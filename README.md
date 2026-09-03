@@ -8,7 +8,7 @@
   <a href="#english"><b>English</b></a> · <a href="#中文"><b>中文</b></a>
 </p>
 
-A local AI credential relay for Windows: it funnels multiple OpenAI-compatible upstreams into a single loopback relay on 127.0.0.1, served through three protocol frontends — OpenAI-native, Anthropic Messages (via translation), and Gemini. Upstream API keys are sealed with Windows DPAPI and never leave your machine.
+A local AI credential relay for Windows: it funnels multiple OpenAI-compatible upstreams into a single loopback relay on 127.0.0.1, served through three protocol frontends — OpenAI-native, Anthropic Messages (via translation), and Gemini. Upstream API keys are sealed with Windows DPAPI and never leave your machine.Suitable for developers who mainly use the aggregate hub model or use multiple harness tools at the same time.
 
 ---
 
@@ -146,7 +146,7 @@ This project is named **Anyswitch**. It was developed under the working name "Ap
 
 ## 中文
 
-一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供三种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）、Gemini（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。
+一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供三种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）、Gemini（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。适用于以聚合中转站模型为主力或同时使用多个harness工具的开发者。
 
 ### 特性
 
