@@ -1,0 +1,458 @@
+/* ==========================================================================
+   风格片段：saas｜现代 SaaS · Linear 风
+   柔和中性底 + 半透明高光细边 + 大圆角 + 深海青渐变点缀 + 玻璃拟态
+   仅换肤：不改 DOM、不改文案。
+   主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
+   与经典蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
+
+   布局级覆盖清单（本轮契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
+   1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
+      seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。
+   2. letter-spacing：徽章 +0.02em、遥测数字 -0.03em。
+   3. box-shadow：柔散投影 + 顶部 1px 内嵌高光（含 hover 态加强）。
+   4. .panel-card hover 微浮：transform: translateY(-1px)（仅 hover
+      瞬时位移，不改动静态几何）。
+   ========================================================================== */
+
+/* 1) 亮色 token 全集 */
+:root[data-style="saas"] {
+  color-scheme: light;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --bg: #fbfbfc;
+  --bg-page: #f5f5f7;
+  --surface: #ffffff;
+  --surface-sunken: #f7f7f9;
+  --surface-hover: #f0f0f3;
+  --surface-glass: rgba(255, 255, 255, 0.78);
+
+  --text: #17181c;
+  --text-2: #3f4249;
+  --text-3: #6d7078;
+  --text-4: #9b9ea6;
+
+  --border: #e5e5e9;
+  --border-strong: #d2d2d9;
+  --divider: #eeeef1;
+
+  --accent: #0b7f96;
+  --accent-soft: #e2f4f6;
+  --accent-border: #addde4;
+
+  --ok: #0d9d70;
+  --ok-soft: #e6f6f0;
+  --ok-border: #b0e3cf;
+
+  --warn: #b7791f;
+  --warn-soft: #fdf4e4;
+  --warn-border: #eedaae;
+
+  --danger: #e5484d;
+  --danger-soft: #fdecec;
+  --danger-border: #f4c3c5;
+
+  --pool: #6d4bd0;
+  --pool-soft: #efeafa;
+  --pool-border: #cfc2ee;
+
+  --spark-line: #0b7f96;
+  --spark-fill: rgba(11, 127, 150, 0.12);
+  --danger-glow: rgba(229, 72, 77, 0.18);
+
+  --shadow-xs: 0 1px 2px 0 rgba(23, 24, 28, 0.03);
+  --shadow-sm: 0 1px 2px 0 rgba(23, 24, 28, 0.04), 0 2px 8px -2px rgba(23, 24, 28, 0.05);
+  --shadow-md: 0 4px 14px -2px rgba(23, 24, 28, 0.07), 0 2px 6px -2px rgba(23, 24, 28, 0.04);
+  --shadow-lg: 0 16px 40px -12px rgba(23, 24, 28, 0.14), 0 4px 12px -4px rgba(23, 24, 28, 0.06);
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --accent-gradient: linear-gradient(135deg, #2ab3c4 0%, #0b8aa3 55%, #0a6d82 100%);
+  --accent-glow: 0 2px 12px rgba(11, 138, 163, 0.38);
+
+  /* 拖拽重排：随本皮肤 accent，glow 用同色系柔光 */
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 0 2px 12px color-mix(in srgb, var(--accent) 38%, transparent);
+  --store-drag-ease: var(--ease-out);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --hl-inset: rgba(255, 255, 255, 0.7);
+  --brand-hl: rgba(255, 255, 255, 0.35);
+  --overlay-bg: rgba(23, 24, 28, 0.32);
+  --glass-blur: blur(22px) saturate(190%);
+  --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(11, 138, 163, 0.09), transparent 70%);
+  --console-bg: #0c0f16;
+  --console-toolbar-bg: #12151e;
+  --console-border: rgba(255, 255, 255, 0.07);
+}
+
+/* 2) 暗色 token 全集（显式 dark） */
+:root[data-style="saas"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  --bg: #101114;
+  --bg-page: #0b0c0e;
+  --surface: #16171b;
+  --surface-sunken: #101116;
+  --surface-hover: #1e2026;
+  --surface-glass: rgba(22, 23, 27, 0.72);
+
+  --text: #f7f8f8;
+  --text-2: #cfd2d6;
+  --text-3: #8a8f98;
+  --text-4: #62666d;
+
+  --border: rgba(255, 255, 255, 0.07);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --divider: rgba(255, 255, 255, 0.05);
+
+  --accent: #3ec2d6;
+  --accent-soft: rgba(62, 194, 214, 0.13);
+  --accent-border: rgba(62, 194, 214, 0.35);
+
+  --ok: #4cc38a;
+  --ok-soft: rgba(76, 195, 138, 0.12);
+  --ok-border: rgba(76, 195, 138, 0.32);
+
+  --warn: #e0a63e;
+  --warn-soft: rgba(224, 166, 62, 0.12);
+  --warn-border: rgba(224, 166, 62, 0.32);
+
+  --danger: #f2555a;
+  --danger-soft: rgba(242, 85, 90, 0.13);
+  --danger-border: rgba(242, 85, 90, 0.32);
+
+  --pool: #a98ef0;
+  --pool-soft: rgba(169,142,240,0.14);
+  --pool-border: rgba(169,142,240,0.36);
+
+  --spark-line: #4fc9dc;
+  --spark-fill: rgba(62, 194, 214, 0.15);
+  --danger-glow: rgba(242, 85, 90, 0.32);
+
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.45), 0 2px 10px -2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 8px 28px -4px rgba(0, 0, 0, 0.5), 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 20px 56px -12px rgba(0, 0, 0, 0.65), 0 4px 16px -4px rgba(0, 0, 0, 0.45);
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --accent-gradient: linear-gradient(135deg, #5fd3e4 0%, #1fa3b8 55%, #12849a 100%);
+  --accent-glow: 0 0 18px rgba(62, 194, 214, 0.45);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --hl-inset: rgba(255, 255, 255, 0.06);
+  --brand-hl: rgba(255, 255, 255, 0.25);
+  --overlay-bg: rgba(0, 0, 0, 0.55);
+  --glass-blur: blur(22px) saturate(190%);
+  --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(62, 194, 214, 0.11), transparent 70%);
+  --console-bg: #0a0c11;
+  --console-toolbar-bg: #10131a;
+  --console-border: rgba(255, 255, 255, 0.07);
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="saas"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    --bg: #101114;
+    --bg-page: #0b0c0e;
+    --surface: #16171b;
+    --surface-sunken: #101116;
+    --surface-hover: #1e2026;
+    --surface-glass: rgba(22, 23, 27, 0.72);
+
+    --text: #f7f8f8;
+    --text-2: #cfd2d6;
+    --text-3: #8a8f98;
+    --text-4: #62666d;
+
+    --border: rgba(255, 255, 255, 0.07);
+    --border-strong: rgba(255, 255, 255, 0.14);
+    --divider: rgba(255, 255, 255, 0.05);
+
+    --accent: #3ec2d6;
+    --accent-soft: rgba(62, 194, 214, 0.13);
+    --accent-border: rgba(62, 194, 214, 0.35);
+
+    --ok: #4cc38a;
+    --ok-soft: rgba(76, 195, 138, 0.12);
+    --ok-border: rgba(76, 195, 138, 0.32);
+
+    --warn: #e0a63e;
+    --warn-soft: rgba(224, 166, 62, 0.12);
+    --warn-border: rgba(224, 166, 62, 0.32);
+
+    --danger: #f2555a;
+    --danger-soft: rgba(242, 85, 90, 0.13);
+    --danger-border: rgba(242, 85, 90, 0.32);
+
+    --pool: #a98ef0;
+    --pool-soft: rgba(169,142,240,0.14);
+    --pool-border: rgba(169,142,240,0.36);
+
+    --spark-line: #4fc9dc;
+    --spark-fill: rgba(62, 194, 214, 0.15);
+    --danger-glow: rgba(242, 85, 90, 0.32);
+
+    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.45), 0 2px 10px -2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 8px 28px -4px rgba(0, 0, 0, 0.5), 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 20px 56px -12px rgba(0, 0, 0, 0.65), 0 4px 16px -4px rgba(0, 0, 0, 0.45);
+
+    --radius-sm: 8px;
+    --radius-md: 10px;
+    --radius-lg: 16px;
+    --accent-gradient: linear-gradient(135deg, #5fd3e4 0%, #1fa3b8 55%, #12849a 100%);
+    --accent-glow: 0 0 18px rgba(62, 194, 214, 0.45);
+
+    /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+    --hl-inset: rgba(255, 255, 255, 0.06);
+    --brand-hl: rgba(255, 255, 255, 0.25);
+    --overlay-bg: rgba(0, 0, 0, 0.55);
+    --glass-blur: blur(22px) saturate(190%);
+    --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(62, 194, 214, 0.11), transparent 70%);
+    --console-bg: #0a0c11;
+    --console-toolbar-bg: #10131a;
+    --console-border: rgba(255, 255, 255, 0.07);
+  }
+}
+
+/* ==========================================================================
+   皮肤覆盖规则（全部以 :root[data-style="saas"] 限定作用域）
+   ========================================================================== */
+
+/* 页面：顶部一抹品牌色径向光晕，营造控制台氛围 */
+:root[data-style="saas"] body {
+  background: var(--page-bg-image), var(--bg-page);
+}
+
+/* Header：加强玻璃拟态，底部改细分割线 + 极轻投影 */
+:root[data-style="saas"] header.site-head {
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom-color: var(--divider);
+  box-shadow: var(--shadow-xs);
+}
+
+/* 品牌图标：渐变 + 光晕 + 顶部高光 */
+:root[data-style="saas"] .brand-icon {
+  border-radius: 10px;
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
+}
+
+/* 版本标签 / 头部信息 pill / 会话 tag：胶囊化 */
+:root[data-style="saas"] .brand-text .version-tag,
+:root[data-style="saas"] .meta-pill,
+:root[data-style="saas"] .tag-bubble {
+  border-radius: 999px;
+}
+
+/* 卡片：大圆角 + 柔散阴影 + 顶部 1px 高光；hover 微浮 + 阴影/边框提亮 */
+:root[data-style="saas"] .panel-card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 var(--hl-inset);
+  transition: transform 180ms var(--ease-out), box-shadow 180ms var(--ease-out), border-color 180ms var(--ease-out);
+}
+:root[data-style="saas"] .panel-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="saas"] .card-header {
+  border-bottom-color: var(--divider);
+}
+
+/* 徽章：胶囊化 + 轻字距 */
+:root[data-style="saas"] .badge {
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+
+/* 按钮：圆角上调；主按钮用渐变 + 光晕 */
+:root[data-style="saas"] .btn {
+  border-radius: var(--radius-md);
+}
+:root[data-style="saas"] .btn-mini {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="saas"] .btn-primary {
+  background: var(--accent-gradient);
+  border-color: transparent;
+  box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
+}
+:root[data-style="saas"] .btn-primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+  box-shadow: 0 0 0 4px var(--accent-soft), var(--accent-glow), inset 0 1px 0 var(--brand-hl);
+}
+:root[data-style="saas"] .btn-primary:active:not(:disabled) {
+  filter: brightness(0.96);
+  transform: none;
+  box-shadow: inset 0 1px 0 var(--brand-hl);
+}
+:root[data-style="saas"] .btn-accent {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+:root[data-style="saas"] .icon-btn {
+  border-radius: 10px;
+  box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
+}
+
+/* 日志控制台：柔化硬编码深色壳，圆角对齐整体语言 */
+:root[data-style="saas"] .log-console {
+  background: var(--console-bg);
+  border-color: var(--console-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+:root[data-style="saas"] .log-toolbar {
+  background: var(--console-toolbar-bg);
+  border-bottom-color: var(--console-border);
+}
+
+/* 遥测四宫格：微渐变底 + 顶部高光，数字收紧字距 */
+:root[data-style="saas"] .telemetry-card {
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
+  box-shadow: inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="saas"] .telemetry-num {
+  letter-spacing: -0.03em;
+}
+
+/* 会话明细 / 提示框 / 折叠组 / 代码块：圆角统一上调 */
+:root[data-style="saas"] .session-table-wrapper,
+:root[data-style="saas"] .alert-box,
+:root[data-style="saas"] .empty-hint,
+:root[data-style="saas"] .agy-fold,
+:root[data-style="saas"] .skills-repo-path,
+:root[data-style="saas"] .skills-diff-list,
+:root[data-style="saas"] .skills-dup-warn {
+  border-radius: var(--radius-md);
+}
+:root[data-style="saas"] .agy-fold-toggle:hover {
+  border-radius: var(--radius-md);
+}
+:root[data-style="saas"] .agy-fold.open .agy-fold-toggle {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+:root[data-style="saas"] .skills-body-view .md-code {
+  border-radius: var(--radius-sm);
+}
+
+/* Toggle：开启态渐变 + 光晕 */
+:root[data-style="saas"] .toggle input:checked + .slider {
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="saas"] .toggle .slider::before {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* seg-control / view-tabs：容器与选中块圆角、高光（仅圆角与阴影，不动几何） */
+:root[data-style="saas"] .seg-control,
+:root[data-style="saas"] .view-tabs {
+  border-radius: var(--radius-md);
+}
+:root[data-style="saas"] .seg-btn,
+:root[data-style="saas"] .view-tab {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="saas"] .seg-btn[aria-checked="true"],
+:root[data-style="saas"] .view-tab.active {
+  box-shadow: var(--shadow-sm), inset 0 1px 0 var(--hl-inset);
+}
+
+/* Toast：胶囊玻璃浮条 */
+:root[data-style="saas"] .toast {
+  border-radius: 999px;
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--hl-inset);
+}
+
+/* Modal：遮罩加深模糊，卡片玻璃化 + 顶部高光；入场 160ms 淡入 + 轻缩放 */
+:root[data-style="saas"] .modal-overlay {
+  background: var(--overlay-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+:root[data-style="saas"] .modal-card {
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
+}
+@keyframes saas-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+:root[data-style="saas"] .modal-overlay.show .modal-card {
+  animation: saas-modal-in 160ms var(--ease-out);
+}
+
+/* 输入控件：圆角统一 + 聚焦柔光环 */
+:root[data-style="saas"] .modal-number,
+:root[data-style="saas"] .agy-select,
+:root[data-style="saas"] .agy-combo-input,
+:root[data-style="saas"] .skills-path-input {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="saas"] .modal-number:focus,
+:root[data-style="saas"] .agy-select:focus,
+:root[data-style="saas"] .agy-combo-input:focus,
+:root[data-style="saas"] .agy-combo.open .agy-combo-input,
+:root[data-style="saas"] .skills-path-input:focus {
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+
+/* 浮层菜单（下拉 / 右键菜单）：玻璃底 + 圆角 + 柔阴影 + 高光 */
+:root[data-style="saas"] .agy-combo-list,
+:root[data-style="saas"] .skills-ctx-menu {
+  border-radius: var(--radius-md);
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="saas"] .agy-combo-item,
+:root[data-style="saas"] .skills-ctx-item {
+  border-radius: 6px;
+}
+
+/* Skills 列表选中：渐变扫光 + 左侧强调条 */
+:root[data-style="saas"] .skills-list-row.selected {
+  background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 88%);
+  border-left-color: var(--accent);
+}
+:root[data-style="saas"] .skills-ctx-item:hover {
+  background: var(--accent-soft);
+}
+
+/* Agent 头像：与品牌图标同语言 */
+:root[data-style="saas"] .agent-avatar {
+  border-radius: 10px;
+  box-shadow: inset 0 1px 0 var(--hl-inset);
+}
+
+/* Store 刷新状态小字：加一字重、慢节奏柔和高亮 */
+:root[data-style="saas"] .store-refresh-status { font-weight: 500; letter-spacing: 0.01em; }
+:root[data-style="saas"] .store-refresh-status .srs-ch { animation-duration: 2.4s; }
+
+/* 使用统计热力图：圆角加大半档，与 teal 柔和质感一致；hover 提亮 */
+:root[data-style="saas"] .stats-heat-cell { rx: 4px; }
+:root[data-style="saas"] .stats-heat-cell:hover { filter: brightness(1.1); }
