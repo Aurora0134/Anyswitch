@@ -21,5 +21,9 @@
   ],
   "scripts": {
     "test": "node --test *.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aurora0134/Anyswitch.git"
   }
 }

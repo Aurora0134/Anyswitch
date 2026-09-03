@@ -37,7 +37,7 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 Clone this repository anywhere you like; the conventional location is `%LOCALAPPDATA%\ApiCred\app`:
 
 ```bat
-git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
+git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\app"
 ```
 
 `panel-app.vbs` is the desktop entry point: it locates `panel-launcher.mjs` relative to itself, so it works from any clone location. It starts the panel host and opens the panel in your browser. Point a desktop shortcut at it for one-click access. Manual fallback entry: `node panel-launcher.mjs` (or `node panel-host.mjs`) from the repo directory.
@@ -171,7 +171,7 @@ This project is named **Anyswitch**. It was developed under the working name "Ap
 把仓库克隆到任意位置即可；约定位置是 `%LOCALAPPDATA%\ApiCred\app`：
 
 ```bat
-git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
+git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\app"
 ```
 
 `panel-app.vbs` 是桌面入口：按脚本自身位置定位 `panel-launcher.mjs`，克隆到任意路径都能用。它会拉起面板宿主并在浏览器中打开面板。给它建一个桌面快捷方式即可一键进入。手动备用入口：在仓库目录下执行 `node panel-launcher.mjs`（或 `node panel-host.mjs`）。
