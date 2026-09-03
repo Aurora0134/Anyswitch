@@ -14,10 +14,6 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 ## English
 
-### Naming
-
-Anyswitch was previously developed under the internal name **ApiCred**. To stay compatible with existing deployments, the data directory (`%LOCALAPPDATA%\ApiCred\...`), scheduled task names (`ApiCredRelay` / `ApiCredWatchdog`), the DPAPI entropy string (`ApiCred|DPAPI|v2|...`), environment variables (`APICRED_RELAY_TOKEN`), and protocol headers keep the old ApiCred name. Only user-facing product naming has changed.
-
 ### Features
 
 - **Credentials stay on your machine** — upstream API keys are sealed per-provider with Windows DPAPI (entropy `ApiCred|DPAPI|v2|<ProviderId>`), decrypted only in memory at request time, never cached, never written to disk in plaintext.
@@ -147,10 +143,6 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 ## 中文
 
 一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供三种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）、Gemini（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。
-
-### 命名说明
-
-Anyswitch 曾用内部名称 **ApiCred**。为兼容现有部署，数据目录（`%LOCALAPPDATA%\ApiCred\...`）、计划任务名（`ApiCredRelay` / `ApiCredWatchdog`）、DPAPI 熵串（`ApiCred|DPAPI|v2|...`）、环境变量（`APICRED_RELAY_TOKEN`）与协议头保留 ApiCred 旧名，仅面向用户的产品名称更新为 Anyswitch。
 
 ### 特性
 
