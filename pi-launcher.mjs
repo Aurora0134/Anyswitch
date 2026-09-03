@@ -1,14 +1,14 @@
 // pi launcher: starts the fallback OpenAI relay, syncs pi's models.json with
-// the ApiCred managed providers, then spawns the real pi CLI.
+// the Anyswitch managed providers, then spawns the real pi CLI.
 //
 // Instance-tagging coupling: managed providers in models.json carry a literal
-// "${APICRED_INSTANCE_ID}" x-agent-instance header placeholder (see
+// "${ANYSWITCH_INSTANCE_ID}" x-agent-instance header placeholder (see
 // pi-merge-models.mjs). The pi CLI expands header placeholders via
 // resolveHeadersOrThrow and THROWS when the env var is missing, so once
 // models.json has been written, invoking pi directly (bypassing this launcher)
-// fails at startup. That is accepted on purpose: the apicred shim routes every
+// fails at startup. That is accepted on purpose: the Anyswitch shim routes every
 // `pi` command through this launcher (resolvePiExecutable's recursion guard
-// documents the shim), and the launcher always sets APICRED_INSTANCE_ID in the
+// documents the shim), and the launcher always sets ANYSWITCH_INSTANCE_ID in the
 // spawned environment below.
 import { spawn } from "node:child_process";
 import { join, isAbsolute, basename } from "node:path";
@@ -24,7 +24,7 @@ import {
   readModelsJson,
   mergeModelsJson,
   writeModelsJsonWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   deriveAutoRouteChannel,
   readSidecar,
   writeSidecar,
@@ -39,7 +39,7 @@ const PI_MODELS_PATH = piModelsPath();
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "ApiCred");
 }
 
@@ -50,11 +50,11 @@ function createOpenAIProductionDeps(options = {}) {
   // missing from the panel and the stats journal entirely.
   let usageJournal = null;
   try {
-    usageJournal = createUsageJournal({ dir: join(apiCredRoot(options.base ?? process.env), "usage") });
+    usageJournal = createUsageJournal({ dir: join(relayDataRoot(options.base ?? process.env), "usage") });
   } catch { usageJournal = null; }
   const metricsCollector = createAgentMetricsCollector({ journal: usageJournal });
   return {
-    token: loadOrGenerateToken(apiCredRoot(options.base ?? process.env)),
+    token: loadOrGenerateToken(relayDataRoot(options.base ?? process.env)),
     loadStore: claudeDeps.loadStore,
     loadCredential: claudeDeps.loadCredential,
     buildUpstreamURLs: claudeDeps.buildUpstreamURLs,
@@ -69,7 +69,7 @@ export async function startOpenAIRelay(options = {}) {
   const deps = createOpenAIProductionDeps(options);
   const probe = deps.loadStore();
   if (!probe.ok) {
-    throw new Error("the ApiCred global store is not usable; refusing to start the pi relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the pi relay");
   }
   const server = createOpenAIRelayServer(deps);
   const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
@@ -77,10 +77,10 @@ export async function startOpenAIRelay(options = {}) {
 }
 
 export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH) {
-  const apiCredProviders = extractApiCredProviders(store);
+  const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "pi");
-  if (Object.keys(apiCredProviders).length === 0 && !autoChannel) {
-    return { ok: true, unchanged: true, reason: "no ApiCred providers with models" };
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   const previousManaged = readSidecar(sidecarRoot).providers;
   let existing;
@@ -92,7 +92,7 @@ export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MO
     }
     throw error;
   }
-  const { config, managed } = mergeModelsJson(existing, apiCredProviders, port, previousManaged, autoChannel);
+  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel);
 
   const gate = validatePiModelsConfig(config);
   if (!gate.valid) {
@@ -118,7 +118,7 @@ export function resolvePiExecutable(base = process.env) {
   if (!isAbsolute(override)) {
     throw new Error(
       `PI_EXECUTABLE must be an absolute path, got "${override}". ` +
-        `A bare name or relative path could resolve back to the apicred shim and ` +
+        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
         `make the launcher recurse into itself.`,
     );
   }
@@ -138,10 +138,10 @@ export function buildInstanceId({ cwd = process.cwd(), pid = process.pid, endpoi
 
 export function buildPiLauncherEnv({ port, token, instanceId = buildInstanceId(), base = {} }) {
   const env = { ...base };
-  env.APICRED_RELAY_TOKEN = token;
+  env.ANYSWITCH_RELAY_TOKEN = token;
   // Consumed by the pi CLI's ${VAR} expansion of the x-agent-instance header
   // placeholder that mergeModelsJson writes into models.json.
-  env.APICRED_INSTANCE_ID = instanceId;
+  env.ANYSWITCH_INSTANCE_ID = instanceId;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
   return env;
@@ -160,9 +160,9 @@ export async function runPiLauncher({
   try {
     const loaded = loadStore();
     if (!loaded.ok) {
-      log("warning: ApiCred store could not be read; pi models not updated");
+      log("warning: Anyswitch store could not be read; pi models not updated");
     } else {
-      const sidecarRoot = apiCredRoot(base);
+      const sidecarRoot = relayDataRoot(base);
       const writeResult = await writeModels(loaded.store, relay.port, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: pi models.json not updated: ${writeResult.reason ?? "unknown error"}`);

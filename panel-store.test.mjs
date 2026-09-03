@@ -21,7 +21,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
     headers: {
       host: "127.0.0.1:47820",
       origin: "http://127.0.0.1:47820",
-      "x-apicred-panel": "1",
+      "x-anyswitch-panel": "1",
       ...extraHeaders,
     },
     on(event, fn) { listeners[event] = fn; return req; },
@@ -38,7 +38,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
 
 function storeRouter(storeService) {
   return createPanelRouter({
-    storePaths: { root: "C:/fake/apicred" },
+    storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
     aliasResolver: null,
@@ -604,7 +604,7 @@ describe("panel router store routes", () => {
     const svc = mockService();
     const router = storeRouter(svc);
     for (const path of ["/panel/api/store/add", "/panel/api/store/rotate", "/panel/api/store/test", "/panel/api/store/refresh", "/panel/api/store/filter", "/panel/api/store/models/add", "/panel/api/store/models/remove", "/panel/api/store/pool/create", "/panel/api/store/pool/delete", "/panel/api/store/rename", "/panel/api/store/pool/rename", "/panel/api/store/pool/members/update", "/panel/api/store/reorder", "/panel/api/store/route-chain/save", "/panel/api/store/route-chain/delete", "/panel/api/store/delete"]) {
-      const noHeader = fakeReqRes(path, "POST", { id: "prov", modelFilter: [] }, { "x-apicred-panel": "0" });
+      const noHeader = fakeReqRes(path, "POST", { id: "prov", modelFilter: [] }, { "x-anyswitch-panel": "0" });
       await router.handle(noHeader.req, noHeader.res);
       assert.equal(noHeader.res.statusCode, 403, `${path} without the panel header`);
       assert.equal(noHeader.json().error, "csrf");

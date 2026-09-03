@@ -65,7 +65,7 @@ describe("antigravity alias manager", () => {
   });
 
   it("handles on-disk persistence, ensureAliasFile, and in-memory overlay hot reloads", () => {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-agy-test-"));
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-agy-test-"));
     const filePath = join(dir, "antigravity.json");
     try {
       // 1. Initial ensure creates file
@@ -98,7 +98,7 @@ describe("antigravity alias manager", () => {
   });
 
   it("picks up on-disk writes from another process on the next resolve (cross-process hot reload)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-agy-xproc-"));
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-agy-xproc-"));
     const filePath = join(dir, "antigravity.json");
     try {
       writeAliasFile(filePath, { aliases: { "gemini-3.7-flash": "prov-a/gemini-3.7-flash" } });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { resolveProviderModels } from "./catalog-resolver.mjs";
 
-// Contract (apicred update.txt lines 104-108):
+// Contract (anyswitch update.txt lines 104-108):
 //   modelId       = model.id   ?? config key
 //   displayName   = model.name ?? config key
 //   contextWindow = model.limit.context  (write only when present)
@@ -100,7 +100,7 @@ test("opencode with model.id override remaps whitelist key when id differs", () 
 });
 
 // ---- reviewer blocking 3-resolver: contract fidelity --------------------
-// Contract (apicred update.txt lines 104-108):
+// Contract (anyswitch update.txt lines 104-108):
 //   displayName = model.name ?? CONFIG KEY  (not the resolved id)
 //   limit fields are written when PRESENT (value passed through as-is);
 //   legality of the value is enforced by store-schema, not silently dropped

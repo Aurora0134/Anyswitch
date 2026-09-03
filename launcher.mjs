@@ -56,9 +56,9 @@ const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 // model family: the auto-mode permission classifier, the background classifier
 // and other quick side-queries. This placeholder should never reach a real
 // session: the real wiring (main) derives a concrete wire ID from the first
-// provider in the local store, and APICRED_SMALL_FAST_MODEL /
+// provider in the local store, and ANYSWITCH_SMALL_FAST_MODEL /
 // ANTHROPIC_SMALL_FAST_MODEL override it entirely. If it ever does take
-// effect, set APICRED_SMALL_FAST_MODEL to a small, stable model.
+// effect, set ANYSWITCH_SMALL_FAST_MODEL to a small, stable model.
 //
 // Why pinning matters: on a third-party gateway Claude Code has no official
 // Sonnet 5 / Haiku IDs to fall back to, so with ANTHROPIC_SMALL_FAST_MODEL
@@ -91,10 +91,10 @@ export function buildLauncherEnv({ port, token, discovery, base = {} }) {
   // Pin the classifier (small-fast) model to a stable wire ID so permission
   // checks never ride on an unstable main model. Precedence:
   //   1. an explicitly inherited ANTHROPIC_SMALL_FAST_MODEL (user override),
-  //   2. APICRED_SMALL_FAST_MODEL (per-launch override via this shim),
+  //   2. ANYSWITCH_SMALL_FAST_MODEL (per-launch override via this shim),
   //   3. DEFAULT_SMALL_FAST_MODEL_WIRE_ID.
   if (env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-    env.ANTHROPIC_SMALL_FAST_MODEL = base.APICRED_SMALL_FAST_MODEL ?? DEFAULT_SMALL_FAST_MODEL_WIRE_ID;
+    env.ANTHROPIC_SMALL_FAST_MODEL = base.ANYSWITCH_SMALL_FAST_MODEL ?? DEFAULT_SMALL_FAST_MODEL_WIRE_ID;
   }
 
   if (discovery) {
@@ -117,7 +117,7 @@ function resolveDiscovery(version, log) {
     log(
       `Claude version is unknown (claude --version did not report a version). ` +
         `Gateway model discovery has been DISABLED; the /model picker will not ` +
-        `list ApiCred models. Use --model anthropic/<provider>/<model> instead.`,
+        `list Anyswitch models. Use --model anthropic/<provider>/<model> instead.`,
     );
     return false;
   }
@@ -212,7 +212,7 @@ export function defaultClaudeExecutable(base = process.env) {
 // and for non-default installs.
 //
 // Recursion guard: once the `claude` command name is taken over by the
-// apicred shim, an override that resolves back to a shim / bare command name /
+// Anyswitch shim, an override that resolves back to a shim / bare command name /
 // non-.exe wrapper would make the launcher re-invoke itself, spinning up relays
 // forever. So an override is only honoured when it is an ABSOLUTE path to a
 // .exe. Anything else is rejected loudly rather than silently recursing.
@@ -224,7 +224,7 @@ export function resolveClaudeExecutable(base = process.env) {
   if (!isAbsolute(override)) {
     throw new Error(
       `CLAUDE_EXECUTABLE must be an absolute path to claude.exe, got "${override}". ` +
-        `A bare name or relative path could resolve back to the apicred shim and ` +
+        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
         `make the launcher recurse into itself.`,
     );
   }
@@ -335,7 +335,7 @@ function createForwardingLogger(fetchFn = fetch) {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-apicred-panel": "1",
+        "x-anyswitch-panel": "1",
         origin: "http://127.0.0.1:47820",
       },
       body: JSON.stringify({ level, message: String(message) }),
@@ -346,12 +346,12 @@ function createForwardingLogger(fetchFn = fetch) {
   return { info: forward("info"), warn: forward("warn"), error: forward("error") };
 }
 
-// When neither ANTHROPIC_SMALL_FAST_MODEL nor APICRED_SMALL_FAST_MODEL is
+// When neither ANTHROPIC_SMALL_FAST_MODEL nor ANYSWITCH_SMALL_FAST_MODEL is
 // configured, derive the classifier (small-fast) wire ID from the local store:
 // the first model of the first provider. Best-effort — on any failure the
 // environment is left untouched and DEFAULT_SMALL_FAST_MODEL_WIRE_ID applies.
 function withStoreSmallFastDefault(base) {
-  if (base.ANTHROPIC_SMALL_FAST_MODEL !== undefined || base.APICRED_SMALL_FAST_MODEL !== undefined) {
+  if (base.ANTHROPIC_SMALL_FAST_MODEL !== undefined || base.ANYSWITCH_SMALL_FAST_MODEL !== undefined) {
     return base;
   }
   try {
@@ -364,7 +364,7 @@ function withStoreSmallFastDefault(base) {
     for (const [providerId, provider] of Object.entries(store.providers ?? {})) {
       const modelId = Object.keys(provider?.models ?? {})[0];
       if (modelId) {
-        return { ...base, APICRED_SMALL_FAST_MODEL: `anthropic/${providerId}/${modelId}` };
+        return { ...base, ANYSWITCH_SMALL_FAST_MODEL: `anthropic/${providerId}/${modelId}` };
       }
     }
   } catch {

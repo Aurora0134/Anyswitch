@@ -48,17 +48,17 @@ describe("buildInstanceId", () => {
 describe("buildOpencodeLauncherEnv", () => {
   it("injects relay token and NO_PROXY for loopback", () => {
     const env = buildOpencodeLauncherEnv({ token: "tok", base: { A: "1", HTTP_PROXY: "http://proxy" } });
-    assert.equal(env.APICRED_RELAY_TOKEN, "tok");
+    assert.equal(env.ANYSWITCH_RELAY_TOKEN, "tok");
     assert.equal(env.NO_PROXY, "127.0.0.1,localhost");
     assert.equal(env.no_proxy, "127.0.0.1,localhost");
     assert.equal(env.A, "1");
     assert.equal(env.HTTP_PROXY, "http://proxy");
-    assert.equal(env.APICRED_AGENT_INSTANCE, undefined);
+    assert.equal(env.ANYSWITCH_AGENT_INSTANCE, undefined);
   });
 
   it("injects the per-instance tag for the plugin when given an instanceId", () => {
     const env = buildOpencodeLauncherEnv({ token: "tok", instanceId: "ws-1", base: {} });
-    assert.equal(env.APICRED_AGENT_INSTANCE, "ws-1");
+    assert.equal(env.ANYSWITCH_AGENT_INSTANCE, "ws-1");
   });
 });
 
@@ -143,7 +143,7 @@ describe("runOpencodeLauncher", () => {
       "--model",
       "x",
     ]);
-    assert.equal(spawn.env.APICRED_RELAY_TOKEN, "tok");
+    assert.equal(spawn.env.ANYSWITCH_RELAY_TOKEN, "tok");
     assert.equal(spawn.env.NO_PROXY, "127.0.0.1,localhost");
     assert.equal(spawn.env.no_proxy, "127.0.0.1,localhost");
     assert.equal(spawn.env.CUSTOM_VAR, "kept");
@@ -166,7 +166,7 @@ describe("runOpencodeLauncher", () => {
       },
     });
     assert.equal(code, 0);
-    assert.equal(spawnedEnv.APICRED_AGENT_INSTANCE, "ws-A-4242");
+    assert.equal(spawnedEnv.ANYSWITCH_AGENT_INSTANCE, "ws-A-4242");
   });
 
   it("defaults COMSPEC to cmd.exe when base lacks it", async () => {
@@ -225,7 +225,7 @@ describe("runOpencodeLauncher", () => {
 describe("startOpenAIRelay", () => {
   // Unlike the zcode/pi/dsh launchers, the opencode relay has no degrade path:
   // an unusable store is fatal before any socket is opened (fail-closed).
-  it("refuses to start when the ApiCred store is not usable", async () => {
+  it("refuses to start when the Anyswitch store is not usable", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencode-relay-"));
     mkdirSync(join(root, "ApiCred"), { recursive: true });
     const base = { LOCALAPPDATA: root, USERPROFILE: root };

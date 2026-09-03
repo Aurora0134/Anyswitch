@@ -70,7 +70,7 @@ describe("agent-sync", () => {
     assert.match(reasonixText, /"model-1"/);
     assert.match(reasonixText, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/alpha\/v1"/);
     const reasonixEnv = readFileSync(join(tmpRoot, "reasonix", ".env"), "utf8");
-    assert.match(reasonixEnv, /APICRED_RELAY_TOKEN=test-token/);
+    assert.match(reasonixEnv, /ANYSWITCH_RELAY_TOKEN=test-token/);
 
     const zcodePath = join(tmpRoot, ".zcode", "v2", "config.json");
     assert.equal(existsSync(zcodePath), true, "zcode config must land under the injected USERPROFILE");

@@ -5147,8 +5147,8 @@ try {
   }
 
   async function api(method, path, body) {
-    // legacy header name kept for compatibility; product renamed ApiCred → Anyswitch
-    const opts = { method, headers: { "Content-Type": "application/json", "X-ApiCred-Panel": "1" } };
+    // server also accepts x-apicred-panel from resident processes spawned pre-rename
+    const opts = { method, headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" } };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(API_BASE + path, opts);
     let data;

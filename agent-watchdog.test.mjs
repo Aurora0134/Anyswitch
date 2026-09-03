@@ -69,9 +69,9 @@ test("probeWatchdog rejects a non-200 status", async () => {
 });
 
 function makeWatchdogRoot() {
-  // apiCredRoot(env) = join(env.LOCALAPPDATA, "ApiCred"), so the pid file
+  // relayDataRoot(env) = join(env.LOCALAPPDATA, "ApiCred"), so the pid file
   // lives one level below the env root we hand to stopWatchdog.
-  const envRoot = mkdtempSync(join(tmpdir(), "apicred-wd-"));
+  const envRoot = mkdtempSync(join(tmpdir(), "anyswitch-wd-"));
   const dataRoot = join(envRoot, "ApiCred");
   mkdirSync(dataRoot, { recursive: true });
   return { envRoot, dataRoot };

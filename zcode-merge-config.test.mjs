@@ -9,7 +9,7 @@ import {
   UnparseableConfigError,
   buildZcodeProviderEntry,
   mergeZcodeConfig,
-  extractApiCredProviders,
+  extractManagedProviders,
   validateZcodeConfig,
   readSidecar,
   writeSidecar,
@@ -68,8 +68,8 @@ describe("readZcodeConfig", () => {
 describe("mergeZcodeConfig", () => {
   it("adds managed providers and keeps existing custom providers", () => {
     const existing = { provider: { "my-custom": { kind: "custom" } } };
-    const apiCredProviders = extractApiCredProviders(STORE);
-    const { config, managed } = mergeZcodeConfig(existing, apiCredProviders, 47821, "tok");
+    const managedProviders = extractManagedProviders(STORE);
+    const { config, managed } = mergeZcodeConfig(existing, managedProviders, 47821, "tok");
     assert.ok(config.provider["my-custom"]);
     assert.ok(config.provider["_poke-api"]);
     assert.ok(config.provider["_nvidia-nim"]);
@@ -184,7 +184,7 @@ describe("writeZcodeConfigWithBackup", () => {
 
 describe("validateZcodeConfig", () => {
   it("accepts a valid merged config", () => {
-    const { config } = mergeZcodeConfig({ provider: {} }, extractApiCredProviders(STORE), 47821, "tok");
+    const { config } = mergeZcodeConfig({ provider: {} }, extractManagedProviders(STORE), 47821, "tok");
     assert.deepEqual(validateZcodeConfig(config), { valid: true });
   });
 
@@ -231,8 +231,8 @@ describe("pool channels", () => {
         },
       },
     };
-    const apiCredProviders = extractApiCredProviders(store);
-    const { config, managed } = mergeZcodeConfig({ provider: {} }, apiCredProviders, 47821, "tok");
+    const managedProviders = extractManagedProviders(store);
+    const { config, managed } = mergeZcodeConfig({ provider: {} }, managedProviders, 47821, "tok");
     const pool = config.provider["_pool-claude"];
     assert.ok(pool);
     assert.equal(pool.name, "Claude Pool");
@@ -245,8 +245,8 @@ describe("pool channels", () => {
   });
 
   it("absorbs member channels into the pool channel", () => {
-    const apiCredProviders = extractApiCredProviders(POOL_STORE);
-    const { config } = mergeZcodeConfig({ provider: {} }, apiCredProviders, 47821, "tok");
+    const managedProviders = extractManagedProviders(POOL_STORE);
+    const { config } = mergeZcodeConfig({ provider: {} }, managedProviders, 47821, "tok");
     assert.ok(config.provider["_pool-claude"]);
     // Members never surface as their own channels — every endpoint sees one
     // provider per pool, exactly like the wire catalog.
@@ -258,8 +258,8 @@ describe("pool channels", () => {
     const existing = {
       provider: { "_pool-claude": { kind: "openai-compatible" }, "_poke-api": { kind: "openai-compatible" } },
     };
-    const apiCredProviders = extractApiCredProviders({ version: 2, providers: POOL_STORE.providers });
-    const { config, managed } = mergeZcodeConfig(existing, apiCredProviders, 47821, "tok", ["pool-claude", "poke-api"]);
+    const managedProviders = extractManagedProviders({ version: 2, providers: POOL_STORE.providers });
+    const { config, managed } = mergeZcodeConfig(existing, managedProviders, 47821, "tok", ["pool-claude", "poke-api"]);
     assert.equal(config.provider["_pool-claude"], undefined);
     assert.ok(config.provider["_poke-api"]);
     assert.deepEqual(managed.sort(), ["nvidia-nim", "poke-api"]);
@@ -270,9 +270,9 @@ describe("pool channels", () => {
       ...POOL_STORE,
       pools: { "poke-api": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } },
     };
-    const apiCredProviders = extractApiCredProviders(store);
-    assert.ok(apiCredProviders["poke-api"].channelName, "pool pseudo-provider replaces the member entry");
-    const { config, managed } = mergeZcodeConfig({ provider: {} }, apiCredProviders, 47821, "tok");
+    const managedProviders = extractManagedProviders(store);
+    assert.ok(managedProviders["poke-api"].channelName, "pool pseudo-provider replaces the member entry");
+    const { config, managed } = mergeZcodeConfig({ provider: {} }, managedProviders, 47821, "tok");
     const channel = config.provider["_poke-api"];
     assert.equal(channel.name, "Poke Pool");
     assert.equal(channel.options.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");
@@ -300,7 +300,7 @@ describe("auto routing channel (_auto)", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "zcode");
     const { config, managed } = mergeZcodeConfig(
       { provider: {} },
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       "tok",
       [],
@@ -321,7 +321,7 @@ describe("auto routing channel (_auto)", () => {
   it("does not inject _auto when the endpoint has no route chain", () => {
     const { config, managed } = mergeZcodeConfig(
       { provider: {} },
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       "tok",
       [],
@@ -334,7 +334,7 @@ describe("auto routing channel (_auto)", () => {
   it("cleans up _auto on the re-sync after the chain is deleted", () => {
     const first = mergeZcodeConfig(
       { provider: {} },
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       "tok",
       [],
@@ -343,7 +343,7 @@ describe("auto routing channel (_auto)", () => {
     assert.ok(first.config.provider._auto);
     const second = mergeZcodeConfig(
       first.config,
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       "tok",
       first.managed,

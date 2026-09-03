@@ -75,7 +75,7 @@ export function appendCrashLog(logPath, label, detail) {
   }
 }
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
     "ApiCred",
@@ -87,10 +87,10 @@ function apiCredRoot(base = process.env) {
 function createResidentDeps(options = {}) {
   const paths = options.paths ?? storePaths();
   const claudeDeps = createProductionDeps({ paths });
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const logger = options.logger ?? createLogger();
   // Per-request usage journal lives next to the stability file under the
-  // ApiCred root. A journal failure must never block relay startup — fall
+  // Anyswitch data root. A journal failure must never block relay startup — fall
   // back to no journal (the collector treats it as absent).
   let usageJournal = null;
   try {
@@ -171,9 +171,8 @@ export async function startResidentRelay(options = {}) {
   // Preflight: refuse to listen if the store is unusable.
   const probe = deps.loadStore();
   if (!probe.ok) {
-    // legacy name "ApiCred" retained in log/error text after product rename to Anyswitch
-    logger.error("ApiCred store not usable; refusing to start resident relay");
-    throw new Error("the ApiCred global store is not usable; refusing to start the resident relay");
+    logger.error("Anyswitch store not usable; refusing to start resident relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the resident relay");
   }
 
   const server = createOpenAIRelayServer(deps);
@@ -194,7 +193,7 @@ export async function startResidentRelay(options = {}) {
   // Register our PID so the decoupled panel (panel-host, 47820) and
   // relay-process-manager can target THIS process for stop/restart — never a
   // global node.exe kill. Cleared on every shutdown path below.
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const pidPath = getRelayPidPath(root);
   writeRelayPid(process.pid, pidPath);
   const clearPid = () => clearRelayPid(pidPath);

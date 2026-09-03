@@ -41,7 +41,7 @@ import {
 // Temp-rooted fixture: a fake home dir (endpoint skills dirs live under it)
 // plus a master repo with nested/container skills. Real junctions are created
 // under %TEMP% — this suite is Windows-only by design.
-function tempRoot(prefix = "apicred-skills-") {
+function tempRoot(prefix = "anyswitch-skills-") {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -374,7 +374,7 @@ describe("importSkill (zip sources)", () => {
   });
 
   it("imports a zip whose archive root holds SKILL.md, stored as a folder", () => {
-    const { dir, cleanup } = tempRoot("apicred-skills-zip-");
+    const { dir, cleanup } = tempRoot("anyswitch-skills-zip-");
     try {
       const repo = join(dir, "repo");
       writeSkill(join(repo, "skill-a"), { name: "skill-a" });
@@ -400,7 +400,7 @@ describe("importSkill (zip sources)", () => {
   });
 
   it("imports a zip with the skill nested in one wrapper directory", () => {
-    const { dir, cleanup } = tempRoot("apicred-skills-zip-");
+    const { dir, cleanup } = tempRoot("anyswitch-skills-zip-");
     try {
       const repo = join(dir, "repo");
       writeSkill(join(repo, "skill-a"), { name: "skill-a" });
@@ -421,7 +421,7 @@ describe("importSkill (zip sources)", () => {
   });
 
   it("refuses ambiguous and SKILL.md-less zips and non-zip files", () => {
-    const { dir, cleanup } = tempRoot("apicred-skills-zip-");
+    const { dir, cleanup } = tempRoot("anyswitch-skills-zip-");
     try {
       const repo = join(dir, "repo");
       writeSkill(join(repo, "skill-a"), { name: "skill-a" });

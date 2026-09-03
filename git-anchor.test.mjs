@@ -26,7 +26,7 @@ test("restores a missing gitfile when the object store still exists", () => {
   mkdirSync(appDir, { recursive: true });
   mkdirSync(anchorDir);
   writeFileSync(join(anchorDir, "HEAD"), "ref: refs/heads/master\n");
-  const result = ensureGitAnchor(appDir, { anchorDir, env: { APICRED_GIT_ANCHOR: "1" } });
+  const result = ensureGitAnchor(appDir, { anchorDir, env: { ANYSWITCH_GIT_ANCHOR: "1" } });
   assert.equal(result.ok, true);
   assert.equal(result.action, "restored");
   assert.match(readFileSync(join(appDir, ".git"), "utf8"), /^gitdir: /);
@@ -41,7 +41,7 @@ test("discards a nested .git directory when the real store already exists", () =
   writeFileSync(join(appDir, ".git", "HEAD"), "ref: refs/heads/junk\n");
   mkdirSync(anchorDir);
   writeFileSync(join(anchorDir, "HEAD"), "ref: refs/heads/master\n");
-  const result = ensureGitAnchor(appDir, { anchorDir, env: { APICRED_GIT_ANCHOR: "1" } });
+  const result = ensureGitAnchor(appDir, { anchorDir, env: { ANYSWITCH_GIT_ANCHOR: "1" } });
   assert.equal(result.ok, true);
   assert.equal(result.action, "discarded-nested");
   assert.equal(readFileSync(join(appDir, ".git"), "utf8"), `gitdir: ${anchorDir}\n`);
@@ -55,7 +55,7 @@ test("does not promote a nested empty repo when the object store is missing", ()
   const anchorDir = join(root, "objects");
   mkdirSync(join(appDir, ".git"), { recursive: true });
   writeFileSync(join(appDir, ".git", "HEAD"), "ref: refs/heads/junk\n");
-  const result = ensureGitAnchor(appDir, { anchorDir, env: { APICRED_GIT_ANCHOR: "1" } });
+  const result = ensureGitAnchor(appDir, { anchorDir, env: { ANYSWITCH_GIT_ANCHOR: "1" } });
   assert.equal(result.ok, false);
   assert.equal(result.action, "missing-anchor");
   assert.equal(existsSync(anchorDir), false);
@@ -73,7 +73,7 @@ test("missing-anchor is logged as error, not swallowed as info", () => {
   assert.deepEqual(lines, [["error", "git anchor missing-anchor: X"]]);
 });
 
-test("no-op by default: without APICRED_GIT_ANCHOR=1 nothing is touched or logged", () => {
+test("no-op by default: without ANYSWITCH_GIT_ANCHOR=1 nothing is touched or logged", () => {
   const root = scratch();
   const appDir = join(root, "app");
   const anchorDir = join(root, "objects");

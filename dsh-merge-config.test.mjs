@@ -5,7 +5,7 @@ import {
   mergeDshSettings,
   readDshSettings,
   writeDshSettingsWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   readSidecar,
   writeSidecar,
   validateDshSettings,
@@ -32,7 +32,7 @@ test("buildDshProviderEntry creates valid dsh profile", () => {
   assert.equal(entry._deepseek.displayName, "deepseek");
   assert.equal(entry._deepseek.api, "openai-completions");
   assert.equal(entry._deepseek.baseURL, "http://127.0.0.1:47821/openai/deepseek/v1");
-  assert.equal(entry._deepseek.apiKeyEnv, "APICRED_RELAY_TOKEN");
+  assert.equal(entry._deepseek.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
   assert.deepEqual(entry._deepseek.headers, { "x-agent-id": "dsh" });
   assert.equal(entry._deepseek.models.length, 1);
   assert.equal(entry._deepseek.models[0].id, "deepseek-chat");
@@ -183,7 +183,7 @@ test("mergeDshSettings manages lifecycle and preserves user sections", () => {
   assert.deepEqual(managed, ["new_provider"]);
 });
 
-test("extractApiCredProviders filters providers without models", () => {
+test("extractManagedProviders filters providers without models", () => {
   const store = {
     providers: {
       valid: { models: { m1: {} } },
@@ -191,7 +191,7 @@ test("extractApiCredProviders filters providers without models", () => {
       none: {},
     },
   };
-  const result = extractApiCredProviders(store);
+  const result = extractManagedProviders(store);
   assert.deepEqual(Object.keys(result), ["valid"]);
 });
 
@@ -304,14 +304,14 @@ test("pool surfaces as one dsh channel with unioned models and dissolves cleanly
     },
   };
 
-  const apiCredProviders = extractApiCredProviders(store);
-  const { config, managed } = mergeDshSettings({}, apiCredProviders, 47821, []);
+  const managedProviders = extractManagedProviders(store);
+  const { config, managed } = mergeDshSettings({}, managedProviders, 47821, []);
   const providers = config["llm-pi-ai"].providers;
   const pool = providers["_pool-ab"];
   assert.ok(pool);
   assert.equal(pool.displayName, "Pool AB");
   assert.equal(pool.baseURL, "http://127.0.0.1:47821/openai/pool-ab/v1");
-  assert.equal(pool.apiKeyEnv, "APICRED_RELAY_TOKEN");
+  assert.equal(pool.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
   assert.deepEqual(pool.headers, { "x-agent-id": "dsh" });
   assert.deepEqual(pool.models.map((m) => m.id), ["model-a", "model-shared", "model-b"]);
   // First member in pool order wins the shared model's metadata.
@@ -325,7 +325,7 @@ test("pool surfaces as one dsh channel with unioned models and dissolves cleanly
   // Dissolve the pool: the stale managed entry is removed via the sidecar list.
   const withoutPool = mergeDshSettings(
     config,
-    extractApiCredProviders({ version: 2, providers: store.providers }),
+    extractManagedProviders({ version: 2, providers: store.providers }),
     47821,
     managed,
   );
@@ -344,7 +344,7 @@ test("pool id equal to a member provider id absorbs all members into one channel
       alpha: { displayName: "Alpha Pool", members: ["alpha", "beta"] },
     },
   };
-  const { config, managed } = mergeDshSettings({}, extractApiCredProviders(store), 47821, []);
+  const { config, managed } = mergeDshSettings({}, extractManagedProviders(store), 47821, []);
   const providers = config["llm-pi-ai"].providers;
   assert.equal(providers._alpha.displayName, "Alpha Pool");
   assert.equal(providers._alpha.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
@@ -373,7 +373,7 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
   const auto = deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh");
   const { config, managed } = mergeDshSettings(
     {},
-    extractApiCredProviders(DSH_CHAIN_STORE),
+    extractManagedProviders(DSH_CHAIN_STORE),
     47821,
     [],
     null,
@@ -385,7 +385,7 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
   assert.equal(entry.api, "openai-completions");
   // The base URL points at the chain HEAD node, not at a literal "auto" segment.
   assert.equal(entry.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");
-  assert.equal(entry.apiKeyEnv, "APICRED_RELAY_TOKEN");
+  assert.equal(entry.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
   assert.deepEqual(entry.headers, { "x-agent-id": "dsh" });
   assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
   assert.ok(!entry.models[0].reasoningEfforts, "the virtual model carries no reasoning levels");
@@ -396,7 +396,7 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
 test("mergeDshSettings does not inject _auto without a route chain", () => {
   const { config, managed } = mergeDshSettings(
     {},
-    extractApiCredProviders(DSH_CHAIN_STORE),
+    extractManagedProviders(DSH_CHAIN_STORE),
     47821,
     [],
     null,
@@ -409,7 +409,7 @@ test("mergeDshSettings does not inject _auto without a route chain", () => {
 test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted", () => {
   const first = mergeDshSettings(
     {},
-    extractApiCredProviders(DSH_CHAIN_STORE),
+    extractManagedProviders(DSH_CHAIN_STORE),
     47821,
     [],
     null,
@@ -418,7 +418,7 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
   assert.ok(first.config["llm-pi-ai"].providers._auto);
   const second = mergeDshSettings(
     first.config,
-    extractApiCredProviders(DSH_CHAIN_STORE),
+    extractManagedProviders(DSH_CHAIN_STORE),
     47821,
     first.managed,
     null,

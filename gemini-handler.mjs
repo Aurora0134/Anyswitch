@@ -135,11 +135,11 @@ export function createGeminiHandler(deps) {
   function loadValidStore() {
     const loaded = loadStore();
     if (!loaded.ok) {
-      return { ok: false, status: 502, body: geminiError(502, "the ApiCred global store could not be read") };
+      return { ok: false, status: 502, body: geminiError(502, "the Anyswitch global store could not be read") };
     }
     const result = validateStore(loaded.store);
     if (!result.valid) {
-      return { ok: false, status: 502, body: geminiError(502, "the ApiCred global store failed schema validation") };
+      return { ok: false, status: 502, body: geminiError(502, "the Anyswitch global store failed schema validation") };
     }
     return { ok: true, store: loaded.store };
   }
@@ -178,7 +178,7 @@ export function createGeminiHandler(deps) {
 
     const provider = loaded.store.providers?.[resolved.providerId];
     if (provider === undefined) {
-      return { status: 404, body: geminiError(404, `provider "${resolved.providerId}" is not in the ApiCred store`) };
+      return { status: 404, body: geminiError(404, `provider "${resolved.providerId}" is not in the Anyswitch store`) };
     }
     if (provider.models?.[resolved.modelId] === undefined) {
       return {

@@ -7,7 +7,7 @@
 // Authentication: NONE. Loopback binding is the network boundary (non-127
 // peers already 403). Writes (start/stop/restart, settings, autostart, agy
 // aliases, session report) additionally require Origin/Referer on :47820 or
-// :47821 plus header X-ApiCred-Panel: 1, so a random page on this machine
+// :47821 plus header X-AnySwitch-Panel: 1, so a random page on this machine
 // cannot POST those routes. Credentials are never echoed. The relay Bearer
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
 
@@ -158,7 +158,9 @@ export function isTrustedPanelOrigin(origin, hostHeader) {
 }
 
 export function isTrustedPanelMutation(req) {
-  const header = req?.headers?.["x-apicred-panel"];
+  // Dual-header read: resident processes spawned before the header rename
+  // still send x-apicred-panel until the next relay/panel restart.
+  const header = req?.headers?.["x-anyswitch-panel"] ?? req?.headers?.["x-apicred-panel"];
   if (header !== "1") return false;
   const host = req.headers.host;
   const origin = req.headers.origin;
@@ -436,7 +438,7 @@ export function createPanelRouter({
   storeService = null,
   // Usage-stats service (usage-stats.mjs) backing GET /panel/api/stats/state.
   // Injectable for tests; `null` lazily builds the real one on first stats
-  // request over a journal rooted at <ApiCred root>/usage.
+  // request over a journal rooted at <Anyswitch data root>/usage.
   statsService = null,
   // Watchdog probe snapshot TTL (panel.mjs). Injectable so tests can force
   // revalidation; production default is WATCHDOG_SNAPSHOT_TTL_MS.
@@ -452,10 +454,10 @@ export function createPanelRouter({
   // answers instantly once a probe round has settled; POST followAgent invalidates.
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
 
-  // Lookup chain: APICRED_PANEL_HTML env override → bundled panel-ui/panel.html.
+  // Lookup chain: ANYSWITCH_PANEL_HTML env override → bundled panel-ui/panel.html.
   // A missing file falls through to servePanelHtml's readFileSync failure → 404.
   function resolvePanelHtmlPath() {
-    if (process.env.APICRED_PANEL_HTML) return process.env.APICRED_PANEL_HTML;
+    if (process.env.ANYSWITCH_PANEL_HTML) return process.env.ANYSWITCH_PANEL_HTML;
     return REPO_PANEL_HTML;
   }
 
@@ -935,7 +937,7 @@ export function createPanelRouter({
   // 即复用内存 body；ETag 由 size+mtimeMs 派生（package.json 无 version 字段，
   // 「版本派生」不存在）；Cache-Control: no-cache 强制每次 revalidate，
   // If-None-Match 命中回 304。缓存键含 resolved htmlPath（测试会切
-  // APICRED_PANEL_HTML env override，防串内容）。statSync 失败不命中/不写缓存，
+  // ANYSWITCH_PANEL_HTML env override，防串内容）。statSync 失败不命中/不写缓存，
   // 404 JSON 语义原样保留。
   let panelHtmlCache = null; // { path, mtimeMs, size, body, etag }
   function servePanelHtml(res, req) {
@@ -1245,7 +1247,7 @@ export function createPanelRouter({
                 result.reason === "model-exists"
                   ? `模型已存在: ${(result.duplicates ?? []).join(", ")}`
                   : result.reason === "unknown-provider"
-                    ? `Provider ${providerId} is not managed by apicred`
+                    ? `Provider ${providerId} is not managed by Anyswitch`
                     : (result.error ?? result.reason);
               return sendJson(res, 400, { ok: false, reason: result.reason, message });
             }
@@ -1262,7 +1264,7 @@ export function createPanelRouter({
                 result.reason === "model-not-found"
                   ? `模型不存在: ${(result.missing ?? []).join(", ")}`
                   : result.reason === "unknown-provider"
-                    ? `Provider ${providerId} is not managed by apicred`
+                    ? `Provider ${providerId} is not managed by Anyswitch`
                     : (result.error ?? result.reason);
               return sendJson(res, 400, { ok: false, reason: result.reason, message });
             }

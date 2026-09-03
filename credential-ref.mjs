@@ -1,4 +1,4 @@
-// Global ApiCred credentialFile reference validator.
+// Global Anyswitch credentialFile reference validator.
 // Pure function only. No IO, no filesystem access.
 // Contract: a credentialFile is a Store-root-relative
 // bare filename that CANNOT escape the credentials directory. Absolute paths,

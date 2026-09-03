@@ -148,7 +148,7 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge) {
     displayName: provider.channelName ?? providerId,
     api: "openai-completions",
     baseURL,
-    apiKeyEnv: "APICRED_RELAY_TOKEN",
+    apiKeyEnv: "ANYSWITCH_RELAY_TOKEN",
     headers: {
       "x-agent-id": "dsh",
     },
@@ -167,7 +167,7 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge) {
   };
 }
 
-export function mergeDshSettings(existingSettings, apiCredProviders, port, previousManaged = [], knowledge = null, autoChannel = null) {
+export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null) {
   const settings = typeof existingSettings === "object" && existingSettings !== null ? { ...existingSettings } : {};
   const llmPiAi = { ...(settings["llm-pi-ai"] ?? {}) };
   const existingProviders = { ...(llmPiAi.providers ?? {}) };
@@ -175,7 +175,7 @@ export function mergeDshSettings(existingSettings, apiCredProviders, port, previ
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop `_auto` via the
   // ordinary previousManaged path.
-  const providers = autoChannel ? { ...apiCredProviders, [AUTO_CHANNEL_KEY]: autoChannel } : apiCredProviders;
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   // 1. Clean up stale managed providers
   for (const prevId of previousManaged) {
@@ -247,7 +247,7 @@ export function writeDshSettingsWithBackup(filePath, data, yaml) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-export { extractApiCredProviders } from "./pool-providers.mjs";
+export { extractManagedProviders } from "./pool-providers.mjs";
 
 export function validateDshSettings(settings) {
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) {

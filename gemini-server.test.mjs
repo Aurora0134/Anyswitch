@@ -49,7 +49,7 @@ describe("gemini server routes and panel antigravity APIs", () => {
   // The panel router's POST route validates alias targets against the store ON
   // DISK (the same enabled set the handler will resolve against), so the mock
   // store is also materialized into a temp file here.
-  const tmpRoot = mkdtempSync(join(tmpdir(), "apicred-gemini-server-test-"));
+  const tmpRoot = mkdtempSync(join(tmpdir(), "anyswitch-gemini-server-test-"));
   process.on("exit", () => rmSync(tmpRoot, { recursive: true, force: true }));
   writeFileSync(join(tmpRoot, "store.json"), JSON.stringify(mockStore));
 
@@ -134,7 +134,7 @@ describe("gemini server routes and panel antigravity APIs", () => {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          "x-apicred-panel": "1",
+          "x-anyswitch-panel": "1",
           origin: `http://127.0.0.1:${srv.port}`,
         },
         body: JSON.stringify({

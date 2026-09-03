@@ -203,7 +203,7 @@ export function createStoreService({
     // Membership comes from the v2 store. A load failure is fail-closed.
     const loaded = load();
     if (!loaded.ok) {
-      throw new Error(`the ApiCred v2 store is unavailable: ${loaded.reason}; deletion aborted, credential retained`);
+      throw new Error(`the Anyswitch v2 store is unavailable: ${loaded.reason}; deletion aborted, credential retained`);
     }
     const v2Providers = loaded.store.providers ?? {};
     const managedEntry = Object.hasOwn(v2Providers, providerId) ? v2Providers[providerId] : undefined;
@@ -215,7 +215,7 @@ export function createStoreService({
       const pending = findPending(journalPath, providerId);
       if (!pending) {
         if (findCompleted(journalPath, providerId)) return { deleted: true, alreadyDeleted: true };
-        throw new Error(`Provider ${providerId} is not managed by apicred`);
+        throw new Error(`Provider ${providerId} is not managed by Anyswitch`);
       }
     }
 
@@ -247,7 +247,7 @@ export function createStoreService({
       const nextV2Store = { ...loaded.store, version: 2, providers: nextV2Providers };
       const written = write(nextV2Store, { expectedHash: loaded.hash });
       if (!written.ok) {
-        throw new Error(`the ApiCred v2 store was not updated for ${providerId}: ${written.reason}; deletion aborted, credential retained`);
+        throw new Error(`the Anyswitch v2 store was not updated for ${providerId}: ${written.reason}; deletion aborted, credential retained`);
       }
     }
 
@@ -409,9 +409,9 @@ export function createStoreService({
         return { ok: false, error: error.message };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.providers?.[id];
-      if (!entry) return { ok: false, error: `Provider ${id} is not managed by apicred` };
+      if (!entry) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
       const credential = await readPlaintextCredential(id, entry.credentialFile ?? `${id}.dpapi`);
       if (!credential.ok) return { ok: false, error: credential.error };
       const plaintext = credential.plaintext;
@@ -448,7 +448,7 @@ export function createStoreService({
       }
       const loaded = load();
       if (!loaded.ok && loaded.reason !== "store-absent") {
-        return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+        return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       }
       const store = loaded.ok ? loaded.store : { version: 2, providers: {} };
       const expectedHash = loaded.ok ? loaded.hash : null;
@@ -531,15 +531,15 @@ export function createStoreService({
         return { ok: false, error: error.message };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const existing = loaded.store.providers?.[id];
-      if (!existing) return { ok: false, error: `Provider ${id} is not managed by apicred` };
+      if (!existing) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
 
       let baseURL = existing.baseURL;
       let fallbackURLs; // undefined keeps the existing group
       if (typeof baseURLs === "string" && baseURLs.trim()) {
         if (id === "opencode") {
-          return { ok: false, error: "The built-in opencode provider endpoint cannot be changed by apicred" };
+          return { ok: false, error: "The built-in opencode provider endpoint cannot be changed by Anyswitch" };
         }
         try {
           const parsed = parseBaseURLs(baseURLs);
@@ -592,7 +592,7 @@ export function createStoreService({
      */
     async refreshProviders(id) {
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store could not be loaded: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store could not be loaded: ${loaded.reason}` };
       const store = loaded.store;
       const allProviderIds = Object.keys(store.providers ?? {});
       let targets;
@@ -603,7 +603,7 @@ export function createStoreService({
           return { ok: false, error: error.message };
         }
         if (!allProviderIds.includes(id)) {
-          return { ok: false, error: `Provider ${id} is not present in the ApiCred v2 store` };
+          return { ok: false, error: `Provider ${id} is not present in the Anyswitch v2 store` };
         }
         targets = [id];
       } else {
@@ -666,9 +666,9 @@ export function createStoreService({
       }
       if (!Array.isArray(modelFilter)) return { ok: false, error: "modelFilter must be an array of model IDs" };
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.providers?.[id];
-      if (!entry) return { ok: false, error: `Provider ${id} is not managed by apicred` };
+      if (!entry) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
 
       const nextEntry = structuredClone(entry);
       let seeded = false;
@@ -729,7 +729,7 @@ export function createStoreService({
      */
     async addModels(providerId, modelIds) {
       const loaded = load();
-      if (!loaded.ok) return { ok: false, reason: "store-unavailable", error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, reason: "store-unavailable", error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.providers?.[providerId];
       if (!entry) return { ok: false, reason: "unknown-provider" };
 
@@ -752,7 +752,7 @@ export function createStoreService({
      */
     async removeModels(providerId, modelIds) {
       const loaded = load();
-      if (!loaded.ok) return { ok: false, reason: "store-unavailable", error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, reason: "store-unavailable", error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.providers?.[providerId];
       if (!entry) return { ok: false, reason: "unknown-provider" };
 
@@ -791,7 +791,7 @@ export function createStoreService({
         return { ok: false, error: "pool members contain duplicates" };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const providers = loaded.store.providers ?? {};
       const memberIdSet = new Set(members);
       // A pool may reuse the id of one of its own members; colliding with a
@@ -810,7 +810,7 @@ export function createStoreService({
       }
       for (const memberId of members) {
         if (!Object.hasOwn(providers, memberId)) {
-          return { ok: false, error: `Provider ${memberId} is not managed by apicred` };
+          return { ok: false, error: `Provider ${memberId} is not managed by Anyswitch` };
         }
         if (memberId === "opencode") {
           return { ok: false, error: `the built-in opencode provider cannot join a pool` };
@@ -839,7 +839,7 @@ export function createStoreService({
      */
     async updatePoolMembers({ poolId, members }) {
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const pools = loaded.store.pools ?? {};
       const pool = pools[poolId];
       if (!pool) return { ok: false, error: `pool "${poolId}" does not exist` };
@@ -855,7 +855,7 @@ export function createStoreService({
       const providers = loaded.store.providers ?? {};
       for (const memberId of members) {
         if (!Object.hasOwn(providers, memberId)) {
-          return { ok: false, error: `Provider ${memberId} is not managed by apicred` };
+          return { ok: false, error: `Provider ${memberId} is not managed by Anyswitch` };
         }
         if (memberId === "opencode") {
           return { ok: false, error: `the built-in opencode provider cannot join a pool` };
@@ -887,7 +887,7 @@ export function createStoreService({
         return { ok: false, error: `pool id: ${error.message}` };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const pools = loaded.store.pools ?? {};
       if (!Object.hasOwn(pools, poolId)) {
         return { ok: false, error: `pool "${poolId}" does not exist` };
@@ -945,7 +945,7 @@ export function createStoreService({
         seenPairs.add(pairKey);
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const providers = loaded.store.providers ?? {};
       const pools = loaded.store.pools ?? {};
       for (const item of chain) {
@@ -984,7 +984,7 @@ export function createStoreService({
         return { ok: false, error: "enabled must be a boolean" };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.routingChains?.[endpointId];
       if (!entry || !Array.isArray(entry.chain)) {
         return { ok: false, error: `route chain for endpoint "${endpointId}" does not exist` };
@@ -1006,7 +1006,7 @@ export function createStoreService({
         return { ok: false, error: `unknown endpoint id "${endpointId}" (known: ${ROUTING_ENDPOINT_IDS.join(", ")})` };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const routingChains = loaded.store.routingChains ?? {};
       if (!Object.hasOwn(routingChains, endpointId)) {
         return { ok: false, error: `route chain for endpoint "${endpointId}" does not exist` };
@@ -1029,9 +1029,9 @@ export function createStoreService({
         return { ok: false, error: "displayName must be a non-empty string" };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const entry = loaded.store.providers?.[id];
-      if (!entry) return { ok: false, error: `Provider ${id} is not managed by apicred` };
+      if (!entry) return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
       const nextStore = structuredClone(loaded.store);
       nextStore.providers[id] = { ...entry, displayName: displayName.trim() };
       const written = write(nextStore, { expectedHash: loaded.hash });
@@ -1048,7 +1048,7 @@ export function createStoreService({
         return { ok: false, error: "displayName must be a non-empty string" };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const pool = loaded.store.pools?.[poolId];
       if (!pool) return { ok: false, error: `pool "${poolId}" does not exist` };
       const nextStore = structuredClone(loaded.store);
@@ -1069,14 +1069,14 @@ export function createStoreService({
         return { ok: false, error: "order must be an array of provider ids" };
       }
       const loaded = load();
-      if (!loaded.ok) return { ok: false, error: `the ApiCred v2 store is unavailable: ${loaded.reason}` };
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const providers = loaded.store.providers ?? {};
       if (order.length !== Object.keys(providers).length || new Set(order).size !== order.length) {
         return { ok: false, error: "order must be a permutation of the existing provider ids" };
       }
       for (const id of order) {
         if (!Object.hasOwn(providers, id)) {
-          return { ok: false, error: `Provider ${id} is not managed by apicred` };
+          return { ok: false, error: `Provider ${id} is not managed by Anyswitch` };
         }
       }
       const position = new Map(order.map((id, index) => [id, index]));

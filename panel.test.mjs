@@ -25,7 +25,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
     headers: {
       host: "127.0.0.1",
       origin: "http://127.0.0.1:47820",
-      "x-apicred-panel": "1",
+      "x-anyswitch-panel": "1",
       ...extraHeaders,
     },
     on(event, fn) { listeners[event] = fn; return req; },
@@ -42,7 +42,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
 
 function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector } = {}) {
   return createPanelRouter({
-    storePaths: { root: "C:/fake/apicred" },
+    storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: metricsCollector ?? null,
     aliasResolver: null,
@@ -60,7 +60,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/ingest republishes a forwarded entry through the logger bus", async () => {
     const entries = [];
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: {
         info: (m) => entries.push(["info", m]),
         warn: (m) => entries.push(["warn", m]),
@@ -82,7 +82,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/ingest rejects a malformed level as bad request, never logging it", async () => {
     const entries = [];
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: { info: (m) => entries.push(m), warn: (m) => entries.push(m), error: (m) => entries.push(m) },
       metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
@@ -100,7 +100,7 @@ describe("panel router relay control + pull-mode agents", () => {
     let clearFrame = null;
     const unsubscribe = logger.subscribe((entry) => { clearFrame = entry; });
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger,
       metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
@@ -117,13 +117,13 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/clear without the panel header is rejected as CSRF", async () => {
     let cleared = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: { info: () => {}, warn: () => {}, error: () => {}, clear: () => { cleared = true; } },
       metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
     });
-    const { req, res } = fakeReqRes("/panel/api/logs/clear", "POST", {}, { origin: "http://evil.example", "x-apicred-panel": undefined });
-    delete req.headers["x-apicred-panel"];
+    const { req, res } = fakeReqRes("/panel/api/logs/clear", "POST", {}, { origin: "http://evil.example", "x-anyswitch-panel": undefined });
+    delete req.headers["x-anyswitch-panel"];
     await router.handle(req, res);
     assert.equal(res.statusCode, 403);
     assert.equal(cleared, false, "a foreign page must not wipe the log");
@@ -142,7 +142,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/start calls startRelayFn and returns its result", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       startRelayFn: async () => { called = true; return { ok: true, relay: { status: "running", pid: 7, port: 47821 } }; },
       fetchRelayAgents: async () => null,
@@ -158,7 +158,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/stop calls stopRelayFn", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
@@ -172,13 +172,13 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/stop without the panel header does not stop the relay", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
     });
-    const { req, res, json } = fakeReqRes("/panel/api/relay/stop", "POST", null, { "x-apicred-panel": "" });
-    delete req.headers["x-apicred-panel"];
+    const { req, res, json } = fakeReqRes("/panel/api/relay/stop", "POST", null, { "x-anyswitch-panel": "" });
+    delete req.headers["x-anyswitch-panel"];
     await router.handle(req, res);
     assert.equal(called, false);
     assert.equal(res.statusCode, 403);
@@ -188,7 +188,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/stop from a foreign origin does not stop the relay", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       stopRelayFn: async () => { called = true; return { ok: true }; },
       fetchRelayAgents: async () => null,
@@ -203,7 +203,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/stop with referer only (no origin) still works from the panel", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       stopRelayFn: async () => { called = true; return { ok: true, relay: { status: "stopped", pid: null, port: 47821 } }; },
       fetchRelayAgents: async () => null,
@@ -222,7 +222,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/relay/restart calls restartRelayFn", async () => {
     let called = false;
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       restartRelayFn: async () => { called = true; return { ok: true, relay: { status: "running", pid: 8, port: 47821 } }; },
       fetchRelayAgents: async () => null,
@@ -246,7 +246,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("GET /panel/api/agents falls back to local collector when relay is down", async () => {
     const local = [{ id: "claude", status: "stopped" }];
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, aliasResolver: null, aliasPath: null,
       metricsCollector: { getAgentsStatus: async () => local },
       fetchRelayAgents: async () => null, // relay down -> null
@@ -268,7 +268,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("GET /panel/api/model-stability uses pulled relay snapshot when available", async () => {
     const pulled = { window: "8h", buckets: 48, models: [{ model: "glm-4.7", provider: "bigmodel", total: 12, successRate: 99, status: "green", cells: [] }] };
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchRelayStability: async () => pulled,
@@ -283,7 +283,7 @@ describe("panel router relay control + pull-mode agents", () => {
   it("GET /panel/api/model-stability falls back to local collector", async () => {
     const snap = { window: "8h", buckets: 48, models: [{ model: "gpt-5.2", total: 3, successRate: 33.3, status: "red", cells: [] }] };
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, aliasResolver: null, aliasPath: null,
       metricsCollector: { getModelStability: () => snap },
       fetchRelayAgents: async () => null,
@@ -298,7 +298,7 @@ describe("panel router relay control + pull-mode agents", () => {
   // 状态检测号池富化：池 id 行 → poolName；成员 id 行 → poolName + memberName；
   // 无关渠道行原样透传。pulled 与本地 collector 两条路径都过同一富化。
   function poolStoreEnv(models, { pulled = true } = {}) {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-pool-"));
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-pool-"));
     const storeFile = join(dir, "store.json");
     writeFileSync(storeFile, JSON.stringify({
       version: 2,
@@ -457,7 +457,7 @@ describe("panel router relay control + pull-mode agents", () => {
 // ENABLED model set on disk.
 describe("panel router antigravity settings routes", () => {
   function tempEnv() {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-agy-"));
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-agy-"));
     const storeFile = join(dir, "store.json");
     writeFileSync(storeFile, JSON.stringify({
       version: 2,
@@ -598,7 +598,7 @@ describe("panel router antigravity settings routes", () => {
 describe("panel router followAgent watchdog coordination", () => {
   function watchdogRouter(calls, opts = {}) {
     return createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null,
       metricsCollector: null,
       aliasResolver: null,
@@ -616,9 +616,9 @@ describe("panel router followAgent watchdog coordination", () => {
   // mkdir first: atomicWriteFile writes settings.json.<uuid>.tmp next to the
   // target and cannot create intermediate directories itself.
   function tempBase() {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-wd-"));
-    const apicredRoot = join(dir, "ApiCred");
-    mkdirSync(apicredRoot, { recursive: true });
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-"));
+    const relayDataRoot = join(dir, "ApiCred");
+    mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }
 
@@ -627,7 +627,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
@@ -654,7 +654,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
@@ -676,7 +676,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: false, error: "reg.exe exploded" }),
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
@@ -711,7 +711,7 @@ describe("panel router followAgent watchdog coordination", () => {
     }));
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -738,7 +738,7 @@ describe("panel router followAgent watchdog coordination", () => {
     }));
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -762,7 +762,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => { calls.push("reg-enable"); return { ok: true }; },
       disableWatchdogAutostartFn: async () => { calls.push("reg-disable"); return { ok: true }; },
@@ -783,7 +783,7 @@ describe("panel router followAgent watchdog coordination", () => {
     const { base } = tempBase();
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -825,9 +825,9 @@ describe("panel router followAgent watchdog coordination", () => {
 // stale-while-revalidate: GETs never wait once a snapshot has settled.
 describe("panel router watchdog probe snapshot", () => {
   function tempBase() {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-wd-snap-"));
-    const apicredRoot = join(dir, "ApiCred");
-    mkdirSync(apicredRoot, { recursive: true });
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-snap-"));
+    const relayDataRoot = join(dir, "ApiCred");
+    mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -838,7 +838,7 @@ describe("panel router watchdog probe snapshot", () => {
     const hang = new Promise(() => {});
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -860,7 +860,7 @@ describe("panel router watchdog probe snapshot", () => {
     const hang = new Promise(() => {});
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -891,7 +891,7 @@ describe("panel router watchdog probe snapshot", () => {
     const gate = new Promise((r) => { release = r; });
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -928,7 +928,7 @@ describe("panel router watchdog probe snapshot", () => {
     let calls = 0;
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => ({ ok: true }),
       disableWatchdogAutostartFn: async () => ({ ok: true }),
@@ -959,7 +959,7 @@ describe("panel router watchdog probe snapshot", () => {
     let autoCalls = 0;
     const router = createPanelRouter({
       base,
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       enableWatchdogAutostartFn: async () => { regOn = true; return { ok: true }; },
       disableWatchdogAutostartFn: async () => { regOn = false; return { ok: true }; },
@@ -1183,7 +1183,7 @@ describe("panel.html stats tab", () => {
 
 // Body size cap + panel.html lookup chain. readJsonBody rejects bodies over
 // 1MB with 413 (BodyTooLargeError) — every legitimate panel payload is KB-scale
-// JSON — and servePanelHtml resolves APICRED_PANEL_HTML → bundled
+// JSON — and servePanelHtml resolves ANYSWITCH_PANEL_HTML → bundled
 // panel-ui/panel.html → 404, with no legacy desktop fallback.
 describe("panel router body limit + panel.html lookup chain", () => {
   // Fake req that streams raw (possibly huge) chunks into readJsonBody's
@@ -1200,7 +1200,7 @@ describe("panel router body limit + panel.html lookup chain", () => {
     const req = {
       url,
       method: "POST",
-      headers: { host: "127.0.0.1", origin: "http://127.0.0.1:47820", "x-apicred-panel": "1" },
+      headers: { host: "127.0.0.1", origin: "http://127.0.0.1:47820", "x-anyswitch-panel": "1" },
       on(event, fn) { listeners[event] = fn; return req; },
     };
     queueMicrotask(() => {
@@ -1237,8 +1237,8 @@ describe("panel router body limit + panel.html lookup chain", () => {
   const repoPanelHtml = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
 
   it("GET /panel serves the bundled panel-ui/panel.html when no env override is set", async () => {
-    const saved = process.env.APICRED_PANEL_HTML;
-    delete process.env.APICRED_PANEL_HTML;
+    const saved = process.env.ANYSWITCH_PANEL_HTML;
+    delete process.env.ANYSWITCH_PANEL_HTML;
     try {
       const router = routerWith();
       const { req, res } = fakeReqRes("/panel", "GET");
@@ -1247,16 +1247,16 @@ describe("panel router body limit + panel.html lookup chain", () => {
       assert.match(res.headers["content-type"], /^text\/html/);
       assert.equal(res.body, readFileSync(repoPanelHtml, "utf8"));
     } finally {
-      if (saved !== undefined) process.env.APICRED_PANEL_HTML = saved;
+      if (saved !== undefined) process.env.ANYSWITCH_PANEL_HTML = saved;
     }
   });
 
-  it("GET /panel serves APICRED_PANEL_HTML when the env override is set", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-html-"));
+  it("GET /panel serves ANYSWITCH_PANEL_HTML when the env override is set", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-html-"));
     const custom = join(dir, "custom-panel.html");
     writeFileSync(custom, "<html>env-injected panel</html>");
-    const saved = process.env.APICRED_PANEL_HTML;
-    process.env.APICRED_PANEL_HTML = custom;
+    const saved = process.env.ANYSWITCH_PANEL_HTML;
+    process.env.ANYSWITCH_PANEL_HTML = custom;
     try {
       const router = routerWith();
       const { req, res } = fakeReqRes("/panel", "GET");
@@ -1264,15 +1264,15 @@ describe("panel router body limit + panel.html lookup chain", () => {
       assert.equal(res.statusCode, 200);
       assert.equal(res.body, "<html>env-injected panel</html>");
     } finally {
-      if (saved !== undefined) process.env.APICRED_PANEL_HTML = saved;
-      else delete process.env.APICRED_PANEL_HTML;
+      if (saved !== undefined) process.env.ANYSWITCH_PANEL_HTML = saved;
+      else delete process.env.ANYSWITCH_PANEL_HTML;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("GET /panel 404s when the resolved html path does not exist (no fallback)", async () => {
-    const saved = process.env.APICRED_PANEL_HTML;
-    process.env.APICRED_PANEL_HTML = join(tmpdir(), "apicred-panel-missing", "panel.html");
+    const saved = process.env.ANYSWITCH_PANEL_HTML;
+    process.env.ANYSWITCH_PANEL_HTML = join(tmpdir(), "anyswitch-panel-missing", "panel.html");
     try {
       const router = routerWith();
       const { req, res, json } = fakeReqRes("/panel", "GET");
@@ -1280,17 +1280,17 @@ describe("panel router body limit + panel.html lookup chain", () => {
       assert.equal(res.statusCode, 404);
       assert.equal(json().error, "panel.html not found");
     } finally {
-      if (saved !== undefined) process.env.APICRED_PANEL_HTML = saved;
-      else delete process.env.APICRED_PANEL_HTML;
+      if (saved !== undefined) process.env.ANYSWITCH_PANEL_HTML = saved;
+      else delete process.env.ANYSWITCH_PANEL_HTML;
     }
   });
 
   it("GET /panel revalidates via ETag: If-None-Match hits 304, changed content changes the ETag", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "apicred-panel-etag-"));
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-etag-"));
     const custom = join(dir, "panel.html");
     writeFileSync(custom, "<html>v1</html>");
-    const saved = process.env.APICRED_PANEL_HTML;
-    process.env.APICRED_PANEL_HTML = custom;
+    const saved = process.env.ANYSWITCH_PANEL_HTML;
+    process.env.ANYSWITCH_PANEL_HTML = custom;
     try {
       const router = routerWith();
       const first = fakeReqRes("/panel", "GET");
@@ -1317,8 +1317,8 @@ describe("panel router body limit + panel.html lookup chain", () => {
       assert.ok(third.res.headers.etag, "changed content still carries an ETag");
       assert.notEqual(third.res.headers.etag, etag1);
     } finally {
-      if (saved !== undefined) process.env.APICRED_PANEL_HTML = saved;
-      else delete process.env.APICRED_PANEL_HTML;
+      if (saved !== undefined) process.env.ANYSWITCH_PANEL_HTML = saved;
+      else delete process.env.ANYSWITCH_PANEL_HTML;
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1332,7 +1332,7 @@ describe("panel router route-chain runtime", () => {
       },
     };
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchRelayChainRuntime: async () => pulled,
@@ -1346,7 +1346,7 @@ describe("panel router route-chain runtime", () => {
 
   it("GET /panel/api/route-chain/runtime falls back to an empty endpoints map when the relay is down", async () => {
     const router = createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchRelayChainRuntime: async () => null,
@@ -1612,7 +1612,7 @@ describe("panel.html stats 横条：右端对齐 + 上限留白", () => {
 describe("panel router route-chain enabled 开关 API", () => {
   function routerWithStoreService(storeService) {
     return createPanelRouter({
-      storePaths: { root: "C:/fake/apicred" },
+      storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       storeService,

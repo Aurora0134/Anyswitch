@@ -9,13 +9,13 @@ import { join } from "node:path";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
-test("buildDshLauncherEnv injects APICRED_RELAY_TOKEN and NO_PROXY", () => {
+test("buildDshLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
   const env = buildDshLauncherEnv({
     port: 47821,
     token: "test-secret-token",
     base: { PATH: "/usr/bin" },
   });
-  assert.equal(env.APICRED_RELAY_TOKEN, "test-secret-token");
+  assert.equal(env.ANYSWITCH_RELAY_TOKEN, "test-secret-token");
   assert.equal(env.NO_PROXY, "127.0.0.1,localhost");
   assert.equal(env.PATH, "/usr/bin");
 });
@@ -69,7 +69,7 @@ test("runDshLauncher reuses resident relay and skips duplicate spawn", async () 
     },
     spawnDsh: async ({ env, args }) => {
       dshSpawned = true;
-      assert.equal(env.APICRED_RELAY_TOKEN !== undefined, true);
+      assert.equal(env.ANYSWITCH_RELAY_TOKEN !== undefined, true);
       assert.deepEqual(args, ["web", "--port", "3080"]);
       return 0;
     },
@@ -98,7 +98,7 @@ test("runDshLauncher falls back to per-launch relay when resident probe fails", 
     },
     spawnDsh: async ({ env }) => {
       dshSpawned = true;
-      assert.equal(env.APICRED_RELAY_TOKEN, "per-launch-tok");
+      assert.equal(env.ANYSWITCH_RELAY_TOKEN, "per-launch-tok");
       return 0;
     },
     probeRelay: async () => false, // No resident relay

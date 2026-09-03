@@ -31,7 +31,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
-import { apiCredRoot } from "./relay-settings.mjs";
+import { relayDataRoot } from "./relay-settings.mjs";
 
 // Endpoint registry. `relSkillsDir` is relative to the user's home directory.
 // agy (Antigravity) reads ~/.gemini/skills — NOT ~/.gemini/config/skills
@@ -50,7 +50,7 @@ export const ENDPOINT_DEFS = Object.freeze([
 ]);
 
 // Repo-path candidates the panel offers as one-click choices.
-// The APICRED_SKILLS_REPO environment variable (absolute path) is offered
+// The ANYSWITCH_SKILLS_REPO environment variable (absolute path) is offered
 // first; the entries below are home-relative common locations.
 const REPO_CANDIDATES = Object.freeze([
   [".agents", "skills"],
@@ -436,7 +436,7 @@ const FOLDER_PICKER_CSHARP = String.raw`
 using System;
 using System.Runtime.InteropServices;
 
-public static class ApicredFolderPicker {
+public static class AnySwitchFolderPicker {
   [ComImport, Guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")]
   private class FileOpenDialog { }
 
@@ -588,7 +588,7 @@ function runProcess(file, args, { spawnFn = spawn, timeoutMs = 120000 } = {}) {
  * to the PowerShell chain.
  */
 export async function ensureFolderPickerHelper({ spawnFn = spawn, base = process.env } = {}) {
-  const binDir = join(apiCredRoot(base), "bin");
+  const binDir = join(relayDataRoot(base), "bin");
   const srcPath = join(binDir, "folder-picker.cs");
   const exePath = join(binDir, "folder-picker.exe");
   if (
@@ -667,7 +667,7 @@ async function runPicker({ spawnFn, timeoutMs, base, title, pickFile: fileMode }
     "$picked = $null",
     "$cancelled = $false",
     "$failed = $false",
-    `try { Add-Type -TypeDefinition @'\n${FOLDER_PICKER_CSHARP}\n'@; $r = [ApicredFolderPicker]::Pick('${psTitle}', ${fileMode ? "$false" : "$true"}); if ($null -eq $r) { $cancelled = $true } else { $picked = $r } } catch { $failed = $true }`,
+    `try { Add-Type -TypeDefinition @'\n${FOLDER_PICKER_CSHARP}\n'@; $r = [AnySwitchFolderPicker]::Pick('${psTitle}', ${fileMode ? "$false" : "$true"}); if ($null -eq $r) { $cancelled = $true } else { $picked = $r } } catch { $failed = $true }`,
     fileMode
       ? `if ($failed) { try { Add-Type -AssemblyName System.Windows.Forms; $ofd = New-Object System.Windows.Forms.OpenFileDialog; $ofd.Title = '${psTitle}'; if ($ofd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $picked = $ofd.FileName } else { $cancelled = $true } } catch { Write-Error $_; exit 1 } }`
       : `if ($failed) { try { Add-Type -AssemblyName System.Windows.Forms; $fbd = New-Object System.Windows.Forms.FolderBrowserDialog; $fbd.Description = '${psTitle}'; if ($fbd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $picked = $fbd.SelectedPath } else { $cancelled = $true } } catch { Write-Error $_; exit 1 } }`,
@@ -717,7 +717,7 @@ function runPowerShellSta(script, { spawnFn = spawn, timeoutMs = 120000 } = {}) 
 // ─────────────────────────────────────────────────────────────
 
 export function skillsConfigPath(base = process.env) {
-  return join(apiCredRoot(base), "skills.json");
+  return join(relayDataRoot(base), "skills.json");
 }
 
 export function loadSkillsConfig({ base = process.env } = {}) {
@@ -734,7 +734,7 @@ export function loadSkillsConfig({ base = process.env } = {}) {
 
 export function saveSkillsConfig(config, { base = process.env } = {}) {
   const target = skillsConfigPath(base);
-  mkdirSync(apiCredRoot(base), { recursive: true });
+  mkdirSync(relayDataRoot(base), { recursive: true });
   atomicWriteFile(target, JSON.stringify({ repoPath: config.repoPath ?? null }, null, 2) + "\n");
 }
 
@@ -881,7 +881,7 @@ function importSkillFromZip(
   { repoPath, sourcePath },
   { spawnFn = spawnSync, mkdtempFn = mkdtempSync, tmpBase = tmpdir(), env = process.env } = {},
 ) {
-  const tmpDir = mkdtempFn(join(tmpBase, "apicred-skill-import-"));
+  const tmpDir = mkdtempFn(join(tmpBase, "anyswitch-skill-import-"));
   try {
     const systemRoot = env.SystemRoot || env.WINDIR || "C:\\Windows";
     const tarPath = join(systemRoot, "System32", "tar.exe");
@@ -1168,7 +1168,7 @@ export function createSkillsService({
         skills,
         endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir }),
         candidates: [
-          ...(base.APICRED_SKILLS_REPO ? [base.APICRED_SKILLS_REPO] : []),
+          ...(base.ANYSWITCH_SKILLS_REPO ? [base.ANYSWITCH_SKILLS_REPO] : []),
           ...REPO_CANDIDATES.map((parts) => join(homeDir, ...parts)),
         ].map((p) => ({ path: p, exists: existsSync(p) && scanRepo(p).length > 0 })),
       };

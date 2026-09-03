@@ -21,7 +21,7 @@ import { probeRelay } from "./openai-server.mjs";
 
 const RELAY_PORT = 47821;
 const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.url));
-// Directory every ApiCred relay process is spawned from — the resident
+// Directory every Anyswitch relay process is spawned from — the resident
 // relay-host.mjs AND the per-launch launchers (zcode/dsh/pi/kimi/reasonix,
 // which also legitimately bind 47821) all run scripts located here. This is
 // the trust boundary for the PID identity check before any taskkill.
@@ -326,7 +326,7 @@ export async function stopRelay(root, deps = {}) {
   // Resolve the real owner of 47821 so a stale pid file doesn't leave the
   // relay running. We kill at most these two candidate PIDs (both specific),
   // never a global node.exe sweep — and only after each PID's command line
-  // positively identifies it as an ApiCred app process.
+  // positively identifies it as an Anyswitch app process.
   const ownerPid = await findOwner(RELAY_PORT);
 
   // PID identity gate: a live PID whose command line does not reference this
@@ -354,7 +354,7 @@ export async function stopRelay(root, deps = {}) {
   const status = await getRelayStatus(root, { probe, findPortOwnerPid: findOwner, isPidAlive: isAlive });
   const result = { ok: status.status === "stopped" && refused.length === 0, relay: status };
   if (refused.length > 0) {
-    result.reason = `refused to kill PID ${refused.join(", ")}: command line does not identify it as an ApiCred app process`;
+    result.reason = `refused to kill PID ${refused.join(", ")}: command line does not identify it as an Anyswitch app process`;
   }
   return result;
 }

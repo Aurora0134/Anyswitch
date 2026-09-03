@@ -45,7 +45,7 @@ git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
 Notes:
 
 - Node.js must be on `PATH` or installed at `%ProgramFiles%\nodejs`.
-- The autostart scheduled tasks (`ApiCredRelay` / `ApiCredWatchdog`) bake in the repo path at registration time. If you move the install directory, re-toggle autostart in the panel so the tasks pick up the new path.
+- The autostart scheduled tasks (`AnyswitchRelay` / `AnyswitchWatchdog`) bake in the repo path at registration time. If you move the install directory, re-toggle autostart in the panel so the tasks pick up the new path.
 
 ### Quick start
 
@@ -68,7 +68,7 @@ Notes:
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude args]` — starts a per-launch relay on an ephemeral loopback port and injects `ANTHROPIC_BASE_URL` + a one-shot `ANTHROPIC_AUTH_TOKEN` via process env only; the relay and token die when Claude exits. |
 | Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi args]` — same per-launch injection, plus managed providers merged into `~/.kimi-code/config.toml`. |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — brings up the relay on 47821 and injects `APICRED_RELAY_TOKEN`; managed providers are injected at startup by the optional companion OpenCode plugin (not shipped here; `opencode.jsonc` is never modified). |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — brings up the relay on 47821 and injects `ANYSWITCH_RELAY_TOKEN`; managed providers are injected at startup by the optional companion OpenCode plugin (not shipped here; `opencode.jsonc` is never modified). |
 | Pi | OpenAI | `node pi-launcher.mjs [pi args]` — syncs managed providers into `~/.pi/agent/models.json`, then launches pi. |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into `~/.dsh/settings.yaml`. |
@@ -110,7 +110,7 @@ Yes. Key sealing relies on Windows DPAPI, autostart uses Windows scheduled tasks
 Each provider's key is sealed with Windows DPAPI under your user account and stored as one ciphertext file per provider in `%LOCALAPPDATA%\ApiCred\credentials\`. The plaintext exists only in memory while a request is being forwarded — it is never cached, never logged, and never written to `store.json` (the schema validator rejects secret-looking fields outright).
 
 **What happens if the relay crashes?**
-It stays down — crash-without-self-healing is a deliberate design choice, so a fault can't be masked by a restart loop. The control panel is a separate process on port 47820 and remains fully usable; restart the relay from the Board tab. If you enable autostart, the `ApiCredWatchdog` scheduled task also revives the relay automatically when a coding agent appears.
+It stays down — crash-without-self-healing is a deliberate design choice, so a fault can't be masked by a restart loop. The control panel is a separate process on port 47820 and remains fully usable; restart the relay from the Board tab. If you enable autostart, the `AnyswitchWatchdog` scheduled task also revives the relay automatically when a coding agent appears.
 
 **Which upstreams are supported?**
 Any OpenAI-compatible endpoint — the store schema fixes `protocol: "openai-compatible"`. The upstream only needs chat completions; a `GET /v1/models` endpoint is used for model discovery, but you can enter model IDs manually when it is missing. Anthropic-protocol and Gemini-protocol clients are served by translating to that same OpenAI-compatible upstream.
@@ -133,6 +133,10 @@ npm test
 ```
 
 Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for single-file runs and environment notes.
+
+### Naming
+
+This project is named **Anyswitch**. It was developed under the working name "ApiCred", and a few load-bearing identifiers still carry that name for data-safety reasons: the `%LOCALAPPDATA%ApiCred` data directory (moving it orphans existing credentials), the DPAPI entropy prefix `ApiCred|DPAPI|v2|` (changing it would seal out every stored key), and the durable git object store `%LOCALAPPDATA%ApiCred-git`. New code and configuration use Anyswitch naming everywhere else; pre-rename user config files are migrated in place on the next client launch.
 
 ### License
 
@@ -175,7 +179,7 @@ git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
 注意事项：
 
 - Node.js 需在 `PATH` 中，或安装在 `%ProgramFiles%\nodejs`。
-- 开机自启的计划任务（`ApiCredRelay` / `ApiCredWatchdog`）固化注册时的仓库路径。移动安装目录后，需在面板中重开自启，让任务更新为新路径。
+- 开机自启的计划任务（`AnyswitchRelay` / `AnyswitchWatchdog`）固化注册时的仓库路径。移动安装目录后，需在面板中重开自启，让任务更新为新路径。
 
 ### 快速开始
 
@@ -198,7 +202,7 @@ git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude 参数]` — 在临时环回端口拉起一次性 relay，仅以进程环境变量注入 `ANTHROPIC_BASE_URL` + 一次性 `ANTHROPIC_AUTH_TOKEN`；Claude 退出时 relay 与 token 一并销毁。 |
 | Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi 参数]` — 同样的一次性注入，另把托管 provider 合并进 `~/.kimi-code/config.toml`。 |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 在跑并注入 `APICRED_RELAY_TOKEN`；托管 provider 由可选的 OpenCode 配套插件在启动时注入（未随本仓库发布；`opencode.jsonc` 不会被修改）。 |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 在跑并注入 `ANYSWITCH_RELAY_TOKEN`；托管 provider 由可选的 OpenCode 配套插件在启动时注入（未随本仓库发布；`opencode.jsonc` 不会被修改）。 |
 | Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` — 先把托管 provider 同步进 `~/.pi/agent/models.json`，再启动 pi。 |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进 `~/.dsh/settings.yaml`。 |
@@ -240,7 +244,7 @@ git clone <repo-url> "%LOCALAPPDATA%\ApiCred\app"
 每个 provider 的 Key 用 Windows DPAPI 在你的用户账户下封存，密文以每提供方一个文件存于 `%LOCALAPPDATA%\ApiCred\credentials\`。明文只在转发请求的瞬间存在于内存——不缓存、不记录日志、也绝不会写进 `store.json`（schema 校验会直接拒绝任何秘密样字段）。
 
 **relay 崩了怎么办？**
-它会保持停止——崩溃不自愈是刻意设计，避免故障被重启循环掩盖。控制面板是 47820 上的独立进程，照常可用，在看板 tab 重启 relay 即可。如果开了开机自启，`ApiCredWatchdog` 计划任务还会在 coding agent 出现时自动拉起 relay。
+它会保持停止——崩溃不自愈是刻意设计，避免故障被重启循环掩盖。控制面板是 47820 上的独立进程，照常可用，在看板 tab 重启 relay 即可。如果开了开机自启，`AnyswitchWatchdog` 计划任务还会在 coding agent 出现时自动拉起 relay。
 
 **支持哪些上游？**
 任何 OpenAI 兼容端点——store schema 固定 `protocol: "openai-compatible"`。上游只需提供 chat completions；`GET /v1/models` 用于模型发现，缺了可以手动填模型 ID。Anthropic 协议和 Gemini 协议的客户端由 relay 转换到这同一个 OpenAI 兼容上游。
@@ -263,6 +267,10 @@ npm test
 ```
 
 零依赖 `node --test` 测试套件；单文件跑法与环境说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+### 命名说明
+
+本项目名为 **Anyswitch**，开发期曾用名 "ApiCred"。少数承重标识符出于数据安全仍保留旧名：`%LOCALAPPDATA%ApiCred` 数据目录（移动会使既有凭据失联）、DPAPI 熵前缀 `ApiCred|DPAPI|v2|`（改动将封死全部已存密钥）、耐久 git 对象库 `%LOCALAPPDATA%ApiCred-git`。其余代码与配置一律用新名；改名前的用户配置文件会在对应客户端下次启动时就地迁移。
 
 ### License
 

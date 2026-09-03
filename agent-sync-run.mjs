@@ -17,7 +17,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 
 const DEFAULT_PORT = 47821;
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
     "ApiCred",
@@ -42,7 +42,7 @@ const logger = {
 
 async function main() {
   const port = parsePort(process.argv.slice(2));
-  const root = apiCredRoot();
+  const root = relayDataRoot();
   const token = loadOrGenerateToken(root);
   const result = await syncAllAgentConfigs({ port, token, root, logger });
   if (!result.ok) {

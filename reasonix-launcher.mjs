@@ -11,7 +11,7 @@ import { createPanelRouter } from "./panel.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import {
-  extractApiCredProviders,
+  extractManagedProviders,
   deriveAutoRouteChannel,
   mergeReasonixConfigToml,
   readReasonixConfigToml,
@@ -23,7 +23,7 @@ import {
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "ApiCred");
 }
 
@@ -36,10 +36,10 @@ export function reasonixConfigPath(base = process.env) {
 }
 
 export async function writeReasonixConfig(store, port, token, sidecarRoot, configPath = reasonixConfigPath()) {
-  const apiCredProviders = extractApiCredProviders(store);
+  const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "reasonix");
-  if (Object.keys(apiCredProviders).length === 0 && !autoChannel) {
-    return { ok: true, unchanged: true, reason: "no ApiCred providers with models" };
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   let existing;
   try {
@@ -49,7 +49,7 @@ export async function writeReasonixConfig(store, port, token, sidecarRoot, confi
   }
   let merged;
   try {
-    merged = mergeReasonixConfigToml(existing, apiCredProviders, port, autoChannel);
+    merged = mergeReasonixConfigToml(existing, managedProviders, port, autoChannel);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_REASONIX_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };
@@ -78,7 +78,7 @@ export async function syncReasonixFromStore({ store, port, token, root, configPa
 function createOpenAIProductionDeps(options = {}) {
   const paths = options.paths ?? storePaths();
   const claudeDeps = createProductionDeps({ paths });
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const logger = options.logger ?? createLogger();
   // Usage journal (same dir as the resident relay) so fallback-relay traffic
   // still lands in the stats journal when the resident relay is down.
@@ -105,7 +105,7 @@ export async function startOpenAIRelay(options = {}) {
   const deps = createOpenAIProductionDeps(options);
   const probe = deps.loadStore();
   if (!probe.ok) {
-    throw new Error("the ApiCred global store is not usable; refusing to start the reasonix relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the reasonix relay");
   }
   const server = createOpenAIRelayServer(deps);
   const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
@@ -118,7 +118,7 @@ export function resolveReasonixExecutable(base = process.env) {
     if (!isAbsolute(override)) {
       throw new Error(
         `REASONIX_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the apicred shim and ` +
+          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
           `make the launcher recurse into itself.`,
       );
     }
@@ -139,7 +139,7 @@ export function resolveReasonixExecutable(base = process.env) {
 
 export function buildReasonixLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };
-  env.APICRED_RELAY_TOKEN = token;
+  env.ANYSWITCH_RELAY_TOKEN = token;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
   return env;
@@ -158,7 +158,7 @@ export async function runReasonixLauncher({
   try {
     const reused = await probeRelayFn(RELAY_PORT);
     if (reused) {
-      const token = loadOrGenerateToken(apiCredRoot(base));
+      const token = loadOrGenerateToken(relayDataRoot(base));
       relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
       log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
     } else {
@@ -172,9 +172,9 @@ export async function runReasonixLauncher({
   try {
     const loaded = loadStore();
     if (!loaded.ok) {
-      log("warning: ApiCred store could not be read; reasonix config not updated");
+      log("warning: Anyswitch store could not be read; reasonix config not updated");
     } else {
-      const sidecarRoot = apiCredRoot(base);
+      const sidecarRoot = relayDataRoot(base);
       const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: reasonix config.toml not updated: ${writeResult.reason ?? "unknown error"}`);

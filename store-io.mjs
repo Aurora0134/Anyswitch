@@ -1,4 +1,4 @@
-// Global ApiCred store IO layer.
+// Global Anyswitch store IO layer.
 //
 // Owns every filesystem path the relay touches. Two hard rules:
 //   1. A credentialFile is resolved ONLY under the fixed credentials root, and
@@ -19,8 +19,7 @@ import { atomicWriteFile, casWriteFile, contentHash } from "./atomic-write.mjs";
 
 export function defaultRoot() {
   const local = process.env.LOCALAPPDATA;
-  if (!local) throw new Error("LOCALAPPDATA is not set; cannot locate the ApiCred store");
-  // legacy name "ApiCred" retained for compatibility after product rename to Anyswitch
+  if (!local) throw new Error("LOCALAPPDATA is not set; cannot locate the Anyswitch store");
   return join(local, "ApiCred");
 }
 

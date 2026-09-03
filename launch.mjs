@@ -296,7 +296,7 @@ export async function startProductionRelay(options = {}) {
   // Preflight: refuse to listen at all if the store is not readable and valid.
   const probe = deps.loadStore();
   if (!probe.ok) {
-    throw new Error("the ApiCred global store is not usable; refusing to start the relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
   }
 
   // Bind the session reporter to this relay's token so the panel can

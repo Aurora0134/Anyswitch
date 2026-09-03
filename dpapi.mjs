@@ -1,4 +1,4 @@
-// Global ApiCred DPAPI bridge.
+// Global Anyswitch DPAPI bridge.
 //
 // Wraps dpapi.ps1. Nothing is cached, nothing is logged, and error messages
 // never carry the payload, the provider entropy or the underlying PowerShell

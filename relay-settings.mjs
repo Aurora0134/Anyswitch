@@ -1,4 +1,4 @@
-// Persistent settings manager for ApiCred.
+// Persistent settings manager for Anyswitch.
 //
 // Reads and writes %LOCALAPPDATA%\ApiCred\settings.json with atomic replacements.
 // Provides sensible defaults (e.g. keepAlive enabled by default).
@@ -20,7 +20,7 @@ function timestamp() {
 
 // Two-tier keep-alive: "off" or "enhanced" (whole-turn hold). The retired
 // "basic" tier is normalized to "enhanced" everywhere it can still arrive
-// (old settings.json, old API clients, APICRED_KEEPALIVE_MODE).
+// (old settings.json, old API clients, ANYSWITCH_KEEPALIVE_MODE).
 export const KEEPALIVE_MODES = Object.freeze(["off", "enhanced"]);
 
 export const DEFAULT_KEEPALIVE_CONFIG = Object.freeze({
@@ -57,7 +57,7 @@ export function parseKeepAliveMaxRetries(raw) {
   return Math.min(MAX_KEEPALIVE_RETRIES, n);
 }
 
-export function apiCredRoot(base = process.env) {
+export function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
     "ApiCred",
@@ -65,7 +65,7 @@ export function apiCredRoot(base = process.env) {
 }
 
 export function defaultSettingsPath(base = process.env) {
-  return join(apiCredRoot(base), "settings.json");
+  return join(relayDataRoot(base), "settings.json");
 }
 
 export function parseKeepAliveConfig(rawKeepAlive, env = process.env) {
@@ -84,15 +84,15 @@ export function parseKeepAliveConfig(rawKeepAlive, env = process.env) {
   }
 
   // Environment variable override for troubleshooting / diagnostics
-  if (env.APICRED_KEEPALIVE_MODE !== undefined) {
-    const m = String(env.APICRED_KEEPALIVE_MODE).toLowerCase();
+  if (env.ANYSWITCH_KEEPALIVE_MODE !== undefined) {
+    const m = String(env.ANYSWITCH_KEEPALIVE_MODE).toLowerCase();
     if (m === "off" || m === "basic" || m === "enhanced") cfg.mode = normalizeKeepAliveMode(m);
-  } else if (env.APICRED_KEEPALIVE_ENABLED !== undefined) {
-    const on = env.APICRED_KEEPALIVE_ENABLED === "1" || env.APICRED_KEEPALIVE_ENABLED === "true";
+  } else if (env.ANYSWITCH_KEEPALIVE_ENABLED !== undefined) {
+    const on = env.ANYSWITCH_KEEPALIVE_ENABLED === "1" || env.ANYSWITCH_KEEPALIVE_ENABLED === "true";
     cfg.mode = on ? "enhanced" : "off";
   }
-  if (env.APICRED_KEEPALIVE_RETRIES !== undefined) {
-    const parsed = Number.parseInt(env.APICRED_KEEPALIVE_RETRIES, 10);
+  if (env.ANYSWITCH_KEEPALIVE_RETRIES !== undefined) {
+    const parsed = Number.parseInt(env.ANYSWITCH_KEEPALIVE_RETRIES, 10);
     if (!Number.isNaN(parsed) && parsed >= 0) {
       cfg.maxRetries = parsed;
     }

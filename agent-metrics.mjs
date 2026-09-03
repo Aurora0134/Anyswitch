@@ -2037,7 +2037,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     try {
       const headers = {
         "content-type": "application/json",
-        "x-apicred-panel": "1",
+        "x-anyswitch-panel": "1",
         origin: "http://127.0.0.1:47821",
       };
       if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;

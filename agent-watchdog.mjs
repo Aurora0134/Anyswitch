@@ -3,7 +3,7 @@
 // The followAgent setting ("跟随 Coding Agent 启动") used to be hosted inside
 // panel-host.mjs — which meant it only worked while a human had opened the
 // panel at least once since login. This process breaks that bootstrap
-// deadlock: it is registered as the "ApiCredWatchdog" scheduled task (see
+// deadlock: it is registered as the "AnyswitchWatchdog" scheduled task (see
 // autostart.mjs), so Windows starts it at login, and the agent-watcher poll
 // inside it revives the relay with nobody at the panel. The relay itself stays
 // lazily started: nothing runs on 47821 until a coding agent appears.
@@ -22,7 +22,7 @@ import { existsSync, writeFileSync, readFileSync, unlinkSync, realpathSync } fro
 import { createAgentWatcher } from "./agent-watcher.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { startRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLine, isOwnProcess } from "./relay-process-manager.mjs";
-import { loadSettings, defaultSettingsPath, apiCredRoot } from "./relay-settings.mjs";
+import { loadSettings, defaultSettingsPath, relayDataRoot } from "./relay-settings.mjs";
 import { createLogger } from "./logger.mjs";
 
 export const WATCHDOG_PORT = 47822;
@@ -108,7 +108,7 @@ export function probeWatchdog(port = WATCHDOG_PORT) {
 export async function spawnWatchdog(env = process.env) {
   if (await probeWatchdog()) return { ok: true, reused: true };
 
-  const root = apiCredRoot(env);
+  const root = relayDataRoot(env);
   clearWatchdogPid(getWatchdogPidPath(root));
   const child = spawn(process.execPath, [WATCHDOG_SCRIPT], {
     cwd: fileURLToPath(new URL(".", import.meta.url)),
@@ -153,13 +153,13 @@ export async function stopWatchdog(env = process.env, deps = {}) {
   const pollMs = deps.stopPollMs ?? STOP_POLL_MS;
   const timeoutMs = deps.stopTimeoutMs ?? STOP_TIMEOUT_MS;
 
-  const root = apiCredRoot(env);
+  const root = relayDataRoot(env);
   const pidPath = getWatchdogPidPath(root);
   const filePid = readWatchdogPid(pidPath);
   // Same safety red line as relay-process-manager.stopRelay: kill at most
   // these two specific PIDs (pid file + marker-port owner), never a global
   // node.exe sweep — and only after each PID's command line positively
-  // identifies it as an ApiCred app process.
+  // identifies it as an Anyswitch app process.
   const ownerPid = await findOwner(WATCHDOG_PORT);
 
   const refused = [];
@@ -185,7 +185,7 @@ export async function stopWatchdog(env = process.env, deps = {}) {
   if (refused.length > 0) {
     return {
       ok: false,
-      reason: `refused to kill PID ${refused.join(", ")}: command line does not identify it as an ApiCred app process`,
+      reason: `refused to kill PID ${refused.join(", ")}: command line does not identify it as an Anyswitch app process`,
     };
   }
   return { ok: down };
@@ -219,10 +219,9 @@ export async function startWatchdogHost(options = {}) {
     // second copy simply succeeds as a no-op, same as relay-host on 47821.
     return { reused: true, close };
   }
-  // legacy name "ApiCred" retained in log prefixes after product rename to Anyswitch
-  logger.info(`ApiCred follow-agent watchdog alive on 127.0.0.1:${WATCHDOG_PORT}`);
+  logger.info(`Anyswitch follow-agent watchdog alive on 127.0.0.1:${WATCHDOG_PORT}`);
 
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
   createAgentWatcher({
     root,

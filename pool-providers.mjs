@@ -5,7 +5,7 @@
 // Every catalog-producing surface consumes this module so the endpoint-facing
 // view can never drift between them:
 //   - wire-id.mjs buildWireCatalog (Anthropic /v1/models)
-//   - the five agent-sync merge modules via extractApiCredProviders
+//   - the five agent-sync merge modules via extractManagedProviders
 //     (kimi / pi / dsh / zcode / reasonix endpoint configs)
 // The OpenAI runtime path shares the same union semantics through
 // poolModelsUnion (pool-routing.mjs), which this module also delegates to.
@@ -54,7 +54,7 @@ export function derivePoolPseudoProviders(store) {
       models[modelId] = structuredClone(model);
     }
     // A pool whose members currently expose no models produces no channel,
-    // matching how model-less providers are skipped by extractApiCredProviders.
+    // matching how model-less providers are skipped by extractManagedProviders.
     if (Object.keys(models).length === 0) continue;
     const channelName =
       typeof pool?.displayName === "string" && pool.displayName.length > 0 ? pool.displayName : poolId;
@@ -83,6 +83,6 @@ export function deriveVisibleChannels(store) {
 // merge module carried its own byte-identical copy; that duplication let the
 // catalog semantics drift (a change landing on one surface but not the
 // others). The single implementation lives here.
-export function extractApiCredProviders(store) {
+export function extractManagedProviders(store) {
   return deriveVisibleChannels(store);
 }

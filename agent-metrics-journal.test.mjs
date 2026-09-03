@@ -214,7 +214,7 @@ describe("usage journal wiring", () => {
 });
 
 describe("usage journal roundtrip through a real journal dir", () => {
-  const dir = mkdtempSync(join(tmpdir(), "apicred-journal-wiring-"));
+  const dir = mkdtempSync(join(tmpdir(), "anyswitch-journal-wiring-"));
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it("persists the collector's line as JSONL and reads it back", () => {

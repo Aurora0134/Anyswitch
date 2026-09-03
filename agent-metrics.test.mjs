@@ -1830,7 +1830,7 @@ describe("createSessionReporter", () => {
     assert.equal(posted.length, 3);
     assert.equal(posted[2].url, "http://127.0.0.1:47821/panel/api/session/report");
     assert.equal(posted[2].headers.authorization, "Bearer tok_abc");
-    assert.equal(posted[2].headers["x-apicred-panel"], "1");
+    assert.equal(posted[2].headers["x-anyswitch-panel"], "1");
     assert.equal(posted[2].body.token, undefined);
     assert.equal(posted[2].body.pid, 5555);
     assert.equal(posted[2].body.requests, 1);

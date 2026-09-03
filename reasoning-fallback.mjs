@@ -4,7 +4,7 @@
 //
 // Why this exists: DSH materializes a custom provider route's reasoning
 // capability ONLY from settings.yaml (`entry.reasoningEfforts`); for a route
-// the installed pi-ai catalog does not describe (every apicred `_provider`
+// the installed pi-ai catalog does not describe (every Anyswitch `_provider`
 // route), `base` is undefined and `resolveModelReasoning` returns
 // `reasoning: false` — the reasoning effort selector never renders. The
 // upstream `/v1/models` listing carries no reasoning fields either, so

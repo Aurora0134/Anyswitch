@@ -13,7 +13,7 @@ import { MAX_CHAIN_NODES } from "./store-schema.mjs";
 // service persisted without touching real DPAPI.
 
 function makeRoot() {
-  const root = mkdtempSync(join(tmpdir(), "apicred-store-service-"));
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-store-service-"));
   const paths = storePaths(root);
   ensureLayout(paths);
   return paths;
