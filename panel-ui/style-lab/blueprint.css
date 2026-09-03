@@ -1,0 +1,518 @@
+/* ==========================================================================
+   风格片段：blueprint｜工程蓝图
+   暗色 = 经典蓝图：深蓝图纸底 + 白/浅蓝描线 + 网格纸底纹 + 亮青标注色；
+   亮色 = 蓝图反过来：米白描图纸底 + 蓝墨线 + 同款网格。
+   细线框、标注字距、小圆角、硬偏移"裁切"投影、卡片四角对位标记（伪装饰，
+   用 background 多层渐变实现，不占布局）；数字/标签走等宽字体。
+
+   布局级覆盖清单（本轮契约放宽项，全部 scoped 在本主题选择器下）：
+   1. header.site-head：border-bottom 加宽到 2px + 1px 副线阴影（图框双线）。
+   2. 硬偏移投影：--shadow-xs/sm/md/lg 与 --accent-glow 用 1–6px 无模糊偏移
+      （"图纸裁切"感），toast/modal/卡片沿用这些 token。
+   3. 圆角全面收紧：--radius-sm/md/lg = 2/3/4px，并覆盖 .panel-card 等
+      基础写死 14px 的圆角。
+   4. 标注字距：.badge / .card-title / .telemetry-label / footer 等
+      letter-spacing 0.03–0.12em，.badge 加 text-transform: uppercase。
+      （不动 .view-tabs / .seg-control 的文字与几何。）
+   5. 指示元素方角化：.ms-cell 半径 0、.lamp 半径 1px。
+   以上均不触碰 width/height/padding/margin/gap/position/flex/grid 等
+   会移动元素的属性，不改 DOM、不碰 hidden 行为。
+   ========================================================================== */
+
+/* 1) 亮色 token 全集（描图纸：米白底 + 蓝墨线） */
+:root[data-style="blueprint"] {
+  color-scheme: light;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
+
+  /* 表面：米白描图纸阶， sunken 稍沉一档 */
+  --bg: #f6f3e9;
+  --bg-page: #efebdd;
+  --surface: #fbf9f0;
+  --surface-sunken: #f1edde;
+  --surface-hover: #e9e4d2;
+  --surface-glass: rgba(251, 249, 240, 0.88);
+
+  /* 文字：蓝黑墨主色 + 蓝灰阶梯 */
+  --text: #18294d;
+  --text-2: #33436b;
+  --text-3: #5d6c90;
+  --text-4: #8d97b1;
+
+  /* 边框：蓝墨细线 */
+  --border: #b6bfd6;
+  --border-strong: #8d9cbd;
+  --divider: #ddd7c4;
+
+  /* 语义色：蓝墨 accent / 墨绿 ok / 制图橙 warn / 朱砂 danger，四色一眼可分 */
+  --accent: #1d4fc4;
+  --accent-soft: #e4eaf9;
+  --accent-border: #a8bbe9;
+
+  --ok: #0e7a55;
+  --ok-soft: #e1f1e9;
+  --ok-border: #9cd2ba;
+
+  --warn: #b95f06;
+  --warn-soft: #f9ecdb;
+  --warn-border: #eac69c;
+
+  --danger: #bf3636;
+  --danger-soft: #f9e5e4;
+  --danger-border: #e6afab;
+
+  --pool: #6a3ec9;
+  --pool-soft: #e9e2f8;
+  --pool-border: #b9a4e6;
+
+  --spark-line: #1d4fc4;
+  --spark-fill: rgba(29, 79, 196, 0.10);
+  --danger-glow: rgba(191, 54, 54, 0.16);
+
+  /* 阴影：硬偏移、无模糊，图纸裁切感 */
+  --shadow-xs: 1px 1px 0 rgba(24, 41, 77, 0.08);
+  --shadow-sm: 2px 2px 0 rgba(24, 41, 77, 0.07);
+  --shadow-md: 3px 3px 0 rgba(24, 41, 77, 0.09);
+  --shadow-lg: 5px 5px 0 rgba(24, 41, 77, 0.12);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #2f66e0 0%, #1d4fc4 60%, #173da0 100%);
+  --accent-glow: 2px 2px 0 rgba(29, 79, 196, 0.28);
+
+  /* 拖拽重排：蓝墨 accent，glow 沿用硬偏移投影；指示线虚线见全局 .store-drop-indicator 覆盖 */
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 2px 2px 0 color-mix(in srgb, var(--accent) 28%, transparent);
+  --store-drag-ease: var(--ease-out);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --on-accent: #ffffff;
+  --grid-fine: rgba(29, 79, 196, 0.055);
+  --grid-coarse: rgba(29, 79, 196, 0.11);
+  --tick: rgba(29, 79, 196, 0.32);
+  --head-rule: #d8d2bd;
+  --overlay-bg: rgba(24, 41, 77, 0.38);
+  --console-bg: #0c2350;
+  --console-toolbar-bg: #122c60;
+  --console-border: rgba(159, 196, 255, 0.24);
+}
+
+/* 2) 暗色 token 全集（显式 dark：经典深蓝蓝图） */
+:root[data-style="blueprint"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
+
+  /* 表面：深蓝图纸阶，surface 比 page 亮半档 */
+  --bg: #0e2450;
+  --bg-page: #0a1c40;
+  --surface: #123059;
+  --surface-sunken: #0c2148;
+  --surface-hover: #173a6b;
+  --surface-glass: rgba(14, 36, 80, 0.85);
+
+  /* 文字：图纸白主色 + 浅蓝描线阶梯 */
+  --text: #eef5ff;
+  --text-2: #c3d5f0;
+  --text-3: #8ca6d2;
+  --text-4: #617eab;
+
+  /* 边框：白蓝图线，强线更实 */
+  --border: rgba(159, 196, 255, 0.26);
+  --border-strong: rgba(159, 196, 255, 0.48);
+  --divider: rgba(159, 196, 255, 0.13);
+
+  /* 语义色：亮青 accent / 薄荷绿 ok / 制图橙 warn / 珊瑚红 danger */
+  --accent: #3fd6f2;
+  --accent-soft: rgba(63, 214, 242, 0.13);
+  --accent-border: rgba(63, 214, 242, 0.45);
+
+  --ok: #43e0a2;
+  --ok-soft: rgba(67, 224, 162, 0.12);
+  --ok-border: rgba(67, 224, 162, 0.38);
+
+  --warn: #ffa245;
+  --warn-soft: rgba(255, 162, 69, 0.12);
+  --warn-border: rgba(255, 162, 69, 0.40);
+
+  --danger: #ff6e6e;
+  --danger-soft: rgba(255, 110, 110, 0.13);
+  --danger-border: rgba(255, 110, 110, 0.42);
+
+  --pool: #b388ff;
+  --pool-soft: rgba(179,136,255,0.13);
+  --pool-border: rgba(179,136,255,0.45);
+
+  --spark-line: #3fd6f2;
+  --spark-fill: rgba(63, 214, 242, 0.14);
+  --danger-glow: rgba(255, 110, 110, 0.32);
+
+  /* 阴影：深色硬偏移 */
+  --shadow-xs: 1px 1px 0 rgba(2, 8, 22, 0.50);
+  --shadow-sm: 2px 2px 0 rgba(2, 8, 22, 0.50);
+  --shadow-md: 3px 3px 0 rgba(2, 8, 22, 0.55);
+  --shadow-lg: 5px 5px 0 rgba(2, 8, 22, 0.60);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #59e2f8 0%, #22b8d8 55%, #1289ab 100%);
+  --accent-glow: 0 0 10px rgba(63, 214, 242, 0.50);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --on-accent: #06303f;
+  --grid-fine: rgba(159, 196, 255, 0.05);
+  --grid-coarse: rgba(159, 196, 255, 0.10);
+  --tick: rgba(159, 196, 255, 0.40);
+  --head-rule: rgba(159, 196, 255, 0.14);
+  --overlay-bg: rgba(4, 12, 30, 0.60);
+  --console-bg: #071633;
+  --console-toolbar-bg: #0b1f47;
+  --console-border: rgba(159, 196, 255, 0.20);
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="blueprint"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
+
+    /* 表面：深蓝图纸阶，surface 比 page 亮半档 */
+    --bg: #0e2450;
+    --bg-page: #0a1c40;
+    --surface: #123059;
+    --surface-sunken: #0c2148;
+    --surface-hover: #173a6b;
+    --surface-glass: rgba(14, 36, 80, 0.85);
+
+    /* 文字：图纸白主色 + 浅蓝描线阶梯 */
+    --text: #eef5ff;
+    --text-2: #c3d5f0;
+    --text-3: #8ca6d2;
+    --text-4: #617eab;
+
+    /* 边框：白蓝图线，强线更实 */
+    --border: rgba(159, 196, 255, 0.26);
+    --border-strong: rgba(159, 196, 255, 0.48);
+    --divider: rgba(159, 196, 255, 0.13);
+
+    /* 语义色：亮青 accent / 薄荷绿 ok / 制图橙 warn / 珊瑚红 danger */
+    --accent: #3fd6f2;
+    --accent-soft: rgba(63, 214, 242, 0.13);
+    --accent-border: rgba(63, 214, 242, 0.45);
+
+    --ok: #43e0a2;
+    --ok-soft: rgba(67, 224, 162, 0.12);
+    --ok-border: rgba(67, 224, 162, 0.38);
+
+    --warn: #ffa245;
+    --warn-soft: rgba(255, 162, 69, 0.12);
+    --warn-border: rgba(255, 162, 69, 0.40);
+
+    --danger: #ff6e6e;
+    --danger-soft: rgba(255, 110, 110, 0.13);
+    --danger-border: rgba(255, 110, 110, 0.42);
+
+    --pool: #b388ff;
+    --pool-soft: rgba(179,136,255,0.13);
+    --pool-border: rgba(179,136,255,0.45);
+
+    --spark-line: #3fd6f2;
+    --spark-fill: rgba(63, 214, 242, 0.14);
+    --danger-glow: rgba(255, 110, 110, 0.32);
+
+    /* 阴影：深色硬偏移 */
+    --shadow-xs: 1px 1px 0 rgba(2, 8, 22, 0.50);
+    --shadow-sm: 2px 2px 0 rgba(2, 8, 22, 0.50);
+    --shadow-md: 3px 3px 0 rgba(2, 8, 22, 0.55);
+    --shadow-lg: 5px 5px 0 rgba(2, 8, 22, 0.60);
+
+    --radius-sm: 2px;
+    --radius-md: 3px;
+    --radius-lg: 4px;
+    --accent-gradient: linear-gradient(135deg, #59e2f8 0%, #22b8d8 55%, #1289ab 100%);
+    --accent-glow: 0 0 10px rgba(63, 214, 242, 0.50);
+
+    /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+    --on-accent: #06303f;
+    --grid-fine: rgba(159, 196, 255, 0.05);
+    --grid-coarse: rgba(159, 196, 255, 0.10);
+    --tick: rgba(159, 196, 255, 0.40);
+    --head-rule: rgba(159, 196, 255, 0.14);
+    --overlay-bg: rgba(4, 12, 30, 0.60);
+    --console-bg: #071633;
+    --console-toolbar-bg: #0b1f47;
+    --console-border: rgba(159, 196, 255, 0.20);
+  }
+}
+
+/* ==========================================================================
+   皮肤覆盖规则（全部以 :root[data-style="blueprint"] 限定作用域）
+   ========================================================================== */
+
+/* 页面：网格纸底纹（细格 24px + 粗格 120px），background-image 实现，不占布局 */
+:root[data-style="blueprint"] body {
+  background-image:
+    linear-gradient(var(--grid-coarse) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-coarse) 1px, transparent 1px),
+    linear-gradient(var(--grid-fine) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-fine) 1px, transparent 1px);
+  background-size: 120px 120px, 120px 120px, 24px 24px, 24px 24px;
+}
+
+/* 选中色：墨染效果 */
+:root[data-style="blueprint"] ::selection {
+  background: var(--accent-soft);
+}
+
+/* Header：图框双线（2px 主线 + 1px 副线阴影），去掉玻璃模糊保持纸面实感 */
+:root[data-style="blueprint"] header.site-head {
+  border-bottom: 2px solid var(--border-strong);
+  box-shadow: 0 1px 0 var(--head-rule);
+}
+
+/* 品牌图标：小方角 + 渐变 + 裁切光晕 */
+:root[data-style="blueprint"] .brand-icon {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="blueprint"] .brand-text h1 { letter-spacing: 0.02em; }
+:root[data-style="blueprint"] .brand-text .version-tag {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.08em;
+}
+
+/* 头部信息 pill / 会话 tag：标注字距 + 小方角 */
+:root[data-style="blueprint"] .meta-pill,
+:root[data-style="blueprint"] .tag-bubble {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.04em;
+}
+
+/* 图标按钮：方角 + 硬投影 */
+:root[data-style="blueprint"] .icon-btn {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="blueprint"] .icon-btn:hover {
+  box-shadow: var(--shadow-sm);
+}
+
+/* 卡片：图框直角 + 硬偏移投影 + 四角对位标记（纯 background 装饰，不占布局） */
+:root[data-style="blueprint"] .panel-card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  background-image:
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick)),
+    linear-gradient(var(--tick), var(--tick));
+  background-repeat: no-repeat;
+  background-size:
+    10px 1px, 1px 10px,
+    10px 1px, 1px 10px,
+    10px 1px, 1px 10px,
+    10px 1px, 1px 10px;
+  background-position:
+    left 8px top 8px, left 8px top 8px,
+    right 8px top 8px, right 8px top 8px,
+    left 8px bottom 8px, left 8px bottom 8px,
+    right 8px bottom 8px, right 8px bottom 8px;
+}
+:root[data-style="blueprint"] .panel-card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* 卡片头：图签栏 —— 沉一档底 + 标注字距标题 */
+:root[data-style="blueprint"] .card-header {
+  background: var(--surface-sunken);
+}
+:root[data-style="blueprint"] .card-title { letter-spacing: 0.04em; }
+
+/* 徽章：制图标注样式 —— 等宽、大写字距、方角 */
+:root[data-style="blueprint"] .badge {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* 按钮：方角 + 标注字距；主按钮渐变 + 裁切光晕，文字色按亮暗取 --on-accent */
+:root[data-style="blueprint"] .btn {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.03em;
+}
+:root[data-style="blueprint"] .btn:hover { box-shadow: var(--shadow-sm); }
+:root[data-style="blueprint"] .btn-mini { border-radius: var(--radius-sm); }
+:root[data-style="blueprint"] .btn-primary {
+  background: var(--accent-gradient);
+  border-color: transparent;
+  color: var(--on-accent);
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="blueprint"] .btn-primary:hover {
+  filter: brightness(1.06);
+}
+
+/* 日志控制台：更深一档的蓝图机身 + 亮描线框 */
+:root[data-style="blueprint"] .log-console {
+  background: var(--console-bg);
+  border-color: var(--console-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+:root[data-style="blueprint"] .log-toolbar {
+  background: var(--console-toolbar-bg);
+  border-bottom-color: var(--console-border);
+}
+:root[data-style="blueprint"] .log-status { color: #7e97c8; }
+:root[data-style="blueprint"] .log-status.live { color: #43e0a2; }
+:root[data-style="blueprint"] .log-clear-btn:hover { background: rgba(159, 196, 255, 0.12); color: #eef5ff; }
+
+/* 日志级别：固定亮色（控制台两亮暗同为深色机身），青=info 橙=warn 红=error */
+:root[data-style="blueprint"] .log-line .ts { color: #7e97c8; }
+:root[data-style="blueprint"] .log-line.info .lvl { color: #6fdcf0; }
+:root[data-style="blueprint"] .log-line.warn .lvl { color: #ffb35c; }
+:root[data-style="blueprint"] .log-line.error .lvl { color: #ff8585; }
+
+/* 遥测四宫格：方角 + 标注字距标签 + 等宽数字 */
+:root[data-style="blueprint"] .telemetry-card {
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xs);
+}
+:root[data-style="blueprint"] .telemetry-card:hover { border-color: var(--border-strong); }
+:root[data-style="blueprint"] .telemetry-label {
+  font-family: var(--font-mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+:root[data-style="blueprint"] .telemetry-num { font-family: var(--font-mono); }
+
+/* 指示灯：方角信号点 */
+:root[data-style="blueprint"] .lamp { border-radius: 1px; }
+
+/* Top5 微柱：方角柱条 */
+:root[data-style="blueprint"] .ms-cell { border-radius: 0; }
+:root[data-style="blueprint"] .ms-cell.idle { border-radius: 0; }
+
+/* 会话明细 / 提示框 / 折叠组 / 代码块：方角统一 */
+:root[data-style="blueprint"] .session-table-wrapper,
+:root[data-style="blueprint"] .alert-box,
+:root[data-style="blueprint"] .empty-hint,
+:root[data-style="blueprint"] .agy-fold,
+:root[data-style="blueprint"] .skills-repo-path,
+:root[data-style="blueprint"] .skills-diff-list,
+:root[data-style="blueprint"] .skills-dup-warn {
+  border-radius: var(--radius-md);
+}
+:root[data-style="blueprint"] .agy-fold-toggle:hover {
+  border-radius: var(--radius-md);
+}
+:root[data-style="blueprint"] .agy-fold.open .agy-fold-toggle {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+:root[data-style="blueprint"] .skills-body-view .md-code { border-radius: var(--radius-sm); }
+:root[data-style="blueprint"] .skills-body-view .md-inline { border-radius: 2px; }
+
+/* Toggle：点亮用强调色 + 裁切光晕 */
+:root[data-style="blueprint"] .toggle input:checked + .slider {
+  box-shadow: var(--accent-glow);
+}
+
+/* seg-control / view-tabs：只改圆角与描边色，不动几何与文字 */
+:root[data-style="blueprint"] .seg-control,
+:root[data-style="blueprint"] .view-tabs {
+  border-radius: var(--radius-md);
+}
+:root[data-style="blueprint"] .seg-btn,
+:root[data-style="blueprint"] .view-tab {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="blueprint"] .seg-btn[aria-checked="true"],
+:root[data-style="blueprint"] .view-tab.active {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-xs);
+}
+
+/* Toast：方角硬投影浮条 */
+:root[data-style="blueprint"] .toast {
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+}
+
+/* Modal：遮罩 + 方角卡片硬投影 */
+:root[data-style="blueprint"] .modal-overlay {
+  background: var(--overlay-bg);
+}
+:root[data-style="blueprint"] .modal-card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 输入控件：方角 + 聚焦双线光环（内细外淡，制图标注圈感） */
+:root[data-style="blueprint"] .modal-number,
+:root[data-style="blueprint"] .agy-select,
+:root[data-style="blueprint"] .agy-combo-input,
+:root[data-style="blueprint"] .skills-path-input {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="blueprint"] .modal-number:focus,
+:root[data-style="blueprint"] .agy-select:focus,
+:root[data-style="blueprint"] .agy-combo-input:focus,
+:root[data-style="blueprint"] .agy-combo.open .agy-combo-input,
+:root[data-style="blueprint"] .skills-path-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+/* 浮层菜单（下拉 / 右键菜单）：方角 + 硬投影 */
+:root[data-style="blueprint"] .agy-combo-list,
+:root[data-style="blueprint"] .skills-ctx-menu {
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+}
+:root[data-style="blueprint"] .agy-combo-item,
+:root[data-style="blueprint"] .skills-ctx-item {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="blueprint"] .skills-ctx-item:hover {
+  background: var(--accent-soft);
+}
+
+/* Skills 列表选中：左侧强调条 + 淡墨底 */
+:root[data-style="blueprint"] .skills-list-row.selected {
+  background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 88%);
+  border-left-color: var(--accent);
+}
+
+/* Agent 头像：与品牌图标同语言 */
+:root[data-style="blueprint"] .agent-avatar {
+  border-radius: var(--radius-sm);
+}
+
+/* 页脚：等宽标注字距 */
+:root[data-style="blueprint"] footer { letter-spacing: 0.06em; }
+
+/* Store 刷新状态小字：等宽图纸标注，高亮用制图橙 */
+:root[data-style="blueprint"] .store-refresh-status {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+}
+:root[data-style="blueprint"] .store-refresh-status .srs-ch { animation-name: srs-pulse-blueprint; }
+@keyframes srs-pulse-blueprint {
+  0%, 100% { color: var(--text-2); }
+  50% { color: var(--warn); }
+}
+/* 完成整体高光用制图橙，与呼吸峰值一致 */
+:root[data-style="blueprint"] .store-refresh-status .srs-done { color: var(--warn); }
+
+/* 使用统计热力图：图纸语言——单元格方角化，与网格底纹一致 */
+:root[data-style="blueprint"] .stats-heat-cell { rx: 0; }

@@ -1,0 +1,416 @@
+/* ==========================================================================
+   neon · 赛博控制台 — Anyswitch 面板美术风格片段（临时预览机制）
+   设计：近黑深底（微冷色倾向）+ 青/电蓝霓虹 accent + 克制 glow；
+   等宽字体激进用于标题/数字/按钮；语义色保持高区分度（绿/琥珀/品红/青）。
+   亮色版 = 同一美学的浅色诠释：浅冷灰底 + 同色系 accent，glow 收敛。
+   契约：见 ./CONTRACT.md —— 不改布局几何，只换皮肤。
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1) 亮色 token 全集
+   -------------------------------------------------------------------------- */
+:root[data-style="neon"] {
+  color-scheme: light;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 浅冷灰底 + 冷白表面 */
+  --bg: #f3f7fa;
+  --bg-page: #e9f0f5;
+  --surface: #ffffff;
+  --surface-sunken: #f1f6fa;
+  --surface-hover: #e7f0f6;
+  --surface-glass: rgba(255, 255, 255, 0.9);
+
+  --text: #0b1a27;
+  --text-2: #2c4357;
+  --text-3: #5b748c;
+  --text-4: #8ba2b6;
+
+  --border: #d6e3ec;
+  --border-strong: #b4cbda;
+  --divider: #e5eef4;
+
+  /* 青色系 accent（亮色用深青保证对比度） */
+  --accent: #0891b2;
+  --accent-soft: #e0f7fc;
+  --accent-border: #8fdcec;
+
+  --ok: #059669;
+  --ok-soft: #e6f9f1;
+  --ok-border: #9de5cc;
+
+  --warn: #b45309;
+  --warn-soft: #fdf3e0;
+  --warn-border: #f0d6a2;
+
+  --danger: #e11d48;
+  --danger-soft: #fdeaef;
+  --danger-border: #f3bac7;
+
+  --pool: #7c3aed;
+  --pool-soft: #f1ebfd;
+  --pool-border: #d3bdf5;
+
+  --spark-line: #0891b2;
+  --spark-fill: rgba(8, 145, 178, 0.12);
+  --danger-glow: rgba(225, 29, 72, 0.18);
+
+  --shadow-xs: 0 1px 2px 0 rgba(11, 26, 39, 0.05);
+  --shadow-sm: 0 1px 3px 0 rgba(11, 26, 39, 0.07), 0 1px 2px -1px rgba(11, 26, 39, 0.05);
+  --shadow-md: 0 4px 8px -1px rgba(11, 26, 39, 0.08), 0 2px 4px -2px rgba(11, 26, 39, 0.05);
+  --shadow-lg: 0 12px 20px -4px rgba(11, 26, 39, 0.12), 0 4px 8px -4px rgba(11, 26, 39, 0.06);
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  --accent-gradient: linear-gradient(135deg, #06b6d4 0%, #2563eb 100%);
+  --accent-glow: 0 2px 8px rgba(8, 145, 178, 0.28);
+}
+
+/* --------------------------------------------------------------------------
+   2) 暗色 token 全集（显式 dark）
+   -------------------------------------------------------------------------- */
+:root[data-style="neon"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 近黑深底，带极微弱冷青倾向 */
+  --bg: #060a12;
+  --bg-page: #04070d;
+  --surface: #0a101c;
+  --surface-sunken: #070c16;
+  --surface-hover: #0e1728;
+  --surface-glass: rgba(8, 13, 24, 0.88);
+
+  --text: #e8f0fa;
+  --text-2: #b4c3d8;
+  --text-3: #7d90aa;
+  --text-4: #52647e;
+
+  --border: #152238;
+  --border-strong: #274361;
+  --divider: #0f1a2c;
+
+  /* 霓虹青 accent */
+  --accent: #22d3ee;
+  --accent-soft: rgba(34, 211, 238, 0.12);
+  --accent-border: rgba(34, 211, 238, 0.42);
+
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.12);
+  --ok-border: rgba(52, 211, 153, 0.38);
+
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.12);
+  --warn-border: rgba(251, 191, 36, 0.38);
+
+  --danger: #f43f5e;
+  --danger-soft: rgba(244, 63, 94, 0.14);
+  --danger-border: rgba(244, 63, 94, 0.42);
+
+  --pool: #b493f5;
+  --pool-soft: rgba(180,147,245,0.14);
+  --pool-border: rgba(180,147,245,0.42);
+
+  --spark-line: #22d3ee;
+  --spark-fill: rgba(34, 211, 238, 0.15);
+  --danger-glow: rgba(244, 63, 94, 0.38);
+
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.55), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 8px -1px rgba(0, 0, 0, 0.6), 0 2px 4px -2px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 12px 20px -4px rgba(0, 0, 0, 0.65), 0 4px 8px -4px rgba(0, 0, 0, 0.5);
+
+  --radius-sm: 3px;
+  --radius-md: 5px;
+  --radius-lg: 8px;
+
+  --accent-gradient: linear-gradient(135deg, #22d3ee 0%, #2563eb 100%);
+  --accent-glow: 0 0 12px rgba(34, 211, 238, 0.45);
+}
+
+/* --------------------------------------------------------------------------
+   3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同
+   -------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="neon"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* 近黑深底，带极微弱冷青倾向 */
+    --bg: #060a12;
+    --bg-page: #04070d;
+    --surface: #0a101c;
+    --surface-sunken: #070c16;
+    --surface-hover: #0e1728;
+    --surface-glass: rgba(8, 13, 24, 0.88);
+
+    --text: #e8f0fa;
+    --text-2: #b4c3d8;
+    --text-3: #7d90aa;
+    --text-4: #52647e;
+
+    --border: #152238;
+    --border-strong: #274361;
+    --divider: #0f1a2c;
+
+    /* 霓虹青 accent */
+    --accent: #22d3ee;
+    --accent-soft: rgba(34, 211, 238, 0.12);
+    --accent-border: rgba(34, 211, 238, 0.42);
+
+    --ok: #34d399;
+    --ok-soft: rgba(52, 211, 153, 0.12);
+    --ok-border: rgba(52, 211, 153, 0.38);
+
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.12);
+    --warn-border: rgba(251, 191, 36, 0.38);
+
+    --danger: #f43f5e;
+    --danger-soft: rgba(244, 63, 94, 0.14);
+    --danger-border: rgba(244, 63, 94, 0.42);
+
+    --pool: #b493f5;
+    --pool-soft: rgba(180,147,245,0.14);
+    --pool-border: rgba(180,147,245,0.42);
+
+    --spark-line: #22d3ee;
+    --spark-fill: rgba(34, 211, 238, 0.15);
+    --danger-glow: rgba(244, 63, 94, 0.38);
+
+    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
+    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.55), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 8px -1px rgba(0, 0, 0, 0.6), 0 2px 4px -2px rgba(0, 0, 0, 0.45);
+    --shadow-lg: 0 12px 20px -4px rgba(0, 0, 0, 0.65), 0 4px 8px -4px rgba(0, 0, 0, 0.5);
+
+    --radius-sm: 3px;
+    --radius-md: 5px;
+    --radius-lg: 8px;
+
+    --accent-gradient: linear-gradient(135deg, #22d3ee 0%, #2563eb 100%);
+    --accent-glow: 0 0 12px rgba(34, 211, 238, 0.45);
+  }
+}
+
+/* ==========================================================================
+   皮肤覆盖规则（一律以 :root[data-style="neon"] 限定作用域）
+   只动颜色/背景/边框色/圆角/阴影/字体/字距/光晕，不碰布局几何。
+   ========================================================================== */
+
+/* 页面环境：顶部一层极淡的青色环境光（暗色更可见，亮色近乎不可察） */
+:root[data-style="neon"] body {
+  background: radial-gradient(1100px 480px at 50% -8%, rgba(8, 145, 178, 0.05), transparent 62%), var(--bg-page);
+}
+:root[data-style="neon"][data-theme="dark"] body {
+  background: radial-gradient(1100px 480px at 50% -8%, rgba(34, 211, 238, 0.07), transparent 62%), var(--bg-page);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-style="neon"]:not([data-theme="light"]):not([data-theme="dark"]) body {
+    background: radial-gradient(1100px 480px at 50% -8%, rgba(34, 211, 238, 0.07), transparent 62%), var(--bg-page);
+  }
+}
+
+/* 顶栏：玻璃底 + 一道霓虹细线光 */
+:root[data-style="neon"] header.site-head {
+  box-shadow: 0 1px 0 rgba(34, 211, 238, 0.14);
+}
+:root[data-style="neon"] .brand-icon {
+  background: var(--accent-gradient);
+  border-radius: var(--radius-md);
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="neon"] .brand-text h1 {
+  font-family: var(--font-mono);
+  letter-spacing: 0.06em;
+}
+:root[data-style="neon"] .brand-text .version-tag {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.05em;
+}
+:root[data-style="neon"] .meta-pill {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.03em;
+}
+:root[data-style="neon"] .icon-btn {
+  border-radius: var(--radius-md);
+}
+
+/* 呼吸指示灯：停止/启动态补一点静态光晕（running 态已由脉冲动画负责） */
+:root[data-style="neon"] .pulse-dot.stopped { box-shadow: 0 0 8px var(--danger); }
+:root[data-style="neon"] .pulse-dot.starting { box-shadow: 0 0 8px var(--warn); }
+
+/* 卡片：更锐利的终端切角，hover 时边框染上霓虹青 */
+:root[data-style="neon"] .panel-card {
+  border-radius: var(--radius-lg);
+}
+:root[data-style="neon"] .panel-card:hover {
+  border-color: var(--accent-border);
+}
+:root[data-style="neon"] .card-title {
+  font-family: var(--font-mono);
+  letter-spacing: 0.05em;
+}
+
+/* 状态徽章：锐利小圆角 + 同色系微弱光晕（四色语义清晰可辨） */
+:root[data-style="neon"] .badge {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.06em;
+}
+:root[data-style="neon"] .badge-ok { box-shadow: 0 0 8px rgba(52, 211, 153, 0.22); }
+:root[data-style="neon"] .badge-warn { box-shadow: 0 0 8px rgba(251, 191, 36, 0.22); }
+:root[data-style="neon"] .badge-danger { box-shadow: 0 0 8px rgba(244, 63, 94, 0.26); }
+:root[data-style="neon"] .badge-accent { box-shadow: 0 0 8px rgba(34, 211, 238, 0.26); }
+
+/* 按钮：等宽字体 + 字距；主按钮用品牌渐变 + 克制光晕 */
+:root[data-style="neon"] .btn {
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+:root[data-style="neon"] .btn-mini { border-radius: var(--radius-sm); }
+:root[data-style="neon"] .btn-primary {
+  background: var(--accent-gradient);
+  border-color: transparent;
+  box-shadow: var(--accent-glow);
+}
+
+/* 实时日志控制台：更深的终端黑 + 青色描边 + 极淡扫描线纹理 */
+:root[data-style="neon"] .log-console {
+  background: #04080f;
+  border-color: #12283f;
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 28px rgba(34, 211, 238, 0.04);
+}
+:root[data-style="neon"] .log-toolbar {
+  background: #081020;
+  border-bottom-color: #12283f;
+}
+:root[data-style="neon"] .log-stream {
+  background: repeating-linear-gradient(0deg, rgba(34, 211, 238, 0.02) 0 1px, transparent 1px 3px);
+}
+:root[data-style="neon"] .log-status.live {
+  color: #34d399;
+  text-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
+}
+:root[data-style="neon"] .log-clear-btn:hover {
+  background: #12283f;
+  color: #c9e6ff;
+}
+:root[data-style="neon"] .log-line .ts { color: #3d5a7a; }
+:root[data-style="neon"] .log-line.info .lvl { color: #22d3ee; }
+:root[data-style="neon"] .log-line.warn .lvl { color: #fbbf24; }
+:root[data-style="neon"] .log-line.error .lvl { color: #fb7185; }
+
+/* Agent 遥测：标题等宽化；遥测卡用浅渐变 + 锐利圆角 */
+:root[data-style="neon"] .agent-headings h3 {
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+:root[data-style="neon"] .telemetry-card {
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
+}
+:root[data-style="neon"] .telemetry-card:hover {
+  border-color: var(--accent-border);
+}
+:root[data-style="neon"] .session-table-wrapper { border-radius: var(--radius-md); }
+:root[data-style="neon"] .tag-bubble {
+  border-radius: var(--radius-sm);
+  letter-spacing: 0.03em;
+}
+
+/* 告警条：锐利圆角 + 危险光晕 */
+:root[data-style="neon"] .alert-box { border-radius: var(--radius-md); }
+:root[data-style="neon"] .alert-box.danger { box-shadow: 0 0 14px var(--danger-glow); }
+
+/* 开关 Toggle：开启时带霓虹光晕 */
+:root[data-style="neon"] .toggle input:checked + .slider {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+}
+
+/* seg-control / view-tabs：选中态改为霓虹青高光 */
+:root[data-style="neon"] .seg-control,
+:root[data-style="neon"] .view-tabs {
+  border-radius: var(--radius-md);
+}
+:root[data-style="neon"] .seg-btn,
+:root[data-style="neon"] .view-tab {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+}
+:root[data-style="neon"] .seg-btn[aria-checked="true"],
+:root[data-style="neon"] .view-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-border);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.16);
+}
+
+/* Toast：等宽字体 + 一圈淡青光 */
+:root[data-style="neon"] .toast {
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  letter-spacing: 0.03em;
+  box-shadow: var(--shadow-md), 0 0 16px rgba(34, 211, 238, 0.12);
+}
+
+/* 弹窗：青色描边 + 环境光晕；标题等宽化；数字输入框聚焦发光 */
+:root[data-style="neon"] .modal-card {
+  border-radius: var(--radius-lg);
+  border-color: var(--accent-border);
+  box-shadow: var(--shadow-lg), 0 0 24px rgba(34, 211, 238, 0.1);
+}
+:root[data-style="neon"] .modal-head h3 {
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}
+:root[data-style="neon"] .modal-number {
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+}
+:root[data-style="neon"] .modal-number:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.22);
+}
+
+/* Antigravity 映射 / Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
+:root[data-style="neon"] .agy-fold { border-radius: var(--radius-md); }
+:root[data-style="neon"] .agy-select,
+:root[data-style="neon"] .agy-combo-input,
+:root[data-style="neon"] .skills-path-input,
+:root[data-style="neon"] .skills-repo-path,
+:root[data-style="neon"] .skills-diff-list {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="neon"] .agy-combo-list { border-radius: var(--radius-md); }
+:root[data-style="neon"] .agy-select:focus,
+:root[data-style="neon"] .agy-combo-input:focus,
+:root[data-style="neon"] .agy-combo.open .agy-combo-input,
+:root[data-style="neon"] .skills-path-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(34, 211, 238, 0.2);
+}
+
+/* Skills 视图：选中行青光描边 + 对勾发光；端点点亮时带光晕 */
+:root[data-style="neon"] .skills-list-row.selected {
+  border-left-color: var(--accent);
+  box-shadow: inset 0 0 14px rgba(34, 211, 238, 0.05);
+}
+:root[data-style="neon"] .skills-list-row.selected::before {
+  text-shadow: 0 0 6px var(--accent);
+}
+:root[data-style="neon"] .skills-ctx-menu { border-radius: var(--radius-md); }
+:root[data-style="neon"] .skills-ctx-item:hover {
+  text-shadow: 0 0 6px rgba(34, 211, 238, 0.35);
+}
+:root[data-style="neon"] .skills-dup-warn { border-radius: var(--radius-sm); }

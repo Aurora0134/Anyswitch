@@ -1,0 +1,438 @@
+/* ============================================================
+   sepia —— 暖纸（细线质感基座 + 暖调 UI 色）
+   白纸 / 墨底背景保持中性不变，暖意全部落在 UI 色上：
+   赭橙 accent 承担选中态/关键按钮/链接，并与绿 ok、琥珀 warn、
+   砖红 danger、靛蓝 pool 拉开色相差分，避免全局单一暖色；
+   1px 细线承担结构，阴影近乎取消，圆角收敛 2–4px。
+   ============================================================ */
+
+/* 1) 亮色 token 全集 */
+:root[data-style="sepia"] {
+  color-scheme: light;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 背景与文字：保持中性，不加暖 */
+  --bg: #ffffff;
+  --bg-page: #faf9f7;
+  --surface: #ffffff;
+  --surface-sunken: #f6f5f3;
+  --surface-hover: #f0efec;
+  --surface-glass: rgba(255, 255, 255, 0.94);
+
+  --text: #141414;
+  --text-2: #3d3d3a;
+  --text-3: #6b6b66;
+  --text-4: #9c9c96;
+
+  --border: #e4e2de;
+  --border-strong: #c9c6c0;
+  --divider: #edebe7;
+
+  /* 暖调 UI 色：赭橙 accent，与文字/语义色明确拉开 */
+  --accent: #9e4a1b;
+  --accent-soft: #f8ede3;
+  --accent-border: #deb696;
+
+  --ok: #2e7d46;
+  --ok-soft: #eff5ec;
+  --ok-border: #d0e1cf;
+
+  --warn: #97690e;
+  --warn-soft: #faf3e0;
+  --warn-border: #e8d5a8;
+
+  --danger: #b23a29;
+  --danger-soft: #faefeb;
+  --danger-border: #edcec4;
+
+  --pool: #3f5a9a;
+  --pool-soft: #e8ecf5;
+  --pool-border: #bfcbe4;
+
+  --spark-line: #9e4a1b;
+  --spark-fill: rgba(158, 74, 27, 0.08);
+  --danger-glow: rgba(178, 58, 41, 0.16);
+
+  --shadow-xs: 0 1px 0 rgba(20, 20, 20, 0.03);
+  --shadow-sm: 0 1px 2px rgba(20, 20, 20, 0.04);
+  --shadow-md: 0 4px 12px rgba(20, 20, 20, 0.06);
+  --shadow-lg: 0 12px 32px rgba(20, 20, 20, 0.10);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #aa5420 0%, #7d3510 100%);
+  --accent-glow: 0 1px 2px rgba(125, 53, 16, 0.20);
+
+  /* 拖拽重排：赭橙 accent，暖色柔光 + 更缓的柔和缓动 */
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
+  --store-drag-ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+}
+
+/* 2) 暗色 token 全集（显式 dark） */
+:root[data-style="sepia"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 背景与文字：保持中性，不加暖 */
+  --bg: #0c0c0b;
+  --bg-page: #090908;
+  --surface: #111110;
+  --surface-sunken: #0d0d0c;
+  --surface-hover: #1a1a19;
+  --surface-glass: rgba(12, 12, 11, 0.94);
+
+  --text: #f2f2ef;
+  --text-2: #cfcfc9;
+  --text-3: #8f8f89;
+  --text-4: #61615c;
+
+  --border: #262624;
+  --border-strong: #3a3a37;
+  --divider: #1c1c1a;
+
+  /* 暖调 UI 色：暖杏 accent，与文字/语义色明确拉开 */
+  --accent: #e59c5e;
+  --accent-soft: rgba(229, 156, 94, 0.12);
+  --accent-border: #7a5433;
+
+  --ok: #5cb584;
+  --ok-soft: rgba(92, 181, 132, 0.12);
+  --ok-border: #2a5238;
+
+  --warn: #d4a446;
+  --warn-soft: rgba(212, 164, 70, 0.12);
+  --warn-border: #6b501e;
+
+  --danger: #db6650;
+  --danger-soft: rgba(219, 102, 80, 0.14);
+  --danger-border: #6d3024;
+
+  --pool: #9db2e8;
+  --pool-soft: rgba(157,178,232,0.10);
+  --pool-border: #46536e;
+
+  --spark-line: #e59c5e;
+  --spark-fill: rgba(229, 156, 94, 0.10);
+  --danger-glow: rgba(219, 102, 80, 0.28);
+
+  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.50);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
+  --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* 背景与文字：保持中性，不加暖 */
+    --bg: #0c0c0b;
+    --bg-page: #090908;
+    --surface: #111110;
+    --surface-sunken: #0d0d0c;
+    --surface-hover: #1a1a19;
+    --surface-glass: rgba(12, 12, 11, 0.94);
+
+    --text: #f2f2ef;
+    --text-2: #cfcfc9;
+    --text-3: #8f8f89;
+    --text-4: #61615c;
+
+    --border: #262624;
+    --border-strong: #3a3a37;
+    --divider: #1c1c1a;
+
+    /* 暖调 UI 色：暖杏 accent，与文字/语义色明确拉开 */
+    --accent: #e59c5e;
+    --accent-soft: rgba(229, 156, 94, 0.12);
+    --accent-border: #7a5433;
+
+    --ok: #5cb584;
+    --ok-soft: rgba(92, 181, 132, 0.12);
+    --ok-border: #2a5238;
+
+    --warn: #d4a446;
+    --warn-soft: rgba(212, 164, 70, 0.12);
+    --warn-border: #6b501e;
+
+    --danger: #db6650;
+    --danger-soft: rgba(219, 102, 80, 0.14);
+    --danger-border: #6d3024;
+
+    --pool: #9db2e8;
+    --pool-soft: rgba(157,178,232,0.10);
+    --pool-border: #46536e;
+
+    --spark-line: #e59c5e;
+    --spark-fill: rgba(229, 156, 94, 0.10);
+    --danger-glow: rgba(219, 102, 80, 0.28);
+
+    --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.30);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.40);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.50);
+
+    --radius-sm: 2px;
+    --radius-md: 3px;
+    --radius-lg: 4px;
+    --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
+    --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+  }
+}
+
+/* ============================================================
+   皮肤覆盖规则（不触碰布局几何，只换皮肤）
+   ============================================================ */
+
+/* 顶部导航：去玻璃模糊，纯平纸面 + 1px 细线 */
+:root[data-style="sepia"] header.site-head {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 品牌图标：渐变收敛为赭橙实心块，方角 */
+:root[data-style="sepia"] .brand-icon {
+  background: var(--accent-gradient);
+  border-radius: 4px;
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="sepia"] .brand-text h1 {
+  font-family: Georgia, "Times New Roman", "Songti SC", "SimSun", serif;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+/* 卡片：细线结构、阴影归零、方角 */
+:root[data-style="sepia"] .panel-card {
+  border-radius: 4px;
+  box-shadow: none;
+}
+:root[data-style="sepia"] .card-title {
+  letter-spacing: -0.02em;
+}
+
+/* 遥测四宫格与会话列表：方角 + 编辑栏题字距 */
+:root[data-style="sepia"] .telemetry-card,
+:root[data-style="sepia"] .session-table-wrapper,
+:root[data-style="sepia"] .alert-box,
+:root[data-style="sepia"] .empty-hint,
+:root[data-style="sepia"] .agy-fold {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .telemetry-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+}
+:root[data-style="sepia"] .telemetry-num {
+  letter-spacing: -0.03em;
+}
+
+/* TTFT 指示灯：去光晕，只留色点 */
+:root[data-style="sepia"] .lamp-green,
+:root[data-style="sepia"] .lamp-yellow,
+:root[data-style="sepia"] .lamp-red {
+  box-shadow: none;
+}
+
+/* 徽章：小方角 + 排版字距；accent 徽章半透明赭橙，与 neutral 明确区分 */
+:root[data-style="sepia"] .badge {
+  border-radius: 2px;
+  letter-spacing: 0.04em;
+}
+:root[data-style="sepia"] .badge-accent {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* 按钮：方角、去投影、赭橙主按钮 */
+:root[data-style="sepia"] .btn {
+  border-radius: 3px;
+  box-shadow: none;
+  letter-spacing: 0.01em;
+}
+:root[data-style="sepia"] .btn-mini {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .icon-btn {
+  border-radius: 3px;
+  box-shadow: none;
+}
+
+/* 实时日志控制台：亮暗都收为暖炭纸块，字色去饱和（暖炭属 UI 色，页面背景不加暖） */
+:root[data-style="sepia"] .log-console {
+  background: #211a12;
+  color: #ece2d0;
+  border: 1px solid #211a12;
+  border-radius: 4px;
+}
+:root[data-style="sepia"] .log-toolbar {
+  background: #2b2318;
+  border-bottom-color: #3b2f20;
+}
+:root[data-style="sepia"] .log-status { color: #9c8e76; }
+:root[data-style="sepia"] .log-status.live { color: #5cb584; }
+:root[data-style="sepia"] .log-clear-btn { color: #9c8e76; }
+:root[data-style="sepia"] .log-clear-btn:hover {
+  background: #3b2f20;
+  color: #f2e9da;
+}
+:root[data-style="sepia"] .log-line .ts { color: #655846; }
+:root[data-style="sepia"] .log-line.info .lvl { color: #8593a6; }
+:root[data-style="sepia"] .log-line.warn .lvl { color: #d4a446; }
+:root[data-style="sepia"] .log-line.error .lvl { color: #db6650; }
+
+/* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
+
+/* seg-control / view-tabs：方角分段 */
+:root[data-style="sepia"] .seg-control,
+:root[data-style="sepia"] .view-tabs {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .seg-btn,
+:root[data-style="sepia"] .view-tab {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .seg-btn[aria-checked="true"],
+:root[data-style="sepia"] .view-tab.active {
+  box-shadow: none;
+}
+
+/* toast / modal / 浮层：方角、细线、轻投影 */
+:root[data-style="sepia"] .toast {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .modal-card {
+  border-radius: 4px;
+}
+/* Modal 入场：160ms 淡入 + 轻缩放（仅 opacity/transform，不改几何） */
+@keyframes sepia-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+:root[data-style="sepia"] .modal-overlay.show .modal-card {
+  animation: sepia-modal-in 160ms var(--ease-out);
+}
+:root[data-style="sepia"] .modal-number,
+:root[data-style="sepia"] .agy-select,
+:root[data-style="sepia"] .agy-combo-input,
+:root[data-style="sepia"] .skills-path-input,
+:root[data-style="sepia"] .skills-repo-path,
+:root[data-style="sepia"] .skills-dup-warn,
+:root[data-style="sepia"] .skills-diff-list,
+:root[data-style="sepia"] .skills-body-view .md-code {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .agy-combo-list,
+:root[data-style="sepia"] .skills-ctx-menu {
+  border-radius: 3px;
+}
+
+/* Skills 视图：分区小标题用宽字距制造编辑栏题感 */
+:root[data-style="sepia"] .skills-group-title,
+:root[data-style="sepia"] .agy-group-title {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+/* 可折叠分组标题保持 12.5px（双类提升特异性压过上面的 10px），宽字距风格保留 */
+:root[data-style="sepia"] .skills-group-title.skills-anomaly-fold {
+  font-size: 12.5px;
+}
+:root[data-style="sepia"] .skills-list-row.selected::before {
+  font-family: var(--font-mono);
+}
+:root[data-style="sepia"] .skills-anomaly-task.selected::before {
+  font-family: var(--font-mono);
+}
+
+/* Skills 视图：收藏钮点亮用赭橙反白填充（亮=橙底纸字，暗随 token 反转），不用金色 */
+:root[data-style="sepia"] .skills-fav-btn.on {
+  background: var(--accent); color: var(--bg); border-color: var(--accent);
+}
+:root[data-style="sepia"] .skills-fav-star { color: var(--text); }
+
+/* ---- 暗色专属修正（accent 反转为暖杏，硬性白字处需反色）---- */
+:root[data-style="sepia"][data-theme="dark"] .btn-primary {
+  color: #1e1509;
+}
+:root[data-style="sepia"][data-theme="dark"] .brand-icon {
+  color: #1e1509;
+}
+:root[data-style="sepia"][data-theme="dark"] .toggle input:checked + .slider::before {
+  background: #1e1509;
+  box-shadow: none;
+}
+:root[data-style="sepia"][data-theme="dark"] .log-console {
+  background: #120d08;
+  border-color: #241c12;
+  color: #d9cdb8;
+}
+:root[data-style="sepia"][data-theme="dark"] .log-toolbar {
+  background: #181209;
+  border-bottom-color: #241c12;
+}
+:root[data-style="sepia"][data-theme="dark"] .log-clear-btn:hover {
+  background: #241c12;
+  color: #f2e9da;
+}
+:root[data-style="sepia"][data-theme="dark"] .log-line .ts { color: #544a39; }
+
+@media (prefers-color-scheme: dark) {
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
+    color: #1e1509;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
+    color: #1e1509;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .toggle input:checked + .slider::before {
+    background: #1e1509;
+    box-shadow: none;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
+    background: #120d08;
+    border-color: #241c12;
+    color: #d9cdb8;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-toolbar {
+    background: #181209;
+    border-bottom-color: #241c12;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-clear-btn:hover {
+    background: #241c12;
+    color: #f2e9da;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-line .ts { color: #544a39; }
+}
+
+/* Store 刷新状态小字：斜体铅字感，高亮向赭橙 accent 呼吸 */
+:root[data-style="sepia"] .store-refresh-status { font-style: italic; letter-spacing: 0.02em; }
+:root[data-style="sepia"] .store-refresh-status .srs-ch { animation-name: srs-pulse-sepia; }
+@keyframes srs-pulse-sepia {
+  0%, 100% { color: var(--text-2); opacity: 0.55; }
+  50% { color: var(--accent); opacity: 1; }
+}
+
+/* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
+:root[data-style="sepia"] {
+  --heat-1: color-mix(in srgb, var(--accent) 26%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--accent) 46%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--accent) 68%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}

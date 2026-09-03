@@ -1,0 +1,566 @@
+/* ==========================================================================
+   风格片段：aurora｜极光玻璃
+   深色基调 + 青→紫→粉极光带氛围光 + 玻璃拟态（backdrop-filter + 半透明面）。
+   强调色明确落在冰青/冰蓝（cyan-700 系），紫与粉只做背景氛围与渐变细线，
+   不进语义色。亮色套为「极地白昼」演绎：冰白底 + 极淡极光晕，玻璃感保留。
+   仅换肤：不改 DOM、不改文案、不动 .view-tabs / .seg-control 几何。
+
+   布局级覆盖清单（本轮契约放宽项，全部 scoped 于本主题选择器下）：
+   1. --radius-sm/md/lg 放大至 10/14/20（经典基准 6/8/12）；
+   2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
+      胶囊化（border-radius: 999px）；
+   3. 辉光阴影：--accent-glow、卡片 hover、暗色 .log-console 外发光，
+      box-shadow 偏移/扩散大于经典基准（不占布局空间）；
+   4. letter-spacing 微调：.badge +0.02em、.telemetry-num -0.03em、
+      .telemetry-label +0.05em、footer +0.04em；
+   5. header 底部 1px 分隔线由实色边框换成极光渐变 hairline
+      （border-bottom-color: transparent + 1px 背景渐变条，盒尺寸不变）。
+   装饰均通过 background / box-shadow / backdrop-filter 实现，无占位伪元素。
+   ========================================================================== */
+
+/* 1) 亮色 token 全集（极地白昼） */
+:root[data-style="aurora"] {
+  color-scheme: light;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 表面：冰白系，面体半透以透出底部极光晕 */
+  --bg: #f4f8fc;
+  --bg-page: #ecf2f8;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-sunken: rgba(238, 245, 250, 0.82);
+  --surface-hover: rgba(255, 255, 255, 0.92);
+  --surface-glass: rgba(250, 252, 254, 0.62);
+
+  /* 文字：极夜蓝墨色阶，白昼下对比充足 */
+  --text: #0b1c2b;
+  --text-2: #2c4358;
+  --text-3: #597188;
+  --text-4: #8ba1b3;
+
+  /* 边框：冰蓝发丝线 */
+  --border: rgba(122, 158, 188, 0.32);
+  --border-strong: rgba(102, 140, 172, 0.5);
+  --divider: rgba(122, 158, 188, 0.2);
+
+  /* 语义色：冰青 accent / 翠绿 ok / 琥珀 warn / 红 danger，四色一眼可分 */
+  --accent: #0e7490;
+  --accent-soft: rgba(8, 145, 178, 0.1);
+  --accent-border: rgba(8, 145, 178, 0.38);
+
+  --ok: #059669;
+  --ok-soft: rgba(5, 150, 105, 0.1);
+  --ok-border: rgba(5, 150, 105, 0.35);
+
+  --warn: #b45309;
+  --warn-soft: rgba(217, 119, 6, 0.1);
+  --warn-border: rgba(217, 119, 6, 0.4);
+
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.09);
+  --danger-border: rgba(220, 38, 38, 0.35);
+
+  --pool: #7c5cd6;
+  --pool-soft: rgba(124,92,214,0.1);
+  --pool-border: rgba(124,92,214,0.38);
+
+  --spark-line: #0891b2;
+  --spark-fill: rgba(8, 145, 178, 0.13);
+  --danger-glow: rgba(220, 38, 38, 0.18);
+
+  /* 阴影：冷蓝灰底 + 大模糊半径，玻璃浮层感 */
+  --shadow-xs: 0 1px 2px 0 rgba(16, 44, 66, 0.05);
+  --shadow-sm: 0 1px 2px 0 rgba(16, 44, 66, 0.04), 0 6px 18px -6px rgba(16, 44, 66, 0.1);
+  --shadow-md: 0 6px 22px -6px rgba(16, 44, 66, 0.13), 0 2px 8px -2px rgba(16, 44, 66, 0.06);
+  --shadow-lg: 0 22px 50px -14px rgba(16, 44, 66, 0.2), 0 6px 16px -6px rgba(16, 44, 66, 0.08);
+
+  /* 新增 token：大圆角；品牌渐变取深冰青段，白字对比 ≥4.5:1 */
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --accent-gradient: linear-gradient(135deg, #0e7490 0%, #0b6478 55%, #155e75 100%);
+  --accent-glow: 0 4px 14px rgba(8, 145, 178, 0.26);
+
+  /* 拖拽重排：冰青 accent，glow 带极光外发光感 */
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 0 0 16px color-mix(in srgb, var(--accent) 40%, transparent);
+  --store-drag-ease: var(--ease-out);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --hl-inset: rgba(255, 255, 255, 0.8);
+  --brand-hl: rgba(255, 255, 255, 0.38);
+  --overlay-bg: rgba(18, 40, 58, 0.36);
+  --glass-blur: blur(18px) saturate(170%);
+  --page-bg-image:
+    radial-gradient(980px 460px at 10% -180px, rgba(56, 189, 248, 0.15), transparent 70%),
+    radial-gradient(900px 440px at 88% -140px, rgba(167, 139, 250, 0.11), transparent 72%),
+    radial-gradient(820px 560px at 55% 130%, rgba(244, 114, 182, 0.08), transparent 76%);
+  --console-bg: #081423;
+  --console-toolbar-bg: #0d1f31;
+  --console-border: rgba(103, 232, 249, 0.12);
+  --card-hairline: linear-gradient(90deg, rgba(14, 165, 233, 0.4), rgba(139, 92, 246, 0.3), rgba(236, 72, 153, 0.26));
+}
+
+/* 2) 暗色 token 全集（显式 dark，极光夜） */
+:root[data-style="aurora"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 表面：极夜深蓝，面体半透透出极光带 */
+  --bg: #0c1421;
+  --bg-page: #070d17;
+  --surface: rgba(21, 32, 49, 0.62);
+  --surface-sunken: rgba(13, 21, 34, 0.72);
+  --surface-hover: rgba(31, 45, 66, 0.72);
+  --surface-glass: rgba(15, 24, 38, 0.58);
+
+  /* 文字：冷白主色 + 冰蓝灰阶梯 */
+  --text: #ecf5fb;
+  --text-2: #c0d3e2;
+  --text-3: #88a0b5;
+  --text-4: #5b7089;
+
+  /* 边框：冰蓝微光线 */
+  --border: rgba(140, 190, 228, 0.13);
+  --border-strong: rgba(140, 190, 228, 0.26);
+  --divider: rgba(140, 190, 228, 0.08);
+
+  /* 语义色：亮青 accent / 翠 ok / 琥珀 warn / 珊瑚红 danger，暗底高对比 */
+  --accent: #4cd6ef;
+  --accent-soft: rgba(76, 214, 239, 0.13);
+  --accent-border: rgba(76, 214, 239, 0.34);
+
+  --ok: #34d399;
+  --ok-soft: rgba(52, 211, 153, 0.12);
+  --ok-border: rgba(52, 211, 153, 0.3);
+
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, 0.12);
+  --warn-border: rgba(251, 191, 36, 0.32);
+
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.13);
+  --danger-border: rgba(248, 113, 113, 0.32);
+
+  --pool: #b79bf7;
+  --pool-soft: rgba(183,155,247,0.13);
+  --pool-border: rgba(183,155,247,0.34);
+
+  --spark-line: #67e8f9;
+  --spark-fill: rgba(103, 232, 249, 0.15);
+  --danger-glow: rgba(248, 113, 113, 0.3);
+
+  /* 阴影：深投影分层，大偏移柔边 */
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.45), 0 6px 20px -6px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 10px 32px -8px rgba(0, 0, 0, 0.58), 0 3px 10px -3px rgba(0, 0, 0, 0.42);
+  --shadow-lg: 0 26px 64px -16px rgba(0, 0, 0, 0.72), 0 8px 20px -6px rgba(0, 0, 0, 0.5);
+
+  /* 新增 token：大圆角；暗色品牌渐变用明亮冰青，配深墨字（见暗色微调） */
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --accent-gradient: linear-gradient(135deg, #7df0fa 0%, #38d3ec 55%, #1dadc9 100%);
+  --accent-glow: 0 0 13px rgba(76, 214, 239, 0.22);
+
+  /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+  --hl-inset: rgba(255, 255, 255, 0.09);
+  --brand-hl: rgba(255, 255, 255, 0.35);
+  --overlay-bg: rgba(3, 8, 16, 0.62);
+  --glass-blur: blur(20px) saturate(180%);
+  --page-bg-image:
+    radial-gradient(1100px 520px at 12% -180px, rgba(45, 212, 191, 0.17), transparent 70%),
+    radial-gradient(980px 480px at 86% -140px, rgba(139, 92, 246, 0.16), transparent 72%),
+    radial-gradient(860px 620px at 58% 132%, rgba(236, 72, 153, 0.1), transparent 76%);
+  --console-bg: #050e1a;
+  --console-toolbar-bg: #0a1a2b;
+  --console-border: rgba(103, 232, 249, 0.12);
+  --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* 表面：极夜深蓝，面体半透透出极光带 */
+    --bg: #0c1421;
+    --bg-page: #070d17;
+    --surface: rgba(21, 32, 49, 0.62);
+    --surface-sunken: rgba(13, 21, 34, 0.72);
+    --surface-hover: rgba(31, 45, 66, 0.72);
+    --surface-glass: rgba(15, 24, 38, 0.58);
+
+    /* 文字：冷白主色 + 冰蓝灰阶梯 */
+    --text: #ecf5fb;
+    --text-2: #c0d3e2;
+    --text-3: #88a0b5;
+    --text-4: #5b7089;
+
+    /* 边框：冰蓝微光线 */
+    --border: rgba(140, 190, 228, 0.13);
+    --border-strong: rgba(140, 190, 228, 0.26);
+    --divider: rgba(140, 190, 228, 0.08);
+
+    /* 语义色：亮青 accent / 翠 ok / 琥珀 warn / 珊瑚红 danger，暗底高对比 */
+    --accent: #4cd6ef;
+    --accent-soft: rgba(76, 214, 239, 0.13);
+    --accent-border: rgba(76, 214, 239, 0.34);
+
+    --ok: #34d399;
+    --ok-soft: rgba(52, 211, 153, 0.12);
+    --ok-border: rgba(52, 211, 153, 0.3);
+
+    --warn: #fbbf24;
+    --warn-soft: rgba(251, 191, 36, 0.12);
+    --warn-border: rgba(251, 191, 36, 0.32);
+
+    --danger: #f87171;
+    --danger-soft: rgba(248, 113, 113, 0.13);
+    --danger-border: rgba(248, 113, 113, 0.32);
+
+    --pool: #b79bf7;
+    --pool-soft: rgba(183,155,247,0.13);
+    --pool-border: rgba(183,155,247,0.34);
+
+    --spark-line: #67e8f9;
+    --spark-fill: rgba(103, 232, 249, 0.15);
+    --danger-glow: rgba(248, 113, 113, 0.3);
+
+    /* 阴影：深投影分层，大偏移柔边 */
+    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.45), 0 6px 20px -6px rgba(0, 0, 0, 0.5);
+    --shadow-md: 0 10px 32px -8px rgba(0, 0, 0, 0.58), 0 3px 10px -3px rgba(0, 0, 0, 0.42);
+    --shadow-lg: 0 26px 64px -16px rgba(0, 0, 0, 0.72), 0 8px 20px -6px rgba(0, 0, 0, 0.5);
+
+    /* 新增 token：大圆角；暗色品牌渐变用明亮冰青，配深墨字（见暗色微调） */
+    --radius-sm: 10px;
+    --radius-md: 14px;
+    --radius-lg: 20px;
+    --accent-gradient: linear-gradient(135deg, #7df0fa 0%, #38d3ec 55%, #1dadc9 100%);
+    --accent-glow: 0 0 13px rgba(76, 214, 239, 0.22);
+
+    /* 片段内部辅助 token（供下方覆盖规则按亮暗取值） */
+    --hl-inset: rgba(255, 255, 255, 0.09);
+    --brand-hl: rgba(255, 255, 255, 0.35);
+    --overlay-bg: rgba(3, 8, 16, 0.62);
+    --glass-blur: blur(20px) saturate(180%);
+    --page-bg-image:
+      radial-gradient(1100px 520px at 12% -180px, rgba(45, 212, 191, 0.17), transparent 70%),
+      radial-gradient(980px 480px at 86% -140px, rgba(139, 92, 246, 0.16), transparent 72%),
+      radial-gradient(860px 620px at 58% 132%, rgba(236, 72, 153, 0.1), transparent 76%);
+    --console-bg: #050e1a;
+    --console-toolbar-bg: #0a1a2b;
+    --console-border: rgba(103, 232, 249, 0.12);
+    --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
+  }
+}
+
+/* ==========================================================================
+   皮肤覆盖规则（全部以 :root[data-style="aurora"] 开头限定作用域）
+   只补 token 做不到的风格特征：极光 hairline、玻璃模糊、辉光、胶囊化。
+   ========================================================================== */
+
+/* 页面：三层极光晕（青/紫/粉）铺在冰底上，亮暗强度由 token 控制 */
+:root[data-style="aurora"] body {
+  background-color: var(--bg-page);
+  background-image: var(--page-bg-image);
+  background-repeat: no-repeat;
+}
+
+/* Header：加强玻璃模糊；底部实线换 1px 极光渐变 hairline */
+:root[data-style="aurora"] header.site-head {
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-bottom-color: transparent;
+  background-image: var(--card-hairline);
+  background-position: bottom;
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+  box-shadow: var(--shadow-xs);
+}
+
+/* 品牌图标：冰青渐变 + 光晕 + 顶部高光，圆角放大 */
+:root[data-style="aurora"] .brand-icon {
+  border-radius: 12px;
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
+}
+
+/* 版本标签 / 头部信息 pill / 会话 tag：胶囊化 + 玻璃底 */
+:root[data-style="aurora"] .brand-text .version-tag,
+:root[data-style="aurora"] .meta-pill,
+:root[data-style="aurora"] .tag-bubble {
+  border-radius: 999px;
+}
+:root[data-style="aurora"] .meta-pill {
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
+}
+
+/* 卡片：玻璃面 + 顶部 1px 极光 hairline + 柔散阴影 */
+:root[data-style="aurora"] .panel-card {
+  border-radius: var(--radius-lg);
+  background-image: var(--card-hairline);
+  background-position: top;
+  background-size: 100% 1px;
+  background-repeat: no-repeat;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-sm), inset 0 1px 0 var(--hl-inset);
+  transition: border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out);
+}
+:root[data-style="aurora"] .panel-card:hover {
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="aurora"] .card-header {
+  border-bottom-color: var(--divider);
+}
+:root[data-style="aurora"] .card-title {
+  letter-spacing: -0.01em;
+}
+
+/* 徽章：胶囊化 + 轻字距，语义色全由 token 保证可区分 */
+:root[data-style="aurora"] .badge {
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+
+/* 按钮：圆角上调；主按钮冰青渐变 + 光晕 */
+:root[data-style="aurora"] .btn {
+  border-radius: var(--radius-md);
+  transition: all 180ms var(--ease-out);
+}
+:root[data-style="aurora"] .btn-mini {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="aurora"] .btn-primary {
+  background: var(--accent-gradient);
+  border-color: transparent;
+  box-shadow: var(--accent-glow), inset 0 1px 0 var(--brand-hl);
+}
+:root[data-style="aurora"] .btn-primary:hover {
+  filter: brightness(1.08);
+}
+:root[data-style="aurora"] .btn-accent {
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+:root[data-style="aurora"] .icon-btn {
+  border-radius: 12px;
+  box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
+}
+
+/* 日志控制台：极夜冰蓝壳 + 青色描边微光，亮暗两套都保持深色机身 */
+:root[data-style="aurora"] .log-console {
+  background: var(--console-bg);
+  border-color: var(--console-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+:root[data-style="aurora"] .log-toolbar {
+  background: var(--console-toolbar-bg);
+  border-bottom-color: var(--console-border);
+}
+:root[data-style="aurora"] .log-clear-btn {
+  transition: all 160ms var(--ease-out);
+}
+:root[data-style="aurora"] .log-clear-btn:hover {
+  background: rgba(103, 232, 249, 0.12);
+}
+
+/* 遥测四宫格：玻璃微渐变 + 顶部高光，数字收紧、标签拉开字距 */
+:root[data-style="aurora"] .telemetry-card {
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
+  backdrop-filter: blur(10px) saturate(160%);
+  -webkit-backdrop-filter: blur(10px) saturate(160%);
+  box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="aurora"] .telemetry-num {
+  letter-spacing: -0.03em;
+}
+:root[data-style="aurora"] .telemetry-label {
+  letter-spacing: 0.05em;
+}
+
+/* 会话明细 / 提示框 / 折叠组 / 代码块：圆角统一上调 */
+:root[data-style="aurora"] .session-table-wrapper,
+:root[data-style="aurora"] .alert-box,
+:root[data-style="aurora"] .empty-hint,
+:root[data-style="aurora"] .agy-fold,
+:root[data-style="aurora"] .skills-repo-path,
+:root[data-style="aurora"] .skills-diff-list,
+:root[data-style="aurora"] .skills-dup-warn {
+  border-radius: var(--radius-md);
+}
+:root[data-style="aurora"] .agy-fold-toggle:hover {
+  border-radius: var(--radius-md);
+}
+:root[data-style="aurora"] .agy-fold.open .agy-fold-toggle {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+:root[data-style="aurora"] .skills-body-view .md-code {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="aurora"] .skills-body-view .md-inline {
+  border-radius: 5px;
+}
+
+/* Toggle：开启态冰青渐变 + 光晕，滑珠顶部高光 */
+:root[data-style="aurora"] .toggle input:checked + .slider {
+  background: var(--accent-gradient);
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="aurora"] .toggle .slider::before {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
+
+/* seg-control / view-tabs：不动几何，仅选中块加一层顶部高光 */
+:root[data-style="aurora"] .seg-btn[aria-checked="true"],
+:root[data-style="aurora"] .view-tab.active {
+  box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
+}
+
+/* Toast：胶囊玻璃浮条 */
+:root[data-style="aurora"] .toast {
+  border-radius: 999px;
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-md), inset 0 1px 0 var(--hl-inset);
+}
+
+/* Modal：遮罩冰蓝调加深模糊，卡片玻璃化 + 大圆角；入场 160ms 淡入 + 轻缩放 */
+:root[data-style="aurora"] .modal-overlay {
+  background: var(--overlay-bg);
+  backdrop-filter: blur(10px) saturate(150%);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+}
+:root[data-style="aurora"] .modal-card {
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
+}
+@keyframes aurora-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+:root[data-style="aurora"] .modal-overlay.show .modal-card {
+  animation: aurora-modal-in 160ms var(--ease-out);
+}
+
+/* 输入控件：圆角统一 + 聚焦冰青光环 */
+:root[data-style="aurora"] .modal-number,
+:root[data-style="aurora"] .agy-select,
+:root[data-style="aurora"] .agy-combo-input,
+:root[data-style="aurora"] .skills-path-input {
+  border-radius: var(--radius-sm);
+}
+:root[data-style="aurora"] .modal-number:focus,
+:root[data-style="aurora"] .agy-select:focus,
+:root[data-style="aurora"] .agy-combo-input:focus,
+:root[data-style="aurora"] .agy-combo.open .agy-combo-input,
+:root[data-style="aurora"] .skills-path-input:focus {
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 12px var(--accent-soft);
+}
+
+/* 浮层菜单（下拉 / 右键菜单）：玻璃化 + 圆角 + 高光 */
+:root[data-style="aurora"] .agy-combo-list,
+:root[data-style="aurora"] .skills-ctx-menu {
+  border-radius: var(--radius-md);
+  background: var(--surface-glass);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
+}
+:root[data-style="aurora"] .agy-combo-item,
+:root[data-style="aurora"] .skills-ctx-item {
+  border-radius: 8px;
+}
+:root[data-style="aurora"] .skills-ctx-item:hover {
+  background: var(--accent-soft);
+}
+
+/* Skills 列表选中：冰青扫光 + 左侧强调条 */
+:root[data-style="aurora"] .skills-list-row.selected {
+  background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 88%);
+  border-left-color: var(--accent);
+}
+
+/* Top5 微柱：hover 提亮替代跳色 */
+:root[data-style="aurora"] .ms-cell {
+  transition: filter 140ms var(--ease-out);
+}
+:root[data-style="aurora"] .ms-cell:not(.idle):hover {
+  filter: brightness(1.15);
+}
+
+/* 状态灯：辉光略强于经典基准（6px→7px），点到为止不晃眼 */
+:root[data-style="aurora"] .lamp-green { box-shadow: 0 0 7px var(--ok); }
+:root[data-style="aurora"] .lamp-yellow { box-shadow: 0 0 7px var(--warn); }
+:root[data-style="aurora"] .lamp-red { box-shadow: 0 0 7px var(--danger); }
+
+/* Agent 头像：与品牌图标同语言 */
+:root[data-style="aurora"] .agent-avatar {
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 var(--hl-inset);
+}
+
+/* 页脚：mono 轻字距，仪表铭牌感 */
+:root[data-style="aurora"] footer {
+  letter-spacing: 0.04em;
+}
+
+/* ---- 暗色微调（显式 dark）：亮青渐变上的文字反色为极夜深墨 ---- */
+:root[data-style="aurora"][data-theme="dark"] .btn-primary {
+  color: #052533;
+}
+:root[data-style="aurora"][data-theme="dark"] .brand-icon {
+  color: #062431;
+}
+:root[data-style="aurora"][data-theme="dark"] .log-console {
+  box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+:root[data-style="aurora"][data-theme="dark"] .panel-card:hover {
+  box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
+}
+
+/* ---- 暗色微调（跟随系统，内容与显式 dark 相同） ---- */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
+    color: #052533;
+  }
+  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
+    color: #062431;
+  }
+  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
+    box-shadow: var(--shadow-md), 0 0 20px -8px rgba(76, 214, 239, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) .panel-card:hover {
+    box-shadow: var(--shadow-md), 0 0 22px -12px rgba(76, 214, 239, 0.1), inset 0 1px 0 var(--hl-inset);
+  }
+}
+
+/* Store 刷新状态小字：冰青高亮带轻辉光（半径收小防糊字） */
+:root[data-style="aurora"] .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
+@keyframes srs-pulse-aurora {
+  0%, 100% { color: var(--text-2); text-shadow: none; }
+  50% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
+}
+/* 完成整体高光：冰青实色带一点轻辉光；字重由基样 600 收细为 500，防辉光糊笔画 */
+:root[data-style="aurora"] .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }
+
+/* 使用统计热力图：高档位辉光减弱——只留 lv4 一档极淡微光，lv3 不再发光（玻璃拟态语言收敛，压自发光观感）；hover 在辉光上叠基样亮度 */
+:root[data-style="aurora"] .stats-heat-cell { rx: 3px; }
+:root[data-style="aurora"] .stats-heat-cell.lv4 { filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent)); }
+:root[data-style="aurora"] .stats-heat-cell.lv4:hover { filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 55%, transparent)) brightness(1.06); }
