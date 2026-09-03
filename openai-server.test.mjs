@@ -932,7 +932,7 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
 // B·进程与端口安全: probeRelay is the trust check behind relay reuse (EADDRINUSE
 // in listenLoopback) and relay start/stop status, so a bare 200 from an
 // unrelated loopback service on 47821 must not count as "our relay" — GET /
-// must answer {service:"apicred-relay"}.
+// must answer {service:"anyswitch-relay"}.
 describe("probeRelay (root-endpoint identity check)", () => {
   async function withMockServer(handler, fn) {
     const { createServer } = await import("node:http");
@@ -945,13 +945,13 @@ describe("probeRelay (root-endpoint identity check)", () => {
     }
   }
 
-  it("accepts the real relay: GET / answers {service:'apicred-relay'}", async () => {
+  it("accepts the real relay: GET / answers {service:'anyswitch-relay'}", async () => {
     await withServer(deps(null), async (port) => {
       assert.equal(await probeRelay(port), true);
     });
   });
 
-  it("rejects a 200 root body without the apicred-relay service marker", async () => {
+  it("rejects a 200 root body without the anyswitch-relay service marker", async () => {
     await withMockServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true }));

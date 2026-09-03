@@ -1,5 +1,5 @@
 // Kimi Code launcher — connects the Kimi Code CLI (Moonshot AI) through
-// the apicred relay so it uses the shared credential store.
+// the Anyswitch relay so it uses the shared credential store.
 //
 // Kimi Code speaks Anthropic protocol natively (it reads ANTHROPIC_BASE_URL,
 // ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY), so the same relay that serves
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
 import {
-  extractApiCredProviders,
+  extractManagedProviders,
   deriveAutoRouteChannel,
   mergeKimiConfigToml,
   readKimiConfigToml,
@@ -32,10 +32,10 @@ export function kimiConfigPath(base = process.env) {
 }
 
 export async function writeKimiConfig(store, port, token, sidecarRoot, configPath = kimiConfigPath()) {
-  const apiCredProviders = extractApiCredProviders(store);
+  const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "kimi");
-  if (Object.keys(apiCredProviders).length === 0 && !autoChannel) {
-    return { ok: true, unchanged: true, reason: "no ApiCred providers with models" };
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   let existing;
   try {
@@ -45,7 +45,7 @@ export async function writeKimiConfig(store, port, token, sidecarRoot, configPat
   }
   let merged;
   try {
-    merged = mergeKimiConfigToml(existing, apiCredProviders, port, token, autoChannel);
+    merged = mergeKimiConfigToml(existing, managedProviders, port, token, autoChannel);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_KIMI_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };

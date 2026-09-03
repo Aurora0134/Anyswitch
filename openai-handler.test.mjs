@@ -116,7 +116,7 @@ describe("openai handler path routing", () => {
       { model: "claude-opus-5", messages: [] },
     );
     assert.equal(result.status, 404);
-    assert.match(result.body.error.message, /not in the ApiCred store/);
+    assert.match(result.body.error.message, /not in the Anyswitch store/);
   });
 
   it("rejects unknown model with 404 and no upstream call", async () => {

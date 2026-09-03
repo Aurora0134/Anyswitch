@@ -14,7 +14,7 @@ import { buildWireCatalog } from "./wire-id.mjs";
 import {
   deriveVisibleChannels,
   derivePoolPseudoProviders,
-  extractApiCredProviders,
+  extractManagedProviders,
   poolMemberIdSet,
 } from "./pool-providers.mjs";
 import { poolModelsUnion, resolvePool } from "./pool-routing.mjs";
@@ -83,8 +83,8 @@ describe("visible-channel derivation is the single catalog source", () => {
     assert.equal(channels["pool-ab"].channelName, "Pool AB");
   });
 
-  it("extractApiCredProviders is the shared implementation, not a copy", () => {
-    assert.deepEqual(extractApiCredProviders(makeStore()), deriveVisibleChannels(makeStore()));
+  it("extractManagedProviders is the shared implementation, not a copy", () => {
+    assert.deepEqual(extractManagedProviders(makeStore()), deriveVisibleChannels(makeStore()));
   });
 
   it("pool pseudo-channels carry exactly the poolModelsUnion the relay serves", () => {

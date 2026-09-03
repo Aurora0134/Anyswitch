@@ -8,7 +8,7 @@ import {
   mergeKimiConfigToml,
   stripManagedBlock,
   writeKimiConfigTomlWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   readSidecar,
   writeSidecar,
   sidecarPath,
@@ -33,7 +33,7 @@ const STORE = {
 
 describe("kimi-merge-config", () => {
   it("builds openai provider and model entries for the relay", () => {
-    const providers = extractApiCredProviders(STORE);
+    const providers = extractManagedProviders(STORE);
     const { text, managed } = buildKimiManagedToml(providers, 47821, "tok");
     assert.deepEqual(managed, ["poke-api"]);
     assert.match(text, /\[providers\."_poke-api"\]/);
@@ -62,7 +62,7 @@ describe("kimi-merge-config", () => {
       MANAGED_END,
       "",
     ].join("\n");
-    const { text } = mergeKimiConfigToml(existing, extractApiCredProviders(STORE), 47821, "tok");
+    const { text } = mergeKimiConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
     assert.match(text, /# user hooks/);
     assert.match(text, /event = "Stop"/);
     assert.doesNotMatch(text, /_old/);
@@ -75,6 +75,18 @@ describe("kimi-merge-config", () => {
       () => stripManagedBlock(`${MANAGED_BEGIN}\n[providers."_x"]\n`),
       (err) => err.code === "UNPARSEABLE_KIMI_CONFIG",
     );
+  });
+
+  it("strips a pre-rename block carrying the legacy apicred markers", () => {
+    const legacy = [
+      "# >>> apicred-managed-kimi (managed by ApiCred; do not edit) >>>",
+      '[providers."_old"]',
+      "# <<< apicred-managed-kimi <<<",
+      "",
+    ].join("\n");
+    const stripped = stripManagedBlock(legacy);
+    assert.equal(stripped.includes("apicred"), false);
+    assert.equal(stripped, "");
   });
 
   it("strips unmarked provider/model tables left by a Kimi self-rewrite", () => {
@@ -99,7 +111,7 @@ describe("kimi-merge-config", () => {
       "max_context_size = 200000",
       "",
     ].join("\n");
-    const { text } = mergeKimiConfigToml(rewritten, extractApiCredProviders(STORE), 47821, "tok");
+    const { text } = mergeKimiConfigToml(rewritten, extractManagedProviders(STORE), 47821, "tok");
     assert.match(text, /default_model = "_poke-api\/claude-opus-5"/);
     assert.match(text, /event = "Stop"/);
     assert.doesNotMatch(text, /\[providers\._poke-api\]/);
@@ -171,7 +183,7 @@ describe("pool channels", () => {
   };
 
   it("emits one provider table for the pool with unioned, deduped model aliases", () => {
-    const { text, managed } = buildKimiManagedToml(extractApiCredProviders(POOL_STORE), 47821, "tok");
+    const { text, managed } = buildKimiManagedToml(extractManagedProviders(POOL_STORE), 47821, "tok");
     assert.match(text, /\[providers\."_pool-claude"\]/);
     assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/pool-claude\/v1"/);
     assert.match(text, /\[models\."_pool-claude\/claude-opus-5"\]/);
@@ -188,11 +200,11 @@ describe("pool channels", () => {
   });
 
   it("removes the pool tables after the pool is dissolved", () => {
-    const withPool = mergeKimiConfigToml("", extractApiCredProviders(POOL_STORE), 47821, "tok").text;
+    const withPool = mergeKimiConfigToml("", extractManagedProviders(POOL_STORE), 47821, "tok").text;
     assert.match(withPool, /_pool-claude/);
     const withoutPool = mergeKimiConfigToml(
       withPool,
-      extractApiCredProviders({ version: 2, providers: POOL_STORE.providers }),
+      extractManagedProviders({ version: 2, providers: POOL_STORE.providers }),
       47821,
       "tok",
     ).text;
@@ -205,7 +217,7 @@ describe("pool channels", () => {
       ...POOL_STORE,
       pools: { "poke-api": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } },
     };
-    const { text, managed } = buildKimiManagedToml(extractApiCredProviders(store), 47821, "tok");
+    const { text, managed } = buildKimiManagedToml(extractManagedProviders(store), 47821, "tok");
     // Both members are absorbed; only the pool channel (reusing the member id)
     // remains. Duplicate aliases would break TOML decoding.
     const providerHeaders = text.match(/^\[providers\..*\]/gm) ?? [];
@@ -249,7 +261,7 @@ describe("auto routing channel (_auto)", () => {
 
   it("injects the _auto provider whose alias maps to the literal wire id auto", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "kimi");
-    const { text, managed } = mergeKimiConfigToml("", extractApiCredProviders(CHAIN_STORE), 47821, "tok", auto);
+    const { text, managed } = mergeKimiConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", auto);
     assert.match(text, /\[providers\."_auto"\]/);
     assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
     assert.match(text, /\[models\."_auto\/auto"\]/);
@@ -268,7 +280,7 @@ describe("auto routing channel (_auto)", () => {
   it("does not inject _auto when the endpoint has no route chain", () => {
     const { text, managed } = mergeKimiConfigToml(
       "",
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       "tok",
       deriveAutoRouteChannel(STORE, "kimi"),
@@ -280,7 +292,7 @@ describe("auto routing channel (_auto)", () => {
   it("drops _auto from the managed block on the re-sync after the chain is deleted", () => {
     const first = mergeKimiConfigToml(
       "",
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       "tok",
       deriveAutoRouteChannel(CHAIN_STORE, "kimi"),
@@ -288,7 +300,7 @@ describe("auto routing channel (_auto)", () => {
     assert.match(first.text, /\[providers\."_auto"\]/);
     const second = mergeKimiConfigToml(
       first.text,
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       "tok",
       deriveAutoRouteChannel(STORE, "kimi"),

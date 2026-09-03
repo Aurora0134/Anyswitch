@@ -95,7 +95,7 @@ describe("buildTaskXml", () => {
 });
 
 describe("enableAutostart", () => {
-  it("registers the ApiCredRelay task with the XML over stdin", async () => {
+  it("registers the AnyswitchRelay task with the XML over stdin", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "REGISTERED\r\n" });
     const result = await enableAutostart({ spawnFn });
 
@@ -104,7 +104,7 @@ describe("enableAutostart", () => {
     const call = calls[0];
     assert.equal(call.cmd, "powershell.exe");
     assert.deepEqual(call.args.slice(0, 3), ["-NoProfile", "-NonInteractive", "-Command"]);
-    assert.ok(psCommandOf(call).includes("Register-ScheduledTask -TaskName 'ApiCredRelay'"));
+    assert.ok(psCommandOf(call).includes("Register-ScheduledTask -TaskName 'AnyswitchRelay'"));
     // The task XML must travel over stdin, never the command line.
     assert.ok(call.stdin.includes("<Task"));
     assert.ok(call.stdin.includes("relay-host.mjs"));
@@ -127,15 +127,23 @@ describe("enableAutostart", () => {
 });
 
 describe("disableAutostart", () => {
-  it("unregisters the ApiCredRelay task and sends no stdin", async () => {
+  it("unregisters the AnyswitchRelay task and sends no stdin", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
     const result = await disableAutostart({ spawnFn });
 
     assert.equal(result.ok, true);
     const command = psCommandOf(calls[0]);
-    assert.ok(command.includes("Unregister-ScheduledTask -TaskName 'ApiCredRelay'"));
+    assert.ok(command.includes("Unregister-ScheduledTask -TaskName 'AnyswitchRelay'"));
     assert.ok(command.includes("-Confirm:$false"));
     assert.equal(calls[0].stdin, "");
+  });
+
+  it("also unregisters the pre-rename legacy task", async () => {
+    const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
+    await disableAutostart({ spawnFn });
+
+    assert.equal(calls.length, 2);
+    assert.ok(psCommandOf(calls[1]).includes("Unregister-ScheduledTask -TaskName 'ApiCredRelay'"));
   });
 });
 
@@ -143,7 +151,7 @@ describe("isAutostartEnabled", () => {
   it("is true when the task is PRESENT", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "PRESENT\r\n" });
     assert.equal(await isAutostartEnabled({ spawnFn }), true);
-    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'ApiCredRelay'"));
+    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'AnyswitchRelay'"));
   });
 
   it("is false when the task is ABSENT", async () => {
@@ -160,25 +168,25 @@ describe("isAutostartEnabled", () => {
 });
 
 describe("watchdog autostart variants", () => {
-  it("registers the ApiCredWatchdog task pointing at agent-watchdog.mjs", async () => {
+  it("registers the AnyswitchWatchdog task pointing at agent-watchdog.mjs", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "REGISTERED\r\n" });
     const result = await enableWatchdogAutostart({ spawnFn });
 
     assert.equal(result.ok, true);
-    assert.ok(psCommandOf(calls[0]).includes("Register-ScheduledTask -TaskName 'ApiCredWatchdog'"));
+    assert.ok(psCommandOf(calls[0]).includes("Register-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
     assert.ok(calls[0].stdin.includes("agent-watchdog.mjs"));
   });
 
-  it("unregisters the ApiCredWatchdog task", async () => {
+  it("unregisters the AnyswitchWatchdog task", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "UNREGISTERED\r\n" });
     const result = await disableWatchdogAutostart({ spawnFn });
     assert.equal(result.ok, true);
-    assert.ok(psCommandOf(calls[0]).includes("Unregister-ScheduledTask -TaskName 'ApiCredWatchdog'"));
+    assert.ok(psCommandOf(calls[0]).includes("Unregister-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
   });
 
-  it("probes the ApiCredWatchdog task name", async () => {
+  it("probes the AnyswitchWatchdog task name", async () => {
     const { spawnFn, calls } = fakePS({ stdout: "ABSENT\r\n" });
     assert.equal(await isWatchdogAutostartEnabled({ spawnFn }), false);
-    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'ApiCredWatchdog'"));
+    assert.ok(psCommandOf(calls[0]).includes("Get-ScheduledTask -TaskName 'AnyswitchWatchdog'"));
   });
 });

@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 
 const GITFILE_PREFIX = "gitdir: ";
 
-// legacy dir name kept for compatibility after product rename ApiCred → Anyswitch
+// Durable object store lives OUTSIDE the data dir; the "ApiCred-git" name predates the rename.
 export const ANCHOR_PARENT_NAME = "ApiCred-git";
 export const ANCHOR_DIR_NAME = "objects";
 export const ANCHOR_SEAL_NAME = "objects.sealed";
@@ -62,13 +62,13 @@ export function writeGitfile(gitPath, anchorDir) {
  *
  * Opt-in: open-source clones have no durable object store, so this is pure
  * noise (a scary missing-anchor error) on every start. Unless
- * APICRED_GIT_ANCHOR=1 is set in the environment, this returns a quiet
+ * ANYSWITCH_GIT_ANCHOR=1 is set in the environment, this returns a quiet
  * no-op ("skipped"). With the flag set, behavior is exactly as before.
  */
 export function ensureGitAnchor(appDir, options = {}) {
   const env = options.env ?? process.env;
   const anchorDir = options.anchorDir ?? defaultAnchorDir(env);
-  if (env.APICRED_GIT_ANCHOR !== "1") {
+  if (env.ANYSWITCH_GIT_ANCHOR !== "1") {
     return { ok: true, action: "skipped", anchorDir };
   }
   const gitPath = join(appDir, ".git");

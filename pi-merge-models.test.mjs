@@ -8,7 +8,7 @@ import {
   mergeModelsJson,
   readModelsJson,
   writeModelsJsonWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   validatePiModelsConfig,
   readSidecar,
   writeSidecar,
@@ -47,9 +47,9 @@ describe("buildPiProviderEntry", () => {
     const p = entry["_poke-api"];
     assert.equal(p.name, "poke-api");
     assert.equal(p.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
-    assert.equal(p.apiKey, "${APICRED_RELAY_TOKEN}");
+    assert.equal(p.apiKey, "${ANYSWITCH_RELAY_TOKEN}");
     assert.equal(p.api, "openai-completions");
-    assert.deepEqual(p.headers, { "x-agent-id": "pi", "x-agent-instance": "${APICRED_INSTANCE_ID}" });
+    assert.deepEqual(p.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
     assert.equal(p.models.length, 2);
     assert.equal(p.models[0].id, "claude-opus-5");
     assert.equal(p.models[0].name, "Claude Opus 5");
@@ -92,7 +92,7 @@ describe("buildPiProviderEntry", () => {
 });
 
 describe("mergeModelsJson", () => {
-  it("adds apiCred providers with _ prefix to empty existing", () => {
+  it("adds managed providers with _ prefix to empty existing", () => {
     const { config, managed } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
     assert.ok(config.providers["_poke-api"]);
     assert.ok(config.providers["_deepseek"]);
@@ -101,7 +101,7 @@ describe("mergeModelsJson", () => {
     assert.ok(managed.includes("deepseek"));
   });
 
-  it("preserves non-ApiCred providers", () => {
+  it("preserves foreign providers", () => {
     const existing = { providers: { "my-custom-provider": { baseUrl: "https://x", models: [{ id: "custom" }] } } };
     const { config } = mergeModelsJson(existing, STORE.providers, 47821);
     assert.ok(config.providers["my-custom-provider"]);
@@ -197,9 +197,9 @@ describe("writeModelsJsonWithBackup", () => {
   });
 });
 
-describe("extractApiCredProviders", () => {
+describe("extractManagedProviders", () => {
   it("extracts providers with non-empty models", () => {
-    const extracted = extractApiCredProviders(STORE);
+    const extracted = extractManagedProviders(STORE);
     assert.equal(Object.keys(extracted).length, 2);
     assert.ok(extracted["poke-api"]);
     assert.ok(extracted["deepseek"]);
@@ -213,7 +213,7 @@ describe("extractApiCredProviders", () => {
         full: { baseURL: "https://y", models: { m: {} } },
       },
     };
-    const extracted = extractApiCredProviders(store);
+    const extracted = extractManagedProviders(store);
     assert.equal(Object.keys(extracted).length, 1);
     assert.ok(extracted["full"]);
     assert.equal(extracted["empty"], undefined);
@@ -289,13 +289,13 @@ describe("pool channels", () => {
   };
 
   it("surfaces a pool as one provider with unioned, deduped models", () => {
-    const { config, managed } = mergeModelsJson({ providers: {} }, extractApiCredProviders(POOL_STORE), 47821, []);
+    const { config, managed } = mergeModelsJson({ providers: {} }, extractManagedProviders(POOL_STORE), 47821, []);
     const pool = config.providers["_pool-claude"];
     assert.ok(pool);
     assert.equal(pool.name, "Claude Pool");
     assert.equal(pool.baseUrl, "http://127.0.0.1:47821/openai/pool-claude/v1");
-    assert.equal(pool.apiKey, "${APICRED_RELAY_TOKEN}");
-    assert.deepEqual(pool.headers, { "x-agent-id": "pi", "x-agent-instance": "${APICRED_INSTANCE_ID}" });
+    assert.equal(pool.apiKey, "${ANYSWITCH_RELAY_TOKEN}");
+    assert.deepEqual(pool.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
     assert.deepEqual(pool.models.map((m) => m.id), ["claude-opus-5", "claude-sonnet-4", "deepseek-v4"]);
     // First member in pool order wins the shared model's metadata.
     assert.equal(pool.models[0].name, "Claude Opus 5");
@@ -308,10 +308,10 @@ describe("pool channels", () => {
   });
 
   it("removes the pool provider after the pool is dissolved", () => {
-    const withPool = mergeModelsJson({ providers: {} }, extractApiCredProviders(POOL_STORE), 47821, []);
+    const withPool = mergeModelsJson({ providers: {} }, extractManagedProviders(POOL_STORE), 47821, []);
     const withoutPool = mergeModelsJson(
       withPool.config,
-      extractApiCredProviders({ version: 2, providers: POOL_STORE.providers }),
+      extractManagedProviders({ version: 2, providers: POOL_STORE.providers }),
       47821,
       withPool.managed,
     );
@@ -324,7 +324,7 @@ describe("pool channels", () => {
       ...POOL_STORE,
       pools: { "poke-api": { displayName: "Poke Pool", members: ["poke-api", "deepseek"] } },
     };
-    const { config, managed } = mergeModelsJson({ providers: {} }, extractApiCredProviders(store), 47821, []);
+    const { config, managed } = mergeModelsJson({ providers: {} }, extractManagedProviders(store), 47821, []);
     const channel = config.providers["_poke-api"];
     assert.equal(channel.name, "Poke Pool");
     assert.equal(channel.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
@@ -352,7 +352,7 @@ describe("auto routing channel (_auto)", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "pi");
     const { config, managed } = mergeModelsJson(
       { providers: {} },
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       [],
       auto,
@@ -363,7 +363,7 @@ describe("auto routing channel (_auto)", () => {
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(entry.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
     assert.equal(entry.api, "openai-completions");
-    assert.deepEqual(entry.headers, { "x-agent-id": "pi", "x-agent-instance": "${APICRED_INSTANCE_ID}" });
+    assert.deepEqual(entry.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
     assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
     assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
     assert.equal(validatePiModelsConfig(config).valid, true);
@@ -372,7 +372,7 @@ describe("auto routing channel (_auto)", () => {
   it("does not inject _auto when the endpoint has no route chain", () => {
     const { config, managed } = mergeModelsJson(
       { providers: {} },
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       [],
       deriveAutoRouteChannel(STORE, "pi"),
@@ -384,7 +384,7 @@ describe("auto routing channel (_auto)", () => {
   it("cleans up _auto on the re-sync after the chain is deleted", () => {
     const first = mergeModelsJson(
       { providers: {} },
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       [],
       deriveAutoRouteChannel(CHAIN_STORE, "pi"),
@@ -392,7 +392,7 @@ describe("auto routing channel (_auto)", () => {
     assert.ok(first.config.providers._auto);
     const second = mergeModelsJson(
       first.config,
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       first.managed,
       deriveAutoRouteChannel(STORE, "pi"),
@@ -407,7 +407,7 @@ describe("per-instance header env expansion feasibility", () => {
   // 证据（本机安装 @earendil-works/pi-coding-agent）：
   //   dist/core/resolve-config-value.js:222 resolveHeaders —— 逐值走 resolveConfigValue 模板展开
   //   dist/core/provider-composer.js:242 —— models.json 的 provider headers 经 resolveHeadersOrThrow 解析
-  // 因此 launcher 每次启动生成 APICRED_INSTANCE_ID 即可实现 per-instance 头注入，
+  // 因此 launcher 每次启动生成 ANYSWITCH_INSTANCE_ID 即可实现 per-instance 头注入，
   // 前提是 merge 管线把 ${VAR} 占位符原样写进 models.json。以下测试钉住该前提与注入行为。
   // 注意：resolveHeadersOrThrow 对缺失变量会抛错，注入的变量必须由 launcher 保证存在。
   it("preserves ${VAR} placeholders in a non-managed provider's headers verbatim", () => {
@@ -415,13 +415,13 @@ describe("per-instance header env expansion feasibility", () => {
       providers: {
         "my-custom": {
           baseUrl: "http://x",
-          headers: { "x-instance-id": "${APICRED_INSTANCE_ID}" },
+          headers: { "x-instance-id": "${ANYSWITCH_INSTANCE_ID}" },
           models: [{ id: "m1" }],
         },
       },
     };
     const { config } = mergeModelsJson(existing, STORE.providers, 47821);
-    assert.equal(config.providers["my-custom"].headers["x-instance-id"], "${APICRED_INSTANCE_ID}");
+    assert.equal(config.providers["my-custom"].headers["x-instance-id"], "${ANYSWITCH_INSTANCE_ID}");
   });
 
   it("keeps the literal ${VAR} placeholder through a write/read round-trip on disk", () => {
@@ -432,7 +432,7 @@ describe("per-instance header env expansion feasibility", () => {
         providers: {
           "my-custom": {
             baseUrl: "http://x",
-            headers: { "x-instance-id": "${APICRED_INSTANCE_ID}" },
+            headers: { "x-instance-id": "${ANYSWITCH_INSTANCE_ID}" },
             models: [{ id: "m1" }],
           },
         },
@@ -442,15 +442,15 @@ describe("per-instance header env expansion feasibility", () => {
     );
     writeModelsJsonWithBackup(filePath, config);
     const reread = readModelsJson(filePath);
-    assert.equal(reread.providers["my-custom"].headers["x-instance-id"], "${APICRED_INSTANCE_ID}");
-    // apiKey 侧的 ${APICRED_RELAY_TOKEN} 占位符同样原样落盘。
-    assert.equal(reread.providers["_poke-api"].apiKey, "${APICRED_RELAY_TOKEN}");
+    assert.equal(reread.providers["my-custom"].headers["x-instance-id"], "${ANYSWITCH_INSTANCE_ID}");
+    // apiKey 侧的 ${ANYSWITCH_RELAY_TOKEN} 占位符同样原样落盘。
+    assert.equal(reread.providers["_poke-api"].apiKey, "${ANYSWITCH_RELAY_TOKEN}");
   });
 
-  it("injects the ${APICRED_INSTANCE_ID} header into every managed provider", () => {
+  it("injects the ${ANYSWITCH_INSTANCE_ID} header into every managed provider", () => {
     const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
     for (const id of ["_poke-api", "_deepseek"]) {
-      assert.equal(config.providers[id].headers["x-agent-instance"], "${APICRED_INSTANCE_ID}");
+      assert.equal(config.providers[id].headers["x-agent-instance"], "${ANYSWITCH_INSTANCE_ID}");
       // 已有的 x-agent-id 静态头保留不动。
       assert.equal(config.providers[id].headers["x-agent-id"], "pi");
     }
@@ -462,6 +462,6 @@ describe("per-instance header env expansion feasibility", () => {
     const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
     writeModelsJsonWithBackup(filePath, config);
     const reread = readModelsJson(filePath);
-    assert.equal(reread.providers["_poke-api"].headers["x-agent-instance"], "${APICRED_INSTANCE_ID}");
+    assert.equal(reread.providers["_poke-api"].headers["x-agent-instance"], "${ANYSWITCH_INSTANCE_ID}");
   });
 });

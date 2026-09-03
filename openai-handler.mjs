@@ -99,11 +99,11 @@ export function createOpenAIHandler(deps) {
   function loadValidStore() {
     const loaded = loadStore();
     if (!loaded.ok) {
-      return { ok: false, status: 502, body: openAIError("api_error", "the ApiCred global store could not be read") };
+      return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store could not be read") };
     }
     const result = validateStore(loaded.store);
     if (!result.valid) {
-      return { ok: false, status: 502, body: openAIError("api_error", "the ApiCred global store failed schema validation") };
+      return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store failed schema validation") };
     }
     return { ok: true, store: loaded.store };
   }
@@ -111,7 +111,7 @@ export function createOpenAIHandler(deps) {
   function resolveProvider(store, providerId) {
     const provider = store.providers?.[providerId];
     if (provider === undefined) {
-      return { ok: false, status: 404, body: openAIError("not_found_error", `provider "${providerId}" is not in the ApiCred store`) };
+      return { ok: false, status: 404, body: openAIError("not_found_error", `provider "${providerId}" is not in the Anyswitch store`) };
     }
     return { ok: true, provider };
   }

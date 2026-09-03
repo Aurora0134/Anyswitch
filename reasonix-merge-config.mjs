@@ -8,12 +8,18 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 
 const SIDECAR_FILENAME = "reasonix-sidecar.json";
-// legacy marker names kept for compatibility after product rename ApiCred → Anyswitch
-export const MANAGED_BEGIN = "# >>> apicred-managed-reasonix (managed by ApiCred; do not edit) >>>";
-export const MANAGED_END = "# <<< apicred-managed-reasonix <<<";
+// Migration: blocks in user config.toml written before the product rename
+// still carry the "apicred-managed-reasonix" markers; stripManagedBlock below
+// recognizes both so the old block is replaced by the new-marker block.
+const LEGACY_MANAGED_BEGIN = "# >>> apicred-managed-reasonix (managed by ApiCred; do not edit) >>>";
+const LEGACY_MANAGED_END = "# <<< apicred-managed-reasonix <<<";
+export const MANAGED_BEGIN = "# >>> anyswitch-managed-reasonix (managed by Anyswitch; do not edit) >>>";
+export const MANAGED_END = "# <<< anyswitch-managed-reasonix <<<";
 
-// legacy env var name kept for compatibility after product rename ApiCred → Anyswitch
-export const RELAY_TOKEN_ENV = "APICRED_RELAY_TOKEN";
+// The .env key used APICRED_RELAY_TOKEN before the rename; mergeReasonixEnv
+// rewrites both spellings so the stored token survives the transition.
+const LEGACY_RELAY_TOKEN_ENV = "APICRED_RELAY_TOKEN";
+export const RELAY_TOKEN_ENV = "ANYSWITCH_RELAY_TOKEN";
 
 const BUILTIN_DEEPSEEK_TOML = [
   "[[providers]]",
@@ -58,7 +64,7 @@ function tomlString(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-export { extractApiCredProviders } from "./pool-providers.mjs";
+export { extractManagedProviders } from "./pool-providers.mjs";
 
 export function prefixedProviderId(providerId) {
   return `_${providerId}`;
@@ -73,7 +79,7 @@ export function mergeReasonixEnv(existingText, token) {
   let found = false;
   const out = [];
   for (const line of lines) {
-    if (/^\s*APICRED_RELAY_TOKEN\s*=/.test(line)) {
+    if (/^\s*(ANYSWITCH_RELAY_TOKEN|APICRED_RELAY_TOKEN)\s*=/.test(line)) {
       out.push(`${RELAY_TOKEN_ENV}=${token}`);
       found = true;
     } else if (line.length > 0 || out.length === 0 || out[out.length - 1] !== "") {
@@ -106,15 +112,15 @@ export function writeReasonixEnvWithBackup(filePath, token) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-export function buildReasonixManagedToml(apiCredProviders, port) {
+export function buildReasonixManagedToml(managedProviders, port) {
   const lines = [
     MANAGED_BEGIN,
-    "# OpenAI-compatible ApiCred relay providers. Token is APICRED_RELAY_TOKEN in .env.",
+    "# OpenAI-compatible Anyswitch relay providers. Token is ANYSWITCH_RELAY_TOKEN in .env.",
     "",
   ];
   const managed = [];
 
-  for (const [providerId, provider] of Object.entries(apiCredProviders)) {
+  for (const [providerId, provider] of Object.entries(managedProviders)) {
     const name = prefixedProviderId(providerId);
     // Pseudo-channels (auto routing) name a different relay URL segment than
     // their own id; real channels never set baseUrlSegment.
@@ -176,11 +182,14 @@ export function stripPrefixedProviderTables(text) {
 }
 
 export function stripManagedBlock(text) {
-  const begin = text.indexOf(MANAGED_BEGIN);
+  const begin = text.indexOf(MANAGED_BEGIN) !== -1
+    ? text.indexOf(MANAGED_BEGIN)
+    : text.indexOf(LEGACY_MANAGED_BEGIN);
   if (begin === -1) return text.replace(/\s+$/, "") + (text.length ? "\n" : "");
-  const end = text.indexOf(MANAGED_END, begin);
+  let end = text.indexOf(MANAGED_END, begin);
+  if (end === -1) end = text.indexOf(LEGACY_MANAGED_END, begin);
   if (end === -1) {
-    const err = new Error("refusing to overwrite reasonix config.toml with a truncated ApiCred managed block");
+    const err = new Error("refusing to overwrite reasonix config.toml with a truncated Anyswitch managed block");
     err.code = "UNPARSEABLE_REASONIX_CONFIG";
     throw err;
   }
@@ -192,7 +201,7 @@ export function stripManagedBlock(text) {
   return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-export function mergeReasonixConfigToml(existingText, apiCredProviders, port, autoChannel = null) {
+export function mergeReasonixConfigToml(existingText, managedProviders, port, autoChannel = null) {
   let preserved = stripPrefixedProviderTables(stripManagedBlock(existingText ?? ""));
   if (!/\[\[providers\]\]/.test(preserved)) {
     preserved = preserved.replace(/\s+$/, "");
@@ -202,7 +211,7 @@ export function mergeReasonixConfigToml(existingText, apiCredProviders, port, au
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `_auto`.
-  const providers = autoChannel ? { ...apiCredProviders, [AUTO_CHANNEL_KEY]: autoChannel } : apiCredProviders;
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
   const { text: managedText, managed } = buildReasonixManagedToml(providers, port);
   const merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
   return { text: merged, managed };

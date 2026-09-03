@@ -46,11 +46,11 @@ describe("relay-settings", () => {
     assert.equal(fromConfig.mode, "enhanced");
     assert.equal(fromConfig.enabled, true);
 
-    const fromEnv = parseKeepAliveConfig({}, { APICRED_KEEPALIVE_MODE: "basic" });
+    const fromEnv = parseKeepAliveConfig({}, { ANYSWITCH_KEEPALIVE_MODE: "basic" });
     assert.equal(fromEnv.mode, "enhanced");
     assert.equal(fromEnv.enabled, true);
 
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-migrate-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-migrate-"));
     const path = join(tmp, "settings.json");
     try {
       // Production settings.json shape before the two-tier merge.
@@ -78,15 +78,15 @@ describe("relay-settings", () => {
   });
 
   it("allows environment variable override", () => {
-    const cfg1 = parseKeepAliveConfig({ enabled: true }, { APICRED_KEEPALIVE_ENABLED: "0" });
+    const cfg1 = parseKeepAliveConfig({ enabled: true }, { ANYSWITCH_KEEPALIVE_ENABLED: "0" });
     assert.equal(cfg1.enabled, false);
 
-    const cfg2 = parseKeepAliveConfig({}, { APICRED_KEEPALIVE_RETRIES: "3" });
+    const cfg2 = parseKeepAliveConfig({}, { ANYSWITCH_KEEPALIVE_RETRIES: "3" });
     assert.equal(cfg2.maxRetries, 3);
   });
 
   it("loads from disk, preserves extra keys, and atomic writes patches", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-test-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-test-"));
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({ followAgentLaunch: true, customKey: 123 }));
@@ -127,7 +127,7 @@ describe("relay-settings", () => {
   });
 
   it("persists sparkWindowPoints as a last-N request window", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-spark-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-spark-"));
     const path = join(tmp, "settings.json");
     try {
       const loaded = loadSettings(path, {});
@@ -141,7 +141,7 @@ describe("relay-settings", () => {
   });
 
   it("quarantines a corrupt settings.json instead of overwriting it", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-corrupt-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-corrupt-"));
     const path = join(tmp, "settings.json");
     try {
       const corrupt = '{ "keepAlive": { "enabled": true, '; // truncated JSON
@@ -165,7 +165,7 @@ describe("relay-settings", () => {
   });
 
   it("saves successfully when the settings root directory does not exist yet", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-noroot-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-noroot-"));
     try {
       // First boot on an empty data root: nested missing directories.
       const path = join(tmp, "missing", "settings.json");
@@ -179,7 +179,7 @@ describe("relay-settings", () => {
   });
 
   it("leaves no corrupt backup behind on a normal save", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-clean-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-clean-"));
     const path = join(tmp, "settings.json");
     try {
       saveSettings(path, { keepAlive: { enabled: false } }, {});
@@ -200,7 +200,7 @@ describe("relay-settings", () => {
   });
 
   it("persists keepAlive.maxRetries via saveSettings and clamps out-of-range values", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-retries-"));
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-retries-"));
     const path = join(tmp, "settings.json");
     try {
       const saved = saveSettings(path, { keepAlive: { maxRetries: 3 } }, {});
@@ -219,14 +219,14 @@ describe("relay-settings", () => {
     }
   });
 
-  it("APICRED_KEEPALIVE_RETRIES overrides the persisted value and is not clamped to 10", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "apicred-settings-retries-env-"));
+  it("ANYSWITCH_KEEPALIVE_RETRIES overrides the persisted value and is not clamped to 10", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-retries-env-"));
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({ keepAlive: { maxRetries: 2 } }));
       assert.equal(loadSettings(path, {}).keepAlive.maxRetries, 2);
-      assert.equal(loadSettings(path, { APICRED_KEEPALIVE_RETRIES: "7" }).keepAlive.maxRetries, 7);
-      assert.equal(loadSettings(path, { APICRED_KEEPALIVE_RETRIES: "20" }).keepAlive.maxRetries, 20);
+      assert.equal(loadSettings(path, { ANYSWITCH_KEEPALIVE_RETRIES: "7" }).keepAlive.maxRetries, 7);
+      assert.equal(loadSettings(path, { ANYSWITCH_KEEPALIVE_RETRIES: "20" }).keepAlive.maxRetries, 20);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

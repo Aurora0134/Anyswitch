@@ -1,4 +1,4 @@
-// Global ApiCred v2 Store schema validator.
+// Global Anyswitch v2 Store schema validator.
 // Pure functions only. No IO, no DPAPI, no network.
 // Contract: the store never carries secrets; credentialFile is a
 // Store-root-relative reference. The reference is validated here through

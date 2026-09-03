@@ -44,7 +44,7 @@ test("JSONC parsing accepts a UTF-8 byte order mark", () => {
 });
 
 test("JSONC parsing accepts a UTF-8 byte order mark ahead of a leading comment", () => {
-  const text = `﻿// managed by apicred\n{\n  "provider": {}\n}`;
+  const text = `﻿// managed by anyswitch\n{\n  "provider": {}\n}`;
   assert.deepEqual(parseJsonc(text).provider, {});
 });
 

@@ -1,4 +1,4 @@
-// Global ApiCred model catalog resolver.
+// Global Anyswitch model catalog resolver.
 // Pure functions only. No IO, no DPAPI, no network. Synthetic input only.
 //
 // Contract:

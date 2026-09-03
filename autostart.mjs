@@ -6,7 +6,7 @@
 //   2. HKCU\...\Run registry key — works per-user without elevation, but some
 //      machines suppress the ENTIRE user-level Run processing at logon (all
 //      HKCU entries skipped while HKLM ones fire; observed 2026-08-24 with
-//      OneDrive/QQNT/Thunder hit alongside ApiCred). No code bug — the shell
+//      OneDrive/QQNT/Thunder hit alongside Anyswitch). No code bug — the shell
 //      just never runs the entries.
 //   3. PowerShell Register-ScheduledTask with an Interactive/Limited
 //      principal and an AtLogOn trigger — succeeds non-elevated, is launched
@@ -26,9 +26,15 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// legacy task names kept for compatibility after product rename ApiCred → Anyswitch
-const TASK_NAME = "ApiCredRelay";
-const WATCHDOG_TASK_NAME = "ApiCredWatchdog";
+// Migration note: tasks were registered as "ApiCredRelay"/"ApiCredWatchdog"
+// before the product rename ApiCred → Anyswitch. New registrations use the
+// Anyswitch* names; the disable paths also unregister the legacy tasks so a
+// pre-rename install doesn't keep two tasks alive, and the probe treats the
+// legacy name as enabled so the panel toggle doesn't flip on old installs.
+const LEGACY_TASK_NAME = "ApiCredRelay";
+const LEGACY_WATCHDOG_TASK_NAME = "ApiCredWatchdog";
+const TASK_NAME = "AnyswitchRelay";
+const WATCHDOG_TASK_NAME = "AnyswitchWatchdog";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 
@@ -158,11 +164,16 @@ export async function enableAutostart({ spawnFn = spawn } = {}) {
 }
 
 export async function disableAutostart({ spawnFn = spawn } = {}) {
-  return unregisterTask(TASK_NAME, spawnFn);
+  const result = await unregisterTask(TASK_NAME, spawnFn);
+  await unregisterTask(LEGACY_TASK_NAME, spawnFn);
+  return result;
 }
 
 export async function isAutostartEnabled({ spawnFn = spawn } = {}) {
-  return isTaskPresent(TASK_NAME, spawnFn);
+  const present = await isTaskPresent(TASK_NAME, spawnFn);
+  if (present) return true;
+  // Pre-rename install: legacy task still registered under the old name.
+  return isTaskPresent(LEGACY_TASK_NAME, spawnFn);
 }
 
 // Watchdog variant: the followAgent entry starts agent-watchdog.mjs (NOT the
@@ -172,9 +183,13 @@ export async function enableWatchdogAutostart({ spawnFn = spawn } = {}) {
 }
 
 export async function disableWatchdogAutostart({ spawnFn = spawn } = {}) {
-  return unregisterTask(WATCHDOG_TASK_NAME, spawnFn);
+  const result = await unregisterTask(WATCHDOG_TASK_NAME, spawnFn);
+  await unregisterTask(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
+  return result;
 }
 
 export async function isWatchdogAutostartEnabled({ spawnFn = spawn } = {}) {
-  return isTaskPresent(WATCHDOG_TASK_NAME, spawnFn);
+  const present = await isTaskPresent(WATCHDOG_TASK_NAME, spawnFn);
+  if (present) return true;
+  return isTaskPresent(LEGACY_WATCHDOG_TASK_NAME, spawnFn);
 }

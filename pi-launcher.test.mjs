@@ -32,8 +32,8 @@ describe("buildInstanceId", () => {
 describe("buildPiLauncherEnv", () => {
   it("injects relay token, instance id and NO_PROXY for loopback", () => {
     const env = buildPiLauncherEnv({ port: 4321, token: "tok", instanceId: "ws-1", base: { A: "1", HTTP_PROXY: "http://proxy" } });
-    assert.equal(env.APICRED_RELAY_TOKEN, "tok");
-    assert.equal(env.APICRED_INSTANCE_ID, "ws-1");
+    assert.equal(env.ANYSWITCH_RELAY_TOKEN, "tok");
+    assert.equal(env.ANYSWITCH_INSTANCE_ID, "ws-1");
     assert.equal(env.NO_PROXY, "127.0.0.1,localhost");
     assert.equal(env.no_proxy, "127.0.0.1,localhost");
     assert.equal(env.A, "1");
@@ -41,7 +41,7 @@ describe("buildPiLauncherEnv", () => {
 
   it("generates an instance id when none is passed", () => {
     const env = buildPiLauncherEnv({ port: 4321, token: "tok", base: {} });
-    assert.match(env.APICRED_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
+    assert.match(env.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
   });
 });
 
@@ -80,7 +80,7 @@ describe("runPiLauncher", () => {
         return { unchanged: false, backupPath: "backup.json" };
       },
       spawnPi: async ({ env }) => {
-        calls.push(`spawnPi:${env.APICRED_RELAY_TOKEN}:${env.NO_PROXY}`);
+        calls.push(`spawnPi:${env.ANYSWITCH_RELAY_TOKEN}:${env.NO_PROXY}`);
         return 0;
       },
       log: () => {},
@@ -95,7 +95,7 @@ describe("runPiLauncher", () => {
     ]);
   });
 
-  it("passes a generated APICRED_INSTANCE_ID into the spawned env", async () => {
+  it("passes a generated ANYSWITCH_INSTANCE_ID into the spawned env", async () => {
     let spawnedEnv = null;
     await runPiLauncher({
       startRelay: async () => ({ port: 7000, token: "tok", close: async () => {} }),
@@ -106,10 +106,10 @@ describe("runPiLauncher", () => {
       },
       base: {},
     });
-    assert.match(spawnedEnv.APICRED_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
+    assert.match(spawnedEnv.ANYSWITCH_INSTANCE_ID, /^[A-Za-z0-9._:-]{1,64}$/);
     // The shared scheme is "<cwd basename>-<launcher pid>"; this process IS
     // the launcher here, so the id ends with our own pid.
-    assert.ok(spawnedEnv.APICRED_INSTANCE_ID.endsWith(`-${process.pid}`));
+    assert.ok(spawnedEnv.ANYSWITCH_INSTANCE_ID.endsWith(`-${process.pid}`));
   });
 
   it("closes relay even when spawn throws", async () => {
@@ -142,7 +142,7 @@ describe("runPiLauncher", () => {
 });
 
 describe("writePiModels", () => {
-  it("returns unchanged when there are no ApiCred providers with models", async () => {
+  it("returns unchanged when there are no Anyswitch providers with models", async () => {
     const result = await writePiModels(
       { version: 2, providers: { empty: { models: {} } } },
       47821,
@@ -173,7 +173,7 @@ describe("writePiModels", () => {
     const written = JSON.parse(readFileSync(modelsPath, "utf8"));
     assert.ok(written.providers["_poke-api"]);
     assert.equal(written.providers["_poke-api"].baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
-    assert.equal(written.providers["_poke-api"].apiKey, "${APICRED_RELAY_TOKEN}");
+    assert.equal(written.providers["_poke-api"].apiKey, "${ANYSWITCH_RELAY_TOKEN}");
     assert.equal(written.providers["_poke-api"].models[0].id, "claude-opus-5");
     const sidecar = JSON.parse(readFileSync(join(dir, "pi-sidecar.json"), "utf8"));
     assert.deepEqual(sidecar.providers, ["poke-api"]);

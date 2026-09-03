@@ -14,7 +14,7 @@ import {
   readZcodeConfig,
   mergeZcodeConfig,
   writeZcodeConfigWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   deriveAutoRouteChannel,
   readSidecar,
   writeSidecar,
@@ -29,14 +29,14 @@ const ZCODE_CONFIG_PATH = zcodeConfigPath();
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "ApiCred");
 }
 
 function createOpenAIProductionDeps(options = {}) {
   const paths = options.paths ?? storePaths();
   const claudeDeps = createProductionDeps({ paths });
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const logger = options.logger ?? createLogger();
   // Usage journal (same dir as the resident relay) so fallback-relay traffic
   // still lands in the stats journal when the resident relay is down.
@@ -63,7 +63,7 @@ export async function startOpenAIRelay(options = {}) {
   const deps = createOpenAIProductionDeps(options);
   const probe = deps.loadStore();
   if (!probe.ok) {
-    throw new Error("the ApiCred global store is not usable; refusing to start the zcode relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the zcode relay");
   }
   const server = createOpenAIRelayServer(deps);
   const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
@@ -71,10 +71,10 @@ export async function startOpenAIRelay(options = {}) {
 }
 
 export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH) {
-  const apiCredProviders = extractApiCredProviders(store);
+  const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "zcode");
-  if (Object.keys(apiCredProviders).length === 0 && !autoChannel) {
-    return { ok: true, unchanged: true, reason: "no ApiCred providers with models" };
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   const previousManaged = readSidecar(sidecarRoot).providers;
   let existing;
@@ -86,7 +86,7 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
     }
     throw error;
   }
-  const { config, managed } = mergeZcodeConfig(existing, apiCredProviders, port, token, previousManaged, autoChannel);
+  const { config, managed } = mergeZcodeConfig(existing, managedProviders, port, token, previousManaged, autoChannel);
 
   const gate = validateZcodeConfig(config);
   if (!gate.valid) {
@@ -114,7 +114,7 @@ export function resolveZcodeExecutable(base = process.env) {
   if (!isAbsolute(override)) {
     throw new Error(
       `ZCODE_EXECUTABLE must be an absolute path, got "${override}". ` +
-        `A bare name or relative path could resolve back to the apicred shim and ` +
+        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
         `make the launcher recurse into itself.`,
     );
   }
@@ -123,7 +123,7 @@ export function resolveZcodeExecutable(base = process.env) {
 
 export function buildZcodeLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };
-  env.APICRED_RELAY_TOKEN = token;
+  env.ANYSWITCH_RELAY_TOKEN = token;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
   return env;
@@ -165,7 +165,7 @@ export async function runZcodeLauncher({
   try {
     const reused = await probeRelayFn(RELAY_PORT);
     if (reused) {
-      const token = loadOrGenerateToken(apiCredRoot(base));
+      const token = loadOrGenerateToken(relayDataRoot(base));
       relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
       log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
     } else {
@@ -181,9 +181,9 @@ export async function runZcodeLauncher({
   try {
     const loaded = loadStore();
     if (!loaded.ok) {
-      log("warning: ApiCred store could not be read; zcode config not updated");
+      log("warning: Anyswitch store could not be read; zcode config not updated");
     } else {
-      const sidecarRoot = apiCredRoot(base);
+      const sidecarRoot = relayDataRoot(base);
       const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: zcode config.json not updated: ${writeResult.reason ?? "unknown error"}`);

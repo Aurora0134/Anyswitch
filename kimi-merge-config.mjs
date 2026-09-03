@@ -8,12 +8,16 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
-export { extractApiCredProviders } from "./pool-providers.mjs";
+export { extractManagedProviders } from "./pool-providers.mjs";
 
 const SIDECAR_FILENAME = "kimi-sidecar.json";
-// legacy marker names kept for compatibility after product rename ApiCred → Anyswitch
-export const MANAGED_BEGIN = "# >>> apicred-managed-kimi (managed by ApiCred; do not edit) >>>";
-export const MANAGED_END = "# <<< apicred-managed-kimi <<<";
+// Migration: blocks in user config.toml written before the product rename
+// still carry the "apicred-managed-kimi" markers; stripManagedBlock below
+// recognizes both so the old block is replaced by the new-marker block.
+const LEGACY_MANAGED_BEGIN = "# >>> apicred-managed-kimi (managed by ApiCred; do not edit) >>>";
+const LEGACY_MANAGED_END = "# <<< apicred-managed-kimi <<<";
+export const MANAGED_BEGIN = "# >>> anyswitch-managed-kimi (managed by Anyswitch; do not edit) >>>";
+export const MANAGED_END = "# <<< anyswitch-managed-kimi <<<";
 
 export function sidecarPath(root) {
   return join(root, SIDECAR_FILENAME);
@@ -45,11 +49,11 @@ export function kimiModelAlias(providerId, modelId) {
   return `${prefixedProviderId(providerId)}/${modelId}`;
 }
 
-export function buildKimiManagedToml(apiCredProviders, port, token) {
-  const lines = [MANAGED_BEGIN, "# OpenAI-compatible ApiCred relay providers and models.", ""];
+export function buildKimiManagedToml(managedProviders, port, token) {
+  const lines = [MANAGED_BEGIN, "# OpenAI-compatible Anyswitch relay providers and models.", ""];
   const managed = [];
 
-  for (const [providerId, provider] of Object.entries(apiCredProviders)) {
+  for (const [providerId, provider] of Object.entries(managedProviders)) {
     const pid = prefixedProviderId(providerId);
     // Pseudo-channels (auto routing) name a different relay URL segment than
     // their own id; real channels never set baseUrlSegment.
@@ -92,12 +96,12 @@ export function buildKimiManagedToml(apiCredProviders, port, token) {
 
 // Kimi Code rewrites config.toml itself (Rust toml serializer) whenever the
 // user changes settings inside the CLI, and that rewrite drops every comment
-// line — including the ApiCred managed-block markers. The rewritten provider/
+// line — including the Anyswitch managed-block markers. The rewritten provider/
 // model tables survive as unmarked content, so the next merge would append a
 // second copy of the same tables and produce duplicate TOML declarations
 // ("Cannot declare ('providers', '_x') twice"), which Kimi rejects wholesale —
 // config load fails and no models are visible. The `_` prefix is reserved for
-// ApiCred-generated ids, so any table under [providers._...] or [models."_..."]
+// Anyswitch-generated ids, so any table under [providers._...] or [models."_..."]
 // outside the managed block is a stale leftover from such a rewrite and must go.
 export function stripPrefixedTables(text) {
   if (!text) return text ?? "";
@@ -117,11 +121,14 @@ export function stripPrefixedTables(text) {
 }
 
 export function stripManagedBlock(text) {
-  const begin = text.indexOf(MANAGED_BEGIN);
+  const begin = text.indexOf(MANAGED_BEGIN) !== -1
+    ? text.indexOf(MANAGED_BEGIN)
+    : text.indexOf(LEGACY_MANAGED_BEGIN);
   if (begin === -1) return text.replace(/\s+$/, "") + (text.length ? "\n" : "");
-  const end = text.indexOf(MANAGED_END, begin);
+  let end = text.indexOf(MANAGED_END, begin);
+  if (end === -1) end = text.indexOf(LEGACY_MANAGED_END, begin);
   if (end === -1) {
-    const err = new Error("refusing to overwrite kimi config.toml with a truncated ApiCred managed block");
+    const err = new Error("refusing to overwrite kimi config.toml with a truncated Anyswitch managed block");
     err.code = "UNPARSEABLE_KIMI_CONFIG";
     throw err;
   }
@@ -133,13 +140,13 @@ export function stripManagedBlock(text) {
   return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-export function mergeKimiConfigToml(existingText, apiCredProviders, port, token, autoChannel = null) {
+export function mergeKimiConfigToml(existingText, managedProviders, port, token, autoChannel = null) {
   const preserved = stripPrefixedTables(stripManagedBlock(existingText ?? ""));
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `_auto`.
-  const providers = autoChannel ? { ...apiCredProviders, [AUTO_CHANNEL_KEY]: autoChannel } : apiCredProviders;
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
   const { text: managedText, managed } = buildKimiManagedToml(providers, port, token);
   const merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
   return { text: merged, managed };

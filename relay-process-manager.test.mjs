@@ -35,7 +35,7 @@ const OWN_LAUNCHER_CMD = `node.exe ${APP_DIR}zcode-launcher.mjs`; // per-launch 
 const FOREIGN_CMD = `"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\someone\\projects\\unrelated\\server.mjs`;
 
 function makeRoot() {
-  return mkdtempSync(join(tmpdir(), "apicred-rpm-"));
+  return mkdtempSync(join(tmpdir(), "anyswitch-rpm-"));
 }
 
 // Build injected deps for stopRelay. `alive` PIDs pass the liveness filter;

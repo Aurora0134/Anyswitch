@@ -7,7 +7,7 @@ Anyswitch 是一套把多家 OpenAI 兼容上游（以及经由协议转换的 A
 - **凭据不出本机**：上游 API Key 用 Windows DPAPI 按提供方熵封存，relay 仅在请求时即时解密、用后即焚，从不缓存、从不落盘明文。
 - **store 即唯一真相源**：一份 v2 `store.json` 描述全部 provider/模型/路由元数据，relay 路由纯靠它，管理面（panel）写、注入插件读。
 - **无感多地址退避 + 协议透传**：主地址失败自动按序重试备用地址（180s 生成预算、5xx 透传）；Anthropic 客户端经 relay 无缝对接 OpenAI 兼容上游。
-- **解耦独立常驻**：常驻 relay 宿主与独立常驻 Web 控制面板分离，relay 停止/崩溃时面板仍可用；支持免管理员权限开机自启（计划任务 ApiCredRelay/ApiCredWatchdog）。
+- **解耦独立常驻**：常驻 relay 宿主与独立常驻 Web 控制面板分离，relay 停止/崩溃时面板仍可用；支持免管理员权限开机自启（计划任务 AnyswitchRelay/AnyswitchWatchdog）。
 
 B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，负责鉴权、路由、协议转换、多 BaseURL 退避、流式转发，并由各客户端启动器把端点 + 一次性会话 token 注入子进程。
 
@@ -105,11 +105,11 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/reasonix）。
 - `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\ApiCred\settings.json`，原子写）。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai/gemini 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
-- `autostart.mjs` — 开机自启管理（每用户计划任务 ApiCredRelay/ApiCredWatchdog，免管理员权限）。
-- `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\ApiCred-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `APICRED_GIT_ANCHOR=1` 才开启。
+- `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
+- `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\ApiCred-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 客户端集成
-- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `APICRED_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。opencode 启动器只确保 relay 运行、设置环境变量并启动 OpenCode；`opencode.jsonc` 不被 anyswitch 修改，托管 provider 由 OpenCode 插件从 store 注入；opencode 启动器还会生成统一实例 ID（`<cwd基名>-<launcher pid>`）经 `APICRED_AGENT_INSTANCE` 传给该插件，插件在 config hook 里给注入的 provider 加 `options.headers["x-agent-instance"]`（per-process，不写盘）。launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。已接受的取舍（冷缓存窗口）：归一依赖 scanProcesses 的进程缓存（面板轮询驱动刷新）；relay 刚重启且缓存尚空时，恰好到达的 launcher 形态 id 归一失败会以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存——面板双行、首请求计数拆两桶，旧行无流量刷新、10min 闲置 TTL 自愈。触发需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立，日常面板常开时打不中。
+- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。opencode 启动器只确保 relay 运行、设置环境变量并启动 OpenCode；`opencode.jsonc` 不被 anyswitch 修改，托管 provider 由 OpenCode 插件从 store 注入；opencode 启动器还会生成统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给该插件，插件在 config hook 里给注入的 provider 加 `options.headers["x-agent-instance"]`（per-process，不写盘）。launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。已接受的取舍（冷缓存窗口）：归一依赖 scanProcesses 的进程缓存（面板轮询驱动刷新）；relay 刚重启且缓存尚空时，恰好到达的 launcher 形态 id 归一失败会以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存——面板双行、首请求计数拆两桶，旧行无流量刷新、10min 闲置 TTL 自愈。触发需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立，日常面板常开时打不中。
 - `pi-merge-models.mjs` / `zcode-merge-config.mjs` / `reasonix-merge-config.mjs` — pi / zcode / reasonix 客户端配置合并（reasonix 额外把 relay token 写入 `%APPDATA%\reasonix\.env`，并在托管 provider 上带 `x-agent-id: reasonix` 头）。
 - 实例归组兜底：用户绕过启动器直接在终端敲 npm shim 命令（如 `kimi`）时，请求既无 `x-agent-instance` 头、relay key 也无实例后缀；此类直连请求由 relay 侧 socket→PID 兜底归组——按连接对端端口查 netstat 缓存拿到客户端进程 PID，实例 id 形如 `kimi-<PID>`，面板实例行与实例计数因此照常出现。边角：客户端若经本地代理（环回代理进程）转发，连接归属的是代理 PID，多个实例会折叠进同一行。
 

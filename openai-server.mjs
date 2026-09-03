@@ -18,7 +18,7 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_RELAY_PORT = 47821;
 
 // Liveness + identity probe for the relay's own port. GET / must answer a
-// JSON body whose service field is "apicred-relay" (see the root route) —
+// JSON body whose service field is "anyswitch-relay" (see the root route) —
 // a bare 200 from some unrelated loopback service must not count.
 export function probeRelay(port) {
   return new Promise((resolve) => {
@@ -33,7 +33,8 @@ export function probeRelay(port) {
       res.on("data", (chunk) => { body += chunk; });
       res.on("end", () => {
         try {
-          resolve(JSON.parse(body)?.service === "apicred-relay");
+          const service = JSON.parse(body)?.service;
+          resolve(service === "anyswitch-relay" || service === "apicred-relay");
         } catch {
           resolve(false);
         }
@@ -311,8 +312,7 @@ export function createOpenAIRelayServer(deps) {
     // GET / — root endpoint liveness probe. Return a minimal JSON body so
     // connectivity checks see a reachable API.
     if ((path === "/" || path === "/v1") && (req.method === "GET" || req.method === "HEAD")) {
-      // legacy service literal kept for compatibility after product rename ApiCred → Anyswitch
-      sendJson(res, 200, { status: "ok", service: "apicred-relay" });
+      sendJson(res, 200, { status: "ok", service: "anyswitch-relay" });
       return;
     }
 

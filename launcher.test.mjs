@@ -91,12 +91,12 @@ test("buildLauncherEnv honours an inherited ANTHROPIC_SMALL_FAST_MODEL override"
   assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/my-provider/my-model");
 });
 
-test("buildLauncherEnv honours APICRED_SMALL_FAST_MODEL when no explicit small-fast model is set", () => {
+test("buildLauncherEnv honours ANYSWITCH_SMALL_FAST_MODEL when no explicit small-fast model is set", () => {
   const env = buildLauncherEnv({
     port: 1,
     token: "t",
     discovery: true,
-    base: { APICRED_SMALL_FAST_MODEL: "anthropic/backup/flash" },
+    base: { ANYSWITCH_SMALL_FAST_MODEL: "anthropic/backup/flash" },
   });
   assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/backup/flash");
 });
@@ -231,7 +231,7 @@ test("if the relay refuses to start, Claude is never spawned", async () => {
     () =>
       runLauncher({
         startRelay: async () => {
-          throw new Error("the ApiCred global store is not usable; refusing to start the relay");
+          throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
         },
         getClaudeVersion: async () => EXPECTED_CLAUDE_VERSION,
         spawnClaude: async ({ env, args }) => {

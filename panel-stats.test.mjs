@@ -24,7 +24,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
     headers: {
       host: "127.0.0.1:47820",
       origin: "http://127.0.0.1:47820",
-      "x-apicred-panel": "1",
+      "x-anyswitch-panel": "1",
       ...extraHeaders,
     },
     on(event, fn) { listeners[event] = fn; return req; },
@@ -41,7 +41,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
 
 function statsRouter(overrides = {}) {
   return createPanelRouter({
-    storePaths: { root: "C:/fake/apicred" },
+    storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
     aliasResolver: null,

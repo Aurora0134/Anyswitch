@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { rotateLogIfNeeded, appendCrashLog } from "./relay-host.mjs";
 
 function makeLogPath() {
-  return join(mkdtempSync(join(tmpdir(), "apicred-rh-")), "relay-host.log");
+  return join(mkdtempSync(join(tmpdir(), "anyswitch-rh-")), "relay-host.log");
 }
 
 test("rotateLogIfNeeded leaves a small log untouched", () => {
@@ -61,5 +61,5 @@ test("appendCrashLog synchronously appends the labelled crash trace", () => {
 });
 
 test("appendCrashLog never throws on an unwritable path", () => {
-  appendCrashLog(join(tmpdir(), "apicred-no-such-dir", "relay-host.log"), "unhandledRejection", "lost");
+  appendCrashLog(join(tmpdir(), "anyswitch-no-such-dir", "relay-host.log"), "unhandledRejection", "lost");
 });

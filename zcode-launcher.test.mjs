@@ -5,7 +5,7 @@ import { buildZcodeLauncherEnv, resolveZcodeExecutable, runZcodeLauncher } from 
 describe("buildZcodeLauncherEnv", () => {
   it("injects relay token and NO_PROXY for loopback", () => {
     const env = buildZcodeLauncherEnv({ port: 4321, token: "tok", base: { A: "1", HTTP_PROXY: "http://proxy" } });
-    assert.equal(env.APICRED_RELAY_TOKEN, "tok");
+    assert.equal(env.ANYSWITCH_RELAY_TOKEN, "tok");
     assert.equal(env.NO_PROXY, "127.0.0.1,localhost");
     assert.equal(env.no_proxy, "127.0.0.1,localhost");
     assert.equal(env.A, "1");
@@ -77,7 +77,7 @@ describe("runZcodeLauncher", () => {
         return { unchanged: true };
       },
       spawnZcode: async ({ env }) => {
-        calls.push(`spawnZcode:${env.APICRED_RELAY_TOKEN}:${env.NO_PROXY}`);
+        calls.push(`spawnZcode:${env.ANYSWITCH_RELAY_TOKEN}:${env.NO_PROXY}`);
         return 0;
       },
       isZcodeRunning: async () => false,

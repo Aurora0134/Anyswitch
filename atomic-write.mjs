@@ -1,4 +1,4 @@
-// Global ApiCred atomic write helpers.
+// Global Anyswitch atomic write helpers.
 //
 // Single-file replacement via temp file + atomic rename.
 // `atomicWriteFile` is a last-writer-wins atomic replace. `casWriteFile` layers

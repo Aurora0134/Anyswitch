@@ -76,7 +76,7 @@ describe("relay log bridge", () => {
     const received = [];
     const unsubscribe = panelLogger.subscribe((entry) => received.push(entry.message));
 
-    const root = mkdtempSync(join(tmpdir(), "apicred-bridge-"));
+    const root = mkdtempSync(join(tmpdir(), "anyswitch-bridge-"));
     let token;
     try {
       // Token file the bridge reads; value irrelevant because fetch is faked.
@@ -109,7 +109,7 @@ describe("relay log bridge", () => {
       throw new Error("ECONNREFUSED");
     };
     const panelLogger = createLogger({ sink: () => {} });
-    const root = mkdtempSync(join(tmpdir(), "apicred-bridge-down-"));
+    const root = mkdtempSync(join(tmpdir(), "anyswitch-bridge-down-"));
     try {
       loadOrGenerateToken(root);
       const stop = startRelayLogBridge(panelLogger, root);

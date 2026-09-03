@@ -21,7 +21,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
     headers: {
       host: "127.0.0.1",
       origin: "http://127.0.0.1:47820",
-      "x-apicred-panel": "1",
+      "x-anyswitch-panel": "1",
       ...extraHeaders,
     },
     on(event, fn) { listeners[event] = fn; return req; },
@@ -38,7 +38,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
 
 function skillsRouter(skillsService) {
   return createPanelRouter({
-    storePaths: { root: "C:/fake/apicred" },
+    storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
     metricsCollector: null,
     aliasResolver: null,
@@ -333,8 +333,8 @@ describe("panel router skills routes", () => {
       ["/panel/api/skills/repo/import-pick-zip", {}],
       ["/panel/api/skills/merge-local", { endpointId: "pi", skillName: "s" }],
     ]) {
-      const { req, res, json } = fakeReqRes(path, "POST", body, { "x-apicred-panel": "" });
-      delete req.headers["x-apicred-panel"];
+      const { req, res, json } = fakeReqRes(path, "POST", body, { "x-anyswitch-panel": "" });
+      delete req.headers["x-anyswitch-panel"];
       await router.handle(req, res);
       assert.equal(res.statusCode, 403, `${path} gated`);
       assert.equal(json().error, "csrf");

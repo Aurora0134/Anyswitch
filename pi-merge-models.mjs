@@ -7,7 +7,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
-export { extractApiCredProviders } from "./pool-providers.mjs";
+export { extractManagedProviders } from "./pool-providers.mjs";
 
 const SIDECAR_FILENAME = "pi-sidecar.json";
 
@@ -47,27 +47,27 @@ export function buildPiProviderEntry(providerId, provider, port) {
     [prefixedId]: {
       name: provider.channelName ?? providerId,
       baseUrl,
-      apiKey: "${APICRED_RELAY_TOKEN}",
+      apiKey: "${ANYSWITCH_RELAY_TOKEN}",
       api: "openai-completions",
       // Tag all Pi-managed providers so the relay can route their requests to
       // the Pi metrics bucket instead of the default ZCode bucket. The
       // x-agent-instance placeholder stays literal on disk — the pi CLI
       // expands ${VAR} in header values at runtime (same mechanism as apiKey)
-      // from APICRED_INSTANCE_ID, which the launcher always sets.
-      headers: { "x-agent-id": "pi", "x-agent-instance": "${APICRED_INSTANCE_ID}" },
+      // from ANYSWITCH_INSTANCE_ID, which the launcher always sets.
+      headers: { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" },
       models,
     },
   };
 }
 
-export function mergeModelsJson(existing, apiCredProviders, port, previousManaged = [], autoChannel = null) {
+export function mergeModelsJson(existing, managedProviders, port, previousManaged = [], autoChannel = null) {
   const merged = { ...existing, providers: { ...(existing.providers ?? {}) } };
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop `_auto` via the
   // ordinary previousManaged path.
-  const providers = autoChannel ? { ...apiCredProviders, [AUTO_CHANNEL_KEY]: autoChannel } : apiCredProviders;
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   for (const prevId of previousManaged) {
     const prefixed = `_${prevId}`;

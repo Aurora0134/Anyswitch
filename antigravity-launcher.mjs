@@ -1,4 +1,4 @@
-// Launcher for antigravity (agy) pointing at the resident ApiCred relay.
+// Launcher for antigravity (agy) pointing at the resident Anyswitch relay.
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -11,7 +11,7 @@ const DEFAULT_AGY_PATH = join(
   "antigravity.exe",
 );
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
     "ApiCred",
@@ -87,7 +87,7 @@ export function launchAntigravity(options = {}) {
     throw new Error(`antigravity executable not found at: ${agyPath}`);
   }
 
-  const root = apiCredRoot();
+  const root = relayDataRoot();
   const token = options.token ?? loadOrGenerateToken(root);
   const relayPort = options.relayPort ?? 47821;
 

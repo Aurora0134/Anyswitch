@@ -10,7 +10,7 @@ import {
   stripPrefixedProviderTables,
   writeReasonixConfigTomlWithBackup,
   writeReasonixEnvWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   mergeReasonixEnv,
   readSidecar,
   writeSidecar,
@@ -36,14 +36,14 @@ const STORE = {
 
 describe("reasonix-merge-config", () => {
   it("builds openai provider entries pointing at the relay", () => {
-    const providers = extractApiCredProviders(STORE);
+    const providers = extractManagedProviders(STORE);
     const { text, managed } = buildReasonixManagedToml(providers, 47821);
     assert.deepEqual(managed, ["poke-api"]);
     assert.match(text, /\[\[providers\]\]/);
     assert.match(text, /name\s+= "_poke-api"/);
     assert.match(text, /kind\s+= "openai"/);
     assert.match(text, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
-    assert.match(text, /api_key_env\s+= "APICRED_RELAY_TOKEN"/);
+    assert.match(text, /api_key_env\s+= "ANYSWITCH_RELAY_TOKEN"/);
     assert.match(text, /model\s+= "claude-opus-5"/);
     assert.match(text, /models\s+= \[/);
     assert.match(text, /"claude-opus-5"/);
@@ -52,7 +52,7 @@ describe("reasonix-merge-config", () => {
   });
 
   it("keeps official deepseek presets when the user had no providers", () => {
-    const { text } = mergeReasonixConfigToml("", extractApiCredProviders(STORE), 47821);
+    const { text } = mergeReasonixConfigToml("", extractManagedProviders(STORE), 47821);
     assert.match(text, /name\s+= "deepseek-flash"/);
     assert.match(text, /name\s+= "_poke-api"/);
     assert.equal(text.indexOf("deepseek-flash") < text.indexOf(MANAGED_BEGIN), true);
@@ -69,7 +69,7 @@ describe("reasonix-merge-config", () => {
       MANAGED_END,
       "",
     ].join("\n");
-    const { text } = mergeReasonixConfigToml(existing, extractApiCredProviders(STORE), 47821);
+    const { text } = mergeReasonixConfigToml(existing, extractManagedProviders(STORE), 47821);
     assert.match(text, /name = "mine"/);
     assert.doesNotMatch(text, /_old/);
     assert.match(text, /_poke-api/);
@@ -81,6 +81,25 @@ describe("reasonix-merge-config", () => {
       () => stripManagedBlock(`${MANAGED_BEGIN}\n[[providers]]\n`),
       (err) => err.code === "UNPARSEABLE_REASONIX_CONFIG",
     );
+  });
+
+  it("strips a pre-rename block carrying the legacy apicred markers", () => {
+    const legacy = [
+      "# >>> apicred-managed-reasonix (managed by ApiCred; do not edit) >>>",
+      "[[providers]]",
+      'name = "_old"',
+      "# <<< apicred-managed-reasonix <<<",
+      "",
+    ].join("\n");
+    const stripped = stripManagedBlock(legacy);
+    assert.equal(stripped.includes("apicred"), false);
+    assert.equal(stripped, "");
+  });
+
+  it("merges a legacy APICRED_RELAY_TOKEN line into the new spelling", () => {
+    const merged = mergeReasonixEnv("APICRED_RELAY_TOKEN=old-token\n", "new-token");
+    assert.ok(merged.includes("ANYSWITCH_RELAY_TOKEN=new-token"));
+    assert.equal(merged.includes("APICRED_RELAY_TOKEN"), false);
   });
 
   it("drops leftover _-prefixed provider tables so an old 9-model copy cannot win", () => {
@@ -133,11 +152,11 @@ describe("reasonix-merge-config", () => {
     assert.doesNotMatch(text, /name\s+= "_acme-main--/);
   });
 
-  it("upserts APICRED_RELAY_TOKEN without clobbering other env keys", () => {
-    const merged = mergeReasonixEnv("DEEPSEEK_API_KEY=abc\nAPICRED_RELAY_TOKEN=old\n", "newtok");
+  it("upserts ANYSWITCH_RELAY_TOKEN without clobbering other env keys", () => {
+    const merged = mergeReasonixEnv("DEEPSEEK_API_KEY=abc\nANYSWITCH_RELAY_TOKEN=old\n", "newtok");
     assert.match(merged, /DEEPSEEK_API_KEY=abc/);
-    assert.match(merged, /APICRED_RELAY_TOKEN=newtok/);
-    assert.doesNotMatch(merged, /APICRED_RELAY_TOKEN=old/);
+    assert.match(merged, /ANYSWITCH_RELAY_TOKEN=newtok/);
+    assert.doesNotMatch(merged, /ANYSWITCH_RELAY_TOKEN=old/);
   });
 
   it("writes config and env under a sandbox home", async () => {
@@ -149,7 +168,7 @@ describe("reasonix-merge-config", () => {
     const toml = readFileSync(configPath, "utf8");
     assert.match(toml, /_poke-api/);
     const env = readFileSync(join(tmp, "reasonix", ".env"), "utf8");
-    assert.match(env, /APICRED_RELAY_TOKEN=tok-1/);
+    assert.match(env, /ANYSWITCH_RELAY_TOKEN=tok-1/);
   });
 });
 
@@ -177,7 +196,7 @@ describe("backup pruning", () => {
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `.env.backup.2020-01-0${i}T00-00-00-000Z`), `old${i}`, "utf8");
     }
-    writeFileSync(filePath, "APICRED_RELAY_TOKEN=old\n", "utf8");
+    writeFileSync(filePath, "ANYSWITCH_RELAY_TOKEN=old\n", "utf8");
     const result = writeReasonixEnvWithBackup(filePath, "tok");
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, false);
@@ -186,7 +205,7 @@ describe("backup pruning", () => {
     assert.equal(backups.length, 5);
     assert.equal(backups[0], ".env.backup.2020-01-03T00-00-00-000Z", "oldest backups pruned");
     assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
-    assert.match(readFileSync(filePath, "utf8"), /APICRED_RELAY_TOKEN=tok/);
+    assert.match(readFileSync(filePath, "utf8"), /ANYSWITCH_RELAY_TOKEN=tok/);
   });
 });
 
@@ -217,10 +236,10 @@ describe("pool channels", () => {
   };
 
   it("emits one [[providers]] block for the pool with unioned, deduped models", () => {
-    const { text, managed } = buildReasonixManagedToml(extractApiCredProviders(POOL_STORE), 47821);
+    const { text, managed } = buildReasonixManagedToml(extractManagedProviders(POOL_STORE), 47821);
     assert.match(text, /name\s+= "_pool-claude"/);
     assert.match(text, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/pool-claude\/v1"/);
-    assert.match(text, /api_key_env\s+= "APICRED_RELAY_TOKEN"/);
+    assert.match(text, /api_key_env\s+= "ANYSWITCH_RELAY_TOKEN"/);
     assert.match(text, /headers\s+= \{ "x-agent-id" = "reasonix" \}/);
     const poolBlock = text.match(/\[\[providers\]\]\nname\s+= "_pool-claude"[\s\S]*?(?=\n\[\[providers\]\]|\n# <<<)/)[0];
     assert.match(poolBlock, /"claude-opus-5",/);
@@ -237,11 +256,11 @@ describe("pool channels", () => {
   });
 
   it("removes the pool block after the pool is dissolved", () => {
-    const withPool = mergeReasonixConfigToml("", extractApiCredProviders(POOL_STORE), 47821).text;
+    const withPool = mergeReasonixConfigToml("", extractManagedProviders(POOL_STORE), 47821).text;
     assert.match(withPool, /_pool-claude/);
     const withoutPool = mergeReasonixConfigToml(
       withPool,
-      extractApiCredProviders({ version: 2, providers: POOL_STORE.providers }),
+      extractManagedProviders({ version: 2, providers: POOL_STORE.providers }),
       47821,
     ).text;
     assert.doesNotMatch(withoutPool, /_pool-claude/);
@@ -253,7 +272,7 @@ describe("pool channels", () => {
       ...POOL_STORE,
       pools: { "poke-api": { displayName: "Poke Pool", members: ["poke-api", "deepseek"] } },
     };
-    const { text, managed } = buildReasonixManagedToml(extractApiCredProviders(store), 47821);
+    const { text, managed } = buildReasonixManagedToml(extractManagedProviders(store), 47821);
     assert.equal(text.match(/name\s+= "_poke-api"/g).length, 1);
     const block = text.match(/\[\[providers\]\]\nname\s+= "_poke-api"[\s\S]*?(?=\n\[\[providers\]\]|\n# <<<)/)[0];
     assert.match(block, /"claude-opus-5",/);
@@ -298,7 +317,7 @@ describe("auto routing channel (_auto)", () => {
 
   it("injects the _auto provider when the endpoint has a route chain", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "reasonix");
-    const { text, managed } = mergeReasonixConfigToml("", extractApiCredProviders(CHAIN_STORE), 47821, auto);
+    const { text, managed } = mergeReasonixConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, auto);
     assert.match(text, /name\s+= "_auto"/);
     assert.match(text, /kind\s+= "openai"/);
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
@@ -312,7 +331,7 @@ describe("auto routing channel (_auto)", () => {
   it("does not inject _auto when the endpoint has no route chain", () => {
     const { text, managed } = mergeReasonixConfigToml(
       "",
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       deriveAutoRouteChannel(STORE, "reasonix"),
     );
@@ -323,14 +342,14 @@ describe("auto routing channel (_auto)", () => {
   it("drops _auto from the managed block on the re-sync after the chain is deleted", () => {
     const first = mergeReasonixConfigToml(
       "",
-      extractApiCredProviders(CHAIN_STORE),
+      extractManagedProviders(CHAIN_STORE),
       47821,
       deriveAutoRouteChannel(CHAIN_STORE, "reasonix"),
     );
     assert.match(first.text, /name\s+= "_auto"/);
     const second = mergeReasonixConfigToml(
       first.text,
-      extractApiCredProviders(STORE),
+      extractManagedProviders(STORE),
       47821,
       deriveAutoRouteChannel(STORE, "reasonix"),
     );

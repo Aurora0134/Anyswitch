@@ -1,6 +1,6 @@
 // Agent config sync coordinator and store file watcher.
 //
-// When the ApiCred global store (`%LOCALAPPDATA%\ApiCred\store.json`) changes
+// When the Anyswitch global store (`%LOCALAPPDATA%\ApiCred\store.json`) changes
 // (e.g. providers/models added, rotated, or deleted via CLI, webUI, or refresh),
 // this module automatically updates downstream coding agent configurations
 // (ZCode, DSH, Pi, etc.) so agents immediately pick up store mutations

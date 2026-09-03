@@ -100,8 +100,7 @@ export async function startPanelHost(options = {}) {
     logger.warn(`panel port ${port} already in use; reusing existing panel`);
     return { port, close, reused: true };
   }
-  // legacy name "ApiCred" retained in log prefixes after product rename to Anyswitch
-  logger.info(`ApiCred control panel running at http://127.0.0.1:${port}/panel`);
+  logger.info(`Anyswitch control panel running at http://127.0.0.1:${port}/panel`);
 
   // Relay log bridge: re-publish the relay process's log entries (keep-alive
   // retries, stream faults) into this logger so the panel's 实时输出 window

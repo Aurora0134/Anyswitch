@@ -5,7 +5,7 @@ param(
   [Parameter(Mandatory = $true)][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')][string]$ProviderId
 )
 
-# Global ApiCred DPAPI helper.
+# Global Anyswitch DPAPI helper.
 #
 # Two entropy generations, deliberately NOT interchangeable:
 #   v1 -> OpenCodeApiCred|DPAPI|v1|<ProviderId>   legacy OpenCode-scoped store
@@ -37,7 +37,7 @@ try {
   if ($Generation -eq 'v1') {
     $label = "OpenCodeApiCred|DPAPI|v1|$ProviderId"
   } else {
-    # legacy entropy prefix kept for compatibility after product rename ApiCred -> Anyswitch
+# v2 entropy prefix is the pre-rename literal "ApiCred" — changing it would orphan every sealed credential.
     $label = "ApiCred|DPAPI|v2|$ProviderId"
   }
   $entropy = [Text.Encoding]::UTF8.GetBytes($label)

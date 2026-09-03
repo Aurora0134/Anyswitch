@@ -122,7 +122,7 @@ export function createHandler(deps) {
       return {
         ok: false,
         status: 502,
-        body: errorBody("api_error", "the ApiCred global store could not be read"),
+        body: errorBody("api_error", "the Anyswitch global store could not be read"),
       };
     }
     const result = validateStore(loaded.store);
@@ -130,7 +130,7 @@ export function createHandler(deps) {
       return {
         ok: false,
         status: 502,
-        body: errorBody("api_error", "the ApiCred global store failed schema validation"),
+        body: errorBody("api_error", "the Anyswitch global store failed schema validation"),
       };
     }
     return { ok: true, store: loaded.store };
@@ -209,7 +209,7 @@ export function createHandler(deps) {
     if (provider === undefined) {
       return {
         status: 404,
-        body: errorBody("not_found_error", `provider "${unpacked.providerId}" is not in the ApiCred store`),
+        body: errorBody("not_found_error", `provider "${unpacked.providerId}" is not in the Anyswitch store`),
       };
     }
     if (provider.models?.[unpacked.modelId] === undefined) {

@@ -67,14 +67,14 @@ export function buildZcodeProviderEntry(providerId, provider, port, token) {
   };
 }
 
-export function mergeZcodeConfig(existing, apiCredProviders, port, token, previousManaged = [], autoChannel = null) {
+export function mergeZcodeConfig(existing, managedProviders, port, token, previousManaged = [], autoChannel = null) {
   const merged = { ...existing, provider: { ...(existing.provider ?? {}) } };
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
   // deleting the endpoint's chain makes the next sync drop `_auto` via the
   // ordinary previousManaged path.
-  const providers = autoChannel ? { ...apiCredProviders, [AUTO_CHANNEL_KEY]: autoChannel } : apiCredProviders;
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   for (const prevId of previousManaged) {
     const prefixed = `_${prevId}`;
@@ -140,7 +140,7 @@ export function writeZcodeConfigWithBackup(filePath, data) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-export { extractApiCredProviders } from "./pool-providers.mjs";
+export { extractManagedProviders } from "./pool-providers.mjs";
 
 export function validateZcodeConfig(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) {

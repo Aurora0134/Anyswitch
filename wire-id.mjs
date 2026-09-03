@@ -14,7 +14,7 @@
 // If that invariant is ever dropped, this encoding fails with it.
 //
 // No case normalisation: "Anthropic/" / "ANTHROPIC/" do NOT start with the
-// literal prefix and are rejected as non-ApiCred targets.
+// literal prefix and are rejected as non-Anyswitch targets.
 //
 // Pool awareness. The provider segment may name a pool instead of a
 // provider; resolution MUST check pools before providers (a pool id may reuse
@@ -161,7 +161,7 @@ export function unpackWireId(wireId, store) {
     }
     return reject(
       UNPACK_REASON.NOT_WIRE_ID,
-      `model "${wireId}" is not an ApiCred wire ID; it must start with the literal prefix "${WIRE_PREFIX}". This relay does not proxy the official Anthropic API.`,
+      `model "${wireId}" is not an Anyswitch wire ID; it must start with the literal prefix "${WIRE_PREFIX}". This relay does not proxy the official Anthropic API.`,
     );
   }
   const rest = wireId.slice(WIRE_PREFIX.length);
@@ -197,7 +197,7 @@ export function unpackWireId(wireId, store) {
 // differ in billing multiplier; a bare model name would make those rows visually
 // identical and the cost difference invisible. The provider *id* is used rather
 // than the provider displayName so the label matches the wire ID, `--model` and
-// the apicred CLI exactly. This field is presentation metadata only and is
+// the Anyswitch CLI exactly. This field is presentation metadata only and is
 // excluded from the catalog generation digest (see catalog-generation.mjs), so
 // relabelling never invalidates a live session.
 //

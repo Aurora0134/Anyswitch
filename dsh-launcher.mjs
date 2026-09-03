@@ -14,7 +14,7 @@ import {
   readDshSettings,
   mergeDshSettings,
   writeDshSettingsWithBackup,
-  extractApiCredProviders,
+  extractManagedProviders,
   deriveAutoRouteChannel,
   readSidecar,
   writeSidecar,
@@ -31,14 +31,14 @@ const DSH_SETTINGS_PATH = dshSettingsPath();
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
-function apiCredRoot(base = process.env) {
+function relayDataRoot(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "ApiCred");
 }
 
 function createOpenAIProductionDeps(options = {}) {
   const paths = options.paths ?? storePaths();
   const claudeDeps = createProductionDeps({ paths });
-  const root = apiCredRoot(options.base ?? process.env);
+  const root = relayDataRoot(options.base ?? process.env);
   const logger = options.logger ?? createLogger();
   // Usage journal (same dir as the resident relay) so fallback-relay traffic
   // still lands in the stats journal when the resident relay is down.
@@ -65,7 +65,7 @@ export async function startOpenAIRelay(options = {}) {
   const deps = createOpenAIProductionDeps(options);
   const probe = deps.loadStore();
   if (!probe.ok) {
-    throw new Error("the ApiCred global store is not usable; refusing to start the dsh relay");
+    throw new Error("the Anyswitch global store is not usable; refusing to start the dsh relay");
   }
   const server = createOpenAIRelayServer(deps);
   const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
@@ -84,10 +84,10 @@ export function dshPackageRoot(base = process.env) {
 
 export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH) {
   const yaml = await getYamlModule();
-  const apiCredProviders = extractApiCredProviders(store);
+  const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "dsh");
-  if (Object.keys(apiCredProviders).length === 0 && !autoChannel) {
-    return { ok: true, unchanged: true, reason: "no ApiCred providers with models" };
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   const previousManaged = readSidecar(sidecarRoot).providers;
   let existing;
@@ -103,7 +103,7 @@ export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DS
   // reasoning-effort knowledge source for models whose upstream /v1/models
   // listing discloses nothing. Empty (and skipped) when DSH is not installed.
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
-  const { config, managed } = mergeDshSettings(existing, apiCredProviders, port, previousManaged, knowledge, autoChannel);
+  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel);
 
   const gate = validateDshSettings(config);
   if (!gate.valid) {
@@ -123,7 +123,7 @@ export function resolveDshExecutable(base = process.env) {
     if (!isAbsolute(override)) {
       throw new Error(
         `DSH_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the apicred shim and ` +
+          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
           `make the launcher recurse into itself.`,
       );
     }
@@ -145,7 +145,7 @@ export function resolveDshExecutable(base = process.env) {
 
 export function buildDshLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };
-  env.APICRED_RELAY_TOKEN = token;
+  env.ANYSWITCH_RELAY_TOKEN = token;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
   return env;
@@ -164,7 +164,7 @@ export async function runDshLauncher({
   try {
     const reused = await probeRelayFn(RELAY_PORT);
     if (reused) {
-      const token = loadOrGenerateToken(apiCredRoot(base));
+      const token = loadOrGenerateToken(relayDataRoot(base));
       relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
       log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
     } else {
@@ -178,9 +178,9 @@ export async function runDshLauncher({
   try {
     const loaded = loadStore();
     if (!loaded.ok) {
-      log("warning: ApiCred store could not be read; dsh settings not updated");
+      log("warning: Anyswitch store could not be read; dsh settings not updated");
     } else {
-      const sidecarRoot = apiCredRoot(base);
+      const sidecarRoot = relayDataRoot(base);
       const writeResult = await writeConfig(loaded.store, relay.port, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: dsh settings.yaml not updated: ${writeResult.reason ?? "unknown error"}`);

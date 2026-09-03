@@ -18,7 +18,7 @@ import {
 } from "./store-io.mjs";
 
 function tempPaths() {
-  const root = mkdtempSync(join(tmpdir(), "apicred-storeio-"));
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-storeio-"));
   return storePaths(root);
 }
 
@@ -48,10 +48,10 @@ test("ensureLayout creates root, credentials and app dirs", () => {
 });
 
 test("storePaths keeps every path under the given root", () => {
-  const paths = storePaths("C:\\tmp\\ApiCredTest");
-  assert.equal(paths.storeFile, "C:\\tmp\\ApiCredTest\\store.json");
-  assert.equal(paths.credentialsDir, "C:\\tmp\\ApiCredTest\\credentials");
-  assert.equal(paths.appDir, "C:\\tmp\\ApiCredTest\\app");
+  const paths = storePaths("C:\\tmp\\AnySwitchTest");
+  assert.equal(paths.storeFile, "C:\\tmp\\AnySwitchTest\\store.json");
+  assert.equal(paths.credentialsDir, "C:\\tmp\\AnySwitchTest\\credentials");
+  assert.equal(paths.appDir, "C:\\tmp\\AnySwitchTest\\app");
 });
 
 // ---------- load classification ----------

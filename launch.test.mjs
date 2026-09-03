@@ -30,7 +30,7 @@ const dpapiAvailable = process.platform === "win32" &&
 const needsDpapi = dpapiAvailable ? {} : { skip: "requires Windows DPAPI (powershell.exe)" };
 
 function makePaths(t) {
-  const root = mkdtempSync(join(tmpdir(), "apicred-launch-"));
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-launch-"));
   mkdirSync(join(root, "credentials"), { recursive: true });
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {
