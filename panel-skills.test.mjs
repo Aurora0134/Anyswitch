@@ -1,5 +1,8 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { createPanelRouter } from "./panel.mjs";
 
 // Skills tab routes: the router is exercised with a mock skills service so no
@@ -356,5 +359,121 @@ describe("panel router skills routes", () => {
       assert.equal(res.statusCode, 400, `${path} with ${JSON.stringify(body)}`);
       assert.equal(json().ok, false);
     }
+  });
+});
+
+// ── panel.html 变动差分高亮（diffSkillsState）──
+// 沿用 panel.test.mjs 的 new Function 提取范式：把差分函数从内嵌脚本里抠出来单测——
+// 它是纯状态对比，不碰 DOM 也不碰后端。
+describe("panel.html skills change diff highlighting", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8"
+  );
+
+  // 顶层函数闭合花括号恒为 2 空格缩进、内部块更深，非贪婪匹配到首个 "\n  }" 即函数边界。
+  function extractFn(name, params) {
+    const m = panelHtml.match(
+      new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
+    );
+    assert.ok(m, `panel.html must contain function ${name}`);
+    return m[0];
+  }
+
+  const deployedSrc = extractFn("deployedEndpointsFor", "skill, state = skillsState");
+  const diffFnSrc = extractFn("diffSkillsState", "prev, next");
+  // 窗口常量、标记变量与 skillSignature 同处一块（从 const 声明到 skillSignature 收尾）
+  const marksSrc = panelHtml.match(
+    /const SKILLS_NEW_WINDOW_MS[\s\S]*?function skillSignature\(state, s\) \{[\s\S]*?\n  \}/
+  );
+  assert.ok(marksSrc, "panel.html must contain the skills flash-mark block");
+
+  const harness = new Function(`
+    let skillsState = null;
+    ${deployedSrc}
+    ${marksSrc[0]}
+    ${diffFnSrc}
+    return {
+      diffSkillsState,
+      marks: () => ({
+        firstSeen: skillsFirstSeen,
+        flashNew: skillsFlashNew,
+        flashChanged: skillsFlashChanged,
+        flashCount: skillsFlashCount,
+      }),
+    };
+  `)();
+
+  const skill = (relPath, description = "desc") => ({ relPath, dirName: relPath, name: relPath, description });
+  const state = (skills, endpoints = [], repoPath = "R:/repo") => ({
+    repoConfigured: true, repoValid: true, repoPath, skills, endpoints,
+  });
+  const junctionEp = (repoSkill) => ({
+    id: "kimi", label: "Kimi", dirExists: true,
+    entries: [{ kind: "junction", broken: false, repoSkill }],
+  });
+
+  it("first load seeds baseline without marking anything new", () => {
+    harness.diffSkillsState(null, state([skill("a"), skill("b")]));
+    const m = harness.marks();
+    assert.equal(m.flashNew.size, 0);
+    assert.equal(m.flashChanged.size, 0);
+    assert.equal(m.flashCount, false);
+    assert.equal(m.firstSeen.size, 0);
+  });
+
+  it("marks added skills and count change", () => {
+    harness.diffSkillsState(state([skill("a")]), state([skill("a"), skill("b")]));
+    const m = harness.marks();
+    assert.deepEqual([...m.flashNew], ["b"]);
+    assert.equal(m.flashCount, true);
+    assert.ok(m.firstSeen.has("b"));
+  });
+
+  it("marks description and deployment changes as changed, not new", () => {
+    harness.diffSkillsState(state([skill("a")]), state([skill("a", "new desc")], [junctionEp("a")]));
+    const m = harness.marks();
+    assert.equal(m.flashNew.size, 0);
+    assert.deepEqual([...m.flashChanged], ["a"]);
+    assert.equal(m.flashCount, false);
+  });
+
+  it("repo switch or unconfigured repo resets baseline instead of flashing everything", () => {
+    harness.diffSkillsState(state([skill("a")]), state([skill("x"), skill("y")], [], "R:/other"));
+    let m = harness.marks();
+    assert.equal(m.flashNew.size, 0);
+    assert.equal(m.firstSeen.size, 0);
+    harness.diffSkillsState({ repoConfigured: false, skills: [] }, state([skill("a")]));
+    m = harness.marks();
+    assert.equal(m.flashNew.size, 0);
+    assert.equal(m.firstSeen.size, 0);
+  });
+
+  it("prunes first-seen of removed skills and resets marks on every diff", () => {
+    harness.diffSkillsState(state([skill("a")]), state([skill("a"), skill("b")]));
+    assert.ok(harness.marks().firstSeen.has("b"));
+    harness.diffSkillsState(state([skill("a"), skill("b")]), state([skill("a")]));
+    const m = harness.marks();
+    assert.equal(m.firstSeen.has("b"), false);
+    assert.equal(m.flashNew.size, 0);
+    assert.equal(m.flashCount, true);
+    harness.diffSkillsState(state([skill("a")]), state([skill("a")]));
+    const m2 = harness.marks();
+    assert.equal(m2.flashNew.size, 0);
+    assert.equal(m2.flashChanged.size, 0);
+    assert.equal(m2.flashCount, false);
+  });
+
+  it("render functions consume flash marks so plain re-renders don't replay animations", () => {
+    const renderList = extractFn("renderSkillsList", "");
+    assert.match(renderList, /skillsFlashNew = new Set\(\)/);
+    assert.match(renderList, /skillsFlashChanged = new Set\(\)/);
+    assert.match(renderList, /skillsFlashCount = false/);
+    assert.match(renderList, /row-new/);
+    assert.match(renderList, /row-changed/);
+    assert.match(renderList, /badge-flash/);
+    // 手动刷新走带反馈的包装：按钮禁用 + 图标旋转 + 最短展示时长
+    assert.match(panelHtml, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
+    assert.match(panelHtml, /setTimeout\(r, 500\)/);
   });
 });

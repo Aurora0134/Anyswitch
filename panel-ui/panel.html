@@ -856,6 +856,27 @@
     font-size: 11.5px; color: var(--text-3); margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
+  /* Skills 视图：刷新按钮 loading 态——请求期间按钮禁用（.btn:disabled 变暗）且图标旋转；
+     JS 侧设最短展示时长，本机接口几十毫秒返回也能让人看清「查过了」 */
+  #skillsRefreshBtn.busy .skills-refresh-ico { animation: skillsRefreshSpin 700ms linear infinite; }
+  @keyframes skillsRefreshSpin { to { transform: rotate(360deg); } }
+  /* Skills 视图：变动高亮——新增行底色渐隐一次 +「新」徽标短暂存续；变化行内描边脉冲；
+     计数徽标变化时闪一下。行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
+     过滤/选中等普通重渲染不重播（标记消费逻辑见 diffSkillsState） */
+  .skills-list-row.row-new { animation: skillsRowNew 2s var(--ease-out); }
+  @keyframes skillsRowNew {
+    0%, 55% { background: var(--accent-soft); }
+    100% { background: transparent; }
+  }
+  .skills-list-row.row-changed { animation: skillsRowChanged 1.2s var(--ease-out); }
+  @keyframes skillsRowChanged {
+    0%, 45% { box-shadow: inset 0 0 0 1.5px var(--accent); }
+    100% { box-shadow: inset 0 0 0 0 transparent; }
+  }
+  .badge.badge-flash { animation: badgeFlash 1.2s var(--ease-out); }
+  @keyframes badgeFlash {
+    0%, 45% { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+  }
 
   /* Skills 视图：详情卡（右列上） */
   .skills-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -4686,7 +4707,10 @@ try {
               <button class="btn" id="skillsPickRepoBtn" title="打开文件夹选择框，选择 skills 主仓库目录">选择主仓库</button>
               <button class="btn" id="skillsImportBtn" title="打开文件夹选择框选 skill 本体目录（需包含 SKILL.md），确认有效后导入主仓库">导入 skill 目录</button>
               <button class="btn" id="skillsImportZipBtn" title="打开文件选择框选 skill 的 .zip 压缩包，解压校验后以目录形式导入主仓库">导入 skill（zip）</button>
-              <button class="btn" id="skillsRefreshBtn">刷新</button>
+              <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与端点状态，发现磁盘上的变动">
+                <svg class="skills-refresh-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                刷新
+              </button>
             </div>
           </div>
         </div>
@@ -7800,7 +7824,7 @@ try {
     $("skillsPickRepoBtn").onclick = pickSkillsRepo;
     $("skillsImportBtn").onclick = () => importSkillViaPicker("skillsImportBtn", "/api/skills/repo/import-pick");
     $("skillsImportZipBtn").onclick = () => importSkillViaPicker("skillsImportZipBtn", "/api/skills/repo/import-pick-zip");
-    $("skillsRefreshBtn").onclick = refreshSkillsState;
+    $("skillsRefreshBtn").onclick = runSkillsRefreshWithFeedback;
     // 卡片 B：过滤 + 主从列表选中
     $("skillsFilterInput").oninput = (e) => {
       skillsFilter = e.target.value.trim().toLowerCase();
@@ -8018,11 +8042,75 @@ try {
     skillsRefreshChain = p.catch(() => {});
     return p;
   }
+
+  // 手动刷新的视觉反馈：禁用按钮 + 图标旋转，最短展示 500ms——本机接口几十毫秒
+  // 返回，不设下限的话动画一闪而过等于没有。失败提示由 doRefreshSkillsState 的
+  // toast 负责，这里只管恢复按钮。
+  async function runSkillsRefreshWithFeedback() {
+    const btn = $("skillsRefreshBtn");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("busy");
+    try {
+      await Promise.all([refreshSkillsState(), new Promise((r) => setTimeout(r, 500))]);
+    } finally {
+      btn.disabled = false;
+      btn.classList.remove("busy");
+    }
+  }
+
+  // ── 变动差分高亮 ──
+  // 列表每次渲染全量重建 innerHTML，变动标记不能挂在 DOM 上（与选中集合同一约定）。
+  // 三层标记：skillsFirstSeen（relPath → 首次发现时刻）驱动「新」徽标，存续一个短
+  // 窗口；skillsFlashNew / skillsFlashChanged 驱动行动画，只在差分后的那次渲染消费，
+  // 之后的普通重渲染不重播；skillsFlashCount 驱动计数徽标闪烁，renderSkillsRepo 读、
+  // 最后渲染的 renderSkillsList 消费。
+  const SKILLS_NEW_WINDOW_MS = 10000;
+  let skillsFirstSeen = new Map();
+  let skillsFlashNew = new Set();
+  let skillsFlashChanged = new Set();
+  let skillsFlashCount = false;
+
+  // skill 内容签名：描述 + 已部署端点集合——列表行上用户可见的两个维度。
+  function skillSignature(state, s) {
+    return (s.description || "") + "\u0001" + deployedEndpointsFor(s, state).join(",");
+  }
+
+  function diffSkillsState(prev, next) {
+    skillsFlashNew = new Set();
+    skillsFlashChanged = new Set();
+    skillsFlashCount = false;
+    const now = Date.now();
+    const skills = next.skills || [];
+    // 首次加载 / 仓库未设置 / 换了仓库：重建基线，不把整仓库标成「新」
+    if (!prev || !prev.repoConfigured || prev.repoPath !== next.repoPath) {
+      skillsFirstSeen = new Map();
+      return;
+    }
+    const prevById = new Map((prev.skills || []).map((s) => [s.relPath, s]));
+    for (const s of skills) {
+      const p = prevById.get(s.relPath);
+      if (!p) {
+        skillsFirstSeen.set(s.relPath, now);
+        skillsFlashNew.add(s.relPath);
+      } else if (skillSignature(prev, p) !== skillSignature(next, s)) {
+        skillsFlashChanged.add(s.relPath);
+      }
+    }
+    skillsFlashCount = (prev.skills || []).length !== skills.length;
+    const alive = new Set(skills.map((s) => s.relPath));
+    for (const [k, ts] of [...skillsFirstSeen]) {
+      if (!alive.has(k) || now - ts >= SKILLS_NEW_WINDOW_MS) skillsFirstSeen.delete(k);
+    }
+  }
+
   async function doRefreshSkillsState() {
     try {
       const res = await api("GET", "/api/skills/state");
       const firstLoad = skillsState === null;
+      const prev = skillsState;
       skillsState = res;
+      diffSkillsState(prev, res);
       // 唯一自动选中：首次加载（skillsState 由 null 变非 null）且集合为空时
       // 集合 = {第一行}、焦点 = 第一行，保持"打开 tab 即见详情"；此后不再复活空选中。
       if (firstLoad && !skillsSelection.size) {
@@ -8060,6 +8148,8 @@ try {
       badge.textContent = (skillsState.skills || []).length + " 个 skill";
       pathEl.textContent = skillsState.repoPath;
     }
+    // 仓库计数变化时闪一下（只读不消费；最后渲染的 renderSkillsList 负责消费）
+    if (skillsFlashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     const candidates = (skillsState && skillsState.candidates) || [];
     const usable = candidates.filter((c) => c.exists && c.path !== (skillsState && skillsState.repoPath));
     candEl.innerHTML = usable.length
@@ -8132,10 +8222,11 @@ try {
 
   // ── 卡片 B：仓库 skills 主从列表（选中驱动右侧详情卡） ──
   // 每个 skill 的部署端点：各端点上 repoSkill 指向它的正常 junction。
-  function deployedEndpointsFor(skill) {
-    if (!skillsState) return [];
+  // state 参数供差分对比旧状态用，缺省取当前 skillsState。
+  function deployedEndpointsFor(skill, state = skillsState) {
+    if (!state) return [];
     const out = [];
-    for (const ep of skillsState.endpoints || []) {
+    for (const ep of state.endpoints || []) {
       for (const entry of ep.entries || []) {
         if (entry.kind === "junction" && !entry.broken && entry.repoSkill === skill.dirName) {
           out.push(ep.id);
@@ -8169,6 +8260,12 @@ try {
     const badge = $("skillsListBadge");
     const skills = (skillsState && skillsState.skills) || [];
     badge.textContent = String(skills.length);
+    // 消费差分标记：只有差分后的那次渲染重播动画，之后过滤/选中等重渲染拿到空集合。
+    // 提前 return 的空列表路径同样消费，避免标记滞留到下一次无关渲染。
+    const flashNew = skillsFlashNew; skillsFlashNew = new Set();
+    const flashChanged = skillsFlashChanged; skillsFlashChanged = new Set();
+    const flashCount = skillsFlashCount; skillsFlashCount = false;
+    if (flashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     if (!skillsState || !skillsState.repoConfigured) {
       listEl.innerHTML = '<div class="empty-hint">先设置主仓库</div>';
       return;
@@ -8204,9 +8301,15 @@ try {
       const favStar = skillsFavorites.has(s.relPath)
         ? '<span class="skills-fav-star" title="已收藏">★</span>'
         : "";
-      return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}" data-skill="${escapeHtml(s.relPath)}">
+      // 「新」徽标按首次发现时刻存续一个窗口（跨重渲染仍在，直到过期后的那次渲染）；
+      // 行底色/描边动画只在差分后的那次渲染挂类，二者分开是防过滤输入逐键重播动画
+      const seenAt = skillsFirstSeen.get(s.relPath);
+      const isNew = seenAt !== undefined && Date.now() - seenAt < SKILLS_NEW_WINDOW_MS;
+      const newBadge = isNew ? '<span class="badge badge-accent" title="刚刚出现在仓库中">新</span>' : "";
+      const flashCls = flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
+      return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}">
         <div class="skills-list-line1">
-          <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}
+          <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}${newBadge}
           <span class="skills-ep-dots">${favStar}${epCount}</span>
         </div>
         <div class="skills-list-desc">${escapeHtml(s.description || "（无描述）")}</div>
