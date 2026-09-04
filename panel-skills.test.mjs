@@ -466,8 +466,97 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(renderList, /row-new/);
     assert.match(renderList, /row-changed/);
     assert.match(renderList, /badge-flash/);
-    // 手动刷新走带反馈的包装：按钮禁用 + 图标旋转 + 最短展示时长
+    // 手动刷新走带反馈的包装：按钮禁用（吃 .btn:disabled 变暗）+ 整列 cascade + 串行动画时长
     assert.match(panelHtml, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
-    assert.match(panelHtml, /setTimeout\(r, 500\)/);
+    assert.match(panelHtml, /setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)/);
+  });
+
+  it("manual refresh dims the button until the cascade finishes, not for a fixed floor", () => {
+    const fn = extractFn("runSkillsRefreshWithFeedback", "");
+    // 旋转整套撤下：变暗交回 .btn:disabled 的 45%，与看板「重启」键同源；
+    // 按钮内的圆弧箭头图标一并删除，只留「刷新」二字
+    assert.doesNotMatch(panelHtml, /skillsRefreshSpin|#skillsRefreshBtn\.busy|skills-refresh-ico/);
+    assert.match(panelHtml, /<button class="btn" id="skillsRefreshBtn" title="[^"]*">刷新<\/button>/);
+    // 串行而非 Promise.all 取最大值：cascade 在数据落地那次渲染才起跑，
+    // 从点击起算会让按钮亮起早于动画收尾一个请求耗时
+    assert.doesNotMatch(fn, /Promise\.all/);
+    assert.match(fn, /await refreshSkillsState\(\);\s*await new Promise\(\(r\) => setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)\)/);
+    // 点击瞬间隐列；finally 兜底解除——请求失败时 doRefreshSkillsState 走 catch 不渲染，
+    // 不清则列表永久隐形、标记滞留到下次无关渲染
+    assert.match(fn, /classList\.add\("is-blank"\)/);
+    assert.match(fn, /skillsCascadePending = true/);
+    assert.match(
+      fn,
+      /finally \{[\s\S]*?skillsCascadePending = false;[\s\S]*?classList\.remove\("is-blank"\);[\s\S]*?btn\.disabled = false;/
+    );
+  });
+
+  it("renderSkillsList consumes the cascade mark before the empty-list early returns", () => {
+    const renderList = extractFn("renderSkillsList", "");
+    const consumed = renderList.indexOf("skillsCascadePending = false");
+    assert.ok(consumed > 0, "renderSkillsList must consume the cascade mark");
+    assert.ok(renderList.indexOf('classList.remove("is-blank")') > 0);
+    // 三条早退（仓库未配置 / 空仓库 / 过滤无匹配）都必须在消费之后，否则标记滞留
+    for (const hint of ["先设置主仓库", "仓库中还没有 skill", "没有匹配的 skill"]) {
+      assert.ok(renderList.indexOf(hint) > consumed, `${hint} 的早退必须在 cascade 消费之后`);
+    }
+    // cascade 那次渲染不挂行级高亮：同元素同特异性的 animation 简写整条互相覆盖，会吃掉一个
+    assert.match(renderList, /const flashCls = cascade\s*\?\s*""/);
+    assert.match(renderList, /style="--i:\$\{i\}"/);
+    assert.match(renderList, /if \(cascade\) playSkillsListCascade\(listEl\);/);
+  });
+
+  it("cascade animates only the rows in view and pins the total to 450ms", () => {
+    // CSS 侧契约：backwards 填充（延迟期间锁 0% 帧，否则行会先全亮再逐个消失）
+    // + clip-path 自上而下揭开 + translateX 横向落位 + 步长走 --csc-step
+    assert.match(panelHtml, /\.skills-list\.is-blank \{ visibility: hidden; \}/);
+    assert.match(panelHtml, /animation: skillsRowCascade 180ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
+    assert.match(panelHtml, /@keyframes skillsRowCascade \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
+
+    const totalSrc = panelHtml.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
+    const rowSrc = panelHtml.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
+    assert.ok(totalSrc && rowSrc, "panel.html must declare the cascade timing constants");
+    const h = new Function(`
+      ${totalSrc[0]}
+      ${rowSrc[0]}
+      ${extractFn("playSkillsListCascade", "listEl")}
+      return { playSkillsListCascade, total: SKILLS_CASCADE_TOTAL_MS, row: SKILLS_CASCADE_ROW_MS };
+    `)();
+    assert.equal(h.total, 450);
+    assert.equal(h.row, 180);
+
+    // 行高均匀（名称/描述两行都是 nowrap+ellipsis），首行 offsetHeight 即代表全体
+    function fakeList(rowCount, clientHeight, rowHeight = 53) {
+      const children = Array.from({ length: rowCount }, () => {
+        const cls = new Set();
+        return { offsetHeight: rowHeight, classList: { add: (c) => cls.add(c), has: (c) => cls.has(c) } };
+      });
+      const props = {};
+      return { children, clientHeight, style: { props, setProperty(k, v) { props[k] = v; } } };
+    }
+    const stepOf = (list) => parseFloat(list.style.props["--csc-step"]);
+    const animated = (list) => list.children.filter((r) => r.classList.has("row-cascade")).length;
+
+    // 长仓库：40 条只有首屏 11 行（495px / 53px 向上取整 + 半行余量）参与，尾部不动
+    const long = fakeList(40, 495);
+    h.playSkillsListCascade(long);
+    assert.equal(animated(long), 11);
+    assert.equal(stepOf(long), 27);
+    // 末行延迟 + 单行时长 == 总时长：总时长不随仓库条数漂
+    assert.equal((animated(long) - 1) * stepOf(long) + h.row, h.total);
+
+    // 短仓库：3 条全部参与，步长自动拉开，总时长仍 450ms
+    const short = fakeList(3, 495);
+    h.playSkillsListCascade(short);
+    assert.equal(animated(short), 3);
+    assert.equal((3 - 1) * stepOf(short) + h.row, h.total);
+
+    // 单行不退化成除零；空列表（正常走不到，防御 early return 之外的调用）不写变量
+    const single = fakeList(1, 495);
+    h.playSkillsListCascade(single);
+    assert.equal(stepOf(single), 0);
+    const empty = fakeList(0, 495);
+    h.playSkillsListCascade(empty);
+    assert.deepEqual(empty.style.props, {});
   });
 });
