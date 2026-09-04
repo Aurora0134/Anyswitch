@@ -857,13 +857,9 @@
     font-size: 11.5px; color: var(--text-3); margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  /* Skills 视图：刷新按钮 loading 态——请求期间按钮禁用且图标旋转；
-     JS 侧设最短展示时长，本机接口几十毫秒返回也能让人看清「查过了」。
-     busy 期间覆盖 .btn:disabled 的 45% 变暗：12px 细线图标淡下去像坏了，
-     旋转本身就是「进行中」信号，连点由 JS 守卫兜住。900ms 一圈比 700ms 沉稳。 */
-  #skillsRefreshBtn.busy { opacity: 1; }
-  #skillsRefreshBtn.busy .skills-refresh-ico { animation: skillsRefreshSpin 900ms linear infinite; }
-  @keyframes skillsRefreshSpin { to { transform: rotate(360deg); } }
+  /* Skills 视图：手动刷新的按钮反馈不写在这里——变暗直接吃 .btn:disabled 的 45%，
+     与看板「重启」键同源（暗着即「还没好」，动作完成才亮），JS 只切 disabled。 */
+
   /* Skills 视图：变动高亮——新增行底色渐隐一次；变化行内描边脉冲；
      计数徽标变化时闪一下。行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
      过滤/选中等普通重渲染不重播（标记消费逻辑见 diffSkillsState） */
@@ -880,6 +876,24 @@
   .badge.badge-flash { animation: badgeFlash 1.2s var(--ease-out); }
   @keyframes badgeFlash {
     0%, 45% { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+  }
+  /* Skills 视图：手动刷新的整列 cascade——点击瞬间整列隐去（is-blank），数据落地那次
+     渲染给首屏行按 --i 顺序挂动画：clip-path 自上而下揭开 + translateX 横向落位，
+     两个维度同拍，读作「滑入并显形」而非单纯揭幕。位移取横向而非纵向——transform
+     不推挤布局，纵向位移会和相邻行拉出缝隙感。折叠区外的行不挂类：innerHTML
+     重建已把 scrollTop 归零，可视区恒为前 K 行，尾部行没人看见。
+     backwards 填充是必须的——延迟期间若走基样式，行会先全亮再逐个消失，动画反向。
+     reduced-motion 下全局 animation:none 连填充一并失效，行直接以基样式呈现。
+     单行时长 180ms 与 JS 的 SKILLS_CASCADE_ROW_MS 同值（步长公式要用）；步长随首屏
+     行数变，由 playSkillsListCascade 写 --csc-step，这里只留兜底值。 */
+  .skills-list.is-blank { visibility: hidden; }
+  .skills-list-row.row-cascade {
+    animation: skillsRowCascade 180ms var(--ease-out) backwards;
+    animation-delay: calc(var(--i) * var(--csc-step, 30ms));
+  }
+  @keyframes skillsRowCascade {
+    from { clip-path: inset(0 0 100% 0); transform: translateX(-6px); }
+    to { clip-path: inset(0 0 0 0); transform: translateX(0); }
   }
 
   /* Skills 视图：详情卡（右列上） */
@@ -4711,10 +4725,7 @@ try {
               <button class="btn" id="skillsPickRepoBtn" title="打开文件夹选择框，选择 skills 主仓库目录">选择主仓库</button>
               <button class="btn" id="skillsImportBtn" title="打开文件夹选择框选 skill 本体目录（需包含 SKILL.md），确认有效后导入主仓库">导入 skill 目录</button>
               <button class="btn" id="skillsImportZipBtn" title="打开文件选择框选 skill 的 .zip 压缩包，解压校验后以目录形式导入主仓库">导入 skill（zip）</button>
-              <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与端点状态，发现磁盘上的变动">
-                <svg class="skills-refresh-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M19.24 10.06A7.5 7.5 0 1 1 12 4.5"/><path d="M12.3 2.2L15.2 4.6L12.3 7.0"/></svg>
-                刷新
-              </button>
+              <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与端点状态，发现磁盘上的变动">刷新</button>
             </div>
           </div>
         </div>
@@ -8143,19 +8154,29 @@ try {
     return p;
   }
 
-  // 手动刷新的视觉反馈：禁用按钮 + 图标旋转，最短展示 500ms——本机接口几十毫秒
-  // 返回，不设下限的话动画一闪而过等于没有。失败提示由 doRefreshSkillsState 的
-  // toast 负责，这里只管恢复按钮。
+  // 手动刷新的视觉反馈：按钮走 .btn:disabled 的 45% 变暗（与看板「重启」键同源，
+  // 暗着即「还没好」），持续到整列 cascade 播完才亮起。等待串在刷新之后而不是与请求
+  // 并行取最大值：cascade 只能在数据落地那次渲染起跑，从点击起算会让亮起早于动画收尾
+  // 一个请求耗时。请求慢于 450ms 时总暗时长就是「请求 + cascade」，语义仍然对。
+  const SKILLS_CASCADE_TOTAL_MS = 450;
+  const SKILLS_CASCADE_ROW_MS = 180; // 与 CSS .row-cascade 的单行时长同值，步长公式要用
+  let skillsCascadePending = false;
+
   async function runSkillsRefreshWithFeedback() {
     const btn = $("skillsRefreshBtn");
     if (btn.disabled) return;
     btn.disabled = true;
-    btn.classList.add("busy");
+    $("skillsList").classList.add("is-blank");
+    skillsCascadePending = true;
     try {
-      await Promise.all([refreshSkillsState(), new Promise((r) => setTimeout(r, 500))]);
+      await refreshSkillsState();
+      await new Promise((r) => setTimeout(r, SKILLS_CASCADE_TOTAL_MS));
     } finally {
+      // 请求失败时 doRefreshSkillsState 走 catch 不渲染，is-blank 与标记都得在这里兜底：
+      // 前者不清列表永久隐形，后者不清会在下次无关渲染（过滤输入逐键）白播一次。
+      skillsCascadePending = false;
+      $("skillsList").classList.remove("is-blank");
       btn.disabled = false;
-      btn.classList.remove("busy");
     }
   }
 
@@ -8353,6 +8374,10 @@ try {
     const flashNew = skillsFlashNew; skillsFlashNew = new Set();
     const flashChanged = skillsFlashChanged; skillsFlashChanged = new Set();
     const flashCount = skillsFlashCount; skillsFlashCount = false;
+    // cascade 标记与 is-blank 同样在提前 return 之前消费：空列表路径没有行可动画，
+    // 但容器必须解除隐形、标记不能滞留到下一次无关渲染（过滤输入逐键会白播）。
+    const cascade = skillsCascadePending; skillsCascadePending = false;
+    listEl.classList.remove("is-blank");
     if (flashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     if (!skillsState || !skillsState.repoConfigured) {
       listEl.innerHTML = '<div class="empty-hint">先设置主仓库</div>';
@@ -8375,7 +8400,7 @@ try {
     // 重名时部署状态会互相沾染，需要在列表里标出来。
     const dirNameCounts = new Map();
     for (const s of skills) dirNameCounts.set(s.dirName, (dirNameCounts.get(s.dirName) || 0) + 1);
-    listEl.innerHTML = filtered.map((s) => {
+    listEl.innerHTML = filtered.map((s, i) => {
       const eps = deployedEndpointsFor(s);
       const epCount = !enabledEps.length
         ? ""
@@ -8389,9 +8414,13 @@ try {
       const favStar = skillsFavorites.has(s.relPath)
         ? '<span class="skills-fav-star" title="已收藏">★</span>'
         : "";
-      // 行底色/描边动画只在差分后的那次渲染挂类，防过滤输入逐键重播动画
-      const flashCls = flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
-      return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}">
+      // 行底色/描边动画只在差分后的那次渲染挂类，防过滤输入逐键重播动画。
+      // cascade 那次渲染让位：同元素同特异性的 animation 简写是整条覆盖而非叠加，
+      // 两个动画会互吃一个；且 2s 底色渐隐混进 300ms cascade 里只是噪声。
+      const flashCls = cascade
+        ? ""
+        : flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
+      return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}" style="--i:${i}">
         <div class="skills-list-line1">
           <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}
           <span class="skills-ep-dots">${favStar}${epCount}</span>
@@ -8399,6 +8428,22 @@ try {
         <div class="skills-list-desc">${escapeHtml(s.description || "（无描述）")}</div>
       </div>`;
     }).join("");
+    if (cascade) playSkillsListCascade(listEl);
+  }
+
+  // 首屏行数 K：行高均匀（名称行与描述行都是 nowrap + ellipsis，永不折行），
+  // 一次 clientHeight / 首行 offsetHeight 即可，不用逐行量。只给前 K 行挂动画类，
+  // 折叠区外的行以基样式直接在那儿——刷新后 scrollTop 归零，没人看得见它们。
+  // 步长由 K 反推，使「末行延迟 + 单行时长」正好等于总时长：K 大时步长自动收窄
+  // （高屏上退化成近似整体揭示），总时长不随仓库条数漂。首屏 10 行时步长 30ms
+  // ≈ 60Hz 下隔两帧起一行，单行 180ms 让约 6 行同时在飞，读作一道往下的波。
+  function playSkillsListCascade(listEl) {
+    const rows = listEl.children;
+    if (!rows.length) return;
+    const k = Math.min(rows.length, Math.ceil(listEl.clientHeight / (rows[0].offsetHeight || 1)) + 1);
+    const step = k > 1 ? (SKILLS_CASCADE_TOTAL_MS - SKILLS_CASCADE_ROW_MS) / (k - 1) : 0;
+    listEl.style.setProperty("--csc-step", step.toFixed(1) + "ms");
+    for (let i = 0; i < k; i++) rows[i].classList.add("row-cascade");
   }
 
   function confirmDeleteSkill(skillName) {
