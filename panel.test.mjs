@@ -15,6 +15,12 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
     statusCode: null,
     headers: {},
     body: "",
+    // Minimal event surface: the panel-host self-restart route arms
+    // res.once("finish") to time its own exit, so tests need to be able to
+    // pull that trigger (see fakeReqRes's caller calling res.emit("finish")).
+    _events: {},
+    once(event, fn) { (this._events[event] ??= []).push(fn); return res; },
+    emit(event) { for (const fn of this._events?.[event] ?? []) fn(); return true; },
     writeHead(code, h) { this.statusCode = code; this.headers = h || {}; },
     end(data) { if (data !== undefined) this.body += data; },
   };
@@ -2421,5 +2427,143 @@ describe("panel.html 预设管理 tab", () => {
       "api() paths must not carry the /panel prefix (double-prefix 404 regression)");
     // 串行刷新链（防乱序），与 skills 同模式
     assert.ok(panelHtml.includes("presetsRefreshChain"), "serialized refresh chain");
+  });
+});
+
+describe("panel-host self-restart endpoint + control-plane-only page", () => {
+  function restartRouter({ hostKind, spawnImpl, exitImpl } = {}) {
+    const calls = { spawns: 0, exits: [] };
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      aliasResolver: null,
+      aliasPath: null,
+      fetchRelayAgents: async () => null,
+      hostKind,
+      spawnPanelHostRestartFn: spawnImpl ?? (() => { calls.spawns += 1; }),
+      exitPanelHostFn: exitImpl ?? ((code) => calls.exits.push(code)),
+    });
+    return { router, calls };
+  }
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  it("answers first and exits only after the response has flushed", async () => {
+    const { router, calls } = restartRouter();
+    const { req, res, json } = fakeReqRes("/panel/api/panel-host/restart", "POST");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().ok, true);
+    assert.equal(json().pid, process.pid);
+    assert.equal(calls.spawns, 1, "the detached helper is the only thing that can bring the next host up");
+    assert.deepEqual(calls.exits, [], "exiting before the flush is what the browser cannot distinguish from failure");
+    res.emit("finish");
+    await wait(250);
+    assert.deepEqual(calls.exits, [0]);
+  });
+
+  it("still exits when the client is gone before the flush completes", async () => {
+    const { router, calls } = restartRouter();
+    const { req, res } = fakeReqRes("/panel/api/panel-host/restart", "POST");
+    await router.handle(req, res);
+    // No "finish" emitted: the backstop must still release 47820, otherwise the
+    // frontend's recovery poll waits forever on a port we are holding.
+    await wait(1_500);
+    assert.deepEqual(calls.exits, [0]);
+  });
+
+  it("reports ok:false without exiting when the helper cannot be spawned", async () => {
+    const { router, calls } = restartRouter({ spawnImpl: () => { throw new Error("spawn ENOENT"); } });
+    const { req, res, json } = fakeReqRes("/panel/api/panel-host/restart", "POST");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 500);
+    assert.equal(json().ok, false);
+    assert.match(json().error, /ENOENT/);
+    await wait(250);
+    assert.deepEqual(calls.exits, [], "no helper means no replacement — stay up and serve");
+  });
+
+  it("refuses the restart from the relay-host copy of the router", async () => {
+    const { router, calls } = restartRouter({ hostKind: "relay-host" });
+    const { req, res, json } = fakeReqRes("/panel/api/panel-host/restart", "POST");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().ok, false);
+    assert.match(json().error, /47820/);
+    assert.equal(calls.spawns, 0);
+    await wait(250);
+    assert.deepEqual(calls.exits, [], "the relay is never the process that dies here");
+  });
+
+  it("rejects a cross-site restart POST without the panel header", async () => {
+    const { router, calls } = restartRouter();
+    const { req, res } = fakeReqRes("/panel/api/panel-host/restart", "POST", null, { origin: "http://evil.test" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 403);
+    assert.equal(calls.spawns, 0);
+  });
+
+  it("redirects 47821's page document to the control plane instead of serving a second copy", async () => {
+    const { router } = restartRouter({ hostKind: "relay-host" });
+    const { req, res } = fakeReqRes("/panel", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 302);
+    assert.equal(res.headers.location, "http://127.0.0.1:47820/panel");
+    assert.equal(res.body, "");
+  });
+
+  it("keeps 47821's API surface alive while its page document redirects", async () => {
+    const { router } = restartRouter({ hostKind: "relay-host" });
+    const status = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(status.req, status.res);
+    assert.equal(status.res.statusCode, 200);
+    assert.equal(status.json().relay.port, 47821);
+    // Per-launch Claude relays POST session/report to 47821 — the redirect must
+    // stay scoped to the page document or their usage-journal rows would stop.
+    const report = fakeReqRes("/panel/api/session/report", "POST", { pid: 123 });
+    await router.handle(report.req, report.res);
+    assert.equal(report.res.statusCode, 200);
+    assert.equal(report.json().ok, true);
+  });
+});
+
+describe("panel.html 面板重启状态机契约", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("恢复轮询独立成链且不受 document.hidden 门控", () => {
+    assert.ok(panelHtml.includes("function watchPanelHostComeBack()"), "独立的恢复轮询");
+    assert.ok(panelHtml.includes("PANEL_RESTART_POLL_MS"), "恢复轮询自带节奏常量");
+    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
+    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
+    assert.ok(recovery.length > 500, "恢复逻辑体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(!recovery.includes("document.hidden"),
+      "带 hidden 门控的话，用户点完重启切走标签页就永远检测不到换新");
+    assert.ok(recovery.includes("location.reload()"), "新进程接管后重载页面，前端 JS 与后端同版本");
+    assert.ok(recovery.includes("identity.pid !== before.pid"), "以 pid 变化判定新进程");
+    assert.ok(recovery.includes("identity.startTime !== before.startTime"), "startTime 作为辅助身份信号");
+  });
+
+  it("panelRestarting 同时压住徽标误报与按钮重新启用", () => {
+    assert.ok(panelHtml.includes("let panelRestarting = false;"));
+    // 徽标：refreshStatus 的 catch 在窗口内不得改判
+    assert.ok(/if \(panelRestarting\) return;\s*\n\s*\$\("topDot"\)\.className = "pulse-dot stopped";/.test(panelHtml),
+      "面板重启期间 47820 不可达是预期，不能把徽标写成「Relay 未运行」");
+    // 按钮：1s 轮询会重新调用 updateRelayControls，不拦住恢复期能再点一次重启
+    assert.ok(/function updateRelayControls\(relay\) \{[\s\S]{0,600}?if \(panelRestarting\) \{[\s\S]{0,200}?return;\s*\}/.test(panelHtml),
+      "updateRelayControls 必须在重启窗口内按住两个按钮后直接返回");
+  });
+
+  it("面板重启请求用裸 fetch，区分连接掐断与服务端拒绝", () => {
+    const execStart = panelHtml.indexOf("async function executeRestartRelay()");
+    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    assert.ok(exec.length > 500, "executeRestartRelay 体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(exec.includes('fetch(API_BASE + "/api/panel-host/restart"'),
+      "api() 把「响应被退出掐断」和「403/409/500 明确拒绝」都抛成同一种 Error");
+    assert.ok(!exec.includes('api("POST", "/api/panel-host/restart"'), "不得改用 api() 打这个端点");
+    assert.ok(exec.includes("restartStarted = true;"), "连接中断按「重启已开始」处理");
+    assert.ok(exec.includes('api("POST", "/api/relay/restart")'), "relay 仍是第一段，失败即终止");
   });
 });

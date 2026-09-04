@@ -120,7 +120,7 @@ function createResidentDeps(options = {}) {
     aliasResolver,
     aliasPath,
     socketOwner,
-    panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, aliasResolver, aliasPath }),
+    panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, aliasResolver, aliasPath, hostKind: "relay-host" }),
     metricsCollector,
     logger,
   };
@@ -225,7 +225,10 @@ export async function startResidentRelay(options = {}) {
     },
   });
 
-  logger.info(`panel at http://127.0.0.1:${port}/panel (relay-served view; control panel lives on 47820)`);
+  // Never phrase this as a panel URL: this line is bridged into the panel's
+  // 实时输出 window, and 47821 serves no page — its /panel redirects to the
+  // control plane. Only its /panel/api/* surface is live (session reports).
+  logger.info(`relay data plane on 127.0.0.1:${port}; panel page lives on 47820 (this port's /panel redirects there)`);
 
   // Graceful shutdown on Ctrl-C / service stop / supervisor kill. Always clear
   // the pid file so relay-process-manager sees "stopped" and can start cleanly.

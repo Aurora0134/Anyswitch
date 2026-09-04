@@ -1,8 +1,12 @@
 // Control-panel HTTP routes. Mounted on both:
 //   - panel-host.mjs (127.0.0.1:47820) — the desktop control plane; stays up
-//     when the relay is stopped
-//   - relay-host.mjs (127.0.0.1:47821) — same HTML, so /panel still works if
-//     someone opens the data-plane port
+//     when the relay is stopped. This is the ONLY place the panel page is
+//     served, and the only place that owns panel-host lifecycle.
+//   - relay-host.mjs (127.0.0.1:47821) — data plane. It mounts the same router
+//     for its API surface (per-launch relays POST session/report here), but its
+//     `/panel` document 302s to 47820: two live copies of the page on two ports
+//     would mean lifecycle buttons acting on whichever process happens to serve
+//     them, and a relay-restart request handled BY the relay is self-kill.
 //
 // Authentication: NONE. Loopback binding is the network boundary (non-127
 // peers already 403). Writes (start/stop/restart, settings, autostart, agy
@@ -28,8 +32,17 @@ import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
+import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 
 const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
+// The one place the panel page lives. relay-host's copy of this router sends
+// document requests here instead of serving a second, indistinguishable copy.
+const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
+// Panel self-restart timing: how long after the response has flushed we let the
+// socket settle before exiting, and the ceiling for the case where the flush
+// never completes because the client already hung up.
+const PANEL_HOST_EXIT_GRACE_MS = 150;
+const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 
 // GET /api/settings decorates its response with watchdog drift visibility
 // (registry task present vs watchdog process answering). Both probes cost real
@@ -453,6 +466,16 @@ export function createPanelRouter({
   startRelayFn = (root) => startRelay(root),
   stopRelayFn = (root) => stopRelay(root),
   restartRelayFn = (root) => restartRelay(root),
+  // Which process owns this router copy: "panel-host" = the control plane on
+  // 47820 (serves the page, owns panel lifecycle), "relay-host" = the data
+  // plane on 47821 (API surface only; its /panel document redirects).
+  hostKind = "panel-host",
+  // Panel-host restart: fire the detached one-shot that waits for 47820 to be
+  // released and brings the replacement up. Both this and the self-exit are
+  // injectable so the router is unit-testable without spawning processes or
+  // the test runner killing itself.
+  spawnPanelHostRestartFn = spawnPanelHostRestartHelper,
+  exitPanelHostFn = (code) => process.exit(code),
   // Watchdog coordination for followAgent: registry first (durable, survives
   // reboots), then process control (effective this session). Injectable so
   // the router is unit-testable without reg.exe or real watchdog processes.
@@ -618,6 +641,46 @@ export function createPanelRouter({
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err.message });
     }
+  }
+
+  // Restart THIS process so the next page load runs the code on disk. Cannot
+  // be done in place: the replacement can only bind 47820 after we release it
+  // (listenLoopbackPanel returns {reused:true} without serving when the port is
+  // taken), and nothing else supervises panel-host — hence the detached helper
+  // that waits for the release and spawns the new host. Order matters: answer
+  // first, exit after the response has flushed, or the browser sees a dead
+  // connection with no way to tell "restarting" from "failed".
+  async function handlePanelHostRestart(res) {
+    if (hostKind !== "panel-host") {
+      // The relay is not the control plane, and a lifecycle request it handled
+      // would be one process reaching across to kill another. relay-host's
+      // /panel redirects to 47820, so this is unreachable from the UI.
+      return sendJson(res, 409, {
+        ok: false,
+        error: "panel host restart must be requested from the control panel on 47820",
+      });
+    }
+    logger?.info("Panel host restart requested from panel control");
+    let scheduled = false;
+    let backstopTimer = null;
+    const scheduleExit = () => {
+      if (scheduled) return;
+      scheduled = true;
+      if (backstopTimer) clearTimeout(backstopTimer); // the flush landed; no need for the ceiling
+      setTimeout(() => exitPanelHostFn(0), PANEL_HOST_EXIT_GRACE_MS);
+    };
+    try {
+      spawnPanelHostRestartFn();
+    } catch (err) {
+      return sendJson(res, 500, { ok: false, error: err.message });
+    }
+    res.once("finish", scheduleExit);
+    sendJson(res, 200, { ok: true, pid: process.pid });
+    // Backstop: if the client is gone before the flush completes, "finish"
+    // never fires — and the frontend deliberately reads a dropped response as
+    // "restart started" (the exit can beat the flush), so it is sitting in its
+    // recovery poll waiting for a port we still owe it.
+    backstopTimer = setTimeout(scheduleExit, PANEL_HOST_EXIT_BACKSTOP_MS);
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
@@ -1028,8 +1091,15 @@ export function createPanelRouter({
     }
 
     // The panel page is served to any loopback peer. No login box. Writes are
-    // gated above; GETs stay tokenless.
+    // gated above; GETs stay tokenless. Only the control plane serves it: two
+    // byte-identical pages on two ports would put every lifecycle button at the
+    // mercy of whichever process happens to answer, and on 47821 that process is
+    // the relay — which cannot restart itself without dying mid-request.
     if (path === "/panel" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
       if (method === "HEAD") {
         res.writeHead(200, { "content-length": 0 });
         return res.end();
@@ -1042,6 +1112,7 @@ export function createPanelRouter({
     if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);
     if (path === "/panel/api/relay/stop" && method === "POST") return handleRelayStop(res);
     if (path === "/panel/api/relay/restart" && method === "POST") return handleRelayRestart(res);
+    if (path === "/panel/api/panel-host/restart" && method === "POST") return handlePanelHostRestart(res);
     if (path === "/panel/api/sync-agents" && method === "POST") return handleAgentSync(res);
     if (path === "/panel/api/agents" && method === "GET") return handleAgents(res);
     if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
