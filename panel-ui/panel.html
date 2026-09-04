@@ -9063,7 +9063,7 @@ try {
   }
   async function doRefreshPresetsState() {
     try {
-      const res = await api("GET", "/panel/api/prompts/state");
+      const res = await api("GET", "/api/prompts/state");
       const firstLoad = presetsState === null;
       presetsState = res;
       // 唯一自动选中：首次加载且未选中时落首项，保持「打开 tab 即见详情」；
@@ -9148,7 +9148,7 @@ try {
       const enabled = input.checked;
       input.disabled = true;
       try {
-        await api("POST", "/panel/api/prompts/master", { enabled });
+        await api("POST", "/api/prompts/master", { enabled });
         toast(enabled ? "预设注入已开启" : "预设注入已关闭");
       } catch (err) {
         toast("设置失败: " + err.message, true);
@@ -9279,7 +9279,7 @@ try {
   // 单端点注入开关：checked = 注入（从 off 列表移除），unchecked = 解除（加入 off 列表）
   async function togglePresetInject(endpointId, preset, on) {
     try {
-      await api("POST", "/panel/api/prompts/override", { endpointId, presetId: preset.id, off: !on });
+      await api("POST", "/api/prompts/override", { endpointId, presetId: preset.id, off: !on });
       toast(on ? `已注入到 ${endpointId}` : `已解除 ${endpointId} 的注入`);
     } catch (e) {
       toast("操作失败: " + e.message + "（服务可能未重启加载新接口）", true);
@@ -9296,7 +9296,7 @@ try {
       for (const ep of endpoints) {
         if (presetOffOn(preset, ep.id) === !on) continue;
         try {
-          await api("POST", "/panel/api/prompts/override", { endpointId: ep.id, presetId: preset.id, off: !on });
+          await api("POST", "/api/prompts/override", { endpointId: ep.id, presetId: preset.id, off: !on });
           changed++;
         } catch { failed++; }
       }
@@ -9309,7 +9309,7 @@ try {
 
   async function setPresetEnabled(preset, enabled) {
     try {
-      await api("POST", "/panel/api/prompts/preset/enable", { id: preset.id, enabled });
+      await api("POST", "/api/prompts/preset/enable", { id: preset.id, enabled });
       toast(enabled ? `已启用「${preset.title}」` : `已停用「${preset.title}」`);
     } catch (e) {
       toast("操作失败: " + e.message, true);
@@ -9325,7 +9325,7 @@ try {
       confirmText: "删除",
       onConfirm: async () => {
         try {
-          await api("POST", "/panel/api/prompts/preset/delete", { id: preset.id });
+          await api("POST", "/api/prompts/preset/delete", { id: preset.id });
           toast("预设已删除");
         } catch (e) {
           toast("删除失败: " + e.message, true);
@@ -9367,10 +9367,10 @@ try {
         if (!content.trim()) return reopen("正文不能为空");
         try {
           if (editing) {
-            await api("POST", "/panel/api/prompts/preset/update", { id: preset.id, title, tag, content });
+            await api("POST", "/api/prompts/preset/update", { id: preset.id, title, tag, content });
             toast("预设已保存");
           } else {
-            const created = await api("POST", "/panel/api/prompts/preset/create", { title, tag, content });
+            const created = await api("POST", "/api/prompts/preset/create", { title, tag, content });
             if (created?.preset?.id) presetsSelection = created.preset.id;
             toast("预设已创建");
           }

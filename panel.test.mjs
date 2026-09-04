@@ -2401,20 +2401,24 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(body.includes("wide: true"), "wide modal like store showAddModal");
     assert.ok(body.includes("showPresetFormModal(preset, { title, tag, content }, msg)"),
       "validation/submit failure reopens with filled values preserved");
-    assert.ok(body.includes("/panel/api/prompts/preset/create"), "create endpoint");
-    assert.ok(body.includes("/panel/api/prompts/preset/update"), "update endpoint");
+    assert.ok(body.includes('"/api/prompts/preset/create"'), "create endpoint");
+    assert.ok(body.includes('"/api/prompts/preset/update"'), "update endpoint");
   });
 
   it("uses the prompts HTTP contract and the shared api() helper", () => {
-    assert.ok(panelHtml.includes('api("GET", "/panel/api/prompts/state")'), "state GET");
+    // api() 会自动拼 API_BASE（origin + "/panel"），传入路径必须是不带
+    // "/panel" 前缀的 "/api/..."——带前缀会产生 /panel/panel/... 双重前缀 404。
+    assert.ok(panelHtml.includes('api("GET", "/api/prompts/state")'), "state GET");
     for (const p of [
-      "/panel/api/prompts/master",
-      "/panel/api/prompts/preset/delete",
-      "/panel/api/prompts/preset/enable",
-      "/panel/api/prompts/override",
+      "/api/prompts/master",
+      "/api/prompts/preset/delete",
+      "/api/prompts/preset/enable",
+      "/api/prompts/override",
     ]) {
       assert.ok(panelHtml.includes(`"${p}"`), `missing endpoint ${p}`);
     }
+    assert.ok(!/api\("(?:GET|POST)", "\/panel\//.test(panelHtml),
+      "api() paths must not carry the /panel prefix (double-prefix 404 regression)");
     // 串行刷新链（防乱序），与 skills 同模式
     assert.ok(panelHtml.includes("presetsRefreshChain"), "serialized refresh chain");
   });
