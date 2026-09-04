@@ -23,6 +23,8 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { createSkillsService } from "./agent-skills.mjs";
+import { createPromptsService } from "./agent-prompts.mjs";
+import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
@@ -53,6 +55,43 @@ export class BodyTooLargeError extends Error {
     this.name = "BodyTooLargeError";
     this.statusCode = 413;
   }
+}
+
+// Prompts tab facade: pairs the prompts data plane (agent-prompts.mjs) with
+// the injector (agent-prompts-inject.mjs). Every mutation is followed by a
+// full syncAll across all eight endpoints; per-endpoint failures land in the
+// `sync` snapshot served by getState and never fail the mutation itself.
+// `homeDir` is injectable so tests can keep all writes inside temp dirs.
+export function createPromptsPanelService({ base = process.env, homeDir } = {}) {
+  const data = createPromptsService({ base });
+  const injector = createPromptsInjector({ base, ...(homeDir ? { homeDir } : {}) });
+  let lastSync = {};
+  const mutateAndSync = (result) => {
+    lastSync = injector.syncAll((endpointId) => data.resolveForEndpoint(endpointId));
+    return result;
+  };
+  return {
+    getState() {
+      return {
+        ...data.getState(),
+        endpoints: injector.listEndpoints().map(({ id, label, hotReload, targetRel }) => ({ id, label, hotReload, targetRel })),
+        sync: lastSync,
+      };
+    },
+    setMaster: (enabled) => mutateAndSync(data.setMaster(enabled)),
+    createPreset: (fields) => mutateAndSync(data.createPreset(fields)),
+    updatePreset: (fields) => mutateAndSync(data.updatePreset(fields)),
+    deletePreset: (id) => mutateAndSync(data.deletePreset(id)),
+    setPresetEnabled: (args) => mutateAndSync(data.setPresetEnabled(args)),
+    setOverride: (args) => {
+      if (!injector.hasEndpoint(args?.endpointId)) {
+        const error = new Error(`未知端点: ${args?.endpointId}`);
+        error.statusCode = 400;
+        throw error;
+      }
+      return mutateAndSync(data.setOverride(args));
+    },
+  };
 }
 
 function sendJson(res, status, body) {
@@ -432,6 +471,9 @@ export function createPanelRouter({
   // unit-testable without real home directories, junctions, or PowerShell.
   // `null` lazily builds the real service on first skills request.
   skillsService = null,
+  // Prompts tab facade (createPromptsPanelService). Injectable for tests;
+  // `null` lazily builds the real facade on the first prompts request.
+  promptsService = null,
   // Store tab service (store-service.mjs). Injectable so the router is
   // unit-testable with a mock; `null` lazily builds the real service on the
   // first store request, rooted at the same storePaths the router uses.
@@ -1512,6 +1554,98 @@ export function createPanelRouter({
           }
           if (path === "/panel/api/skills/body") {
             const result = await svc.readSkillBody(requireString(body.relPath, "relPath"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── Prompts tab routes ─────────────────────────────────────────────
+    // Every mutation POST persists via the data plane, then immediately
+    // re-syncs all eight endpoint instruction files. Sync failures land in
+    // the `sync` snapshot (GET state) and never fail the mutation itself;
+    // thrown validation errors become { ok:false, error }.
+    if (path.startsWith("/panel/api/prompts/")) {
+      if (!promptsService) promptsService = createPromptsPanelService({ base });
+      const svc = promptsService;
+
+      if (path === "/panel/api/prompts/state" && method === "GET") {
+        try {
+          return sendJson(res, 200, { ok: true, ...svc.getState() });
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} 不能为空`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+          const requireBoolean = (value, field) => {
+            if (typeof value !== "boolean") {
+              const error = new Error(`${field} 必须是布尔值`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value;
+          };
+          // tag is optional; content may be empty but must be a string.
+          const requireContent = (value) => {
+            if (typeof value !== "string") {
+              const error = new Error("content 必须是字符串");
+              error.statusCode = 400;
+              throw error;
+            }
+            return value;
+          };
+
+          if (path === "/panel/api/prompts/master") {
+            const result = svc.setMaster(requireBoolean(body.enabled, "enabled"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/create") {
+            const result = svc.createPreset({
+              title: requireString(body.title, "title"),
+              tag: body.tag ?? "",
+              content: requireContent(body.content),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/update") {
+            const result = svc.updatePreset({
+              id: requireString(body.id, "id"),
+              title: requireString(body.title, "title"),
+              tag: body.tag ?? "",
+              content: requireContent(body.content),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/delete") {
+            const result = svc.deletePreset(requireString(body.id, "id"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/enable") {
+            const result = svc.setPresetEnabled({
+              id: requireString(body.id, "id"),
+              enabled: requireBoolean(body.enabled, "enabled"),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/override") {
+            const result = svc.setOverride({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              presetId: requireString(body.presetId, "presetId"),
+              off: requireBoolean(body.off, "off"),
+            });
             return sendJson(res, 200, { ok: true, ...result });
           }
         } catch (err) {
