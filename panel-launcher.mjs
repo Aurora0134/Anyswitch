@@ -31,7 +31,9 @@ const DEFAULT_PROBE_INTERVAL_MS = 400;
 
 // Is the control panel answering on PORT? Probes /panel/api/status (loopback,
 // unauthenticated) and treats a 200 as "up".
-function probePanel(port = PANEL_PORT) {
+// Exported: panel-host-restart-helper.mjs waits on the same definition, so the
+// "is a panel up?" question is answered one way in this app.
+export function probePanel(port = PANEL_PORT) {
   return new Promise((resolve) => {
     const req = request(`http://127.0.0.1:${port}/panel/api/status`, { method: "GET", timeout: 2000 }, (res) => {
       resolve(res.statusCode === 200);

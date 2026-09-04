@@ -5444,6 +5444,8 @@ try {
   async function refreshStatus() {
     try {
       const res = await api("GET", "/api/status");
+      // 记住面板进程身份：请求重启面板后，靠 pid/startTime 变化判定新进程已接管。
+      lastPanelIdentity = { pid: res?.pid ?? null, startTime: res?.startTime ?? null };
       const dot = $("topDot");
       const statusText = $("topRelayStatus");
       const sbState = $("sbStateBadge");
@@ -5475,6 +5477,10 @@ try {
         sbState.textContent = "已停止";
       }
     } catch {
+      // 面板服务正在换新进程：47820 整个不可达是预期内的，徽标已由
+      // watchPanelHostComeBack 写成「面板服务重启中…」，这里不能再把它改判成
+      // 「Relay 未运行」——relay 其实活着。
+      if (panelRestarting) return;
       $("topDot").className = "pulse-dot stopped";
       $("topRelayStatus").textContent = "Relay 未运行";
       $("sbStateBadge").className = "badge badge-danger";
@@ -7555,11 +7561,28 @@ try {
   // 运行中 → ⏹ 停止（红 btn-danger），停止 → ▶ 启动（蓝 btn-primary）。
   let currentRelayState = { status: "stopped" };
 
+  // 面板服务（panel-host, 47820）自身的重启窗口：true = 已请求它退出、正在等新
+  // 进程接管 47820。这个窗口里页面的服务端整个没了，徽标和按钮的每秒重算全部
+  // 来自失败请求，不显式压住就会把「面板重启中」误报成「Relay 已停止」。
+  let panelRestarting = false;
+  // 上一次成功 /api/status 看到的进程身份；pid 或 startTime 变了 = 新进程已接管。
+  let lastPanelIdentity = { pid: null, startTime: null };
+  const PANEL_RESTART_POLL_MS = 500;
+  const PANEL_RESTART_RECOVERY_TIMEOUT_MS = 20_000;
+
   function updateRelayControls(relay) {
     currentRelayState = relay || { status: "stopped" };
     const toggleBtn = $("sbRelayToggleBtn");
     const restartBtn = $("sbRelayRestartBtn");
     if (!toggleBtn) return;
+
+    // 重启窗口内两个按钮一律按住：relay 一回来本函数就会被 1s 轮询再次调用，
+    // 不在这里拦住，恢复期间重启键会重新可点，能再触发一次重启。
+    if (panelRestarting) {
+      toggleBtn.disabled = true;
+      if (restartBtn) restartBtn.disabled = true;
+      return;
+    }
 
     if (currentRelayState.status === "running") {
       toggleBtn.className = "btn btn-mini btn-danger";
@@ -7613,10 +7636,11 @@ try {
     async function openLifecycleModal(action) {
       pendingLifecycleAction = action;
       const isRestart = action === "restart";
-      if (titleText) titleText.textContent = isRestart ? "重启 Relay 服务" : "停止 Relay 服务";
+      if (titleText) titleText.textContent = isRestart ? "重启 Relay 与面板服务" : "停止 Relay 服务";
       if (stopConfirmBtn) stopConfirmBtn.textContent = isRestart ? "确认重启" : "确认停止";
-      const verb = isRestart ? "重启" : "停止";
-      let summary = `<p style="margin:0 0 8px;">确定要${verb} Relay 代理服务吗？${verb}后所有指向 <code>127.0.0.1:47821</code> 的本地 Agent 请求将中断。</p>`;
+      let summary = isRestart
+        ? `<p style="margin:0 0 8px;">确定要重启 Relay 代理服务与面板服务吗？重启期间所有指向 <code>127.0.0.1:47821</code> 的本地 Agent 请求将中断。</p>`
+        : `<p style="margin:0 0 8px;">确定要停止 Relay 代理服务吗？停止后所有指向 <code>127.0.0.1:47821</code> 的本地 Agent 请求将中断。</p>`;
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
@@ -7634,7 +7658,11 @@ try {
       } catch {
         summary += `<p style="margin:0 0 8px;">无法读取当前会话，仍可能打断正在进行的请求。</p>`;
       }
-      summary += `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：仅影响 47821 中继转发，当前 47820 Web 控制台保持在线。</p>`;
+      // 停止 = 只动数据面、控制台保活（拆分架构的承诺）；重启 = 两个都换，页面
+      // 会短暂断开并由本页自动刷新恢复。
+      summary += isRestart
+        ? `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：面板服务（47820）一并重启，本页面会短暂断开、几秒后自动刷新；实时输出窗口的历史会清空（内存缓冲随进程一起没了）。</p>`
+        : `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：仅影响 47821 中继转发，当前 47820 Web 控制台保持在线。</p>`;
       if (stopBody) stopBody.innerHTML = summary;
       stopModal.classList.add("show");
     }
@@ -7673,18 +7701,86 @@ try {
 
     async function executeRestartRelay() {
       restartBtn.disabled = true;
+      // ① relay 先换：这一步由面板进程转手执行，页面不断线。失败到此为止，
+      //    绝不在 relay 没起来的情况下去动面板自己。
       try {
-        const res = await api("POST", "/api/relay/restart");
-        if (res.ok) {
-          toast("Relay 重启成功");
-        } else {
-          toast("重启失败: " + (res.error || "未知错误"), true);
-        }
+        await api("POST", "/api/relay/restart");
       } catch (e) {
-        toast("请求失败: " + e.message, true);
-      } finally {
+        toast("重启失败: " + e.message, true);
         restartBtn.disabled = false;
+        return;
       }
+      // ② 面板服务再换自己。这个请求的「失败」有两种完全不同的含义：连接被退出
+      //    掐断（预期内，重启确实开始了）vs 服务端明确拒绝（403/409/500，面板还
+      //    活着且没动）。api() 把两者都抛成 Error，所以这里用裸 fetch 分清。
+      let restartStarted;
+      let refusal = "";
+      try {
+        const r = await fetch(API_BASE + "/api/panel-host/restart", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" },
+        });
+        restartStarted = r.ok;
+        if (!r.ok) {
+          try { refusal = ((await r.json()).error) || `HTTP ${r.status}`; } catch { refusal = `HTTP ${r.status}`; }
+        }
+      } catch {
+        restartStarted = true; // 连接中断：多半是进程已经退出，交给恢复轮询验证
+      }
+      if (!restartStarted) {
+        toast(`Relay 已重启；面板服务未重启（${refusal}）`, true);
+        restartBtn.disabled = false;
+        return;
+      }
+      watchPanelHostComeBack();
+    }
+
+    // 等 panel-host 换新进程。刻意不复用 1s 状态轮询：那条链带 document.hidden
+    // 门控，用户点完重启切去别的标签页就再也检测不到换新，页面会一直停在已死的
+    // 旧面板上。检测到新身份即 location.reload()——页面 JS 也随磁盘上的新版对齐。
+    function watchPanelHostComeBack() {
+      panelRestarting = true;
+      const before = { ...lastPanelIdentity };
+      const dot = $("topDot");
+      const statusText = $("topRelayStatus");
+      const sbState = $("sbStateBadge");
+      if (dot) dot.className = "pulse-dot starting";
+      if (statusText) statusText.textContent = "面板服务重启中…";
+      if (sbState) { sbState.className = "badge badge-warn"; sbState.textContent = "重启中"; }
+      if (toggleBtn) toggleBtn.disabled = true;
+      if (restartBtn) restartBtn.disabled = true;
+
+      const deadline = Date.now() + PANEL_RESTART_RECOVERY_TIMEOUT_MS;
+      let aliveIdentity = null; // 窗口内最后一次「仍在应答」的身份，用于超时时说清是哪种失败
+      const timer = setInterval(async () => {
+        let identity = null;
+        try {
+          const r = await fetch(API_BASE + "/api/status", { cache: "no-store" });
+          if (r.ok) {
+            const d = await r.json();
+            identity = { pid: d?.pid ?? null, startTime: d?.startTime ?? null };
+          }
+        } catch {
+          /* 47820 还没人应答：旧进程已退出或新进程还在绑端口，继续等 */
+        }
+        if (identity) aliveIdentity = identity;
+        if (identity && (identity.pid !== before.pid || identity.startTime !== before.startTime)) {
+          clearInterval(timer);
+          location.reload();
+          return;
+        }
+        if (Date.now() >= deadline) {
+          clearInterval(timer);
+          panelRestarting = false;
+          if (aliveIdentity && aliveIdentity.pid === before.pid) {
+            // 面板从头到尾没退出过：助手没能把它送走，页面一切照常，别谎称掉线。
+            toast("面板服务未退出，重启没生效；详见 logs/panel-host-restart.log", true);
+          } else {
+            toast("面板服务未能自动恢复，请用桌面快捷方式重新打开 Anyswitch 面板", true);
+          }
+          refreshStatus(); // 徽标与按钮回到真实状态
+        }
+      }, PANEL_RESTART_POLL_MS);
     }
 
     if (stopConfirmBtn) {
