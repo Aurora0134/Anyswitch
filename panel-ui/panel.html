@@ -8,8 +8,8 @@
 <style>
   :root {
     color-scheme: light;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
     
     /* 亮色模式：Slate/Zinc 工业质感技术仪表盘 */
@@ -843,7 +843,7 @@
   }
   .skills-list-line1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .skills-list-name {
-    font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: var(--text);
+    font-family: var(--font-mono); font-size: 12.5px; font-weight: 500; color: var(--text);
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .skills-ep-dots { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
@@ -1480,8 +1480,8 @@
    -------------------------------------------------------------------------- */
 :root[data-style="neon"] {
   color-scheme: light;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 浅冷灰底 + 冷白表面 */
@@ -1544,8 +1544,8 @@
    -------------------------------------------------------------------------- */
 :root[data-style="neon"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 近黑深底，带极微弱冷青倾向 */
@@ -1609,8 +1609,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="neon"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
     /* 近黑深底，带极微弱冷青倾向 */
@@ -1912,8 +1912,8 @@
 /* 1) 亮色 token 全集 */
 :root[data-style="saas"] {
   color-scheme: light;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   --bg: #fbfbfc;
@@ -1986,8 +1986,8 @@
 /* 2) 暗色 token 全集（显式 dark） */
 :root[data-style="saas"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   --bg: #101114;
@@ -2056,8 +2056,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="saas"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
     --bg: #101114;
@@ -2375,8 +2375,8 @@
 /* 1) 亮色 token 全集（极地白昼） */
 :root[data-style="aurora"] {
   color-scheme: light;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 表面：冰白系，面体半透以透出底部极光晕 */
@@ -2459,8 +2459,8 @@
 /* 2) 暗色 token 全集（显式 dark，极光夜） */
 :root[data-style="aurora"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 表面：极夜深蓝，面体半透透出极光带 */
@@ -2539,8 +2539,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="aurora"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
     /* 表面：极夜深蓝，面体半透透出极光带 */
@@ -2944,8 +2944,8 @@
 /* 1) 亮色 token 全集（描图纸：米白底 + 蓝墨线） */
 :root[data-style="blueprint"] {
   color-scheme: light;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
 
   /* 表面：米白描图纸阶， sunken 稍沉一档 */
@@ -3024,8 +3024,8 @@
 /* 2) 暗色 token 全集（显式 dark：经典深蓝蓝图） */
 :root[data-style="blueprint"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
 
   /* 表面：深蓝图纸阶，surface 比 page 亮半档 */
@@ -3100,8 +3100,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="blueprint"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.2, 0.9, 0.25, 1);
 
     /* 表面：深蓝图纸阶，surface 比 page 亮半档 */
@@ -3451,8 +3451,8 @@
 /* 1) 亮色 token 全集 */
 :root[data-style="sepia"] {
   color-scheme: light;
-  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 背景与文字：保持中性，不加暖 */
@@ -3517,8 +3517,8 @@
 /* 2) 暗色 token 全集（显式 dark） */
 :root[data-style="sepia"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 背景与文字：保持中性，不加暖 */
@@ -3579,8 +3579,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
     /* 背景与文字：保持中性，不加暖 */
