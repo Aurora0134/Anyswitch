@@ -856,9 +856,12 @@
     font-size: 11.5px; color: var(--text-3); margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  /* Skills 视图：刷新按钮 loading 态——请求期间按钮禁用（.btn:disabled 变暗）且图标旋转；
-     JS 侧设最短展示时长，本机接口几十毫秒返回也能让人看清「查过了」 */
-  #skillsRefreshBtn.busy .skills-refresh-ico { animation: skillsRefreshSpin 700ms linear infinite; }
+  /* Skills 视图：刷新按钮 loading 态——请求期间按钮禁用且图标旋转；
+     JS 侧设最短展示时长，本机接口几十毫秒返回也能让人看清「查过了」。
+     busy 期间覆盖 .btn:disabled 的 45% 变暗：12px 细线图标淡下去像坏了，
+     旋转本身就是「进行中」信号，连点由 JS 守卫兜住。900ms 一圈比 700ms 沉稳。 */
+  #skillsRefreshBtn.busy { opacity: 1; }
+  #skillsRefreshBtn.busy .skills-refresh-ico { animation: skillsRefreshSpin 900ms linear infinite; }
   @keyframes skillsRefreshSpin { to { transform: rotate(360deg); } }
   /* Skills 视图：变动高亮——新增行底色渐隐一次 +「新」徽标短暂存续；变化行内描边脉冲；
      计数徽标变化时闪一下。行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
@@ -4708,7 +4711,7 @@ try {
               <button class="btn" id="skillsImportBtn" title="打开文件夹选择框选 skill 本体目录（需包含 SKILL.md），确认有效后导入主仓库">导入 skill 目录</button>
               <button class="btn" id="skillsImportZipBtn" title="打开文件选择框选 skill 的 .zip 压缩包，解压校验后以目录形式导入主仓库">导入 skill（zip）</button>
               <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与端点状态，发现磁盘上的变动">
-                <svg class="skills-refresh-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                <svg class="skills-refresh-ico" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M19.24 10.06A7.5 7.5 0 1 1 12 4.5"/><path d="M12.3 2.2L15.2 4.6L12.3 7.0"/></svg>
                 刷新
               </button>
             </div>
