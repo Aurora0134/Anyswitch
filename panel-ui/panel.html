@@ -3892,6 +3892,7 @@ try {
     <nav class="view-tabs" role="tablist" aria-label="视图切换">
       <button class="view-tab active" id="tabBoard" role="tab" aria-selected="true">看板</button>
       <button class="view-tab" id="tabSkills" role="tab" aria-selected="false">Skills 管理</button>
+      <button class="view-tab" id="tabPresets" role="tab" aria-selected="false">预设管理</button>
       <button class="view-tab" id="tabStore" role="tab" aria-selected="false">渠道管理</button>
       <button class="view-tab" id="tabStats" role="tab" aria-selected="false">使用统计</button>
     </nav>
@@ -4736,6 +4737,66 @@ try {
     </div>
   </section>
 
+  <!-- 预设管理视图：左列（预设列表），右列（全局设置 + 预设详情）；布局/样式全量复用 skills 既有类 -->
+  <section class="skills-view" id="presetsView" hidden>
+    <div class="skills-grid">
+
+      <div class="skills-col">
+        <!-- 卡片 A：预设列表（单击选中驱动右侧详情卡；右键菜单编辑/启停/删除） -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              预设列表
+            </h2>
+            <span class="badge badge-neutral" id="presetsListBadge">0</span>
+          </div>
+          <div class="card-body">
+            <div class="skills-btn-row">
+              <button class="btn" id="presetsAddBtn" title="新建预设：预注入到各端点全局指令文件的 prompt">新增预设</button>
+              <button class="btn" id="presetsRefreshBtn">刷新</button>
+            </div>
+            <div class="skills-filter-row" style="margin-top:10px;">
+              <input class="skills-path-input" id="presetsFilterInput" placeholder="过滤标题 / tag / 正文…" style="width:100%; box-sizing:border-box;">
+            </div>
+            <div class="skills-list" id="presetsList"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="skills-col">
+        <!-- 卡片 B：全局设置（预设功能总开关） -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+              全局设置
+            </h2>
+          </div>
+          <div class="card-body">
+            <div class="skills-skill-row">
+              <span class="skills-skill-name">启用预设注入</span>
+              <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
+            </div>
+            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
+          </div>
+        </div>
+
+        <!-- 卡片 C：选中预设的详情（编辑/删除 + 逐端点注入开关） -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              预设详情
+            </h2>
+          </div>
+          <div class="card-body" id="presetsDetailBody"></div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
   <!-- Store 管理视图：左列（总览 + 渠道列表），右列（渠道详情含模型管理） -->
   <section class="skills-view store-view" id="storeView" hidden>
     <div class="skills-grid">
@@ -5320,6 +5381,7 @@ try {
     initAgyMapping();
     initRelayControls();
     initSkillsTab();
+    initPresetsTab();
     initStoreTab();
     initStatsTab();
     loadAutostartState();
@@ -7892,21 +7954,25 @@ try {
     const board = name === "board";
     const store = name === "store";
     const stats = name === "stats";
+    const presets = name === "presets";
     currentView = name;
     document.querySelector(".telemetry-view").hidden = !board;
     $("skillsView").hidden = !(name === "skills");
+    $("presetsView").hidden = !presets;
     $("storeView").hidden = !store;
     $("statsView").hidden = !stats;
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
+    $("tabPresets").classList.toggle("active", presets);
     $("tabStore").classList.toggle("active", store);
     $("tabStats").classList.toggle("active", stats);
     // tablist 语义：aria-selected 与 active class 同步（屏幕阅读器按 tab 读选中态）
-    for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabStore", store], ["tabStats", stats]]) {
+    for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
     try { localStorage.setItem("panel-view", name); } catch {}
     if (name === "skills") refreshSkillsState();
+    if (presets) refreshPresetsState();
     if (store) refreshStoreState();
     if (stats) enterStatsView(); else leaveStatsView();
     // 切回看板（B4/R9）：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
@@ -7922,6 +7988,7 @@ try {
     let saved = null;
     try { saved = localStorage.getItem("panel-view"); } catch {}
     if (saved === "skills") switchView("skills");
+    else if (saved === "presets") switchView("presets");
     else if (saved === "store") switchView("store");
     else if (saved === "stats") switchView("stats");
   }
@@ -8953,6 +9020,366 @@ try {
     if (skillsModalBusy) return; // 确认处理中：忽略遮罩点击与关闭按钮
     $("skillsModal").classList.remove("show");
     skillsModalConfirm = null;
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 预设管理 tab（预设 = 预注入到各端点全局指令文件的 prompt 文本）
+  // 完全照 skills 范式：单选（选中即焦点）驱动右侧详情卡，行内不放操作按钮，
+  // 编辑/删除走详情卡按钮 + 右键菜单；端点注入开关在详情卡内逐端点 toggle。
+  // 布局/样式零新增类，全量复用 skills-*/store-form-* 既有类（皮肤自动生效）。
+  // ══════════════════════════════════════════════════════════════════
+  let presetsState = null;       // GET /panel/api/prompts/state 最近一次结果
+  let presetsSelection = null;   // 单选：选中预设 id（选中即焦点，驱动详情卡）
+  let presetsFilter = "";
+
+  // 注入计数口径：预设 enabled 且不在该端点 off 列表 = 计 1（总开关不影响计数）。
+  // 详情卡「已注入」徽标更严格：还需总开关 enabled。
+  function presetOffOn(preset, epId) {
+    const off = (((presetsState || {}).endpointOverrides || {})[epId] || {}).off || [];
+    return off.includes(preset.id);
+  }
+  function presetCountedOn(preset, epId) {
+    return !!preset.enabled && !presetOffOn(preset, epId);
+  }
+  function presetInjectedOn(preset, epId) {
+    return !!(presetsState && presetsState.enabled) && presetCountedOn(preset, epId);
+  }
+
+  function fmtPresetTime(ts) {
+    if (!ts) return "—";
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return String(ts);
+    const p = (x) => (x < 10 ? "0" : "") + x;
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  // 串行化刷新（与 skills 同模式）：刷新排进 promise 链依次执行，await 返回时
+  // 那次刷新的 GET 一定在调用之后才发出；单次失败不断链。
+  let presetsRefreshChain = Promise.resolve();
+  function refreshPresetsState() {
+    const p = presetsRefreshChain.then(doRefreshPresetsState);
+    presetsRefreshChain = p.catch(() => {});
+    return p;
+  }
+  async function doRefreshPresetsState() {
+    try {
+      const res = await api("GET", "/panel/api/prompts/state");
+      const firstLoad = presetsState === null;
+      presetsState = res;
+      // 唯一自动选中：首次加载且未选中时落首项，保持「打开 tab 即见详情」；
+      // 此后用户清空的选中不被刷新复活。
+      if (firstLoad && presetsSelection === null) {
+        const first = (res.presets || [])[0];
+        if (first) presetsSelection = first.id;
+      }
+      reconcilePresetsSelection();
+      renderPresetsMaster();
+      renderPresetsList();
+      renderPresetDetail();
+    } catch (e) {
+      toast("预设状态加载失败: " + e.message, true);
+    }
+  }
+
+  // reconcile（每次刷新后）：选中项已消失则回落首项（无条目则清空）
+  function reconcilePresetsSelection() {
+    if (presetsSelection === null) return;
+    const presets = (presetsState && presetsState.presets) || [];
+    if (!presets.some((p) => p.id === presetsSelection)) {
+      presetsSelection = presets.length ? presets[0].id : null;
+    }
+  }
+
+  function initPresetsTab() {
+    $("tabPresets").onclick = () => switchView("presets");
+    $("presetsAddBtn").onclick = () => showPresetFormModal(null);
+    $("presetsRefreshBtn").onclick = refreshPresetsState;
+    $("presetsFilterInput").oninput = (e) => {
+      presetsFilter = e.target.value.trim().toLowerCase();
+      renderPresetsList();
+    };
+    // 单选（选中即焦点）：左键选中/再点取消；点列表空白处清空选中
+    $("presetsList").addEventListener("click", (e) => {
+      const row = e.target.closest("[data-preset]");
+      if (!row) {
+        if (presetsSelection !== null) {
+          presetsSelection = null;
+          renderPresetsList();
+          renderPresetDetail();
+        }
+        return;
+      }
+      const id = row.getAttribute("data-preset");
+      presetsSelection = presetsSelection === id ? null : id;
+      renderPresetsList();
+      renderPresetDetail();
+    });
+    // 右键菜单（复用 skills 菜单基建 popSkillsContextMenu）：编辑 / 启用|停用 / 删除
+    $("presetsList").addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const row = e.target.closest("[data-preset]");
+      if (!row) return;
+      const id = row.getAttribute("data-preset");
+      if (presetsSelection !== id) {
+        presetsSelection = id;
+        renderPresetsList();
+        renderPresetDetail();
+      }
+      const preset = ((presetsState && presetsState.presets) || []).find((p) => p.id === id);
+      if (!preset) return;
+      popSkillsContextMenu(e.clientX, e.clientY, preset.title, [
+        { label: "编辑", fn: () => showPresetFormModal(preset) },
+        { label: preset.enabled ? "停用" : "启用", fn: () => setPresetEnabled(preset, !preset.enabled) },
+        { label: "删除", danger: true, fn: () => confirmDeletePreset(preset) },
+      ]);
+    });
+    $("presetsList").addEventListener("scroll", hideSkillsContextMenu);
+    // Esc 收起右键菜单（skills 的全局 keydown 只在 skills/store 视图生效，这里补 presets）
+    document.addEventListener("keydown", (e) => {
+      if ($("presetsView").hidden) return;
+      if (e.key === "Escape" && $("skillsCtxMenu")) {
+        hideSkillsContextMenu();
+        e.preventDefault();
+      }
+    });
+    // 全局设置卡：总开关（预设功能 enabled）
+    $("presetsMasterToggle").onchange = async (e) => {
+      const input = e.target;
+      const enabled = input.checked;
+      input.disabled = true;
+      try {
+        await api("POST", "/panel/api/prompts/master", { enabled });
+        toast(enabled ? "预设注入已开启" : "预设注入已关闭");
+      } catch (err) {
+        toast("设置失败: " + err.message, true);
+      } finally {
+        input.disabled = false;
+      }
+      await refreshPresetsState();
+    };
+    if ($("presetsView").hidden) refreshPresetsState(); // presets 视图时 switchView 已触发刷新
+  }
+
+  // ── 卡片 A：预设列表 ──
+  function visiblePresets() {
+    const presets = (presetsState && presetsState.presets) || [];
+    if (!presetsFilter) return presets;
+    const hit = (v) => (v || "").toLowerCase().includes(presetsFilter);
+    return presets.filter((p) => hit(p.title) || hit(p.tag) || hit(p.content));
+  }
+
+  function renderPresetsList() {
+    const listEl = $("presetsList");
+    const badge = $("presetsListBadge");
+    const presets = (presetsState && presetsState.presets) || [];
+    badge.textContent = String(presets.length);
+    if (!presets.length) {
+      listEl.innerHTML = '<div class="empty-hint">还没有预设，点「新增预设」创建</div>';
+      return;
+    }
+    const filtered = visiblePresets();
+    if (!filtered.length) {
+      listEl.innerHTML = '<div class="empty-hint">没有匹配的预设</div>';
+      return;
+    }
+    const epTotal = ((presetsState && presetsState.endpoints) || []).length;
+    listEl.innerHTML = filtered.map((p) => {
+      const n = epTotal
+        ? ((presetsState.endpoints || []).filter((ep) => presetCountedOn(p, ep.id))).length
+        : 0;
+      const epCount = !epTotal
+        ? ""
+        : `<span class="skills-ep-count${n >= epTotal ? " full" : n ? " some" : ""}" title="注入 ${n}/${epTotal} 个端点">${n}/${epTotal}</span>`;
+      const tagBadge = p.tag ? `<span class="badge badge-neutral">${escapeHtml(p.tag)}</span>` : "";
+      const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
+      // 未启用的预设行整体压暗（内联透明度，不新增类）
+      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}"${p.enabled ? "" : ' style="opacity:0.55;"'} data-preset="${escapeHtml(p.id)}">
+        <div class="skills-list-line1">
+          <span class="skills-list-name">${escapeHtml(p.title)}</span>${tagBadge}
+          <span class="skills-ep-dots">${epCount}</span>
+        </div>
+        <div class="skills-list-desc">${escapeHtml(firstLine)}</div>
+      </div>`;
+    }).join("");
+  }
+
+  // ── 卡片 B：全局设置（总开关） ──
+  function renderPresetsMaster() {
+    $("presetsMasterToggle").checked = !!(presetsState && presetsState.enabled);
+  }
+
+  // ── 卡片 C：选中预设的详情与逐端点注入 ──
+  function renderPresetDetail() {
+    const body = $("presetsDetailBody");
+    const presets = (presetsState && presetsState.presets) || [];
+    const preset = presets.find((p) => p.id === presetsSelection) || null;
+    // 无选中时整卡收起；empty-hint 仅作结构兜底（与 skills 详情卡同手法）
+    const card = body.closest(".panel-card");
+    if (card) card.hidden = !preset;
+    if (!preset) {
+      body.innerHTML = '<div class="empty-hint">从左侧列表选择一个预设，查看详情并管理端点注入</div>';
+      return;
+    }
+    const endpoints = (presetsState && presetsState.endpoints) || [];
+    const sync = (presetsState && presetsState.sync) || {};
+    const rows = endpoints.map((ep) => {
+      const injected = presetInjectedOn(preset, ep.id);
+      const syncErr = sync[ep.id] && sync[ep.id].ok === false ? (sync[ep.id].error || "同步失败") : "";
+      const stateBadge = syncErr
+        ? `<span class="badge badge-warn" title="${escapeHtml(syncErr)}">同步失败</span>`
+        : injected
+          ? '<span class="badge badge-ok">已注入</span>'
+          : '<span class="badge badge-neutral">未注入</span>';
+      // hotReload=false 的端点（claude/zcode/dsh/pi/agy/reasonix）：写盘即生效于新会话，
+      // 运行中会话需重开才加载新的全局指令文件
+      const hotNote = ep.hotReload ? "" : "（运行中会话需重开生效）";
+      return `<div class="skills-skill-row"${ep.hotReload ? "" : ' title="运行中会话需重开生效"'}>
+        <span style="min-width:0;">
+          <span class="skills-skill-name">${escapeHtml(ep.label)} ${stateBadge}</span>
+          <div class="skills-detail-relpath">${escapeHtml(ep.targetRel || "")}${escapeHtml(hotNote)}</div>
+        </span>
+        <label class="toggle"><input type="checkbox" data-inject="${escapeHtml(ep.id)}"${presetOffOn(preset, ep.id) ? "" : " checked"}><span class="slider"></span></label>
+      </div>`;
+    }).join("");
+    const tagBadge = preset.tag ? `<span class="badge badge-neutral">${escapeHtml(preset.tag)}</span> ` : "";
+    const enabledBadge = preset.enabled
+      ? '<span class="badge badge-ok">已启用</span>'
+      : '<span class="badge badge-neutral">已停用</span>';
+    body.innerHTML = `
+      <div class="skills-detail-head">
+        <div class="skills-detail-name">${escapeHtml(preset.title)}</div>
+        <div class="skills-detail-actions">
+          <button class="btn" id="presetDetailEditBtn">编辑</button>
+          <button class="btn btn-danger" id="presetDetailDeleteBtn">删除</button>
+        </div>
+      </div>
+      <div class="skills-detail-relpath">${tagBadge}${enabledBadge} 更新于 ${escapeHtml(fmtPresetTime(preset.updatedAt))}</div>
+      <div class="skills-detail-desc" style="white-space:pre-wrap;">${escapeHtml(preset.content || "（无内容）")}</div>
+      <div class="skills-group-title skills-group-title-row" style="margin-top:0; padding-top:0; border-top:none;">
+        <span>注入到端点</span>
+        <span class="skills-batch-actions">
+          <button class="btn btn-mini btn-accent" id="presetsInjectAllBtn">全部注入</button>
+          <button class="btn btn-mini btn-warn" id="presetsUninjectAllBtn">全部解除</button>
+        </span>
+      </div>
+      ${rows}`;
+    body.querySelectorAll("input[data-inject]").forEach((input) => {
+      input.onchange = () => {
+        // 请求未完成前禁用，防连点并发/乱序刷新（开关回抽），与 skills 部署 toggle 同手法
+        input.disabled = true;
+        togglePresetInject(input.getAttribute("data-inject"), preset, input.checked);
+      };
+    });
+    $("presetDetailEditBtn").onclick = () => showPresetFormModal(preset);
+    $("presetDetailDeleteBtn").onclick = () => confirmDeletePreset(preset);
+    $("presetsInjectAllBtn").onclick = (e) => setAllPresetInjects(preset, true, e.target);
+    $("presetsUninjectAllBtn").onclick = (e) => setAllPresetInjects(preset, false, e.target);
+  }
+
+  // 单端点注入开关：checked = 注入（从 off 列表移除），unchecked = 解除（加入 off 列表）
+  async function togglePresetInject(endpointId, preset, on) {
+    try {
+      await api("POST", "/panel/api/prompts/override", { endpointId, presetId: preset.id, off: !on });
+      toast(on ? `已注入到 ${endpointId}` : `已解除 ${endpointId} 的注入`);
+    } catch (e) {
+      toast("操作失败: " + e.message + "（服务可能未重启加载新接口）", true);
+    }
+    await refreshPresetsState();
+  }
+
+  // 全部注入/全部解除：对 8 端点串行走 override，已是目标状态的端点跳过
+  async function setAllPresetInjects(preset, on, btn) {
+    if (btn) btn.disabled = true;
+    const endpoints = (presetsState && presetsState.endpoints) || [];
+    let changed = 0, failed = 0;
+    try {
+      for (const ep of endpoints) {
+        if (presetOffOn(preset, ep.id) === !on) continue;
+        try {
+          await api("POST", "/panel/api/prompts/override", { endpointId: ep.id, presetId: preset.id, off: !on });
+          changed++;
+        } catch { failed++; }
+      }
+      toast(failed ? `完成 ${changed} 个端点，失败 ${failed} 个` : (on ? "已全部注入" : "已全部解除"), failed > 0);
+    } finally {
+      if (btn) btn.disabled = false;
+    }
+    await refreshPresetsState();
+  }
+
+  async function setPresetEnabled(preset, enabled) {
+    try {
+      await api("POST", "/panel/api/prompts/preset/enable", { id: preset.id, enabled });
+      toast(enabled ? `已启用「${preset.title}」` : `已停用「${preset.title}」`);
+    } catch (e) {
+      toast("操作失败: " + e.message, true);
+    }
+    await refreshPresetsState();
+  }
+
+  function confirmDeletePreset(preset) {
+    showSkillsModal({
+      title: "删除预设",
+      danger: true,
+      bodyHtml: `将删除预设 <b>${escapeHtml(preset.title)}</b>，并从所有端点全局指令文件中移除其注入内容。`,
+      confirmText: "删除",
+      onConfirm: async () => {
+        try {
+          await api("POST", "/panel/api/prompts/preset/delete", { id: preset.id });
+          toast("预设已删除");
+        } catch (e) {
+          toast("删除失败: " + e.message, true);
+        }
+        await refreshPresetsState();
+      },
+    });
+  }
+
+  // ── 新增/编辑预设表单弹窗（store showAddModal 范式：showSkillsModal wide +
+  // 表单 HTML 注入 + store-form-error 错误条，校验/提交失败保留已填内容重开）──
+  function showPresetFormModal(preset, values, errorMsg) {
+    const v = values || {
+      title: preset ? preset.title : "",
+      tag: preset ? (preset.tag || "") : "",
+      content: preset ? (preset.content || "") : "",
+    };
+    const editing = !!preset;
+    const bodyHtml = `
+      <div class="store-form-row"><label class="store-form-label">标题</label>
+        <input class="store-form-input" id="presetFormTitle" value="${escapeHtml(v.title)}" placeholder="如 代码风格约定"></div>
+      <div class="store-form-row"><label class="store-form-label">Tag（可选，列表徽标展示）</label>
+        <input class="store-form-input" id="presetFormTag" value="${escapeHtml(v.tag)}" placeholder="如 style"></div>
+      <div class="store-form-row"><label class="store-form-label">正文（预注入到各端点全局指令文件）</label>
+        <textarea class="store-form-textarea" id="presetFormContent" style="min-height:160px;">${escapeHtml(v.content)}</textarea></div>
+      <div class="store-form-error" id="presetFormError"${errorMsg ? "" : " hidden"}>${escapeHtml(errorMsg || "")}</div>`;
+    showSkillsModal({
+      title: editing ? "编辑预设" : "新增预设",
+      wide: true,
+      confirmText: editing ? "保存" : "创建",
+      bodyHtml,
+      onConfirm: async () => {
+        const title = $("presetFormTitle").value.trim();
+        const tag = $("presetFormTag").value.trim();
+        const content = $("presetFormContent").value;
+        // 失败重开：showSkillsModal 递增 skillsModalGen 后，旧确认回调不再关新弹窗
+        const reopen = (msg) => showPresetFormModal(preset, { title, tag, content }, msg);
+        if (!title) return reopen("标题不能为空");
+        if (!content.trim()) return reopen("正文不能为空");
+        try {
+          if (editing) {
+            await api("POST", "/panel/api/prompts/preset/update", { id: preset.id, title, tag, content });
+            toast("预设已保存");
+          } else {
+            const created = await api("POST", "/panel/api/prompts/preset/create", { title, tag, content });
+            if (created?.preset?.id) presetsSelection = created.preset.id;
+            toast("预设已创建");
+          }
+        } catch (e) {
+          return reopen(e.message);
+        }
+        await refreshPresetsState();
+      },
+    });
   }
 
   // ══════════════════════════════════════════════════════════════════

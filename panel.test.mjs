@@ -2307,3 +2307,115 @@ describe("panel.html 行 hover 高亮移除", () => {
     assert.ok(!panelHtml.includes(".session-name-line:hover"), "session-name-line 无独立 hover 规则");
   });
 });
+
+
+describe("panel.html 预设管理 tab", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("declares the presets tab button (after tabSkills) and view container", () => {
+    assert.ok(panelHtml.includes('id="tabPresets"'), "tabPresets tab button exists");
+    assert.ok(panelHtml.includes('id="presetsView"'), "presetsView section exists");
+    assert.ok(panelHtml.includes("预设管理"), "presets tab label exists");
+    const nav = panelHtml.match(/<nav class="view-tabs"[\s\S]*?<\/nav>/);
+    assert.ok(nav, "view-tabs nav found");
+    const iSkills = nav[0].indexOf('id="tabSkills"');
+    const iPresets = nav[0].indexOf('id="tabPresets"');
+    assert.ok(iSkills !== -1 && iPresets !== -1 && iSkills < iPresets,
+      "tabPresets sits right after tabSkills");
+    for (const id of [
+      "presetsListBadge",
+      "presetsAddBtn",
+      "presetsRefreshBtn",
+      "presetsFilterInput",
+      "presetsList",
+      "presetsMasterToggle",
+      "presetsDetailBody",
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+  });
+
+  it("extends switchView / restoreView / init for the presets view without regressing others", () => {
+    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found");
+    const body = m[1];
+    assert.ok(body.includes('name === "presets"'), "presets branch added");
+    assert.ok(body.includes('$("presetsView").hidden = !presets'), "presetsView visibility wired");
+    assert.ok(body.includes('$("tabPresets").classList.toggle("active", presets)'), "tabPresets active state wired");
+    assert.ok(body.includes('["tabPresets", presets]'), "aria-selected sync covers tabPresets");
+    assert.ok(body.includes("refreshPresetsState()"), "entering presets refreshes state");
+    assert.ok(body.includes('$("skillsView").hidden = !(name === "skills")'), "skills view still exclusive");
+    assert.ok(body.includes("refreshSkillsState()"), "skills refresh preserved");
+    assert.ok(body.includes("refreshStoreState()"), "store refresh preserved");
+    assert.ok(panelHtml.includes("initPresetsTab();"), "initPresetsTab runs during init");
+    assert.ok(panelHtml.includes('$("tabPresets").onclick = () => switchView("presets")'), "tabPresets click wired");
+    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found");
+    assert.ok(r[1].includes('saved === "presets"'), "presets branch added");
+    assert.ok(r[1].includes('saved === "skills"'), "skills branch preserved");
+    assert.ok(r[1].includes('saved === "store"'), "store branch preserved");
+    assert.ok(r[1].includes('saved === "stats"'), "stats branch preserved");
+  });
+
+  it("list rows reuse the skills row template: title / tag badge / inject count / desc", () => {
+    const m = panelHtml.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderPresetsList found");
+    const body = m[1];
+    assert.ok(body.includes("skills-list-row"), "row reuses .skills-list-row");
+    assert.ok(body.includes("skills-list-name"), "title reuses .skills-list-name");
+    assert.ok(body.includes("badge badge-neutral"), "tag badge reuses .badge-neutral");
+    assert.ok(body.includes("skills-ep-count"), "inject count reuses .skills-ep-count");
+    assert.ok(body.includes('" some"') && body.includes('" full"'), "some/full count coloring preserved");
+    assert.ok(body.includes("skills-list-desc"), "desc line reuses .skills-list-desc");
+    assert.ok(body.includes("data-preset="), "rows carry the preset id key");
+    assert.ok(body.includes("presetsListBadge"), "header badge count updated");
+  });
+
+  it("detail card renders per-endpoint rows with toggle, status badge and sync-error warning", () => {
+    const m = panelHtml.match(/function renderPresetDetail\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderPresetDetail found");
+    const body = m[1];
+    assert.ok(body.includes("endpoints.map((ep) =>"), "one row per endpoint (8 from state)");
+    assert.ok(body.includes("skills-skill-row"), "endpoint row reuses .skills-skill-row");
+    assert.ok(body.includes('class="toggle"'), "per-endpoint toggle present");
+    assert.ok(body.includes("data-inject="), "toggle carries the endpoint id");
+    assert.ok(body.includes("badge-ok") && body.includes("badge-neutral"), "injected/not-injected badges");
+    assert.ok(body.includes("badge-warn"), "sync failure badge");
+    assert.ok(body.includes("运行中会话需重开生效"), "hotReload=false endpoint note");
+    assert.ok(body.includes("skills-batch-actions"), "batch inject/uninject actions");
+    assert.ok(body.includes("presetsInjectAllBtn") && body.includes("presetsUninjectAllBtn"), "batch buttons wired");
+    assert.ok(body.includes("presetDetailEditBtn") && body.includes("presetDetailDeleteBtn"), "edit/delete buttons in detail head");
+  });
+
+  it("shares one store-style form modal for create/edit with title/tag/content and an error bar", () => {
+    const m = panelHtml.match(/function showPresetFormModal\(preset, values, errorMsg\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "showPresetFormModal found");
+    const body = m[1];
+    assert.ok(body.includes('id="presetFormTitle"'), "title input");
+    assert.ok(body.includes('id="presetFormTag"'), "tag input");
+    assert.ok(body.includes('id="presetFormContent"'), "content textarea");
+    assert.ok(body.includes('id="presetFormError"') && body.includes("store-form-error"), "error bar");
+    assert.ok(body.includes("wide: true"), "wide modal like store showAddModal");
+    assert.ok(body.includes("showPresetFormModal(preset, { title, tag, content }, msg)"),
+      "validation/submit failure reopens with filled values preserved");
+    assert.ok(body.includes("/panel/api/prompts/preset/create"), "create endpoint");
+    assert.ok(body.includes("/panel/api/prompts/preset/update"), "update endpoint");
+  });
+
+  it("uses the prompts HTTP contract and the shared api() helper", () => {
+    assert.ok(panelHtml.includes('api("GET", "/panel/api/prompts/state")'), "state GET");
+    for (const p of [
+      "/panel/api/prompts/master",
+      "/panel/api/prompts/preset/delete",
+      "/panel/api/prompts/preset/enable",
+      "/panel/api/prompts/override",
+    ]) {
+      assert.ok(panelHtml.includes(`"${p}"`), `missing endpoint ${p}`);
+    }
+    // 串行刷新链（防乱序），与 skills 同模式
+    assert.ok(panelHtml.includes("presetsRefreshChain"), "serialized refresh chain");
+  });
+});
