@@ -888,10 +888,18 @@
      行数变，由 playSkillsListCascade 写 --csc-step，这里只留兜底值。 */
   .skills-list.is-blank { visibility: hidden; }
   .skills-list-row.row-cascade {
-    animation: skillsRowCascade 180ms var(--ease-out) backwards;
+    animation: skillsRowEnter 180ms var(--ease-out) backwards;
     animation-delay: calc(var(--i) * var(--csc-step, 30ms));
   }
-  @keyframes skillsRowCascade {
+  /* Skills 视图：导入落位——新行走同一支入场 keyframes，放慢到 600ms 让插入看得清；
+     与下方行的 FLIP 让位同拍同缓动，两者几何互补：揭开前沿正好追上让位行的上缘，
+     中途不重叠（行背景透明，错开几像素就会看到两行文字叠在一起）。
+     与 row-new 的 2s 底色渐隐并存——不同属性，逗号并列而不是让后写的整条覆盖前写的。 */
+  .skills-list-row.row-reveal { animation: skillsRowEnter 600ms var(--ease-out) backwards; }
+  .skills-list-row.row-new.row-reveal {
+    animation: skillsRowEnter 600ms var(--ease-out) backwards, skillsRowNew 2s var(--ease-out);
+  }
+  @keyframes skillsRowEnter {
     from { clip-path: inset(0 0 100% 0); transform: translateX(-6px); }
     to { clip-path: inset(0 0 0 0); transform: translateX(0); }
   }
@@ -8310,22 +8318,28 @@ try {
     }
   }
 
-  // 「导入 skill 目录…」/「导入 skill（zip）…」：两个按钮各走一条后端
-  // 选择框链路（目录框 / .zip 文件框——系统对话框无法一框通吃两者），
-  // 校验 SKILL.md 后拷入主仓库，zip 解压后同样以目录形式入库。
-  // 取消选择框则静默返回；请求期间禁用按钮防重复弹框。
+  // 「导入 skill 目录…」/「导入 skill（zip）…」：两个按钮各走一条后端选择框链路
+  // （目录框 / .zip 文件框——系统对话框无法一框通吃两者），校验 SKILL.md 后拷入主仓库，
+  // zip 解压后同样以目录形式入库。取消选择框则静默返回。
+  // 一次 POST 覆盖「弹原生框 → 挑目录 → 校验 → 拷贝」，后端 pickFolder 超时 120s；
+  // 原生框弹在桌面上，页面里只剩一个暗按钮，所以暗态要有名字，禁用同时防重复弹框。
   async function importSkillViaPicker(btnId, endpoint) {
     const btn = $(btnId);
+    const label = btn.textContent;
     btn.disabled = true;
+    btn.textContent = "导入中…";
     try {
       const d = await api("POST", endpoint, {});
       if (d.cancelled) return;
       toast(`已导入 ${d.skill.name}`);
-      refreshSkillsState();
+      // 等新行真的上屏再恢复按钮：与刷新同一套「暗到结果可见」语义
+      // （旧写法不 await，按钮先亮、列表后到，完成信号早于结果）
+      await revealSkillsInsert([d.skill.relPath]);
     } catch (e) {
       toast("导入失败: " + e.message, true);
     } finally {
       btn.disabled = false;
+      btn.textContent = label;
     }
   }
 
@@ -8374,9 +8388,12 @@ try {
     const flashNew = skillsFlashNew; skillsFlashNew = new Set();
     const flashChanged = skillsFlashChanged; skillsFlashChanged = new Set();
     const flashCount = skillsFlashCount; skillsFlashCount = false;
-    // cascade 标记与 is-blank 同样在提前 return 之前消费：空列表路径没有行可动画，
+    // cascade / FLIP / 入场标记同样在提前 return 之前消费：空列表路径没有行可动画，
     // 但容器必须解除隐形、标记不能滞留到下一次无关渲染（过滤输入逐键会白播）。
     const cascade = skillsCascadePending; skillsCascadePending = false;
+    const flipTops = skillsFlipTops; skillsFlipTops = null;
+    const flipMs = skillsFlipMs; skillsFlipMs = 0;
+    const revealKeys = skillsRevealKeys; skillsRevealKeys = null;
     listEl.classList.remove("is-blank");
     if (flashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     if (!skillsState || !skillsState.repoConfigured) {
@@ -8429,6 +8446,13 @@ try {
       </div>`;
     }).join("");
     if (cascade) playSkillsListCascade(listEl);
+    // 入场类先挂、FLIP 后跑：FLIP 每行都强制一次回流，顺序反了入场动画会晚一帧起跑
+    if (revealKeys) {
+      for (const row of listEl.children) {
+        if (revealKeys.has(row.getAttribute("data-skill"))) row.classList.add("row-reveal");
+      }
+    }
+    if (flipTops) skillsListFlipFrom(flipTops, flipMs);
   }
 
   // 首屏行数 K：行高均匀（名称行与描述行都是 nowrap + ellipsis，永不折行），
@@ -8446,20 +8470,140 @@ try {
     for (let i = 0; i < k; i++) rows[i].classList.add("row-cascade");
   }
 
-  function confirmDeleteSkill(skillName) {
+  // ── 列表增删的位移反馈（FLIP 让位/吸合 + 单行入场/退场）──
+  // 导入与删除都只动一条数据，但整列 innerHTML 重建后其余行会瞬间跳到新位置：
+  // 没有位移反馈时新行像凭空出现、删除像整列抖一下。这里照 routeChainFlipFrom
+  // 的范式补上——重渲前快照行位置，重渲后把仍在的行平移回旧位置再 transition 归零。
+  // 快照走内容坐标系（相对列表内容原点，不是视口），容器滚动与页面滚动都自动抵消，
+  // 所以「重渲 → 滚到新行 → FLIP」这个顺序不会把滚动量算进位移里。
+  const SKILLS_INSERT_MS = 600;      // 导入：新行入场与邻行让位同拍同缓动
+  const SKILLS_DISSOLVE_MS = 200;    // 删除：行退场
+  const SKILLS_DELETE_FLIP_MS = 300; // 删除：缺口两侧吸合
+  let skillsFlipTops = null;         // Map<relPath, 内容坐标 top> | null
+  let skillsFlipMs = 0;
+  let skillsRevealKeys = null;       // Set<relPath> | null：本次渲染要挂入场动画的行
+
+  function skillsRowByKey(relPath) {
+    const listEl = $("skillsList");
+    if (!listEl) return null;
+    for (const row of listEl.children) {
+      if (row.getAttribute("data-skill") === relPath) return row;
+    }
+    return null;
+  }
+
+  function skillsListTops() {
+    const listEl = $("skillsList");
+    const m = new Map();
+    if (!listEl) return m;
+    const origin = listEl.getBoundingClientRect().top - listEl.scrollTop;
+    for (const row of listEl.children) {
+      const key = row.getAttribute("data-skill");
+      if (key) m.set(key, row.getBoundingClientRect().top - origin);
+    }
+    return m;
+  }
+
+  function skillsListFlipFrom(tops, ms) {
+    const listEl = $("skillsList");
+    if (!listEl || !tops || !tops.size) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const origin = listEl.getBoundingClientRect().top - listEl.scrollTop;
+    for (const row of listEl.children) {
+      const prev = tops.get(row.getAttribute("data-skill"));
+      if (prev === undefined) continue;
+      const dy = prev - (row.getBoundingClientRect().top - origin);
+      if (!dy) continue;
+      row.style.transition = "none";
+      row.style.transform = `translateY(${dy}px)`;
+      void row.offsetWidth;
+      // 缓动必须与入场动画同一条：插入时让位行的上缘要正好贴着揭开前沿走，
+      // 换成别的曲线两者会错开几像素，透明背景的行就会看到文字重叠
+      row.style.transition = `transform ${ms}ms var(--ease-out)`;
+      row.style.transform = "";
+      setTimeout(() => { row.style.transition = ""; }, ms + 30);
+    }
+  }
+
+  // 退场只动 opacity/transform，不动高度——高度变化交给重渲后的 FLIP 吸合，
+  // 两处同时做会让邻行位移两次。fill forwards 防退场结束到重渲之间闪回一帧。
+  function dissolveSkillsRows(relPaths) {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return Promise.resolve();
+    const rows = relPaths.map(skillsRowByKey).filter(Boolean);
+    if (!rows.length || !rows[0].animate) return Promise.resolve();
+    return Promise.all(rows.map((row) => row.animate(
+      [{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(-8px)" }],
+      { duration: SKILLS_DISSOLVE_MS, easing: "ease-in", fill: "forwards" },
+    ).finished)).then(() => {}, () => {});
+  }
+
+  // 滚到新行（居中）。手动改容器 scrollTop 而不用 scrollIntoView：后者会连带滚动
+  // 页面级滚动容器，导入一条 skill 不该把整个面板推走。
+  function centerSkillsRow(relPath) {
+    const listEl = $("skillsList");
+    const row = skillsRowByKey(relPath);
+    if (!listEl || !row) return;
+    const origin = listEl.getBoundingClientRect().top - listEl.scrollTop;
+    const top = row.getBoundingClientRect().top - origin;
+    listEl.scrollTop = Math.max(0, top - (listEl.clientHeight - row.offsetHeight) / 2);
+  }
+
+  // 插入落位：让位快照 → 选中新行（照普通左键语义：集合={新行}、焦点=首条，详情卡
+  // 随之切过去）→ 重渲时 FLIP + 入场 → 滚到视野中央。新行按仓库序落在字母序中间，
+  // 不定位的话动画就发生在折叠区外。收数组是为批量收编（一次插多行）；空集即
+  // 「本次没有新行」，退化为朴素刷新，与 refreshAfterSkillsRemove 的失败路径对称。
+  async function revealSkillsInsert(relPaths) {
+    if (!relPaths.length) {
+      await refreshSkillsState();
+      return;
+    }
+    skillsFlipTops = skillsListTops();
+    skillsFlipMs = SKILLS_INSERT_MS;
+    skillsRevealKeys = new Set(relPaths);
+    skillsSelection.clear();
+    for (const key of relPaths) skillsSelection.add(key);
+    skillsFocusKey = relPaths[0];
+    await refreshSkillsState();
+    // 批量时新行散落在字母序各处，居中最靠上的那条，其余顺着往下就在视野里
+    const listEl = $("skillsList");
+    const topmost = listEl
+      ? [...listEl.children].find((row) => relPaths.includes(row.getAttribute("data-skill")))
+      : null;
+    centerSkillsRow(topmost ? topmost.getAttribute("data-skill") : relPaths[0]);
+  }
+
+  // 删除抽出：退场 → 重渲 → 缺口吸合。传空集即失败路径——行还在服务端，
+  // 不退场，直接重渲与真实状态对齐。
+  async function refreshAfterSkillsRemove(relPaths) {
+    if (!relPaths.length) {
+      await refreshSkillsState();
+      return;
+    }
+    const tops = skillsListTops();
+    await dissolveSkillsRows(relPaths);
+    skillsFlipTops = tops;
+    skillsFlipMs = SKILLS_DELETE_FLIP_MS;
+    await refreshSkillsState();
+  }
+
+  // 形参收整个 skill 而不是 dirName：删除接口按 dirName 定位，行按 relPath 定位，
+  // 嵌套 skill（relPath = relative(repoPath, dir)）下两者不相等。
+  function confirmDeleteSkill(skill) {
     showSkillsModal({
       title: "删除仓库 Skill",
       danger: true,
-      bodyHtml: `将把 <b>${escapeHtml(skillName)}</b> 从主仓库移入回收站，并清除所有端点上指向它的 junction。实体目录不受影响。`,
+      bodyHtml: `将把 <b>${escapeHtml(skill.dirName)}</b> 从主仓库移入回收站，并清除所有端点上指向它的 junction。实体目录不受影响。`,
       confirmText: "移入回收站",
       onConfirm: async () => {
+        let removed = [];
         try {
-          const d = await api("POST", "/api/skills/repo/delete", { skillName });
+          const d = await api("POST", "/api/skills/repo/delete", { skillName: skill.dirName });
           toast(d.unlinked && d.unlinked.length ? `已删除，并清除 ${d.unlinked.length} 处 junction` : "已删除");
+          removed = [skill.relPath];
         } catch (e) {
           toast("删除失败: " + e.message, true);
         }
-        refreshSkillsState();
+        await refreshAfterSkillsRemove(removed);
       },
     });
   }
@@ -8522,7 +8666,7 @@ try {
         toggleDeploy(input.getAttribute("data-deploy"), skill.dirName, input.checked, input);
       };
     });
-    $("skillsDetailDeleteBtn").onclick = () => confirmDeleteSkill(skill.dirName);
+    $("skillsDetailDeleteBtn").onclick = () => confirmDeleteSkill(skill);
     $("skillsDetailFavBtn").onclick = () => toggleSkillFavorite(skill.relPath);
     $("skillsDeployAllBtn").onclick = (e) => setAllDeployments(skill, true, e.target);
     $("skillsUndeployAllBtn").onclick = (e) => setAllDeployments(skill, false, e.target);
@@ -8617,7 +8761,7 @@ try {
         skillsFavorites.has(skill.relPath)
           ? { label: "取消收藏", fn: () => toggleSkillFavorite(skill.relPath) }
           : { label: "收藏", fn: () => toggleSkillFavorite(skill.relPath) },
-        { label: "删除 skill", danger: true, fn: () => confirmDeleteSkill(skill.dirName) },
+        { label: "删除 skill", danger: true, fn: () => confirmDeleteSkill(skill) },
       );
     } else {
       // 列表空白处：只给「全选」
@@ -8667,10 +8811,14 @@ try {
       onConfirm: async () => {
         let okCount = 0, conflictCount = 0, failCount = 0;
         let firstError = "";
+        const inserted = [];
         for (const it of items) {
           try {
             const d = await api("POST", "/api/skills/merge-local", { endpointId: it.ep.id, skillName: it.entry.name });
-            if (d.conflict) conflictCount++; else okCount++;
+            // 转托管（reusedRepoCopy）复用仓库既有副本、只把本地目录换成 junction，
+            // 没有新行；只有收编才真的往仓库里插一条
+            if (d.conflict) conflictCount++;
+            else { okCount++; if (!d.reusedRepoCopy) inserted.push(it.entry.name); }
           } catch (e) { failCount++; if (!firstError) firstError = e.message; }
         }
         const parts = [`成功 ${okCount}`];
@@ -8680,7 +8828,9 @@ try {
         if (failCount) parts.push(`操作失败：${firstError}（服务可能未重启加载新接口）`);
         toast(parts.join("、"), failCount > 0);
         anomalyChecked[kind].clear();
-        await refreshSkillsState();
+        // 批量收编的新行散落在字母序各处：一次 FLIP 让位 + 逐行入场；
+        // 空集（批量转托管 / 全失败）退化为朴素刷新
+        await revealSkillsInsert(inserted);
       },
     });
   }
@@ -8867,17 +9017,19 @@ try {
       bodyHtml: `将把以下 skill 从主仓库移入回收站，并清除所有端点上指向它们的 junction。实体目录不受影响。<div style="margin-top:8px;">${listHtml}</div>${skippedNote}`,
       confirmText: "移入回收站",
       onConfirm: async () => {
-        let okCount = 0, failCount = 0;
+        let failCount = 0;
+        const removed = [];
         for (const s of deletable) {
           try {
             await api("POST", "/api/skills/repo/delete", { skillName: s.dirName });
-            okCount++;
+            removed.push(s.relPath);
           } catch {
             failCount++;
           }
         }
-        toast(failCount ? `删除完成：成功 ${okCount}、失败 ${failCount}` : `已删除 ${okCount} 个 skill`, failCount > 0);
-        refreshSkillsState();
+        toast(failCount ? `删除完成：成功 ${removed.length}、失败 ${failCount}` : `已删除 ${removed.length} 个 skill`, failCount > 0);
+        // 多行一起退场，随后一次 FLIP 把所有缺口吸合（每行的位移已含其上方全部删除量）
+        await refreshAfterSkillsRemove(removed);
       },
     });
   }
@@ -9210,6 +9362,8 @@ try {
         : `将把端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后本地实体目录移入回收站（可恢复），原位改为 junction，此后其他端点也可部署该 skill。`,
       confirmText: isMatching ? "转为托管" : "收编",
       onConfirm: async () => {
+        // null = 请求失败；[] = 走通了但没有新行（转托管复用仓库既有副本）
+        let inserted = null;
         try {
           const d = await api("POST", "/api/skills/merge-local", { endpointId, skillName });
           if (d.conflict) {
@@ -9225,10 +9379,15 @@ try {
             return;
           }
           toast(d.reusedRepoCopy ? "已转为主仓库托管" : `已收编 ${skillName} 到主仓库`);
+          // 只有收编才产生新行：转托管复用仓库既有副本，本地目录只是换成 junction。
+          // relPath 即 skillName——后端拷进仓库根目录，且 assertPlainSkillDirName
+          // 保证它是不含分隔符的纯目录名
+          inserted = d.reusedRepoCopy ? [] : [skillName];
         } catch (e) {
           toast("操作失败: " + e.message + "（服务可能未重启加载新接口）", true);
         }
-        await refreshSkillsState();
+        // 空集即朴素刷新：失败路径行没动、转托管没有新行，都不该演入场动画
+        await revealSkillsInsert(inserted || []);
       },
     });
   }
