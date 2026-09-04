@@ -8313,8 +8313,8 @@ try {
       const flashCls = flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
       return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}">
         <div class="skills-list-line1">
-          <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}${newBadge}
-          <span class="skills-ep-dots">${favStar}${epCount}</span>
+          <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}
+          <span class="skills-ep-dots">${favStar}${epCount}${newBadge}</span>
         </div>
         <div class="skills-list-desc">${escapeHtml(s.description || "（无描述）")}</div>
       </div>`;
