@@ -864,7 +864,7 @@
   #skillsRefreshBtn.busy { opacity: 1; }
   #skillsRefreshBtn.busy .skills-refresh-ico { animation: skillsRefreshSpin 900ms linear infinite; }
   @keyframes skillsRefreshSpin { to { transform: rotate(360deg); } }
-  /* Skills 视图：变动高亮——新增行底色渐隐一次 +「新」徽标短暂存续；变化行内描边脉冲；
+  /* Skills 视图：变动高亮——新增行底色渐隐一次；变化行内描边脉冲；
      计数徽标变化时闪一下。行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
      过滤/选中等普通重渲染不重播（标记消费逻辑见 diffSkillsState） */
   .skills-list-row.row-new { animation: skillsRowNew 2s var(--ease-out); }
@@ -8065,12 +8065,9 @@ try {
 
   // ── 变动差分高亮 ──
   // 列表每次渲染全量重建 innerHTML，变动标记不能挂在 DOM 上（与选中集合同一约定）。
-  // 三层标记：skillsFirstSeen（relPath → 首次发现时刻）驱动「新」徽标，存续一个短
-  // 窗口；skillsFlashNew / skillsFlashChanged 驱动行动画，只在差分后的那次渲染消费，
-  // 之后的普通重渲染不重播；skillsFlashCount 驱动计数徽标闪烁，renderSkillsRepo 读、
-  // 最后渲染的 renderSkillsList 消费。
-  const SKILLS_NEW_WINDOW_MS = 10000;
-  let skillsFirstSeen = new Map();
+  // 两层标记：skillsFlashNew / skillsFlashChanged 驱动行动画，只在差分后的那次渲染
+  // 消费，之后的普通重渲染不重播；skillsFlashCount 驱动计数徽标闪烁，renderSkillsRepo
+  // 读、最后渲染的 renderSkillsList 消费。
   let skillsFlashNew = new Set();
   let skillsFlashChanged = new Set();
   let skillsFlashCount = false;
@@ -8084,28 +8081,19 @@ try {
     skillsFlashNew = new Set();
     skillsFlashChanged = new Set();
     skillsFlashCount = false;
-    const now = Date.now();
     const skills = next.skills || [];
     // 首次加载 / 仓库未设置 / 换了仓库：重建基线，不把整仓库标成「新」
-    if (!prev || !prev.repoConfigured || prev.repoPath !== next.repoPath) {
-      skillsFirstSeen = new Map();
-      return;
-    }
+    if (!prev || !prev.repoConfigured || prev.repoPath !== next.repoPath) return;
     const prevById = new Map((prev.skills || []).map((s) => [s.relPath, s]));
     for (const s of skills) {
       const p = prevById.get(s.relPath);
       if (!p) {
-        skillsFirstSeen.set(s.relPath, now);
         skillsFlashNew.add(s.relPath);
       } else if (skillSignature(prev, p) !== skillSignature(next, s)) {
         skillsFlashChanged.add(s.relPath);
       }
     }
     skillsFlashCount = (prev.skills || []).length !== skills.length;
-    const alive = new Set(skills.map((s) => s.relPath));
-    for (const [k, ts] of [...skillsFirstSeen]) {
-      if (!alive.has(k) || now - ts >= SKILLS_NEW_WINDOW_MS) skillsFirstSeen.delete(k);
-    }
   }
 
   async function doRefreshSkillsState() {
@@ -8305,16 +8293,12 @@ try {
       const favStar = skillsFavorites.has(s.relPath)
         ? '<span class="skills-fav-star" title="已收藏">★</span>'
         : "";
-      // 「新」徽标按首次发现时刻存续一个窗口（跨重渲染仍在，直到过期后的那次渲染）；
-      // 行底色/描边动画只在差分后的那次渲染挂类，二者分开是防过滤输入逐键重播动画
-      const seenAt = skillsFirstSeen.get(s.relPath);
-      const isNew = seenAt !== undefined && Date.now() - seenAt < SKILLS_NEW_WINDOW_MS;
-      const newBadge = isNew ? '<span class="badge badge-accent" title="刚刚出现在仓库中">新</span>' : "";
+      // 行底色/描边动画只在差分后的那次渲染挂类，防过滤输入逐键重播动画
       const flashCls = flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
       return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}">
         <div class="skills-list-line1">
           <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}
-          <span class="skills-ep-dots">${favStar}${epCount}${newBadge}</span>
+          <span class="skills-ep-dots">${favStar}${epCount}</span>
         </div>
         <div class="skills-list-desc">${escapeHtml(s.description || "（无描述）")}</div>
       </div>`;

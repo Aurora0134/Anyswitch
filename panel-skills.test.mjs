@@ -382,9 +382,9 @@ describe("panel.html skills change diff highlighting", () => {
 
   const deployedSrc = extractFn("deployedEndpointsFor", "skill, state = skillsState");
   const diffFnSrc = extractFn("diffSkillsState", "prev, next");
-  // 窗口常量、标记变量与 skillSignature 同处一块（从 const 声明到 skillSignature 收尾）
+  // 标记变量与 skillSignature 同处一块（从 flashNew 声明到 skillSignature 收尾）
   const marksSrc = panelHtml.match(
-    /const SKILLS_NEW_WINDOW_MS[\s\S]*?function skillSignature\(state, s\) \{[\s\S]*?\n  \}/
+    /let skillsFlashNew[\s\S]*?function skillSignature\(state, s\) \{[\s\S]*?\n  \}/
   );
   assert.ok(marksSrc, "panel.html must contain the skills flash-mark block");
 
@@ -396,7 +396,6 @@ describe("panel.html skills change diff highlighting", () => {
     return {
       diffSkillsState,
       marks: () => ({
-        firstSeen: skillsFirstSeen,
         flashNew: skillsFlashNew,
         flashChanged: skillsFlashChanged,
         flashCount: skillsFlashCount,
@@ -419,7 +418,6 @@ describe("panel.html skills change diff highlighting", () => {
     assert.equal(m.flashNew.size, 0);
     assert.equal(m.flashChanged.size, 0);
     assert.equal(m.flashCount, false);
-    assert.equal(m.firstSeen.size, 0);
   });
 
   it("marks added skills and count change", () => {
@@ -427,7 +425,6 @@ describe("panel.html skills change diff highlighting", () => {
     const m = harness.marks();
     assert.deepEqual([...m.flashNew], ["b"]);
     assert.equal(m.flashCount, true);
-    assert.ok(m.firstSeen.has("b"));
   });
 
   it("marks description and deployment changes as changed, not new", () => {
@@ -442,19 +439,16 @@ describe("panel.html skills change diff highlighting", () => {
     harness.diffSkillsState(state([skill("a")]), state([skill("x"), skill("y")], [], "R:/other"));
     let m = harness.marks();
     assert.equal(m.flashNew.size, 0);
-    assert.equal(m.firstSeen.size, 0);
     harness.diffSkillsState({ repoConfigured: false, skills: [] }, state([skill("a")]));
     m = harness.marks();
     assert.equal(m.flashNew.size, 0);
-    assert.equal(m.firstSeen.size, 0);
   });
 
-  it("prunes first-seen of removed skills and resets marks on every diff", () => {
+  it("resets marks on every diff", () => {
     harness.diffSkillsState(state([skill("a")]), state([skill("a"), skill("b")]));
-    assert.ok(harness.marks().firstSeen.has("b"));
+    assert.ok(harness.marks().flashNew.has("b"));
     harness.diffSkillsState(state([skill("a"), skill("b")]), state([skill("a")]));
-    const m = harness.marks();
-    assert.equal(m.firstSeen.has("b"), false);
+    let m = harness.marks();
     assert.equal(m.flashNew.size, 0);
     assert.equal(m.flashCount, true);
     harness.diffSkillsState(state([skill("a")]), state([skill("a")]));
