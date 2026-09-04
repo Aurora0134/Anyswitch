@@ -9,8 +9,8 @@
 /* 1) 亮色 token 全集 */
 :root[data-style="sepia"] {
   color-scheme: light;
-  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 背景与文字：保持中性，不加暖 */
@@ -75,8 +75,8 @@
 /* 2) 暗色 token 全集（显式 dark） */
 :root[data-style="sepia"][data-theme="dark"] {
   color-scheme: dark;
-  --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
   /* 背景与文字：保持中性，不加暖 */
@@ -137,8 +137,8 @@
 @media (prefers-color-scheme: dark) {
   :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) {
     color-scheme: dark;
-    --font-sans: "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
 
     /* 背景与文字：保持中性，不加暖 */
