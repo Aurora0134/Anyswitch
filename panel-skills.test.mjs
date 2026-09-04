@@ -491,27 +491,37 @@ describe("panel.html skills change diff highlighting", () => {
     );
   });
 
-  it("renderSkillsList consumes the cascade mark before the empty-list early returns", () => {
+  it("renderSkillsList consumes the animation marks before the empty-list early returns", () => {
     const renderList = extractFn("renderSkillsList", "");
     const consumed = renderList.indexOf("skillsCascadePending = false");
     assert.ok(consumed > 0, "renderSkillsList must consume the cascade mark");
     assert.ok(renderList.indexOf('classList.remove("is-blank")') > 0);
+    const flipConsumed = renderList.indexOf("skillsFlipTops = null");
+    assert.ok(flipConsumed > 0, "renderSkillsList must consume the FLIP snapshot");
+    assert.ok(renderList.indexOf("skillsRevealKeys = null") > 0);
     // 三条早退（仓库未配置 / 空仓库 / 过滤无匹配）都必须在消费之后，否则标记滞留
     for (const hint of ["先设置主仓库", "仓库中还没有 skill", "没有匹配的 skill"]) {
       assert.ok(renderList.indexOf(hint) > consumed, `${hint} 的早退必须在 cascade 消费之后`);
+      assert.ok(renderList.indexOf(hint) > flipConsumed, `${hint} 的早退必须在 FLIP 消费之后`);
     }
     // cascade 那次渲染不挂行级高亮：同元素同特异性的 animation 简写整条互相覆盖，会吃掉一个
     assert.match(renderList, /const flashCls = cascade\s*\?\s*""/);
     assert.match(renderList, /style="--i:\$\{i\}"/);
     assert.match(renderList, /if \(cascade\) playSkillsListCascade\(listEl\);/);
+    // 入场类先挂、FLIP 后跑：FLIP 每行强制一次回流，反了入场动画会晚一帧起跑
+    assert.ok(
+      renderList.indexOf('classList.add("row-reveal")') < renderList.indexOf("skillsListFlipFrom(flipTops, flipMs)"),
+      "入场类必须在 FLIP 之前挂上"
+    );
   });
 
   it("cascade animates only the rows in view and pins the total to 450ms", () => {
     // CSS 侧契约：backwards 填充（延迟期间锁 0% 帧，否则行会先全亮再逐个消失）
     // + clip-path 自上而下揭开 + translateX 横向落位 + 步长走 --csc-step
     assert.match(panelHtml, /\.skills-list\.is-blank \{ visibility: hidden; \}/);
-    assert.match(panelHtml, /animation: skillsRowCascade 180ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
-    assert.match(panelHtml, /@keyframes skillsRowCascade \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
+    assert.match(panelHtml, /animation: skillsRowEnter 180ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
+    assert.match(panelHtml, /@keyframes skillsRowEnter \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
+    assert.doesNotMatch(panelHtml, /skillsRowCascade/);
 
     const totalSrc = panelHtml.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
     const rowSrc = panelHtml.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
@@ -558,5 +568,130 @@ describe("panel.html skills change diff highlighting", () => {
     const empty = fakeList(0, 495);
     h.playSkillsListCascade(empty);
     assert.deepEqual(empty.style.props, {});
+  });
+
+  it("import lands the new row in view: FLIP yields, reveal enters, row gets selected", () => {
+    const imp = extractFn("importSkillViaPicker", "btnId, endpoint");
+    // 暗态要有名字：一次 POST 覆盖「弹原生框→校验→拷贝」，后端 pickFolder 超时 120s，
+    // 而原生框弹在桌面上，页面里只剩一个暗按钮
+    assert.match(imp, /const label = btn\.textContent;/);
+    assert.match(imp, /btn\.textContent = "导入中…"/);
+    assert.match(imp, /finally \{[\s\S]*?btn\.textContent = label;/);
+    // 等新行真的上屏才恢复按钮（旧写法不 await，完成信号早于结果）
+    assert.match(imp, /await revealSkillsInsert\(\[d\.skill\.relPath\]\)/);
+
+    const reveal = extractFn("revealSkillsInsert", "relPaths");
+    // 空集即「本次没有新行」（批量转托管 / 失败路径），退化为朴素刷新
+    assert.match(reveal, /if \(!relPaths\.length\) \{\s*\n\s*await refreshSkillsState\(\);\s*\n\s*return;/);
+    // 快照必须在重渲之前；选中语义照普通左键（集合=新行、焦点=首条），详情卡随之切过去
+    assert.match(reveal, /skillsFlipTops = skillsListTops\(\);\s*\n\s*skillsFlipMs = SKILLS_INSERT_MS;\s*\n\s*skillsRevealKeys = new Set\(relPaths\);/);
+    assert.match(reveal, /skillsSelection\.clear\(\);\s*\n\s*for \(const key of relPaths\) skillsSelection\.add\(key\);\s*\n\s*skillsFocusKey = relPaths\[0\];/);
+    // 定位在重渲之后：新行按仓库序落在字母序中间，不滚过去动画就发生在折叠区外；
+    // 批量时新行散落各处，居中最靠上的那条
+    assert.match(reveal, /await refreshSkillsState\(\);[\s\S]*?centerSkillsRow\(topmost \? topmost\.getAttribute\("data-skill"\) : relPaths\[0\]\);/);
+    // 手动改容器 scrollTop 而非 scrollIntoView（后者会连带滚动页面级容器）
+    const center = extractFn("centerSkillsRow", "relPath");
+    assert.doesNotMatch(center, /scrollIntoView/);
+    assert.match(center, /listEl\.scrollTop = Math\.max\(0, top - \(listEl\.clientHeight - row\.offsetHeight\) \/ 2\)/);
+
+    // 入场与 row-new 并存：不同属性用逗号并列，否则同特异性的 animation 简写会整条互覆
+    assert.match(panelHtml, /\.skills-list-row\.row-reveal \{ animation: skillsRowEnter 600ms var\(--ease-out\) backwards; \}/);
+    assert.match(panelHtml, /\.skills-list-row\.row-new\.row-reveal \{\s*\n\s*animation: skillsRowEnter 600ms var\(--ease-out\) backwards, skillsRowNew 2s var\(--ease-out\);/);
+  });
+
+  it("delete dissolves the row first, then FLIPs the gap closed", () => {
+    const del = extractFn("confirmDeleteSkill", "skill");
+    // 形参收整个 skill：接口按 dirName 删、行按 relPath 定位，嵌套 skill 下两者不相等
+    assert.match(del, /skillName: skill\.dirName/);
+    assert.match(del, /removed = \[skill\.relPath\]/);
+    assert.match(del, /await refreshAfterSkillsRemove\(removed\)/);
+
+    const multi = extractFn("confirmDeleteSelectedSkills", "");
+    assert.match(multi, /removed\.push\(s\.relPath\)/);
+    assert.match(multi, /await refreshAfterSkillsRemove\(removed\)/);
+
+    const rm = extractFn("refreshAfterSkillsRemove", "relPaths");
+    // 失败路径传空集：行还在服务端，不退场，直接重渲与真实状态对齐
+    assert.match(rm, /if \(!relPaths\.length\) \{\s*\n\s*await refreshSkillsState\(\);\s*\n\s*return;/);
+    // 顺序：快照 → 退场 → 重渲（FLIP 在渲染内消费快照）
+    assert.match(rm, /const tops = skillsListTops\(\);\s*\n\s*await dissolveSkillsRows\(relPaths\);\s*\n\s*skillsFlipTops = tops;\s*\n\s*skillsFlipMs = SKILLS_DELETE_FLIP_MS;\s*\n\s*await refreshSkillsState\(\);/);
+
+    // 退场只动 opacity/transform（高度交给重渲后的 FLIP，两处同时做会让邻行位移两次）；
+    // fill forwards 防退场结束到重渲之间闪回一帧
+    const dissolve = extractFn("dissolveSkillsRows", "relPaths");
+    assert.match(dissolve, /\[\{ opacity: 1, transform: "none" \}, \{ opacity: 0, transform: "translateX\(-8px\)" \}\]/);
+    assert.match(dissolve, /fill: "forwards"/);
+    assert.match(dissolve, /prefers-reduced-motion/);
+  });
+
+  it("only paths that really insert a repo row reveal; 转托管 and resolve-conflict do not", () => {
+    // 后端 mergeLocalSkill 三条出口：仓库无此 skill → 拷入仓库根（新行，relPath 即
+    // skillName）；仓库副本内容一致 → reusedRepoCopy（没有新行，本地目录只换成
+    // junction）；分叉 → conflict（什么都没动）
+    const single = extractFn("mergeLocal", "endpointId, skillName, kind");
+    assert.match(single, /let inserted = null;/);
+    assert.match(single, /inserted = d\.reusedRepoCopy \? \[\] : \[skillName\];/);
+    // 空集即朴素刷新：失败路径（inserted 仍为 null）与转托管都不该演入场
+    assert.match(single, /await revealSkillsInsert\(inserted \|\| \[\]\);/);
+    // conflict 兜底分支维持自己的朴素刷新（什么都没动，没有新行可演）
+    assert.match(single, /if \(d\.conflict\) \{[\s\S]*?await refreshSkillsState\(\);\s*\n\s*return;/);
+
+    const batch = extractFn("confirmBatchMergeLocal", "items, kind");
+    assert.match(batch, /else \{ okCount\+\+; if \(!d\.reusedRepoCopy\) inserted\.push\(it\.entry\.name\); \}/);
+    assert.match(batch, /await revealSkillsInsert\(inserted\);/);
+
+    // resolve-conflict 两个方向都不产生新行：repo 方向只把本地目录换成 junction，
+    // local 方向把内容拷进同一 repo 路径（行还在，只是内容变，走 row-changed 高亮）
+    const resolve = extractFn("resolveConflict", "endpointId, skillName, direction");
+    assert.doesNotMatch(resolve, /revealSkillsInsert/);
+    assert.match(resolve, /await refreshSkillsState\(\)/);
+  });
+
+  it("FLIP shifts a displaced row back to its old spot, immune to scrolling", async () => {
+    const flipSrc = extractFn("skillsListFlipFrom", "tops, ms");
+    let origin = 0;
+    let listEl = null;
+    function fakeRow(key, contentTop) {
+      const log = [];
+      const style = {};
+      Object.defineProperty(style, "transform", {
+        enumerable: true,
+        get: () => style._t,
+        set: (v) => { style._t = v; log.push(v); },
+      });
+      return {
+        log, style, offsetWidth: 0,
+        getAttribute: (n) => (n === "data-skill" ? key : null),
+        getBoundingClientRect: () => ({ top: origin + contentTop }),
+      };
+    }
+    // 场景：在 a 与 b 之间插入 x —— 旧 a=0/b=55/c=110，新 a=0/x=55/b=110/c=165
+    function run(scrollTop, listTop, reduce) {
+      origin = listTop - scrollTop; // 内容坐标原点 = 视口上缘补偿滚动量
+      const rows = [fakeRow("a", 0), fakeRow("x", 55), fakeRow("b", 110), fakeRow("c", 165)];
+      listEl = { scrollTop, children: rows, getBoundingClientRect: () => ({ top: listTop }) };
+      const flip = new Function("$", "window", `${flipSrc}\n return skillsListFlipFrom;`)(
+        (id) => (id === "skillsList" ? listEl : null),
+        { matchMedia: () => ({ matches: reduce }) },
+      );
+      flip(new Map([["a", 0], ["b", 55], ["c", 110]]), 1);
+      return rows;
+    }
+
+    // 位移符号是 FLIP 最易错处：b 的新位在旧位之下，必须先被平移回上方（负值）再归零下滑
+    const [a, x, b, c] = run(0, 100, false);
+    assert.deepEqual(a.log, [], "没位移的行不该被写任何内联样式");
+    assert.deepEqual(x.log, [], "新行没有旧位置，交给入场动画");
+    assert.deepEqual(b.log, ["translateY(-55px)", ""]);
+    assert.deepEqual(c.log, ["translateY(-55px)", ""]);
+    // 缓动必须与入场动画同一条，否则让位行上缘与揭开前沿会错开几像素
+    assert.equal(b.style.transition, "transform 1ms var(--ease-out)");
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(b.style.transition, "", "收尾要清掉内联 transition，交回基样式");
+
+    // 容器滚过之后再 FLIP：内容坐标系让位移量与滚动位置无关
+    assert.deepEqual(run(200, 100, false)[2].log, ["translateY(-55px)", ""]);
+    // reduced-motion：整套位移反馈跳过，行直接落在新位置
+    assert.deepEqual(run(0, 100, true).flatMap((r) => r.log), []);
   });
 });
