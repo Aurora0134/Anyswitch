@@ -3924,13 +3924,16 @@ try {
   #panelStartup { display: none; }
   html[data-startup] #panelStartup {
     display: grid; place-items: center; position: fixed; inset: 0; z-index: 10000;
-    background: var(--bg-page); opacity: 1; transition: opacity 180ms ease;
+    /* 亚克力质感对齐 ZCode 桌面窗体（backgroundMaterial:"acrylic"）的 CSS 近似：
+       页面底色半透明叠加 + backdrop 大半径模糊提饱和，透出被盖住的 panel 主页 */
+    background: var(--bg-page);
+    background: color-mix(in srgb, var(--bg-page) 60%, transparent);
+    backdrop-filter: blur(32px) saturate(150%);
+    opacity: 1; transition: opacity 180ms ease;
   }
+  /* 主页内容不藏了：留在亚克力后面当模糊背景，只拦指针 */
   html[data-startup="playing"] body > :not(#panelStartup):not(script) {
-    opacity: 0; visibility: hidden; pointer-events: none;
-  }
-  html[data-startup="leaving"] body > :is(.site-head, main, footer) {
-    transition: opacity 180ms ease; opacity: 1;
+    pointer-events: none;
   }
   html[data-startup="leaving"] #panelStartup { opacity: 0; pointer-events: none; }
   .startup-mark { position: relative; width: min(160px, calc(100vw - 48px)); aspect-ratio: 1; }
@@ -3975,6 +3978,8 @@ try {
   try { history.replaceState(history.state, "", url.href); } catch {}
   const navigation = performance.getEntriesByType("navigation")[0];
   if (navigation && navigation.type !== "navigate") return;
+  // 本页来自 launcher 首开：主脚本 restoreView 据此固定落看板页（刷新/普通访问仍恢复上次 tab）
+  window.panelStartupLaunch = true;
   window.panelStartupBegin();
 })();
 </script>
@@ -8359,8 +8364,10 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
-  // 刷新页面后留在原 tab（默认看板）
+  // 刷新页面后留在原 tab（默认看板）；launcher 启动的那一次固定落看板，
+  // 刷新与普通访问不受影响，仍按 panel-view 恢复。
   function restoreView() {
+    if (window.panelStartupLaunch) return;
     let saved = null;
     try { saved = localStorage.getItem("panel-view"); } catch {}
     if (saved === "skills") switchView("skills");
