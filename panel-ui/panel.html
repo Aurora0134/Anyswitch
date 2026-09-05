@@ -12818,6 +12818,13 @@ try {
   //   reveal 半途被 morph 接管：dash 从已画弧长续推到全显（recharts
   //   longestAnimatedLengthRef 同款），与点插值并行，不回卷重画。
   function renderStatsLineChart(container, cfg, anim) {
+    // 同终点守卫：morph 进行中若新内容与在飞动画的目标完全一致（seg 重击当前 tab、
+    // 30s 轮询数据未变、手动刷新返回同值），整体跳过本次渲染——在飞动画按原时序播完，
+    // 不重启时间轴（否则曲线顿住后以完整时长慢速重播剩余距离）。签名只看渲染输出
+    // （轴刻度 + 系列键/色/虚线/值），与数据来源无关。
+    if (container._statsAnim && container._statsAnim.raf) {
+      if (container._statsAnim.targetSig === renderStatsTrendSignature(cfg)) return;
+    }
     // 基线优先级：在飞动画的中间像素帧 > 上次提交的像素帧
     const prevAnim = container._statsAnim || null;
     const baseline = (prevAnim && prevAnim.current) || container._statsCommit || null;
@@ -12897,8 +12904,16 @@ try {
     }
     svg.appendChild(seriesG);
 
-    // ── 动画 ──
-    const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  // ── 动画 ──
+  // 渲染输出签名：轴刻度 + 各系列 key/色/虚线/值。同终点守卫用它判断在飞动画
+  // 的目标是否与本次请求渲染的内容一致（与数据来源/调用方无关）。
+  function renderStatsTrendSignature(cfg) {
+    return JSON.stringify([
+      cfg.labels, cfg.min, cfg.max, cfg.height,
+      cfg.series.map((s) => [s.key, s.color, s.dash || "", s.values]),
+    ]);
+  }
+  const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // 提交/在飞状态一律记像素帧：Map<key, [{x,y}|null]>。记像素而非值，跨桶数/yMax
     // 变化时旧帧位置就是曲线上次真实的视觉位置，morph 直接对其插值即可平滑滑动。
     const pixelsOf = (s) => s.values.map((v, j) => (v == null ? null : { x: X(j), y: Y(v) }));
@@ -12907,6 +12922,8 @@ try {
       if (container._statsAnim === state) container._statsAnim = null;
       container._statsCommit = commitPixels();
     };
+    // 目标签名挂到动画状态上：同终点守卫据此识别"内容未变"的重渲
+    const animSig = renderStatsTrendSignature(cfg);
     // 弧长测量/上色工具（reveal 与 morph 的 dash 续接共用）：getTotalLength 需元素
     // 已挂 DOM，故都在首帧 rAF（渲染函数同步段已 appendChild）里惰性调用。
     const statsParseDash = (s) => s.split(/[,\s]+/).map((v) => parseFloat(v)).filter((v) => Number.isFinite(v));
@@ -12946,7 +12963,7 @@ try {
       const plans = seriesRecs.map((rec) => ({ rec, items: [], total: 0 }));
       let measured = false;
       // grown：各系列已画弧长，reveal 被 morph 中断时作续接起点（终态像素帧另记在 current）
-      const state = { raf: 0, current: commitPixels(), grown: new Map() };
+      const state = { raf: 0, current: commitPixels(), grown: new Map(), targetSig: animSig };
       const t0 = performance.now();
       const tick = (t) => {
         if (!measured) {
@@ -12967,7 +12984,7 @@ try {
       state.raf = requestAnimationFrame(tick);
       container._statsAnim = state;
     } else if (!reduceMotion && anim && anim.type === "morph" && baseline) {
-      const state = { raf: 0, current: null };
+      const state = { raf: 0, current: null, targetSig: animSig };
       const zeroY = padT + ih; // 0 线像素（yMin 恒为区间下界）
       const recs = seriesRecs.map((rec) => {
         const dense = rec.s.values.every((v) => v != null) && rec.segs.length > 0;

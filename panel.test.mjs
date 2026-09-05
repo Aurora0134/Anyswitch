@@ -2178,6 +2178,26 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(bb.includes('aria-label", "模型用量柱状图"'), "bars svg role=img aria-label wired");
   });
 
+  it("同终点守卫：morph 进行中同内容重渲跳过（seg 重击/轮询不重置动画时间轴）", () => {
+    // 渲染器顶层守卫：在飞动画存在时先比目标签名（labels+series key/color/dash+values），
+    // 一致 → 整体 return 不重启 rAF；不一致或 reveal → 照旧取消重建。
+    const fn = panelHtml.match(/function renderStatsLineChart\(container, cfg, anim\) \{([\s\S]*?)\n  \}/);
+    assert.ok(fn, "renderStatsLineChart found");
+    const head = fn[1];
+    // 守卫必须在取消在飞 rAF 之前（否则动画已被杀，跳过无意义）
+    const guardIdx = head.indexOf("renderStatsTrendSignature(cfg)");
+    const cancelIdx = head.indexOf("cancelAnimationFrame(prevAnim.raf)");
+    assert.ok(guardIdx !== -1, "same-target guard present in renderer head");
+    assert.ok(cancelIdx !== -1 && guardIdx < cancelIdx,
+      "guard runs before cancelling the in-flight rAF");
+    // 签名函数存在且覆盖轴与系列（值含在 series.values）
+    assert.ok(panelHtml.includes("function renderStatsTrendSignature(cfg)"),
+      "signature helper defined");
+    // 守卫成立路径：直接 return，不重建 DOM（textContent 清空在守卫之后）
+    const after = head.slice(guardIdx, guardIdx + 400);
+    assert.ok(/return;/.test(after), "guard short-circuits with plain return");
+  });
+
   it("morph/reveal 进行中 hover 十字线与 tooltip 隐藏（终态坐标不再与曲线错位）", () => {
     const m = panelHtml.match(/overlay\.addEventListener\("mousemove", \(e\) => \{([\s\S]*?)\n    \}\);/);
     assert.ok(m, "mousemove handler found");
