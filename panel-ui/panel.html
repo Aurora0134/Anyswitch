@@ -775,12 +775,12 @@
   .store-refresh-status .srs-pos { color: var(--ok); }
   .store-refresh-status .srs-neg { color: var(--danger); }
   /* 「正在刷新..」窄波字：每字一个 span，JS 交错 animation-delay（120ms/字），
-     keyframe 把亮窗压在周期前段 30% 内——同一时刻至多相邻三四字柔和叠亮，
+     keyframe 把亮窗压在周期前段 50% 内——同一时刻至多相邻五六字柔和叠亮，
      波峰从左移到右，周期尾部自然留拍后重来。多渠道刷新时该前缀常驻在逐条吐出的渠道 diff 前 */
   .store-refresh-status .srs-ch { animation: srs-pulse 1.6s ease-in-out infinite; }
   @keyframes srs-pulse {
-    0%, 30%, 100% { color: var(--text-2); }
-    15% { color: var(--accent); }
+    0%, 50%, 100% { color: var(--text-2); }
+    25% { color: var(--accent); }
   }
   /* 全部刷新完成：「刷新完成」整体高光（实色，不再逐字滚动）；失败信息只靠
      tail 内红色分段表达，完成态不再整行染红 */
@@ -2930,8 +2930,8 @@
 /* Store 刷新状态小字：冰青高亮带轻辉光（半径收小防糊字） */
 :root[data-style="aurora"] .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
 @keyframes srs-pulse-aurora {
-  0%, 30%, 100% { color: var(--text-2); text-shadow: none; }
-  15% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
+  0%, 50%, 100% { color: var(--text-2); text-shadow: none; }
+  25% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
 }
 /* 完成整体高光：冰青实色带一点轻辉光；字重由基样 600 收细为 500，防辉光糊笔画 */
 :root[data-style="aurora"] .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }
@@ -3452,8 +3452,8 @@
 }
 :root[data-style="blueprint"] .store-refresh-status .srs-ch { animation-name: srs-pulse-blueprint; }
 @keyframes srs-pulse-blueprint {
-  0%, 30%, 100% { color: var(--text-2); }
-  15% { color: var(--warn); }
+  0%, 50%, 100% { color: var(--text-2); }
+  25% { color: var(--warn); }
 }
 /* 完成整体高光用制图橙，与窄波峰值一致 */
 :root[data-style="blueprint"] .store-refresh-status .srs-done { color: var(--warn); }
@@ -3889,8 +3889,8 @@
 :root[data-style="sepia"] .store-refresh-status { font-style: italic; letter-spacing: 0.02em; }
 :root[data-style="sepia"] .store-refresh-status .srs-ch { animation-name: srs-pulse-sepia; }
 @keyframes srs-pulse-sepia {
-  0%, 30%, 100% { color: var(--text-2); opacity: 0.55; }
-  15% { color: var(--accent); opacity: 1; }
+  0%, 50%, 100% { color: var(--text-2); opacity: 0.55; }
+  25% { color: var(--accent); opacity: 1; }
 }
 
 /* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
@@ -10429,7 +10429,7 @@ try {
   let storeStatusTimer = null;
   function srsWaveHtml(text) {
     // 逐字窄波：每字一个 span，延迟 120ms 依次点亮；亮窗由 keyframe 压在周期
-    // 前段 30% 内，同一时刻至多相邻三四字柔和叠亮，波峰扫过随周期尾部停顿重来
+    // 前段 50% 内，同一时刻至多相邻五六字柔和叠亮，波峰扫过随周期尾部停顿重来
     return [...text].map((ch, i) =>
       `<span class="srs-ch" style="animation-delay:${i * 120}ms">${escapeHtml(ch)}</span>`).join("");
   }

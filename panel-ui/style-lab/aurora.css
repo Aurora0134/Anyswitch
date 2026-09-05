@@ -554,8 +554,8 @@
 /* Store 刷新状态小字：冰青高亮带轻辉光（半径收小防糊字） */
 :root[data-style="aurora"] .store-refresh-status .srs-ch { animation-name: srs-pulse-aurora; }
 @keyframes srs-pulse-aurora {
-  0%, 100% { color: var(--text-2); text-shadow: none; }
-  50% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
+  0%, 50%, 100% { color: var(--text-2); text-shadow: none; }
+  25% { color: var(--accent); text-shadow: 0 0 4px var(--accent); }
 }
 /* 完成整体高光：冰青实色带一点轻辉光；字重由基样 600 收细为 500，防辉光糊笔画 */
 :root[data-style="aurora"] .store-refresh-status .srs-done { font-weight: 500; text-shadow: 0 0 4px var(--accent); }

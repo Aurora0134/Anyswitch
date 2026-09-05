@@ -421,12 +421,12 @@
   :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-line .ts { color: #544a39; }
 }
 
-/* Store 刷新状态小字：斜体铅字感，高亮向赭橙 accent 呼吸 */
+/* Store 刷新状态小字：斜体铅字感，窄波扫过点亮赭橙 accent */
 :root[data-style="sepia"] .store-refresh-status { font-style: italic; letter-spacing: 0.02em; }
 :root[data-style="sepia"] .store-refresh-status .srs-ch { animation-name: srs-pulse-sepia; }
 @keyframes srs-pulse-sepia {
-  0%, 100% { color: var(--text-2); opacity: 0.55; }
-  50% { color: var(--accent); opacity: 1; }
+  0%, 50%, 100% { color: var(--text-2); opacity: 0.55; }
+  25% { color: var(--accent); opacity: 1; }
 }
 
 /* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
