@@ -219,6 +219,18 @@ describe("launcher-only startup screen", () => {
     assert.ok(src.includes("reduce ? 0 : 200"), "settle 定格 200ms");
   });
 
+  it("scopes the leaving fade-in to page content, never to floating layers", () => {
+    // leaving 淡入选择器若用 :not(#panelStartup) 反选，特异性取括号内 ID 级，
+    // 会压过 .toast/.modal-overlay 默认的 opacity:0，导致浮动层在 leaving 期间
+    // 被强制淡入成短暂可见的"弹窗"。钉死：playing/leaving 规则显式列出
+    // header/main/footer，不出现 :not() 反选形式。
+    const css = html.match(/<style>([\s\S]*?)<\/style>/g).find((b) => b.includes("data-startup"));
+    assert.ok(css.includes('html[data-startup="leaving"] body > header'), "leaving 淡入覆盖 header");
+    assert.ok(css.includes('html[data-startup="leaving"] body > main'), "leaving 淡入覆盖 main");
+    assert.ok(css.includes('html[data-startup="leaving"] body > footer'), "leaving 淡入覆盖 footer");
+    assert.ok(!css.includes(':not(#panelStartup):not(script)'), "不用 :not() 反选压过浮动层默认态");
+  });
+
   it("signals readiness only after initial status and the restored view have settled", async () => {
     const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init);
