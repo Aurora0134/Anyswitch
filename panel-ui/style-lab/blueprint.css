@@ -508,10 +508,10 @@
 }
 :root[data-style="blueprint"] .store-refresh-status .srs-ch { animation-name: srs-pulse-blueprint; }
 @keyframes srs-pulse-blueprint {
-  0%, 100% { color: var(--text-2); }
-  50% { color: var(--warn); }
+  0%, 50%, 100% { color: var(--text-2); }
+  25% { color: var(--warn); }
 }
-/* 完成整体高光用制图橙，与呼吸峰值一致 */
+/* 完成整体高光用制图橙，与窄波峰值一致 */
 :root[data-style="blueprint"] .store-refresh-status .srs-done { color: var(--warn); }
 
 /* 使用统计热力图：图纸语言——单元格方角化，与网格底纹一致 */
