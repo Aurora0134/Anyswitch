@@ -7,7 +7,7 @@
 //
 //   1. probe 47820/panel — is the control panel already up?
 //   2. if not, spawn panel-host.mjs detached and wait for it to answer
-//   3. open the panel in the default browser (http://127.0.0.1:47820/panel)
+//   3. open the panel in the default browser (http://127.0.0.1:47820/panel?startup=1)
 //
 // It brings up the PANEL, not the relay. The relay (47821) is a separate
 // process that the panel starts/stops on demand (or the followAgent watcher
@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 
 const PANEL_PORT = 47820;
+const PANEL_STARTUP_URL = `http://127.0.0.1:${PANEL_PORT}/panel?startup=1`;
 // How long to wait for a just-spawned panel-host to bind before giving up.
 const DEFAULT_PANEL_READY_TIMEOUT_MS = 8_000;
 const DEFAULT_PROBE_INTERVAL_MS = 400;
@@ -68,7 +69,7 @@ export const waitForRelayReady = waitForPanelReady;
 // Every dependency is injected:
 //   probe()           -> Promise<boolean>, is the panel answering?
 //   spawnPanelHost()  -> start panel-host detached (returns nothing; errors throw)
-//   openBrowser()     -> open http://127.0.0.1:47820/panel in the default browser
+//   openBrowser(url)  -> open the supplied startup URL in the default browser
 //   sleep(ms)         -> promise delay (used while waiting for the panel)
 //   log(line)         -> operator-facing message sink
 //   timeoutMs/intervalMs -> panel-ready poll tuning
@@ -86,7 +87,7 @@ export async function runPanelLauncher({
 
   if (action.kind === "open") {
     log("panel already running; opening");
-    await openBrowser();
+    await openBrowser(PANEL_STARTUP_URL);
     return 0;
   }
 
@@ -105,7 +106,7 @@ export async function runPanelLauncher({
     return 1;
   }
   log("panel is up; opening");
-  await openBrowser();
+  await openBrowser(PANEL_STARTUP_URL);
   return 0;
 }
 
@@ -128,11 +129,11 @@ function realSpawnPanelHost() {
   child.unref();
 }
 
-function realOpenBrowser() {
+function realOpenBrowser(url) {
   // `start "" "url"` opens the URL in the default browser via cmd.exe /c. The
   // empty title arg ("") prevents a quoted URL being mistaken for the title.
   return new Promise((resolve) => {
-    const child = spawn("cmd.exe", ["/c", "start", "", `http://127.0.0.1:${PANEL_PORT}/panel`], {
+    const child = spawn("cmd.exe", ["/c", "start", "", url], {
       windowsHide: true,
       shell: false,
       stdio: "ignore",

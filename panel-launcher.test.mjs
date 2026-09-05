@@ -62,26 +62,26 @@ describe("waitForPanelReady", () => {
 });
 
 describe("runPanelLauncher", () => {
-  it("opens the panel immediately when it is already up (no spawn)", async () => {
+  it("opens the startup panel URL immediately when it is already up (no spawn)", async () => {
     const calls = [];
     const code = await runPanelLauncher({
       probe: async () => { calls.push("probe"); return true; },
       spawnPanelHost: () => { calls.push("spawnPanelHost"); },
-      openBrowser: async () => { calls.push("openBrowser"); },
+      openBrowser: async (url) => { calls.push(["openBrowser", url]); },
       sleep: () => { calls.push("sleep"); },
       log: () => {},
     });
     assert.equal(code, 0);
-    assert.deepEqual(calls, ["probe", "openBrowser"]);
+    assert.deepEqual(calls, ["probe", ["openBrowser", "http://127.0.0.1:47820/panel?startup=1"]]);
   });
 
-  it("spawns the panel host, waits for readiness, then opens the panel", async () => {
+  it("spawns the panel host, waits for readiness, then opens the startup panel URL", async () => {
     const calls = [];
     const code = await runPanelLauncher({
       // miss on first probe (decideAction), then hit on the readiness poll
       probe: makeProbe(2),
       spawnPanelHost: () => { calls.push("spawnPanelHost"); },
-      openBrowser: async () => { calls.push("openBrowser"); },
+      openBrowser: async (url) => { calls.push(["openBrowser", url]); },
       sleep: () => { calls.push("sleep"); },
       log: () => {},
       intervalMs: 100,
@@ -89,7 +89,7 @@ describe("runPanelLauncher", () => {
     assert.equal(code, 0);
     // probe(miss) -> spawn -> probe(hit) -> openBrowser. No sleep because the
     // second probe (the first readiness poll) already hits.
-    assert.deepEqual(calls, ["spawnPanelHost", "openBrowser"]);
+    assert.deepEqual(calls, ["spawnPanelHost", ["openBrowser", "http://127.0.0.1:47820/panel?startup=1"]]);
   });
 
   it("returns 1 and does not open the panel if spawnPanelHost throws", async () => {

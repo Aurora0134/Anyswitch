@@ -3915,9 +3915,195 @@ try {
   if (panelStyle) document.documentElement.setAttribute("data-style", panelStyle);
   else document.documentElement.removeAttribute("data-style");
 } catch (e) {}
+try {
+  var panelTheme = localStorage.getItem("panel-theme");
+  if (panelTheme === "light" || panelTheme === "dark") document.documentElement.setAttribute("data-theme", panelTheme);
+} catch (e) {}
+</script>
+<style>
+  #panelStartup { display: none; }
+  html[data-startup] #panelStartup {
+    display: grid; place-items: center; position: fixed; inset: 0; z-index: 10000;
+    background: var(--bg-page); opacity: 1; transition: opacity 180ms ease;
+  }
+  html[data-startup="playing"] body > :not(#panelStartup):not(script) {
+    opacity: 0; visibility: hidden; pointer-events: none;
+  }
+  html[data-startup="leaving"] body > :is(.site-head, main, footer) {
+    transition: opacity 180ms ease; opacity: 1;
+  }
+  html[data-startup="leaving"] #panelStartup { opacity: 0; pointer-events: none; }
+  .startup-mark { position: relative; width: min(160px, calc(100vw - 48px)); aspect-ratio: 1; }
+  .startup-mark svg, .startup-mark img { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #startupLogo { opacity: 0; transition: opacity 180ms ease; }
+  #startupSvg { opacity: 1; transition: opacity 180ms ease; }
+  #panelStartup[data-phase="settled"][data-logo="ready"] #startupLogo { opacity: 1; }
+  #panelStartup[data-phase="settled"][data-logo="ready"] #startupSvg { opacity: 0; }
+  @media (prefers-reduced-motion: reduce) {
+    html[data-startup] #panelStartup, #startupLogo, #startupSvg { transition: none; }
+  }
+</style>
+<script id="panelStartupBootstrap">
+(function () {
+  const root = document.documentElement;
+  const url = new URL(location.href);
+  if (url.searchParams.get("startup") !== "1") return;
+  url.searchParams.delete("startup");
+  try { history.replaceState(history.state, "", url.href); } catch {}
+  const navigation = performance.getEntriesByType("navigation")[0];
+  if (navigation && navigation.type !== "navigate") return;
+  root.setAttribute("data-startup", "playing");
+  const startup = window.panelStartupController = {
+    startedAt: performance.now(),
+    release() {
+      root.removeAttribute("data-startup");
+      document.getElementById("panelStartup")?.remove();
+      delete window.panelStartupController;
+    },
+  };
+  // This timer is independent of the main application script and its requests.
+  startup.deadline = setTimeout(() => startup.release(), 3000);
+})();
 </script>
 </head>
 <body>
+<div id="panelStartup" role="status" aria-label="正在打开 Anyswitch">
+  <div class="startup-mark">
+    <svg id="startupSvg" viewBox="0 0 512 512" aria-hidden="true">
+      <defs>
+        <linearGradient id="startupBlue" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0" stop-color="#00377f"/>
+          <stop offset="1" stop-color="#007bed"/>
+        </linearGradient>
+      </defs>
+      <rect x="27" y="28" width="459" height="459" rx="101" fill="url(#startupBlue)"/>
+      <g id="startupEdges" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"></g>
+      <g id="startupNodes"></g>
+    </svg>
+    <img id="startupLogo" width="512" height="512" alt="" decoding="async">
+  </div>
+</div>
+<script id="panelStartupAnimation">
+(function () {
+  const startup = window.panelStartupController;
+  if (!startup) return;
+  const root = document.documentElement;
+  const layer = document.getElementById("panelStartup");
+  const logo = document.getElementById("startupLogo");
+  const edges = document.getElementById("startupEdges");
+  const nodes = document.getElementById("startupNodes");
+  const motion = matchMedia("(prefers-reduced-motion: reduce)");
+  const ns = "http://www.w3.org/2000/svg";
+  // Coordinates and radii use the same 512px canvas as docs/assets/logo.png.
+  const points = [[256, 251, 25], [256, 121, 20], [369, 183, 20], [369, 322, 20], [256, 386, 20], [143, 322, 20], [143, 183, 20]];
+  const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6]];
+  const circles = points.map((point, i) => {
+    const circle = document.createElementNS(ns, "circle");
+    circle.setAttribute("r", point[2]);
+    circle.setAttribute("fill", i === 0 ? "#00d8eb" : "#fff");
+    return nodes.appendChild(circle);
+  });
+  const lines = [];
+  for (let a = 0; a < points.length; a++) {
+    for (let b = a + 1; b < points.length; b++) {
+      const line = document.createElementNS(ns, "line");
+      line.setAttribute("opacity", "0");
+      edges.appendChild(line);
+      lines.push({ a, b, line, born: -Infinity, fixed: fixedPairs.some(([x, y]) => (a === x && b === y) || (a === y && b === x)) });
+    }
+  }
+  let raf = 0, finishTimer = 0, removeTimer = 0, logoRevealTimer = 0;
+  let settled = false, ready = false, logoVisible = false, done = false, lastBurst = -Infinity, previous = -1;
+  let reduce = motion.matches;
+  function render(time, final = false) {
+    const p = final ? 1 : Math.min(1, Math.max(0, time / 1100));
+    const scale = 1 + 0.12 * Math.pow(1 - p, 3);
+    const xy = points.map(([x, y], i) => i === 0 ? [x, y] : [256 + (x - 256) * scale, 251 + (y - 251) * scale]);
+    circles.forEach((circle, i) => {
+      circle.setAttribute("cx", xy[i][0]);
+      circle.setAttribute("cy", xy[i][1]);
+    });
+    if (!final && time < 880 && time - lastBurst >= 80) {
+      let index = Math.floor(Math.random() * (lines.length - 1));
+      if (index >= previous) index++;
+      lines[index].born = time;
+      previous = index;
+      lastBurst = time;
+    }
+    for (const edge of lines) {
+      const [x1, y1] = xy[edge.a], [x2, y2] = xy[edge.b];
+      edge.line.setAttribute("x1", x1); edge.line.setAttribute("y1", y1);
+      edge.line.setAttribute("x2", x2); edge.line.setAttribute("y2", y2);
+      const age = time - edge.born;
+      const pulse = age >= 0 && age < 240 ? Math.sin(age / 240 * Math.PI) * 0.85 : 0;
+      const lock = Math.min(1, Math.max(0, (time - 880) / 220));
+      edge.line.setAttribute("opacity", final ? (edge.fixed ? 1 : 0) : Math.max(pulse * (1 - lock), edge.fixed ? lock : 0));
+    }
+  }
+  function stopMotion() {
+    cancelAnimationFrame(raf);
+    clearTimeout(finishTimer);
+    clearTimeout(logoRevealTimer);
+    motion.removeEventListener("change", onMotionChange);
+  }
+  function remove() {
+    stopMotion();
+    clearTimeout(removeTimer);
+    root.removeAttribute("data-startup");
+    layer.remove();
+    delete window.panelStartupController;
+  }
+  function leave() {
+    if (done) return;
+    done = true;
+    stopMotion();
+    clearTimeout(startup.deadline);
+    render(1100, true);
+    root.setAttribute("data-startup", "leaving");
+    removeTimer = setTimeout(remove, reduce ? 0 : 180);
+  }
+  function maybeLeave() {
+    if (settled && ready && logoVisible) leave();
+  }
+  function settle() {
+    render(1100, true);
+    layer.setAttribute("data-phase", "settled");
+    finishTimer = setTimeout(() => { settled = true; maybeLeave(); }, reduce ? 0 : 280);
+  }
+  function frame(now) {
+    if (done) return;
+    const time = now - startup.startedAt;
+    if (time >= 1100) { settle(); return; }
+    render(time);
+    raf = requestAnimationFrame(frame);
+  }
+  function onMotionChange(event) {
+    if (!event.matches || done) return;
+    reduce = true;
+    cancelAnimationFrame(raf);
+    clearTimeout(finishTimer);
+    settle();
+  }
+  startup.ready = () => { ready = true; maybeLeave(); };
+  startup.release = leave;
+  logo.addEventListener("load", () => {
+    if (done) return;
+    layer.setAttribute("data-logo", "ready");
+    clearTimeout(logoRevealTimer);
+    logoRevealTimer = setTimeout(() => {
+      logoVisible = true;
+      maybeLeave();
+    }, reduce ? 0 : 180);
+  }, { once: true });
+  logo.addEventListener("error", () => {
+    if (!done) layer.setAttribute("data-logo", "failed");
+  }, { once: true });
+  logo.src = "/panel/assets/logo.png";
+  motion.addEventListener("change", onMotionChange);
+  if (reduce) settle();
+  else { render(0); raf = requestAnimationFrame(frame); }
+})();
+</script>
 
 <header class="site-head">
   <div class="layout-container head-inner">
@@ -5421,6 +5607,7 @@ try {
   // ═══════════════════════════════════════════════
   // 初始化与轮询
   // ═══════════════════════════════════════════════
+  let startupViewReady = Promise.resolve();
   async function init() {
     initTheme();
     initStylePicker();
@@ -5436,8 +5623,12 @@ try {
     // 之前落地，否则胶囊标记只能靠 loading 守卫抑制（直连样式一帧）。
     // 并行拉取，二者互不阻塞；失败各自走下一轮轮询重试。
     await Promise.allSettled([refreshRouteChainsCache(), refreshRouteRuntimeCache()]);
-    startStatusPolling();
+    const firstStatus = startStatusPolling();
     startLogStream();
+    if (window.panelStartupController) {
+      await Promise.allSettled([firstStatus, startupViewReady]);
+      requestAnimationFrame(() => requestAnimationFrame(() => window.panelStartupController?.ready()));
+    }
   }
 
   // 当前视图（B4）：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
@@ -5446,9 +5637,10 @@ try {
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
-    refreshStatus();
-    refreshAgents();
-    refreshModelStability();
+    const statusReady = refreshStatus();
+    const agentsReady = refreshAgents();
+    const stabilityReady = refreshModelStability();
+    const firstReady = Promise.allSettled(boardVisible() ? [statusReady, agentsReady, stabilityReady] : [statusReady]);
     setInterval(() => {
       if (document.hidden) return;
       refreshStatus();
@@ -5458,6 +5650,7 @@ try {
       if (document.hidden) return;
       if (boardVisible()) refreshModelStability();
     }, 15000);
+    return firstReady;
   }
 
   async function refreshStatus() {
@@ -8114,10 +8307,12 @@ try {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
     try { localStorage.setItem("panel-view", name); } catch {}
-    if (name === "skills") refreshSkillsState();
-    if (presets) refreshPresetsState();
-    if (store) refreshStoreState();
-    if (stats) enterStatsView(); else leaveStatsView();
+    let viewReady;
+    if (name === "skills") viewReady = refreshSkillsState();
+    if (presets) viewReady = refreshPresetsState();
+    if (store) viewReady = refreshStoreState();
+    if (stats) viewReady = enterStatsView(); else leaveStatsView();
+    if (window.panelStartupController && viewReady) startupViewReady = viewReady;
     // 切回看板（B4/R9）：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
       resetAgentRenderFingerprints();
@@ -12357,13 +12552,14 @@ try {
     // 环以 dash=0 起步并立即重播），消除「先见满环、再播动画」的割裂与空窗。
     // fetch 返回的静默重渲由 renderStatsUsage 的 _usageRaf 守卫跳过，不打断揭示。
     if (statsData) renderStatsUsage();
-    refreshStatsState();
+    const firstReady = refreshStatsState();
     if (!statsTimer) {
       statsTimer = setInterval(() => {
         if (document.hidden) return;
         refreshStatsState({ silent: true });
       }, 30000);
     }
+    return firstReady;
   }
 
   function leaveStatsView() {
