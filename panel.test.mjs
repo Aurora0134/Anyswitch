@@ -1330,6 +1330,50 @@ describe("panel router body limit + panel.html lookup chain", () => {
   });
 });
 
+describe("panel router logo asset", () => {
+  it("HEAD /panel/assets/logo.png returns PNG headers without a body, including query params", async () => {
+    const expected = readFileSync(new URL("./docs/assets/logo.png", import.meta.url));
+    const router = routerWith();
+    for (const path of ["/panel/assets/logo.png", "/panel/assets/logo.png?startup=1&v=2"]) {
+      const { req, res } = fakeReqRes(path, "HEAD", null, { host: "127.0.0.1:47820" });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.headers["content-type"], "image/png");
+      assert.equal(Number(res.headers["content-length"]), expected.length);
+      assert.equal(res.headers["cache-control"], "no-cache");
+      assert.equal(res.headers.location, undefined);
+      assert.equal(res.body, "");
+    }
+  });
+
+  it("unknown panel asset paths remain unavailable", async () => {
+    const router = routerWith();
+    for (const path of ["/panel/assets/other.png", "/panel/assets/logo.png/", "/docs/assets/logo.png"]) {
+      const { req, res } = fakeReqRes(path, "GET");
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 404);
+    }
+  });
+
+  it("GET /panel/assets/logo.png serves the bundled PNG bytes on the same origin, including query params", async () => {
+    const expected = readFileSync(new URL("./docs/assets/logo.png", import.meta.url));
+    const router = routerWith();
+    for (const path of ["/panel/assets/logo.png", "/panel/assets/logo.png?startup=1&v=2"]) {
+      const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
+      const chunks = [];
+      res.end = (data) => { if (data !== undefined) chunks.push(data); };
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.headers["content-type"], "image/png");
+      assert.equal(Number(res.headers["content-length"]), expected.length);
+      assert.equal(res.headers["cache-control"], "no-cache");
+      assert.equal(res.headers.location, undefined);
+      assert.ok(chunks.every((chunk) => Buffer.isBuffer(chunk)), "PNG must not be decoded as text");
+      assert.deepEqual(Buffer.concat(chunks), expected);
+    }
+  });
+});
+
 describe("panel router route-chain runtime", () => {
   it("GET /panel/api/route-chain/runtime uses the pulled relay snapshot when available", async () => {
     const pulled = {

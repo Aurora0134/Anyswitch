@@ -35,6 +35,7 @@ import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 
 const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
+const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
 const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
@@ -1105,6 +1106,21 @@ export function createPanelRouter({
         return res.end();
       }
       return servePanelHtml(res, req);
+    }
+
+    if (path === "/panel/assets/logo.png" && (method === "GET" || method === "HEAD")) {
+      let body;
+      try {
+        body = readFileSync(REPO_PANEL_LOGO);
+      } catch {
+        return sendJson(res, 404, { error: "logo.png not found" });
+      }
+      res.writeHead(200, {
+        "content-type": "image/png",
+        "content-length": body.length,
+        "cache-control": "no-cache",
+      });
+      return res.end(method === "HEAD" ? undefined : body);
     }
 
     if (path === "/panel/api/status" && method === "GET") return handleStatus(res);
