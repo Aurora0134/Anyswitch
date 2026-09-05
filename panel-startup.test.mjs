@@ -57,6 +57,7 @@ describe("launcher-only startup screen", () => {
     const p = page("http://127.0.0.1:47820/panel?startup=1&keep=yes#details");
     p.bootstrap();
     assert.equal(p.root.getAttribute("data-startup"), "playing");
+    assert.equal(p.context.panelStartupLaunch, true, "launcher 首开打点，主脚本据此固定落看板页");
     assert.equal(p.context.location.href, "http://127.0.0.1:47820/panel?keep=yes#details");
     assert.equal(p.context.history.state.preserved, true);
   });
@@ -70,6 +71,7 @@ describe("launcher-only startup screen", () => {
       const p = page(url, { navigation });
       p.bootstrap();
       assert.equal(p.root.getAttribute("data-startup"), null);
+      assert.equal(p.context.panelStartupLaunch, undefined, "非 launcher 首开不打点，刷新仍恢复上次 tab");
       assert.equal(p.timers.size, 0);
     }
   });

@@ -2644,4 +2644,13 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(recovery.includes("dropStartupSplash()"), "恢复超时路径也要收回开屏");
     assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
   });
+
+  it("launcher 启动固定落看板页，刷新仍恢复上次 tab", () => {
+    assert.ok(panelHtml.includes("window.panelStartupLaunch = true"), "标记只在 launcher URL 路径打点");
+    const restoreStart = panelHtml.indexOf("function restoreView()");
+    const restore = panelHtml.slice(restoreStart, panelHtml.indexOf("function reconcileSkillsSelection()", restoreStart));
+    assert.ok(restore.length > 100, "restoreView 体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(restore.includes("if (window.panelStartupLaunch) return;"), "launcher 首开跳过恢复固定看板");
+    assert.ok(restore.includes('localStorage.getItem("panel-view")'), "刷新与普通访问仍按 panel-view 恢复");
+  });
 });
