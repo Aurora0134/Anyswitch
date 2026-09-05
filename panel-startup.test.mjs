@@ -118,50 +118,53 @@ describe("launcher-only startup screen", () => {
     assert.equal(nodesG.getAttribute("transform"), "", "settle 后 transform 清空，几何回到算死的终值");
     assert.equal(nodes[1].getAttribute("cy"), "121");
     assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
+    // settle 无干等：ready 早已就位，定格帧画完隔一帧 leaving（防淡出被吞），240ms 后退场完毕。
     assert.equal(p.root.getAttribute("data-startup"), "playing");
-    p.advance(1380);
+    p.advance(1101);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
-    p.advance(1580);
+    p.advance(1341);
     assert.equal(p.root.getAttribute("data-startup"), null);
     assert.equal(p.frames.size, 0);
     assert.equal(p.timers.size, 0);
   });
 
-  it("keeps the settled logo until data and the original PNG are ready", () => {
+  it("leaves as soon as the settled frame is drawn and data is ready, without waiting for the PNG", () => {
     const p = page();
     p.start();
     p.advance(1100);
-    p.advance(1380);
+    // settle 立即 settled，但 ready 未就位，仍停 playing。
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.context.panelStartupController.ready();
-    assert.equal(p.root.getAttribute("data-startup"), "playing");
-    p.elements.get("startupLogo").dispatch("load");
-    assert.equal(p.root.getAttribute("data-startup"), "playing");
-    p.advance(1560);
+    // ready 一就位触发 leave，但 leaving 隔一帧才生效（防淡出被吞），240ms 后退场完毕。
+    p.advance(1101);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
-    p.advance(1740);
+    p.advance(1341);
     assert.equal(p.root.getAttribute("data-startup"), null);
     assert.equal(p.context.panelStartupController, undefined);
     assert.equal(p.elements.get("panelStartup").removed, false);
   });
 
-  it("uses the three-second fallback when the original PNG fails", () => {
+  it("does not block the exit chain on a PNG error", () => {
     const p = page();
     p.start();
     p.advance(1100);
-    p.advance(1380);
     p.context.panelStartupController.ready();
     p.elements.get("startupLogo").dispatch("error");
-    assert.equal(p.root.getAttribute("data-startup"), "playing");
-    p.advance(3000);
+    // PNG 失败只打 data-logo 标记，不阻塞退场：settled && ready 齐备即 leaving。
+    p.advance(1101);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
+    p.advance(1341);
+    assert.equal(p.root.getAttribute("data-startup"), null);
   });
 
   it("releases a stalled initialization after three seconds and stops every animation timer", () => {
     const p = page();
     p.start();
     p.advance(3000);
+    // deadline 触发 leave，leaving 隔一帧生效，240ms 后退场完毕。
+    p.advance(3001);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
-    p.advance(3180);
+    p.advance(3241);
     assert.equal(p.root.getAttribute("data-startup"), null);
     assert.equal(p.context.panelStartupController, undefined);
     assert.equal(p.elements.get("panelStartup").removed, false);
@@ -177,14 +180,14 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.elements.get("startupNodes").children[1].getAttribute("cy"), "121");
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.context.panelStartupController.ready();
-    p.elements.get("startupLogo").dispatch("load");
+    // reduce 路径 settle 立即 settled，ready 一就位触发 leave，leaving 隔一帧生效，removeTimer 为 0。
     p.advance(1);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
     p.advance(2);
     assert.equal(p.root.getAttribute("data-startup"), null);
   });
 
-  it("keeps random edges bounded and finishes with exactly the six ring edges", () => {
+  it("keeps random edges bounded and finishes with the full hub topology", () => {
     const p = page();
     p.start();
     for (let t = 40; t < 880; t += 40) {
@@ -194,40 +197,51 @@ describe("launcher-only startup screen", () => {
       for (const e of visible) assert.ok(e.getAttribute("x1") !== e.getAttribute("x2") || e.getAttribute("y1") !== e.getAttribute("y2"));
     }
     p.advance(1100);
+    // 终态 = logo.png 的轮毂结构：6 条边缘环 + 6 条中心辐射线，共 12 条。
     const final = p.elements.get("startupEdges").children.filter((e) => e.getAttribute("opacity") === "1");
-    assert.equal(final.length, 6);
+    assert.equal(final.length, 12);
   });
 
   it("excludes the center node from every pulse edge and paces bursts at 50ms within a 160ms window", () => {
     const p = page();
     p.start();
     const edges = p.elements.get("startupEdges").children;
-    // 中心点 (256,251) 不参与任何连线：随机池只从边缘 6 点构对，共 C(6,2)=15 条。
-    assert.equal(edges.length, 15);
-    for (const e of edges) {
+    // 随机脉冲池只从边缘 6 点构对 C(6,2)=15 条，中心点不参与快闪；另有 6 条
+    // 中心辐射线只参与定格，born 恒为 -Infinity，脉冲永不触发。
+    assert.equal(edges.length, 21);
+    const pulseEdges = edges.slice(0, 15);
+    const hubEdges = edges.slice(15);
+    for (const e of pulseEdges) {
       const endpoints = [[e.getAttribute("x1"), e.getAttribute("y1")], [e.getAttribute("x2"), e.getAttribute("y2")]];
-      for (const [x, y] of endpoints) assert.ok(!(x === "256" && y === "251"), "连线端点不含中心点");
+      for (const [x, y] of endpoints) assert.ok(!(x === "256" && y === "251"), "脉冲线端点不含中心点");
+    }
+    for (const e of hubEdges) {
+      assert.equal(e.getAttribute("x1"), "256", "辐射线起点是中心点");
+      assert.equal(e.getAttribute("y1"), "251", "辐射线起点是中心点");
     }
     p.advance(0);
     p.advance(25);
-    assert.ok(edges.some((e) => Number(e.getAttribute("opacity")) > 0), "脉冲爬升段可见");
+    assert.ok(pulseEdges.some((e) => Number(e.getAttribute("opacity")) > 0), "脉冲爬升段可见");
+    assert.ok(hubEdges.every((e) => Number(e.getAttribute("opacity")) === 0), "辐射线在脉冲阶段不亮");
     // 窗口与间隔常数从源码字面量钉死，防调参漂移（行为断言受并发脉冲干扰不可靠）。
     const src = html.match(/<script id="panelStartupAnimation">([\s\S]*?)<\/script>/)[1];
     assert.ok(src.includes("time - lastBurst >= 50"), "burst 间隔 50ms");
     assert.ok(src.includes("age < 160"), "脉冲窗口 160ms");
     assert.ok(src.includes("age / 160 * Math.PI"), "脉冲缓动按 160ms 归一");
-    assert.ok(src.includes("reduce ? 0 : 200"), "settle 定格 200ms");
+    assert.ok(src.includes("reduce ? 0 : 240"), "退场重叠 240ms");
   });
 
-  it("scopes the leaving fade-in to page content, never to floating layers", () => {
-    // leaving 淡入选择器若用 :not(#panelStartup) 反选，特异性取括号内 ID 级，
-    // 会压过 .toast/.modal-overlay 默认的 opacity:0，导致浮动层在 leaving 期间
-    // 被强制淡入成短暂可见的"弹窗"。钉死：playing/leaving 规则显式列出
-    // header/main/footer，不出现 :not() 反选形式。
+  it("keeps page content visible under the acrylic and fades only the splash layer on leave", () => {
+    // playing 期间主页内容若压透明，亚克力 backdrop-filter 后面是空白，模糊质感
+    // 就没了。leaving 时主页本来就在，无需淡入——只淡出开屏层。选择器若用
+    // :not(#panelStartup) 反选，特异性取括号内 ID 级，会压过 .toast/.modal-overlay
+    // 默认的 opacity:0，导致浮动层被强制淡入成短暂可见的"弹窗"。钉死：playing
+    // 只拦指针不压透明，leaving 只淡出开屏层，不出现 :not() 反选形式。
     const css = html.match(/<style>([\s\S]*?)<\/style>/g).find((b) => b.includes("data-startup"));
-    assert.ok(css.includes('html[data-startup="leaving"] body > header'), "leaving 淡入覆盖 header");
-    assert.ok(css.includes('html[data-startup="leaving"] body > main'), "leaving 淡入覆盖 main");
-    assert.ok(css.includes('html[data-startup="leaving"] body > footer'), "leaving 淡入覆盖 footer");
+    const playingRule = css.match(/html\[data-startup="playing"\] body > header[^{]*\{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(playingRule.includes("pointer-events: none"), "playing 拦指针");
+    assert.ok(!playingRule.includes("opacity"), "playing 不压透明，亚克力有内容可透");
+    assert.ok(css.includes('html[data-startup="leaving"] #panelStartup'), "leaving 淡出开屏层");
     assert.ok(!css.includes(':not(#panelStartup):not(script)'), "不用 :not() 反选压过浮动层默认态");
   });
 
@@ -268,7 +282,10 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.root.getAttribute("data-startup"), "playing");
 
     p.context.panelStartupController.release();
-    p.advance(5_180);
+    // release 触发 leave，leaving 隔一帧生效，240ms 后退场完毕。
+    p.advance(5_001);
+    assert.equal(p.root.getAttribute("data-startup"), "leaving");
+    p.advance(5_241);
     assert.equal(p.root.getAttribute("data-startup"), null);
 
     p.context.panelStartupBegin(25_000);
@@ -289,8 +306,10 @@ describe("launcher-only startup screen", () => {
     p.advance(24_999);
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.advance(25_000);
+    // deadline 触发 leave，leaving 隔一帧生效，240ms 后退场完毕。
+    p.advance(25_001);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
-    p.advance(25_180);
+    p.advance(25_241);
     assert.equal(p.root.getAttribute("data-startup"), null);
     assert.equal(p.context.panelStartupController, undefined);
     assert.equal(p.frames.size, 0);
