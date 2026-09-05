@@ -3946,23 +3946,36 @@ try {
 <script id="panelStartupBootstrap">
 (function () {
   const root = document.documentElement;
+  // 拉起一次开屏：launcher 首开与看板重启窗口（主脚本 playStartupSplash）共用。
+  // 已在播放中则原样返回；带 deadlineMs 调用会重设兜底时限。release 只摘
+  // data-startup 隐藏图层，不拆 DOM——图层常驻，复播直接重置重用。
+  window.panelStartupBegin = function (deadlineMs) {
+    const existing = window.panelStartupController;
+    if (existing) {
+      if (deadlineMs == null) return existing;
+      clearTimeout(existing.deadline);
+      existing.deadline = setTimeout(() => existing.release(), deadlineMs);
+      return existing;
+    }
+    root.setAttribute("data-startup", "playing");
+    const startup = window.panelStartupController = {
+      startedAt: performance.now(),
+      release() {
+        root.removeAttribute("data-startup");
+        delete window.panelStartupController;
+      },
+    };
+    // This timer is independent of the main application script and its requests.
+    startup.deadline = setTimeout(() => startup.release(), deadlineMs ?? 3000);
+    return startup;
+  };
   const url = new URL(location.href);
   if (url.searchParams.get("startup") !== "1") return;
   url.searchParams.delete("startup");
   try { history.replaceState(history.state, "", url.href); } catch {}
   const navigation = performance.getEntriesByType("navigation")[0];
   if (navigation && navigation.type !== "navigate") return;
-  root.setAttribute("data-startup", "playing");
-  const startup = window.panelStartupController = {
-    startedAt: performance.now(),
-    release() {
-      root.removeAttribute("data-startup");
-      document.getElementById("panelStartup")?.remove();
-      delete window.panelStartupController;
-    },
-  };
-  // This timer is independent of the main application script and its requests.
-  startup.deadline = setTimeout(() => startup.release(), 3000);
+  window.panelStartupBegin();
 })();
 </script>
 </head>
@@ -3984,15 +3997,23 @@ try {
   </div>
 </div>
 <script id="panelStartupAnimation">
-(function () {
+// 单次开屏动画：boot 路径解析到此处立即执行一次；看板重启复播由主脚本在
+// panelStartupBegin 之后再次调用。每次播放先清掉上一轮的节点连线与定格态
+// （settled 时 CSS 已切到 img），否则会叠在定格画面上放不出动画。
+function panelStartupPlay() {
   const startup = window.panelStartupController;
   if (!startup) return;
   const root = document.documentElement;
   const layer = document.getElementById("panelStartup");
+  if (!layer) return;
   const logo = document.getElementById("startupLogo");
   const edges = document.getElementById("startupEdges");
   const nodes = document.getElementById("startupNodes");
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
+  nodes.replaceChildren();
+  edges.replaceChildren();
+  layer.removeAttribute("data-phase");
+  layer.removeAttribute("data-logo");
   const ns = "http://www.w3.org/2000/svg";
   // Coordinates and radii use the same 512px canvas as docs/assets/logo.png.
   const points = [[256, 251, 25], [256, 121, 20], [369, 183, 20], [369, 322, 20], [256, 386, 20], [143, 322, 20], [143, 183, 20]];
@@ -4050,7 +4071,6 @@ try {
     stopMotion();
     clearTimeout(removeTimer);
     root.removeAttribute("data-startup");
-    layer.remove();
     delete window.panelStartupController;
   }
   function leave() {
@@ -4086,7 +4106,7 @@ try {
   }
   startup.ready = () => { ready = true; maybeLeave(); };
   startup.release = leave;
-  logo.addEventListener("load", () => {
+  const revealLogo = () => {
     if (done) return;
     layer.setAttribute("data-logo", "ready");
     clearTimeout(logoRevealTimer);
@@ -4094,7 +4114,10 @@ try {
       logoVisible = true;
       maybeLeave();
     }, reduce ? 0 : 180);
-  }, { once: true });
+  };
+  // 复播时 PNG 已就位：src 重新赋值不保证再触发 load，complete 直接揭示。
+  if (logo.complete && logo.naturalWidth > 0) revealLogo();
+  else logo.addEventListener("load", revealLogo, { once: true });
   logo.addEventListener("error", () => {
     if (!done) layer.setAttribute("data-logo", "failed");
   }, { once: true });
@@ -4102,7 +4125,9 @@ try {
   motion.addEventListener("change", onMotionChange);
   if (reduce) settle();
   else { render(0); raf = requestAnimationFrame(frame); }
-})();
+}
+
+if (window.panelStartupController) panelStartupPlay();
 </script>
 
 <header class="site-head">
@@ -7911,8 +7936,18 @@ try {
       }
     }
 
+    // 重启窗口复播开屏：确认重启即整屏盖住，动画停在定格画面直到换新进程接管
+    // 触发 location.reload() 收尾；relay 换新失败、面板换新被拒、恢复超时三类
+    // 失败路径显式收回，把页面还给用户。兜底时限取恢复超时外加余量。
+    const playStartupSplash = () => {
+      window.panelStartupBegin?.(PANEL_RESTART_RECOVERY_TIMEOUT_MS + 5_000);
+      window.panelStartupPlay?.();
+    };
+    const dropStartupSplash = () => window.panelStartupController?.release?.();
+
     async function executeRestartRelay() {
       restartBtn.disabled = true;
+      playStartupSplash();
       // ① relay 先换：这一步由面板进程转手执行，页面不断线。失败到此为止，
       //    绝不在 relay 没起来的情况下去动面板自己。
       try {
@@ -7920,6 +7955,7 @@ try {
       } catch (e) {
         toast("重启失败: " + e.message, true);
         restartBtn.disabled = false;
+        dropStartupSplash();
         return;
       }
       // ② 面板服务再换自己。这个请求的「失败」有两种完全不同的含义：连接被退出
@@ -7942,6 +7978,7 @@ try {
       if (!restartStarted) {
         toast(`Relay 已重启；面板服务未重启（${refusal}）`, true);
         restartBtn.disabled = false;
+        dropStartupSplash();
         return;
       }
       watchPanelHostComeBack();
@@ -7991,6 +8028,7 @@ try {
             toast("面板服务未能自动恢复，请用桌面快捷方式重新打开 Anyswitch 面板", true);
           }
           refreshStatus(); // 徽标与按钮回到真实状态
+          dropStartupSplash();
         }
       }, PANEL_RESTART_POLL_MS);
     }

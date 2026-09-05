@@ -18,6 +18,7 @@ function element() {
     getAttribute(k) { return attrs.get(k) ?? null; },
     removeAttribute(k) { attrs.delete(k); },
     appendChild(child) { this.children.push(child); return child; },
+    replaceChildren() { this.children.length = 0; },
     remove() { this.removed = true; },
     addEventListener(type, fn) { listeners.set(type, fn); },
     dispatch(type) { listeners.get(type)?.({ type, matches: type === "change" }); },
@@ -86,7 +87,8 @@ describe("launcher-only startup screen", () => {
     p.bootstrap();
     p.advance(3000);
     assert.equal(p.root.getAttribute("data-startup"), null);
-    assert.equal(p.elements.get("panelStartup").removed, true);
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.elements.get("panelStartup").removed, false);
   });
 
   it("converges seven nodes to the brand geometry before revealing the page", () => {
@@ -128,7 +130,9 @@ describe("launcher-only startup screen", () => {
     p.advance(1560);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
     p.advance(1740);
-    assert.equal(p.elements.get("panelStartup").removed, true);
+    assert.equal(p.root.getAttribute("data-startup"), null);
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.elements.get("panelStartup").removed, false);
   });
 
   it("uses the three-second fallback when the original PNG fails", () => {
@@ -149,7 +153,9 @@ describe("launcher-only startup screen", () => {
     p.advance(3000);
     assert.equal(p.root.getAttribute("data-startup"), "leaving");
     p.advance(3180);
-    assert.equal(p.elements.get("panelStartup").removed, true);
+    assert.equal(p.root.getAttribute("data-startup"), null);
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.elements.get("panelStartup").removed, false);
     assert.equal(p.frames.size, 0);
     assert.equal(p.timers.size, 0);
   });
@@ -202,5 +208,50 @@ describe("launcher-only startup screen", () => {
     viewDone();
     await pending;
     assert.equal(ready, true);
+  });
+
+  it("replays over the resident layer for the restart window and resets between shows", () => {
+    const p = page("http://127.0.0.1:47820/panel");
+    p.start();
+    assert.equal(p.root.getAttribute("data-startup"), null);
+    p.context.panelStartupBegin(25_000);
+    p.context.panelStartupPlay();
+    assert.equal(p.context.panelStartupBegin(), p.context.panelStartupController, "已在播放中返回同一控制器");
+    p.advance(1100);
+    const nodes = p.elements.get("startupNodes").children;
+    assert.equal(nodes.length, 7);
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
+    // 复播没有 ready 信号（init 早已跑完）：停在定格等重启流程收尾，不自动退场
+    p.advance(5_000);
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
+
+    p.context.panelStartupController.release();
+    p.advance(5_180);
+    assert.equal(p.root.getAttribute("data-startup"), null);
+
+    p.context.panelStartupBegin(25_000);
+    p.context.panelStartupPlay();
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), null);
+    assert.equal(p.elements.get("startupNodes").children.length, 7);
+    p.advance(6_280);
+    assert.equal(nodes[1].getAttribute("cy"), "121");
+    assert.equal(p.elements.get("panelStartup").removed, false);
+  });
+
+  it("keeps the replayed splash up with its own fallback deadline", () => {
+    const p = page("http://127.0.0.1:47820/panel");
+    p.start();
+    p.context.panelStartupBegin(25_000);
+    p.context.panelStartupPlay();
+    p.advance(24_999);
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
+    p.advance(25_000);
+    assert.equal(p.root.getAttribute("data-startup"), "leaving");
+    p.advance(25_180);
+    assert.equal(p.root.getAttribute("data-startup"), null);
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.frames.size, 0);
+    assert.equal(p.timers.size, 0);
   });
 });
