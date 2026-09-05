@@ -75,6 +75,10 @@ export function parseJsonc(text) {
   return JSON.parse(output);
 }
 
+// Explicit http:// is accepted for any host: typing the scheme is the user's
+// informed choice to run plaintext on the wire. Bare-host answers still get
+// https via normalizeBaseURL, so the safe default is unchanged; loopback http
+// providers keep working through the same path.
 export function validateBaseURL(value) {
   let url;
   try {
@@ -85,8 +89,6 @@ export function validateBaseURL(value) {
   if (!/^https?:$/.test(url.protocol)) throw new Error("Base URL must use HTTP or HTTPS");
   if (url.username || url.password) throw new Error("Base URL cannot contain embedded credentials");
   if (url.search || url.hash) throw new Error("Base URL cannot contain a query string or fragment");
-  const local = isLoopbackHost(url.hostname);
-  if (url.protocol !== "https:" && !local) throw new Error("Base URL must use HTTPS unless it is loopback");
   return url.toString().replace(/\/$/, "");
 }
 

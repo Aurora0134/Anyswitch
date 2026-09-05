@@ -10812,7 +10812,7 @@ try {
           <input class="store-form-input set-id" value="${escapeHtml(s.id || "")}" placeholder="如 myprovider-${k + 1}"></div>
         <div class="store-form-row"><label class="store-form-label">显示名</label>
           <input class="store-form-input set-name" value="${escapeHtml(s.displayName || "")}"></div>
-        <div class="store-form-row"><label class="store-form-label">Base URL${k === 0 ? "（逗号分隔，首个为主、其余为回退；非本机必须 https）" : "（留空 = 与资料 1 一致）"}</label>
+        <div class="store-form-row"><label class="store-form-label">Base URL${k === 0 ? "（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）" : "（留空 = 与资料 1 一致）"}</label>
           <input class="store-form-input set-urls" value="${escapeHtml(s.baseURLs || "")}" placeholder="${k === 0 ? "https://api.example.com/v1" : "留空 = 与资料 1 一致"}"></div>
         <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机 DPAPI 加密存储，不回显）</label>
           <input class="store-form-input set-key" type="password" autocomplete="new-password"></div>
@@ -10842,7 +10842,7 @@ try {
           <input class="store-form-input" id="storeAddId" value="${escapeHtml(v.id || "")}" placeholder="如 myprovider"></div>
         <div class="store-form-row"><label class="store-form-label">显示名</label>
           <input class="store-form-input" id="storeAddName" value="${escapeHtml(v.displayName || "")}" placeholder="如 My Provider"></div>
-        <div class="store-form-row"><label class="store-form-label">Base URL（逗号分隔，首个为主、其余为回退；非本机地址必须 https）</label>
+        <div class="store-form-row"><label class="store-form-label">Base URL（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）</label>
           <input class="store-form-input" id="storeAddUrls" value="${escapeHtml(v.baseURLs || "")}" placeholder="https://api.example.com/v1"></div>
         <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机 DPAPI 加密存储，不回显）</label>
           <input class="store-form-input" type="password" id="storeAddKey" autocomplete="new-password"></div>

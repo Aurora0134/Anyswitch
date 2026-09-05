@@ -35,7 +35,7 @@ test("validateProviderId accepts OpenCode provider IDs and rejects invalid ones"
 test("providerModelsURL appends /models to a validated base URL", () => {
   assert.equal(providerModelsURL("https://api.example.com/v1"), "https://api.example.com/v1/models");
   assert.equal(providerModelsURL("https://api.example.com/v1/"), "https://api.example.com/v1/models");
-  assert.throws(() => providerModelsURL("http://api.example.com/v1"), /HTTPS/);
+  assert.equal(providerModelsURL("http://api.example.com/v1"), "http://api.example.com/v1/models");
 });
 
 test("JSONC parsing accepts a UTF-8 byte order mark", () => {
@@ -70,21 +70,22 @@ test("JSONC parsing strips a trailing comma even after the last string value", (
   assert.equal(parsed.a, "x,]");
 });
 
-test("base URL validation allows HTTPS and local loopback HTTP only", () => {
+test("base URL validation allows HTTP and HTTPS for any host, rejects other schemes", () => {
   assert.equal(validateBaseURL("https://example.com/v1"), "https://example.com/v1");
+  assert.equal(validateBaseURL("http://example.com/v1"), "http://example.com/v1");
+  assert.equal(validateBaseURL("http://192.168.1.10:8000/v1"), "http://192.168.1.10:8000/v1");
   assert.equal(validateBaseURL("http://127.0.0.1:8080/v1"), "http://127.0.0.1:8080/v1");
-  assert.throws(() => validateBaseURL("http://example.com/v1"), /HTTPS/);
   assert.throws(() => validateBaseURL("https://user:pass@example.com/v1"), /credentials/);
   assert.throws(() => validateBaseURL("https://example.com/v1?api_key=secret"), /query/);
   assert.throws(() => validateBaseURL("file:///tmp/key"), /HTTP/);
 });
 
-test("base URL normalization adds HTTPS for public endpoints and HTTP for loopback", () => {
+test("base URL normalization adds HTTPS for bare public hosts and HTTP for loopback", () => {
   assert.equal(normalizeBaseURL("api.example.com/v1"), "https://api.example.com/v1");
   assert.equal(normalizeBaseURL("localhost:11434/v1"), "http://localhost:11434/v1");
   assert.equal(normalizeBaseURL("[::1]:11434/v1"), "http://[::1]:11434/v1");
   assert.equal(normalizeBaseURL("https://api.example.com/v1"), "https://api.example.com/v1");
-  assert.throws(() => normalizeBaseURL("http://api.example.com/v1"), /HTTPS/);
+  assert.equal(normalizeBaseURL("http://api.example.com/v1"), "http://api.example.com/v1");
   assert.equal(validateBaseURL("http://[::1]:11434/v1"), "http://[::1]:11434/v1");
 });
 
@@ -127,8 +128,11 @@ test("parseBaseURLs rejects an answer with no usable URL", () => {
   assert.throws(() => parseBaseURLs(null), /Base URL is invalid/);
 });
 
-test("parseBaseURLs rejects an invalid fallback entry with the same rule as the primary", () => {
-  assert.throws(() => parseBaseURLs("api.example.com/v1, http://backup.example/v1"), /HTTPS/);
+test("parseBaseURLs validates fallback entries with the same rule as the primary", () => {
+  assert.deepEqual(
+    parseBaseURLs("api.example.com/v1, http://backup.example/v1"),
+    { baseURL: "https://api.example.com/v1", fallbackURLs: ["http://backup.example/v1"] },
+  );
   assert.throws(() => parseBaseURLs("api.example.com/v1, not a valid url at all"), /invalid/i);
 });
 
