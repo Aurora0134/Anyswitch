@@ -3929,30 +3929,25 @@ try {
     background: var(--bg-page);
     background: color-mix(in srgb, var(--bg-page) 60%, transparent);
     backdrop-filter: blur(32px) saturate(150%);
-    opacity: 1; transition: opacity 180ms ease;
+    opacity: 1; transition: opacity 240ms ease-in;
   }
-  /* 主页内容不藏了：留在亚克力后面当模糊背景，只拦指针。playing 期间压透明，
-     leaving 时与开屏层同步过渡——开屏淡出、主页淡入，同 180ms 重叠，结尾不硬切。
-     选择器显式列出 header/main/footer 三个正常内容元素，不用 :not() 反选——
-     :not(#panelStartup) 的特异性取括号内最高的 ID 级，会压过 .toast/.modal-overlay
-     默认的 opacity:0，导致 leaving 期间这些浮动层被强制淡入成短暂可见的"弹窗"。 */
+  /* 主页内容不藏：留在亚克力后面当模糊背景，只拦指针。playing 期间主页保持
+     opacity:1，亚克力透出被盖住的 panel 主页，blur 有内容可作用——若压透明，
+     亚克力后面是空白，模糊质感就没了。leaving 时主页本来就在，无需淡入，
+     只让开屏层淡出即可。选择器显式列出 header/main/footer 三个正常内容元素，
+     不用 :not() 反选——:not(#panelStartup) 的特异性取括号内最高的 ID 级，会压过
+     .toast/.modal-overlay 默认的 opacity:0，导致 leaving 期间这些浮动层被强制
+     淡入成短暂可见的"弹窗"。 */
   html[data-startup="playing"] body > header,
   html[data-startup="playing"] body > main,
   html[data-startup="playing"] body > footer {
     pointer-events: none;
-    opacity: 0;
-  }
-  html[data-startup="leaving"] body > header,
-  html[data-startup="leaving"] body > main,
-  html[data-startup="leaving"] body > footer {
-    opacity: 1;
-    transition: opacity 180ms ease;
   }
   html[data-startup="leaving"] #panelStartup { opacity: 0; pointer-events: none; }
   .startup-mark { position: relative; width: min(160px, calc(100vw - 48px)); aspect-ratio: 1; }
   .startup-mark svg, .startup-mark img { position: absolute; inset: 0; width: 100%; height: 100%; }
-  #startupLogo { opacity: 0; transition: opacity 180ms ease; }
-  #startupSvg { opacity: 1; transition: opacity 180ms ease; }
+  #startupLogo { opacity: 0; transition: opacity 240ms ease-in; }
+  #startupSvg { opacity: 1; transition: opacity 240ms ease-in; }
   #panelStartup[data-phase="settled"][data-logo="ready"] #startupLogo { opacity: 1; }
   #panelStartup[data-phase="settled"][data-logo="ready"] #startupSvg { opacity: 0; }
   @media (prefers-reduced-motion: reduce) {
@@ -4037,8 +4032,10 @@ function panelStartupPlay() {
   // points[0] 是中心点（青色），只渲染圆点、不参与任何连线——中心到边缘的连线
   // 只有边缘环连线的一半长，大量出现会拉低观感，故连线只在 6 个边缘点之间构对。
   const points = [[256, 251, 25], [256, 121, 20], [369, 183, 20], [369, 322, 20], [256, 386, 20], [143, 322, 20], [143, 183, 20]];
-  // 定格拓扑 = 边缘六边形环，与 logo.png 一致；中心点不连。
-  const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1]];
+  // 定格拓扑 = logo.png 的轮毂结构：6 条边缘环 + 6 条中心辐射线。中心点不参与
+  // 随机脉冲（中心到边缘的连线只有半长，大量出现会拉低观感），但定格时必须亮起，
+  // 否则终态画面缺了 logo 的标志性辐射结构。
+  const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6]];
   const circles = points.map((point, i) => {
     const circle = document.createElementNS(ns, "circle");
     circle.setAttribute("r", point[2]);
@@ -4064,6 +4061,18 @@ function panelStartupPlay() {
       lines.push({ a, b, line, born: -Infinity, fixed: fixedPairs.some(([x, y]) => (a === x && b === y) || (a === y && b === x)) });
     }
   }
+  // 中心辐射线只参与定格，不进随机脉冲池：born 恒为 -Infinity，脉冲永不触发，
+  // 只有 lock 淡入时随 fixed 标记亮起。
+  for (let b = 1; b < points.length; b++) {
+    const line = document.createElementNS(ns, "line");
+    line.setAttribute("x1", points[0][0]);
+    line.setAttribute("y1", points[0][1]);
+    line.setAttribute("x2", points[b][0]);
+    line.setAttribute("y2", points[b][1]);
+    line.setAttribute("opacity", "0");
+    edges.appendChild(line);
+    lines.push({ a: 0, b, line, born: -Infinity, fixed: true });
+  }
   // 洗牌队列驱动脉冲：均匀覆盖 15 条线，避免 Math.random() 造成节奏忽密忽疏。
   let pulseQueue = [];
   function nextPulseIndex() {
@@ -4076,8 +4085,8 @@ function panelStartupPlay() {
     }
     return pulseQueue.pop();
   }
-  let raf = 0, finishTimer = 0, removeTimer = 0, logoRevealTimer = 0;
-  let settled = false, ready = false, logoVisible = false, done = false, lastBurst = -Infinity;
+  let raf = 0, removeTimer = 0;
+  let settled = false, ready = false, done = false, lastBurst = -Infinity;
   let reduce = motion.matches;
   function render(time, final = false) {
     const p = final ? 1 : Math.min(1, Math.max(0, time / 1100));
@@ -4101,8 +4110,6 @@ function panelStartupPlay() {
   }
   function stopMotion() {
     cancelAnimationFrame(raf);
-    clearTimeout(finishTimer);
-    clearTimeout(logoRevealTimer);
     motion.removeEventListener("change", onMotionChange);
   }
   function remove() {
@@ -4117,16 +4124,23 @@ function panelStartupPlay() {
     stopMotion();
     clearTimeout(startup.deadline);
     render(1100, true);
-    root.setAttribute("data-startup", "leaving");
-    removeTimer = setTimeout(remove, reduce ? 0 : 180);
+    // 定格帧先提交到屏幕，下一帧再切 leaving——同一帧内改 opacity 起点和终点
+    // 会被浏览器合并成一次跳变，淡出过渡被吞。
+    requestAnimationFrame(() => {
+      root.setAttribute("data-startup", "leaving");
+      removeTimer = setTimeout(remove, reduce ? 0 : 240);
+    });
   }
   function maybeLeave() {
-    if (settled && ready && logoVisible) leave();
+    if (settled && ready) leave();
   }
   function settle() {
     render(1100, true);
     layer.setAttribute("data-phase", "settled");
-    finishTimer = setTimeout(() => { settled = true; maybeLeave(); }, reduce ? 0 : 200);
+    // 定格帧画完立即置 settled，不再干等 200ms：SVG 定格画面与 logo.png 视觉
+    // 已几乎一致（同套坐标同套连线），跳过 PNG 替换直接重叠退场，消除台阶感。
+    settled = true;
+    maybeLeave();
   }
   function frame(now) {
     if (done) return;
@@ -4139,23 +4153,12 @@ function panelStartupPlay() {
     if (!event.matches || done) return;
     reduce = true;
     cancelAnimationFrame(raf);
-    clearTimeout(finishTimer);
     settle();
   }
   startup.ready = () => { ready = true; maybeLeave(); };
   startup.release = leave;
-  const revealLogo = () => {
-    if (done) return;
-    layer.setAttribute("data-logo", "ready");
-    clearTimeout(logoRevealTimer);
-    logoRevealTimer = setTimeout(() => {
-      logoVisible = true;
-      maybeLeave();
-    }, reduce ? 0 : 180);
-  };
-  // 复播时 PNG 已就位：src 重新赋值不保证再触发 load，complete 直接揭示。
-  if (logo.complete && logo.naturalWidth > 0) revealLogo();
-  else logo.addEventListener("load", revealLogo, { once: true });
+  // logo.png 仍加载，但不再作为退场门槛：maybeLeave 只看 settled && ready，
+  // PNG 仅兜底 logo 加载失败时的 data-logo 标记，不阻塞退场链。
   logo.addEventListener("error", () => {
     if (!done) layer.setAttribute("data-logo", "failed");
   }, { once: true });
