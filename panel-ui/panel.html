@@ -3931,9 +3931,15 @@ try {
     backdrop-filter: blur(32px) saturate(150%);
     opacity: 1; transition: opacity 180ms ease;
   }
-  /* 主页内容不藏了：留在亚克力后面当模糊背景，只拦指针 */
+  /* 主页内容不藏了：留在亚克力后面当模糊背景，只拦指针。playing 期间压透明，
+     leaving 时与开屏层同步过渡——开屏淡出、主页淡入，同 180ms 重叠，结尾不硬切。 */
   html[data-startup="playing"] body > :not(#panelStartup):not(script) {
     pointer-events: none;
+    opacity: 0;
+  }
+  html[data-startup="leaving"] body > :not(#panelStartup):not(script) {
+    opacity: 1;
+    transition: opacity 180ms ease;
   }
   html[data-startup="leaving"] #panelStartup { opacity: 0; pointer-events: none; }
   .startup-mark { position: relative; width: min(160px, calc(100vw - 48px)); aspect-ratio: 1; }
@@ -4021,47 +4027,67 @@ function panelStartupPlay() {
   layer.removeAttribute("data-logo");
   const ns = "http://www.w3.org/2000/svg";
   // Coordinates and radii use the same 512px canvas as docs/assets/logo.png.
+  // points[0] 是中心点（青色），只渲染圆点、不参与任何连线——中心到边缘的连线
+  // 只有边缘环连线的一半长，大量出现会拉低观感，故连线只在 6 个边缘点之间构对。
   const points = [[256, 251, 25], [256, 121, 20], [369, 183, 20], [369, 322, 20], [256, 386, 20], [143, 322, 20], [143, 183, 20]];
-  const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6]];
+  // 定格拓扑 = 边缘六边形环，与 logo.png 一致；中心点不连。
+  const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1]];
   const circles = points.map((point, i) => {
     const circle = document.createElementNS(ns, "circle");
     circle.setAttribute("r", point[2]);
+    circle.setAttribute("cx", point[0]);
+    circle.setAttribute("cy", point[1]);
     circle.setAttribute("fill", i === 0 ? "#00d8eb" : "#fff");
     return nodes.appendChild(circle);
   });
+  // 随机脉冲池：边缘 6 点两两构对 C(6,2)=15 条。几何在初始化时按最终位置算死，
+  // 运行期不再逐帧写 x1/y1/x2/y2——收缩动画由容器 <g> 的整体 transform 承担，
+  // 每帧只写 2 个容器的 transform + 脉冲线的 opacity，代替原先每帧约 90 次
+  // setAttribute 走主线程布局重算，这是顿帧的主要来源。
   const lines = [];
-  for (let a = 0; a < points.length; a++) {
+  for (let a = 1; a < points.length; a++) {
     for (let b = a + 1; b < points.length; b++) {
       const line = document.createElementNS(ns, "line");
+      line.setAttribute("x1", points[a][0]);
+      line.setAttribute("y1", points[a][1]);
+      line.setAttribute("x2", points[b][0]);
+      line.setAttribute("y2", points[b][1]);
       line.setAttribute("opacity", "0");
       edges.appendChild(line);
       lines.push({ a, b, line, born: -Infinity, fixed: fixedPairs.some(([x, y]) => (a === x && b === y) || (a === y && b === x)) });
     }
   }
+  // 洗牌队列驱动脉冲：均匀覆盖 15 条线，避免 Math.random() 造成节奏忽密忽疏。
+  let pulseQueue = [];
+  function nextPulseIndex() {
+    if (!pulseQueue.length) {
+      pulseQueue = lines.map((_, i) => i);
+      for (let i = pulseQueue.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pulseQueue[i], pulseQueue[j]] = [pulseQueue[j], pulseQueue[i]];
+      }
+    }
+    return pulseQueue.pop();
+  }
   let raf = 0, finishTimer = 0, removeTimer = 0, logoRevealTimer = 0;
-  let settled = false, ready = false, logoVisible = false, done = false, lastBurst = -Infinity, previous = -1;
+  let settled = false, ready = false, logoVisible = false, done = false, lastBurst = -Infinity;
   let reduce = motion.matches;
   function render(time, final = false) {
     const p = final ? 1 : Math.min(1, Math.max(0, time / 1100));
     const scale = 1 + 0.12 * Math.pow(1 - p, 3);
-    const xy = points.map(([x, y], i) => i === 0 ? [x, y] : [256 + (x - 256) * scale, 251 + (y - 251) * scale]);
-    circles.forEach((circle, i) => {
-      circle.setAttribute("cx", xy[i][0]);
-      circle.setAttribute("cy", xy[i][1]);
-    });
-    if (!final && time < 880 && time - lastBurst >= 80) {
-      let index = Math.floor(Math.random() * (lines.length - 1));
-      if (index >= previous) index++;
-      lines[index].born = time;
-      previous = index;
+    // 绕中心点 (256,251) 收缩：translate 到原点 → scale → 移回。中心点恰在变换
+    // 中心，scale 对它无影响；边缘点与连线几何同步收缩，无需逐点重算坐标。
+    const transform = final ? "" : `translate(256 251) scale(${scale}) translate(-256 -251)`;
+    nodes.setAttribute("transform", transform);
+    edges.setAttribute("transform", transform);
+    if (!final && time < 880 && time - lastBurst >= 50) {
+      lines[nextPulseIndex()].born = time;
       lastBurst = time;
     }
     for (const edge of lines) {
-      const [x1, y1] = xy[edge.a], [x2, y2] = xy[edge.b];
-      edge.line.setAttribute("x1", x1); edge.line.setAttribute("y1", y1);
-      edge.line.setAttribute("x2", x2); edge.line.setAttribute("y2", y2);
       const age = time - edge.born;
-      const pulse = age >= 0 && age < 240 ? Math.sin(age / 240 * Math.PI) * 0.85 : 0;
+      // 脉冲窗口 160ms，缓动前段陡（sin(π/2·t) 形）：更快爬到峰值，连线显得更利落。
+      const pulse = age >= 0 && age < 160 ? Math.sin(age / 160 * Math.PI) * 0.85 : 0;
       const lock = Math.min(1, Math.max(0, (time - 880) / 220));
       edge.line.setAttribute("opacity", final ? (edge.fixed ? 1 : 0) : Math.max(pulse * (1 - lock), edge.fixed ? lock : 0));
     }
@@ -4093,7 +4119,7 @@ function panelStartupPlay() {
   function settle() {
     render(1100, true);
     layer.setAttribute("data-phase", "settled");
-    finishTimer = setTimeout(() => { settled = true; maybeLeave(); }, reduce ? 0 : 280);
+    finishTimer = setTimeout(() => { settled = true; maybeLeave(); }, reduce ? 0 : 200);
   }
   function frame(now) {
     if (done) return;

@@ -98,17 +98,24 @@ describe("launcher-only startup screen", () => {
     p.start();
     p.advance(0);
     const nodes = p.elements.get("startupNodes").children;
+    const nodesG = p.elements.get("startupNodes");
     assert.equal(nodes.length, 7);
     assert.equal(nodes[0].getAttribute("cx"), "256");
     assert.equal(nodes[0].getAttribute("cy"), "251");
-    const firstY = Number(nodes[1].getAttribute("cy"));
-    assert.ok(firstY < 121, "outer top node starts farther from the center");
+    // 几何在初始化时按最终位置算死，收缩动画由容器 <g> 的整体 transform 承担：
+    // 起始 scale > 1（外扩），随时间推进向 1 收敛，settle 后 transform 清空。
+    const firstTransform = nodesG.getAttribute("transform");
+    assert.ok(firstTransform.includes("scale("), "起始帧容器带 scale 变换");
+    const firstScale = Number(firstTransform.match(/scale\(([\d.]+)\)/)[1]);
+    assert.ok(firstScale > 1, "outer nodes start farther from the center via container scale");
     p.context.panelStartupController.ready();
     p.elements.get("startupLogo").dispatch("load");
     p.advance(500);
-    assert.ok(Number(nodes[1].getAttribute("cy")) > firstY);
+    const midScale = Number(nodesG.getAttribute("transform").match(/scale\(([\d.]+)\)/)[1]);
+    assert.ok(midScale < firstScale, "scale 随时间向 1 收敛");
     assert.equal(p.root.getAttribute("data-startup"), "playing");
     p.advance(1100);
+    assert.equal(nodesG.getAttribute("transform"), "", "settle 后 transform 清空，几何回到算死的终值");
     assert.equal(nodes[1].getAttribute("cy"), "121");
     assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
     assert.equal(p.root.getAttribute("data-startup"), "playing");
@@ -177,7 +184,7 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.root.getAttribute("data-startup"), null);
   });
 
-  it("keeps random edges bounded and finishes with exactly the twelve logo edges", () => {
+  it("keeps random edges bounded and finishes with exactly the six ring edges", () => {
     const p = page();
     p.start();
     for (let t = 40; t < 880; t += 40) {
@@ -188,7 +195,28 @@ describe("launcher-only startup screen", () => {
     }
     p.advance(1100);
     const final = p.elements.get("startupEdges").children.filter((e) => e.getAttribute("opacity") === "1");
-    assert.equal(final.length, 12);
+    assert.equal(final.length, 6);
+  });
+
+  it("excludes the center node from every pulse edge and paces bursts at 50ms within a 160ms window", () => {
+    const p = page();
+    p.start();
+    const edges = p.elements.get("startupEdges").children;
+    // 中心点 (256,251) 不参与任何连线：随机池只从边缘 6 点构对，共 C(6,2)=15 条。
+    assert.equal(edges.length, 15);
+    for (const e of edges) {
+      const endpoints = [[e.getAttribute("x1"), e.getAttribute("y1")], [e.getAttribute("x2"), e.getAttribute("y2")]];
+      for (const [x, y] of endpoints) assert.ok(!(x === "256" && y === "251"), "连线端点不含中心点");
+    }
+    p.advance(0);
+    p.advance(25);
+    assert.ok(edges.some((e) => Number(e.getAttribute("opacity")) > 0), "脉冲爬升段可见");
+    // 窗口与间隔常数从源码字面量钉死，防调参漂移（行为断言受并发脉冲干扰不可靠）。
+    const src = html.match(/<script id="panelStartupAnimation">([\s\S]*?)<\/script>/)[1];
+    assert.ok(src.includes("time - lastBurst >= 50"), "burst 间隔 50ms");
+    assert.ok(src.includes("age < 160"), "脉冲窗口 160ms");
+    assert.ok(src.includes("age / 160 * Math.PI"), "脉冲缓动按 160ms 归一");
+    assert.ok(src.includes("reduce ? 0 : 200"), "settle 定格 200ms");
   });
 
   it("signals readiness only after initial status and the restored view have settled", async () => {
