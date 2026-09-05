@@ -2630,4 +2630,18 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(exec.includes("restartStarted = true;"), "连接中断按「重启已开始」处理");
     assert.ok(exec.includes('api("POST", "/api/relay/restart")'), "relay 仍是第一段，失败即终止");
   });
+
+  it("重启窗口复播开屏：确认即盖屏，失败与超时显式收回", () => {
+    assert.ok(panelHtml.includes("window.panelStartupBegin"), "开屏复播入口由 head 内联脚本暴露");
+    assert.ok(panelHtml.includes("function panelStartupPlay()"), "开屏动画必须是可重复调用的函数");
+    const execStart = panelHtml.indexOf("async function executeRestartRelay()");
+    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    assert.ok(exec.includes("playStartupSplash()"), "确认重启后立刻复播开屏盖住页面");
+    assert.equal(exec.split("dropStartupSplash()").length - 1, 2,
+      "relay 换新失败与面板换新被拒两条失败路径都要收回开屏");
+    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
+    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
+    assert.ok(recovery.includes("dropStartupSplash()"), "恢复超时路径也要收回开屏");
+    assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
+  });
 });
