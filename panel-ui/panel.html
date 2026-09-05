@@ -3932,12 +3932,19 @@ try {
     opacity: 1; transition: opacity 180ms ease;
   }
   /* 主页内容不藏了：留在亚克力后面当模糊背景，只拦指针。playing 期间压透明，
-     leaving 时与开屏层同步过渡——开屏淡出、主页淡入，同 180ms 重叠，结尾不硬切。 */
-  html[data-startup="playing"] body > :not(#panelStartup):not(script) {
+     leaving 时与开屏层同步过渡——开屏淡出、主页淡入，同 180ms 重叠，结尾不硬切。
+     选择器显式列出 header/main/footer 三个正常内容元素，不用 :not() 反选——
+     :not(#panelStartup) 的特异性取括号内最高的 ID 级，会压过 .toast/.modal-overlay
+     默认的 opacity:0，导致 leaving 期间这些浮动层被强制淡入成短暂可见的"弹窗"。 */
+  html[data-startup="playing"] body > header,
+  html[data-startup="playing"] body > main,
+  html[data-startup="playing"] body > footer {
     pointer-events: none;
     opacity: 0;
   }
-  html[data-startup="leaving"] body > :not(#panelStartup):not(script) {
+  html[data-startup="leaving"] body > header,
+  html[data-startup="leaving"] body > main,
+  html[data-startup="leaving"] body > footer {
     opacity: 1;
     transition: opacity 180ms ease;
   }
