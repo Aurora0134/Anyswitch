@@ -34,10 +34,10 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 ### Installation
 
-Clone this repository anywhere you like; the conventional location is `%LOCALAPPDATA%\ApiCred\app`:
+Clone this repository anywhere you like; the conventional location is `%LOCALAPPDATA%\Anyswitch\app`:
 
 ```bat
-git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\app"
+git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 `panel-app.vbs` is the desktop entry point: it locates `panel-launcher.mjs` relative to itself, so it works from any clone location. It starts the panel host and opens the panel in your browser. Point a desktop shortcut at it for one-click access. Manual fallback entry: `node panel-launcher.mjs` (or `node panel-host.mjs`) from the repo directory.
@@ -95,7 +95,7 @@ The panel (served by a standalone panel host decoupled from the relay, so it sta
 
 ### Security model
 
-- Keys are sealed with Windows DPAPI under the current user; ciphertext lives in `%LOCALAPPDATA%\ApiCred\credentials\`, one file per provider.
+- Keys are sealed with Windows DPAPI under the current user; ciphertext lives in `%LOCALAPPDATA%\Anyswitch\credentials\`, one file per provider.
 - `store.json` holds routing/metadata only and is schema-validated to reject any secret-looking field.
 - Session tokens are generated with a CSPRNG — the per-launch token is never persisted or logged; the shared relay token lives only under the data root.
 - Everything is fail-closed: no default provider, no fuzzy prefix matching, no fallback to another key on decryption failure; error messages are generalized and never leak URLs, credentials, upstream bodies, or stack traces.
@@ -107,7 +107,7 @@ The panel (served by a standalone panel host decoupled from the relay, so it sta
 Yes. Key sealing relies on Windows DPAPI, autostart uses Windows scheduled tasks, and `package.json` declares `"os": ["win32"]`. There is no macOS/Linux support.
 
 **Where are my API keys stored, and is that safe?**
-Each provider's key is sealed with Windows DPAPI under your user account and stored as one ciphertext file per provider in `%LOCALAPPDATA%\ApiCred\credentials\`. The plaintext exists only in memory while a request is being forwarded — it is never cached, never logged, and never written to `store.json` (the schema validator rejects secret-looking fields outright).
+Each provider's key is sealed with Windows DPAPI under your user account and stored as one ciphertext file per provider in `%LOCALAPPDATA%\Anyswitch\credentials\`. The plaintext exists only in memory while a request is being forwarded — it is never cached, never logged, and never written to `store.json` (the schema validator rejects secret-looking fields outright).
 
 **What happens if the relay crashes?**
 It stays down — crash-without-self-healing is a deliberate design choice, so a fault can't be masked by a restart loop. The control panel is a separate process on port 47820 and remains fully usable; restart the relay from the Board tab. If you enable autostart, the `AnyswitchWatchdog` scheduled task also revives the relay automatically when a coding agent appears.
@@ -136,7 +136,7 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 
 ### Naming
 
-This project is named **Anyswitch**. It was developed under the working name "ApiCred", and a few load-bearing identifiers still carry that name for data-safety reasons: the `%LOCALAPPDATA%ApiCred` data directory (moving it orphans existing credentials), the DPAPI entropy prefix `ApiCred|DPAPI|v2|` (changing it would seal out every stored key), and the durable git object store `%LOCALAPPDATA%ApiCred-git`. New code and configuration use Anyswitch naming everywhere else; pre-rename user config files are migrated in place on the next client launch.
+- This project is named **Anyswitch**. It was developed under the working name "ApiCred". The install location, data directory, and durable git object store now all use the Anyswitch name (`%LOCALAPPDATA%\Anyswitch`, `%LOCALAPPDATA%\Anyswitch-git`); pre-rename installs are migrated in place. One load-bearing identifier intentionally keeps the old name: the DPAPI entropy prefix `ApiCred|DPAPI|v2|` - changing it would seal out every stored key.
 
 ### License
 
@@ -168,10 +168,10 @@ This project is named **Anyswitch**. It was developed under the working name "Ap
 
 ### 安装
 
-把仓库克隆到任意位置即可；约定位置是 `%LOCALAPPDATA%\ApiCred\app`：
+把仓库克隆到任意位置即可；约定位置是 `%LOCALAPPDATA%\Anyswitch\app`：
 
 ```bat
-git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\app"
+git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 `panel-app.vbs` 是桌面入口：按脚本自身位置定位 `panel-launcher.mjs`，克隆到任意路径都能用。它会拉起面板宿主并在浏览器中打开面板。给它建一个桌面快捷方式即可一键进入。手动备用入口：在仓库目录下执行 `node panel-launcher.mjs`（或 `node panel-host.mjs`）。
@@ -229,7 +229,7 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\ap
 
 ### 安全模型要点
 
-- Key 用 Windows DPAPI 在当前用户作用域封存；密文存于 `%LOCALAPPDATA%\ApiCred\credentials\`，每提供方一个文件。
+- Key 用 Windows DPAPI 在当前用户作用域封存；密文存于 `%LOCALAPPDATA%\Anyswitch\credentials\`，每提供方一个文件。
 - `store.json` 只存路由/元数据，schema 校验递归拒绝任何秘密样字段。
 - 会话 token 由 CSPRNG 生成——一次性 token 不落盘、不记录；共享 relay token 只存放在数据目录下。
 - 全程 fail-closed：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key；错误信息泛化，绝不泄露 URL/凭据/上游响应体/栈。
@@ -241,7 +241,7 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\ApiCred\ap
 是。Key 封存依赖 Windows DPAPI，开机自启用 Windows 计划任务，`package.json` 也声明了 `"os": ["win32"]`。没有 macOS/Linux 支持。
 
 **我的 API Key 存在哪？安全吗？**
-每个 provider 的 Key 用 Windows DPAPI 在你的用户账户下封存，密文以每提供方一个文件存于 `%LOCALAPPDATA%\ApiCred\credentials\`。明文只在转发请求的瞬间存在于内存——不缓存、不记录日志、也绝不会写进 `store.json`（schema 校验会直接拒绝任何秘密样字段）。
+每个 provider 的 Key 用 Windows DPAPI 在你的用户账户下封存，密文以每提供方一个文件存于 `%LOCALAPPDATA%\Anyswitch\credentials\`。明文只在转发请求的瞬间存在于内存——不缓存、不记录日志、也绝不会写进 `store.json`（schema 校验会直接拒绝任何秘密样字段）。
 
 **relay 崩了怎么办？**
 它会保持停止——崩溃不自愈是刻意设计，避免故障被重启循环掩盖。控制面板是 47820 上的独立进程，照常可用，在看板 tab 重启 relay 即可。如果开了开机自启，`AnyswitchWatchdog` 计划任务还会在 coding agent 出现时自动拉起 relay。
@@ -270,7 +270,7 @@ npm test
 
 ### 命名说明
 
-本项目名为 **Anyswitch**，开发期曾用名 "ApiCred"。少数承重标识符出于数据安全仍保留旧名：`%LOCALAPPDATA%ApiCred` 数据目录（移动会使既有凭据失联）、DPAPI 熵前缀 `ApiCred|DPAPI|v2|`（改动将封死全部已存密钥）、耐久 git 对象库 `%LOCALAPPDATA%ApiCred-git`。其余代码与配置一律用新名；改名前的用户配置文件会在对应客户端下次启动时就地迁移。
+- 本项目名为 **Anyswitch**，开发期曾用名 "ApiCred"。安装位置、数据目录与耐久 git 对象库现已统一为新名（`%LOCALAPPDATA%\Anyswitch`、`%LOCALAPPDATA%\Anyswitch-git`），改名前的旧安装就地迁移。唯一有意保留旧名的承重标识符是 DPAPI 熵前缀 `ApiCred|DPAPI|v2|`——改动将封死全部已存密钥。
 
 ### License
 

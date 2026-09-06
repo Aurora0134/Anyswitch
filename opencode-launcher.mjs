@@ -11,7 +11,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
 function relayDataRoot(base = process.env) {
-  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "ApiCred");
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Anyswitch");
 }
 
 function createOpenAIProductionDeps(options = {}) {

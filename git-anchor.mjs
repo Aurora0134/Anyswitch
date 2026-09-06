@@ -1,5 +1,5 @@
 // Keep the B-layer git object store outside the replaceable `app/` tree
-// AND outside `%LOCALAPPDATA%\ApiCred\` (a parent wipe of ApiCred must
+// AND outside `%LOCALAPPDATA%\Anyswitch\` (a parent wipe of Anyswitch must
 // miss the history). Hosts only rewrite the gitfile; they never move or
 // delete the object store. ACL / migration lives in git-anchor-repair.mjs.
 
@@ -8,8 +8,8 @@ import { join, resolve } from "node:path";
 
 const GITFILE_PREFIX = "gitdir: ";
 
-// Durable object store lives OUTSIDE the data dir; the "ApiCred-git" name predates the rename.
-export const ANCHOR_PARENT_NAME = "ApiCred-git";
+// Durable object store lives OUTSIDE the data dir, as a sibling named after the product.
+export const ANCHOR_PARENT_NAME = "Anyswitch-git";
 export const ANCHOR_DIR_NAME = "objects";
 export const ANCHOR_SEAL_NAME = "objects.sealed";
 

@@ -20,7 +20,7 @@ import { atomicWriteFile, casWriteFile, contentHash } from "./atomic-write.mjs";
 export function defaultRoot() {
   const local = process.env.LOCALAPPDATA;
   if (!local) throw new Error("LOCALAPPDATA is not set; cannot locate the Anyswitch store");
-  return join(local, "ApiCred");
+  return join(local, "Anyswitch");
 }
 
 export function storePaths(root = defaultRoot()) {

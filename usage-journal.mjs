@@ -1,5 +1,5 @@
 // Per-request usage journal: daily-rolled JSONL files under the usage dir
-// (e.g. %LOCALAPPDATA%\ApiCred\usage). Side-band for the relay hot path —
+// (e.g. %LOCALAPPDATA%\Anyswitch\usage). Side-band for the relay hot path —
 // append failures warn and never throw back at the caller.
 //
 // File shape: `dir/requests-YYYY-MM-DD.jsonl` and `dir/sessions-YYYY-MM-DD.jsonl`,

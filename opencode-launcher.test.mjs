@@ -227,7 +227,7 @@ describe("startOpenAIRelay", () => {
   // an unusable store is fatal before any socket is opened (fail-closed).
   it("refuses to start when the Anyswitch store is not usable", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencode-relay-"));
-    mkdirSync(join(root, "ApiCred"), { recursive: true });
+    mkdirSync(join(root, "Anyswitch"), { recursive: true });
     const base = { LOCALAPPDATA: root, USERPROFILE: root };
     await assert.rejects(
       startOpenAIRelay({

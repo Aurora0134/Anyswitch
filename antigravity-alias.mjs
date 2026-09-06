@@ -17,7 +17,7 @@
 // at any time without restarting agy. Every store model stays reachable; at most
 // one is live per slug at a given moment.
 //
-// On-disk shape (at %LOCALAPPDATA%\ApiCred\antigravity.json):
+// On-disk shape (at %LOCALAPPDATA%\Anyswitch\antigravity.json):
 //   {
 //     "aliases": {
 //       "gemini-3.1-pro-preview": "poke-api/claude-opus-4-8",

@@ -20,7 +20,7 @@ const DEFAULT_PORT = 47821;
 function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "ApiCred",
+    "Anyswitch",
   );
 }
 

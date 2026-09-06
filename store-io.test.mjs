@@ -1,5 +1,5 @@
 // store-io.mjs tests. Temp directories only: never touches the real
-// %LOCALAPPDATA%\ApiCred store or the real v1 scope.
+// %LOCALAPPDATA%\Anyswitch store or the real v1 scope.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
