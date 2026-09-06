@@ -527,7 +527,7 @@ export function createPanelRouter({
     return REPO_PANEL_HTML;
   }
 
-  // The relay token lives under %LOCALAPPDATA%\ApiCred (= relayRoot). Reading it
+  // The relay token lives under %LOCALAPPDATA%\Anyswitch (= relayRoot). Reading it
   // here (NOT dirname(storePaths.v2Path), which is undefined after path
   // flattening and silently throws TypeError) is the fix for the decoupled panel
   // seeing empty metrics: the token is what authorises /api/internal/agents.

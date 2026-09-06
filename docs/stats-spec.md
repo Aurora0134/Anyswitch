@@ -7,7 +7,7 @@
 
 ## 1. 数据口径（每卡的来源 / 时间窗 / 单位）
 
-数据源：usage journal（`%LOCALAPPDATA%\ApiCred\usage\`，requests/sessions-YYYY-MM-DD.jsonl，按日滚动，90 天自清理）。
+数据源：usage journal（`%LOCALAPPDATA%\Anyswitch\usage\`，requests/sessions-YYYY-MM-DD.jsonl，按日滚动，90 天自清理）。
 聚合：usage-stats.mjs `createUsageStats().getState(days)`，每次调用重读 journal（无聚合缓存）；读取已分段——热力图口径单独读 90 天，其余口径只读所选窗口。
 接口：`GET /panel/api/stats/state?days=1|7`（panel.mjs，days 经 clampStatDays 单点钳制；usage 块恒同时返回 24h+7d 双窗口，见 R-04）。
 

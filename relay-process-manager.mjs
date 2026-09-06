@@ -3,7 +3,7 @@
 // The panel (panel-host.mjs, port 47820) is a SEPARATE process from the relay
 // (relay-host.mjs, port 47821). So that the panel can start/stop/restart the
 // relay without dying itself, this module owns the relay's OS process: it
-// records the relay PID to %LOCALAPPDATA%\ApiCred\relay.pid, probes 47821's
+// records the relay PID to %LOCALAPPDATA%\Anyswitch\relay.pid, probes 47821's
 // root-endpoint liveness, and spawns/kills relay-host.mjs by that single PID.
 //
 // Safety red line: we ONLY ever terminate recorded/verified PIDs, via

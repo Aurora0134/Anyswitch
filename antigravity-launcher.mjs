@@ -14,7 +14,7 @@ const DEFAULT_AGY_PATH = join(
 function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "ApiCred",
+    "Anyswitch",
   );
 }
 

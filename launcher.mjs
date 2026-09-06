@@ -357,7 +357,7 @@ function withStoreSmallFastDefault(base) {
   try {
     const storePath = join(
       base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-      "ApiCred",
+      "Anyswitch",
       "store.json",
     );
     const store = JSON.parse(readFileSync(storePath, "utf8"));

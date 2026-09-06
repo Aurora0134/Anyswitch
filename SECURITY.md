@@ -10,7 +10,7 @@ Please do not test against other users' installations or access data that does n
 
 ### Security model highlights
 
-- **DPAPI sealing** — upstream API keys are sealed with Windows DPAPI (CurrentUser scope, per-provider entropy `ApiCred|DPAPI|v2|<ProviderId>`). Ciphertext is stored one file per provider under `%LOCALAPPDATA%\ApiCred\credentials\`; keys are decrypted in memory at request time only, never cached, never persisted in plaintext.
+- **DPAPI sealing** — upstream API keys are sealed with Windows DPAPI (CurrentUser scope, per-provider entropy `ApiCred|DPAPI|v2|<ProviderId>`). Ciphertext is stored one file per provider under `%LOCALAPPDATA%\Anyswitch\credentials\`; keys are decrypted in memory at request time only, never cached, never persisted in plaintext.
 - **The store holds no secrets** — `store.json` contains routing/metadata only. The schema validator recursively rejects any secret-looking field; the only link to a key is a strictly validated `credentialFile` reference that cannot escape the credentials directory.
 - **Fail-closed** — no default provider, no fuzzy prefix matching, no fallback to another key when decryption fails. Error messages are generalized and never leak URLs, credentials, upstream response bodies, or stack traces.
 - **Loopback only** — the relay and panel listen on 127.0.0.1 only; per-process session tokens are CSPRNG-generated, never persisted, never logged; `NO_PROXY` is enforced for loopback addresses to prevent leakage through inherited HTTP proxies.
@@ -27,7 +27,7 @@ Please do not test against other users' installations or access data that does n
 
 ### 安全模型要点
 
-- **DPAPI 封存** — 上游 API Key 用 Windows DPAPI 封存（CurrentUser 作用域，按提供方熵 `ApiCred|DPAPI|v2|<ProviderId>`）。密文按提供方一文件存于 `%LOCALAPPDATA%\ApiCred\credentials\`；Key 仅在请求时内存中解密，从不缓存、从不落盘明文。
+- **DPAPI 封存** — 上游 API Key 用 Windows DPAPI 封存（CurrentUser 作用域，按提供方熵 `ApiCred|DPAPI|v2|<ProviderId>`）。密文按提供方一文件存于 `%LOCALAPPDATA%\Anyswitch\credentials\`；Key 仅在请求时内存中解密，从不缓存、从不落盘明文。
 - **store 不含秘密** — `store.json` 只存路由/元数据。schema 校验递归拒绝任何秘密样字段；与 Key 的唯一关联是经过严格校验、无法逃出 credentials 目录的 `credentialFile` 引用。
 - **fail-closed** — 无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key。错误信息泛化，绝不泄露 URL、凭据、上游响应体或栈。
 - **仅环回** — relay 与面板只监听 127.0.0.1；会话 token 由 CSPRNG 按进程生成，不落盘、不记录；为环回地址强制 `NO_PROXY`，防止流量经继承的 HTTP 代理外泄。

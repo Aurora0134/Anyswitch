@@ -1,6 +1,6 @@
 // Agent config sync coordinator and store file watcher.
 //
-// When the Anyswitch global store (`%LOCALAPPDATA%\ApiCred\store.json`) changes
+// When the Anyswitch global store (`%LOCALAPPDATA%\Anyswitch\store.json`) changes
 // (e.g. providers/models added, rotated, or deleted via CLI, webUI, or refresh),
 // this module automatically updates downstream coding agent configurations
 // (ZCode, DSH, Pi, etc.) so agents immediately pick up store mutations
@@ -22,7 +22,7 @@ import { writeReasonixConfig, reasonixConfigPath } from "./reasonix-launcher.mjs
  * @param {object} [options.store] - Parsed store (if omitted, loaded via loadStore)
  * @param {number} options.port - Relay listening port (e.g. 47821)
  * @param {string} options.token - Relay authentication token
- * @param {string} options.root - ApiCred root path (%LOCALAPPDATA%\ApiCred)
+ * @param {string} options.root - Anyswitch root path (%LOCALAPPDATA%\Anyswitch)
  * @param {object} [options.logger] - Logger instance
  * @param {object} [options.base] - Process environment or base paths
  * @returns {Promise<object>} Results of each agent sync

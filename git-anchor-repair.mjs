@@ -5,9 +5,9 @@
 //   node git-anchor-repair.mjs
 //   node git-anchor-repair.mjs --app <appDir>
 //
-// - Moves legacy `%LOCALAPPDATA%\ApiCred\app.git` → `%LOCALAPPDATA%\ApiCred-git\objects`
+// - Moves legacy `%LOCALAPPDATA%\ApiCred\app.git` → `%LOCALAPPDATA%\Anyswitch-git\objects`
 // - Writes `app/.git` gitfile
-// - Denies DELETE + DELETE-CHILD on the parent `ApiCred-git` only (not inherited),
+// - Denies DELETE + DELETE-CHILD on the parent `Anyswitch-git` only (not inherited),
 //   so `rm -rf` of the parent fails while git can still write inside objects/
 
 import { existsSync, mkdirSync, realpathSync, renameSync, rmSync } from "node:fs";

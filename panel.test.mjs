@@ -623,7 +623,7 @@ describe("panel router followAgent watchdog coordination", () => {
   // target and cannot create intermediate directories itself.
   function tempBase() {
     const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-"));
-    const relayDataRoot = join(dir, "ApiCred");
+    const relayDataRoot = join(dir, "Anyswitch");
     mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }
@@ -711,7 +711,7 @@ describe("panel router followAgent watchdog coordination", () => {
 
   it("GET settings returns keepAlive.mode from disk, including enhanced", async () => {
     const { base, dir } = tempBase();
-    writeFileSync(join(dir, "ApiCred", "settings.json"), JSON.stringify({
+    writeFileSync(join(dir, "Anyswitch", "settings.json"), JSON.stringify({
       followAgent: true,
       keepAlive: { enabled: true, mode: "enhanced" },
     }));
@@ -739,7 +739,7 @@ describe("panel router followAgent watchdog coordination", () => {
   it("GET settings migrates the retired basic mode to enhanced", async () => {
     const { base, dir } = tempBase();
     // Production settings.json shape before the two-tier keep-alive merge.
-    writeFileSync(join(dir, "ApiCred", "settings.json"), JSON.stringify({
+    writeFileSync(join(dir, "Anyswitch", "settings.json"), JSON.stringify({
       keepAlive: { enabled: true, mode: "basic" },
     }));
     const router = createPanelRouter({
@@ -832,7 +832,7 @@ describe("panel router followAgent watchdog coordination", () => {
 describe("panel router watchdog probe snapshot", () => {
   function tempBase() {
     const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-snap-"));
-    const relayDataRoot = join(dir, "ApiCred");
+    const relayDataRoot = join(dir, "Anyswitch");
     mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
   }

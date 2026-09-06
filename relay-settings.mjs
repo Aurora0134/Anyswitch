@@ -1,6 +1,6 @@
 // Persistent settings manager for Anyswitch.
 //
-// Reads and writes %LOCALAPPDATA%\ApiCred\settings.json with atomic replacements.
+// Reads and writes %LOCALAPPDATA%\Anyswitch\settings.json with atomic replacements.
 // Provides sensible defaults (e.g. keepAlive enabled by default).
 // Preserves any existing arbitrary keys in settings.json. saveSettings refuses
 // to overwrite a settings.json that fails to parse: the corrupt file is copied
@@ -60,7 +60,7 @@ export function parseKeepAliveMaxRetries(raw) {
 export function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "ApiCred",
+    "Anyswitch",
   );
 }
 

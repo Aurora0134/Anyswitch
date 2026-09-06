@@ -1015,7 +1015,7 @@ describe("skills config persistence", () => {
       assert.deepEqual(loadSkillsConfig({ base }), { repoPath: null });
       saveSkillsConfig({ repoPath: "C:\\somewhere\\skills" }, { base });
       assert.deepEqual(loadSkillsConfig({ base }), { repoPath: "C:\\somewhere\\skills" });
-      writeFileSync(join(dir, "ApiCred", "skills.json"), "not json{{{");
+      writeFileSync(join(dir, "Anyswitch", "skills.json"), "not json{{{");
       assert.deepEqual(loadSkillsConfig({ base }), { repoPath: null });
     } finally {
       cleanup();
@@ -1296,7 +1296,7 @@ describe("pickFolder", () => {
       assert.equal(first.calls.length, 2);
 
       // corrupt the cached source → next run must recompile
-      const srcPath = join(base.LOCALAPPDATA, "ApiCred", "bin", "folder-picker.cs");
+      const srcPath = join(base.LOCALAPPDATA, "Anyswitch", "bin", "folder-picker.cs");
       writeFileSync(srcPath, "// stale");
       const second = fakeSpawn(pickerHandler(csc64, "CANCELLED\r\n"));
       await pickFolder({ spawnFn: second.spawnFn, base });

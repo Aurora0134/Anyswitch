@@ -187,7 +187,7 @@ export function createOpenAIRelayServer(deps) {
     // authoritative live agent metrics cross-process. Loopback-only (already
     // enforced above) and guarded by the same pi-relay-token the relay uses
     // elsewhere — so a foreign loopback client can't read telemetry without
-    // the token that lives only in %LOCALAPPDATA%\ApiCred.
+    // the token that lives only in %LOCALAPPDATA%\Anyswitch.
     if (path === "/api/internal/agents" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
@@ -265,7 +265,7 @@ export function createOpenAIRelayServer(deps) {
     // bus no longer carries relay-side entries (keep-alive retries, faults),
     // so the panel-host proxies this endpoint and merges both streams.
     // Same guard rail as /api/internal/agents: loopback-only plus the
-    // pi-relay-token that lives only in %LOCALAPPDATA%\ApiCred.
+    // pi-relay-token that lives only in %LOCALAPPDATA%\Anyswitch.
     if (path === "/api/internal/logs" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");

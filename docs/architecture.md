@@ -13,7 +13,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 
 ## 2. 架构分层
 
-系统分两层，共享同一份 v2 store（位于 `%LOCALAPPDATA%\ApiCred\`）：
+系统分两层，共享同一份 v2 store（位于 `%LOCALAPPDATA%\Anyswitch\`）：
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -24,7 +24,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
                 │ 只读
                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  v2 store（单一真相源）  %LOCALAPPDATA%\ApiCred\                   │
+│  v2 store（单一真相源）  %LOCALAPPDATA%\Anyswitch\                   │
 │    store.json        —— 路由/元数据, 不含任何秘密                   │
 │    credentials\      —— 每提供方一个 DPAPI 密文文件                 │
 │    app\              —— 本仓库（B 层 relay 代码）                    │
@@ -33,7 +33,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
                 ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │  B 层 · relay app（本仓库）                                       │
-│  位置: %LOCALAPPDATA%\ApiCred\app                                  │
+│  位置: %LOCALAPPDATA%\Anyswitch\app                                  │
 │  职责: loopback HTTP relay —— 鉴权/路由/协议转换/退避/流式,         │
 │        常驻宿主+Web 控制面板, 启动器注入端点+token                  │
 └──────────────────────────────────────────────────────────────────┘
@@ -99,14 +99,14 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。
 - `panel-ui/panel.html` — 面板 Web UI 本体（relay 每请求现读，刷新即生效）。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
-- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/agy/reasonix）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\ApiCred\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
+- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/agy/reasonix）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
 - `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/reasonix）。
-- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\ApiCred\settings.json`，原子写）。
+- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai/gemini 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
-- `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\ApiCred-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
+- `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 客户端集成
 - `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。opencode 启动器只确保 relay 运行、设置环境变量并启动 OpenCode；`opencode.jsonc` 不被 anyswitch 修改，托管 provider 由 OpenCode 插件从 store 注入；opencode 启动器还会生成统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给该插件，插件在 config hook 里给注入的 provider 加 `options.headers["x-agent-instance"]`（per-process，不写盘）。launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。已接受的取舍（冷缓存窗口）：归一依赖 scanProcesses 的进程缓存（面板轮询驱动刷新）；relay 刚重启且缓存尚空时，恰好到达的 launcher 形态 id 归一失败会以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存——面板双行、首请求计数拆两桶，旧行无流量刷新、10min 闲置 TTL 自愈。触发需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立，日常面板常开时打不中。

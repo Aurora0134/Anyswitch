@@ -13,9 +13,9 @@ function scratch() {
   return mkdtempSync(join(tmpdir(), "git-anchor-"));
 }
 
-test("defaultAnchorDir is LocalAppData/ApiCred-git/objects, not under ApiCred", () => {
+test("defaultAnchorDir is LocalAppData/Anyswitch-git/objects, not under the data dir", () => {
   const env = { LOCALAPPDATA: "C:\\Users\\x\\AppData\\Local" };
-  assert.equal(defaultAnchorDir(env), join("C:\\Users\\x\\AppData\\Local", "ApiCred-git", "objects"));
+  assert.equal(defaultAnchorDir(env), join("C:\\Users\\x\\AppData\\Local", "Anyswitch-git", "objects"));
   assert.equal(defaultAnchorDir(env).includes("\\ApiCred\\"), false);
 });
 

@@ -78,7 +78,7 @@ export function appendCrashLog(logPath, label, detail) {
 function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "ApiCred",
+    "Anyswitch",
   );
 }
 
