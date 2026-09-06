@@ -3,12 +3,15 @@
 //
 // WHY THIS EXISTS (and why it is dynamic, not static):
 //
-// agy's model allowlist is hardcoded in its Go binary (Phase 0, 2026-08-19):
-// gemini-3.1-pro-preview, gemini-3.5-flash, gemini-3.6-flash, gemini-3.7-flash,
-// plus a hidden helper slug gemini-3.1-flash-lite-preview. agy refuses every
-// other --model value before it ever reaches the SDK, so the relay cannot make
-// agy request an arbitrary store model name — it can only receive one of these
-// slugs and decide which store model that slug should *mean*.
+// agy's model allowlist is hardcoded in its Go binary (checked against 1.1.27,
+// 2026-09-06): the catalog presents effort-suffixed entries (gemini-3.8-flash-high
+// etc.) but strips the suffix client-side, so the relay only ever receives the
+// base slugs below, plus a hidden helper slug gemini-3.1-flash-lite-preview.
+// gemini-3.5-flash left the catalog in 1.1.27 (no catalog entry resolves to it
+// anymore) but stays in the table: an old agy binary must keep working.
+// agy refuses every other --model value before it ever reaches the SDK, so the
+// relay cannot make agy request an arbitrary store model name — it can only
+// receive one of these slugs and decide which store model that slug should *mean*.
 //
 // A static, fixed alias would permanently lock each slug to one backend and
 // leave the rest of the store unreachable. Instead this module makes the binding
@@ -32,16 +35,18 @@ import { join, dirname } from "node:path";
 
 export const ALIAS_FILENAME = "antigravity.json";
 
-// The slugs agy's binary actually emits in API-key mode. The alias table must
-// cover all of them or a request for an uncovered slug would 404 even when the
-// user expected a default. gemini-3.1-flash-lite-preview is a hidden helper agy
-// uses for conversation-title generation; it is not in `agy models` but appears
-// in live traffic.
+// The slugs agy's binary actually emits on the wire in API-key mode. The alias
+// table must cover all of them or a request for an uncovered slug would 404 even
+// when the user expected a default. gemini-3.1-flash-lite-preview is a hidden
+// helper agy uses for conversation-title generation; it is not in `agy models`
+// but appears in live traffic. gemini-3.1-pro-high/low still emit the old
+// gemini-3.1-pro-preview slug.
 export const AGY_SLUGS = [
   "gemini-3.1-pro-preview",
   "gemini-3.5-flash",
   "gemini-3.6-flash",
   "gemini-3.7-flash",
+  "gemini-3.8-flash",
   "gemini-3.1-flash-lite-preview",
 ];
 
@@ -55,6 +60,7 @@ export const AGY_NORMAL_SLUGS = [
   "gemini-3.5-flash",
   "gemini-3.6-flash",
   "gemini-3.7-flash",
+  "gemini-3.8-flash",
 ];
 export const AGY_SMALL_SLUG = "gemini-3.1-flash-lite-preview";
 

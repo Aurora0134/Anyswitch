@@ -20,21 +20,23 @@ import { geminiToOpenAI, openAIToGemini, geminiError, buildGeminiModelsResponse 
 import { getMatchingProvidersForAgy, getEnabledModelCatalog, isAliasTargetEnabled } from "./panel.mjs";
 
 describe("antigravity alias manager", () => {
-  it("defines exactly 5 supported AGY slugs", () => {
-    assert.strictEqual(AGY_SLUGS.length, 5);
+  it("defines exactly 6 supported AGY slugs", () => {
+    assert.strictEqual(AGY_SLUGS.length, 6);
     assert.ok(AGY_SLUGS.includes("gemini-3.7-flash"));
     assert.ok(AGY_SLUGS.includes("gemini-3.6-flash"));
     assert.ok(AGY_SLUGS.includes("gemini-3.5-flash"));
+    assert.ok(AGY_SLUGS.includes("gemini-3.8-flash"));
     assert.ok(AGY_SLUGS.includes("gemini-3.1-pro-preview"));
     assert.ok(AGY_SLUGS.includes("gemini-3.1-flash-lite-preview"));
   });
 
   it("partitions slugs into normal (one-to-one) and small (free choice) groups", () => {
-    assert.strictEqual(AGY_NORMAL_SLUGS.length, 4);
+    assert.strictEqual(AGY_NORMAL_SLUGS.length, 5);
     assert.ok(AGY_NORMAL_SLUGS.includes("gemini-3.1-pro-preview"));
     assert.ok(AGY_NORMAL_SLUGS.includes("gemini-3.5-flash"));
     assert.ok(AGY_NORMAL_SLUGS.includes("gemini-3.6-flash"));
     assert.ok(AGY_NORMAL_SLUGS.includes("gemini-3.7-flash"));
+    assert.ok(AGY_NORMAL_SLUGS.includes("gemini-3.8-flash"));
     assert.strictEqual(AGY_SMALL_SLUG, "gemini-3.1-flash-lite-preview");
     assert.deepStrictEqual([...AGY_NORMAL_SLUGS, AGY_SMALL_SLUG].sort(), [...AGY_SLUGS].sort());
   });
