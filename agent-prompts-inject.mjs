@@ -45,11 +45,13 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "reasonix", label: "Reasonix", hotReload: false, targetRel: "%APPDATA%/reasonix/AGENTS.md", appData: ["reasonix", "AGENTS.md"] },
 ]);
 
+// Bodies only: the title lives in prompts.json for the panel; it never
+// reaches the endpoint instruction files (user decision, 2026-09-06).
 /** Render the managed block for a non-empty preset set. */
 export function buildManagedBlock(presets) {
   const lines = [MANAGED_BEGIN];
   for (const preset of presets) {
-    lines.push("", `## ${preset.title}`, "", preset.content.trimEnd());
+    lines.push("", preset.content.trimEnd());
   }
   lines.push("", MANAGED_END);
   return lines.join("\n");
