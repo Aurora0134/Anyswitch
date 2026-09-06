@@ -157,8 +157,10 @@ export function createRelayServer(deps) {
           if (request) reqTracker = { ...tracker, ...request };
           // Auto-route stats attribution: journal rows land on the serving
           // chain node (node + bound model) instead of the virtual "auto" —
-          // same wiring as the resident relay paths.
-          if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
+          // same wiring as the resident relay paths. reqTracker prefers the
+          // per-request handle, so concurrent in-session requests each carry
+          // their own resolver.
+          if (chainPlan) reqTracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
 
           if (poolPlan !== null && !poolPlan.ok) {
             reqTracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });

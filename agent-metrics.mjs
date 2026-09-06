@@ -2,6 +2,9 @@ import { exec } from "node:child_process";
 import { join } from "node:path";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
+// AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
+// model on any channel. The reporters must never publish it as a model name.
+import { AUTO_MODEL } from "./chain-routing.mjs";
 
 export const TTFT_THRESHOLDS = Object.freeze({
   GREEN_MAX_MS: 5000,
@@ -565,7 +568,12 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       if (entry.count <= 0) state.activeTargets.delete(key);
     }
   };
-  if (meta.model) {
+  // 虚拟模型 AUTO_MODEL 不是任何渠道上的真实模型，只是路由胶水：它从不进入展示
+  // 口径（currentModel/lastModel/activeModels/activeTargets）。链成员一宣布，
+  // setDisplayModel 会把身份改指到节点的绑定模型 + 渠道；宣布之前（以及预检失败
+  // 这类永远等不到宣布的请求）这条请求没有可展示身份，胶囊按既有语义回落到
+  // 「最近」或「待命」，而不是打印 auto。
+  if (meta.model && meta.model !== AUTO_MODEL) {
     state.currentModel = meta.model;
     state.lastModel = meta.model;
     const count = state.activeModels.get(meta.model) || 0;
@@ -604,7 +612,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   // channel segment and auto-tag provenance describe the SAME serving target
   // as the model name (keyed by providerId×model, so a same-named model
   // switching channels is not a no-op).
-  let displayModel = typeof meta.model === "string" && meta.model ? meta.model : null;
+  let displayModel = typeof meta.model === "string" && meta.model && meta.model !== AUTO_MODEL ? meta.model : null;
   let displayProvider = typeof meta.providerId === "string" && meta.providerId ? meta.providerId : null;
   let displayViaAuto = false;
   const setDisplayModel = (model, providerId, viaAuto) => {
@@ -1513,10 +1521,22 @@ export function createAgentMetricsCollector(options = {}) {
     if (report.sparkHistory && typeof report.sparkHistory === "object" && Array.isArray(report.sparkHistory.tps)) {
       session.sparkHistory = report.sparkHistory;
     }
-    // Model identity for the panel's per-session model badge. Same
-    // overwrite semantics as lastError: the reporter's latest snapshot wins.
-    if ("model" in report) session.model = report.model ?? null;
+    // Model identity for the panel's per-session model badge. Same overwrite
+    // semantics as lastError: the reporter's latest snapshot wins. A snapshot
+    // with no model means "in flight, serving node not decided yet" (auto
+    // routing) or "no request at all" — the CURRENT identity is cleared, while
+    // the sticky last* fields keep the previous real 渠道/模型 so the card's
+    // grey 最近 capsule survives a request that never got attributed.
     if ("providerId" in report) session.providerId = report.providerId ?? null;
+    if ("viaAuto" in report) session.viaAuto = report.viaAuto === true;
+    if ("model" in report) {
+      session.model = report.model ?? null;
+      if (session.model) {
+        session.lastModel = session.model;
+        session.lastProvider = session.providerId;
+        session.lastViaAuto = session.viaAuto === true;
+      }
+    }
     if (report.ended === true) session.ended = true;
 
     claudeSessions.set(key, session);
@@ -1808,26 +1828,62 @@ export function createAgentMetricsCollector(options = {}) {
     // rides the per-launch relay, whose reporter only feeds each session's
     // model field — the resident relay's aggregate claude bucket never sees
     // that traffic. When the bucket is empty, derive the card fields here so
-    // the badge row (renderModelBadges) has a data source: active sessions'
-    // models become activeModels/currentModel, the latest-seen model becomes
-    // lastModel. Session ordering is report order, so the last entry with a
-    // model is the most recent snapshot.
+    // the badge row (renderModelBadges) has a data source.
+    //
+    // The derived shape is the SAME composite account the aggregate endpoints
+    // publish (渠道×模型 + 服务归因), because that is what the endpoint capsule
+    // reads: one entry per (渠道,模型) so a same-named model served by two
+    // sessions does not collapse into one capsule. A session in flight whose
+    // node is not decided yet carries no model — it contributes nothing here,
+    // so the capsule falls back to 最近/待命 instead of printing the virtual
+    // "auto" or a stale model.
     const claudeSessionsDerived = (() => {
       const active = [];
+      const targets = new Map();
       let current = null;
+      let currentProvider = null;
+      let currentViaAuto = false;
       let last = null;
+      let lastProvider = null;
+      let lastViaAuto = false;
       for (const s of claudeRawSessions) {
-        if (typeof s.model !== "string" || !s.model) continue;
-        last = s.model;
+        const model = typeof s.model === "string" && s.model ? s.model : null;
+        if (!model) {
+          // 无身份快照（自动路由节点待定 / 无流量）不抹掉「最近」：粘性字段由
+          // reportSession 保留，渠道同理。
+          if (typeof s.lastModel === "string" && s.lastModel) {
+            last = s.lastModel;
+            lastProvider = typeof s.lastProvider === "string" && s.lastProvider ? s.lastProvider : null;
+            lastViaAuto = s.lastViaAuto === true;
+          }
+          continue;
+        }
+        const providerId = typeof s.providerId === "string" && s.providerId ? s.providerId : null;
+        const viaAuto = s.viaAuto === true;
+        last = model;
+        lastProvider = providerId;
+        lastViaAuto = viaAuto;
         if (s.activeRequests > 0) {
-          active.push(s.model);
-          current = s.model;
+          active.push(model);
+          current = model;
+          currentProvider = providerId;
+          currentViaAuto = viaAuto;
+          const key = `${providerId ?? ""}\u0000${model}`;
+          const entry = targets.get(key) ?? { providerId, model, count: 0, autoCount: 0 };
+          entry.count += s.activeRequests;
+          if (viaAuto) entry.autoCount += s.activeRequests;
+          targets.set(key, entry);
         }
       }
       return {
         activeModels: active,
         currentModel: current,
         lastModel: last,
+        currentProvider,
+        lastProvider,
+        currentViaAuto,
+        lastViaAuto,
+        activeTargets: Array.from(targets.values()),
       };
     })();
 
@@ -1850,6 +1906,15 @@ export function createAgentMetricsCollector(options = {}) {
       activeModels: claudeState.activeModels.size > 0
         ? Array.from(claudeState.activeModels.keys())
         : claudeSessionsDerived.activeModels,
+      // 渠道 × 服务归因：与聚合端点同形的复合账本，端点卡胶囊的「渠道/模型」
+      // 双段与 auto 角标都靠它。常驻桶只在客户端直连常驻 relay 时才填。
+      currentProvider: claudeState.currentProvider ?? claudeSessionsDerived.currentProvider,
+      lastProvider: claudeState.lastProvider ?? claudeSessionsDerived.lastProvider,
+      currentViaAuto: claudeState.currentViaAuto || claudeSessionsDerived.currentViaAuto,
+      lastViaAuto: claudeState.lastViaAuto || claudeSessionsDerived.lastViaAuto,
+      activeTargets: activeTargetList(claudeState).length > 0
+        ? activeTargetList(claudeState)
+        : claudeSessionsDerived.activeTargets,
     };
 
     // 3. DSH Agent Status
@@ -2001,7 +2066,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       // A tick already queued when the last recordEnd ran must not post a
       // stale "still generating" snapshot after the session went idle.
       if (state.activeRequests <= 0) return;
-      post(snapshot());
+      sendSnapshot();
     }, heartbeatIntervalMs);
     heartbeatTimer.unref?.();
   };
@@ -2012,17 +2077,64 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   };
 
   // Journal + auto-route attribution for the per-launch claude relay. The
-  // member wiring (resolver/member id) is session-level, set by the transport
-  // layer between startRequest and recordEnd; a rare concurrent side-query
-  // may smear the attribution of an overlapping row, never the token totals.
-  let pendingMeta = null; // meta of the most recent startRequest, for snapshots
-  let currentMemberId = null;
-  let attributeResolver = null;
-  const resolvedAttributeFor = (memberId) => {
-    const source = memberId ?? currentMemberId;
-    if (!attributeResolver || source === null) return null;
-    const attr = attributeResolver(source);
+  // member wiring (resolver/member id) lives on the request context, exactly
+  // like the resident relay's aggregate tracker: Claude Code fires concurrent
+  // in-session requests (side queries, rapid re-send after Esc), and session
+  // level wiring let one request's end erase the attribution of another. The
+  // outer setters below stay as a legacy surface and target the newest open
+  // request, so callers that never take the per-request handle keep working.
+  const resolvedAttributeFor = (ctx, memberId) => {
+    const source = memberId ?? ctx?.memberId ?? null;
+    if (!ctx?.resolver || source === null) return null;
+    const attr = ctx.resolver(source);
     return attr && typeof attr === "object" ? attr : null;
+  };
+  // 展示身份（模型 + 渠道 + 是否走链）：链成员已宣布 → 节点绑定的模型与渠道；
+  // 否则用请求自带的 meta，但虚拟模型 AUTO_MODEL 不算身份——它是路由胶水，不是
+  // 任何渠道上的真实模型，报上去只会被面板当成模型名显示出来。
+  //
+  // 节点未定时返回 null，且绝不回落到上一次的身份：那会把上一个模型说成正在服
+  // 务的模型。此时胶囊按既有语义回落到「最近」（粘性最近身份）或「待命」。
+  const identityOf = (ctx) => {
+    if (!ctx) return null;
+    const attr = resolvedAttributeFor(ctx, null);
+    if (attr?.model) return { model: attr.model, providerId: attr.providerId ?? null, viaAuto: true };
+    const model = ctx.meta?.model;
+    if (typeof model !== "string" || !model || model === AUTO_MODEL) return null;
+    return { model, providerId: ctx.meta?.providerId ?? null, viaAuto: false };
+  };
+  // 快照展示的是最新的在飞请求（Claude Code 会并发发侧查询）；没有在飞请求时
+  // 沿用最近一次拿到过的身份，让「最近」胶囊与会话行都有真实渠道/模型。
+  //
+  // 在飞但拿不到身份（自动路由节点待定）时返回 null，绝不回落到上一次的身份：
+  // 那会把上一个模型说成正在服务的模型。
+  let lastIdentity = null;
+  const displayIdentity = () => {
+    for (let i = openRequests.length - 1; i >= 0; i -= 1) {
+      const ident = identityOf(openRequests[i]);
+      if (ident) {
+        lastIdentity = ident;
+        return ident;
+      }
+    }
+    return openRequests.length > 0 ? null : lastIdentity;
+  };
+  // 已经推给面板的身份指纹：成员宣布时只在身份真的变了才重发，一次故障切换
+  // 至多一次回环 POST（心跳与请求结束照常发）。
+  let postedIdentity = "";
+  const identityFingerprint = (ident) => (ident ? `${ident.providerId ?? ""}\u0000${ident.model}\u0000${ident.viaAuto}` : "");
+  function sendSnapshot() {
+    postedIdentity = identityFingerprint(displayIdentity());
+    post(snapshot());
+  }
+  const sendSnapshotIfIdentityChanged = () => {
+    if (identityFingerprint(displayIdentity()) !== postedIdentity) sendSnapshot();
+  };
+  // 链成员宣布（含故障切换时改投下一跳）：节点身份一定下来就上报，面板不必等
+  // 10s 心跳才看到「渠道/模型」。
+  const bindMember = (ctx, memberId) => {
+    ctx.memberId = typeof memberId === "string" && memberId.length > 0 ? memberId : null;
+    sendSnapshotIfIdentityChanged();
   };
   const normalizedUsage = (usage) => {
     if (!usage || typeof usage !== "object") return { prompt: 0, completion: 0, cached: 0 };
@@ -2082,11 +2194,25 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         tps: sessionSamples.map((s) => s.tps).filter((v) => typeof v === "number" && v > 0),
         cache: sessionSamples.map((s) => (s.prompt > 0 ? Number(((s.cached / s.prompt) * 100).toFixed(1)) : 0)),
       },
-      // Model identity of the current/last request (chain attribution wins,
-      // then the transport-supplied pendingMeta), so the panel can render a
-      // per-session model badge. null before the first request.
-      model: resolvedAttributeFor(null)?.model || pendingMeta?.model || null,
-      providerId: resolvedAttributeFor(null)?.providerId || pendingMeta?.providerId || null,
+      // Model identity of the request currently in flight (chain attribution
+      // wins, then the transport-supplied meta), so the panel can render a
+      // per-session model badge.
+      //
+      // Two rules the panel's capsule depends on:
+      //   - the virtual chain model "auto" is never published as a model name;
+      //   - an in-flight request whose chain node is not announced yet publishes
+      //     no identity at all (model null), so the capsule falls back to
+      //     "最近" (sticky, panel-side) or "待命" instead of printing routing
+      //     glue or a stale model.
+      // The sticky "最近" fallback lives panel-side (reportSession.lastModel).
+      ...(() => {
+        const ident = displayIdentity();
+        return {
+          model: ident?.model ?? null,
+          providerId: ident?.providerId ?? null,
+          viaAuto: ident?.viaAuto === true,
+        };
+      })(),
     };
   }
 
@@ -2123,7 +2249,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         // bound model for auto requests, the transport-supplied model for
         // direct ones. The panel banner renders `HTTP <status> · <model>`
         // from this field.
-        model: resolvedAttributeFor(null)?.model || ctx.meta?.model || null,
+        model: resolvedAttributeFor(ctx, null)?.model || ctx.meta?.model || null,
       };
       state.errorActive = true;
     } else if (!aborted) {
@@ -2169,7 +2295,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       try {
         const reqDuration = Math.max(1, endTime - ctx.startTime);
         const norm = normalizedUsage(usage);
-        const attr = resolvedAttributeFor(null);
+        const attr = resolvedAttributeFor(ctx, null);
         const httpStatus = Number(error?.status ?? status) || null;
         journal.appendRequest({
           ts: endTime,
@@ -2195,18 +2321,10 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       }
     }
 
-    post(snapshot());
-    // Consume the session-level wiring once nothing is in flight: a recordEnd
-    // firing without a fresh startRequest (plan-phase throw, abort race) must
-    // not journal under the previous request's model/member. Concurrent
-    // in-flight requests keep the wiring — their rows attribute at their own
-    // terminal recordEnd.
-    if (openRequests.length === 0) {
-      pendingMeta = null;
-      currentMemberId = null;
-      attributeResolver = null;
-      stopHeartbeat();
-    }
+    sendSnapshot();
+    // Per-request wiring dies with the request: the ctx owns its member id and
+    // resolver, so a concurrent request's end never touches another's attribution.
+    if (openRequests.length === 0) stopHeartbeat();
   }
 
   return {
@@ -2217,20 +2335,24 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     setClaudePid(pid) {
       claudePid = Number(pid) || null;
       if (claudePid) {
-        post(snapshot());
+        sendSnapshot();
       }
     },
 
     // Server wiring for auto-route attribution + usage journaling: the
     // transport layer (server.mjs) passes the request meta here and installs
     // the chain plan's memberId -> { providerId, model } resolver; the member
-    // loop inside stream-pipe announces each attempted member. All no-ops for
-    // callers that never set them (tests, direct requests).
+    // loop inside stream-pipe announces each attempted member. Both belong to
+    // the request being served: the per-request handle from startRequest is the
+    // precise surface, these legacy outer setters fall back to the newest open
+    // request so callers that ignore the handle keep working.
     setCurrentMember(memberId) {
-      currentMemberId = typeof memberId === "string" && memberId.length > 0 ? memberId : null;
+      const ctx = openRequests[openRequests.length - 1];
+      if (ctx) bindMember(ctx, memberId);
     },
     setAttributeResolver(fn) {
-      attributeResolver = typeof fn === "function" ? fn : null;
+      const ctx = openRequests[openRequests.length - 1];
+      if (ctx) ctx.resolver = typeof fn === "function" ? fn : null;
     },
 
     startRequest(meta = {}) {
@@ -2239,19 +2361,26 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         firstChunk: null,
         ended: false,
         meta: meta && typeof meta === "object" ? meta : null,
+        // Per-request auto-route wiring (mirrors the resident relay's aggregate
+        // tracker): the member being attempted and the chain plan's resolver
+        // belong to THIS request, so concurrent in-session requests never
+        // overwrite each other's attribution.
+        memberId: null,
+        resolver: null,
       };
       if (state.activeRequests === 0) activeWallStart = ctx.startTime;
       state.requests += 1;
       state.activeRequests += 1;
       openRequests.push(ctx);
-      pendingMeta = ctx.meta;
       ensureHeartbeat();
 
-      post(snapshot());
+      sendSnapshot();
 
       return {
         recordFirstChunk: () => recordFirstChunkCtx(ctx),
         recordEnd: (info) => recordEndCtx(ctx, info),
+        setCurrentMember: (memberId) => bindMember(ctx, memberId),
+        setAttributeResolver: (fn) => { ctx.resolver = typeof fn === "function" ? fn : null; },
       };
     },
 

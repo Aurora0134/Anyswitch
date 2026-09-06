@@ -6415,6 +6415,14 @@ if (window.panelStartupController) panelStartupPlay();
     return { cur, total: chain.length };
   }
 
+  // 虚拟模型 "auto" 是自动路由的路由胶水，不是任何渠道上的真实模型。没有渠道
+  // 配对的 auto 条目没有可展示身份，不该上屏：旧 relay（未重启的 per-launch 中
+  // 继）与预检失败的请求都会送来这种条目，胶囊必须丢弃它而不是把 auto 当模型名。
+  function hasDisplayIdentity(providerId, model) {
+    if (typeof model !== "string" || !model) return false;
+    return !(model === "auto" && !providerId);
+  }
+
   // 胶囊数据整形：新 relay 快照带 activeTargets（渠道×模型复合账本）→ 逐条出
   // 双段胶囊（同名模型跨渠道不再坍缩为一颗）；活跃账本为空但 lastModel 在 →
   // 最近灰胶囊携带 lastProvider/lastViaAuto 来源。旧 relay 无该字段时退化为
@@ -6423,16 +6431,19 @@ if (window.panelStartupController) panelStartupPlay();
   function capsuleTargetList(st) {
     if (Array.isArray(st?.activeTargets)) {
       const list = (st.activeTargets || [])
-        .filter((t) => t && typeof t.model === "string" && t.model)
+        .filter((t) => hasDisplayIdentity(t?.providerId, t?.model))
         .map((t) => ({ providerId: t.providerId || null, model: t.model, active: true, viaAuto: (Number(t.autoCount) || 0) > 0 }));
       if (list.length > 0) return list;
-      return st.lastModel
+      return hasDisplayIdentity(st.lastProvider, st.lastModel)
         ? [{ providerId: st.lastProvider || null, model: st.lastModel, active: false, viaAuto: Boolean(st.lastViaAuto) }]
         : [];
     }
-    const activeList = st.activeModels || (st.currentModel ? [st.currentModel] : []);
+    const activeList = (st.activeModels || (st.currentModel ? [st.currentModel] : []))
+      .filter((m) => hasDisplayIdentity(null, m));
     if (activeList.length > 0) return activeList.map((m) => ({ providerId: null, model: m, active: true, viaAuto: false }));
-    return st.lastModel ? [{ providerId: null, model: st.lastModel, active: false, viaAuto: false }] : [];
+    return hasDisplayIdentity(null, st.lastModel)
+      ? [{ providerId: null, model: st.lastModel, active: false, viaAuto: false }]
+      : [];
   }
 
   // 胶囊文案：渠道显示名经 routeNodeName（池 id 先 pools 后 providers）；
@@ -6739,12 +6750,13 @@ if (window.panelStartupController) panelStartupPlay();
 
       $("ccActiveTag").hidden = !isGenerating;
 
-      const activeList = c.activeModels || (c.currentModel ? [c.currentModel] : []);
       const ccLastModelTag = $("ccLastModelTag");
-      if (activeList.length > 0) {
-        ccLastModelTag.textContent = "模型: " + activeList.join(", ");
-      } else if (c.lastModel) {
-        ccLastModelTag.textContent = "模型: " + c.lastModel;
+      // 卡头与胶囊同源：胶囊能显示什么，卡头就显示什么（虚拟模型 auto 已被
+      // capsuleTargetList 过滤掉），两者不会各说各话。没有可展示身份时按既有
+      // 语义显示「待命」。
+      const capsuleLabels = capsuleTargetList(c).map((t) => capsuleLabel(t.providerId, t.model));
+      if (capsuleLabels.length > 0) {
+        ccLastModelTag.textContent = "模型: " + capsuleLabels.join(", ");
       } else {
         ccLastModelTag.textContent = "模型: 待命";
       }

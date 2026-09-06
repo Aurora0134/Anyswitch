@@ -785,6 +785,65 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(claude.currentModel, null, "no in-flight traffic → currentModel stays null");
   });
 
+  it("derives the claude card's 渠道×模型 复合账本 from session reports (胶囊双段 + auto 角标数据源)", async () => {
+    const nowFn = () => 10000;
+    const mockExec = (cmd, opts, cb) =>
+      cb(null, `"claude.exe","4444","Console","1","55,000 K"\r\n"claude.exe","5555","Console","1","55,000 K"\r\n`);
+
+    const collector = testCollector({ execFn: mockExec, nowFn });
+    collector.reportSession("tok_A", {
+      pid: 4444, sessionId: "sess_A", requests: 3, activeRequests: 1,
+      model: "claude-opus-5", providerId: "chan-a", viaAuto: true,
+    });
+    collector.reportSession("tok_B", {
+      pid: 5555, sessionId: "sess_B", requests: 5, activeRequests: 2,
+      model: "qwen-max", providerId: "chan-b", viaAuto: false,
+    });
+
+    const claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.deepEqual(claude.activeTargets, [
+      { providerId: "chan-a", model: "claude-opus-5", count: 1, autoCount: 1 },
+      { providerId: "chan-b", model: "qwen-max", count: 2, autoCount: 0 },
+    ], "每个（渠道,模型）组合一颗胶囊，auto 归因跟条目自身走");
+    assert.equal(claude.currentProvider, "chan-b");
+    assert.equal(claude.currentViaAuto, false);
+    assert.equal(claude.lastProvider, "chan-b");
+    assert.equal(claude.lastViaAuto, false);
+  });
+
+  it("节点待定的在飞会话不出模型胶囊：不冒充模型，最近身份也不被抹掉", async () => {
+    const nowFn = () => 10000;
+    const mockExec = (cmd, opts, cb) => cb(null, `"claude.exe","4444","Console","1","55,000 K"\r\n`);
+    const collector = testCollector({ execFn: mockExec, nowFn });
+
+    // 自动路由请求刚发出、链上节点还没定下来。
+    collector.reportSession("tok_A", {
+      pid: 4444, sessionId: "sess_A", requests: 1, activeRequests: 1, model: null, providerId: null, viaAuto: false,
+    });
+    let claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.deepEqual(claude.activeModels, [], "节点没定下来就没有活跃模型，胶囊回落到最近/待命");
+    assert.deepEqual(claude.activeTargets, []);
+    assert.equal(claude.lastModel, null);
+
+    // 节点宣布 → 真实渠道/模型上屏。
+    collector.reportSession("tok_A", {
+      pid: 4444, sessionId: "sess_A", requests: 1, activeRequests: 1,
+      model: "claude-opus-5", providerId: "chan-a", viaAuto: true,
+    });
+    claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.deepEqual(claude.activeTargets, [{ providerId: "chan-a", model: "claude-opus-5", count: 1, autoCount: 1 }]);
+
+    // 请求结束（快照回到无身份）→ 灰胶囊「最近」保留真实渠道/模型。
+    collector.reportSession("tok_A", {
+      pid: 4444, sessionId: "sess_A", requests: 2, activeRequests: 0, model: null, providerId: null, viaAuto: false,
+    });
+    claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.deepEqual(claude.activeTargets, []);
+    assert.equal(claude.lastModel, "claude-opus-5", "无身份快照不抹掉最近身份");
+    assert.equal(claude.lastProvider, "chan-a");
+    assert.equal(claude.lastViaAuto, true);
+  });
+
   it("marks Claude session ended when PID disappears from process list (forced kill)", async () => {
     let mockTime = 10000;
     const nowFn = () => mockTime;
@@ -1228,28 +1287,41 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(claude.sessionMode, "per_session", "the claude panel card stays on the per-session path");
   });
 
-  it("surfaces the claude tracker model fields on the per-session claude card", async () => {
+  it("never surfaces the virtual chain model on the claude card; the serving node replaces it", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Resident /v1/messages traffic (UA-sniffed agentId "claude") lands in the
-    // claude aggregate bucket; the panel's auto-route chain indicator reads
-    // activeModels/currentModel/lastModel off the claude card like any other
-    // endpoint, so the per-session card must carry them.
+    // claude aggregate bucket. "auto" is routing glue, not a model: it must
+    // never reach the card's display fields — not before the chain node is
+    // announced, and not after a request that never got one.
     const req = collector.startRequest({
       agentId: "claude",
-      providerId: "poke-api",
+      providerId: null,
       model: "auto",
     });
 
     let status = await collector.getAgentsStatus();
     let claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionMode, "per_session");
-    assert.deepEqual(claude.activeModels, ["auto"]);
-    assert.equal(claude.currentModel, "auto");
-    assert.equal(claude.lastModel, "auto");
+    assert.deepEqual(claude.activeModels, [], "未归因的 auto 请求不进入活跃模型");
+    assert.equal(claude.currentModel, null, "auto 不是模型名");
+    assert.equal(claude.lastModel, null);
+    assert.deepEqual(claude.activeTargets, []);
+
+    // 链成员宣布 → 身份改指到节点的绑定模型 + 渠道，并带上服务归因。
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "claude-opus-5" } : null));
+    req.setCurrentMember("chan-a/m1");
+
+    status = await collector.getAgentsStatus();
+    claude = status.find((a) => a.id === "claude");
+    assert.deepEqual(claude.activeTargets, [
+      { providerId: "chan-a", model: "claude-opus-5", count: 1, autoCount: 1 },
+    ], "渠道×模型复合账本 + auto 归因");
+    assert.equal(claude.lastProvider, "chan-a");
+    assert.equal(claude.lastViaAuto, true, "来源标记跟胶囊条目自身走");
 
     mockTime = 2000;
     req.recordFirstChunk();
@@ -1260,7 +1332,8 @@ describe("createAgentMetricsCollector", () => {
     claude = status.find((a) => a.id === "claude");
     assert.deepEqual(claude.activeModels, []);
     assert.equal(claude.currentModel, null);
-    assert.equal(claude.lastModel, "auto", "lastModel survives request end so the card shows 最近: <model>");
+    assert.equal(claude.lastModel, "claude-opus-5", "lastModel survives request end so the card shows 最近: <渠道>/<模型>");
+    assert.equal(claude.lastProvider, "chan-a");
   });
 
   it("claude card model fields stay null/empty when no tracker traffic exists", async () => {
@@ -2494,7 +2567,68 @@ describe("createSessionReporter", () => {
     const wider = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
     assert.equal(wider.metrics.sparkHistory.ttft.length, 2, "disk setting of 2 still wins over in-memory 16");
   });
+  it("auto 请求在链节点宣布前不上报模型名（虚拟模型不得当模型名上屏）", async () => {
+    // 修复前：startRequest 立刻把虚拟模型 id "auto" 当模型名报上来，面板胶囊因此
+    // 显示「活跃: auto」；节点身份要等 10s 心跳或请求结束才更正。
+    const { reporter, posted, tick } = reporterHarness();
+    const req = reporter.startRequest({ providerId: null, model: "auto", stream: true, path: "anthropic" });
+
+    const start = posted[posted.length - 1];
+    assert.equal(start.activeRequests, 1, "在飞状态照常上报（卡片要点亮「正在生成」）");
+    assert.equal(start.model, null, "节点没定下来就没有可展示身份，绝不回落 auto");
+    assert.equal(start.providerId, null);
+    assert.equal(start.viaAuto, false);
+
+    // 节点一宣布就上报渠道 + 模型 + 归因，不必等心跳。
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "claude-opus-5" } : null));
+    req.setCurrentMember("chan-a/m1");
+    const announced = posted[posted.length - 1];
+    assert.equal(announced.model, "claude-opus-5");
+    assert.equal(announced.providerId, "chan-a");
+    assert.equal(announced.viaAuto, true, "服务归因跟身份同源");
+    assert.equal(announced.activeRequests, 1, "请求仍在飞");
+
+    tick(4000);
+    req.recordEnd({ status: 200, usage: { input_tokens: 10, output_tokens: 5 } });
+    const ended = posted[posted.length - 1];
+    assert.equal(ended.activeRequests, 0);
+    assert.equal(ended.model, "claude-opus-5", "请求结束后沿用最近身份，供面板「最近」胶囊使用");
+    assert.equal(ended.providerId, "chan-a");
+  });
+
+  it("并发请求各自归因：后发请求的结束清不掉先发请求的成员身份", async () => {
+    const { reporter, lines, tick } = reporterHarness();
+    const auto = reporter.startRequest({ providerId: null, model: "auto", stream: true, path: "anthropic" });
+    auto.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "claude-opus-5" } : null));
+    auto.setCurrentMember("chan-a/m1");
+
+    // Claude Code 的侧查询：直连请求，与上面的 auto 请求并发在飞。
+    const side = reporter.startRequest({ providerId: "chan-b", model: "qwen-max", stream: true, path: "anthropic" });
+    tick(2000);
+    side.recordEnd({ status: 200, usage: { input_tokens: 4, output_tokens: 2 } });
+
+    tick(4000);
+    auto.recordEnd({ status: 200, usage: { input_tokens: 10, output_tokens: 5 } });
+
+    assert.equal(lines.length, 2);
+    assert.equal(lines.find((r) => r.model === "qwen-max").providerId, "chan-b", "直连行保持自己的渠道");
+    const autoRow = lines.find((r) => r.model === "claude-opus-5");
+    assert.ok(autoRow, "auto 行归因到链上服务节点，没有被并发请求清成 auto");
+    assert.equal(autoRow.providerId, "chan-a");
+  });
+
+  it("身份未变不重发快照（一次故障切换至多一次回环上报）", async () => {
+    const { reporter, posted } = reporterHarness();
+    const req = reporter.startRequest({ providerId: null, model: "auto", stream: true, path: "anthropic" });
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "claude-opus-5" } : null));
+    const before = posted.length;
+    req.setCurrentMember("chan-a/m1");
+    assert.equal(posted.length, before + 1, "身份首次出现 → 上报");
+    req.setCurrentMember("chan-a/m1");
+    assert.equal(posted.length, before + 1, "身份未变 → 不重发");
+  });
 });
+
 
 
 describe("instance PID reconciliation and process-start placeholders", () => {
