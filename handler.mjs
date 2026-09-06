@@ -18,6 +18,7 @@ import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, createStickyTable } from "./pool-routing.mjs";
 import {
   AUTO_MODEL,
+  AUTO_MODEL_ANTHROPIC_ID,
   resolveChain,
   expandChainNode,
   createChainState,
@@ -158,9 +159,12 @@ export function createHandler(deps) {
     // 自动路由: an endpoint with a configured chain can ask for the virtual
     // model "auto". It is deliberately not a wire id (no provider carries it)
     // and is appended after collision checking, so it can never trip that check.
+    // The catalog advertises it under AUTO_MODEL_ANTHROPIC_ID: Claude Code's
+    // gateway discovery drops entries whose id fails /(claude|anthropic)/i,
+    // which the bare "auto" id always does (see chain-routing.mjs).
     if (agentId !== undefined && (resolveChain(loaded.store, agentId)?.chain?.length ?? 0) > 0) {
       entries.push({
-        wireId: AUTO_MODEL,
+        wireId: AUTO_MODEL_ANTHROPIC_ID,
         providerId: agentId,
         modelId: AUTO_MODEL,
         displayName: `[${agentId}] 自动路由 (auto)`,
@@ -358,8 +362,9 @@ export function createHandler(deps) {
 
   // Chain routing pre-flight (自动路由). Same return contract as
   // planPoolMessages:
-  //   null              — body.model is not the virtual model AUTO_MODEL, or
-  //                       the endpoint has no configured chain; the caller
+  //   null              — body.model is not the virtual model AUTO_MODEL (nor
+  //                       its anthropic catalog alias AUTO_MODEL_ANTHROPIC_ID),
+  //                       or the endpoint has no configured chain; the caller
   //                       falls through to the pool/classic paths untouched
   //   { ok: false, ...} — terminal pre-flight error (auth, body, generation
   //                       gate, or no chain node can serve)
@@ -383,7 +388,13 @@ export function createHandler(deps) {
       return { ok: false, status: 400, body: errorBody("invalid_request_error", "request body must be a JSON object") };
     }
 
-    if (body.model !== AUTO_MODEL) return null;
+    if (body.model !== AUTO_MODEL && body.model !== AUTO_MODEL_ANTHROPIC_ID) return null;
+
+    // Normalize the picker-facing alias back to the canonical virtual model:
+    // both call sites (per-launch relay, resident relay) read body.model for
+    // tracker attribution only AFTER this planner runs, so stats/journals keep
+    // the "auto" key no matter which id the client sent.
+    if (body.model === AUTO_MODEL_ANTHROPIC_ID) body.model = AUTO_MODEL;
 
     const loaded = loadValidStore();
     if (!loaded.ok) return null;

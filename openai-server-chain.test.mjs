@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "./chain-routing.mjs";
 
 const TOKEN = "test-token-chain";
 
@@ -532,9 +533,15 @@ describe("chain routing: models and pre-flight", () => {
       });
       assert.equal(withChain.status, 200);
       const catalog = await withChain.json();
+      // The anthropic-path catalog advertises auto under its picker-surviving
+      // alias (Claude Code's discovery filter drops the bare id).
       assert.ok(
-        (catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === "auto"),
+        (catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL_ANTHROPIC_ID),
         "kimi has a chain, so the catalog must carry the virtual auto entry",
+      );
+      assert.ok(
+        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL),
+        "the bare auto id is never advertised on the anthropic path",
       );
 
       const noChain = await fetch(`http://127.0.0.1:${port}/v1/models`, {
@@ -543,7 +550,7 @@ describe("chain routing: models and pre-flight", () => {
       assert.equal(noChain.status, 200);
       const catalog2 = await noChain.json();
       assert.ok(
-        !(catalog2.data ?? catalog2.models ?? []).some((m) => (m.id ?? m.wireId) === "auto"),
+        !(catalog2.data ?? catalog2.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL_ANTHROPIC_ID),
         "claude has no chain, so the catalog must not carry auto",
       );
       assert.deepEqual(calls, []);
@@ -701,8 +708,12 @@ describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {
       assert.equal(res.status, 200);
       const catalog = await res.json();
       assert.ok(
-        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === "auto"),
+        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL_ANTHROPIC_ID),
         "kimi's chain is disabled, so the catalog must not carry auto",
+      );
+      assert.ok(
+        !(catalog.data ?? catalog.models ?? []).some((m) => (m.id ?? m.wireId) === AUTO_MODEL),
+        "the bare auto id is never advertised on the anthropic path",
       );
     });
   });
