@@ -1456,7 +1456,11 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   function makeCapsuleTargetList() {
     const m = panelHtml.match(/function capsuleTargetList\(st\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "capsuleTargetList found in panel.html");
-    return new Function(`return (${m[0]});`)();
+    // 虚拟模型判定委托 hasDisplayIdentity（与 capsuleLabel 委托 routeNodeName
+    // 同样的注入方式）：面板这里只测列表整形与过滤。
+    const h = panelHtml.match(/function hasDisplayIdentity\(providerId, model\) \{[\s\S]*?\n  \}/);
+    assert.ok(h, "hasDisplayIdentity found in panel.html");
+    return new Function("hasDisplayIdentity", `return (${m[0]});`)(new Function(`return (${h[0]});`)());
   }
 
   it("capsuleTargetList：新快照 activeTargets 逐条出（渠道,模型,活跃,归因）", () => {
@@ -1470,6 +1474,20 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.deepEqual(list, [
       { providerId: "A", model: "a", active: true, viaAuto: true },
       { providerId: "B", model: "a", active: true, viaAuto: false },
+    ]);
+  });
+
+  it("capsuleTargetList：无渠道的虚拟 auto 条目被丢弃（不把路由胶水当模型名显示）", () => {
+    const fn = makeCapsuleTargetList();
+    // 旧 relay（未重启的 per-launch 中继）与预检失败的请求都会送来这种条目：
+    // 没有渠道配对的 auto 没有任何可展示身份。
+    assert.deepEqual(fn({ activeTargets: [{ providerId: null, model: "auto", count: 1, autoCount: 1 }] }), []);
+    assert.deepEqual(fn({ activeTargets: [], lastModel: "auto", lastProvider: null, lastViaAuto: true }), []);
+    assert.deepEqual(fn({ activeModels: ["auto"] }), []);
+    assert.deepEqual(fn({ lastModel: "auto" }), []);
+    // 真实模型不受影响（无渠道维度时仍按旧口径单段显示）
+    assert.deepEqual(fn({ activeTargets: [{ providerId: null, model: "m", count: 1, autoCount: 0 }] }), [
+      { providerId: null, model: "m", active: true, viaAuto: false },
     ]);
   });
 
@@ -1527,6 +1545,13 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.ok(panelHtml.includes(".badge-auto-tag"), "auto tag CSS");
     assert.ok(panelHtml.includes("renderRouteChainBoard();"), "board renderer wired into polling");
     assert.ok(panelHtml.includes("renderModelBadges(modelBadgesList,"), "badge helper wired into cards");
+  });
+
+  it("claude 卡头「模型: …」与胶囊同源（虚拟 auto 不会从卡头漏出）", () => {
+    const m = panelHtml.match(/function renderClaude\(c\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderClaude found in panel.html");
+    assert.ok(m[0].includes("capsuleTargetList(c)"), "卡头复用胶囊同一份过滤后的列表");
+    assert.ok(!m[0].includes("c.activeModels"), "卡头不再直接读未过滤的 activeModels");
   });
 
   it("右键菜单项文案为「删除」", () => {
@@ -2379,7 +2404,8 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
     assert.ok(m[1].includes('$("ccSessionTokens").textContent'), "汇总行 tokens 喂数");
     assert.ok(m[1].includes('$("ccSessionReqs").textContent'), "汇总行请求数喂数");
     assert.ok(m[1].includes('$("ccActiveTag").hidden = !isGenerating'), "正在生成胶囊门控");
-    assert.ok(m[1].includes('ccLastModelTag.textContent = "模型: " + activeList.join(", ")'), "模型胶囊走 activeModels");
+    assert.ok(m[1].includes('ccLastModelTag.textContent = "模型: " + capsuleLabels.join(", ")'),
+      "卡头走同源胶囊列表（虚拟 auto 已被过滤）");
   });
 
   it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {
