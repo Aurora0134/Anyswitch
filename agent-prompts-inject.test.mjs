@@ -59,11 +59,11 @@ describe("agent-prompts-inject endpoint table", () => {
 });
 
 describe("agent-prompts-inject block rendering and application", () => {
-  it("renders one ## title section per preset inside the managed markers", () => {
+  it("renders preset bodies only, never titles, inside the managed markers", () => {
     const block = buildManagedBlock([PRESET_A, PRESET_B]);
     assert.equal(
       block,
-      [MANAGED_BEGIN, "", "## 规则A", "", "先读文件再修改", "", "## 规则B", "", "第二行\n第三行", "", MANAGED_END].join("\n"),
+      [MANAGED_BEGIN, "", "先读文件再修改", "", "第二行\n第三行", "", MANAGED_END].join("\n"),
     );
   });
 

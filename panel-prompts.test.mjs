@@ -278,11 +278,12 @@ describe("createPromptsPanelService facade", () => {
     facade.setMaster(true);
     const text = readFileSync(join(homeDir, ".claude", "CLAUDE.md"), "utf8");
     assert.equal(text.startsWith(MANAGED_BEGIN), true);
-    assert.match(text, /## 规则A/);
+    assert.match(text, /内容/);
+    assert.doesNotMatch(text, /规则A/, "title must not be injected");
 
     facade.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false, "off override removes claude's block");
-    assert.match(readFileSync(join(homeDir, ".kimi-code", "AGENTS.md"), "utf8"), /## 规则A/);
+    assert.match(readFileSync(join(homeDir, ".kimi-code", "AGENTS.md"), "utf8"), /内容/);
     sync = facade.getState().sync;
     assert.deepEqual(sync.claude, { ok: true });
   });
