@@ -18,7 +18,7 @@
 | Token 趋势 | days=1 → 24×1h 本地整点桶；days=7 → 21×8h 桶（对齐本地 0/8/16 点）；末桶进行中。三口径：渠道=providerId / 端点=agentId / 模型=`providerId/model` 复合键。值=各桶 prompt+completion。 |
 | 模型用量卡 | **独立时间 seg（近 24h/近 7 日）**，不随全局 days seg；后端单次响应同时下发 `usage["1"]`/`usage["7"]` 双窗口，切换只本地重渲。窗口内单节点总量；**model 口径=裸模型名跨渠道合并**（与趋势的复合键不同，usage-stats.mjs buildUsage 注释）。**版式：卡体左右两栏**——左=环形图+图例排行榜，右=竖直柱状图（同源同排序同色，复用 `statsUsageColorOf(key, allNodes)`，「其他」灰同出场；柱从地面线生长，与环同一 `USAGE_REVEAL_MS`/easeOutCubic/同一 rAF，触发时机同一 `revealNow` 判定）。 |
 | TTFT | 仅 `ok===true && ttftMs>0` 的行；按桶 avg/p95（nearest-rank）+ 按模型 Top5。**非流式请求的 ttftMs 是全时长代理**（采集侧约定）。 |
-| TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**非流式流量因 ttft 代理恒被排除**（见 R-14）。 |
+| TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
 | 端点工时表 | 按 agentId：requests / tokens / sessions(30min 空档切段数 + sessionEnds) / workMs(busy 区间并集)。**legacy session 行 tokens 计入本卡但不进热力图/趋势**——两口径对不上是设计使然。 |
 
 布局：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行，2026-09-02 起；原左列「模型稳定性」卡已整卡移除，见 R-03）。
@@ -113,6 +113,18 @@ journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）
 - 钉住：usage-stats.test.mjs「channel display-name resolution」组；panel-stats.test.mjs「stats channel label wiring」组
 - 拍板：2026-09-03（配套写入端：server.mjs/openai-server.mjs /v1/messages startRequest meta 对普通渠道 wire-id 请求补 `wireIdToTargetId(body?.model)`，消除 claude per-launch 行 providerId 空串→「未知渠道」柱的回归根因）
 
+### R-17 TPS 出榜样本下限 10
+每模型有效生成样本（genSec ≥ 0.2s 的成功流式请求）不足 10 个时整行从 TPS 卡剔除——小样本的总量加权均值被单请求噪声主导，读数没有参考意义。数据层面剔除（usage-stats.mjs 聚合出口），不是前端隐藏；样本数徽标「· N 样本」仍在值文案里，达标的行照常标注。
+- 锚点：usage-stats.mjs `TPS_MIN_SAMPLES = 10` + 聚合出口 `.filter((e) => e.samples >= TPS_MIN_SAMPLES)`
+- 钉住：usage-stats.test.mjs「drops TPS rows with < 10 samples」（9 样本剔除 / 10 样本出榜边界）
+- 拍板：2026-09-06
+
+### R-18 统计页手动刷新：变暗反馈 + 重播生长动画
+页头刷新键点击后走 `.btn:disabled` 45% 变暗（与看板「重启」键、skills 刷新键同源，暗着即「还没好」，连点被挡），数据落地那次渲染**重播所有栏目的生长动画**——趋势图重置 `statsTrendPrev` 走 reveal 清屏左至右生长、模型用量重置 `statsUsageRevealed` 重播环+柱状图一笔画生长（与进 tab 首渲同款）；按钮亮串在动画播完之后（STATS_MORPH_MS=1500 覆盖环 1400ms）。30s 轮询保持静默 morph 不受影响；TTFT 小图/横条/表格无生长动画，随当次重渲自然刷新。
+- 锚点：panel.html `runStatsRefreshWithFeedback` + `refreshStatsState(opts.replay)`（重置标记在 renderStatsAll 之前）
+- 钉住：panel.test.mjs「今日概览卡头有手动刷新键：disabled 变暗反馈…」+「手动刷新重播生长动画」
+- 拍板：2026-09-06
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -120,9 +132,10 @@ journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）
 | 横条上限 85 | panel.html `STATS_BAR_FILL_MAX` | panel.test.mjs 断言（R-01） |
 | 趋势 Top N=5 | usage-stats.mjs `TOP_N` | usage-stats.test.mjs（R-02） |
 | TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
+| TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
 | 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.html `STATS_MORPH_MS` / `STATS_MORPH_EASE`（约 :11724；旧 `REVEAL_MS` 1300ms 正弦已移除） | — |
 | 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.html `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
-| 趋势动画路径分配：进 tab 首张/空态恢复/**切口径 seg** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.html renderStatsTrend 动画决策 + `statsSegScope` wiring（切口径先重置 `statsTrendPrev = null`） | panel.test.mjs「趋势图切口径 seg…不走 morph」 |
+| 趋势动画路径分配：进 tab 首张/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.html renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
 | journal 保留 90 天 | usage-journal.mjs retentionDays | usage-journal 测试 |
 | 监测页实例陈旧 2min | panel.html `INSTANCE_STALE_MS`（:5440） | 属监测页，统计页不用 |
 

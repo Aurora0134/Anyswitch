@@ -1616,14 +1616,42 @@ describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密�
     assert.equal(makeHeatLevel(0)(5), 0);
   });
 
-  it("今日概览卡头有手动刷新键且接到 refreshStatsState", () => {
+  it("今日概览卡头有手动刷新键：disabled 变暗反馈 + 数据落地后重播生长动画", () => {
     assert.ok(panelHtml.includes('id="statsRefreshBtn"'), "刷新按钮存在");
     assert.match(
       panelHtml,
-      /\$\("statsRefreshBtn"\)\.onclick = \(\) => refreshStatsState\(\)/,
-      "按钮点击调用 refreshStatsState（非静默：失败弹 toast）",
+      /\$\("statsRefreshBtn"\)\.onclick = \(\) => runStatsRefreshWithFeedback\(\)/,
+      "按钮点击走带反馈的刷新包装（暗到动画播完才亮）",
     );
     assert.ok(panelHtml.includes(".stats-header-actions { display: flex"), "卡头操作区并排布局规则存在");
+    const m = panelHtml.match(/async function runStatsRefreshWithFeedback\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "runStatsRefreshWithFeedback found");
+    const fn = m[1];
+    assert.ok(fn.includes("if (btn.disabled) return;"), "连点防护：暗着时重复点击直接忽略");
+    assert.ok(fn.includes("btn.disabled = true"), "点击即变暗（.btn:disabled 45%）");
+    assert.ok(fn.includes('refreshStatsState({ replay: true })'), "刷新带 replay 标记");
+    // 亮起串在 reveal 播完之后（STATS_MORPH_MS=1500，环 1400ms 先收尾），不提前
+    const awaitIdx = fn.indexOf("await refreshStatsState");
+    const waitIdx = fn.indexOf("setTimeout(r, STATS_MORPH_MS)");
+    const enableIdx = fn.indexOf("btn.disabled = false");
+    assert.ok(awaitIdx !== -1 && waitIdx !== -1 && awaitIdx < waitIdx && waitIdx < enableIdx,
+      "顺序：刷新 → 等动画播完 → 亮起");
+    assert.ok(fn.includes("finally"), "失败路径也恢复按钮（toast 由 refreshStatsState 弹）");
+  });
+
+  it("手动刷新重播生长动画：replay 重置趋势 reveal 标记与环揭示标记后再渲染", () => {
+    const m = panelHtml.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshStatsState found");
+    const body = m[1];
+    const replayIdx = body.indexOf("opts && opts.replay");
+    assert.ok(replayIdx !== -1, "replay option parsed");
+    // 重置必须落在 renderStatsAll 之前（否则当次渲染已按旧标记走 morph/静默）
+    const resetIdx = body.indexOf('if (replay) { statsTrendPrev = null; statsUsageRevealed = false; }');
+    const renderIdx = body.indexOf("renderStatsAll()");
+    assert.ok(resetIdx !== -1 && renderIdx !== -1 && resetIdx < renderIdx,
+      "replay resets statsTrendPrev + statsUsageRevealed before renderStatsAll");
+    // 30s 轮询仍是静默路径，不带 replay
+    assert.ok(panelHtml.includes("refreshStatsState({ silent: true })"), "poll stays silent (morph)");
   });
 });
 

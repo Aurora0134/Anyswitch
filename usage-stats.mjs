@@ -29,7 +29,8 @@
 //     ttft:       per-bucket ({ start, avg, p95 }) + per-model avg/p95
 //                 (nearest-rank) over successful rows that have a ttftMs,
 //     tps:        per-model generation TPS, completion / ((durationMs-ttftMs)/1000),
-//                 rows whose generation window is < 0.2s are excluded,
+//                 rows whose generation window is < 0.2s are excluded; models
+//                 with < 10 such samples are dropped from the list entirely,
 //     endpoints:  per agentId rows — sessions = activity points split into
 //                 segments at 30-minute gaps (journal session end rows each
 //                 count as one segment), workMs = union of busy intervals. }
@@ -49,6 +50,9 @@ const OTHER_KEY = "__other__";
 const OTHER_LABEL = "其他";
 const SESSION_GAP_MS = 30 * 60 * 1000;
 const TPS_MIN_GEN_SEC = 0.2;
+// TPS 行样本下限：低于 10 个生成段的模型不显示——小样本的总量加权均值
+// 被单请求噪声主导（一次慢请求就把均值拖走），读数没有参考意义。
+const TPS_MIN_SAMPLES = 10;
 const HOUR_MS = 60 * 60 * 1000;
 
 function num(value) {
@@ -451,6 +455,7 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
     }
     const tps = [...tpsMap.entries()]
       .map(([key, e]) => ({ key, avgTps: e.completion / e.genSec, samples: e.samples }))
+      .filter((e) => e.samples >= TPS_MIN_SAMPLES)
       .sort((a, b) => b.avgTps - a.avgTps || (a.key < b.key ? -1 : 1));
 
     // ── Endpoints: per agentId activity, sessions, and busy-time union ──

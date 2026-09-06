@@ -12619,8 +12619,28 @@ if (window.panelStartupController) panelStartupPlay();
     wireStatsSeg("statsSegUsageDim", (v) => { statsPrefs.usageDim = v; saveStatsPrefs(); renderStatsUsage({ replay: true }); });
     wireStatsSeg("statsSegUsageDays", (v) => { statsPrefs.usageDays = Number(v); saveStatsPrefs(); renderStatsUsage({ replay: true }); });
     syncStatsSegs();
-    // 手动刷新键：立即重拉一次（非静默——失败弹 toast；30s 自动轮询不受影响）
-    $("statsRefreshBtn").onclick = () => refreshStatsState();
+    // 手动刷新键：立即重拉一次（非静默——失败弹 toast；30s 自动轮询不受影响），
+    // 反馈与重播由 runStatsRefreshWithFeedback 承担
+    $("statsRefreshBtn").onclick = () => runStatsRefreshWithFeedback();
+  }
+
+  // 手动刷新的视觉反馈：按钮走 .btn:disabled 的 45% 变暗（与看板「重启」键、
+  // skills 刷新键同源，暗着即「还没好」），持续到数据落地后各栏目生长动画
+  // 播完才亮起。重播=进 tab 首渲同款：趋势图清屏 reveal 左至右生长（重置
+  // statsTrendPrev）+ 用量环/柱状图一笔画生长（重置 statsUsageRevealed）；
+  // TTFT 小图无动画参数（渲染器收到 undefined anim 直接画终态），随本次重渲
+  // 自然刷新。等待串在刷新之后而不是与请求并行取最大值：reveal 只能在数据
+  // 落地那次渲染起跑，从点击起算会让亮起早于动画收尾一个请求耗时。
+  async function runStatsRefreshWithFeedback() {
+    const btn = $("statsRefreshBtn");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await refreshStatsState({ replay: true });
+      await new Promise((r) => setTimeout(r, STATS_MORPH_MS));
+    } finally {
+      btn.disabled = false;
+    }
   }
 
   // 进入 tab 拉一次；停留期间 30s 轮询（页面隐藏时暂停，离开 tab 停止）
@@ -12661,6 +12681,7 @@ if (window.panelStartupController) panelStartupPlay();
 
   async function refreshStatsState(opts) {
     const silent = !!(opts && opts.silent);
+    const replay = !!(opts && opts.replay); // 手动刷新：数据落地后重播各栏目生长动画
     loadStatsPrefs(); // 兜底：restoreView 可能在 initStatsTab 之前触发首次取数
     const seq = ++statsReqSeq;
     const reqDays = statsPrefs.days; // 发起时刻的窗口；响应落地前用户可能又切了 seg
@@ -12670,6 +12691,9 @@ if (window.panelStartupController) panelStartupPlay();
       // 后到会覆盖新选择的窗口数据）。days 由后端回显（clampStatDays）。
       if (seq !== statsReqSeq || res.days !== statsPrefs.days) return;
       statsData = res;
+      // 重播标记必须在 renderStatsAll 之前重置：趋势图据此走 reveal 清屏生长
+      // （否则沿用上一帧走 morph 形变），用量环据此重播一笔画揭示
+      if (replay) { statsTrendPrev = null; statsUsageRevealed = false; }
       renderStatsAll();
     } catch (err) {
       if (seq !== statsReqSeq) return; // 已有更新请求在飞：旧失败不弹 toast
@@ -13317,9 +13341,9 @@ if (window.panelStartupController) panelStartupPlay();
     return p >= 0.1 ? Math.round(p * 100) + "%" : (p * 100).toFixed(1) + "%";
   }
 
-  // 揭示动画触发语义：进 tab 首渲（enterStatsView 重置标记）或切换本卡的
-  // 粒度/时间 seg（opts.replay）时播一次；reduced-motion 永远跳过。图例显隐、
-  // 30s 轮询、手动刷新走静默重渲（reveal=0 → 环与柱状图直接画满）。
+  // 揭示动画触发语义：进 tab 首渲（enterStatsView 重置标记）、切换本卡的
+  // 粒度/时间 seg（opts.replay）、手动刷新（refreshStatsState 重置标记）时播一次；
+  // reduced-motion 永远跳过。图例显隐与 30s 轮询走静默重渲（reveal=0 → 环与柱状图直接画满）。
   function revealNow(replay) {
     const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const reveal = (replay || !statsUsageRevealed) && !reduceMotion;

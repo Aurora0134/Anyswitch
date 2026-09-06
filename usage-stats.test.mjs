@@ -313,9 +313,11 @@ describe("usage-stats aggregation", () => {
 
   it("excludes sub-0.2s generation windows from TPS", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
+    // genSec = (2000-500)/1000 = 1.5s → included, 300 completion tokens.
+    // 满 10 样本才出榜（下方小样本用例钉下限）。
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ completion: 300, durationMs: 2000, ttftMs: 500, ok: true })));
     writeRequests(0, [
-      // genSec = (2000-500)/1000 = 1.5s → included, 300 completion tokens.
-      req({ completion: 300, durationMs: 2000, ttftMs: 500, ok: true }),
       // genSec = (600-500)/1000 = 0.1s → excluded.
       req({ completion: 9999, durationMs: 600, ttftMs: 500, ok: true }),
       // failed rows never count.
@@ -324,8 +326,23 @@ describe("usage-stats aggregation", () => {
     const s = stats.getState({ days: 7 });
     assert.equal(s.tps.length, 1);
     assert.equal(s.tps[0].key, "prov-a/m1");
-    assert.equal(s.tps[0].samples, 1);
+    assert.equal(s.tps[0].samples, 10);
     assert.equal(s.tps[0].avgTps, 200); // 300 / 1.5
+    cleanup();
+  });
+
+  it("drops TPS rows with < 10 samples (small-sample means are noise-dominated)", () => {
+    const { stats, writeRequests, cleanup } = makeHarness();
+    // 9 个合格样本 → 不到 10 样本下限，整行不显示
+    writeRequests(0, Array.from({ length: 9 }, () =>
+      req({ completion: 300, durationMs: 2000, ttftMs: 500, ok: true })));
+    // 另一模型恰好 10 样本 → 出榜
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ model: "m2", completion: 150, durationMs: 2000, ttftMs: 500, ok: true })));
+    const s = stats.getState({ days: 7 });
+    assert.deepEqual(s.tps.map((r) => r.key), ["prov-a/m2"]);
+    assert.equal(s.tps[0].samples, 10);
+    assert.equal(s.tps[0].avgTps, 100); // 150 / 1.5
     cleanup();
   });
 
