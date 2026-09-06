@@ -69,6 +69,17 @@ export const CHAIN_DEMOTE_AFTER_FAILURES = 2;
 // carries its own concrete bound model instead.
 export const AUTO_MODEL = "auto";
 
+// The picker-visible id for AUTO_MODEL on the anthropic protocol path. Claude
+// Code's gateway model discovery keeps only catalog entries whose id matches
+// /(claude|anthropic)/i, so the bare "auto" id never reaches its /model
+// picker; every real wire id survives that filter only because it starts with
+// the "anthropic/" prefix. The alias carries the same prefix for the same
+// reason. It is deliberately NOT unpackable — a single segment after the
+// prefix can never be produced by a provider/model pair (provider ids contain
+// no '/'), so it can never collide with a real wire id. planChainMessages
+// accepts it and normalizes the body back to AUTO_MODEL before planning.
+export const AUTO_MODEL_ANTHROPIC_ID = "anthropic/auto";
+
 // The chain entry for an endpoint, or null. The shape is fixed with the store
 // layer: store.routingChains is a top-level map
 // endpointId -> { chain: [{ node, model }, ...], enabled?: boolean }.

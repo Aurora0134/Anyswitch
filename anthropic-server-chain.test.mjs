@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { createHandler } from "./handler.mjs";
 import { createRelayServer, listenLoopback } from "./server.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
+import { AUTO_MODEL, AUTO_MODEL_ANTHROPIC_ID } from "./chain-routing.mjs";
+import { unpackWireId } from "./wire-id.mjs";
 
 const TOKEN = "test-token-anthropic-chain";
 
@@ -278,27 +280,45 @@ describe("handleModels auto catalog entry", () => {
     });
   }
 
-  it("appends the auto virtual model when the caller's endpoint has a chain", async () => {
+  it("appends the auto virtual model under its anthropic alias when the caller's endpoint has a chain", async () => {
     const handler = makeHandler();
     const result = await handler.handleModels({ authorization: TOKEN }, "claude");
     assert.equal(result.status, 200);
-    const auto = result.body.data.find((entry) => entry.id === "auto");
-    assert.ok(auto, "the catalog must list the auto virtual model");
+    const auto = result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID);
+    assert.ok(auto, "the catalog must list the auto virtual model under the alias Claude Code's filter keeps");
     assert.equal(auto.type, "model");
+    assert.equal(auto.display_name, "[claude] 自动路由 (auto)");
+    assert.equal(
+      result.body.data.find((entry) => entry.id === AUTO_MODEL),
+      undefined,
+      "the bare auto id must not be advertised on the anthropic path",
+    );
   });
 
   it("omits auto when no agentId is given (unidentifiable caller)", async () => {
     const handler = makeHandler();
     const result = await handler.handleModels({ authorization: TOKEN });
     assert.equal(result.status, 200);
-    assert.equal(result.body.data.find((entry) => entry.id === "auto"), undefined);
+    assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined);
+    assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL), undefined);
   });
 
   it("omits auto for an endpoint without a chain", async () => {
     const handler = makeHandler(STORE_NO_CHAIN);
     const result = await handler.handleModels({ authorization: TOKEN }, "claude");
     assert.equal(result.status, 200);
-    assert.equal(result.body.data.find((entry) => entry.id === "auto"), undefined);
+    assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined);
+    assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL), undefined);
+  });
+
+  it("the alias survives Claude Code's gateway discovery filter and collides with no wire id", async () => {
+    // The filter below is the exact predicate extracted from claude.exe 2.1.x:
+    // catalog entries whose id fails it never reach the /model picker. Pin the
+    // contract so a future rename can't silently re-hide auto.
+    assert.ok(/(claude|anthropic)/i.test(AUTO_MODEL_ANTHROPIC_ID));
+    // A single segment after the prefix is unpackable, so no provider/model
+    // pair can ever produce the same id (provider ids contain no '/').
+    assert.equal(unpackWireId(AUTO_MODEL_ANTHROPIC_ID, STORE).ok, false);
   });
 });
 
@@ -330,6 +350,24 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
       assert.equal(body.content[0].text, "A says hi");
       assert.deepEqual(calls, ["chan-a"]);
       assert.equal(bodies[0].model, "claude-a", "the upstream receives the node's bound model, not auto");
+    });
+  });
+
+  it("(happy, alias) the anthropic catalog alias walks the same chain", async () => {
+    // Claude Code's /model picker can only send AUTO_MODEL_ANTHROPIC_ID (its
+    // discovery filter hides the bare id); the relay must treat it as "auto".
+    const { upstreamFetch, calls, bodies } = memberRouter({
+      "chan-a": () => nonStreamJson("A says hi"),
+    });
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+
+    await withPerLaunch(deps, async (port) => {
+      const res = await postMessages(port, { model: AUTO_MODEL_ANTHROPIC_ID });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.content[0].text, "A says hi");
+      assert.deepEqual(calls, ["chan-a"]);
+      assert.equal(bodies[0].model, "claude-a", "the upstream receives the node's bound model, not the alias");
     });
   });
 
@@ -505,7 +543,7 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
 
       const models = await getModels(port);
       const catalog = await models.json();
-      assert.ok(catalog.data.find((entry) => entry.id === "auto"), "the kimi chain offers the auto virtual model");
+      assert.ok(catalog.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), "the kimi chain offers the auto virtual model");
     });
   });
 
@@ -526,7 +564,7 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
 
       const models = await getModels(port);
       const catalog = await models.json();
-      assert.equal(catalog.data.find((entry) => entry.id === "auto"), undefined);
+      assert.equal(catalog.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined);
     });
   });
 
@@ -604,7 +642,7 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
       const res = await getModels(port);
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.ok(body.data.some((entry) => entry.id === "auto"), "per-launch catalog must offer auto");
+      assert.ok(body.data.some((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), "per-launch catalog must offer auto");
     });
   });
 
@@ -616,7 +654,8 @@ describe("per-launch relay /v1/messages chain routing (model auto)", () => {
       const res = await getModels(port);
       assert.equal(res.status, 200);
       const body = await res.json();
-      assert.equal(body.data.find((entry) => entry.id === "auto"), undefined);
+      assert.equal(body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined);
+      assert.equal(body.data.find((entry) => entry.id === AUTO_MODEL), undefined);
     });
   });
 });
