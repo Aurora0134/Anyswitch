@@ -232,8 +232,7 @@
 :root[data-style="sepia"] .telemetry-card,
 :root[data-style="sepia"] .session-table-wrapper,
 :root[data-style="sepia"] .alert-box,
-:root[data-style="sepia"] .empty-hint,
-:root[data-style="sepia"] .agy-fold {
+:root[data-style="sepia"] .empty-hint {
   border-radius: 3px;
 }
 :root[data-style="sepia"] .telemetry-label {
@@ -331,8 +330,6 @@
   animation: sepia-modal-in 160ms var(--ease-out);
 }
 :root[data-style="sepia"] .modal-number,
-:root[data-style="sepia"] .agy-select,
-:root[data-style="sepia"] .agy-combo-input,
 :root[data-style="sepia"] .skills-path-input,
 :root[data-style="sepia"] .skills-repo-path,
 :root[data-style="sepia"] .skills-dup-warn,
@@ -340,14 +337,12 @@
 :root[data-style="sepia"] .skills-body-view .md-code {
   border-radius: 2px;
 }
-:root[data-style="sepia"] .agy-combo-list,
 :root[data-style="sepia"] .skills-ctx-menu {
   border-radius: 3px;
 }
 
 /* Skills 视图：分区小标题用宽字距制造编辑栏题感 */
-:root[data-style="sepia"] .skills-group-title,
-:root[data-style="sepia"] .agy-group-title {
+:root[data-style="sepia"] .skills-group-title {
   font-size: 10px;
   letter-spacing: 0.12em;
 }

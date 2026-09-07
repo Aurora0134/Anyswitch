@@ -1,5 +1,5 @@
-// Shared keep-alive retry backoff for all four relay pipelines
-// (openai-server.mjs x2, server.mjs, gemini-server.mjs).
+// Shared keep-alive retry backoff for all three relay pipelines
+// (openai-server.mjs x2, server.mjs).
 //
 // Pure and injectable-rng so tests can pin exact values: delay for the nth
 // retry (1-based) is backoffMs * 2^(n-1) scaled by a jitter factor in

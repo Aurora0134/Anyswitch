@@ -198,7 +198,7 @@ describe("resident relay /v1/messages pool routing: streaming", () => {
       const stability = await collector.getModelStability();
       // The anthropic tracker keys the row on the bare model id (the wire
       // "anthropic/" prefix is endpoint identity spoofing, stripped at
-      // startRequest), same as the gemini/openai paths.
+      // startRequest), same as the openai path.
       const failed = stability.models.find((x) => x.provider === "test-pool" && x.model === "claude-pool");
       assert.ok(failed, "stability must record the failed attempt against the pool");
       assert.equal(failed.total, 2, "attempt-level: the failed member attempt and the recovery both count");

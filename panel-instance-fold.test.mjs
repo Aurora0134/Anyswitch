@@ -147,13 +147,13 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
     const buffers = {
       "kimi:a1": { tps: [{ t: 0, v: 10 }, { t: 0, v: 11 }], cache: [{ t: 0, v: 80 }], ttft: [{ t: 0, v: 0.4 }], sparkHistory: { ttft: [0.3, 0.42] } },
       "kimi:a2": { tps: [{ t: 0, v: 5 }], cache: [], ttft: [] },
-      "agy:x": { tps: [{ t: 0, v: 1 }], cache: [{ t: 0, v: 2 }], ttft: [{ t: 0, v: 3 }] },
+      "pi:x": { tps: [{ t: 0, v: 1 }], cache: [{ t: 0, v: 2 }], ttft: [{ t: 0, v: 3 }] },
     };
     const calls = [];
     const foldBtn = {};
     const card = { querySelector: (sel) => (sel.includes("agent-detail-fold") ? foldBtn : null) };
     const gridEls = ["a1", "a2"].map((iid) => ({ dataset: { instanceId: iid }, closest: () => card }));
-    gridEls.push({ dataset: { instanceId: "x" }, closest: () => ({ querySelector: () => null }) }); // agy 卡无本栏折叠钮，必须跳过
+    gridEls.push({ dataset: { instanceId: "x" }, closest: () => ({ querySelector: () => null }) }); // 无本栏折叠钮的卡必须跳过
     const foldDoc = { querySelectorAll: (sel) => (sel.startsWith(".instance-telemetry-grid") ? gridEls : []) };
     const fn = new Function("document", "instanceSparkBuffers", "sparkValues", "updateSparkline", `return (${m[0]});`)(
       foldDoc,
@@ -165,7 +165,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
     assert.deepEqual(calls.map((c) => c.id), [
       "kimiInstSparkTps-a1", "kimiInstSparkCache-a1", "kimiInstSparkTtft-a1",
       "kimiInstSparkTps-a2", "kimiInstSparkCache-a2", "kimiInstSparkTtft-a2",
-    ], "kimi 两实例各三条，agy 不串栏");
+    ], "kimi 两实例各三条，pi 不串栏");
     const ttft = calls.find((c) => c.id === "kimiInstSparkTtft-a1");
     assert.deepEqual(ttft.dataPoints, [0.42], "ttft 补绘用 buffer 暂存的权威历史（与渲染时口径一致）");
     const cache = calls.find((c) => c.id === "kimiInstSparkCache-a1");

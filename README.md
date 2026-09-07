@@ -8,7 +8,7 @@
   <a href="#english"><b>English</b></a> · <a href="#中文"><b>中文</b></a>
 </p>
 
-A local AI credential relay for Windows: it funnels multiple OpenAI-compatible upstreams into a single loopback relay on 127.0.0.1, served through three protocol frontends — OpenAI-native, Anthropic Messages (via translation), and Gemini. Upstream API keys are sealed with Windows DPAPI and never leave your machine.Suitable for developers who mainly use the aggregate hub model or use multiple harness tools at the same time.
+A local AI credential relay for Windows: it funnels multiple OpenAI-compatible upstreams into a single loopback relay on 127.0.0.1, served through two protocol frontends — OpenAI-native and Anthropic Messages (via translation). Upstream API keys are sealed with Windows DPAPI and never leave your machine.Suitable for developers who mainly use the aggregate hub model or use multiple harness tools at the same time.
 
 ---
 
@@ -18,12 +18,12 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 - **Credentials stay on your machine** — upstream API keys are sealed per-provider with Windows DPAPI (entropy `ApiCred|DPAPI|v2|<ProviderId>`), decrypted only in memory at request time, never cached, never written to disk in plaintext.
 - **Single source of truth** — one v2 `store.json` describes all providers, models, and routing metadata; it contains no secrets, only a controlled `credentialFile` reference.
-- **Three protocol frontends, one relay** — the loopback relay on `127.0.0.1:47821` serves OpenAI-compatible requests natively (`/openai/<provider>/v1/...`), Anthropic Messages requests via translation, and Gemini requests (`/v1beta/models/...`) via translation, so clients of all three protocol families can share the same credential store.
-- **Loopback-only, token-authenticated** — the relay refuses non-loopback peers and authenticates each request: Anthropic-protocol clients get a one-shot 256-bit session token that lives and dies with the launch; OpenAI/Gemini-protocol clients share a persistent relay token stored under the data root.
+- **Two protocol frontends, one relay** — the loopback relay on `127.0.0.1:47821` serves OpenAI-compatible requests natively (`/openai/<provider>/v1/...`) and Anthropic Messages requests via translation, so clients of both protocol families can share the same credential store.
+- **Loopback-only, token-authenticated** — the relay refuses non-loopback peers and authenticates each request: Anthropic-protocol clients get a one-shot 256-bit session token that lives and dies with the launch; OpenAI-protocol clients share a persistent relay token stored under the data root.
 - **Provider pools & route chains** — group 2–5 providers into a pool that fans a request out across its members with sticky failover; or build a per-endpoint route chain that serves the virtual model `auto`, walking channels and pools in order and backing off to the next node on failure.
 - **Multi-BaseURL failover** — per-provider `fallbackURLs` with a 180s generation budget per attempt, exponential backoff, and real upstream 5xx pass-through.
 - **Web control panel** — a standalone, always-available panel on `127.0.0.1:47820` for managing providers, sealing keys, monitoring, and usage statistics.
-- **Client launchers** — per-client launchers inject the relay endpoint and auth token into eight supported coding agents (see below).
+- **Client launchers** — per-client launchers inject the relay endpoint and auth token into seven supported coding agents (see below).
 - **Zero dependencies** — plain Node.js ESM, no `npm install` required.
 
 ### Prerequisites
@@ -73,7 +73,6 @@ Notes:
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into `~/.dsh/settings.yaml`. |
 | Reasonix | OpenAI | `node reasonix-launcher.mjs [reasonix args]` — merges managed providers into `%APPDATA%\reasonix\config.toml`. |
-| Antigravity (agy) | Gemini | `node antigravity-launcher.mjs [agy args]` — points agy at the resident relay (`GOOGLE_GEMINI_BASE_URL` + `GEMINI_API_KEY`); the hardcoded Gemini model slugs are bound to store provider/model pairs via an alias table managed in the panel. |
 
 For the config-merging clients (Kimi Code, Pi, ZCode, DSH, Reasonix), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
 
@@ -81,7 +80,7 @@ For the config-merging clients (Kimi Code, Pi, ZCode, DSH, Reasonix), the reside
 
 The panel (served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down) has four tabs:
 
-- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for all eight clients.
+- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for all seven clients.
 - **Skills 管理 (Skills)** — one master skills repo; import skills from a directory or zip, deploy/undeploy them to agent endpoints, and surface endpoint anomalies.
 - **渠道管理 (Channels)** — provider management (add, rotate key, delete, model filter) with DPAPI key sealing; model discovery refresh plus manual model add/remove; pools (号池) and route-chain (自动路由) editing; manual **同步到端点** sync.
 - **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
@@ -113,7 +112,7 @@ Each provider's key is sealed with Windows DPAPI under your user account and sto
 It stays down — crash-without-self-healing is a deliberate design choice, so a fault can't be masked by a restart loop. The control panel is a separate process on port 47820 and remains fully usable; restart the relay from the Board tab. If you enable autostart, the `AnyswitchWatchdog` scheduled task also revives the relay automatically when a coding agent appears.
 
 **Which upstreams are supported?**
-Any OpenAI-compatible endpoint — the store schema fixes `protocol: "openai-compatible"`. The upstream only needs chat completions; a `GET /v1/models` endpoint is used for model discovery, but you can enter model IDs manually when it is missing. Anthropic-protocol and Gemini-protocol clients are served by translating to that same OpenAI-compatible upstream.
+Any OpenAI-compatible endpoint — the store schema fixes `protocol: "openai-compatible"`. The upstream only needs chat completions; a `GET /v1/models` endpoint is used for model discovery, but you can enter model IDs manually when it is missing. Anthropic-protocol clients are served by translating to that same OpenAI-compatible upstream.
 
 **How does multi-BaseURL failover behave?**
 A provider can list `fallbackURLs` behind its primary `baseURL`. Each attempt gets a 180s generation budget with exponential backoff; 4xx is terminal (your request's problem, passed through), while 5xx moves to the next address. When every address is exhausted you get the last real upstream 5xx, or 502 for pure transport failures.
@@ -146,18 +145,18 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 
 ## 中文
 
-一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供三种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）、Gemini（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。适用于以聚合中转站模型为主力或同时使用多个harness工具的开发者。
+一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供两种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。适用于以聚合中转站模型为主力或同时使用多个harness工具的开发者。
 
 ### 特性
 
 - **凭据不出本机** — 上游 API Key 用 Windows DPAPI 按提供方熵封存（`ApiCred|DPAPI|v2|<ProviderId>`），仅在请求时内存中即时解密，从不缓存、从不落盘明文。
 - **store 单一真相源** — 一份 v2 `store.json` 描述全部 provider/模型/路由元数据；不含任何秘密，只保留受控的 `credentialFile` 引用。
-- **三协议前端，一个 relay** — 环回 relay（`127.0.0.1:47821`）同时承载：OpenAI 兼容原生转发（`/openai/<provider>/v1/...`）、Anthropic Messages 协议转换、Gemini 协议转换（`/v1beta/models/...`），三个协议族的客户端共享同一份凭据 store。
-- **仅环回监听 + token 鉴权** — relay 拒绝非环回连接并逐请求鉴权：Anthropic 协议客户端拿随启动生灭的一次性 256-bit 会话 token；OpenAI/Gemini 协议客户端共用存放在数据目录下的常驻 relay token。
+- **双协议前端，一个 relay** — 环回 relay（`127.0.0.1:47821`）同时承载：OpenAI 兼容原生转发（`/openai/<provider>/v1/...`）、Anthropic Messages 协议转换，两个协议族的客户端共享同一份凭据 store。
+- **仅环回监听 + token 鉴权** — relay 拒绝非环回连接并逐请求鉴权：Anthropic 协议客户端拿随启动生灭的一次性 256-bit 会话 token；OpenAI 协议客户端共用存放在数据目录下的常驻 relay token。
 - **渠道池与路由链** — 把 2–5 个 provider 组成号池，请求在成员间粘性分发、故障自动切换；或为端点配置路由链，用虚拟模型 `auto` 按渠道/号池顺序逐跳路由，失败自动退避下一节点。
 - **多 BaseURL 无感退避** — provider 级 `fallbackURLs`，每次尝试 180s 生成预算、指数退避、真实透传上游 5xx。
 - **Web 控制面板** — 独立常驻面板 `127.0.0.1:47820`，管理 provider、封存 Key、监测与使用统计。
-- **客户端启动器** — 各客户端启动器自动注入 relay 端点与鉴权 token，支持 8 家 coding agent（见下表）。
+- **客户端启动器** — 各客户端启动器自动注入 relay 端点与鉴权 token，支持 7 家 coding agent（见下表）。
 - **零依赖** — 纯 Node.js ESM，无需 `npm install`。
 
 ### 前置条件
@@ -207,7 +206,6 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进 `~/.dsh/settings.yaml`。 |
 | Reasonix | OpenAI | `node reasonix-launcher.mjs [reasonix 参数]` — 合并托管 provider 进 `%APPDATA%\reasonix\config.toml`。 |
-| Antigravity (agy) | Gemini | `node antigravity-launcher.mjs [agy 参数]` — 通过 `GOOGLE_GEMINI_BASE_URL` + `GEMINI_API_KEY` 指向常驻 relay；agy 硬编码的 Gemini 模型 slug 经别名表绑定到 store 的 provider/模型，绑定在面板中管理。 |
 
 对会合并配置的客户端（Kimi Code、Pi、ZCode、DSH、Reasonix），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
 
@@ -215,7 +213,7 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 
 面板由独立面板宿主承载（与 relay 解耦，relay 停止/崩溃时面板仍可用），共四个 tab：
 
-- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部 8 家端点的实例行。
+- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部 7 家端点的实例行。
 - **Skills 管理** — 单一 skills 主仓库：从目录或 zip 导入 skill、部署/解除到各 agent 端点、端点异常提示。
 - **渠道管理** — provider 管理（新增、轮换 Key、删除、模型过滤）并 DPAPI 封存 Key；模型发现刷新与手动增删模型；号池与路由链（自动路由）编辑；手动 **同步到端点**。
 - **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。
@@ -247,7 +245,7 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 它会保持停止——崩溃不自愈是刻意设计，避免故障被重启循环掩盖。控制面板是 47820 上的独立进程，照常可用，在看板 tab 重启 relay 即可。如果开了开机自启，`AnyswitchWatchdog` 计划任务还会在 coding agent 出现时自动拉起 relay。
 
 **支持哪些上游？**
-任何 OpenAI 兼容端点——store schema 固定 `protocol: "openai-compatible"`。上游只需提供 chat completions；`GET /v1/models` 用于模型发现，缺了可以手动填模型 ID。Anthropic 协议和 Gemini 协议的客户端由 relay 转换到这同一个 OpenAI 兼容上游。
+任何 OpenAI 兼容端点——store schema 固定 `protocol: "openai-compatible"`。上游只需提供 chat completions；`GET /v1/models` 用于模型发现，缺了可以手动填模型 ID。Anthropic 协议的客户端由 relay 转换到这同一个 OpenAI 兼容上游。
 
 **多 BaseURL 的退避行为是怎样的？**
 provider 可在主 `baseURL` 后排 `fallbackURLs`。每次尝试有 180s 生成预算并按指数退避；4xx 视为终态（请求自身的问题，原样透传），5xx 切下一个地址。所有地址耗尽时透传最后一个真实上游 5xx，纯传输失败返回 502。

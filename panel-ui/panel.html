@@ -299,8 +299,7 @@
   .panel-card.card-collapsed .card-body { padding: 14px 18px; }
   .panel-card.card-collapsed .empty-hint { display: none; }
   .panel-card.card-collapsed .agent-top-bar { margin-bottom: 0; }
-  .panel-card.card-collapsed .agy-map { margin-top: 14px; }
-  /* 端点详情折叠钮：zcode/dsh/reasonix 走旧 id 接线，claude/kimi/opencode/pi/agy 走
+  /* 端点详情折叠钮：zcode/dsh/reasonix 走旧 id 接线，claude/kimi/opencode/pi 走
      data-prefix 事件委托；运行中默认收起，未运行（card-collapsed）时藏钮 */
   .agent-detail-fold {
     border: none; background: transparent; color: var(--text-3); cursor: pointer;
@@ -310,7 +309,7 @@
   .panel-card.card-collapsed .agent-detail-fold { display: none; }
   /* 收起态简要信息栏：与下方全局汇总行保持四宫格原有的 14px 间距 */
   .agent-detail-brief { margin-bottom: 14px; }
-  /* 多实例栏（claude/kimi/opencode/pi/agy）实例计数胶囊：与栏头 title 同行
+  /* 多实例栏（claude/kimi/opencode/pi）实例计数胶囊：与栏头 title 同行
      （同行布局由 .agent-headings 的 flex+gap 提供），复用 badge-ok 绿色调，
      仅运行中由 setInstanceCount 显示；未运行（card-collapsed）兜底隐藏 */
   .instance-count-badge {
@@ -652,70 +651,6 @@
   .modal-foot {
     display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
   }
-
-  /* Antigravity 模型映射（主面板卡片内） */
-  .agy-map { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
-  .agy-group-title { font-size: 12px; font-weight: 700; color: var(--text-2); margin-bottom: 8px; letter-spacing: 0.02em; }
-  .agy-group-note { font-weight: 500; color: var(--text-4); }
-  .agy-fold {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md, 8px);
-    background: var(--surface-sunken);
-    margin-bottom: 14px;
-  }
-  .agy-fold-toggle {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    width: 100%; background: none; border: none; cursor: pointer;
-    padding: 10px 12px; text-align: left; color: inherit;
-  }
-  .agy-fold-toggle:hover { background: var(--surface-hover); border-radius: var(--radius-md, 8px); }
-  .agy-fold.open .agy-fold-toggle { border-radius: 8px 8px 0 0; }
-  .agy-fold-toggle .agy-group-title { margin: 0; }
-  .agy-fold-chevron {
-    flex: 0 0 auto; font-size: 11px; color: var(--text-3);
-    font-family: var(--font-sans, inherit); font-weight: 600;
-  }
-  .agy-fold-body { display: none; padding: 0 12px 10px; border-top: 1px solid var(--divider); }
-  .agy-fold.open .agy-fold-body { display: block; }
-  .agy-fold.open .agy-fold-chevron { color: var(--accent); }
-  .agy-row {
-    display: flex; align-items: center; gap: 12px;
-    padding: 8px 0; border-top: 1px solid var(--divider);
-  }
-  .agy-row:first-child { border-top: none; }
-  .agy-row-label { flex: 0 0 210px; min-width: 0; }
-  .agy-row-label .name { font-size: 13px; font-weight: 600; color: var(--text); font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; }
-  .agy-row-label .hint { font-size: 11px; color: var(--text-4); margin-top: 1px; }
-  .agy-select, .agy-combo-input {
-    flex: 1; min-width: 0; width: 100%;
-    background: var(--surface-sunken); border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12.5px;
-    font-family: var(--font-mono); padding: 7px 9px; outline: none;
-    transition: border-color 120ms var(--ease-out);
-  }
-  .agy-select:focus, .agy-combo-input:focus, .agy-combo.open .agy-combo-input { border-color: var(--accent); }
-  .agy-select:disabled { opacity: 0.55; cursor: not-allowed; }
-  .agy-select.invalid { border-color: var(--danger); }
-  .agy-combo { position: relative; flex: 1; min-width: 0; }
-  .agy-combo-list {
-    position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 50;
-    background: var(--surface-glass); border: 1px solid var(--border-strong);
-    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
-    border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-lg);
-    max-height: 220px; overflow-y: auto; display: none; padding: 4px;
-  }
-  .agy-combo.open .agy-combo-list { display: block; }
-  .agy-combo-item { display: block; width: 100%; text-align: left; background: none; border: none; cursor: pointer;
-    font-family: var(--font-mono); font-size: 12px; color: var(--text);
-    padding: 6px 8px; border-radius: 5px; line-height: 1.4;
-  }
-  .agy-combo-item:hover, .agy-combo-item.hover { background: var(--surface-hover); }
-  .agy-combo-item.current .prov { color: var(--accent); font-weight: 600; }
-  .agy-combo-item .prov { color: var(--text-3); }
-  .agy-combo-empty { padding: 10px 8px; font-size: 12px; color: var(--text-4); text-align: center; }
-  .agy-status { font-size: 12px; color: var(--text-3); flex: 1; min-width: 0; }
-  .agy-status.err { color: var(--danger); }
-  .agy-save-bar { display: flex; align-items: center; gap: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
 
   /* Skills 视图：Tab 栏（header 内嵌 segmented，样式对齐 seg-control/seg-btn） */
   .view-tabs {
@@ -1874,19 +1809,12 @@
   box-shadow: 0 0 8px rgba(34, 211, 238, 0.22);
 }
 
-/* Antigravity 映射 / Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
-:root[data-style="neon"] .agy-fold { border-radius: var(--radius-md); }
-:root[data-style="neon"] .agy-select,
-:root[data-style="neon"] .agy-combo-input,
+/* Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
 :root[data-style="neon"] .skills-path-input,
 :root[data-style="neon"] .skills-repo-path,
 :root[data-style="neon"] .skills-diff-list {
   border-radius: var(--radius-sm);
 }
-:root[data-style="neon"] .agy-combo-list { border-radius: var(--radius-md); }
-:root[data-style="neon"] .agy-select:focus,
-:root[data-style="neon"] .agy-combo-input:focus,
-:root[data-style="neon"] .agy-combo.open .agy-combo-input,
 :root[data-style="neon"] .skills-path-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 8px rgba(34, 211, 238, 0.2);
@@ -2252,17 +2180,10 @@
 :root[data-style="saas"] .session-table-wrapper,
 :root[data-style="saas"] .alert-box,
 :root[data-style="saas"] .empty-hint,
-:root[data-style="saas"] .agy-fold,
 :root[data-style="saas"] .skills-repo-path,
 :root[data-style="saas"] .skills-diff-list,
 :root[data-style="saas"] .skills-dup-warn {
   border-radius: var(--radius-md);
-}
-:root[data-style="saas"] .agy-fold-toggle:hover {
-  border-radius: var(--radius-md);
-}
-:root[data-style="saas"] .agy-fold.open .agy-fold-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 :root[data-style="saas"] .skills-body-view .md-code {
   border-radius: var(--radius-sm);
@@ -2323,21 +2244,15 @@
 
 /* 输入控件：圆角统一 + 聚焦柔光环 */
 :root[data-style="saas"] .modal-number,
-:root[data-style="saas"] .agy-select,
-:root[data-style="saas"] .agy-combo-input,
 :root[data-style="saas"] .skills-path-input {
   border-radius: var(--radius-sm);
 }
 :root[data-style="saas"] .modal-number:focus,
-:root[data-style="saas"] .agy-select:focus,
-:root[data-style="saas"] .agy-combo-input:focus,
-:root[data-style="saas"] .agy-combo.open .agy-combo-input,
 :root[data-style="saas"] .skills-path-input:focus {
   box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：玻璃底 + 圆角 + 柔阴影 + 高光 */
-:root[data-style="saas"] .agy-combo-list,
 :root[data-style="saas"] .skills-ctx-menu {
   border-radius: var(--radius-md);
   background: var(--surface-glass);
@@ -2345,7 +2260,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="saas"] .agy-combo-item,
 :root[data-style="saas"] .skills-ctx-item {
   border-radius: 6px;
 }
@@ -2771,17 +2685,10 @@
 :root[data-style="aurora"] .session-table-wrapper,
 :root[data-style="aurora"] .alert-box,
 :root[data-style="aurora"] .empty-hint,
-:root[data-style="aurora"] .agy-fold,
 :root[data-style="aurora"] .skills-repo-path,
 :root[data-style="aurora"] .skills-diff-list,
 :root[data-style="aurora"] .skills-dup-warn {
   border-radius: var(--radius-md);
-}
-:root[data-style="aurora"] .agy-fold-toggle:hover {
-  border-radius: var(--radius-md);
-}
-:root[data-style="aurora"] .agy-fold.open .agy-fold-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 :root[data-style="aurora"] .skills-body-view .md-code {
   border-radius: var(--radius-sm);
@@ -2837,21 +2744,15 @@
 
 /* 输入控件：圆角统一 + 聚焦冰青光环 */
 :root[data-style="aurora"] .modal-number,
-:root[data-style="aurora"] .agy-select,
-:root[data-style="aurora"] .agy-combo-input,
 :root[data-style="aurora"] .skills-path-input {
   border-radius: var(--radius-sm);
 }
 :root[data-style="aurora"] .modal-number:focus,
-:root[data-style="aurora"] .agy-select:focus,
-:root[data-style="aurora"] .agy-combo-input:focus,
-:root[data-style="aurora"] .agy-combo.open .agy-combo-input,
 :root[data-style="aurora"] .skills-path-input:focus {
   box-shadow: 0 0 0 3px var(--accent-soft), 0 0 12px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：玻璃化 + 圆角 + 高光 */
-:root[data-style="aurora"] .agy-combo-list,
 :root[data-style="aurora"] .skills-ctx-menu {
   border-radius: var(--radius-md);
   background: var(--surface-glass);
@@ -2859,7 +2760,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="aurora"] .agy-combo-item,
 :root[data-style="aurora"] .skills-ctx-item {
   border-radius: 8px;
 }
@@ -3351,17 +3251,10 @@
 :root[data-style="blueprint"] .session-table-wrapper,
 :root[data-style="blueprint"] .alert-box,
 :root[data-style="blueprint"] .empty-hint,
-:root[data-style="blueprint"] .agy-fold,
 :root[data-style="blueprint"] .skills-repo-path,
 :root[data-style="blueprint"] .skills-diff-list,
 :root[data-style="blueprint"] .skills-dup-warn {
   border-radius: var(--radius-md);
-}
-:root[data-style="blueprint"] .agy-fold-toggle:hover {
-  border-radius: var(--radius-md);
-}
-:root[data-style="blueprint"] .agy-fold.open .agy-fold-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 :root[data-style="blueprint"] .skills-body-view .md-code { border-radius: var(--radius-sm); }
 :root[data-style="blueprint"] .skills-body-view .md-inline { border-radius: 2px; }
@@ -3403,27 +3296,20 @@
 
 /* 输入控件：方角 + 聚焦双线光环（内细外淡，制图标注圈感） */
 :root[data-style="blueprint"] .modal-number,
-:root[data-style="blueprint"] .agy-select,
-:root[data-style="blueprint"] .agy-combo-input,
 :root[data-style="blueprint"] .skills-path-input {
   border-radius: var(--radius-sm);
 }
 :root[data-style="blueprint"] .modal-number:focus,
-:root[data-style="blueprint"] .agy-select:focus,
-:root[data-style="blueprint"] .agy-combo-input:focus,
-:root[data-style="blueprint"] .agy-combo.open .agy-combo-input,
 :root[data-style="blueprint"] .skills-path-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：方角 + 硬投影 */
-:root[data-style="blueprint"] .agy-combo-list,
 :root[data-style="blueprint"] .skills-ctx-menu {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
 }
-:root[data-style="blueprint"] .agy-combo-item,
 :root[data-style="blueprint"] .skills-ctx-item {
   border-radius: var(--radius-sm);
 }
@@ -3696,8 +3582,7 @@
 :root[data-style="sepia"] .telemetry-card,
 :root[data-style="sepia"] .session-table-wrapper,
 :root[data-style="sepia"] .alert-box,
-:root[data-style="sepia"] .empty-hint,
-:root[data-style="sepia"] .agy-fold {
+:root[data-style="sepia"] .empty-hint {
   border-radius: 3px;
 }
 :root[data-style="sepia"] .telemetry-label {
@@ -3795,8 +3680,6 @@
   animation: sepia-modal-in 160ms var(--ease-out);
 }
 :root[data-style="sepia"] .modal-number,
-:root[data-style="sepia"] .agy-select,
-:root[data-style="sepia"] .agy-combo-input,
 :root[data-style="sepia"] .skills-path-input,
 :root[data-style="sepia"] .skills-repo-path,
 :root[data-style="sepia"] .skills-dup-warn,
@@ -3804,14 +3687,12 @@
 :root[data-style="sepia"] .skills-body-view .md-code {
   border-radius: 2px;
 }
-:root[data-style="sepia"] .agy-combo-list,
 :root[data-style="sepia"] .skills-ctx-menu {
   border-radius: 3px;
 }
 
 /* Skills 视图：分区小标题用宽字距制造编辑栏题感 */
-:root[data-style="sepia"] .skills-group-title,
-:root[data-style="sepia"] .agy-group-title {
+:root[data-style="sepia"] .skills-group-title {
   font-size: 10px;
   letter-spacing: 0.12em;
 }
@@ -4606,88 +4487,6 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
-          <!-- 4. Antigravity (agy) 模块 -->
-          <div class="panel-card" data-agent-id="agy">
-            <div class="card-body">
-              <div class="agent-top-bar">
-                <div class="agent-brand">
-                  <div class="agent-avatar" style="background:#0f172a; border:1px solid #1e293b;">
-                    <svg width="22" height="22" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                      <defs>
-                        <linearGradient id="antiGGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-                          <stop offset="0%" stop-color="#4285F4"/>
-                          <stop offset="33%" stop-color="#EA4335"/>
-                          <stop offset="66%" stop-color="#FBBC05"/>
-                          <stop offset="100%" stop-color="#34A853"/>
-                        </linearGradient>
-                      </defs>
-                      <circle cx="50" cy="50" r="38" fill="none" stroke="url(#antiGGrad)" stroke-width="10"/>
-                      <circle cx="50" cy="50" r="14" fill="url(#antiGGrad)"/>
-                    </svg>
-                  </div>
-                  <div class="agent-headings">
-                    <h3>Antigravity (agy)</h3>
-                    <span class="instance-count-badge" id="agyInstanceCount" hidden></span>
-                  </div>
-                </div>
-                <div class="agent-actions">
-                  <div id="agyModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
-                  <button type="button" class="agent-detail-fold" data-prefix="agy" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
-                </div>
-              </div>
-
-              <div class="alert-box danger" id="agyErrorBanner" hidden>
-                <div class="left">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  <span id="agyErrorMsg">HTTP 502 · Upstream Error</span>
-                </div>
-                <div class="time" id="agyErrorTime">刚刚</div>
-              </div>
-
-              <div id="agyEmpty" class="empty-hint">未检测到运行中的 Antigravity 客户端</div>
-
-              <div id="agyMetricsBlock" hidden>
-                <div class="session-table-wrapper">
-                  <div id="agyInstancesList"></div>
-                  <div class="session-row detail-open-only" id="agySessionRow">
-                    <div class="session-main">
-                      <div class="session-name-line">
-                        <span>全局汇总</span>
-                        <span class="badge badge-neutral" id="agySessionReqs">0 次请求</span>
-                      </div>
-                      <div class="session-tokens-line" id="agySessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
-                    </div>
-                    <div class="session-tags-line">
-                      <span class="tag-bubble" id="agyActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
-                      <span class="tag-bubble" id="agyLastModelTag">模型: 未选择</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="agy-map">
-                <div class="agy-fold" id="agyNormalFold">
-                  <button type="button" class="agy-fold-toggle" id="agyNormalFoldBtn" aria-expanded="false">
-                    <div class="agy-group-title">预设模型</div>
-                    <span class="agy-fold-chevron" id="agyNormalFoldLabel">展开</span>
-                  </button>
-                  <div class="agy-fold-body">
-                    <div class="agy-group-title">普通模型 <span class="agy-group-note">· 同名绑定</span></div>
-                    <div id="agyNormalRows"></div>
-                    <div class="agy-group-title" style="margin-top:14px;">小模型 <span class="agy-group-note">· 自由选择</span></div>
-                    <div id="agySmallRow"></div>
-                    <div class="agy-save-bar">
-                      <span class="agy-status" id="agyStatus"></span>
-                      <button class="btn btn-primary" id="agySaveBtn" disabled>保存映射</button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-
-            </div>
-          </div>
-
           <!-- 5. Pi 模块 -->
           <div class="panel-card" data-agent-id="pi">
             <div class="card-body">
@@ -5343,7 +5142,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="modal-item">
           <div>
             <div class="modal-item-title">跟随 Coding Agent 启动</div>
-            <div class="modal-item-desc">检测到 ZCode / Claude Code / DSH / Antigravity / Pi / Kimi / Reasonix 运行时自动保持 Relay 链路就绪。</div>
+            <div class="modal-item-desc">检测到 ZCode / Claude Code / DSH / Pi / Kimi / Reasonix 运行时自动保持 Relay 链路就绪。</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="followAgentToggle">
@@ -5678,7 +5477,6 @@ if (window.panelStartupController) panelStartupPlay();
     initTheme();
     initStylePicker();
     initSettingsModal();
-    initAgyMapping();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -5777,7 +5575,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "agy", "pi", "reasonix", "kimi", "opencode"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
@@ -5924,7 +5722,6 @@ if (window.panelStartupController) panelStartupPlay();
         const zc = res.agents.find(a => a.id === "zcode");
         const cc = res.agents.find(a => a.id === "claude");
         const dsh = res.agents.find(a => a.id === "dsh");
-        const agy = res.agents.find(a => a.id === "agy");
         const pi = res.agents.find(a => a.id === "pi");
         const kimi = res.agents.find(a => a.id === "kimi");
         const reasonix = res.agents.find(a => a.id === "reasonix");
@@ -5932,7 +5729,6 @@ if (window.panelStartupController) panelStartupPlay();
         if (zc) renderIfChanged("zcode", zc, () => renderZcode(zc));
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
-        if (agy) renderIfChanged("agy", agy, () => renderAgy(agy));
         if (pi) renderIfChanged("pi", pi, () => renderPi(pi));
         if (reasonix) renderIfChanged("reasonix", reasonix, () => renderReasonix(reasonix));
         if (kimi) renderIfChanged("kimi", kimi, () => renderKimi(kimi));
@@ -5978,7 +5774,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 展开后换回四宫格。展开态记 localStorage（与 route-fold 同交互语义），刷新不回落；
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
-  // agy/pi/kimi/opencode 已从此旧机制摘除，改走下方 data-prefix 事件委托。
+  // pi/kimi/opencode 已从此旧机制摘除，改走下方 data-prefix 事件委托。
   ["zc", "dsh", "reasonix"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
@@ -6008,7 +5804,7 @@ if (window.panelStartupController) panelStartupPlay();
   });
 
   // ═══════════════════════════════════════════════
-  // 多实例栏共享地基（claude/kimi/opencode/pi/agy）：
+  // 多实例栏共享地基（claude/kimi/opencode/pi）：
   // 实例行渲染、实例级 sparkline、折叠状态机与事件委托
   // ═══════════════════════════════════════════════
 
@@ -6860,60 +6656,6 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
-  function renderAgy(d) {
-    const modelBadgesList = $("agyModelBadgesList");
-    const errorBanner = $("agyErrorBanner");
-    const empty = $("agyEmpty");
-    const metricsBlock = $("agyMetricsBlock");
-    const list = $("agyInstancesList");
-
-    if (modelBadgesList) renderModelBadges(modelBadgesList, "agy", d);
-
-    applyFaultBanner(d, errorBanner, $("agyErrorMsg"), $("agyErrorTime"));
-    empty.closest(".panel-card").classList.toggle("card-collapsed", d.status !== "running");
-
-    if (d.status === "running") {
-      empty.hidden = true;
-      metricsBlock.hidden = false;
-      const isGenerating = (d.metrics && d.metrics.activeRequests > 0) || (d.activeRequests > 0);
-
-      const m = d.metrics || {};
-      const sess = (d.sessions && d.sessions[0]) || {};
-      const tokens = m.tokens || sess.tokens || {};
-
-      // 实例按行排列：无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空
-      const instances = Array.isArray(d.instances) ? d.instances : [];
-      setInstanceCount("agy", instances.length);
-      renderInstanceRows({ prefix: "agy", listEl: list, instances, aggregateFallback: buildAggregateFallback(m, d, isGenerating) });
-      applyDetailFold("agy");
-      gateAggregateRow("agy", $("agySessionRow"), instances.length);
-
-      $("agySessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
-      $("agySessionReqs").textContent = `${m.totalRequests || d.totalRequests || 0} 次请求`;
-
-      const activeTag = $("agyActiveTag");
-      if (isGenerating) {
-        activeTag.hidden = false;
-      } else {
-        activeTag.hidden = true;
-      }
-
-      const activeList = d.activeModels || (d.currentModel ? [d.currentModel] : []);
-      const lastModelTag = $("agyLastModelTag");
-      if (activeList.length > 0) {
-        lastModelTag.textContent = "模型: " + activeList.join(", ");
-      } else if (d.lastModel) {
-        lastModelTag.textContent = "模型: " + d.lastModel;
-      } else {
-        lastModelTag.textContent = "模型: 待命";
-      }
-    } else {
-      setInstanceCount("agy", 0);
-      empty.hidden = false;
-      metricsBlock.hidden = true;
-    }
-  }
-
   function renderPi(p) {
     const modelBadgesList = $("piModelBadgesList");
     const errorBanner = $("piErrorBanner");
@@ -7255,353 +6997,6 @@ if (window.panelStartupController) panelStartupPlay();
     };
   }
 
-  function initAgyMapping() {
-    let agyLoaded = false;
-    let agySaveTimer = null;
-
-    function agyStatusEl() { return $("agyStatus"); }
-
-    function setAgyStatus(text, isErr) {
-      const el = agyStatusEl();
-      if (!el) return;
-      el.textContent = text || "";
-      el.classList.toggle("err", !!isErr);
-    }
-
-    function targetOf(providerId, modelId) { return providerId + "/" + modelId; }
-
-    // A binding survives only if its target is still selectable; a normal slug
-    // whose model disappeared from the store shows "需重新选择".
-    function agyRowValue(row) {
-      return row && row._value ? row._value : "";
-    }
-
-    function buildAgyNormalRow(slug, candidates, currentTarget) {
-      const row = document.createElement("div");
-      row.className = "agy-row";
-      row._slug = slug;
-      const label = document.createElement("div");
-      label.className = "agy-row-label";
-      label.innerHTML = '<div class="name"></div><div class="hint"></div>';
-      label.querySelector(".name").textContent = slug;
-      label.querySelector(".hint").textContent = "同名绑定";
-      row.appendChild(label);
-
-      if (!candidates.length) {
-        const empty = document.createElement("div");
-        empty.className = "agy-status err";
-        empty.textContent = "store 中无同名启用模型";
-        row.appendChild(empty);
-        row._value = "";
-        row._invalid = true;
-        return row;
-      }
-
-      const select = document.createElement("select");
-      select.className = "agy-select";
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.textContent = "— 选择同名模型 —";
-      select.appendChild(placeholder);
-      const sorted = [...candidates].sort((a, b) => (b.isExact ? 1 : 0) - (a.isExact ? 1 : 0));
-      const values = [];
-      for (const c of sorted) {
-        const opt = document.createElement("option");
-        const v = targetOf(c.providerId, c.modelId);
-        opt.value = v;
-        opt.textContent = `${c.providerDisplayName} — ${c.modelId}`;
-        select.appendChild(opt);
-        values.push(v);
-      }
-      const stillValid = values.includes(currentTarget);
-      select.value = stillValid ? currentTarget : "";
-      if (currentTarget && !stillValid) {
-        select.classList.add("invalid");
-        placeholder.textContent = "需重新选择（当前绑定已失效）";
-      }
-      select.onchange = () => {
-        select.classList.remove("invalid");
-        row._value = select.value;
-        scheduleAgySaveCheck();
-      };
-      row.appendChild(select);
-      row._value = stillValid ? currentTarget : "";
-      row._invalid = !stillValid;
-      return row;
-    }
-
-    // Searchable combobox for the small slug: input filters the enabled-model
-    // catalog; picking an item writes "<provider>/<model>" into the input and
-    // stores it as the row value. Keyboard: up/down move, enter picks the
-    // highlighted item, escape closes.
-    function buildAgySmallRow(slug, catalog, currentTarget) {
-      const row = document.createElement("div");
-      row.className = "agy-row";
-      row._slug = slug;
-      const label = document.createElement("div");
-      label.className = "agy-row-label";
-      label.innerHTML = '<div class="name"></div><div class="hint"></div>';
-      label.querySelector(".name").textContent = "小模型（隐藏辅助）";
-      label.querySelector(".hint").textContent = "标题生成等辅助任务";
-      row.appendChild(label);
-
-      const combo = document.createElement("div");
-      combo.className = "agy-combo";
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "agy-combo-input";
-      input.placeholder = "搜索并选择任意已启用模型…";
-      input.spellcheck = false;
-      const list = document.createElement("div");
-      list.className = "agy-combo-list";
-      combo.appendChild(input);
-      combo.appendChild(list);
-      row.appendChild(combo);
-
-      let hoverIndex = -1;
-
-      const catalogByText = new Map();
-      for (const c of catalog) {
-        catalogByText.set(`${c.providerDisplayName} — ${c.modelId}`, c);
-      }
-
-      function currentStaleTarget() {
-        return currentTarget && !catalog.some((c) => targetOf(c.providerId, c.modelId) === currentTarget)
-          ? currentTarget
-          : null;
-      }
-
-      function displayForTarget(t) {
-        if (!t) return "";
-        const c = catalog.find((x) => targetOf(x.providerId, x.modelId) === t);
-        return c ? `${c.providerDisplayName} — ${c.modelId}` : t;
-      }
-
-      function setRowValue(t) {
-        row._value = t;
-        input.classList.toggle("invalid", !t);
-        scheduleAgySaveCheck();
-      }
-
-      function renderList(query) {
-        const q = (query || "").trim().toLowerCase();
-        const items = catalog.filter((c) => {
-          if (!q) return true;
-          const hay = `${c.providerId}/${c.modelId} ${c.providerDisplayName} ${c.modelDisplayName}`.toLowerCase();
-          return q.split(/\s+/).every((w) => hay.includes(w));
-        });
-        hoverIndex = -1;
-        list.textContent = "";
-        if (!items.length) {
-          const empty = document.createElement("div");
-          empty.className = "agy-combo-empty";
-          empty.textContent = "无匹配模型";
-          list.appendChild(empty);
-          return;
-        }
-        const MAX_ITEMS = 60;
-        const currentTarget = row._value;
-        items.slice(0, MAX_ITEMS).forEach((c) => {
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "agy-combo-item";
-          const isCurrent = targetOf(c.providerId, c.modelId) === currentTarget;
-          btn.innerHTML = '<span class="prov"></span>';
-          btn.querySelector(".prov").textContent =
-            (isCurrent ? "✓ " : "") + `${c.providerDisplayName} — ${c.modelId}`;
-          if (isCurrent) btn.classList.add("current");
-          // Keep focus on the input while pressing list items: a plain click
-          // fires blur on the input FIRST (committing an empty value and
-          // closing the list before this click lands). Suppressing mousedown's
-          // default keeps the focus put so onclick runs with the list alive.
-          btn.onmousedown = (e) => e.preventDefault();
-          btn.onclick = (e) => {
-            e.stopPropagation();
-            closeList();
-            input.value = `${c.providerDisplayName} — ${c.modelId}`;
-            setRowValue(targetOf(c.providerId, c.modelId));
-          };
-          list.appendChild(btn);
-        });
-        if (items.length > MAX_ITEMS) {
-          const more = document.createElement("div");
-          more.className = "agy-combo-empty";
-          more.textContent = `…其余 ${items.length - MAX_ITEMS} 项请继续输入过滤`;
-          list.appendChild(more);
-        }
-      }
-
-      function openList() {
-        combo.classList.add("open");
-        renderList("");
-      }
-      function closeList() {
-        combo.classList.remove("open");
-        hoverIndex = -1;
-      }
-
-      // The input carries the current selection's display text ("Provider —
-      // model"). That text is not a search query: on focus the list opens
-      // unfiltered, and only a fresh input event (typing) narrows it.
-      input.addEventListener("focus", () => {
-        combo.classList.add("open");
-        renderList("");
-      });
-      input.addEventListener("input", () => {
-        combo.classList.add("open");
-        renderList(input.value);
-        // Typing means the old selection is gone.
-        row._value = "";
-      });
-      input.addEventListener("blur", () => {
-        // Commit only a complete display-text match ("Provider — model", what
-        // item clicks and the initial fill produce). Partial typing never
-        // silently binds; the text stays for the user to finish or re-open.
-        const c = catalogByText.get(input.value);
-        if (c) setRowValue(targetOf(c.providerId, c.modelId));
-        closeList();
-      });
-      input.addEventListener("keydown", (e) => {
-        const buttons = Array.from(list.querySelectorAll(".agy-combo-item"));
-        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-          e.preventDefault();
-          if (!combo.classList.contains("open")) { openList(); return; }
-          if (!buttons.length) return;
-          hoverIndex = e.key === "ArrowDown"
-            ? (hoverIndex + 1) % buttons.length
-            : (hoverIndex - 1 + buttons.length) % buttons.length;
-          buttons.forEach((b, i) => b.classList.toggle("hover", i === hoverIndex));
-          buttons[hoverIndex].scrollIntoView({ block: "nearest" });
-        } else if (e.key === "Enter") {
-          if (combo.classList.contains("open")) {
-            e.preventDefault();
-            const pick = hoverIndex >= 0 ? buttons[hoverIndex] : buttons[0];
-            if (pick) pick.click();
-          }
-        } else if (e.key === "Escape") {
-          closeList();
-        }
-      });
-      document.addEventListener("click", (e) => {
-        if (!combo.contains(e.target)) closeList();
-      });
-
-      const stale = currentStaleTarget();
-      if (stale) {
-        input.value = "";
-        input.placeholder = "需重新选择（当前绑定已失效）";
-        input.classList.add("invalid");
-        row._value = "";
-        row._invalid = true;
-      } else {
-        input.value = displayForTarget(currentTarget);
-        row._value = currentTarget || "";
-        row._invalid = false;
-      }
-      return row;
-    }
-
-    function scheduleAgySaveCheck() {
-      clearTimeout(agySaveTimer);
-      agySaveTimer = setTimeout(checkAgySave, 120);
-    }
-
-    function checkAgySave() {
-      const rows = Array.from($("agyNormalRows")?.children ?? []);
-      const small = $("agySmallRow")?.firstElementChild;
-      const all = small ? [...rows, small] : rows;
-      const missing = all.filter((r) => !r._value);
-      const saveBtn = $("agySaveBtn");
-      if (!saveBtn) return;
-      if (missing.length) {
-        saveBtn.disabled = true;
-        setAgyStatus(missing.length === all.length ? "尚未选择任何模型" : `还有 ${missing.length} 项未选择`, missing.length > 0);
-      } else {
-        saveBtn.disabled = false;
-        setAgyStatus("");
-      }
-    }
-
-    async function loadAgyOptions() {
-      if (agyLoaded) return;
-      const normalRows = $("agyNormalRows");
-      const smallRow = $("agySmallRow");
-      const saveBtn = $("agySaveBtn");
-      if (!normalRows || !smallRow || !saveBtn) return;
-      agyLoaded = true;
-      normalRows.textContent = "";
-      smallRow.textContent = "";
-      setAgyStatus("加载中…");
-      saveBtn.disabled = true;
-      try {
-        const d = await api("GET", "/api/antigravity/options");
-        if (!d.ok) throw new Error(d.error || "加载失败");
-        for (const slug of d.normalSlugs) {
-          normalRows.appendChild(buildAgyNormalRow(slug, d.options[slug] ?? [], d.aliases?.[slug]));
-        }
-        smallRow.appendChild(buildAgySmallRow(d.smallSlug, d.catalog ?? [], d.aliases?.[d.smallSlug]));
-        checkAgySave();
-      } catch (e) {
-        agyLoaded = false;
-        setAgyStatus("加载失败：" + e.message, true);
-      }
-    }
-
-    const agySaveBtn = $("agySaveBtn");
-    if (agySaveBtn) {
-      agySaveBtn.onclick = async () => {
-        const normalRows = Array.from($("agyNormalRows")?.children ?? []);
-        const smallRowEl = $("agySmallRow")?.firstElementChild;
-        const aliases = {};
-        for (const r of normalRows) {
-          if (r._slug && r._value) aliases[r._slug] = r._value;
-        }
-        if (smallRowEl && smallRowEl._value && smallRowEl._slug) {
-          aliases[smallRowEl._slug] = smallRowEl._value;
-        }
-        if (!Object.keys(aliases).length) {
-          setAgyStatus("没有可保存的映射", true);
-          return;
-        }
-        agySaveBtn.disabled = true;
-        setAgyStatus("保存中…");
-        try {
-          const d = await api("POST", "/api/antigravity/aliases", { aliases });
-          if (!d.ok) throw new Error(d.error || "保存失败");
-          setAgyStatus("已保存，立即生效");
-          toast("Antigravity 模型映射已保存");
-          // Re-anchor rows to the just-saved values (clears stale markers).
-          const cur = d.aliases ?? aliases;
-          for (const r of Array.from($("agyNormalRows")?.children ?? [])) {
-            if (r._slug && cur[r._slug]) r._value = cur[r._slug];
-          }
-          const small = $("agySmallRow")?.firstElementChild;
-          if (small && small._slug && cur[small._slug]) small._value = cur[small._slug];
-          checkAgySave();
-        } catch (e) {
-          setAgyStatus("保存失败：" + e.message, true);
-          toast("映射保存失败: " + e.message, true);
-        } finally {
-          agySaveBtn.disabled = false;
-          checkAgySave();
-        }
-      };
-    }
-
-    const fold = $("agyNormalFold");
-    const foldBtn = $("agyNormalFoldBtn");
-    const foldLabel = $("agyNormalFoldLabel");
-    if (foldBtn && fold) {
-      foldBtn.onclick = () => {
-        const open = fold.classList.toggle("open");
-        foldBtn.setAttribute("aria-expanded", open ? "true" : "false");
-        if (foldLabel) foldLabel.textContent = open ? "收起" : "展开";
-      };
-    }
-
-    loadAgyOptions();
-  }
-
   // 设置弹窗与各项开关
   function initSettingsModal() {
     const modal = $("settingsModal");
@@ -7934,7 +7329,7 @@ if (window.panelStartupController) panelStartupPlay();
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", agy: "Antigravity", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -9909,7 +9304,7 @@ if (window.panelStartupController) panelStartupPlay();
         : injected
           ? '<span class="badge badge-ok">已注入</span>'
           : '<span class="badge badge-neutral">未注入</span>';
-      // hotReload=false 的端点（claude/zcode/dsh/pi/agy/reasonix）：写盘即生效于新会话，
+      // hotReload=false 的端点（claude/zcode/dsh/pi/reasonix）：写盘即生效于新会话，
       // 运行中会话需重开才加载新的全局指令文件
       const hotNote = ep.hotReload ? "" : "（运行中会话需重开生效）";
       return `<div class="skills-skill-row"${ep.hotReload ? "" : ' title="运行中会话需重开生效"'}>
@@ -11661,7 +11056,7 @@ if (window.panelStartupController) panelStartupPlay();
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "agy", "reasonix"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -12493,7 +11888,7 @@ if (window.panelStartupController) panelStartupPlay();
     // scroll 不冒泡：捕获阶段监听，候选区滚动时收起节点右键菜单
     $("routeChainBody").addEventListener("scroll", hideSkillsContextMenu, true);
 
-    // 自动路由卡折叠：默认收起，展开态记 localStorage（与 agy-fold 同交互语义）
+    // 自动路由卡折叠：默认收起，展开态记 localStorage
     const routeFoldCard = $("routeChainCard");
     const routeFoldBtn = $("routeChainFoldBtn");
     const setRouteFold = (open) => {
@@ -12532,7 +11927,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 「按端点」口径的端点 = 客户端 agent（与监测页卡片同名）；journal 落的是
   // 小写 agentId，展示层映射为端点显示名，未知 id 原样兜底。
   const STATS_ENDPOINT_LABELS = {
-    zcode: "ZCode", claude: "Claude Code", dsh: "DSH", agy: "Antigravity",
+    zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
     opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";

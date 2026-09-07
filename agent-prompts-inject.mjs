@@ -3,11 +3,9 @@
 // managed block.
 //
 // Verified target facts (2026-09, see the prompt-injection knowledge note):
-//   - agy (Antigravity) machine-level customization root is
-//     ~/.gemini/config/ — NOT ~/.gemini/ (that path is never loaded).
 //   - reasonix's Windows home is %APPDATA%/reasonix, not ~/.reasonix, so its
 //     target is derived from base.APPDATA, never from homeDir.
-//   - kimi/opencode re-read their file at runtime (hot); the other six read
+//   - kimi/opencode re-read their file at runtime (hot); the other five read
 //     it once at session start — surfaced to the UI as `hotReload`.
 //
 // Managed-block semantics:
@@ -41,7 +39,6 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "dsh", label: "DSH", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
   { id: "pi", label: "Pi", hotReload: false, targetRel: "~/.pi/agent/AGENTS.md", home: [".pi", "agent", "AGENTS.md"] },
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
-  { id: "agy", label: "Antigravity", hotReload: false, targetRel: "~/.gemini/config/GEMINI.md", home: [".gemini", "config", "GEMINI.md"] },
   { id: "reasonix", label: "Reasonix", hotReload: false, targetRel: "%APPDATA%/reasonix/AGENTS.md", appData: ["reasonix", "AGENTS.md"] },
 ]);
 

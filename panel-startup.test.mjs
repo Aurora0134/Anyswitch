@@ -255,7 +255,7 @@ describe("launcher-only startup screen", () => {
       startStatusPolling: () => new Promise((resolve) => { statusDone = resolve; }),
       requestAnimationFrame: (fn) => fn(),
     };
-    for (const name of ["initTheme", "initStylePicker", "initSettingsModal", "initAgyMapping", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    for (const name of ["initTheme", "initStylePicker", "initSettingsModal", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
     const pending = runInNewContext(`${init}; init()`, context);
     await new Promise((resolve) => setImmediate(resolve));
     statusDone();

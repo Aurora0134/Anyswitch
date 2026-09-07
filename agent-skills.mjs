@@ -34,10 +34,6 @@ import { atomicWriteFile } from "./atomic-write.mjs";
 import { relayDataRoot } from "./relay-settings.mjs";
 
 // Endpoint registry. `relSkillsDir` is relative to the user's home directory.
-// agy (Antigravity) reads ~/.gemini/skills — NOT ~/.gemini/config/skills
-// (verified live 2026-08-27: a real dir under config/skills is ignored) — and
-// follows directory junctions (verified with a probe skill visible only
-// through a junction).
 export const ENDPOINT_DEFS = Object.freeze([
   { id: "claude", label: "Claude Code", relSkillsDir: [".claude", "skills"] },
   { id: "zcode", label: "ZCode", relSkillsDir: [".zcode", "skills"] },
@@ -45,7 +41,6 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "pi", label: "Pi", relSkillsDir: [".pi", "agent", "skills"] },
   { id: "kimi", label: "Kimi Code", relSkillsDir: [".kimi-code", "skills"] },
   { id: "dsh", label: "DSH", relSkillsDir: [".dsh", "skills"] },
-  { id: "agy", label: "Antigravity", relSkillsDir: [".gemini", "skills"] },
   { id: "reasonix", label: "Reasonix", relSkillsDir: [".reasonix", "skills"] },
 ]);
 
