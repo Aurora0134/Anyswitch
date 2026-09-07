@@ -5252,7 +5252,7 @@ if (window.panelStartupController) panelStartupPlay();
   <div class="modal-card">
     <div class="modal-head">
       <h3>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         设置
       </h3>
       <button class="modal-close-btn" id="settingsCloseBtn" aria-label="关闭">
@@ -6099,6 +6099,12 @@ if (window.panelStartupController) panelStartupPlay();
       seenKeys[prefix + ":" + iid] = true;
       const tokens = inst.tokens || {};
       const isAct = inst.status === "active";
+      // 实例级自动路由归因（服务归因语义，与端点胶囊的 autoCount 同源）：该实例
+      // 在飞的请求里有链服务的（activeTargets 任一条目 autoCount>0），或 claude
+      // 会话行由 reporter 透传的 viaAuto=true，状态徽标即换成号池紫「自动路由中」；
+      // 直连请求不归因，保持「生成中」。伪「全局汇总」行不带徽标，不受影响。
+      const instViaAuto = inst.viaAuto === true
+        || (Array.isArray(inst.activeTargets) && inst.activeTargets.some((t) => (Number(t && t.autoCount) || 0) > 0));
       const tps = inst.tps;
       const ttft = inst.lastTtftMs;
       const ttftColor = inst.ttftColor || "green";
@@ -6110,7 +6116,13 @@ if (window.panelStartupController) panelStartupPlay();
 
       // 简要行：名称行（标题 + 状态徽标 + 请求数徽标）+ tokens 行 + 胶囊行
       // 伪「全局汇总」行（__aggregate__）不是实例，不挂生成中/待命状态徽标。
+      // 生成中且该实例正被自动路由链服务 → 状态徽标换号池紫「自动路由中」。
       const isAggregate = iid === "__aggregate__";
+      const stateBadge = isAggregate ? "" : (
+        isAct
+          ? `<span class="badge ${instViaAuto ? "badge-auto" : "badge-ok"}">${instViaAuto ? "自动路由中" : "生成中"}</span>`
+          : `<span class="badge badge-neutral">待命</span>`
+      );
       const row = document.createElement("div");
       row.className = "session-row";
       row.dataset.instanceId = iid;
@@ -6118,7 +6130,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="session-main">
           <div class="session-name-line">
             <span>${escapeHtml(inst.title || iid)}</span>
-            ${isAggregate ? "" : `<span class="badge ${isAct ? "badge-ok" : "badge-neutral"}">${isAct ? "生成中" : "待命"}</span>`}
+            ${stateBadge}
             <span class="badge badge-neutral">${inst.requests || inst.totalRequests || 0} 请求</span>
           </div>
           <div class="session-tokens-line">
