@@ -4707,6 +4707,9 @@ if (window.panelStartupController) panelStartupPlay();
                     </div>
                   </div>
                 </div>
+                <div style="font-size:11px; color:var(--text-3); margin-bottom:10px; padding:0 2px;">
+                  支持 BYOK 自定义模型配置同步，渠道/号池变更后自动写入 Qoder settings.json
+                </div>
                 <div class="telemetry-grid" id="qoderTelemetryGrid">
                   <div class="telemetry-card">
                     <div class="telemetry-header">
@@ -5036,7 +5039,7 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="skills-btn-row">
               <button class="btn btn-primary" id="storeAddBtn">新增渠道</button>
               <button class="btn" id="storeRefreshAllBtn">全部刷新</button>
-              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Reasonix）">同步到端点</button>
+              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Reasonix、Qoder）">同步到端点</button>
               <span class="store-refresh-status" id="storeRefreshStatus" aria-live="polite"></span>
             </div>
           </div>

@@ -54,6 +54,7 @@ describe("agent-sync", () => {
     assert.ok(res.results.pi);
     assert.ok(res.results.kimi);
     assert.ok(res.results.reasonix);
+    assert.ok(res.results.qoder);
 
     const { existsSync, readFileSync } = await import("node:fs");
     const kimiPath = join(tmpRoot, ".kimi-code", "config.toml");
@@ -77,6 +78,16 @@ describe("agent-sync", () => {
     const zcode = JSON.parse(readFileSync(zcodePath, "utf8"));
     assert.ok(zcode.provider?._alpha, "alpha provider must be written into the sandbox zcode config");
     assert.equal(zcode.provider._alpha.options.apiKey, "test-token");
+
+    const qoderPath = join(tmpRoot, ".qoder", "settings.json");
+    assert.equal(existsSync(qoderPath), true, "qoder settings.json must land under the injected USERPROFILE");
+    const qoder = JSON.parse(readFileSync(qoderPath, "utf8"));
+    assert.ok(Array.isArray(qoder.modelConfigs?.customModels), "qoder customModels must be an array");
+    const alphaEntry = qoder.modelConfigs.customModels.find((e) => e.provider === "_alpha");
+    assert.ok(alphaEntry, "alpha provider must be written into the sandbox qoder settings");
+    assert.equal(alphaEntry.apiKey, "test-token");
+    assert.equal(alphaEntry.model, "model-1");
+    assert.equal(alphaEntry.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -221,6 +232,13 @@ describe("agent-sync pools", () => {
     assert.match(reasonixText, /name\s+= "_pool-ab"/);
     assert.match(reasonixText, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/pool-ab\/v1"/);
 
+    const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
+    const poolEntries = qoderSettings.modelConfigs.customModels.filter((e) => e.provider === "_pool-ab");
+    assert.equal(poolEntries.length, 2, "pool contributes one entry per model");
+    assert.ok(poolEntries.every((e) => e.baseURL === "http://127.0.0.1:47821/openai/pool-ab/v1"));
+    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_alpha"), undefined);
+    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_beta"), undefined);
+
     // Dissolve the pool and re-sync: the pool channel disappears everywhere,
     // the absorbed member channels resurface as standalone channels.
     const second = await syncAllAgentConfigs(syncOpts(poolStore(false)));
@@ -236,6 +254,11 @@ describe("agent-sync pools", () => {
 
     const reasonixText2 = readFileSync(join(tmpRoot, "reasonix", "config.toml"), "utf8");
     assert.doesNotMatch(reasonixText2, /_pool-ab/);
+
+    const qoderSettings2 = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
+    assert.equal(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_pool-ab"), undefined);
+    assert.ok(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_alpha"));
+    assert.ok(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_beta"));
   });
 });
 
@@ -304,6 +327,11 @@ describe("agent-sync auto routing channel", () => {
     const pi = JSON.parse(readFileSync(join(tmpRoot, ".pi", "agent", "models.json"), "utf8"));
     assert.equal(pi.providers._auto, undefined, "pi without a chain gets no _auto channel");
     assert.ok(pi.providers._alpha);
+
+    // qoder has NO chain: no _auto entry in customModels.
+    const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
+    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_auto"), undefined, "qoder without a chain gets no _auto entry");
+    assert.ok(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_alpha"));
 
     // Delete the chains and re-sync: _auto disappears everywhere.
     const second = await syncAllAgentConfigs(syncOpts(chainStore(false)));

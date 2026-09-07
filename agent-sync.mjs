@@ -14,6 +14,7 @@ import { writeDshConfig, dshSettingsPath } from "./dsh-launcher.mjs";
 import { writePiModels, piModelsPath } from "./pi-launcher.mjs";
 import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
 import { writeReasonixConfig, reasonixConfigPath } from "./reasonix-launcher.mjs";
+import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 
 /**
  * Synchronize all supported coding agent configurations against the current store.
@@ -51,6 +52,7 @@ export async function syncAllAgentConfigs({
     pi: null,
     kimi: null,
     reasonix: null,
+    qoder: null,
   };
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
@@ -121,6 +123,20 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.reasonix = { ok: false, error: err.message };
     logger?.warn?.(`reasonix config sync skipped: ${err.message}`);
+  }
+
+  // 6. Qoder settings.json sync (~/.qoder/settings.json)
+  try {
+    const qoderResult = await writeQoderConfig(store, port, token, root, qoderSettingsPath(base.USERPROFILE ?? ""));
+    results.qoder = qoderResult;
+    if (!qoderResult.ok) {
+      logger?.warn?.(`qoder settings.json not updated: ${qoderResult.reason ?? "unknown"}`);
+    } else if (!qoderResult.unchanged) {
+      logger?.info?.("qoder settings.json synced");
+    }
+  } catch (err) {
+    results.qoder = { ok: false, error: err.message };
+    logger?.warn?.(`qoder config sync skipped: ${err.message}`);
   }
 
   return { ok: true, results };
