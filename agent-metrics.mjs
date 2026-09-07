@@ -653,6 +653,10 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
 
   return {
     attachInstance() {},
+    // 链归属快照（迟到挂载的镜像靠它重放，见 bindInstance）：memberId 是
+    // 成员循环最近一次宣布的成员（null = 尚未宣布/非成员循环），resolver
+    // 只有链计划会安装。两个值都读实时闭包，快照随成员切换自动前进。
+    getAttribution: () => ({ memberId: currentMemberId, resolver: attributeResolver }),
     recordFirstChunk: () => {
       // First genuine token on this provider+model pair clears only that pair's fault.
       clearMatchingAggregateFault(state, meta);
@@ -1399,6 +1403,14 @@ export function createAgentMetricsCollector(options = {}) {
       const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId);
       instanceAttached = true;
       composed = composeInstanceTracker(primary, mirror);
+      // 迟到挂载补标：链归属（resolver + 当前成员）只在请求开头的成员循环里
+      // 宣布一次，netstat 快照补挂的镜像从创建起就错过了那次宣布，会把链服务
+      // 请求整段错记为直连（实例行「自动路由中」丢失，闪「生成中」）。挂载
+      // 瞬间把主 tracker 已宣布的归属重放给镜像；尚未宣布（memberId null）
+      // 时只预置 resolver，随后的 setCurrentMember 会经 composed 扇出到镜像。
+      const attribution = primary.getAttribution?.();
+      if (attribution?.resolver) mirror.setAttributeResolver?.(attribution.resolver);
+      if (attribution?.memberId) mirror.setCurrentMember?.(attribution.memberId);
       return composed;
     }
 
