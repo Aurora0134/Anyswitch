@@ -901,6 +901,54 @@ describe("panel.html opencode endpoint card", () => {
   });
 });
 
+describe("panel.html qoder endpoint card", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("declares a qoder panel card with its own id prefix", () => {
+    assert.ok(panelHtml.includes('data-agent-id="qoder"'), "qoder card container exists");
+    for (const id of [
+      "qoderModelBadgesList",
+      "qoderStateBadge",
+      "qoderErrorBanner",
+      "qoderErrorMsg",
+      "qoderErrorTime",
+      "qoderEmpty",
+      "qoderMetricsBlock",
+      "qoderDetailBrief",
+      "qoderTelemetryGrid",
+      "qoderSparkTtft",
+      "qoderSparkTps",
+      "qoderSparkCache",
+      "qoderSessionRow",
+      "qoderSessionReqs",
+      "qoderSessionTokens",
+      "qoderActiveTag",
+      "qoderLastModelTag",
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+  });
+
+  it("wires qoder into the card order, refreshAgents and renderQoder", () => {
+    const orderMatch = panelHtml.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    assert.ok(orderMatch, "AGENT_CARD_ORDER literal found");
+    assert.ok(orderMatch[1].includes('"qoder"'), "AGENT_CARD_ORDER contains qoder");
+    assert.ok(panelHtml.includes('a.id === "qoder"'), "refreshAgents looks up the qoder agent");
+    assert.ok(panelHtml.includes("renderQoder(qoder)"), "refreshAgents calls renderQoder");
+    assert.ok(panelHtml.includes("function renderQoder(p)"), "renderQoder is defined");
+  });
+
+  it("keeps the stop-relay display name and stats label for qoder", () => {
+    assert.ok(panelHtml.includes('qoder: "Qoder"'), "lifecycle modal label map covers qoder");
+    const statsMatch = panelHtml.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
+    assert.ok(statsMatch, "STATS_ENDPOINT_LABELS literal found");
+    assert.ok(statsMatch[0].includes('qoder: "Qoder"'), "STATS_ENDPOINT_LABELS covers qoder");
+  });
+});
+
 describe("panel.html stats tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
@@ -1775,9 +1823,9 @@ describe("panel.html 结构完整性（防 read 截断污染回写）", () => {
       "base64 行曾被 read 工具截断产物污染，导致头像 img src 损坏、监测卡标题错乱");
   });
 
-  it("监测页七个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
-    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 7, "7 个 agent-avatar");
-    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 7, "7 个 agent-headings");
+  it("监测页八个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
+    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 8, "8 个 agent-avatar");
+    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 8, "8 个 agent-headings");
     // img 开标签必须在本行内闭合（不允许 > 落在数千字符之后吞掉后续结构）
     let idx2 = 0;
     let broken = 0;
@@ -1875,8 +1923,8 @@ describe("panel.html 静态卡（zc/dsh/reasonix）端点级陈旧语义", () =>
     assert.ok(m[1].includes("INSTANCE_STALE_MS"), "same threshold as instance rows");
   });
 
-  it("三个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
-    for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderDsh", "dsh", "d"], ["renderReasonix", "reasonix", "p"]]) {
+  it("四个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
+    for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderDsh", "dsh", "d"], ["renderReasonix", "reasonix", "p"], ["renderQoder", "qoder", "p"]]) {
       const m = panelHtml.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found");
       assert.ok(m[0].includes(`const stale = isEndpointStale(${arg}, isGenerating);`), fnName + " computes stale");
@@ -1905,15 +1953,15 @@ describe("panel.html 静态卡（zc/dsh/reasonix）端点级陈旧语义", () =>
       "rate pill html no longer eager-evaluated (null-safe)");
   });
 
-  it("三张静态卡的简要栏都有 tag-stale 相对时间胶囊", () => {
-    for (const prefix of ["zc", "dsh", "reasonix"]) {
+  it("四张静态卡的简要栏都有 tag-stale 相对时间胶囊", () => {
+    for (const prefix of ["zc", "dsh", "reasonix", "qoder"]) {
       assert.ok(
         new RegExp(`<span class="tag-bubble tag-stale" id="${prefix}BriefStale" hidden></span>`).test(panelHtml),
         prefix + "BriefStale pill exists");
     }
   });
 });
-describe("panel.html 静态卡（zc/dsh/reasonix）收起态简要栏与多实例实例行同范式", () => {
+describe("panel.html 静态卡（zc/dsh/reasonix/qoder）收起态简要栏与多实例实例行同范式", () => {
   // 收起态主信息栏对齐多实例端点实例行：名称行挂请求数徽标、名称行下挂 tokens 行
   // （Prompt/Completion/Cached），「全局汇总」行改仅展开态显示（避免同数据双行并存）。
   const panelHtml = readFileSync(
@@ -1921,8 +1969,8 @@ describe("panel.html 静态卡（zc/dsh/reasonix）收起态简要栏与多实�
     "utf8",
   );
 
-  it("三张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
-    for (const prefix of ["zc", "dsh", "reasonix"]) {
+  it("四张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
+    for (const prefix of ["zc", "dsh", "reasonix", "qoder"]) {
       assert.ok(
         new RegExp(`<span class="badge badge-neutral" id="${prefix}BriefReqs">0 请求</span>`).test(panelHtml),
         prefix + "BriefReqs badge exists");
@@ -1942,8 +1990,8 @@ describe("panel.html 静态卡（zc/dsh/reasonix）收起态简要栏与多实�
     assert.ok(m[0].includes("`${requests || 0} 请求`"), "badge text matches instance-row 「N 请求」 wording");
   });
 
-  it("三个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
-    for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderDsh", "d", "d.totalRequests"], ["renderReasonix", "p", "p.totalRequests"]]) {
+  it("四个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
+    for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderDsh", "d", "d.totalRequests"], ["renderReasonix", "p", "p.totalRequests"], ["renderQoder", "p", "p.totalRequests"]]) {
       const m = panelHtml.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found");
       assert.ok(m[0].includes(`requests: m.totalRequests || ${totalReq} || 0,`), fnName + " passes requests");
@@ -1957,7 +2005,7 @@ describe("panel.html 静态卡（zc/dsh/reasonix）收起态简要栏与多实�
   });
 
   it("「全局汇总」行仅展开态显示：旧机制 setFold 门控其 session-table-wrapper", () => {
-    const m = panelHtml.match(/\["zc", "dsh", "reasonix"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
+    const m = panelHtml.match(/\["zc", "dsh", "reasonix", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
     assert.ok(m, "static fold wiring found");
     assert.ok(m[0].includes('$(prefix + "SessionRow")'), "resolves the aggregate row");
     assert.ok(m[0].includes('closest(".session-table-wrapper")'), "toggles the wrapper");

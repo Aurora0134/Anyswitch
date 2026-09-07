@@ -15,6 +15,7 @@ import { RELAY_PORT as DSH_RELAY_PORT } from "./dsh-launcher.mjs";
 import { RELAY_PORT as PI_RELAY_PORT } from "./pi-launcher.mjs";
 import { RELAY_PORT as REASONIX_RELAY_PORT } from "./reasonix-launcher.mjs";
 import { RELAY_PORT as OPENCODE_RELAY_PORT } from "./opencode-launcher.mjs";
+import { RELAY_PORT as QODER_RELAY_PORT } from "./qoder-launcher.mjs";
 
 describe("relay port has a single source of truth", () => {
   it("keeps the production relay port", () => {
@@ -27,5 +28,6 @@ describe("relay port has a single source of truth", () => {
     assert.equal(PI_RELAY_PORT, DEFAULT_RELAY_PORT);
     assert.equal(REASONIX_RELAY_PORT, DEFAULT_RELAY_PORT);
     assert.equal(OPENCODE_RELAY_PORT, DEFAULT_RELAY_PORT);
+    assert.equal(QODER_RELAY_PORT, DEFAULT_RELAY_PORT);
   });
 });

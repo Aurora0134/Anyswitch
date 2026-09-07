@@ -124,7 +124,7 @@ describe("per-instance aggregate tracking", () => {
       const agent = status.find((a) => a.id === agentId);
       assert.deepEqual(agent.instances.map((i) => i.id), [`${agentId}-one`], `${agentId} instance`);
     }
-    for (const agentId of ["zcode", "dsh", "reasonix", "claude"]) {
+    for (const agentId of ["zcode", "dsh", "reasonix", "qoder", "claude"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.equal("instances" in agent, false, `${agentId} must stay aggregate-only`);
     }

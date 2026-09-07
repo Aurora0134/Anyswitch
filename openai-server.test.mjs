@@ -437,6 +437,51 @@ describe("openai relay transport", () => {
     }
   });
 
+  it("routes requests with x-agent-id: qoder to Qoder metrics", async () => {
+    let startedMeta = null;
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+        };
+      },
+    };
+
+    const server = createOpenAIRelayServer({
+      ...deps(
+        (async function* () {
+          yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+          yield new TextEncoder().encode("data: [DONE]\n\n");
+        })(),
+      ),
+      metricsCollector: fakeCollector,
+    });
+
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          authorization: TOKEN,
+          "content-type": "application/json",
+          "x-agent-id": "qoder",
+        },
+        body: JSON.stringify({
+          model: "claude-opus-5",
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(startedMeta.agentId, "qoder");
+    } finally {
+      await close();
+    }
+  });
+
   it("normalizes empty/missing tool_call arguments to \"{}\" before forwarding upstream", async () => {
     // Some upstream gateways (observed: SenseNova) hard-400 any request whose
     // assistant history carries a tool_call with function.arguments === ""

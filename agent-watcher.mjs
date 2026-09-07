@@ -38,7 +38,7 @@ export function createAgentWatcher({
       if (!settings.followAgent) return;
 
       const procs = scanProcesses();
-      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.reasonix || 0) > 0;
+      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.reasonix || 0) + (procs?.qoder || 0) > 0;
       if (!anyAgent) return;
 
       const relay = await getRelayStatus();

@@ -1140,6 +1140,51 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(zcode.metrics.totalRequests, 0);
   });
 
+  it("routes Qoder traffic by x-agent-id and counts Qoder.exe main processes only", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => {
+      // Qoder IDE (Electron): one main process + one --type= helper child.
+      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\Qoder\\Qoder.exe,Qoder.exe,5150\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\Qoder\\Qoder.exe --type=renderer,Qoder.exe,5151\r\n`;
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn });
+    const req = collector.startRequest({
+      agentId: "qoder",
+      providerId: "poke-api",
+      model: "claude-opus-5",
+    });
+    mockTime = 2200;
+    req.recordFirstChunk();
+    mockTime = 3200;
+    req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    const status = await collector.getAgentsStatus();
+    const qoder = status.find((a) => a.id === "qoder");
+    assert.ok(qoder);
+    assert.equal(qoder.status, "running");
+    assert.equal(qoder.processCount, 1, "Electron --type= helper child filtered out");
+    assert.equal(qoder.lastModel, "claude-opus-5");
+    assert.equal(qoder.metrics.totalRequests, 1);
+    assert.equal(qoder.sessionMode, "aggregate");
+    const zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.totalRequests, 0, "qoder traffic must not fall back into the zcode bucket");
+  });
+
+  it("collects Qoder PIDs into qoderPids like the other endpoints", async () => {
+    const mockExec = (cmd, opts, cb) => {
+      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Programs\\Qoder\\Qoder.exe,Qoder.exe,7001\r\nLAPTOP,C:\\Programs\\Qoder\\Qoder.exe,Qoder.exe,7002\r\n`;
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.qoder, 2);
+    assert.ok(procs.qoderPids instanceof Set);
+    assert.ok(procs.qoderPids.has(7001));
+    assert.ok(procs.qoderPids.has(7002));
+  });
+
   it("routes opencode traffic by x-agent-id and detects opencode.exe", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
@@ -1159,7 +1204,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 7, "panel now exposes 7 endpoint cards including opencode");
+    assert.equal(status.length, 8, "panel now exposes 8 endpoint cards including opencode");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -1232,8 +1277,8 @@ describe("createAgentMetricsCollector", () => {
 
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
-    // 8 cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 7, "claude aggregate bucket must not add a panel card");
+    // 9 cards and claude's card remains the per-session reporter one.
+    assert.equal(status.length, 8, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -2693,19 +2738,19 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
-      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
+      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
       ...extraRows,
     ].join("\r\n") + "\r\n";
   const allZero = (p) => ({
     zcode: p.zcode, claude: p.claude, reasonix: p.reasonix, dsh: p.dsh,
-    kimi: p.kimi, pi: p.pi, opencode: p.opencode,
+    kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder,
   });
 
   it("wmic wrapper row carrying every agent name literal counts as nothing", async () => {
     const execFn = (cmd, opts, cb) => cb(null, wmicWrapper());
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0 },
+    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0 },
       "the probe's own cmd.exe wrapper must not impersonate any client");
     assert.equal(p.reasonixPids.has(7300), false);
     // The wrapper stays in the lineage table — it is a legitimate hop for
