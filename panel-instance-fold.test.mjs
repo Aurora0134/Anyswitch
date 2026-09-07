@@ -174,7 +174,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
   });
 });
 
-describe("panel.html 端点级旧机制（zcode/dsh/reasonix）收起不绘制、展开补绘", () => {
+describe("panel.html 端点级旧机制（zcode/dsh/reasonix/qoder）收起不绘制、展开补绘", () => {
   function makeRedrawEndpoint(env) {
     const m = panelHtml.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "redrawEndpointSparklines found in panel.html");
@@ -185,8 +185,9 @@ describe("panel.html 端点级旧机制（zcode/dsh/reasonix）收起不绘制�
       ttft: [{ t: 0, v: 1.1 }, { t: 0, v: 1.2 }], tps: [{ t: 0, v: 30 }], cache: [{ t: 0, v: 90 }],
       dsh_ttft: [], dsh_tps: [], dsh_cache: [],
       reasonix_ttft: [], reasonix_tps: [], reasonix_cache: [],
+      qoder_ttft: [], qoder_tps: [], qoder_cache: [],
     };
-    const gridEls = { zcTelemetryGrid: { hidden: true }, dshTelemetryGrid: { hidden: false }, reasonixTelemetryGrid: { hidden: false } };
+    const gridEls = { zcTelemetryGrid: { hidden: true }, dshTelemetryGrid: { hidden: false }, reasonixTelemetryGrid: { hidden: false }, qoderTelemetryGrid: { hidden: false } };
     const fn = new Function("$", "historyBuffers", "sparkValues", "updateSparkline", "ENDPOINT_SPARK_KEYS", "endpointStaleFlags", `return (${m[0]});`)(
       (id) => gridEls[id] || null,
       historyBuffers,
@@ -208,16 +209,19 @@ describe("panel.html 端点级旧机制（zcode/dsh/reasonix）收起不绘制�
     fn("reasonix");
     const ids = env.calls.update.map((c) => c.id);
     assert.ok(ids.includes("reasonixSparkTtft") && ids.includes("reasonixSparkTps") && ids.includes("reasonixSparkCache"));
+    fn("qoder");
+    const idsQ = env.calls.update.map((c) => c.id);
+    assert.ok(idsQ.includes("qoderSparkTtft") && idsQ.includes("qoderSparkTps") && idsQ.includes("qoderSparkCache"));
     const zc = env.calls.update.filter((c) => c.id === "zcSparkTtft");
     assert.equal(zc.length, 0, "zc 全程收起，不得出现 zc 折线调用");
   });
 
-  it("renderZcode/renderDsh/renderReasonix 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
-    for (const fnName of ["renderZcode", "renderDsh", "renderReasonix"]) {
+  it("renderZcode/renderDsh/renderReasonix/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
+    for (const fnName of ["renderZcode", "renderDsh", "renderReasonix", "renderQoder"]) {
       const m = panelHtml.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found in panel.html");
       assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
-      const prefix = fnName === "renderZcode" ? "zc" : fnName === "renderDsh" ? "dsh" : "reasonix";
+      const prefix = fnName === "renderZcode" ? "zc" : fnName === "renderDsh" ? "dsh" : fnName === "renderReasonix" ? "reasonix" : "qoder";
       assert.ok(m[0].includes(`redrawEndpointSparklines("${prefix}")`), fnName + " 改走 redrawEndpointSparklines");
     }
   });

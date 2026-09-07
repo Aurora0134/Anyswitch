@@ -11,8 +11,8 @@ import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 // Single source of truth for the relay's loopback port. Every launcher
-// (zcode/dsh/pi/reasonix/opencode) imports this instead of carrying its own
-// hardcoded copy, so a launcher can never drift onto a different port than
+// (zcode/dsh/pi/reasonix/opencode/qoder) imports this instead of carrying its
+// own hardcoded copy, so a launcher can never drift onto a different port than
 // the resident relay (relay-host.mjs) binds.
 export const DEFAULT_RELAY_PORT = 47821;
 
@@ -50,7 +50,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "opencode", "claude"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "qoder", "opencode", "claude"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -95,6 +95,7 @@ function openaiAgentIdFrom(headers) {
   const ua = (headers["user-agent"] || "").toLowerCase();
   if (ua.includes("opencode")) return "opencode";
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
+  if (ua.includes("qoder")) return "qoder";
   return "zcode";
 }
 
@@ -109,6 +110,7 @@ function anthropicAgentIdFrom(headers) {
   if (ua.includes("opencode")) return "opencode";
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
   if (ua.includes("reasonix")) return "reasonix";
+  if (ua.includes("qoder")) return "qoder";
   if (ua.includes("claude") || ua.includes("anthropic")) return "claude";
   return null;
 }

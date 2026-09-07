@@ -4658,6 +4658,127 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
+          <!-- 6.5. Qoder 模块 -->
+          <div class="panel-card" data-agent-id="qoder">
+            <div class="card-body">
+              <div class="agent-top-bar">
+                <div class="agent-brand">
+                  <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
+                    <div style="width:32px; height:32px; border-radius:8px; background:linear-gradient(135deg,#2f6bff,#6b3df0); color:#fff; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:700;">Q</div>
+                  </div>
+                  <div class="agent-headings">
+                    <h3>Qoder</h3>
+                  </div>
+                </div>
+                <div class="agent-actions">
+                  <div id="qoderModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
+                  <span class="badge badge-neutral" id="qoderStateBadge">未运行</span>
+                  <button type="button" class="agent-detail-fold" id="qoderDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                </div>
+              </div>
+
+              <div class="alert-box danger" id="qoderErrorBanner" hidden>
+                <div class="left">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span id="qoderErrorMsg">HTTP 502 · Upstream Error</span>
+                </div>
+                <div class="time" id="qoderErrorTime">刚刚</div>
+              </div>
+
+              <div id="qoderEmpty" class="empty-hint">未检测到运行中的 Qoder 客户端</div>
+
+              <div id="qoderMetricsBlock" hidden>
+                <div class="session-table-wrapper agent-detail-brief" id="qoderDetailBrief">
+                  <div class="session-row">
+                    <div class="session-main">
+                      <div class="session-name-line">
+                        <span>实时遥测</span>
+                        <span class="badge badge-neutral" id="qoderBriefState">待命</span>
+                        <span class="badge badge-neutral" id="qoderBriefReqs">0 请求</span>
+                      </div>
+                      <div class="session-tokens-line" id="qoderBriefTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
+                    </div>
+                    <div class="session-tags-line">
+                      <span class="tag-bubble tag-stale" id="qoderBriefStale" hidden></span>
+                      <span class="tag-bubble" id="qoderBriefTps" hidden></span>
+                      <span class="tag-bubble" id="qoderBriefTtft" hidden></span>
+                      <span class="tag-bubble" id="qoderBriefCache" hidden></span>
+                      <span class="tag-bubble" id="qoderBriefDuration" hidden></span>
+                    </div>
+                  </div>
+                </div>
+                <div class="telemetry-grid" id="qoderTelemetryGrid">
+                  <div class="telemetry-card">
+                    <div class="telemetry-header">
+                      <span class="telemetry-label">首字响应时间</span>
+                      <div class="telemetry-sparkline" id="qoderSparkTtft"></div>
+                    </div>
+                    <div class="telemetry-content">
+                      <div class="telemetry-num">
+                        <i class="lamp lamp-gray" id="qoderTtftLamp"></i>
+                        <span id="qoderTtftVal">-</span>
+                        <span class="telemetry-unit" id="qoderTtftUnit">s</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="telemetry-card">
+                    <div class="telemetry-header">
+                      <span class="telemetry-label">生成速度</span>
+                      <div class="telemetry-sparkline" id="qoderSparkTps"></div>
+                    </div>
+                    <div class="telemetry-content">
+                      <div class="telemetry-num">
+                        <span id="qoderTpsVal">-</span>
+                        <span class="telemetry-unit" id="qoderTpsUnit">tok/s</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="telemetry-card">
+                    <div class="telemetry-header">
+                      <span class="telemetry-label">缓存命中率</span>
+                      <div class="telemetry-sparkline" id="qoderSparkCache"></div>
+                    </div>
+                    <div class="telemetry-content">
+                      <div class="telemetry-num">
+                        <span id="qoderCacheVal">-</span>
+                        <span class="telemetry-unit" id="qoderCacheUnit">%</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="telemetry-card">
+                    <div class="telemetry-header">
+                      <span class="telemetry-label">已工作时间</span>
+                    </div>
+                    <div class="telemetry-content">
+                      <div class="telemetry-num">
+                        <span id="qoderDurationVal">0秒</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="session-table-wrapper">
+                  <div class="session-row" id="qoderSessionRow">
+                    <div class="session-main">
+                      <div class="session-name-line">
+                        <span>全局汇总</span>
+                        <span class="badge badge-neutral" id="qoderSessionReqs">0 次请求</span>
+                      </div>
+                      <div class="session-tokens-line" id="qoderSessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
+                    </div>
+                    <div class="session-tags-line">
+                      <span class="tag-bubble" id="qoderActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
+                      <span class="tag-bubble" id="qoderLastModelTag">模型: 未选择</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
           <!-- 7. Kimi Code 模块 -->
           <div class="panel-card" data-agent-id="kimi">
             <div class="card-body">
@@ -4835,12 +4956,29 @@ if (window.panelStartupController) panelStartupPlay();
     </div>
   </section>
 
-  <!-- 预设管理视图：左列（预设列表），右列（全局设置 + 预设详情）；布局/样式全量复用 skills 既有类 -->
+  <!-- 预设管理视图：左列（全局设置 + 预设列表），右列（预设详情）；布局/样式全量复用 skills 既有类 -->
   <section class="skills-view" id="presetsView" hidden>
     <div class="skills-grid">
 
       <div class="skills-col">
-        <!-- 卡片 A：预设列表（单击选中驱动右侧详情卡；右键菜单编辑/启停/删除） -->
+        <!-- 卡片 A：全局设置（预设功能总开关），置顶左列进页即见 -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+              全局设置
+            </h2>
+          </div>
+          <div class="card-body">
+            <div class="skills-skill-row">
+              <span class="skills-skill-name">启用预设注入</span>
+              <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
+            </div>
+            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
+          </div>
+        </div>
+
+        <!-- 卡片 B：预设列表（单击选中驱动右侧详情卡；右键菜单编辑/启停/删除） -->
         <div class="panel-card">
           <div class="card-header">
             <h2 class="card-title">
@@ -4863,23 +5001,6 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
 
       <div class="skills-col">
-        <!-- 卡片 B：全局设置（预设功能总开关） -->
-        <div class="panel-card">
-          <div class="card-header">
-            <h2 class="card-title">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-              全局设置
-            </h2>
-          </div>
-          <div class="card-body">
-            <div class="skills-skill-row">
-              <span class="skills-skill-name">启用预设注入</span>
-              <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
-            </div>
-            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
-          </div>
-        </div>
-
         <!-- 卡片 C：选中预设的详情（编辑/删除 + 逐端点注入开关） -->
         <div class="panel-card">
           <div class="card-header">
@@ -5290,6 +5411,9 @@ if (window.panelStartupController) panelStartupPlay();
     reasonix_ttft: [],
     reasonix_tps: [],
     reasonix_cache: [],
+    qoder_ttft: [],
+    qoder_tps: [],
+    qoder_cache: [],
   };
 
   function $(id) { return document.getElementById(id); }
@@ -5446,11 +5570,12 @@ if (window.panelStartupController) panelStartupPlay();
     pruneSparkBuffer(buf);
   }
 
-  // 端点级四宫格折线：prefix → [容器 id, historyBuffers 键]，旧机制三栏共用。
+  // 端点级四宫格折线：prefix → [容器 id, historyBuffers 键]，旧机制四栏共用。
   const ENDPOINT_SPARK_KEYS = {
     zc: [["zcSparkTtft", "ttft"], ["zcSparkTps", "tps"], ["zcSparkCache", "cache"]],
     dsh: [["dshSparkTtft", "dsh_ttft"], ["dshSparkTps", "dsh_tps"], ["dshSparkCache", "dsh_cache"]],
     reasonix: [["reasonixSparkTtft", "reasonix_ttft"], ["reasonixSparkTps", "reasonix_tps"], ["reasonixSparkCache", "reasonix_cache"]],
+    qoder: [["qoderSparkTtft", "qoder_ttft"], ["qoderSparkTps", "qoder_tps"], ["qoderSparkCache", "qoder_cache"]],
   };
 
   // 端点级陈旧标记：render* 每轮写，redrawEndpointSparklines 读——陈旧端点不绘历史折线
@@ -5575,7 +5700,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode", "qoder"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
@@ -5725,12 +5850,14 @@ if (window.panelStartupController) panelStartupPlay();
         const pi = res.agents.find(a => a.id === "pi");
         const kimi = res.agents.find(a => a.id === "kimi");
         const reasonix = res.agents.find(a => a.id === "reasonix");
+        const qoder = res.agents.find(a => a.id === "qoder");
         const opencode = res.agents.find(a => a.id === "opencode");
         if (zc) renderIfChanged("zcode", zc, () => renderZcode(zc));
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
         if (pi) renderIfChanged("pi", pi, () => renderPi(pi));
         if (reasonix) renderIfChanged("reasonix", reasonix, () => renderReasonix(reasonix));
+        if (qoder) renderIfChanged("qoder", qoder, () => renderQoder(qoder));
         if (kimi) renderIfChanged("kimi", kimi, () => renderKimi(kimi));
         if (opencode) renderIfChanged("opencode", opencode, (agent) => renderOpencode(opencode));
         // 左栏路由链卡：随 1s 轮询刷退避倒计时，结构指纹闸控 DOM 重建
@@ -5767,7 +5894,7 @@ if (window.panelStartupController) panelStartupPlay();
     setPill("BriefDuration", true, `工作 ${durationText}`);
   }
 
-  // 端点详情折叠（zcode/dsh/reasonix）：运行中默认收起——
+  // 端点详情折叠（zcode/dsh/reasonix/qoder）：运行中默认收起——
   // 详细遥测四宫格换成与多实例端点实例行同构的简要信息栏（含 tokens 行/请求数徽标），
   // 「全局汇总」行改仅展开态显示（与多实例栏 detail-open-only 同范式：收起态 tokens/请求数
   // 已由简要栏承载，双行并存属重复展示）；
@@ -5775,7 +5902,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
   // pi/kimi/opencode 已从此旧机制摘除，改走下方 data-prefix 事件委托。
-  ["zc", "dsh", "reasonix"].forEach((prefix) => {
+  ["zc", "dsh", "reasonix", "qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
     const foldBtn = $(prefix + "DetailFoldBtn");
@@ -6802,6 +6929,99 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
+  function renderQoder(p) {
+    const stateBadge = $("qoderStateBadge");
+    const modelBadgesList = $("qoderModelBadgesList");
+    const errorBanner = $("qoderErrorBanner");
+    const empty = $("qoderEmpty");
+    const metricsBlock = $("qoderMetricsBlock");
+
+    if (modelBadgesList) renderModelBadges(modelBadgesList, "qoder", p);
+
+    applyFaultBanner(p, errorBanner, $("qoderErrorMsg"), $("qoderErrorTime"));
+    stateBadge.closest(".panel-card").classList.toggle("card-collapsed", p.status !== "running");
+
+    if (p.status === "running") {
+      empty.hidden = true;
+      metricsBlock.hidden = false;
+      const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
+      stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
+      stateBadge.textContent = isGenerating ? "生成中" : "待命";
+
+      const m = p.metrics || {};
+      const sess = (p.sessions && p.sessions[0]) || {};
+      // 陈旧端点：速率类置 —、压暗、折线停绘，简要栏换相对时间胶囊；工时等累计量不动。
+      const stale = isEndpointStale(p, isGenerating);
+      endpointStaleFlags.qoder = stale;
+      dimEndpointRateCards("qoder", stale);
+      const ttft = m.lastTtftMs || p.lastTtftMs;
+      if (!stale && typeof ttft === "number" && ttft > 0) {
+        $("qoderTtftVal").textContent = (ttft / 1000).toFixed(2);
+        $("qoderTtftUnit").textContent = "s";
+        const color = m.ttftColor || "green";
+        $("qoderTtftLamp").className = "lamp lamp-" + color;
+      } else {
+        $("qoderTtftVal").textContent = "-";
+        $("qoderTtftLamp").className = "lamp lamp-gray";
+      }
+
+      const tps = m.tps !== undefined ? m.tps : p.tps;
+      $("qoderTpsVal").textContent = (!stale && typeof tps === "number" && tps > 0) ? tps.toFixed(1) : "-";
+
+      const hit = m.cacheHitRate !== undefined ? m.cacheHitRate : p.cacheHitRate;
+      $("qoderCacheVal").textContent = (!stale && typeof hit === "number") ? hit.toFixed(1) : "-";
+
+      const dur = m.activeDurationMs || p.activeDurationMs;
+      $("qoderDurationVal").textContent = formatDurationSeconds(dur);
+
+      const tokens = m.tokens || sess.tokens || {};
+      updateDetailBrief("qoder", {
+        isGenerating,
+        ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
+        ttftColor: m.ttftColor || "green",
+        tps: (typeof tps === "number" && tps > 0) ? tps : null,
+        hit: (typeof hit === "number") ? hit : null,
+        durationText: formatDurationSeconds(dur),
+        staleText: stale ? formatRelativeAge(sess.lastSeen) : null,
+        requests: m.totalRequests || p.totalRequests || 0,
+        tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,
+      });
+
+      if (!stale) {
+        pushMetricPoint("qoder_ttft", typeof ttft === "number" ? ttft / 1000 : null, m.sparkHistory?.ttft);
+        pushMetricPoint("qoder_tps", tps, m.sparkHistory?.tps);
+        pushMetricPoint("qoder_cache", hit, m.sparkHistory?.cache);
+
+        redrawEndpointSparklines("qoder");
+      }
+
+      $("qoderSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
+      $("qoderSessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
+
+      const activeTag = $("qoderActiveTag");
+      if (isGenerating) {
+        activeTag.hidden = false;
+      } else {
+        activeTag.hidden = true;
+      }
+
+      const activeList2 = p.activeModels || (p.currentModel ? [p.currentModel] : []);
+      const lastModelTag = $("qoderLastModelTag");
+      if (activeList2.length > 0) {
+        lastModelTag.textContent = "模型: " + activeList2.join(", ");
+      } else if (p.lastModel) {
+        lastModelTag.textContent = "模型: " + p.lastModel;
+      } else {
+        lastModelTag.textContent = "模型: 待命";
+      }
+    } else {
+      stateBadge.className = "badge badge-neutral";
+      stateBadge.textContent = "未运行";
+      empty.hidden = false;
+      metricsBlock.hidden = true;
+    }
+  }
+
   function renderKimi(p) {
     const modelBadgesList = $("kimiModelBadgesList");
     const errorBanner = $("kimiErrorBanner");
@@ -7329,7 +7549,7 @@ if (window.panelStartupController) panelStartupPlay();
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code", qoder: "Qoder" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -9234,7 +9454,7 @@ if (window.panelStartupController) panelStartupPlay();
     if ($("presetsView").hidden) refreshPresetsState(); // presets 视图时 switchView 已触发刷新
   }
 
-  // ── 卡片 A：预设列表 ──
+  // ── 卡片 B：预设列表 ──
   function visiblePresets() {
     const presets = (presetsState && presetsState.presets) || [];
     if (!presetsFilter) return presets;
@@ -9277,7 +9497,7 @@ if (window.panelStartupController) panelStartupPlay();
     }).join("");
   }
 
-  // ── 卡片 B：全局设置（总开关） ──
+  // ── 卡片 A：全局设置（总开关） ──
   function renderPresetsMaster() {
     $("presetsMasterToggle").checked = !!(presetsState && presetsState.enabled);
   }
@@ -11056,7 +11276,7 @@ if (window.panelStartupController) panelStartupPlay();
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix", "qoder"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -11929,6 +12149,7 @@ if (window.panelStartupController) panelStartupPlay();
   const STATS_ENDPOINT_LABELS = {
     zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
     opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code",
+    qoder: "Qoder",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
 

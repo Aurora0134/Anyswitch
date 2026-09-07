@@ -192,7 +192,8 @@ export async function startResidentRelay(options = {}) {
   writeRelayPid(process.pid, pidPath);
   const clearPid = () => clearRelayPid(pidPath);
 
-  // Initial sync of all agent configs (zcode, dsh, pi, kimi, reasonix).
+  // Initial sync of all agent configs (zcode, dsh, pi, kimi, reasonix; qoder
+  // has no config file to sync — OAuth + its own cloud, launcher-only).
   // Spawned as a child process so the merge logic always loads from disk —
   // catalog-writer fixes take effect on the next sync without restarting
   // this resident host.

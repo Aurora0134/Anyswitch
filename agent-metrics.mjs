@@ -214,6 +214,7 @@ const AGENT_IMAGE_BUCKETS = [
   ["reasonix-cli.exe", "reasonix"],
   ["reasonix-desktop.exe", "reasonix"],
   ["reasonix-launcher.exe", "reasonix"],
+  ["qoder.exe", "qoder"],
   ["zcode.exe", "zcode"],
   ["claude.exe", "claude"],
   ["opencode.exe", "opencode"],
@@ -285,7 +286,7 @@ function resolveProbeRow(lower) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, qoder: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), qoderPids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -325,6 +326,15 @@ function parseTasklistCsv(stdout) {
       } else {
         result.reasonix += 1;
         if (pid) result.reasonixPids.add(pid);
+      }
+    } else if (bucket === "qoder") {
+      // Qoder IDE is an Electron app: filter --type= helper children like
+      // reasonix/zcode so only main processes count as the endpoint process.
+      if (commandLine?.includes("--type=")) {
+        // Electron helper child process, skip
+      } else {
+        result.qoder += 1;
+        if (pid) result.qoderPids.add(pid);
       }
     } else if (bucket === "zcode") {
       // If CommandLine is present (from wmic / tasklist verbose output), count only main processes
@@ -1159,7 +1169,7 @@ export function createAgentMetricsCollector(options = {}) {
       // (the launchers spawn via COMSPEC) and a missing intermediate hop would
       // break ancestor resolution. cmd.exe rows feed only the lineage table —
       // no counting branch claims them.
-      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
+      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
         lastProcessScanTime = nowFn();
         if (!wmicErr && typeof wmicOut === "string" && wmicOut.includes("ProcessId")) {
           cachedProcessCounts = parseTasklistCsv(wmicOut);
@@ -1170,7 +1180,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 2. Secondary fallback: PowerShell Get-CimInstance (preserves CommandLine on Win11 where wmic is deprecated/slow).
         // Same lineage additions as the WMIC probe: ParentProcessId column (emitted
         // as the second field) and cmd.exe in the filter.
-        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
+        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
         execFn(psCmd, { timeout: 3000, windowsHide: true }, (psErr, psOut) => {
           if (!psErr && typeof psOut === "string" && psOut.trim().length > 0) {
             cachedProcessCounts = parseTasklistCsv(psOut);
@@ -1208,6 +1218,7 @@ export function createAgentMetricsCollector(options = {}) {
   const piState = createAggregateState();
   const kimiState = createAggregateState();
   const reasonixState = createAggregateState();
+  const qoderState = createAggregateState();
   const opencodeState = createAggregateState();
   const claudeState = createAggregateState();
 
@@ -1215,13 +1226,13 @@ export function createAgentMetricsCollector(options = {}) {
   // pi): instanceId -> { state, firstSeen }. Only requests carrying a
   // valid instanceId land here, and they ALSO land in the endpoint aggregate
   // above, so the existing cards are unchanged. claude is per-session
-  // already; zcode/dsh/reasonix stay aggregate-only by design.
+  // already; zcode/dsh/reasonix/qoder stay aggregate-only by design.
   const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map() };
 
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState]) {
       state.sparkWindowPoints = sparkWindowPoints;
       while (state.ttftHistory.length > keep) state.ttftHistory.shift();
       while (state.recentSamples.length > keep) state.recentSamples.shift();
@@ -1258,6 +1269,18 @@ export function createAgentMetricsCollector(options = {}) {
     if (typeof meta.userAgent === "string") {
       const ua = meta.userAgent.toLowerCase();
       if (ua.includes("reasonix")) return true;
+    }
+    return false;
+  }
+
+  function isQoderRequest(meta = {}) {
+    if (typeof meta.agentId === "string") {
+      const id = meta.agentId.toLowerCase().trim();
+      if (id === "qoder") return true;
+    }
+    if (typeof meta.userAgent === "string") {
+      const ua = meta.userAgent.toLowerCase();
+      if (ua.includes("qoder")) return true;
     }
     return false;
   }
@@ -1312,6 +1335,9 @@ export function createAgentMetricsCollector(options = {}) {
     } else if (isReasonixRequest(meta)) {
       targetState = reasonixState;
       bucketAgentId = "reasonix";
+    } else if (isQoderRequest(meta)) {
+      targetState = qoderState;
+      bucketAgentId = "qoder";
     } else if (isOpencodeRequest(meta)) {
       targetState = opencodeState;
       bucketAgentId = "opencode";
@@ -1600,7 +1626,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -1637,6 +1663,7 @@ export function createAgentMetricsCollector(options = {}) {
     settleAbandonedAggregateState(piState, procCounts.pi || 0);
     settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
     settleAbandonedAggregateState(reasonixState, procCounts.reasonix || 0);
+    settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
     settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
     settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
 
@@ -1932,6 +1959,15 @@ export function createAgentMetricsCollector(options = {}) {
       nowFn,
     });
 
+    const qoderAgent = buildAggregateAgentStatus({
+      id: "qoder",
+      name: "Qoder",
+      state: qoderState,
+      processCount: procCounts.qoder || 0,
+      tpsWindow: recentSampleWindow,
+      nowFn,
+    });
+
     // 7. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
     const opencodeAgent = buildAggregateAgentStatus({
       id: "opencode",
@@ -1943,7 +1979,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("opencode"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, opencodeAgent];
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, qoderAgent, opencodeAgent];
   }
 
   return {

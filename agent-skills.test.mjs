@@ -1039,7 +1039,7 @@ describe("createSkillsService", () => {
       assert.equal(state.repoConfigured, false);
       assert.equal(state.repoValid, false);
       assert.deepEqual(state.skills, []);
-      assert.equal(state.endpoints.length, 7);
+      assert.equal(state.endpoints.length, 8);
       assert.throws(() => svc.setRepoPath(join(dir, "ghost")), /不存在/);
       assert.throws(() => svc.setRepoPath(home), /没有找到任何 skill/);
       await assert.rejects(svc.deploy({ endpointId: "kimi", skillName: "skill-a" }), /尚未设置主仓库/);
@@ -1187,7 +1187,7 @@ describe("createSkillsService.importPickedSkill", () => {
 });
 
 describe("endpoint registry", () => {
-  it("maps all seven endpoints under the given home", () => {
+  it("maps all eight endpoints under the given home", () => {
     const endpoints = listEndpoints("C:\\fakehome");
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.skillsDir, join("C:\\fakehome", ".claude", "skills"));
@@ -1197,7 +1197,8 @@ describe("endpoint registry", () => {
     assert.equal(byId.kimi.skillsDir, join("C:\\fakehome", ".kimi-code", "skills"));
     assert.equal(byId.dsh.skillsDir, join("C:\\fakehome", ".dsh", "skills"));
     assert.equal(byId.reasonix.skillsDir, join("C:\\fakehome", ".reasonix", "skills"));
-    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix"]) {
+    assert.equal(byId.qoder.skillsDir, join("C:\\fakehome", ".qoder", "skills"));
+    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix", "qoder"]) {
       assert.equal(byId[id].enabled, true, `${id} enabled`);
     }
   });
