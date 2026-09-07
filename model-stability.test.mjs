@@ -123,7 +123,7 @@ describe("createModelStabilityTracker", () => {
     const t0 = bucketStart(5_000_000);
     writeFileSync(path, JSON.stringify({
       models: [{
-        provider: "agy",
+        provider: "legacy-prov",
         model: "legacy-model",
         cells: [{ start: t0, n: 2, ok: 2, latencySum: 2000, prompt: 100, cached: 10 }],
       }],
@@ -135,7 +135,7 @@ describe("createModelStabilityTracker", () => {
     assert.equal(snap.models[0].total, 2);
     assert.equal(snap.models[0].ttftMs, null);
     // And the legacy row still accepts new TTFT-bearing records afterwards.
-    tracker.record({ providerId: "agy", model: "legacy-model", ok: true, latencyMs: 3000, ttftMs: 900, at: t });
+    tracker.record({ providerId: "legacy-prov", model: "legacy-model", ok: true, latencyMs: 3000, ttftMs: 900, at: t });
     assert.equal(tracker.snapshot(t).models[0].ttftMs, 900);
   });
 
@@ -162,7 +162,7 @@ describe("createModelStabilityTracker", () => {
     const t0 = bucketStart(5_000_000);
     writeFileSync(path, JSON.stringify({
       models: [{
-        provider: "agy",
+        provider: "legacy-prov",
         model: "gemini-3-pro",
         cells: [{ start: t0, n: 4, ok: 4, latencySum: 4000, prompt: 200, cached: 50 }],
       }],

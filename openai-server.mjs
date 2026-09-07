@@ -1,7 +1,6 @@
 import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
-import { handleGeminiRoute, geminiChainStateFor } from "./gemini-server.mjs";
 import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel } from "./stream-pipe.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
@@ -51,7 +50,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "agy", "reasonix", "opencode", "claude"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "opencode", "claude"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -69,7 +68,7 @@ function explicitInstanceId(headers) {
 
 // Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。x-agent-instance
 // 头仍是唯一正源且优先——launcher 注入路径的行为完全不变；只有头缺失（或非法
-// 被静默丢弃）时，才对多实例端点（kimi/opencode/pi/agy，与 agent-metrics 的
+// 被静默丢弃）时，才对多实例端点（kimi/opencode/pi，与 agent-metrics 的
 // instanceBuckets 口径一致）用 netstat 快照反查 keep-alive 连接对端进程，
 // 合成 "<agentId>-<pid>"。zcode/claude/dsh/reasonix 保持聚合一桶，一律不兜底。
 // pid === process.pid 说明该 socket 归 relay 自己（自环/进程内转发），同样不
@@ -231,8 +230,8 @@ export function createOpenAIRelayServer(deps) {
     // Internal loopback route-chain runtime query for the standalone control
     // panel (47820 → /panel/api/route-chain/runtime). The chain backoff state
     // lives in this process's handler closures — one chainState per protocol
-    // frontend (openai / anthropic / gemini) — so the payload merges all
-    // three snapshots, keeping the newest record (max since) per endpoint
+    // frontend (openai / anthropic) — so the payload merges both
+    // snapshots, keeping the newest record (max since) per endpoint
     // (see buildChainRuntime). Per-LAUNCH relay processes keep their own
     // state and are not aggregated: they are transient and not reachable from
     // the panel, same blind spot as their model-stability rows. Same guard
@@ -249,7 +248,7 @@ export function createOpenAIRelayServer(deps) {
         const store = loaded?.ok ? loaded.store : null;
         // Enriched snapshots: sticky/backoff positions + per-startup node
         // outcomes (the lamp column) per protocol handler's chainState.
-        const snapshots = [handler.chainState, anthropicHandler.chainState, geminiChainStateFor(deps)]
+        const snapshots = [handler.chainState, anthropicHandler.chainState]
           .filter(Boolean)
           .map((state) => ({ positions: state.snapshot(), nodes: state.nodeStats() }));
         sendJson(res, 200, { ok: true, ...buildChainRuntime(store, snapshots) });
@@ -330,10 +329,6 @@ export function createOpenAIRelayServer(deps) {
     if (path.startsWith("/panel") && deps.panelRouter) {
       return deps.panelRouter.handle(req, res);
     }
-
-    // Gemini REST routes for antigravity frontend
-    const geminiHandled = await handleGeminiRoute(req, res, deps);
-    if (geminiHandled) return;
 
     try {
       const modelsMatch = path.match(/^\/openai\/[^/]+\/v1\/models$/);

@@ -407,17 +407,10 @@
 :root[data-style="blueprint"] .session-table-wrapper,
 :root[data-style="blueprint"] .alert-box,
 :root[data-style="blueprint"] .empty-hint,
-:root[data-style="blueprint"] .agy-fold,
 :root[data-style="blueprint"] .skills-repo-path,
 :root[data-style="blueprint"] .skills-diff-list,
 :root[data-style="blueprint"] .skills-dup-warn {
   border-radius: var(--radius-md);
-}
-:root[data-style="blueprint"] .agy-fold-toggle:hover {
-  border-radius: var(--radius-md);
-}
-:root[data-style="blueprint"] .agy-fold.open .agy-fold-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 :root[data-style="blueprint"] .skills-body-view .md-code { border-radius: var(--radius-sm); }
 :root[data-style="blueprint"] .skills-body-view .md-inline { border-radius: 2px; }
@@ -459,27 +452,20 @@
 
 /* 输入控件：方角 + 聚焦双线光环（内细外淡，制图标注圈感） */
 :root[data-style="blueprint"] .modal-number,
-:root[data-style="blueprint"] .agy-select,
-:root[data-style="blueprint"] .agy-combo-input,
 :root[data-style="blueprint"] .skills-path-input {
   border-radius: var(--radius-sm);
 }
 :root[data-style="blueprint"] .modal-number:focus,
-:root[data-style="blueprint"] .agy-select:focus,
-:root[data-style="blueprint"] .agy-combo-input:focus,
-:root[data-style="blueprint"] .agy-combo.open .agy-combo-input,
 :root[data-style="blueprint"] .skills-path-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：方角 + 硬投影 */
-:root[data-style="blueprint"] .agy-combo-list,
 :root[data-style="blueprint"] .skills-ctx-menu {
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
 }
-:root[data-style="blueprint"] .agy-combo-item,
 :root[data-style="blueprint"] .skills-ctx-item {
   border-radius: var(--radius-sm);
 }

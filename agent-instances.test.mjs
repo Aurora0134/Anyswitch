@@ -1,7 +1,6 @@
 // Per-instance metrics groundwork: the multi-instance endpoints (kimi /
-// opencode / pi / agy) tag each CLI instance with an instanceId — the
-// x-agent-instance header on the OpenAI/Anthropic relay paths, or a
-// "token.instanceId" suffix on the Gemini relay key. Tagged requests land in
+// opencode / pi) tag each CLI instance with an instanceId — the
+// x-agent-instance header on the OpenAI/Anthropic relay paths. Tagged requests land in
 // BOTH the endpoint aggregate bucket (existing cards unchanged) and a
 // per-instance bucket; untagged requests only land in the aggregate.
 // Instance liveness splits by id shape: "<agentId>-<pid>" ids (the fallback
@@ -9,8 +8,8 @@
 // process scan; custom ids keep a read-driven idle TTL. The fallback channel
 // covers clients launched straight from the terminal (bypassing the
 // launcher): a netstat socket→PID snapshot synthesizes "<agentId>-<pid>"
-// when neither the header nor the key suffix is present
-// (instance-socket-owner.mjs; header/key always win).
+// when the header is absent
+// (instance-socket-owner.mjs; the header always wins).
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -20,8 +19,6 @@ import {
   sanitizeInstanceId,
 } from "./agent-metrics.mjs";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
-import { extractPresentedGeminiKey, matchGeminiKey } from "./gemini-handler.mjs";
-import { createAliasResolver } from "./antigravity-alias.mjs";
 
 const silentExec = (cmd, opts, cb) => cb(null, "");
 
@@ -105,10 +102,10 @@ describe("per-instance aggregate tracking", () => {
     assert.equal(wsB.tokens.prompt, 10);
   });
 
-  it("exposes instances for all four scoped endpoints and none for the rest", async () => {
+  it("exposes instances for all three scoped endpoints and none for the rest", async () => {
     let t = 1000;
     const collector = testCollector({ nowFn: () => t });
-    for (const agentId of ["kimi", "opencode", "pi", "agy"]) {
+    for (const agentId of ["kimi", "opencode", "pi"]) {
       // Non-pid-form id: the silent exec mock reports zero processes, and a
       // "<agentId>-<digits>" id would be (correctly) reconciled away as a
       // dead-pid instance — that path is covered in agent-metrics.test.mjs.
@@ -123,7 +120,7 @@ describe("per-instance aggregate tracking", () => {
     d.recordEnd({ status: 200, usage: {} });
 
     const status = await collector.getAgentsStatus();
-    for (const agentId of ["kimi", "opencode", "pi", "agy"]) {
+    for (const agentId of ["kimi", "opencode", "pi"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.deepEqual(agent.instances.map((i) => i.id), [`${agentId}-one`], `${agentId} instance`);
     }
@@ -365,161 +362,6 @@ describe("openai relay x-agent-instance header", () => {
   });
 });
 
-describe("gemini relay token.instanceId suffix", () => {
-  const TOKEN = "relay-token-xyz";
-
-  it("exact token authenticates with no instance (unchanged legacy behavior)", () => {
-    assert.deepEqual(matchGeminiKey(TOKEN, TOKEN), { ok: true, instanceId: null });
-  });
-
-  it("accepts a valid instance suffix on the header key", () => {
-    const presented = extractPresentedGeminiKey({ "x-goog-api-key": `${TOKEN}.ws-1` }, {});
-    assert.deepEqual(matchGeminiKey(presented, TOKEN), { ok: true, instanceId: "ws-1" });
-  });
-
-  it("accepts a suffix after a Bearer prefix and on the ?key= query", () => {
-    const fromBearer = extractPresentedGeminiKey({ "x-goog-api-key": `Bearer ${TOKEN}.hdr-1` }, {});
-    assert.deepEqual(matchGeminiKey(fromBearer, TOKEN), { ok: true, instanceId: "hdr-1" });
-    const fromQuery = extractPresentedGeminiKey({}, { key: `${TOKEN}.q-1` });
-    assert.deepEqual(matchGeminiKey(fromQuery, TOKEN), { ok: true, instanceId: "q-1" });
-  });
-
-  it("authenticates but drops an off-whitelist suffix", () => {
-    assert.deepEqual(matchGeminiKey(`${TOKEN}.bad id!`, TOKEN), { ok: true, instanceId: null });
-  });
-
-  it("rejects a wrong base token even with a valid-looking suffix", () => {
-    assert.equal(matchGeminiKey("wrong.ws-1", TOKEN).ok, false);
-    assert.equal(matchGeminiKey(`${TOKEN}x.ws-1`, TOKEN).ok, false);
-  });
-
-  it("rejects a missing key", () => {
-    assert.equal(matchGeminiKey(null, TOKEN).ok, false);
-  });
-});
-
-describe("gemini relay instance tagging (transport)", () => {
-  const TOKEN = "test-relay-token-12345";
-  const mockStore = {
-    version: 2,
-    providers: {
-      "acme-default": {
-        displayName: "acme default",
-        baseURL: "https://mock.api/v1",
-        protocol: "openai-compatible",
-        credentialFile: "acme.dpapi",
-        models: { "gemini-3.7-flash": { displayName: "Gemini 3.7 Flash" } },
-      },
-    },
-  };
-  const aliasResolver = createAliasResolver({
-    filePath: "mock-nonexistent.json",
-    overlay: { "gemini-3.7-flash": "acme-default/gemini-3.7-flash" },
-  });
-
-  function geminiDeps(collector) {
-    return {
-      token: TOKEN,
-      loadStore: () => ({ ok: true, store: mockStore }),
-      loadCredential: async () => ({ ok: true, value: "mock-api-key" }),
-      upstreamFetch: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          choices: [{ message: { role: "assistant", content: "Hello" } }],
-          usage: { prompt_tokens: 10, completion_tokens: 4 },
-        }),
-      }),
-      aliasResolver,
-      metricsCollector: collector,
-    };
-  }
-
-  function postGenerate(port, apiKey) {
-    return fetch(`http://127.0.0.1:${port}/v1beta/models/gemini-3.7-flash:generateContent`, {
-      method: "POST",
-      headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "ping" }] }] }),
-    });
-  }
-
-  it("tags the agy instance from the key suffix", async () => {
-    const collector = testCollector();
-    const server = createOpenAIRelayServer(geminiDeps(collector));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, `${TOKEN}.ws-agy`);
-      assert.equal(res.status, 200);
-      await res.json();
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances.map((i) => i.id), ["ws-agy"]);
-      assert.equal(agy.instances[0].requests, 1);
-      assert.equal(agy.instances[0].tokens.completion, 4);
-      assert.equal(agy.metrics.totalRequests, 1, "aggregate still counts the tagged request");
-    } finally {
-      await close();
-    }
-  });
-
-  it("key without suffix behaves exactly as before (no instance)", async () => {
-    const collector = testCollector();
-    const server = createOpenAIRelayServer(geminiDeps(collector));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, TOKEN);
-      assert.equal(res.status, 200);
-      await res.json();
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances, []);
-      assert.equal(agy.metrics.totalRequests, 1);
-    } finally {
-      await close();
-    }
-  });
-
-  it("normalizes a launcher-injected key suffix (<cwd基名>-<launcher pid>) to the client pid", async () => {
-    // The agy launcher spawns the client directly: launcher node.exe (1000)
-    // → agy.exe (4321). Same collector-side normalization as the header path.
-    const chainExec = lineageChainExec(
-      "LAPTOP,C:\\Tools\\node.exe C:\\app\\antigravity-launcher.mjs,node.exe,500,1000",
-      "LAPTOP,C:\\Program Files\\agy\\agy.exe,agy.exe,1000,4321");
-    const collector = testCollector({ execFn: chainExec });
-    await collector.scanProcesses(); // warm the cache — the panel-open steady state
-    const server = createOpenAIRelayServer(geminiDeps(collector));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, `${TOKEN}.myproj-1000`);
-      assert.equal(res.status, 200);
-      await res.json();
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances.map((i) => i.id), ["agy-4321"]);
-      assert.equal(agy.instances[0].title, "myproj");
-      assert.equal(agy.instances[0].requests, 1);
-      assert.equal(agy.metrics.totalRequests, 1, "aggregate still counts the tagged request");
-    } finally {
-      await close();
-    }
-  });
-
-  it("wrong base token with a suffix still gets 401 and records no instance", async () => {
-    const collector = testCollector();
-    const server = createOpenAIRelayServer(geminiDeps(collector));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, `wrong-token.ws-agy`);
-      assert.equal(res.status, 401);
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances, [], "a non-authenticating key must not tag instances");
-    } finally {
-      await close();
-    }
-  });
-});
-
 describe("openai relay socket→PID fallback (no instance header)", () => {
   // 绕过 launcher 直连（终端敲 npm shim）的客户端不带 x-agent-instance，
   // relay 用 netstat 快照反查 keep-alive 连接对端进程，合成
@@ -687,109 +529,6 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
       const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
       assert.deepEqual(kimi.instances, [], "self-loop pid must not become a fake instance");
       assert.equal(kimi.metrics.totalRequests, 1);
-    } finally {
-      await close();
-    }
-  });
-});
-
-describe("gemini relay socket→PID fallback (no key suffix)", () => {
-  const TOKEN = "test-relay-token-12345";
-  const mockStore = {
-    version: 2,
-    providers: {
-      "acme-default": {
-        displayName: "acme default",
-        baseURL: "https://mock.api/v1",
-        protocol: "openai-compatible",
-        credentialFile: "acme.dpapi",
-        models: { "gemini-3.7-flash": { displayName: "Gemini 3.7 Flash" } },
-      },
-    },
-  };
-  const aliasResolver = createAliasResolver({
-    filePath: "mock-nonexistent.json",
-    overlay: { "gemini-3.7-flash": "acme-default/gemini-3.7-flash" },
-  });
-
-  function geminiDeps(collector, socketOwner) {
-    return {
-      token: TOKEN,
-      loadStore: () => ({ ok: true, store: mockStore }),
-      loadCredential: async () => ({ ok: true, value: "mock-api-key" }),
-      upstreamFetch: async () => ({
-        ok: true,
-        status: 200,
-        json: async () => ({
-          choices: [{ message: { role: "assistant", content: "Hello" } }],
-          usage: { prompt_tokens: 10, completion_tokens: 4 },
-        }),
-      }),
-      aliasResolver,
-      metricsCollector: collector,
-      socketOwner,
-    };
-  }
-
-  function postGenerate(port, apiKey) {
-    return fetch(`http://127.0.0.1:${port}/v1beta/models/gemini-3.7-flash:generateContent`, {
-      method: "POST",
-      headers: { "x-goog-api-key": apiKey, "content-type": "application/json" },
-      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "ping" }] }] }),
-    });
-  }
-
-  it("authenticating key without suffix synthesizes agy-<pid>", async () => {
-    // Same PID-reconciliation caveat as the openai fallback test above: the
-    // scan mock must report pid 4321 as a live agy process.
-    const agyPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Program Files\\agy\\agy.exe,agy.exe,4321\r\n");
-    const collector = testCollector({ execFn: agyPidExec });
-    const socketOwner = { lookup: () => 4321 };
-    const server = createOpenAIRelayServer(geminiDeps(collector, socketOwner));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, TOKEN);
-      assert.equal(res.status, 200);
-      await res.json();
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances.map((i) => i.id), ["agy-4321"]);
-      assert.equal(agy.instances[0].requests, 1);
-      assert.equal(agy.metrics.totalRequests, 1, "aggregate still counts the fallback-tagged request");
-    } finally {
-      await close();
-    }
-  });
-
-  it("a fallback pid equal to the relay's own pid is not tagged (self-loop guard)", async () => {
-    const collector = testCollector();
-    const socketOwner = { lookup: () => process.pid };
-    const server = createOpenAIRelayServer(geminiDeps(collector, socketOwner));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, TOKEN);
-      assert.equal(res.status, 200);
-      await res.json();
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances.map((i) => i.id), []);
-      assert.equal(agy.metrics.totalRequests, 1, "aggregate still counts the untagged request");
-    } finally {
-      await close();
-    }
-  });
-
-  it("a failing key never tags an instance even with the fallback available", async () => {
-    const collector = testCollector();
-    const socketOwner = { lookup: () => 4321 };
-    const server = createOpenAIRelayServer(geminiDeps(collector, socketOwner));
-    const { port, close } = await listenLoopback(server, 0);
-    try {
-      const res = await postGenerate(port, "wrong-token");
-      assert.equal(res.status, 401);
-
-      const agy = (await collector.getAgentsStatus()).find((a) => a.id === "agy");
-      assert.deepEqual(agy.instances, [], "a non-authenticating key must not tag instances");
     } finally {
       await close();
     }

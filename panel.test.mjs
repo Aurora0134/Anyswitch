@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "./panel.mjs";
-import { createAliasResolver, aliasFilePath, writeAliasFile, AGY_NORMAL_SLUGS, AGY_SMALL_SLUG } from "./antigravity-alias.mjs";
 
 // Minimal fake HTTP req/res pair. res captures the status code, headers, and
 // JSON body the router writes, so a test can assert on them. `body` (optional)
@@ -454,147 +453,6 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.equal(json().pid, process.pid);
     assert.equal(json().relay.status, "running");
     assert.equal(json().relay.pid, 1234);
-  });
-});
-
-// Antigravity settings routes. These run against a real temp dir holding a
-// minimal schema-valid v2 store (validateStore must accept it) plus the shared
-// antigravity.json, because the POST route validates targets against the
-// ENABLED model set on disk.
-describe("panel router antigravity settings routes", () => {
-  function tempEnv() {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-agy-"));
-    const storeFile = join(dir, "store.json");
-    writeFileSync(storeFile, JSON.stringify({
-      version: 2,
-      providers: {
-        "prov-a": {
-          displayName: "Provider A",
-          baseURL: "https://a.example/v1",
-          protocol: "openai-compatible",
-          credentialFile: "a.bin",
-          models: {
-            "gemini-3.7-flash": { displayName: "G3.7F" },
-            "small-helper": { displayName: "Small Helper" },
-          },
-        },
-        "prov-b": {
-          displayName: "Provider B",
-          baseURL: "https://b.example/v1",
-          protocol: "openai-compatible",
-          credentialFile: "b.bin",
-          models: {
-            "google/gemini-3.7-flash": { displayName: "G3.7F (google prefix)" },
-          },
-          discovered: { "gemini-3.6-flash": { displayName: "filtered out" } },
-        },
-      },
-    }));
-    const aliasPath = aliasFilePath(dir);
-    writeAliasFile(aliasPath, { aliases: { "gemini-3.7-flash": "prov-a/gemini-3.7-flash" } });
-    const aliasResolver = createAliasResolver({ filePath: aliasPath });
-    const router = createPanelRouter({
-      storePaths: { root: dir, storeFile, credentialsDir: join(dir, "credentials"), appDir: join(dir, "app") },
-      logger: null,
-      metricsCollector: null,
-      aliasResolver,
-      aliasPath,
-      startTime: 123456,
-      getRelayStatusFn: async () => ({ status: "stopped", pid: null, port: 47821 }),
-      fetchRelayAgents: async () => null,
-    });
-    return { dir, router, aliasResolver, aliasPath };
-  }
-
-  it("GET /panel/api/antigravity/options returns slug groups, same-name options, catalog, and aliases", async () => {
-    const { dir, router } = tempEnv();
-    try {
-      const { req, res, json } = fakeReqRes("/panel/api/antigravity/options", "GET");
-      await router.handle(req, res);
-      assert.equal(res.statusCode, 200);
-      const body = json();
-      assert.equal(body.ok, true);
-      // Slug groups for the settings UI layout.
-      assert.deepEqual(body.normalSlugs, AGY_NORMAL_SLUGS);
-      assert.equal(body.smallSlug, AGY_SMALL_SLUG);
-      // Same-name options come from the enabled set only, across providers.
-      const sameName = body.options["gemini-3.7-flash"];
-      assert.equal(sameName.length, 2);
-      assert.ok(sameName.some((m) => m.providerId === "prov-a" && m.isExact === true));
-      assert.ok(sameName.some((m) => m.providerId === "prov-b" && m.modelId === "google/gemini-3.7-flash"));
-      assert.equal(body.options["gemini-3.6-flash"].length, 0); // discovered-only: filtered out
-      // Catalog = every enabled model, for the small slug's free choice.
-      assert.equal(body.catalog.length, 3);
-      assert.ok(body.catalog.some((e) => e.providerId === "prov-b" && e.modelId === "google/gemini-3.7-flash"));
-      assert.ok(!body.catalog.some((e) => e.modelId === "gemini-3.6-flash"));
-      // Current on-disk binding is echoed back.
-      assert.equal(body.aliases["gemini-3.7-flash"], "prov-a/gemini-3.7-flash");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("POST /panel/api/antigravity/aliases persists, hot-reloads, and reflects in options", async () => {
-    const { dir, router, aliasPath } = tempEnv();
-    try {
-      const aliases = {
-        "gemini-3.7-flash": "prov-b/google/gemini-3.7-flash",
-        [AGY_SMALL_SLUG]: "prov-a/small-helper",
-      };
-      const { req, res, json } = fakeReqRes("/panel/api/antigravity/aliases", "POST", { aliases });
-      await router.handle(req, res);
-      assert.equal(res.statusCode, 200);
-      assert.equal(json().ok, true);
-      assert.equal(json().aliases["gemini-3.7-flash"], "prov-b/google/gemini-3.7-flash");
-
-      // Persisted to disk (this is what makes the change visible to the OTHER
-      // process — the relay — via the mtime-aware file layer).
-      const { readAliasFile } = await import("./antigravity-alias.mjs");
-      const disk = readAliasFile(aliasPath).aliases;
-      assert.equal(disk["gemini-3.7-flash"], "prov-b/google/gemini-3.7-flash");
-      assert.equal(disk[AGY_SMALL_SLUG], "prov-a/small-helper");
-
-      // A second resolver (stand-in for the relay process) sees it immediately.
-      const other = createAliasResolver({ filePath: aliasPath });
-      assert.deepEqual(other.resolve("gemini-3.7-flash"), { ok: true, providerId: "prov-b", modelId: "google/gemini-3.7-flash" });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("POST /panel/api/antigravity/aliases refuses targets outside the enabled set", async () => {
-    const { dir, router, aliasPath } = tempEnv();
-    try {
-      const aliases = { "gemini-3.7-flash": "prov-b/gemini-3.6-flash" }; // discovered-only
-      const { req, res, json } = fakeReqRes("/panel/api/antigravity/aliases", "POST", { aliases });
-      await router.handle(req, res);
-      assert.equal(res.statusCode, 400);
-      assert.equal(json().ok, false);
-      assert.ok(json().error.includes("gemini-3.7-flash"));
-      assert.ok(json().error.includes("not an enabled store model"));
-
-      // Nothing was written: the disk binding is unchanged.
-      const { readAliasFile } = await import("./antigravity-alias.mjs");
-      assert.equal(readAliasFile(aliasPath).aliases["gemini-3.7-flash"], "prov-a/gemini-3.7-flash");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("POST /panel/api/antigravity/aliases still rejects malformed bodies", async () => {
-    const { dir, router } = tempEnv();
-    try {
-      const bad = fakeReqRes("/panel/api/antigravity/aliases", "POST", { aliases: "not-an-object" });
-      await router.handle(bad.req, bad.res);
-      assert.equal(bad.res.statusCode, 400);
-
-      const bad2 = fakeReqRes("/panel/api/antigravity/aliases", "POST", { aliases: { "gemini-3.7-flash": "no-slash" } });
-      await router.handle(bad2.req, bad2.res);
-      assert.equal(bad2.res.statusCode, 400);
-      assert.ok(bad2.json().error.includes("no '/'"));
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 
@@ -1880,7 +1738,7 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
 describe("panel.html per-instance telemetry TTFT sparkline", () => {
   // 回归（dd61b99 多实例化重构）：端点级四宫格删除后，实例级四宫格只接回了
   // 生成速度/缓存命中率两条 sparkline，「首字响应时间」折线图从 kimi/opencode/
-  // pi/agy 四栏消失。以下断言钉住容器、缓冲、绘制三个环节。
+  // pi 三栏消失。以下断言钉住容器、缓冲、绘制三个环节。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -1917,9 +1775,9 @@ describe("panel.html 结构完整性（防 read 截断污染回写）", () => {
       "base64 行曾被 read 工具截断产物污染，导致头像 img src 损坏、监测卡标题错乱");
   });
 
-  it("监测页八个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
-    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 8, "8 个 agent-avatar");
-    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 8, "8 个 agent-headings");
+  it("监测页七个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
+    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 7, "7 个 agent-avatar");
+    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 7, "7 个 agent-headings");
     // img 开标签必须在本行内闭合（不允许 > 落在数千字符之后吞掉后续结构）
     let idx2 = 0;
     let broken = 0;
@@ -2387,7 +2245,7 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
       assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
     }
     assert.ok(/<div class="session-row detail-open-only" id="ccSessionRow">/.test(panelHtml),
-      "cc 汇总行带 detail-open-only（仅展开态显示，与 agy/pi/kimi/opencode 一致）");
+      "cc 汇总行带 detail-open-only（仅展开态显示，与 pi/kimi/opencode 一致）");
     assert.ok(/<div id="ccSessionsList"><\/div>\s*<div class="session-row detail-open-only" id="ccSessionRow">/.test(panelHtml),
       "汇总行位于实例列表之后的 session-table-wrapper 内（同其他栏结构）");
   });
