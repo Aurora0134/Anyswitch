@@ -1703,6 +1703,63 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
     assert.equal(after.lastViaAuto, true, "最近模型的链归因保留");
   });
 
+  it("late attachInstance after the chain announcement replays attribution to the mirror (迟挂载不丢自动路由)", async () => {
+    // netstat 快照 miss 的真实时序：请求落聚合桶 → 链布线/成员宣布完成 →
+    // 快照刷新后才 attachInstance 补挂。镜像在宣布之后创建，必须把已宣布的
+    // 链归属重放进去，否则实例行把链服务请求整段显示成直连「生成中」。
+    let mockTime = 1000;
+    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+    const req = collector.startRequest({ agentId: "kimi", providerId: null, model: "auto", path: "openai" });
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "kimi-k3" } : null));
+    req.setCurrentMember("chan-a/m1");
+
+    req.attachInstance("ws-a"); // 快照补挂晚于成员宣布
+
+    const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    const inst = kimi.instances.find((i) => i.id === "ws-a");
+    assert.ok(inst, "补挂后实例行出现");
+    assert.deepEqual(inst.activeTargets, [
+      { providerId: "chan-a", model: "kimi-k3", count: 1, autoCount: 1 },
+    ], "镜像重放已宣布的链归属，按服务归因记账");
+
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    const after = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    const instAfter = after.instances.find((i) => i.id === "ws-a");
+    assert.deepEqual(instAfter?.activeTargets ?? [], [], "结束后镜像账本清空");
+  });
+
+  it("attach before the chain announcement still receives it via the fan-out (先挂后宣布)", async () => {
+    // 快照 miss 但补挂赶在成员循环之前的时序：镜像只预置 resolver，宣布
+    // 经 composed 扇出到达，归因同样成立。
+    let mockTime = 1000;
+    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+    const req = collector.startRequest({ agentId: "kimi", providerId: null, model: "auto", path: "openai" });
+    req.attachInstance("ws-a");
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1" ? { providerId: "chan-a", model: "kimi-k3" } : null));
+    req.setCurrentMember("chan-a/m1");
+
+    const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    const inst = kimi.instances.find((i) => i.id === "ws-a");
+    assert.deepEqual(inst.activeTargets, [
+      { providerId: "chan-a", model: "kimi-k3", count: 1, autoCount: 1 },
+    ]);
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  });
+
+  it("late-attached direct request keeps autoCount 0 (重放不误标直连)", async () => {
+    let mockTime = 1000;
+    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+    const req = collector.startRequest({ agentId: "kimi", providerId: "chan-d", model: "m9", path: "openai" });
+    req.attachInstance("ws-a");
+
+    const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    const inst = kimi.instances.find((i) => i.id === "ws-a");
+    assert.deepEqual(inst.activeTargets, [
+      { providerId: "chan-d", model: "m9", count: 1, autoCount: 0 },
+    ], "直连请求没有可重放的链归属，账本维持直连口径");
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  });
+
   it("direct request books the entry channel with autoCount 0 and viaAuto stays false", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
