@@ -1,16 +1,18 @@
 // Qoder launcher — spawns the Qoder CLI through its qoder.cmd dispatcher with
 // the Anyswitch relay token in the child environment.
 //
-// Qoder is different from the other endpoints: it has NO config.toml /
-// config.json surface for API endpoints (it authenticates via browser OAuth
-// against its own cloud), so there is no merge-config module and nothing to
-// sync from agent-sync.mjs. The integration is:
+// Qoder's BYOK (custom provider) is configured via settings.json
+// modelConfigs.customModels — a JSON array of model entries. Before spawning,
+// the launcher syncs the Anyswitch store into that array so Qoder picks up
+// the current providers/models without manual configuration.
+// The integration is:
 //   1. reuse the resident relay on 47821 when it is already serving (probe),
 //      otherwise start a per-launch OpenAI relay against the real v2 store;
-//   2. spawn the qoder.cmd dispatcher (COMSPEC /d /c, like the other .cmd
+//   2. write the BYOK config into ~/.qoder/settings.json (via qoder-merge-config);
+//   3. spawn the qoder.cmd dispatcher (COMSPEC /d /c, like the other .cmd
 //      CLIs) with ANYSWITCH_RELAY_TOKEN injected via process-level env vars
 //      only — never written to disk;
-//   3. tear the per-launch relay down when Qoder exits, so nothing leaks.
+//   4. tear the per-launch relay down when Qoder exits, so nothing leaks.
 // Qoder-side endpoint overrides ride the QODER_BIG_MODEL_ENDPOINT /
 // QODER_OPENAPI_ENDPOINT env vars the CLI itself reads (inherited verbatim
 // from the caller's environment — the launcher never invents values for them).
@@ -24,6 +26,8 @@ import { createProductionDeps } from "./launch.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
+import { loadStore } from "./store-io.mjs";
+import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -119,6 +123,27 @@ export async function runQoderLauncher({
   }
 
   try {
+    // Sync BYOK config into Qoder's settings.json before spawning so the
+    // customModels array reflects the current store. Errors are logged but
+    // never block the launch — Qoder can still start with stale or no BYOK.
+    try {
+      const loaded = loadStore();
+      if (loaded.ok) {
+        const sidecarRoot = relayDataRoot(base);
+        const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
+        const writeResult = writeQoderConfig(loaded.store, relay.port, relay.token, sidecarRoot, settingsPath);
+        if (!writeResult.ok) {
+          log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
+        } else if (!writeResult.unchanged) {
+          log(`qoder settings.json updated (backup: ${writeResult.backupPath ?? "none"})`);
+        }
+      } else {
+        log("warning: Anyswitch store could not be read; qoder settings not updated");
+      }
+    } catch (syncErr) {
+      log(`warning: qoder BYOK config sync failed: ${syncErr.message}`);
+    }
+
     const env = buildQoderLauncherEnv({ token: relay.token, base });
     return await spawnQoder({ env, args: qoderArgs });
   } finally {
