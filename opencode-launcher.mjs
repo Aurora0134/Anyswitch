@@ -73,10 +73,9 @@ export function resolveOpencodeExecutable(base = process.env) {
   );
 }
 
-// Unified per-instance id (same scheme as the antigravity launcher):
-// `<cwd basename>-<launcher pid>`, basename scrubbed to the relay's accepted
-// charset [A-Za-z0-9._:-] and the whole id capped at 64 chars; falls back to
-// `<endpoint>-<pid>` when the basename scrubs to empty. The launcher process
+// Unified per-instance id: `<cwd basename>-<launcher pid>`, basename scrubbed
+// to the relay's accepted charset [A-Za-z0-9._:-] and the whole id capped at
+// 64 chars; falls back to `<endpoint>-<pid>` when the basename scrubs to empty. The launcher process
 // maps 1:1 to a client instance, so its own pid is the discriminator.
 export function buildInstanceId({
   cwd = process.cwd(),

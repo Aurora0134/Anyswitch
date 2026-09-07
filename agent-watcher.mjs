@@ -2,7 +2,7 @@
 //
 // When the user enables "跟随 Coding Agent 启动" in settings.json (followAgent),
 // this watcher polls every few seconds: if any coding agent (ZCode, Claude
-// Code, OpenCode, DSH, Antigravity) is running AND the relay (47821) is down,
+// Code, OpenCode, DSH) is running AND the relay (47821) is down,
 // it silently starts the relay. This revives the relay even with no human at
 // the panel — opening a coding agent brings the link back in milliseconds.
 //
@@ -38,7 +38,7 @@ export function createAgentWatcher({
       if (!settings.followAgent) return;
 
       const procs = scanProcesses();
-      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.agy || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.reasonix || 0) > 0;
+      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.reasonix || 0) > 0;
       if (!anyAgent) return;
 
       const relay = await getRelayStatus();

@@ -286,7 +286,7 @@ export function createChainState(options = {}) {
 
 // Build the panel-facing chain runtime payload from the store plus one or
 // more chainState snapshots. One relay process hosts several protocol
-// frontends (openai-handler / anthropic handler / gemini-handler), each with
+// frontends (openai-handler / anthropic handler), each with
 // its OWN chainState closure, so the same endpoint can hold a backoff record
 // in more than one of them; the merge keeps the newest entry (max `since`)
 // per endpoint — the most recent backoff is the position the next request

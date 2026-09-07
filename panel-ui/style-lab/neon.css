@@ -383,19 +383,12 @@
   box-shadow: 0 0 8px rgba(34, 211, 238, 0.22);
 }
 
-/* Antigravity 映射 / Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
-:root[data-style="neon"] .agy-fold { border-radius: var(--radius-md); }
-:root[data-style="neon"] .agy-select,
-:root[data-style="neon"] .agy-combo-input,
+/* Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
 :root[data-style="neon"] .skills-path-input,
 :root[data-style="neon"] .skills-repo-path,
 :root[data-style="neon"] .skills-diff-list {
   border-radius: var(--radius-sm);
 }
-:root[data-style="neon"] .agy-combo-list { border-radius: var(--radius-md); }
-:root[data-style="neon"] .agy-select:focus,
-:root[data-style="neon"] .agy-combo-input:focus,
-:root[data-style="neon"] .agy-combo.open .agy-combo-input,
 :root[data-style="neon"] .skills-path-input:focus {
   border-color: var(--accent);
   box-shadow: 0 0 8px rgba(34, 211, 238, 0.2);

@@ -323,76 +323,29 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    // agy requests carry no providerId -> faults are keyless (keylessFaultAt),
-    // so activeErrors stays empty while errorActive is raised.
-    const bad = collector.startRequest({ agentId: "agy", model: "gemini-2.5-flash" });
+    // A request started without providerId produces a keyless fault
+    // (keylessFaultAt), so activeErrors stays empty while errorActive is raised.
+    const bad = collector.startRequest({ agentId: "kimi", model: "test-model" });
     mockTime = 2000;
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
     let status = await collector.getAgentsStatus();
-    let agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.errorActive, true);
-    assert.equal(agy.activeErrors.length, 0, "keyless fault is not surfaced via activeErrors");
-    assert.ok(agy.lastError);
+    let kimi = status.find((a) => a.id === "kimi");
+    assert.equal(kimi.errorActive, true);
+    assert.equal(kimi.activeErrors.length, 0, "keyless fault is not surfaced via activeErrors");
+    assert.ok(kimi.lastError);
 
-    const retry = collector.startRequest({ agentId: "agy", model: "gemini-2.5-flash" });
+    const retry = collector.startRequest({ agentId: "kimi", model: "test-model" });
     status = await collector.getAgentsStatus();
-    agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.errorActive, true, "retry begin must keep the keyless 502 visible");
-    assert.ok(agy.lastError, "error history retained");
+    kimi = status.find((a) => a.id === "kimi");
+    assert.equal(kimi.errorActive, true, "retry begin must keep the keyless 502 visible");
+    assert.ok(kimi.lastError, "error history retained");
 
     mockTime = 3000;
     retry.recordFirstChunk();
     status = await collector.getAgentsStatus();
-    agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.errorActive, false, "first token recovers the keyless latch");
-    assert.ok(agy.lastError);
-  });
-
-  it("settles orphaned active requests when the aggregate agent's process is gone", async () => {
-    let mockTime = 1000;
-    const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => cb(null, ""); // no agy process running
-    const collector = testCollector({ execFn: mockExec, nowFn });
-
-    const req = collector.startRequest({ agentId: "agy", model: "gemini-3.7-flash" });
-    req.recordFirstChunk();
-
-    // Immediately after the request starts, the process scan still shows no
-    // agy process but we have not crossed the orphan TTL yet.
-    mockTime = 1001;
-    let status = await collector.getAgentsStatus();
-    let agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.metrics.activeRequests, 1, "active request is still counted within the TTL");
-    assert.equal(agy.status, "running", "a lone in-flight request keeps the card running");
-
-    // After the process-gone TTL passes, the request should be settled.
-    mockTime = 4001;
-    status = await collector.getAgentsStatus();
-    agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.metrics.activeRequests, 0, "orphaned active request is settled once process is gone past TTL");
-    assert.equal(agy.currentModel, null, "currentModel is cleared");
-    assert.equal(agy.activeModels.length, 0, "activeModels is cleared");
-    assert.equal(agy.status, "stopped", "card flips to stopped after orphan cleanup");
-  });
-
-  it("does not settle active requests while the aggregate agent's process is still running", async () => {
-    let mockTime = 1000;
-    const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => {
-      // Real wmic shape: Node,CommandLine,Name,ProcessId (no parent column in
-      // this older fixture — the ppid-less 4-column dump).
-      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\agy\\\\bin\\\\antigravity.exe,agy.exe,12345\r\n");
-    };
-    const collector = testCollector({ execFn: mockExec, nowFn });
-
-    const req = collector.startRequest({ agentId: "agy", model: "gemini-3.7-flash" });
-    req.recordFirstChunk();
-
-    mockTime = 10000; // well past the orphan TTL
-    const status = await collector.getAgentsStatus();
-    const agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.metrics.activeRequests, 1, "active request is preserved while the process is alive");
-    assert.equal(agy.status, "running", "card stays running while process is alive");
+    kimi = status.find((a) => a.id === "kimi");
+    assert.equal(kimi.errorActive, false, "first token recovers the keyless latch");
+    assert.ok(kimi.lastError);
   });
 
   it("folds the fault banner when the endpoint closes, ending the fault lifecycle", async () => {
@@ -1206,7 +1159,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 8, "panel now exposes 8 endpoint cards including opencode");
+    assert.equal(status.length, 7, "panel now exposes 7 endpoint cards including opencode");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -1280,7 +1233,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
     // 8 cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 8, "claude aggregate bucket must not add a panel card");
+    assert.equal(status.length, 7, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -2351,7 +2304,6 @@ describe("createSessionReporter", () => {
     assert.ok(status.find((a) => a.id === "reasonix"));
     assert.ok(status.find((a) => a.id === "kimi"));
     assert.ok(status.find((a) => a.id === "pi"));
-    assert.ok(status.find((a) => a.id === "agy"));
 
     const zcode = status.find((a) => a.id === "zcode");
     const dsh = status.find((a) => a.id === "dsh");
@@ -2741,19 +2693,19 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
-      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='antigravity.exe' or name='agy.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
+      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
       ...extraRows,
     ].join("\r\n") + "\r\n";
   const allZero = (p) => ({
     zcode: p.zcode, claude: p.claude, reasonix: p.reasonix, dsh: p.dsh,
-    agy: p.agy, kimi: p.kimi, pi: p.pi, opencode: p.opencode,
+    kimi: p.kimi, pi: p.pi, opencode: p.opencode,
   });
 
   it("wmic wrapper row carrying every agent name literal counts as nothing", async () => {
     const execFn = (cmd, opts, cb) => cb(null, wmicWrapper());
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, agy: 0, kimi: 0, pi: 0, opencode: 0 },
+    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0 },
       "the probe's own cmd.exe wrapper must not impersonate any client");
     assert.equal(p.reasonixPids.has(7300), false);
     // The wrapper stays in the lineage table — it is a legitimate hop for
@@ -2866,20 +2818,6 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
     assert.deepEqual(kimi.instances.map((i) => i.id), ["kimi-30003"], "no garbage placeholder rows from npm view");
     assert.equal(pi.processCount, 0);
     assert.deepEqual(pi.instances, []);
-  });
-
-  it("skips Electron --type= helper processes for antigravity (agy)", async () => {
-    const csv = wmic([
-      "LAPTOP,C:\\Programs\\Antigravity\\antigravity.exe,antigravity.exe,31001",
-      "LAPTOP,C:\\Programs\\Antigravity\\antigravity.exe --type=renderer,antigravity.exe,31002",
-      "LAPTOP,C:\\Programs\\Antigravity\\antigravity.exe --type=gpu,antigravity.exe,31003",
-    ]);
-    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
-
-    const status = await collector.getAgentsStatus();
-    const agy = status.find((a) => a.id === "agy");
-    assert.equal(agy.processCount, 1, "Electron helpers are not sessions");
-    assert.deepEqual(agy.instances.map((i) => i.id), ["agy-31001"]);
   });
 
   it("revives a session whose PID reappears in the scan after a transient miss", async () => {
