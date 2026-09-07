@@ -1812,6 +1812,67 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
       "sparkline redraws each render, seeded from buffer-stashed authoritative history");
   });
 });
+
+describe("panel.html 实例行自动路由状态徽标（生成中 → 号池紫「自动路由中」）", () => {
+  // 实例级服务归因（2026-09-07）：多实例端点实例行的在飞请求里有链服务的
+  // （activeTargets 任一条目 autoCount>0；claude 会话行走 reporter 透传的
+  // viaAuto=true），状态徽标从绿色「生成中」换成号池紫「自动路由中」（badge-auto）；
+  // 直连与待命行不受影响，伪「全局汇总」行永不挂状态徽标。
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  function makeRenderStateBadge() {
+    // 截「const stateBadge = 」到语句末（模板串内无分号，首个 ; 即语句尾），
+    // 整段三元（含 isAggregate 空串分支）作为表达式求值
+    const m = panelHtml.match(/const stateBadge = (isAggregate[\s\S]*?);/);
+    assert.ok(m, "instance-row state badge expression found");
+    return (ctx) => new Function("isAggregate", "isAct", "instViaAuto", `return (${m[1]});`)(ctx.isAggregate, ctx.isAct, ctx.instViaAuto);
+  }
+
+  it("生成中 + 链归因 → badge-auto「自动路由中」；直连生成中保持 badge-ok「生成中」", () => {
+    const badge = makeRenderStateBadge();
+    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: true }), /badge-auto/);
+    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: true }), /自动路由中/);
+    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /badge-ok/);
+    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /生成中/);
+    assert.doesNotMatch(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /自动路由中/);
+  });
+
+  it("待命与伪「全局汇总」行不换装：待命保持 badge-neutral，汇总行无状态徽标", () => {
+    const badge = makeRenderStateBadge();
+    const idle = badge({ isAggregate: false, isAct: false, instViaAuto: true });
+    assert.match(idle, /badge-neutral/);
+    assert.match(idle, /待命/);
+    assert.equal(badge({ isAggregate: true, isAct: true, instViaAuto: true }), "");
+  });
+
+  it("实例级归因判定：activeTargets 任一 autoCount>0 或 claude 行 viaAuto=true 命中", () => {
+    const m = panelHtml.match(/const instViaAuto = inst\.viaAuto === true[\s\S]*?;/);
+    assert.ok(m, "instViaAuto derivation found in renderInstanceRows");
+    assert.ok(m[0].includes("inst.activeTargets.some"), "reads the per-instance composite ledger");
+    assert.ok(m[0].includes("autoCount"), "keys on autoCount, not on chain config");
+  });
+});
+
+describe("panel.html 设置弹窗齿轮图标完整性", () => {
+  // 回归（2026-09-07）：设置弹窗标题的齿轮 path 曾缺一段双弧线段
+  // （a2 2 0 0 1 -2.83 0 2 2 0 0 1），齿形塌陷、图标歪斜。钉住弹窗齿轮与
+  // 页头齿轮（视觉正确基准）path 完全一致，防止再被不完整粘贴破坏。
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("settingsModal 标题齿轮 path 与页头设置按钮齿轮 path 完全一致", () => {
+    const paths = [...panelHtml.matchAll(/M19\.4 15a1\.65[^"]+/g)].map((m) => m[0]);
+    assert.ok(paths.length >= 2, "header + modal gear paths both present");
+    assert.equal(new Set(paths).size, 1, "every gear render uses the identical intact path");
+    // 该弧段是齿轮左下齿的双弧连接，缺失即塌齿
+    assert.ok(paths[0].includes("a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83"), "gear arc segment present");
+  });
+});
 describe("panel.html 结构完整性（防 read 截断污染回写）", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),

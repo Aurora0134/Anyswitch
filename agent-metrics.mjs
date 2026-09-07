@@ -1822,6 +1822,11 @@ export function createAgentMetricsCollector(options = {}) {
         // reporter starts sending it) — feeds the per-session model badge.
         model: s.model ?? null,
         providerId: s.providerId ?? null,
+        // Chain provenance rides the same reporter snapshot: the per-session
+        // row's status badge flips to 自动路由中 only when the in-flight
+        // request is chain-served (same 服务归因 semantics as the capsule's
+        // activeTargets.autoCount; direct traffic never sets it).
+        viaAuto: s.viaAuto === true,
       };
     });
 
