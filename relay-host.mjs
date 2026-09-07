@@ -28,7 +28,6 @@ import { createLogger } from "./logger.mjs";
 import { createPanelRouter } from "./panel.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
-import { aliasFilePath, createAliasResolver } from "./antigravity-alias.mjs";
 import { writeRelayPid, clearRelayPid, getRelayPidPath } from "./relay-process-manager.mjs";
 import { createStoreWatcher } from "./agent-sync.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
@@ -99,14 +98,11 @@ function createResidentDeps(options = {}) {
     logger.warn?.(`usage journal unavailable; continuing without it: ${error.message}`);
   }
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ persistRoot: root, journal: usageJournal });
-  // Socket→PID 兜底归组的共享 netstat 快照（openai / gemini 两条路径共用一个
-  // 实例，TTL 内整个 relay 只 spawn 一次 netstat；机制见
-  // instance-socket-owner.mjs）。per-launch 路径（launch.mjs）不下发——那里
-  // 保持原行为。测试可注入替身。
+  // Socket→PID 兜底归组的共享 netstat 快照（TTL 内整个 relay 只 spawn 一次
+  // netstat；机制见 instance-socket-owner.mjs）。per-launch 路径（launch.mjs）
+  // 不下发——那里保持原行为。测试可注入替身。
   const socketOwner = options.socketOwner ?? createInstanceSocketOwner();
   const token = loadOrGenerateToken(root);
-  const aliasPath = aliasFilePath(root);
-  const aliasResolver = options.aliasResolver ?? createAliasResolver({ filePath: aliasPath });
 
   return {
     token,
@@ -117,10 +113,8 @@ function createResidentDeps(options = {}) {
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
     getKeepAliveConfig: options.getKeepAliveConfig ?? claudeDeps.getKeepAliveConfig,
-    aliasResolver,
-    aliasPath,
     socketOwner,
-    panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, aliasResolver, aliasPath, hostKind: "relay-host" }),
+    panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, hostKind: "relay-host" }),
     metricsCollector,
     logger,
   };

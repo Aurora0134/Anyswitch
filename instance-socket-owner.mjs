@@ -1,8 +1,8 @@
 // Socket→PID 兜底归组（panel 实例行 / 实例计数胶囊的兜底数据源）。
 //
-// 背景：实例归组的正源是 launcher 注入的 x-agent-instance 头（openai 路径）
-// 或 relay key 的 "token.instanceId" 后缀（gemini 路径）。但用户经常直接在
-// 终端敲 npm shim 命令（kimi / opencode / pi / agy）启动客户端，绕过
+// 背景：实例归组的正源是 launcher 注入的 x-agent-instance 头（openai 路径）。
+// 但用户经常直接在
+// 终端敲 npm shim 命令（kimi / opencode / pi）启动客户端，绕过
 // launcher，请求不带任何实例标签——instances[] 恒空，面板实例行与左上角
 // 实例计数胶囊不出现。
 //

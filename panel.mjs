@@ -9,8 +9,8 @@
 //     them, and a relay-restart request handled BY the relay is self-kill.
 //
 // Authentication: NONE. Loopback binding is the network boundary (non-127
-// peers already 403). Writes (start/stop/restart, settings, autostart, agy
-// aliases, session report) additionally require Origin/Referer on :47820 or
+// peers already 403). Writes (start/stop/restart, settings, autostart,
+// session report) additionally require Origin/Referer on :47820 or
 // :47821 plus header X-AnySwitch-Panel: 1, so a random page on this machine
 // cannot POST those routes. Credentials are never echoed. The relay Bearer
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
@@ -22,7 +22,6 @@ import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
 import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "./autostart.mjs";
 import { spawnWatchdog, stopWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
 import { loadSettings, saveSettings, defaultSettingsPath } from "./relay-settings.mjs";
-import { AGY_SLUGS, AGY_NORMAL_SLUGS, AGY_SMALL_SLUG, splitTarget, readAliasFile, writeAliasFile } from "./antigravity-alias.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
@@ -59,7 +58,7 @@ const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
 // All legitimate panel bodies are KB-scale JSON (settings, aliases, store
 // writes). Anything past 1MB is a malfunctioning or hostile client, so the
 // body reader cuts it off instead of buffering it. Same class shape as the
-// BodyTooLargeError in server.mjs / openai-server.mjs / gemini-server.mjs,
+// BodyTooLargeError in server.mjs / openai-server.mjs,
 // defined locally so the panel does not drag in the relay's dep chain.
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -228,82 +227,6 @@ export function isTrustedPanelMutation(req) {
   }
 }
 
-// Same-name candidates for the agy settings page, one entry per slug. The
-// lookup domain is provider.models — the filtered, materialized effective set
-// (discovered ∩ modelFilter) — because that is exactly what gemini-handler
-// accepts at request time: a binding to a discovered-but-filtered-out model
-// would 404 on the very next request. Matching is strict name equality after
-// cosmetic stripping (a leading `[tag]` marker, at most two, and a `google/`
-// routing prefix); a substring hit is NOT a same-name model.
-export function getMatchingProvidersForAgy(store) {
-  const providers = store?.providers ?? {};
-  const result = {};
-  for (const slug of AGY_SLUGS) {
-    result[slug] = [];
-    const normalizedSlug = slug.toLowerCase();
-    for (const [providerId, provider] of Object.entries(providers)) {
-      for (const [modelId, model] of Object.entries(provider.models ?? {})) {
-        const lowerModel = modelId.toLowerCase();
-        const strippedModel = lowerModel
-          .replace(/^\[[^\]]+\]/, "")
-          .replace(/^\[[^\]]+\]/, "")
-          .replace(/^google[\/:]/, "")
-          .trim();
-        const isExact = lowerModel === normalizedSlug;
-        const isMatch = isExact || strippedModel === normalizedSlug;
-        if (isMatch) {
-          result[slug].push({
-            providerId,
-            providerDisplayName: provider.displayName || providerId,
-            modelId,
-            modelDisplayName: model.displayName || modelId,
-            isExact,
-          });
-        }
-      }
-    }
-  }
-  return result;
-}
-
-// Every enabled model in the store (provider.models, NOT the raw discovered
-// cache) as a flat, deterministically ordered catalog. This is the free-choice
-// list for the small helper slug, whose binding is not restricted to
-// same-name models.
-export function getEnabledModelCatalog(store) {
-  const providers = store?.providers ?? {};
-  const catalog = [];
-  for (const [providerId, provider] of Object.entries(providers)) {
-    const providerDisplayName = provider.displayName || providerId;
-    for (const [modelId, model] of Object.entries(provider.models ?? {})) {
-      catalog.push({
-        providerId,
-        providerDisplayName,
-        modelId,
-        modelDisplayName: model.displayName || modelId,
-      });
-    }
-  }
-  // Locale-independent (code-unit) ordering: the catalog crosses process
-  // boundaries as JSON, so its order must not depend on the server's ICU
-  // collation — brackets and CJK tag characters would otherwise shuffle rows
-  // between machines.
-  catalog.sort((a, b) => {
-    if (a.providerId !== b.providerId) return a.providerId < b.providerId ? -1 : 1;
-    return a.modelId < b.modelId ? -1 : 1;
-  });
-  return catalog;
-}
-
-// True when target ("providerId/modelId") resolves to an enabled model in the
-// store. The POST aliases route uses this to refuse bindings that would 404.
-export function isAliasTargetEnabled(store, target) {
-  const split = splitTarget(target);
-  if (!split.ok) return false;
-  const provider = store?.providers?.[split.providerId];
-  return provider?.models?.[split.modelId] !== undefined;
-}
-
 // Pull-mode telemetry: fetch the relay's authoritative live agent metrics from
 // its internal loopback endpoint (47821/api/internal/agents). Returns the agents
 // array, or null if the relay is down/unreachable so the caller can fall back.
@@ -456,8 +379,6 @@ export function createPanelRouter({
   storePaths,
   logger,
   metricsCollector,
-  aliasResolver,
-  aliasPath,
   base = process.env,
   startTime = Date.now(),
   // Relay lifecycle is owned by relay-process-manager (a separate process on
@@ -1199,88 +1120,6 @@ export function createPanelRouter({
           keepAlive: updated.keepAlive,
           sparkWindowPoints: updated.sparkWindowPoints,
         });
-      } catch (err) {
-        return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
-      }
-    }
-
-    // Antigravity (agy) options and alias management routes
-    if (path === "/panel/api/antigravity/options" && method === "GET") {
-      let store = null;
-      try {
-        const loaded = loadStore(storePaths);
-        if (loaded.ok) store = loaded.store;
-      } catch {
-        /* ignore */
-      }
-      const options = getMatchingProvidersForAgy(store);
-      const currentAliases = aliasResolver ? aliasResolver.snapshot() : (aliasPath ? readAliasFile(aliasPath).aliases : {});
-      return sendJson(res, 200, {
-        ok: true,
-        slugs: AGY_SLUGS,
-        normalSlugs: AGY_NORMAL_SLUGS,
-        smallSlug: AGY_SMALL_SLUG,
-        options,
-        catalog: getEnabledModelCatalog(store),
-        aliases: currentAliases,
-      });
-    }
-
-    if (path === "/panel/api/antigravity/aliases" && method === "GET") {
-      const aliases = aliasResolver ? aliasResolver.snapshot() : (aliasPath ? readAliasFile(aliasPath).aliases : {});
-      return sendJson(res, 200, { ok: true, aliases });
-    }
-
-    if (path === "/panel/api/antigravity/aliases" && method === "POST") {
-      try {
-        const body = await readJsonBody(req);
-        const nextAliases = body.aliases;
-        if (!nextAliases || typeof nextAliases !== "object" || Array.isArray(nextAliases)) {
-          return sendJson(res, 400, { ok: false, error: "aliases must be an object map of slug -> target" });
-        }
-
-        // Validate each target
-        for (const [slug, target] of Object.entries(nextAliases)) {
-          const split = splitTarget(target);
-          if (!split.ok) {
-            return sendJson(res, 400, { ok: false, error: `invalid target for slug "${slug}": ${split.reason}` });
-          }
-        }
-
-        // Refuse bindings to models the relay could not actually serve: the
-        // Gemini handler resolves against provider.models only, so a target
-        // that is missing (provider deleted, model filtered out) would 404 on
-        // the next request. Surface it here, at save time, with the offending
-        // slug so the settings page can point the user at the row to fix.
-        let store = null;
-        try {
-          const loaded = loadStore(storePaths);
-          if (loaded.ok) store = loaded.store;
-        } catch {
-          /* checked per-target below */
-        }
-        for (const [slug, target] of Object.entries(nextAliases)) {
-          if (!isAliasTargetEnabled(store, target)) {
-            return sendJson(res, 400, {
-              ok: false,
-              error: `target for slug "${slug}" is not an enabled store model: ${target}`,
-            });
-          }
-        }
-
-        // Persist to disk if path is available
-        if (aliasPath) {
-          writeAliasFile(aliasPath, { aliases: nextAliases });
-        }
-
-        // Hot update in-memory overlay/resolver
-        if (aliasResolver) {
-          for (const [slug, target] of Object.entries(nextAliases)) {
-            aliasResolver.setAlias(slug, target);
-          }
-        }
-
-        return sendJson(res, 200, { ok: true, aliases: aliasResolver ? aliasResolver.snapshot() : nextAliases });
       } catch (err) {
         return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
       }

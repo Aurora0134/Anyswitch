@@ -18,8 +18,8 @@
 //     401/403, and keep-alive-judged retryable stream faults) back off to the
 //     next member; 400/404/422 are request-shaped and pass straight through.
 //
-// This module is the shared piece every relay frontend (OpenAI now,
-// Anthropic/Gemini later) builds its member loop on.
+// This module is the shared piece every relay frontend (OpenAI, Anthropic)
+// builds its member loop on.
 
 // Statuses that mark a member as failed and advance to the next one. 5xx and
 // 502-from-transport are covered by the >= 500 branch; everything else 4xx is

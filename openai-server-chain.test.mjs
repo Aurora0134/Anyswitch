@@ -626,34 +626,6 @@ describe("chain runtime introspection endpoint (/api/internal/route-chain-runtim
       assert.equal(body.endpoints.kimi.since, null);
     });
   });
-
-  it("merges chain state across protocol handlers, keeping the newest entry per endpoint", async () => {
-    // The gemini handler is injected per deps (gemini-server.mjs deps.geminiHandler
-    // escape hatch); its chainState simulates a second in-process protocol
-    // frontend holding a NEWER backoff record for the same endpoint.
-    const { createChainState } = await import("./chain-routing.mjs");
-    const geminiChainState = createChainState();
-    const { upstreamFetch } = memberRouter({
-      "chan-a": () => statusError(503),
-      "chan-b": () => healthyStream("recovered on B"),
-    });
-    const deps = {
-      ...createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY }),
-      geminiHandler: { chainState: geminiChainState },
-    };
-    await withServer(deps, async (port) => {
-      const chat = await postChat(port);
-      assert.equal(chat.status, 200);
-      await chat.text();
-      // A newer record from another protocol handler wins the merge.
-      const future = Date.now() + 60_000;
-      geminiChainState.noteSuccess("zcode", "chan-a", "model-a", future);
-
-      const body = await (await getRuntime(port)).json();
-      assert.equal(body.endpoints.zcode.since, future);
-      assert.deepEqual(body.endpoints.zcode.current, { node: "chan-a", model: "model-a" });
-    });
-  });
 });
 
 describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {

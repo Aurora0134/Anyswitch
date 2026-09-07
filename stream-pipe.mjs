@@ -1,11 +1,11 @@
-// Shared keep-alive streaming pipeline for all four relay frontends
-// (OpenAI passthrough, resident Anthropic, per-launch Anthropic, Gemini).
+// Shared keep-alive streaming pipeline for all three relay frontends
+// (OpenAI passthrough, resident Anthropic, per-launch Anthropic).
 //
-// One parameterized pipe (pipeGuardedStream / pipeGeminiStream) plus one
+// One parameterized pipe (pipeGuardedStream) plus one
 // parameterized keep-alive retry loop (runStreamWithKeepAlive); each server
 // contributes only a thin channel descriptor carrying its wire format, error
 // body shape, log labels and tracker bookkeeping. Behavior is the union of
-// the four former per-server copies — flag semantics, silent 5xx retries and
+// the three former per-server copies — flag semantics, silent 5xx retries and
 // tracker/log semantics are unchanged.
 //
 // Common guarantees preserved from the copies:
@@ -21,11 +21,9 @@
 
 import { OpenAIStreamGuard } from "./openai-stream-guard.mjs";
 import { StreamTranslator, SSEParser, sseEvent } from "./stream.mjs";
-import { translateGeminiStream } from "./gemini-stream.mjs";
 import { computeRetryDelay } from "./keepalive-backoff.mjs";
 import { openAIError } from "./openai-handler.mjs";
 import { errorBody } from "./handler.mjs";
-import { geminiError } from "./gemini-protocol.mjs";
 
 const SSE_HEADERS = {
   "content-type": "text/event-stream",
@@ -385,98 +383,7 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, enh
   }
 }
 
-// Pipe the upstream OpenAI SSE stream out as Gemini alt=sse SSE. Returns an
-// outcome object describing whether the stream committed content, ended
-// retryably empty before any content, or failed terminally. The keep-alive
-// loop owns the retry decision and the definitive recordEnd.
-export async function pipeGeminiStream(res, upstreamBody, slug, tracker, abortController, keepAliveConfig = null) {
-  let committed = false;
-  let clientAborted = false;
-  const enhanced = keepAliveConfig?.mode === "enhanced";
-
-  const onResClose = () => {
-    if (!res.writableEnded) {
-      clientAborted = true;
-      try {
-        // The translate loop holds the stream lock, so a stream-level cancel
-        // rejects (Node 24) instead of cancelling — swallow the promise too,
-        // or a client disconnect surfaces as an unhandled rejection. Real
-        // upstream teardown rides the abort signal wired in gemini-server.
-        upstreamBody?.cancel?.()?.catch?.(() => {});
-      } catch { /* ignore */ }
-    }
-  };
-
-  res.on("close", onResClose);
-
-  const write = (text) => {
-    if (!text) return;
-    if (!res.headersSent) {
-      res.writeHead(200, SSE_HEADERS);
-    }
-    committed = true;
-    res.write(text);
-  };
-
-  // Plan A (enhanced anti-truncation): the whole turn is withheld until the
-  // guard's verdict, so the client would otherwise see dead air for the
-  // entire generation. The original implementation kept the connection
-  // observably alive with SSE comment pings (": ping") — but antigravity's
-  // genai SDK rejects any SSE comment line ("iterateResponseStream: invalid
-  // stream chunk: : ping") and aborts the whole agent run on the first one,
-  // which is exactly how the agy endpoint fails under enhanced mode. The
-  // Gemini path therefore commits the SSE headers up front (so a held turn
-  // never trips a client header timeout) and sends NO body bytes while held:
-  // the loopback client just waits for the first real chunk. A terminal
-  // fault before content still rides a Gemini-shaped SSE error line (see the
-  // exhausted path of the keep-alive loop), exactly as it did when the pings
-  // had already committed the headers.
-  if (enhanced) {
-    try {
-      if (!res.headersSent) {
-        res.writeHead(200, SSE_HEADERS);
-        if (typeof res.flushHeaders === "function") res.flushHeaders();
-      }
-    } catch {
-      // client socket already gone
-    }
-  }
-
-  try {
-    const outcome = await translateGeminiStream(upstreamBody, slug, write, {
-      onFirstChunk: () => {
-        tracker?.recordFirstChunk();
-      },
-      holdEntireTurn: enhanced,
-    });
-
-    if (clientAborted || abortController?.signal?.aborted) {
-      return { outcome: "terminal", committed, clientAborted: true, usage: outcome.usage };
-    }
-    if (outcome.retryable) {
-      return { outcome: "retryable", reason: outcome.reason, error: outcome.error, committed, usage: outcome.usage };
-    }
-    if (outcome.ok) {
-      return { outcome: "ok", committed, usage: outcome.usage };
-    }
-    return {
-      outcome: "terminal",
-      committed,
-      error: outcome.error?.message || "the upstream stream failed mid-response",
-      usage: outcome.usage,
-    };
-  } catch (err) {
-    if (clientAborted || abortController?.signal?.aborted) {
-      return { outcome: "terminal", committed, clientAborted: true };
-    }
-    return { outcome: "terminal", committed, error: err.message };
-  } finally {
-    res.removeListener("close", onResClose);
-    if (committed) res.end();
-  }
-}
-
-// Keep-alive retry loop shared by all four channels: retry an empty /
+// Keep-alive retry loop shared by all three channels: retry an empty /
 // pre-content upstream (bounded by keepAlive.maxRetries, with exponential
 // backoff + jitter) before latching a fault, silently absorb a one-shot
 // upstream 5xx, and let a departed client abort instead of faulting.
@@ -902,95 +809,7 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ca
   };
 }
 
-// Gemini channel (resident relay /v1beta/... for the antigravity frontend).
-// Pool routing (phase 2): the server passes callUpstreams (one callable per
-// candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
-// fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
-// sticky-table update — same contract as the OpenAI channel above.
-export function geminiStreamChannel({ res, tracker, abortController, deps, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
-  const logger = deps?.logger;
-  return {
-    deps,
-    tracker,
-    abortController,
-    callUpstream,
-    callUpstreams,
-    shouldFailover,
-    onMemberSuccess,
-    onMemberFailover,
-    logLabel: "gemini request",
-    pipe: (result, keepAliveConfig) => pipeGeminiStream(res, result.stream, result.slug, tracker, abortController, keepAliveConfig),
-    onCallError: (err) => {
-      tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });
-      if (!res.headersSent) sendJson(res, 500, geminiError(500, "the relay failed to handle this request"));
-    },
-    onTerminalResult: (result, member) => {
-      if (result.status >= 400) {
-        tracker?.recordEnd({ status: result.status, error: { status: result.status, message: result.body?.error?.message || "Error" }, usage: result.usage, memberId: member?.memberId ?? undefined });
-      } else {
-        tracker?.recordEnd({ status: result.status, usage: result.usage });
-      }
-      if (res.headersSent) {
-        // An earlier attempt's enhanced hold already committed the SSE
-        // headers; the definitive error must ride a Gemini-shaped SSE error
-        // line instead of a status line the wire can no longer carry.
-        try {
-          const payload = JSON.stringify({ error: { code: result.status, message: result.body?.error?.message || "Error", status: "INTERNAL" } });
-          res.write(`data: ${payload}\n\n`);
-        } catch {
-          // socket already gone
-        }
-        res.end();
-      } else {
-        sendJson(res, result.status, result.body);
-      }
-    },
-    onSettled: (outcome, attempt) => {
-      if (outcome.outcome === "ok") {
-        tracker?.recordEnd?.({ usage: outcome.usage });
-        if (attempt > 0) {
-          tracker?.noteKeepAliveRecovery?.();
-          logger?.info?.(`keep-alive: recovered on attempt ${attempt + 1}`);
-        }
-      } else if (outcome.clientAborted) {
-        // Defensive alignment with the anthropic channel's onSettled: a
-        // client abort surfaced through onSettled still records an abort end
-        // so the in-flight tracker entry cannot leak. In production the res
-        // "close" listener in gemini-server already records the abort
-        // (first-terminal-wins), so this branch is a safety net, not the
-        // primary mechanism.
-        tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
-      } else if (outcome.outcome === "terminal" && !outcome.clientAborted && (outcome.error || !outcome.committed)) {
-        // A terminal failure that the inner pipe could not surface as a
-        // retryable pre-content error: latch the fault if nothing was sent.
-        logger?.warn?.(`stream fault: ${outcome.error || "the upstream stream failed"}`);
-        if (!res.headersSent) {
-          sendJson(res, 502, geminiError(502, outcome.error || "the upstream stream failed before any content was delivered"));
-        }
-        tracker?.recordEnd?.({ status: 502, error: { status: 502, message: outcome.error || "the upstream stream failed" }, usage: outcome.usage });
-      }
-    },
-    exhaustedMessage: anthropicExhaustedMessage,
-    sendExhausted: (message) => {
-      if (res.headersSent) {
-        // Whole-turn hold committed the SSE headers up front; the definitive
-        // error must ride a Gemini-shaped SSE error line instead of a 5xx
-        // status line the wire can no longer carry.
-        try {
-          const payload = JSON.stringify({ error: { code: 502, message, status: "INTERNAL" } });
-          res.write(`data: ${payload}\n\n`);
-        } catch {
-          // socket already gone
-        }
-        res.end();
-      } else {
-        sendJson(res, 502, geminiError(502, message));
-      }
-    },
-  };
-}
-
-// Exhaustion message shared by the Anthropic and Gemini channels. retryCtx
+// Exhaustion message for the Anthropic channel. retryCtx
 // (from the keep-alive loop) separates a spent retry budget from a never-
 // configured one — "已耗尽" must not claim retries that never ran.
 function anthropicExhaustedMessage(lastOutcome, retryCtx) {

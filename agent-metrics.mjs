@@ -58,9 +58,9 @@ const SESSION_SILENT_ACTIVE_REQUEST_TTL_MS = 45000;
 // denominator. The window is a last-N request count, never a wall-clock TTL.
 const RECENT_SAMPLE_WINDOW = 18;
 
-// Instance-id rules shared by both injection channels (the x-agent-instance
-// header on the OpenAI/Anthropic paths, the "token.instanceId" suffix on the
-// Gemini relay key): trimmed, length-capped, charset whitelist. Unlike
+// Instance-id rules shared by the injection channel (the x-agent-instance
+// header on the OpenAI/Anthropic paths): trimmed, length-capped, charset
+// whitelist. Unlike
 // x-agent-id this is NOT a whitelist value domain — any well-formed string is
 // a valid instance id. A malformed tag is dropped silently; it must never
 // reject the request it rides on.
@@ -218,8 +218,6 @@ const AGENT_IMAGE_BUCKETS = [
   ["claude.exe", "claude"],
   ["opencode.exe", "opencode"],
   ["dsh.exe", "dsh"],
-  ["antigravity.exe", "agy"],
-  ["agy.exe", "agy"],
   ["node.exe", "node"],
   ["cmd.exe", "cmd"],
 ];
@@ -287,7 +285,7 @@ function resolveProbeRow(lower) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, agy: 0, pi: 0, kimi: 0, reasonix: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), agyPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -357,13 +355,6 @@ function parseTasklistCsv(stdout) {
     } else if (bucket === "dsh") {
       result.dsh += 1;
       if (pid) result.dshPids.add(pid);
-    } else if (bucket === "agy") {
-      if (commandLine?.includes("--type=")) {
-        // Electron helper child process, skip (same convention as reasonix)
-      } else {
-        result.agy += 1;
-        if (pid) result.agyPids.add(pid);
-      }
     } else if (bucket === "node") {
       // The scoped package name must appear as an install PATH (trailing
       // separator): Claude Code's auto-update check spawns
@@ -508,7 +499,7 @@ function clearMatchingAggregateFault(state, meta) {
     syncAggregateFaultLatch(state);
     return;
   }
-  // Keyless recovery (agy / gemini with no providerId): first token or a
+  // Keyless recovery (no providerId): first token or a
   // non-streaming success is the only signal that the last unkeyed fault is
   // over. Retry begin must not clear it.
   if (state.keylessFaultAt !== null) {
@@ -1168,7 +1159,7 @@ export function createAgentMetricsCollector(options = {}) {
       // (the launchers spawn via COMSPEC) and a missing intermediate hop would
       // break ancestor resolution. cmd.exe rows feed only the lineage table —
       // no counting branch claims them.
-      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'antigravity.exe\' or name=\'agy.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
+      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
         lastProcessScanTime = nowFn();
         if (!wmicErr && typeof wmicOut === "string" && wmicOut.includes("ProcessId")) {
           cachedProcessCounts = parseTasklistCsv(wmicOut);
@@ -1179,7 +1170,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 2. Secondary fallback: PowerShell Get-CimInstance (preserves CommandLine on Win11 where wmic is deprecated/slow).
         // Same lineage additions as the WMIC probe: ParentProcessId column (emitted
         // as the second field) and cmd.exe in the filter.
-        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'antigravity.exe\' or name=\'agy.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
+        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
         execFn(psCmd, { timeout: 3000, windowsHide: true }, (psErr, psOut) => {
           if (!psErr && typeof psOut === "string" && psOut.trim().length > 0) {
             cachedProcessCounts = parseTasklistCsv(psOut);
@@ -1214,7 +1205,6 @@ export function createAgentMetricsCollector(options = {}) {
   // Aggregate metrics state
   const zcodeState = createAggregateState();
   const dshState = createAggregateState();
-  const agyState = createAggregateState();
   const piState = createAggregateState();
   const kimiState = createAggregateState();
   const reasonixState = createAggregateState();
@@ -1222,16 +1212,16 @@ export function createAgentMetricsCollector(options = {}) {
   const claudeState = createAggregateState();
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / agy): instanceId -> { state, firstSeen }. Only requests carrying a
+  // pi): instanceId -> { state, firstSeen }. Only requests carrying a
   // valid instanceId land here, and they ALSO land in the endpoint aggregate
   // above, so the existing cards are unchanged. claude is per-session
   // already; zcode/dsh/reasonix stay aggregate-only by design.
-  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), agy: new Map() };
+  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map() };
 
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, agyState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
       state.sparkWindowPoints = sparkWindowPoints;
       while (state.ttftHistory.length > keep) state.ttftHistory.shift();
       while (state.recentSamples.length > keep) state.recentSamples.shift();
@@ -1244,18 +1234,6 @@ export function createAgentMetricsCollector(options = {}) {
     if (typeof meta.userAgent === "string") {
       const ua = meta.userAgent.toLowerCase();
       if (ua.includes("deepseek") || ua.includes("dsh")) return true;
-    }
-    return false;
-  }
-
-  function isAgyRequest(meta = {}) {
-    if (typeof meta.agentId === "string") {
-      const id = meta.agentId.toLowerCase().trim();
-      if (id === "agy" || id === "antigravity") return true;
-    }
-    if (typeof meta.userAgent === "string") {
-      const ua = meta.userAgent.toLowerCase();
-      if (ua.includes("antigravity") || ua.includes("agy")) return true;
     }
     return false;
   }
@@ -1322,10 +1300,7 @@ export function createAgentMetricsCollector(options = {}) {
   function startRequest(meta = {}) {
     let targetState = zcodeState;
     let bucketAgentId = "zcode";
-    if (isAgyRequest(meta)) {
-      targetState = agyState;
-      bucketAgentId = "agy";
-    } else if (isDshRequest(meta)) {
+    if (isDshRequest(meta)) {
       targetState = dshState;
       bucketAgentId = "dsh";
     } else if (isPiRequest(meta)) {
@@ -1348,7 +1323,7 @@ export function createAgentMetricsCollector(options = {}) {
     // of the 2500ms cache — never a fresh spawn on the request path; the
     // panel's status polling keeps the cache warm in practice). Both
     // injection channels land here: the x-agent-instance header (openai/
-    // anthropic paths) and the gemini key suffix. A launcher-injected
+    // anthropic paths). A launcher-injected
     // "<cwd基名>-<launcher pid>" folds into the canonical
     // "<agentId>-<client pid>" so PID reconciliation governs it; the socket
     // fallback already synthesizes the canonical form and passes through
@@ -1625,7 +1600,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, agyState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, opencodeState, claudeState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -1659,7 +1634,6 @@ export function createAgentMetricsCollector(options = {}) {
 
     settleAbandonedAggregateState(zcodeState, procCounts.zcode || 0);
     settleAbandonedAggregateState(dshState, procCounts.dsh || 0);
-    settleAbandonedAggregateState(agyState, procCounts.agy || 0);
     settleAbandonedAggregateState(piState, procCounts.pi || 0);
     settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
     settleAbandonedAggregateState(reasonixState, procCounts.reasonix || 0);
@@ -1678,7 +1652,7 @@ export function createAgentMetricsCollector(options = {}) {
     // to no client of this endpoint — normalizeInstanceId already had its say
     // at ingest) have no reliable instanceId<->PID mapping and keep the idle
     // TTL; an instance with in-flight requests never expires on that path.
-    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState, agy: agyState };
+    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       const livePids = procCounts[`${bucket}Pids`] ?? new Set();
@@ -1815,7 +1789,7 @@ export function createAgentMetricsCollector(options = {}) {
         // Authoritative sparkline history (from the reporter's per-request
         // ring, absent until its first report) — feeds the cc card's instance
         // sparkline reconnection after a page reload, same contract as the
-        // per-instance sparkHistory on kimi/opencode/pi/agy.
+        // per-instance sparkHistory on kimi/opencode/pi.
         sparkHistory: s.sparkHistory ?? null,
         // Model identity from the session reporter's snapshot (null until the
         // reporter starts sending it) — feeds the per-session model badge.
@@ -1927,18 +1901,7 @@ export function createAgentMetricsCollector(options = {}) {
       nowFn,
     });
 
-    // 4. Antigravity (agy) Agent Status
-    const agyAgent = buildAggregateAgentStatus({
-      id: "agy",
-      name: "Antigravity",
-      state: agyState,
-      processCount: procCounts.agy || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-      instances: instanceSnapshots("agy"),
-    });
-
-    // 5. Pi Agent Status
+    // 4. Pi Agent Status
     const piAgent = buildAggregateAgentStatus({
       id: "pi",
       name: "Pi",
@@ -1949,7 +1912,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("pi"),
     });
 
-    // 6. Kimi Code Agent Status
+    // 5. Kimi Code Agent Status
     const kimiAgent = buildAggregateAgentStatus({
       id: "kimi",
       name: "Kimi Code",
@@ -1969,7 +1932,7 @@ export function createAgentMetricsCollector(options = {}) {
       nowFn,
     });
 
-    // 8. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
+    // 7. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
     const opencodeAgent = buildAggregateAgentStatus({
       id: "opencode",
       name: "OpenCode",
@@ -1980,7 +1943,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("opencode"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, agyAgent, piAgent, kimiAgent, reasonixAgent, opencodeAgent];
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, opencodeAgent];
   }
 
   return {

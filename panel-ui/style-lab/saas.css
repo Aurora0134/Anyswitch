@@ -336,17 +336,10 @@
 :root[data-style="saas"] .session-table-wrapper,
 :root[data-style="saas"] .alert-box,
 :root[data-style="saas"] .empty-hint,
-:root[data-style="saas"] .agy-fold,
 :root[data-style="saas"] .skills-repo-path,
 :root[data-style="saas"] .skills-diff-list,
 :root[data-style="saas"] .skills-dup-warn {
   border-radius: var(--radius-md);
-}
-:root[data-style="saas"] .agy-fold-toggle:hover {
-  border-radius: var(--radius-md);
-}
-:root[data-style="saas"] .agy-fold.open .agy-fold-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 :root[data-style="saas"] .skills-body-view .md-code {
   border-radius: var(--radius-sm);
@@ -407,21 +400,15 @@
 
 /* 输入控件：圆角统一 + 聚焦柔光环 */
 :root[data-style="saas"] .modal-number,
-:root[data-style="saas"] .agy-select,
-:root[data-style="saas"] .agy-combo-input,
 :root[data-style="saas"] .skills-path-input {
   border-radius: var(--radius-sm);
 }
 :root[data-style="saas"] .modal-number:focus,
-:root[data-style="saas"] .agy-select:focus,
-:root[data-style="saas"] .agy-combo-input:focus,
-:root[data-style="saas"] .agy-combo.open .agy-combo-input,
 :root[data-style="saas"] .skills-path-input:focus {
   box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
 }
 
 /* 浮层菜单（下拉 / 右键菜单）：玻璃底 + 圆角 + 柔阴影 + 高光 */
-:root[data-style="saas"] .agy-combo-list,
 :root[data-style="saas"] .skills-ctx-menu {
   border-radius: var(--radius-md);
   background: var(--surface-glass);
@@ -429,7 +416,6 @@
   -webkit-backdrop-filter: var(--glass-blur);
   box-shadow: var(--shadow-lg), inset 0 1px 0 var(--hl-inset);
 }
-:root[data-style="saas"] .agy-combo-item,
 :root[data-style="saas"] .skills-ctx-item {
   border-radius: 6px;
 }

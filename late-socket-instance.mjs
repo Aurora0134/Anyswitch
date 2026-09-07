@@ -1,6 +1,6 @@
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
 
-const SOCKET_FALLBACK_AGENT_IDS = new Set(["kimi", "opencode", "pi", "agy"]);
+const SOCKET_FALLBACK_AGENT_IDS = new Set(["kimi", "opencode", "pi"]);
 
 export function instanceIdFromSocket(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;

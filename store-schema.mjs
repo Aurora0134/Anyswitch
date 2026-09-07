@@ -290,7 +290,11 @@ function validatePools(store, errors) {
 // ROUTING_ENDPOINT_IDS must be kept in sync with ENDPOINT_DEFS in
 // agent-skills.mjs; it is re-declared here because importing agent-skills
 // would pull its relay-settings/atomic-write dependency chain into this
-// pure module.
+// pure module. "agy" is retained as a legacy id only: it no longer has any
+// frontend, routing or launcher implementation, but dropping it here would
+// make an existing store.json that still carries routingChains.agy fail
+// validation and keep the panel from loading. Keep the entry until stores
+// are migrated.
 export const ROUTING_ENDPOINT_IDS = Object.freeze([
   "claude",
   "zcode",

@@ -25,7 +25,6 @@ import { storePaths } from "./store-io.mjs";
 import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
 import { isWatchdogAutostartEnabled, enableWatchdogAutostart } from "./autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
-import { aliasFilePath, createAliasResolver } from "./antigravity-alias.mjs";
 import { dirname } from "node:path";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
 
@@ -41,15 +40,7 @@ export function createPanelServer(options = {}) {
   const logger = options.logger ?? createLogger({ sink: (line) => process.stderr.write(line) });
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
   const startTime = options.startTime ?? Date.now();
-  // The panel host owns its own resolver over the shared antigravity.json so
-  // the settings page works when opened from THIS port (47820, the desktop
-  // shortcut target): reads show the on-disk bindings and saves persist to
-  // disk. Cross-process liveness comes from the resolver's mtime-aware file
-  // layer — the relay (47821) picks the new bindings up on its next request
-  // without a restart.
-  const aliasPath = aliasFilePath(paths.root);
-  const aliasResolver = options.aliasResolver ?? createAliasResolver({ filePath: aliasPath });
-  const router = createPanelRouter({ storePaths: paths, logger, metricsCollector, aliasResolver, aliasPath, startTime });
+  const router = createPanelRouter({ storePaths: paths, logger, metricsCollector, startTime });
   // Warm the watchdog drift snapshot at startup: the panel frontend fetches
   // /api/settings on every page load to hydrate the 抗截断 toggle, and an
   // un-primed first GET would otherwise pay the ~1s probe round inline.
