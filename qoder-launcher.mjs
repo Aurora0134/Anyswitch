@@ -28,6 +28,7 @@ import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { loadStore } from "./store-io.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
+import { refreshQoderModelCatalog, QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -145,30 +146,46 @@ export async function runQoderLauncher({
     }
 
     const env = buildQoderLauncherEnv({ token: relay.token, base });
-    return await spawnQoder({ env, args: qoderArgs });
+    const exitCode = await spawnQoder({ env, args: qoderArgs, onSpawned: () => {
+      // Best-effort model-catalog warm-up: Qoder 0.2.x cold-start can render the
+      // composer with an empty model list (a cache-strategy race), leaving the
+      // model button disabled. Nudge the store to reload once the renderer is up.
+      refreshQoderModelCatalog({ port: QODER_CDP_PORT, log }).catch((error) => {
+        log(`qoder model catalog warm-up failed: ${error.message}`);
+      });
+    } });
+    return exitCode;
   } finally {
     await relay.close();
   }
 }
 
-function realSpawnQoder({ env, args }) {
+export function realSpawnQoder({ env, args, onSpawned }) {
   return new Promise((resolve, reject) => {
     const exe = resolveQoderExecutable(env);
     const isCmd = exe.toLowerCase().endsWith(".cmd");
     const comspec = process.env.COMSPEC || "cmd.exe";
+    // Inject the CDP port so the launcher can warm up the model catalog after
+    // the renderer comes up (Qoder 0.2.x cold-start race). Qoder ignores the
+    // flag harmlessly when debugging is unavailable.
+    const cdpArg = `--remote-debugging-port=${QODER_CDP_PORT}`;
+    const fullArgs = [cdpArg, ...args];
     const child = isCmd
-      ? spawn(comspec, ["/d", "/c", exe, ...args], {
+      ? spawn(comspec, ["/d", "/c", exe, ...fullArgs], {
           env,
           stdio: "inherit",
           shell: false,
           windowsHide: false,
         })
-      : spawn(exe, args, {
+      : spawn(exe, fullArgs, {
           env,
           stdio: "inherit",
           shell: false,
           windowsHide: false,
         });
+    child.on("spawn", () => {
+      try { onSpawned?.(); } catch { /* never block the launch */ }
+    });
     child.on("error", reject);
     child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
   });
