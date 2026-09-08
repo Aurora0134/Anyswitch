@@ -32,6 +32,7 @@ import { createStoreService } from "./store-service.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
+import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
 
 const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
 const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
@@ -434,6 +435,11 @@ export function createPanelRouter({
   // built statsService). Injectable so tests can capture appendSession
   // without touching the real usage dir; `null` lazily creates one.
   usageJournal = null,
+  // Sessions tab service (session-scan.mjs): scanAll() / loadMessages() /
+  // deleteSessions() over the eight agents' on-disk session stores.
+  // Injectable for tests; `null` lazily binds the real module's exports on
+  // the first sessions request.
+  sessionScanService = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
@@ -1375,6 +1381,70 @@ export function createPanelRouter({
           return sendJson(res, 500, { ok: false, error: err.message });
         }
       }
+    }
+
+    // ── Sessions tab routes ────────────────────────────────────────────
+    // Stateless live scan of the eight agents' on-disk session stores
+    // (session-scan.mjs). A single adapter's failure degrades into
+    // endpointErrors (drives the UI banner) instead of failing the whole
+    // list. GETs carry no CSRF gate; POST delete is covered by the
+    // dual-header mutation gate above. Path traversal defense (canonicalize
+    // + per-adapter roots whitelist) lives inside session-scan's delete —
+    // the router only validates the request shape.
+    if (path.startsWith("/panel/api/sessions/")) {
+      if (!sessionScanService) {
+        sessionScanService = {
+          scanAll: sessionScanAll,
+          loadMessages: sessionLoadMessages,
+          deleteSessions: sessionDeleteSessions,
+        };
+      }
+      const svc = sessionScanService;
+
+      if (path === "/panel/api/sessions/list" && method === "GET") {
+        try {
+          // B5 裁定契约：{ sessions, endpointErrors } 由 scanAll 装配，
+          // 单 adapter 失败已降级进 endpointErrors，路由原样透传。
+          return sendJson(res, 200, await svc.scanAll());
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (path === "/panel/api/sessions/messages" && method === "GET") {
+        const endpoint = url.searchParams.get("endpoint");
+        const file = url.searchParams.get("path");
+        if (!endpoint || !file) {
+          return sendJson(res, 400, { ok: false, error: "endpoint 和 path 参数不能为空" });
+        }
+        try {
+          const messages = await svc.loadMessages(endpoint, file);
+          return sendJson(res, 200, { ok: true, messages });
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (path === "/panel/api/sessions/delete" && method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          if (!Array.isArray(body?.items) || body.items.length === 0
+            || body.items.some((it) => typeof it?.endpoint !== "string" || !it.endpoint
+              || typeof it?.file !== "string" || !it.file)) {
+            return sendJson(res, 400, { ok: false, error: "items 必须是非空的 {endpoint, file} 数组" });
+          }
+          const result = await svc.deleteSessions(body.items);
+          // B3 裁定契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
+          return sendJson(res, 200, {
+            ok: result?.ok ?? [],
+            fail: result?.fail ?? [],
+          });
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+
+      return sendJson(res, 404, { ok: false, error: "not found" });
     }
 
     // ── Skills tab routes ──────────────────────────────────────────────
