@@ -7,9 +7,11 @@ import {
   buildQoderLauncherEnv,
   resolveQoderExecutable,
   runQoderLauncher,
+  realSpawnQoder,
 } from "./qoder-launcher.mjs";
+import { QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
 import { join } from "node:path";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 test("buildQoderLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
@@ -84,9 +86,12 @@ test("runQoderLauncher reuses the resident relay and passes the token through en
         relayStarted = true;
         return { port: 47821, token: "fresh-token", close: async () => { relayClosed = true; } };
       },
-      spawnQoder: async ({ env, args }) => {
+      spawnQoder: async ({ env, args, onSpawned }) => {
         qoderSpawned = true;
         capturedEnv = env;
+        // The launcher must hand every spawnQoder implementation an onSpawned
+        // hook (drives the CDP model-catalog warm-up in realSpawnQoder).
+        assert.equal(typeof onSpawned, "function");
         assert.deepEqual(args, ["--resume"]);
         return 0;
       },
@@ -150,4 +155,67 @@ test("runQoderLauncher tears the relay down even when spawn fails", async () => 
     /spawn failed/,
   );
   assert.equal(relayClosed, true);
+});
+
+test("runQoderLauncher onSpawned fires without blocking the launch", async () => {
+  // The launcher awaits spawnQoder (i.e. Qoder's exit code), so an onSpawned
+  // hook that never settles must not stall the launch — and a throwing hook
+  // must not fail it either (realSpawnQoder swallows hook errors).
+  const code = await runQoderLauncher({
+    startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
+    spawnQoder: async ({ onSpawned }) => {
+      assert.equal(typeof onSpawned, "function");
+      onSpawned(); // fires the CDP warm-up; launched detached, never awaited
+      onSpawned();
+      return 0;
+    },
+    log: () => {},
+    probeRelay: async () => false,
+  });
+  assert.equal(code, 0);
+});
+
+test("realSpawnQoder prepends the CDP debugging port and fires onSpawned", async () => {
+  // Drive the real spawn path through a stand-in .cmd dispatcher (the same
+  // COMSPEC /d /c branch production uses). The batch echoes every argument it
+  // receives to a file so we can assert the CDP flag was injected ahead of the
+  // caller's args. onSpawned must fire on "spawn", and the promise must resolve
+  // with the child's exit code.
+  const dir = mkdtempSync(join(tmpdir(), "qoder-spawn-"));
+  try {
+    const outFile = join(dir, "argv.txt");
+    const cmdPath = join(dir, "qoder.cmd");
+    // %* expands to every argument the dispatcher was invoked with.
+    writeFileSync(cmdPath, `@echo off\r\n@echo %* > "${outFile}"\r\n@exit /b 0\r\n`);
+    let spawned = false;
+    const code = await realSpawnQoder({
+      env: { ...process.env, QODER_EXECUTABLE: cmdPath },
+      args: ["--resume", "--user-flag"],
+      onSpawned: () => { spawned = true; },
+    });
+    assert.equal(code, 0);
+    assert.equal(spawned, true, "onSpawned must fire once the child process spawns");
+    const childArgs = readFileSync(outFile, "utf8").trim().split(/\s+/);
+    assert.equal(QODER_CDP_PORT, 9223);
+    assert.equal(childArgs[0], `--remote-debugging-port=${QODER_CDP_PORT}`);
+    assert.deepEqual(childArgs.slice(1), ["--resume", "--user-flag"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("realSpawnQoder never lets a throwing onSpawned hook fail the launch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "qoder-spawn-"));
+  try {
+    const cmdPath = join(dir, "qoder.cmd");
+    writeFileSync(cmdPath, `@echo off\r\n@exit /b 0\r\n`);
+    const code = await realSpawnQoder({
+      env: { ...process.env, QODER_EXECUTABLE: cmdPath },
+      args: [],
+      onSpawned: () => { throw new Error("hook exploded"); },
+    });
+    assert.equal(code, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

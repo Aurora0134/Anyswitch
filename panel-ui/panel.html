@@ -4137,6 +4137,23 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
 
+        <!-- 全局设置（预设功能总开关） -->
+        <div class="panel-card">
+          <div class="card-header">
+            <h2 class="card-title">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+              全局设置
+            </h2>
+          </div>
+          <div class="card-body">
+            <div class="skills-skill-row">
+              <span class="skills-skill-name">启用预设注入</span>
+              <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
+            </div>
+            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
+          </div>
+        </div>
+
         <div class="panel-card" id="msCard">
           <div class="card-header">
             <h2 class="card-title">
@@ -4708,7 +4725,7 @@ if (window.panelStartupController) panelStartupPlay();
                   </div>
                 </div>
                 <div style="font-size:11px; color:var(--text-3); margin-bottom:10px; padding:0 2px;">
-                  支持 BYOK 自定义模型配置同步，渠道/号池变更后自动写入 Qoder settings.json
+                  支持 BYOK 自定义模型配置同步，渠道/号池变更后自动写入 Qoder 配置
                 </div>
                 <div class="telemetry-grid" id="qoderTelemetryGrid">
                   <div class="telemetry-card">
@@ -4959,28 +4976,11 @@ if (window.panelStartupController) panelStartupPlay();
     </div>
   </section>
 
-  <!-- 预设管理视图：左列（全局设置 + 预设列表），右列（预设详情）；布局/样式全量复用 skills 既有类 -->
+  <!-- 预设管理视图：左列（预设列表），右列（预设详情）；布局/样式全量复用 skills 既有类 -->
   <section class="skills-view" id="presetsView" hidden>
     <div class="skills-grid">
 
       <div class="skills-col">
-        <!-- 卡片 A：全局设置（预设功能总开关），置顶左列进页即见 -->
-        <div class="panel-card">
-          <div class="card-header">
-            <h2 class="card-title">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-              全局设置
-            </h2>
-          </div>
-          <div class="card-body">
-            <div class="skills-skill-row">
-              <span class="skills-skill-name">启用预设注入</span>
-              <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
-            </div>
-            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
-          </div>
-        </div>
-
         <!-- 卡片 B：预设列表（单击选中驱动右侧详情卡；右键菜单编辑/启停/删除） -->
         <div class="panel-card">
           <div class="card-header">
@@ -8032,6 +8032,8 @@ if (window.panelStartupController) panelStartupPlay();
       resetAgentRenderFingerprints();
       refreshAgents();
       refreshModelStability();
+      // 左侧栏常驻预设总开关，切回看板时补刷一次保证状态最新
+      refreshPresetsState();
     }
   }
 
