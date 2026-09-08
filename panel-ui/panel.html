@@ -1414,6 +1414,155 @@
   .stats-usage-bar-val { font-family: var(--font-mono); font-size: 10px; fill: var(--text-3); text-anchor: middle; font-variant-numeric: tabular-nums; }
   .stats-usage-bar-name { font-family: var(--font-mono); font-size: 10.5px; fill: var(--text-4); text-anchor: middle; }
 
+  /* ═══════════════════════════════════════════════
+     会话管理视图（sessions- 前缀为布局/容器作用域类；
+     .sess-*/.msg-*/.toc-* 为原型特有组件类，与全站零冲突原样保留；
+     .btn/.badge/.icon-btn/.seg-control/.modal-overlay 复用全站现有样式）
+     ═══════════════════════════════════════════════ */
+  .sessions-view { display: flex; flex-direction: column; gap: 16px; }
+  /* 页头：视图标题 + 刷新/批量管理操作 */
+  .sessions-pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .sessions-pagehead-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 10px; }
+  .sessions-pagehead-actions { display: flex; align-items: center; gap: 8px; }
+  /* 端点错误横幅（琥珀色，点名端点；可关闭但下次进视图仍再现） */
+  .sessions-err-banner { display: flex; align-items: center; gap: 10px; background: var(--warn-soft); border: 1px solid var(--warn-border); border-radius: var(--radius-md, 8px); color: var(--warn); font-size: 12.5px; padding: 9px 14px; }
+  .sessions-err-banner .eb-close { margin-left: auto; border: none; background: none; color: var(--warn); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: var(--radius-sm, 6px); }
+  .sessions-err-banner .eb-close:hover { background: var(--warn-border); }
+  /* 主布局：左列表 + 右详情（+ TOC 侧栏） */
+  .sessions-master-detail { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; }
+  /* 左栏：会话列表卡 */
+  .sessions-list-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; overflow: hidden; position: sticky; top: 76px; max-height: calc(100vh - 96px); }
+  .sessions-list-toolbar { padding: 12px 12px 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+  .sessions-lt-row { display: flex; align-items: center; gap: 6px; }
+  .sessions-lt-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; margin-right: auto; color: var(--text); }
+  .sessions-sel { background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12.5px; padding: 6px 8px; outline: none; width: 100%; font-family: inherit; }
+  .sessions-sel:focus { border-color: var(--accent); }
+  .sessions-search-box { position: relative; display: flex; align-items: center; }
+  .sessions-search-box svg { position: absolute; left: 9px; color: var(--text-4); pointer-events: none; }
+  .sessions-search-box input { width: 100%; background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-md, 8px); color: var(--text); font-size: 12.5px; padding: 7px 30px 7px 30px; outline: none; font-family: inherit; transition: border-color 120ms var(--ease-out); }
+  .sessions-search-box input:focus { border-color: var(--accent); }
+  .sessions-search-box .kbd-hint { position: absolute; right: 8px; font-size: 11px; font-family: var(--font-mono); color: var(--text-4); border: 1px solid var(--border); border-radius: 4px; padding: 0 5px; background: var(--surface); }
+  .sessions-search-box .clear-btn { position: absolute; right: 6px; border: none; background: none; color: var(--text-4); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px; }
+  .sessions-search-box .clear-btn:hover { color: var(--text); background: var(--surface-hover); }
+  /* 批量模式工具条 */
+  .sessions-batch-bar { padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--accent-soft); display: flex; flex-direction: column; gap: 8px; }
+  .sessions-batch-bar .bb-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .sessions-batch-bar .bb-count { font-size: 12px; font-weight: 700; color: var(--accent); font-family: var(--font-mono); }
+  /* 会话列表滚动区（删除进行中加遮罩禁交互） */
+  .sessions-scroll { overflow-y: auto; flex: 1; min-height: 120px; position: relative; }
+  .sessions-scroll.deleting { pointer-events: none; opacity: 0.55; }
+  .sess-group-head { display: flex; align-items: center; gap: 7px; padding: 8px 12px 6px; font-size: 11.5px; font-weight: 700; color: var(--text-3); cursor: pointer; user-select: none; position: sticky; top: 0; background: var(--surface); z-index: 2; }
+  .sess-group-head:hover { color: var(--text); }
+  .sess-group-head .caret { transition: transform 150ms var(--ease-out); font-size: 10px; flex: none; }
+  .sess-group-head.collapsed .caret { transform: rotate(-90deg); }
+  .sess-group-head .g-count { margin-left: auto; font-family: var(--font-mono); font-weight: 600; color: var(--text-4); font-size: 11px; }
+  .sess-group-head.lvl2 { padding-left: 26px; font-weight: 600; }
+  .sess-group-head input[type="checkbox"] { flex: none; }
+  .sess-item { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; cursor: pointer; border-left: 3px solid transparent; transition: background 120ms var(--ease-out); position: relative; }
+  .sess-item:hover { background: var(--surface-hover); }
+  .sess-item.selected { background: var(--accent-soft); border-left-color: var(--accent); }
+  .sess-item .ep-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px; }
+  .sess-item .si-main { min-width: 0; flex: 1; }
+  .sess-item .si-title { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-item .si-sub { font-size: 11px; color: var(--text-4); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
+  .sess-item .si-time { font-size: 11px; color: var(--text-4); flex: none; margin-top: 2px; }
+  .sess-item input[type="checkbox"] { flex: none; margin-top: 3px; }
+  /* 列表空态 */
+  .sessions-list-empty { padding: 36px 20px; text-align: center; color: var(--text-4); font-size: 12.5px; }
+  .sessions-list-empty .le-icon { font-size: 30px; margin-bottom: 8px; }
+  /* 右栏：详情区 */
+  .sessions-detail-wrap { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 16px; align-items: start; }
+  .sessions-detail-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); box-shadow: var(--shadow-sm); overflow: hidden; min-width: 0; }
+  /* 详情空态 */
+  .sessions-detail-empty { padding: 90px 30px; text-align: center; color: var(--text-4); }
+  .sessions-detail-empty .de-icon { font-size: 44px; margin-bottom: 12px; opacity: .7; }
+  .sessions-detail-empty h3 { margin: 0 0 6px; font-size: 15px; color: var(--text-3); font-weight: 600; }
+  .sessions-detail-empty p { margin: 0; font-size: 12.5px; }
+  /* 会话头 */
+  .sess-head { padding: 18px 22px 14px; border-bottom: 1px solid var(--border); }
+  .sess-head .sh-top { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  .sess-head h2 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; word-break: break-all; color: var(--text); }
+  .sess-head .sh-time { font-size: 12px; color: var(--text-3); }
+  .sess-meta-grid { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .sess-meta-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; min-width: 0; }
+  .sess-meta-row .mk { color: var(--text-3); flex: none; width: 64px; font-size: 12px; }
+  .sess-meta-row .mv { font-family: var(--font-mono); font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: copy; padding: 2px 6px; border-radius: var(--radius-sm, 6px); transition: background 120ms; }
+  .sess-meta-row .mv:hover { background: var(--surface-hover); color: var(--text); }
+  /* 恢复命令预览条 */
+  .sess-resume-bar { display: flex; align-items: center; gap: 12px; margin: 14px 22px 0; background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 10px 14px; }
+  .sess-resume-bar .rb-label { font-size: 11.5px; font-weight: 700; color: var(--text-3); flex: none; }
+  .sess-resume-bar code { font-family: var(--font-mono); font-size: 13px; color: var(--accent); font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sess-resume-bar .btn { flex: none; }
+  /* 操作按钮行 */
+  .sess-action-row { display: flex; align-items: center; gap: 10px; padding: 14px 22px; border-bottom: 1px solid var(--border); }
+  /* 消息流 */
+  .msg-flow { padding: 18px 22px 26px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { display: flex; flex-direction: column; gap: 5px; max-width: 86%; position: relative; }
+  .msg .msg-role { font-size: 11px; font-weight: 700; color: var(--text-4); display: flex; align-items: center; gap: 6px; }
+  .msg .msg-body { border-radius: var(--radius-lg, 12px); padding: 10px 14px; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--border); color: var(--text); }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .msg.user .msg-body { background: var(--ok-soft); border-color: var(--ok-border); border-bottom-right-radius: var(--radius-sm, 6px); }
+  .msg.assistant { align-self: flex-start; }
+  .msg.assistant .msg-body { background: var(--accent-soft); border-color: var(--accent-border); border-bottom-left-radius: var(--radius-sm, 6px); }
+  .msg.system, .msg.tool { align-self: center; max-width: 92%; }
+  .msg.system .msg-body, .msg.tool .msg-body { background: var(--surface-sunken); border-color: var(--border); color: var(--text-3); font-size: 12px; font-family: var(--font-mono); }
+  .msg .msg-copy { position: absolute; top: -8px; right: -8px; opacity: 0; transition: opacity 140ms; z-index: 2; }
+  .msg:hover .msg-copy { opacity: 1; }
+  .msg .msg-copy button { width: 26px; height: 26px; border-radius: var(--radius-sm, 6px); border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-3); cursor: pointer; font-size: 12px; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow-sm); }
+  .msg .msg-copy button:hover { color: var(--accent); border-color: var(--accent-border); }
+  .msg .fold-toggle { align-self: flex-start; border: 1px solid var(--border); background: var(--surface); color: var(--accent); font-size: 12px; font-weight: 600; padding: 4px 12px; border-radius: var(--radius-sm, 6px); cursor: pointer; font-family: inherit; }
+  .msg .fold-toggle:hover { background: var(--accent-soft); }
+  .msg.flash .msg-body { animation: msgFlash 2s var(--ease-out); }
+  @keyframes msgFlash { 0%, 60% { box-shadow: 0 0 0 3px var(--accent-border); } 100% { box-shadow: 0 0 0 3px transparent; } }
+  /* TOC 侧栏（大屏） */
+  .toc-side { position: sticky; top: 76px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg, 12px); box-shadow: var(--shadow-sm); padding: 14px 12px; max-height: calc(100vh - 96px); overflow-y: auto; }
+  .toc-side h4 { margin: 0 0 10px; font-size: 11.5px; font-weight: 700; color: var(--text-3); letter-spacing: 0.06em; text-transform: uppercase; padding: 0 6px; }
+  .toc-item { display: flex; gap: 8px; padding: 6px 8px; border-radius: var(--radius-sm, 6px); font-size: 12px; color: var(--text-3); cursor: pointer; line-height: 1.4; transition: all 120ms; }
+  .toc-item:hover { background: var(--surface-hover); color: var(--text); }
+  .toc-item.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .toc-item .t-idx { font-family: var(--font-mono); font-size: 11px; flex: none; color: var(--text-4); }
+  .toc-item.active .t-idx { color: var(--accent); }
+  .toc-item .t-text { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all; }
+  /* TOC 浮动按钮 + 弹层（小屏） */
+  .toc-fab { position: fixed; right: 20px; bottom: 24px; z-index: 90; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-2); font-size: 17px; cursor: pointer; box-shadow: var(--shadow-lg); display: none; align-items: center; justify-content: center; transition: all 150ms var(--ease-out); }
+  .toc-fab:hover { color: var(--accent); border-color: var(--accent-border); transform: translateY(-2px); }
+  .toc-pop { position: fixed; right: 20px; bottom: 78px; z-index: 90; width: 280px; max-height: 55vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius-lg, 12px); box-shadow: var(--shadow-lg); padding: 12px 8px; }
+  .toc-pop h4 { margin: 0 0 8px; font-size: 11.5px; font-weight: 700; color: var(--text-3); letter-spacing: 0.06em; padding: 0 8px; }
+  /* 骨架屏 shimmer */
+  .sessions-skel { position: relative; overflow: hidden; background: var(--surface-hover); border-radius: var(--radius-sm, 6px); }
+  .sessions-skel::after { content: ""; position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--surface), transparent); animation: sessionsShimmer 1.4s infinite; }
+  @keyframes sessionsShimmer { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+  /* 删除结果汇报条 */
+  .sess-result-bar { display: flex; align-items: center; gap: 10px; margin: 0 22px; padding: 10px 14px; border-radius: var(--radius-md, 8px); font-size: 12.5px; font-weight: 600; }
+  .sess-result-bar.ok { background: var(--ok-soft); border: 1px solid var(--ok-border); color: var(--ok); }
+  .sess-result-bar.warn { background: var(--warn-soft); border: 1px solid var(--warn-border); color: var(--warn); }
+  .sess-result-bar .rb-x { margin-left: auto; border: none; background: none; color: inherit; cursor: pointer; font-size: 13px; }
+  /* 删除确认对话框内容（复用 .modal-overlay/.modal-card 体系） */
+  .sess-dlg-desc { font-size: 12.5px; color: var(--text-2); margin: 0 0 4px; line-height: 1.6; }
+  .sess-dlg-target { background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-md, 8px); padding: 9px 12px; font-size: 12px; margin: 8px 0; }
+  .sess-dlg-target .t1 { font-weight: 600; color: var(--text); }
+  .sess-dlg-target .t2 { font-family: var(--font-mono); color: var(--text-3); font-size: 11px; margin-top: 2px; word-break: break-all; }
+  .sess-dlg-warn { font-size: 12px; color: var(--danger); font-weight: 600; margin-top: 10px; }
+  /* 搜索关键词高亮 */
+  .sessions-view mark, .toc-pop mark { background: var(--warn-soft); color: var(--warn); border-radius: 3px; padding: 0 1px; }
+  /* 移动端抽屉遮罩与开启按钮（开启按钮在 sessions 页头，仅小屏显示） */
+  .sessions-drawer-mask { position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms; }
+  .sessions-drawer-mask.show { opacity: 1; pointer-events: auto; }
+  .sessions-drawer-open-btn { display: none; }
+  /* 响应式：<1280px TOC 转浮动按钮；<768px 左栏转抽屉 */
+  @media (max-width: 1279px) {
+    .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    .toc-side { display: none; }
+    .toc-fab.has-toc { display: flex; }
+  }
+  @media (max-width: 767px) {
+    .sessions-master-detail { grid-template-columns: minmax(0, 1fr); }
+    .sessions-list-card { position: fixed; left: 0; top: 0; bottom: 0; z-index: 110; width: 300px; max-height: none; border-radius: 0; transform: translateX(-100%); transition: transform 240ms var(--ease-out); }
+    .sessions-list-card.drawer-open { transform: none; box-shadow: var(--shadow-lg); }
+    .sessions-drawer-open-btn { display: inline-flex; }
+    .msg { max-width: 96%; }
+  }
+
   footer {
     padding: 24px 0; border-top: 1px solid var(--border);
     text-align: center; color: var(--text-4); font-family: var(--font-mono); font-size: 11.5px;
@@ -4074,6 +4223,7 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="tabSkills" role="tab" aria-selected="false">Skills 管理</button>
       <button class="view-tab" id="tabPresets" role="tab" aria-selected="false">预设管理</button>
       <button class="view-tab" id="tabStore" role="tab" aria-selected="false">渠道管理</button>
+      <button class="view-tab" id="tabSessions" role="tab" aria-selected="false">会话管理</button>
       <button class="view-tab" id="tabStats" role="tab" aria-selected="false">使用统计</button>
     </nav>
 
@@ -5249,7 +5399,160 @@ if (window.panelStartupController) panelStartupPlay();
 
   </section>
 
+  <!-- 会话管理视图：左会话列表（分组/平铺 + 搜索/筛选 + 批量管理）+ 右详情（消息流 + TOC） -->
+  <section class="sessions-view" id="sessionsView" hidden>
+
+    <!-- 页头：视图标题 + 刷新 / 批量管理 -->
+    <div class="sessions-pagehead">
+      <h2 class="sessions-pagehead-title">
+        <button class="icon-btn sessions-drawer-open-btn" id="sessDrawerOpenBtn" title="打开会话列表">☰</button>
+        会话管理
+        <span class="badge badge-neutral" id="sessTotalBadge">0 个会话</span>
+      </h2>
+      <div class="sessions-pagehead-actions">
+        <button class="btn" id="sessRefreshBtn" title="重新读取会话列表">⟳ 刷新</button>
+        <button class="btn" id="sessBatchToggleBtn">☑ 批量管理</button>
+      </div>
+    </div>
+
+    <!-- 端点错误横幅（逐条列出异常端点；可关闭，下次进视图仍再现） -->
+    <div id="sessErrHost"></div>
+
+    <div class="sessions-master-detail">
+
+      <!-- 左栏：会话列表 -->
+      <aside class="sessions-list-card" id="sessListCard">
+        <div class="sessions-list-toolbar">
+          <div class="sessions-lt-row">
+            <span class="sessions-lt-title">会话列表 <span class="badge badge-accent" id="sessListCount">0</span></span>
+            <div class="seg-control" id="sessViewSeg" role="radiogroup" aria-label="列表视图">
+              <button type="button" class="seg-btn" data-v="group" role="radio" aria-checked="true">分组</button>
+              <button type="button" class="seg-btn" data-v="flat" role="radio" aria-checked="false">列表</button>
+            </div>
+            <button class="icon-btn" id="sessCollapseAllBtn" title="全部收起" style="width:28px;height:28px;font-size:12px;">⤒</button>
+          </div>
+          <div class="sessions-lt-row">
+            <select class="sessions-sel" id="sessEndpointFilter"><option value="">全部端点</option></select>
+          </div>
+          <div class="sessions-search-box">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <input type="text" id="sessSearchInput" placeholder="搜索标题、项目目录或会话 ID…" autocomplete="off">
+            <span class="kbd-hint" id="sessKbdHint">/</span>
+            <button class="clear-btn" id="sessSearchClear" hidden title="清空（Esc）">×</button>
+          </div>
+        </div>
+
+        <!-- 批量管理模式工具条 -->
+        <div class="sessions-batch-bar" id="sessBatchBar" hidden>
+          <div class="bb-row">
+            <span class="bb-count" id="sessSelCount">已选 0 项</span>
+            <span style="flex:1;"></span>
+            <button class="btn btn-mini" id="sessSelAllBtn">全选当前筛选结果</button>
+            <button class="btn btn-mini" id="sessSelClearBtn">清空已选</button>
+          </div>
+          <div class="bb-row">
+            <button class="btn btn-mini btn-danger" id="sessBatchDelBtn" disabled>批量删除</button>
+            <span style="flex:1;"></span>
+            <button class="btn btn-mini" id="sessBatchExitBtn">退出批量管理</button>
+          </div>
+        </div>
+
+        <div class="sessions-scroll" id="sessScroll"><!-- JS 渲染列表 --></div>
+      </aside>
+      <div class="sessions-drawer-mask" id="sessDrawerMask"></div>
+
+      <!-- 右栏：详情 -->
+      <div class="sessions-detail-wrap">
+        <section class="sessions-detail-card" id="sessDetailCard">
+          <!-- 空态 -->
+          <div class="sessions-detail-empty" id="sessDetailEmpty">
+            <div class="de-icon">💬</div>
+            <h3>选择一个会话查看详情</h3>
+            <p>从左侧列表选择会话，可浏览完整对话、复制恢复命令，在终端中继续。</p>
+          </div>
+
+          <!-- 详情主体 -->
+          <div id="sessDetailBody" hidden>
+            <div class="sess-head">
+              <div class="sh-top">
+                <span class="badge" id="sessDEpBadge">端点</span>
+                <span class="sh-time" id="sessDTime"></span>
+              </div>
+              <h2 id="sessDTitle"></h2>
+              <div class="sess-meta-grid">
+                <div class="sess-meta-row"><span class="mk">项目目录</span><span class="mv" id="sessDProject" title="点击复制"></span></div>
+                <div class="sess-meta-row"><span class="mk">源文件</span><span class="mv" id="sessDFile" title="点击复制"></span></div>
+                <div class="sess-meta-row"><span class="mk">会话 ID</span><span class="mv" id="sessDSid" title="点击复制完整 ID"></span></div>
+              </div>
+            </div>
+
+            <!-- 恢复命令预览条 -->
+            <div class="sess-resume-bar">
+              <span class="rb-label">在终端继续</span>
+              <code id="sessResumeCmd"></code>
+              <button class="btn btn-mini" id="sessCopyCmdBtn">复制命令</button>
+            </div>
+
+            <div class="sess-action-row">
+              <button class="btn btn-primary" id="sessResumeBtn">▶ 在终端继续</button>
+              <button class="btn btn-danger" id="sessDeleteBtn">删除</button>
+            </div>
+
+            <!-- 删除结果汇报条 -->
+            <div class="sess-result-bar" id="sessResultBar" hidden></div>
+
+            <div class="msg-flow" id="sessMsgFlow"></div>
+          </div>
+
+          <!-- 骨架屏（加载态） -->
+          <div id="sessDetailSkel" hidden style="padding:22px;">
+            <div class="sessions-skel" style="height:20px;width:40%;margin-bottom:14px;"></div>
+            <div class="sessions-skel" style="height:13px;width:70%;margin-bottom:8px;"></div>
+            <div class="sessions-skel" style="height:13px;width:55%;margin-bottom:22px;"></div>
+            <div class="sessions-skel" style="height:64px;margin-bottom:14px;"></div>
+            <div class="sessions-skel" style="height:64px;width:80%;margin-bottom:14px;margin-left:auto;"></div>
+            <div class="sessions-skel" style="height:64px;width:75%;"></div>
+          </div>
+        </section>
+
+        <!-- TOC 侧栏（大屏） -->
+        <nav class="toc-side" id="sessTocSide" hidden>
+          <h4>消息目录</h4>
+          <div id="sessTocList"></div>
+        </nav>
+      </div>
+    </div>
+  </section>
+
 </main>
+
+<!-- 会话管理：TOC 浮动按钮 + 弹层（小屏） -->
+<button class="toc-fab" id="sessTocFab" title="消息目录">☰</button>
+<div class="toc-pop" id="sessTocPop" hidden>
+  <h4>消息目录</h4>
+  <div id="sessTocPopList"></div>
+</div>
+
+<!-- 会话管理：删除确认对话框（复用 .modal-overlay/.modal-card 体系） -->
+<div class="modal-overlay" id="sessDlgMask">
+  <div class="modal-card" style="max-width:440px;" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3><span style="color:var(--danger);">⚠</span><span id="sessDlgTitle">删除会话</span></h3>
+      <button class="modal-close-btn" id="sessDlgCloseBtn" aria-label="关闭">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="sess-dlg-desc" id="sessDlgDesc"></div>
+      <div class="sess-dlg-target" id="sessDlgTarget" hidden></div>
+      <div class="sess-dlg-warn">删除后不可恢复。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="sessDlgCancel">取消</button>
+      <button class="btn btn-danger" id="sessDlgConfirm">确认删除</button>
+    </div>
+  </div>
+</div>
 
 <div class="modal-overlay" id="settingsModal">
   <div class="modal-card">
@@ -5610,6 +5913,7 @@ if (window.panelStartupController) panelStartupPlay();
     initPresetsTab();
     initStoreTab();
     initStatsTab();
+    initSessionsTab();
     loadAutostartState();
     // 首刷预加载：链配置 + 路由链运行时必须在第一次 agents 渲染（1s 轮询）
     // 之前落地，否则胶囊标记只能靠 loading 守卫抑制（直连样式一帧）。
@@ -8005,19 +8309,22 @@ if (window.panelStartupController) panelStartupPlay();
     const store = name === "store";
     const stats = name === "stats";
     const presets = name === "presets";
+    const sessions = name === "sessions";
     currentView = name;
     document.querySelector(".telemetry-view").hidden = !board;
     $("skillsView").hidden = !(name === "skills");
     $("presetsView").hidden = !presets;
     $("storeView").hidden = !store;
     $("statsView").hidden = !stats;
+    $("sessionsView").hidden = !sessions;
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
     $("tabPresets").classList.toggle("active", presets);
     $("tabStore").classList.toggle("active", store);
     $("tabStats").classList.toggle("active", stats);
+    $("tabSessions").classList.toggle("active", sessions);
     // tablist 语义：aria-selected 与 active class 同步（屏幕阅读器按 tab 读选中态）
-    for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats]]) {
+    for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
     try { localStorage.setItem("panel-view", name); } catch {}
@@ -8026,6 +8333,7 @@ if (window.panelStartupController) panelStartupPlay();
     if (presets) viewReady = refreshPresetsState();
     if (store) viewReady = refreshStoreState();
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
+    if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
     // 切回看板（B4/R9）：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
@@ -8047,6 +8355,7 @@ if (window.panelStartupController) panelStartupPlay();
     else if (saved === "presets") switchView("presets");
     else if (saved === "store") switchView("store");
     else if (saved === "stats") switchView("stats");
+    else if (saved === "sessions") switchView("sessions");
   }
 
   // reconcile（每次刷新后）：prune 集合中已消失的 relPath；焦点不在集合内则回退
@@ -13300,6 +13609,758 @@ if (window.panelStartupController) panelStartupPlay();
       `<div class="stats-table-wrap"><table class="stats-table">` +
       `<thead><tr><th>端点</th><th>请求数</th><th>Tokens（入/出）</th><th>会话数</th><th>活跃工时</th></tr></thead>` +
       `<tbody>${body}</tbody></table></div>`;
+  }
+
+  // ═══════════════════════════════════════════════
+  // 会话管理视图
+  // ═══════════════════════════════════════════════
+  // querySelectorAll 快捷方式（panel.html 的 $ 是 getElementById，此处补全 $$）
+  function $$(sel) { return Array.from(document.querySelectorAll(sel)); }
+
+  /* HTML 转义（五字符含引号）：会话内容进 DOM/attribute 前必须过这道。
+     与 escapeHtml 并存——escapeHtml 不转引号，会话数据的 id/路径/标题要进
+     data-id/title 等属性，需引号转义，故保留原型 esc。 */
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  /* 关键词高亮：先转义再包 <mark>，正则特殊字符转义 */
+  function sessHighlight(text, kw) {
+    const safe = esc(text);
+    if (!kw) return safe;
+    const re = new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+    return safe.replace(re, (m) => `<mark>${m}</mark>`);
+  }
+
+  /* 相对时间格式化：刚刚 / N 分钟前 / N 小时前 / 昨天 / N 天前 / 具体日期 */
+  const SESS_MIN = 60 * 1000, SESS_HOUR = 60 * SESS_MIN, SESS_DAY = 24 * SESS_HOUR;
+  function sessRelTime(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 0) return "刚刚";                       // 时钟回拨防御
+    if (diff < SESS_MIN) return "刚刚";
+    if (diff < SESS_HOUR) return Math.floor(diff / SESS_MIN) + " 分钟前";
+    if (diff < 24 * SESS_HOUR) return Math.floor(diff / SESS_HOUR) + " 小时前";
+    const d = new Date(ts), now = new Date();
+    const yest = new Date(now); yest.setDate(now.getDate() - 1);
+    if (d.toDateString() === yest.toDateString()) return "昨天";
+    if (diff < 7 * SESS_DAY) return Math.floor(diff / SESS_DAY) + " 天前";
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return sameYear ? `${d.getMonth() + 1}月${d.getDate()}日` : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+  }
+  /* 绝对时间（title 提示与详情页用） */
+  function sessAbsTime(ts) {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /* 项目目录短名（无标题会话的回退显示名） */
+  function sessDirName(p) { return String(p || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+  /* 会话显示标题：标题为空时回退项目目录名，再回退会话 ID 前 8 位 */
+  function sessTitle(s) { return s.title || sessDirName(s.project) || String(s.id || "").slice(0, 8); }
+
+  /* 复制到剪贴板 + toast 反馈（panel.html toast(msg, isErr)，成功不传第二参） */
+  async function sessCopyText(text, tip) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // 剪贴板 API 不可用（如 file:// 旧环境）时回退 execCommand
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch {}
+      ta.remove();
+    }
+    toast(tip);
+  }
+
+  // 端点清单：真实 8 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS，
+  // 圆点色按顺序取 STATS_PALETTE（CSS 变量，直接作 background）。
+  const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id, i) => ({
+    id,
+    name: STATS_ENDPOINT_LABELS[id] || id,
+    color: (STATS_PALETTE[i] || STATS_OTHER_STYLE).color,
+  }));
+  const SESS_EP = Object.fromEntries(SESSIONS_ENDPOINTS.map((e) => [e.id, e]));
+  const sessEpName = (id) => (SESS_EP[id] || {}).name || STATS_ENDPOINT_LABELS[id] || id || "未知端点";
+  const sessEpColor = (id) => (SESS_EP[id] || {}).color || "var(--text-4)";
+
+  // localStorage 偏好（前缀 anyswitch.sessions.；持久化视图/分组展开状态，搜索与筛选不持久化）
+  const SESS_LS = {
+    get(k, d) { try { const v = localStorage.getItem("anyswitch.sessions." + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem("anyswitch.sessions." + k, JSON.stringify(v)); } catch {} },
+  };
+
+  const sessState = {
+    sessions: [],                      // 会话数据（API 拉取）
+    endpointErrors: [],                // list 响应包装的端点异常 [{endpoint, reason}]
+    loading: false,                    // 列表拉取中（骨架屏）
+    view: SESS_LS.get("view", "group"),   // 视图：group 分组 / flat 列表
+    collapsed: SESS_LS.get("collapsed", {}), // 分组展开状态：{ 组key: true=收起 }
+    endpoint: "",                      // 端点筛选（不持久化）
+    search: "",                        // 搜索词（不持久化）
+    selectedId: null,                  // 当前选中会话
+    batch: false,                      // 批量管理模式
+    checked: new Set(),                // 批量已选会话 id
+    deleting: false,                   // 删除进行中（遮罩 + 禁止再触发）
+  };
+  let sessTimer = null;                // 60s 相对时间刷新定时器（enter/leave 管理）
+  let sessMsgObserver = null;          // TOC 高亮用的 IntersectionObserver
+  let sessInited = false;              // initSessionsTab 一次性事件绑定标记
+  let sessListReqSeq = 0;              // 列表取数竞态守卫
+  const SESS_FOLD_LIMIT = 3000, SESS_FOLD_HEAD = 1500; // 超长消息折叠阈值与预览长度
+
+  /* ============================================================
+     数据拉取
+     ============================================================ */
+  async function refreshSessionsList() {
+    const seq = ++sessListReqSeq;
+    sessState.loading = true;
+    renderSessList();
+    try {
+      const res = await api("GET", "/api/sessions/list");
+      if (seq !== sessListReqSeq) return; // 已有更新请求在飞，丢弃旧响应
+      sessState.sessions = Array.isArray(res.sessions) ? res.sessions : [];
+      sessState.endpointErrors = Array.isArray(res.endpointErrors) ? res.endpointErrors : [];
+      // prune：已消失的会话从 checked/selectedId 清掉
+      const ids = new Set(sessState.sessions.map((s) => s.id));
+      for (const id of [...sessState.checked]) if (!ids.has(id)) sessState.checked.delete(id);
+      if (sessState.selectedId && !ids.has(sessState.selectedId)) sessState.selectedId = null;
+    } catch (err) {
+      if (seq !== sessListReqSeq) return;
+      toast(`会话列表加载失败：${err.message}`, true);
+      sessState.sessions = [];
+      sessState.endpointErrors = [];
+    } finally {
+      if (seq === sessListReqSeq) sessState.loading = false;
+    }
+    renderSessErrBanner();
+    renderSessList();
+    renderSessDetail();
+    updateSessBatchBar();
+  }
+
+  /* ============================================================
+     筛选 + 搜索（列表数据无消息正文，全文匹配：标题/项目目录/会话 ID/概要）
+     ============================================================ */
+  function sessFiltered() {
+    const kw = sessState.search.trim().toLowerCase();
+    return sessState.sessions.filter((s) => {
+      if (sessState.endpoint && s.endpoint !== sessState.endpoint) return false;
+      if (!kw) return true;
+      const hay = [s.title, s.project, s.id, s.summary].filter(Boolean).join("\n").toLowerCase();
+      return hay.includes(kw);
+    }).sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+  }
+
+  /* 两级分组：端点 → 项目目录 */
+  function sessGroup(list) {
+    const byEp = new Map();
+    for (const s of list) {
+      if (!byEp.has(s.endpoint)) byEp.set(s.endpoint, new Map());
+      const byProj = byEp.get(s.endpoint);
+      if (!byProj.has(s.project)) byProj.set(s.project, []);
+      byProj.get(s.project).push(s);
+    }
+    return byEp;
+  }
+
+  /* ============================================================
+     左栏渲染
+     ============================================================ */
+  function renderSessList() {
+    const scrollEl = $("sessScroll");
+    if (!scrollEl) return;
+    const list = sessFiltered();
+    $("sessListCount").textContent = list.length;
+    $("sessTotalBadge").textContent = sessState.sessions.length + " 个会话";
+    scrollEl.classList.toggle("deleting", sessState.deleting);
+
+    // 加载态骨架屏
+    if (sessState.loading) {
+      scrollEl.innerHTML = Array.from({ length: 6 }, () =>
+        `<div style="padding:10px 12px;"><div class="sessions-skel" style="height:14px;width:75%;margin-bottom:6px;"></div><div class="sessions-skel" style="height:11px;width:45%;"></div></div>`
+      ).join("");
+      return;
+    }
+    // 空态 / 搜索无结果
+    if (sessState.sessions.length === 0) {
+      scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🗂️</div>还没有可浏览的会话<br><span style="font-size:11.5px;">在任意端点里开始一段对话后，会出现在这里。</span></div>`;
+      return;
+    }
+    if (list.length === 0) {
+      scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🔍</div>没有匹配的会话<br><span style="font-size:11.5px;">换个关键词试试，或清空搜索查看全部。</span></div>`;
+      return;
+    }
+
+    scrollEl.innerHTML = sessState.view === "group" ? renderSessGrouped(list) : renderSessFlat(list);
+    bindSessListEvents();
+  }
+
+  /* 分组视图 */
+  function renderSessGrouped(list) {
+    const kw = sessState.search.trim();
+    const byEp = sessGroup(list);
+    let html = "";
+    for (const [epId, byProj] of byEp) {
+      const epCount = [...byProj.values()].reduce((n, arr) => n + arr.length, 0);
+      const epKey = "ep:" + epId;
+      const epCollapsed = !!sessState.collapsed[epKey];
+      html += sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj);
+      if (epCollapsed) continue;
+      for (const [proj, arr] of byProj) {
+        const pKey = "proj:" + epId + "|" + String(proj || "").replace(/\\/g, "/").toLowerCase();
+        const pCollapsed = !!sessState.collapsed[pKey];
+        html += sessGroupHeadHtml(pKey, sessDirName(proj), arr.length, pCollapsed, 2, null, arr, proj);
+        if (pCollapsed) continue;
+        html += arr.map((s) => sessItemHtml(s, kw, 2)).join("");
+      }
+    }
+    return html;
+  }
+
+  /* 组头：含折叠箭头、（批量模式下）组复选框、组内计数 */
+  function sessGroupHeadHtml(key, label, count, collapsed, lvl, color, arrOrMap, fullPath) {
+    const cb = sessState.batch ? `<input type="checkbox" class="grp-cb" data-key="${esc(key)}" ${sessGrpCheckState(arrOrMap)}>` : "";
+    const dot = color ? `<span class="ep-dot" style="background:${color};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>` : "";
+    const title = fullPath ? `title="${esc(fullPath)}"` : "";
+    return `<div class="sess-group-head ${lvl === 2 ? "lvl2" : ""} ${collapsed ? "collapsed" : ""}" data-key="${esc(key)}" ${title}>
+      <span class="caret">▼</span>${cb}${dot}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}</span>
+      <span class="g-count">${count}</span></div>`;
+  }
+
+  /* 组复选框状态：全选 checked / 部分选中 data-indeterminate / 未选 */
+  function sessGrpCheckState(arrOrMap) {
+    let ids;
+    if (arrOrMap instanceof Map) ids = [...arrOrMap.values()].flat().map((s) => s.id);
+    else ids = arrOrMap.map((s) => s.id);
+    const n = ids.filter((id) => sessState.checked.has(id)).length;
+    if (n === 0) return "";
+    if (n === ids.length) return "checked";
+    return `data-indeterminate="1"`; // 半选态在 bindSessListEvents 里设置（HTML 属性无法表达 indeterminate）
+  }
+
+  /* 列表视图（平铺，按最后活跃倒序，sessFiltered 已排序） */
+  function renderSessFlat(list) {
+    const kw = sessState.search.trim();
+    return list.map((s) => sessItemHtml(s, kw, 1)).join("");
+  }
+
+  /* 单个会话列表项：克制三字段（端点圆点 + 标题 + 相对时间） */
+  function sessItemHtml(s, kw, lvl) {
+    const sel = s.id === sessState.selectedId ? " selected" : "";
+    const cb = sessState.batch ? `<input type="checkbox" class="item-cb" data-id="${esc(s.id)}" ${sessState.checked.has(s.id) ? "checked" : ""}>` : "";
+    const pad = lvl === 2 && sessState.view === "group" ? "padding-left:38px;" : "";
+    return `<div class="sess-item${sel}" data-id="${esc(s.id)}" style="${pad}">
+      ${cb}<span class="ep-dot" style="background:${sessEpColor(s.endpoint)}" title="${esc(sessEpName(s.endpoint))}"></span>
+      <div class="si-main">
+        <div class="si-title">${sessHighlight(sessTitle(s), kw)}</div>
+        <div class="si-sub">${sessHighlight(s.project || "", kw)}</div>
+      </div>
+      <span class="si-time" title="${sessAbsTime(s.lastActive)}">${sessRelTime(s.lastActive)}</span>
+    </div>`;
+  }
+
+  /* 列表事件绑定（渲染后重绑） */
+  function bindSessListEvents() {
+    const root = $("sessScroll");
+    // 组头折叠/展开
+    root.querySelectorAll(".sess-group-head").forEach((h) => {
+      h.addEventListener("click", (e) => {
+        if (e.target.classList.contains("grp-cb")) return; // 点复选框不折叠
+        const key = h.dataset.key;
+        sessState.collapsed[key] = !sessState.collapsed[key];
+        if (!sessState.collapsed[key]) delete sessState.collapsed[key];
+        SESS_LS.set("collapsed", sessState.collapsed);
+        renderSessList();
+      });
+    });
+    // 组复选框：全选/取消整组；设置半选态
+    root.querySelectorAll(".grp-cb").forEach((cb) => {
+      if (cb.dataset.indeterminate) cb.indeterminate = true;
+      cb.addEventListener("change", () => {
+        const ids = sessCollectGroupIds(cb.dataset.key);
+        if (cb.checked) ids.forEach((id) => sessState.checked.add(id));
+        else ids.forEach((id) => sessState.checked.delete(id));
+        renderSessList(); updateSessBatchBar();
+      });
+    });
+    // 会话项：批量模式下点整行切换勾选；正常模式选中查看
+    root.querySelectorAll(".sess-item").forEach((item) => {
+      item.addEventListener("click", (e) => {
+        const id = item.dataset.id;
+        if (sessState.batch) {
+          if (!e.target.classList.contains("item-cb")) {
+            const cb = item.querySelector(".item-cb");
+            cb.checked = !cb.checked;
+          }
+          const on = item.querySelector(".item-cb").checked;
+          on ? sessState.checked.add(id) : sessState.checked.delete(id);
+          renderSessList(); updateSessBatchBar();
+          return;
+        }
+        selectSession(id);
+      });
+    });
+  }
+
+  /* 收集某分组下全部会话 id（按当前筛选结果） */
+  function sessCollectGroupIds(key) {
+    const list = sessFiltered();
+    if (key.startsWith("ep:")) return list.filter((s) => s.endpoint === key.slice(3)).map((s) => s.id);
+    const [, rest] = key.split("proj:");
+    const [epId, proj] = rest.split("|");
+    return list.filter((s) => s.endpoint === epId && String(s.project || "").replace(/\\/g, "/").toLowerCase() === proj).map((s) => s.id);
+  }
+
+  /* ============================================================
+     端点错误横幅（逐条列出；可关闭，下次进视图仍再现）
+     ============================================================ */
+  function renderSessErrBanner() {
+    const host = $("sessErrHost");
+    if (!host) return;
+    const errs = sessState.endpointErrors || [];
+    host.innerHTML = errs.map((e) =>
+      `<div class="sessions-err-banner"><span>⚠</span><span>${esc(sessEpName(e.endpoint))} 端点的会话目录未配置或不可读，该端点的历史会话暂不可浏览。</span><button class="eb-close" data-eb="${esc(e.endpoint)}" title="关闭提示">×</button></div>`
+    ).join("");
+    host.querySelectorAll(".eb-close").forEach((b) =>
+      b.addEventListener("click", () => b.closest(".sessions-err-banner").remove()));
+  }
+
+  /* ============================================================
+     右栏：会话详情
+     ============================================================ */
+  function selectSession(id) {
+    sessState.selectedId = id;
+    renderSessList();      // 刷新选中态
+    renderSessDetail();
+    // 移动端：选中后收起抽屉
+    $("sessListCard").classList.remove("drawer-open");
+    $("sessDrawerMask").classList.remove("show");
+  }
+
+  function currentSession() { return sessState.sessions.find((s) => s.id === sessState.selectedId) || null; }
+
+  async function renderSessDetail() {
+    const s = currentSession();
+    const empty = $("sessDetailEmpty"), body = $("sessDetailBody"), skel = $("sessDetailSkel");
+    if (!s) {
+      empty.hidden = false; body.hidden = true; skel.hidden = true;
+      renderSessToc(null);
+      return;
+    }
+    // 会话头（元数据随列表已在手）
+    empty.hidden = true; skel.hidden = true; body.hidden = false;
+    const badge = $("sessDEpBadge");
+    const color = sessEpColor(s.endpoint);
+    badge.textContent = "● " + sessEpName(s.endpoint);
+    badge.style.cssText = `background:color-mix(in srgb, ${color} 12%, transparent);color:${color};border:1px solid ${color};`;
+    $("sessDTitle").innerHTML = sessHighlight(sessTitle(s), sessState.search.trim());
+    $("sessDTime").textContent = `${sessRelTime(s.lastActive)} · ${sessAbsTime(s.lastActive)}`;
+    $("sessDProject").textContent = s.project || "";
+    $("sessDFile").textContent = s.file || "";
+    $("sessDSid").textContent = String(s.id || "").slice(0, 8) + "…";
+    $("sessDSid").dataset.full = s.id || "";
+
+    // 恢复命令预览条：resumeCommand 由后端随 SessionMeta 下发，前端只复制，为空置灰
+    const cmd = s.resumeCommand || "";
+    $("sessResumeCmd").textContent = cmd || "该端点暂不支持恢复命令";
+    $("sessCopyCmdBtn").disabled = !cmd;
+    $("sessResumeBtn").disabled = !cmd;
+
+    // 消息流：点选后拉取详情
+    await loadSessMessages(s);
+    renderSessToc(s);
+  }
+
+  /* 拉取并渲染消息流（角色着色、超长折叠、搜索高亮、hover 复制） */
+  async function loadSessMessages(s) {
+    const flow = $("sessMsgFlow");
+    flow.innerHTML = `<div style="padding:8px 0;"><div class="sessions-skel" style="height:64px;margin-bottom:14px;"></div><div class="sessions-skel" style="height:64px;width:80%;margin-left:auto;"></div></div>`;
+    let messages = [];
+    try {
+      const res = await api("GET", "/api/sessions/messages?endpoint=" + encodeURIComponent(s.endpoint) + "&path=" + encodeURIComponent(s.file));
+      messages = Array.isArray(res.messages) ? res.messages : [];
+    } catch (err) {
+      // 会话可能已被删/移动：回退空消息流并提示
+      flow.innerHTML = `<div class="sessions-list-empty">消息加载失败：${esc(err.message)}</div>`;
+      return;
+    }
+    // 竞态：拉取期间用户已改选其它会话 → 丢弃
+    if (sessState.selectedId !== s.id) return;
+    s.messages = messages; // 缓存到会话对象，TOC/复制/折叠共用
+    renderSessMessages(s);
+  }
+
+  function renderSessMessages(s) {
+    const kw = sessState.search.trim();
+    const flow = $("sessMsgFlow");
+    flow.innerHTML = "";
+    (s.messages || []).forEach((m, i) => {
+      const div = document.createElement("div");
+      div.className = "msg " + m.role;
+      div.id = "sess-msg-" + i;
+      const roleName = { user: "我", assistant: sessEpName(s.endpoint), system: "系统", tool: "工具调用" }[m.role] || m.role;
+
+      const long = (m.content || "").length > SESS_FOLD_LIMIT;
+      // 折叠态消息若含搜索命中，自动展开（临时视图状态，不写回数据）
+      const hit = kw && (m.content || "").toLowerCase().includes(kw.toLowerCase());
+      const expanded = hit || !long;
+      const shown = expanded ? m.content : String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…";
+
+      div.innerHTML = `
+        <span class="msg-role">${esc(roleName)}</span>
+        <div class="msg-body">${sessHighlight(shown, kw)}</div>
+        ${long ? `<button class="fold-toggle">${expanded ? "收起" : `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`}</button>` : ""}
+        <span class="msg-copy"><button title="复制该条消息">⧉</button></span>`;
+
+      // 折叠/展开：按钮文案即状态来源，点击后切换本条消息的显示内容
+      if (long) {
+        div.querySelector(".fold-toggle").addEventListener("click", () => {
+          const body = div.querySelector(".msg-body");
+          const btn = div.querySelector(".fold-toggle");
+          const nowCollapsed = btn.textContent.startsWith("展开");
+          if (nowCollapsed) {
+            body.innerHTML = sessHighlight(m.content, kw);
+            btn.textContent = "收起";
+          } else {
+            body.innerHTML = sessHighlight(String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…", kw);
+            btn.textContent = `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`;
+          }
+        });
+      }
+      // 复制该条消息
+      div.querySelector(".msg-copy button").addEventListener("click", (e) => {
+        e.stopPropagation();
+        sessCopyText(m.content, "消息内容已复制");
+      });
+      flow.appendChild(div);
+    });
+  }
+
+  /* ============================================================
+     消息目录 TOC
+     ============================================================ */
+  function sessTocEntries(s) {
+    if (!s || !Array.isArray(s.messages)) return [];
+    const out = [];
+    s.messages.forEach((m, i) => {
+      if (m.role !== "user") return;
+      const clean = String(m.content || "").replace(/^\s+/, "");
+      if (!clean) return;
+      out.push({ idx: out.length + 1, msgIdx: i, text: clean.slice(0, 40) });
+    });
+    return out;
+  }
+
+  function renderSessToc(s) {
+    const entries = sessTocEntries(s);
+    const has = entries.length > 0;
+    $("sessTocSide").hidden = !has;
+    $("sessTocFab").classList.toggle("has-toc", has);
+    if (!has) { $("sessTocPop").hidden = true; return; }
+
+    const html = entries.map((e) =>
+      `<div class="toc-item" data-msg="${e.msgIdx}"><span class="t-idx">${e.idx}</span><span class="t-text">${esc(e.text)}</span></div>`
+    ).join("");
+    $("sessTocList").innerHTML = html;
+    $("sessTocPopList").innerHTML = html;
+
+    // 点击定位：平滑滚动 + 高亮闪烁 2 秒
+    $$(".toc-item").forEach((item) => {
+      item.addEventListener("click", () => {
+        const target = document.getElementById("sess-msg-" + item.dataset.msg);
+        if (!target) return;
+        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        target.classList.remove("flash");
+        void target.offsetWidth; // 重启动画
+        target.classList.add("flash");
+        setTimeout(() => target.classList.remove("flash"), 2000);
+        $("sessTocPop").hidden = true; // 小屏弹层点击后收起
+      });
+    });
+
+    // 当前可视消息对应的 TOC 项高亮
+    if (sessMsgObserver) sessMsgObserver.disconnect();
+    sessMsgObserver = new IntersectionObserver((ents) => {
+      for (const en of ents) {
+        if (!en.isIntersecting) continue;
+        const i = en.target.id.replace("sess-msg-", "");
+        $$(".toc-item").forEach((t) => t.classList.toggle("active", t.dataset.msg === i));
+      }
+    }, { root: null, threshold: 0.4 });
+    (s.messages || []).forEach((m, i) => {
+      if (m.role === "user") {
+        const el = document.getElementById("sess-msg-" + i);
+        if (el) sessMsgObserver.observe(el);
+      }
+    });
+  }
+
+  /* ============================================================
+     删除：确认对话框 + 异步执行 + 结果汇报
+     ============================================================ */
+  let sessPendingDelete = null; // { ids: [...], single: bool }
+
+  function openSessDeleteDlg(ids) {
+    if (sessState.deleting) return; // 删除进行中禁止再触发
+    sessPendingDelete = { ids, single: ids.length === 1 };
+    const single = sessPendingDelete.single;
+    $("sessDlgTitle").textContent = single ? "删除会话" : "批量删除会话";
+    const target = $("sessDlgTarget");
+    if (single) {
+      const s = sessState.sessions.find((x) => x.id === ids[0]);
+      $("sessDlgDesc").textContent = "将删除以下会话，该会话的完整对话记录会一并移除。";
+      target.hidden = false;
+      target.innerHTML = `<div class="t1">${esc(sessTitle(s))}</div><div class="t2">会话 ID：${esc(s.id)}</div>`;
+    } else {
+      $("sessDlgDesc").textContent = `将删除选中的 ${ids.length} 个会话，这些会话的完整对话记录会一并移除。`;
+      target.hidden = true;
+    }
+    $("sessDlgMask").classList.add("show");
+  }
+  function closeSessDeleteDlg() { $("sessDlgMask").classList.remove("show"); sessPendingDelete = null; }
+
+  async function runSessDelete() {
+    if (!sessPendingDelete || sessState.deleting) return;
+    const ids = sessPendingDelete.ids;
+    sessState.deleting = true;
+    closeSessDeleteDlg();
+    renderSessList(); // 加遮罩 + 禁用指针事件
+    // 逐项定位 {endpoint, file}（roots 白名单校验要定位 adapter）
+    const items = ids.map((id) => sessState.sessions.find((s) => s.id === id))
+      .filter(Boolean).map((s) => ({ endpoint: s.endpoint, file: s.file }));
+    let okCount = 0, failCount = 0;
+    try {
+      const res = await api("POST", "/api/sessions/delete", { items });
+      const okFiles = new Set((res.ok || []).map((it) => it.file || it));
+      const failItems = res.fail || [];
+      okCount = okFiles.size || (items.length - failItems.length);
+      failCount = failItems.length;
+      // 只从 checked 清除成功项；失败项保留在列表与勾选集中
+      for (const s of sessState.sessions.slice()) {
+        if (okFiles.has(s.file)) {
+          sessState.checked.delete(s.id);
+        }
+      }
+      // 从 sessions 移除成功项
+      sessState.sessions = sessState.sessions.filter((s) => !okFiles.has(s.file));
+      // 若包含当前选中会话且已删除，selectedId 置空，详情区回空态
+      const cur = currentSession();
+      if (cur && okFiles.has(cur.file)) sessState.selectedId = null;
+      else if (sessState.selectedId && !sessState.sessions.find((s) => s.id === sessState.selectedId)) sessState.selectedId = null;
+      // 失败项的会话 ID 与原因在控制台可查
+      if (failItems.length) console.warn("[sessions] 删除失败项：", failItems);
+    } catch (err) {
+      okCount = 0; failCount = ids.length;
+      toast(`删除失败：${err.message}`, true);
+    } finally {
+      sessState.deleting = false;
+    }
+    renderSessList();
+    renderSessDetail();
+    updateSessBatchBar();
+    showSessResult(okCount, failCount);
+  }
+
+  function showSessResult(ok, fail) {
+    const bar = $("sessResultBar");
+    if (fail === 0) {
+      bar.className = "sess-result-bar ok";
+      bar.innerHTML = `✓ 已删除 ${ok} 个会话<button class="rb-x" onclick="this.parentElement.hidden=true">×</button>`;
+      toast(`已删除 ${ok} 个会话`);
+    } else {
+      bar.className = "sess-result-bar warn";
+      bar.innerHTML = `⚠ 已删除 ${ok} 个会话，${fail} 个失败<button class="rb-x" onclick="this.parentElement.hidden=true">×</button>`;
+      toast(`已删除 ${ok} 个会话，${fail} 个失败`, true);
+    }
+    bar.hidden = false;
+    // 若详情区当前是空态（结果条不可见），toast 已兜底
+    setTimeout(() => { bar.hidden = true; }, 6000);
+  }
+
+  /* ============================================================
+     批量管理模式
+     ============================================================ */
+  function setSessBatch(on) {
+    sessState.batch = on;
+    if (!on) sessState.checked.clear();
+    $("sessBatchBar").hidden = !on;
+    $("sessBatchToggleBtn").textContent = on ? "☑ 批量管理中" : "☑ 批量管理";
+    renderSessList();
+    updateSessBatchBar();
+  }
+
+  function updateSessBatchBar() {
+    $("sessSelCount").textContent = `已选 ${sessState.checked.size} 项`;
+    $("sessBatchDelBtn").disabled = sessState.checked.size === 0;
+    $("sessBatchDelBtn").textContent = sessState.checked.size ? `批量删除（${sessState.checked.size}）` : "批量删除";
+  }
+
+  /* ============================================================
+     工具栏：视图切换 / 收起全部 / 端点筛选 / 搜索
+     ============================================================ */
+  function clearSessSearch() {
+    $("sessSearchInput").value = ""; sessState.search = "";
+    $("sessSearchClear").hidden = true; $("sessKbdHint").hidden = false;
+    renderSessList();
+    if (sessState.selectedId) renderSessDetail();
+  }
+
+  /* 进入/离开视图：首拉 list + 60s 相对时间刷新定时器（照 statsTimer 模式） */
+  function enterSessionsView() {
+    if (!sessInited) initSessionsTab();
+    const firstReady = refreshSessionsList();
+    if (!sessTimer) {
+      sessTimer = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        // 只刷新时间文案，不整树重渲染，避免打断交互
+        $$("#sessScroll .sess-item").forEach((item) => {
+          const s = sessState.sessions.find((x) => x.id === item.dataset.id);
+          if (!s) return;
+          const t = item.querySelector(".si-time");
+          if (t) t.textContent = sessRelTime(s.lastActive);
+        });
+        const cur = currentSession();
+        if (cur && !$("sessDetailBody").hidden) $("sessDTime").textContent = `${sessRelTime(cur.lastActive)} · ${sessAbsTime(cur.lastActive)}`;
+      }, 60 * 1000);
+    }
+    return firstReady;
+  }
+
+  function leaveSessionsView() {
+    if (sessTimer) { clearInterval(sessTimer); sessTimer = null; }
+    if (sessMsgObserver) { sessMsgObserver.disconnect(); sessMsgObserver = null; }
+  }
+
+  /* 一次性事件绑定（enterSessionsView 首进时执行；restoreView 可能先于 init 到达） */
+  function initSessionsTab() {
+    if (sessInited) return;
+    sessInited = true;
+    $("tabSessions").onclick = () => switchView("sessions");
+
+    // 视图切换 seg
+    $("sessViewSeg").querySelectorAll(".seg-btn").forEach((b) => {
+      b.setAttribute("aria-checked", b.getAttribute("data-v") === sessState.view ? "true" : "false");
+      b.addEventListener("click", () => {
+        sessState.view = b.getAttribute("data-v");
+        SESS_LS.set("view", sessState.view);
+        $("sessViewSeg").querySelectorAll(".seg-btn").forEach((x) =>
+          x.setAttribute("aria-checked", x === b ? "true" : "false"));
+        $("sessCollapseAllBtn").style.visibility = sessState.view === "group" ? "visible" : "hidden";
+        renderSessList();
+      });
+    });
+    $("sessCollapseAllBtn").style.visibility = sessState.view === "group" ? "visible" : "hidden";
+    // 全部收起/展开（切换语义）：当前所有组均已收起时展开全部，否则收起全部
+    $("sessCollapseAllBtn").addEventListener("click", () => {
+      const byEp = sessGroup(sessFiltered());
+      const keys = [];
+      for (const [epId, byProj] of byEp) {
+        keys.push("ep:" + epId);
+        for (const proj of byProj.keys()) keys.push("proj:" + epId + "|" + String(proj || "").replace(/\\/g, "/").toLowerCase());
+      }
+      const allCollapsed = keys.length > 0 && keys.every((k) => sessState.collapsed[k]);
+      for (const k of keys) {
+        if (allCollapsed) delete sessState.collapsed[k];
+        else sessState.collapsed[k] = true;
+      }
+      SESS_LS.set("collapsed", sessState.collapsed);
+      renderSessList();
+    });
+
+    // 端点筛选下拉
+    const sel = $("sessEndpointFilter");
+    for (const ep of SESSIONS_ENDPOINTS) {
+      const opt = document.createElement("option");
+      opt.value = ep.id;
+      opt.textContent = ep.name;
+      sel.appendChild(opt);
+    }
+    sel.addEventListener("change", () => { sessState.endpoint = sel.value; renderSessList(); });
+
+    // 搜索框：输入即搜；Esc 清空；/ 聚焦
+    const searchInput = $("sessSearchInput");
+    searchInput.addEventListener("input", () => {
+      sessState.search = searchInput.value;
+      $("sessSearchClear").hidden = !sessState.search;
+      $("sessKbdHint").hidden = !!sessState.search;
+      renderSessList();
+      if (sessState.selectedId) renderSessDetail(); // 搜索词联动消息高亮
+    });
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { clearSessSearch(); searchInput.blur(); }
+    });
+    $("sessSearchClear").addEventListener("click", clearSessSearch);
+    document.addEventListener("keydown", (e) => {
+      if ($("sessionsView").hidden) return; // 仅会话视图可见时响应
+      const tag = (document.activeElement || {}).tagName;
+      const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      if (e.key === "/" && !typing) { e.preventDefault(); searchInput.focus(); }
+      else if (e.key === "Escape" && !typing) {
+        // 全局 Esc：优先关弹层/对话框，其次清空搜索
+        if (!$("sessDlgMask").classList.contains("show") && $("sessTocPop").hidden && sessState.search) clearSessSearch();
+      }
+    });
+
+    // 复制交互：项目目录 / 源文件 / 会话 ID / 恢复命令
+    $("sessDProject").addEventListener("click", () => { const s = currentSession(); if (s) sessCopyText(s.project, "项目目录已复制"); });
+    $("sessDFile").addEventListener("click", () => { const s = currentSession(); if (s) sessCopyText(s.file, "源文件路径已复制"); });
+    $("sessDSid").addEventListener("click", () => { const s = currentSession(); if (s) sessCopyText(s.id, "完整会话 ID 已复制"); });
+    $("sessCopyCmdBtn").addEventListener("click", () => {
+      const s = currentSession(); if (!s || !s.resumeCommand) return;
+      sessCopyText(s.resumeCommand, "命令已复制，粘贴到终端即可继续会话");
+    });
+    $("sessResumeBtn").addEventListener("click", () => {
+      const s = currentSession(); if (!s || !s.resumeCommand) return;
+      sessCopyText(s.resumeCommand, "命令已复制，粘贴到终端即可继续会话");
+    });
+
+    // 删除
+    $("sessDeleteBtn").addEventListener("click", () => { if (sessState.selectedId) openSessDeleteDlg([sessState.selectedId]); });
+    $("sessDlgCancel").addEventListener("click", closeSessDeleteDlg);
+    $("sessDlgCloseBtn").addEventListener("click", closeSessDeleteDlg);
+    $("sessDlgMask").addEventListener("click", (e) => { if (e.target === $("sessDlgMask")) closeSessDeleteDlg(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("sessDlgMask").classList.contains("show")) closeSessDeleteDlg(); });
+    $("sessDlgConfirm").addEventListener("click", runSessDelete);
+
+    // 批量管理
+    $("sessBatchToggleBtn").addEventListener("click", () => setSessBatch(!sessState.batch));
+    $("sessBatchExitBtn").addEventListener("click", () => setSessBatch(false));
+    $("sessSelAllBtn").addEventListener("click", () => {
+      // 全选当前筛选结果（与搜索/筛选联动）
+      sessFiltered().forEach((s) => sessState.checked.add(s.id));
+      renderSessList(); updateSessBatchBar();
+    });
+    $("sessSelClearBtn").addEventListener("click", () => { sessState.checked.clear(); renderSessList(); updateSessBatchBar(); });
+    $("sessBatchDelBtn").addEventListener("click", () => {
+      if (sessState.checked.size) openSessDeleteDlg([...sessState.checked]);
+    });
+
+    // 刷新：重调 list（无状态现扫下 list 即 rescan）
+    $("sessRefreshBtn").addEventListener("click", async () => {
+      const btn = $("sessRefreshBtn");
+      if (btn.disabled) return;
+      btn.disabled = true;
+      try { await refreshSessionsList(); toast("会话列表已刷新"); }
+      finally { btn.disabled = false; }
+    });
+
+    // TOC 浮动按钮（小屏）
+    $("sessTocFab").addEventListener("click", () => { $("sessTocPop").hidden = !$("sessTocPop").hidden; });
+    document.addEventListener("click", (e) => {
+      if (!$("sessTocPop").hidden && !e.target.closest("#sessTocPop") && !e.target.closest("#sessTocFab")) $("sessTocPop").hidden = true;
+    });
+
+    // 移动端抽屉
+    $("sessDrawerOpenBtn").addEventListener("click", () => {
+      $("sessListCard").classList.add("drawer-open");
+      $("sessDrawerMask").classList.add("show");
+    });
+    $("sessDrawerMask").addEventListener("click", () => {
+      $("sessListCard").classList.remove("drawer-open");
+      $("sessDrawerMask").classList.remove("show");
+    });
   }
 
   // 页面就绪启动

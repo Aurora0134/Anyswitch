@@ -1093,6 +1093,66 @@ describe("panel.html stats tab", () => {
   });
 });
 
+describe("panel.html sessions tab", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("declares the sessions tab button and view container", () => {
+    assert.ok(panelHtml.includes('id="tabSessions"'), "tabSessions tab button exists");
+    assert.ok(panelHtml.includes("会话管理"), "sessions tab label exists");
+    const btnMatch = panelHtml.match(/<button[^>]*id="tabSessions"[^>]*>/);
+    assert.ok(btnMatch, "tabSessions button tag found");
+    assert.ok(btnMatch[0].includes('role="tab"'), "tabSessions carries role=tab");
+    assert.ok(panelHtml.includes('id="sessionsView"'), "sessionsView section exists");
+  });
+
+  it("declares the key sessions view elements", () => {
+    for (const id of [
+      "sessSearchInput",      // 搜索框
+      "sessEndpointFilter",   // 端点筛选
+      "sessScroll",           // 列表容器
+      "sessDetailCard",       // 详情容器
+      "sessBatchToggleBtn",   // 批量管理按钮
+      "sessRefreshBtn",       // 刷新按钮
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+  });
+
+  it("extends switchView with the sessions branch and keeps aria-selected in sync", () => {
+    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found");
+    const body = m[1];
+    assert.ok(body.includes('name === "sessions"'), "sessions branch added");
+    assert.ok(body.includes('$("sessionsView").hidden = !sessions'), "sessionsView visibility wired");
+    assert.ok(body.includes('$("tabSessions").classList.toggle("active", sessions)'), "tabSessions active state wired");
+    // aria-selected 数组漏项会静默破坏 tablist 无障碍语义，必须断言
+    assert.ok(body.includes('["tabSessions", sessions]'), "aria-selected sync covers tabSessions");
+  });
+
+  it("restores the sessions tab from localStorage", () => {
+    const m = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "restoreView found");
+    assert.ok(m[1].includes('saved === "sessions"'), "sessions branch added");
+  });
+
+  it("defines initSessionsTab and wires the tab click to switchView", () => {
+    assert.ok(panelHtml.includes("function initSessionsTab()"), "initSessionsTab is defined");
+    assert.ok(
+      panelHtml.includes('$("tabSessions").onclick = () => switchView("sessions")'),
+      "tabSessions click wired to switchView",
+    );
+  });
+
+  it("ships the finalized sessions copy", () => {
+    assert.ok(panelHtml.includes("删除后不可恢复。"), "delete warning copy exists");
+    assert.ok(panelHtml.includes("命令已复制，粘贴到终端即可继续会话"), "resume-command copied toast exists");
+    assert.ok(panelHtml.includes("已删除"), "deleted toast copy exists");
+  });
+});
+
 // Body size cap + panel.html lookup chain. readJsonBody rejects bodies over
 // 1MB with 413 (BodyTooLargeError) — every legitimate panel payload is KB-scale
 // JSON — and servePanelHtml resolves ANYSWITCH_PANEL_HTML → bundled
