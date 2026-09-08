@@ -788,6 +788,59 @@
   .skills-ep-count { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
   .skills-ep-count.some { color: var(--accent); opacity: 0.65; }
   .skills-ep-count.full { color: var(--accent); font-weight: 600; }
+  /* 预设文本长度可视化：卡片头「上下文占用条」(ctx-meter) + 行内单预设长度徽标 (ctx-preset-badge) */
+  .ctx-meter { display: inline-flex; align-items: center; gap: 9px; white-space: nowrap; }
+  .ctx-bar {
+    position: relative; width: 88px; height: 7px; border-radius: 999px;
+    background: var(--surface-sunken);
+    box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 1.5px rgba(15, 23, 42, 0.05);
+    overflow: hidden;
+  }
+  /* 分档刻痕 30% / 60%：压在填充之上，使少/中/多区间在条上可辨 */
+  .ctx-bar::after {
+    content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none; border-radius: inherit;
+    background-image:
+      linear-gradient(90deg, transparent calc(30% - 0.5px), color-mix(in srgb, var(--text-3) 40%, transparent) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px)),
+      linear-gradient(90deg, transparent calc(60% - 0.5px), color-mix(in srgb, var(--text-3) 40%, transparent) calc(60% - 0.5px) calc(60% + 0.5px), transparent calc(60% + 0.5px));
+  }
+  .ctx-bar .ctx-fill {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0; z-index: 0;
+    border-radius: 999px; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
+    transition: width 400ms var(--ease-out), background 200ms var(--ease-out);
+  }
+  /* 100% 预算上限线：贴在条右端，仅作提示锚点 */
+  .ctx-bar .ctx-tick { position: absolute; right: 0; top: 0; bottom: 0; width: 1.5px; z-index: 2; background: var(--text-3); opacity: 0.55; }
+  .ctx-meter[data-tier="empty"] .ctx-fill { background: transparent; box-shadow: none; }
+  .ctx-meter[data-tier="low"] .ctx-fill { background: var(--ok); }
+  .ctx-meter[data-tier="mid"] .ctx-fill { background: var(--accent); }
+  .ctx-meter[data-tier="high"] .ctx-fill { background: var(--warn); }
+  .ctx-meter[data-tier="over"] .ctx-fill {
+    width: 100% !important; border-radius: 999px;
+    background-color: var(--danger);
+    background-image: linear-gradient(45deg,
+      rgba(255, 255, 255, 0.28) 25%, transparent 25%, transparent 50%,
+      rgba(255, 255, 255, 0.28) 50%, rgba(255, 255, 255, 0.28) 75%,
+      transparent 75%, transparent);
+    background-size: 16px 16px;
+    animation: ctxOver 0.7s linear infinite;
+  }
+  /* 位移恰好一个 tile 宽 → 平铺无缝，避免每圈相位跳变抽搐 */
+  @keyframes ctxOver { 0% { background-position: 0 0; } 100% { background-position: 16px 0; } }
+  .ctx-meter[data-tier="empty"] .ctx-bar::before {
+    content: ""; position: absolute; inset: 0.5px; z-index: 1; pointer-events: none;
+    border: 1px dashed var(--border-strong); border-radius: 999px;
+  }
+  .ctx-meter[data-tier="over"] .ctx-bar { box-shadow: inset 0 0 0 1px var(--danger-border); }
+  .ctx-meter[data-tier="over"] .ctx-tick { background: var(--danger); opacity: 1; }
+  .ctx-readout { display: inline-flex; align-items: baseline; gap: 6px; line-height: 1; white-space: nowrap; }
+  .ctx-pct::before { content: "·"; margin-right: 6px; color: var(--text-4); font-weight: 400; }
+  .ctx-total { font-family: var(--font-mono); font-size: 12.5px; font-weight: 700; color: var(--text); }
+  .ctx-pct { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-3); }
+  .ctx-meter[data-tier="empty"] .ctx-total, .ctx-meter[data-tier="empty"] .ctx-pct { color: var(--text-4); }
+  .ctx-meter[data-tier="high"] .ctx-total { color: var(--warn); }
+  .ctx-meter[data-tier="over"] .ctx-total, .ctx-meter[data-tier="over"] .ctx-pct { color: var(--danger); }
+  .ctx-meter[data-tier="over"] .ctx-total::after { content: " ▲"; font-size: 9px; }
+  .ctx-preset-badge { justify-content: center; padding: 2px 6px; font-size: 10.5px; white-space: nowrap; }
   .skills-list-desc {
     font-size: 11.5px; color: var(--text-3); margin-top: 2px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -5138,7 +5191,13 @@ if (window.panelStartupController) panelStartupPlay();
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
               预设列表
             </h2>
-            <span class="badge badge-neutral" id="presetsListBadge">0</span>
+            <div class="ctx-meter" id="ctxMeter" data-tier="empty">
+              <div class="ctx-bar" id="ctxBar" title="">
+                <div class="ctx-fill" id="ctxFill"></div>
+                <div class="ctx-tick"></div>
+              </div>
+              <div class="ctx-readout"><span class="ctx-total" id="ctxTotal">0 字</span><span class="ctx-pct" id="ctxPct">0%</span></div>
+            </div>
           </div>
           <div class="card-body">
             <div class="skills-btn-row">
@@ -9781,11 +9840,55 @@ if (window.panelStartupController) panelStartupPlay();
     return presets.filter((p) => hit(p.title) || hit(p.tag) || hit(p.content));
   }
 
+  // ── 预设文本长度可视化：卡片头占用条 + 行内单预设徽标 ──
+  const CTX_BUDGET = 4000;          // 占用条 100% 参考值（仅提示，不熔断）
+  const PRESET_GREEN_MAX = 200;      // 单预设：≤200 绿
+  const PRESET_YELLOW_MAX = 500;     // 201–500 黄，>500 红
+  const CTX_TIER_NAME = { empty: "空", low: "少", mid: "中", high: "多", over: "超过 100%" };
+  function presetCharCount(p) { return ((p && p.content) || "").length; }
+  function formatChars(n) {
+    if (n < 1000) return n + " 字";
+    if (n < 1e6) return (n / 1000).toFixed(1) + "k 字";
+    return (n / 1e6).toFixed(1) + "M 字";
+  }
+  function formatCharsCompact(n) {
+    if (n < 1000) return n + "字";
+    if (n < 1e6) return (n / 1000).toFixed(1) + "k字";
+    return (n / 1e6).toFixed(1) + "M字";
+  }
+  function presetBadgeClass(n) {
+    if (n <= PRESET_GREEN_MAX) return "badge-ok";
+    if (n <= PRESET_YELLOW_MAX) return "badge-warn";
+    return "badge-danger";
+  }
+  function ctxTierOf(pct) {
+    if (pct <= 0) return "empty";
+    if (pct <= 0.30) return "low";
+    if (pct <= 0.60) return "mid";
+    if (pct <= 1.00) return "high";
+    return "over";
+  }
+  // 用「全部预设」正文总长给卡片头占用条上色/出数（与过滤集无关）
+  function paintCtxMeter(presets) {
+    const meter = $("ctxMeter");
+    if (!meter) return;
+    const total = (presets || []).reduce((s, p) => s + presetCharCount(p), 0);
+    const pct = total / CTX_BUDGET;
+    const tier = ctxTierOf(pct);
+    meter.setAttribute("data-tier", tier);
+    const fill = $("ctxFill");
+    if (fill) fill.style.width = (tier === "empty" ? 0 : Math.min(pct, 1) * 100) + "%";
+    const totalEl = $("ctxTotal"), pctEl = $("ctxPct"), bar = $("ctxBar");
+    if (totalEl) totalEl.textContent = formatChars(total);
+    if (pctEl) pctEl.textContent = Math.round(pct * 100) + "%";
+    if (bar) bar.setAttribute("title",
+      `预设注入正文合计 ${total.toLocaleString()} 字，占上下文预算 ${CTX_BUDGET.toLocaleString()} 字的 ${Math.round(pct * 100)}%（${CTX_TIER_NAME[tier]}）`);
+  }
+
   function renderPresetsList() {
     const listEl = $("presetsList");
-    const badge = $("presetsListBadge");
     const presets = (presetsState && presetsState.presets) || [];
-    badge.textContent = String(presets.length);
+    paintCtxMeter(presets);
     if (!presets.length) {
       listEl.innerHTML = '<div class="empty-hint">还没有预设，点「新增预设」创建</div>';
       return;
@@ -9803,13 +9906,15 @@ if (window.panelStartupController) panelStartupPlay();
       const epCount = !epTotal
         ? ""
         : `<span class="skills-ep-count${n >= epTotal ? " full" : n ? " some" : ""}" title="注入 ${n}/${epTotal} 个端点">${n}/${epTotal}</span>`;
+      const chars = presetCharCount(p);
+      const lenBadge = `<span class="badge ctx-preset-badge ${presetBadgeClass(chars)}" title="正文 ${chars} 字">${formatCharsCompact(chars)}</span>`;
       const tagBadge = p.tag ? `<span class="badge badge-neutral">${escapeHtml(p.tag)}</span>` : "";
       const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
       // 未启用的预设行整体压暗（内联透明度，不新增类）
       return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}"${p.enabled ? "" : ' style="opacity:0.55;"'} data-preset="${escapeHtml(p.id)}">
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.title)}</span>${tagBadge}
-          <span class="skills-ep-dots">${epCount}</span>
+          <span class="skills-ep-dots">${lenBadge}${epCount}</span>
         </div>
         <div class="skills-list-desc">${escapeHtml(firstLine)}</div>
       </div>`;
