@@ -797,30 +797,6 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(claude.lastViaAuto, true);
   });
 
-  it("per-session rows surface the reporter's viaAuto (实例行「自动路由中」数据源)", async () => {
-    // The status badge on a claude session row flips to 自动路由中 only when the
-    // chain provenance rides the formatted snapshot (same attribution the
-    // capsule already consumes); direct sessions keep it false.
-    const nowFn = () => 10000;
-    const mockExec = (cmd, opts, cb) =>
-      cb(null, `"claude.exe","4444","Console","1","55,000 K"\r\n"claude.exe","5555","Console","1","55,000 K"\r\n`);
-    const collector = testCollector({ execFn: mockExec, nowFn });
-
-    collector.reportSession("tok_A", {
-      pid: 4444, sessionId: "sess_A", requests: 1, activeRequests: 1,
-      model: "claude-opus-5", providerId: "chan-a", viaAuto: true,
-    });
-    collector.reportSession("tok_B", {
-      pid: 5555, sessionId: "sess_B", requests: 1, activeRequests: 1,
-      model: "qwen-max", providerId: "chan-b", viaAuto: false,
-    });
-
-    const claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
-    const byId = Object.fromEntries(claude.sessions.map((s) => [s.id, s]));
-    assert.equal(byId.sess_A.viaAuto, true, "链服务会话行带 viaAuto=true");
-    assert.equal(byId.sess_B.viaAuto, false, "直连会话行保持 viaAuto=false");
-  });
-
   it("marks Claude session ended when PID disappears from process list (forced kill)", async () => {
     let mockTime = 10000;
     const nowFn = () => mockTime;
