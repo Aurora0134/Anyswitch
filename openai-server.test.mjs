@@ -392,6 +392,65 @@ describe("openai relay transport", () => {
     }
   });
 
+  it("attributes the requesting endpoint from the `~` identity prefix in the URL segment", async () => {
+    // Qoder 既发不出 x-agent-id、UA 里也没有自家标识，认端点的通道只剩 URL 段。
+    // 这里一次钉住四条契约：前缀认端点、stats 的 providerId 必须是剥离后的真实渠道
+    // （否则 journal 落下 store 里不存在的「qoder~poke-api」幽灵渠道）、显式头仍压在
+    // 前缀之上、未知前缀一律作废回落。
+    const metas = [];
+    const fakeCollector = {
+      startRequest: (meta) => {
+        metas.push(meta);
+        return { recordFirstChunk: () => {}, recordEnd: () => {} };
+      },
+    };
+    // 每条请求都要一条全新的上游流：deps() 传进去的是单个 async 迭代器，第二次
+    // 请求复用会读到已耗尽的流并回 502。
+    const sse = () =>
+      (async function* () {
+        yield new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+        yield new TextEncoder().encode("data: [DONE]\n\n");
+      })();
+
+    const server = createOpenAIRelayServer({
+      ...deps(sse()),
+      upstreamFetch: async () => ({ ok: true, status: 200, body: sse() }),
+      metricsCollector: fakeCollector,
+    });
+
+    const { port, close } = await listenLoopback(server, 0);
+    const chat = (segment, headers = {}) =>
+      fetch(`http://127.0.0.1:${port}/openai/${segment}/v1/chat/completions`, {
+        method: "POST",
+        headers: { authorization: TOKEN, "content-type": "application/json", ...headers },
+        body: JSON.stringify({
+          model: "claude-opus-5",
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+    try {
+      let res = await chat("qoder~poke-api", { "user-agent": "Mozilla/5.0 (Electron)" });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(metas[0].agentId, "qoder");
+      assert.equal(metas[0].providerId, "poke-api");
+
+      res = await chat("qoder~poke-api", { "x-agent-id": "dsh" });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(metas[1].agentId, "dsh");
+
+      res = await chat("ghost~poke-api");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.equal(metas[2].agentId, "zcode");
+      assert.equal(metas[2].providerId, "poke-api");
+    } finally {
+      await close();
+    }
+  });
+
   it("normalizes a known x-agent-id value with stray case and whitespace", async () => {
     let startedMeta = null;
     const fakeCollector = {
