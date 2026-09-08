@@ -2470,7 +2470,7 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(iSkills !== -1 && iPresets !== -1 && iSkills < iPresets,
       "tabPresets sits right after tabSkills");
     for (const id of [
-      "presetsListBadge",
+      "ctxMeter",
       "presetsAddBtn",
       "presetsRefreshBtn",
       "presetsFilterInput",
@@ -2504,7 +2504,7 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(r[1].includes('saved === "stats"'), "stats branch preserved");
   });
 
-  it("list rows reuse the skills row template: title / tag badge / inject count / desc", () => {
+  it("list rows reuse the skills row template plus a per-preset length badge; header meter painted", () => {
     const m = panelHtml.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "renderPresetsList found");
     const body = m[1];
@@ -2515,7 +2515,9 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(body.includes('" some"') && body.includes('" full"'), "some/full count coloring preserved");
     assert.ok(body.includes("skills-list-desc"), "desc line reuses .skills-list-desc");
     assert.ok(body.includes("data-preset="), "rows carry the preset id key");
-    assert.ok(body.includes("presetsListBadge"), "header badge count updated");
+    assert.ok(body.includes("ctx-preset-badge"), "per-preset length badge rendered");
+    assert.ok(body.includes("presetBadgeClass"), "length badge tier coloring (green/yellow/red) wired");
+    assert.ok(body.includes("paintCtxMeter(presets)"), "header occupancy meter painted from full preset set");
   });
 
   it("detail card renders per-endpoint rows with toggle, status badge and sync-error warning", () => {
