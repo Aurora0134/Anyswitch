@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { syncAllAgentConfigs, createStoreWatcher } from "./agent-sync.mjs";
 import { atomicWriteFile } from "./atomic-write.mjs";
+import { managedConnectionId } from "./qoder-merge-config.mjs";
 
 describe("agent-sync", () => {
   let tmpRoot;
@@ -82,12 +83,11 @@ describe("agent-sync", () => {
     const qoderPath = join(tmpRoot, ".qoder", "settings.json");
     assert.equal(existsSync(qoderPath), true, "qoder settings.json must land under the injected USERPROFILE");
     const qoder = JSON.parse(readFileSync(qoderPath, "utf8"));
-    assert.ok(Array.isArray(qoder.modelConfigs?.customModels), "qoder customModels must be an array");
-    const alphaEntry = qoder.modelConfigs.customModels.find((e) => e.provider === "_alpha");
-    assert.ok(alphaEntry, "alpha provider must be written into the sandbox qoder settings");
-    assert.equal(alphaEntry.apiKey, "test-token");
-    assert.equal(alphaEntry.model, "model-1");
-    assert.equal(alphaEntry.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
+    const alphaConn = qoder.providers?.[managedConnectionId("alpha")];
+    assert.ok(alphaConn, "alpha provider must be written into the sandbox qoder settings");
+    assert.equal(alphaConn.apiKey, "test-token");
+    assert.equal(alphaConn.model, "model-1");
+    assert.equal(alphaConn.baseUrl, "http://127.0.0.1:47821/openai/alpha/v1");
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -233,11 +233,12 @@ describe("agent-sync pools", () => {
     assert.match(reasonixText, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/pool-ab\/v1"/);
 
     const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
-    const poolEntries = qoderSettings.modelConfigs.customModels.filter((e) => e.provider === "_pool-ab");
-    assert.equal(poolEntries.length, 2, "pool contributes one entry per model");
-    assert.ok(poolEntries.every((e) => e.baseURL === "http://127.0.0.1:47821/openai/pool-ab/v1"));
-    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_alpha"), undefined);
-    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_beta"), undefined);
+    const poolConn = qoderSettings.providers?.[managedConnectionId("pool-ab")];
+    assert.ok(poolConn, "pool channel in qoder settings");
+    assert.equal(poolConn.baseUrl, "http://127.0.0.1:47821/openai/pool-ab/v1");
+    assert.deepEqual(poolConn.models.map((m) => m.model), ["model-1", "model-2"]);
+    assert.equal(qoderSettings.providers?.[managedConnectionId("alpha")], undefined);
+    assert.equal(qoderSettings.providers?.[managedConnectionId("beta")], undefined);
 
     // Dissolve the pool and re-sync: the pool channel disappears everywhere,
     // the absorbed member channels resurface as standalone channels.
@@ -256,9 +257,9 @@ describe("agent-sync pools", () => {
     assert.doesNotMatch(reasonixText2, /_pool-ab/);
 
     const qoderSettings2 = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
-    assert.equal(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_pool-ab"), undefined);
-    assert.ok(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_alpha"));
-    assert.ok(qoderSettings2.modelConfigs.customModels.find((e) => e.provider === "_beta"));
+    assert.equal(qoderSettings2.providers?.[managedConnectionId("pool-ab")], undefined);
+    assert.ok(qoderSettings2.providers?.[managedConnectionId("alpha")]);
+    assert.ok(qoderSettings2.providers?.[managedConnectionId("beta")]);
   });
 });
 
@@ -328,10 +329,10 @@ describe("agent-sync auto routing channel", () => {
     assert.equal(pi.providers._auto, undefined, "pi without a chain gets no _auto channel");
     assert.ok(pi.providers._alpha);
 
-    // qoder has NO chain: no _auto entry in customModels.
+    // qoder has NO chain: no auto connection in providers.
     const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
-    assert.equal(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_auto"), undefined, "qoder without a chain gets no _auto entry");
-    assert.ok(qoderSettings.modelConfigs.customModels.find((e) => e.provider === "_alpha"));
+    assert.equal(qoderSettings.providers?.[managedConnectionId("auto")], undefined, "qoder without a chain gets no auto connection");
+    assert.ok(qoderSettings.providers?.[managedConnectionId("alpha")]);
 
     // Delete the chains and re-sync: _auto disappears everywhere.
     const second = await syncAllAgentConfigs(syncOpts(chainStore(false)));
