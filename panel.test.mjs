@@ -1813,11 +1813,10 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
   });
 });
 
-describe("panel.html 实例行自动路由状态徽标（生成中 → 号池紫「自动路由中」）", () => {
-  // 实例级服务归因（2026-09-07）：多实例端点实例行的在飞请求里有链服务的
-  // （activeTargets 任一条目 autoCount>0；claude 会话行走 reporter 透传的
-  // viaAuto=true），状态徽标从绿色「生成中」换成号池紫「自动路由中」（badge-auto）；
-  // 直连与待命行不受影响，伪「全局汇总」行永不挂状态徽标。
+describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归因换装）", () => {
+  // 撤销（2026-09-08）：实例行曾按链归因把绿色「生成中」换成号池紫「自动路由中」。
+  // 「这条请求走没走自动路由」只由端点模型胶囊上的 auto 角标表达，状态徽标回到
+  // 生成中/待命两态；伪「全局汇总」行依旧不挂状态徽标。此处钉住不再换装。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -1828,31 +1827,25 @@ describe("panel.html 实例行自动路由状态徽标（生成中 → 号池紫
     // 整段三元（含 isAggregate 空串分支）作为表达式求值
     const m = panelHtml.match(/const stateBadge = (isAggregate[\s\S]*?);/);
     assert.ok(m, "instance-row state badge expression found");
-    return (ctx) => new Function("isAggregate", "isAct", "instViaAuto", `return (${m[1]});`)(ctx.isAggregate, ctx.isAct, ctx.instViaAuto);
+    return (ctx) => new Function("isAggregate", "isAct", `return (${m[1]});`)(ctx.isAggregate, ctx.isAct);
   }
 
-  it("生成中 + 链归因 → badge-auto「自动路由中」；直连生成中保持 badge-ok「生成中」", () => {
+  it("在飞恒 badge-ok「生成中」、待命恒 badge-neutral「待命」、汇总行无状态徽标", () => {
     const badge = makeRenderStateBadge();
-    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: true }), /badge-auto/);
-    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: true }), /自动路由中/);
-    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /badge-ok/);
-    assert.match(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /生成中/);
-    assert.doesNotMatch(badge({ isAggregate: false, isAct: true, instViaAuto: false }), /自动路由中/);
-  });
-
-  it("待命与伪「全局汇总」行不换装：待命保持 badge-neutral，汇总行无状态徽标", () => {
-    const badge = makeRenderStateBadge();
-    const idle = badge({ isAggregate: false, isAct: false, instViaAuto: true });
+    const act = badge({ isAggregate: false, isAct: true });
+    assert.match(act, /badge-ok/);
+    assert.match(act, /生成中/);
+    const idle = badge({ isAggregate: false, isAct: false });
     assert.match(idle, /badge-neutral/);
     assert.match(idle, /待命/);
-    assert.equal(badge({ isAggregate: true, isAct: true, instViaAuto: true }), "");
+    assert.equal(badge({ isAggregate: true, isAct: true }), "");
   });
 
-  it("实例级归因判定：activeTargets 任一 autoCount>0 或 claude 行 viaAuto=true 命中", () => {
-    const m = panelHtml.match(/const instViaAuto = inst\.viaAuto === true[\s\S]*?;/);
-    assert.ok(m, "instViaAuto derivation found in renderInstanceRows");
-    assert.ok(m[0].includes("inst.activeTargets.some"), "reads the per-instance composite ledger");
-    assert.ok(m[0].includes("autoCount"), "keys on autoCount, not on chain config");
+  it("实例行渲染器不留链归因分支（badge-auto 只归端点胶囊）", () => {
+    assert.doesNotMatch(makeRenderStateBadge()({ isAggregate: false, isAct: true }), /自动路由中|badge-auto/);
+    const m = panelHtml.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderInstanceRows found in panel.html");
+    assert.ok(!/instViaAuto|自动路由中/.test(m[0]), "no chain-attribution branch left in the instance-row renderer");
   });
 });
 

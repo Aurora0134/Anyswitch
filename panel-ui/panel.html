@@ -6102,12 +6102,6 @@ if (window.panelStartupController) panelStartupPlay();
       seenKeys[prefix + ":" + iid] = true;
       const tokens = inst.tokens || {};
       const isAct = inst.status === "active";
-      // 实例级自动路由归因（服务归因语义，与端点胶囊的 autoCount 同源）：该实例
-      // 在飞的请求里有链服务的（activeTargets 任一条目 autoCount>0），或 claude
-      // 会话行由 reporter 透传的 viaAuto=true，状态徽标即换成号池紫「自动路由中」；
-      // 直连请求不归因，保持「生成中」。伪「全局汇总」行不带徽标，不受影响。
-      const instViaAuto = inst.viaAuto === true
-        || (Array.isArray(inst.activeTargets) && inst.activeTargets.some((t) => (Number(t && t.autoCount) || 0) > 0));
       const tps = inst.tps;
       const ttft = inst.lastTtftMs;
       const ttftColor = inst.ttftColor || "green";
@@ -6119,11 +6113,10 @@ if (window.panelStartupController) panelStartupPlay();
 
       // 简要行：名称行（标题 + 状态徽标 + 请求数徽标）+ tokens 行 + 胶囊行
       // 伪「全局汇总」行（__aggregate__）不是实例，不挂生成中/待命状态徽标。
-      // 生成中且该实例正被自动路由链服务 → 状态徽标换号池紫「自动路由中」。
       const isAggregate = iid === "__aggregate__";
       const stateBadge = isAggregate ? "" : (
         isAct
-          ? `<span class="badge ${instViaAuto ? "badge-auto" : "badge-ok"}">${instViaAuto ? "自动路由中" : "生成中"}</span>`
+          ? `<span class="badge badge-ok">生成中</span>`
           : `<span class="badge badge-neutral">待命</span>`
       );
       const row = document.createElement("div");

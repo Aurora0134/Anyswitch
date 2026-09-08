@@ -1405,7 +1405,7 @@ export function createAgentMetricsCollector(options = {}) {
       composed = composeInstanceTracker(primary, mirror);
       // 迟到挂载补标：链归属（resolver + 当前成员）只在请求开头的成员循环里
       // 宣布一次，netstat 快照补挂的镜像从创建起就错过了那次宣布，会把链服务
-      // 请求整段错记为直连（实例行「自动路由中」丢失，闪「生成中」）。挂载
+      // 请求整段错记为直连（实例镜像的链归因 autoCount 恒空）。挂载
       // 瞬间把主 tracker 已宣布的归属重放给镜像；尚未宣布（memberId null）
       // 时只预置 resolver，随后的 setCurrentMember 会经 composed 扇出到镜像。
       const attribution = primary.getAttribution?.();
@@ -1834,11 +1834,6 @@ export function createAgentMetricsCollector(options = {}) {
         // reporter starts sending it) — feeds the per-session model badge.
         model: s.model ?? null,
         providerId: s.providerId ?? null,
-        // Chain provenance rides the same reporter snapshot: the per-session
-        // row's status badge flips to 自动路由中 only when the in-flight
-        // request is chain-served (same 服务归因 semantics as the capsule's
-        // activeTargets.autoCount; direct traffic never sets it).
-        viaAuto: s.viaAuto === true,
       };
     });
 
