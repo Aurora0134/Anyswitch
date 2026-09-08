@@ -1,5 +1,6 @@
 import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
+import { parseOpenAIPath } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
 import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel } from "./stream-pipe.mjs";
 import { validateStore } from "./store-schema.mjs";
@@ -83,15 +84,30 @@ function instanceIdForRequest(req, agentId, deps) {
   return instanceIdFromSocket(req, agentId, deps);
 }
 
+// URL 段前缀声明的端点身份（`/openai/<agent>~<provider>/`，语法见 openai-path）。
+// 走与 x-agent-id 完全同一条白名单规则：未知值视为配置错误或非授权客户端拼出来的
+// 路径，忽略之、回落 UA 与兜底，绝不让幽灵端点 id 进 journal / 面板分桶 / 链路由。
+function prefixedAgentId(agentHint) {
+  if (typeof agentHint !== "string") return null;
+  const id = agentHint.toLowerCase().trim();
+  return KNOWN_AGENT_IDS.has(id) ? id : null;
+}
+
 // opencode 客户端不带 x-agent-id，用 UA 识别归到 opencode 栏，
 // 避免兜底进 zcode 污染其指标。kimi 同理：launcher 经 KIMI_CODE_CUSTOM_HEADERS
 // env 注入 x-agent-id: kimi（2026-08-31 起由 config.toml 改为 env 注入，
 // config 的 customHeaders 会覆盖 env 同名头），UA 识别降级为未走 launcher
 // 直连时的防线——不识别的话 kimi 的链式路由（自动路由 auto）会被
 // 兜底成 zcode 的链或直接 404。与 anthropicAgentIdFrom 的 UA 口径保持一致。
-function openaiAgentIdFrom(headers) {
+//
+// 优先级：显式 x-agent-id > URL 段前缀 > UA 嗅探 > 兜底 zcode。前缀压在 UA 之前，
+// 因为它是 merge 模块自己写进客户端配置的确定事实，而 UA 只是启发式——Qoder 的 UA
+// 不含任何自家标识（实测其请求全部兜底进 zcode），这条通道不认前缀就永远认不出它。
+function openaiAgentIdFrom(headers, agentHint = null) {
   const explicit = explicitAgentId(headers);
   if (explicit) return explicit;
+  const prefixed = prefixedAgentId(agentHint);
+  if (prefixed) return prefixed;
   const ua = (headers["user-agent"] || "").toLowerCase();
   if (ua.includes("opencode")) return "opencode";
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
@@ -335,7 +351,9 @@ export function createOpenAIRelayServer(deps) {
     try {
       const modelsMatch = path.match(/^\/openai\/[^/]+\/v1\/models$/);
       if (modelsMatch && req.method === "GET") {
-        const result = await handler.handleModels(path, req.headers, openaiAgentIdFrom(req.headers));
+        // agentHint 缺省（路径本身不合法）时退回原口径，错误由 handler 报。
+        const parsed = parseOpenAIPath(path);
+        const result = await handler.handleModels(path, req.headers, openaiAgentIdFrom(req.headers, parsed.agentHint));
         sendJson(res, result.status, result.body);
         return;
       }
@@ -350,9 +368,15 @@ export function createOpenAIRelayServer(deps) {
           sendJson(res, 400, openAIError("invalid_request_error", "request body is not valid JSON"));
           return;
         }
-        const openaiAgentId = openaiAgentIdFrom(req.headers);
+        // URL 段可能带 `<agent>~` 身份前缀（见 openai-path）。这里解析一次：
+        // agentHint 供归属用，providerId 必须是剥离前缀后的真实渠道 id——直接把
+        // chatMatch[1] 那个原样段塞进 tracker，journal/stats 会落下
+        // 「qoder~a6api-main」这种 store 里不存在的幽灵渠道。解析失败（非法编码）
+        // 时保留原段，错误形状由 handler 的同一 parser 负责报出。
+        const parsedRoute = parseOpenAIPath(path);
+        const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
         const tracker = deps.metricsCollector?.startRequest({
-          providerId: chatMatch[1],
+          providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
           model: body?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,

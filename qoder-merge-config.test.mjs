@@ -89,7 +89,7 @@ describe("buildQoderProviders", () => {
     assert.deepEqual(keys, [managedConnectionId("nvidia-nim"), managedConnectionId("poke-api")].sort());
 
     const poke = providers[managedConnectionId("poke-api")];
-    assert.equal(poke.baseUrl, `http://127.0.0.1:${PORT}/openai/poke-api/v1`);
+    assert.equal(poke.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
     assert.equal(poke.apiKey, TOKEN);
     assert.equal(poke.type, "openai-compatible");
     assert.equal(poke.protocol, "openai");
@@ -174,7 +174,7 @@ describe("buildQoderProviders", () => {
     const map = buildQoderProviders(providers, PORT, TOKEN);
     const conn = map[managedConnectionId("auto")];
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
-    assert.equal(conn.baseUrl, `http://127.0.0.1:${PORT}/openai/poke-api/v1`);
+    assert.equal(conn.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
     assert.equal(conn.displayName, "自动路由");
   });
 });
@@ -189,7 +189,7 @@ describe("mergeQoderSettings", () => {
     assert.ok(providers, "settings.providers must exist");
     const poke = providers[managedConnectionId("poke-api")];
     assert.ok(poke, "poke-api connection injected");
-    assert.equal(poke.baseUrl, `http://127.0.0.1:${PORT}/openai/poke-api/v1`);
+    assert.equal(poke.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
     assert.equal(poke.apiKey, TOKEN);
     assert.equal(poke.type, "openai-compatible");
     assert.equal(poke.protocol, "openai");
@@ -380,7 +380,7 @@ describe("auto routing channel (_auto)", () => {
     assert.equal(autoConn.displayName, "自动路由");
     assert.equal(autoConn.apiKey, TOKEN);
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
-    assert.equal(autoConn.baseUrl, `http://127.0.0.1:${PORT}/openai/poke-api/v1`);
+    assert.equal(autoConn.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
     assert.deepEqual(autoConn.models.map((m) => m.model), ["auto"]);
     assert.ok(managed.includes("auto"), "sidecar tracks the auto channel as managed");
   });
@@ -457,7 +457,7 @@ describe("writeQoderConfig (high-level)", () => {
     const written = JSON.parse(readFileSync(settingsPath, "utf8"));
     const autoConn = written.providers[managedConnectionId("auto")];
     assert.ok(autoConn, "auto connection must be present");
-    assert.equal(autoConn.baseUrl, `http://127.0.0.1:${PORT}/openai/poke-api/v1`);
+    assert.equal(autoConn.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
   });
 
   it("preserves non-managed settings.json fields", () => {

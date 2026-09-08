@@ -26,10 +26,14 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
+import { buildAgentPrefixedSegment } from "./openai-path.mjs";
 
 const SIDECAR_FILENAME = "qoder-sidecar.json";
 const MANAGED_PREFIX = "qoder-custom-anyswitch-";
 const MAX_MODELS_PER_CONNECTION = 32;
+// relay 认这个端点时用的 id，也是 URL 身份前缀的字面值（须与 store-schema 的
+// ROUTING_ENDPOINT_IDS 成员一致，relay 侧按 x-agent-id 同一条白名单校验）。
+const QODER_AGENT_ID = "qoder";
 
 export function sidecarPath(root) {
   return join(root, SIDECAR_FILENAME);
@@ -88,7 +92,14 @@ function buildModelEntry(modelId, model) {
 // own id; real channels never set baseUrlSegment.
 function buildConnection(providerId, provider, port, token) {
   const segment = provider?.baseUrlSegment ?? providerId;
-  const baseUrl = `http://127.0.0.1:${port}/openai/${encodeURIComponent(segment)}/v1`;
+  // 身份前缀 `qoder~`：Qoder 的 provider 配置放不进自定义请求头、UA 里也没有自家
+  // 标识，relay 原本的三条认端点通道（x-agent-id / UA / 兜底）对它全部落空，请求
+  // 一律记成 zcode——看板 Qoder 卡恒 0 请求，zcode 指标被反向污染。URL 段本来就是我
+  // 们自己写的，那就把身份写进 URL。relay 侧按 '~' 剥离后再查 store（语法见
+  // openai-path），渠道查找/404 文案/stats 用的都是剥离后的真实 id。
+  // 连接 id 仍由真实 providerId 派生（managedConnectionId 不经这里），所以加前缀
+  // 不会让 sidecar 托管集漂移，旧条目照常被下一轮 sync 精确替换。
+  const baseUrl = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(QODER_AGENT_ID, segment)}/v1`;
   const models = Object.entries(provider.models ?? {})
     .slice(0, MAX_MODELS_PER_CONNECTION)
     .map(([modelId, model]) => buildModelEntry(modelId, model));

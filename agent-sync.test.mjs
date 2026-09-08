@@ -87,7 +87,9 @@ describe("agent-sync", () => {
     assert.ok(alphaConn, "alpha provider must be written into the sandbox qoder settings");
     assert.equal(alphaConn.apiKey, "test-token");
     assert.equal(alphaConn.model, "model-1");
-    assert.equal(alphaConn.baseUrl, "http://127.0.0.1:47821/openai/alpha/v1");
+    // Qoder 段带 `qoder~` 身份前缀：它发不出 x-agent-id、UA 无自家标识，relay 只能
+    // 从 URL 认端点（其余端点靠各自的头，段仍是裸渠道 id）。
+    assert.equal(alphaConn.baseUrl, "http://127.0.0.1:47821/openai/qoder~alpha/v1");
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -235,7 +237,7 @@ describe("agent-sync pools", () => {
     const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
     const poolConn = qoderSettings.providers?.[managedConnectionId("pool-ab")];
     assert.ok(poolConn, "pool channel in qoder settings");
-    assert.equal(poolConn.baseUrl, "http://127.0.0.1:47821/openai/pool-ab/v1");
+    assert.equal(poolConn.baseUrl, "http://127.0.0.1:47821/openai/qoder~pool-ab/v1");
     assert.deepEqual(poolConn.models.map((m) => m.model), ["model-1", "model-2"]);
     assert.equal(qoderSettings.providers?.[managedConnectionId("alpha")], undefined);
     assert.equal(qoderSettings.providers?.[managedConnectionId("beta")], undefined);
