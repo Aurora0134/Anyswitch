@@ -6011,6 +6011,23 @@ if (window.panelStartupController) panelStartupPlay();
     return firstReady;
   }
 
+  // 后台切回立即补刷。三处轮询（本页 1s/15s、统计页 30s）都带 document.hidden
+  // 闸，隐藏期间完全不取数；而 Chrome 会把隐藏页的定时器节流到约每分钟一次，
+  // 所以回前台后首个 tick 仍可能等近一分钟——期间画面停在切走前的旧数字上，
+  // 折线图也因没有新帧而不更新。按当前视图各补一次即可，不新起定时器：
+  // refreshAgents / refreshModelStability / refreshStatsState 自带在飞与序号守卫。
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    refreshStatus();
+    if (currentView === "stats") {
+      refreshStatsState({ silent: true });
+      return;
+    }
+    if (!boardVisible()) return;
+    refreshAgents();
+    refreshModelStability();
+  });
+
   async function refreshStatus() {
     try {
       const res = await api("GET", "/api/status");
