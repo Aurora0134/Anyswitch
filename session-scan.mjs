@@ -219,35 +219,6 @@ function collectJsonlFiles(root, { skipDirs = () => false, skipFiles = () => fal
   return out;
 }
 
-// Latest mtimeMs among files matching `filter` under dir (recursive).
-// Returns null when nothing stats — callers fall back to other timestamps.
-function latestMtimeUnder(dir, filter = () => true) {
-  let latest = null;
-  const walk = (d) => {
-    let entries;
-    try {
-      entries = readdirSync(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const path = join(d, entry.name);
-      try {
-        if (entry.isDirectory()) {
-          walk(path);
-        } else if (filter(entry.name, path)) {
-          const m = statSync(path).mtimeMs;
-          if (latest === null || m > latest) latest = m;
-        }
-      } catch {
-        // entry vanished mid-walk — skip
-      }
-    }
-  };
-  walk(dir);
-  return latest;
-}
-
 // ---------------------------------------------------------------------------
 // Delete path safety (translation of cc-switch delete_session_with_roots):
 // canonicalize the candidate file and every existing root, then require the
@@ -507,6 +478,33 @@ function createKimiAdapter(roots) {
     return null;
   }
 
+  // Last activity = newest `agents/<id>/wire.jsonl`. Reached via one readdir +
+  // one stat per agent instead of a full recursive walk of the session dir,
+  // which on this machine meant stat'ing up to 1970 files per session just to
+  // answer "when was this conversation last active". Semantic change: tool
+  // results and task logs written after the last transcript append no longer
+  // count — the transcripts are what "session activity" means here.
+  function latestWireMtime(sessionDir) {
+    const agentsDir = join(sessionDir, "agents");
+    let entries;
+    try {
+      entries = readdirSync(agentsDir, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    let latest = null;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      try {
+        const m = statSync(join(agentsDir, entry.name, "wire.jsonl")).mtimeMs;
+        if (latest === null || m > latest) latest = m;
+      } catch {
+        // agent dir with no transcript of its own — not an activity source
+      }
+    }
+    return latest;
+  }
+
   return {
     id: "kimi",
     roots: () => roots,
@@ -519,7 +517,7 @@ function createKimiAdapter(roots) {
           // Sessions whose wire.jsonl carries no real user text (only
           // metadata/binding/system-reminder injections) are not conversations.
           if (prompt === null) continue;
-          const lastActive = latestMtimeUnder(entry.sessionDir) ?? statSync(entry.sessionDir).mtimeMs;
+          const lastActive = latestWireMtime(entry.sessionDir) ?? statSync(entry.sessionDir).mtimeMs;
           const project = typeof entry.workDir === "string" ? entry.workDir : null;
           sessions.push(
             makeMeta({

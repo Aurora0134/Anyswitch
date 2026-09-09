@@ -7,7 +7,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
@@ -300,6 +300,42 @@ test("kimi: scans session_index.jsonl and titles from wire.jsonl prompt.accepted
   const del = await scanner.deleteSessions([{ endpoint: "kimi", file: sessionDir }]);
   assert.equal(del.ok.length, 1);
   assert.ok(!existsSync(sessionDir));
+});
+
+test("kimi: lastActive is the newest agents/*/wire.jsonl, ignoring tool-result noise", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_x", "session_abc");
+  const mainDir = join(sessionDir, "agents", "main");
+  const subDir = join(sessionDir, "agents", "agent-1", "tool-results");
+  mkdirSync(mainDir, { recursive: true });
+  mkdirSync(subDir, { recursive: true });
+
+  const T_MAIN = 1788000000000;
+  const T_SUB = T_MAIN + 5000;
+  const T_TOOL_NOISE = T_MAIN + 900000;
+  const wire = (text) =>
+    JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text }], time: T_MAIN }) + "\n";
+
+  const mainWire = join(mainDir, "wire.jsonl");
+  const subWire = join(subDir, "..", "wire.jsonl");
+  const toolResult = join(subDir, "Read-1.txt");
+  writeFileSync(mainWire, wire("主会话提问"), "utf8");
+  writeFileSync(subWire, wire("子会话提问"), "utf8");
+  writeFileSync(toolResult, "工具输出", "utf8");
+  utimesSync(mainWire, new Date(T_MAIN), new Date(T_MAIN));
+  utimesSync(subWire, new Date(T_SUB), new Date(T_SUB));
+  utimesSync(toolResult, new Date(T_TOOL_NOISE), new Date(T_TOOL_NOISE));
+
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_abc", sessionDir, workDir: "C:\\work\\k" }) + "\n",
+    "utf8",
+  );
+
+  const { sessions } = await testScanner({ kimi: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  // Subagent transcripts count as activity; later-written tool output does not.
+  assert.equal(sessions[0].lastActive, T_SUB);
 });
 
 test("kimi: index rows whose sessionDir vanished are skipped", async () => {
