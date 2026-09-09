@@ -1153,18 +1153,35 @@ export function createAgentMetricsCollector(options = {}) {
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),
   });
 
-  // Process detection cache
+  // Process detection cache — stale-while-revalidate.
+  //
+  // Why the read path must not block on the probe chain: on Windows 11 24H2 the
+  // `wmic` probe no longer exists, so probe 1 fails in ~50ms and every scan pays
+  // the PowerShell Get-CimInstance probe (~1.4s measured here). It can't degrade
+  // to the ~400ms tasklist probe either: tasklist has no CommandLine, and Qoder
+  // counting needs it to filter Electron `--type=` child processes. Meanwhile the
+  // panel polls /api/agents once a second and gives the cross-process pull
+  // 1500ms (see handleAgents in panel.mjs). A blocking scan therefore put roughly
+  // every third poll past that budget — the panel silently served its own
+  // zero-traffic collector and the board flashed "no data" for a beat.
+  //
+  // Handing back a snapshot no fresher than the old cache window costs display
+  // freshness this path never had, and takes the timeout race out of existence.
+  const PROCESS_SCAN_TTL_MS = 2500;
+  // Ceiling on the age a reader may still be served. Past it the probe chain is
+  // failing repeatedly, and presenting arbitrarily ancient process state (an
+  // endpoint that exited long ago still "running") is worse than one slow reply.
+  // Worst served age on the healthy path is one TTL plus one scan (~4s), so this
+  // only bites when probes are broken.
+  const PROCESS_SCAN_MAX_STALE_MS = 6000;
   let lastProcessScanTime = 0;
+  // No snapshot has landed since this collector was created. Until one does,
+  // there is nothing worth serving: the initial empty scan is not process state.
+  let hasProcessScanResult = false;
   let cachedProcessCounts = createEmptyProcessScan();
   let pendingScanPromise = null;
 
-  async function scanProcesses() {
-    const now = nowFn();
-    if (now - lastProcessScanTime < 2500 && pendingScanPromise === null) {
-      return cachedProcessCounts;
-    }
-    if (pendingScanPromise) return pendingScanPromise;
-
+  function startProcessScan() {
     pendingScanPromise = new Promise((resolve) => {
       // 1. Primary probe: WMIC with CommandLine, ParentProcessId and ProcessId.
       // ParentProcessId rides the same query (zero extra spawn) to build the
@@ -1173,11 +1190,18 @@ export function createAgentMetricsCollector(options = {}) {
       // (the launchers spawn via COMSPEC) and a missing intermediate hop would
       // break ancestor resolution. cmd.exe rows feed only the lineage table —
       // no counting branch claims them.
-      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
+      const land = (counts) => {
+        cachedProcessCounts = counts;
+        // Stamped where the data lands, not when the probe started, so the age
+        // math in scanProcesses() means "how fresh is what I'm serving".
         lastProcessScanTime = nowFn();
+        hasProcessScanResult = true;
+        resolve(cachedProcessCounts);
+      };
+
+      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
         if (!wmicErr && typeof wmicOut === "string" && wmicOut.includes("ProcessId")) {
-          cachedProcessCounts = parseTasklistCsv(wmicOut);
-          resolve(cachedProcessCounts);
+          land(parseTasklistCsv(wmicOut));
           return;
         }
 
@@ -1187,8 +1211,7 @@ export function createAgentMetricsCollector(options = {}) {
         const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
         execFn(psCmd, { timeout: 3000, windowsHide: true }, (psErr, psOut) => {
           if (!psErr && typeof psOut === "string" && psOut.trim().length > 0) {
-            cachedProcessCounts = parseTasklistCsv(psOut);
-            resolve(cachedProcessCounts);
+            land(parseTasklistCsv(psOut));
             return;
           }
 
@@ -1197,8 +1220,13 @@ export function createAgentMetricsCollector(options = {}) {
           // instance-id normalization degrades to a no-op (ids pass through).
           execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, (err, stdout) => {
             if (!err && typeof stdout === "string") {
-              cachedProcessCounts = parseTasklistCsv(stdout);
+              land(parseTasklistCsv(stdout));
+              return;
             }
+            // Every probe failed. Stamp the window anyway so a broken probe chain
+            // retries once per cache window rather than once per reader; do NOT
+            // mark a result landed — this round produced nothing.
+            lastProcessScanTime = nowFn();
             resolve(cachedProcessCounts);
           });
         });
@@ -1214,6 +1242,24 @@ export function createAgentMetricsCollector(options = {}) {
     });
 
     return pendingScanPromise;
+  }
+
+  async function scanProcesses() {
+    const age = nowFn() - lastProcessScanTime;
+    // Revalidate in the background; this reader (and every reader until the round
+    // lands) keeps being served the previous snapshot. Coalescing stays with
+    // pendingScanPromise, so one round is ever in flight.
+    if (age >= PROCESS_SCAN_TTL_MS && pendingScanPromise === null) startProcessScan();
+    // Nothing has landed yet: there is no snapshot to serve stale, so join the
+    // round in flight (or hand back the empty scan while a failed round's retry
+    // window is still closed — the same answer the blocking path gave before).
+    if (!hasProcessScanResult) return pendingScanPromise ?? cachedProcessCounts;
+    // Past the stale ceiling: presenting unboundedly ancient process state (an
+    // endpoint that exited long ago still "running") is worse than one slow reply.
+    if (age > PROCESS_SCAN_MAX_STALE_MS) {
+      return pendingScanPromise ?? startProcessScan();
+    }
+    return cachedProcessCounts;
   }
 
   // Aggregate metrics state

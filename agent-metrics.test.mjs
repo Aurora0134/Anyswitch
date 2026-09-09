@@ -3124,3 +3124,80 @@ describe("instance id normalization (collector)", () => {
     assert.deepEqual(kimi.instances.map((i) => i.id), ["kimi-4321"]);
   });
 });
+
+// Process-scan staleness contract (see scanProcesses in agent-metrics.mjs).
+// Blocking reads used to put every ~3rd panel /api/agents poll past the 1500ms
+// cross-process pull budget (the PowerShell probe costs ~1.4s here because wmic
+// is gone on Windows 11 24H2), and the panel then substituted its own
+// zero-traffic collector — a "no data" frame on a healthy relay.
+describe("process scan staleness (stale-while-revalidate)", () => {
+  const wmicScan = "Node,CommandLine,Name,ProcessId\r\n"
+    + "LAPTOP,C:\\Programs\\Qoder\\Qoder.exe,Qoder.exe,4321\r\n";
+
+  // An execFn that answers immediately until arm() is called; from then on the
+  // probe chain only completes when the test says so — so "this read waited for
+  // the in-flight scan" is assertable instead of showing up as a hung test.
+  function gatedExec() {
+    let armed = false;
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    return {
+      arm: () => { armed = true; },
+      release: () => release(),
+      execFn: (cmd, opts, cb) => {
+        if (!armed) {
+          cb(null, wmicScan);
+          return;
+        }
+        gate.then(() => cb(null, wmicScan));
+      },
+    };
+  }
+
+  // Resolves to the sentinel instead of hanging if `promise` is still pending
+  // after ms — the assertion is "this read must/must-not wait for the scan".
+  function raceWithPending(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((resolve) => setTimeout(() => resolve("__pending__"), ms)),
+    ]);
+  }
+
+  it("first read waits for a snapshot instead of serving the never-filled empty scan", async () => {
+    const probe = { started: 0 };
+    const execFn = (cmd, opts, cb) => { probe.started += 1; cb(null, wmicScan); };
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.qoder, 1, "首轮必须等一轮扫描落地");
+    assert.equal(probe.started, 1);
+  });
+
+  it("a read past the cache window returns the previous snapshot without waiting", async () => {
+    let t = 3000;
+    const probe = gatedExec();
+    const collector = testCollector({ execFn: probe.execFn, nowFn: () => t });
+    await collector.scanProcesses(); // round 1 lands at t=3000
+
+    probe.arm();
+    t = 6000; // past the 2500ms window; round 2 is in flight and unfinished
+    const procs = await raceWithPending(collector.scanProcesses(), 200);
+    assert.notEqual(procs, "__pending__", "读取被在飞扫描阻塞了");
+    assert.equal(procs.qoder, 1, "端出的就是上一份快照");
+    probe.release();
+  });
+
+  it("a snapshot past the stale ceiling is never served", async () => {
+    let t = 3000;
+    const probe = gatedExec();
+    const collector = testCollector({ execFn: probe.execFn, nowFn: () => t });
+    await collector.scanProcesses();
+
+    probe.arm();
+    t = 20000; // far past PROCESS_SCAN_MAX_STALE_MS
+    const pending = collector.scanProcesses();
+    const settledEarly = await raceWithPending(pending.then(() => true, () => true), 50);
+    assert.notEqual(settledEarly, true, "超龄快照必须等新扫描落地才返回");
+    probe.release();
+    assert.equal((await pending).qoder, 1);
+  });
+});
