@@ -35,10 +35,10 @@ const PRESET_A = { id: "aaaaaaaaaaaa", title: "规则A", tag: "", enabled: true,
 const PRESET_B = { id: "bbbbbbbbbbbb", title: "规则B", tag: "", enabled: true, content: "第二行\n第三行" };
 
 describe("agent-prompts-inject endpoint table", () => {
-  it("covers all seven endpoints with verified targets", () => {
+  it("covers all eight endpoints with verified targets", () => {
     const { injector, homeDir, appData } = makeInjector();
     const endpoints = injector.listEndpoints();
-    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "reasonix"]);
+    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "reasonix", "qoder"]);
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.target, join(homeDir, ".claude", "CLAUDE.md"));
     assert.equal(byId.kimi.target, join(homeDir, ".kimi-code", "AGENTS.md"));
@@ -48,12 +48,17 @@ describe("agent-prompts-inject endpoint table", () => {
     assert.equal(byId.opencode.target, join(homeDir, ".config", "opencode", "AGENTS.md"));
     // reasonix lives under %APPDATA%, never homeDir-relative.
     assert.equal(byId.reasonix.target, join(appData, "reasonix", "AGENTS.md"));
+    // qoder gets its own file under the user-level rules dir — never the user's
+    // own ~/.qoder/AGENTS.md (verified injection surface, 2026-09-09).
+    assert.equal(byId.qoder.target, join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
+    // Qoder re-watches a loaded rule file, so preset edits land next turn.
+    assert.equal(byId.qoder.hotReload, true);
     for (const id of ["claude", "zcode", "dsh", "pi", "reasonix"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
-    assert.equal(PROMPT_ENDPOINTS.length, 7);
+    assert.equal(PROMPT_ENDPOINTS.length, 8);
   });
 });
 
@@ -101,6 +106,22 @@ describe("agent-prompts-inject block rendering and application", () => {
     assert.equal(existsSync(target), true);
     const result = injector.syncEndpoint("zcode", []);
     assert.equal(result.removed, true);
+    assert.equal(existsSync(target), false);
+  });
+
+  // qoder's target is a whole-file managed rule inside a directory Qoder scans
+  // for *.md, so an emptied-but-left-behind stub would still load as a rule.
+  it("qoder: creates the rules dir on demand and leaves no stub when emptied", () => {
+    const { injector, homeDir } = makeInjector();
+    const rulesDir = join(homeDir, ".qoder", "rules");
+    const target = join(rulesDir, "anyswitch-managed-prompts.md");
+    assert.equal(existsSync(rulesDir), false);
+
+    assert.equal(injector.syncEndpoint("qoder", [PRESET_A, PRESET_B]).changed, true);
+    assert.equal(readFileSync(target, "utf8"), `${buildManagedBlock([PRESET_A, PRESET_B])}\n`);
+
+    const emptied = injector.syncEndpoint("qoder", []);
+    assert.equal(emptied.removed, true);
     assert.equal(existsSync(target), false);
   });
 

@@ -257,13 +257,14 @@ describe("createPromptsPanelService facade", () => {
     while (tempDirs.length) rmSync(tempDirs.pop(), { recursive: true, force: true });
   });
 
-  it("state exposes the seven endpoints and an initially empty sync snapshot", () => {
+  it("state exposes the eight endpoints and an initially empty sync snapshot", () => {
     const { facade } = makeFacade();
     const state = facade.getState();
     assert.equal(state.enabled, false);
     assert.deepEqual(state.presets, []);
     assert.deepEqual(state.sync, {});
-    assert.equal(state.endpoints.length, 7);
+    assert.equal(state.endpoints.length, 8);
+    assert.equal(state.endpoints.some((e) => e.id === "qoder"), true, "qoder must reach the panel endpoint list");
     assert.deepEqual(Object.keys(state.endpoints[0]).sort(), ["hotReload", "id", "label", "targetRel"]);
   });
 
@@ -272,7 +273,7 @@ describe("createPromptsPanelService facade", () => {
     const { preset } = facade.createPreset({ title: "规则A", content: "内容" });
     // Master is off: the sync removed blocks (none) but recorded results.
     let sync = facade.getState().sync;
-    assert.equal(Object.keys(sync).length, 7);
+    assert.equal(Object.keys(sync).length, 8);
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false);
 
     facade.setMaster(true);
@@ -280,6 +281,10 @@ describe("createPromptsPanelService facade", () => {
     assert.equal(text.startsWith(MANAGED_BEGIN), true);
     assert.match(text, /内容/);
     assert.doesNotMatch(text, /规则A/, "title must not be injected");
+    // qoder reaches its user-level rules file through the same path.
+    const qoderText = readFileSync(join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"), "utf8");
+    assert.equal(qoderText.startsWith(MANAGED_BEGIN), true);
+    assert.match(qoderText, /内容/);
 
     facade.setOverride({ endpointId: "claude", presetId: preset.id, off: true });
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false, "off override removes claude's block");
