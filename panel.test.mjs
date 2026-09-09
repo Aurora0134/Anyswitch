@@ -270,6 +270,32 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.deepEqual(json().agents, []);
   });
 
+  it("GET /panel/api/agents serves the last relay pull after a missed pull, not the blind local frame", async () => {
+    const pulled = [{ id: "qoder", status: "running", metrics: { totalRequests: 67 } }];
+    const blindLocal = [{ id: "qoder", status: "running", metrics: { totalRequests: 0 } }];
+    let relayAnswers = true;
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: { getAgentsStatus: async () => blindLocal },
+      fetchRelayAgents: async () => (relayAnswers ? pulled : null),
+    });
+
+    const first = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(first.req, first.res);
+    assert.deepEqual(first.json().agents, pulled);
+
+    // A pull that misses its 1500ms budget answers null — the same value a dead
+    // relay answers. Substituting this process's own collector there yields a
+    // structurally identical frame with 0 requests / no lastSeen, which is what
+    // flashed the Qoder card empty on a healthy relay.
+    relayAnswers = false;
+    const second = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(second.req, second.res);
+    assert.equal(second.res.statusCode, 200);
+    assert.deepEqual(second.json().agents, pulled, "上一次真快照优先于本地盲帧");
+  });
+
   it("GET /panel/api/model-stability uses pulled relay snapshot when available", async () => {
     const pulled = { window: "8h", buckets: 48, models: [{ model: "glm-4.7", provider: "bigmodel", total: 12, successRate: 99, status: "green", cells: [] }] };
     const router = createPanelRouter({
