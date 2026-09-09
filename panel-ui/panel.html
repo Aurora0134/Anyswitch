@@ -866,13 +866,14 @@
     0%, 45% { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
   }
   /* Skills 视图：手动刷新的整列 cascade——点击瞬间整列隐去（is-blank），数据落地那次
-     渲染给首屏行按 --i 顺序挂动画：clip-path 自上而下揭开 + translateX 横向落位，
+     渲染给当前可见窗口的行按 --i 顺序挂动画：clip-path 自上而下揭开 + translateX 横向落位，
      两个维度同拍，读作「滑入并显形」而非单纯揭幕。位移取横向而非纵向——transform
-     不推挤布局，纵向位移会和相邻行拉出缝隙感。折叠区外的行不挂类：innerHTML
-     重建已把 scrollTop 归零，可视区恒为前 K 行，尾部行没人看见。
+     不推挤布局，纵向位移会和相邻行拉出缝隙感。cascade 已改为视口锚定（见
+     playSkillsListCascade）：只动画 scrollTop 对应的可见窗口 [i0,i1]、重渲后还原 scrollTop，
+     故翻到非最上刷新时波在用户视口里流、位置不丢；到顶时窗口即前 K 行，与旧行为一致。
      backwards 填充是必须的——延迟期间若走基样式，行会先全亮再逐个消失，动画反向。
      reduced-motion 下全局 animation:none 连填充一并失效，行直接以基样式呈现。
-     单行时长 180ms 与 JS 的 SKILLS_CASCADE_ROW_MS 同值（步长公式要用）；步长随首屏
+     单行时长 180ms 与 JS 的 SKILLS_CASCADE_ROW_MS 同值（步长公式要用）；步长随可见窗口
      行数变，由 playSkillsListCascade 写 --csc-step，这里只留兜底值。 */
   .skills-list.is-blank { visibility: hidden; }
   .skills-list-row.row-cascade {
@@ -8674,6 +8675,7 @@ if (window.panelStartupController) panelStartupPlay();
     // cascade / FLIP / 入场标记同样在提前 return 之前消费：空列表路径没有行可动画，
     // 但容器必须解除隐形、标记不能滞留到下一次无关渲染（过滤输入逐键会白播）。
     const cascade = skillsCascadePending; skillsCascadePending = false;
+    const prevScrollTop = cascade ? listEl.scrollTop : 0;
     const flipTops = skillsFlipTops; skillsFlipTops = null;
     const flipMs = skillsFlipMs; skillsFlipMs = 0;
     const revealKeys = skillsRevealKeys; skillsRevealKeys = null;
@@ -8728,7 +8730,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="skills-list-desc">${escapeHtml(s.description || "（无描述）")}</div>
       </div>`;
     }).join("");
-    if (cascade) playSkillsListCascade(listEl);
+    if (cascade) { listEl.scrollTop = prevScrollTop; playSkillsListCascade(listEl, prevScrollTop); }
     // 入场类先挂、FLIP 后跑：FLIP 每行都强制一次回流，顺序反了入场动画会晚一帧起跑
     if (revealKeys) {
       for (const row of listEl.children) {
@@ -8738,19 +8740,28 @@ if (window.panelStartupController) panelStartupPlay();
     if (flipTops) skillsListFlipFrom(flipTops, flipMs);
   }
 
-  // 首屏行数 K：行高均匀（名称行与描述行都是 nowrap + ellipsis，永不折行），
-  // 一次 clientHeight / 首行 offsetHeight 即可，不用逐行量。只给前 K 行挂动画类，
-  // 折叠区外的行以基样式直接在那儿——刷新后 scrollTop 归零，没人看得见它们。
-  // 步长由 K 反推，使「末行延迟 + 单行时长」正好等于总时长：K 大时步长自动收窄
-  // （高屏上退化成近似整体揭示），总时长不随仓库条数漂。首屏 10 行时步长 30ms
-  // ≈ 60Hz 下隔两帧起一行，单行 180ms 让约 6 行同时在飞，读作一道往下的波。
-  function playSkillsListCascade(listEl) {
+  // 视口锚定的整列 cascade：取当前可见窗口 [i0,i1] 而非恒为「前 K 行」，并在刷新后
+  // 还原 scrollTop（与 sessions 的 keepScroll 同源）。翻到非最上刷新时，波在用户当前
+  // 视口里自上而下流、位置不丢；到顶时 prevScrollTop=0、i0=0，与旧「前 K 行」逐字节等价。
+  // --i 重基为窗口内位次 (j-i0)：绝对行号会让中后段行的延迟溢出 450ms 预算；--i 走内联
+  // setProperty 覆盖模板里的绝对 --i。步长仍由窗口行数反推，使「末行延迟+单行时长≡总时长」
+  // 不变式继续成立，总时长不随仓库条数漂。行高均匀（名称/描述两行都 nowrap+ellipsis），
+  // 首行 offsetHeight 即代表全体，不用逐行量。
+  function playSkillsListCascade(listEl, prevScrollTop) {
     const rows = listEl.children;
     if (!rows.length) return;
-    const k = Math.min(rows.length, Math.ceil(listEl.clientHeight / (rows[0].offsetHeight || 1)) + 1);
+    prevScrollTop = prevScrollTop || 0;
+    const rowH = rows[0].offsetHeight || 1;
+    const i0 = Math.floor(prevScrollTop / rowH);
+    const i1 = Math.min(rows.length - 1, Math.ceil((prevScrollTop + listEl.clientHeight) / rowH));
+    const k = i1 - i0 + 1;
     const step = k > 1 ? (SKILLS_CASCADE_TOTAL_MS - SKILLS_CASCADE_ROW_MS) / (k - 1) : 0;
     listEl.style.setProperty("--csc-step", step.toFixed(1) + "ms");
-    for (let i = 0; i < k; i++) rows[i].classList.add("row-cascade");
+    for (let j = i0; j <= i1; j++) {
+      const row = rows[j];
+      if (row.style && row.style.setProperty) row.style.setProperty("--i", String(j - i0));
+      row.classList.add("row-cascade");
+    }
   }
 
   // ── 列表增删的位移反馈（FLIP 让位/吸合 + 单行入场/退场）──
@@ -9730,6 +9741,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 串行化刷新（与 skills 同模式）：刷新排进 promise 链依次执行，await 返回时
   // 那次刷新的 GET 一定在调用之后才发出；单次失败不断链。
   let presetsRefreshChain = Promise.resolve();
+  let presetsCascadePending = false;   // 仅点击刷新键那次渲染重播 cascade（与 skills 同源）
   function refreshPresetsState() {
     const p = presetsRefreshChain.then(doRefreshPresetsState);
     presetsRefreshChain = p.catch(() => {});
@@ -9755,6 +9767,26 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
+  // 预设刷新键的视觉反馈：与 skills 同源——按钮走 .btn:disabled 的 45% 变暗（亮着即「还没好」），
+  // 点击瞬间整列隐去（is-blank）、cascade 待播，持续到整列 cascade 收帧才亮起；等待串在刷新之后
+  // 而非与请求并行取最大值，否则亮起早于动画收尾一个请求耗时。请求失败时 doRefreshPresetsState
+  // 走 catch 不渲染，is-blank 与标记都在 finally 兜底（前者不清列表永久隐形、后者不清会下次白播）。
+  async function runPresetsRefreshWithFeedback() {
+    const btn = $("presetsRefreshBtn");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    $("presetsList").classList.add("is-blank");
+    presetsCascadePending = true;
+    try {
+      await refreshPresetsState();
+      await new Promise((r) => setTimeout(r, SKILLS_CASCADE_TOTAL_MS));
+    } finally {
+      presetsCascadePending = false;
+      $("presetsList").classList.remove("is-blank");
+      btn.disabled = false;
+    }
+  }
+
   // reconcile（每次刷新后）：选中项已消失则回落首项（无条目则清空）
   function reconcilePresetsSelection() {
     if (presetsSelection === null) return;
@@ -9767,7 +9799,7 @@ if (window.panelStartupController) panelStartupPlay();
   function initPresetsTab() {
     $("tabPresets").onclick = () => switchView("presets");
     $("presetsAddBtn").onclick = () => showPresetFormModal(null);
-    $("presetsRefreshBtn").onclick = refreshPresetsState;
+    $("presetsRefreshBtn").onclick = runPresetsRefreshWithFeedback;
     $("presetsFilterInput").oninput = (e) => {
       presetsFilter = e.target.value.trim().toLowerCase();
       renderPresetsList();
@@ -9891,6 +9923,12 @@ if (window.panelStartupController) panelStartupPlay();
     const listEl = $("presetsList");
     const presets = (presetsState && presetsState.presets) || [];
     paintCtxMeter(presets);
+    // 消费 cascade 标记（与 skills 同源）：仅刷新那次渲染重播，提前 return 的空列表也消费，
+    // 否则标记滞留到下一次无关渲染（过滤输入逐键会白播）。cascade 时先抓 scrollTop，重渲后
+    // 还原——翻到非最上刷新不丢位置（sessions 的 keepScroll 同思路）。
+    const cascade = presetsCascadePending; presetsCascadePending = false;
+    const prevScrollTop = cascade ? listEl.scrollTop : 0;
+    listEl.classList.remove("is-blank");
     if (!presets.length) {
       listEl.innerHTML = '<div class="empty-hint">还没有预设，点「新增预设」创建</div>';
       return;
@@ -9901,7 +9939,7 @@ if (window.panelStartupController) panelStartupPlay();
       return;
     }
     const epTotal = ((presetsState && presetsState.endpoints) || []).length;
-    listEl.innerHTML = filtered.map((p) => {
+    listEl.innerHTML = filtered.map((p, i) => {
       const n = epTotal
         ? ((presetsState.endpoints || []).filter((ep) => presetCountedOn(p, ep.id))).length
         : 0;
@@ -9912,8 +9950,9 @@ if (window.panelStartupController) panelStartupPlay();
       const lenBadge = `<span class="badge ctx-preset-badge ${presetBadgeClass(chars)}" title="正文 ${chars} 字">${formatCharsCompact(chars)}</span>`;
       const tagBadge = p.tag ? `<span class="badge badge-neutral">${escapeHtml(p.tag)}</span>` : "";
       const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
-      // 未启用的预设行整体压暗（内联透明度，不新增类）
-      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}"${p.enabled ? "" : ' style="opacity:0.55;"'} data-preset="${escapeHtml(p.id)}">
+      // 未启用的预设行整体压暗（内联透明度）；--i 供 cascade 交错（窗口内重基见 playSkillsListCascade）
+      const rowStyle = (p.enabled ? "" : "opacity:0.55;") + "--i:" + i;
+      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}" style="${rowStyle}" data-preset="${escapeHtml(p.id)}">
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.title)}</span>${tagBadge}
           <span class="skills-ep-dots">${lenBadge}${epCount}</span>
@@ -9921,6 +9960,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="skills-list-desc">${escapeHtml(firstLine)}</div>
       </div>`;
     }).join("");
+    if (cascade) { listEl.scrollTop = prevScrollTop; playSkillsListCascade(listEl, prevScrollTop); }
   }
 
   // ── 卡片 A：全局设置（总开关） ──
