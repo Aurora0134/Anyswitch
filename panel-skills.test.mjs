@@ -507,7 +507,7 @@ describe("panel.html skills change diff highlighting", () => {
     // cascade 那次渲染不挂行级高亮：同元素同特异性的 animation 简写整条互相覆盖，会吃掉一个
     assert.match(renderList, /const flashCls = cascade\s*\?\s*""/);
     assert.match(renderList, /style="--i:\$\{i\}"/);
-    assert.match(renderList, /if \(cascade\) playSkillsListCascade\(listEl\);/);
+    assert.match(renderList, /listEl\.scrollTop = prevScrollTop;[\s\S]*?playSkillsListCascade\(listEl, prevScrollTop\)/);
     // 入场类先挂、FLIP 后跑：FLIP 每行强制一次回流，反了入场动画会晚一帧起跑
     assert.ok(
       renderList.indexOf('classList.add("row-reveal")') < renderList.indexOf("skillsListFlipFrom(flipTops, flipMs)"),
@@ -529,7 +529,7 @@ describe("panel.html skills change diff highlighting", () => {
     const h = new Function(`
       ${totalSrc[0]}
       ${rowSrc[0]}
-      ${extractFn("playSkillsListCascade", "listEl")}
+      ${extractFn("playSkillsListCascade", "listEl, prevScrollTop")}
       return { playSkillsListCascade, total: SKILLS_CASCADE_TOTAL_MS, row: SKILLS_CASCADE_ROW_MS };
     `)();
     assert.equal(h.total, 450);
@@ -568,6 +568,77 @@ describe("panel.html skills change diff highlighting", () => {
     const empty = fakeList(0, 495);
     h.playSkillsListCascade(empty);
     assert.deepEqual(empty.style.props, {});
+  });
+
+  it("cascade anchors to the visible window and keeps --i window-local when scrolled off-top", () => {
+    const totalSrc = panelHtml.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
+    const rowSrc = panelHtml.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
+    const h = new Function(`
+      ${totalSrc[0]}
+      ${rowSrc[0]}
+      ${extractFn("playSkillsListCascade", "listEl, prevScrollTop")}
+      return { playSkillsListCascade, total: SKILLS_CASCADE_TOTAL_MS, row: SKILLS_CASCADE_ROW_MS };
+    `)();
+    // 行高均匀；每行带 .style（含 setProperty）以承载 --i 内联重基
+    function winList(rowCount, clientHeight, prevScrollTop, rowHeight = 53) {
+      const children = Array.from({ length: rowCount }, () => {
+        const cls = new Set();
+        const style = {};
+        return {
+          offsetHeight: rowHeight,
+          classList: { add: (c) => cls.add(c), has: (c) => cls.has(c) },
+          style: { props: style, setProperty(k, v) { style[k] = v; } },
+        };
+      });
+      const props = {};
+      return { children, clientHeight, style: { props, setProperty(k, v) { props[k] = v; } } };
+    }
+    const animated = (list) => list.children.filter((r) => r.classList.has("row-cascade"));
+    const idxOf = (list) => animated(list).map((r) => Number(r.style.props["--i"])).sort((a, b) => a - b);
+
+    // 40 行、视口 495、行高 53、scrollTop=1060 → 可见窗口 ≈ 第 20..30 行（含半行余量共 11 行）
+    const mid = winList(40, 495, 1060);
+    h.playSkillsListCascade(mid, 1060);
+    const anim = animated(mid);
+    assert.equal(anim.length, 11);
+    // --i 重基为窗口内位次，从 0 起，绝无绝对行号泄漏（否则中后段行延迟会溢出 450ms 预算）
+    assert.deepEqual(idxOf(mid), Array.from({ length: 11 }, (_, n) => n));
+    // 步长仍由窗口行数反推：末行延迟 + 单行时长 ≡ 总时长
+    const step = parseFloat(mid.style.props["--csc-step"]);
+    assert.equal((anim.length - 1) * step + h.row, h.total);
+
+    // 到顶时窗口即前 K 行，与旧行为逐字节等价（回归保护）
+    const top = winList(40, 495, 0);
+    h.playSkillsListCascade(top, 0);
+    assert.equal(animated(top).length, 11);
+    assert.deepEqual(idxOf(top), Array.from({ length: 11 }, (_, n) => n));
+  });
+
+  it("presets refresh button routes through the same feedback path as skills", () => {
+    const init = extractFn("initPresetsTab", "");
+    assert.match(init, /\$\("presetsRefreshBtn"\)\.onclick = runPresetsRefreshWithFeedback;/);
+  });
+
+  it("runPresetsRefreshWithFeedback dims the button, hides the list, and always restores", () => {
+    const fn = extractFn("runPresetsRefreshWithFeedback", "");
+    // 串行而非 Promise.all 取最大值：cascade 在数据落地那次渲染才起跑
+    assert.doesNotMatch(fn, /Promise\.all/);
+    assert.match(fn, /await refreshPresetsState\(\);\s*await new Promise\(\(r\) => setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)\)/);
+    assert.match(fn, /\$\("presetsList"\)\.classList\.add\("is-blank"\)/);
+    assert.match(fn, /presetsCascadePending = true/);
+    assert.match(
+      fn,
+      /finally \{[\s\S]*?presetsCascadePending = false;[\s\S]*?\$\("presetsList"\)\.classList\.remove\("is-blank"\);[\s\S]*?btn\.disabled = false;/
+    );
+  });
+
+  it("renderPresetsList consumes the cascade mark, emits --i, and restores scroll on cascade", () => {
+    const renderList = extractFn("renderPresetsList", "");
+    assert.ok(renderList.indexOf("presetsCascadePending = false") > 0, "renderPresetsList must consume the cascade mark");
+    assert.ok(renderList.indexOf('classList.remove("is-blank")') > 0);
+    assert.match(renderList, /const rowStyle = /);
+    assert.match(renderList, /style="\$\{rowStyle\}"/);
+    assert.match(renderList, /listEl\.scrollTop = prevScrollTop;[\s\S]*?playSkillsListCascade\(listEl, prevScrollTop\)/);
   });
 
   it("import lands the new row in view: FLIP yields, reveal enters, row gets selected", () => {
