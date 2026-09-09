@@ -851,17 +851,33 @@ export function createPanelRouter({
     sendJson(res, 200, { ok: true, endpoints: {} });
   }
 
+  // Last authoritative relay snapshot: { at, agents }. A failed pull means
+  // either "relay unreachable" or "relay answered slower than the 1500ms pull
+  // budget" — and only the first used to justify the local collector, which owns
+  // no traffic at all. Serving it on a timeout produced a structurally identical
+  // blind frame (running, but 0 requests / no lastSeen / no sparkHistory) and the
+  // board flashed "no data" for a beat. Bounded staleness beats a false zero.
+  const PULLED_AGENTS_STALE_MAX_MS = 5000;
+  let lastPulledAgents = null;
+
   async function handleAgents(res) {
     // PULL mode: when the panel runs as a separate process (panel-host, 47820),
     // the authoritative live metrics live INSIDE the relay process (47821). So
     // first try to fetch them cross-process via the relay's internal telemetry
-    // endpoint. If the relay is stopped/starting/unreachable, fall back to this
-    // process's own collector — which keeps the UI from erroring and lets it
-    // recover the instant the relay is back up.
+    // endpoint. On failure, serve the last pull while it is still young, and only
+    // then fall back to this process's own collector — which keeps the UI from
+    // erroring when the relay really is stopped and lets it recover the instant
+    // the relay is back. (A relay restart zeroes the relay's counters; the cache
+    // can then show a few seconds of pre-restart numbers, and the next successful
+    // pull overwrites it.)
     const token = relayPullToken();
     const pulled = await fetchRelayAgents(relayRoot, token);
     if (pulled) {
+      lastPulledAgents = { at: Date.now(), agents: pulled };
       return sendJson(res, 200, { ok: true, agents: pulled });
+    }
+    if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+      return sendJson(res, 200, { ok: true, agents: lastPulledAgents.agents });
     }
     if (!metricsCollector) {
       sendJson(res, 200, { ok: true, agents: [] });
