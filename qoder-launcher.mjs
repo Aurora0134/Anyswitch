@@ -103,16 +103,39 @@ export function buildQoderLauncherEnv({ token, base = {} }) {
 export async function runQoderLauncher({
   startRelay,
   spawnQoder,
+  // writeConfig / loadStore / loadToken / refreshCatalog are the only doors this
+  // function has to the user's machine (settings.json, the shared relay token
+  // file, Qoder's CDP port). They deliberately have no defaults: main() wires
+  // the real implementations and a test that forgets one crashes instead of
+  // silently writing through to the live paths.
+  writeConfig,
+  loadStore: loadStoreFn,
+  loadToken,
+  refreshCatalog,
   log = () => {},
   base = process.env,
   qoderArgs = [],
   probeRelay: probeRelayFn = async () => false,
 }) {
+  // Asserted up front because every call below sits inside a best-effort catch
+  // that would otherwise swallow a missing injection as a warning and still
+  // spawn Qoder.
+  for (const [name, dep] of Object.entries({
+    writeConfig,
+    loadStore: loadStoreFn,
+    loadToken,
+    refreshCatalog,
+  })) {
+    if (typeof dep !== "function") {
+      throw new TypeError(`runQoderLauncher requires ${name} to be a function`);
+    }
+  }
+
   let relay;
   try {
     const reused = await probeRelayFn(RELAY_PORT);
     if (reused) {
-      const token = loadOrGenerateToken(relayDataRoot(base));
+      const token = loadToken(relayDataRoot(base));
       relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
       log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
     } else {
@@ -128,11 +151,11 @@ export async function runQoderLauncher({
     // customModels array reflects the current store. Errors are logged but
     // never block the launch — Qoder can still start with stale or no BYOK.
     try {
-      const loaded = loadStore();
+      const loaded = loadStoreFn();
       if (loaded.ok) {
         const sidecarRoot = relayDataRoot(base);
         const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
-        const writeResult = writeQoderConfig(loaded.store, relay.port, relay.token, sidecarRoot, settingsPath);
+        const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot, settingsPath);
         if (!writeResult.ok) {
           log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
         } else if (!writeResult.unchanged) {
@@ -150,7 +173,7 @@ export async function runQoderLauncher({
       // Best-effort model-catalog warm-up: Qoder 0.2.x cold-start can render the
       // composer with an empty model list (a cache-strategy race), leaving the
       // model button disabled. Nudge the store to reload once the renderer is up.
-      refreshQoderModelCatalog({ port: QODER_CDP_PORT, log }).catch((error) => {
+      refreshCatalog({ port: QODER_CDP_PORT, log }).catch((error) => {
         log(`qoder model catalog warm-up failed: ${error.message}`);
       });
     } });
@@ -194,6 +217,11 @@ export function realSpawnQoder({ env, args, onSpawned }) {
 export async function main(argv = process.argv.slice(2)) {
   const code = await runQoderLauncher({
     startRelay: () => startOpenAIRelay(),
+    writeConfig: (store, port, token, sidecarRoot, settingsPath) =>
+      writeQoderConfig(store, port, token, sidecarRoot, settingsPath),
+    loadStore,
+    loadToken: (root) => loadOrGenerateToken(root),
+    refreshCatalog: (options) => refreshQoderModelCatalog(options),
     spawnQoder: realSpawnQoder,
     log: (line) => process.stderr.write(`${line}\n`),
     qoderArgs: argv,
