@@ -1121,6 +1121,19 @@ describe("panel.html sessions tab", () => {
     }
   });
 
+  it("会话视图布局规则存活：注释正文不含裸 */，页头与内容靠 gap 拉开", () => {
+    const css = panelHtml.match(/<style>([\s\S]*?)<\/style>/)[1];
+    // 注释里出现 */ 会提前结束注释，浏览器随后把中文说明当选择器前奏，
+    // 并把紧随其后的第一条真规则整条当作它的声明块丢弃（.sessions-view 曾这样消失）。
+    const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.ok(!stripped.includes("*/"), "主 <style> 注释正文含裸 */，会吞掉紧随的规则");
+    assert.ok(/\.sessions-view \{[^}]*gap: 16px/.test(stripped), ".sessions-view 的 gap 规则未被吞");
+    assert.ok(/\.sessions-err-host:empty \{[^}]*display: none/.test(stripped),
+      "无错误横幅时挂载点不占 flex gap，页头间距不翻倍");
+    assert.ok(panelHtml.includes('<div class="sessions-err-host" id="sessErrHost">'),
+      "sessErrHost 带 sessions-err-host 类");
+  });
+
   it("extends switchView with the sessions branch and keeps aria-selected in sync", () => {
     const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "switchView found");
