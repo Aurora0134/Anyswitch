@@ -873,11 +873,11 @@
      故翻到非最上刷新时波在用户视口里流、位置不丢；到顶时窗口即前 K 行，与旧行为一致。
      backwards 填充是必须的——延迟期间若走基样式，行会先全亮再逐个消失，动画反向。
      reduced-motion 下全局 animation:none 连填充一并失效，行直接以基样式呈现。
-     单行时长 180ms 与 JS 的 SKILLS_CASCADE_ROW_MS 同值（步长公式要用）；步长随可见窗口
+     单行时长 150ms 与 JS 的 SKILLS_CASCADE_ROW_MS 同值（步长公式要用）；步长随可见窗口
      行数变，由 playSkillsListCascade 写 --csc-step，这里只留兜底值。 */
   .skills-list.is-blank { visibility: hidden; }
   .skills-list-row.row-cascade {
-    animation: skillsRowEnter 180ms var(--ease-out) backwards;
+    animation: skillsRowEnter 150ms var(--ease-out) backwards;
     animation-delay: calc(var(--i) * var(--csc-step, 30ms));
   }
   /* Skills 视图：导入落位——新行走同一支入场 keyframes，放慢到 600ms 让插入看得清；
@@ -8449,9 +8449,9 @@ if (window.panelStartupController) panelStartupPlay();
   // 手动刷新的视觉反馈：按钮走 .btn:disabled 的 45% 变暗（与看板「重启」键同源，
   // 暗着即「还没好」），持续到整列 cascade 播完才亮起。等待串在刷新之后而不是与请求
   // 并行取最大值：cascade 只能在数据落地那次渲染起跑，从点击起算会让亮起早于动画收尾
-  // 一个请求耗时。请求慢于 450ms 时总暗时长就是「请求 + cascade」，语义仍然对。
-  const SKILLS_CASCADE_TOTAL_MS = 450;
-  const SKILLS_CASCADE_ROW_MS = 180; // 与 CSS .row-cascade 的单行时长同值，步长公式要用
+  // 一个请求耗时。请求慢于 320ms 时总暗时长就是「请求 + cascade」，语义仍然对。
+  const SKILLS_CASCADE_TOTAL_MS = 320;
+  const SKILLS_CASCADE_ROW_MS = 150; // 与 CSS .row-cascade 的单行时长同值，步长公式要用
   let skillsCascadePending = false;
 
   async function runSkillsRefreshWithFeedback() {

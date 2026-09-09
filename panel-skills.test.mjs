@@ -515,11 +515,11 @@ describe("panel.html skills change diff highlighting", () => {
     );
   });
 
-  it("cascade animates only the rows in view and pins the total to 450ms", () => {
+  it("cascade animates only the rows in view and pins the total to 320ms", () => {
     // CSS 侧契约：backwards 填充（延迟期间锁 0% 帧，否则行会先全亮再逐个消失）
     // + clip-path 自上而下揭开 + translateX 横向落位 + 步长走 --csc-step
     assert.match(panelHtml, /\.skills-list\.is-blank \{ visibility: hidden; \}/);
-    assert.match(panelHtml, /animation: skillsRowEnter 180ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
+    assert.match(panelHtml, /animation: skillsRowEnter 150ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
     assert.match(panelHtml, /@keyframes skillsRowEnter \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
     assert.doesNotMatch(panelHtml, /skillsRowCascade/);
 
@@ -532,8 +532,8 @@ describe("panel.html skills change diff highlighting", () => {
       ${extractFn("playSkillsListCascade", "listEl, prevScrollTop")}
       return { playSkillsListCascade, total: SKILLS_CASCADE_TOTAL_MS, row: SKILLS_CASCADE_ROW_MS };
     `)();
-    assert.equal(h.total, 450);
-    assert.equal(h.row, 180);
+    assert.equal(h.total, 320);
+    assert.equal(h.row, 150);
 
     // 行高均匀（名称/描述两行都是 nowrap+ellipsis），首行 offsetHeight 即代表全体
     function fakeList(rowCount, clientHeight, rowHeight = 53) {
@@ -551,11 +551,11 @@ describe("panel.html skills change diff highlighting", () => {
     const long = fakeList(40, 495);
     h.playSkillsListCascade(long);
     assert.equal(animated(long), 11);
-    assert.equal(stepOf(long), 27);
+    assert.equal(stepOf(long), 17);
     // 末行延迟 + 单行时长 == 总时长：总时长不随仓库条数漂
     assert.equal((animated(long) - 1) * stepOf(long) + h.row, h.total);
 
-    // 短仓库：3 条全部参与，步长自动拉开，总时长仍 450ms
+    // 短仓库：3 条全部参与，步长自动拉开，总时长仍 320ms
     const short = fakeList(3, 495);
     h.playSkillsListCascade(short);
     assert.equal(animated(short), 3);
@@ -601,7 +601,7 @@ describe("panel.html skills change diff highlighting", () => {
     h.playSkillsListCascade(mid, 1060);
     const anim = animated(mid);
     assert.equal(anim.length, 11);
-    // --i 重基为窗口内位次，从 0 起，绝无绝对行号泄漏（否则中后段行延迟会溢出 450ms 预算）
+    // --i 重基为窗口内位次，从 0 起，绝无绝对行号泄漏（否则中后段行延迟会溢出 320ms 预算）
     assert.deepEqual(idxOf(mid), Array.from({ length: 11 }, (_, n) => n));
     // 步长仍由窗口行数反推：末行延迟 + 单行时长 ≡ 总时长
     const step = parseFloat(mid.style.props["--csc-step"]);
