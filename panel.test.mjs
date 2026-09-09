@@ -2482,6 +2482,22 @@ describe("panel.html 预设管理 tab", () => {
     }
   });
 
+  it("全局设置（总开关）卡挂在预设视图左列首张，不漂回看板左栏", () => {
+    const iView = panelHtml.indexOf('id="presetsView"');
+    const iToggle = panelHtml.indexOf('id="presetsMasterToggle"');
+    assert.ok(iView > 0 && iToggle > iView, "总开关在预设管理视图内（看板 section 之后）");
+    const firstCol = panelHtml.indexOf('<div class="skills-col">', iView + 1);
+    const secondCol = panelHtml.indexOf('<div class="skills-col">', firstCol + 1);
+    const leftCol = panelHtml.slice(firstCol, secondCol);
+    assert.ok(leftCol.includes('id="presetsMasterToggle"'), "总开关位于左列（第一个 skills-col）");
+    const iGlobal = leftCol.indexOf("全局设置");
+    const iList = leftCol.indexOf("预设列表");
+    assert.ok(iGlobal > -1 && iList > -1 && iGlobal < iList,
+      "左列首张是全局设置，其下才是预设列表");
+    const board = panelHtml.slice(panelHtml.indexOf('<section class="telemetry-view">'), iView);
+    assert.ok(!board.includes("启用预设注入"), "看板视图不携带预设总开关");
+  });
+
   it("extends switchView / restoreView / init for the presets view without regressing others", () => {
     const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "switchView found");
