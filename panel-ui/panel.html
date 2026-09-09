@@ -13823,7 +13823,7 @@ if (window.panelStartupController) panelStartupPlay();
   async function refreshSessionsList() {
     const seq = ++sessListReqSeq;
     sessState.loading = true;
-    renderSessList();
+    renderSessList({ keepScroll: true });
     try {
       const res = await api("GET", "/api/sessions/list");
       if (seq !== sessListReqSeq) return; // 已有更新请求在飞，丢弃旧响应
@@ -13842,7 +13842,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (seq === sessListReqSeq) sessState.loading = false;
     }
     renderSessErrBanner();
-    renderSessList();
+    renderSessList({ keepScroll: true });
     renderSessDetail();
     updateSessBatchBar();
   }
@@ -13875,16 +13875,18 @@ if (window.panelStartupController) panelStartupPlay();
   /* ============================================================
      左栏渲染
      ============================================================ */
-  function renderSessList() {
+  function renderSessList({ keepScroll = false } = {}) {
     const scrollEl = $("sessScroll");
     if (!scrollEl) return;
     const list = sessFiltered();
     $("sessListCount").textContent = list.length;
     $("sessTotalBadge").textContent = sessState.sessions.length + " 个会话";
     scrollEl.classList.toggle("deleting", sessState.deleting);
+    const prevScrollTop = keepScroll ? scrollEl.scrollTop : 0;
 
-    // 加载态骨架屏
-    if (sessState.loading) {
+    // 加载态骨架屏只在冷启动演：切走再切回时 sessions 里还留着上一次的数据，
+    // 整树换成骨架屏会把「静默重取」显形成为重载。
+    if (sessState.loading && sessState.sessions.length === 0) {
       scrollEl.innerHTML = Array.from({ length: 6 }, () =>
         `<div style="padding:10px 12px;"><div class="sessions-skel" style="height:14px;width:75%;margin-bottom:6px;"></div><div class="sessions-skel" style="height:11px;width:45%;"></div></div>`
       ).join("");
@@ -13901,6 +13903,7 @@ if (window.panelStartupController) panelStartupPlay();
     }
 
     scrollEl.innerHTML = sessState.view === "group" ? renderSessGrouped(list) : renderSessFlat(list);
+    if (keepScroll) scrollEl.scrollTop = prevScrollTop;
     bindSessListEvents();
   }
 
