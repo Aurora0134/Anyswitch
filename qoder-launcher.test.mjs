@@ -121,39 +121,54 @@ test("runQoderLauncher starts a per-launch relay when the resident one is down",
   let relayClosed = false;
   let capturedToken = null;
 
-  const code = await runQoderLauncher({
-    startRelay: async () => {
-      relayStarted = true;
-      return { port: 47821, token: "per-launch-token", close: async () => { relayClosed = true; } };
-    },
-    spawnQoder: async ({ env }) => {
-      capturedToken = env.ANYSWITCH_RELAY_TOKEN;
-      return 7;
-    },
-    log: () => {},
-    probeRelay: async () => false,
-  });
+  // runQoderLauncher 的 sync 步骤直连真实 writeQoderConfig：不沙箱化 base 时
+  // 它会把本用例的假 token 写进真实 ~/.qoder/settings.json（2026-09-09 曾把用户
+  // Qoder 端点的 apiKey 覆盖成 "per-launch-token"，面板上表现为自定义模型认证失败）。
+  const sandboxRoot = mkdtempSync(join(tmpdir(), "qoder-relay-"));
+  try {
+    const code = await runQoderLauncher({
+      startRelay: async () => {
+        relayStarted = true;
+        return { port: 47821, token: "per-launch-token", close: async () => { relayClosed = true; } };
+      },
+      spawnQoder: async ({ env }) => {
+        capturedToken = env.ANYSWITCH_RELAY_TOKEN;
+        return 7;
+      },
+      log: () => {},
+      base: { LOCALAPPDATA: sandboxRoot, USERPROFILE: sandboxRoot },
+      probeRelay: async () => false,
+    });
 
-  assert.equal(code, 7);
-  assert.equal(relayStarted, true);
-  assert.equal(capturedToken, "per-launch-token");
-  assert.equal(relayClosed, true, "the per-launch relay dies with the client");
+    assert.equal(code, 7);
+    assert.equal(relayStarted, true);
+    assert.equal(capturedToken, "per-launch-token");
+    assert.equal(relayClosed, true, "the per-launch relay dies with the client");
+  } finally {
+    rmSync(sandboxRoot, { recursive: true, force: true });
+  }
 });
 
 test("runQoderLauncher tears the relay down even when spawn fails", async () => {
   let relayClosed = false;
-  await assert.rejects(
-    () =>
-      runQoderLauncher({
-        startRelay: async () => ({ port: 47821, token: "tok", close: async () => { relayClosed = true; } }),
-        spawnQoder: async () => {
-          throw new Error("spawn failed");
-        },
-        log: () => {},
-        probeRelay: async () => false,
-      }),
-    /spawn failed/,
-  );
+  const sandboxRoot = mkdtempSync(join(tmpdir(), "qoder-relay-"));
+  try {
+    await assert.rejects(
+      () =>
+        runQoderLauncher({
+          startRelay: async () => ({ port: 47821, token: "tok", close: async () => { relayClosed = true; } }),
+          spawnQoder: async () => {
+            throw new Error("spawn failed");
+          },
+          log: () => {},
+          base: { LOCALAPPDATA: sandboxRoot, USERPROFILE: sandboxRoot },
+          probeRelay: async () => false,
+        }),
+      /spawn failed/,
+    );
+  } finally {
+    rmSync(sandboxRoot, { recursive: true, force: true });
+  }
   assert.equal(relayClosed, true);
 });
 
@@ -161,17 +176,24 @@ test("runQoderLauncher onSpawned fires without blocking the launch", async () =>
   // The launcher awaits spawnQoder (i.e. Qoder's exit code), so an onSpawned
   // hook that never settles must not stall the launch — and a throwing hook
   // must not fail it either (realSpawnQoder swallows hook errors).
-  const code = await runQoderLauncher({
-    startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
-    spawnQoder: async ({ onSpawned }) => {
-      assert.equal(typeof onSpawned, "function");
-      onSpawned(); // fires the CDP warm-up; launched detached, never awaited
-      onSpawned();
-      return 0;
-    },
-    log: () => {},
-    probeRelay: async () => false,
-  });
+  const sandboxRoot = mkdtempSync(join(tmpdir(), "qoder-relay-"));
+  let code;
+  try {
+    code = await runQoderLauncher({
+      startRelay: async () => ({ port: 47821, token: "tok", close: async () => {} }),
+      spawnQoder: async ({ onSpawned }) => {
+        assert.equal(typeof onSpawned, "function");
+        onSpawned(); // fires the CDP warm-up; launched detached, never awaited
+        onSpawned();
+        return 0;
+      },
+      log: () => {},
+      base: { LOCALAPPDATA: sandboxRoot, USERPROFILE: sandboxRoot },
+      probeRelay: async () => false,
+    });
+  } finally {
+    rmSync(sandboxRoot, { recursive: true, force: true });
+  }
   assert.equal(code, 0);
 });
 
