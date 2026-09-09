@@ -1469,7 +1469,7 @@
 
   /* ═══════════════════════════════════════════════
      会话管理视图（sessions- 前缀为布局/容器作用域类；
-     .sess-*/.msg-*/.toc-* 为原型特有组件类，与全站零冲突原样保留；
+     sess / msg / toc 三族为原型特有组件类，与全站零冲突原样保留；
      .btn/.badge/.icon-btn/.seg-control/.modal-overlay 复用全站现有样式）
      ═══════════════════════════════════════════════ */
   .sessions-view { display: flex; flex-direction: column; gap: 16px; }
@@ -1477,7 +1477,9 @@
   .sessions-pagehead { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .sessions-pagehead-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 10px; }
   .sessions-pagehead-actions { display: flex; align-items: center; gap: 8px; }
-  /* 端点错误横幅（琥珀色，点名端点；可关闭但下次进视图仍再现） */
+  /* 端点错误横幅挂载点：无横幅时不占 flex gap，避免页头与内容间距翻倍 */
+  .sessions-err-host:empty { display: none; }
+  /* 端点错误横幅（琥珀色，点名端点；可关闭，下次进视图仍再现） */
   .sessions-err-banner { display: flex; align-items: center; gap: 10px; background: var(--warn-soft); border: 1px solid var(--warn-border); border-radius: var(--radius-md, 8px); color: var(--warn); font-size: 12.5px; padding: 9px 14px; }
   .sessions-err-banner .eb-close { margin-left: auto; border: none; background: none; color: var(--warn); cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: var(--radius-sm, 6px); }
   .sessions-err-banner .eb-close:hover { background: var(--warn-border); }
@@ -5475,7 +5477,7 @@ if (window.panelStartupController) panelStartupPlay();
     </div>
 
     <!-- 端点错误横幅（逐条列出异常端点；可关闭，下次进视图仍再现） -->
-    <div id="sessErrHost"></div>
+    <div class="sessions-err-host" id="sessErrHost"></div>
 
     <div class="sessions-master-detail">
 
