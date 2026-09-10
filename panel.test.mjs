@@ -2785,3 +2785,87 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(restore.includes('localStorage.getItem("panel-view")'), "刷新与普通访问仍按 panel-view 恢复");
   });
 });
+
+describe("panel.html 渠道刷新「展示diff」弹窗", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("声明弹窗 DOM 与「展示diff」小字结构", () => {
+    for (const id of [
+      "storeDiffMask",
+      "storeDiffCloseBtn",
+      "storeDiffFails",
+      "storeDiffAddedTitle",
+      "storeDiffAddedBody",
+      "storeDiffPrunedTitle",
+      "storeDiffPrunedBody",
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+    assert.ok(panelHtml.includes("diff-modal-overlay"), "弹窗挂宽幅类");
+    assert.ok(panelHtml.includes("srs-diff-link"), "状态小字含 diff 小字类");
+    assert.ok(panelHtml.includes("展示diff"), "小字文案在线");
+  });
+
+  it("storeRefresh 累积本轮 diff 快照（含池合并与失败原因）", () => {
+    const fnStart = panelHtml.indexOf("async function storeRefresh(");
+    assert.ok(fnStart >= 0, "storeRefresh 定义存在");
+    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    assert.ok(fn.length > 500, "storeRefresh 体必须真的被抓取到");
+    assert.ok(fn.includes("refreshDiffUnits = []"), "每轮开始清空快照");
+    assert.ok(fn.includes("refreshDiffUnits.push({"), "每单元刷完累积快照");
+    assert.ok(fn.includes("uAddedIds.push(...(rep.added || []))"), "收集新增模型 id 数组");
+    assert.ok(fn.includes("uPrunedIds.push(...(rep.pruned || []))"), "收集移除模型 id 数组");
+    assert.ok(fn.includes("if (!uErr) uErr = rep.reason"), "失败原因回填（report failed 路径）");
+    assert.ok(fn.includes("failed: uFail > 0"), "快照记录失败标记");
+  });
+
+  it("「展示diff」小字仅完成态且确有增减/失败时挂出", () => {
+    const fnStart = panelHtml.indexOf("async function storeRefresh(");
+    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    assert.ok(fn.includes('const hasDiff = refreshDiffUnits.some('), "计算本轮是否有 diff");
+    assert.ok(fn.includes('setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff)'),
+      "done 路径把 hasDiff 传给状态小字");
+    // setStoreRefreshStatus 第四参数控制 diff 小字显隐
+    const setStart = panelHtml.indexOf("function setStoreRefreshStatus(");
+    const set = panelHtml.slice(setStart, panelHtml.indexOf("// 10s 淡出计时", setStart));
+    assert.ok(set.includes("showDiff"), "setStoreRefreshStatus 接收 showDiff 参数");
+    assert.ok(set.includes("diff.hidden = !showDiff"), "按 showDiff 切换小字显隐");
+  });
+
+  it("弹窗打开期间暂停状态小字淡出计时，关闭时重新武装", () => {
+    assert.ok(panelHtml.includes("function armStoreStatusTimer()"), "计时武装函数存在");
+    assert.ok(panelHtml.includes("function disarmStoreStatusTimer()"), "计时暂停函数存在");
+    const openStart = panelHtml.indexOf("function openStoreDiffModal()");
+    const open = panelHtml.slice(openStart, panelHtml.indexOf("function closeStoreDiffModal()", openStart));
+    assert.ok(open.includes("disarmStoreStatusTimer()"), "打开弹窗暂停计时");
+    const closeStart = panelHtml.indexOf("function closeStoreDiffModal()");
+    const close = panelHtml.slice(closeStart, panelHtml.indexOf("// 刷新：全部刷新", closeStart));
+    assert.ok(close.includes('classList.contains("show")'), "关闭时判状态小字仍可见");
+    assert.ok(close.includes("armStoreStatusTimer()"), "关闭时重新武装 10s");
+  });
+
+  it("弹窗按单元分组渲染左右分栏，失败渠道单列一区", () => {
+    const grpStart = panelHtml.indexOf("function storeDiffGroupHtml(");
+    const grp = panelHtml.slice(grpStart, panelHtml.indexOf("function openStoreDiffModal()", grpStart));
+    assert.ok(grp.includes("diff-modal-group-title"), "组标题渲染渠道/池名");
+    assert.ok(grp.includes("diff-modal-row"), "每行一个模型 id");
+    assert.ok(grp.includes("diff-modal-empty"), "空态兜底");
+    const openStart = panelHtml.indexOf("function openStoreDiffModal()");
+    const open = panelHtml.slice(openStart, panelHtml.indexOf("function closeStoreDiffModal()", openStart));
+    assert.ok(open.includes('refreshDiffUnits.filter((u) => u.failed)'), "失败单元单列");
+    assert.ok(open.includes("storeDiffFails"), "失败区挂载点");
+    assert.ok(open.includes('storeDiffGroupHtml(refreshDiffUnits, "added", "diff-added")'), "左栏新增绿底");
+    assert.ok(open.includes('storeDiffGroupHtml(refreshDiffUnits, "pruned", "diff-pruned")'), "右栏移除红底");
+  });
+
+  it("弹窗关闭走关闭钮/遮罩/Esc 三路（与会话删除确认同模式）", () => {
+    assert.ok(panelHtml.includes('$("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal)'),
+      "关闭钮接线");
+    assert.ok(panelHtml.includes('e.target === $("storeDiffMask")'), "遮罩点击关闭");
+    assert.ok(panelHtml.includes('$("storeDiffMask").classList.contains("show")) closeStoreDiffModal()'),
+      "Esc 关闭（判 show 态）");
+  });
+});
