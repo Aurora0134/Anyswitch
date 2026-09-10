@@ -273,7 +273,23 @@ test("kimi: scans session_index.jsonl and titles from wire.jsonl prompt.accepted
         content: [{ type: "text", text: "修复登录页样式" }],
         time: 1788000001000,
       }),
-      JSON.stringify({ type: "text", text: "好的，我来处理", time: 1788000002000 }),
+      // Real wire.jsonl shape: assistant text and tool activity are nested
+      // inside context.append_loop_event, never top-level events.
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "content.part", part: { type: "text", text: "好的，我来处理" } },
+        time: 1788000002000,
+      }),
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "tool.call", name: "Bash", args: { command: "ls" } },
+        time: 1788000003000,
+      }),
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "tool.result", result: { output: "file.txt", isError: false } },
+        time: 1788000004000,
+      }),
     ].join("\n") + "\n",
     "utf8",
   );
@@ -294,12 +310,71 @@ test("kimi: scans session_index.jsonl and titles from wire.jsonl prompt.accepted
   const messages = await scanner.loadMessages("kimi", sessionDir);
   assert.deepEqual(
     messages.map((m) => m.role),
-    ["user", "assistant"],
+    ["user", "assistant", "tool", "tool"],
+  );
+  assert.equal(messages[1].content, "好的，我来处理");
+  assert.equal(messages[2].content, "[Tool: Bash]");
+  assert.equal(messages[3].content, "file.txt");
+  assert.deepEqual(
+    messages.map((m) => m.ts),
+    [1788000001000, 1788000002000, 1788000003000, 1788000004000],
   );
 
   const del = await scanner.deleteSessions([{ endpoint: "kimi", file: sessionDir }]);
   assert.equal(del.ok.length, 1);
   assert.ok(!existsSync(sessionDir));
+});
+
+test("kimi: loadMessages skips think parts and empty tool results", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_x", "session_think");
+  mkdirSync(join(sessionDir, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(sessionDir, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({
+        type: "prompt.accepted",
+        content: [{ type: "text", text: "查一下日志" }],
+        time: 1788000001000,
+      }),
+      // Reasoning draft — not dialogue, must not surface as a message.
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "content.part", part: { type: "think", think: "先看看目录结构……" } },
+        time: 1788000002000,
+      }),
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "content.part", part: { type: "text", text: "我来看日志。" } },
+        time: 1788000003000,
+      }),
+      // Empty tool output — skipped rather than rendered as a blank row.
+      JSON.stringify({
+        type: "context.append_loop_event",
+        event: { type: "tool.result", result: { output: "   ", isError: false } },
+        time: 1788000004000,
+      }),
+      // turn.prompt mirrors prompt.accepted — must not duplicate the user turn.
+      JSON.stringify({
+        type: "turn.prompt",
+        input: [{ type: "text", text: "查一下日志" }],
+        time: 1788000001000,
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "session_index.jsonl"),
+    JSON.stringify({ sessionId: "session_think", sessionDir, workDir: "C:\\work\\k" }) + "\n",
+    "utf8",
+  );
+  const messages = await testScanner({ kimi: [root] }).loadMessages("kimi", sessionDir);
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ["user", "assistant"],
+  );
+  assert.equal(messages[0].content, "查一下日志");
+  assert.equal(messages[1].content, "我来看日志。");
 });
 
 test("kimi: lastActive is the newest agents/*/wire.jsonl, ignoring tool-result noise", async () => {

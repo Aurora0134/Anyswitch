@@ -423,7 +423,9 @@ function createClaudeAdapter(roots) {
 // kimi — ~/.kimi-code/session_index.jsonl is a ready-made index of
 // { sessionId, sessionDir, workDir }; lastActive comes from the sessionDir
 // mtime. Transcript is the wire.jsonl event stream (protocol_version 1.5):
-// user turns are "prompt.accepted" events, agent text is "text" events.
+// user turns are "prompt.accepted" events; agent text and tool activity are
+// nested inside "context.append_loop_event" (content.part / tool.call /
+// tool.result) — they never appear as top-level events.
 // ---------------------------------------------------------------------------
 
 function createKimiAdapter(roots) {
@@ -542,20 +544,41 @@ function createKimiAdapter(roots) {
       const target = assertUnderRoots(file, roots);
       const wire = join(target, "agents", "main", "wire.jsonl");
       const messages = [];
+      // Real wire.jsonl shape (census of 1033 on-disk transcripts, 2026-09-10):
+      // assistant text and tool activity NEVER appear as top-level "text" /
+      // "tool.call" events — they are nested inside "context.append_loop_event"
+      // as content.part / tool.call / tool.result. The two top-level branches
+      // this loop used to have matched zero events across every real file.
       for (const value of parseJsonl(readFileSync(wire, "utf8"))) {
         if (value.type === "prompt.accepted") {
+          // turn.prompt carries the same user input — not read here, or every
+          // user turn would appear twice.
           const content = extractText(value.content);
           if (content.trim() !== "") {
             messages.push({ role: "user", content, ts: parseTimestampMs(value.time) });
           }
-        } else if (value.type === "text") {
-          const content = typeof value.text === "string" ? value.text : extractText(value.content);
-          if (content.trim() !== "") {
-            messages.push({ role: "assistant", content, ts: parseTimestampMs(value.time) });
+        } else if (value.type === "context.append_loop_event") {
+          const ev = value.event;
+          if (!ev || typeof ev !== "object") continue;
+          // Inner events carry no timestamp of their own; the wrapper's
+          // `time` is the only clock.
+          const ts = parseTimestampMs(value.time);
+          if (ev.type === "content.part" && ev.part && ev.part.type === "text") {
+            // part.type "think" is the model's reasoning draft, not dialogue.
+            const content = typeof ev.part.text === "string" ? ev.part.text : "";
+            if (content.trim() !== "") {
+              messages.push({ role: "assistant", content, ts });
+            }
+          } else if (ev.type === "tool.call") {
+            const name = typeof ev.name === "string" ? ev.name : "unknown";
+            messages.push({ role: "tool", content: `[Tool: ${name}]`, ts });
+          } else if (ev.type === "tool.result") {
+            const output =
+              ev.result && typeof ev.result.output === "string" ? ev.result.output : "";
+            if (output.trim() !== "") {
+              messages.push({ role: "tool", content: output, ts });
+            }
           }
-        } else if (value.type === "tool.call") {
-          const name = typeof value.name === "string" ? value.name : "unknown";
-          messages.push({ role: "tool", content: `[Tool: ${name}]`, ts: parseTimestampMs(value.time) });
         }
       }
       return messages;
