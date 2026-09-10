@@ -5,7 +5,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
-import { catalogGeneration, generationMatches } from "./catalog-generation.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse } from "./protocol.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 
@@ -214,15 +213,6 @@ test("every catalog entry unpacks back to a store hit", async () => {
   }
 });
 
-test("provider label change does not invalidate a live session (§2.6)", () => {
-  // displayName is presentation metadata and must stay out of the generation
-  // digest, otherwise relabelling would 409 an in-flight session.
-  const a = syntheticStore();
-  const b = syntheticStore();
-  b.providers["poke-api"].displayName = "Renamed Provider";
-  assert.equal(catalogGeneration(a), catalogGeneration(b));
-});
-
 test("buildWireCatalog fails whole catalog on collision (§1.5)", () => {
   // "a" + "b/m" and "a/b" + "m" would collide, but the second provider id is
   // itself illegal, so packWireId rejects it before a partial catalog is built.
@@ -234,43 +224,6 @@ test("buildWireCatalog fails whole catalog on collision (§1.5)", () => {
     },
   };
   assert.throws(() => buildWireCatalog(store), /wire-ID invariant|collision/);
-});
-
-// ---------- §2.6 catalog generation ----------
-
-test("generation ignores presentation metadata", () => {
-  const a = syntheticStore();
-  const b = syntheticStore();
-  b.providers["poke-api"].models["claude-opus-5"].displayName = "Renamed";
-  assert.equal(catalogGeneration(a), catalogGeneration(b));
-});
-
-test("generation changes when baseURL or fallbackURLs change", () => {
-  const a = syntheticStore();
-  const baseURLChanged = syntheticStore();
-  baseURLChanged.providers["poke-api"].baseURL = "https://elsewhere.invalid/v1";
-  assert.notEqual(catalogGeneration(a), catalogGeneration(baseURLChanged));
-
-  const fallbackURLsChanged = syntheticStore();
-  fallbackURLsChanged.providers["poke-api"].fallbackURLs = ["https://backup.invalid/v1"];
-  assert.notEqual(catalogGeneration(a), catalogGeneration(fallbackURLsChanged));
-});
-
-test("generation changes when credentialFile or model set changes", () => {
-  const base = catalogGeneration(syntheticStore());
-  const credChanged = syntheticStore();
-  credChanged.providers["poke-api"].credentialFile = "other.dpapi";
-  assert.notEqual(base, catalogGeneration(credChanged));
-
-  const modelsChanged = syntheticStore();
-  delete modelsChanged.providers["poke-api"].models["claude-sonnet-5"];
-  assert.notEqual(base, catalogGeneration(modelsChanged));
-});
-
-test("generationMatches rejects empty and non-string recordings", () => {
-  assert.equal(generationMatches("", ""), false);
-  assert.equal(generationMatches(null, "x"), false);
-  assert.equal(generationMatches("x", "x"), true);
 });
 
 // ---------- protocol translation ----------
@@ -349,6 +302,39 @@ test("openAIToAnthropic preserves unparsable tool arguments", () => {
   );
   assert.equal(out.content[0].input.__unparsed_arguments, "{not json");
   assert.equal(out.stop_reason, "tool_use");
+});
+
+test("openAIToAnthropic surfaces reasoning as a thinking block ahead of the answer", () => {
+  const out = openAIToAnthropic(
+    {
+      id: "c2",
+      choices: [{ message: { reasoning_content: "想一下", content: "你好" }, finish_reason: "stop" }],
+      usage: {},
+    },
+    "anthropic/poke-api/claude-opus-5",
+  );
+  assert.deepEqual(out.content, [
+    { type: "thinking", thinking: "想一下" },
+    { type: "text", text: "你好" },
+  ]);
+});
+
+test("openAIToAnthropic recognizes every reasoning field alias", () => {
+  for (const field of ["reasoning_content", "reasoning", "thought", "thinking"]) {
+    const out = openAIToAnthropic(
+      { choices: [{ message: { [field]: "想", content: "答" }, finish_reason: "stop" }] },
+      "w",
+    );
+    assert.deepEqual(out.content[0], { type: "thinking", thinking: "想" }, field);
+  }
+});
+
+test("openAIToAnthropic without reasoning emits no thinking block", () => {
+  const out = openAIToAnthropic(
+    { choices: [{ message: { content: "答" }, finish_reason: "stop" }] },
+    "w",
+  );
+  assert.deepEqual(out.content, [{ type: "text", text: "答" }]);
 });
 
 test("buildModelsResponse emits wire ids only", () => {
@@ -602,6 +588,186 @@ test("requests before any discovery are allowed (--model / ANTHROPIC_MODEL path)
   const handler = createHandler(makeDeps({ readGeneration: () => null }));
   const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
   assert.equal(out.status, 200);
+});
+
+// One handler bound to a mutable store, with the side-effect counters a gate
+// test needs: what the request reached, and whether a key was even decrypted.
+function gateFixture() {
+  const store = syntheticStore();
+  let snapshot = null;
+  const calls = { upstream: 0, credential: 0 };
+  const handler = createHandler({
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store }),
+    loadCredential: async () => {
+      calls.credential += 1;
+      return { ok: true, value: "synthetic-key" };
+    },
+    upstreamFetch: async () => {
+      calls.upstream += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "c", choices: [{ message: { content: "x" }, finish_reason: "stop" }], usage: {} }),
+      };
+    },
+    recordGeneration: (value) => { snapshot = value; },
+    readGeneration: () => snapshot,
+  });
+  return { handler, store, calls, snapshotOf: () => snapshot };
+}
+
+test("a change to a channel this request never touches still routes (§2.6 blast radius)", async () => {
+  // The bug this pins: refreshing or re-pointing some OTHER provider used to
+  // 409 every in-flight session in the process, because the whole catalog was
+  // one digest.
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["nvidia-nim"].baseURL = "https://elsewhere.invalid/v1";
+  store.providers["nvidia-nim"].credentialFile = "rotated.dpapi";
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("adding or refreshing models never invalidates a live session (§2.6)", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+
+  store.providers["poke-api"].models["glm-5.3"] = { displayName: "GLM 5.3" };
+  delete store.providers["nvidia-nim"].models["deepseek-ai/deepseek-v4-pro"];
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("a channel created after discovery routes (§2.6)", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["brand-new"] = {
+    displayName: "Brand New",
+    baseURL: "https://new.invalid/v1",
+    protocol: "openai-compatible",
+    credentialFile: "brand-new.dpapi",
+    models: { "claude-opus-5": { displayName: "Claude Opus 5" } },
+  };
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/brand-new/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
+});
+
+test("a model the session uses going away is a 404, not a stale catalog (§2.6)", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  delete store.providers["poke-api"].models["claude-opus-5"];
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 404);
+  assert.equal(calls.upstream, 0);
+});
+
+test("the request's own channel being re-pointed is 409 with no key and no upstream (§2.6)", async () => {
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH);
+  store.providers["poke-api"].baseURL = "https://attacker.invalid/v1";
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 409);
+  assert.equal(calls.credential, 0, "a refused request must never decrypt a credential");
+  assert.equal(calls.upstream, 0, "a refused request must never reach an upstream");
+  assert.match(out.body.error.message, /poke-api/);
+  assert.match(out.body.error.message, /re-run model discovery/);
+});
+
+test("a pool request gates over the members it can call (§2.6)", async () => {
+  const { handler, store } = gateFixture();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  await handler.handleModels(AUTH);
+
+  // Membership edited alone (which members, in what order) is not a re-point.
+  store.pools["poke-pool"].members = ["nvidia-nim", "poke-api"];
+  const reordered = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(reordered.ok, true);
+
+  // The member this request can actually land on was re-pointed: refuse.
+  store.providers["poke-api"].baseURL = "https://attacker.invalid/v1";
+  const stale = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /poke-api/);
+});
+
+test("a pool member that cannot serve this model never gates the request (§2.6)", async () => {
+  // nvidia-nim has no claude-opus-5, so no request for that model can reach it.
+  const { handler, store } = gateFixture();
+  store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
+  await handler.handleModels(AUTH);
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+
+  const plan = await handler.planPoolMessages(AUTH, messageBody("anthropic/poke-pool/claude-opus-5"));
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.members.map((member) => member.memberId), ["poke-api"]);
+});
+
+test("an auto-route request gates over every node its chain can reach (§2.6)", async () => {
+  const { handler, store } = gateFixture();
+  store.providers["side-api"] = {
+    displayName: "Side API",
+    baseURL: "https://side.invalid/v1",
+    protocol: "openai-compatible",
+    credentialFile: "side-api.dpapi",
+    models: { "claude-opus-5": { displayName: "Claude Opus 5" } },
+  };
+  store.routingChains = {
+    claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }, { node: "nvidia-nim", model: "deepseek-ai/deepseek-v4-pro" }] },
+  };
+  await handler.handleModels(AUTH, "claude");
+
+  // A channel the chain never mentions cannot receive this request.
+  store.providers["side-api"].baseURL = "https://attacker.invalid/v1";
+  const untouched = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(untouched.ok, true, "a channel outside the chain must not gate this request");
+
+  // Both chain nodes are reachable within one request, so either moving is stale.
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+  const stale = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(stale.ok, false);
+  assert.equal(stale.status, 409);
+  assert.match(stale.body.error.message, /nvidia-nim/);
+});
+
+test("a refused auto-route request spends no backoff probe (§2.6)", async () => {
+  const { handler, store, snapshotOf } = gateFixture();
+  store.routingChains = { claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }] } };
+  await handler.handleModels(AUTH, "claude");
+
+  // Stick the chain on the second node, then re-point it and get refused.
+  store.routingChains.claude.chain.push({ node: "nvidia-nim", model: "deepseek-ai/deepseek-v4-pro" });
+  await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  handler.chainState.noteSuccess("claude", "nvidia-nim", "deepseek-ai/deepseek-v4-pro", Date.now());
+  const position = handler.chainState.get("claude");
+  store.providers["nvidia-nim"].baseURL = "https://attacker.invalid/v1";
+
+  const stale = await handler.planChainMessages(AUTH, messageBody("auto"), "claude");
+  assert.equal(stale.status, 409);
+  assert.deepEqual(handler.chainState.get("claude"), position, "a refusal must not move or re-anchor the chain position");
+  assert.ok(snapshotOf(), "the snapshot itself stays bound; only discovery re-binds it");
+});
+
+test("another endpoint's discovery does not break this endpoint's live channel (§2.6)", async () => {
+  // The resident relay shares one snapshot across every endpoint: re-binding it
+  // for one client must not invalidate a channel another client is using.
+  const { handler, store, calls } = gateFixture();
+  await handler.handleModels(AUTH, "claude");
+  store.providers["nvidia-nim"].displayName = "Kimi's channel";
+  await handler.handleModels(AUTH, "kimi");
+
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(calls.upstream, 1);
 });
 
 // ---------- happy path ----------

@@ -99,6 +99,51 @@ describe("resident relay /v1/messages streaming (Anthropic path)", () => {
     });
   });
 
+  it("translates upstream reasoning into a thinking block that closes before the answer", async () => {
+    const upstreamFetch = async () => ({
+      ok: true,
+      status: 200,
+      body: sseStream([
+        'data: {"id":"cmpl-1","choices":[{"delta":{"reasoning_content":"想"}}]}\n\n',
+        'data: {"id":"cmpl-1","choices":[{"delta":{"reasoning_content":"想"}}]}\n\n',
+        'data: {"id":"cmpl-1","choices":[{"delta":{"content":"答"}}]}\n\n',
+        'data: {"id":"cmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    });
+
+    await withServer(createMockDeps({ upstreamFetch }), async (port) => {
+      const res = await postMessages(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+
+      // The thinking block opens, streams, and closes BEFORE the text block.
+      const order = [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+      ];
+      let cursor = 0;
+      for (const event of order) {
+        const at = text.indexOf(`event: ${event}`, cursor);
+        assert.ok(at !== -1, `missing ${event}`);
+        cursor = at;
+      }
+      assert.ok(text.includes('"thinking"'), "a thinking block must be opened");
+      assert.ok(text.includes('"thinking_delta"'), "reasoning must stream as thinking_delta");
+      assert.ok(text.includes("想"), "the thinking text must survive");
+      assert.ok(text.includes('"text_delta"'));
+      assert.ok(text.includes("答"), "the answer text must survive");
+    });
+  });
+
   it("exhausts keep-alive retries on empty streams and answers 502 with a readable message", async () => {
     const upstreamFetch = async () => ({
       ok: true,

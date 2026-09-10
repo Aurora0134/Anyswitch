@@ -12,7 +12,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
-import { catalogGeneration, generationMatches } from "./catalog-generation.mjs";
+import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse } from "./protocol.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, createStickyTable } from "./pool-routing.mjs";
@@ -137,6 +137,27 @@ export function createHandler(deps) {
     return { ok: true, store: loaded.store };
   }
 
+  // The catalog gate. `providerIds` are the channels THIS request may reach,
+  // and only those are re-checked against what discovery bound, so editing an
+  // unrelated channel cannot invalidate a live session (see
+  // catalog-generation.mjs for what a channel's shape covers). A channel that
+  // appeared after discovery is not stale — nothing the client learned about it
+  // has moved — and a channel that was deleted is the 404 path's business.
+  // Returns null when the request can be routed.
+  function staleCatalogResult(store, providerIds) {
+    const stale = findStaleTargets(readGeneration(), store, providerIds);
+    if (stale.length === 0) return null;
+    const channels = stale.map((providerId) => `"${providerId}"`).join(", ");
+    return {
+      status: 409,
+      body: errorBody(
+        "invalid_request_error",
+        `the upstream endpoint of ${channels} changed since this client discovered its models; `
+        + "re-run model discovery (restart the endpoint, or pick the model again in /model) before retrying",
+      ),
+    };
+  }
+
   // agentId is optional: callers that can identify the requesting endpoint
   // (per-launch relay: the launched agent; resident relay: UA detection) pass
   // it so the catalog can offer the endpoint's route chain as the AUTO_MODEL
@@ -171,8 +192,8 @@ export function createHandler(deps) {
       });
     }
 
-    // Bind this discovery result to the store shape that produced it.
-    recordGeneration(catalogGeneration(loaded.store));
+    // Bind this discovery result to the endpoint each channel resolves to.
+    recordGeneration(providerRoutingShapes(loaded.store));
     return { status: 200, body: buildModelsResponse(entries) };
   }
 
@@ -195,19 +216,10 @@ export function createHandler(deps) {
       };
     }
 
-    // The generation check runs before provider lookup so a stale catalog is
-    // reported as such rather than as a 404 on a since-removed provider.
-    const recorded = readGeneration();
-    const current = catalogGeneration(loaded.store);
-    if (recorded !== null && !generationMatches(recorded, current)) {
-      return {
-        status: 409,
-        body: errorBody(
-          "invalid_request_error",
-          "the provider catalog changed since it was discovered; re-run model discovery before retrying",
-        ),
-      };
-    }
+    // Scoped to this wire ID's own channel: a re-pointed provider is reported
+    // as stale before it can receive the session's traffic.
+    const stale = staleCatalogResult(loaded.store, [unpacked.providerId]);
+    if (stale !== null) return stale;
 
     const provider = loaded.store.providers?.[unpacked.providerId];
     if (provider === undefined) {
@@ -320,21 +332,13 @@ export function createHandler(deps) {
     const pool = resolvePool(loaded.store, unpacked.poolId);
     if (!pool) return null;
 
-    // Generation check, same ordering as handleMessages.
-    const recorded = readGeneration();
-    const current = catalogGeneration(loaded.store);
-    if (recorded !== null && !generationMatches(recorded, current)) {
-      return {
-        ok: false,
-        status: 409,
-        body: errorBody(
-          "invalid_request_error",
-          "the provider catalog changed since it was discovered; re-run model discovery before retrying",
-        ),
-      };
-    }
-
+    // Gate over exactly the members this request could call. With no candidate
+    // member there is no endpoint to be stale, so that case falls through to
+    // its own 404 below.
     const candidates = poolMembersWithModel(loaded.store, pool, unpacked.modelId);
+    const stale = staleCatalogResult(loaded.store, candidates.map((candidate) => candidate.memberId));
+    if (stale !== null) return { ok: false, ...stale };
+
     if (candidates.length === 0) {
       return {
         ok: false,
@@ -402,19 +406,19 @@ export function createHandler(deps) {
     const chain = resolveChain(loaded.store, agentId);
     if (!chain || chain.chain.length === 0) return null;
 
-    // Generation check, same ordering as handleMessages.
-    const recorded = readGeneration();
-    const current = catalogGeneration(loaded.store);
-    if (recorded !== null && !generationMatches(recorded, current)) {
-      return {
-        ok: false,
-        status: 409,
-        body: errorBody(
-          "invalid_request_error",
-          "the provider catalog changed since it was discovered; re-run model discovery before retrying",
-        ),
-      };
+    // Reachable channels, derived from the CONFIGURED chain without touching
+    // chainState: plan() re-anchors the backoff probe window, and a request
+    // refused here must not spend that probe. A node that no longer resolves
+    // contributes nothing — the existing 404 path owns it.
+    const reachable = [];
+    for (const entry of chain.chain) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+      if (expanded.kind === "channel") reachable.push(expanded.providerId);
+      else reachable.push(...expanded.memberIds);
     }
+    const stale = staleCatalogResult(loaded.store, reachable);
+    if (stale !== null) return { ok: false, ...stale };
 
     // plan already applies "current node first + retry from the head every
     // RETRY_UPSTREAM_MS"; expand the entries in exactly the returned order.
