@@ -111,12 +111,26 @@ function extractText(content) {
   return "";
 }
 
+// The tool name is spelled differently per client: claude, kimi, dsh, pi and
+// qoder carry "name" on the block, while zcode and opencode store the name as
+// "tool" on the part row (all 22569 tool parts in this machine's zcode db).
+// Reading "name" alone labelled every zcode and opencode tool call "[Tool:
+// unknown]".
+function toolCallName(item) {
+  for (const key of ["name", "tool", "toolName", "tool_name"]) {
+    const value = item[key];
+    if (typeof value === "string" && value.trim() !== "") return value;
+  }
+  return "unknown";
+}
+
 function extractTextFromItem(item) {
   if (!item || typeof item !== "object") return null;
   const type = typeof item.type === "string" ? item.type : "";
-  if (type === "tool_use" || type === "toolCall" || type === "tool") {
-    const name = typeof item.name === "string" ? item.name : "unknown";
-    return `[Tool: ${name}]`;
+  // DSH spells tool calls "tool-call" (hyphenated); the snake/camel spellings
+  // come from claude and the OpenAI-shaped adapters.
+  if (type === "tool_use" || type === "toolCall" || type === "tool" || type === "tool-call") {
+    return `[Tool: ${toolCallName(item)}]`;
   }
   if (type === "tool_result" || type === "toolResult") {
     if (item.content !== undefined) {
@@ -196,6 +210,94 @@ function readHeadTailLines(path, headN, tailN) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Concatenated Zstandard container reader.
+// DSH stores one session log as a CHAIN of independently decodable Zstandard
+// frames (a checksummed header frame plus one frame per durable write batch),
+// not as a single stream — and Node's zstd API decodes the first frame and
+// silently ignores everything after it. Reading such a file "as a stream"
+// therefore yields the header alone, which is exactly how every real dsh
+// session came to look like an empty shell. The container is walked
+// structurally instead: parse each frame header and its block table to learn
+// the frame's byte range, then decompress that range on its own.
+// ---------------------------------------------------------------------------
+
+const ZSTD_FRAME_MAGIC = 0xfd2fb528; // little-endian bytes 28 B5 2F FD
+
+// Byte ranges of the complete frames in a concatenated stream. An interrupted
+// append leaves a torn final frame: the walk stops there and the complete
+// frames before it stay usable (never throw on a half-written tail).
+function scanZstdFrames(buffer) {
+  const frames = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const start = offset;
+    // magic(4) + frame header descriptor(1)
+    if (buffer.length - offset < 5) break;
+    if (buffer.readUInt32LE(offset) !== ZSTD_FRAME_MAGIC) break;
+    offset += 4;
+    const descriptor = buffer.readUInt8(offset);
+    offset += 1;
+    if ((descriptor & 0x18) !== 0) break; // reserved header bits — not a frame
+    const contentSizeFlag = descriptor >>> 6;
+    const singleSegment = (descriptor & 0x20) !== 0;
+    const checksum = (descriptor & 0x04) !== 0;
+    const dictionaryFlag = descriptor & 0x03;
+    const dictionaryBytes = dictionaryFlag === 3 ? 4 : dictionaryFlag;
+    const contentSizeBytes =
+      contentSizeFlag === 0 ? (singleSegment ? 1 : 0) : 1 << contentSizeFlag;
+    const remainingHeaderBytes =
+      (singleSegment ? 0 : 1) + dictionaryBytes + contentSizeBytes;
+    if (buffer.length - offset < remainingHeaderBytes) break;
+    offset += remainingHeaderBytes;
+    let complete = true;
+    for (;;) {
+      if (buffer.length - offset < 3) { complete = false; break; }
+      const blockHeader = buffer.readUIntLE(offset, 3);
+      offset += 3;
+      const lastBlock = (blockHeader & 1) !== 0;
+      const blockType = (blockHeader >>> 1) & 3;
+      const blockSize = blockHeader >>> 3;
+      if (blockType === 3) { complete = false; break; } // reserved block type
+      const payloadBytes = blockType === 1 ? 1 : blockSize; // RLE blocks store 1 byte
+      if (buffer.length - offset < payloadBytes) { complete = false; break; }
+      offset += payloadBytes;
+      if (lastBlock) break;
+    }
+    if (!complete) break;
+    if (checksum) {
+      if (buffer.length - offset < 4) break;
+      offset += 4;
+    }
+    frames.push({ start, end: offset });
+  }
+  return frames;
+}
+
+// Hold one container in memory: frame ranges plus a per-frame decoder.
+function readZstdContainer(path) {
+  const buffer = readFileSync(path);
+  const frames = scanZstdFrames(buffer);
+  const decode = (index) => {
+    const frame = frames[index];
+    if (!frame) return [];
+    try {
+      return parseJsonl(zstdDecompressSync(buffer.subarray(frame.start, frame.end)).toString("utf8"));
+    } catch {
+      return []; // corrupt frame — keep the frames that did decode
+    }
+  };
+  return {
+    frames,
+    decode,
+    allRecords() {
+      const records = [];
+      for (let i = 0; i < frames.length; i++) records.push(...decode(i));
+      return records;
+    },
+  };
+}
+
 // Recursive *.jsonl collector. Dir entries that fail to stat are skipped.
 function collectJsonlFiles(root, { skipDirs = () => false, skipFiles = () => false } = {}) {
   const out = [];
@@ -228,6 +330,13 @@ function collectJsonlFiles(root, { skipDirs = () => false, skipFiles = () => fal
 
 function canonicalizeExisting(path, label) {
   if (!existsSync(path)) {
+    // The message a missing session source throws reaches the panel UI verbatim
+    // ("消息加载失败：…"), so it has to be a sentence a user can act on — the
+    // transcript was deleted or moved between listing and opening. Everything
+    // else here is an internal invariant and keeps its developer wording.
+    if (label === "session source") {
+      throw new Error("该会话的源文件已不在磁盘上，可能已被对应客户端删除或移动");
+    }
     throw new Error(`${label} not found: ${path}`);
   }
   return realpathSync(path);
@@ -592,16 +701,61 @@ function createKimiAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
-// dsh — ~/.dsh/sessions/--<munged-cwd>--/<uuid>/session.jsonl.zstd, zstd-
-// compressed JSONL (node:zlib zstdDecompressSync, verified on Node v24.18.0).
-// First line is a {"type":"session"} header with id/cwd/createdAt.
+// dsh — ~/.dsh/sessions/--<munged-cwd>--/<uuid>/session.jsonl.zstd. The file is
+// a concatenated-frame zstd container (readZstdContainer above), not a stream.
+// Records are event objects { type, seq, time, data }: the first is the
+// {"type":"session"} header carrying id/cwd/createdAt, and the conversation
+// lives in data.content (user/message) and data.message.content
+// (assistant/message, tool/result) — there is no top-level role/content pair
+// anywhere in a real log.
 // ---------------------------------------------------------------------------
 
-function createDshAdapter(roots) {
-  function readSessionFile(path) {
-    return parseJsonl(zstdDecompressSync(readFileSync(path)).toString("utf8"));
-  }
+// Frames decoded per session while LISTING. Every transcript on this machine
+// (68 files) carries its first user turn within the first 7 frames, so the head
+// is enough for a title and a liveness check; decoding whole transcripts here
+// would make the list call pay for all of them (1.7s versus 57ms measured).
+const DSH_HEAD_MAX_FRAMES = 32;
 
+const DSH_CONVERSATION_TYPES = new Set(["user/message", "assistant/message", "tool/result"]);
+
+// Content blocks → text. The model's reasoning draft is not dialogue (same
+// rule as kimi's think parts); tool calls render as "[Tool: name]" like every
+// other adapter does.
+function dshText(blocks) {
+  const dialogue = Array.isArray(blocks)
+    ? blocks.filter((block) => block?.type !== "reasoning")
+    : blocks;
+  return extractText(dialogue);
+}
+
+// The record type decides how a record is displayed — NOT the role inside it.
+// Tool output comes back wrapped in a USER-role message (58 of 58 tool/result
+// records on this machine), so trusting message.role would print every tool
+// result as if the user had typed it.
+const DSH_ROLE_BY_TYPE = {
+  "user/message": "user",
+  "assistant/message": "assistant",
+  "tool/result": "tool",
+};
+
+// One storage record → one displayed message, or null for records that carry no
+// conversation (step/turn bookkeeping, chunk deltas, session metadata).
+function dshRecordMessage(record) {
+  const role = DSH_ROLE_BY_TYPE[record.type];
+  if (role === undefined) return null;
+  const ts = parseTimestampMs(record.time);
+  if (record.type === "user/message") {
+    const content = dshText(record.data?.content);
+    return content.trim() === "" ? null : { role, content, ts };
+  }
+  const message = record.data?.message;
+  if (!message || typeof message !== "object") return null;
+  const content = dshText(message.content);
+  if (content.trim() === "") return null;
+  return { role, content, ts };
+}
+
+function createDshAdapter(roots) {
   return {
     id: "dsh",
     roots: () => roots,
@@ -628,35 +782,44 @@ function createDshAdapter(roots) {
             const sessionFile = join(projectPath, sessionDir.name, "session.jsonl.zstd");
             if (!existsSync(sessionFile)) continue;
             try {
-              const lines = readSessionFile(sessionFile);
-              const header = lines.find((v) => v.type === "session") ?? {};
-              // 只有 header 行的空壳会话（本机 dsh 现状：全部是 subagent 派生
-              // 的单行文件）不进列表——没有消息可展示，标题也只能兜底目录名。
-              if (lines.every((v) => v.type === "session")) continue;
+              const container = readZstdContainer(sessionFile);
+              const head = [];
+              const headFrames = Math.min(container.frames.length, DSH_HEAD_MAX_FRAMES);
+              for (let i = 0; i < headFrames; i++) {
+                const records = container.decode(i);
+                head.push(...records);
+                if (records.some((r) => r.type === "user/message")) break;
+              }
+              // 空壳会话（只有 header、没有任何会话记录）不进列表——没有消息可
+              // 展示，标题也只能兜底目录名。
+              if (!head.some((r) => DSH_CONVERSATION_TYPES.has(r.type))) continue;
+              const header = head.find((v) => v.type === "session") ?? {};
               const id =
                 typeof header.id === "string" && header.id !== "" ? header.id : sessionDir.name;
               const project = typeof header.cwd === "string" ? header.cwd : null;
               const createdAt = parseTimestampMs(header.createdAt);
-              const firstUser = lines.find((v) => v.type !== "session" && v.role === "user");
-              const last = lines.length > 0 ? lines[lines.length - 1] : null;
+              const firstUser = head.find((v) => v.type === "user/message");
+              const firstUserMessage = firstUser ? dshRecordMessage(firstUser) : null;
+              // Last activity: the final frame is the newest write batch, so one
+              // frame decode answers it without walking the whole transcript.
+              const tail = container.decode(container.frames.length - 1);
+              const last = tail.length > 0 ? tail[tail.length - 1] : null;
               sessions.push(
                 makeMeta({
                   endpoint: "dsh",
                   id,
                   title:
-                    (firstUser && truncateText(extractText(firstUser.content), TITLE_MAX_CHARS)) ||
+                    (firstUserMessage !== null &&
+                      truncateText(firstUserMessage.content, TITLE_MAX_CHARS)) ||
                     (project !== null ? pathBasename(project) : null),
                   project,
                   file: sessionFile,
                   createdAt,
-                  lastActive:
-                    parseTimestampMs(last?.timestamp) ??
-                    parseTimestampMs(last?.time) ??
-                    statSync(sessionFile).mtimeMs,
+                  lastActive: parseTimestampMs(last?.time) ?? statSync(sessionFile).mtimeMs,
                 }),
               );
             } catch {
-              // corrupt zstd/json — skip this session
+              // corrupt container/json — skip this session
             }
           }
         }
@@ -666,13 +829,13 @@ function createDshAdapter(roots) {
     async loadMessages(file) {
       const target = assertUnderRoots(file, roots);
       const messages = [];
-      for (const value of readSessionFile(target)) {
-        if (value.type === "session") continue; // header line
-        const role = typeof value.role === "string" ? value.role : null;
-        if (role === null) continue;
-        const content = extractText(value.content);
-        if (content.trim() === "") continue;
-        messages.push({ role, content, ts: parseTimestampMs(value.timestamp ?? value.time) });
+      // Assistant text and tool activity are assembled into assistant/message
+      // and tool/result records. The assistant/chunk deltas and the packed
+      // text-/reasoning-/tool-call-chunks rows repeat the very same content, so
+      // they are not read here — reading both would double every turn.
+      for (const record of readZstdContainer(target).allRecords()) {
+        const message = dshRecordMessage(record);
+        if (message !== null) messages.push(message);
       }
       return messages;
     },
@@ -975,6 +1138,21 @@ function scanSessionTable({ endpoint, dbPath }) {
   }
 }
 
+// A "tool" part in zcode/opencode carries BOTH the call and its result —
+// state.output once it completed, state.error when it failed, and neither
+// while it is still running (real rows: 22099 / 451 / 19). The result is
+// emitted as its own "tool"-role message, the shape every other adapter
+// already produces; without it these two endpoints showed calls with no
+// output at all.
+function toolResultText(item) {
+  if (!item || typeof item !== "object" || item.type !== "tool") return null;
+  const state = item.state;
+  if (!state || typeof state !== "object") return null;
+  const text = state.status === "error" ? state.error : state.output;
+  if (typeof text !== "string" || text.trim() === "") return null;
+  return text;
+}
+
 // Shared message loader for zcode/opencode: message.data holds {role,...},
 // part.data holds content blocks ({type:"text",text} etc.).
 function loadSqliteMessages(dbPath, sessionId) {
@@ -995,23 +1173,25 @@ function loadSqliteMessages(dbPath, sessionId) {
         continue;
       }
       const role = typeof data.role === "string" ? data.role : "unknown";
+      const ts = typeof message.time_created === "number" ? message.time_created : null;
       const parts = partStmt.all(message.id);
-      const content = parts
-        .map((part) => {
-          try {
-            return extractTextFromItem(JSON.parse(part.data));
-          } catch {
-            return null;
-          }
-        })
+      const parsed = parts.map((part) => {
+        try {
+          return JSON.parse(part.data);
+        } catch {
+          return null;
+        }
+      });
+      const content = parsed
+        .map(extractTextFromItem)
         .filter((t) => t !== null && t.trim() !== "")
         .join("\n");
-      if (content.trim() === "") continue;
-      out.push({
-        role,
-        content,
-        ts: typeof message.time_created === "number" ? message.time_created : null,
-      });
+      if (content.trim() !== "") out.push({ role, content, ts });
+      // Tool results follow the turn that called them, in part order.
+      for (const item of parsed) {
+        const output = toolResultText(item);
+        if (output !== null) out.push({ role: "tool", content: output, ts });
+      }
     }
     return out;
   } finally {
@@ -1076,60 +1256,199 @@ function createOpencodeAdapter(roots) {
   };
 }
 
-// reasonix — read its own session catalog (catalog_sessions has path /
-// topic_title / custom_title / preview / created_at / last_activity_at).
-// Session files are plain JSONL message snapshots (one {role,content} per
-// line, possibly multi-line records with revisioned "replace" snapshots).
+// ---------------------------------------------------------------------------
+// reasonix — transcripts live at
+// %APPDATA%\reasonix\projects\<munged-workspace>\sessions\<session>.jsonl, one
+// JSON object per line. The app's catalog (catalog_sessions inside
+// %LOCALAPPDATA%\reasonix\session-catalog\v5.sqlite) is a DERIVED index: it
+// lags the files it points at — this machine had a listed row whose transcript
+// the app had already moved into its own .trash, so opening it could only fail
+// — and it only covers the directories it happened to scan. The filesystem is
+// therefore the discovery source and the catalog only enriches rows it still
+// knows about. A turn that only calls tools is an assistant row carrying
+// tool_calls and no content at all.
+// ---------------------------------------------------------------------------
+
 function createReasonixAdapter(roots) {
-  const dbPath = () => join(roots[0], "session-catalog", "v5.sqlite");
+  // roots[0] = %LOCALAPPDATA%\reasonix (catalog db);
+  // roots[1] = %APPDATA%\reasonix\projects (transcripts).
+  const catalogPath = () => join(roots[0], "session-catalog", "v5.sqlite");
+  const transcriptRoots = () => (roots.slice(1).length > 0 ? roots.slice(1) : roots);
+
+  // Transcript path (lowercased — Windows paths are case-insensitive) to its
+  // catalog row. A missing catalog is not an error: the .jsonl.meta sidecar and
+  // the transcript itself still supply everything the list needs.
+  function readCatalog() {
+    const rows = new Map();
+    try {
+      const db = openSqliteReadOnly(catalogPath());
+      try {
+        const select = db.prepare(
+          `SELECT path, directory, topic_title, custom_title, preview, created_at, last_activity_at
+           FROM catalog_sessions`,
+        );
+        for (const row of select.all()) {
+          if (typeof row.path === "string" && row.path !== "") rows.set(row.path.toLowerCase(), row);
+        }
+      } finally {
+        db.close();
+      }
+    } catch {
+      // no catalog on disk — metadata falls back to the sidecar below
+    }
+    return rows;
+  }
+
+  function collectTranscripts() {
+    const files = [];
+    for (const root of transcriptRoots()) {
+      let projects;
+      try {
+        projects = readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const project of projects) {
+        if (!project.isDirectory() || project.name.startsWith(".")) continue;
+        const sessionsDir = join(root, project.name, "sessions");
+        let entries;
+        try {
+          entries = readdirSync(sessionsDir, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const entry of entries) {
+          // Files only: .trash is a directory, and it is the app's own recycle
+          // bin — a deleted session is not a session to list.
+          if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+          // Sidecar logs that sit next to a transcript: turn index, event stream.
+          if (entry.name.endsWith(".turns.jsonl") || entry.name.endsWith(".events.jsonl")) continue;
+          files.push(join(sessionsDir, entry.name));
+        }
+      }
+    }
+    return files;
+  }
+
+  // <session>.jsonl.meta holds the app's own title/preview/ISO timestamps.
+  function readMeta(file) {
+    try {
+      const meta = JSON.parse(readFileSync(`${file}.meta`, "utf8"));
+      return meta && typeof meta === "object" ? meta : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // List-time sample: first user turn (title), last message (summary) and
+  // whether the file holds any conversation at all — never a whole transcript.
+  function readTranscriptSample(file) {
+    const { head, tail } = readHeadTailLines(file, 30, 16);
+    let firstUser = null;
+    let lastMessage = null;
+    let hasConversation = false;
+    for (const line of head) {
+      let value;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof value.role !== "string" || value.role === "system") continue;
+      hasConversation = true;
+      if (firstUser === null && value.role === "user") {
+        const content = extractText(value.content).trim();
+        if (content !== "") firstUser = content;
+      }
+    }
+    for (let i = tail.length - 1; i >= 0; i--) {
+      let value;
+      try {
+        value = JSON.parse(tail[i]);
+      } catch {
+        continue;
+      }
+      if (typeof value.role !== "string" || value.role === "system") continue;
+      hasConversation = true;
+      const content = extractText(value.content).trim();
+      if (content !== "") {
+        lastMessage = content;
+        break;
+      }
+    }
+    return { firstUser, lastMessage, hasConversation };
+  }
+
+  const nonEmptyText = (value) =>
+    typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+  const positiveMs = (value) => (typeof value === "number" && value > 0 ? value : null);
+  const firstTruncated = (maxChars, ...values) => {
+    for (const value of values) {
+      const candidate = nonEmptyText(value);
+      if (candidate !== null) return truncateText(candidate, maxChars);
+    }
+    return null;
+  };
+
   return {
     id: "reasonix",
     roots: () => roots,
     async scan() {
-      const db = openSqliteReadOnly(dbPath());
-      try {
-        const rows = db
-          .prepare(
-            `SELECT path, directory, topic_title, custom_title, preview, created_at, last_activity_at
-             FROM catalog_sessions ORDER BY last_activity_at DESC`,
-          )
-          .all();
-        const sessions = [];
-        for (const row of rows) {
-          if (typeof row.path !== "string" || row.path === "") continue;
-          const title =
-            (typeof row.custom_title === "string" && row.custom_title.trim() !== "" && truncateText(row.custom_title, TITLE_MAX_CHARS)) ||
-            (typeof row.topic_title === "string" && row.topic_title.trim() !== "" && truncateText(row.topic_title, TITLE_MAX_CHARS)) ||
-            null;
+      const catalog = readCatalog();
+      const sessions = [];
+      for (const file of collectTranscripts()) {
+        try {
+          const sample = readTranscriptSample(file);
+          // A transcript with no user/assistant/tool row at all (a session the
+          // app opened but never used) is not a conversation.
+          if (!sample.hasConversation) continue;
+          const row = catalog.get(file.toLowerCase()) ?? null;
+          const meta = readMeta(file);
+          // The file name is the session id and the only durable handle.
+          const id = basename(file).replace(/\.jsonl$/, "");
           sessions.push(
             makeMeta({
               endpoint: "reasonix",
-              // The file path is the catalog primary key and the only durable id.
-              id: basename(row.path).replace(/\.jsonl$/, ""),
-              title,
-              summary:
-                typeof row.preview === "string" && row.preview.trim() !== ""
-                  ? truncateText(row.preview, SUMMARY_MAX_CHARS)
-                  : null,
-              project: typeof row.directory === "string" ? row.directory : null,
-              file: row.path,
-              createdAt: typeof row.created_at === "number" && row.created_at > 0 ? row.created_at : null,
+              id,
+              title:
+                firstTruncated(
+                  TITLE_MAX_CHARS,
+                  row?.custom_title,
+                  row?.topic_title,
+                  meta?.topic_title,
+                  sample.firstUser,
+                ) || id,
+              summary: firstTruncated(
+                SUMMARY_MAX_CHARS,
+                row?.preview,
+                meta?.preview,
+                sample.lastMessage,
+              ),
+              project:
+                typeof row?.directory === "string" && row.directory !== ""
+                  ? row.directory
+                  : dirname(file),
+              file,
+              createdAt:
+                positiveMs(row?.created_at) ??
+                parseTimestampMs(meta?.created_at) ??
+                positiveMs(statSync(file).birthtimeMs),
               lastActive:
-                typeof row.last_activity_at === "number" && row.last_activity_at > 0
-                  ? row.last_activity_at
-                  : null,
+                positiveMs(row?.last_activity_at) ??
+                parseTimestampMs(meta?.updated_at) ??
+                statSync(file).mtimeMs,
             }),
           );
+        } catch {
+          // unreadable transcript — skip, never fail the whole scan
         }
-        return sessions;
-      } finally {
-        db.close();
       }
+      return sessions;
     },
     async loadMessages(file) {
-      // Root check: the catalog db lives under roots[0]; session files live
-      // under %APPDATA%\reasonix\projects — the caller passes that as roots[1].
-      const target = assertUnderRoots(file, roots.slice(1).length > 0 ? roots.slice(1) : roots);
+      // Root check: the catalog db lives under roots[0]; transcripts live under
+      // %APPDATA%\reasonix\projects — the caller passes that as roots[1].
+      const target = assertUnderRoots(file, transcriptRoots());
       const messages = [];
       for (const value of parseJsonl(readFileSync(target, "utf8"))) {
         // Snapshot records carry the whole message list; plain records are one
@@ -1138,20 +1457,36 @@ function createReasonixAdapter(roots) {
         for (const message of list) {
           const role = typeof message.role === "string" ? message.role : null;
           if (role === null || role === "system") continue;
-          const content = extractText(message.content);
+          let content = extractText(message.content);
+          // A turn that only calls tools carries no content whatsoever — the
+          // tool names are everything the transcript holds for it, so render
+          // them instead of dropping the turn (real logs: 32 of 83 rows).
+          if (content.trim() === "" && Array.isArray(message.tool_calls)) {
+            content = message.tool_calls
+              .map((call) => {
+                const name =
+                  typeof call?.name === "string" && call.name !== "" ? call.name : "unknown";
+                return `[Tool: ${name}]`;
+              })
+              .join("\n");
+          }
           if (content.trim() === "") continue;
-          messages.push({ role, content, ts: parseTimestampMs(message.timestamp ?? message.time) });
+          messages.push({
+            role,
+            content,
+            ts: parseTimestampMs(message.timestamp ?? message.time ?? message.createdAt),
+          });
         }
       }
       return messages;
     },
     async delete(file) {
-      const target = assertUnderRoots(file, roots.slice(1).length > 0 ? roots.slice(1) : roots);
+      const target = assertUnderRoots(file, transcriptRoots());
       rmSync(target);
       // Best-effort catalog cleanup — the catalog rebuilds itself, so a
       // failure here must not fail the delete.
       try {
-        const db = new DatabaseSync(dbPath());
+        const db = new DatabaseSync(catalogPath());
         try {
           db.prepare("DELETE FROM catalog_sessions WHERE path = ?").run(target);
         } finally {

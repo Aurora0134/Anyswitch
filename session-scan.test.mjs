@@ -253,7 +253,8 @@ test("deleteSessions reports per-item outcomes and keeps going after a failure",
   ]);
   assert.equal(result.ok.length, 1);
   assert.equal(result.fail.length, 2);
-  assert.match(result.fail[0].reason, /not found/);
+  // The panel surfaces this string to the user, so it must not leak a path.
+  assert.match(result.fail[0].reason, /源文件已不在磁盘上/);
   assert.match(result.fail[1].reason, /unknown endpoint/);
   assert.ok(!existsSync(file));
 });
@@ -426,59 +427,169 @@ test("kimi: index rows whose sessionDir vanished are skipped", async () => {
 });
 
 // --- dsh ----------------------------------------------------------------------
+// DSH writes a session as a CHAIN of independently decodable zstd frames (a
+// checksummed header frame plus one frame per durable write batch) whose
+// records are {type,seq,time,data} events. A single-frame fixture holding
+// top-level role/content lines is what let the original adapter ship broken:
+// it matched neither the container nor the record shape.
 
-test("dsh: reads zstd-compressed session files", async () => {
-  const root = makeTmp();
-  const sessionDir = join(root, "--C-work-dshproj--", "11111111-2222-3333-4444-555555555555");
+function dshHeader(id, cwd, createdAt = 1788000000000) {
+  return { type: "session", version: 0, id, createdAt, cwd, delegationDepth: 0 };
+}
+
+// One frame per batch, exactly like the harness container.
+function writeDshSession(root, dirName, id, batches, { tornTail = false } = {}) {
+  const sessionDir = join(root, dirName, id);
   mkdirSync(sessionDir, { recursive: true });
-  const payload = [
-    JSON.stringify({
-      type: "session",
-      version: 0,
-      id: "11111111-2222-3333-4444-555555555555",
-      createdAt: 1788000000000,
-      cwd: "C:\\work\\dshproj",
-    }),
-    JSON.stringify({ role: "user", content: "压缩会话问题", time: 1788000001000 }),
-    JSON.stringify({ role: "assistant", content: "回答", time: 1788000002000 }),
-  ].join("\n");
-  writeFileSync(join(sessionDir, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(payload, "utf8")));
+  const file = join(sessionDir, "session.jsonl.zstd");
+  const frames = batches.map((records) =>
+    zstdCompressSync(
+      Buffer.from(records.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8"),
+    ),
+  );
+  if (tornTail) {
+    // An interrupted append leaves a partial final frame behind.
+    frames.push(frames.pop().subarray(0, 12));
+  }
+  writeFileSync(file, Buffer.concat(frames));
+  return { sessionDir, file };
+}
+
+test("dsh: reads the concatenated-frame session container", async () => {
+  const root = makeTmp();
+  const id = "11111111-2222-3333-4444-555555555555";
+  const { sessionDir, file } = writeDshSession(root, "--C-work-dshproj--", id, [
+    [dshHeader(id, "C:\\work\\dshproj")],
+    [
+      { type: "step/start", seq: 1, time: 1788000000500, data: { turn: 1, step: 1 } },
+      {
+        type: "user/message",
+        seq: 2,
+        time: 1788000001000,
+        data: { content: [{ type: "text", text: "压缩会话问题" }] },
+      },
+    ],
+    [
+      {
+        type: "assistant/chunk",
+        seq: 3,
+        time: 1788000001500,
+        data: { turn: 1, step: 1, chunk: { type: "text-delta", index: 0, text: "回答" } },
+      },
+      {
+        type: "text-chunks",
+        seq0: 3,
+        time0: 1788000001500,
+        data: { turn: 1, step: 1, index: 0, dt: [0, 1], texts: ["回", "答"] },
+      },
+      {
+        type: "assistant/message",
+        seq: 5,
+        time: 1788000002000,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            role: "assistant",
+            content: [
+              { type: "reasoning", text: "先想一下" },
+              { type: "text", text: "回答" },
+              { type: "tool-call", id: "call_1", name: "run_code", arguments: "{}" },
+            ],
+          },
+        },
+      },
+      {
+        type: "tool/result",
+        seq: 6,
+        time: 1788000003000,
+        data: {
+          turn: 1,
+          step: 1,
+          message: {
+            // Real logs wrap tool output in a USER-role message — it must still
+            // be displayed as a tool result, never as the user's own words.
+            role: "user",
+            source: { kind: "tool" },
+            content: [{ type: "tool-result", content: [{ type: "text", text: "工具输出" }] }],
+          },
+        },
+      },
+    ],
+  ]);
 
   const scanner = testScanner({ dsh: [root] });
   const { sessions } = await scanner.scanAll();
-  assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].id, "11111111-2222-3333-4444-555555555555");
+  assert.equal(sessions.length, 1, "a multi-frame container must yield its session");
+  assert.equal(sessions[0].id, id);
   assert.equal(sessions[0].title, "压缩会话问题");
   assert.equal(sessions[0].project, "C:\\work\\dshproj");
   assert.equal(sessions[0].createdAt, 1788000000000);
+  assert.equal(sessions[0].lastActive, 1788000003000, "last activity comes from the final frame");
   assert.equal(sessions[0].resumeCommand, "", "dsh has no verified resume syntax");
 
-  const messages = await scanner.loadMessages("dsh", join(sessionDir, "session.jsonl.zstd"));
+  const messages = await scanner.loadMessages("dsh", file);
   assert.deepEqual(
     messages.map((m) => [m.role, m.content]),
     [
       ["user", "压缩会话问题"],
-      ["assistant", "回答"],
+      // The reasoning draft and the chunk deltas stay out: the assembled
+      // assistant/message is the single source for that turn.
+      ["assistant", "回答\n[Tool: run_code]"],
+      ["tool", "工具输出"],
     ],
   );
 
-  const del = await scanner.deleteSessions([{ endpoint: "dsh", file: join(sessionDir, "session.jsonl.zstd") }]);
+  const del = await scanner.deleteSessions([{ endpoint: "dsh", file }]);
   assert.equal(del.ok.length, 1);
   assert.ok(!existsSync(sessionDir), "the emptied <uuid> dir is removed too");
 });
 
+test("dsh: a torn trailing frame does not hide the session", async () => {
+  const root = makeTmp();
+  const id = "22222222-3333-4444-5555-666666666666";
+  const { file } = writeDshSession(
+    root,
+    "--C-work-dshproj--",
+    id,
+    [
+      [dshHeader(id, "C:\\work\\dshproj")],
+      [
+        {
+          type: "user/message",
+          seq: 1,
+          time: 1788000001000,
+          data: { content: [{ type: "text", text: "半帧" }] },
+        },
+      ],
+      [
+        {
+          type: "assistant/message",
+          seq: 2,
+          time: 1788000002000,
+          data: { message: { role: "assistant", content: [{ type: "text", text: "没写完" }] } },
+        },
+      ],
+    ],
+    { tornTail: true },
+  );
+
+  const scanner = testScanner({ dsh: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1, "an interrupted append must not hide the session");
+  assert.equal(sessions[0].title, "半帧");
+  const messages = await scanner.loadMessages("dsh", file);
+  assert.deepEqual(
+    messages.map((m) => m.content),
+    ["半帧"],
+    "only the complete frames are readable",
+  );
+});
+
 test("dsh: header-only shell sessions are excluded from the list", async () => {
   const root = makeTmp();
-  const sessionDir = join(root, "--C-work-dshproj--", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
-  mkdirSync(sessionDir, { recursive: true });
-  const payload = JSON.stringify({
-    type: "session",
-    version: 0,
-    id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-    createdAt: 1788000000000,
-    cwd: "C:\\work\\dshproj",
-  });
-  writeFileSync(join(sessionDir, "session.jsonl.zstd"), zstdCompressSync(Buffer.from(payload, "utf8")));
+  const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  writeDshSession(root, "--C-work-dshproj--", id, [[dshHeader(id, "C:\\work\\dshproj")]]);
 
   const { sessions } = await testScanner({ dsh: [root] }).scanAll();
   assert.deepEqual(sessions, []);
@@ -587,7 +698,29 @@ test("qoder: transcripts without any user turn are excluded", async () => {
 
 // --- sqlite adapters ------------------------------------------------------------
 
-function makeSessionDb(dir, fileName = "db.sqlite") {
+// One real zcode/opencode assistant turn. A "tool" part carries the call AND
+// its result (state.output when completed, state.error when it failed, neither
+// while running), and the call's name sits under "tool" — not "name". The
+// fixture used to hold no tool part at all, which is exactly why "[Tool:
+// unknown]" for every zcode call shipped unnoticed.
+function toolPart(overrides = {}) {
+  return {
+    type: "tool",
+    callID: "call_fixture",
+    tool: "Bash",
+    state: { status: "completed", input: { command: "ls" }, output: "文件清单" },
+    ...overrides,
+  };
+}
+
+const FIXTURE_TURN = [
+  { type: "text", text: "数据库里的回答" },
+  toolPart(),
+  toolPart({ callID: "call_err", tool: "Read", state: { status: "error", error: "读取失败" } }),
+  toolPart({ callID: "call_run", tool: "Grep", state: { status: "running", input: {} } }),
+];
+
+function makeSessionDb(dir, fileName = "db.sqlite", turnParts = FIXTURE_TURN) {
   const dbPath = join(dir, fileName);
   const db = new DatabaseSync(dbPath);
   db.exec(`
@@ -626,6 +759,23 @@ function makeSessionDb(dir, fileName = "db.sqlite") {
     1788000001000,
     JSON.stringify({ type: "text", text: "数据库里的问题" }),
   );
+  db.prepare("INSERT INTO message VALUES (?, ?, ?, ?, ?)").run(
+    "msg_2",
+    "sess_db1",
+    1788000002000,
+    1788000002000,
+    JSON.stringify({ role: "assistant" }),
+  );
+  turnParts.forEach((part, i) => {
+    db.prepare("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)").run(
+      `part_t${i}`,
+      "msg_2",
+      "sess_db1",
+      1788000002000 + i,
+      1788000002000 + i,
+      JSON.stringify(part),
+    );
+  });
   db.close();
   return dbPath;
 }
@@ -646,9 +796,17 @@ test("zcode: scans the session table read-only and loads messages", async () => 
   assert.equal(sessions[0].resumeCommand, "", "zcode resume syntax not verified");
 
   const messages = await scanner.loadMessages("zcode", sessions[0].file);
+  // The turn's tool calls keep their real names ([Tool: Bash], never
+  // "[Tool: unknown]"), and every finished call contributes its output as its
+  // own "tool"-role message — a still-running call contributes none.
   assert.deepEqual(
     messages.map((m) => [m.role, m.content]),
-    [["user", "数据库里的问题"]],
+    [
+      ["user", "数据库里的问题"],
+      ["assistant", "数据库里的回答\n[Tool: Bash]\n[Tool: Read]\n[Tool: Grep]"],
+      ["tool", "文件清单"],
+      ["tool", "读取失败"],
+    ],
   );
 
   const del = await scanner.deleteSessions([{ endpoint: "zcode", file: sessions[0].file }]);
@@ -666,6 +824,36 @@ test("opencode: scans its own db and builds a verified resume command", async ()
   assert.equal(sessions.length, 1);
   assert.equal(sessions[0].endpoint, "opencode");
   assert.equal(sessions[0].resumeCommand, "opencode --session sess_db1");
+
+  // Same loader as zcode, so the same tool shape must resolve there too.
+  const messages = await scanner.loadMessages("opencode", sessions[0].file);
+  assert.equal(messages[1].content, "数据库里的回答\n[Tool: Bash]\n[Tool: Read]\n[Tool: Grep]");
+  assert.deepEqual(messages.filter((m) => m.role === "tool").map((m) => m.content), [
+    "文件清单",
+    "读取失败",
+  ]);
+});
+
+test("sqlite tool blocks without a usable name fall back to [Tool: unknown]", async () => {
+  const root = makeTmp();
+  mkdirSync(join(root, "cli", "db"), { recursive: true });
+  makeSessionDb(join(root, "cli", "db"), "db.sqlite", [
+    // empty name → fallback; "name" spelling from the other clients still wins
+    toolPart({ tool: "" }),
+    toolPart({ callID: "call_named", tool: undefined, name: "Write" }),
+  ]);
+  const scanner = testScanner({ zcode: [root] });
+  const { sessions } = await scanner.scanAll();
+  const messages = await scanner.loadMessages("zcode", sessions[0].file);
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "数据库里的问题"],
+      ["assistant", "[Tool: unknown]\n[Tool: Write]"],
+      ["tool", "文件清单"],
+      ["tool", "文件清单"],
+    ],
+  );
 });
 
 test("sqlite adapters degrade to endpointErrors when the db cannot be opened", async () => {
@@ -747,6 +935,127 @@ test("reasonix: reads its session catalog and prefers custom_title", async () =>
   const check = new DatabaseSync(`file:${dbPath.replace(/\\/g, "/")}?mode=ro`);
   assert.equal(check.prepare("SELECT count(*) n FROM catalog_sessions").get().n, 0);
   check.close();
+});
+
+function writeReasonixCatalog(localRoot, rows = []) {
+  mkdirSync(join(localRoot, "session-catalog"), { recursive: true });
+  const dbPath = join(localRoot, "session-catalog", "v5.sqlite");
+  const db = new DatabaseSync(dbPath);
+  db.exec(`CREATE TABLE catalog_sessions (
+    path TEXT PRIMARY KEY, directory TEXT NOT NULL, scope TEXT NOT NULL,
+    topic_title TEXT NOT NULL DEFAULT '', custom_title TEXT NOT NULL DEFAULT '',
+    preview TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0,
+    last_activity_at INTEGER NOT NULL DEFAULT 0
+  )`);
+  const insert = db.prepare("INSERT INTO catalog_sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+  for (const row of rows) {
+    insert.run(
+      row.path, row.directory, row.scope ?? "global", row.topic_title ?? "",
+      row.custom_title ?? "", row.preview ?? "", row.created_at ?? 0, row.last_activity_at ?? 0,
+    );
+  }
+  db.close();
+  return dbPath;
+}
+
+test("reasonix: a catalog row whose transcript is gone is not listed", async () => {
+  const localRoot = makeTmp();
+  const projectsRoot = makeTmp();
+  const sessionsDir = join(projectsRoot, "c--work-rxproj", "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const live = join(sessionsDir, "20260901-100000.1-model.jsonl");
+  writeFileSync(live, JSON.stringify({ role: "user", content: "还在的会话" }) + "\n", "utf8");
+  // The app moved this one into its own .trash and the catalog has not caught
+  // up yet — listing it used to make opening it fail outright.
+  const gone = join(sessionsDir, "20260901-090000.1-model.jsonl");
+  writeReasonixCatalog(localRoot, [
+    {
+      path: gone,
+      directory: sessionsDir,
+      topic_title: "已经消失的会话",
+      preview: "stale preview",
+      created_at: 1788000000000,
+      last_activity_at: 1788000009000,
+    },
+  ]);
+
+  const { sessions } = await testScanner({ reasonix: [localRoot, projectsRoot] }).scanAll();
+  assert.deepEqual(
+    sessions.map((s) => s.file),
+    [live],
+    "only sessions whose transcript is on disk may be listed",
+  );
+});
+
+test("reasonix: transcripts the catalog has not indexed are still listed", async () => {
+  const localRoot = makeTmp();
+  const projectsRoot = makeTmp();
+  writeReasonixCatalog(localRoot, []);
+  const sessionsDir = join(projectsRoot, "c--work-rxproj", "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const file = join(sessionsDir, "20260825-170309.100-gemini.jsonl");
+  writeFileSync(
+    file,
+    [
+      JSON.stringify({ role: "system", content: "You are Reasonix." }),
+      JSON.stringify({ role: "user", content: "Reply with pong" }),
+      JSON.stringify({ role: "assistant", content: "pong" }),
+      // A turn that only calls tools carries no content at all.
+      JSON.stringify({ role: "assistant", tool_calls: [{ name: "run_code" }, { name: "read_file" }] }),
+      JSON.stringify({ role: "tool", tool_call_id: "c1", name: "run_code" }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    `${file}.meta`,
+    JSON.stringify({
+      id: "20260825-170309.100-gemini",
+      topic_title: "侧车里的标题",
+      preview: "侧车里的预览",
+      created_at: "2026-08-25T17:03:09.0638081Z",
+      updated_at: "2026-08-25T17:03:10.6719813Z",
+    }),
+    "utf8",
+  );
+
+  const scanner = testScanner({ reasonix: [localRoot, projectsRoot] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1, "the filesystem is the discovery source");
+  assert.equal(sessions[0].title, "侧车里的标题");
+  assert.equal(sessions[0].summary, "侧车里的预览");
+  assert.equal(new Date(sessions[0].createdAt).toISOString(), "2026-08-25T17:03:09.063Z");
+  assert.equal(new Date(sessions[0].lastActive).toISOString(), "2026-08-25T17:03:10.671Z");
+
+  const messages = await scanner.loadMessages("reasonix", file);
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "Reply with pong"],
+      ["assistant", "pong"],
+      // Tool-only turns keep their tool names instead of vanishing.
+      ["assistant", "[Tool: run_code]\n[Tool: read_file]"],
+    ],
+  );
+});
+
+test("reasonix: a transcript that vanished after listing reports a readable reason", async () => {
+  const localRoot = makeTmp();
+  const projectsRoot = makeTmp();
+  const sessionsDir = join(projectsRoot, "c--work-rxproj", "sessions");
+  mkdirSync(sessionsDir, { recursive: true });
+  const file = join(sessionsDir, "20260901-110000.1-model.jsonl");
+  writeFileSync(file, JSON.stringify({ role: "user", content: "hi" }) + "\n", "utf8");
+
+  const scanner = testScanner({ reasonix: [localRoot, projectsRoot] });
+  rmSync(file);
+  await assert.rejects(
+    () => scanner.loadMessages("reasonix", file),
+    (err) => {
+      assert.match(err.message, /源文件已不在磁盘上/);
+      assert.ok(!err.message.includes(file), "the raw path must not reach the user");
+      return true;
+    },
+  );
 });
 
 // --- orchestration ---------------------------------------------------------------
