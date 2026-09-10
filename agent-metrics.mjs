@@ -58,6 +58,81 @@ const SESSION_SILENT_ACTIVE_REQUEST_TTL_MS = 45000;
 // denominator. The window is a last-N request count, never a wall-clock TTL.
 const RECENT_SAMPLE_WINDOW = 18;
 
+// Minimum generation window for a request to count as a speed measurement.
+// Mirrors the statistics page's rule (usage-stats.mjs TPS_MIN_GEN_SEC): below
+// this the wall-clock between the first and the last token is a packet burst,
+// not a rate — the reply arrived in one or two TCP segments, so the quotient
+// says nothing about how fast the model writes. The guard is window-based on
+// purpose. The rule it replaces was rate-based ("over 200 tok/s must be an
+// artifact — divide by the FULL request duration instead"), which under-reported
+// every fast model the moment real speeds passed 200 tok/s, because that
+// fallback denominator carries the first-token wait (measured 2026-09-10:
+// deepseek-v4.1 at 270 tok/s displayed as 156; a 275 tok/s request as 77.8).
+const TPS_MIN_GEN_MS = 200;
+
+// The one speed statistic the panel and the statistics page share: completion
+// tokens over the generation windows of the samples that carry a real one.
+// Token-weighted, NOT an average of per-request quotients (which gives a
+// 30-token reply the same vote as a 3000-token one), and never cumulative
+// tokens over cumulative busy time (which folds first-token waits and idle gaps
+// into the denominator — that is what put a 12 tok/s reading next to a 57 tok/s
+// curve on the same Claude session card).
+// Samples are { completion, genDurationMs }; genDurationMs is null when the
+// request never streamed a first chunk (no measurable window).
+function isMeasuredSample(sample) {
+  const tokens = Number(sample?.completion) || 0;
+  const gen = Number(sample?.genDurationMs);
+  return tokens > 0 && Number.isFinite(gen) && gen >= TPS_MIN_GEN_MS;
+}
+
+// One request's own speed, or null when it carries no measurement (see
+// isMeasuredSample). The sparklines plot exactly this population, so a curve and
+// the number printed next to it can never be built from different requests.
+export function sampleTps(sample) {
+  if (!isMeasuredSample(sample)) return null;
+  return Number((Number(sample.completion) / (Number(sample.genDurationMs) / 1000)).toFixed(1));
+}
+
+export function windowTps(samples, window = RECENT_SAMPLE_WINDOW) {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  let completion = 0;
+  let genMs = 0;
+  for (const sample of samples.slice(-window)) {
+    if (!isMeasuredSample(sample)) continue;
+    completion += Number(sample.completion);
+    genMs += Number(sample.genDurationMs);
+  }
+  if (genMs <= 0) return null;
+  return Number((completion / (genMs / 1000)).toFixed(1));
+}
+
+// Cache-hit rate over the same window: cached prompt tokens over total prompt
+// tokens. A per-request mean of hit rates would let a 200-token request outvote
+// a 200k-token one.
+export function windowCacheHitRate(samples, window = RECENT_SAMPLE_WINDOW) {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  let prompt = 0;
+  let cached = 0;
+  for (const sample of samples.slice(-window)) {
+    prompt += Number(sample?.prompt) || 0;
+    cached += Number(sample?.cached) || 0;
+  }
+  if (prompt <= 0) return null;
+  return Number(((cached / prompt) * 100).toFixed(1));
+}
+
+// Fallback for a Claude session whose launcher predates the window-sample field:
+// the reporter's per-request speeds, averaged. This is the statistic windowTps
+// replaced (a tiny reply votes as loudly as a long one), but it stays in the
+// right order of magnitude and it disappears as soon as that session is
+// relaunched with the current launcher.
+function meanRecentTps(values, window = RECENT_SAMPLE_WINDOW) {
+  if (!Array.isArray(values)) return null;
+  const valid = values.slice(-window).filter((v) => typeof v === "number" && v > 0);
+  if (valid.length === 0) return null;
+  return Number((valid.reduce((a, b) => a + b, 0) / valid.length).toFixed(1));
+}
+
 // Instance-id rules shared by the injection channel (the x-agent-instance
 // header on the OpenAI/Anthropic paths): trimmed, length-capped, charset
 // whitelist. Unlike
@@ -438,7 +513,11 @@ function createAggregateState() {
     totalPromptTokens: 0,
     totalCompletionTokens: 0,
     totalCachedTokens: 0,
-    recentSamples: [], // last N successful requests' {tps, completion, genDuration, prompt, cached}
+    // Last N successful requests: { completion, genDurationMs, prompt, cached }.
+    // Raw measurements, never derived numbers: windowTps turns them into the
+    // card's value and sampleTps into the sparkline points, from the same
+    // population of measured requests.
+    recentSamples: [],
     ttftHistory: [],
     lastTtftMs: null,
     firstRequestAt: null,
@@ -814,28 +893,22 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         clearMatchingAggregateFault(state, meta);
       }
 
-      // Generation duration is only meaningful for requests that actually
-      // produced output. Failed/aborted requests never generated tokens, so
-      // their wall-clock duration must not feed TPS or the sliding window.
-      let genDuration = reqDuration;
+      // The generation window is the honest wall-clock between the first token
+      // and the end of the request — no rate-based rewriting of the denominator.
+      // A request that never streamed a first chunk has no measurable window at
+      // all (null); the statistics page drops those rows from TPS for the same
+      // reason, so the card must not invent a denominator for them either.
+      // Failed/aborted requests never generated tokens, so their wall-clock
+      // duration must not feed TPS or the window.
+      let genDurationMs = null;
       if (firstChunkTime !== null) {
-        const rawGen = Math.max(1, endTime - firstChunkTime);
-        // If firstChunkTime was recorded within 150ms of endTime (e.g. tool call
-        // or single fast packet where firstChunk and finish arrived in the same TCP burst),
-        // fallback to full reqDuration so instantaneous TPS is not artificially
-        // inflated to 2000-5000+ tok/s by a tiny denominator artifact.
-        if (rawGen < 150) {
-          genDuration = Math.max(rawGen, reqDuration);
-        } else {
-          genDuration = rawGen;
-        }
-        state.totalGenerationDurationMs += genDuration;
+        genDurationMs = Math.max(1, endTime - firstChunkTime);
+        state.totalGenerationDurationMs += genDurationMs;
       } else if (!hadError && !aborted) {
         // Non-streaming success: the full request duration is the best TTFT
         // proxy available. Failed/aborted requests never produced a first
         // token — recording their failure duration would fabricate a
         // healthy-looking TTFT and mask the fault from the panel.
-        genDuration = reqDuration;
         state.lastTtftMs = reqDuration;
         journalTtftMs = reqDuration;
         state.ttftHistory.push(reqDuration);
@@ -861,22 +934,13 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         state.totalCachedTokens += cached;
 
         // Feed the sliding window only from requests that genuinely produced
-        // completion tokens. We calculate each request's individual TPS and
-        // aggregate them as an arithmetic average (平均速度) across recent dialogues/requests,
-        // ensuring concurrent multi-dialogues do not accumulate into combined speed (合速度).
+        // completion tokens. windowTps turns these samples into the card's
+        // number, sampleTps into the sparkline points — one rule, one population,
+        // and the same statistic the statistics page publishes.
         if (!hadError && !aborted && completion > 0) {
-          // Secondary burst check: if completion / (genDuration / 1000) > 200, re-clamp to reqDuration
-          if (firstChunkTime !== null && (completion / (genDuration / 1000)) > 200) {
-            genDuration = Math.max(genDuration, reqDuration);
-          }
-          genDuration = Math.max(genDuration, 100);
-          let singleTps = Number((completion / (genDuration / 1000)).toFixed(1));
-          if (singleTps > 300) singleTps = 300;
-
           state.recentSamples.push({
-            tps: singleTps,
             completion,
-            genDuration,
+            genDurationMs,
             prompt,
             cached,
           });
@@ -1008,26 +1072,12 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
   const tpsSamples = state.recentSamples.slice(-tpsWindow);
   const ttftForAvg = state.ttftHistory.slice(-tpsWindow);
 
-  let tps = null;
-  if (tpsSamples.length > 0) {
-    const validSamples = tpsSamples.filter((s) => typeof s.tps === "number" && s.tps > 0);
-    if (validSamples.length > 0) {
-      const sumTps = validSamples.reduce((acc, s) => acc + s.tps, 0);
-      tps = Number((sumTps / validSamples.length).toFixed(1));
-    }
-  }
-
-  let cacheHitRate = null;
-  if (tpsSamples.length > 0) {
-    let sumPrompt = 0, sumCached = 0;
-    for (const s of tpsSamples) {
-      sumPrompt += s.prompt;
-      sumCached += s.cached;
-    }
-    if (sumPrompt > 0) {
-      cacheHitRate = Number(((sumCached / sumPrompt) * 100).toFixed(1));
-    }
-  }
+  // One statistic for the card and the statistics page: token-weighted speed
+  // over the samples that carry a real generation window (windowTps), and cached
+  // tokens over prompt tokens for the hit rate. Both are windowed — never
+  // process-lifetime, and never a mean of per-request quotients.
+  const tps = windowTps(tpsSamples, tpsWindow);
+  const cacheHitRate = windowCacheHitRate(tpsSamples, tpsWindow);
 
   let avgTtft = null;
   if (ttftForAvg.length > 0) {
@@ -1077,7 +1127,7 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
   const sparkLimit = parseSparkWindowPoints(state.sparkWindowPoints);
   const sparkHistory = {
     ttft: state.ttftHistory.slice(-sparkLimit).map((ms) => Number((ms / 1000).toFixed(2))),
-    tps: state.recentSamples.map((s) => s.tps).filter((v) => typeof v === "number" && v > 0).slice(-sparkLimit),
+    tps: state.recentSamples.map(sampleTps).filter((v) => v !== null).slice(-sparkLimit),
     cache: state.recentSamples.map((s) => {
       if (s.prompt > 0) return Number(((s.cached / s.prompt) * 100).toFixed(1));
       return 0;
@@ -1556,6 +1606,7 @@ export function createAgentMetricsCollector(options = {}) {
       lastError: null,
       errorActive: false,
       sparkHistory: null,
+      samples: null,
       lastSeen: now,
       ended: false,
     };
@@ -1579,6 +1630,14 @@ export function createAgentMetricsCollector(options = {}) {
     // it (heartbeat re-posts included).
     if (report.sparkHistory && typeof report.sparkHistory === "object" && Array.isArray(report.sparkHistory.tps)) {
       session.sparkHistory = report.sparkHistory;
+    }
+    // Raw recent samples (current launchers only): the panel derives this
+    // session's speed and cache rate from them with the very same window rule
+    // the endpoint cards use. Same overwrite semantics as the ring above; a
+    // launcher that predates the field simply leaves it null and the reader
+    // falls back to the ring's per-request mean.
+    if (Array.isArray(report.samples)) {
+      session.samples = report.samples;
     }
     // Model identity for the panel's per-session model badge. Same overwrite
     // semantics as lastError: the reporter's latest snapshot wins. A snapshot
@@ -1628,6 +1687,7 @@ export function createAgentMetricsCollector(options = {}) {
           lastError: null,
           errorActive: false,
           sparkHistory: null,
+          samples: null,
           lastSeen: now,
           ended: false,
         });
@@ -1843,14 +1903,18 @@ export function createAgentMetricsCollector(options = {}) {
     const claudeIsRunning = claudeRawSessions.length > 0 || claudeProcessCount > 0;
 
     const claudeSessionsFormatted = claudeRawSessions.map((s, idx) => {
-      let tps = null;
-      if (s.activeDurationMs > 0 && s.completionTokens > 0) {
-        tps = Number((s.completionTokens / (s.activeDurationMs / 1000)).toFixed(1));
-      }
-      let cacheHitRate = null;
-      if (s.promptTokens > 0) {
-        cacheHitRate = Number(((s.cachedTokens / s.promptTokens) * 100).toFixed(1));
-      }
+      // Speed and cache rate come from the reporter's per-request window — the
+      // same statistic every other card publishes. The cumulative form this
+      // replaced (total output tokens over total busy wall-clock) booked each
+      // request's first-token wait as generation time, which on Claude Code
+      // (6-7s TTFT against a ~2s generation) reported about a fifth of the real
+      // speed, and drifted further the longer the session ran. A launcher that
+      // predates the window field falls back to the reporter's recent
+      // per-request mean, in the right order of magnitude either way.
+      const tps = windowTps(s.samples) ?? meanRecentTps(s.sparkHistory?.tps);
+      const cacheHitRate = windowCacheHitRate(s.samples) ?? (
+        s.promptTokens > 0 ? Number(((s.cachedTokens / s.promptTokens) * 100).toFixed(1)) : null
+      );
       return {
         id: s.id,
         title: `实例 #${idx + 1}`,
@@ -2103,7 +2167,10 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   // reload wipes them; this ring rides every snapshot so the cc card can
   // redraw the full curve from the first poll after a reload. Failures and
   // aborts are skipped — same rule as the aggregate samples.
-  const sessionSamples = []; // {tps, genDuration, prompt, cached}
+  // Each entry keeps the raw measurement ({ completion, genDurationMs, prompt,
+  // cached, ttftMs }), not a pre-computed speed, so the panel can apply the one
+  // shared window rule to this session exactly as it does to an endpoint card.
+  const sessionSamples = [];
   const SESSION_SAMPLE_WINDOW = 128;
   const pushSessionSample = (sample) => {
     sessionSamples.push(sample);
@@ -2248,9 +2315,21 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       // cache as per-request hit-rate percentages.
       sparkHistory: {
         ttft: sessionSamples.map((s) => s.ttftMs).filter((v) => v !== null).map((ms) => Number((ms / 1000).toFixed(2))),
-        tps: sessionSamples.map((s) => s.tps).filter((v) => typeof v === "number" && v > 0),
+        // Per-request speed over the measured population only — the same
+        // requests the card's number is built from (sampleTps), so curve and
+        // number never disagree.
+        tps: sessionSamples.map(sampleTps).filter((v) => v !== null),
         cache: sessionSamples.map((s) => (s.prompt > 0 ? Number(((s.cached / s.prompt) * 100).toFixed(1)) : 0)),
       },
+      // Recent raw samples: the panel turns these into this session's speed and
+      // cache rate with the shared window rule (windowTps / windowCacheHitRate),
+      // so a Claude session card and an endpoint card are the same measurement.
+      samples: sessionSamples.slice(-RECENT_SAMPLE_WINDOW).map((s) => ({
+        completion: s.completion,
+        genDurationMs: s.genDurationMs,
+        prompt: s.prompt,
+        cached: s.cached,
+      })),
       // Model identity of the request currently in flight (chain attribution
       // wins, then the transport-supplied meta), so the panel can render a
       // per-session model badge.
@@ -2331,9 +2410,11 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     if (!hadError && !aborted) {
       const norm = normalizedUsage(usage);
       if (norm.completion > 0) {
-        const genDuration = Math.max(1, endTime - (ctx.firstChunk ?? ctx.startTime));
         pushSessionSample({
-          tps: Math.min(300, Number((norm.completion / (genDuration / 1000)).toFixed(1))),
+          completion: norm.completion,
+          // null for a non-streaming reply: there is no window between first and
+          // last token to measure, and the statistics page drops those rows too.
+          genDurationMs: ctx.firstChunk !== null ? Math.max(1, endTime - ctx.firstChunk) : null,
           prompt: norm.prompt,
           cached: norm.cached,
           ttftMs: ctx.firstChunk !== null ? Math.max(1, ctx.firstChunk - ctx.startTime) : null,
