@@ -7,6 +7,9 @@ import {
   getTtftColor,
   formatDuration,
   normalizeInstanceId,
+  sampleTps,
+  windowCacheHitRate,
+  windowTps,
   TTFT_THRESHOLDS,
 } from "./agent-metrics.mjs";
 
@@ -60,6 +63,45 @@ const WMIC_LINEAGE_CHAIN_SCAN =
     "LAPTOP,,cmd.exe,1000,1001",
     "LAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,1001,4321",
   ].join("\r\n") + "\r\n";
+
+describe("generation-speed window (the statistic the card and the stats page share)", () => {
+  it("sums tokens over generation windows and ignores requests that carry no measurement", () => {
+    const samples = [
+      { completion: 270, genDurationMs: 1000, prompt: 100, cached: 50 },
+      { completion: 2, genDurationMs: 1, prompt: 100, cached: 0 }, // one-packet burst
+      { completion: 50, genDurationMs: null, prompt: 100, cached: 50 }, // never streamed
+      { completion: 300, genDurationMs: 1000, prompt: 100, cached: 0 },
+    ];
+    // (270 + 300) tokens over (1.0 + 1.0)s — the burst and the non-streaming
+    // reply have no window to measure, so they are absent from both sides.
+    assert.equal(windowTps(samples), 285);
+    assert.equal(sampleTps(samples[1]), null);
+    assert.equal(sampleTps(samples[2]), null);
+    // The cache rate counts every sample in the window: it needs prompt tokens,
+    // not a generation window.
+    assert.equal(windowCacheHitRate(samples), 25);
+    assert.equal(windowTps([]), null);
+    assert.equal(windowTps(undefined), null);
+    assert.equal(windowCacheHitRate([]), null);
+  });
+
+  it("weights by tokens, not one vote per request", () => {
+    const samples = [
+      { completion: 40, genDurationMs: 1000, prompt: 1, cached: 0 }, // 40 tok/s
+      { completion: 300, genDurationMs: 3000, prompt: 1, cached: 0 }, // 100 tok/s
+    ];
+    assert.equal(windowTps(samples), 85); // 340 tokens / 4.0s
+    assert.notEqual(windowTps(samples), 70); // the mean of the two quotients
+  });
+
+  it("keeps only the last N samples", () => {
+    const samples = [
+      { completion: 10, genDurationMs: 1000, prompt: 1, cached: 0 },
+      { completion: 900, genDurationMs: 1000, prompt: 1, cached: 0 },
+    ];
+    assert.equal(windowTps(samples, 1), 900);
+  });
+});
 
 describe("createAgentMetricsCollector", () => {
   it("tracks ZCode request start, firstChunk, end, TPS and cache hit rate", async () => {
@@ -610,11 +652,14 @@ describe("createAgentMetricsCollector", () => {
       sessionId: "sess_001",
       requests: 3,
       activeRequests: 1,
+      // 15s of session busy time, of which only 5s was generation — the Claude
+      // Code shape (every request waits several seconds for its first token).
       activeDurationMs: 15000,
       promptTokens: 2000,
       completionTokens: 300,
       cachedTokens: 1500,
       lastTtftMs: 6500, // yellow
+      samples: [{ completion: 300, genDurationMs: 5000, prompt: 2000, cached: 1500 }],
     });
 
     let status = await collector.getAgentsStatus();
@@ -623,8 +668,35 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(claude.sessionsCount, 1);
     assert.equal(claude.sessions[0].id, "sess_001");
     assert.equal(claude.sessions[0].ttftColor, "yellow");
-    assert.equal(claude.sessions[0].tps, 20); // 300 / 15s = 20
+    // 300 tokens over the 5s generation window. Dividing by the 15s of busy
+    // time instead reports 20 — first-token waits booked as generation time.
+    assert.equal(claude.sessions[0].tps, 60);
+    assert.notEqual(claude.sessions[0].tps, 20);
     assert.equal(claude.sessions[0].cacheHitRate, 75); // 1500 / 2000 = 75%
+  });
+
+  it("falls back to the reporter's recent per-request mean when the launcher predates window samples", async () => {
+    const mockExec = (cmd, opts, cb) =>
+      cb(null, `"claude.exe","4444","Console","1","55,000 K"\r\n`);
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
+
+    collector.reportSession("token_claude_old", {
+      pid: 4444,
+      sessionId: "sess_old",
+      requests: 5,
+      activeRequests: 0,
+      activeDurationMs: 60000,
+      promptTokens: 1000,
+      completionTokens: 400,
+      cachedTokens: 500,
+      lastTtftMs: 3000,
+      // A launcher from before the window-sample field: only the ring is present.
+      sparkHistory: { ttft: [3], tps: [50, 40, 60], cache: [50] },
+    });
+
+    const claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+    assert.equal(claude.sessions[0].tps, 50, "mean of the ring (50/40/60) — degraded, never 400 tokens / 60s = 6.7");
+    assert.equal(claude.sessions[0].cacheHitRate, 50, "cumulative fallback: 500 / 1000");
   });
 
   it("settles a claude session whose reporter went silent mid-generation, but never a freshly-heartbeating one", async () => {
@@ -2274,14 +2346,18 @@ describe("createSessionReporter", () => {
     assert.equal(zcode.metrics.activeDurationMs, 7000); // 2000 + 5000
   });
 
-  it("avoids 2000-5000 tok/s spikes when genDuration is very short (clamps/guards to reqDuration)", async () => {
+  it("treats a one-packet reply as unmeasurable instead of inventing a denominator", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    // Request total time: 1000ms (TTFT = 999ms). Output arrived in 1ms (2 tokens).
-    // Effective generation took the full query turn (~1s); single-packet output must not report 2000 tok/s.
+    // Total turn: 1000ms (TTFT = 999ms), output arrived in 1ms (2 tokens). The
+    // quotient (2000 tok/s) is a burst artifact, and the full turn is no better a
+    // denominator — it is almost entirely first-token wait. Such a request
+    // carries no speed measurement at all, exactly as the statistics page treats
+    // it (a generation window under 0.2s), so the card reports nothing rather
+    // than a fabricated number.
     const req = collector.startRequest({ providerId: "acme-default", model: "claude-sonnet-4-6" });
     mockTime = 1999;
     req.recordFirstChunk();
@@ -2290,10 +2366,9 @@ describe("createSessionReporter", () => {
 
     const status = await collector.getAgentsStatus();
     const zcode = status.find((a) => a.id === "zcode");
-    assert.ok(zcode.metrics.tps !== null);
-    // Should be bounded by reqDuration (2 tok / 1.0s = 2.0 tok/s), definitely not 2000 tok/s
-    assert.ok(zcode.metrics.tps <= 100, `tps was ${zcode.metrics.tps}, expected <= 100`);
-    assert.equal(zcode.metrics.tps, 2);
+    assert.equal(zcode.metrics.tps, null, "no measured window, no number");
+    assert.deepEqual(zcode.metrics.sparkHistory.tps, [], "and no point on the curve");
+    assert.equal(zcode.metrics.tokens.completion, 2, "the tokens themselves are still counted");
   });
 
   it("releases activeModels and currentModel immediately on abort", async () => {
@@ -2330,7 +2405,7 @@ describe("createSessionReporter", () => {
     assert.equal(zcode.lastModel, "model-B");
   });
 
-  it("calculates arithmetic average TPS across concurrent requests rather than combined sum speed", async () => {
+  it("publishes a token-weighted window speed, not an average of per-request quotients and not a combined sum", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
     const mockExec = (cmd, opts, cb) => cb(null, "");
@@ -2352,17 +2427,43 @@ describe("createSessionReporter", () => {
 
     const status = await collector.getAgentsStatus();
     const zcode = status.find((a) => a.id === "zcode");
-    // Average of 40 and 60 is 50.0 tok/s (arithmetic mean, not combined 100 tok/s)
+    // 100 tokens over 2.0s = 50.0 tok/s: neither the combined 100 (the two
+    // requests never generated at the same time) nor a couple of quotients
+    // averaged by hand.
     assert.equal(zcode.metrics.tps, 50);
+    assert.deepEqual(zcode.metrics.sparkHistory.tps, [40, 60]);
   });
 
-  it("clamps extreme generation bursts or tool calls to reasonable ceiling and avoids thousands tok/s", async () => {
+  it("publishes a fast model at its real speed — a long first-token wait is not generation time", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    // Tool call response: 80 tokens, total request took 400ms, firstChunk to end was 2ms
+    // The live shape measured on 2026-09-10 (dsh / deepseek-v4.1): 810 tokens
+    // streamed in 3.0s at the tail of an 8.0s turn.
+    const req = collector.startRequest({ providerId: "sta1n-default", model: "deepseek-v4.1-flash" });
+    mockTime = 6000;
+    req.recordFirstChunk(); // 5s first-token wait
+    mockTime = 9000;
+    req.recordEnd({ usage: { prompt_tokens: 20000, completion_tokens: 810 } });
+
+    const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+    // 810 / 3.0s = 270 tok/s. The guard this replaced rewrote the denominator to
+    // the whole 8.0s turn whenever a rate passed 200 tok/s, which printed 101.
+    assert.equal(zcode.metrics.tps, 270);
+    assert.deepEqual(zcode.metrics.sparkHistory.tps, [270]);
+  });
+
+  it("keeps a tool-call burst out of the window instead of clamping it to a fake ceiling", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => cb(null, "");
+    const collector = testCollector({ execFn: mockExec, nowFn });
+
+    // Tool call response: 80 tokens, total turn 400ms, firstChunk to end 2ms.
+    // The burst is not a rate (40000 tok/s) — and the whole turn is not one
+    // either (the reply was already written when the turn had 398ms left).
     const req = collector.startRequest({ providerId: "acme-default", model: "gemini-3.7-flash" });
     mockTime = 1398;
     req.recordFirstChunk();
@@ -2371,10 +2472,9 @@ describe("createSessionReporter", () => {
 
     const status = await collector.getAgentsStatus();
     const zcode = status.find((a) => a.id === "zcode");
-    assert.ok(zcode.metrics.tps !== null);
-    // 80 tokens / 0.4s = 200 tok/s (bounded by reqDuration), must never be 40000 tok/s (80 / 0.002s)
-    assert.ok(zcode.metrics.tps <= 300, `tps was ${zcode.metrics.tps}, expected <= 300`);
-    assert.equal(zcode.metrics.tps, 200);
+    assert.equal(zcode.metrics.tps, null);
+    assert.deepEqual(zcode.metrics.sparkHistory.tps, []);
+    assert.equal(zcode.metrics.tokens.completion, 80);
   });
 
   it("routes DSH requests and tracks DSH aggregate metrics independently from ZCode", async () => {
@@ -2552,7 +2652,8 @@ describe("createSessionReporter", () => {
     mockTime = 3500;
     reporter.recordEnd({ status: 200, usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 40 } });
     // Request 2: non-streaming success — full duration is the TTFT proxy
-    // (journal rule), so the sample's ttftMs is null and ttft history stays [0.5].
+    // (journal rule), so the sample's ttftMs is null and ttft history stays
+    // [0.5]. It also has no generation window, so it contributes no speed point.
     reporter.startRequest({ model: "claude-opus-5", stream: false, path: "anthropic" });
     mockTime = 5000;
     reporter.recordEnd({ status: 200, usage: { input_tokens: 80, output_tokens: 25 } });
@@ -2565,8 +2666,17 @@ describe("createSessionReporter", () => {
     assert.ok(last.sparkHistory, "snapshot carries sparkHistory");
     assert.deepEqual(Object.keys(last.sparkHistory).sort(), ["cache", "tps", "ttft"],
       "session sparkHistory mirrors the aggregate metrics.sparkHistory shape");
-    assert.deepEqual(last.sparkHistory.tps, [25, 16.7], "tps per request: 50 tokens/2s, then 25 tokens/1.5s (gen window = end − firstChunk-or-start)");
+    assert.deepEqual(last.sparkHistory.tps, [25], "only replies with a measurable generation window are plotted: 50 tokens / 2s. The non-streamed 25 tokens have no window, so there is no point — the curve and the card's number are always the same requests");
     assert.deepEqual(last.sparkHistory.ttft, [0.5], "streamed TTFT in seconds; non-streamed sample has no first-chunk point");
+    assert.deepEqual(last.sparkHistory.cache, [40.0, 0.0], "per-request cache-hit-rate percentages (40/100 cached, then 0/80)");
+    assert.deepEqual(
+      last.samples,
+      [
+        { completion: 50, genDurationMs: 2000, prompt: 100, cached: 40 },
+        { completion: 25, genDurationMs: null, prompt: 80, cached: 0 },
+      ],
+      "the snapshot ships raw measurements so the panel derives the session's speed and cache rate with the shared window rule",
+    );
     assert.deepEqual(last.sparkHistory.cache, [40.0, 0.0], "per-request cache hit-rate percentages (40/100 cached, then 0/80)");
 
     // Collector side: reportSession persists the ring onto the session row.
@@ -2580,8 +2690,12 @@ describe("createSessionReporter", () => {
     const sessionRow = claude.sessions[0];
     assert.ok(sessionRow, "per-session snapshot surfaces sparkHistory");
     assert.ok(sessionRow.sparkHistory, "session row carries the reporter's history");
-    assert.deepEqual(sessionRow.sparkHistory.tps, [25, 16.7]);
+    assert.deepEqual(sessionRow.sparkHistory.tps, [25]);
     assert.deepEqual(sessionRow.sparkHistory.ttft, [0.5]);
+    // The row's speed comes from the window samples, not from dividing the
+    // session's cumulative tokens by its cumulative busy time.
+    assert.equal(sessionRow.tps, 25, "50 tokens over the 2s generation window");
+    assert.equal(sessionRow.cacheHitRate, 22.2, "40 cached / 180 prompt over the window");
   });
 
   it("trims sparkHistory to a last-N request window, not a time TTL", async () => {
