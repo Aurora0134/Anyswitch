@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createOpenAIHandler } from "./openai-handler.mjs";
 import { createRetryingFetch } from "./launch.mjs";
+import { providerRoutingShapes } from "./catalog-generation.mjs";
 
 const TOKEN = "test-token-123";
 
@@ -369,7 +370,10 @@ describe("openai handler models discovery", () => {
 
   it("rejects stale catalog with 409 before credential load", async () => {
     let credentialLoaded = false;
-    let generation = "stale-hash";
+    // The snapshot discovery bound: poke-api pointed somewhere else then.
+    const discovered = makeStore();
+    discovered.providers["poke-api"].baseURL = "https://elsewhere.invalid/v1";
+    let generation = providerRoutingShapes(discovered);
     const handler = createOpenAIHandler({
       token: TOKEN,
       loadStore: () => ({ ok: true, store: makeStore() }),
@@ -390,6 +394,34 @@ describe("openai handler models discovery", () => {
     );
     assert.equal(result.status, 409);
     assert.equal(credentialLoaded, false);
+  });
+
+  it("a change to a channel this request never touches still routes", async () => {
+    let upstreamCalls = 0;
+    // Discovery bound both channels; afterwards deepseek was re-pointed.
+    const store = makeStore();
+    let generation = providerRoutingShapes(store);
+    store.providers["deepseek"].baseURL = "https://elsewhere.invalid/v1";
+    const handler = createOpenAIHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store }),
+      loadCredential: () => ({ ok: true, value: "sk" }),
+      upstreamFetch: async () => {
+        upstreamCalls += 1;
+        return { ok: true, status: 200, json: async () => ({ choices: [] }) };
+      },
+      recordGeneration: (value) => {
+        generation = value;
+      },
+      readGeneration: () => generation,
+    });
+    const result = await handler.handleChatCompletions(
+      "/openai/poke-api/v1/chat/completions",
+      { authorization: TOKEN },
+      { model: "claude-opus-5", messages: [] },
+    );
+    assert.equal(result.status, 200);
+    assert.equal(upstreamCalls, 1);
   });
 });
 

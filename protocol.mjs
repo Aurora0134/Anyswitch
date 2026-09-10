@@ -9,6 +9,8 @@
 // The upstream model name is the bare <model-id>: never the wire ID, never
 // prefixed with the provider id.
 
+import { REASONING_FIELDS } from "./stream.mjs";
+
 // ---------- Anthropic request -> OpenAI request ----------
 
 // Anthropic content blocks -> OpenAI message content.
@@ -190,6 +192,15 @@ export function openAIToAnthropic(response, wireId) {
   const message = choice.message ?? {};
   const content = [];
 
+  // Reasoning surfaces as a thinking block ahead of the answer, same order the
+  // streaming translator emits it.
+  for (const field of REASONING_FIELDS) {
+    const value = message[field];
+    if (typeof value === "string" && value.length > 0) {
+      content.push({ type: "thinking", thinking: value });
+      break;
+    }
+  }
   if (typeof message.content === "string" && message.content.length > 0) {
     content.push({ type: "text", text: message.content });
   }

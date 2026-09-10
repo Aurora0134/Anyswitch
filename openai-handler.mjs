@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { parseOpenAIPath, PARSE_REASON } from "./openai-path.mjs";
-import { catalogGeneration, generationMatches } from "./catalog-generation.mjs";
+import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
 import { extractPresentedToken } from "./handler.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "./pool-routing.mjs";
@@ -116,20 +116,24 @@ export function createOpenAIHandler(deps) {
     return { ok: true, provider };
   }
 
-  function generationCheck(store) {
-    const recorded = readGeneration();
-    const current = catalogGeneration(store);
-    if (recorded !== null && !generationMatches(recorded, current)) {
-      return {
-        ok: false,
-        status: 409,
-        body: openAIError(
-          "invalid_request_error",
-          "the provider catalog changed since it was discovered; re-run model discovery before retrying",
-        ),
-      };
-    }
-    return { ok: true };
+  // The catalog gate, scoped to the channels THIS request may reach, so editing
+  // an unrelated channel cannot invalidate a live session (see
+  // catalog-generation.mjs for what a channel's shape covers). A channel that
+  // appeared after discovery is not stale; a deleted one is the 404 path's
+  // business.
+  function generationCheck(store, providerIds) {
+    const stale = findStaleTargets(readGeneration(), store, providerIds);
+    if (stale.length === 0) return { ok: true };
+    const channels = stale.map((providerId) => `"${providerId}"`).join(", ");
+    return {
+      ok: false,
+      status: 409,
+      body: openAIError(
+        "invalid_request_error",
+        `the upstream endpoint of ${channels} changed since this client discovered its models; `
+        + "re-run model discovery (restart the endpoint, or pick the model again in /model) before retrying",
+      ),
+    };
   }
 
   function modelListResponse(provider) {
@@ -173,7 +177,8 @@ export function createOpenAIHandler(deps) {
       response.data.push({ id: AUTO_MODEL, object: "model" });
     }
 
-    recordGeneration(catalogGeneration(loaded.store));
+    // Bind this discovery result to the endpoint each channel resolves to.
+    recordGeneration(providerRoutingShapes(loaded.store));
     return { status: 200, body: response };
   }
 
@@ -196,7 +201,7 @@ export function createOpenAIHandler(deps) {
     const loaded = loadValidStore();
     if (!loaded.ok) return { status: loaded.status, body: loaded.body };
 
-    const gate = generationCheck(loaded.store);
+    const gate = generationCheck(loaded.store, [parsed.providerId]);
     if (!gate.ok) return { status: gate.status, body: gate.body };
 
     const provider = resolveProvider(loaded.store, parsed.providerId);
@@ -314,11 +319,14 @@ export function createOpenAIHandler(deps) {
       return { ok: false, status: 400, body: openAIError("invalid_request_error", "request body is missing a non-empty `model` field") };
     }
 
-    const gate = generationCheck(loaded.store);
+    const modelId = body.model;
+    // A pool id is not a channel: gate over exactly the members this request
+    // could call. With no candidate member there is nothing that can be stale,
+    // so that case keeps its own 404 below.
+    const candidates = poolMembersWithModel(loaded.store, pool, modelId);
+    const gate = generationCheck(loaded.store, candidates.map((candidate) => candidate.memberId));
     if (!gate.ok) return { ok: false, status: gate.status, body: gate.body };
 
-    const modelId = body.model;
-    const candidates = poolMembersWithModel(loaded.store, pool, modelId);
     if (candidates.length === 0) {
       return {
         ok: false,
@@ -383,7 +391,18 @@ export function createOpenAIHandler(deps) {
     const chainEntry = resolveChain(loaded.store, agentId);
     if (!chainEntry) return null;
 
-    const gate = generationCheck(loaded.store);
+    // Reachable channels, derived from the CONFIGURED chain without touching
+    // chainState: plan() re-anchors the backoff probe window, and a request
+    // refused here must not spend that probe. A node that no longer resolves
+    // contributes nothing — the existing 404 path owns it.
+    const reachable = [];
+    for (const entry of chainEntry.chain) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+      if (expanded.kind === "channel") reachable.push(expanded.providerId);
+      else reachable.push(...expanded.memberIds);
+    }
+    const gate = generationCheck(loaded.store, reachable);
     if (!gate.ok) return { ok: false, status: gate.status, body: gate.body };
 
     const plan = chainState.plan(loaded.store, agentId, chainEntry.chain, Date.now());

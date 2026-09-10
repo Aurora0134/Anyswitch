@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRelayServer, listenLoopback, generateToken } from "./server.mjs";
-import { catalogGeneration } from "./catalog-generation.mjs";
+import { providerRoutingShapes } from "./catalog-generation.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
 
 const STORE = {
@@ -208,6 +208,65 @@ test("streaming request emits an ordered Anthropic SSE sequence", async () => {
   );
 });
 
+test("streaming request surfaces upstream reasoning as a thinking block", async () => {
+  const sse = [
+    'data: {"id":"cmpl-1","choices":[{"delta":{"reasoning_content":"想"}}]}\n\n',
+    'data: {"id":"cmpl-1","choices":[{"delta":{"reasoning_content":"想"}}]}\n\n',
+    'data: {"id":"cmpl-1","choices":[{"delta":{"content":"答"}}]}\n\n',
+    'data: {"id":"cmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":3}}\n\n',
+    "data: [DONE]\n\n",
+  ];
+  const upstreamBody = (async function* () {
+    const encoder = new TextEncoder();
+    for (const part of sse) yield encoder.encode(part);
+  })();
+
+  await withServer(
+    deps({
+      upstreamFetch: async () => ({ ok: true, status: 200, body: upstreamBody }),
+    }),
+    async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: { authorization: "test-token-abc", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "anthropic/poke-api/claude-opus-5",
+          max_tokens: 64,
+          stream: true,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+
+      // thinking block opens, streams, and closes BEFORE the text block opens.
+      const order = [
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_delta",
+        "content_block_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+      ];
+      let cursor = 0;
+      for (const event of order) {
+        const at = text.indexOf(`event: ${event}`, cursor);
+        assert.ok(at !== -1, `missing ${event}`);
+        cursor = at;
+      }
+      assert.ok(text.includes('"thinking"'), "a thinking block must be opened");
+      assert.ok(text.includes('"thinking_delta"'), "reasoning must stream as thinking_delta");
+      assert.ok(text.includes("想"), "the thinking text must survive");
+      assert.ok(text.includes('"text_delta"'));
+      assert.ok(text.includes("答"), "the answer text must survive");
+    },
+  );
+});
+
 test("mid-stream upstream failure emits an SSE error event, not a fake message_stop", async () => {
   const upstreamBody = (async function* () {
     const encoder = new TextEncoder();
@@ -313,7 +372,7 @@ test("stale catalog over HTTP is 409", async () => {
           },
         },
       };
-      assert.notEqual(catalogGeneration(store), generation);
+      assert.notEqual(providerRoutingShapes(store)["poke-api"], generation["poke-api"]);
 
       const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
         method: "POST",

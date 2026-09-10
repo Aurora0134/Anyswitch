@@ -24,12 +24,28 @@ export function sseEvent(type, data) {
   return `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
 }
 
+// Upstream field names that carry reasoning, in the order they are checked.
+// openai-stream-guard.mjs imports this same table so the guard's "is this
+// stream healthy" check and the translator's "what do I forward" check can
+// never disagree about which fields count as thinking.
+export const REASONING_FIELDS = ["reasoning_content", "reasoning", "thought", "thinking"];
+
+// The first non-empty reasoning string on a delta, or null.
+function reasoningText(delta) {
+  for (const field of REASONING_FIELDS) {
+    const value = delta?.[field];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return null;
+}
+
 export class StreamTranslator {
   constructor(wireId) {
     this.wireId = wireId;
     this.started = false;
     this.nextIndex = 0;
     this.textIndex = null;
+    this.thinkingIndex = null;
     // openai tool_call index -> { index, started }
     this.toolBlocks = new Map();
     this.stopReason = "end_turn";
@@ -73,7 +89,32 @@ export class StreamTranslator {
 
     const delta = choice.delta ?? {};
 
+    // A content block closes the moment the stream switches kinds: Anthropic
+    // event order forbids a thinking_delta on a text block (and vice versa),
+    // and Claude Code aborts the stream on a type mismatch. Reasoning and
+    // content can share one delta, so thinking is emitted first.
+    const thinking = reasoningText(delta);
+    if (thinking !== null) {
+      out += this.closeText();
+      out += this.closeToolBlocks();
+      if (this.thinkingIndex === null) {
+        this.thinkingIndex = this.nextIndex++;
+        out += sseEvent("content_block_start", {
+          type: "content_block_start",
+          index: this.thinkingIndex,
+          content_block: { type: "thinking", thinking: "" },
+        });
+      }
+      out += sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: this.thinkingIndex,
+        delta: { type: "thinking_delta", thinking },
+      });
+    }
+
     if (typeof delta.content === "string" && delta.content.length > 0) {
+      out += this.closeThinking();
+      out += this.closeToolBlocks();
       if (this.textIndex === null) {
         this.textIndex = this.nextIndex++;
         out += sseEvent("content_block_start", {
@@ -94,6 +135,8 @@ export class StreamTranslator {
       const key = call.index ?? 0;
       let block = this.toolBlocks.get(key);
       if (!block) {
+        out += this.closeThinking();
+        out += this.closeText();
         block = { index: this.nextIndex++ };
         this.toolBlocks.set(key, block);
         out += sseEvent("content_block_start", {
@@ -124,18 +167,41 @@ export class StreamTranslator {
     return out;
   }
 
+  // Emit content_block_stop for the open block of one kind, if any. These are
+  // the only places a block closes mid-stream; finish() closes whatever is
+  // still open at the end.
+  closeThinking() {
+    if (this.thinkingIndex === null) return "";
+    const index = this.thinkingIndex;
+    this.thinkingIndex = null;
+    return sseEvent("content_block_stop", { type: "content_block_stop", index });
+  }
+
+  closeText() {
+    if (this.textIndex === null) return "";
+    const index = this.textIndex;
+    this.textIndex = null;
+    return sseEvent("content_block_stop", { type: "content_block_stop", index });
+  }
+
+  closeToolBlocks() {
+    let out = "";
+    for (const block of this.toolBlocks.values()) {
+      out += sseEvent("content_block_stop", { type: "content_block_stop", index: block.index });
+    }
+    this.toolBlocks.clear();
+    return out;
+  }
+
   // Close every open block, then message_delta + message_stop. Idempotent.
   finish() {
     if (this.finished) return "";
     this.finished = true;
     let out = this.started ? "" : this.start(null);
 
-    if (this.textIndex !== null) {
-      out += sseEvent("content_block_stop", { type: "content_block_stop", index: this.textIndex });
-    }
-    for (const block of this.toolBlocks.values()) {
-      out += sseEvent("content_block_stop", { type: "content_block_stop", index: block.index });
-    }
+    out += this.closeThinking();
+    out += this.closeText();
+    out += this.closeToolBlocks();
     out += sseEvent("message_delta", {
       type: "message_delta",
       delta: { stop_reason: this.stopReason, stop_sequence: null },

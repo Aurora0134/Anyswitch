@@ -39,6 +39,8 @@
 //
 // Pure state machine over decoded text. No IO.
 
+import { REASONING_FIELDS } from "./stream.mjs";
+
 const ERROR_TYPE = "api_error";
 const INCOMPLETE_TOOL_CALL_MESSAGE =
   "the upstream stream contained an incomplete tool call (missing id or function name); the response was aborted";
@@ -205,10 +207,9 @@ export class OpenAIStreamGuard {
       const delta = choice?.delta;
       if (!delta) continue;
       if (typeof delta.content === "string" && delta.content.length > 0) return true;
-      if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
-      if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
-      if (typeof delta.thought === "string" && delta.thought.length > 0) return true;
-      if (typeof delta.thinking === "string" && delta.thinking.length > 0) return true;
+      for (const field of REASONING_FIELDS) {
+        if (typeof delta[field] === "string" && delta[field].length > 0) return true;
+      }
       if (!this.holdEntireTurn && Array.isArray(delta.tool_calls)) {
         for (const call of delta.tool_calls) {
           if (call === null || typeof call !== "object") continue;
