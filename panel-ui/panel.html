@@ -720,6 +720,12 @@
   /* 全部刷新完成：「刷新完成」整体高光（实色，不再逐字滚动）；失败信息只靠
      tail 内红色分段表达，完成态不再整行染红 */
   .store-refresh-status .srs-done { color: var(--accent); font-weight: 600; }
+  /* tail 右侧的「展示diff」高光小字：与 tail 同字号，accent 实色可点击；
+     仅完成态且本轮确有增减/失败时挂出，随状态小字同一个 10s 淡出计时 */
+  .store-refresh-status .srs-diff-link {
+    margin-left: 0.6em; color: var(--accent); font-weight: 600; cursor: pointer;
+  }
+  .store-refresh-status .srs-diff-link:hover { text-decoration: underline; }
   .skills-path-input {
     flex: 1; min-width: 0; background: var(--surface-sunken); border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; font-family: var(--font-mono);
@@ -1148,6 +1154,37 @@
   .route-chain-ep { font-size: 12.5px; font-weight: 600; color: var(--text); }
   .route-chain-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
   .route-chain-card-actions .btn { padding: 3px 10px; font-size: 12px; }
+  /* 刷新差异弹窗（渠道刷新「展示diff」）：中等宽幅，左右分栏按单元分组列出
+     本轮新增/移除的模型 id；失败渠道在分栏上方单列一区。着色只引语义 token，
+     绿/红底高光由 color-mix 派生，五主题零改动 */
+  .diff-modal-overlay .modal-card { max-width: 720px; }
+  .diff-modal-fails { margin-bottom: 12px; }
+  .diff-modal-fail-row {
+    font-size: 12.5px; color: var(--danger); padding: 4px 0;
+    border-top: 1px solid var(--divider);
+  }
+  .diff-modal-fail-row:first-child { border-top: none; }
+  .diff-modal-cols { display: flex; gap: 16px; align-items: flex-start; }
+  .diff-modal-col { flex: 1; min-width: 0; }
+  .diff-modal-col-title { font-size: 12.5px; font-weight: 700; margin-bottom: 6px; }
+  .diff-modal-col-title.diff-added { color: var(--ok); }
+  .diff-modal-col-title.diff-pruned { color: var(--danger); }
+  .diff-modal-col-body {
+    max-height: 50vh; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+  }
+  .diff-modal-group-title {
+    font-size: 11px; color: var(--text-3); padding: 6px 10px 2px;
+    position: sticky; top: 0; background: var(--surface);
+  }
+  .diff-modal-row {
+    font-family: var(--font-mono); font-size: 12px; color: var(--text);
+    padding: 3px 10px; word-break: break-all;
+  }
+  .diff-modal-row.diff-added { background: color-mix(in srgb, var(--ok) 12%, transparent); }
+  .diff-modal-row.diff-pruned { background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .diff-modal-empty { font-size: 12px; color: var(--text-4); padding: 10px; }
+
   /* 链编辑器弹窗（E9）：横向宽幅双栏——左 34% 纵向链舞台，右 66% 候选区 */
   .route-modal-overlay .modal-card { max-width: 760px; }
   .route-editor { display: flex; gap: 16px; margin-top: 10px; align-items: stretch; }
@@ -5609,6 +5646,31 @@ if (window.panelStartupController) panelStartupPlay();
     <div class="modal-foot">
       <button class="btn" id="sessDlgCancel">取消</button>
       <button class="btn btn-danger" id="sessDlgConfirm">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- 渠道刷新：本轮差异弹窗（「展示diff」小字唤起；左右分栏按单元分组列新增/移除模型，失败渠道单列一区） -->
+<div class="modal-overlay diff-modal-overlay" id="storeDiffMask">
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3>刷新差异</h3>
+      <button class="modal-close-btn" id="storeDiffCloseBtn" aria-label="关闭">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="diff-modal-fails" id="storeDiffFails" hidden></div>
+      <div class="diff-modal-cols">
+        <div class="diff-modal-col">
+          <div class="diff-modal-col-title diff-added" id="storeDiffAddedTitle">新增</div>
+          <div class="diff-modal-col-body" id="storeDiffAddedBody"></div>
+        </div>
+        <div class="diff-modal-col">
+          <div class="diff-modal-col-title diff-pruned" id="storeDiffPrunedTitle">移除</div>
+          <div class="diff-modal-col-body" id="storeDiffPrunedBody"></div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -10816,18 +10878,21 @@ if (window.panelStartupController) panelStartupPlay();
     return [...text].map((ch, i) =>
       `<span class="srs-ch" style="animation-delay:${i * 120}ms">${escapeHtml(ch)}</span>`).join("");
   }
-  // 元素内固定 prefix/tail 两个子 span：prefix 按指纹比对只在变化时重建
+  // 元素内固定 prefix/tail/diff 三个子 span：prefix 按指纹比对只在变化时重建
   // innerHTML，tail（HTML，分段着色）独立更新——逐渠道刷新只换 tail，
-  // 窄波动画不重启
-  function setStoreRefreshStatus(text, mode, tailHtml) {
+  // 窄波动画不重启；diff（「展示diff」高光小字）仅完成态挂出
+  function setStoreRefreshStatus(text, mode, tailHtml, showDiff) {
     const el = $("storeRefreshStatus");
     if (!el) return;
     let prefix = el.querySelector(".srs-prefix");
     let tail = el.querySelector(".srs-tail");
-    if (!prefix || !tail) {
-      el.innerHTML = '<span class="srs-prefix"></span><span class="srs-tail"></span>';
+    let diff = el.querySelector(".srs-diff-link");
+    if (!prefix || !tail || !diff) {
+      el.innerHTML = '<span class="srs-prefix"></span><span class="srs-tail"></span><span class="srs-diff-link" hidden>展示diff</span>';
       prefix = el.querySelector(".srs-prefix");
       tail = el.querySelector(".srs-tail");
+      diff = el.querySelector(".srs-diff-link");
+      diff.onclick = () => { openStoreDiffModal(); };
     }
     el.classList.toggle("err", mode === "err");
     const key = `${mode}:${text}`;
@@ -10838,12 +10903,22 @@ if (window.panelStartupController) panelStartupPlay();
       else prefix.textContent = text;
     }
     tail.innerHTML = tailHtml || "";
+    diff.hidden = !showDiff;
     el.classList.add("show");
+    armStoreStatusTimer();
+  }
+  // 10s 淡出计时：弹窗打开期间暂停（计时器清掉、不重新武装），关闭弹窗时
+  // 若状态小字仍可见则重新武装一个完整 10s
+  function armStoreStatusTimer() {
+    const el = $("storeRefreshStatus");
     if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
     storeStatusTimer = setTimeout(() => {
       el.classList.remove("show");
       storeStatusTimer = null;
     }, 10000);
+  }
+  function disarmStoreStatusTimer() {
+    if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
   }
 
   // 渠道 diff 只摆增减数字，不列具体模型 id（长列表会爆格）；分段着色：
@@ -10866,6 +10941,49 @@ if (window.panelStartupController) panelStartupPlay();
     if (totPruned) parts.push(`<span class="srs-neg">−${totPruned}</span>`);
     if (failCount) parts.push(`<span class="srs-neg">${failCount} 个失败</span>`);
     return parts.length ? parts.join(" ") : "无变化";
+  }
+
+  // ── 「展示diff」弹窗：本轮刷新的完整增减明细（状态小字只摆数字，这里列模型 id） ──
+  // refreshDiffUnits 由 storeRefresh 每轮重填；弹窗打开期间暂停状态小字的 10s
+  // 淡出计时，关闭时若状态小字仍可见则重新武装一个完整 10s
+  let refreshDiffUnits = [];
+  function storeDiffGroupHtml(units, key, rowClass) {
+    const parts = [];
+    for (const u of units) {
+      const ids = u[key] || [];
+      if (!ids.length) continue;
+      parts.push(`<div class="diff-modal-group-title">${escapeHtml(u.label)}</div>`);
+      for (const id of ids) {
+        parts.push(`<div class="diff-modal-row ${rowClass}">${escapeHtml(id)}</div>`);
+      }
+    }
+    return parts.length ? parts.join("") : `<div class="diff-modal-empty">无</div>`;
+  }
+  function openStoreDiffModal() {
+    const fails = refreshDiffUnits.filter((u) => u.failed);
+    const failEl = $("storeDiffFails");
+    if (fails.length) {
+      failEl.innerHTML = fails.map((u) =>
+        `<div class="diff-modal-fail-row">${escapeHtml(u.label)} 失败（${escapeHtml(u.reason || "unknown")}）</div>`).join("");
+      failEl.hidden = false;
+    } else {
+      failEl.innerHTML = "";
+      failEl.hidden = true;
+    }
+    const totAdded = refreshDiffUnits.reduce((n, u) => n + (u.added || []).length, 0);
+    const totPruned = refreshDiffUnits.reduce((n, u) => n + (u.pruned || []).length, 0);
+    $("storeDiffAddedTitle").textContent = `新增 +${totAdded}`;
+    $("storeDiffPrunedTitle").textContent = `移除 −${totPruned}`;
+    $("storeDiffAddedBody").innerHTML = storeDiffGroupHtml(refreshDiffUnits, "added", "diff-added");
+    $("storeDiffPrunedBody").innerHTML = storeDiffGroupHtml(refreshDiffUnits, "pruned", "diff-pruned");
+    $("storeDiffMask").classList.add("show");
+    // 弹窗打开期间暂停状态小字淡出计时（点开即视为用户正在查看，不该淡出）
+    disarmStoreStatusTimer();
+  }
+  function closeStoreDiffModal() {
+    $("storeDiffMask").classList.remove("show");
+    // 关闭时状态小字仍可见则重新武装 10s（用户看完 diff，状态小字继续正常淡出）
+    if ($("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
   }
 
   // 刷新：全部刷新/多选刷新按可见行分组——号池行整行一个单元（成员逐个刷，
@@ -10899,6 +11017,9 @@ if (window.panelStartupController) panelStartupPlay();
     const batch = units.reduce((n, u) => n + u.ids.length, 0) > 1;    // 多渠道尽力而为：单点失败不中断
     if (btn) { btn.disabled = true; btn.textContent = "刷新中…"; }
     let lastTail = "";
+    // 本轮 diff 明细快照：每单元一条 {label, added[], pruned[], failed, reason}，
+    // 供「展示diff」弹窗按单元分组渲染；池聚合单元合并成员数组为池级
+    refreshDiffUnits = [];
     try {
       if (!units.length) {
         setStoreRefreshStatus("无可刷新渠道", "ok");
@@ -10912,6 +11033,7 @@ if (window.panelStartupController) panelStartupPlay();
         // 浏览器来不及绘制，diff 整段不可见——本轮修复点）
         if (i === 0) setStoreRefreshStatus("正在刷新..", "busy", `${escapeHtml(unit.label)}${prog}`);
         let uAdded = 0, uPruned = 0, uFail = 0, uRep = null, uErr = "";
+        const uAddedIds = [], uPrunedIds = [];
         for (const id of unit.ids) {
           try {
             const r = await api("POST", "/api/store/refresh", { id });
@@ -10919,9 +11041,12 @@ if (window.panelStartupController) panelStartupPlay();
             if (rep) {
               if (rep.status === "failed") {
                 uFail++;
+                if (!uErr) uErr = rep.reason || "unknown";
               } else if (rep.status === "updated") {
                 uAdded += (rep.added || []).length;
                 uPruned += (rep.pruned || []).length;
+                uAddedIds.push(...(rep.added || []));
+                uPrunedIds.push(...(rep.pruned || []));
               }
               if (!unit.aggregate) uRep = rep;
             }
@@ -10932,6 +11057,13 @@ if (window.panelStartupController) panelStartupPlay();
             uErr = e.message;
           }
         }
+        refreshDiffUnits.push({
+          label: unit.label,
+          added: uAddedIds,
+          pruned: uPrunedIds,
+          failed: uFail > 0,
+          reason: uErr,
+        });
         const resHtml = unit.aggregate
           ? `${escapeHtml(unit.label)} ${storeAggregateHtml(uAdded, uPruned, uFail)}`
           : uErr ? `<span class="srs-neg">${escapeHtml(unit.label)} 刷新失败: ${escapeHtml(uErr)}</span>`
@@ -10941,7 +11073,9 @@ if (window.panelStartupController) panelStartupPlay();
         if (!wholeLabel) setStoreRefreshStatus("正在刷新..", "busy", lastTail);
       }
       await refreshStoreState();
-      setStoreRefreshStatus("刷新完成", "done", lastTail);
+      // 本轮确有增减或失败时才挂「展示diff」小字；全零无变化不显示（没东西可看）
+      const hasDiff = refreshDiffUnits.some((u) => u.failed || u.added.length > 0 || u.pruned.length > 0);
+      setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff);
     } catch (e) {
       if (e.message === "cas-conflict") {
         setStoreRefreshStatus("store 已被其他操作修改，正在刷新", "err");
@@ -12464,6 +12598,10 @@ if (window.panelStartupController) panelStartupPlay();
     $("tabStore").onclick = () => switchView("store");
     $("storeAddBtn").onclick = () => showAddModal();
     $("storeRefreshAllBtn").onclick = () => storeRefresh(null);
+    // 「展示diff」弹窗关闭：关闭钮 / 点遮罩 / Esc（与会话删除确认弹窗同模式）
+    $("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal);
+    $("storeDiffMask").addEventListener("click", (e) => { if (e.target === $("storeDiffMask")) closeStoreDiffModal(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("storeDiffMask").classList.contains("show")) closeStoreDiffModal(); });
     $("storeSyncAgentsBtn").onclick = async () => {
       // 立即把当前 store 推送到全部端点配置——走独立同步进程，现读磁盘上的
       // merge 逻辑，因此目录写层的修复不需要重启服务即可生效。
