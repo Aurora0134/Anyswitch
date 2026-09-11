@@ -2809,6 +2809,15 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     assert.ok(panelHtml.includes("展示diff"), "小字文案在线");
   });
 
+  it("「展示diff」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
+    // 前提：容器声明不拦指针（浮动小字不挡按钮），这条被删掉会让全页小字都吃点击
+    assert.ok(/\.store-refresh-status\s*\{[^}]*pointer-events:\s*none/.test(panelHtml),
+      "容器默认 pointer-events: none（前提）");
+    // pointer-events 可继承：不在可见态开回，小字的 onclick 永远不触发
+    assert.ok(panelHtml.includes(".store-refresh-status.show .srs-diff-link { pointer-events: auto; }"),
+      "可见态显式恢复小字命中测试");
+  });
+
   it("storeRefresh 累积本轮 diff 快照（含池合并与失败原因）", () => {
     const fnStart = panelHtml.indexOf("async function storeRefresh(");
     assert.ok(fnStart >= 0, "storeRefresh 定义存在");

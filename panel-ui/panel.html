@@ -726,6 +726,10 @@
     margin-left: 0.6em; color: var(--accent); font-weight: 600; cursor: pointer;
   }
   .store-refresh-status .srs-diff-link:hover { text-decoration: underline; }
+  /* pointer-events 可继承：容器为不拦指针的浮动小字（none），小字要可点必须在
+     可见态显式开回命中测试。限定在 .show 下——10s 淡出只摘 .show、不把小字置
+     hidden，无条件开 auto 会在按钮行右侧留一个看不见但能点的热区 */
+  .store-refresh-status.show .srs-diff-link { pointer-events: auto; }
   .skills-path-input {
     flex: 1; min-width: 0; background: var(--surface-sunken); border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; font-family: var(--font-mono);
