@@ -2529,6 +2529,41 @@
 :root[data-style="saas"] .stats-heat-cell { rx: 4px; }
 :root[data-style="saas"] .stats-heat-cell:hover { filter: brightness(1.1); }
 
+/* ---- 占用条（ctx-meter）与单预设长度徽标：凹槽加深 + 统一顶部白渐 + 随档位语义色柔光。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：凹槽加深一档，槽内 1px 顶高光 + 底部柔沉，读作「嵌进卡头」而非贴在上面 */
+:root[data-style="saas"] .ctx-bar {
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    inset 0 1.5px 2px color-mix(in srgb, var(--text) 7%, transparent),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.55);
+}
+/* 填充：该主题统一的 180° 顶部白渐（同按钮/徽章一族，内高光由各档柔光规则承担）。
+   排除 empty/over——本条优先级高于基座同档规则，不收窄会把空态刷亮、并把
+   over 档的 45° 危险斜纹顶成白渐；那两档的形状属基座告警语言。 */
+:root[data-style="saas"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 62%);
+}
+/* 柔光随档位走语义色，不做跨色相渐变——避免与相邻档位串味 */
+:root[data-style="saas"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 6px color-mix(in srgb, var(--ok) 26%, transparent); }
+:root[data-style="saas"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 6px color-mix(in srgb, var(--accent) 26%, transparent); }
+:root[data-style="saas"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 7px color-mix(in srgb, var(--warn) 30%, transparent); }
+/* 预算上限线：淡成 hairline，over 时升为描边 */
+:root[data-style="saas"] .ctx-bar .ctx-tick { background: var(--border-strong); opacity: 0.9; }
+/* 读数：收紧字距贴近该主题遥测数字的排法 */
+:root[data-style="saas"] .ctx-readout { letter-spacing: -0.02em; }
+/* 徽标：胶囊 + 顶高光，与 .badge 的 saas 胶囊化同族 */
+:root[data-style="saas"] .ctx-preset-badge {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 70%);
+  box-shadow: inset 0 1px 0 var(--hl-inset), var(--shadow-xs);
+}
+:root[data-style="saas"][data-theme="dark"] .ctx-bar {
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    inset 0 1.5px 2px rgba(0, 0, 0, 0.42),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+}
+
 /* ===== style-lab: aurora ===== */
 /* ==========================================================================
    风格片段：aurora｜极光玻璃
@@ -3083,6 +3118,42 @@
 :root[data-style="aurora"] .stats-heat-cell.lv4 { filter: drop-shadow(0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent)); }
 :root[data-style="aurora"] .stats-heat-cell.lv4:hover { filter: drop-shadow(0 0 2px color-mix(in srgb, var(--accent) 55%, transparent)) brightness(1.06); }
 
+/* ---- 占用条（ctx-meter）与单预设长度徽标：玻璃条底 + --card-hairline 缎面 + 随档位辉光。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：玻璃底 + 透背景模糊；环色走冰蓝发丝线 */
+:root[data-style="aurora"] .ctx-bar {
+  background-color: color-mix(in srgb, var(--surface-sunken) 58%, transparent);
+  box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 2px rgba(16, 44, 66, 0.07);
+}
+/* 填充：极光 hairline 青→紫→粉作缎面叠加，档位语义色仍由 background-color 承担且占主导。
+   排除 empty/over——over 档的 45° 危险斜纹属基座告警语言，被本条顶掉后会变成
+   在 16px 平铺下横移的色带，读不出「超限」。 */
+:root[data-style="aurora"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: var(--card-hairline);
+  opacity: 0.92;
+}
+/* 辉光按档位取语义色，暗色加强、亮色收淡 */
+:root[data-style="aurora"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--ok) 28%, transparent); }
+:root[data-style="aurora"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 8px color-mix(in srgb, var(--accent) 30%, transparent); }
+:root[data-style="aurora"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 9px color-mix(in srgb, var(--warn) 32%, transparent); }
+/* 满格红线：over 档整条外发光用现成 --danger-glow */
+:root[data-style="aurora"] .ctx-meter[data-tier="over"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--danger-border), 0 0 10px var(--danger-glow);
+}
+/* 读数：轻字距 + 发丝灰 */
+:root[data-style="aurora"] .ctx-readout { letter-spacing: 0.01em; }
+/* 徽标：玻璃胶囊，hairline 作顶部一道亮线 */
+:root[data-style="aurora"] .ctx-preset-badge {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.42), rgba(255, 255, 255, 0) 58%);
+  box-shadow: inset 0 1px 0 var(--hl-inset), 0 2px 8px -3px rgba(16, 44, 66, 0.16);
+}
+:root[data-style="aurora"][data-theme="dark"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--border), inset 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--ok) 40%, transparent); }
+:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--accent) 42%, transparent); }
+:root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 14px color-mix(in srgb, var(--warn) 44%, transparent); }
+
 /* ===== style-lab: blueprint ===== */
 /* ==========================================================================
    风格片段：blueprint｜工程蓝图
@@ -3589,6 +3660,50 @@
 /* 使用统计热力图：图纸语言——单元格方角化，与网格底纹一致 */
 :root[data-style="blueprint"] .stats-heat-cell { rx: 0; }
 
+/* ---- 占用条（ctx-meter）与单预设长度徽标：方角 + 竖向标尺纹 + 图纸剖面斜纹 + 刻痕用 --tick。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：方角 + 竖向细密标尺纹（4px 一道，不占布局）+ 蓝墨单线环 */
+:root[data-style="blueprint"] .ctx-bar {
+  border-radius: var(--radius-sm);
+  background-image: repeating-linear-gradient(90deg, var(--grid-fine) 0 1px, transparent 1px 4px);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+/* 30% / 60% 分档刻痕改用该主题现成的刻度专用色 --tick */
+:root[data-style="blueprint"] .ctx-bar::after {
+  background-image:
+    linear-gradient(90deg, transparent calc(30% - 0.5px), var(--tick) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px)),
+    linear-gradient(90deg, transparent calc(60% - 0.5px), var(--tick) calc(60% - 0.5px) calc(60% + 0.5px), transparent calc(60% + 0.5px));
+}
+/* 填充：方角、不留高光——所有档位一致，含 over/empty 的形态 */
+:root[data-style="blueprint"] .ctx-bar .ctx-fill { border-radius: 1px; box-shadow: none; }
+/* 图纸剖面斜纹（制图 hatching）只铺 low/mid/high：本条优先级高于基座 over 档规则，
+   不收窄会把 45° 白斜纹告警顶成自家斜纹，还会被基座 background-size:16px 二次平铺。 */
+:root[data-style="blueprint"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--on-accent) 26%, transparent) 0 1px, transparent 1px 4px);
+}
+/* 预算上限线：1.5px 方角墨线 */
+:root[data-style="blueprint"] .ctx-bar .ctx-tick { background: var(--border-strong); opacity: 0.8; }
+/* 空态虚线：改用 --tick 色，读作「图纸上的待填虚线」 */
+:root[data-style="blueprint"] .ctx-meter[data-tier="empty"] .ctx-bar::before { border-color: var(--tick); border-radius: 1px; }
+/* 读数：标注字距 + 等宽数字对齐，over 档换朱砂硬偏移投影 */
+:root[data-style="blueprint"] .ctx-readout { letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+:root[data-style="blueprint"] .ctx-meter[data-tier="over"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--danger), 2px 2px 0 color-mix(in srgb, var(--danger) 22%, transparent);
+}
+/* 徽标：方角 + 细线 + 标注字距（该主题 .badge 已 uppercase，此处只补形态） */
+:root[data-style="blueprint"] .ctx-preset-badge {
+  border-radius: 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+/* 暗色的 --on-accent 是深蓝墨 #06303f，沿用亮色 26% 在亮底填充上几乎看不出，提到 40% */
+:root[data-style="blueprint"][data-theme="dark"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--on-accent) 40%, transparent) 0 1px, transparent 1px 4px);
+}
+
   /* ===== style-lab: sepia ===== */
 /* ============================================================
    sepia —— 暖纸（细线质感基座 + 暖调 UI 色）
@@ -4023,6 +4138,45 @@
   --heat-3: color-mix(in srgb, var(--accent) 68%, var(--bg));
   --heat-4: color-mix(in srgb, var(--accent) 86%, var(--bg));
 }
+
+/* ---- 占用条（ctx-meter）与单预设长度徽标：圆角收敛 + 只留 1px 细线 + over 斜纹收细放慢。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：圆角收敛到该主题的 3px，去 base 的玻璃内阴影，只留 1px 细线 */
+:root[data-style="sepia"] .ctx-bar {
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+:root[data-style="sepia"] .ctx-bar .ctx-fill {
+  border-radius: 2px;
+  box-shadow: none;
+}
+/* 刻痕改用细线色，与主题「1px 线承担结构」同语法 */
+:root[data-style="sepia"] .ctx-bar::after {
+  background-image:
+    linear-gradient(90deg, transparent calc(30% - 0.5px), var(--border-strong) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px)),
+    linear-gradient(90deg, transparent calc(60% - 0.5px), var(--border-strong) calc(60% - 0.5px) calc(60% + 0.5px), transparent calc(60% + 0.5px));
+}
+:root[data-style="sepia"] .ctx-meter[data-tier="empty"] .ctx-bar::before { border-radius: 2px; }
+:root[data-style="sepia"] .ctx-bar .ctx-tick { background: var(--text-4); opacity: 0.9; }
+/* over 档：斜纹 tile 收细、相位流动放慢到暖纸的节奏（不改几何，只改渐变参数）。
+   条纹色必须是**常数**：--danger-soft 在暖纸亮色是近白、暗色是 danger 本身 @14%，
+   拿它当条纹色在暗色等于「同色盖同色」，动画照跑但零对比。固定暖白两模式都比底色浅。 */
+:root[data-style="sepia"] .ctx-meter[data-tier="over"] .ctx-fill {
+  background-image: linear-gradient(45deg,
+    rgba(253, 243, 234, 0.34) 25%, transparent 25%, transparent 50%,
+    rgba(253, 243, 234, 0.34) 50%, rgba(253, 243, 234, 0.34) 75%,
+    transparent 75%, transparent);
+  background-size: 10px 10px;
+  animation: ctxOverSepia 1.1s linear infinite;
+}
+@keyframes ctxOverSepia { 0% { background-position: 0 0; } 100% { background-position: 10px 0; } }
+:root[data-style="sepia"] .ctx-meter[data-tier="over"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--danger-border);
+}
+/* 读数：字重从 700 收到 600，暖纸靠细线不靠重墨 */
+:root[data-style="sepia"] .ctx-total { font-weight: 600; }
+/* 徽标：2px 方角 + 细线 */
+:root[data-style="sepia"] .ctx-preset-badge { border-radius: var(--radius-sm); }
 
 </style>
 <script>
