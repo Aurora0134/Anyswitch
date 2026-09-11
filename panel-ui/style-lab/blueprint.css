@@ -502,3 +502,47 @@
 
 /* 使用统计热力图：图纸语言——单元格方角化，与网格底纹一致 */
 :root[data-style="blueprint"] .stats-heat-cell { rx: 0; }
+
+/* ---- 占用条（ctx-meter）与单预设长度徽标：方角 + 竖向标尺纹 + 图纸剖面斜纹 + 刻痕用 --tick。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：方角 + 竖向细密标尺纹（4px 一道，不占布局）+ 蓝墨单线环 */
+:root[data-style="blueprint"] .ctx-bar {
+  border-radius: var(--radius-sm);
+  background-image: repeating-linear-gradient(90deg, var(--grid-fine) 0 1px, transparent 1px 4px);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+/* 30% / 60% 分档刻痕改用该主题现成的刻度专用色 --tick */
+:root[data-style="blueprint"] .ctx-bar::after {
+  background-image:
+    linear-gradient(90deg, transparent calc(30% - 0.5px), var(--tick) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px)),
+    linear-gradient(90deg, transparent calc(60% - 0.5px), var(--tick) calc(60% - 0.5px) calc(60% + 0.5px), transparent calc(60% + 0.5px));
+}
+/* 填充：方角、不留高光——所有档位一致，含 over/empty 的形态 */
+:root[data-style="blueprint"] .ctx-bar .ctx-fill { border-radius: 1px; box-shadow: none; }
+/* 图纸剖面斜纹（制图 hatching）只铺 low/mid/high：本条优先级高于基座 over 档规则，
+   不收窄会把 45° 白斜纹告警顶成自家斜纹，还会被基座 background-size:16px 二次平铺。 */
+:root[data-style="blueprint"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--on-accent) 26%, transparent) 0 1px, transparent 1px 4px);
+}
+/* 预算上限线：1.5px 方角墨线 */
+:root[data-style="blueprint"] .ctx-bar .ctx-tick { background: var(--border-strong); opacity: 0.8; }
+/* 空态虚线：改用 --tick 色，读作「图纸上的待填虚线」 */
+:root[data-style="blueprint"] .ctx-meter[data-tier="empty"] .ctx-bar::before { border-color: var(--tick); border-radius: 1px; }
+/* 读数：标注字距 + 等宽数字对齐，over 档换朱砂硬偏移投影 */
+:root[data-style="blueprint"] .ctx-readout { letter-spacing: 0.06em; font-variant-numeric: tabular-nums; }
+:root[data-style="blueprint"] .ctx-meter[data-tier="over"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--danger), 2px 2px 0 color-mix(in srgb, var(--danger) 22%, transparent);
+}
+/* 徽标：方角 + 细线 + 标注字距（该主题 .badge 已 uppercase，此处只补形态） */
+:root[data-style="blueprint"] .ctx-preset-badge {
+  border-radius: 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+}
+/* 暗色的 --on-accent 是深蓝墨 #06303f，沿用亮色 26% 在亮底填充上几乎看不出，提到 40% */
+:root[data-style="blueprint"][data-theme="dark"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: repeating-linear-gradient(45deg,
+    color-mix(in srgb, var(--on-accent) 40%, transparent) 0 1px, transparent 1px 4px);
+}

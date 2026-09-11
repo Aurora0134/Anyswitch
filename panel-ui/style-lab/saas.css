@@ -442,3 +442,33 @@
 /* 使用统计热力图：圆角加大半档，与 teal 柔和质感一致；hover 提亮 */
 :root[data-style="saas"] .stats-heat-cell { rx: 4px; }
 :root[data-style="saas"] .stats-heat-cell:hover { filter: brightness(1.1); }
+
+/* ---- 占用条（ctx-meter）：凹槽加深 + 统一顶部白渐 + 随档位语义色柔光。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座；行内长度徽标沿用基座默认。 ---- */
+/* 条体：凹槽加深一档，槽内 1px 顶高光 + 底部柔沉，读作「嵌进卡头」而非贴在上面 */
+:root[data-style="saas"] .ctx-bar {
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    inset 0 1.5px 2px color-mix(in srgb, var(--text) 7%, transparent),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.55);
+}
+/* 填充：该主题统一的 180° 顶部白渐（同按钮/徽章一族，内高光由各档柔光规则承担）。
+   排除 empty/over——本条优先级高于基座同档规则，不收窄会把空态刷亮、并把
+   over 档的 45° 危险斜纹顶成白渐；那两档的形状属基座告警语言。 */
+:root[data-style="saas"] .ctx-meter:not([data-tier="empty"]):not([data-tier="over"]) .ctx-fill {
+  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0) 62%);
+}
+/* 柔光随档位走语义色，不做跨色相渐变——避免与相邻档位串味 */
+:root[data-style="saas"] .ctx-meter[data-tier="low"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 6px color-mix(in srgb, var(--ok) 26%, transparent); }
+:root[data-style="saas"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 6px color-mix(in srgb, var(--accent) 26%, transparent); }
+:root[data-style="saas"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--hl-inset), 0 0 7px color-mix(in srgb, var(--warn) 30%, transparent); }
+/* 预算上限线：淡成 hairline，over 时升为描边 */
+:root[data-style="saas"] .ctx-bar .ctx-tick { background: var(--border-strong); opacity: 0.9; }
+/* 读数：收紧字距贴近该主题遥测数字的排法 */
+:root[data-style="saas"] .ctx-readout { letter-spacing: -0.02em; }
+:root[data-style="saas"][data-theme="dark"] .ctx-bar {
+  box-shadow:
+    inset 0 0 0 1px var(--border),
+    inset 0 1.5px 2px rgba(0, 0, 0, 0.42),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.04);
+}

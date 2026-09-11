@@ -76,6 +76,22 @@ Notes:
 
 For the config-merging clients (Kimi Code, Pi, ZCode, DSH, Reasonix), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
 
+### Agent skills
+
+Anyswitch ships an optional agent skill that teaches a coding agent the correct way to author and manage Anyswitch **presets** (prompt presets injected into endpoint `AGENTS.md` files via the panel API). The skill lives at [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md) in this repo.
+
+To install it into a coding agent that loads skills from a directory (e.g. Kimi Code), copy the folder into that agent's skills directory:
+
+```bat
+xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E
+```
+
+```bash
+cp -r skills/anyswitch-preset ~/.kimi-code/skills/
+```
+
+Once installed, the agent follows the skill's rules: it writes presets only through the panel API at `http://127.0.0.1:47820` (never by hand-editing `prompts.json`), and reports when each endpoint actually picks up the change (hot-reload endpoints apply immediately; the other five apply on next session).
+
 ### Panel overview
 
 The panel (served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down) has four tabs:
@@ -208,6 +224,22 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 | Reasonix | OpenAI | `node reasonix-launcher.mjs [reasonix 参数]` — 合并托管 provider 进 `%APPDATA%\reasonix\config.toml`。 |
 
 对会合并配置的客户端（Kimi Code、Pi、ZCode、DSH、Reasonix），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
+
+### 智能体技能
+
+Anyswitch 附带一个可选的智能体技能，教 coding agent 以正确的方式编写与管理 Anyswitch **预设**（通过面板 API 注入各端点 `AGENTS.md` 的提示词预设）。技能位于本仓库的 [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md)。
+
+要把它装进从目录加载技能的 coding agent（如 Kimi Code），把该目录复制到对应 agent 的 skills 目录即可：
+
+```bat
+xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E
+```
+
+```bash
+cp -r skills/anyswitch-preset ~/.kimi-code/skills/
+```
+
+安装后，agent 会遵循该技能的规则：只通过 `http://127.0.0.1:47820` 的面板 API 写预设（绝不手改 `prompts.json`），并如实报告各端点的生效时机（热加载端点立即生效，其余五个下次会话生效）。
 
 ### 面板功能简介
 
