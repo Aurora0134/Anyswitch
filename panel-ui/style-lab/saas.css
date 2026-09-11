@@ -443,8 +443,8 @@
 :root[data-style="saas"] .stats-heat-cell { rx: 4px; }
 :root[data-style="saas"] .stats-heat-cell:hover { filter: brightness(1.1); }
 
-/* ---- 占用条（ctx-meter）与单预设长度徽标：凹槽加深 + 统一顶部白渐 + 随档位语义色柔光。
-   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* ---- 占用条（ctx-meter）：凹槽加深 + 统一顶部白渐 + 随档位语义色柔光。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座；行内长度徽标沿用基座默认。 ---- */
 /* 条体：凹槽加深一档，槽内 1px 顶高光 + 底部柔沉，读作「嵌进卡头」而非贴在上面 */
 :root[data-style="saas"] .ctx-bar {
   box-shadow:
@@ -466,11 +466,6 @@
 :root[data-style="saas"] .ctx-bar .ctx-tick { background: var(--border-strong); opacity: 0.9; }
 /* 读数：收紧字距贴近该主题遥测数字的排法 */
 :root[data-style="saas"] .ctx-readout { letter-spacing: -0.02em; }
-/* 徽标：胶囊 + 顶高光，与 .badge 的 saas 胶囊化同族 */
-:root[data-style="saas"] .ctx-preset-badge {
-  background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0) 70%);
-  box-shadow: inset 0 1px 0 var(--hl-inset), var(--shadow-xs);
-}
 :root[data-style="saas"][data-theme="dark"] .ctx-bar {
   box-shadow:
     inset 0 0 0 1px var(--border),
