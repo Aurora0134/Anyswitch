@@ -115,11 +115,42 @@ describe("buildQoderProviders", () => {
     assert.equal(m.model, "test-model");
     assert.equal(m.displayName, "Test");
     assert.equal(m.contextWindow, 999000);
-    // Qoder parses capabilities.thinking with a strict boolean reader and
-    // offers external providers no level list — the relay injects the level.
+    // `thinking` must be an object with a `modes` array: the running app's
+    // validator rejects any other shape AND then drops the whole provider, so a
+    // boolean here silently empties the endpoint's model list.
     assert.deepEqual(m.capabilities, {
       vision: true,
-      thinking: true,
+      thinking: { modes: ["enabled"], requiresBudgetForEnabled: false, supportedEffortLevels: [] },
+    });
+  });
+
+  it("clips effort levels to the five Qoder accepts, which can empty the list", () => {
+    const providers = {
+      "test-p": {
+        models: { "test-model": { displayName: "Test" } },
+      },
+    };
+    const catalog = {
+      models: new Map([
+        [
+          "test-model",
+          {
+            kind: "reasoning",
+            // `light`/`minimal` are library vocabulary Qoder rejects; writing
+            // either through costs the entire provider, not just that level.
+            levels: ["light", "medium", "high", "xhigh", "max"],
+            default: "high",
+            wire: {},
+            thinkingFormat: null,
+          },
+        ],
+      ]),
+    };
+    const conn = buildQoderProviders(providers, PORT, TOKEN, catalog)[managedConnectionId("test-p")];
+    assert.deepEqual(conn.models[0].capabilities.thinking, {
+      modes: ["enabled"],
+      requiresBudgetForEnabled: false,
+      supportedEffortLevels: ["medium", "high", "xhigh", "max"],
     });
   });
 
@@ -138,13 +169,15 @@ describe("buildQoderProviders", () => {
       ]),
     };
     const conn = buildQoderProviders(providers, PORT, TOKEN, catalog)[managedConnectionId("test-p")];
-    assert.equal(
+    assert.deepEqual(
       conn.models.find((m) => m.model === "agnes-image-2.0-flash").capabilities.thinking,
-      false,
+      { modes: [] },
     );
-    assert.equal(
+    // No library row for glm-5.3 -> optimistic default levels, clipped to the
+    // five Qoder accepts (the default is high/xhigh/max, all of them legal).
+    assert.deepEqual(
       conn.models.find((m) => m.model === "glm-5.3").capabilities.thinking,
-      true,
+      { modes: ["enabled"], requiresBudgetForEnabled: false, supportedEffortLevels: ["high", "xhigh", "max"] },
     );
   });
 

@@ -69,27 +69,55 @@ export function managedConnectionId(providerId) {
   return `${MANAGED_PREFIX}${digest}`;
 }
 
+// Effort levels Qoder's worker runtime accepts in `capabilities.thinking`
+// before it rejects the WHOLE provider entry. Measured against the real
+// validator shipped with the running app (0.2.3, `iec` + `Ctr`): only these
+// five pass, and anything else — `light`, `minimal`, `off`, a gateway-specific
+// spelling — raises an issue on the model, which `qAc` then answers by dropping
+// the provider entirely. So the library's levels must be intersected with this
+// set, never written through.
+const QODER_EFFORT_LEVELS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
+
 // Build one model entry in Qoder's `providers[].models[]` shape.
+//
+// `capabilities.thinking` must be an OBJECT carrying a `modes` array — not a
+// boolean. Verified by running the app's own validator (0.2.3 worker `qAc`):
+// a bare boolean fails `iec`'s shape check, the model accumulates an issue, and
+// because `qAc` only returns a provider when `issues.length === 0`, the entire
+// provider silently disappears from Qoder's model list. That is what emptied
+// the endpoint — every managed connection was dropped, not merely downgraded.
+// (A boolean happens to be what the stale copy of the binary under
+// `Programs\Qoder\resources\` expects; that install is not the one running.)
+//
+// The levels are also handed to Qoder rather than left to request-time
+// injection alone, so the endpoint's own picker offers exactly what the
+// upstream speaks. Clipping to QODER_EFFORT_LEVELS is mandatory for the same
+// all-or-nothing reason: one out-of-vocabulary level costs the whole provider.
 function buildModelEntry(modelId, model, catalog = null) {
   const context = Number(model.contextWindow ?? fallbackContextWindow(modelId));
-  // Qoder's worker runtime reads `capabilities.thinking` with a strict boolean
-  // parser (worker vEc): any non-boolean — including the {modes:[...]} object
-  // shape written before — falls through to `false` and the model registers as
-  // non-thinking, which is what disabled its thinking UI entirely. A boolean is
-  // also ALL the surface external providers get: the projection (worker Idr)
-  // maps it to is_reasoning + a default-on thinking_config and offers no
-  // effort list, so levels reach Qoder exclusively through the relay's
-  // request-time injection.
-  const isReasoning = catalog
-    ? resolveModelEfforts(modelId, catalog).levels.length > 0
-    : model.isReasoning === true;
+  const levels = catalog
+    ? resolveModelEfforts(modelId, catalog).levels.filter((level) =>
+        QODER_EFFORT_LEVELS.includes(level),
+      )
+    : [];
+  const isReasoning = catalog ? levels.length > 0 : model.isReasoning === true;
   return {
     model: modelId,
     displayName: model.displayName ?? modelId,
     contextWindow: context,
     capabilities: {
       vision: model.isVision === true,
-      thinking: isReasoning,
+      thinking: isReasoning
+        ? {
+            modes: ["enabled"],
+            // Declared explicitly: this key's default is `true` whenever
+            // "enabled" is offered, and `true` makes the picker demand a token
+            // budget the relay does not set. `false` keeps plain enable/disable
+            // meaningful.
+            requiresBudgetForEnabled: false,
+            supportedEffortLevels: [...levels],
+          }
+        : { modes: [] },
     },
   };
 }
