@@ -6,6 +6,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
+import { modelEffortSurface } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "reasonix-sidecar.json";
 // Migration: blocks in user config.toml written before the product rename
@@ -64,6 +65,10 @@ function tomlString(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function tomlArray(values) {
+  return `[${values.map(tomlString).join(", ")}]`;
+}
+
 export { extractManagedProviders } from "./pool-providers.mjs";
 
 export function prefixedProviderId(providerId) {
@@ -112,7 +117,7 @@ export function writeReasonixEnvWithBackup(filePath, token) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-export function buildReasonixManagedToml(managedProviders, port) {
+export function buildReasonixManagedToml(managedProviders, port, catalog = null) {
   const lines = [
     MANAGED_BEGIN,
     "# OpenAI-compatible Anyswitch relay providers. Token is ANYSWITCH_RELAY_TOKEN in .env.",
@@ -152,10 +157,19 @@ export function buildReasonixManagedToml(managedProviders, port) {
       const sm = provider.models[modelId];
       const cw = sm?.contextWindow;
       const maxOut = sm?.maxOutputTokens;
-      if (cw === undefined && maxOut === undefined) continue;
+      const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "reasonix" }) : null;
+      if (cw === undefined && maxOut === undefined && !efforts) continue;
       lines.push(`[providers.model_overrides.${tomlString(modelId)}]`);
       if (cw !== undefined) lines.push(`context_window     = ${Number(cw)}`);
       if (typeof maxOut === "number") lines.push(`max_output_tokens  = ${maxOut}`);
+      if (efforts) {
+        // Reasonix hard-errors on an effort outside the list it was given, so
+        // the list is the whole contract: it is already clipped to what this
+        // channel family accepts (an unaccepted family yields no list at all
+        // and this model is left untouched above).
+        lines.push(`supported_efforts  = ${tomlArray(efforts.levels)}`);
+        lines.push(`default_effort     = ${tomlString(efforts.default)}`);
+      }
       lines.push("");
     }
     managed.push(providerId);
@@ -201,7 +215,7 @@ export function stripManagedBlock(text) {
   return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-export function mergeReasonixConfigToml(existingText, managedProviders, port, autoChannel = null) {
+export function mergeReasonixConfigToml(existingText, managedProviders, port, autoChannel = null, catalog = null) {
   let preserved = stripPrefixedProviderTables(stripManagedBlock(existingText ?? ""));
   if (!/\[\[providers\]\]/.test(preserved)) {
     preserved = preserved.replace(/\s+$/, "");
@@ -212,7 +226,7 @@ export function mergeReasonixConfigToml(existingText, managedProviders, port, au
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `_auto`.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
-  const { text: managedText, managed } = buildReasonixManagedToml(providers, port);
+  const { text: managedText, managed } = buildReasonixManagedToml(providers, port, catalog);
   const merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
   return { text: merged, managed };
 }

@@ -7,6 +7,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { modalitiesFromStoreModel } from "./modalities-fallback.mjs";
+import { modelEffortSurface } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "zcode-sidecar.json";
 
@@ -28,7 +29,7 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-export function buildZcodeProviderEntry(providerId, provider, port, token) {
+export function buildZcodeProviderEntry(providerId, provider, port, token, catalog = null) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -44,6 +45,19 @@ export function buildZcodeProviderEntry(providerId, provider, port, token) {
     };
     if (m.maxOutputTokens !== undefined) {
       entry.limit.output = m.maxOutputTokens;
+    }
+    const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "zcode" }) : null;
+    if (efforts) {
+      // ZCode renders `variants` verbatim as its thinking-depth picker, so the
+      // list itself is the vocabulary; `defaultVariant` is what a session that
+      // never touched the picker sends. Key names come from the shipped
+      // app.asar schema, not from an observed request — if a ZCode update
+      // renames them this block silently stops rendering a picker.
+      entry.reasoning = {
+        enabled: true,
+        variants: efforts.levels,
+        defaultVariant: efforts.default,
+      };
     }
     models[modelId] = entry;
   }
@@ -67,7 +81,7 @@ export function buildZcodeProviderEntry(providerId, provider, port, token) {
   };
 }
 
-export function mergeZcodeConfig(existing, managedProviders, port, token, previousManaged = [], autoChannel = null) {
+export function mergeZcodeConfig(existing, managedProviders, port, token, previousManaged = [], autoChannel = null, catalog = null) {
   const merged = { ...existing, provider: { ...(existing.provider ?? {}) } };
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
@@ -84,7 +98,7 @@ export function mergeZcodeConfig(existing, managedProviders, port, token, previo
   }
 
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildZcodeProviderEntry(providerId, provider, port, token);
+    const entry = buildZcodeProviderEntry(providerId, provider, port, token, catalog);
     Object.assign(merged.provider, entry);
     currentManaged.push(providerId);
   }

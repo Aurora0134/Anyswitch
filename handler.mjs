@@ -13,7 +13,8 @@
 import { timingSafeEqual } from "node:crypto";
 import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
-import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse } from "./protocol.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientSpecifiedThinking } from "./protocol.mjs";
+import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, createStickyTable } from "./pool-routing.mjs";
 import {
@@ -92,7 +93,10 @@ export function createHandler(deps) {
     recordGeneration,
     readGeneration,
     logger = null,
+    effortInjector = null,
   } = deps;
+
+  const efforts = effortInjector ?? defaultEffortInjector({ logger });
 
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
@@ -255,25 +259,48 @@ export function createHandler(deps) {
 
     const upstreamRequest = anthropicToOpenAI(body, modelId);
     const urls = buildUpstreamURLs(provider, "/chat/completions");
+    // Claude names its depth in the raw request; the translator drops it, so the
+    // "never override a client's own choice" rule has to look at the raw body.
+    const { body: outboundRequest, injected } = efforts.inject({
+      providerId,
+      body: upstreamRequest,
+      clientChoseEffort: clientSpecifiedThinking(body),
+    });
+
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${credential.value}`,
+    };
+    const send = (payload) => upstreamFetch(
+      urls,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      },
+      { bufferResponse: payload.stream !== true },
+    );
 
     let upstream;
     try {
-      upstream = await upstreamFetch(
-        urls,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${credential.value}`,
-          },
-          body: JSON.stringify(upstreamRequest),
-        },
-        { bufferResponse: upstreamRequest.stream !== true },
-      );
+      upstream = await send(outboundRequest);
     } catch {
       // Message deliberately generic: an upstream transport error must not leak
       // the URL, the credential or the raw error text.
       return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
+    }
+
+    if (!upstream.ok && injected !== null) {
+      const detail = await readResponseText(upstream);
+      if (looksLikeEffortRejection(upstream.status, detail)) {
+        upstreamFetch.releaseResponse?.(upstream);
+        efforts.noteRejected(providerId);
+        try {
+          upstream = await send(efforts.withoutEffort(outboundRequest));
+        } catch {
+          return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
+        }
+      }
     }
 
     if (!upstream.ok) {

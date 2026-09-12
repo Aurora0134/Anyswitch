@@ -465,3 +465,49 @@ describe("per-instance header env expansion feasibility", () => {
     assert.equal(reread.providers["_poke-api"].headers["x-agent-instance"], "${ANYSWITCH_INSTANCE_ID}");
   });
 });
+
+describe("pi thinking effort levels", () => {
+  const catalog = {
+    models: new Map([
+      ["claude-opus-5", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+      ["claude-sonnet-4", { kind: "reasoning", levels: ["low", "high"], default: "high", wire: { low: "medium" }, thinkingFormat: "openai" }],
+      ["deepseek-v4", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const modelOf = (entry, id) => entry["_poke-api"].models.find((m) => m.id === id);
+
+  it("writes nothing effort-related when no catalog reaches the builder", () => {
+    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821);
+    assert.equal(modelOf(entry, "claude-opus-5").reasoning, undefined);
+    assert.equal(modelOf(entry, "claude-opus-5").thinkingLevelMap, undefined);
+  });
+
+  it("offers the levels with off: null and the level name as wire", () => {
+    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821, catalog);
+    assert.deepEqual(modelOf(entry, "claude-opus-5"), {
+      id: "claude-opus-5",
+      name: "Claude Opus 5",
+      reasoning: true,
+      thinkingLevelMap: { off: null, high: "high", xhigh: "xhigh", max: "max" },
+    });
+  });
+
+  it("sends the library wire spelling and names the dialect only when there is one", () => {
+    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821, catalog);
+    const model = modelOf(entry, "claude-sonnet-4");
+    assert.deepEqual(model.thinkingLevelMap, { off: null, low: "medium", high: "high" });
+    assert.deepEqual(model.compat, { thinkingFormat: "openai" });
+    assert.equal(modelOf(entry, "claude-opus-5").compat, undefined);
+  });
+
+  it("leaves a model the library declares non-text alone", () => {
+    const entry = buildPiProviderEntry("deepseek", STORE.providers.deepseek, 47821, catalog);
+    assert.deepEqual(entry["_deepseek"].models, [{ id: "deepseek-v4", name: "DeepSeek V4" }]);
+  });
+
+  it("mergeModelsJson forwards the catalog to every provider", () => {
+    const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821, [], null, catalog);
+    assert.equal(config.providers["_poke-api"].models[0].reasoning, true);
+    assert.equal(config.providers["_deepseek"].models[0].reasoning, undefined);
+  });
+});

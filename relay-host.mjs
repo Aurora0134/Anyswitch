@@ -112,6 +112,7 @@ function createResidentDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     getKeepAliveConfig: options.getKeepAliveConfig ?? claudeDeps.getKeepAliveConfig,
     socketOwner,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, hostKind: "relay-host" }),

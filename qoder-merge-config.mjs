@@ -27,6 +27,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
 import { buildAgentPrefixedSegment } from "./openai-path.mjs";
+import { catalogForRoot, resolveModelEfforts } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "qoder-sidecar.json";
 const MANAGED_PREFIX = "qoder-custom-anyswitch-";
@@ -69,20 +70,26 @@ export function managedConnectionId(providerId) {
 }
 
 // Build one model entry in Qoder's `providers[].models[]` shape.
-function buildModelEntry(modelId, model) {
+function buildModelEntry(modelId, model, catalog = null) {
   const context = Number(model.contextWindow ?? fallbackContextWindow(modelId));
-  const isReasoning = model.isReasoning === true;
+  // Qoder's worker runtime reads `capabilities.thinking` with a strict boolean
+  // parser (worker vEc): any non-boolean — including the {modes:[...]} object
+  // shape written before — falls through to `false` and the model registers as
+  // non-thinking, which is what disabled its thinking UI entirely. A boolean is
+  // also ALL the surface external providers get: the projection (worker Idr)
+  // maps it to is_reasoning + a default-on thinking_config and offers no
+  // effort list, so levels reach Qoder exclusively through the relay's
+  // request-time injection.
+  const isReasoning = catalog
+    ? resolveModelEfforts(modelId, catalog).levels.length > 0
+    : model.isReasoning === true;
   return {
     model: modelId,
     displayName: model.displayName ?? modelId,
     contextWindow: context,
     capabilities: {
       vision: model.isVision === true,
-      thinking: {
-        modes: isReasoning ? ["enabled"] : [],
-        supportsEffort: false,
-        supportedEffortLevels: [],
-      },
+      thinking: isReasoning,
     },
   };
 }
@@ -90,7 +97,7 @@ function buildModelEntry(modelId, model) {
 // Build one custom-endpoint connection for a single Anyswitch provider.
 // Pseudo-channels (auto routing) name a different relay URL segment than their
 // own id; real channels never set baseUrlSegment.
-function buildConnection(providerId, provider, port, token) {
+function buildConnection(providerId, provider, port, token, catalog = null) {
   const segment = provider?.baseUrlSegment ?? providerId;
   // 身份前缀 `qoder~`：Qoder 的 provider 配置放不进自定义请求头、UA 里也没有自家
   // 标识，relay 原本的三条认端点通道（x-agent-id / UA / 兜底）对它全部落空，请求
@@ -102,7 +109,7 @@ function buildConnection(providerId, provider, port, token) {
   const baseUrl = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(QODER_AGENT_ID, segment)}/v1`;
   const models = Object.entries(provider.models ?? {})
     .slice(0, MAX_MODELS_PER_CONNECTION)
-    .map(([modelId, model]) => buildModelEntry(modelId, model));
+    .map(([modelId, model]) => buildModelEntry(modelId, model, catalog));
   const displayName = provider?.channelName ?? provider?.displayName ?? providerId;
   return {
     baseUrl,
@@ -118,10 +125,10 @@ function buildConnection(providerId, provider, port, token) {
 
 // Build the full managed `providers` map from the managed providers map.
 // Keys are the deterministic managed connection ids.
-export function buildQoderProviders(managedProviders, port, token) {
+export function buildQoderProviders(managedProviders, port, token, catalog = null) {
   const providers = {};
   for (const [providerId, provider] of Object.entries(managedProviders)) {
-    const connection = buildConnection(providerId, provider, port, token);
+    const connection = buildConnection(providerId, provider, port, token, catalog);
     if (connection.models.length === 0) continue;
     providers[managedConnectionId(providerId)] = connection;
   }
@@ -132,7 +139,7 @@ export function buildQoderProviders(managedProviders, port, token) {
 // Replaces the managed subset of `providers` (tracked by sidecar) and removes
 // the dead `modelConfigs.customModels` array. All other settings.json fields
 // are preserved untouched, including user-created `providers` entries.
-export function mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds = [], autoChannel = null) {
+export function mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds = [], autoChannel = null, catalog = null) {
   const settings = typeof existing === "object" && existing !== null ? { ...existing } : {};
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
@@ -140,7 +147,7 @@ export function mergeQoderSettings(existing, managedProviders, port, token, prev
   // previousManaged path.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
-  const managedMap = buildQoderProviders(providers, port, token);
+  const managedMap = buildQoderProviders(providers, port, token, catalog);
   const currentManagedIds = Object.keys(providers).map(managedConnectionId);
 
   // Start from the user's own providers, drop previously-managed connections,
@@ -214,7 +221,7 @@ export function writeQoderSettingsWithBackup(filePath, data) {
 
 // High-level write: read existing settings, merge managed providers, write
 // back with backup. Returns { ok, unchanged, backupPath?, reason? }.
-export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath) {
+export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot)) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "qoder");
   const previousManaged = readSidecar(sidecarRoot).providers;
@@ -231,7 +238,7 @@ export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath) 
     throw error;
   }
   const previousManagedIds = previousManaged.map(managedConnectionId);
-  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel);
+  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel, catalog);
 
   const writeResult = writeQoderSettingsWithBackup(settingsPath, config);
   if (writeResult.ok) {

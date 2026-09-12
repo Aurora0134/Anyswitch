@@ -5864,6 +5864,16 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
         <div class="modal-item">
           <div>
+            <div class="modal-item-title">注入思考强度</div>
+            <div class="modal-item-desc">客户端没有选思考深度时，按该模型可用的档位补一个默认值再发往渠道，让"不选档"也有稳定的深度；某条渠道不认这个参数时会自动停用对它的注入。关闭后一律原样透传，深度取决于客户端与渠道各自的默认值。开启时还会同时打开 Kimi Code 自己的思考总开关（不动你已在里面选好的深度）。</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="injectEffortToggle">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="modal-item">
+          <div>
             <div class="modal-item-title">折线视窗节点数</div>
             <div class="modal-item-desc">按请求时序保留最近 N 个数据点，不按时间过期。范围 2–128，默认 16。</div>
           </div>
@@ -7825,6 +7835,7 @@ if (window.panelStartupController) panelStartupPlay();
     const keepAliveTitle = $("keepAliveTitle");
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
+    const injectEffortToggle = $("injectEffortToggle");
     const sparkWindowInput = $("sparkWindowInput");
     const keepAliveRetriesInput = $("keepAliveRetriesInput");
     const KEEP_ALIVE_MODES = ["off", "enhanced"];
@@ -7842,7 +7853,7 @@ if (window.panelStartupController) panelStartupPlay();
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, spark: false, keepAliveRetries: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false };
     function applyKeepAliveUi(mode) {
       const m = KEEP_ALIVE_MODES.includes(mode) ? mode : "enhanced";
       const copy = KEEP_ALIVE_COPY[m];
@@ -7887,6 +7898,9 @@ if (window.panelStartupController) panelStartupPlay();
         }
         if (!settingsSaving.followAgent && followAgentToggle && d.settings && typeof d.settings.followAgent === "boolean") {
           followAgentToggle.checked = d.settings.followAgent;
+        }
+        if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
+          injectEffortToggle.checked = d.settings.injectThinkingEffort;
         }
         if (!settingsSaving.spark) {
           const fromApi = d.sparkWindowPoints ?? d.settings?.sparkWindowPoints;
@@ -8053,6 +8067,36 @@ if (window.panelStartupController) panelStartupPlay();
         } finally {
           settingsSaving.followAgent = false;
           followAgentToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    if (injectEffortToggle) {
+      injectEffortToggle.onchange = async () => {
+        if (settingsSaving.injectEffort) {
+          injectEffortToggle.checked = !injectEffortToggle.checked;
+          return;
+        }
+        const next = injectEffortToggle.checked;
+        settingsSaving.injectEffort = true;
+        settingsLoadGen += 1;
+        injectEffortToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { injectThinkingEffort: next });
+          if (!d.ok) {
+            injectEffortToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.injectThinkingEffort;
+            if (typeof saved === "boolean") injectEffortToggle.checked = saved;
+            toast(next ? "已开启注入思考强度" : "已关闭注入思考强度");
+          }
+        } catch (e) {
+          injectEffortToggle.checked = !next;
+          toast("请求失败: " + e.message, true);
+        } finally {
+          settingsSaving.injectEffort = false;
+          injectEffortToggle.removeAttribute("aria-busy");
         }
       };
     }

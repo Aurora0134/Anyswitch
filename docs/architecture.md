@@ -55,7 +55,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
    托管 provider（baseURL 指向 relay、apiKey 用 relay token）与 reasoning variants 由可选的 OpenCode 插件启动时直接从 store 注入，`opencode.jsonc` 不被 anyswitch 修改。策略：只填空（已有 variants 跳过，保护手补）、`supportsReasoning:false` 硬豁免。
 
 4. **协议透传**
-   Anthropic Messages API ↔ OpenAI Chat Completions 双向转换（仅翻译 Claude Code 实际发出的允许字段，其余丢弃）。`reasoning_effort` 透传已撤销（Claude Code 挡位选择器前端固定，透传无效）。
+   Anthropic Messages API ↔ OpenAI Chat Completions 双向转换（仅翻译 Claude Code 实际发出的允许字段，其余丢弃）。`reasoning_effort` 透传已撤销（Claude Code 挡位选择器前端固定，透传无效）。请求面注入落在翻译之后，判「客户端是否已自选」看的是原始 Anthropic 请求里的 `thinking`/`reasoning_effort`/`effort`，因此被丢弃的自选值不会被库默认顶替。
 
 5. **兜底档位映射**
    catalog 生成阶段用关键词档位映射推断上下文窗口（如 `claude-opus/gpt-5.5/5.6 → 1M`、`GPT-5.x → 272K`）；未命中关键词的模型统一给 `1M` 兜底（而非 128K 硬编码或 999M 假数值）。
@@ -65,6 +65,15 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 
 7. **store 单一真相源 + 写保护**
    v2 `store.json` 是唯一真相源，relay 路由纯靠它。写保护两道：(a) CAS 哈希写——`writeStore` 基于读取时拿到的内容哈希做 compare-and-swap（`casWriteFile` + 跨进程文件锁），并发改写会以 `PreconditionFailed` 失败而非静默覆盖；(b) generation digest——discovery 记录“决定请求去哪的 store 字段”的内容摘要，`POST /v1/messages` 重算并失配即返 409，防止路由漂移。
+
+8. **思考强度挡位库（两面注入）**
+   上游 `/models` 不声明推理挡位能力，客户端也大多不发 `reasoning_effort`，端点里的挡位区因此对中转站渠道整体失效。anyswitch 自持一份「模型 → 可选挡位」库补齐两面：
+
+   - **数据**：`%LOCALAPPDATA%\Anyswitch\thinking-efforts.db.json`（人工可改、不进仓库、不进 git 锚点）。读库唯一入口 `effort-catalog.mjs`：按 `mtimeMs`+体积缓存、改了下一轮即生效；解析失败沿用上一次可用副本并标 `stale`，文件缺失等价于「只有乐观默认」。条目级校验**逐条生效不整表作废**：形状不对/非文本却带挡位的行跳过并计数，挡位名不在词表内的剔除（剔空才跳过），`default` 不在该模型挡位列表内时按偏好重算而非弃行。模型 id 先归一化（循环剥 `[前缀]`、挡位词尾、日期尾、命名空间、Claude 家族名重排），再按点/横两种拼写查——生产 83 个模型 id 全部命中，其中 2 个只能靠点横折叠命中。
+   - **配置面**：把挡位写进各端点自己的模型能力配置，让选择器出真挡位。pi `thinkingLevelMap`+`compat.thinkingFormat`、ZCode `reasoning{enabled,variants,defaultVariant}`、Reasonix `supported_efforts`/`default_effort`（先与渠道族允许集求交，交空则整个模型不写）、kimi `support_efforts`/`default_effort`/`reasoning`——这四家过 `modelEffortSurface` 按各自词表裁剪。DSH 在 store 标注 / 渠道模板 / pi-ai 知识库之后追加一级兜底（不参与路由级方言判定），兜底级同样按 DSH 词表裁剪（dsh-llm-pi-ai 对 `reasoningEfforts` 键做固定集合校验，词表外的挡位名会让整份 settings.yaml 拒载）。词表共八档 `off/light/minimal/low/medium/high/xhigh/max`：`light` 是 gpt-5.6 及以上独有的最轻挡，pi/DSH 两家的固定档位集不含它、裁剪时剔除，其余端点原样渲染。Qoder 只取"有无挡位"的布尔（`capabilities.thinking` 必须是裸布尔——其运行时严格按布尔解析，对象形状会静默落成 false），挡位只能走请求面到达。
+   - **请求面**：`effort-injection.mjs` 在出上游前补默认（OpenAI 路径与 Anthropic 路径共用一个注入器实例）。三条规则——客户端已发（含显式 `null`）一律不覆盖；注入值取库 `default`，现库默认只落 `high`/`xhigh`、无 `max`，库缺失时乐观默认 `high`（不给 `max`：a6api 网关 ~296s 墙钟且照常计费）；上游 400/422 报文提到该参数则去字段重试一次并把渠道记为拒收。拒收集是**进程内存态**：`store.json` 归 panel 进程写（CAS+删除日志），relay 写它会与 UI 抢盘，重启丢一个标记只多一次重试。
+   - **开关**：面板设置项「注入思考强度」（`settings.json` 的 `injectThinkingEffort`，默认开）同时管请求面注入与 kimi 全局 `[thinking]` 接管；关闭后请求原样透传。kimi 的 `[thinking]` 只改已存在的表：把 `enabled` 就地翻 true（表内没有该键时在表内补一行），找不到该表或值不是裸布尔就拒改并落日志（重复定义 `[thinking]` 会让 kimi 整份配置解析失败），改前由 `writeKimiConfigTomlWithBackup` 落带时间戳备份。
+   - fail-open 贯穿两面：挡位解析失败绝不拖垮 relay 请求或配置同步。
 
 ## 4. 目录结构
 
@@ -77,6 +86,8 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `catalog-resolver.mjs` — 模型目录解析器：把 OpenCode 风格 model 条目解析为 Store 模型对象，透传 `contextWindow`/`maxOutputTokens`/`supportsReasoning` 等元数据。
 - `context-fallback.mjs` — 上下文分层兜底规则（tier-based context fallback）。
 - `reasoning-fallback.mjs` — 推理挡位知识库兜底：按模型 id 查询 DSH 内置 pi-ai 模型数据库（`thinkingLevelMap`/`thinkingFormat`），产出 DSH `reasoningEfforts` wire 映射。
+- `effort-catalog.mjs` — 思考强度挡位库的唯一读入口（`%LOCALAPPDATA%\Anyswitch\thinking-efforts.db.json`）：模型 id 归一化 + 点横拼写候选、条目级校验、mtime+体积热加载、解析失败沿用旧副本，并按端点词表/Reasonix 渠道族允许集裁剪挡位；库缺失时给乐观默认 `high,xhigh,max`。
+- `effort-injection.mjs` — 请求面注入：客户端未发挡位时补库默认，上游 400/422 提到该参数则去字段重试一次并把渠道记为拒收（进程内存态，不写 store）；受「注入思考强度」开关控制，OpenAI 与 Anthropic 两条路径共用一个实例。
 
 ### 协议与流处理层
 - `protocol.mjs` — Anthropic ↔ OpenAI 兼容协议互转（纯函数）。

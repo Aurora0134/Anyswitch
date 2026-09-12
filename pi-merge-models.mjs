@@ -8,6 +8,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
+import { modelEffortSurface, effortWireValue } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "pi-sidecar.json";
 
@@ -29,7 +30,7 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-export function buildPiProviderEntry(providerId, provider, port) {
+export function buildPiProviderEntry(providerId, provider, port, catalog = null) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -41,6 +42,18 @@ export function buildPiProviderEntry(providerId, provider, port) {
     if (sm?.displayName) m.name = sm.displayName;
     if (sm?.contextWindow !== undefined) m.contextWindow = sm.contextWindow;
     if (sm?.maxOutputTokens !== undefined) m.maxTokens = sm.maxOutputTokens;
+    const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "pi" }) : null;
+    if (efforts) {
+      // Pi reads the level list out of thinkingLevelMap: `off: null` is its
+      // own "thinking off" entry, and every offered level maps to the exact
+      // wire spelling the upstream expects.
+      m.reasoning = true;
+      m.thinkingLevelMap = {
+        off: null,
+        ...Object.fromEntries(efforts.levels.map((level) => [level, effortWireValue(efforts, level)])),
+      };
+      if (efforts.thinkingFormat) m.compat = { thinkingFormat: efforts.thinkingFormat };
+    }
     return m;
   });
   return {
@@ -60,7 +73,7 @@ export function buildPiProviderEntry(providerId, provider, port) {
   };
 }
 
-export function mergeModelsJson(existing, managedProviders, port, previousManaged = [], autoChannel = null) {
+export function mergeModelsJson(existing, managedProviders, port, previousManaged = [], autoChannel = null, catalog = null) {
   const merged = { ...existing, providers: { ...(existing.providers ?? {}) } };
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
@@ -77,7 +90,7 @@ export function mergeModelsJson(existing, managedProviders, port, previousManage
   }
 
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildPiProviderEntry(providerId, provider, port);
+    const entry = buildPiProviderEntry(providerId, provider, port, catalog);
     Object.assign(merged.providers, entry);
     currentManaged.push(providerId);
   }

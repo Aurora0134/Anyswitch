@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createOpenAIHandler } from "./openai-handler.mjs";
 import { createRetryingFetch } from "./launch.mjs";
 import { providerRoutingShapes } from "./catalog-generation.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
 
 const TOKEN = "test-token-123";
 
@@ -477,5 +478,84 @@ describe("openai handler chain noteSuccess model 兜底", () => {
     const plan = await planFor(handler);
     plan.noteSuccess("ghost-member");
     assert.equal(handler.chainState.get("zcode"), undefined);
+  });
+});
+
+describe("openai handler thinking-depth injection", () => {
+  const catalog = {
+    models: new Map([
+      ["claude-opus-5", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+    ]),
+  };
+
+  function makeInjectingHandler({ responses, isEnabled = () => true } = {}) {
+    const sent = [];
+    let index = 0;
+    let generation = null;
+    const handler = createOpenAIHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store: makeStore() }),
+      loadCredential: () => ({ ok: true, value: "sk-test" }),
+      upstreamFetch: async (urls, init) => {
+        sent.push(JSON.parse(init.body));
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        return next;
+      },
+      recordGeneration: (value) => { generation = value; },
+      readGeneration: () => generation,
+      effortInjector: createEffortInjector({ catalog, isEnabled }),
+    });
+    return { handler, sent };
+  }
+
+  const ask = (handler, extra = {}) => handler.handleChatCompletions(
+    "/openai/poke-api/v1/chat/completions",
+    { authorization: `Bearer ${TOKEN}` },
+    { model: "claude-opus-5", messages: [], ...extra },
+  );
+
+  it("adds the library default when the client named no level", async () => {
+    const { handler, sent } = makeInjectingHandler({ responses: [success()] });
+    await ask(handler);
+    assert.equal(sent[0].reasoning_effort, "high");
+  });
+
+  it("leaves a level the client chose exactly as sent", async () => {
+    const { handler, sent } = makeInjectingHandler({ responses: [success()] });
+    await ask(handler, { reasoning_effort: "max" });
+    assert.equal(sent[0].reasoning_effort, "max");
+  });
+
+  it("retries once without the field when the channel refuses it, then stops injecting there", async () => {
+    const refusal = new Response('{"error":{"message":"Unsupported parameter: \'reasoning_effort\'"}}', {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+    const { handler, sent } = makeInjectingHandler({ responses: [refusal, success()] });
+
+    const first = await ask(handler);
+    assert.equal(first.status, 200, "the client sees the retry's result");
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0].reasoning_effort, "high");
+    assert.equal("reasoning_effort" in sent[1], false);
+
+    await ask(handler);
+    assert.equal(sent.length, 3, "later requests go out clean, no refusal cycle again");
+    assert.equal("reasoning_effort" in sent[2], false);
+  });
+
+  it("keeps an unrelated upstream failure a single attempt", async () => {
+    const quota = new Response('{"error":{"message":"quota exceeded"}}', { status: 400 });
+    const { handler, sent } = makeInjectingHandler({ responses: [quota] });
+    const result = await ask(handler);
+    assert.equal(result.status, 400);
+    assert.equal(sent.length, 1);
+  });
+
+  it("sends nothing while the switch is off", async () => {
+    const { handler, sent } = makeInjectingHandler({ responses: [success()], isEnabled: () => false });
+    await ask(handler);
+    assert.equal("reasoning_effort" in sent[0], false);
   });
 });

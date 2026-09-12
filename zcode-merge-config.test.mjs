@@ -354,3 +354,50 @@ describe("auto routing channel (_auto)", () => {
     assert.ok(!second.managed.includes("auto"));
   });
 });
+
+describe("zcode thinking effort levels", () => {
+  const PROVIDER = {
+    channelName: "poke-api",
+    models: {
+      "glm-5.3": { displayName: "GLM 5.3", contextWindow: 200000 },
+      "agnes-image-2.0-flash": { displayName: "Agnes Image", contextWindow: 8192 },
+    },
+  };
+  const catalog = {
+    models: new Map([
+      ["glm-5.3", { kind: "reasoning", levels: ["medium", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+      ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const entryOf = (entry) => entry["_poke-api"].models;
+
+  it("writes no reasoning block without a catalog", () => {
+    const entry = buildZcodeProviderEntry("poke-api", PROVIDER, 47821, "tok");
+    assert.deepEqual(entryOf(entry)["glm-5.3"], {
+      limit: { context: 200000 },
+      modalities: { input: ["text", "image"], output: ["text"] },
+    });
+  });
+
+  it("offers the library levels with the default variant among them", () => {
+    const entry = buildZcodeProviderEntry("poke-api", PROVIDER, 47821, "tok", catalog);
+    assert.deepEqual(entryOf(entry)["glm-5.3"].reasoning, {
+      enabled: true,
+      variants: ["medium", "high", "xhigh", "max"],
+      defaultVariant: "high",
+    });
+  });
+
+  it("stays silent for a non-text model", () => {
+    const entry = buildZcodeProviderEntry("poke-api", PROVIDER, 47821, "tok", catalog);
+    assert.equal(entryOf(entry)["agnes-image-2.0-flash"].reasoning, undefined);
+  });
+
+  it("mergeZcodeConfig forwards the catalog", () => {
+    const { config } = mergeZcodeConfig({ provider: {} }, { "poke-api": PROVIDER }, 47821, "tok", [], null, catalog);
+    assert.deepEqual(
+      config.provider["_poke-api"].models["glm-5.3"].reasoning.variants,
+      ["medium", "high", "xhigh", "max"],
+    );
+  });
+});

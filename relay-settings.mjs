@@ -51,6 +51,17 @@ export function parseSparkWindowPoints(raw) {
 export const MIN_KEEPALIVE_RETRIES = 0;
 export const MAX_KEEPALIVE_RETRIES = 10;
 
+// "Thinking depth injection": when a client sends no effort for a model, the
+// relay supplies the library's default level instead, and kimi's global
+// `[thinking]` switch is taken over so its default path matches. On by default
+// (an absent or malformed value keeps it on; only an explicit false turns it
+// off) because the whole feature exists to make the pickers real.
+export const DEFAULT_INJECT_THINKING_EFFORT = true;
+
+export function parseInjectThinkingEffort(raw) {
+  return raw === false ? false : DEFAULT_INJECT_THINKING_EFFORT;
+}
+
 export function parseKeepAliveMaxRetries(raw) {
   const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
   if (!Number.isInteger(n) || n < MIN_KEEPALIVE_RETRIES) return DEFAULT_KEEPALIVE_CONFIG.maxRetries;
@@ -119,15 +130,18 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
 
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
+  const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
   return {
     raw,
     settings: {
       ...raw,
       keepAlive,
       sparkWindowPoints,
+      injectThinkingEffort,
     },
     keepAlive,
     sparkWindowPoints,
+    injectThinkingEffort,
   };
 }
 
@@ -186,6 +200,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "sparkWindowPoints")) {
     updated.sparkWindowPoints = parseSparkWindowPoints(patch.sparkWindowPoints);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "injectThinkingEffort")) {
+    updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
   }
 
   const text = JSON.stringify(updated, null, 2) + "\n";

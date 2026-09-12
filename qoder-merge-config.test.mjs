@@ -115,14 +115,37 @@ describe("buildQoderProviders", () => {
     assert.equal(m.model, "test-model");
     assert.equal(m.displayName, "Test");
     assert.equal(m.contextWindow, 999000);
+    // Qoder parses capabilities.thinking with a strict boolean reader and
+    // offers external providers no level list — the relay injects the level.
     assert.deepEqual(m.capabilities, {
       vision: true,
-      thinking: {
-        modes: ["enabled"],
-        supportsEffort: false,
-        supportedEffortLevels: [],
-      },
+      thinking: true,
     });
+  });
+
+  it("lets the effort library overrule the store's reasoning flag", () => {
+    const providers = {
+      "test-p": {
+        models: {
+          "agnes-image-2.0-flash": { displayName: "Agnes", isReasoning: true },
+          "glm-5.3": { displayName: "GLM" },
+        },
+      },
+    };
+    const catalog = {
+      models: new Map([
+        ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+      ]),
+    };
+    const conn = buildQoderProviders(providers, PORT, TOKEN, catalog)[managedConnectionId("test-p")];
+    assert.equal(
+      conn.models.find((m) => m.model === "agnes-image-2.0-flash").capabilities.thinking,
+      false,
+    );
+    assert.equal(
+      conn.models.find((m) => m.model === "glm-5.3").capabilities.thinking,
+      true,
+    );
   });
 
   it("uses store contextWindow when present, tier fallback when absent", () => {

@@ -19,6 +19,7 @@ import { createRelayServer, generateToken, listenLoopback } from "./server.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
+import { defaultEffortInjector } from "./effort-injection.mjs";
 
 // Per-endpoint upstream deadline. This bounds fetch() resolve time, which for
 // non-streaming chat completions is the FULL generation time (headers arrive
@@ -197,6 +198,7 @@ export function createProductionDeps({
   upstreamFetch = fetch,
   retryOptions,
   getKeepAliveConfig,
+  effortInjector,
   logger = null,
   agentId = "claude",
 } = {}) {
@@ -283,6 +285,10 @@ export function createProductionDeps({
     // saves take effect on the next request without a restart. Low-traffic
     // single-user relay: the readFileSync cost is negligible.
     getKeepAliveConfig: getKeepAliveConfig ?? (() => loadSettings(defaultSettingsPath()).keepAlive),
+    // One injector for both relay paths of this process: the thinking-depth
+    // library is read per request and the "this channel refuses the parameter"
+    // memory is shared, so a refusal seen on one path is honored on the other.
+    effortInjector: effortInjector ?? defaultEffortInjector({ logger }),
   };
 }
 

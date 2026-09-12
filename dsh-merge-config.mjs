@@ -7,6 +7,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { loadPiAiReasoningIndex, resolveKnowledgeReasoning } from "./reasoning-fallback.mjs";
+import { resolveModelEfforts, effortWireValue, intersectEffortVocabulary } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "dsh-sidecar.json";
 
@@ -58,15 +59,15 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-export function resolveModelReasoningLevels(model, provider, knowledge) {
+export function resolveModelReasoningLevels(model, provider, knowledge, catalog = null) {
   if (model?.supportsReasoning === false) {
-    return { exempt: true, levels: null, wireValues: null, thinkingFormat: null };
+    return { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: null };
   }
   if (Array.isArray(model?.reasoningEffortLevels) && model.reasoningEffortLevels.length > 0) {
-    return { exempt: false, levels: model.reasoningEffortLevels, wireValues: null, thinkingFormat: null };
+    return { exempt: false, levels: model.reasoningEffortLevels, wireValues: null, thinkingFormat: null, origin: "store" };
   }
   if (Array.isArray(provider?.reasoningVariants) && provider.reasoningVariants.length > 0) {
-    return { exempt: false, levels: provider.reasoningVariants, wireValues: null, thinkingFormat: null };
+    return { exempt: false, levels: provider.reasoningVariants, wireValues: null, thinkingFormat: null, origin: "provider" };
   }
   // Tier 4: the pi-ai knowledge base entry for this model id — the same
   // database DSH's own dispatch reads, so wire spellings match exactly.
@@ -79,10 +80,34 @@ export function resolveModelReasoningLevels(model, provider, knowledge) {
       resolveKnowledgeReasoning(knowledge.get(id)) ??
       (bare !== id ? resolveKnowledgeReasoning(knowledge.get(bare)) : null);
     if (resolved) {
-      return { exempt: false, levels: resolved.levels, wireValues: resolved.wireValues, thinkingFormat: resolved.thinkingFormat };
+      return { exempt: false, levels: resolved.levels, wireValues: resolved.wireValues, thinkingFormat: resolved.thinkingFormat, origin: "knowledge" };
     }
   }
-  return { exempt: false, levels: null, wireValues: null, thinkingFormat: null };
+  // Tier 5: the hub's thinking-effort library. It reaches models no catalog
+  // describes — every gateway-private id — so a model never shows up with no
+  // levels at all. Its wire spellings come from the same source pi-ai would
+  // use, and a row that says the model is not a text model is an exemption.
+  if (catalog) {
+    const entry = resolveModelEfforts(modelIdOf(model), catalog);
+    // Clip to DSH's own level set before writing: dsh-llm-pi-ai validates
+    // reasoningEfforts keys against its fixed THINKING_LEVELS union and rejects
+    // the whole settings.yaml on an unknown key, so a library-only word
+    // ("light") must be dropped here rather than passed through.
+    const levels = intersectEffortVocabulary(entry.levels, "dsh");
+    if (entry.kind === "non-text" || levels.length === 0) {
+      return { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: "library" };
+    }
+    const wireValues = {};
+    for (const level of levels) wireValues[level] = effortWireValue(entry, level);
+    return {
+      exempt: false,
+      levels,
+      wireValues,
+      thinkingFormat: entry.thinkingFormat,
+      origin: "library",
+    };
+  }
+  return { exempt: false, levels: null, wireValues: null, thinkingFormat: null, origin: null };
 }
 
 function modelIdOf(model) {
@@ -104,7 +129,7 @@ export function buildReasoningEffortsMap(levels, wireValues) {
   return map;
 }
 
-export function buildDshProviderEntry(providerId, provider, port, knowledge) {
+export function buildDshProviderEntry(providerId, provider, port, knowledge, catalog = null) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -124,12 +149,15 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge) {
       entry.maxTokens = m.maxOutputTokens;
     }
 
-    const resolved = resolveModelReasoningLevels({ ...m, id: modelId }, provider, knowledge);
+    const resolved = resolveModelReasoningLevels({ ...m, id: modelId }, provider, knowledge, catalog);
     if (!resolved.exempt && resolved.levels && resolved.levels.length > 0) {
       const reasoningEfforts = buildReasoningEffortsMap(resolved.levels, resolved.wireValues);
       if (reasoningEfforts) {
         entry.reasoningEfforts = reasoningEfforts;
-        hasAnyReasoning = true;
+        // The library alone must not decide the route's dialect: it knows the
+        // levels, not which spelling this gateway speaks, and a wrong dialect
+        // breaks requests that worked before levels were offered at all.
+        if (resolved.origin !== "library") hasAnyReasoning = true;
         // Per-model wire format from the knowledge base (zai/deepseek/openai
         // …). A route-level format only makes sense when every reasoning
         // model on the route agrees on one; mixed routes stay format-free
@@ -167,7 +195,7 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge) {
   };
 }
 
-export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null) {
+export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null, catalog = null) {
   const settings = typeof existingSettings === "object" && existingSettings !== null ? { ...existingSettings } : {};
   const llmPiAi = { ...(settings["llm-pi-ai"] ?? {}) };
   const existingProviders = { ...(llmPiAi.providers ?? {}) };
@@ -188,7 +216,7 @@ export function mergeDshSettings(existingSettings, managedProviders, port, previ
   // 2. Inject current active providers
   const currentManaged = [];
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildDshProviderEntry(providerId, provider, port, knowledge);
+    const entry = buildDshProviderEntry(providerId, provider, port, knowledge, catalog);
     Object.assign(existingProviders, entry);
     currentManaged.push(providerId);
   }

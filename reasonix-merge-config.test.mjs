@@ -358,3 +358,54 @@ describe("auto routing channel (_auto)", () => {
     assert.ok(!second.managed.includes("auto"));
   });
 });
+
+describe("reasonix thinking effort levels", () => {
+  const PROVIDER = {
+    channelName: "poke-api",
+    models: {
+      "deepseek-v4-flash": { displayName: "DeepSeek V4 Flash", contextWindow: 1000000 },
+      "longcat-chat": { displayName: "LongCat", contextWindow: 131072 },
+      "bare-new-model": { displayName: "Bare" },
+    },
+  };
+  const reasoning = (levels, level) => ({ kind: "reasoning", levels, default: level, wire: {}, thinkingFormat: null });
+  const catalog = {
+    models: new Map([
+      ["deepseek-v4-flash", reasoning(["high", "xhigh", "max"], "high")],
+      ["longcat-chat", reasoning(["high", "xhigh", "max"], "high")],
+      ["bare-new-model", reasoning(["high", "xhigh", "max"], "high")],
+    ]),
+  };
+  const tableOf = (text, modelId) => {
+    const header = `[providers.model_overrides."${modelId}"]`;
+    return text.split(/\n(?=\[)/).find((chunk) => chunk.startsWith(header)) ?? "";
+  };
+
+  it("writes no effort keys when no catalog reaches the builder", () => {
+    const { text } = mergeReasonixConfigToml("", { "poke-api": PROVIDER }, 47821);
+    assert.doesNotMatch(text, /supported_efforts/);
+    assert.doesNotMatch(text, /default_effort/);
+  });
+
+  it("clips the list to what the channel family accepts", () => {
+    const { text } = mergeReasonixConfigToml("", { "poke-api": PROVIDER }, 47821, null, catalog);
+    const table = tableOf(text, "deepseek-v4-flash");
+    assert.match(table, /supported_efforts\s+= \["high", "max"\]/);
+    assert.match(table, /default_effort\s+= "high"/);
+    assert.match(table, /context_window\s+= 1000000/);
+  });
+
+  it("leaves a binary-toggle family without an effort declaration", () => {
+    const { text } = mergeReasonixConfigToml("", { "poke-api": PROVIDER }, 47821, null, catalog);
+    const table = tableOf(text, "longcat-chat");
+    assert.ok(table.includes("context_window"), "the size override is still written");
+    assert.doesNotMatch(table, /supported_efforts/);
+  });
+
+  it("still opens an override table for a model that only has levels to declare", () => {
+    const { text } = mergeReasonixConfigToml("", { "poke-api": PROVIDER }, 47821, null, catalog);
+    const table = tableOf(text, "bare-new-model");
+    assert.match(table, /supported_efforts\s+= \["high", "xhigh", "max"\]/);
+    assert.doesNotMatch(table, /context_window/);
+  });
+});

@@ -6,6 +6,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
+import { modelEffortSurface } from "./effort-catalog.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
@@ -41,6 +42,10 @@ function tomlString(value) {
   return `"${String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+function tomlArray(values) {
+  return `[${values.map(tomlString).join(", ")}]`;
+}
+
 export function prefixedProviderId(providerId) {
   return `_${providerId}`;
 }
@@ -49,7 +54,7 @@ export function kimiModelAlias(providerId, modelId) {
   return `${prefixedProviderId(providerId)}/${modelId}`;
 }
 
-export function buildKimiManagedToml(managedProviders, port, token) {
+export function buildKimiManagedToml(managedProviders, port, token, effort = null) {
   const lines = [MANAGED_BEGIN, "# OpenAI-compatible Anyswitch relay providers and models.", ""];
   const managed = [];
 
@@ -84,6 +89,17 @@ export function buildKimiManagedToml(managedProviders, port, token) {
       }
       if (typeof model.maxOutputTokens === "number") {
         lines.push(`max_output_size = ${model.maxOutputTokens}`);
+      }
+      const efforts = effort?.catalog
+        ? modelEffortSurface(modelId, { catalog: effort.catalog, agent: "kimi" })
+        : null;
+      if (efforts) {
+        // Kimi treats `reasoning === true || support_efforts.length > 0` as
+        // "this model thinks" and renders support_efforts verbatim as its
+        // picker; default_effort is what a session that never touched it sends.
+        lines.push(`reasoning = true`);
+        lines.push(`support_efforts = ${tomlArray(efforts.levels)}`);
+        lines.push(`default_effort = ${tomlString(efforts.default)}`);
       }
       lines.push("");
     }
@@ -140,16 +156,59 @@ export function stripManagedBlock(text) {
   return parts.length ? parts.join("\n\n") + "\n" : "";
 }
 
-export function mergeKimiConfigToml(existingText, managedProviders, port, token, autoChannel = null) {
+export function mergeKimiConfigToml(existingText, managedProviders, port, token, autoChannel = null, effort = null) {
   const preserved = stripPrefixedTables(stripManagedBlock(existingText ?? ""));
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `_auto`.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
-  const { text: managedText, managed } = buildKimiManagedToml(providers, port, token);
-  const merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
-  return { text: merged, managed };
+  const { text: managedText, managed } = buildKimiManagedToml(providers, port, token, effort);
+  let merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;
+  let thinking;
+  if (effort?.takeOverThinking) {
+    thinking = takeOverKimiThinkingTable(merged);
+    merged = thinking.text;
+  }
+  return { text: merged, managed, thinking };
+}
+
+// Kimi's global `[thinking] enabled` short-circuits the DEFAULT path: with it
+// false, a session that never touched the effort picker sends no effort at all,
+// however many support_efforts the model declares (a manually picked level
+// still wins). Anyswitch owns the model tables but not that switch, so a user
+// who turned thinking off globally keeps an off default unless the takeover is
+// asked for.
+//
+// The rewrite is surgical on purpose: `[thinking]` declared twice is a TOML
+// parse error, and kimi rejects the whole file when it cannot parse it — which
+// would leave the endpoint with no models at all. So this only ever edits a
+// value that is already there, and refuses everything else.
+export function takeOverKimiThinkingTable(text) {
+  const lines = String(text ?? "").split(/\r?\n/);
+  const headerIndex = lines.findIndex((line) => /^\s*\[thinking\]\s*$/.test(line));
+  if (headerIndex === -1) return { text, status: "absent", changed: false };
+
+  const bodyEnd = lines.findIndex((line, index) => index > headerIndex && /^\s*\[/.test(line));
+  const end = bodyEnd === -1 ? lines.length : bodyEnd;
+  for (let index = headerIndex + 1; index < end; index += 1) {
+    const match = lines[index].match(/^(\s*enabled\s*=\s*)(true|false)(.*)$/);
+    if (!match) continue;
+    if (match[2] === "true") return { text, status: "present", changed: false };
+    const updated = [...lines];
+    updated[index] = `${match[1]}true${match[3]}`;
+    return { text: updated.join("\n"), status: "updated", changed: true };
+  }
+
+  const declared = lines.slice(headerIndex + 1, end).some((line) => /^\s*enabled\s*=/.test(line));
+  if (declared) {
+    // Present but not a bare boolean (a string, an expression, a table): this
+    // is the user's own wording and rewriting it blind risks breaking the file.
+    return { text, status: "invalid", changed: false };
+  }
+  const updated = [...lines];
+  updated.splice(headerIndex + 1, 0, "enabled = true");
+  return { text: updated.join("\n"), status: "added", changed: true };
 }
 
 export function readKimiConfigToml(filePath) {
