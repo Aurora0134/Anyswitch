@@ -12,7 +12,8 @@ import { mkdtempSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeWatchdog, stopWatchdog, getWatchdogPidPath } from "./agent-watchdog.mjs";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost } from "./agent-watchdog.mjs";
+import { createAgentWatcher } from "./agent-watcher.mjs";
 
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 const OWN_CMD = `node.exe ${APP_DIR}agent-watchdog.mjs`;
@@ -181,4 +182,52 @@ test("stopWatchdog treats an owner lookup resolving null as 'no port owner'", as
 
   assert.equal(result.ok, true);
   assert.deepEqual(killed, [888], "only the pid-file PID is killed");
+});
+
+// --- follow-agent watcher revive path ---------------------------------------
+
+test("followAgent tick reaches getRelayStatus/startRelay with an ASYNC scanProcesses", async () => {
+  // Regression: the injected scanProcesses is the collector's async probe —
+  // calling it without await made `procs` a Promise, every endpoint count
+  // read undefined, and anyAgent short-circuited the tick to a silent no-op.
+  const calls = { getRelayStatus: 0, startRelay: 0 };
+  const watcher = createAgentWatcher({
+    root: "C:/x",
+    scanProcesses: async () => ({ zcode: 1 }),
+    startRelay: async () => { calls.startRelay += 1; },
+    getRelayStatus: async () => { calls.getRelayStatus += 1; return { status: "stopped" }; },
+    loadSettings: () => ({ settings: { followAgent: true } }),
+    intervalMs: 60 * 60 * 1000, // the timer must not re-fire during the test
+    logger: { info() {}, error() {} },
+  });
+  watcher.start(); // fires one tick immediately
+  await new Promise((r) => setTimeout(r, 50));
+  watcher.stop();
+  assert.equal(calls.getRelayStatus, 1, "async scanProcesses 下 anyAgent 必须读到真计数");
+  assert.equal(calls.startRelay, 1, "agent 在跑且 relay 停了就必须自动拉起");
+});
+
+test("startWatchdogHost wires the real settings file (not the data root dir) into the tick", async () => {
+  // Regression: the loadSettings glue forwarded the watcher's `root` argument
+  // (a directory) as the settings file path; readFileSync on a directory
+  // failed, the tick saw empty settings, and followAgent was silently dead.
+  const localAppData = mkdtempSync(join(tmpdir(), "anyswitch-watchdog-"));
+  mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
+  writeFileSync(join(localAppData, "Anyswitch", "settings.json"), JSON.stringify({ followAgent: true }));
+  const calls = { getRelayStatus: 0, startRelay: 0 };
+  const host = await startWatchdogHost({
+    base: { LOCALAPPDATA: localAppData },
+    port: 0, // ephemeral marker port — no collision with a live watchdog
+    logger: { info() {}, error() {} },
+    watcherIntervalMs: 60 * 60 * 1000,
+    watcherDeps: {
+      scanProcesses: async () => ({ zcode: 1 }),
+      getRelayStatus: async () => { calls.getRelayStatus += 1; return { status: "stopped" }; },
+      startRelay: async () => { calls.startRelay += 1; },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 50));
+  await host.close();
+  assert.equal(calls.getRelayStatus, 1, "tick 必须读到真 settings.json 并走到 relay 状态探测");
+  assert.equal(calls.startRelay, 1);
 });

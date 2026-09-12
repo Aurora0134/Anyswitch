@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
@@ -47,8 +48,47 @@ describe("formatDuration", () => {
   });
 });
 
+// The collector's fast probe is a RESIDENT powershell.exe spoken to over
+// stdin/stdout. Tests that only inject execFn still exercise that path: this
+// shim fakes the child process and answers each stdin query by invoking the
+// test's execFn with a powershell-flavoured command string, so mocks that
+// route on `cmd.includes("powershell" / "tasklist" / ...)` keep working, and
+// delayed/gated exec callbacks keep their "scan round in flight" semantics.
+function makeShimPsSpawn(execFn) {
+  return () => {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    const stdin = {
+      write: (text) => {
+        execFn('powershell -NoProfile -NonInteractive -Command "<shim>"', {}, (err, out) => {
+          if (err || typeof out !== "string") {
+            child.emit("error", err || new Error("shim exec failed"));
+            return;
+          }
+          const markerMatch = text.match(/Write-Output '([^']+)'/);
+          const marker = markerMatch ? markerMatch[1] : "";
+          stdout.emit("data", out + marker + "\r\n");
+        });
+      },
+    };
+    child.stdin = stdin;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  };
+}
+
 function testCollector(opts) {
-  return createAgentMetricsCollector({ loadSparkSettings: false, ...opts });
+  const patched = { loadSparkSettings: false, ...opts };
+  if (patched.execFn && !patched.spawnFn) {
+    patched.spawnFn = makeShimPsSpawn(patched.execFn);
+  }
+  return createAgentMetricsCollector(patched);
 }
 
 // Shared WMIC lineage fixture (CommandLine,Name,ParentProcessId,ProcessId —
@@ -900,6 +940,10 @@ describe("createAgentMetricsCollector", () => {
     claudeCsv = "";
     // Bump time past the 2.5s scan cache so the next scan re-runs
     mockTime = 13000;
+    // Reads never block on a rescan: the first call serves the stale snapshot
+    // and kicks the background round; the second serves what it landed.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     status = await collector.getAgentsStatus();
     claude = status.find((a) => a.id === "claude");
     assert.equal(claude.status, "stopped");
@@ -1070,7 +1114,10 @@ describe("createAgentMetricsCollector", () => {
     // The OS recycles pid 5555 for a real claude.exe: the card must show the
     // process-scan placeholder for the new claude process, never the kimi row.
     claudeCsv = `"claude.exe","5555","Console","1","55,000 K"\r\n`;
-    mockTime = 13000; // past the scan cache so the next poll re-runs tasklist
+    mockTime = 13000; // past the scan cache so the next poll re-runs the probe
+    // Reads never block on a rescan: first call serves stale + kicks the round.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     status = await collector.getAgentsStatus();
     claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
@@ -1427,6 +1474,11 @@ describe("createAgentMetricsCollector", () => {
     // holds a live (GUI) process.
     engineAlive = false;
     t += 3000;
+    // Reads never block on a rescan: the first call past the cache window
+    // serves the stale snapshot and kicks the background round; the next read
+    // serves what it landed.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.deepEqual(codex.instances, [], "engine-scoped liveness evicts the row while the GUI idles on");
     assert.equal(codex.processCount, 1, "the idling GUI still counts toward the card");
@@ -1581,6 +1633,9 @@ describe("createAgentMetricsCollector", () => {
     // to the session.
     familyAlive = false;
     t += 3000;
+    // Reads never block on a rescan: first call serves stale + kicks the round.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.deepEqual(codex.instances, [], "procCounts.codex === 0 clears session rows immediately");
     assert.equal(codex.status, "stopped");
@@ -1631,6 +1686,9 @@ describe("createAgentMetricsCollector", () => {
     // not after the idle TTL — the engine alone keeps the card running.
     launcherAlive = false;
     t += 3000;
+    // Reads never block on a rescan: first call serves stale + kicks the round.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.deepEqual(codex.instances, [], "dead launcher pid evicts its leftover custom row");
     assert.equal(codex.processCount, 1, "the engine still counts toward the card");
@@ -3205,6 +3263,9 @@ describe("instance PID reconciliation and process-start placeholders", () => {
     // both buckets).
     alive = false;
     t += 3000;
+    // Reads never block on a rescan: first call serves stale + kicks the round.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
     assert.deepEqual(kimi.instances, [], "dead-pid instance is evicted on read, not by idle TTL");
     assert.equal(kimi.metrics.activeRequests, 0, "leaked in-flight count settled in the endpoint aggregate");
@@ -3432,11 +3493,16 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
 
     alive = false;
     t += 3000; // past the 2.5s scan cache so the read rescans
+    // Reads never block on a rescan: first call serves stale + kicks the round.
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 0, "process gone — session latched ended");
 
     alive = true; // same PID back (recycled, or the miss was transient)
     t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
     card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 1, "live PID revives the row instead of staying hidden behind the ended latch");
     assert.equal(card.sessions[0].id, "pid-5555");
@@ -3646,7 +3712,8 @@ describe("process scan staleness (stale-while-revalidate)", () => {
   // An execFn that answers immediately until arm() is called; from then on the
   // probe chain only completes when the test says so — so "this read waited for
   // the in-flight scan" is assertable instead of showing up as a hung test.
-  function gatedExec() {
+  // payload() is read per answer, so a test can change what the next round lands.
+  function gatedExec(payloadFn = () => wmicScan) {
     let armed = false;
     let release;
     const gate = new Promise((r) => { release = r; });
@@ -3655,10 +3722,10 @@ describe("process scan staleness (stale-while-revalidate)", () => {
       release: () => release(),
       execFn: (cmd, opts, cb) => {
         if (!armed) {
-          cb(null, wmicScan);
+          cb(null, payloadFn());
           return;
         }
-        gate.then(() => cb(null, wmicScan));
+        gate.then(() => cb(null, payloadFn()));
       },
     };
   }
@@ -3695,18 +3762,114 @@ describe("process scan staleness (stale-while-revalidate)", () => {
     probe.release();
   });
 
-  it("a snapshot past the stale ceiling is never served", async () => {
+  it("a snapshot of ANY age is served without waiting while a background round revalidates", async () => {
+    // First frame after a long idle gap (hidden tab pauses polling) must not
+    // wait a probe round — that stall was the user-visible "switch back to the
+    // panel and the board sits frozen" regression.
     let t = 3000;
-    const probe = gatedExec();
+    const freshScan = "Node,CommandLine,Name,ProcessId\r\n"
+      + "LAPTOP,C:\\Programs\\ZCode.exe,ZCode.exe,7777\r\n";
+    let nextPayload = wmicScan;
+    const probe = gatedExec(() => nextPayload);
     const collector = testCollector({ execFn: probe.execFn, nowFn: () => t });
-    await collector.scanProcesses();
+    await collector.scanProcesses(); // round 1 lands qoder at t=3000
 
     probe.arm();
-    t = 20000; // far past PROCESS_SCAN_MAX_STALE_MS
-    const pending = collector.scanProcesses();
-    const settledEarly = await raceWithPending(pending.then(() => true, () => true), 50);
-    assert.notEqual(settledEarly, true, "超龄快照必须等新扫描落地才返回");
+    nextPayload = freshScan;
+    t = 20000; // minutes after the tab was hidden — far past any staleness ceiling
+    const procs = await raceWithPending(collector.scanProcesses(), 200);
+    assert.notEqual(procs, "__pending__", "超龄快照也必须立即端出，不得等扫描");
+    assert.equal(procs.qoder, 1, "端出的就是上一份快照（内容陈旧但立即可得）");
     probe.release();
-    assert.equal((await pending).qoder, 1);
+
+    // The background round the stale read kicked off must still land; the next
+    // read then serves the fresh snapshot.
+    await new Promise((r) => setTimeout(r, 30));
+    t = 20100;
+    const fresh = await collector.scanProcesses();
+    assert.equal(fresh.zcode, 1, "后台重验轮落地后读到的就是新快照");
+    assert.equal(fresh.qoder, 0);
+  });
+});
+
+describe("persistent PowerShell probe transport", () => {
+  const qoderScan = "Node,CommandLine,Name,ProcessId\r\n"
+    + "LAPTOP,C:\\Programs\\Qoder\\Qoder.exe,Qoder.exe,4321\r\n";
+
+  // A controllable fake child process: writes are answered per the handler.
+  function fakeChild(onWrite) {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    child.stdin = { write: (text) => onWrite(child, stdout, text) };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  }
+  const markerOf = (text) => (text.match(/Write-Output '([^']+)'/) || [])[1] || "";
+
+  it("spawns once and reuses the same child across scan rounds", async () => {
+    let t = 1000;
+    let spawns = 0;
+    const spawnFn = () => {
+      spawns += 1;
+      return fakeChild((child, stdout, text) => stdout.emit("data", qoderScan + markerOf(text) + "\r\n"));
+    };
+    const collector = testCollector({ spawnFn, nowFn: () => t });
+    await collector.scanProcesses();
+    t = 10000; // past the TTL → second round
+    await collector.scanProcesses();
+    assert.equal(spawns, 1, "常驻探测进程必须跨轮复用，不得每轮冷启动");
+  });
+
+  it("a child that dies mid-query falls back to tasklist for that round and respawns next round", async () => {
+    let t = 3000;
+    let spawns = 0;
+    const spawnFn = () => {
+      spawns += 1;
+      const n = spawns;
+      return fakeChild((child, stdout, text) => {
+        if (n === 1) {
+          child.emit("error", new Error("child died"));
+          return;
+        }
+        stdout.emit("data", qoderScan + markerOf(text) + "\r\n");
+      });
+    };
+    const execFn = (cmd, opts, cb) => {
+      if (cmd.includes("tasklist")) {
+        return cb(null, '"ZCode.exe","20588","Console","1","50,000 K"\r\n');
+      }
+      return cb(new Error("unexpected exec"));
+    };
+    const collector = testCollector({ spawnFn, execFn, nowFn: () => t });
+    const first = await collector.scanProcesses();
+    assert.equal(first.zcode, 1, "探测进程死亡当轮必须落到 tasklist 兜底");
+    t = 10000;
+    await collector.scanProcesses(); // stale read kicks the respawn round
+    await new Promise((r) => setTimeout(r, 20)); // let it land
+    t = 11000; // inside the fresh TTL window: serves round-2 data, no extra spawn
+    const second = await collector.scanProcesses();
+    assert.equal(second.qoder, 1, "下一轮必须重起探测进程并走回快车道");
+    assert.equal(spawns, 2, "死亡进程不得复用");
+  });
+
+  it("an unanswered query rejects within the probe timeout instead of hanging the scan", { timeout: 15000 }, async () => {
+    // The real probe timeout is 3000ms; this test waits it out and asserts the
+    // scan still settles through the tasklist fallback.
+    const spawnFn = () => fakeChild(() => { /* never answers */ });
+    const execFn = (cmd, opts, cb) => {
+      if (cmd.includes("tasklist")) {
+        return cb(null, '"ZCode.exe","20588","Console","1","50,000 K"\r\n');
+      }
+      return cb(new Error("unexpected exec"));
+    };
+    const collector = testCollector({ spawnFn, execFn, nowFn: () => 3000 });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.zcode, 1, "超时轮必须落到 tasklist 兜底而不是挂死");
   });
 });
