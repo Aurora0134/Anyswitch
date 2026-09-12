@@ -1,4 +1,4 @@
-import { exec } from "node:child_process";
+import { exec, spawn } from "node:child_process";
 import { join } from "node:path";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
@@ -1281,9 +1281,161 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
   };
 }
 
+// ---------------------------------------------------------------------------
+// Persistent PowerShell process-scan probe.
+//
+// Why a resident child instead of one `exec` per round: wmic no longer exists
+// on Win11 24H2, so the old probe chain paid a full powershell.exe cold start
+// (~0.5s measured on this machine) every 2.5s while the board was open — that
+// process-creation churn is what made the panel feel sticky again. Spawning
+// once and reusing stdin/stdout drops a round to tens of milliseconds; the
+// query itself is the same Get-CimInstance row dump the fallback used to run.
+//
+// Protocol: each query is one line on the child's stdin, answered by the CSV
+// rows followed by a unique end-marker line. A query that times out, or a
+// child that dies mid-query, rejects — the caller then falls back to tasklist
+// for that round, and the next query spawns a fresh child. An idle child is
+// killed after PS_PROBE_IDLE_MS so a hidden panel leaves zero resident
+// processes behind. Children are unref'd (they never keep the host process
+// alive) and are killed from one shared process-exit hook.
+// ---------------------------------------------------------------------------
+const PS_PROBE_TIMEOUT_MS = 3000;
+const PS_PROBE_IDLE_MS = 60000;
+
+// `-Command -` would buffer stdin to EOF before executing — useless for a
+// resident probe. This read-eval loop runs each line as it arrives with no
+// prompt and no input echo, which is what makes stdin/stdout reuse possible.
+const PS_REPL_COMMAND =
+  "while (($line = [Console]::In.ReadLine()) -ne $null) { try { Invoke-Expression $line } catch { Write-Output \"ERR: $_\" } }";
+
+// Same row dump the old per-round PowerShell fallback ran: ParentProcessId
+// rides the same query to build the lineage table instance-id normalization
+// walks; cmd.exe joins the name filter because launcher → client chains pass
+// through a `cmd /c` shim (the launchers spawn via COMSPEC) and a missing
+// intermediate hop would break ancestor resolution. cmd.exe rows feed only
+// the lineage table — no counting branch claims them.
+const PS_PROCESS_SCAN_QUERY =
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+
+const livePsProbeChildren = new Set();
+let psProbeExitHookInstalled = false;
+
+function createPersistentPsProbe({ spawnFn, queryText }) {
+  let child = null;
+  let stdoutBuf = "";
+  let pending = null; // { marker, resolve, reject, timer }
+  let querySeq = 0;
+  let idleTimer = null;
+
+  const dropChild = (err) => {
+    const c = child;
+    child = null;
+    stdoutBuf = "";
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (pending !== null) {
+      const p = pending;
+      pending = null;
+      clearTimeout(p.timer);
+      p.reject(err);
+    }
+    if (c !== null) {
+      livePsProbeChildren.delete(c);
+      try { c.kill(); } catch { /* already dead */ }
+    }
+  };
+
+  const armIdleTimer = () => {
+    if (idleTimer !== null) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => dropChild(new Error("ps probe idle")), PS_PROBE_IDLE_MS);
+    if (typeof idleTimer.unref === "function") idleTimer.unref();
+  };
+
+  const ensureChild = () => {
+    if (child !== null) return child;
+    const c = spawnFn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_REPL_COMMAND], { windowsHide: true });
+    stdoutBuf = "";
+    c.stdout.setEncoding("utf8");
+    c.stderr.resume(); // drain so the pipe never back-pressures; content is noise
+    c.stdout.on("data", (chunk) => {
+      stdoutBuf += chunk;
+      if (pending === null) return;
+      const markerIdx = stdoutBuf.indexOf(pending.marker);
+      if (markerIdx === -1) return;
+      const out = stdoutBuf.slice(0, markerIdx);
+      stdoutBuf = stdoutBuf.slice(markerIdx + pending.marker.length);
+      const p = pending;
+      pending = null;
+      clearTimeout(p.timer);
+      p.resolve(out);
+    });
+    c.on("error", (err) => dropChild(err));
+    c.on("exit", () => dropChild(new Error("ps probe child exited")));
+    if (typeof c.unref === "function") c.unref();
+    for (const stream of [c.stdin, c.stdout, c.stderr]) {
+      if (stream && typeof stream.unref === "function") stream.unref();
+    }
+    livePsProbeChildren.add(c);
+    if (!psProbeExitHookInstalled) {
+      psProbeExitHookInstalled = true;
+      process.once("exit", () => {
+        for (const live of livePsProbeChildren) {
+          try { live.kill(); } catch { /* best effort */ }
+        }
+      });
+    }
+    child = c;
+    return c;
+  };
+
+  return {
+    query() {
+      return new Promise((resolve, reject) => {
+        if (pending !== null) {
+          reject(new Error("ps probe query already in flight"));
+          return;
+        }
+        let c;
+        try {
+          c = ensureChild();
+        } catch (err) {
+          reject(err);
+          return;
+        }
+        const marker = `__ANYSWITCH_PS_PROBE_END_${++querySeq}__`;
+        pending = {
+          marker,
+          resolve,
+          reject,
+          timer: setTimeout(() => {
+            // A wedged child never answers: drop it so the next round respawns.
+            dropChild(new Error("ps probe query timeout"));
+          }, PS_PROBE_TIMEOUT_MS),
+        };
+        // NOTE: the query timer stays REF'd on purpose. Child and stdio are
+        // unref'd so an idle probe never holds the host's event loop — but
+        // with everything unref'd the loop can drain mid-query and the answer
+        // never arrives (observed: unsettled top-level await). The pending
+        // timer is the one handle that keeps the loop alive until the answer
+        // (or the timeout) lands; it is always cleared on settle.
+        armIdleTimer();
+        stdoutBuf = ""; // discard any tail of a previous answer before asking
+        try {
+          c.stdin.write(`${queryText} ; Write-Output '${marker}'\n`);
+        } catch (err) {
+          dropChild(err);
+        }
+      });
+    },
+  };
+}
+
 export function createAgentMetricsCollector(options = {}) {
   const execFn = options.execFn ?? exec;
   const nowFn = options.nowFn ?? Date.now;
+  const psProbe = createPersistentPsProbe({ spawnFn: options.spawnFn ?? spawn, queryText: PS_PROCESS_SCAN_QUERY });
   let sparkWindowPoints = parseSparkWindowPoints(options.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
   const recentSampleWindow = options.recentSampleWindow ?? RECENT_SAMPLE_WINDOW;
   const faultIdleTtlMs = options.faultIdleTtlMs ?? FAULT_IDLE_TTL_MS;
@@ -1300,27 +1452,22 @@ export function createAgentMetricsCollector(options = {}) {
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),
   });
 
-  // Process detection cache — stale-while-revalidate.
+  // Process detection cache — stale-while-revalidate, never blocking past the
+  // first snapshot.
   //
-  // Why the read path must not block on the probe chain: on Windows 11 24H2 the
-  // `wmic` probe no longer exists, so probe 1 fails in ~50ms and every scan pays
-  // the PowerShell Get-CimInstance probe (~1.4s measured here). It can't degrade
-  // to the ~400ms tasklist probe either: tasklist has no CommandLine, and Qoder
-  // counting needs it to filter Electron `--type=` child processes. Meanwhile the
-  // panel polls /api/agents once a second and gives the cross-process pull
-  // 1500ms (see handleAgents in panel.mjs). A blocking scan therefore put roughly
-  // every third poll past that budget — the panel silently served its own
-  // zero-traffic collector and the board flashed "no data" for a beat.
-  //
-  // Handing back a snapshot no fresher than the old cache window costs display
-  // freshness this path never had, and takes the timeout race out of existence.
+  // The probe is one RESIDENT powershell.exe per collector (see
+  // createPersistentPsProbe): wmic is gone on Win11 24H2, and a per-round
+  // powershell cold start cost ~0.5s every TTL window while the board was
+  // open. Reads therefore never wait for a scan once any snapshot exists: the
+  // first reader past the TTL kicks a background round and gets the previous
+  // snapshot, however old. Serving a few extra seconds of staleness on a
+  // display-only path beats what the old "stale ceiling" did — it made every
+  // first frame after an idle gap (hidden tab pauses polling; the panel is
+  // revisited minutes later) wait a full probe round, which is exactly the
+  // stall a user feels when switching back to the panel. The only blocking
+  // case left is a collector with no snapshot at all (process startup), where
+  // there is nothing to serve.
   const PROCESS_SCAN_TTL_MS = 2500;
-  // Ceiling on the age a reader may still be served. Past it the probe chain is
-  // failing repeatedly, and presenting arbitrarily ancient process state (an
-  // endpoint that exited long ago still "running") is worse than one slow reply.
-  // Worst served age on the healthy path is one TTL plus one scan (~4s), so this
-  // only bites when probes are broken.
-  const PROCESS_SCAN_MAX_STALE_MS = 6000;
   let lastProcessScanTime = 0;
   // No snapshot has landed since this collector was created. Until one does,
   // there is nothing worth serving: the initial empty scan is not process state.
@@ -1329,61 +1476,46 @@ export function createAgentMetricsCollector(options = {}) {
   let pendingScanPromise = null;
 
   function startProcessScan() {
-    pendingScanPromise = new Promise((resolve) => {
-      // 1. Primary probe: WMIC with CommandLine, ParentProcessId and ProcessId.
-      // ParentProcessId rides the same query (zero extra spawn) to build the
-      // lineage table instance-id normalization walks; cmd.exe joins the name
-      // filter because launcher → client chains pass through a `cmd /c` shim
-      // (the launchers spawn via COMSPEC) and a missing intermediate hop would
-      // break ancestor resolution. cmd.exe rows feed only the lineage table —
-      // no counting branch claims them.
+    pendingScanPromise = (async () => {
       const land = (counts) => {
         cachedProcessCounts = counts;
         // Stamped where the data lands, not when the probe started, so the age
         // math in scanProcesses() means "how fresh is what I'm serving".
         lastProcessScanTime = nowFn();
         hasProcessScanResult = true;
-        resolve(cachedProcessCounts);
       };
 
-      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'codex.exe\' or name=\'codex-code-mode-host.exe\' or name=\'codex-command-runner.exe\' or name=\'ChatGPT.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
-        if (!wmicErr && typeof wmicOut === "string" && wmicOut.includes("ProcessId")) {
-          land(parseTasklistCsv(wmicOut));
-          return;
-        }
+      // 1. Resident PowerShell probe (fast path). Empty output counts as a
+      // failed round — the tasklist fallback still gets its say.
+      const psOut = await psProbe.query().catch(() => null);
+      if (typeof psOut === "string" && psOut.trim().length > 0) {
+        land(parseTasklistCsv(psOut));
+        return cachedProcessCounts;
+      }
 
-        // 2. Secondary fallback: PowerShell Get-CimInstance (preserves CommandLine on Win11 where wmic is deprecated/slow).
-        // Same lineage additions as the WMIC probe: ParentProcessId column (emitted
-        // as the second field) and cmd.exe in the filter.
-        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'codex.exe\' or name=\'codex-code-mode-host.exe\' or name=\'codex-command-runner.exe\' or name=\'ChatGPT.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
-        execFn(psCmd, { timeout: 3000, windowsHide: true }, (psErr, psOut) => {
-          if (!psErr && typeof psOut === "string" && psOut.trim().length > 0) {
-            land(parseTasklistCsv(psOut));
-            return;
-          }
-
-          // 3. Ultimate fallback: standard tasklist CSV. No parent column on
-          // this path — the lineage table stays empty and ancestor-based
-          // instance-id normalization degrades to a no-op (ids pass through).
-          execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, (err, stdout) => {
-            if (!err && typeof stdout === "string") {
-              land(parseTasklistCsv(stdout));
-              return;
-            }
-            // Every probe failed. Stamp the window anyway so a broken probe chain
-            // retries once per cache window rather than once per reader; do NOT
-            // mark a result landed — this round produced nothing.
+      // 2. Ultimate fallback: standard tasklist CSV. No parent column on
+      // this path — the lineage table stays empty and ancestor-based
+      // instance-id normalization degrades to a no-op (ids pass through).
+      await new Promise((resolve) => {
+        execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, (err, stdout) => {
+          if (!err && typeof stdout === "string") {
+            land(parseTasklistCsv(stdout));
+          } else {
+            // Every probe failed. Stamp the window anyway so a broken probe
+            // chain retries once per cache window rather than once per reader;
+            // do NOT mark a result landed — this round produced nothing.
             lastProcessScanTime = nowFn();
-            resolve(cachedProcessCounts);
-          });
+          }
+          resolve();
         });
       });
-    });
+      return cachedProcessCounts;
+    })();
 
     // Clear the in-flight marker after the scan settles so the next call
     // past the cache window re-scans. Using .then keeps this correct for both
-    // async exec (real child_process) and sync exec (test mocks): the clear
-    // runs after the resolve, never before the outer assignment lands.
+    // async probes (real child processes) and sync ones (test mocks): the
+    // clear runs after the resolve, never before the outer assignment lands.
     pendingScanPromise.then(() => {
       pendingScanPromise = null;
     });
@@ -1401,11 +1533,6 @@ export function createAgentMetricsCollector(options = {}) {
     // round in flight (or hand back the empty scan while a failed round's retry
     // window is still closed — the same answer the blocking path gave before).
     if (!hasProcessScanResult) return pendingScanPromise ?? cachedProcessCounts;
-    // Past the stale ceiling: presenting unboundedly ancient process state (an
-    // endpoint that exited long ago still "running") is worse than one slow reply.
-    if (age > PROCESS_SCAN_MAX_STALE_MS) {
-      return pendingScanPromise ?? startProcessScan();
-    }
     return cachedProcessCounts;
   }
 

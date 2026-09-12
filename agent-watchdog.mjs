@@ -223,12 +223,19 @@ export async function startWatchdogHost(options = {}) {
 
   const root = relayDataRoot(options.base ?? process.env);
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
+  // watcherDeps exists so tests can observe the follow-agent path without real
+  // process/port side effects; production passes nothing and gets the real deps.
+  const deps = options.watcherDeps ?? {};
   createAgentWatcher({
     root,
-    scanProcesses: () => metricsCollector.scanProcesses(),
-    startRelay: () => startRelay(root),
-    getRelayStatus: () => getRelayStatus(root),
-    loadSettings: (p) => loadSettings(p ?? defaultSettingsPath()),
+    scanProcesses: deps.scanProcesses ?? (() => metricsCollector.scanProcesses()),
+    startRelay: deps.startRelay ?? (() => startRelay(root)),
+    getRelayStatus: deps.getRelayStatus ?? (() => getRelayStatus(root)),
+    // The watcher passes the data ROOT directory, not a file path — forwarding
+    // it made readFileSync fail on a directory and the tick saw empty settings
+    // every poll (followAgent silently dead). Resolve the real settings file.
+    loadSettings: deps.loadSettings ?? (() => loadSettings(defaultSettingsPath(options.base ?? process.env))),
+    intervalMs: options.watcherIntervalMs,
     logger,
   }).start();
 
