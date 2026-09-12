@@ -44,7 +44,6 @@ function makeHarness(providers) {
       storeNewIdsFor,
       consumeStoreNewModels,
       orderStoreModelIds,
-      shown: storeNewShown,
       raw: () => JSON.parse(localStorage.getItem(STORE_NEW_MODELS_KEY) || "{}"),
       setTs: (pid, ts) => {
         const raw = JSON.parse(localStorage.getItem(STORE_NEW_MODELS_KEY) || "{}");
@@ -140,15 +139,27 @@ describe("store-new-models 置顶排序", () => {
   });
 });
 
-describe("store-new-models 高光呈现门控（storeNewShown）", () => {
-  it("未呈现的渠道 highlight 为真，已呈现为假", () => {
+describe("store-new-models render 消耗语义（看过即复位）", () => {
+  // 模拟 renderProviderDetail 的判定：有待读 → 置顶+高光 → 渲染末尾 consume。
+  // 第一次 render 高光，第二次 render 新增态已消耗 → 不再置顶/高光。
+  it("第一次 render 置顶高光并消耗，第二次 render 复位", () => {
     const h = makeHarness(PROV);
-    h.markStoreNewModels("p1", ["a"]);
-    const newIds = h.storeNewIdsFor("p1");
-    const highlightFirst = newIds.length > 0 && !h.shown.has("p1");
-    assert.equal(highlightFirst, true);
-    h.shown.add("p1"); // applyStoreFocus 登记
-    const highlightSecond = h.storeNewIdsFor("p1").length > 0 && !h.shown.has("p1");
-    assert.equal(highlightSecond, false);
+    h.markStoreNewModels("p1", ["c", "a"]); // 新增 a、c
+    const discovered = ["a", "b", "c", "d"];
+
+    // 第一次 render：有待读 → 置顶 + 高光，渲染末尾消耗
+    const ids1 = h.storeNewIdsFor("p1");
+    const highlight1 = ids1.length > 0;
+    const ordered1 = highlight1 ? h.orderStoreModelIds(discovered, ids1) : discovered;
+    assert.equal(highlight1, true);
+    assert.deepEqual(ordered1, ["a", "c", "b", "d"]); // 新增置顶、组内保原相对序
+    if (highlight1) h.consumeStoreNewModels("p1");
+
+    // 第二次 render：新增态已消耗 → 原序、无高光
+    const ids2 = h.storeNewIdsFor("p1");
+    const highlight2 = ids2.length > 0;
+    const ordered2 = highlight2 ? h.orderStoreModelIds(discovered, ids2) : discovered;
+    assert.equal(highlight2, false);
+    assert.deepEqual(ordered2, ["a", "b", "c", "d"]); // 放回原位
   });
 });
