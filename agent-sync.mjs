@@ -106,6 +106,13 @@ export async function syncAllAgentConfigs({
     } else if (!kimiResult.unchanged) {
       logger?.info?.("kimi config.toml synced");
     }
+    // The per-model level list is written either way; this only reports that
+    // kimi's own global switch stayed out of Anyswitch's hands.
+    if (kimiResult.thinking === "absent") {
+      logger?.info?.("kimi 配置里没有全局思考开关，已跳过接管：模型档位照常可选，未选档时按 kimi 自己的默认走。");
+    } else if (kimiResult.thinking === "invalid") {
+      logger?.warn?.("kimi 全局思考开关的值无法识别，已跳过接管：请打开 kimi 设置确认该项后重新同步。");
+    }
   } catch (err) {
     results.kimi = { ok: false, error: err.message };
     logger?.warn?.(`kimi config sync skipped: ${err.message}`);

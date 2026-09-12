@@ -20,6 +20,7 @@ import {
   reasonixEnvPathFromConfig,
   writeSidecar,
 } from "./reasonix-merge-config.mjs";
+import { catalogForRoot } from "./effort-catalog.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -35,7 +36,7 @@ export function reasonixConfigPath(base = process.env) {
   );
 }
 
-export async function writeReasonixConfig(store, port, token, sidecarRoot, configPath = reasonixConfigPath()) {
+export async function writeReasonixConfig(store, port, token, sidecarRoot, configPath = reasonixConfigPath(), catalog = catalogForRoot(sidecarRoot)) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "reasonix");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
@@ -49,7 +50,7 @@ export async function writeReasonixConfig(store, port, token, sidecarRoot, confi
   }
   let merged;
   try {
-    merged = mergeReasonixConfigToml(existing, managedProviders, port, autoChannel);
+    merged = mergeReasonixConfigToml(existing, managedProviders, port, autoChannel, catalog);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_REASONIX_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };
@@ -95,6 +96,7 @@ function createOpenAIProductionDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector }),
     metricsCollector,
     logger,

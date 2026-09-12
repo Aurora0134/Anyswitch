@@ -136,6 +136,18 @@ function convertToolChoice(toolChoice) {
   }
 }
 
+// Anthropic names thinking depth a few ways across versions (Claude Code
+// itself sends a top-level reasoning_effort); the translator below carries none
+// of them upstream, so the injector needs this check against the RAW body to
+// keep its "never override a client's own choice" rule.
+export function clientSpecifiedThinking(rawBody) {
+  if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) return false;
+  if (rawBody.thinking !== undefined) return true;
+  if (rawBody.reasoning_effort !== undefined) return true;
+  if (typeof rawBody.effort === "string" && rawBody.effort.length > 0) return true;
+  return typeof rawBody.output_config?.effort === "string";
+}
+
 // `modelId` is the bare upstream model id produced by unpackWireId.
 export function anthropicToOpenAI(body, modelId) {
   const messages = [];

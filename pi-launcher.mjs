@@ -30,6 +30,7 @@ import {
   writeSidecar,
   validatePiModelsConfig,
 } from "./pi-merge-models.mjs";
+import { catalogForRoot } from "./effort-catalog.mjs";
 
 export function piModelsPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".pi", "agent", "models.json");
@@ -61,6 +62,7 @@ function createOpenAIProductionDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     metricsCollector,
   };
 }
@@ -76,7 +78,7 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH) {
+export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH, catalog = catalogForRoot(sidecarRoot)) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "pi");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
@@ -92,7 +94,7 @@ export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MO
     }
     throw error;
   }
-  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel);
+  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel, catalog);
 
   const gate = validatePiModelsConfig(config);
   if (!gate.valid) {

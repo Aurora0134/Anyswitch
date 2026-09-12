@@ -24,6 +24,8 @@ import {
   writeKimiConfigTomlWithBackup,
   writeSidecar,
 } from "./kimi-merge-config.mjs";
+import { catalogForRoot } from "./effort-catalog.mjs";
+import { loadSettings } from "./relay-settings.mjs";
 
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 
@@ -31,12 +33,19 @@ export function kimiConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".kimi-code", "config.toml");
 }
 
-export async function writeKimiConfig(store, port, token, sidecarRoot, configPath = kimiConfigPath()) {
+export async function writeKimiConfig(store, port, token, sidecarRoot, configPath = kimiConfigPath(), effort = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "kimi");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
+  // Both the level list (support_efforts) and the global default live here:
+  // the switch behind 「注入思考强度」 owns "make thinking happen by default",
+  // so it decides whether Anyswitch may rewrite kimi's own `[thinking]` table.
+  const effortOptions = effort ?? {
+    catalog: catalogForRoot(sidecarRoot),
+    takeOverThinking: loadSettings(join(sidecarRoot, "settings.json")).injectThinkingEffort,
+  };
   let existing;
   try {
     existing = readKimiConfigToml(configPath);
@@ -45,7 +54,7 @@ export async function writeKimiConfig(store, port, token, sidecarRoot, configPat
   }
   let merged;
   try {
-    merged = mergeKimiConfigToml(existing, managedProviders, port, token, autoChannel);
+    merged = mergeKimiConfigToml(existing, managedProviders, port, token, autoChannel, effortOptions);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_KIMI_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };
@@ -55,6 +64,9 @@ export async function writeKimiConfig(store, port, token, sidecarRoot, configPat
   const writeResult = writeKimiConfigTomlWithBackup(configPath, merged.text);
   if (writeResult.ok) {
     writeSidecar(sidecarRoot, merged.managed);
+  }
+  if (writeResult.ok && merged.thinking) {
+    return { ...writeResult, thinking: merged.thinking.status };
   }
   return writeResult;
 }

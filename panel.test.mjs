@@ -2878,3 +2878,116 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
       "Esc 关闭（判 show 态）");
   });
 });
+
+describe("设置项「注入思考强度」", () => {
+  function makeRouter(base) {
+    return createPanelRouter({
+      base,
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      enableWatchdogAutostartFn: async () => ({ ok: true }),
+      disableWatchdogAutostartFn: async () => ({ ok: true }),
+      isWatchdogAutostartEnabledFn: async () => false,
+      spawnWatchdogFn: async () => ({ ok: true }),
+      stopWatchdogFn: async () => ({ ok: true }),
+      probeWatchdogFn: async () => false,
+      fetchRelayAgents: async () => null,
+    });
+  }
+
+  function tempBase() {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-effort-"));
+    const relayDataRoot = join(dir, "Anyswitch");
+    mkdirSync(relayDataRoot, { recursive: true });
+    return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir: relayDataRoot };
+  }
+
+  it("未落盘时默认为开，POST false 后 GET 回读为 false", async () => {
+    const { base, dir } = tempBase();
+    const router = makeRouter(base);
+
+    const initial = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(initial.req, initial.res);
+    assert.equal(JSON.parse(initial.res.body).settings.injectThinkingEffort, true, "开关默认开");
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { injectThinkingEffort: false });
+    await router.handle(post.req, post.res);
+    assert.equal(JSON.parse(post.res.body).ok, true);
+
+    const after = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(JSON.parse(after.res.body).settings.injectThinkingEffort, false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("设置弹窗里以既有的 .toggle 开关呈现，标题为「注入思考强度」", () => {
+    assert.ok(panelHtml.includes('<div class="modal-item-title">注入思考强度</div>'), "条目标题");
+    const item = panelHtml.match(/<div class="modal-item">[\s\S]*?注入思考强度[\s\S]*?<\/label>\s*<\/div>/);
+    assert.ok(item, "条目挂在设置弹窗内");
+    assert.ok(item[0].includes('<label class="toggle">'), "沿用全局开关控件与各主题皮肤");
+    assert.ok(item[0].includes('id="injectEffortToggle"'), "开关有稳定 id 供读写");
+  });
+
+  // 抠出 onchange 函数体，注入假 toggle/api/toast 做真行为断言（全绿不等于可点，
+  // 这里跑的就是点击后那段代码）。
+  function runToggleHandler({ checked, apiResult }) {
+    const source = panelHtml.match(/injectEffortToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+    assert.ok(source, "onchange 处理器在 panel.html 里");
+    const toggle = {
+      checked,
+      setAttribute() {},
+      removeAttribute() {},
+    };
+    const calls = [];
+    const toasts = [];
+    const settingsSaving = { injectEffort: false };
+    const api = async (method, path, body) => {
+      calls.push({ method, path, body });
+      return apiResult;
+    };
+    const run = new Function(
+      "injectEffortToggle", "settingsSaving", "api", "toast",
+      `let settingsLoadGen = 0; ${source[0]} return injectEffortToggle.onchange();`,
+    );
+    return {
+      done: run(toggle, settingsSaving, api, (message) => toasts.push(message)),
+      calls,
+      toasts,
+      toggle,
+      savingAfter: () => settingsSaving.injectEffort,
+    };
+  }
+
+  it("打开开关后 POST 该设置并以服务端回读值为准", async () => {
+    const scenario = runToggleHandler({
+      checked: true,
+      apiResult: { ok: true, settings: { injectThinkingEffort: true } },
+    });
+    await scenario.done;
+    assert.deepEqual(scenario.calls, [{
+      method: "POST", path: "/api/settings", body: { injectThinkingEffort: true },
+    }]);
+    assert.deepEqual(scenario.toasts, ["已开启注入思考强度"]);
+    assert.equal(scenario.savingAfter(), false, "保存中标记已释放");
+  });
+
+  it("保存失败时开关弹回原状并报错", async () => {
+    const scenario = runToggleHandler({ checked: false, apiResult: { ok: false } });
+    await scenario.done;
+    assert.equal(scenario.toggle.checked, true, "回滚到点击前状态");
+    assert.equal(scenario.toasts.length, 1);
+    assert.equal(scenario.toasts[0], "设置保存失败");
+  });
+
+  it("说明文案只讲用户看得懂的行为，不出现字段名", () => {
+    const desc = panelHtml.match(/<div class="modal-item-desc">(客户端没有选思考深度[^<]*)<\/div>/);
+    assert.ok(desc, "说明文案存在");
+    assert.doesNotMatch(desc[1], /reasoning_effort|injectThinkingEffort|support_efforts|default_effort|thinkingLevelMap|thinkingFormat/, "正文不出现字段名");
+    assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase 标识符");
+  });
+});

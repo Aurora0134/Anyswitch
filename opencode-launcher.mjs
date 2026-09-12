@@ -32,6 +32,7 @@ function createOpenAIProductionDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     metricsCollector,
   };
 }

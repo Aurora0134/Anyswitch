@@ -5,7 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
-import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse } from "./protocol.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientSpecifiedThinking } from "./protocol.mjs";
+import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 
 const TOKEN = "test-token-0123456789abcdef";
@@ -211,6 +212,82 @@ test("every catalog entry unpacks back to a store hit", async () => {
     const out = await handler.handleMessages(AUTH, messageBody(entry.wireId));
     assert.equal(out.status, 200, `${entry.wireId} should route`);
   }
+});
+
+// ---------- thinking-depth injection on the Anthropic path ----------
+
+const EFFORT_CATALOG = {
+  models: new Map([
+    ["claude-opus-5", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+  ]),
+};
+
+function makeInjectingMessagesHandler(responses) {
+  const sent = [];
+  let index = 0;
+  const handler = createHandler(makeDeps({
+    upstreamFetch: async (urls, init) => {
+      sent.push(JSON.parse(init.body));
+      const next = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      return next;
+    },
+    effortInjector: createEffortInjector({ catalog: EFFORT_CATALOG }),
+  }));
+  return { handler, sent };
+}
+
+const okResponse = {
+  ok: true,
+  status: 200,
+  json: async () => ({
+    id: "cmpl-1",
+    choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 3, completion_tokens: 1 },
+  }),
+};
+
+test("anthropic path adds the library default when Claude named no depth", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("anthropic path leaves a request that carried a thinking block alone", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), thinking: { type: "enabled", budget_tokens: 2048 } };
+  await handler.handleMessages(AUTH, body);
+  assert.equal("reasoning_effort" in sent[0], false);
+});
+
+test("a level Claude sent itself is not replaced by the library default", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), reasoning_effort: "max" };
+  await handler.handleMessages(AUTH, body);
+  // The translator still drops Claude's field on this path (unchanged decision);
+  // what must not happen is the relay filling the gap with a level of its own.
+  assert.equal("reasoning_effort" in sent[0], false);
+});
+
+test("anthropic path retries once without the field when the channel refuses it", async () => {
+  const refusal = { ok: false, status: 400, text: async () => 'Unsupported parameter: "reasoning_effort"' };
+  const { handler, sent } = makeInjectingMessagesHandler([refusal, okResponse]);
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].reasoning_effort, "high");
+  assert.equal("reasoning_effort" in sent[1], false);
+});
+
+test("clientSpecifiedThinking reads every way Claude names a depth", () => {
+  assert.equal(clientSpecifiedThinking({ thinking: { type: "enabled" } }), true);
+  assert.equal(clientSpecifiedThinking({ reasoning_effort: "high" }), true);
+  assert.equal(clientSpecifiedThinking({ effort: "medium" }), true);
+  assert.equal(clientSpecifiedThinking({ output_config: { effort: "low" } }), true);
+  assert.equal(clientSpecifiedThinking({ max_tokens: 100 }), false);
+  assert.equal(clientSpecifiedThinking({ effort: "" }), false);
+  assert.equal(clientSpecifiedThinking(null), false);
 });
 
 test("buildWireCatalog fails whole catalog on collision (§1.5)", () => {

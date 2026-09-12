@@ -20,6 +20,7 @@ import {
   writeSidecar,
   validateZcodeConfig,
 } from "./zcode-merge-config.mjs";
+import { catalogForRoot } from "./effort-catalog.mjs";
 
 export function zcodeConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".zcode", "v2", "config.json");
@@ -53,6 +54,7 @@ function createOpenAIProductionDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector }),
     metricsCollector,
     logger,
@@ -70,7 +72,7 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH) {
+export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH, catalog = catalogForRoot(sidecarRoot)) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "zcode");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
@@ -86,7 +88,7 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
     }
     throw error;
   }
-  const { config, managed } = mergeZcodeConfig(existing, managedProviders, port, token, previousManaged, autoChannel);
+  const { config, managed } = mergeZcodeConfig(existing, managedProviders, port, token, previousManaged, autoChannel, catalog);
 
   const gate = validateZcodeConfig(config);
   if (!gate.valid) {

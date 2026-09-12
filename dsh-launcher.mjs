@@ -21,6 +21,7 @@ import {
   validateDshSettings,
   getYamlModule,
 } from "./dsh-merge-config.mjs";
+import { catalogForRoot } from "./effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
 
 export function dshSettingsPath(base = process.env) {
@@ -55,6 +56,7 @@ function createOpenAIProductionDeps(options = {}) {
     upstreamFetch: claudeDeps.upstreamFetch,
     recordGeneration: claudeDeps.recordGeneration,
     readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector }),
     metricsCollector,
     logger,
@@ -82,7 +84,7 @@ export function dshPackageRoot(base = process.env) {
   );
 }
 
-export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH) {
+export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot)) {
   const yaml = await getYamlModule();
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "dsh");
@@ -102,8 +104,10 @@ export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DS
   // The pi-ai database shipped inside the installed DSH package is the
   // reasoning-effort knowledge source for models whose upstream /v1/models
   // listing discloses nothing. Empty (and skipped) when DSH is not installed.
+  // Behind it sits the hub's own thinking-effort library (effort-catalog.mjs),
+  // which covers the gateway-private ids no catalog describes.
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
-  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel);
+  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel, catalog);
 
   const gate = validateDshSettings(config);
   if (!gate.valid) {

@@ -15,6 +15,7 @@ import {
   MANAGED_BEGIN,
   MANAGED_END,
   deriveAutoRouteChannel,
+  takeOverKimiThinkingTable,
 } from "./kimi-merge-config.mjs";
 
 const STORE = {
@@ -308,5 +309,103 @@ describe("auto routing channel (_auto)", () => {
     assert.doesNotMatch(second.text, /_auto/, "stale _auto removed once the chain is gone");
     assert.match(second.text, /\[providers\."_poke-api"\]/, "real channels survive the cleanup");
     assert.ok(!second.managed.includes("auto"));
+  });
+});
+
+describe("kimi thinking effort levels", () => {
+  const PROVIDER = {
+    baseURL: "https://poke.example/v1",
+    models: {
+      "kimi-k3": { displayName: "Kimi K3", contextWindow: 1000000 },
+      "agnes-image-2.0-flash": { displayName: "Agnes", contextWindow: 4096 },
+    },
+  };
+  const catalog = {
+    models: new Map([
+      ["kimi-k3", { kind: "reasoning", levels: ["low", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: "openai" }],
+      ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const tableOf = (text, alias) =>
+    text.split(/\n(?=\[)/).find((chunk) => chunk.startsWith(`[models.${JSON.stringify(alias)}]`)) ?? "";
+
+  it("writes no effort keys when the effort option is absent", () => {
+    const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok");
+    assert.equal(tableOf(text, "_poke-api/kimi-k3").includes("support_efforts"), false);
+  });
+
+  it("declares the picker list and the level a session defaults to", () => {
+    const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
+    const table = tableOf(text, "_poke-api/kimi-k3");
+    assert.match(table, /reasoning = true/);
+    assert.match(table, /support_efforts = \["low", "high", "xhigh", "max"\]/);
+    assert.match(table, /default_effort = "high"/);
+  });
+
+  it("stays quiet for a non-text model", () => {
+    const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
+    const table = tableOf(text, "_poke-api/agnes-image-2.0-flash");
+    assert.ok(table.includes("max_context_size"), "the model itself is still declared");
+    assert.equal(table.includes("support_efforts"), false);
+  });
+});
+
+describe("takeOverKimiThinkingTable", () => {
+  it("flips an existing switch in place and keeps the rest of the file", () => {
+    const source = [
+      "[thinking]",
+      'enabled = false',
+      'effort = "high"',
+      "",
+      "[experimental]",
+      "foo = 1",
+      "",
+    ].join("\n");
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "updated");
+    assert.equal(result.changed, true);
+    assert.equal(result.text.split("\n")[1], "enabled = true");
+    assert.equal(result.text.match(/^\[thinking\]$/gm).length, 1, "never a second table");
+    assert.match(result.text, /effort = "high"/);
+    assert.match(result.text, /\[experimental\]/);
+  });
+
+  it("keeps a trailing comment attached to the value", () => {
+    const result = takeOverKimiThinkingTable("[thinking]\nenabled = false  # 我先关着\n");
+    assert.equal(result.text, "[thinking]\nenabled = true  # 我先关着\n");
+  });
+
+  it("reports present when thinking is already on", () => {
+    const source = "[thinking]\nenabled = true\n";
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "present");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("adds the key inside a table that declares none", () => {
+    const result = takeOverKimiThinkingTable('[thinking]\neffort = "low"\n');
+    assert.equal(result.status, "added");
+    assert.equal(result.text, '[thinking]\nenabled = true\neffort = "low"\n');
+  });
+
+  it("refuses to invent a table it was not given", () => {
+    const source = '[providers."_x"]\ntype = "openai"\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "absent");
+    assert.equal(result.changed, false);
+    assert.equal(result.text, source);
+  });
+
+  it("refuses a value that is not a bare boolean", () => {
+    const source = '[thinking]\nenabled = "off"\n';
+    const result = takeOverKimiThinkingTable(source);
+    assert.equal(result.status, "invalid");
+    assert.equal(result.text, source);
+  });
+
+  it("ignores a nested table whose name merely ends in thinking", () => {
+    const result = takeOverKimiThinkingTable('[kimi.thinking]\nenabled = false\n');
+    assert.equal(result.status, "absent");
   });
 });

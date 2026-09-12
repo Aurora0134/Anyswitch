@@ -8,6 +8,8 @@ import {
   DEFAULT_SPARK_WINDOW_POINTS,
   parseKeepAliveConfig,
   parseSparkWindowPoints,
+  parseInjectThinkingEffort,
+  DEFAULT_INJECT_THINKING_EFFORT,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
@@ -227,6 +229,36 @@ describe("relay-settings", () => {
       assert.equal(loadSettings(path, {}).keepAlive.maxRetries, 2);
       assert.equal(loadSettings(path, { ANYSWITCH_KEEPALIVE_RETRIES: "7" }).keepAlive.maxRetries, 7);
       assert.equal(loadSettings(path, { ANYSWITCH_KEEPALIVE_RETRIES: "20" }).keepAlive.maxRetries, 20);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("injectThinkingEffort", () => {
+  it("turns off only for an explicit false", () => {
+    assert.equal(DEFAULT_INJECT_THINKING_EFFORT, true);
+    assert.equal(parseInjectThinkingEffort(undefined), true);
+    assert.equal(parseInjectThinkingEffort(false), false);
+    assert.equal(parseInjectThinkingEffort(true), true);
+    assert.equal(parseInjectThinkingEffort("false"), true, "a stray string is not a user's off switch");
+  });
+
+  it("survives a save round-trip without disturbing neighbouring keys", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-effort-setting-"));
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ followAgent: true, sparkWindowPoints: 24 }));
+      assert.equal(loadSettings(path, {}).injectThinkingEffort, true);
+
+      const saved = saveSettings(path, { injectThinkingEffort: false }, {});
+      assert.equal(saved.settings.injectThinkingEffort, false);
+      assert.equal(saved.settings.followAgent, true);
+      assert.equal(saved.settings.sparkWindowPoints, 24);
+      assert.equal(loadSettings(path, {}).injectThinkingEffort, false);
+
+      const malformed = saveSettings(path, { injectThinkingEffort: "nonsense" }, {});
+      assert.equal(malformed.settings.injectThinkingEffort, true, "stored value stays canonical");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

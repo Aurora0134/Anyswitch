@@ -432,3 +432,76 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
   assert.ok(second.config["llm-pi-ai"].providers["_poke-api"], "real channels survive the cleanup");
   assert.ok(!second.managed.includes("auto"));
 });
+
+test("library tier: no catalog keeps today's shape for an unknown model", () => {
+  const provider = { models: { "mimo-v2.5-pro": { displayName: "Mimo" } } };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null);
+  const model = entry._poke.models[0];
+  assert.equal(model.reasoningEfforts, undefined);
+  assert.equal(entry._poke.compat, undefined);
+});
+
+test("library tier: an unknown text model gets levels, not a route dialect", () => {
+  const provider = { models: { "mimo-v2.5-pro": { displayName: "Mimo" } } };
+  const catalog = {
+    models: new Map([
+      ["mimo-v2.5-pro", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const model = entry._poke.models[0];
+  // DSH rejects a non-off level whose wire value is empty, so every level lands
+  // with the level name itself.
+  assert.deepEqual(model.reasoningEfforts, { off: null, high: "high", xhigh: "xhigh", max: "max" });
+  assert.equal(entry._poke.compat, undefined, "the library alone must not pick the route's thinking dialect");
+});
+
+test("library tier: a level outside DSH's fixed set is clipped, not written", () => {
+  // dsh-llm-pi-ai validates reasoningEfforts keys against its THINKING_LEVELS
+  // union and rejects the whole settings.yaml otherwise, so the gpt-5.6+
+  // "light" level must never reach the file.
+  const provider = { models: { "gpt-5.6-sol": { displayName: "Sol" } } };
+  const catalog = {
+    models: new Map([
+      ["gpt-5.6-sol", { kind: "reasoning", levels: ["light", "medium", "high", "xhigh", "max"], default: "high", wire: { light: "light" }, thinkingFormat: null }],
+    ]),
+  };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  assert.deepEqual(entry._poke.models[0].reasoningEfforts, { off: null, medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+});
+
+test("library tier: a model the library calls non-text stays exempt", () => {
+  const provider = { models: { "agnes-image-2.0-flash": { displayName: "Agnes" } } };
+  const catalog = {
+    models: new Map([
+      ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  assert.equal(entry._poke.models[0].reasoningEfforts, undefined);
+});
+
+test("library tier sits behind the store and provider declarations", () => {
+  const provider = {
+    models: { "glm-5.3": { displayName: "GLM", reasoningEffortLevels: ["low", "high"] } },
+  };
+  const catalog = {
+    models: new Map([
+      ["glm-5.3", { kind: "reasoning", levels: ["medium", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+    ]),
+  };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  assert.deepEqual(Object.keys(entry._poke.models[0].reasoningEfforts), ["off", "low", "high"]);
+});
+
+test("a library dialect is written per model, not as a route default", () => {
+  const provider = { models: { "deepseek-v4-flash": { displayName: "DS" } } };
+  const catalog = {
+    models: new Map([
+      ["deepseek-v4-flash", { kind: "reasoning", levels: ["high", "max"], default: "high", wire: {}, thinkingFormat: "deepseek" }],
+    ]),
+  };
+  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  assert.deepEqual(entry._poke.models[0].compat, { thinkingFormat: "deepseek" });
+  assert.equal(entry._poke.compat, undefined);
+});

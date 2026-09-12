@@ -5,6 +5,7 @@ import { extractPresentedToken } from "./handler.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "./pool-routing.mjs";
 import { AUTO_MODEL, resolveChain, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
+import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 
 export function openAIError(type, message) {
   return { error: { type, message } };
@@ -72,7 +73,10 @@ export function createOpenAIHandler(deps) {
     recordGeneration,
     readGeneration,
     logger = null,
+    effortInjector = null,
   } = deps;
+
+  const efforts = effortInjector ?? defaultEffortInjector({ logger });
 
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
@@ -229,7 +233,7 @@ export function createOpenAIHandler(deps) {
     const urls = buildUpstreamURLs(provider, "/chat/completions");
 
     const normalizedBody = normalizeToolCallArguments(body);
-    const outboundBody = normalizedBody.stream === true
+    const withUsage = normalizedBody.stream === true
       ? {
           ...normalizedBody,
           stream_options: {
@@ -238,27 +242,51 @@ export function createOpenAIHandler(deps) {
           },
         }
       : normalizedBody;
+    // A client that named its own level wins; this only ever fills a gap.
+    const { body: outboundBody, injected } = efforts.inject({ providerId, body: withUsage });
+
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${credential.value}`,
+    };
+    const send = (payload) => upstreamFetch(
+      urls,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: options.signal,
+      },
+      { bufferResponse: body.stream !== true },
+    );
 
     let upstream;
     try {
-      upstream = await upstreamFetch(
-        urls,
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${credential.value}`,
-          },
-          body: JSON.stringify(outboundBody),
-          signal: options.signal,
-        },
-        { bufferResponse: body.stream !== true },
-      );
+      upstream = await send(outboundBody);
     } catch (err) {
       if (options.signal?.aborted) {
         throw err;
       }
       return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+    }
+
+    // A gateway that does not take the parameter at all gets the same request
+    // back off without it, once; the channel is then left alone for the rest of
+    // this process's life. Only a level WE added can be removed this way.
+    if (!upstream.ok && injected !== null) {
+      const detail = await readResponseText(upstream);
+      if (looksLikeEffortRejection(upstream.status, detail)) {
+        upstreamFetch.releaseResponse?.(upstream);
+        efforts.noteRejected(providerId);
+        try {
+          upstream = await send(efforts.withoutEffort(outboundBody));
+        } catch (err) {
+          if (options.signal?.aborted) {
+            throw err;
+          }
+          return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+        }
+      }
     }
 
     if (!upstream.ok) {
