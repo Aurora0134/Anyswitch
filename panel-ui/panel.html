@@ -1092,6 +1092,21 @@
   .store-model-row input[type="checkbox"] { flex-shrink: 0; accent-color: var(--accent); }
   .store-model-id { font-family: var(--font-mono); color: var(--text); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .store-model-badges { display: inline-flex; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
+  /* 新增模型待读态：置顶 + 左侧强调竖条 + 高光底，看过一次后自动撤下（见 store-new-models 机制） */
+  .store-model-row-new {
+    background: var(--accent-soft);
+    border-left: 3px solid var(--accent);
+    padding-left: 7px;
+  }
+  .store-model-row-new:hover { background: color-mix(in srgb, var(--accent-soft) 72%, var(--surface-hover)); }
+  .badge-new {
+    background: var(--accent); color: #fff; border: 1px solid var(--accent);
+    font-size: 10px; padding: 0 5px; line-height: 16px;
+  }
+  .store-pool-tab-dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--accent); margin-left: 5px; vertical-align: middle;
+  }
   .store-manual-add { display: flex; align-items: flex-start; gap: 8px; margin-top: 8px; }
   .store-manual-add textarea { flex: 1; min-height: 34px; height: 34px; }
   .store-manual-add .btn { flex-shrink: 0; margin-top: 4px; }
@@ -10726,11 +10741,13 @@ if (window.panelStartupController) panelStartupPlay();
         const union = new Set();
         for (const m of row.members) for (const mid of Object.keys(m.models || {})) union.add(mid);
         const noCred = row.members.some((m) => !m.hasCredential);
+        const poolNew = row.members.reduce((n, m) => n + storeNewIdsFor(m.id).length, 0);
         return `
       <div class="skills-list-row${selected}" data-store="${escapeHtml(row.id)}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(row.displayName)} <span class="badge badge-pool">号池</span></span>
           <span class="store-list-meta">
+            ${poolNew ? `<span class="badge badge-new">新增 ${poolNew}</span>` : ""}
             ${noCred ? `<span class="badge badge-warn">有成员缺凭据</span>` : ""}
             <span class="badge badge-neutral">${row.members.length} 渠道 · 并集 ${union.size}</span>
           </span>
@@ -10739,11 +10756,13 @@ if (window.panelStartupController) panelStartupPlay();
       </div>`;
       }
       const p = row.p;
+      const newCount = storeNewIdsFor(p.id).length;
       return `
       <div class="skills-list-row${selected}" data-store="${escapeHtml(p.id)}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.displayName)}</span>
           <span class="store-list-meta">
+            ${newCount ? `<span class="badge badge-new">新增 ${newCount}</span>` : ""}
             ${p.hasCredential ? "" : `<span class="badge badge-warn">无凭据</span>`}
             <span class="badge badge-neutral">有效 ${p.modelCount}/发现 ${p.discoveredCount}</span>
           </span>
@@ -10946,7 +10965,7 @@ if (window.panelStartupController) panelStartupPlay();
       }
     }
     const tabs = row.members.map((m) =>
-      `<button class="seg-btn store-pool-tab" data-tab="${escapeHtml(m.id)}" role="radio" aria-checked="${m.id === storePoolTab}">${escapeHtml(m.displayName)}</button>`
+      `<button class="seg-btn store-pool-tab" data-tab="${escapeHtml(m.id)}" role="radio" aria-checked="${m.id === storePoolTab}">${escapeHtml(m.displayName)}${storeNewIdsFor(m.id).length ? `<span class="store-pool-tab-dot"></span>` : ""}</button>`
     ).join("");
     body.innerHTML = `
       <div class="skills-detail-head">
@@ -10994,11 +11013,19 @@ if (window.panelStartupController) panelStartupPlay();
       storeFilterDirty = false;
     }
     const poolDup = storePoolDuplicateModels(p);
-    const modelRows = discoveredIds.map((mid) => {
+    // 新增待读：首次呈现置顶+高光；已呈现过则本次消耗（撤下置顶/高光，放回原位）
+    const newIds = storeNewIdsFor(p.id);
+    const newSet = new Set(newIds);
+    const highlight = newIds.length > 0 && !storeNewShown.has(p.id);
+    const orderedIds = highlight ? orderStoreModelIds(discoveredIds, newIds) : discoveredIds;
+    if (newIds.length > 0 && storeNewShown.has(p.id)) consumeStoreNewModels(p.id);
+    const modelRows = orderedIds.map((mid) => {
       const meta = p.discovered[mid] || {};
       const checked = storeFilterChecked.has(mid);
       const effective = !!(p.models && p.models[mid]);
+      const isNew = highlight && newSet.has(mid);
       const badges = [];
+      if (isNew) badges.push(`<span class="badge badge-new">新</span>`);
       if (poolDup && poolDup.has(mid)) badges.push(`<span class="badge badge-pool">号池</span>`);
       if (meta.manual === true) badges.push(`<span class="badge badge-accent">补录</span>`);
       if (meta.contextWindow) badges.push(`<span class="badge badge-neutral">${formatCtx(meta.contextWindow)}</span>`);
@@ -11007,7 +11034,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (mods.length) badges.push(`<span class="badge badge-neutral">${escapeHtml([...new Set(mods)].join("/"))}</span>`);
       if (effective) badges.push(`<span class="badge badge-ok">有效</span>`);
       return `
-        <label class="store-model-row" data-mid="${escapeHtml(mid)}">
+        <label class="store-model-row${isNew ? " store-model-row-new" : ""}" data-mid="${escapeHtml(mid)}">
           <input type="checkbox" data-mid="${escapeHtml(mid)}"${checked ? " checked" : ""}>
           <span class="store-model-id">${escapeHtml(mid)}</span>
           <span class="store-model-badges">${badges.join("")}</span>
@@ -11162,6 +11189,71 @@ if (window.panelStartupController) panelStartupPlay();
       }
       return null;
     }
+  }
+
+  // ── 新增模型待读态：刷新后把本轮 added 记入 localStorage，渠道详情首次呈现时
+  // 置顶 + 高光，再次呈现时撤下放回原位（用户已获取信息）。纯前端机制，不动 store 落盘。
+  // 数据形状：{ [providerId]: { ids: [modelId...], ts: epochMs } }，ts 仅作老化兜底。
+  const STORE_NEW_MODELS_KEY = "store-new-models";
+  const STORE_NEW_MODELS_TTL_MS = 7 * 24 * 3600 * 1000; // 7 天未看自动老化，防永久残留
+  let storeNewModels = null;      // 惰性从 localStorage 载入的待读表
+  let storeNewShown = new Set();  // 本次会话已高光呈现过的渠道（二次呈现即消耗）
+
+  function loadStoreNewModels() {
+    if (storeNewModels) return storeNewModels;
+    storeNewModels = {};
+    try {
+      const raw = localStorage.getItem(STORE_NEW_MODELS_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) storeNewModels = parsed;
+      }
+    } catch { storeNewModels = {}; }
+    return storeNewModels;
+  }
+  function saveStoreNewModels() {
+    try { localStorage.setItem(STORE_NEW_MODELS_KEY, JSON.stringify(storeNewModels || {})); } catch {}
+  }
+  // 刷新后登记：added 并入该渠道待读集（去重、保序），ts 刷新
+  function markStoreNewModels(providerId, addedIds) {
+    if (!Array.isArray(addedIds) || !addedIds.length) return;
+    const map = loadStoreNewModels();
+    const cur = map[providerId] && Array.isArray(map[providerId].ids) ? map[providerId].ids : [];
+    const seen = new Set(cur);
+    for (const id of addedIds) if (typeof id === "string" && id && !seen.has(id)) { seen.add(id); cur.push(id); }
+    map[providerId] = { ids: cur, ts: Date.now() };
+    saveStoreNewModels();
+  }
+  // 该渠道当前待读的新增 id（过滤已失效/已老化项；有清理时回写）
+  function storeNewIdsFor(providerId) {
+    const map = loadStoreNewModels();
+    const entry = map[providerId];
+    if (!entry || !Array.isArray(entry.ids) || !entry.ids.length) return [];
+    if (typeof entry.ts === "number" && Date.now() - entry.ts > STORE_NEW_MODELS_TTL_MS) {
+      delete map[providerId]; saveStoreNewModels(); return [];
+    }
+    const p = storeProviders().find((x) => x.id === providerId);
+    const valid = p ? new Set(Object.keys(p.discovered || {})) : null;
+    const ids = valid ? entry.ids.filter((id) => valid.has(id)) : entry.ids;
+    if (ids.length !== entry.ids.length) {
+      if (ids.length) map[providerId] = { ids, ts: entry.ts };
+      else delete map[providerId];
+      saveStoreNewModels();
+    }
+    return ids;
+  }
+  // 消耗：该渠道待读集清空（看过之后调用）
+  function consumeStoreNewModels(providerId) {
+    const map = loadStoreNewModels();
+    if (map[providerId]) { delete map[providerId]; saveStoreNewModels(); }
+  }
+  // 模型 id 排序：待读新增置顶（组内保原相对序），其余保原序
+  function orderStoreModelIds(discoveredIds, newIds) {
+    if (!newIds || !newIds.length) return discoveredIds;
+    const newSet = new Set(newIds);
+    const fresh = discoveredIds.filter((id) => newSet.has(id));
+    const rest = discoveredIds.filter((id) => !newSet.has(id));
+    return [...fresh, ...rest];
   }
 
   // ── 「全部刷新」右侧的刷新状态小字（替代 toast）：每次写入重置 10s 存活计时 ──
@@ -11344,6 +11436,7 @@ if (window.panelStartupController) panelStartupPlay();
                 uPruned += (rep.pruned || []).length;
                 uAddedIds.push(...(rep.added || []));
                 uPrunedIds.push(...(rep.pruned || []));
+                markStoreNewModels(id, rep.added || []);
               }
               if (!unit.aggregate) uRep = rep;
             }
@@ -11743,6 +11836,8 @@ if (window.panelStartupController) panelStartupPlay();
       storeFilterDirty = false;
       storeFilterProviderId = pid;
     }
+    // 用户主动把详情切到该渠道：本次呈现即视为「看过」，下次呈现消耗新增态
+    if (pid) storeNewShown.add(pid);
     renderStoreList();
     renderStoreDetail();
   }
