@@ -56,8 +56,16 @@ describe("agent-sync", () => {
     assert.ok(res.results.kimi);
     assert.ok(res.results.reasonix);
     assert.ok(res.results.qoder);
+    assert.ok(res.results.codex);
 
     const { existsSync, readFileSync } = await import("node:fs");
+    const codexPath = join(tmpRoot, ".codex", "config.toml");
+    assert.equal(existsSync(codexPath), true, "codex config.toml must land under the injected USERPROFILE");
+    const codexText = readFileSync(codexPath, "utf8");
+    assert.match(codexText, /\[model_providers\."anyswitch-alpha"\]/);
+    assert.match(codexText, /wire_api = "responses"/);
+    assert.match(codexText, /http_headers = \{ "Authorization" = "Bearer test-token", "x-agent-id" = "codex" \}/);
+
     const kimiPath = join(tmpRoot, ".kimi-code", "config.toml");
     assert.equal(existsSync(kimiPath), true, "kimi config.toml must land under the injected USERPROFILE");
     const kimiText = readFileSync(kimiPath, "utf8");

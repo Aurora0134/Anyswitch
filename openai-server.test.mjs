@@ -3,7 +3,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback, anthropicUsageToOpenAI, probeRelay } from "./openai-server.mjs";
+import { createOpenAIRelayServer, listenLoopback, anthropicUsageToOpenAI, probeRelay, isCodexBackgroundRequest } from "./openai-server.mjs";
+import { INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 
 const TOKEN = "test-token-123";
 
@@ -1097,5 +1098,406 @@ describe("probeRelay (root-endpoint identity check)", () => {
     }, async (port) => {
       assert.equal(await probeRelay(port), false);
     });
+  });
+});
+
+// ── Responses routes (codex frontend) ──────────────────────────────────────
+// /openai/<seg>/v1/responses[/compact]: Responses-shaped request in, translated
+// chat/completions fan-out upstream, Responses SSE back. Same loopback-socket
+// rig as the transport suite above.
+
+function chatSseStream(lines) {
+  return (async function* () {
+    const encoder = new TextEncoder();
+    for (const part of lines) yield encoder.encode(part);
+  })();
+}
+
+const HEALTHY_CHAT_SSE = [
+  'data: {"id":"chatcmpl-1","model":"claude-opus-5","created":1724900000,"choices":[{"delta":{"content":"hi"}}]}\n\n',
+  'data: {"id":"chatcmpl-1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+  "data: [DONE]\n\n",
+];
+
+function responsesDeps(upstreamBody, captured = null) {
+  return {
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store: STORE }),
+    loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+    upstreamFetch: async (urls, init) => {
+      if (captured) captured.body = JSON.parse(init.body);
+      return { ok: true, status: 200, body: upstreamBody };
+    },
+    recordGeneration: () => {},
+    readGeneration: () => null,
+  };
+}
+
+function postResponses(port, tail = "/v1/responses", headers = {}, body = undefined) {
+  return fetch(`http://127.0.0.1:${port}/openai/poke-api${tail}`, {
+    method: "POST",
+    headers: { authorization: TOKEN, "content-type": "application/json", ...headers },
+    body: JSON.stringify(body ?? {
+      model: "claude-opus-5",
+      instructions: "be terse",
+      input: "hello",
+      stream: true,
+    }),
+  });
+}
+
+describe("openai relay /responses routes (codex)", () => {
+  it("hits the route, translates the request downstream and the stream back up", async () => {
+    const captured = {};
+    await withServer(responsesDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postResponses(port);
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get("content-type"), /text\/event-stream/);
+      const text = await res.text();
+      // Responses SSE dialect on the wire, with the codex load-bearing
+      // invariants: msg_/resp_ id prefixes, usage details filled, literal
+      // [DONE] terminator.
+      assert.ok(text.includes("event: response.created"), "stream opens with response.created");
+      assert.ok(text.includes("event: response.completed"), "stream ends with response.completed");
+      assert.ok(text.includes('"id":"msg_resp_chatcmpl-1"'), "message item carries the msg_ prefix");
+      assert.ok(text.includes('"reasoning_tokens":0'), "usage always carries output_tokens_details.reasoning_tokens");
+      assert.ok(text.includes("data: [DONE]"), "literal [DONE] terminates the stream");
+      assert.equal(text.includes("SENTINEL-UPSTREAM-KEY"), false, "must never leak the upstream key");
+
+      // The upstream saw the translated chat/completions body: instructions
+      // collapsed into a head system message, input as the user message,
+      // streaming forced with usage riding the terminal chunk.
+      assert.equal(captured.body.model, "claude-opus-5");
+      assert.deepEqual(captured.body.messages, [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "hello" },
+      ]);
+      assert.equal(captured.body.stream, true);
+      assert.equal(captured.body.stream_options?.include_usage, true);
+    });
+  });
+
+  it("routes /v1/responses/compact through the same pipeline", async () => {
+    const captured = {};
+    await withServer(responsesDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postResponses(port, "/v1/responses/compact");
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("event: response.completed"));
+      assert.deepEqual(captured.body.messages, [
+        { role: "system", content: "be terse" },
+        { role: "user", content: "hello" },
+      ]);
+    });
+  });
+
+  it("returns 401 without a token", async () => {
+    await withServer(responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/responses`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-opus-5", input: "hello", stream: true }),
+      });
+      assert.equal(res.status, 401);
+      const body = await res.json();
+      assert.equal(body.error.type, "authentication_error");
+    });
+  });
+
+  it("keeps the 404 fallback untouched around the new routes", async () => {
+    await withServer(responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)), async (port) => {
+      // The compact suffix must not swallow further path tails...
+      const extra = await postResponses(port, "/v1/responses/compactx");
+      assert.equal(extra.status, 404);
+      assert.equal((await extra.json()).error.type, "not_found_error");
+      // ...and an unknown endpoint under the same segment still 404s.
+      const unknown = await postResponses(port, "/v1/unknown");
+      assert.equal(unknown.status, 404);
+      assert.equal((await unknown.json()).error.type, "not_found_error");
+    });
+  });
+
+  it("ends a mid-stream upstream failure with response.failed instead of [DONE]", async () => {
+    const upstreamBody = (async function* () {
+      const encoder = new TextEncoder();
+      yield encoder.encode('data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"He"}}]}\n\n');
+      throw new Error("upstream socket reset");
+    })();
+
+    await withServer(responsesDeps(upstreamBody), async (port) => {
+      const res = await postResponses(port);
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("He"), "already-delivered content must survive");
+      assert.ok(text.includes("event: response.failed"), "the turn ends with response.failed");
+      assert.equal(text.includes("data: [DONE]"), false, "no [DONE] may follow a failed response");
+      assert.equal(text.includes("SENTINEL-UPSTREAM-KEY"), false, "must never leak the upstream key");
+    });
+  });
+
+  // x-agent-id: codex is what the launcher injects; the UA branches are the
+  // fallback for clients that bypass it.
+  async function agentIdForResponsesRequest(headers) {
+    let startedMeta = null;
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+        };
+      },
+    };
+    const server = createOpenAIRelayServer({
+      ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
+      metricsCollector: fakeCollector,
+    });
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postResponses(port, "/v1/responses", headers);
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(startedMeta, "metricsCollector.startRequest was called");
+      return startedMeta.agentId;
+    } finally {
+      await close();
+    }
+  }
+
+  it("accepts x-agent-id: codex as a known endpoint id", async () => {
+    assert.equal(await agentIdForResponsesRequest({ "x-agent-id": "codex" }), "codex");
+  });
+
+  it("sniffs a codex_cli_rs User-Agent as codex", async () => {
+    assert.equal(await agentIdForResponsesRequest({ "user-agent": "codex_cli_rs/0.55.0" }), "codex");
+  });
+
+  it("sniffs a codex-tui User-Agent as codex", async () => {
+    assert.equal(await agentIdForResponsesRequest({ "user-agent": "codex-tui/1.0" }), "codex");
+  });
+
+  // prompt_cache_key 会话身份：codex 核心客户端（GUI app-server 与 CLI 共用）恒在
+  // Responses 请求体写会话 id。实例归属优先级：prompt_cache_key 派生 >
+  // x-agent-instance 头 > socket pid 兜底；非 codex 归属或无 key 时行为不变。
+  async function instanceMetaForResponsesRequest(body, headers = {}, tail = "/v1/responses") {
+    let startedMeta = null;
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+        };
+      },
+    };
+    const server = createOpenAIRelayServer({
+      ...responsesDeps(chatSseStream(HEALTHY_CHAT_SSE)),
+      metricsCollector: fakeCollector,
+    });
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postResponses(port, tail, { "x-agent-id": "codex", ...headers }, body);
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(startedMeta, "metricsCollector.startRequest was called");
+      return startedMeta;
+    } finally {
+      await close();
+    }
+  }
+
+  function responsesBody(extra = {}) {
+    return { model: "claude-opus-5", input: "hello", stream: true, ...extra };
+  }
+
+  it("derives the instance id from prompt_cache_key as codex-sess-<会话 id>", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "018f6c2a-1234-7abc-8def-0123456789ab" }),
+    );
+    assert.equal(meta.agentId, "codex");
+    assert.equal(meta.instanceId, "codex-sess-018f6c2a-1234-7abc-8def-0123456789ab");
+  });
+
+  it("folds repeat requests of one session into the same instance and splits different sessions", async () => {
+    const a1 = await instanceMetaForResponsesRequest(responsesBody({ prompt_cache_key: "sess-alpha" }));
+    const a2 = await instanceMetaForResponsesRequest(responsesBody({ input: "hello again", prompt_cache_key: "sess-alpha" }));
+    const b = await instanceMetaForResponsesRequest(responsesBody({ prompt_cache_key: "sess-beta" }));
+    assert.equal(a1.instanceId, "codex-sess-sess-alpha");
+    assert.equal(a2.instanceId, a1.instanceId);
+    assert.equal(b.instanceId, "codex-sess-sess-beta");
+  });
+
+  it("derives the same session instance on the compact route", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "sess-compact" }),
+      {},
+      "/v1/responses/compact",
+    );
+    assert.equal(meta.instanceId, "codex-sess-sess-compact");
+  });
+
+  it("lets prompt_cache_key win over the x-agent-instance header", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "sess-win" }),
+      { "x-agent-instance": "launcher-tag-1" },
+    );
+    assert.equal(meta.instanceId, "codex-sess-sess-win");
+  });
+
+  it("falls back to the x-agent-instance header when prompt_cache_key is absent", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody(),
+      { "x-agent-instance": "launcher-tag-1" },
+    );
+    assert.equal(meta.instanceId, "launcher-tag-1");
+  });
+
+  it("leaves a non-codex agent carrying prompt_cache_key on the header/fallback path", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "sess-not-codex" }),
+      { "x-agent-id": "kimi", "x-agent-instance": "kimi-inst-1" },
+    );
+    assert.equal(meta.agentId, "kimi");
+    assert.equal(meta.instanceId, "kimi-inst-1");
+  });
+
+  it("cleans non-whitelist characters out of the session id", async () => {
+    // 内部子会话的 "{source}:{parent_thread_id}" 形状里冒号天然合法；空白等
+    // 白名单外字符折成 "-"。
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "guardian:018f6c2a dead beef" }),
+    );
+    assert.equal(meta.instanceId, "codex-sess-guardian:018f6c2a-dead-beef");
+  });
+
+  it("caps the derived session id at the instance-id length limit", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "a".repeat(120) }),
+    );
+    assert.equal(meta.instanceId.length, INSTANCE_ID_MAX_LEN);
+    assert.ok(meta.instanceId.startsWith("codex-sess-"));
+  });
+
+  it("never forwards prompt_cache_key to the upstream", async () => {
+    const captured = {};
+    await withServer(responsesDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postResponses(port, "/v1/responses", { "x-agent-id": "codex" },
+        responsesBody({ prompt_cache_key: "018f6c2a-1234-7abc-8def-0123456789ab" }));
+      assert.equal(res.status, 200);
+      await res.text();
+      // 翻译层是字段级白名单（EXTRA_CHAT_PASSTHROUGH_FIELDS 不含它），会话身份
+      // 字段只用于归属，绝不透给第三方上游。
+      assert.equal("prompt_cache_key" in captured.body, false);
+    });
+  });
+
+  // ── codex 后台/内部请求的分类与面板隔离 ──────────────────────────────
+  // GUI 记忆流水线 / guardian 审批 / 缓存预热等引擎自发的模型请求带线上标记，
+  // 四种信号命中其一即判后台（isCodexBackgroundRequest）：实例身份三条通道
+  //（prompt_cache_key 派生 / x-agent-instance 头 / socket pid 兜底）全部跳过，
+  // meta.background 传给 agent-metrics 压报错面。turn/compaction/无标记/坏
+  // JSON 一律按用户流量——宁可漏判一个后台请求，也绝不错杀真实用户流量。
+  const turnMeta = (obj) => JSON.stringify(obj);
+
+  it("unit: each of the four wire markers classifies the request as background", () => {
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "memory", thread_source: "user" }) } }, {},
+    ), true, "request_kind=memory");
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "prewarm" }) } }, {},
+    ), true, "request_kind=prewarm");
+    // 四者命中其一即后台：thread_source 的后台值优先于 request_kind=turn。
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: "memory_consolidation" }) } }, {},
+    ), true, "thread_source=memory_consolidation wins even on a turn kind");
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: "guardian_review" }) } }, {},
+    ), true, "thread_source=guardian_review");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-openai-subagent": "guardian" } }, {}), true, "x-openai-subagent 头存在即后台");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-openai-memgen-request": "true" } }, {}), true, "x-openai-memgen-request: true");
+  });
+
+  it("unit: turn/compaction kinds and markerless requests stay user traffic", () => {
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: "user", turn_trigger: "user" }) } }, {},
+    ), false, "request_kind=turn");
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "compaction", thread_source: "user" }) } }, {},
+    ), false, "request_kind=compaction");
+    assert.equal(isCodexBackgroundRequest({ headers: {} }, {}), false, "no markers at all");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-openai-memgen-request": "false" } }, {}), false, "显式 false 不算标记");
+  });
+
+  it("unit: unparseable or non-object metadata degrades to user traffic", () => {
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-codex-turn-metadata": "{not-json" } }, {}), false, "坏 JSON");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-codex-turn-metadata": "[1,2]" } }, {}), false, "数组不是对象");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-codex-turn-metadata": "\"memory\"" } }, {}), false, "裸字符串不是对象");
+  });
+
+  it("unit: falls back to body client_metadata when the header copy is missing or unparseable", () => {
+    const body = { client_metadata: { "x-codex-turn-metadata": turnMeta({ request_kind: "memory", thread_source: "memory_consolidation" }) } };
+    assert.equal(isCodexBackgroundRequest({ headers: {} }, body), true, "头缺失时 body 里的同一份 metadata 生效");
+    assert.equal(isCodexBackgroundRequest({ headers: { "x-codex-turn-metadata": "{broken" } }, body), true, "头解析失败回落 body 副本");
+  });
+
+  it("gives background requests no instance id — session key and header channels both skipped", async () => {
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "sess-bg" }),
+      {
+        "x-agent-instance": "launcher-tag-1",
+        "x-codex-turn-metadata": turnMeta({ request_kind: "memory", thread_source: "memory_consolidation" }),
+      },
+    );
+    assert.equal(meta.agentId, "codex");
+    assert.equal(meta.background, true, "background 标记随 meta 传给 agent-metrics");
+    assert.equal(meta.instanceId, null, "prompt_cache_key 派生与 x-agent-instance 头都被跳过");
+  });
+
+  it("never consults the socket pid fallback or the late-bind channel for background traffic", async () => {
+    let startedMeta = null;
+    const counters = { lookups: 0, subscriptions: 0, attaches: 0 };
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+          attachInstance: () => { counters.attaches += 1; },
+        };
+      },
+    };
+    const server = createOpenAIRelayServer({
+      ...responsesDeps(null),
+      // 两条请求共用一台 server，上游流必须每次新建（生成器消费一次即尽）。
+      upstreamFetch: async () => ({ ok: true, status: 200, body: chatSseStream(HEALTHY_CHAT_SSE) }),
+      metricsCollector: fakeCollector,
+      socketOwner: {
+        lookup: () => { counters.lookups += 1; return 987654; },
+        onRefresh: () => { counters.subscriptions += 1; return () => {}; },
+      },
+    });
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      // 对照组先行：无标记用户流量照常走 socket pid 兜底，证明桩本身是通的。
+      const userRes = await postResponses(port, "/v1/responses", { "x-agent-id": "codex" }, responsesBody());
+      assert.equal(userRes.status, 200);
+      await userRes.text();
+      assert.equal(startedMeta.background, false);
+      assert.equal(startedMeta.instanceId, "codex-987654", "user traffic keeps the socket pid fallback");
+      const afterControl = { ...counters };
+      assert.ok(afterControl.lookups > 0 && afterControl.subscriptions > 0, "control request must exercise the stub");
+
+      const bgRes = await postResponses(port, "/v1/responses", {
+        "x-agent-id": "codex",
+        "x-codex-turn-metadata": turnMeta({ request_kind: "prewarm" }),
+      }, responsesBody({ prompt_cache_key: "sess-bg" }));
+      assert.equal(bgRes.status, 200);
+      await bgRes.text();
+      assert.equal(startedMeta.background, true);
+      assert.equal(startedMeta.instanceId, null, "后台请求连 socket pid 兜底也跳过");
+      assert.deepEqual(counters, afterControl, "后台请求零次反查、零次订阅、零次迟挂");
+    } finally {
+      await close();
+    }
   });
 });

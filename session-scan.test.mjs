@@ -23,7 +23,7 @@ function makeTmp() {
 // never the real home dirs.
 function testScanner(overrides = {}) {
   const roots = {};
-  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "reasonix"]) {
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "reasonix", "codex"]) {
     roots[id] = [makeTmp()];
   }
   Object.assign(roots, overrides);
@@ -694,6 +694,163 @@ test("qoder: transcripts without any user turn are excluded", async () => {
   ]);
   const { sessions } = await testScanner({ qoder: [root] }).scanAll();
   assert.deepEqual(sessions, []);
+});
+
+// --- codex ------------------------------------------------------------------
+
+function codexLine(type, payload, timestamp = "2026-09-01T10:00:00.000Z") {
+  return JSON.stringify({ timestamp, type, payload });
+}
+
+// root is the sessions dir (<home>/sessions); the thread-name index lives one
+// level up (<home>/session_index.jsonl), same as ~/.codex in production.
+function writeCodexSession(root, dateDir, fileName, lines) {
+  const dir = join(root, dateDir);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, fileName);
+  writeFileSync(file, lines.join("\n") + "\n", "utf8");
+  return file;
+}
+
+test("codex: scans rollout envelopes, titles from session_index, loads messages", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "019fb399-0000-7d24-a26b-39732b7ce85b";
+  const file = writeCodexSession(root, join("2026", "09", "01"), `rollout-2026-09-01T10-00-00-${id}.jsonl`, [
+    codexLine("session_meta", { id, timestamp: "2026-09-01T10:00:00.000Z", cwd: "C:\\work\\codexproj", originator: "codex_cli" }),
+    codexLine("response_item", { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] }, "2026-09-01T10:00:01.000Z"),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>\n  <cwd>C:\\work\\codexproj</cwd>\n</environment_context>" }] }, "2026-09-01T10:00:02.000Z"),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "codex 用户问题" }] }, "2026-09-01T10:00:03.000Z"),
+    codexLine("response_item", { type: "function_call", name: "shell", arguments: "{\"command\":\"ls\"}" }, "2026-09-01T10:00:04.000Z"),
+    codexLine("response_item", { type: "function_call_output", call_id: "c1", output: "文件清单" }, "2026-09-01T10:00:05.000Z"),
+    codexLine("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text: "codex 回答" }] }, "2026-09-01T10:00:06.000Z"),
+    // world_state / turn_context envelopes must be tolerated, never fatal.
+    codexLine("world_state", { full: true, state: {} }, "2026-09-01T10:00:07.000Z"),
+    codexLine("turn_context", { turn_id: "t1", cwd: "C:\\work\\codexproj" }, "2026-09-01T10:00:08.000Z"),
+  ]);
+  writeFileSync(join(home, "session_index.jsonl"), JSON.stringify({ id, thread_name: "桌面线程名", updated_at: "2026-09-01T10:00:08.000Z" }) + "\n", "utf8");
+  const scanner = testScanner({ codex: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].endpoint, "codex");
+  assert.equal(sessions[0].id, id);
+  assert.equal(sessions[0].title, "桌面线程名");
+  assert.equal(sessions[0].summary, "codex 回答");
+  assert.equal(sessions[0].project, "C:\\work\\codexproj");
+  assert.equal(sessions[0].createdAt, Date.parse("2026-09-01T10:00:00.000Z"));
+  assert.equal(sessions[0].lastActive, Date.parse("2026-09-01T10:00:08.000Z"));
+  assert.equal(sessions[0].resumeCommand, `codex resume ${id}`);
+
+  const messages = await scanner.loadMessages("codex", file);
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "codex 用户问题"],
+      ["assistant", "[Tool: shell]"],
+      ["tool", "文件清单"],
+      ["assistant", "codex 回答"],
+    ],
+  );
+
+  const del = await scanner.deleteSessions([{ endpoint: "codex", file }]);
+  assert.equal(del.ok.length, 1);
+  assert.ok(!existsSync(file));
+});
+
+test("codex: without session_index the title is the first user-typed text", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  writeCodexSession(root, join("2026", "09", "02"), "rollout-2026-09-02T09-00-00-019fb399-1111-7d24-a26b-39732b7ce85b.jsonl", [
+    codexLine("session_meta", { id: "019fb399-1111-7d24-a26b-39732b7ce85b", timestamp: "2026-09-02T09:00:00.000Z", cwd: "C:\\work\\codexproj" }),
+    // The injected context dump must not become the title…
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>…</environment_context>" }] }, "2026-09-02T09:00:01.000Z"),
+    // …the event_msg mirror carries what the user actually typed.
+    codexLine("event_msg", { type: "user_message", message: "event 里的真实提问" }, "2026-09-02T09:00:02.000Z"),
+  ]);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].title, "event 里的真实提问");
+});
+
+test("codex: envelopes with no user turn, thread name, or cwd are excluded", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  // Nothing to title by: no user-typed turn, no session_index thread name,
+  // and no cwd on the session_meta — the one combination that still means
+  // "not a conversation worth listing".
+  writeCodexSession(root, join("2026", "09", "03"), "rollout-2026-09-03T08-00-00-deadc0de-0000-1111-2222-333344445555.jsonl", [
+    codexLine("session_meta", { id: "deadc0de-0000-1111-2222-333344445555", timestamp: "2026-09-03T08:00:00.000Z" }),
+    codexLine("turn_context", { turn_id: "t1" }),
+    codexLine("world_state", { full: false, state: {} }),
+  ]);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.deepEqual(sessions, []);
+});
+
+test("codex: the '# AGENTS.md instructions' synthetic envelope never titles a session", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "01a09627-ee1d-77a3-9f4e-5ef68e2a65a6";
+  // Mirrors the observed production rollout shape: session_meta, developer
+  // preludes, then a user-role synthetic envelope (starts with
+  // "# AGENTS.md instructions", embeds <environment_context><cwd>), then
+  // world_state / turn_context, and only THEN the first real user message.
+  writeCodexSession(root, join("2026", "09", "12"), `rollout-2026-09-12T23-06-34-${id}.jsonl`, [
+    codexLine("session_meta", { id, timestamp: "2026-09-12T23:06:34.000Z", cwd: "C:\\work\\codexproj" }),
+    codexLine("event_msg", { type: "task_started" }, "2026-09-12T23:06:34.100Z"),
+    codexLine("response_item", { type: "message", role: "developer", content: [{ type: "input_text", text: "base instructions" }] }, "2026-09-12T23:06:34.200Z"),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<INSTRUCTIONS>\n…\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\work\\codexproj</cwd>\n</environment_context>" }] }, "2026-09-12T23:06:34.300Z"),
+    codexLine("world_state", { full: true, state: {} }, "2026-09-12T23:06:34.400Z"),
+    codexLine("turn_context", { turn_id: "t1", cwd: "C:\\work\\codexproj" }, "2026-09-12T23:06:34.500Z"),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "Reply with exactly: sess-ok" }] }, "2026-09-12T23:06:35.000Z"),
+  ]);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].title, "Reply with exactly: sess-ok", "the first real user message titles, not the injected envelope");
+});
+
+test("codex: without any real user message the title falls back to the cwd basename", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "01a09627-0000-77a3-9f4e-5ef68e2a65a6";
+  writeCodexSession(root, join("2026", "09", "13"), `rollout-2026-09-13T08-00-00-${id}.jsonl`, [
+    codexLine("session_meta", { id, timestamp: "2026-09-13T08:00:00.000Z", cwd: "C:\\work\\codexproj" }),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<INSTRUCTIONS>\n…\n</INSTRUCTIONS>\n<environment_context>\n  <cwd>C:\\work\\codexproj</cwd>\n</environment_context>" }] }, "2026-09-13T08:00:01.000Z"),
+  ]);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1, "an envelope-only session still lists");
+  assert.equal(sessions[0].title, "codexproj", "cwd basename is the title of last resort");
+  assert.equal(sessions[0].project, "C:\\work\\codexproj");
+});
+
+test("codex: a thread name still beats the envelope and the first real user message", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "01a09627-1111-77a3-9f4e-5ef68e2a65a6";
+  writeCodexSession(root, join("2026", "09", "14"), `rollout-2026-09-14T08-00-00-${id}.jsonl`, [
+    codexLine("session_meta", { id, timestamp: "2026-09-14T08:00:00.000Z", cwd: "C:\\work\\codexproj" }),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "# AGENTS.md instructions\n<environment_context>\n  <cwd>C:\\work\\codexproj</cwd>\n</environment_context>" }] }, "2026-09-14T08:00:01.000Z"),
+    codexLine("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "真实提问" }] }, "2026-09-14T08:00:02.000Z"),
+  ]);
+  writeFileSync(join(home, "session_index.jsonl"), JSON.stringify({ id, thread_name: "桌面命名线程", updated_at: "2026-09-14T08:00:03.000Z" }) + "\n", "utf8");
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].title, "桌面命名线程", "thread-name priority over every message-derived title is unchanged");
+});
+
+test("codex: session id falls back to the rollout filename uuid", async () => {
+  const home = makeTmp();
+  const root = join(home, "sessions");
+  const id = "019fb399-2222-7d24-a26b-39732b7ce85b";
+  writeCodexSession(root, join("2026", "09", "04"), `rollout-2026-09-04T08-00-00-${id}.jsonl`, [
+    "{corrupt",
+    codexLine("event_msg", { type: "user_message", message: "无 meta 的会话" }),
+  ]);
+  const { sessions } = await testScanner({ codex: [root] }).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, id);
+  assert.equal(sessions[0].project, null);
+  assert.equal(sessions[0].resumeCommand, `codex resume ${id}`);
 });
 
 // --- sqlite adapters ------------------------------------------------------------
