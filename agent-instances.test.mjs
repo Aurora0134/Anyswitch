@@ -13,6 +13,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
@@ -30,8 +31,43 @@ function lineageChainExec(...rows) {
   return (cmd, opts, cb) => cb(null, scan);
 }
 
+// Same stdin/stdout shim as agent-metrics.test.mjs: the collector's fast
+// probe is a resident powershell child; tests inject execFn only, so fake the
+// child and route each query back through the injected execFn — otherwise the
+// probe would spawn a REAL powershell and assert against the live process list.
+function makeShimPsSpawn(execFn) {
+  return () => {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    const stdin = {
+      write: (text) => {
+        execFn('powershell -NoProfile -NonInteractive -Command "<shim>"', {}, (err, out) => {
+          if (err || typeof out !== "string") {
+            child.emit("error", err || new Error("shim exec failed"));
+            return;
+          }
+          const markerMatch = text.match(/Write-Output '([^']+)'/);
+          const marker = markerMatch ? markerMatch[1] : "";
+          stdout.emit("data", out + marker + "\r\n");
+        });
+      },
+    };
+    child.stdin = stdin;
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  };
+}
+
 function testCollector(opts) {
-  return createAgentMetricsCollector({ loadSparkSettings: false, execFn: silentExec, ...opts });
+  const patched = { loadSparkSettings: false, execFn: silentExec, ...opts };
+  if (!patched.spawnFn) patched.spawnFn = makeShimPsSpawn(patched.execFn);
+  return createAgentMetricsCollector(patched);
 }
 
 describe("sanitizeInstanceId", () => {
