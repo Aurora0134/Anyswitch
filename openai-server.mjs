@@ -2,11 +2,12 @@ import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
 import { parseOpenAIPath } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
-import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel } from "./stream-pipe.mjs";
+import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel } from "./stream-pipe.mjs";
+import { translateResponsesRequest } from "./responses-translate.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
 import { isChainFailoverStatus, buildChainRuntime } from "./chain-routing.mjs";
-import { sanitizeInstanceId } from "./agent-metrics.mjs";
+import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 import { instanceIdFromSocket, bindLateSocketInstance } from "./late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 
@@ -51,7 +52,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "qoder", "opencode", "claude"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "qoder", "opencode", "claude", "codex"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -84,6 +85,74 @@ function instanceIdForRequest(req, agentId, deps) {
   return instanceIdFromSocket(req, agentId, deps);
 }
 
+// codex 会话粒度的实例身份正源。codex 核心客户端（GUI app-server 与 CLI 共用）
+// 发往 Responses 端点的每个请求体都带 prompt_cache_key，值即会话 id——GUI 全部
+// 会话复用一个引擎进程、CLI 进程退出后 socket 兜底随之消失，进程粒度对 codex
+// 两头都不成立，会话 id 才是稳定身份。内部子会话（guardian/compact 内部调用）
+// 的值是 "{source}:{parent_thread_id}" 形状，冒号本就在实例 id 白名单内。
+// 清洗用与 sanitizeInstanceId 同一白名单字符集（非法字符折成 "-"），给
+// "codex-sess-" 前缀留位后截断，终审仍过 sanitizeInstanceId；洗不出有效字符或
+// 不是字符串时返回 null，归属回落到头/兜底，与今天完全一致。
+const CODEX_SESSION_PREFIX = "codex-sess-";
+function codexSessionInstanceId(body) {
+  const raw = body?.prompt_cache_key;
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.trim().replace(/[^A-Za-z0-9._:-]+/g, "-");
+  if (cleaned.length === 0) return null;
+  const value = cleaned.slice(0, INSTANCE_ID_MAX_LEN - CODEX_SESSION_PREFIX.length);
+  return sanitizeInstanceId(CODEX_SESSION_PREFIX + value);
+}
+
+// codex 后台/内部请求判定（GUI 记忆流水线、guardian 审批、缓存预热等由引擎
+// 自己发起的模型请求，不是用户对话流量）。codex 核心客户端给这类请求带线上
+// 标记，四处信号命中其一即后台请求：
+//   - x-codex-turn-metadata 头（JSON）的 request_kind ∈ {memory, prewarm}
+//   - 同一份 metadata 的 thread_source ∈ {memory_consolidation, guardian_review}
+//   - x-openai-subagent 头存在（memory_consolidation / guardian 专用通道）
+//   - x-openai-memgen-request: true 头（记忆整理专用）
+// 判定顺序：先解析 metadata（请求头优先，其次 body 的
+// client_metadata["x-codex-turn-metadata"]——codex 两处放的是同一份 JSON），
+// 再看两个专用头。request_kind ∈ {turn, compaction} 或完全无标记 = 用户流量，
+// 行为与今天完全一致；头缺失或 JSON 解析失败一律按用户流量处理——宁可漏判
+// 一个后台请求，也绝不错杀真实用户流量。
+const CODEX_BACKGROUND_REQUEST_KINDS = new Set(["memory", "prewarm"]);
+const CODEX_BACKGROUND_THREAD_SOURCES = new Set(["memory_consolidation", "guardian_review"]);
+
+function codexTurnMetadata(req, body) {
+  const candidates = [req.headers["x-codex-turn-metadata"], body?.client_metadata?.["x-codex-turn-metadata"]];
+  for (const raw of candidates) {
+    if (typeof raw !== "string" || raw === "") continue;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // 坏 JSON 视为无标记：继续看下一个候选，最终回落用户流量
+    }
+  }
+  return null;
+}
+
+// 专用头的存在性/真值判定。值恒为字符串（Node 已小写化头名）；空串视为
+// 缺失，"false"/"0" 视为假，与 turn-metadata 的解析失败口径一致（宁漏勿杀）。
+function headerMarkedTrue(value) {
+  if (typeof value !== "string") return false;
+  const v = value.trim().toLowerCase();
+  return v !== "" && v !== "false" && v !== "0";
+}
+
+export function isCodexBackgroundRequest(req, body) {
+  const metadata = codexTurnMetadata(req, body);
+  if (metadata) {
+    const kind = typeof metadata.request_kind === "string" ? metadata.request_kind.toLowerCase().trim() : "";
+    if (CODEX_BACKGROUND_REQUEST_KINDS.has(kind)) return true;
+    const source = typeof metadata.thread_source === "string" ? metadata.thread_source.toLowerCase().trim() : "";
+    if (CODEX_BACKGROUND_THREAD_SOURCES.has(source)) return true;
+  }
+  if (headerMarkedTrue(req.headers["x-openai-subagent"])) return true;
+  if (headerMarkedTrue(req.headers["x-openai-memgen-request"])) return true;
+  return false;
+}
+
 // URL 段前缀声明的端点身份（`/openai/<agent>~<provider>/`，语法见 openai-path）。
 // 走与 x-agent-id 完全同一条白名单规则：未知值视为配置错误或非授权客户端拼出来的
 // 路径，忽略之、回落 UA 与兜底，绝不让幽灵端点 id 进 journal / 面板分桶 / 链路由。
@@ -98,7 +167,9 @@ function prefixedAgentId(agentHint) {
 // env 注入 x-agent-id: kimi（2026-08-31 起由 config.toml 改为 env 注入，
 // config 的 customHeaders 会覆盖 env 同名头），UA 识别降级为未走 launcher
 // 直连时的防线——不识别的话 kimi 的链式路由（自动路由 auto）会被
-// 兜底成 zcode 的链或直接 404。与 anthropicAgentIdFrom 的 UA 口径保持一致。
+// 兜底成 zcode 的链或直接 404。codex 同理：launcher 经 codex-merge-config 的
+// http_headers 注入 x-agent-id: codex，UA 识别（codex_cli_rs / codex-tui）是未走
+// launcher 直连时的防线。与 anthropicAgentIdFrom 的 UA 口径保持一致。
 //
 // 优先级：显式 x-agent-id > URL 段前缀 > UA 嗅探 > 兜底 zcode。前缀压在 UA 之前，
 // 因为它是 merge 模块自己写进客户端配置的确定事实，而 UA 只是启发式——Qoder 的 UA
@@ -112,6 +183,7 @@ function openaiAgentIdFrom(headers, agentHint = null) {
   if (ua.includes("opencode")) return "opencode";
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
   if (ua.includes("qoder")) return "qoder";
+  if (ua.includes("codex_cli_rs") || ua.includes("codex-tui")) return "codex";
   return "zcode";
 }
 
@@ -513,6 +585,132 @@ export function createOpenAIRelayServer(deps) {
             tracker?.recordEnd({ status: result.status, usage: result.body?.usage });
           }
           sendJson(res, result.status, result.body);
+          return;
+        } catch (err) {
+          if (abortController.signal.aborted) {
+            tracker?.recordEnd({ aborted: true });
+          } else {
+            tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });
+          }
+          throw err;
+        } finally {
+          res.removeListener("close", onResAborted);
+        }
+      }
+
+      // ── Responses endpoints (codex) ──────────────────────────────────────
+      // codex speaks only the Responses API; every upstream in the store
+      // speaks chat/completions, so this block is a thin wiring layer: the
+      // request body translates down (responses-translate.mjs), the chat
+      // fan-out below is the same planChain/planPool/classic memberPlan
+      // pipeline the chat/completions route drives (auth, generation gate and
+      // seg parsing ride along unchanged), and the stream translates back up
+      // in the responses channel. /v1/responses/compact is codex's remote
+      // compaction call — same Responses shape, same pipeline; the regex's
+      // optional suffix keeps "compact" out of the provider segment.
+      const responsesMatch = path.match(/^\/openai\/([^/]+)\/v1\/responses(?:\/compact)?$/);
+      if (responsesMatch && req.method === "POST") {
+        const raw = await readBody(req);
+        let body;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          sendJson(res, 400, openAIError("invalid_request_error", "request body is not valid JSON"));
+          return;
+        }
+        // URL 段前缀与归属解析同 chat/completions 路由（见上）。codex 恒流式，
+        // 翻译后强制 stream:true，上游扇出无条件走流式管线；include_usage 由
+        // handler 侧对 stream 请求补齐。
+        const parsedRoute = parseOpenAIPath(path);
+        const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
+        // codex 后台/内部请求（记忆整理、guardian 审批、缓存预热等引擎自发的
+        // 模型请求，分类口径见 isCodexBackgroundRequest）在面板上整体隔离：
+        // 实例身份三条通道（prompt_cache_key 派生、x-agent-instance 头、
+        // socket pid 兜底）显式全部跳过——实例 id 置 null 且迟绑定通道不挂，
+        // netstat 快照再新也补不出幻影实例行；background 标记随 meta 传给
+        // agent-metrics，失败结算时不上卡片报错面。用户流量
+        // （turn/compaction/无标记/解析失败）走原路径，行为与今天完全一致。
+        const codexBackground = openaiAgentId === "codex" && isCodexBackgroundRequest(req, body);
+        // 用户流量的实例身份优先级不变：prompt_cache_key 派生的会话 id
+        // （codex-sess-<会话 id>）> x-agent-instance 头 > socket pid 兜底；
+        // 会话 id 命中时迟绑定通道一并压住（视作 explicitId）。prompt_cache_key
+        // 只用于归属：翻译层字段白名单不含它，绝不透给上游。
+        const sessionInstanceId = codexBackground || openaiAgentId !== "codex" ? null : codexSessionInstanceId(body);
+        const chatBody = { ...translateResponsesRequest(body), stream: true };
+        const tracker = deps.metricsCollector?.startRequest({
+          providerId: parsedRoute.ok ? parsedRoute.providerId : responsesMatch[1],
+          model: chatBody?.model,
+          userAgent: req.headers["user-agent"],
+          agentId: openaiAgentId,
+          instanceId: codexBackground ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps)),
+          stream: true,
+          path: "openai",
+          background: codexBackground,
+        });
+        if (!codexBackground) {
+          bindLateSocketInstance(req, openaiAgentId, deps, tracker, {
+            explicitId: sessionInstanceId ?? explicitInstanceId(req.headers),
+          });
+        }
+
+        const abortController = new AbortController();
+        const onResAborted = () => {
+          // Same first-writer-wins abort latch as the chat/completions route.
+          if (!res.writableEnded) {
+            abortController.abort();
+            tracker?.recordEnd({ aborted: true });
+          }
+        };
+        res.on("close", onResAborted);
+
+        try {
+          const chainPlan = await handler.planChainChatCompletions(path, req.headers, chatBody, openaiAgentId);
+          if (chainPlan !== null && !chainPlan.ok) {
+            tracker?.recordEnd({ status: chainPlan.status, error: { status: chainPlan.status, message: chainPlan.body?.error?.message || "Error" } });
+            sendJson(res, chainPlan.status, chainPlan.body);
+            return;
+          }
+
+          const poolPlan = chainPlan === null
+            ? await handler.planPoolChatCompletions(path, req.headers, chatBody)
+            : null;
+          if (poolPlan !== null && !poolPlan.ok) {
+            tracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });
+            sendJson(res, poolPlan.status, poolPlan.body);
+            return;
+          }
+
+          const memberPlan = chainPlan ?? poolPlan;
+          // Failover semantics differ by plan kind: chain plans treat an
+          // upstream 404 as a node-level failure (the node cannot serve its
+          // bound model), pool plans keep 404 request-shaped (passthrough).
+          const isFailoverStatus = chainPlan ? isChainFailoverStatus : isPoolFailoverStatus;
+          if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
+
+          await runStreamWithKeepAlive(res, responsesStreamChannel({
+            res,
+            tracker,
+            abortController,
+            deps,
+            // The original Responses body is the translator's ctx: freeform
+            // custom-tool names and the request fields echoed onto the
+            // response object both come from it.
+            responsesCtx: body,
+            ...(memberPlan
+              ? {
+                  callUpstreams: memberPlan.members.map((member) => ({
+                    memberId: member.memberId,
+                    memberNoun: member.memberNoun,
+                    call: () => member.call({ signal: abortController.signal }),
+                  })),
+                  shouldFailover: (result) => isFailoverStatus(result.status),
+                  onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
+                  onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
+                }
+              : {
+                  callUpstream: () => handler.handleChatCompletions(path, req.headers, chatBody, { signal: abortController.signal }),
+                }),
+          }));
           return;
         } catch (err) {
           if (abortController.signal.aborted) {

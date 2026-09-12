@@ -975,6 +975,67 @@ describe("panel.html qoder endpoint card", () => {
   });
 });
 
+describe("panel.html codex endpoint card", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("declares a codex panel card with its own id prefix", () => {
+    assert.ok(panelHtml.includes('data-agent-id="codex"'), "codex card container exists");
+    for (const id of [
+      "codexModelBadgesList",
+      "codexErrorBanner",
+      "codexErrorMsg",
+      "codexErrorTime",
+      "codexEmpty",
+      "codexMetricsBlock",
+      "codexInstanceCount",
+      "codexInstancesList",
+      "codexSessionRow",
+      "codexSessionReqs",
+      "codexSessionTokens",
+      "codexActiveTag",
+      "codexLastModelTag",
+    ]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
+    }
+  });
+
+  it("wires codex into the card order, refreshAgents and renderCodex", () => {
+    const orderMatch = panelHtml.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    assert.ok(orderMatch, "AGENT_CARD_ORDER literal found");
+    assert.ok(orderMatch[1].includes('"codex"'), "AGENT_CARD_ORDER contains codex");
+    assert.ok(panelHtml.includes('a.id === "codex"'), "refreshAgents looks up the codex agent");
+    assert.ok(panelHtml.includes("renderCodex(codex)"), "refreshAgents calls renderCodex");
+    assert.ok(panelHtml.includes("function renderCodex(p)"), "renderCodex is defined");
+  });
+
+  it("renders codex as a multi-instance card like pi (instance rows + delegated fold, no legacy wiring)", () => {
+    assert.ok(panelHtml.includes('class="agent-detail-fold" data-prefix="codex"'), "fold button uses data-prefix delegation");
+    const m = panelHtml.match(/function renderCodex\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderCodex found in panel.html");
+    assert.ok(m[0].includes('renderInstanceRows({ prefix: "codex"'), "renders instance rows");
+    assert.ok(m[0].includes('setInstanceCount("codex", instances.length)'), "drives the instance-count badge");
+    assert.ok(m[0].includes('applyDetailFold("codex")'), "applies the delegated fold state");
+    assert.ok(m[0].includes('gateAggregateRow("codex", $("codexSessionRow"), instances.length)'), "gates the aggregate row on instance count");
+    assert.ok(m[0].includes("buildAggregateFallback(m, p, isGenerating)"), "zero-instance aggregate fallback row");
+    assert.ok(!m[0].includes("redrawEndpointSparklines"), "no legacy endpoint-level sparkline path");
+    assert.ok(!panelHtml.includes("codexTelemetryGrid"), "no endpoint-level telemetry grid");
+    const keys = panelHtml.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
+    assert.ok(keys && !keys[0].includes("codex"), "ENDPOINT_SPARK_KEYS stays legacy-only (no codex)");
+    const legacyFold = panelHtml.match(/\["zc", "dsh", "reasonix", "qoder"\]\.forEach/);
+    assert.ok(legacyFold, "legacy id-wired fold list unchanged (codex not in it)");
+  });
+
+  it("keeps the stop-relay display name and stats label for codex", () => {
+    assert.ok(panelHtml.includes('codex: "Codex"'), "lifecycle modal label map covers codex");
+    const statsMatch = panelHtml.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
+    assert.ok(statsMatch, "STATS_ENDPOINT_LABELS literal found");
+    assert.ok(statsMatch[0].includes('codex: "Codex"'), "STATS_ENDPOINT_LABELS covers codex");
+  });
+});
+
 describe("panel.html stats tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
@@ -1976,9 +2037,9 @@ describe("panel.html 结构完整性（防 read 截断污染回写）", () => {
       "base64 行曾被 read 工具截断产物污染，导致头像 img src 损坏、监测卡标题错乱");
   });
 
-  it("监测页八个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
-    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 8, "8 个 agent-avatar");
-    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 8, "8 个 agent-headings");
+  it("监测页九个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
+    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 9, "9 个 agent-avatar");
+    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 9, "9 个 agent-headings");
     // img 开标签必须在本行内闭合（不允许 > 落在数千字符之后吞掉后续结构）
     let idx2 = 0;
     let broken = 0;

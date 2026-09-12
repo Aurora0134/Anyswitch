@@ -1257,6 +1257,385 @@ describe("createAgentMetricsCollector", () => {
     assert.ok(procs.qoderPids.has(7002));
   });
 
+  it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => {
+      // Codex CLI + desktop GUI: the engine family lives under the versioned
+      // bin dir (hash drifts per upgrade), ChatGPT.exe is the GUI's Electron
+      // shell under WindowsApps (package version drifts too) with one main
+      // process and one --type= helper child.
+      const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n" +
+        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex-code-mode-host.exe,codex-code-mode-host.exe,6101\r\n" +
+        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex-command-runner.exe,codex-command-runner.exe,6102\r\n" +
+        "LAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe,ChatGPT.exe,6200\r\n" +
+        "LAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe --type=renderer,ChatGPT.exe,6201\r\n";
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn });
+    const req = collector.startRequest({
+      agentId: "codex",
+      providerId: "poke-api",
+      model: "gpt-5.2-codex",
+    });
+    mockTime = 2200;
+    req.recordFirstChunk();
+    mockTime = 3200;
+    req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    const status = await collector.getAgentsStatus();
+    const codex = status.find((a) => a.id === "codex");
+    assert.ok(codex);
+    assert.equal(codex.status, "running");
+    assert.equal(codex.processCount, 4, "engine family + ChatGPT.exe main; Electron --type= helper child filtered out");
+    assert.equal(codex.lastModel, "gpt-5.2-codex");
+    assert.equal(codex.metrics.totalRequests, 1);
+    assert.equal(codex.sessionMode, "aggregate");
+    const zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.totalRequests, 0, "codex traffic must not fall back into the zcode bucket");
+  });
+
+  it("collects Codex PIDs into codexPids like the other endpoints", async () => {
+    const mockExec = (cmd, opts, cb) => {
+      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe,codex.exe,7101\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe,codex.exe,7102\r\n`;
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.codex, 2);
+    assert.ok(procs.codexPids instanceof Set);
+    assert.ok(procs.codexPids.has(7101));
+    assert.ok(procs.codexPids.has(7102));
+  });
+
+  it("counts an idling ChatGPT.exe GUI shell as a process but never as activity", async () => {
+    // V4 验收语义：仅 GUI 空转时卡面可有进程数，但活跃会话引擎是 GUI 为每个
+    // 会话拉起的 codex.exe app-server 子进程——外壳本身不产生活跃。
+    const mockExec = (cmd, opts, cb) => {
+      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe,ChatGPT.exe,6200\r\n`;
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 3000 });
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.processCount, 1, "GUI main process counts toward the card");
+    assert.equal(codex.status, "running");
+    assert.equal(codex.metrics.activeRequests, 0);
+    assert.equal(codex.metrics.totalRequests, 0);
+    assert.equal(codex.sessions[0].status, "idle", "idle GUI is 待命, never 活跃");
+  });
+
+  it("sniffs codex_cli_rs / codex-tui user agents into the codex bucket", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 1000 });
+    for (const userAgent of ["codex_cli_rs/0.153.4 (Windows 11; x86_64)", "codex-tui/0.153.4"]) {
+      const req = collector.startRequest({ userAgent, providerId: "p1", model: "m1" });
+      req.recordEnd({ status: 200, usage: {} });
+    }
+    const status = await collector.getAgentsStatus();
+    const codex = status.find((a) => a.id === "codex");
+    assert.equal(codex.metrics.totalRequests, 2);
+    const zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.totalRequests, 0);
+  });
+
+  it("spawns no codex instance rows from processes alone; launcher-tagged traffic folds into codex-<pid>", async () => {
+    const t = 3000;
+    const codexRow = (pid) =>
+      `LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe,codex.exe,${pid}`;
+    const execFn = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\n" + codexRow(8101) + "\r\n" + codexRow(8102) + "\r\n");
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    // Engine processes alive but zero traffic: no placeholder rows — codex
+    // instance rows are session/traffic-born only.
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "live engine processes never spawn placeholder rows");
+    assert.equal(codex.processCount, 2, "the card still counts the engine family");
+
+    // A launcher-tagged request (header path, no prompt_cache_key derived id)
+    // folds into the canonical codex-<pid> row, keeping the cwd basename as
+    // the row label.
+    const r = collector.startRequest({ agentId: "codex", instanceId: "myproj-8101", model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1);
+    const inst = codex.instances[0];
+    assert.equal(inst.id, "codex-8101");
+    assert.equal(inst.requests, 1);
+    assert.equal(inst.title, "myproj");
+    assert.equal(codex.metrics.totalRequests, 1, "tagged traffic also lands in the endpoint aggregate");
+  });
+
+  it("keeps a desktop session (ChatGPT.exe GUI + codex.exe engine) rowless until session traffic arrives", async () => {
+    // GUI shell + shared app-server engine alive, no traffic: no rows — one
+    // engine hosts every GUI conversation, so a process cannot stand in for
+    // a session.
+    const t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe,ChatGPT.exe,6200\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+    const execFn = (cmd, opts, cb) => cb(null, csv);
+    const collector = testCollector({ execFn, nowFn: () => t, codexSessionLookup: async () => [] });
+
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "GUI + engine alone spawn no instance row");
+    assert.equal(codex.processCount, 2, "card process count keeps the full family scope");
+
+    // One session-tagged request (prompt_cache_key derived upstream) creates
+    // exactly one row; with no session-scan match the title is the short id.
+    const sessionId = "01932abc-7f6e-7a01-9c8e-1a2b3c4d5e6f";
+    const r = collector.startRequest({ agentId: "codex", instanceId: `codex-sess-${sessionId}`, model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1, "session traffic converges on the single session row");
+    assert.equal(codex.instances[0].id, `codex-sess-${sessionId}`);
+    assert.equal(codex.instances[0].requests, 1);
+    assert.equal(codex.instances[0].title, "Codex 会话 01932abc", "no session-scan match → short-id title");
+  });
+
+  it("spawns no instance row for a short-lived codex-command-runner.exe", async () => {
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex-command-runner.exe,codex-command-runner.exe,6150\r\n";
+    const execFn = (cmd, opts, cb) => cb(null, csv);
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.processCount, 1, "the helper still counts toward the card");
+    assert.deepEqual(codex.instances, [], "helpers never own an instance row");
+  });
+
+  it("evicts a pid-shaped codex row when its engine process exits", async () => {
+    let t = 3000;
+    let engineAlive = true;
+    const guiRow = "LAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe,ChatGPT.exe,6200";
+    const engineRow = "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100";
+    const execFn = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\n" + guiRow + "\r\n" + (engineAlive ? engineRow + "\r\n" : ""));
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    // The socket fallback synthesizes codex-<engine pid> for a request that
+    // carries neither a prompt_cache_key nor a launcher header.
+    const r = collector.startRequest({ agentId: "codex", instanceId: "codex-6100", model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances.map((i) => i.id), ["codex-6100"]);
+
+    // The engine exits while the GUI shell keeps running. The next read past
+    // the scan cache window must drop the row even though the bucket still
+    // holds a live (GUI) process.
+    engineAlive = false;
+    t += 3000;
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "engine-scoped liveness evicts the row while the GUI idles on");
+    assert.equal(codex.processCount, 1, "the idling GUI still counts toward the card");
+  });
+
+  it("titles codex session rows from the on-disk session scan (GUI/CLI 同构)", async () => {
+    const t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+    const sessA = "aaaa1111-2222-3333-4444-55556666777f";
+    const sessB = "bbbb2222-3333-4444-5555-66667777888f";
+    const collector = testCollector({
+      execFn: (cmd, opts, cb) => cb(null, csv),
+      nowFn: () => t,
+      codexSessionLookup: async () => [
+        { endpoint: "codex", id: sessA, title: "修复登录页闪退", project: "C:\\work\\shop" },
+        // No thread name or first message on record → cwd basename titles.
+        { endpoint: "codex", id: sessB, title: null, project: "C:\\work\\shop" },
+      ],
+    });
+
+    for (const sessionId of [sessA, sessB]) {
+      const r = collector.startRequest({ agentId: "codex", instanceId: `codex-sess-${sessionId}`, model: "m1", path: "openai" });
+      r.recordEnd({ status: 200, usage: {} });
+    }
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 2, "different sessions split into different rows");
+    const rowA = codex.instances.find((i) => i.id === `codex-sess-${sessA}`);
+    const rowB = codex.instances.find((i) => i.id === `codex-sess-${sessB}`);
+    assert.equal(rowA.title, "修复登录页闪退", "the scanned session title wins");
+    assert.equal(rowB.title, "shop", "titleless session falls back to the cwd basename");
+  });
+
+  // ── codex 后台请求（meta.background）的面板隔离 ─────────────────────
+  // openai-server 的分类器把记忆整理/guardian/预热等引擎自发流量标成
+  // background；这一侧的约定：不出实例行（即便调用方误传 instanceId），失败
+  // 不碰卡片报错面（lastError/activeErrors/errorActive），但请求数与 token
+  // 照实计入端点聚合——不藏流量，也不惊动用户。
+  it("background traffic spawns no instance row even when an instanceId leaks through", async () => {
+    const t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => t, codexSessionLookup: async () => [] });
+
+    // 防线测试：openai-server 正常路径会传 instanceId: null，这里故意带上
+    // 会话 id，验证 collector 侧第二道闸门；迟挂通道（attachInstance）同样是
+    // no-op。
+    const r = collector.startRequest({ agentId: "codex", instanceId: "codex-sess-ghost", model: "gpt-5.6-luna", path: "openai", background: true });
+    r.attachInstance("codex-6100");
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "background traffic never spawns an instance row");
+    assert.equal(codex.metrics.totalRequests, 1, "流量照实计入端点聚合");
+    assert.equal(codex.metrics.tokens.prompt, 10);
+    assert.equal(codex.metrics.tokens.completion, 5);
+  });
+
+  it("a background failure leaves the card error surfaces untouched but still counts", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+
+    // 后台请求撞上硬编码模型的 404：不上报错横幅，但请求数照涨。
+    const bg = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai", background: true });
+    bg.recordEnd({ status: 404, error: { status: 404, message: "model not found" } });
+
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, false);
+    assert.equal(codex.lastError, null);
+    assert.deepEqual(codex.activeErrors, []);
+    assert.equal(codex.sessions[0].errorActive, false);
+    assert.equal(codex.metrics.totalRequests, 1, "失败的后台请求也照实计数");
+
+    // 对照：同一端点上用户流量的同样失败照常 raise——隔离是定向的，不是
+    // 把报错面整个关掉。
+    const user = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai" });
+    user.recordEnd({ status: 404, error: { status: 404, message: "model not found" } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, true);
+    assert.equal(codex.activeErrors.length, 1);
+    assert.equal(codex.lastError.status, 404);
+  });
+
+  it("a background failure neither raises nor clears a user-latched fault", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+
+    // 用户流量先在 (provider, model) 对上挂起真实故障。
+    const user = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai" });
+    user.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, true);
+
+    // 同一对上的后台失败：不得改写 lastError、不得新增 activeErrors，更不得
+    // 落入 clear 分支把用户故障吞掉。
+    const bgFail = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai", background: true });
+    bgFail.recordEnd({ status: 404, error: { status: 404, message: "model not found" } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, true, "后台失败不得清掉用户挂起的故障");
+    assert.equal(codex.activeErrors.length, 1);
+    assert.equal(codex.lastError.status, 502, "lastError 仍是用户那次 502");
+
+    // 同一对上的后台成功（流式首 token + 正常结算）也不是用户故障的恢复信号。
+    const bgOk = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai", background: true });
+    bgOk.recordFirstChunk();
+    bgOk.recordEnd({ status: 200, usage: { prompt_tokens: 4, completion_tokens: 2 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, true, "后台成功不得替用户流量宣布恢复");
+
+    // 用户流量的成功照常清闩。
+    const userOk = collector.startRequest({ agentId: "codex", providerId: "codex-hosted", model: "gpt-5.6-luna", path: "openai" });
+    userOk.recordFirstChunk();
+    userOk.recordEnd({ status: 200, usage: { prompt_tokens: 4, completion_tokens: 2 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.errorActive, false);
+    assert.equal(codex.activeErrors.length, 0);
+  });
+
+  it("keeps one row for repeated traffic of the same codex session", async () => {
+    const t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => t, codexSessionLookup: async () => [] });
+
+    const sessionId = "cccc3333-4444-5555-6666-77778888999f";
+    for (let i = 0; i < 3; i++) {
+      const r = collector.startRequest({ agentId: "codex", instanceId: `codex-sess-${sessionId}`, model: "m1", path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+    }
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1, "one session is one row, however many requests");
+    assert.equal(codex.instances[0].id, `codex-sess-${sessionId}`);
+    assert.equal(codex.instances[0].requests, 3);
+    assert.equal(codex.metrics.totalRequests, 3, "every request also lands in the endpoint aggregate");
+  });
+
+  it("clears codex session rows once the whole codex process family exits", async () => {
+    let t = 3000;
+    let familyAlive = true;
+    const engineRow = "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100";
+    const execFn = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\n" + (familyAlive ? engineRow + "\r\n" : ""));
+    const collector = testCollector({ execFn, nowFn: () => t, codexSessionLookup: async () => [] });
+
+    const r = collector.startRequest({ agentId: "codex", instanceId: "codex-sess-dddd4444-5555-6666-7777-88889990000f", model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: {} });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1);
+
+    // GUI app and every CLI exited: the session row clears on the next read
+    // even though it is seconds old — no process is left that could belong
+    // to the session.
+    familyAlive = false;
+    t += 3000;
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "procCounts.codex === 0 clears session rows immediately");
+    assert.equal(codex.status, "stopped");
+  });
+
+  it("expires a codex session row after 5 idle minutes, not the 10-minute custom TTL", async () => {
+    let t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => t, codexSessionLookup: async () => [] });
+
+    const r = collector.startRequest({ agentId: "codex", instanceId: "codex-sess-eeee5555-6666-7777-8888-99990000111f", model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: {} });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1);
+
+    t += 4 * 60 * 1000;
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.instances.length, 1, "inside the 5-minute session TTL the row stays");
+
+    t += 2 * 60 * 1000; // 6 minutes since the last traffic
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "idle past 5 minutes clears the row while the engine idles on");
+    assert.equal(codex.processCount, 1, "the engine still counts toward the card");
+  });
+
+  it("evicts a codex launcher custom id row once its tail pid leaves the scan", async () => {
+    let t = 3000;
+    let launcherAlive = true;
+    // WMIC shape with ParentProcessId: the launcher (node.exe 7777) and the
+    // engine (codex.exe 6100), parented elsewhere so the launcher id never
+    // folds into the canonical row.
+    const engineRow = "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,500,6100";
+    const launcherRow = "LAPTOP,C:\\Tools\\node.exe C:\\app\\codex-launcher.mjs,node.exe,500,7777";
+    const execFn = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" + engineRow + "\r\n" + (launcherAlive ? launcherRow + "\r\n" : ""));
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    // Ingestion cannot fold "shop-7777" (7777 is no engine pid nor an engine
+    // ancestor), so the row stays custom — and while the launcher lives in
+    // the scan, the row lists.
+    const r = collector.startRequest({ agentId: "codex", instanceId: "shop-7777", model: "m1", path: "openai" });
+    r.recordEnd({ status: 200, usage: {} });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances.map((i) => i.id), ["shop-7777"]);
+
+    // Launcher exits (session over): the dead tail pid evicts the row now,
+    // not after the idle TTL — the engine alone keeps the card running.
+    launcherAlive = false;
+    t += 3000;
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "dead launcher pid evicts its leftover custom row");
+    assert.equal(codex.processCount, 1, "the engine still counts toward the card");
+  });
+
   it("routes opencode traffic by x-agent-id and detects opencode.exe", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
@@ -1276,7 +1655,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 8, "panel now exposes 8 endpoint cards including opencode");
+    assert.equal(status.length, 9, "panel now exposes 9 endpoint cards including codex");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -1349,8 +1728,8 @@ describe("createAgentMetricsCollector", () => {
 
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
-    // 9 cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 8, "claude aggregate bucket must not add a panel card");
+    // cards and claude's card remains the per-session reporter one.
+    assert.equal(status.length, 9, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -2909,19 +3288,19 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
-      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
+      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
       ...extraRows,
     ].join("\r\n") + "\r\n";
   const allZero = (p) => ({
     zcode: p.zcode, claude: p.claude, reasonix: p.reasonix, dsh: p.dsh,
-    kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder,
+    kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder, codex: p.codex,
   });
 
   it("wmic wrapper row carrying every agent name literal counts as nothing", async () => {
     const execFn = (cmd, opts, cb) => cb(null, wmicWrapper());
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0 },
+    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0, codex: 0 },
       "the probe's own cmd.exe wrapper must not impersonate any client");
     assert.equal(p.reasonixPids.has(7300), false);
     // The wrapper stays in the lineage table — it is a legitimate hop for
@@ -3166,6 +3545,22 @@ describe("normalizeInstanceId", () => {
   it("returns null for invalid ids", () => {
     assert.equal(normalizeInstanceId("kimi", "bad id!", snapshot), null);
     assert.equal(normalizeInstanceId("kimi", null, snapshot), null);
+  });
+
+  it("folds codex ids against the engine pid set, not the whole bucket", () => {
+    // Desktop session shape: ChatGPT.exe GUI (6200) is the PARENT of the
+    // codex.exe app-server engine (6100). The engine pid direct-hits; a
+    // GUI-pid tag folds to the engine through the lineage table — both land
+    // on the same row the engine-scoped housekeeping keeps alive.
+    const codexSnapshot = {
+      codexPids: new Set([6200, 6100]),
+      codexEnginePids: new Set([6100]),
+      ppidByPid: new Map([[6100, 6200]]),
+    };
+    assert.deepEqual(normalizeInstanceId("codex", "codex-6100", codexSnapshot), { id: "codex-6100", label: null });
+    assert.deepEqual(normalizeInstanceId("codex", "codex-6200", codexSnapshot), { id: "codex-6100", label: null });
+    assert.deepEqual(normalizeInstanceId("codex", "codex-9999", codexSnapshot), { id: "codex-9999", label: null },
+      "a pid outside the engine set with no lineage link stays a custom id");
   });
 });
 

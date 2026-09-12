@@ -1,5 +1,5 @@
-// Shared keep-alive streaming pipeline for all three relay frontends
-// (OpenAI passthrough, resident Anthropic, per-launch Anthropic).
+// Shared keep-alive streaming pipeline for the relay frontends (OpenAI
+// passthrough, Responses for codex, resident Anthropic, per-launch Anthropic).
 //
 // One parameterized pipe (pipeGuardedStream) plus one
 // parameterized keep-alive retry loop (runStreamWithKeepAlive); each server
@@ -21,6 +21,7 @@
 
 import { OpenAIStreamGuard } from "./openai-stream-guard.mjs";
 import { StreamTranslator, SSEParser, sseEvent } from "./stream.mjs";
+import { ResponsesSseTranslator } from "./responses-translate.mjs";
 import { computeRetryDelay } from "./keepalive-backoff.mjs";
 import { openAIError } from "./openai-handler.mjs";
 import { errorBody } from "./handler.mjs";
@@ -65,16 +66,21 @@ export function sleepWithAbort(ms, signal) {
 //
 // opts:
 //   format:  "openai" (verbatim + raw-line usage scan, pipe records tracker
-//            ends itself) | "anthropic" (StreamTranslator translation)
+//            ends itself) | "anthropic" (StreamTranslator translation) |
+//            "responses" (ResponsesSseTranslator translation, codex frontend)
 //   wireId:  Anthropic channel only — translator session id
+//   responsesCtx: Responses channel only — the original Responses request
+//            body, the translator's ctx (tool-name classification, response
+//            field echo)
 //   enhanced: whole-turn hold (Plan A anti-truncation)
 //   pings:   emit ": ping" SSE comments while the turn is held (OpenAI and
 //            per-launch Anthropic channels; the resident Anthropic channel
 //            sends no pings)
-export async function pipeGuardedStream(res, upstreamBody, { format, wireId, enhanced = false, pings = false, tracker = null, abortController = null }) {
+export async function pipeGuardedStream(res, upstreamBody, { format, wireId, responsesCtx, enhanced = false, pings = false, tracker = null, abortController = null }) {
   const isOpenAI = format === "openai";
+  const isResponses = format === "responses";
   const guard = new OpenAIStreamGuard({ holdEntireTurn: enhanced });
-  const translator = isOpenAI ? null : new StreamTranslator(wireId);
+  const translator = isOpenAI ? null : isResponses ? new ResponsesSseTranslator(responsesCtx) : new StreamTranslator(wireId);
   const parser = isOpenAI ? null : new SSEParser();
   const decoder = new TextDecoder();
   let committed = false; // real content bytes were sent (pings do not count)
@@ -329,15 +335,17 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, enh
       };
     }
     commit();
-    // The guard's error is OpenAI-shaped; this channel speaks Anthropic SSE,
-    // so it must go out as an `event: error` frame. A bare data line without
-    // an event name reads as an unterminated stream to Claude Code, which
-    // misreports it as "ended before any complete data" and falls back to an
-    // unprotected non-streaming retry.
+    // The guard's error is OpenAI-shaped; each translated channel ends the
+    // turn in its own wire dialect. Anthropic gets an `event: error` frame —
+    // a bare data line without an event name reads as an unterminated stream
+    // to Claude Code, which misreports it as "ended before any complete data"
+    // and falls back to an unprotected non-streaming retry. Responses gets
+    // response.failed from the translator — the turn's terminal frame, after
+    // which no [DONE] may follow.
     const errorType = verdict.error?.error?.type || "api_error";
     const errorMessage = verdict.error?.error?.message
       || "the upstream stream was truncated after content was delivered";
-    res.write(sseEvent("error", errorBody(errorType, errorMessage)));
+    res.write(isResponses ? translator.fail(errorMessage, errorType) : sseEvent("error", errorBody(errorType, errorMessage)));
     if (verdict.truncated) {
       // The content was cut (mid-word, or tool args that never parse). The
       // error event above replaces message_stop client-side; surface the
@@ -368,7 +376,9 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, enh
       return { outcome: "terminal", committed, error: streamErr };
     }
     commit();
-    res.write(sseEvent("error", errorBody("api_error", "the upstream stream failed mid-response")));
+    res.write(isResponses
+      ? translator.fail("the upstream stream failed mid-response", "api_error")
+      : sseEvent("error", errorBody("api_error", "the upstream stream failed mid-response")));
     return { outcome: "terminal", committed, error: "the upstream stream failed mid-response", usage: usageExtracted };
   } finally {
     if (pingTimer) clearInterval(pingTimer);
@@ -690,6 +700,119 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, callU
           // socket already gone
         }
         res.end();
+        return;
+      }
+      const retryableReason = lastOutcome?.reason;
+      if (retryableReason && retryableReason !== "empty_stream" && retryableReason !== "stream_error_before_content" && lastOutcome.error) {
+        sendJson(res, 502, lastOutcome.error);
+      } else if (retryableReason === "stream_error_before_content") {
+        sendJson(
+          res,
+          502,
+          openAIError("api_error", "the upstream stream failed before any content was delivered"),
+        );
+      } else {
+        // The final branch is exactly the empty-stream set of exhaustedMessage,
+        // so the wording (spent budget vs 未配置重试) must come from `message`
+        // rather than a private copy of the text.
+        sendJson(res, 502, openAIError("api_error", message));
+      }
+    },
+  };
+}
+
+// Responses channel (resident relay /openai/.../v1/responses[/compact], the
+// codex frontend). The upstream fan-out is the same chat/completions plan the
+// OpenAI passthrough channel drives, but the wire is Responses SSE: the pipe
+// runs ResponsesSseTranslator over the chat chunks, so the pipe's OpenAI-only
+// tracker recordEnd paths do not cover this format and ends are recorded here
+// in onSettled (same split as the Anthropic channels). Pre-stream terminal
+// errors keep the relay's usual JSON error shape; once the SSE headers are
+// committed (keep-alive pings) the definitive error rides a response.failed
+// frame instead of a status line the wire can no longer carry.
+// Pool routing (phase 2): same callUpstreams / shouldFailover /
+// onMemberSuccess contract as the other channels.
+export function responsesStreamChannel({ res, tracker, abortController, deps, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
+  const logger = deps?.logger;
+  const writeFailedFrame = (message, type) => {
+    try {
+      res.write(new ResponsesSseTranslator(responsesCtx).fail(message, type));
+    } catch {
+      // socket already gone
+    }
+    res.end();
+  };
+  return {
+    deps,
+    tracker,
+    abortController,
+    callUpstream,
+    callUpstreams,
+    shouldFailover,
+    onMemberSuccess,
+    onMemberFailover,
+    logLabel: "responses request",
+    pipe: (result, keepAliveConfig) => {
+      const enhanced = keepAliveConfig?.mode === "enhanced";
+      return pipeGuardedStream(res, result.stream, { format: "responses", responsesCtx, enhanced, pings: enhanced, tracker, abortController });
+    },
+    onCallError: (err) => {
+      tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });
+      if (!res.headersSent) {
+        sendJson(res, 500, openAIError("api_error", "the relay failed to handle this request"));
+      }
+    },
+    onTerminalResult: (result, member) => {
+      if (result.status >= 400) {
+        tracker?.recordEnd({ status: result.status, error: { status: result.status, message: result.body?.error?.message || "Error" }, usage: result.body?.usage, memberId: member?.memberId ?? undefined });
+      } else {
+        tracker?.recordEnd({ status: result.status, usage: result.body?.usage });
+      }
+      if (res.headersSent) {
+        writeFailedFrame(result.body?.error?.message || "Error", result.body?.error?.type);
+      } else {
+        sendJson(res, result.status, result.body);
+      }
+    },
+    onSettled: (outcome, attempt) => {
+      if (outcome.outcome === "ok") {
+        tracker?.recordEnd?.({ usage: outcome.usage });
+        if (attempt > 0) {
+          tracker?.noteKeepAliveRecovery?.();
+          logger?.info?.(`keep-alive: responses request recovered on attempt ${attempt + 1}`);
+        }
+      } else if (outcome.clientAborted) {
+        tracker?.recordEnd?.({ aborted: true, usage: outcome.usage });
+      } else {
+        // Terminal fault: a mid-stream failure after content was committed.
+        const message = typeof outcome.error === "string" ? outcome.error : outcome.error?.message || "the upstream stream failed";
+        tracker?.recordEnd?.({ status: 502, error: { status: 502, message }, usage: outcome.usage });
+        logger?.warn?.(`responses stream fault after content was delivered: ${message}`);
+      }
+    },
+    exhaustedMessage: (lastOutcome, retryCtx) => {
+      const retryableReason = lastOutcome?.reason;
+      if (retryableReason && retryableReason !== "empty_stream" && retryableReason !== "stream_error_before_content" && lastOutcome.error) {
+        return lastOutcome.error.error?.message || lastOutcome.error.message;
+      }
+      if (retryableReason === "stream_error_before_content") {
+        return "the upstream stream failed before any content was delivered";
+      }
+      // "已耗尽" only after the retry budget was actually spent; a zero-retry
+      // config (off tier or maxRetries 0) never retried and must say so.
+      return (retryCtx?.attemptsUsed ?? 1) > 1
+        ? "模型未返回任何内容 (上游流在首字前结束或为空，保活重试已耗尽)"
+        : "模型未返回任何内容 (上游流在首字前结束或为空；未配置重试)";
+    },
+    onExhaustedLog: (message, lastOutcome, retryCtx) => {
+      const head = (retryCtx?.attemptsUsed ?? 1) > 1
+        ? "keep-alive: exhausted"
+        : "keep-alive: empty upstream (no retry configured)";
+      logger?.warn?.(`${head} (${lastOutcome?.reason ?? "empty_stream"}): ${message}`);
+    },
+    sendExhausted: (message, lastOutcome) => {
+      if (res.headersSent) {
+        writeFailedFrame(message, "api_error");
         return;
       }
       const retryableReason = lastOutcome?.reason;

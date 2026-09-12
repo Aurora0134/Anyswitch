@@ -52,6 +52,7 @@ const SUMMARY_MAX_CHARS = 160;
 //   kimi --session <id>      (kimi --help: "-S, --session [id] Resume a session. With ID: resume that session.")
 //   pi --session <path|id>   (pi --help: "--session <path|id> Use specific session file or partial UUID")
 //   opencode --session <id>  (opencode --help: "-s, --session  session id to continue")
+//   codex resume <id>        (codex resume --help: "[SESSION_ID] Session id (UUID) or session name")
 // Not verified (no resume flag in --help): dsh (chat has no resume option),
 // zcode / qoder / reasonix (no CLI on PATH to check) → left empty.
 const RESUME_COMMAND = Object.freeze({
@@ -59,6 +60,7 @@ const RESUME_COMMAND = Object.freeze({
   kimi: (meta) => `kimi --session ${meta.id}`,
   pi: (meta) => `pi --session ${meta.file}`,
   opencode: (meta) => `opencode --session ${meta.id}`,
+  codex: (meta) => `codex resume ${meta.id}`,
 });
 
 function resumeCommandFor(endpoint, meta) {
@@ -1101,6 +1103,199 @@ function createQoderAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
+// codex — ~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<ts>-<uuid>.jsonl. Every
+// line is an envelope {timestamp, type, payload}: session_meta carries
+// {id, cwd, timestamp}; conversation turns are response_item entries wrapping
+// Responses-API items (message content is input_text/output_text blocks);
+// event_msg user_message/agent_message mirror the same text streams (kept out
+// of loadMessages so nothing renders twice). world_state / turn_context
+// envelopes — and any future type — are tolerated: skipped, never fatal.
+// ~/.codex/session_index.jsonl ({id, thread_name, updated_at}) supplies the
+// desktop thread name when one exists; like claude's custom-title it beats
+// the first user message as the list title. The title chain is thread name →
+// first real user-typed message → session_meta cwd basename; codex's
+// injected user-role prelude (the "# AGENTS.md instructions" /
+// <environment_context> synthetic envelope) never counts as a user message.
+// ---------------------------------------------------------------------------
+
+// codex injects its per-turn context as a user-role message: the session
+// prelude starts with "# AGENTS.md instructions" and embeds an
+// <environment_context> block (cwd etc.) further down. Either marker alone
+// means the text is that synthetic envelope, never something the user typed.
+function isSyntheticUserEnvelope(text) {
+  return text.startsWith("# AGENTS.md instructions") || text.includes("<environment_context");
+}
+
+// Displayable user/assistant text of one envelope, or null when it carries
+// none (world_state / turn_context / reasoning / tool calls / developer
+// instructions). A synthetic user envelope (see isSyntheticUserEnvelope) is
+// not a user-typed turn and never qualifies — the real first user message
+// comes after it.
+function codexMessage(value) {
+  if (value?.type === "response_item" && value.payload?.type === "message") {
+    const role = value.payload.role;
+    if (role !== "user" && role !== "assistant") return null;
+    const text = extractText(value.payload.content).trim();
+    if (text === "" || (role === "user" && isSyntheticUserEnvelope(text))) return null;
+    return { role, text };
+  }
+  if (value?.type === "event_msg") {
+    const kind = value.payload?.type;
+    const role = kind === "user_message" ? "user" : kind === "agent_message" ? "assistant" : null;
+    if (role === null || typeof value.payload.message !== "string") return null;
+    const text = value.payload.message.trim();
+    if (text === "" || (role === "user" && isSyntheticUserEnvelope(text))) return null;
+    return { role, text };
+  }
+  return null;
+}
+
+function createCodexAdapter(roots) {
+  // The index sits next to the sessions root (~/.codex/session_index.jsonl);
+  // a missing or corrupt index just means no thread names.
+  function loadThreadNames() {
+    const names = new Map();
+    for (const root of roots) {
+      let values;
+      try {
+        values = parseJsonl(readFileSync(join(dirname(root), "session_index.jsonl"), "utf8"));
+      } catch {
+        continue;
+      }
+      for (const value of values) {
+        if (typeof value?.id === "string" && typeof value?.thread_name === "string" && value.thread_name.trim() !== "") {
+          names.set(value.id, value.thread_name.trim());
+        }
+      }
+    }
+    return names;
+  }
+
+  function parseSession(path, threadNames) {
+    const { head, tail } = readHeadTailLines(path, 30, 30);
+
+    let sessionId = null;
+    let project = null;
+    let createdAt = null;
+    let firstUserMessage = null;
+
+    for (const line of head) {
+      let value;
+      try {
+        value = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = value?.payload;
+      if (value?.type === "session_meta" && payload && typeof payload === "object") {
+        if (sessionId === null && typeof payload.id === "string" && payload.id !== "") sessionId = payload.id;
+        if (project === null && typeof payload.cwd === "string" && payload.cwd !== "") project = payload.cwd;
+        if (createdAt === null) createdAt = parseTimestampMs(payload.timestamp) ?? parseTimestampMs(value.timestamp);
+      }
+      if (firstUserMessage === null) {
+        const message = codexMessage(value);
+        if (message !== null && message.role === "user") firstUserMessage = message.text;
+      }
+      if (sessionId !== null && project !== null && createdAt !== null && firstUserMessage !== null) break;
+    }
+
+    // Filename fallback: rollout-<local-ts>-<uuid>.jsonl ends in the uuid.
+    if (sessionId === null) {
+      const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(basename(path));
+      sessionId = match ? match[1] : null;
+    }
+    if (sessionId === null) return null;
+    const threadName = threadNames.get(sessionId) ?? null;
+    // No user turn, no desktop-named thread, and no working directory to
+    // title by → not a conversation worth listing. A session whose only
+    // user-role records are synthetic envelopes still lists — titled by its
+    // cwd basename in the fallback chain below.
+    if (firstUserMessage === null && threadName === null && project === null) return null;
+
+    let lastActive = null;
+    let summary = null;
+    for (let i = tail.length - 1; i >= 0; i--) {
+      let value;
+      try {
+        value = JSON.parse(tail[i]);
+      } catch {
+        continue;
+      }
+      if (lastActive === null) lastActive = parseTimestampMs(value?.timestamp);
+      if (summary === null) {
+        const message = codexMessage(value);
+        if (message !== null) summary = message.text;
+      }
+      if (lastActive !== null && summary !== null) break;
+    }
+
+    return makeMeta({
+      endpoint: "codex",
+      id: sessionId,
+      title:
+        (threadName !== null ? truncateText(threadName, TITLE_MAX_CHARS) : null) ||
+        (firstUserMessage !== null ? truncateText(firstUserMessage, TITLE_MAX_CHARS) : null) ||
+        (project !== null ? pathBasename(project) : null),
+      summary: summary !== null ? truncateText(summary, SUMMARY_MAX_CHARS) || null : null,
+      project,
+      file: path,
+      createdAt,
+      lastActive: lastActive ?? createdAt,
+    });
+  }
+
+  return {
+    id: "codex",
+    roots: () => roots,
+    async scan() {
+      const threadNames = loadThreadNames();
+      const sessions = [];
+      for (const root of roots) {
+        for (const file of collectJsonlFiles(root)) {
+          try {
+            const meta = parseSession(file, threadNames);
+            if (meta) sessions.push(meta);
+          } catch {
+            // unreadable file — skip
+          }
+        }
+      }
+      return sessions;
+    },
+    async loadMessages(file) {
+      const target = assertUnderRoots(file, roots);
+      const messages = [];
+      for (const value of parseJsonl(readFileSync(target, "utf8"))) {
+        // response_item is the durable record; event_msg mirrors are skipped
+        // so user/assistant text never renders twice.
+        if (value?.type !== "response_item" || !value.payload) continue;
+        const payload = value.payload;
+        const ts = parseTimestampMs(value.timestamp);
+        if (payload.type === "message") {
+          const role = payload.role;
+          if (role !== "user" && role !== "assistant") continue;
+          const content = extractText(payload.content).trim();
+          if (content === "" || (role === "user" && content.startsWith("<environment_context"))) continue;
+          messages.push({ role, content, ts });
+        } else if (payload.type === "function_call" || payload.type === "custom_tool_call") {
+          messages.push({ role: "assistant", content: `[Tool: ${toolCallName(payload)}]`, ts });
+        } else if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output") {
+          const content = extractText(payload.output).trim();
+          if (content === "") continue;
+          messages.push({ role: "tool", content, ts });
+        }
+      }
+      return messages;
+    },
+    async delete(file) {
+      const target = assertUnderRoots(file, roots);
+      rmSync(target);
+      return true;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // SQLite adapters (zcode / opencode / reasonix). All open read-only via a
 // file:...?mode=ro URI so active WAL stores are safe to read concurrently.
 // Open/query failure degrades the adapter to an empty list — it must never
@@ -1513,6 +1708,7 @@ function defaultRoots(home = homedir()) {
     pi: [join(home, ".pi", "agent", "sessions")],
     opencode: [join(home, ".local", "share", "opencode")],
     qoder: [join(home, ".qoder", "projects")],
+    codex: [join(home, ".codex", "sessions")],
     reasonix: [
       join(process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "reasonix"),
       join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "reasonix", "projects"),
@@ -1528,6 +1724,7 @@ const ADAPTER_FACTORIES = {
   pi: createPiAdapter,
   opencode: createOpencodeAdapter,
   qoder: createQoderAdapter,
+  codex: createCodexAdapter,
   reasonix: createReasonixAdapter,
 };
 

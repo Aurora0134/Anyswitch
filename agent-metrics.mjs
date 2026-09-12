@@ -190,7 +190,9 @@ export function findDescendantClientPid(ancestorPid, clientPids, ppidByPid) {
 }
 
 // Normalize a (already well-formed or not) instance id against a process-scan
-// snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional).
+// snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional;
+// codex reads codexEnginePids instead — its pid-tagged ids fold against the
+// engine subset).
 // Returns { id, label }: id is the canonical "<agentId>-<client pid>" when
 // the numeric tail resolves, otherwise the input unchanged; label is the
 // id's prefix (cwd basename) on a successful fold, else null. Returns null
@@ -201,7 +203,14 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
   const tail = id.match(/-(\d+)$/);
   if (tail === null) return { id, label: null };
   const tailPid = Number(tail[1]);
-  const clientPids = procSnapshot?.[`${agentId}Pids`];
+  // codex folds against the ENGINE subset, not the whole bucket: ChatGPT.exe
+  // (the desktop GUI shell — typically the engine's PARENT, so a GUI-pid tag
+  // still folds through the lineage table) and the short-lived helpers sit in
+  // codexPids but never own a session. Same scope the instance housekeeping
+  // reconciles against, so a folded id is never evicted as a dead pid.
+  const clientPids = agentId === "codex"
+    ? procSnapshot?.codexEnginePids
+    : procSnapshot?.[`${agentId}Pids`];
   let clientPid = clientPids instanceof Set && clientPids.has(tailPid) ? tailPid : null;
   if (clientPid === null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
@@ -209,6 +218,44 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
   if (clientPid === null) return { id, label: null };
   const prefix = id.slice(0, tail.index);
   return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null };
+}
+
+// Liveness verdict for a custom id's numeric tail — a launcher pid that
+// never folded into canonical "<agentId>-<pid>" form. The tail names a
+// process outside the endpoint's own pid set (the launcher is a node.exe
+// row), so reconcile against EVERYTHING the scan enumerated: any counted pid
+// set, or the lineage table whose keys cover every probed row, launcher and
+// cmd shim included. Returns null when the scan cannot arbitrate (the
+// plain-tasklist fallback carries no parent column, so launcher rows leave
+// no trace) — callers keep the idle TTL in that case.
+function scanPidLiveness(pid, procCounts) {
+  if (procCounts === null || typeof procCounts !== "object") return null;
+  for (const value of Object.values(procCounts)) {
+    if (value instanceof Set && value.has(pid)) return true;
+  }
+  if (procCounts.ppidByPid instanceof Map) {
+    if (procCounts.ppidByPid.has(pid)) return true;
+    if (procCounts.ppidByPid.size > 0) return false;
+  }
+  return null;
+}
+
+// Panel title for a codex session row: the scanned session's own title
+// (session-scan's codex adapter already prioritizes thread name → first
+// user message → cwd basename), else the session's working-directory
+// basename, else a short-id placeholder. GUI and CLI sessions share the
+// shape — both write the same rollout files. Rows with no scan match (the
+// session file not written yet, or the id capped by INSTANCE_ID_MAX_LEN)
+// land on the placeholder.
+function codexSessionRowTitle(instId, sessionById) {
+  const sessionId = instId.slice(CODEX_SESSION_ID_PREFIX.length);
+  const meta = sessionById?.get(sessionId) ?? null;
+  if (typeof meta?.title === "string" && meta.title.trim() !== "") return meta.title;
+  if (typeof meta?.project === "string" && meta.project !== "") {
+    const base = meta.project.split(/[\\/]/).filter(Boolean).pop();
+    if (base) return base;
+  }
+  return `Codex 会话 ${sessionId.slice(0, 8)}`;
 }
 
 // How long an idle instance stays listed after its last request. Only custom
@@ -224,6 +271,20 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
 // 10 minutes covers a thinking pause between turns without letting long-dead
 // custom-tagged instances linger on the panel.
 const INSTANCE_IDLE_TTL_MS = 10 * 60 * 1000;
+
+// codex session rows (ids "codex-sess-<prompt_cache_key>", derived upstream
+// from the Responses request body's prompt_cache_key — the codex session id,
+// identical for the GUI and the CLI) declare no owning PID: every GUI
+// conversation shares one app-server engine process and the CLI exits per
+// session, so process liveness cannot arbitrate them. They clear on the
+// first of two conditions: the whole codex process family is gone
+// (procCounts.codex === 0 — GUI app and every CLI exited), or this TTL
+// lapses with no traffic. 5 minutes, deliberately shorter than the generic
+// custom-id TTL above: a closed session has nothing left that could hold its
+// row open, so the card drops it soon after the user moves on instead of
+// lingering the way the old process rows did.
+export const CODEX_SESSION_ID_PREFIX = "codex-sess-";
+const CODEX_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
 
 export function getTtftColor(ttftMs) {
   if (typeof ttftMs !== "number" || isNaN(ttftMs) || ttftMs <= 0) return "gray";
@@ -290,6 +351,10 @@ const AGENT_IMAGE_BUCKETS = [
   ["reasonix-desktop.exe", "reasonix"],
   ["reasonix-launcher.exe", "reasonix"],
   ["qoder.exe", "qoder"],
+  ["codex.exe", "codex"],
+  ["codex-code-mode-host.exe", "codex"],
+  ["codex-command-runner.exe", "codex"],
+  ["chatgpt.exe", "codex"],
   ["zcode.exe", "zcode"],
   ["claude.exe", "claude"],
   ["opencode.exe", "opencode"],
@@ -361,7 +426,7 @@ function resolveProbeRow(lower) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, qoder: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), qoderPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, qoder: 0, codex: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -410,6 +475,29 @@ function parseTasklistCsv(stdout) {
       } else {
         result.qoder += 1;
         if (pid) result.qoderPids.add(pid);
+      }
+    } else if (bucket === "codex") {
+      // The engine family under %LOCALAPPDATA%\OpenAI\Codex\bin\*\ (codex.exe,
+      // codex-code-mode-host.exe, codex-command-runner.exe) counts as-is.
+      // ChatGPT.exe is the desktop GUI's Electron shell: filter --type=
+      // helper children like qoder so only its main process counts. codex.exe
+      // gets the same guard so a helper-shaped row on the no-Name-field
+      // fallback path (argv[0] claims the row, --type= sits in the captured
+      // command line) cannot inflate the count. An idling GUI alone never
+      // marks the endpoint active — the active-session engine is the
+      // codex.exe app-server child the GUI spawns per session, and activity
+      // itself is relay-traffic driven.
+      if ((image === "chatgpt.exe" || image === "codex.exe") && commandLine?.includes("--type=")) {
+        // Electron helper child process, skip
+      } else {
+        result.codex += 1;
+        if (pid) result.codexPids.add(pid);
+        // Instance liveness is engine-scoped for the pid-shaped rows: only
+        // the codex.exe app-server owns sessions, so it alone feeds the pid
+        // set that id normalization folds against and housekeeping
+        // reconciles "<pid>"-tailed rows against. procCounts.codex /
+        // codexPids keep the whole family for the card's process count.
+        if (pid && image === "codex.exe") result.codexEnginePids.add(pid);
       }
     } else if (bucket === "zcode") {
       // If CommandLine is present (from wmic / tasklist verbose output), count only main processes
@@ -622,9 +710,15 @@ function pruneStaleAggregateFaults(state, nowFn, ttlMs) {
 
 function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId) {
   const startTime = nowFn();
+  // 后台请求（codex 记忆整理/guardian/预热等引擎自发流量，由 openai-server 的
+  // 分类器打上 meta.background）与报错面双向隔离：失败不写 lastError/
+  // activeFaults/errorActive（卡片报错横幅的数据源），成功也不清用户流量挂起
+  // 的故障；totalRequests/token/时长/stability/journal 照实结算——流量不藏，
+  // 但也不惊动用户。journal 行同样不带实例身份。
+  const background = meta.background === true;
   // Optional per-instance tag (multi-instance endpoints). Validated once here
   // so the journal row and the instance bucket never see a raw header value.
-  const journalInstanceId = sanitizeInstanceId(meta.instanceId);
+  const journalInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
   if (state.activeRequests === 0) state.activeWallStart = startTime;
   state.activeRequests += 1;
   state.totalRequests += 1;
@@ -738,7 +832,8 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     getAttribution: () => ({ memberId: currentMemberId, resolver: attributeResolver }),
     recordFirstChunk: () => {
       // First genuine token on this provider+model pair clears only that pair's fault.
-      clearMatchingAggregateFault(state, meta);
+      // 后台请求不参与故障闩锁：它的首 token 不能替用户流量宣布故障恢复。
+      if (!background) clearMatchingAggregateFault(state, meta);
       if (firstChunkTime !== null || ended) return;
       firstChunkTime = nowFn();
       const ttft = Math.max(1, firstChunkTime - startTime);
@@ -855,7 +950,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // pair — retry begin must not hide a still-failing upstream. Empty or
       // truncated streams never look like success because the stream guard
       // retries them before the first token; if this attempt fails, recordEnd
-      // re-latches.
+      // re-latches. 后台请求（background）全程不碰这条闩锁：失败不 raise
+      // （记忆流水线硬编码模型的 404 不该伪装成用户故障横幅），成功也不走
+      // 下面的 clear 分支替用户流量宣布恢复。
       const hadError = Boolean(info.error) || (typeof info.status === "number" && info.status >= 400);
       const aborted = Boolean(info.aborted);
       // Pool routing: the actual failing member (when the channel reports one)
@@ -869,7 +966,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // or the one last attempted (pipe-internal ends carry no memberId).
       const attr = resolvedAttributeFor(memberId);
 
-      if (hadError) {
+      if (hadError && !background) {
         const model = meta.model || state.lastModel;
         const providerId = meta.providerId || state.lastProvider;
         const entry = {
@@ -889,7 +986,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
           state.errorActive = true;
           state.keylessFaultAt = endTime;
         }
-      } else if (!aborted && firstChunkTime === null) {
+      } else if (!hadError && !background && !aborted && firstChunkTime === null) {
         clearMatchingAggregateFault(state, meta);
       }
 
@@ -1249,7 +1346,7 @@ export function createAgentMetricsCollector(options = {}) {
         resolve(cachedProcessCounts);
       };
 
-      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
+      execFn('wmic process where "name=\'ZCode.exe\' or name=\'claude.exe\' or name=\'opencode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'codex.exe\' or name=\'codex-code-mode-host.exe\' or name=\'codex-command-runner.exe\' or name=\'ChatGPT.exe\' or name=\'node.exe\' or name=\'cmd.exe\'" get ProcessId,ParentProcessId,CommandLine,Name /format:csv', { timeout: 3000, windowsHide: true }, (wmicErr, wmicOut) => {
         if (!wmicErr && typeof wmicOut === "string" && wmicOut.includes("ProcessId")) {
           land(parseTasklistCsv(wmicOut));
           return;
@@ -1258,7 +1355,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 2. Secondary fallback: PowerShell Get-CimInstance (preserves CommandLine on Win11 where wmic is deprecated/slow).
         // Same lineage additions as the WMIC probe: ParentProcessId column (emitted
         // as the second field) and cmd.exe in the filter.
-        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
+        const psCmd = 'powershell -NoProfile -NonInteractive -Command "Get-CimInstance Win32_Process -Filter \\"name=\'node.exe\' or name=\'claude.exe\' or name=\'ZCode.exe\' or name=\'dsh.exe\' or name=\'pi.exe\' or name=\'opencode.exe\' or name=\'Reasonix.exe\' or name=\'reasonix-cli.exe\' or name=\'reasonix-desktop.exe\' or name=\'reasonix-launcher.exe\' or name=\'Qoder.exe\' or name=\'codex.exe\' or name=\'codex-code-mode-host.exe\' or name=\'codex-command-runner.exe\' or name=\'ChatGPT.exe\' or name=\'cmd.exe\'\\" | ForEach-Object { \\"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\\" }"';
         execFn(psCmd, { timeout: 3000, windowsHide: true }, (psErr, psOut) => {
           if (!psErr && typeof psOut === "string" && psOut.trim().length > 0) {
             land(parseTasklistCsv(psOut));
@@ -1312,6 +1409,37 @@ export function createAgentMetricsCollector(options = {}) {
     return cachedProcessCounts;
   }
 
+  // Session-title lookup for codex session rows. The default walks
+  // ~/.codex/sessions/**.jsonl through session-scan's codex adapter — far too
+  // heavy for the panel's 1s poll, so the result is cached and the import is
+  // lazy (launchers and the watchdog import this module too; they never list
+  // codex session rows and must not pay session-scan's sqlite/zlib imports
+  // for nothing). Tests inject codexSessionLookup instead.
+  const codexSessionLookup = options.codexSessionLookup ?? null;
+  const CODEX_SESSION_LOOKUP_TTL_MS = 15000;
+  let codexSessionInfoCache = null; // { at, byId } | null
+
+  async function loadCodexSessionInfo() {
+    const now = nowFn();
+    if (codexSessionInfoCache !== null && now - codexSessionInfoCache.at < CODEX_SESSION_LOOKUP_TTL_MS) {
+      return codexSessionInfoCache.byId;
+    }
+    let sessions = [];
+    try {
+      sessions = codexSessionLookup !== null
+        ? await codexSessionLookup()
+        : await (await import("./session-scan.mjs")).defaultScanner.adapters.get("codex").scan();
+    } catch {
+      sessions = []; // a scan failure must never break the status read
+    }
+    const byId = new Map();
+    for (const meta of Array.isArray(sessions) ? sessions : []) {
+      if (meta && typeof meta.id === "string") byId.set(meta.id, meta);
+    }
+    codexSessionInfoCache = { at: now, byId };
+    return byId;
+  }
+
   // Aggregate metrics state
   const zcodeState = createAggregateState();
   const dshState = createAggregateState();
@@ -1321,18 +1449,19 @@ export function createAgentMetricsCollector(options = {}) {
   const qoderState = createAggregateState();
   const opencodeState = createAggregateState();
   const claudeState = createAggregateState();
+  const codexState = createAggregateState();
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi): instanceId -> { state, firstSeen }. Only requests carrying a
+  // pi / codex): instanceId -> { state, firstSeen }. Only requests carrying a
   // valid instanceId land here, and they ALSO land in the endpoint aggregate
   // above, so the existing cards are unchanged. claude is per-session
   // already; zcode/dsh/reasonix/qoder stay aggregate-only by design.
-  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map() };
+  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map() };
 
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState, codexState]) {
       state.sparkWindowPoints = sparkWindowPoints;
       while (state.ttftHistory.length > keep) state.ttftHistory.shift();
       while (state.recentSamples.length > keep) state.recentSamples.shift();
@@ -1381,6 +1510,18 @@ export function createAgentMetricsCollector(options = {}) {
     if (typeof meta.userAgent === "string") {
       const ua = meta.userAgent.toLowerCase();
       if (ua.includes("qoder")) return true;
+    }
+    return false;
+  }
+
+  function isCodexRequest(meta = {}) {
+    if (typeof meta.agentId === "string") {
+      const id = meta.agentId.toLowerCase().trim();
+      if (id === "codex") return true;
+    }
+    if (typeof meta.userAgent === "string") {
+      const ua = meta.userAgent.toLowerCase();
+      if (ua.includes("codex_cli_rs") || ua.includes("codex-tui")) return true;
     }
     return false;
   }
@@ -1438,6 +1579,9 @@ export function createAgentMetricsCollector(options = {}) {
     } else if (isQoderRequest(meta)) {
       targetState = qoderState;
       bucketAgentId = "qoder";
+    } else if (isCodexRequest(meta)) {
+      targetState = codexState;
+      bucketAgentId = "codex";
     } else if (isOpencodeRequest(meta)) {
       targetState = opencodeState;
       bucketAgentId = "opencode";
@@ -1464,7 +1608,11 @@ export function createAgentMetricsCollector(options = {}) {
     // briefly show two rows for one logical instance and the counts split
     // across both buckets. The raw row self-heals: it is a custom id on the
     // 10-minute idle TTL (INSTANCE_IDLE_TTL_MS) and expires on its own.
-    const rawInstanceId = sanitizeInstanceId(meta.instanceId);
+    // 后台请求（codex 引擎自发的记忆整理/guardian/预热流量）永远不出实例行：
+    // openai-server 侧已把实例 id 置空，这里再压一道——即便调用方误传
+    // instanceId 也不归一、不建桶，迟挂 attachInstance 对它是 no-op。
+    const background = meta.background === true;
+    const rawInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
     const instMap = instanceBuckets[bucketAgentId];
     const normalized = rawInstanceId !== null && instMap !== undefined
       ? normalizeInstanceId(bucketAgentId, rawInstanceId, cachedProcessCounts)
@@ -1511,6 +1659,7 @@ export function createAgentMetricsCollector(options = {}) {
     }
 
     function attachInstance(rawId) {
+      if (background) return;
       const raw = sanitizeInstanceId(rawId);
       if (raw === null) return;
       bindInstance(normalizeInstanceId(bucketAgentId, raw, cachedProcessCounts));
@@ -1744,7 +1893,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState, codexState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -1782,29 +1931,50 @@ export function createAgentMetricsCollector(options = {}) {
     settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
     settleAbandonedAggregateState(reasonixState, procCounts.reasonix || 0);
     settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
+    settleAbandonedAggregateState(codexState, procCounts.codex || 0);
     settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
     settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
 
     // Instance housekeeping mirrors the endpoint-level one: settle orphans,
     // expire stale fault latches, drop stale entries. Read-driven, no timers.
     // Liveness splits by id shape. An id of the strict "<agentId>-<pid>"
-    // form (socket-fallback synthesized, launcher-injected and folded by
-    // normalizeInstanceId at ingest, or the placeholder below) declares its
-    // owning PID, so the process scan is authoritative: a live PID keeps the
-    // row listed regardless of idle time, a dead PID evicts it now — the idle
-    // TTL would otherwise leave a dead instance showing 待命 until
-    // lastSeen+10min. Custom ids (no numeric tail, or a tail pid that resolved
-    // to no client of this endpoint — normalizeInstanceId already had its say
-    // at ingest) have no reliable instanceId<->PID mapping and keep the idle
-    // TTL; an instance with in-flight requests never expires on that path.
-    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState };
+    // form (socket-fallback synthesized, or launcher-injected and folded by
+    // normalizeInstanceId at ingest) declares its owning PID, so the process
+    // scan is authoritative: a live PID keeps the row listed regardless of
+    // idle time, a dead PID evicts it now — the idle TTL would otherwise
+    // leave a dead instance showing 待命 until lastSeen+10min. The codex
+    // bucket extends the same verdict to custom ids with a numeric tail
+    // (launcher-injected "<cwd>-<launcher pid>" rows that never folded): the
+    // tail pid is no client of the endpoint, so it reconciles against every
+    // process the scan saw, and a dead pid drops the leftover row now.
+    // codex session rows ("codex-sess-<session id>") declare no PID at all:
+    // they clear the moment the whole codex process family exits, or after
+    // CODEX_SESSION_IDLE_TTL_MS without traffic — whichever comes first.
+    // Remaining custom ids (no numeric tail — normalizeInstanceId already
+    // had its say at ingest) keep the idle TTL; an instance with in-flight
+    // requests never expires on that path.
+    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
-      const livePids = procCounts[`${bucket}Pids`] ?? new Set();
+      // codex canonical rows reconcile against the ENGINE subset: the bucket's
+      // full pid set also holds the desktop GUI shell (ChatGPT.exe) and
+      // short-lived helpers, which never own a session. Card status/process
+      // count keeps the full-family scope; only instance liveness narrows.
+      const livePids = (bucket === "codex" ? procCounts.codexEnginePids : procCounts[`${bucket}Pids`]) ?? new Set();
       const pidIdRe = new RegExp(`^${bucket}-(\\d+)$`);
       for (const [instId, entry] of instMap) {
         const pidMatch = instId.match(pidIdRe);
-        if (pidMatch !== null && !livePids.has(Number(pidMatch[1]))) {
+        const isCodexSessionRow = bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX);
+        let evict = false;
+        if (pidMatch !== null) {
+          evict = !livePids.has(Number(pidMatch[1]));
+        } else if (isCodexSessionRow) {
+          evict = count === 0;
+        } else if (bucket === "codex") {
+          const tail = instId.match(/-(\d+)$/);
+          evict = tail !== null && scanPidLiveness(Number(tail[1]), procCounts) === false;
+        }
+        if (evict) {
           // The owning process is gone — evict now. Its in-flight requests
           // are orphans the transport layer will never finish (same
           // situation as settleAbandonedAggregateState), and they were ALSO
@@ -1829,7 +1999,8 @@ export function createAgentMetricsCollector(options = {}) {
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
         if (pidMatch === null) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
-          if (entry.state.activeRequests === 0 && now - lastSeen > INSTANCE_IDLE_TTL_MS) {
+          const idleTtlMs = isCodexSessionRow ? CODEX_SESSION_IDLE_TTL_MS : INSTANCE_IDLE_TTL_MS;
+          if (entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
           }
         }
@@ -1840,12 +2011,27 @@ export function createAgentMetricsCollector(options = {}) {
       // Mirrors the claude placeholder sessions in getActiveClaudeSessions:
       // a real request with the same "<agentId>-<pid>" id takes the entry
       // over in startRequest, and once the process dies the reconciliation
-      // above evicts it on the next read.
-      for (const pid of livePids) {
-        const placeholderId = `${bucket}-${pid}`;
-        if (!instMap.has(placeholderId)) {
-          instMap.set(placeholderId, { state: createAggregateState(), firstSeen: now, label: null });
+      // above evicts it on the next read. codex is the exception: its rows
+      // are session-scoped (traffic-born), so its processes — the shared GUI
+      // engine included — never spawn placeholder rows.
+      if (bucket !== "codex") {
+        for (const pid of livePids) {
+          const placeholderId = `${bucket}-${pid}`;
+          if (!instMap.has(placeholderId)) {
+            instMap.set(placeholderId, { state: createAggregateState(), firstSeen: now, label: null });
+          }
         }
+      }
+    }
+
+    // codex session rows get user-readable titles from the on-disk session
+    // scan (session-scan's codex adapter over ~/.codex/sessions/**.jsonl).
+    // Worth the walk only when a session row is actually listed.
+    let codexSessionById = null;
+    for (const instId of instanceBuckets.codex.keys()) {
+      if (instId.startsWith(CODEX_SESSION_ID_PREFIX)) {
+        codexSessionById = await loadCodexSessionInfo();
+        break;
       }
     }
 
@@ -1875,8 +2061,14 @@ export function createAgentMetricsCollector(options = {}) {
             id: instId,
             // The cwd basename a launcher-injected id folded in with (null
             // for socket-fallback/placeholder rows) — the panel renders
-            // `inst.title || iid`, so an unlabeled row shows its id as before.
-            title: entry.label ?? instId,
+            // `inst.title || iid`, so an unlabeled row shows its id as
+            // before. codex session rows never fold (no pid tail), so they
+            // take the session scan's title (thread / first message / cwd),
+            // falling back to "Codex 会话 <短id>" when nothing associates.
+            title: entry.label
+              ?? (bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX)
+                ? codexSessionRowTitle(instId, codexSessionById)
+                : instId),
             // An instance listed at all is alive (idle TTL for custom ids,
             // PID reconciliation for "<agentId>-<pid>" ids), so idle — never
             // "stopped" just because no OS process count fed its build.
@@ -1938,7 +2130,7 @@ export function createAgentMetricsCollector(options = {}) {
         // Authoritative sparkline history (from the reporter's per-request
         // ring, absent until its first report) — feeds the cc card's instance
         // sparkline reconnection after a page reload, same contract as the
-        // per-instance sparkHistory on kimi/opencode/pi.
+        // per-instance sparkHistory on kimi/opencode/pi/codex.
         sparkHistory: s.sparkHistory ?? null,
         // Model identity from the session reporter's snapshot (null until the
         // reporter starts sending it) — feeds the per-session model badge.
@@ -2090,6 +2282,18 @@ export function createAgentMetricsCollector(options = {}) {
       nowFn,
     });
 
+    // Codex Agent Status（汇总卡 + 实例桶；实例按会话一行 codex-sess-<会话 id>，
+    // GUI/CLI 同构，进程家族只决定卡片运行状态与会话行的生灭）
+    const codexAgent = buildAggregateAgentStatus({
+      id: "codex",
+      name: "Codex",
+      state: codexState,
+      processCount: procCounts.codex || 0,
+      tpsWindow: recentSampleWindow,
+      nowFn,
+      instances: instanceSnapshots("codex"),
+    });
+
     // 7. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
     const opencodeAgent = buildAggregateAgentStatus({
       id: "opencode",
@@ -2101,7 +2305,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("opencode"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, qoderAgent, opencodeAgent];
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, qoderAgent, codexAgent, opencodeAgent];
   }
 
   return {

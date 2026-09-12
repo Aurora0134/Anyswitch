@@ -43,6 +43,7 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "dsh", label: "DSH", relSkillsDir: [".dsh", "skills"] },
   { id: "reasonix", label: "Reasonix", relSkillsDir: [".reasonix", "skills"] },
   { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"] },
+  { id: "codex", label: "Codex", relSkillsDir: [".codex", "skills"] },
 ]);
 
 // Repo-path candidates the panel offers as one-click choices.

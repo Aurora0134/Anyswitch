@@ -15,6 +15,7 @@ import { writePiModels, piModelsPath } from "./pi-launcher.mjs";
 import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
 import { writeReasonixConfig, reasonixConfigPath } from "./reasonix-launcher.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
+import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
 
 /**
  * Synchronize all supported coding agent configurations against the current store.
@@ -53,6 +54,7 @@ export async function syncAllAgentConfigs({
     kimi: null,
     reasonix: null,
     qoder: null,
+    codex: null,
   };
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
@@ -144,6 +146,20 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.qoder = { ok: false, error: err.message };
     logger?.warn?.(`qoder config sync skipped: ${err.message}`);
+  }
+
+  // 7. Codex config.toml sync (~/.codex/config.toml)
+  try {
+    const codexResult = await writeCodexConfig(store, port, token, root, codexConfigPath(base));
+    results.codex = codexResult;
+    if (!codexResult.ok) {
+      logger?.warn?.(`codex config.toml not updated: ${codexResult.reason ?? "unknown"}`);
+    } else if (!codexResult.unchanged) {
+      logger?.info?.("codex config.toml synced");
+    }
+  } catch (err) {
+    results.codex = { ok: false, error: err.message };
+    logger?.warn?.(`codex config sync skipped: ${err.message}`);
   }
 
   return { ok: true, results };

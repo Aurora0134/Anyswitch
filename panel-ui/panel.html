@@ -299,7 +299,7 @@
   .panel-card.card-collapsed .card-body { padding: 14px 18px; }
   .panel-card.card-collapsed .empty-hint { display: none; }
   .panel-card.card-collapsed .agent-top-bar { margin-bottom: 0; }
-  /* 端点详情折叠钮：zcode/dsh/reasonix 走旧 id 接线，claude/kimi/opencode/pi 走
+  /* 端点详情折叠钮：zcode/dsh/reasonix/qoder 走旧 id 接线，claude/kimi/opencode/pi/codex 走
      data-prefix 事件委托；运行中默认收起，未运行（card-collapsed）时藏钮 */
   .agent-detail-fold {
     border: none; background: transparent; color: var(--text-3); cursor: pointer;
@@ -5270,6 +5270,56 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
+          <!-- 9. Codex 模块 -->
+          <div class="panel-card" data-agent-id="codex">
+            <div class="card-body">
+              <div class="agent-top-bar">
+                <div class="agent-brand">
+                  <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
+                    <img src="data:image/png;base64,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" width="32" height="32" alt="Codex" style="width:32px; height:32px; border-radius:8px; display:block; object-fit:contain;">
+                  </div>
+                  <div class="agent-headings">
+                    <h3>Codex</h3>
+                    <span class="instance-count-badge" id="codexInstanceCount" hidden></span>
+                  </div>
+                </div>
+                <div class="agent-actions">
+                  <div id="codexModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
+                  <button type="button" class="agent-detail-fold" data-prefix="codex" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                </div>
+              </div>
+
+              <div class="alert-box danger" id="codexErrorBanner" hidden>
+                <div class="left">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span id="codexErrorMsg">HTTP 502 · Upstream Error</span>
+                </div>
+                <div class="time" id="codexErrorTime">刚刚</div>
+              </div>
+
+              <div id="codexEmpty" class="empty-hint">未检测到运行中的 Codex 客户端</div>
+
+              <div id="codexMetricsBlock" hidden>
+                <div class="session-table-wrapper">
+                  <div id="codexInstancesList"></div>
+                  <div class="session-row detail-open-only" id="codexSessionRow">
+                    <div class="session-main">
+                      <div class="session-name-line">
+                        <span>全局汇总</span>
+                        <span class="badge badge-neutral" id="codexSessionReqs">0 次请求</span>
+                      </div>
+                      <div class="session-tokens-line" id="codexSessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
+                    </div>
+                    <div class="session-tags-line">
+                      <span class="tag-bubble" id="codexActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
+                      <span class="tag-bubble" id="codexLastModelTag">模型: 未选择</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </section>
     </div>
@@ -5433,7 +5483,7 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="skills-btn-row">
               <button class="btn btn-primary" id="storeAddBtn">新增渠道</button>
               <button class="btn" id="storeRefreshAllBtn">全部刷新</button>
-              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Reasonix、Qoder）">同步到端点</button>
+              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Reasonix、Qoder、Codex）">同步到端点</button>
               <span class="store-refresh-status" id="storeRefreshStatus" aria-live="polite"></span>
             </div>
           </div>
@@ -6303,7 +6353,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode", "qoder"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode", "qoder", "codex"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
@@ -6401,7 +6451,7 @@ if (window.panelStartupController) panelStartupPlay();
     return typeof ls === "number" && (Date.now() - ls) > INSTANCE_STALE_MS;
   }
 
-  // 静态卡（zc/dsh/reasonix）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
+  // 静态卡（zc/dsh/reasonix/qoder）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
   function isEndpointStale(agent, isGenerating) {
     if (isGenerating) return false;
     const s0 = agent.sessions && agent.sessions[0];
@@ -6455,6 +6505,7 @@ if (window.panelStartupController) panelStartupPlay();
         const reasonix = res.agents.find(a => a.id === "reasonix");
         const qoder = res.agents.find(a => a.id === "qoder");
         const opencode = res.agents.find(a => a.id === "opencode");
+        const codex = res.agents.find(a => a.id === "codex");
         if (zc) renderIfChanged("zcode", zc, () => renderZcode(zc));
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
@@ -6463,6 +6514,7 @@ if (window.panelStartupController) panelStartupPlay();
         if (qoder) renderIfChanged("qoder", qoder, () => renderQoder(qoder));
         if (kimi) renderIfChanged("kimi", kimi, () => renderKimi(kimi));
         if (opencode) renderIfChanged("opencode", opencode, (agent) => renderOpencode(opencode));
+        if (codex) renderIfChanged("codex", codex, () => renderCodex(codex));
         // 左栏路由链卡：随 1s 轮询刷退避倒计时，结构指纹闸控 DOM 重建
         renderRouteChainBoard();
       }
@@ -6504,7 +6556,7 @@ if (window.panelStartupController) panelStartupPlay();
   // 展开后换回四宫格。展开态记 localStorage（与 route-fold 同交互语义），刷新不回落；
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
-  // pi/kimi/opencode 已从此旧机制摘除，改走下方 data-prefix 事件委托。
+  // pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
   ["zc", "dsh", "reasonix", "qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
@@ -6534,7 +6586,7 @@ if (window.panelStartupController) panelStartupPlay();
   });
 
   // ═══════════════════════════════════════════════
-  // 多实例栏共享地基（claude/kimi/opencode/pi）：
+  // 多实例栏共享地基（claude/kimi/opencode/pi/codex）：
   // 实例行渲染、实例级 sparkline、折叠状态机与事件委托
   // ═══════════════════════════════════════════════
 
@@ -7630,6 +7682,59 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
+  function renderCodex(p) {
+    const modelBadgesList = $("codexModelBadgesList");
+    const errorBanner = $("codexErrorBanner");
+    const empty = $("codexEmpty");
+    const metricsBlock = $("codexMetricsBlock");
+
+    if (modelBadgesList) renderModelBadges(modelBadgesList, "codex", p);
+
+    applyFaultBanner(p, errorBanner, $("codexErrorMsg"), $("codexErrorTime"));
+    empty.closest(".panel-card").classList.toggle("card-collapsed", p.status !== "running");
+
+    if (p.status === "running") {
+      empty.hidden = true;
+      metricsBlock.hidden = false;
+      const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
+
+      const m = p.metrics || {};
+      const sess = (p.sessions && p.sessions[0]) || {};
+      const tokens = m.tokens || sess.tokens || {};
+
+      // 实例按行排列：无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空
+      const instances = Array.isArray(p.instances) ? p.instances : [];
+      setInstanceCount("codex", instances.length);
+      renderInstanceRows({ prefix: "codex", listEl: $("codexInstancesList"), instances, aggregateFallback: buildAggregateFallback(m, p, isGenerating) });
+      applyDetailFold("codex");
+      gateAggregateRow("codex", $("codexSessionRow"), instances.length);
+
+      $("codexSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
+      $("codexSessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
+
+      const activeTag = $("codexActiveTag");
+      if (isGenerating) {
+        activeTag.hidden = false;
+      } else {
+        activeTag.hidden = true;
+      }
+
+      const activeList = p.activeModels || (p.currentModel ? [p.currentModel] : []);
+      const lastModelTag = $("codexLastModelTag");
+      if (activeList.length > 0) {
+        lastModelTag.textContent = "模型: " + activeList.join(", ");
+      } else if (p.lastModel) {
+        lastModelTag.textContent = "模型: " + p.lastModel;
+      } else {
+        lastModelTag.textContent = "模型: 待命";
+      }
+    } else {
+      setInstanceCount("codex", 0);
+      empty.hidden = false;
+      metricsBlock.hidden = true;
+    }
+  }
+
   function renderKimi(p) {
     const modelBadgesList = $("kimiModelBadgesList");
     const errorBanner = $("kimiErrorBanner");
@@ -8191,7 +8296,7 @@ if (window.panelStartupController) panelStartupPlay();
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code", qoder: "Qoder" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -10258,7 +10363,7 @@ if (window.panelStartupController) panelStartupPlay();
         : injected
           ? '<span class="badge badge-ok">已注入</span>'
           : '<span class="badge badge-neutral">未注入</span>';
-      // hotReload=false 的端点（claude/zcode/dsh/pi/reasonix）：写盘即生效于新会话，
+      // hotReload=false 的端点（claude/zcode/dsh/pi/reasonix/codex）：写盘即生效于新会话，
       // 运行中会话需重开才加载新的全局指令文件
       const hotNote = ep.hotReload ? "" : "（运行中会话需重开生效）";
       return `<div class="skills-skill-row"${ep.hotReload ? "" : ' title="运行中会话需重开生效"'}>
@@ -12082,7 +12187,7 @@ if (window.panelStartupController) panelStartupPlay();
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix", "qoder"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix", "qoder", "codex"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -12959,7 +13064,7 @@ if (window.panelStartupController) panelStartupPlay();
   const STATS_ENDPOINT_LABELS = {
     zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
     opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code",
-    qoder: "Qoder",
+    qoder: "Qoder", codex: "Codex",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
 
@@ -14165,7 +14270,7 @@ if (window.panelStartupController) panelStartupPlay();
     toast(tip);
   }
 
-  // 端点清单：真实 8 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS，
+  // 端点清单：真实 9 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS，
   // 圆点色按顺序取 STATS_PALETTE（CSS 变量，直接作 background）。
   const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id, i) => ({
     id,

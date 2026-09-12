@@ -314,6 +314,11 @@ const AGENT_EFFORT_VOCABULARIES = Object.freeze({
   zcode: null,
   kimi: null,
   qoder: Object.freeze([]),
+  // codex spells its zero level "none" (not "off") and tops out at
+  // ultra/persistent beyond max; those three words never appear in
+  // EFFORT_LEVELS_ORDER, so the clip effectively passes minimal..max and
+  // drops off/light — the request-side dialect fold is the translator's job.
+  codex: Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"]),
 });
 
 export function intersectEffortVocabulary(levels, agent) {

@@ -5,7 +5,7 @@
 // Verified target facts (2026-09, see the prompt-injection knowledge note):
 //   - reasonix's Windows home is %APPDATA%/reasonix, not ~/.reasonix, so its
 //     target is derived from base.APPDATA, never from homeDir.
-//   - kimi/opencode re-read their file at runtime (hot); the other five read
+//   - kimi/opencode re-read their file at runtime (hot); the other six read
 //     it once at session start — surfaced to the UI as `hotReload`.
 //   - qoder: `~/.qoder/rules/**/*.md` is a real user-level surface in Qoder
 //     Desktop (verified 2026-09-09 by a fresh conversation quoting its own
@@ -48,6 +48,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
   { id: "reasonix", label: "Reasonix", hotReload: false, targetRel: "%APPDATA%/reasonix/AGENTS.md", appData: ["reasonix", "AGENTS.md"] },
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
+  { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
 ]);
 
 // Bodies only: the title lives in prompts.json for the panel; it never

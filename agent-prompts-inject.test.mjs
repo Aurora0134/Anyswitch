@@ -35,10 +35,10 @@ const PRESET_A = { id: "aaaaaaaaaaaa", title: "规则A", tag: "", enabled: true,
 const PRESET_B = { id: "bbbbbbbbbbbb", title: "规则B", tag: "", enabled: true, content: "第二行\n第三行" };
 
 describe("agent-prompts-inject endpoint table", () => {
-  it("covers all eight endpoints with verified targets", () => {
+  it("covers all nine endpoints with verified targets", () => {
     const { injector, homeDir, appData } = makeInjector();
     const endpoints = injector.listEndpoints();
-    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "reasonix", "qoder"]);
+    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "reasonix", "qoder", "codex"]);
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.target, join(homeDir, ".claude", "CLAUDE.md"));
     assert.equal(byId.kimi.target, join(homeDir, ".kimi-code", "AGENTS.md"));
@@ -51,14 +51,16 @@ describe("agent-prompts-inject endpoint table", () => {
     // qoder gets its own file under the user-level rules dir — never the user's
     // own ~/.qoder/AGENTS.md (verified injection surface, 2026-09-09).
     assert.equal(byId.qoder.target, join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"));
+    assert.equal(byId.codex.target, join(homeDir, ".codex", "AGENTS.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
     // Qoder re-watches a loaded rule file, so preset edits land next turn.
     assert.equal(byId.qoder.hotReload, true);
-    for (const id of ["claude", "zcode", "dsh", "pi", "reasonix"]) {
+    // codex reads AGENTS.md once at session start and has no fs watcher.
+    for (const id of ["claude", "zcode", "dsh", "pi", "reasonix", "codex"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
-    assert.equal(PROMPT_ENDPOINTS.length, 8);
+    assert.equal(PROMPT_ENDPOINTS.length, 9);
   });
 });
 

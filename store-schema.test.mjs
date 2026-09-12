@@ -462,6 +462,14 @@ test("validateStore accepts well-formed routingChains (provider and pool nodes)"
   assert.deepEqual(result.errors, []);
 });
 
+test("validateStore accepts a routingChains entry for the codex endpoint", () => {
+  const store = legalStoreWithChains();
+  store.routingChains.codex = { chain: [{ node: "deepseek", model: "deepseek-chat" }] };
+  const result = validateStore(store);
+  assert.equal(result.valid, true);
+  assert.deepEqual(result.errors, []);
+});
+
 test("validateStore accepts a bound model that is not in the node's catalog", () => {
   // Catalogs shift with discovered refreshes, so the schema deliberately does
   // NOT hard-validate chain models against provider catalogs.

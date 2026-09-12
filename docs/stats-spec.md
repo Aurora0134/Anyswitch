@@ -125,6 +125,12 @@ journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）
 - 钉住：panel.test.mjs「今日概览卡头有手动刷新键：disabled 变暗反馈…」+「手动刷新重播生长动画」
 - 拍板：2026-09-06
 
+### R-19 codex 实例口径=引擎进程 codex.exe（外壳与沙箱宿主只计入进程数）
+codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉起的 app-server 子进程），一个桌面会话一行，实例 id 形如 `codex-<引擎pid>`。ChatGPT.exe 外壳与 codex-code-mode-host.exe / codex-command-runner.exe 沙箱宿主仍计入卡面进程数（`procCounts.codex` / `codexPids` 全家桶口径不变），但不产生实例行：`normalizeInstanceId` 与实例 housekeeping（占位行、PID 存活对账）都只对 `codexEnginePids` 集合 reconcile；GUI pid 标签经血缘表折叠到引擎 pid，同会话收敛到同一行。
+- 锚点：agent-metrics.mjs `codexEnginePids`（parseTasklistCsv 约 :447 填入；normalizeInstanceId 约 :210、实例 housekeeping 约 :1862 消费）
+- 钉住：agent-metrics.test.mjs「lists one instance for a desktop session (ChatGPT.exe GUI + codex.exe engine)」+「spawns no instance row for a short-lived codex-command-runner.exe」+「evicts the codex instance row when its engine process exits」+「folds codex ids against the engine pid set, not the whole bucket」
+- 拍板：2026-09-12（全家桶口径下一个桌面会话恒列 GUI+引擎两行、command-runner 闪现再加行，收窄）
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |

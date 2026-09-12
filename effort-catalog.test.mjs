@@ -304,6 +304,19 @@ describe("intersectEffortVocabulary", () => {
     assert.deepEqual(intersectEffortVocabulary(["high"], "qoder"), []);
   });
 
+  it("clips to codex's vocabulary: off/light drop, minimal..max pass", () => {
+    // codex's zero level is spelled "none", so an "off" library level has no
+    // codex word and clips away; "light" is likewise outside its wire set.
+    assert.deepEqual(
+      intersectEffortVocabulary(["off", "minimal", "low", "medium", "high", "xhigh", "max"], "codex"),
+      ["minimal", "low", "medium", "high", "xhigh", "max"],
+    );
+    assert.deepEqual(intersectEffortVocabulary(["light", "high"], "codex"), ["high"]);
+    // ultra/persistent are codex wire words the library space never produces,
+    // so they never survive the canonical-order filter either.
+    assert.deepEqual(intersectEffortVocabulary(["ultra", "high"], "codex"), ["high"]);
+  });
+
   it("tolerates an unknown agent and empty input", () => {
     assert.deepEqual(intersectEffortVocabulary(["high"], "nope"), ["high"]);
     assert.deepEqual(intersectEffortVocabulary(undefined, "pi"), []);
