@@ -14,4 +14,6 @@ owners. They are used solely to identify the products Anyswitch integrates
 with. Anyswitch is not affiliated with, sponsored by, or endorsed by the owners
 of any of these marks, and no such relationship should be inferred.
 
-`anyswitch.ico` is original artwork created for this project.
+`anyswitch.ico` is original artwork created for this project. It is not
+referenced by any file in this repository: it is used from outside the repo, as
+the icon of the desktop shortcut that launches the control panel.
