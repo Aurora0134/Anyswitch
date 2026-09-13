@@ -90,8 +90,8 @@ describe("kimi-merge-config", () => {
   });
 
   it("strips unmarked provider/model tables left by a Kimi self-rewrite", () => {
-    // Real-world shape (2026-08-25 incident): Kimi Code re-serializes its own
-    // config.toml after a settings change, dropping the managed markers and
+    // Kimi Code re-serializes its own config.toml after a settings change,
+    // dropping the managed markers and
     // unquoting keys. Without this cleanup the next merge appends a duplicate
     // provider table and the whole file fails to decode.
     const rewritten = [

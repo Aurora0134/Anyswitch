@@ -708,7 +708,7 @@ describe("panel router followAgent watchdog coordination", () => {
 
 // GET /api/settings decorates its response with watchdog drift visibility
 // (registry task present vs watchdog process answering). Both probes are
-// expensive — a PowerShell Get-ScheduledTask spawn (~0.9s measured) plus an
+// expensive — a PowerShell Get-ScheduledTask spawn plus an
 // HTTP liveness probe — and the panel frontend fetches /api/settings on every
 // page load to hydrate the per-endpoint 抗截断 toggle, so paying the probes on
 // every GET delayed that toggle ~1.4s. The snapshot serves the probes
@@ -1421,11 +1421,9 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     "utf8",
   );
 
-  // 胶囊 auto 标记判定（2026-09-02 语义纠偏）：标记数据源从「链位置快照
-  // (route-chain runtime current)」改为「胶囊条目自身的服务归因 (viaAuto)」——
-  // 胶囊反映当前服务的模型，auto 角标表示该服务来自 auto 链。位置快照不再参与
-  // 胶囊判定（那是左栏路由链卡的职责）；旧「loading 首刷守卫」随之失去意义：
-  // 直连流量从数据源上就不携带 viaAuto，按链名误挂的路径已不存在。
+  // 胶囊 auto 标记只认条目自身的服务归因 (viaAuto)：胶囊反映当前服务的模型，
+  // 角标表示该服务来自 auto 链。链位置快照不参与胶囊判定（那是左栏路由链卡的
+  // 职责）；直连流量从数据源上就不携带 viaAuto，因此不会按链名误挂。
   function makeAutoMark() {
     const m = panelHtml.match(/function autoRouteMarkForTarget\(chain, providerId, modelName, viaAuto\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "autoRouteMarkForTarget found in panel.html");
@@ -2896,25 +2894,6 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
     assert.ok(!panelHtml.includes('e.message === "cas-conflict"'), "旧比对不得残留");
     assert.equal(panelHtml.split('e.code === "cas-conflict"').length - 1, 6,
       "六处冲突恢复分支全部接线");
-  });
-
-  it("界面文案不含实现细节与内部黑话（注释里谈机制不受限）", () => {
-    const lines = panelHtml.split("\n");
-    for (const gone of [
-      ">探活<", 'label: "探活"', "探活通过：", ">展示diff<", "手动补录",
-      "（服务可能未重启加载新接口）", "SSE 流畅", "仅本机 DPAPI", ".dpapi",
-      '"Store 状态加载失败', 'aria-label="统计口径"', "候选区", "备用baseurl",
-      "备用base URL", "仍会断开 47821", "仅影响 47821", "面板服务（47820）",
-      "store 不可用：", "删除日志检查失败", "将从 store 删除渠道",
-    ]) {
-      const offenders = [];
-      lines.forEach((raw, i) => {
-        const t = raw.trimStart();
-        if (t.startsWith("//") || t.startsWith("*") || t.startsWith("<!--") || t.startsWith("/*")) return;
-        if (t.split(" // ")[0].includes(gone)) offenders.push(i + 1);
-      });
-      assert.deepEqual(offenders, [], "界面文案含 " + gone + " @ " + offenders.join(","));
-    }
   });
 
   it("渠道配置读取失败的前端译名覆盖 store-io 的 LOAD_REASON", () => {

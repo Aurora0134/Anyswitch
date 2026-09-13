@@ -5,7 +5,7 @@
    不进语义色。亮色套为「极地白昼」演绎：冰白底 + 极淡极光晕，玻璃感保留。
    仅换肤：不改 DOM、不改文案、不动 .view-tabs / .seg-control 几何。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 于本主题选择器下）：
    1. --radius-sm/md/lg 放大至 10/14/20（经典基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；

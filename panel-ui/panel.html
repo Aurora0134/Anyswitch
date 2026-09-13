@@ -1675,7 +1675,7 @@
    主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
    与经典蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="saas"]，
    不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
    1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
       seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。
@@ -2151,7 +2151,7 @@
    不进语义色。亮色套为「极地白昼」演绎：冰白底 + 极淡极光晕，玻璃感保留。
    仅换肤：不改 DOM、不改文案、不动 .view-tabs / .seg-control 几何。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 于本主题选择器下）：
    1. --radius-sm/md/lg 放大至 10/14/20（经典基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
@@ -2736,7 +2736,7 @@
    细线框、标注字距、小圆角、硬偏移"裁切"投影、卡片四角对位标记（伪装饰，
    用 background 多层渐变实现，不占布局）；数字/标签走等宽字体。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 在本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 在本主题选择器下）：
    1. header.site-head：border-bottom 加宽到 2px + 1px 副线阴影（图框双线）。
    2. 硬偏移投影：--shadow-xs/sm/md/lg 与 --accent-glow 用 1–6px 无模糊偏移
       （"图纸裁切"感），toast/modal/卡片沿用这些 token。
@@ -3897,8 +3897,8 @@ function panelStartupPlay() {
   });
   // 随机脉冲池：边缘 6 点两两构对 C(6,2)=15 条。几何在初始化时按最终位置算死，
   // 运行期不再逐帧写 x1/y1/x2/y2——收缩动画由容器 <g> 的整体 transform 承担，
-  // 每帧只写 2 个容器的 transform + 脉冲线的 opacity，代替原先每帧约 90 次
-  // setAttribute 走主线程布局重算，这是顿帧的主要来源。
+  // 每帧只写 2 个容器的 transform + 脉冲线的 opacity。逐帧改每条线的端点会走
+  // 主线程布局重算，那是顿帧的主要来源。
   const lines = [];
   for (let a = 1; a < points.length; a++) {
     for (let b = a + 1; b < points.length; b++) {
@@ -5418,7 +5418,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="modal-item">
           <div>
             <div class="modal-item-title">跟随 Coding Agent 启动</div>
-            <div class="modal-item-desc">检测到 ZCode / Claude Code / DSH / Pi / Kimi / Reasonix 运行时自动保持 Relay 链路就绪。</div>
+            <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Reasonix / Qoder 运行时自动保持 Relay 链路就绪。</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="followAgentToggle">
@@ -5584,23 +5584,23 @@ if (window.panelStartupController) panelStartupPlay();
     t._tid = setTimeout(() => t.classList.remove("show"), 3000);
   }
 
-  // 服务端失败文本有两种身份：为这个界面写的中文句子，和给开发者看的短码、
-// 校验语、系统错误（"cas-conflict"、"pool members must be an array…"、errno）。
-// 只有前者允许上屏：panelCopy 认中文，其余换成调用方自带的中文兜底，原文交给
-// 控制台。短码分支一律读 err.code（err.message 带 "HTTP <status>：" 前缀）。
-const PANEL_UI_COPY_RE = /[\u4e00-\u9fff]/;
+  // /panel/api/* 的失败文本按语言分两种身份：中文句子是为这个界面写的，可以直接
+  // 上屏；英文短句是校验语、短码（"cas-conflict"、"pool members must be an array…"）
+  // 或系统错误，一律换成调用方自带的中文兜底，原文交给控制台。新增端点文案要落中文，
+  // 否则会被当开发者文本吞掉。短码分支一律读 err.code（err.message 带 "HTTP <status>：" 前缀）。
+  const PANEL_UI_COPY_RE = /[\u4e00-\u9fff]/;
 
-function panelCopy(raw, fallback) {
-  const text = String(raw == null ? "" : raw);
-  return PANEL_UI_COPY_RE.test(text) ? text : fallback;
-}
+  function panelCopy(raw, fallback) {
+    const text = String(raw == null ? "" : raw);
+    return PANEL_UI_COPY_RE.test(text) ? text : fallback;
+  }
 
-function panelError(err, fallback) {
-  const raw = (err && err.code) || (err && err.message) || "";
-  const text = panelCopy(raw, fallback);
-  if (text === fallback) console.warn("[panel] " + fallback + " ← " + raw);
-  return text;
-}
+  function panelError(err, fallback) {
+    const raw = (err && err.code) || (err && err.message) || "";
+    const text = panelCopy(raw, fallback);
+    if (text === fallback) console.warn("[panel] " + fallback + " ← " + raw);
+    return text;
+  }
 
 async function api(method, path, body) {
     // server also accepts x-apicred-panel from resident processes spawned pre-rename
@@ -5796,7 +5796,7 @@ async function api(method, path, body) {
     }
   }
 
-  // 当前视图（B4）：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
+  // 当前视图：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
   // status 保持常开（头部状态灯跨视图可见）。首次立即取数不做门控，保证首刷。
   let currentView = "board";
   function boardVisible() { return currentView === "board"; }
@@ -6404,9 +6404,9 @@ async function api(method, path, body) {
       // 要用与本次渲染同源的 sparkHistory，否则 ttft 曲线口径回退到本地去重 buffer。
       if (inst.sparkHistory) buf.sparkHistory = inst.sparkHistory;
       // 折叠门控：收起态跳过绘制，展开瞬间经 applyDetailFold 补绘；陈旧行不绘历史折线。
-      // 三条线统一接权威历史：tps/cache 与 ttft 同样消费 sparkHistory，刷新/丢 buffer
-      // 后首轮即由服务端历史整线恢复（此前只有 ttft 接，TPS/缓存刷新后从零攒点，
-      // 表现为折线节点丢失）。
+      // 三条线统一接权威历史：tps/cache 与 ttft 同样消费 sparkHistory，刷新或丢
+      // buffer 后的首轮即由服务端历史整线恢复。只让一条线接历史，其余两条会在刷新后
+      // 从零攒点，表现为折线节点丢失。
       if (open && !stale) {
         updateSparkline(sparkTpsId, sparkValues(buf.tps, buf.sparkHistory?.tps));
         updateSparkline(sparkCacheId, sparkValues(buf.cache, buf.sparkHistory?.cache), 0, 100);
@@ -8221,7 +8221,7 @@ async function api(method, path, body) {
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
     if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
-    // 切回看板（B4/R9）：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
+    // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
       resetAgentRenderFingerprints();
       refreshAgents();
@@ -10110,15 +10110,15 @@ async function api(method, path, body) {
   }
 
   // 渠道配置读不出来时的四种情形，各给一句用户看得懂的话。
-// 键是 /api/store/state 的 storeError 短码，取值随 store-io.mjs 的 LOAD_REASON。
-const STORE_LOAD_COPY = {
-  "store-absent": "还没有添加任何渠道",
-  "store-unreadable": "渠道配置文件读不到",
-  "store-unparsable": "渠道配置文件格式损坏",
-  "store-schema-invalid": "渠道配置文件内容不合法",
-};
+  // 键是 /api/store/state 的 storeError 短码，取值随 store-io.mjs 的 LOAD_REASON。
+  const STORE_LOAD_COPY = {
+    "store-absent": "还没有添加任何渠道",
+    "store-unreadable": "渠道配置文件读不到",
+    "store-unparsable": "渠道配置文件格式损坏",
+    "store-schema-invalid": "渠道配置文件内容不合法",
+  };
 
-// ── 卡片 A：渠道总览 ──
+  // ── 卡片 A：渠道总览 ──
   function renderStoreOverview() {
     const badge = $("storeHealthBadge");
     const summary = $("storeSummary");
@@ -10626,8 +10626,8 @@ const STORE_LOAD_COPY = {
 
   // ── 「全部刷新」右侧的刷新状态小字（替代 toast）：每次写入重置 10s 存活计时 ──
   // mode：busy = text 逐字窄波；done = text 整体高光（「刷新完成」）；ok/err = 纯文本。
-  //      （busy-err/done-err 已退役：中途单渠道失败只红该渠道 tail 分段，
-  //      完成态永不整行染红；err 仅用于 cas-conflict/异常的整体失败路径）
+  //      中途单渠道失败只红该渠道 tail 分段，完成态永不整行染红；
+  //      err 仅用于 cas-conflict 或整次异常。
   let storeStatusTimer = null;
   function srsWaveHtml(text) {
     // 逐字窄波：每字一个 span，延迟 120ms 依次点亮；亮窗由 keyframe 压在周期
@@ -10786,8 +10786,8 @@ const STORE_LOAD_COPY = {
         const unit = units[i];
         const prog = multi ? ` · ${i + 1}/${units.length}` : "";
         // 仅首个单元先亮「正在刷新.. 行名」；其后循环开头不覆盖 tail——上一单元
-        // 的结果保留显示到本单元刷完（结果一到立刻被下一单元 busy 提示同步覆盖时，
-        // 浏览器来不及绘制，diff 整段不可见——本轮修复点）
+        // 的结果保留显示到本单元刷完。结果一到就被下一单元的 busy 提示同步覆盖，
+        // 浏览器来不及绘制，那一段 diff 等于没显示过。
         if (i === 0) setStoreRefreshStatus("正在刷新..", "busy", `${escapeHtml(unit.label)}${prog}`);
         let uAdded = 0, uPruned = 0, uFail = 0, uRep = null, uErr = "";
         const uAddedIds = [], uPrunedIds = [];

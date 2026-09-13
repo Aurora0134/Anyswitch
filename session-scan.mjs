@@ -706,10 +706,10 @@ function createKimiAdapter(roots) {
 // anywhere in a real log.
 // ---------------------------------------------------------------------------
 
-// Frames decoded per session while LISTING. Every transcript on this machine
-// (68 files) carries its first user turn within the first 7 frames, so the head
-// is enough for a title and a liveness check; decoding whole transcripts here
-// would make the list call pay for all of them (1.7s versus 57ms measured).
+// Frames decoded per session while LISTING. A session's first user turn sits
+// near the head of its transcript, so the head is enough for a title and a
+// liveness check; decoding whole transcripts here would make the list call pay
+// for every transcript on disk.
 const DSH_HEAD_MAX_FRAMES = 32;
 
 const DSH_CONVERSATION_TYPES = new Set(["user/message", "assistant/message", "tool/result"]);
@@ -1543,7 +1543,7 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
     adapters,
 
     // Scan every endpoint in parallel; one adapter's failure degrades to an
-    // endpointErrors entry, never a whole-list failure (B5 response shape).
+    // endpointErrors entry, never a whole-list failure.
     async scanAll() {
       const results = await Promise.all(
         [...adapters.values()].map(async (adapter) => {
