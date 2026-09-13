@@ -1,9 +1,10 @@
 // Standalone follow-agent watchdog process.
 //
-// The followAgent setting ("跟随 Coding Agent 启动") used to be hosted inside
-// panel-host.mjs — which meant it only worked while a human had opened the
-// panel at least once since login. This process breaks that bootstrap
-// deadlock: it is registered as the "AnyswitchWatchdog" scheduled task (see
+// The followAgent setting ("跟随 Coding Agent 启动") has to work before anyone
+// opens the panel, so it cannot be hosted by panel-host — that would require a
+// human to open the panel once per login just to get the relay started. This
+// process breaks that bootstrap deadlock: it is registered as the
+// "AnyswitchWatchdog" scheduled task (see
 // autostart.mjs), so Windows starts it at login, and the agent-watcher poll
 // inside it revives the relay with nobody at the panel. The relay itself stays
 // lazily started: nothing runs on 47821 until a coding agent appears.

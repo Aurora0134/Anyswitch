@@ -271,9 +271,9 @@ describe("openai relay keep-alive anti-truncation", () => {
   });
 
   it("(f) retries when a gateway keep-alive `data:` line precedes an otherwise-empty stream", async () => {
-    // Production bypass shape: an empty `data:` ping line used to disarm the
-    // stream guard, so the truncated stream looked like a normal completion
-    // and the retry never fired. It must be classified empty and retried.
+    // Gateway keep-alive shape: an empty `data:` ping line must not disarm the
+    // stream guard, or a truncated stream would look like a normal completion
+    // and the retry would never fire. It is classified empty and retried.
     let callCount = 0;
     const upstreamFetch = async () => {
       callCount += 1;
@@ -628,8 +628,8 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       await res.text();
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
-      // 20 tokens over a 300ms generation segment → ~66.7 tok/s. The
-      // pre-fix regression measured over the whole 700ms request → 28.6.
+      // 20 tokens over a 300ms generation segment → ~66.7 tok/s. Measuring over
+      // the whole 700ms request instead would give 28.6, so the two are separable.
       assert.ok(Math.abs(zcode.metrics.tps - 66.7) < 1, `tps must reflect the generation segment, got ${zcode.metrics.tps}`);
       assert.ok(Math.abs(zcode.metrics.lastTtftMs - 400) < 5, `ttft must reflect the upstream first token, got ${zcode.metrics.lastTtftMs}`);
     });

@@ -20,10 +20,9 @@
 // Ordered: first keyword (case-insensitive substring of the model id) wins.
 // Keep prefixes specific enough not to shadow later rules.
 //
-// Tier values verified against the 2026-08-16 context-window survey of all
-// 303 store models (227 verified from vendor docs). The survey's core
-// finding: underestimation is the only dangerous direction (it drops live
-// context when the IDE compresses early), so specific prefixes whose family
+// Tier values come from vendor documentation. The governing rule is that
+// underestimation is the only dangerous direction (it drops live context
+// when the IDE compresses early), so specific prefixes whose family
 // outgrew the generic tier get an earlier, larger rule:
 //   - claude-opus: Opus 4.6/4.7/4.8/5 are all 1M while Sonnet/Haiku stay 200K
 //   - gpt-5.5 / gpt-5.6: 400K-default/1M vs the generic 272K gpt-5 tier

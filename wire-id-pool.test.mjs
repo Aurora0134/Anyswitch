@@ -1,4 +1,4 @@
-// Pool-aware wire ID resolution tests (phase 2). Pure functions, no IO.
+// Pool-aware wire ID resolution tests. Pure functions, no IO.
 // Covers: qualified pool targets (pools-before-providers tie break), a pool
 // id that reuses a member's id, and the unqualified scan where each pool is
 // ONE match unit matched on its members' catalog union (matching members are
@@ -172,7 +172,7 @@ describe("buildWireCatalog pool awareness", () => {
   it("survives a pool id that reuses a member id (no wire-ID collision)", () => {
     const store = makeStore();
     // Pool id identical to a member provider id — schema-legal. Without
-    // member absorption this is a §1.5 collision that fails the whole catalog.
+    // member absorption this is a collision that fails the whole catalog.
     delete store.pools["test-pool"];
     store.pools["member-a"] = { displayName: "Same-name Pool", members: ["member-a", "member-b"] };
     const entries = buildWireCatalog(store);

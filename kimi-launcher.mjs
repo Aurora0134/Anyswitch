@@ -104,8 +104,9 @@ export function buildKimiLauncherEnv({ port, token, base = {}, instanceId = null
   // newline-separated "Name: value" lines, parsed by kimi-code's
   // parseKimiCodeCustomHeaders and merged under every provider's outgoing
   // request headers (env layer is the base; provider customHeaders from
-  // config.toml would override it, which is why the managed block no longer
-  // carries x-agent-id). x-agent-id stays load-bearing: the relay's agent-id
+  // config.toml would override it, so the managed block must not carry
+  // x-agent-id either — writing it there shadows the env value). x-agent-id
+  // stays load-bearing: the relay's agent-id
   // whitelist and auto-chain lookup key on it. x-agent-instance feeds the
   // panel's per-instance buckets (agent-metrics.mjs instanceBuckets).
   const headers = ["x-agent-id: kimi"];

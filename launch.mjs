@@ -117,10 +117,9 @@ async function discardResponse(response) {
 //     endpoint.
 //   - upstream 5xx response (reached the upstream, it errored): return the LAST
 //     5xx response instead of throwing, so the handler can pass the real status
-//     through. Collapsing a reached 503 into a 502 was a semantic lie that hid
-//     upstream-side faults (notably minute-scale 503 internal server error from
-//     a provider站点), making them indistinguishable from relay/transport
-//     failures and blocking the client SDK's 5xx retry path.
+//     through. Collapsing a reached 5xx into a 502 would attribute upstream
+//     faults to the relay and would also disable the client SDK's own 5xx retry
+//     path, which only triggers on a genuine upstream status.
 export function createRetryingFetch(
   baseFetch,
   { timeoutMs = DEFAULT_UPSTREAM_TIMEOUT_MS, sleep = defaultSleep } = {},

@@ -5,7 +5,7 @@
    细线框、标注字距、小圆角、硬偏移"裁切"投影、卡片四角对位标记（伪装饰，
    用 background 多层渐变实现，不占布局）；数字/标签走等宽字体。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 在本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 在本主题选择器下）：
    1. header.site-head：border-bottom 加宽到 2px + 1px 副线阴影（图框双线）。
    2. 硬偏移投影：--shadow-xs/sm/md/lg 与 --accent-glow 用 1–6px 无模糊偏移
       （"图纸裁切"感），toast/modal/卡片沿用这些 token。

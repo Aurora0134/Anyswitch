@@ -1084,11 +1084,11 @@ describe("createAgentMetricsCollector", () => {
   it("ignores session reports tagged with a non-claude agentId (kimi relay)", async () => {
     // The kimi launcher rides startProductionRelay({ agentId: "kimi" }); its
     // child is spawned via cmd /c kimi.cmd, so the reported pid is cmd's and
-    // never appears in claudePids. Such a report used to land in
-    // claudeSessions anyway — and if the OS later recycles that pid for a
-    // real claude.exe, the kimi row is revived as-is and the claude card
-    // shows kimi's session id and stats. The panel's journal chain already
-    // consumes agentId correctly — claudeSessions must simply not take it.
+    // never appears in claudePids. claudeSessions must not take such a report:
+    // if the OS later recycles that pid for a real claude.exe, the kimi row is
+    // revived as-is and the claude card shows kimi's session id and stats. The
+    // panel's journal chain already consumes agentId correctly; this side has to
+    // agree with it.
     let claudeCsv = "";
     const mockExec = (cmd, opts, cb) => cb(null, claudeCsv);
     let mockTime = 10000;
@@ -1169,9 +1169,9 @@ describe("createAgentMetricsCollector", () => {
   });
 
   it("trims a padded claude agentId instead of early-returning (panel journal parity)", async () => {
-    // `" claude"` used to fail the `!== "claude"` early return and never reach
-    // claudeSessions, while the panel journal trimmed it and filed the row
-    // under claude — the two sides disagreed on the same report.
+    // A padded `" claude"` has to be trimmed before the identity check, or this
+    // side drops the row while the panel journal trims it and files the same
+    // report under claude — the two sides would disagree.
     const mockExec = (cmd, opts, cb) =>
       cb(null, `"claude.exe","4444","Console","1","55,000 K"\r\n`);
     const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
@@ -1806,8 +1806,8 @@ describe("createAgentMetricsCollector", () => {
   });
 
   it("collects opencode PIDs into opencodePids like the other endpoints", async () => {
-    // 一致性修复：parseTasklistCsv 此前对 opencode 只计数不收集 PID，
-    // 其他端点都有各自的 xxxPids Set。
+    // parseTasklistCsv 必须为每个端点都把 PID 收进各自的 xxxPids Set；只计数
+    // 不收集的端点，其进程对账与实例驱逐都会失效。
     const mockExec = (cmd, opts, cb) => {
       const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\opencode\\opencode.exe,opencode.exe,6363\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\opencode\\opencode.exe,opencode.exe,6364\r\n`;
       cb(null, csv);
@@ -2955,8 +2955,8 @@ describe("createSessionReporter", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    // The live shape measured on 2026-09-10 (dsh / deepseek-v4.1): 810 tokens
-    // streamed in 3.0s at the tail of an 8.0s turn.
+    // A realistic live shape (dsh / deepseek-v4.1): 810 tokens streamed in
+    // 3.0s at the tail of an 8.0s turn.
     const req = collector.startRequest({ providerId: "sta1n-default", model: "deepseek-v4.1-flash" });
     mockTime = 6000;
     req.recordFirstChunk(); // 5s first-token wait
@@ -3251,8 +3251,8 @@ describe("createSessionReporter", () => {
     assert.equal(wider.metrics.sparkHistory.ttft.length, 2, "disk setting of 2 still wins over in-memory 16");
   });
   it("auto 请求在链节点宣布前不上报模型名（虚拟模型不得当模型名上屏）", async () => {
-    // 修复前：startRequest 立刻把虚拟模型 id "auto" 当模型名报上来，面板胶囊因此
-    // 显示「活跃: auto」；节点身份要等 10s 心跳或请求结束才更正。
+    // startRequest 不得把虚拟模型 id "auto" 当模型名上报：面板胶囊会显示
+    // 「活跃: auto」，而真实节点身份要等心跳或请求结束才更正。
     const { reporter, posted, tick } = reporterHarness();
     const req = reporter.startRequest({ providerId: null, model: "auto", stream: true, path: "anthropic" });
 
@@ -3423,7 +3423,7 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   // the WHERE clause — lands in the probe's own result. Whole-line matching
   // claimed it as a reasonix client (first branch, no command-line check), so
   // a machine that never ran Reasonix showed a phantom 启动/待命 reasonix card
-  // forever (9613914). Claiming must key off the image NAME field only.
+  // forever. Claiming must key off the image NAME field only.
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
@@ -3779,10 +3779,10 @@ describe("instance id normalization (collector)", () => {
 });
 
 // Process-scan staleness contract (see scanProcesses in agent-metrics.mjs).
-// Blocking reads used to put every ~3rd panel /api/agents poll past the 1500ms
-// cross-process pull budget (the PowerShell probe costs ~1.4s here because wmic
-// is gone on Windows 11 24H2), and the panel then substituted its own
-// zero-traffic collector — a "no data" frame on a healthy relay.
+// A blocking read can push a panel /api/agents poll past the 1500ms
+// cross-process pull budget — the process probe alone costs over a second on
+// machines without WMI — after which the panel substitutes its own
+// zero-traffic collector: a "no data" frame on a healthy relay.
 describe("process scan staleness (stale-while-revalidate)", () => {
   const wmicScan = "Node,CommandLine,Name,ProcessId\r\n"
     + "LAPTOP,C:\\Programs\\Qoder\\Qoder.exe,Qoder.exe,4321\r\n";

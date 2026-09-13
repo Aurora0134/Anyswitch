@@ -5,7 +5,7 @@
    主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
    与经典蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="saas"]，
    不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
    1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
       seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。

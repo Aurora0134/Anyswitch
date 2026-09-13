@@ -42,8 +42,8 @@ describe("relay-settings", () => {
   });
 
   it("migrates the retired basic mode to enhanced (config, env, and save patches)", () => {
-    // Two-tier keep-alive: the old "basic" tier no longer exists; every
-    // surface that can still produce it must land on "enhanced".
+    // Two-tier keep-alive: "basic" is not a valid mode, so every surface that
+    // can still receive it must land on "enhanced".
     const fromConfig = parseKeepAliveConfig({ mode: "basic" }, {});
     assert.equal(fromConfig.mode, "enhanced");
     assert.equal(fromConfig.enabled, true);

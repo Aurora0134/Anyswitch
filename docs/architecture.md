@@ -78,6 +78,8 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 ## 4. 目录结构
 
 ### store / 真相源层
+- `store-core.mjs` — store 管理的纯函数：渠道注册、模型发现结果的分类与合并、刷新语义、错误面判定，全部无 IO；面板写侧与诊断共用这一份判定，避免两处各自解释 store 形状。
+- `store-service.mjs` — 面板写侧的 store 服务：把 `store-core` 的纯函数接到 `store-io`/DPAPI/catalog 上，承载注册、刷新、删除事务（先落删除日志、再动 store、最后动密文，任一步失败可判定该继续还是保留凭据）与路由链/号池写入。
 - `store-io.mjs` — 存储 IO 层：加载校验 v2 store.json（返回内容哈希供 CAS），在固定 credentials 根下解析 `credentialFile`、读取密文；`writeStore` 支持 CAS 乐观并发；含只读的 v1 旧存储加载器。
 - `store-schema.mjs` — v2 store 纯函数校验器：强制“store 不含秘密”不变量，校验 providers/models/`credentialFile` 引用/`fallbackURLs`/`contextWindow`/`maxOutputTokens`/`reasoningVariants`。
 - `credential-ref.mjs` — `credentialFile` 引用纯函数校验器：拒绝绝对路径/盘符/UNC/父级穿越/分隔符/Windows 保留设备名，确保引用无法逃出 credentials 目录。
@@ -110,23 +112,58 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。
 - `panel-ui/panel.html` — 面板 Web UI 本体（relay 每请求现读，刷新即生效）。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
-- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/reasonix）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
+- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/reasonix/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
-- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/reasonix）。
+- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/reasonix/qoder）。
 - `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 客户端集成
-- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` / `codex-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。opencode 启动器只确保 relay 运行、设置环境变量并启动 OpenCode；`opencode.jsonc` 不被 anyswitch 修改，托管 provider 由 OpenCode 插件从 store 注入；opencode 启动器还会生成统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给该插件，插件在 config hook 里给注入的 provider 加 `options.headers["x-agent-instance"]`（per-process，不写盘）。codex 启动器不经环境变量注入 relay token（桌面 GUI 看不到启动器环境），token 只以字面量 Authorization 头活在托管配置块里；实例标记走 `ANYSWITCH_INSTANCE_ID` 环境变量，由 config.toml 托管 provider 的 `env_http_headers` 占位符展开成 `x-agent-instance` 头。launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。codex 特例：归一化与实例存活对账都只认引擎进程集合 `codexEnginePids`（codex.exe app-server，桌面 GUI 每会话拉起一个），ChatGPT.exe 外壳与 codex-code-mode-host.exe / codex-command-runner.exe 沙箱宿主计入卡面进程数但不产生实例行，实例 id 形如 `codex-<引擎pid>`，GUI pid 标签经血缘表折叠到引擎 pid。已接受的取舍（冷缓存窗口）：归一依赖 scanProcesses 的进程缓存（面板轮询驱动刷新）；relay 刚重启且缓存尚空时，恰好到达的 launcher 形态 id 归一失败会以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存——面板双行、首请求计数拆两桶，旧行无流量刷新、10min 闲置 TTL 自愈。触发需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立，日常面板常开时打不中。
-- `pi-merge-models.mjs` / `zcode-merge-config.mjs` / `reasonix-merge-config.mjs` — pi / zcode / reasonix 客户端配置合并（reasonix 额外把 relay token 写入 `%APPDATA%\reasonix\.env`，并在托管 provider 上带 `x-agent-id: reasonix` 头）。
+- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` / `qoder-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。
+- `qoder-cdp-refresh.mjs` — Qoder 模型目录重载：Qoder 没有从配置面触发目录刷新的入口，启动器因此带一个只绑 127.0.0.1 的 DevTools 端口拉起它，等渲染进程就绪后调用一次重载。尽力而为——端口不可用、渲染进程未就绪或对方接口变动都只记录并跳过，不阻塞也不打断启动。
+- opencode 启动器只确保 relay 运行、设置环境变量并启动 OpenCode；`opencode.jsonc` 不被 anyswitch 修改，托管 provider 由 OpenCode 插件从 store 注入；opencode 启动器还会生成统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给该插件，插件在 config hook 里给注入的 provider 加 `options.headers["x-agent-instance"]`（per-process，不写盘）。
+- launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。
+- 已知限制（实例归一的冷缓存窗口）：归一依赖 scanProcesses 的进程缓存，该缓存由面板轮询驱动刷新。relay 刚重启、缓存尚空时到达的 launcher 形态 id 会归一失败，以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存（面板出两行、首请求计数拆两桶）；旧行无流量刷新，由 10min 闲置 TTL 清除。需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立才触发。
+- `kimi-merge-config.mjs` / `zcode-merge-config.mjs` / `dsh-merge-config.mjs` / `pi-merge-models.mjs` / `reasonix-merge-config.mjs` / `qoder-merge-config.mjs` — 各家客户端配置合并：把 store 的托管渠道写进各家自己的配置文件，格式与位置按各家约定（kimi `~/.kimi-code/config.toml`、zcode `~/.zcode/v2/config.json`、dsh `~/.dsh/settings.yaml`、pi `~/.pi/agent/models.json`、reasonix `%APPDATA%\reasonix\config.toml` 与 `.env`、qoder `~/.qoder/settings.json`）。reasonix 在托管 provider 上带 `x-agent-id: reasonix` 头；qoder 无自定义头能力，改由 URL 段身份前缀归属（见 `openai-path.mjs`）。
 - `codex-merge-config.mjs` — codex 客户端配置合并：托管渠道写入 `~/.codex/config.toml` 的 `[model_providers.anyswitch-*]` 表（`wire_api="responses"` 指向 relay 的 `/openai/<seg>/v1`，token 为字面量 Authorization 头，`x-agent-instance` 走 `env_http_headers` 环境变量名占位）；并生成模型目录 `~/.codex/model-catalogs/anyswitch-models.json`——字段模板取自模板资产 `codex-model-catalog-template.json`（上游 openai/codex 官方 models.json 的 gpt-5.5 条目逐字提取），生成时强制覆盖 `multi_agent_version:"v2"`、`supports_search_tool:false`、`prefer_websockets:false` 等请求塑形字段，config.toml 顶层写 `model_catalog_json` 指针；用户自指的 `model_catalog_json` 不覆盖（残留的旧目录文件会被清掉），空模型集时清掉指针与生成的目录文件。
-- 实例归组兜底：用户绕过启动器直接在终端敲 npm shim 命令（如 `kimi`）时，请求既无 `x-agent-instance` 头、relay key 也无实例后缀；此类直连请求由 relay 侧 socket→PID 兜底归组——按连接对端端口查 netstat 缓存拿到客户端进程 PID，实例 id 形如 `kimi-<PID>`，面板实例行与实例计数因此照常出现。边角：客户端若经本地代理（环回代理进程）转发，连接归属的是代理 PID，多个实例会折叠进同一行。
+- `merge-common.mjs` — 上述合并模块共用的 sidecar 读写契约：数据根下一个 JSON 对象 `{ "providers": [ids…] }`（id 排序、2 空格缩进、结尾换行），记录 anyswitch 托管了哪些条目，解除托管时据此精确剥离、不碰用户自有条目。
+- 不经启动器直接启动客户端（例如在终端里跑 `kimi`）是支持的用法，此时请求既无 `x-agent-instance` 头、relay key 也无实例后缀；这类直连请求由 relay 侧 socket→PID 兜底归组——按连接对端端口查 netstat 缓存拿到客户端进程 PID，实例 id 形如 `kimi-<PID>`，面板实例行与实例计数因此照常出现。边角：客户端若经本地代理（环回代理进程）转发，连接归属的是代理 PID，多个实例会折叠进同一行。
+
+### 路由决策层
+- `pool-providers.mjs` — 可见渠道派生的唯一源头（`deriveVisibleChannels`）：算出端点应当看到哪些渠道与模型（号池吸收其成员、按池展示），运行时 wire 目录与各客户端配置合并模块都从这里取数，避免多处各自实现导致口径漂移。
+- `pool-routing.mjs` — 号池路由原语（纯函数＋一张进程内存粘性表）：号池把 2–5 个 provider 收在自己的 id 下，请求命中池 id 时按粘性成员分发，成员失败则退避到下一档。无 IO，store 由调用方传入。
+- `chain-routing.mjs` — 路由链原语（纯函数＋进程内存链状态表）：虚拟模型 `auto` 按端点配置的链逐跳走，节点失败后退避、每 5 分钟由请求驱动惰性回链首重试、成功即粘回链首，并产出面板链灯所需的节点状态。无 IO，store 由调用方传入。
+- `modalities-fallback.mjs` — 输入模态的本机兜底表：优先级为 store 显式声明 > 本表推断，数据由本仓库自持，不属于任何端点的目录。
+
+### 流转发与保活
+- `stream-pipe.mjs` — 三条 relay 管线（OpenAI 直通、常驻 Anthropic、一次性 Anthropic）共用的流转发管道：抗截断保活、重试、usage 采集与错误归因都在此一处实现，各前端只传入自己的渠道描述符。
+- `keepalive-backoff.mjs` — 保活重试的退避时长表，纯函数、RNG 可注入，便于测试钉死具体数值。
+- `late-socket-instance.mjs` — 一次性 relay（kimi/opencode/pi）中 socket 归属晚于请求开始时的实例补挂：把已开始的请求挂到后到的进程身份上。
+
+### 观测·统计·会话
+- `agent-metrics.mjs` — 进程与请求观测采集器：扫描各家客户端进程、维护端点级与会话级实时状态、按 agentId 分桶，向面板下发看板所需的计数、折线样本与链归因；含实例 id 归一与迟到挂载重放。
+- `model-stability.mjs` — 模型稳定性：8 小时滚动窗、10 分钟桶、按调用量取前 5，进程内存态＋可选 sidecar 持久化，供面板链灯与统计页判渠道健康。
+- `usage-journal.mjs` — 逐请求用量流水：数据根 `usage\` 下按日滚动的 JSONL（requests / sessions 两条流），90 天自清理。它是 relay 热路径的旁路——写失败只告警，绝不抛回调用方。
+- `usage-stats.mjs` — 在流水之上做聚合，产出使用统计页的状态。每次 `getState()` 现读且分段读取（热力图读它固定的 90 天，其余口径只读所选窗口），不设聚合缓存；各项口径的定义与红线见 `docs/stats-spec.md`。
+- `logger.mjs` — 进程内日志器：环形缓冲＋发布订阅，面板的实时输出窗口经 SSE 订阅它。
+- `session-scan.mjs` — 面板「会话管理」的数据层：按需现扫各客户端自己的会话存储，不建索引、不自建数据库，每次列表都重读对方文件；各家记录形状的差异（含多帧压缩容器、派生索引滞后等）在本模块内适配掉。
+
+### 预设注入层
+- `agent-prompts.mjs` — 预设数据面：数据根下的 `prompts.json`（总开关、预设增删改查、逐端点 off 覆盖），文件损坏时严格隔离不连带覆写。某端点的生效集＝总开关 ∧ 预设 enabled ∧ 未被该端点 off。
+- `agent-prompts-inject.mjs` — 预设注入面：把各端点的生效集渲染进该端点自家的全局指令文件，写成带 `# >>> anyswitch-managed-prompts` / `# <<< anyswitch-managed-prompts` 标记的托管块；只注正文不注标题，幂等、只剩托管块时删文件以字节级还原，单端点失败互不影响。各端点目标文件与时机见 `skills/anyswitch-preset/SKILL.md`。
+
+### 进程与运维
+- `agent-watchdog.mjs` — followAgent 的独立看门狗进程（占用 47822 标记端口）：不依赖面板是否开着，检测到 coding agent 在跑而 relay 未启时拉起。
+- `agent-sync-run.mjs` / `agent-sync-spawn.mjs` — 配置同步的独立短命进程与其拉起助手。同步刻意跑在常驻进程之外：每次新进程都从磁盘现读 `agent-sync` 与各 merge 模块，因此改动这些模块无需重启 relay 或面板。
+- `panel-host-restart-helper.mjs` — 一次性重启助手：面板页的「重启」按钮由 panel-host 自己承载，进程无法重启自身，故由本助手等旧进程退出、拉起新进程并确认应答。
+- `git-anchor-repair.mjs` — 运维脚本：修复或迁移 git 锚点（含把改名前路径下的旧对象库搬到 `%LOCALAPPDATA%\Anyswitch-git\objects`、重设 ACL）。会改动权限与对象库，属需人工授权的一次性操作。
 
 ### 安全与加解密
 - `dpapi.mjs` — DPAPI 桥（调用 `dpapi.ps1`）：`protect`/`unprotect`，不缓存不记录、自分配缓冲区退出清零；v2 熵 `ApiCred|DPAPI|v2|<ProviderId>`。
+- `pi-relay-token.mjs` — 常驻 relay 令牌的生成与读取（数据根下按端点存放），供无法自带鉴权头的客户端复用。
 
 ## 5. 安全模型
 

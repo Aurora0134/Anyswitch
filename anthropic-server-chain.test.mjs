@@ -1,4 +1,4 @@
-// Anthropic-path chain routing tests (自动路由, wave 2): the virtual model
+// Anthropic-path chain routing tests (自动路由): the virtual model
 // "auto" walks store.routingChains[endpointId].chain in chainState.plan
 // order. Channel nodes are single upstream calls with the node's bound model;
 // pool nodes expand to their sticky-ordered member callables and only count

@@ -1,10 +1,10 @@
 // Qoder launcher — spawns the Qoder CLI through its qoder.cmd dispatcher with
 // the Anyswitch relay token in the child environment.
 //
-// Qoder's BYOK (custom provider) is configured via settings.json
-// modelConfigs.customModels — a JSON array of model entries. Before spawning,
-// the launcher syncs the Anyswitch store into that array so Qoder picks up
-// the current providers/models without manual configuration.
+// Qoder's BYOK (custom provider) is configured via the settings.json
+// `providers` map. Before spawning, the launcher syncs the Anyswitch store
+// into that map so Qoder picks up the current providers/models without manual
+// configuration (see qoder-merge-config.mjs for the shape and its rationale).
 // The integration is:
 //   1. reuse the resident relay on 47821 when it is already serving (probe),
 //      otherwise start a per-launch OpenAI relay against the real v2 store;
@@ -171,9 +171,9 @@ export async function runQoderLauncher({
 
     const env = buildQoderLauncherEnv({ token: relay.token, base });
     const exitCode = await spawnQoder({ env, args: qoderArgs, onSpawned: () => {
-      // Best-effort model-catalog warm-up: Qoder 0.2.x cold-start can render the
-      // composer with an empty model list (a cache-strategy race), leaving the
-      // model button disabled. Nudge the store to reload once the renderer is up.
+      // Best-effort model-catalog warm-up: a cold start can leave the composer
+      // with an empty model list and the model button disabled. Nudge a reload
+      // once the renderer is up.
       refreshCatalog({ port: QODER_CDP_PORT, log }).catch((error) => {
         log(`qoder model catalog warm-up failed: ${error.message}`);
       });
@@ -190,8 +190,8 @@ export function realSpawnQoder({ env, args, onSpawned }) {
     const isCmd = exe.toLowerCase().endsWith(".cmd");
     const comspec = process.env.COMSPEC || "cmd.exe";
     // Inject the CDP port so the launcher can warm up the model catalog after
-    // the renderer comes up (Qoder 0.2.x cold-start race). Qoder ignores the
-    // flag harmlessly when debugging is unavailable.
+    // the renderer comes up. Qoder ignores the flag harmlessly when debugging
+    // is unavailable.
     const cdpArg = `--remote-debugging-port=${QODER_CDP_PORT}`;
     const fullArgs = [cdpArg, ...args];
     const child = isCmd

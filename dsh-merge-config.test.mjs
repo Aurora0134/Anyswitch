@@ -354,7 +354,7 @@ test("pool id equal to a member provider id absorbs all members into one channel
   assert.deepEqual(managed, ["alpha"]);
 });
 
-// Virtual "auto" routing channel (chain routing, wave 2): injected when the
+// Virtual "auto" routing channel: injected when the
 // dsh endpoint has a route chain, cleaned up when the chain is deleted.
 const DSH_CHAIN_STORE = {
   version: 2,

@@ -1,11 +1,10 @@
 // Relay-port consistency guardrail.
 //
-// The relay port used to be hardcoded in six places (five launchers plus
-// openai-server.mjs). It is now defined exactly once — openai-server.mjs's
+// The relay port is defined exactly once — openai-server.mjs's
 // DEFAULT_RELAY_PORT — and every launcher binds that shared constant instead
-// of a private copy. These tests pin the invariant so a future re-hardcoded
-// port fails here instead of drifting into a launcher that probes or binds a
-// different port than the resident relay owns.
+// of a private copy. These tests pin the invariant so a hardcoded port fails
+// here rather than drifting into a launcher that probes or binds a port other
+// than the one the resident relay owns.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";

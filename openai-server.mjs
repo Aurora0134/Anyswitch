@@ -70,7 +70,7 @@ function explicitInstanceId(headers) {
 }
 
 // Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。x-agent-instance
-// 头仍是唯一正源且优先——launcher 注入路径的行为完全不变；只有头缺失（或非法
+// 头仍是唯一正源且优先；只有头缺失（或非法
 // 被静默丢弃）时，才对多实例端点（kimi/opencode/pi，与 agent-metrics 的
 // instanceBuckets 口径一致）用 netstat 快照反查 keep-alive 连接对端进程，
 // 合成 "<agentId>-<pid>"。zcode/claude/dsh/reasonix 保持聚合一桶，一律不兜底。
@@ -195,8 +195,8 @@ function prefixedAgentId(agentHint) {
 
 // opencode 客户端不带 x-agent-id，用 UA 识别归到 opencode 栏，
 // 避免兜底进 zcode 污染其指标。kimi 同理：launcher 经 KIMI_CODE_CUSTOM_HEADERS
-// env 注入 x-agent-id: kimi（2026-08-31 起由 config.toml 改为 env 注入，
-// config 的 customHeaders 会覆盖 env 同名头），UA 识别降级为未走 launcher
+// env 注入 x-agent-id: kimi —— 身份只能走 env，不能写进 config.toml，
+// 因为 config 的 customHeaders 会覆盖 env 同名头，UA 识别降级为未走 launcher
 // 直连时的防线——不识别的话 kimi 的链式路由（自动路由 auto）会被
 // 兜底成 zcode 的链或直接 404。codex 同理：launcher 经 codex-merge-config 的
 // http_headers 注入 x-agent-id: codex，UA 识别（codex_cli_rs / codex-tui）是未走
@@ -204,7 +204,7 @@ function prefixedAgentId(agentHint) {
 //
 // 优先级：显式 x-agent-id > URL 段前缀 > UA 嗅探 > 兜底 zcode。前缀压在 UA 之前，
 // 因为它是 merge 模块自己写进客户端配置的确定事实，而 UA 只是启发式——Qoder 的 UA
-// 不含任何自家标识（实测其请求全部兜底进 zcode），这条通道不认前缀就永远认不出它。
+// 不含任何自家标识，这条通道不认前缀就永远认不出它。
 function openaiAgentIdFrom(headers, agentHint = null) {
   const explicit = explicitAgentId(headers);
   if (explicit) return explicit;
@@ -400,7 +400,7 @@ export function createOpenAIRelayServer(deps) {
     // Internal loopback log stream for the standalone control panel
     // (panel-host.mjs on 47820). The panel page's 实时输出 window subscribes
     // to its own process's logger — after the panel/relay process split that
-    // bus no longer carries relay-side entries (keep-alive retries, faults),
+    // bus does not carry relay-side entries (keep-alive retries, faults),
     // so the panel-host proxies this endpoint and merges both streams.
     // Same guard rail as /api/internal/agents: loopback-only plus the
     // pi-relay-token that lives only in %LOCALAPPDATA%\Anyswitch.
@@ -542,7 +542,7 @@ export function createOpenAIRelayServer(deps) {
             return;
           }
 
-          // Pool routing (phase 2): when the URL segment names a pool, the
+          // Pool routing: when the URL segment names a pool, the
           // request fans out across the pool's candidate members (sticky
           // member first, then pool order). planPoolChatCompletions returns
           // null for plain provider ids — those take the classic path below
@@ -813,7 +813,7 @@ export function createOpenAIRelayServer(deps) {
         // routing (a virtual model no pool member catalog carries).
         const chainPlan = await anthropicHandler.planChainMessages(req.headers, body, agentId);
 
-        // Pool routing (phase 2): a body.model of anthropic/<pool-id>/<model>
+        // Pool routing: a body.model of anthropic/<pool-id>/<model>
         // fans out across the pool's candidate members (sticky member first,
         // then pool order). planPoolMessages returns null for plain provider
         // wire ids — those take the classic path below untouched.

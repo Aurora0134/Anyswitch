@@ -1,4 +1,4 @@
-// relay-process-manager unit tests (B·进程与端口安全).
+// relay-process-manager unit tests.
 //
 // Locks the PID identity gate: stopRelay must never taskkill a PID whose
 // command line does not reference this app directory, and restartRelay must
@@ -212,7 +212,7 @@ test("restartRelay starts the relay only after a successful stop", async () => {
   assert.equal(started, true);
 });
 
-// --- A1: async findPortOwnerPid + cached wrapper (R8 coverage) --------------
+// --- async findPortOwnerPid + cached wrapper --------------
 
 test("findPortOwnerPid exposes cached and uncached shapes; uncached is the raw function", () => {
   assert.equal(typeof findPortOwnerPid.cached, "function");
@@ -276,7 +276,7 @@ test("cached finder dedupes concurrent in-flight lookups for the same port", asy
   assert.equal(calls, 1);
 });
 
-test("getRelayStatus awaits an async owner lookup (R8: a Promise owner must not leak into the payload)", async () => {
+test("getRelayStatus awaits an async owner lookup (a Promise owner must not leak into the payload)", async () => {
   const root = makeRoot();
   const status = await getRelayStatus(root, {
     probe: async () => true,
@@ -299,7 +299,7 @@ test("getRelayStatus falls back to the pid file when the owner lookup resolves n
   assert.equal(status.pid, 1234);
 });
 
-test("stopRelay kills an owner PID that arrives as a Promise (R8: filter must not drop it)", async () => {
+test("stopRelay kills an owner PID that arrives as a Promise (a Promise owner must not be dropped)", async () => {
   const root = makeRoot();
   const pidPath = getRelayPidPath(root);
   writeRelayPid(111, pidPath);
