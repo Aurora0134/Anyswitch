@@ -93,7 +93,7 @@ const QODER_EFFORT_LEVELS = Object.freeze(["low", "medium", "high", "xhigh", "ma
 // injection alone, so the endpoint's own picker offers exactly what the
 // upstream speaks. Clipping to QODER_EFFORT_LEVELS is mandatory for the same
 // all-or-nothing reason: one out-of-vocabulary level costs the whole provider.
-function buildModelEntry(modelId, model, catalog = null, provider = null) {
+function buildModelEntry(modelId, model, catalog = null, provider = null, channelLabel = null) {
   const context = Number(model.contextWindow ?? fallbackContextWindow(modelId));
   // Qoder's worker folds `thinking` into a boolean, so the level list never
   // reaches its UI — it only decides whether the model counts as a reasoning
@@ -110,9 +110,15 @@ function buildModelEntry(modelId, model, catalog = null, provider = null) {
   // Switch off (catalog null): nothing was resolved, so the store's own flag
   // is the whole answer, exactly as it was before the library existed.
   const isReasoning = catalog ? levels.length > 0 : model.isReasoning === true;
+  const modelLabel = model.displayName ?? modelId;
   return {
     model: modelId,
-    displayName: model.displayName ?? modelId,
+    // 渠道名拼进模型显示名：Qoder 选择器每行只渲染 display_name（0.2.5 运行
+    // 时实证 providerDisplayName 不进展示字段，行末 modelID 又是
+    // qoder-custom-anyswitch-<哈希> 这种 opaque 形式），跨渠道同名模型不拼
+    // 渠道名就是两行无法区分的条目；且运行时存在按 display_name 首匹配解析
+    // 的路径，名称唯一化同时消除该路径的歧义。
+    displayName: channelLabel ? `${modelLabel} · ${channelLabel}` : modelLabel,
     contextWindow: context,
     capabilities: {
       vision: model.isVision === true,
@@ -144,10 +150,10 @@ function buildConnection(providerId, provider, port, token, catalog = null) {
   // 连接 id 仍由真实 providerId 派生（managedConnectionId 不经这里），所以加前缀
   // 不会让 sidecar 托管集漂移，旧条目照常被下一轮 sync 精确替换。
   const baseUrl = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(QODER_AGENT_ID, segment)}/v1`;
+  const displayName = provider?.channelName ?? provider?.displayName ?? providerId;
   const models = Object.entries(provider.models ?? {})
     .slice(0, MAX_MODELS_PER_CONNECTION)
-    .map(([modelId, model]) => buildModelEntry(modelId, model, catalog, provider));
-  const displayName = provider?.channelName ?? provider?.displayName ?? providerId;
+    .map(([modelId, model]) => buildModelEntry(modelId, model, catalog, provider, displayName));
   return {
     baseUrl,
     apiKey: token,

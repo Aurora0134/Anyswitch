@@ -28,6 +28,14 @@
 // left untouched (codex++ semantics); an empty model set writes neither file
 // nor pointer, because codex hard-fails config load on an empty catalog.
 //
+// Catalog granularity is one entry per (channel, model) pair with the channel
+// encoded in the slug (<channelId>~<modelId>, channel-model-slug.mjs): codex's
+// picker namespace is global and flat, so per-model-id entries silently
+// collapsed same-named models across channels, showed no channel name, and —
+// because the provider is a single global selector — pinned every call to
+// whichever channel the selector happened to point at. The relay strips the
+// prefix at its entry and routes by it, so picking a model picks the channel.
+//
 // Features gate: the desktop GUI's cross-session memory pipeline fires its
 // own background model calls (hardcoded model, separate session ids), which
 // surface on the panel as phantom session rows and unexpected 404 banners.
@@ -51,6 +59,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 export { extractManagedProviders } from "./pool-providers.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
 import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled } from "./effort-catalog.mjs";
+import { packChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model-slug.mjs";
 
 const SIDECAR_FILENAME = "codex-sidecar.json";
 export const MANAGED_BEGIN = "# >>> anyswitch-managed-codex (managed by Anyswitch; do not edit) >>>";
@@ -119,24 +128,31 @@ export function loadCodexCatalogTemplate() {
   }
 }
 
-// Flatten the endpoint-visible channels into the catalog's model list: the
-// first channel to offer a model id also wins its metadata (pool-union
-// semantics, same as deriveVisibleChannels).
+// Flatten the endpoint-visible channels into the catalog's entry list: one
+// entry per (channel, model) pair, keyed by the channel-qualified slug so a
+// model id offered by several channels shows up once per channel instead of
+// collapsing onto the first. The auto pseudo-channel's virtual model stays a
+// bare slug: "auto" is the chain-routing trigger word (body.model === "auto"
+// walks the chain), not a real model, so it never takes the channel prefix.
 export function collectCodexCatalogModels(providers) {
   const models = new Map();
-  for (const provider of Object.values(providers ?? {})) {
+  for (const [providerId, provider] of Object.entries(providers ?? {})) {
+    const channelLabel = provider?.channelName ?? provider?.displayName ?? providerId;
     for (const [modelId, model] of Object.entries(provider?.models ?? {})) {
       // The owning provider rides along with the model: the declaration check
       // needs both (provider-level reasoningVariants sits on the provider,
-      // per-model levels on the model), and "first channel wins" means the
-      // pair has to stay together rather than be looked up again later.
-      if (!models.has(modelId)) models.set(modelId, { model: model ?? {}, provider });
+      // per-model levels on the model).
+      if (providerId === AUTO_CHANNEL_KEY) {
+        models.set(modelId, { modelId, model: model ?? {}, provider, channelLabel: null });
+        continue;
+      }
+      models.set(packChannelModelSlug(providerId, modelId), { modelId, model: model ?? {}, provider, channelLabel });
     }
   }
   return models;
 }
 
-// One catalog entry per routable model. The upstream entry is cloned verbatim
+// One catalog entry per routable (channel, model) pair. The upstream entry is cloned verbatim
 // so every capability codex gates features on (reasoning levels, truncation
 // policy, per-model instructions, …) survives; only identity and the fields
 // that would shape requests in ways non-OpenAI upstreams reject are
@@ -155,12 +171,15 @@ export function collectCodexCatalogModels(providers) {
 export function buildCodexModelCatalog(models, template, catalog = null) {
   const entries = [];
   let index = 0;
-  for (const [modelId, collected] of models) {
-    const { model, provider } = collected ?? {};
+  for (const [slug, collected] of models) {
+    const { modelId, model, provider, channelLabel } = collected ?? {};
     const entry = structuredClone(template);
-    entry.slug = modelId;
-    entry.display_name =
+    entry.slug = slug;
+    const modelLabel =
       typeof model?.displayName === "string" && model.displayName.length > 0 ? model.displayName : modelId;
+    // 渠道名进显示名：选择器每行只读 display_name，跨渠道同名模型不带渠道名
+    // 就是无法区分的重复行（wire-id.mjs 的 [provider] 前缀同款理由）。
+    entry.display_name = channelLabel ? `${modelLabel} · ${channelLabel}` : modelLabel;
     entry.description = null;
     if (Number.isInteger(model?.contextWindow) && model.contextWindow > 0) {
       entry.context_window = model.contextWindow;
@@ -418,6 +437,30 @@ export function protectModelProvider(text, managed) {
   return text;
 }
 
+// model 键保护，与 protectModelProvider 同语义：只在值无法解析时改指。渠道
+// 限定 slug（本轮起目录的形态）不在现役目录里 = 悬空（渠道删除/改名、模型
+// 下架、桌面 App 重写后配置漂移），改指 auto（有链时）或目录首条；裸模型
+// id（无 "~"）一律不动——它可能是用户手写、经 URL 段回落路由的合法选择，
+// 托管块无权替用户收回。指针指向用户自己的 catalog 或目录为空时不插手。
+export function protectModelKey(text, catalogModels, catalogPointer) {
+  if (catalogPointer !== "ours" || catalogModels.size === 0) return text;
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    if (/^\s*\[/.test(lines[index])) break; // top-level keys end at the first table
+    const kv = lines[index].match(/^(\s*model\s*=\s*)(["'])([^"']*)\2(\s*(?:#.*)?)$/);
+    if (!kv) continue;
+    const value = kv[3];
+    if (!value.includes(CHANNEL_MODEL_SEPARATOR)) return text;
+    if (catalogModels.has(value)) return text;
+    const fallback = catalogModels.has(AUTO_CHANNEL_KEY)
+      ? AUTO_CHANNEL_KEY
+      : catalogModels.keys().next().value;
+    lines[index] = `${kv[1]}${tomlString(fallback)}${kv[4]}`;
+    return lines.join("\n");
+  }
+  return text;
+}
+
 export function mergeCodexConfigToml(existingText, managedProviders, port, token, autoChannel = null, catalogTemplate = null, effortCatalog = null) {
   const preserved = dropLegacyKeys(stripManagedTables(stripManagedBlock(existingText ?? "")));
   // The memories gate is decided on the preserved text (after the old managed
@@ -446,7 +489,8 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   }
   const trimmedHead = head.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
-  return { text: protectModelProvider(merged, managed), managed, catalogModels, catalogPointer, effortCatalog, memoriesGate: gate.hasFeaturesTable ? "absorbed" : "managed-block" };
+  const protectedText = protectModelKey(protectModelProvider(merged, managed), catalogModels, catalogPointer);
+  return { text: protectedText, managed, catalogModels, catalogPointer, effortCatalog, memoriesGate: gate.hasFeaturesTable ? "absorbed" : "managed-block" };
 }
 
 export function readCodexConfigToml(filePath) {

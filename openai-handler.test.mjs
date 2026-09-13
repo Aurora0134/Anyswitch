@@ -353,6 +353,18 @@ describe("openai handler models discovery", () => {
     assert.deepEqual(ids, ["claude-opus-5", "claude-sonnet-4"]);
   });
 
+  it("returns the channel-qualified union for codex, regardless of the URL segment", async () => {
+    const handler = makeHandler();
+    const result = await handler.handleModels("/openai/poke-api/v1/models", { authorization: TOKEN }, "codex");
+    assert.equal(result.status, 200);
+    const ids = result.body.data.map((m) => m.id).sort();
+    assert.deepEqual(ids, ["deepseek~deepseek-v4", "poke-api~claude-opus-5", "poke-api~claude-sonnet-4"]);
+    // Same answer from the other provider's entry point: every codex provider
+    // is an equivalent doorway once the channel rides the model slug.
+    const viaDeepseek = await handler.handleModels("/openai/deepseek/v1/models", { authorization: TOKEN }, "codex");
+    assert.deepEqual(viaDeepseek.body.data.map((m) => m.id).sort(), ids);
+  });
+
   it("records catalog generation on discovery", async () => {
     let recorded = null;
     const handler = createOpenAIHandler({

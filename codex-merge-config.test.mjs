@@ -190,6 +190,44 @@ describe("codex-merge-config", () => {
   });
 });
 
+describe("model key protection (channel-qualified slugs)", () => {
+  it("re-points a stale channel-qualified slug onto auto when a chain exists, keeping the comment", () => {
+    const existing = 'model = "gone~gpt-6-astra" # 我选的\n';
+    const { text } = mergeCodexConfigToml(
+      existing,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(CHAIN_STORE, "codex"),
+      CATALOG_TEMPLATE,
+    );
+    assert.match(text, /^model = "auto" # 我选的$/m);
+  });
+
+  it("re-points a stale slug onto the first catalog entry when no chain exists", () => {
+    const { text } = mergeCodexConfigToml('model = "gone~gpt-6-astra"\n', extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(text, /^model = "poke-api~gpt-6-astra"$/m);
+  });
+
+  it("re-points a slug whose channel survives but whose model was delisted", () => {
+    const { text } = mergeCodexConfigToml('model = "poke-api~delisted"\n', extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(text, /^model = "poke-api~gpt-6-astra"$/m);
+  });
+
+  it("leaves a current slug and a bare model id alone", () => {
+    const { text: currentOut } = mergeCodexConfigToml('model = "poke-api~gpt-6-astra"\n', extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(currentOut, /^model = "poke-api~gpt-6-astra"$/m);
+    const { text: bareOut } = mergeCodexConfigToml('model = "gpt-6-astra"\n', extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(bareOut, /^model = "gpt-6-astra"$/m);
+  });
+
+  it("never touches the model key when the pointer belongs to the user's own catalog", () => {
+    const existing = ['model_catalog_json = "my-own/catalog.json"', 'model = "gone~gpt-6-astra"', ""].join("\n");
+    const { text } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(text, /^model = "gone~gpt-6-astra"$/m);
+  });
+});
+
 describe("[features] memories gate", () => {
   it("declares the gate inside the managed block when the user has no [features] table", () => {
     const { text, memoriesGate } = mergeCodexConfigToml("", extractManagedProviders(STORE), 47821, "tok");
@@ -363,22 +401,24 @@ describe("codex sidecar", () => {
 });
 
 describe("codex model catalog (model_catalog_json)", () => {
-  it("builds spec-compliant entries from the channel view, one per routable model", () => {
+  it("builds spec-compliant entries from the channel view, one per (channel, model) pair", () => {
     assert.ok(CATALOG_TEMPLATE, "template asset codex-model-catalog-template.json loads");
     const providers = {
       alpha: { models: { "m-one": { displayName: "M One", contextWindow: 128000 }, "m-two": {} } },
       beta: { models: { "m-one": { displayName: "shadowed" } } },
     };
     const catalog = buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE);
-    assert.equal(catalog.models.length, 2, "duplicate model ids collapse, first channel wins");
-    const [one, two] = catalog.models;
-    assert.equal(one.slug, "m-one");
-    assert.equal(one.display_name, "M One");
+    assert.equal(catalog.models.length, 3, "same model id on two channels lists once per channel, never collapsed");
+    const [one, two, three] = catalog.models;
+    assert.equal(one.slug, "alpha~m-one");
+    assert.equal(one.display_name, "M One · alpha", "display_name carries the channel label");
     assert.equal(one.context_window, 128000, "store contextWindow overrides the template window");
     assert.equal(one.max_context_window, 128000);
-    assert.equal(two.slug, "m-two");
-    assert.equal(two.display_name, "m-two", "display_name falls back to the model id");
+    assert.equal(two.slug, "alpha~m-two");
+    assert.equal(two.display_name, "m-two · alpha", "model label falls back to the model id");
     assert.equal(two.context_window, CATALOG_TEMPLATE.context_window, "no metadata keeps the template window");
+    assert.equal(three.slug, "beta~m-one");
+    assert.equal(three.display_name, "shadowed · beta", "the second channel's copy keeps its own metadata");
     for (const [index, entry] of catalog.models.entries()) {
       assert.equal(entry.visibility, "list");
       assert.equal(entry.supported_in_api, true);
@@ -411,7 +451,7 @@ describe("codex model catalog (model_catalog_json)", () => {
 
     const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
-    assert.deepEqual(catalog.models.map((m) => m.slug).sort(), ["auto", "gpt-6-astra"]);
+    assert.deepEqual(catalog.models.map((m) => m.slug).sort(), ["auto", "poke-api~gpt-6-astra"]);
 
     // A second sync is stable: one pointer, unchanged config, same catalog bytes.
     const before = readFileSync(catalogPath, "utf8");

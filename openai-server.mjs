@@ -1,6 +1,6 @@
 import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
-import { parseOpenAIPath } from "./openai-path.mjs";
+import { parseOpenAIPath, buildOpenAIPath } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
 import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel } from "./stream-pipe.mjs";
 import { translateResponsesRequest } from "./responses-translate.mjs";
@@ -10,6 +10,7 @@ import { isChainFailoverStatus, buildChainRuntime } from "./chain-routing.mjs";
 import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 import { instanceIdFromSocket, bindLateSocketInstance } from "./late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
+import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model-slug.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 // Single source of truth for the relay's loopback port. Every launcher
@@ -282,6 +283,24 @@ export function anthropicUsageToOpenAI(usage) {
   return mapped;
 }
 
+// 渠道限定模型 slug（<channelId>~<modelId>，channel-model-slug.mjs）入口剥离：
+// codex 的模型目录把渠道编码进 slug（它的选择器是全局扁平命名空间、provider
+// 只是全局单选，渠道信息没有别的载体）。命中已知渠道时改写路由路径段与模型
+// 名——选模型即选渠道，URL 段 provider 退化为未编码模型的回落渠道。剥离发生
+// 在入口，翻译、effort 注入、chain/pool 扇出、journal/stats 全部只见真实渠道
+// id 与干净模型名（qoder~ URL 前缀同一纪律）。未命中（裸模型 id、未知渠道、
+// store 暂不可读）返回 null，调用侧原样继续，行为与今天完全一致。
+function resolveChannelModelSlug(path, body, deps) {
+  if (typeof body?.model !== "string" || !body.model.includes(CHANNEL_MODEL_SEPARATOR)) return null;
+  const loaded = deps.loadStore?.();
+  if (!loaded?.ok) return null;
+  const hit = unpackChannelModelSlug(body.model, loaded.store);
+  if (!hit) return null;
+  const parsed = parseOpenAIPath(path);
+  if (!parsed.ok) return null;
+  return { path: buildOpenAIPath(hit.channelId, parsed.subpath), body: { ...body, model: hit.modelId } };
+}
+
 export function createOpenAIRelayServer(deps) {
   const handler = createOpenAIHandler(deps);
   const anthropicHandler = createHandler(deps);
@@ -470,12 +489,17 @@ export function createOpenAIRelayServer(deps) {
           sendJson(res, 400, openAIError("invalid_request_error", "request body is not valid JSON"));
           return;
         }
+        // 渠道限定模型 slug（<channelId>~<modelId>）入口剥离：命中已知渠道时
+        // 路由渠道与模型名在此改写，下游全部只见真实渠道 id 与干净模型名。
+        const slugRewrite = resolveChannelModelSlug(path, body, deps);
+        const routePath = slugRewrite?.path ?? path;
+        if (slugRewrite) body = slugRewrite.body;
         // URL 段可能带 `<agent>~` 身份前缀（见 openai-path）。这里解析一次：
         // agentHint 供归属用，providerId 必须是剥离前缀后的真实渠道 id——直接把
         // chatMatch[1] 那个原样段塞进 tracker，journal/stats 会落下
         // 「qoder~a6api-main」这种 store 里不存在的幽灵渠道。解析失败（非法编码）
         // 时保留原段，错误形状由 handler 的同一 parser 负责报出。
-        const parsedRoute = parseOpenAIPath(path);
+        const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
@@ -511,7 +535,7 @@ export function createOpenAIRelayServer(deps) {
           // routing because "auto" is a virtual model no real channel (and
           // therefore no pool member catalog) carries. Returns null when the
           // model is not "auto" or the agent has no chain.
-          const chainPlan = await handler.planChainChatCompletions(path, req.headers, body, openaiAgentId);
+          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, body, openaiAgentId);
           if (chainPlan !== null && !chainPlan.ok) {
             tracker?.recordEnd({ status: chainPlan.status, error: { status: chainPlan.status, message: chainPlan.body?.error?.message || "Error" } });
             sendJson(res, chainPlan.status, chainPlan.body);
@@ -524,7 +548,7 @@ export function createOpenAIRelayServer(deps) {
           // null for plain provider ids — those take the classic path below
           // untouched.
           const poolPlan = chainPlan === null
-            ? await handler.planPoolChatCompletions(path, req.headers, body)
+            ? await handler.planPoolChatCompletions(routePath, req.headers, body)
             : null;
           if (poolPlan !== null && !poolPlan.ok) {
             tracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });
@@ -572,7 +596,7 @@ export function createOpenAIRelayServer(deps) {
                     onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
-                    callUpstream: () => handler.handleChatCompletions(path, req.headers, body, { signal: abortController.signal }),
+                    callUpstream: () => handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal }),
                   }),
             }));
             return;
@@ -600,7 +624,7 @@ export function createOpenAIRelayServer(deps) {
               memberPlan.noteFailure?.(member.memberId);
             }
           } else {
-            result = await handler.handleChatCompletions(path, req.headers, body, { signal: abortController.signal });
+            result = await handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal });
           }
           if (result.status >= 400) {
             // Error responses never produce a first token — no recordFirstChunk
@@ -648,10 +672,15 @@ export function createOpenAIRelayServer(deps) {
           sendJson(res, 400, openAIError("invalid_request_error", "request body is not valid JSON"));
           return;
         }
+        // 渠道限定模型 slug 入口剥离（同 chat/completions 路由）：必须在翻译
+        // 之前改写，翻译层、扇出与归属才能全部拿到干净模型名与真实渠道 id。
+        const slugRewrite = resolveChannelModelSlug(path, body, deps);
+        const routePath = slugRewrite?.path ?? path;
+        if (slugRewrite) body = slugRewrite.body;
         // URL 段前缀与归属解析同 chat/completions 路由（见上）。codex 恒流式，
         // 翻译后强制 stream:true，上游扇出无条件走流式管线；include_usage 由
         // handler 侧对 stream 请求补齐。
-        const parsedRoute = parseOpenAIPath(path);
+        const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
         // codex 后台/内部请求（记忆整理、guardian 审批、缓存预热等引擎自发的
         // 模型请求，分类口径见 isCodexBackgroundRequest）在面板上整体隔离：
@@ -694,7 +723,7 @@ export function createOpenAIRelayServer(deps) {
         res.on("close", onResAborted);
 
         try {
-          const chainPlan = await handler.planChainChatCompletions(path, req.headers, chatBody, openaiAgentId);
+          const chainPlan = await handler.planChainChatCompletions(routePath, req.headers, chatBody, openaiAgentId);
           if (chainPlan !== null && !chainPlan.ok) {
             tracker?.recordEnd({ status: chainPlan.status, error: { status: chainPlan.status, message: chainPlan.body?.error?.message || "Error" } });
             sendJson(res, chainPlan.status, chainPlan.body);
@@ -702,7 +731,7 @@ export function createOpenAIRelayServer(deps) {
           }
 
           const poolPlan = chainPlan === null
-            ? await handler.planPoolChatCompletions(path, req.headers, chatBody)
+            ? await handler.planPoolChatCompletions(routePath, req.headers, chatBody)
             : null;
           if (poolPlan !== null && !poolPlan.ok) {
             tracker?.recordEnd({ status: poolPlan.status, error: { status: poolPlan.status, message: poolPlan.body?.error?.message || "Error" } });
@@ -738,7 +767,7 @@ export function createOpenAIRelayServer(deps) {
                   onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
-                  callUpstream: () => handler.handleChatCompletions(path, req.headers, chatBody, { signal: abortController.signal }),
+                  callUpstream: () => handler.handleChatCompletions(routePath, req.headers, chatBody, { signal: abortController.signal }),
                 }),
           }));
           return;

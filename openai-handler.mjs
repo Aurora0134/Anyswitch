@@ -6,6 +6,7 @@ import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "./pool-routing.mjs";
 import { AUTO_MODEL, resolveChain, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
+import { buildChannelModelSlugCatalog } from "./channel-model-slug.mjs";
 
 export function openAIError(type, message) {
   return { error: { type, message } };
@@ -161,16 +162,27 @@ export function createOpenAIHandler(deps) {
     if (!loaded.ok) return { status: loaded.status, body: loaded.body };
 
     let response;
-    // Pools resolve before providers: a pool id may reuse a member's id, and
-    // the pool wins the tie. A pool's model list is the union of its members'
-    // catalogs in pool order (first member wins duplicate ids).
-    const pool = resolvePool(loaded.store, parsed.providerId);
-    if (pool) {
-      response = modelListResponse({ models: poolModelsUnion(loaded.store, pool) });
+    if (agentId === "codex") {
+      // codex 的模型选择器读静态目录（model_catalog_json），provider 是全局
+      // 单选——目录把渠道编码进 slug（<channelId>~<modelId>，见
+      // channel-model-slug.mjs），/models 与目录保持同一口径：全部可见渠道
+      // 的并集，与 URL 段无关（任一 provider 入口都可能被问到全部模型）。
+      response = {
+        object: "list",
+        data: buildChannelModelSlugCatalog(loaded.store).map((entry) => ({ id: entry.slug, object: "model" })),
+      };
     } else {
-      const provider = resolveProvider(loaded.store, parsed.providerId);
-      if (!provider.ok) return { status: provider.status, body: provider.body };
-      response = modelListResponse(provider.provider);
+      // Pools resolve before providers: a pool id may reuse a member's id, and
+      // the pool wins the tie. A pool's model list is the union of its members'
+      // catalogs in pool order (first member wins duplicate ids).
+      const pool = resolvePool(loaded.store, parsed.providerId);
+      if (pool) {
+        response = modelListResponse({ models: poolModelsUnion(loaded.store, pool) });
+      } else {
+        const provider = resolveProvider(loaded.store, parsed.providerId);
+        if (!provider.ok) return { status: provider.status, body: provider.body };
+        response = modelListResponse(provider.provider);
+      }
     }
 
     // Chain routing (自动路由): an agent with a configured route chain may

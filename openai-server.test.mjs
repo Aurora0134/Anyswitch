@@ -1571,3 +1571,111 @@ describe("openai relay /responses routes (codex)", () => {
     }
   });
 });
+
+// ── 渠道限定模型 slug（<channelId>~<modelId>）──────────────────────────────
+// codex 目录把渠道编码进 slug；relay 入口剥离并以该渠道路由（选模型即选渠
+// 道），URL 段 provider 退化为未编码模型的回落。store 用两条独立渠道，靠
+// 上游 URL 与 tracker 归属证明路由落点。
+
+const SLUG_STORE = {
+  version: 2,
+  providers: {
+    "poke-api": {
+      displayName: "Poke",
+      baseURL: "https://poke.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "poke-api.dpapi",
+      models: { "claude-opus-5": { displayName: "Opus 5" } },
+    },
+    nim: {
+      displayName: "NIM",
+      baseURL: "https://nim.invalid/v1",
+      protocol: "openai-compatible",
+      credentialFile: "nim.dpapi",
+      models: { "deepseek-chat": { displayName: "DS" } },
+    },
+  },
+};
+
+function slugDeps(upstreamBody, captured) {
+  return {
+    token: TOKEN,
+    loadStore: () => ({ ok: true, store: SLUG_STORE }),
+    loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+    upstreamFetch: async (url, init) => {
+      captured.url = url;
+      captured.body = JSON.parse(init.body);
+      return { ok: true, status: 200, body: upstreamBody };
+    },
+    recordGeneration: () => {},
+    readGeneration: () => null,
+    metricsCollector: {
+      startRequest: (meta) => {
+        captured.meta = meta;
+        return { recordFirstChunk: () => {}, recordEnd: () => {} };
+      },
+    },
+  };
+}
+
+function postSlugChat(port, model) {
+  return fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: TOKEN, "content-type": "application/json" },
+    body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
+  });
+}
+
+describe("channel-qualified model slugs (<channel>~<model>)", () => {
+  it("chat route: the slug's channel wins over the URL segment, upstream sees the bare model", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postSlugChat(port, "nim~deepseek-chat");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.url).startsWith("https://nim.invalid/"), "routed by the slug's channel, not the URL segment's");
+      assert.equal(captured.body.model, "deepseek-chat", "the upstream never sees the channel prefix");
+      assert.equal(captured.meta.providerId, "nim", "journal/stats attribute the real channel");
+      assert.equal(captured.meta.model, "deepseek-chat");
+    });
+  });
+
+  it("responses route: the same rewrite happens ahead of the translator", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/responses`, {
+        method: "POST",
+        headers: { authorization: TOKEN, "content-type": "application/json" },
+        body: JSON.stringify({ model: "nim~deepseek-chat", instructions: "be terse", input: "hello", stream: true }),
+      });
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.url).startsWith("https://nim.invalid/"));
+      assert.equal(captured.body.model, "deepseek-chat");
+      assert.equal(captured.meta.providerId, "nim");
+    });
+  });
+
+  it("unknown-channel slugs pass through untouched: the URL segment keeps routing", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postSlugChat(port, "unknown~x");
+      assert.equal(res.status, 404, "poke-api does not carry the model — proof the request stayed on the URL segment's channel");
+      assert.equal(captured.url, undefined, "upstream never called");
+      assert.equal(captured.meta.providerId, "poke-api");
+      assert.equal(captured.meta.model, "unknown~x");
+    });
+  });
+
+  it("bare model ids keep today's URL-segment routing verbatim", async () => {
+    const captured = {};
+    await withServer(slugDeps(chatSseStream(HEALTHY_CHAT_SSE), captured), async (port) => {
+      const res = await postSlugChat(port, "claude-opus-5");
+      assert.equal(res.status, 200);
+      await res.text();
+      assert.ok(String(captured.url).startsWith("https://poke.invalid/"));
+      assert.equal(captured.body.model, "claude-opus-5");
+      assert.equal(captured.meta.providerId, "poke-api");
+    });
+  });
+});
