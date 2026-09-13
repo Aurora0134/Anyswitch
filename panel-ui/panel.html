@@ -54,6 +54,21 @@
     --spark-fill: rgba(59, 130, 246, 0.12);
     --danger-glow: rgba(220, 38, 38, 0.18);
 
+    /* 端点品牌色（会话视图的圆点与徽标共用）：与语义色刻意错开色相，
+       免得端点标识被误读成状态。pi 的白与 zcode 的黑本身在某一侧底色上
+       会隐形，由 --ep-ring 内描边补齐可见性，故两色的值不随主题改变。 */
+    --ep-zcode: #18181b;
+    --ep-claude: #ea580c;
+    --ep-dsh: #0284c7;
+    --ep-pi: #ffffff;
+    --ep-reasonix: #b45309;
+    --ep-kimi: #7e22ce;
+    --ep-opencode: #e11d48;
+    --ep-qoder: #c026d3;
+    --ep-codex: #16a34a;
+    /* 圆点内描边：亮底用深环托住白点，暗底用浅环托住黑点 */
+    --ep-ring: rgba(15, 23, 42, 0.28);
+
     /* 渠道列表拖拽重排：随 --accent 自适应亮暗，各皮肤段可覆盖质感 */
     --store-drag-accent: var(--accent);
     --store-drag-glow: 0 2px 14px color-mix(in srgb, var(--store-drag-accent) 32%, transparent);
@@ -107,6 +122,19 @@
     --spark-line: #60a5fa;
     --spark-fill: rgba(96, 165, 250, 0.18);
     --danger-glow: rgba(239, 68, 68, 0.32);
+
+    /* 端点品牌色：色相与亮色一致，明度提亮以适配暗底；pi 的白与 zcode 的
+       黑保持本色不变，靠翻成浅色的内描边环收边。 */
+    --ep-zcode: #18181b;
+    --ep-claude: #fb923c;
+    --ep-dsh: #38bdf8;
+    --ep-pi: #ffffff;
+    --ep-reasonix: #fbbf24;
+    --ep-kimi: #a855f7;
+    --ep-opencode: #fb7185;
+    --ep-qoder: #e879f9;
+    --ep-codex: #4ade80;
+    --ep-ring: rgba(248, 250, 252, 0.55);
 
     --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
     --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.45), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
@@ -1567,6 +1595,9 @@
   .sess-item:hover { background: var(--surface-hover); }
   .sess-item.selected { background: var(--accent-soft); border-left-color: var(--accent); }
   .sess-item .ep-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px; }
+  /* 白/黑两个端点标识在某一侧底色上会与背景融掉，用一圈内描边把边界托出来；
+     其余端点的实色点不需要，加了反而发灰。 */
+  .ep-dot--outlined { box-shadow: inset 0 0 0 1px var(--ep-ring); }
   .sess-item .si-main { min-width: 0; flex: 1; }
   .sess-item .si-title { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-item .si-sub { font-size: 11px; color: var(--text-4); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
@@ -14354,16 +14385,26 @@ if (window.panelStartupController) panelStartupPlay();
     toast(tip);
   }
 
-  // 端点清单：真实 9 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS，
-  // 圆点色按顺序取 STATS_PALETTE（CSS 变量，直接作 background）。
-  const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id, i) => ({
+  // 端点清单：真实 9 端点，顺序取 AGENT_CARD_ORDER；显示名复用 STATS_ENDPOINT_LABELS。
+  // 圆点与徽标色是端点品牌色，取自 --ep-* token（亮暗各一套），与会话/统计
+  // 两个视图无关——端点标识不能借用语义色，否则会被读成状态。未登记的新端点
+  // 回落中性灰，不占用既有端点的色相。
+  const SESS_ENDPOINT_COLORS = {
+    zcode: "var(--ep-zcode)", claude: "var(--ep-claude)", dsh: "var(--ep-dsh)",
+    pi: "var(--ep-pi)", reasonix: "var(--ep-reasonix)", kimi: "var(--ep-kimi)",
+    opencode: "var(--ep-opencode)", qoder: "var(--ep-qoder)", codex: "var(--ep-codex)",
+  };
+  const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id) => ({
     id,
     name: STATS_ENDPOINT_LABELS[id] || id,
-    color: (STATS_PALETTE[i] || STATS_OTHER_STYLE).color,
+    color: SESS_ENDPOINT_COLORS[id] || "var(--text-4)",
   }));
   const SESS_EP = Object.fromEntries(SESSIONS_ENDPOINTS.map((e) => [e.id, e]));
   const sessEpName = (id) => (SESS_EP[id] || {}).name || STATS_ENDPOINT_LABELS[id] || id || "未知端点";
   const sessEpColor = (id) => (SESS_EP[id] || {}).color || "var(--text-4)";
+  // 需要描边环的端点：pi 的白与 zcode 的黑（见 --ep-ring 说明）
+  const SESS_EP_RINGED = new Set(["pi", "zcode"]);
+  const sessEpDotClass = (id) => `ep-dot${SESS_EP_RINGED.has(id) ? " ep-dot--outlined" : ""}`;
 
   // localStorage 偏好（前缀 anyswitch.sessions.；持久化视图/分组展开状态，搜索与筛选不持久化）
   const SESS_LS = {
@@ -14489,7 +14530,7 @@ if (window.panelStartupController) panelStartupPlay();
       const epCount = [...byProj.values()].reduce((n, arr) => n + arr.length, 0);
       const epKey = "ep:" + epId;
       const epCollapsed = !!sessState.collapsed[epKey];
-      html += sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj);
+      html += sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj, null, SESS_EP_RINGED.has(epId));
       if (epCollapsed) continue;
       for (const [proj, arr] of byProj) {
         const pKey = "proj:" + epId + "|" + String(proj || "").replace(/\\/g, "/").toLowerCase();
@@ -14503,9 +14544,10 @@ if (window.panelStartupController) panelStartupPlay();
   }
 
   /* 组头：含折叠箭头、（批量模式下）组复选框、组内计数 */
-  function sessGroupHeadHtml(key, label, count, collapsed, lvl, color, arrOrMap, fullPath) {
+  function sessGroupHeadHtml(key, label, count, collapsed, lvl, color, arrOrMap, fullPath, ringed) {
     const cb = sessState.batch ? `<input type="checkbox" class="grp-cb" data-key="${esc(key)}" ${sessGrpCheckState(arrOrMap)}>` : "";
-    const dot = color ? `<span class="ep-dot" style="background:${color};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>` : "";
+    const dotClass = `ep-dot${ringed ? " ep-dot--outlined" : ""}`;
+    const dot = color ? `<span class="${dotClass}" style="background:${color};width:8px;height:8px;border-radius:50%;display:inline-block;"></span>` : "";
     const title = fullPath ? `title="${esc(fullPath)}"` : "";
     return `<div class="sess-group-head ${lvl === 2 ? "lvl2" : ""} ${collapsed ? "collapsed" : ""}" data-key="${esc(key)}" ${title}>
       <span class="caret">▼</span>${cb}${dot}<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(label)}</span>
@@ -14535,7 +14577,7 @@ if (window.panelStartupController) panelStartupPlay();
     const cb = sessState.batch ? `<input type="checkbox" class="item-cb" data-id="${esc(s.id)}" ${sessState.checked.has(s.id) ? "checked" : ""}>` : "";
     const pad = lvl === 2 && sessState.view === "group" ? "padding-left:38px;" : "";
     return `<div class="sess-item${sel}" data-id="${esc(s.id)}" style="${pad}">
-      ${cb}<span class="ep-dot" style="background:${sessEpColor(s.endpoint)}" title="${esc(sessEpName(s.endpoint))}"></span>
+      ${cb}<span class="${sessEpDotClass(s.endpoint)}" style="background:${sessEpColor(s.endpoint)}" title="${esc(sessEpName(s.endpoint))}"></span>
       <div class="si-main">
         <div class="si-title">${sessHighlight(sessTitle(s), kw)}</div>
         <div class="si-sub">${sessHighlight(s.project || "", kw)}</div>
@@ -14636,8 +14678,13 @@ if (window.panelStartupController) panelStartupPlay();
     empty.hidden = true; skel.hidden = true; body.hidden = false;
     const badge = $("sessDEpBadge");
     const color = sessEpColor(s.endpoint);
-    badge.textContent = "● " + sessEpName(s.endpoint);
-    badge.style.cssText = `background:color-mix(in srgb, ${color} 12%, transparent);color:${color};border:1px solid ${color};`;
+    // 圆点自带颜色（pi/zcode 另加描边环），文字另用可读色：白/黑端点的文字
+    // 若跟着端点色走，在浅/深底上一样会读不出来。
+    const ringed = SESS_EP_RINGED.has(s.endpoint);
+    badge.innerHTML = `<span class="ep-dot${ringed ? " ep-dot--outlined" : ""}" style="background:${color};width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle;"></span>${esc(sessEpName(s.endpoint))}`;
+    badge.style.cssText = ringed
+      ? "background:color-mix(in srgb, var(--text) 10%, transparent);color:var(--text);border:1px solid var(--ep-ring);"
+      : `background:color-mix(in srgb, ${color} 12%, transparent);color:${color};border:1px solid ${color};`;
     $("sessDTitle").innerHTML = sessHighlight(sessTitle(s), sessState.search.trim());
     $("sessDTime").textContent = `${sessRelTime(s.lastActive)} · ${sessAbsTime(s.lastActive)}`;
     $("sessDProject").textContent = s.project || "";
