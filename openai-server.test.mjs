@@ -1392,11 +1392,12 @@ describe("openai relay /responses routes (codex)", () => {
   });
 
   // ── codex 后台/内部请求的分类与面板隔离 ──────────────────────────────
-  // GUI 记忆流水线 / guardian 审批 / 缓存预热等引擎自发的模型请求带线上标记，
-  // 四种信号命中其一即判后台（isCodexBackgroundRequest）：实例身份三条通道
+  // 引擎/GUI 自发流量（记忆流水线、guardian、预热、GUI 线程标题/摘要生成等）
+  // 带线上标记，命中其一即判后台（isCodexBackgroundRequest）：实例身份三条通道
   //（prompt_cache_key 派生 / x-agent-instance 头 / socket pid 兜底）全部跳过，
-  // meta.background 传给 agent-metrics 压报错面。turn/compaction/无标记/坏
-  // JSON 一律按用户流量——宁可漏判一个后台请求，也绝不错杀真实用户流量。
+  // meta.background 传给 agent-metrics 压报错面与展示面。turn/compaction/
+  // 用户可见 thread_source/无标记/坏 JSON 一律按用户流量——宁可漏判一个后台
+  // 请求，也绝不错杀真实用户流量。
   const turnMeta = (obj) => JSON.stringify(obj);
 
   it("unit: each of the four wire markers classifies the request as background", () => {
@@ -1415,6 +1416,59 @@ describe("openai relay /responses routes (codex)", () => {
     ), true, "thread_source=guardian_review");
     assert.equal(isCodexBackgroundRequest({ headers: { "x-openai-subagent": "guardian" } }, {}), true, "x-openai-subagent 头存在即后台");
     assert.equal(isCodexBackgroundRequest({ headers: { "x-openai-memgen-request": "true" } }, {}), true, "x-openai-memgen-request: true");
+  });
+
+  it("unit: GUI hidden-helper thread sources classify as background even on a turn kind", () => {
+    // 引擎 ThreadSource::Feature(String) 把 GUI 建线程时传的 feature 名原样
+    // 透传进 thread_source；这些 ephemeral 元数据线程（模型硬编码
+    // gpt-5.6-luna、effort=low）是后台流量，即便 request_kind 是普通 turn。
+    for (const source of [
+      "thread_title",
+      "thread_description",
+      "thread_summary",
+      "thread_title_reconsideration",
+      "ambient_suggestion_safety",
+      "ambient_suggestions",
+      "dictation_cleanup",
+      "guardian_classifier",
+    ]) {
+      assert.equal(isCodexBackgroundRequest(
+        { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: source }) } }, {},
+      ), true, `thread_source=${source}`);
+    }
+  });
+
+  it("unit: turn_trigger hits the same background table when thread_source is absent or user-shaped", () => {
+    // GUI 建线程传 threadSource、发 turn 传 turnTrigger，同源同值；任一通道
+    // 缺失时另一个兜底。thread_source 缺失或为用户值不掩护 turn_trigger 命中。
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", turn_trigger: "thread_title" }) } }, {},
+    ), true, "turn_trigger=thread_title without thread_source");
+    assert.equal(isCodexBackgroundRequest(
+      { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: "user", turn_trigger: "dictation_cleanup" }) } }, {},
+    ), true, "thread_source=user does not shield a background turn_trigger");
+  });
+
+  it("unit: user-visible thread sources stay user traffic", () => {
+    // 与 GUI 任务列表的可见性白名单同口径：这些来源对应用户看得见的工作，
+    // 误杀会丢实例行与报错横幅。
+    for (const source of [
+      "user",
+      "agent_created_thread",
+      "agent_forked_thread",
+      "ambient_suggestion_task",
+      "code_review",
+      "conversation_digest",
+      "implement_todo",
+      "automation",
+      "automated_review",
+      "conversational_onboarding",
+      "inline_edit",
+    ]) {
+      assert.equal(isCodexBackgroundRequest(
+        { headers: { "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: source, turn_trigger: source }) } }, {},
+      ), false, `thread_source=${source} must stay user traffic`);
+    }
   });
 
   it("unit: turn/compaction kinds and markerless requests stay user traffic", () => {
@@ -1451,6 +1505,22 @@ describe("openai relay /responses routes (codex)", () => {
     assert.equal(meta.agentId, "codex");
     assert.equal(meta.background, true, "background 标记随 meta 传给 agent-metrics");
     assert.equal(meta.instanceId, null, "prompt_cache_key 派生与 x-agent-instance 头都被跳过");
+  });
+
+  it("gives a GUI title-generation turn no instance row — the ghost-session regression shape", async () => {
+    // 实机复发形态（2026-09-13）：GUI 标题生成线程以 request_kind=turn +
+    // thread_source=thread_title + 一次性线程 id 作 prompt_cache_key 打到
+    // relay，旧检测器只认 memory_consolidation/guardian_review，漏判出一行
+    // codex-sess-* 幽灵实例。
+    const meta = await instanceMetaForResponsesRequest(
+      responsesBody({ prompt_cache_key: "01a09912-e5db-7463-99f2-20609d61ff43" }),
+      {
+        "x-codex-turn-metadata": turnMeta({ request_kind: "turn", thread_source: "thread_title", turn_trigger: "thread_title" }),
+      },
+    );
+    assert.equal(meta.agentId, "codex");
+    assert.equal(meta.background, true, "标题生成线程判后台");
+    assert.equal(meta.instanceId, null, "一次性线程 id 不产生实例行");
   });
 
   it("never consults the socket pid fallback or the late-bind channel for background traffic", async () => {
