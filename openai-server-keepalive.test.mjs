@@ -628,8 +628,8 @@ describe("plan A: whole-turn hold in enhanced mode", () => {
       await res.text();
       const status = await collector.getAgentsStatus();
       const zcode = status.find((a) => a.id === "zcode");
-      // 20 tokens over a 300ms generation segment → ~66.7 tok/s. The
-      // pre-fix regression measured over the whole 700ms request → 28.6.
+      // 20 tokens over a 300ms generation segment → ~66.7 tok/s. Measuring over
+      // the whole 700ms request instead would give 28.6, so the two are separable.
       assert.ok(Math.abs(zcode.metrics.tps - 66.7) < 1, `tps must reflect the generation segment, got ${zcode.metrics.tps}`);
       assert.ok(Math.abs(zcode.metrics.lastTtftMs - 400) < 5, `ttft must reflect the upstream first token, got ${zcode.metrics.lastTtftMs}`);
     });

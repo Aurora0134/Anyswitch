@@ -47,9 +47,9 @@ const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 
 // GET /api/settings decorates its response with watchdog drift visibility
 // (registry task present vs watchdog process answering). Both probes cost real
-// time — a PowerShell Get-ScheduledTask spawn (~0.9s measured) plus an HTTP
-// liveness probe — and the panel page fetches /api/settings on every load to
-// hydrate the 抗截断 toggle, so paying them per GET delayed that toggle >1s.
+// time — a PowerShell Get-ScheduledTask spawn plus an HTTP liveness probe —
+// and the panel page fetches /api/settings on every load to hydrate the 抗截断
+// toggle, so paying them per GET made that toggle wait on the probes.
 // The snapshot is stale-while-revalidate: once a probe round has settled,
 // GETs return instantly (stale values past the TTL) while one shared
 // background round refreshes. POST followAgent invalidates so the next GET
@@ -1429,7 +1429,7 @@ export function createPanelRouter({
         const endpoint = url.searchParams.get("endpoint");
         const file = url.searchParams.get("path");
         if (!endpoint || !file) {
-          return sendJson(res, 400, { ok: false, error: "endpoint 和 path 参数不能为空" });
+          return sendJson(res, 400, { ok: false, error: "endpoint and path query params are required" });
         }
         try {
           const messages = await svc.loadMessages(endpoint, file);
@@ -1445,7 +1445,7 @@ export function createPanelRouter({
           if (!Array.isArray(body?.items) || body.items.length === 0
             || body.items.some((it) => typeof it?.endpoint !== "string" || !it.endpoint
               || typeof it?.file !== "string" || !it.file)) {
-            return sendJson(res, 400, { ok: false, error: "items 必须是非空的 {endpoint, file} 数组" });
+            return sendJson(res, 400, { ok: false, error: "items must be a non-empty array of { endpoint, file }" });
           }
           const result = await svc.deleteSessions(body.items);
           // 响应契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
@@ -1546,7 +1546,7 @@ export function createPanelRouter({
           if (path === "/panel/api/skills/resolve-conflict") {
             const direction = requireString(body.direction, "direction");
             if (direction !== "repo" && direction !== "local") {
-              return sendJson(res, 400, { ok: false, error: 'direction 必须是 "repo" 或 "local"' });
+              return sendJson(res, 400, { ok: false, error: 'direction must be "repo" or "local"' });
             }
             const result = await svc.resolveConflictSkill({
               endpointId: requireString(body.endpointId, "endpointId"),
