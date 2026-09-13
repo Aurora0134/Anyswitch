@@ -6,8 +6,8 @@
 // → wscript → zcode-launcher → relay chain (broken every ZCode update), one
 // node process binds 127.0.0.1:47821 for the whole session. ZCode becomes a
 // pure consumer: it reads config.json (already pointing at 127.0.0.1:47821 with
-// the persistent pi-relay-token) and just connects. The shortcut is no longer
-// load-bearing for relay availability.
+// the persistent pi-relay-token) and just connects. Relay availability therefore
+// does not depend on the desktop shortcut.
 //
 // The control panel is mounted *inside* this same server (panel.mjs), so relay
 // up ⇔ panel up — no separate daemon process, no supervisor probe loop, no tray.
@@ -176,8 +176,8 @@ export async function startResidentRelay(options = {}) {
   if (reused) {
     // Port 47821 already answers the relay probe — another relay (likely a
     // per-launch zcode-launcher instance, or a prior resident host) is already
-    // serving. Rather than fight for the port or idle pointlessly, exit 0: the
-    // existing instance owns 47821, and the autostart entry will simply succeed
+    // serving. Exit 0 rather than compete for the port: the existing instance
+    // owns 47821, and the autostart entry will simply succeed
     // no-op next login if the resident host is already up.
     logger.warn(`port ${RELAY_PORT} already has a relay serving; this resident host will not double-bind. Exiting 0.`);
     return { port, token: deps.token, close, reused: true };

@@ -5,7 +5,7 @@
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
-// scan() returns SessionMeta[] with the 9-field contract (REVIEW-FINDINGS B1):
+// scan() returns SessionMeta[] with a 9-field contract:
 //   endpoint / id / title / summary / project / file / createdAt / lastActive /
 //   resumeCommand
 // loadMessages(file) returns { role, content, ts }[] (or a degraded note for
@@ -45,15 +45,13 @@ const SUMMARY_MAX_CHARS = 160;
 
 // Resume-command template table — the single place commands are assembled.
 // The frontend treats resumeCommand as an opaque string and never builds one
-// itself (REVIEW-FINDINGS B2). Empty string = syntax not verified with
-// `--help`; the UI greys out the resume button for those endpoints.
-// Verified 2026-09-08 on this machine:
-//   claude --resume <id>     (claude --help: "-r, --resume [value] Resume a conversation by session ID")
-//   kimi --session <id>      (kimi --help: "-S, --session [id] Resume a session. With ID: resume that session.")
-//   pi --session <path|id>   (pi --help: "--session <path|id> Use specific session file or partial UUID")
-//   opencode --session <id>  (opencode --help: "-s, --session  session id to continue")
-// Not verified (no resume flag in --help): dsh (chat has no resume option),
-// zcode / qoder / reasonix (no CLI on PATH to check) → left empty.
+// itself. An empty string means no resume command is offered for that client,
+// and the UI greys out the resume button accordingly. The flags below are the
+// ones each CLI documents in its own `--help`:
+//   claude --resume <id>     (-r, --resume [value])
+//   kimi --session <id>      (-S, --session [id])
+//   pi --session <path|id>   (--session <path|id>, accepts a partial UUID)
+//   opencode --session <id>  (-s, --session)
 const RESUME_COMMAND = Object.freeze({
   claude: (meta) => `claude --resume ${meta.id}`,
   kimi: (meta) => `kimi --session ${meta.id}`,
@@ -589,12 +587,11 @@ function createKimiAdapter(roots) {
     return null;
   }
 
-  // Last activity = newest `agents/<id>/wire.jsonl`. Reached via one readdir +
-  // one stat per agent instead of a full recursive walk of the session dir,
-  // which on this machine meant stat'ing up to 1970 files per session just to
-  // answer "when was this conversation last active". Semantic change: tool
-  // results and task logs written after the last transcript append no longer
-  // count — the transcripts are what "session activity" means here.
+  // Last activity = newest `agents/<id>/wire.jsonl`. One readdir + one stat per
+  // agent, never a recursive walk of the session dir: a walk has to stat every
+  // tool-result and task-log file it contains just to answer "when was this
+  // conversation last active". Activity therefore means transcript activity —
+  // tool results and task logs written after the last transcript don't count.
   function latestWireMtime(sessionDir) {
     const agentsDir = join(sessionDir, "agents");
     let entries;
@@ -653,11 +650,10 @@ function createKimiAdapter(roots) {
       const target = assertUnderRoots(file, roots);
       const wire = join(target, "agents", "main", "wire.jsonl");
       const messages = [];
-      // Real wire.jsonl shape (census of 1033 on-disk transcripts, 2026-09-10):
-      // assistant text and tool activity NEVER appear as top-level "text" /
-      // "tool.call" events — they are nested inside "context.append_loop_event"
-      // as content.part / tool.call / tool.result. The two top-level branches
-      // this loop used to have matched zero events across every real file.
+      // Real wire.jsonl shape: assistant text and tool activity NEVER appear as
+      // top-level "text" / "tool.call" events — they are nested inside
+      // "context.append_loop_event" as content.part / tool.call / tool.result.
+      // Reading only top-level events yields an empty transcript for every file.
       for (const value of parseJsonl(readFileSync(wire, "utf8"))) {
         if (value.type === "prompt.accepted") {
           // turn.prompt carries the same user input — not read here, or every
@@ -1261,9 +1257,9 @@ function createOpencodeAdapter(roots) {
 // %APPDATA%\reasonix\projects\<munged-workspace>\sessions\<session>.jsonl, one
 // JSON object per line. The app's catalog (catalog_sessions inside
 // %LOCALAPPDATA%\reasonix\session-catalog\v5.sqlite) is a DERIVED index: it
-// lags the files it points at — this machine had a listed row whose transcript
-// the app had already moved into its own .trash, so opening it could only fail
-// — and it only covers the directories it happened to scan. The filesystem is
+// lags the files it points at — a listed row can point at a transcript the app
+// has already moved into its own .trash — and it only covers the directories it
+// happened to scan. The filesystem is
 // therefore the discovery source and the catalog only enriches rows it still
 // knows about. A turn that only calls tools is an assistant row carrying
 // tool_calls and no content at all.
@@ -1577,7 +1573,7 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
     },
 
     // Serial per-item deletes: { ok: [...], fail: [{ endpoint, file, reason }] }.
-    // Items carry {endpoint, file} (REVIEW-FINDINGS B3) so the roots whitelist
+    // Items carry {endpoint, file} so the roots whitelist
     // check runs inside the right adapter without a lookup race.
     async deleteSessions(items) {
       const ok = [];

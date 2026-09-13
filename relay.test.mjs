@@ -66,7 +66,7 @@ function messageBody(model) {
   return { model, max_tokens: 16, messages: [{ role: "user", content: "hello" }] };
 }
 
-// ---------- §1.2 / §1.3 wire ID ----------
+// ---------- wire ID pack/unpack ----------
 
 test("packWireId prefixes canonical id", () => {
   assert.equal(packWireId("poke-api", "claude-opus-5"), "anthropic/poke-api/claude-opus-5");
@@ -131,7 +131,7 @@ test("unpack refuses ambiguous unqualified relay models", () => {
   assert.equal(out.reason, UNPACK_REASON.AMBIGUOUS_UNQUALIFIED);
 });
 
-test("unpack is case sensitive on the prefix (§1.5 no normalisation)", () => {
+test("unpack is case sensitive on the prefix (no normalisation)", () => {
   for (const bad of ["Anthropic/p/m", "ANTHROPIC/p/m"]) {
     assert.equal(unpackWireId(bad).reason, UNPACK_REASON.NOT_WIRE_ID);
   }
@@ -213,7 +213,7 @@ test("every catalog entry unpacks back to a store hit", async () => {
   }
 });
 
-test("buildWireCatalog fails whole catalog on collision (§1.5)", () => {
+test("buildWireCatalog fails whole catalog on collision", () => {
   // "a" + "b/m" and "a/b" + "m" would collide, but the second provider id is
   // itself illegal, so packWireId rejects it before a partial catalog is built.
   const store = {
@@ -344,7 +344,7 @@ test("buildModelsResponse emits wire ids only", () => {
   assert.equal(body.has_more, false);
 });
 
-// ---------- §2.5 auth ----------
+// ---------- auth ----------
 
 test("extractPresentedToken handles bare and Bearer forms", () => {
   assert.equal(extractPresentedToken({ authorization: "abc" }), "abc");
@@ -396,7 +396,7 @@ test("discovery also requires the token", async () => {
   assert.equal((await handler.handleModels(AUTH)).status, 200);
 });
 
-// ---------- §2.3 error surface ----------
+// ---------- error surface ----------
 
 test("non-object body is 400", async () => {
   const handler = createHandler(makeDeps());
@@ -411,7 +411,7 @@ test("missing model is 400", async () => {
   assert.equal(out.status, 400);
 });
 
-test("unknown bare model is 400 with no official passthrough (§2.4)", async () => {
+test("unknown bare model is 400 with no official passthrough", async () => {
   let upstreamCalls = 0;
   const handler = createHandler(
     makeDeps({ upstreamFetch: async () => { upstreamCalls += 1; throw new Error("must not run"); } }),
@@ -549,7 +549,7 @@ test("malformed upstream JSON is 502", async () => {
   assert.equal(out.status, 502);
 });
 
-// ---------- §2.6 409 on stale catalog ----------
+// ---------- 409 on stale catalog ----------
 
 test("catalog change after discovery is 409 and never hits upstream", async () => {
   let upstreamCalls = 0;
@@ -617,10 +617,10 @@ function gateFixture() {
   return { handler, store, calls, snapshotOf: () => snapshot };
 }
 
-test("a change to a channel this request never touches still routes (§2.6 blast radius)", async () => {
-  // The bug this pins: refreshing or re-pointing some OTHER provider used to
-  // 409 every in-flight session in the process, because the whole catalog was
-  // one digest.
+test("a change to a channel this request never touches still routes (blast radius)", async () => {
+  // Refreshing or re-pointing some OTHER provider must not 409 every in-flight
+  // session in the process: the generation digest is scoped to what this
+  // request actually depends on.
   const { handler, store, calls } = gateFixture();
   await handler.handleModels(AUTH);
   store.providers["nvidia-nim"].baseURL = "https://elsewhere.invalid/v1";
@@ -631,7 +631,7 @@ test("a change to a channel this request never touches still routes (§2.6 blast
   assert.equal(calls.upstream, 1);
 });
 
-test("adding or refreshing models never invalidates a live session (§2.6)", async () => {
+test("adding or refreshing models never invalidates a live session", async () => {
   const { handler, store, calls } = gateFixture();
   await handler.handleModels(AUTH);
 
@@ -643,7 +643,7 @@ test("adding or refreshing models never invalidates a live session (§2.6)", asy
   assert.equal(calls.upstream, 1);
 });
 
-test("a channel created after discovery routes (§2.6)", async () => {
+test("a channel created after discovery routes", async () => {
   const { handler, store, calls } = gateFixture();
   await handler.handleModels(AUTH);
   store.providers["brand-new"] = {
@@ -659,7 +659,7 @@ test("a channel created after discovery routes (§2.6)", async () => {
   assert.equal(calls.upstream, 1);
 });
 
-test("a model the session uses going away is a 404, not a stale catalog (§2.6)", async () => {
+test("a model the session uses going away is a 404, not a stale catalog", async () => {
   const { handler, store, calls } = gateFixture();
   await handler.handleModels(AUTH);
   delete store.providers["poke-api"].models["claude-opus-5"];
@@ -669,7 +669,7 @@ test("a model the session uses going away is a 404, not a stale catalog (§2.6)"
   assert.equal(calls.upstream, 0);
 });
 
-test("the request's own channel being re-pointed is 409 with no key and no upstream (§2.6)", async () => {
+test("the request's own channel being re-pointed is 409 with no key and no upstream", async () => {
   const { handler, store, calls } = gateFixture();
   await handler.handleModels(AUTH);
   store.providers["poke-api"].baseURL = "https://attacker.invalid/v1";
@@ -682,7 +682,7 @@ test("the request's own channel being re-pointed is 409 with no key and no upstr
   assert.match(out.body.error.message, /re-run model discovery/);
 });
 
-test("a pool request gates over the members it can call (§2.6)", async () => {
+test("a pool request gates over the members it can call", async () => {
   const { handler, store } = gateFixture();
   store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
   await handler.handleModels(AUTH);
@@ -700,7 +700,7 @@ test("a pool request gates over the members it can call (§2.6)", async () => {
   assert.match(stale.body.error.message, /poke-api/);
 });
 
-test("a pool member that cannot serve this model never gates the request (§2.6)", async () => {
+test("a pool member that cannot serve this model never gates the request", async () => {
   // nvidia-nim has no claude-opus-5, so no request for that model can reach it.
   const { handler, store } = gateFixture();
   store.pools = { "poke-pool": { displayName: "Poke Pool", members: ["poke-api", "nvidia-nim"] } };
@@ -712,7 +712,7 @@ test("a pool member that cannot serve this model never gates the request (§2.6)
   assert.deepEqual(plan.members.map((member) => member.memberId), ["poke-api"]);
 });
 
-test("an auto-route request gates over every node its chain can reach (§2.6)", async () => {
+test("an auto-route request gates over every node its chain can reach", async () => {
   const { handler, store } = gateFixture();
   store.providers["side-api"] = {
     displayName: "Side API",
@@ -739,7 +739,7 @@ test("an auto-route request gates over every node its chain can reach (§2.6)", 
   assert.match(stale.body.error.message, /nvidia-nim/);
 });
 
-test("a refused auto-route request spends no backoff probe (§2.6)", async () => {
+test("a refused auto-route request spends no backoff probe", async () => {
   const { handler, store, snapshotOf } = gateFixture();
   store.routingChains = { claude: { chain: [{ node: "poke-api", model: "claude-opus-5" }] } };
   await handler.handleModels(AUTH, "claude");
@@ -757,7 +757,7 @@ test("a refused auto-route request spends no backoff probe (§2.6)", async () =>
   assert.ok(snapshotOf(), "the snapshot itself stays bound; only discovery re-binds it");
 });
 
-test("another endpoint's discovery does not break this endpoint's live channel (§2.6)", async () => {
+test("another endpoint's discovery does not break this endpoint's live channel", async () => {
   // The resident relay shares one snapshot across every endpoint: re-binding it
   // for one client must not invalidate a channel another client is using.
   const { handler, store, calls } = gateFixture();

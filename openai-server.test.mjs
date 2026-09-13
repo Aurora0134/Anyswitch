@@ -394,7 +394,7 @@ describe("openai relay transport", () => {
 
   it("attributes the requesting endpoint from the `~` identity prefix in the URL segment", async () => {
     // Qoder 既发不出 x-agent-id、UA 里也没有自家标识，认端点的通道只剩 URL 段。
-    // 这里一次钉住四条契约：前缀认端点、stats 的 providerId 必须是剥离后的真实渠道
+    // 这里一次覆盖四条契约：前缀认端点、stats 的 providerId 必须是剥离后的真实渠道
     // （否则 journal 落下 store 里不存在的「qoder~poke-api」幽灵渠道）、显式头仍压在
     // 前缀之上、未知前缀一律作废回落。
     const metas = [];
@@ -737,7 +737,7 @@ describe("openai relay transport", () => {
 
   it("flags mid-word truncation: content delivered, no [DONE] and no finish_reason, latch a 502 on the tracker", async () => {
     // The 字中截断 shape: text was flowing, then the TCP stream simply ends.
-    // Previously classified as a healthy completion — the client treated
+    // Classifying this as a healthy completion would make the client treat
     // partial output as the full response.
     let endedInfo = null;
     const fakeCollector = {
@@ -1008,8 +1008,8 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
       assert.equal(body.usage.input_tokens, 11, "the client still gets the Anthropic-shaped usage");
 
       assert.ok(endedInfo, "tracker.recordEnd was called");
-      // The tracker only reads prompt_tokens/completion_tokens — the raw
-      // Anthropic shape ({input_tokens, output_tokens}) used to record 0.
+      // The tracker only reads prompt_tokens/completion_tokens, so the raw
+      // Anthropic shape ({input_tokens, output_tokens}) has to be mapped first.
       assert.equal(endedInfo.usage.prompt_tokens, 11);
       assert.equal(endedInfo.usage.completion_tokens, 7);
     } finally {
@@ -1033,7 +1033,7 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
   });
 });
 
-// B·进程与端口安全: probeRelay is the trust check behind relay reuse (EADDRINUSE
+// probeRelay is the trust check behind relay reuse (EADDRINUSE
 // in listenLoopback) and relay start/stop status, so a bare 200 from an
 // unrelated loopback service on 47821 must not count as "our relay" — GET /
 // must answer {service:"anyswitch-relay"}.

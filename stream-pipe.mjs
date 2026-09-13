@@ -4,11 +4,10 @@
 // One parameterized pipe (pipeGuardedStream) plus one
 // parameterized keep-alive retry loop (runStreamWithKeepAlive); each server
 // contributes only a thin channel descriptor carrying its wire format, error
-// body shape, log labels and tracker bookkeeping. Behavior is the union of
-// the three former per-server copies — flag semantics, silent 5xx retries and
-// tracker/log semantics are unchanged.
+// body shape, log labels and tracker bookkeeping. Any behaviour change here
+// reaches all three frontends at once, so per-server copies must not reappear.
 //
-// Common guarantees preserved from the copies:
+// Guarantees the three frontends rely on:
 //   - OpenAIStreamGuard valves the upstream bytes; nothing is forwarded until
 //     the stream proves itself usable (holdEntireTurn under enhanced mode).
 //   - committed means real content bytes were sent; keep-alive pings do not
@@ -104,8 +103,8 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, enh
   const onResClose = () => {
     // Watch res, not req: on Node >= 16 the IncomingMessage "close" event
     // fires as soon as the request body is consumed, so a listener attached
-    // after readBody() never fires — the previous clientAborted detection was
-    // dead code. The ServerResponse "close" does fire when the client socket
+    // after readBody() never fires at all and would silently miss every
+    // abort. The ServerResponse "close" does fire when the client socket
     // is destroyed mid-response, and also after a normal finish (guarded by
     // the writableEnded check below).
     if (!res.writableEnded) {
@@ -530,7 +529,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 
       if (outcome.outcome !== "retryable") {
         // Success or already committed/aborted/terminal. A committed stream
-        // (real content bytes written) never fails over — the red line.
+        // (real content bytes written) never fails over to another member:
         if (outcome.outcome === "ok") channel.onMemberSuccess?.(member);
         channel.onSettled(outcome, attempt);
         return;

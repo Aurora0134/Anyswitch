@@ -1,4 +1,4 @@
-// agent-watchdog unit tests (B·进程与端口安全).
+// agent-watchdog unit tests.
 //
 // probeWatchdog must validate the marker port's JSON body (watchdog === true),
 // not just a 200 status; stopWatchdog applies the same PID identity gate as
@@ -147,9 +147,9 @@ test("stopWatchdog is fail-safe when the command line cannot be queried", async 
   assert.deepEqual(killed, []);
 });
 
-// --- A1: stopWatchdog async owner path (R8 coverage) -------------------------
+// --- stopWatchdog async owner path -------------------------
 
-test("stopWatchdog kills an owner PID that arrives as a Promise (R8: filter must not drop it)", async () => {
+test("stopWatchdog kills an owner PID that arrives as a Promise (a Promise owner must not be dropped)", async () => {
   const { envRoot, dataRoot } = makeWatchdogRoot();
   writeWatchdogPidFile(dataRoot, 888);
 

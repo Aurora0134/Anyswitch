@@ -338,7 +338,7 @@ test("resolveClaudeExecutable treats an empty override as unset", () => {
   assert.match(resolved, /claude\.exe$/i);
 });
 
-// --- realGetClaudeVersion deadline (B·进程与端口安全) ------------------------
+// --- realGetClaudeVersion deadline ------------------------
 //
 // A hung `claude --version` must never block the launch forever: past the
 // deadline the child is killed and the probe resolves null, which flows into

@@ -1,14 +1,13 @@
-// Shared sidecar read/write for the five per-agent merge modules
-// (kimi/zcode/dsh/reasonix/pi). Each module used to carry a byte-identical
-// copy of these two functions; the on-disk contract is one JSON object
+// Shared sidecar read/write for the per-agent merge modules
+// (kimi/zcode/dsh/reasonix/pi/qoder). The on-disk contract is one JSON object
 // { "providers": [ids…] } — ids sorted, 2-space indent, trailing newline —
 // written through atomicWriteFile so a crash never leaves a half-written
 // sidecar. The sidecar is a cache of "what we injected last time", never user
 // data, so a missing or corrupt file reads back as an empty managed list
 // (fail-open) rather than failing the merge.
 //
-// Also home to the shared auto-routing pseudo-channel derivation (chain
-// routing, wave 2): endpoint-aware, so it lives here rather than in
+// Also home to the shared auto-routing pseudo-channel derivation:
+// endpoint-aware, so it lives here rather than in
 // pool-providers.mjs, whose deriveVisibleChannels is deliberately
 // endpoint-agnostic.
 

@@ -1,4 +1,4 @@
-// relay-host unit tests (B·进程与端口安全): startup log rotation and the
+// relay-host unit tests: startup log rotation and the
 // synchronous crash-log path used by the fatal handlers. All file work happens
 // in an os.tmpdir() sandbox — the production logs/relay-host.log is never
 // touched.
