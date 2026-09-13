@@ -5,8 +5,7 @@
 //      non-elevated users (the CLI path demands admin no matter the flags).
 //   2. HKCU\...\Run registry key — works per-user without elevation, but some
 //      machines suppress the ENTIRE user-level Run processing at logon (all
-//      HKCU entries skipped while HKLM ones fire; observed 2026-08-24 with
-//      OneDrive/QQNT/Thunder hit alongside Anyswitch). No code bug — the shell
+//      HKCU entries skipped while HKLM ones fire). No code bug — the shell
 //      just never runs the entries.
 //   3. PowerShell Register-ScheduledTask with an Interactive/Limited
 //      principal and an AtLogOn trigger — succeeds non-elevated, is launched

@@ -49,7 +49,7 @@ describe("agent-prompts-inject endpoint table", () => {
     // reasonix lives under %APPDATA%, never homeDir-relative.
     assert.equal(byId.reasonix.target, join(appData, "reasonix", "AGENTS.md"));
     // qoder gets its own file under the user-level rules dir — never the user's
-    // own ~/.qoder/AGENTS.md (verified injection surface, 2026-09-09).
+    // own ~/.qoder/AGENTS.md, which Anyswitch must not touch.
     assert.equal(byId.qoder.target, join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.codex.target, join(homeDir, ".codex", "AGENTS.md"));
     assert.equal(byId.kimi.hotReload, true);

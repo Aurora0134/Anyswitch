@@ -1,10 +1,10 @@
 // 收起态折线图渲染门控——行为回归测试。
-// 背景：栏的「展开 ▾/收起 ▴」折叠只对四宫格切 hidden（CSS display:none），
-// 修复前渲染路径对折叠态无感知：收起的栏每秒仍对隐藏 SVG 写折线 d 属性
-// （生成中每实例 3 条 × 1s 的 JS 空转写）。本文件钉住修后的三个行为：
+// 栏的「展开 ▾/收起 ▴」折叠只对四宫格切 hidden（CSS display:none），所以渲染
+// 路径必须同样感知折叠态，否则收起的栏每秒仍会对隐藏 SVG 写折线 d 属性
+// （生成中每实例 3 条 × 1s 的 JS 空转写）。本文件覆盖三个行为：
 // ① 收起态渲染实例行：零 updateSparkline 调用（buffer 照常累积，曲线连续性不受影响）；
 // ② 展开瞬间（折叠钮 → applyDetailFold）立即用已攒 buffer 补绘，不等下一轮 1s 轮询；
-// ③ 展开态渲染行为与修前一致（tps/ttft/cache 三条，cache 锁 0-100 量程）。
+// ③ 展开态渲染行为（tps/ttft/cache 三条，cache 锁 0-100 量程）。
 // 端点级旧机制（zcode/dsh/reasonix）行为见文件尾 describe。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";

@@ -4,11 +4,16 @@ Anyswitch
 Third-party trademarks
 ----------------------
 
-The control panel embeds icons and brand colors of third-party products and
-services — including but not limited to ZCode, Claude, DeepSeek, Reasonix,
-and Kimi. These names, logos, icons, and brand colors are
-trademarks of their respective owners. They are used solely for product
-identification purposes; no endorsement of or affiliation with Anyswitch is
-implied.
+The control panel displays the names, logos, icons and brand colors of the
+third-party products it integrates with: ZCode, Claude Code, DeepSeek (DSH),
+Reasonix, Kimi Code, Qoder, OpenCode, and Pi. Anyswitch also reads and writes
+configuration files belonging to these products on the user's own machine.
 
-`anyswitch.ico` is original artwork created for this project.
+These names, logos, icons and brand colors are trademarks of their respective
+owners. They are used solely to identify the products Anyswitch integrates
+with. Anyswitch is not affiliated with, sponsored by, or endorsed by the owners
+of any of these marks, and no such relationship should be inferred.
+
+`anyswitch.ico` is original artwork created for this project. It is not
+referenced by any file in this repository: it is used from outside the repo, as
+the icon of the desktop shortcut that launches the control panel.

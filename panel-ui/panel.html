@@ -748,7 +748,7 @@
   /* 全部刷新完成：「刷新完成」整体高光（实色，不再逐字滚动）；失败信息只靠
      tail 内红色分段表达，完成态不再整行染红 */
   .store-refresh-status .srs-done { color: var(--accent); font-weight: 600; }
-  /* tail 右侧的「展示diff」高光小字：与 tail 同字号，accent 实色可点击；
+  /* tail 右侧的「查看差异」高光小字：与 tail 同字号，accent 实色可点击；
      仅完成态且本轮确有增减/失败时挂出，随状态小字同一个 10s 淡出计时 */
   .store-refresh-status .srs-diff-link {
     margin-left: 0.6em; color: var(--accent); font-weight: 600; cursor: pointer;
@@ -1192,7 +1192,7 @@
   .route-chain-ep { font-size: 12.5px; font-weight: 600; color: var(--text); }
   .route-chain-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
   .route-chain-card-actions .btn { padding: 3px 10px; font-size: 12px; }
-  /* 刷新差异弹窗（渠道刷新「展示diff」）：中等宽幅，左右分栏按单元分组列出
+  /* 刷新差异弹窗（渠道刷新「查看差异」）：中等宽幅，左右分栏按单元分组列出
      本轮新增/移除的模型 id；失败渠道在分栏上方单列一区。着色只引语义 token，
      绿/红底高光由 color-mix 派生，五主题零改动 */
   .diff-modal-overlay .modal-card { max-width: 720px; }
@@ -1704,426 +1704,6 @@
 
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
-  /* ===== style-lab: neon（已退役不可选；片段暂保留，预览机制整体退役时移除） ===== */
-/* ==========================================================================
-   neon · 赛博控制台 — Anyswitch 面板美术风格片段（临时预览机制）
-   状态：已从设置弹窗选项中移除（退役），此处 CSS 本体暂不删除，
-   待整个 style-lab 预览机制退役时一并清理。
-   设计：近黑深底（微冷色倾向）+ 青/电蓝霓虹 accent + 克制 glow；
-   等宽字体激进用于标题/数字/按钮；语义色保持高区分度（绿/琥珀/品红/青）。
-   亮色版 = 同一美学的浅色诠释：浅冷灰底 + 同色系 accent，glow 收敛。
-   契约：见 ./CONTRACT.md —— 不改布局几何，只换皮肤。
-   ========================================================================== */
-
-/* --------------------------------------------------------------------------
-   1) 亮色 token 全集
-   -------------------------------------------------------------------------- */
-:root[data-style="neon"] {
-  color-scheme: light;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-
-  /* 浅冷灰底 + 冷白表面 */
-  --bg: #f3f7fa;
-  --bg-page: #e9f0f5;
-  --surface: #ffffff;
-  --surface-sunken: #f1f6fa;
-  --surface-hover: #e7f0f6;
-  --surface-glass: rgba(255, 255, 255, 0.9);
-
-  --text: #0b1a27;
-  --text-2: #2c4357;
-  --text-3: #5b748c;
-  --text-4: #8ba2b6;
-
-  --border: #d6e3ec;
-  --border-strong: #b4cbda;
-  --divider: #e5eef4;
-
-  /* 青色系 accent（亮色用深青保证对比度） */
-  --accent: #0891b2;
-  --accent-soft: #e0f7fc;
-  --accent-border: #8fdcec;
-
-  --ok: #059669;
-  --ok-soft: #e6f9f1;
-  --ok-border: #9de5cc;
-
-  --warn: #b45309;
-  --warn-soft: #fdf3e0;
-  --warn-border: #f0d6a2;
-
-  --danger: #e11d48;
-  --danger-soft: #fdeaef;
-  --danger-border: #f3bac7;
-
-  --pool: #7c3aed;
-  --pool-soft: #f1ebfd;
-  --pool-border: #d3bdf5;
-
-  --spark-line: #0891b2;
-  --spark-fill: rgba(8, 145, 178, 0.12);
-  --danger-glow: rgba(225, 29, 72, 0.18);
-
-  --shadow-xs: 0 1px 2px 0 rgba(11, 26, 39, 0.05);
-  --shadow-sm: 0 1px 3px 0 rgba(11, 26, 39, 0.07), 0 1px 2px -1px rgba(11, 26, 39, 0.05);
-  --shadow-md: 0 4px 8px -1px rgba(11, 26, 39, 0.08), 0 2px 4px -2px rgba(11, 26, 39, 0.05);
-  --shadow-lg: 0 12px 20px -4px rgba(11, 26, 39, 0.12), 0 4px 8px -4px rgba(11, 26, 39, 0.06);
-
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 8px;
-
-  --accent-gradient: linear-gradient(135deg, #06b6d4 0%, #2563eb 100%);
-  --accent-glow: 0 2px 8px rgba(8, 145, 178, 0.28);
-}
-
-/* --------------------------------------------------------------------------
-   2) 暗色 token 全集（显式 dark）
-   -------------------------------------------------------------------------- */
-:root[data-style="neon"][data-theme="dark"] {
-  color-scheme: dark;
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
-  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-
-  /* 近黑深底，带极微弱冷青倾向 */
-  --bg: #060a12;
-  --bg-page: #04070d;
-  --surface: #0a101c;
-  --surface-sunken: #070c16;
-  --surface-hover: #0e1728;
-  --surface-glass: rgba(8, 13, 24, 0.88);
-
-  --text: #e8f0fa;
-  --text-2: #b4c3d8;
-  --text-3: #7d90aa;
-  --text-4: #52647e;
-
-  --border: #152238;
-  --border-strong: #274361;
-  --divider: #0f1a2c;
-
-  /* 霓虹青 accent */
-  --accent: #22d3ee;
-  --accent-soft: rgba(34, 211, 238, 0.12);
-  --accent-border: rgba(34, 211, 238, 0.42);
-
-  --ok: #34d399;
-  --ok-soft: rgba(52, 211, 153, 0.12);
-  --ok-border: rgba(52, 211, 153, 0.38);
-
-  --warn: #fbbf24;
-  --warn-soft: rgba(251, 191, 36, 0.12);
-  --warn-border: rgba(251, 191, 36, 0.38);
-
-  --danger: #f43f5e;
-  --danger-soft: rgba(244, 63, 94, 0.14);
-  --danger-border: rgba(244, 63, 94, 0.42);
-
-  --pool: #b493f5;
-  --pool-soft: rgba(180,147,245,0.14);
-  --pool-border: rgba(180,147,245,0.42);
-
-  --spark-line: #22d3ee;
-  --spark-fill: rgba(34, 211, 238, 0.15);
-  --danger-glow: rgba(244, 63, 94, 0.38);
-
-  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
-  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.55), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 8px -1px rgba(0, 0, 0, 0.6), 0 2px 4px -2px rgba(0, 0, 0, 0.45);
-  --shadow-lg: 0 12px 20px -4px rgba(0, 0, 0, 0.65), 0 4px 8px -4px rgba(0, 0, 0, 0.5);
-
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 8px;
-
-  --accent-gradient: linear-gradient(135deg, #22d3ee 0%, #2563eb 100%);
-  --accent-glow: 0 0 12px rgba(34, 211, 238, 0.45);
-}
-
-/* --------------------------------------------------------------------------
-   3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同
-   -------------------------------------------------------------------------- */
-@media (prefers-color-scheme: dark) {
-  :root[data-style="neon"]:not([data-theme="light"]):not([data-theme="dark"]) {
-    color-scheme: dark;
-    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
-    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-
-    /* 近黑深底，带极微弱冷青倾向 */
-    --bg: #060a12;
-    --bg-page: #04070d;
-    --surface: #0a101c;
-    --surface-sunken: #070c16;
-    --surface-hover: #0e1728;
-    --surface-glass: rgba(8, 13, 24, 0.88);
-
-    --text: #e8f0fa;
-    --text-2: #b4c3d8;
-    --text-3: #7d90aa;
-    --text-4: #52647e;
-
-    --border: #152238;
-    --border-strong: #274361;
-    --divider: #0f1a2c;
-
-    /* 霓虹青 accent */
-    --accent: #22d3ee;
-    --accent-soft: rgba(34, 211, 238, 0.12);
-    --accent-border: rgba(34, 211, 238, 0.42);
-
-    --ok: #34d399;
-    --ok-soft: rgba(52, 211, 153, 0.12);
-    --ok-border: rgba(52, 211, 153, 0.38);
-
-    --warn: #fbbf24;
-    --warn-soft: rgba(251, 191, 36, 0.12);
-    --warn-border: rgba(251, 191, 36, 0.38);
-
-    --danger: #f43f5e;
-    --danger-soft: rgba(244, 63, 94, 0.14);
-    --danger-border: rgba(244, 63, 94, 0.42);
-
-    --pool: #b493f5;
-    --pool-soft: rgba(180,147,245,0.14);
-    --pool-border: rgba(180,147,245,0.42);
-
-    --spark-line: #22d3ee;
-    --spark-fill: rgba(34, 211, 238, 0.15);
-    --danger-glow: rgba(244, 63, 94, 0.38);
-
-    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.5);
-    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.55), 0 1px 2px -1px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 4px 8px -1px rgba(0, 0, 0, 0.6), 0 2px 4px -2px rgba(0, 0, 0, 0.45);
-    --shadow-lg: 0 12px 20px -4px rgba(0, 0, 0, 0.65), 0 4px 8px -4px rgba(0, 0, 0, 0.5);
-
-    --radius-sm: 3px;
-    --radius-md: 5px;
-    --radius-lg: 8px;
-
-    --accent-gradient: linear-gradient(135deg, #22d3ee 0%, #2563eb 100%);
-    --accent-glow: 0 0 12px rgba(34, 211, 238, 0.45);
-  }
-}
-
-/* ==========================================================================
-   皮肤覆盖规则（一律以 :root[data-style="neon"] 限定作用域）
-   只动颜色/背景/边框色/圆角/阴影/字体/字距/光晕，不碰布局几何。
-   ========================================================================== */
-
-/* 页面环境：顶部一层极淡的青色环境光（暗色更可见，亮色近乎不可察） */
-:root[data-style="neon"] body {
-  background: radial-gradient(1100px 480px at 50% -8%, rgba(8, 145, 178, 0.05), transparent 62%), var(--bg-page);
-}
-:root[data-style="neon"][data-theme="dark"] body {
-  background: radial-gradient(1100px 480px at 50% -8%, rgba(34, 211, 238, 0.07), transparent 62%), var(--bg-page);
-}
-@media (prefers-color-scheme: dark) {
-  :root[data-style="neon"]:not([data-theme="light"]):not([data-theme="dark"]) body {
-    background: radial-gradient(1100px 480px at 50% -8%, rgba(34, 211, 238, 0.07), transparent 62%), var(--bg-page);
-  }
-}
-
-/* 顶栏：玻璃底 + 一道霓虹细线光 */
-:root[data-style="neon"] header.site-head {
-  box-shadow: 0 1px 0 rgba(34, 211, 238, 0.14);
-}
-:root[data-style="neon"] .brand-icon {
-  background: var(--accent-gradient);
-  border-radius: var(--radius-md);
-  box-shadow: var(--accent-glow);
-}
-:root[data-style="neon"] .brand-text h1 {
-  font-family: var(--font-mono);
-  letter-spacing: 0.06em;
-}
-:root[data-style="neon"] .brand-text .version-tag {
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.05em;
-}
-:root[data-style="neon"] .meta-pill {
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.03em;
-}
-:root[data-style="neon"] .icon-btn {
-  border-radius: var(--radius-md);
-}
-
-/* 呼吸指示灯：停止/启动态补一点静态光晕（running 态已由脉冲动画负责） */
-:root[data-style="neon"] .pulse-dot.stopped { box-shadow: 0 0 8px var(--danger); }
-:root[data-style="neon"] .pulse-dot.starting { box-shadow: 0 0 8px var(--warn); }
-
-/* 卡片：更锐利的终端切角，hover 时边框染上霓虹青 */
-:root[data-style="neon"] .panel-card {
-  border-radius: var(--radius-lg);
-}
-:root[data-style="neon"] .panel-card:hover {
-  border-color: var(--accent-border);
-}
-:root[data-style="neon"] .card-title {
-  font-family: var(--font-mono);
-  letter-spacing: 0.05em;
-}
-
-/* 状态徽章：锐利小圆角 + 同色系微弱光晕（四色语义清晰可辨） */
-:root[data-style="neon"] .badge {
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.06em;
-}
-:root[data-style="neon"] .badge-ok { box-shadow: 0 0 8px rgba(52, 211, 153, 0.22); }
-:root[data-style="neon"] .badge-warn { box-shadow: 0 0 8px rgba(251, 191, 36, 0.22); }
-:root[data-style="neon"] .badge-danger { box-shadow: 0 0 8px rgba(244, 63, 94, 0.26); }
-:root[data-style="neon"] .badge-accent { box-shadow: 0 0 8px rgba(34, 211, 238, 0.26); }
-
-/* 按钮：等宽字体 + 字距；主按钮用品牌渐变 + 克制光晕 */
-:root[data-style="neon"] .btn {
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
-}
-:root[data-style="neon"] .btn-mini { border-radius: var(--radius-sm); }
-:root[data-style="neon"] .btn-primary {
-  background: var(--accent-gradient);
-  border-color: transparent;
-  box-shadow: var(--accent-glow);
-}
-
-/* 实时日志控制台：更深的终端黑 + 青色描边 + 极淡扫描线纹理 */
-:root[data-style="neon"] .log-console {
-  background: #04080f;
-  border-color: #12283f;
-  border-radius: var(--radius-md);
-  box-shadow: inset 0 0 28px rgba(34, 211, 238, 0.04);
-}
-:root[data-style="neon"] .log-toolbar {
-  background: #081020;
-  border-bottom-color: #12283f;
-}
-:root[data-style="neon"] .log-stream {
-  background: repeating-linear-gradient(0deg, rgba(34, 211, 238, 0.02) 0 1px, transparent 1px 3px);
-}
-:root[data-style="neon"] .log-status.live {
-  color: #34d399;
-  text-shadow: 0 0 8px rgba(52, 211, 153, 0.55);
-}
-:root[data-style="neon"] .log-clear-btn:hover {
-  background: #12283f;
-  color: #c9e6ff;
-}
-:root[data-style="neon"] .log-line .ts { color: #3d5a7a; }
-:root[data-style="neon"] .log-line.info .lvl { color: #22d3ee; }
-:root[data-style="neon"] .log-line.warn .lvl { color: #fbbf24; }
-:root[data-style="neon"] .log-line.error .lvl { color: #fb7185; }
-
-/* Agent 遥测：标题等宽化；遥测卡用浅渐变 + 锐利圆角 */
-:root[data-style="neon"] .agent-headings h3 {
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
-}
-:root[data-style="neon"] .telemetry-card {
-  border-radius: var(--radius-md);
-  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);
-}
-:root[data-style="neon"] .telemetry-card:hover {
-  border-color: var(--accent-border);
-}
-:root[data-style="neon"] .session-table-wrapper { border-radius: var(--radius-md); }
-:root[data-style="neon"] .tag-bubble {
-  border-radius: var(--radius-sm);
-  letter-spacing: 0.03em;
-}
-
-/* 告警条：锐利圆角 + 危险光晕 */
-:root[data-style="neon"] .alert-box { border-radius: var(--radius-md); }
-:root[data-style="neon"] .alert-box.danger { box-shadow: 0 0 14px var(--danger-glow); }
-
-/* 开关 Toggle：开启时带霓虹光晕 */
-:root[data-style="neon"] .toggle input:checked + .slider {
-  background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
-}
-
-/* seg-control / view-tabs：选中态改为霓虹青高光 */
-:root[data-style="neon"] .seg-control,
-:root[data-style="neon"] .view-tabs {
-  border-radius: var(--radius-md);
-}
-:root[data-style="neon"] .seg-btn,
-:root[data-style="neon"] .view-tab {
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
-}
-:root[data-style="neon"] .seg-btn[aria-checked="true"],
-:root[data-style="neon"] .view-tab.active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: var(--accent-border);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.16);
-}
-
-/* Toast：等宽字体 + 一圈淡青光 */
-:root[data-style="neon"] .toast {
-  border-radius: var(--radius-md);
-  font-family: var(--font-mono);
-  letter-spacing: 0.03em;
-  box-shadow: var(--shadow-md), 0 0 16px rgba(34, 211, 238, 0.12);
-}
-
-/* 弹窗：青色描边 + 环境光晕；标题等宽化；数字输入框聚焦发光 */
-:root[data-style="neon"] .modal-card {
-  border-radius: var(--radius-lg);
-  border-color: var(--accent-border);
-  box-shadow: var(--shadow-lg), 0 0 24px rgba(34, 211, 238, 0.1);
-}
-:root[data-style="neon"] .modal-head h3 {
-  font-family: var(--font-mono);
-  letter-spacing: 0.04em;
-}
-:root[data-style="neon"] .modal-number {
-  border-radius: var(--radius-sm);
-  font-family: var(--font-mono);
-}
-:root[data-style="neon"] .modal-number:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.22);
-}
-
-/* Skills 输入控件：统一锐利圆角 + 聚焦霓虹光 */
-:root[data-style="neon"] .skills-path-input,
-:root[data-style="neon"] .skills-repo-path,
-:root[data-style="neon"] .skills-diff-list {
-  border-radius: var(--radius-sm);
-}
-:root[data-style="neon"] .skills-path-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 8px rgba(34, 211, 238, 0.2);
-}
-
-/* Skills 视图：选中行青光描边 + 对勾发光；端点点亮时带光晕 */
-:root[data-style="neon"] .skills-list-row.selected {
-  border-left-color: var(--accent);
-  box-shadow: inset 0 0 14px rgba(34, 211, 238, 0.05);
-}
-:root[data-style="neon"] .skills-list-row.selected::before {
-  text-shadow: 0 0 6px var(--accent);
-}
-/* 异常卡待处理行选中：同样的青光描边 + 对勾发光 */
-:root[data-style="neon"] .skills-anomaly-task.selected {
-  box-shadow: inset 0 0 14px rgba(34, 211, 238, 0.05);
-}
-:root[data-style="neon"] .skills-anomaly-task.selected::before {
-  text-shadow: 0 0 6px var(--accent);
-}
-:root[data-style="neon"] .skills-ctx-menu { border-radius: var(--radius-md); }
-:root[data-style="neon"] .skills-ctx-item:hover {
-  text-shadow: 0 0 6px rgba(34, 211, 238, 0.35);
-}
-:root[data-style="neon"] .skills-dup-warn { border-radius: var(--radius-sm); }
-
   /* ===== style-lab: saas ===== */
 /* ==========================================================================
    风格片段：saas｜现代 SaaS · Linear 风
@@ -2132,7 +1712,7 @@
    主色：深海青 teal-cyan（亮 #0b7f96 / 暗 #3ec2d6，色相 ~190），
    与经典蓝 #3b82f6（~217）、ok 绿 #0d9d70（~158）均拉开明显色相距离。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于 :root[data-style="saas"]，
+   布局级覆盖清单（契约放宽项，全部 scoped 于 :root[data-style="saas"]，
    不触碰 .view-tabs / .seg-control 几何，仅做圆角与装饰）：
    1. border-radius 全量上调：卡片 / 按钮 / 徽章 / 输入 / 浮层 / toggle /
       seg-control & view-tabs 容器与选中块（圆角值，不改尺寸）。
@@ -2608,7 +2188,7 @@
    不进语义色。亮色套为「极地白昼」演绎：冰白底 + 极淡极光晕，玻璃感保留。
    仅换肤：不改 DOM、不改文案、不动 .view-tabs / .seg-control 几何。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 于本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 于本主题选择器下）：
    1. --radius-sm/md/lg 放大至 10/14/20（经典基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
@@ -3193,7 +2773,7 @@
    细线框、标注字距、小圆角、硬偏移"裁切"投影、卡片四角对位标记（伪装饰，
    用 background 多层渐变实现，不占布局）；数字/标签走等宽字体。
 
-   布局级覆盖清单（本轮契约放宽项，全部 scoped 在本主题选择器下）：
+   布局级覆盖清单（契约放宽项，全部 scoped 在本主题选择器下）：
    1. header.site-head：border-bottom 加宽到 2px + 1px 副线阴影（图框双线）。
    2. 硬偏移投影：--shadow-xs/sm/md/lg 与 --accent-glow 用 1–6px 无模糊偏移
       （"图纸裁切"感），toast/modal/卡片沿用这些 token。
@@ -4354,8 +3934,8 @@ function panelStartupPlay() {
   });
   // 随机脉冲池：边缘 6 点两两构对 C(6,2)=15 条。几何在初始化时按最终位置算死，
   // 运行期不再逐帧写 x1/y1/x2/y2——收缩动画由容器 <g> 的整体 transform 承担，
-  // 每帧只写 2 个容器的 transform + 脉冲线的 opacity，代替原先每帧约 90 次
-  // setAttribute 走主线程布局重算，这是顿帧的主要来源。
+  // 每帧只写 2 个容器的 transform + 脉冲线的 opacity。逐帧改每条线的端点会走
+  // 主线程布局重算，那是顿帧的主要来源。
   const lines = [];
   for (let a = 1; a < points.length; a++) {
     for (let b = a + 1; b < points.length; b++) {
@@ -4603,7 +4183,7 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="card-body" style="padding:12px;">
             <div class="log-console">
               <div class="log-toolbar">
-                <span class="log-status live" id="logConn">● SSE 流畅</span>
+                <span class="log-status live" id="logConn">● 实时传输</span>
                 <button class="log-clear-btn" id="clearLog">清空</button>
               </div>
               <div class="log-stream" id="logBody"></div>
@@ -5636,7 +5216,7 @@ if (window.panelStartupController) panelStartupPlay();
             Token 趋势
           </h2>
           <div class="stats-seg-row">
-            <div class="seg-control" id="statsSegScope" role="radiogroup" aria-label="统计口径">
+            <div class="seg-control" id="statsSegScope" role="radiogroup" aria-label="分组方式">
               <button type="button" class="seg-btn" data-v="channel" role="radio" aria-checked="true">按渠道</button>
               <button type="button" class="seg-btn" data-v="endpoint" role="radio" aria-checked="false">按端点</button>
               <button type="button" class="seg-btn" data-v="model" role="radio" aria-checked="false">按模型</button>
@@ -5885,7 +5465,7 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </div>
 
-<!-- 渠道刷新：本轮差异弹窗（「展示diff」小字唤起；左右分栏按单元分组列新增/移除模型，失败渠道单列一区） -->
+<!-- 渠道刷新：本轮差异弹窗（「查看差异」小字唤起；左右分栏按单元分组列新增/移除模型，失败渠道单列一区） -->
 <div class="modal-overlay diff-modal-overlay" id="storeDiffMask">
   <div class="modal-card" role="dialog" aria-modal="true">
     <div class="modal-head">
@@ -5925,7 +5505,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="modal-item">
           <div>
             <div class="modal-item-title">跟随 Coding Agent 启动</div>
-            <div class="modal-item-desc">检测到 ZCode / Claude Code / DSH / Pi / Kimi / Reasonix 运行时自动保持 Relay 链路就绪。</div>
+            <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Reasonix / Qoder 运行时自动保持 Relay 链路就绪。</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="followAgentToggle">
@@ -6101,17 +5681,37 @@ if (window.panelStartupController) panelStartupPlay();
     t._tid = setTimeout(() => t.classList.remove("show"), 3000);
   }
 
-  async function api(method, path, body) {
+  // /panel/api/* 的失败文本按语言分两种身份：中文句子是为这个界面写的，可以直接
+  // 上屏；英文短句是校验语、短码（"cas-conflict"、"pool members must be an array…"）
+  // 或系统错误，一律换成调用方自带的中文兜底，原文交给控制台。新增端点文案要落中文，
+  // 否则会被当开发者文本吞掉。短码分支一律读 err.code（err.message 带 "HTTP <status>：" 前缀）。
+  const PANEL_UI_COPY_RE = /[\u4e00-\u9fff]/;
+
+  function panelCopy(raw, fallback) {
+    const text = String(raw == null ? "" : raw);
+    return PANEL_UI_COPY_RE.test(text) ? text : fallback;
+  }
+
+  function panelError(err, fallback) {
+    const raw = (err && err.code) || (err && err.message) || "";
+    const text = panelCopy(raw, fallback);
+    if (text === fallback) console.warn("[panel] " + fallback + " ← " + raw);
+    return text;
+  }
+
+async function api(method, path, body) {
     // server also accepts x-apicred-panel from resident processes spawned pre-rename
     const opts = { method, headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" } };
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch(API_BASE + path, opts);
     let data;
     try { data = await res.json(); } catch { data = { ok: res.ok }; }
-    // 非 2xx 或服务端显式 ok:false 一律抛出，消息带状态码与服务端 error/reason，调用方 toast 可见
+    // 非 2xx 或服务端显式 ok:false 一律抛出：message 带状态码供控制台定位，服务端原文只挂到 err.code
     if (!res.ok || data.ok === false) {
-      const detail = data.error || data.message || data.reason || "";
-      throw new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
+      const detail = String(data.error || data.message || data.reason || "");
+      const err = new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
+      err.code = detail;
+      throw err;
     }
     return data;
   }
@@ -6293,7 +5893,7 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
-  // 当前视图（B4）：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
+  // 当前视图：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
   // status 保持常开（头部状态灯跨视图可见）。首次立即取数不做门控，保证首刷。
   let currentView = "board";
   function boardVisible() { return currentView === "board"; }
@@ -6905,9 +6505,9 @@ if (window.panelStartupController) panelStartupPlay();
       // 要用与本次渲染同源的 sparkHistory，否则 ttft 曲线口径回退到本地去重 buffer。
       if (inst.sparkHistory) buf.sparkHistory = inst.sparkHistory;
       // 折叠门控：收起态跳过绘制，展开瞬间经 applyDetailFold 补绘；陈旧行不绘历史折线。
-      // 三条线统一接权威历史：tps/cache 与 ttft 同样消费 sparkHistory，刷新/丢 buffer
-      // 后首轮即由服务端历史整线恢复（此前只有 ttft 接，TPS/缓存刷新后从零攒点，
-      // 表现为折线节点丢失）。
+      // 三条线统一接权威历史：tps/cache 与 ttft 同样消费 sparkHistory，刷新或丢
+      // buffer 后的首轮即由服务端历史整线恢复。只让一条线接历史，其余两条会在刷新后
+      // 从零攒点，表现为折线节点丢失。
       if (open && !stale) {
         updateSparkline(sparkTpsId, sparkValues(buf.tps, buf.sparkHistory?.tps));
         updateSparkline(sparkCacheId, sparkValues(buf.cache, buf.sparkHistory?.cache), 0, 100);
@@ -7962,7 +7562,7 @@ if (window.panelStartupController) panelStartupPlay();
       } catch (e) {
         t.checked = !next;
         try { localStorage.setItem("panel-autostart", !next ? "1" : "0"); } catch {}
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         t.disabled = false;
       }
@@ -8075,7 +7675,7 @@ if (window.panelStartupController) panelStartupPlay();
         toast(KEEP_ALIVE_COPY[saved].toast);
       } catch (e) {
         applyKeepAliveUi(previous);
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         settingsSaving.keepAlive = false;
         if (keepAliveSlider) keepAliveSlider.setAttribute("aria-disabled", "false");
@@ -8131,7 +7731,7 @@ if (window.panelStartupController) panelStartupPlay();
         sparkWindowPoints = previous;
         resetAgentRenderFingerprints(); // B1：回滚也要重渲
         if (sparkWindowInput) sparkWindowInput.value = String(previous);
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         settingsSaving.spark = false;
       }
@@ -8169,7 +7769,7 @@ if (window.panelStartupController) panelStartupPlay();
       } catch (e) {
         keepAliveMaxRetries = previous;
         if (keepAliveRetriesInput) keepAliveRetriesInput.value = String(previous);
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         settingsSaving.keepAliveRetries = false;
       }
@@ -8207,7 +7807,7 @@ if (window.panelStartupController) panelStartupPlay();
           }
         } catch (e) {
           followAgentToggle.checked = !next;
-          toast("请求失败: " + e.message, true);
+          toast(panelError(e, "请求失败"), true);
         } finally {
           settingsSaving.followAgent = false;
           followAgentToggle.removeAttribute("aria-busy");
@@ -8237,7 +7837,7 @@ if (window.panelStartupController) panelStartupPlay();
           }
         } catch (e) {
           injectEffortToggle.checked = !next;
-          toast("请求失败: " + e.message, true);
+          toast(panelError(e, "请求失败"), true);
         } finally {
           settingsSaving.injectEffort = false;
           injectEffortToggle.removeAttribute("aria-busy");
@@ -8344,7 +7944,7 @@ if (window.panelStartupController) panelStartupPlay();
           const names = busy.map((a) => labels[a.id] || a.name || a.id).join("、");
           summary += `<p style="margin:0 0 8px;">将会打断：${names}</p>`;
         } else {
-          summary += `<p style="margin:0 0 8px;">当前没有进行中的请求，但仍会断开 47821。</p>`;
+          summary += `<p style="margin:0 0 8px;">当前没有进行中的请求，但仍会断开中继连接。</p>`;
         }
       } catch {
         summary += `<p style="margin:0 0 8px;">无法读取当前会话，仍可能打断正在进行的请求。</p>`;
@@ -8352,8 +7952,8 @@ if (window.panelStartupController) panelStartupPlay();
       // 停止 = 只动数据面、控制台保活（拆分架构的承诺）；重启 = 两个都换，页面
       // 会短暂断开并由本页自动刷新恢复。
       summary += isRestart
-        ? `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：面板服务（47820）一并重启，本页面会短暂断开、几秒后自动刷新；实时输出窗口的历史会清空（内存缓冲随进程一起没了）。</p>`
-        : `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：仅影响 47821 中继转发，当前 47820 Web 控制台保持在线。</p>`;
+        ? `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：控制面板服务一并重启，本页面会短暂断开、几秒后自动刷新；实时输出窗口的历史会随之清空。</p>`
+        : `<p style="margin:0; font-size:11.5px; color:var(--text-3);">注：仅影响中继转发，当前控制面板保持在线。</p>`;
       if (stopBody) stopBody.innerHTML = summary;
       stopModal.classList.add("show");
     }
@@ -8368,7 +7968,7 @@ if (window.panelStartupController) panelStartupPlay();
           toast("启动失败: " + (res.error || "未知错误"), true);
         }
       } catch (e) {
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         toggleBtn.disabled = false;
       }
@@ -8384,7 +7984,7 @@ if (window.panelStartupController) panelStartupPlay();
           toast("停止失败: " + (res.error || "未知错误"), true);
         }
       } catch (e) {
-        toast("请求失败: " + e.message, true);
+        toast(panelError(e, "请求失败"), true);
       } finally {
         toggleBtn.disabled = false;
       }
@@ -8407,7 +8007,7 @@ if (window.panelStartupController) panelStartupPlay();
       try {
         await api("POST", "/api/relay/restart");
       } catch (e) {
-        toast("重启失败: " + e.message, true);
+        toast(panelError(e, "重启失败"), true);
         restartBtn.disabled = false;
         dropStartupSplash();
         return;
@@ -8530,7 +8130,7 @@ if (window.panelStartupController) panelStartupPlay();
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
-    // 「赛博」(neon) 已退役不可选；CSS 片段暂保留。
+    // 「赛博」(neon) 已退役不可选，CSS 片段已随退役删除。
     // 「工业+」(industrial) 与「极简」(editorial) 已删除；历史 localStorage
     // 存档的退役样式由 <head> 恢复脚本兜底回落经典。
     const STYLES = ["", "saas", "aurora", "blueprint", "sepia"];
@@ -8809,7 +8409,7 @@ if (window.panelStartupController) panelStartupPlay();
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
     if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
-    // 切回看板（B4/R9）：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
+    // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
       resetAgentRenderFingerprints();
       refreshAgents();
@@ -8926,7 +8526,7 @@ if (window.panelStartupController) panelStartupPlay();
       renderSkillDetail();
       renderSkillsAnomalies();
     } catch (e) {
-      toast("Skills 状态加载失败: " + e.message, true);
+      toast(panelError(e, "Skills 状态加载失败"), true);
     }
   }
 
@@ -8986,7 +8586,7 @@ if (window.panelStartupController) panelStartupPlay();
       const d = await api("POST", "/api/skills/repo", { repoPath: path });
       toast(`主仓库已设置（${d.skillCount} 个 skill）`);
     } catch (e) {
-      toast("设置主仓库失败: " + e.message, true);
+      toast(panelError(e, "设置主仓库失败"), true);
     }
     refreshSkillsState();
   }
@@ -8997,7 +8597,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (d.cancelled || !d.path) return;
       await setSkillsRepo(d.path);
     } catch (e) {
-      toast("打开目录选择框失败: " + e.message, true);
+      toast(panelError(e, "打开目录选择框失败"), true);
     }
   }
 
@@ -9019,7 +8619,7 @@ if (window.panelStartupController) panelStartupPlay();
       // （旧写法不 await，按钮先亮、列表后到，完成信号早于结果）
       await revealSkillsInsert([d.skill.relPath]);
     } catch (e) {
-      toast("导入失败: " + e.message, true);
+      toast(panelError(e, "导入失败"), true);
     } finally {
       btn.disabled = false;
       btn.textContent = label;
@@ -9242,7 +8842,7 @@ if (window.panelStartupController) panelStartupPlay();
 
   // 插入落位：让位快照 → 选中新行（照普通左键语义：集合={新行}、焦点=首条，详情卡
   // 随之切过去）→ 重渲时 FLIP + 入场 → 滚到视野中央。新行按仓库序落在字母序中间，
-  // 不定位的话动画就发生在折叠区外。收数组是为批量收编（一次插多行）；空集即
+  // 不定位的话动画就发生在折叠区外。收数组是为批量导入（一次插多行）；空集即
   // 「本次没有新行」，退化为朴素刷新，与 refreshAfterSkillsRemove 的失败路径对称。
   async function revealSkillsInsert(relPaths) {
     if (!relPaths.length) {
@@ -9284,16 +8884,16 @@ if (window.panelStartupController) panelStartupPlay();
     showSkillsModal({
       title: "删除仓库 Skill",
       danger: true,
-      bodyHtml: `将把 <b>${escapeHtml(skill.dirName)}</b> 从主仓库移入回收站，并清除所有端点上指向它的 junction。实体目录不受影响。`,
+      bodyHtml: `将把 <b>${escapeHtml(skill.dirName)}</b> 从主仓库移入回收站，并清除所有端点上指向它的链接。端点上的真实目录不受影响。`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let removed = [];
         try {
           const d = await api("POST", "/api/skills/repo/delete", { skillName: skill.dirName });
-          toast(d.unlinked && d.unlinked.length ? `已删除，并清除 ${d.unlinked.length} 处 junction` : "已删除");
+          toast(d.unlinked && d.unlinked.length ? `已删除，并清除 ${d.unlinked.length} 处端点链接` : "已删除");
           removed = [skill.relPath];
         } catch (e) {
-          toast("删除失败: " + e.message, true);
+          toast(panelError(e, "删除失败"), true);
         }
         await refreshAfterSkillsRemove(removed);
       },
@@ -9485,7 +9085,7 @@ if (window.panelStartupController) panelStartupPlay();
     menu.style.top = Math.min(y, window.innerHeight - menu.offsetHeight - 8) + "px";
   }
 
-  // 批量转托管/收编：对同组选中项串行走既有 merge-local（单项确认语义
+  // 批量转托管/导入：对同组选中项串行走既有 merge-local（单项确认语义
   // 合并为一个列表弹窗）；分叉冲突项后端会回 conflict，计数跳过留给
   // 「分叉冲突」分组处理。
   function confirmBatchMergeLocal(items, kind) {
@@ -9493,13 +9093,13 @@ if (window.panelStartupController) panelStartupPlay();
     const listHtml = items.map((it) =>
       `<div>· <b>${escapeHtml(it.entry.name)}</b>（${escapeHtml(it.ep.label)}）</div>`).join("");
     showSkillsModal({
-      title: isMatching ? `批量转为主仓库托管（${items.length} 项）` : `批量收编到主仓库（${items.length} 项）`,
+      title: isMatching ? `批量转为主仓库托管（${items.length} 项）` : `批量导入主仓库（${items.length} 项）`,
       danger: false,
       bodyHtml: (isMatching
-        ? "以下端点目录与主仓库内容一致，不复制文件：本地实体目录将移入回收站（可恢复），原位改为指向主仓库副本的 junction。"
-        : "以下端点目录将逐项复制到主仓库（.git 除外），随后本地实体目录移入回收站（可恢复），原位改为 junction。")
+        ? "以下端点目录与主仓库内容一致，不复制文件：端点上的真实目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。"
+        : "以下端点目录将逐项复制到主仓库（.git 除外），随后端点上的真实目录移入回收站（可恢复），原位改为链接。")
         + `<div style="margin-top:8px;">${listHtml}</div>`,
-      confirmText: isMatching ? "转为托管" : "收编",
+      confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
         let okCount = 0, conflictCount = 0, failCount = 0;
         let firstError = "";
@@ -9508,19 +9108,19 @@ if (window.panelStartupController) panelStartupPlay();
           try {
             const d = await api("POST", "/api/skills/merge-local", { endpointId: it.ep.id, skillName: it.entry.name });
             // 转托管（reusedRepoCopy）复用仓库既有副本、只把本地目录换成 junction，
-            // 没有新行；只有收编才真的往仓库里插一条
+            // 没有新行；只有导入才真的往仓库里插一条
             if (d.conflict) conflictCount++;
             else { okCount++; if (!d.reusedRepoCopy) inserted.push(it.entry.name); }
-          } catch (e) { failCount++; if (!firstError) firstError = e.message; }
+          } catch (e) { failCount++; if (!firstError) firstError = panelError(e, "详见面板日志"); }
         }
         const parts = [`成功 ${okCount}`];
         if (conflictCount) parts.push(`${conflictCount} 个分叉冲突跳过（请到分叉冲突分组处理）`);
         if (failCount) parts.push(`失败 ${failCount}`);
-        // 失败必须显式报错：数量之外给出首个失败原因，404 多为服务未重启加载新接口
-        if (failCount) parts.push(`操作失败：${firstError}（服务可能未重启加载新接口）`);
+        // 失败必须显式报错：数量之外给出首个失败原因
+        if (failCount) parts.push(`操作失败：${firstError}`);
         toast(parts.join("、"), failCount > 0);
         anomalyChecked[kind].clear();
-        // 批量收编的新行散落在字母序各处：一次 FLIP 让位 + 逐行入场；
+        // 批量导入的新行散落在字母序各处：一次 FLIP 让位 + 逐行入场；
         // 空集（批量转托管 / 全失败）退化为朴素刷新
         await revealSkillsInsert(inserted);
       },
@@ -9555,11 +9155,11 @@ if (window.panelStartupController) panelStartupPlay();
             await api("POST", "/api/skills/local/delete", { endpointId: it.ep.id, skillName: it.entry.name });
             okCount++;
             okItems.push(it);
-          } catch (e) { failCount++; if (!firstError) firstError = e.message; }
+          } catch (e) { failCount++; if (!firstError) firstError = panelError(e, "详见面板日志"); }
         }
-        // 失败必须显式报错：数量之外给出首个失败原因，404 多为服务未重启加载新接口
+        // 失败必须显式报错：数量之外给出首个失败原因
         toast(failCount
-          ? `删除完成：成功 ${okCount}、失败 ${failCount}。操作失败：${firstError}（服务可能未重启加载新接口）`
+          ? `删除完成：成功 ${okCount}、失败 ${failCount}。首个失败原因：${firstError}`
           : `已删除 ${okCount} 个端点目录`, failCount > 0);
         anomalyChecked.matching.clear();
         anomalyChecked.unique.clear();
@@ -9590,7 +9190,7 @@ if (window.panelStartupController) panelStartupPlay();
         onConfirm: null,
       });
     } catch (e) {
-      toast("读取 skill 正文失败: " + e.message, true);
+      toast(panelError(e, "读取 skill 正文失败"), true);
     }
   }
 
@@ -9706,7 +9306,7 @@ if (window.panelStartupController) panelStartupPlay();
     showSkillsModal({
       title: `删除选中的 ${deletable.length} 个 Skill`,
       danger: true,
-      bodyHtml: `将把以下 skill 从主仓库移入回收站，并清除所有端点上指向它们的 junction。实体目录不受影响。<div style="margin-top:8px;">${listHtml}</div>${skippedNote}`,
+      bodyHtml: `将把以下 skill 从主仓库移入回收站，并清除所有端点上指向它们的链接。端点上的真实目录不受影响。<div style="margin-top:8px;">${listHtml}</div>${skippedNote}`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let failCount = 0;
@@ -9731,7 +9331,7 @@ if (window.panelStartupController) panelStartupPlay();
     const body = $("skillsAnomalyBody");
     const badge = $("skillsAnomalyBadge");
     const endpoints = (skillsState && skillsState.endpoints) || [];
-    const broken = [];   // 失效 junction
+    const broken = [];   // 失效链接（指向主仓库的链接已断）
     const diverged = []; // 分叉冲突（matchesRepo === false）
     const matching = []; // 一致可迁移（matchesRepo === true）
     const unique = [];   // 本地独有（matchesRepo === null）
@@ -9785,7 +9385,7 @@ if (window.panelStartupController) panelStartupPlay();
       const k = `${ep.id}${SEP}${entry.name}`;
       const adoptBtn = group === "matching"
         ? `<button class="btn btn-mini" data-adopt="${escapeHtml(k)}" data-kind="matching">转为主仓库托管</button>`
-        : `<button class="btn btn-mini" data-adopt="${escapeHtml(k)}" data-kind="unique">收编到主仓库</button>`;
+        : `<button class="btn btn-mini" data-adopt="${escapeHtml(k)}" data-kind="unique">导入主仓库</button>`;
       return `<div class="skills-anomaly-row skills-anomaly-task${anomalyChecked[group].has(k) ? " selected" : ""}" data-atask="${group}" data-key="${escapeHtml(k)}">
         <span class="skills-anomaly-label">
           <span class="skills-anomaly-ep">${escapeHtml(ep.label)}</span>
@@ -9804,7 +9404,7 @@ if (window.panelStartupController) panelStartupPlay();
       const checkedCount = anomalyChecked[foldKey].size;
       const batchBar = !folded && checkedCount
         ? `<span class="skills-anomaly-batch">已选 ${checkedCount} 项` +
-          `<button class="btn btn-mini" data-batch-merge="${foldKey}">${foldKey === "matching" ? "批量转托管" : "批量收编"}</button>` +
+          `<button class="btn btn-mini" data-batch-merge="${foldKey}">${foldKey === "matching" ? "批量转托管" : "批量导入"}</button>` +
           `<button class="btn btn-danger btn-mini" data-batch-del="${foldKey}">删除</button></span>`
         : "";
       // 全选做成文本按钮放标题行右侧：勾选框语义不明显。全选后变「取消全选」
@@ -9820,7 +9420,7 @@ if (window.panelStartupController) panelStartupPlay();
     const sections = [];
     if (broken.length) {
       sections.push(
-        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>失效 junction</div>` +
+        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>失效链接</div>` +
         broken.map(({ ep, entry }) => rowHtml(ep, entry,
           '<span class="badge badge-warn">失效</span>',
           `<button class="btn btn-mini" data-remove-broken="${key(ep, entry)}">移除</button>`)).join(""),
@@ -9877,7 +9477,7 @@ if (window.panelStartupController) panelStartupPlay();
     // matching/unique 行级点选与行内操作（同样需在 innerHTML 重建后重新绑定）
     body.querySelectorAll(".skills-anomaly-task").forEach((rowEl) => {
       rowEl.onclick = (e) => {
-        if (e.target.closest("button")) return; // 行内「转为主仓库托管/收编/删除」按钮不触发选中
+        if (e.target.closest("button")) return; // 行内「转为主仓库托管/导入/删除」按钮不触发选中
         const group = rowEl.getAttribute("data-atask");
         const k = rowEl.getAttribute("data-key");
         if (anomalyChecked[group].has(k)) anomalyChecked[group].delete(k); else anomalyChecked[group].add(k);
@@ -9917,19 +9517,19 @@ if (window.panelStartupController) panelStartupPlay();
     });
   }
 
-  // 失效 junction 只删链接；undeploy 的 rmdir 语义对 broken 目标同样成立。
+  // 失效链接只删链接；undeploy 的 rmdir 语义对 broken 目标同样成立。
   function removeBrokenJunction(endpointId, skillName) {
     showSkillsModal({
-      title: "移除失效 junction",
+      title: "移除失效链接",
       danger: true,
-      bodyHtml: `将移除端点 <b>${escapeHtml(endpointId)}</b> 上失效的 junction <b>${escapeHtml(skillName)}</b>（仅删除链接，不影响任何实体目录）。`,
+      bodyHtml: `将移除端点 <b>${escapeHtml(endpointId)}</b> 上指向 <b>${escapeHtml(skillName)}</b> 的失效链接（只删链接，不影响任何真实目录）。`,
       confirmText: "移除",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/undeploy", { endpointId, skillName });
-          toast("已移除失效 junction");
+          toast("已移除失效链接");
         } catch (e) {
-          toast("移除失败: " + e.message, true);
+          toast(panelError(e, "移除失败"), true);
         }
         refreshSkillsState();
       },
@@ -9952,7 +9552,7 @@ if (window.panelStartupController) panelStartupPlay();
         onConfirm: null,
       });
     } catch (e) {
-      toast("获取差异失败: " + e.message, true);
+      toast(panelError(e, "获取差异失败"), true);
     }
   }
 
@@ -9967,15 +9567,15 @@ if (window.panelStartupController) panelStartupPlay();
       title: isRepo ? "以主仓库覆盖端点" : "以端点覆盖主仓库",
       danger: true,
       bodyHtml: isRepo
-        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的实体目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为指向主仓库版本的 junction。${diffListHtml(diffs)}`
-        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以端点 <b>${escapeHtml(endpointId)}</b> 的内容覆盖；其他端点指向该 skill 的 junction 将自动指向新内容。${diffListHtml(diffs)}`,
+        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的真实目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为链接指向主仓库版本。${diffListHtml(diffs)}`
+        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以端点 <b>${escapeHtml(endpointId)}</b> 的内容覆盖；其他端点指向该 skill 的链接会自动跟到新内容。${diffListHtml(diffs)}`,
       confirmText: isRepo ? "覆盖端点" : "覆盖主仓库",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/resolve-conflict", { endpointId, skillName, direction });
           toast(isRepo ? "已以主仓库版本覆盖端点" : "已以端点版本覆盖主仓库（旧版在回收站）");
         } catch (e) {
-          toast("覆盖失败: " + e.message + "（服务可能未重启加载新接口）", true);
+          toast(panelError(e, "覆盖失败"), true);
         }
         await refreshSkillsState();
       },
@@ -10003,7 +9603,7 @@ if (window.panelStartupController) panelStartupPlay();
       }
     } catch (e) {
       revert();
-      toast((on ? "部署失败: " : "解除失败: ") + e.message, true);
+      toast(panelError(e, on ? "部署失败" : "解除部署失败"), true);
       return; // 已回退勾选态，无需再刷新
     }
     await refreshSkillsState();
@@ -10026,33 +9626,33 @@ if (window.panelStartupController) panelStartupPlay();
     showSkillsModal({
       title: "端点目录与仓库不一致",
       danger: true,
-      bodyHtml: `端点 <b>${escapeHtml(endpointId)}</b> 上已存在同名的实体目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该实体目录移入回收站并改为 junction。${diffListHtml(diffs)}`,
+      bodyHtml: `端点 <b>${escapeHtml(endpointId)}</b> 上已存在同名的真实目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该目录移入回收站，并改为链接指向仓库版本。${diffListHtml(diffs)}`,
       confirmText: "替换为仓库版本",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/deploy", { endpointId, skillName, force: true });
           toast(`已替换并部署到 ${endpointId}`);
         } catch (e) {
-          toast("替换失败: " + e.message, true);
+          toast(panelError(e, "替换失败"), true);
         }
         refreshSkillsState();
       },
     });
   }
 
-  // 转托管/收编前二次确认（danger=false：本地实体目录进回收站可恢复，无内容丢失）。
+  // 转托管/导入前二次确认（danger=false：本地实体目录进回收站可恢复，无内容丢失）。
   // matching：内容一致不复制文件，本地实体目录回收后原位建指向主仓库副本的 junction；
   // unique：先复制进主仓库（过滤 .git），再回收本地建 junction。分叉冲突由前端分流到
   // resolve-conflict，正常走不到这里；后端 conflict 响应仍留兜底弹窗。
   function mergeLocal(endpointId, skillName, kind) {
     const isMatching = kind === "matching";
     showSkillsModal({
-      title: isMatching ? "转为主仓库托管" : "收编到主仓库",
+      title: isMatching ? "转为主仓库托管" : "导入主仓库",
       danger: false,
       bodyHtml: isMatching
-        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：本地实体目录将移入回收站（可恢复），原位改为指向主仓库副本的 junction，此后以主仓库为唯一来源。`
-        : `将把端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后本地实体目录移入回收站（可恢复），原位改为 junction，此后其他端点也可部署该 skill。`,
-      confirmText: isMatching ? "转为托管" : "收编",
+        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：端点上的真实目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。`
+        : `将把端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后端点上的真实目录移入回收站（可恢复），原位改为链接，此后其他端点也可部署该 skill。`,
+      confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
         // null = 请求失败；[] = 走通了但没有新行（转托管复用仓库既有副本）
         let inserted = null;
@@ -10070,13 +9670,13 @@ if (window.panelStartupController) panelStartupPlay();
             await refreshSkillsState();
             return;
           }
-          toast(d.reusedRepoCopy ? "已转为主仓库托管" : `已收编 ${skillName} 到主仓库`);
-          // 只有收编才产生新行：转托管复用仓库既有副本，本地目录只是换成 junction。
+          toast(d.reusedRepoCopy ? "已转为主仓库托管" : `已导入 ${skillName} 到主仓库`);
+          // 只有导入才产生新行：转托管复用仓库既有副本，本地目录只是换成链接。
           // relPath 即 skillName——后端拷进仓库根目录，且 assertPlainSkillDirName
           // 保证它是不含分隔符的纯目录名
           inserted = d.reusedRepoCopy ? [] : [skillName];
         } catch (e) {
-          toast("操作失败: " + e.message + "（服务可能未重启加载新接口）", true);
+          toast(panelError(e, "操作失败"), true);
         }
         // 空集即朴素刷新：失败路径行没动、转托管没有新行，都不该演入场动画
         await revealSkillsInsert(inserted || []);
@@ -10161,7 +9761,7 @@ if (window.panelStartupController) panelStartupPlay();
       renderPresetsList();
       renderPresetDetail();
     } catch (e) {
-      toast("预设状态加载失败: " + e.message, true);
+      toast(panelError(e, "预设状态加载失败"), true);
     }
   }
 
@@ -10255,7 +9855,7 @@ if (window.panelStartupController) panelStartupPlay();
         await api("POST", "/api/prompts/master", { enabled });
         toast(enabled ? "预设注入已开启" : "预设注入已关闭");
       } catch (err) {
-        toast("设置失败: " + err.message, true);
+        toast(panelError(err, "设置失败"), true);
       } finally {
         input.disabled = false;
       }
@@ -10440,7 +10040,7 @@ if (window.panelStartupController) panelStartupPlay();
       await api("POST", "/api/prompts/override", { endpointId, presetId: preset.id, off: !on });
       toast(on ? `已注入到 ${endpointId}` : `已解除 ${endpointId} 的注入`);
     } catch (e) {
-      toast("操作失败: " + e.message + "（服务可能未重启加载新接口）", true);
+      toast(panelError(e, "操作失败"), true);
     }
     await refreshPresetsState();
   }
@@ -10470,7 +10070,7 @@ if (window.panelStartupController) panelStartupPlay();
       await api("POST", "/api/prompts/preset/enable", { id: preset.id, enabled });
       toast(enabled ? `已启用「${preset.title}」` : `已停用「${preset.title}」`);
     } catch (e) {
-      toast("操作失败: " + e.message, true);
+      toast(panelError(e, "操作失败"), true);
     }
     await refreshPresetsState();
   }
@@ -10486,7 +10086,7 @@ if (window.panelStartupController) panelStartupPlay();
           await api("POST", "/api/prompts/preset/delete", { id: preset.id });
           toast("预设已删除");
         } catch (e) {
-          toast("删除失败: " + e.message, true);
+          toast(panelError(e, "删除失败"), true);
         }
         await refreshPresetsState();
       },
@@ -10533,7 +10133,7 @@ if (window.panelStartupController) panelStartupPlay();
             toast("预设已创建");
           }
         } catch (e) {
-          return reopen(e.message);
+          return reopen(panelError(e, "预设保存失败"));
         }
         await refreshPresetsState();
       },
@@ -10679,9 +10279,18 @@ if (window.panelStartupController) panelStartupPlay();
       renderStoreList();
       renderStoreDetail();
     } catch (e) {
-      toast("Store 状态加载失败: " + e.message, true);
+      toast(panelError(e, "渠道配置加载失败"), true);
     }
   }
+
+  // 渠道配置读不出来时的四种情形，各给一句用户看得懂的话。
+  // 键是 /api/store/state 的 storeError 短码，取值随 store-io.mjs 的 LOAD_REASON。
+  const STORE_LOAD_COPY = {
+    "store-absent": "还没有添加任何渠道",
+    "store-unreadable": "渠道配置文件读不到",
+    "store-unparsable": "渠道配置文件格式损坏",
+    "store-schema-invalid": "渠道配置文件内容不合法",
+  };
 
   // ── 卡片 A：渠道总览 ──
   function renderStoreOverview() {
@@ -10691,7 +10300,7 @@ if (window.panelStartupController) panelStartupPlay();
     if (!storeState || !storeState.storeOk) {
       badge.className = "badge badge-warn";
       badge.textContent = "不可用";
-      summary.textContent = "store 不可用：" + ((storeState && storeState.storeError) || "未知错误");
+      summary.textContent = "渠道配置不可用：" + (STORE_LOAD_COPY[storeState && storeState.storeError] || "状态未知");
     } else {
       const providers = storeProviders();
       const models = providers.reduce((n, p) => n + (p.modelCount || 0), 0);
@@ -10706,7 +10315,7 @@ if (window.panelStartupController) panelStartupPlay();
     const failed = (rr && rr.failed) || [];
     if (rr && rr.error) {
       note.hidden = false;
-      note.textContent = "删除日志检查失败：" + rr.error;
+      note.textContent = panelCopy(rr.error, "无法确认是否有未完成的删除，请稍后重试");
     } else if (resumed.length || failed.length) {
       note.hidden = false;
       note.textContent =
@@ -10902,7 +10511,7 @@ if (window.panelStartupController) panelStartupPlay();
           setTimeout(() => { refreshStoreState(); }, 300);
         } catch (err) {
           renderStoreList();
-          toast("渠道重排失败: " + err.message, true);
+          toast(panelError(err, "渠道顺序保存失败"), true);
         }
       })();
     });
@@ -10980,7 +10589,7 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="skills-detail-relpath">${escapeHtml(row.id)} · 成员 ${row.members.length} 个 · 模型并集 ${union.size} · 重复 ${dup.size}</div>
         </div>
         <div class="skills-detail-actions">
-          <button class="btn btn-mini" id="storePoolTestBtn">探活</button>
+          <button class="btn btn-mini" id="storePoolTestBtn">测试连接</button>
           <button class="btn btn-mini" id="storePoolRefreshBtn">刷新模型</button>
           <button class="btn btn-mini" id="storePoolRenameBtn">重命名</button>
           <button class="btn btn-mini btn-warn" id="storePoolDissolveBtn">解除号池</button>
@@ -11053,7 +10662,7 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="skills-detail-relpath">${escapeHtml(p.id)}</div>
         </div>
         <div class="skills-detail-actions">
-          <button class="btn btn-mini" id="storeTestBtn">探活</button>
+          <button class="btn btn-mini" id="storeTestBtn">测试连接</button>
           <button class="btn btn-mini" id="storeRefreshOneBtn">刷新模型</button>
           <button class="btn btn-mini" id="storeRenameBtn">重命名</button>
           <button class="btn btn-mini" id="storeRotateBtn">更改配置</button>
@@ -11075,11 +10684,11 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
       ${discoveredIds.length
         ? `<div class="store-model-list">${modelRows}</div>`
-        : `<div class="skills-list-desc" style="padding:8px 0;">尚无模型缓存，先「刷新模型」。</div>`}
+        : `<div class="skills-list-desc" style="padding:8px 0;">还没有模型，先点「刷新模型」。</div>`}
       <div class="store-manual-add">
         <textarea class="store-form-textarea" id="storeManualAddInput" rows="1"
-          placeholder="手动补录模型 id（上游 /v1/models 漏报时用），多个用逗号/空格/换行分隔"></textarea>
-        <button class="btn btn-mini" id="storeManualAddBtn">手动补录</button>
+          placeholder="手动添加在线发现没列出的模型 id，多个用逗号/空格/换行分隔"></textarea>
+        <button class="btn btn-mini" id="storeManualAddBtn">手动添加</button>
       </div>
     `;
     bindStoreDetail(p);
@@ -11089,7 +10698,7 @@ if (window.panelStartupController) panelStartupPlay();
 
   function bindStoreDetail(p) {
     $("storeTestBtn").onclick = () => storeAction(`/api/store/test`, { id: p.id },
-      (r) => `探活通过：${p.id}（上游 ${r.modelCount} 个模型）`);
+      (r) => `${p.displayName} 可用（发现 ${r.modelCount} 个模型）`);
     $("storeRefreshOneBtn").onclick = () => storeRefresh([p.id]);
     $("storeRenameBtn").onclick = () => showRenameProviderModal(p);
     $("storeRotateBtn").onclick = () => showRotateModal(p);
@@ -11134,7 +10743,7 @@ if (window.panelStartupController) panelStartupPlay();
       storeFilterDirty = false;
       await refreshStoreState();
     } catch (e) {
-      toast("保存过滤失败: " + e.message, true);
+      toast(panelError(e, "模型过滤保存失败"), true);
       btn.disabled = false;
     } finally {
       const b = $("storeFilterSaveBtn");
@@ -11142,7 +10751,7 @@ if (window.panelStartupController) panelStartupPlay();
     }
   }
 
-  // 手动补录：上游 /v1/models 漏报可调用模型时由用户补登。成功后勾选集重建
+  // 手动添加：在线发现漏报可调用模型时由用户补登。成功后勾选集重建
   // （新补录项已在 modelFilter 中，自动勾选）；失败 toast 后端 message/reason。
   async function addManualModels(p) {
     const input = $("storeManualAddInput");
@@ -11161,7 +10770,7 @@ if (window.panelStartupController) panelStartupPlay();
       storeFilterDirty = false;
       await refreshStoreState();
     } catch (e) {
-      toast("补录失败: " + e.message, true);
+      toast(panelError(e, "模型添加失败"), true);
       const b = $("storeManualAddBtn");
       if (b) b.disabled = false;
     }
@@ -11177,7 +10786,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (storeFilterChecked) storeFilterChecked.delete(mid);
       await refreshStoreState();
     } catch (e) {
-      toast("删除失败: " + e.message, true);
+      toast(panelError(e, "删除失败"), true);
     }
   }
 
@@ -11189,11 +10798,11 @@ if (window.panelStartupController) panelStartupPlay();
       await refreshStoreState();
       return r;
     } catch (e) {
-      if (e.message === "cas-conflict") {
-        toast("store 已被其他操作修改，正在刷新", true);
+      if (e.code === "cas-conflict") {
+        toast("渠道配置已被其他操作改动，已重新拉取最新状态", true);
         await refreshStoreState();
       } else {
-        toast(e.message, true);
+        toast(panelError(e, "操作失败"), true);
       }
       return null;
     }
@@ -11266,8 +10875,8 @@ if (window.panelStartupController) panelStartupPlay();
 
   // ── 「全部刷新」右侧的刷新状态小字（替代 toast）：每次写入重置 10s 存活计时 ──
   // mode：busy = text 逐字窄波；done = text 整体高光（「刷新完成」）；ok/err = 纯文本。
-  //      （busy-err/done-err 已退役：中途单渠道失败只红该渠道 tail 分段，
-  //      完成态永不整行染红；err 仅用于 cas-conflict/异常的整体失败路径）
+  //      中途单渠道失败只红该渠道 tail 分段，完成态永不整行染红；
+  //      err 仅用于 cas-conflict 或整次异常。
   let storeStatusTimer = null;
   function srsWaveHtml(text) {
     // 逐字窄波：每字一个 span，延迟 120ms 依次点亮；亮窗由 keyframe 压在周期
@@ -11277,7 +10886,7 @@ if (window.panelStartupController) panelStartupPlay();
   }
   // 元素内固定 prefix/tail/diff 三个子 span：prefix 按指纹比对只在变化时重建
   // innerHTML，tail（HTML，分段着色）独立更新——逐渠道刷新只换 tail，
-  // 窄波动画不重启；diff（「展示diff」高光小字）仅完成态挂出
+  // 窄波动画不重启；diff（「查看差异」高光小字）仅完成态挂出
   function setStoreRefreshStatus(text, mode, tailHtml, showDiff) {
     const el = $("storeRefreshStatus");
     if (!el) return;
@@ -11285,7 +10894,7 @@ if (window.panelStartupController) panelStartupPlay();
     let tail = el.querySelector(".srs-tail");
     let diff = el.querySelector(".srs-diff-link");
     if (!prefix || !tail || !diff) {
-      el.innerHTML = '<span class="srs-prefix"></span><span class="srs-tail"></span><span class="srs-diff-link" hidden>展示diff</span>';
+      el.innerHTML = '<span class="srs-prefix"></span><span class="srs-tail"></span><span class="srs-diff-link" hidden>查看差异</span>';
       prefix = el.querySelector(".srs-prefix");
       tail = el.querySelector(".srs-tail");
       diff = el.querySelector(".srs-diff-link");
@@ -11340,7 +10949,7 @@ if (window.panelStartupController) panelStartupPlay();
     return parts.length ? parts.join(" ") : "无变化";
   }
 
-  // ── 「展示diff」弹窗：本轮刷新的完整增减明细（状态小字只摆数字，这里列模型 id） ──
+  // ── 「查看差异」弹窗：本轮刷新的完整增减明细（状态小字只摆数字，这里列模型 id） ──
   // refreshDiffUnits 由 storeRefresh 每轮重填；弹窗打开期间暂停状态小字的 10s
   // 淡出计时，关闭时若状态小字仍可见则重新武装一个完整 10s
   let refreshDiffUnits = [];
@@ -11361,7 +10970,7 @@ if (window.panelStartupController) panelStartupPlay();
     const failEl = $("storeDiffFails");
     if (fails.length) {
       failEl.innerHTML = fails.map((u) =>
-        `<div class="diff-modal-fail-row">${escapeHtml(u.label)} 失败（${escapeHtml(u.reason || "unknown")}）</div>`).join("");
+        `<div class="diff-modal-fail-row">${escapeHtml(u.label)} 失败（${escapeHtml(panelCopy(u.reason, "原因见面板日志"))}）</div>`).join("");
       failEl.hidden = false;
     } else {
       failEl.innerHTML = "";
@@ -11415,7 +11024,7 @@ if (window.panelStartupController) panelStartupPlay();
     if (btn) { btn.disabled = true; btn.textContent = "刷新中…"; }
     let lastTail = "";
     // 本轮 diff 明细快照：每单元一条 {label, added[], pruned[], failed, reason}，
-    // 供「展示diff」弹窗按单元分组渲染；池聚合单元合并成员数组为池级
+    // 供「查看差异」弹窗按单元分组渲染；池聚合单元合并成员数组为池级
     refreshDiffUnits = [];
     try {
       if (!units.length) {
@@ -11426,8 +11035,8 @@ if (window.panelStartupController) panelStartupPlay();
         const unit = units[i];
         const prog = multi ? ` · ${i + 1}/${units.length}` : "";
         // 仅首个单元先亮「正在刷新.. 行名」；其后循环开头不覆盖 tail——上一单元
-        // 的结果保留显示到本单元刷完（结果一到立刻被下一单元 busy 提示同步覆盖时，
-        // 浏览器来不及绘制，diff 整段不可见——本轮修复点）
+        // 的结果保留显示到本单元刷完。结果一到就被下一单元的 busy 提示同步覆盖，
+        // 浏览器来不及绘制，那一段 diff 等于没显示过。
         if (i === 0) setStoreRefreshStatus("正在刷新..", "busy", `${escapeHtml(unit.label)}${prog}`);
         let uAdded = 0, uPruned = 0, uFail = 0, uRep = null, uErr = "";
         const uAddedIds = [], uPrunedIds = [];
@@ -11449,10 +11058,10 @@ if (window.panelStartupController) panelStartupPlay();
               if (!unit.aggregate) uRep = rep;
             }
           } catch (e) {
-            if (e.message === "cas-conflict" || !batch) throw e;
+            if (e.code === "cas-conflict" || !batch) throw e;
             // 批量刷新：单点失败只计入本单元，不中断后续渠道
             uFail++;
-            uErr = e.message;
+            uErr = panelError(e, "原因见面板日志");
           }
         }
         refreshDiffUnits.push({
@@ -11464,22 +11073,22 @@ if (window.panelStartupController) panelStartupPlay();
         });
         const resHtml = unit.aggregate
           ? `${escapeHtml(unit.label)} ${storeAggregateHtml(uAdded, uPruned, uFail)}`
-          : uErr ? `<span class="srs-neg">${escapeHtml(unit.label)} 刷新失败: ${escapeHtml(uErr)}</span>`
+          : uErr ? `<span class="srs-neg">${escapeHtml(unit.label)} 刷新失败：${escapeHtml(panelCopy(uErr, "原因见面板日志"))}</span>`
           : uRep ? storeReportHtml(uRep, unit.label)
           : `${escapeHtml(unit.label)} 无结果`;
         lastTail = `${resHtml}${prog}`;
         if (!wholeLabel) setStoreRefreshStatus("正在刷新..", "busy", lastTail);
       }
       await refreshStoreState();
-      // 本轮确有增减或失败时才挂「展示diff」小字；全零无变化不显示（没东西可看）
+      // 本轮确有增减或失败时才挂「查看差异」小字；全零无变化不显示（没东西可看）
       const hasDiff = refreshDiffUnits.some((u) => u.failed || u.added.length > 0 || u.pruned.length > 0);
       setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff);
     } catch (e) {
-      if (e.message === "cas-conflict") {
-        setStoreRefreshStatus("store 已被其他操作修改，正在刷新", "err");
+      if (e.code === "cas-conflict") {
+        setStoreRefreshStatus("渠道配置已被其他操作改动，正在刷新", "err");
         await refreshStoreState();
       } else {
-        setStoreRefreshStatus("刷新失败: " + e.message, "err");
+        setStoreRefreshStatus(panelError(e, "刷新失败"), "err");
       }
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = all ? "全部刷新" : "刷新模型"; }
@@ -11534,7 +11143,7 @@ if (window.panelStartupController) panelStartupPlay();
           <input class="store-form-input set-name" value="${escapeHtml(s.displayName || "")}"></div>
         <div class="store-form-row"><label class="store-form-label">Base URL${k === 0 ? "（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）" : "（留空 = 与资料 1 一致）"}</label>
           <input class="store-form-input set-urls" value="${escapeHtml(s.baseURLs || "")}" placeholder="${k === 0 ? "https://api.example.com/v1" : "留空 = 与资料 1 一致"}"></div>
-        <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机 DPAPI 加密存储，不回显）</label>
+        <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机加密保存，保存后不再显示）</label>
           <input class="store-form-input set-key" type="password" autocomplete="new-password"></div>
         <div class="store-form-row"><label class="store-form-label">模型 IDs（可选，每行一个；留空则在线发现）</label>
           <textarea class="store-form-textarea set-models">${escapeHtml(s.modelIdsText || "")}</textarea></div>
@@ -11564,7 +11173,7 @@ if (window.panelStartupController) panelStartupPlay();
           <input class="store-form-input" id="storeAddName" value="${escapeHtml(v.displayName || "")}" placeholder="如 My Provider"></div>
         <div class="store-form-row"><label class="store-form-label">Base URL（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）</label>
           <input class="store-form-input" id="storeAddUrls" value="${escapeHtml(v.baseURLs || "")}" placeholder="https://api.example.com/v1"></div>
-        <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机 DPAPI 加密存储，不回显）</label>
+        <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机加密保存，保存后不再显示）</label>
           <input class="store-form-input" type="password" id="storeAddKey" autocomplete="new-password"></div>
         <div class="store-form-row"><label class="store-form-label">模型 IDs（可选，每行一个；留空则在线发现，发现失败时必须手填）</label>
           <textarea class="store-form-textarea" id="storeAddModels" placeholder="gpt-5&#10;claude-sonnet-4">${escapeHtml(v.modelIdsText || "")}</textarea></div>
@@ -11630,10 +11239,10 @@ if (window.panelStartupController) panelStartupPlay();
       showAddModal({ id, displayName, baseURLs, modelIdsText });
       const err = $("storeAddError");
       err.hidden = false;
-      err.textContent = /provide modelIds/.test(e.message)
-        ? "在线发现失败，请手填模型 IDs 后重试（" + e.message + "）"
-        : e.message;
-      if (e.message === "cas-conflict") await refreshStoreState();
+      err.textContent = /provide modelIds/.test(e.code || "")
+        ? "在线发现没拿到模型列表，请在「模型 IDs」里手填后重试"
+        : panelError(e, "渠道添加失败");
+      if (e.code === "cas-conflict") await refreshStoreState();
     }
   }
 
@@ -11663,7 +11272,7 @@ if (window.panelStartupController) panelStartupPlay();
     }));
     for (const s of sets) {
       if (!s.id) return fail(`资料 ${s.k}：请填写渠道 ID`);
-      if (!s.baseURLs && s.k === 1) return fail("资料 1：请填写 Base URL");
+      if (!s.baseURLs && s.k === 1) return fail("第 1 份资料：请填写 Base URL");
       if (!s.apiKey) return fail(`资料 ${s.k}：请填写 API 密钥`);
     }
     const created = [];
@@ -11688,7 +11297,7 @@ if (window.panelStartupController) panelStartupPlay();
         created.push(r.id);
       } catch (e) {
         await rollback();
-        fail(`资料 ${s.k}：${/provide modelIds/.test(e.message) ? "在线发现失败，请手填模型 IDs 后重试（" + e.message + "）" : e.message}（已回滚 ${created.length} 个已建渠道）`);
+        fail(`第 ${s.k} 份资料：${/provide modelIds/.test(e.code || "") ? "在线发现没拿到模型列表，请在「模型 IDs」里手填后重试" : panelError(e, "渠道创建失败")}（已回滚 ${created.length} 个已建渠道）`);
         await refreshStoreState();
         return;
       }
@@ -11697,7 +11306,7 @@ if (window.panelStartupController) panelStartupPlay();
       await api("POST", "/api/store/pool/create", { poolId, displayName, members: created });
     } catch (e) {
       await rollback();
-      fail(`号池创建失败：${e.message}（已回滚 ${created.length} 个已建渠道）`);
+      fail(`${panelError(e, "号池创建失败")}（已回滚 ${created.length} 个已建渠道）`);
       await refreshStoreState();
       return;
     }
@@ -11751,8 +11360,8 @@ if (window.panelStartupController) panelStartupPlay();
   }
 
   // 「更改配置」（原「轮换密钥」）：换 API 密钥和/或 Base URL。
-  // 备用 Base URL 用按钮增量添加入口（不再逗号分隔）：点「添加备用baseurl」出现
-  // 「备用base URL」标题 + 一个输入窗，再点则在标题下继续加输入窗；备用输入窗
+  // 备用 Base URL 用按钮增量添加入口（不再逗号分隔）：点「添加备用 Base URL」出现
+  // 「备用 Base URL」标题 + 一个输入窗，再点则在标题下继续加输入窗；备用输入窗
   // 位于主 URL 栏与添加按钮之间，添加按钮置于弹窗最下方（细字重），数量上限
   // （含主最多 5 个）不占正文，放按钮悬浮 title，达上限禁用按钮，提交时二次防护。
   // 主 Base URL 留空 = 保留原值；主留空但填了备用时，主按原值兜底。
@@ -11771,9 +11380,9 @@ if (window.panelStartupController) panelStartupPlay();
         <div id="storeRotateFallbacks"></div>
         <div class="store-rotate-add-row">
           <button class="btn btn-mini store-rotate-add-btn" type="button" id="storeRotateAddFallback"${isBuiltin ? " disabled" : ""}
-            title="添加一个备用 Base URL（含主最多 ${ROTATE_URL_MAX} 个）">添加备用baseurl</button>
+            title="添加一个备用 Base URL（与主地址合计最多 ${ROTATE_URL_MAX} 个）">添加备用 Base URL</button>
         </div>
-        ${isBuiltin ? `<div class="store-form-error">内建 opencode 渠道的端点不可由 anyswitch 修改</div>` : ""}`,
+        ${isBuiltin ? `<div class="store-form-error">内建 OpenCode 渠道的端点由 OpenCode 自己管理，Anyswitch 不修改</div>` : ""}`,
       onConfirm: async () => {
         const apiKey = $("storeRotateKey").value;
         const main = $("storeRotateUrls").value.trim();
@@ -11781,7 +11390,7 @@ if (window.panelStartupController) panelStartupPlay();
           .map((el) => el.value.trim()).filter(Boolean);
         const urls = backups.length ? [main || p.baseURL, ...backups] : (main ? [main] : []);
         if (urls.length > ROTATE_URL_MAX) {
-          toast(`Base URL 含主最多 ${ROTATE_URL_MAX} 个`, true);
+          toast(`Base URL 与主地址合计最多 ${ROTATE_URL_MAX} 个`, true);
           return;
         }
         const baseURLs = urls.join(", ");
@@ -11794,11 +11403,11 @@ if (window.panelStartupController) panelStartupPlay();
     const box = $("storeRotateFallbacks");
     if (addBtn && box && !isBuiltin) {
       addBtn.onclick = () => {
-        // 首次点击才长出「备用base URL」标题，其后每次只在标题下追加输入窗
+        // 首次点击才长出「备用 Base URL」标题，其后每次只在标题下追加输入窗
         if (!box.querySelector(".store-form-label")) {
           const labelEl = document.createElement("label");
           labelEl.className = "store-form-label";
-          labelEl.textContent = "备用base URL";
+          labelEl.textContent = "备用 Base URL";
           box.appendChild(labelEl);
         }
         const input = document.createElement("input");
@@ -11818,9 +11427,9 @@ if (window.panelStartupController) panelStartupPlay();
       danger: true,
       confirmText: "确认删除",
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
-        将从 store 删除渠道 <b>${escapeHtml(p.id)}</b>（${p.modelCount} 个有效模型），
-        并随后删除凭据文件 <code>${escapeHtml(p.id)}.dpapi</code>。<br>
-        该操作经删除日志事务执行：store 删除失败时凭据保留；凭据删除是唯一不可恢复的步骤。</div>`,
+        将从渠道管理删除渠道 <b>${escapeHtml(p.id)}</b>（${p.modelCount} 个有效模型），
+        并删除它在主机上的加密凭据。<br>
+        凭据删除是唯一不可恢复的步骤；渠道删除失败时凭据会原样保留。</div>`,
       onConfirm: async () => {
         await storeAction("/api/store/delete", { id: p.id },
           (r) => `已删除 ${p.id}（${r.modelCount} 个模型）`);
@@ -11875,11 +11484,11 @@ if (window.panelStartupController) panelStartupPlay();
         await api("POST", "/api/store/test", { id });
         ok++;
       } catch (e) {
-        failed.push(`${id}: ${e.message}`);
+        failed.push(`${id}：${panelError(e, "连接失败")}`);
       }
     }
-    if (failed.length) toast(`探活 ${ok} 通过 / ${failed.length} 失败（${failed.join("；")}）`, true);
-    else toast(`探活全部通过（${ok} 个渠道）`);
+    if (failed.length) toast(`${ok} 个渠道可用、${failed.length} 个连不上（${failed.join("；")}）`, true);
+    else toast(`${ok} 个渠道全部可用`);
   }
 
   // 解除号池：仅删 pools 条目，成员渠道与凭据原样保留
@@ -11916,7 +11525,7 @@ if (window.panelStartupController) panelStartupPlay();
     try {
       await api("POST", "/api/store/pool/delete", { poolId: row.id });
     } catch (e) {
-      failed.push(`号池 ${row.id} 解除失败: ${e.message}`);
+      failed.push(`号池 ${row.id} 解除失败：${panelError(e, "操作未完成")}`);
     }
     let deleted = 0;
     for (const m of row.members) {
@@ -11924,7 +11533,7 @@ if (window.panelStartupController) panelStartupPlay();
         await api("POST", "/api/store/delete", { id: m.id });
         deleted++;
       } catch (e) {
-        failed.push(`${m.id}: ${e.message}`);
+        failed.push(`${m.id}：${panelError(e, "删除未完成")}`);
       }
     }
     if (failed.length) toast(`部分删除失败（已删 ${deleted}/${row.members.length}）：${failed.join("；")}`, true);
@@ -11959,7 +11568,7 @@ if (window.panelStartupController) panelStartupPlay();
           try {
             await api("POST", "/api/store/pool/delete", { poolId: row.id });
           } catch (e) {
-            failed.push(`号池 ${row.id} 解除失败: ${e.message}`);
+            failed.push(`号池 ${row.id} 解除失败：${panelError(e, "操作未完成")}`);
           }
         }
         let deleted = 0;
@@ -11968,7 +11577,7 @@ if (window.panelStartupController) panelStartupPlay();
             await api("POST", "/api/store/delete", { id });
             deleted++;
           } catch (e) {
-            failed.push(`${id}: ${e.message}`);
+            failed.push(`${id}：${panelError(e, "操作未完成")}`);
           }
         }
         if (failed.length) toast(`部分删除失败（已删 ${deleted}/${providerIds.length}）：${failed.join("；")}`, true);
@@ -12270,11 +11879,11 @@ if (window.panelStartupController) panelStartupPlay();
       renderStoreList();
       renderStoreDetail();
     } catch (e) {
-      if (e.message === "cas-conflict") {
-        fail("store 已被其他操作修改，正在刷新；请稍后重试");
+      if (e.code === "cas-conflict") {
+        fail("渠道配置已被其他操作改动，请稍后重试");
         await refreshStoreState();
       } else {
-        fail(e.message);
+        fail(panelError(e, "操作失败"));
       }
     } finally {
       poolBuildBusy = false;
@@ -12604,7 +12213,7 @@ if (window.panelStartupController) panelStartupPlay();
 
   // 与 store-schema 同口径的前端先行校验（行内报错，不打到后端才失败）
   function routeChainValidate(chain) {
-    if (!chain.length) return "链路为空：请先从候选区添加至少 1 个节点";
+    if (!chain.length) return "路由链为空：请先从右侧候选列表添加至少 1 个渠道或号池";
     if (chain.length > ROUTE_CHAIN_MAX_NODES) return `一条路由链最多 ${ROUTE_CHAIN_MAX_NODES} 个节点`;
     const seen = new Set();
     for (const it of chain) {
@@ -12623,7 +12232,7 @@ if (window.panelStartupController) panelStartupPlay();
 
   // 底部一行文本摘要（E10）：`主力: 模型A · provider甲 → 退避1: 模型B · provider乙 → …`
   function routeChainSummaryText() {
-    if (!routeChainDraft.length) return "链为空：从右侧候选区选择渠道/号池接入";
+    if (!routeChainDraft.length) return "尚未配置：从右侧候选列表选择渠道或号池接入";
     return routeChainDraft.map((it, i) => `${routeHopLabel(i)}: ${it.model} · ${routeNodeName(it.node)}`).join(" → ");
   }
 
@@ -12750,7 +12359,7 @@ if (window.panelStartupController) panelStartupPlay();
             </select>`
           : `<select class="store-form-input" disabled><option>无模型缓存</option></select>`}
       </div>`;
-    }).join("") : `<div class="route-cand-row" style="cursor:default;"><span class="route-cand-name" style="color:var(--text-4);">暂无渠道/号池，请先在 Store 新增渠道</span></div>`;
+    }).join("") : `<div class="route-cand-row" style="cursor:default;"><span class="route-cand-name" style="color:var(--text-4);">暂无渠道/号池，请先在「渠道管理」新增渠道</span></div>`;
     const summary = routeChainSummaryText();
     $("routeChainBody").innerHTML = `
       <div style="font-size:11.5px; color:var(--text-3);">
@@ -12928,11 +12537,11 @@ if (window.panelStartupController) panelStartupPlay();
       toast(`路由链已保存：${label}（${routeChainDraft.length} 个节点）`);
       await refreshStoreState();
     } catch (e) {
-      if (e.message === "cas-conflict") {
-        fail("store 已被其他操作修改，正在刷新；请稍后重试");
+      if (e.code === "cas-conflict") {
+        fail("渠道配置已被其他操作改动，请稍后重试");
         await refreshStoreState();
       } else {
-        fail(e.message);
+        fail(panelError(e, "操作失败"));
       }
     } finally {
       routeChainBusy = false;
@@ -12949,7 +12558,7 @@ if (window.panelStartupController) panelStartupPlay();
     if (storeSelection.has(id) && storeSelection.size > 1) {
       // 多选菜单：基础项 + 组建/加入号池（置于删除之前）；无池时「加入号池」置灰
       const items = [
-        { label: "探活", fn: () => storeBatchTest(storeSelectionProviders()) },
+        { label: "测试连接", fn: () => storeBatchTest(storeSelectionProviders()) },
         { label: "刷新模型", fn: () => storeRefresh(storeSelectionProviders()) },
         { label: "全选", fn: selectAllVisibleStoreRows },
         { label: "取消选择", fn: () => { storeSelection.clear(); requestStoreFocus(null); renderStoreList(); } },
@@ -12962,7 +12571,7 @@ if (window.panelStartupController) panelStartupPlay();
     }
     if (row.kind === "pool") {
       popSkillsContextMenu(x, y, row.displayName, [
-        { label: "探活", fn: () => storeBatchTest(row.members.map((m) => m.id)) },
+        { label: "测试连接", fn: () => storeBatchTest(row.members.map((m) => m.id)) },
         { label: "刷新模型", fn: () => storeRefresh(row.members.map((m) => m.id), { wholeLabel: row.displayName || row.id }) },
         { label: "重命名", fn: () => showRenamePoolModal(row) },
         { label: "解除号池", fn: () => confirmDissolvePool(row) },
@@ -12974,7 +12583,7 @@ if (window.panelStartupController) panelStartupPlay();
     }
     const p = row.p;
     popSkillsContextMenu(x, y, p.displayName, [
-      { label: "探活", fn: () => storeAction("/api/store/test", { id: p.id }, (r) => `探活通过：${p.id}（上游 ${r.modelCount} 个模型）`) },
+      { label: "测试连接", fn: () => storeAction("/api/store/test", { id: p.id }, (r) => `${p.displayName} 可用（发现 ${r.modelCount} 个模型）`) },
       { label: "刷新模型", fn: () => storeRefresh([p.id]) },
       { label: "重命名", fn: () => showRenameProviderModal(p) },
       { label: "加入号池…", disabled: storePools().length ? null : "暂无号池，请先组建号池", fn: openPoolAddToPoolModal },
@@ -12996,7 +12605,7 @@ if (window.panelStartupController) panelStartupPlay();
     $("tabStore").onclick = () => switchView("store");
     $("storeAddBtn").onclick = () => showAddModal();
     $("storeRefreshAllBtn").onclick = () => storeRefresh(null);
-    // 「展示diff」弹窗关闭：关闭钮 / 点遮罩 / Esc（与会话删除确认弹窗同模式）
+    // 「查看差异」弹窗关闭：关闭钮 / 点遮罩 / Esc（与会话删除确认弹窗同模式）
     $("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal);
     $("storeDiffMask").addEventListener("click", (e) => { if (e.target === $("storeDiffMask")) closeStoreDiffModal(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("storeDiffMask").classList.contains("show")) closeStoreDiffModal(); });
@@ -13012,8 +12621,8 @@ if (window.panelStartupController) panelStartupPlay();
         setStoreRefreshStatus("端点同步完成", "done");
         toast("已同步到全部端点配置");
       } catch (err) {
-        setStoreRefreshStatus(`同步失败：${err.message}`, "err");
-        toast(`端点同步失败：${err.message}`, true);
+        setStoreRefreshStatus("同步失败", "err");
+        toast(panelError(err, "端点同步失败"), true);
       } finally {
         btn.disabled = false;
       }
@@ -13341,7 +12950,7 @@ if (window.panelStartupController) panelStartupPlay();
       renderStatsAll();
     } catch (err) {
       if (seq !== statsReqSeq) return; // 已有更新请求在飞：旧失败不弹 toast
-      if (!silent) toast(`使用统计加载失败：${err.message}`, true);
+      if (!silent) toast(panelError(err, "使用统计加载失败"), true);
       if (!statsData) renderStatsAll(); // 首次失败：各卡渲染「暂无数据」空态
     }
   }
@@ -14435,7 +14044,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (sessState.selectedId && !ids.has(sessState.selectedId)) sessState.selectedId = null;
     } catch (err) {
       if (seq !== sessListReqSeq) return;
-      toast(`会话列表加载失败：${err.message}`, true);
+      toast(panelError(err, "会话列表加载失败"), true);
       sessState.sessions = [];
       sessState.endpointErrors = [];
     } finally {
@@ -14699,7 +14308,7 @@ if (window.panelStartupController) panelStartupPlay();
       messages = Array.isArray(res.messages) ? res.messages : [];
     } catch (err) {
       // 会话可能已被删/移动：回退空消息流并提示
-      flow.innerHTML = `<div class="sessions-list-empty">消息加载失败：${esc(err.message)}</div>`;
+      flow.innerHTML = `<div class="sessions-list-empty">${esc(panelError(err, "消息加载失败"))}</div>`;
       return;
     }
     // 竞态：拉取期间用户已改选其它会话 → 丢弃
@@ -14869,7 +14478,7 @@ if (window.panelStartupController) panelStartupPlay();
       if (failItems.length) console.warn("[sessions] 删除失败项：", failItems);
     } catch (err) {
       okCount = 0; failCount = ids.length;
-      toast(`删除失败：${err.message}`, true);
+      toast(panelError(err, "删除失败"), true);
     } finally {
       sessState.deleting = false;
     }

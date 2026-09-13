@@ -1,11 +1,9 @@
-// Panel store-management service: the panel's write-side store flows (the
-// read-only store-check diagnostics surface has been retired). Business
-// semantics are ported from an early CLI implementation (enroll / discover /
-// refresh flows and the delete transaction) onto this repo's store-io /
+// Panel store-management service: the panel's write-side store flows (enroll /
+// discover / refresh and the delete transaction) on this repo's store-io /
 // dpapi / atomic-write primitives, with store-core.mjs supplying the pure
 // planning functions both layers share.
 //
-// Rules carried over from the CLI:
+// Rules this service enforces:
 //   - Every store write is schema-validated and CAS-guarded against the hash
 //     that was read. A precondition failure is surfaced as the recognizable
 //     error string "cas-conflict".
@@ -152,8 +150,7 @@ export function createStoreService({
   // timeout, capturing the verified upstream field names (context_length /
   // max_completion_tokens). Reasoning fields are deliberately NOT collected:
   // no upstream in the field returns supports_reasoning / reasoning_effort_levels
-  // (audited 2026-09-01, all providers HTTP 200), so extraction only ever
-  // produced empty metadata; the effort selector is fed from store annotations
+  // at all, so extraction only ever produced empty metadata; the effort selector is fed from store annotations
   // and the pi-ai knowledge base instead (reasoning-fallback.mjs).
   async function discoverModels(baseURL, plaintext) {
     const controller = new AbortController();
@@ -226,8 +223,7 @@ export function createStoreService({
     // This gate MUST run before markPending: it is a business rejection, not
     // a transient failure — a pending journal entry left behind would be
     // replayed by resumeDeletions once the pool is gone, deleting the
-    // provider out from under the user (learned the hard way: a blocked
-    // negative test deleted the live sensenova entry + credential).
+    // provider out from under the user without any request to delete it.
     if (managedEntry) {
       const pools = loaded.store.pools ?? {};
       for (const [poolId, pool] of Object.entries(pools)) {

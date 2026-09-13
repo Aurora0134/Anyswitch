@@ -63,11 +63,10 @@ const RECENT_SAMPLE_WINDOW = 18;
 // this the wall-clock between the first and the last token is a packet burst,
 // not a rate — the reply arrived in one or two TCP segments, so the quotient
 // says nothing about how fast the model writes. The guard is window-based on
-// purpose. The rule it replaces was rate-based ("over 200 tok/s must be an
-// artifact — divide by the FULL request duration instead"), which under-reported
-// every fast model the moment real speeds passed 200 tok/s, because that
-// fallback denominator carries the first-token wait (measured 2026-09-10:
-// deepseek-v4.1 at 270 tok/s displayed as 156; a 275 tok/s request as 77.8).
+// purpose, never rate-based. A rate threshold ("over N tok/s must be an
+// artifact — divide by the FULL request duration instead") under-reports every
+// fast model once real speeds pass N, because the whole-request denominator
+// carries the first-token wait. Windowing has no such cliff.
 const TPS_MIN_GEN_MS = 200;
 
 // The one speed statistic the panel and the statistics page share: completion
@@ -339,12 +338,12 @@ function extractParentPid(line) {
 // scanProcesses. Rows are claimed by their image NAME field — authoritative
 // in every probe shape — never by a substring of the whole line: the probe's
 // own cmd.exe wrapper (child_process.exec shells out on Windows) shows up in
-// the result carrying every agent name literal inside its command line, and
-// the old whole-line includes() branches let it impersonate a client —
-// reasonix sat first in the chain with no command-line check, so the panel
-// held a phantom 启动/待命 reasonix card on a machine that never ran
-// Reasonix. cmd.exe maps to a bucket of its own purely so the dispatch can
-// send it to the lineage table and nowhere else.
+// the result carrying every agent name literal inside its command line, so
+// bucketing must key off the IMAGE NAME field only — a whole-line substring
+// match lets a cmd wrapper impersonate whichever bucket is tested first, which
+// shows the panel a 启动/待命 card for a client that never ran. cmd.exe maps to a
+// bucket of its own purely so the dispatch can send it to the lineage table and
+// nowhere else.
 const AGENT_IMAGE_BUCKETS = [
   ["reasonix.exe", "reasonix"],
   ["reasonix-cli.exe", "reasonix"],
@@ -1743,7 +1742,7 @@ export function createAgentMetricsCollector(options = {}) {
     // unchanged, as do unresolvable custom ids. The normalized id also
     // reaches the usage journal (effMeta), keeping journal and bucket
     // attribution consistent.
-    // Accepted trade-off (cold-cache window): when the relay has just started
+    // Trade-off (cold-cache window): when the relay has just started
     // and cachedProcessCounts is still the empty scan, a launcher-injected
     // "<cwd基名>-<launcher pid>" id cannot resolve and is tracked under the
     // RAW id as a custom (idle-TTL) row. Once the cache warms, later requests

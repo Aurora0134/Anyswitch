@@ -19,9 +19,9 @@ describe("CONTEXT_TIER_RULES", () => {
   });
 
   it("keeps tier rules to a small curated set, not a static model library", () => {
-    // A growing per-model table is exactly what the compat plan rejects
-    // (兜底层 4.1): tiers go stale as upstreams iterate. Six is the surveyed
-    // 2026-08 set: gpt-5.5/gpt-5.6/gpt-5/gpt-4/claude-opus/claude.
+    // A growing per-model table is what this module deliberately avoids: tiers
+    // go stale as upstreams iterate, so the rule set stays small and curated
+    // (gpt-5.5/gpt-5.6/gpt-5/gpt-4/claude-opus/claude).
     assert.ok(CONTEXT_TIER_RULES.length <= 6);
   });
 });

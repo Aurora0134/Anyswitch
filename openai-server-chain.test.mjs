@@ -706,8 +706,8 @@ describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {
 
 describe("openai 路径端点识别（UA 嗅探）", () => {
   // 只有 kimi 配了链：kimi 的合并配置（kimi-merge-config.mjs）不带 x-agent-id，
-  // 端点识别只能依赖 UA。修复前 openaiAgentIdFrom 把 kimi 兜底成 zcode——
-  // kimi 的链既不暴露 auto，调用 auto 也按 zcode（无链）404。
+  // 端点识别只能依赖 UA。openaiAgentIdFrom 若把 kimi 兜底成 zcode，
+  // kimi 的链既不暴露 auto，调用 auto 也会按 zcode（无链）404。
   const KIMI_ONLY_STORE = {
     ...STORE,
     routingChains: {
@@ -749,7 +749,7 @@ describe("openai 路径端点识别（UA 嗅探）", () => {
 
   it("(models) UA kimi-code 且 kimi 无链时不泄漏 zcode 的 auto", async () => {
     const { upstreamFetch } = memberRouter({});
-    // zcode 有链、kimi 无链：kimi 的列表不得出现 auto（修复前兜底到 zcode 会错配）。
+    // zcode 有链、kimi 无链：kimi 的列表不得出现 auto（兜底到 zcode 会错配）。
     const deps = {
       ...createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY }),
       loadStore: () => ({ ok: true, store: { ...STORE, routingChains: { zcode: STORE.routingChains.zcode } } }),
@@ -940,9 +940,9 @@ describe("wire id 统计口径（anthropic/ 前缀不进 journal）", () => {
     assert.equal(lines[0].model, "model-a", "the wire prefix and provider segment must not reach the journal");
     // Direct (non-pool/chain) anthropic requests carry their channel id in
     // the startRequest meta (wireIdToTargetId) — without it the per-launch
-    // session reporter's fallback chain ends in an empty 未知渠道 row
-    // (2026-09-03 regression fix; c924055 had removed the read-time backfill
-    // this row shape used to rely on).
+    // session reporter's fallback chain ends in an empty 未知渠道 row, because
+    // providerId is only ever available from the request meta — there is no
+    // read-time backfill for this row shape.
     assert.equal(lines[0].providerId, "chan-a");
   });
 

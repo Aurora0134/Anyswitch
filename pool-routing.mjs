@@ -1,4 +1,4 @@
-// Pool routing primitives (provider pools, phase 2).
+// Pool routing primitives (provider pools).
 // Pure functions plus one in-memory sticky table. No IO.
 //
 // A pool groups 2-5 providers under its own id. When a request's URL segment

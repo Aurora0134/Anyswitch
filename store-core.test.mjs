@@ -541,9 +541,9 @@ test("planStoreRefresh enriches discovered entries with rawModels metadata", () 
   assert.equal(m1Model.contextWindow, 128000);
 });
 
-// Discovery no longer collects reasoning fields from upstream /v1/models
-// (audited 2026-09-01: every provider's listing carries none, so the
-// extraction only ever materialized empty metadata). Effort levels come from
+// Discovery does not collect reasoning fields from upstream /v1/models:
+// provider listings carry none, so extracting them can only ever produce
+// empty metadata. Effort levels come from
 // store annotations and the pi-ai knowledge base instead.
 test("planStoreRefresh never copies reasoning fields from rawModels metadata", () => {
   const configText = `{

@@ -2,14 +2,13 @@
 // endpoint into that endpoint's home-level global instructions file as a
 // managed block.
 //
-// Verified target facts (2026-09, see the prompt-injection knowledge note):
+// Target facts this module depends on:
 //   - reasonix's Windows home is %APPDATA%/reasonix, not ~/.reasonix, so its
 //     target is derived from base.APPDATA, never from homeDir.
 //   - kimi/opencode re-read their file at runtime (hot); the other six read
 //     it once at session start — surfaced to the UI as `hotReload`.
-//   - qoder: `~/.qoder/rules/**/*.md` is a real user-level surface in Qoder
-//     Desktop (verified 2026-09-09 by a fresh conversation quoting its own
-//     injected `--- Context from: .../.qoder/rules/<file>.md ---` block). A
+//   - qoder: `~/.qoder/rules/**/*.md` is a user-level injection surface in
+//     Qoder Desktop, and its loaded text is observable in model context. A
 //     rule file with no loading frontmatter defaults to `always_on`, and
 //     Qoder keeps watching a rule file once loaded, so edits land on the next
 //     turn → hotReload true. `~/.qoder/AGENTS.md` injects too but is read only
@@ -52,7 +51,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
 ]);
 
 // Bodies only: the title lives in prompts.json for the panel; it never
-// reaches the endpoint instruction files (user decision, 2026-09-06).
+// reaches the endpoint instruction files.
 /** Render the managed block for a non-empty preset set. */
 export function buildManagedBlock(presets) {
   const lines = [MANAGED_BEGIN];

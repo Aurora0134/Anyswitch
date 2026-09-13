@@ -1,6 +1,6 @@
 // style-lab 主题同步校验：panel.html 内嵌块（/* ===== style-lab: SLUG ===== */ 横幅）
 // 必须与 panel-ui/style-lab/SLUG.css 源文件逐字一致（归一化 CRLF/LF 行尾后比对）。
-// neon 已退役、按约定保留存档，不在校验范围（见 style-lab/CONTRACT.md）。
+// 只校验 SLUGS 里在册的风格；退役片段的 CSS 与源文件随退役一并删除。
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

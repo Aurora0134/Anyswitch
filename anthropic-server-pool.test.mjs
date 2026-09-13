@@ -1,4 +1,4 @@
-// Anthropic-path pool routing tests (phase 2): real loopback sockets against
+// Anthropic-path pool routing tests: real loopback sockets against
 // both Anthropic entries — the resident relay (createOpenAIRelayServer,
 // /v1/messages) and the per-launch relay (createRelayServer). Synthetic
 // store, mock upstream. No real credentials, no real network egress, no DPAPI.

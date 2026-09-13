@@ -1,7 +1,7 @@
 // OpenAI chat.completion.chunk -> Anthropic Messages SSE translation tests.
 // Pure state machine: no IO, no network.
 //
-// The load-bearing invariant is A5: an upstream that never emits reasoning must
+// The load-bearing invariant: an upstream that never emits reasoning must
 // translate byte-for-byte the same as it always has. Reasoning support is an
 // additive path, never a rewrite of the existing one.
 
@@ -34,9 +34,9 @@ function parseEvents(text) {
 
 const delta = (d, extra = {}) => ({ choices: [{ index: 0, delta: d, ...extra }] });
 
-// ---------- A5: zero-regression guard — no reasoning upstream ----------
+// ---------- zero-regression guard: no reasoning upstream ----------
 
-test("A5: a text-only stream translates byte-for-byte as before", () => {
+test("a text-only stream translates byte-for-byte as before", () => {
   const events = translate([
     { id: "c1", choices: [{ index: 0, delta: { role: "assistant" } }] },
     { id: "c1", choices: [{ index: 0, delta: { content: "你" } }] },
@@ -55,7 +55,7 @@ test("A5: a text-only stream translates byte-for-byte as before", () => {
   assert.equal(events[5].data.usage.output_tokens, 2);
 });
 
-test("A5: a tool-call-only stream translates byte-for-byte as before", () => {
+test("a tool-call-only stream translates byte-for-byte as before", () => {
   const events = translate([
     { id: "c2", choices: [{ index: 0, delta: { role: "assistant" } }] },
     { id: "c2", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Bash", arguments: "" } }] } }] },
@@ -72,7 +72,7 @@ test("A5: a tool-call-only stream translates byte-for-byte as before", () => {
   assert.equal(events[4].data.delta.stop_reason, "tool_use");
 });
 
-test("A5: text then tool_use closes the text block before the tool block starts", () => {
+test("text then tool_use closes the text block before the tool block starts", () => {
   const events = translate([
     { id: "c3", choices: [{ index: 0, delta: { content: "先看一眼" } }] },
     { id: "c3", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Read", arguments: "" } }] } }] },
@@ -88,9 +88,9 @@ test("A5: text then tool_use closes the text block before the tool block starts"
   assert.equal(events[4].data.index, 1);
 });
 
-// ---------- A1/A2/A4: reasoning -> thinking blocks ----------
+// ---------- reasoning -> thinking blocks ----------
 
-test("A1: reasoning deltas translate to a thinking block with thinking_delta events", () => {
+test("reasoning deltas translate to a thinking block with thinking_delta events", () => {
   const events = translate([
     { id: "c4", choices: [{ index: 0, delta: { role: "assistant" } }] },
     { id: "c4", choices: [{ index: 0, delta: { reasoning_content: "想" } }] },
@@ -107,7 +107,7 @@ test("A1: reasoning deltas translate to a thinking block with thinking_delta eve
   assert.equal(events[3].data.delta.thinking, "想");
 });
 
-test("A2: thinking then text closes the thinking block before the text block starts", () => {
+test("thinking then text closes the thinking block before the text block starts", () => {
   const events = translate([
     { id: "c5", choices: [{ index: 0, delta: { reasoning_content: "想一下" } }] },
     { id: "c5", choices: [{ index: 0, delta: { content: "你好" } }] },
@@ -124,7 +124,7 @@ test("A2: thinking then text closes the thinking block before the text block sta
   assert.equal(events[5].data.delta.text, "你好");
 });
 
-test("A2: thinking then tool_use closes the thinking block before the tool block starts", () => {
+test("thinking then tool_use closes the thinking block before the tool block starts", () => {
   const events = translate([
     { id: "c6", choices: [{ index: 0, delta: { reasoning_content: "要调工具" } }] },
     { id: "c6", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Bash", arguments: "" } }] } }] },
@@ -138,7 +138,7 @@ test("A2: thinking then tool_use closes the thinking block before the tool block
   assert.equal(events[4].data.content_block.type, "tool_use");
 });
 
-test("A4: every reasoning field alias maps to thinking", () => {
+test("every reasoning field alias maps to thinking", () => {
   assert.deepEqual(REASONING_FIELDS, ["reasoning_content", "reasoning", "thought", "thinking"]);
   for (const field of REASONING_FIELDS) {
     const events = translate([
@@ -151,7 +151,7 @@ test("A4: every reasoning field alias maps to thinking", () => {
   }
 });
 
-test("A6: an unclosed thinking block is closed by finish()", () => {
+test("an unclosed thinking block is closed by finish()", () => {
   const translator = new StreamTranslator("anthropic/poke-api/claude-opus-5");
   let out = translator.chunk({ id: "c8", choices: [{ index: 0, delta: { reasoning_content: "想" } }] });
   out += translator.finish();
@@ -162,7 +162,7 @@ test("A6: an unclosed thinking block is closed by finish()", () => {
   );
 });
 
-test("A6: usage and stop_reason are unchanged by a thinking block", () => {
+test("usage and stop_reason are unchanged by a thinking block", () => {
   const events = translate([
     { id: "c9", choices: [{ index: 0, delta: { reasoning_content: "想" } }] },
     { id: "c9", choices: [{ index: 0, delta: { content: "答" } }] },

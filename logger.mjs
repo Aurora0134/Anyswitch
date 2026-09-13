@@ -49,8 +49,8 @@ export function createLogger(options = {}) {
 
   // Reset the ring and notify subscribers with a control frame. A "clear" is
   // not a log line: subscribers forward the frame to viewers so every open
-  // panel window empties together, and SSE reconnects no longer replay what
-  // the user just cleared. The frame itself never enters the history.
+  // panel window empties together, and an SSE reconnect does not replay lines
+  // the user has already cleared. The frame itself never enters the history.
   function clear() {
     ring.fill(undefined);
     head = 0;

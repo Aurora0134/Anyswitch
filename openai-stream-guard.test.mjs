@@ -124,9 +124,9 @@ describe("OpenAIStreamGuard", () => {
   });
 
   it("holds non-JSON data lines instead of releasing; a stream of only non-JSON lines is empty", () => {
-    // A bare `data:` line (or any non-JSON payload) used to disarm the guard
-    // entirely — truncated streams then passed as normal completions and the
-    // keep-alive retry never fired. It must prove nothing and stay held.
+    // A bare `data:` line (or any non-JSON payload) must not disarm the guard:
+    // if it did, a truncated stream would pass as a normal completion and the
+    // keep-alive retry would never fire. It proves nothing and stays held.
     const guard = new OpenAIStreamGuard();
     const weird = "data: not-json-at-all\n\n";
     const emitted = pump(guard, [weird, "data: [DONE]\n\n"]);
@@ -213,8 +213,8 @@ describe("OpenAIStreamGuard", () => {
 
   it("flags mid-word truncation: content delivered, stream ends with no [DONE] and no finish_reason", () => {
     // The "字中截断" shape: text was flowing, then the TCP stream simply ends.
-    // No terminator, no error — previously classified "pass", which made the
-    // client treat partial output as a complete response.
+    // No terminator, no error — classifying this as "pass" would let the client
+    // treat partial output as a complete response.
     const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [
       'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"Here is some partial out"}}]}\n\n',
@@ -391,7 +391,7 @@ describe("holdEntireTurn (plan A: whole-turn hold in enhanced mode)", () => {
     assert.ok(emitted.includes("reasoning_content"), "basic mode must stream live");
   });
 
-  it("single-flag signature: the legacy holdToolCalls option no longer holds anything", () => {
+  it("single-flag signature: holdToolCalls is not a constructor option", () => {
     // The constructor now takes only holdEntireTurn. A caller still passing
     // the removed holdToolCalls option gets basic-mode behavior: a complete
     // tool call releases the hold live.

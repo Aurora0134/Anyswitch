@@ -323,10 +323,10 @@ test("runQoderLauncher never lets a throwing config sync fail the launch", async
 });
 
 test("runQoderLauncher rejects a caller that omits writeConfig before any side effect", async () => {
-  // This is the whole point of injecting the machine-touching deps instead of
-  // calling them directly: an isolated test that forgets one must crash here,
-  // not fall through to the real qoder-merge-config writer and overwrite the
-  // user's ~/.qoder/settings.json with a fake token (happened 2026-09-09).
+  // Machine-touching deps are injected rather than called directly so that a
+  // test which forgets one crashes here, instead of falling through to the real
+  // qoder-merge-config writer and overwriting the user's
+  // ~/.qoder/settings.json with a fake token.
   const deps = recordingDeps();
   const { writeConfig, ...withoutWriteConfig } = deps;
 

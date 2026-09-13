@@ -1,7 +1,6 @@
 *.tmp
 *.log
 node_modules/
-ApiCred.Gui.exe
 .cptest/
 logs/
 .env

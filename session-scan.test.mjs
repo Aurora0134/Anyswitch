@@ -1,6 +1,6 @@
 // session-scan unit tests: every adapter runs against temp-dir fixtures, never
-// the real home dirs. Coverage follows the REVIEW-FINDINGS / research-report
-// acceptance list: custom-title priority, caveat skipping, dir-name fallback,
+// the real home dirs. Coverage includes: custom-title priority, caveat
+// skipping, dir-name fallback,
 // title truncation, journal/agent exclusion, subagents exclusion, delete root
 // whitelist (refuse + accept), claude sidecar cleanup, sqlite read-only open
 // failure degradation, and the scanAll/loadMessages/deleteSessions contract.
@@ -858,8 +858,8 @@ test("codex: session id falls back to the rollout filename uuid", async () => {
 // One real zcode/opencode assistant turn. A "tool" part carries the call AND
 // its result (state.output when completed, state.error when it failed, neither
 // while running), and the call's name sits under "tool" — not "name". The
-// fixture used to hold no tool part at all, which is exactly why "[Tool:
-// unknown]" for every zcode call shipped unnoticed.
+// fixture with no tool part at all would let "[Tool: unknown]" for every zcode
+// call pass unnoticed, so the fixtures always carry one.
 function toolPart(overrides = {}) {
   return {
     type: "tool",
@@ -1123,7 +1123,7 @@ test("reasonix: a catalog row whose transcript is gone is not listed", async () 
   const live = join(sessionsDir, "20260901-100000.1-model.jsonl");
   writeFileSync(live, JSON.stringify({ role: "user", content: "还在的会话" }) + "\n", "utf8");
   // The app moved this one into its own .trash and the catalog has not caught
-  // up yet — listing it used to make opening it fail outright.
+  // up yet — listing such a file makes opening it fail outright.
   const gone = join(sessionsDir, "20260901-090000.1-model.jsonl");
   writeReasonixCatalog(localRoot, [
     {

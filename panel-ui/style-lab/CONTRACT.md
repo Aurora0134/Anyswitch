@@ -10,13 +10,12 @@
 横幅块与对应 `SLUG.css` 归一化行尾（CRLF/LF）后逐字比对，漂移即红。
 若发现两侧漂移：以现行生效的一侧为准回写另一侧（panel.html 内嵌块是实际加载的样式，
 通常是内嵌块领先、源文件落后，把内嵌块内容回写进 `SLUG.css`），不许只改一侧留漂移。
-`neon` 已退役仅作存档保留，不在校验范围。
 
 ## 切换机制（集成方实现，片段作者只需了解）
 
 - `<html>` 上新增 `data-style` 属性：缺省 = 当前经典样式；`saas` /
-  `aurora` / `blueprint` / `sepia` = 四套风格
-  （`neon` 已退役不可选，CSS 暂保留，存档值回落经典）。
+  `aurora` / `blueprint` / `sepia` = 四套风格。
+  已退役的 `neon` / `industrial` / `editorial` 片段随退役删除，历史存档值回落经典。
 - 亮暗仍由既有 `data-theme="light|dark"` + `prefers-color-scheme` 决定，与 `data-style` 正交，
   亮暗由右上角按钮独立控制。
 - 设置弹窗「面板主题」栏切换，即时生效，localStorage `panel-style` 记忆在本机。

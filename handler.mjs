@@ -7,7 +7,7 @@
 //   - no default provider
 //   - no prefix fuzzy matching
 //   - no nearest-model fallback
-//   - no official Anthropic passthrough (user decision 2026-08-04)
+//   - no official Anthropic passthrough
 //   - no falling back to some other key when decryption fails
 
 import { timingSafeEqual } from "node:crypto";

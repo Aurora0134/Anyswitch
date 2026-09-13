@@ -47,9 +47,9 @@ const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 
 // GET /api/settings decorates its response with watchdog drift visibility
 // (registry task present vs watchdog process answering). Both probes cost real
-// time — a PowerShell Get-ScheduledTask spawn (~0.9s measured) plus an HTTP
-// liveness probe — and the panel page fetches /api/settings on every load to
-// hydrate the 抗截断 toggle, so paying them per GET delayed that toggle >1s.
+// time — a PowerShell Get-ScheduledTask spawn plus an HTTP liveness probe —
+// and the panel page fetches /api/settings on every load to hydrate the 抗截断
+// toggle, so paying them per GET made that toggle wait on the probes.
 // The snapshot is stale-while-revalidate: once a probe round has settled,
 // GETs return instantly (stale values past the TTL) while one shared
 // background round refreshes. POST followAgent invalidates so the next GET
@@ -473,11 +473,10 @@ export function createPanelRouter({
     }
   }
 
-  // A3: store.json mtime 微缓存。handleStatus 每秒只读 provider 计数，每请求
+  // store.json mtime 微缓存。handleStatus 每秒只读 provider 计数，每请求
   // 一次 statSync（元数据读，微秒级）按 mtimeMs:size 校验，不变即复用上次解析
   // 结果。跨进程安全：relay 写 store 走 atomic rename，mtime 必变。
-  // 契约：缓存命中返回的是共享 parsed 引用——调用方只读、禁止原地修改
-  // （已核对 panel.mjs 内全部 loadStore 调用方均为只读）。
+  // 契约：缓存命中返回的是共享 parsed 引用——调用方只读、禁止原地修改。
   // statSync 失败（store.json 缺失）落入 uncached 分支，绝不返回上次 ok:true
   // 缓存（否则 storeOk 外显变化）；只缓存 stat 成功且 ok:true 的结果。
   let storeLoadCache = null; // { path, mtimeMs, size, loaded }
@@ -860,10 +859,10 @@ export function createPanelRouter({
 
   // Last authoritative relay snapshot: { at, agents }. A failed pull means
   // either "relay unreachable" or "relay answered slower than the 1500ms pull
-  // budget" — and only the first used to justify the local collector, which owns
-  // no traffic at all. Serving it on a timeout produced a structurally identical
-  // blind frame (running, but 0 requests / no lastSeen / no sparkHistory) and the
-  // board flashed "no data" for a beat. Bounded staleness beats a false zero.
+  // budget", and only the first justifies the local collector — which owns no
+  // traffic at all. Serving the collector on a timeout yields a structurally
+  // identical blind frame (running, but 0 requests / no lastSeen / no
+  // sparkHistory), so bounded staleness beats a false zero.
   const PULLED_AGENTS_STALE_MAX_MS = 5000;
   let lastPulledAgents = null;
 
@@ -989,9 +988,8 @@ export function createPanelRouter({
     }
   }
 
-  // A4: panel.html 内存缓存 + ETag/304。每请求 statSync 校验 mtimeMs:size，不变
-  // 即复用内存 body；ETag 由 size+mtimeMs 派生（package.json 无 version 字段，
-  // 「版本派生」不存在）；Cache-Control: no-cache 强制每次 revalidate，
+  // panel.html 内存缓存 + ETag/304。每请求 statSync 校验 mtimeMs:size，不变
+  // 即复用内存 body；ETag 由 size+mtimeMs 派生；Cache-Control: no-cache 强制每次 revalidate，
   // If-None-Match 命中回 304。缓存键含 resolved htmlPath（测试会切
   // ANYSWITCH_PANEL_HTML env override，防串内容）。statSync 失败不命中/不写缓存，
   // 404 JSON 语义原样保留。
@@ -1186,7 +1184,7 @@ export function createPanelRouter({
         }
       }
 
-      // A5: 看板轻量端点——只下发 routingChains + 名字映射，不带全量 store payload。
+      // 看板轻量端点：只下发 routingChains + 名字映射，不带全量 store payload。
       if (path === "/panel/api/store/board-state" && method === "GET") {
         try {
           return sendJson(res, 200, await svc.getBoardState());
@@ -1438,8 +1436,8 @@ export function createPanelRouter({
 
       if (path === "/panel/api/sessions/list" && method === "GET") {
         try {
-          // B5 裁定契约：{ sessions, endpointErrors } 由 scanAll 装配，
-          // 单 adapter 失败已降级进 endpointErrors，路由原样透传。
+          // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，
+          // 单 adapter 失败降级进 endpointErrors，路由原样透传。
           return sendJson(res, 200, await svc.scanAll());
         } catch (err) {
           return sendJson(res, 500, { ok: false, error: err.message });
@@ -1450,7 +1448,7 @@ export function createPanelRouter({
         const endpoint = url.searchParams.get("endpoint");
         const file = url.searchParams.get("path");
         if (!endpoint || !file) {
-          return sendJson(res, 400, { ok: false, error: "endpoint 和 path 参数不能为空" });
+          return sendJson(res, 400, { ok: false, error: "endpoint and path query params are required" });
         }
         try {
           const messages = await svc.loadMessages(endpoint, file);
@@ -1466,10 +1464,10 @@ export function createPanelRouter({
           if (!Array.isArray(body?.items) || body.items.length === 0
             || body.items.some((it) => typeof it?.endpoint !== "string" || !it.endpoint
               || typeof it?.file !== "string" || !it.file)) {
-            return sendJson(res, 400, { ok: false, error: "items 必须是非空的 {endpoint, file} 数组" });
+            return sendJson(res, 400, { ok: false, error: "items must be a non-empty array of { endpoint, file }" });
           }
           const result = await svc.deleteSessions(body.items);
-          // B3 裁定契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
+          // 响应契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
           return sendJson(res, 200, {
             ok: result?.ok ?? [],
             fail: result?.fail ?? [],
@@ -1567,7 +1565,7 @@ export function createPanelRouter({
           if (path === "/panel/api/skills/resolve-conflict") {
             const direction = requireString(body.direction, "direction");
             if (direction !== "repo" && direction !== "local") {
-              return sendJson(res, 400, { ok: false, error: 'direction 必须是 "repo" 或 "local"' });
+              return sendJson(res, 400, { ok: false, error: 'direction must be "repo" or "local"' });
             }
             const result = await svc.resolveConflictSkill({
               endpointId: requireString(body.endpointId, "endpointId"),

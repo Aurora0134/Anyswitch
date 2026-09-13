@@ -622,7 +622,7 @@ describe("panel router followAgent watchdog coordination", () => {
 
   it("GET settings migrates the retired basic mode to enhanced", async () => {
     const { base, dir } = tempBase();
-    // Production settings.json shape before the two-tier keep-alive merge.
+    // 旧版 settings.json 形状：keepAlive 仍带 mode 字段。
     writeFileSync(join(dir, "Anyswitch", "settings.json"), JSON.stringify({
       keepAlive: { enabled: true, mode: "basic" },
     }));
@@ -708,7 +708,7 @@ describe("panel router followAgent watchdog coordination", () => {
 
 // GET /api/settings decorates its response with watchdog drift visibility
 // (registry task present vs watchdog process answering). Both probes are
-// expensive — a PowerShell Get-ScheduledTask spawn (~0.9s measured) plus an
+// expensive — a PowerShell Get-ScheduledTask spawn plus an
 // HTTP liveness probe — and the panel frontend fetches /api/settings on every
 // page load to hydrate the per-endpoint 抗截断 toggle, so paying the probes on
 // every GET delayed that toggle ~1.4s. The snapshot serves the probes
@@ -1062,7 +1062,7 @@ describe("panel.html stats tab", () => {
     assert.ok(panelHtml.includes("使用统计"), "stats tab label exists");
     assert.ok(panelHtml.includes('class="stats-top-grid"'), "two-column top layout exists");
     assert.ok(!panelHtml.includes("statsOvActive"), "active-count card removed");
-    // 日期徽标已删（用户拍板）：今日口径是默认读法
+    // 概览不设日期徽标：今日口径是默认读法
     assert.ok(!panelHtml.includes("statsOverviewDate"), "overview date badge removed");
     for (const id of [
       "statsOvRequests",
@@ -1496,11 +1496,9 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     "utf8",
   );
 
-  // 胶囊 auto 标记判定（2026-09-02 语义纠偏）：标记数据源从「链位置快照
-  // (route-chain runtime current)」改为「胶囊条目自身的服务归因 (viaAuto)」——
-  // 胶囊反映当前服务的模型，auto 角标表示该服务来自 auto 链。位置快照不再参与
-  // 胶囊判定（那是左栏路由链卡的职责）；旧「loading 首刷守卫」随之失去意义：
-  // 直连流量从数据源上就不携带 viaAuto，按链名误挂的路径已不存在。
+  // 胶囊 auto 标记只认条目自身的服务归因 (viaAuto)：胶囊反映当前服务的模型，
+  // 角标表示该服务来自 auto 链。链位置快照不参与胶囊判定（那是左栏路由链卡的
+  // 职责）；直连流量从数据源上就不携带 viaAuto，因此不会按链名误挂。
   function makeAutoMark() {
     const m = panelHtml.match(/function autoRouteMarkForTarget\(chain, providerId, modelName, viaAuto\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "autoRouteMarkForTarget found in panel.html");
@@ -1606,13 +1604,13 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.equal(label(nameOf, "A", "auto"), "auto");
   });
 
-  it("实例行「模型 @ 渠道」标签已移除：端点卡胶囊复合键化后归因信息完整，不再重复展示", () => {
+  it("实例行不重复挂「模型 @ 渠道」标签：端点卡胶囊已是渠道×模型复合键", () => {
     assert.ok(!panelHtml.includes("instanceTagBubble"), "instanceTagBubble gone");
     assert.ok(!panelHtml.includes("instanceTargetOf"), "instanceTargetOf gone");
     assert.ok(!panelHtml.includes("modelTag"), "modelTag slot gone");
   });
 
-  it("卡头 Flow Rail 已移除：mini 轨道 CSS 与渲染入口不存在", () => {
+  it("卡头不含 Flow Rail：mini 轨道 CSS 与渲染入口均不存在", () => {
     assert.ok(!panelHtml.includes("route-seg--mini"), "mini seg CSS gone");
     assert.ok(!panelHtml.includes("renderRouteChainStatus"), "rail renderer gone");
     assert.ok(!panelHtml.includes(".route-rail {"), "rail container CSS gone");
@@ -1639,8 +1637,8 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.ok(!panelHtml.includes('label: "从链中移除"'), "old label gone");
   });
 
-  // 灯色数据源切换（2026-09-01）：runtime lamps（每次启动重新统计）取代
-  // stability 缓存判定；黄档移除，runtime 缺失时链首默认点亮。
+  // 灯色数据源：runtime lamps（每次启动重新统计），不是 stability 缓存判定；
+  // 无黄档，runtime 缺失时链首默认点亮。
   function makeRailLights() {
     const re = new RegExp("function routeRailLights\\(items, rt\\) \\{[\\s\\S]*?\\n  \\}");
     const m = panelHtml.match(re);
@@ -1660,8 +1658,8 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.deepEqual(makeRailLights()(items, { lamps: ["red"] }), ["green", "gray"], "长度不符不采用");
   });
 
-  it("stability 灯色判定与 TTFT 黄档已从链路状态区移除", () => {
-    assert.ok(!panelHtml.includes("ROUTE_TTFT_WARN_MS"), "TTFT warn threshold gone");
+  it("链路状态区不含 TTFT 黄档判定", () => {
+    assert.ok(!panelHtml.includes("ROUTE_TTFT_WARN_MS"), "链路状态区不得含 ROUTE_TTFT_WARN_MS");
     assert.ok(!panelHtml.includes("routeNodeLamp"), "stability-based lamp gone");
     assert.ok(!panelHtml.includes("lampWord"), "悬浮窗灯色文字 gone");
     assert.ok(!/黄灯|绿灯/.test(panelHtml), "链路状态区不再出现灯色名称字样");
@@ -1958,9 +1956,9 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
 });
 
 describe("panel.html per-instance telemetry TTFT sparkline", () => {
-  // 回归（dd61b99 多实例化重构）：端点级四宫格删除后，实例级四宫格只接回了
-  // 生成速度/缓存命中率两条 sparkline，「首字响应时间」折线图从 kimi/opencode/
-  // pi 三栏消失。以下断言钉住容器、缓冲、绘制三个环节。
+  // 多实例化后端点级四宫格已不在，实例级四宫格必须自带 tps/cache/TTFT 三条
+  // sparkline——任一条漏接都会让 kimi/opencode/pi 三栏静默失去该折线图。
+  // 以下断言覆盖容器、缓冲、绘制三个环节。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -1980,7 +1978,7 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
       "pushInstanceSpark feeds ttft samples");
     assert.ok(/ttft: typeof ttft === "number" && ttft > 0 \? ttft \/ 1000 : null,/.test(panelHtml),
       "renderInstanceRows pushes lastTtftMs in seconds (endpoint-level unit parity)");
-    // 2026-09-01 折叠门控调和：绘制收进 if (open)，权威历史暂存到 buf.sparkHistory
+    // 折叠门控：绘制收在 if (open) 内，权威历史暂存到 buf.sparkHistory
     // （折叠期间无 inst 可用），两条路径口径见 panel-instance-fold.test.mjs。
     assert.ok(/updateSparkline\(sparkTtftId, sparkValues\(buf\.ttft, buf\.sparkHistory\?\.ttft\)\);/.test(panelHtml),
       "sparkline redraws each render, seeded from buffer-stashed authoritative history");
@@ -1988,9 +1986,8 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
 });
 
 describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归因换装）", () => {
-  // 撤销（2026-09-08）：实例行曾按链归因把绿色「生成中」换成号池紫「自动路由中」。
-  // 「这条请求走没走自动路由」只由端点模型胶囊上的 auto 角标表达，状态徽标回到
-  // 生成中/待命两态；伪「全局汇总」行依旧不挂状态徽标。此处钉住不再换装。
+  // 实例行状态徽标只有生成中/待命两态：「这条请求走没走自动路由」由端点模型胶囊
+  // 上的 auto 角标单独表达，不由状态徽标换装承担；伪「全局汇总」行不挂状态徽标。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -2024,9 +2021,8 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 });
 
 describe("panel.html 设置弹窗齿轮图标完整性", () => {
-  // 回归（2026-09-07）：设置弹窗标题的齿轮 path 曾缺一段双弧线段
-  // （a2 2 0 0 1 -2.83 0 2 2 0 0 1），齿形塌陷、图标歪斜。钉住弹窗齿轮与
-  // 页头齿轮（视觉正确基准）path 完全一致，防止再被不完整粘贴破坏。
+  // 设置弹窗标题的齿轮 path 必须与页头齿轮（视觉正确基准）逐字一致：缺任一段
+  // 双弧线段都会让齿形塌陷、图标歪斜，而这种差异在结构断言里看不出来。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -2040,15 +2036,15 @@ describe("panel.html 设置弹窗齿轮图标完整性", () => {
     assert.ok(paths[0].includes("a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83"), "gear arc segment present");
   });
 });
-describe("panel.html 结构完整性（防 read 截断污染回写）", () => {
+describe("panel.html 结构完整性（超长行原样保留）", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("文件不含工具截断标记（超长行必须原样保留，img/path 数据不得被替换为占位文本）", () => {
+  it("文件不含截断占位标记（img/path 数据不得被替换为占位文本）", () => {
     assert.ok(!panelHtml.includes("(line truncated to 2000 chars)"),
-      "base64 行曾被 read 工具截断产物污染，导致头像 img src 损坏、监测卡标题错乱");
+      "超长 base64 行一旦被占位文本替换，头像 img src 会损坏、监测卡标题会错乱");
   });
 
   it("监测页九个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
@@ -2485,27 +2481,27 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(panelHtml.includes('svg.setAttribute("role", "img")'), "svg role=img set");
   });
 
-  it("卡片口径标注副标就位，死样式与过期注释已清", () => {
+  it("统计卡口径标注唯一性", () => {
     // 卡头标注只留在确有误读风险的卡（TPS）；今日概览与趋势卡头不设标注
-    //（今日口径与滚动窗口属默认读法，用户拍板删除）。稳定性卡已整卡移除。
+    //（今日口径与滚动窗口属默认读法）。
     for (const note of [
       "仅统计流式请求",
     ]) {
       assert.ok(panelHtml.includes(`<span class="stats-card-note">${note}</span>`), "note: " + note);
     }
-    assert.ok(!panelHtml.includes("成功率不含用户取消"), "stability card note gone with the card");
+    assert.ok(!panelHtml.includes("成功率不含用户取消"), "统计卡不含该标注");
     for (const dropped of [
       "今日自然日口径",
       "按过去 24h / 7 日滚动窗口统计",
     ]) {
-      assert.ok(!panelHtml.includes(dropped), "dropped note really gone: " + dropped);
+      assert.ok(!panelHtml.includes(dropped), "卡头不得出现标注: " + dropped);
     }
     // 取消口径下沉到成功率行标签。
     assert.ok(panelHtml.includes("成功率（不含取消）"), "success-rate row carries the exclude-cancel caveat");
-    assert.ok(!panelHtml.includes(".stats-usage-grid"), "dead .stats-usage-grid CSS removed");
-    assert.ok(!panelHtml.includes("图表 tab[柱状图/环形图]"), "stale chart-tab comment removed");
+    assert.ok(!panelHtml.includes(".stats-usage-grid"), ".stats-usage-grid 不得残留");
+    assert.ok(!panelHtml.includes("图表 tab[柱状图/环形图]"), "图表 tab 注释不得残留");
     assert.ok(!panelHtml.includes('<section class="skills-view stats-view"'),
-      "unreferenced .skills-view class dropped from statsView");
+      "statsView 不得挂未引用的 .skills-view 类");
     assert.ok(panelHtml.includes('<span class="badge badge-neutral">近 90 天</span>'), "heatmap 90-day badge kept as its annotation");
   });
 });
@@ -2554,14 +2550,14 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
   });
 });
 
-describe("panel.html 行 hover 高亮移除", () => {
+describe("panel.html 行不含 hover 高亮", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
   it("全局汇总行与实例 title 行（同为 .session-row）不再有鼠标悬浮高亮", () => {
-    assert.ok(!panelHtml.includes(".session-row:hover"), ".session-row:hover 高亮规则已删除");
+    assert.ok(!panelHtml.includes(".session-row:hover"), ".session-row 不得含 hover 高亮规则");
     assert.ok(!panelHtml.includes(".session-name-line:hover"), "session-name-line 无独立 hover 规则");
   });
 });
@@ -2808,7 +2804,7 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(panelHtml.includes("PANEL_RESTART_POLL_MS"), "恢复轮询自带节奏常量");
     const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
     const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
-    assert.ok(recovery.length > 500, "恢复逻辑体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(recovery.length > 500, "未真正取到函数体，后续断言会全部落空");
     assert.ok(!recovery.includes("document.hidden"),
       "带 hidden 门控的话，用户点完重启切走标签页就永远检测不到换新");
     assert.ok(recovery.includes("location.reload()"), "新进程接管后重载页面，前端 JS 与后端同版本");
@@ -2829,10 +2825,10 @@ describe("panel.html 面板重启状态机契约", () => {
   it("面板重启请求用裸 fetch，区分连接掐断与服务端拒绝", () => {
     const execStart = panelHtml.indexOf("async function executeRestartRelay()");
     const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
-    assert.ok(exec.length > 500, "executeRestartRelay 体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(exec.length > 500, "未真正取到 executeRestartRelay 函数体，后续断言会全部落空");
     assert.ok(exec.includes('fetch(API_BASE + "/api/panel-host/restart"'),
       "api() 把「响应被退出掐断」和「403/409/500 明确拒绝」都抛成同一种 Error");
-    assert.ok(!exec.includes('api("POST", "/api/panel-host/restart"'), "不得改用 api() 打这个端点");
+    assert.ok(!exec.includes('api("POST", "/api/panel-host/restart"'), "这个端点只能走裸 fetch：api() 无法区分连接掐断与明确拒绝");
     assert.ok(exec.includes("restartStarted = true;"), "连接中断按「重启已开始」处理");
     assert.ok(exec.includes('api("POST", "/api/relay/restart")'), "relay 仍是第一段，失败即终止");
   });
@@ -2855,19 +2851,19 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(panelHtml.includes("window.panelStartupLaunch = true"), "标记只在 launcher URL 路径打点");
     const restoreStart = panelHtml.indexOf("function restoreView()");
     const restore = panelHtml.slice(restoreStart, panelHtml.indexOf("function reconcileSkillsSelection()", restoreStart));
-    assert.ok(restore.length > 100, "restoreView 体必须真的被抓取到，否则下面的断言全是空过");
+    assert.ok(restore.length > 100, "未真正取到 restoreView 函数体，后续断言会全部落空");
     assert.ok(restore.includes("if (window.panelStartupLaunch) return;"), "launcher 首开跳过恢复固定看板");
     assert.ok(restore.includes('localStorage.getItem("panel-view")'), "刷新与普通访问仍按 panel-view 恢复");
   });
 });
 
-describe("panel.html 渠道刷新「展示diff」弹窗", () => {
+describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("声明弹窗 DOM 与「展示diff」小字结构", () => {
+  it("声明弹窗 DOM 与「查看差异」小字结构", () => {
     for (const id of [
       "storeDiffMask",
       "storeDiffCloseBtn",
@@ -2881,10 +2877,11 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     }
     assert.ok(panelHtml.includes("diff-modal-overlay"), "弹窗挂宽幅类");
     assert.ok(panelHtml.includes("srs-diff-link"), "状态小字含 diff 小字类");
-    assert.ok(panelHtml.includes("展示diff"), "小字文案在线");
+    assert.ok(panelHtml.includes('>查看差异</span>'), "小字文案在线");
+    assert.ok(!panelHtml.includes("展示diff"), "旧文案不得残留");
   });
 
-  it("「展示diff」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
+  it("「查看差异」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
     // 前提：容器声明不拦指针（浮动小字不挡按钮），这条被删掉会让全页小字都吃点击
     assert.ok(/\.store-refresh-status\s*\{[^}]*pointer-events:\s*none/.test(panelHtml),
       "容器默认 pointer-events: none（前提）");
@@ -2906,7 +2903,7 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     assert.ok(fn.includes("failed: uFail > 0"), "快照记录失败标记");
   });
 
-  it("「展示diff」小字仅完成态且确有增减/失败时挂出", () => {
+  it("「查看差异」小字仅完成态且确有增减/失败时挂出", () => {
     const fnStart = panelHtml.indexOf("async function storeRefresh(");
     const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
     assert.ok(fn.includes('const hasDiff = refreshDiffUnits.some('), "计算本轮是否有 diff");
@@ -3092,5 +3089,43 @@ describe("设置项「注入推理强度」", () => {
     assert.ok(desc, "说明文案存在");
     assert.doesNotMatch(desc[1], /reasoning_effort|injectThinkingEffort|support_efforts|default_effort|thinkingLevelMap|thinkingFormat/, "正文不出现字段名");
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase 标识符");
+  });
+});
+
+describe("panel.html 界面文案边界（实现细节不上屏）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("服务端失败原文只挂 err.code，上屏一律经 panelError 取文案", () => {
+    assert.ok(panelHtml.includes("err.code = detail;"), "抛出时把服务端原文带在 code 上");
+    assert.ok(panelHtml.includes("function panelError(err, fallback)"), "取文案的唯一出口");
+    assert.ok(panelHtml.includes("function panelCopy(raw, fallback)"), "短码/文案分流的判据");
+    assert.ok(!/\+ (e|err)\.message\b/.test(panelHtml), "不得把 err.message 拼进界面文案");
+    assert.ok(!/\$\{(?:e|err)\.message\}/.test(panelHtml), "模板串里同理");
+  });
+
+  it("CAS 冲突分支比对 err.code：message 带 HTTP 前缀，比对它等于分支不生效", () => {
+    assert.ok(!panelHtml.includes('e.message === "cas-conflict"'), "旧比对不得残留");
+    assert.equal(panelHtml.split('e.code === "cas-conflict"').length - 1, 6,
+      "六处冲突恢复分支全部接线");
+  });
+
+  it("渠道配置读取失败的前端译名覆盖 store-io 的 LOAD_REASON", () => {
+    const storeIo = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "store-io.mjs"),
+      "utf8",
+    );
+    const decl = storeIo.indexOf("export const LOAD_REASON");
+    const codes = [...storeIo.slice(decl, storeIo.indexOf("};", decl)).matchAll(/:\s*"([^"]+)"/g)]
+      .map((m) => m[1]);
+    assert.ok(codes.length >= 4, "LOAD_REASON 取值被抓到，got " + codes.length);
+    const tbl = panelHtml.indexOf("const STORE_LOAD_COPY");
+    const table = panelHtml.slice(tbl, panelHtml.indexOf("};", tbl));
+    assert.ok(tbl >= 0, "译名表在线");
+    for (const code of codes) {
+      assert.ok(table.includes(`"${code}"`), "缺译名的短码: " + code);
+    }
   });
 });

@@ -1,5 +1,5 @@
 // Visible-channel derivation — the SINGLE source for "which channels and
-// models do endpoints see" (provider pools, phase 2 → single-surface refactor).
+// models do endpoints see".
 // Pure functions only: no IO, no DPAPI, no network.
 //
 // Every catalog-producing surface consumes this module so the endpoint-facing
@@ -79,10 +79,9 @@ export function deriveVisibleChannels(store) {
   return channels;
 }
 
-// Shared entry point for all five agent-sync merge modules. Previously each
-// merge module carried its own byte-identical copy; that duplication let the
-// catalog semantics drift (a change landing on one surface but not the
-// others). The single implementation lives here.
+// Shared entry point for the per-agent merge modules. They consume the same
+// visible-channel derivation as the wire catalog, so what an endpoint sees can
+// never differ between the config it is handed and the catalog it is told.
 export function extractManagedProviders(store) {
   return deriveVisibleChannels(store);
 }
