@@ -287,7 +287,7 @@ export function createOpenAIHandler(deps) {
     return { status: 200, body: payload };
   }
 
-  // Pool routing pre-flight (phase 2). Returns:
+  // Pool routing pre-flight. Returns:
   //   null              — the URL segment does not name a pool; the caller
   //                       falls through to the classic single-provider path
   //                       (which re-runs auth/parse/store and reports errors)

@@ -306,12 +306,12 @@ test("validateStore rejects non-array or non-string fallbackURLs entries", () =>
   }
 });
 
-// ---- pools (号池, panel 一期): top-level map of grouped providers ----------
-// Phase 1 is panel-only: the relay never resolves pools, but the schema
+// ---- pools (号池): top-level map of grouped providers ----------------------
+// Pool resolution is panel-only: the relay never resolves pools, but the schema
 // validates them on every request (loadStore runs per request), so malformed
 // pools must be rejected the same way malformed providers are. Pool ids share
-// the provider id alphabet and namespace so phase 2 endpoint routing needs no
-// id migration.
+// the provider id alphabet and namespace so endpoint routing needs no id
+// migration.
 function legalStoreWithPool() {
   const store = legalStore();
   store.providers.zhipu = {

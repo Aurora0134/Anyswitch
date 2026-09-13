@@ -1,4 +1,4 @@
-// Atomic write + cross-process lock unit tests (Phase 2.4). Real fs on temp
+// Atomic write + cross-process lock unit tests. Real fs on temp
 // dirs only; no credentials, no network, no DPAPI.
 
 import { test } from "node:test";

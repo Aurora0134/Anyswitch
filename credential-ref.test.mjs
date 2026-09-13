@@ -4,7 +4,7 @@ import { validateCredentialRef } from "./credential-ref.mjs";
 
 // credentialFile must be a Store-root-relative reference that
 // cannot escape the store root. Absolute paths, drive letters, UNC paths,
-// parent traversal and path separators are all rejected so that Phase 2 DPAPI
+// parent traversal and path separators are all rejected so that DPAPI
 // reads can never be steered outside the credentials directory.
 
 test("accepts a plain uuid credential filename", () => {

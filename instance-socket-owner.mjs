@@ -1,10 +1,9 @@
 // Socket→PID 兜底归组（panel 实例行 / 实例计数胶囊的兜底数据源）。
 //
 // 背景：实例归组的正源是 launcher 注入的 x-agent-instance 头（openai 路径）。
-// 但用户经常直接在
-// 终端敲 npm shim 命令（kimi / opencode / pi）启动客户端，绕过
-// launcher，请求不带任何实例标签——instances[] 恒空，面板实例行与左上角
-// 实例计数胶囊不出现。
+// 客户端也可以在终端里直接用自己的命令启动（kimi / opencode / pi），经
+// 这条路径进来的请求不带任何实例标签，instances[] 会恒空，面板实例行与
+// 左上角实例计数胶囊因此不出现。本模块就是为这条路径补的兜底。
 //
 // 兜底机制：Windows 上每个客户端进程都持有自己的 keep-alive 连接到 relay，
 // 在 netstat -ano -p tcp 的输出里呈现为「本端端口 = 客户端临时端口、
@@ -52,16 +51,16 @@ export function parseNetstatOutput(text) {
   return map;
 }
 
-// 共享快照 + 同步查询。为什么 lookup 必须同步：调用点在 server 的
-// startRequest（构造 metrics tracker 的同步代码）里，把它改成 async 会
-// 波及整条请求处理链；而 netstat spawn 一次要几十到几百毫秒，为了一个
-// 纯装饰性的实例归组去阻塞请求路径完全不值。所以这里维护一份后台刷新的
-// netstat 快照，lookup 只做内存查表。
+// 共享快照 + 同步查询。lookup 必须保持同步：调用点在 server 的
+// startRequest（构造 metrics tracker 的同步代码）里，改成 async 会波及
+// 整条请求处理链；而 netstat spawn 一次要几十到几百毫秒，不能为了实例
+// 归组去阻塞请求路径。所以这里维护一份后台刷新的 netstat 快照，
+// lookup 只做内存查表。
 //
-// 为什么要容忍新连接的首请求 miss：客户端进程刚建立 keep-alive 连接时，
-// 快照里还没有它的行，首请求落聚合桶（面板卡片刻意不丢这条数据）；
-// miss 会触发一次后台刷新，keep-alive 连接随后续请求长期存在，所以
-// 第二个请求起就能命中。这是"首请求少打一个实例行"换"请求路径零阻塞"。
+// 新连接的首请求允许 miss：客户端刚建立 keep-alive 连接时快照里还没有
+// 它的行，首请求落聚合桶（面板卡片刻意不丢这条数据）；miss 会触发一次
+// 后台刷新，keep-alive 连接随后续请求长期存在，第二个请求起即可命中。
+// 取舍是请求路径零阻塞优先于首请求的实例归组完整。
 export function createInstanceSocketOwner(options = {}) {
   const execFn = options.execFn ?? exec;
   const ttlMs = options.ttlMs ?? 2000;

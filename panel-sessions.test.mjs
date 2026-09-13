@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import { createPanelRouter } from "./panel.mjs";
 
 // Sessions tab routes: the router is exercised with a mock session-scan
-// service so no real agent session store is touched. Covers the B3/B4/B5
-// contract shapes (REVIEW-FINDINGS.md): list degradation via endpointErrors,
+// service so no real agent session store is touched. Covers the route
+// contract shapes: list degradation via endpointErrors,
 // messages query-param validation, per-item delete outcomes, and the roots
 // whitelist rejection surfaced from session-scan's delete. Mirrors the
 // fakeReqRes pattern from panel-stats.test.mjs.

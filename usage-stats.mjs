@@ -43,8 +43,7 @@ import { dayKey } from "./usage-journal.mjs";
 import { WIRE_PREFIX } from "./wire-id.mjs";
 
 const HEATMAP_DAYS = 90;
-// 趋势线只保留前 5 名，其余并入「其他」：线多了图例和曲线都不可读（2026-09-01
-// 用户迭代，7→5）。
+// 趋势线只保留前 5 名，其余并入「其他」：线多了图例和曲线都不可读。
 const TOP_N = 5;
 const OTHER_KEY = "__other__";
 const OTHER_LABEL = "其他";
@@ -183,8 +182,8 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
   }
 
   // Tag rows with a normalized ts/day; rows without a usable ts are skipped.
-  // Legacy rows (written before the transport layer started stripping it)
-  // carry the full Claude wire ID "anthropic/<provider>/<model>" in `model`.
+  // Some stored rows carry the full Claude wire ID
+  // "anthropic/<provider>/<model>" in `model`.
   // The wire prefix is endpoint identity spoofing, not statistics, so both
   // segments are stripped here — old and new rows aggregate into the same
   // series, and the wire's provider segment backfills rows whose providerId

@@ -90,8 +90,8 @@ describe("buildZcodeProviderEntry", () => {
   it("projects models without contextWindow through the tier fallback", () => {
     const entry = buildZcodeProviderEntry("poke-api", STORE.providers["poke-api"], 47821, "tok");
     // claude-opus-5 has no store contextWindow; the compat-fix fallback chain
-    // (context-fallback.mjs) gives it the claude-opus tier (1M per the
-    // 2026-08-16 survey) instead of the old 128K hardcoded default.
+    // (context-fallback.mjs) gives it the claude-opus tier (1M) rather than a
+    // conservative default.
     const model = entry["_poke-api"].models["claude-opus-5"];
     assert.equal(model.limit.context, 1_000_000);
     assert.deepEqual(model.modalities, { input: ["text", "image"], output: ["text"] });

@@ -2,12 +2,12 @@
 // settings.json `providers` map so Qoder's BYOK (Bring Your Own Key) feature
 // routes through the Anyswitch relay.
 //
-// Why `providers` and not `modelConfigs.customModels`: Qoder 0.2.x persists
-// BYOK custom-endpoint connections in settings.json under `providers`
-// (keyed by a "qoder-custom-…" connection id). The older
-// `modelConfigs.customModels` array is no longer read by the main process at
-// all — it is dead data. The daemon loads `providers` on cold start and the
-// model picker lists them under the "自定义" (custom) category.
+// Why `providers`: Qoder reads its BYOK custom-endpoint connections from the
+// settings.json `providers` map (keyed by a "qoder-custom-…" connection id),
+// loads them on cold start, and lists them in the model picker under
+// "自定义" (custom). `modelConfigs.customModels` is not a write target here;
+// because Qoder's reading behaviour is version-dependent, re-check it against
+// the version actually running before changing this module's output shape.
 //
 // One Anyswitch provider becomes ONE custom-endpoint connection whose `models`
 // array is that provider's whole model list. The connection baseUrl points at
@@ -150,7 +150,7 @@ export function mergeQoderSettings(existing, managedProviders, port, token, prev
   for (const id of currentManagedIds) delete existingProviders[id];
   settings.providers = { ...existingProviders, ...managedMap };
 
-  // Remove the dead customModels array Qoder 0.2.x no longer reads.
+  // Drop customModels so an older layout cannot shadow `providers`.
   if (settings.modelConfigs && typeof settings.modelConfigs === "object") {
     const modelConfigs = { ...settings.modelConfigs };
     delete modelConfigs.customModels;

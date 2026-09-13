@@ -1,4 +1,4 @@
-// Chain routing primitives (virtual model "auto", wave 1).
+// Chain routing primitives for the virtual model "auto".
 // Pure functions plus one in-memory chain state table. No IO — the store is
 // passed in by the caller, same contract as pool-routing.mjs.
 //
@@ -311,9 +311,8 @@ export function createChainState(options = {}) {
 //     countdown as retryIntervalMs - (now - since).
 //   lamps: per configured chain entry, "green" (touched and not latched —
 //     可用), "red" (latched-failing — 不可用/退避), or "gray" (no data this
-//     process lifetime). There is deliberately NO yellow: the TTFT-based
-//     caution tier was removed from the chain lamps (2026-09-01) — a slow
-//     but answering node is still 可用. When every lamp is gray (fresh
+//     process lifetime). Chain lamps have no yellow tier: a slow but
+//     answering node is 可用, not a third state. When every lamp is gray (fresh
 //     start, no traffic yet) the head is lit green: it is the next hop by
 //     definition, so the rail reads "第一个亮灯，后面暂时全灰".
 // Endpoints come from the union of configured routingChains and snapshot
