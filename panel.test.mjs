@@ -2784,13 +2784,13 @@ describe("panel.html 面板重启状态机契约", () => {
   });
 });
 
-describe("panel.html 渠道刷新「展示diff」弹窗", () => {
+describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("声明弹窗 DOM 与「展示diff」小字结构", () => {
+  it("声明弹窗 DOM 与「查看差异」小字结构", () => {
     for (const id of [
       "storeDiffMask",
       "storeDiffCloseBtn",
@@ -2804,10 +2804,11 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     }
     assert.ok(panelHtml.includes("diff-modal-overlay"), "弹窗挂宽幅类");
     assert.ok(panelHtml.includes("srs-diff-link"), "状态小字含 diff 小字类");
-    assert.ok(panelHtml.includes("展示diff"), "小字文案在线");
+    assert.ok(panelHtml.includes('>查看差异</span>'), "小字文案在线");
+    assert.ok(!panelHtml.includes("展示diff"), "旧文案不得残留");
   });
 
-  it("「展示diff」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
+  it("「查看差异」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
     // 前提：容器声明不拦指针（浮动小字不挡按钮），这条被删掉会让全页小字都吃点击
     assert.ok(/\.store-refresh-status\s*\{[^}]*pointer-events:\s*none/.test(panelHtml),
       "容器默认 pointer-events: none（前提）");
@@ -2829,7 +2830,7 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     assert.ok(fn.includes("failed: uFail > 0"), "快照记录失败标记");
   });
 
-  it("「展示diff」小字仅完成态且确有增减/失败时挂出", () => {
+  it("「查看差异」小字仅完成态且确有增减/失败时挂出", () => {
     const fnStart = panelHtml.indexOf("async function storeRefresh(");
     const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
     assert.ok(fn.includes('const hasDiff = refreshDiffUnits.some('), "计算本轮是否有 diff");
@@ -2874,5 +2875,62 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
     assert.ok(panelHtml.includes('e.target === $("storeDiffMask")'), "遮罩点击关闭");
     assert.ok(panelHtml.includes('$("storeDiffMask").classList.contains("show")) closeStoreDiffModal()'),
       "Esc 关闭（判 show 态）");
+  });
+});
+
+describe("panel.html 界面文案边界（实现细节不上屏）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("服务端失败原文只挂 err.code，上屏一律经 panelError 取文案", () => {
+    assert.ok(panelHtml.includes("err.code = detail;"), "抛出时把服务端原文带在 code 上");
+    assert.ok(panelHtml.includes("function panelError(err, fallback)"), "取文案的唯一出口");
+    assert.ok(panelHtml.includes("function panelCopy(raw, fallback)"), "短码/文案分流的判据");
+    assert.ok(!/\+ (e|err)\.message\b/.test(panelHtml), "不得把 err.message 拼进界面文案");
+    assert.ok(!/\$\{(?:e|err)\.message\}/.test(panelHtml), "模板串里同理");
+  });
+
+  it("CAS 冲突分支比对 err.code：message 带 HTTP 前缀，比对它等于分支不生效", () => {
+    assert.ok(!panelHtml.includes('e.message === "cas-conflict"'), "旧比对不得残留");
+    assert.equal(panelHtml.split('e.code === "cas-conflict"').length - 1, 6,
+      "六处冲突恢复分支全部接线");
+  });
+
+  it("界面文案不含实现细节与内部黑话（注释里谈机制不受限）", () => {
+    const lines = panelHtml.split("\n");
+    for (const gone of [
+      ">探活<", 'label: "探活"', "探活通过：", ">展示diff<", "手动补录",
+      "（服务可能未重启加载新接口）", "SSE 流畅", "仅本机 DPAPI", ".dpapi",
+      '"Store 状态加载失败', 'aria-label="统计口径"', "候选区", "备用baseurl",
+      "备用base URL", "仍会断开 47821", "仅影响 47821", "面板服务（47820）",
+      "store 不可用：", "删除日志检查失败", "将从 store 删除渠道",
+    ]) {
+      const offenders = [];
+      lines.forEach((raw, i) => {
+        const t = raw.trimStart();
+        if (t.startsWith("//") || t.startsWith("*") || t.startsWith("<!--") || t.startsWith("/*")) return;
+        if (t.split(" // ")[0].includes(gone)) offenders.push(i + 1);
+      });
+      assert.deepEqual(offenders, [], "界面文案含 " + gone + " @ " + offenders.join(","));
+    }
+  });
+
+  it("渠道配置读取失败的前端译名覆盖 store-io 的 LOAD_REASON", () => {
+    const storeIo = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "store-io.mjs"),
+      "utf8",
+    );
+    const decl = storeIo.indexOf("export const LOAD_REASON");
+    const codes = [...storeIo.slice(decl, storeIo.indexOf("};", decl)).matchAll(/:\s*"([^"]+)"/g)]
+      .map((m) => m[1]);
+    assert.ok(codes.length >= 4, "LOAD_REASON 取值被抓到，got " + codes.length);
+    const tbl = panelHtml.indexOf("const STORE_LOAD_COPY");
+    const table = panelHtml.slice(tbl, panelHtml.indexOf("};", tbl));
+    assert.ok(tbl >= 0, "译名表在线");
+    for (const code of codes) {
+      assert.ok(table.includes(`"${code}"`), "缺译名的短码: " + code);
+    }
   });
 });
