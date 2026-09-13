@@ -385,6 +385,13 @@ export function createPanelRouter({
   // Relay lifecycle is owned by relay-process-manager (a separate process on
   // 47821). These default to the real supervisor but are injectable so the
   // router is unit-testable without spawning processes or binding sockets.
+  //
+  // The agent-config sync spawner gets the same treatment: the reasoning-level
+  // setting governs what every endpoint's config is told, so saving it fires a
+  // sync. The default spawns a real child process that rewrites the user's own
+  // endpoint configs under ~/.zcode, ~/.pi, ~/.codex and friends — a unit test
+  // must never do that, so this is injectable like the relay controls.
+  spawnAgentSyncFn = spawnAgentSync,
   getRelayStatusFn = (root) => getRelayStatus(root),
   startRelayFn = (root) => startRelay(root),
   stopRelayFn = (root) => stopRelay(root),
@@ -617,7 +624,7 @@ export function createPanelRouter({
   async function handleAgentSync(res) {
     logger?.info("agent endpoint sync requested from panel");
     try {
-      const result = await spawnAgentSync({ port: 47821, logger });
+      const result = await spawnAgentSyncFn({ port: 47821, logger });
       sendJson(res, result.ok ? 200 : 500, {
         ok: result.ok,
         error: result.ok ? undefined : (result.error ?? `sync runner exit ${result.code}`),
@@ -1122,6 +1129,18 @@ export function createPanelRouter({
         const updated = saveSettings(settingsFile, body, base);
         if (metricsCollector && typeof metricsCollector.setSparkWindowPoints === "function") {
           metricsCollector.setSparkWindowPoints(updated.sparkWindowPoints);
+        }
+        // 注入推理强度 controls what every endpoint's config is told about
+        // levels, and those configs are only rewritten by a sync. Fire one so
+        // the toggle takes effect immediately instead of waiting for the next
+        // store change. Best-effort: the setting is already saved, and a failed
+        // sync just leaves the endpoints as they were until the next one.
+        if (typeof body.injectThinkingEffort === "boolean") {
+          try {
+            await spawnAgentSyncFn({ port: 47821, logger });
+          } catch (err) {
+            logger?.warn?.(`推理强度设置已保存，但端点重新同步失败：${err.message}`);
+          }
         }
         if (togglesWatchdog) {
           try {

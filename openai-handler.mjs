@@ -242,8 +242,15 @@ export function createOpenAIHandler(deps) {
           },
         }
       : normalizedBody;
-    // A client that named its own level wins; this only ever fills a gap.
-    const { body: outboundBody, injected } = efforts.inject({ providerId, body: withUsage });
+    // A client that named its own level wins; this only ever fills a gap. The
+    // store row rides along so a channel that states its own levels wins over
+    // the library, same rule as the config face.
+    const { body: outboundBody, injected } = efforts.inject({
+      providerId,
+      body: withUsage,
+      model: provider.models?.[withUsage.model],
+      provider,
+    });
 
     const headers = {
       "content-type": "application/json",

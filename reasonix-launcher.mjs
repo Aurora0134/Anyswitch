@@ -20,7 +20,7 @@ import {
   reasonixEnvPathFromConfig,
   writeSidecar,
 } from "./reasonix-merge-config.mjs";
-import { catalogForRoot } from "./effort-catalog.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -36,7 +36,7 @@ export function reasonixConfigPath(base = process.env) {
   );
 }
 
-export async function writeReasonixConfig(store, port, token, sidecarRoot, configPath = reasonixConfigPath(), catalog = catalogForRoot(sidecarRoot)) {
+export async function writeReasonixConfig(store, port, token, sidecarRoot, configPath = reasonixConfigPath(), catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "reasonix");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
@@ -49,8 +49,11 @@ export async function writeReasonixConfig(store, port, token, sidecarRoot, confi
     return { ok: false, unchanged: true, reason: error.message };
   }
   let merged;
+  // Switch off → no level declaration; the managed block is regenerated
+  // wholesale, so a previous sync's supported_efforts goes with it.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
   try {
-    merged = mergeReasonixConfigToml(existing, managedProviders, port, autoChannel, catalog);
+    merged = mergeReasonixConfigToml(existing, managedProviders, port, autoChannel, effectiveCatalog);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_REASONIX_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };

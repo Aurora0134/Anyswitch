@@ -265,6 +265,10 @@ export function createHandler(deps) {
       providerId,
       body: upstreamRequest,
       clientChoseEffort: clientSpecifiedThinking(body),
+      // The store row rides along so a channel that states its own levels wins
+      // over the library, same rule as the config face.
+      model: provider.models?.[modelId],
+      provider,
     });
 
     const headers = {

@@ -129,7 +129,7 @@ export function buildReasoningEffortsMap(levels, wireValues) {
   return map;
 }
 
-export function buildDshProviderEntry(providerId, provider, port, knowledge, catalog = null) {
+export function buildDshProviderEntry(providerId, provider, port, knowledge, catalog = null, includeEfforts = true) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -149,7 +149,9 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge, cat
       entry.maxTokens = m.maxOutputTokens;
     }
 
-    const resolved = resolveModelReasoningLevels({ ...m, id: modelId }, provider, knowledge, catalog);
+    const resolved = includeEfforts
+      ? resolveModelReasoningLevels({ ...m, id: modelId }, provider, knowledge, catalog)
+      : { exempt: true, levels: null, wireValues: null, thinkingFormat: null, origin: null };
     if (!resolved.exempt && resolved.levels && resolved.levels.length > 0) {
       const reasoningEfforts = buildReasoningEffortsMap(resolved.levels, resolved.wireValues);
       if (reasoningEfforts) {
@@ -195,7 +197,7 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge, cat
   };
 }
 
-export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null, catalog = null) {
+export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null, catalog = null, includeEfforts = true) {
   const settings = typeof existingSettings === "object" && existingSettings !== null ? { ...existingSettings } : {};
   const llmPiAi = { ...(settings["llm-pi-ai"] ?? {}) };
   const existingProviders = { ...(llmPiAi.providers ?? {}) };
@@ -216,7 +218,7 @@ export function mergeDshSettings(existingSettings, managedProviders, port, previ
   // 2. Inject current active providers
   const currentManaged = [];
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildDshProviderEntry(providerId, provider, port, knowledge, catalog);
+    const entry = buildDshProviderEntry(providerId, provider, port, knowledge, catalog, includeEfforts);
     Object.assign(existingProviders, entry);
     currentManaged.push(providerId);
   }

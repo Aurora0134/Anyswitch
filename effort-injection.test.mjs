@@ -107,6 +107,54 @@ describe("createEffortInjector.inject", () => {
     const { injector } = makeInjector();
     assert.deepEqual(injector.inject({ providerId: "p", body: null }), { body: null, injected: null });
   });
+
+  // A channel that states its own levels in the store answers before the
+  // library — the operator's declaration is the authority on both faces.
+  it("prefers the store's own declared levels over the library", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p",
+      body: bodyFor("glm-5.3"),
+      model: { reasoningEffortLevels: ["low", "high"] },
+    });
+    assert.equal(result.injected, "high");
+  });
+
+  it("honors the store's defaultEffort when it is a declared level", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p",
+      body: bodyFor("glm-5.3"),
+      model: { reasoningEffortLevels: ["low", "high", "max"], defaultEffort: "low" },
+    });
+    assert.equal(result.injected, "low");
+  });
+
+  it("ignores a defaultEffort the model does not offer", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p",
+      body: bodyFor("glm-5.3"),
+      model: { reasoningEffortLevels: ["low", "medium"], defaultEffort: "max" },
+    });
+    assert.equal(result.injected, "medium", "falls back to the deepest declared level");
+  });
+
+  it("prefers a channel-level declaration too", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p",
+      body: bodyFor("glm-5.3"),
+      provider: { reasoningVariants: ["low", "medium"] },
+    });
+    assert.equal(result.injected, "medium");
+  });
+
+  it("still uses the library when the store declares nothing", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({ providerId: "p", body: bodyFor("glm-5.3"), model: {} });
+    assert.equal(result.injected, "high");
+  });
 });
 
 describe("createEffortInjector.withoutEffort", () => {

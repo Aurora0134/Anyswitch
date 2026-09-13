@@ -6,7 +6,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
-import { modelEffortSurface } from "./effort-catalog.mjs";
+import { resolveEndpointEfforts } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "reasonix-sidecar.json";
 // Migration: blocks in user config.toml written before the product rename
@@ -157,7 +157,9 @@ export function buildReasonixManagedToml(managedProviders, port, catalog = null)
       const sm = provider.models[modelId];
       const cw = sm?.contextWindow;
       const maxOut = sm?.maxOutputTokens;
-      const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "reasonix" }) : null;
+      const efforts = catalog
+        ? resolveEndpointEfforts(modelId, { catalog, agent: "reasonix", model: sm, provider })
+        : null;
       if (cw === undefined && maxOut === undefined && !efforts) continue;
       lines.push(`[providers.model_overrides.${tomlString(modelId)}]`);
       if (cw !== undefined) lines.push(`context_window     = ${Number(cw)}`);

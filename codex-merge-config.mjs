@@ -50,6 +50,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
+import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "codex-sidecar.json";
 export const MANAGED_BEGIN = "# >>> anyswitch-managed-codex (managed by Anyswitch; do not edit) >>>";
@@ -125,7 +126,11 @@ export function collectCodexCatalogModels(providers) {
   const models = new Map();
   for (const provider of Object.values(providers ?? {})) {
     for (const [modelId, model] of Object.entries(provider?.models ?? {})) {
-      if (!models.has(modelId)) models.set(modelId, model ?? {});
+      // The owning provider rides along with the model: the declaration check
+      // needs both (provider-level reasoningVariants sits on the provider,
+      // per-model levels on the model), and "first channel wins" means the
+      // pair has to stay together rather than be looked up again later.
+      if (!models.has(modelId)) models.set(modelId, { model: model ?? {}, provider });
     }
   }
   return models;
@@ -147,10 +152,11 @@ export function collectCodexCatalogModels(providers) {
 //     OpenAI's own backend honors
 // multi_agent_version is forced to "v2" even though the template entry leaves
 // it null — without it codex disables the subagent tools (codex++ #2161).
-export function buildCodexModelCatalog(models, template) {
+export function buildCodexModelCatalog(models, template, catalog = null) {
   const entries = [];
   let index = 0;
-  for (const [modelId, model] of models) {
+  for (const [modelId, collected] of models) {
+    const { model, provider } = collected ?? {};
     const entry = structuredClone(template);
     entry.slug = modelId;
     entry.display_name =
@@ -164,6 +170,29 @@ export function buildCodexModelCatalog(models, template) {
     // ALLOWED_MODALITIES == codex's InputModality wire values).
     if (Array.isArray(model?.inputModalities) && model.inputModalities.length > 0) {
       entry.input_modalities = [...model.inputModalities];
+    }
+    // Reasoning levels are per-model: the template clone carries GPT-5.5's
+    // frozen set, and every entry inheriting it would tell codex that a
+    // gateway model speaks exactly what OpenAI's own model speaks. The
+    // library (or the store's own declaration) answers per model instead;
+    // codex reads its effort picker straight off these two fields.
+    //
+    // With the switch off there is no library answer, so the entry keeps the
+    // template's set — codex's own baseline for the catalog, and the exact
+    // behavior every model had before the library existed. Supplementation is
+    // what the switch governs; the catalog's required fields are not ours to
+    // blank (codex reads reasoning support off this list, and an empty one
+    // would remove the picker rather than restore a default).
+    const efforts = catalog
+      ? resolveEndpointEfforts(modelId, { catalog, agent: "codex", model, provider })
+      : null;
+    if (efforts) {
+      entry.supported_reasoning_levels = efforts.levels.map((level) => ({
+        effort: level,
+        description: entry.supported_reasoning_levels?.find((l) => l.effort === level)?.description
+          ?? `${level} reasoning effort`,
+      }));
+      entry.default_reasoning_level = efforts.default;
     }
     entry.priority = index + 1;
     entry.multi_agent_version = "v2";
@@ -389,7 +418,7 @@ export function protectModelProvider(text, managed) {
   return text;
 }
 
-export function mergeCodexConfigToml(existingText, managedProviders, port, token, autoChannel = null, catalogTemplate = null) {
+export function mergeCodexConfigToml(existingText, managedProviders, port, token, autoChannel = null, catalogTemplate = null, effortCatalog = null) {
   const preserved = dropLegacyKeys(stripManagedTables(stripManagedBlock(existingText ?? "")));
   // The memories gate is decided on the preserved text (after the old managed
   // block and stale tables are gone): a surviving user [features] table
@@ -417,7 +446,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   }
   const trimmedHead = head.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
-  return { text: protectModelProvider(merged, managed), managed, catalogModels, catalogPointer, memoriesGate: gate.hasFeaturesTable ? "absorbed" : "managed-block" };
+  return { text: protectModelProvider(merged, managed), managed, catalogModels, catalogPointer, effortCatalog, memoriesGate: gate.hasFeaturesTable ? "absorbed" : "managed-block" };
 }
 
 export function readCodexConfigToml(filePath) {
@@ -452,8 +481,8 @@ function catalogFilePath(codexDir) {
   return join(codexDir, "model-catalogs", "anyswitch-models.json");
 }
 
-function writeCatalogFile(codexDir, catalogModels, template) {
-  const catalog = buildCodexModelCatalog(catalogModels, template);
+function writeCatalogFile(codexDir, catalogModels, template, effortCatalog = null) {
+  const catalog = buildCodexModelCatalog(catalogModels, template, effortCatalog);
   if (!catalog) return; // unreachable: the "ours" pointer implies non-empty models
   const filePath = catalogFilePath(codexDir);
   const text = JSON.stringify(catalog, null, 2) + "\n";
@@ -474,7 +503,7 @@ function removeCatalogFile(codexDir) {
 // High-level write: read existing config, merge managed providers, write back
 // with backup. Returns { ok, unchanged, backupPath?, reason? }. Fail-closed: a
 // config whose managed block cannot be parsed is reported, never overwritten.
-export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath()) {
+export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath(), catalog = null, effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "codex");
   const previousManaged = readSidecar(sidecarRoot).providers;
@@ -488,9 +517,15 @@ export function writeCodexConfig(store, port, token, sidecarRoot, configPath = c
     return { ok: false, unchanged: true, reason: error.message };
   }
   const catalogTemplate = loadCodexCatalogTemplate();
+  // Switch off → the catalog keeps the template's frozen levels rather than
+  // gaining per-model ones from the library. The catalog file is rewritten
+  // wholesale on every sync, so a previous sync's levels do not survive.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot))
+    ? (catalog ?? catalogForRoot(sidecarRoot))
+    : null;
   let merged;
   try {
-    merged = mergeCodexConfigToml(existing, managedProviders, port, token, autoChannel, catalogTemplate);
+    merged = mergeCodexConfigToml(existing, managedProviders, port, token, autoChannel, catalogTemplate, effectiveCatalog);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_CODEX_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };
@@ -506,7 +541,7 @@ export function writeCodexConfig(store, port, token, sidecarRoot, configPath = c
   // at another file leaves our previously generated catalog as inert clutter
   // (the user's own file sits at their path and is never touched).
   if (merged.catalogPointer === "ours") {
-    writeCatalogFile(dirname(configPath), merged.catalogModels, catalogTemplate);
+    writeCatalogFile(dirname(configPath), merged.catalogModels, catalogTemplate, merged.effortCatalog);
   }
   const writeResult = writeCodexConfigTomlWithBackup(configPath, merged.text);
   if (writeResult.ok) {

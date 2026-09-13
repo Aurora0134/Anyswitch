@@ -40,12 +40,18 @@ export async function writeKimiConfig(store, port, token, sidecarRoot, configPat
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   // Both the level list (support_efforts) and the global default live here:
-  // the switch behind 「注入思考强度」 owns "make thinking happen by default",
+  // the switch behind 「注入推理强度」 owns "make thinking happen by default",
   // so it decides whether Anyswitch may rewrite kimi's own `[thinking]` table.
-  const effortOptions = effort ?? {
-    catalog: catalogForRoot(sidecarRoot),
-    takeOverThinking: loadSettings(join(sidecarRoot, "settings.json")).injectThinkingEffort,
-  };
+  // It gates the level list too: switch off → no catalog, so the managed block
+  // is regenerated without support_efforts/default_effort (the block is
+  // rewritten wholesale, which is also how the levels get cleaned up).
+  const effortOptions = effort ?? (() => {
+    const enabled = loadSettings(join(sidecarRoot, "settings.json")).injectThinkingEffort !== false;
+    return {
+      catalog: enabled ? catalogForRoot(sidecarRoot) : null,
+      takeOverThinking: enabled,
+    };
+  })();
   let existing;
   try {
     existing = readKimiConfigToml(configPath);

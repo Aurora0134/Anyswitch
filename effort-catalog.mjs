@@ -26,7 +26,7 @@
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { relayDataRoot } from "./relay-settings.mjs";
+import { relayDataRoot, loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
 
 const nodeFs = { existsSync, readFileSync, statSync };
 
@@ -354,7 +354,66 @@ export function intersectReasonixEfforts(levels, modelId) {
  * it did before, a wrong one can hard-fail its config load.
  */
 export function modelEffortSurface(rawId, { catalog, agent } = {}) {
-  const resolved = resolveModelEfforts(rawId, catalog);
+  return clipEffortSurface(resolveModelEfforts(rawId, catalog), rawId, agent);
+}
+
+/**
+ * The effort surface for one model, preferring a declaration the store already
+ * carries over the library's derived one.
+ *
+ * This is DSH's ladder (see resolveModelReasoningLevels in dsh-merge-config.mjs)
+ * reduced to the two tiers the other six endpoints need: the store's own
+ * declaration first — `model.reasoningEffortLevels`, else
+ * `provider.reasoningVariants` — and the hub library only when neither exists.
+ * A store row that states its levels is treated as already-correct and is
+ * written through (clipped to the endpoint's vocabulary) rather than
+ * overridden; the library exists to fill the gap a gateway leaves, not to
+ * argue with an operator who has filled it by hand.
+ *
+ * The declaration's wire spellings are empty by construction (the store has no
+ * wire field), so effortWireValue falls back to the level name — the OpenAI
+ * shape an upstream expects.
+ *
+ * Returns null exactly when modelEffortSurface does: nothing worth writing.
+ */
+export function resolveEndpointEfforts(rawId, { catalog, agent, model, provider } = {}) {
+  if (modelDeclaresOwnEfforts(model, provider)) {
+    return clipEffortSurface(resolveDeclaredEfforts(rawId, { catalog, model, provider }), rawId, agent);
+  }
+  if (!catalog) return null;
+  return modelEffortSurface(rawId, { catalog, agent });
+}
+
+/**
+ * Levels for one model with the store's own declaration preferred, BEFORE any
+ * endpoint vocabulary is applied.
+ *
+ * Callers that clip to their own accept-set (Qoder's QODER_EFFORT_LEVELS) need
+ * the unclipped answer: the generic vocabulary entry for such an endpoint is
+ * empty by definition, so going through resolveEndpointEfforts would erase the
+ * levels before the endpoint's own filter ever ran.
+ *
+ * Returns empty levels when neither a declaration nor a library is available,
+ * so callers can treat "no levels" uniformly.
+ */
+export function resolveDeclaredEfforts(rawId, { catalog, model, provider } = {}) {
+  if (modelDeclaresOwnEfforts(model, provider)) {
+    const declared = Array.isArray(model?.reasoningEffortLevels) && model.reasoningEffortLevels.length > 0
+      ? model.reasoningEffortLevels
+      : provider.reasoningVariants;
+    return {
+      levels: [...declared], default: null, wire: {}, thinkingFormat: null,
+      kind: "reasoning", origin: "store", matchedKey: null,
+    };
+  }
+  if (!catalog) {
+    return { levels: [], default: null, wire: {}, thinkingFormat: null, kind: "reasoning", origin: "none", matchedKey: null };
+  }
+  return resolveModelEfforts(rawId, catalog);
+}
+
+/** Vocabulary-clip a resolved effort set and name its default. Shared by both entry points. */
+function clipEffortSurface(resolved, rawId, agent) {
   if (resolved.kind === "non-text" || resolved.levels.length === 0) return null;
   const levels = agent === "reasonix"
     ? intersectReasonixEfforts(resolved.levels, rawId)
@@ -365,8 +424,46 @@ export function modelEffortSurface(rawId, { catalog, agent } = {}) {
   return {
     levels,
     default: level,
-    wire: resolved.wire,
-    thinkingFormat: resolved.thinkingFormat,
+    wire: resolved.wire ?? {},
+    thinkingFormat: resolved.thinkingFormat ?? null,
     origin: resolved.origin,
   };
+}
+
+/**
+ * Whether a model already declares its own thinking levels, making library
+ * supplementation unnecessary.
+ *
+ * The two shapes the store carries are `model.reasoningEffortLevels` (per
+ * model) and `provider.reasoningVariants` (per channel). They are the only
+ * "levels someone already stated" signal that exists anywhere in the chain:
+ * an upstream `/v1/models` listing never carries reasoning fields (see
+ * reasoning-fallback.mjs), so nothing the channel itself sends can answer
+ * this. A declaration here is treated as authoritative and left untouched —
+ * supplementation fills gaps, it does not overrule what is already written.
+ */
+export function modelDeclaresOwnEfforts(model, provider) {
+  if (Array.isArray(model?.reasoningEffortLevels) && model.reasoningEffortLevels.length > 0) return true;
+  if (Array.isArray(provider?.reasoningVariants) && provider.reasoningVariants.length > 0) return true;
+  return false;
+}
+
+/**
+ * Whether the 「注入推理强度」 switch lets the config writers supplement levels.
+ *
+ * Read from disk on every call so a panel save takes effect at the next sync
+ * without restarting anything (same contract as the request-side injector).
+ * Every writer is gated by this one predicate: with the switch off, no
+ * endpoint is told about levels at all — the endpoints keep whatever their
+ * own defaults were, which is what "关闭后一律原样透传" means on the config
+ * face. A missing or unreadable settings file leaves it on, matching the
+ * setting's own default.
+ */
+export function effortSupplementEnabled(root, base = process.env) {
+  try {
+    const settingsPath = root ? join(root, "settings.json") : defaultSettingsPath(base);
+    return loadSettings(settingsPath, base).injectThinkingEffort !== false;
+  } catch {
+    return true;
+  }
 }

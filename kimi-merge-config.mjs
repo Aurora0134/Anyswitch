@@ -6,7 +6,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
-import { modelEffortSurface } from "./effort-catalog.mjs";
+import { resolveEndpointEfforts } from "./effort-catalog.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
@@ -91,7 +91,7 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
         lines.push(`max_output_size = ${model.maxOutputTokens}`);
       }
       const efforts = effort?.catalog
-        ? modelEffortSurface(modelId, { catalog: effort.catalog, agent: "kimi" })
+        ? resolveEndpointEfforts(modelId, { catalog: effort.catalog, agent: "kimi", model: model, provider })
         : null;
       if (efforts) {
         // Kimi treats `reasoning === true || support_efforts.length > 0` as
