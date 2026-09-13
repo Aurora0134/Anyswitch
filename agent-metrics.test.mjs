@@ -1514,10 +1514,12 @@ describe("createAgentMetricsCollector", () => {
   });
 
   // ── codex 后台请求（meta.background）的面板隔离 ─────────────────────
-  // openai-server 的分类器把记忆整理/guardian/预热等引擎自发流量标成
-  // background；这一侧的约定：不出实例行（即便调用方误传 instanceId），失败
-  // 不碰卡片报错面（lastError/activeErrors/errorActive），但请求数与 token
-  // 照实计入端点聚合——不藏流量，也不惊动用户。
+  // openai-server 的分类器把引擎/GUI 自发流量（记忆整理、guardian、预热、
+  // 线程标题/摘要生成等）标成 background；这一侧的约定：不出实例行（即便
+  // 调用方误传 instanceId），不碰卡片报错面（lastError/activeErrors/
+  // errorActive），不改写模型徽章（currentModel/lastModel/currentProvider/
+  // lastProvider/activeModels/activeTargets）、TTFT/TPS 样本窗与模型稳定性
+  // 行；但请求数与 token 照实计入端点聚合——不藏流量，也不惊动用户。
   it("background traffic spawns no instance row even when an instanceId leaks through", async () => {
     const t = 3000;
     const csv = "Node,CommandLine,Name,ProcessId\r\n" +
@@ -1594,6 +1596,82 @@ describe("createAgentMetricsCollector", () => {
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.equal(codex.errorActive, false);
     assert.equal(codex.activeErrors.length, 0);
+  });
+
+  it("background traffic never touches the card model/provider badges", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+
+    // 用户流量先建立徽章基线。
+    const user = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "kimi-k3", path: "openai" });
+    user.recordEnd({ status: 200, usage: { prompt_tokens: 4, completion_tokens: 2 } });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.lastModel, "kimi-k3");
+    assert.equal(codex.lastProvider, "a6api-main");
+
+    // 后台请求带着硬编码模型飞来：进行中不占「正在生成」徽章，结束后也不
+    // 改写「最近模型/渠道」——实机形态即卡片 lastModel 被标题生成线程改成
+    // gpt-5.6-luna（2026-09-13 复发）。
+    const bg = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "gpt-5.6-luna", path: "openai", background: true });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.currentModel, null, "后台请求进行中不占用「正在生成」徽章");
+    assert.deepEqual(codex.activeModels, []);
+    assert.deepEqual(codex.activeTargets, []);
+    bg.recordEnd({ status: 200, usage: { prompt_tokens: 4, completion_tokens: 2 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.lastModel, "kimi-k3", "后台请求不改写最近模型徽章");
+    assert.equal(codex.lastProvider, "a6api-main");
+    assert.equal(codex.metrics.totalRequests, 2, "流量照实计数");
+  });
+
+  it("background traffic feeds neither the TTFT display nor the TPS window", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn });
+
+    // 用户流量建立展示面基线：流式成功，TTFT 1200ms。
+    const user = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "kimi-k3", path: "openai", stream: true });
+    mockTime = 2200;
+    user.recordFirstChunk();
+    mockTime = 4200;
+    user.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 50 } });
+    let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    const baselineTtft = codex.metrics.lastTtftMs;
+    const baselineTps = codex.metrics.tps;
+    assert.equal(baselineTtft, 1200);
+
+    // 后台流式成功：首 token 与结算都不进 TTFT/TPS 展示面（100ms 的后台
+    // TTFT 若漏进去会立刻拉低 lastTtftMs）。
+    const bg = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "gpt-5.6-luna", path: "openai", stream: true, background: true });
+    mockTime = 4300;
+    bg.recordFirstChunk();
+    mockTime = 4400;
+    bg.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 500 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.metrics.lastTtftMs, baselineTtft, "后台首 token 不改写 TTFT 展示");
+    assert.equal(codex.metrics.tps, baselineTps, "后台 token 不进 TPS 样本窗");
+    assert.equal(codex.metrics.tokens.completion, 550, "token 总量照实结算");
+
+    // 后台非流式成功同理：全时长 TTFT 代理也不写展示面。
+    const bgNonStream = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "gpt-5.6-luna", path: "openai", background: true });
+    mockTime = 4450;
+    bgNonStream.recordEnd({ status: 200, usage: { prompt_tokens: 5, completion_tokens: 5 } });
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.metrics.lastTtftMs, baselineTtft);
+  });
+
+  it("background requests write no model-stability rows", async () => {
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 3000 });
+
+    // 硬编码后台模型的 404 若写入稳定性，会留下永不恢复的全红行（实机即
+    // a6api-main/gpt-5.6-luna n=6 ok=0）。
+    const bg = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "gpt-5.6-luna", path: "openai", background: true });
+    bg.recordEnd({ status: 404, error: { status: 404, message: "model not found" } });
+    assert.deepEqual(collector.getModelStability().models, [], "后台 404 不留稳定性行");
+
+    // 对照：用户流量的同样失败照常入列——隔离是定向的。
+    const user = collector.startRequest({ agentId: "codex", providerId: "a6api-main", model: "gpt-5.6-luna", path: "openai" });
+    user.recordEnd({ status: 404, error: { status: 404, message: "model not found" } });
+    assert.equal(collector.getModelStability().models.length, 1);
   });
 
   it("keeps one row for repeated traffic of the same codex session", async () => {

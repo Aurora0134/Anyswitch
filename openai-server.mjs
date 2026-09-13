@@ -103,20 +103,46 @@ function codexSessionInstanceId(body) {
   return sanitizeInstanceId(CODEX_SESSION_PREFIX + value);
 }
 
-// codex 后台/内部请求判定（GUI 记忆流水线、guardian 审批、缓存预热等由引擎
-// 自己发起的模型请求，不是用户对话流量）。codex 核心客户端给这类请求带线上
-// 标记，四处信号命中其一即后台请求：
+// codex 后台/内部请求判定（记忆流水线、guardian 审批、缓存预热、GUI 线程
+// 标题/摘要生成等由引擎或桌面端自己发起的模型请求，不是用户对话流量）。
+// codex 核心客户端给这类请求带线上标记，命中其一即后台请求：
 //   - x-codex-turn-metadata 头（JSON）的 request_kind ∈ {memory, prewarm}
-//   - 同一份 metadata 的 thread_source ∈ {memory_consolidation, guardian_review}
+//     （该字段枚举全表即 turn / prewarm / compaction / memory 四值）
+//   - 同一份 metadata 的 thread_source 或 turn_trigger 命中后台取值表
 //   - x-openai-subagent 头存在（memory_consolidation / guardian 专用通道）
 //   - x-openai-memgen-request: true 头（记忆整理专用）
+// thread_source 是引擎 ThreadSource 的序列化值：内建
+// user/subagent/guardian_review/memory_consolidation 之外，Feature(String)
+// 变体把任意字符串原样透传——桌面 GUI 的隐藏辅助线程（标题/描述/摘要/标题
+// 重拟、建议安全分类、听写清理等 ephemeral 元数据线程，模型硬编码
+// gpt-5.6-luna、effort=low）就以 feature 名出现在这里；turn_trigger 与线程
+// 同源同值，按同一张表双保险判定。取值表只收已核实的隐藏辅助流：引擎内部
+// 的 memory_consolidation/guardian_review/guardian_classifier，GUI 元数据
+// 生成的 thread_title/thread_description/thread_summary/
+// thread_title_reconsideration，主动建议流水线的 ambient_suggestion_safety/
+// ambient_suggestions，听写清理 dictation_cleanup。用户可见来源（user、
+// agent_created_thread、agent_forked_thread、ambient_suggestion_task、
+// code_review、conversation_digest、implement_todo、automation、
+// automated_review、conversational_onboarding、inline_edit 等——与 GUI
+// 任务列表的可见性白名单同口径）一律不进表，保持用户流量。
 // 判定顺序：先解析 metadata（请求头优先，其次 body 的
 // client_metadata["x-codex-turn-metadata"]——codex 两处放的是同一份 JSON），
 // 再看两个专用头。request_kind ∈ {turn, compaction} 或完全无标记 = 用户流量，
 // 行为与今天完全一致；头缺失或 JSON 解析失败一律按用户流量处理——宁可漏判
 // 一个后台请求，也绝不错杀真实用户流量。
 const CODEX_BACKGROUND_REQUEST_KINDS = new Set(["memory", "prewarm"]);
-const CODEX_BACKGROUND_THREAD_SOURCES = new Set(["memory_consolidation", "guardian_review"]);
+const CODEX_BACKGROUND_THREAD_SOURCES = new Set([
+  "memory_consolidation",
+  "guardian_review",
+  "guardian_classifier",
+  "thread_title",
+  "thread_description",
+  "thread_summary",
+  "thread_title_reconsideration",
+  "ambient_suggestion_safety",
+  "ambient_suggestions",
+  "dictation_cleanup",
+]);
 
 function codexTurnMetadata(req, body) {
   const candidates = [req.headers["x-codex-turn-metadata"], body?.client_metadata?.["x-codex-turn-metadata"]];
@@ -147,6 +173,10 @@ export function isCodexBackgroundRequest(req, body) {
     if (CODEX_BACKGROUND_REQUEST_KINDS.has(kind)) return true;
     const source = typeof metadata.thread_source === "string" ? metadata.thread_source.toLowerCase().trim() : "";
     if (CODEX_BACKGROUND_THREAD_SOURCES.has(source)) return true;
+    // turn_trigger 与 thread_source 同源同值（GUI 建线程与发 turn 时各传
+    // 一次），任一通道缺失时另一个兜底。
+    const trigger = typeof metadata.turn_trigger === "string" ? metadata.turn_trigger.toLowerCase().trim() : "";
+    if (CODEX_BACKGROUND_THREAD_SOURCES.has(trigger)) return true;
   }
   if (headerMarkedTrue(req.headers["x-openai-subagent"])) return true;
   if (headerMarkedTrue(req.headers["x-openai-memgen-request"])) return true;

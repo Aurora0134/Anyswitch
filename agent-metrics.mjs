@@ -710,11 +710,14 @@ function pruneStaleAggregateFaults(state, nowFn, ttlMs) {
 
 function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId) {
   const startTime = nowFn();
-  // 后台请求（codex 记忆整理/guardian/预热等引擎自发流量，由 openai-server 的
-  // 分类器打上 meta.background）与报错面双向隔离：失败不写 lastError/
-  // activeFaults/errorActive（卡片报错横幅的数据源），成功也不清用户流量挂起
-  // 的故障；totalRequests/token/时长/stability/journal 照实结算——流量不藏，
-  // 但也不惊动用户。journal 行同样不带实例身份。
+  // 后台请求（codex 引擎/GUI 自发流量——记忆整理、guardian、预热、线程标题/
+  // 摘要生成等，由 openai-server 的分类器打上 meta.background）与全部展示面
+  // 双向隔离：不进实例行；失败不写 lastError/activeFaults/errorActive（卡片
+  // 报错横幅的数据源），成功也不清用户流量挂起的故障；卡片模型徽章
+  // （currentModel/lastModel/currentProvider/lastProvider/activeModels/
+  // activeTargets）、TTFT/TPS 样本窗、模型稳定性行同样不碰——这些面只描述
+  // 用户流量。totalRequests/token/时长/journal 照实结算——流量不藏，但也不
+  // 惊动用户。journal 行同样不带实例身份。
   const background = meta.background === true;
   // Optional per-instance tag (multi-instance endpoints). Validated once here
   // so the journal row and the instance bucket never see a raw header value.
@@ -746,8 +749,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   // 口径（currentModel/lastModel/activeModels/activeTargets）。链成员一宣布，
   // setDisplayModel 会把身份改指到节点的绑定模型 + 渠道；宣布之前（以及预检失败
   // 这类永远等不到宣布的请求）这条请求没有可展示身份，胶囊按既有语义回落到
-  // 「最近」或「待命」，而不是打印 auto。
-  if (meta.model && meta.model !== AUTO_MODEL) {
+  // 「最近」或「待命」，而不是打印 auto。后台请求整段跳过：卡片模型徽章只描述
+  // 用户流量（硬编码后台模型的 404 不该改写「最近模型」）。
+  if (!background && meta.model && meta.model !== AUTO_MODEL) {
     state.currentModel = meta.model;
     state.lastModel = meta.model;
     const count = state.activeModels.get(meta.model) || 0;
@@ -756,7 +760,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     state.currentViaAuto = false;
     state.lastViaAuto = false;
   }
-  if (meta.providerId) {
+  if (!background && meta.providerId) {
     state.currentProvider = meta.providerId;
     state.lastProvider = meta.providerId;
   }
@@ -786,7 +790,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   // channel segment and auto-tag provenance describe the SAME serving target
   // as the model name (keyed by providerId×model, so a same-named model
   // switching channels is not a no-op).
-  let displayModel = typeof meta.model === "string" && meta.model && meta.model !== AUTO_MODEL ? meta.model : null;
+  // background 请求从 null 起步：recordEnd 的反向记账以 displayModel 为准，
+  // 起步即 null 让后台请求在结束侧对称空转（start 侧本就没记账）。
+  let displayModel = !background && typeof meta.model === "string" && meta.model && meta.model !== AUTO_MODEL ? meta.model : null;
   let displayProvider = typeof meta.providerId === "string" && meta.providerId ? meta.providerId : null;
   let displayViaAuto = false;
   const setDisplayModel = (model, providerId, viaAuto) => {
@@ -832,12 +838,15 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     getAttribution: () => ({ memberId: currentMemberId, resolver: attributeResolver }),
     recordFirstChunk: () => {
       // First genuine token on this provider+model pair clears only that pair's fault.
-      // 后台请求不参与故障闩锁：它的首 token 不能替用户流量宣布故障恢复。
+      // 后台请求不参与故障闩锁：它的首 token 不能替用户流量宣布故障恢复。卡片的
+      // TTFT 展示（lastTtftMs/ttftHistory）同理只描述用户流量；journal 行仍带
+      // 真实 TTFT（journalTtftMs 照实结算，与展示面无关）。
       if (!background) clearMatchingAggregateFault(state, meta);
       if (firstChunkTime !== null || ended) return;
       firstChunkTime = nowFn();
       const ttft = Math.max(1, firstChunkTime - startTime);
       journalTtftMs = ttft;
+      if (background) return;
       state.lastTtftMs = ttft;
       state.ttftHistory.push(ttft);
       const keep = Math.max(recentSampleWindow, state.sparkWindowPoints || recentSampleWindow);
@@ -1006,12 +1015,16 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         // proxy available. Failed/aborted requests never produced a first
         // token — recording their failure duration would fabricate a
         // healthy-looking TTFT and mask the fault from the panel.
-        state.lastTtftMs = reqDuration;
+        // journal 与总时长照实结算；卡片 TTFT 展示面（lastTtftMs/ttftHistory）
+        // 只描述用户流量，后台请求跳过。
         journalTtftMs = reqDuration;
-        state.ttftHistory.push(reqDuration);
-        const keep = Math.max(recentSampleWindow, state.sparkWindowPoints || recentSampleWindow);
-        if (state.ttftHistory.length > keep) state.ttftHistory.shift();
         state.totalGenerationDurationMs += reqDuration;
+        if (!background) {
+          state.lastTtftMs = reqDuration;
+          state.ttftHistory.push(reqDuration);
+          const keep = Math.max(recentSampleWindow, state.sparkWindowPoints || recentSampleWindow);
+          if (state.ttftHistory.length > keep) state.ttftHistory.shift();
+        }
       }
       // Errors/aborts before any content: no generation happened — nothing to add.
 
@@ -1034,7 +1047,8 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         // completion tokens. windowTps turns these samples into the card's
         // number, sampleTps into the sparkline points — one rule, one population,
         // and the same statistic the statistics page publishes.
-        if (!hadError && !aborted && completion > 0) {
+        // 后台请求即便成功也不进窗：卡片 TPS/缓存率/折线图只描述用户流量。
+        if (!background && !hadError && !aborted && completion > 0) {
           state.recentSamples.push({
             completion,
             genDurationMs,
@@ -1048,7 +1062,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         }
       }
 
-      if (stability && meta.model && !aborted) {
+      // 模型稳定性是用户流量的路由健康信号：后台请求（硬编码后台模型的
+      // 404 之类）不写入，否则稳定性页会留下永不恢复的全红行。
+      if (stability && meta.model && !aborted && !background) {
         const u = usage && typeof usage === "object" ? usage : {};
         const prompt = Number(u.prompt_tokens) || 0;
         const cached = Number(
@@ -1735,9 +1751,10 @@ export function createAgentMetricsCollector(options = {}) {
     // briefly show two rows for one logical instance and the counts split
     // across both buckets. The raw row self-heals: it is a custom id on the
     // 10-minute idle TTL (INSTANCE_IDLE_TTL_MS) and expires on its own.
-    // 后台请求（codex 引擎自发的记忆整理/guardian/预热流量）永远不出实例行：
-    // openai-server 侧已把实例 id 置空，这里再压一道——即便调用方误传
-    // instanceId 也不归一、不建桶，迟挂 attachInstance 对它是 no-op。
+    // 后台请求（codex 引擎/GUI 自发流量：记忆整理、guardian、预热、线程
+    // 标题/摘要生成等）永远不出实例行：openai-server 侧已把实例 id 置空，
+    // 这里再压一道——即便调用方误传 instanceId 也不归一、不建桶，迟挂
+    // attachInstance 对它是 no-op。
     const background = meta.background === true;
     const rawInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
     const instMap = instanceBuckets[bucketAgentId];
