@@ -21,7 +21,7 @@ import {
   validateDshSettings,
   getYamlModule,
 } from "./dsh-merge-config.mjs";
-import { catalogForRoot } from "./effort-catalog.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
 
 export function dshSettingsPath(base = process.env) {
@@ -84,7 +84,7 @@ export function dshPackageRoot(base = process.env) {
   );
 }
 
-export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot)) {
+export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const yaml = await getYamlModule();
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "dsh");
@@ -107,7 +107,13 @@ export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DS
   // Behind it sits the hub's own thinking-effort library (effort-catalog.mjs),
   // which covers the gateway-private ids no catalog describes.
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
-  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel, catalog);
+  // Switch off → DSH is told nothing about levels, at any tier. Store-declared
+  // rows would otherwise be written through by the entry builder, so the flag
+  // goes all the way in rather than just nulling the library. The wholesale
+  // entry rebuild drops the reasoningEfforts a previous sync wrote, which is
+  // the switch's cleanup path.
+  const includeEfforts = effortsEnabled ?? effortSupplementEnabled(sidecarRoot);
+  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel, catalog, includeEfforts);
 
   const gate = validateDshSettings(config);
   if (!gate.valid) {

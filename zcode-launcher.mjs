@@ -20,7 +20,7 @@ import {
   writeSidecar,
   validateZcodeConfig,
 } from "./zcode-merge-config.mjs";
-import { catalogForRoot } from "./effort-catalog.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 export function zcodeConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".zcode", "v2", "config.json");
@@ -72,13 +72,17 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH, catalog = catalogForRoot(sidecarRoot)) {
+export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "zcode");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   const previousManaged = readSidecar(sidecarRoot).providers;
+  // With 「注入推理强度」 off no level declaration is written at all: the merge
+  // rebuilds every managed entry wholesale, so an absent catalog also strips
+  // the levels a previous sync wrote — that is the switch's cleanup path.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
   let existing;
   try {
     existing = readZcodeConfig(configPath);
@@ -88,7 +92,7 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
     }
     throw error;
   }
-  const { config, managed } = mergeZcodeConfig(existing, managedProviders, port, token, previousManaged, autoChannel, catalog);
+  const { config, managed } = mergeZcodeConfig(existing, managedProviders, port, token, previousManaged, autoChannel, effectiveCatalog);
 
   const gate = validateZcodeConfig(config);
   if (!gate.valid) {

@@ -27,7 +27,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
 import { buildAgentPrefixedSegment } from "./openai-path.mjs";
-import { catalogForRoot, resolveModelEfforts } from "./effort-catalog.mjs";
+import { catalogForRoot, resolveDeclaredEfforts, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "qoder-sidecar.json";
 const MANAGED_PREFIX = "qoder-custom-anyswitch-";
@@ -93,13 +93,22 @@ const QODER_EFFORT_LEVELS = Object.freeze(["low", "medium", "high", "xhigh", "ma
 // injection alone, so the endpoint's own picker offers exactly what the
 // upstream speaks. Clipping to QODER_EFFORT_LEVELS is mandatory for the same
 // all-or-nothing reason: one out-of-vocabulary level costs the whole provider.
-function buildModelEntry(modelId, model, catalog = null) {
+function buildModelEntry(modelId, model, catalog = null, provider = null) {
   const context = Number(model.contextWindow ?? fallbackContextWindow(modelId));
-  const levels = catalog
-    ? resolveModelEfforts(modelId, catalog).levels.filter((level) =>
-        QODER_EFFORT_LEVELS.includes(level),
-      )
-    : [];
+  // Qoder's worker folds `thinking` into a boolean, so the level list never
+  // reaches its UI — it only decides whether the model counts as a reasoning
+  // model.
+  //
+  // Levels come from the unclipped resolver and are filtered here: the generic
+  // per-endpoint vocabulary for Qoder is empty (there is nothing to render),
+  // so clipping to it upstream would leave nothing for QODER_EFFORT_LEVELS —
+  // the set the app's own validator accepts — to filter.
+  const resolved = catalog ? resolveDeclaredEfforts(modelId, { catalog, model, provider }) : null;
+  const levels = (resolved?.levels ?? []).filter((level) => QODER_EFFORT_LEVELS.includes(level));
+  // Switch on: the resolved answer is authoritative — a non-text row resolves
+  // to no levels and so overrules a stale store flag, which is the point.
+  // Switch off (catalog null): nothing was resolved, so the store's own flag
+  // is the whole answer, exactly as it was before the library existed.
   const isReasoning = catalog ? levels.length > 0 : model.isReasoning === true;
   return {
     model: modelId,
@@ -137,7 +146,7 @@ function buildConnection(providerId, provider, port, token, catalog = null) {
   const baseUrl = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(QODER_AGENT_ID, segment)}/v1`;
   const models = Object.entries(provider.models ?? {})
     .slice(0, MAX_MODELS_PER_CONNECTION)
-    .map(([modelId, model]) => buildModelEntry(modelId, model, catalog));
+    .map(([modelId, model]) => buildModelEntry(modelId, model, catalog, provider));
   const displayName = provider?.channelName ?? provider?.displayName ?? providerId;
   return {
     baseUrl,
@@ -249,7 +258,7 @@ export function writeQoderSettingsWithBackup(filePath, data) {
 
 // High-level write: read existing settings, merge managed providers, write
 // back with backup. Returns { ok, unchanged, backupPath?, reason? }.
-export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot)) {
+export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "qoder");
   const previousManaged = readSidecar(sidecarRoot).providers;
@@ -266,7 +275,11 @@ export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, 
     throw error;
   }
   const previousManagedIds = previousManaged.map(managedConnectionId);
-  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel, catalog);
+  // Switch off → no library answer, so each model falls back to the store's
+  // own isReasoning flag. The whole managed provider set is rebuilt every
+  // sync, so nothing library-sourced survives the switch being turned off.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
+  const { config, managed } = mergeQoderSettings(existing, managedProviders, port, token, previousManagedIds, autoChannel, effectiveCatalog);
 
   const writeResult = writeQoderSettingsWithBackup(settingsPath, config);
   if (writeResult.ok) {

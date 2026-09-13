@@ -2940,8 +2940,8 @@ describe("panel.html 渠道刷新「展示diff」弹窗", () => {
   });
 });
 
-describe("设置项「注入思考强度」", () => {
-  function makeRouter(base) {
+describe("设置项「注入推理强度」", () => {
+  function makeRouter(base, { onSync } = {}) {
     return createPanelRouter({
       base,
       storePaths: { root: "C:/fake/anyswitch" },
@@ -2953,6 +2953,9 @@ describe("设置项「注入思考强度」", () => {
       stopWatchdogFn: async () => ({ ok: true }),
       probeWatchdogFn: async () => false,
       fetchRelayAgents: async () => null,
+      // Never let a test spawn the real sync runner: it rewrites the user's
+      // own endpoint configs under ~/.zcode, ~/.pi, ~/.codex and friends.
+      spawnAgentSyncFn: async (args) => { onSync?.(args); return { ok: true, stdout: "" }; },
     });
   }
 
@@ -2981,14 +2984,39 @@ describe("设置项「注入思考强度」", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // The endpoints only learn about levels from a sync, so saving this setting
+  // has to fire one — otherwise the toggle would appear to do nothing until
+  // the next unrelated store change.
+  it("保存该设置后触发一次端点同步", async () => {
+    const { base, dir } = tempBase();
+    const syncs = [];
+    const router = makeRouter(base, { onSync: (args) => syncs.push(args) });
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { injectThinkingEffort: false });
+    await router.handle(post.req, post.res);
+    assert.equal(syncs.length, 1, "保存推理强度开关触发一次同步");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("保存无关设置时不触发同步", async () => {
+    const { base, dir } = tempBase();
+    const syncs = [];
+    const router = makeRouter(base, { onSync: (args) => syncs.push(args) });
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { sparkWindowPoints: 32 });
+    await router.handle(post.req, post.res);
+    assert.equal(syncs.length, 0, "其它设置不触发端点同步");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("设置弹窗里以既有的 .toggle 开关呈现，标题为「注入思考强度」", () => {
-    assert.ok(panelHtml.includes('<div class="modal-item-title">注入思考强度</div>'), "条目标题");
-    const item = panelHtml.match(/<div class="modal-item">[\s\S]*?注入思考强度[\s\S]*?<\/label>\s*<\/div>/);
+  it("设置弹窗里以既有的 .toggle 开关呈现，标题为「注入推理强度」", () => {
+    assert.ok(panelHtml.includes('<div class="modal-item-title">注入推理强度</div>'), "条目标题");
+    const item = panelHtml.match(/<div class="modal-item">[\s\S]*?注入推理强度[\s\S]*?<\/label>\s*<\/div>/);
     assert.ok(item, "条目挂在设置弹窗内");
     assert.ok(item[0].includes('<label class="toggle">'), "沿用全局开关控件与各主题皮肤");
     assert.ok(item[0].includes('id="injectEffortToggle"'), "开关有稳定 id 供读写");
@@ -3033,7 +3061,7 @@ describe("设置项「注入思考强度」", () => {
     assert.deepEqual(scenario.calls, [{
       method: "POST", path: "/api/settings", body: { injectThinkingEffort: true },
     }]);
-    assert.deepEqual(scenario.toasts, ["已开启注入思考强度"]);
+    assert.deepEqual(scenario.toasts, ["已开启注入推理强度"]);
     assert.equal(scenario.savingAfter(), false, "保存中标记已释放");
   });
 
@@ -3046,7 +3074,7 @@ describe("设置项「注入思考强度」", () => {
   });
 
   it("说明文案只讲用户看得懂的行为，不出现字段名", () => {
-    const desc = panelHtml.match(/<div class="modal-item-desc">(客户端没有选思考深度[^<]*)<\/div>/);
+    const desc = panelHtml.match(/<div class="modal-item-desc">(anyswitch借助公开资料[^<]*)<\/div>/);
     assert.ok(desc, "说明文案存在");
     assert.doesNotMatch(desc[1], /reasoning_effort|injectThinkingEffort|support_efforts|default_effort|thinkingLevelMap|thinkingFormat/, "正文不出现字段名");
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase 标识符");

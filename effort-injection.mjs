@@ -1,4 +1,4 @@
-// Request-time thinking-depth injection (the relay's own injection surface).
+// Request-time reasoning-depth injection (the relay's own injection surface).
 //
 // Seven of the eight endpoints can be handed a level picker through their config
 // file; the relay covers the case every endpoint shares — a client that simply
@@ -6,13 +6,22 @@
 // can pin its default path off, so without this the upstream would be asked for
 // "the model's own default", which for most gateway models means no thinking.
 //
-// Three rules, in order:
-//   1. a client that named a level is never overridden (the field is left alone
+// This is the request half of the same feature the config writers implement;
+// both are governed by the one 「注入推理强度」 switch, so turning it off means
+// no endpoint is told about levels AND no default is filled in at request time.
+//
+// Four rules, in order:
+//   1. the switch is off → nothing happens (the request goes upstream exactly
+//      as the client wrote it);
+//   2. a client that named a level is never overridden (the field is left alone
 //      even when its value is null — saying "no thinking" is a choice);
-//   2. the level sent is the library's default for that model, which is never
-//      `max` by construction (the a6api gateway kills a deep-thinking agentic
-//      request at ~296s wall clock and bills it anyway);
-//   3. if a channel answers that it does not take the parameter, the field is
+//   3. a channel that states its own levels in the store answers first
+//      (`reasoningEffortLevels` / `reasoningVariants`, with `defaultEffort`
+//      naming the level when it is legal); otherwise the level is the library's
+//      default for that model, which is never `max` by construction (the a6api
+//      gateway kills a deep-thinking agentic request at ~296s wall clock and
+//      bills it anyway);
+//   4. if a channel answers that it does not take the parameter, the field is
 //      dropped and the request is sent again, and that channel stops being
 //      injected for.
 //
@@ -21,7 +30,14 @@
 // that wrote machine state into it would race the UI; losing one flag on restart
 // costs one retried request.
 
-import { getEffortCatalog, resolveModelEfforts, defaultEffortDbPath } from "./effort-catalog.mjs";
+import {
+  getEffortCatalog,
+  resolveModelEfforts,
+  resolveDeclaredEfforts,
+  modelDeclaresOwnEfforts,
+  pickDefaultEffort,
+  defaultEffortDbPath,
+} from "./effort-catalog.mjs";
 import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
 
 export const EFFORT_REQUEST_FIELD = "reasoning_effort";
@@ -84,27 +100,43 @@ export function createEffortInjector({
     }
   }
 
-  /** The level to send for one model, or null when there is nothing to add. */
-  function defaultLevelFor(modelId) {
-    if (typeof modelId !== "string" || modelId.length === 0) return null;
-    const resolved = resolveModelEfforts(modelId, currentCatalog());
+  /**
+   * The level to send for one model, or null when there is nothing to add.
+   *
+   * A store row that states its own levels answers first, exactly as it does
+   * on the config face: the operator's declaration is the authority, and the
+   * library only fills the gap. `defaultEffort` names the level when it is
+   * present and legal; otherwise the deepest declared level the preference
+   * order allows.
+   */
+  function defaultLevelFor(rawId, model, provider) {
+    if (typeof rawId !== "string" || rawId.length === 0) return null;
+    if (modelDeclaresOwnEfforts(model, provider)) {
+      const declared = resolveDeclaredEfforts(rawId, { catalog: currentCatalog(), model, provider });
+      if (declared.levels.length === 0) return null;
+      const stated = typeof model?.defaultEffort === "string" ? model.defaultEffort : null;
+      if (stated && declared.levels.includes(stated)) return stated;
+      return pickDefaultEffort(declared.levels);
+    }
+    const resolved = resolveModelEfforts(rawId, currentCatalog());
     if (resolved.kind === "non-text" || resolved.levels.length === 0) return null;
     return resolved.default;
   }
 
   /**
-   * @param {{ providerId: string, body: object, clientChoseEffort?: boolean }} args
+   * @param {{ providerId: string, body: object, clientChoseEffort?: boolean,
+   *           model?: object, provider?: object }} args
    * @returns {{ body: object, injected: string|null }} the body to send and the
    *          level added, if any. `injected` is what the caller may drop on a
    *          rejection retry, so it must be exact.
    */
-  function inject({ providerId, body, clientChoseEffort = false }) {
+  function inject({ providerId, body, clientChoseEffort = false, model = null, provider = null }) {
     if (body === null || typeof body !== "object" || Array.isArray(body)) return { body, injected: null };
     if (!enabled()) return { body, injected: null };
     if (clientChoseEffort) return { body, injected: null };
     if (EFFORT_REQUEST_FIELD in body) return { body, injected: null };
     if (rejectedChannels.has(providerId)) return { body, injected: null };
-    const level = defaultLevelFor(body.model);
+    const level = defaultLevelFor(body.model, model, provider);
     if (!level) return { body, injected: null };
     return { body: { ...body, [EFFORT_REQUEST_FIELD]: level }, injected: level };
   }
@@ -134,7 +166,7 @@ export function createEffortInjector({
 }
 
 /**
- * The persisted 「注入思考强度」 switch, read from disk on every call so a panel
+ * The persisted 「注入推理强度」 switch, read from disk on every call so a panel
  * save takes effect on the next request without restarting the relay (same
  * contract as the keep-alive config thunk).
  */

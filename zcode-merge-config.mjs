@@ -7,7 +7,7 @@ import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { modalitiesFromStoreModel } from "./modalities-fallback.mjs";
-import { modelEffortSurface } from "./effort-catalog.mjs";
+import { resolveEndpointEfforts } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "zcode-sidecar.json";
 
@@ -46,7 +46,9 @@ export function buildZcodeProviderEntry(providerId, provider, port, token, catal
     if (m.maxOutputTokens !== undefined) {
       entry.limit.output = m.maxOutputTokens;
     }
-    const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "zcode" }) : null;
+    const efforts = catalog
+      ? resolveEndpointEfforts(modelId, { catalog, agent: "zcode", model: m, provider })
+      : null;
     if (efforts) {
       // ZCode renders `variants` verbatim as its thinking-depth picker, so the
       // list itself is the vocabulary; `defaultVariant` is what a session that

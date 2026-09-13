@@ -8,7 +8,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
-import { modelEffortSurface, effortWireValue } from "./effort-catalog.mjs";
+import { resolveEndpointEfforts, effortWireValue } from "./effort-catalog.mjs";
 
 const SIDECAR_FILENAME = "pi-sidecar.json";
 
@@ -42,7 +42,9 @@ export function buildPiProviderEntry(providerId, provider, port, catalog = null)
     if (sm?.displayName) m.name = sm.displayName;
     if (sm?.contextWindow !== undefined) m.contextWindow = sm.contextWindow;
     if (sm?.maxOutputTokens !== undefined) m.maxTokens = sm.maxOutputTokens;
-    const efforts = catalog ? modelEffortSurface(modelId, { catalog, agent: "pi" }) : null;
+    const efforts = catalog
+      ? resolveEndpointEfforts(modelId, { catalog, agent: "pi", model: sm, provider })
+      : null;
     if (efforts) {
       // Pi reads the level list out of thinkingLevelMap: `off: null` is its
       // own "thinking off" entry, and every offered level maps to the exact

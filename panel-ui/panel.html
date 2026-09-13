@@ -5953,8 +5953,8 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
         <div class="modal-item">
           <div>
-            <div class="modal-item-title">注入思考强度</div>
-            <div class="modal-item-desc">客户端没有选思考深度时，按该模型可用的档位补一个默认值再发往渠道，让"不选档"也有稳定的深度；某条渠道不认这个参数时会自动停用对它的注入。关闭后一律原样透传，深度取决于客户端与渠道各自的默认值。开启时还会同时打开 Kimi Code 自己的思考总开关（不动你已在里面选好的深度）。</div>
+            <div class="modal-item-title">注入推理强度</div>
+            <div class="modal-item-desc">anyswitch借助公开资料整理了当前所有主流模型支持的推理强度选项；当上游未下发思考强度选项时，开启此项可为模型补齐推理强度选项（注入选项不代表一定可用）。</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="injectEffortToggle">
@@ -8233,7 +8233,7 @@ if (window.panelStartupController) panelStartupPlay();
           } else {
             const saved = d.settings?.injectThinkingEffort;
             if (typeof saved === "boolean") injectEffortToggle.checked = saved;
-            toast(next ? "已开启注入思考强度" : "已关闭注入思考强度");
+            toast(next ? "已开启注入推理强度" : "已关闭注入推理强度");
           }
         } catch (e) {
           injectEffortToggle.checked = !next;

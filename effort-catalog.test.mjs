@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   canonicalizeModelId,
   effortLookupKeys,
@@ -14,6 +17,10 @@ import {
   intersectEffortVocabulary,
   intersectReasonixEfforts,
   modelEffortSurface,
+  resolveEndpointEfforts,
+  resolveDeclaredEfforts,
+  modelDeclaresOwnEfforts,
+  effortSupplementEnabled,
   OPTIMISTIC_EFFORT_LEVELS,
 } from "./effort-catalog.mjs";
 
@@ -371,5 +378,99 @@ describe("modelEffortSurface", () => {
     const surface = modelEffortSurface("brand-new-model", { catalog: { models: new Map() }, agent: "kimi" });
     assert.deepEqual(surface.levels, ["high", "xhigh", "max"]);
     assert.equal(surface.origin, "optimistic");
+  });
+});
+
+describe("store 自带声明优先于库（resolveEndpointEfforts）", () => {
+  const catalog = {
+    models: new Map([
+      ["glm-5.3", { kind: "reasoning", levels: ["medium", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
+    ]),
+  };
+
+  it("model.reasoningEffortLevels 命中时原样写回，不取库", () => {
+    const surface = resolveEndpointEfforts("glm-5.3", {
+      catalog, agent: "zcode",
+      model: { reasoningEffortLevels: ["low", "high"] },
+    });
+    assert.deepEqual(surface.levels, ["low", "high"]);
+    assert.equal(surface.origin, "store");
+  });
+
+  it("provider.reasoningVariants 命中时同样优先", () => {
+    const surface = resolveEndpointEfforts("glm-5.3", {
+      catalog, agent: "zcode",
+      model: {}, provider: { reasoningVariants: ["low", "medium"] },
+    });
+    assert.deepEqual(surface.levels, ["low", "medium"]);
+    assert.equal(surface.origin, "store");
+  });
+
+  it("无声明时回落到库", () => {
+    const surface = resolveEndpointEfforts("glm-5.3", { catalog, agent: "zcode", model: {} });
+    assert.deepEqual(surface.levels, ["medium", "high", "xhigh", "max"]);
+    assert.equal(surface.origin, "library");
+  });
+
+  it("声明为空数组不算声明，仍走库", () => {
+    assert.equal(modelDeclaresOwnEfforts({ reasoningEffortLevels: [] }, {}), false);
+    const surface = resolveEndpointEfforts("glm-5.3", {
+      catalog, agent: "zcode", model: { reasoningEffortLevels: [] },
+    });
+    assert.equal(surface.origin, "library");
+  });
+
+  it("开关关闭（无库）时返回 null，端点保持原样", () => {
+    assert.equal(resolveEndpointEfforts("glm-5.3", { catalog: null, agent: "zcode", model: {} }), null);
+  });
+
+  it("声明仍会被裁到端点词表内", () => {
+    // codex 不认 off/light，声明里的 off 必须被裁掉
+    const surface = resolveEndpointEfforts("glm-5.3", {
+      catalog, agent: "codex",
+      model: { reasoningEffortLevels: ["off", "light", "high"] },
+    });
+    assert.deepEqual(surface.levels, ["high"]);
+  });
+
+  it("resolveDeclaredEfforts 不做词表裁剪，交由调用方过滤", () => {
+    const resolved = resolveDeclaredEfforts("glm-5.3", {
+      catalog, model: { reasoningEffortLevels: ["light", "medium", "high", "xhigh", "max"] },
+    });
+    assert.deepEqual(resolved.levels, ["light", "medium", "high", "xhigh", "max"]);
+  });
+
+  it("resolveDeclaredEfforts 在无库无声明时给出空档位而非 optimistic", () => {
+    const resolved = resolveDeclaredEfforts("brand-new", { catalog: null, model: {} });
+    assert.deepEqual(resolved.levels, []);
+  });
+});
+
+describe("注入推理强度开关（effortSupplementEnabled）", () => {
+  it("设置缺失时默认开", () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    assert.equal(effortSupplementEnabled(dir), true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("显式 false 时为关", () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: false }));
+    assert.equal(effortSupplementEnabled(dir), false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("显式 true 时为开", () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: true }));
+    assert.equal(effortSupplementEnabled(dir), true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("settings.json 损坏时 fail-open 为开", () => {
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    writeFileSync(join(dir, "settings.json"), "{ not json");
+    assert.equal(effortSupplementEnabled(dir), true);
+    rmSync(dir, { recursive: true, force: true });
   });
 });

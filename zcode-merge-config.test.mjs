@@ -400,4 +400,21 @@ describe("zcode thinking effort levels", () => {
       ["medium", "high", "xhigh", "max"],
     );
   });
+
+  // A store row that states its own levels is treated as already correct: the
+  // library fills the gap a gateway leaves, it does not overrule the operator.
+  it("prefers the store's own declaration over the library", () => {
+    const provider = {
+      ...PROVIDER,
+      models: { ...PROVIDER.models, "glm-5.3": { ...PROVIDER.models["glm-5.3"], reasoningEffortLevels: ["low", "high"] } },
+    };
+    const entry = buildZcodeProviderEntry("poke-api", provider, 47821, "tok", catalog);
+    assert.deepEqual(entryOf(entry)["glm-5.3"].reasoning.variants, ["low", "high"]);
+  });
+
+  it("prefers the channel's own declaration over the library", () => {
+    const provider = { ...PROVIDER, reasoningVariants: ["low", "medium"] };
+    const entry = buildZcodeProviderEntry("poke-api", provider, 47821, "tok", catalog);
+    assert.deepEqual(entryOf(entry)["glm-5.3"].reasoning.variants, ["low", "medium"]);
+  });
 });

@@ -30,7 +30,7 @@ import {
   writeSidecar,
   validatePiModelsConfig,
 } from "./pi-merge-models.mjs";
-import { catalogForRoot } from "./effort-catalog.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 export function piModelsPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".pi", "agent", "models.json");
@@ -78,13 +78,16 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH, catalog = catalogForRoot(sidecarRoot)) {
+export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "pi");
   if (Object.keys(managedProviders).length === 0 && !autoChannel) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   const previousManaged = readSidecar(sidecarRoot).providers;
+  // Switch off → no level declaration; the wholesale entry rebuild also
+  // removes the thinkingLevelMap a previous sync wrote.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
   let existing;
   try {
     existing = readModelsJson(modelsPath);
@@ -94,7 +97,7 @@ export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MO
     }
     throw error;
   }
-  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel, catalog);
+  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel, effectiveCatalog);
 
   const gate = validatePiModelsConfig(config);
   if (!gate.valid) {
