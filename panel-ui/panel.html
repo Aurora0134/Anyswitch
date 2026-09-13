@@ -768,6 +768,9 @@
   /* Skills 视图：skill 主从列表（左列，焦点驱动右侧详情卡） */
   .skills-filter-row { margin-bottom: 10px; }
   .skills-list { max-height: 55vh; overflow-y: auto; display: flex; flex-direction: column; }
+  /* 裸滚动容器会被 Chromium 放进 Tab 序列并沿框画 UA 焦点环；行不可键盘导航，此环无信息价值。
+     只收 :focus-visible，设计内焦点样式（按钮/输入框）不受影响。 */
+  .skills-list:focus-visible { outline: none; }
   .skills-list-row {
     position: relative;
     padding: 8px 10px; border-top: 1px solid var(--divider); cursor: pointer;
