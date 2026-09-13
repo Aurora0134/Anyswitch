@@ -382,9 +382,9 @@ describe("panel.html skills change diff highlighting", () => {
 
   const deployedSrc = extractFn("deployedEndpointsFor", "skill, state = skillsState");
   const diffFnSrc = extractFn("diffSkillsState", "prev, next");
-  // 标记变量与 skillSignature 同处一块（从 flashNew 声明到 skillSignature 收尾）
+  // 标记变量声明块（flashNew / flashCount 两个 let）
   const marksSrc = panelHtml.match(
-    /let skillsFlashNew[\s\S]*?function skillSignature\(state, s\) \{[\s\S]*?\n  \}/
+    /let skillsFlashNew = new Set\(\);\s*\n\s*let skillsFlashCount = false;/
   );
   assert.ok(marksSrc, "panel.html must contain the skills flash-mark block");
 
@@ -397,7 +397,6 @@ describe("panel.html skills change diff highlighting", () => {
       diffSkillsState,
       marks: () => ({
         flashNew: skillsFlashNew,
-        flashChanged: skillsFlashChanged,
         flashCount: skillsFlashCount,
       }),
     };
@@ -416,7 +415,6 @@ describe("panel.html skills change diff highlighting", () => {
     harness.diffSkillsState(null, state([skill("a"), skill("b")]));
     const m = harness.marks();
     assert.equal(m.flashNew.size, 0);
-    assert.equal(m.flashChanged.size, 0);
     assert.equal(m.flashCount, false);
   });
 
@@ -427,11 +425,10 @@ describe("panel.html skills change diff highlighting", () => {
     assert.equal(m.flashCount, true);
   });
 
-  it("marks description and deployment changes as changed, not new", () => {
+  it("content or deployment changes mark nothing (row-changed pulse removed)", () => {
     harness.diffSkillsState(state([skill("a")]), state([skill("a", "new desc")], [junctionEp("a")]));
     const m = harness.marks();
     assert.equal(m.flashNew.size, 0);
-    assert.deepEqual([...m.flashChanged], ["a"]);
     assert.equal(m.flashCount, false);
   });
 
@@ -454,17 +451,16 @@ describe("panel.html skills change diff highlighting", () => {
     harness.diffSkillsState(state([skill("a")]), state([skill("a")]));
     const m2 = harness.marks();
     assert.equal(m2.flashNew.size, 0);
-    assert.equal(m2.flashChanged.size, 0);
     assert.equal(m2.flashCount, false);
   });
 
   it("render functions consume flash marks so plain re-renders don't replay animations", () => {
     const renderList = extractFn("renderSkillsList", "");
     assert.match(renderList, /skillsFlashNew = new Set\(\)/);
-    assert.match(renderList, /skillsFlashChanged = new Set\(\)/);
     assert.match(renderList, /skillsFlashCount = false/);
     assert.match(renderList, /row-new/);
-    assert.match(renderList, /row-changed/);
+    // row-changed 脉冲已整组移除（CSS + 标记 + 消费），渲染侧不得残留引用
+    assert.doesNotMatch(renderList, /skillsFlashChanged|row-changed/);
     assert.match(renderList, /badge-flash/);
     // 手动刷新走带反馈的包装：按钮禁用（吃 .btn:disabled 变暗）+ 整列 cascade + 串行动画时长
     assert.match(panelHtml, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
@@ -712,7 +708,7 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(batch, /await revealSkillsInsert\(inserted\);/);
 
     // resolve-conflict 两个方向都不产生新行：repo 方向只把本地目录换成 junction，
-    // local 方向把内容拷进同一 repo 路径（行还在，只是内容变，走 row-changed 高亮）
+    // local 方向把内容拷进同一 repo 路径（行还在，不产生新行）
     const resolve = extractFn("resolveConflict", "endpointId, skillName, direction");
     assert.doesNotMatch(resolve, /revealSkillsInsert/);
     assert.match(resolve, /await refreshSkillsState\(\)/);

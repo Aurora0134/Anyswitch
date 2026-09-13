@@ -889,18 +889,13 @@
   /* Skills 视图：手动刷新的按钮反馈不写在这里——变暗直接吃 .btn:disabled 的 45%，
      与看板「重启」键同源（暗着即「还没好」，动作完成才亮），JS 只切 disabled。 */
 
-  /* Skills 视图：变动高亮——新增行底色渐隐一次；变化行内描边脉冲；
-     计数徽标变化时闪一下。行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
+  /* Skills 视图：变动高亮——新增行底色渐隐一次；计数徽标变化时闪一下。
+     行随每次渲染 innerHTML 重建，动画类只在差分后的那次渲染挂上，
      过滤/选中等普通重渲染不重播（标记消费逻辑见 diffSkillsState） */
   .skills-list-row.row-new { animation: skillsRowNew 2s var(--ease-out); }
   @keyframes skillsRowNew {
     0%, 55% { background: var(--accent-soft); }
     100% { background: transparent; }
-  }
-  .skills-list-row.row-changed { animation: skillsRowChanged 1.2s var(--ease-out); }
-  @keyframes skillsRowChanged {
-    0%, 45% { box-shadow: inset 0 0 0 1.5px var(--accent); }
-    100% { box-shadow: inset 0 0 0 0 transparent; }
   }
   .badge.badge-flash { animation: badgeFlash 1.2s var(--ease-out); }
   @keyframes badgeFlash {
@@ -8891,33 +8886,20 @@ if (window.panelStartupController) panelStartupPlay();
 
   // ── 变动差分高亮 ──
   // 列表每次渲染全量重建 innerHTML，变动标记不能挂在 DOM 上（与选中集合同一约定）。
-  // 两层标记：skillsFlashNew / skillsFlashChanged 驱动行动画，只在差分后的那次渲染
-  // 消费，之后的普通重渲染不重播；skillsFlashCount 驱动计数徽标闪烁，renderSkillsRepo
-  // 读、最后渲染的 renderSkillsList 消费。
+  // skillsFlashNew 驱动新行底色渐隐，只在差分后的那次渲染消费，之后的普通重渲染不重播；
+  // skillsFlashCount 驱动计数徽标闪烁，renderSkillsRepo 读、最后渲染的 renderSkillsList 消费。
   let skillsFlashNew = new Set();
-  let skillsFlashChanged = new Set();
   let skillsFlashCount = false;
-
-  // skill 内容签名：描述 + 已部署端点集合——列表行上用户可见的两个维度。
-  function skillSignature(state, s) {
-    return (s.description || "") + "\u0001" + deployedEndpointsFor(s, state).join(",");
-  }
 
   function diffSkillsState(prev, next) {
     skillsFlashNew = new Set();
-    skillsFlashChanged = new Set();
     skillsFlashCount = false;
     const skills = next.skills || [];
     // 首次加载 / 仓库未设置 / 换了仓库：重建基线，不把整仓库标成「新」
     if (!prev || !prev.repoConfigured || prev.repoPath !== next.repoPath) return;
     const prevById = new Map((prev.skills || []).map((s) => [s.relPath, s]));
     for (const s of skills) {
-      const p = prevById.get(s.relPath);
-      if (!p) {
-        skillsFlashNew.add(s.relPath);
-      } else if (skillSignature(prev, p) !== skillSignature(next, s)) {
-        skillsFlashChanged.add(s.relPath);
-      }
+      if (!prevById.has(s.relPath)) skillsFlashNew.add(s.relPath);
     }
     skillsFlashCount = (prev.skills || []).length !== skills.length;
   }
@@ -9087,7 +9069,6 @@ if (window.panelStartupController) panelStartupPlay();
     // 消费差分标记：只有差分后的那次渲染重播动画，之后过滤/选中等重渲染拿到空集合。
     // 提前 return 的空列表路径同样消费，避免标记滞留到下一次无关渲染。
     const flashNew = skillsFlashNew; skillsFlashNew = new Set();
-    const flashChanged = skillsFlashChanged; skillsFlashChanged = new Set();
     const flashCount = skillsFlashCount; skillsFlashCount = false;
     // cascade / FLIP / 入场标记同样在提前 return 之前消费：空列表路径没有行可动画，
     // 但容器必须解除隐形、标记不能滞留到下一次无关渲染（过滤输入逐键会白播）。
@@ -9133,12 +9114,12 @@ if (window.panelStartupController) panelStartupPlay();
       const favStar = skillsFavorites.has(s.relPath)
         ? '<span class="skills-fav-star" title="已收藏">★</span>'
         : "";
-      // 行底色/描边动画只在差分后的那次渲染挂类，防过滤输入逐键重播动画。
+      // 新行底色动画只在差分后的那次渲染挂类，防过滤输入逐键重播动画。
       // cascade 那次渲染让位：同元素同特异性的 animation 简写是整条覆盖而非叠加，
       // 两个动画会互吃一个；且 2s 底色渐隐混进 300ms cascade 里只是噪声。
       const flashCls = cascade
         ? ""
-        : flashNew.has(s.relPath) ? " row-new" : flashChanged.has(s.relPath) ? " row-changed" : "";
+        : flashNew.has(s.relPath) ? " row-new" : "";
       return `<div class="skills-list-row${skillsSelection.has(s.relPath) ? " selected" : ""}${flashCls}" data-skill="${escapeHtml(s.relPath)}" style="--i:${i}">
         <div class="skills-list-line1">
           <span class="skills-list-name" title="${escapeHtml(s.relPath)}">${escapeHtml(s.name)}</span>${dupBadge}
