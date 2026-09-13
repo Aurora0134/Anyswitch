@@ -1034,6 +1034,20 @@ describe("panel.html codex endpoint card", () => {
     assert.ok(statsMatch, "STATS_ENDPOINT_LABELS literal found");
     assert.ok(statsMatch[0].includes('codex: "Codex"'), "STATS_ENDPOINT_LABELS covers codex");
   });
+
+  it("aligns the codex avatar with the shared white-tile pattern (same as qoder)", () => {
+    const tile =
+      '<div style="width:32px; height:32px; border-radius:8px; background:#fff; display:flex; align-items:center; justify-content:center;">';
+    const headingIdx = panelHtml.indexOf("<h3>Codex</h3>");
+    assert.ok(headingIdx > 0, "codex card heading exists");
+    const brandStart = panelHtml.lastIndexOf('<div class="agent-brand">', headingIdx);
+    assert.ok(brandStart >= 0, "codex brand block found");
+    const brandBlock = panelHtml.slice(brandStart, headingIdx);
+    assert.ok(brandBlock.includes(tile), "codex avatar wrapped in the 32px white rounded tile");
+    assert.ok(brandBlock.includes('alt="Codex"'), "existing codex icon asset preserved");
+    assert.ok(brandBlock.includes('style="width:24px; height:24px; display:block;'), "icon centered at 24px inside the tile");
+    assert.ok(!brandBlock.includes('width="32" height="32"'), "no bare 32px img left on the codex avatar");
+  });
 });
 
 describe("panel.html stats tab", () => {

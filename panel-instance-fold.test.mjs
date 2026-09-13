@@ -348,3 +348,37 @@ describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶�
     assert.equal(agg.lastSeen, null);
   });
 });
+
+describe("panel.html 看板会话行命名「会话 #x」（按卡内行显示顺序 1 起）", () => {
+  // 实例/会话行不再直接显示会话标题（首条用户消息），改按本卡行序编号；
+  // 伪「全局汇总」行保持原标题、不参与编号。
+  const SESSION_A = { id: "a", title: "帮我修登录页样式", status: "active", tokens: {}, requests: 1 };
+  const SESSION_B = { id: "b", title: "重构路由模块", status: "idle", tokens: {}, requests: 2 };
+
+  function renderRowHtmls(instances, aggregateFallback) {
+    const env = makeEnv();
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "codex", listEl: fakeElement(), instances, aggregateFallback });
+    return env.created.filter((el) => el.className === "session-row").map((el) => el.innerHTML);
+  }
+
+  it("会话行按显示顺序编号 会话 #1/#2，原始会话标题不再上屏", () => {
+    const rows = renderRowHtmls([SESSION_A, SESSION_B]);
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].includes("会话 #1"), "首行编号 1");
+    assert.ok(rows[1].includes("会话 #2"), "次行编号 2");
+    assert.ok(!rows[0].includes("帮我修登录页样式") && !rows[1].includes("重构路由模块"), "原始会话标题不再上屏");
+  });
+
+  it("编号随行序走：实例顺序变化后首行仍是 会话 #1（不持久化编号）", () => {
+    const rows = renderRowHtmls([SESSION_B, SESSION_A]);
+    assert.ok(rows[0].includes("会话 #1") && rows[1].includes("会话 #2"), "重排后编号按新行序分配");
+  });
+
+  it("伪「全局汇总」行保持原标题，不参与编号", () => {
+    const rows = renderRowHtmls([], { tokens: {}, totalRequests: 0 });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].includes("全局汇总"), "汇总行标题保持「全局汇总」");
+    assert.ok(!rows[0].includes("会话 #"), "汇总行不编号");
+  });
+});
