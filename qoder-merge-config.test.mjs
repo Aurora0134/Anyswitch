@@ -113,7 +113,7 @@ describe("buildQoderProviders", () => {
     assert.equal(conn.models.length, 1);
     const m = conn.models[0];
     assert.equal(m.model, "test-model");
-    assert.equal(m.displayName, "Test");
+    assert.equal(m.displayName, "Test · test-p", "displayName carries the channel label — Qoder's picker renders nothing else");
     assert.equal(m.contextWindow, 999000);
     // `thinking` must be an object with a `modes` array: the running app's
     // validator rejects any other shape AND then drops the whole provider, so a
@@ -197,7 +197,7 @@ describe("buildQoderProviders", () => {
     assert.equal(models["claude-opus-5"].contextWindow, 1_000_000);
   });
 
-  it("uses modelId as displayName when displayName is absent", () => {
+  it("uses modelId as the model label when displayName is absent", () => {
     const providers = {
       "test-p": {
         models: {
@@ -206,7 +206,7 @@ describe("buildQoderProviders", () => {
       },
     };
     const map = buildQoderProviders(providers, PORT, TOKEN);
-    assert.equal(map[managedConnectionId("test-p")].models[0].displayName, "some-model");
+    assert.equal(map[managedConnectionId("test-p")].models[0].displayName, "some-model · test-p");
   });
 
   it("skips providers whose models array is empty", () => {
