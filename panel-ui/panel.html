@@ -10968,6 +10968,8 @@ async function api(method, path, body) {
       const isNew = highlight && newSet.has(mid);
       const badges = [];
       if (poolDup && poolDup.has(mid)) badges.push(`<span class="badge badge-pool">号池</span>`);
+      // 补录 = 该 id 目前只靠手动补录存着；某次刷新若发现上游已列出它，后端会清掉
+      // 这个标记，徽标随之下线，此后再按普通探测模型对待（含被未探测到时的剪枝）。
       if (meta.manual === true) badges.push(`<span class="badge badge-accent">补录</span>`);
       if (meta.contextWindow) badges.push(`<span class="badge badge-neutral">${formatCtx(meta.contextWindow)}</span>`);
       if (meta.supportsReasoning) badges.push(`<span class="badge badge-neutral">推理</span>`);
