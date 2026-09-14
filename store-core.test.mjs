@@ -891,3 +891,123 @@ test("planStoreRefresh re-adds a removed discovered model to discovered but not 
   assert.deepEqual(Object.keys(sensenova.models), ["upstream-a"]);
   assert.deepEqual(result.reports[0].added, ["upstream-b"]);
 });
+
+// ---- manual flag cleared once upstream reports the id ---------------------
+
+test("mergeModelIds clears the manual flag when upstream reports the model", () => {
+  const existing = {
+    "kimi-k3": {
+      displayName: "Kimi K3",
+      manual: true,
+      contextWindow: 262144,
+      supportsReasoning: true,
+      inputModalities: ["text", "image"],
+    },
+  };
+  const merged = mergeModelIds({
+    existing,
+    upstreamIds: ["kimi-k3"],
+    canPrune: true,
+    makeEntry: (id) => ({ displayName: id }),
+  });
+  // only the backfill marker goes; every other field survives untouched
+  assert.deepEqual(merged["kimi-k3"], {
+    displayName: "Kimi K3",
+    contextWindow: 262144,
+    supportsReasoning: true,
+    inputModalities: ["text", "image"],
+  });
+  assert.equal("manual" in merged["kimi-k3"], false);
+  assert.notEqual(merged["kimi-k3"], existing["kimi-k3"]);
+});
+
+test("mergeModelIds clears manual on an incomplete listing that still reports the id", () => {
+  const existing = {
+    "kimi-k3": { displayName: "kimi-k3", manual: true },
+    "not-listed": { displayName: "not-listed", manual: true },
+  };
+  // reason "dropped"/"capped" => canPrune false, yet a listed id is still
+  // reported by upstream, so its backfill marker is superseded. An id the
+  // listing omits keeps its flag and its value.
+  for (const canPrune of [true, false]) {
+    const merged = mergeModelIds({
+      existing,
+      upstreamIds: ["kimi-k3"],
+      canPrune,
+      makeEntry: (id) => ({ displayName: id }),
+    });
+    assert.deepEqual(merged["kimi-k3"], { displayName: "kimi-k3" }, `canPrune=${canPrune}`);
+    assert.deepEqual(merged["not-listed"], { displayName: "not-listed", manual: true }, `canPrune=${canPrune}`);
+  }
+});
+
+test("planDiscoveredRefresh clears manual when the upstream adds the model to its listing", () => {
+  const plan = planDiscoveredRefresh({
+    rawIds: ["keep", "kimi-k3"],
+    sanitizedIds: ["keep", "kimi-k3"],
+    discovered: {
+      keep: { displayName: "Keep" },
+      "kimi-k3": { displayName: "kimi-k3", manual: true },
+    },
+  });
+  assert.deepEqual(plan.added, []);
+  assert.deepEqual(plan.pruned, []);
+  // the badge data source is gone, yet the refresh reports no diff: the id was
+  // already known locally, only its provenance changed
+  assert.equal("manual" in plan.discovered["kimi-k3"], false);
+});
+
+test("planStoreRefresh turns a backfilled model into an ordinary discovered one once upstream reports it", () => {
+  const configText = "{}";
+  const seededStore = {
+    version: 2,
+    providers: {
+      sensenova: {
+        displayName: "SenseNova",
+        baseURL: "https://sensenova.example/v1",
+        protocol: "openai-compatible",
+        credentialFile: "sensenova.dpapi",
+        discovered: {},
+        modelFilter: [],
+        models: {},
+      },
+    },
+  };
+  // ① upstream misses the model, the user backfills it
+  const add = planAddModels(seededStore.providers.sensenova, ["kimi-k3"]);
+  assert.equal(add.ok, true);
+  seededStore.providers.sensenova = add.nextEntry;
+  assert.equal(seededStore.providers.sensenova.discovered["kimi-k3"].manual, true);
+  // ② a later refresh finds upstream reporting it: the badge goes away in both
+  //    discovered and the materialized models
+  const reported = planStoreRefresh({
+    configText,
+    store: seededStore,
+    discoveries: [{
+      providerId: "sensenova",
+      rawIds: ["kimi-k3"],
+      sanitizedIds: ["kimi-k3"],
+      rawModels: [{ id: "kimi-k3", contextWindow: 262144 }],
+    }],
+  });
+  const entry = reported.store.providers.sensenova;
+  assert.deepEqual(entry.discovered["kimi-k3"], { displayName: "kimi-k3", contextWindow: 262144 });
+  assert.deepEqual(entry.models["kimi-k3"], { displayName: "kimi-k3", contextWindow: 262144 });
+  assert.deepEqual(entry.modelFilter, ["kimi-k3"]);
+  // ③ it now behaves like any probe-discovered model: a complete listing that
+  //    omits it prunes it, and the manual exemption no longer applies
+  const dropped = planStoreRefresh({
+    configText,
+    store: reported.store,
+    discoveries: [{ providerId: "sensenova", rawIds: [], sanitizedIds: [] }],
+  });
+  assert.equal(dropped.reports[0].status, "failed");
+  assert.deepEqual(Object.keys(dropped.store.providers.sensenova.discovered), ["kimi-k3"]);
+  const gone = planStoreRefresh({
+    configText,
+    store: dropped.store,
+    discoveries: [{ providerId: "sensenova", rawIds: ["other"], sanitizedIds: ["other"] }],
+  });
+  assert.deepEqual(gone.reports[0].pruned, ["kimi-k3"]);
+  assert.deepEqual(Object.keys(gone.store.providers.sensenova.discovered), ["other"]);
+});
