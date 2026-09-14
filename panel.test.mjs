@@ -1265,6 +1265,18 @@ describe("panel.html sessions tab", () => {
     assert.ok(panelHtml.includes("命令已复制，粘贴到终端即可继续会话"), "resume-command copied toast exists");
     assert.ok(panelHtml.includes("已删除"), "deleted toast copy exists");
   });
+
+  it("详情端点徽标换会话时瞬时换色，不吃基座 150ms 过渡", () => {
+    // 基座 .badge 带 border-color/color/background 三条 150ms 过渡，而详情徽标每次
+    // 换会话都整条换色：不覆盖就会让上一个端点的颜色挂在新端点的名字上淡出，读起来
+    // 像外框颜色变化滞后。覆盖必须按 id 写——基座与各主题都对 .badge 有规则，靠
+    // 类选择器压不住（同权重时由样式表顺序决定）。徽标只在端点之间切换，不需要渐入。
+    const css = panelHtml.match(/<style>([\s\S]*?)<\/style>/)[1];
+    assert.ok(/\.badge \{[^}]*transition: background[^}]*border-color/.test(css),
+      "基座 .badge 的过渡前提变了，这条断言需要重新核对");
+    assert.ok(/#sessDEpBadge \{ transition: none; \}/.test(css),
+      "详情端点徽标必须按 id 覆盖掉 .badge 的过渡");
+  });
 });
 
 // Body size cap + panel.html lookup chain. readJsonBody rejects bodies over

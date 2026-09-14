@@ -1596,6 +1596,10 @@
   /* 白/黑两个端点标识在某一侧底色上会与背景融掉，用一圈内描边把边界托出来；
      其余端点的实色点不需要，加了反而发灰。 */
   .ep-dot--outlined { box-shadow: inset 0 0 0 1px var(--ep-ring); }
+  /* 详情徽标每次换会话都整条换色，基座 .badge 的 150ms 过渡在这里只会让上一条
+     会话的旧色挂在新会话的名字上淡出。过渡按基座规则作用于本元素，故按 id 覆盖
+     （也一并盖过各主题对 .badge 的覆盖）；徽标只在端点之间切换，瞬时到位即可。 */
+  #sessDEpBadge { transition: none; }
   .sess-item .si-main { min-width: 0; flex: 1; }
   .sess-item .si-title { font-size: 12.5px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sess-item .si-sub { font-size: 11px; color: var(--text-4); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); }
@@ -14274,7 +14278,8 @@ async function api(method, path, body) {
     const badge = $("sessDEpBadge");
     const color = sessEpColor(s.endpoint);
     // 圆点自带颜色（pi/zcode 另加描边环），文字另用可读色：白/黑端点的文字
-    // 若跟着端点色走，在浅/深底上一样会读不出来。
+    // 若跟着端点色走，在浅/深底上一样会读不出来。整条徽标按端点整体换色，
+    // 由 #sessDEpBadge 关掉过渡，避免旧端点的颜色在新名字上停留。
     const ringed = SESS_EP_RINGED.has(s.endpoint);
     badge.innerHTML = `<span class="ep-dot${ringed ? " ep-dot--outlined" : ""}" style="background:${color};width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle;"></span>${esc(sessEpName(s.endpoint))}`;
     badge.style.cssText = ringed
