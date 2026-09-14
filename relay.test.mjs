@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
-import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientSpecifiedThinking } from "./protocol.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 
@@ -254,20 +254,49 @@ test("anthropic path adds the library default when Claude named no depth", async
   assert.equal(sent[0].reasoning_effort, "high");
 });
 
-test("anthropic path leaves a request that carried a thinking block alone", async () => {
+test("a thinking block that names no depth still gets the library default", async () => {
   const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
   const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), thinking: { type: "enabled", budget_tokens: 2048 } };
   await handler.handleMessages(AUTH, body);
-  assert.equal("reasoning_effort" in sent[0], false);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("the depth Claude named goes upstream in the field the channel takes", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  const body = {
+    ...messageBody("anthropic/poke-api/claude-opus-5"),
+    thinking: { type: "adaptive" },
+    output_config: { effort: "xhigh" },
+  };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "xhigh");
+  assert.equal("thinking" in sent[0], false);
+  assert.equal("output_config" in sent[0], false);
 });
 
 test("a level Claude sent itself is not replaced by the library default", async () => {
   const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
   const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), reasoning_effort: "max" };
   await handler.handleMessages(AUTH, body);
-  // The translator still drops Claude's field on this path (unchanged decision);
-  // what must not happen is the relay filling the gap with a level of its own.
-  assert.equal("reasoning_effort" in sent[0], false);
+  assert.equal(sent[0].reasoning_effort, "max");
+});
+
+test("a level the model does not list lands on the nearest one it does", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  // claude-opus-5 offers high/xhigh/max, so a medium request goes out as high —
+  // a value the model is known to take, never one it would refuse.
+  const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), effort: "medium" };
+  await handler.handleMessages(AUTH, body);
+  assert.equal(sent[0].reasoning_effort, "high");
+});
+
+test("Claude asking for no thinking is respected, default and all", async () => {
+  const { handler, sent } = makeInjectingMessagesHandler([okResponse]);
+  for (const off of [{ thinking: { type: "disabled" } }, { effort: "off" }]) {
+    const body = { ...messageBody("anthropic/poke-api/claude-opus-5"), ...off };
+    await handler.handleMessages(AUTH, body);
+    assert.equal("reasoning_effort" in sent[0], false);
+  }
 });
 
 test("anthropic path retries once without the field when the channel refuses it", async () => {
@@ -280,14 +309,21 @@ test("anthropic path retries once without the field when the channel refuses it"
   assert.equal("reasoning_effort" in sent[1], false);
 });
 
-test("clientSpecifiedThinking reads every way Claude names a depth", () => {
-  assert.equal(clientSpecifiedThinking({ thinking: { type: "enabled" } }), true);
-  assert.equal(clientSpecifiedThinking({ reasoning_effort: "high" }), true);
-  assert.equal(clientSpecifiedThinking({ effort: "medium" }), true);
-  assert.equal(clientSpecifiedThinking({ output_config: { effort: "low" } }), true);
-  assert.equal(clientSpecifiedThinking({ max_tokens: 100 }), false);
-  assert.equal(clientSpecifiedThinking({ effort: "" }), false);
-  assert.equal(clientSpecifiedThinking(null), false);
+test("clientEffortFromAnthropic reads every way Claude names a depth", () => {
+  assert.deepEqual(clientEffortFromAnthropic({ output_config: { effort: "xhigh" } }), { stated: true, level: "xhigh" });
+  assert.deepEqual(clientEffortFromAnthropic({ reasoning_effort: "high" }), { stated: true, level: "high" });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "medium" }), { stated: true, level: "medium" });
+  // "think, at whatever depth you like" is not a level choice.
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "adaptive" } }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "enabled", budget_tokens: 2048 } }), { stated: false, level: null });
+  // Both explicit refusals: no thinking, and no default filled in behind it.
+  assert.deepEqual(clientEffortFromAnthropic({ thinking: { type: "disabled" } }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ reasoning_effort: null }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "off" }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ output_config: { effort: "none" } }), { stated: true, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ max_tokens: 100 }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic({ effort: "" }), { stated: false, level: null });
+  assert.deepEqual(clientEffortFromAnthropic(null), { stated: false, level: null });
 });
 
 test("buildWireCatalog fails whole catalog on collision", () => {
