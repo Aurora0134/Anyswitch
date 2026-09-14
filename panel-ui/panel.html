@@ -3905,12 +3905,16 @@ try {
   if (startupParam === "1") {
     // 本页来自 launcher 首开：主脚本 restoreView 据此固定落看板页（刷新/普通访问仍恢复上次 tab）
     window.panelStartupLaunch = true;
+    window.panelStartupBegin();
   } else {
     // 本页来自看板「重启」后的自动刷新：开屏层从首绘起接力旧页面的定格画面，
     // restoreView 据此恢复上次 tab 且不静默入场动画（重启回来的那次切换播 view-enter/board-enter）。
+    // 跳转时机已前移到「面板接受重启」——此刻新 panel 多半还没接管 47820，splash 需盖住
+    // 整个 panel 切换 + 首刷窗口，兜底时限从首开用的 3s 放宽到恢复超时的量级（25s）。
+    // ready 信号仍在数据真正就绪后正常提前触发，25s 只是「panel 始终没回来」的保险丝。
     window.panelStartupRestart = true;
+    window.panelStartupBegin(25000);
   }
-  window.panelStartupBegin();
 })();
 </script>
 </head>
@@ -5920,6 +5924,22 @@ async function api(method, path, body) {
   // ═══════════════════════════════════════════════
   let startupViewReady = Promise.resolve();
   async function init() {
+    // 重启恢复页（panelStartupRestart）先等新 panel 真正接管 47820：
+    // 跳转时机已前移到「旧 panel 接受重启」，此刻新进程多半还没绑端口，
+    // 而 refreshStatus 失败也 resolve（走 catch 写「Relay 未运行」）——不等就直接
+    // startStatusPolling 的话 firstStatus 立刻 resolve，splash 提前淡出到一个
+    // 还没活过来的面板。轮询上限 8s：正常窗口 ~0.5s，超过即放弃等待照常往下走
+    //（splash 的 25s 兜底是更外层的保险丝，这层只决定「数据就绪」从何时起算）。
+    if (window.panelStartupRestart) {
+      const waitDeadline = Date.now() + 8000;
+      for (;;) {
+        const alive = await fetch(API_BASE + "/api/status", { cache: "no-store" })
+          .then((r) => r.ok)
+          .catch(() => false);
+        if (alive || Date.now() >= waitDeadline) break;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+    }
     initTheme();
     initStylePicker();
     initSettingsModal();
@@ -7928,13 +7948,16 @@ async function api(method, path, body) {
   // 运行中 → ⏹ 停止（红 btn-danger），停止 → ▶ 启动（蓝 btn-primary）。
   let currentRelayState = { status: "stopped" };
 
-  // 面板服务（panel-host, 47820）自身的重启窗口：true = 已请求它退出、正在等新
-  // 进程接管 47820。这个窗口里页面的服务端整个没了，徽标和按钮的每秒重算全部
-  // 来自失败请求，不显式压住就会把「面板重启中」误报成「Relay 已停止」。
+  // 面板服务（panel-host, 47820）自身的重启窗口标志。提前跳转后旧页面不再轮询
+  // 等新进程（watchPanelHostComeBack 已移除），此标志仅保留给 refreshStatus 的
+  // catch 分支：重启请求已发出但跳转尚未完成的瞬间，一次失败的状态轮询不应把
+  // 徽标改判成「Relay 未运行」。
   let panelRestarting = false;
-  // 上一次成功 /api/status 看到的进程身份；pid 或 startTime 变了 = 新进程已接管。
+  // 上一次成功 /api/status 看到的进程身份；restart 流程已不再用它判定接管
+  //（提前跳转后旧页面等不到新 pid），仅保留供 refreshStatus 记账。
   let lastPanelIdentity = { pid: null, startTime: null };
-  const PANEL_RESTART_POLL_MS = 200;
+  // 新页面 restart 路径的 splash 兜底时限（panelStartupBegin 的实参）；恢复超时
+  // 不再由旧页面轮询消费，仅作为 splash 保险丝口径保留。
   const PANEL_RESTART_RECOVERY_TIMEOUT_MS = 20_000;
 
   function updateRelayControls(relay) {
@@ -8080,96 +8103,68 @@ async function api(method, path, body) {
     async function executeRestartRelay() {
       restartBtn.disabled = true;
       playStartupSplash();
-      // ① relay 先换：这一步由面板进程转手执行，页面不断线。失败到此为止，
-      //    绝不在 relay 没起来的情况下去动面板自己。
-      try {
-        await api("POST", "/api/relay/restart");
-      } catch (e) {
-        toast(panelError(e, "重启失败"), true);
-        restartBtn.disabled = false;
-        dropStartupSplash();
-        return;
-      }
-      // ② 面板服务再换自己。这个请求的「失败」有两种完全不同的含义：连接被退出
-      //    掐断（预期内，重启确实开始了）vs 服务端明确拒绝（403/409/500，面板还
-      //    活着且没动）。api() 把两者都抛成 Error，所以这里用裸 fetch 分清。
-      let restartStarted;
-      let refusal = "";
-      try {
-        const r = await fetch(API_BASE + "/api/panel-host/restart", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" },
-        });
-        restartStarted = r.ok;
+      // 动画并行化：relay 重启、panel 重启、动画播放三者同时触发，不再串行等待。
+      // relay 重启由 panel-host 进程转手执行（spawn detached relay-host，panel 死后
+      // relay 进程照样跑完），所以页面可以提前跳转，不用等 relay 就绪。
+      // 动画 1100ms 播完即定格；定格后立刻跳转——新页面的 splash 盖住剩余等待。
+      let relayRestartFailed = null;
+      let panelRestartRefused = "";
+      // ① relay 重启：不 await，失败记录下来跳转后 toast
+      const relayPromise = api("POST", "/api/relay/restart").catch((e) => {
+        relayRestartFailed = panelError(e, "重启失败");
+      });
+      // ② panel 重启：不 await，但要区分「拒绝」和「连接中断」
+      const panelPromise = fetch(API_BASE + "/api/panel-host/restart", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" },
+      }).then(async (r) => {
         if (!r.ok) {
-          try { refusal = ((await r.json()).error) || `HTTP ${r.status}`; } catch { refusal = `HTTP ${r.status}`; }
+          try { panelRestartRefused = ((await r.json()).error) || `HTTP ${r.status}`; } catch { panelRestartRefused = `HTTP ${r.status}`; }
         }
-      } catch {
-        restartStarted = true; // 连接中断：多半是进程已经退出，交给恢复轮询验证
-      }
-      if (!restartStarted) {
-        toast(`Relay 已重启；面板服务未重启（${refusal}）`, true);
+      }).catch(() => { /* 连接中断 = 进程已退出，预期内 */ });
+      // ③ 等动画播完（splash settled）再跳转：pulse 1100ms 后 settle，
+      // settle 时刻由 panelStartupController 的 data-phase 属性标记
+      const settled = await new Promise((resolve) => {
+        const layer = document.getElementById("panelStartup");
+        if (!layer) return resolve();
+        if (layer.getAttribute("data-phase") === "settled") return resolve();
+        const observer = new MutationObserver(() => {
+          if (layer.getAttribute("data-phase") === "settled") { observer.disconnect(); resolve(); }
+        });
+        observer.observe(layer, { attributes: true, attributeFilter: ["data-phase"] });
+        // 保险丝：动画异常不 settle 时 3s 后照样跳转
+        setTimeout(resolve, 3000);
+      });
+      // 动画已定格，立即跳转——不等 relay/panel 重启完成。relay 重启由 panel-host
+      // 转手执行（detached relay-host 进程独立于 panel 存活），panel 重启由 helper
+      // 进程接管，两者都不需要旧页面在线等结果。失败检查移到新页面：relay 重启
+      // 失败的概率极低（本地回环），且新页面的 splash 兜底会盖住异常窗口。
+      // 唯一需要同步等待的是 panel 重启的「明确拒绝」（403/409/500）——那种情况
+      // 下旧 panel 还活着，不该跳转。但 panel 重启请求通常在 100ms 内应答，
+      // 动画 1100ms 播完时它早已返回，所以 Promise.allSettled 只等 panel 那一个。
+      await Promise.allSettled([panelPromise]);
+      if (relayRestartFailed) {
+        toast(relayRestartFailed, true);
         restartBtn.disabled = false;
         dropStartupSplash();
         return;
       }
-      watchPanelHostComeBack();
-    }
-
-    // 等 panel-host 换新进程。刻意不复用 1s 状态轮询：那条链带 document.hidden
-    // 门控，用户点完重启切去别的标签页就再也检测不到换新，页面会一直停在已死的
-    // 旧面板上。检测到新身份即 location.reload()——页面 JS 也随磁盘上的新版对齐。
-    function watchPanelHostComeBack() {
+      if (panelRestartRefused) {
+        toast(`Relay 已重启；面板服务未重启（${panelRestartRefused}）`, true);
+        restartBtn.disabled = false;
+        dropStartupSplash();
+        return;
+      }
       panelRestarting = true;
-      const before = { ...lastPanelIdentity };
-      const dot = $("topDot");
-      const statusText = $("topRelayStatus");
-      const sbState = $("sbStateBadge");
-      if (dot) dot.className = "pulse-dot starting";
-      if (statusText) statusText.textContent = "面板服务重启中…";
-      if (sbState) { sbState.className = "badge badge-warn"; sbState.textContent = "重启中"; }
-      if (toggleBtn) toggleBtn.disabled = true;
-      if (restartBtn) restartBtn.disabled = true;
-
-      const deadline = Date.now() + PANEL_RESTART_RECOVERY_TIMEOUT_MS;
-      let aliveIdentity = null; // 窗口内最后一次「仍在应答」的身份，用于超时时说清是哪种失败
-      const timer = setInterval(async () => {
-        let identity = null;
-        try {
-          const r = await fetch(API_BASE + "/api/status", { cache: "no-store" });
-          if (r.ok) {
-            const d = await r.json();
-            identity = { pid: d?.pid ?? null, startTime: d?.startTime ?? null };
-          }
-        } catch {
-          /* 47820 还没人应答：旧进程已退出或新进程还在绑端口，继续等 */
-        }
-        if (identity) aliveIdentity = identity;
-        if (identity && (identity.pid !== before.pid || identity.startTime !== before.startTime)) {
-          clearInterval(timer);
-          // 带 startup=restart 跳转而非裸 reload：新页面首绘即接力开屏层，恢复的视图
-          // 播入场动画，连接处平滑（bootstrap 识别该标记并置 panelStartupRestart）。
-          // assign 而非 replace：与 launcher 首开同一条 navigate 路径，bootstrap 的
-          // navigation.type 门控才能放行。
-          const next = new URL(location.href);
-          next.searchParams.set("startup", "restart");
-          location.assign(next.href);
-          return;
-        }
-        if (Date.now() >= deadline) {
-          clearInterval(timer);
-          panelRestarting = false;
-          if (aliveIdentity && aliveIdentity.pid === before.pid) {
-            // 面板从头到尾没退出过：助手没能把它送走，页面一切照常，别谎称掉线。
-            toast("面板服务未退出，重启没生效；详见 logs/panel-host-restart.log", true);
-          } else {
-            toast("面板服务未能自动恢复，请用桌面快捷方式重新打开 Anyswitch 面板", true);
-          }
-          refreshStatus(); // 徽标与按钮回到真实状态
-          dropStartupSplash();
-        }
-      }, PANEL_RESTART_POLL_MS);
+      const next = new URL(location.href);
+      next.searchParams.set("startup", "restart");
+      location.assign(next.href);
     }
+
+    // 旧的「等 panel-host 换新进程再 reload」轮询链已随动画并行化移除：
+    // 提前跳转后新页面等不到旧 pid 变化（跳转那一刻旧 pid 还没死），轮询只会把
+    // 用户钉在旧页面上。panel 切换与新页面首刷由新页面的 splash 兜底时限盖住；
+    // 「重启中」徽标由 panelRestarting 标志压住，见 refreshStatus/updateRelayControls。
 
     if (stopConfirmBtn) {
       stopConfirmBtn.onclick = async () => {

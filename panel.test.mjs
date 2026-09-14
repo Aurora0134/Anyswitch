@@ -2958,19 +2958,18 @@ describe("panel.html 面板重启状态机契约", () => {
     "utf8",
   );
 
-  it("恢复轮询独立成链且不受 document.hidden 门控", () => {
-    assert.ok(panelHtml.includes("function watchPanelHostComeBack()"), "独立的恢复轮询");
-    assert.ok(panelHtml.includes("PANEL_RESTART_POLL_MS"), "恢复轮询自带节奏常量");
-    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
-    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
-    assert.ok(recovery.length > 500, "未真正取到函数体，后续断言会全部落空");
-    assert.ok(!recovery.includes("document.hidden"),
-      "带 hidden 门控的话，用户点完重启切走标签页就永远检测不到换新");
-    assert.ok(!recovery.includes("location.reload()"), "不再裸 reload——新页面首绘要接力开屏层，裸 reload 会把标记丢掉");
-    assert.ok(recovery.includes('next.searchParams.set("startup", "restart")'), "带 startup=restart 跳转，新页面据此接力开屏并播入场动画");
-    assert.ok(recovery.includes("location.assign(next.href)"), "assign 走 navigate 路径，bootstrap 的 navigation.type 门控才放行");
-    assert.ok(recovery.includes("identity.pid !== before.pid"), "以 pid 变化判定新进程");
-    assert.ok(recovery.includes("identity.startTime !== before.startTime"), "startTime 作为辅助身份信号");
+  it("面板接受重启后立即带 startup=restart 跳转，不再轮询等新进程", () => {
+    // 动画并行化：旧页面不再等「检测到新 pid」才跳转——那会把动画播完后的
+    // 0.5–1.5s 死等待留给用户。改为 panel-host/restart 被接受即 location.assign，
+    // 剩余等待由新页面的 splash 兜底时限盖住。
+    const execStart = panelHtml.indexOf("async function executeRestartRelay()");
+    const exec = panelHtml.slice(execStart, panelHtml.indexOf("if (stopConfirmBtn)", execStart));
+    assert.ok(exec.length > 500, "未真正取到 executeRestartRelay 函数体，后续断言会全部落空");
+    assert.ok(!panelHtml.includes("function watchPanelHostComeBack()"), "旧的恢复轮询链必须已移除");
+    assert.ok(!panelHtml.includes("PANEL_RESTART_POLL_MS"), "旧的轮询节奏常量必须已移除");
+    assert.ok(exec.includes('next.searchParams.set("startup", "restart")'), "带 startup=restart 跳转，新页面据此接力开屏并播入场动画");
+    assert.ok(exec.includes("location.assign(next.href)"), "assign 走 navigate 路径，bootstrap 的 navigation.type 门控才放行");
+    assert.ok(exec.includes("panelRestarting = true"), "跳转前置位，防最后一次轮询 tick 误报「Relay 未运行」");
   });
 
   it("panelRestarting 同时压住徽标误报与按钮重新启用", () => {
@@ -2985,20 +2984,24 @@ describe("panel.html 面板重启状态机契约", () => {
 
   it("面板重启请求用裸 fetch，区分连接掐断与服务端拒绝", () => {
     const execStart = panelHtml.indexOf("async function executeRestartRelay()");
-    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    const exec = panelHtml.slice(execStart, panelHtml.indexOf("if (stopConfirmBtn)", execStart));
     assert.ok(exec.length > 500, "未真正取到 executeRestartRelay 函数体，后续断言会全部落空");
     assert.ok(exec.includes('fetch(API_BASE + "/api/panel-host/restart"'),
       "api() 把「响应被退出掐断」和「403/409/500 明确拒绝」都抛成同一种 Error");
     assert.ok(!exec.includes('api("POST", "/api/panel-host/restart"'), "这个端点只能走裸 fetch：api() 无法区分连接掐断与明确拒绝");
-    assert.ok(exec.includes("restartStarted = true;"), "连接中断按「重启已开始」处理");
+    assert.ok(exec.includes("panelRestartRefused"), "panel 拒绝走 panelRestartRefused 记录，连接中断按「重启已开始」处理");
     assert.ok(exec.includes('api("POST", "/api/relay/restart")'), "relay 仍是第一段，失败即终止");
+    // 动画并行化：relay/panel 重启不再 await 串行，与动画并行触发
+    assert.ok(exec.includes("const relayPromise = api("), "relay 重启不 await，与动画并行");
+    assert.ok(exec.includes("const panelPromise = fetch("), "panel 重启不 await，与动画并行");
+    assert.ok(exec.includes("Promise.allSettled([panelPromise])"), "动画定格后只等 panel 应答（relay 不等——detached 进程独立存活）");
   });
 
   it("重启窗口复播开屏：确认即盖屏，失败与超时显式收回", () => {
     assert.ok(panelHtml.includes("window.panelStartupBegin"), "开屏复播入口由 head 内联脚本暴露");
     assert.ok(panelHtml.includes("function panelStartupPlay(replayPulse)"), "开屏动画必须是可重复调用的函数，且接受「这一次要不要播脉冲」");
     const execStart = panelHtml.indexOf("async function executeRestartRelay()");
-    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    const exec = panelHtml.slice(execStart, panelHtml.indexOf("if (stopConfirmBtn)", execStart));
     assert.ok(exec.includes("playStartupSplash()"), "确认重启后立刻复播开屏盖住页面");
     // 复播必须显式要求播脉冲：只看页面级标记的话，用户停在上次重启恢复页上再点
     // 重启，这一遍开屏会被静默吞成定格（整条链一帧动画都没有）。
@@ -3006,10 +3009,14 @@ describe("panel.html 面板重启状态机契约", () => {
       "用户点重启触发的复播显式传 true，不依赖页面级标记");
     assert.equal(exec.split("dropStartupSplash()").length - 1, 2,
       "relay 换新失败与面板换新被拒两条失败路径都要收回开屏");
-    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
-    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
-    assert.ok(recovery.includes("dropStartupSplash()"), "恢复超时路径也要收回开屏");
-    assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
+    // 新页面 restart 路径的 splash 兜底放宽到 25s：提前跳转后新 panel 还没接管，
+    // splash 需盖住 panel 切换 + 首刷全程。ready 仍在数据就绪后正常提前触发。
+    assert.ok(panelHtml.includes("window.panelStartupBegin(25000)"),
+      "restart 路径的 splash 兜底时限必须放宽到盖住 panel 切换全程");
+    // init 在 restart 恢复页先等新 panel 应答，再开始正常数据加载——否则 firstStatus
+    // 失败也 resolve，splash 会提前淡出到还没活过来的面板。
+    assert.ok(panelHtml.includes("window.panelStartupRestart") && panelHtml.includes("waitDeadline"),
+      "init 必须先等新 panel 接管再 startStatusPolling");
   });
 
   it("launcher 启动固定落看板页，刷新仍恢复上次 tab", () => {
