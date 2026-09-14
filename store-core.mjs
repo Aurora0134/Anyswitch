@@ -177,16 +177,32 @@ export function classifyDiscovery({ rawIds, sanitizedIds }) {
   return { complete: true, canPrune: true, reason: null };
 }
 
+// Copy a discovered entry with its manual-backfill flag removed. Every other
+// field survives untouched — only the "how did this id get here" marker goes,
+// because once upstream reports the id there is nothing left to mark.
+function withManualCleared(entry) {
+  const copy = structuredClone(entry);
+  if (copy && typeof copy === "object" && !Array.isArray(copy)) delete copy.manual;
+  return copy;
+}
+
 export function mergeModelIds({ existing, upstreamIds, canPrune, makeEntry }) {
   const source = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
   const upstream = Array.isArray(upstreamIds) ? upstreamIds : [];
   const upstreamSet = new Set(upstream);
   const merged = {};
   for (const [modelId, entry] of Object.entries(source)) {
+    // Upstream reported this id, so it is an ordinary probe-discovered model
+    // from now on: any earlier manual backfill is superseded and its flag is
+    // dropped (the panel badge disappears with it). Reporting an id is a
+    // separate fact from whether the listing is complete enough to prune by —
+    // see how planStoreRefresh adopts metadata and how planDiscoveredRefresh
+    // only treats "empty" as "reported nothing" — so this clears on capped or
+    // dropped listings too.
+    if (upstreamSet.has(modelId)) merged[modelId] = withManualCleared(entry);
     // Manually backfilled models (manual === true) are exempt from pruning:
     // a complete upstream /v1/models response that omits them reflects an
     // upstream reporting gap, not a real removal.
-    if (upstreamSet.has(modelId)) merged[modelId] = structuredClone(entry);
     else if (!canPrune || (entry && typeof entry === "object" && entry.manual === true)) merged[modelId] = structuredClone(entry);
   }
   for (const modelId of upstream) {
@@ -270,8 +286,10 @@ export function materializeModels({ discovered, modelFilter, configModels }) {
  * computeMigrationSeed when the entry lacks either; ③ reject the whole batch
  * when any cleaned id already exists in discovered; ④ merge each new id into
  * discovered as `{ displayName: id, manual: true }` (the manual flag exempts
- * it from refresh pruning) and append it to modelFilter (deduped, order
- * preserved); ⑤ rematerialize models via materializeModels.
+ * it from refresh pruning until a later refresh finds upstream reporting the
+ * id, at which point mergeModelIds drops the flag) and append it to
+ * modelFilter (deduped, order preserved); ⑤ rematerialize models via
+ * materializeModels.
  *
  * @param {object} entry provider store entry (may lack discovered/modelFilter)
  * @param {string[]} modelIds raw model ids to backfill
