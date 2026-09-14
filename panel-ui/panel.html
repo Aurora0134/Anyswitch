@@ -1113,6 +1113,11 @@
     background: var(--surface-sunken); word-break: break-all;
   }
   .store-list-meta { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+  /* 渠道列表行尾指示：可用性（灯+百分比）与第二行空位的 TTFT 均值。
+     不用徽标（无边框无底色），无痕嵌入行尾 */
+  .store-avail { display: inline-flex; align-items: center; gap: 5px; }
+  .store-list-line2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .store-ttft { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); flex-shrink: 0; }
   .store-detail-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 12.5px; margin-bottom: 12px; }
   .store-detail-grid dt { color: var(--text-3); white-space: nowrap; }
   .store-detail-grid dd { margin: 0; color: var(--text); font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
@@ -10356,6 +10361,9 @@ async function api(method, path, body) {
   // 池行合并展示、池详情成员 tab、组建/解除号池，数据由 getState 的 pools 下发。
   // ══════════════════════════════════════════════════════════════════
   let storeState = null;          // GET /panel/api/store/state 最近一次结果
+  // 渠道列表行右侧可用性信号灯的数据：行 id（渠道/号池）→ { rate, status, nodes }，
+  // 随 refreshStoreState 拉取（口径见 buildStoreAvailability）
+  let storeAvailability = new Map();
   // 「高光即选中」（与 skills 同范式）：选中集合（渠道 id 或号池 id，同命名空间不撞）
   // = 所有高亮行 = 一切操作的作用对象；焦点是集合内最后加入的一员，驱动右侧详情卡。
   let storeSelection = new Set();
@@ -10458,7 +10466,11 @@ async function api(method, path, body) {
   }
   async function doRefreshStoreState() {
     try {
-      const res = await api("GET", "/api/store/state");
+      const [res, stab] = await Promise.all([
+        api("GET", "/api/store/state"),
+        api("GET", "/api/model-stability").catch(() => null), // 稳定性拉取失败不挡渠道配置加载
+      ]);
+      if (stab) storeAvailability = buildStoreAvailability(stab.models);
       const firstLoad = storeState === null;
       storeState = res;
       if (firstLoad && !storeSelection.size) {
@@ -10553,6 +10565,51 @@ async function api(method, path, body) {
     return rows.map(({ row }) => row);
   }
 
+  // 渠道列表右侧可用性（与看板「状态检测」同口径）：近 8h 滚动窗、尝试级
+  // successRate；每行可用性 = 该行名下有流量的节点（渠道×模型行）successRate
+  // 的简单平均；TTFT 同取节点简单平均，ttftMs 为 null（无样本）的节点不参与。
+  // 号池行已由后端把成员渠道合并为 provider=池 id 的行，故渠道与号池都按行 id
+  // 直接查。灯色阈值同 statusOf：≥85 绿 / ≥70 黄 / 其余红；窗口内无流量的节点
+  // 不参与平均，整行无流量时该行无记录（行尾什么都不渲染）。
+  function buildStoreAvailability(models) {
+    const map = new Map();
+    for (const m of models || []) {
+      if (!m || typeof m.provider !== "string" || !(Number(m.total) > 0)) continue;
+      let agg = map.get(m.provider);
+      if (!agg) { agg = { sum: 0, nodes: 0, ttftSum: 0, ttftNodes: 0 }; map.set(m.provider, agg); }
+      agg.sum += Number(m.successRate) || 0;
+      agg.nodes += 1;
+      if (typeof m.ttftMs === "number" && Number.isFinite(m.ttftMs)) {
+        agg.ttftSum += m.ttftMs;
+        agg.ttftNodes += 1;
+      }
+    }
+    for (const [id, agg] of map) {
+      const rate = agg.sum / agg.nodes;
+      map.set(id, {
+        rate,
+        status: rate >= 85 ? "green" : rate >= 70 ? "yellow" : "red",
+        nodes: agg.nodes,
+        ttftMs: agg.ttftNodes > 0 ? Math.round(agg.ttftSum / agg.ttftNodes) : null,
+        ttftNodes: agg.ttftNodes,
+      });
+    }
+    return map;
+  }
+
+  // 行尾两段指示的 HTML：avail = 可用性（灯+百分比，行1 右侧）；
+  // ttft = TTFT 均值（行2 右侧空位，无样本则空）。窗口内无流量时两段皆空。
+  function storeAvailabilityHtml(id) {
+    const a = storeAvailability.get(id);
+    if (!a) return { avail: "", ttft: "" };
+    const cls = a.status === "green" ? "g" : a.status === "yellow" ? "y" : "r";
+    const avail = `<span class="store-avail" title="近 8h 可用性 · ${a.nodes} 个节点平均"><i class="lamp lamp-${a.status}"></i> <span class="ms-rate ${cls}">${a.rate.toFixed(1)}%</span></span>`;
+    const ttft = a.ttftMs == null
+      ? ""
+      : `<span class="store-ttft" title="近 8h TTFT 均值 · ${a.ttftNodes} 个节点平均">平均 TTFT ${fmtLatency(a.ttftMs)}</span>`;
+    return { avail, ttft };
+  }
+
   function renderStoreList() {
     const visible = storeVisibleRows();
     $("storeListBadge").textContent = String(storeRows().length);
@@ -10566,32 +10623,38 @@ async function api(method, path, body) {
       // 仅非过滤态可拖拽重排：过滤态行序 ≠ providers 顺序，无法映射新顺序
       const drag = storeListDraggable() ? ` draggable="true"` : "";
       if (row.kind === "pool") {
-        const union = new Set();
-        for (const m of row.members) for (const mid of Object.keys(m.models || {})) union.add(mid);
         const noCred = row.members.some((m) => !m.hasCredential);
+        const { avail, ttft } = storeAvailabilityHtml(row.id);
         return `
       <div class="skills-list-row${selected}" data-store="${escapeHtml(row.id)}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(row.displayName)} <span class="badge badge-pool">号池</span></span>
           <span class="store-list-meta">
             ${noCred ? `<span class="badge badge-warn">有成员缺凭据</span>` : ""}
-            <span class="badge badge-neutral">${row.members.length} 渠道 · 并集 ${union.size}</span>
+            ${avail}
           </span>
         </div>
-        <div class="skills-list-desc">${escapeHtml(row.id)}</div>
+        <div class="store-list-line2">
+          <span class="skills-list-desc">${escapeHtml(row.id)}</span>
+          ${ttft}
+        </div>
       </div>`;
       }
       const p = row.p;
+      const { avail, ttft } = storeAvailabilityHtml(p.id);
       return `
       <div class="skills-list-row${selected}" data-store="${escapeHtml(p.id)}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.displayName)}</span>
           <span class="store-list-meta">
             ${p.hasCredential ? "" : `<span class="badge badge-warn">无凭据</span>`}
-            <span class="badge badge-neutral">有效 ${p.modelCount}/发现 ${p.discoveredCount}</span>
+            ${avail}
           </span>
         </div>
-        <div class="skills-list-desc">${escapeHtml(p.id)}</div>
+        <div class="store-list-line2">
+          <span class="skills-list-desc">${escapeHtml(p.id)}</span>
+          ${ttft}
+        </div>
       </div>`;
     }).join("");
   }
