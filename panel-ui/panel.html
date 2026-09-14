@@ -3935,7 +3935,10 @@ try {
 // 单次开屏动画：boot 路径解析到此处立即执行一次；看板重启复播由主脚本在
 // panelStartupBegin 之后再次调用。每次播放先清掉上一轮的节点连线与定格态
 // （settled 时 CSS 已切到 img），否则会叠在定格画面上放不出动画。
-function panelStartupPlay() {
+// replayPulse 由调用方显式给定：要不要播脉冲是「这一次播放」的属性，不是页面
+// 的属性。用户停在重启恢复页上再点一次重启，这一遍开屏照样该完整播一遍——只看
+// 页面级标记会把第二次重启吞成定格。
+function panelStartupPlay(replayPulse) {
   const startup = window.panelStartupController;
   if (!startup) return;
   const root = document.documentElement;
@@ -4093,10 +4096,13 @@ function panelStartupPlay() {
   }, { once: true });
   logo.src = "/panel/assets/logo.png";
   motion.addEventListener("change", onMotionChange);
-  // 重启恢复（panelStartupRestart）直接定格：脉冲动画用户在旧页面已看过一遍，
-  // 新页面重播就是「多播放了一次」；开屏层此处只承担盖首刷 + 淡出的职责。
-  if (reduce || window.panelStartupRestart) settle();
-  else { render(0); raf = requestAnimationFrame(frame); }
+  // 减少动态效果一律定格。其余看这一次播放的来源：用户点重启触发的复播显式传
+  // true——那一次必完整播一遍，不管本页是不是重启恢复来的；首绘自动调用未表态，
+  // 才回落到「本页来自重启恢复就定格」——那次脉冲旧页面刚播过，重播即多播一次，
+  // 开屏层此处只承担盖首刷 + 淡出。
+  const pulse = reduce ? false : replayPulse ?? !window.panelStartupRestart;
+  if (pulse) { render(0); raf = requestAnimationFrame(frame); }
+  else settle();
 }
 
 if (window.panelStartupController) panelStartupPlay();
@@ -8063,9 +8069,11 @@ async function api(method, path, body) {
     // 重启窗口复播开屏：确认重启即整屏盖住，动画停在定格画面直到换新进程接管
     // 触发 location.reload() 收尾；relay 换新失败、面板换新被拒、恢复超时三类
     // 失败路径显式收回，把页面还给用户。兜底时限取恢复超时外加余量。
+    // 显式传 true：这是用户主动点重启触发的播放，无论本页是不是上次重启恢复来的，
+    // 都该完整播一遍脉冲。不传的话，停在上次恢复页上再点重启会被静默吞成定格。
     const playStartupSplash = () => {
       window.panelStartupBegin?.(PANEL_RESTART_RECOVERY_TIMEOUT_MS + 5_000);
-      window.panelStartupPlay?.();
+      window.panelStartupPlay?.(true);
     };
     const dropStartupSplash = () => window.panelStartupController?.release?.();
 

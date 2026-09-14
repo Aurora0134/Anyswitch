@@ -404,4 +404,52 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.frames.size, 0);
     assert.equal(p.timers.size, 0);
   });
+
+  it("plays the pulse for a restart the user starts from the restart-recovery page", () => {
+    // 回归：用户点完重启跳到 ?startup=restart 的新页面，此后就常驻在这一页上。
+    // 在这页上再点重启，如果只看「本页来自重启恢复」这个页面级标记，这一遍开屏
+    // 会被静默吞成定格——整条重启链一帧动画都没有，只剩静止图标挂到淡出。
+    const p = page("http://127.0.0.1:47820/panel?startup=restart");
+    p.start();
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled", "首绘接力定格");
+    p.context.panelStartupBegin(25_000);
+    p.context.panelStartupPlay(true); // playStartupSplash 的调用形态：显式要求播脉冲
+    assert.ok(p.frames.size > 0, "用户主动触发的复播必须播脉冲，不受页面级标记压制");
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), null, "复播从定格态复位，不被冻结");
+    p.advance(1_100);
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled", "播完照常定格等接管");
+  });
+
+  it("plays the pulse on every page the restart can be started from", () => {
+    for (const [label, url] of [
+      ["launcher 首开页", "http://127.0.0.1:47820/panel?startup=1"],
+      ["重启恢复页", "http://127.0.0.1:47820/panel?startup=restart"],
+      ["手动打开页", "http://127.0.0.1:47820/panel"],
+    ]) {
+      const p = page(url);
+      p.start();
+      p.context.panelStartupBegin(25_000);
+      p.context.panelStartupPlay(true);
+      assert.ok(p.frames.size > 0, `${label} 上点重启都应播脉冲`);
+    }
+  });
+
+  it("keeps reduced motion settled even when the restart path explicitly asks for the pulse", () => {
+    const p = page("http://127.0.0.1:47820/panel", { reduce: true });
+    p.start();
+    p.context.panelStartupBegin(25_000);
+    p.context.panelStartupPlay(true);
+    assert.equal(p.frames.size, 0, "减少动态效果优先于复播请求，不因显式传参而破例");
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
+  });
+
+  it("keeps the first paint settled only on the restart-recovery page, not on a plain boot", () => {
+    // 首绘自动调用不带参数：只有「本页来自重启恢复」才定格，普通首开照旧播脉冲。
+    const plain = page("http://127.0.0.1:47820/panel?startup=1");
+    plain.start();
+    assert.ok(plain.frames.size > 0, "launcher 首开首绘仍播脉冲");
+    const restarted = page("http://127.0.0.1:47820/panel?startup=restart");
+    restarted.start();
+    assert.equal(restarted.frames.size, 0, "重启恢复首绘定格接力，不重播旧页面刚播过的脉冲");
+  });
 });

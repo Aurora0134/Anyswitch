@@ -2996,10 +2996,14 @@ describe("panel.html 面板重启状态机契约", () => {
 
   it("重启窗口复播开屏：确认即盖屏，失败与超时显式收回", () => {
     assert.ok(panelHtml.includes("window.panelStartupBegin"), "开屏复播入口由 head 内联脚本暴露");
-    assert.ok(panelHtml.includes("function panelStartupPlay()"), "开屏动画必须是可重复调用的函数");
+    assert.ok(panelHtml.includes("function panelStartupPlay(replayPulse)"), "开屏动画必须是可重复调用的函数，且接受「这一次要不要播脉冲」");
     const execStart = panelHtml.indexOf("async function executeRestartRelay()");
     const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
     assert.ok(exec.includes("playStartupSplash()"), "确认重启后立刻复播开屏盖住页面");
+    // 复播必须显式要求播脉冲：只看页面级标记的话，用户停在上次重启恢复页上再点
+    // 重启，这一遍开屏会被静默吞成定格（整条链一帧动画都没有）。
+    assert.ok(panelHtml.includes("panelStartupPlay?.(true)"),
+      "用户点重启触发的复播显式传 true，不依赖页面级标记");
     assert.equal(exec.split("dropStartupSplash()").length - 1, 2,
       "relay 换新失败与面板换新被拒两条失败路径都要收回开屏");
     const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
