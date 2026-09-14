@@ -2108,6 +2108,33 @@ export function createAgentMetricsCollector(options = {}) {
       for (const [instId, entry] of instMap) {
         const pidMatch = instId.match(pidIdRe);
         const isCodexSessionRow = bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX);
+        // 冷缓存收敛：启动器注入的 "<cwd>-<launcher pid>" 在扫描缓存没赶上
+        // 会话启动（或看板关闭期间缓存不刷新——请求路径只同步读缓存、从
+        // 不触发扫描）时折不进规范形，落成自定义 id 行；缓存跟上后后续请
+        // 求折回 "<agentId>-<pid>"，两行并排——单会话看板显示两个实例，
+        // 临时行要等 10 分钟空闲 TTL 才消失（pi 现场 2026-09-14）。这里
+        // 拿本读的新快照重试折叠：目标行不存在就把整行改名归位（在途镜
+        // 像写的是同一 state 对象，随之归位，不受改名影响）；目标行已存
+        // 在且本行无在途请求就清行（这些计数随空闲 TTL 本来也要丢，
+        // journal 已逐请求落账不受影响）；有在途请求留到其收尾后的下一
+        // 轮读再收敛。
+        if (pidMatch === null && !isCodexSessionRow) {
+          const refold = normalizeInstanceId(bucket, instId, procCounts);
+          if (refold !== null && refold.id !== instId) {
+            const target = instMap.get(refold.id);
+            if (target === undefined) {
+              instMap.delete(instId);
+              if (refold.label !== null) entry.label = refold.label;
+              instMap.set(refold.id, entry);
+              continue;
+            }
+            if (target.label === null && refold.label !== null) target.label = refold.label;
+            if (entry.state.activeRequests === 0) {
+              instMap.delete(instId);
+              continue;
+            }
+          }
+        }
         let evict = false;
         if (pidMatch !== null) {
           evict = !livePids.has(Number(pidMatch[1]));
