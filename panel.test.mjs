@@ -1246,6 +1246,50 @@ describe("panel.html sessions tab", () => {
     assert.ok(body.includes('["tabSessions", sessions]'), "aria-selected sync covers tabSessions");
   });
 
+  it("plays the view-enter animation on active switches only, suppressed on restore", () => {
+    assert.ok(panelHtml.includes("@keyframes viewEnter"), "viewEnter keyframes defined");
+    assert.ok(
+      panelHtml.includes(".view-enter { animation: viewEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }"),
+      "view-enter class plays the 300ms easeInOut entrance aligned with the board variant",
+    );
+    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found");
+    assert.ok(m[1].includes('classList.add("view-enter")'), "switchView plays the entrance on the entered view");
+    assert.ok(m[1].includes('playBoardEnter(document.querySelector(".telemetry-view"))'), "board view routed to the variant entrance");
+    assert.ok(m[1].includes("suppressViewEnter"), "switchView honors the suppress flag");
+    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found");
+    assert.ok(r[1].includes("suppressViewEnter = true"), "restoreView suppresses the entrance animation");
+    // 置位必须挂在有效分支条件上：saved 为 "board"/无效值时不调 switchView，
+    // 无条件置位会让标志残留、吞掉下一次主动切换的动画
+    assert.ok(
+      r[1].includes('if (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") suppressViewEnter = true;'),
+      "suppress flag is only set when a switchView call follows",
+    );
+  });
+
+  it("ports the staggered mount entrance for the board view", () => {
+    assert.ok(panelHtml.includes("@keyframes boardEnter { from { opacity: 0; transform: translateY(10px); } }"),
+      "boardEnter keyframes: fade + 10px rise");
+    assert.ok(panelHtml.includes("@keyframes boardEnterScale { from { opacity: 0; transform: scale(0.98); } }"),
+      "boardEnterScale keyframes for the hero card");
+    assert.ok(
+      panelHtml.includes(".board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards"),
+      "cards stagger with 300ms easeInOut and backwards fill",
+    );
+    const s = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(s, "switchView found");
+    assert.ok(s[1].includes("} else if (board) {"), "board branch split from the generic entrance");
+    const m = panelHtml.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "playBoardEnter found");
+    assert.ok(m[1].includes('classList.add("board-enter")'), "container entrance plays");
+    assert.ok(m[1].includes('querySelectorAll(".panel-card")'), "stagger covers the board panel cards");
+    assert.ok(m[1].includes("!el.hidden"), "hidden cards skipped from the stagger");
+    assert.ok(m[1].includes("150 + (i - 1) * 40"), "stagger delay formula 150ms + i*40ms");
+    assert.ok(m[1].includes('hero ? "100ms"'), "hero card delay 100ms");
+    assert.ok(m[1].includes('hero ? "board-card-enter-scale" : "board-card-enter"'), "hero card uses the scale variant");
+  });
+
   it("restores the sessions tab from localStorage", () => {
     const m = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "restoreView found");
