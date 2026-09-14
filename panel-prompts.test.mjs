@@ -66,6 +66,7 @@ function mockService(overrides = {}) {
     updatePreset: ({ id, title }) => ({ preset: { id, title } }),
     deletePreset: () => ({}),
     setPresetEnabled: ({ id, enabled }) => ({ id, enabled }),
+    reorderPresets: (order) => ({ presetOrder: order }),
     setOverride: ({ endpointId, presetId, off }) => ({ endpointId, presetId, off }),
     ...overrides,
   };
@@ -190,6 +191,40 @@ describe("panel router prompts routes", () => {
     }
   });
 
+  it("POST /panel/api/prompts/preset/reorder forwards the order array and validates it", async () => {
+    let got = null;
+    const router = promptsRouter(mockService({
+      reorderPresets: (order) => {
+        got = order;
+        if (order.includes("ghost")) {
+          const error = new Error("预设不存在: ghost");
+          error.statusCode = 400;
+          throw error;
+        }
+        return { presetOrder: order };
+      },
+    }));
+    const { req, res, json } = fakeReqRes("/panel/api/prompts/preset/reorder", "POST", {
+      order: ["bbbbbbbbbbbb", "aaaaaaaaaaaa"],
+    });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(got, ["bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
+    assert.equal(json().ok, true);
+    assert.deepEqual(json().presetOrder, ["bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
+
+    // 非数组直接 400，业务校验（排列完整性）由数据层抛 400 冒泡上来
+    for (const body of [{}, { order: "aaaaaaaaaaaa" }, { order: 42 }]) {
+      const bad = fakeReqRes("/panel/api/prompts/preset/reorder", "POST", body);
+      await router.handle(bad.req, bad.res);
+      assert.equal(bad.res.statusCode, 400, JSON.stringify(body));
+      assert.equal(bad.json().ok, false);
+    }
+    const partial = fakeReqRes("/panel/api/prompts/preset/reorder", "POST", { order: ["ghost"] });
+    await router.handle(partial.req, partial.res);
+    assert.equal(partial.res.statusCode, 400);
+  });
+
   it("POST /panel/api/prompts/override forwards endpointId/presetId/off", async () => {
     let got = null;
     const router = promptsRouter(mockService({
@@ -230,6 +265,7 @@ describe("panel router prompts routes", () => {
       ["/panel/api/prompts/preset/create", { title: "A", content: "x" }],
       ["/panel/api/prompts/preset/delete", { id: "x" }],
       ["/panel/api/prompts/preset/enable", { id: "x", enabled: true }],
+      ["/panel/api/prompts/preset/reorder", { order: ["x"] }],
       ["/panel/api/prompts/override", { endpointId: "claude", presetId: "x", off: true }],
     ]) {
       const { req, res, json } = fakeReqRes(path, "POST", body);
@@ -306,6 +342,22 @@ describe("createPromptsPanelService facade", () => {
     assert.equal(sync.claude.ok, false);
     assert.match(sync.claude.error, /.+/);
     assert.deepEqual(sync.kimi, { ok: true });
+  });
+
+  it("reordering presets changes the injected block order on every endpoint", () => {
+    const { facade, homeDir } = makeFacade();
+    const a = facade.createPreset({ title: "A", content: "正文A" }).preset;
+    const b = facade.createPreset({ title: "B", content: "正文B" }).preset;
+    facade.setMaster(true);
+    const claude = () => readFileSync(join(homeDir, ".claude", "CLAUDE.md"), "utf8");
+    assert.ok(claude().indexOf("正文A") < claude().indexOf("正文B"), "creation order first");
+
+    facade.reorderPresets([b.id, a.id]);
+    assert.deepEqual(facade.getState().presetOrder, [b.id, a.id]);
+    assert.deepEqual(facade.getState().presets.map((p) => p.id), [b.id, a.id]);
+    // The reorder is a real mutation: it re-syncs, so the managed block follows.
+    assert.ok(claude().indexOf("正文B") < claude().indexOf("正文A"), "block order follows presetOrder");
+    assert.deepEqual(facade.getState().sync.claude, { ok: true });
   });
 
   it("rejects overrides for unknown endpoints", () => {

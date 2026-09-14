@@ -1935,6 +1935,12 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
+  // 预设列表复刻了同一套拖拽机制，两个模块的源码在 panel.html 里前后相邻；
+  // 本组断言只看渠道那段，否则预设段会替渠道段满足断言，渠道机制静默失效也测不出来。
+  const dragStart = panelHtml.indexOf("// ── 渠道列表拖拽重排");
+  const dragEnd = panelHtml.indexOf("// ── 卡片 C：渠道详情", dragStart);
+  assert.ok(dragStart > 0 && dragEnd > dragStart, "channel drag section found in panel.html");
+  const dragHtml = panelHtml.slice(dragStart, dragEnd);
 
   it("renderStoreList 渠道行/池行在非过滤态带 draggable，过滤态不带", () => {
     const m = panelHtml.match(/function renderStoreList\(\) \{([\s\S]*?)\n  \}/);
@@ -1965,13 +1971,13 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
   });
 
   it("reduced-motion 时跳过 FLIP（matchMedia 短路）", () => {
-    const m = panelHtml.match(/function storeDragReducedMotion\(\) \{([\s\S]*?)\}/);
+    const m = dragHtml.match(/function storeDragReducedMotion\(\) \{([\s\S]*?)\}/);
     assert.ok(m, "storeDragReducedMotion helper exists");
     assert.ok(m[1].includes('matchMedia("(prefers-reduced-motion: reduce)")'), "matchMedia reduce check");
   });
 
   it("dragover 不挪行不做行 FLIP：列表静止，只更新指示线槽位", () => {
-    const m = panelHtml.match(/addEventListener\("dragover", \(e\) => \{([\s\S]*?)addEventListener\("drop"/);
+    const m = dragHtml.match(/addEventListener\("dragover", \(e\) => \{([\s\S]*?)addEventListener\("drop"/);
     assert.ok(m, "dragover handler found");
     assert.ok(!m[1].includes("insertBefore"), "dragover must not move rows");
     assert.ok(!m[1].includes("translateY(${dy}"), "dragover must not FLIP rows");
@@ -1980,7 +1986,7 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
   });
 
   it("drop 一次性重排：DOM 应用新顺序 + 全列表 FLIP（260ms store-drag-ease）", () => {
-    const m = panelHtml.match(/addEventListener\("drop", \(e\) => \{([\s\S]*?)addEventListener\("dragend"/);
+    const m = dragHtml.match(/addEventListener\("drop", \(e\) => \{([\s\S]*?)addEventListener\("dragend"/);
     assert.ok(m, "drop handler found");
     assert.ok(m[1].includes("insertBefore"), "drop applies the new order in DOM");
     assert.ok(m[1].includes("260ms var(--store-drag-ease)"), "drop FLIP uses 260ms skin easing");
@@ -1988,26 +1994,103 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
   });
 
   it("dragend 只清理态，不再 renderStoreList 恢复（拖动中 DOM 未变）", () => {
-    const m = panelHtml.match(/addEventListener\("dragend", \(\) => \{([\s\S]*?)\n    \}\);/);
+    const m = dragHtml.match(/addEventListener\("dragend", \(\) => \{([\s\S]*?)\n    \}\);/);
     assert.ok(m, "dragend handler found");
     assert.ok(!m[1].includes("renderStoreList"), "dragend must not re-render");
     assert.ok(m[1].includes("suppressStoreClick"), "click suppression kept");
   });
 
   it("空位占位 + 加重指示线（绝对定位/3px/槽间瞬移/左端圆帽）样式齐备", () => {
-    const drag = panelHtml.match(/\.store-row-dragging \{([\s\S]*?)\}/);
+    const drag = panelHtml.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
     assert.ok(drag, "dragging row style exists");
     assert.ok(drag[1].includes("dashed var(--store-drag-accent)"), "placeholder uses dashed accent inset");
-    const ind = panelHtml.match(/\.store-drop-indicator \{([\s\S]*?)\}/);
+    const ind = panelHtml.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
     assert.ok(ind, "drop indicator style exists");
     assert.ok(ind[1].includes("position: absolute"), "indicator absolutely positioned");
     assert.ok(ind[1].includes("3px"), "indicator is 3px heavy");
     assert.ok(!ind[1].includes("transition"), "indicator jumps between slots instantly (no glide transition)");
     assert.ok(panelHtml.includes(".store-drop-indicator::before"), "left round cap exists");
     assert.ok(panelHtml.includes(".store-row-landed"), "landed highlight style exists");
-    const bp = panelHtml.match(/:root\[data-style="blueprint"\] \.store-drop-indicator \{([\s\S]*?)\}/);
+    const bp = panelHtml.match(/:root\[data-style="blueprint"\] \.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
     assert.ok(bp, "blueprint overrides drop indicator");
     assert.ok(bp[1].includes("repeating-linear-gradient"), "blueprint indicator is dashed");
+  });
+});
+
+describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 只取预设那段：机制与渠道同款，断言必须落在预设自己的模块上
+  const dragStart = panelHtml.indexOf("// ── 预设列表拖拽重排");
+  const dragEnd = panelHtml.indexOf("// ── 卡片 A：全局设置", dragStart);
+  assert.ok(dragStart > 0 && dragEnd > dragStart, "preset drag section found in panel.html");
+  const dragHtml = panelHtml.slice(dragStart, dragEnd);
+  const renderFn = panelHtml.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
+
+  it("预设行在非过滤态带 draggable，过滤态不带", () => {
+    assert.ok(renderFn, "renderPresetsList found");
+    assert.ok(renderFn[1].includes('draggable="true"'), "rows render the draggable attribute");
+    assert.ok(renderFn[1].includes("presetsListDraggable"), "draggable gated on the filter input state");
+    const gate = panelHtml.match(/function presetsListDraggable\(\) \{([\s\S]*?)\}/);
+    assert.ok(gate, "presetsListDraggable helper exists");
+    assert.ok(gate[1].includes('$("presetsFilterInput").value.trim()'), "gate reads the presets filter input");
+  });
+
+  it("拖拽逻辑挂在 presetsList 上并在 init 时接线", () => {
+    assert.ok(dragHtml.includes('$("presetsList")'), "handlers bind to #presetsList");
+    assert.ok(panelHtml.includes("initPresetsListDrag();"), "drag module is initialised");
+    for (const evt of ["dragstart", "dragover", "drop", "dragend"]) {
+      assert.ok(dragHtml.includes(`addEventListener("${evt}"`), `${evt} handler exists`);
+    }
+  });
+
+  it("dragover 不挪行不做行 FLIP：列表静止，只更新指示线槽位并边缘自动滚动", () => {
+    const m = dragHtml.match(/addEventListener\("dragover", \(e\) => \{([\s\S]*?)addEventListener\("drop"/);
+    assert.ok(m, "dragover handler found");
+    assert.ok(!m[1].includes("insertBefore"), "dragover must not move rows");
+    assert.ok(!m[1].includes("translateY(${dy}"), "dragover must not FLIP rows");
+    assert.ok(m[1].includes("preset-drop-indicator"), "dragover updates the indicator");
+    assert.ok(m[1].includes("scrollTop"), "dragover auto-scrolls near the list's top/bottom edge");
+  });
+
+  it("drop 一次性重排：DOM 应用新顺序 + 全列表 FLIP + 提交 /api/prompts/preset/reorder", () => {
+    const m = dragHtml.match(/addEventListener\("drop", \(e\) => \{([\s\S]*?)addEventListener\("dragend"/);
+    assert.ok(m, "drop handler found");
+    assert.ok(m[1].includes("insertBefore"), "drop applies the new order in DOM");
+    assert.ok(m[1].includes("260ms var(--store-drag-ease)"), "drop FLIP uses 260ms skin easing");
+    assert.ok(m[1].includes("preset-row-landed"), "landed row pulses");
+    assert.ok(m[1].includes('/api/prompts/preset/reorder", { order: nextIds }'), "drop posts the new order");
+    assert.ok(m[1].includes("refreshPresetsState()"), "state refreshes after the order lands");
+    assert.ok(m[1].includes("renderPresetsList()"), "a failed save restores the previous order");
+  });
+
+  it("dragend 只清理态不重渲，并置位 suppressPresetClick 吞掉合成点击", () => {
+    const m = dragHtml.match(/addEventListener\("dragend", \(\) => \{([\s\S]*?)\n    \}\);/);
+    assert.ok(m, "dragend handler found");
+    assert.ok(!m[1].includes("renderPresetsList"), "dragend must not re-render");
+    assert.ok(m[1].includes("suppressPresetClick"), "click suppression set");
+    const click = panelHtml.match(/\$\("presetsList"\)\.addEventListener\("click", \(e\) => \{([\s\S]*?)\n    \}\);/);
+    assert.ok(click, "presetsList click delegate found");
+    assert.ok(click[1].includes("suppressPresetClick"), "click delegate swallows the click after a drag");
+  });
+
+  it("reduced-motion 时跳过 FLIP（matchMedia 短路）", () => {
+    const m = dragHtml.match(/function presetDragReducedMotion\(\) \{([\s\S]*?)\}/);
+    assert.ok(m, "presetDragReducedMotion helper exists");
+    assert.ok(m[1].includes('matchMedia("(prefers-reduced-motion: reduce)")'), "matchMedia reduce check");
+  });
+
+  it("预设列表复用同款占位/指示线/落位样式（含 blueprint 虚线覆盖）", () => {
+    const drag = panelHtml.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
+    assert.ok(drag && drag[0].includes(".preset-row-dragging"), "preset rows share the dragging placeholder style");
+    const ind = panelHtml.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
+    assert.ok(ind && ind[0].includes(".preset-drop-indicator"), "preset list shares the drop indicator style");
+    assert.ok(/\.store-drop-indicator::before, \.preset-drop-indicator::before \{/.test(panelHtml), "preset indicator carries the round cap");
+    assert.ok(/\.store-row-landed, \.preset-row-landed \{/.test(panelHtml), "preset rows share the landed pulse");
+    assert.ok(/#storeList, #presetsList \{ position: relative; \}/.test(panelHtml), "preset list is a positioning context for the indicator");
+    assert.ok(/:root\[data-style="blueprint"\] \.preset-drop-indicator/.test(panelHtml), "blueprint overrides the preset indicator");
   });
 });
 

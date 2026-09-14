@@ -54,12 +54,19 @@ function notFound(message) {
 }
 
 function defaultState() {
-  return { enabled: false, presets: [], endpointOverrides: {} };
+  return { enabled: false, presetOrder: [], presets: [], endpointOverrides: {} };
 }
 
 // Coerce persisted JSON into the canonical shape; entries that cannot carry
 // their role (missing id/title/content) are dropped rather than failing the
 // whole read. Off lists are deduped and pruned to live preset ids.
+//
+// `presetOrder` is the display/injection order (the panel's list order and the
+// order presets follow inside every endpoint's managed block). It is normalized
+// against the surviving presets: unknown and duplicate ids drop out, and ids
+// that were never ordered (written by an older build, or created concurrently)
+// are appended. A stored set that carries no order therefore reads back exactly
+// as before — file order — instead of being shuffled by the migration.
 function normalizeState(raw) {
   const state = defaultState();
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return state;
@@ -82,6 +89,11 @@ function normalizeState(raw) {
     }
   }
   const liveIds = new Set(state.presets.map((p) => p.id));
+  const stored = Array.isArray(raw.presetOrder) ? raw.presetOrder : [];
+  state.presetOrder = [...new Set(stored.filter((id) => typeof id === "string" && liveIds.has(id)))];
+  for (const preset of state.presets) {
+    if (!state.presetOrder.includes(preset.id)) state.presetOrder.push(preset.id);
+  }
   if (raw.endpointOverrides && typeof raw.endpointOverrides === "object" && !Array.isArray(raw.endpointOverrides)) {
     for (const [endpointId, value] of Object.entries(raw.endpointOverrides)) {
       if (!value || typeof value !== "object" || !Array.isArray(value.off)) continue;
@@ -261,12 +273,44 @@ export function createPromptsService({ base = process.env } = {}) {
       return { endpointId: ep, presetId: pid, off: offFlag };
     },
 
-    /** Effective preset set for one endpoint, in stored order. */
+    /**
+     * Move one preset to a new position: `order` must be a permutation of the
+     * current preset ids (same set, no duplicates, no missing, no ghosts) —
+     * same contract as the channel reorder, so a stale panel list cannot
+     * half-apply a reorder.
+     */
+    reorderPresets(order) {
+      if (!Array.isArray(order) || order.some((id) => typeof id !== "string" || !id)) {
+        throw badRequest("order 必须是预设 id 数组");
+      }
+      const state = load();
+      if (order.length !== state.presets.length || new Set(order).size !== order.length) {
+        throw badRequest("order 必须是现有预设 id 的完整排列");
+      }
+      const live = new Set(state.presets.map((p) => p.id));
+      for (const id of order) {
+        if (!live.has(id)) throw badRequest(`预设不存在: ${id}`);
+      }
+      const byId = new Map(state.presets.map((p) => [p.id, p]));
+      state.presetOrder = [...order];
+      // The presets array itself follows too: a reader that only walks the list
+      // (getState consumers, hand inspection of prompts.json) must not see a
+      // different order than the one injected.
+      state.presets = state.presetOrder.map((id) => byId.get(id));
+      save(state);
+      return { presetOrder: [...state.presetOrder] };
+    },
+
+    /** Effective preset set for one endpoint, in the panel's order. */
     resolveForEndpoint(endpointId) {
       const state = load();
       if (!state.enabled) return [];
       const off = new Set(state.endpointOverrides[endpointId]?.off ?? []);
-      return state.presets.filter((p) => p.enabled && !off.has(p.id)).map(clone);
+      const byId = new Map(state.presets.map((p) => [p.id, p]));
+      return state.presetOrder
+        .map((id) => byId.get(id))
+        .filter((p) => p && p.enabled && !off.has(p.id))
+        .map(clone);
     },
   };
 }
