@@ -55,10 +55,54 @@ describe("createEffortInjector.inject", () => {
     assert.equal(injector.inject({ providerId: "p", body: off }).injected, null);
   });
 
-  it("honors a client that speaks the Anthropic shape instead", () => {
+  it("forwards the level a client named in the Anthropic shape", () => {
     const { injector } = makeInjector();
-    const result = injector.inject({ providerId: "p", body: bodyFor("glm-5.3"), clientChoseEffort: true });
+    const result = injector.inject({
+      providerId: "p",
+      body: bodyFor("glm-5.3"),
+      clientEffort: { stated: true, level: "xhigh" },
+    });
+    assert.equal(result.body[EFFORT_REQUEST_FIELD], "xhigh");
+    assert.equal(result.injected, "xhigh");
+  });
+
+  it("clips the client's level to the nearest one the model carries", () => {
+    const { injector } = makeInjector();
+    // glm-5.3 offers medium/high/xhigh/max.
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: "max" },
+    }).injected, "max");
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: "light" },
+    }).injected, "medium");
+    // ...but off means off: the field stays off the wire entirely.
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: "off" },
+    }).injected, null);
+    // claude-fable-5 offers only xhigh/max — a high request lands on xhigh.
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("claude-fable-5"), clientEffort: { stated: true, level: "high" },
+    }).injected, "xhigh");
+    assert.equal(injector.inject({
+      providerId: "p", body: bodyFor("claude-fable-5"), clientEffort: { stated: true, level: "xhigh" },
+    }).injected, "xhigh");
+  });
+
+  it("forwards a name the shared ladder does not know, unclipped", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: "ultracode" },
+    });
+    assert.equal(result.body[EFFORT_REQUEST_FIELD], "ultracode");
+  });
+
+  it("adds nothing when the client said no thinking", () => {
+    const { injector } = makeInjector();
+    const result = injector.inject({
+      providerId: "p", body: bodyFor("glm-5.3"), clientEffort: { stated: true, level: null },
+    });
     assert.equal(EFFORT_REQUEST_FIELD in result.body, false);
+    assert.equal(result.injected, null);
   });
 
   it("adds nothing for a model the library calls non-text", () => {

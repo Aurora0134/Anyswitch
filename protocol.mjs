@@ -136,16 +136,39 @@ function convertToolChoice(toolChoice) {
   }
 }
 
-// Anthropic names thinking depth a few ways across versions (Claude Code
-// itself sends a top-level reasoning_effort); the translator below carries none
-// of them upstream, so the injector needs this check against the RAW body to
-// keep its "never override a client's own choice" rule.
-export function clientSpecifiedThinking(rawBody) {
-  if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) return false;
-  if (rawBody.thinking !== undefined) return true;
-  if (rawBody.reasoning_effort !== undefined) return true;
-  if (typeof rawBody.effort === "string" && rawBody.effort.length > 0) return true;
-  return typeof rawBody.output_config?.effort === "string";
+// Anthropic names thinking depth a few ways across versions (Claude Code sends
+// `output_config.effort` with the effort beta, older builds a top-level
+// `reasoning_effort`). The translator below carries none of them upstream
+// verbatim, so the injector is handed what the raw body actually said instead of
+// having to re-read it.
+const UNNAMED_EFFORT = Object.freeze({ stated: false, level: null });
+const EFFORT_SPELLINGS = (rawBody) => [
+  rawBody.reasoning_effort,
+  rawBody.effort,
+  rawBody.output_config?.effort,
+];
+
+/**
+ * What thinking depth the client asked for.
+ *
+ * `stated` means the client's answer is final and the relay must not fill in a
+ * level of its own; `level` is the depth to forward, or null when the client
+ * said "no thinking". A `thinking` block that names no depth — adaptive
+ * thinking, or a bare budget — only says "think", which is not a level choice,
+ * so it stays unnamed and the library default still applies.
+ */
+export function clientEffortFromAnthropic(rawBody) {
+  if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) return UNNAMED_EFFORT;
+  const spellings = EFFORT_SPELLINGS(rawBody);
+  const named = spellings.find((value) => typeof value === "string" && value.length > 0);
+  if (typeof named === "string") {
+    const lower = named.toLowerCase();
+    if (lower === "off" || lower === "none") return { stated: true, level: null };
+    return { stated: true, level: named };
+  }
+  if (spellings.some((value) => value === null)) return { stated: true, level: null };
+  if (rawBody.thinking?.type === "disabled") return { stated: true, level: null };
+  return UNNAMED_EFFORT;
 }
 
 // `modelId` is the bare upstream model id produced by unpackWireId.

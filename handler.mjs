@@ -13,7 +13,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
-import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientSpecifiedThinking } from "./protocol.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, createStickyTable } from "./pool-routing.mjs";
@@ -259,12 +259,14 @@ export function createHandler(deps) {
 
     const upstreamRequest = anthropicToOpenAI(body, modelId);
     const urls = buildUpstreamURLs(provider, "/chat/completions");
-    // Claude names its depth in the raw request; the translator drops it, so the
-    // "never override a client's own choice" rule has to look at the raw body.
+    // Claude names its depth in the raw request and the translator has no
+    // OpenAI field to carry it in, so the level is read off the raw body and
+    // handed to the injector, which puts it on the wire in the spelling the
+    // upstream takes.
     const { body: outboundRequest, injected } = efforts.inject({
       providerId,
       body: upstreamRequest,
-      clientChoseEffort: clientSpecifiedThinking(body),
+      clientEffort: clientEffortFromAnthropic(body),
       // The store row rides along so a channel that states its own levels wins
       // over the library, same rule as the config face.
       model: provider.models?.[modelId],
