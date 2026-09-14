@@ -67,13 +67,45 @@ describe("launcher-only startup screen", () => {
       ["http://127.0.0.1:47820/panel", "navigate"],
       ["http://127.0.0.1:47820/panel?startup=1", "reload"],
       ["http://127.0.0.1:47820/panel?startup=1", "back_forward"],
+      ["http://127.0.0.1:47820/panel?startup=restart", "reload"],
     ]) {
       const p = page(url, { navigation });
       p.bootstrap();
       assert.equal(p.root.getAttribute("data-startup"), null);
       assert.equal(p.context.panelStartupLaunch, undefined, "非 launcher 首开不打点，刷新仍恢复上次 tab");
+      assert.equal(p.context.panelStartupRestart, undefined, "非重启恢复不打点");
       assert.equal(p.timers.size, 0);
     }
+  });
+
+  it("consumes the restart marker: splash replays from first paint without pinning the board view", () => {
+    const p = page("http://127.0.0.1:47820/panel?startup=restart&keep=yes");
+    p.bootstrap();
+    assert.equal(p.root.getAttribute("data-startup"), "playing", "重启恢复首绘即接力开屏层");
+    assert.equal(p.context.panelStartupRestart, true, "重启恢复打点，restoreView 据此播入场动画");
+    assert.equal(p.context.panelStartupLaunch, undefined, "不打 launcher 首开点——不固定落看板，仍恢复上次 tab");
+    assert.equal(p.context.location.href, "http://127.0.0.1:47820/panel?keep=yes", "标记即清，二次刷新不复播");
+  });
+
+  it("settles immediately on restart recovery instead of replaying the pulse animation", () => {
+    const p = page("http://127.0.0.1:47820/panel?startup=restart");
+    p.start();
+    // 脉冲动画用户在旧页面已看过一遍，新页面重播就是「多播放了一次」：
+    // 首帧即定格（无 scale 外扩、无 rAF 循环、data-phase=settled），开屏层只盖首刷 + 淡出。
+    const nodesG = p.elements.get("startupNodes");
+    assert.equal(nodesG.getAttribute("transform"), "", "首帧即定格，不从 scale(1.12) 重播收缩");
+    assert.equal(p.elements.get("panelStartup").getAttribute("data-phase"), "settled");
+    assert.equal(p.frames.size, 0, "不起 rAF 脉冲循环");
+    // 定格后仍等 ready 信号才淡出（盖首刷的职责不变），onLeave 链不受影响。
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
+    let left = 0;
+    p.context.panelStartupController.onLeave = () => { left++; };
+    p.context.panelStartupController.ready();
+    p.advance(1);
+    assert.equal(p.root.getAttribute("data-startup"), "leaving");
+    assert.equal(left, 1, "onLeave 仍在淡出起点触发");
+    p.advance(241);
+    assert.equal(p.root.getAttribute("data-startup"), null);
   });
 
   it("does not mistake a browser window named element for an active startup controller", () => {
@@ -142,6 +174,28 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.root.getAttribute("data-startup"), null);
     assert.equal(p.context.panelStartupController, undefined);
     assert.equal(p.elements.get("panelStartup").removed, false);
+  });
+
+  it("fires onLeave at the exact frame the splash starts fading, not at ready()", () => {
+    const p = page();
+    p.start();
+    let left = 0;
+    p.context.panelStartupController.onLeave = () => { left++; };
+    // ready 提前就位（数据快于 1100ms 动画）：onLeave 不能在此时触发——开屏层还盖着，
+    // 此刻播入场动画会在底下播完。
+    p.context.panelStartupController.ready();
+    p.advance(500);
+    assert.equal(left, 0, "ready 时就触发 = 动画在开屏层底下播完");
+    assert.equal(p.root.getAttribute("data-startup"), "playing");
+    // settle 到位触发 leave，leaving 隔一帧生效——onLeave 与淡出起点同帧。
+    p.advance(1100);
+    assert.equal(left, 0, "settle 帧只提交定格，淡出尚未开始");
+    p.advance(1101);
+    assert.equal(p.root.getAttribute("data-startup"), "leaving");
+    assert.equal(left, 1, "淡出起点那一帧触发一次");
+    assert.equal(p.context.panelStartupController.onLeave, null, "触发后自清——复播/失败收回路径不会重放旧钩子");
+    p.advance(1341);
+    assert.equal(left, 1, "退场完毕不重复触发");
   });
 
   it("does not block the exit chain on a PNG error", () => {
@@ -251,6 +305,7 @@ describe("launcher-only startup screen", () => {
     let statusDone, viewDone, ready = false;
     const context = {
       window: { panelStartupController: { ready: () => { ready = true; } } },
+      restartEnterView: null,
       startupViewReady: new Promise((resolve) => { viewDone = resolve; }),
       startStatusPolling: () => new Promise((resolve) => { statusDone = resolve; }),
       requestAnimationFrame: (fn) => fn(),
@@ -264,6 +319,40 @@ describe("launcher-only startup screen", () => {
     viewDone();
     await pending;
     assert.equal(ready, true);
+  });
+
+  it("hooks the restored view's enter animation onto onLeave when recovering from a restart", async () => {
+    const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init);
+    const controller = { ready() {}, onLeave: null };
+    const context = {
+      window: { panelStartupController: controller },
+      restartEnterView: "board",
+      startupViewReady: Promise.resolve(),
+      startStatusPolling: () => Promise.resolve(),
+      requestAnimationFrame: (fn) => fn(),
+      playBoardEnter() {},
+    };
+    for (const name of ["initTheme", "initStylePicker", "initSettingsModal", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    await runInNewContext(`${init}; init()`, context);
+    assert.equal(typeof controller.onLeave, "function", "重启恢复时入场动画挂到开屏淡出起点");
+    assert.equal(context.restartEnterView, null, "标记消费一次即清");
+  });
+
+  it("leaves onLeave untouched for the launcher first-paint path", async () => {
+    const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init);
+    const controller = { ready() {}, onLeave: null };
+    const context = {
+      window: { panelStartupController: controller },
+      restartEnterView: null,
+      startupViewReady: Promise.resolve(),
+      startStatusPolling: () => Promise.resolve(),
+      requestAnimationFrame: (fn) => fn(),
+    };
+    for (const name of ["initTheme", "initStylePicker", "initSettingsModal", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    await runInNewContext(`${init}; init()`, context);
+    assert.equal(controller.onLeave, null, "launcher 首开不挂钩子，行为不变");
   });
 
   it("replays over the resident layer for the restart window and resets between shows", () => {

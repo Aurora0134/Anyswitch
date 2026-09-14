@@ -3896,13 +3896,20 @@ try {
     return startup;
   };
   const url = new URL(location.href);
-  if (url.searchParams.get("startup") !== "1") return;
+  const startupParam = url.searchParams.get("startup");
+  if (startupParam !== "1" && startupParam !== "restart") return;
   url.searchParams.delete("startup");
   try { history.replaceState(history.state, "", url.href); } catch {}
   const navigation = performance.getEntriesByType("navigation")[0];
   if (navigation && navigation.type !== "navigate") return;
-  // 本页来自 launcher 首开：主脚本 restoreView 据此固定落看板页（刷新/普通访问仍恢复上次 tab）
-  window.panelStartupLaunch = true;
+  if (startupParam === "1") {
+    // 本页来自 launcher 首开：主脚本 restoreView 据此固定落看板页（刷新/普通访问仍恢复上次 tab）
+    window.panelStartupLaunch = true;
+  } else {
+    // 本页来自看板「重启」后的自动刷新：开屏层从首绘起接力旧页面的定格画面，
+    // restoreView 据此恢复上次 tab 且不静默入场动画（重启回来的那次切换播 view-enter/board-enter）。
+    window.panelStartupRestart = true;
+  }
   window.panelStartupBegin();
 })();
 </script>
@@ -4044,6 +4051,13 @@ function panelStartupPlay() {
     requestAnimationFrame(() => {
       root.setAttribute("data-startup", "leaving");
       removeTimer = setTimeout(remove, reduce ? 0 : 240);
+      // 淡出起点已提交：重启恢复的视图入场动画挂这个时刻起播（240ms 淡出与
+      // 浮入重叠，连接处连续）。首开路径主脚本不挂此钩子，行为不变。
+      // 触发后自清：panelStartupPlay 复播只重设 ready/release 不动 onLeave，
+      // 不清的话重启失败收回开屏（release→leave）会把旧钩子再放一次。
+      const onLeave = startup.onLeave;
+      startup.onLeave = null;
+      try { onLeave?.(); } catch {}
     });
   }
   function maybeLeave() {
@@ -4079,7 +4093,9 @@ function panelStartupPlay() {
   }, { once: true });
   logo.src = "/panel/assets/logo.png";
   motion.addEventListener("change", onMotionChange);
-  if (reduce) settle();
+  // 重启恢复（panelStartupRestart）直接定格：脉冲动画用户在旧页面已看过一遍，
+  // 新页面重播就是「多播放了一次」；开屏层此处只承担盖首刷 + 淡出的职责。
+  if (reduce || window.panelStartupRestart) settle();
   else { render(0); raf = requestAnimationFrame(frame); }
 }
 
@@ -5915,6 +5931,28 @@ async function api(method, path, body) {
     const firstStatus = startStatusPolling();
     startLogStream();
     if (window.panelStartupController) {
+      // 重启恢复的入场动画挂开屏淡出起点（onLeave）：ready() 调用时刻 settled 未必
+      // 已到位（数据快于 1100ms 动画时长时 leave 会等 settle），直接播会在开屏层
+      // 底下播完；onLeave 在开屏层实际开始淡出的那一帧触发，淡出与浮入重叠。
+      // launcher 首开无 restartEnterView，不挂钩子，行为不变。
+      if (restartEnterView) {
+        const view = restartEnterView;
+        restartEnterView = null;
+        window.panelStartupController.onLeave = () => {
+          if (view === "board") playBoardEnter(document.querySelector(".telemetry-view"));
+          else {
+            const enteredView = view === "skills" ? $("skillsView")
+              : view === "presets" ? $("presetsView")
+              : view === "store" ? $("storeView")
+              : view === "stats" ? $("statsView")
+              : $("sessionsView");
+            enteredView.classList.remove("view-enter");
+            void enteredView.offsetWidth;
+            enteredView.classList.add("view-enter");
+            enteredView.addEventListener("animationend", () => enteredView.classList.remove("view-enter"), { once: true });
+          }
+        };
+      }
       await Promise.allSettled([firstStatus, startupViewReady]);
       requestAnimationFrame(() => requestAnimationFrame(() => window.panelStartupController?.ready()));
     }
@@ -5925,6 +5963,9 @@ async function api(method, path, body) {
   let currentView = "board";
   // restoreView 恢复视图时置位：首屏/刷新恢复不播入场动画，switchView 消费一次即复位
   let suppressViewEnter = false;
+  // 重启恢复（panelStartupRestart）时 restoreView 记下的待播入场动画视图名；
+  // init() 末尾在开屏 ready() 之后消费一次——与开屏淡出同步起播，连接处平滑。
+  let restartEnterView = null;
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -8098,7 +8139,13 @@ async function api(method, path, body) {
         if (identity) aliveIdentity = identity;
         if (identity && (identity.pid !== before.pid || identity.startTime !== before.startTime)) {
           clearInterval(timer);
-          location.reload();
+          // 带 startup=restart 跳转而非裸 reload：新页面首绘即接力开屏层，恢复的视图
+          // 播入场动画，连接处平滑（bootstrap 识别该标记并置 panelStartupRestart）。
+          // assign 而非 replace：与 launcher 首开同一条 navigate 路径，bootstrap 的
+          // navigation.type 门控才能放行。
+          const next = new URL(location.href);
+          next.searchParams.set("startup", "restart");
+          location.assign(next.href);
           return;
         }
         if (Date.now() >= deadline) {
@@ -8491,13 +8538,20 @@ async function api(method, path, body) {
     let saved = null;
     try { saved = localStorage.getItem("panel-view"); } catch {}
     // 刷新恢复落位不播入场动画；仅命中分支时置位——saved 为 "board"/无效值时不调
-    // switchView，无条件置位会让标志残留，顺延吞掉下一次主动切换的动画
+    // switchView，无条件置位会让标志残留，顺延吞掉下一次主动切换的动画。
+    // 重启恢复（panelStartupRestart）同样先置位静默：此刻开屏层还盖着，立即播会在
+    // 底下播完；改为记 restartEnterView，init() 末尾在开屏 ready() 之后、与淡出同步起播。
     if (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") suppressViewEnter = true;
     if (saved === "skills") switchView("skills");
     else if (saved === "presets") switchView("presets");
     else if (saved === "store") switchView("store");
     else if (saved === "stats") switchView("stats");
     else if (saved === "sessions") switchView("sessions");
+    if (window.panelStartupRestart) {
+      // saved 为 "board"/null/无效值时看板是 HTML 默认显示的、不经 switchView，同样
+      // 靠这个标记补播。
+      restartEnterView = (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") ? saved : "board";
+    }
   }
 
   // reconcile（每次刷新后）：prune 集合中已消失的 relPath；焦点不在集合内则回退

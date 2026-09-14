@@ -1268,6 +1268,26 @@ describe("panel.html sessions tab", () => {
     );
   });
 
+  it("defers the restart-recovery entrance to the splash fade via restartEnterView", () => {
+    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found");
+    // 重启恢复时恢复分支仍先静默（开屏层还盖着，立即播会在底下播完），
+    // 改为记 restartEnterView，init() 末尾挂到开屏淡出起点（onLeave）起播。
+    assert.ok(r[1].includes("if (window.panelStartupRestart)"), "restart recovery branch present");
+    assert.ok(r[1].includes('restartEnterView = (saved === "skills"'), "restored tab recorded for deferred playback");
+    assert.ok(r[1].includes(': "board"'), "board default recorded — the board never passes through switchView on restore");
+    assert.ok(!r[1].includes("playBoardEnter("), "no immediate playback while the splash still covers the page");
+    // init() 里消费：挂钩子、清标记、onLeave 起播
+    const init = panelHtml.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init, "init found");
+    assert.ok(init[0].includes("window.panelStartupController.onLeave = () => {"), "enter animation hooked onto the splash fade start");
+    assert.ok(init[0].includes("restartEnterView = null"), "marker consumed exactly once");
+    assert.ok(init[0].includes('if (view === "board") playBoardEnter('), "board routed to the staggered variant");
+    assert.ok(init[0].includes('classList.add("view-enter")'), "other views routed to the generic entrance");
+    // 声明与默认值
+    assert.ok(panelHtml.includes("let restartEnterView = null;"), "marker declared with null default");
+  });
+
   it("ports the staggered mount entrance for the board view", () => {
     assert.ok(panelHtml.includes("@keyframes boardEnter { from { opacity: 0; transform: translateY(10px); } }"),
       "boardEnter keyframes: fade + 10px rise");
@@ -2946,7 +2966,9 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(recovery.length > 500, "未真正取到函数体，后续断言会全部落空");
     assert.ok(!recovery.includes("document.hidden"),
       "带 hidden 门控的话，用户点完重启切走标签页就永远检测不到换新");
-    assert.ok(recovery.includes("location.reload()"), "新进程接管后重载页面，前端 JS 与后端同版本");
+    assert.ok(!recovery.includes("location.reload()"), "不再裸 reload——新页面首绘要接力开屏层，裸 reload 会把标记丢掉");
+    assert.ok(recovery.includes('next.searchParams.set("startup", "restart")'), "带 startup=restart 跳转，新页面据此接力开屏并播入场动画");
+    assert.ok(recovery.includes("location.assign(next.href)"), "assign 走 navigate 路径，bootstrap 的 navigation.type 门控才放行");
     assert.ok(recovery.includes("identity.pid !== before.pid"), "以 pid 变化判定新进程");
     assert.ok(recovery.includes("identity.startTime !== before.startTime"), "startTime 作为辅助身份信号");
   });
