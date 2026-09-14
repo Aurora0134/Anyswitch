@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, writeFileSync, readFileSync, unlinkSync, realpathSync } from "node:fs";
 import { createAgentWatcher } from "./agent-watcher.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
-import { startRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLine, isOwnProcess } from "./relay-process-manager.mjs";
+import { startRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLineAsync, isOwnProcess } from "./relay-process-manager.mjs";
 import { loadSettings, defaultSettingsPath, relayDataRoot } from "./relay-settings.mjs";
 import { createLogger } from "./logger.mjs";
 
@@ -147,7 +147,9 @@ export async function stopWatchdog(env = process.env, deps = {}) {
   // gate must see the fresh owner PID, never a cached one.
   const findOwner = deps.findPortOwnerPid ?? findPortOwnerPid.uncached;
   const isAlive = deps.isPidAlive ?? isPidAlive;
-  const getCommandLine = deps.getProcessCommandLine ?? getProcessCommandLine;
+  // Async by default so a fallback query never blocks the event loop; injected
+  // sync doubles keep working because awaiting a non-promise is a no-op.
+  const getCommandLine = deps.getProcessCommandLine ?? getProcessCommandLineAsync;
   const kill = deps.terminatePid ?? terminatePid;
   const probe = deps.probe ?? (() => probeWatchdog());
   const delay = deps.delay ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
@@ -166,7 +168,7 @@ export async function stopWatchdog(env = process.env, deps = {}) {
   const refused = [];
   for (const pid of new Set([filePid, ownerPid].filter((p) => Number.isFinite(p) && p > 0))) {
     if (!isAlive(pid)) continue; // dead PID: taskkill would no-op, not a refusal
-    if (!isOwnProcess(getCommandLine(pid))) {
+    if (!isOwnProcess(await getCommandLine(pid))) {
       refused.push(pid);
       continue;
     }

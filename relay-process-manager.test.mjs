@@ -19,6 +19,7 @@ import {
   readRelayPid,
   isOwnProcess,
   getProcessCommandLine,
+  getProcessCommandLineAsync,
   getRelayStatus,
   stopRelay,
   restartRelay,
@@ -316,4 +317,26 @@ test("stopRelay kills an owner PID that arrives as a Promise (a Promise owner mu
 
   assert.equal(result.ok, true);
   assert.deepEqual(killed.sort(), [111, 222], "the async owner PID must reach the kill loop");
+});
+
+// --- async command-line query (the stop-leg cold-start fix) --------------
+
+test("getProcessCommandLineAsync mirrors the sync null-on-invalid contract without spawning", async () => {
+  assert.equal(await getProcessCommandLineAsync(0), null);
+  assert.equal(await getProcessCommandLineAsync(-1), null);
+  assert.equal(await getProcessCommandLineAsync(null), null);
+});
+
+test("stopRelay accepts an async (Promise-returning) injected command-line mapper", async () => {
+  const root = makeRoot();
+  const pidPath = getRelayPidPath(root);
+  writeRelayPid(111, pidPath);
+  const { deps, killed } = makeStopDeps({ ownerPid: null, alive: [111], commandLines: {}, portAnswering: false });
+  // Inject an ASYNC mapper returning an own command line — the kill loop must
+  // await it (a missing await would turn the Promise into a falsy verify and
+  // refuse the kill).
+  deps.getProcessCommandLine = async () => OWN_RELAY_CMD;
+  const result = await stopRelay(root, deps);
+  assert.equal(result.ok, true);
+  assert.deepEqual(killed, [111], "the awaited async mapper must verify and reach the kill");
 });

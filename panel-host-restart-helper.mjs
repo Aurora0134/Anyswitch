@@ -31,12 +31,12 @@ const PANEL_PORT = 47820;
 // graceful close can take an event-loop turn or two under load; past this we
 // give up rather than double-spawn against a still-held port.
 const DEFAULT_RELEASE_TIMEOUT_MS = 10_000;
-const DEFAULT_RELEASE_POLL_MS = 200;
+const DEFAULT_RELEASE_POLL_MS = 100;
 // Budget for the replacement to bind and answer. panel-host does real work
 // before it listens (git anchor write-back, watchdog probe prewarm), so this
 // is wider than the launcher's own wait.
 const DEFAULT_READY_TIMEOUT_MS = 12_000;
-const DEFAULT_READY_POLL_MS = 300;
+const DEFAULT_READY_POLL_MS = 100;
 
 // Wait for the old host to let go of 47820, then bring a new one up and confirm
 // it answers. Pure orchestration — every dependency is injected:

@@ -29,9 +29,9 @@ const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 
 const PS_QUERY_TIMEOUT_MS = 5000;
 
-const START_POLL_MS = 300;
+const START_POLL_MS = 100;
 const START_TIMEOUT_MS = 8000;
-const STOP_POLL_MS = 300;
+const STOP_POLL_MS = 100;
 const STOP_TIMEOUT_MS = 6000;
 
 export function getRelayPidPath(root) {
@@ -215,6 +215,55 @@ export function getProcessCommandLine(pid) {
   }
 }
 
+// Async twin of getProcessCommandLine. Identical query and null-on-failure
+// semantics, but spawned without blocking the event loop: the sync version
+// stalls the panel host for the whole PowerShell cold start (~300-450ms per
+// call), which dominates the relay stop leg on the restart path. stopRelay /
+// the watchdog are already async contexts, so the kill gate pays this only on
+// the rare fallback (pid file missing / disagrees with the port owner) — and
+// never freezes the panel while doing so.
+export function getProcessCommandLineAsync(pid) {
+  if (!pid || pid <= 0) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}" | Select-Object -ExpandProperty CommandLine`,
+        ],
+        { windowsHide: true },
+      );
+    } catch {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const finish = (line) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(line);
+    };
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch { /* already gone */ }
+      finish(null);
+    }, PS_QUERY_TIMEOUT_MS);
+    let out = "";
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk) => { out += chunk; });
+    child.on("error", () => finish(null));
+    child.on("close", (code) => {
+      if (code !== 0) return finish(null);
+      const line = out.trim();
+      finish(line.length > 0 ? line : null);
+    });
+  });
+}
+
 // A PID may only be terminated when its command line references this app
 // directory. The check is deliberately "command line contains the app dir",
 // NOT "runs relay-host.mjs": the per-launch launchers also legitimately bind
@@ -315,7 +364,10 @@ export async function stopRelay(root, deps = {}) {
   // in-flight slot.
   const findOwner = deps.findPortOwnerPid ?? findPortOwnerPid.uncached;
   const isAlive = deps.isPidAlive ?? isPidAlive;
-  const getCommandLine = deps.getProcessCommandLine ?? getProcessCommandLine;
+  // Async by default so a fallback query never blocks the panel event loop.
+  // Injected test doubles are plain sync mappers; awaiting a non-promise is a
+  // no-op, so existing injections keep working unchanged.
+  const getCommandLine = deps.getProcessCommandLine ?? getProcessCommandLineAsync;
   const kill = deps.terminatePid ?? terminatePid;
   const delay = deps.delay ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
   const pollMs = deps.stopPollMs ?? STOP_POLL_MS;
@@ -334,10 +386,17 @@ export async function stopRelay(root, deps = {}) {
   // simply could not query) is never killed. Refusals are reported through
   // ok:false + reason — the panel frontend surfaces that to the user instead
   // of a silent skip that would look like success.
+  //
+  // Cost fix, safety unchanged: the query is async (getProcessCommandLineAsync).
+  // The sync PowerShell spawn froze the panel host for its whole ~300-450ms cold
+  // start per call, and stopRelay runs inside the panel process — so every
+  // restart stalled the panel UI for that long. The wall-clock cost of the query
+  // itself is unchanged (the identity gate still requires it); what changes is
+  // that the panel keeps answering other requests while it runs.
   const refused = [];
   for (const pid of new Set([filePid, ownerPid].filter((p) => Number.isFinite(p) && p > 0))) {
     if (!isAlive(pid)) continue; // dead PID: taskkill would no-op, not a refusal
-    if (!isOwnProcess(getCommandLine(pid))) {
+    if (!isOwnProcess(await getCommandLine(pid))) {
       refused.push(pid);
       continue;
     }
