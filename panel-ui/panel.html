@@ -803,15 +803,15 @@
     color: var(--accent); font-size: 12px; font-weight: 700;
   }
 
-  /* 渠道列表拖拽重排：拖动中列表静止——被拖行原地做空位占位（accent 虚线内描边），
-     指示线绝对定位、槽间瞬移；松手一次性 FLIP 重排，落位行描边闪烁 */
-  #storeList { position: relative; }
+  /* 列表拖拽重排（渠道列表 / 预设列表同款）：拖动中列表静止——被拖行原地做空位占位
+     （accent 虚线内描边），指示线绝对定位、槽间瞬移；松手一次性 FLIP 重排，落位行描边闪烁 */
+  #storeList, #presetsList { position: relative; }
   .skills-list-row[draggable="true"] { cursor: grab; }
-  .store-row-dragging {
+  .store-row-dragging, .preset-row-dragging {
     opacity: 0.3;
     box-shadow: inset 0 0 0 1.5px dashed var(--store-drag-accent);
   }
-  .store-drop-indicator {
+  .store-drop-indicator, .preset-drop-indicator {
     position: absolute; left: 6px; right: 6px; top: 0; z-index: 2;
     height: 3px; margin-top: -1px; border-radius: 2px;
     background: var(--store-drag-accent);
@@ -819,19 +819,20 @@
     pointer-events: none;
   }
   /* 左端小圆帽：同 accent 色 */
-  .store-drop-indicator::before {
+  .store-drop-indicator::before, .preset-drop-indicator::before {
     content: ""; position: absolute; left: -2px; top: 50%;
     width: 8px; height: 8px; border-radius: 50%;
     background: var(--store-drag-accent);
     transform: translateY(-50%);
   }
-  .store-row-landed { animation: storeRowLanded 300ms var(--store-drag-ease); }
+  .store-row-landed, .preset-row-landed { animation: storeRowLanded 300ms var(--store-drag-ease); }
   @keyframes storeRowLanded {
     0%, 60% { box-shadow: inset 0 0 0 1.5px var(--store-drag-accent); }
     100% { box-shadow: inset 0 0 0 0 transparent; }
   }
   /* blueprint：指示线改制图虚线（其余皮肤沿用实线） */
-  :root[data-style="blueprint"] .store-drop-indicator {
+  :root[data-style="blueprint"] .store-drop-indicator,
+  :root[data-style="blueprint"] .preset-drop-indicator {
     background: repeating-linear-gradient(90deg, var(--store-drag-accent) 0 6px, transparent 6px 10px);
   }
   .skills-list-line1 { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -9864,8 +9865,11 @@ async function api(method, path, body) {
       presetsFilter = e.target.value.trim().toLowerCase();
       renderPresetsList();
     };
+    initPresetsListDrag();
     // 单选（选中即焦点）：左键选中/再点取消；点列表空白处清空选中
     $("presetsList").addEventListener("click", (e) => {
+      // 拖拽重排落位后的合成 click：吞掉，不当成选中操作
+      if (suppressPresetClick) { suppressPresetClick = false; return; }
       const row = e.target.closest("[data-preset]");
       if (!row) {
         if (presetsSelection !== null) {
@@ -9999,6 +10003,8 @@ async function api(method, path, body) {
       return;
     }
     const epTotal = ((presetsState && presetsState.endpoints) || []).length;
+    // 仅非过滤态可拖拽重排：过滤态行序 ≠ 预设顺序，无法映射新顺序
+    const drag = presetsListDraggable() ? ` draggable="true"` : "";
     listEl.innerHTML = filtered.map((p, i) => {
       const n = epTotal
         ? ((presetsState.endpoints || []).filter((ep) => presetCountedOn(p, ep.id))).length
@@ -10012,7 +10018,7 @@ async function api(method, path, body) {
       const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
       // 未启用的预设行整体压暗（内联透明度）；--i 供 cascade 交错（窗口内重基见 playSkillsListCascade）
       const rowStyle = (p.enabled ? "" : "opacity:0.55;") + "--i:" + i;
-      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}" style="${rowStyle}" data-preset="${escapeHtml(p.id)}">
+      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}" style="${rowStyle}" data-preset="${escapeHtml(p.id)}" data-preset-index="${i}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.title)}</span>${tagBadge}
           <span class="skills-ep-dots">${lenBadge}${epCount}</span>
@@ -10021,6 +10027,147 @@ async function api(method, path, body) {
       </div>`;
     }).join("");
     if (cascade) { listEl.scrollTop = prevScrollTop; playSkillsListCascade(listEl, prevScrollTop); }
+  }
+
+  // ── 预设列表拖拽重排（与渠道列表同款：HTML5 DnD + 槽位指示线 + drop 一次性 FLIP） ──
+  // 预设顺序同时决定列表顺序与各端点指令文件托管块内的正文顺序，故与渠道顺序一样
+  // 落盘（prompts.json 的 presetOrder）。拖动中列表完全静止：被拖行原地做空位占位，
+  // dragover 只算插入槽、指示线瞬移到位；drop 才按槽位算新顺序、DOM 一次性重排 +
+  // 全列表 FLIP，提交后端后 refresh。过滤态行序 ≠ 预设顺序，渲染时不加 draggable，
+  // 拖拽逻辑也直接忽略。
+  let presetDragId = null;         // 拖动中行 id
+  let presetDragSlot = null;       // 当前插入槽索引（相对 DOM 现序，含被拖行）
+  let suppressPresetClick = false; // dragend 后吞掉紧随的合成 click，避免误改选中
+
+  function presetsListDraggable() {
+    return !$("presetsFilterInput").value.trim();
+  }
+  function presetDragReducedMotion() {
+    return window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  // 槽位 Y（相对容器内容区，用 offsetTop 系换算，滚动下仍正确）：
+  // slot 0 → 首行 top 减半间隙；slot i → 第 i-1 行 bottom 与第 i 行 top 的中点；末尾同理加半间隙
+  function presetDragSlotY(rows, slot) {
+    const gapBetween = (a, b) => (a && b ? b.offsetTop - (a.offsetTop + a.offsetHeight) : 0);
+    if (slot <= 0) return rows[0].offsetTop - gapBetween(rows[0], rows[1]) / 2;
+    if (slot >= rows.length) {
+      const last = rows[rows.length - 1];
+      return last.offsetTop + last.offsetHeight + gapBetween(rows[rows.length - 2], last) / 2;
+    }
+    const prev = rows[slot - 1];
+    return (prev.offsetTop + prev.offsetHeight + rows[slot].offsetTop) / 2;
+  }
+
+  function initPresetsListDrag() {
+    const list = $("presetsList");
+    // 事件委托挂容器：行由 innerHTML 整批重建，绑行会丢
+    list.addEventListener("dragstart", (e) => {
+      if (!presetsListDraggable()) return;
+      const row = e.target.closest("[data-preset]");
+      if (!row) return;
+      presetDragId = row.getAttribute("data-preset");
+      presetDragSlot = null;
+      row.classList.add("preset-row-dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", presetDragId);
+    });
+    list.addEventListener("dragover", (e) => {
+      if (!presetDragId) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      // 列表静止：不挪行、不让位，只按指针中线算插入槽，指示线瞬移到槽位
+      const rows = [...list.querySelectorAll("[data-preset]")];
+      if (!rows.length) return;
+      let slot = rows.length;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i].getBoundingClientRect();
+        if (e.clientY < r.top + r.height / 2) { slot = i; break; }
+      }
+      presetDragSlot = slot;
+      let indicator = list.querySelector(".preset-drop-indicator");
+      if (!indicator) {
+        indicator = document.createElement("div");
+        indicator.className = "preset-drop-indicator";
+        list.appendChild(indicator);
+      }
+      // 拖动中列表静止，槽位不再随滚动漂移，故指示线关掉过渡直接落位
+      // （渠道列表的指示线由面板的 reduced-motion 规则强制关过渡，这里显式声明一次）
+      indicator.style.transition = "none";
+      indicator.style.transform = `translateY(${presetDragSlotY(rows, slot)}px)`;
+      // 边缘自动滚动：指针进入列表可视区上/下缘 48px 带内，按贴近程度加速滚动，
+      // 让隐藏在上/下方的槽位可达；dragover 在拖拽中持续触发，滚动即连续
+      const EDGE = 48, MAX_STEP = 18;
+      const lr = list.getBoundingClientRect();
+      const dTop = e.clientY - lr.top, dBottom = lr.bottom - e.clientY;
+      if (dTop < EDGE && list.scrollTop > 0) {
+        list.scrollTop -= Math.ceil(MAX_STEP * (1 - Math.max(dTop, 0) / EDGE));
+      } else if (dBottom < EDGE && list.scrollTop + list.clientHeight < list.scrollHeight) {
+        list.scrollTop += Math.ceil(MAX_STEP * (1 - Math.max(dBottom, 0) / EDGE));
+      }
+    });
+    list.addEventListener("drop", (e) => {
+      if (!presetDragId) return;
+      e.preventDefault();
+      const landedId = presetDragId;
+      const rows = [...list.querySelectorAll("[data-preset]")];
+      const dragEl = rows.find((el) => el.getAttribute("data-preset") === landedId);
+      if (!dragEl) return;
+      // 槽位相对「移除被拖行后」的序列换算：槽在被拖行之后则前移一位
+      const from = rows.indexOf(dragEl);
+      let slot = presetDragSlot == null ? from : presetDragSlot;
+      if (slot > from) slot -= 1;
+      const restEls = rows.filter((el) => el !== dragEl);
+      slot = Math.max(0, Math.min(slot, restEls.length));
+      const nextIds = restEls.map((el) => el.getAttribute("data-preset"));
+      nextIds.splice(slot, 0, landedId);
+      // 一次性重排：snapshot → DOM 应用新顺序 → 位移行 FLIP 归零
+      const rects = new Map(rows.map((el) => [el, el.getBoundingClientRect()]));
+      const reordered = nextIds
+        .map((id) => rows.find((el) => el.getAttribute("data-preset") === id))
+        .filter(Boolean);
+      reordered.forEach((el) => list.insertBefore(el, null));
+      // 行序即注入序，行内 index 需同步改名，否则同一次渲染里的过滤/重排会读错行
+      reordered.forEach((el, i) => el.setAttribute("data-preset-index", String(i)));
+      dragEl.classList.remove("preset-row-dragging");
+      if (!presetDragReducedMotion()) {
+        reordered.forEach((el) => {
+          const dy = rects.get(el).top - el.getBoundingClientRect().top;
+          if (!dy) return;
+          el.style.transition = "none";
+          el.style.transform = `translateY(${dy}px)`;
+          void el.offsetWidth;
+          el.style.transition = `transform 260ms var(--store-drag-ease)`;
+          el.style.transform = "";
+          setTimeout(() => { el.style.transition = ""; }, 290);
+        });
+      }
+      dragEl.classList.add("preset-row-landed");
+      setTimeout(() => dragEl.classList.remove("preset-row-landed"), 300);
+      (async () => {
+        try {
+          await api("POST", "/api/prompts/preset/reorder", { order: nextIds });
+          // 等 FLIP 收尾再重渲，避免动画中的行被 innerHTML 替换
+          setTimeout(() => { refreshPresetsState(); }, 300);
+        } catch (err) {
+          renderPresetsList();
+          toast(panelError(err, "预设顺序保存失败"), true);
+        }
+      })();
+    });
+    list.addEventListener("dragend", () => {
+      if (!presetDragId) return;
+      presetDragId = null;
+      presetDragSlot = null;
+      // 拖动中 DOM 未变，未落位也无需重渲，只清理占位态与指示线
+      const dragging = list.querySelector(".preset-row-dragging");
+      if (dragging) dragging.classList.remove("preset-row-dragging");
+      const indicator = list.querySelector(".preset-drop-indicator");
+      if (indicator) indicator.remove();
+      // 拖拽结束后浏览器会补发一次 click，吞掉以免误触选中
+      suppressPresetClick = true;
+      setTimeout(() => { suppressPresetClick = false; }, 0);
+    });
   }
 
   // ── 卡片 A：全局设置（总开关） ──

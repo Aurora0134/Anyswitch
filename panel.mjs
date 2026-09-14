@@ -97,6 +97,7 @@ export function createPromptsPanelService({ base = process.env, homeDir } = {}) 
     updatePreset: (fields) => mutateAndSync(data.updatePreset(fields)),
     deletePreset: (id) => mutateAndSync(data.deletePreset(id)),
     setPresetEnabled: (args) => mutateAndSync(data.setPresetEnabled(args)),
+    reorderPresets: (order) => mutateAndSync(data.reorderPresets(order)),
     setOverride: (args) => {
       if (!injector.hasEndpoint(args?.endpointId)) {
         const error = new Error(`未知端点: ${args?.endpointId}`);
@@ -1660,6 +1661,16 @@ export function createPanelRouter({
           }
           if (path === "/panel/api/prompts/preset/delete") {
             const result = svc.deletePreset(requireString(body.id, "id"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/reorder") {
+            // 预设拖拽重排：order 为预设 id 的完整排列，业务校验在数据层。
+            if (!Array.isArray(body.order)) {
+              const error = new Error("order 必须是预设 id 数组");
+              error.statusCode = 400;
+              throw error;
+            }
+            const result = svc.reorderPresets(body.order);
             return sendJson(res, 200, { ok: true, ...result });
           }
           if (path === "/panel/api/prompts/preset/enable") {

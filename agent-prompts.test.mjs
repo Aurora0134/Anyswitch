@@ -29,7 +29,7 @@ afterEach(() => {
 describe("agent-prompts data plane", () => {
   it("returns the default state when prompts.json is missing", () => {
     const { svc } = makeService();
-    assert.deepEqual(svc.getState(), { enabled: false, presets: [], endpointOverrides: {} });
+    assert.deepEqual(svc.getState(), { enabled: false, presetOrder: [], presets: [], endpointOverrides: {} });
   });
 
   it("creates a preset with a 12-char base64url id and persists it", () => {
@@ -138,11 +138,73 @@ describe("agent-prompts data plane", () => {
     assert.deepEqual(svc.resolveForEndpoint("kimi").map((p) => p.id), [a.id, c.id]);
   });
 
+  it("keeps creation order in presetOrder and drops reordered ids on delete", () => {
+    const { svc, base } = makeService();
+    const a = svc.createPreset({ title: "A", content: "a" }).preset;
+    const b = svc.createPreset({ title: "B", content: "b" }).preset;
+    const c = svc.createPreset({ title: "C", content: "c" }).preset;
+    assert.deepEqual(svc.getState().presetOrder, [a.id, b.id, c.id]);
+
+    svc.deletePreset(a.id);
+    assert.deepEqual(svc.getState().presetOrder, [b.id, c.id]);
+    assert.deepEqual(createPromptsService({ base }).getState().presetOrder, [b.id, c.id]);
+  });
+
+  it("reorderPresets moves a preset and drives both the panel list and the injection order", () => {
+    const { svc } = makeService();
+    const a = svc.createPreset({ title: "A", content: "a" }).preset;
+    const b = svc.createPreset({ title: "B", content: "b" }).preset;
+    const c = svc.createPreset({ title: "C", content: "c" }).preset;
+    svc.setMaster(true);
+
+    const result = svc.reorderPresets([c.id, a.id, b.id]);
+    assert.deepEqual(result.presetOrder, [c.id, a.id, b.id]);
+    assert.deepEqual(svc.getState().presetOrder, [c.id, a.id, b.id]);
+    assert.deepEqual(svc.getState().presets.map((p) => p.id), [c.id, a.id, b.id]);
+    // 托管块里的正文顺序跟着走：排序不是纯展示层的排序
+    assert.deepEqual(svc.resolveForEndpoint("claude").map((p) => p.id), [c.id, a.id, b.id]);
+  });
+
+  it("reorderPresets rejects partial, duplicated, unknown and non-array orders", () => {
+    const { svc } = makeService();
+    const a = svc.createPreset({ title: "A", content: "a" }).preset;
+    const b = svc.createPreset({ title: "B", content: "b" }).preset;
+    const bad = (order) =>
+      assert.throws(() => svc.reorderPresets(order), (err) => err.statusCode === 400);
+    bad([a.id]);                    // 少了 b：部分排列会让未列出的预设无家可归
+    bad([a.id, a.id]);              // 重复
+    bad([a.id, "ghost"]);           // 不存在的 id
+    bad([a.id, b.id, a.id]);
+    bad("not an array");
+    bad([a.id, 42]);
+    // 拒绝后顺序不变：失败的拖拽不该半途落盘
+    assert.deepEqual(svc.getState().presetOrder, [a.id, b.id]);
+  });
+
+  it("an order written by an older build (or lost ids) is completed instead of shuffled", () => {
+    const { svc, file } = makeService();
+    const a = svc.createPreset({ title: "A", content: "a" }).preset;
+    const b = svc.createPreset({ title: "B", content: "b" }).preset;
+    const c = svc.createPreset({ title: "C", content: "c" }).preset;
+    const raw = JSON.parse(readFileSync(file, "utf8"));
+
+    // 老版本写的文件：压根没有 presetOrder —— 回落到文件序，不重排
+    delete raw.presetOrder;
+    writeFileSync(file, JSON.stringify(raw), "utf8");
+    assert.deepEqual(svc.getState().presetOrder, [a.id, b.id, c.id]);
+    assert.deepEqual(svc.getState().presets.map((p) => p.id), [a.id, b.id, c.id]);
+
+    // 并发写坏的顺序：未知 id 与重复项剔掉，漏掉的补到末尾
+    raw.presetOrder = [c.id, "ghost", c.id];
+    writeFileSync(file, JSON.stringify(raw), "utf8");
+    assert.deepEqual(svc.getState().presetOrder, [c.id, a.id, b.id]);
+  });
+
   it("read path degrades to defaults on a corrupt prompts.json", () => {
     const { svc, file } = makeService();
     svc.createPreset({ title: "A", content: "a" });
     writeFileSync(file, "{ not json !!!", "utf8");
-    assert.deepEqual(svc.getState(), { enabled: false, presets: [], endpointOverrides: {} });
+    assert.deepEqual(svc.getState(), { enabled: false, presetOrder: [], presets: [], endpointOverrides: {} });
   });
 
   it("write path quarantines a corrupt prompts.json and refuses to overwrite it", () => {
