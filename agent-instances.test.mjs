@@ -398,6 +398,119 @@ describe("openai relay x-agent-instance header", () => {
   });
 });
 
+describe("冷缓存临时身份的折叠收敛（单会话不再显示两个实例）", () => {
+  // pi 现场（2026-09-14）：会话头几条请求赶上进程扫描缓存未刷新，启动
+  // 器注入的 "<cwd>-<launcher pid>" 折不进规范形，落成自定义 id 临时行；
+  // 缓存跟上后后续请求折回 "<pi>-<pid>"，看板两行并存，临时行要等 10
+  // 分钟空闲 TTL。housekeeping 现在每次读都拿新快照重试折叠，临时行于
+  // 下一轮读归位。下面三例：整行改名、目标行已存在时清行、在途请求延
+  // 迟收敛。
+  //
+  // 进程链仿 pi 现场：launcher node.exe (17360) → cmd /c shim (10220) →
+  // pi 客户端 node.exe (14692)。
+  const PI_CHAIN_SCAN = "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" + [
+    "LAPTOP,C:\\Tools\\node.exe C:\\app\\pi-launcher.mjs,node.exe,500,17360",
+    "LAPTOP,,cmd.exe,17360,10220",
+    "LAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js,node.exe,10220,14692",
+  ].join("\r\n") + "\r\n";
+
+  // execFn 冷热身切换：warm=false 任何探测都回空（等价于快照里没有客户
+  // 端），warm=true 回完整进程链。scanWarm 只驱动扫描缓存转热、不跑
+  // housekeeping（stale-while-revalidate：首个快照未落地前 scanProcesses
+  // 会等本轮扫完；已有快照后越过 2.5s TTL 的调用踢一轮后台扫描即返回旧
+  // 快照，故循环「踢+让出事件循环」直到新快照落地）。之后的
+  // startRequest 才能折回规范身份，且临时行与规范行的并存态不被提前收
+  // 敛——留给被测的那次 getAgentsStatus 读。
+  function coldWarmCollector(tRef) {
+    const state = { warm: false };
+    const execFn = (cmd, opts, cb) => cb(null, state.warm ? PI_CHAIN_SCAN : "");
+    const collector = testCollector({ execFn, nowFn: () => tRef.t });
+    const flush = async () => { for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+    const scanWarm = async () => {
+      state.warm = true;
+      for (let i = 0; i < 10; i += 1) {
+        tRef.t += 3000;
+        await collector.scanProcesses();
+        await flush();
+      }
+    };
+    return { state, collector, flush, scanWarm };
+  }
+
+  const piReq = (collector, tRef) => collector.startRequest({
+    agentId: "pi", instanceId: "86183-17360", providerId: "p1", model: "m1", stream: true, path: "openai",
+  });
+  const piStatus = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "pi");
+
+  it("缓存冷时落临时行，缓存热后整行改名归位（计数与标签保留）", async () => {
+    const tRef = { t: 1000 };
+    const { collector, scanWarm } = coldWarmCollector(tRef);
+
+    const r1 = piReq(collector, tRef);
+    tRef.t = 2000;
+    r1.recordFirstChunk();
+    tRef.t = 3000;
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    let pi = await piStatus(collector);
+    assert.deepEqual(pi.instances.map((i) => i.id), ["86183-17360"], "冷缓存：行保持启动器临时身份");
+
+    await scanWarm(); // 看板轮询驱动缓存转热（用户打开看板）
+
+    pi = await piStatus(collector);
+    assert.deepEqual(pi.instances.map((i) => i.id), ["pi-14692"], "热缓存下一轮读：临时行折回规范身份，不再两行并存");
+    assert.equal(pi.instances[0].title, "86183", "cwd 基名作为行标签随折叠归位");
+    assert.equal(pi.instances[0].requests, 1, "临时行的历史计数随之归位");
+    assert.equal(pi.metrics.totalRequests, 1);
+  });
+
+  it("临时行与规范行并存时清掉临时行（无在途请求），规范行计数不重复", async () => {
+    const tRef = { t: 1000 };
+    const { collector, scanWarm } = coldWarmCollector(tRef);
+
+    // 冷缓存期的请求落临时行（用户在 pi 里发的第一条消息）。
+    const r1 = piReq(collector, tRef);
+    tRef.t = 2000;
+    r1.recordEnd({ status: 503, error: { status: 503, message: "upstream" } });
+
+    // 用户打开看板查 503：轮询把缓存焐热（只扫描、未 housekeeping），之
+    // 后的请求折回规范身份——此刻临时行与规范行并存，正是用户看到的两
+    // 个实例。
+    await scanWarm();
+
+    const r2 = piReq(collector, tRef); // 热缓存折回规范身份
+    tRef.t += 1000;
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    // 下一轮读 housekeeping 拿热快照重折叠：临时行被清掉，只剩规范行。
+    const pi = await piStatus(collector);
+    assert.deepEqual(pi.instances.map((i) => i.id), ["pi-14692"], "临时行被清掉，单会话回到单实例");
+    assert.equal(pi.instances[0].requests, 1, "规范行只计折回的请求，临时行历史不重复并入");
+    assert.equal(pi.metrics.totalRequests, 2, "端点聚合计数不受影响");
+  });
+
+  it("临时行有在途请求时延迟收敛，请求收尾后下一轮读归位", async () => {
+    const tRef = { t: 1000 };
+    const { collector, scanWarm } = coldWarmCollector(tRef);
+
+    const r1 = piReq(collector, tRef); // 在途，先不收尾
+    await scanWarm();
+
+    const r2 = piReq(collector, tRef); // 热缓存折回规范身份，两行并存
+    tRef.t += 1000;
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    let pi = await piStatus(collector);
+    assert.deepEqual(pi.instances.map((i) => i.id).sort(), ["86183-17360", "pi-14692"], "临时行有在途请求：本轮保留");
+
+    tRef.t += 1000;
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    pi = await piStatus(collector);
+    assert.deepEqual(pi.instances.map((i) => i.id), ["pi-14692"], "在途请求收尾后收敛为单行");
+    assert.equal(pi.metrics.totalRequests, 2);
+  });
+});
+
 describe("openai relay socket→PID fallback (no instance header)", () => {
   // 绕过 launcher 直连（终端敲 npm shim）的客户端不带 x-agent-instance，
   // relay 用 netstat 快照反查 keep-alive 连接对端进程，合成
