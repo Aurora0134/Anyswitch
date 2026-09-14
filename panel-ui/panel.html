@@ -702,6 +702,23 @@
     border: 1px solid var(--border);
   }
 
+  /* 视图切换：内容区入场——新显示的视图淡入+上浮一次。参数与看板 board-enter 变体
+     拉齐（10px / 300ms / easeInOut），六视图切换同属一族；看板在此基础上多一层
+     卡片阶梯。仅用户主动切换播放（switchView 加 .view-enter）；restoreView 恢复与
+     首屏静默。reduced-motion 由全局禁用媒体查询兜住，此处无需分支。 */
+  @keyframes viewEnter { from { opacity: 0; transform: translateY(10px); } }
+  .view-enter { animation: viewEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }
+
+  /* 看板视图：变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）——
+     容器淡入+上浮 10px 立即开始；可见卡片按文档顺序逐张阶梯，延迟 150ms+i×40ms
+     经 --board-delay 注入；首卡（服务状态）用 scale 变奏、延迟 100ms。统一 300ms
+     easeInOut；backwards 填充保证延迟期间保持初态；播完 JS 清类。 */
+  @keyframes boardEnter { from { opacity: 0; transform: translateY(10px); } }
+  @keyframes boardEnterScale { from { opacity: 0; transform: scale(0.98); } }
+  .board-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }
+  .board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
+  .board-card-enter-scale { animation: boardEnterScale 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards; animation-delay: var(--board-delay, 0ms); }
+
   /* Skills 视图：左右分栏布局（左：主仓库+skill 列表；右：详情+异常聚合） */
   .skills-grid {
     display: grid; grid-template-columns: minmax(320px, 5fr) 7fr; gap: 16px;
@@ -5900,6 +5917,8 @@ async function api(method, path, body) {
   // 当前视图：agents/stability 数据只喂看板卡片，非看板视图暂停其轮询；
   // status 保持常开（头部状态灯跨视图可见）。首次立即取数不做门控，保证首刷。
   let currentView = "board";
+  // restoreView 恢复视图时置位：首屏/刷新恢复不播入场动画，switchView 消费一次即复位
+  let suppressViewEnter = false;
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -8405,8 +8424,24 @@ async function api(method, path, body) {
     for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
-    try { localStorage.setItem("panel-view", name); } catch {}
-    let viewReady;
+    // 内容区入场动效：仅主动切换播放；恢复/首屏由 suppressViewEnter 置位跳过。
+    // 看板走变体阶梯入场（playBoardEnter），其余视图走通用 view-enter。
+    if (suppressViewEnter) {
+      suppressViewEnter = false;
+    } else if (board) {
+      playBoardEnter(document.querySelector(".telemetry-view"));
+    } else {
+      const enteredView = name === "skills" ? $("skillsView")
+        : presets ? $("presetsView")
+        : store ? $("storeView")
+        : stats ? $("statsView")
+        : $("sessionsView");
+      enteredView.classList.remove("view-enter");
+      void enteredView.offsetWidth; // 复位进行中的动画，连切时重播
+      enteredView.classList.add("view-enter");
+      enteredView.addEventListener("animationend", () => enteredView.classList.remove("view-enter"), { once: true });
+    }
+    try { localStorage.setItem("panel-view", name); } catch {}    let viewReady;
     if (name === "skills") viewReady = refreshSkillsState();
     if (presets) viewReady = refreshPresetsState();
     if (store) viewReady = refreshStoreState();
@@ -8423,12 +8458,35 @@ async function api(method, path, body) {
     }
   }
 
+  // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
+  // 上浮 10px 立即开始；可见 .panel-card 按文档顺序逐张阶梯——首卡（服务状态）用 scale
+  // 变奏、延迟 100ms，其余淡入+上浮、延迟 150ms+i×40ms。隐藏卡（如无链时的路由链卡）
+  // 跳过不占延迟位；播完即清，1s 轮询只更新卡片内容不重建节点，不会打断动画。
+  function playBoardEnter(view) {
+    view.classList.remove("board-enter");
+    void view.offsetWidth; // 复位进行中的动画，连切时重播
+    view.classList.add("board-enter");
+    view.addEventListener("animationend", () => view.classList.remove("board-enter"), { once: true });
+    const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
+    cards.forEach((el, i) => {
+      const hero = i === 0;
+      el.style.setProperty("--board-delay", hero ? "100ms" : `${150 + (i - 1) * 40}ms`);
+      el.classList.remove("board-card-enter", "board-card-enter-scale");
+      void el.offsetWidth;
+      el.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
+      el.addEventListener("animationend", () => el.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
+    });
+  }
+
   // 刷新页面后留在原 tab（默认看板）；launcher 启动的那一次固定落看板，
   // 刷新与普通访问不受影响，仍按 panel-view 恢复。
   function restoreView() {
     if (window.panelStartupLaunch) return;
     let saved = null;
     try { saved = localStorage.getItem("panel-view"); } catch {}
+    // 刷新恢复落位不播入场动画；仅命中分支时置位——saved 为 "board"/无效值时不调
+    // switchView，无条件置位会让标志残留，顺延吞掉下一次主动切换的动画
+    if (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") suppressViewEnter = true;
     if (saved === "skills") switchView("skills");
     else if (saved === "presets") switchView("presets");
     else if (saved === "store") switchView("store");
