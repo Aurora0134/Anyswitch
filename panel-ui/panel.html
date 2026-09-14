@@ -622,9 +622,6 @@
     border: 1px solid var(--border);
   }
 
-  /* 面板主题选择器：10 项一排放不下，单独允许换行（不影响其它 seg-control 几何） */
-  #stylePicker { display: flex; flex-wrap: wrap; }
-
   /* 浮动 Toast */
   .toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px);
@@ -679,6 +676,44 @@
   .modal-foot {
     display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
   }
+
+  /* 设置全页视图：专用头行（退出 + 标题 + 亮暗）、子 tab 条、主题分栏与预览样张。
+     设置项沿用 modal-item/modal-number 既有类（与样式实验室四段主题 CSS 对齐）；
+     预览全部复用真实组件类（panel-card/btn/badge/seg-control/toggle/view-tabs/
+     telemetry-sparkline），五套主题与亮暗 token 自动作用，无需主题特化 CSS。 */
+  .settings-head-left { display: flex; align-items: center; gap: 12px; }
+  .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
+  .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
+  .settings-theme-desc { margin: 0 0 12px; font-size: 12px; color: var(--text-3); }
+  .settings-theme-grid { display: grid; grid-template-columns: 180px 1fr; gap: 16px; align-items: start; }
+  @media (max-width: 960px) {
+    .settings-theme-grid { grid-template-columns: 1fr; }
+  }
+  .settings-theme-list { display: flex; flex-direction: column; gap: 4px; }
+  .settings-theme-item {
+    appearance: none; font: inherit; font-size: 13px; font-weight: 600; text-align: left;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 9px 12px; cursor: pointer; color: var(--text-2);
+    background: transparent; border: 1px solid transparent; border-radius: var(--radius-md, 8px);
+    transition: background 140ms var(--ease-out), color 140ms var(--ease-out), border-color 140ms var(--ease-out);
+  }
+  .settings-theme-item:hover { background: var(--surface-hover); color: var(--text); }
+  .settings-theme-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .settings-theme-item[aria-checked="true"] {
+    background: var(--surface); color: var(--text);
+    border-color: var(--border-strong); box-shadow: var(--shadow-xs);
+  }
+  .settings-theme-item[aria-checked="true"]::after { content: "✓"; color: var(--accent); font-weight: 700; }
+  /* 预览画布：inert + pointer-events 双保险不响应交互；宽版折线覆盖 68px 默认尺寸 */
+  .settings-theme-preview {
+    pointer-events: none; user-select: none;
+    background: var(--bg-page); border: 1px solid var(--border);
+    border-radius: var(--radius-lg, 12px); padding: 14px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .settings-preview-nav { align-self: flex-start; }
+  .settings-preview-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .settings-preview-spark { width: 160px; height: 32px; margin-left: auto; }
 
   /* Skills 视图：Tab 栏（header 内嵌 segmented，样式对齐 seg-control/seg-btn） */
   .view-tabs {
@@ -4087,7 +4122,7 @@ if (window.panelStartupController) panelStartupPlay();
 </script>
 
 <header class="site-head">
-  <div class="layout-container head-inner">
+  <div class="layout-container head-inner" id="mainHeadInner">
     <div class="brand-group">
       <div class="brand-icon">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
@@ -4128,6 +4163,20 @@ if (window.panelStartupController) panelStartupPlay();
         <svg id="icoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
       </button>
     </div>
+  </div>
+  <!-- 设置全页头行：与主头行互斥（switchView 切 hidden）；右侧亮暗钮与主头行同一状态源 -->
+  <div class="layout-container head-inner" id="settingsHeadInner" hidden>
+    <div class="settings-head-left">
+      <button class="btn btn-mini" id="settingsExitBtn" title="回到之前的视图">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+        退出
+      </button>
+      <h1 class="settings-head-title">设置</h1>
+    </div>
+    <button class="icon-btn" id="settingsThemeToggle" aria-label="切换亮暗主题" title="切换亮暗主题">
+      <svg id="settingsIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="settingsIcoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    </button>
   </div>
 </header>
 
@@ -5462,6 +5511,132 @@ if (window.panelStartupController) panelStartupPlay();
     </div>
   </section>
 
+  <!-- 设置全页视图：页头齿轮切入（switchView 与主头行互斥），退出回到进入前视图；
+       不写入 panel-view，刷新按 restoreView 白名单恢复，永不落设置页 -->
+  <section class="settings-view" id="settingsView" hidden>
+    <nav class="view-tabs settings-subtabs" role="tablist" aria-label="设置分类">
+      <button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true">通用</button>
+      <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false">主题</button>
+    </nav>
+
+    <!-- 「通用」：原设置弹窗五项原样搬入（控件 id、逐项独立保存/失败回滚语义不变） -->
+    <div class="settings-panel" id="settingsPanelGeneral">
+      <div class="panel-card">
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">跟随 Coding Agent 启动</div>
+              <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Reasonix / Qoder 运行时自动保持 Relay 链路就绪。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="followAgentToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title" id="keepAliveTitle">抗截断</div>
+              <div class="modal-item-desc" id="keepAliveDesc">整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。</div>
+            </div>
+            <div class="seg-control" id="keepAliveSlider" role="radiogroup" aria-label="抗截断" data-mode="enhanced">
+              <button type="button" class="seg-btn" data-mode="off" role="radio" aria-checked="false">关</button>
+              <button type="button" class="seg-btn" data-mode="enhanced" role="radio" aria-checked="true">开</button>
+            </div>
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">抗截断重试次数</div>
+              <div class="modal-item-desc">上游截断/空流时的最大重试次数。范围 0–10，默认 2。抗截断开启时生效，重试覆盖整个回合。</div>
+            </div>
+            <input class="modal-number" type="number" id="keepAliveRetriesInput" min="0" max="10" step="1" value="2">
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">注入推理强度</div>
+              <div class="modal-item-desc">anyswitch借助公开资料整理了当前所有主流模型支持的推理强度选项；当上游未下发思考强度选项时，开启此项可为模型补齐推理强度选项（注入选项不代表一定可用）。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="injectEffortToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">折线视窗节点数</div>
+              <div class="modal-item-desc">按请求时序保留最近 N 个数据点，不按时间过期。范围 2–128，默认 16。</div>
+            </div>
+            <input class="modal-number" type="number" id="sparkWindowInput" min="2" max="128" step="1" value="16">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 「主题」：左栏列表点选即全局生效（setStyle），右栏抽象样张实时预览 -->
+    <div class="settings-panel" id="settingsPanelTheme" hidden>
+      <p class="settings-theme-desc">点选主题即时生效并记住选择；亮暗模式由右上角按钮单独控制。</p>
+      <div class="settings-theme-grid">
+        <div class="settings-theme-list" id="stylePicker" role="radiogroup" aria-label="主题">
+          <button type="button" class="settings-theme-item" data-style="" role="radio" aria-checked="true">经典</button>
+          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="false">SaaS</button>
+          <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">极光</button>
+          <button type="button" class="settings-theme-item" data-style="blueprint" role="radio" aria-checked="false">蓝图</button>
+          <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">暖纸</button>
+        </div>
+        <!-- 预览样张：抽象模拟界面，真实组件类拼装，换主题/切亮暗即时反映，inert 不响应交互 -->
+        <div class="settings-theme-preview" id="settingsThemePreview" inert>
+          <div class="view-tabs settings-preview-nav">
+            <span class="view-tab active">看板</span>
+            <span class="view-tab">统计</span>
+          </div>
+          <div class="panel-card">
+            <div class="card-header">
+              <h2 class="card-title">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                服务状态
+              </h2>
+              <span class="badge badge-ok">运行正常</span>
+            </div>
+            <div class="card-body">
+              <div class="prop-list">
+                <div class="prop-row">
+                  <span class="prop-name">监听地址</span>
+                  <span class="prop-val">127.0.0.1:47821</span>
+                </div>
+                <div class="prop-row">
+                  <span class="prop-name">开机自启常驻</span>
+                  <label class="toggle">
+                    <input type="checkbox" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+              <div class="settings-preview-row">
+                <button class="btn btn-mini btn-primary">启动</button>
+                <button class="btn btn-mini">重载</button>
+                <button class="btn btn-mini btn-danger">停止</button>
+                <span class="seg-control">
+                  <span class="seg-btn">关</span>
+                  <span class="seg-btn" aria-checked="true">开</span>
+                </span>
+              </div>
+              <div class="settings-preview-row">
+                <span class="badge badge-ok">正常</span>
+                <span class="badge badge-neutral">待命</span>
+                <span class="badge badge-danger">异常</span>
+                <div class="telemetry-sparkline settings-preview-spark">
+                  <svg viewBox="0 0 68 26" preserveAspectRatio="none">
+                    <path d="M0,20 L9.7,14 L19.4,16 L29.1,8 L38.8,12 L48.5,5 L58.2,9 L68,4 L68,26 L0,26 Z" fill="var(--spark-fill)"/>
+                    <path d="M0,20 L9.7,14 L19.4,16 L29.1,8 L38.8,12 L48.5,5 L58.2,9 L68,4" fill="none" stroke="var(--spark-line)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                  </svg>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
 </main>
 
 <!-- 会话管理：TOC 浮动按钮 + 弹层（小屏） -->
@@ -5513,82 +5688,6 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="diff-modal-col-body" id="storeDiffPrunedBody"></div>
         </div>
       </div>
-    </div>
-  </div>
-</div>
-
-<div class="modal-overlay" id="settingsModal">
-  <div class="modal-card">
-    <div class="modal-head">
-      <h3>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        设置
-      </h3>
-      <button class="modal-close-btn" id="settingsCloseBtn" aria-label="关闭">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-      </button>
-    </div>
-    <div class="modal-body">
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title">跟随 Coding Agent 启动</div>
-            <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Reasonix / Qoder 运行时自动保持 Relay 链路就绪。</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="followAgentToggle">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title" id="keepAliveTitle">抗截断</div>
-            <div class="modal-item-desc" id="keepAliveDesc">整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。</div>
-          </div>
-          <div class="seg-control" id="keepAliveSlider" role="radiogroup" aria-label="抗截断" data-mode="enhanced">
-            <button type="button" class="seg-btn" data-mode="off" role="radio" aria-checked="false">关</button>
-            <button type="button" class="seg-btn" data-mode="enhanced" role="radio" aria-checked="true">开</button>
-          </div>
-        </div>
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title">抗截断重试次数</div>
-            <div class="modal-item-desc">上游截断/空流时的最大重试次数。范围 0–10，默认 2。抗截断开启时生效，重试覆盖整个回合。</div>
-          </div>
-          <input class="modal-number" type="number" id="keepAliveRetriesInput" min="0" max="10" step="1" value="2">
-        </div>
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title">注入推理强度</div>
-            <div class="modal-item-desc">anyswitch借助公开资料整理了当前所有主流模型支持的推理强度选项；当上游未下发思考强度选项时，开启此项可为模型补齐推理强度选项（注入选项不代表一定可用）。</div>
-          </div>
-          <label class="toggle">
-            <input type="checkbox" id="injectEffortToggle">
-            <span class="slider"></span>
-          </label>
-        </div>
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title">折线视窗节点数</div>
-            <div class="modal-item-desc">按请求时序保留最近 N 个数据点，不按时间过期。范围 2–128，默认 16。</div>
-          </div>
-          <input class="modal-number" type="number" id="sparkWindowInput" min="2" max="128" step="1" value="16">
-        </div>
-        <div class="modal-item">
-          <div>
-            <div class="modal-item-title">面板主题</div>
-            <div class="modal-item-desc">切换即时生效并记忆在本机；亮暗模式由右上角按钮独立控制，与各主题正交。</div>
-          </div>
-          <div class="seg-control" id="stylePicker" role="radiogroup" aria-label="主题">
-            <button type="button" class="seg-btn" data-style="" role="radio" aria-checked="true">经典</button>
-            <button type="button" class="seg-btn" data-style="saas" role="radio" aria-checked="false">SaaS</button>
-            <button type="button" class="seg-btn" data-style="aurora" role="radio" aria-checked="false">极光</button>
-            <button type="button" class="seg-btn" data-style="blueprint" role="radio" aria-checked="false">蓝图</button>
-            <button type="button" class="seg-btn" data-style="sepia" role="radio" aria-checked="false">暖纸</button>
-          </div>
-        </div>
-    </div>
-    <div class="modal-foot">
-      <button class="btn" id="settingsDoneBtn">完成</button>
     </div>
   </div>
 </div>
@@ -5900,7 +5999,7 @@ async function api(method, path, body) {
   async function init() {
     initTheme();
     initStylePicker();
-    initSettingsModal();
+    initSettingsView();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -5925,6 +6024,10 @@ async function api(method, path, body) {
   let currentView = "board";
   // restoreView 恢复视图时置位：首屏/刷新恢复不播入场动画，switchView 消费一次即复位
   let suppressViewEnter = false;
+  // 设置全页视图：记住进入前的视图供「← 退出」返回；进入钩子由 initSettingsView
+  // 装配（子 tab 重置到「通用」并重拉设置项）。设置本身不写入 panel-view。
+  let settingsReturnView = "board";
+  let enterSettingsView = () => {};
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -7598,12 +7701,8 @@ async function api(method, path, body) {
     };
   }
 
-  // 设置弹窗与各项开关
-  function initSettingsModal() {
-    const modal = $("settingsModal");
-    const openBtn = $("settingsBtn");
-    const closeBtn = $("settingsCloseBtn");
-    const doneBtn = $("settingsDoneBtn");
+  // 设置全页视图与各项开关
+  function initSettingsView() {
     const keepAliveSlider = $("keepAliveSlider");
     const keepAliveTitle = $("keepAliveTitle");
     const keepAliveDesc = $("keepAliveDesc");
@@ -7642,19 +7741,41 @@ async function api(method, path, body) {
       return m;
     }
 
-    function openModal() {
-      modal.classList.add("show");
-      loadSettingsState();
-    }
-    function closeModal() {
-      modal.classList.remove("show");
-    }
+    // 设置入口：页头齿轮切入全页设置视图，退出回到进入前的视图
+    const openBtn = $("settingsBtn");
+    const exitBtn = $("settingsExitBtn");
+    if (openBtn) openBtn.onclick = () => {
+      if (currentView !== "settings") settingsReturnView = currentView;
+      switchView("settings");
+    };
+    if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
 
-    if (openBtn) openBtn.onclick = openModal;
-    if (closeBtn) closeBtn.onclick = closeModal;
-    if (doneBtn) doneBtn.onclick = closeModal;
-    modal.onclick = (e) => {
-      if (e.target === modal) closeModal();
+    // 子 tab：通用 / 主题。进入设置固定落「通用」（enterSettingsView 装配于此）；
+    // 用户点切时面板沿用视图入场一族（view-enter）重播一次。
+    function activateSettingsSubTab(which, animate) {
+      const general = which === "general";
+      const tab = $(general ? "settingsTabGeneral" : "settingsTabTheme");
+      if (tab.classList.contains("active")) return;
+      $("settingsTabGeneral").classList.toggle("active", general);
+      $("settingsTabTheme").classList.toggle("active", !general);
+      $("settingsTabGeneral").setAttribute("aria-selected", general ? "true" : "false");
+      $("settingsTabTheme").setAttribute("aria-selected", !general ? "true" : "false");
+      $("settingsPanelGeneral").hidden = !general;
+      $("settingsPanelTheme").hidden = general;
+      if (animate) {
+        replayViewEnter($(general ? "settingsPanelGeneral" : "settingsPanelTheme"));
+      }
+    }
+    function resetSettingsSubTab() {
+      for (const id of ["settingsTabGeneral", "settingsTabTheme"]) $(id).classList.remove("active");
+      activateSettingsSubTab("general", false);
+    }
+    $("settingsTabGeneral").onclick = () => activateSettingsSubTab("general", true);
+    $("settingsTabTheme").onclick = () => activateSettingsSubTab("theme", true);
+
+    enterSettingsView = () => {
+      resetSettingsSubTab();
+      return loadSettingsState();
     };
 
     async function loadSettingsState() {
@@ -8131,31 +8252,38 @@ async function api(method, path, body) {
 
   // 主题切换
   function initTheme() {
-    const btn = $("themeToggle");
+    // 主头行与设置头行各有一颗亮暗钮：同一状态源（data-theme + panel-theme），
+    // 同一套日/月图标逻辑，任一侧切换两侧同步刷新
+    const toggles = [
+      { btn: $("themeToggle"), sun: $("icoSun"), moon: $("icoMoon") },
+      { btn: $("settingsThemeToggle"), sun: $("settingsIcoSun"), moon: $("settingsIcoMoon") },
+    ].filter((t) => t.btn);
     function currentTheme() {
       const t = document.documentElement.getAttribute("data-theme");
       if (t === "light" || t === "dark") return t;
       return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     }
-    function syncBtn() {
+    function syncBtns() {
       const dark = currentTheme() === "dark";
-      $("icoSun").hidden = !dark;
-      $("icoMoon").hidden = dark;
       const label = dark ? "切换到亮色模式" : "切换到暗色模式";
-      btn.setAttribute("aria-label", label); btn.title = label;
+      for (const t of toggles) {
+        if (t.sun) t.sun.hidden = !dark;
+        if (t.moon) t.moon.hidden = dark;
+        t.btn.setAttribute("aria-label", label); t.btn.title = label;
+      }
     }
     function setTheme(mode) {
       if (mode === "light" || mode === "dark") document.documentElement.setAttribute("data-theme", mode);
       else document.documentElement.removeAttribute("data-theme");
       try { localStorage.setItem("panel-theme", mode); } catch {}
-      syncBtn();
+      syncBtns();
     }
     const saved = localStorage.getItem("panel-theme");
     setTheme(saved === "light" || saved === "dark" ? saved : "auto");
-    btn.onclick = () => setTheme(currentTheme() === "dark" ? "light" : "dark");
+    for (const t of toggles) t.btn.onclick = () => setTheme(currentTheme() === "dark" ? "light" : "dark");
   }
 
-  // 面板主题（常驻设置）
+  // 面板主题（设置视图「主题」子 tab 左栏列表，点选即全局生效）
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
@@ -8169,7 +8297,7 @@ async function api(method, path, body) {
     }
     function syncBtns() {
       const cur = currentStyle();
-      for (const b of picker.querySelectorAll(".seg-btn")) {
+      for (const b of picker.querySelectorAll(".settings-theme-item")) {
         b.setAttribute("aria-checked", b.dataset.style === cur ? "true" : "false");
       }
     }
@@ -8180,7 +8308,7 @@ async function api(method, path, body) {
       syncBtns();
     }
     picker.addEventListener("click", (e) => {
-      const b = e.target.closest(".seg-btn");
+      const b = e.target.closest(".settings-theme-item");
       if (!b || !STYLES.includes(b.dataset.style)) return;
       setStyle(b.dataset.style);
     });
@@ -8407,12 +8535,22 @@ async function api(method, path, body) {
     if ($("skillsView").hidden) refreshSkillsState(); // skills 视图时 switchView 已触发刷新
   }
 
+  // view-enter 重播：remove → 强制 reflow（复位进行中的动画，连切时重播）→ add →
+  // animationend 一次性清类。switchView 的视图入场与设置子 tab 面板切换共用同一套。
+  function replayViewEnter(el) {
+    el.classList.remove("view-enter");
+    void el.offsetWidth;
+    el.classList.add("view-enter");
+    el.addEventListener("animationend", () => el.classList.remove("view-enter"), { once: true });
+  }
+
   function switchView(name) {
     const board = name === "board";
     const store = name === "store";
     const stats = name === "stats";
     const presets = name === "presets";
     const sessions = name === "sessions";
+    const settings = name === "settings";
     currentView = name;
     document.querySelector(".telemetry-view").hidden = !board;
     $("skillsView").hidden = !(name === "skills");
@@ -8420,6 +8558,10 @@ async function api(method, path, body) {
     $("storeView").hidden = !store;
     $("statsView").hidden = !stats;
     $("sessionsView").hidden = !sessions;
+    $("settingsView").hidden = !settings;
+    // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
+    $("mainHeadInner").hidden = settings;
+    $("settingsHeadInner").hidden = !settings;
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
     $("tabPresets").classList.toggle("active", presets);
@@ -8441,18 +8583,19 @@ async function api(method, path, body) {
         : presets ? $("presetsView")
         : store ? $("storeView")
         : stats ? $("statsView")
+        : settings ? $("settingsView")
         : $("sessionsView");
-      enteredView.classList.remove("view-enter");
-      void enteredView.offsetWidth; // 复位进行中的动画，连切时重播
-      enteredView.classList.add("view-enter");
-      enteredView.addEventListener("animationend", () => enteredView.classList.remove("view-enter"), { once: true });
+      replayViewEnter(enteredView);
     }
-    try { localStorage.setItem("panel-view", name); } catch {}    let viewReady;
+    // 设置视图不写入 panel-view：刷新后按 restoreView 白名单恢复，永不落设置页
+    if (!settings) try { localStorage.setItem("panel-view", name); } catch {}
+    let viewReady;
     if (name === "skills") viewReady = refreshSkillsState();
     if (presets) viewReady = refreshPresetsState();
     if (store) viewReady = refreshStoreState();
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
     if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
+    if (settings) viewReady = enterSettingsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
     // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
