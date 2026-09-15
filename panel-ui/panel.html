@@ -13237,11 +13237,12 @@ async function api(method, path, body) {
     statsTrendPrev = null; // 进 tab 首张图走 reveal 揭示动画
     statsUsageRevealed = false; // 环形图揭示同理：每次进 tab 重播（与趋势图一致）
     loadStatsPrefs(); // 兜底：restoreView 可能先于 initStatsTab 到达
-    // 缓存热渲染：切走时 leaveStatsView 只取消 rAF 不清 DOM，旧满环会残留在
+    // 缓存热渲染：切走时 leaveStatsView 只取消 rAF 不清 DOM，旧画面会残留在
     // 容器里直到网络返回——先同步用已缓存数据重渲（此时 reveal 标记刚被重置，
-    // 环以 dash=0 起步并立即重播），消除「先见满环、再播动画」的割裂与空窗。
-    // fetch 返回的静默重渲由 renderStatsUsage 的 _usageRaf 守卫跳过，不打断揭示。
-    if (statsData) renderStatsUsage();
+    // 趋势图与环均从零起步立即重播生长动画），消除「旧图静置、动画迟到」的
+    // 割裂与空窗。fetch 落地后：数据未变由守卫跳过静默重渲（环 _usageRaf、
+    // 趋势图同终点签名），已变则趋势图 morph 从在飞位置半途接管，均不打断动画。
+    if (statsData) { renderStatsTrend(); renderStatsUsage(); }
     const firstReady = refreshStatsState();
     if (!statsTimer) {
       statsTimer = setInterval(() => {

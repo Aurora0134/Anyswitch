@@ -120,7 +120,7 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 | TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
 | 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.html `STATS_MORPH_MS` / `STATS_MORPH_EASE`（约 :11724） | — |
 | 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.html `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
-| 趋势动画路径分配：进 tab 首张/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.html renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
+| 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.html `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
 | journal 保留 90 天 | usage-journal.mjs retentionDays | usage-journal 测试 |
 | 监测页实例陈旧 2min | panel.html `INSTANCE_STALE_MS`（:5440） | 属监测页，统计页不用 |
 
