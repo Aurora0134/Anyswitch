@@ -12,8 +12,8 @@ import {
   PROMPT_ENDPOINTS,
 } from "./agent-prompts-inject.mjs";
 
-// Injection plane: every injector runs against a temp fake home + fake
-// %APPDATA% so real endpoint instruction files are never touched.
+// Injection plane: every injector runs against a temp fake home so real
+// endpoint instruction files are never touched.
 
 const tempDirs = [];
 
@@ -21,10 +21,8 @@ function makeInjector() {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-inject-"));
   tempDirs.push(root);
   const homeDir = join(root, "home");
-  const appData = join(root, "appdata");
   mkdirSync(homeDir, { recursive: true });
-  mkdirSync(appData, { recursive: true });
-  return { injector: createPromptsInjector({ homeDir, appData, base: {} }), homeDir, appData };
+  return { injector: createPromptsInjector({ homeDir }), homeDir };
 }
 
 afterEach(() => {
@@ -35,10 +33,10 @@ const PRESET_A = { id: "aaaaaaaaaaaa", title: "规则A", tag: "", enabled: true,
 const PRESET_B = { id: "bbbbbbbbbbbb", title: "规则B", tag: "", enabled: true, content: "第二行\n第三行" };
 
 describe("agent-prompts-inject endpoint table", () => {
-  it("covers all nine endpoints with verified targets", () => {
-    const { injector, homeDir, appData } = makeInjector();
+  it("covers all eight endpoints with verified targets", () => {
+    const { injector, homeDir } = makeInjector();
     const endpoints = injector.listEndpoints();
-    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "reasonix", "qoder", "codex"]);
+    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex"]);
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.target, join(homeDir, ".claude", "CLAUDE.md"));
     assert.equal(byId.kimi.target, join(homeDir, ".kimi-code", "AGENTS.md"));
@@ -46,8 +44,6 @@ describe("agent-prompts-inject endpoint table", () => {
     assert.equal(byId.dsh.target, join(homeDir, ".dsh", "AGENTS.md"));
     assert.equal(byId.pi.target, join(homeDir, ".pi", "agent", "AGENTS.md"));
     assert.equal(byId.opencode.target, join(homeDir, ".config", "opencode", "AGENTS.md"));
-    // reasonix lives under %APPDATA%, never homeDir-relative.
-    assert.equal(byId.reasonix.target, join(appData, "reasonix", "AGENTS.md"));
     // qoder gets its own file under the user-level rules dir — never the user's
     // own ~/.qoder/AGENTS.md, which Anyswitch must not touch.
     assert.equal(byId.qoder.target, join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"));
@@ -57,10 +53,10 @@ describe("agent-prompts-inject endpoint table", () => {
     // Qoder re-watches a loaded rule file, so preset edits land next turn.
     assert.equal(byId.qoder.hotReload, true);
     // codex reads AGENTS.md once at session start and has no fs watcher.
-    for (const id of ["claude", "zcode", "dsh", "pi", "reasonix", "codex"]) {
+    for (const id of ["claude", "zcode", "dsh", "pi", "codex"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
-    assert.equal(PROMPT_ENDPOINTS.length, 9);
+    assert.equal(PROMPT_ENDPOINTS.length, 8);
   });
 });
 
@@ -172,7 +168,7 @@ describe("agent-prompts-inject block rendering and application", () => {
     const results = injector.syncAll(() => [PRESET_A]);
     assert.equal(results.claude.ok, false);
     assert.match(results.claude.error, /.+/);
-    for (const id of ["kimi", "zcode", "dsh", "pi", "opencode", "reasonix"]) {
+    for (const id of ["kimi", "zcode", "dsh", "pi", "opencode"]) {
       assert.deepEqual(results[id], { ok: true }, id);
     }
     // The healthy endpoints really were written.

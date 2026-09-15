@@ -61,7 +61,7 @@ const STORE = {
     // no candidate anywhere: the pool node binds a model no member carries
     dsh: { chain: [ { node: "pool-x", model: "model-zzz" } ] },
     // 同一节点绑定不同模型两次入链（node+model 复合键去重后的合法形态）
-    reasonix: { chain: [ { node: "chan-a", model: "model-a" }, { node: "chan-a", model: "model-a2" } ] },
+    qoder: { chain: [ { node: "chan-a", model: "model-a" }, { node: "chan-a", model: "model-a2" } ] },
   },
 };
 
@@ -314,7 +314,7 @@ describe("chain routing: streaming", () => {
     const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
 
     await withServer(deps, async (port) => {
-      const first = await postChat(port, { agentId: "reasonix" });
+      const first = await postChat(port, { agentId: "qoder" });
       assert.equal(first.status, 200);
       await first.text();
       assert.deepEqual(calls, ["chan-a"]);
@@ -322,7 +322,7 @@ describe("chain routing: streaming", () => {
 
       calls.length = 0;
       bodies.length = 0;
-      const second = await postChat(port, { agentId: "reasonix" });
+      const second = await postChat(port, { agentId: "qoder" });
       assert.equal(second.status, 200);
       await second.text();
       assert.deepEqual(calls, ["chan-a"]);
@@ -347,7 +347,7 @@ describe("chain routing: streaming", () => {
     await withServer(deps, async (port) => {
       // 两个请求都走 [model-a(404) → model-a2(ok)]：第二次连续失败锁定降级。
       for (let round = 0; round < 2; round += 1) {
-        const res = await postChat(port, { agentId: "reasonix" });
+        const res = await postChat(port, { agentId: "qoder" });
         assert.equal(res.status, 200);
         const text = await res.text();
         assert.ok(text.includes("A2 answers"));
@@ -357,7 +357,7 @@ describe("chain routing: streaming", () => {
         bodies.length = 0;
       }
 
-      const third = await postChat(port, { agentId: "reasonix" });
+      const third = await postChat(port, { agentId: "qoder" });
       assert.equal(third.status, 200);
       await third.text();
       assert.deepEqual(calls, ["chan-a"], "the chain restarts at the second occurrence, skipping the dead head entry");

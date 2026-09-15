@@ -14,7 +14,7 @@ import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 // Single source of truth for the relay's loopback port. Every launcher
-// (zcode/dsh/pi/reasonix/opencode/qoder) imports this instead of carrying its
+// (zcode/dsh/pi/opencode/qoder) imports this instead of carrying its
 // own hardcoded copy, so a launcher can never drift onto a different port than
 // the resident relay (relay-host.mjs) binds.
 export const DEFAULT_RELAY_PORT = 47821;
@@ -53,7 +53,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "reasonix", "qoder", "opencode", "claude", "codex"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "qoder", "opencode", "claude", "codex"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -73,7 +73,7 @@ function explicitInstanceId(headers) {
 // 头仍是唯一正源且优先；只有头缺失（或非法
 // 被静默丢弃）时，才对多实例端点（kimi/opencode/pi，与 agent-metrics 的
 // instanceBuckets 口径一致）用 netstat 快照反查 keep-alive 连接对端进程，
-// 合成 "<agentId>-<pid>"。zcode/claude/dsh/reasonix 保持聚合一桶，一律不兜底。
+// 合成 "<agentId>-<pid>"。zcode/claude/dsh 保持聚合一桶，一律不兜底。
 // pid === process.pid 说明该 socket 归 relay 自己（自环/进程内转发），同样不
 // 兜底，避免把 relay 进程伪造成一个实例。
 // 两条路径的 id 都在 collector.startRequest 内过 normalizeInstanceId（消费侧
@@ -220,15 +220,14 @@ function openaiAgentIdFrom(headers, agentHint = null) {
 
 // Anthropic-native clients don't send x-agent-id, so we sniff the UA for
 // metrics routing and chain (自动路由) lookup. Returns null when unknown.
-// A whitelisted explicit header still wins (reasonix injects one), keeping
-// both paths' attribution rules symmetric.
+// A whitelisted explicit header still wins, keeping both paths' attribution
+// rules symmetric.
 function anthropicAgentIdFrom(headers) {
   const explicit = explicitAgentId(headers);
   if (explicit) return explicit;
   const ua = (headers["user-agent"] || "").toLowerCase();
   if (ua.includes("opencode")) return "opencode";
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
-  if (ua.includes("reasonix")) return "reasonix";
   if (ua.includes("qoder")) return "qoder";
   if (ua.includes("claude") || ua.includes("anthropic")) return "claude";
   return null;

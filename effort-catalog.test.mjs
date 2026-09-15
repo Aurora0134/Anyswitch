@@ -15,7 +15,6 @@ import {
   pickDefaultEffort,
   effortWireValue,
   intersectEffortVocabulary,
-  intersectReasonixEfforts,
   modelEffortSurface,
   resolveEndpointEfforts,
   resolveDeclaredEfforts,
@@ -330,37 +329,22 @@ describe("intersectEffortVocabulary", () => {
   });
 });
 
-describe("intersectReasonixEfforts", () => {
-  it("clips to the channel family's accepted set", () => {
-    assert.deepEqual(intersectReasonixEfforts(["high", "xhigh", "max"], "deepseek-v4-flash"), ["high", "max"]);
-  });
-
-  it("comes back empty for a binary-toggle family, which means do not write it", () => {
-    assert.deepEqual(intersectReasonixEfforts(["low", "high", "max"], "longcat-chat"), []);
-    assert.deepEqual(intersectReasonixEfforts(["minimal", "low", "medium", "high", "max"], "MiniMax-M3"), []);
-  });
-
-  it("leaves an unconstrained family as the library stated", () => {
-    assert.deepEqual(intersectReasonixEfforts(["high", "xhigh", "max"], "glm-5.3"), ["high", "xhigh", "max"]);
-    assert.deepEqual(intersectReasonixEfforts(["high"], undefined), ["high"]);
-  });
-});
-
 describe("modelEffortSurface", () => {
   const catalog = { models: new Map(Object.entries(SAMPLE_MODELS).map(([k, v]) => [k, normalizeEffortEntry(v)])) };
 
   it("hands a writer the clipped levels and the default among them", () => {
-    const surface = modelEffortSurface("deepseek-v4-flash", { catalog, agent: "reasonix" });
-    assert.deepEqual(surface.levels, ["high", "max"]);
+    const surface = modelEffortSurface("deepseek-v4-flash", { catalog, agent: "dsh" });
+    assert.deepEqual(surface.levels, ["high", "xhigh", "max"]);
     assert.equal(surface.default, "high");
     assert.equal(surface.thinkingFormat, "deepseek");
   });
 
   it("re-picks the default when clipping removed the declared one", () => {
+    // dsh/pi 的词表不含 light：light 为默认挡时裁剪剔除后按偏好重算。
     const partial = {
-      models: new Map([["deepseek-v5", normalizeEffortEntry({ kind: "reasoning", levels: ["low", "high", "xhigh"], default: "xhigh" })]]),
+      models: new Map([["deepseek-v5", normalizeEffortEntry({ kind: "reasoning", levels: ["light", "low", "high"], default: "light" })]]),
     };
-    const surface = modelEffortSurface("deepseek-v5", { catalog: partial, agent: "reasonix" });
+    const surface = modelEffortSurface("deepseek-v5", { catalog: partial, agent: "dsh" });
     assert.deepEqual(surface.levels, ["low", "high"]);
     assert.equal(surface.default, "high");
   });
@@ -370,7 +354,7 @@ describe("modelEffortSurface", () => {
   });
 
   it("says nothing when the endpoint cannot carry a level at all", () => {
-    assert.equal(modelEffortSurface("longcat-chat", { catalog, agent: "reasonix" }), null);
+    assert.equal(modelEffortSurface("longcat-chat", { catalog, agent: "qoder" }), null);
     assert.equal(modelEffortSurface("glm-5.3", { catalog, agent: "qoder" }), null);
   });
 

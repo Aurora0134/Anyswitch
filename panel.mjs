@@ -73,12 +73,12 @@ export class BodyTooLargeError extends Error {
 
 // Prompts tab facade: pairs the prompts data plane (agent-prompts.mjs) with
 // the injector (agent-prompts-inject.mjs). Every mutation is followed by a
-// full syncAll across all eight endpoints; per-endpoint failures land in the
+// full syncAll across all endpoints; per-endpoint failures land in the
 // `sync` snapshot served by getState and never fail the mutation itself.
 // `homeDir` is injectable so tests can keep all writes inside temp dirs.
 export function createPromptsPanelService({ base = process.env, homeDir } = {}) {
   const data = createPromptsService({ base });
-  const injector = createPromptsInjector({ base, ...(homeDir ? { homeDir } : {}) });
+  const injector = createPromptsInjector({ ...(homeDir ? { homeDir } : {}) });
   let lastSync = {};
   const mutateAndSync = (result) => {
     lastSync = injector.syncAll((endpointId) => data.resolveForEndpoint(endpointId));
@@ -619,8 +619,9 @@ export function createPanelRouter({
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
-  // kimi, reasonix). Runs the standalone sync runner so the merge logic loads
-  // from disk — catalog-writer fixes apply here without a panel/relay restart.
+  // kimi, qoder, codex, opencode). Runs the standalone sync runner so the
+  // merge logic loads from disk — catalog-writer fixes apply here without a
+  // panel/relay restart.
   async function handleAgentSync(res) {
     logger?.info("agent endpoint sync requested from panel");
     try {

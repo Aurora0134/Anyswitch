@@ -345,10 +345,6 @@ function extractParentPid(line) {
 // bucket of its own purely so the dispatch can send it to the lineage table and
 // nowhere else.
 const AGENT_IMAGE_BUCKETS = [
-  ["reasonix.exe", "reasonix"],
-  ["reasonix-cli.exe", "reasonix"],
-  ["reasonix-desktop.exe", "reasonix"],
-  ["reasonix-launcher.exe", "reasonix"],
   ["qoder.exe", "qoder"],
   ["codex.exe", "codex"],
   ["codex-code-mode-host.exe", "codex"],
@@ -364,7 +360,7 @@ const AGENT_IMAGE_BUCKETS = [
 
 // Tail-anchored matchers for WMIC-shaped rows, one per candidate. WMIC output
 // is <node>,<command line...>,<name>[,<ppid>],<pid> and command lines carry
-// commas (quoted flags) plus quoted name literals (name='Reasonix.exe'), so
+// commas (quoted flags) plus quoted name literals (name='Qoder.exe'), so
 // neither a comma split nor a bare substring works; anchoring on the trailing
 // pid (plus optional parent column) is what keeps a name literal inside a
 // command line — the probe wrapper's WHERE clause, an npm path — from
@@ -425,7 +421,7 @@ function resolveProbeRow(lower) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, reasonix: 0, qoder: 0, codex: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), reasonixPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -448,7 +444,7 @@ function parseTasklistCsv(stdout) {
     // Claim by image name only (see resolveProbeRow). The probe wrapper's
     // command line embeds every agent name literal; a whole-line includes()
     // here would resurrect the phantom-client class of bugs (9613914's
-    // reasonix ghost card), so command lines are consulted only AFTER the
+    // ghost card), so command lines are consulted only AFTER the
     // name has claimed the row, and cmd.exe-named rows feed nothing but the
     // lineage table above.
     const { image, commandLine } = resolveProbeRow(lower);
@@ -459,16 +455,9 @@ function parseTasklistCsv(stdout) {
 
     if (bucket === "cmd") continue;
 
-    if (bucket === "reasonix") {
-      if (commandLine?.includes("--type=")) {
-        // Electron helper child process, skip
-      } else {
-        result.reasonix += 1;
-        if (pid) result.reasonixPids.add(pid);
-      }
-    } else if (bucket === "qoder") {
+    if (bucket === "qoder") {
       // Qoder IDE is an Electron app: filter --type= helper children like
-      // reasonix/zcode so only main processes count as the endpoint process.
+      // zcode so only main processes count as the endpoint process.
       if (commandLine?.includes("--type=")) {
         // Electron helper child process, skip
       } else {
@@ -1330,7 +1319,7 @@ const PS_REPL_COMMAND =
 // intermediate hop would break ancestor resolution. cmd.exe rows feed only
 // the lineage table — no counting branch claims them.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -1587,7 +1576,6 @@ export function createAgentMetricsCollector(options = {}) {
   const dshState = createAggregateState();
   const piState = createAggregateState();
   const kimiState = createAggregateState();
-  const reasonixState = createAggregateState();
   const qoderState = createAggregateState();
   const opencodeState = createAggregateState();
   const claudeState = createAggregateState();
@@ -1597,13 +1585,13 @@ export function createAgentMetricsCollector(options = {}) {
   // pi / codex): instanceId -> { state, firstSeen }. Only requests carrying a
   // valid instanceId land here, and they ALSO land in the endpoint aggregate
   // above, so the existing cards are unchanged. claude is per-session
-  // already; zcode/dsh/reasonix/qoder stay aggregate-only by design.
+  // already; zcode/dsh/qoder stay aggregate-only by design.
   const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map() };
 
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState, codexState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState]) {
       state.sparkWindowPoints = sparkWindowPoints;
       while (state.ttftHistory.length > keep) state.ttftHistory.shift();
       while (state.recentSamples.length > keep) state.recentSamples.shift();
@@ -1628,18 +1616,6 @@ export function createAgentMetricsCollector(options = {}) {
     if (typeof meta.userAgent === "string") {
       const ua = meta.userAgent.toLowerCase();
       if (ua.includes("pi/") || ua.includes("pi-client")) return true;
-    }
-    return false;
-  }
-
-  function isReasonixRequest(meta = {}) {
-    if (typeof meta.agentId === "string") {
-      const id = meta.agentId.toLowerCase().trim();
-      if (id === "reasonix") return true;
-    }
-    if (typeof meta.userAgent === "string") {
-      const ua = meta.userAgent.toLowerCase();
-      if (ua.includes("reasonix")) return true;
     }
     return false;
   }
@@ -1715,9 +1691,6 @@ export function createAgentMetricsCollector(options = {}) {
     } else if (isKimiRequest(meta)) {
       targetState = kimiState;
       bucketAgentId = "kimi";
-    } else if (isReasonixRequest(meta)) {
-      targetState = reasonixState;
-      bucketAgentId = "reasonix";
     } else if (isQoderRequest(meta)) {
       targetState = qoderState;
       bucketAgentId = "qoder";
@@ -2088,7 +2061,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, piState, kimiState, reasonixState, qoderState, opencodeState, claudeState, codexState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -2124,7 +2097,6 @@ export function createAgentMetricsCollector(options = {}) {
     settleAbandonedAggregateState(dshState, procCounts.dsh || 0);
     settleAbandonedAggregateState(piState, procCounts.pi || 0);
     settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
-    settleAbandonedAggregateState(reasonixState, procCounts.reasonix || 0);
     settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
     settleAbandonedAggregateState(codexState, procCounts.codex || 0);
     settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
@@ -2486,15 +2458,6 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("kimi"),
     });
 
-    const reasonixAgent = buildAggregateAgentStatus({
-      id: "reasonix",
-      name: "Reasonix",
-      state: reasonixState,
-      processCount: procCounts.reasonix || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-    });
-
     const qoderAgent = buildAggregateAgentStatus({
       id: "qoder",
       name: "Qoder",
@@ -2516,7 +2479,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("codex"),
     });
 
-    // 7. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
+    // 6. OpenCode Agent Status（汇总卡 + 实例桶，经 openai relay 的 UA / x-agent-id 归类）
     const opencodeAgent = buildAggregateAgentStatus({
       id: "opencode",
       name: "OpenCode",
@@ -2527,7 +2490,7 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("opencode"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, reasonixAgent, qoderAgent, codexAgent, opencodeAgent];
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent];
   }
 
   return {
