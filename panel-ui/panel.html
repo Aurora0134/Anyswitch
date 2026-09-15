@@ -11038,9 +11038,9 @@ async function api(method, path, body) {
     $("storeRefreshOneBtn").onclick = () => storeRefresh([p.id]);
     $("storeRenameBtn").onclick = () => showRenameProviderModal(p);
     $("storeRotateBtn").onclick = () => showRotateModal(p);
-    // 入池渠道须先在号池详情解除号池（后端 deleteProvider 同样硬闸）
+    // 池内渠道可直接删除：后端先摘池籍（池剩 1 人时解池）再走删除事务
     $("storeDeleteBtn").onclick = p.poolId
-      ? () => toast(`渠道 ${p.id} 属于号池 ${p.poolId}，请先在号池详情解除号池`, true)
+      ? () => confirmDeletePoolMember(p)
       : () => confirmDeleteProvider(p);
     $("storeModelAllBtn").onclick = () => {
       storeFilterChecked = new Set(Object.keys(p.discovered || {}));
@@ -11771,6 +11771,37 @@ async function api(method, path, body) {
           (r) => `已删除 ${p.id}（${r.modelCount} 个模型）`);
         storeSelection.delete(p.id);
         if (storeFocusId === p.id) storeFocusId = storeLastSelectionId();
+        storeFilterChecked = null;
+        storeFilterDirty = false;
+        storeFilterProviderId = null;
+      },
+    });
+  }
+
+  // 池成员删除：与 confirmDeleteProvider 同一删除事务，多一段摘池/解池后果说明；
+  // 池还在则保留池焦点（成员 tab 渲染时自动回退到首个成员），池被一并解除才回退焦点
+  function confirmDeletePoolMember(p) {
+    const pool = storePools().find((pl) => pl.id === p.poolId);
+    const poolName = pool?.displayName || p.poolId;
+    const dissolving = (pool?.members?.length ?? 2) <= 2;
+    showSkillsModal({
+      title: `删除渠道 ${p.displayName}`,
+      danger: true,
+      confirmText: "确认删除",
+      bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
+        将从渠道管理删除渠道 <b>${escapeHtml(p.id)}</b>（${p.modelCount} 个有效模型），
+        并删除它在主机上的加密凭据。<br>
+        该渠道属于号池 <b>${escapeHtml(poolName)}</b>，删除后会自动移出号池${dissolving ? "；号池只剩 1 个成员，将一并解除" : ""}。<br>
+        凭据删除是唯一不可恢复的步骤；渠道删除失败时凭据会原样保留。</div>`,
+      onConfirm: async () => {
+        await storeAction("/api/store/delete", { id: p.id },
+          (r) => `已删除 ${p.id}（${r.modelCount} 个模型）`);
+        storeSelection.delete(p.id);
+        const poolGone = !storePools().some((pl) => pl.id === p.poolId);
+        if (poolGone) {
+          storeSelection.delete(p.poolId);
+          if (storeFocusId === p.poolId) storeFocusId = storeLastSelectionId();
+        }
         storeFilterChecked = null;
         storeFilterDirty = false;
         storeFilterProviderId = null;

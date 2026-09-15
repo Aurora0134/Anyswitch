@@ -218,8 +218,9 @@ export function createStoreService({
 
     // Pools keep ordered references to their members; a pooled provider must
     // not be deleted out from under its pool (the schema would reject the
-    // dangling reference on the next load anyway). The panel dissolves the
-    // pool first (pool/delete) and only then deletes the members.
+    // dangling reference on the next load anyway). deleteProvider detaches
+    // pool membership first (detachFromPool), so this gate is the backstop
+    // for a concurrent re-pooling race only.
     // This gate MUST run before markPending: it is a business rejection, not
     // a transient failure — a pending journal entry left behind would be
     // replayed by resumeDeletions once the pool is gone, deleting the
@@ -277,6 +278,36 @@ export function createStoreService({
     clearPending(journalPath, providerId, credentialFile);
 
     return { deleted: true, modelCount, credentialFile };
+  }
+
+  // Detach a provider from its pool in a standalone CAS write, BEFORE the
+  // journal transaction starts. The pool gate inside deleteProviderOnce
+  // exists precisely so nothing pending outlives a pool reference, so the
+  // detach must happen first: a pool left with a single member is dissolved
+  // outright (pools require >= 2 members). Returns true when the provider
+  // was not pooled or the detach write succeeded; a failure returns the
+  // usual result object and leaves the journal untouched — the worst benign
+  // outcome is a provider that survives, no longer attached to its pool.
+  async function detachFromPool(providerId) {
+    const loaded = load();
+    if (!loaded.ok) {
+      return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}; deletion aborted, credential retained` };
+    }
+    const pools = loaded.store.pools ?? {};
+    const poolId = Object.keys(pools).find((id) =>
+      Array.isArray(pools[id]?.members) && pools[id].members.includes(providerId));
+    if (poolId === undefined) return true;
+    const nextStore = structuredClone(loaded.store);
+    const members = nextStore.pools[poolId].members.filter((memberId) => memberId !== providerId);
+    if (members.length >= 2) {
+      nextStore.pools[poolId].members = members;
+    } else {
+      delete nextStore.pools[poolId];
+      if (Object.keys(nextStore.pools).length === 0) delete nextStore.pools;
+    }
+    const written = write(nextStore, { expectedHash: loaded.hash });
+    if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
+    return true;
   }
 
   // Re-runs the same idempotent deletion for every provider still pending in
@@ -1095,12 +1126,16 @@ export function createStoreService({
 
     /**
      * Delete a provider with the journal-driven forward-only transaction.
-     * Business failures (store unavailable, unmanaged provider, unsafe
-     * credential path) come back as { ok:false, error }; the credential is
-     * retained in every failure path.
+     * A pooled provider is detached from its pool first (detachFromPool —
+     * its own CAS write, dissolving the pool when it drops below 2 members),
+     * then the transaction runs ungated. Business failures (store
+     * unavailable, unmanaged provider, unsafe credential path) come back as
+     * { ok:false, error }; the credential is retained in every failure path.
      */
     async deleteProvider(id) {
       try {
+        const detach = await detachFromPool(id);
+        if (detach !== true) return detach;
         const result = await deleteProviderOnce(id);
         return { ok: true, ...result };
       } catch (error) {
