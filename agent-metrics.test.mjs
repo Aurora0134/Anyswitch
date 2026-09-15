@@ -1230,35 +1230,6 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(pi.processCount, 1);
   });
 
-  it("routes Reasonix traffic by x-agent-id and detects Reasonix.exe", async () => {
-    let mockTime = 1000;
-    const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => {
-      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\Reasonix\\Reasonix.exe,Reasonix.exe,4242\r\n`;
-      cb(null, csv);
-    };
-    const collector = testCollector({ execFn: mockExec, nowFn });
-    const req = collector.startRequest({
-      agentId: "reasonix",
-      providerId: "poke-api",
-      model: "claude-opus-5",
-    });
-    mockTime = 2200;
-    req.recordFirstChunk();
-    mockTime = 3200;
-    req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
-
-    const status = await collector.getAgentsStatus();
-    const reasonix = status.find((a) => a.id === "reasonix");
-    assert.ok(reasonix);
-    assert.equal(reasonix.status, "running");
-    assert.equal(reasonix.processCount, 1);
-    assert.equal(reasonix.lastModel, "claude-opus-5");
-    assert.equal(reasonix.metrics.totalRequests, 1);
-    const zcode = status.find((a) => a.id === "zcode");
-    assert.equal(zcode.metrics.totalRequests, 0);
-  });
-
   it("routes Qoder traffic by x-agent-id and counts Qoder.exe main processes only", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
@@ -1791,7 +1762,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 9, "panel now exposes 9 endpoint cards including codex");
+    assert.equal(status.length, 8, "panel now exposes 8 endpoint cards including codex");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -1865,7 +1836,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
     // cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 9, "claude aggregate bucket must not add a panel card");
+    assert.equal(status.length, 8, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -3018,7 +2989,6 @@ describe("createSessionReporter", () => {
     dshReq.recordEnd({ usage: { prompt_tokens: 1000, completion_tokens: 80, prompt_tokens_details: { cached_tokens: 800 } } });
 
     const status = await collector.getAgentsStatus();
-    assert.ok(status.find((a) => a.id === "reasonix"));
     assert.ok(status.find((a) => a.id === "kimi"));
     assert.ok(status.find((a) => a.id === "pi"));
 
@@ -3615,20 +3585,20 @@ describe("instance PID reconciliation and process-start placeholders", () => {
 describe("probe row claiming by image name (probe self-match regression)", () => {
   // Live capture of the exact failure that motivated this describe: the probe
   // runs through child_process.exec, Windows wraps it in
-  // `cmd.exe /d /s /c "wmic process where "name='Reasonix.exe' ..."` and that
+  // `cmd.exe /d /s /c "wmic process where "name='Qoder.exe' ..."` and that
   // wrapper process — its COMMAND LINE carrying every agent name literal from
   // the WHERE clause — lands in the probe's own result. Whole-line matching
-  // claimed it as a reasonix client (first branch, no command-line check), so
-  // a machine that never ran Reasonix showed a phantom 启动/待命 reasonix card
+  // claimed it as a qoder client (first branch, no command-line check), so
+  // a machine that never ran Qoder showed a phantom 启动/待命 qoder card
   // forever. Claiming must key off the image NAME field only.
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
-      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Reasonix.exe' or name='reasonix-cli.exe' or name='reasonix-desktop.exe' or name='reasonix-launcher.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
+      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
       ...extraRows,
     ].join("\r\n") + "\r\n";
   const allZero = (p) => ({
-    zcode: p.zcode, claude: p.claude, reasonix: p.reasonix, dsh: p.dsh,
+    zcode: p.zcode, claude: p.claude, dsh: p.dsh,
     kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder, codex: p.codex,
   });
 
@@ -3636,9 +3606,9 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
     const execFn = (cmd, opts, cb) => cb(null, wmicWrapper());
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, reasonix: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0, codex: 0 },
+    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0, codex: 0 },
       "the probe's own cmd.exe wrapper must not impersonate any client");
-    assert.equal(p.reasonixPids.has(7300), false);
+    assert.equal(p.qoderPids.has(7300), false);
     // The wrapper stays in the lineage table — it is a legitimate hop for
     // launcher → cmd /c → client ancestor resolution.
     assert.equal(p.ppidByPid.get(7300), 5184, "wrapper still feeds the lineage table");
@@ -3647,22 +3617,22 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   it("real clients in the same scan still count beside the wrapper", async () => {
     const execFn = (cmd, opts, cb) =>
       cb(null, wmicWrapper([
-        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\Reasonix\\Reasonix.exe,Reasonix.exe,4000,4242",
+        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\Programs\\Qoder\\Qoder.exe,Qoder.exe,4000,4242",
         "LAPTOP,\"C:\\Program Files\\nodejs\\node.exe\" C:\\app\\relay-host.mjs,node.exe,5184,7320",
         "LAPTOP,\"C:\\Programs\\ZCode\\ZCode.exe\",ZCode.exe,15332,6592",
       ]));
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.equal(p.reasonix, 1);
-    assert.deepEqual([...p.reasonixPids], [4242]);
+    assert.equal(p.qoder, 1);
+    assert.deepEqual([...p.qoderPids], [4242]);
     assert.equal(p.zcode, 1);
     assert.equal(p.kimi, 0, "a bare relay node.exe is no client");
   });
 
   it("powershell fallback wrapper row (with ppid) also counts as nothing", async () => {
     const ps =
-      "7300,5184,cmd.exe,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"powershell -NoProfile -NonInteractive -Command \"Get-CimInstance Win32_Process -Filter \\\"name='Reasonix.exe' or name='node.exe'\\\"\"\r\n" +
-      "4242,4000,Reasonix.exe,C:\\Users\\u\\AppData\\Local\\Programs\\Reasonix\\Reasonix.exe\r\n";
+      "7300,5184,cmd.exe,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"powershell -NoProfile -NonInteractive -Command \"Get-CimInstance Win32_Process -Filter \\\"name='Qoder.exe' or name='node.exe'\\\"\"\r\n" +
+      "4242,4000,Qoder.exe,C:\\Users\\u\\AppData\\Local\\Programs\\Qoder\\Qoder.exe\r\n";
     const execFn = (cmd, opts, cb) => {
       if (cmd.includes("wmic")) return cb(null, "");
       if (cmd.includes("powershell")) return cb(null, ps);
@@ -3670,8 +3640,8 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
     };
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.equal(p.reasonix, 1, "exactly the real Reasonix.exe counts — wrapper contributes nothing");
-    assert.deepEqual([...p.reasonixPids], [4242], "wrapper pid 7300 absent from reasonixPids");
+    assert.equal(p.qoder, 1, "exactly the real Qoder.exe counts — wrapper contributes nothing");
+    assert.deepEqual([...p.qoderPids], [4242], "wrapper pid 7300 absent from qoderPids");
     assert.equal(p.claude, 0);
     assert.equal(p.zcode, 0);
     assert.equal(p.ppidByPid.get(7300), 5184, "wrapper still feeds the lineage table");
@@ -3687,7 +3657,7 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
     assert.ok(p.claudePids.has(4321), "accept-by-name preserved for quoted tasklist rows");
-    assert.equal(p.reasonix, 0);
+    assert.equal(p.qoder, 0);
     assert.equal(p.zcode, 0);
   });
 });

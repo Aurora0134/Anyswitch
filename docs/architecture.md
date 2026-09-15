@@ -26,9 +26,9 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
         ▼                               ▼
 ┌───────────────────────────┐  ┌────────────────────────────────────┐
 │  B 层 · relay（本仓库）     │  │  B 层 · 端点配置写手（本仓库）        │
-│  loopback HTTP 服务：鉴权/  │  │  把托管渠道写进 8 家端点各自的配置    │
-│  路由/协议转换/退避/流式,   │  │  文件（zcode/dsh/pi/kimi/reasonix/  │
-│  常驻宿主+Web 控制面板      │  │  qoder/codex/opencode）            │
+│  loopback HTTP 服务：鉴权/  │  │  把托管渠道写进 7 家端点各自的配置    │
+│  路由/协议转换/退避/流式,   │  │  文件（zcode/dsh/pi/kimi/qoder/     │
+│  常驻宿主+Web 控制面板      │  │  codex/opencode）                  │
 └───────────────────────────┘  └────────────────────────────────────┘
 ```
 
@@ -63,7 +63,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
    上游 `/models` 不声明推理挡位能力，客户端也大多不发 `reasoning_effort`，端点里的挡位区因此对中转站渠道整体失效。anyswitch 自持一份「模型 → 可选挡位」库补齐两面：
 
    - **数据**：`%LOCALAPPDATA%\Anyswitch\thinking-efforts.db.json`（人工可改、不进仓库、不进 git 锚点）。读库唯一入口 `effort-catalog.mjs`：按 `mtimeMs`+体积缓存、改了下一轮即生效；解析失败沿用上一次可用副本并标 `stale`，文件缺失等价于「只有乐观默认」。条目级校验**逐条生效不整表作废**：形状不对/非文本却带挡位的行跳过并计数，挡位名不在词表内的剔除（剔空才跳过），`default` 不在该模型挡位列表内时按偏好重算而非弃行。模型 id 先归一化（循环剥 `[前缀]`、挡位词尾、日期尾、命名空间、Claude 家族名重排），再按点/横两种拼写查——生产 83 个模型 id 全部命中，其中 2 个只能靠点横折叠命中。
-   - **配置面**：把挡位写进各端点自己的模型能力配置，让选择器出真挡位。pi `thinkingLevelMap`+`compat.thinkingFormat`、ZCode `reasoning{enabled,variants,defaultVariant}`、Reasonix `supported_efforts`/`default_effort`（先与渠道族允许集求交，交空则整个模型不写）、kimi `support_efforts`/`default_effort`/`reasoning`——这四家过 `modelEffortSurface` 按各自词表裁剪。DSH 在 store 标注 / 渠道模板 / pi-ai 知识库之后追加一级兜底（不参与路由级方言判定），兜底级同样按 DSH 词表裁剪（dsh-llm-pi-ai 对 `reasoningEfforts` 键做固定集合校验，词表外的挡位名会让整份 settings.yaml 拒载）。词表共八档 `off/light/minimal/low/medium/high/xhigh/max`：`light` 是 gpt-5.6 及以上独有的最轻挡，pi/DSH 两家的固定档位集不含它、裁剪时剔除，其余端点原样渲染。Qoder 只取"有无挡位"的布尔（`capabilities.thinking` 必须是裸布尔——其运行时严格按布尔解析，对象形状会静默落成 false），挡位只能走请求面到达。
+   - **配置面**：把挡位写进各端点自己的模型能力配置，让选择器出真挡位。pi `thinkingLevelMap`+`compat.thinkingFormat`、ZCode `reasoning{enabled,variants,defaultVariant}`、kimi `support_efforts`/`default_effort`/`reasoning`——这三家过 `modelEffortSurface` 按各自词表裁剪。DSH 在 store 标注 / 渠道模板 / pi-ai 知识库之后追加一级兜底（不参与路由级方言判定），兜底级同样按 DSH 词表裁剪（dsh-llm-pi-ai 对 `reasoningEfforts` 键做固定集合校验，词表外的挡位名会让整份 settings.yaml 拒载）。词表共八档 `off/light/minimal/low/medium/high/xhigh/max`：`light` 是 gpt-5.6 及以上独有的最轻挡，pi/DSH 两家的固定档位集不含它、裁剪时剔除，其余端点原样渲染。Qoder 只取"有无挡位"的布尔（`capabilities.thinking` 必须是裸布尔——其运行时严格按布尔解析，对象形状会静默落成 false），挡位只能走请求面到达。
    - **请求面**：`effort-injection.mjs` 在出上游前补写思考深度（OpenAI 路径与 Anthropic 路径共用一个注入器实例）。五条规则——客户端自己把字段写在 body 里（含显式 `null`）一律不覆盖；客户端以别的协议形状点名档位（Anthropic 面没有 `reasoning_effort`）则转成上游字段，先夹到该模型已知挡位表内最接近的一档（保证发出去的值一定被接受、不会误触渠道拒收）；代填值取库 `default`，现库默认只落 `high`/`xhigh`、无 `max`，库缺失时乐观默认 `high`（不给 `max`：a6api 网关 ~296s 墙钟且照常计费）；上游 400/422 报文提到该参数则去字段重试一次并把渠道记为拒收。拒收集是**进程内存态**：`store.json` 归 panel 进程写（CAS+删除日志），relay 写它会与 UI 抢盘，重启丢一个标记只多一次重试。
    - **开关**：面板设置项「注入思考强度」（`settings.json` 的 `injectThinkingEffort`，默认开）同时管请求面注入与 kimi 全局 `[thinking]` 接管；关闭后请求原样透传。kimi 的 `[thinking]` 只改已存在的表：把 `enabled` 就地翻 true（表内没有该键时在表内补一行），找不到该表或值不是裸布尔就拒改并落日志（重复定义 `[thinking]` 会让 kimi 整份配置解析失败），改前由 `writeKimiConfigTomlWithBackup` 落带时间戳备份。
    - fail-open 贯穿两面：挡位解析失败绝不拖垮 relay 请求或配置同步。
@@ -81,7 +81,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `catalog-resolver.mjs` — 模型目录解析器：把 OpenCode 风格 model 条目解析为 Store 模型对象，透传 `contextWindow`/`maxOutputTokens`/`supportsReasoning` 等元数据。
 - `context-fallback.mjs` — 上下文分层兜底规则（tier-based context fallback）。
 - `reasoning-fallback.mjs` — 推理挡位知识库兜底：按模型 id 查询 DSH 内置 pi-ai 模型数据库（`thinkingLevelMap`/`thinkingFormat`），产出 DSH `reasoningEfforts` wire 映射。
-- `effort-catalog.mjs` — 思考强度挡位库的唯一读入口（`%LOCALAPPDATA%\Anyswitch\thinking-efforts.db.json`）：模型 id 归一化 + 点横拼写候选、条目级校验、mtime+体积热加载、解析失败沿用旧副本，并按端点词表/Reasonix 渠道族允许集裁剪挡位；库缺失时给乐观默认 `high,xhigh,max`。
+- `effort-catalog.mjs` — 思考强度挡位库的唯一读入口（`%LOCALAPPDATA%\Anyswitch\thinking-efforts.db.json`）：模型 id 归一化 + 点横拼写候选、条目级校验、mtime+体积热加载、解析失败沿用旧副本，并按端点词表裁剪挡位；库缺失时给乐观默认 `high,xhigh,max`。
 - `effort-injection.mjs` — 请求面注入：客户端未发挡位时补库默认，上游 400/422 提到该参数则去字段重试一次并把渠道记为拒收（进程内存态，不写 store）；受「注入思考强度」开关控制，OpenAI 与 Anthropic 两条路径共用一个实例。
 
 ### 协议与流处理层
@@ -105,22 +105,22 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。
 - `panel-ui/panel.html` — 面板 Web UI 本体（relay 每请求现读，刷新即生效）。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
-- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/reasonix/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
+- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
-- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/reasonix/qoder/codex/opencode）。
+- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode）。
 - `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 客户端集成
-- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `reasonix-launcher.mjs` / `qoder-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。
+- `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `qoder-launcher.mjs` — 各客户端启动器：探测或拉起 47821 relay、同步托管配置、注入 `ANYSWITCH_RELAY_TOKEN` 与 NO_PROXY 后启动客户端。
 - `qoder-cdp-refresh.mjs` — Qoder 模型目录重载：Qoder 没有从配置面触发目录刷新的入口，启动器因此带一个只绑 127.0.0.1 的 DevTools 端口拉起它，等渲染进程就绪后调用一次重载。尽力而为——端口不可用、渲染进程未就绪或对方接口变动都只记录并跳过，不阻塞也不打断启动。
 - opencode 启动器确保 relay 运行、经 `writeOpencodeConfig` 同步 `~/.config/opencode/opencode.json`、设置环境变量后启动 OpenCode；生成的统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给子进程，由托管配置里每个 provider 的 `{env:ANYSWITCH_AGENT_INSTANCE}` 头引用展开为 `x-agent-instance`（per-process，不落盘；直启无该环境变量时头为空，relay 丢弃后走 socket→PID 兜底）。
 - launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。
 - 已知限制（实例归一的冷缓存窗口）：归一依赖 scanProcesses 的进程缓存，该缓存由面板轮询驱动刷新。relay 刚重启、缓存尚空时到达的 launcher 形态 id 会归一失败，以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存（面板出两行、首请求计数拆两桶）；旧行无流量刷新，由 10min 闲置 TTL 清除。需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立才触发。
-- `kimi-merge-config.mjs` / `zcode-merge-config.mjs` / `dsh-merge-config.mjs` / `pi-merge-models.mjs` / `reasonix-merge-config.mjs` / `qoder-merge-config.mjs` / `opencode-merge-config.mjs` — 各家客户端配置合并：把 store 的托管渠道写进各家自己的配置文件，格式与位置按各家约定（kimi `~/.kimi-code/config.toml`、zcode `~/.zcode/v2/config.json`、dsh `~/.dsh/settings.yaml`、pi `~/.pi/agent/models.json`、reasonix `%APPDATA%\reasonix\config.toml` 与 `.env`、qoder `~/.qoder/settings.json`、opencode `~/.config/opencode/opencode.json`）。reasonix 在托管 provider 上带 `x-agent-id: reasonix` 头；opencode 带 `x-agent-id: opencode` + `{env:}` 实例头，apiKey 用 `{file:}` 引用不落盘；qoder 无自定义头能力，改由 URL 段身份前缀归属（见 `openai-path.mjs`）。
+- `kimi-merge-config.mjs` / `zcode-merge-config.mjs` / `dsh-merge-config.mjs` / `pi-merge-models.mjs` / `qoder-merge-config.mjs` / `opencode-merge-config.mjs` — 各家客户端配置合并：把 store 的托管渠道写进各家自己的配置文件，格式与位置按各家约定（kimi `~/.kimi-code/config.toml`、zcode `~/.zcode/v2/config.json`、dsh `~/.dsh/settings.yaml`、pi `~/.pi/agent/models.json`、qoder `~/.qoder/settings.json`、opencode `~/.config/opencode/opencode.json`）。opencode 带 `x-agent-id: opencode` + `{env:}` 实例头，apiKey 用 `{file:}` 引用不落盘；qoder 无自定义头能力，改由 URL 段身份前缀归属（见 `openai-path.mjs`）。
 - `codex-merge-config.mjs` — codex 客户端配置合并：托管渠道写入 `~/.codex/config.toml` 的 `[model_providers.anyswitch-*]` 表（`wire_api="responses"` 指向 relay 的 `/openai/<seg>/v1`，token 为字面量 Authorization 头，`x-agent-instance` 走 `env_http_headers` 环境变量名占位）；并生成模型目录 `~/.codex/model-catalogs/anyswitch-models.json`——字段模板取自模板资产 `codex-model-catalog-template.json`（上游 openai/codex 官方 models.json 的 gpt-5.5 条目逐字提取），生成时强制覆盖 `multi_agent_version:"v2"`、`supports_search_tool:false`、`prefer_websockets:false` 等请求塑形字段，config.toml 顶层写 `model_catalog_json` 指针；用户自指的 `model_catalog_json` 不覆盖（残留的旧目录文件会被清掉），空模型集时清掉指针与生成的目录文件。
 - `merge-common.mjs` — 上述合并模块共用的 sidecar 读写契约：数据根下一个 JSON 对象 `{ "providers": [ids…] }`（id 排序、2 空格缩进、结尾换行），记录 anyswitch 托管了哪些条目，解除托管时据此精确剥离、不碰用户自有条目。
 - 不经启动器直接启动客户端（例如在终端里跑 `kimi`）是支持的用法，此时请求既无 `x-agent-instance` 头、relay key 也无实例后缀；这类直连请求由 relay 侧 socket→PID 兜底归组——按连接对端端口查 netstat 缓存拿到客户端进程 PID，实例 id 形如 `kimi-<PID>`，面板实例行与实例计数因此照常出现。边角：客户端若经本地代理（环回代理进程）转发，连接归属的是代理 PID，多个实例会折叠进同一行。

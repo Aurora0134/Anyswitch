@@ -13,7 +13,6 @@ import { writeZcodeConfig, zcodeConfigPath } from "./zcode-launcher.mjs";
 import { writeDshConfig, dshSettingsPath } from "./dsh-launcher.mjs";
 import { writePiModels, piModelsPath } from "./pi-launcher.mjs";
 import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
-import { writeReasonixConfig, reasonixConfigPath } from "./reasonix-launcher.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
 import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
@@ -53,7 +52,6 @@ export async function syncAllAgentConfigs({
     dsh: null,
     pi: null,
     kimi: null,
-    reasonix: null,
     qoder: null,
     codex: null,
     opencode: null,
@@ -122,21 +120,7 @@ export async function syncAllAgentConfigs({
     logger?.warn?.(`kimi config sync skipped: ${err.message}`);
   }
 
-  // 5. Reasonix config.toml + .env sync (%APPDATA%\reasonix)
-  try {
-    const reasonixResult = await writeReasonixConfig(store, port, token, root, reasonixConfigPath(base));
-    results.reasonix = reasonixResult;
-    if (!reasonixResult.ok) {
-      logger?.warn?.(`reasonix config.toml not updated: ${reasonixResult.reason ?? "unknown"}`);
-    } else if (!reasonixResult.unchanged) {
-      logger?.info?.("reasonix config.toml synced");
-    }
-  } catch (err) {
-    results.reasonix = { ok: false, error: err.message };
-    logger?.warn?.(`reasonix config sync skipped: ${err.message}`);
-  }
-
-  // 6. Qoder settings.json sync (~/.qoder/settings.json)
+  // 5. Qoder settings.json sync (~/.qoder/settings.json)
   try {
     const qoderResult = await writeQoderConfig(store, port, token, root, qoderSettingsPath(base.USERPROFILE ?? ""));
     results.qoder = qoderResult;
@@ -150,7 +134,7 @@ export async function syncAllAgentConfigs({
     logger?.warn?.(`qoder config sync skipped: ${err.message}`);
   }
 
-  // 7. Codex config.toml sync (~/.codex/config.toml)
+  // 6. Codex config.toml sync (~/.codex/config.toml)
   try {
     const codexResult = await writeCodexConfig(store, port, token, root, codexConfigPath(base));
     results.codex = codexResult;
@@ -164,7 +148,7 @@ export async function syncAllAgentConfigs({
     logger?.warn?.(`codex config sync skipped: ${err.message}`);
   }
 
-  // 8. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
+  // 7. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
   try {
     const ocResult = await writeOpencodeConfig(store, port, root, opencodeConfigPath(base));
     results.opencode = ocResult;

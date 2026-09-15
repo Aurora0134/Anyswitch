@@ -22,8 +22,8 @@ import { probeRelay } from "./openai-server.mjs";
 const RELAY_PORT = 47821;
 const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.url));
 // Directory every Anyswitch relay process is spawned from — the resident
-// relay-host.mjs AND the per-launch launchers (zcode/dsh/pi/kimi/reasonix/
-// qoder, which also legitimately bind 47821) all run scripts located here.
+// relay-host.mjs AND the per-launch launchers (zcode/dsh/pi/kimi/qoder,
+// which also legitimately bind 47821) all run scripts located here.
 // This is the trust boundary for the PID identity check before any taskkill.
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 

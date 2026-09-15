@@ -1,5 +1,5 @@
 // Shared sidecar read/write for the per-agent merge modules
-// (kimi/zcode/dsh/reasonix/pi/qoder). The on-disk contract is one JSON object
+// (kimi/zcode/dsh/pi/qoder). The on-disk contract is one JSON object
 // { "providers": [ids…] } — ids sorted, 2-space indent, trailing newline —
 // written through atomicWriteFile so a crash never leaves a half-written
 // sidecar. The sidecar is a cache of "what we injected last time", never user

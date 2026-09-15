@@ -1292,7 +1292,7 @@ function createCodexAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
-// SQLite adapters (zcode / opencode / reasonix). All open read-only via a
+// SQLite adapters (zcode / opencode). All open read-only via a
 // file:...?mode=ro URI so active WAL stores are safe to read concurrently.
 // Open/query failure degrades the adapter to an empty list — it must never
 // blow up the combined scan.
@@ -1448,250 +1448,6 @@ function createOpencodeAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
-// reasonix — transcripts live at
-// %APPDATA%\reasonix\projects\<munged-workspace>\sessions\<session>.jsonl, one
-// JSON object per line. The app's catalog (catalog_sessions inside
-// %LOCALAPPDATA%\reasonix\session-catalog\v5.sqlite) is a DERIVED index: it
-// lags the files it points at — a listed row can point at a transcript the app
-// has already moved into its own .trash — and it only covers the directories it
-// happened to scan. The filesystem is
-// therefore the discovery source and the catalog only enriches rows it still
-// knows about. A turn that only calls tools is an assistant row carrying
-// tool_calls and no content at all.
-// ---------------------------------------------------------------------------
-
-function createReasonixAdapter(roots) {
-  // roots[0] = %LOCALAPPDATA%\reasonix (catalog db);
-  // roots[1] = %APPDATA%\reasonix\projects (transcripts).
-  const catalogPath = () => join(roots[0], "session-catalog", "v5.sqlite");
-  const transcriptRoots = () => (roots.slice(1).length > 0 ? roots.slice(1) : roots);
-
-  // Transcript path (lowercased — Windows paths are case-insensitive) to its
-  // catalog row. A missing catalog is not an error: the .jsonl.meta sidecar and
-  // the transcript itself still supply everything the list needs.
-  function readCatalog() {
-    const rows = new Map();
-    try {
-      const db = openSqliteReadOnly(catalogPath());
-      try {
-        const select = db.prepare(
-          `SELECT path, directory, topic_title, custom_title, preview, created_at, last_activity_at
-           FROM catalog_sessions`,
-        );
-        for (const row of select.all()) {
-          if (typeof row.path === "string" && row.path !== "") rows.set(row.path.toLowerCase(), row);
-        }
-      } finally {
-        db.close();
-      }
-    } catch {
-      // no catalog on disk — metadata falls back to the sidecar below
-    }
-    return rows;
-  }
-
-  function collectTranscripts() {
-    const files = [];
-    for (const root of transcriptRoots()) {
-      let projects;
-      try {
-        projects = readdirSync(root, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const project of projects) {
-        if (!project.isDirectory() || project.name.startsWith(".")) continue;
-        const sessionsDir = join(root, project.name, "sessions");
-        let entries;
-        try {
-          entries = readdirSync(sessionsDir, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const entry of entries) {
-          // Files only: .trash is a directory, and it is the app's own recycle
-          // bin — a deleted session is not a session to list.
-          if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
-          // Sidecar logs that sit next to a transcript: turn index, event stream.
-          if (entry.name.endsWith(".turns.jsonl") || entry.name.endsWith(".events.jsonl")) continue;
-          files.push(join(sessionsDir, entry.name));
-        }
-      }
-    }
-    return files;
-  }
-
-  // <session>.jsonl.meta holds the app's own title/preview/ISO timestamps.
-  function readMeta(file) {
-    try {
-      const meta = JSON.parse(readFileSync(`${file}.meta`, "utf8"));
-      return meta && typeof meta === "object" ? meta : null;
-    } catch {
-      return null;
-    }
-  }
-
-  // List-time sample: first user turn (title), last message (summary) and
-  // whether the file holds any conversation at all — never a whole transcript.
-  function readTranscriptSample(file) {
-    const { head, tail } = readHeadTailLines(file, 30, 16);
-    let firstUser = null;
-    let lastMessage = null;
-    let hasConversation = false;
-    for (const line of head) {
-      let value;
-      try {
-        value = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (typeof value.role !== "string" || value.role === "system") continue;
-      hasConversation = true;
-      if (firstUser === null && value.role === "user") {
-        const content = extractText(value.content).trim();
-        if (content !== "") firstUser = content;
-      }
-    }
-    for (let i = tail.length - 1; i >= 0; i--) {
-      let value;
-      try {
-        value = JSON.parse(tail[i]);
-      } catch {
-        continue;
-      }
-      if (typeof value.role !== "string" || value.role === "system") continue;
-      hasConversation = true;
-      const content = extractText(value.content).trim();
-      if (content !== "") {
-        lastMessage = content;
-        break;
-      }
-    }
-    return { firstUser, lastMessage, hasConversation };
-  }
-
-  const nonEmptyText = (value) =>
-    typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-  const positiveMs = (value) => (typeof value === "number" && value > 0 ? value : null);
-  const firstTruncated = (maxChars, ...values) => {
-    for (const value of values) {
-      const candidate = nonEmptyText(value);
-      if (candidate !== null) return truncateText(candidate, maxChars);
-    }
-    return null;
-  };
-
-  return {
-    id: "reasonix",
-    roots: () => roots,
-    async scan() {
-      const catalog = readCatalog();
-      const sessions = [];
-      for (const file of collectTranscripts()) {
-        try {
-          const sample = readTranscriptSample(file);
-          // A transcript with no user/assistant/tool row at all (a session the
-          // app opened but never used) is not a conversation.
-          if (!sample.hasConversation) continue;
-          const row = catalog.get(file.toLowerCase()) ?? null;
-          const meta = readMeta(file);
-          // The file name is the session id and the only durable handle.
-          const id = basename(file).replace(/\.jsonl$/, "");
-          sessions.push(
-            makeMeta({
-              endpoint: "reasonix",
-              id,
-              title:
-                firstTruncated(
-                  TITLE_MAX_CHARS,
-                  row?.custom_title,
-                  row?.topic_title,
-                  meta?.topic_title,
-                  sample.firstUser,
-                ) || id,
-              summary: firstTruncated(
-                SUMMARY_MAX_CHARS,
-                row?.preview,
-                meta?.preview,
-                sample.lastMessage,
-              ),
-              project:
-                typeof row?.directory === "string" && row.directory !== ""
-                  ? row.directory
-                  : dirname(file),
-              file,
-              createdAt:
-                positiveMs(row?.created_at) ??
-                parseTimestampMs(meta?.created_at) ??
-                positiveMs(statSync(file).birthtimeMs),
-              lastActive:
-                positiveMs(row?.last_activity_at) ??
-                parseTimestampMs(meta?.updated_at) ??
-                statSync(file).mtimeMs,
-            }),
-          );
-        } catch {
-          // unreadable transcript — skip, never fail the whole scan
-        }
-      }
-      return sessions;
-    },
-    async loadMessages(file) {
-      // Root check: the catalog db lives under roots[0]; transcripts live under
-      // %APPDATA%\reasonix\projects — the caller passes that as roots[1].
-      const target = assertUnderRoots(file, transcriptRoots());
-      const messages = [];
-      for (const value of parseJsonl(readFileSync(target, "utf8"))) {
-        // Snapshot records carry the whole message list; plain records are one
-        // message per line. Both shapes hold {role, content}.
-        const list = Array.isArray(value.messages) ? value.messages : [value];
-        for (const message of list) {
-          const role = typeof message.role === "string" ? message.role : null;
-          if (role === null || role === "system") continue;
-          let content = extractText(message.content);
-          // A turn that only calls tools carries no content whatsoever — the
-          // tool names are everything the transcript holds for it, so render
-          // them instead of dropping the turn (real logs: 32 of 83 rows).
-          if (content.trim() === "" && Array.isArray(message.tool_calls)) {
-            content = message.tool_calls
-              .map((call) => {
-                const name =
-                  typeof call?.name === "string" && call.name !== "" ? call.name : "unknown";
-                return `[Tool: ${name}]`;
-              })
-              .join("\n");
-          }
-          if (content.trim() === "") continue;
-          messages.push({
-            role,
-            content,
-            ts: parseTimestampMs(message.timestamp ?? message.time ?? message.createdAt),
-          });
-        }
-      }
-      return messages;
-    },
-    async delete(file) {
-      const target = assertUnderRoots(file, transcriptRoots());
-      rmSync(target);
-      // Best-effort catalog cleanup — the catalog rebuilds itself, so a
-      // failure here must not fail the delete.
-      try {
-        const db = new DatabaseSync(catalogPath());
-        try {
-          db.prepare("DELETE FROM catalog_sessions WHERE path = ?").run(target);
-        } finally {
-          db.close();
-        }
-      } catch {
-        // catalog row left behind — reasonix prunes missing files itself
-      }
-      return true;
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
 // Top-level orchestration (called by panel.mjs routes)
 // ---------------------------------------------------------------------------
 
@@ -1705,10 +1461,6 @@ function defaultRoots(home = homedir()) {
     opencode: [join(home, ".local", "share", "opencode")],
     qoder: [join(home, ".qoder", "projects")],
     codex: [join(home, ".codex", "sessions")],
-    reasonix: [
-      join(process.env.LOCALAPPDATA ?? join(home, "AppData", "Local"), "reasonix"),
-      join(process.env.APPDATA ?? join(home, "AppData", "Roaming"), "reasonix", "projects"),
-    ],
   };
 }
 
@@ -1721,7 +1473,6 @@ const ADAPTER_FACTORIES = {
   opencode: createOpencodeAdapter,
   qoder: createQoderAdapter,
   codex: createCodexAdapter,
-  reasonix: createReasonixAdapter,
 };
 
 export function createSessionScanner({ roots: rootOverrides } = {}) {

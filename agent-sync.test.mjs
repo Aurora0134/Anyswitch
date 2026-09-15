@@ -54,7 +54,6 @@ describe("agent-sync", () => {
     assert.ok(res.results.dsh);
     assert.ok(res.results.pi);
     assert.ok(res.results.kimi);
-    assert.ok(res.results.reasonix);
     assert.ok(res.results.qoder);
     assert.ok(res.results.codex);
 
@@ -72,15 +71,6 @@ describe("agent-sync", () => {
     assert.match(kimiText, /\[providers\."_alpha"\]/);
     assert.match(kimiText, /api_key = "test-token"/);
     assert.match(kimiText, /\[models\."_alpha\/model-1"\]/);
-
-    const reasonixPath = join(tmpRoot, "reasonix", "config.toml");
-    assert.equal(existsSync(reasonixPath), true, "reasonix config.toml must land under the injected APPDATA");
-    const reasonixText = readFileSync(reasonixPath, "utf8");
-    assert.match(reasonixText, /name\s+= "_alpha"/);
-    assert.match(reasonixText, /"model-1"/);
-    assert.match(reasonixText, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/alpha\/v1"/);
-    const reasonixEnv = readFileSync(join(tmpRoot, "reasonix", ".env"), "utf8");
-    assert.match(reasonixEnv, /ANYSWITCH_RELAY_TOKEN=test-token/);
 
     const zcodePath = join(tmpRoot, ".zcode", "v2", "config.json");
     assert.equal(existsSync(zcodePath), true, "zcode config must land under the injected USERPROFILE");
@@ -252,10 +242,6 @@ describe("agent-sync pools", () => {
     assert.doesNotMatch(kimiText, /\[providers\."_alpha"\]/);
     assert.doesNotMatch(kimiText, /\[providers\."_beta"\]/);
 
-    const reasonixText = readFileSync(join(tmpRoot, "reasonix", "config.toml"), "utf8");
-    assert.match(reasonixText, /name\s+= "_pool-ab"/);
-    assert.match(reasonixText, /base_url\s+= "http:\/\/127\.0\.0\.1:47821\/openai\/pool-ab\/v1"/);
-
     const qoderSettings = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
     const poolConn = qoderSettings.providers?.[managedConnectionId("pool-ab")];
     assert.ok(poolConn, "pool channel in qoder settings");
@@ -285,9 +271,6 @@ describe("agent-sync pools", () => {
 
     const kimiText2 = readFileSync(join(tmpRoot, ".kimi-code", "config.toml"), "utf8");
     assert.doesNotMatch(kimiText2, /_pool-ab/);
-
-    const reasonixText2 = readFileSync(join(tmpRoot, "reasonix", "config.toml"), "utf8");
-    assert.doesNotMatch(reasonixText2, /_pool-ab/);
 
     const qoderSettings2 = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
     assert.equal(qoderSettings2.providers?.[managedConnectionId("pool-ab")], undefined);

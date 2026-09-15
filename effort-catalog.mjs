@@ -327,23 +327,6 @@ export function intersectEffortVocabulary(levels, agent) {
   return EFFORT_LEVELS_ORDER.filter((level) => levels?.includes(level) && vocabulary.includes(level));
 }
 
-// Reasonix validates an effort against its channel family's accepted set and
-// hard-errors on anything else, so levels are intersected with the family set
-// before writing. An unknown family is unrestricted (write what the library
-// says); an intersection that comes back empty means the caller skips the model
-// entirely — "not written" keeps the endpoint as it is, "written wrong" breaks it.
-const REASONIX_FAMILY_ALLOW_SETS = [
-  { re: /deepseek/i, allow: Object.freeze(["low", "high", "max", "disabled"]) },
-  { re: /longcat/i, allow: Object.freeze(["enabled", "disabled"]) },
-  { re: /minimax/i, allow: Object.freeze(["adaptive", "disabled"]) },
-];
-
-export function intersectReasonixEfforts(levels, modelId) {
-  const family = REASONIX_FAMILY_ALLOW_SETS.find((rule) => rule.re.test(modelId ?? ""));
-  if (!family) return [...levels ?? []];
-  return (levels ?? []).filter((level) => family.allow.includes(level));
-}
-
 /**
  * What one endpoint should be told about one model's thinking depth, already
  * clipped to what that endpoint can render.
@@ -415,9 +398,7 @@ export function resolveDeclaredEfforts(rawId, { catalog, model, provider } = {})
 /** Vocabulary-clip a resolved effort set and name its default. Shared by both entry points. */
 function clipEffortSurface(resolved, rawId, agent) {
   if (resolved.kind === "non-text" || resolved.levels.length === 0) return null;
-  const levels = agent === "reasonix"
-    ? intersectReasonixEfforts(resolved.levels, rawId)
-    : intersectEffortVocabulary(resolved.levels, agent);
+  const levels = intersectEffortVocabulary(resolved.levels, agent);
   if (levels.length === 0) return null;
   const level = levels.includes(resolved.default) ? resolved.default : pickDefaultEffort(levels);
   if (!level) return null;

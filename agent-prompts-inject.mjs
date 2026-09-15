@@ -3,9 +3,7 @@
 // managed block.
 //
 // Target facts this module depends on:
-//   - reasonix's Windows home is %APPDATA%/reasonix, not ~/.reasonix, so its
-//     target is derived from base.APPDATA, never from homeDir.
-//   - kimi/opencode re-read their file at runtime (hot); the other six read
+//   - kimi/opencode re-read their file at runtime (hot); the other five read
 //     it once at session start — surfaced to the UI as `hotReload`.
 //   - qoder: `~/.qoder/rules/**/*.md` is a user-level injection surface in
 //     Qoder Desktop, and its loaded text is observable in model context. A
@@ -36,8 +34,8 @@ import { atomicWriteFile } from "./atomic-write.mjs";
 export const MANAGED_BEGIN = "# >>> anyswitch-managed-prompts";
 export const MANAGED_END = "# <<< anyswitch-managed-prompts";
 
-// `home` parts are relative to the user's home directory; `appData` parts to
-// %APPDATA%. `targetRel` is the human-facing display string for the panel.
+// `home` parts are relative to the user's home directory. `targetRel` is the
+// human-facing display string for the panel.
 export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "claude", label: "Claude Code", hotReload: false, targetRel: "~/.claude/CLAUDE.md", home: [".claude", "CLAUDE.md"] },
   { id: "kimi", label: "Kimi Code", hotReload: true, targetRel: "~/.kimi-code/AGENTS.md", home: [".kimi-code", "AGENTS.md"] },
@@ -45,7 +43,6 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "dsh", label: "DSH", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
   { id: "pi", label: "Pi", hotReload: false, targetRel: "~/.pi/agent/AGENTS.md", home: [".pi", "agent", "AGENTS.md"] },
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
-  { id: "reasonix", label: "Reasonix", hotReload: false, targetRel: "%APPDATA%/reasonix/AGENTS.md", appData: ["reasonix", "AGENTS.md"] },
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
 ]);
@@ -97,16 +94,12 @@ export function applyManagedBlock(text, block) {
 }
 
 /**
- * Injection service. `homeDir` / `appData` are injectable so tests run
- * entirely against temp directories; production derives homeDir from os and
- * appData from base.APPDATA (falling back to the conventional home-relative
- * Roaming path when APPDATA is unset).
+ * Injection service. `homeDir` is injectable so tests run entirely against
+ * temp directories; production derives it from os.
  */
-export function createPromptsInjector({ homeDir = homedir(), base = process.env, appData } = {}) {
-  const resolvedAppData = appData ?? base.APPDATA ?? join(homeDir, "AppData", "Roaming");
-
+export function createPromptsInjector({ homeDir = homedir() } = {}) {
   function targetFor(def) {
-    return def.appData ? join(resolvedAppData, ...def.appData) : join(homeDir, ...def.home);
+    return join(homeDir, ...def.home);
   }
 
   function listEndpoints() {

@@ -41,7 +41,7 @@ export function createAgentWatcher({
       // — without await, procs is a Promise, every count reads undefined and
       // anyAgent short-circuits the tick to a silent no-op.
       const procs = await scanProcesses();
-      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.reasonix || 0) + (procs?.qoder || 0) + (procs?.codex || 0) > 0;
+      const anyAgent = (procs?.zcode || 0) + (procs?.claude || 0) + (procs?.opencode || 0) + (procs?.dsh || 0) + (procs?.pi || 0) + (procs?.kimi || 0) + (procs?.qoder || 0) + (procs?.codex || 0) > 0;
       if (!anyAgent) return;
 
       const relay = await getRelayStatus();

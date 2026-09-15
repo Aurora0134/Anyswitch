@@ -61,7 +61,6 @@
     --ep-claude: #ea580c;
     --ep-dsh: #0284c7;
     --ep-pi: #ffffff;
-    --ep-reasonix: #b45309;
     --ep-kimi: #7e22ce;
     --ep-opencode: #e11d48;
     --ep-qoder: #c026d3;
@@ -129,7 +128,6 @@
     --ep-claude: #fb923c;
     --ep-dsh: #38bdf8;
     --ep-pi: #ffffff;
-    --ep-reasonix: #fbbf24;
     --ep-kimi: #a855f7;
     --ep-opencode: #fb7185;
     --ep-qoder: #e879f9;
@@ -327,7 +325,7 @@
   .panel-card.card-collapsed .card-body { padding: 14px 18px; }
   .panel-card.card-collapsed .empty-hint { display: none; }
   .panel-card.card-collapsed .agent-top-bar { margin-bottom: 0; }
-  /* 端点详情折叠钮：zcode/dsh/reasonix/qoder 走旧 id 接线，claude/kimi/opencode/pi/codex 走
+  /* 端点详情折叠钮：zcode/dsh/qoder 走旧 id 接线，claude/kimi/opencode/pi/codex 走
      data-prefix 事件委托；运行中默认收起，未运行（card-collapsed）时藏钮 */
   .agent-detail-fold {
     border: none; background: transparent; color: var(--text-3); cursor: pointer;
@@ -4603,127 +4601,6 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
-          <!-- 6. Reasonix 模块 -->
-          <div class="panel-card" data-agent-id="reasonix">
-            <div class="card-body">
-              <div class="agent-top-bar">
-                <div class="agent-brand">
-                  <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
-                    <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAQQSURBVFhHtVffa1xFFL5jrRZtxacSahGfhD6JIAr+AaJgyY+JiU3Sh/qjEZpGUNFWUTQt1mqsFZSqbcEHq1YtiCDVKoJK1RKsojRabYXanN1ttnd3s+lmN7m7+8k3d7feTO7d7GaTAx/szsw9882Zb87McRzHcZQWG6uVloeUls+VlpjS4iktaBD8Jq60HFVa+pWWFnseY1bjMqVFKy0/KC0zIU4XCvo6obR0Ky1XziIR+LNCaXlBabkU4mCxMKW0vKi0XGMT4Mo5eTHko8VGSWnZVY1ElQDDvpQrt5FXWjZUCVBw3HN7kIHTLnDaGgDHd8z1E4IRpWUNCVDtoYKjo9ueTKL/rQw214Dp35dB13AKtzw2jhX3x3wiIT4D4CnZQgI8ananT6BNMPTxJOq1UhlIZks48lMedz6dNAuYh8TXJMBzbnf4BNoFQx/VTyBoY24JrS+585G4SAKRSaYRAulcGRNT5Vltp6WImwcuGD+27wrKJGA3zkuAE6UvlTE65uHE3zOm7bORAu4bTuHbU9M49N0U9n2ZM+3PfZitqYeGCPx7sYjH353A7U8lcesT42h5MGEm9YrAqfMebnrkAlb2xrGqL463j/kEjv1a8EUZ4r8hAu5kGffsdOGsFzitlePWLri2J4Zt72WRK5Tx5hc53NifwOHjeUx7Pumfz87g+o3xyKNZNwFxS9j96SQ27EnhhocTl887sawzZiJB0a3f5aIckML3o9OGZNMEqsaj9ts5D5veSOOqLt8xw2sItYrZ86BRC6Y/xP+CCFStMAPs/GTS399KJFZvSmDkjC9KGrfl7h2uySe276YJ0Ci+5w9nsbwSiWfezyJ4EN/5Koeru6PD3zQBWsGDyZZrNyew8fW0SUDUAI9iywOJmpMvmADDTy1UrVgC/ooV8fs5D8f/nDb6WNUbrfymCHB1DHvXqyn88s//+121oycLuK4vXiv7NUkAQPeeFJx7x3DXkGvyg23ckis6o5NP0wR6Xkv7d78WbD+UnbUdNKbq9t2puqLQ8GU0i0CHmHDz+rVt9LyHdYM1LyLCXEZ8OtsddRGojln36Dj+GKvk3oAd+THv6yFajC4J8N1ud/jO2wQ7Qh4kPXsDBCokOl9JIZufq4dnP8iaVB2hh29IgEVD5JPsjm1JbD04gYH9GYMt+zP+HR9YFZ0zGXW8nMLgwQlsPZDBwIGM+d27Nx11F/AFPkgCrFhYNNgDfOdhj9K5zvxI2OOqj9QQv0rLSaVlLQkQrFhYNNiDlgoFpaUvWBewSGDFwqLBHrwUGFZaltulGcslViwsGuwPFgtcOSdfaZdmwUiwYmHREJkfFgAKjnvOsJuVXyYQUiETa1g08N3OpzMTRojT+cBvXB41qp2Cs+eh/Qe0iP23d2ehtwAAAABJRU5ErkJggg==" width="32" height="32" alt="Reasonix" style="width:32px; height:32px; border-radius:8px; display:block; object-fit:contain;">
-                  </div>
-                  <div class="agent-headings">
-                    <h3>Reasonix</h3>
-                  </div>
-                </div>
-                <div class="agent-actions">
-                  <div id="reasonixModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
-                  <span class="badge badge-neutral" id="reasonixStateBadge">未运行</span>
-                  <button type="button" class="agent-detail-fold" id="reasonixDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
-                </div>
-              </div>
-
-              <div class="alert-box danger" id="reasonixErrorBanner" hidden>
-                <div class="left">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  <span id="reasonixErrorMsg">HTTP 502 · Upstream Error</span>
-                </div>
-                <div class="time" id="reasonixErrorTime">刚刚</div>
-              </div>
-
-              <div id="reasonixEmpty" class="empty-hint">未检测到运行中的 Reasonix 客户端</div>
-
-              <div id="reasonixMetricsBlock" hidden>
-                <div class="session-table-wrapper agent-detail-brief" id="reasonixDetailBrief">
-                  <div class="session-row">
-                    <div class="session-main">
-                      <div class="session-name-line">
-                        <span>实时遥测</span>
-                        <span class="badge badge-neutral" id="reasonixBriefState">待命</span>
-                        <span class="badge badge-neutral" id="reasonixBriefReqs">0 请求</span>
-                      </div>
-                      <div class="session-tokens-line" id="reasonixBriefTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
-                    </div>
-                    <div class="session-tags-line">
-                      <span class="tag-bubble tag-stale" id="reasonixBriefStale" hidden></span>
-                      <span class="tag-bubble" id="reasonixBriefTps" hidden></span>
-                      <span class="tag-bubble" id="reasonixBriefTtft" hidden></span>
-                      <span class="tag-bubble" id="reasonixBriefCache" hidden></span>
-                      <span class="tag-bubble" id="reasonixBriefDuration" hidden></span>
-                    </div>
-                  </div>
-                </div>
-                <div class="telemetry-grid" id="reasonixTelemetryGrid">
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">首字响应时间</span>
-                      <div class="telemetry-sparkline" id="reasonixSparkTtft"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <i class="lamp lamp-gray" id="reasonixTtftLamp"></i>
-                        <span id="reasonixTtftVal">-</span>
-                        <span class="telemetry-unit" id="reasonixTtftUnit">s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">生成速度</span>
-                      <div class="telemetry-sparkline" id="reasonixSparkTps"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="reasonixTpsVal">-</span>
-                        <span class="telemetry-unit" id="reasonixTpsUnit">tok/s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">缓存命中率</span>
-                      <div class="telemetry-sparkline" id="reasonixSparkCache"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="reasonixCacheVal">-</span>
-                        <span class="telemetry-unit" id="reasonixCacheUnit">%</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">已工作时间</span>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="reasonixDurationVal">0秒</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="session-table-wrapper">
-                  <div class="session-row" id="reasonixSessionRow">
-                    <div class="session-main">
-                      <div class="session-name-line">
-                        <span>全局汇总</span>
-                        <span class="badge badge-neutral" id="reasonixSessionReqs">0 次请求</span>
-                      </div>
-                      <div class="session-tokens-line" id="reasonixSessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
-                    </div>
-                    <div class="session-tags-line">
-                      <span class="tag-bubble" id="reasonixActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
-                      <span class="tag-bubble" id="reasonixLastModelTag">模型: 未选择</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <!-- 6.5. Qoder 模块 -->
           <div class="panel-card" data-agent-id="qoder">
             <div class="card-body">
@@ -5158,7 +5035,7 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="skills-btn-row">
               <button class="btn btn-primary" id="storeAddBtn">新增渠道</button>
               <button class="btn" id="storeRefreshAllBtn">全部刷新</button>
-              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Reasonix、Qoder、Codex）">同步到端点</button>
+              <button class="btn" id="storeSyncAgentsBtn" title="把当前渠道/号池立即写入全部端点配置（Kimi、Pi、DSH、ZCode、Qoder、Codex）">同步到端点</button>
               <span class="store-refresh-status" id="storeRefreshStatus" aria-live="polite"></span>
             </div>
           </div>
@@ -5563,7 +5440,7 @@ if (window.panelStartupController) panelStartupPlay();
         <div class="modal-item">
           <div>
             <div class="modal-item-title">跟随 Coding Agent 启动</div>
-            <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Reasonix / Qoder 运行时自动保持 Relay 链路就绪。</div>
+            <div class="modal-item-desc">检测到 ZCode / Claude Code / OpenCode / DSH / Pi / Kimi / Qoder 运行时自动保持 Relay 链路就绪。</div>
           </div>
           <label class="toggle">
             <input type="checkbox" id="followAgentToggle">
@@ -5718,9 +5595,6 @@ if (window.panelStartupController) panelStartupPlay();
     dsh_ttft: [],
     dsh_tps: [],
     dsh_cache: [],
-    reasonix_ttft: [],
-    reasonix_tps: [],
-    reasonix_cache: [],
     qoder_ttft: [],
     qoder_tps: [],
     qoder_cache: [],
@@ -5917,7 +5791,6 @@ async function api(method, path, body) {
   const ENDPOINT_SPARK_KEYS = {
     zc: [["zcSparkTtft", "ttft"], ["zcSparkTps", "tps"], ["zcSparkCache", "cache"]],
     dsh: [["dshSparkTtft", "dsh_ttft"], ["dshSparkTps", "dsh_tps"], ["dshSparkCache", "dsh_cache"]],
-    reasonix: [["reasonixSparkTtft", "reasonix_ttft"], ["reasonixSparkTps", "reasonix_tps"], ["reasonixSparkCache", "reasonix_cache"]],
     qoder: [["qoderSparkTtft", "qoder_ttft"], ["qoderSparkTps", "qoder_tps"], ["qoderSparkCache", "qoder_cache"]],
   };
 
@@ -6088,7 +5961,7 @@ async function api(method, path, body) {
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "reasonix", "kimi", "opencode", "qoder", "codex"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
@@ -6186,7 +6059,7 @@ async function api(method, path, body) {
     return typeof ls === "number" && (Date.now() - ls) > INSTANCE_STALE_MS;
   }
 
-  // 静态卡（zc/dsh/reasonix/qoder）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
+  // 静态卡（zc/dsh/qoder）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
   function isEndpointStale(agent, isGenerating) {
     if (isGenerating) return false;
     const s0 = agent.sessions && agent.sessions[0];
@@ -6237,7 +6110,6 @@ async function api(method, path, body) {
         const dsh = res.agents.find(a => a.id === "dsh");
         const pi = res.agents.find(a => a.id === "pi");
         const kimi = res.agents.find(a => a.id === "kimi");
-        const reasonix = res.agents.find(a => a.id === "reasonix");
         const qoder = res.agents.find(a => a.id === "qoder");
         const opencode = res.agents.find(a => a.id === "opencode");
         const codex = res.agents.find(a => a.id === "codex");
@@ -6245,7 +6117,6 @@ async function api(method, path, body) {
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
         if (pi) renderIfChanged("pi", pi, () => renderPi(pi));
-        if (reasonix) renderIfChanged("reasonix", reasonix, () => renderReasonix(reasonix));
         if (qoder) renderIfChanged("qoder", qoder, () => renderQoder(qoder));
         if (kimi) renderIfChanged("kimi", kimi, () => renderKimi(kimi));
         if (opencode) renderIfChanged("opencode", opencode, (agent) => renderOpencode(opencode));
@@ -6284,7 +6155,7 @@ async function api(method, path, body) {
     setPill("BriefDuration", true, `工作 ${durationText}`);
   }
 
-  // 端点详情折叠（zcode/dsh/reasonix/qoder）：运行中默认收起——
+  // 端点详情折叠（zcode/dsh/qoder）：运行中默认收起——
   // 详细遥测四宫格换成与多实例端点实例行同构的简要信息栏（含 tokens 行/请求数徽标），
   // 「全局汇总」行改仅展开态显示（与多实例栏 detail-open-only 同范式：收起态 tokens/请求数
   // 已由简要栏承载，双行并存属重复展示）；
@@ -6292,7 +6163,7 @@ async function api(method, path, body) {
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
   // pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
-  ["zc", "dsh", "reasonix", "qoder"].forEach((prefix) => {
+  ["zc", "dsh", "qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
     const foldBtn = $(prefix + "DetailFoldBtn");
@@ -7233,99 +7104,6 @@ async function api(method, path, body) {
     }
   }
 
-  function renderReasonix(p) {
-    const stateBadge = $("reasonixStateBadge");
-    const modelBadgesList = $("reasonixModelBadgesList");
-    const errorBanner = $("reasonixErrorBanner");
-    const empty = $("reasonixEmpty");
-    const metricsBlock = $("reasonixMetricsBlock");
-
-    if (modelBadgesList) renderModelBadges(modelBadgesList, "reasonix", p);
-
-    applyFaultBanner(p, errorBanner, $("reasonixErrorMsg"), $("reasonixErrorTime"));
-    stateBadge.closest(".panel-card").classList.toggle("card-collapsed", p.status !== "running");
-
-    if (p.status === "running") {
-      empty.hidden = true;
-      metricsBlock.hidden = false;
-      const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
-      stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
-      stateBadge.textContent = isGenerating ? "生成中" : "待命";
-
-      const m = p.metrics || {};
-      const sess = (p.sessions && p.sessions[0]) || {};
-      // 陈旧端点：速率类置 —、压暗、折线停绘，简要栏换相对时间胶囊；工时等累计量不动。
-      const stale = isEndpointStale(p, isGenerating);
-      endpointStaleFlags.reasonix = stale;
-      dimEndpointRateCards("reasonix", stale);
-      const ttft = m.lastTtftMs || p.lastTtftMs;
-      if (!stale && typeof ttft === "number" && ttft > 0) {
-        $("reasonixTtftVal").textContent = (ttft / 1000).toFixed(2);
-        $("reasonixTtftUnit").textContent = "s";
-        const color = m.ttftColor || "green";
-        $("reasonixTtftLamp").className = "lamp lamp-" + color;
-      } else {
-        $("reasonixTtftVal").textContent = "-";
-        $("reasonixTtftLamp").className = "lamp lamp-gray";
-      }
-
-      const tps = m.tps !== undefined ? m.tps : p.tps;
-      $("reasonixTpsVal").textContent = (!stale && typeof tps === "number" && tps > 0) ? tps.toFixed(1) : "-";
-
-      const hit = m.cacheHitRate !== undefined ? m.cacheHitRate : p.cacheHitRate;
-      $("reasonixCacheVal").textContent = (!stale && typeof hit === "number") ? hit.toFixed(1) : "-";
-
-      const dur = m.activeDurationMs || p.activeDurationMs;
-      $("reasonixDurationVal").textContent = formatDurationSeconds(dur);
-
-      const tokens = m.tokens || sess.tokens || {};
-      updateDetailBrief("reasonix", {
-        isGenerating,
-        ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
-        ttftColor: m.ttftColor || "green",
-        tps: (typeof tps === "number" && tps > 0) ? tps : null,
-        hit: (typeof hit === "number") ? hit : null,
-        durationText: formatDurationSeconds(dur),
-        staleText: stale ? formatRelativeAge(sess.lastSeen) : null,
-        requests: m.totalRequests || p.totalRequests || 0,
-        tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,
-      });
-
-      if (!stale) {
-        pushMetricPoint("reasonix_ttft", typeof ttft === "number" ? ttft / 1000 : null, m.sparkHistory?.ttft);
-        pushMetricPoint("reasonix_tps", tps, m.sparkHistory?.tps);
-        pushMetricPoint("reasonix_cache", hit, m.sparkHistory?.cache);
-
-        redrawEndpointSparklines("reasonix");
-      }
-
-      $("reasonixSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
-      $("reasonixSessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
-
-      const activeTag = $("reasonixActiveTag");
-      if (isGenerating) {
-        activeTag.hidden = false;
-      } else {
-        activeTag.hidden = true;
-      }
-
-      const activeList2 = p.activeModels || (p.currentModel ? [p.currentModel] : []);
-      const lastModelTag = $("reasonixLastModelTag");
-      if (activeList2.length > 0) {
-        lastModelTag.textContent = "模型: " + activeList2.join(", ");
-      } else if (p.lastModel) {
-        lastModelTag.textContent = "模型: " + p.lastModel;
-      } else {
-        lastModelTag.textContent = "模型: 待命";
-      }
-    } else {
-      stateBadge.className = "badge badge-neutral";
-      stateBadge.textContent = "未运行";
-      empty.hidden = false;
-      metricsBlock.hidden = true;
-    }
-  }
-
   function renderQoder(p) {
     const stateBadge = $("qoderStateBadge");
     const modelBadgesList = $("qoderModelBadgesList");
@@ -8033,7 +7811,7 @@ async function api(method, path, body) {
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -10292,7 +10070,7 @@ async function api(method, path, body) {
         : injected
           ? '<span class="badge badge-ok">已注入</span>'
           : '<span class="badge badge-neutral">未注入</span>';
-      // hotReload=false 的端点（claude/zcode/dsh/pi/reasonix/codex）：写盘即生效于新会话，
+      // hotReload=false 的端点（claude/zcode/dsh/pi/codex）：写盘即生效于新会话，
       // 运行中会话需重开才加载新的全局指令文件
       const hotNote = ep.hotReload ? "" : "（运行中会话需重开生效）";
       return `<div class="skills-skill-row"${ep.hotReload ? "" : ' title="运行中会话需重开生效"'}>
@@ -12325,7 +12103,7 @@ async function api(method, path, body) {
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "reasonix", "qoder", "codex"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -13201,7 +12979,7 @@ async function api(method, path, body) {
   // 小写 agentId，展示层映射为端点显示名，未知 id 原样兜底。
   const STATS_ENDPOINT_LABELS = {
     zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
-    opencode: "OpenCode", pi: "Pi", reasonix: "Reasonix", kimi: "Kimi Code",
+    opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code",
     qoder: "Qoder", codex: "Codex",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
@@ -14425,7 +14203,7 @@ async function api(method, path, body) {
   // 回落中性灰，不占用既有端点的色相。
   const SESS_ENDPOINT_COLORS = {
     zcode: "var(--ep-zcode)", claude: "var(--ep-claude)", dsh: "var(--ep-dsh)",
-    pi: "var(--ep-pi)", reasonix: "var(--ep-reasonix)", kimi: "var(--ep-kimi)",
+    pi: "var(--ep-pi)", kimi: "var(--ep-kimi)",
     opencode: "var(--ep-opencode)", qoder: "var(--ep-qoder)", codex: "var(--ep-codex)",
   };
   const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id) => ({

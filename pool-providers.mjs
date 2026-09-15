@@ -5,8 +5,8 @@
 // Every catalog-producing surface consumes this module so the endpoint-facing
 // view can never drift between them:
 //   - wire-id.mjs buildWireCatalog (Anthropic /v1/models)
-//   - the five agent-sync merge modules via extractManagedProviders
-//     (kimi / pi / dsh / zcode / reasonix endpoint configs)
+//   - the agent-sync merge modules via extractManagedProviders
+//     (kimi / pi / dsh / zcode / qoder / codex / opencode endpoint configs)
 // The OpenAI runtime path shares the same union semantics through
 // poolModelsUnion (pool-routing.mjs), which this module also delegates to.
 //
