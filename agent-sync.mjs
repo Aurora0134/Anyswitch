@@ -16,6 +16,7 @@ import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
 import { writeReasonixConfig, reasonixConfigPath } from "./reasonix-launcher.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
+import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
 
 /**
  * Synchronize all supported coding agent configurations against the current store.
@@ -55,6 +56,7 @@ export async function syncAllAgentConfigs({
     reasonix: null,
     qoder: null,
     codex: null,
+    opencode: null,
   };
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
@@ -160,6 +162,20 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.codex = { ok: false, error: err.message };
     logger?.warn?.(`codex config sync skipped: ${err.message}`);
+  }
+
+  // 8. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
+  try {
+    const ocResult = await writeOpencodeConfig(store, port, root, opencodeConfigPath(base));
+    results.opencode = ocResult;
+    if (!ocResult.ok) {
+      logger?.warn?.(`opencode.json not updated: ${ocResult.reason ?? "unknown"}`);
+    } else if (!ocResult.unchanged) {
+      logger?.info?.("opencode.json synced");
+    }
+  } catch (err) {
+    results.opencode = { ok: false, error: err.message };
+    logger?.warn?.(`opencode config sync skipped: ${err.message}`);
   }
 
   return { ok: true, results };
