@@ -98,6 +98,20 @@ describe("agent-sync", () => {
     // Qoder 段带 `qoder~` 身份前缀：它发不出 x-agent-id、UA 无自家标识，relay 只能
     // 从 URL 认端点（其余端点靠各自的头，段仍是裸渠道 id）。
     assert.equal(alphaConn.baseUrl, "http://127.0.0.1:47821/openai/qoder~alpha/v1");
+
+    assert.ok(res.results.opencode);
+    const opencodePath = join(tmpRoot, ".config", "opencode", "opencode.json");
+    assert.equal(existsSync(opencodePath), true, "opencode.json must land under the injected USERPROFILE");
+    const opencode = JSON.parse(readFileSync(opencodePath, "utf8"));
+    const ocAlpha = opencode.provider?.alpha;
+    assert.ok(ocAlpha, "alpha provider must be written into the sandbox opencode.json under its raw id");
+    assert.equal(ocAlpha.npm, "@ai-sdk/openai-compatible");
+    assert.equal(ocAlpha.options.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
+    // apiKey 是 {file:} 引用而非字面 token：盘上零秘密，轮换免重同步。
+    assert.equal(ocAlpha.options.apiKey, `{file:${join(tmpRoot, "pi-relay-token").replace(/\\/g, "/")}}`);
+    assert.equal(ocAlpha.options.headers["x-agent-id"], "opencode");
+    assert.equal(ocAlpha.options.headers["x-agent-instance"], "{env:ANYSWITCH_AGENT_INSTANCE}");
+    assert.deepEqual(Object.keys(ocAlpha.models), ["model-1"]);
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -250,6 +264,15 @@ describe("agent-sync pools", () => {
     assert.equal(qoderSettings.providers?.[managedConnectionId("alpha")], undefined);
     assert.equal(qoderSettings.providers?.[managedConnectionId("beta")], undefined);
 
+    const opencode = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.ok(opencode.provider["pool-ab"], "pool channel in opencode.json");
+    assert.equal(opencode.provider["pool-ab"].name, "Pool AB");
+    assert.equal(opencode.provider["pool-ab"].options.baseURL, "http://127.0.0.1:47821/openai/pool-ab/v1");
+    assert.deepEqual(Object.keys(opencode.provider["pool-ab"].models), ["model-1", "model-2"]);
+    // Members are absorbed into the pool channel — no endpoint lists them.
+    assert.equal(opencode.provider.alpha, undefined);
+    assert.equal(opencode.provider.beta, undefined);
+
     // Dissolve the pool and re-sync: the pool channel disappears everywhere,
     // the absorbed member channels resurface as standalone channels.
     const second = await syncAllAgentConfigs(syncOpts(poolStore(false)));
@@ -270,6 +293,11 @@ describe("agent-sync pools", () => {
     assert.equal(qoderSettings2.providers?.[managedConnectionId("pool-ab")], undefined);
     assert.ok(qoderSettings2.providers?.[managedConnectionId("alpha")]);
     assert.ok(qoderSettings2.providers?.[managedConnectionId("beta")]);
+
+    const opencode2 = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.equal(opencode2.provider["pool-ab"], undefined);
+    assert.ok(opencode2.provider.alpha);
+    assert.ok(opencode2.provider.beta);
   });
 });
 
@@ -308,6 +336,7 @@ describe("agent-sync auto routing channel", () => {
       store.routingChains = {
         zcode: { chain: [{ node: "alpha", model: "model-1" }, { node: "beta", model: "model-2" }] },
         kimi: { chain: [{ node: "beta", model: "model-2" }] },
+        opencode: { chain: [{ node: "beta", model: "model-2" }] },
       };
     }
     return store;
@@ -344,6 +373,13 @@ describe("agent-sync auto routing channel", () => {
     assert.equal(qoderSettings.providers?.[managedConnectionId("auto")], undefined, "qoder without a chain gets no auto connection");
     assert.ok(qoderSettings.providers?.[managedConnectionId("alpha")]);
 
+    // opencode has a chain headed by beta: the auto channel points at the head segment.
+    const opencode = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.ok(opencode.provider.auto, "opencode gets the auto channel");
+    assert.equal(opencode.provider.auto.name, "自动路由");
+    assert.equal(opencode.provider.auto.options.baseURL, "http://127.0.0.1:47821/openai/beta/v1");
+    assert.deepEqual(Object.keys(opencode.provider.auto.models), ["auto"]);
+
     // Delete the chains and re-sync: _auto disappears everywhere.
     const second = await syncAllAgentConfigs(syncOpts(chainStore(false)));
     assert.equal(second.ok, true);
@@ -355,5 +391,9 @@ describe("agent-sync auto routing channel", () => {
     const kimiText2 = readFileSync(join(tmpRoot, ".kimi-code", "config.toml"), "utf8");
     assert.doesNotMatch(kimiText2, /_auto/, "kimi _auto cleaned up after chain deletion");
     assert.match(kimiText2, /\[providers\."_alpha"\]/);
+
+    const opencode2 = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.equal(opencode2.provider.auto, undefined, "opencode auto cleaned up after chain deletion");
+    assert.ok(opencode2.provider.alpha);
   });
 });

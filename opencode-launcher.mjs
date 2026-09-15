@@ -4,11 +4,28 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
+import { loadStore } from "./store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
+import {
+  readOpencodeConfig,
+  mergeOpencodeConfig,
+  writeOpencodeConfigWithBackup,
+  extractManagedProviders,
+  deriveAutoRouteChannel,
+  readSidecar,
+  writeSidecar,
+  relayTokenFileRef,
+  validateOpencodeConfig,
+} from "./opencode-merge-config.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
+
+export function opencodeConfigPath(base = process.env) {
+  return join(base.USERPROFILE ?? "", ".config", "opencode", "opencode.json");
+}
 
 function relayDataRoot(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Anyswitch");
@@ -48,6 +65,45 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
+// High-level write: read existing opencode.json, merge managed providers,
+// write back with backup. Returns { ok, unchanged, backupPath?, reason? }.
+// Fail-closed: a config whose managed block cannot be parsed is reported,
+// never overwritten. Token-less signature (like dsh/pi): the apiKey is a
+// `{file:...}` reference to the relay token file, not a literal value.
+export async function writeOpencodeConfig(store, port, sidecarRoot, configPath = opencodeConfigPath(), catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
+  const managedProviders = extractManagedProviders(store);
+  const autoChannel = deriveAutoRouteChannel(store, "opencode");
+  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
+  }
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  // With 「注入推理强度」 off no variants are written at all: the merge
+  // rebuilds every managed entry wholesale, so an absent catalog also strips
+  // the variants a previous sync wrote — that is the switch's cleanup path.
+  const effectiveCatalog = (effortsEnabled ?? effortSupplementEnabled(sidecarRoot)) ? catalog : null;
+  let existing;
+  try {
+    existing = readOpencodeConfig(configPath);
+  } catch (error) {
+    if (error?.code === "UNPARSEABLE_CONFIG") {
+      return { ok: false, unchanged: true, reason: error.message };
+    }
+    throw error;
+  }
+  const { config, managed } = mergeOpencodeConfig(existing, managedProviders, port, relayTokenFileRef(sidecarRoot), previousManaged, autoChannel, effectiveCatalog);
+
+  const gate = validateOpencodeConfig(config);
+  if (!gate.valid) {
+    return { ok: false, unchanged: true, reason: `opencode.json would be invalid: ${gate.error}` };
+  }
+
+  const writeResult = writeOpencodeConfigWithBackup(configPath, config);
+  if (writeResult.ok) {
+    writeSidecar(sidecarRoot, managed);
+  }
+  return writeResult;
+}
+
 export function resolveOpencodeExecutable(base = process.env) {
   const override = base.OPENCODE_EXECUTABLE;
   if (override) {
@@ -60,15 +116,22 @@ export function resolveOpencodeExecutable(base = process.env) {
     }
     return override;
   }
-  // Default to the real opencode binary, NOT a PATH-resolved `opencode`:
-  // the Anyswitch shadow shims (bin-opencode, ahead of npm in PATH) route
-  // `opencode` back into this launcher, so resolving the command name here
-  // would recurse forever.
+  // Default to the real opencode binary bundled inside the platform optional
+  // dependency — NOT %APPDATA%\npm\opencode.cmd (the Anyswitch shadow shims
+  // route that back into this launcher = infinite recursion) and NOT
+  // opencode-ai\bin\opencode.exe: that top-level path is a 479-byte
+  // placeholder batch whenever npm's allow-scripts policy blocks the
+  // postinstall copy (observed with npm 12 on 2026-09-14/15), which Windows
+  // then refuses to execute ("与你运行的 Windows 版本不兼容"). The embedded
+  // path depends on upstream's "optional dependency per platform" layout —
+  // if upstream repackages, OPENCODE_EXECUTABLE is the escape hatch.
   return join(
     base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
     "npm",
     "node_modules",
     "opencode-ai",
+    "node_modules",
+    "opencode-windows-x64",
     "bin",
     "opencode.exe",
   );
@@ -91,9 +154,12 @@ export function buildInstanceId({
 export function buildOpencodeLauncherEnv({ token, instanceId, base = {} }) {
   const env = { ...base };
   env.ANYSWITCH_RELAY_TOKEN = token;
-  // Read by the companion OpenCode injection plugin (not shipped with this
-  // repository) and turned into an x-agent-instance header; the tag lives in
-  // the child env only, never on disk.
+  // Consumed by the `{env:ANYSWITCH_AGENT_INSTANCE}` reference the managed
+  // opencode.json writes into every provider's x-agent-instance header —
+  // expanded inside the opencode process, so the tag lives in the child env
+  // and the config reference, never as a literal on disk. Missing when the
+  // client was not started through the launcher: the header expands empty
+  // and the relay drops it (sanitizeInstanceId), as before.
   if (instanceId) env.ANYSWITCH_AGENT_INSTANCE = instanceId;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
@@ -106,10 +172,29 @@ export async function runOpencodeLauncher({
   opencodeArgs = [],
   spawnFn = spawn,
   instanceId = buildInstanceId(),
+  // writeConfig syncs opencode.json against the store before spawning. The
+  // default is a no-op so tests stay hermetic (a default-real writer would
+  // rewrite the user's actual config); production main() wires it explicitly.
+  writeConfig = null,
+  log = () => {},
 }) {
   const relay = await startRelay();
 
   try {
+    if (writeConfig) {
+      const loaded = loadStore();
+      if (!loaded.ok) {
+        log("warning: Anyswitch store could not be read; opencode config not updated");
+      } else {
+        const writeResult = await writeConfig(loaded.store, relay.port, relayDataRoot(base));
+        if (!writeResult.ok) {
+          log(`warning: opencode.json not updated: ${writeResult.reason ?? "unknown error"}`);
+        } else if (!writeResult.unchanged) {
+          log(`opencode.json updated (backup: ${writeResult.backupPath ?? "none"})`);
+        }
+      }
+    }
+
     const env = buildOpencodeLauncherEnv({ token: relay.token, instanceId, base });
     const exe = resolveOpencodeExecutable(base);
     const comspec = base.COMSPEC || "cmd.exe";
@@ -132,6 +217,8 @@ export async function runOpencodeLauncher({
 export async function main(argv = process.argv.slice(2)) {
   const code = await runOpencodeLauncher({
     startRelay: () => startOpenAIRelay(),
+    writeConfig: (store, port, sidecarRoot) => writeOpencodeConfig(store, port, sidecarRoot),
+    log: (line) => process.stderr.write(`${line}\n`),
     opencodeArgs: argv,
   });
   return code;
