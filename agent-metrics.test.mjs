@@ -3314,6 +3314,203 @@ describe("createSessionReporter", () => {
 
 
 
+describe("per-launch stability batch + chain runtime relay（一次性 relay 盲区修复）", () => {
+  // Like reporterHarness but the POST outcome is switchable mid-test, so the
+  // batch resend path (failed POST keeps entries) can be exercised.
+  function batchHarness() {
+    let mockTime = 1000;
+    const posted = [];
+    const state = { fail: false };
+    const reporter = createSessionReporter({
+      reportUrl: "http://report.invalid/panel/api/session/report",
+      nowFn: () => mockTime,
+      fetchFn: (url, init) => {
+        posted.push(JSON.parse(init.body));
+        return state.fail ? Promise.reject(new Error("connection refused")) : Promise.resolve({ ok: true });
+      },
+    });
+    return { reporter, posted, state, tick: (t) => { mockTime = t; } };
+  }
+  // post() acknowledges the batch in the microtask after fetchFn resolves.
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  it("recordEnd 终态入 stabilityBatch：归因与 TTFT 规则和 journal 行一致", async () => {
+    const { reporter, posted, tick } = batchHarness();
+    reporter.setClaudePid(100);
+    const req = reporter.startRequest({ providerId: "chan-a", model: "claude-opus-5", stream: true, path: "anthropic" });
+    tick(1500);
+    req.recordFirstChunk();
+    tick(4000);
+    req.recordEnd({ status: 200, usage: { input_tokens: 12, output_tokens: 7, cache_read_input_tokens: 5 } });
+
+    const batch = posted[posted.length - 1].stabilityBatch;
+    assert.equal(batch.length, 1);
+    assert.deepEqual(batch[0], {
+      seq: 1,
+      providerId: "chan-a",
+      model: "claude-opus-5",
+      ok: true,
+      latencyMs: 3000,
+      prompt: 12,
+      cached: 5,
+      ttftMs: 500,
+      at: 4000,
+    });
+
+    // 失败终态：ok:false 且不携带 TTFT（失败请求没有首字，等待时长不得把
+    // 死节点刷绿）。
+    const req2 = reporter.startRequest({ providerId: "chan-a", model: "claude-opus-5", stream: true, path: "anthropic" });
+    tick(6000);
+    req2.recordEnd({ status: 502, error: { status: 502, message: "bad gateway" } });
+    const batch2 = posted[posted.length - 1].stabilityBatch;
+    const failed = batch2.find((r) => r.ok === false);
+    assert.ok(failed, "failed terminal end recorded");
+    assert.equal(failed.ttftMs, null);
+    assert.equal(failed.latencyMs, 2000);
+
+    // abort 不进稳定性（与 journal/常驻收集器同规则）。
+    const before3 = posted[posted.length - 1].stabilityBatch.length;
+    const req3 = reporter.startRequest({ providerId: "chan-a", model: "claude-opus-5", stream: true, path: "anthropic" });
+    tick(7000);
+    req3.recordEnd({ aborted: true });
+    const after3 = posted[posted.length - 1].stabilityBatch;
+    assert.equal(after3.filter((r) => r.at === 7000).length, 0, "abort contributes no stability record");
+
+    // 链请求：归因归到服务节点（链解析器），不落在虚拟 auto 上。
+    const req4 = reporter.startRequest({ providerId: null, model: "auto", stream: true, path: "anthropic" });
+    req4.setAttributeResolver((memberId) => (memberId === "chan-b/m1" ? { providerId: "chan-b", model: "glm-5.2" } : null));
+    req4.setCurrentMember("chan-b/m1");
+    tick(9000);
+    req4.recordEnd({ status: 200, usage: { input_tokens: 3, output_tokens: 2 } });
+    const auto = posted[posted.length - 1].stabilityBatch.find((r) => r.at === 9000);
+    assert.equal(auto.providerId, "chan-b");
+    assert.equal(auto.model, "glm-5.2");
+  });
+
+  it("recordRetry 记尝试级失败：静默恢复不得把成功率染成 100%", async () => {
+    const { reporter, posted, tick } = batchHarness();
+    const req = reporter.startRequest({ providerId: "pool-x", model: "glm-5.2", stream: true, path: "anthropic" });
+    req.setAttributeResolver((memberId) => (memberId === "pool-x/member-a" ? { providerId: "pool-x", model: "glm-5.2" } : null));
+    req.recordRetry({ reason: "upstream_429", usage: { prompt_tokens: 100, prompt_tokens_details: { cached_tokens: 40 } }, memberId: "pool-x/member-a" });
+    tick(3000);
+    req.recordEnd({ status: 200, usage: { input_tokens: 100, output_tokens: 50 } });
+
+    const batch = posted[posted.length - 1].stabilityBatch;
+    assert.equal(batch.length, 2, "retry attempt + terminal end");
+    assert.deepEqual(batch[0], {
+      seq: 1,
+      providerId: "pool-x",
+      model: "glm-5.2",
+      ok: false,
+      latencyMs: 0,
+      prompt: 100,
+      cached: 40,
+      ttftMs: null,
+      at: 1000,
+    });
+    assert.equal(batch[1].seq, 2);
+    assert.equal(batch[1].ok, true);
+  });
+
+  it("上报成功才清缓冲；失败的 POST 保留下轮重发，序号单调", async () => {
+    const { reporter, posted, state, tick } = batchHarness();
+    state.fail = true;
+    reporter.startRequest({ providerId: "chan-a", model: "m", stream: false, path: "anthropic" });
+    tick(2000);
+    reporter.recordEnd({ status: 200, usage: { input_tokens: 1, output_tokens: 1 } });
+    await flush();
+    tick(3000);
+    reporter.startRequest({ providerId: "chan-a", model: "m", stream: false, path: "anthropic" });
+    assert.deepEqual(posted[posted.length - 1].stabilityBatch.map((r) => r.seq), [1], "failed POST keeps entries; next snapshot re-carries them");
+
+    state.fail = false;
+    tick(4000);
+    reporter.recordEnd({ status: 200, usage: { input_tokens: 1, output_tokens: 1 } });
+    assert.deepEqual(posted[posted.length - 1].stabilityBatch.map((r) => r.seq), [1, 2], "seq keeps climbing across resends");
+    await flush();
+    reporter.startRequest({ providerId: "chan-a", model: "m", stream: false, path: "anthropic" });
+    assert.equal(posted[posted.length - 1].stabilityBatch.length, 0, "acked entries cleared after a successful POST");
+  });
+
+  it("setChainState 后快照捎带 chainRuntime；未接线时不带", async () => {
+    const { reporter, posted } = batchHarness();
+    reporter.setChainState({
+      snapshot: () => [{ endpointId: "claude", nodeId: "chan-b", model: "model-b", since: 1234 }],
+      nodeStats: () => [{ node: "chan-a", model: "model-a", failures: 2 }],
+    });
+    reporter.startRequest({ providerId: "chan-b", model: "model-b", stream: false, path: "anthropic" });
+    assert.deepEqual(posted[posted.length - 1].chainRuntime, {
+      positions: [{ endpointId: "claude", nodeId: "chan-b", model: "model-b", since: 1234 }],
+      nodes: [{ node: "chan-a", model: "model-a", failures: 2 }],
+    });
+
+    const plain = batchHarness();
+    plain.reporter.startRequest({ providerId: "chan-a", model: "m", stream: false, path: "anthropic" });
+    assert.ok(!("chainRuntime" in plain.posted[plain.posted.length - 1]), "no chainState wired → field absent");
+  });
+
+  it("reportSession 把 batch 喂进常驻追踪器，按 at 落桶、按 seq 去重", async () => {
+    let mockTime = 1_000_000;
+    const collector = testCollector({ nowFn: () => mockTime });
+    const report = {
+      pid: 4444,
+      agentId: "claude",
+      stabilityBatch: [
+        { seq: 1, providerId: "sensenova", model: "kimi-k3", ok: true, latencyMs: 3000, prompt: 10, cached: 4, ttftMs: 800, at: 999000 },
+        { seq: 2, providerId: "sensenova", model: "kimi-k3", ok: false, latencyMs: 0, prompt: 5, cached: 0, ttftMs: null, at: 1000000 },
+      ],
+    };
+    collector.reportSession("tok_a", report);
+    let row = collector.getModelStability().models.find((m) => m.provider === "sensenova" && m.model === "kimi-k3");
+    assert.equal(row.total, 2);
+    assert.equal(row.successRate, 50);
+    assert.equal(row.ttftMs, 800, "only the record with a real first token feeds the TTFT mean");
+
+    collector.reportSession("tok_a", report);
+    row = collector.getModelStability().models.find((m) => m.provider === "sensenova" && m.model === "kimi-k3");
+    assert.equal(row.total, 2, "重放的同批必须按 seq 去重，不双计");
+
+    // PID 复用（同 pid 不同 token）= 新 reporter 进程，seq 从 1 重启——
+    // 去重游标必须随会话重置，否则新会话的整批记录会被静默丢弃。
+    collector.reportSession("tok_b", {
+      pid: 4444,
+      agentId: "claude",
+      stabilityBatch: [{ seq: 1, providerId: "sensenova", model: "kimi-k3", ok: true, latencyMs: 1000, at: 1001000 }],
+    });
+    row = collector.getModelStability().models.find((m) => m.provider === "sensenova" && m.model === "kimi-k3");
+    assert.equal(row.total, 3, "recycled PID starts a fresh seq line and must record");
+  });
+
+  it("reportSession 存 chainRuntime 全量快照，getReportedChainRuntime 供链运行时合并", async () => {
+    const collector = testCollector({ nowFn: () => 1000 });
+    collector.reportSession("tok_a", {
+      pid: 4444,
+      agentId: "claude",
+      chainRuntime: {
+        positions: [{ endpointId: "claude", nodeId: "chan-b", model: "model-b", since: 900 }],
+        nodes: [{ node: "chan-a", model: "model-a", failures: 2 }],
+      },
+    });
+    let dumps = collector.getReportedChainRuntime();
+    assert.equal(dumps.length, 1);
+    assert.deepEqual(dumps[0].positions, [{ endpointId: "claude", nodeId: "chan-b", model: "model-b", since: 900 }]);
+    assert.deepEqual(dumps[0].nodes, [{ node: "chan-a", model: "model-a", failures: 2 }]);
+
+    // 同一会话的新快照整体覆盖（上报方 dump 是全量不是增量）。
+    collector.reportSession("tok_a", {
+      pid: 4444,
+      agentId: "claude",
+      chainRuntime: { positions: [], nodes: [{ node: "chan-b", model: "model-b", failures: 0 }] },
+    });
+    dumps = collector.getReportedChainRuntime();
+    assert.equal(dumps.length, 1);
+    assert.deepEqual(dumps[0].positions, []);
+    assert.deepEqual(dumps[0].nodes, [{ node: "chan-b", model: "model-b", failures: 0 }]);
+  });
+});
+
+
+
 describe("instance PID reconciliation and process-start placeholders", () => {
   // wmic-shaped CSV reporting one live kimi node.exe process with the given PID.
   const kimiWmicRow = (pid) =>

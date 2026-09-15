@@ -246,6 +246,11 @@ export function createProductionDeps({
   // runs in startProductionRelay. Failure to reach the panel is silent —
   // metrics are best-effort and must never break the relay's primary job.
   //
+  // The snapshots also carry this process's model-stability records
+  // (stabilityBatch, seq-deduped resident-side) and its route-chain runtime
+  // (chainRuntime) — the two things a per-launch relay cannot hold for the
+  // panel: the resident relay records/merges them on this session's behalf.
+  //
   // The usage journal targets the SAME dir the resident relay writes to, so
   // the stats tab finally sees this endpoint's request rows (per-launch relay
   // traffic never touches the resident relay). agentId 决定 journal 行的归

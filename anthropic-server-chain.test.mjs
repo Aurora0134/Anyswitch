@@ -669,13 +669,17 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
   function reporterDeps({ upstreamFetch, store = STORE, getKeepAliveConfig = NO_RETRY } = {}) {
     const lines = [];
     const journal = { lines, appendRequest: (entry) => lines.push(entry) };
+    const posted = [];
     const sessionTracker = createSessionReporter({
       reportUrl: "http://report.invalid/panel/api/session/report",
       journal,
-      fetchFn: async () => ({ ok: true }),
+      fetchFn: async (url, init) => {
+        posted.push(JSON.parse(init.body));
+        return { ok: true };
+      },
     });
     const deps = { ...createMockDeps({ upstreamFetch, store, getKeepAliveConfig }), sessionTracker };
-    return { deps, lines };
+    return { deps, lines, posted };
   }
 
   it("(auto, non-stream) journal 行归到实际应答节点 + 绑定模型，不再是 auto", async () => {
@@ -751,5 +755,59 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
     assert.equal(lines[0].ok, false);
     assert.equal(lines[0].status, 503);
     assert.equal(lines[0].errKind, "http_5xx");
+  });
+
+  it("(auto) 稳定性批量随快照捎带：失败尝试与终态各一条，归因到节点", async () => {
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-a": () => statusError(503),
+      "member-a": () => nonStreamJson("pool answers"),
+    });
+    const { deps, posted } = reporterDeps({ upstreamFetch });
+    await withPerLaunch(deps, async (port) => {
+      const res = await postMessages(port, { model: "auto", stream: false });
+      assert.equal(res.status, 200);
+      await res.json();
+    });
+    assert.deepEqual(calls, ["chan-a", "member-a"]);
+    // 批量是「至少一次」投递：一条记录可能随多个快照重发（常驻侧按 seq 去重），
+    // 且已确认的记录会从后续快照消失——断言要合并所有快照里的记录。
+    const seen = new Map();
+    for (const p of posted) {
+      for (const r of p.stabilityBatch ?? []) if (!seen.has(r.seq)) seen.set(r.seq, r);
+    }
+    const records = [...seen.values()];
+    const failed = records.filter((r) => r.ok === false);
+    const succeeded = records.filter((r) => r.ok === true);
+    assert.equal(failed.length, 1, "chan-a 的失败尝试入列（静默恢复不染绿）");
+    assert.equal(failed[0].providerId, "chan-a");
+    assert.equal(failed[0].model, "claude-a");
+    assert.equal(failed[0].ttftMs, null);
+    assert.equal(succeeded.length, 1, "终态成功入列");
+    assert.equal(succeeded[0].providerId, "test-pool");
+    assert.equal(succeeded[0].model, "claude-pool");
+    assert.ok(failed[0].seq < succeeded[0].seq, "尝试级失败先于终态，seq 单调");
+  });
+
+  it("(auto) 链运行时随快照捎带 chainRuntime：退避位置与节点成败", async () => {
+    const { upstreamFetch } = memberRouter({
+      "chan-a": () => statusError(503),
+      "member-a": () => nonStreamJson("pool answers"),
+    });
+    const { deps, posted } = reporterDeps({ upstreamFetch });
+    await withPerLaunch(deps, async (port) => {
+      // 链降级锁存要连续 2 次失败（CHAIN_DEMOTE_AFTER_FAILURES）：单次切换只是
+      // 抖动不挪位（既有语义），第二次才真正退避。两次请求后位置落到应答节点。
+      for (let i = 0; i < 2; i += 1) {
+        const res = await postMessages(port, { model: "auto", stream: false });
+        assert.equal(res.status, 200);
+        await res.json();
+      }
+    });
+    const runtime = posted[posted.length - 1].chainRuntime;
+    assert.ok(runtime, "server.mjs 已把 handler 的 chainState 接进 reporter");
+    const pos = runtime.positions.find((p) => p.endpointId === "claude");
+    assert.deepEqual({ node: pos.nodeId, model: pos.model }, { node: "test-pool", model: "claude-pool" }, "退避后落在应答节点");
+    const headStat = runtime.nodes.find((n) => n.node === "chan-a");
+    assert.ok(headStat.failures >= 2, "chan-a 的连续失败计入节点成败（链灯数据源）");
   });
 });

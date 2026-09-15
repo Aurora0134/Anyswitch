@@ -67,6 +67,10 @@ export function createRelayServer(deps) {
   const handler = createHandler(deps);
   const tracker = deps?.sessionTracker ?? null;
   const agentId = typeof deps?.agentId === "string" && deps.agentId ? deps.agentId : "claude";
+  // The panel cannot reach this ephemeral relay, so this process's
+  // route-chain runtime (positions + node outcomes) rides the session
+  // reports; the resident relay merges it into the Flow Rail.
+  tracker?.setChainState?.(handler.chainState);
 
   const server = createServer(async (req, res) => {
     if (!isLoopback(req.socket.remoteAddress)) {
