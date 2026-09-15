@@ -2560,6 +2560,35 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(/return;/.test(after), "guard short-circuits with plain return");
   });
 
+  it("reveal 半途被 morph 接管：dash 从已画弧长连续起步、沿用原时钟归一续推（不重启、总时长不变）", () => {
+    // reveal 的 t0 记上 state，供接管沿用
+    assert.ok(
+      /const state = \{ raf: 0, current: commitPixels\(\), grown: new Map\(\), targetSig: animSig, t0: performance\.now\(\) \}/.test(panelHtml),
+      "reveal state carries t0 for takeover clock inheritance");
+    // morph 状态带 dashT0（续接时钟）与 grown（链式续推的成员判定）
+    assert.ok(
+      /const state = \{ raf: 0, current: null, targetSig: animSig, t0, dashT0, grown: new Map\(\) \}/.test(panelHtml),
+      "morph state carries dashT0 and grown");
+    // 续接时钟沿接管链继承最初 reveal 的时钟，链外取自身 t0
+    assert.ok(
+      panelHtml.includes("const dashT0 = (prevAnim && (prevAnim.dashT0 ?? prevAnim.t0)) ?? t0;"),
+      "dashT0 inherited along the takeover chain");
+    // 续推从接管点已画弧长 k 连续起步，剩余段按缓动尾部归一（eStart=接管点在原
+    // 时钟上的缓动进度）：位置与速度都连续、不重启时钟；旧的「k→total 换全新
+    // 1500ms」写法已移除
+    assert.ok(
+      panelHtml.includes("const eStart = STATS_MORPH_EASE(Math.min(1, (t0 - dashT0) / STATS_MORPH_MS));")
+        && panelHtml.includes("const pDash = Math.min(1, (t - dashT0) / STATS_MORPH_MS);")
+        && panelHtml.includes("k + (pl.total - k) * (STATS_MORPH_EASE(pDash) - eStart) / (1 - eStart)"),
+      "dash continuation continuous from k, normalized over the remaining ease tail");
+    assert.ok(!panelHtml.includes("(pl.total - k) * e;"),
+      "old clock-restart continuation removed");
+    // 续接系列已画弧长回写 grown（链式接管不断链）；播满还原静态 dash
+    assert.ok(panelHtml.includes("state.grown.set(pl.rec.s.key, u);")
+        && panelHtml.includes("if (pDash >= 1) restoreSegs(pl);"),
+      "grown maintained during carry and dash restored on completion");
+  });
+
   it("morph/reveal 进行中 hover 十字线与 tooltip 隐藏（终态坐标不再与曲线错位）", () => {
     const m = panelHtml.match(/overlay\.addEventListener\("mousemove", \(e\) => \{([\s\S]*?)\n    \}\);/);
     assert.ok(m, "mousemove handler found");

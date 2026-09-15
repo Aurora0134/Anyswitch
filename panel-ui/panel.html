@@ -13602,8 +13602,9 @@ async function api(method, path, body) {
   //            桶数变化按索引比例映射 floor(j*旧点数/新点数)，新出现的 key 从 0 线升起，
   //            消失的 key 由调用方不传入即自然不出现；yMax/点距变化随像素插值平滑过渡。
   //   动画进行中再次渲染：取消在飞 rAF，以其中间帧为新 morph 的起点，不闪跳；
-  //   reveal 半途被 morph 接管：dash 从已画弧长续推到全显（recharts
-  //   longestAnimatedLengthRef 同款），与点插值并行，不回卷重画。
+  //   reveal 半途被 morph 接管：dash 从已画弧长连续起步、沿用 reveal 原时钟在
+  //   原剩余时间内归一续推到全显（速度与不被打断一致、总时长不变），与点插值
+  //   并行，不回卷重画。
   function renderStatsLineChart(container, cfg, anim) {
     // 同终点守卫：morph 进行中若新内容与在飞动画的目标完全一致（seg 重击当前 tab、
     // 30s 轮询数据未变、手动刷新返回同值），整体跳过本次渲染——在飞动画按原时序播完，
@@ -13749,15 +13750,15 @@ async function api(method, path, body) {
       for (const rec of seriesRecs) for (const seg of rec.segs) seg.el.setAttribute("stroke-dasharray", "0px 100000px");
       const plans = seriesRecs.map((rec) => ({ rec, items: [], total: 0 }));
       let measured = false;
-      // grown：各系列已画弧长，reveal 被 morph 中断时作续接起点（终态像素帧另记在 current）
-      const state = { raf: 0, current: commitPixels(), grown: new Map(), targetSig: animSig };
-      const t0 = performance.now();
+      // grown：各系列已画弧长，被 morph 接管时作续接成员判定（终态像素帧另记在 current）；
+      // t0 记上 state：接管时 dash 续推沿用本时钟（见 morph 分支 dashT0）
+      const state = { raf: 0, current: commitPixels(), grown: new Map(), targetSig: animSig, t0: performance.now() };
       const tick = (t) => {
         if (!measured) {
           for (const pl of plans) { const m = measureSegs(pl.rec); pl.items = m.items; pl.total = m.total; }
           measured = true;
         }
-        const p = Math.min(1, (t - t0) / STATS_MORPH_MS);
+        const p = Math.min(1, (t - state.t0) / STATS_MORPH_MS);
         const e = STATS_MORPH_EASE(p);
         for (const plan of plans) {
           if (!plan.total) continue;
@@ -13771,7 +13772,14 @@ async function api(method, path, body) {
       state.raf = requestAnimationFrame(tick);
       container._statsAnim = state;
     } else if (!reduceMotion && anim && anim.type === "morph" && baseline) {
-      const state = { raf: 0, current: null, targetSig: animSig };
+      // t0=自身点插值时钟；dashT0=dash 续接时钟，沿接管链一路继承最初 reveal 的
+      // 时钟（链外取自身 t0）；grown=dash 续接系列当前已画弧长，本 morph 再被接管
+      // 时作续接成员判定（reveal→morph→morph 链式续推不断链）
+      const t0 = performance.now();
+      const dashT0 = (prevAnim && (prevAnim.dashT0 ?? prevAnim.t0)) ?? t0;
+      // eStart：接管点在原时钟上的缓动进度，续推对剩余段以此为零点归一（见 tick）
+      const eStart = STATS_MORPH_EASE(Math.min(1, (t0 - dashT0) / STATS_MORPH_MS));
+      const state = { raf: 0, current: null, targetSig: animSig, t0, dashT0, grown: new Map() };
       const zeroY = padT + ih; // 0 线像素（yMin 恒为区间下界）
       const recs = seriesRecs.map((rec) => {
         const dense = rec.s.values.every((v) => v != null) && rec.segs.length > 0;
@@ -13788,11 +13796,8 @@ async function api(method, path, body) {
           : null;
         return { rec, dense, start };
       });
-      const t0 = performance.now();
-      // dash 续接：reveal 半绘中被 morph 接管时，前半程已画部分不能闪现跳到全显——
-      // 记录接管时刻的已画弧长 k（recharts longestAnimatedLengthRef 同款），morph 期间
-      // 各段 dash 从 k 内推到全显，与点插值并行不回卷。弧长须在首帧 rAF 惰性测
-      // （此时 svg 已 appendChild，getTotalLength 才可靠）。
+      // dash 续接成员判定：原动画仍在生长的系列（已画弧长 < 新曲线总长）才续推；
+      // 弧长须在首帧 rAF 惰性测（此时 svg 已 appendChild，getTotalLength 才可靠）
       const prevgrown = (prevAnim && prevAnim.grown) || null;
       let dashCarry = null;
       const tick = (t) => {
@@ -13804,12 +13809,17 @@ async function api(method, path, body) {
         }
         const p = Math.min(1, (t - t0) / STATS_MORPH_MS);
         const e = STATS_MORPH_EASE(p);
-        // dash 续接目标：k → total 用同一 ease，首帧即补齐到 k，随后推到全显
+        // dash 续推：从接管点已画弧长 k 连续起步，沿用 dashT0 原时钟，剩余弧长在
+        // 原时钟剩余时间内按缓动尾部归一播完——位置与速度都连续（新旧曲线弧长
+        // 差异仅体现为同比缩放）、总时长不变、不重启；播满即还原静态 dash
+        const pDash = Math.min(1, (t - dashT0) / STATS_MORPH_MS);
         for (const pl of dashCarry) {
           const k = prevgrown.get(pl.rec.s.key);
-          const u = k + (pl.total - k) * e;
+          const u = eStart >= 1 ? pl.total
+            : k + (pl.total - k) * (STATS_MORPH_EASE(pDash) - eStart) / (1 - eStart);
+          state.grown.set(pl.rec.s.key, u);
           paintSegs(pl, u);
-          if (p >= 1) restoreSegs(pl);
+          if (pDash >= 1) restoreSegs(pl);
         }
         const current = new Map();
         for (const { rec, dense, start } of recs) {
