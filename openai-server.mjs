@@ -371,10 +371,12 @@ export function createOpenAIRelayServer(deps) {
     // lives in this process's handler closures — one chainState per protocol
     // frontend (openai / anthropic) — so the payload merges both
     // snapshots, keeping the newest record (max since) per endpoint
-    // (see buildChainRuntime). Per-LAUNCH relay processes keep their own
-    // state and are not aggregated: they are transient and not reachable from
-    // the panel, same blind spot as their model-stability rows. Same guard
-    // rail as /api/internal/agents: loopback + pi-relay-token.
+    // (see buildChainRuntime). Per-launch relay processes (claude/kimi) keep
+    // their own state in THEIR closures; their session reporters piggyback a
+    // chainRuntime dump on every session-report POST, and the collector
+    // surfaces the latest per session (getReportedChainRuntime) so the merge
+    // below covers per-launch chain positions too. Same guard rail as
+    // /api/internal/agents: loopback + pi-relay-token.
     if (path === "/api/internal/route-chain-runtime" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
@@ -386,10 +388,12 @@ export function createOpenAIRelayServer(deps) {
         const loaded = deps.loadStore();
         const store = loaded?.ok ? loaded.store : null;
         // Enriched snapshots: sticky/backoff positions + per-startup node
-        // outcomes (the lamp column) per protocol handler's chainState.
+        // outcomes (the lamp column) per protocol handler's chainState, plus
+        // the per-launch dumps reported via session reports.
         const snapshots = [handler.chainState, anthropicHandler.chainState]
           .filter(Boolean)
           .map((state) => ({ positions: state.snapshot(), nodes: state.nodeStats() }));
+        snapshots.push(...(deps.metricsCollector?.getReportedChainRuntime?.() ?? []));
         sendJson(res, 200, { ok: true, ...buildChainRuntime(store, snapshots) });
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get route-chain runtime: ${err.message}`));

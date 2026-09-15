@@ -1851,6 +1851,12 @@ export function createAgentMetricsCollector(options = {}) {
   // latches ended on the next read (or worse, gets revived if the OS recycles
   // the pid for a real claude.exe).
   const claudeSessions = new Map();
+  // Per-session dedup cursors for the stability batch, and the latest
+  // per-launch route-chain runtime dump — both ride session-report POSTs
+  // because a per-launch relay has neither a stability tracker nor a
+  // panel-reachable chain state of its own.
+  const sessionStabilitySeq = new Map();
+  const reportedChainStates = new Map();
 
   function reportSession(token, report) {
     if (!token || typeof report !== "object") return;
@@ -1881,6 +1887,12 @@ export function createAgentMetricsCollector(options = {}) {
         existing.lastSeen = now;
       }
       claudeSessions.delete(key);
+      // A recycled PID is a new reporter process: its batch seqs restart at
+      // 1, so the dedup cursor and the chain runtime dump must restart too —
+      // keeping the old cursor would silently drop every record of the new
+      // session.
+      sessionStabilitySeq.delete(key);
+      reportedChainStates.delete(key);
     }
 
     const session = claudeSessions.get(key) || {
@@ -1949,6 +1961,42 @@ export function createAgentMetricsCollector(options = {}) {
     }
     if (report.ended === true) session.ended = true;
 
+    // Stability batch: the per-launch relay's request outcomes, recorded into
+    // THIS process's tracker on the reporter's behalf (a per-launch relay has
+    // no tracker of its own; the 状态检测 card and the store availability
+    // lamps both read only the resident side). Dedup by the reporter's
+    // monotonic seq — a failed POST is re-carried by the next snapshot.
+    if (Array.isArray(report.stabilityBatch)) {
+      const lastSeq = sessionStabilitySeq.get(key) ?? 0;
+      let maxSeq = lastSeq;
+      for (const rec of report.stabilityBatch) {
+        const seq = Number(rec?.seq) || 0;
+        if (seq === 0 || seq <= lastSeq) continue;
+        if (seq > maxSeq) maxSeq = seq;
+        stability.record({
+          providerId: typeof rec.providerId === "string" ? rec.providerId : "",
+          model: typeof rec.model === "string" ? rec.model : null,
+          ok: rec.ok === true,
+          latencyMs: Number(rec.latencyMs) || 0,
+          prompt: Number(rec.prompt) || 0,
+          cached: Number(rec.cached) || 0,
+          ttftMs: typeof rec.ttftMs === "number" ? rec.ttftMs : null,
+          at: typeof rec.at === "number" ? rec.at : now,
+        });
+      }
+      if (maxSeq > lastSeq) sessionStabilitySeq.set(key, maxSeq);
+    }
+
+    // Per-launch route-chain runtime (positions + per-startup node outcomes).
+    // Overwrite per session: the reporter's dump is the whole truth of its
+    // process, not a delta. /api/internal/route-chain-runtime merges these.
+    if (report.chainRuntime && typeof report.chainRuntime === "object") {
+      reportedChainStates.set(key, {
+        positions: Array.isArray(report.chainRuntime.positions) ? report.chainRuntime.positions : [],
+        nodes: Array.isArray(report.chainRuntime.nodes) ? report.chainRuntime.nodes : [],
+      });
+    }
+
     claudeSessions.set(key, session);
   }
 
@@ -1998,7 +2046,11 @@ export function createAgentMetricsCollector(options = {}) {
           s.ended = false;
           s.lastSeen = now;
         } else {
-          if (now - s.lastSeen > ENDED_DISPLAY_MS) claudeSessions.delete(key);
+          if (now - s.lastSeen > ENDED_DISPLAY_MS) {
+            claudeSessions.delete(key);
+            sessionStabilitySeq.delete(key);
+            reportedChainStates.delete(key);
+          }
           continue;
         }
       }
@@ -2483,6 +2535,11 @@ export function createAgentMetricsCollector(options = {}) {
     reportSession,
     getAgentsStatus,
     getModelStability: () => stability.snapshot(nowFn()),
+    // Latest route-chain runtime dump per live per-launch session, in the
+    // same { positions, nodes } shape buildChainRuntime merges — lets the
+    // resident relay's /api/internal/route-chain-runtime see chain positions
+    // held inside ephemeral per-launch relay processes.
+    getReportedChainRuntime: () => Array.from(reportedChainStates.values()),
     scanProcesses,
     setSparkWindowPoints: applySparkWindow,
     getSparkWindowPoints: () => sparkWindowPoints,
@@ -2550,6 +2607,29 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     sessionSamples.push(sample);
     while (sessionSamples.length > SESSION_SAMPLE_WINDOW) sessionSamples.shift();
   };
+
+  // Pending model-stability records riding the snapshot POSTs. A per-launch
+  // relay has no stability tracker of its own (ephemeral port — the panel
+  // cannot reach it), so the resident relay records these into ITS tracker on
+  // this session's behalf; the 状态检测 card and the store availability lamps
+  // both read only the resident side. Each entry carries a monotonic seq: a
+  // failed POST keeps the entries and the next snapshot re-carries them, and
+  // the resident side dedups by seq. Bounded — if the resident relay stays
+  // unreachable the oldest entries drop first.
+  const stabilityPending = [];
+  const STABILITY_PENDING_MAX = 500;
+  let stabilitySeq = 0;
+  const pushStability = (rec) => {
+    if (!rec || typeof rec.model !== "string" || !rec.model) return;
+    stabilityPending.push({ seq: ++stabilitySeq, ...rec });
+    while (stabilityPending.length > STABILITY_PENDING_MAX) stabilityPending.shift();
+  };
+
+  // This process's route-chain state (positions + per-startup node outcomes),
+  // wired by server.mjs via setChainState. Rides every snapshot so the
+  // resident relay can merge it into the panel's Flow Rail — per-launch chain
+  // state is otherwise as invisible as the stability rows were.
+  let chainStateRef = null;
 
   // Heartbeat: events only fire on request start/end, so a single long
   // generation would otherwise leave the panel without a fresh snapshot for
@@ -2644,6 +2724,13 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   };
 
   async function post(report) {
+    // The batch this report carries is acknowledged (dropped) only after the
+    // POST succeeds; a failed POST keeps the entries so the next snapshot
+    // re-carries them. Overlapping posts can re-carry the same entries — the
+    // resident side dedups by seq, so re-sends are safe.
+    const batch = Array.isArray(report.stabilityBatch) && report.stabilityBatch.length > 0
+      ? report.stabilityBatch
+      : null;
     try {
       const headers = {
         "content-type": "application/json",
@@ -2651,11 +2738,20 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         origin: "http://127.0.0.1:47821",
       };
       if (sessionToken) headers.authorization = `Bearer ${sessionToken}`;
-      await fetchFn(reportUrl, {
+      const res = await fetchFn(reportUrl, {
         method: "POST",
         headers,
         body: JSON.stringify(report),
       });
+      // A resolved non-error response acknowledges the batch. Test doubles
+      // that resolve undefined count as success; only an explicit ok:false
+      // keeps the entries (same "never break the relay" best-effort rule).
+      if (batch && res?.ok !== false) {
+        const ackedSeq = batch[batch.length - 1].seq;
+        let drop = 0;
+        while (drop < stabilityPending.length && stabilityPending[drop].seq <= ackedSeq) drop += 1;
+        if (drop > 0) stabilityPending.splice(0, drop);
+      }
     } catch {
       // Panel unreachable or relay down — metrics are best-effort, never
       // break the relay's primary function over a reporting failure.
@@ -2704,6 +2800,15 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         prompt: s.prompt,
         cached: s.cached,
       })),
+      // Pending stability records for the resident relay's tracker (the
+      // per-launch blind-spot fix): terminal request outcomes plus
+      // attempt-level retry failures, deduped resident-side by seq.
+      stabilityBatch: stabilityPending.slice(),
+      // Per-launch route-chain runtime for the panel's Flow Rail merge.
+      // Absent until server.mjs wires this process's chainState.
+      ...(chainStateRef
+        ? { chainRuntime: { positions: chainStateRef.snapshot(), nodes: chainStateRef.nodeStats() } }
+        : {}),
       // Model identity of the request currently in flight (chain attribution
       // wins, then the transport-supplied meta), so the panel can render a
       // per-session model badge.
@@ -2733,6 +2838,26 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     // First genuine token recovers the session fault. Retry begin must
     // not have cleared it, or a looping retry never surfaces on the panel.
     state.errorActive = false;
+  }
+
+  // Attempt-level failure recording, mirroring the aggregate collector's
+  // recordRetry: a retried attempt failed before delivering content, and
+  // counting it keeps silent recovery from painting a misleading 100%
+  // success rate on the 状态检测 card. Attempts carry no TTFT (they never
+  // produced a first token) and zero latency, exactly like the resident side.
+  function recordRetryCtx(ctx, { usage, memberId } = {}) {
+    const u = usage && typeof usage === "object" ? usage : {};
+    const attr = resolvedAttributeFor(ctx, memberId ?? null);
+    pushStability({
+      providerId: attr?.providerId || ctx?.meta?.providerId || memberId || "",
+      model: attr?.model || ctx?.meta?.model || null,
+      ok: false,
+      latencyMs: 0,
+      prompt: Number(u.prompt_tokens ?? u.input_tokens) || 0,
+      cached: extractCachedTokens(u),
+      ttftMs: null,
+      at: nowFn(),
+    });
   }
 
   function recordEndCtx(ctx, { usage, error, status, aborted } = {}) {
@@ -2781,8 +2906,9 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     // aggregate collector's recentSamples (failures/aborts/empty completions
     // produce no tps point). TPS mirrors its cap rule too (300 tok/s guard
     // against degenerate sub-100ms generations).
+    const reqDuration = Math.max(1, endTime - ctx.startTime);
+    const norm = normalizedUsage(usage);
     if (!hadError && !aborted) {
-      const norm = normalizedUsage(usage);
       if (norm.completion > 0) {
         pushSessionSample({
           completion: norm.completion,
@@ -2805,8 +2931,6 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     // requests attribute to the serving chain node + its bound model.
     if (journal && !aborted) {
       try {
-        const reqDuration = Math.max(1, endTime - ctx.startTime);
-        const norm = normalizedUsage(usage);
         const attr = resolvedAttributeFor(ctx, null);
         const httpStatus = Number(error?.status ?? status) || null;
         journal.appendRequest({
@@ -2831,6 +2955,27 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       } catch (journalError) {
         console.warn(`[session-reporter] usage journal append failed: ${journalError.message}`);
       }
+    }
+
+    // Model-stability record for the resident relay's tracker — a per-launch
+    // relay has none of its own (the blind spot this closes). Same rules as
+    // the aggregate collector's terminal record: first terminal end wins
+    // (ctx.ended guard above), aborts skipped, failures carry no TTFT (a
+    // failed request has no first token; feeding its wait would paint a dead
+    // node green), attribution mirrors the journal row exactly (serving chain
+    // node wins, then the pool id / channel id from the transport meta).
+    if (!aborted) {
+      const attr = resolvedAttributeFor(ctx, null);
+      pushStability({
+        providerId: attr?.providerId || ctx.meta?.providerId || "",
+        model: attr?.model || ctx.meta?.model || null,
+        ok: !hadError,
+        latencyMs: reqDuration,
+        prompt: norm.prompt,
+        cached: norm.cached,
+        ttftMs: hadError ? null : (ctx.firstChunk !== null ? Math.max(1, ctx.firstChunk - ctx.startTime) : reqDuration),
+        at: endTime,
+      });
     }
 
     sendSnapshot();
@@ -2891,6 +3036,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
       return {
         recordFirstChunk: () => recordFirstChunkCtx(ctx),
         recordEnd: (info) => recordEndCtx(ctx, info),
+        recordRetry: (info) => recordRetryCtx(ctx, info),
         setCurrentMember: (memberId) => bindMember(ctx, memberId),
         setAttributeResolver: (fn) => { ctx.resolver = typeof fn === "function" ? fn : null; },
       };
@@ -2908,6 +3054,21 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     recordEnd(info = {}) {
       const ctx = openRequests[openRequests.length - 1];
       if (ctx) recordEndCtx(ctx, info);
+    },
+
+    // Legacy outer surface for stream-pipe's retry hook — same newest-open
+    // fallback as recordEnd. Retried attempts count as failed stability
+    // records so silent recovery never paints a fake 100% success rate.
+    recordRetry(info = {}) {
+      const ctx = openRequests[openRequests.length - 1];
+      if (ctx) recordRetryCtx(ctx, info);
+    },
+
+    // server.mjs wires the handler's chainState here once, so heartbeat
+    // snapshots carry this per-launch process's route-chain runtime
+    // (positions + node outcomes) for the resident relay's Flow Rail merge.
+    setChainState(cs) {
+      chainStateRef = cs && typeof cs.snapshot === "function" && typeof cs.nodeStats === "function" ? cs : null;
     },
 
     reportEnd() {

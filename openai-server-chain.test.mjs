@@ -626,6 +626,30 @@ describe("chain runtime introspection endpoint (/api/internal/route-chain-runtim
       assert.equal(body.endpoints.kimi.since, null);
     });
   });
+
+  it("(runtime) 一次性 relay 捎带的链状态并入 runtime（per-launch 盲区修复）", async () => {
+    const { upstreamFetch } = memberRouter({});
+    const collector = createAgentMetricsCollector({ loadSparkSettings: false });
+    // 模拟一个 claude 一次性 relay 的会话上报：它的链退避到了 chan-b，
+    // chan-a 有两次失败。该状态只存在于那个瞬态进程里，靠 chainRuntime 捎带。
+    collector.reportSession("tok_claude_1", {
+      pid: 4444,
+      agentId: "claude",
+      chainRuntime: {
+        positions: [{ endpointId: "claude", nodeId: "chan-b", model: "model-b", since: 12345 }],
+        nodes: [{ node: "chan-a", model: "model-a", failures: 2 }],
+      },
+    });
+    const deps = { ...createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY }), metricsCollector: collector };
+    await withServer(deps, async (port) => {
+      const res = await getRuntime(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.endpoints.claude.current, { node: "chan-b", model: "model-b" }, "per-launch 的退避位置并入 Flow Rail");
+      assert.equal(body.endpoints.claude.since, 12345);
+      assert.deepEqual(body.endpoints.claude.positions, [{ nodeId: "chan-b", model: "model-b", since: 12345 }]);
+    });
+  });
 });
 
 describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {

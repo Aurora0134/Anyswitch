@@ -110,6 +110,12 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 - 钉住：agent-metrics.test.mjs「lists one instance for a desktop session (ChatGPT.exe GUI + codex.exe engine)」+「spawns no instance row for a short-lived codex-command-runner.exe」+「evicts the codex instance row when its engine process exits」+「folds codex ids against the engine pid set, not the whole bucket」
 - 拍板：2026-09-12（全家桶口径下一个桌面会话恒列 GUI+引擎两行、command-runner 闪现再加行，收窄）
 
+### R-20 状态检测/渠道可用性/Flow Rail 覆盖一次性 relay 流量
+看板「状态检测」卡、渠道管理页行尾可用性灯/TTFT 均值、路由链运行时（Flow Rail）的唯一数据源是常驻 relay 进程内的 stability 追踪器与链状态；一次性 relay（claude/kimi 的 per-launch relay，随机端口、面板够不到）的流量必须经 session-report 通道捎带，由常驻 relay 代记代并：reporter 随快照捎带 `stabilityBatch`（终态 + 尝试级失败各一条，归因与 TTFT 规则同 R-06/R-07 与 journal 行，monotonic `seq`，POST 成功才清缓冲、失败重发）与 `chainRuntime`（链位置 + 节点成败全量覆盖）；常驻 `reportSession` 按会话游标去重后喂本进程 stability 追踪器，`/api/internal/route-chain-runtime` 把各存活会话的链 dump 并入 `buildChainRuntime`（同端点取最新 since）。禁止在一次性 relay 内自建 stability 追踪器（瞬态进程落盘即竞态）。
+- 锚点：agent-metrics.mjs `createSessionReporter`（stabilityPending / recordRetryCtx / setChainState）+ `reportSession`（sessionStabilitySeq 去重 / reportedChainStates / getReportedChainRuntime）；server.mjs `tracker?.setChainState?.(handler.chainState)`；openai-server.mjs route-chain-runtime 合并处
+- 钉住：agent-metrics.test.mjs「per-launch stability batch + chain runtime relay」组；anthropic-server-chain.test.mjs「稳定性批量随快照捎带」「链运行时随快照捎带」；openai-server-chain.test.mjs「一次性 relay 捎带的链状态并入 runtime」
+- 拍板：2026-09-15（claude 流量长期不进状态检测/渠道灯，用户拍板修复）
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -137,3 +143,4 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 9. **errKind "abort" 死枚举**（R-13）：枚举与实现脱节，勿依赖。
 10. **复合键 `${providerId}/${model}` 分隔符碰撞面**：model 含 "/"（openrouter 风格）时可撞键；裸拼接碰撞已注释处理，分隔符碰撞未处理。
 11. **多进程写同一 journal 目录**（relay/panel/各 launcher）：跨进程 append 可能读到半行（JSON.parse 容错兜底），cleanup 无锁（已容错）。
+12. **一次性 relay 捎带通道的残余边界**（R-20）：常驻 relay 不可达期间，batch 暂存 reporter 内存（500 条上限，溢出丢最旧），恢复后按事件时间补落桶；reporter 进程被强杀则未上报部分丢失（与 §4.1 崩溃丢失同类）。Flow Rail 的 per-launch 链状态随会话行清除（ended 60s 后）消失，回到常驻自有状态。kimi 的 batch 被 reportSession 的 claude-only 闸门丢弃——kimi 实际流量走常驻 relay，其一次性 relay 是空转旁路，无实际影响。
