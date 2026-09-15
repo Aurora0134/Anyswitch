@@ -626,8 +626,11 @@
   #stylePicker { display: flex; flex-wrap: wrap; }
 
   /* 浮动 Toast */
+  /* 顶部居中浮层：落在 56px 顶栏下方 12px 处，不遮顶栏 tab——底部位置实测难以
+     察觉（带动作的刷新结果报信需要更高可见性，全站 toast 统一上移）；
+     入场由上方 8px 滑下 */
   .toast {
-    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(8px);
+    position: fixed; top: 68px; left: 50%; transform: translateX(-50%) translateY(-8px);
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-md); padding: 8px 16px;
     font-size: 12.5px; font-weight: 600; color: var(--text); opacity: 0;
@@ -635,6 +638,12 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.err { color: var(--danger); border-color: var(--danger-border); }
+  /* toast 动作小字（如渠道刷新结果尾部的「查看差异」）：accent 实色可点击。
+     基座 .toast 不拦指针（float 层不遮下方操作），动作小字要可点必须在可见态
+     显式开回命中测试——与 .store-refresh-status.show .srs-diff-link 同款解法 */
+  .toast .toast-action { margin-left: 0.8em; color: var(--accent); cursor: pointer; }
+  .toast .toast-action:hover { text-decoration: underline; }
+  .toast.show .toast-action { pointer-events: auto; }
 
   /* 弹窗 Modal */
   .modal-overlay {
@@ -5722,12 +5731,25 @@ if (window.panelStartupController) panelStartupPlay();
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  function toast(msg, isErr) {
+  // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick } 在文案后追加
+  // 一个可点小字（如「查看差异」）——点中即收起 toast 再执行 onClick
+  function toast(msg, isErr, opts) {
     const t = $("toast");
-    t.textContent = msg;
+    const action = opts && opts.action;
+    if (action) {
+      t.textContent = "";
+      t.append(document.createTextNode(msg));
+      const link = document.createElement("span");
+      link.className = "toast-action";
+      link.textContent = action.label;
+      link.onclick = () => { clearTimeout(t._tid); t.classList.remove("show"); action.onClick(); };
+      t.append(link);
+    } else {
+      t.textContent = msg;
+    }
     t.className = "toast" + (isErr ? " err" : "") + " show";
     clearTimeout(t._tid);
-    t._tid = setTimeout(() => t.classList.remove("show"), 3000);
+    t._tid = setTimeout(() => t.classList.remove("show"), (opts && opts.durationMs) || 3000);
   }
 
   // /panel/api/* 的失败文本按语言分两种身份：中文句子是为这个界面写的，可以直接
@@ -8509,6 +8531,12 @@ async function api(method, path, body) {
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
     if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
+    // 刷新终态在离开期间落的小字暂停了淡出计时，切回渠道 tab 即消费「等切回」标记、
+    // 重新计一个完整 10s（与差异弹窗关闭重计同款先例）；此后再切走不再暂停
+    if (store && storeStatusAwaitReturn) {
+      storeStatusAwaitReturn = false;
+      if ($("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
+    }
     // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
     if (board) {
       resetAgentRenderFingerprints();
@@ -11214,6 +11242,10 @@ async function api(method, path, body) {
   //      中途单渠道失败只红该渠道 tail 分段，完成态永不整行染红；
   //      err 仅用于 cas-conflict 或整次异常。
   let storeStatusTimer = null;
+  // 「等切回」一次性标记：刷新终态落小字那一刻人不在渠道 tab → 置位并暂停 10s
+  // 淡出计时，直到用户切回（switchView 消费、重新计一个完整 10s）；此后再切走
+  // 不再暂停。完成时人就在 tab、之后才走的不置位——结果已被亲眼看到
+  let storeStatusAwaitReturn = false;
   function srsWaveHtml(text) {
     // 逐字窄波：每字一个 span，延迟 120ms 依次点亮；亮窗由 keyframe 压在周期
     // 前段 50% 内，同一时刻至多相邻五六字柔和叠亮，波峰扫过随周期尾部停顿重来
@@ -11261,6 +11293,20 @@ async function api(method, path, body) {
   }
   function disarmStoreStatusTimer() {
     if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
+  }
+
+  // 刷新终态远离通报：人不在渠道 tab 时弹结果 toast（8s 驻留，比常规 3s 长——
+  // 要留点击窗口；持久载体是暂停的小字，toast 只是即时报信），本轮确有增减/失败
+  // 时附可点「查看差异」，点中原地开差异弹窗、不切 tab；同时置「等切回」标记并
+  // 停掉小字淡出计时，让结果留到用户切回。人在渠道 tab 时一切照旧
+  function notifyStoreRefreshAway(text, isErr, hasDiff) {
+    if (currentView === "store") return;
+    storeStatusAwaitReturn = true;
+    disarmStoreStatusTimer();
+    toast(text, isErr, {
+      durationMs: 8000,
+      action: hasDiff ? { label: "查看差异", onClick: () => openStoreDiffModal() } : null,
+    });
   }
 
   // 渠道 diff 只摆增减数字，不列具体模型 id（长列表会爆格）；分段着色：
@@ -11324,8 +11370,10 @@ async function api(method, path, body) {
   }
   function closeStoreDiffModal() {
     $("storeDiffMask").classList.remove("show");
-    // 关闭时状态小字仍可见则重新武装 10s（用户看完 diff，状态小字继续正常淡出）
-    if ($("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
+    // 关闭时状态小字仍可见则重新武装 10s（用户看完 diff，状态小字继续正常淡出）；
+    // 「等切回」标记未消费时不武装——弹窗可能是在别的 tab 从 toast 点开的，人还没
+    // 回过渠道 tab，小字要继续暂停等他切回
+    if (!storeStatusAwaitReturn && $("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
   }
 
   // 刷新：全部刷新/多选刷新按可见行分组——号池行整行一个单元（成员逐个刷，
@@ -11419,12 +11467,25 @@ async function api(method, path, body) {
       // 本轮确有增减或失败时才挂「查看差异」小字；全零无变化不显示（没东西可看）
       const hasDiff = refreshDiffUnits.some((u) => u.failed || u.added.length > 0 || u.pruned.length > 0);
       setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff);
+      // 人不在渠道 tab：弹结果 toast 并暂停小字淡出等切回。toast 用聚合口径
+      // （小字 tail 只摆最后一个单元，toast 报全轮合计才完整）
+      const totAdded = refreshDiffUnits.reduce((n, u) => n + u.added.length, 0);
+      const totPruned = refreshDiffUnits.reduce((n, u) => n + u.pruned.length, 0);
+      const totFailed = refreshDiffUnits.filter((u) => u.failed).length;
+      const totParts = [];
+      if (totAdded) totParts.push(`+${totAdded}`);
+      if (totPruned) totParts.push(`−${totPruned}`);
+      if (totFailed) totParts.push(`${totFailed} 个失败`);
+      notifyStoreRefreshAway(`刷新完成：${totParts.length ? totParts.join(" ") : "无变化"}`, false, hasDiff);
     } catch (e) {
       if (e.code === "cas-conflict") {
         setStoreRefreshStatus("渠道配置已被其他操作改动，正在刷新", "err");
         await refreshStoreState();
+        notifyStoreRefreshAway("渠道配置已被其他操作改动，本次刷新未完成", true, false);
       } else {
-        setStoreRefreshStatus(panelError(e, "刷新失败"), "err");
+        const errText = panelError(e, "刷新失败");
+        setStoreRefreshStatus(errText, "err");
+        notifyStoreRefreshAway(errText, true, false);
       }
     } finally {
       if (btn) { btn.disabled = false; btn.textContent = all ? "全部刷新" : "刷新模型"; }
