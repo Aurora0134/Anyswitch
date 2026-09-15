@@ -3314,3 +3314,70 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
     }
   });
 });
+
+describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("toast 支持动作小字与自定义驻留（可见态开回命中）", () => {
+    assert.ok(/function toast\(msg, isErr, opts\)/.test(panelHtml), "toast 接收 opts 第三参数");
+    assert.ok(panelHtml.includes("(opts && opts.durationMs) || 3000"), "默认 3s、可覆盖驻留时长");
+    assert.ok(panelHtml.includes('link.className = "toast-action"'), "动作小字挂 toast-action 类");
+    // 前提：基座 toast 不拦指针（浮动层不遮下方操作）；动作小字必须在可见态
+    // 显式开回命中测试，否则 onclick 永远不触发（与 srs-diff-link 同款约束）
+    assert.ok(/\.toast\s*\{[^}]*pointer-events:\s*none/.test(panelHtml), "toast 默认 pointer-events: none（前提）");
+    assert.ok(panelHtml.includes(".toast.show .toast-action { pointer-events: auto; }"),
+      "可见态恢复动作小字命中测试");
+  });
+
+  it("toast 置顶于顶栏下方（底部难以察觉，上移不遮顶栏 tab）", () => {
+    const toastRule = panelHtml.match(/\.toast\s*\{[^}]*\}/);
+    assert.ok(toastRule, "基座 .toast 规则存在");
+    assert.ok(toastRule[0].includes("top: 68px"), "固定在 56px 顶栏下方 12px");
+    assert.ok(!toastRule[0].includes("bottom:"), "底部定位已移除");
+    assert.ok(toastRule[0].includes("translateY(-8px)"), "入场自上方滑下");
+  });
+
+  it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
+    assert.ok(panelHtml.includes("let storeStatusAwaitReturn = false;"), "一次性等切回标记存在");
+    const nStart = panelHtml.indexOf("function notifyStoreRefreshAway(");
+    assert.ok(nStart >= 0, "远离通报函数存在");
+    const fn = panelHtml.slice(nStart, panelHtml.indexOf("// 渠道 diff 只摆增减数字", nStart));
+    assert.ok(fn.includes('if (currentView === "store") return;'), "人在渠道 tab 不通报");
+    assert.ok(fn.includes("storeStatusAwaitReturn = true;"), "置等切回标记");
+    assert.ok(fn.includes("disarmStoreStatusTimer()"), "停掉小字 10s 淡出计时等人切回");
+    assert.ok(fn.includes("durationMs: 8000"), "结果 toast 驻留 8s（留点击窗口）");
+    assert.ok(fn.includes('label: "查看差异"'), "有差异时附可点「查看差异」");
+    assert.ok(fn.includes("onClick: () => openStoreDiffModal()"), "点中原地开差异弹窗");
+    assert.ok(!fn.includes("switchView("), "不抢焦点切 tab");
+  });
+
+  it("storeRefresh 三个终态各接线一次通报：完成带聚合与 diff、失败无 diff", () => {
+    const fnStart = panelHtml.indexOf("async function storeRefresh(");
+    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    assert.equal((fn.match(/notifyStoreRefreshAway\(/g) || []).length, 3,
+      "完成/cas冲突/失败三处终态各通报一次（无可刷渠道的空操作不通报）");
+    assert.ok(fn.includes('notifyStoreRefreshAway(`刷新完成：${totParts.length ? totParts.join(" ") : "无变化"}`, false, hasDiff)'),
+      "完成态弹聚合结果并沿用 hasDiff 决定链接");
+    assert.ok(fn.includes("const totAdded = refreshDiffUnits.reduce"), "toast 文案按全轮聚合而非末单元");
+    assert.ok(fn.includes('notifyStoreRefreshAway("渠道配置已被其他操作改动，本次刷新未完成", true, false)'),
+      "cas-conflict 中断通报（红色、无链接）");
+    assert.ok(fn.includes("notifyStoreRefreshAway(errText, true, false)"), "刷新失败通报（红色、无链接）");
+  });
+
+  it("切回渠道 tab 消费标记重计 10s；标记未消费时关弹窗不武装", () => {
+    const swStart = panelHtml.indexOf("function switchView(");
+    const sw = panelHtml.slice(swStart, panelHtml.indexOf("// 看板变体入场", swStart));
+    const consumeAt = sw.indexOf("if (store && storeStatusAwaitReturn)");
+    assert.ok(consumeAt >= 0, "切回渠道 tab 时检查等切回标记");
+    const consume = sw.slice(consumeAt);
+    assert.ok(consume.includes("storeStatusAwaitReturn = false;"), "标记一次性消费（再切走不再暂停）");
+    assert.ok(consume.includes('classList.contains("show")'), "仅小字仍可见时才重计");
+    assert.ok(consume.includes("armStoreStatusTimer()"), "切回重新武装完整 10s");
+    const closeStart = panelHtml.indexOf("function closeStoreDiffModal()");
+    const close = panelHtml.slice(closeStart, panelHtml.indexOf("// 刷新：全部刷新", closeStart));
+    assert.ok(close.includes("!storeStatusAwaitReturn"), "标记未消费（人未切回）时关弹窗不武装计时");
+  });
+});
