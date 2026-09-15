@@ -1022,19 +1022,66 @@ describe("store-service pools (号池)", () => {
     assert.match(result.error, /does not exist/);
   });
 
-  it("deleteProvider refuses a pooled provider until the pool is dissolved", async () => {
+  it("deleteProvider detaches a pooled provider from its pool, then deletes", async () => {
+    const paths = makeRoot();
+    poolSeed(paths);
+    writeCredential(paths, "prov-a");
+    const svc = makeService(paths);
+    await svc.createPool({ poolId: "pool-x", displayName: "主号池", members: ["prov-a", "prov-b", "prov-c"] });
+
+    const result = await svc.deleteProvider("prov-a");
+    assert.equal(result.ok, true, result.error);
+    const stored = readStore(paths).store;
+    assert.equal(Object.hasOwn(stored.providers, "prov-a"), false);
+    assert.deepEqual(stored.pools["pool-x"].members, ["prov-b", "prov-c"]);
+    assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), false);
+    // 删除完成后不得留下 journal pending——否则 resumeDeletions 会重放删除
+    const journalPath = join(paths.root, "delete-journal.json");
+    const journal = existsSync(journalPath)
+      ? JSON.parse(readFileSync(journalPath, "utf8"))
+      : { pending: [] };
+    assert.deepEqual(journal.pending, []);
+
+    const state = await svc.getState();
+    assert.equal(state.providers.find((p) => p.id === "prov-b").poolId, "pool-x");
+    assert.deepEqual(state.resumeResult.resumed, []);
+  });
+
+  it("deleteProvider dissolves the pool when the member count would drop below 2", async () => {
     const paths = makeRoot();
     poolSeed(paths);
     writeCredential(paths, "prov-a");
     const svc = makeService(paths);
     await svc.createPool({ poolId: "pool-x", displayName: "主号池", members: ["prov-a", "prov-b"] });
 
-    const blocked = await svc.deleteProvider("prov-a");
+    const result = await svc.deleteProvider("prov-a");
+    assert.equal(result.ok, true, result.error);
+    const stored = readStore(paths).store;
+    assert.equal(Object.hasOwn(stored, "pools"), false, "empty pools map is dropped");
+    assert.deepEqual(Object.keys(stored.providers).sort(), ["prov-b", "prov-c"]);
+    const state = await svc.getState();
+    assert.equal(state.providers.find((p) => p.id === "prov-b").poolId, null);
+    assert.deepEqual(state.resumeResult.resumed, []);
+  });
+
+  it("deleteProvider on a pooled provider keeps everything on detach CAS conflict", async () => {
+    const paths = makeRoot();
+    poolSeed(paths);
+    writeCredential(paths, "prov-a");
+    const svc = makeService(paths);
+    await svc.createPool({ poolId: "pool-x", displayName: "主号池", members: ["prov-a", "prov-b"] });
+    const failing = makeService(paths, {
+      writeStoreImpl: () => ({ ok: false, reason: "store changed since it was read" }),
+    });
+
+    const blocked = await failing.deleteProvider("prov-a");
     assert.equal(blocked.ok, false);
-    assert.match(blocked.error, /belongs to pool "pool-x"/);
+    assert.equal(blocked.error, "cas-conflict");
+    const stored = readStore(paths).store;
+    assert.equal(Object.hasOwn(stored.providers, "prov-a"), true);
+    assert.deepEqual(stored.pools["pool-x"].members, ["prov-a", "prov-b"]);
     assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), true);
-    assert.equal(Object.hasOwn(readStore(paths).store.providers, "prov-a"), true);
-    // 业务拒绝不得留下 journal pending——否则 resumeDeletions 会在解池后重放删除
+    // 摘池失败不得留下 journal pending——否则 resumeDeletions 会在解池后重放删除
     const journalPath = join(paths.root, "delete-journal.json");
     const journal = existsSync(journalPath)
       ? JSON.parse(readFileSync(journalPath, "utf8"))
@@ -1047,10 +1094,6 @@ describe("store-service pools (号池)", () => {
     assert.deepEqual(state.resumeResult.resumed, []);
     assert.equal(Object.hasOwn(readStore(paths).store.providers, "prov-a"), true);
     assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), true);
-
-    const freed = await svc.deleteProvider("prov-a");
-    assert.equal(freed.ok, true, freed.error);
-    assert.equal(Object.hasOwn(readStore(paths).store.providers, "prov-a"), false);
   });
 
   it("getState reports pools:[] when the store is unreadable", async () => {
