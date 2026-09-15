@@ -2439,6 +2439,26 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(m[1].includes("statsTrendPrev = null"), "trend reveal reset preserved");
   });
 
+  it("趋势图进 tab 缓存热渲染：动画随进 tab 即时起跑，不等 stats 接口返回", () => {
+    const m = panelHtml.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "enterStatsView found");
+    const body = m[1];
+    // 回归根因：热渲染曾只有环形图，趋势图首渲等 refreshStatsState 的网络往返
+    // 落地（实测热 300~500ms）才触发，reveal 起跑随之延迟同款时长。
+    const fetchIdx = body.indexOf("refreshStatsState()");
+    assert.ok(fetchIdx !== -1, "fetch kicked off on tab enter");
+    const trendIdx = body.indexOf("renderStatsTrend()");
+    const usageIdx = body.indexOf("renderStatsUsage()");
+    assert.ok(trendIdx !== -1 && trendIdx < fetchIdx, "trend hot-rendered from cache before the fetch");
+    assert.ok(usageIdx !== -1 && usageIdx < fetchIdx, "donut hot-render preserved");
+    // 热渲染时刻 reveal 标记已重置 → 首渲走 reveal 清屏生长而非 morph
+    const resetIdx = body.indexOf("statsTrendPrev = null");
+    assert.ok(resetIdx !== -1 && resetIdx < trendIdx, "reveal flag reset before hot-render");
+    // 接口落地重渲不打断在飞动画的兜底仍在：数据未变由同终点签名守卫整体跳过
+    assert.ok(panelHtml.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg)"),
+      "same-endpoint guard skips the fetch-landing re-render when data is unchanged");
+  });
+
   it("趋势图切口径 seg：重置 reveal 标记走清屏生长，不走 morph；days seg 维持 morph", () => {
     const m = panelHtml.match(/function initStatsTab\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "initStatsTab found");
