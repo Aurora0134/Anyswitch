@@ -201,7 +201,7 @@ export function createHandler(deps) {
     return { status: 200, body: buildModelsResponse(entries) };
   }
 
-  async function handleMessages(headers, body) {
+  async function handleMessages(headers, body, options = {}) {
     const auth = authorize(headers);
     if (!auth.ok) return { status: auth.status, body: auth.body };
 
@@ -242,12 +242,12 @@ export function createHandler(deps) {
       };
     }
 
-    return attemptMessages(unpacked.providerId, provider, body, unpacked.modelId);
+    return attemptMessages(unpacked.providerId, provider, body, unpacked.modelId, options);
   }
 
   // One upstream attempt against a single provider. Shared by the classic
   // single-provider path and by each member call of a pool request.
-  async function attemptMessages(providerId, provider, body, modelId) {
+  async function attemptMessages(providerId, provider, body, modelId, options = {}) {
     // Decrypt only now, inject for this one request, never cache.
     const credential = await loadCredential(providerId, provider);
     if (!credential.ok) {
@@ -283,6 +283,7 @@ export function createHandler(deps) {
         method: "POST",
         headers,
         body: JSON.stringify(payload),
+        signal: options.signal,
       },
       { bufferResponse: payload.stream !== true },
     );
@@ -290,7 +291,10 @@ export function createHandler(deps) {
     let upstream;
     try {
       upstream = await send(outboundRequest);
-    } catch {
+    } catch (err) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
       // Message deliberately generic: an upstream transport error must not leak
       // the URL, the credential or the raw error text.
       return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
@@ -303,7 +307,10 @@ export function createHandler(deps) {
         efforts.noteRejected(providerId);
         try {
           upstream = await send(efforts.withoutEffort(outboundRequest));
-        } catch {
+        } catch (err) {
+          if (options.signal?.aborted) {
+            throw err;
+          }
           return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
         }
       }
@@ -387,7 +394,7 @@ export function createHandler(deps) {
       modelId: unpacked.modelId,
       members: ordered.map(({ memberId, provider }) => ({
         memberId,
-        call: () => attemptMessages(memberId, provider, body, unpacked.modelId),
+        call: (options = {}) => attemptMessages(memberId, provider, body, unpacked.modelId, options),
       })),
       noteSuccess: (memberId) => stickyTable.noteSuccess(unpacked.poolId, unpacked.modelId, memberId),
       // 成员级请求失败计数（成员切换真正越过该成员时由 server 侧回调）——
@@ -475,7 +482,7 @@ export function createHandler(deps) {
           providerId: expanded.providerId,
           model: expanded.model,
           memberNoun: "chain node",
-          call: () => attemptMessages(expanded.providerId, provider, body, expanded.model),
+          call: (options = {}) => attemptMessages(expanded.providerId, provider, body, expanded.model, options),
         });
         continue;
       }
@@ -500,7 +507,7 @@ export function createHandler(deps) {
           providerId: expanded.poolId,
           model: expanded.model,
           memberNoun: "pool member",
-          call: () => attemptMessages(poolMemberId, provider, body, expanded.model),
+          call: (options = {}) => attemptMessages(poolMemberId, provider, body, expanded.model, options),
         });
       }
     }

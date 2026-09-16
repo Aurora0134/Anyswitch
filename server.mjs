@@ -197,14 +197,14 @@ export function createRelayServer(deps) {
                   callUpstreams: memberPlan.members.map((member) => ({
                     memberId: member.memberId,
                     memberNoun: member.memberNoun,
-                    call: () => member.call(),
+                    call: () => member.call({ signal: abortController.signal }),
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
                   onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
                   onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
-                  callUpstream: () => handler.handleMessages(req.headers, body),
+                  callUpstream: () => handler.handleMessages(req.headers, body, { signal: abortController.signal }),
                 }),
             name: agentId,
             logLabel: `${agentId} request`,

@@ -893,14 +893,14 @@ export function createOpenAIRelayServer(deps) {
                     callUpstreams: memberPlan.members.map((member) => ({
                       memberId: member.memberId,
                       memberNoun: member.memberNoun,
-                      call: () => member.call(),
+                      call: () => member.call({ signal: abortController.signal }),
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
                     onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
                     onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
-                    callUpstream: () => anthropicHandler.handleMessages(req.headers, body),
+                    callUpstream: () => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal }),
                   }),
               name: "anthropic",
               logLabel: "anthropic request",
@@ -920,7 +920,7 @@ export function createOpenAIRelayServer(deps) {
             for (let index = 0; index < memberPlan.members.length; index += 1) {
               const member = memberPlan.members[index];
               tracker?.setCurrentMember?.(member.memberId);
-              result = await member.call();
+              result = await member.call({ signal: abortController.signal });
               if (result.status < 400) {
                 memberPlan.noteSuccess(member.memberId);
                 break;
@@ -932,7 +932,7 @@ export function createOpenAIRelayServer(deps) {
               memberPlan.noteFailure?.(member.memberId);
             }
           } else {
-            result = await anthropicHandler.handleMessages(req.headers, body);
+            result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal });
           }
           const mappedUsage = anthropicUsageToOpenAI(result.body?.usage);
           if (result.status >= 400) {
