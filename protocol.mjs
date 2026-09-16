@@ -191,7 +191,12 @@ export function anthropicToOpenAI(body, modelId) {
   if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
     request.stop = body.stop_sequences;
   }
-  if (body.stream === true) request.stream = true;
+  if (body.stream === true) {
+    request.stream = true;
+    // Usage delivery on a stream is voluntary unless asked: without this flag
+    // some channels report zero tokens and the stats page goes blind.
+    request.stream_options = { include_usage: true };
+  }
 
   const tools = convertTools(body.tools);
   if (tools) request.tools = tools;

@@ -910,6 +910,69 @@ test("valid request reaches upstream with the bare model id and Bearer key", asy
   assert.equal(out.body.content[0].text, "pong");
 });
 
+test("anthropicToOpenAI asks the upstream to report stream usage", () => {
+  const out = anthropicToOpenAI(
+    { stream: true, max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.equal(out.stream, true);
+  assert.deepEqual(out.stream_options, { include_usage: true });
+});
+
+test("anthropicToOpenAI leaves non-stream requests without stream options", () => {
+  const out = anthropicToOpenAI(
+    { max_tokens: 8, messages: [{ role: "user", content: "hi" }] },
+    "m",
+  );
+  assert.ok(!("stream_options" in out));
+});
+
+test("handleMessages forwards the caller abort signal to the upstream fetch", async () => {
+  let seenSignal = null;
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async (url, init) => {
+        seenSignal = init.signal ?? null;
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "c", choices: [{ message: { content: "pong" }, finish_reason: "stop" }], usage: {} }),
+        };
+      },
+    }),
+  );
+  const controller = new AbortController();
+  const out = await handler.handleMessages(
+    AUTH,
+    messageBody("anthropic/poke-api/claude-opus-5"),
+    { signal: controller.signal },
+  );
+  assert.equal(out.status, 200);
+  assert.equal(seenSignal, controller.signal);
+});
+
+test("aborted upstream fetch surfaces as a throw, not a 502", async () => {
+  const handler = createHandler(
+    makeDeps({
+      upstreamFetch: async () => {
+        const err = new Error("This operation was aborted");
+        err.name = "AbortError";
+        throw err;
+      },
+    }),
+  );
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    handler.handleMessages(
+      AUTH,
+      messageBody("anthropic/poke-api/claude-opus-5"),
+      { signal: controller.signal },
+    ),
+    /abort/i,
+  );
+});
+
 test("every catalog entry unpacks back to a store hit", async () => {
   const store = syntheticStore();
   const handler = createHandler(makeDeps({ store }));
