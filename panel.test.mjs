@@ -1254,7 +1254,9 @@ describe("panel.html sessions tab", () => {
     );
     const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "switchView found");
-    assert.ok(m[1].includes('classList.add("view-enter")'), "switchView plays the entrance on the entered view");
+    assert.ok(m[1].includes("replayViewEnter(enteredView)"), "switchView plays the entrance on the entered view");
+    const re = panelHtml.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/);
+    assert.ok(re && re[1].includes('classList.add("view-enter")'), "重播实现收敛在共用 replayViewEnter");
     assert.ok(m[1].includes('playBoardEnter(document.querySelector(".telemetry-view"))'), "board view routed to the variant entrance");
     assert.ok(m[1].includes("suppressViewEnter"), "switchView honors the suppress flag");
     const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
@@ -2179,20 +2181,110 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
   });
 });
 
-describe("panel.html 设置弹窗齿轮图标完整性", () => {
-  // 设置弹窗标题的齿轮 path 必须与页头齿轮（视觉正确基准）逐字一致：缺任一段
-  // 双弧线段都会让齿形塌陷、图标歪斜，而这种差异在结构断言里看不出来。
+describe("panel.html 设置全页视图", () => {
+  // 设置从弹窗升级为全页视图：页头齿轮切入，原页头整行换成设置专用头行
+  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「主题」两个子 tab。
+  // 设置视图不写入 panel-view，刷新永不恢复进设置页。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("settingsModal 标题齿轮 path 与页头设置按钮齿轮 path 完全一致", () => {
-    const paths = [...panelHtml.matchAll(/M19\.4 15a1\.65[^"]+/g)].map((m) => m[0]);
-    assert.ok(paths.length >= 2, "header + modal gear paths both present");
-    assert.equal(new Set(paths).size, 1, "every gear render uses the identical intact path");
-    // 该弧段是齿轮左下齿的双弧连接，缺失即塌齿
-    assert.ok(paths[0].includes("a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83"), "gear arc segment present");
+  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「主题」子 tab 与两块面板", () => {
+    assert.ok(/<section class="settings-view" id="settingsView" hidden>/.test(panelHtml),
+      "settingsView section 默认隐藏");
+    const iView = panelHtml.indexOf('id="settingsView"');
+    assert.ok(iView > panelHtml.indexOf('id="sessionsView"') && iView < panelHtml.indexOf("</main>"),
+      "settingsView 位于 main 内（sessions 之后）");
+    assert.ok(/<button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true">通用<\/button>/.test(panelHtml),
+      "「通用」子 tab 默认选中");
+    assert.ok(/<button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false">主题<\/button>/.test(panelHtml),
+      "「主题」子 tab 默认未选");
+    assert.ok(panelHtml.includes('id="settingsPanelGeneral"'), "通用面板存在");
+    assert.ok(/id="settingsPanelTheme" hidden/.test(panelHtml), "主题面板默认隐藏");
+  });
+
+  it("「通用」子 tab 保留原设置弹窗全部五项控件", () => {
+    const iGeneral = panelHtml.indexOf('id="settingsPanelGeneral"');
+    const iTheme = panelHtml.indexOf('id="settingsPanelTheme"');
+    assert.ok(iGeneral > 0 && iTheme > iGeneral, "通用面板在主题面板之前");
+    const general = panelHtml.slice(iGeneral, iTheme);
+    for (const id of ["followAgentToggle", "keepAliveSlider", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
+      assert.ok(general.includes(`id="${id}"`), `通用面板保留控件 #${id}`);
+    }
+  });
+
+  it("设置专用头行：左侧「← 退出」+「设置」标题，右侧亮暗钮与主头行同源", () => {
+    assert.ok(/<div class="layout-container head-inner" id="mainHeadInner">/.test(panelHtml),
+      "主头行有 mainHeadInner 锚点");
+    assert.ok(/id="settingsHeadInner" hidden/.test(panelHtml), "设置头行默认隐藏");
+    const head = panelHtml.slice(panelHtml.indexOf('id="settingsHeadInner"'), panelHtml.indexOf("</header>"));
+    assert.ok(head.includes('id="settingsExitBtn"') && head.includes("退出"), "左侧退出按钮");
+    assert.ok(/class="settings-head-title">设置</.test(head), "「设置」标题");
+    assert.ok(head.includes('id="settingsThemeToggle"'), "右侧亮暗切换按钮");
+    assert.ok(head.includes('id="settingsIcoMoon"') && head.includes('id="settingsIcoSun"'), "日/月图标齐备");
+    const theme = panelHtml.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(theme, "initTheme found");
+    assert.ok(theme[1].includes("settingsThemeToggle") && theme[1].includes("settingsIcoSun"),
+      "initTheme 把设置头行亮暗钮并入同一状态源");
+  });
+
+  it("设置头行日/月图标 path 与主头行 #themeToggle 逐字一致", () => {
+    // 两颗亮暗钮同图不同 id：图标 path 若各自手抄极易 drift（缺一段弧线肉眼难辨），
+    // 与原「设置弹窗齿轮 path 与页头齿轮逐字一致」测试同一锁法。
+    function svgInner(id) {
+      const m = panelHtml.match(new RegExp(`<svg id="${id}"[^>]*>([\\s\\S]*?)</svg>`));
+      assert.ok(m, id + " svg found");
+      return m[1];
+    }
+    assert.equal(svgInner("settingsIcoMoon"), svgInner("icoMoon"), "月亮图标 path 逐字一致");
+    assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
+  });
+
+  it("「主题」子 tab：左栏五项点选即生效，右栏预览样张复用真实组件类", () => {
+    const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
+    assert.ok(picker, "主题列表沿用 stylePicker 锚点");
+    const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
+    assert.deepEqual(items.map((m) => [m[1], m[2]]), [
+      ["", "经典"], ["saas", "SaaS"], ["aurora", "极光"], ["blueprint", "蓝图"], ["sepia", "暖纸"],
+    ], "五项主题与样式值一一对应");
+    assert.ok(panelHtml.includes('picker.querySelectorAll(".settings-theme-item")'),
+      "initStylePicker 同步选中态到新列表项");
+    assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
+    const preview = panelHtml.slice(
+      panelHtml.indexOf('id="settingsThemePreview"'),
+      panelHtml.indexOf("</section>", panelHtml.indexOf('id="settingsThemePreview"')),
+    );
+    for (const cls of ["panel-card", "badge badge-ok", "seg-control", 'class="toggle"', "telemetry-sparkline", "btn-primary"]) {
+      assert.ok(preview.includes(cls), `预览样张含真实组件 ${cls}`);
+    }
+  });
+
+  it("齿轮改为切入设置视图，退出回到进入前视图；设置视图不写入 panel-view", () => {
+    assert.ok(/\$\("settingsBtn"\)[\s\S]{0,300}?switchView\("settings"\)/.test(panelHtml),
+      "页头齿轮切入设置视图");
+    assert.ok(panelHtml.includes("switchView(settingsReturnView)"), "退出回到进入前视图");
+    const sw = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found");
+    assert.ok(sw[1].includes('$("settingsView").hidden = !settings;'), "switchView 切换设置视图显隐");
+    assert.ok(sw[1].includes('$("mainHeadInner").hidden = settings;')
+      && sw[1].includes('$("settingsHeadInner").hidden = !settings;'),
+      "主头行与设置头行互斥切换");
+    assert.ok(/if \(!settings\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
+      "设置视图不持久化 panel-view");
+    const restoreStart = panelHtml.indexOf("function restoreView()");
+    const restore = panelHtml.slice(restoreStart, panelHtml.indexOf("function reconcileSkillsSelection()", restoreStart));
+    assert.ok(restore.length > 100, "未真正取到 restoreView 函数体");
+    assert.ok(!restore.includes('"settings"'), "restoreView 白名单不含 settings");
+  });
+
+  it("原设置弹窗整体移除（DOM、开关逻辑、init 装配更名）", () => {
+    assert.ok(!panelHtml.includes('id="settingsModal"'), "settingsModal DOM 已删除");
+    assert.ok(!panelHtml.includes("settingsCloseBtn") && !panelHtml.includes("settingsDoneBtn"),
+      "弹窗关闭/完成按钮已删除");
+    assert.ok(!panelHtml.includes("initSettingsModal"), "initSettingsModal 已更名移除");
+    const init = panelHtml.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init && init[0].includes("initSettingsView();"), "init 装配 initSettingsView");
   });
 });
 describe("panel.html 结构完整性（超长行原样保留）", () => {
