@@ -1,4 +1,4 @@
-// style-lab 主题同步校验：panel.html 内嵌块（/* ===== style-lab: SLUG ===== */ 横幅）
+// style-lab 主题同步校验：panel.css 内嵌块（/* ===== style-lab: SLUG ===== */ 横幅）
 // 必须与 panel-ui/style-lab/SLUG.css 源文件逐字一致（归一化 CRLF/LF 行尾后比对）。
 // 只校验 SLUGS 里在册的风格；退役片段的 CSS 与源文件随退役一并删除。
 import { test } from "node:test";
@@ -11,14 +11,16 @@ const root = dirname(fileURLToPath(import.meta.url));
 const SLUGS = ["saas", "aurora", "blueprint", "sepia"];
 
 function extractBlocks() {
-  const html = readFileSync(join(root, "panel-ui", "panel.html"), "utf8").replace(/\r\n/g, "\n");
-  const lines = html.split("\n");
+  const css = readFileSync(join(root, "panel-ui", "panel.css"), "utf8").replace(/\r\n/g, "\n");
+  const lines = css.split("\n");
   const marks = [];
   lines.forEach((l, i) => {
     const m = l.match(/\/\* ===== style-lab: (\w+)/);
     if (m) marks.push({ slug: m[1], line: i });
   });
-  const styleEnd = lines.findIndex((l) => l.includes("</style>"));
+  // 纯 CSS 文件没有 </style>：末块终点 = 开屏样式段（文件头注释里的 ② 段）的首条规则，
+  // 即原主 <style> 块结尾的等价边界；横幅块全部位于主样式段内，开屏规则不属于任何主题块
+  const styleEnd = lines.findIndex((l) => l.includes("#panelStartup { display: none; }"));
   const blocks = new Map();
   for (let k = 0; k < marks.length; k++) {
     const { slug, line } = marks[k];
@@ -31,9 +33,9 @@ function extractBlocks() {
 const blocks = extractBlocks();
 
 for (const slug of SLUGS) {
-  test(`style-lab 同步：${slug}.css 与 panel.html 内嵌块逐字一致`, () => {
+  test(`style-lab 同步：${slug}.css 与 panel.css 内嵌块逐字一致`, () => {
     const embedded = blocks.get(slug);
-    assert.ok(embedded, `panel.html 缺少 /* ===== style-lab: ${slug} ===== */ 横幅块`);
+    assert.ok(embedded, `panel.css 缺少 /* ===== style-lab: ${slug} ===== */ 横幅块`);
     const source = readFileSync(join(root, "panel-ui", "style-lab", `${slug}.css`), "utf8")
       .replace(/\r\n/g, "\n")
       .replace(/\s+$/, "") + "\n";

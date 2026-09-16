@@ -5,28 +5,28 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 // 新增模型待读态（置顶+高光，看过即复位）的单测。沿用 panel-skills.test.mjs 的
-// new Function 提取范式：把机制相关纯函数从 panel.html 内嵌脚本抠出来，喂一个
+// new Function 提取范式：把机制相关纯函数从 panel.js（面板主脚本）抠出来，喂一个
 // localStorage / storeProviders 的桩，验证标记合并、老化清理、置顶排序与消耗语义。
 // 不碰 DOM、不碰后端。
 
-const panelHtml = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+const panelJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8"
 );
 
 function extractFn(name, params) {
-  const m = panelHtml.match(
+  const m = panelJs.match(
     new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
   );
-  assert.ok(m, `panel.html must contain function ${name}`);
+  assert.ok(m, `panel.js must contain function ${name}`);
   return m[0];
 }
 
 // 机制块：常量 + 状态变量 + 全部函数（从 STORE_NEW_MODELS_KEY 到 orderStoreModelIds 收尾）
-const mechSrc = panelHtml.match(
+const mechSrc = panelJs.match(
   /const STORE_NEW_MODELS_KEY[\s\S]*?function orderStoreModelIds\(discoveredIds, newIds\) \{[\s\S]*?\n  \}/
 );
-assert.ok(mechSrc, "panel.html must contain the store-new-models mechanism block");
+assert.ok(mechSrc, "panel.js must contain the store-new-models mechanism block");
 
 // 每个用例一份独立 harness：自带 localStorage 内存桩 + 可注入的 storeProviders
 function makeHarness(providers) {

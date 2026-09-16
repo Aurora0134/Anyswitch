@@ -35,6 +35,8 @@ import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
 
 const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
+const REPO_PANEL_CSS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css");
+const REPO_PANEL_JS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js");
 const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
@@ -456,7 +458,7 @@ export function createPanelRouter({
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
 
   // Lookup chain: ANYSWITCH_PANEL_HTML env override → bundled panel-ui/panel.html.
-  // A missing file falls through to servePanelHtml's readFileSync failure → 404.
+  // A missing file falls through to servePanelFile's readFileSync failure → 404.
   function resolvePanelHtmlPath() {
     if (process.env.ANYSWITCH_PANEL_HTML) return process.env.ANYSWITCH_PANEL_HTML;
     return REPO_PANEL_HTML;
@@ -990,14 +992,13 @@ export function createPanelRouter({
     }
   }
 
-  // panel.html 内存缓存 + ETag/304。每请求 statSync 校验 mtimeMs:size，不变
-  // 即复用内存 body；ETag 由 size+mtimeMs 派生；Cache-Control: no-cache 强制每次 revalidate，
-  // If-None-Match 命中回 304。缓存键含 resolved htmlPath（测试会切
-  // ANYSWITCH_PANEL_HTML env override，防串内容）。statSync 失败不命中/不写缓存，
-  // 404 JSON 语义原样保留。
+  // panel.html/panel.css/panel.js 内存缓存 + ETag/304。每请求 statSync 校验
+  // mtimeMs:size，不变即复用内存 body；ETag 由 size+mtimeMs 派生；
+  // Cache-Control: no-cache 强制每次 revalidate，If-None-Match 命中回 304。
+  // 缓存键含 resolved 路径（测试会切 ANYSWITCH_PANEL_HTML env override，防串内容）。
+  // statSync 失败不命中/不写缓存，404 JSON 语义原样保留。
   let panelHtmlCache = null; // { path, mtimeMs, size, body, etag }
-  function servePanelHtml(res, req) {
-    const htmlPath = resolvePanelHtmlPath();
+  function servePanelFile(res, req, htmlPath, contentType) {
     let st = null;
     try {
       st = statSync(htmlPath);
@@ -1017,7 +1018,7 @@ export function createPanelRouter({
       }
       if (!st) {
         // statSync 失败但读到了内容（竞态）：不写缓存、不发 ETag，原样直出。
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.writeHead(200, { "content-type": contentType });
         return res.end(body);
       }
       cached = { path: htmlPath, mtimeMs: st.mtimeMs, size: st.size, body, etag: `"${st.size}-${st.mtimeMs}"` };
@@ -1028,7 +1029,7 @@ export function createPanelRouter({
       res.writeHead(304, revalidateHeaders);
       return res.end();
     }
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...revalidateHeaders });
+    res.writeHead(200, { "content-type": contentType, ...revalidateHeaders });
     return res.end(cached.body);
   }
 
@@ -1055,7 +1056,23 @@ export function createPanelRouter({
         res.writeHead(200, { "content-length": 0 });
         return res.end();
       }
-      return servePanelHtml(res, req);
+      return servePanelFile(res, req, resolvePanelHtmlPath(), "text/html; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/panel.css" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_PANEL_CSS, "text/css; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/panel.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_PANEL_JS, "text/javascript; charset=utf-8");
     }
 
     if (path === "/panel/assets/logo.png" && (method === "GET" || method === "HEAD")) {

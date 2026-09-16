@@ -4,6 +4,9 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 
 const html = readFileSync(new URL("./panel-ui/panel.html", import.meta.url), "utf8");
+// 开屏样式规则在 panel.css（原 body 内 <style> 块）；init() 等主脚本逻辑在 panel.js
+const panelCss = readFileSync(new URL("./panel-ui/panel.css", import.meta.url), "utf8");
+const panelJs = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
 function script(id) {
   const match = html.match(new RegExp(`<script id="${id}">([\\s\\S]*?)<\\/script>`));
   assert.ok(match, `startup script ${id} is present`);
@@ -291,7 +294,7 @@ describe("launcher-only startup screen", () => {
     // :not(#panelStartup) 反选，特异性取括号内 ID 级，会压过 .toast/.modal-overlay
     // 默认的 opacity:0，导致浮动层被强制淡入成短暂可见的"弹窗"。钉死：playing
     // 只拦指针不压透明，leaving 只淡出开屏层，不出现 :not() 反选形式。
-    const css = html.match(/<style>([\s\S]*?)<\/style>/g).find((b) => b.includes("data-startup"));
+    const css = panelCss;
     const playingRule = css.match(/html\[data-startup="playing"\] body > header[^{]*\{([^}]*)\}/)?.[1] ?? "";
     assert.ok(playingRule.includes("pointer-events: none"), "playing 拦指针");
     assert.ok(!playingRule.includes("opacity"), "playing 不压透明，亚克力有内容可透");
@@ -300,7 +303,7 @@ describe("launcher-only startup screen", () => {
   });
 
   it("signals readiness only after initial status and the restored view have settled", async () => {
-    const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init);
     let statusDone, viewDone, ready = false;
     const context = {
@@ -322,7 +325,7 @@ describe("launcher-only startup screen", () => {
   });
 
   it("hooks the restored view's enter animation onto onLeave when recovering from a restart", async () => {
-    const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init);
     const controller = { ready() {}, onLeave: null };
     const context = {
@@ -340,7 +343,7 @@ describe("launcher-only startup screen", () => {
   });
 
   it("leaves onLeave untouched for the launcher first-paint path", async () => {
-    const init = html.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init);
     const controller = { ready() {}, onLeave: null };
     const context = {
