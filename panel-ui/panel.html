@@ -684,10 +684,10 @@
     display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border);
   }
 
-  /* 设置全页视图：专用头行（退出 + 标题 + 亮暗）、子 tab 条、主题分栏与预览样张。
+  /* 设置全页视图：专用头行（退出 + 标题 + 亮暗）、子 tab 条、主题分栏与看板镜像预览。
      设置项沿用 modal-item/modal-number 既有类（与样式实验室四段主题 CSS 对齐）；
-     预览全部复用真实组件类（panel-card/btn/badge/seg-control/toggle/view-tabs/
-     telemetry-sparkline），五套主题与亮暗 token 自动作用，无需主题特化 CSS。 */
+     预览是真实看板页的 DOM 克隆（JS 剥 id 后 CSS 缩放），五套主题与亮暗 token 经
+     全局变量自动作用于镜像，无需主题特化 CSS，也不存在独立样张可与看板脱节。 */
   .settings-head-left { display: flex; align-items: center; gap: 12px; }
   .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
   .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
@@ -711,16 +711,20 @@
     border-color: var(--border-strong); box-shadow: var(--shadow-xs);
   }
   .settings-theme-item[aria-checked="true"]::after { content: "✓"; color: var(--accent); font-weight: 700; }
-  /* 预览画布：inert + pointer-events 双保险不响应交互；宽版折线覆盖 68px 默认尺寸 */
+  /* 预览画布：inert + pointer-events 双保险不响应交互。看板镜像三层结构：
+     viewport 定高内滚 → sizer 撑出缩放后真实尺寸 → scale 按预览栏宽等比微缩。 */
   .settings-theme-preview {
     pointer-events: none; user-select: none;
     background: var(--bg-page); border: 1px solid var(--border);
-    border-radius: var(--radius-lg, 12px); padding: 14px;
-    display: flex; flex-direction: column; gap: 12px;
+    border-radius: var(--radius-lg, 12px); padding: 10px;
   }
-  .settings-preview-nav { align-self: flex-start; }
-  .settings-preview-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-  .settings-preview-spark { width: 160px; height: 32px; margin-left: auto; }
+  .settings-mirror-viewport {
+    overflow-y: auto; overflow-x: hidden; max-height: 560px; scrollbar-gutter: stable;
+    border-radius: var(--radius-md, 8px); background: var(--bg-page);
+  }
+  .settings-mirror-sizer { position: relative; overflow: hidden; }
+  .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
+  .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
 
   /* Skills 视图：Tab 栏（header 内嵌 segmented，样式对齐 seg-control/seg-btn） */
   .view-tabs {
@@ -4196,9 +4200,8 @@ if (window.panelStartupController) panelStartupPlay();
   <!-- 设置全页头行：与主头行互斥（switchView 切 hidden）；右侧亮暗钮与主头行同一状态源 -->
   <div class="layout-container head-inner" id="settingsHeadInner" hidden>
     <div class="settings-head-left">
-      <button class="btn btn-mini" id="settingsExitBtn" title="回到之前的视图">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-        退出
+      <button class="icon-btn" id="settingsExitBtn" title="回到之前的视图" aria-label="回到之前的视图">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
       </button>
       <h1 class="settings-head-title">设置</h1>
     </div>
@@ -5490,54 +5493,12 @@ if (window.panelStartupController) panelStartupPlay();
           <button type="button" class="settings-theme-item" data-style="blueprint" role="radio" aria-checked="false">蓝图</button>
           <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">暖纸</button>
         </div>
-        <!-- 预览样张：抽象模拟界面，真实组件类拼装，换主题/切亮暗即时反映，inert 不响应交互 -->
+        <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS
+             缩放），换主题/切亮暗经全局 token 即时反映；看板改版预览自动跟随 -->
         <div class="settings-theme-preview" id="settingsThemePreview" inert>
-          <div class="view-tabs settings-preview-nav">
-            <span class="view-tab active">看板</span>
-            <span class="view-tab">统计</span>
-          </div>
-          <div class="panel-card">
-            <div class="card-header">
-              <h2 class="card-title">
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                服务状态
-              </h2>
-              <span class="badge badge-ok">运行正常</span>
-            </div>
-            <div class="card-body">
-              <div class="prop-list">
-                <div class="prop-row">
-                  <span class="prop-name">监听地址</span>
-                  <span class="prop-val">127.0.0.1:47821</span>
-                </div>
-                <div class="prop-row">
-                  <span class="prop-name">开机自启常驻</span>
-                  <label class="toggle">
-                    <input type="checkbox" checked>
-                    <span class="slider"></span>
-                  </label>
-                </div>
-              </div>
-              <div class="settings-preview-row">
-                <button class="btn btn-mini btn-primary">启动</button>
-                <button class="btn btn-mini">重载</button>
-                <button class="btn btn-mini btn-danger">停止</button>
-                <span class="seg-control">
-                  <span class="seg-btn">关</span>
-                  <span class="seg-btn" aria-checked="true">开</span>
-                </span>
-              </div>
-              <div class="settings-preview-row">
-                <span class="badge badge-ok">正常</span>
-                <span class="badge badge-neutral">待命</span>
-                <span class="badge badge-danger">异常</span>
-                <div class="telemetry-sparkline settings-preview-spark">
-                  <svg viewBox="0 0 68 26" preserveAspectRatio="none">
-                    <path d="M0,20 L9.7,14 L19.4,16 L29.1,8 L38.8,12 L48.5,5 L58.2,9 L68,4 L68,26 L0,26 Z" fill="var(--spark-fill)"/>
-                    <path d="M0,20 L9.7,14 L19.4,16 L29.1,8 L38.8,12 L48.5,5 L58.2,9 L68,4" fill="none" stroke="var(--spark-line)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                  </svg>
-                </div>
-              </div>
+          <div class="settings-mirror-viewport" id="settingsMirrorViewport">
+            <div class="settings-mirror-sizer" id="settingsMirrorSizer">
+              <div class="settings-mirror-scale" id="settingsMirrorScale"></div>
             </div>
           </div>
         </div>
@@ -5966,7 +5927,7 @@ async function api(method, path, body) {
   // 重启恢复（panelStartupRestart）时 restoreView 记下的待播入场动画视图名；
   // init() 末尾在开屏 ready() 之后消费一次——与开屏淡出同步起播，连接处平滑。
   let restartEnterView = null;
-  // 设置全页视图：记住进入前的视图供「← 退出」返回；进入钩子由 initSettingsView
+  // 设置全页视图：记住进入前的视图供头行「←」钮返回；进入钩子由 initSettingsView
   // 装配（子 tab 重置到「通用」并重拉设置项）。设置本身不写入 panel-view。
   let settingsReturnView = "board";
   let enterSettingsView = () => {};
@@ -7612,7 +7573,58 @@ async function api(method, path, body) {
       if (animate) {
         replayViewEnter($(general ? "settingsPanelGeneral" : "settingsPanelTheme"));
       }
+      if (!general) captureSettingsMirror();
     }
+    // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
+    // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
+    // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
+    // 抓一次即冻结——预览看样式不看数据；主题/亮暗切换经全局 token 即时作用于镜像。
+    function captureSettingsMirror() {
+      const viewport = $("settingsMirrorViewport");
+      const sizer = $("settingsMirrorSizer");
+      const scaleEl = $("settingsMirrorScale");
+      const board = document.querySelector(".telemetry-view");
+      const main = document.querySelector("main.layout-container");
+      if (!viewport || !sizer || !scaleEl || !board || !main) return;
+      const stripIds = (root) => {
+        root.removeAttribute("id");
+        for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
+      };
+      scaleEl.textContent = "";
+      const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
+      if (tabs) {
+        const tabsClone = tabs.cloneNode(true);
+        stripIds(tabsClone);
+        const tabsWrap = document.createElement("div");
+        tabsWrap.className = "settings-mirror-tabs";
+        tabsWrap.appendChild(tabsClone);
+        scaleEl.appendChild(tabsWrap);
+      }
+      const boardClone = board.cloneNode(true);
+      boardClone.removeAttribute("hidden");
+      stripIds(boardClone);
+      scaleEl.appendChild(boardClone);
+      // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；
+      // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开供 viewport 内滚。
+      const mainCs = getComputedStyle(main);
+      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight);
+      const availW = viewport.clientWidth;
+      if (!naturalW || !availW) return;
+      scaleEl.style.width = naturalW + "px";
+      const s = availW / naturalW;
+      const naturalH = scaleEl.offsetHeight;
+      scaleEl.style.transform = `scale(${s})`;
+      sizer.style.width = naturalW * s + "px";
+      sizer.style.height = naturalH * s + "px";
+      viewport.scrollTop = 0;
+    }
+    let mirrorResizeTimer = 0;
+    window.addEventListener("resize", () => {
+      const themePanel = $("settingsPanelTheme");
+      if (!themePanel || themePanel.hidden) return;
+      clearTimeout(mirrorResizeTimer);
+      mirrorResizeTimer = setTimeout(captureSettingsMirror, 200);
+    });
     function resetSettingsSubTab() {
       for (const id of ["settingsTabGeneral", "settingsTabTheme"]) $(id).classList.remove("active");
       activateSettingsSubTab("general", false);

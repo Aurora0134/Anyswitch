@@ -2214,12 +2214,16 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
-  it("设置专用头行：左侧「← 退出」+「设置」标题，右侧亮暗钮与主头行同源", () => {
+  it("设置专用头行：左侧「←」图标钮（无文字）+「设置」标题，右侧亮暗钮与主头行同源", () => {
     assert.ok(/<div class="layout-container head-inner" id="mainHeadInner">/.test(panelHtml),
       "主头行有 mainHeadInner 锚点");
     assert.ok(/id="settingsHeadInner" hidden/.test(panelHtml), "设置头行默认隐藏");
     const head = panelHtml.slice(panelHtml.indexOf('id="settingsHeadInner"'), panelHtml.indexOf("</header>"));
-    assert.ok(head.includes('id="settingsExitBtn"') && head.includes("退出"), "左侧退出按钮");
+    const exit = head.match(/<button class="icon-btn" id="settingsExitBtn"[^>]*>([\s\S]*?)<\/button>/);
+    assert.ok(exit, "左侧退出钮沿用 icon-btn 图标钮形态");
+    assert.ok(exit[0].includes('title="回到之前的视图"') && exit[0].includes('aria-label="回到之前的视图"'),
+      "退出钮悬浮提示与无障碍标签保留");
+    assert.ok(/^\s*<svg[\s\S]*<\/svg>\s*$/.test(exit[1]), "退出钮仅含箭头图标、无文字");
     assert.ok(/class="settings-head-title">设置</.test(head), "「设置」标题");
     assert.ok(head.includes('id="settingsThemeToggle"'), "右侧亮暗切换按钮");
     assert.ok(head.includes('id="settingsIcoMoon"') && head.includes('id="settingsIcoSun"'), "日/月图标齐备");
@@ -2241,7 +2245,7 @@ describe("panel.html 设置全页视图", () => {
     assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
   });
 
-  it("「主题」子 tab：左栏五项点选即生效，右栏预览样张复用真实组件类", () => {
+  it("「主题」子 tab：左栏五项点选即生效，右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
     const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
@@ -2255,9 +2259,22 @@ describe("panel.html 设置全页视图", () => {
       panelHtml.indexOf('id="settingsThemePreview"'),
       panelHtml.indexOf("</section>", panelHtml.indexOf('id="settingsThemePreview"')),
     );
-    for (const cls of ["panel-card", "badge badge-ok", "seg-control", 'class="toggle"', "telemetry-sparkline", "btn-primary"]) {
-      assert.ok(preview.includes(cls), `预览样张含真实组件 ${cls}`);
+    // 镜像三层结构：viewport 定高内滚 → sizer 撑缩放后尺寸 → scale 等比微缩；
+    // 容器内不再有独立样张 markup，内容由 captureSettingsMirror 克隆看板填充
+    for (const id of ["settingsMirrorViewport", "settingsMirrorSizer", "settingsMirrorScale"]) {
+      assert.ok(preview.includes(`id="${id}"`), `预览含镜像层 #${id}`);
     }
+    assert.ok(!preview.includes("panel-card"), "预览不再内置独立样张");
+    const capture = panelHtml.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
+    assert.ok(capture, "captureSettingsMirror found");
+    assert.ok(capture[1].includes('document.querySelector(".telemetry-view")'), "镜像源为真实看板视图");
+    assert.ok(capture[1].includes("cloneNode(true)"), "镜像为看板 DOM 克隆");
+    assert.ok(capture[1].includes('removeAttribute("id")'), "克隆剥 id 防重复命中");
+    assert.ok(capture[1].includes('boardClone.removeAttribute("hidden")'), "克隆根去 hidden 抵消看板被切走");
+    assert.ok(capture[1].includes("scale("), "镜像按预览栏宽缩放");
+    const subTab = panelHtml.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
+    assert.ok(subTab, "activateSettingsSubTab found");
+    assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置视图不写入 panel-view", () => {
