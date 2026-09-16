@@ -12,8 +12,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const panelHtml = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+const panelJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8",
 );
 
@@ -64,7 +64,7 @@ function makeEnv() {
 }
 
 function makeRenderInstanceRows(env) {
-  const m = panelHtml.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
+  const m = panelJs.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "renderInstanceRows found in panel.html");
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
@@ -77,7 +77,7 @@ function makeRenderInstanceRows(env) {
 }
 
 function makeApplyDetailFold(env, open) {
-  const m = panelHtml.match(/function applyDetailFold\(prefix\) \{[\s\S]*?\n  \}/);
+  const m = panelJs.match(/function applyDetailFold\(prefix\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "applyDetailFold found in panel.html");
   const gridEl = fakeElement();
   const btn = {
@@ -142,7 +142,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
   });
 
   it("redrawInstanceSparklines 用已攒 buffer 逐实例绘制三条折线，不串栏", () => {
-    const m = panelHtml.match(/function redrawInstanceSparklines\(prefix\) \{[\s\S]*?\n  \}/);
+    const m = panelJs.match(/function redrawInstanceSparklines\(prefix\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "redrawInstanceSparklines found in panel.html");
     const buffers = {
       "kimi:a1": { tps: [{ t: 0, v: 10 }, { t: 0, v: 11 }], cache: [{ t: 0, v: 80 }], ttft: [{ t: 0, v: 0.4 }], sparkHistory: { ttft: [0.3, 0.42] } },
@@ -176,9 +176,9 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
 
 describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、展开补绘", () => {
   function makeRedrawEndpoint(env) {
-    const m = panelHtml.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
+    const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "redrawEndpointSparklines found in panel.html");
-    const km = panelHtml.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
+    const km = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
     assert.ok(km, "ENDPOINT_SPARK_KEYS found in panel.html");
     const keys = new Function(`return (${km[0].replace(/^const ENDPOINT_SPARK_KEYS = /, "").replace(/;$/, "")})`)();
     const historyBuffers = {
@@ -214,7 +214,7 @@ describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、�
 
   it("renderZcode/renderDsh/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
     for (const fnName of ["renderZcode", "renderDsh", "renderQoder"]) {
-      const m = panelHtml.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
+      const m = panelJs.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found in panel.html");
       assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
       const prefix = fnName === "renderZcode" ? "zc" : fnName === "renderDsh" ? "dsh" : "qoder";
@@ -223,7 +223,7 @@ describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、�
   });
 
   it("旧机制 setFold 展开（open=true）立即补绘端点级折线", () => {
-    const m = panelHtml.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
+    const m = panelJs.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
     assert.ok(m, "setFold found in panel.html");
     const env = makeEnv();
     const grid = { hidden: true }, brief = { hidden: false }, foldBtn = { setAttribute() {}, textContent: "" };
@@ -306,7 +306,7 @@ describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", ()
 
 
 describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶）", () => {
-  const m = panelHtml.match(/function claudeAggregateMetrics\(sessions\) \{[\s\S]*?\n  \}/);
+  const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "claudeAggregateMetrics found in panel.html");
   const claudeAggregateMetrics = new Function(`return (${m[0]});`)();
 

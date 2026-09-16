@@ -1,6 +1,6 @@
 # 使用统计页现行规格
 
-> 本文件是「使用统计」tab（panel-ui/panel.html statsView + usage-stats.mjs + usage-journal.mjs）的**单一现行规格**。
+> 本文件是「使用统计」tab（panel-ui/panel.js statsView + usage-stats.mjs + usage-journal.mjs）的**单一现行规格**。
 > 维护约定：**改统计页行为的提交必须同笔更新本文件对应条目**。本文件只留「现在是什么」，变更过程由提交历史承载。
 > 条目格式：红线约束强制挂「锚点（文件/常量/函数/测试名）」；无锚点的条目视为草稿。
 > 行号会漂移，定位以常量名/函数名/测试名为准。
@@ -29,7 +29,7 @@ R-03 与 R-10 已作废，编号不再复用，其余编号保持稳定。
 
 ### R-01 横条填充上限 85%
 最长条不顶到轨道右端，留出呼吸余量。
-- 锚点：panel.html `STATS_BAR_FILL_MAX = 85`（约 :12142）
+- 锚点：panel.js `STATS_BAR_FILL_MAX = 85`
 - 钉住：panel.test.mjs「最长条不顶到轨道满宽」（约 :1422，断言常量 <100 且 =85）
 
 ### R-02 趋势图 Top5+其他
@@ -57,7 +57,7 @@ journal 行归到**实际应答节点+绑定模型**；虚拟 auto 与中间失�
 
 ### R-08 热力图线性相对 4 档
 档位=当日值相对 90 天最大值的线性比例（`ceil(t/maxT·4)`，1-4 档）。不用对数分位：同一数量级的值会被全压进顶档，四档退化成一档。
-- 锚点：panel.html 热力图 level 计算（约 :11491）
+- 锚点：panel.js 热力图 level 计算
 - ⚠️ 无独立测试钉档位函数，改动时人工核对
 
 ### R-09 路由链灯无黄档（仅链灯；他处红黄绿不变）
@@ -67,7 +67,7 @@ journal 行归到**实际应答节点+绑定模型**；虚拟 auto 与中间失�
 - 边界：仅路由链点阵；监测页 TTFT 灯、模型稳定性灯仍是红/黄/绿三档——**这是有意差分，不是不一致**。
 
 ### R-11 主题双份维护契约 + 逐字校验
-style-lab/*.css 是源文件，改动必须同步嵌入 panel.html 对应横幅块；漂移方向以现行生效侧为准回写。
+style-lab/*.css 是源文件，改动必须同步嵌入 panel.css 对应横幅块；漂移方向以现行生效侧为准回写。
 - 锚点：panel-ui/style-lab/CONTRACT.md
 - 钉住：style-lab-sync.test.mjs（归一化行尾逐字比对，漂移即红）
 
@@ -101,7 +101,7 @@ journal/统计按渠道或号池 id 分键（wire 身份，永不随改名变）
 
 ### R-18 统计页手动刷新：变暗反馈 + 重播生长动画
 页头刷新键点击后走 `.btn:disabled` 45% 变暗（与看板「重启」键、skills 刷新键同源，暗着即「还没好」，连点被挡），数据落地那次渲染**重播所有栏目的生长动画**——趋势图重置 `statsTrendPrev` 走 reveal 清屏左至右生长、模型用量重置 `statsUsageRevealed` 重播环+柱状图一笔画生长（与进 tab 首渲同款）；按钮亮串在动画播完之后（STATS_MORPH_MS=1500 覆盖环 1400ms）。30s 轮询保持静默 morph 不受影响；TTFT 小图/横条/表格无生长动画，随当次重渲自然刷新。
-- 锚点：panel.html `runStatsRefreshWithFeedback` + `refreshStatsState(opts.replay)`（重置标记在 renderStatsAll 之前）
+- 锚点：panel.js `runStatsRefreshWithFeedback` + `refreshStatsState(opts.replay)`（重置标记在 renderStatsAll 之前）
 - 钉住：panel.test.mjs「今日概览卡头有手动刷新键：disabled 变暗反馈…」+「手动刷新重播生长动画」
 
 ### R-19 codex 实例口径=引擎进程 codex.exe（外壳与沙箱宿主只计入进程数）
@@ -120,15 +120,15 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 
 | 值 | 位置 | 镜像/钉住处 |
 |---|---|---|
-| 横条上限 85 | panel.html `STATS_BAR_FILL_MAX` | panel.test.mjs 断言（R-01） |
+| 横条上限 85 | panel.js `STATS_BAR_FILL_MAX` | panel.test.mjs 断言（R-01） |
 | 趋势 Top N=5 | usage-stats.mjs `TOP_N` | usage-stats.test.mjs（R-02） |
 | TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
 | TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
-| 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.html `STATS_MORPH_MS` / `STATS_MORPH_EASE`（约 :11724） | — |
-| 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.html `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
-| 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.html `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
+| 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.js `STATS_MORPH_MS` / `STATS_MORPH_EASE` | — |
+| 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.js `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
+| 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.js `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
 | journal 保留 90 天 | usage-journal.mjs retentionDays | usage-journal 测试 |
-| 监测页实例陈旧 2min | panel.html `INSTANCE_STALE_MS`（:5440） | 属监测页，统计页不用 |
+| 监测页实例陈旧 2min | panel.js `INSTANCE_STALE_MS` | 属监测页，统计页不用 |
 
 ## 4. 已知限制与已接受坑
 

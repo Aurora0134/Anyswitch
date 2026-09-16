@@ -103,7 +103,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `relay-host.mjs` — 常驻 relay 宿主（127.0.0.1:47821，crash 不自愈是刻意设计）。
 - `panel-host.mjs` — 独立常驻控制面板宿主（127.0.0.1:47820）：relay 停止/崩溃时面板仍可用，并承载 followAgent 探活 watcher。
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。
-- `panel-ui/panel.html` — 面板 Web UI 本体（relay 每请求现读，刷新即生效）。
+- `panel-ui/panel.html` — 面板 Web UI 骨架（DOM + 防闪烁/开屏内联小脚本，2026-09-17 起样式与主脚本外链到 `panel-ui/panel.css` / `panel-ui/panel.js`）；panel-host 每请求现读（mtime 缓存 + ETag），刷新即生效。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
 - `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/zcode/opencode/pi/kimi/dsh/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。

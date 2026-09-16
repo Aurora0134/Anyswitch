@@ -19,8 +19,8 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const panelHtml = readFileSync(
-  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+const panelJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8",
 );
 
@@ -28,14 +28,14 @@ const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", 
 // 基准顺序（fixture 默认全为已启动空闲，即待命层的完整卡序）
 const BASE_ORDER = AGENT_IDS;
 
-// 提取 panel.html 中排序语义整块（常量 + 判定 helper + reorderAgentCards）。
+// 提取 panel.js 中排序语义整块（常量 + 判定 helper + reorderAgentCards）。
 // 块内有多个 2 空格缩进的函数闭合，无法用「首个 \n  }」截断，改锚定块尾
 // 唯一的 container.append(...cards) 语句 + 函数闭合。
 function makeReorder() {
-  const m = panelHtml.match(
+  const m = panelJs.match(
     /const AGENT_CARD_ORDER[\s\S]*?container\.append\(\.\.\.cards\);\r?\n  \}/,
   );
-  assert.ok(m, "排序语义块（AGENT_CARD_ORDER…reorderAgentCards）在 panel.html 中完整存在");
+  assert.ok(m, "排序语义块（AGENT_CARD_ORDER…reorderAgentCards）在 panel.js 中完整存在");
   return buildSandbox(m[0]);
 }
 
