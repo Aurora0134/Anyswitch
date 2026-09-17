@@ -56,6 +56,9 @@ describe("buildPiProviderEntry", () => {
     assert.equal(p.models[0].apiKey, undefined);
     assert.equal(p.models[0].provider, undefined);
     assert.equal(p.models[0].baseUrl, undefined);
+    // No store contextWindow — the claude-opus tier fills in 1M.
+    assert.equal(p.models[0].contextWindow, 1_000_000);
+    assert.equal(p.models[1].contextWindow, 200_000);
   });
 
   it("uses modelId as fallback name when no displayName", () => {
@@ -69,6 +72,8 @@ describe("buildPiProviderEntry", () => {
     const p = entry["_test"];
     assert.equal(p.models[0].name, undefined);
     assert.equal(p.models[0].id, "bare-model");
+    // Unmatched model id falls to the 1M default, never undefined.
+    assert.equal(p.models[0].contextWindow, 1_000_000);
   });
 
   it("includes contextWindow and maxTokens when present", () => {
@@ -88,6 +93,46 @@ describe("buildPiProviderEntry", () => {
     const p = entry["_test"];
     assert.equal(p.models[0].contextWindow, 100000);
     assert.equal(p.models[0].maxTokens, 65536);
+  });
+
+  it("falls back to the keyword tier when the store carries no contextWindow", () => {
+    // The common case: most upstream /models responses omit context_length, so
+    // the store model has no real value. The pi merge must mirror the other
+    // five agents and write the tier-map fallback instead of dropping the
+    // field, or pi's binary silently defaults every model to 128k.
+    const provider = {
+      baseURL: "https://x.example/v1",
+      protocol: "openai-compatible",
+      credentialFile: "x.dpapi",
+      models: {
+        "gpt-5.5-codex": { displayName: "GPT 5.5 Codex" },
+        "gpt-4.1": { displayName: "GPT 4.1" },
+        "claude-sonnet-5": { displayName: "Claude Sonnet 5" },
+        "unknown-thing": { displayName: "Unknown" },
+      },
+    };
+    const entry = buildPiProviderEntry("test", provider, 47821);
+    const p = entry["_test"];
+    assert.equal(p.models.find((m) => m.id === "gpt-5.5-codex").contextWindow, 1_000_000);
+    assert.equal(p.models.find((m) => m.id === "gpt-4.1").contextWindow, 128_000);
+    assert.equal(p.models.find((m) => m.id === "claude-sonnet-5").contextWindow, 200_000);
+    assert.equal(p.models.find((m) => m.id === "unknown-thing").contextWindow, 1_000_000);
+  });
+
+  it("store contextWindow wins over the fallback tier", () => {
+    // A real upstream value (e.g. an OpenAI-compatible server that does report
+    // context_length) must always outrank the keyword tier — underestimation
+    // drops live context, but so does ignoring the vendor's advertised limit.
+    const provider = {
+      baseURL: "https://x.example/v1",
+      protocol: "openai-compatible",
+      credentialFile: "x.dpapi",
+      models: {
+        "gpt-5": { displayName: "GPT 5", contextWindow: 500_000 },
+      },
+    };
+    const entry = buildPiProviderEntry("test", provider, 47821);
+    assert.equal(entry["_test"].models[0].contextWindow, 500_000);
   });
 });
 
@@ -487,6 +532,7 @@ describe("pi thinking effort levels", () => {
     assert.deepEqual(modelOf(entry, "claude-opus-5"), {
       id: "claude-opus-5",
       name: "Claude Opus 5",
+      contextWindow: 1_000_000,
       reasoning: true,
       thinkingLevelMap: { off: null, high: "high", xhigh: "xhigh", max: "max" },
     });
@@ -502,7 +548,7 @@ describe("pi thinking effort levels", () => {
 
   it("leaves a model the library declares non-text alone", () => {
     const entry = buildPiProviderEntry("deepseek", STORE.providers.deepseek, 47821, catalog);
-    assert.deepEqual(entry["_deepseek"].models, [{ id: "deepseek-v4", name: "DeepSeek V4" }]);
+    assert.deepEqual(entry["_deepseek"].models, [{ id: "deepseek-v4", name: "DeepSeek V4", contextWindow: 1_000_000 }]);
   });
 
   it("mergeModelsJson forwards the catalog to every provider", () => {
