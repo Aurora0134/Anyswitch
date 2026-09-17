@@ -1539,9 +1539,17 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false">主题</button>
     </nav>
 
-    <!-- 「通用」：原设置弹窗五项原样搬入（控件 id、逐项独立保存/失败回滚语义不变） -->
+    <!-- 「通用」：五项按语义分三张卡——「启动」「抗截断」带卡头（复用各视图通用的
+         card-header/card-title 标准件），其余两项暂不归类、平卡放置；
+         控件 id、逐项独立保存/失败回滚语义不变 -->
     <div class="settings-panel" id="settingsPanelGeneral">
       <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v10"/><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/></svg>
+            启动
+          </h2>
+        </div>
         <div class="card-body">
           <div class="modal-item">
             <div>
@@ -1553,6 +1561,17 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/></svg>
+            抗截断
+          </h2>
+        </div>
+        <div class="card-body">
           <div class="modal-item">
             <div>
               <div class="modal-item-title" id="keepAliveTitle">抗截断</div>
@@ -1573,6 +1592,11 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <input class="modal-number" type="number" id="keepAliveRetriesInput" min="0" max="10" step="1" value="2">
           </div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="card-body">
           <div class="modal-item">
             <div>
               <div class="modal-item-title">注入推理强度</div>

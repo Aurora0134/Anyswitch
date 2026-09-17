@@ -2306,6 +2306,23 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
+  it("「通用」子 tab 五项分三张卡：启动/抗截断带图标卡头，其余未归类平卡", () => {
+    const general = panelHtml.slice(
+      panelHtml.indexOf('id="settingsPanelGeneral"'),
+      panelHtml.indexOf('id="settingsPanelTheme"'),
+    );
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 3,
+      "通用面板恰三张 panel-card");
+    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 2,
+      "仅两张卡有 card-header（杂项卡保持无头）");
+    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*启动\s*<\/h2>/.test(general),
+      "「启动」卡带 stroke 图标卡头");
+    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*抗截断\s*<\/h2>/.test(general),
+      "「抗截断」卡带 stroke 图标卡头");
+    assert.ok(panelCss.includes("#settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }"),
+      "设置行悬停整行淡底（--surface-hover）");
+  });
+
   it("抗截断开关同构 ccswitch skill 管理：品牌色淡底方钮 + 总开关关时收起图标", () => {
     // ── DOM：控件只剩图标组 + 总开关（计数徽标已移除）──
     const controls = panelHtml.slice(
