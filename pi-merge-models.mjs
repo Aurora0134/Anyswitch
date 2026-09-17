@@ -9,6 +9,7 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
 import { resolveEndpointEfforts, effortWireValue } from "./effort-catalog.mjs";
+import { fallbackContextWindow } from "./context-fallback.mjs";
 
 const SIDECAR_FILENAME = "pi-sidecar.json";
 
@@ -40,7 +41,12 @@ export function buildPiProviderEntry(providerId, provider, port, catalog = null)
     const m = { id: modelId };
     const sm = provider.models[modelId];
     if (sm?.displayName) m.name = sm.displayName;
-    if (sm?.contextWindow !== undefined) m.contextWindow = sm.contextWindow;
+    // Same priority chain as the other five merge modules: store value wins,
+    // context-fallback tier map fills the gap when the upstream /models
+    // response never carried a context_length (the common case — most
+    // upstreams omit it). Without the fallback pi's own binary defaults every
+    // model to 128e3, which is what the user sees as "all models 128k".
+    m.contextWindow = sm?.contextWindow ?? fallbackContextWindow(modelId);
     if (sm?.maxOutputTokens !== undefined) m.maxTokens = sm.maxOutputTokens;
     const efforts = catalog
       ? resolveEndpointEfforts(modelId, { catalog, agent: "pi", model: sm, provider })
