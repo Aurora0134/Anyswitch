@@ -41,10 +41,10 @@ async function withServer(deps, fn) {
   }
 }
 
-function postChat(port, { signal } = {}) {
+function postChat(port, { signal, headers } = {}) {
   return fetch(`http://127.0.0.1:${port}/openai/test-prov/v1/chat/completions`, {
     method: "POST",
-    headers: { authorization: TOKEN, "content-type": "application/json" },
+    headers: { authorization: TOKEN, "content-type": "application/json", ...headers },
     body: JSON.stringify({
       model: "gpt-test",
       stream: true,
@@ -236,6 +236,38 @@ describe("openai relay keep-alive anti-truncation", () => {
       const zcode = status.find((a) => a.id === "zcode");
       assert.equal(zcode.metrics.keepAlive.exhausted, 0, "nothing was exhausted when no retry budget existed");
       assert.equal(zcode.metrics.keepAlive.retries, 0);
+    });
+  });
+
+  it("(c2) does NOT retry on an endpoint switched off in the panel, while other endpoints keep retrying", async () => {
+    let callCount = 0;
+    const upstreamFetch = async () => {
+      callCount += 1;
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream([
+          'data: {"id":"1","choices":[{"delta":{}}]}\n\n',
+          "data: [DONE]\n\n",
+        ]),
+      };
+    };
+
+    const collector = createAgentMetricsCollector({ nowFn: () => 1000, execFn: (cmd, opts, cb) => cb(null, "") });
+    const deps = createMockDeps({
+      upstreamFetch,
+      getKeepAliveConfig: () => ({ enabled: true, maxRetries: 1, backoffMs: 10, endpoints: { dsh: { enabled: false } } }),
+      metricsCollector: collector,
+    });
+
+    await withServer(deps, async (port) => {
+      const switchedOff = await postChat(port, { headers: { "x-agent-id": "dsh" } });
+      assert.equal(switchedOff.status, 502);
+      assert.equal(callCount, 1, "an endpoint with its own switch off must not retry");
+
+      const inheriting = await postChat(port, { headers: { "x-agent-id": "kimi" } });
+      assert.equal(inheriting.status, 502);
+      assert.equal(callCount, 3, "an endpoint absent from the map inherits the master switch and retries once");
     });
   });
 
