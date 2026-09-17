@@ -7,6 +7,7 @@ import {
   DEFAULT_KEEPALIVE_CONFIG,
   DEFAULT_SPARK_WINDOW_POINTS,
   parseKeepAliveConfig,
+  resolveKeepAliveEnabled,
   parseSparkWindowPoints,
   parseInjectThinkingEffort,
   DEFAULT_INJECT_THINKING_EFFORT,
@@ -259,6 +260,66 @@ describe("injectThinkingEffort", () => {
 
       const malformed = saveSettings(path, { injectThinkingEffort: "nonsense" }, {});
       assert.equal(malformed.settings.injectThinkingEffort, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("keepAlive per-endpoint switches", () => {
+  it("leaves endpoints absent until something is stored, so a fresh install is all-on", () => {
+    const cfg = parseKeepAliveConfig({ mode: "enhanced" }, {});
+    assert.equal(cfg.endpoints, undefined);
+    assert.deepEqual(cfg, DEFAULT_KEEPALIVE_CONFIG);
+  });
+
+  it("normalizes stored endpoint entries to {enabled} and drops malformed ones", () => {
+    const cfg = parseKeepAliveConfig({
+      endpoints: { claude: { enabled: false }, kimi: true, zcode: { enabled: "no" }, "": { enabled: false }, opencode: null },
+    }, {});
+    assert.deepEqual(cfg.endpoints, { claude: { enabled: false }, kimi: { enabled: true } });
+  });
+
+  it("resolves an endpoint as enabled when it was never switched, and only then", () => {
+    const on = parseKeepAliveConfig({}, {});
+    assert.equal(resolveKeepAliveEnabled(on, "claude"), true);
+    assert.equal(resolveKeepAliveEnabled(on, null), true);
+
+    const withOff = parseKeepAliveConfig({ endpoints: { claude: { enabled: false } } }, {});
+    assert.equal(resolveKeepAliveEnabled(withOff, "claude"), false);
+    assert.equal(resolveKeepAliveEnabled(withOff, "kimi"), true, "an untouched endpoint inherits the master switch");
+
+    const masterOff = parseKeepAliveConfig({ endpoints: { claude: { enabled: true } }, enabled: false }, {});
+    assert.equal(resolveKeepAliveEnabled(masterOff, "claude"), false, "the master switch wins");
+  });
+
+  it("merges endpoint patches per endpoint instead of replacing the whole map", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-endpoints-"));
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { keepAlive: { endpoints: { claude: { enabled: false } } } }, {});
+      const second = saveSettings(path, { keepAlive: { endpoints: { kimi: { enabled: false } } } }, {});
+      assert.deepEqual(second.keepAlive.endpoints, {
+        claude: { enabled: false },
+        kimi: { enabled: false },
+      });
+
+      const flipped = saveSettings(path, { keepAlive: { endpoints: { claude: { enabled: true } } } }, {});
+      assert.deepEqual(flipped.keepAlive.endpoints, {
+        claude: { enabled: true },
+        kimi: { enabled: false },
+      });
+      assert.equal(flipped.keepAlive.mode, "enhanced", "endpoint patches leave the master switch alone");
+
+      const untouched = saveSettings(path, { keepAlive: { maxRetries: 4 } }, {});
+      assert.deepEqual(untouched.keepAlive.endpoints, {
+        claude: { enabled: true },
+        kimi: { enabled: false },
+      });
+      assert.deepEqual(loadSettings(path, {}).keepAlive.endpoints, {
+        claude: { enabled: true },
+        kimi: { enabled: false },
+      });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

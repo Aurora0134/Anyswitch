@@ -22,6 +22,7 @@ import { OpenAIStreamGuard } from "./openai-stream-guard.mjs";
 import { StreamTranslator, SSEParser, sseEvent } from "./stream.mjs";
 import { ResponsesSseTranslator } from "./responses-translate.mjs";
 import { computeRetryDelay } from "./keepalive-backoff.mjs";
+import { resolveKeepAliveEnabled } from "./relay-settings.mjs";
 import { openAIError } from "./openai-handler.mjs";
 import { errorBody } from "./handler.mjs";
 
@@ -439,10 +440,22 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
 //   onExhaustedLog(message, lastOutcome, retryCtx) (optional)
 //   sendExhausted(message, lastOutcome)
 //   logLabel                          -> "request" / "anthropic request" / ...
+//   agentId                           -> endpoint whose per-endpoint keep-alive
+//                                        switch gates this request's retry
+//                                        budget; null = unidentified traffic
+//                                        (master switch only); a channel with
+//                                        no such key falls back to deps.agentId
 export async function runStreamWithKeepAlive(res, channel) {
   const { deps, tracker, abortController, pipe, logLabel } = channel;
   const keepAliveConfig = deps?.getKeepAliveConfig ? deps.getKeepAliveConfig() : { enabled: true, maxRetries: 1, backoffMs: 500 };
-  const maxRetries = keepAliveConfig.enabled ? (keepAliveConfig.maxRetries ?? 1) : 0;
+  // The endpoint's own switch sits on top of the master one. Factory-built
+  // channels always carry the key — a concrete id for attributed traffic, or
+  // null for unidentified traffic, which keeps the pre-existing master-only
+  // behaviour. Hand-rolled channels (tests) without the key fall back to the
+  // process-wide deps.agentId. Both resolve through the same helper the panel
+  // uses, so the UI can never claim a state the pipe does not honour.
+  const agentId = "agentId" in channel ? (channel.agentId ?? null) : (deps?.agentId ?? null);
+  const maxRetries = resolveKeepAliveEnabled(keepAliveConfig, agentId) ? (keepAliveConfig.maxRetries ?? 1) : 0;
   const backoffMs = keepAliveConfig.backoffMs ?? 500;
   const logger = deps?.logger;
 
@@ -617,10 +630,11 @@ export async function runStreamWithKeepAlive(res, channel) {
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function openAIStreamChannel({ res, tracker, abortController, deps, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
+export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
   const logger = deps?.logger;
   return {
     deps,
+    agentId,
     tracker,
     abortController,
     callUpstream,
@@ -731,7 +745,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, callU
 // frame instead of a status line the wire can no longer carry.
 // Pool routing (phase 2): same callUpstreams / shouldFailover /
 // onMemberSuccess contract as the other channels.
-export function responsesStreamChannel({ res, tracker, abortController, deps, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
+export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
   const logger = deps?.logger;
   const writeFailedFrame = (message, type) => {
     try {
@@ -743,6 +757,7 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, re
   };
   return {
     deps,
+    agentId,
     tracker,
     abortController,
     callUpstream,
@@ -842,10 +857,11 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, re
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function anthropicStreamChannel({ res, tracker, abortController, deps, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover, name, logLabel, pings, writeFrameWhenHeadersSent }) {
+export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover, name, logLabel, pings, writeFrameWhenHeadersSent }) {
   const logger = deps?.logger;
   return {
     deps,
+    agentId,
     tracker,
     abortController,
     callUpstream,

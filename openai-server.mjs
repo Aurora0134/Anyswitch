@@ -579,6 +579,7 @@ export function createOpenAIRelayServer(deps) {
               tracker,
               abortController,
               deps,
+              agentId: openaiAgentId,
               ...(memberPlan
                 ? {
                     // One callable per candidate member; the keep-alive loop
@@ -754,6 +755,7 @@ export function createOpenAIRelayServer(deps) {
             tracker,
             abortController,
             deps,
+            agentId: openaiAgentId,
             // The original Responses body is the translator's ctx: freeform
             // custom-tool names and the request fields echoed onto the
             // response object both come from it.
@@ -882,6 +884,10 @@ export function createOpenAIRelayServer(deps) {
               tracker,
               abortController,
               deps,
+              // Unidentified Anthropic traffic keeps the pre-existing
+              // master-only behaviour: only an attributed endpoint id is
+              // gated by its own switch.
+              agentId: agentId ?? null,
               ...(memberPlan
                 ? {
                     // One callable per candidate member; the keep-alive loop

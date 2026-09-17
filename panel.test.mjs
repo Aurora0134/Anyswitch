@@ -704,6 +704,39 @@ describe("panel router followAgent watchdog coordination", () => {
 
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
+
+  it("POST keepAlive.endpoints persists per endpoint and is returned by GET", async () => {
+    const { base } = tempBase();
+    const router = createPanelRouter({
+      base,
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      enableWatchdogAutostartFn: async () => ({ ok: true }),
+      disableWatchdogAutostartFn: async () => ({ ok: true }),
+      isWatchdogAutostartEnabledFn: async () => false,
+      spawnWatchdogFn: async () => ({ ok: true }),
+      stopWatchdogFn: async () => ({ ok: true }),
+      probeWatchdogFn: async () => false,
+      fetchRelayAgents: async () => null,
+    });
+
+    const off = fakeReqRes("/panel/api/settings", "POST", { keepAlive: { endpoints: { claude: { enabled: false } } } });
+    await router.handle(off.req, off.res);
+    assert.equal(off.res.statusCode, 200);
+    assert.deepEqual(off.json().keepAlive.endpoints, { claude: { enabled: false } });
+
+    // A second endpoint patch must not clobber the first entry.
+    const second = fakeReqRes("/panel/api/settings", "POST", { keepAlive: { endpoints: { kimi: { enabled: false } } } });
+    await router.handle(second.req, second.res);
+    assert.deepEqual(second.json().keepAlive.endpoints, { claude: { enabled: false }, kimi: { enabled: false } });
+    assert.equal(second.json().keepAlive.mode, "enhanced", "endpoint patches leave the master switch alone");
+
+    const getRes = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(getRes.req, getRes.res);
+    assert.deepEqual(getRes.json().keepAlive.endpoints, { claude: { enabled: false }, kimi: { enabled: false } });
+
+    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
+  });
 });
 
 // GET /api/settings decorates its response with watchdog drift visibility
@@ -2204,12 +2237,12 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/id="settingsPanelTheme" hidden/.test(panelHtml), "主题面板默认隐藏");
   });
 
-  it("「通用」子 tab 保留原设置弹窗全部五项控件", () => {
+  it("「通用」子 tab 保留原设置弹窗的全部控件", () => {
     const iGeneral = panelHtml.indexOf('id="settingsPanelGeneral"');
     const iTheme = panelHtml.indexOf('id="settingsPanelTheme"');
     assert.ok(iGeneral > 0 && iTheme > iGeneral, "通用面板在主题面板之前");
     const general = panelHtml.slice(iGeneral, iTheme);
-    for (const id of ["followAgentToggle", "keepAliveSlider", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
+    for (const id of ["followAgentToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
       assert.ok(general.includes(`id="${id}"`), `通用面板保留控件 #${id}`);
     }
   });

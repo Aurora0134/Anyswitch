@@ -185,6 +185,7 @@ export function createRelayServer(deps) {
             tracker: reqTracker,
             abortController,
             deps,
+            agentId,
             ...(memberPlan
               ? {
                   // One callable per candidate member (pool members, or the

@@ -68,6 +68,35 @@ export function parseKeepAliveMaxRetries(raw) {
   return Math.min(MAX_KEEPALIVE_RETRIES, n);
 }
 
+// Per-endpoint switches ride under keepAlive.endpoints[agentId].enabled. The key
+// stays absent until the user actually switches one endpoint: a missing entry
+// (or a missing map) means "inherits the master switch", which makes a fresh
+// install all-on without baking any endpoint list into the schema.
+function parseKeepAliveEndpoints(rawEndpoints) {
+  if (!rawEndpoints || typeof rawEndpoints !== "object" || Array.isArray(rawEndpoints)) return undefined;
+  const endpoints = {};
+  for (const [agentId, raw] of Object.entries(rawEndpoints)) {
+    if (!agentId) continue;
+    if (typeof raw === "boolean") {
+      endpoints[agentId] = { enabled: raw };
+    } else if (raw && typeof raw === "object" && typeof raw.enabled === "boolean") {
+      endpoints[agentId] = { enabled: raw.enabled };
+    }
+  }
+  return Object.keys(endpoints).length > 0 ? endpoints : undefined;
+}
+
+// One request's effective keep-alive state: master switch AND that endpoint's
+// own switch. Both the panel UI and the stream pipe resolve through this so the
+// two never drift (unknown/absent endpoint ids inherit the master switch).
+export function resolveKeepAliveEnabled(keepAliveConfig, agentId) {
+  if (!keepAliveConfig || typeof keepAliveConfig !== "object") return true;
+  if (keepAliveConfig.enabled === false) return false;
+  if (!agentId) return true;
+  const entry = keepAliveConfig.endpoints?.[agentId];
+  return !(entry && entry.enabled === false);
+}
+
 export function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
@@ -92,6 +121,8 @@ export function parseKeepAliveConfig(rawKeepAlive, env = process.env) {
       cfg.backoffMs = rawKeepAlive.backoffMs;
     }
     cfg.mode = normalizeKeepAliveMode(rawKeepAlive.mode, cfg.enabled);
+    const endpoints = parseKeepAliveEndpoints(rawKeepAlive.endpoints);
+    if (endpoints !== undefined) cfg.endpoints = endpoints;
   }
 
   // Environment variable override for troubleshooting / diagnostics
@@ -194,6 +225,15 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     }
     if (Object.prototype.hasOwnProperty.call(patch.keepAlive, "maxRetries")) {
       merged.maxRetries = parseKeepAliveMaxRetries(patch.keepAlive.maxRetries);
+    }
+    // Endpoint switches merge per endpoint: the panel PATCHes one agentId at a
+    // time, and replacing the whole map would drop the other endpoint entries.
+    const patchedEndpoints = parseKeepAliveEndpoints(patch.keepAlive.endpoints);
+    if (patch.keepAlive.endpoints !== undefined && patchedEndpoints !== undefined) {
+      merged.endpoints = { ...(current.raw.keepAlive?.endpoints || {}) };
+      for (const [agentId, entry] of Object.entries(patchedEndpoints)) {
+        merged.endpoints[agentId] = { ...(merged.endpoints[agentId] || {}), ...entry };
+      }
     }
     updated.keepAlive = merged;
   }
