@@ -5336,7 +5336,7 @@ async function api(method, path, body) {
       </div>
       <div id="storePoolMemberDetail"></div>
     `;
-    $("storePoolTestBtn").onclick = () => storeBatchTest(row.members.map((m) => m.id));
+    $("storePoolTestBtn").onclick = () => runStoreTest(row.members.map((m) => m.id), { btn: $("storePoolTestBtn") });
     $("storePoolRefreshBtn").onclick = () => storeRefresh(row.members.map((m) => m.id), { wholeLabel: row.displayName || row.id });
     $("storePoolRenameBtn").onclick = () => showRenamePoolModal(row);
     $("storePoolReorderBtn").onclick = () => openPoolReorderModal(row);
@@ -5433,8 +5433,7 @@ async function api(method, path, body) {
   }
 
   function bindStoreDetail(p) {
-    $("storeTestBtn").onclick = () => storeAction(`/api/store/test`, { id: p.id },
-      (r) => `${p.displayName} 可用（发现 ${r.modelCount} 个模型）`);
+    $("storeTestBtn").onclick = () => runStoreTest([p.id], { btn: $("storeTestBtn") });
     $("storeRefreshOneBtn").onclick = () => storeRefresh([p.id]);
     $("storeRenameBtn").onclick = () => showRenameProviderModal(p);
     $("storeRotateBtn").onclick = () => showRotateModal(p);
@@ -5541,6 +5540,64 @@ async function api(method, path, body) {
         toast(panelError(e, "操作失败"), true);
       }
       return null;
+    }
+  }
+
+  // ── 测试连接在途/结果反馈：复用刷新状态小字（busy 逐字波 → done/err 收尾） ──
+  // 三入口（单渠道详情钮、号池详情钮、右键菜单）共用；storeTestBusy 防并发重入
+  // （详情钮还会自身 disabled，菜单无可禁用元素，全靠这个标志挡第二轮）。
+  let storeTestBusy = false;
+  // ids：按可见行展开后的渠道 id 序列；labelMap 解析显示名（池行取池名）。
+  // opts：{ btn } 仅详情钮传——按下即禁用改文案，finally 复位；右键菜单不传。
+  async function runStoreTest(ids, opts) {
+    if (storeTestBusy) return null;
+    storeTestBusy = true;
+    const btn = opts && opts.btn;
+    if (btn) { btn.disabled = true; btn.textContent = "测试中…"; }
+    const rows = storeRows();
+    const labelMap = new Map();
+    for (const r of rows) {
+      if (r.kind === "pool") for (const m of r.members) labelMap.set(m.id, r.displayName || m.displayName || m.id);
+      else labelMap.set(r.p.id, r.p.displayName || r.p.id);
+    }
+    const multi = ids.length > 1;
+    let ok = 0;
+    const failed = [];
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        const prog = multi ? ` · ${i + 1}/${ids.length}` : "";
+        const label = labelMap.get(id) || id;
+        setStoreRefreshStatus("正在测试连接..", "busy", `${escapeHtml(label)}${prog}`);
+        try {
+          const r = await api("POST", "/api/store/test", { id });
+          ok++;
+          setStoreRefreshStatus("正在测试连接..", "busy",
+            `<span class="srs-pos">${escapeHtml(label)} 可用（${r.modelCount} 个模型）</span>${prog}`);
+        } catch (e) {
+          failed.push(`${label}：${panelError(e, "连不上")}`);
+          setStoreRefreshStatus("正在测试连接..", "busy",
+            `<span class="srs-neg">${escapeHtml(label)} 连不上</span>${prog}`);
+        }
+      }
+      const last = labelMap.get(ids[ids.length - 1]) || ids[ids.length - 1];
+      if (!failed.length) {
+        const tail = multi
+          ? `<span class="srs-pos">${ok} 个渠道全部可用</span>`
+          : `<span class="srs-pos">${escapeHtml(last)} 可用</span>`;
+        setStoreRefreshStatus("测试完成", "done", tail);
+        toast(multi ? `${ok} 个渠道全部可用` : `${last} 可用`);
+      } else {
+        setStoreRefreshStatus("测试完成", "err",
+          `<span class="srs-neg">${ok} 个可用、${failed.length} 个连不上（${escapeHtml(failed.join("；"))}）</span>`);
+        toast(multi
+          ? `${ok} 个渠道可用、${failed.length} 个连不上（${failed.join("；")}）`
+          : `${failed.join("；")}`, true);
+      }
+      return { ok, failed };
+    } finally {
+      storeTestBusy = false;
+      if (btn) { btn.disabled = false; btn.textContent = "测试连接"; }
     }
   }
 
@@ -6275,21 +6332,6 @@ async function api(method, path, body) {
     applyStoreFocus(focusId, poolTab);
   }
 
-  // ── 批量动作：池行展开为成员串行执行，单点失败计数不中断 ──
-  async function storeBatchTest(providerIds) {
-    let ok = 0;
-    const failed = [];
-    for (const id of providerIds) {
-      try {
-        await api("POST", "/api/store/test", { id });
-        ok++;
-      } catch (e) {
-        failed.push(`${id}：${panelError(e, "连接失败")}`);
-      }
-    }
-    if (failed.length) toast(`${ok} 个渠道可用、${failed.length} 个连不上（${failed.join("；")}）`, true);
-    else toast(`${ok} 个渠道全部可用`);
-  }
 
   // 解除号池：仅删 pools 条目，成员渠道与凭据原样保留
   function confirmDissolvePool(row) {
@@ -7358,7 +7400,7 @@ async function api(method, path, body) {
     if (storeSelection.has(id) && storeSelection.size > 1) {
       // 多选菜单：基础项 + 组建/加入号池（置于删除之前）；无池时「加入号池」置灰
       const items = [
-        { label: "测试连接", fn: () => storeBatchTest(storeSelectionProviders()) },
+        { label: "测试连接", fn: () => runStoreTest(storeSelectionProviders()) },
         { label: "刷新模型", fn: () => storeRefresh(storeSelectionProviders()) },
         { label: "全选", fn: selectAllVisibleStoreRows },
         { label: "取消选择", fn: () => { storeSelection.clear(); requestStoreFocus(null); renderStoreList(); } },
@@ -7371,7 +7413,7 @@ async function api(method, path, body) {
     }
     if (row.kind === "pool") {
       popSkillsContextMenu(x, y, row.displayName, [
-        { label: "测试连接", fn: () => storeBatchTest(row.members.map((m) => m.id)) },
+        { label: "测试连接", fn: () => runStoreTest(row.members.map((m) => m.id)) },
         { label: "刷新模型", fn: () => storeRefresh(row.members.map((m) => m.id), { wholeLabel: row.displayName || row.id }) },
         { label: "重命名", fn: () => showRenamePoolModal(row) },
         { label: "解除号池", fn: () => confirmDissolvePool(row) },
@@ -7383,7 +7425,7 @@ async function api(method, path, body) {
     }
     const p = row.p;
     popSkillsContextMenu(x, y, p.displayName, [
-      { label: "测试连接", fn: () => storeAction("/api/store/test", { id: p.id }, (r) => `${p.displayName} 可用（发现 ${r.modelCount} 个模型）`) },
+      { label: "测试连接", fn: () => runStoreTest([p.id]) },
       { label: "刷新模型", fn: () => storeRefresh([p.id]) },
       { label: "重命名", fn: () => showRenameProviderModal(p) },
       { label: "加入号池…", disabled: storePools().length ? null : "暂无号池，请先组建号池", fn: openPoolAddToPoolModal },
