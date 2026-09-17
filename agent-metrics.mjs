@@ -1,5 +1,7 @@
 import { exec, spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { atomicWriteFile } from "./atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
 // AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
@@ -49,6 +51,20 @@ const SESSION_REPORTER_HEARTBEAT_MS = 10000;
 // of silence is conclusive. Settled on read, no timers — same style as
 // PROCESS_GONE_ACTIVE_REQUEST_TTL_MS above.
 const SESSION_SILENT_ACTIVE_REQUEST_TTL_MS = 45000;
+
+// Display-metric snapshot across relay restarts. Aggregates and instance
+// buckets live only in this process's memory; a relay restart (upgrade,
+// crash, or a manual stop/start) used to zero them, and the board then showed
+// an empty card until the endpoint's next request finished settling — for a
+// coding agent that is a whole turn (~30s+). The snapshot persists the
+// display history on the model-stability cadence: cumulative accounting and
+// the sample windows backing the card's numbers. It is display history, never
+// protocol state — on restore, in-flight counts, fault latches and
+// current-identity fields stay live-only (see restoreAggregateState), because
+// restoring them would pin a "生成中" badge no live request owns.
+export const METRICS_SNAPSHOT_FILENAME = "agent-metrics-snapshot.json";
+const METRICS_SNAPSHOT_VERSION = 1;
+const METRICS_SNAPSHOT_EVERY_MS = 30_000;
 
 // Sliding window of recent successful requests. TPS and cache-hit rate are
 // computed from this window, NOT from process-lifetime totals. A lifetime
@@ -621,6 +637,86 @@ function createAggregateState() {
     lastKeepAliveAt: null,
     sparkWindowPoints: DEFAULT_SPARK_WINDOW_POINTS,
   };
+}
+
+// Snapshot wire shape (see the METRICS_SNAPSHOT_* block above). Only the
+// display-history fields cross the restart: cumulative counters, the sample
+// windows (recentSamples / ttftHistory — a window shorn of its history would
+// print a different number than the card showed a second before the restart),
+// the sticky "最近" identity, and the keep-alive ledger. Everything
+// liveness-scoped is excluded: activeRequests / activeWallStart /
+// currentModel / currentProvider / activeModels / activeTargets /
+// currentViaAuto / errorActive / activeFaults / keylessFaultAt / lastError
+// describe what THIS process is doing right now and start empty again.
+function serializeAggregateState(state) {
+  return {
+    totalRequests: state.totalRequests,
+    activeWallClockMs: state.activeWallClockMs,
+    totalActiveDurationMs: state.totalActiveDurationMs,
+    totalGenerationDurationMs: state.totalGenerationDurationMs,
+    totalPromptTokens: state.totalPromptTokens,
+    totalCompletionTokens: state.totalCompletionTokens,
+    totalCachedTokens: state.totalCachedTokens,
+    recentSamples: state.recentSamples,
+    ttftHistory: state.ttftHistory,
+    lastTtftMs: state.lastTtftMs,
+    firstRequestAt: state.firstRequestAt,
+    lastRequestAt: state.lastRequestAt,
+    lastModel: state.lastModel,
+    lastProvider: state.lastProvider,
+    lastViaAuto: state.lastViaAuto,
+    keepAliveRetries: state.keepAliveRetries,
+    keepAliveRecoveries: state.keepAliveRecoveries,
+    keepAliveExhausted: state.keepAliveExhausted,
+    lastKeepAliveAt: state.lastKeepAliveAt,
+  };
+}
+
+function snapshotFinite(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function snapshotNullableNumber(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+// Defensive field-by-field restore: a corrupt or older/newer sidecar must
+// degrade to "no data" per field, never throw, never trust the file's shape.
+function restoreAggregateState(state, raw, sampleKeep) {
+  if (!raw || typeof raw !== "object") return;
+  state.totalRequests = snapshotFinite(raw.totalRequests);
+  state.activeWallClockMs = snapshotFinite(raw.activeWallClockMs);
+  state.totalActiveDurationMs = snapshotFinite(raw.totalActiveDurationMs);
+  state.totalGenerationDurationMs = snapshotFinite(raw.totalGenerationDurationMs);
+  state.totalPromptTokens = snapshotFinite(raw.totalPromptTokens);
+  state.totalCompletionTokens = snapshotFinite(raw.totalCompletionTokens);
+  state.totalCachedTokens = snapshotFinite(raw.totalCachedTokens);
+  state.lastTtftMs = snapshotNullableNumber(raw.lastTtftMs);
+  state.firstRequestAt = snapshotNullableNumber(raw.firstRequestAt);
+  state.lastRequestAt = snapshotNullableNumber(raw.lastRequestAt);
+  state.lastModel = typeof raw.lastModel === "string" ? raw.lastModel : null;
+  state.lastProvider = typeof raw.lastProvider === "string" ? raw.lastProvider : null;
+  state.lastViaAuto = raw.lastViaAuto === true;
+  state.keepAliveRetries = snapshotFinite(raw.keepAliveRetries);
+  state.keepAliveRecoveries = snapshotFinite(raw.keepAliveRecoveries);
+  state.keepAliveExhausted = snapshotFinite(raw.keepAliveExhausted);
+  state.lastKeepAliveAt = snapshotNullableNumber(raw.lastKeepAliveAt);
+  if (Array.isArray(raw.recentSamples)) {
+    state.recentSamples = raw.recentSamples
+      .filter((s) => s && typeof s === "object")
+      .map((s) => ({
+        completion: Number(s.completion) || 0,
+        genDurationMs: snapshotNullableNumber(s.genDurationMs),
+        prompt: Number(s.prompt) || 0,
+        cached: Number(s.cached) || 0,
+      }))
+      .slice(-sampleKeep);
+  }
+  if (Array.isArray(raw.ttftHistory)) {
+    state.ttftHistory = raw.ttftHistory
+      .filter((v) => typeof v === "number" && Number.isFinite(v))
+      .slice(-sampleKeep);
+  }
 }
 
 // errKind taxonomy for the usage journal (see usage-journal.mjs header).
@@ -1588,6 +1684,114 @@ export function createAgentMetricsCollector(options = {}) {
   // already; zcode/dsh/qoder stay aggregate-only by design.
   const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map() };
 
+  // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
+  // relay process wires persistRoot in, so it owns the file; the panel and
+  // watchdog collectors (no persistRoot) skip every step and behave exactly
+  // as before.
+  const metricsSnapshotPath = options.metricsSnapshotPath
+    ?? (persistRoot ? join(persistRoot, METRICS_SNAPSHOT_FILENAME) : null);
+  const metricsSnapshotEveryMs = options.metricsSnapshotEveryMs ?? METRICS_SNAPSHOT_EVERY_MS;
+  const endpointStates = {
+    zcode: zcodeState,
+    claude: claudeState,
+    dsh: dshState,
+    pi: piState,
+    kimi: kimiState,
+    qoder: qoderState,
+    codex: codexState,
+    opencode: opencodeState,
+  };
+  let metricsSnapshotDirty = false;
+  let lastMetricsSnapshotAt = 0;
+
+  function markMetricsDirty() {
+    metricsSnapshotDirty = true;
+  }
+
+  function serializeMetricsSnapshot(now) {
+    const endpoints = {};
+    for (const [id, state] of Object.entries(endpointStates)) {
+      endpoints[id] = serializeAggregateState(state);
+    }
+    const instances = {};
+    for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
+      instances[bucket] = [...instMap.entries()].map(([id, entry]) => ({
+        id,
+        firstSeen: entry.firstSeen,
+        label: entry.label,
+        state: serializeAggregateState(entry.state),
+      }));
+    }
+    return { version: METRICS_SNAPSHOT_VERSION, savedAt: now, endpoints, instances };
+  }
+
+  function persistMetricsSnapshot(now = nowFn()) {
+    if (metricsSnapshotPath === null) return false;
+    try {
+      atomicWriteFile(metricsSnapshotPath, JSON.stringify(serializeMetricsSnapshot(now), null, 2));
+      metricsSnapshotDirty = false;
+      lastMetricsSnapshotAt = now;
+      return true;
+    } catch {
+      // Best-effort like model-stability: the in-memory collector stays the
+      // source of truth; a locked/unwritable dir must never reach a request.
+      return false;
+    }
+  }
+
+  function maybePersistMetricsSnapshot(now = nowFn()) {
+    if (!metricsSnapshotDirty) return;
+    if (now - lastMetricsSnapshotAt < metricsSnapshotEveryMs) return;
+    persistMetricsSnapshot(now);
+  }
+
+  function restoreMetricsSnapshot() {
+    if (metricsSnapshotPath === null || !existsSync(metricsSnapshotPath)) return;
+    let raw;
+    try {
+      raw = JSON.parse(readFileSync(metricsSnapshotPath, "utf8"));
+    } catch {
+      return; // corrupt sidecar: start empty; the next persist overwrites it
+    }
+    if (!raw || raw.version !== METRICS_SNAPSHOT_VERSION) return;
+    const sampleKeep = Math.max(recentSampleWindow, sparkWindowPoints);
+    if (raw.endpoints && typeof raw.endpoints === "object") {
+      for (const [id, state] of Object.entries(endpointStates)) {
+        restoreAggregateState(state, raw.endpoints[id], sampleKeep);
+      }
+    }
+    if (raw.instances && typeof raw.instances === "object") {
+      for (const [bucket, rows] of Object.entries(raw.instances)) {
+        const instMap = instanceBuckets[bucket];
+        if (instMap === undefined || !Array.isArray(rows)) continue;
+        for (const row of rows) {
+          if (!row || typeof row !== "object") continue;
+          // Only ids that survive their own sanitizer are trusted back in —
+          // the file is a sidecar, not a trusted channel.
+          if (sanitizeInstanceId(row.id) !== row.id) continue;
+          if (instMap.has(row.id)) continue;
+          const entry = {
+            state: createAggregateState(),
+            firstSeen: snapshotFinite(row.firstSeen) || nowFn(),
+            label: typeof row.label === "string" ? row.label : null,
+          };
+          restoreAggregateState(entry.state, row.state, sampleKeep);
+          instMap.set(row.id, entry);
+        }
+      }
+    }
+    // Liveness reconciliation is deliberately NOT repeated here: the first
+    // getAgentsStatus read already evicts rows whose owning PID is dead (the
+    // "<agentId>-<pid>" id-shape rule) and expires custom ids past the idle
+    // TTL — duplicating that verdict here would fork its logic.
+  }
+
+  restoreMetricsSnapshot();
+  const metricsSnapshotTimer = metricsSnapshotPath !== null
+    ? setInterval(() => maybePersistMetricsSnapshot(), metricsSnapshotEveryMs)
+    : null;
+  metricsSnapshotTimer?.unref?.();
+
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
@@ -1737,6 +1941,9 @@ export function createAgentMetricsCollector(options = {}) {
       ? { ...meta, instanceId: normalized.id }
       : meta;
     const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId);
+    // A request start already moved totalRequests/activeRequests: mark the
+    // snapshot dirty so a restart mid-turn still carries the start forward.
+    markMetricsDirty();
 
     // Per-instance mirror (multi-instance endpoints only): a tagged request
     // is tracked twice — once in the endpoint aggregate above, once in its
@@ -1758,6 +1965,7 @@ export function createAgentMetricsCollector(options = {}) {
       if (!entry) {
         entry = { state: createAggregateState(), firstSeen: nowFn(), label: null };
         instMap.set(instanceId, entry);
+        markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
       const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId);
@@ -1784,13 +1992,13 @@ export function createAgentMetricsCollector(options = {}) {
     if (normalized !== null) {
       bindInstance(normalized);
       return {
-        recordFirstChunk: (arg) => composed.recordFirstChunk?.(arg),
+        recordFirstChunk: (arg) => { markMetricsDirty(); return composed.recordFirstChunk?.(arg); },
         setCurrentMember: (arg) => composed.setCurrentMember?.(arg),
         setAttributeResolver: (arg) => composed.setAttributeResolver?.(arg),
         recordRetry: (arg) => composed.recordRetry?.(arg),
         noteKeepAliveRecovery: (arg) => composed.noteKeepAliveRecovery?.(arg),
         noteKeepAliveExhausted: (arg) => composed.noteKeepAliveExhausted?.(arg),
-        recordEnd: (arg) => composed.recordEnd?.(arg),
+        recordEnd: (arg) => { markMetricsDirty(); return composed.recordEnd?.(arg); },
         attachInstance,
       };
     }
@@ -1798,10 +2006,11 @@ export function createAgentMetricsCollector(options = {}) {
     let ended = false;
     const endOnce = (arg) => {
       ended = true;
+      markMetricsDirty();
       return composed.recordEnd?.(arg);
     };
     return {
-      recordFirstChunk: (arg) => composed.recordFirstChunk?.(arg),
+      recordFirstChunk: (arg) => { markMetricsDirty(); return composed.recordFirstChunk?.(arg); },
       setCurrentMember: (arg) => composed.setCurrentMember?.(arg),
       setAttributeResolver: (arg) => composed.setAttributeResolver?.(arg),
       recordRetry: (arg) => composed.recordRetry?.(arg),
@@ -2504,6 +2713,10 @@ export function createAgentMetricsCollector(options = {}) {
     // held inside ephemeral per-launch relay processes.
     getReportedChainRuntime: () => Array.from(reportedChainStates.values()),
     scanProcesses,
+    // Final flush for process-exit paths (graceful shutdown and the crash
+    // handler): the 30s debounce alone would drop the last segment of
+    // accounting exactly when a restart is about to need it.
+    persistMetricsSnapshot,
     setSparkWindowPoints: applySparkWindow,
     getSparkWindowPoints: () => sparkWindowPoints,
   };
