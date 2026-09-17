@@ -137,7 +137,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `late-socket-instance.mjs` — 一次性 relay（kimi/opencode/pi）中 socket 归属晚于请求开始时的实例补挂：把已开始的请求挂到后到的进程身份上。
 
 ### 观测·统计·会话
-- `agent-metrics.mjs` — 进程与请求观测采集器：扫描各家客户端进程、维护端点级与会话级实时状态、按 agentId 分桶，向面板下发看板所需的计数、折线样本与链归因；含实例 id 归一与迟到挂载重放。
+- `agent-metrics.mjs` — 进程与请求观测采集器：扫描各家客户端进程、维护端点级与会话级实时状态、按 agentId 分桶，向面板下发看板所需的计数、折线样本与链归因；含实例 id 归一与迟到挂载重放。累计量与样本窗跨进程重启持久化（`agent-metrics-snapshot.json`，30s 防抖 + 退出前冲刷）：relay 重启/换新后看板立即回到重启前的数据，不再出现整段空窗；在飞计数与故障闩锁属活状态，恢复时一律归零。
 - `model-stability.mjs` — 模型稳定性：8 小时滚动窗、10 分钟桶、按调用量取前 5，进程内存态＋可选 sidecar 持久化，供面板链灯与统计页判渠道健康。
 - `usage-journal.mjs` — 逐请求用量流水：数据根 `usage\` 下按日滚动的 JSONL（requests / sessions 两条流），90 天自清理。它是 relay 热路径的旁路——写失败只告警，绝不抛回调用方。
 - `usage-stats.mjs` — 在流水之上做聚合，产出使用统计页的状态。每次 `getState()` 现读且分段读取（热力图读它固定的 90 天，其余口径只读所选窗口），不设聚合缓存；各项口径的定义与红线见 `docs/stats-spec.md`。

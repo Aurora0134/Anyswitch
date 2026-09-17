@@ -1,6 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
@@ -12,6 +15,7 @@ import {
   windowCacheHitRate,
   windowTps,
   TTFT_THRESHOLDS,
+  METRICS_SNAPSHOT_FILENAME,
 } from "./agent-metrics.mjs";
 
 describe("getTtftColor", () => {
@@ -4116,5 +4120,129 @@ describe("persistent PowerShell probe transport", () => {
     const collector = testCollector({ spawnFn, execFn, nowFn: () => 3000 });
     const procs = await collector.scanProcesses();
     assert.equal(procs.zcode, 1, "超时轮必须落到 tasklist 兜底而不是挂死");
+  });
+});
+
+// Cross-restart display history. A relay restart used to zero every aggregate
+// and instance bucket, and the board showed zeros/empty cells until the next
+// request finished settling — a whole coding turn for kimi. The snapshot
+// carries cumulative accounting and the sample windows only; in-flight
+// counters and current-identity fields stay live-only.
+describe("metrics snapshot persistence across collector recreations", () => {
+  const chainExec = (cmd, opts, cb) => cb(null, WMIC_LINEAGE_CHAIN_SCAN);
+  const emptyScanExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n");
+
+  function snapshotDir() {
+    return mkdtempSync(join(tmpdir(), "anyswitch-metrics-snapshot-"));
+  }
+
+  it("restores endpoint accounting, sample windows and sticky identity", async () => {
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      const first = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      await first.scanProcesses();
+      const req = first.startRequest({ agentId: "kimi", model: "kimi-k3", providerId: "a6api-main" });
+      t += 1200;
+      req.recordFirstChunk();
+      t += 2000;
+      req.recordEnd({ usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } } });
+      assert.equal(first.persistMetricsSnapshot(), true, "flush writes the sidecar");
+      assert.ok(existsSync(join(dir, METRICS_SNAPSHOT_FILENAME)));
+
+      const second = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      const kimi = (await second.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimi.metrics.totalRequests, 1);
+      assert.equal(kimi.metrics.tokens.prompt, 1000);
+      assert.equal(kimi.metrics.tokens.completion, 50);
+      assert.equal(kimi.metrics.tokens.cached, 800);
+      assert.equal(kimi.metrics.cacheHitRate, 80); // 800 / 1000
+      assert.equal(kimi.metrics.lastTtftMs, 1200);
+      assert.equal(kimi.metrics.avgTtftMs, 1200);
+      assert.equal(kimi.metrics.tps, 25); // 50 tokens over the 2.0s generation window
+      assert.equal(kimi.lastModel, "kimi-k3");
+      assert.equal(kimi.lastProvider, "a6api-main");
+      // Live-only fields never come back: nothing is generating in this process.
+      assert.equal(kimi.metrics.activeRequests, 0);
+      assert.equal(kimi.currentModel, null);
+      assert.equal(kimi.status, "running"); // process scan still owns liveness
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("drops an in-flight request's live state while keeping its started accounting", async () => {
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      const first = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      await first.scanProcesses();
+      first.startRequest({ agentId: "kimi", instanceId: "kimi-4321", model: "kimi-k3", providerId: "a6api-main" });
+      assert.equal(first.persistMetricsSnapshot(), true);
+
+      const second = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      const kimi = (await second.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimi.metrics.totalRequests, 1, "the start crossed the restart");
+      assert.equal(kimi.metrics.activeRequests, 0, "a restored activeRequests would pin the 生成中 badge");
+      assert.equal(kimi.currentModel, null);
+      assert.equal(kimi.lastModel, "kimi-k3", "the sticky 最近 identity survives");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("restored instance rows survive only while their owning pid is alive", async () => {
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      const first = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      await first.scanProcesses(); // kimi client pid 4321 alive
+      const req = first.startRequest({ agentId: "kimi", instanceId: "kimi-4321", model: "m1" });
+      req.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 10 } });
+      assert.equal(first.persistMetricsSnapshot(), true);
+
+      const alive = testCollector({ execFn: chainExec, nowFn: () => t, persistRoot: dir });
+      const kimiAlive = (await alive.getAgentsStatus()).find((a) => a.id === "kimi");
+      const row = kimiAlive.instances.find((i) => i.id === "kimi-4321");
+      assert.ok(row, "a live pid keeps its restored row");
+      assert.equal(row.requests, 1);
+      assert.equal(row.tokens.prompt, 100);
+
+      const gone = testCollector({ execFn: emptyScanExec, nowFn: () => t, persistRoot: dir });
+      const kimiGone = (await gone.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.deepEqual(kimiGone.instances.map((i) => i.id), [],
+        "a dead pid evicts the restored row on the first read");
+      assert.equal(kimiGone.metrics.totalRequests, 1, "endpoint accounting is unaffected by instance liveness");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a corrupt sidecar loads as a clean start and is overwritten by the next flush", async () => {
+    const dir = snapshotDir();
+    try {
+      writeFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), "{ this is not json", "utf8");
+      const collector = testCollector({ execFn: chainExec, nowFn: () => 10_000, persistRoot: dir });
+      const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimi.metrics.totalRequests, 0);
+      assert.equal(collector.persistMetricsSnapshot(), true);
+      const written = JSON.parse(readFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), "utf8"));
+      assert.equal(written.version, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a collector without persistRoot keeps no sidecar at all", async () => {
+    const dir = snapshotDir();
+    try {
+      const collector = testCollector({ execFn: chainExec, nowFn: () => 10_000 });
+      const req = collector.startRequest({ agentId: "kimi", model: "m1" });
+      req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      assert.equal(collector.persistMetricsSnapshot(), false);
+      assert.deepEqual(readdirSync(dir), [], "no persistRoot means nothing is ever written");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

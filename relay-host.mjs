@@ -136,7 +136,14 @@ function redirectStderrToFile(logPath) {
     }
     return origWrite(chunk, encoding, callback);
   };
+  // Late-bound fatal hook: startResidentRelay installs the metrics flush once
+  // the collector exists. Registered here because this handler exits the
+  // process, so a second listener registered later would never run.
+  let onFatal = null;
   process.on("uncaughtException", (err) => {
+    // Flush the display-metric snapshot before exiting: the restart that
+    // follows this crash must come back with the board's history, not zeros.
+    try { onFatal?.(); } catch { /* the crash path must not throw twice */ }
     appendCrashLog(logPath, "uncaughtException", err?.stack ?? err);
     process.exit(1);
   });
@@ -147,13 +154,13 @@ function redirectStderrToFile(logPath) {
     // Synchronous faults above still exit.
     appendCrashLog(logPath, "unhandledRejection", reason?.stack ?? reason);
   });
-  return stream;
+  return (fn) => { onFatal = fn; };
 }
 
 export async function startResidentRelay(options = {}) {
   const logPath = join(__dirname, "logs", "relay-host.log");
   rotateLogIfNeeded(logPath);
-  redirectStderrToFile(logPath);
+  const setFatalHook = redirectStderrToFile(logPath);
   const logger = createLogger({ sink: (line) => process.stderr.write(line) });
   try {
     logGitAnchorResult(logger, ensureGitAnchor(__dirname));
@@ -162,6 +169,10 @@ export async function startResidentRelay(options = {}) {
   }
 
   const deps = createResidentDeps({ ...options, logger });
+  // Crash-path flush for the display-metric snapshot (see agent-metrics'
+  // METRICS_SNAPSHOT_* block): wired after the collector exists, before any
+  // request can be served.
+  setFatalHook(() => deps.metricsCollector?.persistMetricsSnapshot?.());
 
   // Preflight: refuse to listen if the store is unusable.
   const probe = deps.loadStore();
@@ -229,6 +240,9 @@ export async function startResidentRelay(options = {}) {
   // the pid file so relay-process-manager sees "stopped" and can start cleanly.
   const shutdown = async (signal) => {
     logger.info(`${signal} received, shutting down`);
+    // Final snapshot flush: the next relay (restart, login respawn) restores
+    // the board's metric history from this file instead of starting at zero.
+    try { deps.metricsCollector?.persistMetricsSnapshot?.(); } catch { /* shutdown must not fail on the sidecar */ }
     storeWatcher.close();
     clearPid();
     try {
