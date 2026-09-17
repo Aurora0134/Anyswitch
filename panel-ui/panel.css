@@ -617,19 +617,46 @@
     border: 1px solid var(--border);
   }
 
-  /* 抗截断：总开关 + 各端点图标开关（图标复用看板卡片头像，亮=启用、暗=停用） */
-  .keepalive-controls { display: flex; align-items: center; gap: 12px; flex-shrink: 0; align-self: flex-start; }
-  .keepalive-eps { display: flex; align-items: center; gap: 6px; transition: opacity 140ms var(--ease-out); }
-  .keepalive-eps.master-off { opacity: 0.45; }
+  /* 抗截断：同构 ccswitch skill 管理（AppToggleGroup）——总开关滑块 + 各端点统一
+     28px 圆角方钮。启用=品牌色淡底(16%)+同色相细描边(45%)，色值取「会话管理」圆点
+     同一套 --ep-*。图标是各家自带底衬的头像，与外圈品牌色未必同色，实心铺满会把
+     图标框成「镶边」（ccswitch 在 28px 档同样只用 10% 底 + 20% 环，颜色重量交给
+     图标本体），故用量止于淡底+描边；pi 白/zcode 黑在某一侧底色上隐形，描边改
+     --ep-ring 立边，同圆点先例。停用=35% 透明、悬停回 70%。不用灰度滤镜——灰度
+     读作「端点坏了」，启停只靠「有色底 vs 淡化」这一个视觉通道。总开关 off 时整排
+     图标收起（hidden），关态由描述文案说明（偏好保留、重开生效）。 */
+  .keepalive-controls { display: flex; align-items: center; gap: 14px; flex-shrink: 0; align-self: flex-start; }
+  .keepalive-eps { display: flex; align-items: center; gap: 9px; }
+  /* hidden 收起：UA 的 [hidden]{display:none} 打不过上面的 display:flex，显式兜底 */
+  .keepalive-eps[hidden] { display: none; }
   .keepalive-ep {
-    appearance: none; border: 0; background: transparent; padding: 0; cursor: pointer;
-    line-height: 0; border-radius: var(--radius-md, 8px);
-    transition: opacity 140ms var(--ease-out), filter 140ms var(--ease-out);
+    /* --ep-color 由构建脚本按端点指到 --ep-*；缺省中性灰兜底，启用态不至于消失 */
+    --ep-color: var(--text-3);
+    appearance: none; padding: 0; cursor: pointer;
+    width: 28px; height: 28px; border-radius: var(--radius-md, 8px);
+    background: transparent; border: 1px solid transparent;
+    display: flex; align-items: center; justify-content: center;
+    transition: opacity 140ms var(--ease-out), background 140ms var(--ease-out), border-color 140ms var(--ease-out);
   }
-  .keepalive-ep:hover { filter: brightness(1.08); }
+  .keepalive-ep:hover { background: var(--surface-hover); }
   .keepalive-ep:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .keepalive-ep.ep-off { opacity: 0.35; filter: grayscale(0.9); }
-  .keepalive-ep.ep-off:hover { filter: grayscale(0.9) brightness(1.08); }
+  /* 图标归一化：克隆看板上的整个 .agent-avatar（各家自带底衬——dsh 黑鲸鱼的白底、
+     qoder/codex 的 32px 白底方块都是内联样式，剥掉会黑字压色底/溢出方钮），
+     在 20px 槽位里等比缩 0.625 倍——观感与看板逐像素同构。flex:none 防布局收缩，
+     只用 transform 缩视觉，布局盒仍是 32px、由槽位 flex 居中。 */
+  .keepalive-ep-icon { width: 20px; height: 20px; flex: none; display: flex; align-items: center; justify-content: center; line-height: 0; }
+  .keepalive-ep-icon .agent-avatar { flex: none; transform: scale(0.625); transform-origin: center; }
+  .keepalive-ep[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--ep-color) 16%, transparent);
+    border-color: color-mix(in srgb, var(--ep-color) 45%, transparent);
+  }
+  .keepalive-ep[aria-pressed="true"].keepalive-ep--ringed { border-color: var(--ep-ring); }
+  /* 悬停加深淡底（同 ccswitch 的 hover 转向更重的档位），描边不动 */
+  .keepalive-ep[aria-pressed="true"]:hover {
+    background: color-mix(in srgb, var(--ep-color) 24%, transparent);
+  }
+  .keepalive-ep[aria-pressed="false"] { opacity: 0.35; }
+  .keepalive-ep[aria-pressed="false"]:hover { opacity: 0.7; }
   .keepalive-eps[aria-busy="true"] .keepalive-ep { pointer-events: none; }
 
   /* 浮动 Toast */

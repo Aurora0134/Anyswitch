@@ -1898,7 +1898,7 @@ async function api(method, path, body) {
       return Math.min(MAX_KEEPALIVE_RETRIES, parsed);
     }
     const KEEP_ALIVE_COPY = {
-      off: { title: "抗截断", desc: "不做防截断处理，输出即时。", toast: "已停用抗截断" },
+      off: { title: "抗截断", desc: "不做防截断处理，输出即时；各端点偏好保留，重新开启后生效。", toast: "已停用抗截断" },
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
@@ -1908,18 +1908,24 @@ async function api(method, path, body) {
     // 总开关时天然是全端点亮起，无需初始化写入。
     let keepAliveMode = "enhanced";
     let keepAliveEndpoints = {};
+    // 需要描边环托底的端点（pi 的白、zcode 的黑在某一侧底色上隐形）——与会话管理
+    // 圆点的 SESS_EP_RINGED 同一判据，见面板调色 --ep-ring 说明
+    const KEEP_ALIVE_EP_RINGED = new Set(["pi", "zcode"]);
     function keepAliveEndpointOn(agentId) {
       return keepAliveEndpoints[agentId]?.enabled !== false;
     }
+    // 启停只由 aria-pressed 一个视觉通道驱动：启用=品牌色淡底+同色相描边（色值与
+    // 「会话管理」圆点同套的 --ep-*；头像自带底衬与品牌色未必同色，实心铺满会把图标
+    // 框成「镶边」，故止于淡底+描边），停用=35% 透明；pi 白/zcode 黑会隐形的两例由
+    // --ep-ring 描边立边（同会话圆点前例），不用灰度滤镜。总开关 off 时整排图标收起
+    // ——偏好仍在服务端，重开即按原样亮回。
     function applyKeepAliveEndpointsUi() {
       if (!keepAliveEndpointsWrap) return;
-      keepAliveEndpointsWrap.classList.toggle("master-off", keepAliveMode === "off");
       for (const btn of keepAliveEndpointsWrap.querySelectorAll(".keepalive-ep")) {
         const agentId = btn.dataset.agentId;
         const on = keepAliveEndpointOn(agentId);
-        btn.classList.toggle("ep-off", !on);
         btn.setAttribute("aria-pressed", on ? "true" : "false");
-        const label = `${statsEndpointLabel(agentId)}：抗截断${on ? "已启用，点击停用" : "已停用，点击启用"}`;
+        const label = `${statsEndpointLabel(agentId)}：${on ? "已启用 ✓，点击停用" : "已停用，点击启用"}`;
         btn.title = label;
         btn.setAttribute("aria-label", label);
       }
@@ -1932,10 +1938,13 @@ async function api(method, path, body) {
       if (keepAliveTitle) keepAliveTitle.textContent = copy.title;
       if (keepAliveDesc) keepAliveDesc.textContent = copy.desc;
       applyKeepAliveEndpointsUi();
+      if (keepAliveEndpointsWrap) keepAliveEndpointsWrap.hidden = m === "off";
       return m;
     }
-    // 图标照搬看板卡片的 .agent-avatar 子树（含各家微调内联样式），cloneNode
-    // 原样保留；点击监听直接挂在按钮上，亮暗只由 aria-pressed/ep-off 驱动。
+    // 图标归一化：克隆看板头像整体（含各家底衬/描边/圆角——dsh 黑鲸鱼靠白底衬可辨、
+    // qoder 与 codex 是 32px 内联白底方块，只取字形会糊掉或溢出方钮），由
+    // .keepalive-ep-icon 等比缩放统一尺寸；品牌色经 --ep-color 指到 --ep-* token，
+    // 启用态底衬/描边由它派生。点击监听直接挂在按钮上。
     function buildKeepAliveEndpoints() {
       if (!keepAliveEndpointsWrap || keepAliveEndpointsWrap.childElementCount > 0) return;
       const board = document.querySelector(".agent-cards-container");
@@ -1944,9 +1953,15 @@ async function api(method, path, body) {
         btn.type = "button";
         btn.className = "keepalive-ep";
         btn.dataset.agentId = agentId;
+        btn.style.setProperty("--ep-color", `var(--ep-${agentId})`);
+        if (KEEP_ALIVE_EP_RINGED.has(agentId)) btn.classList.add("keepalive-ep--ringed");
         const avatar = board?.querySelector(`.panel-card[data-agent-id="${agentId}"] .agent-avatar`);
-        if (avatar) btn.appendChild(avatar.cloneNode(true));
-        else btn.textContent = statsEndpointLabel(agentId);
+        if (avatar) {
+          const iconWrap = document.createElement("span");
+          iconWrap.className = "keepalive-ep-icon";
+          iconWrap.appendChild(avatar.cloneNode(true));
+          btn.appendChild(iconWrap);
+        } else btn.textContent = statsEndpointLabel(agentId);
         btn.addEventListener("click", () => persistKeepAliveEndpoint(agentId));
         keepAliveEndpointsWrap.appendChild(btn);
       }
