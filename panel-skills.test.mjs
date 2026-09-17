@@ -363,30 +363,39 @@ describe("panel router skills routes", () => {
 });
 
 // ── panel.html 变动差分高亮（diffSkillsState）──
-// 沿用 panel.test.mjs 的 new Function 提取范式：把差分函数从内嵌脚本里抠出来单测——
-// 它是纯状态对比，不碰 DOM 也不碰后端。
+// 沿用 panel.test.mjs 的 new Function 提取范式：把差分函数从主脚本里抠出来单测——
+// 它是纯状态对比，不碰 DOM 也不碰后端。函数实现已拆到 panel.js，
+// cascade/入场动画的 CSS 契约在 panel.css，按钮 DOM 在 panel.html。
 describe("panel.html skills change diff highlighting", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8"
   );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8"
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8"
+  );
 
   // 顶层函数闭合花括号恒为 2 空格缩进、内部块更深，非贪婪匹配到首个 "\n  }" 即函数边界。
   function extractFn(name, params) {
-    const m = panelHtml.match(
+    const m = panelJs.match(
       new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
     );
-    assert.ok(m, `panel.html must contain function ${name}`);
+    assert.ok(m, `panel.js must contain function ${name}`);
     return m[0];
   }
 
   const deployedSrc = extractFn("deployedEndpointsFor", "skill, state = skillsState");
   const diffFnSrc = extractFn("diffSkillsState", "prev, next");
   // 标记变量声明块（flashNew / flashCount 两个 let）
-  const marksSrc = panelHtml.match(
+  const marksSrc = panelJs.match(
     /let skillsFlashNew = new Set\(\);\s*\n\s*let skillsFlashCount = false;/
   );
-  assert.ok(marksSrc, "panel.html must contain the skills flash-mark block");
+  assert.ok(marksSrc, "panel.js must contain the skills flash-mark block");
 
   const harness = new Function(`
     let skillsState = null;
@@ -463,15 +472,15 @@ describe("panel.html skills change diff highlighting", () => {
     assert.doesNotMatch(renderList, /skillsFlashChanged|row-changed/);
     assert.match(renderList, /badge-flash/);
     // 手动刷新走带反馈的包装：按钮禁用（吃 .btn:disabled 变暗）+ 整列 cascade + 串行动画时长
-    assert.match(panelHtml, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
-    assert.match(panelHtml, /setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)/);
+    assert.match(panelJs, /\$\("skillsRefreshBtn"\)\.onclick = runSkillsRefreshWithFeedback/);
+    assert.match(panelJs, /setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)/);
   });
 
   it("manual refresh dims the button until the cascade finishes, not for a fixed floor", () => {
     const fn = extractFn("runSkillsRefreshWithFeedback", "");
     // 旋转整套撤下：变暗交回 .btn:disabled 的 45%，与看板「重启」键同源；
     // 按钮内的圆弧箭头图标一并删除，只留「刷新」二字
-    assert.doesNotMatch(panelHtml, /skillsRefreshSpin|#skillsRefreshBtn\.busy|skills-refresh-ico/);
+    assert.doesNotMatch(panelJs, /skillsRefreshSpin|#skillsRefreshBtn\.busy|skills-refresh-ico/);
     assert.match(panelHtml, /<button class="btn" id="skillsRefreshBtn" title="[^"]*">刷新<\/button>/);
     // 串行而非 Promise.all 取最大值：cascade 在数据落地那次渲染才起跑，
     // 从点击起算会让按钮亮起早于动画收尾一个请求耗时
@@ -514,14 +523,14 @@ describe("panel.html skills change diff highlighting", () => {
   it("cascade animates only the rows in view and pins the total to 320ms", () => {
     // CSS 侧契约：backwards 填充（延迟期间锁 0% 帧，否则行会先全亮再逐个消失）
     // + clip-path 自上而下揭开 + translateX 横向落位 + 步长走 --csc-step
-    assert.match(panelHtml, /\.skills-list\.is-blank \{ visibility: hidden; \}/);
-    assert.match(panelHtml, /animation: skillsRowEnter 150ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
-    assert.match(panelHtml, /@keyframes skillsRowEnter \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
-    assert.doesNotMatch(panelHtml, /skillsRowCascade/);
+    assert.match(panelCss, /\.skills-list\.is-blank \{ visibility: hidden; \}/);
+    assert.match(panelCss, /animation: skillsRowEnter 150ms var\(--ease-out\) backwards;\s*\n\s*animation-delay: calc\(var\(--i\) \* var\(--csc-step/);
+    assert.match(panelCss, /@keyframes skillsRowEnter \{\s*\n\s*from \{ clip-path: inset\(0 0 100% 0\); transform: translateX\(-6px\); \}\s*\n\s*to \{ clip-path: inset\(0 0 0 0\); transform: translateX\(0\); \}/);
+    assert.doesNotMatch(panelCss, /skillsRowCascade/);
 
-    const totalSrc = panelHtml.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
-    const rowSrc = panelHtml.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
-    assert.ok(totalSrc && rowSrc, "panel.html must declare the cascade timing constants");
+    const totalSrc = panelJs.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
+    const rowSrc = panelJs.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
+    assert.ok(totalSrc && rowSrc, "panel.js must declare the cascade timing constants");
     const h = new Function(`
       ${totalSrc[0]}
       ${rowSrc[0]}
@@ -567,8 +576,8 @@ describe("panel.html skills change diff highlighting", () => {
   });
 
   it("cascade anchors to the visible window and keeps --i window-local when scrolled off-top", () => {
-    const totalSrc = panelHtml.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
-    const rowSrc = panelHtml.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
+    const totalSrc = panelJs.match(/const SKILLS_CASCADE_TOTAL_MS = \d+;/);
+    const rowSrc = panelJs.match(/const SKILLS_CASCADE_ROW_MS = \d+;/);
     const h = new Function(`
       ${totalSrc[0]}
       ${rowSrc[0]}
@@ -662,8 +671,8 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(center, /listEl\.scrollTop = Math\.max\(0, top - \(listEl\.clientHeight - row\.offsetHeight\) \/ 2\)/);
 
     // 入场与 row-new 并存：不同属性用逗号并列，否则同特异性的 animation 简写会整条互覆
-    assert.match(panelHtml, /\.skills-list-row\.row-reveal \{ animation: skillsRowEnter 600ms var\(--ease-out\) backwards; \}/);
-    assert.match(panelHtml, /\.skills-list-row\.row-new\.row-reveal \{\s*\n\s*animation: skillsRowEnter 600ms var\(--ease-out\) backwards, skillsRowNew 2s var\(--ease-out\);/);
+    assert.match(panelCss, /\.skills-list-row\.row-reveal \{ animation: skillsRowEnter 600ms var\(--ease-out\) backwards; \}/);
+    assert.match(panelCss, /\.skills-list-row\.row-new\.row-reveal \{\s*\n\s*animation: skillsRowEnter 600ms var\(--ease-out\) backwards, skillsRowNew 2s var\(--ease-out\);/);
   });
 
   it("delete dissolves the row first, then FLIPs the gap closed", () => {

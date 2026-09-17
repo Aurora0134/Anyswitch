@@ -1,14 +1,14 @@
 # 面板美术风格重构 · 风格片段契约（常驻主题机制）
 
-目标：`../panel.html` 单文件（CSS / DOM / JS 三段）现有 5 套可切换面板主题（经典 + 4 套风格片段）。
+目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 5 套可切换面板主题（经典 + 4 套风格片段）。
 **布局、DOM 结构、文案、既有注释一律不动**；只换皮肤。
 
-主题已转正为常驻设置：片段以内嵌 CSS 块形式存于 panel.html（每块带 `/* ===== style-lab: SLUG ===== */`
-横幅注释），本目录的 `SLUG.css` 是**源文件**——改动片段后必须把最新内容同步嵌入 panel.html 对应块。
+主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
+横幅注释），本目录的 `SLUG.css` 是**源文件**——改动片段后必须把最新内容同步嵌入 panel.css 对应块。
 
-同步由仓库根目录 `style-lab-sync.test.mjs`（node:test，随全量测试一起跑）强制校验：解析 panel.html 的
+同步由仓库根目录 `style-lab-sync.test.mjs`（node:test，随全量测试一起跑）强制校验：解析 panel.css 的
 横幅块与对应 `SLUG.css` 归一化行尾（CRLF/LF）后逐字比对，漂移即红。
-若发现两侧漂移：以现行生效的一侧为准回写另一侧（panel.html 内嵌块是实际加载的样式，
+若发现两侧漂移：以现行生效的一侧为准回写另一侧（panel.css 内嵌块是实际加载的样式，
 通常是内嵌块领先、源文件落后，把内嵌块内容回写进 `SLUG.css`），不许只改一侧留漂移。
 
 ## 切换机制（集成方实现，片段作者只需了解）
@@ -40,7 +40,7 @@
 
 ## 必须定义齐全的 token（亮色一套、暗色一套，语义不变只换值）
 
-既有 token（panel.html 9–145 行有当前经典值可作基准）：
+既有 token（panel.css 开头「基座 token」段有当前经典值可作基准）：
 `--font-sans --font-mono --ease-out`
 `--bg --bg-page --surface --surface-sunken --surface-hover --surface-glass`
 `--text --text-2 --text-3 --text-4`
@@ -69,6 +69,6 @@
 
 ## 参考
 
-- 选择器清单与组件分区：读 `../panel.html` 8–817 行（分区注释齐全：header/卡片/徽章/按钮/日志控制台/遥测四宫格/toggle/seg-control/toast/modal/Skills 视图全套）。
-- 想确认 DOM 结构再读 819–1802 行对应段落，不要通读全文。
-- 产出：`panel-ui/style-lab/SLUG.css` 源文件 + 同步嵌入 `panel.html` 的对应主题块。
+- 选择器清单与组件分区：读 `../panel.css` 开头至 style-lab 横幅块之前的段落（分区注释齐全：header/卡片/徽章/按钮/日志控制台/遥测四宫格/toggle/seg-control/toast/modal/Skills 视图全套）。
+- 想确认 DOM 结构再读 `../panel.html` 对应段落，不要通读全文。
+- 产出：`panel-ui/style-lab/SLUG.css` 源文件 + 同步嵌入 `panel.css` 的对应主题块。
