@@ -2306,6 +2306,71 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
+  it("抗截断开关同构 ccswitch skill 管理：品牌色淡底方钮 + 总开关关时收起图标", () => {
+    // ── DOM：控件只剩图标组 + 总开关（计数徽标已移除）──
+    const controls = panelHtml.slice(
+      panelHtml.indexOf('class="keepalive-controls"'),
+      panelHtml.indexOf('id="keepAliveToggle"'),
+    );
+    assert.ok(controls.includes('id="keepAliveEndpoints"'), "端点图标组存在");
+    assert.ok(!panelHtml.includes("keepAliveCount") && !panelHtml.includes("keepalive-count"),
+      "计数徽标已移除（DOM 与样式名都不再出现）");
+
+    // ── CSS：只扫抗截断段（段内负向断言防空转）──
+    const kaCss = panelCss.slice(
+      panelCss.indexOf(".keepalive-controls"),
+      panelCss.indexOf("/* 浮动 Toast"),
+    );
+    assert.ok(kaCss.length > 100, "取到抗截断 CSS 段");
+    assert.ok(/\.keepalive-ep \{[\s\S]*?width: 28px; height: 28px/.test(kaCss), "端点按钮统一 28px 方钮");
+    assert.ok(kaCss.includes(".keepalive-eps { display: flex; align-items: center; gap: 9px; }"),
+      "端点图标间隔 9px");
+    assert.ok(kaCss.includes(".keepalive-eps[hidden] { display: none; }"),
+      "hidden 收起有显式兜底（否则被同元素的 display:flex 覆盖）");
+    assert.ok(/\.keepalive-ep-icon \{[\s\S]*?width: 20px; height: 20px/.test(kaCss)
+      && kaCss.includes(".keepalive-ep-icon .agent-avatar { flex: none; transform: scale(0.625); transform-origin: center; }"),
+      "图标=克隆整头像等比缩 0.625（保留各家自带底衬）");
+    assert.ok(!kaCss.includes(".keepalive-ep-icon > *"), "不再强制子元素撑满（会压糊/溢出内联尺寸头像）");
+    // 启用态=品牌色淡底+同色相细描边（纯品牌色，不掺灰；色值同会话管理圆点）
+    assert.ok(/\.keepalive-ep\[aria-pressed="true"\] \{[\s\S]*?background: color-mix\(in srgb, var\(--ep-color\) 16%, transparent\);[\s\S]*?border-color: color-mix\(in srgb, var\(--ep-color\) 45%, transparent\);/.test(kaCss),
+      "启用态=品牌色 16% 淡底 + 45% 同色相描边");
+    assert.ok(/\.keepalive-ep\[aria-pressed="true"\]:hover \{[\s\S]*?background: color-mix\(in srgb, var\(--ep-color\) 24%, transparent\);/.test(kaCss),
+      "悬停加深淡底到 24%");
+    assert.ok(!kaCss.includes("background: var(--ep-color);"),
+      "不再有实心品牌色铺满（图标自带底衬会被框成镶边）");
+    assert.ok(kaCss.includes('.keepalive-ep[aria-pressed="true"].keepalive-ep--ringed { border-color: var(--ep-ring); }'),
+      "pi 白/zcode 黑由 --ep-ring 描边立边（同会话圆点）");
+    assert.ok(kaCss.includes('.keepalive-ep[aria-pressed="false"] { opacity: 0.35; }')
+      && kaCss.includes('.keepalive-ep[aria-pressed="false"]:hover { opacity: 0.7; }'),
+      "停用态=35% 透明、悬停回 70%");
+    for (const dead of ["grayscale", "brightness", "master-off", "ep-off", "keepalive-count"]) {
+      assert.ok(!kaCss.includes(dead), `抗截断段不再使用 ${dead}`);
+    }
+
+    // ── JS：整头像克隆 + ringed 判据 + 总开关关时收起 ──
+    assert.ok(panelJs.includes('setProperty("--ep-color"'), "按钮注入 --ep-color 品牌色指针");
+    const build = panelJs.match(/function buildKeepAliveEndpoints\(\) \{([\s\S]*?)\n    \}/);
+    assert.ok(build, "buildKeepAliveEndpoints found");
+    assert.ok(build[1].includes('querySelector(`.panel-card[data-agent-id="${agentId}"] .agent-avatar`)')
+      && build[1].includes("iconWrap.appendChild(avatar.cloneNode(true))"),
+      "克隆看板整头像（含底衬/圆角），不再只取字形");
+    assert.ok(!build[1].includes("firstElementChild"), "不再剥掉头像容器的内联底衬");
+    assert.ok(build[1].includes("KEEP_ALIVE_EP_RINGED.has(agentId)")
+      && build[1].includes("keepalive-ep--ringed"), "pi/zcode 加 ringed 类");
+    assert.ok(panelJs.includes('const KEEP_ALIVE_EP_RINGED = new Set(["pi", "zcode"]);'),
+      "ringed 判据与会话管理 SESS_EP_RINGED 同一集合");
+    assert.ok(!panelJs.includes("applyKeepAliveCountUi") && !panelJs.includes("persistKeepAliveEndpointsAll"),
+      "计数徽标的渲染与批量写入逻辑已整体移除");
+    const applyUi = panelJs.match(/function applyKeepAliveUi\(mode\) \{([\s\S]*?)\n    \}/);
+    assert.ok(applyUi, "applyKeepAliveUi found");
+    assert.ok(applyUi[1].includes('keepAliveEndpointsWrap.hidden = m === "off"'),
+      "总开关 off 时收起整排端点图标");
+    assert.ok(panelJs.includes("已启用 ✓，点击停用"), "tooltip 带 ✓ 状态词");
+    assert.ok(panelJs.includes("各端点偏好保留，重新开启后生效"), "关态文案说明偏好保留");
+    assert.ok(!panelJs.includes("master-off") && !panelJs.includes("ep-off"),
+      "JS 不再驱动 master-off / ep-off");
+  });
+
   it("设置专用头行：左侧「←」图标钮（无文字）+「设置」标题，右侧亮暗钮与主头行同源", () => {
     assert.ok(/<div class="layout-container head-inner" id="mainHeadInner">/.test(panelHtml),
       "主头行有 mainHeadInner 锚点");
