@@ -61,6 +61,21 @@ function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector }
   });
 }
 
+// 拆分后的面板源码：panel.html（DOM + 两个内联启动脚本）、panel.css（主样式 + 开屏样式
+// + style-lab 主题块）、panel.js（原 body 末主脚本）。源码扫描断言按对象选文件。
+const panelHtml = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  "utf8",
+);
+const panelCss = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+  "utf8",
+);
+const panelJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+  "utf8",
+);
+
 describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/ingest republishes a forwarded entry through the logger bus", async () => {
     const entries = [];
@@ -913,6 +928,11 @@ describe("panel.html opencode endpoint card", () => {
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
+  // 卡片 DOM 在 panel.html，绑定与渲染逻辑已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
 
   it("declares an opencode panel card with its own id prefix", () => {
     assert.ok(panelHtml.includes('data-agent-id="opencode"'), "opencode card container exists");
@@ -936,17 +956,17 @@ describe("panel.html opencode endpoint card", () => {
   });
 
   it("wires opencode into the card order, refreshAgents and renderOpencode", () => {
-    assert.ok(panelHtml.includes('"opencode"'), "opencode appears in AGENT_CARD_ORDER");
-    const orderMatch = panelHtml.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    assert.ok(panelJs.includes('"opencode"'), "opencode appears in AGENT_CARD_ORDER");
+    const orderMatch = panelJs.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
     assert.ok(orderMatch, "AGENT_CARD_ORDER literal found");
     assert.ok(orderMatch[1].includes('"opencode"'), "AGENT_CARD_ORDER contains opencode");
-    assert.ok(panelHtml.includes('a.id === "opencode"'), "refreshAgents looks up the opencode agent");
-    assert.ok(panelHtml.includes("renderOpencode(opencode)"), "refreshAgents calls renderOpencode");
-    assert.ok(panelHtml.includes("function renderOpencode(p)"), "renderOpencode is defined");
+    assert.ok(panelJs.includes('a.id === "opencode"'), "refreshAgents looks up the opencode agent");
+    assert.ok(panelJs.includes("renderOpencode(opencode)"), "refreshAgents calls renderOpencode");
+    assert.ok(panelJs.includes("function renderOpencode(p)"), "renderOpencode is defined");
   });
 
   it("keeps the stop-relay display name for opencode", () => {
-    assert.ok(panelHtml.includes('opencode: "OpenCode"'), "lifecycle modal label map covers opencode");
+    assert.ok(panelJs.includes('opencode: "OpenCode"'), "lifecycle modal label map covers opencode");
   });
 
   it("inline scripts stay syntactically valid JavaScript", () => {
@@ -963,6 +983,11 @@ describe("panel.html opencode endpoint card", () => {
 describe("panel.html qoder endpoint card", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 卡片 DOM 在 panel.html，绑定与渲染逻辑已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -992,17 +1017,17 @@ describe("panel.html qoder endpoint card", () => {
   });
 
   it("wires qoder into the card order, refreshAgents and renderQoder", () => {
-    const orderMatch = panelHtml.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    const orderMatch = panelJs.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
     assert.ok(orderMatch, "AGENT_CARD_ORDER literal found");
     assert.ok(orderMatch[1].includes('"qoder"'), "AGENT_CARD_ORDER contains qoder");
-    assert.ok(panelHtml.includes('a.id === "qoder"'), "refreshAgents looks up the qoder agent");
-    assert.ok(panelHtml.includes("renderQoder(qoder)"), "refreshAgents calls renderQoder");
-    assert.ok(panelHtml.includes("function renderQoder(p)"), "renderQoder is defined");
+    assert.ok(panelJs.includes('a.id === "qoder"'), "refreshAgents looks up the qoder agent");
+    assert.ok(panelJs.includes("renderQoder(qoder)"), "refreshAgents calls renderQoder");
+    assert.ok(panelJs.includes("function renderQoder(p)"), "renderQoder is defined");
   });
 
   it("keeps the stop-relay display name and stats label for qoder", () => {
-    assert.ok(panelHtml.includes('qoder: "Qoder"'), "lifecycle modal label map covers qoder");
-    const statsMatch = panelHtml.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
+    assert.ok(panelJs.includes('qoder: "Qoder"'), "lifecycle modal label map covers qoder");
+    const statsMatch = panelJs.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
     assert.ok(statsMatch, "STATS_ENDPOINT_LABELS literal found");
     assert.ok(statsMatch[0].includes('qoder: "Qoder"'), "STATS_ENDPOINT_LABELS covers qoder");
   });
@@ -1011,6 +1036,11 @@ describe("panel.html qoder endpoint card", () => {
 describe("panel.html codex endpoint card", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 卡片 DOM 在 panel.html，绑定与渲染逻辑已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -1036,34 +1066,34 @@ describe("panel.html codex endpoint card", () => {
   });
 
   it("wires codex into the card order, refreshAgents and renderCodex", () => {
-    const orderMatch = panelHtml.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
+    const orderMatch = panelJs.match(/AGENT_CARD_ORDER\s*=\s*\[([^\]]+)\]/);
     assert.ok(orderMatch, "AGENT_CARD_ORDER literal found");
     assert.ok(orderMatch[1].includes('"codex"'), "AGENT_CARD_ORDER contains codex");
-    assert.ok(panelHtml.includes('a.id === "codex"'), "refreshAgents looks up the codex agent");
-    assert.ok(panelHtml.includes("renderCodex(codex)"), "refreshAgents calls renderCodex");
-    assert.ok(panelHtml.includes("function renderCodex(p)"), "renderCodex is defined");
+    assert.ok(panelJs.includes('a.id === "codex"'), "refreshAgents looks up the codex agent");
+    assert.ok(panelJs.includes("renderCodex(codex)"), "refreshAgents calls renderCodex");
+    assert.ok(panelJs.includes("function renderCodex(p)"), "renderCodex is defined");
   });
 
   it("renders codex as a multi-instance card like pi (instance rows + delegated fold, no legacy wiring)", () => {
     assert.ok(panelHtml.includes('class="agent-detail-fold" data-prefix="codex"'), "fold button uses data-prefix delegation");
-    const m = panelHtml.match(/function renderCodex\(p\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "renderCodex found in panel.html");
+    const m = panelJs.match(/function renderCodex\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderCodex found in panel.js");
     assert.ok(m[0].includes('renderInstanceRows({ prefix: "codex"'), "renders instance rows");
     assert.ok(m[0].includes('setInstanceCount("codex", instances.length)'), "drives the instance-count badge");
     assert.ok(m[0].includes('applyDetailFold("codex")'), "applies the delegated fold state");
     assert.ok(m[0].includes('gateAggregateRow("codex", $("codexSessionRow"), instances.length)'), "gates the aggregate row on instance count");
     assert.ok(m[0].includes("buildAggregateFallback(m, p, isGenerating)"), "zero-instance aggregate fallback row");
     assert.ok(!m[0].includes("redrawEndpointSparklines"), "no legacy endpoint-level sparkline path");
-    assert.ok(!panelHtml.includes("codexTelemetryGrid"), "no endpoint-level telemetry grid");
-    const keys = panelHtml.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
+    assert.ok(!panelJs.includes("codexTelemetryGrid"), "no endpoint-level telemetry grid");
+    const keys = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
     assert.ok(keys && !keys[0].includes("codex"), "ENDPOINT_SPARK_KEYS stays legacy-only (no codex)");
-    const legacyFold = panelHtml.match(/\["zc", "dsh", "qoder"\]\.forEach/);
+    const legacyFold = panelJs.match(/\["zc", "dsh", "qoder"\]\.forEach/);
     assert.ok(legacyFold, "legacy id-wired fold list unchanged (codex not in it)");
   });
 
   it("keeps the stop-relay display name and stats label for codex", () => {
-    assert.ok(panelHtml.includes('codex: "Codex"'), "lifecycle modal label map covers codex");
-    const statsMatch = panelHtml.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
+    assert.ok(panelJs.includes('codex: "Codex"'), "lifecycle modal label map covers codex");
+    const statsMatch = panelJs.match(/STATS_ENDPOINT_LABELS\s*=\s*\{[\s\S]*?\n  \}/);
     assert.ok(statsMatch, "STATS_ENDPOINT_LABELS literal found");
     assert.ok(statsMatch[0].includes('codex: "Codex"'), "STATS_ENDPOINT_LABELS covers codex");
   });
@@ -1086,6 +1116,11 @@ describe("panel.html codex endpoint card", () => {
 describe("panel.html stats tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 视图容器与 id 在 panel.html，tab 机制与图表函数已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -1118,7 +1153,10 @@ describe("panel.html stats tab", () => {
     assert.ok(!panelHtml.includes("statsCacheChart"), "cache hit-rate card removed");
     assert.ok(!panelHtml.includes("statsCacheBars"), "cache by-channel bars removed");
     assert.ok(!panelHtml.includes("statsStability"), "stability card removed");
-    assert.ok(!panelHtml.includes(".stats-stab-"), "stability card CSS removed");
+    // 负向断言覆盖全部三个文件：CSS 规则与脚本都可能让移除的卡复活
+    for (const src of [panelHtml, panelJs, panelCss]) {
+      assert.ok(!src.includes(".stats-stab-"), "stability card CSS removed");
+    }
   });
 
   it("stats-quad 网格两列各一卡：左列 TTFT、右列 TPS 并排", () => {
@@ -1133,8 +1171,8 @@ describe("panel.html stats tab", () => {
   });
 
   it("extends switchView to four views without changing board/skills/store behavior", () => {
-    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "switchView found");
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
     const body = m[1];
     assert.ok(body.includes('name === "board"'), "board branch preserved");
     assert.ok(body.includes('name === "store"'), "store branch preserved");
@@ -1147,8 +1185,8 @@ describe("panel.html stats tab", () => {
   });
 
   it("restores the stats tab from localStorage", () => {
-    const m = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "restoreView found");
+    const m = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "restoreView found in panel.js");
     assert.ok(m[1].includes('saved === "skills"'), "skills branch preserved");
     assert.ok(m[1].includes('saved === "store"'), "store branch preserved");
     assert.ok(m[1].includes('saved === "stats"'), "stats branch added");
@@ -1158,30 +1196,30 @@ describe("panel.html stats tab", () => {
     // initSkillsTab 的 restoreView→switchView→enterStatsView 先于 initStatsTab 触发
     // 首次取数；refreshStatsState 必须在读 statsPrefs.days 之前兜底 loadStatsPrefs，
     // 否则刷新后 seg 显示已存选择、数据却按默认 days=7 拉取。
-    const m = panelHtml.match(/function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "refreshStatsState found");
+    const m = panelJs.match(/function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshStatsState found in panel.js");
     const loadIdx = m[1].indexOf("loadStatsPrefs()");
     const fetchIdx = m[1].indexOf("/api/stats/state?days=");
     assert.ok(loadIdx !== -1 && fetchIdx !== -1 && loadIdx < fetchIdx,
       "loadStatsPrefs runs before the days-dependent fetch");
-    assert.ok(panelHtml.includes("let statsPrefsLoaded = false;"), "prefs load is once-only guarded");
+    assert.ok(panelJs.includes("let statsPrefsLoaded = false;"), "prefs load is once-only guarded");
   });
 
   it("wires the stats tab, polls the stats API and pauses when hidden", () => {
-    assert.ok(panelHtml.includes("initStatsTab();"), "initStatsTab runs during init");
-    assert.ok(panelHtml.includes('$("tabStats").onclick = () => switchView("stats")'), "tabStats click wired");
-    assert.ok(panelHtml.includes('api("GET", "/api/stats/state?days='), "stats API endpoint used");
-    assert.ok(panelHtml.includes("function enterStatsView()"), "enter hook defined");
-    assert.ok(panelHtml.includes("function leaveStatsView()"), "leave hook defined");
-    const m = panelHtml.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "enterStatsView found");
+    assert.ok(panelJs.includes("initStatsTab();"), "initStatsTab runs during init");
+    assert.ok(panelJs.includes('$("tabStats").onclick = () => switchView("stats")'), "tabStats click wired");
+    assert.ok(panelJs.includes('api("GET", "/api/stats/state?days='), "stats API endpoint used");
+    assert.ok(panelJs.includes("function enterStatsView()"), "enter hook defined");
+    assert.ok(panelJs.includes("function leaveStatsView()"), "leave hook defined");
+    const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "enterStatsView found in panel.js");
     assert.ok(m[1].includes("document.hidden"), "polling pauses while page hidden");
     assert.ok(m[1].includes("30000"), "30s polling interval");
   });
 
   it("clamps smooth-path control points so spike-adjacent segments never dip below the baseline", () => {
-    const m = panelHtml.match(/function statsSmoothPath\(pts, clampY\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "statsSmoothPath(pts, clampY) found");
+    const m = panelJs.match(/function statsSmoothPath\(pts, clampY\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsSmoothPath(pts, clampY) found in panel.js");
     const fn = new Function(`return function statsSmoothPath(pts, clampY) {${m[1]}\n  }`)();
     // 复现回归场景：零-零段前方两天后有尖峰（像素域 [10, 198]，基线 y=198）。
     const pts = [
@@ -1201,8 +1239,8 @@ describe("panel.html stats tab", () => {
   });
 
   it("leaves the zero baseline horizontally so the rise has no slope jump", () => {
-    const m = panelHtml.match(/function statsSmoothPath\(pts, clampY\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "statsSmoothPath(pts, clampY) found");
+    const m = panelJs.match(/function statsSmoothPath\(pts, clampY\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsSmoothPath(pts, clampY) found in panel.js");
     const fn = new Function(`return function statsSmoothPath(pts, clampY) {${m[1]}\n  }`)();
     // 零-零-尖峰-零（像素域：基线 y=198，峰值 y=10）。旧 Catmull-Rom + 硬钳制在 x=221 处
     // 入场斜率 0、出场斜率 −0.537，节点两侧折角即用户所见「从 0 升高时斜率跳变」。
@@ -1256,11 +1294,10 @@ describe("panel.html sessions tab", () => {
   });
 
   it("会话视图布局规则存活：注释正文不含裸 */，页头与内容靠 gap 拉开", () => {
-    const css = panelHtml.match(/<style>([\s\S]*?)<\/style>/)[1];
     // 注释里出现 */ 会提前结束注释，浏览器随后把中文说明当选择器前奏，
     // 并把紧随其后的第一条真规则整条当作它的声明块丢弃（.sessions-view 曾这样消失）。
-    const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
-    assert.ok(!stripped.includes("*/"), "主 <style> 注释正文含裸 */，会吞掉紧随的规则");
+    const stripped = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.ok(!stripped.includes("*/"), "panel.css 注释正文含裸 */，会吞掉紧随的规则");
     assert.ok(/\.sessions-view \{[^}]*gap: 16px/.test(stripped), ".sessions-view 的 gap 规则未被吞");
     assert.ok(/\.sessions-err-host:empty \{[^}]*display: none/.test(stripped),
       "无错误横幅时挂载点不占 flex gap，页头间距不翻倍");
@@ -1269,8 +1306,8 @@ describe("panel.html sessions tab", () => {
   });
 
   it("extends switchView with the sessions branch and keeps aria-selected in sync", () => {
-    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "switchView found");
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
     const body = m[1];
     assert.ok(body.includes('name === "sessions"'), "sessions branch added");
     assert.ok(body.includes('$("sessionsView").hidden = !sessions'), "sessionsView visibility wired");
@@ -1280,20 +1317,20 @@ describe("panel.html sessions tab", () => {
   });
 
   it("plays the view-enter animation on active switches only, suppressed on restore", () => {
-    assert.ok(panelHtml.includes("@keyframes viewEnter"), "viewEnter keyframes defined");
+    assert.ok(panelCss.includes("@keyframes viewEnter"), "viewEnter keyframes defined in panel.css");
     assert.ok(
-      panelHtml.includes(".view-enter { animation: viewEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }"),
+      panelCss.includes(".view-enter { animation: viewEnter 300ms cubic-bezier(0.42, 0, 0.58, 1); }"),
       "view-enter class plays the 300ms easeInOut entrance aligned with the board variant",
     );
-    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "switchView found");
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
     assert.ok(m[1].includes("replayViewEnter(enteredView)"), "switchView plays the entrance on the entered view");
-    const re = panelHtml.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/);
+    const re = panelJs.match(/function replayViewEnter\(el\) \{([\s\S]*?)\n  \}/);
     assert.ok(re && re[1].includes('classList.add("view-enter")'), "重播实现收敛在共用 replayViewEnter");
     assert.ok(m[1].includes('playBoardEnter(document.querySelector(".telemetry-view"))'), "board view routed to the variant entrance");
     assert.ok(m[1].includes("suppressViewEnter"), "switchView honors the suppress flag");
-    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(r, "restoreView found");
+    const r = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found in panel.js");
     assert.ok(r[1].includes("suppressViewEnter = true"), "restoreView suppresses the entrance animation");
     // 置位必须挂在有效分支条件上：saved 为 "board"/无效值时不调 switchView，
     // 无条件置位会让标志残留、吞掉下一次主动切换的动画
@@ -1304,8 +1341,8 @@ describe("panel.html sessions tab", () => {
   });
 
   it("defers the restart-recovery entrance to the splash fade via restartEnterView", () => {
-    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(r, "restoreView found");
+    const r = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found in panel.js");
     // 重启恢复时恢复分支仍先静默（开屏层还盖着，立即播会在底下播完），
     // 改为记 restartEnterView，init() 末尾挂到开屏淡出起点（onLeave）起播。
     assert.ok(r[1].includes("if (window.panelStartupRestart)"), "restart recovery branch present");
@@ -1313,30 +1350,30 @@ describe("panel.html sessions tab", () => {
     assert.ok(r[1].includes(': "board"'), "board default recorded — the board never passes through switchView on restore");
     assert.ok(!r[1].includes("playBoardEnter("), "no immediate playback while the splash still covers the page");
     // init() 里消费：挂钩子、清标记、onLeave 起播
-    const init = panelHtml.match(/async function init\(\) \{[\s\S]*?\n  \}/);
-    assert.ok(init, "init found");
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init, "init found in panel.js");
     assert.ok(init[0].includes("window.panelStartupController.onLeave = () => {"), "enter animation hooked onto the splash fade start");
     assert.ok(init[0].includes("restartEnterView = null"), "marker consumed exactly once");
     assert.ok(init[0].includes('if (view === "board") playBoardEnter('), "board routed to the staggered variant");
     assert.ok(init[0].includes('classList.add("view-enter")'), "other views routed to the generic entrance");
     // 声明与默认值
-    assert.ok(panelHtml.includes("let restartEnterView = null;"), "marker declared with null default");
+    assert.ok(panelJs.includes("let restartEnterView = null;"), "marker declared with null default");
   });
 
   it("ports the staggered mount entrance for the board view", () => {
-    assert.ok(panelHtml.includes("@keyframes boardEnter { from { opacity: 0; transform: translateY(10px); } }"),
-      "boardEnter keyframes: fade + 10px rise");
-    assert.ok(panelHtml.includes("@keyframes boardEnterScale { from { opacity: 0; transform: scale(0.98); } }"),
-      "boardEnterScale keyframes for the hero card");
+    assert.ok(panelCss.includes("@keyframes boardEnter { from { opacity: 0; transform: translateY(10px); } }"),
+      "boardEnter keyframes: fade + 10px rise (panel.css)");
+    assert.ok(panelCss.includes("@keyframes boardEnterScale { from { opacity: 0; transform: scale(0.98); } }"),
+      "boardEnterScale keyframes for the hero card (panel.css)");
     assert.ok(
-      panelHtml.includes(".board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards"),
-      "cards stagger with 300ms easeInOut and backwards fill",
+      panelCss.includes(".board-card-enter { animation: boardEnter 300ms cubic-bezier(0.42, 0, 0.58, 1) backwards"),
+      "cards stagger with 300ms easeInOut and backwards fill (panel.css)",
     );
-    const s = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(s, "switchView found");
+    const s = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(s, "switchView found in panel.js");
     assert.ok(s[1].includes("} else if (board) {"), "board branch split from the generic entrance");
-    const m = panelHtml.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "playBoardEnter found");
+    const m = panelJs.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "playBoardEnter found in panel.js");
     assert.ok(m[1].includes('classList.add("board-enter")'), "container entrance plays");
     assert.ok(m[1].includes('querySelectorAll(".panel-card")'), "stagger covers the board panel cards");
     assert.ok(m[1].includes("!el.hidden"), "hidden cards skipped from the stagger");
@@ -1346,23 +1383,25 @@ describe("panel.html sessions tab", () => {
   });
 
   it("restores the sessions tab from localStorage", () => {
-    const m = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "restoreView found");
+    const m = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "restoreView found in panel.js");
     assert.ok(m[1].includes('saved === "sessions"'), "sessions branch added");
   });
 
   it("defines initSessionsTab and wires the tab click to switchView", () => {
-    assert.ok(panelHtml.includes("function initSessionsTab()"), "initSessionsTab is defined");
+    assert.ok(panelJs.includes("function initSessionsTab()"), "initSessionsTab is defined");
     assert.ok(
-      panelHtml.includes('$("tabSessions").onclick = () => switchView("sessions")'),
+      panelJs.includes('$("tabSessions").onclick = () => switchView("sessions")'),
       "tabSessions click wired to switchView",
     );
   });
 
   it("ships the finalized sessions copy", () => {
-    assert.ok(panelHtml.includes("删除后不可恢复。"), "delete warning copy exists");
-    assert.ok(panelHtml.includes("命令已复制，粘贴到终端即可继续会话"), "resume-command copied toast exists");
-    assert.ok(panelHtml.includes("已删除"), "deleted toast copy exists");
+    // 用户可见文案分布在三个文件（DOM、脚本 toast、CSS 内容），负向与正向都按全量文本断言
+    const allUiText = panelHtml + panelJs + panelCss;
+    assert.ok(allUiText.includes("删除后不可恢复。"), "delete warning copy exists");
+    assert.ok(allUiText.includes("命令已复制，粘贴到终端即可继续会话"), "resume-command copied toast exists");
+    assert.ok(allUiText.includes("已删除"), "deleted toast copy exists");
   });
 
   it("详情端点徽标换会话时瞬时换色，不吃基座 150ms 过渡", () => {
@@ -1370,7 +1409,7 @@ describe("panel.html sessions tab", () => {
     // 换会话都整条换色：不覆盖就会让上一个端点的颜色挂在新端点的名字上淡出，读起来
     // 像外框颜色变化滞后。覆盖必须按 id 写——基座与各主题都对 .badge 有规则，靠
     // 类选择器压不住（同权重时由样式表顺序决定）。徽标只在端点之间切换，不需要渐入。
-    const css = panelHtml.match(/<style>([\s\S]*?)<\/style>/)[1];
+    const css = panelCss;
     assert.ok(/\.badge \{[^}]*transition: background[^}]*border-color/.test(css),
       "基座 .badge 的过渡前提变了，这条断言需要重新核对");
     assert.ok(/#sessDEpBadge \{ transition: none; \}/.test(css),
@@ -1602,8 +1641,12 @@ describe("panel router route-chain runtime", () => {
 
 
 describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左栏路由链卡）", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
@@ -1611,8 +1654,8 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   // 角标表示该服务来自 auto 链。链位置快照不参与胶囊判定（那是左栏路由链卡的
   // 职责）；直连流量从数据源上就不携带 viaAuto，因此不会按链名误挂。
   function makeAutoMark() {
-    const m = panelHtml.match(/function autoRouteMarkForTarget\(chain, providerId, modelName, viaAuto\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "autoRouteMarkForTarget found in panel.html");
+    const m = panelJs.match(/function autoRouteMarkForTarget\(chain, providerId, modelName, viaAuto\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "autoRouteMarkForTarget found in panel.js");
     return new Function(`return (${m[0]});`)();
   }
   const CHAIN = [{ node: "a", model: "m1" }, { node: "b", model: "m2" }, { node: "c", model: "m3" }];
@@ -1643,12 +1686,12 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   // 胶囊数据整形：同名坍缩修复的渲染层入口。新 relay 快照带 activeTargets
   // （渠道×模型复合账本）→ 逐条出双段胶囊；旧 relay 无此字段 → 退化为旧名单。
   function makeCapsuleTargetList() {
-    const m = panelHtml.match(/function capsuleTargetList\(st\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "capsuleTargetList found in panel.html");
+    const m = panelJs.match(/function capsuleTargetList\(st\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "capsuleTargetList found in panel.js");
     // 虚拟模型判定委托 hasDisplayIdentity（与 capsuleLabel 委托 routeNodeName
     // 同样的注入方式）：面板这里只测列表整形与过滤。
-    const h = panelHtml.match(/function hasDisplayIdentity\(providerId, model\) \{[\s\S]*?\n  \}/);
-    assert.ok(h, "hasDisplayIdentity found in panel.html");
+    const h = panelJs.match(/function hasDisplayIdentity\(providerId, model\) \{[\s\S]*?\n  \}/);
+    assert.ok(h, "hasDisplayIdentity found in panel.js");
     return new Function("hasDisplayIdentity", `return (${m[0]});`)(new Function(`return (${h[0]});`)());
   }
 
@@ -1700,8 +1743,8 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   // 渠道段显示名委托 routeNodeName（池 id 先 pools 后 providers 的前科在它身上，
   // 由路由链编辑器套件覆盖）；这里只测 capsuleLabel 自己的守卫与拼装。
   function makeCapsuleLabel() {
-    const m = panelHtml.match(/function capsuleLabel\(providerId, model\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "capsuleLabel found in panel.html");
+    const m = panelJs.match(/function capsuleLabel\(providerId, model\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "capsuleLabel found in panel.js");
     return (routeNodeName, providerId, model) => new Function("routeNodeName", `return (${m[0]});`)(routeNodeName)(providerId, model);
   }
 
@@ -1716,44 +1759,44 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   });
 
   it("实例行不重复挂「模型 @ 渠道」标签：端点卡胶囊已是渠道×模型复合键", () => {
-    assert.ok(!panelHtml.includes("instanceTagBubble"), "instanceTagBubble gone");
-    assert.ok(!panelHtml.includes("instanceTargetOf"), "instanceTargetOf gone");
-    assert.ok(!panelHtml.includes("modelTag"), "modelTag slot gone");
+    assert.ok(!panelJs.includes("instanceTagBubble"), "instanceTagBubble gone");
+    assert.ok(!panelJs.includes("instanceTargetOf"), "instanceTargetOf gone");
+    assert.ok(!panelJs.includes("modelTag"), "modelTag slot gone");
   });
 
   it("卡头不含 Flow Rail：mini 轨道 CSS 与渲染入口均不存在", () => {
-    assert.ok(!panelHtml.includes("route-seg--mini"), "mini seg CSS gone");
-    assert.ok(!panelHtml.includes("renderRouteChainStatus"), "rail renderer gone");
-    assert.ok(!panelHtml.includes(".route-rail {"), "rail container CSS gone");
+    assert.ok(!panelCss.includes("route-seg--mini"), "mini seg CSS gone");
+    assert.ok(!panelJs.includes("renderRouteChainStatus"), "rail renderer gone");
+    assert.ok(!panelCss.includes(".route-rail {"), "rail container CSS gone");
   });
 
   it("左栏路由链卡与 auto 胶囊的钩子存在", () => {
     assert.ok(panelHtml.includes('id="routeRailCard"'), "sidebar card hook");
     assert.ok(panelHtml.includes('id="routeRailList"'), "sidebar list hook");
-    assert.ok(panelHtml.includes(".badge-auto {"), "badge-auto CSS");
-    assert.ok(panelHtml.includes(".badge-auto-tag"), "auto tag CSS");
-    assert.ok(panelHtml.includes("renderRouteChainBoard();"), "board renderer wired into polling");
-    assert.ok(panelHtml.includes("renderModelBadges(modelBadgesList,"), "badge helper wired into cards");
+    assert.ok(panelCss.includes(".badge-auto {"), "badge-auto CSS");
+    assert.ok(panelCss.includes(".badge-auto-tag"), "auto tag CSS");
+    assert.ok(panelJs.includes("renderRouteChainBoard();"), "board renderer wired into polling");
+    assert.ok(panelJs.includes("renderModelBadges(modelBadgesList,"), "badge helper wired into cards");
   });
 
   it("claude 卡头「模型: …」与胶囊同源（虚拟 auto 不会从卡头漏出）", () => {
-    const m = panelHtml.match(/function renderClaude\(c\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "renderClaude found in panel.html");
+    const m = panelJs.match(/function renderClaude\(c\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderClaude found in panel.js");
     assert.ok(m[0].includes("capsuleTargetList(c)"), "卡头复用胶囊同一份过滤后的列表");
     assert.ok(!m[0].includes("c.activeModels"), "卡头不再直接读未过滤的 activeModels");
   });
 
   it("右键菜单项文案为「删除」", () => {
-    assert.ok(panelHtml.includes('{ label: "删除", danger: true'), "menu item renamed to 删除");
-    assert.ok(!panelHtml.includes('label: "从链中移除"'), "old label gone");
+    assert.ok(panelJs.includes('{ label: "删除", danger: true'), "menu item renamed to 删除");
+    assert.ok(!panelJs.includes('label: "从链中移除"'), "old label gone");
   });
 
   // 灯色数据源：runtime lamps（每次启动重新统计），不是 stability 缓存判定；
   // 无黄档，runtime 缺失时链首默认点亮。
   function makeRailLights() {
     const re = new RegExp("function routeRailLights\\(items, rt\\) \\{[\\s\\S]*?\\n  \\}");
-    const m = panelHtml.match(re);
-    assert.ok(m, "routeRailLights found in panel.html");
+    const m = panelJs.match(re);
+    assert.ok(m, "routeRailLights found in panel.js");
     return (items, rt) => new Function("items", "rt", `return (${m[0]})(items, rt);`)(items, rt);
   }
 
@@ -1770,34 +1813,38 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   });
 
   it("链路状态区不含 TTFT 黄档判定", () => {
-    assert.ok(!panelHtml.includes("ROUTE_TTFT_WARN_MS"), "链路状态区不得含 ROUTE_TTFT_WARN_MS");
-    assert.ok(!panelHtml.includes("routeNodeLamp"), "stability-based lamp gone");
-    assert.ok(!panelHtml.includes("lampWord"), "悬浮窗灯色文字 gone");
-    assert.ok(!/黄灯|绿灯/.test(panelHtml), "链路状态区不再出现灯色名称字样");
+    assert.ok(!panelJs.includes("ROUTE_TTFT_WARN_MS"), "链路状态区不得含 ROUTE_TTFT_WARN_MS");
+    assert.ok(!panelJs.includes("routeNodeLamp"), "stability-based lamp gone");
+    assert.ok(!panelJs.includes("lampWord"), "悬浮窗灯色文字 gone");
+    assert.ok(!/黄灯|绿灯/.test(panelJs), "链路状态区不再出现灯色名称字样");
   });
 });
 
 describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密档 / 热力线性分档）", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
   function makeNiceMax() {
-    const m = panelHtml.match(/function statsNiceMax\(v\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "statsNiceMax found");
+    const m = panelJs.match(/function statsNiceMax\(v\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsNiceMax found in panel.js");
     return new Function("v", m[1]);
   }
 
   function makeHeatLevel(maxT) {
-    const m = panelHtml.match(/const level = (\(t\) => \{[\s\S]*?\n    \});/);
-    assert.ok(m, "heatmap level closure found");
+    const m = panelJs.match(/const level = (\(t\) => \{[\s\S]*?\n    \});/);
+    assert.ok(m, "heatmap level closure found in panel.js");
     return new Function("maxT", `return ${m[1]};`)(maxT);
   }
 
   it("stats-bar-fill 是块级元素（span 无 display:block 时宽高塌陷，横条只剩空黑轨道）", () => {
-    const m = panelHtml.match(/\.stats-bar-fill \{([^}]*)\}/);
-    assert.ok(m, ".stats-bar-fill rule found");
+    const m = panelCss.match(/\.stats-bar-fill \{([^}]*)\}/);
+    assert.ok(m, ".stats-bar-fill rule found in panel.css");
     assert.match(m[1], /display:\s*block/, "fill must be block-level for width/height to apply");
   });
 
@@ -1833,13 +1880,13 @@ describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密�
   it("今日概览卡头有手动刷新键：disabled 变暗反馈 + 数据落地后重播生长动画", () => {
     assert.ok(panelHtml.includes('id="statsRefreshBtn"'), "刷新按钮存在");
     assert.match(
-      panelHtml,
+      panelJs,
       /\$\("statsRefreshBtn"\)\.onclick = \(\) => runStatsRefreshWithFeedback\(\)/,
       "按钮点击走带反馈的刷新包装（暗到动画播完才亮）",
     );
-    assert.ok(panelHtml.includes(".stats-header-actions { display: flex"), "卡头操作区并排布局规则存在");
-    const m = panelHtml.match(/async function runStatsRefreshWithFeedback\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "runStatsRefreshWithFeedback found");
+    assert.ok(panelCss.includes(".stats-header-actions { display: flex"), "卡头操作区并排布局规则存在");
+    const m = panelJs.match(/async function runStatsRefreshWithFeedback\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "runStatsRefreshWithFeedback found in panel.js");
     const fn = m[1];
     assert.ok(fn.includes("if (btn.disabled) return;"), "连点防护：暗着时重复点击直接忽略");
     assert.ok(fn.includes("btn.disabled = true"), "点击即变暗（.btn:disabled 45%）");
@@ -1854,8 +1901,8 @@ describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密�
   });
 
   it("手动刷新重播生长动画：replay 重置趋势 reveal 标记与环揭示标记后再渲染", () => {
-    const m = panelHtml.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "refreshStatsState found");
+    const m = panelJs.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshStatsState found in panel.js");
     const body = m[1];
     const replayIdx = body.indexOf("opts && opts.replay");
     assert.ok(replayIdx !== -1, "replay option parsed");
@@ -1865,37 +1912,41 @@ describe("panel.html stats tab 图表可读性（bar-fill 块级 / niceMax 密�
     assert.ok(resetIdx !== -1 && renderIdx !== -1 && resetIdx < renderIdx,
       "replay resets statsTrendPrev + statsUsageRevealed before renderStatsAll");
     // 30s 轮询仍是静默路径，不带 replay
-    assert.ok(panelHtml.includes("refreshStatsState({ silent: true })"), "poll stays silent (morph)");
+    assert.ok(panelJs.includes("refreshStatsState({ silent: true })"), "poll stays silent (morph)");
   });
 });
 
 describe("panel.html stats 横条：右端对齐 + 上限留白", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
   it("容器改 grid 三列共享列宽（数值列 max-content 取全组最长行，各行轨道右端严格对齐）", () => {
-    assert.ok(panelHtml.includes('el.classList.add("stats-bars")'), "statsRenderBars 给容器挂 grid 类");
-    const m = panelHtml.match(/\.stats-bars \{([^}]*)\}/);
-    assert.ok(m, ".stats-bars rule found");
+    assert.ok(panelJs.includes('el.classList.add("stats-bars")'), "statsRenderBars 给容器挂 grid 类");
+    const m = panelCss.match(/\.stats-bars \{([^}]*)\}/);
+    assert.ok(m, ".stats-bars rule found in panel.css");
     assert.match(m[1], /display:\s*grid/, "container is grid");
     assert.match(m[1], /max-content/, "value column sized to the longest row");
-    assert.ok(panelHtml.includes(".stats-bar-row { display: contents"), "rows join the shared grid");
-    assert.ok(!panelHtml.includes(".stats-bar-row { display: flex"), "old per-row flex rule gone");
+    assert.ok(panelCss.includes(".stats-bar-row { display: contents"), "rows join the shared grid");
+    assert.ok(!panelCss.includes(".stats-bar-row { display: flex"), "old per-row flex rule gone");
     assert.ok(
-      panelHtml.includes(".stats-bars .empty-hint { grid-column: 1 / -1"),
+      panelCss.includes(".stats-bars .empty-hint { grid-column: 1 / -1"),
       "empty hint spans all grid columns",
     );
   });
 
   it("最长条不顶到轨道满宽：填充上限 STATS_BAR_FILL_MAX < 100", () => {
-    const m = panelHtml.match(/STATS_BAR_FILL_MAX = (\d+)/);
+    const m = panelJs.match(/STATS_BAR_FILL_MAX = (\d+)/);
     assert.ok(m, "STATS_BAR_FILL_MAX defined");
     const cap = Number(m[1]);
     assert.equal(cap, 85, `cap=${cap} 应为 85（最长条留 15% 呼吸余量）`);
     assert.ok(
-      panelHtml.includes("/ maxV) * STATS_BAR_FILL_MAX"),
+      panelJs.includes("/ maxV) * STATS_BAR_FILL_MAX"),
       "fill width scales by the cap instead of 100%",
     );
   });
@@ -1940,15 +1991,15 @@ describe("panel router route-chain enabled 开关 API", () => {
 });
 
 describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
-  // 从 panel.html 抠出 agentUsingAutoRoute 函数体，注入 boardRoutingChains 做行为测试
+  // 从 panel.js 抠出 agentUsingAutoRoute 函数体，注入 boardRoutingChains 做行为测试
   function makeAgentUsingAutoRoute(chains) {
-    const m = panelHtml.match(/function agentUsingAutoRoute\(agentId, st\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "agentUsingAutoRoute found in panel.html");
+    const m = panelJs.match(/function agentUsingAutoRoute\(agentId, st\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "agentUsingAutoRoute found in panel.js");
     return new Function("boardRoutingChains", `return (${m[0]});`)(() => chains);
   }
 
@@ -1975,53 +2026,57 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
   });
 
   it("链卡片渲染带 per-endpoint 启用开关（沿用 .toggle 滑块控件），与「编辑/配置路由链」并列", () => {
-    assert.ok(panelHtml.includes("data-route-enabled"), "route chain card carries a data-route-enabled toggle");
-    const m = panelHtml.match(/<label class="toggle"[^>]*>[\s\S]*?data-route-enabled[\s\S]*?<\/label>/);
+    assert.ok(panelJs.includes("data-route-enabled"), "route chain card carries a data-route-enabled toggle");
+    const m = panelJs.match(/<label class="toggle"[^>]*>[\s\S]*?data-route-enabled[\s\S]*?<\/label>/);
     assert.ok(m, "toggle uses the existing .toggle switch control");
   });
 
   it("开关变更打到 /api/store/route-chain/enabled", () => {
-    assert.ok(panelHtml.includes("/api/store/route-chain/enabled"), "toggle posts to the enabled API");
+    assert.ok(panelJs.includes("/api/store/route-chain/enabled"), "toggle posts to the enabled API");
   });
 });
 
 describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
-  // 预设列表复刻了同一套拖拽机制，两个模块的源码在 panel.html 里前后相邻；
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8",
+  );
+  // 预设列表复刻了同一套拖拽机制，两个模块的源码在 panel.js 里前后相邻；
   // 本组断言只看渠道那段，否则预设段会替渠道段满足断言，渠道机制静默失效也测不出来。
-  const dragStart = panelHtml.indexOf("// ── 渠道列表拖拽重排");
-  const dragEnd = panelHtml.indexOf("// ── 卡片 C：渠道详情", dragStart);
-  assert.ok(dragStart > 0 && dragEnd > dragStart, "channel drag section found in panel.html");
-  const dragHtml = panelHtml.slice(dragStart, dragEnd);
+  const dragStart = panelJs.indexOf("// ── 渠道列表拖拽重排");
+  const dragEnd = panelJs.indexOf("// ── 卡片 C：渠道详情", dragStart);
+  assert.ok(dragStart > 0 && dragEnd > dragStart, "channel drag section found in panel.js");
+  const dragHtml = panelJs.slice(dragStart, dragEnd);
 
   it("renderStoreList 渠道行/池行在非过滤态带 draggable，过滤态不带", () => {
-    const m = panelHtml.match(/function renderStoreList\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderStoreList found");
+    const m = panelJs.match(/function renderStoreList\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderStoreList found in panel.js");
     assert.ok(m[1].includes('draggable="true"'), "rows render draggable attribute");
     assert.ok(m[1].includes("storeListDraggable"), "draggable gated on filter input state");
   });
 
   it("drop 按 DOM 现序展开池成员并提交 /api/store/reorder", () => {
-    assert.ok(panelHtml.includes("/api/store/reorder"), "reorder API call exists");
-    const m = panelHtml.match(/\/api\/store\/reorder",\s*\{\s*order\s*\}/);
+    assert.ok(panelJs.includes("/api/store/reorder"), "reorder API call exists");
+    const m = panelJs.match(/\/api\/store\/reorder",\s*\{\s*order\s*\}/);
     assert.ok(m, "reorder posts {order}");
   });
 
   it("dragend 置位 suppressStoreClick，click 委托吞掉拖拽后的合成点击", () => {
-    assert.ok(panelHtml.includes("suppressStoreClick"), "suppressStoreClick flag exists");
-    const m = panelHtml.match(/\$\("storeList"\)\.addEventListener\("click", \(e\) => \{([\s\S]*?)\n    \}\);/);
+    assert.ok(panelJs.includes("suppressStoreClick"), "suppressStoreClick flag exists");
+    const m = panelJs.match(/\$\("storeList"\)\.addEventListener\("click", \(e\) => \{([\s\S]*?)\n    \}\);/);
     assert.ok(m, "storeList click delegate found");
     assert.ok(m[1].includes("suppressStoreClick"), "click delegate swallows the click after drag");
   });
 
   it("5 个皮肤段（默认/saas/aurora/blueprint/sepia）均定义 --store-drag-accent", () => {
-    assert.match(panelHtml, /:root \{[\s\S]*?--store-drag-accent:/, "default :root defines --store-drag-accent");
+    assert.match(panelCss, /:root \{[\s\S]*?--store-drag-accent:/, "default :root defines --store-drag-accent");
     for (const skin of ["saas", "aurora", "blueprint", "sepia"]) {
       const re = new RegExp(`:root\\[data-style="${skin}"\\] \\{[\\s\\S]*?--store-drag-accent:`);
-      assert.ok(re.test(panelHtml), `${skin} skin defines --store-drag-accent`);
+      assert.ok(re.test(panelCss), `${skin} skin defines --store-drag-accent`);
     }
   });
 
@@ -2056,46 +2111,50 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
   });
 
   it("空位占位 + 加重指示线（绝对定位/3px/槽间瞬移/左端圆帽）样式齐备", () => {
-    const drag = panelHtml.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
-    assert.ok(drag, "dragging row style exists");
+    const drag = panelCss.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
+    assert.ok(drag, "dragging row style exists in panel.css");
     assert.ok(drag[1].includes("dashed var(--store-drag-accent)"), "placeholder uses dashed accent inset");
-    const ind = panelHtml.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
-    assert.ok(ind, "drop indicator style exists");
+    const ind = panelCss.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
+    assert.ok(ind, "drop indicator style exists in panel.css");
     assert.ok(ind[1].includes("position: absolute"), "indicator absolutely positioned");
     assert.ok(ind[1].includes("3px"), "indicator is 3px heavy");
     assert.ok(!ind[1].includes("transition"), "indicator jumps between slots instantly (no glide transition)");
-    assert.ok(panelHtml.includes(".store-drop-indicator::before"), "left round cap exists");
-    assert.ok(panelHtml.includes(".store-row-landed"), "landed highlight style exists");
-    const bp = panelHtml.match(/:root\[data-style="blueprint"\] \.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
+    assert.ok(panelCss.includes(".store-drop-indicator::before"), "left round cap exists");
+    assert.ok(panelCss.includes(".store-row-landed"), "landed highlight style exists");
+    const bp = panelCss.match(/:root\[data-style="blueprint"\] \.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
     assert.ok(bp, "blueprint overrides drop indicator");
     assert.ok(bp[1].includes("repeating-linear-gradient"), "blueprint indicator is dashed");
   });
 });
 
 describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
   // 只取预设那段：机制与渠道同款，断言必须落在预设自己的模块上
-  const dragStart = panelHtml.indexOf("// ── 预设列表拖拽重排");
-  const dragEnd = panelHtml.indexOf("// ── 卡片 A：全局设置", dragStart);
-  assert.ok(dragStart > 0 && dragEnd > dragStart, "preset drag section found in panel.html");
-  const dragHtml = panelHtml.slice(dragStart, dragEnd);
-  const renderFn = panelHtml.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
+  const dragStart = panelJs.indexOf("// ── 预设列表拖拽重排");
+  const dragEnd = panelJs.indexOf("// ── 卡片 A：全局设置", dragStart);
+  assert.ok(dragStart > 0 && dragEnd > dragStart, "preset drag section found in panel.js");
+  const dragHtml = panelJs.slice(dragStart, dragEnd);
+  const renderFn = panelJs.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
 
   it("预设行在非过滤态带 draggable，过滤态不带", () => {
-    assert.ok(renderFn, "renderPresetsList found");
+    assert.ok(renderFn, "renderPresetsList found in panel.js");
     assert.ok(renderFn[1].includes('draggable="true"'), "rows render the draggable attribute");
     assert.ok(renderFn[1].includes("presetsListDraggable"), "draggable gated on the filter input state");
-    const gate = panelHtml.match(/function presetsListDraggable\(\) \{([\s\S]*?)\}/);
+    const gate = panelJs.match(/function presetsListDraggable\(\) \{([\s\S]*?)\}/);
     assert.ok(gate, "presetsListDraggable helper exists");
     assert.ok(gate[1].includes('$("presetsFilterInput").value.trim()'), "gate reads the presets filter input");
   });
 
   it("拖拽逻辑挂在 presetsList 上并在 init 时接线", () => {
     assert.ok(dragHtml.includes('$("presetsList")'), "handlers bind to #presetsList");
-    assert.ok(panelHtml.includes("initPresetsListDrag();"), "drag module is initialised");
+    assert.ok(panelJs.includes("initPresetsListDrag();"), "drag module is initialised");
     for (const evt of ["dragstart", "dragover", "drop", "dragend"]) {
       assert.ok(dragHtml.includes(`addEventListener("${evt}"`), `${evt} handler exists`);
     }
@@ -2126,7 +2185,7 @@ describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () =>
     assert.ok(m, "dragend handler found");
     assert.ok(!m[1].includes("renderPresetsList"), "dragend must not re-render");
     assert.ok(m[1].includes("suppressPresetClick"), "click suppression set");
-    const click = panelHtml.match(/\$\("presetsList"\)\.addEventListener\("click", \(e\) => \{([\s\S]*?)\n    \}\);/);
+    const click = panelJs.match(/\$\("presetsList"\)\.addEventListener\("click", \(e\) => \{([\s\S]*?)\n    \}\);/);
     assert.ok(click, "presetsList click delegate found");
     assert.ok(click[1].includes("suppressPresetClick"), "click delegate swallows the click after a drag");
   });
@@ -2138,14 +2197,14 @@ describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () =>
   });
 
   it("预设列表复用同款占位/指示线/落位样式（含 blueprint 虚线覆盖）", () => {
-    const drag = panelHtml.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
+    const drag = panelCss.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
     assert.ok(drag && drag[0].includes(".preset-row-dragging"), "preset rows share the dragging placeholder style");
-    const ind = panelHtml.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
+    const ind = panelCss.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
     assert.ok(ind && ind[0].includes(".preset-drop-indicator"), "preset list shares the drop indicator style");
-    assert.ok(/\.store-drop-indicator::before, \.preset-drop-indicator::before \{/.test(panelHtml), "preset indicator carries the round cap");
-    assert.ok(/\.store-row-landed, \.preset-row-landed \{/.test(panelHtml), "preset rows share the landed pulse");
-    assert.ok(/#storeList, #presetsList \{ position: relative; \}/.test(panelHtml), "preset list is a positioning context for the indicator");
-    assert.ok(/:root\[data-style="blueprint"\] \.preset-drop-indicator/.test(panelHtml), "blueprint overrides the preset indicator");
+    assert.ok(/\.store-drop-indicator::before, \.preset-drop-indicator::before \{/.test(panelCss), "preset indicator carries the round cap");
+    assert.ok(/\.store-row-landed, \.preset-row-landed \{/.test(panelCss), "preset rows share the landed pulse");
+    assert.ok(/#storeList, #presetsList \{ position: relative; \}/.test(panelCss), "preset list is a positioning context for the indicator");
+    assert.ok(/:root\[data-style="blueprint"\] \.preset-drop-indicator/.test(panelCss), "blueprint overrides the preset indicator");
   });
 });
 
@@ -2153,28 +2212,28 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
   // 多实例化后端点级四宫格已不在，实例级四宫格必须自带 tps/cache/TTFT 三条
   // sparkline——任一条漏接都会让 kimi/opencode/pi 三栏静默失去该折线图。
   // 以下断言覆盖容器、缓冲、绘制三个环节。
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
   it("gives the per-instance 首字响应时间 card its own sparkline container", () => {
-    assert.ok(/const sparkTtftId = prefix \+ "InstSparkTtft-" \+ domId;/.test(panelHtml),
+    assert.ok(/const sparkTtftId = prefix \+ "InstSparkTtft-" \+ domId;/.test(panelJs),
       "renderInstanceRows derives a stable InstSparkTtft id");
-    assert.ok(/首字响应时间<\/span>\s*<div class="telemetry-sparkline" id="\$\{sparkTtftId\}"><\/div>/.test(panelHtml),
+    assert.ok(/首字响应时间<\/span>\s*<div class="telemetry-sparkline" id="\$\{sparkTtftId\}"><\/div>/.test(panelJs),
       "TTFT card header carries the telemetry-sparkline div");
   });
 
   it("records and draws TTFT history in the per-instance spark buffer", () => {
-    assert.ok(/instanceSparkBuffers\[key\] = \{ tps: \[\], cache: \[\], ttft: \[\] \}/.test(panelHtml),
+    assert.ok(/instanceSparkBuffers\[key\] = \{ tps: \[\], cache: \[\], ttft: \[\] \}/.test(panelJs),
       "buffer allocation includes a ttft array");
-    assert.ok(/pushOne\(buf\.ttft, vals \? vals\.ttft : null\);/.test(panelHtml),
+    assert.ok(/pushOne\(buf\.ttft, vals \? vals\.ttft : null\);/.test(panelJs),
       "pushInstanceSpark feeds ttft samples");
-    assert.ok(/ttft: typeof ttft === "number" && ttft > 0 \? ttft \/ 1000 : null,/.test(panelHtml),
+    assert.ok(/ttft: typeof ttft === "number" && ttft > 0 \? ttft \/ 1000 : null,/.test(panelJs),
       "renderInstanceRows pushes lastTtftMs in seconds (endpoint-level unit parity)");
     // 折叠门控：绘制收在 if (open) 内，权威历史暂存到 buf.sparkHistory
     // （折叠期间无 inst 可用），两条路径口径见 panel-instance-fold.test.mjs。
-    assert.ok(/updateSparkline\(sparkTtftId, sparkValues\(buf\.ttft, buf\.sparkHistory\?\.ttft\)\);/.test(panelHtml),
+    assert.ok(/updateSparkline\(sparkTtftId, sparkValues\(buf\.ttft, buf\.sparkHistory\?\.ttft\)\);/.test(panelJs),
       "sparkline redraws each render, seeded from buffer-stashed authoritative history");
   });
 });
@@ -2182,16 +2241,16 @@ describe("panel.html per-instance telemetry TTFT sparkline", () => {
 describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归因换装）", () => {
   // 实例行状态徽标只有生成中/待命两态：「这条请求走没走自动路由」由端点模型胶囊
   // 上的 auto 角标单独表达，不由状态徽标换装承担；伪「全局汇总」行不挂状态徽标。
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
   function makeRenderStateBadge() {
     // 截「const stateBadge = 」到语句末（模板串内无分号，首个 ; 即语句尾），
     // 整段三元（含 isAggregate 空串分支）作为表达式求值
-    const m = panelHtml.match(/const stateBadge = (isAggregate[\s\S]*?);/);
-    assert.ok(m, "instance-row state badge expression found");
+    const m = panelJs.match(/const stateBadge = (isAggregate[\s\S]*?);/);
+    assert.ok(m, "instance-row state badge expression found in panel.js");
     return (ctx) => new Function("isAggregate", "isAct", `return (${m[1]});`)(ctx.isAggregate, ctx.isAct);
   }
 
@@ -2208,8 +2267,8 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 
   it("实例行渲染器不留链归因分支（badge-auto 只归端点胶囊）", () => {
     assert.doesNotMatch(makeRenderStateBadge()({ isAggregate: false, isAct: true }), /自动路由中|badge-auto/);
-    const m = panelHtml.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "renderInstanceRows found in panel.html");
+    const m = panelJs.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderInstanceRows found in panel.js");
     assert.ok(!/instViaAuto|自动路由中/.test(m[0]), "no chain-attribution branch left in the instance-row renderer");
   });
 });
@@ -2260,8 +2319,8 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/class="settings-head-title">设置</.test(head), "「设置」标题");
     assert.ok(head.includes('id="settingsThemeToggle"'), "右侧亮暗切换按钮");
     assert.ok(head.includes('id="settingsIcoMoon"') && head.includes('id="settingsIcoSun"'), "日/月图标齐备");
-    const theme = panelHtml.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(theme, "initTheme found");
+    const theme = panelJs.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(theme, "initTheme found in panel.js");
     assert.ok(theme[1].includes("settingsThemeToggle") && theme[1].includes("settingsIcoSun"),
       "initTheme 把设置头行亮暗钮并入同一状态源");
   });
@@ -2285,7 +2344,7 @@ describe("panel.html 设置全页视图", () => {
     assert.deepEqual(items.map((m) => [m[1], m[2]]), [
       ["", "经典"], ["saas", "SaaS"], ["aurora", "极光"], ["blueprint", "蓝图"], ["sepia", "暖纸"],
     ], "五项主题与样式值一一对应");
-    assert.ok(panelHtml.includes('picker.querySelectorAll(".settings-theme-item")'),
+    assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
     const preview = panelHtml.slice(
@@ -2298,42 +2357,45 @@ describe("panel.html 设置全页视图", () => {
       assert.ok(preview.includes(`id="${id}"`), `预览含镜像层 #${id}`);
     }
     assert.ok(!preview.includes("panel-card"), "预览不再内置独立样张");
-    const capture = panelHtml.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
-    assert.ok(capture, "captureSettingsMirror found");
+    const capture = panelJs.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
+    assert.ok(capture, "captureSettingsMirror found in panel.js");
     assert.ok(capture[1].includes('document.querySelector(".telemetry-view")'), "镜像源为真实看板视图");
     assert.ok(capture[1].includes("cloneNode(true)"), "镜像为看板 DOM 克隆");
     assert.ok(capture[1].includes('removeAttribute("id")'), "克隆剥 id 防重复命中");
     assert.ok(capture[1].includes('boardClone.removeAttribute("hidden")'), "克隆根去 hidden 抵消看板被切走");
     assert.ok(capture[1].includes("scale("), "镜像按预览栏宽缩放");
-    const subTab = panelHtml.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
-    assert.ok(subTab, "activateSettingsSubTab found");
+    const subTab = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
+    assert.ok(subTab, "activateSettingsSubTab found in panel.js");
     assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置视图不写入 panel-view", () => {
-    assert.ok(/\$\("settingsBtn"\)[\s\S]{0,300}?switchView\("settings"\)/.test(panelHtml),
+    assert.ok(/\$\("settingsBtn"\)[\s\S]{0,300}?switchView\("settings"\)/.test(panelJs),
       "页头齿轮切入设置视图");
-    assert.ok(panelHtml.includes("switchView(settingsReturnView)"), "退出回到进入前视图");
-    const sw = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(sw, "switchView found");
+    assert.ok(panelJs.includes("switchView(settingsReturnView)"), "退出回到进入前视图");
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found in panel.js");
     assert.ok(sw[1].includes('$("settingsView").hidden = !settings;'), "switchView 切换设置视图显隐");
     assert.ok(sw[1].includes('$("mainHeadInner").hidden = settings;')
       && sw[1].includes('$("settingsHeadInner").hidden = !settings;'),
       "主头行与设置头行互斥切换");
     assert.ok(/if \(!settings\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
       "设置视图不持久化 panel-view");
-    const restoreStart = panelHtml.indexOf("function restoreView()");
-    const restore = panelHtml.slice(restoreStart, panelHtml.indexOf("function reconcileSkillsSelection()", restoreStart));
+    const restoreStart = panelJs.indexOf("function restoreView()");
+    const restore = panelJs.slice(restoreStart, panelJs.indexOf("function reconcileSkillsSelection()", restoreStart));
     assert.ok(restore.length > 100, "未真正取到 restoreView 函数体");
     assert.ok(!restore.includes('"settings"'), "restoreView 白名单不含 settings");
   });
 
   it("原设置弹窗整体移除（DOM、开关逻辑、init 装配更名）", () => {
-    assert.ok(!panelHtml.includes('id="settingsModal"'), "settingsModal DOM 已删除");
-    assert.ok(!panelHtml.includes("settingsCloseBtn") && !panelHtml.includes("settingsDoneBtn"),
-      "弹窗关闭/完成按钮已删除");
-    assert.ok(!panelHtml.includes("initSettingsModal"), "initSettingsModal 已更名移除");
-    const init = panelHtml.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    // 负向断言覆盖三个文件：DOM 残留、脚本残留、CSS 残留都会让弹窗以任一形式复活
+    for (const src of [panelHtml, panelJs, panelCss]) {
+      assert.ok(!src.includes('id="settingsModal"'), "settingsModal DOM 已删除");
+      assert.ok(!src.includes("settingsCloseBtn") && !src.includes("settingsDoneBtn"),
+        "弹窗关闭/完成按钮已删除");
+      assert.ok(!src.includes("initSettingsModal"), "initSettingsModal 已更名移除");
+    }
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
     assert.ok(init && init[0].includes("initSettingsView();"), "init 装配 initSettingsView");
   });
 });
@@ -2370,15 +2432,19 @@ describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类�
   // 背景：速率类指标（tok/s、TTFT、缓存命中率、sparkline）是 last-N 计数窗口而非
   // 时间窗，PID 形态实例靠进程扫描续命绕过 10min TTL，聚合桶更是无 TTL——数小时前
   // 的数值会原样上屏冒充实时数据。渲染层按 lastSeen 判定陈旧并隐藏速率类数值。
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
   it("陈旧判定 helper：lastSeen 超 INSTANCE_STALE_MS（2min）为陈旧，active 豁免", () => {
-    assert.ok(/const INSTANCE_STALE_MS = 2 \* 60 \* 1000;/.test(panelHtml),
+    assert.ok(/const INSTANCE_STALE_MS = 2 \* 60 \* 1000;/.test(panelJs),
       "stale threshold pinned at 2 minutes");
-    const m = panelHtml.match(/function isInstanceStale\(inst\) \{([\s\S]*?)\n  \}/);
+    const m = panelJs.match(/function isInstanceStale\(inst\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "isInstanceStale helper exists");
     assert.ok(m[1].includes('inst.status === "active"'), "active instances never stale");
     assert.ok(m[1].includes("inst.lastSeen"), "reads inst.lastSeen");
@@ -2386,63 +2452,67 @@ describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类�
   });
 
   it("聚合伪实例行透出 sessions[0].lastSeen 参与同一陈旧判定", () => {
-    const m = panelHtml.match(/function buildAggregateFallback\(m, d, isGenerating\) \{([\s\S]*?)\n  \}/);
+    const m = panelJs.match(/function buildAggregateFallback\(m, d, isGenerating\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "buildAggregateFallback exists");
     assert.ok(/lastSeen: typeof sess\.lastSeen === "number" \? sess\.lastSeen : null,/.test(m[1]),
       "aggregate fallback carries lastSeen (aggregate bucket is TTL-less residue)");
   });
 
   it("陈旧行四宫格：速率类三格压暗置 —，工时卡不动，无额外注释行", () => {
-    assert.ok(/const stale = isInstanceStale\(inst\);/.test(panelHtml), "renderInstanceRows computes stale");
-    assert.ok(/const staleCls = stale \? " inst-stale" : "";/.test(panelHtml), "stale class prepared");
-    assert.ok(/<div class="telemetry-card\$\{staleCls\}">\s*<div class="telemetry-header">\s*<span class="telemetry-label">生成速度<\/span>/.test(panelHtml),
+    assert.ok(/const stale = isInstanceStale\(inst\);/.test(panelJs), "renderInstanceRows computes stale");
+    assert.ok(/const staleCls = stale \? " inst-stale" : "";/.test(panelJs), "stale class prepared");
+    assert.ok(/<div class="telemetry-card\$\{staleCls\}">\s*<div class="telemetry-header">\s*<span class="telemetry-label">生成速度<\/span>/.test(panelJs),
       "tps card dimmed when stale");
-    assert.ok(/<span>\$\{!stale && tps > 0 \? tps\.toFixed\(1\) : "-"\}<\/span>/.test(panelHtml),
+    assert.ok(/<span>\$\{!stale && tps > 0 \? tps\.toFixed\(1\) : "-"\}<\/span>/.test(panelJs),
       "stale tps renders as dash");
-    assert.ok(/<span>\$\{!stale && ttft > 0 \? \(ttft \/ 1000\)\.toFixed\(2\) : "-"\}<\/span>/.test(panelHtml),
+    assert.ok(/<span>\$\{!stale && ttft > 0 \? \(ttft \/ 1000\)\.toFixed\(2\) : "-"\}<\/span>/.test(panelJs),
       "stale ttft renders as dash");
-    assert.ok(/<span>\$\{!stale && typeof hit === "number" \? hit\.toFixed\(1\) : "-"\}<\/span>/.test(panelHtml),
+    assert.ok(/<span>\$\{!stale && typeof hit === "number" \? hit\.toFixed\(1\) : "-"\}<\/span>/.test(panelJs),
       "stale cache hit rate renders as dash");
-    assert.ok(!panelHtml.includes("instance-stale-note"), "grid tail annotation removed");
+    assert.ok(!panelJs.includes("instance-stale-note") && !panelCss.includes("instance-stale-note"), "grid tail annotation removed");
   });
 
   it("陈旧行简要胶囊行：速率类胶囊换成相对时间胶囊（「X 分钟前」），工时胶囊保留", () => {
-    assert.ok(/<span class="tag-bubble tag-stale">\$\{formatRelativeAge\(inst\.lastSeen\)\}<\/span>/.test(panelHtml),
+    assert.ok(/<span class="tag-bubble tag-stale">\$\{formatRelativeAge\(inst\.lastSeen\)\}<\/span>/.test(panelJs),
       "tags line swaps rate bubbles for a bare relative-age bubble");
   });
 
   it("陈旧行折线停绘：渲染期 if (open && !stale) 门控 + 展开补绘跳过 data-stale 行", () => {
-    assert.ok(/if \(open && !stale\) \{[\s\S]*?updateSparkline\(sparkTpsId/.test(panelHtml),
+    assert.ok(/if \(open && !stale\) \{[\s\S]*?updateSparkline\(sparkTpsId/.test(panelJs),
       "render-time sparkline draw gated on !stale");
-    assert.ok(/grid\.dataset\.stale = stale \? "1" : "0";/.test(panelHtml), "grid carries data-stale flag");
-    assert.ok(/if \(grid\.dataset\.stale === "1"\) return;/.test(panelHtml),
+    assert.ok(/grid\.dataset\.stale = stale \? "1" : "0";/.test(panelJs), "grid carries data-stale flag");
+    assert.ok(/if \(grid\.dataset\.stale === "1"\) return;/.test(panelJs),
       "redrawInstanceSparklines skips stale grids");
   });
 
   it("相对时间标注随时间刷新：renderIfChanged 指纹混入陈旧分钟桶", () => {
-    assert.ok(/function agentStaleTick\(agent\) \{/.test(panelHtml), "agentStaleTick exists");
-    assert.ok(/agentStaleTick\(agent\) \+ "\|" \+ JSON\.stringify\(agent\)/.test(panelHtml),
+    assert.ok(/function agentStaleTick\(agent\) \{/.test(panelJs), "agentStaleTick exists");
+    assert.ok(/agentStaleTick\(agent\) \+ "\|" \+ JSON\.stringify\(agent\)/.test(panelJs),
       "fingerprint mixes the stale minute tick so 「X 前」 refreshes at most once a minute");
   });
 
   it("陈旧态样式齐备：整卡压暗 + 虚线陈旧胶囊（无格尾注释样式）", () => {
-    assert.ok(/\.telemetry-card\.inst-stale \{ opacity: 0\.45; \}/.test(panelHtml), "stale card dimmed");
-    assert.ok(!/\.instance-stale-note/.test(panelHtml), "note style removed with the note element");
-    assert.ok(/\.tag-bubble\.tag-stale \{/.test(panelHtml), "stale bubble style exists");
+    assert.ok(/\.telemetry-card\.inst-stale \{ opacity: 0\.45; \}/.test(panelCss), "stale card dimmed");
+    assert.ok(!/\.instance-stale-note/.test(panelCss), "note style removed with the note element");
+    assert.ok(/\.tag-bubble\.tag-stale \{/.test(panelCss), "stale bubble style exists");
   });
 });
 
 describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
   // 与实例行同口径：全局汇总行 lastSeen 超 INSTANCE_STALE_MS 即陈旧——速率类置 —
   // 压暗、折线停绘、简要栏换相对时间胶囊；累计量（工时/tokens/请求数）不动。
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
   it("端点级判定 helper：isEndpointStale 读 sessions[0].lastSeen，生成中豁免", () => {
-    const m = panelHtml.match(/function isEndpointStale\(agent, isGenerating\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "isEndpointStale exists");
+    const m = panelJs.match(/function isEndpointStale\(agent, isGenerating\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "isEndpointStale exists in panel.js");
     assert.ok(m[1].includes("if (isGenerating) return false;"), "generating endpoints never stale");
     assert.ok(m[1].includes("s0.lastSeen"), "reads 全局汇总行 lastSeen");
     assert.ok(m[1].includes("INSTANCE_STALE_MS"), "same threshold as instance rows");
@@ -2450,8 +2520,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
 
   it("四个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
     for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderDsh", "dsh", "d"], ["renderQoder", "qoder", "p"]]) {
-      const m = panelHtml.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found");
+      const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
+      assert.ok(m, fnName + " found in panel.js");
       assert.ok(m[0].includes(`const stale = isEndpointStale(${arg}, isGenerating);`), fnName + " computes stale");
       assert.ok(m[0].includes(`endpointStaleFlags.${prefix} = stale;`), fnName + " sets stale flag");
       assert.ok(m[0].includes(`dimEndpointRateCards("${prefix}", stale);`), fnName + " dims rate cards");
@@ -2463,14 +2533,14 @@ describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
   });
 
   it("redrawEndpointSparklines 顶层门控 endpointStaleFlags（setFold 展开补绘同受控）", () => {
-    const m = panelHtml.match(/function redrawEndpointSparklines\(prefix\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "redrawEndpointSparklines found");
+    const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "redrawEndpointSparklines found in panel.js");
     assert.ok(m[1].includes("if (endpointStaleFlags[prefix]) return;"), "stale endpoints skip drawing");
   });
 
   it("updateDetailBrief 支持 staleText：隐藏速率类胶囊、显示相对时间胶囊", () => {
-    const m = panelHtml.match(/function updateDetailBrief\(prefix, \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "updateDetailBrief found");
+    const m = panelJs.match(/function updateDetailBrief\(prefix, \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "updateDetailBrief found in panel.js");
     assert.ok(m[0].includes("staleText"), "accepts staleText");
     assert.ok(m[0].includes('setPill("BriefStale", staleMode'), "drives the stale pill");
     assert.ok(m[0].includes('setPill("BriefTps", !staleMode && tps !== null'), "rate pills hidden in stale mode");
@@ -2493,6 +2563,10 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
 
   it("三张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
     for (const prefix of ["zc", "dsh", "qoder"]) {
@@ -2506,8 +2580,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
   });
 
   it("updateDetailBrief 驱动请求数徽标与 tokens 行（累计量，不受 staleMode 门控）", () => {
-    const m = panelHtml.match(/function updateDetailBrief\(prefix, \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "updateDetailBrief found");
+    const m = panelJs.match(/function updateDetailBrief\(prefix, \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "updateDetailBrief found in panel.js");
     assert.ok(m[0].includes("requests"), "accepts requests");
     assert.ok(m[0].includes("tokensText"), "accepts tokensText");
     assert.ok(m[0].includes('$(prefix + "BriefReqs")'), "drives the requests badge");
@@ -2517,8 +2591,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
 
   it("四个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
     for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderDsh", "d", "d.totalRequests"], ["renderQoder", "p", "p.totalRequests"]]) {
-      const m = panelHtml.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
-      assert.ok(m, fnName + " found");
+      const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
+      assert.ok(m, fnName + " found in panel.js");
       assert.ok(m[0].includes(`requests: m.totalRequests || ${totalReq} || 0,`), fnName + " passes requests");
       assert.ok(
         m[0].includes("tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,"),
@@ -2530,8 +2604,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
   });
 
   it("「全局汇总」行仅展开态显示：旧机制 setFold 门控其 session-table-wrapper", () => {
-    const m = panelHtml.match(/\["zc", "dsh", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
-    assert.ok(m, "static fold wiring found");
+    const m = panelJs.match(/\["zc", "dsh", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
+    assert.ok(m, "static fold wiring found in panel.js");
     assert.ok(m[0].includes('$(prefix + "SessionRow")'), "resolves the aggregate row");
     assert.ok(m[0].includes('closest(".session-table-wrapper")'), "toggles the wrapper");
     assert.ok(m[0].includes("if (aggWrap) aggWrap.hidden = !open;"), "collapsed hides the aggregate row");
@@ -2540,16 +2614,16 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
 
 
 describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a11y", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
   it("refreshStatsState 丢弃旧响应：请求序号 + 响应 days 双比对", () => {
-    const m = panelHtml.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "refreshStatsState found");
+    const m = panelJs.match(/async function refreshStatsState\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshStatsState found in panel.js");
     const body = m[1];
-    assert.ok(panelHtml.includes("let statsReqSeq = 0"), "req seq counter declared");
+    assert.ok(panelJs.includes("let statsReqSeq = 0"), "req seq counter declared");
     assert.ok(body.includes("++statsReqSeq"), "seq bumped per request");
     assert.ok(body.includes("seq !== statsReqSeq"), "stale response dropped by seq");
     assert.ok(body.includes("res.days !== statsPrefs.days"), "window-mismatched response dropped");
@@ -2563,8 +2637,8 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("leaveStatsView 停轮询并统一取消在飞动画 rAF（趋势 morph + 环形 reveal）", () => {
-    const m = panelHtml.match(/function leaveStatsView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "leaveStatsView found");
+    const m = panelJs.match(/function leaveStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "leaveStatsView found in panel.js");
     const body = m[1];
     assert.ok(body.includes("clearInterval(statsTimer)"), "30s poll cleared");
     assert.ok(body.includes("statsTrendChart"), "trend chart visited");
@@ -2575,15 +2649,15 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("环形图揭示动画每次进 tab 重播（enterStatsView 重置标记，与趋势图 reveal 同语义）", () => {
-    const m = panelHtml.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "enterStatsView found");
+    const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "enterStatsView found in panel.js");
     assert.ok(m[1].includes("statsUsageRevealed = false"), "reveal flag reset on tab enter");
     assert.ok(m[1].includes("statsTrendPrev = null"), "trend reveal reset preserved");
   });
 
   it("趋势图进 tab 缓存热渲染：动画随进 tab 即时起跑，不等 stats 接口返回", () => {
-    const m = panelHtml.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "enterStatsView found");
+    const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "enterStatsView found in panel.js");
     const body = m[1];
     // 回归根因：热渲染曾只有环形图，趋势图首渲等 refreshStatsState 的网络往返
     // 落地（实测热 300~500ms）才触发，reveal 起跑随之延迟同款时长。
@@ -2597,13 +2671,13 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     const resetIdx = body.indexOf("statsTrendPrev = null");
     assert.ok(resetIdx !== -1 && resetIdx < trendIdx, "reveal flag reset before hot-render");
     // 接口落地重渲不打断在飞动画的兜底仍在：数据未变由同终点签名守卫整体跳过
-    assert.ok(panelHtml.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg)"),
+    assert.ok(panelJs.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg)"),
       "same-endpoint guard skips the fetch-landing re-render when data is unchanged");
   });
 
   it("趋势图切口径 seg：重置 reveal 标记走清屏生长，不走 morph；days seg 维持 morph", () => {
-    const m = panelHtml.match(/function initStatsTab\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "initStatsTab found");
+    const m = panelJs.match(/function initStatsTab\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "initStatsTab found in panel.js");
     // 切口径：先重置 statsTrendPrev（下次渲染落 reveal 生长）再重渲，顺序不能反
     const scope = m[1].match(/wireStatsSeg\("statsSegScope", \(v\) => \{([^}]*)\}\)/);
     assert.ok(scope, "statsSegScope wiring found");
@@ -2617,15 +2691,15 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(!days[1].includes("statsTrendPrev"), "days seg keeps the morph path");
     assert.ok(days[1].includes("refreshStatsState()"), "days seg re-fetches window data");
     // 动画决策单点：有上一帧 → morph，无 → reveal（清屏生长）
-    const trend = panelHtml.match(/function renderStatsTrend\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(trend, "renderStatsTrend found");
+    const trend = panelJs.match(/function renderStatsTrend\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(trend, "renderStatsTrend found in panel.js");
     assert.ok(trend[1].includes('statsTrendPrev ? { type: "morph" } : { type: "reveal" }'),
       "anim decision: morph only when a previous frame exists, otherwise reveal");
   });
 
   it("揭示收尾清 _usageRaf 句柄，守卫只挡静默重渲（seg 点击 replay 放行）", () => {
-    const m = panelHtml.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderStatsUsage found");
+    const m = panelJs.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderStatsUsage found in panel.js");
     const body = m[1];
     // 收尾：draw 最后一帧必须清句柄，否则已触发的旧 id 恒真 → 守卫永久吞掉 seg/轮询重渲
     const doneIdx = body.indexOf("else donutEl._usageRaf = null;");
@@ -2648,8 +2722,8 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
       "donut+legend left column precedes bars right column");
 
     // 渲染：与环同一批可见节点（nodes=hidden 过滤后）、同一颜色来源 statsUsageColorOf(key, allNodes)
-    const m = panelHtml.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderStatsUsage found");
+    const m = panelJs.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderStatsUsage found in panel.js");
     const fn = m[1];
     assert.ok(fn.includes('$("statsUsageBars")'), "renderStatsUsage visits bars container");
     assert.ok(fn.includes("barsEl.textContent = \"\""), "bars cleared on every render (空态不渲染)");
@@ -2671,8 +2745,8 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
 
     // 构造器：同色（statsUsageColorOf）、同名（nodeLabel→端点粒度走 statsEndpointLabel）、
     // 数值标签 formatTokensCn；reveal 时 0 高起步，静默（reveal=false）直接画满
-    const bm = panelHtml.match(/function appendStatsUsageBars\(([\s\S]*?)\n  \}/);
-    assert.ok(bm, "appendStatsUsageBars found");
+    const bm = panelJs.match(/function appendStatsUsageBars\(([\s\S]*?)\n  \}/);
+    assert.ok(bm, "appendStatsUsageBars found in panel.js");
     const bb = bm[1];
     assert.ok(bb.includes('rect.setAttribute("fill", statsUsageColorOf(n.key, allNodes))'),
       "bar fill reuses statsUsageColorOf — 与环段/图例点同色");
@@ -2685,8 +2759,8 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   it("同终点守卫：morph 进行中同内容重渲跳过（seg 重击/轮询不重置动画时间轴）", () => {
     // 渲染器顶层守卫：在飞动画存在时先比目标签名（labels+series key/color/dash+values），
     // 一致 → 整体 return 不重启 rAF；不一致或 reveal → 照旧取消重建。
-    const fn = panelHtml.match(/function renderStatsLineChart\(container, cfg, anim\) \{([\s\S]*?)\n  \}/);
-    assert.ok(fn, "renderStatsLineChart found");
+    const fn = panelJs.match(/function renderStatsLineChart\(container, cfg, anim\) \{([\s\S]*?)\n  \}/);
+    assert.ok(fn, "renderStatsLineChart found in panel.js");
     const head = fn[1];
     // 守卫必须在取消在飞 rAF 之前（否则动画已被杀，跳过无意义）
     const guardIdx = head.indexOf("renderStatsTrendSignature(cfg)");
@@ -2695,7 +2769,7 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     assert.ok(cancelIdx !== -1 && guardIdx < cancelIdx,
       "guard runs before cancelling the in-flight rAF");
     // 签名函数存在且覆盖轴与系列（值含在 series.values）
-    assert.ok(panelHtml.includes("function renderStatsTrendSignature(cfg)"),
+    assert.ok(panelJs.includes("function renderStatsTrendSignature(cfg)"),
       "signature helper defined");
     // 守卫成立路径：直接 return，不重建 DOM（textContent 清空在守卫之后）
     const after = head.slice(guardIdx, guardIdx + 400);
@@ -2705,35 +2779,35 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   it("reveal 半途被 morph 接管：dash 从已画弧长连续起步、沿用原时钟归一续推（不重启、总时长不变）", () => {
     // reveal 的 t0 记上 state，供接管沿用
     assert.ok(
-      /const state = \{ raf: 0, current: commitPixels\(\), grown: new Map\(\), targetSig: animSig, t0: performance\.now\(\) \}/.test(panelHtml),
+      /const state = \{ raf: 0, current: commitPixels\(\), grown: new Map\(\), targetSig: animSig, t0: performance\.now\(\) \}/.test(panelJs),
       "reveal state carries t0 for takeover clock inheritance");
     // morph 状态带 dashT0（续接时钟）与 grown（链式续推的成员判定）
     assert.ok(
-      /const state = \{ raf: 0, current: null, targetSig: animSig, t0, dashT0, grown: new Map\(\) \}/.test(panelHtml),
+      /const state = \{ raf: 0, current: null, targetSig: animSig, t0, dashT0, grown: new Map\(\) \}/.test(panelJs),
       "morph state carries dashT0 and grown");
     // 续接时钟沿接管链继承最初 reveal 的时钟，链外取自身 t0
     assert.ok(
-      panelHtml.includes("const dashT0 = (prevAnim && (prevAnim.dashT0 ?? prevAnim.t0)) ?? t0;"),
+      panelJs.includes("const dashT0 = (prevAnim && (prevAnim.dashT0 ?? prevAnim.t0)) ?? t0;"),
       "dashT0 inherited along the takeover chain");
     // 续推从接管点已画弧长 k 连续起步，剩余段按缓动尾部归一（eStart=接管点在原
     // 时钟上的缓动进度）：位置与速度都连续、不重启时钟；旧的「k→total 换全新
     // 1500ms」写法已移除
     assert.ok(
-      panelHtml.includes("const eStart = STATS_MORPH_EASE(Math.min(1, (t0 - dashT0) / STATS_MORPH_MS));")
-        && panelHtml.includes("const pDash = Math.min(1, (t - dashT0) / STATS_MORPH_MS);")
-        && panelHtml.includes("k + (pl.total - k) * (STATS_MORPH_EASE(pDash) - eStart) / (1 - eStart)"),
+      panelJs.includes("const eStart = STATS_MORPH_EASE(Math.min(1, (t0 - dashT0) / STATS_MORPH_MS));")
+        && panelJs.includes("const pDash = Math.min(1, (t - dashT0) / STATS_MORPH_MS);")
+        && panelJs.includes("k + (pl.total - k) * (STATS_MORPH_EASE(pDash) - eStart) / (1 - eStart)"),
       "dash continuation continuous from k, normalized over the remaining ease tail");
-    assert.ok(!panelHtml.includes("(pl.total - k) * e;"),
+    assert.ok(!panelJs.includes("(pl.total - k) * e;"),
       "old clock-restart continuation removed");
     // 续接系列已画弧长回写 grown（链式接管不断链）；播满还原静态 dash
-    assert.ok(panelHtml.includes("state.grown.set(pl.rec.s.key, u);")
-        && panelHtml.includes("if (pDash >= 1) restoreSegs(pl);"),
+    assert.ok(panelJs.includes("state.grown.set(pl.rec.s.key, u);")
+        && panelJs.includes("if (pDash >= 1) restoreSegs(pl);"),
       "grown maintained during carry and dash restored on completion");
   });
 
   it("morph/reveal 进行中 hover 十字线与 tooltip 隐藏（终态坐标不再与曲线错位）", () => {
-    const m = panelHtml.match(/overlay\.addEventListener\("mousemove", \(e\) => \{([\s\S]*?)\n    \}\);/);
-    assert.ok(m, "mousemove handler found");
+    const m = panelJs.match(/overlay\.addEventListener\("mousemove", \(e\) => \{([\s\S]*?)\n    \}\);/);
+    assert.ok(m, "mousemove handler found in panel.js");
     const body = m[1];
     const guardIdx = body.indexOf("container._statsAnim");
     const useIdx = body.indexOf("X(idx)");
@@ -2743,11 +2817,11 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("图例隐藏集 prune + 持久化到 localStorage（panel-stats-legend 并列键）", () => {
-    assert.ok(panelHtml.includes('"panel-stats-legend"'), "legend persistence key used");
-    assert.ok(panelHtml.includes("function saveStatsLegend()"), "saveStatsLegend defined");
-    const trend = panelHtml.match(/function renderStatsTrend\(\) \{([\s\S]*?)\n  \}/);
-    const usage = panelHtml.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
-    assert.ok(trend && usage, "both renderers found");
+    assert.ok(panelJs.includes('"panel-stats-legend"'), "legend persistence key used");
+    assert.ok(panelJs.includes("function saveStatsLegend()"), "saveStatsLegend defined");
+    const trend = panelJs.match(/function renderStatsTrend\(\) \{([\s\S]*?)\n  \}/);
+    const usage = panelJs.match(/function renderStatsUsage\(opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(trend && usage, "both renderers found in panel.js");
     for (const [name, body] of [["renderStatsTrend", trend[1]], ["renderStatsUsage", usage[1]]]) {
       assert.ok(body.includes("liveKeys"), name + " collects live keys");
       assert.ok(body.includes("hidden.delete(k)"), name + " prunes vanished keys");
@@ -2762,9 +2836,9 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("panel-stats-legend 存取往返：Set 序列化为数组、非法形状静默忽略", () => {
-    const load = panelHtml.match(/function loadStatsPrefs\(\) \{([\s\S]*?)\n  \}/);
-    const save = panelHtml.match(/function saveStatsLegend\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(load && save, "load/save functions found");
+    const load = panelJs.match(/function loadStatsPrefs\(\) \{([\s\S]*?)\n  \}/);
+    const save = panelJs.match(/function saveStatsLegend\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(load && save, "load/save functions found in panel.js");
     const factory = new Function(
       "localStorage", "statsPrefs", "statsLegendHidden", "statsUsageHidden",
       "let statsPrefsLoaded = false;\n"
@@ -2806,8 +2880,8 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     for (const id of ["tabBoard", "tabSkills", "tabStore", "tabStats"]) {
       assert.ok(new RegExp(`id="${id}" role="tab" aria-selected=`).test(panelHtml), id + " has tab role + selected state");
     }
-    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "switchView found");
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
     assert.ok(m[1].includes('setAttribute("aria-selected"'), "aria-selected synced in switchView");
   });
 
@@ -2822,34 +2896,35 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("a11y：图例项为 button，趋势/环形 SVG 有 role=img 与 aria-label", () => {
-    assert.ok(!panelHtml.includes('document.createElement("span");\n      chip.className = "stats-legend-item"'),
+    assert.ok(!panelJs.includes('document.createElement("span");\n      chip.className = "stats-legend-item"'),
       "trend legend chip no longer a span");
-    assert.ok(panelHtml.includes('document.createElement("button")'), "legend items are buttons");
-    assert.ok(panelHtml.includes('ariaLabel: "Token 趋势图"'), "trend chart aria-label wired");
-    assert.ok(panelHtml.includes('ariaLabel: "首字响应 TTFT 趋势图"'), "ttft chart aria-label wired");
-    assert.ok(panelHtml.includes('aria-label", "模型用量环形图"'), "donut svg aria-label wired");
-    assert.ok(panelHtml.includes('svg.setAttribute("role", "img")'), "svg role=img set");
+    assert.ok(panelJs.includes('document.createElement("button")'), "legend items are buttons");
+    assert.ok(panelJs.includes('ariaLabel: "Token 趋势图"'), "trend chart aria-label wired");
+    assert.ok(panelJs.includes('ariaLabel: "首字响应 TTFT 趋势图"'), "ttft chart aria-label wired");
+    assert.ok(panelJs.includes('aria-label", "模型用量环形图"'), "donut svg aria-label wired");
+    assert.ok(panelJs.includes('svg.setAttribute("role", "img")'), "svg role=img set");
   });
 
   it("统计卡口径标注唯一性", () => {
     // 卡头标注只留在确有误读风险的卡（TPS）；今日概览与趋势卡头不设标注
     //（今日口径与滚动窗口属默认读法）。
+    const allUiText = panelHtml + panelJs + panelCss;
     for (const note of [
       "仅统计流式请求",
     ]) {
-      assert.ok(panelHtml.includes(`<span class="stats-card-note">${note}</span>`), "note: " + note);
+      assert.ok(allUiText.includes(`<span class="stats-card-note">${note}</span>`), "note: " + note);
     }
-    assert.ok(!panelHtml.includes("成功率不含用户取消"), "统计卡不含该标注");
+    assert.ok(!allUiText.includes("成功率不含用户取消"), "统计卡不含该标注");
     for (const dropped of [
       "今日自然日口径",
       "按过去 24h / 7 日滚动窗口统计",
     ]) {
-      assert.ok(!panelHtml.includes(dropped), "卡头不得出现标注: " + dropped);
+      assert.ok(!allUiText.includes(dropped), "卡头不得出现标注: " + dropped);
     }
     // 取消口径下沉到成功率行标签。
-    assert.ok(panelHtml.includes("成功率（不含取消）"), "success-rate row carries the exclude-cancel caveat");
-    assert.ok(!panelHtml.includes(".stats-usage-grid"), ".stats-usage-grid 不得残留");
-    assert.ok(!panelHtml.includes("图表 tab[柱状图/环形图]"), "图表 tab 注释不得残留");
+    assert.ok(allUiText.includes("成功率（不含取消）"), "success-rate row carries the exclude-cancel caveat");
+    assert.ok(!panelHtml.includes(".stats-usage-grid") && !panelCss.includes(".stats-usage-grid"), ".stats-usage-grid 不得残留");
+    assert.ok(!allUiText.includes("图表 tab[柱状图/环形图]"), "图表 tab 注释不得残留");
     assert.ok(!panelHtml.includes('<section class="skills-view stats-view"'),
       "statsView 不得挂未引用的 .skills-view 类");
     assert.ok(panelHtml.includes('<span class="badge badge-neutral">近 90 天</span>'), "heatmap 90-day badge kept as its annotation");
@@ -2859,6 +2934,11 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
 describe("panel.html claude 全局汇总行（与其他多实例栏同范式）", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 汇总行 DOM 在 panel.html，renderClaude/claudeAggregateMetrics 逻辑已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -2873,8 +2953,8 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
   });
 
   it("renderClaude 接线：会话求和聚合 + 零实例伪实例行 + 折叠门控与其他栏一致", () => {
-    const m = panelHtml.match(/function renderClaude\(c\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderClaude found");
+    const m = panelJs.match(/function renderClaude\(c\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderClaude found in panel.js");
     assert.ok(m[1].includes("const agg = claudeAggregateMetrics(sessions);"), "claude 无聚合桶，由各会话行求和派生");
     assert.ok(m[1].includes("aggregateFallback: buildAggregateFallback(agg, c, isGenerating)"),
       "零实例时用聚合量渲染「全局汇总」伪实例行，收起态不为空");
@@ -2889,8 +2969,8 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
   });
 
   it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {
-    const m = panelHtml.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "claudeAggregateMetrics exists");
+    const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "claudeAggregateMetrics exists in panel.js");
     assert.ok(m[1].includes("tokens.prompt += tk.prompt || 0;"), "tokens 累加");
     assert.ok(m[1].includes("totalRequests += s.requests || 0;"), "请求数累加");
     assert.ok(m[1].includes("durationMs += s.activeDurationMs || 0;"), "工时累加");
@@ -2901,14 +2981,14 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
 });
 
 describe("panel.html 行不含 hover 高亮", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
   it("全局汇总行与实例 title 行（同为 .session-row）不再有鼠标悬浮高亮", () => {
-    assert.ok(!panelHtml.includes(".session-row:hover"), ".session-row 不得含 hover 高亮规则");
-    assert.ok(!panelHtml.includes(".session-name-line:hover"), "session-name-line 无独立 hover 规则");
+    assert.ok(!panelCss.includes(".session-row:hover"), ".session-row 不得含 hover 高亮规则");
+    assert.ok(!panelCss.includes(".session-name-line:hover"), "session-name-line 无独立 hover 规则");
   });
 });
 
@@ -2916,6 +2996,11 @@ describe("panel.html 行不含 hover 高亮", () => {
 describe("panel.html 预设管理 tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 视图容器与按钮在 panel.html，列表/详情/表单/接线逻辑已拆到 panel.js
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -2959,8 +3044,8 @@ describe("panel.html 预设管理 tab", () => {
   });
 
   it("extends switchView / restoreView / init for the presets view without regressing others", () => {
-    const m = panelHtml.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "switchView found");
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
     const body = m[1];
     assert.ok(body.includes('name === "presets"'), "presets branch added");
     assert.ok(body.includes('$("presetsView").hidden = !presets'), "presetsView visibility wired");
@@ -2970,10 +3055,10 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(body.includes('$("skillsView").hidden = !(name === "skills")'), "skills view still exclusive");
     assert.ok(body.includes("refreshSkillsState()"), "skills refresh preserved");
     assert.ok(body.includes("refreshStoreState()"), "store refresh preserved");
-    assert.ok(panelHtml.includes("initPresetsTab();"), "initPresetsTab runs during init");
-    assert.ok(panelHtml.includes('$("tabPresets").onclick = () => switchView("presets")'), "tabPresets click wired");
-    const r = panelHtml.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(r, "restoreView found");
+    assert.ok(panelJs.includes("initPresetsTab();"), "initPresetsTab runs during init");
+    assert.ok(panelJs.includes('$("tabPresets").onclick = () => switchView("presets")'), "tabPresets click wired");
+    const r = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "restoreView found in panel.js");
     assert.ok(r[1].includes('saved === "presets"'), "presets branch added");
     assert.ok(r[1].includes('saved === "skills"'), "skills branch preserved");
     assert.ok(r[1].includes('saved === "store"'), "store branch preserved");
@@ -2981,8 +3066,8 @@ describe("panel.html 预设管理 tab", () => {
   });
 
   it("list rows reuse the skills row template plus a per-preset length badge; header meter painted", () => {
-    const m = panelHtml.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderPresetsList found");
+    const m = panelJs.match(/function renderPresetsList\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderPresetsList found in panel.js");
     const body = m[1];
     assert.ok(body.includes("skills-list-row"), "row reuses .skills-list-row");
     assert.ok(body.includes("skills-list-name"), "title reuses .skills-list-name");
@@ -2997,8 +3082,8 @@ describe("panel.html 预设管理 tab", () => {
   });
 
   it("detail card renders per-endpoint rows with toggle, status badge and sync-error warning", () => {
-    const m = panelHtml.match(/function renderPresetDetail\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "renderPresetDetail found");
+    const m = panelJs.match(/function renderPresetDetail\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "renderPresetDetail found in panel.js");
     const body = m[1];
     assert.ok(body.includes("endpoints.map((ep) =>"), "one row per endpoint (8 from state)");
     assert.ok(body.includes("skills-skill-row"), "endpoint row reuses .skills-skill-row");
@@ -3013,8 +3098,8 @@ describe("panel.html 预设管理 tab", () => {
   });
 
   it("shares one store-style form modal for create/edit with title/tag/content and an error bar", () => {
-    const m = panelHtml.match(/function showPresetFormModal\(preset, values, errorMsg\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "showPresetFormModal found");
+    const m = panelJs.match(/function showPresetFormModal\(preset, values, errorMsg\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "showPresetFormModal found in panel.js");
     const body = m[1];
     assert.ok(body.includes('id="presetFormTitle"'), "title input");
     assert.ok(body.includes('id="presetFormTag"'), "tag input");
@@ -3030,19 +3115,19 @@ describe("panel.html 预设管理 tab", () => {
   it("uses the prompts HTTP contract and the shared api() helper", () => {
     // api() 会自动拼 API_BASE（origin + "/panel"），传入路径必须是不带
     // "/panel" 前缀的 "/api/..."——带前缀会产生 /panel/panel/... 双重前缀 404。
-    assert.ok(panelHtml.includes('api("GET", "/api/prompts/state")'), "state GET");
+    assert.ok(panelJs.includes('api("GET", "/api/prompts/state")'), "state GET");
     for (const p of [
       "/api/prompts/master",
       "/api/prompts/preset/delete",
       "/api/prompts/preset/enable",
       "/api/prompts/override",
     ]) {
-      assert.ok(panelHtml.includes(`"${p}"`), `missing endpoint ${p}`);
+      assert.ok(panelJs.includes(`"${p}"`), `missing endpoint ${p}`);
     }
-    assert.ok(!/api\("(?:GET|POST)", "\/panel\//.test(panelHtml),
+    assert.ok(!/api\("(?:GET|POST)", "\/panel\//.test(panelJs),
       "api() paths must not carry the /panel prefix (double-prefix 404 regression)");
     // 串行刷新链（防乱序），与 skills 同模式
-    assert.ok(panelHtml.includes("presetsRefreshChain"), "serialized refresh chain");
+    assert.ok(panelJs.includes("presetsRefreshChain"), "serialized refresh chain");
   });
 });
 
@@ -3144,16 +3229,22 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
 });
 
 describe("panel.html 面板重启状态机契约", () => {
+  // 主脚本逻辑（恢复轮询/重启执行/控制按住）在 panel.js；开屏复播入口
+  // panelStartupPlay 由 panel.html 的内联脚本暴露，跨文件断言两处都覆盖。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
 
   it("恢复轮询独立成链且不受 document.hidden 门控", () => {
-    assert.ok(panelHtml.includes("function watchPanelHostComeBack()"), "独立的恢复轮询");
-    assert.ok(panelHtml.includes("PANEL_RESTART_POLL_MS"), "恢复轮询自带节奏常量");
-    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
-    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
+    assert.ok(panelJs.includes("function watchPanelHostComeBack()"), "独立的恢复轮询");
+    assert.ok(panelJs.includes("PANEL_RESTART_POLL_MS"), "恢复轮询自带节奏常量");
+    const recoveryStart = panelJs.indexOf("function watchPanelHostComeBack()");
+    const recovery = panelJs.slice(recoveryStart, panelJs.indexOf("if (stopConfirmBtn)", recoveryStart));
     assert.ok(recovery.length > 500, "未真正取到函数体，后续断言会全部落空");
     assert.ok(!recovery.includes("document.hidden"),
       "带 hidden 门控的话，用户点完重启切走标签页就永远检测不到换新");
@@ -3165,18 +3256,18 @@ describe("panel.html 面板重启状态机契约", () => {
   });
 
   it("panelRestarting 同时压住徽标误报与按钮重新启用", () => {
-    assert.ok(panelHtml.includes("let panelRestarting = false;"));
+    assert.ok(panelJs.includes("let panelRestarting = false;"));
     // 徽标：refreshStatus 的 catch 在窗口内不得改判
-    assert.ok(/if \(panelRestarting\) return;\s*\n\s*\$\("topDot"\)\.className = "pulse-dot stopped";/.test(panelHtml),
+    assert.ok(/if \(panelRestarting\) return;\s*\n\s*\$\("topDot"\)\.className = "pulse-dot stopped";/.test(panelJs),
       "面板重启期间 47820 不可达是预期，不能把徽标写成「Relay 未运行」");
     // 按钮：1s 轮询会重新调用 updateRelayControls，不拦住恢复期能再点一次重启
-    assert.ok(/function updateRelayControls\(relay\) \{[\s\S]{0,600}?if \(panelRestarting\) \{[\s\S]{0,200}?return;\s*\}/.test(panelHtml),
+    assert.ok(/function updateRelayControls\(relay\) \{[\s\S]{0,600}?if \(panelRestarting\) \{[\s\S]{0,200}?return;\s*\}/.test(panelJs),
       "updateRelayControls 必须在重启窗口内按住两个按钮后直接返回");
   });
 
   it("面板重启请求用裸 fetch，区分连接掐断与服务端拒绝", () => {
-    const execStart = panelHtml.indexOf("async function executeRestartRelay()");
-    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    const execStart = panelJs.indexOf("async function executeRestartRelay()");
+    const exec = panelJs.slice(execStart, panelJs.indexOf("function watchPanelHostComeBack()", execStart));
     assert.ok(exec.length > 500, "未真正取到 executeRestartRelay 函数体，后续断言会全部落空");
     assert.ok(exec.includes('fetch(API_BASE + "/api/panel-host/restart"'),
       "api() 把「响应被退出掐断」和「403/409/500 明确拒绝」都抛成同一种 Error");
@@ -3186,27 +3277,27 @@ describe("panel.html 面板重启状态机契约", () => {
   });
 
   it("重启窗口复播开屏：确认即盖屏，失败与超时显式收回", () => {
-    assert.ok(panelHtml.includes("window.panelStartupBegin"), "开屏复播入口由 head 内联脚本暴露");
+    assert.ok(panelJs.includes("window.panelStartupBegin"), "开屏复播入口由 head 内联脚本暴露");
     assert.ok(panelHtml.includes("function panelStartupPlay(replayPulse)"), "开屏动画必须是可重复调用的函数，且接受「这一次要不要播脉冲」");
-    const execStart = panelHtml.indexOf("async function executeRestartRelay()");
-    const exec = panelHtml.slice(execStart, panelHtml.indexOf("function watchPanelHostComeBack()", execStart));
+    const execStart = panelJs.indexOf("async function executeRestartRelay()");
+    const exec = panelJs.slice(execStart, panelJs.indexOf("function watchPanelHostComeBack()", execStart));
     assert.ok(exec.includes("playStartupSplash()"), "确认重启后立刻复播开屏盖住页面");
     // 复播必须显式要求播脉冲：只看页面级标记的话，用户停在上次重启恢复页上再点
     // 重启，这一遍开屏会被静默吞成定格（整条链一帧动画都没有）。
-    assert.ok(panelHtml.includes("panelStartupPlay?.(true)"),
+    assert.ok(panelJs.includes("panelStartupPlay?.(true)"),
       "用户点重启触发的复播显式传 true，不依赖页面级标记");
     assert.equal(exec.split("dropStartupSplash()").length - 1, 2,
       "relay 换新失败与面板换新被拒两条失败路径都要收回开屏");
-    const recoveryStart = panelHtml.indexOf("function watchPanelHostComeBack()");
-    const recovery = panelHtml.slice(recoveryStart, panelHtml.indexOf("if (stopConfirmBtn)", recoveryStart));
+    const recoveryStart = panelJs.indexOf("function watchPanelHostComeBack()");
+    const recovery = panelJs.slice(recoveryStart, panelJs.indexOf("if (stopConfirmBtn)", recoveryStart));
     assert.ok(recovery.includes("dropStartupSplash()"), "恢复超时路径也要收回开屏");
     assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
   });
 
   it("launcher 启动固定落看板页，刷新仍恢复上次 tab", () => {
     assert.ok(panelHtml.includes("window.panelStartupLaunch = true"), "标记只在 launcher URL 路径打点");
-    const restoreStart = panelHtml.indexOf("function restoreView()");
-    const restore = panelHtml.slice(restoreStart, panelHtml.indexOf("function reconcileSkillsSelection()", restoreStart));
+    const restoreStart = panelJs.indexOf("function restoreView()");
+    const restore = panelJs.slice(restoreStart, panelJs.indexOf("function reconcileSkillsSelection()", restoreStart));
     assert.ok(restore.length > 100, "未真正取到 restoreView 函数体，后续断言会全部落空");
     assert.ok(restore.includes("if (window.panelStartupLaunch) return;"), "launcher 首开跳过恢复固定看板");
     assert.ok(restore.includes('localStorage.getItem("panel-view")'), "刷新与普通访问仍按 panel-view 恢复");
@@ -3216,6 +3307,16 @@ describe("panel.html 面板重启状态机契约", () => {
 describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  // 弹窗 DOM 在 panel.html，storeRefresh/状态小字/分组渲染逻辑在 panel.js，
+  // 宽幅弹窗与 diff 小字的样式规则在 panel.css
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
@@ -3232,24 +3333,24 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
       assert.ok(panelHtml.includes(`id="${id}"`), `missing element #${id}`);
     }
     assert.ok(panelHtml.includes("diff-modal-overlay"), "弹窗挂宽幅类");
-    assert.ok(panelHtml.includes("srs-diff-link"), "状态小字含 diff 小字类");
-    assert.ok(panelHtml.includes('>查看差异</span>'), "小字文案在线");
-    assert.ok(!panelHtml.includes("展示diff"), "旧文案不得残留");
+    assert.ok(panelJs.includes("srs-diff-link"), "状态小字含 diff 小字类");
+    assert.ok(panelJs.includes('>查看差异</span>'), "小字文案在线");
+    assert.ok(!panelHtml.includes("展示diff") && !panelJs.includes("展示diff"), "旧文案不得残留");
   });
 
   it("「查看差异」小字在可见态可命中（容器 none 需子元素显式开回）", () => {
     // 前提：容器声明不拦指针（浮动小字不挡按钮），这条被删掉会让全页小字都吃点击
-    assert.ok(/\.store-refresh-status\s*\{[^}]*pointer-events:\s*none/.test(panelHtml),
+    assert.ok(/\.store-refresh-status\s*\{[^}]*pointer-events:\s*none/.test(panelCss),
       "容器默认 pointer-events: none（前提）");
     // pointer-events 可继承：不在可见态开回，小字的 onclick 永远不触发
-    assert.ok(panelHtml.includes(".store-refresh-status.show .srs-diff-link { pointer-events: auto; }"),
+    assert.ok(panelCss.includes(".store-refresh-status.show .srs-diff-link { pointer-events: auto; }"),
       "可见态显式恢复小字命中测试");
   });
 
   it("storeRefresh 累积本轮 diff 快照（含池合并与失败原因）", () => {
-    const fnStart = panelHtml.indexOf("async function storeRefresh(");
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
     assert.ok(fnStart >= 0, "storeRefresh 定义存在");
-    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
     assert.ok(fn.length > 500, "storeRefresh 体必须真的被抓取到");
     assert.ok(fn.includes("refreshDiffUnits = []"), "每轮开始清空快照");
     assert.ok(fn.includes("refreshDiffUnits.push({"), "每单元刷完累积快照");
@@ -3260,38 +3361,38 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("「查看差异」小字仅完成态且确有增减/失败时挂出", () => {
-    const fnStart = panelHtml.indexOf("async function storeRefresh(");
-    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
     assert.ok(fn.includes('const hasDiff = refreshDiffUnits.some('), "计算本轮是否有 diff");
     assert.ok(fn.includes('setStoreRefreshStatus("刷新完成", "done", lastTail, hasDiff)'),
       "done 路径把 hasDiff 传给状态小字");
     // setStoreRefreshStatus 第四参数控制 diff 小字显隐
-    const setStart = panelHtml.indexOf("function setStoreRefreshStatus(");
-    const set = panelHtml.slice(setStart, panelHtml.indexOf("// 10s 淡出计时", setStart));
+    const setStart = panelJs.indexOf("function setStoreRefreshStatus(");
+    const set = panelJs.slice(setStart, panelJs.indexOf("// 10s 淡出计时", setStart));
     assert.ok(set.includes("showDiff"), "setStoreRefreshStatus 接收 showDiff 参数");
     assert.ok(set.includes("diff.hidden = !showDiff"), "按 showDiff 切换小字显隐");
   });
 
   it("弹窗打开期间暂停状态小字淡出计时，关闭时重新武装", () => {
-    assert.ok(panelHtml.includes("function armStoreStatusTimer()"), "计时武装函数存在");
-    assert.ok(panelHtml.includes("function disarmStoreStatusTimer()"), "计时暂停函数存在");
-    const openStart = panelHtml.indexOf("function openStoreDiffModal()");
-    const open = panelHtml.slice(openStart, panelHtml.indexOf("function closeStoreDiffModal()", openStart));
+    assert.ok(panelJs.includes("function armStoreStatusTimer()"), "计时武装函数存在");
+    assert.ok(panelJs.includes("function disarmStoreStatusTimer()"), "计时暂停函数存在");
+    const openStart = panelJs.indexOf("function openStoreDiffModal()");
+    const open = panelJs.slice(openStart, panelJs.indexOf("function closeStoreDiffModal()", openStart));
     assert.ok(open.includes("disarmStoreStatusTimer()"), "打开弹窗暂停计时");
-    const closeStart = panelHtml.indexOf("function closeStoreDiffModal()");
-    const close = panelHtml.slice(closeStart, panelHtml.indexOf("// 刷新：全部刷新", closeStart));
+    const closeStart = panelJs.indexOf("function closeStoreDiffModal()");
+    const close = panelJs.slice(closeStart, panelJs.indexOf("// 刷新：全部刷新", closeStart));
     assert.ok(close.includes('classList.contains("show")'), "关闭时判状态小字仍可见");
     assert.ok(close.includes("armStoreStatusTimer()"), "关闭时重新武装 10s");
   });
 
   it("弹窗按单元分组渲染左右分栏，失败渠道单列一区", () => {
-    const grpStart = panelHtml.indexOf("function storeDiffGroupHtml(");
-    const grp = panelHtml.slice(grpStart, panelHtml.indexOf("function openStoreDiffModal()", grpStart));
+    const grpStart = panelJs.indexOf("function storeDiffGroupHtml(");
+    const grp = panelJs.slice(grpStart, panelJs.indexOf("function openStoreDiffModal()", grpStart));
     assert.ok(grp.includes("diff-modal-group-title"), "组标题渲染渠道/池名");
     assert.ok(grp.includes("diff-modal-row"), "每行一个模型 id");
     assert.ok(grp.includes("diff-modal-empty"), "空态兜底");
-    const openStart = panelHtml.indexOf("function openStoreDiffModal()");
-    const open = panelHtml.slice(openStart, panelHtml.indexOf("function closeStoreDiffModal()", openStart));
+    const openStart = panelJs.indexOf("function openStoreDiffModal()");
+    const open = panelJs.slice(openStart, panelJs.indexOf("function closeStoreDiffModal()", openStart));
     assert.ok(open.includes('refreshDiffUnits.filter((u) => u.failed)'), "失败单元单列");
     assert.ok(open.includes("storeDiffFails"), "失败区挂载点");
     assert.ok(open.includes('storeDiffGroupHtml(refreshDiffUnits, "added", "diff-added")'), "左栏新增绿底");
@@ -3299,10 +3400,10 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
   });
 
   it("弹窗关闭走关闭钮/遮罩/Esc 三路（与会话删除确认同模式）", () => {
-    assert.ok(panelHtml.includes('$("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal)'),
+    assert.ok(panelJs.includes('$("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal)'),
       "关闭钮接线");
-    assert.ok(panelHtml.includes('e.target === $("storeDiffMask")'), "遮罩点击关闭");
-    assert.ok(panelHtml.includes('$("storeDiffMask").classList.contains("show")) closeStoreDiffModal()'),
+    assert.ok(panelJs.includes('e.target === $("storeDiffMask")'), "遮罩点击关闭");
+    assert.ok(panelJs.includes('$("storeDiffMask").classList.contains("show")) closeStoreDiffModal()'),
       "Esc 关闭（判 show 态）");
   });
 });
@@ -3376,8 +3477,8 @@ describe("设置项「注入推理强度」", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
     "utf8",
   );
 
@@ -3392,8 +3493,8 @@ describe("设置项「注入推理强度」", () => {
   // 抠出 onchange 函数体，注入假 toggle/api/toast 做真行为断言（全绿不等于可点，
   // 这里跑的就是点击后那段代码）。
   function runToggleHandler({ checked, apiResult }) {
-    const source = panelHtml.match(/injectEffortToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
-    assert.ok(source, "onchange 处理器在 panel.html 里");
+    const source = panelJs.match(/injectEffortToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+    assert.ok(source, "onchange 处理器在 panel.js 里");
     const toggle = {
       checked,
       setAttribute() {},
@@ -3449,22 +3550,33 @@ describe("设置项「注入推理强度」", () => {
 });
 
 describe("panel.html 界面文案边界（实现细节不上屏）", () => {
+  // 用户可见文本分布在三个文件（DOM、脚本 toast/模板、CSS content），负向断言
+  // 必须覆盖三文件拼接后的文本，否则实现细节词会从 panel.js/panel.css 漏上屏。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8",
+  );
+  const allUiText = panelHtml + panelJs + panelCss;
 
   it("服务端失败原文只挂 err.code，上屏一律经 panelError 取文案", () => {
-    assert.ok(panelHtml.includes("err.code = detail;"), "抛出时把服务端原文带在 code 上");
-    assert.ok(panelHtml.includes("function panelError(err, fallback)"), "取文案的唯一出口");
-    assert.ok(panelHtml.includes("function panelCopy(raw, fallback)"), "短码/文案分流的判据");
-    assert.ok(!/\+ (e|err)\.message\b/.test(panelHtml), "不得把 err.message 拼进界面文案");
-    assert.ok(!/\$\{(?:e|err)\.message\}/.test(panelHtml), "模板串里同理");
+    assert.ok(panelJs.includes("err.code = detail;"), "抛出时把服务端原文带在 code 上");
+    assert.ok(panelJs.includes("function panelError(err, fallback)"), "取文案的唯一出口");
+    assert.ok(panelJs.includes("function panelCopy(raw, fallback)"), "短码/文案分流的判据");
+    assert.ok(!/\+ (e|err)\.message\b/.test(allUiText), "不得把 err.message 拼进界面文案");
+    assert.ok(!/\$\{(?:e|err)\.message\}/.test(allUiText), "模板串里同理");
   });
 
   it("CAS 冲突分支比对 err.code：message 带 HTTP 前缀，比对它等于分支不生效", () => {
-    assert.ok(!panelHtml.includes('e.message === "cas-conflict"'), "旧比对不得残留");
-    assert.equal(panelHtml.split('e.code === "cas-conflict"').length - 1, 6,
+    assert.ok(!allUiText.includes('e.message === "cas-conflict"'), "旧比对不得残留");
+    assert.equal(panelJs.split('e.code === "cas-conflict"').length - 1, 6,
       "六处冲突恢复分支全部接线");
   });
 
@@ -3477,8 +3589,8 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
     const codes = [...storeIo.slice(decl, storeIo.indexOf("};", decl)).matchAll(/:\s*"([^"]+)"/g)]
       .map((m) => m[1]);
     assert.ok(codes.length >= 4, "LOAD_REASON 取值被抓到，got " + codes.length);
-    const tbl = panelHtml.indexOf("const STORE_LOAD_COPY");
-    const table = panelHtml.slice(tbl, panelHtml.indexOf("};", tbl));
+    const tbl = panelJs.indexOf("const STORE_LOAD_COPY");
+    const table = panelJs.slice(tbl, panelJs.indexOf("};", tbl));
     assert.ok(tbl >= 0, "译名表在线");
     for (const code of codes) {
       assert.ok(table.includes(`"${code}"`), "缺译名的短码: " + code);
@@ -3487,24 +3599,29 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
 });
 
 describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
-  const panelHtml = readFileSync(
-    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+  // toast 机制与通报函数体在 panel.js；.toast 基座与动作小字命中规则在 panel.css
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
     "utf8",
   );
 
   it("toast 支持动作小字与自定义驻留（可见态开回命中）", () => {
-    assert.ok(/function toast\(msg, isErr, opts\)/.test(panelHtml), "toast 接收 opts 第三参数");
-    assert.ok(panelHtml.includes("(opts && opts.durationMs) || 3000"), "默认 3s、可覆盖驻留时长");
-    assert.ok(panelHtml.includes('link.className = "toast-action"'), "动作小字挂 toast-action 类");
+    assert.ok(/function toast\(msg, isErr, opts\)/.test(panelJs), "toast 接收 opts 第三参数");
+    assert.ok(panelJs.includes("(opts && opts.durationMs) || 3000"), "默认 3s、可覆盖驻留时长");
+    assert.ok(panelJs.includes('link.className = "toast-action"'), "动作小字挂 toast-action 类");
     // 前提：基座 toast 不拦指针（浮动层不遮下方操作）；动作小字必须在可见态
     // 显式开回命中测试，否则 onclick 永远不触发（与 srs-diff-link 同款约束）
-    assert.ok(/\.toast\s*\{[^}]*pointer-events:\s*none/.test(panelHtml), "toast 默认 pointer-events: none（前提）");
-    assert.ok(panelHtml.includes(".toast.show .toast-action { pointer-events: auto; }"),
+    assert.ok(/\.toast\s*\{[^}]*pointer-events:\s*none/.test(panelCss), "toast 默认 pointer-events: none（前提）");
+    assert.ok(panelCss.includes(".toast.show .toast-action { pointer-events: auto; }"),
       "可见态恢复动作小字命中测试");
   });
 
   it("toast 置顶于顶栏下方（底部难以察觉，上移不遮顶栏 tab）", () => {
-    const toastRule = panelHtml.match(/\.toast\s*\{[^}]*\}/);
+    const toastRule = panelCss.match(/\.toast\s*\{[^}]*\}/);
     assert.ok(toastRule, "基座 .toast 规则存在");
     assert.ok(toastRule[0].includes("top: 68px"), "固定在 56px 顶栏下方 12px");
     assert.ok(!toastRule[0].includes("bottom:"), "底部定位已移除");
@@ -3512,10 +3629,10 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   });
 
   it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
-    assert.ok(panelHtml.includes("let storeStatusAwaitReturn = false;"), "一次性等切回标记存在");
-    const nStart = panelHtml.indexOf("function notifyStoreRefreshAway(");
+    assert.ok(panelJs.includes("let storeStatusAwaitReturn = false;"), "一次性等切回标记存在");
+    const nStart = panelJs.indexOf("function notifyStoreRefreshAway(");
     assert.ok(nStart >= 0, "远离通报函数存在");
-    const fn = panelHtml.slice(nStart, panelHtml.indexOf("// 渠道 diff 只摆增减数字", nStart));
+    const fn = panelJs.slice(nStart, panelJs.indexOf("// 渠道 diff 只摆增减数字", nStart));
     assert.ok(fn.includes('if (currentView === "store") return;'), "人在渠道 tab 不通报");
     assert.ok(fn.includes("storeStatusAwaitReturn = true;"), "置等切回标记");
     assert.ok(fn.includes("disarmStoreStatusTimer()"), "停掉小字 10s 淡出计时等人切回");
@@ -3526,8 +3643,8 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   });
 
   it("storeRefresh 三个终态各接线一次通报：完成带聚合与 diff、失败无 diff", () => {
-    const fnStart = panelHtml.indexOf("async function storeRefresh(");
-    const fn = panelHtml.slice(fnStart, panelHtml.indexOf("// ── 新增渠道 modal", fnStart));
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
     assert.equal((fn.match(/notifyStoreRefreshAway\(/g) || []).length, 3,
       "完成/cas冲突/失败三处终态各通报一次（无可刷渠道的空操作不通报）");
     assert.ok(fn.includes('notifyStoreRefreshAway(`刷新完成：${totParts.length ? totParts.join(" ") : "无变化"}`, false, hasDiff)'),
@@ -3539,16 +3656,16 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   });
 
   it("切回渠道 tab 消费标记重计 10s；标记未消费时关弹窗不武装", () => {
-    const swStart = panelHtml.indexOf("function switchView(");
-    const sw = panelHtml.slice(swStart, panelHtml.indexOf("// 看板变体入场", swStart));
+    const swStart = panelJs.indexOf("function switchView(");
+    const sw = panelJs.slice(swStart, panelJs.indexOf("// 看板变体入场", swStart));
     const consumeAt = sw.indexOf("if (store && storeStatusAwaitReturn)");
     assert.ok(consumeAt >= 0, "切回渠道 tab 时检查等切回标记");
     const consume = sw.slice(consumeAt);
     assert.ok(consume.includes("storeStatusAwaitReturn = false;"), "标记一次性消费（再切走不再暂停）");
     assert.ok(consume.includes('classList.contains("show")'), "仅小字仍可见时才重计");
     assert.ok(consume.includes("armStoreStatusTimer()"), "切回重新武装完整 10s");
-    const closeStart = panelHtml.indexOf("function closeStoreDiffModal()");
-    const close = panelHtml.slice(closeStart, panelHtml.indexOf("// 刷新：全部刷新", closeStart));
+    const closeStart = panelJs.indexOf("function closeStoreDiffModal()");
+    const close = panelJs.slice(closeStart, panelJs.indexOf("// 刷新：全部刷新", closeStart));
     assert.ok(close.includes("!storeStatusAwaitReturn"), "标记未消费（人未切回）时关弹窗不武装计时");
   });
 });
