@@ -319,6 +319,11 @@ const AGENT_EFFORT_VOCABULARIES = Object.freeze({
   // EFFORT_LEVELS_ORDER, so the clip effectively passes minimal..max and
   // drops off/light — the request-side dialect fold is the translator's job.
   codex: Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"]),
+  // grok's --reasoning-effort canon is none/minimal/low/medium/high/xhigh/max
+  // (user-guide/14-headless-mode.md): same "none" zero spelling as codex but
+  // without the ultra/persistent extension, so the clip passes minimal..max
+  // and drops off/light exactly like the codex row above.
+  grok: Object.freeze(["none", "minimal", "low", "medium", "high", "xhigh", "max"]),
 });
 
 export function intersectEffortVocabulary(levels, agent) {

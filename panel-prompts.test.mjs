@@ -293,15 +293,16 @@ describe("createPromptsPanelService facade", () => {
     while (tempDirs.length) rmSync(tempDirs.pop(), { recursive: true, force: true });
   });
 
-  it("state exposes the eight endpoints and an initially empty sync snapshot", () => {
+  it("state exposes the nine endpoints and an initially empty sync snapshot", () => {
     const { facade } = makeFacade();
     const state = facade.getState();
     assert.equal(state.enabled, false);
     assert.deepEqual(state.presets, []);
     assert.deepEqual(state.sync, {});
-    assert.equal(state.endpoints.length, 8);
+    assert.equal(state.endpoints.length, 9);
     assert.equal(state.endpoints.some((e) => e.id === "qoder"), true, "qoder must reach the panel endpoint list");
     assert.equal(state.endpoints.some((e) => e.id === "codex"), true, "codex must reach the panel endpoint list");
+    assert.equal(state.endpoints.some((e) => e.id === "grok"), true, "grok must reach the panel endpoint list");
     assert.deepEqual(Object.keys(state.endpoints[0]).sort(), ["hotReload", "id", "label", "targetRel"]);
   });
 
@@ -310,7 +311,7 @@ describe("createPromptsPanelService facade", () => {
     const { preset } = facade.createPreset({ title: "规则A", content: "内容" });
     // Master is off: the sync removed blocks (none) but recorded results.
     let sync = facade.getState().sync;
-    assert.equal(Object.keys(sync).length, 8);
+    assert.equal(Object.keys(sync).length, 9);
     assert.equal(existsSync(join(homeDir, ".claude", "CLAUDE.md")), false);
 
     facade.setMaster(true);

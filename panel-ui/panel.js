@@ -394,7 +394,7 @@ async function api(method, path, body) {
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
-  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex"];
+  const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
@@ -546,6 +546,7 @@ async function api(method, path, body) {
         const qoder = res.agents.find(a => a.id === "qoder");
         const opencode = res.agents.find(a => a.id === "opencode");
         const codex = res.agents.find(a => a.id === "codex");
+        const grok = res.agents.find(a => a.id === "grok");
         if (zc) renderIfChanged("zcode", zc, () => renderZcode(zc));
         if (cc) renderIfChanged("claude", cc, () => renderClaude(cc));
         if (dsh) renderIfChanged("dsh", dsh, () => renderDsh(dsh));
@@ -554,6 +555,7 @@ async function api(method, path, body) {
         if (kimi) renderIfChanged("kimi", kimi, () => renderKimi(kimi));
         if (opencode) renderIfChanged("opencode", opencode, (agent) => renderOpencode(opencode));
         if (codex) renderIfChanged("codex", codex, () => renderCodex(codex));
+        if (grok) renderIfChanged("grok", grok, () => renderGrok(grok));
         // 左栏路由链卡：随 1s 轮询刷退避倒计时，结构指纹闸控 DOM 重建
         renderRouteChainBoard();
       }
@@ -1735,6 +1737,59 @@ async function api(method, path, body) {
     }
   }
 
+  function renderGrok(p) {
+    const modelBadgesList = $("grokModelBadgesList");
+    const errorBanner = $("grokErrorBanner");
+    const empty = $("grokEmpty");
+    const metricsBlock = $("grokMetricsBlock");
+
+    if (modelBadgesList) renderModelBadges(modelBadgesList, "grok", p);
+
+    applyFaultBanner(p, errorBanner, $("grokErrorMsg"), $("grokErrorTime"));
+    empty.closest(".panel-card").classList.toggle("card-collapsed", p.status !== "running");
+
+    if (p.status === "running") {
+      empty.hidden = true;
+      metricsBlock.hidden = false;
+      const isGenerating = (p.metrics && p.metrics.activeRequests > 0) || (p.activeRequests > 0);
+
+      const m = p.metrics || {};
+      const sess = (p.sessions && p.sessions[0]) || {};
+      const tokens = m.tokens || sess.tokens || {};
+
+      // 实例按行排列：无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空
+      const instances = Array.isArray(p.instances) ? p.instances : [];
+      setInstanceCount("grok", instances.length);
+      renderInstanceRows({ prefix: "grok", listEl: $("grokInstancesList"), instances, aggregateFallback: buildAggregateFallback(m, p, isGenerating) });
+      applyDetailFold("grok");
+      gateAggregateRow("grok", $("grokSessionRow"), instances.length);
+
+      $("grokSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
+      $("grokSessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
+
+      const activeTag = $("grokActiveTag");
+      if (isGenerating) {
+        activeTag.hidden = false;
+      } else {
+        activeTag.hidden = true;
+      }
+
+      const activeList = p.activeModels || (p.currentModel ? [p.currentModel] : []);
+      const lastModelTag = $("grokLastModelTag");
+      if (activeList.length > 0) {
+        lastModelTag.textContent = "模型: " + activeList.join(", ");
+      } else if (p.lastModel) {
+        lastModelTag.textContent = "模型: " + p.lastModel;
+      } else {
+        lastModelTag.textContent = "模型: 待命";
+      }
+    } else {
+      setInstanceCount("grok", 0);
+      empty.hidden = false;
+      metricsBlock.hidden = true;
+    }
+  }
+
   function renderOpencode(p) {
     const modelBadgesList = $("opencodeModelBadgesList");
     const errorBanner = $("opencodeErrorBanner");
@@ -2150,7 +2205,8 @@ async function api(method, path, body) {
         const localSpan = element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`);
         if (installation.status === "error" || installation.issue === "not_runnable") localSpan.dataset.tone = "danger";
         line.appendChild(localSpan);
-        const remoteText = goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
+        // 无官方版本源的安装项（Grok Build）不查官方版本，官方列直述「自带更新」
+        const remoteText = !installation.remoteId ? "自带更新" : goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
         line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
         const comparison = goodRemote && validLocal(installation) ? remote.comparison : "unknown";
         const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
@@ -2234,7 +2290,7 @@ async function api(method, path, body) {
           if (!current()) return;
           renderLocal(true);
           get("aboutEnvironmentStatus").textContent = "正在查询官方版本…";
-          const jobs = local.clients.flatMap((client) => client.installations.map((installation) => ({ client, installation })));
+          const jobs = local.clients.flatMap((client) => client.installations.filter((installation) => installation.remoteId).map((installation) => ({ client, installation })));
           let cursor = 0;
           async function worker() {
             while (current() && cursor < jobs.length) {
@@ -2863,7 +2919,7 @@ async function api(method, path, body) {
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex", grok: "Grok Build" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -5201,7 +5257,7 @@ async function api(method, path, body) {
     await refreshPresetsState();
   }
 
-  // 全部注入/全部解除：对 8 端点串行走 override，已是目标状态的端点跳过
+  // 全部注入/全部解除：对 9 端点串行走 override，已是目标状态的端点跳过
   async function setAllPresetInjects(preset, on, btn) {
     if (btn) btn.disabled = true;
     const endpoints = (presetsState && presetsState.endpoints) || [];
@@ -7219,7 +7275,7 @@ async function api(method, path, body) {
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
   // node+model 组合不重复——同节点可绑定不同模型分别入链）。
-  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex"];
+  const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
@@ -8096,7 +8152,7 @@ async function api(method, path, body) {
   const STATS_ENDPOINT_LABELS = {
     zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
     opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code",
-    qoder: "Qoder", codex: "Codex",
+    qoder: "Qoder", codex: "Codex", grok: "Grok Build",
   };
   const statsEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id || "未知端点";
 
@@ -9320,7 +9376,8 @@ async function api(method, path, body) {
   const SESS_ENDPOINT_COLORS = {
     zcode: "var(--ep-zcode)", claude: "var(--ep-claude)", dsh: "var(--ep-dsh)",
     pi: "var(--ep-pi)", kimi: "var(--ep-kimi)",
-    opencode: "var(--ep-opencode)", qoder: "var(--ep-qoder)", codex: "var(--ep-codex)",
+    opencode: "var(--ep-opencode)", qoder: "var(--ep-qoder)",
+    codex: "var(--ep-codex)", grok: "var(--ep-grok)",
   };
   const SESSIONS_ENDPOINTS = AGENT_CARD_ORDER.map((id) => ({
     id,

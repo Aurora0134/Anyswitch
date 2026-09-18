@@ -1,6 +1,6 @@
 // Request-time reasoning-depth injection (the relay's own injection surface).
 //
-// Seven of the eight endpoints can be handed a level picker through their config
+// Seven of the nine endpoints can be handed a level picker through their config
 // file; the relay covers what every endpoint shares on top of that — a client
 // that simply never picks one, and a client that picks one in a shape the
 // upstream does not speak. Qoder has no level surface at all, and kimi's global

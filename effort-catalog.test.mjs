@@ -323,6 +323,17 @@ describe("intersectEffortVocabulary", () => {
     assert.deepEqual(intersectEffortVocabulary(["ultra", "high"], "codex"), ["high"]);
   });
 
+  it("clips to grok's codex-like vocabulary: off/light drop, minimal..max pass", () => {
+    // grok --reasoning-effort speaks none/minimal/low/medium/high/xhigh/max
+    // (user-guide/14-headless-mode.md) — codex's set minus ultra/persistent.
+    assert.deepEqual(
+      intersectEffortVocabulary(["off", "minimal", "low", "medium", "high", "xhigh", "max"], "grok"),
+      ["minimal", "low", "medium", "high", "xhigh", "max"],
+    );
+    assert.deepEqual(intersectEffortVocabulary(["light", "high"], "grok"), ["high"]);
+    assert.deepEqual(intersectEffortVocabulary(["ultra", "persistent", "max"], "grok"), ["max"]);
+  });
+
   it("tolerates an unknown agent and empty input", () => {
     assert.deepEqual(intersectEffortVocabulary(["high"], "nope"), ["high"]);
     assert.deepEqual(intersectEffortVocabulary(undefined, "pi"), []);

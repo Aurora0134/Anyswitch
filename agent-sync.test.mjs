@@ -102,6 +102,18 @@ describe("agent-sync", () => {
     assert.equal(ocAlpha.options.headers["x-agent-id"], "opencode");
     assert.equal(ocAlpha.options.headers["x-agent-instance"], "{env:ANYSWITCH_AGENT_INSTANCE}");
     assert.deepEqual(Object.keys(ocAlpha.models), ["model-1"]);
+
+    assert.ok(res.results.grok);
+    const grokPath = join(tmpRoot, ".grok", "config.toml");
+    assert.equal(existsSync(grokPath), true, "grok config.toml must land under the injected USERPROFILE");
+    const grokText = readFileSync(grokPath, "utf8");
+    assert.match(grokText, /\[model\."anyswitch-alpha-model-1"\]/);
+    assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/alpha\/v1"/);
+    assert.match(grokText, /api_key = "test-token"/);
+    assert.match(grokText, /name = "model-1 · Alpha"/);
+    assert.match(grokText, /context_window = 4096/, "store contextWindow lands verbatim");
+    assert.match(grokText, /extra_headers = \{ "x-agent-id" = "grok" \}/);
+    assert.match(grokText, /env_http_headers = \{ "x-agent-instance" = "ANYSWITCH_INSTANCE_ID" \}/);
   });
 
   it("createStoreWatcher triggers callback when store.json changes", async () => {
@@ -259,6 +271,13 @@ describe("agent-sync pools", () => {
     assert.equal(opencode.provider.alpha, undefined);
     assert.equal(opencode.provider.beta, undefined);
 
+    const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
+    assert.match(grokText, /\[model\."anyswitch-pool-ab-model-1"\]/);
+    assert.match(grokText, /\[model\."anyswitch-pool-ab-model-2"\]/);
+    assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/pool-ab\/v1"/);
+    assert.doesNotMatch(grokText, /anyswitch-alpha/);
+    assert.doesNotMatch(grokText, /anyswitch-beta/);
+
     // Dissolve the pool and re-sync: the pool channel disappears everywhere,
     // the absorbed member channels resurface as standalone channels.
     const second = await syncAllAgentConfigs(syncOpts(poolStore(false)));
@@ -281,6 +300,11 @@ describe("agent-sync pools", () => {
     assert.equal(opencode2.provider["pool-ab"], undefined);
     assert.ok(opencode2.provider.alpha);
     assert.ok(opencode2.provider.beta);
+
+    const grokText2 = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
+    assert.doesNotMatch(grokText2, /anyswitch-pool-ab/, "grok pool channel cleaned up after dissolve");
+    assert.match(grokText2, /\[model\."anyswitch-alpha-model-1"\]/);
+    assert.match(grokText2, /\[model\."anyswitch-beta-model-2"\]/);
   });
 });
 
@@ -320,6 +344,7 @@ describe("agent-sync auto routing channel", () => {
         zcode: { chain: [{ node: "alpha", model: "model-1" }, { node: "beta", model: "model-2" }] },
         kimi: { chain: [{ node: "beta", model: "model-2" }] },
         opencode: { chain: [{ node: "beta", model: "model-2" }] },
+        grok: { chain: [{ node: "beta", model: "model-2" }] },
       };
     }
     return store;
@@ -363,6 +388,14 @@ describe("agent-sync auto routing channel", () => {
     assert.equal(opencode.provider.auto.options.baseURL, "http://127.0.0.1:47821/openai/beta/v1");
     assert.deepEqual(Object.keys(opencode.provider.auto.models), ["auto"]);
 
+    // grok has a chain headed by beta: the auto entry is the virtual "auto"
+    // model on the head's URL segment, keyed with the managed prefix.
+    const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
+    assert.match(grokText, /\[model\."anyswitch-auto"\]/);
+    assert.match(grokText, /model = "auto"/);
+    assert.match(grokText, /name = "auto"/);
+    assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/beta\/v1"/);
+
     // Delete the chains and re-sync: _auto disappears everywhere.
     const second = await syncAllAgentConfigs(syncOpts(chainStore(false)));
     assert.equal(second.ok, true);
@@ -378,5 +411,9 @@ describe("agent-sync auto routing channel", () => {
     const opencode2 = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
     assert.equal(opencode2.provider.auto, undefined, "opencode auto cleaned up after chain deletion");
     assert.ok(opencode2.provider.alpha);
+
+    const grokText2 = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
+    assert.doesNotMatch(grokText2, /anyswitch-auto/, "grok auto cleaned up after chain deletion");
+    assert.match(grokText2, /\[model\."anyswitch-beta-model-2"\]/, "real grok channels survive the cleanup");
   });
 });

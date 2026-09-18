@@ -4,7 +4,7 @@ import { join, dirname, resolve, isAbsolute, extname, basename, relative } from 
 import {
   resolveClaudeExecutable, resolveCodexExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
-  resolveZcodeExecutable,
+  resolveZcodeExecutable, resolveGrokExecutable,
 } from "./agent-discovery.mjs";
 
 // Qoder is a desktop-only client here: ~/.qoder/entry/qoder.cmd is the IDE's
@@ -56,9 +56,17 @@ const CLIENTS = [
   ["dsh", "DSH", resolveDshExecutable],
   ["zcode", "ZCode", resolveZcodeExecutable],
   ["qoder", "Qoder", resolveQoderExecutable],
+  // Grok Build is a native binary like codex: version comes from the CLI's own
+  // --version report (probeVersion branch below), never an npm package.json.
+  ["grok", "Grok Build", resolveGrokExecutable],
 ];
 
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
+
+// Grok Build is a native binary with its own `grok update` and no public
+// release feed — no entry in release-service.mjs CLIENTS, so the about page
+// must not issue an official-latest query for it.
+const NO_OFFICIAL_SOURCE = new Set(["grok"]);
 
 function missing(error) {
   return ["ENOENT", "ENOTDIR"].includes(error?.code);
@@ -143,14 +151,17 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
   }
 
   async function inspect(id, kind, locate) {
-    const result = { kind, remoteId: id, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    // Clients without a public release feed (Grok Build: native binary,
+    // self-updates via `grok update`) get no remoteId — the about page then
+    // skips the official-latest query instead of showing a query failure.
+    const result = { kind, remoteId: NO_OFFICIAL_SOURCE.has(id) ? null : id, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
     try {
       let path = locate(base, resolverIo);
       if (!isFile(path)) return result;
       if (["pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
       if (!path || !isFile(path)) return result;
       Object.assign(result, { status: "found", path, issue: "version_unavailable" });
-      if (id === "codex") {
+      if (id === "codex" || id === "grok") {
         const probe = await probeVersion(path);
         if (probe?.missing) return { ...result, status: "not_found", path: null, issue: "entry_missing" };
         return probe?.version

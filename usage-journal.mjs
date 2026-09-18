@@ -10,7 +10,7 @@
 // Entry schema (contract for writers and the aggregation layer):
 //
 // requests line:
-//   { "ts": 1724900000000, "agentId": "zcode|dsh|kimi|pi|qoder|opencode|claude|codex",
+//   { "ts": 1724900000000, "agentId": "zcode|dsh|kimi|pi|qoder|opencode|claude|codex|grok",
 //     "providerId": "渠道id或号池id(池按整体)", "model": "kimi-k3",
 //     "prompt": 1234, "completion": 567, "cached": 100,
 //     "ttftMs": 850, "durationMs": 5200, "ok": true, "status": 200,

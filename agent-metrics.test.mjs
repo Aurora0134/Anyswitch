@@ -1766,7 +1766,7 @@ describe("createAgentMetricsCollector", () => {
     req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
     const status = await collector.getAgentsStatus();
-    assert.equal(status.length, 8, "panel now exposes 8 endpoint cards including codex");
+    assert.equal(status.length, 9, "panel now exposes 9 endpoint cards including grok");
     const opencode = status.find((a) => a.id === "opencode");
     assert.ok(opencode);
     assert.equal(opencode.status, "running");
@@ -1778,6 +1778,65 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(opencode.sessions[0].id, "opencode-global");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0);
+  });
+
+  it("routes grok traffic by x-agent-id and detects grok.exe", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => {
+      const csv = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Users\\tester\\.grok\\bin\\grok.exe,grok.exe,7400\r\n`;
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn });
+    const req = collector.startRequest({
+      agentId: "grok",
+      providerId: "poke-api",
+      model: "grok-4",
+    });
+    mockTime = 2200;
+    req.recordFirstChunk();
+    mockTime = 3200;
+    req.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    const status = await collector.getAgentsStatus();
+    assert.equal(status.length, 9, "panel exposes 9 endpoint cards including grok");
+    const grok = status.find((a) => a.id === "grok");
+    assert.ok(grok);
+    assert.equal(grok.name, "Grok Build");
+    assert.equal(grok.status, "running");
+    assert.equal(grok.processCount, 1);
+    assert.equal(grok.lastModel, "grok-4");
+    assert.equal(grok.metrics.totalRequests, 1);
+    assert.equal(grok.sessionMode, "aggregate");
+    // grok.exe 每终端一进程：扫描到的 pid 立即出 kimi 同款占位实例行。
+    assert.deepEqual(grok.instances.map((i) => i.id), ["grok-7400"]);
+    const zcode = status.find((a) => a.id === "zcode");
+    assert.equal(zcode.metrics.totalRequests, 0);
+  });
+
+  it("routes grok traffic by User-Agent header (grok-cli/<version>) if agentId is missing", async () => {
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => cb(null, "");
+    const collector = testCollector({ execFn: mockExec, nowFn });
+
+    const req = collector.startRequest({
+      userAgent: "grok-cli/1.0.30",
+      providerId: "poke-api",
+      model: "grok-4",
+    });
+    mockTime = 2000;
+    req.recordFirstChunk();
+    mockTime = 3000;
+    req.recordEnd({ usage: { prompt_tokens: 100, completion_tokens: 20 } });
+
+    const status = await collector.getAgentsStatus();
+    const grok = status.find((a) => a.id === "grok");
+    const zcode = status.find((a) => a.id === "zcode");
+
+    assert.equal(grok.metrics.totalRequests, 1);
+    assert.equal(grok.lastModel, "grok-4");
+    assert.equal(zcode.metrics.totalRequests, 0, "grok traffic must not fall back into the zcode bucket");
   });
 
   it("collects opencode PIDs into opencodePids like the other endpoints", async () => {
@@ -1840,7 +1899,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     // The claude aggregate bucket stays internal: the panel keeps its fixed
     // cards and claude's card remains the per-session reporter one.
-    assert.equal(status.length, 8, "claude aggregate bucket must not add a panel card");
+    assert.equal(status.length, 9, "claude aggregate bucket must not add a panel card");
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
@@ -3598,19 +3657,19 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   const wmicWrapper = (extraRows = []) =>
     "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n" +
     [
-      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
+      "LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"wmic process where \"name='ZCode.exe' or name='claude.exe' or name='opencode.exe' or name='dsh.exe' or name='pi.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='node.exe' or name='cmd.exe'\" get ProcessId,ParentProcessId,CommandLine,Name /format:csv\",cmd.exe,5184,7300",
       ...extraRows,
     ].join("\r\n") + "\r\n";
   const allZero = (p) => ({
     zcode: p.zcode, claude: p.claude, dsh: p.dsh,
-    kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder, codex: p.codex,
+    kimi: p.kimi, pi: p.pi, opencode: p.opencode, qoder: p.qoder, codex: p.codex, grok: p.grok,
   });
 
   it("wmic wrapper row carrying every agent name literal counts as nothing", async () => {
     const execFn = (cmd, opts, cb) => cb(null, wmicWrapper());
     const collector = testCollector({ execFn, nowFn: () => 10000 });
     const p = await collector.scanProcesses();
-    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0, codex: 0 },
+    assert.deepEqual(allZero(p), { zcode: 0, claude: 0, dsh: 0, kimi: 0, pi: 0, opencode: 0, qoder: 0, codex: 0, grok: 0 },
       "the probe's own cmd.exe wrapper must not impersonate any client");
     assert.equal(p.qoderPids.has(7300), false);
     // The wrapper stays in the lineage table — it is a legitimate hop for

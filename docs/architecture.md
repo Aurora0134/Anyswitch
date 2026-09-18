@@ -26,9 +26,9 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
         ▼                               ▼
 ┌───────────────────────────┐  ┌────────────────────────────────────┐
 │  B 层 · relay（本仓库）     │  │  B 层 · 端点配置写手（本仓库）        │
-│  loopback HTTP 服务：鉴权/  │  │  把托管渠道写进 7 家端点各自的配置    │
+│  loopback HTTP 服务：鉴权/  │  │  把托管渠道写进 8 家端点各自的配置    │
 │  路由/协议转换/退避/流式,   │  │  文件（zcode/dsh/pi/kimi/qoder/     │
-│  常驻宿主+Web 控制面板      │  │  codex/opencode）                  │
+│  常驻宿主+Web 控制面板      │  │  codex/opencode/grok）             │
 └───────────────────────────┘  └────────────────────────────────────┘
 ```
 
@@ -105,32 +105,32 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；客户端安装/更新走 `POST /panel/api/environment/update` 加 `GET /panel/api/environment/update/<runId>` 查询进度：写请求沿用面板写闸门，服务端全局单飞（并发第二个任务 409），任务在后台跑、结果留内存供轮询，安装完成或失败后强制重查本地检测与官方最新再归为已更新/未生效/失败/装上了跑不起来。当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
 - `panel-ui/panel.html` — 面板 Web UI 骨架（DOM + 防闪烁/开屏内联小脚本，2026-09-17 起样式与主脚本外链到 `panel-ui/panel.css` / `panel-ui/panel.js`）；静态文件按请求检查 mtime 缓存与 ETag，刷新可加载新的页面资源。后端模块和进程版本需 panel-host 换新进程才生效；现有「重启」按钮先重启 relay、再重启 panel-host，会中断在途请求，执行时机由用户安排。
 - `agent-discovery.mjs` — 无启动副作用的客户端路径发现，供启动器和本地环境检测共享；除 Codex 一次有界 `--version` 自报外，检测不得调用启动器或目标客户端。
-- `environment-service.mjs` — 关于页本地环境服务：读取八个客户端选定安装的公开包元数据、包装脚本目标及必要的 PE/ASAR 产品资料；返回 Windows、当前面板 Node 版本、安装发现状态与版本来源。只发现安装不代表可运行、已登录或已接入 relay；路径存在但缺执行体、无法读产品版本、装了但跑不起来、读取失败分别呈现。
-- `client-lifecycle.mjs` — 关于页安装/更新的执行面，与只读检测分开：六个 npm 托管 CLI 各绑一个固定包名（zcode/qoder 是桌面应用，不在此表内即面板不代管）；用当前 node 直接跑与它同目录的 `npm-cli.js` 执行全局安装，不经 shell、不依赖 PATH，客户端 id 只做白名单查表。超时只当泄漏兜底（分钟级），不中途杀慢安装。
+- `environment-service.mjs` — 关于页本地环境服务：读取九个客户端选定安装的公开包元数据、包装脚本目标及必要的 PE/ASAR 产品资料；返回 Windows、当前面板 Node 版本、安装发现状态与版本来源。只发现安装不代表可运行、已登录或已接入 relay；路径存在但缺执行体、无法读产品版本、装了但跑不起来、读取失败分别呈现。
+- `client-lifecycle.mjs` — 关于页安装/更新的执行面，与只读检测分开：六个 npm 托管 CLI 各绑一个固定包名（zcode/qoder 是桌面应用、grok 是无 npm/GitHub 版本源的原生二进制且自带 `grok update` 自更新，均不在此表内即面板不代管）；用当前 node 直接跑与它同目录的 `npm-cli.js` 执行全局安装，不经 shell、不依赖 PATH，客户端 id 只做白名单查表。超时只当泄漏兜底（分钟级），不中途杀慢安装。
 - `version-check.mjs` / `release-service.mjs` — 版本比较与固定官方来源查询。Anyswitch 查固定仓库 Releases，排除草稿；preview 身份包含预发布，正式版身份优先正式发布、正式渠道一个 Release 都没有时回退到最新预览版并带预览标识；按 SemVer 选择目标并返回对应真实发布页；分页不完整或网络失败不能报「已是最新」。客户端官方版本逐项查询，失败互不影响；远端缓存十分钟、本地检测缓存一分钟，进关于页自动查一次走缓存、手动检查强制刷新但复用同一进行中请求，不接入每秒看板轮询。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
-- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/codex/zcode/opencode/pi/kimi/dsh/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
+- `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/codex/zcode/opencode/pi/kimi/dsh/qoder/grok）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
-- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode）。
+- `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode/grok）。
 - `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 关于页的版本来源边界
-- 本地版本来自所选安装的产品资料；唯一例外是 Codex——其原生二进制无版本资源、安装目录为哈希，改由一次带超时、无 shell 的 `codex --version` 自报，探测不达时呈现「已安装但无法运行」，文件消失则回落未找到。其余情形不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考。
-- 官方查询限定产品来源：Claude Code、OpenCode、Pi、Kimi Code、DSH 取对应 npm 包的 `latest`；Codex 查 `openai/codex` 正式 Release；ZCode 查官方 stable manifest；Qoder 查官方桌面清单。npm `latest` 不等于稳定版，也不代表读取了用户的更新渠道，DSH 等版本中的 `rc` 标识须保留。
+- 本地版本来自所选安装的产品资料；唯二例外是 Codex 与 Grok Build——两者都是原生二进制，没有可读的产品版本资源（Codex 的安装目录还是哈希），改由一次带超时、无 shell 的 `<客户端> --version` 自报（`codex --version` / `grok --version`），探测不达时呈现「已安装但无法运行」，文件消失则回落未找到。其余情形不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考。
+- 官方查询限定产品来源：Claude Code、OpenCode、Pi、Kimi Code、DSH 取对应 npm 包的 `latest`；Codex 查 `openai/codex` 正式 Release；ZCode 查官方 stable manifest；Qoder 查官方桌面清单。Grok Build 既无 npm 包也无 GitHub 版本源、由自带 `grok update` 自更新，因此不参与官方版本查询，也不在面板的安装/更新执行面内。npm `latest` 不等于稳定版，也不代表读取了用户的更新渠道，DSH 等版本中的 `rc` 标识须保留。
 - Qoder 是纯桌面条目：`~/.qoder/entry/qoder.cmd` 是桌面 IDE 随装的命令调度器（`code.cmd` 同构），不是独立安装的 CLI 产品，不作检测对象；包装入口残留而执行体缺失不能报已安装。无法读取本地版本时仍可独立显示官方版本，不能拿目录哈希、运行时版本或另一产品版本代填。
 - 关于页只查版本并链接真实发布说明，不下载替换程序、不安装或升级客户端。查询不携带用户认证和设备标识；接口只接受白名单客户端和刷新参数，不接受任意 URL、路径或命令。
 
 ### 客户端集成
-- `codex-launcher.mjs` / `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `qoder-launcher.mjs` — 各客户端启动器：探测或拉起 relay、同步托管配置，按各客户端约定提供鉴权与实例标识，并设置 NO_PROXY 后启动客户端。
+- `codex-launcher.mjs` / `opencode-launcher.mjs` / `pi-launcher.mjs` / `zcode-launcher.mjs` / `dsh-launcher.mjs` / `kimi-launcher.mjs` / `qoder-launcher.mjs` / `grok-launcher.mjs` — 各客户端启动器：探测或拉起 relay、同步托管配置，按各客户端约定提供鉴权与实例标识，并设置 NO_PROXY 后启动客户端。
 - `qoder-cdp-refresh.mjs` — Qoder 模型目录重载：Qoder 没有从配置面触发目录刷新的入口，启动器因此带一个只绑 127.0.0.1 的 DevTools 端口拉起它，等渲染进程就绪后调用一次重载。尽力而为——端口不可用、渲染进程未就绪或对方接口变动都只记录并跳过，不阻塞也不打断启动。
 - opencode 启动器确保 relay 运行、经 `writeOpencodeConfig` 同步 `~/.config/opencode/opencode.json`、设置环境变量后启动 OpenCode；生成的统一实例 ID（`<cwd基名>-<launcher pid>`）经 `ANYSWITCH_AGENT_INSTANCE` 传给子进程，由托管配置里每个 provider 的 `{env:ANYSWITCH_AGENT_INSTANCE}` 头引用展开为 `x-agent-instance`（per-process，不落盘；直启无该环境变量时头为空，relay 丢弃后走 socket→PID 兜底）。
 - launcher 注入的 `<cwd基名>-<launcher pid>` 只是传输形态：消费侧（collector.startRequest 内的 normalizeInstanceId，按进程血缘把 launcher pid 解析到客户端 pid）会把它归一为规范的 `<agentId>-<客户端pid>`，cwd 基名降级为实例行的展示 label；归一失败（无数字尾或血缘查不到）才按原样保留为自定义 id。
 - 已知限制（实例归一的冷缓存窗口）：归一依赖 scanProcesses 的进程缓存，该缓存由面板轮询驱动刷新。relay 刚重启、缓存尚空时到达的 launcher 形态 id 会归一失败，以原始 `<cwd基名>-<launcher pid>` 建行，与缓存热后归一出的 `<agentId>-<客户端pid>` 行短暂并存（面板出两行、首请求计数拆两桶）；旧行无流量刷新，由 10min 闲置 TTL 清除。需「relay 刚重启 + 面板未轮询 + launcher 实例恰在发请求」三者同时成立才触发。
-- `kimi-merge-config.mjs` / `zcode-merge-config.mjs` / `dsh-merge-config.mjs` / `pi-merge-models.mjs` / `qoder-merge-config.mjs` / `opencode-merge-config.mjs` — 各家客户端配置合并：把 store 的托管渠道写进各家自己的配置文件，格式与位置按各家约定（kimi `~/.kimi-code/config.toml`、zcode `~/.zcode/v2/config.json`、dsh `~/.dsh/settings.yaml`、pi `~/.pi/agent/models.json`、qoder `~/.qoder/settings.json`、opencode `~/.config/opencode/opencode.json`）。opencode 带 `x-agent-id: opencode` + `{env:}` 实例头，apiKey 用 `{file:}` 引用不落盘；qoder 无自定义头能力，改由 URL 段身份前缀归属（见 `openai-path.mjs`）。
+- `kimi-merge-config.mjs` / `zcode-merge-config.mjs` / `dsh-merge-config.mjs` / `pi-merge-models.mjs` / `qoder-merge-config.mjs` / `opencode-merge-config.mjs` / `grok-merge-config.mjs` — 各家客户端配置合并：把 store 的托管渠道写进各家自己的配置文件，格式与位置按各家约定（kimi `~/.kimi-code/config.toml`、zcode `~/.zcode/v2/config.json`、dsh `~/.dsh/settings.yaml`、pi `~/.pi/agent/models.json`、qoder `~/.qoder/settings.json`、opencode `~/.config/opencode/opencode.json`、grok `~/.grok/config.toml`）。opencode 带 `x-agent-id: opencode` + `{env:}` 实例头，apiKey 用 `{file:}` 引用不落盘；qoder 无自定义头能力，改由 URL 段身份前缀归属（见 `openai-path.mjs`）。
 - `codex-merge-config.mjs` — codex 客户端配置合并：托管渠道写入 `~/.codex/config.toml` 的 `[model_providers.anyswitch-*]` 表（`wire_api="responses"` 指向 relay 的 `/openai/<seg>/v1`，token 为字面量 Authorization 头，`x-agent-instance` 走 `env_http_headers` 环境变量名占位）；并生成模型目录 `~/.codex/model-catalogs/anyswitch-models.json`——字段模板取自模板资产 `codex-model-catalog-template.json`（上游 openai/codex 官方 models.json 的 gpt-5.5 条目逐字提取），生成时强制覆盖 `multi_agent_version:"v2"`、`supports_search_tool:false`、`prefer_websockets:false` 等请求塑形字段，config.toml 顶层写 `model_catalog_json` 指针；用户自指的 `model_catalog_json` 不覆盖（残留的旧目录文件会被清掉），空模型集时清掉指针与生成的目录文件。
 - `merge-common.mjs` — 上述合并模块共用的 sidecar 读写契约：数据根下一个 JSON 对象 `{ "providers": [ids…] }`（id 排序、2 空格缩进、结尾换行），记录 anyswitch 托管了哪些条目，解除托管时据此精确剥离、不碰用户自有条目。
 - 不经启动器直接启动客户端（例如在终端里跑 `kimi`）是支持的用法，此时请求既无 `x-agent-instance` 头、relay key 也无实例后缀；这类直连请求由 relay 侧 socket→PID 兜底归组——按连接对端端口查 netstat 缓存拿到客户端进程 PID，实例 id 形如 `kimi-<PID>`，面板实例行与实例计数因此照常出现。边角：客户端若经本地代理（环回代理进程）转发，连接归属的是代理 PID，多个实例会折叠进同一行。

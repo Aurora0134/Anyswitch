@@ -306,6 +306,7 @@ export const ROUTING_ENDPOINT_IDS = Object.freeze([
   "reasonix",
   "qoder",
   "codex",
+  "grok",
 ]);
 // Exported so the service layer (store-service.saveRouteChain) enforces the
 // same chain length limit instead of carrying its own magic number.

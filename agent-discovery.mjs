@@ -105,6 +105,23 @@ export function resolveZcodeExecutable(base = process.env) {
   );
 }
 
+export function resolveGrokExecutable(base = process.env) {
+  const override = absoluteOverride(base, "GROK_EXECUTABLE");
+  if (override !== null) {
+    if (!/\.exe$/i.test(override)) {
+      throw new Error(
+        `GROK_EXECUTABLE must point at a .exe, got "${override}". ` +
+          `Pointing it at a .cmd/.ps1/shim wrapper could make the launcher recurse into itself.`,
+      );
+    }
+    return override;
+  }
+  // Grok Build is a native binary installed under its own home (~/.grok, docs:
+  // user-guide/14-headless-mode.md "File Locations"); GROK_HOME only moves the
+  // config root, not this machine's managed install location.
+  return join(base.USERPROFILE ?? "", ".grok", "bin", "grok.exe");
+}
+
 export function resolveQoderExecutable(base = process.env, io = { existsSync }) {
   const override = absoluteOverride(base, "QODER_EXECUTABLE");
   if (override !== null) return override;

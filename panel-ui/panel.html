@@ -1033,6 +1033,56 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
+          <!-- 10. Grok Build 模块 -->
+          <div class="panel-card" data-agent-id="grok">
+            <div class="card-body">
+              <div class="agent-top-bar">
+                <div class="agent-brand">
+                  <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
+                    <img src="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%3E%3Crect%20width%3D%2232%22%20height%3D%2232%22%20rx%3D%227%22%20fill%3D%22%2318181b%22%2F%3E%3Cpath%20d%3D%22M13%2025%20L21%207%20h-4.2%20L8.8%2025%20z%22%20fill%3D%22%23ffffff%22%2F%3E%3C%2Fsvg%3E" width="32" height="32" alt="Grok Build" style="width:32px; height:32px; border-radius:8px; display:block; object-fit:contain;">
+                  </div>
+                  <div class="agent-headings">
+                    <h3>Grok Build</h3>
+                    <span class="instance-count-badge" id="grokInstanceCount" hidden></span>
+                  </div>
+                </div>
+                <div class="agent-actions">
+                  <div id="grokModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
+                  <button type="button" class="agent-detail-fold" data-prefix="grok" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                </div>
+              </div>
+
+              <div class="alert-box danger" id="grokErrorBanner" hidden>
+                <div class="left">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <span id="grokErrorMsg">HTTP 502 · Upstream Error</span>
+                </div>
+                <div class="time" id="grokErrorTime">刚刚</div>
+              </div>
+
+              <div id="grokEmpty" class="empty-hint">未检测到运行中的 Grok Build 客户端</div>
+
+              <div id="grokMetricsBlock" hidden>
+                <div class="session-table-wrapper">
+                  <div id="grokInstancesList"></div>
+                  <div class="session-row detail-open-only" id="grokSessionRow">
+                    <div class="session-main">
+                      <div class="session-name-line">
+                        <span>全局汇总</span>
+                        <span class="badge badge-neutral" id="grokSessionReqs">0 次请求</span>
+                      </div>
+                      <div class="session-tokens-line" id="grokSessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
+                    </div>
+                    <div class="session-tags-line">
+                      <span class="tag-bubble" id="grokActiveTag" hidden><i class="lamp lamp-green"></i> 正在生成</span>
+                      <span class="tag-bubble" id="grokLastModelTag">模型: 未选择</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
         </div>
       </section>
     </div>

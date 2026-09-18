@@ -53,7 +53,7 @@ export function probeRelay(port) {
 // x-agent-id 只接受其中的已知值（trim + 小写归一）；未知值视为配置错误
 // 或非授权客户端，一律回落 UA 识别与兜底，杜绝幽灵端点 id 进入 journal、
 // 面板分桶和链路由查询。
-const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "qoder", "opencode", "claude", "codex"]);
+const KNOWN_AGENT_IDS = new Set(["zcode", "dsh", "kimi", "pi", "qoder", "opencode", "claude", "codex", "grok"]);
 
 function explicitAgentId(headers) {
   const raw = headers["x-agent-id"];
@@ -215,6 +215,7 @@ function openaiAgentIdFrom(headers, agentHint = null) {
   if (ua.includes("kimi-code") || ua.includes("kimi/")) return "kimi";
   if (ua.includes("qoder")) return "qoder";
   if (ua.includes("codex_cli_rs") || ua.includes("codex-tui")) return "codex";
+  if (ua.includes("grok-cli/")) return "grok";
   return "zcode";
 }
 

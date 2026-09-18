@@ -2493,9 +2493,9 @@ describe("panel.html 结构完整性（超长行原样保留）", () => {
       "超长 base64 行一旦被占位文本替换，头像 img src 会损坏、监测卡标题会错乱");
   });
 
-  it("监测页八个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
-    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 8, "8 个 agent-avatar");
-    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 8, "8 个 agent-headings");
+  it("监测页九个端点卡的头像区结构配对完整（avatar/headings 成对、无跨标签吞并）", () => {
+    assert.equal((panelHtml.match(/class="agent-avatar"/g) || []).length, 9, "9 个 agent-avatar");
+    assert.equal((panelHtml.match(/class="agent-headings"/g) || []).length, 9, "9 个 agent-headings");
     // img 开标签必须在本行内闭合（不允许 > 落在数千字符之后吞掉后续结构）
     let idx2 = 0;
     let broken = 0;
@@ -3168,7 +3168,7 @@ describe("panel.html 预设管理 tab", () => {
     const m = panelJs.match(/function renderPresetDetail\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "renderPresetDetail found in panel.js");
     const body = m[1];
-    assert.ok(body.includes("endpoints.map((ep) =>"), "one row per endpoint (8 from state)");
+    assert.ok(body.includes("endpoints.map((ep) =>"), "one row per endpoint (9 from state)");
     assert.ok(body.includes("skills-skill-row"), "endpoint row reuses .skills-skill-row");
     assert.ok(body.includes('class="toggle"'), "per-endpoint toggle present");
     assert.ok(body.includes("data-inject="), "toggle carries the endpoint id");
