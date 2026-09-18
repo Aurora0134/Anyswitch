@@ -130,11 +130,13 @@ The panel is served by a standalone panel host decoupled from the relay, so it s
 - **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
 - **设置 (Settings)** — **通用 (General) / 主题 (Theme) / 关于 (About)**. About has two stacked cards: Anyswitch version and update checks above, local environment below.
 
-The upper card shows the version of the running panel process and a preview label where applicable. Opening About loads that version; Anyswitch checks for updates only when you click **检查更新 (Check for updates)**, with a link to the matching release notes when a newer release is found.
+The upper card shows the version of the running panel process and a preview label where applicable. Opening About loads that version and checks for updates once against the cached result; clicking **检查更新 (Check for updates)** always forces a fresh lookup. When a newer release is found, a link to the matching release notes appears — and if only a preview release exists, it is offered and clearly marked as a preview rather than reported as "no releases".
 
-The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all eight clients listed above. It reads installation locations and product metadata without launching a client, then separately queries official versions. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
+The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all eight clients listed above. Detection reads installation locations and product metadata without launching a client — the single exception is Codex, whose native binary carries no readable version, so it is asked once for its own `codex --version` report under a timeout; an installation that fails that probe is shown as installed but not runnable. Official versions are queried separately per client. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
 
-Detection distinguishes an installation found, not found, a version that cannot be read, and a detection failure. It does not prove a client can run, is signed in, or is connected to the relay. Official `latest` is the published channel being queried, not a claim about your selected update channel or a guarantee of a stable release; prerelease labels are retained. Qoder stays one client entry with separate **CLI** and **desktop** version rows, compared only within their own product lines. Unknown local versions remain unknown even when an official version is available.
+Detection distinguishes an installation found, not found, a version that cannot be read, installed but not runnable, and a detection failure. It does not prove a client can run, is signed in, or is connected to the relay. Official `latest` is the published channel being queried, not a claim about your selected update channel or a guarantee of a stable release; prerelease labels are retained. Qoder is a desktop-only entry: the `qoder.cmd` dispatcher belongs to the desktop IDE installation and is not a separate product, so one desktop row is shown and compared against the official desktop channel. Unknown local versions remain unknown even when an official version is available.
+
+The card can also act on the six npm-managed CLI clients (Claude Code, Codex, OpenCode, Pi, Kimi, DSH): a stale row offers an **更新到 x.y.z (Update)** button and a missing row offers **安装 (Install)**, while ZCode and Qoder are desktop products that stay on their own update channels and only get links to official releases. Updating runs the npm global install of the client's fixed package on this machine; the server executes at most one such task at a time and the panel polls its result, so a slow download does not hold an HTTP connection open. If the target client is running, a confirmation dialog asks you to quit it first. When the command succeeds but the local version does not move, the panel says so instead of claiming success. **全部更新 (Update all)** handles every stale client one after another. Both buttons finish by re-detecting the local environment, so the displayed state always comes from a fresh probe.
 
 <p align="center">
   <img src="docs/screenshots/s1-board.png" alt="Board tab" width="720">
@@ -314,11 +316,13 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 - **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。
 - **设置** — 分为 **通用｜主题｜关于**。关于页上下两张卡：上方是 Anyswitch 版本与检查更新，下方是本地环境。
 
-上卡显示当前面板进程的 Anyswitch 版本，并在预览版时标明预览状态。打开关于页先读取当前版本；只有点击 **检查更新** 才查询 Anyswitch 发布记录，发现新版时可打开对应发布说明。
+上卡显示当前面板进程的 Anyswitch 版本，并在预览版时标明预览状态。打开关于页先读取当前版本，并基于缓存结果自动检查一次更新；点击 **检查更新** 则总是强制重新查询。发现新版时可打开对应发布说明；若当前只有预览版可升，会如实显示为预览版而不是「暂无发布版本」。
 
-下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的八个客户端。检测只读取安装位置和产品资料，不启动客户端；随后独立查询各客户端官方版本。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
+下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的八个客户端。检测只读取安装位置和产品资料，不启动客户端——唯一例外是 Codex：它的原生二进制没有可读的版本信息，因此以带超时的一次 `codex --version` 自报为准；装了但探测无响应的，显示为已安装但无法运行。官方版本随后按客户端独立查询。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
 
-检测区分已发现、未找到、版本无法读取和检测失败，不表示客户端一定可运行、已登录或已接入转发。官方 `latest` 表示本次查询的发布渠道，不代表已读取用户选择的更新渠道，也不保证是稳定版；预发布标识会保留。Qoder 仍是一个客户端条目，分别显示 **CLI** 与 **桌面** 两行版本，始终在各自产品线内比较。本地版本读不到时保留未知状态，官方版本仍可单独显示。
+检测区分已发现、未找到、版本无法读取、已安装但无法运行和检测失败，不表示客户端一定可运行、已登录或已接入转发。官方 `latest` 表示本次查询的发布渠道，不代表已读取用户选择的更新渠道，也不保证是稳定版；预发布标识会保留。Qoder 是纯桌面条目：`qoder.cmd` 调度器属于桌面 IDE 安装、不是独立产品，因此只显示一行桌面版本并与官方桌面渠道比较。本地版本读不到时保留未知状态，官方版本仍可单独显示。
+
+这张卡也能对六个 npm 托管的 CLI 客户端（Claude Code、Codex、OpenCode、Pi、Kimi、DSH）动手：落后的行出现 **更新到 x.y.z** 按钮，没安装的行出现 **安装** 按钮；ZCode 与 Qoder 是桌面产品，仍走它们自己的更新渠道，面板只提供官方版本入口。更新就是在本机重装该客户端固定的全局包；服务端同一时间只跑一个这样的任务，面板轮询结果，因此慢下载不会占着一条 HTTP 连接。目标客户端正在运行时，会先弹确认请你退出。命令成功但本地版本没动时，面板如实说明未生效而不是报成功。**全部更新** 会把所有落后的客户端逐个处理。两类操作结束后都会重新检测本地环境，页面显示的状态始终来自最新一次探测。
 
 <p align="center">
   <img src="docs/screenshots/s1-board.png" alt="看板" width="720">

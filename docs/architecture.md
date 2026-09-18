@@ -102,11 +102,12 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 ### 控制面层
 - `relay-host.mjs` — 常驻 relay 宿主（127.0.0.1:47821，crash 不自愈是刻意设计）。
 - `panel-host.mjs` — 独立常驻控制面板宿主（127.0.0.1:47820）：relay 停止/崩溃时面板仍可用，并承载 followAgent 探活 watcher。
-- `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
+- `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；客户端安装/更新走 `POST /panel/api/environment/update` 加 `GET /panel/api/environment/update/<runId>` 查询进度：写请求沿用面板写闸门，服务端全局单飞（并发第二个任务 409），任务在后台跑、结果留内存供轮询，安装完成或失败后强制重查本地检测与官方最新再归为已更新/未生效/失败/装上了跑不起来。当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
 - `panel-ui/panel.html` — 面板 Web UI 骨架（DOM + 防闪烁/开屏内联小脚本，2026-09-17 起样式与主脚本外链到 `panel-ui/panel.css` / `panel-ui/panel.js`）；静态文件按请求检查 mtime 缓存与 ETag，刷新可加载新的页面资源。后端模块和进程版本需 panel-host 换新进程才生效；现有「重启」按钮先重启 relay、再重启 panel-host，会中断在途请求，执行时机由用户安排。
-- `agent-discovery.mjs` — 无启动副作用的客户端路径发现，供启动器和本地环境检测共享；检测不得调用启动器或目标客户端。
-- `environment-service.mjs` — 关于页本地环境服务：读取八个客户端选定安装的公开包元数据、包装脚本目标及必要的 PE/ASAR 产品资料；返回 Windows、当前面板 Node 版本、安装发现状态与版本来源。只发现安装不代表可运行、已登录或已接入 relay；路径存在但缺执行体、无法读产品版本、读取失败分别呈现。
-- `version-check.mjs` / `release-service.mjs` — 版本比较与固定官方来源查询。Anyswitch 查固定仓库 Releases，排除草稿，preview 包含预发布、正式版仅看正式发布，按 SemVer 选择目标并返回对应真实发布页；分页不完整或网络失败不能报「已是最新」。客户端官方版本逐项查询，失败互不影响；远端缓存十分钟、本地检测缓存一分钟，手动刷新绕过缓存但复用同一进行中请求，不接入每秒看板轮询。
+- `agent-discovery.mjs` — 无启动副作用的客户端路径发现，供启动器和本地环境检测共享；除 Codex 一次有界 `--version` 自报外，检测不得调用启动器或目标客户端。
+- `environment-service.mjs` — 关于页本地环境服务：读取八个客户端选定安装的公开包元数据、包装脚本目标及必要的 PE/ASAR 产品资料；返回 Windows、当前面板 Node 版本、安装发现状态与版本来源。只发现安装不代表可运行、已登录或已接入 relay；路径存在但缺执行体、无法读产品版本、装了但跑不起来、读取失败分别呈现。
+- `client-lifecycle.mjs` — 关于页安装/更新的执行面，与只读检测分开：六个 npm 托管 CLI 各绑一个固定包名（zcode/qoder 是桌面应用，不在此表内即面板不代管）；用当前 node 直接跑与它同目录的 `npm-cli.js` 执行全局安装，不经 shell、不依赖 PATH，客户端 id 只做白名单查表。超时只当泄漏兜底（分钟级），不中途杀慢安装。
+- `version-check.mjs` / `release-service.mjs` — 版本比较与固定官方来源查询。Anyswitch 查固定仓库 Releases，排除草稿；preview 身份包含预发布，正式版身份优先正式发布、正式渠道一个 Release 都没有时回退到最新预览版并带预览标识；按 SemVer 选择目标并返回对应真实发布页；分页不完整或网络失败不能报「已是最新」。客户端官方版本逐项查询，失败互不影响；远端缓存十分钟、本地检测缓存一分钟，进关于页自动查一次走缓存、手动检查强制刷新但复用同一进行中请求，不接入每秒看板轮询。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
 - `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/codex/zcode/opencode/pi/kimi/dsh/qoder）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
@@ -118,9 +119,9 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 关于页的版本来源边界
-- 本地版本来自所选安装的产品资料，不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；Codex 找到执行体但没有可靠产品版本时显示无法读取；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考。
-- 官方查询限定产品来源：Claude Code、OpenCode、Pi、Kimi Code、DSH 取对应 npm 包的 `latest`；Codex 查 `openai/codex` 正式 Release；ZCode 查官方 stable manifest；Qoder CLI 与桌面分别查各自官方清单。npm `latest` 不等于稳定版，也不代表读取了用户的更新渠道，DSH 等版本中的 `rc` 标识须保留。
-- Qoder 在同一个客户端条目内分别展示 CLI 和桌面版本，始终按同一产品线比较；包装入口残留而执行体缺失不能报已安装。无法读取本地版本时仍可独立显示官方版本，不能拿目录哈希、运行时版本或另一产品版本代填。
+- 本地版本来自所选安装的产品资料；唯一例外是 Codex——其原生二进制无版本资源、安装目录为哈希，改由一次带超时、无 shell 的 `codex --version` 自报，探测不达时呈现「已安装但无法运行」，文件消失则回落未找到。其余情形不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考。
+- 官方查询限定产品来源：Claude Code、OpenCode、Pi、Kimi Code、DSH 取对应 npm 包的 `latest`；Codex 查 `openai/codex` 正式 Release；ZCode 查官方 stable manifest；Qoder 查官方桌面清单。npm `latest` 不等于稳定版，也不代表读取了用户的更新渠道，DSH 等版本中的 `rc` 标识须保留。
+- Qoder 是纯桌面条目：`~/.qoder/entry/qoder.cmd` 是桌面 IDE 随装的命令调度器（`code.cmd` 同构），不是独立安装的 CLI 产品，不作检测对象；包装入口残留而执行体缺失不能报已安装。无法读取本地版本时仍可独立显示官方版本，不能拿目录哈希、运行时版本或另一产品版本代填。
 - 关于页只查版本并链接真实发布说明，不下载替换程序、不安装或升级客户端。查询不携带用户认证和设备标识；接口只接受白名单客户端和刷新参数，不接受任意 URL、路径或命令。
 
 ### 客户端集成

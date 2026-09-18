@@ -167,12 +167,31 @@ it("reports unavailable or malformed sources without claiming a latest version",
   }
 });
 
-it("uses the Codex CLI release and distinct official desktop and CLI manifests", async () => {
+it("falls back to the newest preview for a stable install when no stable release exists yet", async () => {
+  const onlyPreview = [release("v0.5.0-preview.2", { published_at: "2026-09-19T01:00:00Z" }), release("v0.5.0-preview.10")];
+  for (const [currentVersion, state, tag] of [
+    ["0.4.3", "update_available", "v0.5.0-preview.10"],
+    ["0.4.2", "update_available", "v0.5.0-preview.10"],
+    ["0.9.0", "ahead", "v0.5.0-preview.10"],
+  ]) {
+    const service = createReleaseService({ currentVersion, now, fetchFn: async () => json(onlyPreview) });
+    const result = await service.getAppUpdate();
+    assert.equal(result.state, state);
+    assert.equal(result.release.version, tag.slice(1));
+    assert.equal(result.release.prerelease, true);
+    assert.equal(result.release.url, `https://github.com/Aurora0134/Anyswitch/releases/tag/${tag}`);
+  }
+  const draftsOnly = [release("v0.5.0", { draft: true })];
+  const drafted = await createReleaseService({ currentVersion: "0.4.3", now, fetchFn: async () => json(draftsOnly) }).getAppUpdate();
+  assert.equal(drafted.state, "no_releases");
+  assert.equal(drafted.release, null);
+});
+
+it("uses the Codex CLI release and the official desktop manifest for Qoder", async () => {
   const fixtures = [
     ["codex", "https://api.github.com/repos/openai/codex/releases/latest", { tag_name: "rust-v0.155.0", draft: false, prerelease: false, html_url: "https://github.com/openai/codex/releases/tag/rust-v0.155.0" }, "0.155.0", "https://github.com/openai/codex/releases/tag/rust-v0.155.0", "github:openai/codex:latest"],
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
-    ["qoder", "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/channels/manifest.json", { latest: "1.1.55" }, "1.1.55", "https://qoder.com/cli", "qoder:cli:latest"],
-    ["qoder-desktop", "https://download.qoder.com.cn/qoder-app/releases/latest.yml", "version: '0.2.5' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.2.5", "https://qoder.com/changelog", "qoder:desktop:latest"],
+    ["qoder", "https://download.qoder.com.cn/qoder-app/releases/latest.yml", "version: '0.2.5' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.2.5", "https://qoder.com/changelog", "qoder:desktop:latest"],
   ];
   for (const [id, endpoint, payload, version, page, source] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {

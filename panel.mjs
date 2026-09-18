@@ -16,6 +16,7 @@
 // token still guards /v1/* and /openai/* and is not pasted into the browser.
 
 import { readFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
@@ -461,6 +462,9 @@ export function createPanelRouter({
   sessionScanService = null,
   environmentService = null,
   releaseService = null,
+  // 客户端生命周期执行器（client-lifecycle.mjs 的 runClientLifecycle）。
+  // 注入给测试；`null` 在首个安装/更新请求时绑定真实模块。
+  runClientLifecycleFn = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
@@ -629,6 +633,124 @@ export function createPanelRouter({
     // "restart started" (the exit can beat the flush), so it is sitting in its
     // recovery poll waiting for a port we still owe it.
     backstopTimer = setTimeout(scheduleExit, PANEL_HOST_EXIT_BACKSTOP_MS);
+  }
+
+  async function getEnvironmentService() {
+    if (!environmentService) {
+      const { createEnvironmentService } = await import("./environment-service.mjs");
+      environmentService ??= createEnvironmentService({ base });
+    }
+    return environmentService;
+  }
+
+  async function getReleaseService() {
+    if (!releaseService) {
+      const { createReleaseService } = await import("./release-service.mjs");
+      releaseService ??= createReleaseService({ currentVersion: appInfo.version });
+    }
+    return releaseService;
+  }
+
+  // 客户端更新（安装/升级）作业登记。单飞：npm 全局目录只有一份，两个并发
+  // npm i -g 会互相踩，所以任意时刻只允许一个任务；其余请求 409。任务跑在后台，
+  // 前端按 runId 轮询——npm 安装可能慢到超过一次 HTTP 请求的合理等待，长连接
+  // 会先超时丢响应而不是先装完。结果保留在 panel 进程内存里，面板重启即弃；
+  // 页面丢失 runId 后走重新检测自愈（检测结果本身是权威的）。
+  const CLIENT_UPDATE_RUNS_MAX = 20;
+  let lifecycleRuns = null; // Map<runId, run>，首个任务到来才建
+  let lifecycleActive = null; // 进行中的 run，就是单飞锁
+
+  async function handleClientUpdate(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      return sendJson(res, err.statusCode ?? 400, { ok: false, error: "bad_request", message: err.message });
+    }
+    const id = typeof body?.id === "string" ? body.id : null;
+    const action = typeof body?.action === "string" ? body.action : null;
+    const { clientLifecycleKind, CLIENT_ACTIONS } = await import("./client-lifecycle.mjs");
+    if (!id || !clientLifecycleKind(id)) {
+      return sendJson(res, 404, { ok: false, error: "unknown_client", message: "未找到这个客户端" });
+    }
+    if (!CLIENT_ACTIONS.includes(action)) {
+      return sendJson(res, 400, { ok: false, error: "unsupported_action", message: "不支持的操作" });
+    }
+    if (lifecycleActive) {
+      return sendJson(res, 409, {
+        ok: false,
+        error: "busy",
+        message: `已有客户端任务在进行中（${lifecycleActive.clientId}），请等待完成`,
+      });
+    }
+    if (!runClientLifecycleFn) {
+      const { runClientLifecycle } = await import("./client-lifecycle.mjs");
+      runClientLifecycleFn ??= runClientLifecycle;
+    }
+    lifecycleRuns ??= new Map();
+    const runId = randomUUID();
+    const run = { runId, clientId: id, action, state: "running", startedAt: new Date().toISOString(), finishedAt: null, result: null };
+    lifecycleRuns.set(runId, run);
+    while (lifecycleRuns.size > CLIENT_UPDATE_RUNS_MAX) lifecycleRuns.delete(lifecycleRuns.keys().next().value);
+    lifecycleActive = run;
+    void (async () => {
+      try {
+        const before = (await getEnvironmentService().then((service) => service.getState()))
+          .clients.find((client) => client.id === id);
+        const beforeVersion = before?.installations?.[0]?.version ?? null;
+        const command = await runClientLifecycleFn({ id, action });
+        // 重查本地与官方版本时强制绕过 TTL——刚装完，缓存结果就是错的。
+        const after = (await getEnvironmentService().then((service) => service.getState({ force: true })))
+          .clients.find((client) => client.id === id);
+        const installation = after?.installations?.[0] ?? null;
+        const afterVersion = installation?.version ?? null;
+        const latest = await getReleaseService().then((service) => service.getClientLatest(id, { force: true }));
+        const { compareVersions } = await import("./version-check.mjs");
+        const order = latest?.state === "ok" && afterVersion ? compareVersions(afterVersion, latest.version) : null;
+        const comparison = order === null ? "unknown" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
+        let result;
+        if (!command.ok) {
+          result = {
+            outcome: "failed",
+            message: command.npmMissing
+              ? "更新工具缺失（npm），请修复或重装 Node.js 后重试"
+              : command.timedOut
+                ? "更新用时过长被中止，请检查网络后重新检测确认结果"
+                : "更新命令执行失败，请稍后重试",
+            detail: command.output || undefined,
+          };
+        } else if (installation?.issue === "not_runnable") {
+          result = { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" };
+        } else if (!afterVersion) {
+          result = { outcome: "not_found_after", message: "命令已执行，但仍未找到该客户端，请重新检测确认" };
+        } else if (beforeVersion && beforeVersion === afterVersion && comparison === "update_available") {
+          // npm 返回成功但版本原地踏步：多半有另一处安装盖过 npm 全局目录里的这一份。
+          result = { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效" };
+        } else {
+          result = { outcome: "updated", message: `已更新到 ${afterVersion}` };
+        }
+        run.result = { ...result, beforeVersion, afterVersion, latestVersion: latest?.state === "ok" ? latest.version : null, comparison };
+        run.state = "done";
+        run.finishedAt = new Date().toISOString();
+      } catch {
+        run.result = { outcome: "failed", message: "更新失败，请重新检测确认结果" };
+        run.state = "done";
+        run.finishedAt = new Date().toISOString();
+      } finally {
+        lifecycleActive = null;
+      }
+    })();
+    return sendJson(res, 202, { ok: true, runId, clientId: id, action });
+  }
+
+  function handleClientUpdateStatus(res, runId) {
+    const run = lifecycleRuns?.get(runId);
+    if (!run) {
+      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务，请重新检测确认结果" });
+    }
+    const payload = { ok: true, runId, clientId: run.clientId, action: run.action, state: run.state, startedAt: run.startedAt };
+    if (run.state === "done") Object.assign(payload, { finishedAt: run.finishedAt }, run.result);
+    return sendJson(res, 200, payload);
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
@@ -1104,26 +1226,20 @@ export function createPanelRouter({
     if (path === "/panel/api/app-info" && method === "GET") return sendJson(res, 200, appInfo);
     if (path === "/panel/api/updates" && method === "GET") {
       try {
-        if (!releaseService) {
-          const { createReleaseService } = await import("./release-service.mjs");
-          releaseService ??= createReleaseService({ currentVersion: appInfo.version });
-        }
-        return sendJson(res, 200, await releaseService.getAppUpdate({ force: url.searchParams.get("refresh") === "1" }));
+        const service = await getReleaseService();
+        return sendJson(res, 200, await service.getAppUpdate({ force: url.searchParams.get("refresh") === "1" }));
       } catch {
         return sendJson(res, 200, { currentVersion: appInfo.version, state: "error", checkedAt: new Date().toISOString(), release: null, errorCode: "update_unavailable" });
       }
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "qoder-desktop"].includes(id)) {
+      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {
-        if (!releaseService) {
-          const { createReleaseService } = await import("./release-service.mjs");
-          releaseService ??= createReleaseService({ currentVersion: appInfo.version });
-        }
-        const result = await releaseService.getClientLatest(id, { force: url.searchParams.get("refresh") === "1" });
+        const service = await getReleaseService();
+        const result = await service.getClientLatest(id, { force: url.searchParams.get("refresh") === "1" });
         const localVersion = url.searchParams.get("localVersion");
         let comparison = "unknown";
         if (result.state === "ok" && localVersion && localVersion.length <= 128) {
@@ -1136,13 +1252,14 @@ export function createPanelRouter({
         return sendJson(res, 200, { state: "error", version: null, url: null, source: "", checkedAt: new Date().toISOString(), errorCode: "update_unavailable", comparison: "unknown" });
       }
     }
+    if (path === "/panel/api/environment/update" && method === "POST") return handleClientUpdate(req, res);
+    if (path.startsWith("/panel/api/environment/update/") && method === "GET") {
+      return handleClientUpdateStatus(res, path.slice("/panel/api/environment/update/".length));
+    }
     if (path === "/panel/api/environment" && method === "GET") {
       try {
-        if (!environmentService) {
-          const { createEnvironmentService } = await import("./environment-service.mjs");
-          environmentService ??= createEnvironmentService({ base });
-        }
-        return sendJson(res, 200, await environmentService.getState({ force: url.searchParams.get("refresh") === "1" }));
+        const service = await getEnvironmentService();
+        return sendJson(res, 200, await service.getState({ force: url.searchParams.get("refresh") === "1" }));
       } catch {
         return sendJson(res, 500, { error: "environment_unavailable", message: "暂时无法检测本地环境" });
       }
