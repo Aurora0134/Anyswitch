@@ -64,7 +64,7 @@ describe("usage journal wiring", () => {
     const journal = fakeJournal();
     const collector = testCollector({ nowFn: () => t, journal });
 
-    const req = collector.startRequest({ providerId: "p1", model: "m1", stream: false, path: "anthropic" });
+    const req = collector.startRequest({ providerId: "p1", model: "m1", stream: false, path: "anthropic", agentId: "claude" });
     t = 7500;
     req.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
 
@@ -74,8 +74,35 @@ describe("usage journal wiring", () => {
     assert.equal(journal.lines[0].stream, false);
     assert.equal(journal.lines[0].cached, 0);
     assert.equal(journal.lines[0].errKind, null);
-    // agentId omitted from meta falls back to the zcode bucket
-    assert.equal(journal.lines[0].agentId, "zcode");
+    assert.equal(journal.lines[0].agentId, "claude");
+  });
+
+  it("journals unattributed requests with a null agentId and counts them on no endpoint", async () => {
+    // 归属为 null 的流量（未知来源客户端）：照常服务、journal 留审计行
+    // （agentId: null），但不落任何端点聚合桶、不出实例行——显示面全不显示。
+    let t = 1000;
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => t, journal });
+
+    const req = collector.startRequest({ providerId: "p1", model: "m1", stream: false, path: "openai", agentId: null });
+    t = 1500;
+    req.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+
+    assert.equal(journal.lines.length, 1, "the audit trail keeps every served request");
+    assert.equal(journal.lines[0].agentId, null);
+    assert.equal(journal.lines[0].providerId, "p1");
+
+    const agents = await collector.getAgentsStatus();
+    for (const a of agents) {
+      if (!a.metrics) continue; // claude 卡是 per-session 报表，无聚合 metrics
+      assert.equal(a.metrics.totalRequests, 0, `no endpoint card may count this request (${a.id})`);
+    }
+    // 渠道×模型稳定性是与端点无关的上游健康视图：未知来源的结果照样计入，
+    // 不因「不显示端点」而丢数据。
+    const stab = collector.getModelStability();
+    assert.equal(stab.models.length, 1);
+    assert.equal(stab.models[0].total, 1);
+    assert.equal(stab.models[0].successRate, 100);
   });
 
   it("classifies failure rows into the errKind taxonomy", () => {

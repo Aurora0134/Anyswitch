@@ -235,6 +235,11 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
     const allRequests = tagRows(readRequestsSafe(winRange));
     const inWindow = (r) => r._ts >= axis.start && r._ts < axis.end;
     const win = allRequests.filter(inWindow);
+    // 「未知来源不显示」：归属为 null/缺失（agentId 不是非空字符串）的请求
+    // 不进入任何端点维度——端点行、端点趋势、端点用量分布都没有它们的位置。
+    // 它们仍在 win / usage1 / usage7 里：渠道、模型、总览、热力图等与端点
+    // 无关的维度照常计入（那些是与端点无关的事实）。
+    const hasEndpointAttribution = (r) => typeof r.agentId === "string" && r.agentId !== "";
     const usage1 = allRequests.filter(
       (r) => r._ts >= usageAxis1.start && r._ts < usageAxis1.end,
     );
@@ -286,9 +291,9 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
     // ── Trends: three groupings, Top-N + merged "__other__" ──
     // labelOf maps a grouping key to its display label; keys stay raw (the
     // panel's legend show/hide state persists by key), only labels resolve.
-    function buildTrend(keyOf, labelOf = (key) => key) {
+    function buildTrend(keyOf, labelOf = (key) => key, rows = win) {
       const perKey = new Map(); // key -> { total, buckets: Map(idx -> {prompt, completion}) }
-      for (const r of win) {
+      for (const r of rows) {
         const key = keyOf(r);
         let e = perKey.get(key);
         if (!e) {
@@ -333,7 +338,7 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
     }
     const trends = {
       channel: buildTrend((r) => String(r.providerId ?? ""), labelChannel),
-      endpoint: buildTrend((r) => String(r.agentId ?? "")),
+      endpoint: buildTrend((r) => String(r.agentId ?? ""), (key) => key, win.filter(hasEndpointAttribution)),
       model: buildTrend((r) => `${r.providerId ?? ""}/${r.model ?? ""}`),
     };
 
@@ -389,7 +394,7 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
         labelChannel,
       ),
       endpoint: buildUsage(
-        rows,
+        rows.filter(hasEndpointAttribution),
         (r) => String(r.agentId ?? ""),
         "未知端点",
         "其他端点",
@@ -467,7 +472,7 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
       }
       return e;
     };
-    for (const r of win) {
+    for (const r of win.filter(hasEndpointAttribution)) {
       const e = epFor(String(r.agentId ?? ""));
       e.requests += 1;
       e.prompt += num(r.prompt);

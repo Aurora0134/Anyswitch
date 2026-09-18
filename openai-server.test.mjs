@@ -312,8 +312,13 @@ describe("openai relay transport", () => {
     }
   });
 
-  it("keeps the zcode fallback for requests without x-agent-id or a known UA", async () => {
+  it("serves unidentified requests without attributing them to any endpoint", async () => {
+    // 无身份头、无 URL 前缀、UA 不可识别的请求：照常服务，但归属记 null——
+    // 不落任何端点桶、不进统计页端点维度（「未知来源不显示」），兜底时打一条
+    // 日志作为唯一观测面。历史上的「兜底进 zcode」语义已废弃（污染真实端点的
+    // 看板与 journal，且事后无法追查来源）。
     let startedMeta = null;
+    const warns = [];
     const fakeCollector = {
       startRequest: (meta) => {
         startedMeta = meta;
@@ -332,6 +337,7 @@ describe("openai relay transport", () => {
         })(),
       ),
       metricsCollector: fakeCollector,
+      logger: { warn: (line) => warns.push(line), info: () => {} },
     });
 
     const { port, close } = await listenLoopback(server, 0);
@@ -340,15 +346,17 @@ describe("openai relay transport", () => {
       assert.equal(res.status, 200);
       await res.text();
       assert.ok(startedMeta, "metricsCollector.startRequest was called");
-      assert.equal(startedMeta.agentId, "zcode");
+      assert.equal(startedMeta.agentId, null);
+      assert.equal(warns.length, 1, "one unattributed-request warning per fallback");
+      assert.match(warns[0], /unattributed/i);
     } finally {
       await close();
     }
   });
 
-  it("ignores an unknown x-agent-id value and falls back to the zcode default", async () => {
+  it("ignores an unknown x-agent-id value without attributing to any endpoint", async () => {
     // 白名单之外的显式值（拼写错误/未知客户端）不允许创造幽灵端点：
-    // 回落 UA 识别与兜底，而不是原样进 journal。
+    // 回落 UA 识别；UA 也不认识时归属为 null，不落到任何真实端点名下。
     let startedMeta = null;
     const fakeCollector = {
       startRequest: (meta) => {
@@ -387,7 +395,7 @@ describe("openai relay transport", () => {
       });
       assert.equal(res.status, 200);
       await res.text();
-      assert.equal(startedMeta.agentId, "zcode");
+      assert.equal(startedMeta.agentId, null);
     } finally {
       await close();
     }
@@ -445,7 +453,7 @@ describe("openai relay transport", () => {
       res = await chat("ghost~poke-api");
       assert.equal(res.status, 200);
       await res.text();
-      assert.equal(metas[2].agentId, "zcode");
+      assert.equal(metas[2].agentId, null, "unknown prefix is discarded; no fallback to a real endpoint");
       assert.equal(metas[2].providerId, "poke-api");
     } finally {
       await close();
