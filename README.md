@@ -34,7 +34,7 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 ### Installation
 
-Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). For `v0.5.0-preview`, once that release is available, clone into a new directory:
+Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0-preview` is the first published release; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.0-preview`, clone into a new directory:
 
 ```bat
 git clone --branch v0.5.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
@@ -61,7 +61,7 @@ For an existing Git clone, first schedule a break in active sessions and inspect
 git status --short
 ```
 
-If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.0-preview`, after it is published:
+If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.0-preview`:
 
 ```bat
 git fetch --no-tags origin tag v0.5.0-preview
@@ -220,7 +220,7 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 
 ### 安装
 
-Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签；以 `v0.5.0-preview` 为例，待该版本发布后，克隆到一个新目录：
+Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0-preview` 是首个正式发布的版本，0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.0-preview` 为例，克隆到一个新目录：
 
 ```bat
 git clone --branch v0.5.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
@@ -247,7 +247,7 @@ git clone --branch v0.5.0-preview --single-branch https://github.com/Aurora0134/
 git status --short
 ```
 
-若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.0-preview` 为例，发布后执行：
+若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.0-preview` 为例，执行：
 
 ```bat
 git fetch --no-tags origin tag v0.5.0-preview
