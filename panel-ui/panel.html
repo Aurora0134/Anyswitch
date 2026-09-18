@@ -1535,14 +1535,15 @@ if (window.panelStartupController) panelStartupPlay();
        不写入 panel-view，刷新按 restoreView 白名单恢复，永不落设置页 -->
   <section class="settings-view" id="settingsView" hidden>
     <nav class="view-tabs settings-subtabs" role="tablist" aria-label="设置分类">
-      <button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true">通用</button>
-      <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false">主题</button>
+      <button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true" aria-controls="settingsPanelGeneral">通用</button>
+      <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false" aria-controls="settingsPanelTheme" tabindex="-1">主题</button>
+      <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
     </nav>
 
     <!-- 「通用」：五项按语义分三张卡——「启动」「抗截断」带卡头（复用各视图通用的
          card-header/card-title 标准件），其余两项暂不归类、平卡放置；
          控件 id、逐项独立保存/失败回滚语义不变 -->
-    <div class="settings-panel" id="settingsPanelGeneral">
+    <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral">
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
@@ -1618,8 +1619,8 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「主题」：左栏列表点选即全局生效（setStyle），右栏抽象样张实时预览 -->
-    <div class="settings-panel" id="settingsPanelTheme" hidden>
+    <!-- 「主题」：左栏列表点选即全局生效（setStyle），右栏看板镜像实时预览 -->
+    <div class="settings-panel" id="settingsPanelTheme" hidden role="tabpanel" aria-labelledby="settingsTabTheme">
       <p class="settings-theme-desc">点选主题即时生效并记住选择；亮暗模式由右上角按钮单独控制。</p>
       <div class="settings-theme-grid">
         <div class="settings-theme-list" id="stylePicker" role="radiogroup" aria-label="主题">
@@ -1637,6 +1638,40 @@ if (window.panelStartupController) panelStartupPlay();
               <div class="settings-mirror-scale" id="settingsMirrorScale"></div>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-panel" id="settingsPanelAbout" hidden role="tabpanel" aria-labelledby="settingsTabAbout">
+      <div class="panel-card">
+        <div class="card-header about-card-head">
+          <div class="about-app-heading">
+            <h2 class="card-title">Anyswitch</h2>
+            <span class="about-app-version" id="aboutAppVersion">读取版本中…</span>
+            <span class="about-preview" id="aboutPreviewBadge" hidden>预览版</span>
+          </div>
+          <button type="button" class="btn btn-mini" id="aboutCheckUpdates">检查更新</button>
+        </div>
+        <div class="card-body about-update-body">
+          <span class="about-status" id="aboutUpdateStatus" role="status" aria-live="polite">尚未检查更新</span>
+          <span class="about-meta" id="aboutUpdateTime"></span>
+          <a class="about-link" id="aboutReleaseLink" target="_blank" rel="noopener noreferrer" hidden>查看发布说明</a>
+        </div>
+      </div>
+      <div class="panel-card">
+        <div class="card-header about-card-head">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
+            本地环境
+          </h2>
+          <button type="button" class="btn btn-mini" id="aboutEnvironmentRefresh">重新检测</button>
+        </div>
+        <div class="card-body">
+          <div class="about-system-row">
+            <span class="about-meta" id="aboutSystem"></span>
+            <span class="about-status" id="aboutEnvironmentStatus" role="status" aria-live="polite">尚未检测</span>
+          </div>
+          <div class="about-clients" id="aboutClients" role="list" aria-label="客户端本地环境"></div>
         </div>
       </div>
     </div>

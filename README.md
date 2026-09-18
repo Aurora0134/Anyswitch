@@ -29,16 +29,18 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 ### Prerequisites
 
 - Windows (the credential store relies on Windows DPAPI)
-- Node.js ≥ 21
+- **Node.js 24 LTS recommended.** Required API range: `>=22.15.0 <23 || >=23.8.0`. Session reading uses Node's built-in SQLite and zstd APIs; the range states the API minimum, not that every matching Node version has been tested.
 - No dependencies — nothing to install via npm
 
 ### Installation
 
-Clone this repository anywhere you like; the conventional location is `%LOCALAPPDATA%\Anyswitch\app`:
+Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). For `v0.5.0-preview`, once that release is available, clone into a new directory:
 
 ```bat
-git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
+
+The conventional location is `%LOCALAPPDATA%\Anyswitch\app`; another location works too. For a first installation from a source archive, extract into a new `app` directory. Do not extract over an existing installation.
 
 `panel-app.vbs` is the desktop entry point: it locates `panel-launcher.mjs` relative to itself, so it works from any clone location. It starts the panel host and opens the panel in your browser. Point a desktop shortcut at it for one-click access. Manual fallback entry: `node panel-launcher.mjs` (or `node panel-host.mjs`) from the repo directory.
 
@@ -46,6 +48,29 @@ Notes:
 
 - Node.js must be on `PATH` or installed at `%ProgramFiles%\nodejs`.
 - The autostart scheduled tasks (`AnyswitchRelay` / `AnyswitchWatchdog`) bake in the repo path at registration time. If you move the install directory, re-toggle autostart in the panel so the tasks pick up the new path.
+
+### Upgrading
+
+Open **设置 → 关于 (Settings → About)** and click **检查更新 (Check for updates)** to check Anyswitch releases, then read the linked release notes. Preview versions include prereleases in the comparison; stable versions check stable releases only. A failed check is reported as unavailable, not as up to date. Checking does not download, replace, or restart Anyswitch, and does not upgrade your coding agents.
+
+Keep your user data in the parent directory `%LOCALAPPDATA%\Anyswitch\`: `store.json`, `credentials`, settings, presets, and usage records belong there, outside `app`. Back it up before upgrading, and preserve the repository's `.git` file or directory and any external Git object store it points to. Do not replace the whole installation directory or use `git reset --hard` to upgrade.
+
+For an existing Git clone, first schedule a break in active sessions and inspect the working tree from the repository directory:
+
+```bat
+git status --short
+```
+
+If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.0-preview`, after it is published:
+
+```bat
+git fetch --no-tags origin tag v0.5.0-preview
+git switch --detach v0.5.0-preview
+```
+
+A detached checkout is normal for a release installation. These steps are for users running a release clone; maintainers working on the local development `master` keep that branch and do not switch it to a release tag. For an archive-based installation, unpack into a separate directory and compare/apply source-file changes, including removed files, while retaining user data and existing Git metadata; do not overlay the entire directory.
+
+After updating the source, the backend needs a new panel-host process. Refreshing the browser only reloads static page files; it does not replace the old backend or its recorded version. The existing panel **重启 (Restart)** button restarts the relay first and then the panel host, interrupting active relay requests and potentially coding sessions. Use it only at a time you have arranged, then reopen or refresh the panel and confirm the version in About.
 
 ### Quick start
 
@@ -57,7 +82,7 @@ Notes:
    - **API Key** — sealed with DPAPI the moment you save.
    
    On save, Anyswitch discovers the model list from the upstream's `GET /v1/models`. If discovery fails (the upstream has no models endpoint), you can paste model IDs manually instead.
-3. Optionally, in the same tab: group providers into a **号池 (pool)**, or edit a **路由链 (route chain)** so that requesting the model `auto` walks your channels in order. Click **同步到端点 (Sync to endpoints)** to write the managed channels into client configs — this also happens automatically whenever the store changes (Kimi Code, Pi, DSH, ZCode, Qoder).
+3. Optionally, in the same tab: group providers into a **号池 (pool)**, or edit a **路由链 (route chain)** so that requesting the model `auto` walks your channels in order. Click **同步到端点 (Sync to endpoints)** to write the managed channels into client configs — this also happens automatically whenever the store changes (Kimi Code, Codex, OpenCode, Pi, DSH, ZCode, Qoder).
 
    ![Route chain editor](docs/screenshots/s5-route-chain.png)
 4. Start your coding agent through its launcher (see the table below), e.g. `node launcher.mjs` for Claude Code. The launcher injects the relay endpoint and token automatically; any extra arguments are passed straight through to the client.
@@ -68,13 +93,14 @@ Notes:
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude args]` — starts a per-launch relay on an ephemeral loopback port and injects `ANTHROPIC_BASE_URL` + a one-shot `ANTHROPIC_AUTH_TOKEN` via process env only; the relay and token die when Claude exits. |
 | Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi args]` — same per-launch injection, plus managed providers merged into `~/.kimi-code/config.toml`. |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — brings up the relay on 47821 and injects `ANYSWITCH_RELAY_TOKEN`; managed providers are injected at startup by the optional companion OpenCode plugin (not shipped here; `opencode.jsonc` is never modified). |
+| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex args]` — ensures the relay is available on 47821, merges managed providers into `~/.codex/config.toml`, and supplies a model catalog unless you have chosen your own. Relay authentication is written into the managed config; the launcher passes instance identity through the process environment. |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — ensures the relay is available on 47821 and merges managed providers into `~/.config/opencode/opencode.json` using the built-in config writer. No companion plugin is required; your `opencode.jsonc` is left untouched. |
 | Pi | OpenAI | `node pi-launcher.mjs [pi args]` — syncs managed providers into `~/.pi/agent/models.json`, then launches pi. |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into `~/.dsh/settings.yaml`. |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.qoder/settings.json`, and starts Qoder's own `qoder.cmd` dispatcher with `ANYSWITCH_RELAY_TOKEN` + `NO_PROXY` set in the process environment only. Two behaviours are specific to Qoder and worth knowing up front: requests are attributed by an identity prefix in the URL segment (`/openai/qoder~<provider>/v1`) because Qoder has no way to send a custom header, and the launcher starts Qoder with a DevTools port bound to 127.0.0.1 so it can ask Qoder to reload its model catalog after a config change — that reload is best-effort and its failure never blocks startup. |
 
-For the config-merging clients (Kimi Code, Pi, ZCode, DSH, Qoder), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
+For the config-merging clients (Kimi Code, Codex, OpenCode, Pi, ZCode, DSH, Qoder), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
 
 ### Agent skills
 
@@ -96,12 +122,19 @@ Once installed, the agent follows the skill's rules: it writes presets only thro
 
 ### Panel overview
 
-The panel (served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down) has four tabs:
+The panel is served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down. Its features include:
 
 - **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client.
 - **Skills 管理 (Skills)** — one master skills repo; import skills from a directory or zip, deploy/undeploy them to agent endpoints, and surface endpoint anomalies.
 - **渠道管理 (Channels)** — provider management (add, rotate key, delete, model filter) with DPAPI key sealing; model discovery refresh plus manual model add/remove; pools (号池) and route-chain (自动路由) editing; manual **同步到端点** sync.
 - **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
+- **设置 (Settings)** — **通用 (General) / 主题 (Theme) / 关于 (About)**. About has two stacked cards: Anyswitch version and update checks above, local environment below.
+
+The upper card shows the version of the running panel process and a preview label where applicable. Opening About loads that version; Anyswitch checks for updates only when you click **检查更新 (Check for updates)**, with a link to the matching release notes when a newer release is found.
+
+The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all eight clients listed above. It reads installation locations and product metadata without launching a client, then separately queries official versions. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
+
+Detection distinguishes an installation found, not found, a version that cannot be read, and a detection failure. It does not prove a client can run, is signed in, or is connected to the relay. Official `latest` is the published channel being queried, not a claim about your selected update channel or a guarantee of a stable release; prerelease labels are retained. Qoder stays one client entry with separate **CLI** and **desktop** version rows, compared only within their own product lines. Unknown local versions remain unknown even when an official version is available.
 
 <p align="center">
   <img src="docs/screenshots/s1-board.png" alt="Board tab" width="720">
@@ -180,16 +213,18 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 ### 前置条件
 
 - Windows（凭据封存依赖 Windows DPAPI）
-- Node.js ≥ 21
+- **推荐 Node.js 24 LTS。** API 下限范围为 `>=22.15.0 <23 || >=23.8.0`。会话读取使用 Node 内置 SQLite 与 zstd API；此范围说明 API 最低要求，不表示每个符合范围的 Node 版本均已实测。
 - 零依赖，无需 npm 安装任何东西
 
 ### 安装
 
-把仓库克隆到任意位置即可；约定位置是 `%LOCALAPPDATA%\Anyswitch\app`：
+Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签；以 `v0.5.0-preview` 为例，待该版本发布后，克隆到一个新目录：
 
 ```bat
-git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
+
+约定位置是 `%LOCALAPPDATA%\Anyswitch\app`，也可使用其他位置。首次使用源码归档安装时，解压到一个新的 `app` 目录，不要解压覆盖已有安装。
 
 `panel-app.vbs` 是桌面入口：按脚本自身位置定位 `panel-launcher.mjs`，克隆到任意路径都能用。它会拉起面板宿主并在浏览器中打开面板。给它建一个桌面快捷方式即可一键进入。手动备用入口：在仓库目录下执行 `node panel-launcher.mjs`（或 `node panel-host.mjs`）。
 
@@ -197,6 +232,29 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 
 - Node.js 需在 `PATH` 中，或安装在 `%ProgramFiles%\nodejs`。
 - 开机自启的计划任务（`AnyswitchRelay` / `AnyswitchWatchdog`）固化注册时的仓库路径。移动安装目录后，需在面板中重开自启，让任务更新为新路径。
+
+### 升级
+
+打开 **设置 → 关于**，点 **检查更新** 查询 Anyswitch 新版，再查看结果链接中的发布说明。预览版会把预发布纳入比较，正式版仅检查正式发布；检查失败会显示暂时无法检查，不会误报为最新。检查不会下载、替换或重启 Anyswitch，也不会升级你的 coding agent。
+
+保留 `app` 上层 `%LOCALAPPDATA%\Anyswitch\` 中的用户数据：`store.json`、`credentials`、设置、预设和用量记录等都在这里。升级前备份数据，并保留仓库的 `.git` 文件或目录及其指向的外部 Git 对象库。不要整目录替换安装，也不要用 `git reset --hard` 升级。
+
+已有 Git clone 的用户应先安排会话空档，在仓库目录检查工作树：
+
+```bat
+git status --short
+```
+
+若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.0-preview` 为例，发布后执行：
+
+```bat
+git fetch --no-tags origin tag v0.5.0-preview
+git switch --detach v0.5.0-preview
+```
+
+发布版安装处于 detached HEAD 状态是正常的。这套步骤适用于使用发布版 clone 的用户；维护者的本机开发 `master` 保持原分支，不按此步骤切到发布标签。源码归档用户应先解压到单独目录，对照应用源文件变更（包括已删除的文件），保留用户数据和已有 Git 元数据，不要整目录覆盖。
+
+源码更新后，后端需要换成新的 panel-host 进程。浏览器刷新只会重新加载静态页面，不会替换旧后端或更新其记录的运行版本。面板已有的 **重启** 按钮会先重启 relay，再重启面板宿主，中断正在转发的请求，可能打断 coding 会话。请自行安排合适时机使用，随后重新打开或刷新面板，在关于页确认版本。
 
 ### 快速开始
 
@@ -208,7 +266,7 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
    - **API Key** — 保存即用 DPAPI 封存。
 
    保存时 Anyswitch 自动通过上游的 `GET /v1/models` 拉取模型列表；若发现失败（上游没有 models 端点），可以改为手动粘贴模型 ID。
-3. 可选：在同一个 tab 里把多个渠道组成 **号池**，或编辑 **路由链**（请求模型 `auto` 时按链逐跳路由）。点 **同步到端点** 把托管渠道写入各客户端配置——store 每次变更时也会自动同步（Kimi Code、Pi、DSH、ZCode、Qoder）。
+3. 可选：在同一个 tab 里把多个渠道组成 **号池**，或编辑 **路由链**（请求模型 `auto` 时按链逐跳路由）。点 **同步到端点** 把托管渠道写入各客户端配置——store 每次变更时也会自动同步（Kimi Code、Codex、OpenCode、Pi、DSH、ZCode、Qoder）。
 
    ![路由链编辑器](docs/screenshots/s5-route-chain.png)
 4. 通过对应启动器启动 coding agent（见下表），例如 Claude Code 用 `node launcher.mjs`。启动器自动注入 relay 端点与 token；多余参数原样透传给客户端。
@@ -219,13 +277,14 @@ git clone https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude 参数]` — 在临时环回端口拉起一次性 relay，仅以进程环境变量注入 `ANTHROPIC_BASE_URL` + 一次性 `ANTHROPIC_AUTH_TOKEN`；Claude 退出时 relay 与 token 一并销毁。 |
 | Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi 参数]` — 同样的一次性注入，另把托管 provider 合并进 `~/.kimi-code/config.toml`。 |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 在跑并注入 `ANYSWITCH_RELAY_TOKEN`；托管 provider 由可选的 OpenCode 配套插件在启动时注入（未随本仓库发布；`opencode.jsonc` 不会被修改）。 |
+| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex 参数]` — 确保 47821 relay 可用，把托管 provider 合并进 `~/.codex/config.toml`；未自选模型目录时提供托管模型目录。relay 鉴权写入托管配置，启动器通过进程环境传递实例标识。 |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 可用，由仓内配置写手把托管 provider 合并进 `~/.config/opencode/opencode.json`。无需配套插件，用户的 `opencode.jsonc` 保持不动。 |
 | Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` — 先把托管 provider 同步进 `~/.pi/agent/models.json`，再启动 pi。 |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进 `~/.dsh/settings.yaml`。 |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.qoder/settings.json`，再经 Qoder 自家的 `qoder.cmd` 调度器启动，`ANYSWITCH_RELAY_TOKEN` 与 `NO_PROXY` 只走进程环境变量、不落盘。两处 Qoder 特有行为需先知晓：请求归属靠 URL 段里的身份前缀（`/openai/qoder~<provider>/v1`），因为 Qoder 没有下发自定义请求头的位置；启动器会带一个只绑 127.0.0.1 的 DevTools 端口拉起 Qoder，用于在配置变更后请它重载模型目录——该重载是尽力而为，失败也不阻塞启动。 |
 
-对会合并配置的客户端（Kimi Code、Pi、ZCode、DSH、Qoder），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
+对会合并配置的客户端（Kimi Code、Codex、OpenCode、Pi、ZCode、DSH、Qoder），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
 
 ### 智能体技能
 
@@ -247,12 +306,19 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 
 ### 面板功能简介
 
-面板由独立面板宿主承载（与 relay 解耦，relay 停止/崩溃时面板仍可用），共四个 tab：
+面板由独立面板宿主承载，与 relay 解耦，relay 停止/崩溃时面板仍可用。主要功能包括：
 
 - **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行。
 - **Skills 管理** — 单一 skills 主仓库：从目录或 zip 导入 skill、部署/解除到各 agent 端点、端点异常提示。
 - **渠道管理** — provider 管理（新增、轮换 Key、删除、模型过滤）并 DPAPI 封存 Key；模型发现刷新与手动增删模型；号池与路由链（自动路由）编辑；手动 **同步到端点**。
 - **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。
+- **设置** — 分为 **通用｜主题｜关于**。关于页上下两张卡：上方是 Anyswitch 版本与检查更新，下方是本地环境。
+
+上卡显示当前面板进程的 Anyswitch 版本，并在预览版时标明预览状态。打开关于页先读取当前版本；只有点击 **检查更新** 才查询 Anyswitch 发布记录，发现新版时可打开对应发布说明。
+
+下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的八个客户端。检测只读取安装位置和产品资料，不启动客户端；随后独立查询各客户端官方版本。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
+
+检测区分已发现、未找到、版本无法读取和检测失败，不表示客户端一定可运行、已登录或已接入转发。官方 `latest` 表示本次查询的发布渠道，不代表已读取用户选择的更新渠道，也不保证是稳定版；预发布标识会保留。Qoder 仍是一个客户端条目，分别显示 **CLI** 与 **桌面** 两行版本，始终在各自产品线内比较。本地版本读不到时保留未知状态，官方版本仍可单独显示。
 
 <p align="center">
   <img src="docs/screenshots/s1-board.png" alt="看板" width="720">

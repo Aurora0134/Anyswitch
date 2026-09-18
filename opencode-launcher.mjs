@@ -104,38 +104,8 @@ export async function writeOpencodeConfig(store, port, sidecarRoot, configPath =
   return writeResult;
 }
 
-export function resolveOpencodeExecutable(base = process.env) {
-  const override = base.OPENCODE_EXECUTABLE;
-  if (override) {
-    if (!isAbsolute(override)) {
-      throw new Error(
-        `OPENCODE_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-          `make the launcher recurse into itself.`,
-      );
-    }
-    return override;
-  }
-  // Default to the real opencode binary bundled inside the platform optional
-  // dependency — NOT %APPDATA%\npm\opencode.cmd (the Anyswitch shadow shims
-  // route that back into this launcher = infinite recursion) and NOT
-  // opencode-ai\bin\opencode.exe: that top-level path is a 479-byte
-  // placeholder batch whenever npm's allow-scripts policy blocks the
-  // postinstall copy (observed with npm 12 on 2026-09-14/15), which Windows
-  // then refuses to execute ("与你运行的 Windows 版本不兼容"). The embedded
-  // path depends on upstream's "optional dependency per platform" layout —
-  // if upstream repackages, OPENCODE_EXECUTABLE is the escape hatch.
-  return join(
-    base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
-    "npm",
-    "node_modules",
-    "opencode-ai",
-    "node_modules",
-    "opencode-windows-x64",
-    "bin",
-    "opencode.exe",
-  );
-}
+import { resolveOpencodeExecutable } from "./agent-discovery.mjs";
+export { resolveOpencodeExecutable };
 
 // Unified per-instance id: `<cwd basename>-<launcher pid>`, basename scrubbed
 // to the relay's accepted charset [A-Za-z0-9._:-] and the whole id capped at

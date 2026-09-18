@@ -191,52 +191,8 @@ export async function runLauncher({
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// The default install path of the real Claude binary. Kept as a pure helper so
-// both claudeExecutable() and its tests can reference the same default.
-export function defaultClaudeExecutable(base = process.env) {
-  // Convert backslashes to forward slashes to prevent spawn() path corruption on Windows.
-  // spawn() with shell:false can misinterpret backslash sequences (\n, \b, \@) as escape codes.
-  const path = join(
-    base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
-    "npm",
-    "node_modules",
-    "@anthropic-ai",
-    "claude-code",
-    "bin",
-    "claude.exe",
-  );
-  return path.replace(/\\/g, '/');
-}
-
-// Resolve the Claude executable. Overridable via CLAUDE_EXECUTABLE for testing
-// and for non-default installs.
-//
-// Recursion guard: once the `claude` command name is taken over by the
-// Anyswitch shim, an override that resolves back to a shim / bare command name /
-// non-.exe wrapper would make the launcher re-invoke itself, spinning up relays
-// forever. So an override is only honoured when it is an ABSOLUTE path to a
-// .exe. Anything else is rejected loudly rather than silently recursing.
-export function resolveClaudeExecutable(base = process.env) {
-  const override = base.CLAUDE_EXECUTABLE;
-  if (override === undefined || override === null || override === "") {
-    return defaultClaudeExecutable(base);
-  }
-  if (!isAbsolute(override)) {
-    throw new Error(
-      `CLAUDE_EXECUTABLE must be an absolute path to claude.exe, got "${override}". ` +
-        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-        `make the launcher recurse into itself.`,
-    );
-  }
-  if (!/\.exe$/i.test(override)) {
-    throw new Error(
-      `CLAUDE_EXECUTABLE must point at a .exe, got "${override}". ` +
-        `Pointing it at a .cmd/.ps1/shim wrapper could make the launcher recurse into itself.`,
-    );
-  }
-  // Convert backslashes to forward slashes to prevent spawn() path corruption on Windows.
-  return override.replace(/\\/g, '/');
-}
+import { defaultClaudeExecutable, resolveClaudeExecutable } from "./agent-discovery.mjs";
+export { defaultClaudeExecutable, resolveClaudeExecutable };
 
 function claudeExecutable() {
   return resolveClaudeExecutable(process.env);

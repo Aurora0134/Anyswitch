@@ -1,10 +1,10 @@
 {
   "name": "anyswitch",
-  "version": "0.4.3",
+  "version": "0.5.0-preview",
   "description": "Local AI credential relay for Windows: funnels OpenAI-compatible upstreams into a loopback relay with DPAPI-sealed API keys",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=21"
+    "node": ">=22.15.0 <23 || >=23.8.0"
   },
   "os": [
     "win32"
