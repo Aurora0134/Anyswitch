@@ -111,24 +111,8 @@ export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MO
   return writeResult;
 }
 
-export function resolvePiExecutable(base = process.env) {
-  const override = base.PI_EXECUTABLE;
-  if (override === undefined || override === null || override === "") {
-    return join(
-      base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
-      "npm",
-      "pi.cmd",
-    );
-  }
-  if (!isAbsolute(override)) {
-    throw new Error(
-      `PI_EXECUTABLE must be an absolute path, got "${override}". ` +
-        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-        `make the launcher recurse into itself.`,
-    );
-  }
-  return override;
-}
+import { resolvePiExecutable } from "./agent-discovery.mjs";
+export { resolvePiExecutable };
 
 // Per-instance id, shared scheme across all four endpoints:
 // "<cwd basename>-<launcher pid>". The basename is charset-cleaned to the

@@ -123,17 +123,8 @@ export function buildKimiLauncherEnv({ port, token, base = {}, instanceId = null
   return env;
 }
 
-export function resolveKimiExecutable(base = process.env) {
-  const override = base.KIMI_EXECUTABLE;
-  if (override) return override;
-
-  // Default: the global npm bin directory
-  return join(
-    base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
-    "npm",
-    "kimi.cmd",
-  );
-}
+import { resolveKimiExecutable } from "./agent-discovery.mjs";
+export { resolveKimiExecutable };
 
 function realSpawnKimi({ env, args, onPid = () => {} }) {
   return new Promise((resolve, reject) => {

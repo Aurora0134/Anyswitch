@@ -127,31 +127,8 @@ export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DS
   return writeResult;
 }
 
-export function resolveDshExecutable(base = process.env) {
-  const override = base.DSH_EXECUTABLE;
-  if (override !== undefined && override !== null && override !== "") {
-    if (!isAbsolute(override)) {
-      throw new Error(
-        `DSH_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-          `make the launcher recurse into itself.`,
-      );
-    }
-    return override;
-  }
-  // Windows npm global dsh executable
-  const roamingNpm = join(
-    base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
-    "npm",
-  );
-  const cmdPath = join(roamingNpm, "dsh.cmd");
-  if (existsSync(cmdPath)) return cmdPath;
-  // Deliberately skip dsh.ps1: realSpawnDsh only wraps .cmd in comspec /c,
-  // and Windows cannot execute a .ps1 file directly — returning it would
-  // guarantee an error event on spawn. Fall through to the extensionless
-  // shim instead.
-  return join(roamingNpm, "dsh");
-}
+import { resolveDshExecutable } from "./agent-discovery.mjs";
+export { resolveDshExecutable };
 
 export function buildDshLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };

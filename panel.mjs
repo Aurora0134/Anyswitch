@@ -34,6 +34,14 @@ import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
 
+const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+const APP_INFO = Object.freeze({
+  version: APP_VERSION,
+  platform: process.platform,
+  nodeVersion: process.version,
+  prerelease: APP_VERSION.includes("-"),
+});
+
 const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
 const REPO_PANEL_CSS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css");
 const REPO_PANEL_JS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js");
@@ -385,6 +393,7 @@ export function createPanelRouter({
   metricsCollector,
   base = process.env,
   startTime = Date.now(),
+  appInfo = APP_INFO,
   // Relay lifecycle is owned by relay-process-manager (a separate process on
   // 47821). These default to the real supervisor but are injectable so the
   // router is unit-testable without spawning processes or binding sockets.
@@ -450,6 +459,8 @@ export function createPanelRouter({
   // Injectable for tests; `null` lazily binds the real module's exports on
   // the first sessions request.
   sessionScanService = null,
+  environmentService = null,
+  releaseService = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
@@ -1090,6 +1101,52 @@ export function createPanelRouter({
       return res.end(method === "HEAD" ? undefined : body);
     }
 
+    if (path === "/panel/api/app-info" && method === "GET") return sendJson(res, 200, appInfo);
+    if (path === "/panel/api/updates" && method === "GET") {
+      try {
+        if (!releaseService) {
+          const { createReleaseService } = await import("./release-service.mjs");
+          releaseService ??= createReleaseService({ currentVersion: appInfo.version });
+        }
+        return sendJson(res, 200, await releaseService.getAppUpdate({ force: url.searchParams.get("refresh") === "1" }));
+      } catch {
+        return sendJson(res, 200, { currentVersion: appInfo.version, state: "error", checkedAt: new Date().toISOString(), release: null, errorCode: "update_unavailable" });
+      }
+    }
+    if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
+      const id = path.slice("/panel/api/environment/latest/".length);
+      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "qoder-desktop"].includes(id)) {
+        return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
+      }
+      try {
+        if (!releaseService) {
+          const { createReleaseService } = await import("./release-service.mjs");
+          releaseService ??= createReleaseService({ currentVersion: appInfo.version });
+        }
+        const result = await releaseService.getClientLatest(id, { force: url.searchParams.get("refresh") === "1" });
+        const localVersion = url.searchParams.get("localVersion");
+        let comparison = "unknown";
+        if (result.state === "ok" && localVersion && localVersion.length <= 128) {
+          const { compareVersions } = await import("./version-check.mjs");
+          const order = compareVersions(localVersion, result.version);
+          if (order !== null) comparison = order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
+        }
+        return sendJson(res, 200, { ...result, comparison });
+      } catch {
+        return sendJson(res, 200, { state: "error", version: null, url: null, source: "", checkedAt: new Date().toISOString(), errorCode: "update_unavailable", comparison: "unknown" });
+      }
+    }
+    if (path === "/panel/api/environment" && method === "GET") {
+      try {
+        if (!environmentService) {
+          const { createEnvironmentService } = await import("./environment-service.mjs");
+          environmentService ??= createEnvironmentService({ base });
+        }
+        return sendJson(res, 200, await environmentService.getState({ force: url.searchParams.get("refresh") === "1" }));
+      } catch {
+        return sendJson(res, 500, { error: "environment_unavailable", message: "暂时无法检测本地环境" });
+      }
+    }
     if (path === "/panel/api/status" && method === "GET") return handleStatus(res);
     if (path === "/panel/api/relay/status" && method === "GET") return handleRelayStatus(res);
     if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);

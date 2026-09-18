@@ -106,26 +106,8 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
   return writeResult;
 }
 
-export function resolveZcodeExecutable(base = process.env) {
-  const override = base.ZCODE_EXECUTABLE;
-  if (override === undefined || override === null || override === "") {
-    // ZCode 通常作为 Electron 应用安装在 LocalAppData
-    return join(
-      base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-      "Programs",
-      "zcode",
-      "ZCode.exe",
-    );
-  }
-  if (!isAbsolute(override)) {
-    throw new Error(
-      `ZCODE_EXECUTABLE must be an absolute path, got "${override}". ` +
-        `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-        `make the launcher recurse into itself.`,
-    );
-  }
-  return override;
-}
+import { resolveZcodeExecutable } from "./agent-discovery.mjs";
+export { resolveZcodeExecutable };
 
 export function buildZcodeLauncherEnv({ port, token, base = {} }) {
   const env = { ...base };

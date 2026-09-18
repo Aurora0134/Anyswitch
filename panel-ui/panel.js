@@ -1,6 +1,6 @@
 // Anyswitch 面板主脚本（自 panel.html 拆出，2026-09-17）。由 panel.html 以
 // <script src="/panel/assets/panel.js" defer> 引入：defer 保证 DOM 就绪后执行，
-// 与原先「置于 body 末尾的内联脚本」执行时机一致。内容未做任何改动。
+// 与原先「置于 body 末尾的内联脚本」执行时机一致。
 (function () {
   "use strict";
 
@@ -299,6 +299,7 @@ async function api(method, path, body) {
   // 装配（子 tab 重置到「通用」并重拉设置项）。设置本身不写入 panel-view。
   let settingsReturnView = "board";
   let enterSettingsView = () => {};
+  let leaveSettingsView = () => {};
   function boardVisible() { return currentView === "board"; }
 
   function startStatusPolling() {
@@ -1877,6 +1878,281 @@ async function api(method, path, body) {
     };
   }
 
+  function createAboutController({ request, doc, now = () => Date.now() }) {
+    const get = (id) => doc.getElementById(id);
+    const pending = new Map();
+    const remoteCache = new Map();
+    const rows = new Map();
+    let active = false, environmentGen = 0, updateGen = 0;
+    let appInfo = null, local = null, localAt = 0, update = null;
+    let environmentTask = null, updateTask = null, localFailed = false;
+    const products = {
+      claude: ["anthropics/claude-code", "@anthropic-ai/claude-code"],
+      codex: ["openai/codex", "@openai/codex"],
+      opencode: ["anomalyco/opencode", "opencode-ai"],
+      pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
+      kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
+      dsh: ["deepseek-ai/dsh", "@deepseek-ai/dsh"],
+      zcode: [], qoder: ["", "@qoder-ai/qodercli"], "qoder-desktop": [],
+    };
+    function safeLink(raw, id) {
+      try {
+        const url = new URL(raw);
+        if (url.protocol !== "https:" || url.username || url.password || url.port) return null;
+        const path = decodeURIComponent(url.pathname).replace(/\/$/, "");
+        if (id === "app") return url.hostname === "github.com" && /^\/Aurora0134\/Anyswitch\/releases\/tag\/[^/]+$/.test(path) ? url.href : null;
+        const [repo, pkg] = products[id] || [];
+        if (url.hostname === "github.com" && repo && (path === `/${repo}` || path.startsWith(`/${repo}/releases`))) return url.href;
+        if (url.hostname === "www.npmjs.com" && pkg && path === `/package/${pkg}`) return url.href;
+        const hosts = id === "zcode" ? ["zcode.z.ai"]
+          : id === "qoder" || id === "qoder-desktop" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn", "qoder-ide.oss-accelerate.aliyuncs.com"] : [];
+        return hosts.includes(url.hostname) ? url.href : null;
+      } catch { return null; }
+    }
+    function fetchOnce(path) {
+      if (!pending.has(path)) {
+        const task = Promise.resolve().then(() => request("GET", path)).finally(() => pending.delete(path));
+        pending.set(path, task);
+      }
+      return pending.get(path);
+    }
+    function element(tag, className, text) {
+      const node = doc.createElement(tag);
+      node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+    function timeText(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
+    }
+    function busy(id, on, idle, working) {
+      const button = get(id);
+      button.disabled = on;
+      button.textContent = on ? working : idle;
+      button.setAttribute("aria-busy", String(on));
+    }
+    function validLocal(installation) {
+      const version = installation.version;
+      return installation.status === "found" && typeof version === "string" && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version) ? version : null;
+    }
+    function cacheKey(installation) { return `${installation.remoteId}:${validLocal(installation) || ""}`; }
+    function renderApp() {
+      get("aboutAppVersion").textContent = appInfo?.version || "版本暂时无法读取";
+      get("aboutPreviewBadge").hidden = !appInfo?.prerelease;
+      const system = local || appInfo;
+      if (system) get("aboutSystem").textContent = `${({ win32: "Windows", darwin: "macOS", linux: "Linux" })[system.platform] || "当前系统"} · Node ${system.nodeVersion || "版本未知"}`;
+    }
+    function renderUpdate(checking = false) {
+      const state = update?.state;
+      const copy = {
+        update_available: `发现新版本 ${update?.release?.version || ""}`,
+        current: "当前已是最新", ahead: "当前版本领先于已发布版本", no_releases: "暂无发布版本",
+        error: "暂时无法检查，请重试", unknown_version: "当前版本无法比较",
+      };
+      const status = get("aboutUpdateStatus");
+      status.textContent = checking ? "正在检查更新…" : copy[state] || "尚未检查更新";
+      status.dataset.tone = !checking && state === "error" ? "danger" : !checking && state === "current" ? "ok" : "";
+      get("aboutUpdateTime").textContent = update?.checkedAt ? `检查时间 ${timeText(update.checkedAt)}` : "";
+      const link = get("aboutReleaseLink");
+      const href = !checking && safeLink(update?.release?.url, "app");
+      link.hidden = !href;
+      if (href) link.href = href; else link.removeAttribute("href");
+    }
+    function sourceText(raw) {
+      if (!raw) return "未提供";
+      if (/asar/i.test(raw)) return "应用安装资料";
+      if (/pe|file.?version|product.?version/i.test(raw)) return "程序版本信息";
+      if (/npm|package|manifest/i.test(raw)) return "安装包资料";
+      return "本地安装资料";
+    }
+    function renderClient(client, loading = false) {
+      let row = rows.get(client.id);
+      if (!row) {
+        row = element("div", "about-client");
+        row.dataset.clientId = client.id;
+        row.setAttribute("role", "listitem");
+        rows.set(client.id, row);
+        get("aboutClients").appendChild(row);
+      }
+      const wasOpen = row.querySelector("details")?.open || false;
+      const main = element("div", "about-client-main");
+      const name = element("div", "about-client-name");
+      const avatar = doc.querySelector(`.agent-cards-container .panel-card[data-agent-id="${client.id}"] .agent-avatar`);
+      if (avatar) {
+        const icon = element("span", "about-client-icon");
+        icon.setAttribute("aria-hidden", "true");
+        const clone = avatar.cloneNode(true);
+        clone.removeAttribute("id");
+        for (const node of clone.querySelectorAll("[id]")) node.removeAttribute("id");
+        icon.appendChild(clone); name.appendChild(icon);
+      }
+      name.appendChild(element("span", "", client.name));
+      const lines = element("div", "about-version-lines");
+      lines.setAttribute("aria-live", "polite");
+      const details = element("details", "about-details");
+      details.open = wasOpen;
+      details.appendChild(element("summary", "", "路径与版本来源"));
+      const list = element("dl", "");
+      function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
+      for (const installation of client.installations) {
+        const cached = remoteCache.get(cacheKey(installation));
+        const remote = cached?.data;
+        const goodRemote = remote?.state === "ok" && !!remote.version;
+        const kind = installation.kind === "desktop" ? "桌面" : "CLI";
+        const found = installation.status === "found";
+        const localStatus = installation.status === "not_found" ? "未找到" : !found ? "检测失败" : !validLocal(installation) ? "版本无法读取" : "已发现";
+        const line = element("div", "about-version-line");
+        line.appendChild(element("span", "about-kind", kind));
+        line.appendChild(element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`));
+        const remoteText = goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
+        line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
+        const comparison = goodRemote && validLocal(installation) ? remote.comparison : "unknown";
+        const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
+        const result = element("span", "about-result", compared || (localStatus !== "已发现" ? localStatus : goodRemote ? "无法比较版本" : "已发现"));
+        result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : installation.status === "error" ? "danger" : "";
+        line.appendChild(result);
+        if (loading && remote) line.appendChild(element("span", "about-meta", "查询中…"));
+        lines.appendChild(line);
+        detail(`${kind} 路径`, installation.path || "未找到");
+        detail(`${kind} 版本来源`, sourceText(installation.versionSource));
+        const href = safeLink(remote?.url, installation.remoteId);
+        if (href) {
+          const target = element("dd", "");
+          const link = element("a", "about-link", "查看官方版本");
+          link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
+          target.appendChild(link); list.append(element("dt", "", `${kind} 官方来源`), target);
+        }
+        if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));
+      }
+      if (local?.checkedAt) detail("检测时间", timeText(local.checkedAt));
+      details.appendChild(list);
+      main.append(name, lines);
+      row.replaceChildren(main, details);
+    }
+    function renderLocal(loading = false) {
+      if (!local) return;
+      const keep = new Set(local.clients.map((client) => client.id));
+      for (const [id, row] of rows) if (!keep.has(id)) { row.remove(); rows.delete(id); }
+      for (const client of local.clients) renderClient(client, loading);
+      renderApp();
+    }
+    async function loadApp(gen) {
+      if (appInfo) return;
+      try {
+        const data = await fetchOnce("/api/app-info");
+        if (!active || gen !== environmentGen) return;
+        appInfo = data;
+      } catch {
+        if (!active || gen !== environmentGen) return;
+      }
+      renderApp();
+    }
+    function loadEnvironment(refresh = false) {
+      if (!active) return Promise.resolve();
+      if (environmentTask) return environmentTask;
+      const gen = ++environmentGen;
+      const current = () => active && gen === environmentGen;
+      busy("aboutEnvironmentRefresh", true, "重新检测", "检测中…");
+      get("aboutEnvironmentStatus").textContent = local ? "正在重新检测…" : "正在检测…";
+      get("aboutEnvironmentStatus").dataset.tone = "";
+      const appTask = loadApp(gen);
+      const task = (async () => {
+        try {
+          if (refresh || !local || localFailed || now() - localAt >= 60_000) {
+            const data = await fetchOnce(`/api/environment${refresh ? "?refresh=1" : ""}`);
+            if (!current()) return;
+            local = data; localAt = now(); localFailed = false;
+          }
+          if (!current()) return;
+          renderLocal(true);
+          get("aboutEnvironmentStatus").textContent = "正在查询官方版本…";
+          const jobs = local.clients.flatMap((client) => client.installations.map((installation) => ({ client, installation })));
+          let cursor = 0;
+          async function worker() {
+            while (current() && cursor < jobs.length) {
+              const { client, installation } = jobs[cursor++];
+              const key = cacheKey(installation);
+              const cached = remoteCache.get(key);
+              if (!refresh && cached?.data.state === "ok" && now() - cached.at < 600_000) {
+                renderClient(client); continue;
+              }
+              const query = new URLSearchParams();
+              if (refresh) query.set("refresh", "1");
+              const version = validLocal(installation);
+              if (version) query.set("localVersion", version);
+              const suffix = query.size ? `?${query}` : "";
+              let data;
+              try { data = await fetchOnce(`/api/environment/latest/${encodeURIComponent(installation.remoteId)}${suffix}`); }
+              catch { data = { state: "error", version: null }; }
+              if (!current()) return;
+              remoteCache.set(key, { data, at: now() });
+              renderClient(client);
+            }
+          }
+          await Promise.all(Array.from({ length: Math.min(3, jobs.length) }, () => worker()));
+          if (!current()) return;
+          renderLocal();
+          const failed = jobs.some(({ installation }) => remoteCache.get(cacheKey(installation))?.data.state !== "ok");
+          get("aboutEnvironmentStatus").textContent = failed ? "部分官方版本查询失败，可重新检测" : `检测完成 · ${timeText(local.checkedAt)}`;
+          get("aboutEnvironmentStatus").dataset.tone = failed ? "warn" : "";
+        } catch {
+          if (!current()) return;
+          localFailed = true;
+          get("aboutEnvironmentStatus").textContent = local ? "检测失败，保留上次结果，请重试" : "检测失败，请重试";
+          get("aboutEnvironmentStatus").dataset.tone = "danger";
+          renderLocal();
+        } finally {
+          await appTask;
+          if (current()) {
+            environmentTask = null;
+            busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
+          }
+        }
+      })();
+      environmentTask = task;
+      return task;
+    }
+    function checkUpdates() {
+      if (!active) return Promise.resolve();
+      if (updateTask) return updateTask;
+      const gen = ++updateGen;
+      busy("aboutCheckUpdates", true, "检查更新", "检查中…");
+      renderUpdate(true);
+      const task = (async () => {
+        let data;
+        try { data = await fetchOnce("/api/updates?refresh=1"); }
+        catch { data = { state: "error" }; }
+        if (!active || gen !== updateGen) return;
+        update = data;
+        renderUpdate();
+        updateTask = null;
+        busy("aboutCheckUpdates", false, "检查更新", "检查中…");
+      })();
+      updateTask = task;
+      return task;
+    }
+    function enter() {
+      if (active) return environmentTask || Promise.resolve();
+      active = true;
+      if (appInfo) renderApp();
+      renderUpdate();
+      renderLocal();
+      return loadEnvironment();
+    }
+    function leave() {
+      active = false;
+      environmentGen++; updateGen++;
+      environmentTask = null; updateTask = null;
+      busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
+      busy("aboutCheckUpdates", false, "检查更新", "检查中…");
+    }
+    get("aboutCheckUpdates").onclick = checkUpdates;
+    get("aboutEnvironmentRefresh").onclick = () => loadEnvironment(true);
+    return { enter, leave, checkUpdates, refresh: () => loadEnvironment(true) };
+  }
+
   // 设置全页视图与各项开关
   function initSettingsView() {
     const keepAliveToggle = $("keepAliveToggle");
@@ -1977,22 +2253,28 @@ async function api(method, path, body) {
     };
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
 
-    // 子 tab：通用 / 主题。进入设置固定落「通用」（enterSettingsView 装配于此）；
-    // 用户点切时面板沿用视图入场一族（view-enter）重播一次。
+    // 子 tab：通用 / 主题 / 关于；进入设置固定落「通用」。
+    const about = createAboutController({ request: api, doc: document });
+    leaveSettingsView = () => about.leave();
+    const settingsSubTabs = {
+      general: ["settingsTabGeneral", "settingsPanelGeneral"],
+      theme: ["settingsTabTheme", "settingsPanelTheme"],
+      about: ["settingsTabAbout", "settingsPanelAbout"],
+    };
     function activateSettingsSubTab(which, animate) {
-      const general = which === "general";
-      const tab = $(general ? "settingsTabGeneral" : "settingsTabTheme");
-      if (tab.classList.contains("active")) return;
-      $("settingsTabGeneral").classList.toggle("active", general);
-      $("settingsTabTheme").classList.toggle("active", !general);
-      $("settingsTabGeneral").setAttribute("aria-selected", general ? "true" : "false");
-      $("settingsTabTheme").setAttribute("aria-selected", !general ? "true" : "false");
-      $("settingsPanelGeneral").hidden = !general;
-      $("settingsPanelTheme").hidden = general;
-      if (animate) {
-        replayViewEnter($(general ? "settingsPanelGeneral" : "settingsPanelTheme"));
+      const selected = settingsSubTabs[which];
+      if (!selected || $(selected[0]).classList.contains("active")) return;
+      if (which !== "about") about.leave();
+      for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
+        const on = name === which;
+        $(tabId).classList.toggle("active", on);
+        $(tabId).setAttribute("aria-selected", String(on));
+        $(tabId).tabIndex = on ? 0 : -1;
+        $(panelId).hidden = !on;
       }
-      if (!general) captureSettingsMirror();
+      if (animate) replayViewEnter($(selected[1]));
+      if (which === "theme") captureSettingsMirror();
+      if (which === "about") return about.enter();
     }
     // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
     // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
@@ -2045,11 +2327,29 @@ async function api(method, path, body) {
       mirrorResizeTimer = setTimeout(captureSettingsMirror, 200);
     });
     function resetSettingsSubTab() {
-      for (const id of ["settingsTabGeneral", "settingsTabTheme"]) $(id).classList.remove("active");
+      for (const [id] of Object.values(settingsSubTabs)) $(id).classList.remove("active");
       activateSettingsSubTab("general", false);
     }
-    $("settingsTabGeneral").onclick = () => activateSettingsSubTab("general", true);
-    $("settingsTabTheme").onclick = () => activateSettingsSubTab("theme", true);
+    function bindSettingsSubTabs() {
+      const names = Object.keys(settingsSubTabs);
+      names.forEach((name, index) => {
+        const [tabId, panelId] = settingsSubTabs[name];
+        const tab = $(tabId);
+        tab.onclick = () => activateSettingsSubTab(name, true);
+        $(panelId).setAttribute("role", "tabpanel");
+        $(panelId).setAttribute("aria-labelledby", tabId);
+        tab.onkeydown = (event) => {
+          const target = event.key === "Home" ? 0 : event.key === "End" ? names.length - 1
+            : event.key === "ArrowRight" ? (index + 1) % names.length
+            : event.key === "ArrowLeft" ? (index + names.length - 1) % names.length : -1;
+          if (target < 0) return;
+          event.preventDefault();
+          $(settingsSubTabs[names[target]][0]).focus();
+          activateSettingsSubTab(names[target], true);
+        };
+      });
+    }
+    bindSettingsSubTabs();
 
     enterSettingsView = () => {
       resetSettingsSubTab();
@@ -2901,7 +3201,7 @@ async function api(method, path, body) {
     if (store) viewReady = refreshStoreState();
     if (stats) viewReady = enterStatsView(); else leaveStatsView();
     if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
-    if (settings) viewReady = enterSettingsView();
+    if (settings) viewReady = enterSettingsView(); else leaveSettingsView();
     if (window.panelStartupController && viewReady) startupViewReady = viewReady;
     // 刷新终态在离开期间落的小字暂停了淡出计时，切回渠道 tab 即消费「等切回」标记、
     // 重新计一个完整 10s（与差异弹窗关闭重计同款先例）；此后再切走不再暂停

@@ -75,23 +75,8 @@ export async function startOpenAIRelay(options = {}) {
 // qodercli.exe), so pointing the launcher at the dispatcher keeps that
 // resolution in one place. The direct CLI path is only the fallback for
 // entry-dir-less layouts.
-export function resolveQoderExecutable(base = process.env) {
-  const override = base.QODER_EXECUTABLE;
-  if (override !== undefined && override !== null && override !== "") {
-    if (!isAbsolute(override)) {
-      throw new Error(
-        `QODER_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-          `make the launcher recurse into itself.`,
-      );
-    }
-    return override;
-  }
-  const home = base.USERPROFILE ?? "";
-  const entryPath = join(home, ".qoder", "entry", "qoder.cmd");
-  if (existsSync(entryPath)) return entryPath;
-  return join(home, ".qoder", "bin", "qodercli", "qodercli.exe");
-}
+import { resolveQoderExecutable } from "./agent-discovery.mjs";
+export { resolveQoderExecutable };
 
 export function buildQoderLauncherEnv({ token, base = {} }) {
   const env = { ...base };

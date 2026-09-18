@@ -2275,25 +2275,26 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 
 describe("panel.html 设置全页视图", () => {
   // 设置从弹窗升级为全页视图：页头齿轮切入，原页头整行换成设置专用头行
-  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「主题」两个子 tab。
+  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「主题」「关于」三个子 tab。
   // 设置视图不写入 panel-view，刷新永不恢复进设置页。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「主题」子 tab 与两块面板", () => {
+  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「主题」「关于」子 tab 与三块面板", () => {
     assert.ok(/<section class="settings-view" id="settingsView" hidden>/.test(panelHtml),
       "settingsView section 默认隐藏");
     const iView = panelHtml.indexOf('id="settingsView"');
     assert.ok(iView > panelHtml.indexOf('id="sessionsView"') && iView < panelHtml.indexOf("</main>"),
       "settingsView 位于 main 内（sessions 之后）");
-    assert.ok(/<button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true">通用<\/button>/.test(panelHtml),
+    assert.ok(/<button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true"[^>]*>通用<\/button>/.test(panelHtml),
       "「通用」子 tab 默认选中");
-    assert.ok(/<button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false">主题<\/button>/.test(panelHtml),
-      "「主题」子 tab 默认未选");
+    for (const [name, label] of [["Theme", "主题"], ["About", "关于"]]) {
+      assert.ok(new RegExp(`<button class="view-tab" id="settingsTab${name}" role="tab" aria-selected="false"[^>]*>${label}</button>`).test(panelHtml), `${label}子 tab 默认未选`);
+      assert.ok(panelHtml.includes(`id="settingsPanel${name}" hidden`), `${label}面板默认隐藏`);
+    }
     assert.ok(panelHtml.includes('id="settingsPanelGeneral"'), "通用面板存在");
-    assert.ok(/id="settingsPanelTheme" hidden/.test(panelHtml), "主题面板默认隐藏");
   });
 
   it("「通用」子 tab 保留原设置弹窗的全部控件", () => {
@@ -2431,7 +2432,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
     const preview = panelHtml.slice(
       panelHtml.indexOf('id="settingsThemePreview"'),
-      panelHtml.indexOf("</section>", panelHtml.indexOf('id="settingsThemePreview"')),
+      panelHtml.indexOf('id="settingsPanelAbout"'),
     );
     // 镜像三层结构：viewport 定高内滚 → sizer 撑缩放后尺寸 → scale 等比微缩；
     // 容器内不再有独立样张 markup，内容由 captureSettingsMirror 克隆看板填充

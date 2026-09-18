@@ -69,39 +69,8 @@ export async function startOpenAIRelay(options = {}) {
 // the newest codex.exe wins. The CODEX_EXECUTABLE override must be absolute:
 // a bare name or relative path could resolve back to the Anyswitch shim and
 // make the launcher recurse into itself.
-export function resolveCodexExecutable(base = process.env) {
-  const override = base.CODEX_EXECUTABLE;
-  if (override !== undefined && override !== null && override !== "") {
-    if (!isAbsolute(override)) {
-      throw new Error(
-        `CODEX_EXECUTABLE must be an absolute path, got "${override}". ` +
-          `A bare name or relative path could resolve back to the Anyswitch shim and ` +
-          `make the launcher recurse into itself.`,
-      );
-    }
-    return override;
-  }
-  const binRoot = join(
-    base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-    "OpenAI",
-    "Codex",
-    "bin",
-  );
-  let candidates = [];
-  try {
-    candidates = readdirSync(binRoot)
-      .map((entry) => join(binRoot, entry, "codex.exe"))
-      .filter((exe) => existsSync(exe));
-  } catch { candidates = []; }
-  if (candidates.length === 0) {
-    throw new Error(
-      `no codex.exe found under ${binRoot}; is the Codex CLI installed? ` +
-        `Set CODEX_EXECUTABLE to an absolute path to point the launcher at it.`,
-    );
-  }
-  candidates.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  return candidates[0];
-}
+import { resolveCodexExecutable } from "./agent-discovery.mjs";
+export { resolveCodexExecutable };
 
 // Per-instance id, shared scheme across the endpoints:
 // "<cwd basename>-<launcher pid>". The basename is charset-cleaned to the

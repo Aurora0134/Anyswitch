@@ -10,7 +10,7 @@
   npm test
   ```
 
-  This runs `node --test *.test.mjs`. The glob is expanded by Node's own test runner (Node ≥ 21), so it works even though Windows npm scripts don't expand wildcards. The project is zero-dependency — no `npm install` needed.
+  This runs `node --test *.test.mjs`. The glob is expanded by Node's own test runner, so it works even though Windows npm scripts don't expand wildcards. Use **Node.js 24 LTS** for development. The required API range in `package.json` is `>=22.15.0 <23 || >=23.8.0`, accounting for the built-in SQLite and zstd APIs used by session reading; it does not claim that every matching Node version has been tested. The project is zero-dependency — no `npm install` needed.
 
 - Single file:
 
@@ -47,7 +47,7 @@
   npm test
   ```
 
-  即 `node --test *.test.mjs`。通配符由 Node 自带的 test runner 展开（Node ≥ 21），Windows npm script 不展开通配符也没关系。项目零依赖，无需 `npm install`。
+  即 `node --test *.test.mjs`。通配符由 Node 自带的 test runner 展开，Windows npm script 不展开通配符也没关系。开发推荐 **Node.js 24 LTS**。`package.json` 的 API 下限范围为 `>=22.15.0 <23 || >=23.8.0`，涵盖会话读取所需的内置 SQLite 与 zstd API，不表示范围内每个 Node 版本均已实测。项目零依赖，无需 `npm install`。
 
 - 单文件：
 
