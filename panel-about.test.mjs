@@ -52,14 +52,14 @@ function deferred() {
 }
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const appInfo = { version: "0.5.0-preview", prerelease: true, platform: "win32", nodeVersion: "v24.13.0" };
-const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"];
+const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"];
 function environment() {
   return {
     platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
     clients: ids.map((id) => ({
       id, name: id,
       installations: (id === "qoder" || id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
-        kind, remoteId: id,
+        kind, remoteId: id === "grok" ? null : id, // Grok Build 无官方版本源，关于页不对其发起查询（与生产行为一致）
         status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
         versionSource: "package-json", issue: null,
       })),
@@ -123,7 +123,7 @@ test("enter renders local data before official replies; remote concurrency is bo
   assert.match(h.get("aboutAppVersion").textContent, /0\.5\.0-preview/);
   assert.equal(h.get("aboutPreviewBadge").hidden, false);
   assert.match(h.get("aboutSystem").textContent, /Windows.*Node.*v24\.13\.0/);
-  assert.equal(h.get("aboutClients").children.length, 8);
+  assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.row("claude").textContent, /本地.*1\.0\.0/);
   assert.match(h.row("claude").textContent, /查询中/);
   assert.equal(pending.length, 3);
@@ -274,7 +274,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   update.resolve({ state: "current", checkedAt: "2026-09-18T09:00:00Z" });
   await Promise.all([first, second]);
   await tick(); await tick();
-  assert.equal(h.get("aboutClients").children.length, 8);
+  assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
   assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 8);
 });

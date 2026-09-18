@@ -3,7 +3,7 @@
 // managed block.
 //
 // Target facts this module depends on:
-//   - kimi/opencode re-read their file at runtime (hot); the other five read
+//   - kimi/opencode re-read their file at runtime (hot); the other six read
 //     it once at session start — surfaced to the UI as `hotReload`.
 //   - qoder: `~/.qoder/rules/**/*.md` is a user-level injection surface in
 //     Qoder Desktop, and its loaded text is observable in model context. A
@@ -11,6 +11,11 @@
 //     Qoder keeps watching a rule file once loaded, so edits land on the next
 //     turn → hotReload true. `~/.qoder/AGENTS.md` injects too but is read only
 //     at session start and is the user's own file — hence rules.
+//   - grok: `$GROK_HOME/rules/` (default `~/.grok/rules/`) is a home-level
+//     rules directory Grok always scans — every *.md directly inside it loads
+//     as a user rule. Rules are read at session start with no file watcher
+//     (same treatment as codex) → hotReload false. Anyswitch never touches
+//     ~/.grok/AGENTS.md — hence a dedicated file under rules/.
 //
 // Managed-block semantics:
 //   - empty effective set removes the block; when the file holds only the
@@ -45,6 +50,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },
   { id: "codex", label: "Codex", hotReload: false, targetRel: "~/.codex/AGENTS.md", home: [".codex", "AGENTS.md"] },
+  { id: "grok", label: "Grok Build", hotReload: false, targetRel: "~/.grok/rules/anyswitch-managed-prompts.md", home: [".grok", "rules", "anyswitch-managed-prompts.md"] },
 ]);
 
 // Bodies only: the title lives in prompts.json for the panel; it never

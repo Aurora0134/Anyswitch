@@ -23,7 +23,7 @@ function makeTmp() {
 // never the real home dirs.
 function testScanner(overrides = {}) {
   const roots = {};
-  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex"]) {
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
     roots[id] = [makeTmp()];
   }
   Object.assign(roots, overrides);
@@ -853,7 +853,117 @@ test("codex: session id falls back to the rollout filename uuid", async () => {
   assert.equal(sessions[0].resumeCommand, `codex resume ${id}`);
 });
 
-// --- sqlite adapters ------------------------------------------------------------
+// --- grok --------------------------------------------------------------------
+
+// root is the sessions dir (~/.grok/sessions): <encoded-cwd>/<session-id>/
+// holds summary.json (the index entry) and updates.jsonl (the ACP update
+// stream). Fixture shapes follow user-guide/17-sessions.md and the ACP sample
+// in README.md (update.sessionUpdate, update.content.text, update.tool).
+function writeGrokSession(root, projectDir, sessionId, { summary, updates = [] } = {}) {
+  const dir = join(root, projectDir, sessionId);
+  mkdirSync(dir, { recursive: true });
+  if (summary !== null) writeFileSync(join(dir, "summary.json"), JSON.stringify(summary), "utf8");
+  if (updates.length > 0) {
+    writeFileSync(join(dir, "updates.jsonl"), updates.map((u) => JSON.stringify(u)).join("\n") + "\n", "utf8");
+  }
+  return dir;
+}
+
+test("grok: scans summary.json entries and loads the ACP update stream", async () => {
+  const root = makeTmp();
+  const id = "01912345-6789-7abc-8def-0123456789ab";
+  const dir = writeGrokSession(root, "C%3A%5Cwork%5Cgrokproj", id, {
+    summary: {
+      info: { session_id: id, cwd: "C:\\work\\grokproj" },
+      title: "手动重命名的标题",
+      generated_title: "自动生成的标题",
+      title_is_manual: true,
+      created_at: "2026-09-01T10:00:00.000Z",
+      updated_at: "2026-09-01T10:30:00.000Z",
+      num_messages: 6,
+      current_model_id: "grok-4.6",
+      agent_name: "default",
+      last_turn_summary: "最后一轮的小结",
+    },
+    updates: [
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "grok " } },
+      { sessionUpdate: "user_message_chunk", content: { type: "text", text: "用户问题" } },
+      // The reasoning draft is not dialogue and never surfaces.
+      { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "先想想……" } },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "回答" } },
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "全文" } },
+      { sessionUpdate: "tool_call", tool: "read_file", title: "Read", status: "pending" },
+      { sessionUpdate: "tool_call_update", toolCallId: "c1", status: "completed", rawOutput: "文件内容" },
+      // ACP notification envelopes wrap the same update — same rendering.
+      { method: "session/update", params: { update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "收尾" } } } },
+    ],
+  });
+  const scanner = testScanner({ grok: [root] });
+  const { sessions, endpointErrors } = await scanner.scanAll();
+  assert.deepEqual(endpointErrors.filter((e) => e.endpoint === "grok"), []);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].endpoint, "grok");
+  assert.equal(sessions[0].id, id);
+  assert.equal(sessions[0].title, "手动重命名的标题", "a manual /rename always wins");
+  assert.equal(sessions[0].summary, "最后一轮的小结");
+  assert.equal(sessions[0].project, "C:\\work\\grokproj");
+  assert.equal(sessions[0].file, dir);
+  assert.equal(sessions[0].createdAt, Date.parse("2026-09-01T10:00:00.000Z"));
+  assert.equal(sessions[0].lastActive, Date.parse("2026-09-01T10:30:00.000Z"));
+  assert.equal(sessions[0].resumeCommand, `grok --resume ${id}`);
+
+  const messages = await scanner.loadMessages("grok", dir);
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "grok 用户问题"],          // chunk fragments of one turn merge
+      ["assistant", "回答全文"],
+      ["assistant", "[Tool: read_file]"],
+      ["tool", "文件内容"],
+      ["assistant", "收尾"],              // envelope-wrapped update, new turn
+    ],
+  );
+});
+
+test("grok: generated title, then cwd basename, then exclusion when there is nothing", async () => {
+  const root = makeTmp();
+  const id = "01912345-0000-7000-8000-000000000001";
+  writeGrokSession(root, "proj", id, {
+    summary: {
+      sessionId: id, cwd: "C:\\work\\flatproj", // flat fields, no `info`
+      generated_title: "自动生成的标题",
+      created_at: 1788000000000, updated_at: 1788000001000, num_messages: 4,
+    },
+  });
+  const shellId = "01912345-0000-7000-8000-000000000002";
+  writeGrokSession(root, "proj", shellId, {
+    summary: { sessionId: shellId, num_messages: 0 }, // saved without a single message
+  });
+  // No summary.json at all → not a listable session.
+  writeGrokSession(root, "proj", "01912345-0000-7000-8000-000000000003", { summary: null });
+  const { sessions } = await testScanner({ grok: [root] }).scanAll();
+  assert.deepEqual(sessions.map((s) => s.id), [id]);
+  assert.equal(sessions[0].title, "自动生成的标题");
+  assert.equal(sessions[0].createdAt, 1788000000000);
+  assert.equal(sessions[0].lastActive, 1788000001000);
+});
+
+test("grok: delete removes only the session dir and never the global search index", async () => {
+  const root = makeTmp();
+  const id = "01912345-0000-7000-8000-0000000000ff";
+  // Grok keeps one FTS search index at the sessions root (session_search.sqlite).
+  const index = join(root, "session_search.sqlite");
+  writeFileSync(index, "search index", "utf8");
+  const dir = writeGrokSession(root, "proj", id, {
+    summary: { sessionId: id, cwd: "C:\\work\\p", generated_title: "t", num_messages: 2, created_at: 1788000000000 },
+  });
+  const result = await testScanner({ grok: [root] }).deleteSessions([{ endpoint: "grok", file: dir }]);
+  assert.equal(result.ok.length, 1);
+  assert.ok(!existsSync(dir));
+  assert.ok(existsSync(index), "the search index is Grok's own state — left untouched");
+});
+
+
 
 // One real zcode/opencode assistant turn. A "tool" part carries the call AND
 // its result (state.output when completed, state.error when it failed, neither

@@ -456,7 +456,7 @@ export function createPanelRouter({
   // without touching the real usage dir; `null` lazily creates one.
   usageJournal = null,
   // Sessions tab service (session-scan.mjs): scanAll() / loadMessages() /
-  // deleteSessions() over the eight agents' on-disk session stores.
+  // deleteSessions() over the nine agents' on-disk session stores.
   // Injectable for tests; `null` lazily binds the real module's exports on
   // the first sessions request.
   sessionScanService = null,
@@ -1234,7 +1234,7 @@ export function createPanelRouter({
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"].includes(id)) {
+      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {
@@ -1610,7 +1610,7 @@ export function createPanelRouter({
     }
 
     // ── Sessions tab routes ────────────────────────────────────────────
-    // Stateless live scan of the eight agents' on-disk session stores
+    // Stateless live scan of the nine agents' on-disk session stores
     // (session-scan.mjs). A single adapter's failure degrades into
     // endpointErrors (drives the UI banner) instead of failing the whole
     // list. GETs carry no CSRF gate; POST delete is covered by the
@@ -1786,7 +1786,7 @@ export function createPanelRouter({
 
     // ── Prompts tab routes ─────────────────────────────────────────────
     // Every mutation POST persists via the data plane, then immediately
-    // re-syncs all eight endpoint instruction files. Sync failures land in
+    // re-syncs all nine endpoint instruction files. Sync failures land in
     // the `sync` snapshot (GET state) and never fail the mutation itself;
     // thrown validation errors become { ok:false, error }.
     if (path.startsWith("/panel/api/prompts/")) {

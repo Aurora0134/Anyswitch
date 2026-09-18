@@ -53,12 +53,14 @@ const SUMMARY_MAX_CHARS = 160;
 //   pi --session <path|id>   (--session <path|id>, accepts a partial UUID)
 //   opencode --session <id>  (-s, --session)
 //   codex resume <id>        ([SESSION_ID], UUID or session name)
+//   grok --resume <id>       (-r, --resume <ID_OR_TITLE>; user-guide/17-sessions.md)
 const RESUME_COMMAND = Object.freeze({
   claude: (meta) => `claude --resume ${meta.id}`,
   kimi: (meta) => `kimi --session ${meta.id}`,
   pi: (meta) => `pi --session ${meta.file}`,
   opencode: (meta) => `opencode --session ${meta.id}`,
   codex: (meta) => `codex resume ${meta.id}`,
+  grok: (meta) => `grok --resume ${meta.id}`,
 });
 
 function resumeCommandFor(endpoint, meta) {
@@ -1292,6 +1294,171 @@ function createCodexAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
+// grok — ~/.grok/sessions/<url-encoded-cwd>/<sessionId>/ (user-guide/
+// 17-sessions.md). summary.json is the index entry: `info` carries the session
+// id and cwd; `title`/`generated_title` the display title (a manual /rename
+// sets title_is_manual and always wins); created_at/updated_at the
+// timestamps; session_summary and last_turn_summary the previews.
+// updates.jsonl is the authoritative conversation log — one self-contained
+// ACP session update event per line (sessionUpdate: user_message_chunk /
+// agent_message_chunk / agent_thought_chunk / tool_call / tool_call_update).
+// The sibling session_search.sqlite is only Grok's own FTS search index over
+// the same data (17-sessions.md "JSONL is the source of truth"), so delete()
+// removes the session directory and NEVER touches that index — a stale search
+// hit is Grok's to reconcile, a rewritten global index is not ours to risk.
+// ---------------------------------------------------------------------------
+
+// First non-empty string among the candidates, else null.
+function firstString(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return null;
+}
+
+// A session update line is either the bare update object or the ACP
+// notification envelope wrapping it ({method:"session/update", params:{update}}).
+function grokSessionUpdate(value) {
+  if (!value || typeof value !== "object") return null;
+  if (typeof value.sessionUpdate === "string") return value;
+  const update = value.params?.update;
+  if (value.method === "session/update" && update && typeof update === "object") return update;
+  return null;
+}
+
+function createGrokAdapter(roots) {
+  // The encoded-cwd group name is a slug+hash when the encoding exceeds 255
+  // bytes; the original path then lives in the group's .cwd file (17-sessions.md).
+  function readCwdFile(projectDir) {
+    try {
+      return firstString(readFileSync(join(projectDir, ".cwd"), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  function parseSession(sessionDir, projectDir) {
+    let summary;
+    try {
+      summary = JSON.parse(readFileSync(join(sessionDir, "summary.json"), "utf8"));
+    } catch {
+      return null; // no index entry (or corrupt JSON) — not a listable session
+    }
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) return null;
+    const info = summary.info && typeof summary.info === "object" ? summary.info : {};
+    const id =
+      firstString(info.session_id, info.sessionId, info.id, summary.sessionId, summary.session_id) ??
+      basename(sessionDir);
+    if (id === "") return null;
+    const project = firstString(info.cwd, summary.cwd) ?? readCwdFile(projectDir);
+    // Title chain: manual/current title → generated title → cwd basename.
+    // Grok starts title generation right after the first prompt, so a real
+    // conversation practically always has one; the basename is the safety net.
+    const title =
+      (firstString(summary.title, summary.generated_title) !== null &&
+        truncateText(firstString(summary.title, summary.generated_title), TITLE_MAX_CHARS)) ||
+      (project !== null ? pathBasename(project) : null);
+    const preview = firstString(summary.last_turn_summary, summary.session_summary);
+    // A shell session (saved without a single message) has nothing to show.
+    if (summary.num_messages === 0 && preview === null) return null;
+    if (title === null && preview === null) return null;
+    const createdAt = parseTimestampMs(summary.created_at);
+    return makeMeta({
+      endpoint: "grok",
+      id,
+      title,
+      summary: preview !== null ? truncateText(preview, SUMMARY_MAX_CHARS) || null : null,
+      project,
+      file: sessionDir,
+      createdAt,
+      lastActive: parseTimestampMs(summary.updated_at) ?? createdAt,
+    });
+  }
+
+  return {
+    id: "grok",
+    roots: () => roots,
+    async scan() {
+      const sessions = [];
+      for (const root of roots) {
+        let projectDirs;
+        try {
+          projectDirs = readdirSync(root, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const projectDir of projectDirs) {
+          // session_search.sqlite{,-shm,-wal} sit at this level — files, skipped.
+          if (!projectDir.isDirectory()) continue;
+          const projectPath = join(root, projectDir.name);
+          let sessionDirs;
+          try {
+            sessionDirs = readdirSync(projectPath, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          for (const sessionDir of sessionDirs) {
+            if (!sessionDir.isDirectory()) continue;
+            try {
+              const meta = parseSession(join(projectPath, sessionDir.name), projectPath);
+              if (meta) sessions.push(meta);
+            } catch {
+              // unreadable entry — skip, never fail the whole scan
+            }
+          }
+        }
+      }
+      return sessions;
+    },
+    async loadMessages(file) {
+      const target = assertUnderRoots(file, roots);
+      const updates = join(target, "updates.jsonl");
+      const messages = [];
+      // Consecutive *_message_chunk lines are streaming fragments of ONE turn;
+      // they are concatenated (no separator — a chunk can split mid-word) so
+      // the transcript shows turns, not tokens. agent_thought_chunk is the
+      // model's reasoning draft and, like kimi's think parts, not dialogue.
+      let openTurn = null; // the message a run of same-role chunks appends to
+      for (const value of parseJsonl(readFileSync(updates, "utf8"))) {
+        const update = grokSessionUpdate(value);
+        if (update === null) continue;
+        const kind = update.sessionUpdate;
+        const ts = parseTimestampMs(update.ts) ?? parseTimestampMs(update.timestamp);
+        if (kind === "user_message_chunk" || kind === "agent_message_chunk") {
+          const role = kind === "user_message_chunk" ? "user" : "assistant";
+          const text = extractText(update.content);
+          if (text.trim() === "") continue;
+          if (openTurn && openTurn.role === role) {
+            openTurn.content += text;
+          } else {
+            openTurn = { role, content: text, ts };
+            messages.push(openTurn);
+          }
+        } else if (kind === "tool_call") {
+          openTurn = null;
+          messages.push({ role: "assistant", content: `[Tool: ${toolCallName(update)}]`, ts });
+        } else if (kind === "tool_call_update") {
+          openTurn = null;
+          const text =
+            extractText(update.content) ||
+            (typeof update.rawOutput === "string" ? update.rawOutput : "");
+          if (text.trim() !== "") messages.push({ role: "tool", content: text, ts });
+        }
+      }
+      return messages;
+    },
+    async delete(file) {
+      const target = assertUnderRoots(file, roots);
+      // Directory delete only: the global session_search.sqlite under the root
+      // is Grok's own search index and is deliberately left alone (see the
+      // adapter header note).
+      rmSync(target, { recursive: true, force: true });
+      return true;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // SQLite adapters (zcode / opencode). All open read-only via a
 // file:...?mode=ro URI so active WAL stores are safe to read concurrently.
 // Open/query failure degrades the adapter to an empty list — it must never
@@ -1461,6 +1628,7 @@ function defaultRoots(home = homedir()) {
     opencode: [join(home, ".local", "share", "opencode")],
     qoder: [join(home, ".qoder", "projects")],
     codex: [join(home, ".codex", "sessions")],
+    grok: [join(home, ".grok", "sessions")],
   };
 }
 
@@ -1473,6 +1641,7 @@ const ADAPTER_FACTORIES = {
   opencode: createOpencodeAdapter,
   qoder: createQoderAdapter,
   codex: createCodexAdapter,
+  grok: createGrokAdapter,
 };
 
 export function createSessionScanner({ roots: rootOverrides } = {}) {

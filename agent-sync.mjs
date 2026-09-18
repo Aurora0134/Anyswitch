@@ -16,6 +16,7 @@ import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
 import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
+import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
 
 /**
  * Synchronize all supported coding agent configurations against the current store.
@@ -55,6 +56,7 @@ export async function syncAllAgentConfigs({
     qoder: null,
     codex: null,
     opencode: null,
+    grok: null,
   };
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
@@ -160,6 +162,20 @@ export async function syncAllAgentConfigs({
   } catch (err) {
     results.opencode = { ok: false, error: err.message };
     logger?.warn?.(`opencode config sync skipped: ${err.message}`);
+  }
+
+  // 8. Grok Build config.toml sync (~/.grok/config.toml)
+  try {
+    const grokResult = await writeGrokConfig(store, port, token, root, grokConfigPath(base));
+    results.grok = grokResult;
+    if (!grokResult.ok) {
+      logger?.warn?.(`grok config.toml not updated: ${grokResult.reason ?? "unknown"}`);
+    } else if (!grokResult.unchanged) {
+      logger?.info?.("grok config.toml synced");
+    }
+  } catch (err) {
+    results.grok = { ok: false, error: err.message };
+    logger?.warn?.(`grok config sync skipped: ${err.message}`);
   }
 
   return { ok: true, results };

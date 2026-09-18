@@ -370,6 +370,7 @@ const AGENT_IMAGE_BUCKETS = [
   ["claude.exe", "claude"],
   ["opencode.exe", "opencode"],
   ["dsh.exe", "dsh"],
+  ["grok.exe", "grok"],
   ["node.exe", "node"],
   ["cmd.exe", "cmd"],
 ];
@@ -437,7 +438,7 @@ function resolveProbeRow(lower) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -532,6 +533,13 @@ function parseTasklistCsv(stdout) {
     } else if (bucket === "dsh") {
       result.dsh += 1;
       if (pid) result.dshPids.add(pid);
+    } else if (bucket === "grok") {
+      // Grok Build is a native binary (one grok.exe per terminal session,
+      // kimi-style multi-instance) — no helper-image filtering applies. Its
+      // bin dir also ships agent.exe / grove*.exe: deliberately NOT bucketed
+      // (agent.exe is a generic name third-party software may carry).
+      result.grok += 1;
+      if (pid) result.grokPids.add(pid);
     } else if (bucket === "node") {
       // The scoped package name must appear as an install PATH (trailing
       // separator): Claude Code's auto-update check spawns
@@ -1415,7 +1423,7 @@ const PS_REPL_COMMAND =
 // intermediate hop would break ancestor resolution. cmd.exe rows feed only
 // the lineage table — no counting branch claims them.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -1676,13 +1684,14 @@ export function createAgentMetricsCollector(options = {}) {
   const opencodeState = createAggregateState();
   const claudeState = createAggregateState();
   const codexState = createAggregateState();
+  const grokState = createAggregateState();
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / codex): instanceId -> { state, firstSeen }. Only requests carrying a
-  // valid instanceId land here, and they ALSO land in the endpoint aggregate
-  // above, so the existing cards are unchanged. claude is per-session
-  // already; zcode/dsh/qoder stay aggregate-only by design.
-  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map() };
+  // pi / codex / grok): instanceId -> { state, firstSeen }. Only requests
+  // carrying a valid instanceId land here, and they ALSO land in the endpoint
+  // aggregate above, so the existing cards are unchanged. claude is
+  // per-session already; zcode/dsh/qoder stay aggregate-only by design.
+  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map() };
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -1700,6 +1709,7 @@ export function createAgentMetricsCollector(options = {}) {
     qoder: qoderState,
     codex: codexState,
     opencode: opencodeState,
+    grok: grokState,
   };
   let metricsSnapshotDirty = false;
   let lastMetricsSnapshotAt = 0;
@@ -1795,7 +1805,7 @@ export function createAgentMetricsCollector(options = {}) {
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState]) {
       state.sparkWindowPoints = sparkWindowPoints;
       while (state.ttftHistory.length > keep) state.ttftHistory.shift();
       while (state.recentSamples.length > keep) state.recentSamples.shift();
@@ -1872,6 +1882,21 @@ export function createAgentMetricsCollector(options = {}) {
     return false;
   }
 
+  // Grok Build tags agentId "grok" through the launchers; its own HTTP layer
+  // sends User-Agent "grok-cli/<version>" (grok docs: user-guide
+  // 05-configuration / 07-mcp-servers), so both channels are recognized.
+  function isGrokRequest(meta = {}) {
+    if (typeof meta.agentId === "string") {
+      const id = meta.agentId.toLowerCase().trim();
+      if (id === "grok") return true;
+    }
+    if (typeof meta.userAgent === "string") {
+      const ua = meta.userAgent.toLowerCase();
+      if (ua.includes("grok-cli/")) return true;
+    }
+    return false;
+  }
+
   // Claude aggregate bucket. agentId-only on purpose: the resident relay's
   // /v1/messages path already maps the Anthropic client UA to agentId
   // "claude" upstream, while the chat/completions path explicitly defaults
@@ -1904,6 +1929,9 @@ export function createAgentMetricsCollector(options = {}) {
     } else if (isOpencodeRequest(meta)) {
       targetState = opencodeState;
       bucketAgentId = "opencode";
+    } else if (isGrokRequest(meta)) {
+      targetState = grokState;
+      bucketAgentId = "grok";
     } else if (isClaudeRequest(meta)) {
       targetState = claudeState;
       bucketAgentId = "claude";
@@ -2270,7 +2298,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
-    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState]) {
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState]) {
       pruneStaleAggregateFaults(state, nowFn, faultIdleTtlMs);
     }
 
@@ -2309,6 +2337,7 @@ export function createAgentMetricsCollector(options = {}) {
     settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
     settleAbandonedAggregateState(codexState, procCounts.codex || 0);
     settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
+    settleAbandonedAggregateState(grokState, procCounts.grok || 0);
     settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
 
     // Instance housekeeping mirrors the endpoint-level one: settle orphans,
@@ -2329,7 +2358,7 @@ export function createAgentMetricsCollector(options = {}) {
     // Remaining custom ids (no numeric tail — normalizeInstanceId already
     // had its say at ingest) keep the idle TTL; an instance with in-flight
     // requests never expires on that path.
-    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState };
+    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       // codex canonical rows reconcile against the ENGINE subset: the bucket's
@@ -2533,7 +2562,7 @@ export function createAgentMetricsCollector(options = {}) {
         // Authoritative sparkline history (from the reporter's per-request
         // ring, absent until its first report) — feeds the cc card's instance
         // sparkline reconnection after a page reload, same contract as the
-        // per-instance sparkHistory on kimi/opencode/pi/codex.
+        // per-instance sparkHistory on kimi/opencode/pi/codex/grok.
         sparkHistory: s.sparkHistory ?? null,
         // Model identity from the session reporter's snapshot (null until the
         // reporter starts sending it) — feeds the per-session model badge.
@@ -2699,7 +2728,19 @@ export function createAgentMetricsCollector(options = {}) {
       instances: instanceSnapshots("opencode"),
     });
 
-    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent];
+    // Grok Build Agent Status（汇总卡 + 实例桶；grok.exe 每终端一进程，
+    // kimi 同款多实例语义）
+    const grokAgent = buildAggregateAgentStatus({
+      id: "grok",
+      name: "Grok Build",
+      state: grokState,
+      processCount: procCounts.grok || 0,
+      tpsWindow: recentSampleWindow,
+      nowFn,
+      instances: instanceSnapshots("grok"),
+    });
+
+    return [zcodeAgent, claudeAgent, dshAgent, piAgent, kimiAgent, qoderAgent, codexAgent, opencodeAgent, grokAgent];
   }
 
   return {

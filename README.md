@@ -82,7 +82,7 @@ After updating the source, the backend needs a new panel-host process. Refreshin
    - **API Key** — sealed with DPAPI the moment you save.
    
    On save, Anyswitch discovers the model list from the upstream's `GET /v1/models`. If discovery fails (the upstream has no models endpoint), you can paste model IDs manually instead.
-3. Optionally, in the same tab: group providers into a **号池 (pool)**, or edit a **路由链 (route chain)** so that requesting the model `auto` walks your channels in order. Click **同步到端点 (Sync to endpoints)** to write the managed channels into client configs — this also happens automatically whenever the store changes (Kimi Code, Codex, OpenCode, Pi, DSH, ZCode, Qoder).
+3. Optionally, in the same tab: group providers into a **号池 (pool)**, or edit a **路由链 (route chain)** so that requesting the model `auto` walks your channels in order. Click **同步到端点 (Sync to endpoints)** to write the managed channels into client configs — this also happens automatically whenever the store changes (Kimi Code, Codex, OpenCode, Pi, DSH, ZCode, Qoder, Grok Build).
 
    ![Route chain editor](docs/screenshots/s5-route-chain.png)
 4. Start your coding agent through its launcher (see the table below), e.g. `node launcher.mjs` for Claude Code. The launcher injects the relay endpoint and token automatically; any extra arguments are passed straight through to the client.
@@ -99,12 +99,13 @@ After updating the source, the backend needs a new panel-host process. Refreshin
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into `~/.dsh/settings.yaml`. |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.qoder/settings.json`, and starts Qoder's own `qoder.cmd` dispatcher with `ANYSWITCH_RELAY_TOKEN` + `NO_PROXY` set in the process environment only. Two behaviours are specific to Qoder and worth knowing up front: requests are attributed by an identity prefix in the URL segment (`/openai/qoder~<provider>/v1`) because Qoder has no way to send a custom header, and the launcher starts Qoder with a DevTools port bound to 127.0.0.1 so it can ask Qoder to reload its model catalog after a config change — that reload is best-effort and its failure never blocks startup. |
+| Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.grok/config.toml`, strips any inherited `XAI_API_KEY`, and starts Grok Build with `ANYSWITCH_INSTANCE_ID` and `NO_PROXY` set in the process environment only. |
 
-For the config-merging clients (Kimi Code, Codex, OpenCode, Pi, ZCode, DSH, Qoder), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
+For the config-merging clients (Kimi Code, Codex, OpenCode, Pi, ZCode, DSH, Qoder, Grok Build), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
 
 ### Agent skills
 
-Anyswitch ships an optional agent skill that teaches a coding agent the correct way to author and manage Anyswitch **presets** — prompt presets that the panel writes into each supported client's own global instruction file (`AGENTS.md` for most clients, `CLAUDE.md` for Claude Code, a dedicated `~/.qoder/rules/` file for Qoder) through the panel API. The skill lives at [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md) in this repo.
+Anyswitch ships an optional agent skill that teaches a coding agent the correct way to author and manage Anyswitch **presets** — prompt presets that the panel writes into each supported client's own global instruction file (`AGENTS.md` for most clients, `CLAUDE.md` for Claude Code, dedicated `~/.qoder/rules/` and `~/.grok/rules/` files for Qoder and Grok Build) through the panel API. The skill lives at [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md) in this repo.
 
 Installing a preset changes files in your home directory that belong to your other tools, not just files in this repository; the panel exposes a master switch and a per-client switch so you can turn that off at any time.
 
@@ -118,7 +119,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 ```
 
-Once installed, the agent follows the skill's rules: it writes presets only through the panel API at `http://127.0.0.1:47820` (never by hand-editing `prompts.json`), and reports when each endpoint actually picks up the change (hot-reload endpoints apply immediately; the other five apply on next session).
+Once installed, the agent follows the skill's rules: it writes presets only through the panel API at `http://127.0.0.1:47820` (never by hand-editing `prompts.json`), and reports when each endpoint actually picks up the change (hot-reload endpoints apply immediately; the other six apply on next session).
 
 ### Panel overview
 
@@ -132,7 +133,7 @@ The panel is served by a standalone panel host decoupled from the relay, so it s
 
 The upper card shows the version of the running panel process and a preview label where applicable. Opening About loads that version and checks for updates once against the cached result; clicking **检查更新 (Check for updates)** always forces a fresh lookup. When a newer release is found, a link to the matching release notes appears — and if only a preview release exists, it is offered and clearly marked as a preview rather than reported as "no releases".
 
-The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all eight clients listed above. Detection reads installation locations and product metadata without launching a client — the single exception is Codex, whose native binary carries no readable version, so it is asked once for its own `codex --version` report under a timeout; an installation that fails that probe is shown as installed but not runnable. Official versions are queried separately per client. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
+The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all nine clients listed above. Detection reads installation locations and product metadata without launching a client — the exceptions are Codex and Grok Build, whose native binaries carry no readable version, so each is asked once for its own `--version` report under a timeout; an installation that fails that probe is shown as installed but not runnable. Official versions are queried separately per client. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
 
 Detection distinguishes an installation found, not found, a version that cannot be read, installed but not runnable, and a detection failure. It does not prove a client can run, is signed in, or is connected to the relay. Official `latest` is the published channel being queried, not a claim about your selected update channel or a guarantee of a stable release; prerelease labels are retained. Qoder is a desktop-only entry: the `qoder.cmd` dispatcher belongs to the desktop IDE installation and is not a separate product, so one desktop row is shown and compared against the official desktop channel. Unknown local versions remain unknown even when an official version is available.
 
@@ -268,7 +269,7 @@ git switch --detach v0.5.0-preview
    - **API Key** — 保存即用 DPAPI 封存。
 
    保存时 Anyswitch 自动通过上游的 `GET /v1/models` 拉取模型列表；若发现失败（上游没有 models 端点），可以改为手动粘贴模型 ID。
-3. 可选：在同一个 tab 里把多个渠道组成 **号池**，或编辑 **路由链**（请求模型 `auto` 时按链逐跳路由）。点 **同步到端点** 把托管渠道写入各客户端配置——store 每次变更时也会自动同步（Kimi Code、Codex、OpenCode、Pi、DSH、ZCode、Qoder）。
+3. 可选：在同一个 tab 里把多个渠道组成 **号池**，或编辑 **路由链**（请求模型 `auto` 时按链逐跳路由）。点 **同步到端点** 把托管渠道写入各客户端配置——store 每次变更时也会自动同步（Kimi Code、Codex、OpenCode、Pi、DSH、ZCode、Qoder、Grok Build）。
 
    ![路由链编辑器](docs/screenshots/s5-route-chain.png)
 4. 通过对应启动器启动 coding agent（见下表），例如 Claude Code 用 `node launcher.mjs`。启动器自动注入 relay 端点与 token；多余参数原样透传给客户端。
@@ -285,12 +286,13 @@ git switch --detach v0.5.0-preview
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
 | DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进 `~/.dsh/settings.yaml`。 |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.qoder/settings.json`，再经 Qoder 自家的 `qoder.cmd` 调度器启动，`ANYSWITCH_RELAY_TOKEN` 与 `NO_PROXY` 只走进程环境变量、不落盘。两处 Qoder 特有行为需先知晓：请求归属靠 URL 段里的身份前缀（`/openai/qoder~<provider>/v1`），因为 Qoder 没有下发自定义请求头的位置；启动器会带一个只绑 127.0.0.1 的 DevTools 端口拉起 Qoder，用于在配置变更后请它重载模型目录——该重载是尽力而为，失败也不阻塞启动。 |
+| Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.grok/config.toml`，剥离继承的 `XAI_API_KEY`，再以仅进程环境变量注入 `ANYSWITCH_INSTANCE_ID` 与 `NO_PROXY` 启动 Grok Build。 |
 
-对会合并配置的客户端（Kimi Code、Codex、OpenCode、Pi、ZCode、DSH、Qoder），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
+对会合并配置的客户端（Kimi Code、Codex、OpenCode、Pi、ZCode、DSH、Qoder、Grok Build），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
 
 ### 智能体技能
 
-Anyswitch 附带一个可选的智能体技能，教 coding agent 以正确的方式编写与管理 Anyswitch **预设**——预设正文由面板写入各客户端自家的全局指令文件（多数客户端是 `AGENTS.md`，Claude Code 是 `CLAUDE.md`，Qoder 是 `~/.qoder/rules/` 下的专属文件），写入只经面板 API。技能位于本仓库的 [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md)。
+Anyswitch 附带一个可选的智能体技能，教 coding agent 以正确的方式编写与管理 Anyswitch **预设**——预设正文由面板写入各客户端自家的全局指令文件（多数客户端是 `AGENTS.md`，Claude Code 是 `CLAUDE.md`，Qoder 与 Grok Build 是各自规则目录下的专属文件 `~/.qoder/rules/`、`~/.grok/rules/`），写入只经面板 API。技能位于本仓库的 [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md)。
 
 需要先知晓：写入预设改动的是你家目录里属于其他工具的文件，不局限于本仓库；面板提供总开关与逐端点开关，随时可关。
 
@@ -304,7 +306,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 ```
 
-安装后，agent 会遵循该技能的规则：只通过 `http://127.0.0.1:47820` 的面板 API 写预设（绝不手改 `prompts.json`），并如实报告各端点的生效时机（热加载端点立即生效，其余五个下次会话生效）。
+安装后，agent 会遵循该技能的规则：只通过 `http://127.0.0.1:47820` 的面板 API 写预设（绝不手改 `prompts.json`），并如实报告各端点的生效时机（热加载端点立即生效，其余六个下次会话生效）。
 
 ### 面板功能简介
 
@@ -318,7 +320,7 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 
 上卡显示当前面板进程的 Anyswitch 版本，并在预览版时标明预览状态。打开关于页先读取当前版本，并基于缓存结果自动检查一次更新；点击 **检查更新** 则总是强制重新查询。发现新版时可打开对应发布说明；若当前只有预览版可升，会如实显示为预览版而不是「暂无发布版本」。
 
-下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的八个客户端。检测只读取安装位置和产品资料，不启动客户端——唯一例外是 Codex：它的原生二进制没有可读的版本信息，因此以带超时的一次 `codex --version` 自报为准；装了但探测无响应的，显示为已安装但无法运行。官方版本随后按客户端独立查询。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
+下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的九个客户端。检测只读取安装位置和产品资料，不启动客户端——唯二例外是 Codex 与 Grok Build：它们的原生二进制没有可读的版本信息，因此以带超时的一次 `--version` 自报为准；装了但探测无响应的，显示为已安装但无法运行。官方版本随后按客户端独立查询。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
 
 检测区分已发现、未找到、版本无法读取、已安装但无法运行和检测失败，不表示客户端一定可运行、已登录或已接入转发。官方 `latest` 表示本次查询的发布渠道，不代表已读取用户选择的更新渠道，也不保证是稳定版；预发布标识会保留。Qoder 是纯桌面条目：`qoder.cmd` 调度器属于桌面 IDE 安装、不是独立产品，因此只显示一行桌面版本并与官方桌面渠道比较。本地版本读不到时保留未知状态，官方版本仍可单独显示。
 

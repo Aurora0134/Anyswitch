@@ -33,10 +33,10 @@ const PRESET_A = { id: "aaaaaaaaaaaa", title: "规则A", tag: "", enabled: true,
 const PRESET_B = { id: "bbbbbbbbbbbb", title: "规则B", tag: "", enabled: true, content: "第二行\n第三行" };
 
 describe("agent-prompts-inject endpoint table", () => {
-  it("covers all eight endpoints with verified targets", () => {
+  it("covers all nine endpoints with verified targets", () => {
     const { injector, homeDir } = makeInjector();
     const endpoints = injector.listEndpoints();
-    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex"]);
+    assert.deepEqual(endpoints.map((e) => e.id), ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]);
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.target, join(homeDir, ".claude", "CLAUDE.md"));
     assert.equal(byId.kimi.target, join(homeDir, ".kimi-code", "AGENTS.md"));
@@ -48,15 +48,18 @@ describe("agent-prompts-inject endpoint table", () => {
     // own ~/.qoder/AGENTS.md, which Anyswitch must not touch.
     assert.equal(byId.qoder.target, join(homeDir, ".qoder", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.codex.target, join(homeDir, ".codex", "AGENTS.md"));
+    // grok: a dedicated *.md under the always-scanned ~/.grok/rules/ dir —
+    // never the user's own ~/.grok/AGENTS.md.
+    assert.equal(byId.grok.target, join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md"));
     assert.equal(byId.kimi.hotReload, true);
     assert.equal(byId.opencode.hotReload, true);
     // Qoder re-watches a loaded rule file, so preset edits land next turn.
     assert.equal(byId.qoder.hotReload, true);
-    // codex reads AGENTS.md once at session start and has no fs watcher.
-    for (const id of ["claude", "zcode", "dsh", "pi", "codex"]) {
+    // codex and grok read their rule files once at session start, no watcher.
+    for (const id of ["claude", "zcode", "dsh", "pi", "codex", "grok"]) {
       assert.equal(byId[id].hotReload, false, id);
     }
-    assert.equal(PROMPT_ENDPOINTS.length, 8);
+    assert.equal(PROMPT_ENDPOINTS.length, 9);
   });
 });
 
