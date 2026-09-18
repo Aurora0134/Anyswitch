@@ -23,10 +23,6 @@ const CLIENTS = {
     headers: { "X-Platform": "windows-x86_64", "X-Release-Channel": "stable" },
   },
   qoder: {
-    endpoint: "https://qoder-ide.oss-accelerate.aliyuncs.com/qodercli/channels/manifest.json",
-    source: "qoder:cli:latest", field: "latest", url: "https://qoder.com/cli",
-  },
-  "qoder-desktop": {
     endpoint: "https://download.qoder.com.cn/qoder-app/releases/latest.yml",
     source: "qoder:desktop:latest", format: "yaml", url: "https://qoder.com/changelog",
   },
@@ -166,7 +162,7 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
     if (!current) return { ...base, state: "unknown_version" };
     try {
       let endpoint = `${APP_RELEASES}?per_page=100&page=1`;
-      let target = null;
+      let stable = null, preview = null;
       let page = 0;
       while (endpoint) {
         page++;
@@ -182,15 +178,19 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
           const version = typeof item.tag_name === "string" ? item.tag_name.replace(/^v/, "") : null;
           const parsed = parseVersion(version);
           if (!parsed) throw new ReleaseError("invalid_response");
-          if (!current.prerelease.length && (item.prerelease || parsed.prerelease.length)) continue;
           if (typeof item.published_at !== "string" || !Number.isFinite(Date.parse(item.published_at))) throw new ReleaseError("invalid_response");
           const url = releaseUrl(item.html_url, "Aurora0134/Anyswitch", item.tag_name);
-          if (!target || compareVersions(version, target.version) === 1) {
-            target = { version, tag: item.tag_name, prerelease: item.prerelease, url, publishedAt: item.published_at };
-          }
+          const candidate = { version, tag: item.tag_name, prerelease: item.prerelease || parsed.prerelease.length > 0, url, publishedAt: item.published_at };
+          if (candidate.prerelease) { if (!preview || compareVersions(version, preview.version) === 1) preview = candidate; }
+          else if (!stable || compareVersions(version, stable.version) === 1) stable = candidate;
         }
         endpoint = nextPage(response.headers.get("link"), page);
       }
+      // 预览版身份两条渠道都看；稳定版身份优先正式渠道，正式渠道一个 Release 都没有时
+      // 回退到最新预览版——否则在只有预览版可升的时期，稳定版用户只会看到「暂无发布版本」。
+      const target = current.prerelease.length
+        ? ([stable, preview].filter(Boolean).sort((a, b) => compareVersions(b.version, a.version))[0] ?? null)
+        : stable ?? preview;
       const order = target ? compareVersions(currentVersion, target.version) : null;
       return { ...base, checkedAt: new Date(now()).toISOString(), release: target, state: !target ? "no_releases" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current" };
     } catch (error) {

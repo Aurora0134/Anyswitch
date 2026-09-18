@@ -742,6 +742,8 @@
   #settingsPanelAbout { display: flex; flex-direction: column; gap: 20px; }
   .about-card-head { flex-wrap: wrap; gap: 12px; }
   .about-app-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .about-app-icon { width: 22px; height: 22px; border-radius: var(--radius-sm, 6px); flex-shrink: 0; }
+  .about-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
   .about-app-version { font: 12px var(--font-mono); color: var(--text-2); overflow-wrap: anywhere; }
   .about-preview { font-size: 11px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: var(--radius-sm, 6px); padding: 2px 6px; }
   .about-update-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
@@ -763,7 +765,9 @@
   .about-version-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; line-height: 1.8; }
   .about-kind { font-size: 11px; color: var(--text-3); min-width: 28px; }
   .about-version { color: var(--text-2); overflow-wrap: anywhere; }
+  .about-version[data-tone="danger"] { color: var(--danger); }
   .about-result { color: var(--text-3); font-size: 11px; }
+  .about-client-action { margin-left: auto; align-self: center; }
   .about-details { margin: 6px 0 0 166px; font-size: 11px; color: var(--text-3); }
   .about-details > summary { cursor: pointer; width: fit-content; padding: 2px 0; }
   .about-details dl { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px 10px; margin: 8px 0; line-height: 1.6; }

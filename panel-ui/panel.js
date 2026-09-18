@@ -1878,13 +1878,13 @@ async function api(method, path, body) {
     };
   }
 
-  function createAboutController({ request, doc, now = () => Date.now() }) {
+  function createAboutController({ request, doc, now = () => Date.now(), notify = () => {}, schedule = setTimeout, cancelSchedule = clearTimeout }) {
     const get = (id) => doc.getElementById(id);
     const pending = new Map();
     const remoteCache = new Map();
     const rows = new Map();
     let active = false, environmentGen = 0, updateGen = 0;
-    let appInfo = null, local = null, localAt = 0, update = null;
+    let appInfo = null, local = null, localAt = 0, update = null, updateAt = 0;
     let environmentTask = null, updateTask = null, localFailed = false;
     const products = {
       claude: ["anthropics/claude-code", "@anthropic-ai/claude-code"],
@@ -1892,9 +1892,13 @@ async function api(method, path, body) {
       opencode: ["anomalyco/opencode", "opencode-ai"],
       pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
       kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
-      dsh: ["deepseek-ai/dsh", "@deepseek-ai/dsh"],
-      zcode: [], qoder: ["", "@qoder-ai/qodercli"], "qoder-desktop": [],
+      dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],
+      zcode: [], qoder: [],
     };
+    // 面板可代管安装/更新的客户端（npm 全局包）。与服务端 client-lifecycle.mjs
+    // 的 CLIENT_PACKAGES 保持同一份清单，两者的一致性由 client-lifecycle.test.mjs 钉住；
+    // 服务端仍是权威，这里只决定按钮是否出现。zcode/qoder 是桌面应用，走官方更新渠道。
+    const updatableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh"]);
     function safeLink(raw, id) {
       try {
         const url = new URL(raw);
@@ -1905,7 +1909,7 @@ async function api(method, path, body) {
         if (url.hostname === "github.com" && repo && (path === `/${repo}` || path.startsWith(`/${repo}/releases`))) return url.href;
         if (url.hostname === "www.npmjs.com" && pkg && path === `/package/${pkg}`) return url.href;
         const hosts = id === "zcode" ? ["zcode.z.ai"]
-          : id === "qoder" || id === "qoder-desktop" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn", "qoder-ide.oss-accelerate.aliyuncs.com"] : [];
+          : id === "qoder" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn"] : [];
         return hosts.includes(url.hostname) ? url.href : null;
       } catch { return null; }
     }
@@ -1938,6 +1942,139 @@ async function api(method, path, body) {
       return installation.status === "found" && typeof version === "string" && /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version) ? version : null;
     }
     function cacheKey(installation) { return `${installation.remoteId}:${validLocal(installation) || ""}`; }
+
+    // ── 客户端安装/更新（本地环境卡的动作位）──────────────────────────
+    // 服务端单飞 + npm 全局目录单写者：任一时刻全页面只允许一个任务。
+    // 任务在后台跑，这里持 runId 轮询；离开关于页就放弃轮询与本地标记，
+    // 服务端会自己跑完，结果由重新检测兜底呈现。
+    let lifecycleRun = null; // { clientId, action, runId }
+    let lifecyclePoll = null; // 轮询 timer
+    let lifecycleGen = 0; // leave() 时 +1，丢弃迟到的轮询回调
+    let lifecycleBatch = null; // { queue, results }，批量更新进行中非 null
+    let lifecycleModalResolve = null;
+    // 该安装项当前能做什么：可更新 > 未安装可安装；桌面应用与状态不明不给动作。
+    function installationAction(installation) {
+      if (!installation || installation.kind !== "cli") return null;
+      const remote = remoteCache.get(cacheKey(installation))?.data;
+      if (remote?.state === "ok" && remote.version && validLocal(installation) && remote.comparison === "update_available") {
+        return { kind: "update", version: remote.version };
+      }
+      if (installation.status === "not_found") return { kind: "install" };
+      return null;
+    }
+    function clientName(id) { return local?.clients.find((client) => client.id === id)?.name || id; }
+    function updateBatchButton() {
+      const button = get("aboutUpdateAll");
+      if (!button) return;
+      const count = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
+        .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update")).length;
+      button.disabled = count === 0 || Boolean(lifecycleRun) || Boolean(lifecycleBatch);
+      button.textContent = lifecycleBatch ? "批量更新中…" : count > 0 ? `全部更新 (${count})` : "全部更新";
+    }
+    function confirmClientUpdate(names, many) {
+      get("clientUpdateModalTitle").textContent = many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`;
+      get("clientUpdateModalBody").textContent = `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`;
+      get("clientUpdateModal").classList.toggle("show", true);
+      return new Promise((resolve) => { lifecycleModalResolve = resolve; });
+    }
+    function closeLifecycleModal(decision) {
+      get("clientUpdateModal").classList.toggle("show", false);
+      const resolve = lifecycleModalResolve;
+      lifecycleModalResolve = null;
+      if (resolve) resolve(decision);
+    }
+    // 目标端点正在运行时更新，Windows 下在跑的 exe/cmd 被占用会让安装覆盖失败且打断会话；
+    // agents 查询失败时跳过这层确认，由更新命令自身的报错兜底。
+    async function runningClients(ids) {
+      try {
+        const data = await fetchOnce("/api/agents");
+        const live = new Set((data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running").map((agent) => agent.id));
+        return ids.filter((id) => live.has(id));
+      } catch { return []; }
+    }
+    function pollLifecycle(runId) {
+      const gen = lifecycleGen;
+      return new Promise((resolve, reject) => {
+        const step = async () => {
+          let status;
+          try { status = await fetchOnce(`/api/environment/update/${encodeURIComponent(runId)}`); }
+          catch { status = null; }
+          if (!active || gen !== lifecycleGen) { reject(Object.assign(new Error("lifecycle abandoned"), { abandoned: true })); return; }
+          lifecyclePoll = null;
+          if (status?.state === "running") { lifecyclePoll = schedule(step, 1500); return; }
+          if (!status) reject(new Error("lifecycle status unavailable"));
+          else resolve(status);
+        };
+        void step();
+      });
+    }
+    function reportLifecycleOutcome(status, id) {
+      const name = clientName(id);
+      if (status?.outcome === "updated") { notify(`${name} ${status.message}`, false); return; }
+      let text = `${name}：${status?.message || "更新失败，请重新检测确认结果"}`;
+      const detail = typeof status?.detail === "string" ? status.detail.split("\n").find(Boolean) : "";
+      if (detail) text += `（${detail}）`;
+      notify(text, true);
+    }
+    async function performLifecycleRun({ id, action }) {
+      if (lifecycleRun) return { id, outcome: "skipped" };
+      lifecycleRun = { clientId: id, action, runId: null };
+      renderLocal();
+      updateBatchButton();
+      try {
+        const started = await request("POST", "/api/environment/update", { id, action });
+        lifecycleRun.runId = started.runId;
+        const status = await pollLifecycle(started.runId);
+        reportLifecycleOutcome(status, id);
+        return { id, outcome: status?.outcome ?? "unknown" };
+      } catch (error) {
+        if (!error?.abandoned) {
+          if (error?.code === "busy") notify("已有更新任务在进行中，请等待完成后重试", true);
+          else notify("更新失败，请重新检测确认结果", true);
+        }
+        return { id, outcome: "failed" };
+      } finally {
+        lifecycleRun = null;
+        if (lifecyclePoll !== null) { cancelSchedule(lifecyclePoll); lifecyclePoll = null; }
+        if (active) { renderLocal(); updateBatchButton(); }
+      }
+    }
+    // 单个动作：本端点在跑先确认，再执行。
+    async function updateClient(id, action) {
+      if (lifecycleRun || lifecycleBatch || lifecycleModalResolve) return;
+      const running = await runningClients([id]);
+      if (running.length && !(await confirmClientUpdate(running.map(clientName), false))) return;
+      await performLifecycleRun({ id, action });
+      if (active) await loadEnvironment(true);
+    }
+    // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后在服务端串行。
+    async function startUpdateAll() {
+      if (lifecycleRun || lifecycleBatch || lifecycleModalResolve) return;
+      const targets = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
+        .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update"))
+        .map((client) => ({ id: client.id, action: "update" }));
+      if (!targets.length) return;
+      const running = await runningClients(targets.map((target) => target.id));
+      if (running.length && !(await confirmClientUpdate(running.map(clientName), true))) return;
+      lifecycleBatch = { results: [] };
+      const batch = lifecycleBatch;
+      updateBatchButton();
+      for (const target of targets) {
+        const result = await performLifecycleRun(target);
+        batch.results.push(result);
+        if (lifecycleBatch !== batch) return; // 中途离开关于页，批量收尾交给服务端与下次检测
+      }
+      lifecycleBatch = null;
+      if (active) {
+        const updated = batch.results.filter((result) => result.outcome === "updated").length;
+        const failed = batch.results.length - updated;
+        notify(failed ? `批量更新完成：${updated} 个成功，${failed} 个未生效` : `批量更新完成：${updated} 个客户端已更新`, failed > 0);
+        updateBatchButton();
+        await loadEnvironment(true);
+      } else {
+        updateBatchButton();
+      }
+    }
     function renderApp() {
       get("aboutAppVersion").textContent = appInfo?.version || "版本暂时无法读取";
       get("aboutPreviewBadge").hidden = !appInfo?.prerelease;
@@ -1946,8 +2083,9 @@ async function api(method, path, body) {
     }
     function renderUpdate(checking = false) {
       const state = update?.state;
+      const releaseVersion = update?.release?.version || "";
       const copy = {
-        update_available: `发现新版本 ${update?.release?.version || ""}`,
+        update_available: update?.release?.prerelease ? `发现新预览版 ${releaseVersion}` : `发现新版本 ${releaseVersion}`,
         current: "当前已是最新", ahead: "当前版本领先于已发布版本", no_releases: "暂无发布版本",
         error: "暂时无法检查，请重试", unknown_version: "当前版本无法比较",
       };
@@ -1962,6 +2100,7 @@ async function api(method, path, body) {
     }
     function sourceText(raw) {
       if (!raw) return "未提供";
+      if (/--version/i.test(raw)) return "命令行自报版本";
       if (/asar/i.test(raw)) return "应用安装资料";
       if (/pe|file.?version|product.?version/i.test(raw)) return "程序版本信息";
       if (/npm|package|manifest/i.test(raw)) return "安装包资料";
@@ -2002,18 +2141,44 @@ async function api(method, path, body) {
         const goodRemote = remote?.state === "ok" && !!remote.version;
         const kind = installation.kind === "desktop" ? "桌面" : "CLI";
         const found = installation.status === "found";
-        const localStatus = installation.status === "not_found" ? "未找到" : !found ? "检测失败" : !validLocal(installation) ? "版本无法读取" : "已发现";
+        const localStatus = installation.status === "not_found" ? "未找到"
+          : !found ? "检测失败"
+          : installation.issue === "not_runnable" ? "已安装但无法运行"
+          : !validLocal(installation) ? "版本无法读取" : "已发现";
         const line = element("div", "about-version-line");
         line.appendChild(element("span", "about-kind", kind));
-        line.appendChild(element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`));
+        const localSpan = element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`);
+        if (installation.status === "error" || installation.issue === "not_runnable") localSpan.dataset.tone = "danger";
+        line.appendChild(localSpan);
         const remoteText = goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
         line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
         const comparison = goodRemote && validLocal(installation) ? remote.comparison : "unknown";
         const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
-        const result = element("span", "about-result", compared || (localStatus !== "已发现" ? localStatus : goodRemote ? "无法比较版本" : "已发现"));
-        result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : installation.status === "error" ? "danger" : "";
-        line.appendChild(result);
+        // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词
+        const resultText = compared || (goodRemote ? "无法比较版本" : "");
+        if (resultText) {
+          const result = element("span", "about-result", resultText);
+          result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "";
+          line.appendChild(result);
+        }
         if (loading && remote) line.appendChild(element("span", "about-meta", "查询中…"));
+        // 动作位：本行任务在跑 > 可更新/可安装；其他行有任务时按钮留形但禁用（服务器单飞）。
+        if (updatableClients.has(client.id)) {
+          let intent = null;
+          if (lifecycleRun?.clientId === client.id) {
+            intent = { label: lifecycleRun.action === "install" ? "安装中…" : "更新中…", disabled: true };
+          } else {
+            const act = installationAction(installation);
+            if (act) intent = { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleRun) };
+          }
+          if (intent) {
+            const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
+            actionButton.type = "button";
+            actionButton.disabled = intent.disabled;
+            if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
+            line.appendChild(actionButton);
+          }
+        }
         lines.appendChild(line);
         detail(`${kind} 路径`, installation.path || "未找到");
         detail(`${kind} 版本来源`, sourceText(installation.versionSource));
@@ -2037,6 +2202,7 @@ async function api(method, path, body) {
       for (const [id, row] of rows) if (!keep.has(id)) { row.remove(); rows.delete(id); }
       for (const client of local.clients) renderClient(client, loading);
       renderApp();
+      updateBatchButton();
     }
     async function loadApp(gen) {
       if (appInfo) return;
@@ -2114,7 +2280,7 @@ async function api(method, path, body) {
       environmentTask = task;
       return task;
     }
-    function checkUpdates() {
+    function checkUpdates(force = true) {
       if (!active) return Promise.resolve();
       if (updateTask) return updateTask;
       const gen = ++updateGen;
@@ -2122,10 +2288,10 @@ async function api(method, path, body) {
       renderUpdate(true);
       const task = (async () => {
         let data;
-        try { data = await fetchOnce("/api/updates?refresh=1"); }
+        try { data = await fetchOnce(`/api/updates${force ? "?refresh=1" : ""}`); }
         catch { data = { state: "error" }; }
         if (!active || gen !== updateGen) return;
-        update = data;
+        update = data; updateAt = now();
         renderUpdate();
         updateTask = null;
         busy("aboutCheckUpdates", false, "检查更新", "检查中…");
@@ -2139,17 +2305,31 @@ async function api(method, path, body) {
       if (appInfo) renderApp();
       renderUpdate();
       renderLocal();
+      updateBatchButton();
+      // 进页自动查一次（非强制、吃后端缓存）：没查过、上次失败、或结果超过 10 分钟才查；
+      // 「检查更新」按钮保留 refresh=1 的强制语义
+      if (!update || update.state === "error" || now() - updateAt >= 600_000) checkUpdates(false);
       return loadEnvironment();
     }
     function leave() {
       active = false;
-      environmentGen++; updateGen++;
+      environmentGen++; updateGen++; lifecycleGen++;
       environmentTask = null; updateTask = null;
+      // 更新任务交给服务端跑完：离开即放弃轮询与本地标记，结果由下次进页的重新检测呈现
+      if (lifecyclePoll !== null) { cancelSchedule(lifecyclePoll); lifecyclePoll = null; }
+      lifecycleRun = null;
+      lifecycleBatch = null;
+      closeLifecycleModal(false);
       busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
       busy("aboutCheckUpdates", false, "检查更新", "检查中…");
     }
-    get("aboutCheckUpdates").onclick = checkUpdates;
+    get("aboutCheckUpdates").onclick = () => checkUpdates(true);
     get("aboutEnvironmentRefresh").onclick = () => loadEnvironment(true);
+    get("aboutUpdateAll").onclick = () => startUpdateAll();
+    get("clientUpdateModalCancel").onclick = () => closeLifecycleModal(false);
+    get("clientUpdateModalClose").onclick = () => closeLifecycleModal(false);
+    get("clientUpdateModalConfirm").onclick = () => closeLifecycleModal(true);
+    get("clientUpdateModal").onclick = (event) => { if (event?.target === get("clientUpdateModal")) closeLifecycleModal(false); };
     return { enter, leave, checkUpdates, refresh: () => loadEnvironment(true) };
   }
 
@@ -2254,7 +2434,7 @@ async function api(method, path, body) {
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
 
     // 子 tab：通用 / 主题 / 关于；进入设置固定落「通用」。
-    const about = createAboutController({ request: api, doc: document });
+    const about = createAboutController({ request: api, doc: document, notify: toast });
     leaveSettingsView = () => about.leave();
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],

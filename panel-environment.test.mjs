@@ -31,10 +31,25 @@ async function withPanel(options, run) {
   await once(server, "listening");
   const root = `http://127.0.0.1:${server.address().port}`;
   try {
-    await run(async (path) => {
-      const response = await fetch(root + path);
-      return { status: response.status, body: await response.json() };
-    });
+    await run(
+      async (path) => {
+        const response = await fetch(root + path);
+        return { status: response.status, body: await response.json() };
+      },
+      async (path, body, options = {}) => {
+        const response = await fetch(root + path, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: root,
+            "x-anyswitch-panel": "1",
+            ...(options.headers || {}),
+          },
+          body: JSON.stringify(body ?? {}),
+        });
+        return { status: response.status, body: await response.json() };
+      },
+    );
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -93,6 +108,7 @@ test("官方客户端版本查询只允许已支持客户端", async () => {
     assert.equal(result.status, 200);
     assert.deepEqual(result.body, { ...latest, comparison: "unknown" });
     assert.equal((await get("/panel/api/environment/latest/not-a-client")).status, 404);
+    assert.equal((await get("/panel/api/environment/latest/qoder-desktop")).status, 404);
     assert.equal((await get("/panel/api/environment/latest/https%3A%2F%2Fevil.test")).status, 404);
   });
 });
@@ -139,5 +155,167 @@ test("检测服务异常返回受控错误，不泄漏本机异常信息", async
       assert.equal(result.body.state, "error");
       assert.doesNotMatch(JSON.stringify(result.body), /private filesystem/);
     }
+  });
+});
+
+// ── 客户端安装/更新：单飞、结果分级、不误报成功 ──────────────
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+function clientState(versions = {}, issues = {}) {
+  return {
+    checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
+    clients: ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"].map((id) => ({
+      id, name: id,
+      installations: [{
+        kind: id === "zcode" || id === "qoder" ? "desktop" : "cli",
+        remoteId: id, status: "found", path: `C:/fixture/${id}`,
+        version: Object.hasOwn(versions, id) ? versions[id] : "1.0.0", versionSource: "package.json", issue: issues[id] ?? null,
+      }],
+    })),
+  };
+}
+
+const latestFor = (version) => ({
+  state: "ok", version, url: null, source: "npm", checkedAt: "2026-09-18T00:00:00.000Z", errorCode: null,
+});
+
+async function waitForRun(get, runId) {
+  for (let index = 0; index < 200; index += 1) {
+    const result = await get(`/panel/api/environment/update/${runId}`);
+    if (result.status !== 200 || result.body.state === "done") return { status: result.status, body: result.body };
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error("client lifecycle run never finished");
+}
+
+test("客户端更新接口沿用面板写闸门，缺写头直接拒绝", async () => {
+  await withPanel({}, async (get, post) => {
+    const blocked = await post("/panel/api/environment/update", { id: "claude", action: "update" }, { headers: { "x-anyswitch-panel": "" } });
+    assert.equal(blocked.status, 403);
+    assert.equal(blocked.body.error, "csrf");
+  });
+});
+
+test("客户端更新只接受可代管客户端与合法动作，非法请求不触发任何安装", async () => {
+  let spawned = 0;
+  await withPanel({ runClientLifecycleFn: async () => { spawned += 1; return { ok: true, output: "" }; } }, async (get, post) => {
+    assert.equal((await post("/panel/api/environment/update", { id: "zcode", action: "update" })).status, 404, "桌面应用不经面板更新");
+    assert.equal((await post("/panel/api/environment/update", { id: "qoder", action: "install" })).status, 404);
+    assert.equal((await post("/panel/api/environment/update", { id: "not-a-client", action: "update" })).status, 404);
+    assert.equal((await post("/panel/api/environment/update", { id: "constructor", action: "update" })).status, 404, "原型链上的名字不能当客户端 id");
+    assert.equal((await post("/panel/api/environment/update", { id: "claude", action: "uninstall" })).status, 400);
+    assert.equal((await post("/panel/api/environment/update", { id: "claude" })).status, 400);
+    assert.equal((await post("/panel/api/environment/update", {})).status, 404);
+    assert.equal(spawned, 0);
+  });
+});
+
+test("客户端更新单飞：任务进行中再来的请求被 409 拒绝，完成后释放", async () => {
+  const gate = deferred();
+  await withPanel({
+    environmentService: { async getState() { return clientState(); } },
+    releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
+    runClientLifecycleFn: async () => { await gate.promise; return { ok: true, output: "" }; },
+  }, async (get, post) => {
+    const first = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    assert.equal(first.status, 202);
+    assert.ok(first.body.runId);
+    assert.equal(first.body.clientId, "claude");
+    const second = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    assert.equal(second.status, 409);
+    assert.equal(second.body.error, "busy");
+    gate.resolve();
+    assert.equal((await waitForRun(get, first.body.runId)).body.state, "done");
+    const third = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    assert.equal(third.status, 202);
+  });
+});
+
+test("更新完成后回传新本地版本、官方最新与比对结论", async () => {
+  const probes = [];
+  await withPanel({
+    environmentService: {
+      async getState(options = {}) {
+        probes.push(Boolean(options.force));
+        return clientState({ claude: options.force ? "1.1.0" : "1.0.0" });
+      },
+    },
+    releaseService: {
+      async getClientLatest(id, options) {
+        assert.equal(id, "claude");
+        assert.deepEqual(options, { force: true });
+        return latestFor("1.1.0");
+      },
+    },
+    runClientLifecycleFn: async ({ id, action }) => {
+      assert.deepEqual({ id, action }, { id: "claude", action: "update" });
+      return { ok: true, output: "" };
+    },
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.deepEqual({ outcome: finished.body.outcome, before: finished.body.beforeVersion, after: finished.body.afterVersion }, { outcome: "updated", before: "1.0.0", after: "1.1.0" });
+    assert.equal(finished.body.latestVersion, "1.1.0");
+    assert.equal(finished.body.comparison, "current");
+    assert.match(finished.body.message, /1\.1\.0/);
+    assert.deepEqual(probes.slice(0, 2), [false, true], "安装后重查本地版本必须绕过 TTL 缓存");
+  });
+});
+
+test("命令成功但版本原地踏步归为未生效，不误报成功", async () => {
+  await withPanel({
+    environmentService: { async getState() { return clientState({ claude: "1.0.0" }); } },
+    releaseService: { async getClientLatest() { return latestFor("2.0.0"); } },
+    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "unchanged");
+    assert.equal(finished.body.comparison, "update_available", "新版本仍然可升，说明这次更新没落到生效位置");
+    assert.match(finished.body.message, /版本未变化/);
+  });
+});
+
+test("更新命令失败带出末行错误，不谎报成功", async () => {
+  await withPanel({
+    environmentService: { async getState() { return clientState(); } },
+    releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
+    runClientLifecycleFn: async () => ({ ok: false, output: "npm warn deprecated x\nnpm error code EACCES\nnpm error path C:\\npm" }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "kimi", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "failed");
+    assert.match(finished.body.detail, /npm error path C:\\npm/);
+  });
+});
+
+test("装上了却跑不起来给出运行环境提示，而非报成安装成功", async () => {
+  await withPanel({
+    environmentService: {
+      async getState(options = {}) {
+        return options.force ? clientState({ codex: null }, { codex: "not_runnable" }) : clientState({ codex: "1.0.0" });
+      },
+    },
+    releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
+    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "installed_not_runnable");
+    assert.match(finished.body.message, /运行环境/);
+    assert.equal(finished.body.comparison, "unknown", "跑不起来时不与官方版本比新旧");
+  });
+});
+
+test("未知运行编号返回 404，页面可据此走重新检测自愈", async () => {
+  await withPanel({}, async (get) => {
+    const missing = await get("/panel/api/environment/update/8bfd5a4e-0000-0000-0000-000000000000");
+    assert.equal(missing.status, 404);
+    assert.equal(missing.body.error, "unknown_run");
   });
 });

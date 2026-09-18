@@ -1646,11 +1646,16 @@ if (window.panelStartupController) panelStartupPlay();
       <div class="panel-card">
         <div class="card-header about-card-head">
           <div class="about-app-heading">
+            <img class="about-app-icon" src="/panel/assets/logo.png" alt="">
             <h2 class="card-title">Anyswitch</h2>
             <span class="about-app-version" id="aboutAppVersion">读取版本中…</span>
             <span class="about-preview" id="aboutPreviewBadge" hidden>预览版</span>
           </div>
-          <button type="button" class="btn btn-mini" id="aboutCheckUpdates">检查更新</button>
+          <div class="about-head-actions">
+            <a class="about-link" href="https://github.com/Aurora0134/Anyswitch" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a class="about-link" href="https://github.com/Aurora0134/Anyswitch/releases" target="_blank" rel="noopener noreferrer">发布说明</a>
+            <button type="button" class="btn btn-mini" id="aboutCheckUpdates">检查更新</button>
+          </div>
         </div>
         <div class="card-body about-update-body">
           <span class="about-status" id="aboutUpdateStatus" role="status" aria-live="polite">尚未检查更新</span>
@@ -1664,7 +1669,10 @@ if (window.panelStartupController) panelStartupPlay();
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
             本地环境
           </h2>
-          <button type="button" class="btn btn-mini" id="aboutEnvironmentRefresh">重新检测</button>
+          <div class="about-head-actions">
+            <button type="button" class="btn btn-mini" id="aboutUpdateAll" disabled>全部更新</button>
+            <button type="button" class="btn btn-mini" id="aboutEnvironmentRefresh">重新检测</button>
+          </div>
         </div>
         <div class="card-body">
           <div class="about-system-row">
@@ -1684,6 +1692,21 @@ if (window.panelStartupController) panelStartupPlay();
 <div class="toc-pop" id="sessTocPop" hidden>
   <h4>消息目录</h4>
   <div id="sessTocPopList"></div>
+</div>
+
+<!-- 客户端更新：目标客户端正在运行时的确认（复用 .modal-overlay/.modal-card 体系） -->
+<div class="modal-overlay" id="clientUpdateModal">
+  <div class="modal-card" style="max-width:440px;" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 style="color:var(--warn);"><span id="clientUpdateModalTitle">客户端正在运行</span></h3>
+      <button class="modal-close-btn" id="clientUpdateModalClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="clientUpdateModalBody" style="font-size:13px; color:var(--text-2); line-height:1.6;"></div>
+    <div class="modal-foot">
+      <button class="btn" id="clientUpdateModalCancel">取消</button>
+      <button class="btn" id="clientUpdateModalConfirm">仍要更新</button>
+    </div>
+  </div>
 </div>
 
 <!-- 会话管理：删除确认对话框（复用 .modal-overlay/.modal-card 体系） -->

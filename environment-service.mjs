@@ -4,8 +4,15 @@ import { join, dirname, resolve, isAbsolute, extname, basename, relative } from 
 import {
   resolveClaudeExecutable, resolveCodexExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
-  resolveZcodeExecutable, resolveQoderExecutable,
+  resolveZcodeExecutable,
 } from "./agent-discovery.mjs";
+
+// Qoder is a desktop-only client here: ~/.qoder/entry/qoder.cmd is the IDE's
+// own command dispatcher (the `code.cmd`-style shim the IDE installer drops),
+// not a separately installed CLI product, so it is not a detection target.
+function resolveQoderExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
+}
 
 export function readWindowsVersionResource(path) {
   if (process.platform !== "win32") return Promise.resolve(null);
@@ -26,6 +33,20 @@ function productVersion(value) {
   return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value) ? value : null;
 }
 
+// Codex ships a native binary with no version resource and a hash-named install
+// directory, so the only accurate source is the CLI's own report. Bounded
+// subprocess, never a shell; a missing file reports `missing` so the caller can
+// fall back to "not found" instead of blaming the installation.
+export function probeExecutableVersion(path, { exec = execFile, timeoutMs = 5000 } = {}) {
+  return new Promise((done) => {
+    exec(path, ["--version"], { timeout: timeoutMs, windowsHide: true, maxBuffer: 65536, encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error) return done({ missing: ["ENOENT", "ENOTDIR"].includes(error.code), version: null });
+      const match = /(?:^|[^\d.])(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:[^\d]|$)/.exec(`${stdout}\n${stderr}`);
+      done({ missing: false, version: match ? productVersion(match[1]) : null });
+    });
+  });
+}
+
 const CLIENTS = [
   ["claude", "Claude Code", resolveClaudeExecutable],
   ["codex", "Codex CLI", resolveCodexExecutable],
@@ -37,11 +58,13 @@ const CLIENTS = [
   ["qoder", "Qoder", resolveQoderExecutable],
 ];
 
+const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
+
 function missing(error) {
   return ["ENOENT", "ENOTDIR"].includes(error?.code);
 }
 
-export function createEnvironmentService({ base = process.env, now = Date.now, io = fs, readVersionResource = readWindowsVersionResource, ttl = 60_000 } = {}) {
+export function createEnvironmentService({ base = process.env, now = Date.now, io = fs, readVersionResource = readWindowsVersionResource, probeVersion = probeExecutableVersion, ttl = 60_000 } = {}) {
   function isFile(path) {
     try { return io.statSync(path).isFile(); }
     catch (error) { if (missing(error)) return false; throw error; }
@@ -127,6 +150,13 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       if (["pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
       if (!path || !isFile(path)) return result;
       Object.assign(result, { status: "found", path, issue: "version_unavailable" });
+      if (id === "codex") {
+        const probe = await probeVersion(path);
+        if (probe?.missing) return { ...result, status: "not_found", path: null, issue: "entry_missing" };
+        return probe?.version
+          ? { ...result, version: probe.version, versionSource: "cli --version", issue: null }
+          : { ...result, issue: "not_runnable" };
+      }
       if (kind === "desktop") {
         const desktop = desktopVersion(id, path);
         return desktop ? { ...result, version: desktop, versionSource: "app.asar/package.json", issue: null } : result;
@@ -151,10 +181,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     const at = now();
     if (!force && cache && at - cache.at < ttl) return cache.state;
     const clients = await Promise.all(CLIENTS.map(async ([id, name, resolver]) => {
-      const installations = [await inspect(id, id === "zcode" ? "desktop" : "cli", resolver)];
-      if (id === "qoder") installations.push(await inspect("qoder-desktop", "desktop", () => join(
-        base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe",
-      )));
+      const installations = [await inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)];
       return { id, name, installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };

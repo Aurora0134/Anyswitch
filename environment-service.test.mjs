@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
-import { createEnvironmentService } from "./environment-service.mjs";
+import { createEnvironmentService, probeExecutableVersion } from "./environment-service.mjs";
 
 function fixture(t) {
   const parent = new URL("./.cptest/", import.meta.url);
@@ -107,14 +107,46 @@ function installation(state, id, index = 0) {
   return state.clients.find((client) => client.id === id).installations[index];
 }
 
-test("an empty installation reports all eight clients and separate Qoder products", async (t) => {
+test("Codex reads its version from the CLI's own report and flags an unresponsive install", async (t) => {
+  const f = fixture(t);
+  const exe = f.put(join(f.base.LOCALAPPDATA, "OpenAI/Codex/bin/9f1c/codex.exe"));
+  const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "0.155.0" }) }).getState();
+  const found = installation(ok, "codex");
+  assert.equal(found.status, "found");
+  assert.equal(found.version, "0.155.0");
+  assert.equal(found.versionSource, "cli --version");
+  assert.equal(found.issue, null);
+
+  const broken = installation(await f.service({ probeVersion: async () => ({ missing: false, version: null }) }).getState(), "codex");
+  assert.equal(broken.status, "found");
+  assert.equal(broken.version, null);
+  assert.equal(broken.issue, "not_runnable");
+
+  const raced = installation(await f.service({ probeVersion: async () => ({ missing: true }) }).getState(), "codex");
+  assert.equal(raced.status, "not_found");
+  assert.equal(raced.path, null);
+  assert.equal(raced.issue, "entry_missing");
+});
+
+test("probeExecutableVersion parses the first SemVer and classifies spawn failures", async () => {
+  const run = (error, stdout = "", stderr = "") => probeExecutableVersion("codex.exe", { exec: (_path, _args, _options, cb) => cb(error, stdout, stderr) });
+  assert.deepEqual(await run(null, "codex-cli 0.155.0\n"), { missing: false, version: "0.155.0" });
+  assert.deepEqual(await run(null, "codex-cli 0.154.0-alpha.6.2\n"), { missing: false, version: "0.154.0-alpha.6.2" });
+  assert.deepEqual(await run(null, "usage: codex\n"), { missing: false, version: null });
+  const enoent = Object.assign(new Error("spawn failed"), { code: "ENOENT" });
+  assert.deepEqual(await run(enoent), { missing: true, version: null });
+  const timedOut = Object.assign(new Error("killed"), { killed: true });
+  assert.deepEqual(await run(timedOut), { missing: false, version: null });
+});
+
+test("an empty installation reports all eight clients and Qoder as one desktop product", async (t) => {
   const f = fixture(t);
   const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
   assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
   assert.equal(state.platform, process.platform);
   assert.equal(state.nodeVersion, process.version);
   assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"]);
-  assert.deepEqual(state.clients.at(-1).installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder"], ["desktop", "qoder-desktop"]]);
+  assert.deepEqual(state.clients.at(-1).installations.map((i) => [i.kind, i.remoteId]), [["desktop", "qoder"]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     for (const item of client.installations) {
