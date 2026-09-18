@@ -610,21 +610,26 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     }
   });
 
-  it("zcode never falls back (aggregate-only endpoint)", async () => {
+  it("unidentified traffic lands on no endpoint card at all", async () => {
     const collector = testCollector();
     const { seen, socketOwner } = stubOwner(4321);
     const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
     const { port, close } = await listenLoopback(server, 0);
     try {
-      // 无 x-agent-id、无识别 UA：openaiAgentIdFrom 兜底为 zcode
+      // 无 x-agent-id、无识别 UA：归属为 null（旧语义曾兜底为 zcode，已废弃——
+      // 未知来源不占任何端点卡）。
       const res = await postChat(port, {});
       assert.equal(res.status, 200);
       await res.text();
 
-      const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
-      assert.equal("instances" in zcode, false, "zcode stays aggregate-only");
-      assert.equal(seen.length, 0, "the fallback must not even consult the snapshot for zcode");
-      assert.equal(zcode.metrics.totalRequests, 1);
+      const agents = await collector.getAgentsStatus();
+      const zcode = agents.find((a) => a.id === "zcode");
+      assert.equal(seen.length, 0, "unattributed requests must not consult the socket snapshot");
+      assert.equal(zcode.metrics.totalRequests, 0, "zcode bucket stays clean");
+      for (const a of agents) {
+        if (!a.metrics) continue; // claude 卡是 per-session 报表，无聚合 metrics
+        assert.equal(a.metrics.totalRequests, 0, `no endpoint card may count this request (${a.id})`);
+      }
     } finally {
       await close();
     }

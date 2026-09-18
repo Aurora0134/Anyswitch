@@ -160,7 +160,7 @@ describe("createAgentMetricsCollector", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Request 1: streaming
-    const req1 = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" });
+    const req1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" });
     mockTime = 2200; // 1200ms TTFT
     req1.recordFirstChunk();
     mockTime = 3200; // 1000ms generation duration (1.0s)
@@ -206,7 +206,7 @@ describe("createAgentMetricsCollector", () => {
 
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({ providerId: "acme-default", model: "claude-sonnet-4-6" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "claude-sonnet-4-6" });
     mockTime = 1500;
     req.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
@@ -238,7 +238,7 @@ describe("createAgentMetricsCollector", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // 1. Healthy request establishes a real TTFT
-    const ok1 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const ok1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 2000; // TTFT = 1000ms
     ok1.recordFirstChunk();
     mockTime = 4000;
@@ -246,7 +246,7 @@ describe("createAgentMetricsCollector", () => {
 
     // 2. 502 fails BEFORE any first chunk — the 5s failure duration must not
     //    be recorded as a plausible-looking TTFT
-    const bad = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 9000;
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
@@ -257,7 +257,7 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(zcode.errorActive, true);
 
     // 3. Next clean success clears the active fault, error history retained
-    const ok2 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const ok2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 10000;
     ok2.recordFirstChunk();
     mockTime = 11000;
@@ -278,11 +278,11 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "acme-glm", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
-    const otherProvider = collector.startRequest({ providerId: "acme-default", model: "gemini-3.6-flash" });
+    const otherProvider = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "gemini-3.6-flash" });
     mockTime = 3000;
     otherProvider.recordFirstChunk();
     mockTime = 4000;
@@ -296,7 +296,7 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(zcode.activeErrors[0].providerId, "acme-glm");
     assert.equal(zcode.lastError.model, "glm-5.3");
 
-    const otherModel = collector.startRequest({ providerId: "acme-glm", model: "glm-5.2" });
+    const otherModel = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.2" });
     mockTime = 5000;
     otherModel.recordFirstChunk();
     mockTime = 6000;
@@ -315,11 +315,11 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const glm = collector.startRequest({ providerId: "acme-glm", model: "glm-5.3" });
+    const glm = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.3" });
     mockTime = 2000;
     glm.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
-    const acme = collector.startRequest({ providerId: "acme-default", model: "gemini-3.6-flash" });
+    const acme = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "gemini-3.6-flash" });
     mockTime = 2500;
     acme.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
@@ -330,7 +330,7 @@ describe("createAgentMetricsCollector", () => {
     assert.deepEqual(zcode.activeErrors.map((e) => e.model).sort(), ["gemini-3.6-flash", "glm-5.3"]);
     assert.equal(zcode.lastError.model, "gemini-3.6-flash");
 
-    const recoverAcme = collector.startRequest({ providerId: "acme-default", model: "gemini-3.6-flash" });
+    const recoverAcme = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "gemini-3.6-flash" });
     mockTime = 3000;
     recoverAcme.recordFirstChunk();
     mockTime = 3500;
@@ -350,7 +350,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
     let status = await collector.getAgentsStatus();
@@ -360,7 +360,7 @@ describe("createAgentMetricsCollector", () => {
 
     // Retry begin must NOT hide the 502 — otherwise a looping retry never
     // surfaces the banner. The latch lives until a genuine first token.
-    const retry = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const retry = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     status = await collector.getAgentsStatus();
     zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.errorActive, true, "retry begin must keep the 502 visible");
@@ -389,11 +389,11 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
-    const retry = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const retry = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 4000;
     retry.recordEnd({ status: 502, error: { status: 502, message: "still down" } });
     const status = await collector.getAgentsStatus();
@@ -488,12 +488,12 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "acme-glm", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
     // A different provider+model begins — must not touch the acme fault.
-    collector.startRequest({ providerId: "acme-default", model: "gemini-3.6-flash" });
+    collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "gemini-3.6-flash" });
     const status = await collector.getAgentsStatus();
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.errorActive, true, "an unrelated pair's begin must not clear this fault");
@@ -508,11 +508,11 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "acme-glm", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
-    const ok = collector.startRequest({ providerId: "acme-glm", model: "glm-5.3" });
+    const ok = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "glm-5.3" });
     mockTime = 3000;
     ok.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 4 } });
 
@@ -531,12 +531,12 @@ describe("createAgentMetricsCollector", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Model A errors and is then abandoned; the user switches to model B.
-    const bad = collector.startRequest({ providerId: "acme-glm", model: "model-a" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "model-a" });
     mockTime = 2000;
     bad.recordEnd({ status: 503, error: { status: 503, message: "upstream unavailable" } });
 
     // Model B succeeds — this must NOT clear model A's fault (existing latch semantics)
-    const ok = collector.startRequest({ providerId: "acme-default", model: "model-b" });
+    const ok = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "model-b" });
     mockTime = 3000;
     ok.recordFirstChunk();
     mockTime = 4000;
@@ -569,7 +569,7 @@ describe("createAgentMetricsCollector", () => {
     // Two rounds of failure, each ~50s apart — each error refreshes entry.time,
     // so the fault is 100s old at the end but never 60s idle.
     for (let round = 0; round < 2; round++) {
-      const bad = collector.startRequest({ providerId: "acme-glm", model: "model-a" });
+      const bad = collector.startRequest({ agentId: "zcode", providerId: "acme-glm", model: "model-a" });
       mockTime = 1000 + round * 50000;
       bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
     }
@@ -587,7 +587,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({});
+    const req = collector.startRequest({ agentId: "zcode",});
     mockTime = 2000;
     req.recordEnd({ status: 500, error: { status: 500, message: "handler error" } });
 
@@ -609,13 +609,13 @@ describe("createAgentMetricsCollector", () => {
 
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 2000;
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
     // Abort is not recovery: the prior 502 stays latched. Abort also must
     // not raise a second fault or invent a TTFT from the wait duration.
-    const aborted = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const aborted = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 6000;
     aborted.recordEnd({ aborted: true });
 
@@ -629,12 +629,12 @@ describe("createAgentMetricsCollector", () => {
     // Symmetric check: a clean success followed by an abort keeps the row normal.
     // ok started at mockTime=6000 (left over from the previous step), first chunk
     // at 7000 → TTFT = max(1, 7000-6000) = 1000; the later abort must not touch it.
-    const ok = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const ok = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 7000;
     ok.recordFirstChunk();
     mockTime = 8000;
     ok.recordEnd({ usage: { prompt_tokens: 10, completion_tokens: 2 } });
-    const ab2 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const ab2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 8500;
     ab2.recordEnd({ aborted: true });
 
@@ -652,19 +652,19 @@ describe("createAgentMetricsCollector", () => {
     const collector = testCollector({ execFn: mockExec, nowFn, recentSampleWindow: 2, loadSparkSettings: false });
 
     // Req 1: very fast and fully cached — would dominate a lifetime average.
-    const r1 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const r1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 1100; r1.recordFirstChunk();
     mockTime = 1200; // 100ms generation, 500 tokens
     r1.recordEnd({ usage: { prompt_tokens: 10000, completion_tokens: 500, prompt_tokens_details: { cached_tokens: 10000 } } });
 
     // Req 2: slow, no cache.
-    const r2 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const r2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 3000; r2.recordFirstChunk();
     mockTime = 13000; // 10s generation, 50 tokens
     r2.recordEnd({ usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 0 } } });
 
     // Req 3: slow, no cache — evicts req 1 from the size-2 window.
-    const r3 = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const r3 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 14000; r3.recordFirstChunk();
     mockTime = 24000; // 10s generation, 50 tokens
     r3.recordEnd({ usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 0 } } });
@@ -1940,7 +1940,7 @@ describe("createAgentMetricsCollector", () => {
     // Pool request: meta.providerId is the pool id. Member failover means one
     // failed attempt (recordRetry with the failing memberId) followed by a
     // successful recordEnd. Both must land on the pool's single row.
-    const req = collector.startRequest({ providerId: "sensenova", model: "kimi-k3" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "sensenova", model: "kimi-k3" });
     mockTime = 1500;
     req.recordRetry({ reason: "upstream_502", memberId: "sensenova-backup1" });
     mockTime = 2500;
@@ -1964,7 +1964,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({ providerId: "sensenova", model: "kimi-k3" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "sensenova", model: "kimi-k3" });
     mockTime = 2000;
     // Terminal failure carrying the last member's id (stream-pipe exhausted path).
     req.recordEnd({ status: 502, error: { status: 502, message: "exhausted" }, memberId: "sensenova-backup2" });
@@ -1988,7 +1988,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" });
     mockTime = 2200; // TTFT = 1200ms
     req.recordFirstChunk();
     mockTime = 5200; // full duration 4200ms must NOT leak into ttftMs
@@ -2006,7 +2006,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 3500; // no recordFirstChunk: non-streaming, duration is the TTFT proxy
     req.recordEnd({ usage: { prompt_tokens: 50, completion_tokens: 10 } });
 
@@ -2020,7 +2020,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const bad = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+    const bad = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
     mockTime = 9000; // 8s of waiting must not become a TTFT sample
     bad.recordEnd({ status: 502, error: { status: 502, message: "Upstream Bad Gateway" } });
 
@@ -2036,7 +2036,7 @@ describe("createAgentMetricsCollector", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req = collector.startRequest({ providerId: "sensenova", model: "kimi-k3" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "sensenova", model: "kimi-k3" });
     mockTime = 1500;
     req.recordRetry({ reason: "upstream_502", memberId: "sensenova-backup1" });
     mockTime = 4000; // TTFT of the successful attempt = 3000ms
@@ -2064,7 +2064,7 @@ describe("auto-route node attribution (auto 不作为独立统计口径)", () =>
 
     // An auto request enters under the chain head's URL segment with the
     // virtual model — the tracker meta is what the old stats tab saw.
-    const req = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     req.setAttributeResolver((memberId) => ({
       "chan-a": { providerId: "chan-a", model: "model-a" },
       "pool-x/pool-m1": { providerId: "pool-x", model: "model-p" },
@@ -2105,7 +2105,7 @@ describe("auto-route node attribution (auto 不作为独立统计口径)", () =>
     const journal = fakeJournal();
     const collector = testCollector({ nowFn: () => mockTime, journal });
 
-    const req = collector.startRequest({ model: "auto", path: "anthropic" });
+    const req = collector.startRequest({ agentId: "zcode", model: "auto", path: "anthropic" });
     req.setAttributeResolver((memberId) => (memberId === "chan-b" ? { providerId: "chan-b", model: "model-b" } : null));
     req.setCurrentMember("chan-a"); // stale announcement — the explicit id wins
     mockTime = 2000;
@@ -2122,7 +2122,7 @@ describe("auto-route node attribution (auto 不作为独立统计口径)", () =>
     const journal = fakeJournal();
     const collector = testCollector({ nowFn: () => mockTime, journal });
 
-    const req = collector.startRequest({ providerId: "test-pool", model: "gpt-pool" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "test-pool", model: "gpt-pool" });
     req.setCurrentMember("test-pool/member-a"); // set by the member loop even without a resolver
     mockTime = 2000;
     req.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
@@ -2139,7 +2139,7 @@ describe("auto-route node attribution (auto 不作为独立统计口径)", () =>
     const journal = fakeJournal();
     const collector = testCollector({ nowFn: () => mockTime, journal });
 
-    const req = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     req.setAttributeResolver(() => null);
     req.setCurrentMember("chan-a");
     mockTime = 2000;
@@ -2155,7 +2155,7 @@ describe("auto-route node attribution (auto 不作为独立统计口径)", () =>
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn, journal: fakeJournal() });
 
-    const req = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     req.setAttributeResolver((memberId) => (memberId === "chan-a" ? { providerId: "chan-a", model: "glm-5.2" } : null));
     req.setCurrentMember("chan-a");
 
@@ -2183,7 +2183,7 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
   it("chain member announcement books the composite target with autoCount and flips viaAuto", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
-    const req = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     req.setAttributeResolver(() => ({ providerId: "chan-b", model: "model-b" }));
     req.setCurrentMember("chan-b");
 
@@ -2198,7 +2198,7 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
   it("same-model cross-channel switch moves the composite key (A/a→B/a 不再被同名 no-op 吞掉)", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
-    const req = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     req.setAttributeResolver((id) => ({
       "chan-a": { providerId: "chan-a", model: "shared-m" },
       "chan-b": { providerId: "chan-b", model: "shared-m" },
@@ -2301,7 +2301,7 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
   it("direct request books the entry channel with autoCount 0 and viaAuto stays false", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
-    const req = collector.startRequest({ providerId: "chan-d", model: "m9", path: "openai" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "chan-d", model: "m9", path: "openai" });
     req.setCurrentMember("chan-d/member-1"); // member loop announces even without a resolver
 
     const zcode = (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
@@ -2312,8 +2312,8 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
   it("mixed provenance on one pair: autoCount tracks chain-served requests only", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
-    const direct = collector.startRequest({ providerId: "chan-a", model: "shared-m", path: "openai" });
-    const chained = collector.startRequest({ providerId: "chan-a", model: "auto", path: "openai" });
+    const direct = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "shared-m", path: "openai" });
+    const chained = collector.startRequest({ agentId: "zcode", providerId: "chan-a", model: "auto", path: "openai" });
     chained.setAttributeResolver(() => ({ providerId: "chan-a", model: "shared-m" }));
     chained.setCurrentMember("chan-a");
 
@@ -2790,9 +2790,9 @@ describe("createSessionReporter", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req1 = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" }); // interval opens at 1000
+    const req1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" }); // interval opens at 1000
     mockTime = 2000;
-    const req2 = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" }); // overlaps
+    const req2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" }); // overlaps
     mockTime = 4000;
     req2.recordEnd({ usage: { prompt_tokens: 100, completion_tokens: 10 } });
     mockTime = 7000;
@@ -2811,7 +2811,7 @@ describe("createSessionReporter", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" });
+    collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" });
     mockTime = 3500;
     const status = await collector.getAgentsStatus();
     const zcode = status.find((a) => a.id === "zcode");
@@ -2824,10 +2824,10 @@ describe("createSessionReporter", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const req1 = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" });
+    const req1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" });
     mockTime = 3000;
     req1.recordEnd({});
-    const req2 = collector.startRequest({ providerId: "furry", model: "gemini-3.7-flash" });
+    const req2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "gemini-3.7-flash" });
     mockTime = 8000;
     req2.recordEnd({});
 
@@ -2848,7 +2848,7 @@ describe("createSessionReporter", () => {
     // carries no speed measurement at all, exactly as the statistics page treats
     // it (a generation window under 0.2s), so the card reports nothing rather
     // than a fabricated number.
-    const req = collector.startRequest({ providerId: "acme-default", model: "claude-sonnet-4-6" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "claude-sonnet-4-6" });
     mockTime = 1999;
     req.recordFirstChunk();
     mockTime = 2000;
@@ -2867,14 +2867,14 @@ describe("createSessionReporter", () => {
     const mockExec = (cmd, opts, cb) => cb(null, "");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
-    const reqA = collector.startRequest({ providerId: "furry", model: "model-A" });
+    const reqA = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "model-A" });
     let status = await collector.getAgentsStatus();
     let zcode = status.find((a) => a.id === "zcode");
     assert.deepEqual(zcode.activeModels, ["model-A"]);
     assert.equal(zcode.currentModel, "model-A");
 
     // Start model B (user switched model)
-    const reqB = collector.startRequest({ providerId: "furry", model: "model-B" });
+    const reqB = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "model-B" });
     status = await collector.getAgentsStatus();
     zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.activeModels.length, 2);
@@ -2902,14 +2902,14 @@ describe("createSessionReporter", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Request 1: 40 tokens generated over 1.0s -> 40.0 tok/s
-    const req1 = collector.startRequest({ providerId: "furry", model: "model-1" });
+    const req1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "model-1" });
     mockTime = 1500;
     req1.recordFirstChunk();
     mockTime = 2500;
     req1.recordEnd({ usage: { prompt_tokens: 100, completion_tokens: 40 } });
 
     // Request 2: 60 tokens generated over 1.0s -> 60.0 tok/s
-    const req2 = collector.startRequest({ providerId: "furry", model: "model-2" });
+    const req2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "model-2" });
     mockTime = 3000;
     req2.recordFirstChunk();
     mockTime = 4000;
@@ -2932,7 +2932,7 @@ describe("createSessionReporter", () => {
 
     // A realistic live shape (dsh / deepseek-v4.1): 810 tokens streamed in
     // 3.0s at the tail of an 8.0s turn.
-    const req = collector.startRequest({ providerId: "sta1n-default", model: "deepseek-v4.1-flash" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "sta1n-default", model: "deepseek-v4.1-flash" });
     mockTime = 6000;
     req.recordFirstChunk(); // 5s first-token wait
     mockTime = 9000;
@@ -2954,7 +2954,7 @@ describe("createSessionReporter", () => {
     // Tool call response: 80 tokens, total turn 400ms, firstChunk to end 2ms.
     // The burst is not a rate (40000 tok/s) — and the whole turn is not one
     // either (the reply was already written when the turn had 398ms left).
-    const req = collector.startRequest({ providerId: "acme-default", model: "gemini-3.7-flash" });
+    const req = collector.startRequest({ agentId: "zcode", providerId: "acme-default", model: "gemini-3.7-flash" });
     mockTime = 1398;
     req.recordFirstChunk();
     mockTime = 1400;
@@ -2979,7 +2979,7 @@ describe("createSessionReporter", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // 1. ZCode request
-    const zReq = collector.startRequest({ providerId: "furry", model: "claude-3-7-sonnet" });
+    const zReq = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "claude-3-7-sonnet" });
     mockTime = 1800; // TTFT = 800ms
     zReq.recordFirstChunk();
     mockTime = 2800; // 1000ms gen duration
@@ -3057,7 +3057,7 @@ describe("createSessionReporter", () => {
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Request 1: 500ms TTFT, 50 tok/s, 50% cache hit
-    const r1 = collector.startRequest({ providerId: "furry", model: "claude-3-7-sonnet" });
+    const r1 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "claude-3-7-sonnet" });
     mockTime = 1500;
     r1.recordFirstChunk();
     mockTime = 2500;
@@ -3065,7 +3065,7 @@ describe("createSessionReporter", () => {
 
     // Request 2: 1200ms TTFT, 100 tok/s, 80% cache hit
     mockTime = 3000;
-    const r2 = collector.startRequest({ providerId: "furry", model: "claude-3-7-sonnet" });
+    const r2 = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "claude-3-7-sonnet" });
     mockTime = 4200;
     r2.recordFirstChunk();
     mockTime = 5200;
@@ -3201,7 +3201,7 @@ describe("createSessionReporter", () => {
 
     for (let i = 0; i < 3; i++) {
       mockTime += 60_000;
-      const r = collector.startRequest({ providerId: "furry", model: "glm-5.3" });
+      const r = collector.startRequest({ agentId: "zcode", providerId: "furry", model: "glm-5.3" });
       mockTime += 500;
       r.recordFirstChunk();
       mockTime += 1000;

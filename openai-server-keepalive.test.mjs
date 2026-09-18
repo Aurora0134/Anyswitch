@@ -44,7 +44,9 @@ async function withServer(deps, fn) {
 function postChat(port, { signal, headers } = {}) {
   return fetch(`http://127.0.0.1:${port}/openai/test-prov/v1/chat/completions`, {
     method: "POST",
-    headers: { authorization: TOKEN, "content-type": "application/json", ...headers },
+    // 显式端点身份：断言都挂在 zcode 卡上（旧语义里的默认兜底桶）。
+    // 归属四通道全落空现在是「无归属不显示」，裸请求不再计到任何卡片。
+    headers: { authorization: TOKEN, "content-type": "application/json", "x-agent-id": "zcode", ...headers },
     body: JSON.stringify({
       model: "gpt-test",
       stream: true,
