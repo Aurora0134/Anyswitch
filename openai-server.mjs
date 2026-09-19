@@ -193,18 +193,26 @@ function prefixedAgentId(agentHint) {
   return KNOWN_AGENT_IDS.has(id) ? id : null;
 }
 
-// opencode 客户端不带 x-agent-id，用 UA 识别归到 opencode 栏，
-// 避免兜底进 zcode 污染其指标。kimi 同理：launcher 经 KIMI_CODE_CUSTOM_HEADERS
+// opencode 客户端不带 x-agent-id，用 UA 识别归到 opencode 栏，避免降级为
+// 无归属。kimi 同理：launcher 经 KIMI_CODE_CUSTOM_HEADERS
 // env 注入 x-agent-id: kimi —— 身份只能走 env，不能写进 config.toml，
 // 因为 config 的 customHeaders 会覆盖 env 同名头，UA 识别降级为未走 launcher
-// 直连时的防线——不识别的话 kimi 的链式路由（自动路由 auto）会被
-// 兜底成 zcode 的链或直接 404。codex 同理：launcher 经 codex-merge-config 的
+// 直连时的防线——不识别的话 kimi 的链式路由（自动路由 auto）没有端点链可用、
+// 直接 404。codex 同理：launcher 经 codex-merge-config 的
 // http_headers 注入 x-agent-id: codex，UA 识别（codex_cli_rs / codex-tui）是未走
 // launcher 直连时的防线。与 anthropicAgentIdFrom 的 UA 口径保持一致。
 //
-// 优先级：显式 x-agent-id > URL 段前缀 > UA 嗅探 > 兜底 zcode。前缀压在 UA 之前，
+// 优先级：显式 x-agent-id > URL 段前缀 > UA 嗅探 > 无归属（null）。前缀压在 UA 之前，
 // 因为它是 merge 模块自己写进客户端配置的确定事实，而 UA 只是启发式——Qoder 的 UA
 // 不含任何自家标识，这条通道不认前缀就永远认不出它。
+//
+// 四通道全落空时返回 null（不再兜底成 zcode）：未知来源的请求照常服务，
+// 但归属为 null → 不进任何端点桶、不出现在看板与统计页的端点维度
+// （「未知来源不显示」），journal 仍留一行 agentId: null 的审计账。
+// 历史语义（兜底 zcode）已废弃：它把探针、手工脚本、未接入客户端的流量
+// 全部记进真实端点 ZCode 名下，污染其指标、稳定性与链路由，且因为 zcode
+// 是聚合桶（无实例行、journal 不记 UA）事后无法追查来源——08-25 Pi、09-08
+// Qoder、09-19 裸 HTTP 探针三次事故都是同一条兜底造成的。
 function openaiAgentIdFrom(headers, agentHint = null) {
   const explicit = explicitAgentId(headers);
   if (explicit) return explicit;
@@ -216,7 +224,19 @@ function openaiAgentIdFrom(headers, agentHint = null) {
   if (ua.includes("qoder")) return "qoder";
   if (ua.includes("codex_cli_rs") || ua.includes("codex-tui")) return "codex";
   if (ua.includes("grok-cli/")) return "grok";
-  return "zcode";
+  return null;
+}
+
+// 归属四通道全落空的请求：这是它唯一的观测面。没有这行日志，一次新的归属
+// 断档（客户端改了 UA、新增了我们的写手还没覆盖的调用路径、agent 手工跑探针）
+// 只能像 09-19 那次一样靠人肉从客户端侧日志反挖。deps.logger 由宿主注入，
+// 缺失（单测哑 logger）时是 no-op。
+function logUnattributedRequest(deps, surface, req, model) {
+  const ua = req.headers["user-agent"] || "";
+  deps.logger?.warn?.(
+    `unattributed ${surface} request served without endpoint identity ` +
+    `(model="${typeof model === "string" ? model : ""}", UA="${ua}"): not counted on any endpoint card`,
+  );
 }
 
 // Anthropic-native clients don't send x-agent-id, so we sniff the UA for
@@ -505,12 +525,14 @@ export function createOpenAIRelayServer(deps) {
         // 时保留原段，错误形状由 handler 的同一 parser 负责报出。
         const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
+        if (openaiAgentId === null) logUnattributedRequest(deps, "openai chat", req, body?.model);
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
           model: body?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
-          instanceId: instanceIdForRequest(req, openaiAgentId, deps),
+          // 无归属的请求连实例身份也不携带：journal 行与桶都不该留半个身份。
+          instanceId: openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps),
           stream: body.stream === true,
           path: "openai",
         });
@@ -687,6 +709,7 @@ export function createOpenAIRelayServer(deps) {
         // handler 侧对 stream 请求补齐。
         const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
+        if (openaiAgentId === null) logUnattributedRequest(deps, "openai responses", req, body?.model);
         // codex 后台/内部请求（记忆整理、guardian 审批、缓存预热等引擎自发的
         // 模型请求，分类口径见 isCodexBackgroundRequest）在面板上整体隔离：
         // 实例身份三条通道（prompt_cache_key 派生、x-agent-instance 头、
@@ -706,7 +729,8 @@ export function createOpenAIRelayServer(deps) {
           model: chatBody?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
-          instanceId: codexBackground ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps)),
+          // 同 chat 路由：无归属即无实例身份。
+          instanceId: codexBackground || openaiAgentId === null ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps)),
           stream: true,
           path: "openai",
           background: codexBackground,
@@ -813,6 +837,7 @@ export function createOpenAIRelayServer(deps) {
         // Detect the agent from the user-agent header for metrics routing
         // and chain (自动路由) lookup.
         const agentId = anthropicAgentIdFrom(req.headers);
+        if (agentId === null) logUnattributedRequest(deps, "anthropic messages", req, body?.model);
 
         // Chain routing (自动路由): body.model === "auto" walks the
         // requesting agent's route chain and takes priority over pool
@@ -849,7 +874,8 @@ export function createOpenAIRelayServer(deps) {
           model: wireIdToStatModel(body?.model),
           userAgent: req.headers["user-agent"],
           agentId,
-          instanceId: instanceIdForRequest(req, agentId, deps),
+          // 同 openai 路由：无归属即无实例身份。
+          instanceId: agentId === null ? null : instanceIdForRequest(req, agentId, deps),
           stream: body.stream === true,
           path: "anthropic",
         });

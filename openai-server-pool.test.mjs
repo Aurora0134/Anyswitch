@@ -101,7 +101,9 @@ async function withServer(deps, fn) {
 function postChat(port, { poolId = "test-pool", model = "gpt-pool", stream = true } = {}) {
   return fetch(`http://127.0.0.1:${port}/openai/${poolId}/v1/chat/completions`, {
     method: "POST",
-    headers: { authorization: TOKEN, "content-type": "application/json" },
+    // 显式端点身份：本文件断言挂在（旧默认兜底桶）zcode 卡上；四通道
+    // 全落空现在是「无归属不显示」，裸请求不再计到任何卡片。
+    headers: { authorization: TOKEN, "content-type": "application/json", "x-agent-id": "zcode" },
     body: JSON.stringify({
       model,
       stream,

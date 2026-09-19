@@ -730,8 +730,8 @@ describe("chain enabled 开关（自动路由 per-endpoint 启用）", () => {
 
 describe("openai 路径端点识别（UA 嗅探）", () => {
   // 只有 kimi 配了链：kimi 的合并配置（kimi-merge-config.mjs）不带 x-agent-id，
-  // 端点识别只能依赖 UA。openaiAgentIdFrom 若把 kimi 兜底成 zcode，
-  // kimi 的链既不暴露 auto，调用 auto 也会按 zcode（无链）404。
+  // 端点识别只能依赖 UA。openaiAgentIdFrom 若认不出 kimi，
+  // kimi 的链既不暴露 auto，调用 auto 也会因无归属（无链）404。
   const KIMI_ONLY_STORE = {
     ...STORE,
     routingChains: {
@@ -766,8 +766,25 @@ describe("openai 路径端点识别（UA 嗅探）", () => {
         body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "hi" }] }),
       });
       assert.equal(res.status, 200);
-      assert.deepEqual(calls, ["chan-b"], "kimi's chain head is chan-b; a zcode fallback would 404 (no chain)");
+      assert.deepEqual(calls, ["chan-b"], "kimi's chain head is chan-b; misattribution would 404 (no chain)");
       assert.equal(bodies[0].model, "model-b");
+    });
+  });
+
+  it("(chat) 无任何身份的 auto 请求 404——未知来源不蹭任何端点的链", async () => {
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-b": async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: "unreachable" } }] }) }),
+    });
+    await withServer(kimiDeps(upstreamFetch), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/chan-a/v1/chat/completions`, {
+        method: "POST",
+        // 无 x-agent-id、无前缀、UA 不可识别：归属 null → 无链可用 → 明确 404，
+        // 绝不冒用任何真实端点的路由链（旧语义会蹭 zcode 的链）。
+        headers: { authorization: TOKEN, "content-type": "application/json" },
+        body: JSON.stringify({ model: "auto", messages: [{ role: "user", content: "hi" }] }),
+      });
+      assert.equal(res.status, 404);
+      assert.deepEqual(calls, [], "no upstream call may happen for an unattributed auto request");
     });
   });
 
