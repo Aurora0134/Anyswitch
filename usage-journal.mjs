@@ -10,12 +10,14 @@
 // Entry schema (contract for writers and the aggregation layer):
 //
 // requests line:
-//   { "ts": 1724900000000, "agentId": "zcode|dsh|kimi|pi|qoder|opencode|claude|codex|grok",
+//   { "ts": 1724900000000, "agentId": "zcode|dsh|kimi|pi|qoder|opencode|claude|codex|grok|null",
 //     "providerId": "渠道id或号池id(池按整体)", "model": "kimi-k3",
 //     "prompt": 1234, "completion": 567, "cached": 100,
 //     "ttftMs": 850, "durationMs": 5200, "ok": true, "status": 200,
 //     "errKind": null, "stream": true, "path": "openai|anthropic",
 //     "instanceId": "ws-1" /* 可选：多实例端点的实例标签，有则写 */ }
+//   agentId: null 表示「未知来源」（认不出归属的请求）：行照记作审计账，
+//   但不进任何端点维度——看板卡与统计页端点行/端点趋势/端点用量都不显示它。
 //   errKind enum: null | "http_429" | "http_5xx" | "http_4xx" | "network" | "timeout" | "abort"
 //   Missing fields are tolerated: readers/aggregators treat them as 0/null.
 //

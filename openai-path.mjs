@@ -2,11 +2,11 @@ const PREFIX = "/openai/";
 
 // 端点身份前缀：`/openai/<agentId>~<providerId>/v1`。
 //
-// 为什么需要：relay 认发起端点只有两条通道——`x-agent-id` 头与 UA 嗅探，两者都落空
-// 时一律兜底成 "zcode"（见 openai-server 的 openaiAgentIdFrom）。Qoder 这类 BYOK 客户
-// 端的 provider 配置没有放自定义请求头的地方、UA 里也不带自家标识，于是它的请求全记到
-// zcode 名下：看板 Qoder 卡恒 0 请求，zcode 指标被反向污染。前缀让身份跟着 URL 走，
-// 不依赖客户端能力。
+// 为什么需要：relay 认发起端点的通道是 `x-agent-id` 头、URL 段前缀与 UA 嗅探，三者
+// 都落空时归属为 null（未知来源不显示，见 openai-server 的 openaiAgentIdFrom）。
+// Qoder 这类 BYOK 客户端的 provider 配置没有放自定义请求头的地方、UA 里也不带自家
+// 标识，没有前缀通道时它的请求会变成无归属：看板 Qoder 卡恒 0 请求，流量也从统计页
+// 端点维度消失。前缀让身份跟着 URL 走，不依赖客户端能力。
 //
 // 为什么是 "~"：store-schema 的 PROVIDER_ID 字符集是 [A-Za-z0-9._-]，真 provider /
 // pool / chain node id 永远不含 "~"，所以这个语法自带消歧，无需在此再维护一份端点白名

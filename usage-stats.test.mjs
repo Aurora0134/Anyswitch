@@ -272,6 +272,28 @@ describe("usage-stats aggregation", () => {
     cleanup();
   });
 
+  it("excludes unattributed rows (agentId null) from every endpoint dimension", () => {
+    // 「未知来源不显示」：归属为 null 的请求照常落 journal（审计），但统计页
+    // 的端点行、端点趋势、端点用量分布一概不出现；渠道/模型等端点无关维度
+    // 不受影响。
+    const { stats, writeRequests, cleanup } = makeHarness();
+    const missingKeyRow = req({ providerId: "prov-b", model: "m2", prompt: 5, completion: 1, ts: tsOn(0, 11, 30) });
+    delete missingKeyRow.agentId; // 旧行/手写行可能整个缺键，口径与 null 一致
+    writeRequests(0, [
+      req({ agentId: "zcode", providerId: "prov-a", model: "m1", prompt: 10, completion: 1 }),
+      req({ agentId: null, providerId: "prov-a", model: "m1", prompt: 999, completion: 9, ts: tsOn(0, 11) }),
+      missingKeyRow,
+    ]);
+    const s = stats.getState({ days: 7 });
+    assert.deepEqual(s.endpoints.map((x) => x.agentId), ["zcode"], "only attributed endpoints appear");
+    assert.deepEqual(s.trends.endpoint.series.map((x) => x.key), ["zcode"], "no empty-key endpoint series");
+    const usageEpKeys = s.usage["7"].endpoint.nodes.map((n) => n.key);
+    assert.deepEqual(usageEpKeys, ["zcode"], "endpoint donut has no 未知端点 slice from unattributed rows");
+    // 渠道与模型维度照常计入全部行（端点无关的事实）。
+    assert.deepEqual(s.trends.channel.series.map((x) => x.key).sort(), ["prov-a", "prov-b"]);
+    cleanup();
+  });
+
   it("computes overview for today only, with null-safe ratios", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
     writeRequests(0, [

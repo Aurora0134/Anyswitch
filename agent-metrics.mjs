@@ -1686,6 +1686,12 @@ export function createAgentMetricsCollector(options = {}) {
   const codexState = createAggregateState();
   const grokState = createAggregateState();
 
+  // 无归属请求的专用承载态：不进 endpointStates（看板不可见、快照不持久化）、
+  // 不进 instanceBuckets（无实例行），存在只为让 tracker 生命周期复用
+  // trackAggregateRequest 的既有记账逻辑、给 journal 留 agentId: null 的
+  // 审计行。渠道×模型稳定性是与端点无关的上游健康视图，照常记录。
+  const unattributedState = createAggregateState();
+
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
   // pi / codex / grok): instanceId -> { state, firstSeen }. Only requests
   // carrying a valid instanceId land here, and they ALSO land in the endpoint
@@ -1897,21 +1903,39 @@ export function createAgentMetricsCollector(options = {}) {
     return false;
   }
 
+  // ZCode aggregate bucket. agentId-only: real ZCode traffic arrives with the
+  // x-agent-id header its merge config injects; there is deliberately no UA
+  // branch — an unrecognized UA must become unattributed (null upstream), never
+  // be guessed into a real endpoint's bucket. The old default-to-zcode bucket
+  // is gone; this bucket only keeps positively-identified ZCode traffic.
+  function isZcodeRequest(meta = {}) {
+    return typeof meta.agentId === "string" && meta.agentId.toLowerCase().trim() === "zcode";
+  }
+
   // Claude aggregate bucket. agentId-only on purpose: the resident relay's
   // /v1/messages path already maps the Anthropic client UA to agentId
-  // "claude" upstream, while the chat/completions path explicitly defaults
-  // agentId to "zcode" — a UA sniff here would wrongly override that tag.
+  // "claude" upstream, while the chat/completions path reports null for
+  // unknown clients — a UA sniff here would wrongly override that tag.
   // Claude's per-session panel card is a separate reporter path; this bucket
-  // only keeps relay traffic out of the zcode fallback.
+  // only keeps positively-identified relay traffic.
   function isClaudeRequest(meta = {}) {
     return typeof meta.agentId === "string" && meta.agentId.toLowerCase().trim() === "claude";
   }
 
-  // Track an in-flight request
+  // Track an in-flight request.
+  //
+  // 归属解析：agentId（白名单值）或 UA 特征命中即落对应端点桶；两者都落空
+  // 时 bucketAgentId 为 null，请求落进 unattributedState——不计入任何端点
+  // 卡、不出实例行、不进快照，只在 journal 留一行 agentId: null 的审计账
+  // （「未知来源不显示」）。历史默认桶是 zcode（一个真实端点），任何认不出
+  // 来源的流量都会污染 ZCode 的看板与统计，已于 09-19 废弃。
   function startRequest(meta = {}) {
-    let targetState = zcodeState;
-    let bucketAgentId = "zcode";
-    if (isDshRequest(meta)) {
+    let targetState = unattributedState;
+    let bucketAgentId = null;
+    if (isZcodeRequest(meta)) {
+      targetState = zcodeState;
+      bucketAgentId = "zcode";
+    } else if (isDshRequest(meta)) {
       targetState = dshState;
       bucketAgentId = "dsh";
     } else if (isPiRequest(meta)) {
@@ -2012,6 +2036,7 @@ export function createAgentMetricsCollector(options = {}) {
 
     function attachInstance(rawId) {
       if (background) return;
+      if (bucketAgentId === null) return; // 无归属请求永远没有实例行
       const raw = sanitizeInstanceId(rawId);
       if (raw === null) return;
       bindInstance(normalizeInstanceId(bucketAgentId, raw, cachedProcessCounts));
