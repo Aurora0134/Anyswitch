@@ -347,10 +347,11 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   const activate = source.match(/    function activateSettingsSubTab\(which, animate\) \{[\s\S]*?\n    \}/);
   const bind = source.match(/    function bindSettingsSubTabs\(\) \{[\s\S]*?\n    \}/);
   assert.ok(tabs && activate && bind);
-  let enters = 0, leaves = 0, mirrors = 0;
+  let enters = 0, leaves = 0, mirrors = 0, pageScrollResets = 0;
   const context = vm.createContext({
     $: h.get, about: { enter() { enters++; }, leave() { leaves++; } },
     replayViewEnter() {}, captureSettingsMirror() { mirrors++; },
+    resetPageScroll() { pageScrollResets++; },
   });
   vm.runInContext(`${tabs[0]}\n${activate[0]}\n${bind[0]}\nbindSettingsSubTabs();`, context);
   h.get("settingsTabAbout").click();
@@ -359,15 +360,17 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   assert.equal(h.get("settingsPanelGeneral").hidden, true);
   assert.equal(h.get("settingsTabAbout").getAttribute("aria-selected"), "true");
   assert.equal(enters, 1); assert.equal(mirrors, 0);
-  h.get("settingsTabAbout").click(); assert.equal(enters, 1);
-  h.get("settingsTabTheme").click(); assert.equal(leaves, 1); assert.equal(mirrors, 1);
+  assert.equal(pageScrollResets, 1, "switching to About returns the page to the top");
+  h.get("settingsTabAbout").click(); assert.equal(enters, 1); assert.equal(pageScrollResets, 1);
+  h.get("settingsTabTheme").click(); assert.equal(leaves, 1); assert.equal(mirrors, 1); assert.equal(pageScrollResets, 2);
   const event = { key: "ArrowRight", preventDefault() {} };
   h.get("settingsTabTheme").onkeydown(event);
   assert.equal(h.get("settingsTabAbout").focused, true);
-  assert.equal(enters, 2);
+  assert.equal(enters, 2); assert.equal(pageScrollResets, 3);
   h.get("settingsTabGeneral").click();
   assert.equal(h.get("settingsPanelGeneral").hidden, false);
   assert.equal(h.get("settingsPanelAbout").hidden, true);
+  assert.equal(pageScrollResets, 4);
   assert.match(source, /if \(settings\) viewReady = enterSettingsView\(\); else leaveSettingsView\(\);/);
 });
 
