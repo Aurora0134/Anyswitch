@@ -1152,6 +1152,20 @@ export function createSkillsService({
     return loadSkillsConfig({ base }).repoPath;
   }
 
+  // 写/扫主仓库类操作共用守卫：未配置与目录已消失（被移动/删除）都拒绝。
+  // 后者防的是导入/收编在旧路径原位静默重建目录（cpSync 会递归建父目录），
+  // 把本地实体目录送进回收站——仓库疑似搬走时等于在旧位置造出分叉副本。
+  // 只要求目录存在、不要求仍含 skill：面板把仓库删空是合法状态（删除不查空，
+  // 重设才拒收空目录），此时收编/导入必须照常工作，否则用户陷入死局。
+  function requireExistingRepo() {
+    const repoPath = configuredRepo();
+    if (!repoPath) throw new Error("尚未设置主仓库");
+    if (!existsSync(repoPath)) {
+      throw new Error(`主仓库目录已不存在，可能已被移动或删除，请重新选择主仓库: ${repoPath}`);
+    }
+    return repoPath;
+  }
+
   return {
     /** Aggregate everything the Skills tab renders in one round-trip. */
     getState() {
@@ -1189,8 +1203,7 @@ export function createSkillsService({
     pickFolder: (options = {}) => pickFolder({ spawnFn, base, ...options }),
 
     async importSkill(sourcePath) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return importSkill({ repoPath, sourcePath });
     },
 
@@ -1200,8 +1213,7 @@ export function createSkillsService({
      * 主仓库。用户取消时返回 { cancelled: true }，其余同 importSkill。
      */
     async importPickedSkill() {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       const picked = await pickFolder({ spawnFn, base, title: "选择要导入的 skill 目录（需包含 SKILL.md）" });
       if (picked.cancelled || !picked.path) return { cancelled: true };
       return { cancelled: false, ...importSkill({ repoPath, sourcePath: picked.path }) };
@@ -1213,8 +1225,7 @@ export function createSkillsService({
      * 储存形态一致。选到非 .zip 文件时报错；取消返回 { cancelled: true }。
      */
     async importPickedZip() {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       const picked = await pickFile({ spawnFn, base, title: "选择要导入的 skill .zip 压缩包" });
       if (picked.cancelled || !picked.path) return { cancelled: true };
       if (!/\.zip$/i.test(picked.path)) {
@@ -1224,17 +1235,17 @@ export function createSkillsService({
     },
 
     async deleteRepoSkill(skillName) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return deleteRepoSkill({ repoPath, skillName }, deps);
     },
 
     async deploy({ endpointId, skillName, force }) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return deploy({ endpointId, skillName, repoPath, force: Boolean(force) }, deps);
     },
 
+    // undeploy（移除失效链接）只删链接不碰仓库，维持只查非空的旧守卫：
+    // 仓库目录消失时链接仍可清理，这里收紧反而让用户卡死在失效链接上
     async undeploy({ endpointId, skillName }) {
       const repoPath = configuredRepo();
       if (!repoPath) throw new Error("尚未设置主仓库");
@@ -1242,8 +1253,7 @@ export function createSkillsService({
     },
 
     async mergeLocalSkill({ endpointId, skillName }) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return mergeLocalSkill({ endpointId, skillName, repoPath }, deps);
     },
 
@@ -1253,20 +1263,17 @@ export function createSkillsService({
     },
 
     async resolveConflictSkill({ endpointId, skillName, direction }) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return resolveConflictSkill({ endpointId, skillName, repoPath, direction }, deps);
     },
 
     diffLocalSkill({ endpointId, skillName }) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return diffLocalSkill({ endpointId, skillName, repoPath }, { homeDir });
     },
 
     readSkillBody(relPath) {
-      const repoPath = configuredRepo();
-      if (!repoPath) throw new Error("尚未设置主仓库");
+      const repoPath = requireExistingRepo();
       return readSkillBody(repoPath, relPath);
     },
   };
