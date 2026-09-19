@@ -109,12 +109,13 @@ function panelStartupPlay(replayPulse) {
   layer.removeAttribute("data-logo");
   const ns = "http://www.w3.org/2000/svg";
   // Coordinates and radii use the same 512px canvas as docs/assets/logo.png.
-  // points[0] 是中心点（青色），只渲染圆点、不参与任何连线——中心到边缘的连线
-  // 只有边缘环连线的一半长，大量出现会拉低观感，故连线只在 6 个边缘点之间构对。
+  // points[0] 是中心点（青色），只渲染圆点；脉冲构对在 6 个边缘点之间进行
+  // （C(6,2)=15，中心到边缘的连线只有半长，大量出现会拉低观感），中心辐射线
+  // 另建——服务定格画面，也进洗牌脉冲池（见下）。
   const points = [[256, 251, 25], [256, 121, 20], [369, 183, 20], [369, 322, 20], [256, 386, 20], [143, 322, 20], [143, 183, 20]];
-  // 定格拓扑 = logo.png 的轮毂结构：6 条边缘环 + 6 条中心辐射线。中心点不参与
-  // 随机脉冲（中心到边缘的连线只有半长，大量出现会拉低观感），但定格时必须亮起，
-  // 否则终态画面缺了 logo 的标志性辐射结构。
+  // 定格拓扑 = logo.png 的轮毂结构：6 条边缘环 + 6 条中心辐射线。辐射线定格
+  // 时必须亮起，否则终态画面缺了 logo 的标志性辐射结构；脉冲阶段它同样可能
+  // 被洗牌抽中短暂亮起（现行观感，保留）。
   const fixedPairs = [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6], [6, 1], [0, 1], [0, 2], [0, 3], [0, 4], [0, 5], [0, 6]];
   const circles = points.map((point, i) => {
     const circle = document.createElementNS(ns, "circle");
@@ -124,7 +125,7 @@ function panelStartupPlay(replayPulse) {
     circle.setAttribute("fill", i === 0 ? "#00d8eb" : "#fff");
     return nodes.appendChild(circle);
   });
-  // 随机脉冲池：边缘 6 点两两构对 C(6,2)=15 条。几何在初始化时按最终位置算死，
+  // 随机脉冲池：15 条边缘构对 + 下方 6 条中心辐射线，共 21 条。几何在初始化时按最终位置算死，
   // 运行期不再逐帧写 x1/y1/x2/y2——收缩动画由容器 <g> 的整体 transform 承担，
   // 每帧只写 2 个容器的 transform + 脉冲线的 opacity。逐帧改每条线的端点会走
   // 主线程布局重算，那是顿帧的主要来源。
@@ -141,8 +142,8 @@ function panelStartupPlay(replayPulse) {
       lines.push({ a, b, line, born: -Infinity, fixed: fixedPairs.some(([x, y]) => (a === x && b === y) || (a === y && b === x)) });
     }
   }
-  // 中心辐射线只参与定格，不进随机脉冲池：born 恒为 -Infinity，脉冲永不触发，
-  // 只有 lock 淡入时随 fixed 标记亮起。
+  // 中心辐射线同样进洗牌脉冲池：抽中时与边缘线一样在脉冲期短暂亮起
+  // （现行观感），未抽中时 born 恒为 -Infinity、不亮；定格时随 fixed 标记必亮。
   for (let b = 1; b < points.length; b++) {
     const line = document.createElementNS(ns, "line");
     line.setAttribute("x1", points[0][0]);
@@ -153,7 +154,7 @@ function panelStartupPlay(replayPulse) {
     edges.appendChild(line);
     lines.push({ a: 0, b, line, born: -Infinity, fixed: true });
   }
-  // 洗牌队列驱动脉冲：均匀覆盖 15 条线，避免 Math.random() 造成节奏忽密忽疏。
+  // 洗牌队列驱动脉冲：均匀覆盖全部 21 条线（15 边缘 + 6 辐射），避免 Math.random() 造成节奏忽密忽疏。
   let pulseQueue = [];
   function nextPulseIndex() {
     if (!pulseQueue.length) {
