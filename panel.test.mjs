@@ -1316,6 +1316,35 @@ describe("panel.html sessions tab", () => {
     assert.ok(body.includes('["tabSessions", sessions]'), "aria-selected sync covers tabSessions");
   });
 
+  it("resets page scroll to the top on every main or settings sub-tab switch", () => {
+    const reset = panelJs.match(/function resetPageScroll\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(reset, "resetPageScroll found in panel.js");
+    const scrollCalls = [];
+    const documentElement = { scrollTop: 240 };
+    const body = { scrollTop: 240 };
+    const resetPageScroll = new Function("window", "document",
+      `return function resetPageScroll() {${reset[1]}\n  }`,
+    )(
+      { scrollTo: (...args) => scrollCalls.push(args) },
+      { documentElement, body },
+    );
+
+    resetPageScroll();
+
+    assert.deepEqual(scrollCalls, [[0, 0]], "window scroll resets the page viewport");
+    assert.equal(documentElement.scrollTop, 0, "standards-mode scroll position is reset");
+    assert.equal(body.scrollTop, 0, "legacy body scroll position is reset");
+
+    const switchView = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(switchView, "switchView found in panel.js");
+    assert.ok(switchView[1].includes("resetPageScroll();"), "every switchView path resets the page scroll");
+
+    const settingsSubTab = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
+    assert.ok(settingsSubTab, "activateSettingsSubTab found in panel.js");
+    assert.ok(settingsSubTab[1].includes("resetPageScroll();"),
+      "every settings sub-tab switch resets the page scroll");
+  });
+
   it("plays the view-enter animation on active switches only, suppressed on restore", () => {
     assert.ok(panelCss.includes("@keyframes viewEnter"), "viewEnter keyframes defined in panel.css");
     assert.ok(

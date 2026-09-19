@@ -2500,6 +2500,7 @@ async function api(method, path, body) {
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
       if (!selected || $(selected[0]).classList.contains("active")) return;
+      resetPageScroll();
       if (which !== "about") about.leave();
       for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
         const on = name === which;
@@ -3386,6 +3387,12 @@ async function api(method, path, body) {
     el.addEventListener("animationend", () => el.classList.remove("view-enter"), { once: true });
   }
 
+  function resetPageScroll() {
+    window.scrollTo(0, 0);
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }
+
   function switchView(name) {
     const board = name === "board";
     const store = name === "store";
@@ -3393,6 +3400,7 @@ async function api(method, path, body) {
     const presets = name === "presets";
     const sessions = name === "sessions";
     const settings = name === "settings";
+    resetPageScroll();
     currentView = name;
     document.querySelector(".telemetry-view").hidden = !board;
     $("skillsView").hidden = !(name === "skills");
