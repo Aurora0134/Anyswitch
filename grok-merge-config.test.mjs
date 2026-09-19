@@ -60,8 +60,8 @@ describe("grok-merge-config", () => {
     assert.match(text, /extra_headers = \{ "x-agent-id" = "grok" \}/);
     assert.match(text, /env_http_headers = \{ "x-agent-instance" = "ANYSWITCH_INSTANCE_ID" \}/);
     // 刻意不写的键：api_backend（文档默认即 chat_completions）、env_key（token
-    // 是文件里读的轮换值，env 引用无意义）、reasoning_efforts（grok 文档只有
-    // "array of tables" 没有子表字段格式，不写）。
+    // 是文件里读的轮换值，env 引用无意义）。reasoning_efforts 只在拿到挡位库
+    // 时才写（见下一个 describe）——这里没传 catalog，托管块保持无挡位。
     assert.doesNotMatch(text, /api_backend/);
     assert.doesNotMatch(text, /env_key/);
     assert.doesNotMatch(text, /reasoning_efforts/);
@@ -69,10 +69,13 @@ describe("grok-merge-config", () => {
     assert.doesNotMatch(text, /^\[models\]$/m);
   });
 
-  it("falls back to the documented 200000 context window when the store omits it", () => {
-    const providers = { alpha: { models: { "m-1": {} } } };
+  it("falls back through the shared context tier table when the store omits contextWindow", () => {
+    const providers = { alpha: { models: { "m-1": {}, "gpt-5-thing": {} } } };
     const { text } = buildGrokManagedToml(providers, 47821, "tok");
-    assert.match(text, /context_window = 200000/);
+    // 关键词档位命中 gpt-5 → 272000；未命中落 1M 兜底（不是 grok 自带的 200000）。
+    assert.match(text, /\[model\."anyswitch-alpha-gpt-5-thing"\]\nmodel = "gpt-5-thing"[\s\S]*?context_window = 272000/);
+    assert.match(text, /\[model\."anyswitch-alpha-m-1"\]\nmodel = "m-1"[\s\S]*?context_window = 1000000/);
+    assert.doesNotMatch(text, /context_window = 200000/);
     assert.match(text, /name = "m-1 · alpha"/, "model label falls back to the model id");
   });
 
@@ -149,6 +152,10 @@ describe("grok-merge-config", () => {
       "[model.anyswitch-poke-api-gpt-6-astra.extra_headers]",
       '"x-agent-id" = "grok"',
       "",
+      "[[model.anyswitch-poke-api-gpt-6-astra.reasoning_efforts]]",
+      'value = "high"',
+      'label = "High Effort"',
+      "",
     ].join("\n");
     const { text } = mergeGrokConfigToml(rewritten, extractManagedProviders(STORE), 47821, "tok");
     const modelHeaders = text.match(/^\[model\..*\]/gm) ?? [];
@@ -157,6 +164,9 @@ describe("grok-merge-config", () => {
     assert.doesNotMatch(text, /old-tok/);
     // 新块的字段回到行内 inline-table 形态，没有独立的子表残留。
     assert.doesNotMatch(text, /\.extra_headers\]$/m);
+    // 序列化器展开的 reasoning_efforts 数组子表同属残留，整段被剥掉。
+    assert.doesNotMatch(text, /reasoning_efforts/);
+    assert.doesNotMatch(text, /label = "High Effort"/);
   });
 
   it("writes no model entries for an empty channel set but keeps foreign sections", () => {
@@ -348,5 +358,69 @@ describe("writeGrokConfig", () => {
 
   it("grokConfigPath resolves under USERPROFILE", () => {
     assert.equal(grokConfigPath({ USERPROFILE: "/home/u" }), join("/home/u", ".grok", "config.toml"));
+  });
+});
+
+describe("grok reasoning_efforts injection", () => {
+  it("writes one array-of-tables entry per library level, deepest first, default flagged", () => {
+    const library = {
+      models: new Map([
+        ["grok-4-6", { levels: ["low", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null, kind: "reasoning" }],
+      ]),
+    };
+    const providers = { "S3AI-Grok": { displayName: "S3AI Grok", models: { "grok-4.6": {} } } };
+    const { text } = buildGrokManagedToml(providers, 47821, "tok", { catalog: library });
+    const headers = text.match(/^\[\[model\."anyswitch-S3AI-Grok-grok-4\.6"\.reasoning_efforts\]\]$/gm) ?? [];
+    assert.equal(headers.length, 4);
+    const values = [...text.matchAll(/^\s*value = "([a-z]+)"$/gm)].map((m) => m[1]);
+    assert.deepEqual(values, ["max", "xhigh", "high", "low"], "deepest level offered first");
+    assert.equal((text.match(/^default = true$/gm) ?? []).length, 1, "exactly one default marker");
+    assert.match(
+      text,
+      /value = "high"\nlabel = "High Effort"\ndescription = [^\n]+\ndefault = true/,
+      "the library default carries the flag",
+    );
+  });
+
+  it("clips store-declared levels to grok's vocabulary and renames the default", () => {
+    const providers = { alpha: { models: { "m-1": { reasoningEffortLevels: ["ultra", "low"] } } } };
+    const { text } = buildGrokManagedToml(providers, 47821, "tok", { catalog: { models: new Map() } });
+    assert.match(text, /value = "low"/);
+    assert.doesNotMatch(text, /ultra/, "levels outside grok's vocabulary are clipped");
+    assert.match(text, /value = "low"\nlabel = "Low Effort"\ndescription = [^\n]+\ndefault = true/);
+  });
+
+  it("resolves the store contextWindow before any fallback tier", () => {
+    const providers = { alpha: { models: { "gpt-5-thing": { contextWindow: 640000 } } } };
+    const { text } = buildGrokManagedToml(providers, 47821, "tok");
+    assert.match(text, /context_window = 640000/);
+    assert.doesNotMatch(text, /context_window = 272000/);
+  });
+
+  it("writeGrokConfig: no settings file → injection on, optimistic levels written", () => {
+    const dir = mkdtempSync(join(tmpdir(), "grok-effort-"));
+    const configPath = join(dir, ".grok", "config.toml");
+    const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    const text = readFileSync(configPath, "utf8");
+    const headers = text.match(/^\[\[model\."anyswitch-poke-api-gpt-6-astra"\.reasoning_efforts\]\]$/gm) ?? [];
+    assert.deepEqual(
+      [...text.matchAll(/^\s*value = "([a-z]+)"$/gm)].map((m) => m[1]),
+      ["max", "xhigh", "high"],
+      "library-missing optimistic default set",
+    );
+    assert.equal(headers.length, 3);
+    assert.match(text, /value = "high"\nlabel = "High Effort"\ndescription = [^\n]+\ndefault = true/);
+  });
+
+  it("writeGrokConfig: injection switch off → the block omits every reasoning_efforts entry", () => {
+    const dir = mkdtempSync(join(tmpdir(), "grok-effort-"));
+    writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: false }));
+    const configPath = join(dir, ".grok", "config.toml");
+    const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(result.ok, true);
+    const text = readFileSync(configPath, "utf8");
+    assert.doesNotMatch(text, /reasoning_efforts/);
+    assert.match(text, /context_window = 256000/, "context resolution is independent of the switch");
   });
 });
