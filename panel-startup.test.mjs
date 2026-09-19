@@ -259,33 +259,37 @@ describe("launcher-only startup screen", () => {
     assert.equal(final.length, 12);
   });
 
-  it("excludes the center node from every pulse edge and paces bursts at 50ms within a 160ms window", () => {
+  it("keeps the center out of the ring pairs, pools every line for the pulse, and paces bursts at 50ms within a 160ms window", () => {
     const p = page();
     p.start();
     const edges = p.elements.get("startupEdges").children;
-    // 随机脉冲池只从边缘 6 点构对 C(6,2)=15 条，中心点不参与快闪；另有 6 条
-    // 中心辐射线只参与定格，born 恒为 -Infinity，脉冲永不触发。
+    // 21 条线 = 15 条边缘构对（端点不含中心点）+ 6 条中心辐射线（起点是中心点）。
+    // 两类都在洗牌脉冲池里：抽中哪条哪条闪，辐射线不享有「永不脉冲」的豁免。
     assert.equal(edges.length, 21);
-    const pulseEdges = edges.slice(0, 15);
-    const hubEdges = edges.slice(15);
-    for (const e of pulseEdges) {
+    const ringPairs = edges.slice(0, 15);
+    const hubLines = edges.slice(15);
+    for (const e of ringPairs) {
       const endpoints = [[e.getAttribute("x1"), e.getAttribute("y1")], [e.getAttribute("x2"), e.getAttribute("y2")]];
-      for (const [x, y] of endpoints) assert.ok(!(x === "256" && y === "251"), "脉冲线端点不含中心点");
+      for (const [x, y] of endpoints) assert.ok(!(x === "256" && y === "251"), "边缘构对端点不含中心点");
     }
-    for (const e of hubEdges) {
+    for (const e of hubLines) {
       assert.equal(e.getAttribute("x1"), "256", "辐射线起点是中心点");
       assert.equal(e.getAttribute("y1"), "251", "辐射线起点是中心点");
     }
+    // t=0 的首个脉冲必然打点（lastBurst 初值 -Infinity），t=25 时距上一发 25ms < 50ms
+    // 不会再来一发：此刻恰有一条线处在 160ms 爬升窗内（age=25 → sin(25/160·π)·0.85 > 0），
+    // 与洗牌抽中哪条无关——断言不依赖随机结果。
     p.advance(0);
     p.advance(25);
-    assert.ok(pulseEdges.some((e) => Number(e.getAttribute("opacity")) > 0), "脉冲爬升段可见");
-    assert.ok(hubEdges.every((e) => Number(e.getAttribute("opacity")) === 0), "辐射线在脉冲阶段不亮");
+    const lit = edges.filter((e) => Number(e.getAttribute("opacity")) > 0);
+    assert.equal(lit.length, 1, "t=25 恰有一条脉冲线在爬升段");
     // 窗口与间隔常数从源码字面量钉死，防调参漂移（行为断言受并发脉冲干扰不可靠）。
     const src = html.match(/<script id="panelStartupAnimation">([\s\S]*?)<\/script>/)[1];
     assert.ok(src.includes("time - lastBurst >= 50"), "burst 间隔 50ms");
     assert.ok(src.includes("age < 160"), "脉冲窗口 160ms");
     assert.ok(src.includes("age / 160 * Math.PI"), "脉冲缓动按 160ms 归一");
     assert.ok(src.includes("reduce ? 0 : 240"), "退场重叠 240ms");
+    assert.ok(src.includes("pulseQueue = lines.map((_, i) => i)"), "脉冲池洗牌覆盖全部 21 条线（含辐射线）");
   });
 
   it("keeps page content visible under the acrylic and fades only the splash layer on leave", () => {
