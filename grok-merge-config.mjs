@@ -23,6 +23,11 @@
 //   - env_http_headers maps a header to an env var NAME and is silently
 //     skipped when the variable is unset, so a grok launch without the
 //     launcher-exported ANYSWITCH_INSTANCE_ID simply omits the header.
+//   - reasoning_efforts is an array of tables on the model table, so each
+//     level becomes its own [[model.<name>.reasoning_efforts]] entry; without
+//     the declaration grok's agent mode drops any reasoning_effort the model
+//     would have sent (15-agent-mode.md), which is why the writer fills it
+//     from the shared effort library the same way the kimi writer does.
 //
 // Default model pointer: grok's selector is the `default` key inside a user
 // [models] table (26-config-reference.md `models.default`, matched against
@@ -37,6 +42,8 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { fallbackContextWindow } from "./context-fallback.mjs";
+import { resolveEndpointEfforts, catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel } from "./merge-common.mjs";
@@ -57,9 +64,19 @@ const MANAGED_ID_PREFIX = "anyswitch-";
 // stutter. The key keeps the managed prefix so the stale-table strip catches
 // it like every other managed entry.
 export const AUTO_MODEL_KEY = `${MANAGED_ID_PREFIX}${AUTO_CHANNEL_KEY}`;
-// 26-config-reference.md: a custom model without context_window defaults to
-// 200,000 — written explicitly so auto-compaction tracks the store's number.
-const DEFAULT_CONTEXT_WINDOW = 200000;
+// Picker copy for the reasoning_efforts sub-tables: low→xhigh mirror the
+// wording of grok's built-in model catalog (extracted from the binary's
+// bundled definitions); none/minimal/max extend the same style because the
+// built-ins never ship those levels.
+const EFFORT_PRESENTATION = {
+  none: { label: "No Reasoning", description: "Disable reasoning for the fastest responses" },
+  minimal: { label: "Minimal Effort", description: "Lightest reasoning for simple tasks" },
+  low: { label: "Low Effort", description: "Quick, fast implementations" },
+  medium: { label: "Medium Effort", description: "Balanced effort with standard implementation and testing" },
+  high: { label: "High Effort", description: "Higher implementation quality with extensive reasoning" },
+  xhigh: { label: "Extra High Effort", description: "Highest effort and reasoning level" },
+  max: { label: "Max Effort", description: "Maximum effort and reasoning level" },
+};
 
 export function sidecarPath(root) {
   return join(root, SIDECAR_FILENAME);
@@ -100,7 +117,7 @@ export function managedModelKey(channelId, modelId) {
 // One table per (channel, model) pair. base_url points at the channel's relay
 // segment; pseudo-channels (auto routing) name a different URL segment than
 // their own id (the chain head), real channels never set baseUrlSegment.
-export function buildGrokManagedToml(managedProviders, port, token) {
+export function buildGrokManagedToml(managedProviders, port, token, effort = null) {
   const lines = [MANAGED_BEGIN, "# OpenAI chat/completions models routed through the local Anyswitch relay.", ""];
   const managed = [];
   const modelKeys = [];
@@ -117,10 +134,22 @@ export function buildGrokManagedToml(managedProviders, port, token) {
       // 就是无法区分的重复行（codex 目录 display_name 同款理由）。auto 伪渠道
       // 与 codex 一致保持裸名 "auto"——它是链路由触发词，不是真模型。
       const displayName = providerId === AUTO_CHANNEL_KEY ? modelLabel : `${modelLabel} · ${channelLabel}`;
+      // Same chain as the kimi/dsh writers (context-fallback.mjs): the store's
+      // discovered contextWindow wins; without it the keyword tier table
+      // answers, and an unmatched id lands on the 1M default. grok's own
+      // fallback for a keyless custom model is only 200,000
+      // (26-config-reference.md), so the key is always written explicitly.
       const contextWindow =
         Number.isInteger(model?.contextWindow) && model.contextWindow > 0
           ? model.contextWindow
-          : DEFAULT_CONTEXT_WINDOW;
+          : fallbackContextWindow(modelId);
+      // The 「注入推理强度」 switch gates the whole config face: with no
+      // catalog handed in, the model simply gets no reasoning_efforts, and
+      // grok's agent mode drops any reasoning_effort it would have sent
+      // (15-agent-mode.md).
+      const efforts = effort?.catalog
+        ? resolveEndpointEfforts(modelId, { catalog: effort.catalog, agent: "grok", model, provider })
+        : null;
       lines.push(`[model.${tomlString(key)}]`);
       lines.push(`model = ${tomlString(modelId)}`);
       lines.push(`name = ${tomlString(displayName)}`);
@@ -132,6 +161,23 @@ export function buildGrokManagedToml(managedProviders, port, token) {
       // per CLI launch; a bare grok launch has no such variable and grok then
       // just skips the header (11-custom-models.md env_http_headers).
       lines.push(`env_http_headers = { "x-agent-instance" = "ANYSWITCH_INSTANCE_ID" }`);
+      if (efforts) {
+        // Allowed-effort declaration: one [[model.<key>.reasoning_efforts]]
+        // array-of-tables entry per level (26-config-reference.md; the
+        // value/label/description/default sub-table shape comes from the
+        // bundled model catalog inside the grok binary). Deepest-first
+        // matches the built-in entries; `default = true` on the library
+        // default makes a session that never touches the picker send it.
+        for (const level of [...efforts.levels].reverse()) {
+          const presentation = EFFORT_PRESENTATION[level] ?? { label: level, description: "" };
+          lines.push(`[[model.${tomlString(key)}.reasoning_efforts]]`);
+          lines.push(`value = ${tomlString(level)}`);
+          lines.push(`label = ${tomlString(presentation.label)}`);
+          if (presentation.description) lines.push(`description = ${tomlString(presentation.description)}`);
+          if (level === efforts.default) lines.push("default = true");
+          lines.push("");
+        }
+      }
       lines.push("");
       modelKeys.push(key);
     }
@@ -145,16 +191,18 @@ export function buildGrokManagedToml(managedProviders, port, token) {
 // Self-heal for a rewrite that dropped the comment markers: the `anyswitch-`
 // prefix is reserved for managed catalog keys, so any [model.anyswitch-*]
 // table outside the managed block — including serializer-expanded sub-tables
-// like [model."anyswitch-x".extra_headers] — is a stale leftover and must go
-// before the fresh block is appended. Note the `model\.` anchor: a [models]
-// table (plural, user-owned) is never matched.
+// like [model."anyswitch-x".extra_headers] and our own array-of-tables
+// entries [[model."anyswitch-x".reasoning_efforts]] — is a stale leftover and
+// must go before the fresh block is appended. The `\[+` opener absorbs the
+// double bracket of an array-of-tables header; note the `model\.` anchor: a
+// [models] table (plural, user-owned) is never matched.
 export function stripManagedTables(text) {
   if (!text) return text ?? "";
   const lines = text.split(/\r?\n/);
   const out = [];
   let inManagedTable = false;
   for (const line of lines) {
-    const header = line.match(/^\s*\[([^\]]*)\]/);
+    const header = line.match(/^\s*\[+([^\]]*)\]/);
     if (header) {
       const name = header[1];
       inManagedTable = /^model\."?anyswitch-/.test(name);
@@ -219,14 +267,14 @@ export function protectModelsDefault(text, modelKeys) {
   return text;
 }
 
-export function mergeGrokConfigToml(existingText, managedProviders, port, token, autoChannel = null) {
+export function mergeGrokConfigToml(existingText, managedProviders, port, token, autoChannel = null, effort = null) {
   const preserved = stripManagedTables(stripManagedBlock(existingText ?? ""));
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `anyswitch-auto`.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
-  const { text: managedText, managed, modelKeys } = buildGrokManagedToml(providers, port, token);
+  const { text: managedText, managed, modelKeys } = buildGrokManagedToml(providers, port, token, effort);
   const trimmedHead = preserved.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
   const protectedText = protectModelsDefault(merged, modelKeys);
@@ -261,13 +309,20 @@ export function writeGrokConfigTomlWithBackup(filePath, text) {
 // High-level write: read existing config, merge managed models, write back
 // with backup. Returns { ok, unchanged, backupPath?, reason? }. Fail-closed: a
 // config whose managed block cannot be parsed is reported, never overwritten.
-export function writeGrokConfig(store, port, token, sidecarRoot, configPath = grokConfigPath()) {
+// The effort catalog defaults from the sidecar root, same contract as kimi's
+// writer: the 「注入推理强度」 switch gates the whole config face, so with the
+// switch off no catalog is loaded and the regenerated block omits every
+// reasoning_efforts sub-table (wholesale regeneration is also the cleanup).
+export function writeGrokConfig(store, port, token, sidecarRoot, configPath = grokConfigPath(), effort = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "grok");
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
+  const effortOptions = effort ?? {
+    catalog: effortSupplementEnabled(sidecarRoot) ? catalogForRoot(sidecarRoot) : null,
+  };
   let existing;
   try {
     existing = readGrokConfigToml(configPath);
@@ -276,7 +331,7 @@ export function writeGrokConfig(store, port, token, sidecarRoot, configPath = gr
   }
   let merged;
   try {
-    merged = mergeGrokConfigToml(existing, managedProviders, port, token, autoChannel);
+    merged = mergeGrokConfigToml(existing, managedProviders, port, token, autoChannel, effortOptions);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_GROK_CONFIG") {
       return { ok: false, unchanged: true, reason: error.message };
