@@ -28,6 +28,18 @@
 // left untouched (codex++ semantics); an empty model set writes neither file
 // nor pointer, because codex hard-fails config load on an empty catalog.
 //
+// The model set is NOT part of config.toml's text, so the config result and
+// the catalog's own result must be read together: a model-only edit leaves
+// config.toml byte-identical (unchanged) while the picker's list is rewritten.
+// writeCodexConfig therefore reports `catalog: { state, entries, reason }`
+// beside the config result — state is one of written / unchanged / skipped /
+// user-pointer / removed, entries is the entry count of the catalog we own
+// (0 whenever we write none), reason is the user-facing Chinese line for the
+// three states where the model list did NOT reach the picker. The two
+// downgrades (no template asset, user's own pointer) keep the already
+// generated catalog file instead of deleting it silently: without our pointer
+// it is inert, and the next sync regenerates it as soon as the reason is gone.
+//
 // Catalog granularity is one entry per (channel, model) pair with the channel
 // encoded in the slug (<channelId>~<modelId>, channel-model-slug.mjs): codex's
 // picker namespace is global and flat, so per-model-id entries silently
@@ -525,14 +537,39 @@ function catalogFilePath(codexDir) {
   return join(codexDir, "model-catalogs", "anyswitch-models.json");
 }
 
+// User-facing copy for the three states in which the model list did not reach
+// the picker. This text goes straight into the sync log and the panel's result
+// banner, so it talks about the model list in the user's Codex — never about
+// assets, pointers, files or why the code decided so.
+const CATALOG_REASON_SKIPPED = "模型列表这次没能生成，Codex 暂时只用自带的内置模型。";
+const CATALOG_REASON_USER_POINTER = "你的 Codex 已指定了自己的模型列表来源，我们不再更新它。";
+const CATALOG_REASON_REMOVED = "当前没有可同步的模型，Codex 的模型列表已恢复为自带的内置模型。";
+
+// Reported on the paths that never reach the catalog at all (no channels to
+// sync, unreadable or unparseable config). Always present, so a caller can
+// read result.catalog.state without guarding for undefined.
+function untouchedCatalog() {
+  return { state: "unchanged", entries: 0 };
+}
+
+// Returns what happened to the generated file: "written" when the bytes just
+// landed, "unchanged" when the file already carried exactly this catalog (no
+// rewrite, no needless churn on a file codex may be reading), "removed" when
+// there is nothing to write at all.
 function writeCatalogFile(codexDir, catalogModels, template, effortCatalog = null) {
   const catalog = buildCodexModelCatalog(catalogModels, template, effortCatalog);
-  if (!catalog) return; // unreachable: the "ours" pointer implies non-empty models
+  // Unreachable in practice (the "ours" pointer implies a non-empty model
+  // set); treated as "removed" so the caller strips the now-dangling pointer
+  // rather than leaving one behind.
+  if (!catalog) return { state: "removed", entries: 0 };
   const filePath = catalogFilePath(codexDir);
   const text = JSON.stringify(catalog, null, 2) + "\n";
-  if (existsSync(filePath) && contentHash(readFileSync(filePath, "utf8")) === contentHash(text)) return;
+  if (existsSync(filePath) && contentHash(readFileSync(filePath, "utf8")) === contentHash(text)) {
+    return { state: "unchanged", entries: catalog.models.length };
+  }
   mkdirSync(dirname(filePath), { recursive: true });
   atomicWriteFile(filePath, text);
+  return { state: "written", entries: catalog.models.length };
 }
 
 function removeCatalogFile(codexDir) {
@@ -545,22 +582,27 @@ function removeCatalogFile(codexDir) {
 }
 
 // High-level write: read existing config, merge managed providers, write back
-// with backup. Returns { ok, unchanged, backupPath?, reason? }. Fail-closed: a
-// config whose managed block cannot be parsed is reported, never overwritten.
-export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath(), catalog = null, effortsEnabled = null) {
+// with backup. Returns { ok, unchanged, backupPath?, reason?, catalog } where
+// catalog is { state, entries, reason? } describing what happened to the
+// generated model list — see the header. catalogTemplateOverride is a seam for
+// tests and simulations: passing null reproduces an unreadable template asset,
+// leaving it out (the only production form) reads the shipped asset.
+// Fail-closed: a config whose managed block cannot be parsed is reported,
+// never overwritten.
+export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath(), catalog = null, effortsEnabled = null, catalogTemplateOverride = undefined) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "codex");
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
-    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models", catalog: untouchedCatalog() };
   }
   let existing;
   try {
     existing = readCodexConfigToml(configPath);
   } catch (error) {
-    return { ok: false, unchanged: true, reason: error.message };
+    return { ok: false, unchanged: true, reason: error.message, catalog: untouchedCatalog() };
   }
-  const catalogTemplate = loadCodexCatalogTemplate();
+  const catalogTemplate = catalogTemplateOverride === undefined ? loadCodexCatalogTemplate() : catalogTemplateOverride;
   // Switch off → the catalog keeps the template's frozen levels rather than
   // gaining per-model ones from the library. The catalog file is rewritten
   // wholesale on every sync, so a previous sync's levels do not survive.
@@ -572,25 +614,43 @@ export function writeCodexConfig(store, port, token, sidecarRoot, configPath = c
     merged = mergeCodexConfigToml(existing, managedProviders, port, token, autoChannel, catalogTemplate, effectiveCatalog);
   } catch (error) {
     if (error?.code === "UNPARSEABLE_CODEX_CONFIG") {
-      return { ok: false, unchanged: true, reason: error.message };
+      return { ok: false, unchanged: true, reason: error.message, catalog: untouchedCatalog() };
     }
     throw error;
   }
   // The catalog file lands before the config that points at it, so a codex
   // launch racing the sync can never meet a dangling model_catalog_json
-  // pointer; the stale-file removal below runs after the config write for the
-  // same reason (an outdated-but-present catalog still loads, a missing one
-  // fails config load outright). Removal fires whenever the pointer is not
-  // ours — "none" (empty model set) and "user" alike: a hand-written pointer
-  // at another file leaves our previously generated catalog as inert clutter
-  // (the user's own file sits at their path and is never touched).
-  if (merged.catalogPointer === "ours") {
-    writeCatalogFile(dirname(configPath), merged.catalogModels, catalogTemplate, merged.effortCatalog);
+  // pointer.
+  let catalogStatus;
+  if (merged.catalogPointer === "user") {
+    // The user's own source wins: we write no catalog of ours and never touch
+    // theirs. Our previously generated file is kept (see the removal below) —
+    // deleting it was the silent half of this downgrade.
+    catalogStatus = { state: "user-pointer", entries: 0, reason: CATALOG_REASON_USER_POINTER };
+  } else if (!catalogTemplate) {
+    // No template asset: the pointer stays off for this sync, but the already
+    // generated file is kept — without our pointer it is inert, and the next
+    // sync regenerates it as soon as the asset is readable again.
+    catalogStatus = { state: "skipped", entries: 0, reason: CATALOG_REASON_SKIPPED };
+  } else if (merged.catalogPointer === "ours") {
+    const written = writeCatalogFile(dirname(configPath), merged.catalogModels, catalogTemplate, merged.effortCatalog);
+    catalogStatus = written.state === "removed"
+      ? { state: "removed", entries: 0, reason: CATALOG_REASON_REMOVED }
+      : { state: written.state, entries: written.entries };
+  } else {
+    // Empty model set: no pointer was written and nothing will ever
+    // regenerate the file, so it is cleaned up.
+    catalogStatus = { state: "removed", entries: 0, reason: CATALOG_REASON_REMOVED };
   }
   const writeResult = writeCodexConfigTomlWithBackup(configPath, merged.text);
   if (writeResult.ok) {
     writeSidecar(sidecarRoot, merged.managed);
-    if (merged.catalogPointer !== "ours") removeCatalogFile(dirname(configPath));
+    // Only the empty model set still removes the file, and it runs after the
+    // config write: an outdated-but-present catalog still loads, a missing one
+    // fails config load outright. The two downgrades above keep it — a stale
+    // file without our pointer is inert, and both reasons can disappear on the
+    // next sync.
+    if (catalogStatus.state === "removed") removeCatalogFile(dirname(configPath));
   }
-  return writeResult;
+  return { ...writeResult, catalog: catalogStatus };
 }

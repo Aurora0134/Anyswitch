@@ -1,7 +1,7 @@
 // Cross-surface catalog consistency guardrail.
 //
 // The endpoint-facing model list reaches agents through several surfaces: the
-// Anthropic wire catalog (/v1/models), the five agent-sync endpoint configs,
+// Anthropic wire catalog (/v1/models), the eight agent-sync endpoint configs,
 // and the OpenAI runtime path. They are only correct if they all express ONE
 // set of catalog semantics — the visible-channel derivation in
 // pool-providers.mjs. These tests pin that invariant so any future drift

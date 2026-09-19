@@ -88,10 +88,14 @@ export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DS
   const yaml = await getYamlModule();
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "dsh");
-  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+  // Last channel deleted: what the previous sync wrote into the client config
+  // is only recorded in the sidecar, so an empty previous managed set is what
+  // makes bailing out safe — otherwise the merge has to run to drop the stale
+  // entries instead of leaving them behind forever.
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
-  const previousManaged = readSidecar(sidecarRoot).providers;
   let existing;
   try {
     existing = readDshSettings(settingsPath, yaml);

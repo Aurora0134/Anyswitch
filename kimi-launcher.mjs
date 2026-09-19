@@ -22,6 +22,7 @@ import {
   mergeKimiConfigToml,
   readKimiConfigToml,
   writeKimiConfigTomlWithBackup,
+  readSidecar,
   writeSidecar,
 } from "./kimi-merge-config.mjs";
 import { catalogForRoot } from "./effort-catalog.mjs";
@@ -36,7 +37,11 @@ export function kimiConfigPath(base = process.env) {
 export async function writeKimiConfig(store, port, token, sidecarRoot, configPath = kimiConfigPath(), effort = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "kimi");
-  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+  // 最后一个渠道被删空时也要走完合并：上一轮写进 config.toml 的托管块只能
+  // 靠 sidecar 记住——它记录的是上一轮托管了哪些渠道，为空才说明确实没有
+  // 残留需要清理，这时早退才是安全的。
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   // Both the level list (support_efforts) and the global default live here:

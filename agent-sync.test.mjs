@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { syncAllAgentConfigs, createStoreWatcher } from "./agent-sync.mjs";
+import {
+  syncAllAgentConfigs,
+  createStoreWatcher,
+  buildSyncSummary,
+  formatSyncSummaryLine,
+  parseSyncSummaryLine,
+  codexCatalogLogMessage,
+  SYNC_RESULT_PREFIX,
+} from "./agent-sync.mjs";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { managedConnectionId } from "./qoder-merge-config.mjs";
 
@@ -107,7 +115,7 @@ describe("agent-sync", () => {
     const grokPath = join(tmpRoot, ".grok", "config.toml");
     assert.equal(existsSync(grokPath), true, "grok config.toml must land under the injected USERPROFILE");
     const grokText = readFileSync(grokPath, "utf8");
-    assert.match(grokText, /\[model\."anyswitch-alpha-model-1"\]/);
+    assert.match(grokText, /\[model\."anyswitch-alpha~model-1"\]/);
     assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/alpha\/v1"/);
     assert.match(grokText, /api_key = "test-token"/);
     assert.match(grokText, /name = "model-1 · Alpha"/);
@@ -272,8 +280,8 @@ describe("agent-sync pools", () => {
     assert.equal(opencode.provider.beta, undefined);
 
     const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
-    assert.match(grokText, /\[model\."anyswitch-pool-ab-model-1"\]/);
-    assert.match(grokText, /\[model\."anyswitch-pool-ab-model-2"\]/);
+    assert.match(grokText, /\[model\."anyswitch-pool-ab~model-1"\]/);
+    assert.match(grokText, /\[model\."anyswitch-pool-ab~model-2"\]/);
     assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/pool-ab\/v1"/);
     assert.doesNotMatch(grokText, /anyswitch-alpha/);
     assert.doesNotMatch(grokText, /anyswitch-beta/);
@@ -303,8 +311,8 @@ describe("agent-sync pools", () => {
 
     const grokText2 = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
     assert.doesNotMatch(grokText2, /anyswitch-pool-ab/, "grok pool channel cleaned up after dissolve");
-    assert.match(grokText2, /\[model\."anyswitch-alpha-model-1"\]/);
-    assert.match(grokText2, /\[model\."anyswitch-beta-model-2"\]/);
+    assert.match(grokText2, /\[model\."anyswitch-alpha~model-1"\]/);
+    assert.match(grokText2, /\[model\."anyswitch-beta~model-2"\]/);
   });
 });
 
@@ -414,6 +422,142 @@ describe("agent-sync auto routing channel", () => {
 
     const grokText2 = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
     assert.doesNotMatch(grokText2, /anyswitch-auto/, "grok auto cleaned up after chain deletion");
-    assert.match(grokText2, /\[model\."anyswitch-beta-model-2"\]/, "real grok channels survive the cleanup");
+    assert.match(grokText2, /\[model\."anyswitch-beta~model-2"\]/, "real grok channels survive the cleanup");
   });
 });
+
+describe("agent-sync 同步结果摘要", () => {
+  let tmpRoot;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "agent-sync-summary-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  const base = () => ({ USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot });
+
+  function summaryStore() {
+    return {
+      version: 2,
+      providers: {
+        alpha: {
+          displayName: "Alpha",
+          baseURL: "https://alpha.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "alpha.dpapi",
+          models: { "model-1": { displayName: "Model 1", contextWindow: 4096 } },
+        },
+      },
+    };
+  }
+
+  it("单个端点写不进去时整体仍算成功，失败名单列出该端点", async () => {
+    // 拿目录顶住 codex 的配置文件：只有 codex 这一步读不出来，其余端点照常写。
+    mkdirSync(join(tmpRoot, ".codex", "config.toml"), { recursive: true });
+    const res = await syncAllAgentConfigs({
+      store: summaryStore(),
+      port: 47821,
+      token: "test-token",
+      root: tmpRoot,
+      base: base(),
+    });
+    assert.equal(res.ok, true, "单个端点失败不再拖垮整次同步");
+    assert.equal(res.results.codex.ok, false);
+
+    const summary = buildSyncSummary(res);
+    assert.equal(summary.ok, true, "有端点失败但整次同步仍算跑完");
+    assert.ok(summary.failed.includes("codex"), "失败名单列出没写进去的端点");
+    assert.ok(!summary.synced.includes("codex"), "失败端点不进成功名单");
+    assert.ok(summary.synced.includes("zcode"), "其余端点照常进成功名单");
+    for (const name of summary.failed) {
+      assert.ok(!summary.synced.includes(name), `${name} 不能同时出现在两个名单里`);
+    }
+    assert.equal(summary.synced.length + summary.failed.length, 8, "八个端点各归一个名单");
+  });
+
+  it("仓库数据读不出来时整体失败，不给面板任何端点名单", async () => {
+    // store.json 是个目录：存在但读不出来。
+    mkdirSync(join(tmpRoot, "store.json"), { recursive: true });
+    const res = await syncAllAgentConfigs({
+      port: 47821,
+      token: "test-token",
+      root: tmpRoot,
+      base: base(),
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.reason, "store-unreadable");
+
+    const summary = buildSyncSummary(res);
+    assert.equal(summary.ok, false, "仓库数据读不出来是真失败");
+    assert.deepEqual(summary.synced, [], "没有端点结果可言，成功名单留空");
+    assert.deepEqual(summary.failed, [], "失败原因走 error，不塞进端点名单");
+  });
+
+  it("摘要行可被解析，缺这行或这行坏了都不报错", () => {
+    const summary = {
+      ok: true,
+      synced: ["zcode", "pi"],
+      failed: ["codex"],
+      codexCatalog: { state: "written", entries: 7 },
+    };
+    const line = formatSyncSummaryLine(summary);
+    assert.ok(line.startsWith(SYNC_RESULT_PREFIX), "行首就是约定的标记");
+    assert.deepEqual(parseSyncSummaryLine(line), summary, "摘要行能原样解析回来");
+
+    const stdout = `[agent-sync] zcode config.json synced
+${line}
+[agent-sync] WARN codex config.toml not updated: nope
+`;
+    assert.deepEqual(parseSyncSummaryLine(stdout), summary, "摘要行混在普通日志里也能捞出来");
+
+    assert.equal(parseSyncSummaryLine("[agent-sync] all agent configurations synced\n"), null, "没有摘要行就返回 null");
+    assert.equal(parseSyncSummaryLine(""), null);
+    assert.equal(parseSyncSummaryLine(undefined), null);
+    assert.equal(parseSyncSummaryLine(`${SYNC_RESULT_PREFIX}{oops`), null, "摘要行坏了也只返回 null");
+
+    // 目录字段由 codex 写入器给出，还没给的时候摘要里就没有这一项。
+    const plain = { ok: true, synced: ["pi"], failed: [] };
+    assert.deepEqual(parseSyncSummaryLine(formatSyncSummaryLine(plain)), plain);
+  });
+
+  it("目录重写过就记一条日志，没重写过或没这个字段都不记", () => {
+    // codex 写入器给的目录状态固定五个取值，重写过就是 written，其余四个都不算更新。
+    const withEntries = codexCatalogLogMessage({ state: "written", entries: 12 });
+    assert.equal(withEntries, "Codex 模型列表已更新，共 12 个模型");
+    assert.doesNotMatch(withEntries, /catalog|state|entries|unchanged|written/i, "日志文案不提内部字段名");
+    assert.equal(codexCatalogLogMessage({ state: "written" }), "Codex 模型列表已更新");
+    assert.equal(codexCatalogLogMessage({ state: "something-else", entries: 3 }), null, "不认识的状态不记日志");
+    assert.equal(codexCatalogLogMessage({ state: "unchanged", entries: 12 }), null, "目录没重写就不记");
+    assert.equal(codexCatalogLogMessage({ state: "removed", entries: 0 }), null, "目录撤掉不算更新");
+    assert.equal(codexCatalogLogMessage({ state: "skipped", entries: 0 }), null, "这次没生成目录就不记");
+    assert.equal(codexCatalogLogMessage({ state: "user-pointer", entries: 0 }), null, "用的是用户自己的目录就不记");
+    assert.equal(codexCatalogLogMessage(undefined), null, "写入器还没给这个字段时安静跳过");
+  });
+
+  it("整轮同步的摘要带上目录状态，写入器不给这一项就没有它", async () => {
+    const res = await syncAllAgentConfigs({
+      store: summaryStore(),
+      port: 47821,
+      token: "test-token",
+      root: tmpRoot,
+      base: base(),
+    });
+    assert.equal(res.ok, true);
+    const summary = buildSyncSummary(res);
+    const catalog = res.results.codex?.catalog;
+    if (catalog) {
+      // 目录状态由 codex 写入器给出，摘要原样透传给面板。
+      assert.equal(summary.codexCatalog.state, catalog.state);
+      assert.equal(summary.codexCatalog.entries, catalog.entries);
+      assert.equal(catalog.state, "written", "有模型可同步时目录这次重写过");
+      assert.ok(catalog.entries > 0, "条目数是真实写进目录的模型数");
+      assert.ok(codexCatalogLogMessage(catalog), "真实同步里这条目录日志确实会记");
+    } else {
+      assert.equal(summary.codexCatalog, undefined, "写入器没给目录状态时摘要里就不带这一项");
+    }
+  });
+});
+

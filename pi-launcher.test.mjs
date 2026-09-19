@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable } from "./pi-launcher.mjs";
+import { readSidecar } from "./pi-merge-models.mjs";
 
 describe("buildInstanceId", () => {
   it("is '<cwd basename>-<pid>'", () => {
@@ -177,5 +178,39 @@ describe("writePiModels", () => {
     assert.equal(written.providers["_poke-api"].models[0].id, "claude-opus-5");
     const sidecar = JSON.parse(readFileSync(join(dir, "pi-sidecar.json"), "utf8"));
     assert.deepEqual(sidecar.providers, ["poke-api"]);
+  });
+
+  it("clears the managed providers after the last channel is deleted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-write-cleanup-"));
+    try {
+      const modelsPath = join(dir, "models.json");
+      const store = {
+        version: 2,
+        providers: {
+          "poke-api": {
+            displayName: "Poke API",
+            baseURL: "https://poke.example/v1",
+            protocol: "openai-compatible",
+            credentialFile: "poke-api.dpapi",
+            models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+          },
+        },
+      };
+      const first = await writePiModels(store, 47821, dir, modelsPath);
+      assert.equal(first.ok, true);
+      assert.equal(first.unchanged, false);
+      assert.ok(JSON.parse(readFileSync(modelsPath, "utf8")).providers["_poke-api"]);
+      assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
+
+      // 渠道删空：sidecar 记着上一轮托管过什么，所以这一轮不能早退——必须
+      // 走完合并把 models.json 里的托管渠道删掉，否则脏模型列表永久残留。
+      const emptied = await writePiModels({ version: 2, providers: {} }, 47821, dir, modelsPath);
+      assert.equal(emptied.ok, true);
+      assert.equal(emptied.unchanged, false, "the stale managed channel must be rewritten away, not skipped");
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(modelsPath, "utf8")).providers), []);
+      assert.deepEqual(readSidecar(dir), { providers: [] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -7979,6 +7979,27 @@ async function api(method, path, body) {
     renderStoreList();
   }
 
+  // 同步接口会带回 Codex 模型列表的重写结果：state 表示已重写时，把「已更新」与条数
+  // 一并说给用户。判定与同步日志同一套状态值（written 即「这次重写过」）；
+  // 字段尚未上线（undefined）或 state 表示没重写时一句都不提——没拿到证据就不说话，
+  // 避免又变成一句永远正确的套话。点名端点复用统计页那套端点显示名（同一批客户端）。
+  const SYNC_CATALOG_REWRITTEN_STATES = new Set(["written"]);
+  // Codex 桌面端的选择器只取模型列表的第一页（100 个），页外的模型在 Codex 里选不到。
+  // 目录条数越过这条线就明说，不论本轮有没有重写——超限是持续状态，不是一次性事件。
+  const CODEX_PICKER_PAGE_SIZE = 100;
+  function syncCodexCatalogNote(cat) {
+    if (!cat || typeof cat !== "object") return "";
+    const entries = Number.isFinite(cat.entries) ? cat.entries : null;
+    const parts = [];
+    if (SYNC_CATALOG_REWRITTEN_STATES.has(String(cat.state || ""))) {
+      parts.push(entries === null ? "Codex 的模型列表已更新" : `Codex 的模型列表已更新，共 ${entries} 个模型`);
+    }
+    if (entries !== null && entries > CODEX_PICKER_PAGE_SIZE) {
+      parts.push(`Codex 的选择器只显示前 ${CODEX_PICKER_PAGE_SIZE} 个模型，当前 ${entries} 个，排后面的选不到`);
+    }
+    return parts.join("。");
+  }
+
   function initStoreTab() {
     $("tabStore").onclick = () => switchView("store");
     $("storeAddBtn").onclick = () => showAddModal();
@@ -7988,16 +8009,35 @@ async function api(method, path, body) {
     $("storeDiffMask").addEventListener("click", (e) => { if (e.target === $("storeDiffMask")) closeStoreDiffModal(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("storeDiffMask").classList.contains("show")) closeStoreDiffModal(); });
     $("storeSyncAgentsBtn").onclick = async () => {
-      // 立即把当前 store 推送到全部端点配置——走独立同步进程，现读磁盘上的
-      // merge 逻辑，因此目录写层的修复不需要重启服务即可生效。
+      // 立即把当前渠道配置推送到各端点——走独立同步进程，现读磁盘上的 merge 逻辑，
+      // 因此写层的修复不需要重启服务即可生效。结果按同步接口如实反馈：全部成功、
+      // 部分端点没成功（点名端点）、Codex 模型列表已更新（带条数）。
       const btn = $("storeSyncAgentsBtn");
       if (btn.disabled) return;
       btn.disabled = true;
       setStoreRefreshStatus("正在同步到端点..", "busy");
       try {
-        await api("POST", "/api/sync-agents");
-        setStoreRefreshStatus("端点同步完成", "done");
-        toast("已同步到全部端点配置");
+        const r = await api("POST", "/api/sync-agents");
+        // synced/failed/codexCatalog 由同步接口下发，尚未上线时取不到：取不到就按
+        // 全部成功处理，不报错
+        const synced = Array.isArray(r.synced) ? r.synced : [];
+        const failed = Array.isArray(r.failed) ? r.failed : [];
+        const names = failed.map((id) => statsEndpointLabel(id)).join("、");
+        const catalogNote = syncCodexCatalogNote(r.codexCatalog);
+        const withNote = (head) => (catalogNote ? `${head}。${catalogNote}` : head);
+        if (failed.length) {
+          const head = synced.length
+            ? `已同步 ${synced.length} 个端点，${names} 没同步成功`
+            : `这些端点没同步成功：${names}`;
+          setStoreRefreshStatus("端点同步未完成", "err", escapeHtml(`未成功：${names}`));
+          toast(withNote(head), true);
+        } else {
+          const head = synced.length
+            ? `已同步到全部 ${synced.length} 个端点的配置`
+            : "已同步到全部端点的配置";
+          setStoreRefreshStatus("端点同步完成", "done", escapeHtml(catalogNote));
+          toast(withNote(head));
+        }
       } catch (err) {
         setStoreRefreshStatus("同步失败", "err");
         toast(panelError(err, "端点同步失败"), true);

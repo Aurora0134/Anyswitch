@@ -754,17 +754,36 @@ export function createPanelRouter({
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
-  // kimi, qoder, codex, opencode). Runs the standalone sync runner so the
+  // kimi, qoder, codex, opencode, grok). Runs the standalone sync runner so the
   // merge logic loads from disk — catalog-writer fixes apply here without a
   // panel/relay restart.
   async function handleAgentSync(res) {
     logger?.info("agent endpoint sync requested from panel");
     try {
-      const result = await spawnAgentSyncFn({ port: 47821, logger });
-      sendJson(res, result.ok ? 200 : 500, {
-        ok: result.ok,
-        error: result.ok ? undefined : (result.error ?? `sync runner exit ${result.code}`),
-        output: result.stdout?.trim() || undefined,
+      const { parseSyncSummaryLine, SYNC_RESULT_PREFIX } = await import("./agent-sync.mjs");
+      // 同步进程把那行机器可读摘要混在 stdout 里回传：它是给前端解析用的，不该
+      // 出现在用户看的实时输出里，交给子进程前先把这行从日志里滤掉。
+      const uiLogger = logger
+        ? {
+            info: (message) => {
+              if (!String(message).includes(SYNC_RESULT_PREFIX)) logger.info?.(message);
+            },
+            warn: (message) => logger.warn?.(message),
+            error: (message) => logger.error?.(message),
+          }
+        : null;
+      const result = await spawnAgentSyncFn({ port: 47821, logger: uiLogger });
+      // 同步进程在 stdout 上留了一行机器可读摘要。个别端点写不进去不再算整次
+      // 失败：其余端点已经同步好，按钮只把没写进去的端点报出来。仓库数据读不
+      // 出来或同步进程自己崩了，才是真的失败。
+      const summary = parseSyncSummaryLine(result.stdout);
+      const ok = summary ? summary.ok : result.ok;
+      sendJson(res, ok ? 200 : 500, {
+        ok,
+        failed: summary?.failed ?? [],
+        synced: summary?.synced ?? [],
+        codexCatalog: summary?.codexCatalog,
+        error: ok ? undefined : "同步没能完成，请稍后重试",
       });
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err.message });

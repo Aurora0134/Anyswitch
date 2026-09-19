@@ -73,10 +73,14 @@ export async function startOpenAIRelay(options = {}) {
 export async function writeOpencodeConfig(store, port, sidecarRoot, configPath = opencodeConfigPath(), catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAutoRouteChannel(store, "opencode");
-  if (Object.keys(managedProviders).length === 0 && !autoChannel) {
+  // Last channel deleted: what the previous sync wrote into the client config
+  // is only recorded in the sidecar, so an empty previous managed set is what
+  // makes bailing out safe — otherwise the merge has to run to drop the stale
+  // entries instead of leaving them behind forever.
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
-  const previousManaged = readSidecar(sidecarRoot).providers;
   // With 「注入推理强度」 off no variants are written at all: the merge
   // rebuilds every managed entry wholesale, so an absent catalog also strips
   // the variants a previous sync wrote — that is the switch's cleanup path.

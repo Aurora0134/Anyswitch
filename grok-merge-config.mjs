@@ -1,5 +1,5 @@
 // Grok Build config.toml merge — writes Anyswitch store channels into
-// ~/.grok/config.toml as [model."anyswitch-<channelId>-<modelId>"] tables so
+// ~/.grok/config.toml as [model."anyswitch-<channelId>~<modelId>"] tables so
 // the grok CLI routes through the local relay's OpenAI chat/completions
 // surface (POST /openai/<seg>/v1/chat/completions).
 //
@@ -51,6 +51,9 @@ export { deriveAutoRouteChannel } from "./merge-common.mjs";
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
+// Channel-qualified key packing, shared with codex's catalog slugs — see
+// managedModelKey for why the separator has to be "~".
+import { packChannelModelSlug } from "./channel-model-slug.mjs";
 
 const SIDECAR_FILENAME = "grok-sidecar.json";
 export const MANAGED_BEGIN = "# >>> anyswitch-managed-grok (managed by Anyswitch; do not edit) >>>";
@@ -60,9 +63,11 @@ export const MANAGED_END = "# <<< anyswitch-managed-grok <<<";
 const GROK_AGENT_ID = "grok";
 const MANAGED_ID_PREFIX = "anyswitch-";
 // The auto pseudo-channel collapses channel and model into one catalog key:
-// its only model is the virtual "auto", so "anyswitch-auto-auto" would just
+// its only model is the virtual "auto", so "anyswitch-auto~auto" would just
 // stutter. The key keeps the managed prefix so the stale-table strip catches
-// it like every other managed entry.
+// it like every other managed entry — and because the branch fires on the
+// channel alone, every model of that channel lands on this one key, which is
+// what the duplicate-key gate in buildGrokManagedToml guards.
 export const AUTO_MODEL_KEY = `${MANAGED_ID_PREFIX}${AUTO_CHANNEL_KEY}`;
 // Picker copy for the reasoning_efforts sub-tables: low→xhigh mirror the
 // wording of grok's built-in model catalog (extracted from the binary's
@@ -109,9 +114,19 @@ export function grokConfigPath(base = process.env) {
 // because grok's model namespace is global and flat — a model id offered by
 // several channels would otherwise collapse onto one entry and pin every call
 // to whichever entry survived.
+//
+// The join is codex's own packChannelModelSlug (channel-model-slug.mjs), i.e.
+// "<channel>~<model>". "-" was the separator here before and it is ambiguous:
+// both channel ids and model ids may contain "-", so channel "a" + model "b-c"
+// and channel "a-b" + model "c" packed onto the same key — two identically
+// named TOML tables, which makes grok reject the whole config and leaves the
+// user with zero models. Channel ids never hold a "~" (store-schema's
+// PROVIDER_ID is [A-Za-z0-9._-], pools included), so the first "~" is the one
+// and only channel/model boundary whatever the model id itself contains ("/",
+// even another "~").
 export function managedModelKey(channelId, modelId) {
   if (channelId === AUTO_CHANNEL_KEY) return AUTO_MODEL_KEY;
-  return `${MANAGED_ID_PREFIX}${channelId}-${modelId}`;
+  return `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
 }
 
 // One table per (channel, model) pair. base_url points at the channel's relay
@@ -121,6 +136,12 @@ export function buildGrokManagedToml(managedProviders, port, token, effort = nul
   const lines = [MANAGED_BEGIN, "# OpenAI chat/completions models routed through the local Anyswitch relay.", ""];
   const managed = [];
   const modelKeys = [];
+  // Duplicate keys are unrepresentable in TOML: two [model.<same key>] tables
+  // make grok reject the whole config, so a repeat is dropped instead of
+  // emitted and recorded in `skipped` for the caller to report. Losing one
+  // catalog entry is recoverable; an unloadable config is not.
+  const skipped = [];
+  const seenKeys = new Set();
 
   for (const [providerId, provider] of Object.entries(managedProviders)) {
     const segment = provider?.baseUrlSegment ?? providerId;
@@ -128,6 +149,16 @@ export function buildGrokManagedToml(managedProviders, port, token, effort = nul
     const channelLabel = provider?.channelName ?? provider?.displayName ?? providerId;
     for (const [modelId, model] of Object.entries(provider?.models ?? {})) {
       const key = managedModelKey(providerId, modelId);
+      if (seenKeys.has(key)) {
+        skipped.push({
+          key,
+          channelId: providerId,
+          modelId,
+          reason: `duplicate catalog key "${key}" for channel "${providerId}" model "${modelId}"; skipped to keep config.toml loadable`,
+        });
+        continue;
+      }
+      seenKeys.add(key);
       const modelLabel =
         typeof model?.displayName === "string" && model.displayName.length > 0 ? model.displayName : modelId;
       // 渠道名进显示名：grok 的选择器每行只读 name，跨渠道同名模型不带渠道名
@@ -185,7 +216,7 @@ export function buildGrokManagedToml(managedProviders, port, token, effort = nul
   }
 
   lines.push(MANAGED_END);
-  return { text: lines.join("\n") + "\n", managed, modelKeys };
+  return { text: lines.join("\n") + "\n", managed, modelKeys, skipped };
 }
 
 // Self-heal for a rewrite that dropped the comment markers: the `anyswitch-`
@@ -274,11 +305,11 @@ export function mergeGrokConfigToml(existingText, managedProviders, port, token,
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `anyswitch-auto`.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
-  const { text: managedText, managed, modelKeys } = buildGrokManagedToml(providers, port, token, effort);
+  const { text: managedText, managed, modelKeys, skipped } = buildGrokManagedToml(providers, port, token, effort);
   const trimmedHead = preserved.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
   const protectedText = protectModelsDefault(merged, modelKeys);
-  return { text: protectedText, managed, modelKeys };
+  return { text: protectedText, managed, modelKeys, skipped };
 }
 
 export function readGrokConfigToml(filePath) {
@@ -342,5 +373,7 @@ export function writeGrokConfig(store, port, token, sidecarRoot, configPath = gr
   if (writeResult.ok) {
     writeSidecar(sidecarRoot, merged.managed);
   }
-  return writeResult;
+  // skipped travels with the result so the caller can surface why a catalog
+  // entry is missing (see agent-sync's warning path).
+  return { ...writeResult, skipped: merged.skipped };
 }

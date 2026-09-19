@@ -18,6 +18,84 @@ import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
 import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
 import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
 
+// --- 同步结果的机器可读摘要 -----------------------------------------------
+// 同步子进程除了人看的日志，还在 stdout 上打一行定长前缀的 JSON 摘要，面板靠它
+// 区分「整次没做成」和「个别端点没写进去」：八个端点里挂掉一个，不该让同步按钮
+// 整颗报红。端点名与字段名固定，前端按名字取用。
+export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
+export const SYNC_RESULT_PREFIX = "__ANYSWITCH_SYNC_RESULT__";
+
+// Codex 的模型目录每次同步都整份重写，而只改模型不动配置文本时 unchanged 为真，
+// 光看 unchanged 会把真正重写过目录的那一次漏掉。目录状态由 codex 写入器给出，
+// 取值固定五个：written / unchanged / skipped / user-pointer / removed，其中
+// written 就是「这次重写过」。字段缺失或状态不认识时安静跳过，不记这条日志。
+const CODEX_CATALOG_REWRITTEN = new Set(["written"]);
+
+export function codexCatalogLogMessage(catalog) {
+  if (!catalog || typeof catalog !== "object") return null;
+  if (!CODEX_CATALOG_REWRITTEN.has(catalog.state)) return null;
+  return Number.isFinite(catalog.entries)
+    ? `Codex 模型列表已更新，共 ${catalog.entries} 个模型`
+    : "Codex 模型列表已更新";
+}
+
+// 把 syncAllAgentConfigs 的结果压成面板要的形状。ok 为假（仓库数据读不出来）时
+// 没有逐端点结果可言，两个名单都留空，原因走 error。
+export function buildSyncSummary(result) {
+  const results = result?.results ?? {};
+  if (!result?.ok) return { ok: false, synced: [], failed: [] };
+  const synced = [];
+  const failed = [];
+  const known = new Set(AGENT_ENDPOINTS);
+  // 先按固定顺序走已知端点，再兜住将来新增的名字，保证名单顺序稳定。
+  for (const name of [...AGENT_ENDPOINTS, ...Object.keys(results).filter((n) => !known.has(n))]) {
+    const entry = results[name];
+    if (!entry) continue; // 本轮没跑到：既不算成功也不算失败
+    (entry.ok === true ? synced : failed).push(name);
+  }
+  const summary = { ok: true, synced, failed };
+  const catalog = results.codex?.catalog;
+  if (catalog && typeof catalog === "object") {
+    const picked = {};
+    if (typeof catalog.state === "string") picked.state = catalog.state;
+    if (Number.isFinite(catalog.entries)) picked.entries = catalog.entries;
+    if (typeof catalog.reason === "string") picked.reason = catalog.reason;
+    if (Object.keys(picked).length > 0) summary.codexCatalog = picked;
+  }
+  return summary;
+}
+
+export function formatSyncSummaryLine(summary) {
+  return `${SYNC_RESULT_PREFIX}${JSON.stringify(summary)}`;
+}
+
+// 从子进程 stdout 里捞那一行摘要。找不到、JSON 坏了、形状不对都返回 null：调用
+// 方退回「只看退出码」的老路径，绝不因为解析问题让同步按钮报错。
+export function parseSyncSummaryLine(text) {
+  if (typeof text !== "string") return null;
+  let payload = null;
+  for (const candidate of text.split(/\r?\n/)) {
+    const at = candidate.indexOf(SYNC_RESULT_PREFIX);
+    if (at === -1) continue;
+    payload = candidate.slice(at + SYNC_RESULT_PREFIX.length);
+    break;
+  }
+  if (payload === null) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const names = (value) => (Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
+  const summary = { ok: parsed.ok === true, synced: names(parsed.synced), failed: names(parsed.failed) };
+  if (parsed.codexCatalog && typeof parsed.codexCatalog === "object" && !Array.isArray(parsed.codexCatalog)) {
+    summary.codexCatalog = parsed.codexCatalog;
+  }
+  return summary;
+}
+
 /**
  * Synchronize all supported coding agent configurations against the current store.
  *
@@ -145,6 +223,10 @@ export async function syncAllAgentConfigs({
     } else if (!codexResult.unchanged) {
       logger?.info?.("codex config.toml synced");
     }
+    // 目录整份重写时单独记一条：只换模型不改配置文本的情况下 unchanged 为真，
+    // 上面的闸门会把这一次的目录更新整个吞掉。
+    const catalogLine = codexCatalogLogMessage(codexResult.catalog);
+    if (catalogLine) logger?.info?.(catalogLine);
   } catch (err) {
     results.codex = { ok: false, error: err.message };
     logger?.warn?.(`codex config sync skipped: ${err.message}`);
