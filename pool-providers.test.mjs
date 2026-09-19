@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { derivePoolPseudoProviders } from "./pool-providers.mjs";
+import { derivePoolPseudoProviders, deriveVisibleChannels } from "./pool-providers.mjs";
 
 const STORE = {
   version: 2,
@@ -76,5 +76,80 @@ describe("derivePoolPseudoProviders", () => {
     const pseudo = derivePoolPseudoProviders(STORE);
     pseudo["pool-ab"].models["model-a"].contextWindow = 1;
     assert.deepEqual(STORE, before);
+  });
+});
+
+describe("deriveVisibleChannels ordering", () => {
+  it("surfaces a pool at its earliest member's slot, matching the panel's visible order", () => {
+    const channels = deriveVisibleChannels({
+      providers: {
+        "solo-1": { models: { "m-1": {} } },
+        alpha: { models: { "model-a": {} } },
+        beta: { models: { "model-b": {} } },
+        "solo-2": { models: { "m-2": {} } },
+      },
+      pools: { "pool-ab": { displayName: "Pool AB", members: ["alpha", "beta"] } },
+    });
+    assert.deepEqual(Object.keys(channels), ["solo-1", "pool-ab", "solo-2"]);
+    assert.equal(channels["pool-ab"].channelName, "Pool AB");
+    assert.equal(channels.alpha, undefined, "members stay absorbed");
+    assert.equal(channels.beta, undefined, "members stay absorbed");
+  });
+
+  it("takes the earliest member in providers key order, not members[0]", () => {
+    const channels = deriveVisibleChannels({
+      providers: {
+        alpha: { models: { "model-a": {} } },
+        beta: { models: { "model-b": {} } },
+      },
+      pools: { "pool-ab": { members: ["beta", "alpha"] } },
+    });
+    assert.deepEqual(Object.keys(channels), ["pool-ab"]);
+  });
+
+  it("skips providers without models while keeping the pool at its member's slot", () => {
+    const channels = deriveVisibleChannels({
+      providers: {
+        empty: {},
+        alpha: { models: { "model-a": {} } },
+        "solo-1": { models: { "m-1": {} } },
+      },
+      pools: { "pool-ab": { members: ["alpha"] } },
+    });
+    assert.deepEqual(Object.keys(channels), ["pool-ab", "solo-1"]);
+  });
+
+  it("lets a pool win a pool-id/provider-id tie in place", () => {
+    const channels = deriveVisibleChannels({
+      providers: {
+        "solo-1": { models: { "m-1": {} } },
+        twin: { models: { "model-a": {} } },
+      },
+      pools: { twin: { displayName: "Twin Pool", members: ["twin"] } },
+    });
+    assert.deepEqual(Object.keys(channels), ["solo-1", "twin"]);
+    assert.equal(channels.twin.channelName, "Twin Pool", "the pool pseudo-channel wins the tie");
+  });
+
+  it("surfaces nothing for members of a pool that currently has no models", () => {
+    const channels = deriveVisibleChannels({
+      providers: { alpha: {}, beta: { models: {} } },
+      pools: { "pool-empty": { members: ["alpha", "beta"] } },
+    });
+    assert.deepEqual(Object.keys(channels), []);
+  });
+
+  it("lists at the tail a pool whose members were all claimed by an earlier pool", () => {
+    const channels = deriveVisibleChannels({
+      providers: {
+        "solo-1": { models: { "m-1": {} } },
+        alpha: { models: { "model-a": {} } },
+      },
+      pools: {
+        "pool-first": { members: ["alpha"] },
+        "pool-second": { members: ["alpha"] },
+      },
+    });
+    assert.deepEqual(Object.keys(channels), ["solo-1", "pool-first", "pool-second"]);
   });
 });

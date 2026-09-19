@@ -23,6 +23,10 @@
 //      replacement alone.
 //   3. Providers without models produce no channel; pools whose members
 //      currently expose no models produce no channel either.
+//   4. Channel order is the panel's visible order: store providers key order,
+//      with each pool surfacing at its earliest member's slot. Codex's picker
+//      only fetches the first catalog page, so this order decides what is
+//      selectable — it is load-bearing, not cosmetic.
 //
 // Runtime leniency is a separate matter: absorbed members stay resolvable for
 // requests (unpackWireId, /openai/<id>/v1) so configs written before the
@@ -66,16 +70,46 @@ export function derivePoolPseudoProviders(store) {
 // The endpoint-visible channel table: standalone (non-member) providers with
 // models, plus one pseudo-provider per pool. Pool ids win any tie with a
 // provider id by construction, mirroring the relay's pool-first resolution.
+//
+// The walk follows store providers key order — the panel's visible order. An
+// absorbed member never surfaces on its own; its pool takes the slot of the
+// earliest member instead, so dragging a channel in the panel moves the same
+// row in every endpoint config and in codex's paginated catalog. A pool that
+// never gets a slot during the walk (every member claimed by an earlier pool)
+// still lists, at the tail.
 export function deriveVisibleChannels(store) {
   const providers = store?.providers ?? {};
+  const pseudo = derivePoolPseudoProviders(store);
   const memberIds = poolMemberIdSet(store);
+  // First pool to claim a member wins the member's slot, mirroring the
+  // pool-first tie resolution everywhere else.
+  const poolByMember = new Map();
+  for (const [poolId, pool] of Object.entries(store?.pools ?? {})) {
+    if (pseudo[poolId] === undefined) continue;
+    for (const memberId of pool?.members ?? []) {
+      if (!poolByMember.has(memberId)) poolByMember.set(memberId, poolId);
+    }
+  }
   const channels = {};
   for (const [providerId, provider] of Object.entries(providers)) {
+    const poolId = poolByMember.get(providerId);
+    if (poolId !== undefined) {
+      if (channels[poolId] === undefined) channels[poolId] = pseudo[poolId];
+      continue;
+    }
+    // Absorbed member of a pool that currently surfaces no channel.
     if (memberIds.has(providerId)) continue;
+    // A pool id may reuse a provider id; the pool wins the tie in place.
+    if (pseudo[providerId] !== undefined) {
+      channels[providerId] = pseudo[providerId];
+      continue;
+    }
     if (!(provider?.models && Object.keys(provider.models).length > 0)) continue;
     channels[providerId] = provider;
   }
-  Object.assign(channels, derivePoolPseudoProviders(store));
+  for (const [poolId, channel] of Object.entries(pseudo)) {
+    if (channels[poolId] === undefined) channels[poolId] = channel;
+  }
   return channels;
 }
 
