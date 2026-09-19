@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -443,6 +443,9 @@ describe("codex model catalog (model_catalog_json)", () => {
     const configPath = join(dir, ".codex", "config.toml");
     const result = writeCodexConfig(CHAIN_STORE, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
+    assert.equal(result.catalog.state, "written", "the first sync lands the model list");
+    assert.equal(result.catalog.entries, 2);
+    assert.equal(result.catalog.reason, undefined, "written / unchanged carry no reason");
     const text = readFileSync(configPath, "utf8");
     const pointerLine = `model_catalog_json = "${CATALOG_POINTER_VALUE}"`;
     assert.ok(text.includes(pointerLine));
@@ -452,12 +455,18 @@ describe("codex model catalog (model_catalog_json)", () => {
     const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
     assert.deepEqual(catalog.models.map((m) => m.slug).sort(), ["auto", "poke-api~gpt-6-astra"]);
+    assert.equal(catalog.models.length, result.catalog.entries, "entries counts the entries in the file");
 
     // A second sync is stable: one pointer, unchanged config, same catalog bytes.
     const before = readFileSync(catalogPath, "utf8");
+    const mtimeBefore = statSync(catalogPath).mtimeMs;
     const second = writeCodexConfig(CHAIN_STORE, 47821, "tok", dir, configPath);
     assert.equal(second.unchanged, true);
     assert.equal(readFileSync(catalogPath, "utf8"), before);
+    assert.equal(second.catalog.state, "unchanged", "identical content reports unchanged instead of claiming a rewrite");
+    assert.equal(second.catalog.entries, 2, "unchanged still reports how many models the list holds");
+    assert.equal(second.catalog.reason, undefined);
+    assert.equal(statSync(catalogPath).mtimeMs, mtimeBefore, "identical content is not rewritten");
     const textAgain = readFileSync(configPath, "utf8");
     assert.equal(textAgain.split("model_catalog_json").length - 1, 1);
   });
@@ -486,24 +495,41 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(existsSync(join(dir, ".codex", "model-catalogs")), false, "our catalog is not written");
   });
 
-  it("removes our stale catalog file when the user points model_catalog_json elsewhere", () => {
+  it("keeps our generated catalog and says why when the user points model_catalog_json elsewhere", () => {
     const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
     const configPath = join(dir, ".codex", "config.toml");
     // A first sync owns the pointer and generates the catalog file.
     writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
+    const generatedBefore = readFileSync(catalogPath, "utf8");
     assert.equal(existsSync(catalogPath), true);
     // The user then hand-writes a pointer at their own catalog: the next sync
-    // strips our leftover file but never touches theirs.
+    // reports that we no longer update the list, keeps our file (it is inert
+    // without the pointer — silently deleting it was the old behavior) and
+    // never touches theirs.
     const userCatalogPath = join(dir, ".codex", "my-own", "catalog.json");
     mkdirSync(dirname(userCatalogPath), { recursive: true });
     writeFileSync(userCatalogPath, '{"models":[]}\n', "utf8");
     writeFileSync(configPath, 'model_catalog_json = "my-own/catalog.json"\n', "utf8");
     const result = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
-    assert.equal(existsSync(catalogPath), false, "stale anyswitch-managed catalog removed");
+    assert.equal(result.catalog.state, "user-pointer");
+    assert.equal(result.catalog.entries, 0);
+    assert.equal(typeof result.catalog.reason, "string", "the downgrade is stated, not silent");
+    assert.ok(result.catalog.reason.length > 0);
+    assert.equal(existsSync(catalogPath), true, "our generated list is kept");
+    assert.equal(readFileSync(catalogPath, "utf8"), generatedBefore, "and not rewritten");
     assert.equal(readFileSync(userCatalogPath, "utf8"), '{"models":[]}\n', "the user's own catalog is never touched");
     assert.match(readFileSync(configPath, "utf8"), /^model_catalog_json = "my-own\/catalog\.json"$/m);
+
+    // The downgrade is reversible: once the user's pointer is gone the next
+    // sync re-anchors ours onto the file it kept — same bytes, so no rewrite.
+    writeFileSync(configPath, readFileSync(configPath, "utf8").replace(/^model_catalog_json = .*$/m, ""), "utf8");
+    const recovered = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(recovered.catalog.state, "unchanged", "the kept list is reused, not regenerated");
+    assert.equal(recovered.catalog.entries, 1);
+    assert.equal(recovered.catalog.reason, undefined, "no reason once the list is ours again");
+    assert.match(readFileSync(configPath, "utf8"), /^model_catalog_json = "model-catalogs\/anyswitch-models\.json"$/m);
   });
 
   it("writes no pointer and no file when no model is routable, and cleans up stale ones", () => {
@@ -521,8 +547,71 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(existsSync(catalogPath), true);
     const result = writeCodexConfig({ version: 2, providers: {} }, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
+    assert.equal(result.catalog.state, "removed", "an empty model set drops the pointer and says so");
+    assert.equal(result.catalog.entries, 0);
+    assert.equal(typeof result.catalog.reason, "string");
+    assert.ok(result.catalog.reason.length > 0);
     assert.doesNotMatch(readFileSync(configPath, "utf8"), /model_catalog_json/);
     assert.equal(existsSync(catalogPath), false);
+  });
+
+  it("reports a rewritten model list even when only a model changed and config.toml stayed identical", () => {
+    // The reason `catalog` exists at all: the model set is not part of
+    // config.toml's text, so a model-only edit used to come back as a plain
+    // "unchanged" and the panel reported a no-op while the picker's list had
+    // in fact been rewritten.
+    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const configPath = join(dir, ".codex", "config.toml");
+    const first = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(first.catalog.state, "written");
+    const configBefore = readFileSync(configPath, "utf8");
+    const renamed = {
+      version: 2,
+      providers: {
+        "poke-api": {
+          ...STORE.providers["poke-api"],
+          models: { "gpt-6-astra": { displayName: "GPT 6 Astra v2", contextWindow: 200000 } },
+        },
+      },
+    };
+    const second = writeCodexConfig(renamed, 47821, "tok", dir, configPath);
+    assert.equal(second.unchanged, true, "config.toml's text is untouched by a model-only edit");
+    assert.equal(readFileSync(configPath, "utf8"), configBefore);
+    assert.equal(second.catalog.state, "written", "the model list did change");
+    assert.equal(second.catalog.entries, 1);
+    const catalog = JSON.parse(readFileSync(join(dir, ".codex", "model-catalogs", "anyswitch-models.json"), "utf8"));
+    assert.equal(catalog.models[0].display_name, "GPT 6 Astra v2 · Poke API");
+  });
+
+  it("keeps the generated catalog and says why when the template asset is unreadable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const configPath = join(dir, ".codex", "config.toml");
+    const first = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(first.catalog.state, "written");
+    const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
+    const before = readFileSync(catalogPath, "utf8");
+    // A null template is what an unreadable shipped asset looks like: the list
+    // cannot be regenerated this sync, so the pointer goes off — but the file
+    // that is already there is kept (inert without the pointer) instead of
+    // being deleted in silence.
+    const result = writeCodexConfig(STORE, 47821, "tok", dir, configPath, null, null, null);
+    assert.equal(result.ok, true);
+    assert.equal(result.catalog.state, "skipped");
+    assert.equal(result.catalog.entries, 0);
+    assert.equal(typeof result.catalog.reason, "string", "the downgrade is stated, not silent");
+    assert.ok(result.catalog.reason.length > 0);
+    assert.equal(existsSync(catalogPath), true, "the generated list is kept");
+    assert.equal(readFileSync(catalogPath, "utf8"), before, "and not rewritten");
+    assert.doesNotMatch(readFileSync(configPath, "utf8"), /model_catalog_json/, "the pointer is off while the list cannot be regenerated");
+    assert.match(readFileSync(configPath, "utf8"), /\[model_providers\."anyswitch-poke-api"\]/, "the channels still sync");
+
+    // Same reversibility: once the list can be generated again the pointer
+    // returns and the file that was kept is adopted as-is.
+    const recovered = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
+    assert.equal(recovered.catalog.state, "unchanged", "the kept list is adopted, not regenerated");
+    assert.equal(recovered.catalog.entries, 1);
+    assert.equal(recovered.catalog.reason, undefined);
+    assert.match(readFileSync(configPath, "utf8"), /^model_catalog_json = "model-catalogs\/anyswitch-models\.json"$/m);
   });
 
   it("strips our stale pointer when the catalog feature is off (no template)", () => {
@@ -557,6 +646,8 @@ describe("writeCodexConfig", () => {
     assert.equal(result.unchanged, true);
     assert.equal(result.reason, "no Anyswitch providers with models");
     assert.equal(existsSync(join(dir, ".codex", "config.toml")), false);
+    assert.equal(result.catalog.state, "unchanged", "catalog is always reported, even on a no-op");
+    assert.equal(result.catalog.entries, 0);
   });
 
   it("still cleans up after the last channel is removed, using the sidecar", () => {
@@ -582,6 +673,8 @@ describe("writeCodexConfig", () => {
     assert.match(result.reason, /truncated/);
     assert.equal(readFileSync(configPath, "utf8"), before);
     assert.equal(existsSync(sidecarPath(dir)), false, "no sidecar written for a refused merge");
+    assert.equal(result.catalog.state, "unchanged", "a refused merge touches no model list");
+    assert.equal(result.catalog.entries, 0);
   });
 
   it("codexConfigPath resolves under USERPROFILE", () => {

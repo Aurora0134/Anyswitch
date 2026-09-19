@@ -31,7 +31,6 @@ import { catalogForRoot, resolveDeclaredEfforts, effortSupplementEnabled } from 
 
 const SIDECAR_FILENAME = "qoder-sidecar.json";
 const MANAGED_PREFIX = "qoder-custom-anyswitch-";
-const MAX_MODELS_PER_CONNECTION = 32;
 // relay 认这个端点时用的 id，也是 URL 身份前缀的字面值（须与 store-schema 的
 // ROUTING_ENDPOINT_IDS 成员一致，relay 侧按 x-agent-id 同一条白名单校验）。
 const QODER_AGENT_ID = "qoder";
@@ -151,8 +150,8 @@ function buildConnection(providerId, provider, port, token, catalog = null) {
   // 不会让 sidecar 托管集漂移，旧条目照常被下一轮 sync 精确替换。
   const baseUrl = `http://127.0.0.1:${port}/openai/${buildAgentPrefixedSegment(QODER_AGENT_ID, segment)}/v1`;
   const displayName = provider?.channelName ?? provider?.displayName ?? providerId;
+  // 全量写入：渠道有多少模型就写多少模型，不裁剪。
   const models = Object.entries(provider.models ?? {})
-    .slice(0, MAX_MODELS_PER_CONNECTION)
     .map(([modelId, model]) => buildModelEntry(modelId, model, catalog, provider, displayName));
   return {
     baseUrl,

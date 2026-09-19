@@ -3,7 +3,7 @@
 //
 // Grok Build speaks OpenAI chat/completions natively and reads its custom
 // models from ~/.grok/config.toml, where grok-merge-config.mjs writes one
-// managed [model."anyswitch-<channel>-<model>"] table per (channel, model)
+// managed [model."anyswitch-<channel>~<model>"] table per (channel, model)
 // pointing at the relay's /openai/<seg>/v1 surface. The instance-tagging
 // coupling is the same as codex's env_http_headers scheme: every managed
 // table carries `env_http_headers = { "x-agent-instance" = "ANYSWITCH_INSTANCE_ID" }`,

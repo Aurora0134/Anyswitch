@@ -4,9 +4,11 @@ import {
   buildDshLauncherEnv,
   resolveDshExecutable,
   runDshLauncher,
+  writeDshConfig,
 } from "./dsh-launcher.mjs";
+import { getYamlModule, readDshSettings, readSidecar } from "./dsh-merge-config.mjs";
 import { join } from "node:path";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 
 test("buildDshLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
@@ -110,3 +112,55 @@ test("runDshLauncher falls back to per-launch relay when resident probe fails", 
   assert.equal(relayClosed, true);
   assert.equal(dshSpawned, true);
 });
+
+function dshChannelStore() {
+  return {
+    version: 2,
+    providers: {
+      "poke-api": {
+        displayName: "Poke API",
+        baseURL: "https://poke.example/v1",
+        protocol: "openai-compatible",
+        credentialFile: "poke-api.dpapi",
+        models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+      },
+    },
+  };
+}
+
+test("writeDshConfig reports a no-op when there are no channels and nothing was managed before", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-write-"));
+  try {
+    const result = await writeDshConfig({ version: 2, providers: {} }, 47821, dir, join(dir, "settings.yaml"));
+    assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
+    assert.equal(existsSync(join(dir, "settings.yaml")), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("writeDshConfig clears the managed providers after the last channel is deleted", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dsh-write-"));
+  try {
+    const settingsPath = join(dir, "settings.yaml");
+    const first = await writeDshConfig(dshChannelStore(), 47821, dir, settingsPath);
+    assert.equal(first.ok, true);
+    assert.equal(first.unchanged, false);
+    const yaml = await getYamlModule();
+    const written = readDshSettings(settingsPath, yaml);
+    assert.ok(written["llm-pi-ai"].providers["_poke-api"]);
+    assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
+
+    // 渠道删空：sidecar 记着上一轮托管过什么，所以这一轮不能早退——必须走完
+    // 合并把 settings.yaml 里的托管渠道删掉，否则脏模型列表永久残留。
+    const emptied = await writeDshConfig({ version: 2, providers: {} }, 47821, dir, settingsPath);
+    assert.equal(emptied.ok, true);
+    assert.equal(emptied.unchanged, false, "the stale managed channel must be rewritten away, not skipped");
+    const cleaned = readDshSettings(settingsPath, yaml);
+    assert.deepEqual(Object.keys(cleaned["llm-pi-ai"].providers), []);
+    assert.deepEqual(readSidecar(dir), { providers: [] });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

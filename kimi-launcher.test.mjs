@@ -1,9 +1,13 @@
 // Kimi launcher tests. Same injected-dependency pattern as launcher.test.mjs:
 // ZERO real spawn, ZERO real relay, ZERO real credentials.
 
-import test from "node:test";
+import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { runKimiLauncher, buildKimiLauncherEnv, buildInstanceId } from "./kimi-launcher.mjs";
+import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { runKimiLauncher, buildKimiLauncherEnv, buildInstanceId, writeKimiConfig } from "./kimi-launcher.mjs";
+import { readSidecar } from "./kimi-merge-config.mjs";
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
 
 // Mirror of kimi-code's parseKimiCodeCustomHeaders (dist/main.mjs): the env
@@ -174,3 +178,54 @@ test("runKimiLauncher works without a session tracker (older relay handles)", as
   assert.equal(code, 3);
   assert.equal(state.closed, true);
 });
+
+describe("writeKimiConfig", () => {
+  function channelStore() {
+    return {
+      version: 2,
+      providers: {
+        "poke-api": {
+          displayName: "Poke API",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke-api.dpapi",
+          models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+        },
+      },
+    };
+  }
+
+  it("reports a no-op when the store has no channels and nothing was managed before", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kimi-write-"));
+    try {
+      const result = await writeKimiConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "config.toml"));
+      assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
+      assert.equal(existsSync(join(dir, "config.toml")), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the managed block after the last channel is deleted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "kimi-write-"));
+    try {
+      const configPath = join(dir, "config.toml");
+      const first = await writeKimiConfig(channelStore(), 47821, "tok", dir, configPath);
+      assert.equal(first.ok, true);
+      assert.equal(first.unchanged, false);
+      assert.match(readFileSync(configPath, "utf8"), /_poke-api/);
+      assert.deepEqual(readSidecar(dir), { providers: ["poke-api"] });
+
+      // 渠道删空：sidecar 还记着上一轮托管过什么，所以这一轮不能早退——
+      // 必须走完合并把 config.toml 里的托管块清掉，否则脏模型列表永久残留。
+      const emptied = await writeKimiConfig({ version: 2, providers: {} }, 47821, "tok", dir, configPath);
+      assert.equal(emptied.ok, true);
+      assert.equal(emptied.unchanged, false, "the stale managed block must be rewritten, not skipped");
+      assert.doesNotMatch(readFileSync(configPath, "utf8"), /_poke-api/);
+      assert.deepEqual(readSidecar(dir), { providers: [] });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+

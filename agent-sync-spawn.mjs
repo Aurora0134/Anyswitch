@@ -9,6 +9,10 @@
 import { spawn } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+// Single source of truth for the machine-readable summary marker: the runner
+// prints one such line per sync for the panel to parse. It carries endpoint
+// names and counts, not prose, so the mirror below keeps it out of log views.
+import { SYNC_RESULT_PREFIX } from "./agent-sync.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const AGENT_SYNC_RUN_SCRIPT = join(here, "agent-sync-run.mjs");
@@ -57,7 +61,8 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000 }) {
     child.on("close", (code) => {
       clearTimeout(timer);
       const lines = (text) => text.trim().split(/\r?\n/).filter(Boolean);
-      for (const line of lines(stdout)) logger?.info?.(line);
+      const humanLines = (text) => lines(text).filter((line) => !line.includes(SYNC_RESULT_PREFIX));
+      for (const line of humanLines(stdout)) logger?.info?.(line);
       if (code !== 0) {
         for (const line of lines(stderr)) logger?.warn?.(line);
       }

@@ -100,6 +100,18 @@ describe("buildQoderProviders", () => {
     assert.equal(poke.model, poke.models[0].model);
   });
 
+  it("writes every model even when a channel has more than 32 — no truncation", () => {
+    const models = {};
+    for (let i = 1; i <= 40; i += 1) models[`model-${i}`] = { displayName: `Model ${i}` };
+    const providers = { "big-channel": { models } };
+    const map = buildQoderProviders(providers, PORT, TOKEN);
+    const conn = map[managedConnectionId("big-channel")];
+    // 一个都不许丢：截断会让第 33 个起的模型从 Qoder 选择器里静默消失
+    assert.equal(conn.models.length, 40);
+    assert.equal(conn.models[0].model, "model-1");
+    assert.equal(conn.models[39].model, "model-40");
+  });
+
   it("emits the full model entry shape including capabilities/thinking", () => {
     const providers = {
       "test-p": {

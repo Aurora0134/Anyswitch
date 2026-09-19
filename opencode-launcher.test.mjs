@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { readSidecar } from "./opencode-merge-config.mjs";
 import {
   buildInstanceId,
   buildOpencodeLauncherEnv,
@@ -372,6 +373,29 @@ describe("writeOpencodeConfig", () => {
       assert.equal(result.unchanged, true);
       assert.match(result.reason, /refusing to overwrite unparseable opencode config/);
       assert.equal(readFileSync(configPath, "utf8"), bad);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the managed providers after the last channel is deleted", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opencode-write-cleanup-"));
+    try {
+      const configPath = join(root, "opencode.json");
+      const first = await writeOpencodeConfig(pooledStore(), 47821, root, configPath);
+      assert.equal(first.ok, true);
+      assert.equal(first.unchanged, false);
+      const written = JSON.parse(readFileSync(configPath, "utf8"));
+      assert.deepEqual(Object.keys(written.provider).sort(), ["gamma", "pool-ab"]);
+      assert.deepEqual(readSidecar(root), { providers: ["gamma", "pool-ab"] });
+
+      // 渠道删空：sidecar 记着上一轮托管过什么，所以这一轮不能早退——必须
+      // 走完合并把 opencode.json 里的托管渠道删掉，否则脏模型列表永久残留。
+      const emptied = await writeOpencodeConfig({ version: 2, providers: {} }, 47821, root, configPath);
+      assert.equal(emptied.ok, true);
+      assert.equal(emptied.unchanged, false, "the stale managed channels must be rewritten away, not skipped");
+      assert.deepEqual(Object.keys(JSON.parse(readFileSync(configPath, "utf8")).provider), []);
+      assert.deepEqual(readSidecar(root), { providers: [] });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
