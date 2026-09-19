@@ -1186,6 +1186,117 @@ describe("createSkillsService.importPickedSkill", () => {
   });
 });
 
+// 配置过但目录已消失（被移动/删除）的守卫：写/扫仓库类操作拒绝且零磁盘变动，
+// 不得在旧路径原位重建目录；undeploy（只删链接）豁免；空仓库仍可收编。
+describe("createSkillsService invalid-repo guard", () => {
+  it("refuses merge/import when the configured repo dir has vanished, touching nothing", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const local = join(home, ".claude", "skills", "local-gem");
+      writeSkill(local, { name: "local-gem" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+      const calls = [];
+      const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle(calls) });
+      svc.setRepoPath(repo);
+      // 模拟仓库目录被移走
+      rmSync(repo, { recursive: true, force: true });
+
+      await assert.rejects(
+        svc.mergeLocalSkill({ endpointId: "claude", skillName: "local-gem" }),
+        /主仓库目录已不存在/,
+      );
+      assert.equal(existsSync(repo), false, "旧路径不得被原位重建");
+      assert.equal(lstatSync(local).isSymbolicLink(), false, "本地目录仍是实体目录");
+      assert.equal(calls.length, 0, "没有任何目录进回收站");
+
+      // 路径导入同样在守卫处拒绝，不创建目标
+      await assert.rejects(svc.importSkill(local), /主仓库目录已不存在/);
+      assert.equal(existsSync(repo), false);
+      assert.equal(calls.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("refuses importPickedSkill before the dialog opens when the repo dir has vanished", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const { base, csc64 } = pickerFixture(dir);
+      const picker = fakeSpawn(pickerHandler(csc64, `PICKED:${join(dir, "picked-skill")}\r\n`));
+      const svc = createSkillsService({
+        homeDir: join(dir, "home"),
+        base,
+        spawnFn: picker.spawnFn,
+        recycleDirFn: mockRecycle([]),
+      });
+      svc.setRepoPath(repo);
+      rmSync(repo, { recursive: true, force: true });
+
+      await assert.rejects(svc.importPickedSkill(), /主仓库目录已不存在/);
+      assert.equal(picker.calls.length, 0, "选择框根本不该弹出");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("still adopts into an existing-but-empty repo (the panel can legally empty it)", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+      const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      svc.setRepoPath(repo);
+      // 面板把仓库删空是合法状态：删除不查空，重设才拒收空目录——
+      // 守卫必须只要求目录存在，否则空仓库后用户陷入既不能收编也不能重设的死局
+      await svc.deleteRepoSkill("skill-a");
+      assert.equal(existsSync(join(repo, "skill-a")), false);
+
+      const local = join(home, ".claude", "skills", "local-gem");
+      writeSkill(local, { name: "local-gem" });
+      const r = await svc.mergeLocalSkill({ endpointId: "claude", skillName: "local-gem" });
+      assert.equal(r.ok, true);
+      assert.ok(existsSync(join(repo, "local-gem", "SKILL.md")), "adopted into the emptied repo");
+      assert.equal(lstatSync(local).isSymbolicLink(), true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("swaps the deploy error to the invalid-repo hint, while undeploy keeps working", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+      const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      svc.setRepoPath(repo);
+      const r = await svc.deploy({ endpointId: "kimi", skillName: "skill-a" });
+      assert.equal(r.ok, true);
+      const linkPath = join(home, ".kimi-code", "skills", "skill-a");
+
+      rmSync(repo, { recursive: true, force: true });
+      // 扫仓库类操作换上准确的失效提示（旧行为是误导性的「repo 中不存在 skill」）
+      await assert.rejects(svc.deploy({ endpointId: "claude", skillName: "skill-a" }), /主仓库目录已不存在/);
+      // diffLocalSkill 是同步方法：守卫同步抛错，用 throws 断言
+      assert.throws(() => svc.diffLocalSkill({ endpointId: "claude", skillName: "skill-a" }), /主仓库目录已不存在/);
+      // undeploy 只删链接，仓库没了也照常工作（失效链接必须仍可清理）
+      const u = await svc.undeploy({ endpointId: "kimi", skillName: "skill-a" });
+      assert.equal(u.ok, true);
+      assert.equal(existsSync(linkPath), false, "junction removed");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("endpoint registry", () => {
   it("maps all nine endpoints under the given home", () => {
     const endpoints = listEndpoints("C:\\fakehome");
