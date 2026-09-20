@@ -241,10 +241,26 @@ async function api(method, path, body) {
   // ═══════════════════════════════════════════════
   // 初始化与轮询
   // ═══════════════════════════════════════════════
+  // 左上品牌版本徽标：版本只有一处来源——package.json 经 /api/app-info 下发，
+  // 页面里不写死版本号（写死就得每次发版记得手改，漏改即显示过期版本）。
+  // 取不到就保持隐藏：宁可没有徽标，也不显示占位符或可能过期的数字。
+  async function initBrandVersion() {
+    const tag = $("brandVersion");
+    if (!tag) return;
+    try {
+      const info = await api("GET", "/api/app-info");
+      const version = info && typeof info.version === "string" ? info.version.trim() : "";
+      if (!version) return;
+      tag.textContent = "v" + version;
+      tag.hidden = false;
+    } catch { /* 接口不可达（面板服务换新中）：不显示版本，不进控制台噪音 */ }
+  }
+
   let startupViewReady = Promise.resolve();
   async function init() {
     initTheme();
     initStylePicker();
+    initBrandVersion();
     initSettingsView();
     initRelayControls();
     initSkillsTab();
