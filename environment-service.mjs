@@ -50,7 +50,7 @@ export function probeExecutableVersion(path, { exec = execFile, timeoutMs = 5000
 
 const CLIENTS = [
   ["claude", "Claude Code", resolveClaudeExecutable],
-  ["codex", "Codex CLI", resolveCodexExecutable],
+  ["codex", "Codex", resolveCodexExecutable],
   ["opencode", "OpenCode", resolveOpencodeExecutable],
   ["pi", "Pi", resolvePiExecutable],
   ["kimi", "Kimi Code", resolveKimiExecutable],
