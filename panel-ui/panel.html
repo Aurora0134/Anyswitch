@@ -7,18 +7,20 @@
 <title>Anyswitch · 实时监测与状态看板</title>
 <link rel="stylesheet" href="/panel/assets/panel.css">
 <script>
-// 面板主题——绘制前恢复本机选择的风格，避免刷新时闪经典样式
-// 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 已退役不可选：
-// 历史存档一律回落经典并改写存档，避免残留已删样式
+// 面板主题——绘制前恢复本机选择的主题，避免刷新时先闪过默认的 SaaS 主题
+// 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 等历史主题已退役不可选：
+// 缺失、空值或任何非法存档一律回落 SaaS 并改写存档，避免残留已删样式
+// 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）
+var PANEL_STYLES = ["saas", "aurora", "sepia"];
+var panelStyleRaw = null;
 try {
-  var panelStyle = localStorage.getItem("panel-style") || "";
-  if (panelStyle === "neon" || panelStyle === "industrial" || panelStyle === "editorial") {
-    panelStyle = "";
-    localStorage.setItem("panel-style", "");
-  }
-  if (panelStyle) document.documentElement.setAttribute("data-style", panelStyle);
-  else document.documentElement.removeAttribute("data-style");
+  panelStyleRaw = localStorage.getItem("panel-style");
 } catch (e) {}
+var panelStyle = PANEL_STYLES.indexOf(panelStyleRaw) >= 0 ? panelStyleRaw : "saas";
+if (panelStyleRaw !== panelStyle) {
+  try { localStorage.setItem("panel-style", panelStyle); } catch (e) {}
+}
+document.documentElement.setAttribute("data-style", panelStyle);
 try {
   var panelTheme = localStorage.getItem("panel-theme");
   if (panelTheme === "light" || panelTheme === "dark") document.documentElement.setAttribute("data-theme", panelTheme);
@@ -1678,10 +1680,8 @@ if (window.panelStartupController) panelStartupPlay();
       <p class="settings-theme-desc">点选主题即时生效并记住选择；亮暗模式由右上角按钮单独控制。</p>
       <div class="settings-theme-grid">
         <div class="settings-theme-list" id="stylePicker" role="radiogroup" aria-label="主题">
-          <button type="button" class="settings-theme-item" data-style="" role="radio" aria-checked="true">经典</button>
-          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="false">SaaS</button>
+          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">SaaS</button>
           <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">极光</button>
-          <button type="button" class="settings-theme-item" data-style="blueprint" role="radio" aria-checked="false">蓝图</button>
           <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">暖纸</button>
         </div>
         <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS

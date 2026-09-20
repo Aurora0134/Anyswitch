@@ -6,11 +6,11 @@
    仅换肤：不改 DOM、不改文案、不动 .view-tabs / .seg-control 几何。
 
    布局级覆盖清单（契约放宽项，全部 scoped 于本主题选择器下）：
-   1. --radius-sm/md/lg 放大至 10/14/20（经典基准 6/8/12）；
+   1. --radius-sm/md/lg 放大至 10/14/20（基座基准 6/8/12）；
    2. .badge / .toast / .brand-text .version-tag / .meta-pill / .tag-bubble
       胶囊化（border-radius: 999px）；
    3. 辉光阴影：--accent-glow、卡片 hover、暗色 .log-console 外发光，
-      box-shadow 偏移/扩散大于经典基准（不占布局空间）；
+      box-shadow 偏移/扩散大于基座基准（不占布局空间）；
    4. letter-spacing 微调：.badge +0.02em、.telemetry-num -0.03em、
       .telemetry-label +0.05em、footer +0.04em；
    5. header 底部 1px 分隔线由实色边框换成极光渐变 hairline
@@ -491,7 +491,7 @@
   filter: brightness(1.15);
 }
 
-/* 状态灯：辉光略强于经典基准（6px→7px），点到为止不晃眼 */
+/* 状态灯：辉光略强于基座基准（6px→7px），点到为止不晃眼 */
 :root[data-style="aurora"] .lamp-green { box-shadow: 0 0 7px var(--ok); }
 :root[data-style="aurora"] .lamp-yellow { box-shadow: 0 0 7px var(--warn); }
 :root[data-style="aurora"] .lamp-red { box-shadow: 0 0 7px var(--danger); }
