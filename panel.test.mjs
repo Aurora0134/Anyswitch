@@ -3080,8 +3080,7 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
       "卡头走同源胶囊列表（虚拟 auto 已被过滤）");
   });
 
-  it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {
-    const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
+  it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {    const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "claudeAggregateMetrics exists in panel.js");
     assert.ok(m[1].includes("tokens.prompt += tk.prompt || 0;"), "tokens 累加");
     assert.ok(m[1].includes("totalRequests += s.requests || 0;"), "请求数累加");
@@ -3089,6 +3088,30 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
     assert.ok(m[1].includes("if (typeof s.tps === \"number\" && s.tps > 0) tpsSum += s.tps;"), "tps 为各会话之和");
     assert.ok(m[1].includes("tokens.cached / tokens.prompt"), "缓存命中率按 prompt 加权");
     assert.ok(m[1].includes("(seen || 0) >= ttftSeen"), "TTFT 取最近有活动的会话");
+  });
+
+  it("看板 claude 头像方砖：亮色品牌橙描边 + 淡橙打底，暗色两段回退深棕砖", () => {
+    // 方块来自 panel.html 内联 var()，值由 panel.css 三段 token 提供：亮色段=淡橙底+
+    // 品牌橙边；显式 dark 与跟随系统 dark 两段都回退为原来的 #2b1810/#542c1b。
+    // 三段缺一，暗底就会留下亮色淡橙（或反之），四个主题共用同一组值。
+    const inline = /<div class="agent-avatar" style="background:var\(--cc-avatar-bg\); border:1px solid var\(--cc-avatar-border\);">/;
+    assert.ok(inline.test(panelHtml), "claude 头像方砖走 --cc-avatar-* token（非写死色值）");
+    assert.ok(!panelHtml.includes("background:#2b1810"), "写死的深棕底已交还 token，否则内联样式会盖住亮色值");
+    const roots = panelCss.match(/:root([^{]*)\{([\s\S]*?)\n  \}/g) || [];
+    const tokensOf = (sel) => {
+      const block = roots.find((b) => b.startsWith(sel));
+      return block ? { bg: /--cc-avatar-bg:\s*([^;]+);/.exec(block)?.[1], border: /--cc-avatar-border:\s*([^;]+);/.exec(block)?.[1] } : null;
+    };
+    const light = tokensOf(":root {") ?? tokensOf(":root{");
+    assert.deepEqual(light && { bg: light.bg?.trim(), border: light.border?.trim() },
+      { bg: "#ffedd5", border: "var(--ep-claude)" }, "亮色段=淡橙底 + 品牌橙描边");
+    assert.equal((panelCss.match(/--cc-avatar-bg:\s*#2b1810;/g) || []).length, 2,
+      "暗色两段（显式 dark 与跟随系统）各回退一次深棕底");
+    assert.equal((panelCss.match(/--cc-avatar-border:\s*#542c1b;/g) || []).length, 2,
+      "暗色两段各回退一次深棕描边");
+    const dark = panelCss.slice(panelCss.indexOf(':root[data-theme="dark"] {'), panelCss.indexOf('@media (prefers-color-scheme: dark)'));
+    assert.ok(/--cc-avatar-bg:\s*#2b1810;/.test(dark) && /--cc-avatar-border:\s*#542c1b;/.test(dark),
+      "显式暗色段带完整回退值");
   });
 });
 

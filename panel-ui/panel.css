@@ -66,6 +66,12 @@
     /* 圆点内描边：亮底用深环托住白点，暗底用浅环托住黑点 */
     --ep-ring: rgba(15, 23, 42, 0.28);
 
+    /* Claude Code 头像方砖：亮色下换品牌橙描边 + 淡橙打底（与设置页抗截断的
+       启用态同观感）。看板 / 抗截断 / 关于页三处是同一颗头像节点的克隆，故走
+       token 而非内联样式——三处一致，且暗色段可整块翻回原来的深棕砖。 */
+    --cc-avatar-bg: #ffedd5;
+    --cc-avatar-border: var(--ep-claude);
+
     /* 渠道列表拖拽重排：随 --accent 自适应亮暗，各皮肤段可覆盖质感 */
     --store-drag-accent: var(--accent);
     --store-drag-glow: 0 2px 14px color-mix(in srgb, var(--store-drag-accent) 32%, transparent);
@@ -133,6 +139,10 @@
     --ep-grok: #a1a1aa;
     --ep-ring: rgba(248, 250, 252, 0.55);
 
+    /* Claude Code 头像方砖：暗底保持原有深棕砖（亮色的淡橙底在暗底会晃眼） */
+    --cc-avatar-bg: #2b1810;
+    --cc-avatar-border: #542c1b;
+
     --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
     --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.45), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
     --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.55), 0 2px 4px -2px rgba(0, 0, 0, 0.4);
@@ -182,6 +192,10 @@
       --spark-line: #60a5fa;
       --spark-fill: rgba(96, 165, 250, 0.18);
       --danger-glow: rgba(239, 68, 68, 0.32);
+
+      /* 与显式 dark 段一致：跟随系统的暗色下同样翻回深棕砖 */
+      --cc-avatar-bg: #2b1810;
+      --cc-avatar-border: #542c1b;
 
       --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.35);
       --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.45), 0 1px 2px -1px rgba(0, 0, 0, 0.35);
