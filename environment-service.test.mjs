@@ -107,6 +107,44 @@ function installation(state, id, index = 0) {
   return state.clients.find((client) => client.id === id).installations[index];
 }
 
+test("Qoder reads its version from the newest installed payload, not the stale install root", async (t) => {
+  const f = fixture(t);
+  const installRoot = join(f.base.LOCALAPPDATA, "Programs/Qoder");
+  const executable = f.put(join(installRoot, "Qoder.exe"));
+  asarPackage(f, executable, "qoder", "0.1.3");
+  const service = f.service();
+  const rootOnly = installation(await service.getState(), "qoder");
+  assert.equal(rootOnly.path, executable);
+  assert.equal(rootOnly.version, "0.1.3");
+  for (const version of ["0.2.9", "0.2.10", "0.3.4"]) {
+    const payload = join(installRoot, ".qoder-versions", version, "Qoder.exe");
+    f.put(payload);
+    asarPackage(f, payload, "qoder", version);
+  }
+  f.put(join(installRoot, ".qoder-versions/0.4.0/Qoder.exe"));
+  f.put(join(installRoot, ".qoder-versions/pending/Qoder.exe"));
+  const item = installation(await service.getState({ force: true }), "qoder");
+  assert.equal(item.status, "found");
+  assert.equal(item.path, join(installRoot, ".qoder-versions/0.3.4/Qoder.exe"));
+  assert.equal(item.version, "0.3.4");
+  assert.equal(item.versionSource, "app.asar/package.json");
+  assert.equal(item.issue, null);
+});
+
+test("An unreadable newest payload is reported as unreadable, never as the stale install root version", async (t) => {
+  const f = fixture(t);
+  const installRoot = join(f.base.LOCALAPPDATA, "Programs/Qoder");
+  asarPackage(f, f.put(join(installRoot, "Qoder.exe")), "qoder", "0.1.3");
+  const payload = join(installRoot, ".qoder-versions/0.3.4/Qoder.exe");
+  f.put(payload);
+  f.put(join(installRoot, ".qoder-versions/0.3.4/resources/app.asar"), "garbage long enough to attempt a header read from");
+  const item = installation(await f.service().getState(), "qoder");
+  assert.equal(item.status, "found");
+  assert.equal(item.path, payload);
+  assert.equal(item.version, null);
+  assert.equal(item.issue, "version_unavailable");
+});
+
 test("Codex reads its version from the CLI's own report and flags an unresponsive install", async (t) => {
   const f = fixture(t);
   const exe = f.put(join(f.base.LOCALAPPDATA, "OpenAI/Codex/bin/9f1c/codex.exe"));
