@@ -768,3 +768,55 @@ describe("uniqueMemberId", () => {
     assert.equal(uniqueMemberId(taken, "pool-x/m2", "model-p"), "pool-x/m2");
   });
 });
+
+describe("按失败率降级（chain 降级门控的第二条判据）", () => {
+  const gateStore = {
+    routingChains: {
+      zcode: { chain: [{ node: "chan-a", model: "model-a" }, { node: "chan-b", model: "model-b" }] },
+    },
+  };
+  const lampsOf = (state) =>
+    buildChainRuntime(gateStore, [{ positions: state.snapshot(), nodes: state.nodeStats() }]).endpoints.zcode.lamps;
+
+  // 同一条渠道交替成败：连续失败计数每次都被上一次成功清零，因而
+  // 「连续 N 次」判据永不触发——正是失败率门要覆盖的形状。
+  const alternate = (state, rounds) => {
+    for (let i = 0; i < rounds; i += 1) {
+      state.noteFailure("zcode", "chan-a", "model-a");
+      state.noteSuccess("zcode", "chan-a", "model-a", T0 + i);
+    }
+  };
+
+  it("门关闭（含缺省）时交替失败不降级，与门引入前一致", () => {
+    const plain = createChainState();
+    alternate(plain, 6);
+    assert.equal(plain.consecutive("chan-a", "model-a"), 0);
+    assert.deepEqual(lampsOf(plain), ["green", "gray"]);
+
+    const off = createChainState({ getFailureRateGate: () => ({ enabled: false, samples: 4, failPercent: 50 }) });
+    alternate(off, 6);
+    assert.deepEqual(lampsOf(off), ["green", "gray"]);
+  });
+
+  it("门开启后同一形状锁死该节点，链可越过它", () => {
+    const on = createChainState({ getFailureRateGate: () => ({ enabled: true, samples: 4, failPercent: 50 }) });
+    alternate(on, 3);
+    assert.deepEqual(lampsOf(on), ["red", "gray"], "最近 4 次里 2 次失败 = 50%，达阈值");
+    assert.equal(on.consecutive("chan-a", "model-a"), 0, "连续失败计数照旧，锁死来自失败率");
+  });
+
+  it("门开启但未达阈值不锁", () => {
+    const strict = createChainState({ getFailureRateGate: () => ({ enabled: true, samples: 4, failPercent: 75 }) });
+    alternate(strict, 3);
+    assert.deepEqual(lampsOf(strict), ["green", "gray"]);
+  });
+
+  it("nodeStats 带出锁死位，旧 dump（无该字段）仍按连续失败判红", () => {
+    const on = createChainState({ getFailureRateGate: () => ({ enabled: true, samples: 4, failPercent: 50 }) });
+    alternate(on, 2);
+    const stats = on.nodeStats();
+    assert.equal(stats.find((n) => n.node === "chan-a").latched, true);
+    const legacy = buildChainRuntime(gateStore, [{ positions: [], nodes: [{ node: "chan-a", model: "model-a", failures: 2 }] }]);
+    assert.deepEqual(legacy.endpoints.zcode.lamps, ["red", "gray"]);
+  });
+});

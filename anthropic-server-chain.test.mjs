@@ -810,4 +810,25 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
     const headStat = runtime.nodes.find((n) => n.node === "chan-a");
     assert.ok(headStat.failures >= 2, "chan-a 的连续失败计入节点成败（链灯数据源）");
   });
+
+  it("(auto) 链尾节点的终端失败同样计入 chainRuntime", async () => {
+    // 降级计数原先只在"节点被越过"时触发：作为链尾的 chan-b 永远不会被越过，
+    // 于是一次次失败却从不进计数——链灯不亮红、快照里干脆没有它的条目。
+    const { upstreamFetch } = memberRouter({
+      "chan-a": () => statusError(503),
+      "chan-b": () => statusError(503),
+    });
+    const { deps, posted } = reporterDeps({ upstreamFetch, store: STORE_AB });
+    await withPerLaunch(deps, async (port) => {
+      for (let i = 0; i < 2; i += 1) {
+        const res = await postMessages(port, { model: "auto", stream: false });
+        assert.equal(res.status, 503, "全链失败按末位节点的状态收尾");
+        await res.json();
+      }
+    });
+    const runtime = posted.map((p) => p.chainRuntime).filter(Boolean).pop();
+    assert.ok(runtime, "server.mjs 已把 handler 的 chainState 接进 reporter");
+    const tailStat = runtime.nodes.find((n) => n.node === "chan-b");
+    assert.ok(tailStat && tailStat.failures >= 2, "链尾 chan-b 的失败必须进节点成败计数");
+  });
 });

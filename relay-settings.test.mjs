@@ -10,10 +10,54 @@ import {
   resolveKeepAliveEnabled,
   parseSparkWindowPoints,
   parseInjectThinkingEffort,
+  parseFailureRateGate,
+  failureRateLatched,
   DEFAULT_INJECT_THINKING_EFFORT,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
+
+describe("按失败率降级（failureRateGate）", () => {
+  it("缺省即关闭，越界夹取而非原样接受", () => {
+    assert.deepEqual(parseFailureRateGate(undefined), { enabled: false, samples: 10, failPercent: 60 });
+    assert.deepEqual(parseFailureRateGate(null), { enabled: false, samples: 10, failPercent: 60 });
+    assert.deepEqual(
+      parseFailureRateGate({ enabled: true, samples: 9999, failPercent: 9999 }),
+      { enabled: true, samples: 50, failPercent: 100 },
+    );
+    assert.equal(parseFailureRateGate({ samples: 1 }).samples, 10, "低于样本下限回落默认");
+    assert.equal(parseFailureRateGate({ failPercent: "75" }).failPercent, 75);
+    assert.equal(parseFailureRateGate({ enabled: "yes" }).enabled, false, "非布尔不改写开关");
+  });
+
+  it("failureRateLatched：窗口未满不判定，达标才锁", () => {
+    const gate = { enabled: true, samples: 4, failPercent: 50 };
+    assert.equal(failureRateLatched(gate, [false, false, false]), false, "样本不足不判定");
+    assert.equal(failureRateLatched(gate, [true, false, true, false]), true, "50% 达阈值");
+    assert.equal(failureRateLatched(gate, [true, true, true, false]), false, "25% 未达阈值");
+    assert.equal(failureRateLatched(gate, [true, true, true, true, false, false]), true, "只看最近 4 次");
+    assert.equal(failureRateLatched({ ...gate, enabled: false }, [false, false, false, false]), false,
+      "关闭时无论失败率多高都不锁（保持原语义）");
+    assert.equal(failureRateLatched(gate, undefined), false, "无样本不锁");
+  });
+
+  it("saveSettings 逐字段合并该设置并回读", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-rate-"));
+    const path = join(tmp, "settings.json");
+    try {
+      assert.deepEqual(loadSettings(path, {}).failureRateGate, { enabled: false, samples: 10, failPercent: 60 });
+      const on = saveSettings(path, { failureRateGate: { enabled: true } }, {});
+      assert.equal(on.failureRateGate.enabled, true);
+      assert.equal(on.failureRateGate.samples, 10, "只改开关不得重置已存数值");
+      const numbers = saveSettings(path, { failureRateGate: { samples: 20, failPercent: 45 } }, {});
+      assert.equal(numbers.failureRateGate.enabled, true, "未提及的开关保持原状");
+      assert.equal(numbers.failureRateGate.samples, 20);
+      assert.equal(loadSettings(path, {}).settings.failureRateGate.failPercent, 45);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("relay-settings", () => {
   it("uses default enabled=true when no config exists", () => {
