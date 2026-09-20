@@ -114,6 +114,7 @@ function createResidentDeps(options = {}) {
     readGeneration: claudeDeps.readGeneration,
     effortInjector: claudeDeps.effortInjector,
     getKeepAliveConfig: options.getKeepAliveConfig ?? claudeDeps.getKeepAliveConfig,
+    getFailureRateConfig: options.getFailureRateConfig ?? claudeDeps.getFailureRateConfig,
     socketOwner,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, hostKind: "relay-host" }),
     metricsCollector,

@@ -418,12 +418,19 @@ export async function pipeGuardedStream(res, upstreamBody, { format, wireId, res
 //                                        plans keep other 4xx terminal.
 //   onMemberSuccess(member)           -> pool routing: a member's stream
 //                                        completed ok (sticky-table update)
-//   onMemberFailover(member, reason)  -> optional: a member's failure actually
-//                                        advanced to the next member. Chain
-//                                        plans use it to feed the node-level
-//                                        failure counter that gates demotion
-//                                        (只计真正切换的失败，最后一个成员的
-//                                        终端失败不在此列).
+//   onMemberFault(member, reason)     -> optional: this member's attempt failed
+//                                        definitively for this request, whether
+//                                        or not the request then advanced to the
+//                                        next member. The plan's demotion
+//                                        counters count exactly this. (The
+//                                        hook used to fire only when a member
+//                                        was crossed, which left the chain tail
+//                                        and every single-member pool
+//                                        permanently uncounted — 面板不亮红却
+//                                        持续 502.) Never fires for a
+//                                        request-shaped status (shouldFailover
+//                                        false) nor after the client walked
+//                                        away.
 //   memberNoun                        -> failover-log noun fallback (default
 //                                        "pool member"); callUpstreams entries
 //                                        may carry their own — chain plans tag
@@ -473,9 +480,9 @@ export async function runStreamWithKeepAlive(res, channel) {
   // A member's definitive failure before the last member: count the failed
   // attempt against the actual member and log the failover, then advance.
   const noteMemberFailover = (member, reason, usage) => {
+    channel.onMemberFault?.(member, reason);
     tracker?.recordRetry?.({ reason, memberId: member.memberId ?? undefined, usage });
     logger?.warn?.(`keep-alive: ${logLabel} failing over from ${member.memberNoun ?? channel.memberNoun ?? "pool member"} "${member.memberId}" (${reason})`);
-    channel.onMemberFailover?.(member, reason);
   };
 
   for (let memberIndex = 0; memberIndex < callUpstreams.length; memberIndex += 1) {
@@ -539,7 +546,13 @@ export async function runStreamWithKeepAlive(res, channel) {
         // Non-stream or non-2xx status is terminal for the stream handler. A
         // non-stream success (per-launch Anthropic drives those through this
         // loop too) counts for pool stickiness, same as a piped ok stream.
-        if (result.status < 400) channel.onMemberSuccess?.(member);
+        if (result.status < 400) {
+          channel.onMemberSuccess?.(member);
+        } else if (shouldFailover(result)) {
+          // The last callable's channel-level fault: no member is crossed, but
+          // this member did fail the request, so it counts the same way.
+          channel.onMemberFault?.(member, `upstream_${result.status}`);
+        }
         channel.onTerminalResult(result, member);
         return;
       }
@@ -586,10 +599,13 @@ export async function runStreamWithKeepAlive(res, channel) {
 
       // The member's keep-alive budget is spent on a retryable pre-content
       // fault. Pool routing: back off to the next member; the last member
-      // falls out to the exhaustion path below.
+      // falls out to the exhaustion path below, still counting as this
+      // member's failed request (nothing crossed it, but it did fail).
       if (!isLastMember) {
         noteMemberFailover(member, outcome.reason, outcome.usage);
         advanceToNextMember = true;
+      } else {
+        channel.onMemberFault?.(member, outcome.reason);
       }
       break;
     }
@@ -630,7 +646,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
+export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -641,7 +657,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
-    onMemberFailover,
+    onMemberFault,
     logLabel: "request",
     pipe: (result, keepAliveConfig) => {
       const enhanced = keepAliveConfig?.mode === "enhanced";
@@ -745,7 +761,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
 // frame instead of a status line the wire can no longer carry.
 // Pool routing (phase 2): same callUpstreams / shouldFailover /
 // onMemberSuccess contract as the other channels.
-export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover }) {
+export function responsesStreamChannel({ res, tracker, abortController, deps, agentId, responsesCtx, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
   const writeFailedFrame = (message, type) => {
     try {
@@ -764,7 +780,7 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
-    onMemberFailover,
+    onMemberFault,
     logLabel: "responses request",
     pipe: (result, keepAliveConfig) => {
       const enhanced = keepAliveConfig?.mode === "enhanced";
@@ -857,7 +873,7 @@ export function responsesStreamChannel({ res, tracker, abortController, deps, ag
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFailover, name, logLabel, pings, writeFrameWhenHeadersSent }) {
+export function anthropicStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault, name, logLabel, pings, writeFrameWhenHeadersSent }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -868,7 +884,7 @@ export function anthropicStreamChannel({ res, tracker, abortController, deps, ag
     callUpstreams,
     shouldFailover,
     onMemberSuccess,
-    onMemberFailover,
+    onMemberFault,
     logLabel,
     pipe: (result, keepAliveConfig) => {
       const enhanced = keepAliveConfig?.mode === "enhanced";

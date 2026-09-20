@@ -1314,6 +1314,7 @@ export function createPanelRouter({
           settings: loaded.settings,
           keepAlive: loaded.keepAlive,
           sparkWindowPoints: loaded.sparkWindowPoints,
+          failureRateGate: loaded.failureRateGate,
           watchdog,
         });
       } catch (err) {
@@ -1370,6 +1371,7 @@ export function createPanelRouter({
           settings: updated.settings,
           keepAlive: updated.keepAlive,
           sparkWindowPoints: updated.sparkWindowPoints,
+          failureRateGate: updated.failureRateGate,
         });
       } catch (err) {
         return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });

@@ -94,19 +94,22 @@ export function createHandler(deps) {
     readGeneration,
     logger = null,
     effortInjector = null,
+    getFailureRateConfig = null,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
 
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
-  const stickyTable = createStickyTable();
+  // 失败率门（按失败率降级）现读设置：面板改完下一个请求即生效，缺省不注入即关闭。
+  const stickyTable = createStickyTable({ getFailureRateGate: getFailureRateConfig });
 
   // Chain routing (自动路由): endpointId -> last successful chain node. Same
   // process-memory lifetime as the sticky table. 降级锁定时经 logger 落一条
   // 退避日志（常驻模式下经日志桥流进面板「实时输出」）。
   const chainState = createChainState({
     onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
+    getFailureRateGate: getFailureRateConfig,
   });
 
   // Token check happens before the body is parsed.
@@ -397,9 +400,9 @@ export function createHandler(deps) {
         call: (options = {}) => attemptMessages(memberId, provider, body, unpacked.modelId, options),
       })),
       noteSuccess: (memberId) => stickyTable.noteSuccess(unpacked.poolId, unpacked.modelId, memberId),
-      // 成员级请求失败计数（成员切换真正越过该成员时由 server 侧回调）——
-      // 号池粘性位降级门控（失败才降级）的计数来源。成员一次请求至多
-      // failover 一次，无需去重。
+      // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
+      // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
+      // 一个成员在一次请求里至多失败一次，无需去重。
       noteFailure: (memberId) => stickyTable.noteFailure(unpacked.poolId, unpacked.modelId, memberId),
     };
   }
@@ -541,8 +544,8 @@ export function createHandler(deps) {
           stickyTable.noteSuccess(record.poolId, record.model, record.poolMemberId);
         }
       },
-      // 一次请求级节点失败（成员切换真正越过该节点时由 server 侧回调）；
-      // per-request 去重让号池整池耗尽只计一次（请求数口径）。
+      // 一次请求级节点失败（该节点本次请求彻底失败时由 server 侧回调，
+      // 链尾末位同样计入）；per-request 去重让号池整池耗尽只计一次（请求数口径）。
       noteFailure: (memberId) => {
         const record = byMemberId.get(memberId);
         if (record === undefined) return;

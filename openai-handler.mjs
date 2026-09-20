@@ -75,19 +75,22 @@ export function createOpenAIHandler(deps) {
     readGeneration,
     logger = null,
     effortInjector = null,
+    getFailureRateConfig = null,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
 
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
-  const stickyTable = createStickyTable();
+  // 失败率门（按失败率降级）现读设置：面板改完下一个请求即生效，缺省不注入即关闭。
+  const stickyTable = createStickyTable({ getFailureRateGate: getFailureRateConfig });
 
   // Chain routing (自动路由): endpointId (the requesting agent's id) -> the
   // chain node that answered last. Same closure lifetime as stickyTable.
   // 降级锁定时经 logger 落一条退避日志（常驻模式下经日志桥流进面板「实时输出」）。
   const chainState = createChainState({
     onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
+    getFailureRateGate: getFailureRateConfig,
   });
 
   function authorize(headers) {
@@ -392,9 +395,9 @@ export function createOpenAIHandler(deps) {
         call: (options = {}) => attemptChatCompletion(memberId, provider, body, options),
       })),
       noteSuccess: (memberId) => stickyTable.noteSuccess(parsed.providerId, modelId, memberId),
-      // 成员级请求失败计数（成员切换真正越过该成员时由 server 侧回调）——
-      // 号池粘性位降级门控（失败才降级）的计数来源。成员在一次请求里
-      // 至多 failover 一次（keep-alive 重试在成员内部吸收），无需去重。
+      // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
+      // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
+      // 一个成员在一次请求里至多失败一次（keep-alive 重试在成员内部吸收），无需去重。
       noteFailure: (memberId) => stickyTable.noteFailure(parsed.providerId, modelId, memberId),
     };
   }
