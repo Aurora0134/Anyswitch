@@ -1,5 +1,6 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -3802,5 +3803,79 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
     const closeStart = panelJs.indexOf("function closeStoreDiffModal()");
     const close = panelJs.slice(closeStart, panelJs.indexOf("// 刷新：全部刷新", closeStart));
     assert.ok(close.includes("!storeStatusAwaitReturn"), "标记未消费（人未切回）时关弹窗不武装计时");
+  });
+});
+
+describe("panel.html 品牌版本徽标（左上角取真实版本，不写死）", () => {
+  // 徽标文本只有一处来源：package.json 经 /api/app-info 下发。页面里若写死版本号，
+  // 发版升号后徽标不会跟着变，页面上就会显示一个与真实版本不符的数字——这条测试
+  // 同时钉住「有位可填」「取值来源唯一」「取不到不编造」三点。
+  const html = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  const js = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const pkg = JSON.parse(
+    readFileSync(join(dirname(fileURLToPath(import.meta.url)), "package.json"), "utf8"),
+  );
+
+  it("左上角徽标是空位＋隐藏态，不是写死的文字", () => {
+    const tag = html.match(/<span class="version-tag"[^>]*><\/span>/);
+    assert.ok(tag, "版本徽标元素存在");
+    assert.ok(tag[0].includes('id="brandVersion"'), "徽标有可填的 id");
+    assert.ok(/\shidden(\s|>)/.test(tag[0]), "初始隐藏：填不进版本时不留空胶囊");
+    assert.ok(!html.includes("MONITOR"), "写死的 MONITOR 文案已移除");
+    // 版本号不得出现在页面文件里（写死即必然过期）
+    assert.ok(!html.includes(pkg.version), "panel.html 不含写死的版本号");
+    assert.ok(!js.includes(pkg.version), "panel.js 不含写死的版本号");
+  });
+
+  it("init() 接线一次：取值来源是 /api/app-info，显示为 v+版本", async () => {
+    assert.ok(js.includes("initBrandVersion();"), "init() 调用品牌版本装配");
+    const body = js.match(/async function initBrandVersion\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(body, "initBrandVersion found in panel.js");
+    assert.ok(body.includes('api("GET", "/api/app-info")'), "版本取自 app-info 唯一来源");
+    assert.ok(body.includes('"v" + version'), "徽标文本为 v 前缀版本号");
+  });
+
+  async function run(info, { fail = false } = {}) {
+    const body = js.match(/async function initBrandVersion\(\) \{[\s\S]*?\n  \}/)[0];
+    const tag = { textContent: null, hidden: true };
+    const initBrandVersion = await vm.runInNewContext(
+      `(async () => { ${body} ; return initBrandVersion; })()`,
+      {
+        api: async () => { if (fail) throw new Error("HTTP 500"); return info; },
+        $: (id) => (id === "brandVersion" ? tag : null),
+      },
+    );
+    await initBrandVersion();
+    return tag;
+  }
+
+  it("拿到版本：写入 v+版本并取消隐藏", async () => {
+    const tag = await run({ version: "0.5.0-preview" });
+    assert.equal(tag.textContent, "v0.5.0-preview");
+    assert.equal(tag.hidden, false);
+  });
+
+  it("版本号两侧空白被去掉，不出现 v 与数字之间的空格", async () => {
+    const tag = await run({ version: " 1.2.3 " });
+    assert.equal(tag.textContent, "v1.2.3");
+    assert.equal(tag.hidden, false);
+  });
+
+  it("接口失败：保持隐藏，不显示占位或旧版本，也不抛出", async () => {
+    const tag = await run(null, { fail: true });
+    assert.equal(tag.textContent, null);
+    assert.equal(tag.hidden, true);
+  });
+
+  it("响应缺版本字段：保持隐藏，不编造数字", async () => {
+    const tag = await run({ platform: "win32" });
+    assert.equal(tag.textContent, null);
+    assert.equal(tag.hidden, true);
   });
 });

@@ -317,7 +317,7 @@ describe("launcher-only startup screen", () => {
       startStatusPolling: () => new Promise((resolve) => { statusDone = resolve; }),
       requestAnimationFrame: (fn) => fn(),
     };
-    for (const name of ["initTheme", "initStylePicker", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
     const pending = runInNewContext(`${init}; init()`, context);
     await new Promise((resolve) => setImmediate(resolve));
     statusDone();
@@ -340,7 +340,7 @@ describe("launcher-only startup screen", () => {
       requestAnimationFrame: (fn) => fn(),
       playBoardEnter() {},
     };
-    for (const name of ["initTheme", "initStylePicker", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
     await runInNewContext(`${init}; init()`, context);
     assert.equal(typeof controller.onLeave, "function", "重启恢复时入场动画挂到开屏淡出起点");
     assert.equal(context.restartEnterView, null, "标记消费一次即清");
@@ -357,7 +357,7 @@ describe("launcher-only startup screen", () => {
       startStatusPolling: () => Promise.resolve(),
       requestAnimationFrame: (fn) => fn(),
     };
-    for (const name of ["initTheme", "initStylePicker", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
+    for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream"]) context[name] = () => {};
     await runInNewContext(`${init}; init()`, context);
     assert.equal(controller.onLeave, null, "launcher 首开不挂钩子，行为不变");
   });
