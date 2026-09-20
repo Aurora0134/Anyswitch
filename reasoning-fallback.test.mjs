@@ -163,7 +163,11 @@ test("loadPiAiReasoningIndex reads the real installed pi-ai data when present", 
   }
   const glm = index.get("glm-5.2");
   if (glm) {
-    assert.equal(glm.thinkingFormat, "zai");
+    // The real database's values are upstream-owned and drift with each DSH
+    // update (pi-ai 0.85.1 reclassified glm-5.2 zai → qwen), so pin structure,
+    // not values — the layout-move tripwire is the index.size check above.
+    assert.equal(typeof glm.thinkingFormat, "string");
+    assert.ok(glm.thinkingFormat.length > 0, "glm-5.2 entry has a thinking format");
     assert.ok(glm.levels.length > 0);
   }
 });
