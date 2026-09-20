@@ -2118,9 +2118,9 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
     assert.ok(m[1].includes("suppressStoreClick"), "click delegate swallows the click after drag");
   });
 
-  it("5 个皮肤段（默认/saas/aurora/blueprint/sepia）均定义 --store-drag-accent", () => {
-    assert.match(panelCss, /:root \{[\s\S]*?--store-drag-accent:/, "default :root defines --store-drag-accent");
-    for (const skin of ["saas", "aurora", "blueprint", "sepia"]) {
+  it("基础层 + saas/aurora/sepia 三皮肤段均定义 --store-drag-accent", () => {
+    assert.match(panelCss, /:root \{[\s\S]*?--store-drag-accent:/, "base :root defines --store-drag-accent");
+    for (const skin of ["saas", "aurora", "sepia"]) {
       const re = new RegExp(`:root\\[data-style="${skin}"\\] \\{[\\s\\S]*?--store-drag-accent:`);
       assert.ok(re.test(panelCss), `${skin} skin defines --store-drag-accent`);
     }
@@ -2167,9 +2167,6 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
     assert.ok(!ind[1].includes("transition"), "indicator jumps between slots instantly (no glide transition)");
     assert.ok(panelCss.includes(".store-drop-indicator::before"), "left round cap exists");
     assert.ok(panelCss.includes(".store-row-landed"), "landed highlight style exists");
-    const bp = panelCss.match(/:root\[data-style="blueprint"\] \.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
-    assert.ok(bp, "blueprint overrides drop indicator");
-    assert.ok(bp[1].includes("repeating-linear-gradient"), "blueprint indicator is dashed");
   });
 });
 
@@ -2242,7 +2239,7 @@ describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () =>
     assert.ok(m[1].includes('matchMedia("(prefers-reduced-motion: reduce)")'), "matchMedia reduce check");
   });
 
-  it("预设列表复用同款占位/指示线/落位样式（含 blueprint 虚线覆盖）", () => {
+  it("预设列表复用同款占位/指示线/落位样式", () => {
     const drag = panelCss.match(/\.store-row-dragging[^{]*\{([\s\S]*?)\}/);
     assert.ok(drag && drag[0].includes(".preset-row-dragging"), "preset rows share the dragging placeholder style");
     const ind = panelCss.match(/\.store-drop-indicator[^{]*\{([\s\S]*?)\}/);
@@ -2250,7 +2247,6 @@ describe("panel.html 预设列表拖拽重排（与渠道列表同款）", () =>
     assert.ok(/\.store-drop-indicator::before, \.preset-drop-indicator::before \{/.test(panelCss), "preset indicator carries the round cap");
     assert.ok(/\.store-row-landed, \.preset-row-landed \{/.test(panelCss), "preset rows share the landed pulse");
     assert.ok(/#storeList, #presetsList \{ position: relative; \}/.test(panelCss), "preset list is a positioning context for the indicator");
-    assert.ok(/:root\[data-style="blueprint"\] \.preset-drop-indicator/.test(panelCss), "blueprint overrides the preset indicator");
   });
 });
 
@@ -2495,13 +2491,13 @@ describe("panel.html 设置全页视图", () => {
     assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
   });
 
-  it("「主题」子 tab：左栏五项点选即生效，右栏预览为真实看板镜像", () => {
+  it("「主题」子 tab：左栏三项点选即生效，右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
-    const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
-    assert.deepEqual(items.map((m) => [m[1], m[2]]), [
-      ["", "经典"], ["saas", "SaaS"], ["aurora", "极光"], ["blueprint", "蓝图"], ["sepia", "暖纸"],
-    ], "五项主题与样式值一一对应");
+    const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)" role="radio" aria-checked="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
+    assert.deepEqual(items.map((m) => [m[1], m[3], m[2]]), [
+      ["saas", "SaaS", "true"], ["aurora", "极光", "false"], ["sepia", "暖纸", "false"],
+    ], "三项主题与样式值一一对应，SaaS 按钮静态 aria-checked=\"true\"");
     assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
@@ -2525,6 +2521,25 @@ describe("panel.html 设置全页视图", () => {
     const subTab = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
     assert.ok(subTab, "activateSettingsSubTab found in panel.js");
     assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
+  });
+
+  it("主题存档恢复：内联脚本三项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
+    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia"];'),
+      "PANEL_STYLES 恰为 saas/aurora/sepia 三项");
+    assert.ok(panelHtml.includes('? panelStyleRaw : "saas"'),
+      "缺失或非法存档一律回落 \"saas\"");
+    assert.ok(panelHtml.includes("if (panelStyleRaw !== panelStyle)"),
+      "解析结果与原始存档不一致时进入覆写分支");
+    assert.ok(panelHtml.includes('localStorage.setItem("panel-style", panelStyle)'),
+      "覆写 localStorage 存档，避免残留已删样式");
+    assert.ok(panelHtml.includes('document.documentElement.setAttribute("data-style", panelStyle)'),
+      "绘制前无条件写入 data-style");
+    assert.ok(!panelHtml.includes('removeAttribute("data-style")'),
+      "panel.html 无 removeAttribute(\"data-style\") 分支");
+    assert.ok(!panelJs.includes('removeAttribute("data-style")'),
+      "panel.js 无 removeAttribute(\"data-style\") 分支");
+    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia"];'),
+      "panel.js 的 STYLES 数组恰为三项");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置视图不写入 panel-view", () => {
@@ -3139,7 +3154,7 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
   it("看板 claude 头像方砖：亮色品牌橙描边 + 淡橙打底，暗色两段回退深棕砖", () => {
     // 方块来自 panel.html 内联 var()，值由 panel.css 三段 token 提供：亮色段=淡橙底+
     // 品牌橙边；显式 dark 与跟随系统 dark 两段都回退为原来的 #2b1810/#542c1b。
-    // 三段缺一，暗底就会留下亮色淡橙（或反之），四个主题共用同一组值。
+    // 三段缺一，暗底就会留下亮色淡橙（或反之），三套主题共用同一组值。
     const inline = /<div class="agent-avatar" style="background:var\(--cc-avatar-bg\); border:1px solid var\(--cc-avatar-border\);">/;
     assert.ok(inline.test(panelHtml), "claude 头像方砖走 --cc-avatar-* token（非写死色值）");
     assert.ok(!panelHtml.includes("background:#2b1810"), "写死的深棕底已交还 token，否则内联样式会盖住亮色值");

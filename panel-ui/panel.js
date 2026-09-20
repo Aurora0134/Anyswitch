@@ -3150,13 +3150,14 @@ async function api(method, path, body) {
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
-    // 「赛博」(neon) 已退役不可选，CSS 片段已随退役删除。
-    // 「工业+」(industrial) 与「极简」(editorial) 已删除；历史 localStorage
-    // 存档的退役样式由 <head> 恢复脚本兜底回落经典。
-    const STYLES = ["", "saas", "aurora", "blueprint", "sepia"];
+    // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 等历史主题均已退役，
+    // CSS 片段已随退役删除；历史 localStorage 存档的退役样式
+    // 由 <head> 恢复脚本兜底回落 SaaS。
+    // 与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份清单，改动需两侧同步（panel.test.mjs 有同值断言）
+    const STYLES = ["saas", "aurora", "sepia"];
     function currentStyle() {
       const s = document.documentElement.getAttribute("data-style") || "";
-      return STYLES.includes(s) ? s : "";
+      return STYLES.includes(s) ? s : "saas";
     }
     function syncBtns() {
       const cur = currentStyle();
@@ -3165,8 +3166,7 @@ async function api(method, path, body) {
       }
     }
     function setStyle(s) {
-      if (s) document.documentElement.setAttribute("data-style", s);
-      else document.documentElement.removeAttribute("data-style");
+      document.documentElement.setAttribute("data-style", s);
       try { localStorage.setItem("panel-style", s); } catch {}
       syncBtns();
     }

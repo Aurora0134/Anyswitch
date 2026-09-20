@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const root = dirname(fileURLToPath(import.meta.url));
-const SLUGS = ["saas", "aurora", "blueprint", "sepia"];
+const SLUGS = ["saas", "aurora", "sepia"];
 
 function extractBlocks() {
   const css = readFileSync(join(root, "panel-ui", "panel.css"), "utf8").replace(/\r\n/g, "\n");

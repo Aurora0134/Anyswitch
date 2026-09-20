@@ -1,6 +1,6 @@
 # 面板美术风格重构 · 风格片段契约（常驻主题机制）
 
-目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 5 套可切换面板主题（经典 + 4 套风格片段）。
+目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 3 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上。
 **布局、DOM 结构、文案、既有注释一律不动**；只换皮肤。
 
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
@@ -13,9 +13,9 @@
 
 ## 切换机制（集成方实现，片段作者只需了解）
 
-- `<html>` 上新增 `data-style` 属性：缺省 = 当前经典样式；`saas` /
-  `aurora` / `blueprint` / `sepia` = 四套风格。
-  已退役的 `neon` / `industrial` / `editorial` 片段随退役删除，历史存档值回落经典。
+- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` = 三套风格。
+  已退役的 `blueprint` / `neon` / `industrial` / `editorial` 片段随退役删除；
+  存档缺失、空串、上述退役值或任何未知值，首帧一律解析为 `saas` 并覆写存档。
 - 亮暗仍由既有 `data-theme="light|dark"` + `prefers-color-scheme` 决定，与 `data-style` 正交，
   亮暗由右上角按钮独立控制。
 - 设置弹窗「面板主题」栏切换，即时生效，localStorage `panel-style` 记忆在本机。
@@ -40,7 +40,7 @@
 
 ## 必须定义齐全的 token（亮色一套、暗色一套，语义不变只换值）
 
-既有 token（panel.css 开头「基座 token」段有当前经典值可作基准）：
+既有 token（panel.css 开头「基座 token」段的基座默认值可作基准）：
 `--font-sans --font-mono --ease-out`
 `--bg --bg-page --surface --surface-sunken --surface-hover --surface-glass`
 `--text --text-2 --text-3 --text-4`
@@ -53,10 +53,10 @@
 `--spark-line --spark-fill --danger-glow`
 `--shadow-xs --shadow-sm --shadow-md --shadow-lg`
 
-新增 token（集成方会把基础 CSS 改成带经典值兜底的 `var()`，片段只需给值）：
-`--radius-sm --radius-md --radius-lg`（经典基准 6px / 8px / 12px）
-`--accent-gradient`（品牌图标渐变，经典基准 `linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)`）
-`--accent-glow`（品牌图标/强调光晕阴影，经典基准 `0 2px 8px rgba(37, 99, 235, 0.35)`）
+新增 token（集成方会把基础 CSS 改成带基座值兜底的 `var()`，片段只需给值）：
+`--radius-sm --radius-md --radius-lg`（基座基准 6px / 8px / 12px）
+`--accent-gradient`（品牌图标渐变，基座基准 `linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)`）
+`--accent-glow`（品牌图标/强调光晕阴影，基座基准 `0 2px 8px rgba(37, 99, 235, 0.35)`）
 
 ## 红线
 
