@@ -119,9 +119,9 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
 
 ### 关于页的版本来源边界
-- 本地版本来自所选安装的产品资料；唯二例外是 Codex 与 Grok Build——两者都是原生二进制，没有可读的产品版本资源（Codex 的安装目录还是哈希），改由一次带超时、无 shell 的 `<客户端> --version` 自报（`codex --version` / `grok --version`），探测不达时呈现「已安装但无法运行」，文件消失则回落未找到。其余情形不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考。
+- 本地版本来自所选安装的产品资料；唯二例外是 Codex 与 Grok Build——两者都是原生二进制，没有可读的产品版本资源（Codex 的安装目录还是哈希），改由一次带超时、无 shell 的 `<客户端> --version` 自报（`codex --version` / `grok --version`），探测不达时呈现「已安装但无法运行」，文件消失则回落未找到。其余情形不运行客户端的 `--version`，也不以安装证据推断登录或接入状态。Claude Code 的包与 PE 产品版本冲突保留提示；OpenCode 的 Bun 版本不作为产品版本。Kimi Code 的 npm 包与旧 Python `kimi-cli` 分开识别；ZCode 以 ASAR 中的产品版本为准，PE 构建号仅作参考；桌面应用的 ASAR 取实际会运行的那一份安装，Qoder 因此按版本目录取最新（安装根目录那份是首次安装的过期副本，PE 版本信息同样停在旧版，两者都不能作依据）。
 - 官方查询限定产品来源：Claude Code、OpenCode、Pi、Kimi Code、DSH 取对应 npm 包的 `latest`；Codex 查 `openai/codex` 正式 Release；ZCode 查官方 stable manifest；Qoder 查官方桌面清单。Grok Build 既无 npm 包也无 GitHub 版本源、由自带 `grok update` 自更新，因此不参与官方版本查询，也不在面板的安装/更新执行面内。npm `latest` 不等于稳定版，也不代表读取了用户的更新渠道，DSH 等版本中的 `rc` 标识须保留。
-- Qoder 是纯桌面条目：`~/.qoder/entry/qoder.cmd` 是桌面 IDE 随装的命令调度器（`code.cmd` 同构），不是独立安装的 CLI 产品，不作检测对象；包装入口残留而执行体缺失不能报已安装。无法读取本地版本时仍可独立显示官方版本，不能拿目录哈希、运行时版本或另一产品版本代填。
+- Qoder 是纯桌面条目：`~/.qoder/entry/qoder.cmd` 是桌面 IDE 随装的命令调度器（`code.cmd` 同构），不是独立安装的 CLI 产品，不作检测对象；包装入口残留而执行体缺失不能报已安装。Qoder 的每次自更新把整包装进安装根目录下的 `.qoder-versions/<版本>/`，安装根目录那份 ASAR 从此停在首次安装的版本，因此本地版本取版本目录里版本号最大、且执行体与 ASAR 都在的那一份安装，呈现的路径与版本都来自它；那份 ASAR 读不出产品版本时呈现「版本无法读取」，不回落安装根目录的旧版本，也不拿目录哈希、运行时版本或另一产品版本代填。没有版本目录的安装（含 ZCode 这类原地安装的桌面应用）仍读安装根目录 ASAR。无法读取本地版本时仍可独立显示官方版本。
 - 关于页只查版本并链接真实发布说明，不下载替换程序、不安装或升级客户端。查询不携带用户认证和设备标识；接口只接受白名单客户端和刷新参数，不接受任意 URL、路径或命令。
 
 ### 客户端集成

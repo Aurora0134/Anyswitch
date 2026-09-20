@@ -6,6 +6,7 @@ import {
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable,
 } from "./agent-discovery.mjs";
+import { compareVersions, parseVersion } from "./version-check.mjs";
 
 // Qoder is a desktop-only client here: ~/.qoder/entry/qoder.cmd is the IDE's
 // own command dispatcher (the `code.cmd`-style shim the IDE installer drops),
@@ -94,9 +95,35 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     return match ? resolve(dirname(path), match[1].replace(/[\\/]/g, "/")) : null;
   }
 
-  function desktopVersion(id, executable) {
-    const path = join(dirname(executable), "resources/app.asar");
-    if (!isFile(path)) return null;
+  // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
+  // and never rewrites the install root, whose app.asar keeps reporting the first
+  // installed version. The newest payload carrying both its executable and its
+  // app.asar is the one that runs.
+  function desktopPayloads(id, executable) {
+    const root = join(dirname(executable), `.${id}-versions`);
+    let entries;
+    try {
+      entries = io.readdirSync(root);
+    } catch (error) {
+      if (missing(error)) return [];
+      throw error;
+    }
+    return entries.filter((entry) => parseVersion(entry))
+      .map((entry) => ({ version: entry, exe: join(root, entry, basename(executable)), asar: join(root, entry, "resources/app.asar") }))
+      .filter((payload) => isFile(payload.exe) && isFile(payload.asar))
+      .sort((left, right) => compareVersions(right.version, left.version) ?? 0);
+  }
+
+  function asarProductVersion(id, path) {
+    try {
+      return readAsarPackageVersion(id, path);
+    } catch (error) {
+      if (error.code === "METADATA_INVALID" || error instanceof SyntaxError) return null;
+      throw error;
+    }
+  }
+
+  function readAsarPackageVersion(id, path) {
     const fd = io.openSync(path, "r");
     try {
       const size = io.fstatSync(fd).size;
@@ -123,6 +150,13 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       return [pkg.name, pkg.productName].some((name) => typeof name === "string" && name.toLowerCase() === expected)
         ? productVersion(pkg.version) : null;
     } finally { io.closeSync(fd); }
+  }
+
+  function desktopVersion(id, executable) {
+    const [payload] = desktopPayloads(id, executable);
+    if (payload) return { version: asarProductVersion(id, payload.asar), path: payload.exe };
+    const asar = join(dirname(executable), "resources/app.asar");
+    return isFile(asar) ? { version: asarProductVersion(id, asar), path: null } : { version: null, path: null };
   }
 
   function packageVersion(id, path) {
@@ -170,7 +204,8 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       }
       if (kind === "desktop") {
         const desktop = desktopVersion(id, path);
-        return desktop ? { ...result, version: desktop, versionSource: "app.asar/package.json", issue: null } : result;
+        const located = desktop.path ? { ...result, path: desktop.path } : result;
+        return desktop.version ? { ...located, version: desktop.version, versionSource: "app.asar/package.json", issue: null } : located;
       }
       const version = packageVersion(id, path);
       if (id === "claude") {
