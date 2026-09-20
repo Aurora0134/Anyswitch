@@ -618,9 +618,9 @@ export function createOpenAIRelayServer(deps) {
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
                     onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
-                    // 链计划：成员切换真正越过该节点时计一次请求级失败
-                    //（降级门控的计数来源；池计划没有 noteFailure，可选链兜底）。
-                    onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
+                    // 成员一次请求彻底失败就计一次（降级门控的计数来源），
+                    // 与是否被越过无关——末位成员此前从不计数。
+                    onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
                     callUpstream: () => handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal }),
@@ -645,10 +645,13 @@ export function createOpenAIRelayServer(deps) {
                 break;
               }
               const isLastMember = index === memberPlan.members.length - 1;
-              if (isLastMember || !isFailoverStatus(result.status)) break;
+              if (!isFailoverStatus(result.status)) break;
+              // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
+              // 就是最后一员（此前末位直接 break，永远不计数）。
+              memberPlan.noteFailure?.(member.memberId);
+              if (isLastMember) break;
               tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
               deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
-              memberPlan.noteFailure?.(member.memberId);
             }
           } else {
             result = await handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal });
@@ -794,7 +797,7 @@ export function createOpenAIRelayServer(deps) {
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
                   onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
-                  onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
+                  onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
                   callUpstream: () => handler.handleChatCompletions(routePath, req.headers, chatBody, { signal: abortController.signal }),
@@ -930,7 +933,7 @@ export function createOpenAIRelayServer(deps) {
                     })),
                     shouldFailover: (result) => isFailoverStatus(result.status),
                     onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
-                    onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
+                    onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
                     callUpstream: () => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal }),
@@ -959,10 +962,13 @@ export function createOpenAIRelayServer(deps) {
                 break;
               }
               const isLastMember = index === memberPlan.members.length - 1;
-              if (isLastMember || !isFailoverStatus(result.status)) break;
+              if (!isFailoverStatus(result.status)) break;
+              // 渠道级故障：这一家本次请求彻底失败，计入降级门控——哪怕它
+              // 就是最后一员（此前末位直接 break，永远不计数）。
+              memberPlan.noteFailure?.(member.memberId);
+              if (isLastMember) break;
               tracker?.recordRetry?.({ reason: `upstream_${result.status}`, memberId: member.memberId, usage: result.body?.usage });
               deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
-              memberPlan.noteFailure?.(member.memberId);
             }
           } else {
             result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal });

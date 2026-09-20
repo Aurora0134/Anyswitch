@@ -97,6 +97,55 @@ export function resolveKeepAliveEnabled(keepAliveConfig, agentId) {
   return !(entry && entry.enabled === false);
 }
 
+// 按失败率降级：除了「连续 N 次失败即跳过」之外的第二条降级判据——最近若干次
+// 请求里的失败占比。默认关闭：关闭时降级判据与开关引入前完全一致（只看连续失败
+// 次数），交替成功失败的渠道不会被跳过。
+export const DEFAULT_FAILURE_RATE_GATE = Object.freeze({
+  enabled: false,
+  samples: 10,
+  failPercent: 60,
+});
+export const MIN_FAILURE_RATE_SAMPLES = 4;
+export const MAX_FAILURE_RATE_SAMPLES = 50;
+export const MIN_FAILURE_RATE_PERCENT = 20;
+export const MAX_FAILURE_RATE_PERCENT = 100;
+
+function parseIntInRange(raw, fallback, min, max) {
+  const n = typeof raw === "number" ? raw : Number.parseInt(String(raw ?? ""), 10);
+  if (!Number.isInteger(n) || n < min) return fallback;
+  return Math.min(max, n);
+}
+
+export function parseFailureRateSamples(raw) {
+  return parseIntInRange(raw, DEFAULT_FAILURE_RATE_GATE.samples, MIN_FAILURE_RATE_SAMPLES, MAX_FAILURE_RATE_SAMPLES);
+}
+
+export function parseFailureRatePercent(raw) {
+  return parseIntInRange(raw, DEFAULT_FAILURE_RATE_GATE.failPercent, MIN_FAILURE_RATE_PERCENT, MAX_FAILURE_RATE_PERCENT);
+}
+
+// An absent/malformed section is "off" — never a half-parsed gate.
+export function parseFailureRateGate(rawGate) {
+  const cfg = { ...DEFAULT_FAILURE_RATE_GATE };
+  if (!rawGate || typeof rawGate !== "object" || Array.isArray(rawGate)) return cfg;
+  if (typeof rawGate.enabled === "boolean") cfg.enabled = rawGate.enabled;
+  cfg.samples = parseFailureRateSamples(rawGate.samples);
+  cfg.failPercent = parseFailureRatePercent(rawGate.failPercent);
+  return cfg;
+}
+
+// Whether a node/member that answered `outcomes` (oldest first, true = 成功)
+// should count as 持续故障. A window that is not yet full never latches: with
+// two samples of which one failed, the ratio says nothing yet.
+export function failureRateLatched(gate, outcomes) {
+  if (!gate?.enabled || !Array.isArray(outcomes)) return false;
+  const window = outcomes.slice(-gate.samples);
+  if (window.length < gate.samples) return false;
+  let failures = 0;
+  for (const ok of window) if (!ok) failures += 1;
+  return (failures / window.length) * 100 >= gate.failPercent;
+}
+
 export function relayDataRoot(base = process.env) {
   return join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
@@ -162,6 +211,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
+  const failureRateGate = parseFailureRateGate(raw.failureRateGate);
   return {
     raw,
     settings: {
@@ -169,10 +219,12 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       keepAlive,
       sparkWindowPoints,
       injectThinkingEffort,
+      failureRateGate,
     },
     keepAlive,
     sparkWindowPoints,
     injectThinkingEffort,
+    failureRateGate,
   };
 }
 
@@ -244,6 +296,15 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "injectThinkingEffort")) {
     updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
+  }
+
+  // The gate PATCHes one field at a time (a toggle save carries no numbers),
+  // so merge over the stored section before normalizing.
+  if (patch.failureRateGate && typeof patch.failureRateGate === "object") {
+    updated.failureRateGate = parseFailureRateGate({
+      ...(current.raw.failureRateGate || {}),
+      ...patch.failureRateGate,
+    });
   }
 
   const text = JSON.stringify(updated, null, 2) + "\n";
