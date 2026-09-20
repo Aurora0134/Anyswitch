@@ -2064,6 +2064,22 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
   it("开关变更打到 /api/store/route-chain/enabled", () => {
     assert.ok(panelJs.includes("/api/store/route-chain/enabled"), "toggle posts to the enabled API");
   });
+
+  it("瓦片墙渲染：三态瓦片 + 图标克隆看板 avatar + 进 tab 刷新 store 数据", () => {
+    assert.ok(panelJs.includes('class="route-ep-tile'), "renders tiles");
+    assert.ok(panelJs.includes("route-ep-tile--empty"), "未配置瓦片变体");
+    assert.ok(!panelJs.includes("route-ep-tile--off"), "质感与启用/配置状态解耦：无 --off 变体");
+    assert.ok(panelJs.includes("data-route-avatar"), "瓦片带图标槽位");
+    assert.ok(panelJs.includes(".agent-cards-container .panel-card[data-agent-id="),
+      "图标克隆自看板卡 .agent-avatar（与抗截断端点钮同源）");
+    assert.ok(panelJs.includes('route: ["settingsTabRoute", "settingsPanelRoute"]'),
+      "settingsSubTabs 注册自动路由子 tab");
+    assert.ok(panelJs.includes('if (which === "route") refreshStoreState();'),
+      "进自动路由 tab 刷新 store 数据");
+    assert.ok(!panelJs.includes("route-chain-card"), "旧小链卡渲染已移除");
+    assert.ok(!panelJs.includes("store-route-chain-fold"), "折叠态 localStorage 已移除");
+    assert.ok(!panelJs.includes("routeFoldCard"), "折叠逻辑已移除");
+  });
 });
 
 describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", () => {
@@ -2305,14 +2321,14 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 
 describe("panel.html 设置全页视图", () => {
   // 设置从弹窗升级为全页视图：页头齿轮切入，原页头整行换成设置专用头行
-  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「主题」「关于」三个子 tab。
+  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「自动路由」「主题」「关于」四个子 tab。
   // 设置视图不写入 panel-view，刷新永不恢复进设置页。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
   );
 
-  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「主题」「关于」子 tab 与三块面板", () => {
+  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「自动路由」「主题」「关于」子 tab 与四块面板", () => {
     assert.ok(/<section class="settings-view" id="settingsView" hidden>/.test(panelHtml),
       "settingsView section 默认隐藏");
     const iView = panelHtml.indexOf('id="settingsView"');
@@ -2320,7 +2336,7 @@ describe("panel.html 设置全页视图", () => {
       "settingsView 位于 main 内（sessions 之后）");
     assert.ok(/<button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true"[^>]*>通用<\/button>/.test(panelHtml),
       "「通用」子 tab 默认选中");
-    for (const [name, label] of [["Theme", "主题"], ["About", "关于"]]) {
+    for (const [name, label] of [["Route", "自动路由"], ["Theme", "主题"], ["About", "关于"]]) {
       assert.ok(new RegExp(`<button class="view-tab" id="settingsTab${name}" role="tab" aria-selected="false"[^>]*>${label}</button>`).test(panelHtml), `${label}子 tab 默认未选`);
       assert.ok(panelHtml.includes(`id="settingsPanel${name}" hidden`), `${label}面板默认隐藏`);
     }
@@ -2329,9 +2345,9 @@ describe("panel.html 设置全页视图", () => {
 
   it("「通用」子 tab 保留原设置弹窗的全部控件", () => {
     const iGeneral = panelHtml.indexOf('id="settingsPanelGeneral"');
-    const iTheme = panelHtml.indexOf('id="settingsPanelTheme"');
-    assert.ok(iGeneral > 0 && iTheme > iGeneral, "通用面板在主题面板之前");
-    const general = panelHtml.slice(iGeneral, iTheme);
+    const iRoute = panelHtml.indexOf('id="settingsPanelRoute"');
+    assert.ok(iGeneral > 0 && iRoute > iGeneral, "通用面板在自动路由面板之前");
+    const general = panelHtml.slice(iGeneral, iRoute);
     for (const id of ["followAgentToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
       assert.ok(general.includes(`id="${id}"`), `通用面板保留控件 #${id}`);
     }
@@ -2340,7 +2356,7 @@ describe("panel.html 设置全页视图", () => {
   it("「通用」子 tab 五项分三张卡：启动/抗截断带图标卡头，其余未归类平卡", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
-      panelHtml.indexOf('id="settingsPanelTheme"'),
+      panelHtml.indexOf('id="settingsPanelRoute"'),
     );
     assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 3,
       "通用面板恰三张 panel-card");
@@ -2352,6 +2368,35 @@ describe("panel.html 设置全页视图", () => {
       "「抗截断」卡带 stroke 图标卡头");
     assert.ok(panelCss.includes("#settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }"),
       "设置行悬停整行淡底（--surface-hover）");
+  });
+
+  it("「自动路由」子 tab：面板在通用与主题之间，含瓦片墙容器与卡头徽标，Store 旧折叠卡已移除", () => {
+    const iRoute = panelHtml.indexOf('id="settingsPanelRoute"');
+    assert.ok(iRoute > panelHtml.indexOf('id="settingsPanelGeneral"'), "路由面板在通用面板之后");
+    assert.ok(iRoute < panelHtml.indexOf('id="settingsPanelTheme"'), "路由面板在主题面板之前");
+    const route = panelHtml.slice(iRoute, panelHtml.indexOf('id="settingsPanelTheme"'));
+    assert.ok(route.includes('id="routeChainGrid"'), "瓦片墙容器存在");
+    assert.ok(route.includes('id="routeChainBadge"'), "已配置计数徽标存在");
+    assert.ok(route.includes("按链顺序路由，失败自动退避下一节点"), "功能说明文案保留");
+    assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 1, "路由面板恰一张 panel-card");
+    assert.ok(!panelHtml.includes('id="routeChainCard"'), "Store 页旧折叠卡已移除");
+    assert.ok(!panelHtml.includes("routeChainFoldBtn"), "折叠钮已移除");
+  });
+
+  it("瓦片墙样式：三列网格 + 受光渐变面，质感与配置状态解耦（未配置仅文字降色）", () => {
+    assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr);"),
+      "三列瓦片网格");
+    assert.ok(panelCss.includes("linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-hover) 75%, var(--border))"),
+      "受光渐变面（整级明度差底 stop）");
+    assert.ok(/\.route-ep-tile \{[^}]*box-shadow: var\(--shadow-md\)/.test(panelCss), "全部瓦片统一 md 投影");
+    assert.ok(!panelCss.includes(".route-ep-tile--off"), "无停用降档投影（质感不绑状态）");
+    assert.ok(!panelCss.includes(".route-ep-tile--empty {") && !panelCss.includes(".route-ep-tile--empty:"),
+      "未配置瓦片不再覆盖底色/投影");
+    assert.ok(/\.route-ep-tile--empty \.route-ep-name \{ color: var\(--text-3\); \}/.test(panelCss),
+      "未配置仅名称降色");
+    assert.ok(!panelCss.includes(".route-chain-grid"), "旧两列网格样式已删");
+    assert.ok(!panelCss.includes(".route-fold-toggle"), "折叠钮样式已删");
+    assert.ok(!panelCss.includes(".route-chain-card"), "旧小链卡样式已删");
   });
 
   it("抗截断开关同构 ccswitch skill 管理：品牌色淡底方钮 + 总开关关时收起图标", () => {

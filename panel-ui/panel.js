@@ -2505,11 +2505,12 @@ async function api(method, path, body) {
     };
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
 
-    // 子 tab：通用 / 主题 / 关于；进入设置固定落「通用」。
+    // 子 tab：通用 / 自动路由 / 主题 / 关于；进入设置固定落「通用」。
     const about = createAboutController({ request: api, doc: document, notify: toast });
     leaveSettingsView = () => about.leave();
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],
+      route: ["settingsTabRoute", "settingsPanelRoute"],
       theme: ["settingsTabTheme", "settingsPanelTheme"],
       about: ["settingsTabAbout", "settingsPanelAbout"],
     };
@@ -2527,6 +2528,9 @@ async function api(method, path, body) {
       }
       if (animate) replayViewEnter($(selected[1]));
       if (which === "theme") captureSettingsMirror();
+      // 「自动路由」的配置数据与渠道页同源（store state），进 tab 即刷新一次，
+      // 与渠道页每次切入都刷新同语义；渲染在 doRefreshStoreState 内统一完成。
+      if (which === "route") refreshStoreState();
       if (which === "about") return about.enter();
     }
     // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
@@ -7294,7 +7298,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 路由链（自动路由）：Store tab「自动路由」区 + 链编辑器弹窗 ──
+  // ── 路由链（自动路由）：设置页「自动路由」子 tab 瓦片墙 + 链编辑器弹窗 ──
   // 数据 = getState 下发的 routingChains: [{endpointId, chain:[{node,model}...]}]；
   // node 为渠道或号池 id（池优先），model 为绑定上游模型。保存/删除走
   // /api/store/route-chain/save|delete，校验口径与 store-schema 对齐（1-8 节点、
@@ -7532,7 +7536,7 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 卡片 A2：自动路由区（每端点一张小链卡） ──
+  // ── 设置「自动路由」tab：九端点瓦片墙（每端点一枚瓦片，三列网格） ──
   function renderRouteChains() {
     const grid = $("routeChainGrid");
     if (!grid) return;
@@ -7547,23 +7551,29 @@ async function api(method, path, body) {
         // per-endpoint 启用开关（getState 显式下发布尔，缺省=开）：开 = 暴露
         // auto 模型 + 监测页路由链卡显示；关 = 链配置保留但 auto 不暴露。
         const enabled = !entry || entry.enabled !== false;
-        return `<div class="route-chain-card">
-          <div class="route-chain-card-head"><span class="route-chain-ep">${escapeHtml(label)}</span><span class="badge ${enabled ? "badge-accent" : "badge-neutral"}">${enabled ? `${chain.length} 节点` : "已停用"}</span></div>
-          <div class="route-chain-card-actions">
+        return `<div class="route-ep-tile" data-agent-id="${ep}">
+          <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-avatar" data-route-avatar="${ep}"></span><span class="route-ep-name">${escapeHtml(label)}</span></div><span class="badge ${enabled ? "badge-accent" : "badge-neutral"}">${enabled ? `${chain.length} 节点` : "已停用"}</span></div>
+          <div class="route-ep-tile-actions">
             <label class="toggle" title="启用自动路由：开 = 该端点暴露虚拟模型 auto 并按链退避；关 = 链配置保留但 auto 不暴露"><input type="checkbox" data-route-enabled="${ep}"${enabled ? " checked" : ""}><span class="slider"></span></label>
             <button class="btn" data-route-edit="${ep}">编辑</button>
             <button class="btn btn-danger" data-route-del-chain="${ep}">删除</button>
           </div>
         </div>`;
       }
-      return `<div class="route-chain-card">
-        <div class="route-chain-card-head"><span class="route-chain-ep">${escapeHtml(label)}</span><span class="badge badge-neutral">未配置</span></div>
-        <div class="route-chain-card-actions">
+      return `<div class="route-ep-tile route-ep-tile--empty" data-agent-id="${ep}">
+        <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-avatar" data-route-avatar="${ep}"></span><span class="route-ep-name">${escapeHtml(label)}</span></div><span class="badge badge-neutral">未配置</span></div>
+        <div class="route-ep-tile-actions">
           <button class="btn" data-route-edit="${ep}">配置路由链</button>
         </div>
       </div>`;
     }).join("");
     $("routeChainBadge").textContent = String(configured);
+    // 瓦片图标 = 看板 .agent-avatar 的克隆（与抗截断端点钮、关于页同一来源；
+    // 克隆在三处间保持一致，亮暗/主题 token 自动跟随）
+    grid.querySelectorAll("[data-route-avatar]").forEach((slot) => {
+      const avatar = document.querySelector(`.agent-cards-container .panel-card[data-agent-id="${slot.getAttribute("data-route-avatar")}"] .agent-avatar`);
+      if (avatar) slot.appendChild(avatar.cloneNode(true));
+    });
     grid.querySelectorAll("[data-route-edit]").forEach((btn) => {
       btn.onclick = () => openRouteChainModal(btn.getAttribute("data-route-edit"));
     });
@@ -8174,23 +8184,6 @@ async function api(method, path, body) {
     });
     // scroll 不冒泡：捕获阶段监听，候选区滚动时收起节点右键菜单
     $("routeChainBody").addEventListener("scroll", hideSkillsContextMenu, true);
-
-    // 自动路由卡折叠：默认收起，展开态记 localStorage
-    const routeFoldCard = $("routeChainCard");
-    const routeFoldBtn = $("routeChainFoldBtn");
-    const setRouteFold = (open) => {
-      routeFoldCard.classList.toggle("route-folded", !open);
-      routeFoldBtn.setAttribute("aria-expanded", open ? "true" : "false");
-      routeFoldBtn.textContent = open ? "收起 ▴" : "展开 ▾";
-    };
-    let routeFoldOpen = false;
-    try { routeFoldOpen = localStorage.getItem("store-route-chain-fold") === "1"; } catch {}
-    setRouteFold(routeFoldOpen);
-    routeFoldBtn.onclick = () => {
-      routeFoldOpen = !routeFoldOpen;
-      setRouteFold(routeFoldOpen);
-      try { localStorage.setItem("store-route-chain-fold", routeFoldOpen ? "1" : "0"); } catch {}
-    };
 
     if ($("storeView").hidden === false) {
       refreshStoreState();

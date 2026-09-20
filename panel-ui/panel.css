@@ -1348,22 +1348,34 @@
   .store-add-pool-ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 500; color: var(--text-3); margin-left: 10px; }
   .store-add-pool-ctl .modal-number { width: 56px; padding: 3px 6px; font-size: 12px; }
 
-  /* 路由链（自动路由）：Store tab 端点链卡 + 链编辑器弹窗。编辑器 = 下方双栏布局 +
-     .route-stage/.route-seg 纵向舞台；监测页左栏 = 路由链状态卡（.rc-side-*） */
-  .route-chain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  @media (max-width: 1200px) { .route-chain-grid { grid-template-columns: 1fr; } }
-  /* 自动路由卡折叠：卡头右侧折叠钮；route-folded 态藏 body（展开态由 localStorage 记忆） */
-  .route-fold-toggle {
-    border: none; background: transparent; color: var(--text-3); cursor: pointer;
-    font-size: 12px; padding: 2px 6px;
+  /* 路由链（自动路由）：配置面在设置页「自动路由」子 tab（九端点瓦片墙）；
+     链编辑器弹窗 = 下方双栏布局 + .route-stage/.route-seg 纵向舞台；
+     监测页左栏 = 路由链状态卡（.rc-side-*） */
+  /* 瓦片墙：三列网格（<900px 两列、<600px 一列）。质感 = 受光渐变面
+     （surface → hover75%×border25%，整级明度差，亮暗两态实测 ≥3.9%）
+     ＋投影抬升（md，hover 升 lg）。质感与配置状态解耦：九枚瓦片同面同影，
+     状态只由徽标/按钮/文字明暗表达（未配置仅名称与徽标降为三级色）。 */
+  #settingsPanelRoute { display: flex; flex-direction: column; gap: 20px; }
+  .route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  @media (max-width: 900px) { .route-ep-grid { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 600px) { .route-ep-grid { grid-template-columns: 1fr; } }
+  .route-ep-tile {
+    min-width: 0; padding: 14px 16px;
+    border: 1px solid var(--border); border-radius: var(--radius-md, 8px);
+    background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-hover) 75%, var(--border)));
+    box-shadow: var(--shadow-md);
+    transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
   }
-  .route-fold-toggle:hover { color: var(--accent); }
-  .panel-card.route-folded .card-body { display: none; }
-  .route-chain-card { border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); padding: 8px 10px; }
-  .route-chain-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .route-chain-ep { font-size: 12.5px; font-weight: 600; color: var(--text); }
-  .route-chain-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
-  .route-chain-card-actions .btn { padding: 3px 10px; font-size: 12px; }
+  .route-ep-tile:hover { border-color: var(--accent); box-shadow: var(--shadow-lg); }
+  .route-ep-tile--empty .route-ep-name { color: var(--text-3); }
+  .route-ep-tile--empty .badge { color: var(--text-3); }
+  /* 内部排版：上排「图标+名称 | 状态徽标」，下排右对齐控件组 */
+  .route-ep-tile-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .route-ep-id { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .route-ep-avatar { display: inline-flex; flex: none; }
+  .route-ep-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .route-ep-tile-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .route-ep-tile-actions .btn { font-size: 12px; padding: 4px 10px; }
   /* 刷新差异弹窗（渠道刷新「查看差异」）：中等宽幅，左右分栏按单元分组列出
      本轮新增/移除的模型 id；失败渠道在分栏上方单列一区。着色只引语义 token，
      绿/红底高光由 color-mix 派生，五主题零改动 */
