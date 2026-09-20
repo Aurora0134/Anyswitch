@@ -202,7 +202,7 @@ export function createRelayServer(deps) {
                   })),
                   shouldFailover: (result) => isFailoverStatus(result.status),
                   onMemberSuccess: (member) => memberPlan.noteSuccess(member.memberId),
-                  onMemberFailover: (member) => memberPlan.noteFailure?.(member.memberId),
+                  onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
                   callUpstream: () => handler.handleMessages(req.headers, body, { signal: abortController.signal }),

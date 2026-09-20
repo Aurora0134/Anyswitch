@@ -35,6 +35,7 @@
 // itself — any 4xx included — and the chain backs off.
 
 import { resolvePool, poolMembersWithModel } from "./pool-routing.mjs";
+import { failureRateLatched, MAX_FAILURE_RATE_SAMPLES } from "./relay-settings.mjs";
 
 // Statuses that mark a chain NODE as failed and back the chain off to the
 // next node: every upstream 4xx and 5xx. Chain nodes deliberately bind models
@@ -156,11 +157,17 @@ export function createChainState(options = {}) {
   // 仅在位置前进且被跨过的跳全部锁死失败的判定点触发；探测重锚（plan）与
   // 上游恢复不经过它，故同一退避周期只触发一次，链继续降级算新周期再触发。
   const onDemote = options?.onDemote ?? null;
+  // getFailureRateGate() -> { enabled, samples, failPercent }，每次判定现读，
+  // 面板改设置不必重启 relay。不提供或关闭时降级只看连续失败次数。
+  const getFailureRateGate = options?.getFailureRateGate ?? null;
   const table = new Map();
   // nodeKey -> consecutive request-level failures. Keyed by node+model (the
   // chain-position composite) but shared across endpoints: the failing thing
   // is the upstream node, not the endpoint whose chain mentions it.
   const failures = new Map();
+  // nodeKey -> 最近请求的结果（true=成功，oldest first），失败率门的输入。
+  // 每个 node+model 至多存 MAX_FAILURE_RATE_SAMPLES 条，与 failures 同生命周期。
+  const outcomes = new Map();
   // nodeKeys with ANY recorded outcome since process start. The per-startup
   // lamp view (数据统计与显示单独拆开：每次启动重新统计) treats an untouched
   // node as "no data" — gray — instead of leaning on the persisted model
@@ -171,7 +178,15 @@ export function createChainState(options = {}) {
   // the handler re-passing the chain.
   const chains = new Map();
 
-  const isLatched = (key) => (failures.get(key) ?? 0) >= CHAIN_DEMOTE_AFTER_FAILURES;
+  const noteOutcome = (key, ok) => {
+    const list = outcomes.get(key) ?? [];
+    list.push(ok);
+    outcomes.set(key, list.slice(-MAX_FAILURE_RATE_SAMPLES));
+  };
+
+  const isLatched = (key) =>
+    (failures.get(key) ?? 0) >= CHAIN_DEMOTE_AFTER_FAILURES ||
+    failureRateLatched(getFailureRateGate?.(), outcomes.get(key));
 
   return {
     // Ordered attempt plan for one request: an array of the chain's
@@ -212,6 +227,7 @@ export function createChainState(options = {}) {
       const key = chainNodeKey(nodeId, model);
       attempted.add(key);
       failures.set(key, 0);
+      noteOutcome(key, true);
       const nodes = chains.get(endpointId);
       // No chain on record (noteSuccess before any plan — tests/diagnostics)
       // or the answer is not in the chain (stale): order is unknowable,
@@ -256,6 +272,7 @@ export function createChainState(options = {}) {
       const key = chainNodeKey(nodeId, model);
       attempted.add(key);
       failures.set(key, (failures.get(key) ?? 0) + 1);
+      noteOutcome(key, false);
     },
     // Introspection for tests and diagnostics.
     get(endpointId) {
@@ -273,6 +290,7 @@ export function createChainState(options = {}) {
           node: sep === -1 ? key : key.slice(0, sep),
           model: sep === -1 ? "" : key.slice(sep + 1),
           failures: failures.get(key) ?? 0,
+          latched: isLatched(key),
         };
       });
     },
@@ -337,6 +355,7 @@ export function buildChainRuntime(store, snapshots, retryIntervalMs = RETRY_UPST
         const prev = nodeStats.get(key);
         nodeStats.set(key, {
           failures: Math.max(prev?.failures ?? 0, Number(n.failures) || 0),
+          latched: (prev?.latched ?? false) || n.latched === true,
           attempted: true,
         });
       }
@@ -360,7 +379,9 @@ export function buildChainRuntime(store, snapshots, retryIntervalMs = RETRY_UPST
   const lampOf = (node, model) => {
     const e = nodeStats.get(chainNodeKey(node, model));
     if (!e || !e.attempted) return "gray";
-    return e.failures >= CHAIN_DEMOTE_AFTER_FAILURES ? "red" : "green";
+    // latched 由产出方按当前降级判据算好（连续失败或失败率门）；旧 dump 没有
+    // 该字段时退回连续失败判据。
+    return e.latched === true || e.failures >= CHAIN_DEMOTE_AFTER_FAILURES ? "red" : "green";
   };
   const endpoints = {};
   const configured = store?.routingChains ?? {};
@@ -405,9 +426,10 @@ export function noteChainSuccess(state, endpointId, nodeId, model, now) {
   state.noteSuccess(endpointId, nodeId, model, now);
 }
 
-// One request-level failure of a chain node (called by the handler's plan
-// when a member failover advances past it; pool-member failovers within one
-// request are deduped to a single count by the handler).
+// One request-level failure of a chain node (called by the handler whenever a
+// member's attempt fails definitively, the plan's last entry included; pool
+// member failovers within one request are deduped to a single count by the
+// handler).
 export function noteChainFailure(state, endpointId, nodeId, model) {
   state.noteFailure(endpointId, nodeId, model);
 }

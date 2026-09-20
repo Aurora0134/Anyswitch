@@ -721,6 +721,49 @@ describe("panel router followAgent watchdog coordination", () => {
     rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   });
 
+  it("POST failureRateGate 往返：默认关闭、逐字段合并、越界夹取", async () => {
+    const { base } = tempBase();
+    const router = createPanelRouter({
+      base,
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      enableWatchdogAutostartFn: async () => ({ ok: true }),
+      disableWatchdogAutostartFn: async () => ({ ok: true }),
+      isWatchdogAutostartEnabledFn: async () => false,
+      spawnWatchdogFn: async () => ({ ok: true }),
+      stopWatchdogFn: async () => ({ ok: true }),
+      probeWatchdogFn: async () => false,
+      fetchRelayAgents: async () => null,
+    });
+
+    const fresh = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(fresh.req, fresh.res);
+    assert.deepEqual(fresh.json().failureRateGate, { enabled: false, samples: 10, failPercent: 60 },
+      "从未保存过即默认关闭");
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { failureRateGate: { enabled: true } });
+    await router.handle(post.req, post.res);
+    assert.equal(post.json().failureRateGate.enabled, true);
+    assert.equal(post.json().failureRateGate.samples, 10);
+
+    const numbers = fakeReqRes("/panel/api/settings", "POST", { failureRateGate: { samples: 20, failPercent: 45 } });
+    await router.handle(numbers.req, numbers.res);
+    assert.equal(numbers.json().failureRateGate.enabled, true, "只改数值不动开关");
+    assert.equal(numbers.json().failureRateGate.samples, 20);
+    assert.equal(numbers.json().settings.failureRateGate.failPercent, 45);
+
+    const over = fakeReqRes("/panel/api/settings", "POST", { failureRateGate: { samples: 9999, failPercent: -5 } });
+    await router.handle(over.req, over.res);
+    assert.equal(over.json().failureRateGate.samples, 50, "越界夹取，不原样落盘");
+    assert.equal(over.json().failureRateGate.failPercent, 60, "低于下限回落默认");
+
+    const again = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(again.req, again.res);
+    assert.equal(again.json().failureRateGate.samples, 50, "夹取结果即为持久化结果");
+
+    rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
+  });
+
   it("POST keepAlive.endpoints persists per endpoint and is returned by GET", async () => {
     const { base } = tempBase();
     const router = createPanelRouter({
@@ -2374,7 +2417,13 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(route.includes('id="routeChainGrid"'), "瓦片墙容器存在");
     assert.ok(route.includes('id="routeChainBadge"'), "已配置计数徽标存在");
     assert.ok(route.includes("按链顺序路由，失败自动退避下一节点"), "功能说明文案保留");
-    assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 1, "路由面板恰一张 panel-card");
+    assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 2,
+      "路由面板两张 panel-card（瓦片墙 + 按失败率降级）");
+    assert.ok(route.includes('id="failureRateToggle"'), "按失败率降级开关在路由子 tab 内");
+    assert.ok(route.includes('id="failureRateSamplesInput"') && route.includes('id="failureRatePercentInput"'),
+      "两个数值控件存在");
+    assert.ok(route.includes('min="4" max="50"') && route.includes('min="20" max="100"'),
+      "数值控件带范围，与服务端夹取口径一致");
     assert.ok(!panelHtml.includes('id="routeChainCard"'), "Store 页旧折叠卡已移除");
     assert.ok(!panelHtml.includes("routeChainFoldBtn"), "折叠钮已移除");
   });

@@ -11,7 +11,10 @@
 //     and puts it first — but the sticky point only moves past a member that
 //     is FAILING (see POOL_DEMOTE_AFTER_FAILURES below): a single transient
 //     fault fails that one request over without demoting the front member,
-//     mirroring the chain demotion gate (失败才降级，黄灯不降);
+//     mirroring the chain demotion gate (失败才降级，黄灯不降). An optional
+//     second judgement — 按失败率降级, see failureRateLatched in
+//     relay-settings.mjs — can latch a member as failing on the failure share
+//     of its recent requests instead; it is off by default.
 //   - entries whose member left the candidate set are dropped lazily (member
 //     removed from the pool, model gone, pool deleted);
 //   - channel-level faults (5xx, transport errors surfaced as 502, 429,
@@ -20,6 +23,8 @@
 //
 // This module is the shared piece every relay frontend (OpenAI, Anthropic)
 // builds its member loop on.
+
+import { failureRateLatched, MAX_FAILURE_RATE_SAMPLES } from "./relay-settings.mjs";
 
 // Statuses that mark a member as failed and advance to the next one. 5xx and
 // 502-from-transport are covered by the >= 500 branch; everything else 4xx is
@@ -82,10 +87,15 @@ export const POOL_DEMOTE_AFTER_FAILURES = 2;
 // earlier member (recovery) moves the sticky point back. The failure counter
 // is keyed by member+model GLOBALLY (not per pool): the failing thing is the
 // upstream member, not the pool that mentioned it.
-export function createStickyTable() {
+export function createStickyTable(options = {}) {
+  // getFailureRateGate() -> { enabled, samples, failPercent }，每次判定现读，
+  // 面板改设置不必重启 relay。不提供或关闭时只看连续失败次数（原语义）。
+  const getFailureRateGate = options?.getFailureRateGate ?? null;
   const table = new Map();
   // memberId\0modelId -> consecutive request-level failures.
   const failures = new Map();
+  // memberId\0modelId -> 最近请求的结果（true=成功，oldest first），失败率门输入。
+  const outcomes = new Map();
   // pool\0model -> member order of the last order() call, so noteSuccess can
   // tell whether the answering member moved forward past failing ones.
   const orders = new Map();
@@ -93,7 +103,19 @@ export function createStickyTable() {
   // across the two segments, so the pair key is unambiguous.
   const key = (poolId, modelId) => `${poolId}\0${modelId}`;
   const memberKey = (memberId, modelId) => `${memberId}\0${modelId}`;
-  const isLatched = (memberId, modelId) => (failures.get(memberKey(memberId, modelId)) ?? 0) >= POOL_DEMOTE_AFTER_FAILURES;
+
+  const noteOutcome = (memberId, modelId, ok) => {
+    const k = memberKey(memberId, modelId);
+    const list = outcomes.get(k) ?? [];
+    list.push(ok);
+    outcomes.set(k, list.slice(-MAX_FAILURE_RATE_SAMPLES));
+  };
+
+  const isLatched = (memberId, modelId) => {
+    const k = memberKey(memberId, modelId);
+    return (failures.get(k) ?? 0) >= POOL_DEMOTE_AFTER_FAILURES
+      || failureRateLatched(getFailureRateGate?.(), outcomes.get(k));
+  };
 
   return {
     // Order candidates sticky-first. A sticky entry whose member is no longer
@@ -113,6 +135,7 @@ export function createStickyTable() {
     },
     noteSuccess(poolId, modelId, memberId) {
       failures.set(memberKey(memberId, modelId), 0);
+      noteOutcome(memberId, modelId, true);
       const k = key(poolId, modelId);
       const memberOrder = orders.get(k);
       // No candidate order on record (direct noteSuccess — tests/diagnostics)
@@ -140,12 +163,15 @@ export function createStickyTable() {
         table.set(k, memberId);
       }
     },
-    // One request-level failure of a member (called by the handler's plan
-    // when a member failover advances past it). The counter latches lazily —
-    // read by noteSuccess — so this is the single source of truth.
+    // One request-level failure of a member — called for every member whose
+    // attempt failed definitively, the last candidate in the list included
+    // (it is crossed by nobody, but it did fail the request). The counter
+    // latches lazily — read by noteSuccess — so this is the single source of
+    // truth.
     noteFailure(poolId, modelId, memberId) {
       const k = memberKey(memberId, modelId);
       failures.set(k, (failures.get(k) ?? 0) + 1);
+      noteOutcome(memberId, modelId, false);
     },
     // Introspection for tests and diagnostics.
     get(poolId, modelId) {

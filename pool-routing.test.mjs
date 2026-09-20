@@ -239,3 +239,33 @@ describe("sticky table", () => {
     assert.equal(table.consecutive("prov-a", "model"), 0);
   });
 });
+
+describe("按失败率降级（号池粘性门控）", () => {
+  // 与链同一判据：关闭时（含不注入 getter）只有连续失败才锁，开启后
+  // 最近 N 次的失败占比也能锁死一个成员，粘性位才允许越过它。
+  function walkWith(gate) {
+    const table = gate
+      ? createStickyTable({ getFailureRateGate: () => gate })
+      : createStickyTable();
+    table.order("pool", "model", [{ memberId: "prov-a" }, { memberId: "prov-b" }]);
+    for (let i = 0; i < 2; i += 1) {
+      table.noteFailure("pool", "model", "prov-a");
+      table.noteSuccess("pool", "model", "prov-a");
+    }
+    table.noteSuccess("pool", "model", "prov-b");
+    return table.get("pool", "model");
+  }
+
+  it("关闭时交替失败的成员不算锁死，粘性位不前移（黄灯不降）", () => {
+    assert.equal(walkWith(null), "prov-a", "粘性位仍钉在交替失败的那一家");
+    assert.equal(walkWith({ enabled: false, samples: 4, failPercent: 50 }), "prov-a");
+  });
+
+  it("开启且失败占比达阈值时该成员被锁死，粘性位越过它", () => {
+    assert.equal(walkWith({ enabled: true, samples: 4, failPercent: 50 }), "prov-b");
+  });
+
+  it("开启但未达阈值同样不锁", () => {
+    assert.equal(walkWith({ enabled: true, samples: 4, failPercent: 75 }), "prov-a");
+  });
+});
