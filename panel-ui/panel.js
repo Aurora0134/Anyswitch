@@ -17,19 +17,6 @@
   const MAX_SPARK_WINDOW_POINTS = 128;
   let sparkWindowPoints = DEFAULT_SPARK_WINDOW_POINTS;
 
-  // 按失败率降级（自动路由高级项）：范围与 relay-settings.mjs 的同名常量一致，
-  // 默认关闭——关闭时自动路由仍只看连续失败次数。
-  const DEFAULT_FAILURE_RATE_SAMPLES = 10;
-  const MIN_FAILURE_RATE_SAMPLES = 4;
-  const MAX_FAILURE_RATE_SAMPLES = 50;
-  const DEFAULT_FAILURE_RATE_PERCENT = 60;
-  const MIN_FAILURE_RATE_PERCENT = 20;
-  const MAX_FAILURE_RATE_PERCENT = 100;
-  let failureRateGate = {
-    enabled: false,
-    samples: DEFAULT_FAILURE_RATE_SAMPLES,
-    failPercent: DEFAULT_FAILURE_RATE_PERCENT,
-  };
   const historyBuffers = {
     ttft: [],
     tps: [],
@@ -198,18 +185,6 @@ async function api(method, path, body) {
     const parsed = Number.parseInt(n, 10);
     if (!Number.isInteger(parsed) || parsed < MIN_SPARK_WINDOW_POINTS) return DEFAULT_SPARK_WINDOW_POINTS;
     return Math.min(MAX_SPARK_WINDOW_POINTS, parsed);
-  }
-
-  function clampFailureRateSamples(n) {
-    const parsed = Number.parseInt(n, 10);
-    if (!Number.isInteger(parsed) || parsed < MIN_FAILURE_RATE_SAMPLES) return DEFAULT_FAILURE_RATE_SAMPLES;
-    return Math.min(MAX_FAILURE_RATE_SAMPLES, parsed);
-  }
-
-  function clampFailureRatePercent(n) {
-    const parsed = Number.parseInt(n, 10);
-    if (!Number.isInteger(parsed) || parsed < MIN_FAILURE_RATE_PERCENT) return DEFAULT_FAILURE_RATE_PERCENT;
-    return Math.min(MAX_FAILURE_RATE_PERCENT, parsed);
   }
 
   function pruneSparkBuffer(buf) {
@@ -2441,9 +2416,6 @@ async function api(method, path, body) {
     const injectEffortToggle = $("injectEffortToggle");
     const sparkWindowInput = $("sparkWindowInput");
     const keepAliveRetriesInput = $("keepAliveRetriesInput");
-    const failureRateToggle = $("failureRateToggle");
-    const failureRateSamplesInput = $("failureRateSamplesInput");
-    const failureRatePercentInput = $("failureRatePercentInput");
     const KEEP_ALIVE_MODES = ["off", "enhanced"];
     const DEFAULT_KEEPALIVE_RETRIES = 2;
     const MIN_KEEPALIVE_RETRIES = 0;
@@ -2459,7 +2431,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, failureRate: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -2668,10 +2640,6 @@ async function api(method, path, body) {
           if (sparkWindowInput) sparkWindowInput.value = String(sparkWindowPoints);
           Object.values(historyBuffers).forEach(pruneSparkBuffer);
         }
-        if (!settingsSaving.failureRate && d.failureRateGate) {
-          failureRateGate = readFailureRate(d.failureRateGate);
-          applyFailureRateUi(failureRateGate);
-        }
       } catch {}
     }
 
@@ -2819,91 +2787,6 @@ async function api(method, path, body) {
         if (e.key === "Enter") {
           e.preventDefault();
           persistKeepAliveRetries(keepAliveRetriesInput.value);
-        }
-      };
-    }
-
-    function readFailureRate(raw) {
-      return {
-        enabled: raw?.enabled === true,
-        samples: clampFailureRateSamples(raw?.samples),
-        failPercent: clampFailureRatePercent(raw?.failPercent),
-      };
-    }
-
-    function applyFailureRateUi(gate) {
-      if (failureRateToggle) failureRateToggle.checked = gate.enabled === true;
-      if (failureRateSamplesInput) failureRateSamplesInput.value = String(gate.samples);
-      if (failureRatePercentInput) failureRatePercentInput.value = String(gate.failPercent);
-    }
-
-    // 一项设置三个控件：任一改动都整段 PATCH 落盘（后端逐字段合并），失败回滚。
-    async function persistFailureRate(patch, message) {
-      if (settingsSaving.failureRate) return;
-      const previous = { ...failureRateGate };
-      const next = readFailureRate({ ...failureRateGate, ...patch });
-      failureRateGate = next;
-      applyFailureRateUi(next);
-      settingsSaving.failureRate = true;
-      settingsLoadGen += 1;
-      try {
-        const d = await api("POST", "/api/settings", { failureRateGate: next });
-        if (!d.ok) {
-          failureRateGate = previous;
-          applyFailureRateUi(previous);
-          toast("设置保存失败", true);
-          return;
-        }
-        const saved = d.failureRateGate ?? d.settings?.failureRateGate;
-        if (saved) {
-          failureRateGate = readFailureRate(saved);
-          applyFailureRateUi(failureRateGate);
-        }
-        toast(message);
-      } catch (e) {
-        failureRateGate = previous;
-        applyFailureRateUi(previous);
-        toast(panelError(e, "请求失败"), true);
-      } finally {
-        settingsSaving.failureRate = false;
-      }
-    }
-
-    function failureRateToggleMessage(gate) {
-      return gate.enabled ? "已开启按失败率降级" : "已关闭按失败率降级";
-    }
-
-    if (failureRateToggle) {
-      failureRateToggle.onchange = () => {
-        const next = { ...failureRateGate, enabled: failureRateToggle.checked };
-        persistFailureRate(next, failureRateToggleMessage(next));
-      };
-    }
-
-    if (failureRateSamplesInput) {
-      const persist = () => persistFailureRate(
-        { samples: failureRateSamplesInput.value },
-        "按失败率降级已按最近 " + clampFailureRateSamples(failureRateSamplesInput.value) + " 次请求判断",
-      );
-      failureRateSamplesInput.onchange = persist;
-      failureRateSamplesInput.onkeydown = (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          persist();
-        }
-      };
-    }
-
-    if (failureRatePercentInput) {
-      const persist = () => persistFailureRate(
-        { failPercent: failureRatePercentInput.value },
-        "失败占比达 " + clampFailureRatePercent(failureRatePercentInput.value) + "% 即跳过该渠道",
-      );
-      failureRatePercentInput.onchange = persist;
-      failureRatePercentInput.onkeydown = (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          persist();
         }
       };
     }

@@ -1673,43 +1673,6 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="route-ep-grid" id="routeChainGrid"></div>
         </div>
       </div>
-
-      <!-- 「按失败率降级」：自动路由的第二条降级判据，默认关闭（关闭时行为与开关
-           引入前完全一致），三项同属一项设置 -->
-      <div class="panel-card">
-        <div class="card-header">
-          <h2 class="card-title">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-            按失败率降级
-          </h2>
-        </div>
-        <div class="card-body">
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">按失败率降级</div>
-              <div class="modal-item-desc">默认关闭。平时自动路由要连续失败两次才跳过某渠道；开启后追加一条判据——该渠道最近若干次请求里失败占比达到阈值就同样视为持续故障并跳过，它恢复后自动接回。</div>
-            </div>
-            <label class="toggle">
-              <input type="checkbox" id="failureRateToggle">
-              <span class="slider"></span>
-            </label>
-          </div>
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">统计请求数</div>
-              <div class="modal-item-desc">只看每个渠道最近 N 次请求的成败，不按时间过期。范围 4–50，默认 10；不足 N 次不触发跳过。</div>
-            </div>
-            <input class="modal-number" type="number" id="failureRateSamplesInput" min="4" max="50" step="1" value="10">
-          </div>
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">失败率阈值</div>
-              <div class="modal-item-desc">最近 N 次里失败占比达到该百分比即跳过该渠道。范围 20–100，默认 60。</div>
-            </div>
-            <input class="modal-number" type="number" id="failureRatePercentInput" min="20" max="100" step="1" value="60">
-          </div>
-        </div>
-      </div>
     </div>
 
     <!-- 「主题」：左栏列表点选即全局生效（setStyle），右栏看板镜像实时预览 -->
