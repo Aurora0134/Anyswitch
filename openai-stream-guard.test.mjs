@@ -442,3 +442,89 @@ describe("holdEntireTurn (plan A: whole-turn hold in enhanced mode)", () => {
     assert.equal(guard.hasProvenContent(), true, "a complete tool call must prove usability even when held");
   });
 });
+
+describe("tool-call delta normalization (upstream repeats empty strings on continuation frames)", () => {
+  function parseFrames(text) {
+    const out = [];
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      out.push(JSON.parse(payload));
+    }
+    return out;
+  }
+
+  it("strips empty-string id/type/name from continuation frames so overwrite-merging clients keep the real values", () => {
+    // Wire shape observed against a live stepfun streaming response: the first
+    // tool-call delta carries the real id/type/name, every continuation delta
+    // repeats them as empty strings. Canonical streams omit those keys instead.
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"chatcmpl-tool-abc","type":"function","function":{"name":"list_directory","arguments":"{"}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"","arguments":"\\"target_directory\\": \\"/tmp/x\\""}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"","arguments":"}"}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const out = emitted + (verdict.tail || "");
+    assert.ok(out.includes('"id":"chatcmpl-tool-abc"'), "the first frame's real id must survive");
+    assert.ok(out.includes('"name":"list_directory"'), "the first frame's real name must survive");
+    assert.ok(!out.includes('"id":""'), "empty-string id must not reach the client");
+    assert.ok(!out.includes('"name":""'));
+    assert.ok(!out.includes('"type":""'));
+    for (const frame of parseFrames(out)) {
+      for (const choice of frame.choices ?? []) {
+        for (const call of choice?.delta?.tool_calls ?? []) {
+          assert.notEqual(call.id, "");
+          assert.notEqual(call.type, "");
+          assert.notEqual(call.function?.name, "");
+        }
+      }
+    }
+    // the non-tool-call frames must pass through untouched
+    assert.ok(out.includes('"finish_reason":"tool_calls"'));
+    assert.ok(out.includes("[DONE]"));
+  });
+
+  it("treats a tool call that only ever carries empty-string id/name as incomplete (reject while holding)", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","type":"","function":{"name":"","arguments":"{}"}}]}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    assert.equal(emitted, "", "an unusable tool call must not be forwarded as a completion");
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "reject");
+    assert.equal(verdict.reason, "incomplete_tool_call");
+  });
+
+  it("a nameless empty-string tool call after delivered text terminates with the structured error instead of [DONE]", () => {
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"content":"Let me check."}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"","function":{"name":"","arguments":"{}"}}]}}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    assert.ok(emitted.includes("Let me check."), "already-delivered text must survive");
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "error");
+    assert.equal((emitted + verdict.errorLine).includes("[DONE]"), false);
+  });
+
+  it("does not rewrite frames that already use the canonical shape", () => {
+    const sse = [
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{\\"c\\":"}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"1}"}}]}}]}\n\n',
+      'data: {"id":"cmpl-1","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      "data: [DONE]\n\n",
+    ].join("");
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [sse]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    assert.equal(emitted + (verdict.tail || ""), sse, "canonical streams must stay byte-identical");
+  });
+});

@@ -571,3 +571,114 @@ describe("openai handler thinking-depth injection", () => {
     assert.equal("reasoning_effort" in sent[0], false);
   });
 });
+
+describe("outbound history tool-call sanitization", () => {
+  function makeCaptureHandler() {
+    let sentBody = null;
+    const handler = createOpenAIHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store: makeStore() }),
+      loadCredential: () => ({ ok: true, value: "sk-test" }),
+      upstreamFetch: async (_url, init) => {
+        sentBody = JSON.parse(init.body);
+        return success();
+      },
+      recordGeneration: () => {},
+      readGeneration: () => null,
+    });
+    return { handler, sent: () => sentBody };
+  }
+
+  const ask = (handler, messages) => handler.handleChatCompletions(
+    "/openai/poke-api/v1/chat/completions",
+    { authorization: TOKEN },
+    { model: "claude-opus-5", messages },
+  );
+
+  it("drops assistant tool_calls whose id or name is empty, plus the tool results they can never answer", async () => {
+    const { handler, sent } = makeCaptureHandler();
+    const result = await ask(handler, [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "", type: "function", function: { name: "", arguments: "{}" } },
+          { id: "call_2", type: "function", function: { name: "", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "", content: "x" },
+    ]);
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent().messages, [
+      { role: "user", content: "hi" },
+    ]);
+  });
+
+  it("keeps a healthy tool-call round trip exactly as the client sent it", async () => {
+    const { handler, sent } = makeCaptureHandler();
+    const messages = [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "bash", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+    ];
+    const result = await ask(handler, messages);
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent().messages, messages);
+  });
+
+  it("keeps the good call and its result while dropping a bad sibling call and its orphan result", async () => {
+    const { handler, sent } = makeCaptureHandler();
+    const result = await ask(handler, [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "bash", arguments: "{}" } },
+          { id: "", type: "function", function: { name: "", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+      { role: "tool", tool_call_id: "", content: "orphan" },
+    ]);
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent().messages, [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          { id: "call_1", type: "function", function: { name: "bash", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "done" },
+    ]);
+  });
+
+  it("keeps an assistant message whose content survives even when its tool calls were unusable", async () => {
+    const { handler, sent } = makeCaptureHandler();
+    const result = await ask(handler, [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "partial answer without tool",
+        tool_calls: [
+          { id: "", type: "function", function: { name: "", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "", content: "orphan" },
+    ]);
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent().messages, [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "partial answer without tool", tool_calls: [] },
+    ]);
+  });
+});

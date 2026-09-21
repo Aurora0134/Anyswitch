@@ -82,6 +82,40 @@ function dataPayload(line) {
   return payload.endsWith("\r") ? payload.slice(0, -1) : payload;
 }
 
+// A present-but-empty tool-call id/type/name is as unusable as a missing one:
+// clients that merge deltas object-style (`{...acc, ...delta}` or `??`) keep
+// the later "" and overwrite the real values the first delta carried.
+function hasText(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+// Some upstreams (observed: stepfun) repeat `id`/`type`/`function.name` on
+// every tool-call continuation delta with the value "" instead of omitting
+// the keys — the canonical shape every other upstream emits. Forward the line
+// without the emptied keys so strict clients keep the first delta's values;
+// a call that never carries real values anywhere is left for the guard's
+// incomplete-tool-call verdict to reject below.
+function stripEmptyToolCallKeys(line, parsed) {
+  let touched = false;
+  for (const choice of parsed.choices ?? []) {
+    const calls = choice?.delta?.tool_calls;
+    if (!Array.isArray(calls)) continue;
+    for (const call of calls) {
+      if (call === null || typeof call !== "object") continue;
+      for (const key of ["id", "type"]) {
+        if (call[key] === "") { delete call[key]; touched = true; }
+      }
+      const fn = call.function;
+      if (fn !== null && typeof fn === "object" && fn.name === "") { delete fn.name; touched = true; }
+    }
+  }
+  if (!touched) return line;
+  const nl = line.endsWith("\r\n") ? "\r\n" : "\n";
+  const body = line.slice(0, line.length - nl.length);
+  const sep = body.slice(5, 6) === " " ? " " : "";
+  return `data:${sep}${JSON.stringify(parsed)}${nl}`;
+}
+
 export class OpenAIStreamGuard {
   constructor({ holdEntireTurn = false } = {}) {
     this.partial = ""; // decoded text not yet forming a complete line
@@ -160,8 +194,9 @@ export class OpenAIStreamGuard {
     }
 
     this.trackToolCalls(parsed);
-    if (!this.holding) return line;
-    this.held += line;
+    const forward = stripEmptyToolCallKeys(line, parsed);
+    if (!this.holding) return forward;
+    this.held += forward;
     if (this.isHealthy(parsed)) {
       this.sawContent = true;
       if (!this.holdEntireTurn) {
@@ -188,12 +223,14 @@ export class OpenAIStreamGuard {
         let rec = this.calls.get(call.index);
         if (rec === undefined) {
           // A first delta without an id is itself malformed for strict
-          // clients; remember it so the verdict can account for it.
-          rec = { firstHadId: call.id != null, hasId: false, hasName: false, args: "" };
+          // clients; remember it so the verdict can account for it. An
+          // empty string counts as missing — a "" id/name is as unusable
+          // as an absent one, and some upstreams stream "" continuations.
+          rec = { firstHadId: hasText(call.id), hasId: false, hasName: false, args: "" };
           this.calls.set(call.index, rec);
         }
-        if (call.id != null) rec.hasId = true;
-        if (call.function?.name != null) rec.hasName = true;
+        if (hasText(call.id)) rec.hasId = true;
+        if (hasText(call.function?.name)) rec.hasName = true;
         if (typeof call.function?.arguments === "string") rec.args += call.function.arguments;
       }
     }
