@@ -2384,12 +2384,25 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes("routeChainFoldBtn"), "折叠钮已移除");
   });
 
-  it("瓦片墙样式：三列网格 + 受光渐变面，质感与配置状态解耦（未配置仅文字降色）", () => {
+  it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {
     assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr);"),
       "三列瓦片网格");
-    assert.ok(panelCss.includes("linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-hover) 75%, var(--border))"),
-      "受光渐变面（整级明度差底 stop）");
-    assert.ok(/\.route-ep-tile \{[^}]*box-shadow: var\(--shadow-md\)/.test(panelCss), "全部瓦片统一 md 投影");
+    const tileRule = panelCss.match(/\.route-ep-tile \{([^}]*)\}/);
+    assert.ok(tileRule, ".route-ep-tile 静止规则存在");
+    assert.ok(/background: var\(--surface-sunken\);/.test(tileRule[1]),
+      "瓦片底色取内陷面（与遥测四宫格、分段控件同一档）");
+    assert.ok(!/box-shadow/.test(tileRule[1]), "瓦片自身无投影——抬升由外层 .panel-card 承担");
+    assert.ok(!/linear-gradient/.test(tileRule[1]), "无常驻渐变面（悬停 token 不当常任用色）");
+    const tileHover = panelCss.match(/\.route-ep-tile:hover \{([^}]*)\}/);
+    assert.ok(tileHover && /background: var\(--surface-hover\)/.test(tileHover[1])
+      && /border-color: var\(--border-strong\)/.test(tileHover[1]),
+      "悬停＝整块平铺提亮 + 边框提到立边色（与设置页「通用」行、主题列表项同手感）");
+    assert.ok(tileHover && !/var\(--accent\)/.test(tileHover[1]) && !/box-shadow/.test(tileHover[1]),
+      "悬停不用品牌色描边、不跳投影档（品牌色描边只表示选中/启用）");
+    // 材质只走 token，不留主题特化：皮肤段若给瓦片单画材质，就会出现「不随主题重画的表面」
+    const skinSection = panelCss.slice(panelCss.indexOf("/* ===== style-lab: saas ===== */"));
+    assert.ok(skinSection.includes("style-lab: sepia"), "皮肤段切片锚点有效");
+    assert.ok(!/\.route-ep-/.test(skinSection), "主题片段不覆盖 route-ep 选择器");
     assert.ok(!panelCss.includes(".route-ep-tile--off"), "无停用降档投影（质感不绑状态）");
     assert.ok(!panelCss.includes(".route-ep-tile--empty {") && !panelCss.includes(".route-ep-tile--empty:"),
       "未配置瓦片不再覆盖底色/投影");
