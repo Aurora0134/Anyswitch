@@ -5671,7 +5671,10 @@ async function api(method, path, body) {
     }
     const rr = storeState && storeState.resumeResult;
     const resumed = (rr && rr.resumed) || [];
-    const failed = (rr && rr.failed) || [];
+    // failed 项是 { providerId, reason }；只上屏渠道 id（原因属服务日志，长英文句
+    // 不该出现在这里），旧格式（纯 id）照旧兼容。
+    const failed = ((rr && rr.failed) || []).map((item) =>
+      typeof item === "string" ? item : (item && item.providerId) || "未知渠道");
     if (rr && rr.error) {
       note.hidden = false;
       note.textContent = panelCopy(rr.error, "无法确认是否有未完成的删除，请稍后重试");
@@ -6924,6 +6927,7 @@ async function api(method, path, body) {
   }
 
   function confirmDeleteProvider(p) {
+    const routed = endpointsRoutingThroughNodes(p.id);
     showSkillsModal({
       title: `删除渠道 ${p.displayName}`,
       danger: true,
@@ -6931,10 +6935,11 @@ async function api(method, path, body) {
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
         将从渠道管理删除渠道 <b>${escapeHtml(p.id)}</b>（${p.modelCount} 个有效模型），
         并删除它在主机上的加密凭据。<br>
+        ${routed.length ? `以下端点的自动路由包含该渠道：${escapeHtml(routed.join("、"))}。删除后会从这些自动路由中移除对应节点。<br>` : ""}
         凭据删除是唯一不可恢复的步骤；渠道删除失败时凭据会原样保留。</div>`,
       onConfirm: async () => {
         await storeAction("/api/store/delete", { id: p.id },
-          (r) => `已删除 ${p.id}（${r.modelCount} 个模型）`);
+          (r) => `已删除 ${p.id}（${r.modelCount} 个模型）${routeChainPrunedNote(r.prunedChains)}`);
         storeSelection.delete(p.id);
         if (storeFocusId === p.id) storeFocusId = storeLastSelectionId();
         storeFilterChecked = null;
@@ -6950,6 +6955,7 @@ async function api(method, path, body) {
     const pool = storePools().find((pl) => pl.id === p.poolId);
     const poolName = pool?.displayName || p.poolId;
     const dissolving = (pool?.members?.length ?? 2) <= 2;
+    const routed = endpointsRoutingThroughNodes(dissolving ? [p.id, p.poolId] : [p.id]);
     showSkillsModal({
       title: `删除渠道 ${p.displayName}`,
       danger: true,
@@ -6958,10 +6964,11 @@ async function api(method, path, body) {
         将从渠道管理删除渠道 <b>${escapeHtml(p.id)}</b>（${p.modelCount} 个有效模型），
         并删除它在主机上的加密凭据。<br>
         该渠道属于号池 <b>${escapeHtml(poolName)}</b>，删除后会自动移出号池${dissolving ? "；号池只剩 1 个成员，将一并解除" : ""}。<br>
+        ${routed.length ? `以下端点的自动路由包含${dissolving ? "该渠道与所在号池" : "该渠道"}：${escapeHtml(routed.join("、"))}。删除后会从这些自动路由中移除对应节点。<br>` : ""}
         凭据删除是唯一不可恢复的步骤；渠道删除失败时凭据会原样保留。</div>`,
       onConfirm: async () => {
         await storeAction("/api/store/delete", { id: p.id },
-          (r) => `已删除 ${p.id}（${r.modelCount} 个模型）`);
+          (r) => `已删除 ${p.id}（${r.modelCount} 个模型）${routeChainPrunedNote(r.prunedChains)}`);
         storeSelection.delete(p.id);
         const poolGone = !storePools().some((pl) => pl.id === p.poolId);
         if (poolGone) {
@@ -7011,20 +7018,24 @@ async function api(method, path, body) {
 
   // 解除号池：仅删 pools 条目，成员渠道与凭据原样保留
   function confirmDissolvePool(row) {
+    const routed = endpointsRoutingThroughNodes(row.id);
     showSkillsModal({
       title: `解除号池 ${row.displayName}`,
       confirmText: "解除号池",
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
         号池 <b>${escapeHtml(row.id)}</b> 解除后，成员渠道 ${row.members.map((m) => `<b>${escapeHtml(m.id)}</b>`).join("、")}
-        退回各自独立渠道状态；渠道、模型与凭据均保留。</div>`,
+        退回各自独立渠道状态；渠道、模型与凭据均保留。<br>
+        ${routed.length ? `以下端点的自动路由包含该号池：${escapeHtml(routed.join("、"))}。解除后会从这些自动路由中移除该号池节点。` : ""}</div>`,
       onConfirm: async () => {
-        await storeAction("/api/store/pool/delete", { poolId: row.id }, `已解除号池：${row.displayName}`);
+        await storeAction("/api/store/pool/delete", { poolId: row.id },
+          (r) => `已解除号池：${row.displayName}${routeChainPrunedNote(r.prunedChains)}`);
       },
     });
   }
 
   // 删除号池（两步语义）：先解除号池，再逐个删除成员渠道及凭据
   function confirmDeletePool(row) {
+    const routed = endpointsRoutingThroughNodes([row.id, ...row.members.map((m) => m.id)]);
     showSkillsModal({
       title: `删除号池 ${row.displayName}`,
       danger: true,
@@ -7032,6 +7043,7 @@ async function api(method, path, body) {
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
         将<b>先解除号池</b> ${escapeHtml(row.id)}，再逐个删除 ${row.members.length} 个成员渠道及其凭据文件：<br>
         ${row.members.map((m) => `· ${escapeHtml(m.id)}（${m.modelCount} 个有效模型）`).join("<br>")}<br>
+        ${routed.length ? `以下端点的自动路由包含其中的渠道或号池：${escapeHtml(routed.join("、"))}。删除后会从这些自动路由中移除对应节点。<br>` : ""}
         凭据删除是唯一不可恢复的步骤。</div>`,
       onConfirm: async () => {
         await deletePoolAndMembers(row);
@@ -7040,22 +7052,25 @@ async function api(method, path, body) {
   }
   async function deletePoolAndMembers(row) {
     const failed = [];
+    const pruned = [];
+    const collectPruned = (r) => { if (Array.isArray(r?.prunedChains)) pruned.push(...r.prunedChains); };
     try {
-      await api("POST", "/api/store/pool/delete", { poolId: row.id });
+      collectPruned(await api("POST", "/api/store/pool/delete", { poolId: row.id }));
     } catch (e) {
       failed.push(`号池 ${row.id} 解除失败：${panelError(e, "操作未完成")}`);
     }
     let deleted = 0;
     for (const m of row.members) {
       try {
-        await api("POST", "/api/store/delete", { id: m.id });
+        collectPruned(await api("POST", "/api/store/delete", { id: m.id }));
         deleted++;
       } catch (e) {
         failed.push(`${m.id}：${panelError(e, "删除未完成")}`);
       }
     }
+    const note = routeChainPrunedNote(dedupePrunedChains(pruned));
     if (failed.length) toast(`部分删除失败（已删 ${deleted}/${row.members.length}）：${failed.join("；")}`, true);
-    else toast(`已删除号池 ${row.displayName} 及 ${deleted} 个成员渠道`);
+    else toast(`已删除号池 ${row.displayName} 及 ${deleted} 个成员渠道${note}`);
     storeSelection.clear();
     storeFocusId = null;
     storeFilterChecked = null;
@@ -7069,6 +7084,7 @@ async function api(method, path, body) {
     const rows = [...storeSelection].map((id) => storeRows().find((r) => r.id === id)).filter(Boolean);
     const poolRows = rows.filter((r) => r.kind === "pool");
     const providerIds = storeSelectionProviders();
+    const routed = endpointsRoutingThroughNodes([...new Set(rows.flatMap((r) => r.kind === "pool" ? [r.id, ...r.members.map((m) => m.id)] : [r.id]))]);
     const lines = rows.map((r) => r.kind === "pool"
       ? `· 号池 ${escapeHtml(r.displayName)}（${r.members.length} 个成员渠道将一并删除）`
       : `· 渠道 ${escapeHtml(r.id)}`);
@@ -7079,12 +7095,15 @@ async function api(method, path, body) {
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
         ${lines.join("<br>")}<br>
         ${poolRows.length ? "号池将先解除再逐个删除成员渠道；" : ""}共删除 ${providerIds.length} 个渠道及其凭据文件，
+        ${routed.length ? `<br>以下端点的自动路由包含其中的渠道或号池：${escapeHtml(routed.join("、"))}。删除后会从这些自动路由中移除对应节点。` : ""}
         凭据删除是唯一不可恢复的步骤。</div>`,
       onConfirm: async () => {
         const failed = [];
+        const pruned = [];
+        const collectPruned = (r) => { if (Array.isArray(r?.prunedChains)) pruned.push(...r.prunedChains); };
         for (const row of poolRows) {
           try {
-            await api("POST", "/api/store/pool/delete", { poolId: row.id });
+            collectPruned(await api("POST", "/api/store/pool/delete", { poolId: row.id }));
           } catch (e) {
             failed.push(`号池 ${row.id} 解除失败：${panelError(e, "操作未完成")}`);
           }
@@ -7092,14 +7111,15 @@ async function api(method, path, body) {
         let deleted = 0;
         for (const id of providerIds) {
           try {
-            await api("POST", "/api/store/delete", { id });
+            collectPruned(await api("POST", "/api/store/delete", { id }));
             deleted++;
           } catch (e) {
             failed.push(`${id}：${panelError(e, "操作未完成")}`);
           }
         }
+        const note = routeChainPrunedNote(dedupePrunedChains(pruned));
         if (failed.length) toast(`部分删除失败（已删 ${deleted}/${providerIds.length}）：${failed.join("；")}`, true);
-        else toast(`已删除 ${deleted} 个渠道${poolRows.length ? `（含 ${poolRows.length} 个号池）` : ""}`);
+        else toast(`已删除 ${deleted} 个渠道${poolRows.length ? `（含 ${poolRows.length} 个号池）` : ""}${note}`);
         storeSelection.clear();
         storeFocusId = null;
         storeFilterChecked = null;
@@ -7418,6 +7438,38 @@ async function api(method, path, body) {
   const ROUTE_CHAIN_ENDPOINTS = ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok"];
   const ROUTE_CHAIN_MAX_NODES = 8;
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
+
+  // 删除渠道 / 解散号池会顺势剪掉指向它们的路由链节点（服务端在同一笔写入里完成），
+  // 删除结果带回 prunedChains: [{endpointId, remaining}]。删除成功提示据此附一句
+  // 「已从自动路由移除对应节点」；remaining = 0（整条链被剪空）时不带括号，只报端点名。
+  function routeChainPrunedNote(prunedChains) {
+    if (!Array.isArray(prunedChains) || !prunedChains.length) return "";
+    const labels = prunedChains.map((item) =>
+      item.remaining > 0
+        ? `${routeChainEndpointLabel(item.endpointId)}（剩 ${item.remaining} 个节点）`
+        : routeChainEndpointLabel(item.endpointId));
+    return `；已从自动路由移除对应节点：${labels.join("、")}`;
+  }
+
+  // 哪些端点的自动路由链引用了给定节点（渠道/号池 id）。删除前预告与删除确认
+  // 共用：只列真正会被剪到的端点，未被引用的不出现。
+  function endpointsRoutingThroughNodes(nodeIds) {
+    const set = new Set(Array.isArray(nodeIds) ? nodeIds : [nodeIds]);
+    return storeRoutingChains()
+      .filter((c) => Array.isArray(c.chain) && c.chain.some((it) => set.has(it.node)))
+      .map((c) => routeChainEndpointLabel(c.endpointId));
+  }
+
+  // 批量删除会把多次删除结果的 prunedChains 汇总；同一端点可能被剪多次
+  // （成员逐个删），取各次里剩余最少的一条作为最终跳数。
+  function dedupePrunedChains(items) {
+    const byEndpoint = new Map();
+    for (const item of items || []) {
+      const prev = byEndpoint.get(item.endpointId);
+      if (prev === undefined || item.remaining < prev) byEndpoint.set(item.endpointId, item.remaining);
+    }
+    return [...byEndpoint].map(([endpointId, remaining]) => ({ endpointId, remaining }));
+  }
 
   let routeChainEndpointId = null;   // 编辑器当前端点
   let routeChainDraft = [];          // 编辑中的链 [{node, model}]
