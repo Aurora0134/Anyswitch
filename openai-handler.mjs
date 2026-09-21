@@ -63,6 +63,47 @@ function normalizeToolCallArguments(body) {
   return touched ? { ...body, messages } : body;
 }
 
+// Upstreams reject an assistant tool_call whose id or function name is empty
+// (observed: stepfun answers 400), and such an entry is unanswerable anyway:
+// no tool message can ever pair with an empty/missing id. A client that
+// replays a corrupted turn then hard-fails every later request of the
+// session, so drop the unusable calls together with the tool messages they
+// can never match, and drop an assistant message the cleanup leaves empty.
+function stripUnusableToolCalls(body) {
+  if (!Array.isArray(body.messages)) return body;
+  const survivingIds = new Set();
+  for (const message of body.messages) {
+    if (message === null || typeof message !== "object" || message.role !== "assistant") continue;
+    for (const call of message.tool_calls ?? []) {
+      if (hasUsableIdentity(call)) survivingIds.add(call.id);
+    }
+  }
+  let touched = false;
+  const messages = [];
+  for (const message of body.messages) {
+    if (message !== null && typeof message === "object" && message.role === "assistant" && Array.isArray(message.tool_calls)) {
+      const toolCalls = message.tool_calls.filter(hasUsableIdentity);
+      if (toolCalls.length !== message.tool_calls.length) touched = true;
+      const content = message.content;
+      const contentEmpty = content == null || content === "" || (Array.isArray(content) && content.length === 0);
+      if (toolCalls.length === 0 && contentEmpty) { touched = true; continue; }
+      messages.push(toolCalls.length === message.tool_calls.length ? message : { ...message, tool_calls: toolCalls });
+      continue;
+    }
+    if (message !== null && typeof message === "object" && message.role === "tool") {
+      const id = message.tool_call_id;
+      if (typeof id !== "string" || id.length === 0 || !survivingIds.has(id)) { touched = true; continue; }
+    }
+    messages.push(message);
+  }
+  return touched ? { ...body, messages } : body;
+}
+
+function hasUsableIdentity(call) {
+  return typeof call?.id === "string" && call.id.length > 0
+    && typeof call?.function?.name === "string" && call.function.name.length > 0;
+}
+
 export function createOpenAIHandler(deps) {
   const {
     token,
@@ -244,7 +285,7 @@ export function createOpenAIHandler(deps) {
 
     const urls = buildUpstreamURLs(provider, "/chat/completions");
 
-    const normalizedBody = normalizeToolCallArguments(body);
+    const normalizedBody = normalizeToolCallArguments(stripUnusableToolCalls(body));
     const withUsage = normalizedBody.stream === true
       ? {
           ...normalizedBody,
