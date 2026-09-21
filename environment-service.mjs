@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { execFile } from "node:child_process";
 import { join, dirname, resolve, isAbsolute, extname, basename, relative } from "node:path";
 import {
-  resolveClaudeExecutable, resolveCodexExecutable, resolveOpencodeExecutable,
+  resolveClaudeExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable,
 } from "./agent-discovery.mjs";
@@ -13,6 +13,14 @@ import { compareVersions, parseVersion } from "./version-check.mjs";
 // not a separately installed CLI product, so it is not a detection target.
 function resolveQoderExecutable(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
+}
+
+// The Codex CLI line must describe the same artifact the update button
+// installs — the npm-global @openai/codex package — not the launcher's
+// bundled engine under %LOCALAPPDATA%\OpenAI\Codex\bin, so detection follows
+// the npm shim like the other npm-based clients, never resolveCodexExecutable.
+function resolveCodexShim(base = process.env) {
+  return join(base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"), "npm", "codex.cmd");
 }
 
 export function readWindowsVersionResource(path) {
@@ -30,14 +38,37 @@ export function readWindowsVersionResource(path) {
   });
 }
 
+// Microsoft Store MSIX packages carry their version in the package
+// registration, not in any executable resource. An empty stdout means the
+// package is absent (resolve null); a nonzero exit, a timeout, or output that
+// is not JSON rejects so the caller reports discovery_failed.
+export function readWindowsAppxPackage(name) {
+  if (process.platform !== "win32") return Promise.resolve(null);
+  const script = "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); Get-AppxPackage -Name $env:ANYSWITCH_APPX_NAME | Select-Object Name,Version,InstallLocation | ConvertTo-Json -Compress";
+  return new Promise((done, reject) => {
+    execFile(join(process.env.SystemRoot || "C:\\Windows", "System32/WindowsPowerShell/v1.0/powershell.exe"),
+      ["-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")],
+      { timeout: 3000, windowsHide: true, maxBuffer: 65536, encoding: "utf8", env: { SystemRoot: process.env.SystemRoot, ANYSWITCH_APPX_NAME: name } },
+      (error, stdout) => {
+        if (error) return reject(Object.assign(new Error(), { code: error.killed ? "RESOURCE_TIMEOUT" : "RESOURCE_FAILED" }));
+        const text = stdout.replace(/^\uFEFF/, "").trim();
+        if (!text) return done(null);
+        let parsed;
+        try { parsed = JSON.parse(text); }
+        catch { return reject(Object.assign(new Error(), { code: "METADATA_INVALID" })); }
+        return done(Array.isArray(parsed) ? parsed[0] ?? null : parsed);
+      });
+  });
+}
+
 function productVersion(value) {
   return typeof value === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(value) ? value : null;
 }
 
-// Codex ships a native binary with no version resource and a hash-named install
-// directory, so the only accurate source is the CLI's own report. Bounded
-// subprocess, never a shell; a missing file reports `missing` so the caller can
-// fall back to "not found" instead of blaming the installation.
+// For native-binary clients without a reliable version resource the only
+// accurate source is the CLI's own report. Bounded subprocess, never a shell;
+// a missing file reports `missing` so the caller can fall back to "not found"
+// instead of blaming the installation.
 export function probeExecutableVersion(path, { exec = execFile, timeoutMs = 5000 } = {}) {
   return new Promise((done) => {
     exec(path, ["--version"], { timeout: timeoutMs, windowsHide: true, maxBuffer: 65536, encoding: "utf8" }, (error, stdout, stderr) => {
@@ -50,15 +81,15 @@ export function probeExecutableVersion(path, { exec = execFile, timeoutMs = 5000
 
 const CLIENTS = [
   ["claude", "Claude Code", resolveClaudeExecutable],
-  ["codex", "Codex", resolveCodexExecutable],
+  ["codex", "Codex", resolveCodexShim],
   ["opencode", "OpenCode", resolveOpencodeExecutable],
   ["pi", "Pi", resolvePiExecutable],
   ["kimi", "Kimi Code", resolveKimiExecutable],
   ["dsh", "DSH", resolveDshExecutable],
   ["zcode", "ZCode", resolveZcodeExecutable],
   ["qoder", "Qoder", resolveQoderExecutable],
-  // Grok Build is a native binary like codex: version comes from the CLI's own
-  // --version report (probeVersion branch below), never an npm package.json.
+  // Grok Build is the remaining native binary: version comes from the CLI's
+  // own --version report (probeVersion branch below), never an npm package.json.
   ["grok", "Grok Build", resolveGrokExecutable],
 ];
 
@@ -73,7 +104,7 @@ function missing(error) {
   return ["ENOENT", "ENOTDIR"].includes(error?.code);
 }
 
-export function createEnvironmentService({ base = process.env, now = Date.now, io = fs, readVersionResource = readWindowsVersionResource, probeVersion = probeExecutableVersion, ttl = 60_000 } = {}) {
+export function createEnvironmentService({ base = process.env, now = Date.now, io = fs, readVersionResource = readWindowsVersionResource, probeVersion = probeExecutableVersion, readAppxPackage = readWindowsAppxPackage, ttl = 60_000 } = {}) {
   function isFile(path) {
     try { return io.statSync(path).isFile(); }
     catch (error) { if (missing(error)) return false; throw error; }
@@ -169,7 +200,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         && resolve(root, "bin/opencode.exe").toLowerCase() === resolve(path).toLowerCase()
         && typeof pkg.version === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
     }
-    const names = { claude: "@anthropic-ai/claude-code", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh" };
+    const names = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh" };
     if (!names[id]) return null;
     let dir = dirname(path);
     for (let depth = 0; depth < 6; depth++, dir = dirname(dir)) {
@@ -192,10 +223,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     try {
       let path = locate(base, resolverIo);
       if (!isFile(path)) return result;
-      if (["pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
+      if (["codex", "pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
       if (!path || !isFile(path)) return result;
       Object.assign(result, { status: "found", path, issue: "version_unavailable" });
-      if (id === "codex" || id === "grok") {
+      if (id === "grok") {
         const probe = await probeVersion(path);
         if (probe?.missing) return { ...result, status: "not_found", path: null, issue: "entry_missing" };
         return probe?.version
@@ -222,12 +253,39 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
+  // The Codex desktop app is a Microsoft Store MSIX package (OpenAI.Codex).
+  // Store builds carry a four-segment manifest version (26.915.4065.0); a
+  // trailing ".0" is stripped like the Claude PE check above, anything else
+  // reports the row as found with an unreadable version. remoteId is
+  // "codex-desktop" so the panel queries the desktop release feed for it.
+  async function inspectCodexDesktop() {
+    const result = { kind: "desktop", remoteId: "codex-desktop", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const pkg = await readAppxPackage("OpenAI.Codex");
+      if (!pkg) return result;
+      const found = {
+        ...result,
+        status: "found",
+        path: typeof pkg.InstallLocation === "string" ? pkg.InstallLocation : null,
+        issue: "version_unavailable",
+      };
+      const version = typeof pkg.Version === "string" ? productVersion(pkg.Version.replace(/^(\d+\.\d+\.\d+)\.0$/, "$1")) : null;
+      return version ? { ...found, version, versionSource: "appx manifest", issue: null } : found;
+    } catch {
+      return { ...result, status: "error", issue: "discovery_failed" };
+    }
+  }
+
   let cache = null;
   async function getState({ force = false } = {}) {
     const at = now();
     if (!force && cache && at - cache.at < ttl) return cache.state;
     const clients = await Promise.all(CLIENTS.map(async ([id, name, resolver]) => {
-      const installations = [await inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)];
+      // Codex is two installations in one card: the npm CLI (index 0, what the
+      // update button manages) and the Microsoft Store desktop app.
+      const installations = await Promise.all(id === "codex"
+        ? [inspect(id, "cli", resolver), inspectCodexDesktop()]
+        : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
       return { id, name, installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };

@@ -1981,7 +1981,8 @@ async function api(method, path, body) {
         if (url.hostname === "github.com" && repo && (path === `/${repo}` || path.startsWith(`/${repo}/releases`))) return url.href;
         if (url.hostname === "www.npmjs.com" && pkg && path === `/package/${pkg}`) return url.href;
         const hosts = id === "zcode" ? ["zcode.z.ai"]
-          : id === "qoder" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn"] : [];
+          : id === "qoder" ? ["qoder.com", "www.qoder.com", "qoder.com.cn", "www.qoder.com.cn", "docs.qoder.com", "download.qoder.com.cn"]
+          : id === "codex-desktop" ? ["apps.microsoft.com", "www.microsoft.com"] : [];
         return hosts.includes(url.hostname) ? url.href : null;
       } catch { return null; }
     }

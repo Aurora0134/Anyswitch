@@ -113,6 +113,22 @@ test("官方客户端版本查询只允许已支持客户端", async () => {
   });
 });
 
+test("Codex 桌面端纳入官方版本查询白名单，不再吃 unknown_client", async () => {
+  const latest = { state: "ok", version: "26.915.4066", url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS", source: "codex-desktop:windows-store:latest", checkedAt: "2026-09-18T00:00:00Z", errorCode: null };
+  await withPanel({ releaseService: { async getClientLatest(id, options) {
+    assert.equal(id, "codex-desktop", "远端 id 原样传给发布服务");
+    assert.deepEqual(options, { force: false });
+    return latest;
+  } } }, async (get) => {
+    const result = await get("/panel/api/environment/latest/codex-desktop");
+    assert.equal(result.status, 200, "codex-desktop 不再落进 404 unknown_client");
+    assert.deepEqual(result.body, { ...latest, comparison: "unknown" });
+    const compared = await get("/panel/api/environment/latest/codex-desktop?localVersion=26.915.4065");
+    assert.equal(compared.status, 200);
+    assert.equal(compared.body.comparison, "update_available", "comparison 字段照常按本地版本计算");
+  });
+});
+
 test("客户端预发布版本按数字比较，未知和查询失败保持无法比较", async () => {
   let offline = false;
   const service = { async getClientLatest() {

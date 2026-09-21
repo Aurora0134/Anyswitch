@@ -17,6 +17,11 @@ const CLIENTS = {
     endpoint: "https://api.github.com/repos/openai/codex/releases/latest",
     source: "github:openai/codex:latest", format: "codex",
   },
+  "codex-desktop": {
+    endpoint: "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json",
+    source: "codex-desktop:windows-store:latest", format: "codex-desktop",
+    url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS",
+  },
   zcode: {
     endpoint: "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1",
     source: "zcode:windows-x86_64:stable", format: "yaml", url: "https://zcode.z.ai/cn/changelog",
@@ -141,8 +146,12 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
       const data = spec.format === "yaml" ? null : parseJson(text);
       if (spec.format === "codex" && (typeof data?.tag_name !== "string" || !data.tag_name.startsWith("rust-v")
         || data.draft !== false || data.prerelease !== false)) throw new ReleaseError("invalid_response");
+      if (spec.format === "codex-desktop" && (typeof data?.buildVersion !== "string"
+        || !/^\d+\.\d+\.\d+(?:\.0)?$/.test(data.buildVersion))) throw new ReleaseError("invalid_response");
       const version = spec.format === "yaml" ? yamlVersion(text)
-        : spec.format === "codex" ? data.tag_name.slice(6) : data?.[spec.field];
+        : spec.format === "codex" ? data.tag_name.slice(6)
+        : spec.format === "codex-desktop" ? data.buildVersion.replace(/^(\d+\.\d+\.\d+)\.0$/, "$1")
+        : data?.[spec.field];
       const parsed = parseVersion(version);
       if (!parsed || (spec.format === "codex" && parsed.prerelease.length)) throw new ReleaseError("invalid_response");
       return {
