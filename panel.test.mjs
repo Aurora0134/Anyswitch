@@ -971,8 +971,10 @@ describe("panel.html opencode endpoint card", () => {
   });
 
   it("inline scripts stay syntactically valid JavaScript", () => {
-    const blocks = [...panelHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
-    assert.ok(blocks.length > 0, "panel.html has inline scripts");
+    // 取样含带 id 的内联脚本（panelStartupBootstrap / panelViewPrepaint 等）——
+    // 只匹配裸 <script> 会把首帧脚本留在自检之外，而它跑在绘制前、语法错了整页白屏。
+    const blocks = [...panelHtml.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
+    assert.ok(blocks.length >= 4, "panel.html 的内联脚本数量不少于四个");
     for (const code of blocks) {
       // new Function parses the source without executing it — a cheap
       // node --check equivalent for the inline scripts.
@@ -2635,6 +2637,243 @@ describe("panel.html 设置全页视图", () => {
     // 没停在设置页：标记为 0 时不得凭空进设置
     const mainOnly = run({ "panel-view": "stats", "panel-settings-open": "0" }, {});
     assert.deepEqual(mainOnly.calls, ["stats"], "只恢复主视图");
+  });
+
+  // ── 首帧视图落位：整页加载不再先画出看板 ──────────────────────────────
+  // 主脚本是 defer 外链，restoreView 落位必然晚于首绘，而 HTML 的静态默认是看板。
+  // panel.html 的 panelViewPrepaint 于绘制前把目标屏写在 <html> 上，panel.css 的
+  // 「首帧视图落位」段负责那一帧显隐。三条红线在此钉死：
+  // ① 首帧目标与 restoreView 落定目标逐一相等——两边不一致本身就是新的闪烁；
+  // ② CSS 的显示取值等于各容器自身的 display——凭印象写就会首帧布局走形；
+  // ③ switchView 摘属性的时机在 hidden 赋值之后、进入钩子之前。
+  const PREPAINT_SUB_TABS = ["general", "route", "theme", "about"];
+  const prepaintSrc = (panelHtml.match(/<script id="panelViewPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+  const prepaintRestoreBody =
+    (panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/) || [])[1];
+
+  function prepaintAttrs(store, win = {}, broken = false) {
+    const attrs = {};
+    const document = {
+      documentElement: {
+        setAttribute: (k, v) => { attrs[k] = v; },
+        removeAttribute: (k) => { delete attrs[k]; },
+      },
+    };
+    const localStorage = {
+      getItem: (k) => { if (broken) throw new Error("denied"); return k in store ? store[k] : null; },
+      setItem: () => {},
+    };
+    // 原样跑那段内联脚本（含 IIFE），比复述它的逻辑更接近真页面上的行为
+    new Function("window", "document", "localStorage", prepaintSrc)(win, document, localStorage);
+    return attrs;
+  }
+
+  function restoreOutcome(store, win = {}, broken = false) {
+    const calls = [];
+    return new Function("store", "win", "calls", "broken", `
+      let suppressViewEnter = false, settingsReturnView = "board", settingsSubTabToRestore = null,
+          restartEnterView = null, currentView = "board";
+      const window = win;
+      const localStorage = {
+        getItem: (k) => { if (broken) throw new Error("denied"); return k in store ? store[k] : null; },
+        setItem: (k, v) => { store[k] = v; },
+      };
+      function switchView(name) { currentView = name; calls.push(name); }
+      function restoreView() {
+      ${prepaintRestoreBody}
+      }
+      restoreView();
+      return { calls, currentView, settingsSubTabToRestore };
+    `)(store, win, calls, broken);
+  }
+
+  const PREPAINT_CASES = [
+    { name: "停在设置页·主题（进设置前在渠道页）", view: "settings", subTab: "theme",
+      store: { "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "theme" } },
+    { name: "停在设置页·关于（进设置前在看板）", view: "settings", subTab: "about",
+      store: { "panel-view": "board", "panel-settings-open": "1", "panel-settings-subtab": "about" } },
+    { name: "停在设置页但子 tab 存档不在册 → 与 enterSettingsView 同样回落「通用」", view: "settings", subTab: "general",
+      store: { "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "nope" } },
+    { name: "停在渠道页", view: "store", subTab: null,
+      store: { "panel-view": "store", "panel-settings-open": "0" } },
+    { name: "停在统计页", view: "stats", subTab: null,
+      store: { "panel-view": "stats", "panel-settings-open": "0" } },
+    { name: "停在会话页", view: "sessions", subTab: null,
+      store: { "panel-view": "sessions", "panel-settings-open": "0" } },
+    { name: "没有任何存档 → 看板就是 HTML 默认，不写属性", view: "board", subTab: null, store: {} },
+    { name: "panel-view 值不在册 → 同上", view: "board", subTab: null,
+      store: { "panel-view": "nope", "panel-settings-open": "0" } },
+    { name: "launcher 首开固定落看板（标记属上一次会话）", view: "board", subTab: null,
+      store: { "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "theme" },
+      win: { panelStartupLaunch: true } },
+    { name: "面板服务重启后的自动刷新 → 开屏层后面也是目标屏", view: "settings", subTab: "route",
+      store: { "panel-view": "board", "panel-settings-open": "1", "panel-settings-subtab": "route" },
+      win: { panelStartupRestart: true } },
+    { name: "localStorage 不可用 → 两边同样落看板默认", view: "board", subTab: null, store: {}, broken: true },
+  ];
+
+  it("首帧落位与 restoreView 落定目标逐一相等（含首开、重启、非法存档、存储不可用）", () => {
+    assert.ok(prepaintSrc, "panel.html 有 <script id=\"panelViewPrepaint\">");
+    assert.ok(prepaintRestoreBody, "restoreView found in panel.js");
+    for (const c of PREPAINT_CASES) {
+      const attrs = prepaintAttrs({ ...c.store }, c.win, c.broken);
+      const out = restoreOutcome({ ...c.store }, c.win, c.broken);
+      assert.strictEqual(out.currentView, c.view, `${c.name}：restoreView 落点与预期不符`);
+      assert.strictEqual(attrs["data-prepaint-view"] ?? "board", out.currentView,
+        `${c.name}：首帧那一屏与落定那一屏不一致`);
+      // 首帧没有子 tab 属性时，HTML 默认露出的就是「通用」——与 enterSettingsView
+      // 拿不到有效存档时的回落同一格。
+      const jsSub = out.currentView === "settings"
+        ? (PREPAINT_SUB_TABS.includes(out.settingsSubTabToRestore) ? out.settingsSubTabToRestore : "general")
+        : null;
+      const paintSub = attrs["data-prepaint-subtab"]
+        ?? (out.currentView === "settings" ? "general" : null);
+      assert.strictEqual(paintSub, jsSub, `${c.name}：首帧子 tab 与落定子 tab 不一致`);
+      assert.strictEqual(jsSub, c.subTab, `${c.name}：子 tab 落点与预期不符`);
+    }
+  });
+
+  it("首帧脚本只读判定：不改任何存档，且带 id 而非裸 <script>", () => {
+    let written = [];
+    const before = { "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "theme" };
+    const store = { ...before };
+    const document = { documentElement: { setAttribute: () => {}, removeAttribute: () => {} } };
+    new Function("window", "document", "localStorage", prepaintSrc)(
+      {}, document,
+      { getItem: (k) => (k in store ? store[k] : null), setItem: (k) => { written.push(k); } },
+    );
+    assert.deepEqual(written, [], "首帧脚本不写存档（存档归 switchView / restoreView）");
+    assert.deepEqual(store, before, "存档原样未动");
+    assert.ok(/<script id="panelViewPrepaint">/.test(panelHtml),
+      "带 id 引入，不与既有「裸 <script> 语法自检」用例的取样范围相撞");
+  });
+
+  it("首帧视图 CSS：显示取值等于容器自身 display，且六视图全在册", () => {
+    const iMark = panelCss.indexOf("首帧视图落位（绘制前）");
+    assert.ok(iMark > 0, "panel.css 有「首帧视图落位」段");
+    const base = panelCss.slice(0, iMark);
+    // 注释里带着 [hidden]{display:none !important} 这样的字面量，取样先剥注释
+    const block = panelCss.slice(iMark).replace(/\/\*[\s\S]*?\*\//g, "");
+
+    // 视图名与子 tab 名：内联脚本与 CSS 必须是同一套，漏一格就是一格仍然闪
+    const listOf = (src, key) => (src.match(new RegExp(`const ${key} = \\[([^\\]]*)\\]`)) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    const scriptViews = listOf(prepaintSrc, "VIEW_NAMES");
+    const scriptSubTabs = listOf(prepaintSrc, "SUB_TAB_NAMES");
+    const cssViews = new Set([...block.matchAll(/data-prepaint-view="([a-z]+)"/g)].map((m) => m[1]));
+    const cssSubTabs = new Set([...block.matchAll(/data-prepaint-subtab="([a-z]+)"/g)].map((m) => m[1]));
+    for (const v of scriptViews) assert.ok(cssViews.has(v), `CSS 缺视图 ${v} 的首帧规则`);
+    for (const v of cssViews) assert.ok(scriptViews.includes(v), `CSS 视图 ${v} 不在脚本白名单内`);
+    for (const s of scriptSubTabs) assert.ok(cssSubTabs.has(s), `CSS 缺子 tab ${s} 的首帧规则`);
+    assert.deepEqual(scriptSubTabs, PREPAINT_SUB_TABS, "脚本子 tab 清单与 panel.js 的四个子 tab 同");
+
+    // 容器自身的 display（class 规则 + id 规则，都没有即 block）
+    const ownDisplay = (id) => {
+      const tag = (panelHtml.match(new RegExp(`<(?:section|div)[^>]*id="${id}"[^>]*>`)) || [])[0];
+      assert.ok(tag, `${id} 在 panel.html 里有开标签`);
+      const classes = ((tag.match(/class="([^"]+)"/) || [, ""])[1]).split(/\s+/).filter(Boolean);
+      const found = new Set();
+      const grab = (re) => {
+        for (const m of base.matchAll(re)) {
+          const d = m[1].match(/display:\s*([a-z-]+)/);
+          if (d) found.add(d[1]);
+        }
+      };
+      for (const cls of classes) grab(new RegExp(`\\.${cls}(?![\\w-])(?:\\[[^\\]]*\\])*\\s*\\{([^}]*)\\}`, "g"));
+      grab(new RegExp(`#${id}\\s*\\{([^}]*)\\}`, "g"));
+      assert.ok(found.size <= 1, `${id} 自身有多条互相冲突的 display，需人工判定首帧取值`);
+      return found.size ? [...found][0] : "block";
+    };
+    const reveals = [];
+    for (const chunk of block.split("}")) {
+      const iBrace = chunk.indexOf("{");
+      if (iBrace < 0) continue;
+      const decl = chunk.slice(iBrace + 1).trim();
+      const display = (decl.match(/display:\s*([a-z-]+)/) || [])[1];
+      if (!display || display === "none") continue; // 收起侧另有专门断言
+      for (const sel of chunk.slice(0, iBrace).split(",")) {
+        // 选择器可以以 #id[hidden] 收尾，取 selector 里最后一个 ID
+        const ids = sel.match(/#[A-Za-z]+(?![\w-])/g) || [];
+        const id = ids.length ? ids[ids.length - 1].slice(1) : null;
+        if (!id || !sel.includes("data-prepaint")) continue;
+        reveals.push({ id, display, hidden: sel.includes("[hidden]"), important: decl.includes("!important") });
+      }
+    }
+    assert.ok(reveals.length >= 11,
+      `取得显示侧规则 ${reveals.length} 条，少于六视图+设置头行+四块子面板`);
+    for (const r of reveals) {
+      assert.strictEqual(r.display, ownDisplay(r.id), `${r.id} 首帧 display=${r.display}，容器自身是 ${ownDisplay(r.id)}`);
+      if (r.hidden) {
+        assert.ok(base.includes("[hidden] { display: none !important; }"), "全局 hidden 兜底仍是 !important");
+        assert.ok(r.important, `${r.id} 带 hidden，显示侧必须 !important 才压得住全局兜底`);
+      }
+    }
+    // 收起侧两条：看板与主头行（不显示的那一侧不存在布局冲突，无需取值比对）
+    assert.ok(/html\[data-prepaint-view\] \.telemetry-view \{ display: none; \}/.test(block),
+      "首帧收起看板");
+    assert.ok(/html\[data-prepaint-view="settings"\] #mainHeadInner \{ display: none; \}/.test(block),
+      "首帧收起主头行（仅设置页）");
+    const isList = (block.match(/:is\(([^)]*)\)/) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
+    assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelAbout"],
+      "子 tab 整体收起规则覆盖四块面板");
+  });
+
+  it("首帧不描子 tab 选中态：只把静态选中项减回基座外观，取值与三个主题都不冲突", () => {
+    const undo = panelCss.match(/html\[data-prepaint-subtab\]:not\([^\)]*\) #([A-Za-z]+) \{([^}]*)\}/);
+    assert.ok(undo, "有一条减子 tab 选中态的规则");
+    // 主头行 tab 条里的「看板」同样是静态选中项，取样限定在设置子 tab 那格 nav 内
+    const navStart = panelHtml.indexOf("settings-subtabs");
+    const subTabNav = panelHtml.slice(navStart, panelHtml.indexOf("</nav>", navStart));
+    assert.ok(navStart > 0 && subTabNav.includes("settingsTabAbout"), "取到设置子 tab 的 nav");
+    const activeInMarkup = (subTabNav.match(/<button class="view-tab active" id="([A-Za-z]+)"/) || [])[1];
+    assert.strictEqual(undo[1], activeInMarkup, "减的就是 HTML 静态选中的那一个子 tab");
+    const baseDecls = (panelCss.match(/^ {2}\.view-tab \{([^}]*)\}/m) || [, ""])[1];
+    const activeDecls = (panelCss.match(/^ {2}\.view-tab\.active \{([^}]*)\}/m) || [, ""])[1];
+    const props = (s) => new Set(s.split(";").map((d) => (d.split(":")[0] || "").trim()).filter(Boolean));
+    assert.deepEqual(props(undo[2]), props(activeDecls),
+      "减法必须覆盖 .view-tab.active 添加的每一个属性，漏一个就留下半截高亮");
+    for (const d of undo[2].split(";").map((s) => s.trim()).filter(Boolean)) {
+      const [prop, value] = d.split(":").map((s) => s.trim());
+      if (prop === "box-shadow") {
+        // 基座的 transition 里也写着 box-shadow，只认「属性声明」那一处
+        assert.ok(!/(?:^|[;{\s])box-shadow\s*:/.test(baseDecls), "基座未声明 box-shadow 属性，减为 none 即未选中态");
+        continue;
+      }
+      assert.ok(baseDecls.includes(`${prop}: ${value}`), `${d} 与 .view-tab 基座同值，才等于未选中外观`);
+    }
+    // 主题只往 .view-tab.active 上加 box-shadow、只给未选中态改圆角：减法不碰这两处
+    // 之外的属性，就不会在任何主题下把未选中态减成第四个样子。
+    for (const m of panelCss.matchAll(/:root\[data-style="([a-z]+)"\] \.view-tab\.active \{([^}]*)\}/g)) {
+      assert.deepEqual([...props(m[2])], ["box-shadow"], `${m[1]} 主题的选中态只应动 box-shadow`);
+    }
+    for (const m of panelCss.matchAll(/:root\[data-style="([a-z]+)"\] \.view-tab \{([^}]*)\}/g)) {
+      assert.deepEqual([...props(m[2])], ["border-radius"], `${m[1]} 主题的未选中态只应动 border-radius`);
+    }
+    assert.ok(!/data-prepaint-subtab[^\n]*\{[^}]*box-shadow:\s*var/.test(panelCss),
+      "首帧层不自己造选中态描色");
+  });
+
+  it("switchView 摘首帧属性的时机：hidden 赋值之后、进入钩子之前", () => {
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found in panel.js");
+    const body = sw[1];
+    const at = (needle) => {
+      const i = body.indexOf(needle);
+      assert.ok(i >= 0, `switchView 里找到「${needle}」`);
+      return i;
+    };
+    const iHidden = at('$("settingsView").hidden = !settings;');
+    const iHead = at('$("settingsHeadInner").hidden = !settings;');
+    const iRemoveView = at('document.documentElement.removeAttribute("data-prepaint-view")');
+    const iRemoveSub = at('document.documentElement.removeAttribute("data-prepaint-subtab")');
+    const iEnter = at("if (settings) viewReady = enterSettingsView()");
+    assert.ok(iRemoveView > iHidden && iRemoveView > iHead,
+      "摘属性前 hidden 已落定，两套显隐来源不会同框");
+    assert.ok(iRemoveSub > iHidden && iRemoveSub < iEnter,
+      "摘属性早于进入钩子：镜像快照按真实 DOM 拍，不被首帧收起规则连累");
+    assert.ok(!body.includes('data-prepaint') || iRemoveView < iEnter,
+      "switchView 不残留首帧属性");
   });
 
   it("原设置弹窗整体移除（DOM、开关逻辑、init 装配更名）", () => {

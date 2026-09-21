@@ -3455,3 +3455,42 @@
   @media (prefers-reduced-motion: reduce) {
     html[data-startup] #panelStartup, #startupLogo, #startupSvg { transition: none; }
   }
+
+  /* ── 首帧视图落位（绘制前）──────────────────────────────────────────────
+     panel.html 的 panelViewPrepaint 内联脚本把「上一次停在哪一屏」写在 <html> 的
+     data-prepaint-view / data-prepaint-subtab 上，这里负责那一帧的显隐：主脚本是
+     defer 外链，restoreView 落位晚于首绘，不接管首帧就会先画出 HTML 静态默认的
+     看板再切到目标屏。switchView 做完 hidden 赋值即摘掉这两个属性，运行时显隐仍由
+     hidden 单一承担，两套不会同框。
+     显示侧取值 = 各容器自己的 display，一处都不能凭印象：.stats-view /
+     .sessions-view / #settingsPanel{General,Route,About} / .site-head .head-inner
+     是 flex，其余在册容器（.telemetry-view / .settings-view / .skills-view 含
+     store·presets / #settingsPanelTheme）无作者 display 规则即 block。
+     panel.test.mjs 把每条取值与对应规则逐字比对，改样式要连断言一起改。
+     全局 [hidden]{display:none !important} 压住「把带 hidden 的容器显示出来」，
+     故带 [hidden] 的显示侧规则用 !important：选择器含 ID，特异性已高于那条单属性
+     规则，同为 !important 时胜出。不带 hidden 的那几条靠特异性即够。 */
+  html[data-prepaint-view] .telemetry-view { display: none; }
+  html[data-prepaint-view="settings"] #mainHeadInner { display: none; }
+  html[data-prepaint-view="skills"] #skillsView[hidden],
+  html[data-prepaint-view="presets"] #presetsView[hidden],
+  html[data-prepaint-view="store"] #storeView[hidden],
+  html[data-prepaint-view="settings"] #settingsView[hidden] { display: block !important; }
+  html[data-prepaint-view="stats"] #statsView[hidden],
+  html[data-prepaint-view="sessions"] #sessionsView[hidden],
+  html[data-prepaint-view="settings"] #settingsHeadInner[hidden] { display: flex !important; }
+  /* 设置子 tab：先按标记整体收起，再放出归档那一个——顺序敏感，「通用」不带 hidden，
+     收起与放出同特异，靠下面那条在后胜出。 */
+  html[data-prepaint-view="settings"][data-prepaint-subtab]
+    :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelTheme, #settingsPanelAbout) { display: none; }
+  html[data-prepaint-view="settings"][data-prepaint-subtab="general"] #settingsPanelGeneral { display: flex; }
+  html[data-prepaint-view="settings"][data-prepaint-subtab="route"] #settingsPanelRoute[hidden],
+  html[data-prepaint-view="settings"][data-prepaint-subtab="about"] #settingsPanelAbout[hidden] { display: flex !important; }
+  html[data-prepaint-view="settings"][data-prepaint-subtab="theme"] #settingsPanelTheme[hidden] { display: block !important; }
+  /* 子 tab 的选中态只做减法：三个主题的 .view-tab.active 各自加/换 box-shadow，
+     绘制前无从复用，正向描色必在某个主题下走形。这里只把 HTML 静态选中的「通用」
+     减回未选中外观（四条取值抄自 .view-tab 基座），于是首帧是「内容已归位、选中态
+     待 JS 描上」，而不是「高亮与内容互相矛盾」。 */
+  html[data-prepaint-subtab]:not([data-prepaint-subtab="general"]) #settingsTabGeneral {
+    background: transparent; color: var(--text-3); box-shadow: none; border: 0;
+  }

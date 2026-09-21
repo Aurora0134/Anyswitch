@@ -70,6 +70,40 @@ try {
   window.panelStartupBegin();
 })();
 </script>
+<script id="panelViewPrepaint">
+(function () {
+  // 首帧视图落位——绘制前把「上一次停在哪一屏」写在 <html> 上，由 panel.css 的
+  // 「首帧视图落位」段负责那一帧的显隐。成因与上面防闪烁的主题脚本同一类：主脚本
+  // 是 defer 外链，restoreView 的落位必然晚于首绘，而 HTML 的静态默认是看板——
+  // 不接管首帧的话，刷新就先画出看板再切到目标屏（闪一下主页）。
+  // 这里只读判定、不改存档（存档归 switchView / restoreView 写）。判定口径与
+  // restoreView 逐条对齐，两边不一致就会出现「首帧一屏、落定后另一屏」的新闪烁：
+  // ① launcher 首开固定落看板——直接消费 panelStartupBootstrap 算好的
+  //    panelStartupLaunch，连它那句 navigation.type 判定一起继承，不重复实现；
+  // ② 停设置页由 panel-settings-open 决定，它优先于 panel-view（那份留作「←退出」
+  //    的目标，不是首帧该露的屏）；
+  // ③ 主视图取 panel-view，值为 "board"/缺失/不在册时看板就是 HTML 默认态，不写属性。
+  if (window.panelStartupLaunch) return;
+  const VIEW_NAMES = ["skills", "presets", "store", "stats", "sessions", "settings"];
+  const SUB_TAB_NAMES = ["general", "route", "theme", "about"];
+  let view = null;
+  let subTab = null;
+  try {
+    view = localStorage.getItem("panel-view");
+    if (localStorage.getItem("panel-settings-open") === "1") view = "settings";
+    subTab = localStorage.getItem("panel-settings-subtab");
+  } catch (e) {
+    return; // localStorage 不可用：与 restoreView 同样落看板默认态
+  }
+  if (VIEW_NAMES.indexOf(view) < 0) return;
+  const root = document.documentElement;
+  root.setAttribute("data-prepaint-view", view);
+  // 子 tab 只影响设置页内部那一格内容，别的视图下没有意义
+  if (view === "settings" && SUB_TAB_NAMES.indexOf(subTab) >= 0) {
+    root.setAttribute("data-prepaint-subtab", subTab);
+  }
+})();
+</script>
 </head>
 <body>
 <div id="panelStartup" role="status" aria-label="正在打开 Anyswitch">
