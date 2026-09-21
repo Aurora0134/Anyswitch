@@ -316,6 +316,7 @@ async function api(method, path, body) {
               : view === "presets" ? $("presetsView")
               : view === "store" ? $("storeView")
               : view === "stats" ? $("statsView")
+              : view === "settings" ? $("settingsView")
               : $("sessionsView");
             enteredView.classList.remove("view-enter");
             void enteredView.offsetWidth;
@@ -338,8 +339,15 @@ async function api(method, path, body) {
   // init() 末尾在开屏 ready() 之后消费一次——与开屏淡出同步起播，连接处平滑。
   let restartEnterView = null;
   // 设置全页视图：记住进入前的视图供头行「←」钮返回；进入钩子由 initSettingsView
-  // 装配（子 tab 重置到「通用」并重拉设置项）。设置本身不写入 panel-view。
+  // 装配。设置视图不占 panel-view——那份继续存主视图，刷新恢复回设置页时正好拿它当
+  // 返回目标；「停在设置页」另由 panel-settings-open 标记记录。
   let settingsReturnView = "board";
+  // restoreView 恢复设置页时待激活的子 tab（取自 panel-settings-subtab），
+  // enterSettingsView 消费一次即清；主动点齿轮进入恒落「通用」，不看它。
+  let settingsSubTabToRestore = null;
+  // 看板渲染完成的通知钩子：恢复进「主题」子页时镜像快照拍到的是还没取到数据的空壳
+  // 看板，靠它补拍一次（实现在 initSettingsView）。
+  let notifyBoardRendered = () => {};
   let enterSettingsView = () => {};
   let leaveSettingsView = () => {};
   function boardVisible() { return currentView === "board"; }
@@ -600,6 +608,8 @@ async function api(method, path, body) {
         if (grok) renderIfChanged("grok", grok, () => renderGrok(grok));
         // 左栏路由链卡：随 1s 轮询刷退避倒计时，结构指纹闸控 DOM 重建
         renderRouteChainBoard();
+        // 看板内容已真实：通知设置页主题镜像补拍恢复路径下那张空壳快照（一次性）
+        notifyBoardRendered();
       }
     } catch {}
     finally { agentsInFlight = false; }
@@ -2534,7 +2544,7 @@ async function api(method, path, body) {
     };
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
 
-    // 子 tab：通用 / 自动路由 / 主题 / 关于；进入设置固定落「通用」。
+    // 子 tab：通用 / 自动路由 / 主题 / 关于；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
     leaveSettingsView = () => about.leave();
     const settingsSubTabs = {
@@ -2555,8 +2565,14 @@ async function api(method, path, body) {
         $(tabId).tabIndex = on ? 0 : -1;
         $(panelId).hidden = !on;
       }
+      // 子 tab 存档 = 此刻真实显示的那一个：进设置时的「通用」重置也走这里，存档
+      // 永远与用户看到的一致，刷新恢复不必再区分「用户点的」与「程序置的」。
+      try { localStorage.setItem("panel-settings-subtab", which); } catch {}
       if (animate) replayViewEnter($(selected[1]));
-      if (which === "theme") captureSettingsMirror();
+      if (which === "theme") {
+        captureSettingsMirror();
+        mirrorAwaitRender = true;
+      }
       // 「自动路由」的配置数据与渠道页同源（store state），进 tab 即刷新一次，
       // 与渠道页每次切入都刷新同语义；渲染在 doRefreshStoreState 内统一完成。
       if (which === "route") refreshStoreState();
@@ -2605,6 +2621,16 @@ async function api(method, path, body) {
       sizer.style.height = naturalH * s + "px";
       viewport.scrollTop = 0;
     }
+    // 恢复路径下进「主题」的那次快照可能拍在首刷数据落地之前（空壳看板）：挂一次性补拍，
+    // 等 refreshAgents 把真实内容渲染完再拍。正常路径拍到的已是真实内容，补拍值相同、
+    // 无视觉变化；已离开主题子页时补拍直接作废。
+    let mirrorAwaitRender = false;
+    notifyBoardRendered = () => {
+      if (!mirrorAwaitRender) return;
+      mirrorAwaitRender = false;
+      const themePanel = $("settingsPanelTheme");
+      if (themePanel && !themePanel.hidden) captureSettingsMirror();
+    };
     let mirrorResizeTimer = 0;
     window.addEventListener("resize", () => {
       const themePanel = $("settingsPanelTheme");
@@ -2638,7 +2664,12 @@ async function api(method, path, body) {
     bindSettingsSubTabs();
 
     enterSettingsView = () => {
-      resetSettingsSubTab();
+      // 刷新/重启恢复进设置页：按 restoreView 交来的存档回到原子 tab；主动点齿轮进入
+      // 仍旧从头看起，落「通用」。存档只在此消费一次，不留到下一次进入。
+      const restore = settingsSubTabToRestore;
+      settingsSubTabToRestore = null;
+      if (restore && Object.keys(settingsSubTabs).includes(restore)) activateSettingsSubTab(restore, false);
+      else resetSettingsSubTab();
       return loadSettingsState();
     };
 
@@ -3575,8 +3606,10 @@ async function api(method, path, body) {
         : $("sessionsView");
       replayViewEnter(enteredView);
     }
-    // 设置视图不写入 panel-view：刷新后按 restoreView 白名单恢复，永不落设置页
+    // panel-view 只存主视图（设置视图不覆盖它，那份留着当「←退出」的目标）；
+    // 是否停在设置页由 panel-settings-open 单独记，restoreView 按这两个键恢复。
     if (!settings) try { localStorage.setItem("panel-view", name); } catch {}
+    try { localStorage.setItem("panel-settings-open", settings ? "1" : "0"); } catch {}
     let viewReady;
     if (name === "skills") viewReady = refreshSkillsState();
     if (presets) viewReady = refreshPresetsState();
@@ -3622,11 +3655,21 @@ async function api(method, path, body) {
   }
 
   // 刷新页面后留在原 tab（默认看板）；launcher 启动的那一次固定落看板，
-  // 刷新与普通访问不受影响，仍按 panel-view 恢复。
+  // 刷新与普通访问不受影响，仍按 panel-view 恢复。设置页由 panel-settings-open
+  // 独立标记恢复，「←退出」的目标就是 panel-view 里那份主视图。
   function restoreView() {
-    if (window.panelStartupLaunch) return;
+    if (window.panelStartupLaunch) {
+      // 首开这一跳不算「回来」，可标记是上一次会话留下的：不就地清掉，本页之后第一次
+      // 刷新就会跳进设置页——「固定落看板」只剩首屏那一下管用。
+      try { localStorage.setItem("panel-settings-open", "0"); } catch {}
+      return;
+    }
     let saved = null;
-    try { saved = localStorage.getItem("panel-view"); } catch {}
+    let settingsOpen = false;
+    try {
+      saved = localStorage.getItem("panel-view");
+      settingsOpen = localStorage.getItem("panel-settings-open") === "1";
+    } catch {}
     // 刷新恢复落位不播入场动画；仅命中分支时置位——saved 为 "board"/无效值时不调
     // switchView，无条件置位会让标志残留，顺延吞掉下一次主动切换的动画。
     // 重启恢复（panelStartupRestart）同样先置位静默：此刻开屏层还盖着，立即播会在
@@ -3637,10 +3680,19 @@ async function api(method, path, body) {
     else if (saved === "store") switchView("store");
     else if (saved === "stats") switchView("stats");
     else if (saved === "sessions") switchView("sessions");
+    if (settingsOpen) {
+      // 上面那条链落好的就是进设置前的主视图（没命中则为看板），直接拿来当返回目标；
+      // 子 tab 存档交给 enterSettingsView 消费。置位口径同主视图恢复：落位不播动画。
+      settingsReturnView = currentView;
+      try { settingsSubTabToRestore = localStorage.getItem("panel-settings-subtab"); } catch {}
+      suppressViewEnter = true;
+      switchView("settings");
+    }
     if (window.panelStartupRestart) {
       // saved 为 "board"/null/无效值时看板是 HTML 默认显示的、不经 switchView，同样
       // 靠这个标记补播。
       restartEnterView = (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") ? saved : "board";
+      if (settingsOpen) restartEnterView = "settings";
     }
   }
 
