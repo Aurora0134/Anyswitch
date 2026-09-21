@@ -325,3 +325,23 @@ describe("keepAlive per-endpoint switches", () => {
     }
   });
 });
+
+describe("legacy keepAlive keys", () => {
+  it("scrubs the never-consumed disabledEndpoints key on any save", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-legacy-"));
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({
+        keepAlive: { enabled: true, disabledEndpoints: [], endpoints: { claude: { enabled: false } } },
+      }));
+      // The scrub is not tied to keepAlive patches: any save drops the key.
+      const saved = saveSettings(path, { sparkWindowPoints: 24 }, {});
+      assert.equal("disabledEndpoints" in saved.raw.keepAlive, false);
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      assert.equal("disabledEndpoints" in onDisk.keepAlive, false);
+      assert.deepEqual(onDisk.keepAlive.endpoints, { claude: { enabled: false } }, "live keys survive the scrub");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

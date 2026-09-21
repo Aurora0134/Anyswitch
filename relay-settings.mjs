@@ -246,6 +246,14 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
   }
 
+  // Legacy cleanup: `keepAlive.disabledEndpoints` turns up in on-disk settings
+  // files, but no code in this repo's history has ever read or written it. The
+  // raw-spread merge above would carry it forward forever, so drop it on any
+  // save regardless of which section was patched.
+  if (updated.keepAlive && typeof updated.keepAlive === "object") {
+    delete updated.keepAlive.disabledEndpoints;
+  }
+
   const text = JSON.stringify(updated, null, 2) + "\n";
   // First boot on an empty data root: the settings directory may not exist
   // yet; atomicWriteFile does not create it, so a save would 500 on ENOENT.
