@@ -1346,10 +1346,12 @@
   /* 路由链（自动路由）：配置面在设置页「自动路由」子 tab（九端点瓦片墙）；
      链编辑器弹窗 = 下方双栏布局 + .route-stage/.route-seg 纵向舞台；
      监测页左栏 = 路由链状态卡（.rc-side-*） */
-  /* 瓦片墙：三列网格（<900px 两列、<600px 一列）。质感 = 受光渐变面
-     （surface → hover75%×border25%，整级明度差，亮暗两态实测 ≥3.9%）
-     ＋投影抬升（md，hover 升 lg）。质感与配置状态解耦：九枚瓦片同面同影，
-     状态只由徽标/按钮/文字明暗表达（未配置仅名称与徽标降为三级色）。 */
+  /* 瓦片墙：三列网格（<900px 两列、<600px 一列）。质感取全站「卡内小块」那一档：
+     底色 = --surface-sunken、瓦片自身无投影，抬升由外层 .panel-card 承担；悬停 =
+     整块平铺 --surface-hover + 边框提到 --border-strong（与设置页「通用」行、主题
+     列表项同一手感）。品牌色描边只表示选中/启用，不作悬停色。底色与边框均为主题
+     token，三套主题 × 亮暗各自取值且方向恒为内陷。质感与配置状态解耦：九枚瓦片
+     同面同影，状态只由徽标/按钮/文字明暗表达（未配置仅名称与徽标降为三级色）。 */
   #settingsPanelRoute { display: flex; flex-direction: column; gap: 20px; }
   .route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
   @media (max-width: 900px) { .route-ep-grid { grid-template-columns: repeat(2, 1fr); } }
@@ -1357,11 +1359,10 @@
   .route-ep-tile {
     min-width: 0; padding: 14px 16px;
     border: 1px solid var(--border); border-radius: var(--radius-md, 8px);
-    background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface-hover) 75%, var(--border)));
-    box-shadow: var(--shadow-md);
-    transition: border-color 150ms var(--ease-out), box-shadow 150ms var(--ease-out);
+    background: var(--surface-sunken);
+    transition: background 140ms var(--ease-out), border-color 140ms var(--ease-out);
   }
-  .route-ep-tile:hover { border-color: var(--accent); box-shadow: var(--shadow-lg); }
+  .route-ep-tile:hover { background: var(--surface-hover); border-color: var(--border-strong); }
   .route-ep-tile--empty .route-ep-name { color: var(--text-3); }
   .route-ep-tile--empty .badge { color: var(--text-3); }
   /* 内部排版：上排「图标+名称 | 状态徽标」，下排右对齐控件组 */
