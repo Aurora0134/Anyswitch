@@ -30,7 +30,7 @@ import {
 import { protect as defaultProtect, unprotect as defaultUnprotect } from "./dpapi.mjs";
 import { atomicWriteFile as defaultAtomicWriteFile } from "./atomic-write.mjs";
 import { MAX_CHAIN_NODES, ROUTING_ENDPOINT_IDS } from "./store-schema.mjs";
-import { chainNodeKey } from "./chain-routing.mjs";
+import { chainNodeExists, chainNodeKey } from "./chain-routing.mjs";
 import {
   buildV2AddEntry,
   computeMigrationSeed,
@@ -124,6 +124,34 @@ function findCompleted(journalPath, providerId) {
   return readJournal(journalPath).completed.find((entry) => entry.providerId === providerId);
 }
 
+// Drop every route-chain entry whose node no longer resolves — the node just
+// deleted (or whose pool was just dissolved / lost this member). The chain
+// schema requires every node to exist, so a dangling reference would make
+// every later write (starting with the delete transaction's own store write)
+// fail validation; the relay already skips dead nodes lazily at request time
+// (chainNodeExists), so pruning here just makes the persisted chain match the
+// live plan. A node may reappear through a pool that still contains it (a
+// provider absorbed into a pool is resolved pool-first), which is what
+// chainNodeExists reports — only truly dead references are removed. A chain
+// stripped to zero entries is dropped whole (the schema forbids an empty
+// chain). Returns [{ endpointId, remaining }] for every chain that lost at
+// least one entry (remaining = hops left, 0 = the whole chain).
+function pruneRouteChainNodes(store, shouldGo) {
+  const chains = store.routingChains;
+  if (!chains || typeof chains !== "object") return [];
+  const pruned = [];
+  for (const [endpointId, entry] of Object.entries(chains)) {
+    if (!entry || !Array.isArray(entry.chain)) continue;
+    const remaining = entry.chain.filter((item) => !shouldGo(item?.node));
+    if (remaining.length === entry.chain.length) continue;
+    if (remaining.length === 0) delete chains[endpointId];
+    else entry.chain = remaining;
+    pruned.push({ endpointId, remaining: remaining.length });
+  }
+  if (Object.keys(chains).length === 0) delete store.routingChains;
+  return pruned;
+}
+
 /**
  * Store-management service for the panel router. All IO is injectable so the
  * service is unit-testable against a mkdtemp store root with fake fetch/dpapi;
@@ -196,6 +224,10 @@ export function createStoreService({
   // caller (deleteProvider / resumeDeletions) converts to a result object.
   async function deleteProviderOnce(providerId) {
     validateProviderId(providerId);
+    // Endpoint ids whose route chains lost an entry to this deletion (the
+    // entry's node no longer resolves). Reported to the caller so the panel
+    // can say what was adjusted along with the deletion.
+    let resultPrunedChains = [];
 
     // Membership comes from the v2 store. A load failure is fail-closed.
     const loaded = load();
@@ -237,15 +269,24 @@ export function createStoreService({
     markPending(journalPath, providerId, credentialFile);
 
     // Step 1: remove the store entry with a CAS guard. Fail-closed: a write
-    // failure throws before the credential is removed.
+    // failure throws before the credential is removed. The same write also
+    // prunes every route-chain entry pointing at a node that no longer
+    // resolves without this provider (including pool nodes left empty when
+    // this provider was their last live member) — the chain schema demands
+    // nodes exist, and leaving the reference behind would trap the deletion
+    // in a retry loop (and, before this, made the whole store invalid). A
+    // resume after a crash goes through this same path, so a journal left
+    // behind by the old behavior self-heals on the next refresh.
     if (managedEntry) {
-      const nextV2Providers = { ...v2Providers };
-      delete nextV2Providers[providerId];
-      const nextV2Store = { ...loaded.store, version: 2, providers: nextV2Providers };
+      const nextV2Store = structuredClone(loaded.store);
+      nextV2Store.version = 2;
+      delete nextV2Store.providers[providerId];
+      const prunedChains = pruneRouteChainNodes(nextV2Store, (nodeId) => !chainNodeExists(nextV2Store, nodeId));
       const written = write(nextV2Store, { expectedHash: loaded.hash });
       if (!written.ok) {
         throw new Error(`the Anyswitch v2 store was not updated for ${providerId}: ${written.reason}; deletion aborted, credential retained`);
       }
+      resultPrunedChains = prunedChains;
     }
 
     // Step 2: verify the store no longer references the provider before the
@@ -277,17 +318,19 @@ export function createStoreService({
 
     clearPending(journalPath, providerId, credentialFile);
 
-    return { deleted: true, modelCount, credentialFile };
+    return { deleted: true, modelCount, credentialFile, prunedChains: resultPrunedChains };
   }
 
   // Detach a provider from its pool in a standalone CAS write, BEFORE the
   // journal transaction starts. The pool gate inside deleteProviderOnce
   // exists precisely so nothing pending outlives a pool reference, so the
   // detach must happen first: a pool left with a single member is dissolved
-  // outright (pools require >= 2 members). Returns true when the provider
-  // was not pooled or the detach write succeeded; a failure returns the
-  // usual result object and leaves the journal untouched — the worst benign
-  // outcome is a provider that survives, no longer attached to its pool.
+  // outright (pools require >= 2 members). Returns { ok: true, prunedChains }
+  // when the provider was not pooled or the detach write succeeded (the
+  // profile's provider going away may also kill a pool node a chain named);
+  // a failure returns the usual result object and leaves the journal
+  // untouched — the worst benign outcome is a provider that survives, no
+  // longer attached to its pool.
   async function detachFromPool(providerId) {
     const loaded = load();
     if (!loaded.ok) {
@@ -296,7 +339,7 @@ export function createStoreService({
     const pools = loaded.store.pools ?? {};
     const poolId = Object.keys(pools).find((id) =>
       Array.isArray(pools[id]?.members) && pools[id].members.includes(providerId));
-    if (poolId === undefined) return true;
+    if (poolId === undefined) return { ok: true, prunedChains: [] };
     const nextStore = structuredClone(loaded.store);
     const members = nextStore.pools[poolId].members.filter((memberId) => memberId !== providerId);
     if (members.length >= 2) {
@@ -305,9 +348,13 @@ export function createStoreService({
       delete nextStore.pools[poolId];
       if (Object.keys(nextStore.pools).length === 0) delete nextStore.pools;
     }
+    // The profile's provider is gone — either this very member or the pool
+    // entry that absorbed it — so a chain entry naming it may be dead now.
+    // Prune before the write, same rule as the delete transaction.
+    const prunedChains = pruneRouteChainNodes(nextStore, (nodeId) => !chainNodeExists(nextStore, nodeId));
     const written = write(nextStore, { expectedHash: loaded.hash });
     if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
-    return true;
+    return { ok: true, prunedChains };
   }
 
   // Re-runs the same idempotent deletion for every provider still pending in
@@ -922,9 +969,13 @@ export function createStoreService({
       const nextStore = structuredClone(loaded.store);
       delete nextStore.pools[poolId];
       if (Object.keys(nextStore.pools).length === 0) delete nextStore.pools;
+      // A chain may name the pool itself; once dissolved it only survives if
+      // one of its (now independent) members carries the same id. Prune the
+      // rest before the write, same rule as the delete transaction.
+      const prunedChains = pruneRouteChainNodes(nextStore, (nodeId) => !chainNodeExists(nextStore, nodeId));
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
-      return { ok: true, poolId };
+      return { ok: true, poolId, prunedChains };
     },
 
     /**
@@ -1128,16 +1179,25 @@ export function createStoreService({
      * Delete a provider with the journal-driven forward-only transaction.
      * A pooled provider is detached from its pool first (detachFromPool —
      * its own CAS write, dissolving the pool when it drops below 2 members),
-     * then the transaction runs ungated. Business failures (store
+     * then the transaction runs ungated. Route-chain entries left pointing at
+     * a dead node (the provider, or a pool dissolved by the detach) are
+     * pruned in the same write and reported back as prunedChains, so the
+     * caller can say which endpoints were adjusted. Business failures (store
      * unavailable, unmanaged provider, unsafe credential path) come back as
      * { ok:false, error }; the credential is retained in every failure path.
      */
     async deleteProvider(id) {
       try {
         const detach = await detachFromPool(id);
-        if (detach !== true) return detach;
+        if (!detach.ok) return detach;
         const result = await deleteProviderOnce(id);
-        return { ok: true, ...result };
+        // The detach write and the transaction write each pruned what their
+        // own snapshot made dead; merge per endpoint, keeping the final count.
+        const merged = new Map();
+        for (const item of [...detach.prunedChains, ...(result.prunedChains ?? [])]) {
+          merged.set(item.endpointId, item.remaining);
+        }
+        return { ok: true, ...result, prunedChains: [...merged].map(([endpointId, remaining]) => ({ endpointId, remaining })) };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         // The journal-driven transaction surfaces the same recognizable conflict
