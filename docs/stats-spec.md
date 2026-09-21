@@ -17,7 +17,7 @@
 | 90 天热力图 | 固定 90 天日轴（日历运算防 DST），tokens=prompt+completion，**只算 request 行**，零填充。 |
 | Token 趋势 | days=1 → 24×1h 本地整点桶；days=7 → 21×8h 桶（对齐本地 0/8/16 点）；末桶进行中。三口径：渠道=providerId / 端点=agentId / 模型=`providerId/model` 复合键。值=各桶 prompt+completion。 |
 | 模型用量卡 | **独立时间 seg（近 24h/近 7 日）**，不随全局 days seg；后端单次响应同时下发 `usage["1"]`/`usage["7"]` 双窗口，切换只本地重渲。窗口内单节点总量；**model 口径=裸模型名跨渠道合并**（与趋势的复合键不同，usage-stats.mjs buildUsage 注释）。**版式：卡体左右两栏**——左=环形图+图例排行榜，右=竖直柱状图（同源同排序同色，复用 `statsUsageColorOf(key, allNodes)`，「其他」灰同出场；柱从地面线生长，与环同一 `USAGE_REVEAL_MS`/easeOutCubic/同一 rAF，触发时机同一 `revealNow` 判定）。 |
-| TTFT | 仅 `ok===true && ttftMs>0` 的行；按桶 avg/p95（nearest-rank）+ 按模型 Top5。**非流式请求的 ttftMs 是全时长代理**（采集侧约定）。 |
+| TTFT | 仅 `ok===true && ttftMs>0` 的行；按桶 avg/p95（nearest-rank）+ 按模型 Top5。**非流式请求的 ttftMs 是全时长代理**（采集侧约定）。**样本 <10 的模型整行不显示**（与 TPS 同一机制，见 R-21）。 |
 | TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
 | 端点工时表 | 按 agentId：requests / tokens / sessions(30min 空档切段数 + sessionEnds) / workMs(busy 区间并集)。**legacy session 行 tokens 计入本卡但不进热力图/趋势**——两口径对不上是设计使然。 |
 
@@ -117,6 +117,11 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 - 钉住：agent-metrics.test.mjs「per-launch stability batch + chain runtime relay」组；anthropic-server-chain.test.mjs「稳定性批量随快照捎带」「链运行时随快照捎带」；openai-server-chain.test.mjs「一次性 relay 捎带的链状态并入 runtime」
 - 拍板：2026-09-15（claude 流量长期不进状态检测/渠道灯，用户拍板修复）
 
+### R-21 TTFT 出榜样本下限 10（与 TPS 同机制）
+每模型有效 TTFT 样本（`ok===true && ttftMs>0` 的请求）不足 10 个时整行从「首字响应 TTFT」卡的按模型 Top5 剔除——与 R-17 同一理由：小样本均值被单请求噪声主导，读数没有参考意义。数据层面剔除（usage-stats.mjs 聚合出口），不是前端隐藏；样本数徽标「· N 次」仍在值文案里，达标的行照常标注。今日概览的平均 TTFT 与按桶 avg/p95 趋势不受此下限影响（那是全窗口口径，非按模型行）。
+- 锚点：usage-stats.mjs `TTFT_MIN_SAMPLES = 10` + 聚合出口 `.filter((e) => e.samples >= TTFT_MIN_SAMPLES)`
+- 钉住：usage-stats.test.mjs「drops TTFT rows with < 10 samples」（9 样本剔除 / 10 样本出榜边界）
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -125,6 +130,7 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 | 趋势 Top N=5 | usage-stats.mjs `TOP_N` | usage-stats.test.mjs（R-02） |
 | TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
 | TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
+| TTFT 出榜样本下限 10（不足整行不显示，与 TPS 同机制） | usage-stats.mjs `TTFT_MIN_SAMPLES` | usage-stats.test.mjs「drops TTFT rows with < 10 samples」 |
 | 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.js `STATS_MORPH_MS` / `STATS_MORPH_EASE` | — |
 | 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.js `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
 | 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.js `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
@@ -138,7 +144,7 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 3. **coveredAgents 断崖**：见 R-15。
 4. **口径并存**：今日概览（自然日）vs 趋势（滚动 24h/7d）；工时表含 legacy session tokens 而热力图/趋势不含——卡间数字对不上属设计使然，今日概览已按 R-12 原则不另行标注。
 5. **非流式 TTFT=全时长代理**：进 TTFT 均值但不进 TPS（R-14）。
-6. **p95 nearest-rank 小样本≈max**（days=1 每模型常 <10 条）。
+6. **p95 nearest-rank 小样本≈max**：days=1 每模型常 <10 条——不足 10 样本的按模型行已被 R-17/R-21 挡在榜外，残余噪音只剩 10-19 条的边缘档（nearest-rank 在 n=10 时仍取到 max）。
 7. **桶轴不防 DST**（dayAxis 防了，bucketAxis 没防）；cleanup cutoff 用毫秒减，DST 边界日可能多留/少留一个文件。
 8. **instanceId 已采集未消费**：journal request 行带 instanceId（归一形态 `<agentId>-<pid>`），聚合侧不读；实例下钻未立项（cwd 目录名不落盘是前置条件）。
 9. **errKind "abort" 死枚举**（R-13）：枚举与实现脱节，勿依赖。
