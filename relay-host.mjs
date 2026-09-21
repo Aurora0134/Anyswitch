@@ -157,6 +157,26 @@ function redirectStderrToFile(logPath) {
   return (fn) => { onFatal = fn; };
 }
 
+// Fire-and-forget warm-up of the collector's process-scan cache. The first
+// scan round a collector ever runs is a cold probe (over a second on machines
+// without fast WMI); if that round only starts when the panel's first
+// /api/agents read arrives, the read can outrun the panel's cross-process pull
+// budget and the panel substitutes its own zero-traffic collector — a
+// "0 requests" frame on endpoints that are in fact busy. That is exactly the
+// backgrounded-panel shape: a relay restart while the tab is hidden means no
+// poll ever primes this cache, so the first read after switching back pays the
+// cold probe inline. Kicking the round at startup means a snapshot has long
+// landed by the time anyone polls. Failures are contained inside the
+// collector's probe chain; the catches here only guard injected doubles so the
+// warm-up can never disturb startup.
+export function warmProcessScanCache(metricsCollector) {
+  try {
+    metricsCollector?.scanProcesses?.()?.catch(() => {});
+  } catch {
+    /* a double that throws synchronously must not disturb startup either */
+  }
+}
+
 export async function startResidentRelay(options = {}) {
   const logPath = join(__dirname, "logs", "relay-host.log");
   rotateLogIfNeeded(logPath);
@@ -173,6 +193,10 @@ export async function startResidentRelay(options = {}) {
   // METRICS_SNAPSHOT_* block): wired after the collector exists, before any
   // request can be served.
   setFatalHook(() => deps.metricsCollector?.persistMetricsSnapshot?.());
+
+  // Prime the process-scan cache now rather than on the panel's first read —
+  // see warmProcessScanCache for the failure shape this pre-empts.
+  warmProcessScanCache(deps.metricsCollector);
 
   // Preflight: refuse to listen if the store is unusable.
   const probe = deps.loadStore();
