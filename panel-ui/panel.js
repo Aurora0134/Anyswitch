@@ -637,11 +637,19 @@ async function api(method, path, body) {
       grid.hidden = !open;
       brief.hidden = open;
       if (aggWrap) aggWrap.hidden = !open;
+      // 本栏若挂了实例行（DSH），四宫格随折叠态一起收放——与 data-prefix 栏的
+      // applyDetailFold 同语义。渲染侧每轮按 isDetailOpen 重画，但数据未变时
+      // renderIfChanged 不会重跑，点击瞬间得自己拨一次 hidden。
+      const card = grid.closest(".panel-card");
+      if (card) card.querySelectorAll(".instance-telemetry-grid").forEach((el) => { el.hidden = !open; });
       foldBtn.setAttribute("aria-expanded", open ? "true" : "false");
       foldBtn.textContent = open ? "收起 ▴" : "展开 ▾";
       // 展开瞬间补绘：折叠期间端点级 buffer 照常累积但不绘制（见 redrawEndpointSparklines），
       // 这里用已攒数据立刻上屏，不等下一轮 1s 轮询。
-      if (open) redrawEndpointSparklines(prefix);
+      if (open) {
+        redrawEndpointSparklines(prefix);
+        redrawInstanceSparklines(prefix);
+      }
     };
     let open = false; // 默认收起
     try { open = localStorage.getItem(storeKey) === "1"; } catch {}
@@ -808,7 +816,10 @@ async function api(method, path, body) {
   // 并以 data-instance-id 索引，便于后续按实例更新。instances 为空时用
   // aggregateFallback 渲染一行「全局汇总」伪实例行，走同一范式。
   // 渲染后按当前折叠态应用四宫格 hidden，并清理已消失实例的 spark buffer。
-  function renderInstanceRows({ prefix, listEl, instances, aggregateFallback }) {
+  // showSurface：行上贴一枚 `inst.surface` 徽标。行号只能表达「第几行」，
+  // 表达不了「这一行是哪个界面」——DSH 的 web 与每个 TUI 终端同属一个端点 id，
+  // 徽标取后端从进程命令行读出的 profile 显示名，读不出就不贴（不猜）。
+  function renderInstanceRows({ prefix, listEl, instances, aggregateFallback, showSurface = false }) {
     if (!listEl) return;
     const list = (Array.isArray(instances) && instances.length > 0)
       ? instances
@@ -831,11 +842,15 @@ async function api(method, path, body) {
       const stale = isInstanceStale(inst);
       const staleCls = stale ? " inst-stale" : "";
 
-      // 简要行：名称行（「会话 #x」编号 + 状态徽标 + 请求数徽标）+ tokens 行 + 胶囊行。
+      // 简要行：名称行（「会话 #x」编号 + 面徽标（showSurface 时）+ 状态徽标 + 请求数徽标）
+      // + tokens 行 + 胶囊行。
       // 编号按本卡行显示顺序 1 起，纯渲染时按 idx 派生，不持久化；
       // 伪「全局汇总」行（__aggregate__）不是实例，不编号、不挂生成中/待命状态徽标。
       const isAggregate = iid === "__aggregate__";
       const rowTitle = isAggregate ? escapeHtml(inst.title || iid) : "会话 #" + (idx + 1);
+      const surfaceBadge = !isAggregate && showSurface && inst.surface
+        ? `<span class="badge badge-neutral">${escapeHtml(String(inst.surface))}</span>`
+        : "";
       const stateBadge = isAggregate ? "" : (
         isAct
           ? `<span class="badge badge-ok">生成中</span>`
@@ -848,6 +863,7 @@ async function api(method, path, body) {
         <div class="session-main">
           <div class="session-name-line">
             <span>${rowTitle}</span>
+            ${surfaceBadge}
             ${stateBadge}
             <span class="badge badge-neutral">${inst.requests || inst.totalRequests || 0} 请求</span>
           </div>
@@ -952,13 +968,17 @@ async function api(method, path, body) {
   }
 
   // 展开瞬间补绘：按当前 DOM 行序把已攒 buffer 画回本栏实例折线（不串其他栏），
-  // 供 applyDetailFold 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
+  // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/dsh/qoder）
+  // 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
   // 行→实例配对与 renderInstanceRows 同构（.instance-telemetry-grid[data-instance-id]），
   // ttft 取 buffer 暂存的权威历史、cache 锁 0-100 量程，与渲染时口径一致。
   function redrawInstanceSparklines(prefix) {
     document.querySelectorAll('.instance-telemetry-grid[data-instance-id]').forEach((grid) => {
       const card = grid.closest(".panel-card");
-      if (!card || !card.querySelector('.agent-detail-fold[data-prefix="' + prefix + '"]')) return;
+      if (!card) return;
+      // 本栏的折叠钮：新机制按 data-prefix 找，旧机制按 <prefix>DetailFoldBtn 找。
+      if (!card.querySelector('.agent-detail-fold[data-prefix="' + prefix + '"]')
+        && !card.querySelector("#" + prefix + "DetailFoldBtn")) return;
       if (grid.dataset.stale === "1") return; // 陈旧行不补绘历史折线
       const iid = grid.dataset.instanceId;
       const buf = instanceSparkBuffers[prefix + ":" + iid];
@@ -1420,6 +1440,22 @@ async function api(method, path, body) {
     }
   }
 
+  // DSH 卡分面副行："Web ×1 · TUI ×2"。只有进程扫描能在第一条请求之前分辨面
+  // （web 与 TUI 在请求面上同像：同一条 x-agent-id: dsh），命令行里读不出
+  // profile 的那一档按「DSH ×n」如实显示，所以副行加总恒等于卡上的进程数。
+  function renderDshSurfaceSummary(surfaces) {
+    const el = $("dshSurfaceSummary");
+    if (!el) return;
+    const rows = (Array.isArray(surfaces) ? surfaces : []).filter((s) => s && s.count > 0);
+    if (rows.length === 0) {
+      el.hidden = true;
+      el.textContent = "";
+      return;
+    }
+    el.hidden = false;
+    el.textContent = rows.map((s) => `${s.label ?? s.profile ?? "DSH"} ×${s.count}`).join(" · ");
+  }
+
   function renderDsh(d) {
     const stateBadge = $("dshStateBadge");
     const modelBadgesList = $("dshModelBadgesList");
@@ -1438,6 +1474,17 @@ async function api(method, path, body) {
       const isGenerating = (d.metrics && d.metrics.activeRequests > 0) || (d.activeRequests > 0);
       stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
       stateBadge.textContent = isGenerating ? "生成中" : "待命";
+
+      // 实例行：一行 = 一个 DSH 进程（一个 web 进程一行、每个 TUI 终端一行），
+      // 行上的面徽标取后端从该进程命令行读出的 profile 名。
+      // 不传 aggregateFallback——端点级汇总由本卡的「实时遥测」简要栏与展开态
+      // 「全局汇总」行承担（这张卡今天的形状），实例化只多出行、不拆聚合行。
+      const instances = Array.isArray(d.instances) ? d.instances : [];
+      const instancesWrap = $("dshInstancesWrapper");
+      setInstanceCount("dsh", instances.length);
+      if (instancesWrap) instancesWrap.hidden = instances.length === 0;
+      renderInstanceRows({ prefix: "dsh", listEl: $("dshInstancesList"), instances, showSurface: true });
+      renderDshSurfaceSummary(d.surfaces);
 
       const m = d.metrics || {};
       const sess = (d.sessions && d.sessions[0]) || {};
@@ -1508,6 +1555,10 @@ async function api(method, path, body) {
     } else {
       stateBadge.className = "badge badge-neutral";
       stateBadge.textContent = "未运行";
+      setInstanceCount("dsh", 0);
+      const instancesWrap = $("dshInstancesWrapper");
+      if (instancesWrap) instancesWrap.hidden = true;
+      renderDshSurfaceSummary([]);
       empty.hidden = false;
       metricsBlock.hidden = true;
     }

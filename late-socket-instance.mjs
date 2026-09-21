@@ -1,6 +1,12 @@
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
 
-const SOCKET_FALLBACK_AGENT_IDS = new Set(["kimi", "opencode", "pi", "codex", "grok"]);
+// Endpoints whose per-process rows come from the netstat reverse lookup when
+// no x-agent-instance header is present. dsh joins on the same basis kimi/pi/
+// opencode have: each DSH surface (web UI, TUI, custom profile) is its own
+// process holding its own keep-alive connection to the loopback relay, and it
+// sends no instance header of its own — the terminal user launches `dsh`/`dst`,
+// not an Anyswitch launcher. zcode/claude stay aggregate-only.
+const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok"]);
 
 export function instanceIdFromSocket(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;
