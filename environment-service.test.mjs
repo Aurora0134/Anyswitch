@@ -15,7 +15,7 @@ function fixture(t) {
     fs.writeFileSync(path, content);
     return path;
   };
-  return { root, base, put, service: (options = {}) => createEnvironmentService({ base, readVersionResource: async () => null, ...options }) };
+  return { root, base, put, service: (options = {}) => createEnvironmentService({ base, readVersionResource: async () => null, readAppxPackage: async () => null, ...options }) };
 }
 
 function npmInstall(f, id, name, version, bin) {
@@ -145,28 +145,86 @@ test("An unreadable newest payload is reported as unreadable, never as the stale
   assert.equal(item.issue, "version_unavailable");
 });
 
-test("Codex reads its version from the CLI's own report and flags an unresponsive install", async (t) => {
+test("Codex reads its CLI version from the npm package manifest, never from a probe", async (t) => {
   const f = fixture(t);
-  const exe = f.put(join(f.base.LOCALAPPDATA, "OpenAI/Codex/bin/9f1c/codex.exe"));
-  const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "0.155.0" }) }).getState();
-  const found = installation(ok, "codex");
+  const { root, entry } = npmInstall(f, "codex", "@openai/codex", "0.155.1", "bin/codex.js");
+  const probeVersion = async () => { throw new Error("codex must not be probed"); };
+  const service = f.service({ probeVersion });
+  const found = installation(await service.getState(), "codex");
+  assert.equal(found.kind, "cli");
   assert.equal(found.status, "found");
-  assert.equal(found.version, "0.155.0");
-  assert.equal(found.versionSource, "cli --version");
+  assert.equal(found.path, entry);
+  assert.equal(found.version, "0.155.1");
+  assert.equal(found.versionSource, "package.json");
   assert.equal(found.issue, null);
 
-  const broken = installation(await f.service({ probeVersion: async () => ({ missing: false, version: null }) }).getState(), "codex");
-  assert.equal(broken.status, "found");
-  assert.equal(broken.version, null);
-  assert.equal(broken.issue, "not_runnable");
-
-  const raced = installation(await f.service({ probeVersion: async () => ({ missing: true }) }).getState(), "codex");
-  assert.equal(raced.status, "not_found");
-  assert.equal(raced.path, null);
-  assert.equal(raced.issue, "entry_missing");
+  fs.unlinkSync(join(root, "package.json"));
+  const degraded = installation(await service.getState({ force: true }), "codex");
+  assert.equal(degraded.status, "found");
+  assert.equal(degraded.path, entry);
+  assert.equal(degraded.version, null);
+  assert.equal(degraded.versionSource, null);
+  assert.equal(degraded.issue, "version_unavailable");
 });
 
-test("Grok Build reads its version from the CLI's own report, like codex", async (t) => {
+test("Codex desktop row reads the Microsoft Store package manifest", async (t) => {
+  const f = fixture(t);
+  const location = "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.915.4065.0_x64__2db5s4fq7sg1g";
+  let pkg = { Name: "OpenAI.Codex", Version: "26.915.4065.0", InstallLocation: location };
+  const service = f.service({ readAppxPackage: async (name) => (assert.equal(name, "OpenAI.Codex"), pkg) });
+  const found = installation(await service.getState(), "codex", 1);
+  assert.equal(found.kind, "desktop");
+  assert.equal(found.remoteId, "codex-desktop");
+  assert.equal(found.status, "found");
+  assert.equal(found.path, location);
+  assert.equal(found.version, "26.915.4065");
+  assert.equal(found.versionSource, "appx manifest");
+  assert.equal(found.issue, null);
+
+  pkg = { ...pkg, Version: "27.0.1" };
+  const threeSegment = installation(await service.getState({ force: true }), "codex", 1);
+  assert.equal(threeSegment.status, "found");
+  assert.equal(threeSegment.version, "27.0.1");
+  assert.equal(threeSegment.versionSource, "appx manifest");
+  assert.equal(threeSegment.issue, null);
+
+  pkg = { ...pkg, Version: "26.915" };
+  const unreadable = installation(await service.getState({ force: true }), "codex", 1);
+  assert.equal(unreadable.status, "found");
+  assert.equal(unreadable.path, location);
+  assert.equal(unreadable.version, null);
+  assert.equal(unreadable.versionSource, null);
+  assert.equal(unreadable.issue, "version_unavailable");
+});
+
+test("Codex desktop row reports an absent package and a failed probe without disturbing the CLI row", async (t) => {
+  const f = fixture(t);
+  const { entry } = npmInstall(f, "codex", "@openai/codex", "0.155.1", "bin/codex.js");
+  const absent = installation(await f.service().getState(), "codex", 1);
+  assert.equal(absent.kind, "desktop");
+  assert.equal(absent.remoteId, "codex-desktop");
+  assert.equal(absent.status, "not_found");
+  assert.equal(absent.path, null);
+  assert.equal(absent.version, null);
+  assert.equal(absent.versionSource, null);
+  assert.equal(absent.issue, "entry_missing");
+
+  const failed = await f.service({ readAppxPackage: async () => { throw Object.assign(new Error(), { code: "RESOURCE_FAILED" }); } }).getState();
+  const cli = installation(failed, "codex", 0);
+  assert.equal(cli.kind, "cli");
+  assert.equal(cli.status, "found");
+  assert.equal(cli.path, entry);
+  assert.equal(cli.version, "0.155.1");
+  assert.equal(cli.versionSource, "package.json");
+  assert.equal(cli.issue, null);
+  const desktop = installation(failed, "codex", 1);
+  assert.equal(desktop.status, "error");
+  assert.equal(desktop.path, null);
+  assert.equal(desktop.version, null);
+  assert.equal(desktop.issue, "discovery_failed");
+});
+
+test("Grok Build reads its version from the CLI's own report", async (t) => {
   const f = fixture(t);
   const exe = f.put(join(f.base.USERPROFILE, ".grok/bin/grok.exe"));
   const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "1.0.30" }) }).getState();
@@ -204,9 +262,11 @@ test("an empty installation reports all nine clients and Qoder as one desktop pr
   assert.equal(state.platform, process.platform);
   assert.equal(state.nodeVersion, process.version);
   assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"]);
+  assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
   assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["desktop", "qoder"]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
+    assert.equal(client.installations.length, client.id === "codex" ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");

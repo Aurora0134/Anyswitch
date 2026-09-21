@@ -1253,7 +1253,7 @@ export function createPanelRouter({
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].includes(id)) {
+      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {
