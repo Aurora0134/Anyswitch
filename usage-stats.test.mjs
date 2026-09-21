@@ -368,6 +368,24 @@ describe("usage-stats aggregation", () => {
     cleanup();
   });
 
+  it("drops TTFT rows with < 10 samples (same rule as the TPS card)", () => {
+    const { stats, writeRequests, cleanup } = makeHarness();
+    // 9 个合格样本 → 不到 10 样本下限，整行不显示
+    writeRequests(0, Array.from({ length: 9 }, () =>
+      req({ ttftMs: 300, ok: true })));
+    // 另一模型恰好 10 样本 → 出榜
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ model: "m2", ttftMs: 700, ok: true })));
+    // 失败行即使带 ttftMs 也不算样本
+    writeRequests(0, [req({ model: "m3", ttftMs: 100, ok: false })]);
+    const s = stats.getState({ days: 7 });
+    assert.deepEqual(s.ttft.byModel.map((r) => r.key), ["prov-a/m2"]);
+    assert.equal(s.ttft.byModel[0].samples, 10);
+    assert.equal(s.ttft.byModel[0].avg, 700);
+    assert.equal(s.ttft.byModel[0].p95, 700);
+    cleanup();
+  });
+
   it("splits endpoint sessions at 30-minute activity gaps", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
     // Points: 10:00, 10:10 (same segment), 10:50, 11:00 (gap 40m → new
@@ -498,7 +516,9 @@ describe("usage-stats aggregation", () => {
     const s = stats.getState({ days: 7 });
     assert.equal(s.overview.requests, 2); // the no-ts row is skipped
     // Only the fully-formed row carries a ttft sample; the near-empty one doesn't.
-    assert.equal(s.ttft.byModel.length, 1);
+    assert.equal(s.overview.avgTtftMs, 500);
+    // 但单样本不足 10 下限，按模型行整行不显示（与 TPS 卡同一机制）。
+    assert.equal(s.ttft.byModel.length, 0);
     assert.ok(Number.isFinite(s.endpoints[0].workMs));
     cleanup();
   });
@@ -524,11 +544,13 @@ describe("legacy wire-id rows (anthropic/ 前缀剥离 + providerId 回填)", ()
 
   it("strips the wire prefix and provider segment in every grouping", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
-    writeRequests(0, [
-      req({ model: "anthropic/prov-a/m1", providerId: "prov-a" }),
-      // Same bare model written the new way — must land in the SAME series.
-      req({ ts: tsOn(0, 11), model: "m1", providerId: "prov-a" }),
-    ]);
+    // 每型 10 行：按模型 TTFT 行有 10 样本下限，不到下限整行不显示（R-21），
+    // 这里的 key 形状断言要落在榜上才是真断言。
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ model: "anthropic/prov-a/m1", providerId: "prov-a" })));
+    // Same bare model written the new way — must land in the SAME series.
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ ts: tsOn(0, 11), model: "m1", providerId: "prov-a" })));
     const s = stats.getState({ days: 1 });
     const channel = s.trends.channel.series.find((x) => x.key === "prov-a");
     assert.ok(channel, "channel grouping keys on providerId, unaffected by the model field");
@@ -562,9 +584,8 @@ describe("legacy wire-id rows (anthropic/ 前缀剥离 + providerId 回填)", ()
 
   it("keeps model ids that contain '/' after the provider segment", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
-    writeRequests(0, [
-      req({ model: "anthropic/vendorb-go/go/qwen3.8-max", providerId: "vendorb-go" }),
-    ]);
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ model: "anthropic/vendorb-go/go/qwen3.8-max", providerId: "vendorb-go" })));
     const s = stats.getState({ days: 1 });
     assert.equal(s.ttft.byModel[0].key, "vendorb-go/go/qwen3.8-max", "the FIRST '/' after the prefix is the provider boundary");
     cleanup();
@@ -572,9 +593,8 @@ describe("legacy wire-id rows (anthropic/ 前缀剥离 + providerId 回填)", ()
 
   it("leaves plain (non-wire-id) rows untouched", () => {
     const { stats, writeRequests, cleanup } = makeHarness();
-    writeRequests(0, [
-      req({ model: "kimi-k3", providerId: "prov-a" }),
-    ]);
+    writeRequests(0, Array.from({ length: 10 }, () =>
+      req({ model: "kimi-k3", providerId: "prov-a" })));
     const s = stats.getState({ days: 1 });
     assert.equal(s.ttft.byModel[0].key, "prov-a/kimi-k3");
     cleanup();

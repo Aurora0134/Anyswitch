@@ -28,6 +28,8 @@
 //               persistence is keyed), unknown ids keep their raw key.
 //     ttft:       per-bucket ({ start, avg, p95 }) + per-model avg/p95
 //                 (nearest-rank) over successful rows that have a ttftMs,
+//                 models with < 10 such samples are dropped from the list
+//                 entirely (same rule as tps below),
 //     tps:        per-model generation TPS, completion / ((durationMs-ttftMs)/1000),
 //                 rows whose generation window is < 0.2s are excluded; models
 //                 with < 10 such samples are dropped from the list entirely,
@@ -52,6 +54,9 @@ const TPS_MIN_GEN_SEC = 0.2;
 // TPS 行样本下限：低于 10 个生成段的模型不显示——小样本的总量加权均值
 // 被单请求噪声主导（一次慢请求就把均值拖走），读数没有参考意义。
 const TPS_MIN_SAMPLES = 10;
+// TTFT 行样本下限：与 TPS 卡同一机制——低于 10 个样本的模型不显示，
+// 小样本均值被单请求噪声主导（一次慢请求就把均值拖走），读数没有参考意义。
+const TTFT_MIN_SAMPLES = 10;
 const HOUR_MS = 60 * 60 * 1000;
 
 function num(value) {
@@ -439,6 +444,7 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
         p95: nearestRank(samples, 0.95),
         samples: samples.length,
       }))
+      .filter((e) => e.samples >= TTFT_MIN_SAMPLES)
       .sort((a, b) => b.samples - a.samples || (a.key < b.key ? -1 : 1));
 
     // ── TPS: completion tokens per generation second (post-first-chunk) ──
