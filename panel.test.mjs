@@ -4212,6 +4212,41 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
   });
 });
 
+describe("panel.html 删除渠道/号池携路由链剪除", () => {
+  // 用户 09-21 定稿：删除被自动路由引用的渠道不再拒绝，而是同一笔删除里剪掉
+  // 对应链节点；确认弹窗预告、成功提示回报。新增文案已逐句过审（PANEL-COPY-SPEC
+  // 的流程），这里钉住批准版本。
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  it("删除恢复失败的 failed 项按 providerId 上屏，不得整对象拼接出 [object Object]", () => {
+    assert.ok(panelJs.includes("item.providerId"), "失败项取 providerId");
+    assert.ok(!panelJs.includes("const failed = (rr && rr.failed) || [];"), "不得保留旧写法（直接拿对象数组 join）");
+  });
+
+  it("删除渠道/池成员/号池/多选四个弹窗都预报自动路由被剪", () => {
+    for (const fn of ["confirmDeleteProvider", "confirmDeletePoolMember", "confirmDissolvePool", "confirmDeletePool", "confirmDeleteStoreSelection"]) {
+      assert.ok(panelJs.includes(`function ${fn}`), `${fn} 存在`);
+    }
+    assert.ok(panelJs.includes("endpointsRoutingThroughNodes("), "引用预判走共享函数");
+    assert.ok(panelJs.includes("以下端点的自动路由包含该渠道："), "渠道弹窗预告句");
+    assert.ok(panelJs.includes("以下端点的自动路由包含该号池："), "解除号池弹窗预告句");
+    assert.ok(panelJs.includes("以下端点的自动路由包含其中的渠道或号池："), "删池/多选弹窗预告句");
+    assert.ok(panelJs.includes("已从自动路由移除对应节点："), "删除成功提示后缀句");
+  });
+
+  it("prunedChains 的剩余跳数口径：0 跳整链消失只报端点名，>0 报剩几个节点", () => {
+    const start = panelJs.indexOf("function routeChainPrunedNote");
+    assert.ok(start >= 0, "后缀生成器存在");
+    const body = panelJs.slice(start, panelJs.indexOf("\n  }", start));
+    assert.ok(body.includes("item.remaining > 0"), "按 remaining 分支");
+    assert.ok(body.includes("（剩 ${item.remaining} 个节点）"), "正数口径");
+    assert.ok(!body.includes("[object"), "不得出现对象拼接");
+  });
+});
+
 describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
   // toast 机制与通报函数体在 panel.js；.toast 基座与动作小字命中规则在 panel.css
   const panelJs = readFileSync(

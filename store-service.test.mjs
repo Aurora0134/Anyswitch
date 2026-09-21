@@ -635,6 +635,149 @@ describe("store-service deleteProvider", () => {
     assert.equal(result.ok, false);
     assert.match(result.error, /unsafe|retained/);
   });
+
+  // Route chains demand every node exists (store-schema), so a provider (or
+  // pool) that a chain names must be pruned out of that chain in the same
+  // write that removes it — otherwise the whole store write is refused and
+  // the deletion can never complete (the historical stuck-journal bug).
+  describe("route-chain pruning on delete", () => {
+    it("deleting a provider drops its chain entries and keeps the rest", async () => {
+      const paths = makeRoot();
+      seedStore(paths, {
+        "prov-a": richEntry("prov-a", ["m1"]),
+        "prov-c": richEntry("prov-c", ["m4"]),
+      }, {
+        routingChains: {
+          claude: { chain: [{ node: "prov-a", model: "m1" }, { node: "prov-c", model: "m4" }] },
+          kimi: { chain: [{ node: "prov-c", model: "m4" }] },
+        },
+      });
+      writeCredential(paths, "prov-a");
+      const svc = makeService(paths);
+
+      const result = await svc.deleteProvider("prov-a");
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.prunedChains, [{ endpointId: "claude", remaining: 1 }]);
+      const stored = readStore(paths).store;
+      assert.equal(Object.hasOwn(stored.providers, "prov-a"), false);
+      assert.deepEqual(stored.routingChains, {
+        claude: { chain: [{ node: "prov-c", model: "m4" }] },
+        kimi: { chain: [{ node: "prov-c", model: "m4" }] },
+      });
+      assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), false);
+    });
+
+    it("deleting the last referenced provider drops the chain and an emptied routingChains map", async () => {
+      const paths = makeRoot();
+      seedStore(paths, { "prov-a": richEntry("prov-a", ["m1"]) }, {
+        routingChains: { claude: { chain: [{ node: "prov-a", model: "m1" }] } },
+      });
+      const svc = makeService(paths);
+
+      const result = await svc.deleteProvider("prov-a");
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.prunedChains, [{ endpointId: "claude", remaining: 0 }]);
+      const stored = readStore(paths).store;
+      assert.equal(Object.hasOwn(stored, "routingChains"), false, "empty routingChains map is dropped");
+    });
+
+    it("deleting a pooled member keeps the pool node while it still resolves, and prunes only the member node", async () => {
+      const paths = makeRoot();
+      seedStore(paths, {
+        "prov-a": richEntry("prov-a", ["m1", "m2"]),
+        "prov-b": richEntry("prov-b", ["m2"]),
+        "prov-c": richEntry("prov-c", ["m4"]),
+      }, {
+        pools: { "pool-x": { displayName: "号池", members: ["prov-a", "prov-b", "prov-c"] } },
+        routingChains: { dsh: { chain: [{ node: "pool-x", model: "m2" }, { node: "prov-a", model: "m1" }] } },
+      });
+      writeCredential(paths, "prov-a");
+      const svc = makeService(paths);
+
+      const result = await svc.deleteProvider("prov-a");
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.prunedChains, [{ endpointId: "dsh", remaining: 1 }]);
+      const stored = readStore(paths).store;
+      assert.deepEqual(stored.pools["pool-x"].members, ["prov-b", "prov-c"]);
+      assert.deepEqual(stored.routingChains.dsh.chain, [{ node: "pool-x", model: "m2" }]);
+    });
+
+    it("deleting a pooled member dissolves the pool: the pool node is pruned too", async () => {
+      const paths = makeRoot();
+      seedStore(paths, {
+        "prov-a": richEntry("prov-a", ["m1"]),
+        "prov-b": richEntry("prov-b", ["m2"]),
+        "prov-c": richEntry("prov-c", ["m4"]),
+      }, {
+        pools: { "pool-x": { displayName: "号池", members: ["prov-a", "prov-b"] } },
+        routingChains: { claude: { chain: [{ node: "pool-x", model: "m2" }, { node: "prov-c", model: "m4" }] } },
+      });
+      writeCredential(paths, "prov-a");
+      const svc = makeService(paths);
+
+      const result = await svc.deleteProvider("prov-a");
+      assert.equal(result.ok, true, result.error);
+      assert.deepEqual(result.prunedChains, [{ endpointId: "claude", remaining: 1 }]);
+      const stored = readStore(paths).store;
+      assert.equal(Object.hasOwn(stored, "pools"), false, "pool dissolved with the member");
+      assert.deepEqual(stored.routingChains.claude.chain, [{ node: "prov-c", model: "m4" }]);
+    });
+
+    it("dissolving a pool prunes a chain naming it, unless a remaining member shadows the id", async () => {
+      const paths = makeRoot();
+      seedStore(paths, {
+        "prov-a": richEntry("prov-a", ["m1", "m2"]),
+        "prov-b": richEntry("prov-b", ["m2"]),
+        "prov-c": richEntry("prov-c", ["m4"]),
+      }, {
+        pools: { "pool-x": { displayName: "号池", members: ["prov-a", "prov-b"] } },
+        routingChains: { kimi: { chain: [{ node: "pool-x", model: "m2" }, { node: "prov-c", model: "m4" }] } },
+      });
+      const svc = makeService(paths);
+
+      const result = await svc.deletePool("pool-x");
+      assert.equal(result.ok, true, result.error);
+      const stored = readStore(paths).store;
+      assert.deepEqual(stored.routingChains.kimi.chain, [{ node: "prov-c", model: "m4" }]);
+
+      // A pool whose id is reused by one of its members: after the dissolve
+      // that provider still resolves the id, so the chain entry stays.
+      const paths2 = makeRoot();
+      seedStore(paths2, {
+        "prov-a": richEntry("prov-a", ["m1"]),
+        "prov-b": richEntry("prov-b", ["m2"]),
+      }, {
+        pools: { "prov-a": { displayName: "同名", members: ["prov-a", "prov-b"] } },
+        routingChains: { claude: { chain: [{ node: "prov-a", model: "m1" }] } },
+      });
+      const svc2 = makeService(paths2);
+      const result2 = await svc2.deletePool("prov-a");
+      assert.equal(result2.ok, true, result2.error);
+      assert.deepEqual(readStore(paths2).store.routingChains.claude.chain, [{ node: "prov-a", model: "m1" }]);
+    });
+
+    it("a journal left pending by the old behavior heals on getState", async () => {
+      const paths = makeRoot();
+      // The real-world fixture: provider still in the store, chain pointing at
+      // it, journal pending — every write used to be refused forever.
+      seedStore(paths, { "prov-a": richEntry("prov-a", ["m1"]) }, {
+        routingChains: { dsh: { chain: [{ node: "prov-a", model: "m1" }] } },
+      });
+      writeCredential(paths, "prov-a");
+      writeFileSync(
+        join(paths.root, "delete-journal.json"),
+        JSON.stringify({ pending: [{ providerId: "prov-a", credentialFile: "prov-a.dpapi", recordedAt: "x" }], completed: [] }),
+      );
+
+      const svc = makeService(paths);
+      const state = await svc.getState();
+      assert.deepEqual(state.resumeResult, { resumed: ["prov-a"], failed: [] });
+      const stored = readStore(paths).store;
+      assert.equal(Object.hasOwn(stored.providers, "prov-a"), false);
+      assert.equal(Object.hasOwn(stored, "routingChains"), false);
+      assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), false);
+    });
+  });
 });
 
 describe("store-service getState", () => {
