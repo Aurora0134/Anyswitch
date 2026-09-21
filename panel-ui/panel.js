@@ -3475,6 +3475,13 @@ async function api(method, path, body) {
     for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
+    // 首帧落位属性在此交棒：panel.html 的 panelViewPrepaint 于绘制前把目标屏写在
+    // <html> 上，显隐由 panel.css 的「首帧视图落位」段承担；上面那批 hidden 赋值
+    // 已把同一状态落到真实 DOM，摘掉属性后运行时显隐就只剩 hidden 一个来源。
+    // 位置在 hidden 赋值之后、下面进入钩子之前是硬要求：enterSettingsView 会激活
+    // 归档子 tab 并拍看板镜像快照，属性还挂着会让快照连收起规则一起拍进去。
+    document.documentElement.removeAttribute("data-prepaint-view");
+    document.documentElement.removeAttribute("data-prepaint-subtab");
     // 内容区入场动效：仅主动切换播放；恢复/首屏由 suppressViewEnter 置位跳过。
     // 看板走变体阶梯入场（playBoardEnter），其余视图走通用 view-enter。
     if (suppressViewEnter) {
