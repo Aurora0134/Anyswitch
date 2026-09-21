@@ -2318,7 +2318,8 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 describe("panel.html 设置全页视图", () => {
   // 设置从弹窗升级为全页视图：页头齿轮切入，原页头整行换成设置专用头行
   // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「自动路由」「主题」「关于」四个子 tab。
-  // 设置视图不写入 panel-view，刷新永不恢复进设置页。
+  // 设置视图不占 panel-view（那份留作「←退出」的目标），另由 panel-settings-open
+  // 标记记录是否停在设置页：刷新与面板重启恢复都按这两个键回到原处。
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
     "utf8",
@@ -2544,7 +2545,7 @@ describe("panel.html 设置全页视图", () => {
       "panel.js 的 STYLES 数组恰为三项");
   });
 
-  it("齿轮改为切入设置视图，退出回到进入前视图；设置视图不写入 panel-view", () => {
+  it("齿轮改为切入设置视图，退出回到进入前视图；设置页另用 panel-settings-open 持久化", () => {
     assert.ok(/\$\("settingsBtn"\)[\s\S]{0,300}?switchView\("settings"\)/.test(panelJs),
       "页头齿轮切入设置视图");
     assert.ok(panelJs.includes("switchView(settingsReturnView)"), "退出回到进入前视图");
@@ -2555,11 +2556,85 @@ describe("panel.html 设置全页视图", () => {
       && sw[1].includes('$("settingsHeadInner").hidden = !settings;'),
       "主头行与设置头行互斥切换");
     assert.ok(/if \(!settings\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
-      "设置视图不持久化 panel-view");
+      "panel-view 只存主视图，设置视图不覆盖它");
+    assert.ok(sw[1].includes('localStorage.setItem("panel-settings-open", settings ? "1" : "0")'),
+      "进设置页打标记、离开即清");
     const restoreStart = panelJs.indexOf("function restoreView()");
     const restore = panelJs.slice(restoreStart, panelJs.indexOf("function reconcileSkillsSelection()", restoreStart));
     assert.ok(restore.length > 100, "未真正取到 restoreView 函数体");
-    assert.ok(!restore.includes('"settings"'), "restoreView 白名单不含 settings");
+    assert.ok(restore.includes('localStorage.getItem("panel-settings-open")'), "刷新按标记判定是否恢复进设置页");
+    assert.ok(restore.includes('switchView("settings")'), "restoreView 恢复设置页");
+    assert.ok(restore.includes("settingsReturnView = currentView"), "恢复后「←退出」目标取自主视图存档");
+    assert.ok(restore.includes('restartEnterView = "settings"'), "重启恢复的入场动画落到设置视图");
+  });
+
+  it("刷新恢复设置页：子 tab 回到离开前那一个，主题镜像等看板首刷补拍", () => {
+    const subTab = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/);
+    assert.ok(subTab, "activateSettingsSubTab found in panel.js");
+    assert.ok(subTab[1].includes('localStorage.setItem("panel-settings-subtab", which)'),
+      "子 tab 激活即存档（存档＝此刻真实显示的那一个）");
+    const enter = panelJs.match(/\n    enterSettingsView = \(\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(enter, "enterSettingsView found in panel.js");
+    assert.ok(enter[1].includes("settingsSubTabToRestore"), "恢复路径按存档激活子 tab");
+    assert.ok(enter[1].includes("settingsSubTabToRestore = null"), "存档只消费一次，不留到下一次进入");
+    assert.ok(enter[1].includes("resetSettingsSubTab()"), "主动点齿轮进入仍落「通用」");
+    // 恢复直接进「主题」时快照拍在首刷数据落地之前（空壳看板），等 agents 渲染完补拍一次
+    assert.ok(panelJs.includes("let notifyBoardRendered = () => {};"), "补拍钩子有无操作默认值");
+    const hook = panelJs.match(/\n    notifyBoardRendered = \(\) => \{([\s\S]*?)\n    \};/);
+    assert.ok(hook && hook[1].includes("mirrorAwaitRender = false"), "补拍一次性：触发即摘标记");
+    assert.ok(hook && hook[1].includes("captureSettingsMirror()"), "补拍实现复用同一套快照逻辑");
+    const agents = panelJs.match(/async function refreshAgents\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(agents && agents[1].includes("notifyBoardRendered();"), "看板渲染完成即通知");
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init && init[0].includes('view === "settings" ? $("settingsView")'),
+      "开屏淡出后的入场动画覆盖设置视图");
+  });
+
+  it("恢复决策实测：设置页标记决定落点，返回目标取主视图，launcher 首开清标记", () => {
+    // 只断字符串证明不了行为：把 restoreView 抽出来在桩环境里真跑一遍，
+    // switchView 换成记录调用与 currentView 的桩，localStorage 换成内存对象。
+    const body = (panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/) || [])[1];
+    assert.ok(body, "restoreView found in panel.js");
+    const run = (store, win) => {
+      const calls = [];
+      return new Function("store", "win", "calls", `
+        let suppressViewEnter = false, settingsReturnView = "board", settingsSubTabToRestore = null,
+            restartEnterView = null, currentView = "board";
+        const window = win;
+        const localStorage = {
+          getItem: (k) => (k in store ? store[k] : null),
+          setItem: (k, v) => { store[k] = v; },
+        };
+        function switchView(name) { currentView = name; calls.push(name); }
+        function restoreView() {
+        ${body}
+        }
+        restoreView();
+        return { calls, currentView, settingsReturnView, settingsSubTabToRestore, restartEnterView, store };
+      `)(store, win, calls);
+    };
+
+    // 停在设置页（进设置前在渠道页）：恢复进设置，退出目标是渠道页，子 tab 存档交棒
+    const onSettings = run({ "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "theme" }, {});
+    assert.deepEqual(onSettings.calls, ["store", "settings"], "先恢复主视图再落设置页");
+    assert.strictEqual(onSettings.settingsReturnView, "store", "「←退出」回到进入设置前的渠道页");
+    assert.strictEqual(onSettings.settingsSubTabToRestore, "theme", "子 tab 存档交给 enterSettingsView");
+    assert.strictEqual(onSettings.restartEnterView, null, "普通刷新不记重启入场动画");
+
+    // 面板服务重启后自动刷新回来：同样落设置页，且入场动画改由开屏淡出起播
+    const afterRestart = run({ "panel-view": "board", "panel-settings-open": "1" }, { panelStartupRestart: true });
+    assert.deepEqual(afterRestart.calls, ["settings"], "看板进的设置页恢复后仍在设置页");
+    assert.strictEqual(afterRestart.settingsReturnView, "board", "返回目标仍是看板");
+    assert.strictEqual(afterRestart.restartEnterView, "settings", "入场动画记到设置视图");
+
+    // launcher 首开：固定落看板，且把上次会话留下的标记就地清掉
+    const launched = run({ "panel-view": "store", "panel-settings-open": "1" }, { panelStartupLaunch: true });
+    assert.deepEqual(launched.calls, [], "首开不恢复，停在看板");
+    assert.strictEqual(launched.store["panel-settings-open"], "0", "首开即清标记，之后的刷新才按真实视图走");
+
+    // 没停在设置页：标记为 0 时不得凭空进设置
+    const mainOnly = run({ "panel-view": "stats", "panel-settings-open": "0" }, {});
+    assert.deepEqual(mainOnly.calls, ["stats"], "只恢复主视图");
   });
 
   it("原设置弹窗整体移除（DOM、开关逻辑、init 装配更名）", () => {
@@ -3497,7 +3572,8 @@ describe("panel.html 面板重启状态机契约", () => {
     const restoreStart = panelJs.indexOf("function restoreView()");
     const restore = panelJs.slice(restoreStart, panelJs.indexOf("function reconcileSkillsSelection()", restoreStart));
     assert.ok(restore.length > 100, "未真正取到 restoreView 函数体，后续断言会全部落空");
-    assert.ok(restore.includes("if (window.panelStartupLaunch) return;"), "launcher 首开跳过恢复固定看板");
+    assert.ok(/if \(window\.panelStartupLaunch\) \{[\s\S]{0,200}setItem\("panel-settings-open", "0"\)[\s\S]{0,120}return;/.test(restore),
+      "launcher 首开连设置页标记一起清掉再跳过恢复，固定落看板");
     assert.ok(restore.includes('localStorage.getItem("panel-view")'), "刷新与普通访问仍按 panel-view 恢复");
   });
 });
