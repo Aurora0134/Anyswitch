@@ -62,8 +62,8 @@ journal 行归到**实际应答节点+绑定模型**；虚拟 auto 与中间失�
 
 ### R-09 路由链灯无黄档（仅链灯；他处红黄绿不变）
 链灯三态：绿=可用 / 红=不可用退避 / 灰=无数据（进程生命周期内）。"慢但可用"不构成黄档。
-红档的锁死判据有两条，同一 `isLatched` 计算并随 `nodeStats().latched` 上报：①连续失败达到阈值（恒定生效）；②按失败率降级——最近 N 次请求里失败占比达阈值即锁（`failureRateGate`，默认关，关闭时判据与引入前完全一致）。计数口径是"该成员本次请求彻底失败"，链尾一跳与单成员池同样计入（此前只有被越过的那一跳计数，链尾因此永不亮红）。旧 dump 无 `latched` 字段时退回判据①。
-- 锚点：chain-routing.mjs lamps 的三态定义与不设黄档的说明（约 :299）、relay-settings.mjs `failureRateLatched`
+红档的锁死判据是连续失败达到阈值（`CHAIN_DEMOTE_AFTER_FAILURES`）。计数口径是"该成员本次请求彻底失败"，链尾一跳与单成员池同样计入（此前只有被越过的那一跳计数，链尾因此永不亮红）。
+- 锚点：chain-routing.mjs lamps 的三态定义与不设黄档的说明（约 :299）
 - 钉住：panel.test.mjs「链路状态区不含 TTFT 黄档判定」
 - 边界：仅路由链点阵；监测页 TTFT 灯、模型稳定性灯仍是红/黄/绿三档——**这是有意差分，不是不一致**。
 
@@ -117,12 +117,6 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 - 钉住：agent-metrics.test.mjs「per-launch stability batch + chain runtime relay」组；anthropic-server-chain.test.mjs「稳定性批量随快照捎带」「链运行时随快照捎带」；openai-server-chain.test.mjs「一次性 relay 捎带的链状态并入 runtime」
 - 拍板：2026-09-15（claude 流量长期不进状态检测/渠道灯，用户拍板修复）
 
-### R-21 按失败率降级（自动路由第二把降级判据，默认关）
-设置项 `failureRateGate` = { enabled, samples, failPercent }，`enabled:false` 是默认值——关闭时自动路由与号池的降级仍只看连续失败次数，行为与开关引入前逐项一致。开启后任一渠道最近 `samples` 次请求的失败占比 ≥ `failPercent`% 即视为锁死：链位置可越过它、链灯亮红、号池粘性位允许前移；它自身成功一次不会立刻解除，随窗口滑出而解除。判定在链/池两侧各自实现同一函数（`failureRateLatched`），逐请求现读设置（面板改完下一个请求即生效，不重启 relay）。
-- 锚点：relay-settings.mjs `parseFailureRateGate` / `failureRateLatched`；chain-routing.mjs 与 pool-routing.mjs 的 `getFailureRateGate`；launch.mjs / relay-host.mjs 的 `getFailureRateConfig` 下发
-- 钉住：relay-settings.test.mjs「按失败率降级（failureRateGate）」；chain-routing.test.mjs 与 pool-routing.test.mjs 同名 describe（含"关闭时保持原语义"负例）；openai-server-chain.test.mjs「(gate) 门关闭/开启…」端到端两例
-- 拍板：2026-09-21（对标 cc-switch 熔断错误率维度，用户指定做成默认关的高级功能）
-
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -136,7 +130,6 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 | 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.js `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
 | journal 保留 90 天 | usage-journal.mjs retentionDays | usage-journal 测试 |
 | 监测页实例陈旧 2min | panel.js `INSTANCE_STALE_MS` | 属监测页，统计页不用 |
-| 失败率门 samples 4–50 默认 10 / failPercent 20–100 默认 60 | relay-settings.mjs `*_FAILURE_RATE_*` 常量 | panel.js `clampFailureRateSamples` / `clampFailureRatePercent`（越界口径同为"低于下限回落默认、超上限夹取"）+ panel.html 两控件的 min/max |
 
 ## 4. 已知限制与已接受坑
 

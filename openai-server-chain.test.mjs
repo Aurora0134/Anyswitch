@@ -650,49 +650,6 @@ describe("chain runtime introspection endpoint (/api/internal/route-chain-runtim
       assert.deepEqual(body.endpoints.claude.positions, [{ nodeId: "chan-b", model: "model-b", since: 12345 }]);
     });
   });
-
-  // 按失败率降级（高级项，默认关）：交替失败的链首在「连续失败」判据下永不
-  // 锁死，位置也就不会越过它；开启后同样的失败形状达到占比即被越过。
-  async function walkAlternatingHead(port) {
-    for (let round = 0; round < 5; round += 1) {
-      const res = await postChat(port);
-      await res.text();
-    }
-  }
-
-  it("(gate) 门关闭时交替失败的链首不会被越过（保持现有语义）", async () => {
-    let headFails = true;
-    const { upstreamFetch } = memberRouter({
-      "chan-a": () => (headFails = !headFails) ? healthyStream("A answers") : statusError(503),
-      "chan-b": () => healthyStream("B answers"),
-    });
-    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
-    await withServer(deps, async (port) => {
-      await walkAlternatingHead(port);
-      const body = await (await getRuntime(port)).json();
-      assert.equal(body.endpoints.zcode.current.node, "chan-a", "位置仍停在链首");
-      assert.deepEqual(body.endpoints.zcode.lamps, ["green", "green"]);
-    });
-  });
-
-  it("(gate) 门开启后同样交替失败的链首会被越过", async () => {
-    let headFails = true;
-    const { upstreamFetch } = memberRouter({
-      "chan-a": () => (headFails = !headFails) ? healthyStream("A answers") : statusError(503),
-      "chan-b": () => healthyStream("B answers"),
-    });
-    const deps = {
-      ...createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY }),
-      getFailureRateConfig: () => ({ enabled: true, samples: 4, failPercent: 50 }),
-    };
-    await withServer(deps, async (port) => {
-      await walkAlternatingHead(port);
-      const body = await (await getRuntime(port)).json();
-      assert.deepEqual(body.endpoints.zcode.lamps, ["red", "green"], "最近 4 次里 2 次失败即锁死链首");
-      assert.equal(body.endpoints.zcode.current.node, "chan-b", "锁死后位置才允许越过它");
-    });
-  });
-
   // 末位失败计数：降级计数原先只在"成员被越过"时触发，链的最后一跳（以及
   // 单成员池）因此永不计数——客户端持续拿到失败，Flow Rail 的尾灯却永远灰着。
 

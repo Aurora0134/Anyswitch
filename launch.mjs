@@ -197,7 +197,6 @@ export function createProductionDeps({
   upstreamFetch = fetch,
   retryOptions,
   getKeepAliveConfig,
-  getFailureRateConfig,
   effortInjector,
   logger = null,
   agentId = "claude",
@@ -290,8 +289,6 @@ export function createProductionDeps({
     // saves take effect on the next request without a restart. Low-traffic
     // single-user relay: the readFileSync cost is negligible.
     getKeepAliveConfig: getKeepAliveConfig ?? (() => loadSettings(defaultSettingsPath()).keepAlive),
-    // 按失败率降级（默认关）同样逐请求现读，与抗截断同一热生效路径。
-    getFailureRateConfig: getFailureRateConfig ?? (() => loadSettings(defaultSettingsPath()).failureRateGate),
     // One injector for both relay paths of this process: the thinking-depth
     // library is read per request and the "this channel refuses the parameter"
     // memory is shared, so a refusal seen on one path is honored on the other.

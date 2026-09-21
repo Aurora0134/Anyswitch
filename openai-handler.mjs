@@ -75,22 +75,19 @@ export function createOpenAIHandler(deps) {
     readGeneration,
     logger = null,
     effortInjector = null,
-    getFailureRateConfig = null,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
 
   // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
   // in the handler closure, so it is process memory and resets on restart.
-  // 失败率门（按失败率降级）现读设置：面板改完下一个请求即生效，缺省不注入即关闭。
-  const stickyTable = createStickyTable({ getFailureRateGate: getFailureRateConfig });
+  const stickyTable = createStickyTable();
 
   // Chain routing (自动路由): endpointId (the requesting agent's id) -> the
   // chain node that answered last. Same closure lifetime as stickyTable.
   // 降级锁定时经 logger 落一条退避日志（常驻模式下经日志桥流进面板「实时输出」）。
   const chainState = createChainState({
     onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
-    getFailureRateGate: getFailureRateConfig,
   });
 
   function authorize(headers) {
