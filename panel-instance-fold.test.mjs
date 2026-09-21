@@ -64,7 +64,7 @@ function makeEnv() {
 }
 
 function makeRenderInstanceRows(env) {
-  const m = panelJs.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
+  const m = panelJs.match(/function renderInstanceRows\(\{[^}]*\}\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "renderInstanceRows found in panel.html");
   return new Function(
     "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
@@ -222,22 +222,33 @@ describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、�
     }
   });
 
-  it("旧机制 setFold 展开（open=true）立即补绘端点级折线", () => {
+  it("旧机制 setFold 展开（open=true）立即补绘端点级折线，实例四宫格同拨", () => {
     const m = panelJs.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
     assert.ok(m, "setFold found in panel.html");
     const env = makeEnv();
-    const grid = { hidden: true }, brief = { hidden: false }, foldBtn = { setAttribute() {}, textContent: "" };
+    // DSH 卡在本机制下还挂着一列实例行：四宫格要跟着折叠钮收放，否则
+    // 数据未变时 renderIfChanged 不重跑，点击瞬间的展开态停在收起样子。
+    const instGrid = { hidden: false };
+    const card = { querySelectorAll: (sel) => (sel === ".instance-telemetry-grid" ? [instGrid] : []) };
+    const grid = { hidden: true, closest: () => card };
+    const brief = { hidden: false };
+    const foldBtn = { setAttribute() {}, textContent: "" };
     const aggWrap = { hidden: true };
     const arrow = m[0].replace(/^const setFold = /, "").replace(/;$/, "");
-    const fn = new Function("grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "aggWrap", `return (${arrow});`)(
-      grid, brief, foldBtn, "dsh", env.redrawEndpointSparklines, aggWrap,
-    );
+    const fn = new Function(
+      "grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "redrawInstanceSparklines", "aggWrap",
+      `return (${arrow});`,
+    )(grid, brief, foldBtn, "dsh", env.redrawEndpointSparklines, env.redrawInstanceSparklines, aggWrap);
     fn(true);
     assert.deepEqual(env.calls.redrawEp, ["dsh"], "展开瞬间补绘");
+    assert.deepEqual(env.calls.redraw, ["dsh"], "展开瞬间补绘本栏实例折线");
+    assert.equal(instGrid.hidden, false, "实例四宫格随展开可见");
     assert.equal(grid.hidden, false);
     assert.equal(aggWrap.hidden, false, "展开态显示「全局汇总」行");
     fn(false);
     assert.deepEqual(env.calls.redrawEp, ["dsh"], "收起方向不补绘");
+    assert.deepEqual(env.calls.redraw, ["dsh"], "收起方向同样不补绘实例折线");
+    assert.equal(instGrid.hidden, true, "收起态实例四宫格再藏回去");
     assert.equal(aggWrap.hidden, true, "收起态隐藏「全局汇总」行（tokens/请求数由简要栏承载）");
   });
 
@@ -376,5 +387,85 @@ describe("panel.html 看板会话行命名「会话 #x」（按卡内行显示�
     assert.equal(rows.length, 1);
     assert.ok(rows[0].includes("全局汇总"), "汇总行标题保持「全局汇总」");
     assert.ok(!rows[0].includes("会话 #"), "汇总行不编号");
+  });
+});
+
+describe("实例行面徽标（DSH：一行 = 一个进程，徽标 = 它的界面）", () => {
+  const TUI_ROW = { id: "dsh-4102", title: "dsh-4102", surface: "TUI", status: "idle", tokens: {}, requests: 1 };
+  const WEB_ROW = { id: "dsh-4200", title: "dsh-4200", surface: "Web", status: "active", tokens: {}, requests: 2 };
+
+  function renderRows(instances, opts = {}) {
+    const env = makeEnv();
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "dsh", listEl: fakeElement(), instances, ...opts });
+    return env.created.filter((el) => el.className === "session-row").map((el) => el.innerHTML);
+  }
+
+  it("showSurface 时按行贴面徽标，行号照旧", () => {
+    const rows = renderRows([TUI_ROW, WEB_ROW], { showSurface: true });
+    assert.ok(rows[0].includes("会话 #1") && rows[1].includes("会话 #2"), "编号不受徽标影响");
+    assert.ok(rows[0].includes('<span class="badge badge-neutral">TUI</span>'), "首行标出 TUI 面");
+    assert.ok(rows[1].includes('<span class="badge badge-neutral">Web</span>'), "次行标出 Web 面");
+    assert.ok(rows[0].indexOf("TUI") < rows[0].indexOf("待命"), "面徽标排在状态徽标之前");
+  });
+
+  it("读不出面就不贴（不猜），行号与其余字段照旧", () => {
+    const rows = renderRows([{ ...TUI_ROW, surface: undefined }], { showSurface: true });
+    assert.ok(!rows[0].includes("TUI"), "无面可分时行上不多东西");
+    assert.ok(rows[0].includes("会话 #1") && rows[0].includes("待命"));
+  });
+
+  it("其他栏默认不开：同一批实例数据渲染结果一字不差", () => {
+    const on = renderRows([TUI_ROW, WEB_ROW], { showSurface: true });
+    const off = renderRows([TUI_ROW, WEB_ROW]);
+    assert.notDeepEqual(off, on, "开关确实改变渲染");
+    assert.ok(!off[0].includes("badge-neutral\">TUI"), "默认不贴面徽标");
+  });
+
+  it("伪「全局汇总」行不贴面徽标", () => {
+    const rows = renderRows([], { showSurface: true, aggregateFallback: { tokens: {}, totalRequests: 0, surface: "TUI" } });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].includes("全局汇总"));
+    assert.ok(!rows[0].includes(">TUI<"), "汇总行不属于任何一个面");
+  });
+});
+
+describe("DSH 卡头分面副行（Web ×1 · TUI ×2）", () => {
+  function makeSummaryFn(node) {
+    const m = panelJs.match(/function renderDshSurfaceSummary\(surfaces\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderDshSurfaceSummary found in panel.js");
+    return new Function("$", `return (${m[0]});`)((id) => (id === "dshSurfaceSummary" ? node : null));
+  }
+
+  it("按面计数并用 · 连接，元素常显", () => {
+    const node = { hidden: true, textContent: "" };
+    makeSummaryFn(node)([
+      { profile: "dsh-tui", label: "TUI", count: 2 },
+      { profile: "web", label: "Web", count: 1 },
+    ]);
+    assert.equal(node.textContent, "TUI ×2 · Web ×1");
+    assert.equal(node.hidden, false);
+  });
+
+  it("读不出 profile 的那一档按后端给的字面显示名呈现", () => {
+    const node = { hidden: true, textContent: "" };
+    makeSummaryFn(node)([{ profile: null, label: "DSH", count: 3 }]);
+    assert.equal(node.textContent, "DSH ×3");
+  });
+
+  it("空数组 / 零计数 / 缺字段一律收起并清空文案，不留空胶囊", () => {
+    for (const surfaces of [[], null, undefined, [{ profile: "web", label: "Web", count: 0 }], [{ count: 0 }]]) {
+      const node = { hidden: false, textContent: "TUI ×2" };
+      makeSummaryFn(node)(surfaces);
+      assert.equal(node.hidden, true, `收起：${JSON.stringify(surfaces)}`);
+      assert.equal(node.textContent, "");
+    }
+  });
+
+  it("元素不在（其他视图/旧页面）时静默返回，不抛", () => {
+    const m = panelJs.match(/function renderDshSurfaceSummary\(surfaces\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderDshSurfaceSummary found in panel.js");
+    const fn = new Function("$", `return (${m[0]});`);
+    assert.doesNotThrow(() => fn(() => null)([{ profile: "web", label: "Web", count: 1 }]));
   });
 });

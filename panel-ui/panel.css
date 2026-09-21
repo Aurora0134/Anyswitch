@@ -348,6 +348,9 @@
   .panel-card.card-collapsed .agent-detail-fold { display: none; }
   /* 收起态简要信息栏：与下方全局汇总行保持四宫格原有的 14px 间距 */
   .agent-detail-brief { margin-bottom: 14px; }
+  /* 旧折叠机制栏（zcode/dsh/qoder）里挂实例行时，实例盒与简要栏各自成盒，
+     之间要有同一节奏，否则两块 sunken 底色贴边、中间只余一道双边框 */
+  .instances-table-wrapper { margin-bottom: 14px; }
   /* 多实例栏（claude/kimi/opencode/pi）实例计数胶囊：与栏头 title 同行
      （同行布局由 .agent-headings 的 flex+gap 提供），复用 badge-ok 绿色调，
      仅运行中由 setInstanceCount 显示；未运行（card-collapsed）兜底隐藏 */

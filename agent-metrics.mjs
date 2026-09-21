@@ -205,9 +205,9 @@ export function findDescendantClientPid(ancestorPid, clientPids, ppidByPid) {
 }
 
 // Normalize a (already well-formed or not) instance id against a process-scan
-// snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional;
-// codex reads codexEnginePids instead — its pid-tagged ids fold against the
-// engine subset).
+// snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional; an
+// endpoint that tracks an engine subset folds against `${agentId}EnginePids`
+// instead — codex and dsh do, see their bucket comments).
 // Returns { id, label }: id is the canonical "<agentId>-<client pid>" when
 // the numeric tail resolves, otherwise the input unchanged; label is the
 // id's prefix (cwd basename) on a successful fold, else null. Returns null
@@ -218,14 +218,13 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
   const tail = id.match(/-(\d+)$/);
   if (tail === null) return { id, label: null };
   const tailPid = Number(tail[1]);
-  // codex folds against the ENGINE subset, not the whole bucket: ChatGPT.exe
-  // (the desktop GUI shell — typically the engine's PARENT, so a GUI-pid tag
-  // still folds through the lineage table) and the short-lived helpers sit in
-  // codexPids but never own a session. Same scope the instance housekeeping
-  // reconciles against, so a folded id is never evicted as a dead pid.
-  const clientPids = agentId === "codex"
-    ? procSnapshot?.codexEnginePids
-    : procSnapshot?.[`${agentId}Pids`];
+  // Endpoints that own an engine subset fold against it, not the whole bucket:
+  // codex's ChatGPT.exe (the desktop GUI shell — typically the engine's PARENT,
+  // so a GUI-pid tag still folds through the lineage table) and its short-lived
+  // helpers, and dsh's two TUI launcher shells, sit in `${agentId}Pids` but
+  // never own a session. Same scope the instance housekeeping reconciles
+  // against, so a folded id is never evicted as a dead pid.
+  const clientPids = procSnapshot?.[`${agentId}EnginePids`] ?? procSnapshot?.[`${agentId}Pids`];
   let clientPid = clientPids instanceof Set && clientPids.has(tailPid) ? tailPid : null;
   if (clientPid === null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
@@ -435,10 +434,104 @@ function resolveProbeRow(lower) {
   return { image: null, commandLine: null };
 }
 
+// ---------------------------------------------------------------------------
+// DSH surface classification (步 1 of bridge/anyswitch/dsh-tui-integration-plan.md).
+//
+// One community-TUI launch in npm form is THREE node.exe rows: the global
+// launcher, the profile-copy launcher it delegates to, and the real
+// `dsh --profile dsh-tui` process it spawns (replayed against the shipped
+// bin/dsh-tui.js + the npm dsh.cmd shim — see the plan's §2/§3). All three
+// used to land in the DSH count because the loose `bin\dsh` matcher is a
+// prefix of `bin\dsh-tui.js`, so the card read 3 processes per terminal. Only
+// the last one is a session: the two shells are stdio-inherit stubs that live
+// and die with it. Same split as codex's family/engine pair, with one
+// deliberate difference — the DSH card counts the ENGINE set (a DSH launcher
+// shell is a stub, while codex's ChatGPT.exe is the desktop app itself, so
+// that card keeps the family).
+//
+// The harness package path is the engine signature: npm, pnpm and profile-dir
+// layouts all keep `@deepseek-ai/dsh/…/lib/bin.js` on the command line (the
+// package manifest declares bin = lib/bin.js). Management invocations of the
+// same entry are excluded: `dsh plugin --profile x add <pkg>` forwards to pnpm
+// and `--dump-config` prints and exits — neither boots a session.
+// ---------------------------------------------------------------------------
+const DSH_HARNESS_PATH_RE = /@deepseek-ai[\\/]dsh[\\/]|dsh[\\/]lib[\\/]bin\.js/;
+const DSH_LAUNCHER_SHELL_RE = /[\\/]bin[\\/]dsh-tui\.js/;
+const DSH_MANAGEMENT_RE = /[\s"']plugin\s+--profile|--dump-config|--dump-default-config/;
+// `--profile <name>` and `--profile=<name>`; the value stops at the first
+// space or quote so a following flag cannot be swallowed.
+const DSH_PROFILE_ARG_RE = /--profile(?:=|\s+)("([^"]*)"|(\S+))/;
+// The `web` subcommand is a hardcoded alias of `--profile web` (dsh's own
+// bin.js), so a web boot carries no --profile token: the alias sits as the
+// first token after the script path.
+const DSH_WEB_ALIAS_RE = /bin\.js["']?\s+web(?:\s|$)/;
+// Anything that is not a bare profile directory name (spaces, quotes, path
+// separators) is treated as unreadable rather than pasted into a badge.
+const DSH_PROFILE_NAME_RE = /^[^"'\\\s/]{1,40}$/;
+
+// Profile name this DSH command line boots, or null when it cannot be read
+// (management invocation, plain-tasklist rows with no command line, a custom
+// profile launched through a wrapper that dropped the flag). Case is preserved:
+// the name is a directory name the user chose.
+export function dshProfileNameFrom(commandLine) {
+  if (typeof commandLine !== "string" || commandLine.length === 0) return null;
+  if (DSH_MANAGEMENT_RE.test(commandLine)) return null;
+  const arg = commandLine.match(DSH_PROFILE_ARG_RE);
+  if (arg !== null) {
+    const name = arg[2] ?? arg[3] ?? "";
+    return DSH_PROFILE_NAME_RE.test(name) ? name : null;
+  }
+  return DSH_WEB_ALIAS_RE.test(commandLine) ? "web" : null;
+}
+
+// Is this DSH-family command line the harness itself (vs a launcher shell or a
+// management invocation)? Image-name rows (dsh.exe — the pip packaging ships
+// Scripts\dsh.exe) never reach here: they are authoritative by name.
+function isDshEngineCommandLine(lower) {
+  return DSH_HARNESS_PATH_RE.test(lower)
+    && !DSH_LAUNCHER_SHELL_RE.test(lower)
+    && !DSH_MANAGEMENT_RE.test(lower);
+}
+
+// Panel display names for the profiles whose product name is not the directory
+// name: `web` is DSH's browser UI (also spelled by its `dsh web` alias), and
+// the community terminal front end installs itself as profile `dsh-tui`
+// (`dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`).
+const DSH_SURFACE_LABELS = { web: "Web", "dsh-tui": "TUI", tui: "TUI" };
+const DSH_UNKNOWN_SURFACE_LABEL = "DSH";
+
+export function dshSurfaceLabel(profile) {
+  if (typeof profile !== "string" || profile.length === 0) return DSH_UNKNOWN_SURFACE_LABEL;
+  return DSH_SURFACE_LABELS[profile] ?? profile;
+}
+
+// Card subline data: how many live DSH session processes belong to each
+// surface. The process scan is the only source that can tell web from TUI
+// before the first request — every DSH surface shares one `x-agent-id: dsh`,
+// so the request plane cannot. Engine pids whose profile could not be read
+// group under null and display as "DSH ×n", so the subline always adds up to
+// the card's process count.
+export function summarizeDshSurfaces(procCounts) {
+  const enginePids = procCounts?.dshEnginePids instanceof Set ? procCounts.dshEnginePids : [];
+  const counts = new Map();
+  for (const pid of enginePids) {
+    const profile = procCounts.dshProfileByPid?.get(pid) ?? null;
+    counts.set(profile, (counts.get(profile) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => {
+      if (a[0] === b[0]) return 0;
+      if (a[0] === null) return 1;
+      if (b[0] === null) return -1;
+      return a[0] < b[0] ? -1 : 1;
+    })
+    .map(([profile, count]) => ({ profile, label: dshSurfaceLabel(profile), count }));
+}
+
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -531,8 +624,20 @@ function parseTasklistCsv(stdout) {
       result.opencode += 1;
       if (pid) result.opencodePids.add(pid);
     } else if (bucket === "dsh") {
+      // dsh.exe is the harness's own executable (the pip packaging ships
+      // Scripts\dsh.exe), so the image name alone already makes it a session
+      // process — count it as engine exactly as before. Its command line
+      // still carries the profile flag, so reuse the parse when the probe
+      // supplied one; plain-tasklist rows carry none and stay unlabeled.
       result.dsh += 1;
-      if (pid) result.dshPids.add(pid);
+      if (pid) {
+        result.dshPids.add(pid);
+        result.dshEnginePids.add(pid);
+      }
+      if (pid && commandLine !== null) {
+        const imageProfile = dshProfileNameFrom(commandLine);
+        if (imageProfile !== null) result.dshProfileByPid.set(pid, imageProfile);
+      }
     } else if (bucket === "grok") {
       // Grok Build is a native binary (one grok.exe per terminal session,
       // kimi-style multi-instance) — no helper-image filtering applies. Its
@@ -566,8 +671,19 @@ function parseTasklistCsv(stdout) {
         lower.includes("node_modules\\dsh") ||
         lower.includes("node_modules/dsh");
       if (isDshNode) {
-        result.dsh += 1;
+        // Family vs engine: every DSH-family row (harness, TUI launcher shell,
+        // pnpm-forwarding `dsh plugin`) enters dshPids so pid liveness keeps
+        // working for the whole family, but only the harness boot counts as a
+        // DSH process on the card and feeds the instance buckets.
         if (pid) result.dshPids.add(pid);
+        if (isDshEngineCommandLine(lower)) {
+          result.dsh += 1;
+          if (pid) {
+            result.dshEnginePids.add(pid);
+            const profile = dshProfileNameFrom(commandLine);
+            if (profile !== null) result.dshProfileByPid.set(pid, profile);
+          }
+        }
       }
       const isPiNode =
         lower.includes("pi") &&
@@ -1693,11 +1809,20 @@ export function createAgentMetricsCollector(options = {}) {
   const unattributedState = createAggregateState();
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / codex / grok): instanceId -> { state, firstSeen }. Only requests
+  // pi / codex / grok / dsh): instanceId -> { state, firstSeen }. Only requests
   // carrying a valid instanceId land here, and they ALSO land in the endpoint
   // aggregate above, so the existing cards are unchanged. claude is
-  // per-session already; zcode/dsh/qoder stay aggregate-only by design.
-  const instanceBuckets = { kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map() };
+  // per-session already; zcode/qoder stay aggregate-only by design.
+  // dsh joins on the same socket-reverse-lookup mechanism the other CLI
+  // endpoints use: every DSH surface (web UI, TUI, any custom profile) talks to
+  // the loopback relay over its own keep-alive connection, so one row per
+  // process is reachable without asking the client to send anything. The row
+  // identity is the ENGINE pid from the process scan, never a conversation id:
+  // DSH carries its session id as far as the LLM adapter but never puts it on
+  // the wire (its compat gate withholds the session-affinity headers), so
+  // per-conversation truth stays on the ~/.dsh/sessions scan, where it is
+  // already accurate.
+  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map() };
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -2383,14 +2508,16 @@ export function createAgentMetricsCollector(options = {}) {
     // Remaining custom ids (no numeric tail — normalizeInstanceId already
     // had its say at ingest) keep the idle TTL; an instance with in-flight
     // requests never expires on that path.
-    const bucketAggregateState = { kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState };
+    const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
-      // codex canonical rows reconcile against the ENGINE subset: the bucket's
-      // full pid set also holds the desktop GUI shell (ChatGPT.exe) and
-      // short-lived helpers, which never own a session. Card status/process
-      // count keeps the full-family scope; only instance liveness narrows.
-      const livePids = (bucket === "codex" ? procCounts.codexEnginePids : procCounts[`${bucket}Pids`]) ?? new Set();
+      // Endpoints with an ENGINE subset reconcile their canonical rows against
+      // it: codex's full pid set also holds the desktop GUI shell (ChatGPT.exe)
+      // and short-lived helpers, and dsh's holds the two TUI launcher shells,
+      // none of which own a session. Card status/process count keeps the
+      // bucket's own scope (codex = whole family, dsh = engines only); only
+      // instance liveness narrows to the set that can hold traffic.
+      const livePids = procCounts[`${bucket}EnginePids`] ?? procCounts[`${bucket}Pids`] ?? new Set();
       const pidIdRe = new RegExp(`^${bucket}-(\\d+)$`);
       for (const [instId, entry] of instMap) {
         const pidMatch = instId.match(pidIdRe);
@@ -2492,6 +2619,17 @@ export function createAgentMetricsCollector(options = {}) {
       }
     }
 
+    // DSH row badge: which surface (profile) the process behind this row is.
+    // The row carries no client-side identity (see the instanceBuckets note),
+    // so the profile comes from the same process-scan map that feeds the card
+    // subline. An unreadable profile yields no badge instead of a guess.
+    const dshInstanceSurface = (instId) => {
+      const pidMatch = instId.match(/^dsh-(\d+)$/);
+      if (pidMatch === null) return null;
+      const profile = procCounts.dshProfileByPid?.get(Number(pidMatch[1])) ?? null;
+      return profile === null ? null : dshSurfaceLabel(profile);
+    };
+
     // Per-instance snapshots for one endpoint. Reuses the aggregate card's
     // 全局汇总 session shape field-for-field; ordering is deterministic
     // (firstSeen, then id) so the panel API output is stable.
@@ -2508,6 +2646,7 @@ export function createAgentMetricsCollector(options = {}) {
             nowFn,
           });
           const s = built.sessions[0];
+          const dshSurface = bucket === "dsh" ? dshInstanceSurface(instId) : null;
           return {
             ...s,
             // Authoritative spark history (same shape as the endpoint-level
@@ -2517,15 +2656,19 @@ export function createAgentMetricsCollector(options = {}) {
             sparkHistory: built.metrics.sparkHistory,
             id: instId,
             // The cwd basename a launcher-injected id folded in with (null
-            // for socket-fallback/placeholder rows) — the panel renders
-            // `inst.title || iid`, so an unlabeled row shows its id as
-            // before. codex session rows never fold (no pid tail), so they
-            // take the session scan's title (thread / first message / cwd),
-            // falling back to "Codex 会话 <短id>" when nothing associates.
+            // for socket-fallback/placeholder rows). The panel numbers its
+            // rows 会话 #N and keeps `title` off screen except on the pseudo
+            // 全局汇总 row; codex session rows never fold (no pid tail), so
+            // they take the session scan's title (thread / first message /
+            // cwd), falling back to "Codex 会话 <短id>" when nothing associates.
             title: entry.label
               ?? (bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX)
                 ? codexSessionRowTitle(instId, codexSessionById)
                 : instId),
+            // DSH rows carry the surface (profile) they belong to, which the
+            // row number cannot express: web and every TUI terminal are the
+            // same endpoint id. Other buckets never set it.
+            ...(dshSurface !== null ? { surface: dshSurface } : {}),
             // An instance listed at all is alive (idle TTL for custom ids,
             // PID reconciliation for "<agentId>-<pid>" ids), so idle — never
             // "stopped" just because no OS process count fed its build.
@@ -2689,15 +2832,23 @@ export function createAgentMetricsCollector(options = {}) {
         : claudeSessionsDerived.activeTargets,
     };
 
-    // 3. DSH Agent Status
-    const dshAgent = buildAggregateAgentStatus({
-      id: "dsh",
-      name: "DSH",
-      state: dshState,
-      processCount: procCounts.dsh || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-    });
+    // 3. DSH Agent Status（汇总卡 + 实例桶；一行 = 一个 DSH 进程，profile 决定
+    // 它是 web 还是 TUI 还是用户自建的面。会话粒度不在这里——见 instanceBuckets
+    // 上方注释，请求面拿不到 DSH 的会话 id）
+    const dshAgent = {
+      ...buildAggregateAgentStatus({
+        id: "dsh",
+        name: "DSH",
+        state: dshState,
+        processCount: procCounts.dsh || 0,
+        tpsWindow: recentSampleWindow,
+        nowFn,
+        instances: instanceSnapshots("dsh"),
+      }),
+      // 卡内分面汇总（"Web ×1 · TUI ×2"）：只有进程扫描能在第一条请求之前
+      // 分辨面，请求面上 web 与 TUI 同像（同一条 x-agent-id: dsh）。
+      surfaces: summarizeDshSurfaces(procCounts),
+    };
 
     // 4. Pi Agent Status
     const piAgent = buildAggregateAgentStatus({

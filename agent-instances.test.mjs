@@ -138,10 +138,10 @@ describe("per-instance aggregate tracking", () => {
     assert.equal(wsB.tokens.prompt, 10);
   });
 
-  it("exposes instances for all three scoped endpoints and none for the rest", async () => {
+  it("exposes instances for every scoped endpoint and none for the aggregate-only ones", async () => {
     let t = 1000;
     const collector = testCollector({ nowFn: () => t });
-    for (const agentId of ["kimi", "opencode", "pi"]) {
+    for (const agentId of ["kimi", "opencode", "pi", "dsh"]) {
       // Non-pid-form id: the silent exec mock reports zero processes, and a
       // "<agentId>-<digits>" id would be (correctly) reconciled away as a
       // dead-pid instance — that path is covered in agent-metrics.test.mjs.
@@ -152,15 +152,17 @@ describe("per-instance aggregate tracking", () => {
     // Aggregate-only endpoints must not sprout instance buckets even when tagged.
     const z = collector.startRequest({ agentId: "zcode", instanceId: "z-1", model: "m1" });
     z.recordEnd({ status: 200, usage: {} });
-    const d = collector.startRequest({ agentId: "dsh", instanceId: "d-1", model: "m1" });
-    d.recordEnd({ status: 200, usage: {} });
+    const c = collector.startRequest({ agentId: "claude", instanceId: "c-1", model: "m1" });
+    c.recordEnd({ status: 200, usage: {} });
 
     const status = await collector.getAgentsStatus();
-    for (const agentId of ["kimi", "opencode", "pi"]) {
+    for (const agentId of ["kimi", "opencode", "pi", "dsh"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.deepEqual(agent.instances.map((i) => i.id), [`${agentId}-one`], `${agentId} instance`);
     }
-    for (const agentId of ["zcode", "dsh", "qoder", "claude"]) {
+    // dsh became instance-capable with the DSH-TUI integration (一行 = 一个 DSH
+    // 进程); zcode/qoder/claude keep the aggregate-only shape.
+    for (const agentId of ["zcode", "qoder", "claude"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.equal("instances" in agent, false, `${agentId} must stay aggregate-only`);
     }
@@ -588,6 +590,30 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
       assert.deepEqual(kimi.instances.map((i) => i.id), ["kimi-4321"]);
       assert.equal(kimi.instances[0].requests, 1);
       assert.equal(kimi.metrics.totalRequests, 1, "aggregate still counts the fallback-tagged request");
+    } finally {
+      await close();
+    }
+  });
+
+  it("synthesizes dsh-<pid> for a DSH started in a terminal, and labels its surface", async () => {
+    // 终端里自己起的 dsh（web 或 `dst`）不经过 Anyswitch 启动器、不带任何头，
+    // 只有 x-agent-id 是托管渠道写进 settings.yaml 的。行身份来自 netstat 反查，
+    // 面（Web / TUI）来自同一次进程扫描。
+    const dshPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js\" --profile dsh-tui,node.exe,4321\r\n");
+    const collector = testCollector({ execFn: dshPidExec });
+    const { seen, socketOwner } = stubOwner(4321);
+    const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postChat(port, { "x-agent-id": "dsh" });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.equal(seen.length, 1, "dsh 在套接字兜底白名单内");
+      const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+      assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4321", "TUI"]]);
+      assert.equal(dsh.instances[0].requests, 1);
+      assert.equal(dsh.metrics.totalRequests, 1);
     } finally {
       await close();
     }

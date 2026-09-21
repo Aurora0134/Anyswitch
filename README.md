@@ -125,7 +125,7 @@ Once installed, the agent follows the skill's rules: it writes presets only thro
 
 The panel is served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down. Its features include:
 
-- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client.
+- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client. On the DSH card one row is one DSH process, tagged with the surface it came from (Web vs. the terminal front end), and the card header counts the surfaces.
 - **Skills 管理 (Skills)** — one master skills repo; import skills from a directory or zip, deploy/undeploy them to agent endpoints, and surface endpoint anomalies.
 - **渠道管理 (Channels)** — provider management (add, rotate key, delete, model filter) with DPAPI key sealing; model discovery refresh plus manual model add/remove; pools (号池) and route-chain (自动路由) editing; manual **同步到端点** sync.
 - **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
@@ -312,7 +312,7 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 
 面板由独立面板宿主承载，与 relay 解耦，relay 停止/崩溃时面板仍可用。主要功能包括：
 
-- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行。
+- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行；DSH 卡的实例行一行对应一个 DSH 进程，并按界面标明来历（Web 与终端前端各一行，卡头给出各界面的数量）。
 - **Skills 管理** — 单一 skills 主仓库：从目录或 zip 导入 skill、部署/解除到各 agent 端点、端点异常提示。
 - **渠道管理** — provider 管理（新增、轮换 Key、删除、模型过滤）并 DPAPI 封存 Key；模型发现刷新与手动增删模型；号池与路由链（自动路由）编辑；手动 **同步到端点**。
 - **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。
