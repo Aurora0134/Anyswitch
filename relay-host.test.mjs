@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rotateLogIfNeeded, appendCrashLog } from "./relay-host.mjs";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache } from "./relay-host.mjs";
 
 function makeLogPath() {
   return join(mkdtempSync(join(tmpdir(), "anyswitch-rh-")), "relay-host.log");
@@ -62,4 +62,43 @@ test("appendCrashLog synchronously appends the labelled crash trace", () => {
 
 test("appendCrashLog never throws on an unwritable path", () => {
   appendCrashLog(join(tmpdir(), "anyswitch-no-such-dir", "relay-host.log"), "unhandledRejection", "lost");
+});
+
+// Startup warm-up of the collector's process-scan cache. The regression shape:
+// the relay restarts while the panel tab is hidden, no poll ever primes the
+// scan cache, and the first read after switching back pays the cold ~1s probe
+// inline — past the panel's pull budget, so the panel falls back to its own
+// zero-traffic collector and shows a "0 requests" frame for busy endpoints.
+test("warmProcessScanCache kicks the collector's first scan round immediately", () => {
+  let calls = 0;
+  warmProcessScanCache({ scanProcesses: () => { calls += 1; return Promise.resolve({}); } });
+  assert.equal(calls, 1, "startup must kick the scan round synchronously");
+});
+
+test("warmProcessScanCache does not wait for the scan round to land", () => {
+  // A scan promise that never resolves: if the warm-up awaited it, the relay
+  // startup path would hang right here.
+  warmProcessScanCache({ scanProcesses: () => new Promise(() => {}) });
+});
+
+test("warmProcessScanCache swallows a rejected scan round without an unhandled rejection", async () => {
+  const stray = [];
+  const onRejection = (reason) => stray.push(reason);
+  process.on("unhandledRejection", onRejection);
+  try {
+    assert.doesNotThrow(() => warmProcessScanCache({ scanProcesses: () => Promise.reject(new Error("probe dead")) }));
+    await new Promise((r) => setTimeout(r, 20)); // give any stray rejection a tick to fire
+    assert.deepEqual(stray, [], "warm-up failure must surface nowhere");
+  } finally {
+    process.off("unhandledRejection", onRejection);
+  }
+});
+
+test("warmProcessScanCache tolerates missing or throwing collectors", () => {
+  assert.doesNotThrow(() => warmProcessScanCache(null));
+  assert.doesNotThrow(() => warmProcessScanCache(undefined));
+  assert.doesNotThrow(() => warmProcessScanCache({}), "injected double without scanProcesses");
+  assert.doesNotThrow(() => warmProcessScanCache({
+    scanProcesses: () => { throw new Error("sync boom"); },
+  }), "injected double that throws synchronously");
 });
