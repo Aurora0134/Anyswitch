@@ -1157,6 +1157,73 @@ describe("panel.html codex endpoint card", () => {
   });
 });
 
+describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8",
+  );
+  const cardStart = panelHtml.indexOf('data-agent-id="dsh"');
+  const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
+  const dshCard = panelHtml.slice(cardStart, cardEnd);
+
+  it("declares its own instance region and surface subline inside the DSH card", () => {
+    assert.ok(cardStart > 0, "dsh card container exists");
+    for (const id of [
+      "dshInstanceCount",
+      "dshSurfaceSummary",
+      "dshInstancesWrapper",
+      "dshInstancesList",
+    ]) {
+      assert.ok(dshCard.includes(`id="${id}"`), `dsh card missing #${id}`);
+    }
+    assert.ok(dshCard.indexOf('id="dshInstancesWrapper"') < dshCard.indexOf('id="dshDetailBrief"'),
+      "实例盒排在简要栏之前（与多实例栏同序）");
+    assert.ok(panelCss.includes(".instances-table-wrapper"), "实例盒的间距节奏在 CSS 里有定义");
+  });
+
+  it("keeps the instance region out of the legacy fold's own boxes", () => {
+    // 旧折叠机制拨的是 dshTelemetryGrid / dshDetailBrief / 「全局汇总」行所在的
+    // wrapper；实例盒若复用那三个之一，收起态就没有行可看了。
+    const wrapAt = dshCard.indexOf('id="dshInstancesWrapper"');
+    const wrapTag = dshCard.slice(dshCard.lastIndexOf("<div", wrapAt), wrapAt);
+    assert.ok(wrapTag.includes("instances-table-wrapper"), "实例盒用自家的间距节奏类");
+    assert.ok(!wrapTag.includes("agent-detail-brief"), "实例盒不是简要栏盒");
+    assert.ok(!wrapTag.includes("detail-open-only"), "实例盒不随展开态收放");
+  });
+
+  it("renders DSH as an instance card while keeping its legacy detail fold", () => {
+    const m = panelJs.match(/function renderDsh\(d\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderDsh found in panel.js");
+    assert.ok(m[0].includes('renderInstanceRows({ prefix: "dsh"'), "renders instance rows");
+    assert.ok(m[0].includes('setInstanceCount("dsh", instances.length)'), "drives the instance-count badge");
+    assert.ok(m[0].includes("showSurface: true"), "行上贴面徽标");
+    assert.ok(m[0].includes("renderDshSurfaceSummary(d.surfaces)"), "卡头副行按面汇总");
+    assert.ok(m[0].includes("$(\"dshInstancesWrapper\").hidden") || m[0].includes("instancesWrap.hidden = instances.length === 0"),
+      "零实例时实例盒收起，不留空盒");
+    assert.ok(!m[0].includes("buildAggregateFallback"),
+      "不造伪实例行：端点级汇总由本卡简要栏与「全局汇总」行承担");
+    assert.ok(m[0].includes('setInstanceCount("dsh", 0)'), "未运行分支清零计数与副行");
+    assert.ok(m[0].includes('redrawEndpointSparklines("dsh")'), "旧机制的端点级补绘路径不丢");
+  });
+
+  it("does not opt the other instance cards into the surface badge", () => {
+    for (const fn of ["renderPi", "renderKimi", "renderOpencode", "renderCodex", "renderGrok"]) {
+      const m = panelJs.match(new RegExp("function " + fn + "\\(p\\) \\{[\\s\\S]*?\\n  \\}"));
+      assert.ok(m, fn + " found in panel.js");
+      assert.ok(!m[0].includes("showSurface"), `${fn} keeps today's row markup`);
+      assert.ok(!m[0].includes("dshInstances"), `${fn} stays free of dsh wiring`);
+    }
+  });
+});
+
 describe("panel.html stats tab", () => {
   const panelHtml = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
@@ -2352,7 +2419,7 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 
   it("实例行渲染器不留链归因分支（badge-auto 只归端点胶囊）", () => {
     assert.doesNotMatch(makeRenderStateBadge()({ isAggregate: false, isAct: true }), /自动路由中|badge-auto/);
-    const m = panelJs.match(/function renderInstanceRows\(\{ prefix, listEl, instances, aggregateFallback \}\) \{[\s\S]*?\n  \}/);
+    const m = panelJs.match(/function renderInstanceRows\(\{[^}]*\}\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "renderInstanceRows found in panel.js");
     assert.ok(!/instViaAuto|自动路由中/.test(m[0]), "no chain-attribution branch left in the instance-row renderer");
   });

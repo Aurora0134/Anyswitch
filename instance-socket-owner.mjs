@@ -1,7 +1,7 @@
 // Socket→PID 兜底归组（panel 实例行 / 实例计数胶囊的兜底数据源）。
 //
 // 背景：实例归组的正源是 launcher 注入的 x-agent-instance 头（openai 路径）。
-// 客户端也可以在终端里直接用自己的命令启动（kimi / opencode / pi），经
+// 客户端也可以在终端里直接用自己的命令启动（kimi / opencode / pi / dsh），经
 // 这条路径进来的请求不带任何实例标签，instances[] 会恒空，面板实例行与
 // 左上角实例计数胶囊因此不出现。本模块就是为这条路径补的兜底。
 //

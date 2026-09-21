@@ -604,6 +604,8 @@ if (window.panelStartupController) panelStartupPlay();
                   </div>
                   <div class="agent-headings">
                     <h3>DSH</h3>
+                    <span class="instance-count-badge" id="dshInstanceCount" hidden></span>
+                    <span class="badge badge-neutral" id="dshSurfaceSummary" hidden></span>
                   </div>
                 </div>
                 <div class="agent-actions">
@@ -624,6 +626,9 @@ if (window.panelStartupController) panelStartupPlay();
               <div id="dshEmpty" class="empty-hint">未检测到运行中的 DSH 客户端</div>
 
               <div id="dshMetricsBlock" hidden>
+                <div class="session-table-wrapper instances-table-wrapper" id="dshInstancesWrapper" hidden>
+                  <div id="dshInstancesList"></div>
+                </div>
                 <div class="session-table-wrapper agent-detail-brief" id="dshDetailBrief">
                   <div class="session-row">
                     <div class="session-main">

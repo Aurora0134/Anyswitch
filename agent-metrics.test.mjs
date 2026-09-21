@@ -7,6 +7,7 @@ import { join } from "node:path";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
+  dshProfileNameFrom,
   findDescendantClientPid,
   getTtftColor,
   formatDuration,
@@ -3642,6 +3643,150 @@ describe("instance PID reconciliation and process-start placeholders", () => {
     assert.equal(kimi.instances[0].requests, 1);
     assert.equal(kimi.instances[0].tokens.prompt, 10);
     assert.equal(kimi.instances[0].tokens.completion, 5);
+  });
+});
+
+describe("DSH surfaces: harness process vs TUI launcher shell", () => {
+  // Command lines as they really appear on Windows for the npm-form install:
+  // `dst` runs the global copy's bin\dsh-tui.js, which delegates to the profile
+  // copy's bin\dsh-tui.js, which spawns `dsh --profile dsh-tui` (the npm dsh.cmd
+  // shim resolves to node + @deepseek-ai/dsh/lib/bin.js). All three are
+  // node.exe rows and all three carry a "bin\dsh" substring, which is why the
+  // card used to read 3 DSH processes per terminal.
+  const DSH_BIN = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js";
+  const TUI_LAUNCHERS = [
+    "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-harness-tui\\dsh-tui\\bin\\dsh-tui.js",
+    "C:\\Users\\tester\\.dsh\\profiles\\dsh-tui\\node_modules\\@deepseek-harness-tui\\dsh-tui\\bin\\dsh-tui.js",
+  ];
+  const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
+  const launcherRow = (pid, idx) => nodeRow(pid, `"${TUI_LAUNCHERS[idx]}"`);
+  const harnessRow = (pid, args) => nodeRow(pid, `"${DSH_BIN}" ${args}`);
+  const wmic = (...rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const surfacesOf = (agent) => Object.fromEntries(agent.surfaces.map((s) => [s.label, s.count]));
+
+  it("counts one npm-form TUI launch as one DSH process instead of three", async () => {
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      launcherRow(4100, 0),
+      launcherRow(4101, 1),
+      harnessRow(4102, "--profile dsh-tui"),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1, "两个启动器壳不算会话进程");
+    assert.equal(dsh.status, "running");
+    assert.deepEqual(surfacesOf(dsh), { TUI: 1 });
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-4102"], "只有引擎进程出行");
+    assert.equal(dsh.instances[0].surface, "TUI");
+  });
+
+  it("labels every profile its own name and adds up to the process count", async () => {
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4200, "web --port 3080"),
+      harnessRow(4201, "--profile dsh-tui"),
+      harnessRow(4202, "--profile mydesk"),
+      launcherRow(4203, 0),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 3);
+    // 排序按 profile 名，读不出profile的落最后。
+    assert.deepEqual(dsh.surfaces, [
+      { profile: "dsh-tui", label: "TUI", count: 1 },
+      { profile: "mydesk", label: "mydesk", count: 1 },
+      { profile: "web", label: "Web", count: 1 },
+    ]);
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [
+      ["dsh-4200", "Web"],
+      ["dsh-4201", "TUI"],
+      ["dsh-4202", "mydesk"],
+    ]);
+  });
+
+  it("keeps CLI management invocations out of the session count", async () => {
+    // `dsh plugin --profile x add <pkg>` forwards to pnpm and `--dump-config`
+    // prints and exits: both run the harness entry file, neither boots a session.
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4300, "plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui"),
+      harnessRow(4301, "--profile web --dump-config"),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 0);
+    assert.deepEqual(dsh.instances, []);
+    assert.deepEqual(dsh.surfaces, []);
+    assert.equal(dsh.status, "stopped");
+  });
+
+  it("counts the dsh.exe packaging as a session process and still reads its profile", async () => {
+    // The pip packaging installs Scripts\dsh.exe, so the image-name branch owns
+    // these rows (accept-by-name stays authoritative — a command line is a
+    // bonus used only for the surface label).
+    const execFn = (cmd, opts, cb) => cb(null,
+      "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\Python311\\Scripts\\dsh.exe --profile web,dsh.exe,4400\r\n");
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { Web: 1 });
+  });
+
+  it("degrades to an unlabeled surface instead of guessing when no profile is readable", async () => {
+    // plain-tasklist-shaped rows carry no command line at all.
+    const execFn = (cmd, opts, cb) => cb(null, '"dsh.exe","4500","Console","1"\r\n"dsh.exe","4501","Console","1"\r\n');
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 2);
+    assert.deepEqual(dsh.surfaces, [{ profile: null, label: "DSH", count: 2 }]);
+    assert.equal("surface" in dsh.instances[0], false, "读不出面就不贴标签");
+  });
+
+  it("evicts a DSH row by its own pid and leaves the launcher shells unlisted", async () => {
+    let t = 3000;
+    let terminalOpen = true;
+    const execFn = (cmd, opts, cb) => cb(null, terminalOpen
+      ? wmic(launcherRow(4600, 0), launcherRow(4601, 1), harnessRow(4602, "--profile dsh-tui"))
+      : wmic(harnessRow(4700, "--profile web")));
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    let dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-4602"]);
+
+    // The TUI terminal closes (all three of its processes go) while a web
+    // process starts. Reconciling against the engine set means the row drops
+    // immediately; the shells were never in the list to begin with.
+    terminalOpen = false;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+    dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4700", "Web"]]);
+    assert.equal(dsh.processCount, 1);
+  });
+
+  it("folds a launcher-tailed instance id against the engine pid, not the shell", () => {
+    // The dsh launcher never injects an instance header; this pins the shared
+    // rule anyway, so a future injection cannot fold onto a shell pid.
+    const scan = {
+      dshPids: new Set([4100, 4101, 4102]),
+      dshEnginePids: new Set([4102]),
+      ppidByPid: new Map([[4101, 4100], [4102, 4101]]),
+    };
+    assert.deepEqual(normalizeInstanceId("dsh", "proj-4100", scan), { id: "dsh-4102", label: "proj" });
+    assert.deepEqual(normalizeInstanceId("dsh", "proj-4101", scan), { id: "dsh-4102", label: "proj" });
+  });
+
+  it("dshProfileNameFrom reads the flag forms DSH accepts and nothing else", () => {
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --profile web`), "web");
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --profile=DeepSeek-Web`), "DeepSeek-Web", "大小写按用户命名保留");
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --profile "quoted name"`), null, "带空格的名字不是 profile 目录名");
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --profile ./relative-path`), null, "路径值不当 profile 名读");
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" web --no-open`), "web", "web 子命令是 --profile web 的别名");
+    assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --resume abc`), null);
+    assert.equal(dshProfileNameFrom(null), null);
   });
 });
 
