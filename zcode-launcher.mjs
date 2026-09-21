@@ -21,6 +21,7 @@ import {
   validateZcodeConfig,
 } from "./zcode-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
+import { syncZcodePersonalConfig } from "./zcode-personal-config.mjs";
 
 export function zcodeConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".zcode", "v2", "config.json");
@@ -104,10 +105,19 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
   }
 
   const writeResult = writeZcodeConfigWithBackup(configPath, config);
-  if (writeResult.ok) {
-    writeSidecar(sidecarRoot, managed);
-  }
-  return writeResult;
+  if (!writeResult.ok) return writeResult;
+  writeSidecar(sidecarRoot, managed);
+  // config.json is only read by ZCode while its own provider_config.json is
+  // still missing; once that file exists it becomes the list the client
+  // renders, so a sync that stops at config.json changes nothing the user can
+  // pick. Maintain the client-side list from the entries just written.
+  const personal = syncZcodePersonalConfig({
+    configPath,
+    managedEntries: Object.fromEntries(managed.map((id) => [`_${id}`, config.provider[`_${id}`]])),
+    previousManaged: previousManaged.map((id) => `_${id}`),
+  });
+  if (!personal.ok) return { ...writeResult, ok: false, reason: personal.reason };
+  return { ...writeResult, personal };
 }
 
 import { resolveZcodeExecutable } from "./agent-discovery.mjs";
