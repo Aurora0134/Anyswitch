@@ -335,6 +335,62 @@ test("DSH 官方来源链接放行真实仓库 deepseek-harness", async () => {
   assert.equal(links[0].href, "https://github.com/deepseek-ai/deepseek-harness/releases");
 });
 
+test("Codex 一张卡片两行：CLI 行带更新按钮，桌面行查 codex-desktop 且无动作位", async () => {
+  const local = environment();
+  local.clients[1].installations = [
+    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
+  ];
+  const h = harness((path) => {
+    if (path.includes("/latest/codex-desktop")) return { ...latest("26.915.4066"), url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS" };
+    if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
+    return normal(path);
+  });
+  await h.controller.enter();
+  const row = h.row("codex");
+  assert.equal(h.get("aboutClients").children.length, 9, "桌面安装项不额外开卡");
+  const lines = descendants(row, (node) => node.className === "about-version-line");
+  assert.equal(lines.length, 2, "CLI 与桌面各占一行");
+  assert.deepEqual(lines.map((line) => descendants(line, (node) => node.className === "about-kind")[0].textContent), ["CLI", "桌面"]);
+  assert.match(lines[0].textContent, /本地.*1\.0\.0/);
+  assert.match(lines[1].textContent, /本地.*26\.915\.4065.*官方最新.*26\.915\.4066/);
+  const cliActions = descendants(lines[0], (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(cliActions.length, 1);
+  assert.match(cliActions[0].textContent, /更新到 1\.1\.0/);
+  assert.equal(descendants(lines[1], (node) => node.tagName === "button" && node.className.includes("about-client-action")).length, 0, "桌面应用不经面板更新");
+  assert.ok(h.calls.includes("/api/environment/latest/codex-desktop?localVersion=26.915.4065"), "桌面行的官方最新单元格走 codex-desktop 远端 id");
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(6\)/, "桌面行不把批量更新数多算一次");
+});
+
+test("Codex 桌面行的官方来源链接放行 Microsoft Store，仿冒域名被丢弃", async () => {
+  const local = environment();
+  local.clients[1].installations = [
+    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
+  ];
+  const dual = (desktopUrl) => harness((path) => {
+    if (path.includes("/latest/codex-desktop")) return { ...latest("26.915.4066"), url: desktopUrl };
+    if (path.includes("/latest/codex?")) return { ...latest("1.1.0"), url: "https://github.com/openai/codex" };
+    if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
+    return normal(path);
+  });
+  const allowed = dual("https://apps.microsoft.com/detail/9PLM9XGG6VKS");
+  await allowed.controller.enter();
+  const links = descendants(allowed.row("codex"), (node) => node.tagName === "a");
+  assert.equal(links.length, 2);
+  const store = links.find((node) => node.href === "https://apps.microsoft.com/detail/9PLM9XGG6VKS");
+  assert.ok(store, "桌面行的查看官方版本链接指向 Microsoft Store");
+  assert.equal(store.textContent, "查看官方版本");
+  assert.ok(links.every((node) => node.rel === "noopener noreferrer" && node.target === "_blank"));
+  const rejected = dual("https://apps.microsoft.com.evil.test/detail/9PLM9XGG6VKS");
+  await rejected.controller.enter();
+  const survivors = descendants(rejected.row("codex"), (node) => node.tagName === "a");
+  assert.equal(survivors.length, 1, "仿冒域名被丢弃，只留 CLI 行的链接");
+  assert.equal(survivors[0].href, "https://github.com/openai/codex");
+  const lines = descendants(rejected.row("codex"), (node) => node.className === "about-version-line");
+  assert.match(lines[1].textContent, /官方最新 26\.915\.4066/, "只是不放链接，官方版本照常展示");
+});
+
 test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", () => {
   assert.match(html, /<img class="about-app-icon" src="\/panel\/assets\/logo\.png" alt="">/);
   assert.match(html, /href="https:\/\/github\.com\/Aurora0134\/Anyswitch"[^>]*>GitHub<\/a>/);

@@ -206,6 +206,48 @@ it("uses the Codex CLI release and the official desktop manifest for Qoder", asy
   }
 });
 
+it("reads the Codex desktop version from the Windows Store update manifest", async () => {
+  const endpoint = "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json";
+  const url = "https://apps.microsoft.com/detail/9PLM9XGG6VKS";
+  const source = "codex-desktop:windows-store:latest";
+  for (const [buildVersion, version] of [["26.915.4065.0", "26.915.4065"], ["27.1.2", "27.1.2"], ["27.1.0", "27.1.0"]]) {
+    const service = createReleaseService({ now, fetchFn: async (requested, options) => {
+      assert.equal(requested, endpoint);
+      assert.equal(options.credentials, "omit");
+      assert.equal(options.redirect, "error");
+      assert.deepEqual(options.headers, { Accept: "application/json" });
+      return json({ schemaVersion: 1, buildVersion, storeProductId: "9PLM9XGG6VKS" });
+    } });
+    assert.deepEqual(await service.getClientLatest("codex-desktop"), { state: "ok", version, url, source, checkedAt, errorCode: null });
+  }
+  const invalid = [
+    { schemaVersion: 1, storeProductId: "9PLM9XGG6VKS" },
+    { schemaVersion: 1, buildVersion: 26.9, storeProductId: "9PLM9XGG6VKS" },
+    { schemaVersion: 1, buildVersion: "abc", storeProductId: "9PLM9XGG6VKS" },
+    { schemaVersion: 1, buildVersion: "26.915.4065.1.2", storeProductId: "9PLM9XGG6VKS" },
+  ];
+  for (const payload of invalid) {
+    const result = await createReleaseService({ now, fetchFn: async () => json(payload) }).getClientLatest("codex-desktop");
+    assert.equal(result.state, "error", JSON.stringify(payload));
+    assert.equal(result.errorCode, "invalid_response");
+  }
+  const httpErrors = [
+    [() => json({}, { status: 429 }), "rate_limited"],
+    [() => json({}, { status: 403, headers: { "x-ratelimit-remaining": "0" } }), "rate_limited"],
+    [() => json({}, { status: 404 }), "http_error"],
+    [() => { throw new Error("offline"); }, "network_error"],
+  ];
+  for (const [fetchFn, errorCode] of httpErrors) {
+    const result = await createReleaseService({ now, fetchFn }).getClientLatest("codex-desktop");
+    assert.equal(result.state, "error", errorCode);
+    assert.equal(result.errorCode, errorCode);
+    assert.equal(result.version, null);
+    assert.equal(result.url, null);
+    assert.equal(result.source, source);
+    assert.equal(result.checkedAt, checkedAt);
+  }
+});
+
 it("queries npm latest for each fixed CLI package, preserving preview channels", async () => {
   const fixtures = [
     ["claude", "@anthropic-ai/claude-code", "2.1.276", "https://github.com/anthropics/claude-code/releases"],
