@@ -415,6 +415,9 @@ async function api(method, path, body) {
   // 立即就位，不用再等一个宽限期；从未有过活动的卡（锚点缺失）按启动状态
   // 归层（已启动入待命层，未启动垫底）。
   // 顺序没变就不动 DOM，避免每秒轮询重排抖动、打断点击。
+  // 这套分层只有取到 /api/agents 才算得出来，晚于首绘；刷新后取数落地前的那一帧
+  // 由 panel.html 的 panelCardOrderPrepaint 按「上一次重排出来的卡序」画，真重排
+  // 那一刻交棒回 DOM 顺序（见下方 reorderAgentCards 末段）。
   const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
   const STANDBY_SINK_MS = 5000;
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
@@ -469,6 +472,15 @@ async function api(method, path, body) {
       if (card) cards.push(card);
     });
     lastCardOrderKey = key;
+    // 交棒给运行时，两步都紧跟下面的重排、同处一个同步块（中间不产帧）：
+    // ① 摘掉 <html> 上的首帧属性——那一帧的卡序由 CSS order 撑着，DOM 一旦重排完
+    //    就该回到「DOM 顺序即视觉顺序」，否则 order 会压过真卡序把画面锁在存档上；
+    // ② 把这份卡序写进存档，供下次刷新时 panel.html 的 panelCardOrderPrepaint
+    //    直接画在首帧（只在这里写，等于「用户上一次真正看到的卡序」）。
+    // 摘属性不放 try：它抛错就是 DOM 坏了，兜住只会把跳帧留成静默故障；
+    // 写存档兜住，存储不可用时顶多首帧接管失效、行为回到没有接管之前。
+    document.documentElement.removeAttribute("data-prepaint-card-order");
+    try { localStorage.setItem("agent-card-order", key); } catch {}
     container.append(...cards);
   }
 

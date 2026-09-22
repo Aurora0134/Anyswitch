@@ -104,6 +104,43 @@ try {
   }
 })();
 </script>
+<style id="panelCardOrderPrepaintCss"></style>
+<script id="panelCardOrderPrepaint">
+(function () {
+  // 看板端点卡的首帧卡序落位——与上面「首帧视图落位」同一形状的病、同一种解法。
+  // 端点卡的真实卡序按「生成中 / 长待命 / 未启动」三段分层（语义见 panel.js
+  // reorderAgentCards 的注释），而这个判定只有主脚本取回 /api/agents 才算得出来；
+  // 主脚本是 defer 外链，首绘必然早于那次取数，于是普通刷新的首帧只能画出
+  // panel.html 里的静态基准序（ZCode 打头），取数落地后再整屏跳一次。让 JS 更早跑
+  // 修不掉：JS 再早也晚于首绘。所以由绘制前脚本把那一帧直接画对。
+  // 存档由 reorderAgentCards 在真正重排的那一刻写入，读回来就是用户刷新前看到的
+  // 那幅画面。launcher 首开与看板「重启」回跳有开屏层挡着，那一帧本就看不见。
+  // 只在存档正好是这套端点的完整排列时介入：多一项、少一项、有重复一律不画——
+  // 宁可仍闪一次基准序，也不画出一个首帧与运行时两边都不认的顺序。
+  // order 生效的前提是卡容器为 flex，这条由 panel.test.mjs 钉住。
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  let raw = null;
+  try { raw = localStorage.getItem("agent-card-order"); } catch (e) { return; }
+  if (typeof raw !== "string" || !raw) return;
+  const ids = raw.split(",");
+  if (ids.length !== AGENT_IDS.length) return;
+  for (let i = 0; i < ids.length; i++) {
+    // 不在册的 id 挡掉样式注入，indexOf 不等自身下标即出现重复
+    if (AGENT_IDS.indexOf(ids[i]) < 0 || ids.indexOf(ids[i]) !== i) return;
+  }
+  const css = document.getElementById("panelCardOrderPrepaintCss");
+  if (!css) return;
+  let text = "";
+  for (let i = 0; i < ids.length; i++) {
+    // 属性前缀就是交棒开关：主脚本首次真重排时摘掉 <html> 上那个属性，整层 order
+    // 立刻失效、回到「DOM 顺序即视觉顺序」，不必回头改这段样式文本。
+    text += "html[data-prepaint-card-order] .agent-cards-container>.panel-card"
+      + '[data-agent-id="' + ids[i] + '"]{order:' + (i + 1) + '}';
+  }
+  css.textContent = text;
+  document.documentElement.setAttribute("data-prepaint-card-order", raw);
+})();
+</script>
 </head>
 <body>
 <div id="panelStartup" role="status" aria-label="正在打开 Anyswitch">
