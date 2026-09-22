@@ -476,6 +476,20 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(panelJs, /setTimeout\(r, SKILLS_CASCADE_TOTAL_MS\)/);
   });
 
+  it("card D uses the neutral scan glyph, not a warning triangle", () => {
+    // 告警三角在全页只出现在卡 D 标题；换成中性的取景框后不得残留
+    assert.doesNotMatch(panelHtml, /M10\.29 3\.86L1\.82 18/);
+    const head = panelHtml.match(/<h2 class="card-title">([\s\S]*?)端点条目与异常\s*<\/h2>/);
+    assert.ok(head, "卡 D 标题必须存在");
+    assert.match(head[1], /<path d="M3 7V5a2 2 0 0 1 2-2h2"\/>/);
+    assert.match(head[1], /<path d="M17 3h2a2 2 0 0 1 2 2v2"\/>/);
+    assert.match(head[1], /<path d="M21 17v2a2 2 0 0 1-2 2h-2"\/>/);
+    assert.match(head[1], /<path d="M7 21H5a2 2 0 0 1-2-2v-2"\/>/);
+    // 常驻中性：标题图标不随失效 / 分叉切换，告警语义只由计数徽标与行内徽标承担
+    assert.doesNotMatch(panelJs, /skillsAnomalyTitle(Icon|Ico)|anomalyIcon/);
+    assert.match(extractFn("renderSkillsAnomalies", ""), /badge\.className = "badge " \+ \(broken\.length \+ diverged\.length \? "badge-warn" : "badge-neutral"\);/);
+  });
+
   it("manual refresh dims the button until the cascade finishes, not for a fixed floor", () => {
     const fn = extractFn("runSkillsRefreshWithFeedback", "");
     // 旋转整套撤下：变暗交回 .btn:disabled 的 45%，与看板「重启」键同源；
