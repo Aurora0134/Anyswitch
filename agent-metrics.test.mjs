@@ -7,7 +7,9 @@ import { join } from "node:path";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
+  buildDshConsoleQuery,
   dshProfileNameFrom,
+  parseDshConsoleQueryOutput,
   findDescendantClientPid,
   getTtftColor,
   formatDuration,
@@ -3740,7 +3742,7 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
 
     const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
     assert.equal(dsh.processCount, 2);
-    assert.deepEqual(dsh.surfaces, [{ profile: null, label: "DSH", count: 2 }]);
+    assert.deepEqual(dsh.surfaces, [{ profile: null, label: "未知", count: 2 }]);
     assert.equal("surface" in dsh.instances[0], false, "读不出面就不贴标签");
   });
 
@@ -3787,6 +3789,173 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(dshProfileNameFrom(`"${DSH_BIN}" web --no-open`), "web", "web 子命令是 --profile web 的别名");
     assert.equal(dshProfileNameFrom(`"${DSH_BIN}" --resume abc`), null);
     assert.equal(dshProfileNameFrom(null), null);
+  });
+
+  // spawnFn that answers the process scan with `scanRows` and the console
+  // probe with the queued `consoleAnswers` (one per round, consumed in
+  // order), telling the two apart by the AttachErr marker in the query text.
+  // Same child shape as makeShimPsSpawn so the persistent probe drives it.
+  const makeDualSpawn = (scanRows, consoleAnswers) => {
+    const state = { consoleQueries: [], spawnFn: null };
+    const answers = [...consoleAnswers];
+    state.spawnFn = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      stdout.setEncoding = () => {};
+      const stderr = new EventEmitter();
+      stderr.resume = () => {};
+      child.stdin = {
+        write: (text) => {
+          const markerMatch = text.match(/Write-Output '([^']+)'/);
+          const marker = markerMatch ? markerMatch[1] : "";
+          let body = scanRows;
+          if (text.includes("AttachErr")) {
+            state.consoleQueries.push(text);
+            body = answers.length > 0 ? answers.shift() : "";
+          }
+          if (body.length > 0 && !body.endsWith("\r\n")) body += "\r\n";
+          stdout.emit("data", body + marker + "\r\n");
+        },
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.kill = () => { child.emit("exit", 0); };
+      child.unref = () => {};
+      return child;
+    };
+    return state;
+  };
+
+  it("keeps harness-spawned helper processes out of the DSH engine count", async () => {
+    // Live third-card root cause (2026-09-22): the harness spawns transient
+    // helpers under its own node_modules — subprocess runner, sandbox ACL
+    // runner, directory-picker worker, web-app server — and every one of them
+    // carries an `@deepseek-ai\dsh…` path prefix, so a package-path engine
+    // signature counts them as sessions (unbadged row + "DSH ×1" subline).
+    // Only the manifest entry dsh\lib\bin.js boots a session.
+    const NPM = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules";
+    const helperRow = (pid, rel) => nodeRow(pid, `"${NPM}\\@deepseek-ai\\dsh\\node_modules\\@deepseek-ai\\${rel}"`);
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4800, "--profile dsh-tui"),
+      helperRow(4801, "dsh-subprocess-local\\lib\\runner.js -- powershell.exe -NoLogo"),
+      helperRow(4802, "dsh-sandbox-windows-acl\\lib\\runner.js --workspace C:\\w --temp C:\\t"),
+      helperRow(4803, "dsh-host-directory-picker-native\\lib\\worker.cjs"),
+      helperRow(4804, "dsh-web-app\\lib\\index.js"),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { TUI: 1 });
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4800", "TUI"]]);
+  });
+
+  it("reaps a TUI harness whose terminal is gone and drops its row", async () => {
+    // Live empty-TUI-card root cause (2026-09-22): a `--profile dsh-tui`
+    // harness outlives its dead terminal (AttachConsole -> 233/5/87) and the
+    // panel kept listing it forever. Two dead verdicts one scan window apart
+    // confirm; then the process is reaped and the row/count drop. A web
+    // engine is never probed.
+    let t = 3000;
+    const probe = makeDualSpawn(
+      wmic(harnessRow(5001, "--profile dsh-tui"), harnessRow(5002, "web --no-open --port 31399")),
+      ["c=5001/233", "c=5001/5"],
+    );
+    const killed = [];
+    const collector = testCollector({ spawnFn: probe.spawnFn, killFn: (pid) => killed.push(pid), nowFn: () => t });
+
+    let dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-5001", "TUI"], ["dsh-5002", "Web"]]);
+    assert.equal(killed.length, 0, "one dead verdict alone must not reap");
+
+    t += 3000;
+    await collector.getAgentsStatus(); // round 2: confirming verdict + reap
+    await new Promise((r) => setTimeout(r, 20));
+    dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(killed, [5001]);
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-5002", "Web"]]);
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { Web: 1 });
+    assert.ok(probe.consoleQueries.length >= 2);
+    assert.ok(probe.consoleQueries.every((q) => q.includes("5001") && !q.includes("5002")), "只探测 TUI 形态");
+  });
+
+  it("does not reap when a dead verdict is followed by a live console", async () => {
+    let t = 3000;
+    const probe = makeDualSpawn(wmic(harnessRow(5101, "--profile dsh-tui")), ["c=5101/233", "c=5101/0", "c=5101/0"]);
+    const killed = [];
+    const collector = testCollector({ spawnFn: probe.spawnFn, killFn: (pid) => killed.push(pid), nowFn: () => t });
+
+    await collector.getAgentsStatus();
+    t += 3000; await collector.getAgentsStatus(); await new Promise((r) => setTimeout(r, 20));
+    t += 3000; await collector.getAgentsStatus(); await new Promise((r) => setTimeout(r, 20));
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(killed, []);
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-5101"]);
+  });
+
+  it("never reaps when the process has no console object at all", async () => {
+    // err 6 = the process has no console object (headless spawn shapes);
+    // that is not a closed-terminal verdict, so the row stays.
+    let t = 3000;
+    const probe = makeDualSpawn(wmic(harnessRow(5201, "--profile dsh-tui")), ["c=5201/6", "c=5201/6"]);
+    const killed = [];
+    const collector = testCollector({ spawnFn: probe.spawnFn, killFn: (pid) => killed.push(pid), nowFn: () => t });
+
+    await collector.getAgentsStatus();
+    t += 3000; await collector.getAgentsStatus(); await new Promise((r) => setTimeout(r, 20));
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(killed, []);
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-5201"]);
+  });
+
+  it("reaps on every measured dead-console flavor, not just the first one seen", async () => {
+    // Live miss fixed 2026-09-22: the first orphan measured (parent long
+    // gone) answered 233, so the dead verdict was pinned to {5, 233}; a
+    // freshly orphaned harness (parent still alive, conhost just killed)
+    // answers 87 (ERROR_INVALID_PARAMETER) and slipped through unreaped.
+    // The verdict rule is now "nonzero and not no-console", so 87 reaps
+    // exactly like 233 and 5.
+    let t = 3000;
+    const probe = makeDualSpawn(
+      wmic(harnessRow(5401, "--profile dsh-tui")),
+      ["c=5401/87", "c=5401/87"],
+    );
+    const killed = [];
+    const collector = testCollector({ spawnFn: probe.spawnFn, killFn: (pid) => killed.push(pid), nowFn: () => t });
+
+    await collector.getAgentsStatus();
+    assert.deepEqual(killed, [], "one dead verdict alone must not reap");
+    t += 3000; await collector.getAgentsStatus(); await new Promise((r) => setTimeout(r, 20));
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(killed, [5401]);
+    assert.deepEqual(dsh.instances.map((i) => i.id), []);
+    assert.equal(dsh.processCount, 0);
+  });
+
+  it("never reaps when the console probe answer is unreadable", async () => {
+    let t = 3000;
+    const probe = makeDualSpawn(wmic(harnessRow(5301, "--profile dsh-tui")), ["", "Node,CommandLine,Name,ProcessId"]);
+    const killed = [];
+    const collector = testCollector({ spawnFn: probe.spawnFn, killFn: (pid) => killed.push(pid), nowFn: () => t });
+
+    await collector.getAgentsStatus();
+    t += 3000; await collector.getAgentsStatus(); await new Promise((r) => setTimeout(r, 20));
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(killed, []);
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-5301"]);
+  });
+
+  it("buildDshConsoleQuery and parseDshConsoleQueryOutput round the probe contract", () => {
+    assert.equal(buildDshConsoleQuery([]), null);
+    const query = buildDshConsoleQuery([13128, 27156]);
+    assert.ok(query.includes("AttachErr"), "AttachErr 标记是识别控制台查询的契约");
+    assert.ok(query.includes("13128,27156"));
+    const verdicts = parseDshConsoleQueryOutput("c=13128/233\r\nc=27156/0\r\n__MARKER__\r\n");
+    assert.equal(verdicts.get(13128), 233);
+    assert.equal(verdicts.get(27156), 0);
+    assert.equal(parseDshConsoleQueryOutput("Node,CommandLine\r\n").size, 0);
+    assert.equal(parseDshConsoleQueryOutput(null).size, 0);
   });
 });
 
