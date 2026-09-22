@@ -4402,3 +4402,216 @@ describe("panel.html 品牌版本徽标（左上角取真实版本，不写死�
     assert.equal(tag.hidden, true);
   });
 });
+
+describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序）", () => {
+  // 症状：刷新看板页，端点卡先以「zcode 在顶」画出一帧，取数落地后再整屏跳一次。
+  // 根因：卡序由「生成中 / 待命 / 未启动」三段分层决定，只有主脚本拿到
+  // /api/agents 才算得出来；主脚本是 defer 外链，首绘必然早于那次取数，而
+  // panel.html 的静态卡序就是基准序。launcher 首开与「重启」回跳有开屏层挡着，
+  // 只有普通刷新看得见这一帧。
+  // 机制沿用 09-21 已拍板的「首帧视图落位」：由绘制前脚本把那一帧直接画对，
+  // 而不是让 JS 更早跑——存档只记「上一次真正重排出来的卡序」，读回来即用户
+  // 刷新前看到的画面。
+  const here = dirname(fileURLToPath(import.meta.url));
+  const panelJs = readFileSync(join(here, "panel-ui", "panel.js"), "utf8");
+  const panelHtml = readFileSync(join(here, "panel-ui", "panel.html"), "utf8");
+  const panelCss = readFileSync(join(here, "panel-ui", "panel.css"), "utf8");
+
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  const ORDER_KEY = "agent-card-order";
+  const GATE = "data-prepaint-card-order";
+  const STYLE_ID = "panelCardOrderPrepaintCss";
+
+  const prepaintSrc = (panelHtml.match(/<script id="panelCardOrderPrepaint">([\s\S]*?)<\/script>/) || [])[1];
+  const styleTag = (panelHtml.match(new RegExp(`<style id="${STYLE_ID}">[\\s\\S]*?</style>`)) || [])[0];
+  // 与 panel-card-standby-sink.test.mjs 同一提取式：块尾锚定 container.append(...)
+  const reorderBlock = (panelJs.match(
+    /const AGENT_CARD_ORDER[\s\S]*?container\.append\(\.\.\.cards\);\r?\n  \}/,
+  ) || [])[0];
+
+  // 首帧视觉卡序 = 注入规则里的 order 升序
+  function paintOrder(cssText) {
+    return [...String(cssText).matchAll(/\[data-agent-id="([a-z]+)"\]\{order:(\d+)\}/g)]
+      .map((m) => ({ id: m[1], order: Number(m[2]) }))
+      .sort((a, b) => a.order - b.order)
+      .map((r) => r.id);
+  }
+
+  function runPrepaint(stored, opts = {}) {
+    const attrs = {};
+    const style = { textContent: "" };
+    const document = {
+      documentElement: {
+        setAttribute: (k, v) => { attrs[k] = v; },
+        removeAttribute: (k) => { delete attrs[k]; },
+      },
+      getElementById: (id) => (opts.noStyle || id !== STYLE_ID ? null : style),
+    };
+    const localStorage = {
+      getItem: (k) => {
+        if (opts.denied) throw new Error("denied");
+        return k === ORDER_KEY ? stored : null;
+      },
+      setItem: (k, v) => { (opts.writes || []).push([k, v]); },
+    };
+    // 原样跑那段内联脚本（含 IIFE），与 panelViewPrepaint 的取样方式同构
+    new Function("document", "localStorage", prepaintSrc)(document, localStorage);
+    return { attrs, cssText: style.textContent, painted: paintOrder(style.textContent) };
+  }
+
+  // 真实形态的看板 payload：grok 生成中置顶，dsh/qoder 长待命入中层，其余未启动垫底
+  // （层内保持基准序）——即线上实测落地后的卡序，非基准序，足以证伪「首帧不用接管」。
+  function liveAgents() {
+    const now = Date.now();
+    const mk = (id, status, active, lastSeen) => ({
+      id, status, processCount: status === "running" ? 1 : 0,
+      metrics: { activeRequests: active }, sessions: lastSeen ? [{ lastSeen }] : [],
+    });
+    return [
+      mk("zcode", "stopped", 0, now - 300_000),
+      { id: "claude", status: "stopped", processCount: 0, sessions: [] },
+      mk("dsh", "running", 0, now - 60_000),
+      mk("pi", "stopped", 0, now - 300_000),
+      mk("qoder", "running", 0, now - 60_000),
+      mk("kimi", "stopped", 0, now - 300_000),
+      mk("opencode", "stopped", 0, now - 300_000),
+      mk("codex", "stopped", 0, now - 60_000),
+      mk("grok", "running", 1, now - 1_000),
+    ];
+  }
+  const LIVE_ORDER = ["grok", "dsh", "qoder", "zcode", "claude", "pi", "kimi", "opencode", "codex"];
+
+  function reorderSandbox() {
+    const cards = {};
+    for (const id of AGENT_IDS) cards[id] = { id };
+    const log = { appends: [], removes: [], writes: [] };
+    const container = {
+      append(...els) { log.appends.push(els.map((e) => e.id)); },
+      querySelector(sel) {
+        const m = /data-agent-id="([^"]+)"/.exec(sel);
+        return m ? (cards[m[1]] || null) : null;
+      },
+    };
+    const document = {
+      querySelector: (sel) => (sel === ".agent-cards-container" ? container : null),
+      documentElement: { removeAttribute: (k) => { log.removes.push(k); } },
+    };
+    const localStorage = { setItem: (k, v) => { log.writes.push([k, v]); } };
+    const reorder = new Function(
+      "document", "localStorage", "Date",
+      `${reorderBlock}\nreturn reorderAgentCards;`,
+    )(document, localStorage, Date);
+    return { reorder, log };
+  }
+
+  it("取样点都在册：绘制前脚本、空样式节点、排序语义块", () => {
+    assert.ok(prepaintSrc, "panel.html 有 <script id=\"panelCardOrderPrepaint\">");
+    assert.ok(styleTag, `panel.html 有 <style id="${STYLE_ID}">`);
+    assert.ok(reorderBlock, "panel.js 的排序语义块可被完整提取（交棒三步须在其中）");
+    const styleInner = styleTag
+      .replace(/^<style id="panelCardOrderPrepaintCss">/, "").replace(/<\/style>$/, "");
+    assert.equal(styleInner.trim(), "", "样式节点静态留空，卡序只能来自存档");
+    assert.ok(panelHtml.indexOf("panelViewPrepaint") < panelHtml.indexOf("panelCardOrderPrepaint"),
+      "排在同段首帧机制之后，不进 body");
+    assert.ok(panelHtml.indexOf("panelCardOrderPrepaint") < panelHtml.indexOf("</head>"),
+      "脚本在 </head> 之前，早于任何一次绘制");
+  });
+
+  it("① 存档是完整排列：首帧卡序即存档卡序，并挂上首帧属性", () => {
+    const out = runPrepaint(LIVE_ORDER.join(","));
+    assert.deepEqual(out.painted, LIVE_ORDER, "首帧按上次卡序画，不再画基准序");
+    assert.equal(out.attrs[GATE], LIVE_ORDER.join(","), "首帧层生效");
+    // 每条规则都带首帧属性前缀：摘掉属性即整层失效，不留半截 order
+    const rules = [...out.cssText.matchAll(/[^}]*\}/g)].map((m) => m[0]);
+    assert.equal(rules.length, AGENT_IDS.length, "一张卡一条规则");
+    for (const r of rules) assert.ok(r.includes(`html[${GATE}]`), `规则带属性前缀：${r}`);
+  });
+
+  it("② 存档缺项 / 多项 / 重复 / 非法字符 / 为空 → 首帧完全不介入", () => {
+    const dup = [...LIVE_ORDER];
+    dup[3] = dup[0]; // grok 出现两次、zcode 整个不见了：长度对得上但不是排列
+    const bad = {
+      "少一张卡（旧端点清单）": LIVE_ORDER.slice(0, 8).join(","),
+      "多一张卡（新增端点还没进脚本清单）": [...LIVE_ORDER, "agy"].join(","),
+      "有重复": dup.join(","),
+      "含不在册的 id": LIVE_ORDER.map((id) => (id === "grok" ? "reasonix" : id)).join(","),
+      "含注入形状的垃圾": 'zcode",claude,dsh,pi,kimi,opencode,qoder,codex,grok}{order:1',
+      "空串": "",
+      "只有分隔符": ",,,,,,,,",
+    };
+    for (const [name, stored] of Object.entries(bad)) {
+      const out = runPrepaint(stored);
+      assert.deepEqual(out.painted, [], `${name}：不写任何 order`);
+      assert.ok(!(GATE in out.attrs), `${name}：不挂首帧属性`);
+      assert.equal(out.cssText, "", `${name}：样式节点原样留空`);
+    }
+  });
+
+  it("③ 存储不可用 / 样式节点不在册 → 静默不介入，不抛出", () => {
+    assert.doesNotThrow(() => runPrepaint(LIVE_ORDER.join(","), { denied: true }));
+    const denied = runPrepaint(LIVE_ORDER.join(","), { denied: true });
+    assert.ok(!(GATE in denied.attrs) && denied.cssText === "", "localStorage 抛错即放弃接管");
+    const noStyle = runPrepaint(LIVE_ORDER.join(","), { noStyle: true });
+    assert.ok(!(GATE in noStyle.attrs), "样式节点被删走时不挂属性，避免画出无样式的首帧层");
+    const nothing = runPrepaint(null);
+    assert.ok(!(GATE in nothing.attrs), "从未重排过（首次安装）→ 行为与今天一致");
+  });
+
+  it("④ 脚本端点清单与运行时基准序同一套（漏一格即首帧闪新卡）", () => {
+    const listOf = (src, key) => (src.match(new RegExp(`const ${key} = \\[([^\\]]*)\\]`)) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^"|"$/g, "")).filter(Boolean);
+    assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), listOf(panelJs, "AGENT_CARD_ORDER"),
+      "绘制前脚本的端点清单必须与 panel.js 的基准序逐项同");
+    assert.deepEqual(listOf(prepaintSrc, "AGENT_IDS"), AGENT_IDS, "取样用的九个端点清单未过期");
+    // 清单对了还得对得上真实 DOM：首帧那层是按 data-agent-id 挂 order 的，
+    // 卡容器里多一张少一张都会让那一格拿不到 order。
+    const markupIds = [...panelHtml.matchAll(/^ {10}<div class="panel-card" data-agent-id="([a-z]+)">$/gm)]
+      .map((m) => m[1]);
+    assert.deepEqual(markupIds, ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok"],
+      "panel.html 静态九张卡按缩进一层不落地取到（卡序接管靠这套 id 挂 order）");
+    assert.deepEqual(new Set(markupIds), new Set(listOf(prepaintSrc, "AGENT_IDS")),
+      "首帧脚本的清单与卡容器里的卡一一对应");
+  });
+
+  it("⑤ 往返：运行时写出的存档喂回首帧脚本，首帧卡序与 DOM 卡序逐一相等", () => {
+    const { reorder, log } = reorderSandbox();
+    reorder(liveAgents());
+    assert.deepEqual(log.appends[0], LIVE_ORDER, "运行时首重排的 DOM 卡序");
+    assert.deepEqual(log.writes.map((w) => w[0]), [ORDER_KEY], "重排那一刻写存档");
+    assert.equal(log.writes[0][1], LIVE_ORDER.join(","), "存档即那份卡序键");
+    assert.deepEqual(runPrepaint(log.writes[0][1]).painted, log.appends[0],
+      "交棒不跳帧：下一次刷新首帧就是这次重排出来的卡序");
+  });
+
+  it("⑥ 交棒三步在同一同步块内、都在「顺序没变」守卫之后", () => {
+    const iGuard = reorderBlock.indexOf('if (key === lastCardOrderKey) return;');
+    const iRemove = reorderBlock.indexOf(`document.documentElement.removeAttribute("${GATE}")`);
+    const iWrite = reorderBlock.indexOf(`localStorage.setItem("${ORDER_KEY}", key)`);
+    const iAppend = reorderBlock.indexOf("container.append(...cards);");
+    assert.ok(iGuard >= 0 && iRemove >= 0 && iWrite >= 0 && iAppend >= 0,
+      "守卫、摘属性、写存档、DOM 重排四步都在排序语义块内");
+    assert.ok(iGuard < iRemove && iRemove < iAppend,
+      "摘属性晚于守卫、早于 DOM 重排：三步同处一个同步块，中间不产帧，不会先闪基准序");
+    assert.ok(iGuard < iWrite && iWrite < iAppend, "写存档同样只在真重排那一刻");
+    assert.ok(!/await/.test(reorderBlock.slice(iRemove, iAppend)),
+      "摘属性与重排之间不得有 await，否则会让出一帧");
+  });
+
+  it("⑦ 顺序没变的那一轮不写存档、不摘属性（每秒轮询不空转）", () => {
+    const { reorder, log } = reorderSandbox();
+    const agents = liveAgents();
+    reorder(agents);
+    reorder(agents);
+    reorder(agents);
+    assert.equal(log.appends.length, 1, "只有首轮真重排");
+    assert.equal(log.writes.length, 1, "存档不随每秒轮询重写");
+    assert.equal(log.removes.length, 1, "首帧属性也只摘一次");
+  });
+
+  it("⑧ 卡容器仍是 flex：order 属性唯一依赖的排版前提", () => {
+    const rule = panelCss.match(/^\s*\.agent-cards-container \{([^}]*)\}/m);
+    assert.ok(rule, "有 .agent-cards-container 规则");
+    assert.ok(/display:\s*flex/.test(rule[1]),
+      "容器改出 flex/grid 之外就得同步换掉首帧接管机制");
+  });
+});
