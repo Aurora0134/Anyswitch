@@ -88,7 +88,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `protocol.mjs` — Anthropic ↔ OpenAI 兼容协议互转（纯函数）。
 - `wire-id.mjs` — Claude wire ID 打包/解包：`anthropic/<provider>/<model>`，严格单次剥离、按首个 `/` 切分；`buildWireCatalog` 检测 wire ID 碰撞。
 - `stream.mjs` — SSE 流翻译（纯状态机）：把上游 OpenAI `chat.completion.chunk` 流翻译为 Anthropic Messages SSE 事件序列。
-- `openai-stream-guard.mjs` — OpenAI 流式响应守卫（坏流过滤、孤儿 tool_call 拦截、reasoning 字段即时放行）。
+- `openai-stream-guard.mjs` — OpenAI 流式响应守卫（坏流过滤、孤儿 tool_call 拦截、reasoning 字段即时放行）；可选的信封补齐（`fillChunkEnvelope`，仅 grok 开启）为缺 `id`/`created`/`model` 的数据块补字段并回显首值。
 
 ### relay / 服务层
 - `handler.mjs` — Anthropic 路径请求处理器：恒定时间 token 鉴权 → 加载 store → 解包 wire ID → generation 校验 → 解密凭据 → 协议转换 → fallback URL 列表发上游；全程 fail-closed。
