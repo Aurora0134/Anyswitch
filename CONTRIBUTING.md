@@ -35,6 +35,16 @@
 - **Stats tab**: any change to stats-tab behavior must update the corresponding entry in `docs/stats-spec.md` in the same commit. That file is the single living spec — it records what is true *now*.
 - **Theme / style-lab**: `panel-ui/style-lab/*.css` files are the source of truth; edits must be mirrored into the corresponding banner block embedded in `panel-ui/panel.css` (see `panel-ui/style-lab/CONTRACT.md`). `style-lab-sync.test.mjs` fails on any drift.
 
+### Release note conventions
+
+Release notes are the changelog a user reaches from the About page, so their audience is the person installing this source tree — not the person maintaining it.
+
+- **Cover the range, not the last commit.** Take `git log --no-merges <previous tag>..<new tag>` as the only source of truth, and write one verdict line per commit into an inventory file first: either it goes into the notes (naming the section) or it is explicitly ruled out with a reason that the user-visible surface is zero. A note that omits commits is a false statement, not an abbreviation.
+- **Keep maintainer-facing content out of the notes.** No test counts (`2503/2503`, "N cases green"), no test file names, no class, function or header names, no verification methodology or control groups, no flaky-failure attribution, no internal process names. What stays is whatever changes the reader's decision: that a restart is required, the exact error string they may have seen, and the commands to upgrade.
+- **State the effective surface and the upgrade path.** Whether a change needs a new backend process or a page refresh is part of the release, same as the version and tag.
+- **Commit messages are the other half and stay maintainer-facing.** Test counts and root-cause detail belong there; do not let either side borrow the other's vocabulary.
+- Run the release checker against both the draft and the published body before considering a release done. It lives with maintenance tooling outside the source tree.
+
 ---
 
 ## 中文
@@ -71,3 +81,13 @@
 
 - **统计页**：凡改动统计页行为的提交，必须同笔更新 `docs/stats-spec.md` 对应条目。该文件是单一现行规格——只记录「现在是什么」。
 - **主题 / style-lab**：`panel-ui/style-lab/*.css` 是源文件，改动必须同步嵌入 `panel-ui/panel.css` 对应横幅块（见 `panel-ui/style-lab/CONTRACT.md`）；`style-lab-sync.test.mjs` 对漂移直接判红。
+
+### 发布说明撰写约定
+
+发布说明就是用户从关于页点进去看到的更新日志，受众是把它装起来的人，不是维护这个仓库的人。
+
+- **按区间覆盖，不按最后一笔。** 以 `git log --no-merges <上一个标签>..<新标签>` 为唯一依据，先落一份覆盖清单：区间内每笔提交一行裁决，要么进正文并写明落在哪个小节，要么明确判「不入正文」并写清用户可见面为零。漏掉提交的正文是陈述失实，不是简写。
+- **维护者向内容不进正文。** 不写测试计数（`2503/2503`、「N 例全绿」）、不写测试文件名、不写类名函数名请求头、不写验证方法与对照组、不写偶发失败归因、不写内部流程名。留下的是会改变读者判断的事实：要不要重启、他可能见过的原样报错串、升级要执行的命令。
+- **生效面与升级步骤必写。** 一处改动是刷新页面即得、还是要换新进程，属于发布内容本身，与版本号、标签同级。
+- **提交说明是另一半，继续面向维护者。** 测试计数与根因写在那里，两边不互相借词。
+- 发布前对草稿、发布后对线上正文各跑一次发布校验脚本；脚本随维护工具放在源码树外。

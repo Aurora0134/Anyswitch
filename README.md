@@ -34,10 +34,10 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 ### Installation
 
-Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0` is the first stable release, preceded by the `v0.5.0-preview` prerelease; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.0`, clone into a new directory:
+Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0` is the first stable release, preceded by the `v0.5.0-preview` prerelease; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.1`, clone into a new directory:
 
 ```bat
-git clone --branch v0.5.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 The conventional location is `%LOCALAPPDATA%\Anyswitch\app`; another location works too. For a first installation from a source archive, extract into a new `app` directory. Do not extract over an existing installation.
@@ -61,11 +61,11 @@ For an existing Git clone, first schedule a break in active sessions and inspect
 git status --short
 ```
 
-If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.0`:
+If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.1`:
 
 ```bat
-git fetch --no-tags origin tag v0.5.0
-git switch --detach v0.5.0
+git fetch --no-tags origin tag v0.5.1
+git switch --detach v0.5.1
 ```
 
 A detached checkout is normal for a release installation. These steps are for users running a release clone; maintainers working on the local development `master` keep that branch and do not switch it to a release tag. For an archive-based installation, unpack into a separate directory and compare/apply source-file changes, including removed files, while retaining user data and existing Git metadata; do not overlay the entire directory.
@@ -221,10 +221,10 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 
 ### 安装
 
-Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0` 是首个稳定版，此前发布过它的预览版 `v0.5.0-preview`；0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.0` 为例，克隆到一个新目录：
+Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0` 是首个稳定版，此前发布过它的预览版 `v0.5.0-preview`；0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.1` 为例，克隆到一个新目录：
 
 ```bat
-git clone --branch v0.5.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 约定位置是 `%LOCALAPPDATA%\Anyswitch\app`，也可使用其他位置。首次使用源码归档安装时，解压到一个新的 `app` 目录，不要解压覆盖已有安装。
@@ -248,11 +248,11 @@ git clone --branch v0.5.0 --single-branch https://github.com/Aurora0134/Anyswitc
 git status --short
 ```
 
-若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.0` 为例，执行：
+若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.1` 为例，执行：
 
 ```bat
-git fetch --no-tags origin tag v0.5.0
-git switch --detach v0.5.0
+git fetch --no-tags origin tag v0.5.1
+git switch --detach v0.5.1
 ```
 
 发布版安装处于 detached HEAD 状态是正常的。这套步骤适用于使用发布版 clone 的用户；维护者的本机开发 `master` 保持原分支，不按此步骤切到发布标签。源码归档用户应先解压到单独目录，对照应用源文件变更（包括已删除的文件），保留用户数据和已有 Git 元数据，不要整目录覆盖。
