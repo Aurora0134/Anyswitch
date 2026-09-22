@@ -520,7 +520,7 @@ test("安装动作走 install，完成后重新检测", async () => {
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
 });
 
-test("批量更新串行执行、单飞期间他行按钮禁用、收尾汇总并重新检测", async () => {
+test("批量更新逐行串行、批量期间各行动作位禁用、收尾汇总并重新检测", async () => {
   const pending = new Map();
   const posts = [];
   let seq = 0;
@@ -542,8 +542,8 @@ test("批量更新串行执行、单飞期间他行按钮禁用、收尾汇总�
   assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(2\)/);
   const batch = h.get("aboutUpdateAll").click();
   await flush();
-  assert.deepEqual(posts.map((post) => post.id), ["claude"], "一次只发一个，服务器单飞");
-  assert.equal(actionButton(h, "codex").disabled, true, "单飞期间其他行的动作按钮留形但禁用");
+  assert.deepEqual(posts.map((post) => post.id), ["claude"], "批量逐行推进，同一时刻只动一行");
+  assert.equal(actionButton(h, "codex").disabled, true, "批量进行中其他行先禁点，免得同一行被两个任务同时更新");
   pending.get("run-1")(doneRun("run-1", "claude"));
   await flush();
   assert.deepEqual(posts.map((post) => post.id), ["claude", "codex"]);
@@ -552,6 +552,90 @@ test("批量更新串行执行、单飞期间他行按钮禁用、收尾汇总�
   assert.match(h.toasts.map((toast) => toast.message).join("\n"), /批量更新完成：2 个客户端已更新/);
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
   assert.equal(h.get("aboutUpdateAll").disabled, false);
+});
+
+test("单个更新按行独立：一行在更新时其他行照常可点，各自收尾各自提示", async () => {
+  const pending = new Map();
+  const posts = [];
+  let seq = 0;
+  const h = harness(
+    (path) => {
+      if (path === "/api/agents") return { agents: [] };
+      if (path.includes("/latest/claude")) return latest("1.1.0");
+      if (path.includes("/latest/codex")) return latest("1.2.0");
+      if (path.includes("/latest/opencode")) return latest("1.3.0");
+      if (path.includes("/latest/")) return latest("1.0.0", "current");
+      if (path.startsWith("/api/environment/update/")) {
+        const runId = path.slice("/api/environment/update/".length);
+        return new Promise((resolve) => pending.set(runId, resolve));
+      }
+      return normal(path);
+    },
+    { respondPost: ({ body }) => { posts.push(body); return { ok: true, runId: `run-${++seq}` }; } },
+  );
+  await h.controller.enter();
+  // 第一行开工后停在轮询里（服务端任务还没回来）
+  const first = actionButton(h, "claude").click();
+  await flush();
+  assert.deepEqual(posts.map((post) => post.id), ["claude"]);
+  assert.equal(actionButton(h, "claude").disabled, true, "本行更新中，自己不可再点");
+  assert.match(actionButton(h, "claude").textContent, /更新中/);
+  // 关键：别人在跑不挡这一行——旧行为会把这里一起禁掉
+  assert.equal(actionButton(h, "codex").disabled, false, "别的客户端在更新不阻塞本行");
+  const second = actionButton(h, "codex").click();
+  await flush();
+  assert.deepEqual(posts.map((post) => post.id), ["claude", "codex"], "两个客户端并发开工");
+  assert.equal(actionButton(h, "opencode").disabled, false, "第三个也照常可点");
+  pending.get("run-2")(doneRun("run-2", "codex", { message: "已更新到 1.2.0" }));
+  await second;
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /codex 已更新到 1\.2\.0/);
+  assert.match(actionButton(h, "claude").textContent, /更新中/, "另一行还在跑，不受影响");
+  pending.get("run-1")(doneRun("run-1", "claude"));
+  await first;
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /claude 已更新到 1\.1\.0/);
+  assert.equal(actionButton(h, "claude").disabled, false);
+});
+
+test("同时到来的运行中确认排队逐个弹，离开关于页时排队项按取消收尾", async () => {
+  const running = { agents: [{ id: "claude", status: "running" }, { id: "codex", status: "running" }] };
+  const posts = [];
+  const h = harness(
+    (path) => {
+      if (path === "/api/agents") return running;
+      if (path.includes("/latest/claude")) return latest("1.1.0");
+      if (path.includes("/latest/codex")) return latest("1.2.0");
+      if (path.includes("/latest/")) return latest("1.0.0", "current");
+      if (path.startsWith("/api/environment/update/")) return doneRun("run-c", "claude");
+      return normal(path);
+    },
+    { respondPost: ({ body }) => { posts.push(body); return { ok: true, runId: "run-c" }; } },
+  );
+  await h.controller.enter();
+  const first = actionButton(h, "claude").click();
+  await flush();
+  assert.ok(h.get("clientUpdateModal").className.includes("show"), "第一个确认已上屏");
+  assert.match(h.get("clientUpdateModalTitle").textContent, /claude 正在运行/);
+  const second = actionButton(h, "codex").click();
+  await flush();
+  assert.match(h.get("clientUpdateModalTitle").textContent, /claude 正在运行/, "第二个确认排队等待，不覆盖屏上那个");
+  h.get("clientUpdateModalConfirm").click();
+  await flush();
+  await first;
+  assert.match(h.get("clientUpdateModalTitle").textContent, /codex 正在运行/, "答完第一个才轮到第二个");
+  h.get("clientUpdateModalCancel").click();
+  await second;
+  assert.deepEqual(posts.map((post) => post.id), ["claude"], "取消的那个不动手");
+  assert.equal(h.get("clientUpdateModal").className.includes("show"), false);
+
+  // 排队中的确认在离开关于页时按取消作答，不留悬挂的 Promise
+  const third = actionButton(h, "claude").click();
+  await flush();
+  const fourth = actionButton(h, "codex").click();
+  await flush();
+  h.controller.leave();
+  await third;
+  await fourth;
+  assert.deepEqual(posts.map((post) => post.id), ["claude"], "离开后两个确认都不动手");
 });
 
 test("更新失败与未生效分别提示，失败带出错误末行", async () => {
@@ -574,7 +658,7 @@ test("更新失败与未生效分别提示，失败带出错误末行", async ()
   }
 });
 
-test("更新请求被单飞锁拒绝时给出提示，不假装在跑", async () => {
+test("同一客户端重复请求被拒时给出提示，不假装在跑", async () => {
   const h = harness(normal, {
     respondPost: () => { throw Object.assign(new Error("HTTP 409：busy"), { code: "busy" }); },
   });
