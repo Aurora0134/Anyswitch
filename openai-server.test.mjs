@@ -642,6 +642,65 @@ describe("openai relay transport", () => {
     }
   });
 
+  describe("chunk-envelope repair is gated on grok alone", () => {
+    // The live SAIL-deepseek shape: choices + object only, no id/created/model.
+    const ENVELOPELESS_SSE = [
+      'data: {"choices":[{"delta":{"content":"hi"},"index":0}],"object":"chat.completion.chunk"}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}\n\n',
+      "data: [DONE]\n\n",
+    ];
+
+    async function fetchAs(agentHeader, model) {
+      const upstreamBody = (async function* () {
+        const encoder = new TextEncoder();
+        for (const part of ENVELOPELESS_SSE) yield encoder.encode(part);
+      })();
+      let text = "";
+      await withServer(deps(upstreamBody), async (port) => {
+        const headers = {
+          authorization: TOKEN,
+          "content-type": "application/json",
+          ...(agentHeader === null ? {} : { "x-agent-id": agentHeader }),
+        };
+        const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: "hello" }] }),
+        });
+        assert.equal(res.status, 200);
+        text = await res.text();
+      });
+      return text;
+    }
+
+    it("injects id/created/model on every chunk for a grok request", async () => {
+      const text = await fetchAs("grok", "claude-opus-5");
+      const frames = text
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim())
+        .filter((p) => p && p !== "[DONE]")
+        .map((p) => JSON.parse(p));
+      assert.equal(frames.length, 2);
+      for (const f of frames) {
+        assert.ok(typeof f.id === "string" && f.id.length > 0, "grok chunks must carry a non-empty id");
+        assert.equal(typeof f.created, "number");
+        assert.equal(f.model, "claude-opus-5", "the request model fills the envelope");
+      }
+      assert.ok(text.includes("[DONE]"));
+    });
+
+    it("leaves the same stream untouched for a non-grok endpoint", async () => {
+      const text = await fetchAs("kimi", "claude-opus-5");
+      assert.equal(text, ENVELOPELESS_SSE.join(""), "non-grok clients must receive byte-identical passthrough");
+    });
+
+    it("leaves the same stream untouched when the endpoint is unattributed", async () => {
+      const text = await fetchAs(null, "claude-opus-5");
+      assert.equal(text, ENVELOPELESS_SSE.join(""), "an unknown client must not have its bytes rewritten");
+    });
+  });
+
   it("normalizes empty/missing tool_call arguments to \"{}\" before forwarding upstream", async () => {
     // Some upstream gateways (observed: SenseNova) hard-400 any request whose
     // assistant history carries a tool_call with function.arguments === ""

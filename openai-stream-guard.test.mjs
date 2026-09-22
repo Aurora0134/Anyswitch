@@ -528,3 +528,124 @@ describe("tool-call delta normalization (upstream repeats empty strings on conti
     assert.equal(emitted + (verdict.tail || ""), sse, "canonical streams must stay byte-identical");
   });
 });
+
+describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struct)", () => {
+  // The exact wire shape a live SAIL-deepseek stream produced: choices + object
+  // only, no id/created/model. grok aborts the whole turn on the first such
+  // chunk (is_retryable=false), while every other client reads it fine.
+  const sailFrames = [
+    'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null,"index":0}],"object":"chat.completion.chunk"}\n\n',
+    'data: {"choices":[{"delta":{"reasoning_content":"The user"},"finish_reason":null,"index":0}],"object":"chat.completion.chunk"}\n\n',
+    'data: {"choices":[{"delta":{"content":"hello"},"index":0}],"object":"chat.completion.chunk"}\n\n',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}\n\n',
+    "data: [DONE]\n\n",
+  ];
+
+  function frames(text) {
+    const out = [];
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      const p = line.slice(5).trim();
+      if (!p || p === "[DONE]") continue;
+      out.push(JSON.parse(p));
+    }
+    return out;
+  }
+
+  const on = () => new OpenAIStreamGuard({ fillChunkEnvelope: { model: "deepseek-v4.1-flash" } });
+
+  it("fills id/created/model on every data chunk when enabled", () => {
+    const guard = on();
+    const emitted = pump(guard, sailFrames);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const parsed = frames(emitted + (verdict.tail || ""));
+    assert.equal(parsed.length, 4);
+    for (const f of parsed) {
+      assert.equal(typeof f.id, "string");
+      assert.ok(f.id.length > 0, "id must be non-empty");
+      assert.equal(typeof f.created, "number");
+      assert.equal(typeof f.model, "string");
+      assert.ok(f.model.length > 0, "model must be non-empty");
+    }
+    // the synthesized id is stable for the whole turn
+    assert.equal(new Set(parsed.map((f) => f.id)).size, 1);
+  });
+
+  it("leaves the stream byte-identical when the repair is off (every non-grok client)", () => {
+    const sse = sailFrames.join("");
+    const guard = new OpenAIStreamGuard();
+    const emitted = pump(guard, [sse]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    assert.equal(emitted + (verdict.tail || ""), sse);
+  });
+
+  it("echoes the first real value instead of the synthesized fallback when upstream supplies one", () => {
+    const guard = on();
+    const emitted = pump(guard, [
+      'data: {"id":"real-id-1","created":123,"model":"real-model","choices":[{"delta":{"content":"hi"},"index":0}]}\n\n',
+      // continuation omits all three: must inherit the first real values
+      'data: {"choices":[{"delta":{"content":" there"},"index":0}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const parsed = frames(emitted + (verdict.tail || ""));
+    assert.equal(parsed.length, 2);
+    for (const f of parsed) {
+      assert.equal(f.id, "real-id-1");
+      assert.equal(f.created, 123);
+      assert.equal(f.model, "real-model");
+    }
+  });
+
+  it("treats an empty-string id/created/model as a gap and fills it", () => {
+    const guard = on();
+    const emitted = pump(guard, [
+      'data: {"id":"","model":"","choices":[{"delta":{"content":"hi"},"index":0}]}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const [f] = frames(emitted + (verdict.tail || ""));
+    assert.ok(f.id.length > 0, "empty-string id must be replaced");
+    assert.ok(f.model.length > 0, "empty-string model must be replaced");
+    assert.equal(typeof f.created, "number");
+  });
+
+  it("repairs under whole-turn hold too (enhanced keep-alive mode)", () => {
+    const guard = new OpenAIStreamGuard({ holdEntireTurn: true, fillChunkEnvelope: { model: "m" } });
+    const emitted = pump(guard, sailFrames);
+    assert.equal(emitted, "", "nothing releases the hold in enhanced mode");
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const parsed = frames(verdict.tail);
+    assert.equal(parsed.length, 4);
+    for (const f of parsed) assert.ok(f.id.length > 0 && f.model.length > 0 && typeof f.created === "number");
+  });
+
+  it("repairs tool-call chunks as well, without disturbing the tool payload", () => {
+    const guard = on();
+    const emitted = pump(guard, [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"bash","arguments":"{}"}}]},"index":0}],"object":"chat.completion.chunk"}\n\n',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"object":"chat.completion.chunk"}\n\n',
+      "data: [DONE]\n\n",
+    ]);
+    const verdict = guard.finish();
+    assert.equal(verdict.action, "pass");
+    const parsed = frames(emitted + (verdict.tail || ""));
+    const call = parsed[0].choices[0].delta.tool_calls[0];
+    assert.equal(call.id, "call_a");
+    assert.equal(call.function.name, "bash");
+    for (const f of parsed) assert.ok(f.id.length > 0 && typeof f.created === "number");
+  });
+
+  it("falls back to \"unknown\" rather than a null model when neither the stream nor the request names one", () => {
+    const guard = new OpenAIStreamGuard({ fillChunkEnvelope: { model: "" } });
+    const emitted = pump(guard, sailFrames);
+    const verdict = guard.finish();
+    const [f] = frames(emitted + (verdict.tail || ""));
+    assert.equal(f.model, "unknown");
+  });
+});

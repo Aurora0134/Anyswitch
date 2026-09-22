@@ -37,8 +37,17 @@
 // legible error event and latch a fault instead of letting the client
 // treat partial output as complete.
 //
+// Chunk-envelope repair: grok's ChatCompletionChunk struct requires id,
+// created and model on EVERY data chunk and aborts the whole turn
+// (is_retryable=false, session dead until /new) when any is absent. The
+// upstream channels that omit them on continuation chunks are otherwise
+// valid — every other client tolerates the gap — so this repair is opt-in
+// per endpoint and disabled by default. It only fills genuine gaps, echoing
+// the first real value seen so a well-formed stream stays byte-identical.
+//
 // Pure state machine over decoded text. No IO.
 
+import { randomUUID } from "node:crypto";
 import { REASONING_FIELDS } from "./stream.mjs";
 
 const ERROR_TYPE = "api_error";
@@ -91,11 +100,11 @@ function hasText(value) {
 
 // Some upstreams (observed: stepfun) repeat `id`/`type`/`function.name` on
 // every tool-call continuation delta with the value "" instead of omitting
-// the keys — the canonical shape every other upstream emits. Forward the line
-// without the emptied keys so strict clients keep the first delta's values;
-// a call that never carries real values anywhere is left for the guard's
-// incomplete-tool-call verdict to reject below.
-function stripEmptyToolCallKeys(line, parsed) {
+// the keys — the canonical shape every other upstream emits. Drop the emptied
+// keys so strict clients keep the first delta's values; a call that never
+// carries real values anywhere is left for the guard's incomplete-tool-call
+// verdict to reject below. Mutates `parsed`; returns whether it changed it.
+function stripEmptyToolCallKeys(parsed) {
   let touched = false;
   for (const choice of parsed.choices ?? []) {
     const calls = choice?.delta?.tool_calls;
@@ -109,7 +118,34 @@ function stripEmptyToolCallKeys(line, parsed) {
       if (fn !== null && typeof fn === "object" && fn.name === "") { delete fn.name; touched = true; }
     }
   }
-  if (!touched) return line;
+  return touched;
+}
+
+// Fill the id/created/model envelope grok's strict struct requires (see the
+// header note). `envelope` doubles as the memory of what to echo: the first
+// real value of each field wins, so continuation chunks that omit a field get
+// the value the opening chunk established, and a stream that never carried a
+// field at all falls back to the synthesized id / timestamp / request model.
+// Mutates `parsed`; returns whether it changed it.
+function fillChunkEnvelope(parsed, envelope) {
+  if (envelope === null) return false;
+  let touched = false;
+  if (hasText(parsed.id)) envelope.id = parsed.id;
+  else { parsed.id = envelope.id; touched = true; }
+  if (typeof parsed.created === "number") envelope.created = parsed.created;
+  else { parsed.created = envelope.created; touched = true; }
+  if (hasText(parsed.model)) envelope.model = parsed.model;
+  else { parsed.model = envelope.model; touched = true; }
+  return touched;
+}
+
+// Apply every per-line repair in a single pass, so a line is re-serialized at
+// most once. Returns the original line untouched when no repair applies — the
+// byte-identical passthrough every non-opted-in channel still relies on.
+function rewriteDataLine(line, parsed, envelope) {
+  const strippedEmptyKeys = stripEmptyToolCallKeys(parsed);
+  const filledEnvelope = fillChunkEnvelope(parsed, envelope);
+  if (!strippedEmptyKeys && !filledEnvelope) return line;
   const nl = line.endsWith("\r\n") ? "\r\n" : "\n";
   const body = line.slice(0, line.length - nl.length);
   const sep = body.slice(5, 6) === " " ? " " : "";
@@ -117,7 +153,19 @@ function stripEmptyToolCallKeys(line, parsed) {
 }
 
 export class OpenAIStreamGuard {
-  constructor({ holdEntireTurn = false } = {}) {
+  constructor({ holdEntireTurn = false, fillChunkEnvelope = null } = {}) {
+    // Chunk-envelope repair state (null = off). Only the OpenAI passthrough
+    // channel enables it, and only for grok; see the header note. The request
+    // model is the fallback for a stream that never names a model itself, and
+    // must be a non-empty string — grok rejects a missing field, and a null
+    // would read as one.
+    this.envelope = fillChunkEnvelope === null
+      ? null
+      : {
+          id: `chatcmpl-${randomUUID()}`,
+          created: Math.floor(Date.now() / 1000),
+          model: hasText(fillChunkEnvelope.model) ? fillChunkEnvelope.model : "unknown",
+        };
     this.partial = ""; // decoded text not yet forming a complete line
     this.holding = true; // nothing forwarded yet
     this.held = ""; // verbatim text withheld during the hold phase
@@ -194,7 +242,7 @@ export class OpenAIStreamGuard {
     }
 
     this.trackToolCalls(parsed);
-    const forward = stripEmptyToolCallKeys(line, parsed);
+    const forward = rewriteDataLine(line, parsed, this.envelope);
     if (!this.holding) return forward;
     this.held += forward;
     if (this.isHealthy(parsed)) {

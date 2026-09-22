@@ -76,10 +76,14 @@ export function sleepWithAbort(ms, signal) {
 //   pings:   emit ": ping" SSE comments while the turn is held (OpenAI and
 //            per-launch Anthropic channels; the resident Anthropic channel
 //            sends no pings)
-export async function pipeGuardedStream(res, upstreamBody, { format, wireId, responsesCtx, enhanced = false, pings = false, tracker = null, abortController = null }) {
+//   fillChunkEnvelope: OpenAI passthrough only — grok's strict chunk struct
+//            needs id/created/model on every chunk, so the guard repairs
+//            genuine gaps before forwarding. null (default) leaves the
+//            stream byte-identical for every other client.
+export async function pipeGuardedStream(res, upstreamBody, { format, wireId, responsesCtx, enhanced = false, pings = false, tracker = null, abortController = null, fillChunkEnvelope = null }) {
   const isOpenAI = format === "openai";
   const isResponses = format === "responses";
-  const guard = new OpenAIStreamGuard({ holdEntireTurn: enhanced });
+  const guard = new OpenAIStreamGuard({ holdEntireTurn: enhanced, fillChunkEnvelope });
   const translator = isOpenAI ? null : isResponses ? new ResponsesSseTranslator(responsesCtx) : new StreamTranslator(wireId);
   const parser = isOpenAI ? null : new SSEParser();
   const decoder = new TextDecoder();
@@ -646,7 +650,7 @@ export async function runStreamWithKeepAlive(res, channel) {
 // candidate member), a plan-kind shouldFailover classifier (chain: any 4xx
 // fails over, pool: other 4xx stays terminal), and onMemberSuccess for the
 // sticky-table update.
-export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
+export function openAIStreamChannel({ res, tracker, abortController, deps, agentId, fillChunkEnvelope = null, callUpstream, callUpstreams, shouldFailover, onMemberSuccess, onMemberFault }) {
   const logger = deps?.logger;
   return {
     deps,
@@ -661,7 +665,7 @@ export function openAIStreamChannel({ res, tracker, abortController, deps, agent
     logLabel: "request",
     pipe: (result, keepAliveConfig) => {
       const enhanced = keepAliveConfig?.mode === "enhanced";
-      return pipeGuardedStream(res, result.stream, { format: "openai", enhanced, pings: enhanced, tracker, abortController });
+      return pipeGuardedStream(res, result.stream, { format: "openai", enhanced, pings: enhanced, tracker, abortController, fillChunkEnvelope });
     },
     onCallError: (err) => {
       tracker?.recordEnd({ status: 500, error: { status: 500, message: err.message } });

@@ -228,6 +228,16 @@ function openaiAgentIdFrom(headers, agentHint = null) {
   return null;
 }
 
+// 只有 grok 的 ChatCompletionChunk 结构体把 id/created/model 当必填，缺一个
+// 就整轮中止且 is_retryable=false（会话在 /new 之前都是死的）。其他客户端
+// （实测 kimi/opencode/pi/codex/claude/dsh）要么自己解析时逐字段容错读取，
+// 要么走 responses/anthropic 通道由中继重排，都不受影响——所以信封修复
+// 只对 grok 开，别家字节级原样透传。返回 null 表示不开。
+function chunkEnvelopeRepairFor(agentId, model) {
+  if (agentId !== "grok") return null;
+  return { model: typeof model === "string" ? model : "" };
+}
+
 // 归属四通道全落空的请求：这是它唯一的观测面。没有这行日志，一次新的归属
 // 断档（客户端改了 UA、新增了我们的写手还没覆盖的调用路径、agent 手工跑探针）
 // 只能像 09-19 那次一样靠人肉从客户端侧日志反挖。deps.logger 由宿主注入，
@@ -604,6 +614,7 @@ export function createOpenAIRelayServer(deps) {
               abortController,
               deps,
               agentId: openaiAgentId,
+              fillChunkEnvelope: chunkEnvelopeRepairFor(openaiAgentId, body?.model),
               ...(memberPlan
                 ? {
                     // One callable per candidate member; the keep-alive loop
