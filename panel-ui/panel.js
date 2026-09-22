@@ -1444,7 +1444,9 @@ async function api(method, path, body) {
 
   // DSH 卡分面副行："Web ×1 · TUI ×2"。只有进程扫描能在第一条请求之前分辨面
   // （web 与 TUI 在请求面上同像：同一条 x-agent-id: dsh），命令行里读不出
-  // profile 的那一档按「DSH ×n」如实显示，所以副行加总恒等于卡上的进程数。
+  // profile 的那一档按「未知 ×n」如实显示，所以副行加总恒等于卡上的进程数。
+  // 徽标位只放界面形态，读不出就是「未知」，不拿产品名顶替——见后端
+  // DSH_SURFACE_LABELS/DSH_UNKNOWN_SURFACE_LABEL 的同一口径。
   function renderDshSurfaceSummary(surfaces) {
     const el = $("dshSurfaceSummary");
     if (!el) return;
@@ -1455,7 +1457,7 @@ async function api(method, path, body) {
       return;
     }
     el.hidden = false;
-    el.textContent = rows.map((s) => `${s.label ?? s.profile ?? "DSH"} ×${s.count}`).join(" · ");
+    el.textContent = rows.map((s) => `${s.label ?? s.profile ?? "未知"} ×${s.count}`).join(" · ");
   }
 
   function renderDsh(d) {

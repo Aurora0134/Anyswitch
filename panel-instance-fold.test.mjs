@@ -445,8 +445,8 @@ describe("DSH 卡头分面副行（Web ×1 · TUI ×2）", () => {
 
   it("读不出 profile 的那一档按后端给的字面显示名呈现", () => {
     const node = { hidden: true, textContent: "" };
-    makeSummaryFn(node)([{ profile: null, label: "DSH", count: 3 }]);
-    assert.equal(node.textContent, "DSH ×3");
+    makeSummaryFn(node)([{ profile: null, label: "未知", count: 3 }]);
+    assert.equal(node.textContent, "未知 ×3");
   });
 
   it("空数组 / 零计数 / 缺字段一律收起并清空文案，不留空胶囊", () => {

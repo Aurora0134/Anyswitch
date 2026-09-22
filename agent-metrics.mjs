@@ -449,13 +449,19 @@ function resolveProbeRow(lower) {
 // shell is a stub, while codex's ChatGPT.exe is the desktop app itself, so
 // that card keeps the family).
 //
-// The harness package path is the engine signature: npm, pnpm and profile-dir
+// The harness entry file is the engine signature: npm, pnpm and profile-dir
 // layouts all keep `@deepseek-ai/dsh/…/lib/bin.js` on the command line (the
-// package manifest declares bin = lib/bin.js). Management invocations of the
-// same entry are excluded: `dsh plugin --profile x add <pkg>` forwards to pnpm
-// and `--dump-config` prints and exits — neither boots a session.
+// package manifest declares bin = lib/bin.js). The entry file, not the
+// package path: the harness also spawns transient helpers under its own
+// node_modules (`dsh-subprocess-local/lib/runner.js`, `dsh-sandbox-windows-acl`,
+// `dsh-host-directory-picker-native`, `dsh-web-app`), and every one of those
+// command lines carries the `@deepseek-ai\dsh\` prefix — a package-path
+// signature counted them as sessions (the third unbadged card, 2026-09-22).
+// Management invocations of the same entry are excluded: `dsh plugin
+// --profile x add <pkg>` forwards to pnpm and `--dump-config` prints and
+// exits — neither boots a session.
 // ---------------------------------------------------------------------------
-const DSH_HARNESS_PATH_RE = /@deepseek-ai[\\/]dsh[\\/]|dsh[\\/]lib[\\/]bin\.js/;
+const DSH_HARNESS_PATH_RE = /dsh[\\/]lib[\\/]bin\.js/;
 const DSH_LAUNCHER_SHELL_RE = /[\\/]bin[\\/]dsh-tui\.js/;
 const DSH_MANAGEMENT_RE = /[\s"']plugin\s+--profile|--dump-config|--dump-default-config/;
 // `--profile <name>` and `--profile=<name>`; the value stops at the first
@@ -493,12 +499,15 @@ function isDshEngineCommandLine(lower) {
     && !DSH_MANAGEMENT_RE.test(lower);
 }
 
-// Panel display names for the profiles whose product name is not the directory
+// Panel display names for the profiles whose UI form is not the directory
 // name: `web` is DSH's browser UI (also spelled by its `dsh web` alias), and
 // the community terminal front end installs itself as profile `dsh-tui`
 // (`dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`).
+// The badge axis is the interface, not the product: unknown profiles show
+// the product name (bare `dsh` is a real bootable profile) — the badge's
+// "which surface is this" question has no answer there.
 const DSH_SURFACE_LABELS = { web: "Web", "dsh-tui": "TUI", tui: "TUI" };
-const DSH_UNKNOWN_SURFACE_LABEL = "DSH";
+const DSH_UNKNOWN_SURFACE_LABEL = "未知";
 
 export function dshSurfaceLabel(profile) {
   if (typeof profile !== "string" || profile.length === 0) return DSH_UNKNOWN_SURFACE_LABEL;
@@ -509,8 +518,9 @@ export function dshSurfaceLabel(profile) {
 // surface. The process scan is the only source that can tell web from TUI
 // before the first request — every DSH surface shares one `x-agent-id: dsh`,
 // so the request plane cannot. Engine pids whose profile could not be read
-// group under null and display as "DSH ×n", so the subline always adds up to
-// the card's process count.
+// group under null and display as "未知 ×n", so the subline always adds up to
+// the card's process count (the badge axis is the interface; an unreadable
+// profile is honest "unknown", never a product name — see DSH_SURFACE_LABELS).
 export function summarizeDshSurfaces(procCounts) {
   const enginePids = procCounts?.dshEnginePids instanceof Set ? procCounts.dshEnginePids : [];
   const counts = new Map();
@@ -526,6 +536,61 @@ export function summarizeDshSurfaces(procCounts) {
       return a[0] < b[0] ? -1 : 1;
     })
     .map(([profile, count]) => ({ profile, label: dshSurfaceLabel(profile), count }));
+}
+
+// Terminal (console) liveness for TUI-profile DSH engines. Windows lets a
+// process outlive its terminal: when the console host dies abruptly
+// (terminal crash, taskkill) the attached harness is not notified and keeps
+// running with a dead console — measured live 2026-09-22 and reproduced in a
+// sandbox. Such an orphan is a session that can never serve the user again,
+// so the scan reaps it instead of listing an empty TUI row forever.
+// AttachConsole is the probe: it returns 0 while the terminal lives. A dead
+// console reports as a nonzero error that is not ERROR_INVALID_HANDLE (6 =
+// the process never had a console object at all, like the panel host): the
+// object exists but its terminal is gone. Measured flavors: 233
+// (ERROR_PIPE_NOT_CONNECTED) on long-dead orphans whose parent is long gone,
+// 87 (ERROR_INVALID_PARAMETER) on freshly orphaned processes whose parent is
+// still alive, 5 (ERROR_ACCESS_DENIED) in between — enumerating flavors is a
+// losing game, so any nonzero non-6 verdict counts as closed-terminal. The
+// web surface is never probed at all — a headless web boot keeps today's
+// behavior.
+const DSH_TUI_CONSOLE_PROFILES = new Set(["dsh-tui", "tui"]);
+const DSH_NO_CONSOLE_ERR = 6;
+// A reap needs two dead verdicts one scan window apart: one flaky attach
+// failure must never cost the user a live session.
+const DSH_DEAD_CONSOLE_CONFIRM_ROUNDS = 2;
+const DSH_CONSOLE_PROBE_TYPE = "Anys.CP";
+const DSH_CONSOLE_PROBE_CS =
+  '[DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint dwProcessId); ' +
+  '[DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole(); ' +
+  'public static int AttachErr(uint dwProcessId) { return AttachConsole(dwProcessId) ? 0 : System.Runtime.InteropServices.Marshal.GetLastWin32Error(); }';
+
+// One PowerShell line for the resident REPL probe (its read-line/eval loop
+// cannot take a multi-line here-string): compile the P/Invoke helper once,
+// drop the probe's own console, then attach to each target pid and report
+// `c=<pid>/<err>`. FreeConsole after every successful attach so the probe
+// never stays attached to a user terminal between rounds.
+export function buildDshConsoleQuery(pids) {
+  if (!Array.isArray(pids) || pids.length === 0) return null;
+  const list = pids.join(",");
+  return (
+    `if (-not ("${DSH_CONSOLE_PROBE_TYPE}" -as [type])) { Add-Type -Namespace Anys -Name CP -MemberDefinition '${DSH_CONSOLE_PROBE_CS}' }; ` +
+    `[${DSH_CONSOLE_PROBE_TYPE}]::FreeConsole() | Out-Null; ` +
+    `foreach ($p in ${list}) { $e = [${DSH_CONSOLE_PROBE_TYPE}]::AttachErr([uint32]$p); if ($e -eq 0) { [${DSH_CONSOLE_PROBE_TYPE}]::FreeConsole() | Out-Null }; Write-Output "c=$p/$e" }`
+  );
+}
+
+// Console-probe answer: one `c=<pid>/<err>` line per probed pid. Anything
+// else (process-scan rows from a shim that cannot distinguish queries, an
+// error line, nothing at all) parses to an empty map — an unreadable round
+// never reaps anything.
+export function parseDshConsoleQueryOutput(out) {
+  const verdicts = new Map();
+  if (typeof out !== "string") return verdicts;
+  for (const m of out.matchAll(/^c=(\d+)\/(\d+)$/gm)) {
+    verdicts.set(Number(m[1]), Number(m[2]));
+  }
+  return verdicts;
 }
 
 // The empty scan result both parseTasklistCsv and the collector's cache init
@@ -1615,7 +1680,9 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
   };
 
   return {
-    query() {
+    // `text` defaults to the probe's standing query (the process scan); the
+    // DSH console check passes its own one-liner through the same REPL.
+    query(text) {
       return new Promise((resolve, reject) => {
         if (pending !== null) {
           reject(new Error("ps probe query already in flight"));
@@ -1647,7 +1714,7 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
         armIdleTimer();
         stdoutBuf = ""; // discard any tail of a previous answer before asking
         try {
-          c.stdin.write(`${queryText} ; Write-Output '${marker}'\n`);
+          c.stdin.write(`${text ?? queryText} ; Write-Output '${marker}'\n`);
         } catch (err) {
           dropChild(err);
         }
@@ -1699,6 +1766,59 @@ export function createAgentMetricsCollector(options = {}) {
   let cachedProcessCounts = createEmptyProcessScan();
   let pendingScanPromise = null;
 
+  // DSH terminal-orphan reap (see the console-probe block above). Runs inside
+  // every resident scan round, only when a TUI-profile engine pid exists.
+  // Mutates `counts` in place so the landed snapshot already excludes the
+  // reaped session, and kills the process only after two dead verdicts one
+  // round apart. `options.killFn` exists so tests can observe the kill.
+  const killProcessFn = options.killFn ?? ((pid) => process.kill(pid, "SIGTERM"));
+  const dshDeadConsoleStreak = new Map(); // TUI engine pid -> consecutive dead rounds
+  async function reapDshTerminalOrphans(counts) {
+    const enginePids = counts.dshEnginePids instanceof Set ? counts.dshEnginePids : new Set();
+    const tuiPids = [];
+    for (const pid of enginePids) {
+      if (DSH_TUI_CONSOLE_PROFILES.has(counts.dshProfileByPid?.get(pid))) tuiPids.push(pid);
+    }
+    // Streak bookkeeping only tracks pids the current scan still lists, so a
+    // reused pid can never inherit an old verdict.
+    for (const pid of dshDeadConsoleStreak.keys()) {
+      if (!enginePids.has(pid)) dshDeadConsoleStreak.delete(pid);
+    }
+    if (tuiPids.length === 0) return;
+    const query = buildDshConsoleQuery(tuiPids);
+    if (query === null) return;
+    const out = await psProbe.query(query).catch(() => null);
+    const verdicts = parseDshConsoleQueryOutput(out);
+    if (verdicts.size === 0) return; // unreadable round: every pid keeps its row
+    const reaped = [];
+    for (const pid of tuiPids) {
+      const err = verdicts.get(pid);
+      if (err === undefined) continue; // no verdict for this pid this round
+      if (err !== 0 && err !== DSH_NO_CONSOLE_ERR) {
+        const streak = (dshDeadConsoleStreak.get(pid) ?? 0) + 1;
+        dshDeadConsoleStreak.set(pid, streak);
+        if (streak >= DSH_DEAD_CONSOLE_CONFIRM_ROUNDS) reaped.push(pid);
+      } else {
+        dshDeadConsoleStreak.delete(pid); // live terminal resets the streak
+      }
+    }
+    for (const pid of reaped) {
+      counts.dsh = Math.max(0, (counts.dsh ?? 0) - 1);
+      counts.dshEnginePids?.delete(pid);
+      counts.dshPids?.delete(pid);
+      counts.dshProfileByPid?.delete(pid);
+      dshDeadConsoleStreak.delete(pid);
+      try {
+        killProcessFn(pid);
+      } catch {
+        // Gone between scan and kill: the sets above already dropped it and
+        // the next scan will not list it either.
+        continue;
+      }
+      console.warn(`[agent-metrics] reaped DSH TUI process ${pid}: terminal closed, process stayed`);
+    }
+  }
+
   function startProcessScan() {
     pendingScanPromise = (async () => {
       const land = (counts) => {
@@ -1713,7 +1833,11 @@ export function createAgentMetricsCollector(options = {}) {
       // failed round — the tasklist fallback still gets its say.
       const psOut = await psProbe.query().catch(() => null);
       if (typeof psOut === "string" && psOut.trim().length > 0) {
-        land(parseTasklistCsv(psOut));
+        const counts = parseTasklistCsv(psOut);
+        // Terminal-orphan reap before landing: the snapshot the panel reads
+        // must already exclude the reaped session.
+        await reapDshTerminalOrphans(counts);
+        land(counts);
         return cachedProcessCounts;
       }
 
