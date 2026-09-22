@@ -5,7 +5,7 @@
 // ① 收起态渲染实例行：零 updateSparkline 调用（buffer 照常累积，曲线连续性不受影响）；
 // ② 展开瞬间（折叠钮 → applyDetailFold）立即用已攒 buffer 补绘，不等下一轮 1s 轮询；
 // ③ 展开态渲染行为（tps/ttft/cache 三条，cache 锁 0-100 量程）。
-// 端点级旧机制（zcode/dsh/qoder）行为见文件尾 describe。
+// 端点级旧机制（zcode/qoder）行为见文件尾 describe（DSH 已并入统一管线，其防尘测在 panel.test.mjs）。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -174,7 +174,7 @@ describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
   });
 });
 
-describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、展开补绘", () => {
+describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开补绘", () => {
   function makeRedrawEndpoint(env) {
     const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "redrawEndpointSparklines found in panel.html");
@@ -183,10 +183,9 @@ describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、�
     const keys = new Function(`return (${km[0].replace(/^const ENDPOINT_SPARK_KEYS = /, "").replace(/;$/, "")})`)();
     const historyBuffers = {
       ttft: [{ t: 0, v: 1.1 }, { t: 0, v: 1.2 }], tps: [{ t: 0, v: 30 }], cache: [{ t: 0, v: 90 }],
-      dsh_ttft: [], dsh_tps: [], dsh_cache: [],
       qoder_ttft: [], qoder_tps: [], qoder_cache: [],
     };
-    const gridEls = { zcTelemetryGrid: { hidden: true }, dshTelemetryGrid: { hidden: false }, qoderTelemetryGrid: { hidden: false } };
+    const gridEls = { zcTelemetryGrid: { hidden: true }, qoderTelemetryGrid: { hidden: false } };
     const fn = new Function("$", "historyBuffers", "sparkValues", "updateSparkline", "ENDPOINT_SPARK_KEYS", "endpointStaleFlags", `return (${m[0]});`)(
       (id) => gridEls[id] || null,
       historyBuffers,
@@ -203,63 +202,60 @@ describe("panel.html 端点级旧机制（zcode/dsh/qoder）收起不绘制、�
     const { fn } = makeRedrawEndpoint(env);
     fn("zc");
     assert.equal(env.calls.update.length, 0, "收起态零绘制");
-    fn("dsh");
-    assert.deepEqual(env.calls.update.map((c) => c.id), ["dshSparkTtft", "dshSparkTps", "dshSparkCache"], "可见栏照常绘制");
     fn("qoder");
-    const idsQ = env.calls.update.map((c) => c.id);
-    assert.ok(idsQ.includes("qoderSparkTtft") && idsQ.includes("qoderSparkTps") && idsQ.includes("qoderSparkCache"));
+    assert.deepEqual(env.calls.update.map((c) => c.id), ["qoderSparkTtft", "qoderSparkTps", "qoderSparkCache"], "可见栏照常绘制");
     const zc = env.calls.update.filter((c) => c.id === "zcSparkTtft");
     assert.equal(zc.length, 0, "zc 全程收起，不得出现 zc 折线调用");
   });
 
-  it("renderZcode/renderDsh/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
-    for (const fnName of ["renderZcode", "renderDsh", "renderQoder"]) {
+  it("renderZcode/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
+    for (const fnName of ["renderZcode", "renderQoder"]) {
       const m = panelJs.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found in panel.html");
       assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
-      const prefix = fnName === "renderZcode" ? "zc" : fnName === "renderDsh" ? "dsh" : "qoder";
+      const prefix = fnName === "renderZcode" ? "zc" : "qoder";
       assert.ok(m[0].includes(`redrawEndpointSparklines("${prefix}")`), fnName + " 改走 redrawEndpointSparklines");
     }
   });
 
-  it("旧机制 setFold 展开（open=true）立即补绘端点级折线，实例四宫格同拨", () => {
+  it("renderDsh 并入统一管线后，端点级补绘路径不得回潮", () => {
+    const m = panelJs.match(/function renderDsh\(d\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderDsh found in panel.js");
+    assert.ok(!m[0].includes("redrawEndpointSparklines("), "端点级补绘已随四宫格摘除");
+    assert.ok(!m[0].includes("updateSparkline("), "不得裸调 updateSparkline（行内折线经 renderInstanceRows）");
+  });
+
+  it("旧机制 setFold 展开（open=true）立即补绘端点级折线", () => {
     const m = panelJs.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
     assert.ok(m, "setFold found in panel.html");
     const env = makeEnv();
-    // DSH 卡在本机制下还挂着一列实例行：四宫格要跟着折叠钮收放，否则
-    // 数据未变时 renderIfChanged 不重跑，点击瞬间的展开态停在收起样子。
-    const instGrid = { hidden: false };
-    const card = { querySelectorAll: (sel) => (sel === ".instance-telemetry-grid" ? [instGrid] : []) };
-    const grid = { hidden: true, closest: () => card };
+    const grid = { hidden: true, closest: () => null };
     const brief = { hidden: false };
     const foldBtn = { setAttribute() {}, textContent: "" };
     const aggWrap = { hidden: true };
     const arrow = m[0].replace(/^const setFold = /, "").replace(/;$/, "");
     const fn = new Function(
-      "grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "redrawInstanceSparklines", "aggWrap",
+      "grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "aggWrap",
       `return (${arrow});`,
-    )(grid, brief, foldBtn, "dsh", env.redrawEndpointSparklines, env.redrawInstanceSparklines, aggWrap);
+    )(grid, brief, foldBtn, "zc", env.redrawEndpointSparklines, aggWrap);
     fn(true);
-    assert.deepEqual(env.calls.redrawEp, ["dsh"], "展开瞬间补绘");
-    assert.deepEqual(env.calls.redraw, ["dsh"], "展开瞬间补绘本栏实例折线");
-    assert.equal(instGrid.hidden, false, "实例四宫格随展开可见");
+    assert.deepEqual(env.calls.redrawEp, ["zc"], "展开瞬间补绘");
     assert.equal(grid.hidden, false);
     assert.equal(aggWrap.hidden, false, "展开态显示「全局汇总」行");
     fn(false);
-    assert.deepEqual(env.calls.redrawEp, ["dsh"], "收起方向不补绘");
-    assert.deepEqual(env.calls.redraw, ["dsh"], "收起方向同样不补绘实例折线");
-    assert.equal(instGrid.hidden, true, "收起态实例四宫格再藏回去");
+    assert.deepEqual(env.calls.redrawEp, ["zc"], "收起方向不补绘");
     assert.equal(aggWrap.hidden, true, "收起态隐藏「全局汇总」行（tokens/请求数由简要栏承载）");
+    assert.deepEqual(env.calls.redraw, [], "旧机制卡不再挂实例行，不拨实例折线");
   });
 
   it("陈旧端点（endpointStaleFlags 置位）可见也零绘制，恢复新鲜后照常", () => {
     const env = makeEnv();
     const { fn } = makeRedrawEndpoint(env);
-    env.endpointStaleFlags.dsh = true;
-    fn("dsh");
+    env.endpointStaleFlags.qoder = true;
+    fn("qoder");
     assert.equal(env.calls.update.length, 0, "陈旧端点不绘历史折线（四宫格可见也一样）");
-    env.endpointStaleFlags.dsh = false;
-    fn("dsh");
+    env.endpointStaleFlags.qoder = false;
+    fn("qoder");
     assert.equal(env.calls.update.length, 3, "恢复新鲜后照常绘制");
   });
 });

@@ -1090,8 +1090,8 @@ describe("panel.html codex endpoint card", () => {
     assert.ok(!panelJs.includes("codexTelemetryGrid"), "no endpoint-level telemetry grid");
     const keys = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
     assert.ok(keys && !keys[0].includes("codex"), "ENDPOINT_SPARK_KEYS stays legacy-only (no codex)");
-    const legacyFold = panelJs.match(/\["zc", "dsh", "qoder"\]\.forEach/);
-    assert.ok(legacyFold, "legacy id-wired fold list unchanged (codex not in it)");
+    const legacyFold = panelJs.match(/\["zc", "qoder"\]\.forEach/);
+    assert.ok(legacyFold, "legacy id-wired fold list = zc/qoder only (codex not in it)");
   });
 
   it("keeps the stop-relay display name and stats label for codex", () => {
@@ -1143,22 +1143,28 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
     ]) {
       assert.ok(dshCard.includes(`id="${id}"`), `dsh card missing #${id}`);
     }
-    assert.ok(dshCard.indexOf('id="dshInstancesWrapper"') < dshCard.indexOf('id="dshDetailBrief"'),
-      "实例盒排在简要栏之前（与多实例栏同序）");
+    assert.ok(dshCard.indexOf('id="dshInstancesWrapper"') < dshCard.indexOf('id="dshSessionRow"'),
+      "实例盒排在「全局汇总」行之前（与多实例栏同序）");
     assert.ok(panelCss.includes(".instances-table-wrapper"), "实例盒的间距节奏在 CSS 里有定义");
   });
 
-  it("keeps the instance region out of the legacy fold's own boxes", () => {
-    // 旧折叠机制拨的是 dshTelemetryGrid / dshDetailBrief / 「全局汇总」行所在的
-    // wrapper；实例盒若复用那三个之一，收起态就没有行可看了。
+  it("folds with the unified data-prefix mechanism, legacy fold leftovers gone", () => {
+    // DSH 卡并入多实例统一折叠（zcode 老机制的端点四宫格/简要栏残留物是
+    // 双四宫格并存的根因，本测试钉死其不得回潮）。
+    assert.ok(dshCard.includes('data-prefix="dsh"'), "折叠钮走统一事件委托");
+    for (const legacy of ["dshTelemetryGrid", "dshDetailBrief", "dshDetailFoldBtn"]) {
+      assert.ok(!dshCard.includes(`id="${legacy}"`), `旧机制残留物 #${legacy} 已摘除`);
+    }
     const wrapAt = dshCard.indexOf('id="dshInstancesWrapper"');
     const wrapTag = dshCard.slice(dshCard.lastIndexOf("<div", wrapAt), wrapAt);
     assert.ok(wrapTag.includes("instances-table-wrapper"), "实例盒用自家的间距节奏类");
-    assert.ok(!wrapTag.includes("agent-detail-brief"), "实例盒不是简要栏盒");
-    assert.ok(!wrapTag.includes("detail-open-only"), "实例盒不随展开态收放");
+    assert.ok(!wrapTag.includes("detail-open-only"), "实例盒不随展开态收放（行常驻）");
+    const rowAt = dshCard.indexOf('id="dshSessionRow"');
+    const rowTag = dshCard.slice(dshCard.lastIndexOf("<div", rowAt), rowAt);
+    assert.ok(rowTag.includes("detail-open-only"), "「全局汇总」行归入展开态门控");
   });
 
-  it("renders DSH as an instance card while keeping its legacy detail fold", () => {
+  it("renders DSH as a canon multi-instance card", () => {
     const m = panelJs.match(/function renderDsh\(d\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "renderDsh found in panel.js");
     assert.ok(m[0].includes('renderInstanceRows({ prefix: "dsh"'), "renders instance rows");
@@ -1168,9 +1174,13 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
     assert.ok(m[0].includes("$(\"dshInstancesWrapper\").hidden") || m[0].includes("instancesWrap.hidden = instances.length === 0"),
       "零实例时实例盒收起，不留空盒");
     assert.ok(!m[0].includes("buildAggregateFallback"),
-      "不造伪实例行：端点级汇总由本卡简要栏与「全局汇总」行承担");
+      "不造伪实例行：端点级汇总由实例行与「全局汇总」行承担");
+    assert.ok(m[0].includes('applyDetailFold("dsh")'), "折叠态应用走统一管线");
+    assert.ok(m[0].includes('gateAggregateRow("dsh", $("dshSessionRow"), instances.length)'), "「全局汇总」行同其他卡门控");
     assert.ok(m[0].includes('setInstanceCount("dsh", 0)'), "未运行分支清零计数与副行");
-    assert.ok(m[0].includes('redrawEndpointSparklines("dsh")'), "旧机制的端点级补绘路径不丢");
+    for (const oldWire of ["updateDetailBrief", "redrawEndpointSparklines", "dimEndpointRateCards", "isEndpointStale", "$(\"dshTelemetryGrid\")", "$(\"dshTtftVal\")"]) {
+      assert.ok(!m[0].includes(oldWire), `旧端点遥测接线 ${oldWire} 已摘除`);
+    }
   });
 
   it("does not opt the other instance cards into the surface badge", () => {
@@ -3067,7 +3077,7 @@ describe("panel.html 实例四宫格陈旧语义（lastSeen 超阈值速率类�
   });
 });
 
-describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
+describe("panel.html 静态卡（zc/qoder）端点级陈旧语义", () => {
   // 与实例行同口径：全局汇总行 lastSeen 超 INSTANCE_STALE_MS 即陈旧——速率类置 —
   // 压暗、折线停绘、简要栏换相对时间胶囊；累计量（工时/tokens/请求数）不动。
   const panelJs = readFileSync(
@@ -3087,8 +3097,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
     assert.ok(m[1].includes("INSTANCE_STALE_MS"), "same threshold as instance rows");
   });
 
-  it("四个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
-    for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderDsh", "dsh", "d"], ["renderQoder", "qoder", "p"]]) {
+  it("三个静态渲染函数同口径接线：判定 + 置位 flag + 压暗 + staleText + 停绘", () => {
+    for (const [fnName, prefix, arg] of [["renderZcode", "zc", "z"], ["renderQoder", "qoder", "p"]]) {
       const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found in panel.js");
       assert.ok(m[0].includes(`const stale = isEndpointStale(${arg}, isGenerating);`), fnName + " computes stale");
@@ -3117,15 +3127,15 @@ describe("panel.html 静态卡（zc/dsh/qoder）端点级陈旧语义", () => {
       "rate pill html no longer eager-evaluated (null-safe)");
   });
 
-  it("三张静态卡的简要栏都有 tag-stale 相对时间胶囊", () => {
-    for (const prefix of ["zc", "dsh", "qoder"]) {
+  it("两张静态卡的简要栏都有 tag-stale 相对时间胶囊", () => {
+    for (const prefix of ["zc", "qoder"]) {
       assert.ok(
         new RegExp(`<span class="tag-bubble tag-stale" id="${prefix}BriefStale" hidden></span>`).test(panelHtml),
         prefix + "BriefStale pill exists");
     }
   });
 });
-describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例实例行同范式", () => {
+describe("panel.html 静态卡（zc/qoder）收起态简要栏与多实例实例行同范式", () => {
   // 收起态主信息栏对齐多实例端点实例行：名称行挂请求数徽标、名称行下挂 tokens 行
   // （Prompt/Completion/Cached），「全局汇总」行改仅展开态显示（避免同数据双行并存）。
   const panelHtml = readFileSync(
@@ -3137,8 +3147,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
     "utf8",
   );
 
-  it("三张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
-    for (const prefix of ["zc", "dsh", "qoder"]) {
+  it("两张静态卡简要栏：名称行挂请求数徽标 + tokens 行（Prompt/Completion/Cached）", () => {
+    for (const prefix of ["zc", "qoder"]) {
       assert.ok(
         new RegExp(`<span class="badge badge-neutral" id="${prefix}BriefReqs">0 请求</span>`).test(panelHtml),
         prefix + "BriefReqs badge exists");
@@ -3158,8 +3168,8 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
     assert.ok(m[0].includes("`${requests || 0} 请求`"), "badge text matches instance-row 「N 请求」 wording");
   });
 
-  it("四个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
-    for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderDsh", "d", "d.totalRequests"], ["renderQoder", "p", "p.totalRequests"]]) {
+  it("三个静态渲染函数把 tokens/请求数接入 updateDetailBrief（tokens 先于调用声明）", () => {
+    for (const [fnName, arg, totalReq] of [["renderZcode", "z", "z.totalRequests"], ["renderQoder", "p", "p.totalRequests"]]) {
       const m = panelJs.match(new RegExp("function " + fnName + "\\(" + arg + "\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fnName + " found in panel.js");
       assert.ok(m[0].includes(`requests: m.totalRequests || ${totalReq} || 0,`), fnName + " passes requests");
@@ -3173,7 +3183,7 @@ describe("panel.html 静态卡（zc/dsh/qoder）收起态简要栏与多实例�
   });
 
   it("「全局汇总」行仅展开态显示：旧机制 setFold 门控其 session-table-wrapper", () => {
-    const m = panelJs.match(/\["zc", "dsh", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
+    const m = panelJs.match(/\["zc", "qoder"\]\.forEach\(\(prefix\) => \{[\s\S]*?\n  \}\);/);
     assert.ok(m, "static fold wiring found in panel.js");
     assert.ok(m[0].includes('$(prefix + "SessionRow")'), "resolves the aggregate row");
     assert.ok(m[0].includes('closest(".session-table-wrapper")'), "toggles the wrapper");
