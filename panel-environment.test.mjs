@@ -174,7 +174,7 @@ test("检测服务异常返回受控错误，不泄漏本机异常信息", async
   });
 });
 
-// ── 客户端安装/更新：单飞、结果分级、不误报成功 ──────────────
+// ── 客户端安装/更新：按客户端分锁、结果分级、不误报成功 ──────────────
 
 function deferred() {
   let resolve, reject;
@@ -231,7 +231,7 @@ test("客户端更新只接受可代管客户端与合法动作，非法请求�
   });
 });
 
-test("客户端更新单飞：任务进行中再来的请求被 409 拒绝，完成后释放", async () => {
+test("客户端更新按客户端分锁：同一客户端任务进行中再来的请求被 409 拒绝，不同客户端并行放行", async () => {
   const gate = deferred();
   await withPanel({
     environmentService: { async getState() { return clientState(); } },
@@ -242,13 +242,48 @@ test("客户端更新单飞：任务进行中再来的请求被 409 拒绝，完
     assert.equal(first.status, 202);
     assert.ok(first.body.runId);
     assert.equal(first.body.clientId, "claude");
-    const second = await post("/panel/api/environment/update", { id: "codex", action: "update" });
-    assert.equal(second.status, 409);
-    assert.equal(second.body.error, "busy");
+    // 另一个客户端可以同时开工——关于页因此能同时开多个更新，而不是一次只放行一个。
+    const parallel = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    assert.equal(parallel.status, 202, "不同客户端互不阻塞");
+    assert.equal(parallel.body.clientId, "codex");
+    // 同一个客户端再来一个请求仍然被拒：npm 全局目录里同一个包只有一份落点，
+    // 并发的同一个包安装会互搬目录（本机实测会把安装搬坏）。
+    const same = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    assert.equal(same.status, 409);
+    assert.equal(same.body.error, "busy");
     gate.resolve();
     assert.equal((await waitForRun(get, first.body.runId)).body.state, "done");
-    const third = await post("/panel/api/environment/update", { id: "codex", action: "update" });
-    assert.equal(third.status, 202);
+    assert.equal((await waitForRun(get, parallel.body.runId)).body.state, "done");
+    // 都跑完之后同一客户端可以再次开工——锁按客户端释放，没被别的客户端带走。
+    const again = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    assert.equal(again.status, 202);
+  });
+});
+
+test("一个客户端跑完不会解锁另一个客户端正在进行的任务", async () => {
+  const fast = deferred();
+  const slow = deferred();
+  const gates = { claude: fast, codex: slow };
+  const started = [];
+  await withPanel({
+    environmentService: { async getState() { return clientState(); } },
+    releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
+    runClientLifecycleFn: async ({ id }) => { started.push(id); await gates[id].promise; return { ok: true, output: "" }; },
+  }, async (get, post) => {
+    const claude = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+    const codex = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    assert.equal(claude.status, 202);
+    assert.equal(codex.status, 202);
+    fast.resolve();
+    assert.equal((await waitForRun(get, claude.body.runId)).body.state, "done");
+    // claude 收尾时不能顺手把 codex 那把锁也放掉，否则 codex 会被第二个任务同时更新。
+    const bleeding = await post("/panel/api/environment/update", { id: "codex", action: "update" });
+    assert.equal(bleeding.status, 409, "codex 仍在跑，锁必须还在");
+    slow.resolve();
+    assert.equal((await waitForRun(get, codex.body.runId)).body.state, "done");
+    // 两个任务各自只跑了一次；最后一次 202 会再起一个 codex 任务，故只比对前两次。
+    assert.deepEqual(started.slice(0, 2), ["claude", "codex"]);
+    assert.equal((await post("/panel/api/environment/update", { id: "codex", action: "update" })).status, 202);
   });
 });
 

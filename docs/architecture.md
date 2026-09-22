@@ -102,7 +102,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 ### 控制面层
 - `relay-host.mjs` — 常驻 relay 宿主（127.0.0.1:47821，crash 不自愈是刻意设计）。
 - `panel-host.mjs` — 独立常驻控制面板宿主（127.0.0.1:47820）：relay 停止/崩溃时面板仍可用，并承载 followAgent 探活 watcher。
-- `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；客户端安装/更新走 `POST /panel/api/environment/update` 加 `GET /panel/api/environment/update/<runId>` 查询进度：写请求沿用面板写闸门，服务端全局单飞（并发第二个任务 409），任务在后台跑、结果留内存供轮询，安装完成或失败后强制重查本地检测与官方最新再归为已更新/未生效/失败/装上了跑不起来。当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
+- `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；客户端安装/更新走 `POST /panel/api/environment/update` 加 `GET /panel/api/environment/update/<runId>` 查询进度：写请求沿用面板写闸门，服务端锁按客户端分（同一个客户端并发第二个任务 409，不同客户端并行放行——同一个包的两份并发全局安装会互搬目录，不同包各写各的目录），任务在后台跑、结果留内存供轮询，安装完成或失败后强制重查本地检测与官方最新再归为已更新/未生效/失败/装上了跑不起来。当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
 - `panel-ui/panel.html` — 面板 Web UI 骨架（DOM + 防闪烁/开屏内联小脚本，2026-09-17 起样式与主脚本外链到 `panel-ui/panel.css` / `panel-ui/panel.js`）；静态文件按请求检查 mtime 缓存与 ETag，刷新可加载新的页面资源。后端模块和进程版本需 panel-host 换新进程才生效；现有「重启」按钮先重启 relay、再重启 panel-host，会中断在途请求，执行时机由用户安排。
 - `agent-discovery.mjs` — 无启动副作用的客户端路径发现，供启动器和本地环境检测共享；除 Grok Build 一次有界 `--version` 自报外，检测不得调用启动器或目标客户端。
 - `environment-service.mjs` — 关于页本地环境服务：读取九个客户端选定安装的公开包元数据、包装脚本目标、必要的 PE/ASAR 产品资料及 Microsoft Store 包注册信息；返回 Windows、当前面板 Node 版本、安装发现状态与版本来源。Codex 一张卡呈现两行安装：CLI 行读 npm 全局 `@openai/codex` 的包清单，桌面行读商店包 `OpenAI.Codex` 的注册版本。只发现安装不代表可运行、已登录或已接入 relay；路径存在但缺执行体、无法读产品版本、装了但跑不起来、读取失败分别呈现。

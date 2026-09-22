@@ -651,14 +651,17 @@ export function createPanelRouter({
     return releaseService;
   }
 
-  // 客户端更新（安装/升级）作业登记。单飞：npm 全局目录只有一份，两个并发
-  // npm i -g 会互相踩，所以任意时刻只允许一个任务；其余请求 409。任务跑在后台，
-  // 前端按 runId 轮询——npm 安装可能慢到超过一次 HTTP 请求的合理等待，长连接
-  // 会先超时丢响应而不是先装完。结果保留在 panel 进程内存里，面板重启即弃；
+  // 客户端更新（安装/升级）作业登记。锁按客户端分：npm 全局目录里一个包只有一份
+  // 落点，两个并发的同一个包安装会把对方的目录搬走再删（实测 5 次里 2 次把安装搬坏，
+  // npm 报 ENOTEMPTY、包清单与命令入口一起消失），所以同一个客户端同时只允许一个
+  // 任务，同客户端并发 409。不同客户端各装各的包、互不触碰对方的目录，可以并行——
+  // 关于页因此能同时开多个更新，而不是一次只放行一个。
+  // 任务跑在后台，前端按 runId 轮询——npm 安装可能慢到超过一次 HTTP 请求的合理等待，
+  // 长连接会先超时丢响应而不是先装完。结果保留在 panel 进程内存里，面板重启即弃；
   // 页面丢失 runId 后走重新检测自愈（检测结果本身是权威的）。
   const CLIENT_UPDATE_RUNS_MAX = 20;
   let lifecycleRuns = null; // Map<runId, run>，首个任务到来才建
-  let lifecycleActive = null; // 进行中的 run，就是单飞锁
+  let lifecycleActive = null; // Map<clientId, run>，按客户端持有的锁
 
   async function handleClientUpdate(req, res) {
     let body;
@@ -676,11 +679,13 @@ export function createPanelRouter({
     if (!CLIENT_ACTIONS.includes(action)) {
       return sendJson(res, 400, { ok: false, error: "unsupported_action", message: "不支持的操作" });
     }
-    if (lifecycleActive) {
+    lifecycleActive ??= new Map();
+    const active = lifecycleActive.get(id);
+    if (active) {
       return sendJson(res, 409, {
         ok: false,
         error: "busy",
-        message: `已有客户端任务在进行中（${lifecycleActive.clientId}），请等待完成`,
+        message: `已有客户端任务在进行中（${id}），请等待完成`,
       });
     }
     if (!runClientLifecycleFn) {
@@ -692,7 +697,7 @@ export function createPanelRouter({
     const run = { runId, clientId: id, action, state: "running", startedAt: new Date().toISOString(), finishedAt: null, result: null };
     lifecycleRuns.set(runId, run);
     while (lifecycleRuns.size > CLIENT_UPDATE_RUNS_MAX) lifecycleRuns.delete(lifecycleRuns.keys().next().value);
-    lifecycleActive = run;
+    lifecycleActive.set(id, run);
     void (async () => {
       try {
         const before = (await getEnvironmentService().then((service) => service.getState()))
@@ -737,7 +742,8 @@ export function createPanelRouter({
         run.state = "done";
         run.finishedAt = new Date().toISOString();
       } finally {
-        lifecycleActive = null;
+        // 只放掉自己那一把：别的客户端这时可能正跑着，整表清空会把它们一起解锁。
+        if (lifecycleActive.get(id) === run) lifecycleActive.delete(id);
       }
     })();
     return sendJson(res, 202, { ok: true, runId, clientId: id, action });

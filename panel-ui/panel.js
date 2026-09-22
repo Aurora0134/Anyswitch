@@ -2028,14 +2028,16 @@ async function api(method, path, body) {
     function cacheKey(installation) { return `${installation.remoteId}:${validLocal(installation) || ""}`; }
 
     // ── 客户端安装/更新（本地环境卡的动作位）──────────────────────────
-    // 服务端单飞 + npm 全局目录单写者：任一时刻全页面只允许一个任务。
+    // 锁按客户端分：同一个客户端的两个 npm 全局安装会互相搬目录（服务端实测过会搬坏），
+    // 所以每个客户端同一时间只跑一个任务；不同客户端各装各的包，可以并行，
+    // 于是开着一个更新时其他行的按钮照常可点。
     // 任务在后台跑，这里持 runId 轮询；离开关于页就放弃轮询与本地标记，
     // 服务端会自己跑完，结果由重新检测兜底呈现。
-    let lifecycleRun = null; // { clientId, action, runId }
-    let lifecyclePoll = null; // 轮询 timer
+    const lifecycleRuns = new Map(); // clientId -> { clientId, action, runId, poll }，每客户端至多一条
     let lifecycleGen = 0; // leave() 时 +1，丢弃迟到的轮询回调
-    let lifecycleBatch = null; // { queue, results }，批量更新进行中非 null
+    let lifecycleBatch = null; // { results }，批量更新进行中非 null；批量与单行整段时间互斥
     let lifecycleModalResolve = null;
+    const lifecycleModalQueue = []; // 弹层是单例，同时到来的确认请求排队逐个弹
     // 该安装项当前能做什么：可更新 > 未安装可安装；桌面应用与状态不明不给动作。
     function installationAction(installation) {
       if (!installation || installation.kind !== "cli") return null;
@@ -2052,20 +2054,32 @@ async function api(method, path, body) {
       if (!button) return;
       const count = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
         .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update")).length;
-      button.disabled = count === 0 || Boolean(lifecycleRun) || Boolean(lifecycleBatch);
+      button.disabled = count === 0 || lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
       button.textContent = lifecycleBatch ? "批量更新中…" : count > 0 ? `全部更新 (${count})` : "全部更新";
     }
-    function confirmClientUpdate(names, many) {
+    function showClientUpdateModal(names, many) {
       get("clientUpdateModalTitle").textContent = many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`;
       get("clientUpdateModalBody").textContent = `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`;
       get("clientUpdateModal").classList.toggle("show", true);
       return new Promise((resolve) => { lifecycleModalResolve = resolve; });
+    }
+    // 弹层是单例：已经有一个确认在屏上时，后到的请求排队等它答完再弹，
+    // 否则两个并发任务会互相覆盖对方的标题与按钮归属。
+    function confirmClientUpdate(names, many) {
+      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ names, many, resolve }); });
+      return showClientUpdateModal(names, many);
     }
     function closeLifecycleModal(decision) {
       get("clientUpdateModal").classList.toggle("show", false);
       const resolve = lifecycleModalResolve;
       lifecycleModalResolve = null;
       if (resolve) resolve(decision);
+      const next = lifecycleModalQueue.shift();
+      if (next) void showClientUpdateModal(next.names, next.many).then(next.resolve);
+    }
+    // 离开关于页：排队中的确认一律按取消作答，不留悬挂的 Promise 等着一个不会出现的弹层。
+    function drainLifecycleModalQueue(decision) {
+      while (lifecycleModalQueue.length) lifecycleModalQueue.shift().resolve(decision);
     }
     // 目标端点正在运行时更新，Windows 下在跑的 exe/cmd 被占用会让安装覆盖失败且打断会话；
     // agents 查询失败时跳过这层确认，由更新命令自身的报错兜底。
@@ -2076,7 +2090,7 @@ async function api(method, path, body) {
         return ids.filter((id) => live.has(id));
       } catch { return []; }
     }
-    function pollLifecycle(runId) {
+    function pollLifecycle(run, runId) {
       const gen = lifecycleGen;
       return new Promise((resolve, reject) => {
         const step = async () => {
@@ -2084,8 +2098,8 @@ async function api(method, path, body) {
           try { status = await fetchOnce(`/api/environment/update/${encodeURIComponent(runId)}`); }
           catch { status = null; }
           if (!active || gen !== lifecycleGen) { reject(Object.assign(new Error("lifecycle abandoned"), { abandoned: true })); return; }
-          lifecyclePoll = null;
-          if (status?.state === "running") { lifecyclePoll = schedule(step, 1500); return; }
+          run.poll = null;
+          if (status?.state === "running") { run.poll = schedule(step, 1500); return; }
           if (!status) reject(new Error("lifecycle status unavailable"));
           else resolve(status);
         };
@@ -2101,14 +2115,15 @@ async function api(method, path, body) {
       notify(text, true);
     }
     async function performLifecycleRun({ id, action }) {
-      if (lifecycleRun) return { id, outcome: "skipped" };
-      lifecycleRun = { clientId: id, action, runId: null };
+      if (lifecycleRuns.has(id)) return { id, outcome: "skipped" };
+      const run = { clientId: id, action, runId: null, poll: null };
+      lifecycleRuns.set(id, run);
       renderLocal();
       updateBatchButton();
       try {
         const started = await request("POST", "/api/environment/update", { id, action });
-        lifecycleRun.runId = started.runId;
-        const status = await pollLifecycle(started.runId);
+        run.runId = started.runId;
+        const status = await pollLifecycle(run, started.runId);
         reportLifecycleOutcome(status, id);
         return { id, outcome: status?.outcome ?? "unknown" };
       } catch (error) {
@@ -2118,28 +2133,32 @@ async function api(method, path, body) {
         }
         return { id, outcome: "failed" };
       } finally {
-        lifecycleRun = null;
-        if (lifecyclePoll !== null) { cancelSchedule(lifecyclePoll); lifecyclePoll = null; }
+        lifecycleRuns.delete(id);
+        if (run.poll !== null) { cancelSchedule(run.poll); run.poll = null; }
         if (active) { renderLocal(); updateBatchButton(); }
       }
     }
-    // 单个动作：本端点在跑先确认，再执行。
+    // 单个动作：只跟自己这行为敌——本行在跑就点不动，别人在跑不影响。
     async function updateClient(id, action) {
-      if (lifecycleRun || lifecycleBatch || lifecycleModalResolve) return;
+      if (lifecycleRuns.has(id) || lifecycleBatch) return;
       const running = await runningClients([id]);
       if (running.length && !(await confirmClientUpdate(running.map(clientName), false))) return;
+      // 确认期间状态可能已变（等待排队弹层时别人先跑起来了），动手前再核一次
+      if (lifecycleRuns.has(id) || lifecycleBatch) return;
       await performLifecycleRun({ id, action });
       if (active) await loadEnvironment(true);
     }
-    // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后在服务端串行。
+    // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后在页面串行跑完。
+    // 批量与单行整段时间互斥：否则同一行会被批量与本行同时更新，那正是会互相搬目录的场景。
     async function startUpdateAll() {
-      if (lifecycleRun || lifecycleBatch || lifecycleModalResolve) return;
+      if (lifecycleRuns.size > 0 || lifecycleBatch) return;
       const targets = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
         .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update"))
         .map((client) => ({ id: client.id, action: "update" }));
       if (!targets.length) return;
       const running = await runningClients(targets.map((target) => target.id));
       if (running.length && !(await confirmClientUpdate(running.map(clientName), true))) return;
+      if (lifecycleRuns.size > 0 || lifecycleBatch) return;
       lifecycleBatch = { results: [] };
       const batch = lifecycleBatch;
       updateBatchButton();
@@ -2149,9 +2168,10 @@ async function api(method, path, body) {
         if (lifecycleBatch !== batch) return; // 中途离开关于页，批量收尾交给服务端与下次检测
       }
       lifecycleBatch = null;
+      const ran = batch.results.filter((result) => result.outcome !== "skipped");
       if (active) {
-        const updated = batch.results.filter((result) => result.outcome === "updated").length;
-        const failed = batch.results.length - updated;
+        const updated = ran.filter((result) => result.outcome === "updated").length;
+        const failed = ran.length - updated;
         notify(failed ? `批量更新完成：${updated} 个成功，${failed} 个未生效` : `批量更新完成：${updated} 个客户端已更新`, failed > 0);
         updateBatchButton();
         await loadEnvironment(true);
@@ -2247,14 +2267,17 @@ async function api(method, path, body) {
           line.appendChild(result);
         }
         if (loading && remote) line.appendChild(element("span", "about-meta", "查询中…"));
-        // 动作位：本行任务在跑 > 可更新/可安装；其他行有任务时按钮留形但禁用（服务器单飞）。
+        // 动作位：本行任务在跑 > 可更新/可安装；其他行在跑不影响本行（锁按客户端分）。
         if (updatableClients.has(client.id)) {
           let intent = null;
-          if (lifecycleRun?.clientId === client.id) {
-            intent = { label: lifecycleRun.action === "install" ? "安装中…" : "更新中…", disabled: true };
+          const ownRun = lifecycleRuns.get(client.id);
+          // 批量更新按行串行推进：正在跑的那行显「更新中…」，排队等着的行先禁点，
+          // 免得出两个任务同时更新同一行。
+          if (ownRun) {
+            intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true };
           } else {
             const act = installationAction(installation);
-            if (act) intent = { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleRun) };
+            if (act) intent = { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
           }
           if (intent) {
             const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
@@ -2401,9 +2424,14 @@ async function api(method, path, body) {
       environmentGen++; updateGen++; lifecycleGen++;
       environmentTask = null; updateTask = null;
       // 更新任务交给服务端跑完：离开即放弃轮询与本地标记，结果由下次进页的重新检测呈现
-      if (lifecyclePoll !== null) { cancelSchedule(lifecyclePoll); lifecyclePoll = null; }
-      lifecycleRun = null;
+      for (const run of lifecycleRuns.values()) {
+        if (run.poll !== null) { cancelSchedule(run.poll); run.poll = null; }
+      }
+      lifecycleRuns.clear();
       lifecycleBatch = null;
+      // 先作废排队中的确认（它们还没上屏），再关掉屏上那个——否则关掉时会顺手把
+      // 队列里的下一个弹出来，落在一个已经离开的页面上。
+      drainLifecycleModalQueue(false);
       closeLifecycleModal(false);
       busy("aboutEnvironmentRefresh", false, "重新检测", "检测中…");
       busy("aboutCheckUpdates", false, "检查更新", "检查中…");
