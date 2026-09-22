@@ -21,9 +21,6 @@
     ttft: [],
     tps: [],
     cache: [],
-    dsh_ttft: [],
-    dsh_tps: [],
-    dsh_cache: [],
     qoder_ttft: [],
     qoder_tps: [],
     qoder_cache: [],
@@ -219,7 +216,6 @@ async function api(method, path, body) {
   // 端点级四宫格折线：prefix → [容器 id, historyBuffers 键]，旧机制四栏共用。
   const ENDPOINT_SPARK_KEYS = {
     zc: [["zcSparkTtft", "ttft"], ["zcSparkTps", "tps"], ["zcSparkCache", "cache"]],
-    dsh: [["dshSparkTtft", "dsh_ttft"], ["dshSparkTps", "dsh_tps"], ["dshSparkCache", "dsh_cache"]],
     qoder: [["qoderSparkTtft", "qoder_ttft"], ["qoderSparkTps", "qoder_tps"], ["qoderSparkCache", "qoder_cache"]],
   };
 
@@ -517,7 +513,7 @@ async function api(method, path, body) {
     return typeof ls === "number" && (Date.now() - ls) > INSTANCE_STALE_MS;
   }
 
-  // 静态卡（zc/dsh/qoder）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
+  // 静态卡（zc/qoder）端点级陈旧判定：读全局汇总行 lastSeen，口径同实例行。
   function isEndpointStale(agent, isGenerating) {
     if (isGenerating) return false;
     const s0 = agent.sessions && agent.sessions[0];
@@ -617,15 +613,15 @@ async function api(method, path, body) {
     setPill("BriefDuration", true, `工作 ${durationText}`);
   }
 
-  // 端点详情折叠（zcode/dsh/qoder）：运行中默认收起——
+  // 端点详情折叠（zcode/qoder）：运行中默认收起——
   // 详细遥测四宫格换成与多实例端点实例行同构的简要信息栏（含 tokens 行/请求数徽标），
   // 「全局汇总」行改仅展开态显示（与多实例栏 detail-open-only 同范式：收起态 tokens/请求数
   // 已由简要栏承载，双行并存属重复展示）；
   // 展开后换回四宫格。展开态记 localStorage（与 route-fold 同交互语义），刷新不回落；
   // 渲染只拨 *MetricsBlock.hidden，不碰 grid/brief.hidden，故折叠态跨 15s 轮询自然保持；
   // 未运行时折叠钮由 card-collapsed CSS 隐藏。
-  // pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
-  ["zc", "dsh", "qoder"].forEach((prefix) => {
+  // dsh/pi/kimi/opencode/codex 已从此旧机制摘除，改走下方 data-prefix 事件委托。
+  ["zc", "qoder"].forEach((prefix) => {
     const grid = $(prefix + "TelemetryGrid");
     const brief = $(prefix + "DetailBrief");
     const foldBtn = $(prefix + "DetailFoldBtn");
@@ -637,18 +633,12 @@ async function api(method, path, body) {
       grid.hidden = !open;
       brief.hidden = open;
       if (aggWrap) aggWrap.hidden = !open;
-      // 本栏若挂了实例行（DSH），四宫格随折叠态一起收放——与 data-prefix 栏的
-      // applyDetailFold 同语义。渲染侧每轮按 isDetailOpen 重画，但数据未变时
-      // renderIfChanged 不会重跑，点击瞬间得自己拨一次 hidden。
-      const card = grid.closest(".panel-card");
-      if (card) card.querySelectorAll(".instance-telemetry-grid").forEach((el) => { el.hidden = !open; });
       foldBtn.setAttribute("aria-expanded", open ? "true" : "false");
       foldBtn.textContent = open ? "收起 ▴" : "展开 ▾";
       // 展开瞬间补绘：折叠期间端点级 buffer 照常累积但不绘制（见 redrawEndpointSparklines），
       // 这里用已攒数据立刻上屏，不等下一轮 1s 轮询。
       if (open) {
         redrawEndpointSparklines(prefix);
-        redrawInstanceSparklines(prefix);
       }
     };
     let open = false; // 默认收起
@@ -968,7 +958,7 @@ async function api(method, path, body) {
   }
 
   // 展开瞬间补绘：按当前 DOM 行序把已攒 buffer 画回本栏实例折线（不串其他栏），
-  // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/dsh/qoder）
+  // 供 applyDetailFold（data-prefix 栏）与旧 id 接线栏的 setFold（zcode/qoder）
   // 展开时调用——否则折叠期间攒的数据要等下一轮 1s 轮询才上屏。
   // 行→实例配对与 renderInstanceRows 同构（.instance-telemetry-grid[data-instance-id]），
   // ttft 取 buffer 暂存的权威历史、cache 锁 0-100 量程，与渲染时口径一致。
@@ -1475,63 +1465,23 @@ async function api(method, path, body) {
       stateBadge.className = isGenerating ? "badge badge-ok" : "badge badge-neutral";
       stateBadge.textContent = isGenerating ? "生成中" : "待命";
 
+      const m = d.metrics || {};
+      const sess = (d.sessions && d.sessions[0]) || {};
+      const tokens = m.tokens || sess.tokens || {};
+
       // 实例行：一行 = 一个 DSH 进程（一个 web 进程一行、每个 TUI 终端一行），
       // 行上的面徽标取后端从该进程命令行读出的 profile 名。
-      // 不传 aggregateFallback——端点级汇总由本卡的「实时遥测」简要栏与展开态
-      // 「全局汇总」行承担（这张卡今天的形状），实例化只多出行、不拆聚合行。
+      // 不传 aggregateFallback：running 必有引擎占位行，零实例只在 stopped
+      // 时整块 metricsBlock 隐藏。端点遥测由实例行与展开态「全局汇总」行
+      // 承担——DSH 卡与其余多实例卡同构（端点四宫格/简要栏已摘除）。
       const instances = Array.isArray(d.instances) ? d.instances : [];
       const instancesWrap = $("dshInstancesWrapper");
       setInstanceCount("dsh", instances.length);
       if (instancesWrap) instancesWrap.hidden = instances.length === 0;
       renderInstanceRows({ prefix: "dsh", listEl: $("dshInstancesList"), instances, showSurface: true });
       renderDshSurfaceSummary(d.surfaces);
-
-      const m = d.metrics || {};
-      const sess = (d.sessions && d.sessions[0]) || {};
-      // 陈旧端点：速率类置 —、压暗、折线停绘，简要栏换相对时间胶囊；工时等累计量不动。
-      const stale = isEndpointStale(d, isGenerating);
-      endpointStaleFlags.dsh = stale;
-      dimEndpointRateCards("dsh", stale);
-      const ttft = m.lastTtftMs || d.lastTtftMs;
-      if (!stale && typeof ttft === "number" && ttft > 0) {
-        $("dshTtftVal").textContent = (ttft / 1000).toFixed(2);
-        $("dshTtftUnit").textContent = "s";
-        const color = m.ttftColor || "green";
-        $("dshTtftLamp").className = "lamp lamp-" + color;
-      } else {
-        $("dshTtftVal").textContent = "-";
-        $("dshTtftLamp").className = "lamp lamp-gray";
-      }
-
-      const tps = m.tps !== undefined ? m.tps : d.tps;
-      $("dshTpsVal").textContent = (!stale && typeof tps === "number" && tps > 0) ? tps.toFixed(1) : "-";
-
-      const hit = m.cacheHitRate !== undefined ? m.cacheHitRate : d.cacheHitRate;
-      $("dshCacheVal").textContent = (!stale && typeof hit === "number") ? hit.toFixed(1) : "-";
-
-      const dur = m.activeDurationMs || d.activeDurationMs;
-      $("dshDurationVal").textContent = formatDurationSeconds(dur);
-
-      const tokens = m.tokens || sess.tokens || {};
-      updateDetailBrief("dsh", {
-        isGenerating,
-        ttft: (typeof ttft === "number" && ttft > 0) ? ttft : null,
-        ttftColor: m.ttftColor || "green",
-        tps: (typeof tps === "number" && tps > 0) ? tps : null,
-        hit: (typeof hit === "number") ? hit : null,
-        durationText: formatDurationSeconds(dur),
-        staleText: stale ? formatRelativeAge(sess.lastSeen) : null,
-        requests: m.totalRequests || d.totalRequests || 0,
-        tokensText: `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`,
-      });
-
-      if (!stale) {
-        pushMetricPoint("dsh_ttft", typeof ttft === "number" ? ttft / 1000 : null, m.sparkHistory?.ttft);
-        pushMetricPoint("dsh_tps", tps, m.sparkHistory?.tps);
-        pushMetricPoint("dsh_cache", hit, m.sparkHistory?.cache);
-
-        redrawEndpointSparklines("dsh");
-      }
+      applyDetailFold("dsh");
+      gateAggregateRow("dsh", $("dshSessionRow"), instances.length);
 
       $("dshSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
       $("dshSessionReqs").textContent = `${m.totalRequests || d.totalRequests || 0} 次请求`;

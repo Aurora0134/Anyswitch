@@ -645,7 +645,7 @@ if (window.panelStartupController) panelStartupPlay();
                 <div class="agent-actions">
                   <div id="dshModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <span class="badge badge-neutral" id="dshStateBadge">未运行</span>
-                  <button type="button" class="agent-detail-fold" id="dshDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
+                  <button type="button" class="agent-detail-fold" data-prefix="dsh" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
               </div>
 
@@ -663,80 +663,8 @@ if (window.panelStartupController) panelStartupPlay();
                 <div class="session-table-wrapper instances-table-wrapper" id="dshInstancesWrapper" hidden>
                   <div id="dshInstancesList"></div>
                 </div>
-                <div class="session-table-wrapper agent-detail-brief" id="dshDetailBrief">
-                  <div class="session-row">
-                    <div class="session-main">
-                      <div class="session-name-line">
-                        <span>实时遥测</span>
-                        <span class="badge badge-neutral" id="dshBriefState">待命</span>
-                        <span class="badge badge-neutral" id="dshBriefReqs">0 请求</span>
-                      </div>
-                      <div class="session-tokens-line" id="dshBriefTokens">Prompt: 0 · Completion: 0 · Cached: 0</div>
-                    </div>
-                    <div class="session-tags-line">
-                      <span class="tag-bubble tag-stale" id="dshBriefStale" hidden></span>
-                      <span class="tag-bubble" id="dshBriefTps" hidden></span>
-                      <span class="tag-bubble" id="dshBriefTtft" hidden></span>
-                      <span class="tag-bubble" id="dshBriefCache" hidden></span>
-                      <span class="tag-bubble" id="dshBriefDuration" hidden></span>
-                    </div>
-                  </div>
-                </div>
-                <div class="telemetry-grid" id="dshTelemetryGrid">
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">首字响应时间</span>
-                      <div class="telemetry-sparkline" id="dshSparkTtft"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <i class="lamp lamp-gray" id="dshTtftLamp"></i>
-                        <span id="dshTtftVal">-</span>
-                        <span class="telemetry-unit" id="dshTtftUnit">s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">生成速度</span>
-                      <div class="telemetry-sparkline" id="dshSparkTps"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="dshTpsVal">-</span>
-                        <span class="telemetry-unit" id="dshTpsUnit">tok/s</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">缓存命中率</span>
-                      <div class="telemetry-sparkline" id="dshSparkCache"></div>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="dshCacheVal">-</span>
-                        <span class="telemetry-unit" id="dshCacheUnit">%</span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div class="telemetry-card">
-                    <div class="telemetry-header">
-                      <span class="telemetry-label">已工作时间</span>
-                    </div>
-                    <div class="telemetry-content">
-                      <div class="telemetry-num">
-                        <span id="dshDurationVal">0秒</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
                 <div class="session-table-wrapper">
-                  <div class="session-row" id="dshSessionRow">
+                  <div class="session-row detail-open-only" id="dshSessionRow">
                     <div class="session-main">
                       <div class="session-name-line">
                         <span>全局汇总</span>
