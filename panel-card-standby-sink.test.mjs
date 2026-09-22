@@ -53,13 +53,17 @@ function buildSandbox(block) {
   const doc = {
     querySelector: (sel) =>
       sel === ".agent-cards-container" ? container : null,
+    // 真重排那一刻要摘掉首帧卡序属性、并把它写进存档（交棒语义见
+    // panel-card-order-prepaint 那组用例）——这里的桩只需承接调用，不记内容。
+    documentElement: { removeAttribute: () => {} },
   };
   let nowMs = 1_000_000;
   const fakeDate = { now: () => nowMs };
+  const fakeStorage = { setItem: () => {} };
   const sandbox = new Function(
-    "document", "Date",
+    "document", "localStorage", "Date",
     `${block}\nreturn { reorderAgentCards, cardActivityAnchor };`,
-  )(doc, fakeDate);
+  )(doc, fakeStorage, fakeDate);
   return {
     ...sandbox,
     advance: (ms) => { nowMs += ms; },
