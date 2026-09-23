@@ -9,6 +9,8 @@ import {
   createSessionReporter,
   buildDshConsoleQuery,
   dshProfileNameFrom,
+  kimiSurfaceLabel,
+  summarizeKimiSurfaces,
   parseDshConsoleQueryOutput,
   findDescendantClientPid,
   getTtftColor,
@@ -3956,6 +3958,172 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(verdicts.get(27156), 0);
     assert.equal(parseDshConsoleQueryOutput("Node,CommandLine\r\n").size, 0);
     assert.equal(parseDshConsoleQueryOutput(null).size, 0);
+  });
+});
+
+describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
+  // 行形态与真机一致：WMIC 形状 <Node>,<CommandLine>,<Name>,<ProcessId>。
+  const KIMI_PKG = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@moonshot-ai\\kimi-code";
+  const DESKTOP_IMG = "C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi Code\\Kimi Code.exe";
+  const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
+  const kimiRow = (pid) => nodeRow(pid, `"${KIMI_PKG}\\dist\\main.mjs"`);
+  const desktopRow = (pid, args = "") => `LAPTOP,"${DESKTOP_IMG}" ${args},kimi code.exe,${pid}`;
+  const wmic = (...rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const tasklistCsv = (...quotedRows) => `${quotedRows.join("\r\n")}\r\n`;
+  const surfacesOf = (agent) => Object.fromEntries(agent.surfaces.map((s) => [s.label, s.count]));
+  const rowsOf = (agent) => agent.instances.map((i) => [i.id, i.surface ?? null]);
+  const registry = (entries) => async () => new Map(entries);
+  const kimi = (status) => status.find((a) => a.id === "kimi");
+
+  it("counts one desktop app as one Kimi process, labelled Desktop, and ignores its Electron children", async () => {
+    // 桌面端是原生 Electron 包：命令行里没有 `kimi-code` 安装路径，今天那套
+    // node 路径谓词一条都不命中（计划 §3：进程面全盲）。主进程自己就是会话
+    // 属主（kimi 核心内嵌其中、relay 连接挂在它身上），所以它计数并贴桌面面；
+    // --type= 的辅助子进程与 qoder / ChatGPT.exe 同口径只进家族集。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        desktopRow(6001),
+        desktopRow(6002, "--type=crashpad-handler"),
+        desktopRow(6003, "--type=gpu-process"),
+        desktopRow(6004, '--type=renderer --user-data-dir="C:\\Users\\tester\\AppData\\Roaming\\kimi-code-app"'),
+      )),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.status, "running", "只开桌面端就要点亮卡片");
+    assert.equal(card.processCount, 1, "辅助子进程不计数");
+    assert.deepEqual(surfacesOf(card), { Desktop: 1 });
+    assert.deepEqual(rowsOf(card), [["kimi-6001", "Desktop"]], "只有主进程出行");
+  });
+
+  it("accepts a plain-tasklist desktop row by image name (no command line on that probe)", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, tasklistCsv(
+        '"Kimi Code.exe","6301","Console","1","280,000 K"',
+      )),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1);
+    assert.deepEqual(surfacesOf(card), { Desktop: 1 });
+  });
+
+  it("asks the resident probe for the desktop image by name", async () => {
+    // 行的第一道门是探针的 WHERE 名单：查询里没有 `Kimi Code.exe`，后面所有
+    // 谓词都拿不到这一行。这条把查询文本本身钉住，防止改名/漏加只表现为"桌面端不见了"。
+    const seen = [];
+    const spawnFn = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      stdout.setEncoding = () => {};
+      const stderr = new EventEmitter();
+      stderr.resume = () => {};
+      child.stdin = {
+        write: (text) => {
+          seen.push(text);
+          const marker = (text.match(/Write-Output '([^']+)'/) ?? [])[1] ?? "";
+          stdout.emit("data", `__unused__${marker}\r\n`);
+        },
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.kill = () => child.emit("exit", 0);
+      child.unref = () => {};
+      return child;
+    };
+    const collector = testCollector({ nowFn: () => 3000, spawnFn, execFn: (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n"), kimiRegistryLookup: registry([]) });
+    await collector.getAgentsStatus();
+    assert.ok(seen.length > 0, "探针被问过");
+    assert.ok(seen[0].includes("name='Kimi Code.exe'"), `常驻查询要含桌面端镜像名，实际：${seen[0].slice(0, 160)}`);
+  });
+
+  it("promotes the terminal row that owns a server registration to Web and leaves the desktop row alone", async () => {
+    // `kimi web` 与终端客户端在命令行上无法分辨（同一个 dist/main.mjs），区别
+    // 只在谁起了 server：起了 server 的会在 ~/.kimi-code/server/instances/ 留下
+    // 以自己 pid 署名的一条登记。注册表只提级终端那一档，桌面端由镜像名定性。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        kimiRow(6101),
+        kimiRow(6102),
+        desktopRow(6103),
+      )),
+      kimiRegistryLookup: registry([[6102, { pid: 6102, port: 7457, heartbeatAt: 2900, hostVersion: "2.0.1" }]]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 3);
+    assert.deepEqual(surfacesOf(card), { Desktop: 1, TUI: 1, Web: 1 }, "副行加总 = 进程数");
+    assert.deepEqual(rowsOf(card).sort(), [["kimi-6101", "TUI"], ["kimi-6102", "Web"], ["kimi-6103", "Desktop"]]);
+  });
+
+  it("never lets the registration table move a desktop row off its face", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(desktopRow(6201), kimiRow(6202))),
+      kimiRegistryLookup: registry([[6201, { pid: 6201, port: 7457, heartbeatAt: 2900, hostVersion: "2.0.1" }]]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(surfacesOf(card), { Desktop: 1, TUI: 1 }, "桌面端不被注册表改写");
+  });
+
+  it("ignores registrations for pids the scan does not list, and degrades when the table is unreadable", async () => {
+    // 注册表只分面、不判活：一条残档（进程早没了、pid 被复用）既不能撑出一行，
+    // 也不能把卡片点亮；整轮读不出就退回"所有 kimi 进程都算终端面"。
+    const rowsOnly = {
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(kimiRow(6301))),
+    };
+    const stale = kimi(await testCollector({
+      ...rowsOnly,
+      kimiRegistryLookup: registry([[9999, { pid: 9999, port: 7457, heartbeatAt: 2900, hostVersion: "2.0.1" }]]),
+    }).getAgentsStatus());
+    assert.deepEqual(surfacesOf(stale), { TUI: 1 });
+    assert.deepEqual(rowsOf(stale), [["kimi-6301", "TUI"]]);
+
+    const broken = kimi(await testCollector({
+      ...rowsOnly,
+      kimiRegistryLookup: async () => { throw new Error("EACCES"); },
+    }).getAgentsStatus());
+    assert.deepEqual(surfacesOf(broken), { TUI: 1 }, "读不出注册表不影响计数与卡片");
+    assert.equal(broken.processCount, 1);
+  });
+
+  it("leaves an unresolvable instance id unbadged instead of guessing a face", async () => {
+    // 启动器注入的 <cwd>-<launcher pid> 在扫描缓存没赶上时折不进规范形，
+    // 落成自定义 id 行：行要有（请求真实发生），但面未知时不贴徽标。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(kimiRow(6401))),
+      kimiRegistryLookup: registry([]),
+    });
+    collector.startRequest({ agentId: "kimi", instanceId: "proj-999999", model: "m", providerId: "p" });
+    const card = kimi(await collector.getAgentsStatus());
+    const foreign = card.instances.find((i) => i.id === "proj-999999");
+    assert.ok(foreign, "未折叠的实例行照常出");
+    assert.equal(foreign.surface, undefined, "非 pid 形行不贴面徽标");
+    assert.deepEqual(surfacesOf(card), { TUI: 1 }, "副行只按扫描到的进程算");
+  });
+
+  it("summarizeKimiSurfaces labels only the closed face set and stays empty without an engine set", () => {
+    assert.deepEqual(summarizeKimiSurfaces(undefined), []);
+    assert.deepEqual(summarizeKimiSurfaces({}), []);
+    assert.deepEqual(summarizeKimiSurfaces({ kimiEnginePids: new Set([1]) }), [
+      { surface: null, label: "未知", count: 1 },
+    ]);
+    assert.deepEqual(summarizeKimiSurfaces({
+      kimiEnginePids: new Set([1, 2, 3, 4]),
+      kimiSurfaceByPid: new Map([[1, "desktop"], [2, "web"], [3, "tui"], [4, "bogus"]]),
+    }), [
+      { surface: "bogus", label: "未知", count: 1 },
+      { surface: "desktop", label: "Desktop", count: 1 },
+      { surface: "tui", label: "TUI", count: 1 },
+      { surface: "web", label: "Web", count: 1 },
+    ]);
+    assert.equal(kimiSurfaceLabel("desktop"), "Desktop");
+    assert.equal(kimiSurfaceLabel(undefined), "未知");
+    assert.equal(kimiSurfaceLabel("Kimi Code"), "未知", "产品名不当界面名用");
   });
 });
 
