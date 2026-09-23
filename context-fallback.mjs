@@ -10,7 +10,9 @@
 // It is a *tier map*, not a static model knowledge base. Rules must describe
 // slow-moving per-family tiers, never per-model rows: upstreams iterate faster
 // than any curated list, and L1 discovery is the primary source of truth. When
-// in doubt, leave a rule out — the unmatched default applies.
+// in doubt, leave a rule out — the unmatched default applies. Version-scoped
+// rows are still allowed when vendor documentation pins one sub-family off the
+// generic tier; each such rule below cites its basis.
 //
 // The unmatched default is 1M, deliberately not 999M: large enough that long
 // sessions stop tripping the IDE's context-compression boundary on models that
@@ -33,8 +35,9 @@
 //   - kimi-k3 is exactly 1048576 per Moonshot's own Codex config; kimi-k2
 //     (2.6 / 2.7-code) is 262144 and would otherwise sit at the 1M default
 //   - grok-4.5/4.6/4.7 are 500000 per xAI's model table, not the 1M default
-//   - sensenova-6.7/6.8 flash-lite are 262144 per the same-family channel
-//     whose upstream actually reports context_length
+//   - sensenova-6.7/6.8 flash variants (flash / flash-lite) are 262144 per the
+//     same-family channel whose upstream actually reports context_length; the
+//     keyword stops at "-flash" so the non-flash base models stay unmatched
 export const CONTEXT_TIER_RULES = [
   { keyword: "gpt-6", contextWindow: 1_050_000 },
   { keyword: "gpt-5", contextWindow: 1_050_000 },
@@ -52,16 +55,24 @@ export const CONTEXT_TIER_RULES = [
   { keyword: "grok-4.5", contextWindow: 500_000 },
   { keyword: "grok-4.6", contextWindow: 500_000 },
   { keyword: "grok-4.7", contextWindow: 500_000 },
-  { keyword: "sensenova-6.7", contextWindow: 262_144 },
-  { keyword: "sensenova-6.8", contextWindow: 262_144 },
+  { keyword: "sensenova-6.7-flash", contextWindow: 262_144 },
+  { keyword: "sensenova-6.8-flash", contextWindow: 262_144 },
 ];
 
 export const UNMATCHED_CONTEXT_FALLBACK = 1_000_000;
 
 // One channel (SAIL-kimi) lists the model under the bare alias "k3" instead of
-// the vendor id; normalize it so the k3 tier rule catches both spellings.
+// the vendor id; normalize it so the k3 tier rule catches both spellings. The
+// decorated spellings seen in the store get the same peel effort-catalog uses:
+// leading [Channel] brackets in a loop, then a "vendor/model" namespace keeps
+// its last segment — so "[SAIL]k3" and "sail/k3" normalize too. Only the
+// peeled spelling is alias-checked; non-alias ids keep their original form for
+// the substring keyword match.
 function normalizeContextModelId(id) {
-  return id === "k3" ? "kimi-k3" : id;
+  let bare = id;
+  while (/^\[[^\]]*\]/.test(bare)) bare = bare.replace(/^\[[^\]]*\]/, "").trim();
+  while (bare.includes("/")) bare = bare.slice(bare.indexOf("/") + 1);
+  return bare === "k3" ? "kimi-k3" : id;
 }
 
 // Fallback context window for a model the store has no real contextWindow for.

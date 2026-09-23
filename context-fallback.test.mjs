@@ -75,6 +75,10 @@ describe("fallbackContextWindow", () => {
     assert.equal(fallbackContextWindow("Kimi-K3"), 1_048_576);
     assert.equal(fallbackContextWindow("[Cloud]Kimi-K3"), 1_048_576);
     assert.equal(fallbackContextWindow("k3"), 1_048_576);
+    assert.equal(fallbackContextWindow("[SAIL]k3"), 1_048_576);
+    assert.equal(fallbackContextWindow("[Cloud][SAIL]K3"), 1_048_576);
+    assert.equal(fallbackContextWindow("sail/k3"), 1_048_576);
+    assert.equal(fallbackContextWindow("vendor/path/k3"), 1_048_576);
     assert.equal(fallbackContextWindow("kimi-k2.6"), 262_144);
     assert.equal(fallbackContextWindow("Kimi-K2.6-free"), 262_144);
     assert.equal(fallbackContextWindow("[Cloud]Kimi-K2.7-Code"), 262_144);
@@ -87,9 +91,18 @@ describe("fallbackContextWindow", () => {
     assert.equal(fallbackContextWindow("grok-4.7"), 500_000);
   });
 
-  it("maps SenseNova 6.7/6.8 flash-lite to the 256K tier", () => {
+  it("maps SenseNova 6.7/6.8 flash variants to the 256K tier", () => {
     assert.equal(fallbackContextWindow("sensenova-6.7-flash-lite"), 262_144);
     assert.equal(fallbackContextWindow("sensenova-6.8-flash-lite"), 262_144);
+    assert.equal(fallbackContextWindow("SenseNova-6.8-Flash"), 262_144);
+  });
+
+  it("keeps non-flash SenseNova base models on the unmatched default", () => {
+    // The 256K tier is documented for the flash variants only; the bare
+    // 6.7/6.8 ids must not be squeezed down to it.
+    assert.equal(fallbackContextWindow("sensenova-6.7"), UNMATCHED_CONTEXT_FALLBACK);
+    assert.equal(fallbackContextWindow("sensenova-6.8"), UNMATCHED_CONTEXT_FALLBACK);
+    assert.equal(fallbackContextWindow("sensenova-6.8-pro"), UNMATCHED_CONTEXT_FALLBACK);
   });
 
   it("falls back to 1M for unmatched model families", () => {
