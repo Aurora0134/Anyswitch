@@ -331,7 +331,9 @@ describe("kimi thinking effort levels", () => {
 
   it("writes no effort keys when the effort option is absent", () => {
     const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok");
-    assert.equal(tableOf(text, "_poke-api/kimi-k3").includes("support_efforts"), false);
+    const table = tableOf(text, "_poke-api/kimi-k3");
+    assert.equal(table.includes("support_efforts"), false);
+    assert.equal(table.includes("capabilities"), false, "没有档位可声明时也不要去声明能力");
   });
 
   it("declares the picker list and the level a session defaults to", () => {
@@ -342,11 +344,26 @@ describe("kimi thinking effort levels", () => {
     assert.match(table, /default_effort = "high"/);
   });
 
+  it("declares the thinking capability, which is the only thing the desktop and web model catalogs read", () => {
+    // 桌面端/网页端判「支持思考强度」只看 capabilities 里有没有 thinking：
+    // reasoning 不是它们那张模型表的键，而自动补 thinking 只对 anthropic 协议发生，
+    // 我们的渠道是 type = "openai"。少这一行，同一份配置在终端能选档、在桌面端
+    // 写着「不支持思考强度」（2026-09-23 实测症状）。
+    const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
+    assert.match(tableOf(text, "_poke-api/kimi-k3"), /capabilities = \["thinking"\]/);
+    assert.equal(
+      /always_thinking/.test(text),
+      false,
+      "always_thinking 会把「关掉思考」这个选项吃掉，任何时候都不许写",
+    );
+  });
+
   it("stays quiet for a non-text model", () => {
     const { text } = buildKimiManagedToml({ "poke-api": PROVIDER }, 47821, "tok", { catalog });
     const table = tableOf(text, "_poke-api/agnes-image-2.0-flash");
     assert.ok(table.includes("max_context_size"), "the model itself is still declared");
     assert.equal(table.includes("support_efforts"), false);
+    assert.equal(table.includes("capabilities"), false);
   });
 });
 
