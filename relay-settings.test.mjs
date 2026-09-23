@@ -13,6 +13,7 @@ import {
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
+import { parseClaudeTierMappings } from "./claude-tier-mapping.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("relay-settings", () => {
@@ -340,6 +341,63 @@ describe("legacy keepAlive keys", () => {
       const onDisk = JSON.parse(readFileSync(path, "utf8"));
       assert.equal("disabledEndpoints" in onDisk.keepAlive, false);
       assert.deepEqual(onDisk.keepAlive.endpoints, { claude: { enabled: false } }, "live keys survive the scrub");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("claudeTierMappings", () => {
+  it("normalises to configured tiers only", () => {
+    assert.deepEqual(
+      parseClaudeTierMappings({ sonnet: "anthropic/a/m", opus: "", gpt: "x", haiku: 7 }),
+      { sonnet: "anthropic/a/m" },
+    );
+    for (const unusable of [undefined, null, "sonnet", 3, []]) {
+      assert.deepEqual(parseClaudeTierMappings(unusable), {});
+    }
+  });
+
+  it("merges per tier, because the panel saves one row at a time", () => {
+    const tmp = mkTestDir("anyswitch-tier-mapping-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ followAgent: true }));
+
+      saveSettings(path, { claudeTierMappings: { sonnet: "anthropic/a/kimi-k3" } }, {});
+      const afterSecond = saveSettings(path, { claudeTierMappings: { haiku: "anthropic/b/flash" } }, {});
+      assert.deepEqual(afterSecond.claudeTierMappings, {
+        sonnet: "anthropic/a/kimi-k3",
+        haiku: "anthropic/b/flash",
+      });
+      assert.equal(afterSecond.settings.followAgent, true, "neighbouring settings ride through");
+
+      // Clearing one row leaves the other standing.
+      const cleared = saveSettings(path, { claudeTierMappings: { sonnet: "  " } }, {});
+      assert.deepEqual(cleared.claudeTierMappings, { haiku: "anthropic/b/flash" });
+
+      // Last row cleared → the key is gone, so an unset section and an emptied
+      // one are the same bytes on disk.
+      const emptied = saveSettings(path, { claudeTierMappings: { haiku: "" } }, {});
+      assert.deepEqual(emptied.claudeTierMappings, {});
+      assert.equal("claudeTierMappings" in JSON.parse(readFileSync(path, "utf8")), false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("drops tiers the map does not know, so a stale row cannot match anything", () => {
+    const tmp = mkTestDir("anyswitch-tier-legacy-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ claudeTierMappings: { subagent: "anthropic/a/m", opus: "anthropic/b/m" } }));
+      // The read path normalises the stale row away before the relay can see it…
+      assert.deepEqual(loadSettings(path, {}).claudeTierMappings, { opus: "anthropic/b/m" });
+      // …and any save scrubs it from disk rather than carrying it forward, while
+      // the tiers that ARE known keep their values.
+      const saved = saveSettings(path, { claudeTierMappings: { sonnet: "anthropic/c/m" } }, {});
+      assert.deepEqual(saved.claudeTierMappings, { sonnet: "anthropic/c/m", opus: "anthropic/b/m" });
+      assert.equal("subagent" in JSON.parse(readFileSync(path, "utf8")).claudeTierMappings, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
