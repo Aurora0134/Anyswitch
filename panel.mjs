@@ -26,7 +26,8 @@ import { loadSettings, saveSettings, defaultSettingsPath } from "./relay-setting
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
-import { createSkillsService } from "./agent-skills.mjs";
+import { createSkillsService, pickFile, pickFolder } from "./agent-skills.mjs";
+import { createDataBundleService } from "./data-bundle.mjs";
 import { createPromptsService } from "./agent-prompts.mjs";
 import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
@@ -437,6 +438,11 @@ export function createPanelRouter({
   // unit-testable without real home directories, junctions, or PowerShell.
   // `null` lazily builds the real service on first skills request.
   skillsService = null,
+  // 数据搬迁包服务（data-bundle.mjs）。可注入以便单测；`null` 时首次请求
+  // 按当前 base 惰性建真服务。两个原生选择框同样可注入，单测不起对话框进程。
+  dataBundleService = null,
+  pickFolderFn = pickFolder,
+  pickFileFn = pickFile,
   // Prompts tab facade (createPromptsPanelService). Injectable for tests;
   // `null` lazily builds the real facade on the first prompts request.
   promptsService = null,
@@ -489,6 +495,75 @@ export function createPanelRouter({
     } catch {
       return null;
     }
+  }
+
+  // 导入是整份覆盖 settings.json，走不到设置路由那条副作用链上，而
+  // followAgent 恰好是唯一带持久副作用的开关：值与登录计划、自愈进程脱节时，
+  // 「包里关、本机开」会留下一个界面写着关、登录照旧自启、每 3 秒把 relay 拉
+  // 回来的常驻进程，没有任何路径会自愈它。导入落定后按刚写进盘的值把两者对齐
+  // 回来，顺序沿用设置路由：计划先、进程后。计划写失败就停在这里只出警告——
+  // 数据已经换过位置了，回滚比短暂不一致更糟。
+  async function reconcileFollowAgentAfterImport(desired) {
+    // warnings 是写给日志的；reasons 只放裸原因，界面上的成句文案归前端
+    // （panel.js）——服务层不参与用户可见措辞，否则一处话两个地方说。
+    const outcome = { desired, task: "unchanged", process: "unchanged", warnings: [], reasons: {} };
+    let touched = false;
+
+    let registered = false;
+    try {
+      registered = await isWatchdogAutostartEnabledFn();
+    } catch (err) {
+      outcome.task = "unknown";
+      outcome.reasons.task = err.message;
+      outcome.warnings.push(`登录计划状态读不出来：${err.message}`);
+      return outcome;
+    }
+    if (registered !== desired) {
+      const reg = desired ? await enableWatchdogAutostartFn() : await disableWatchdogAutostartFn();
+      if (!reg?.ok) {
+        outcome.task = "failed";
+        outcome.reasons.task = reg?.error ?? "写入失败";
+        outcome.warnings.push(`登录计划未同步（${outcome.reasons.task}），设置与下次登录后的实际行为暂不一致`);
+        return outcome;
+      }
+      outcome.task = desired ? "registered" : "unregistered";
+      touched = true;
+    }
+
+    let alive = false;
+    try {
+      alive = await probeWatchdogFn();
+    } catch (err) {
+      outcome.process = "unknown";
+      outcome.reasons.process = err.message;
+      outcome.warnings.push(`自愈进程状态读不出来：${err.message}`);
+      if (touched) watchdogSnapshot.invalidate();
+      return outcome;
+    }
+    if (alive !== desired) {
+      // spawnWatchdog / stopWatchdog 都不抛错：等不到就返回 ok:false（stop 还带
+      // reason）。只 catch 异常会把「没做成」报成「已对齐」。
+      try {
+        const moved = desired ? await spawnWatchdogFn() : await stopWatchdogFn();
+        if (moved?.ok === false) {
+          outcome.process = "failed";
+          outcome.reasons.process = moved.reason ?? "未达到预期状态";
+          outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${outcome.reasons.process}`);
+        } else {
+          outcome.process = desired ? "started" : "stopped";
+          touched = true;
+        }
+      } catch (err) {
+        outcome.process = "failed";
+        outcome.reasons.process = err.message;
+        outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${err.message}`);
+      }
+    }
+
+    // 计划或进程刚被改动：丢掉探测快照，下一次 GET /api/settings 重新探，
+    // 而不是把改动前的漂移读数继续端到界面上。
+    if (touched) watchdogSnapshot.invalidate();
+    return outcome;
   }
 
   // store.json mtime 微缓存。handleStatus 每秒只读 provider 计数，每请求
@@ -1925,6 +2000,64 @@ export function createPanelRouter({
       }
     }
 
+    // ── 数据搬迁（高级选项 tab 的导出 / 导入）──────────────────────────
+    // 导出与导入都只把「路径」过 API：文件本体由后端在磁盘上读写，所以包体积
+    // 与面板那条 1 MiB 请求体上限无关。导入分两步：preview 回摘要与一次性票据，
+    // apply 只认这张票据，路径不由界面传入。业务失败一律 200 + { ok:false, error }。
+    if (path.startsWith("/panel/api/data/")) {
+      if (!dataBundleService) dataBundleService = createDataBundleService({ base });
+      const svc = dataBundleService;
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} 不能为空`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+
+          if (path === "/panel/api/data/export-pick" || path === "/panel/api/data/import-pick") {
+            const exporting = path.endsWith("/export-pick");
+            const picked = exporting
+              ? await pickFolderFn({ base, title: "选择导出包的保存位置" })
+              : await pickFileFn({ base, title: "选择要导入的 anyswitch 导出包" });
+            if (picked.cancelled) return sendJson(res, 200, { ok: true, cancelled: true });
+            const result = exporting
+              ? await svc.exportBundle({ targetDir: picked.path })
+              : await svc.previewBundle(picked.path);
+            return sendJson(res, 200, { ok: result.ok !== false, pickedPath: picked.path, ...result });
+          }
+          if (path === "/panel/api/data/export") {
+            const result = await svc.exportBundle({ targetDir: requireString(body.targetDir, "targetDir") });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/data/import-preview") {
+            const result = await svc.previewBundle(requireString(body.zipPath, "zipPath"));
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/data/import-apply") {
+            const result = await svc.applyBundle({
+              token: requireString(body.token, "token"),
+              skillsRepoPath: typeof body.skillsRepoPath === "string" ? body.skillsRepoPath.trim() : undefined,
+            });
+            // 只有真的换掉了 settings.json 才有对齐的必要；包里没带设置文件时
+            // 盘上还是原来那份，计划与进程本来就和它对应，别去动。
+            if (result.ok !== false && result.applied?.settings === true) {
+              result.watchdog = await reconcileFollowAgentAfterImport(result.applied.followAgent === true);
+              for (const w of result.watchdog.warnings) logger?.warn?.(`导入后 followAgent 对齐：${w}`);
+            }
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
     sendJson(res, 404, { error: "not found" });
   }
 
@@ -1934,6 +2067,15 @@ export function createPanelRouter({
     // startup) so even the very first GET /api/settings is snapshot-served.
     prewarmWatchdogProbes() {
       watchdogSnapshot.prewarm();
+    },
+    // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
+    // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。
+    dropDataBundleTickets() {
+      try {
+        dataBundleService?.dropAllTickets?.();
+      } catch (err) {
+        logger?.warn?.(`导入暂存清理失败：${err.message}`);
+      }
     },
   };
 }

@@ -758,6 +758,27 @@
     transition: background 120ms var(--ease-out);
   }
   #settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }
+  /* 「高级选项」的数据迁移：卡头右侧放动作、卡体第一行状态第二行明细，与「关于」的本地
+     环境卡同一写法；状态色只改文字色、不加色块，取值抄 about-status 那一组。
+     display 必须显式挂 #settingsPanelAdvanced：本页各子面板的 display 与行样式全按 id 写，
+     少一格就没有 flex、没有卡间距，整块会贴成一坨。 */
+  #settingsPanelAdvanced { display: flex; flex-direction: column; gap: 20px; }
+  #settingsPanelAdvanced .card-body { display: flex; flex-direction: column; gap: 8px; }
+  #settingsPanelAdvanced .modal-item {
+    margin: 0 -10px; padding: 12px 10px;
+    transition: background 120ms var(--ease-out);
+  }
+  #settingsPanelAdvanced .modal-item:hover { background: var(--surface-hover); }
+  #settingsPanelAdvanced .card-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .data-bundle-status { font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
+  .data-bundle-status[data-tone="busy"] { color: var(--accent); }
+  .data-bundle-status[data-tone="ok"] { color: var(--ok); }
+  .data-bundle-status[data-tone="warn"] { color: var(--warn); }
+  .data-bundle-status[data-tone="danger"] { color: var(--danger); }
+  .data-bundle-meta { font-size: 11px; line-height: 1.6; color: var(--text-3); overflow-wrap: anywhere; }
+  .data-bundle-meta:empty { display: none; }
+  .data-bundle-note { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
+  .data-bundle-note[data-tone="warn"] { color: var(--warn); }
   #settingsPanelAbout { display: flex; flex-direction: column; gap: 20px; }
   .about-card-head { flex-wrap: wrap; gap: 12px; }
   .about-app-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -3467,7 +3488,7 @@
      看板再切到目标屏。switchView 做完 hidden 赋值即摘掉这两个属性，运行时显隐仍由
      hidden 单一承担，两套不会同框。
      显示侧取值 = 各容器自己的 display，一处都不能凭印象：.stats-view /
-     .sessions-view / #settingsPanel{General,Route,About} / .site-head .head-inner
+     .sessions-view / #settingsPanel{General,Advanced,Route,About} / .site-head .head-inner
      是 flex，其余在册容器（.telemetry-view / .settings-view / .skills-view 含
      store·presets / #settingsPanelTheme）无作者 display 规则即 block。
      panel.test.mjs 把每条取值与对应规则逐字比对，改样式要连断言一起改。
@@ -3486,8 +3507,9 @@
   /* 设置子 tab：先按标记整体收起，再放出归档那一个——顺序敏感，「通用」不带 hidden，
      收起与放出同特异，靠下面那条在后胜出。 */
   html[data-prepaint-view="settings"][data-prepaint-subtab]
-    :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelTheme, #settingsPanelAbout) { display: none; }
+    :is(#settingsPanelGeneral, #settingsPanelAdvanced, #settingsPanelRoute, #settingsPanelTheme, #settingsPanelAbout) { display: none; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="general"] #settingsPanelGeneral { display: flex; }
+  html[data-prepaint-view="settings"][data-prepaint-subtab="advanced"] #settingsPanelAdvanced[hidden] { display: flex !important; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="route"] #settingsPanelRoute[hidden],
   html[data-prepaint-view="settings"][data-prepaint-subtab="about"] #settingsPanelAbout[hidden] { display: flex !important; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="theme"] #settingsPanelTheme[hidden] { display: block !important; }

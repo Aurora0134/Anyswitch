@@ -1982,6 +1982,180 @@ async function api(method, path, body) {
     };
   }
 
+  // 高级选项页的数据搬迁。导出与导入都只把「路径」交给后端，包体不过界面，
+  // 所以十几 MB 的包也不受请求体上限影响。导入分两步：先读包回摘要与一次性
+  // 票据，用户点「备份并导入」才写入；票据过期只能重选包，不做静默重试。
+  // 结构沿用本页其它设置卡的写法：卡头右侧放动作按钮，卡体第一行是状态行、第二行是
+  // 次要明细，需要独立控件的行用 .modal-item；状态色只由 data-tone 决定。
+  function createDataBundleController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback, askConfirm = (text) => window.confirm(text) }) {
+    const get = (id) => doc.getElementById(id);
+    const exportBtn = get("dataExportBtn");
+    const exportStatus = get("dataExportStatus");
+    const exportMeta = get("dataExportMeta");
+    const pickBtn = get("dataImportPickBtn");
+    const applyBtn = get("dataImportApplyBtn");
+    const summaryLine = get("dataImportSummary");
+    const importMeta = get("dataImportMeta");
+    const skillsLine = get("dataSkillsPath");
+    const skillsBtn = get("dataSkillsPickBtn");
+    if (!exportBtn || !pickBtn || !applyBtn) return { reset() {} };
+
+    let ticket = null;
+    let skillsRepoPath = null;
+    let skillsEnabled = false;
+    let busy = false;
+
+    const baseName = (p) => String(p || "").split(/[\\/]/).filter(Boolean).pop() || "";
+    const COUNT_LABELS = [
+      ["providers", "渠道"], ["pools", "号池"], ["routingChains", "路由链"],
+      ["presets", "预设"], ["skillDirs", "Skills"], ["credentials", "密钥"],
+    ];
+    const countsText = (counts = {}) =>
+      COUNT_LABELS.filter(([k]) => typeof counts[k] === "number").map(([k, label]) => `${label} ${counts[k]}`).join(" · ");
+    const timeText = (iso) => {
+      if (!iso) return "时间未知";
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString();
+    };
+    // 状态行说这一步的结果（带色调），明细行摆数据（计数、路径、备份号）；
+    // 空明细由 CSS 的 :empty 收起，不留空行。
+    function show(el, tone, text) {
+      el.textContent = text;
+      if (tone) el.dataset.tone = tone;
+      else delete el.dataset.tone;
+    }
+    function showMeta(el, text) { el.textContent = text ?? ""; }
+    function setBusy(on) {
+      busy = on;
+      exportBtn.disabled = on;
+      pickBtn.disabled = on;
+      applyBtn.disabled = on || !ticket;
+      skillsBtn.disabled = on || !ticket || !skillsEnabled;
+    }
+
+    async function runExport() {
+      if (busy) return;
+      setBusy(true);
+      show(exportStatus, "busy", "正在打包…");
+      showMeta(exportMeta, "");
+      try {
+        const result = await request("POST", "/panel/api/data/export-pick", {});
+        if (result.cancelled) {
+          show(exportStatus, "", "未选择导出位置");
+          return;
+        }
+        const skipped = (result.skippedCredentials ?? []).length;
+        show(exportStatus, "ok", `已导出 ${baseName(result.path)}`);
+        showMeta(exportMeta, `${countsText(result.counts)}${skipped ? ` · ${skipped} 个密钥未取到` : ""}`);
+        notify("导出完成", false);
+      } catch (err) {
+        show(exportStatus, "danger", errorText(err, "导出未完成"));
+        showMeta(exportMeta, "");
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function showPreview(result) {
+      ticket = result.token ?? null;
+      skillsRepoPath = null;
+      skillsEnabled = Boolean(result.skillsSourcePath);
+      const from = result.sourceComputer ? `来自 ${result.sourceComputer} · ` : "";
+      show(summaryLine, "", `已读取包内容：${from}${timeText(result.createdAt)}`);
+      showMeta(importMeta, countsText(result.counts));
+      skillsLine.textContent = result.skillsSourcePath
+        ? `沿用导出包里记录的原始位置：${result.skillsSourcePath}`
+        : "包里不含 Skills 目录";
+      setBusy(false);
+    }
+    // 退回未选择态：票据与 Skills 落点一起收，只留状态行上那句话，不留半截状态。
+    function clearPreview(tone, text) {
+      ticket = null;
+      skillsRepoPath = null;
+      skillsEnabled = false;
+      showMeta(importMeta, "");
+      skillsLine.textContent = "沿用导出包里记录的原始位置";
+      show(summaryLine, tone, text);
+      setBusy(false);
+    }
+
+    async function runPick() {
+      if (busy) return;
+      setBusy(true);
+      show(summaryLine, "busy", "正在读取包内容…");
+      showMeta(importMeta, "");
+      try {
+        const result = await request("POST", "/panel/api/data/import-pick", {});
+        if (result.cancelled) { clearPreview("", "未选择导出包"); return; }
+        showPreview(result);
+      } catch (err) {
+        clearPreview("danger", errorText(err, "包内容读取失败"));
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function runSkillsPick() {
+      if (busy) return;
+      try {
+        const result = await request("POST", "/panel/api/skills/repo/pick", {});
+        if (result.cancelled || !result.path) return;
+        skillsRepoPath = result.path;
+        skillsLine.textContent = `导入时放到：${result.path}`;
+      } catch (err) {
+        notify(errorText(err, "位置选择失败"), true);
+      }
+    }
+
+    async function runApply() {
+      if (busy || !ticket) return;
+      const confirmed = askConfirm(
+        "导入会替换当前的渠道、号池、路由链、提示词预设与 API 密钥。\n" +
+        "写入前会自动备份当前配置。确定继续？",
+      );
+      if (!confirmed) return;
+      const usedTicket = ticket;
+      setBusy(true);
+      show(summaryLine, "busy", "正在备份并导入…");
+      try {
+        // 业务失败（HTTP 200 + ok:false）由 api() 统一抛出并把服务端原文挂到 err.code，
+        // 这里不再判一次 ok，否则重造出的 Error 会丢掉原文。
+        const result = await request("POST", "/panel/api/data/import-apply", { token: usedTicket, skillsRepoPath });
+        // 「跟随 Coding Agent 启动」的登录自启或自愈进程没对齐回来时，数据已经换完，
+        // 坏的是那一层：状态行仍报导入完成、只是转成提醒色，没跟上的具体是什么写进明细。
+        const wd = result.watchdog;
+        const reason = (r) => (r ? `（${r}）` : "");
+        let note = "";
+        if (wd && (wd.task === "failed" || wd.task === "unknown")) {
+          note = `「跟随 Coding Agent 启动」已按包里的设置更新，但登录自启没跟着改，重启电脑后的行为可能和设置显示的不一致${reason(wd.reasons?.task)}。可以在设置里把它拨一次再拨回来重试。`;
+        } else if (wd && (wd.process === "failed" || wd.process === "unknown")) {
+          note = `「跟随 Coding Agent 启动」的开关已更新，但自愈进程没跟上${reason(wd.reasons?.process)}。当前实际行为可能和设置显示的不一致。`;
+        }
+        ticket = null;
+        skillsRepoPath = null;
+        skillsEnabled = false;
+        show(summaryLine, note ? "warn" : "ok",
+          `导入完成 · 备份号 ${result.backupId}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
+        showMeta(importMeta, [countsText(result.counts), note].filter(Boolean).join(" · "));
+        notify(`导入完成，已备份为 ${result.backupId}`, false);
+      } catch (err) {
+        const detail = errorText(err, "导入未完成");
+        clearPreview("danger", detail);
+        notify(detail, true);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    exportBtn.onclick = runExport;
+    pickBtn.onclick = runPick;
+    applyBtn.onclick = runApply;
+    skillsBtn.onclick = runSkillsPick;
+    // 初始显隐由控制器定，不靠 markup 上的 disabled：票据状态只有一处真相。
+    setBusy(false);
+    return { reset: () => clearPreview("", "尚未选择导出包") };
+  }
+
   function createAboutController({ request, doc, now = () => Date.now(), notify = () => {}, schedule = setTimeout, cancelSchedule = clearTimeout }) {
     const get = (id) => doc.getElementById(id);
     const pending = new Map();
@@ -2575,9 +2749,11 @@ async function api(method, path, body) {
 
     // 子 tab：通用 / 自动路由 / 主题 / 关于；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
+    const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelError });
     leaveSettingsView = () => about.leave();
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],
+      advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"],
       route: ["settingsTabRoute", "settingsPanelRoute"],
       theme: ["settingsTabTheme", "settingsPanelTheme"],
       about: ["settingsTabAbout", "settingsPanelAbout"],
