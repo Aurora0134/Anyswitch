@@ -51,7 +51,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
    Anthropic Messages API ↔ OpenAI Chat Completions 双向转换（仅翻译 Claude Code 实际发出的允许字段，其余丢弃，思考深度不在允许字段内）。Claude Code 点名的档位（`output_config.effort`／顶层 `reasoning_effort`／顶层 `effort`）因此只在原始 Anthropic body 里可见，由请求面注入层读出、夹到该模型已知挡位后写成上游的 `reasoning_effort`；只表示「要思考」而没给档的（`thinking.type=adaptive`、只带 `budget_tokens`）仍按库默认代填，`thinking.type=disabled`／`off`／`none` 则既不转发也不代填。详见下条请求面规则。
 
 5. **兜底档位映射**
-   catalog 生成阶段用关键词档位映射推断上下文窗口（如 `claude-opus/gpt-5.5/5.6 → 1M`、`GPT-5.x → 272K`）；未命中关键词的模型统一给 `1M` 兜底（而非 128K 硬编码或 999M 假数值）。
+   catalog 生成阶段用关键词档位映射推断上下文窗口（各端点写入器与 Codex 模型目录共用 `context-fallback.mjs`）：GPT-5.x/GPT-6 → 1.05M，Claude Opus 4.6 起/Sonnet 5/Sonnet 4.6/Fable → 1M，Opus 4.5 与 Sonnet 4.5/Haiku → 200K，Kimi K3 → 1048576、Kimi K2 → 262144，Grok 4.5–4.7 → 500000，SenseNova 6.7/6.8 → 262144；未命中关键词的模型统一给 `1M` 兜底（而非 128K 硬编码或 999M 假数值）。
 
 6. **DSH 推理挡位知识库兜底**
    DSH 对自定义 provider route 只认 `settings.yaml` 显式声明的 `reasoningEfforts`（`dsh-llm-pi-ai` 的 `resolveModelReasoning` 对非 catalog route 恒 `reasoning: false`），线上发现协议（`LlmDiscoveredModel`）也不携带推理字段——两层都断供。`reasoning-fallback.mjs` 读取 DSH 自带安装的 pi-ai 模型知识库（`@earendil-works/pi-ai/dist/providers/data/*.json`，与 DSH dispatch 同源），按模型 id（含 `go/` 等网关前缀的末段回退）解析 `thinkingLevelMap` wire 拼写与 `compat.thinkingFormat`，作为 store 字段/provider 模板之后的第 3 级兜底注入 `settings.yaml`。厂商条目优先于网关镜像；无 map 条目按 pi-ai 基础五挡语义展开；`enabled/off` 二值开关折叠为 `off/low`。fail-open：知识库缺失时返回空索引，不阻塞配置同步。
