@@ -87,11 +87,12 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 ### 协议与流处理层
 - `protocol.mjs` — Anthropic ↔ OpenAI 兼容协议互转（纯函数）。
 - `wire-id.mjs` — Claude wire ID 打包/解包：`anthropic/<provider>/<model>`，严格单次剥离、按首个 `/` 切分；`buildWireCatalog` 检测 wire ID 碰撞。
+- `claude-tier-mapping.mjs` — Claude Code 档位入口名（Sonnet/Opus/Fable/Haiku）→ 托管模型的映射判据（纯函数）：剔 `[1m]` 后缀、认档位词本身与 `claude-` 家族段，两个档位词同现即不接管，未配置的档位不降级、不塌默认。判据与设置归一（`parseClaudeTierMappings`）同处一个模块，中继与设置层共用。
 - `stream.mjs` — SSE 流翻译（纯状态机）：把上游 OpenAI `chat.completion.chunk` 流翻译为 Anthropic Messages SSE 事件序列。
 - `openai-stream-guard.mjs` — OpenAI 流式响应守卫（坏流过滤、孤儿 tool_call 拦截、reasoning 字段即时放行）；可选的信封补齐（`fillChunkEnvelope`，仅 grok 开启）为缺 `id`/`created`/`model` 的数据块补字段并回显首值。
 
 ### relay / 服务层
-- `handler.mjs` — Anthropic 路径请求处理器：恒定时间 token 鉴权 → 加载 store → 解包 wire ID → generation 校验 → 解密凭据 → 协议转换 → fallback URL 列表发上游；全程 fail-closed。
+- `handler.mjs` — Anthropic 路径请求处理器：恒定时间 token 鉴权 → 加载 store → 档位映射接管预检（仅 Claude 端点、仅严格解析已拒的档位名）→ 解包 wire ID → generation 校验 → 解密凭据 → 协议转换 → fallback URL 列表发上游；除该预检外全程 fail-closed。
 - `openai-handler.mjs` — OpenAI 原生路径处理器：`/v1/models` 与 `/chat/completions` 直通到 OpenAI 兼容上游（不做协议翻译）。
 - `openai-path.mjs` — OpenAI relay 路径解析。
 - `server.mjs` — Anthropic 前端 loopback HTTP 服务（127.0.0.1、随机会话 token）。
@@ -178,7 +179,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - **store 不含秘密**：`store.json` 按契约只存路由/元数据，绝不存 Key；只保留一个 `credentialFile` 引用。`store-schema.mjs` 递归扫描并拒绝任何秘密样字段名。
 - **credentialFile 引用受控**：`credential-ref.mjs` 拒绝绝对路径/盘符/UNC/父级穿越/任何路径分隔符/Windows 保留设备名，确保无法逃出 credentials 目录。
 - **会话 token 与 代理隔离**：relay 启动时 CSPRNG 生成 256-bit token，不落盘、不记录、随进程死亡；为环回地址强制设 `NO_PROXY`/`no_proxy`，防 relay 流量经继承的 HTTP_PROXY 外泄。
-- **fail-closed**：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key。所有错误信息泛化，绝不泄露 URL/凭据/原始上游响应体/栈。
+- **fail-closed**：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key。所有错误信息泛化，绝不泄露 URL/凭据/原始上游响应体/栈。唯一有界例外是 Claude Code 档位映射：用户在设置里为某个档位指定托管模型后，中继才把那个档位名改投过去——只作用在 Claude 端点、只在严格解析已经拒绝之后、只认 unmistakable 的档位名（未配置的档位仍照原样拒绝，不降级、不塌默认）。
 - **CAS 写保护**：store 写入走内容哈希 CAS（`casWriteFile` + 跨进程文件锁），并发改写以 `PreconditionFailed` 失败而非静默覆盖。
 
 ## 6. 测试

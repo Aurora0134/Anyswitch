@@ -9,9 +9,27 @@
 //   - no nearest-model fallback
 //   - no official Anthropic passthrough
 //   - no falling back to some other key when decryption fails
+//
+// ONE bounded exception to "no fuzzy matching / no official Anthropic
+// passthrough": the Claude Code 档位映射 (claude-tier-mapping.mjs). Claude owns
+// four model tiers of its own and names them on the wire — in sub-agent
+// dispatch, in side queries, in the official ids it resolves a tier to — and
+// this relay serves no Anthropic model, so those requests used to die at the
+// strict contract below. An operator-configured tier row may redirect exactly
+// such a name to a hosted model, and nothing else: only the Claude endpoint,
+// only after the strict rules have already refused the name, only names that are
+// unmistakably one of the four tiers, only tiers the operator actually filled
+// in. There is still no default target, no cross-tier degradation and no
+// takeover for any other endpoint.
 
 import { timingSafeEqual } from "node:crypto";
 import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
+import {
+  CLAUDE_TIER_AGENT_ID,
+  classifyTierEntryName,
+  parseClaudeTierMappings,
+  resolveTierEntry,
+} from "./claude-tier-mapping.mjs";
 import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
@@ -46,6 +64,29 @@ const UNPACK_STATUS = {
   [UNPACK_REASON.AMBIGUOUS_UNQUALIFIED]: 400,
   [UNPACK_REASON.UNKNOWN_UNQUALIFIED]: 400,
 };
+
+// Only these two refusals describe "a model name this relay could not look up".
+// The rest are structural (no model field, blank, non-string), where a 档位映射
+// hint would be noise — and AMBIGUOUS_UNQUALIFIED is deliberately excluded: that
+// name IS several real Anyswitch models, and only the operator can say which one
+// was meant, so it stays a plain refusal rather than a tier takeover.
+const TIER_ELIGIBLE_REASONS = new Set([UNPACK_REASON.NOT_WIRE_ID, UNPACK_REASON.UNKNOWN_UNQUALIFIED]);
+
+// The panel section's user-facing address, reused by every 档位映射 message so
+// the operator is always sent to the same place.
+const TIER_SETTINGS_LOCATION = "Anyswitch 设置 · 通用 · Claude Code";
+
+// A model name is client-controlled text. Anywhere it reaches a log line or an
+// error message it is flattened to one capped line: a relay log must not be a
+// surface where one request forges extra entries, and the message goes straight
+// into the client's terminal.
+function nameLabel(model) {
+  return String(model).replace(/[\r\n]+/g, " ").trim().slice(0, 160);
+}
+
+function tierRowName(tier) {
+  return tier.charAt(0).toUpperCase() + tier.slice(1);
+}
 
 // Constant-time token comparison. Length mismatch is reported without
 // short-circuiting on content. Both temporary copies are zeroed on every path so
@@ -82,6 +123,10 @@ export function extractPresentedToken(headers) {
 //   buildUpstreamURLs : (provider, path) => string[]
 //   upstreamFetch  : (urls, init) => Promise<Response>
 //   recordGeneration / readGeneration : catalog generation binding
+//   getClaudeTierMapping : () => raw settings value of the 档位映射 section
+//                    (read per request so a panel save takes effect on the next
+//                    one without a restart, same contract as keep-alive config);
+//                    absent → the mechanism is off
 export function createHandler(deps) {
   const {
     token,
@@ -94,6 +139,7 @@ export function createHandler(deps) {
     readGeneration,
     logger = null,
     effortInjector = null,
+    getClaudeTierMapping = null,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
@@ -108,6 +154,36 @@ export function createHandler(deps) {
   const chainState = createChainState({
     onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
   });
+
+  // The 档位映射 exactly as configured right now. An absent getter means the
+  // mechanism is not wired at all (a relay frontend that never serves Claude, a
+  // unit test that does not care) → no tier is mapped → no takeover.
+  function currentTierMappings() {
+    return getClaudeTierMapping ? parseClaudeTierMappings(getClaudeTierMapping()) : {};
+  }
+
+  // What a refused Claude request should tell its client. Only a name that IS
+  // one of the four tiers earns a 档位映射 message; anything else keeps the
+  // strict contract's own wording untouched, because for those the existing
+  // "use the full model id from /v1/models" advice is the correct advice.
+  function tierRefusalMessage(model, reason) {
+    if (!TIER_ELIGIBLE_REASONS.has(reason)) return null;
+    const kind = classifyTierEntryName(model);
+    if (!kind.ok) return null;
+    const tier = tierRowName(kind.tier);
+    const mapping = currentTierMappings()[kind.tier];
+    if (mapping === undefined) {
+      return (
+        `model "${nameLabel(model)}" is Claude's ${tier} tier, which is not mapped to any `
+        + `Anyswitch model yet — set the ${tier} row in ${TIER_SETTINGS_LOCATION} to serve it`
+      );
+    }
+    return (
+      `model "${nameLabel(model)}" is Claude's ${tier} tier, but its mapping target `
+      + `"${nameLabel(mapping)}" is not a model this relay serves — fix the ${tier} row in `
+      + `${TIER_SETTINGS_LOCATION}`
+    );
+  }
 
   // Token check happens before the body is parsed.
   function authorize(headers) {
@@ -201,6 +277,11 @@ export function createHandler(deps) {
     return { status: 200, body: buildModelsResponse(entries) };
   }
 
+  // options.signal  — the client abort signal, forwarded to the upstream call.
+  // options.agentId — the endpoint this request belongs to. It is what decides
+  //   whether an unresolvable model name is reported and explained: only the
+  //   Claude path owns a 档位映射, so only there is "this name is Claude's Fable
+  //   tier and you have not mapped it" an answer the caller can act on.
   async function handleMessages(headers, body, options = {}) {
     const auth = authorize(headers);
     if (!auth.ok) return { status: auth.status, body: auth.body };
@@ -214,9 +295,23 @@ export function createHandler(deps) {
 
     const unpacked = unpackWireId(body.model, loaded.store);
     if (!unpacked.ok) {
+      // A model name this relay cannot resolve is the one failure class the
+      // operator otherwise cannot see at all: the request never reaches a
+      // channel, so it lands in no usage row and no model-stability bucket.
+      // Reported on the Claude path only — other endpoints were never this
+      // mechanism's business and keep their existing silence.
+      const reportable = options.agentId === CLAUDE_TIER_AGENT_ID;
+      if (reportable) {
+        logger?.warn?.(
+          `档位映射未接管：模型名 "${nameLabel(body.model)}" 无法解析（${unpacked.reason}），本次请求按原样拒绝`,
+        );
+      }
       return {
         status: UNPACK_STATUS[unpacked.reason] ?? 400,
-        body: errorBody("invalid_request_error", unpacked.message),
+        body: errorBody(
+          "invalid_request_error",
+          (reportable ? tierRefusalMessage(body.model, unpacked.reason) : null) ?? unpacked.message,
+        ),
       };
     }
 
@@ -341,6 +436,58 @@ export function createHandler(deps) {
       upstreamFetch.releaseResponse?.(upstream);
     }
     return { status: 200, body: openAIToAnthropic(payload, body.model) };
+  }
+
+  // 档位映射 (Claude Code tier entries) — the takeover pre-flight.
+  //
+  // Runs FIRST in the caller, before the pool and chain plans and before the
+  // request is opened on the tracker: it rewrites `body.model` from a Claude
+  // tier entry name to the operator's configured Anyswitch model, so pool
+  // fan-out, chain routing, the journal row, model stability and the model the
+  // response echoes all carry the DESTINATION and never the entry name. That is
+  // also why the rewrite is in place rather than returned: the same reason
+  // AUTO_MODEL normalizes itself here (see planChainMessages) — attribution
+  // reads `body.model` downstream.
+  //
+  // Returns the takeover record, or null whenever this request is not the
+  // mechanism's business: another endpoint, an unauthorized call (the paths
+  // below report that identically), a name the strict rules already resolved,
+  // or a tier the operator did not configure. A refusal it declines to act on
+  // still gets an explanatory 400 from handleMessages, which sees the same
+  // classification.
+  async function planTierEntryMessages(headers, body, agentId) {
+    if (agentId !== CLAUDE_TIER_AGENT_ID) return null;
+    const auth = authorize(headers);
+    if (!auth.ok) return null;
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    const strict = unpackWireId(body.model, loaded.store);
+    if (strict.ok || !TIER_ELIGIBLE_REASONS.has(strict.reason)) return null;
+
+    // Read the configuration only now: a request whose model name already
+    // resolves never costs a settings read, which keeps the normal path exactly
+    // as cheap as it was before this mechanism existed.
+    const mappings = currentTierMappings();
+    if (Object.keys(mappings).length === 0) return null;
+
+    const takeover = resolveTierEntry({
+      model: body.model,
+      mappings,
+      // A destination that is not itself a resolvable model name is a broken
+      // row, not a channel outage: refuse here so the 400 can name the row
+      // instead of 404ing on a half-rewritten request.
+      targetResolves: (target) => unpackWireId(target, loaded.store).ok,
+    });
+    if (!takeover.ok) return null;
+
+    body.model = takeover.wireId;
+    logger?.info?.(
+      `档位映射接管：模型名 "${nameLabel(takeover.entry)}" 是 Claude 的 ${tierRowName(takeover.tier)} 档，`
+      + `本次请求改投 "${nameLabel(takeover.wireId)}"`,
+    );
+    return takeover;
   }
 
   // Pool routing pre-flight. Returns:
@@ -559,5 +706,5 @@ export function createHandler(deps) {
     };
   }
 
-  return { authorize, handleModels, handleMessages, planPoolMessages, planChainMessages, chainState };
+  return { authorize, handleModels, handleMessages, planTierEntryMessages, planPoolMessages, planChainMessages, chainState };
 }

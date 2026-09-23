@@ -197,6 +197,7 @@ export function createProductionDeps({
   upstreamFetch = fetch,
   retryOptions,
   getKeepAliveConfig,
+  getClaudeTierMapping,
   effortInjector,
   logger = null,
   agentId = "claude",
@@ -289,6 +290,10 @@ export function createProductionDeps({
     // saves take effect on the next request without a restart. Low-traffic
     // single-user relay: the readFileSync cost is negligible.
     getKeepAliveConfig: getKeepAliveConfig ?? (() => loadSettings(defaultSettingsPath()).keepAlive),
+    // 档位映射 (Claude tier entries) reads from disk on the same terms: a row
+    // saved in the panel is honoured by the next request, no restart. Only the
+    // Claude path ever calls it — see planTierEntryMessages in handler.mjs.
+    getClaudeTierMapping: getClaudeTierMapping ?? (() => loadSettings(defaultSettingsPath()).claudeTierMappings),
     // One injector for both relay paths of this process: the thinking-depth
     // library is read per request and the "this channel refuses the parameter"
     // memory is shared, so a refusal seen on one path is honored on the other.

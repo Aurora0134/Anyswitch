@@ -11,6 +11,7 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
+import { CLAUDE_TIERS, parseClaudeTierMappings } from "./claude-tier-mapping.mjs";
 
 // Same timestamp format as the config backups (zcode/kimi/dsh merge-config):
 // ISO with ":" and "." replaced by "-", safe for Windows file names.
@@ -60,6 +61,26 @@ export const DEFAULT_INJECT_THINKING_EFFORT = true;
 
 export function parseInjectThinkingEffort(raw) {
   return raw === false ? false : DEFAULT_INJECT_THINKING_EFFORT;
+}
+
+// Claude 档位映射: the four Claude Code tier entries (sonnet/opus/fable/haiku)
+// each optionally name one Anyswitch-hosted model. An unset or blank tier means
+// "not taken over", so an unconfigured install relays exactly as before —
+// normalisation itself is claude-tier-mapping.mjs#parseClaudeTierMappings.
+//
+// The panel PATCHes ONE tier at a time (即改即存), so a raw-spread merge of the
+// section would drop the other three rows. Merge per tier and treat an empty
+// value as clearing that row — the only way back to "not taken over".
+function mergeClaudeTierMappings(currentRaw, patchRaw) {
+  const merged = { ...parseClaudeTierMappings(currentRaw) };
+  for (const tier of CLAUDE_TIERS) {
+    if (!Object.prototype.hasOwnProperty.call(patchRaw, tier)) continue;
+    const value = patchRaw[tier];
+    const trimmed = typeof value === "string" ? value.trim() : "";
+    if (trimmed.length === 0) delete merged[tier];
+    else merged[tier] = trimmed;
+  }
+  return merged;
 }
 
 export function parseKeepAliveMaxRetries(raw) {
@@ -162,6 +183,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
+  const claudeTierMappings = parseClaudeTierMappings(raw.claudeTierMappings);
   return {
     raw,
     settings: {
@@ -169,10 +191,12 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       keepAlive,
       sparkWindowPoints,
       injectThinkingEffort,
+      claudeTierMappings,
     },
     keepAlive,
     sparkWindowPoints,
     injectThinkingEffort,
+    claudeTierMappings,
   };
 }
 
@@ -244,6 +268,14 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "injectThinkingEffort")) {
     updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
+  }
+
+  if (patch.claudeTierMappings && typeof patch.claudeTierMappings === "object" && !Array.isArray(patch.claudeTierMappings)) {
+    const merged = mergeClaudeTierMappings(current.raw.claudeTierMappings, patch.claudeTierMappings);
+    // No tiers left configured → no key at all, so a cleared panel section and
+    // a never-configured one are byte-identical on disk.
+    if (Object.keys(merged).length === 0) delete updated.claudeTierMappings;
+    else updated.claudeTierMappings = merged;
   }
 
   // Legacy cleanup: `keepAlive.disabledEndpoints` turns up in on-disk settings

@@ -2781,6 +2781,10 @@ async function api(method, path, body) {
       // 「自动路由」的配置数据与渠道页同源（store state），进 tab 即刷新一次，
       // 与渠道页每次切入都刷新同语义；渲染在 doRefreshStoreState 内统一完成。
       if (which === "route") refreshStoreState();
+      // 「通用」的档位映射下拉同样以 store state 为源：进子页即刷新并在数据落地后
+      // 重生成选项，于是渠道增删/改名后回到这一页看到的就是最新模型清单。
+      // 拉取失败保留上一次生成的选项，不让一次网络抖动把四行变成空下拉。
+      if (which === "general") refreshStoreState().then(renderClaudeTierOptions, () => {});
       if (which === "about") return about.enter();
     }
     // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
@@ -2904,6 +2908,12 @@ async function api(method, path, body) {
           if (sparkWindowInput) sparkWindowInput.value = String(sparkWindowPoints);
           Object.values(historyBuffers).forEach(pruneSparkBuffer);
         }
+        // 档位映射按服务端归一值回灌；某行正在保存时不回灌，免得把用户刚敲进
+        // 那一行的值按旧结果盖掉。
+        if (!anyClaudeTierSaving()) {
+          claudeTierMappings = { ...(d.settings?.claudeTierMappings ?? {}) };
+          applyClaudeTierUi();
+        }
       } catch {}
     }
 
@@ -3013,6 +3023,101 @@ async function api(method, path, body) {
         if (e.key === "Enter") {
           e.preventDefault();
           persistSparkWindow(sparkWindowInput.value);
+        }
+      };
+    }
+
+    // ── Claude Code 档位映射 ────────────────────────────────────────────
+    // 四行「可输入的下拉」：值 = anyswitch 托管模型的完整模型名，留空 = 该档位
+    // 不接管。逐行独立「即改即存 + 失败回滚」，与本页其余设置项同一语义；中继侧
+    // 每次请求都重读设置，所以保存即生效，不需要重启任何端点。
+    const claudeTierInputs = {
+      sonnet: $("claudeTierSonnetInput"),
+      opus: $("claudeTierOpusInput"),
+      fable: $("claudeTierFableInput"),
+      haiku: $("claudeTierHaikuInput"),
+    };
+    let claudeTierMappings = {};
+    // 逐档各自的在存标记：一行在存时既挡住轮询回灌（不覆盖用户正在编辑的那行），
+    // 也不牵连另一行——单一布尔会把并发的那次保存静默丢掉。
+    const claudeTierSaving = { sonnet: false, opus: false, fable: false, haiku: false };
+    const anyClaudeTierSaving = () => Object.values(claudeTierSaving).some(Boolean);
+
+    function applyClaudeTierUi() {
+      for (const [tier, input] of Object.entries(claudeTierInputs)) {
+        if (!input) continue;
+        if (claudeTierSaving[tier]) continue;
+        input.value = claudeTierMappings[tier] ?? "";
+      }
+    }
+
+    // 下拉选项 = 中继此刻真的认得的模型全集：与「自动路由」同源的 storeRows()
+    // （号池按合并行出、成员行不重复出现），成员并集即该池的可见目录；值就是
+    // 中继的完整模型名。渠道增删后重进「通用」即随 store state 一起刷新。
+    function renderClaudeTierOptions() {
+      const list = $("claudeTierModelOptions");
+      if (!list) return;
+      const seen = new Set();
+      const options = [];
+      for (const row of storeRows()) {
+        const label = row.kind === "pool" ? (row.displayName || row.id) : ((row.p && row.p.displayName) || row.id);
+        const models = {};
+        if (row.kind === "pool") {
+          for (const member of row.members || []) Object.assign(models, (member && member.models) || {});
+        } else {
+          Object.assign(models, (row.p && row.p.models) || {});
+        }
+        for (const modelId of Object.keys(models)) {
+          const wireId = `anthropic/${row.id}/${modelId}`;
+          if (seen.has(wireId)) continue;
+          seen.add(wireId);
+          const shown = (models[modelId] && models[modelId].displayName) || modelId;
+          options.push(`<option value="${esc(wireId)}">${esc(`[${label}] ${shown}`)}</option>`);
+        }
+      }
+      list.innerHTML = options.join("");
+    }
+
+    async function persistClaudeTier(tier, raw) {
+      const input = claudeTierInputs[tier];
+      if (!input || claudeTierSaving[tier]) return;
+      const previous = claudeTierMappings[tier] ?? "";
+      const next = String(raw ?? "").trim();
+      const optimistic = { ...claudeTierMappings };
+      if (next) optimistic[tier] = next;
+      else delete optimistic[tier];
+      claudeTierMappings = optimistic;
+      claudeTierSaving[tier] = true;
+      settingsLoadGen += 1;
+      try {
+        const d = await api("POST", "/api/settings", { claudeTierMappings: { [tier]: next } });
+        if (!d.ok) {
+          claudeTierMappings = { ...claudeTierMappings };
+          delete claudeTierMappings[tier];
+          if (previous) claudeTierMappings[tier] = previous;
+          toast("档位映射保存失败", true);
+          return;
+        }
+        // 服务端写回的是归一化结果（空行即删键、未知档位名即丢），以它为准。
+        claudeTierMappings = { ...(d.settings?.claudeTierMappings ?? optimistic) };
+        toast(next ? "档位映射已保存" : "该档位已改为不接管");
+      } catch (e) {
+        delete claudeTierMappings[tier];
+        if (previous) claudeTierMappings[tier] = previous;
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        claudeTierSaving[tier] = false;
+        applyClaudeTierUi();
+      }
+    }
+
+    for (const [tier, input] of Object.entries(claudeTierInputs)) {
+      if (!input) continue;
+      input.onchange = () => persistClaudeTier(tier, input.value);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          persistClaudeTier(tier, input.value);
         }
       };
     }
