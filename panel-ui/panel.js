@@ -2498,7 +2498,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeTier: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
