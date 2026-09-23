@@ -416,7 +416,8 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(one.max_context_window, 128000);
     assert.equal(two.slug, "alpha~m-two");
     assert.equal(two.display_name, "m-two · alpha", "model label falls back to the model id");
-    assert.equal(two.context_window, CATALOG_TEMPLATE.context_window, "no metadata keeps the template window");
+    assert.equal(two.context_window, 1_000_000, "no metadata falls back through the shared tier map, not the template's 272K");
+    assert.equal(two.max_context_window, 1_000_000);
     assert.equal(three.slug, "beta~m-one");
     assert.equal(three.display_name, "shadowed · beta", "the second channel's copy keeps its own metadata");
     for (const [index, entry] of catalog.models.entries()) {
@@ -436,6 +437,28 @@ describe("codex model catalog (model_catalog_json)", () => {
       assert.equal(entry.supports_image_detail_original, false);
     }
     assert.equal(buildCodexModelCatalog(new Map(), CATALOG_TEMPLATE), null, "empty model set builds no catalog");
+  });
+
+  it("routes codex catalog entries without metadata through the shared context tier map", () => {
+    const providers = {
+      alpha: {
+        models: {
+          "gpt-6-astra": {},
+          "gpt-5.5": {},
+          "kimi-k3": {},
+          "grok-4.6": {},
+          "claude-sonnet-5": {},
+        },
+      },
+    };
+    const catalog = buildCodexModelCatalog(collectCodexCatalogModels(providers), CATALOG_TEMPLATE);
+    const bySlug = new Map(catalog.models.map((entry) => [entry.slug, entry]));
+    assert.equal(bySlug.get("alpha~gpt-6-astra").context_window, 1_050_000, "gpt-6 tier beats the template's 272K");
+    assert.equal(bySlug.get("alpha~gpt-6-astra").max_context_window, 1_050_000);
+    assert.equal(bySlug.get("alpha~gpt-5.5").context_window, 1_050_000);
+    assert.equal(bySlug.get("alpha~kimi-k3").context_window, 1_048_576);
+    assert.equal(bySlug.get("alpha~grok-4.6").context_window, 500_000);
+    assert.equal(bySlug.get("alpha~claude-sonnet-5").context_window, 1_000_000);
   });
 
   it("writes the catalog file and anchors the pointer in the top-level key region", () => {

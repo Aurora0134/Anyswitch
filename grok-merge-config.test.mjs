@@ -75,10 +75,11 @@ describe("grok-merge-config", () => {
   });
 
   it("falls back through the shared context tier table when the store omits contextWindow", () => {
-    const providers = { alpha: { models: { "m-1": {}, "gpt-5-thing": {} } } };
+    const providers = { alpha: { models: { "m-1": {}, "gpt-5-thing": {}, "grok-4.6": {} } } };
     const { text } = buildGrokManagedToml(providers, 47821, "tok");
-    // 关键词档位命中 gpt-5 → 272000；未命中落 1M 兜底（不是 grok 自带的 200000）。
-    assert.match(text, /\[model\."anyswitch-alpha~gpt-5-thing"\]\nmodel = "gpt-5-thing"[\s\S]*?context_window = 272000/);
+    // 关键词档位命中 gpt-5 → 1050000、grok-4.x → 500000；未命中落 1M 兜底（不是 grok 自带的 200000）。
+    assert.match(text, /\[model\."anyswitch-alpha~gpt-5-thing"\]\nmodel = "gpt-5-thing"[\s\S]*?context_window = 1050000/);
+    assert.match(text, /\[model\."anyswitch-alpha~grok-4\.6"\]\nmodel = "grok-4\.6"[\s\S]*?context_window = 500000/);
     assert.match(text, /\[model\."anyswitch-alpha~m-1"\]\nmodel = "m-1"[\s\S]*?context_window = 1000000/);
     assert.doesNotMatch(text, /context_window = 200000/);
     assert.match(text, /name = "m-1 · alpha"/, "model label falls back to the model id");

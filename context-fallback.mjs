@@ -20,27 +20,54 @@
 // Ordered: first keyword (case-insensitive substring of the model id) wins.
 // Keep prefixes specific enough not to shadow later rules.
 //
-// Tier values come from vendor documentation. The governing rule is that
-// underestimation is the only dangerous direction (it drops live context
-// when the IDE compresses early), so specific prefixes whose family
-// outgrew the generic tier get an earlier, larger rule:
-//   - claude-opus: Opus 4.6/4.7/4.8/5 are all 1M while Sonnet/Haiku stay 200K
-//   - gpt-5.5 / gpt-5.6: 400K-default/1M vs the generic 272K gpt-5 tier
+// Tier values come from vendor documentation and the models.dev aggregate
+// catalog (snapshot 2026-09-23). Underestimation drops live context when the
+// IDE compresses early; overestimation lets a session grow past the upstream
+// limit and hard-fails the request, so specific prefixes whose family moved
+// off the generic tier get an earlier rule in either direction:
+//   - gpt-5.x / gpt-6: the whole family sits at 1.05M (user call 2026-09-23:
+//     no native-vs-gateway split; the old generic 272K gpt-5 tier is gone)
+//   - claude-opus: Opus 4.6/4.7/4.8/5/5.5 are 1M; only Opus 4.5 stays 200K
+//   - claude-sonnet-5 / claude-sonnet-4.6 / claude-fable: 1M, while
+//     Sonnet 4.5 and Haiku stay at the generic 200K claude tier
+//   - kimi-k3 is exactly 1048576 per Moonshot's own Codex config; kimi-k2
+//     (2.6 / 2.7-code) is 262144 and would otherwise sit at the 1M default
+//   - grok-4.5/4.6/4.7 are 500000 per xAI's model table, not the 1M default
+//   - sensenova-6.7/6.8 flash-lite are 262144 per the same-family channel
+//     whose upstream actually reports context_length
 export const CONTEXT_TIER_RULES = [
-  { keyword: "gpt-5.5", contextWindow: 1_000_000 },
-  { keyword: "gpt-5.6", contextWindow: 1_000_000 },
-  { keyword: "gpt-5", contextWindow: 272000 },
-  { keyword: "gpt-4", contextWindow: 128000 },
+  { keyword: "gpt-6", contextWindow: 1_050_000 },
+  { keyword: "gpt-5", contextWindow: 1_050_000 },
+  { keyword: "gpt-4", contextWindow: 128_000 },
+  { keyword: "claude-opus-4.5", contextWindow: 200_000 },
+  { keyword: "claude-opus-4-5", contextWindow: 200_000 },
   { keyword: "claude-opus", contextWindow: 1_000_000 },
-  { keyword: "claude", contextWindow: 200000 },
+  { keyword: "claude-sonnet-5", contextWindow: 1_000_000 },
+  { keyword: "claude-sonnet-4.6", contextWindow: 1_000_000 },
+  { keyword: "claude-sonnet-4-6", contextWindow: 1_000_000 },
+  { keyword: "claude-fable", contextWindow: 1_000_000 },
+  { keyword: "claude", contextWindow: 200_000 },
+  { keyword: "kimi-k3", contextWindow: 1_048_576 },
+  { keyword: "kimi-k2", contextWindow: 262_144 },
+  { keyword: "grok-4.5", contextWindow: 500_000 },
+  { keyword: "grok-4.6", contextWindow: 500_000 },
+  { keyword: "grok-4.7", contextWindow: 500_000 },
+  { keyword: "sensenova-6.7", contextWindow: 262_144 },
+  { keyword: "sensenova-6.8", contextWindow: 262_144 },
 ];
 
 export const UNMATCHED_CONTEXT_FALLBACK = 1_000_000;
 
+// One channel (SAIL-kimi) lists the model under the bare alias "k3" instead of
+// the vendor id; normalize it so the k3 tier rule catches both spellings.
+function normalizeContextModelId(id) {
+  return id === "k3" ? "kimi-k3" : id;
+}
+
 // Fallback context window for a model the store has no real contextWindow for.
 // Unknown/non-string ids resolve to the unmatched default, never to undefined.
 export function fallbackContextWindow(modelId) {
-  const id = typeof modelId === "string" ? modelId.toLowerCase() : "";
+  const id = normalizeContextModelId(typeof modelId === "string" ? modelId.toLowerCase() : "");
   for (const rule of CONTEXT_TIER_RULES) {
     if (id.includes(rule.keyword)) return rule.contextWindow;
   }

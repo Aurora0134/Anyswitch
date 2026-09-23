@@ -72,6 +72,7 @@ export { extractManagedProviders } from "./pool-providers.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
 import { catalogForRoot, resolveEndpointEfforts, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { packChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model-slug.mjs";
+import { fallbackContextWindow } from "./context-fallback.mjs";
 
 const SIDECAR_FILENAME = "codex-sidecar.json";
 export const MANAGED_BEGIN = "# >>> anyswitch-managed-codex (managed by Anyswitch; do not edit) >>>";
@@ -193,10 +194,16 @@ export function buildCodexModelCatalog(models, template, catalog = null) {
     // 就是无法区分的重复行（wire-id.mjs 的 [provider] 前缀同款理由）。
     entry.display_name = channelLabel ? `${modelLabel} · ${channelLabel}` : modelLabel;
     entry.description = null;
-    if (Number.isInteger(model?.contextWindow) && model.contextWindow > 0) {
-      entry.context_window = model.contextWindow;
-      entry.max_context_window = model.contextWindow;
-    }
+    // Same priority chain as the other six writers: the store's discovered
+    // contextWindow wins, otherwise the shared tier map (context-fallback.mjs)
+    // fills the gap. The template's GPT-native 272K must not leak through: it
+    // would compress every gateway model's session far below its real limit.
+    const contextWindow =
+      Number.isInteger(model?.contextWindow) && model.contextWindow > 0
+        ? model.contextWindow
+        : fallbackContextWindow(modelId);
+    entry.context_window = contextWindow;
+    entry.max_context_window = contextWindow;
     // Same lowercase text/image/audio alphabet on both sides (store-schema
     // ALLOWED_MODALITIES == codex's InputModality wire values).
     if (Array.isArray(model?.inputModalities) && model.inputModalities.length > 0) {
