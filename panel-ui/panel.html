@@ -1581,8 +1581,8 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
     </nav>
 
-    <!-- 「通用」：五项按语义分三张卡——「启动」「抗截断」带卡头（复用各视图通用的
-         card-header/card-title 标准件），其余两项暂不归类、平卡放置；
+    <!-- 「通用」：六项按语义分四张卡——「启动」「抗截断」「Claude Code」带卡头（复用各
+         视图通用的 card-header/card-title 标准件），其余两项暂不归类、平卡放置；
          控件 id、逐项独立保存/失败回滚语义不变 -->
     <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral">
       <div class="panel-card">
@@ -1656,6 +1656,47 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <input class="modal-number" type="number" id="sparkWindowInput" min="2" max="128" step="1" value="16">
           </div>
+        </div>
+      </div>
+
+      <!-- Claude Code 档位映射：四行「可输入的下拉」（input + 共用 datalist），值 =
+           anyswitch 托管模型的完整模型名（anthropic/渠道/模型），留空 = 该档位不接管。
+           选项由 panel.js 从 store state 生成（与「自动路由」同源，号池取成员并集）。
+           控件沿用 modal-item / modal-number 既有类，新增类只管宽度与文字对齐、不带
+           任何颜色取值，因此三套主题与亮暗无需特化。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 3 8l9 5 9-5-9-5z"/><path d="M3 16l9 5 9-5"/></svg>
+            Claude Code
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">Sonnet</div>
+            </div>
+            <input class="modal-number settings-tier-input" type="text" id="claudeTierSonnetInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">Opus</div>
+            </div>
+            <input class="modal-number settings-tier-input" type="text" id="claudeTierOpusInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">Fable</div>
+            </div>
+            <input class="modal-number settings-tier-input" type="text" id="claudeTierFableInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">Haiku</div>
+            </div>
+            <input class="modal-number settings-tier-input" type="text" id="claudeTierHaikuInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+          </div>
+          <datalist id="claudeTierModelOptions"></datalist>
         </div>
       </div>
     </div>

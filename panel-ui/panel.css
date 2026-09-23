@@ -749,7 +749,7 @@
   .settings-head-left { display: flex; align-items: center; gap: 12px; }
   .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
   .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
-  /* 「通用」分组：五项按语义分三张卡（启动 / 抗截断 / 未归类平卡），卡间距对齐
+  /* 「通用」分组：六项按语义分四张卡（启动 / 抗截断 / Claude Code / 未归类平卡），卡间距对齐
      侧栏列的 20px；设置行悬停整行淡底（--surface-hover 既有悬停 token，与主题列表
      项同手感），行块左右外扩 10px 让底色有呼吸感，文本与原位置对齐。 */
   #settingsPanelGeneral { display: flex; flex-direction: column; gap: 20px; }
@@ -758,6 +758,14 @@
     transition: background 120ms var(--ease-out);
   }
   #settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }
+  /* Claude Code 档位映射行：复用 .modal-number 的全部取值（底色/边框/焦点环都走
+     主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名框」——
+     不引入任何颜色声明，因此三套主题与亮暗都无需特化片段。 */
+  .settings-tier-input {
+    width: min(320px, 46vw); text-align: left;
+    font-family: var(--font-mono); font-weight: 500;
+  }
+  .settings-tier-input::placeholder { color: var(--text-3); font-weight: 500; }
   #settingsPanelAbout { display: flex; flex-direction: column; gap: 20px; }
   .about-card-head { flex-wrap: wrap; gap: 12px; }
   .about-app-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }

@@ -854,6 +854,11 @@ export function createOpenAIRelayServer(deps) {
         const agentId = anthropicAgentIdFrom(req.headers);
         if (agentId === null) logUnattributedRequest(deps, "anthropic messages", req, body?.model);
 
+        // 档位映射接管（Claude 档位名 → 托管模型）：与 per-launch 中继同一顺序纪律，
+        // 必须排在号池/链规划与归属读取之前。agentId 由 x-agent-id 或 UA 判定，
+        // 所以认不出是 Claude 的请求一律不接管——这条映射只服务 Claude 的词表。
+        await anthropicHandler.planTierEntryMessages(req.headers, body, agentId);
+
         // Chain routing (自动路由): body.model === "auto" walks the
         // requesting agent's route chain and takes priority over pool
         // routing (a virtual model no pool member catalog carries).
@@ -948,7 +953,7 @@ export function createOpenAIRelayServer(deps) {
                     onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                   }
                 : {
-                    callUpstream: () => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal }),
+                    callUpstream: () => anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId }),
                   }),
               name: "anthropic",
               logLabel: "anthropic request",
@@ -983,7 +988,7 @@ export function createOpenAIRelayServer(deps) {
               deps.logger?.warn?.(`${planLabel}: member "${member.memberId}" returned ${result.status}; failing over to the next member`);
             }
           } else {
-            result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal });
+            result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId });
           }
           const mappedUsage = anthropicUsageToOpenAI(result.body?.usage);
           if (result.status >= 400) {

@@ -428,6 +428,9 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
     $: h.get, about: { enter() { enters++; }, leave() { leaves++; } },
     replayViewEnter() {}, captureSettingsMirror() { mirrors++; },
     resetPageScroll() { pageScrollResets++; },
+    // 「通用」子页会拉 store state 生成档位映射下拉的选项（与「自动路由」同源），
+    // 本测试只验 About 生命周期，给一条已落地的 Promise 即可。
+    refreshStoreState: () => Promise.resolve(), renderClaudeTierOptions() {},
   });
   vm.runInContext(`${tabs[0]}\n${activate[0]}\n${bind[0]}\nbindSettingsSubTabs();`, context);
   h.get("settingsTabAbout").click();
