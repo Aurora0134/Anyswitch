@@ -85,7 +85,7 @@ try {
   // ③ 主视图取 panel-view，值为 "board"/缺失/不在册时看板就是 HTML 默认态，不写属性。
   if (window.panelStartupLaunch) return;
   const VIEW_NAMES = ["skills", "presets", "store", "stats", "sessions", "settings"];
-  const SUB_TAB_NAMES = ["general", "route", "theme", "about"];
+  const SUB_TAB_NAMES = ["general", "advanced", "route", "theme", "about"];
   let view = null;
   let subTab = null;
   try {
@@ -1576,6 +1576,7 @@ if (window.panelStartupController) panelStartupPlay();
   <section class="settings-view" id="settingsView" hidden>
     <nav class="view-tabs settings-subtabs" role="tablist" aria-label="设置分类">
       <button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true" aria-controls="settingsPanelGeneral">通用</button>
+      <button class="view-tab" id="settingsTabAdvanced" role="tab" aria-selected="false" aria-controls="settingsPanelAdvanced" tabindex="-1">高级选项</button>
       <button class="view-tab" id="settingsTabRoute" role="tab" aria-selected="false" aria-controls="settingsPanelRoute" tabindex="-1">自动路由</button>
       <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false" aria-controls="settingsPanelTheme" tabindex="-1">主题</button>
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
@@ -1739,6 +1740,52 @@ if (window.panelStartupController) panelStartupPlay();
             <span class="about-status" id="aboutEnvironmentStatus" role="status" aria-live="polite">尚未检测</span>
           </div>
           <div class="about-clients" id="aboutClients" role="list" aria-label="客户端本地环境"></div>
+        </div>
+      </div>
+    </div>
+    <!-- 「高级选项」：数据迁移两张卡。版式沿用本页既有卡的写法——卡头右侧放动作按钮
+         （与「关于」的本地环境卡同构），卡体第一行是 role=status 的状态行、第二行是
+         次要明细，需要控件的行用 .modal-item；状态色调走 data-tone，与 about-status 同规则。 -->
+    <div class="settings-panel" id="settingsPanelAdvanced" hidden role="tabpanel" aria-labelledby="settingsTabAdvanced">
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            导出配置包
+          </h2>
+          <div class="card-head-actions">
+            <button type="button" class="btn btn-mini" id="dataExportBtn">选择位置并导出</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="data-bundle-status" id="dataExportStatus" role="status" aria-live="polite">尚未导出</div>
+          <div class="data-bundle-meta" id="dataExportMeta"></div>
+          <div class="data-bundle-note">包内含渠道、号池、路由链、提示词预设、Skills 目录与 API 密钥；用量统计不在包内。</div>
+          <div class="data-bundle-note" data-tone="warn">zip 未加密，包内是明文 API 密钥，等同于把密钥带在手上；导入完成后请删除该文件。</div>
+        </div>
+      </div>
+
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            导入配置包
+          </h2>
+          <div class="card-head-actions">
+            <button type="button" class="btn btn-mini" id="dataImportPickBtn">选择导出包</button>
+            <button type="button" class="btn btn-primary" id="dataImportApplyBtn" disabled>备份并导入</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="data-bundle-status" id="dataImportSummary" role="status" aria-live="polite">尚未选择导出包</div>
+          <div class="data-bundle-meta" id="dataImportMeta"></div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">Skills 保存位置</div>
+              <div class="modal-item-desc" id="dataSkillsPath">沿用导出包里记录的原始位置</div>
+            </div>
+            <button type="button" class="btn btn-mini" id="dataSkillsPickBtn" disabled>更改位置</button>
+          </div>
         </div>
       </div>
     </div>

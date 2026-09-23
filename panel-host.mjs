@@ -120,6 +120,12 @@ export async function startPanelHost(options = {}) {
   const shutdown = async (signal) => {
     logger.info(`${signal} received, closing panel host`);
     stopLogBridge();
+    // 导入预览可能正攥着解到 %TEMP% 的包与明文密钥内存副本；退出前丢掉。
+    try {
+      router.dropDataBundleTickets?.();
+    } catch (err) {
+      logger.warn(`导入暂存清理失败 (non-fatal): ${err.message}`);
+    }
     try {
       await close();
     } catch {

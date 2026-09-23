@@ -2757,7 +2757,10 @@ describe("panel.html 设置全页视图", () => {
   // ① 首帧目标与 restoreView 落定目标逐一相等——两边不一致本身就是新的闪烁；
   // ② CSS 的显示取值等于各容器自身的 display——凭印象写就会首帧布局走形；
   // ③ switchView 摘属性的时机在 hidden 赋值之后、进入钩子之前。
-  const PREPAINT_SUB_TABS = ["general", "route", "theme", "about"];
+  // ④ 子 tab 名单与 panel.js 的注册表同源——注册了新格子却漏了首帧规则，就会
+  //    在「停在高级选项 → 重新加载」时先闪出通用。
+  const PREPAINT_SUB_TABS = ["general", "advanced", "route", "theme", "about"];
+  const registeredSubTabs = [...panelJs.matchAll(/^ {6}([a-z]+): \["settingsTab[A-Za-z]+", "settingsPanel[A-Za-z]+"\],$/gm)].map((m) => m[1]);
   const prepaintSrc = (panelHtml.match(/<script id="panelViewPrepaint">([\s\S]*?)<\/script>/) || [])[1];
   const prepaintRestoreBody =
     (panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/) || [])[1];
@@ -2877,6 +2880,8 @@ describe("panel.html 设置全页视图", () => {
     for (const v of cssViews) assert.ok(scriptViews.includes(v), `CSS 视图 ${v} 不在脚本白名单内`);
     for (const s of scriptSubTabs) assert.ok(cssSubTabs.has(s), `CSS 缺子 tab ${s} 的首帧规则`);
     assert.deepEqual(scriptSubTabs, PREPAINT_SUB_TABS, "脚本子 tab 清单与 panel.js 的四个子 tab 同");
+    assert.deepEqual(scriptSubTabs, registeredSubTabs,
+      "首帧在册的子 tab 必须与 settingsSubTabs 注册表逐格同（漏一格就是那一格仍然闪）");
 
     // 容器自身的 display（class 规则 + id 规则，都没有即 block）
     const ownDisplay = (id) => {
@@ -2926,8 +2931,8 @@ describe("panel.html 设置全页视图", () => {
       "首帧收起主头行（仅设置页）");
     const isList = (block.match(/:is\(([^)]*)\)/) || [, ""])[1]
       .split(",").map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
-    assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelAbout"],
-      "子 tab 整体收起规则覆盖四块面板");
+    assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelAdvanced", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelAbout"],
+      "子 tab 整体收起规则覆盖五块面板");
   });
 
   it("首帧不描子 tab 选中态：只把静态选中项减回基座外观，取值与三个主题都不冲突", () => {
