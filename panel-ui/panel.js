@@ -1442,13 +1442,14 @@ async function api(method, path, body) {
     }
   }
 
-  // DSH 卡分面副行："Web ×1 · TUI ×2"。只有进程扫描能在第一条请求之前分辨面
-  // （web 与 TUI 在请求面上同像：同一条 x-agent-id: dsh），命令行里读不出
-  // profile 的那一档按「未知 ×n」如实显示，所以副行加总恒等于卡上的进程数。
-  // 徽标位只放界面形态，读不出就是「未知」，不拿产品名顶替——见后端
-  // DSH_SURFACE_LABELS/DSH_UNKNOWN_SURFACE_LABEL 的同一口径。
-  function renderDshSurfaceSummary(surfaces) {
-    const el = $("dshSurfaceSummary");
+  // 端点卡分面副行："Web ×1 · TUI ×2"。只有进程扫描能在第一条请求之前分辨面
+  // （DSH 的 web 与 TUI 在请求面上同像：同一条 x-agent-id: dsh；Kimi 的终端、
+  // web 与桌面端同理共用同一条 kimi 归属），后端读不出面的那一档按「未知 ×n」
+  // 如实显示，所以副行加总恒等于卡上的进程数。徽标位只放界面形态，读不出就是
+  // 「未知」，不拿产品名顶替——与后端 DSH_SURFACE_LABELS / KIMI_SURFACE_LABELS
+  // 同一口径，显示名一律由后端下发。
+  function renderSurfaceSummary(prefix, surfaces) {
+    const el = $(`${prefix}SurfaceSummary`);
     if (!el) return;
     const rows = (Array.isArray(surfaces) ? surfaces : []).filter((s) => s && s.count > 0);
     if (rows.length === 0) {
@@ -1493,7 +1494,7 @@ async function api(method, path, body) {
       setInstanceCount("dsh", instances.length);
       if (instancesWrap) instancesWrap.hidden = instances.length === 0;
       renderInstanceRows({ prefix: "dsh", listEl: $("dshInstancesList"), instances, showSurface: true });
-      renderDshSurfaceSummary(d.surfaces);
+      renderSurfaceSummary("dsh", d.surfaces);
       applyDetailFold("dsh");
       gateAggregateRow("dsh", $("dshSessionRow"), instances.length);
 
@@ -1522,7 +1523,7 @@ async function api(method, path, body) {
       setInstanceCount("dsh", 0);
       const instancesWrap = $("dshInstancesWrapper");
       if (instancesWrap) instancesWrap.hidden = true;
-      renderDshSurfaceSummary([]);
+      renderSurfaceSummary("dsh", []);
       empty.hidden = false;
       metricsBlock.hidden = true;
     }
@@ -1748,9 +1749,12 @@ async function api(method, path, body) {
       const tokens = m.tokens || sess.tokens || {};
 
       // 实例按行排列：无实例时用端点聚合量渲染一行「全局汇总」伪实例行，收起态不为空
+      // showSurface：与 DSH 同口径，行上贴这一进程所属界面的徽标（TUI / Web /
+      // Desktop），徽标名由后端下发；聚合伪行不贴。
       const instances = Array.isArray(p.instances) ? p.instances : [];
       setInstanceCount("kimi", instances.length);
-      renderInstanceRows({ prefix: "kimi", listEl: $("kimiInstancesList"), instances, aggregateFallback: buildAggregateFallback(m, p, isGenerating) });
+      renderInstanceRows({ prefix: "kimi", listEl: $("kimiInstancesList"), instances, showSurface: true, aggregateFallback: buildAggregateFallback(m, p, isGenerating) });
+      renderSurfaceSummary("kimi", p.surfaces);
       $("kimiSessionTokens").textContent = `Prompt: ${formatTokens(tokens.prompt)} · Completion: ${formatTokens(tokens.completion)} · Cached: ${formatTokens(tokens.cached)}`;
       $("kimiSessionReqs").textContent = `${m.totalRequests || p.totalRequests || 0} 次请求`;
 
@@ -1776,6 +1780,9 @@ async function api(method, path, body) {
       empty.hidden = false;
       metricsBlock.hidden = true;
       setInstanceCount("kimi", 0);
+      // 停止态必须显式清掉副行：卡收起时 CSS 不藏徽标，脏值会一直挂到下一轮
+      // running 刷新（DSH 同一处置，见 renderDsh 的 else 分支）。
+      renderSurfaceSummary("kimi", []);
     }
   }
 

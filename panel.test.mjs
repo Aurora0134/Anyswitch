@@ -1170,7 +1170,7 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
     assert.ok(m[0].includes('renderInstanceRows({ prefix: "dsh"'), "renders instance rows");
     assert.ok(m[0].includes('setInstanceCount("dsh", instances.length)'), "drives the instance-count badge");
     assert.ok(m[0].includes("showSurface: true"), "行上贴面徽标");
-    assert.ok(m[0].includes("renderDshSurfaceSummary(d.surfaces)"), "卡头副行按面汇总");
+    assert.ok(m[0].includes('renderSurfaceSummary("dsh", d.surfaces)'), "卡头副行按面汇总");
     assert.ok(m[0].includes("$(\"dshInstancesWrapper\").hidden") || m[0].includes("instancesWrap.hidden = instances.length === 0"),
       "零实例时实例盒收起，不留空盒");
     assert.ok(!m[0].includes("buildAggregateFallback"),
@@ -1183,8 +1183,28 @@ describe("panel.html DSH endpoint card（卡内分面 + 每进程一行）", () 
     }
   });
 
-  it("does not opt the other instance cards into the surface badge", () => {
-    for (const fn of ["renderPi", "renderKimi", "renderOpencode", "renderCodex", "renderGrok"]) {
+  it("renders Kimi as a surface-badged multi-instance card", () => {
+    const cardStart = panelHtml.indexOf('data-agent-id="kimi"');
+    const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
+    const kimiCard = panelHtml.slice(cardStart, cardEnd);
+    assert.ok(cardStart > 0, "kimi card container exists");
+    assert.ok(kimiCard.includes('id="kimiSurfaceSummary"'), "卡头有分面副行位");
+    assert.ok(
+      kimiCard.indexOf('id="kimiInstanceCount"') < kimiCard.indexOf('id="kimiSurfaceSummary"'),
+      "副行排在实例计数胶囊之后（与 DSH 卡同序）",
+    );
+
+    const m = panelJs.match(/function renderKimi\(p\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderKimi found in panel.js");
+    assert.ok(m[0].includes("showSurface: true"), "行上贴面徽标");
+    assert.ok(m[0].includes('renderSurfaceSummary("kimi", p.surfaces)'), "卡头副行按面汇总");
+    assert.ok(m[0].includes('renderSurfaceSummary("kimi", [])'), "停止态显式清副行（CSS 不藏徽标，脏值会挂到下一轮）");
+    assert.ok(m[0].includes('setInstanceCount("kimi", 0)'), "未运行分支清零计数");
+    assert.ok(!m[0].includes("dshInstances") && !m[0].includes("dshSurface"), "不借 DSH 的接线");
+  });
+
+  it("keeps the surface badge off the cards without a second face", () => {
+    for (const fn of ["renderPi", "renderOpencode", "renderCodex", "renderGrok"]) {
       const m = panelJs.match(new RegExp("function " + fn + "\\(p\\) \\{[\\s\\S]*?\\n  \\}"));
       assert.ok(m, fn + " found in panel.js");
       assert.ok(!m[0].includes("showSurface"), `${fn} keeps today's row markup`);

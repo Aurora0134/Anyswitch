@@ -426,16 +426,17 @@ describe("实例行面徽标（DSH：一行 = 一个进程，徽标 = 它的界�
   });
 });
 
-describe("DSH 卡头分面副行（Web ×1 · TUI ×2）", () => {
-  function makeSummaryFn(node) {
-    const m = panelJs.match(/function renderDshSurfaceSummary\(surfaces\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "renderDshSurfaceSummary found in panel.js");
-    return new Function("$", `return (${m[0]});`)((id) => (id === "dshSurfaceSummary" ? node : null));
+describe("端点卡头分面副行（Web ×1 · TUI ×2）", () => {
+  // 一个函数服务两张卡：prefix 决定写哪一个副行位（DSH 与 Kimi 同口径）。
+  function makeSummaryFn(nodes) {
+    const m = panelJs.match(/function renderSurfaceSummary\(prefix, surfaces\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderSurfaceSummary found in panel.js");
+    return new Function("$", `return (${m[0]});`)((id) => nodes[id] ?? null);
   }
 
   it("按面计数并用 · 连接，元素常显", () => {
     const node = { hidden: true, textContent: "" };
-    makeSummaryFn(node)([
+    makeSummaryFn({ dshSurfaceSummary: node })("dsh", [
       { profile: "dsh-tui", label: "TUI", count: 2 },
       { profile: "web", label: "Web", count: 1 },
     ]);
@@ -443,25 +444,38 @@ describe("DSH 卡头分面副行（Web ×1 · TUI ×2）", () => {
     assert.equal(node.hidden, false);
   });
 
+  it("Kimi 卡走同一函数、只换前缀，面名照后端下发值", () => {
+    const nodes = {
+      dshSurfaceSummary: { hidden: false, textContent: "旧值" },
+      kimiSurfaceSummary: { hidden: true, textContent: "" },
+    };
+    makeSummaryFn(nodes)("kimi", [
+      { surface: "desktop", label: "Desktop", count: 1 },
+      { surface: "tui", label: "TUI", count: 1 },
+    ]);
+    assert.equal(nodes.kimiSurfaceSummary.textContent, "Desktop ×1 · TUI ×1");
+    assert.equal(nodes.kimiSurfaceSummary.hidden, false);
+    assert.equal(nodes.dshSurfaceSummary.textContent, "旧值", "不串到另一张卡的副行位");
+  });
+
   it("读不出 profile 的那一档按后端给的字面显示名呈现", () => {
     const node = { hidden: true, textContent: "" };
-    makeSummaryFn(node)([{ profile: null, label: "未知", count: 3 }]);
+    makeSummaryFn({ dshSurfaceSummary: node })("dsh", [{ profile: null, label: "未知", count: 3 }]);
     assert.equal(node.textContent, "未知 ×3");
   });
 
   it("空数组 / 零计数 / 缺字段一律收起并清空文案，不留空胶囊", () => {
     for (const surfaces of [[], null, undefined, [{ profile: "web", label: "Web", count: 0 }], [{ count: 0 }]]) {
       const node = { hidden: false, textContent: "TUI ×2" };
-      makeSummaryFn(node)(surfaces);
+      makeSummaryFn({ dshSurfaceSummary: node })("dsh", surfaces);
       assert.equal(node.hidden, true, `收起：${JSON.stringify(surfaces)}`);
       assert.equal(node.textContent, "");
     }
   });
 
   it("元素不在（其他视图/旧页面）时静默返回，不抛", () => {
-    const m = panelJs.match(/function renderDshSurfaceSummary\(surfaces\) \{[\s\S]*?\n  \}/);
-    assert.ok(m, "renderDshSurfaceSummary found in panel.js");
-    const fn = new Function("$", `return (${m[0]});`);
-    assert.doesNotThrow(() => fn(() => null)([{ profile: "web", label: "Web", count: 1 }]));
+    const fn = makeSummaryFn({});
+    assert.doesNotThrow(() => fn("dsh", [{ profile: "web", label: "Web", count: 1 }]));
+    assert.doesNotThrow(() => fn("kimi", [{ surface: "web", label: "Web", count: 1 }]));
   });
 });
