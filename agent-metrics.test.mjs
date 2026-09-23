@@ -4058,6 +4058,40 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card).sort(), [["kimi-6101", "TUI"], ["kimi-6102", "Web"], ["kimi-6103", "Desktop"]]);
   });
 
+  it("flips a process's face when it hands its session to the browser mid-life, with the row identity intact", async () => {
+    // 客户端里有一条「TUI 交棒」的路：在终端界面里把当前会话交给浏览器，TUI 让位
+    // 后同一个进程号就地变成 server，并在注册表里补一条以自己 pid 署名的登记。
+    // 面不是一次贴死的——每轮扫描都从「镜像名 + 本轮注册表」重算，所以登记出现后
+    // 的那一轮里卡头副行与实例行一起换面，行身份仍是同一个 kimi-<pid>。
+    // 轮数按上界轮询而不是固定排空次数：换面落地前的读者照旧拿上一轮快照
+    // （stale-while-revalidate），哪一轮落地由不得测试来猜。
+    let now = 3000;
+    let registered = false;
+    const collector = testCollector({
+      nowFn: () => now,
+      execFn: (cmd, opts, cb) => cb(null, wmic(kimiRow(6501))),
+      kimiRegistryLookup: async () => (registered
+        ? new Map([[6501, { pid: 6501, port: 58627, heartbeatAt: now, hostVersion: "2.0.2" }]])
+        : new Map()),
+    });
+    const before = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(surfacesOf(before), { TUI: 1 });
+    assert.deepEqual(rowsOf(before), [["kimi-6501", "TUI"]]);
+
+    registered = true;
+    now += 2501;
+    let flipped = null;
+    for (let round = 0; round < 20 && flipped === null; round += 1) {
+      const card = kimi(await collector.getAgentsStatus());
+      if (card.surfaces.some((s) => s.label === "Web")) flipped = card;
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.ok(flipped !== null, "登记出现后的一轮里，副行要跟着换成 Web");
+    assert.deepEqual(surfacesOf(flipped), { Web: 1 }, "同一个进程只有一张面，换面不是加面");
+    assert.deepEqual(flipped.instances.map((i) => [i.id, i.surface]), [["kimi-6501", "Web"]], "实例行与副行同轮换面");
+    assert.equal(flipped.processCount, 1, "换面不换计数");
+  });
+
   it("never lets the registration table move a desktop row off its face", async () => {
     const collector = testCollector({
       nowFn: () => 3000,
