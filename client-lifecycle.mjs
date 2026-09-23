@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { existsSync } from "node:fs";
 
 // npm 全局安装的客户端：本地检测（environment-service）读的就是这些包在 npm
@@ -14,12 +14,37 @@ export const CLIENT_PACKAGES = Object.freeze({
   dsh: "@deepseek-ai/dsh",
 });
 
-export const CLIENT_ACTIONS = Object.freeze(["install", "update"]);
+// 执行体不是 npm 全局包、但官方分发在 npm 上的客户端（Grok Build）：先跑它自身的
+// 升级命令，失败才降级到 npm 安装。npm 那一跳必须钉住服务端查到的官方版本、并把
+// registry 显式指回官方源——用户 npm 配置的 registry 可能停在同步落后的镜像上
+// （本机镜像的 @xai-official/grok latest 落后了整条大版本），`@latest` 在那种机器上
+// 会把执行体降级。allowScripts 同理不能省：把新二进制安置进 ~/.grok/bin 的正是该包的
+// postinstall，而 npm 的脚本白名单默认不放行它，被拦下就成「命令成功、版本没动」。
+export const NATIVE_CLIENTS = Object.freeze({
+  grok: Object.freeze({
+    package: "@xai-official/grok",
+    registry: "https://registry.npmjs.org",
+    updateArgs: Object.freeze(["update"]),
+  }),
+});
 
-// 面板能代管生命周期的客户端；null 表示只能给官方入口、面板不执行任何写入。
+export const CLIENT_ACTIONS = Object.freeze(["install", "update"]);
+const NATIVE_ACTIONS = Object.freeze(["update"]);
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+// 面板能代管生命周期的客户端与执行形态；null 表示只能给官方入口、面板不执行任何写入。
 // 用自身属性判定：普通对象会从原型链上捡到 constructor/toString 这类名字。
 export function clientLifecycleKind(id) {
-  return typeof id === "string" && Object.hasOwn(CLIENT_PACKAGES, id) ? "npm" : null;
+  if (typeof id !== "string") return null;
+  if (Object.hasOwn(CLIENT_PACKAGES, id)) return "npm";
+  return Object.hasOwn(NATIVE_CLIENTS, id) ? "native" : null;
+}
+
+// 该客户端可接受的动作。原生自更新的客户端只有「更新」：未安装时面板不代装，
+// 从裸装起把用户切进哪种安装形态不该由一个按钮代劳。
+export function clientLifecycleActions(id) {
+  const kind = clientLifecycleKind(id);
+  return kind === "npm" ? CLIENT_ACTIONS : kind === "native" ? NATIVE_ACTIONS : [];
 }
 
 function packageFor(id) {
@@ -40,25 +65,29 @@ function tailLines(text, limit, maxChars) {
   return tail.length > maxChars ? tail.slice(tail.length - maxChars) : tail;
 }
 
-// 安装与更新是同一个 npm 命令（--global 装最新版），action 只影响结果措辞。
+// 全局安装最新（或钉住的）版本；action 只影响结果措辞，命令同一跳。
 // 超时给得很宽、只当泄漏兜底：中途杀 npm 会在全局目录里留下半截安装，比等它跑完更糟。
-export function runClientLifecycle({
-  id,
-  action,
-  spawn = execFile,
-  execPath = process.execPath,
-  io = { existsSync },
-  timeoutMs = 20 * 60 * 1000,
-  maxOutputChars = 2000,
-} = {}) {
-  const pkg = packageFor(id);
-  if (!pkg || !CLIENT_ACTIONS.includes(action)) return Promise.resolve({ ok: false, unsupported: true, output: "" });
+function runNpmInstall({
+  pkg,
+  version = "latest",
+  registry = null,
+  allowScripts = null,
+  spawn,
+  execPath,
+  io,
+  timeoutMs,
+  maxOutputChars,
+}) {
   const npmCli = resolveNpmCli({ execPath, io });
   if (!npmCli) return Promise.resolve({ ok: false, npmMissing: true, output: "" });
+  const args = [npmCli, "install", "--global", "--no-audit", "--no-fund"];
+  if (registry) args.push(`--registry=${registry}`);
+  if (allowScripts) args.push(`--allow-scripts=${allowScripts}`);
+  args.push(`${pkg}@${version}`);
   return new Promise((done) => {
     spawn(
       execPath,
-      [npmCli, "install", "--global", "--no-audit", "--no-fund", `${pkg}@latest`],
+      args,
       { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" },
       (error, stdout, stderr) => {
         const raw = String(stderr ?? "").trim() || String(stdout ?? "").trim();
@@ -66,4 +95,72 @@ export function runClientLifecycle({
       },
     );
   });
+}
+
+// 执行体路径来自本地检测（GROK_EXECUTABLE 覆盖时已要求绝对路径 .exe），面板请求里
+// 换不掉它；两跳都不经 shell，参数逐项传递。官方最新版本拿不准时不做兜底安装——
+// 宁可报失败，也不能拿一个可能落后的 dist-tag 覆盖正在跑的执行体。
+function runNativeSelfUpdate({
+  id,
+  commandPath,
+  targetVersion,
+  spawn,
+  execPath,
+  io,
+  timeoutMs,
+  maxOutputChars,
+}) {
+  const spec = NATIVE_CLIENTS[id];
+  if (typeof commandPath !== "string" || !isAbsolute(commandPath)) {
+    return Promise.resolve({ ok: false, unsupported: true, output: "" });
+  }
+  return new Promise((done) => {
+    spawn(
+      commandPath,
+      [...spec.updateArgs],
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        const raw = String(stderr ?? "").trim() || String(stdout ?? "").trim();
+        const selfUpdateOutput = tailLines(raw, 8, maxOutputChars);
+        if (!error) done({ ok: true, timedOut: false, output: selfUpdateOutput });
+        else if (!SEMVER.test(String(targetVersion ?? ""))) {
+          done({ ok: false, timedOut: Boolean(error.killed), output: selfUpdateOutput });
+        } else {
+          runNpmInstall({
+            pkg: spec.package,
+            version: targetVersion,
+            registry: spec.registry,
+            allowScripts: spec.package,
+            spawn,
+            execPath,
+            io,
+            timeoutMs,
+            maxOutputChars,
+          }).then((fallback) => done(fallback.ok
+            ? fallback
+            : { ...fallback, output: [selfUpdateOutput, fallback.output].filter(Boolean).join("\n") }));
+        }
+      },
+    );
+  });
+}
+
+export function runClientLifecycle({
+  id,
+  action,
+  commandPath = null,
+  targetVersion = null,
+  spawn = execFile,
+  execPath = process.execPath,
+  io = { existsSync },
+  timeoutMs = 20 * 60 * 1000,
+  maxOutputChars = 2000,
+} = {}) {
+  const kind = clientLifecycleKind(id);
+  if (!kind || !clientLifecycleActions(id).includes(action)) {
+    return Promise.resolve({ ok: false, unsupported: true, output: "" });
+  }
+  const shared = { spawn, execPath, io, timeoutMs, maxOutputChars };
+  if (kind === "native") return runNativeSelfUpdate({ id, commandPath, targetVersion, ...shared });
+  return runNpmInstall({ pkg: packageFor(id), ...shared });
 }

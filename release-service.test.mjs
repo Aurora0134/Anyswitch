@@ -87,12 +87,16 @@ it("accepts only matching official release links and constrained pagination", as
     assert.equal(result.state, "error", endpoint);
     assert.equal(result.errorCode, "invalid_pagination");
   }
-  for (const patch of [{ tag_name: "desktop-v0.155.0" }, { prerelease: true }, { draft: true }, { tag_name: null }]) {
-    const result = await createReleaseService({ now, fetchFn: async () => json({ ...release("rust-v0.155.0"), prerelease: false, html_url: "https://github.com/openai/codex/releases/tag/rust-v0.155.0", ...patch }) }).getClientLatest("codex");
-    assert.equal(result.errorCode, "invalid_response");
+  // npm 系客户端的发布页是写死的固定链接，远端响应里没有任何可注入的 URL；
+  // 能做的只有拒绝读不出版本的响应体。Grok Build 走同一形态，一并钉住。
+  for (const body of [{}, { latest: null }, { latest: "not-a-version" }, { latest: "1.0.30.1" }, { next: "1.0.41" }]) {
+    const result = await createReleaseService({ now, fetchFn: async () => json(body) }).getClientLatest("grok");
+    assert.equal(result.state, "error", JSON.stringify(body));
+    assert.equal(result.errorCode, "invalid_response", JSON.stringify(body));
+    assert.equal(result.version, null);
   }
-  const codex = await createReleaseService({ now, fetchFn: async () => json({ ...release("rust-v0.155.0"), prerelease: false, html_url: "https://github.com/openai/codex/releases/tag/desktop-v0.155.0" }) }).getClientLatest("codex");
-  assert.equal(codex.errorCode, "unsafe_url");
+  const npmUrl = await createReleaseService({ now, fetchFn: async () => json({ latest: "1.0.41", alpha: "1.0.41" }) }).getClientLatest("grok");
+  assert.deepEqual(npmUrl, { state: "ok", version: "1.0.41", url: "https://www.npmjs.com/package/@xai-official/grok", source: "npm:@xai-official/grok:latest", checkedAt, errorCode: null });
 });
 
 it("follows all release pages before deciding and never trusts partial results", async () => {
@@ -187,9 +191,11 @@ it("falls back to the newest preview for a stable install when no stable release
   assert.equal(drafted.release, null);
 });
 
-it("uses the Codex CLI release and the official desktop manifest for Qoder", async () => {
+it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", async () => {
   const fixtures = [
-    ["codex", "https://api.github.com/repos/openai/codex/releases/latest", { tag_name: "rust-v0.155.0", draft: false, prerelease: false, html_url: "https://github.com/openai/codex/releases/tag/rust-v0.155.0" }, "0.155.0", "https://github.com/openai/codex/releases/tag/rust-v0.155.0", "github:openai/codex:latest"],
+    // Codex 与更新动作同源：本地检测读 npm 全局包、装的是 npm 全局包，官方最新也查 npm。
+    ["codex", "https://registry.npmjs.org/-/package/%40openai%2Fcodex/dist-tags", { latest: "0.155.0", alpha: "0.157.0-alpha.10", "win32-x64": "0.155.0-win32-x64" }, "0.155.0", "https://github.com/openai/codex/releases", "npm:@openai/codex:latest"],
+    ["grok", "https://registry.npmjs.org/-/package/%40xai-official%2Fgrok/dist-tags", { latest: "1.0.41", alpha: "1.0.41" }, "1.0.41", "https://www.npmjs.com/package/@xai-official/grok", "npm:@xai-official/grok:latest"],
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
     ["qoder", "https://download.qoder.com.cn/qoder-app/releases/latest.yml", "version: '0.2.5' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.2.5", "https://qoder.com/changelog", "qoder:desktop:latest"],
   ];

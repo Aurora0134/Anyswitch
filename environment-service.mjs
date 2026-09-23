@@ -88,17 +88,14 @@ const CLIENTS = [
   ["dsh", "DSH", resolveDshExecutable],
   ["zcode", "ZCode", resolveZcodeExecutable],
   ["qoder", "Qoder", resolveQoderExecutable],
-  // Grok Build is the remaining native binary: version comes from the CLI's
-  // own --version report (probeVersion branch below), never an npm package.json.
+  // Grok Build is the remaining native binary: its local version comes from the
+  // CLI's own --version report (probeVersion branch below), never an npm
+  // package.json — `@xai-official/grok` is only how upstream ships it (and how
+  // release-service reads the official latest), not the copy this machine runs.
   ["grok", "Grok Build", resolveGrokExecutable],
 ];
 
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
-
-// Grok Build is a native binary with its own `grok update` and no public
-// release feed — no entry in release-service.mjs CLIENTS, so the about page
-// must not issue an official-latest query for it.
-const NO_OFFICIAL_SOURCE = new Set(["grok"]);
 
 function missing(error) {
   return ["ENOENT", "ENOTDIR"].includes(error?.code);
@@ -216,10 +213,9 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
   }
 
   async function inspect(id, kind, locate) {
-    // Clients without a public release feed (Grok Build: native binary,
-    // self-updates via `grok update`) get no remoteId — the about page then
-    // skips the official-latest query instead of showing a query failure.
-    const result = { kind, remoteId: NO_OFFICIAL_SOURCE.has(id) ? null : id, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    // Every client row carries the remoteId the about page queries its official
+    // latest from; release-service.mjs CLIENTS is the authoritative source list.
+    const result = { kind, remoteId: id, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
     try {
       let path = locate(base, resolverIo);
       if (!isFile(path)) return result;

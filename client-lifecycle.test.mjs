@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { CLIENT_PACKAGES, CLIENT_ACTIONS, clientLifecycleKind, resolveNpmCli, runClientLifecycle } from "./client-lifecycle.mjs";
+import { CLIENT_PACKAGES, CLIENT_ACTIONS, NATIVE_CLIENTS, clientLifecycleKind, clientLifecycleActions, resolveNpmCli, runClientLifecycle } from "./client-lifecycle.mjs";
 
 const ALL_CLIENTS = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"];
 
@@ -14,13 +14,26 @@ test("npm 代管清单恰好覆盖 6 个 CLI 客户端，桌面应用缺席", ()
   assert.throws(() => { CLIENT_PACKAGES.claude = "evil"; }, TypeError, "清单被冻结，不能被改写");
 });
 
-test("前端关于页的更新按钮清单与服务端 npm 包表一致", () => {
+test("Grok Build 走自身升级命令，且只接受更新", () => {
+  assert.deepEqual(Object.keys(NATIVE_CLIENTS), ["grok"]);
+  assert.equal(clientLifecycleKind("grok"), "native");
+  assert.deepEqual([...clientLifecycleActions("grok")], ["update"], "未安装时面板不代装 grok");
+  assert.deepEqual([...clientLifecycleActions("claude")].sort(), ["install", "update"]);
+  assert.deepEqual([...clientLifecycleActions("zcode")], [], "桌面应用没有任何代管动作");
+  assert.deepEqual([...clientLifecycleActions("constructor")], [], "原型链上的名字不是客户端");
+  assert.throws(() => { NATIVE_CLIENTS.grok.package = "evil"; }, TypeError);
+});
+
+test("前端关于页的按钮清单与服务端两张表一致", () => {
   // 两个清单分居前后端，任何一端增删客户端而忘记另一端都会让按钮与服务端行为漂移
   const panelJs = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
-  const match = panelJs.match(/updatableClients = new Set\(\[([^\]]+)\]\)/);
-  assert.ok(match, "panel.js 里存在 updatableClients 集合");
-  const ids = JSON.parse(`[${match[1]}]`);
-  assert.deepEqual(ids.sort(), Object.keys(CLIENT_PACKAGES).sort());
+  const listed = (name) => {
+    const match = panelJs.match(new RegExp(`${name} = new Set\\(\\[([^\\]]+)\\]\\)`));
+    assert.ok(match, `panel.js 里存在 ${name} 集合`);
+    return JSON.parse(`[${match[1]}]`).sort();
+  };
+  assert.deepEqual(listed("updatableClients"), [...Object.keys(CLIENT_PACKAGES), ...Object.keys(NATIVE_CLIENTS)].sort());
+  assert.deepEqual(listed("installableClients"), Object.keys(CLIENT_PACKAGES).sort());
 });
 
 test("动作白名单只有安装与更新", () => {
@@ -58,7 +71,7 @@ test("安装命令：node 直跑 npm-cli.js，不经 shell，包名来自服务�
 
 test("未知客户端或非法动作不触发任何进程", async () => {
   const { calls, spawn } = fakeSpawn((_, callback) => callback(null, "", ""));
-  for (const [id, action] of [["zcode", "update"], ["qoder", "install"], ["nope", "update"], ["claude", "reinstall"], ["claude", "rm -rf /"]]) {
+  for (const [id, action] of [["zcode", "update"], ["qoder", "install"], ["nope", "update"], ["claude", "reinstall"], ["claude", "rm -rf /"], ["grok", "install"]]) {
     const result = await runClientLifecycle({ id, action, spawn });
     assert.equal(result.ok, false);
     assert.equal(result.unsupported, true);
@@ -98,3 +111,80 @@ test("管道/文件名里带空格与特殊字符的执行路径原样传递，�
   assert.equal(calls[0].args[0], npmCli);
   assert.deepEqual(calls[0].args.slice(1, 4), ["install", "--global", "--no-audit"]);
 });
+
+// ── Grok Build：先跑它自身的升级命令，失败才降级到 npm ──────────────────
+const GROK_EXE = "C:\\Users\\me\\.grok\\bin\\grok.exe";
+const grokNpmCli = "C:\\node\\node_modules\\npm\\bin\\npm-cli.js";
+const grokIo = { existsSync: (path) => path === grokNpmCli };
+
+test("grok 自身升级成功时不碰 npm，命令不经 shell", async () => {
+  const { calls, spawn } = fakeSpawn((_, callback) => callback(null, "Already up to date\n", ""));
+  const result = await runClientLifecycle({
+    id: "grok", action: "update", commandPath: GROK_EXE, targetVersion: "1.0.41",
+    spawn, execPath: "C:\\node\\node.exe", io: grokIo,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1, "升级成功就结束，不再有第二跳");
+  assert.equal(calls[0].file, GROK_EXE);
+  assert.deepEqual(calls[0].args, ["update"]);
+  assert.equal(calls[0].options.shell, undefined, "不经 shell，参数逐项传递");
+  assert.equal(calls[0].options.windowsHide, true);
+});
+
+test("grok 自身升级失败时降级到 npm，钉住官方版本、显式指官方 registry 并放行该包脚本", async () => {
+  const { calls, spawn } = fakeSpawn((call, callback) => callback(
+    call.file === GROK_EXE ? Object.assign(new Error("GCS channel pointer fetch failed"), { code: 1 }) : null,
+    "",
+    call.file === GROK_EXE ? "Error: No such file or directory (os error 2)" : "",
+  ));
+  const result = await runClientLifecycle({
+    id: "grok", action: "update", commandPath: GROK_EXE, targetVersion: "1.0.41",
+    spawn, execPath: "C:\\node\\node.exe", io: grokIo,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].args, [
+    grokNpmCli, "install", "--global", "--no-audit", "--no-fund",
+    "--registry=https://registry.npmjs.org", "--allow-scripts=@xai-official/grok", "@xai-official/grok@1.0.41",
+  ], "版本钉死且不跟随用户 registry：镜像的 latest 落后时会把执行体降级");
+  assert.equal(calls[1].file, "C:\\node\\node.exe");
+});
+
+for (const targetVersion of [null, undefined, "latest", "0.1.4.9", "1.0.41 ; rm", ""])
+  test(`拿不到可信的官方版本（${JSON.stringify(targetVersion)}）时不做兜底安装`, async () => {
+    const { calls, spawn } = fakeSpawn((_, callback) => callback(Object.assign(new Error("exit 1"), { code: 1 }), "", "update failed"));
+    const result = await runClientLifecycle({
+      id: "grok", action: "update", commandPath: GROK_EXE, targetVersion,
+      spawn, execPath: "C:\\node\\node.exe", io: grokIo,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(calls.length, 1, "只跑客户端自身的升级命令");
+    assert.match(result.output, /update failed/);
+  });
+
+test("兜底安装也失败时两跳的末行一起上报", async () => {
+  const { spawn } = fakeSpawn((call, callback) => callback(
+    Object.assign(new Error("exit 1"), { code: 1 }),
+    "",
+    call.file === GROK_EXE ? "self-update said no" : "npm error code UNAUTHORIZED",
+  ));
+  const result = await runClientLifecycle({
+    id: "grok", action: "update", commandPath: GROK_EXE, targetVersion: "1.0.41",
+    spawn, execPath: "C:\\node\\node.exe", io: grokIo,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.output, /self-update said no/);
+  assert.match(result.output, /npm error code UNAUTHORIZED/);
+});
+
+for (const commandPath of [null, undefined, "", "grok.exe", "./grok.exe"])
+  test(`检测不到执行体（${JSON.stringify(commandPath)}）时不执行任何命令`, async () => {
+    const { calls, spawn } = fakeSpawn((_, callback) => callback(null, "", ""));
+    const result = await runClientLifecycle({
+      id: "grok", action: "update", commandPath, targetVersion: "1.0.41",
+      spawn, execPath: "C:\\node\\node.exe", io: grokIo,
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.unsupported, true);
+    assert.equal(calls.length, 0);
+  });

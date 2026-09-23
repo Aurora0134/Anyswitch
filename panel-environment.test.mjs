@@ -185,7 +185,7 @@ function deferred() {
 function clientState(versions = {}, issues = {}) {
   return {
     checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
-    clients: ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"].map((id) => ({
+    clients: ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].map((id) => ({
       id, name: id,
       installations: [{
         kind: id === "zcode" || id === "qoder" ? "desktop" : "cli",
@@ -360,6 +360,47 @@ test("装上了却跑不起来给出运行环境提示，而非报成安装成�
     assert.equal(finished.body.outcome, "installed_not_runnable");
     assert.match(finished.body.message, /运行环境/);
     assert.equal(finished.body.comparison, "unknown", "跑不起来时不与官方版本比新旧");
+  });
+});
+
+test("未安装的 grok 不给安装动作，更新动作仍然受理", async () => {
+  await withPanel({
+    environmentService: { async getState() { return clientState({ grok: null }); } },
+    releaseService: { async getClientLatest() { return latestFor("1.0.41"); } },
+    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
+  }, async (get, post) => {
+    assert.equal((await post("/panel/api/environment/update", { id: "grok", action: "install" })).status, 400,
+      "首装会把用户切进另一种安装形态，不由面板代劳");
+    assert.equal((await post("/panel/api/environment/update", { id: "grok", action: "update" })).status, 202);
+  });
+});
+
+test("grok 更新前先把官方最新版本取来钉住兜底安装，执行体路径用检测到的那份", async () => {
+  const requested = [];
+  await withPanel({
+    environmentService: {
+      async getState(options = {}) {
+        return clientState({ grok: options.force ? "1.0.41" : "1.0.30" });
+      },
+    },
+    releaseService: {
+      async getClientLatest(id, options) {
+        requested.push({ id, force: Boolean(options?.force) });
+        return latestFor(id === "grok" ? "1.0.41" : "1.0.0");
+      },
+    },
+    runClientLifecycleFn: async ({ id, action, commandPath, targetVersion }) => {
+      assert.deepEqual({ id, action }, { id: "grok", action: "update" });
+      assert.equal(commandPath, "C:/fixture/grok", "执行体路径来自本地检测，请求体换不掉它");
+      assert.equal(targetVersion, "1.0.41", "降级安装要钉住查到的官方版本，不能跟 dist-tag");
+      return { ok: true, output: "" };
+    },
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "grok", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "updated", "重查后本地版本已到位");
+    assert.match(finished.body.message, /1\.0\.41/);
+    assert.deepEqual(requested.slice(0, 1), [{ id: "grok", force: false }], "动手前先查一次官方版本，走缓存不打扰远端");
   });
 });
 
