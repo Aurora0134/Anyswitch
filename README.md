@@ -92,7 +92,7 @@ After updating the source, the backend needs a new panel-host process. Refreshin
 | Client | Protocol | How to connect |
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude args]` — starts a per-launch relay on an ephemeral loopback port and injects `ANTHROPIC_BASE_URL` + a one-shot `ANTHROPIC_AUTH_TOKEN` via process env only; the relay and token die when Claude exits. |
-| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi args]` — same per-launch injection, plus managed providers merged into `~/.kimi-code/config.toml`. |
+| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi args]` — same per-launch injection, plus managed providers merged into `~/.kimi-code/config.toml`. The native desktop app shares that same home directory, so it reads the managed channels, `AGENTS.md` and skills with no extra setup; the board tags its rows `Desktop`. |
 | Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex args]` — ensures the relay is available on 47821, merges managed providers into `~/.codex/config.toml`, and supplies a model catalog unless you have chosen your own. Relay authentication is written into the managed config; the launcher passes instance identity through the process environment. |
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — ensures the relay is available on 47821 and merges managed providers into `~/.config/opencode/opencode.json` using the built-in config writer. No companion plugin is required; your `opencode.jsonc` is left untouched. |
 | Pi | OpenAI | `node pi-launcher.mjs [pi args]` — syncs managed providers into `~/.pi/agent/models.json`, then launches pi. |
@@ -125,7 +125,7 @@ Once installed, the agent follows the skill's rules: it writes presets only thro
 
 The panel is served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down. Its features include:
 
-- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client. On the DSH card one row is one DSH process, tagged with the surface it came from (Web vs. the terminal front end), and the card header counts the surfaces.
+- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client. On the DSH card one row is one DSH process, tagged with the surface it came from (Web vs. the terminal front end), and the card header counts the surfaces. The Kimi Code card works the same way over its three surfaces — `TUI`, `Web` and the native desktop app (`Desktop`).
 - **Skills 管理 (Skills)** — one master skills repo; import skills from a directory or zip, deploy/undeploy them to agent endpoints, and surface endpoint anomalies.
 - **渠道管理 (Channels)** — provider management (add, rotate key, delete, model filter) with DPAPI key sealing; model discovery refresh plus manual model add/remove; pools (号池) and route-chain (自动路由) editing; manual **同步到端点** sync.
 - **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
@@ -279,7 +279,7 @@ git switch --detach v0.5.1
 | 客户端 | 协议 | 接入方式 |
 | --- | --- | --- |
 | Claude Code | Anthropic | `node launcher.mjs [claude 参数]` — 在临时环回端口拉起一次性 relay，仅以进程环境变量注入 `ANTHROPIC_BASE_URL` + 一次性 `ANTHROPIC_AUTH_TOKEN`；Claude 退出时 relay 与 token 一并销毁。 |
-| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi 参数]` — 同样的一次性注入，另把托管 provider 合并进 `~/.kimi-code/config.toml`。 |
+| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi 参数]` — 同样的一次性注入，另把托管 provider 合并进 `~/.kimi-code/config.toml`。官方桌面端与 CLI 共用同一份家目录，托管渠道、`AGENTS.md` 与 skills 一并读到，无需额外接入；看板上它的实例行标为 `Desktop`。 |
 | Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex 参数]` — 确保 47821 relay 可用，把托管 provider 合并进 `~/.codex/config.toml`；未自选模型目录时提供托管模型目录。relay 鉴权写入托管配置，启动器通过进程环境传递实例标识。 |
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 可用，由仓内配置写手把托管 provider 合并进 `~/.config/opencode/opencode.json`。无需配套插件，用户的 `opencode.jsonc` 保持不动。 |
 | Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` — 先把托管 provider 同步进 `~/.pi/agent/models.json`，再启动 pi。 |
@@ -312,7 +312,7 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 
 面板由独立面板宿主承载，与 relay 解耦，relay 停止/崩溃时面板仍可用。主要功能包括：
 
-- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行；DSH 卡的实例行一行对应一个 DSH 进程，并按界面标明来历（Web 与终端前端各一行，卡头给出各界面的数量）。
+- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行；DSH 卡的实例行一行对应一个 DSH 进程，并按界面标明来历（Web 与终端前端各一行，卡头给出各界面的数量）。Kimi Code 卡同一形状，覆盖它的三个界面：终端（`TUI`）、`kimi web`（`Web`）与原生桌面端（`Desktop`）。
 - **Skills 管理** — 单一 skills 主仓库：从目录或 zip 导入 skill、部署/解除到各 agent 端点、端点异常提示。
 - **渠道管理** — provider 管理（新增、轮换 Key、删除、模型过滤）并 DPAPI 封存 Key；模型发现刷新与手动增删模型；号池与路由链（自动路由）编辑；手动 **同步到端点**。
 - **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。

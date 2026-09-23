@@ -619,6 +619,32 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     }
   });
 
+  it("synthesizes kimi-<pid> for a desktop app started by double-click, labelled Desktop", async () => {
+    // 桌面端不经过 Anyswitch 启动器：既没有 x-agent-id 也没有 x-agent-instance，
+    // 归属只能靠 UA 嗅探（内嵌核心发的是 kimi-code-desktop/<ver>），行身份靠
+    // netstat 反查，面来自同一次进程扫描里的镜像名。这条把"双击启动也能被观测"
+    // 整条链钉住——它正是本期决定不引入 launcher 的前提（计划 §8）。
+    const desktopPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,\"C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi Code\\Kimi Code.exe\" ,kimi code.exe,4321\r\n");
+    const collector = testCollector({ execFn: desktopPidExec });
+    const { seen, socketOwner } = stubOwner(4321);
+    const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postChat(port, { "user-agent": "kimi-code-desktop/1.0.2" });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.equal(seen.length, 1, "kimi 在套接字兜底白名单内");
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(card.processCount, 1, "桌面端计入端点进程数");
+      assert.deepEqual(card.instances.map((i) => [i.id, i.surface]), [["kimi-4321", "Desktop"]]);
+      assert.deepEqual(card.surfaces.map((s) => [s.label, s.count]), [["Desktop", 1]]);
+      assert.equal(card.metrics.totalRequests, 1, "无头请求照样归到 kimi 桶");
+    } finally {
+      await close();
+    }
+  });
+
   it("header wins over the socket fallback", async () => {
     const collector = testCollector();
     const { socketOwner } = stubOwner(4321);

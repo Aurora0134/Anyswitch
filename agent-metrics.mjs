@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
+import { readKimiServerInstances } from "./kimi-server-registry.mjs";
 // AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
 // model on any channel. The reporters must never publish it as a model name.
 import { AUTO_MODEL } from "./chain-routing.mjs";
@@ -370,6 +371,10 @@ const AGENT_IMAGE_BUCKETS = [
   ["opencode.exe", "opencode"],
   ["dsh.exe", "dsh"],
   ["grok.exe", "grok"],
+  // Kimi Code 的官方桌面端是原生 Electron 包：镜像名 `Kimi Code.exe`，命令行里
+  // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
+  // 不到它（步 1 of kimi-desktop-integration-plan.md §3：桌面端在进程面全盲）。
+  ["kimi code.exe", "kimi"],
   ["node.exe", "node"],
   ["cmd.exe", "cmd"],
 ];
@@ -405,7 +410,10 @@ const AGENT_IMAGE_ROW_MATCHERS = AGENT_IMAGE_BUCKETS.map(([image, bucket]) => [
 function resolveImageFromCommandLineField(lower) {
   const field = lower.match(/^[^,]+,(.*),\s*\d+\s*$/);
   if (!field) return null;
-  const image = field[1].match(/^"?(?:[^"\\\/]*[\\\/])*([a-z0-9_.-]+\.exe)(?:\s|"|$)/);
+  // The image token may contain a space: `Kimi Code.exe` is argv[0] there just
+  // like anywhere else, and dropping it would make the desktop surface invisible
+  // on exactly this legacy 3-column probe shape.
+  const image = field[1].match(/^"?(?:[^"\\\/]*[\\\/])*([a-z0-9_. -]+\.exe)(?:\s|"|$)/);
   if (!image) return null;
   return AGENT_IMAGE_BUCKETS.some(([img]) => img === image[1])
     ? { image: image[1], commandLine: field[1] }
@@ -523,10 +531,40 @@ export function dshSurfaceLabel(profile) {
 // profile is honest "unknown", never a product name — see DSH_SURFACE_LABELS).
 export function summarizeDshSurfaces(procCounts) {
   const enginePids = procCounts?.dshEnginePids instanceof Set ? procCounts.dshEnginePids : [];
+  return groupSurfaceCounts(enginePids, procCounts?.dshProfileByPid).map(
+    ([profile, count]) => ({ profile, label: dshSurfaceLabel(profile), count }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Kimi Code 的分面（步 1/2 of bridge/anyswitch/kimi-desktop-integration-plan.md）。
+//
+// 一个 kimi 端点 id、一份 ~/.kimi-code 家目录之上有三个界面：终端客户端
+// （`kimi`）、`kimi web`（在终端里前台起的 server，浏览器只是它的观看端）、
+// 以及官方原生桌面端。与 DSH 的差别在于面的读法：kimi 不需要命令行正则——
+// 镜像名 `Kimi Code.exe` 本身就说明它是桌面端；剩下的 node 进程里，谁在
+// `server/instances/` 名下有一条自己的登记，谁就是 `kimi web` 的 server，
+// 没有登记的就是终端客户端（纯 TUI 不起 server，实测：213 个历史会话只对应
+// 一条登记，而那条是桌面端写的）。注册表只能把 tui 提为 web，永远不能把桌面
+// 端降级或提级，也不能把扫描里不存在的进程号算成一个面。
+//
+// 面是封闭集合：集合外的值只可能是我们自己读错了，如实落「未知」，不原样上屏
+// （DSH 那一档不同——那里的未知值是用户自己起的 profile 目录名，本身就是界面名）。
+// ---------------------------------------------------------------------------
+const KIMI_SURFACE_LABELS = { tui: "TUI", web: "Web", desktop: "Desktop" };
+
+export function kimiSurfaceLabel(surface) {
+  if (typeof surface !== "string" || !(surface in KIMI_SURFACE_LABELS)) return DSH_UNKNOWN_SURFACE_LABEL;
+  return KIMI_SURFACE_LABELS[surface];
+}
+
+// 共用的分面计数：按面聚合 engine 进程号，读不出的那一档（null）排在最后，
+// 于是「副行加总 = 卡上进程数」是恒等式而不是巧合。
+function groupSurfaceCounts(enginePids, surfaceByPid) {
   const counts = new Map();
   for (const pid of enginePids) {
-    const profile = procCounts.dshProfileByPid?.get(pid) ?? null;
-    counts.set(profile, (counts.get(profile) ?? 0) + 1);
+    const surface = surfaceByPid?.get(pid) ?? null;
+    counts.set(surface, (counts.get(surface) ?? 0) + 1);
   }
   return [...counts.entries()]
     .sort((a, b) => {
@@ -534,8 +572,14 @@ export function summarizeDshSurfaces(procCounts) {
       if (a[0] === null) return 1;
       if (b[0] === null) return -1;
       return a[0] < b[0] ? -1 : 1;
-    })
-    .map(([profile, count]) => ({ profile, label: dshSurfaceLabel(profile), count }));
+    });
+}
+
+export function summarizeKimiSurfaces(procCounts) {
+  const enginePids = procCounts?.kimiEnginePids instanceof Set ? procCounts.kimiEnginePids : [];
+  return groupSurfaceCounts(enginePids, procCounts?.kimiSurfaceByPid).map(
+    ([surface, count]) => ({ surface, label: kimiSurfaceLabel(surface), count }),
+  );
 }
 
 // Terminal (console) liveness for TUI-profile DSH engines. Windows lets a
@@ -596,7 +640,7 @@ export function parseDshConsoleQueryOutput(out) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
 }
 
 function parseTasklistCsv(stdout) {
@@ -703,6 +747,25 @@ function parseTasklistCsv(stdout) {
         const imageProfile = dshProfileNameFrom(commandLine);
         if (imageProfile !== null) result.dshProfileByPid.set(pid, imageProfile);
       }
+    } else if (bucket === "kimi") {
+      // "Kimi Code.exe" is the desktop app's Electron shell: one main process
+      // per app, plus --type= helper children that are filtered exactly like
+      // qoder's and ChatGPT.exe's. The main process IS the session owner (the
+      // kimi core runs embedded inside it and holds the relay connection), so
+      // unlike DSH's launcher shells it counts and it joins the engine set —
+      // and the image name alone is what makes it the Desktop surface. Plain
+      // tasklist rows carry no command line, so they stay accept-by-name.
+      // Helper children feed the family pid set only (lineage / liveness).
+      if (commandLine?.includes("--type=")) {
+        if (pid) result.kimiPids.add(pid);
+      } else {
+        result.kimi += 1;
+        if (pid) {
+          result.kimiPids.add(pid);
+          result.kimiEnginePids.add(pid);
+          result.kimiSurfaceByPid.set(pid, "desktop");
+        }
+      }
     } else if (bucket === "grok") {
       // Grok Build is a native binary (one grok.exe per terminal session,
       // kimi-style multi-instance) — no helper-image filtering applies. Its
@@ -772,7 +835,15 @@ function parseTasklistCsv(stdout) {
         (lower.includes("dist/main.mjs") && lower.includes("kimi"));
       if (isKimiNode) {
         result.kimi += 1;
-        if (pid) result.kimiPids.add(pid);
+        if (pid) {
+          result.kimiPids.add(pid);
+          result.kimiEnginePids.add(pid);
+          // Terminal client by default: the registration table promotes the
+          // subset that owns a server to "web" later in the same scan round
+          // (attachKimiSurfaces), because a `kimi web` boot is the same node
+          // row with the same install path and no distinguishing flag.
+          result.kimiSurfaceByPid.set(pid, "tui");
+        }
       }
     }
   }
@@ -1604,7 +1675,7 @@ const PS_REPL_COMMAND =
 // intermediate hop would break ancestor resolution. cmd.exe rows feed only
 // the lineage table — no counting branch claims them.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -1819,6 +1890,28 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
 
+  // Kimi 面提级（分面口径见 summarizeKimiSurfaces 上方）。注册表只回答一件事：
+  // 「这个 node 进程自己起了 server」——所以进程号必须已经被本轮扫描认作 kimi
+  // engine，且只提级「终端」那一档；桌面端由镜像名定性，注册表无权改动它。
+  // 读不出（目录缺失、无权限、整轮抛错）就整批不动，退化成今天的行为：所有
+  // kimi 进程都算终端面，卡片照常计数、副行照常加总。
+  const kimiRegistryLookup = options.kimiRegistryLookup ?? readKimiServerInstances;
+  async function attachKimiSurfaces(counts) {
+    const enginePids = counts.kimiEnginePids instanceof Set ? counts.kimiEnginePids : new Set();
+    if (enginePids.size === 0) return;
+    let registered;
+    try {
+      registered = await kimiRegistryLookup({ env: options.env ?? process.env, nowFn });
+    } catch {
+      return;
+    }
+    if (!(registered instanceof Map) || registered.size === 0) return;
+    for (const pid of enginePids) {
+      if (counts.kimiSurfaceByPid?.get(pid) !== "tui") continue;
+      if (registered.has(pid)) counts.kimiSurfaceByPid.set(pid, "web");
+    }
+  }
+
   function startProcessScan() {
     pendingScanPromise = (async () => {
       const land = (counts) => {
@@ -1837,6 +1930,7 @@ export function createAgentMetricsCollector(options = {}) {
         // Terminal-orphan reap before landing: the snapshot the panel reads
         // must already exclude the reaped session.
         await reapDshTerminalOrphans(counts);
+        await attachKimiSurfaces(counts);
         land(counts);
         return cachedProcessCounts;
       }
@@ -1845,9 +1939,11 @@ export function createAgentMetricsCollector(options = {}) {
       // this path — the lineage table stays empty and ancestor-based
       // instance-id normalization degrades to a no-op (ids pass through).
       await new Promise((resolve) => {
-        execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, (err, stdout) => {
+        execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, async (err, stdout) => {
           if (!err && typeof stdout === "string") {
-            land(parseTasklistCsv(stdout));
+            const counts = parseTasklistCsv(stdout);
+            await attachKimiSurfaces(counts);
+            land(counts);
           } else {
             // Every probe failed. Stamp the window anyway so a broken probe
             // chain retries once per cache window rather than once per reader;
@@ -2754,6 +2850,23 @@ export function createAgentMetricsCollector(options = {}) {
       return profile === null ? null : dshSurfaceLabel(profile);
     };
 
+    // Kimi row badge: the same rule on a different source — the face comes from
+    // the process scan (image name, plus the server registration that promotes
+    // a terminal row to web), never from the request plane. A row whose process
+    // the scan cannot resolve stays unbadged instead of guessing.
+    const kimiInstanceSurface = (instId) => {
+      const pidMatch = instId.match(/^kimi-(\d+)$/);
+      if (pidMatch === null) return null;
+      const surface = procCounts.kimiSurfaceByPid?.get(Number(pidMatch[1])) ?? null;
+      return surface === null ? null : kimiSurfaceLabel(surface);
+    };
+
+    const instanceSurfaceFor = (bucket, instId) => {
+      if (bucket === "dsh") return dshInstanceSurface(instId);
+      if (bucket === "kimi") return kimiInstanceSurface(instId);
+      return null;
+    };
+
     // Per-instance snapshots for one endpoint. Reuses the aggregate card's
     // 全局汇总 session shape field-for-field; ordering is deterministic
     // (firstSeen, then id) so the panel API output is stable.
@@ -2770,7 +2883,7 @@ export function createAgentMetricsCollector(options = {}) {
             nowFn,
           });
           const s = built.sessions[0];
-          const dshSurface = bucket === "dsh" ? dshInstanceSurface(instId) : null;
+          const rowSurface = instanceSurfaceFor(bucket, instId);
           return {
             ...s,
             // Authoritative spark history (same shape as the endpoint-level
@@ -2789,10 +2902,10 @@ export function createAgentMetricsCollector(options = {}) {
               ?? (bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX)
                 ? codexSessionRowTitle(instId, codexSessionById)
                 : instId),
-            // DSH rows carry the surface (profile) they belong to, which the
-            // row number cannot express: web and every TUI terminal are the
-            // same endpoint id. Other buckets never set it.
-            ...(dshSurface !== null ? { surface: dshSurface } : {}),
+            // DSH and Kimi rows carry the surface they belong to, which the row
+            // number cannot express: a web server, a TUI terminal and the
+            // desktop app are all one endpoint id. Other buckets never set it.
+            ...(rowSurface !== null ? { surface: rowSurface } : {}),
             // An instance listed at all is alive (idle TTL for custom ids,
             // PID reconciliation for "<agentId>-<pid>" ids), so idle — never
             // "stopped" just because no OS process count fed its build.
@@ -2986,15 +3099,21 @@ export function createAgentMetricsCollector(options = {}) {
     });
 
     // 5. Kimi Code Agent Status
-    const kimiAgent = buildAggregateAgentStatus({
-      id: "kimi",
-      name: "Kimi Code",
-      state: kimiState,
-      processCount: procCounts.kimi || 0,
-      tpsWindow: recentSampleWindow,
-      nowFn,
-      instances: instanceSnapshots("kimi"),
-    });
+    // 卡内分面汇总（"Desktop ×1 · TUI ×1"）：与 DSH 同一形状、不同来源——kimi 的
+    // 面读自镜像名与它自己的 server 登记表（口径见 summarizeKimiSurfaces 上方），
+    // 请求面上三个面共用同一条 kimi 归属、本期不承担分面（计划 §8）。
+    const kimiAgent = {
+      ...buildAggregateAgentStatus({
+        id: "kimi",
+        name: "Kimi Code",
+        state: kimiState,
+        processCount: procCounts.kimi || 0,
+        tpsWindow: recentSampleWindow,
+        nowFn,
+        instances: instanceSnapshots("kimi"),
+      }),
+      surfaces: summarizeKimiSurfaces(procCounts),
+    };
 
     const qoderAgent = buildAggregateAgentStatus({
       id: "qoder",
