@@ -94,9 +94,19 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
         ? resolveEndpointEfforts(modelId, { catalog: effort.catalog, agent: "kimi", model: model, provider })
         : null;
       if (efforts) {
-        // Kimi treats `reasoning === true || support_efforts.length > 0` as
-        // "this model thinks" and renders support_efforts verbatim as its
-        // picker; default_effort is what a session that never touched it sends.
+        // 「这个模型会思考」在两处界面上由两个不同的键说给 kimi 听，只写一个就会
+        // 出现「终端能选档、桌面端与网页端写着不支持思考强度」。2026-09-23 读自本机
+        // 安装的 @moonshot-ai/kimi-code 与 Kimi Code.exe 内嵌核心：
+        // - 终端：认 `reasoning === true || support_efforts.length > 0`，并把
+        //   support_efforts 原样渲染成档位表；
+        // - 桌面端/网页端的模型目录（agent-core-v2 的 catalog 面）：只看
+        //   `capabilities` 里有没有 `thinking`，`reasoning` 根本不是那张表的键，
+        //   而自动补 thinking 那一步只在 anthropic 协议上做——我们的渠道是
+        //   `type = "openai"`，没人替我们补，故必须显式声明。
+        // 声明与 kimi 自己探测到的能力取并集、只加不减，所以下面这一行不会削弱
+        // 工具调用等既有能力。`always_thinking` 绝对不写：那是「想关也关不掉」。
+        // default_effort 是「这个会话没动过档位」时发出去的档。
+        lines.push(`capabilities = ["thinking"]`);
         lines.push(`reasoning = true`);
         lines.push(`support_efforts = ${tomlArray(efforts.levels)}`);
         lines.push(`default_effort = ${tomlString(efforts.default)}`);
