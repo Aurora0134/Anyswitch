@@ -114,3 +114,23 @@ test("a recycled pid keeps the fresher of two registrations", async () => {
   assert.equal(found.get(500).port, 7457);
   assert.equal(found.get(500).hostVersion, "2.0.1");
 });
+
+test("the window tracks the client's own heartbeat cadence: a beating row counts, a row left by an app that exited three minutes ago does not", async () => {
+  // 15 秒是客户端安装包里的默认心跳间隔（createInstanceRegistry），每拍重写一次
+  // 自己的登记，与有没有活动无关。所以一个还活着的 server 的 heartbeat_at 永远
+  // 只有一拍老；反过来，退出时不删档的那条路（真机桌面端 2026-09-23 12:55 那次）
+  // 留下的残档会立刻停止前进。窗口取几拍 = 90 秒：余量给唤醒与慢盘，上限压住
+  // 「进程号被新起的 kimi 复用、残档替它冒充另一张面」。这两个界把常量的取值
+  // 理由钉在客户端节律上，而不是任一个数字。
+  const CLIENT_HEARTBEAT_MS = 15_000;
+  assert.ok(KIMI_REGISTRY_HEARTBEAT_MAX_AGE_MS >= 4 * CLIENT_HEARTBEAT_MS, "窗口要容得下漏写几拍");
+  assert.ok(KIMI_REGISTRY_HEARTBEAT_MAX_AGE_MS <= 8 * CLIENT_HEARTBEAT_MS, "窗口不能长到让残档顶面");
+
+  const now = 1790131653029;
+  const io = fakeIo({
+    "beating.json": `{"pid":700,"port":58627,"heartbeat_at":${now - CLIENT_HEARTBEAT_MS}}`,
+    "leftover.json": `{"pid":701,"port":9600,"heartbeat_at":${now - 3 * 60 * 1000}}`,
+  });
+  const found = await readKimiServerInstances({ env: ENV, nowFn: () => now, io });
+  assert.deepEqual([...found.keys()], [700], "刚写过心跳的算一条，三分钟前的残档不算");
+});
