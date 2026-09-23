@@ -114,9 +114,9 @@ describe("buildPiProviderEntry", () => {
     };
     const entry = buildPiProviderEntry("test", provider, 47821);
     const p = entry["_test"];
-    assert.equal(p.models.find((m) => m.id === "gpt-5.5-codex").contextWindow, 1_000_000);
+    assert.equal(p.models.find((m) => m.id === "gpt-5.5-codex").contextWindow, 1_050_000);
     assert.equal(p.models.find((m) => m.id === "gpt-4.1").contextWindow, 128_000);
-    assert.equal(p.models.find((m) => m.id === "claude-sonnet-5").contextWindow, 200_000);
+    assert.equal(p.models.find((m) => m.id === "claude-sonnet-5").contextWindow, 1_000_000);
     assert.equal(p.models.find((m) => m.id === "unknown-thing").contextWindow, 1_000_000);
   });
 
