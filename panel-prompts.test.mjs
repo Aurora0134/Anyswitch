@@ -1,10 +1,10 @@
 import test, { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createPanelRouter, createPromptsPanelService } from "./panel.mjs";
 import { MANAGED_BEGIN } from "./agent-prompts-inject.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Prompts tab routes: the router is exercised with a mock prompts service so
 // no real home directories or instruction files are touched. Mirrors the
@@ -283,7 +283,7 @@ describe("panel router prompts routes", () => {
 describe("createPromptsPanelService facade", () => {
   const tempDirs = [];
   function makeFacade() {
-    const root = mkdtempSync(join(tmpdir(), "anyswitch-prompts-facade-"));
+    const root = mkTestDir("anyswitch-prompts-facade-");
     tempDirs.push(root);
     const homeDir = join(root, "home");
     const base = { LOCALAPPDATA: join(root, "local"), APPDATA: join(root, "appdata") };

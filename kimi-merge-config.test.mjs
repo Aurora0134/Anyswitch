@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   buildKimiManagedToml,
   mergeKimiConfigToml,
@@ -17,6 +16,7 @@ import {
   deriveAutoRouteChannel,
   takeOverKimiThinkingTable,
 } from "./kimi-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -125,7 +125,7 @@ describe("kimi-merge-config", () => {
 
 describe("writeKimiConfigTomlWithBackup", () => {
   it("writes atomically, backs up the previous file, and prunes to the newest 5 backups", () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-merge-test-"));
+    const dir = mkTestDir("kimi-merge-test-");
     const filePath = join(dir, "config.toml");
     // Six stale backups predating this write; the fresh backup plus the
     // newest 4 of these survive.
@@ -145,7 +145,7 @@ describe("writeKimiConfigTomlWithBackup", () => {
   });
 
   it("reports unchanged without creating a backup", () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-merge-test-"));
+    const dir = mkTestDir("kimi-merge-test-");
     const filePath = join(dir, "config.toml");
     writeKimiConfigTomlWithBackup(filePath, "# same");
     const before = readdirSync(dir);
@@ -231,19 +231,19 @@ describe("pool channels", () => {
 
 describe("kimi sidecar", () => {
   it("readSidecar returns empty list for missing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-sidecar-"));
+    const dir = mkTestDir("kimi-sidecar-");
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
   it("writeSidecar and readSidecar round-trip sorted", () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-sidecar-"));
+    const dir = mkTestDir("kimi-sidecar-");
     writeSidecar(dir, ["zeta", "alpha"]);
     assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
     assert.ok(existsSync(sidecarPath(dir)));
   });
 
   it("writeSidecar keeps the shared on-disk format", () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-sidecar-"));
+    const dir = mkTestDir("kimi-sidecar-");
     writeSidecar(dir, ["poke-api"]);
     assert.equal(
       readFileSync(sidecarPath(dir), "utf8"),

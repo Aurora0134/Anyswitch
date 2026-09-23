@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,6 +16,7 @@ import {
   sidecarPath,
   deriveAutoRouteChannel,
 } from "./zcode-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -48,7 +49,7 @@ describe("readZcodeConfig", () => {
   });
 
   it("throws UnparseableConfigError for a corrupt file instead of treating it as empty", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
     writeFileSync(filePath, "{ not valid json", "utf8");
     assert.throws(() => readZcodeConfig(filePath), UnparseableConfigError);
@@ -57,7 +58,7 @@ describe("readZcodeConfig", () => {
   });
 
   it("parses a UTF-8 BOM-prefixed file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
     writeFileSync(filePath, "\uFEFF" + JSON.stringify({ provider: { "my-custom": {} } }), "utf8");
     const parsed = readZcodeConfig(filePath);
@@ -145,7 +146,7 @@ describe("buildZcodeProviderEntry", () => {
 
 describe("writeZcodeConfigWithBackup", () => {
   it("writes data and creates backup for existing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
     writeFileSync(filePath, JSON.stringify({ provider: {} }), "utf8");
     const result = writeZcodeConfigWithBackup(filePath, { provider: { new: true } });
@@ -157,7 +158,7 @@ describe("writeZcodeConfigWithBackup", () => {
   });
 
   it("reports unchanged when content hash matches", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
     const data = { provider: {} };
     writeZcodeConfigWithBackup(filePath, data);
@@ -167,7 +168,7 @@ describe("writeZcodeConfigWithBackup", () => {
   });
 
   it("prunes backups down to the newest 5 after a write", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     const filePath = join(dir, "config.json");
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.json`), `old${i}`, "utf8");
@@ -195,7 +196,7 @@ describe("validateZcodeConfig", () => {
 
 describe("sidecar", () => {
   it("round-trips managed provider ids", () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-merge-test-"));
+    const dir = mkTestDir("zcode-merge-test-");
     writeSidecar(dir, ["poke-api", "nvidia-nim"]);
     assert.deepEqual(readSidecar(dir).providers, ["nvidia-nim", "poke-api"]);
     assert.equal(sidecarPath(dir), join(dir, "zcode-sidecar.json"));

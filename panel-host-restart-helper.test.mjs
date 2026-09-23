@@ -1,12 +1,12 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   runPanelHostRestartHelper,
   spawnPanelHostRestartHelper,
 } from "./panel-host-restart-helper.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Deterministic clock: every probe() tick advances by a fixed step, so the
 // helper's release/ready deadlines are reached without real waiting.
@@ -115,7 +115,7 @@ describe("spawnPanelHostRestartHelper (the call the dying host makes)", () => {
   }
 
   it("detaches the helper, points stderr at the restart log, and unrefs", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-restart-spawn-"));
+    const dir = mkTestDir("anyswitch-restart-spawn-");
     try {
       const logPath = join(dir, "panel-host-restart.log");
       const calls = [];
@@ -154,7 +154,7 @@ describe("spawnPanelHostRestartHelper (the call the dying host makes)", () => {
     // Put the log path UNDER a plain file: mkdirSync cannot descend into a
     // non-directory, so the trail really cannot be opened (on Windows,
     // openSync() of a directory would have succeeded and proven nothing).
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-restart-nolog-"));
+    const dir = mkTestDir("anyswitch-restart-nolog-");
     try {
       const blocker = join(dir, "blocker");
       writeFileSync(blocker, "not a directory");
@@ -171,7 +171,7 @@ describe("spawnPanelHostRestartHelper (the call the dying host makes)", () => {
   });
 
   it("tolerates a spawn that returns no child object", () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-restart-tolerant-"));
+    const dir = mkTestDir("anyswitch-restart-tolerant-");
     try {
       assert.doesNotThrow(() => spawnPanelHostRestartHelper({
         spawnFn: () => undefined,

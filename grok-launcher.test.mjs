@@ -11,7 +11,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
   buildGrokLauncherEnv,
@@ -23,6 +23,7 @@ import {
   RELAY_PORT,
 } from "./grok-launcher.mjs";
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Opaque on purpose: writeConfig is mocked, so no test here depends on the
 // real Anyswitch store schema.
@@ -359,7 +360,7 @@ test("realSpawnGrok passes the caller's args through and reports the child pid",
   // override must be a .exe, so npm's .cmd shims are unusable as stand-ins).
   // The script echoes its own argv to a file so we can assert passthrough, and
   // the promise must resolve with the child's exit code.
-  const dir = mkdtempSync(join(tmpdir(), "grok-spawn-"));
+  const dir = mkTestDir("grok-spawn-");
   try {
     const outFile = join(dir, "argv.json");
     const script = "require('node:fs').writeFileSync(process.env.GROK_SPAWN_OUT, JSON.stringify(process.argv))";

@@ -3,19 +3,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  mkdtempSync,
-  writeFileSync,
-  readFileSync,
-  existsSync,
-  readdirSync,
-  rmSync,
-  mkdirSync,
-  renameSync,
-} from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync, mkdirSync, renameSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   atomicWriteFile,
   casWriteFile,
@@ -25,9 +15,10 @@ import {
   PreconditionFailedError,
   LockTimeoutError,
 } from "./atomic-write.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function tempDir() {
-  return mkdtempSync(join(tmpdir(), "atomic-write-test-"));
+  return mkTestDir("atomic-write-test-");
 }
 
 test("atomicWriteFile replaces content and leaves no temp files", () => {

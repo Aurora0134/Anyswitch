@@ -5,13 +5,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache } from "./relay-host.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeLogPath() {
-  return join(mkdtempSync(join(tmpdir(), "anyswitch-rh-")), "relay-host.log");
+  return join(mkTestDir("anyswitch-rh-"), "relay-host.log");
 }
 
 test("rotateLogIfNeeded leaves a small log untouched", () => {

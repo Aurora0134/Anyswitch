@@ -2,15 +2,7 @@ import test, { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import {
-  cpSync,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -37,12 +29,13 @@ import {
   scanRepo,
   undeploy,
 } from "./agent-skills.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Temp-rooted fixture: a fake home dir (endpoint skills dirs live under it)
 // plus a master repo with nested/container skills. Real junctions are created
 // under %TEMP% — this suite is Windows-only by design.
 function tempRoot(prefix = "anyswitch-skills-") {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = mkTestDir(prefix);
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 

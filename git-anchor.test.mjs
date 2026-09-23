@@ -1,16 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   defaultAnchorDir,
   ensureGitAnchor,
   logGitAnchorResult,
 } from "./git-anchor.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function scratch() {
-  return mkdtempSync(join(tmpdir(), "git-anchor-"));
+  return mkTestDir("git-anchor-");
 }
 
 test("defaultAnchorDir is LocalAppData/Anyswitch-git/objects, not under the data dir", () => {

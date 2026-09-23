@@ -6,8 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { protect } from "./dpapi.mjs";
 import {
@@ -19,6 +18,7 @@ import {
 } from "./launch.mjs";
 import { createHandler } from "./handler.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const PLAINTEXT = "synthetic-launch-test-key-not-a-real-credential";
 
@@ -30,7 +30,7 @@ const dpapiAvailable = process.platform === "win32" &&
 const needsDpapi = dpapiAvailable ? {} : { skip: "requires Windows DPAPI (powershell.exe)" };
 
 function makePaths(t) {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-launch-"));
+  const root = mkTestDir("anyswitch-launch-");
   mkdirSync(join(root, "credentials"), { recursive: true });
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return {

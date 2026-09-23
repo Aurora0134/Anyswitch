@@ -1,10 +1,10 @@
 import { describe, it, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function fakeJournal() {
   const lines = [];
@@ -241,7 +241,7 @@ describe("usage journal wiring", () => {
 });
 
 describe("usage journal roundtrip through a real journal dir", () => {
-  const dir = mkdtempSync(join(tmpdir(), "anyswitch-journal-wiring-"));
+  const dir = mkTestDir("anyswitch-journal-wiring-");
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it("persists the collector's line as JSONL and reads it back", () => {

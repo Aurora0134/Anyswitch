@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { EventEmitter } from "node:events";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readSidecar } from "./opencode-merge-config.mjs";
@@ -16,6 +15,7 @@ import {
   startOpenAIRelay,
   writeOpencodeConfig,
 } from "./opencode-launcher.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Minimal fake child for the injected spawnFn: emits either "error" or
 // "exit" asynchronously, exactly like a real child_process handle.
@@ -317,7 +317,7 @@ describe("writeOpencodeConfig", () => {
   }
 
   it("writes the pool as ONE channel with a {file:} apiKey, absorbs members, and is idempotent", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencode-write-"));
+    const root = mkTestDir("opencode-write-");
     try {
       const configPath = join(root, "opencode.json");
       const result = await writeOpencodeConfig(pooledStore(), 47821, root, configPath);
@@ -353,7 +353,7 @@ describe("writeOpencodeConfig", () => {
   });
 
   it("reports instead of writing when there are no providers with models", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencode-write-empty-"));
+    const root = mkTestDir("opencode-write-empty-");
     try {
       const result = await writeOpencodeConfig({ version: 2, providers: {} }, 47821, root, join(root, "opencode.json"));
       assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
@@ -363,7 +363,7 @@ describe("writeOpencodeConfig", () => {
   });
 
   it("fails closed on an unparseable existing config", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencode-write-bad-"));
+    const root = mkTestDir("opencode-write-bad-");
     try {
       const configPath = join(root, "opencode.json");
       const bad = "{ definitely not json";
@@ -379,7 +379,7 @@ describe("writeOpencodeConfig", () => {
   });
 
   it("clears the managed providers after the last channel is deleted", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencode-write-cleanup-"));
+    const root = mkTestDir("opencode-write-cleanup-");
     try {
       const configPath = join(root, "opencode.json");
       const first = await writeOpencodeConfig(pooledStore(), 47821, root, configPath);
@@ -413,7 +413,7 @@ describe("startOpenAIRelay", () => {
   // Unlike the zcode/pi/dsh launchers, the opencode relay has no degrade path:
   // an unusable store is fatal before any socket is opened (fail-closed).
   it("refuses to start when the Anyswitch store is not usable", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencode-relay-"));
+    const root = mkTestDir("opencode-relay-");
     mkdirSync(join(root, "Anyswitch"), { recursive: true });
     const base = { LOCALAPPDATA: root, USERPROFILE: root };
     await assert.rejects(

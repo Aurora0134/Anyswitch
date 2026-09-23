@@ -3,8 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -16,9 +15,10 @@ import {
   readCiphertext,
   LOAD_REASON,
 } from "./store-io.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function tempPaths() {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-storeio-"));
+  const root = mkTestDir("anyswitch-storeio-");
   return storePaths(root);
 }
 

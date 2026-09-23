@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   PERSONAL_CONFIG_FILENAME,
   PERSONAL_SCHEMA_VERSION,
@@ -17,6 +16,7 @@ import {
 } from "./zcode-personal-config.mjs";
 import { buildZcodeProviderEntry } from "./zcode-merge-config.mjs";
 import { writeZcodeConfig } from "./zcode-launcher.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // ZCode reads its model list from ~/.zcode/v2/provider_config.json and only
 // imports the injected config.json while that file is still absent. Anyswitch
@@ -29,7 +29,7 @@ import { writeZcodeConfig } from "./zcode-launcher.mjs";
 // defaultModelSelection?}} where every object is strict (unknown keys reject).
 
 function tmpRoot() {
-  return mkdtempSync(join(tmpdir(), "zc-personal-"));
+  return mkTestDir("zc-personal-");
 }
 
 // A provider entry exactly as it is written into ZCode's config.json.

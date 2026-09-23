@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   DEFAULT_KEEPALIVE_CONFIG,
   DEFAULT_SPARK_WINDOW_POINTS,
@@ -14,6 +13,7 @@ import {
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("relay-settings", () => {
   it("uses default enabled=true when no config exists", () => {
@@ -53,7 +53,7 @@ describe("relay-settings", () => {
     assert.equal(fromEnv.mode, "enhanced");
     assert.equal(fromEnv.enabled, true);
 
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-migrate-"));
+    const tmp = mkTestDir("anyswitch-settings-migrate-");
     const path = join(tmp, "settings.json");
     try {
       // Production settings.json shape before the two-tier merge.
@@ -89,7 +89,7 @@ describe("relay-settings", () => {
   });
 
   it("loads from disk, preserves extra keys, and atomic writes patches", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-test-"));
+    const tmp = mkTestDir("anyswitch-settings-test-");
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({ followAgentLaunch: true, customKey: 123 }));
@@ -130,7 +130,7 @@ describe("relay-settings", () => {
   });
 
   it("persists sparkWindowPoints as a last-N request window", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-spark-"));
+    const tmp = mkTestDir("anyswitch-settings-spark-");
     const path = join(tmp, "settings.json");
     try {
       const loaded = loadSettings(path, {});
@@ -144,7 +144,7 @@ describe("relay-settings", () => {
   });
 
   it("quarantines a corrupt settings.json instead of overwriting it", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-corrupt-"));
+    const tmp = mkTestDir("anyswitch-settings-corrupt-");
     const path = join(tmp, "settings.json");
     try {
       const corrupt = '{ "keepAlive": { "enabled": true, '; // truncated JSON
@@ -168,7 +168,7 @@ describe("relay-settings", () => {
   });
 
   it("saves successfully when the settings root directory does not exist yet", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-noroot-"));
+    const tmp = mkTestDir("anyswitch-settings-noroot-");
     try {
       // First boot on an empty data root: nested missing directories.
       const path = join(tmp, "missing", "settings.json");
@@ -182,7 +182,7 @@ describe("relay-settings", () => {
   });
 
   it("leaves no corrupt backup behind on a normal save", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-clean-"));
+    const tmp = mkTestDir("anyswitch-settings-clean-");
     const path = join(tmp, "settings.json");
     try {
       saveSettings(path, { keepAlive: { enabled: false } }, {});
@@ -203,7 +203,7 @@ describe("relay-settings", () => {
   });
 
   it("persists keepAlive.maxRetries via saveSettings and clamps out-of-range values", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-retries-"));
+    const tmp = mkTestDir("anyswitch-settings-retries-");
     const path = join(tmp, "settings.json");
     try {
       const saved = saveSettings(path, { keepAlive: { maxRetries: 3 } }, {});
@@ -223,7 +223,7 @@ describe("relay-settings", () => {
   });
 
   it("ANYSWITCH_KEEPALIVE_RETRIES overrides the persisted value and is not clamped to 10", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-retries-env-"));
+    const tmp = mkTestDir("anyswitch-settings-retries-env-");
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({ keepAlive: { maxRetries: 2 } }));
@@ -246,7 +246,7 @@ describe("injectThinkingEffort", () => {
   });
 
   it("survives a save round-trip without disturbing neighbouring keys", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-effort-setting-"));
+    const tmp = mkTestDir("anyswitch-effort-setting-");
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({ followAgent: true, sparkWindowPoints: 24 }));
@@ -294,7 +294,7 @@ describe("keepAlive per-endpoint switches", () => {
   });
 
   it("merges endpoint patches per endpoint instead of replacing the whole map", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-endpoints-"));
+    const tmp = mkTestDir("anyswitch-settings-endpoints-");
     const path = join(tmp, "settings.json");
     try {
       saveSettings(path, { keepAlive: { endpoints: { claude: { enabled: false } } } }, {});
@@ -328,7 +328,7 @@ describe("keepAlive per-endpoint switches", () => {
 
 describe("legacy keepAlive keys", () => {
   it("scrubs the never-consumed disabledEndpoints key on any save", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "anyswitch-settings-legacy-"));
+    const tmp = mkTestDir("anyswitch-settings-legacy-");
     const path = join(tmp, "settings.json");
     try {
       writeFileSync(path, JSON.stringify({

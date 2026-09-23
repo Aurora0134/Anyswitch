@@ -3,22 +3,15 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  appendFileSync,
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 function tempDir() {
-  return mkdtempSync(join(tmpdir(), "usage-journal-test-"));
+  return mkTestDir("usage-journal-test-");
 }
 
 test("appendRequest/appendSession round-trip through read", () => {

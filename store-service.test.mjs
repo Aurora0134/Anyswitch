@@ -1,11 +1,11 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createStoreService } from "./store-service.mjs";
 import { storePaths, ensureLayout, loadStore, writeStore } from "./store-io.mjs";
 import { MAX_CHAIN_NODES } from "./store-schema.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Store-management service against a real mkdtemp store root with real
 // store-io; only fetch and dpapi are faked. Credential "ciphertext" here is a
@@ -13,7 +13,7 @@ import { MAX_CHAIN_NODES } from "./store-schema.mjs";
 // service persisted without touching real DPAPI.
 
 function makeRoot() {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-store-service-"));
+  const root = mkTestDir("anyswitch-store-service-");
   const paths = storePaths(root);
   ensureLayout(paths);
   return paths;

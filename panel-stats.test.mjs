@@ -1,9 +1,9 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { createPanelRouter } from "./panel.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Stats routes + claude session-end journaling: the router is exercised with
 // mock services / a fake journal so no real store, relay, or usage dir is
@@ -108,7 +108,7 @@ describe("panel router stats routes", () => {
   });
 
   it("lazily builds a real service over <root>/usage when statsService is null", async () => {
-    const root = mkdtempSync(join(tmpdir(), "panel-stats-"));
+    const root = mkTestDir("panel-stats-");
     try {
       const router = statsRouter({ storePaths: { root }, statsService: null });
       const { req, res, json } = fakeReqRes("/panel/api/stats/state", "GET");
@@ -248,7 +248,7 @@ describe("claude session-end journaling", () => {
 describe("stats channel label wiring (panel.mjs resolver)", () => {
   it("resolves channel labels from the store board names, pools winning shared ids", async () => {
     const { createUsageJournal } = await import("./usage-journal.mjs");
-    const dir = mkdtempSync(join(tmpdir(), "panel-stats-labels-"));
+    const dir = mkTestDir("panel-stats-labels-");
     try {
       const journal = createUsageJournal({ dir });
       journal.appendRequest({
@@ -288,7 +288,7 @@ describe("stats channel label wiring (panel.mjs resolver)", () => {
 
   it("falls back to raw ids when the store is unreadable (stats never break)", async () => {
     const { createUsageJournal } = await import("./usage-journal.mjs");
-    const dir = mkdtempSync(join(tmpdir(), "panel-stats-labels-"));
+    const dir = mkTestDir("panel-stats-labels-");
     try {
       const journal = createUsageJournal({ dir });
       journal.appendRequest({

@@ -8,8 +8,8 @@ import {
 } from "./dsh-launcher.mjs";
 import { getYamlModule, readDshSettings, readSidecar } from "./dsh-merge-config.mjs";
 import { join } from "node:path";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 test("buildDshLauncherEnv injects ANYSWITCH_RELAY_TOKEN and NO_PROXY", () => {
   const env = buildDshLauncherEnv({
@@ -35,7 +35,7 @@ test("resolveDshExecutable accepts absolute path and rejects relative override",
 });
 
 test("resolveDshExecutable never returns the unspawnable .ps1 shim", () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-exe-"));
+  const dir = mkTestDir("dsh-exe-");
   try {
     const roamingNpm = join(dir, "npm");
     mkdirSync(roamingNpm, { recursive: true });
@@ -129,7 +129,7 @@ function dshChannelStore() {
 }
 
 test("writeDshConfig reports a no-op when there are no channels and nothing was managed before", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-write-"));
+  const dir = mkTestDir("dsh-write-");
   try {
     const result = await writeDshConfig({ version: 2, providers: {} }, 47821, dir, join(dir, "settings.yaml"));
     assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
@@ -140,7 +140,7 @@ test("writeDshConfig reports a no-op when there are no channels and nothing was 
 });
 
 test("writeDshConfig clears the managed providers after the last channel is deleted", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-write-"));
+  const dir = mkTestDir("dsh-write-");
   try {
     const settingsPath = join(dir, "settings.yaml");
     const first = await writeDshConfig(dshChannelStore(), 47821, dir, settingsPath);

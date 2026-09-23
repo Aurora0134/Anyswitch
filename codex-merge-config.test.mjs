@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   buildCodexManagedToml,
   mergeCodexConfigToml,
@@ -24,6 +23,7 @@ import {
   MANAGED_BEGIN,
   MANAGED_END,
 } from "./codex-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const CATALOG_TEMPLATE = loadCodexCatalogTemplate();
 
@@ -353,7 +353,7 @@ describe("auto routing channel (anyswitch-auto)", () => {
 
 describe("writeCodexConfigTomlWithBackup", () => {
   it("writes atomically, backs up the previous file, and prunes to the newest 5 backups", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-merge-test-"));
+    const dir = mkTestDir("codex-merge-test-");
     const filePath = join(dir, "config.toml");
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.toml`), `old${i}`, "utf8");
@@ -371,7 +371,7 @@ describe("writeCodexConfigTomlWithBackup", () => {
   });
 
   it("reports unchanged without creating a backup", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-merge-test-"));
+    const dir = mkTestDir("codex-merge-test-");
     const filePath = join(dir, "config.toml");
     writeCodexConfigTomlWithBackup(filePath, "# same");
     const before = readdirSync(dir);
@@ -385,12 +385,12 @@ describe("writeCodexConfigTomlWithBackup", () => {
 
 describe("codex sidecar", () => {
   it("readSidecar returns empty list for missing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-sidecar-"));
+    const dir = mkTestDir("codex-sidecar-");
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
   it("writeSidecar and readSidecar round-trip sorted in the shared format", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-sidecar-"));
+    const dir = mkTestDir("codex-sidecar-");
     writeSidecar(dir, ["zeta", "alpha"]);
     assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
     assert.equal(
@@ -439,7 +439,7 @@ describe("codex model catalog (model_catalog_json)", () => {
   });
 
   it("writes the catalog file and anchors the pointer in the top-level key region", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     const result = writeCodexConfig(CHAIN_STORE, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
@@ -482,7 +482,7 @@ describe("codex model catalog (model_catalog_json)", () => {
   });
 
   it("keeps a user's own model_catalog_json and writes neither pointer nor file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, 'model_catalog_json = "my-own/catalog.json"\n', "utf8");
@@ -496,7 +496,7 @@ describe("codex model catalog (model_catalog_json)", () => {
   });
 
   it("keeps our generated catalog and says why when the user points model_catalog_json elsewhere", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     // A first sync owns the pointer and generates the catalog file.
     writeCodexConfig(STORE, 47821, "tok", dir, configPath);
@@ -540,7 +540,7 @@ describe("codex model catalog (model_catalog_json)", () => {
 
     // write level: the re-sync after the last channel is removed strips our
     // pointer and deletes the generated file
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
@@ -560,7 +560,7 @@ describe("codex model catalog (model_catalog_json)", () => {
     // config.toml's text, so a model-only edit used to come back as a plain
     // "unchanged" and the panel reported a no-op while the picker's list had
     // in fact been rewritten.
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     const first = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(first.catalog.state, "written");
@@ -584,7 +584,7 @@ describe("codex model catalog (model_catalog_json)", () => {
   });
 
   it("keeps the generated catalog and says why when the template asset is unreadable", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-catalog-"));
+    const dir = mkTestDir("codex-catalog-");
     const configPath = join(dir, ".codex", "config.toml");
     const first = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(first.catalog.state, "written");
@@ -624,7 +624,7 @@ describe("codex model catalog (model_catalog_json)", () => {
 
 describe("writeCodexConfig", () => {
   it("writes config and sidecar, then reports unchanged on a second run", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-write-"));
+    const dir = mkTestDir("codex-write-");
     const configPath = join(dir, ".codex", "config.toml");
     const first = writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(first.ok, true);
@@ -640,7 +640,7 @@ describe("writeCodexConfig", () => {
   });
 
   it("returns a no-op reason when the store has no channels and nothing was managed before", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-write-"));
+    const dir = mkTestDir("codex-write-");
     const result = writeCodexConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, ".codex", "config.toml"));
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, true);
@@ -651,7 +651,7 @@ describe("writeCodexConfig", () => {
   });
 
   it("still cleans up after the last channel is removed, using the sidecar", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-write-"));
+    const dir = mkTestDir("codex-write-");
     const configPath = join(dir, ".codex", "config.toml");
     writeCodexConfig(STORE, 47821, "tok", dir, configPath);
     const result = writeCodexConfig({ version: 2, providers: {} }, 47821, "tok", dir, configPath);
@@ -662,7 +662,7 @@ describe("writeCodexConfig", () => {
   });
 
   it("fails closed on a truncated managed block and leaves the file untouched", () => {
-    const dir = mkdtempSync(join(tmpdir(), "codex-write-"));
+    const dir = mkTestDir("codex-write-");
     const configPath = join(dir, ".codex", "config.toml");
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, `${MANAGED_BEGIN}\n[model_providers."anyswitch-x"]\n`, "utf8");

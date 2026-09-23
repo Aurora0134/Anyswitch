@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createModelStabilityTracker,
@@ -13,6 +12,7 @@ import {
   RATE_GREEN,
   RATE_YELLOW,
 } from "./model-stability.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("statusOf", () => {
   it("uses 85 green / 70 yellow / else red", () => {
@@ -118,7 +118,7 @@ describe("createModelStabilityTracker", () => {
   });
 
   it("tolerates a legacy sidecar whose cells have no ttft fields", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ms-legacy-"));
+    const dir = mkTestDir("ms-legacy-");
     const path = join(dir, "model-stability.json");
     const t0 = bucketStart(5_000_000);
     writeFileSync(path, JSON.stringify({
@@ -140,7 +140,7 @@ describe("createModelStabilityTracker", () => {
   });
 
   it("roundtrips ttft aggregates through the persisted sidecar", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ms-ttft-"));
+    const dir = mkTestDir("ms-ttft-");
     const path = join(dir, "model-stability.json");
     const t0 = bucketStart(5_000_000);
     writeFileSync(path, JSON.stringify({
@@ -157,7 +157,7 @@ describe("createModelStabilityTracker", () => {
   });
 
   it("reloads persisted sidecar on create", () => {
-    const dir = mkdtempSync(join(tmpdir(), "ms-"));
+    const dir = mkTestDir("ms-");
     const path = join(dir, "model-stability.json");
     const t0 = bucketStart(5_000_000);
     writeFileSync(path, JSON.stringify({

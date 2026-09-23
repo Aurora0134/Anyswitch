@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   buildGrokManagedToml,
   mergeGrokConfigToml,
@@ -26,6 +25,7 @@ import {
   unpackChannelModelSlug,
   CHANNEL_MODEL_SEPARATOR,
 } from "./channel-model-slug.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -353,7 +353,7 @@ describe("[models] default protection", () => {
 
 describe("writeGrokConfigTomlWithBackup", () => {
   it("writes atomically, backs up the previous file, and prunes to the newest 5 backups", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-merge-test-"));
+    const dir = mkTestDir("grok-merge-test-");
     const filePath = join(dir, "config.toml");
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `config.backup.2020-01-0${i}T00-00-00-000Z.toml`), `old${i}`, "utf8");
@@ -371,7 +371,7 @@ describe("writeGrokConfigTomlWithBackup", () => {
   });
 
   it("reports unchanged without creating a backup", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-merge-test-"));
+    const dir = mkTestDir("grok-merge-test-");
     const filePath = join(dir, "config.toml");
     writeGrokConfigTomlWithBackup(filePath, "# same");
     const before = readdirSync(dir);
@@ -385,12 +385,12 @@ describe("writeGrokConfigTomlWithBackup", () => {
 
 describe("grok sidecar", () => {
   it("readSidecar returns empty list for missing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-sidecar-"));
+    const dir = mkTestDir("grok-sidecar-");
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
   it("writeSidecar and readSidecar round-trip sorted in the shared format", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-sidecar-"));
+    const dir = mkTestDir("grok-sidecar-");
     writeSidecar(dir, ["zeta", "alpha"]);
     assert.deepEqual(readSidecar(dir), { providers: ["alpha", "zeta"] });
     assert.equal(
@@ -402,7 +402,7 @@ describe("grok sidecar", () => {
 
 describe("writeGrokConfig", () => {
   it("writes config and sidecar, then reports unchanged on a second run", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
     const first = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(first.ok, true);
@@ -418,7 +418,7 @@ describe("writeGrokConfig", () => {
   });
 
   it("injects the auto channel when the grok chain exists", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
     const result = writeGrokConfig(CHAIN_STORE, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
@@ -428,7 +428,7 @@ describe("writeGrokConfig", () => {
   });
 
   it("returns a no-op reason when the store has no channels and nothing was managed before", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const result = writeGrokConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, ".grok", "config.toml"));
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, true);
@@ -437,7 +437,7 @@ describe("writeGrokConfig", () => {
   });
 
   it("still cleans up after the last channel is removed, using the sidecar", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
     writeGrokConfig(STORE, 47821, "tok", dir, configPath);
     const result = writeGrokConfig({ version: 2, providers: {} }, 47821, "tok", dir, configPath);
@@ -448,7 +448,7 @@ describe("writeGrokConfig", () => {
   });
 
   it("reports duplicate catalog keys that had to be skipped", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
     // 渠道 id 就叫 auto 且挂了多条模型时，第二条会撞上 auto 触发词键。
     const store = { version: 2, providers: { auto: { displayName: "Auto", models: { auto: {}, "m-2": {} } } } };
@@ -461,7 +461,7 @@ describe("writeGrokConfig", () => {
   });
 
   it("fails closed on a truncated managed block and leaves the file untouched", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-write-"));
+    const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
     mkdirSync(dirname(configPath), { recursive: true });
     writeFileSync(configPath, `${MANAGED_BEGIN}\n[model."anyswitch-x"]\n`, "utf8");
@@ -516,7 +516,7 @@ describe("grok reasoning_efforts injection", () => {
   });
 
   it("writeGrokConfig: no settings file → injection on, optimistic levels written", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-effort-"));
+    const dir = mkTestDir("grok-effort-");
     const configPath = join(dir, ".grok", "config.toml");
     const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
@@ -532,7 +532,7 @@ describe("grok reasoning_efforts injection", () => {
   });
 
   it("writeGrokConfig: injection switch off → the block omits every reasoning_efforts entry", () => {
-    const dir = mkdtempSync(join(tmpdir(), "grok-effort-"));
+    const dir = mkTestDir("grok-effort-");
     writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: false }));
     const configPath = join(dir, ".grok", "config.toml");
     const result = writeGrokConfig(STORE, 47821, "tok", dir, configPath);

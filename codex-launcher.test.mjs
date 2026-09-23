@@ -9,7 +9,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
   buildCodexLauncherEnv,
@@ -19,6 +19,7 @@ import {
   realSpawnCodex,
   RELAY_PORT,
 } from "./codex-launcher.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Opaque on purpose: writeConfig is mocked, so no test here depends on the
 // real Anyswitch store schema.
@@ -108,7 +109,7 @@ test("resolveCodexExecutable accepts absolute override and rejects relative", ()
 });
 
 test("resolveCodexExecutable glob-discovers codex.exe under the hash dir", () => {
-  const dir = mkdtempSync(join(tmpdir(), "codex-exe-"));
+  const dir = mkTestDir("codex-exe-");
   try {
     const local = join(dir, "local");
     // The hash directory name must not be hardcoded: any subdirectory of bin/
@@ -131,7 +132,7 @@ test("resolveCodexExecutable glob-discovers codex.exe under the hash dir", () =>
 });
 
 test("resolveCodexExecutable picks the newest codex.exe when several hash dirs linger", () => {
-  const dir = mkdtempSync(join(tmpdir(), "codex-exe-"));
+  const dir = mkTestDir("codex-exe-");
   try {
     const local = join(dir, "local");
     const binRoot = join(local, "OpenAI", "Codex", "bin");
@@ -151,7 +152,7 @@ test("resolveCodexExecutable picks the newest codex.exe when several hash dirs l
 });
 
 test("resolveCodexExecutable throws a clear error when no codex.exe is installed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "codex-exe-"));
+  const dir = mkTestDir("codex-exe-");
   try {
     assert.throws(
       () => resolveCodexExecutable({ LOCALAPPDATA: join(dir, "local") }),
@@ -327,7 +328,7 @@ test("realSpawnCodex passes the caller's args through the dispatcher", async () 
   // COMSPEC /d /c branch production uses for .cmd overrides). The batch echoes
   // every argument it receives to a file so we can assert passthrough, and the
   // promise must resolve with the child's exit code.
-  const dir = mkdtempSync(join(tmpdir(), "codex-spawn-"));
+  const dir = mkTestDir("codex-spawn-");
   try {
     const outFile = join(dir, "argv.txt");
     const cmdPath = join(dir, "codex.cmd");
