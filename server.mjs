@@ -120,6 +120,15 @@ export function createRelayServer(deps) {
         };
         res.on("close", onResAborted);
         try {
+          // 档位映射 takeover (Claude tier entries) runs FIRST, ahead of the pool
+          // and chain plans and of the tracker opening this request: it rewrites
+          // body.model from a Claude tier name to the hosted model the operator
+          // mapped it to, so pool fan-out, chain routing, the journal row and the
+          // attribution below all see the destination, never the entry name.
+          // No-op for every other endpoint and for any model the strict rules
+          // already resolve.
+          await handler.planTierEntryMessages(req.headers, body, agentId);
+
           // Pool routing: a body.model of anthropic/<pool-id>/<model>
           // fans out across the pool's candidate members (sticky member first,
           // then pool order). planPoolMessages returns null for plain provider
@@ -205,7 +214,10 @@ export function createRelayServer(deps) {
                   onMemberFault: (member) => memberPlan.noteFailure?.(member.memberId),
                 }
               : {
-                  callUpstream: () => handler.handleMessages(req.headers, body, { signal: abortController.signal }),
+                  callUpstream: () => handler.handleMessages(req.headers, body, {
+                    signal: abortController.signal,
+                    agentId,
+                  }),
                 }),
             name: agentId,
             logLabel: `${agentId} request`,

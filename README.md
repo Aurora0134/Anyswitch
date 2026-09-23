@@ -151,7 +151,7 @@ The card can also act on seven clients: the six npm-managed CLI clients (Claude 
 - Keys are sealed with Windows DPAPI under the current user; ciphertext lives in `%LOCALAPPDATA%\Anyswitch\credentials\`, one file per provider.
 - `store.json` holds routing/metadata only and is schema-validated to reject any secret-looking field.
 - Session tokens are generated with a CSPRNG — the per-launch token is never persisted or logged; the shared relay token lives only under the data root.
-- Everything is fail-closed: no default provider, no fuzzy prefix matching, no fallback to another key on decryption failure; error messages are generalized and never leak URLs, credentials, upstream bodies, or stack traces.
+- Everything is fail-closed: no default provider, no fuzzy prefix matching, no fallback to another key on decryption failure; error messages are generalized and never leak URLs, credentials, upstream bodies, or stack traces. The one bounded exception is the Claude Code tier mapping: once you map a tier (Sonnet/Opus/Fable/Haiku) to a hosted model in Settings → General, the relay redirects exactly that tier name to it — Claude traffic only, only after strict resolution already refused the name, and never onto a tier you did not configure.
 - See `SECURITY.md` for reporting vulnerabilities.
 
 ### FAQ
@@ -338,7 +338,7 @@ cp -r skills/anyswitch-preset ~/.kimi-code/skills/
 - Key 用 Windows DPAPI 在当前用户作用域封存；密文存于 `%LOCALAPPDATA%\Anyswitch\credentials\`，每提供方一个文件。
 - `store.json` 只存路由/元数据，schema 校验递归拒绝任何秘密样字段。
 - 会话 token 由 CSPRNG 生成——一次性 token 不落盘、不记录；共享 relay token 只存放在数据目录下。
-- 全程 fail-closed：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key；错误信息泛化，绝不泄露 URL/凭据/上游响应体/栈。
+- 全程 fail-closed：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key；错误信息泛化，绝不泄露 URL/凭据/上游响应体/栈。唯一有界例外是 Claude Code 档位映射：在 设置 → 通用 里为某个档位（Sonnet/Opus/Fable/Haiku）指定托管模型后，中继才把那个档位名改投过去——只作用在 Claude 端点、只在严格解析已经拒绝该名字之后、未配置的档位一律照原样拒绝。
 - 漏洞报告见 `SECURITY.md`。
 
 ### FAQ
