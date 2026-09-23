@@ -485,7 +485,7 @@ export function createHandler(deps) {
     body.model = takeover.wireId;
     logger?.info?.(
       `档位映射接管：模型名 "${nameLabel(takeover.entry)}" 是 Claude 的 ${tierRowName(takeover.tier)} 档，`
-      + `本次请求改投 "${takeover.wireId}"`,
+      + `本次请求改投 "${nameLabel(takeover.wireId)}"`,
     );
     return takeover;
   }
