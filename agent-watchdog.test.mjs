@@ -8,12 +8,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtempSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost } from "./agent-watchdog.mjs";
 import { createAgentWatcher } from "./agent-watcher.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 const OWN_CMD = `node.exe ${APP_DIR}agent-watchdog.mjs`;
@@ -72,7 +72,7 @@ test("probeWatchdog rejects a non-200 status", async () => {
 function makeWatchdogRoot() {
   // relayDataRoot(env) = join(env.LOCALAPPDATA, "Anyswitch"), so the pid file
   // lives one level below the env root we hand to stopWatchdog.
-  const envRoot = mkdtempSync(join(tmpdir(), "anyswitch-wd-"));
+  const envRoot = mkTestDir("anyswitch-wd-");
   const dataRoot = join(envRoot, "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
   return { envRoot, dataRoot };
@@ -211,7 +211,7 @@ test("startWatchdogHost wires the real settings file (not the data root dir) int
   // Regression: the loadSettings glue forwarded the watcher's `root` argument
   // (a directory) as the settings file path; readFileSync on a directory
   // failed, the tick saw empty settings, and followAgent was silently dead.
-  const localAppData = mkdtempSync(join(tmpdir(), "anyswitch-watchdog-"));
+  const localAppData = mkTestDir("anyswitch-watchdog-");
   mkdirSync(join(localAppData, "Anyswitch"), { recursive: true });
   writeFileSync(join(localAppData, "Anyswitch", "settings.json"), JSON.stringify({ followAgent: true }));
   const calls = { getRelayStatus: 0, startRelay: 0 };

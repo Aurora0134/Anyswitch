@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -18,6 +18,7 @@ import {
   writeQoderConfig,
   qoderSettingsPath,
 } from "./qoder-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -53,7 +54,7 @@ describe("readQoderSettings", () => {
   });
 
   it("throws UnparseableQoderSettingsError for a corrupt file instead of treating it as empty", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
     writeFileSync(filePath, "{ not valid json", "utf8");
     assert.throws(() => readQoderSettings(filePath), UnparseableQoderSettingsError);
@@ -62,7 +63,7 @@ describe("readQoderSettings", () => {
   });
 
   it("parses a UTF-8 BOM-prefixed file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
     writeFileSync(filePath, "\uFEFF" + JSON.stringify({ enabledPlugins: { foo: true } }), "utf8");
     const parsed = readQoderSettings(filePath);
@@ -369,7 +370,7 @@ describe("mergeQoderSettings", () => {
 
 describe("writeQoderSettingsWithBackup", () => {
   it("writes data and creates backup for existing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
     writeFileSync(filePath, JSON.stringify({ providers: {} }), "utf8");
     const result = writeQoderSettingsWithBackup(filePath, { providers: { "qoder-custom-anyswitch-x": { model: "new" } } });
@@ -381,7 +382,7 @@ describe("writeQoderSettingsWithBackup", () => {
   });
 
   it("reports unchanged when content hash matches", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
     const data = { providers: {} };
     writeQoderSettingsWithBackup(filePath, data);
@@ -391,7 +392,7 @@ describe("writeQoderSettingsWithBackup", () => {
   });
 
   it("prunes backups down to the newest 5 after a write", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     const filePath = join(dir, "settings.json");
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `settings.backup.2020-01-0${i}T00-00-00-000Z.json`), `old${i}`, "utf8");
@@ -408,14 +409,14 @@ describe("writeQoderSettingsWithBackup", () => {
 
 describe("sidecar", () => {
   it("round-trips managed provider ids", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     writeSidecar(dir, ["poke-api", "nvidia-nim"]);
     assert.deepEqual(readSidecar(dir).providers, ["nvidia-nim", "poke-api"]);
     assert.equal(sidecarPath(dir), join(dir, "qoder-sidecar.json"));
   });
 
   it("reads a missing sidecar as an empty managed list", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-merge-test-"));
+    const dir = mkTestDir("qoder-merge-test-");
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 });
@@ -492,7 +493,7 @@ describe("auto routing channel (_auto)", () => {
 
 describe("writeQoderConfig (high-level)", () => {
   it("basic merge with providers", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     const result = writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
     assert.equal(result.ok, true);
@@ -517,7 +518,7 @@ describe("writeQoderConfig (high-level)", () => {
         },
       },
     };
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     const result = writeQoderConfig(chainStore, PORT, TOKEN, dir, settingsPath);
     assert.equal(result.ok, true);
@@ -529,7 +530,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("preserves non-managed settings.json fields", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     mkdirSync(join(dir, ".qoder"), { recursive: true });
     writeFileSync(
@@ -547,7 +548,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("cleans up stale connections via sidecar", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
 
     // First sync: both providers
@@ -572,7 +573,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("removes dead customModels from an existing settings.json on write", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     mkdirSync(join(dir, ".qoder"), { recursive: true });
     writeFileSync(
@@ -588,7 +589,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("returns unchanged for empty store with no providers and no chain", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     const emptyStore = { version: 2, providers: {} };
     const result = writeQoderConfig(emptyStore, PORT, TOKEN, dir, settingsPath);
@@ -598,7 +599,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("content-hash skip: no-op when settings are already up to date", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
 
     const first = writeQoderConfig(STORE, PORT, TOKEN, dir, settingsPath);
@@ -611,7 +612,7 @@ describe("writeQoderConfig (high-level)", () => {
   });
 
   it("returns error for unparseable settings.json", () => {
-    const dir = mkdtempSync(join(tmpdir(), "qoder-write-test-"));
+    const dir = mkTestDir("qoder-write-test-");
     const settingsPath = join(dir, ".qoder", "settings.json");
     mkdirSync(join(dir, ".qoder"), { recursive: true });
     writeFileSync(settingsPath, "{ broken json", "utf8");

@@ -1,7 +1,6 @@
 import test, { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   createPromptsService,
@@ -9,6 +8,7 @@ import {
   UnparseablePromptsError,
   MAX_CONTENT_BYTES,
 } from "./agent-prompts.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Prompts data plane: every service is rooted at a temp LOCALAPPDATA so the
 // real relay data root is never touched.
@@ -16,7 +16,7 @@ import {
 const tempDirs = [];
 
 function makeService() {
-  const dir = mkdtempSync(join(tmpdir(), "anyswitch-prompts-"));
+  const dir = mkTestDir("anyswitch-prompts-");
   tempDirs.push(dir);
   const base = { LOCALAPPDATA: dir };
   return { svc: createPromptsService({ base }), file: promptsPath(base), base };

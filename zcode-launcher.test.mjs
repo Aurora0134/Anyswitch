@@ -1,10 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { buildZcodeLauncherEnv, resolveZcodeExecutable, runZcodeLauncher, writeZcodeConfig } from "./zcode-launcher.mjs";
 import { readSidecar } from "./zcode-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("buildZcodeLauncherEnv", () => {
   it("injects relay token and NO_PROXY for loopback", () => {
@@ -146,7 +146,7 @@ describe("writeZcodeConfig", () => {
   }
 
   it("reports a no-op when the store has no channels and nothing was managed before", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-write-"));
+    const dir = mkTestDir("zcode-write-");
     try {
       const result = await writeZcodeConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "config.json"));
       assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
@@ -156,7 +156,7 @@ describe("writeZcodeConfig", () => {
   });
 
   it("clears the managed providers after the last channel is deleted", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "zcode-write-"));
+    const dir = mkTestDir("zcode-write-");
     try {
       const configPath = join(dir, "config.json");
       const first = await writeZcodeConfig(channelStore(), 47821, "tok", dir, configPath);

@@ -1,10 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable } from "./pi-launcher.mjs";
 import { readSidecar } from "./pi-merge-models.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("buildInstanceId", () => {
   it("is '<cwd basename>-<pid>'", () => {
@@ -155,7 +156,7 @@ describe("writePiModels", () => {
   });
 
   it("writes models.json with _ prefixed providers and sidecar", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-write-test-"));
+    const dir = mkTestDir("pi-write-test-");
     const modelsPath = join(dir, "models.json");
     const store = {
       version: 2,
@@ -181,7 +182,7 @@ describe("writePiModels", () => {
   });
 
   it("clears the managed providers after the last channel is deleted", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-write-cleanup-"));
+    const dir = mkTestDir("pi-write-cleanup-");
     try {
       const modelsPath = join(dir, "models.json");
       const store = {

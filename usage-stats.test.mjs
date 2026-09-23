@@ -1,10 +1,11 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Fixed "now": 2026-08-30 12:34:56 local — deliberately mid-bucket so the
 // flooring of the bucket axes is exercised. The 1h axis floors onto 12:00,
@@ -32,7 +33,7 @@ function idx8h(ts) {
 }
 
 function makeHarness() {
-  const dir = mkdtempSync(join(tmpdir(), "usage-stats-"));
+  const dir = mkTestDir("usage-stats-");
   const stats = createUsageStats({ journal: createUsageJournal({ dir }), now: () => NOW });
   // Writers append under the file name of THEIR day, so each past-day row is
   // written through a journal whose clock sits on that day.
@@ -736,7 +737,7 @@ describe("segmented journal reads", () => {
 
 describe("channel display-name resolution (channelLabel)", () => {
   function labeledHarness(channelLabel) {
-    const dir = mkdtempSync(join(tmpdir(), "usage-stats-label-"));
+    const dir = mkTestDir("usage-stats-label-");
     const stats = createUsageStats({ journal: createUsageJournal({ dir }), now: () => NOW, channelLabel });
     const writeRequests = (dayOffset, rows) => {
       const j = createUsageJournal({ dir, now: () => tsOn(dayOffset, 12) });

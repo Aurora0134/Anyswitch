@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   createAgentMetricsCollector,
@@ -22,6 +21,7 @@ import {
   TTFT_THRESHOLDS,
   METRICS_SNAPSHOT_FILENAME,
 } from "./agent-metrics.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("getTtftColor", () => {
   it("returns green for ttft under 5s", () => {
@@ -4674,7 +4674,7 @@ describe("metrics snapshot persistence across collector recreations", () => {
   const emptyScanExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ParentProcessId,ProcessId\r\n");
 
   function snapshotDir() {
-    return mkdtempSync(join(tmpdir(), "anyswitch-metrics-snapshot-"));
+    return mkTestDir("anyswitch-metrics-snapshot-");
   }
 
   it("restores endpoint accounting, sample windows and sticky identity", async () => {

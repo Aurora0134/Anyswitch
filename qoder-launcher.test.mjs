@@ -10,7 +10,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import {
   buildQoderLauncherEnv,
@@ -20,6 +20,7 @@ import {
   RELAY_PORT,
 } from "./qoder-launcher.mjs";
 import { QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Opaque on purpose: writeConfig is mocked, so no test here depends on the
 // real Anyswitch store schema.
@@ -110,7 +111,7 @@ test("resolveQoderExecutable accepts absolute override and rejects relative", ()
 });
 
 test("resolveQoderExecutable prefers the entry dispatcher, then the direct CLI", () => {
-  const dir = mkdtempSync(join(tmpdir(), "qoder-exe-"));
+  const dir = mkTestDir("qoder-exe-");
   try {
     const home = join(dir, "home");
     // No entry dir, no bin dir: falls back to the direct CLI path.
@@ -363,7 +364,7 @@ test("realSpawnQoder prepends the CDP debugging port and fires onSpawned", async
   // receives to a file so we can assert the CDP flag was injected ahead of the
   // caller's args. onSpawned must fire on "spawn", and the promise must resolve
   // with the child's exit code.
-  const dir = mkdtempSync(join(tmpdir(), "qoder-spawn-"));
+  const dir = mkTestDir("qoder-spawn-");
   try {
     const outFile = join(dir, "argv.txt");
     const cmdPath = join(dir, "qoder.cmd");
@@ -387,7 +388,7 @@ test("realSpawnQoder prepends the CDP debugging port and fires onSpawned", async
 });
 
 test("realSpawnQoder never lets a throwing onSpawned hook fail the launch", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "qoder-spawn-"));
+  const dir = mkTestDir("qoder-spawn-");
   try {
     const cmdPath = join(dir, "qoder.cmd");
     writeFileSync(cmdPath, `@echo off\r\n@exit /b 0\r\n`);

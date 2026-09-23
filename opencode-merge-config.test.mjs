@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildOpencodeProviderEntry,
@@ -16,11 +15,12 @@ import {
   deriveAutoRouteChannel,
   sidecarPath,
 } from "./opencode-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 let tmpRoot;
 
 beforeEach(() => {
-  tmpRoot = mkdtempSync(join(tmpdir(), "opencode-merge-test-"));
+  tmpRoot = mkTestDir("opencode-merge-test-");
 });
 
 afterEach(() => {

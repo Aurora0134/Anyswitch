@@ -3,12 +3,12 @@
 
 import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { runKimiLauncher, buildKimiLauncherEnv, buildInstanceId, writeKimiConfig } from "./kimi-launcher.mjs";
 import { readSidecar } from "./kimi-merge-config.mjs";
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Mirror of kimi-code's parseKimiCodeCustomHeaders (dist/main.mjs): the env
 // value is newline-separated "Name: value" lines, split at the first colon.
@@ -196,7 +196,7 @@ describe("writeKimiConfig", () => {
   }
 
   it("reports a no-op when the store has no channels and nothing was managed before", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-write-"));
+    const dir = mkTestDir("kimi-write-");
     try {
       const result = await writeKimiConfig({ version: 2, providers: {} }, 47821, "tok", dir, join(dir, "config.toml"));
       assert.deepEqual(result, { ok: true, unchanged: true, reason: "no Anyswitch providers with models" });
@@ -207,7 +207,7 @@ describe("writeKimiConfig", () => {
   });
 
   it("clears the managed block after the last channel is deleted", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "kimi-write-"));
+    const dir = mkTestDir("kimi-write-");
     try {
       const configPath = join(dir, "config.toml");
       const first = await writeKimiConfig(channelStore(), 47821, "tok", dir, configPath);

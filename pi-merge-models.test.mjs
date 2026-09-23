@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,6 +16,7 @@ import {
   UnparseableModelsError,
   deriveAutoRouteChannel,
 } from "./pi-merge-models.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -173,7 +174,7 @@ describe("readModelsJson", () => {
   });
 
   it("throws UnparseableModelsError for a corrupt file instead of treating it as empty", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     writeFileSync(filePath, "{ not valid json", "utf8");
     assert.throws(() => readModelsJson(filePath), UnparseableModelsError);
@@ -182,7 +183,7 @@ describe("readModelsJson", () => {
   });
 
   it("parses a UTF-8 BOM-prefixed file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     writeFileSync(filePath, "\uFEFF" + JSON.stringify({ providers: { "poke-api": {} } }), "utf8");
     const parsed = readModelsJson(filePath);
@@ -192,7 +193,7 @@ describe("readModelsJson", () => {
 
 describe("writeModelsJsonWithBackup", () => {
   it("writes data and creates backup for existing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     writeFileSync(filePath, JSON.stringify({ providers: {} }), "utf8");
     const result = writeModelsJsonWithBackup(filePath, { providers: { new: true } });
@@ -204,7 +205,7 @@ describe("writeModelsJsonWithBackup", () => {
   });
 
   it("skips backup when file does not exist yet", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     const result = writeModelsJsonWithBackup(filePath, { providers: { first: true } });
     assert.equal(result.ok, true);
@@ -213,7 +214,7 @@ describe("writeModelsJsonWithBackup", () => {
   });
 
   it("returns unchanged when content is identical", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     writeFileSync(filePath, JSON.stringify({ providers: { a: 1 } }, null, 2) + "\n", "utf8");
     const result = writeModelsJsonWithBackup(filePath, { providers: { a: 1 } });
@@ -222,7 +223,7 @@ describe("writeModelsJsonWithBackup", () => {
   });
 
   it("prunes to the newest 5 backups and never touches pi's own models-store.backup.*", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     for (let i = 1; i <= 6; i++) {
       writeFileSync(join(dir, `models.backup.2020-01-0${i}T00-00-00-000Z.json`), `old${i}`, "utf8");
@@ -297,12 +298,12 @@ describe("validatePiModelsConfig", () => {
 
 describe("sidecar", () => {
   it("readSidecar returns empty list for missing file", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-sidecar-"));
+    const dir = mkTestDir("pi-sidecar-");
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
   it("writeSidecar and readSidecar round-trip", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-sidecar-"));
+    const dir = mkTestDir("pi-sidecar-");
     writeSidecar(dir, ["deepseek", "poke-api"]);
     const read = readSidecar(dir);
     assert.deepEqual(read.providers, ["deepseek", "poke-api"]);
@@ -470,7 +471,7 @@ describe("per-instance header env expansion feasibility", () => {
   });
 
   it("keeps the literal ${VAR} placeholder through a write/read round-trip on disk", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     const { config } = mergeModelsJson(
       {
@@ -502,7 +503,7 @@ describe("per-instance header env expansion feasibility", () => {
   });
 
   it("keeps the managed provider's instance placeholder through a disk round-trip", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+    const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
     const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
     writeModelsJsonWithBackup(filePath, config);

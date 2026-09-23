@@ -1,7 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   createEffortInjector,
@@ -10,6 +9,7 @@ import {
   readResponseText,
   EFFORT_REQUEST_FIELD,
 } from "./effort-injection.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const reasoning = (levels, level) => ({ kind: "reasoning", levels, default: level, wire: {}, thinkingFormat: null });
 const CATALOG = {
@@ -244,7 +244,7 @@ describe("readResponseText", () => {
 
 describe("defaultEffortInjector", () => {
   function sandboxBase() {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-inj-"));
+    const dir = mkTestDir("anyswitch-effort-inj-");
     const root = join(dir, "Anyswitch");
     mkdirSync(root, { recursive: true });
     return { dir, base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") } };

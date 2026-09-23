@@ -13,9 +13,9 @@ import {
   getYamlModule,
   deriveAutoRouteChannel,
 } from "./dsh-merge-config.mjs";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 test("buildDshProviderEntry creates valid dsh profile", () => {
   const provider = {
@@ -213,7 +213,7 @@ test("validateDshSettings validates structure", () => {
 
 test("round-trip read/write settings with yaml backup", async () => {
   const yaml = await getYamlModule();
-  const dir = mkdtempSync(join(tmpdir(), "dsh-merge-test-"));
+  const dir = mkTestDir("dsh-merge-test-");
   try {
     const filePath = join(dir, "settings.yaml");
     const initial = { "ui-theme": { preference: "light" } };
@@ -245,7 +245,7 @@ test("round-trip read/write settings with yaml backup", async () => {
 
 test("writeDshSettingsWithBackup prunes settings backups to the newest 5", async () => {
   const yaml = await getYamlModule();
-  const dir = mkdtempSync(join(tmpdir(), "dsh-merge-test-"));
+  const dir = mkTestDir("dsh-merge-test-");
   try {
     const filePath = join(dir, "settings.yaml");
     for (let i = 1; i <= 6; i++) {
@@ -264,7 +264,7 @@ test("writeDshSettingsWithBackup prunes settings backups to the newest 5", async
 });
 
 test("sidecar read and write round-trip", () => {
-  const dir = mkdtempSync(join(tmpdir(), "dsh-sidecar-test-"));
+  const dir = mkTestDir("dsh-sidecar-test-");
   try {
     assert.deepEqual(readSidecar(dir), { providers: [] });
     writeSidecar(dir, ["p2", "p1"]);

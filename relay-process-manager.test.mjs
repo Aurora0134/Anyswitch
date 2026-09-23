@@ -9,8 +9,6 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -27,6 +25,7 @@ import {
   createCachedPortOwnerFinder,
   PORT_OWNER_CACHE_TTL_MS,
 } from "./relay-process-manager.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // stopRelay verifies against the real app directory, so the "own" command
 // lines injected in these tests must reference it.
@@ -36,7 +35,7 @@ const OWN_LAUNCHER_CMD = `node.exe ${APP_DIR}zcode-launcher.mjs`; // per-launch 
 const FOREIGN_CMD = `"C:\\Program Files\\nodejs\\node.exe" C:\\Users\\someone\\projects\\unrelated\\server.mjs`;
 
 function makeRoot() {
-  return mkdtempSync(join(tmpdir(), "anyswitch-rpm-"));
+  return mkTestDir("anyswitch-rpm-");
 }
 
 // Build injected deps for stopRelay. `alive` PIDs pass the liveness filter;

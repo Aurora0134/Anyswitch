@@ -1,7 +1,6 @@
 import test, { describe, it, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   createPromptsInjector,
@@ -11,6 +10,7 @@ import {
   MANAGED_END,
   PROMPT_ENDPOINTS,
 } from "./agent-prompts-inject.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Injection plane: every injector runs against a temp fake home so real
 // endpoint instruction files are never touched.
@@ -18,7 +18,7 @@ import {
 const tempDirs = [];
 
 function makeInjector() {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-inject-"));
+  const root = mkTestDir("anyswitch-inject-");
   tempDirs.push(root);
   const homeDir = join(root, "home");
   mkdirSync(homeDir, { recursive: true });

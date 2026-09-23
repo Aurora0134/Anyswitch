@@ -1,8 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import {
   canonicalizeModelId,
   effortLookupKeys,
@@ -22,6 +21,7 @@ import {
   effortSupplementEnabled,
   OPTIMISTIC_EFFORT_LEVELS,
 } from "./effort-catalog.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function fakeFs(files) {
   return {
@@ -443,27 +443,27 @@ describe("store 自带声明优先于库（resolveEndpointEfforts）", () => {
 
 describe("注入推理强度开关（effortSupplementEnabled）", () => {
   it("设置缺失时默认开", () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    const dir = mkTestDir("anyswitch-effort-gate-");
     assert.equal(effortSupplementEnabled(dir), true);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("显式 false 时为关", () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    const dir = mkTestDir("anyswitch-effort-gate-");
     writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: false }));
     assert.equal(effortSupplementEnabled(dir), false);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("显式 true 时为开", () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    const dir = mkTestDir("anyswitch-effort-gate-");
     writeFileSync(join(dir, "settings.json"), JSON.stringify({ injectThinkingEffort: true }));
     assert.equal(effortSupplementEnabled(dir), true);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("settings.json 损坏时 fail-open 为开", () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-effort-gate-"));
+    const dir = mkTestDir("anyswitch-effort-gate-");
     writeFileSync(join(dir, "settings.json"), "{ not json");
     assert.equal(effortSupplementEnabled(dir), true);
     rmSync(dir, { recursive: true, force: true });

@@ -1,7 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   syncAllAgentConfigs,
@@ -14,12 +13,13 @@ import {
 } from "./agent-sync.mjs";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { managedConnectionId } from "./qoder-merge-config.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("agent-sync", () => {
   let tmpRoot;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "agent-sync-test-"));
+    tmpRoot = mkTestDir("agent-sync-test-");
   });
 
   afterEach(() => {
@@ -206,7 +206,7 @@ describe("agent-sync pools", () => {
   let tmpRoot;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "agent-sync-pool-test-"));
+    tmpRoot = mkTestDir("agent-sync-pool-test-");
   });
 
   afterEach(() => {
@@ -320,7 +320,7 @@ describe("agent-sync auto routing channel", () => {
   let tmpRoot;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "agent-sync-auto-test-"));
+    tmpRoot = mkTestDir("agent-sync-auto-test-");
   });
 
   afterEach(() => {
@@ -430,7 +430,7 @@ describe("agent-sync 同步结果摘要", () => {
   let tmpRoot;
 
   beforeEach(() => {
-    tmpRoot = mkdtempSync(join(tmpdir(), "agent-sync-summary-test-"));
+    tmpRoot = mkTestDir("agent-sync-summary-test-");
   });
 
   afterEach(() => {

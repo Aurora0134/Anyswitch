@@ -8,33 +8,33 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { readSidecar, writeSidecar, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("merge-common sidecar", () => {
   it("reads a missing sidecar as an empty managed list", () => {
-    const dir = mkdtempSync(join(tmpdir(), "merge-common-"));
+    const dir = mkTestDir("merge-common-");
     assert.deepEqual(readSidecar(join(dir, "x-sidecar.json")), { providers: [] });
   });
 
   it("reads a corrupt sidecar as an empty managed list", () => {
-    const dir = mkdtempSync(join(tmpdir(), "merge-common-"));
+    const dir = mkTestDir("merge-common-");
     const path = join(dir, "x-sidecar.json");
     writeFileSync(path, "{ not json");
     assert.deepEqual(readSidecar(path), { providers: [] });
   });
 
   it("round-trips a provider list sorted", () => {
-    const dir = mkdtempSync(join(tmpdir(), "merge-common-"));
+    const dir = mkTestDir("merge-common-");
     const path = join(dir, "x-sidecar.json");
     writeSidecar(path, ["zeta", "alpha", "mid"]);
     assert.deepEqual(readSidecar(path), { providers: ["alpha", "mid", "zeta"] });
   });
 
   it("writes the exact on-disk format the merge modules always used", () => {
-    const dir = mkdtempSync(join(tmpdir(), "merge-common-"));
+    const dir = mkTestDir("merge-common-");
     const path = join(dir, "x-sidecar.json");
     writeSidecar(path, ["b", "a"]);
     assert.equal(
@@ -44,7 +44,7 @@ describe("merge-common sidecar", () => {
   });
 
   it("creates the parent directory when it does not exist yet", () => {
-    const dir = mkdtempSync(join(tmpdir(), "merge-common-"));
+    const dir = mkTestDir("merge-common-");
     const path = join(dir, "nested", "deeper", "x-sidecar.json");
     writeSidecar(path, ["only"]);
     assert.deepEqual(readSidecar(path), { providers: ["only"] });

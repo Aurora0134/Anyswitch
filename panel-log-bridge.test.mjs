@@ -13,13 +13,13 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { createLogger } from "./logger.mjs";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { startRelayLogBridge } from "./panel.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const STORE = {
   version: 2,
@@ -76,7 +76,7 @@ describe("relay log bridge", () => {
     const received = [];
     const unsubscribe = panelLogger.subscribe((entry) => received.push(entry.message));
 
-    const root = mkdtempSync(join(tmpdir(), "anyswitch-bridge-"));
+    const root = mkTestDir("anyswitch-bridge-");
     let token;
     try {
       // Token file the bridge reads; value irrelevant because fetch is faked.
@@ -109,7 +109,7 @@ describe("relay log bridge", () => {
       throw new Error("ECONNREFUSED");
     };
     const panelLogger = createLogger({ sink: () => {} });
-    const root = mkdtempSync(join(tmpdir(), "anyswitch-bridge-down-"));
+    const root = mkTestDir("anyswitch-bridge-down-");
     try {
       loadOrGenerateToken(root);
       const stop = startRelayLogBridge(panelLogger, root);

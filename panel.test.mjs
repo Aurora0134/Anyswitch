@@ -1,11 +1,12 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "./panel.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Minimal fake HTTP req/res pair. res captures the status code, headers, and
 // JSON body the router writes, so a test can assert on them. `body` (optional)
@@ -345,7 +346,7 @@ describe("panel router relay control + pull-mode agents", () => {
   // 状态检测号池富化：池 id 行 → poolName；成员 id 行 → poolName + memberName；
   // 无关渠道行原样透传。pulled 与本地 collector 两条路径都过同一富化。
   function poolStoreEnv(models, { pulled = true } = {}) {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-pool-"));
+    const dir = mkTestDir("anyswitch-panel-pool-");
     const storeFile = join(dir, "store.json");
     writeFileSync(storeFile, JSON.stringify({
       version: 2,
@@ -522,7 +523,7 @@ describe("panel router followAgent watchdog coordination", () => {
   // mkdir first: atomicWriteFile writes settings.json.<uuid>.tmp next to the
   // target and cannot create intermediate directories itself.
   function tempBase() {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-"));
+    const dir = mkTestDir("anyswitch-panel-wd-");
     const relayDataRoot = join(dir, "Anyswitch");
     mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
@@ -764,7 +765,7 @@ describe("panel router followAgent watchdog coordination", () => {
 // stale-while-revalidate: GETs never wait once a snapshot has settled.
 describe("panel router watchdog probe snapshot", () => {
   function tempBase() {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-wd-snap-"));
+    const dir = mkTestDir("anyswitch-panel-wd-snap-");
     const relayDataRoot = join(dir, "Anyswitch");
     mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir };
@@ -1617,7 +1618,7 @@ describe("panel router body limit + panel.html lookup chain", () => {
   });
 
   it("GET /panel serves ANYSWITCH_PANEL_HTML when the env override is set", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-html-"));
+    const dir = mkTestDir("anyswitch-panel-html-");
     const custom = join(dir, "custom-panel.html");
     writeFileSync(custom, "<html>env-injected panel</html>");
     const saved = process.env.ANYSWITCH_PANEL_HTML;
@@ -1651,7 +1652,7 @@ describe("panel router body limit + panel.html lookup chain", () => {
   });
 
   it("GET /panel revalidates via ETag: If-None-Match hits 304, changed content changes the ETag", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-etag-"));
+    const dir = mkTestDir("anyswitch-panel-etag-");
     const custom = join(dir, "panel.html");
     writeFileSync(custom, "<html>v1</html>");
     const saved = process.env.ANYSWITCH_PANEL_HTML;
@@ -4051,7 +4052,7 @@ describe("设置项「注入推理强度」", () => {
   }
 
   function tempBase() {
-    const dir = mkdtempSync(join(tmpdir(), "anyswitch-panel-effort-"));
+    const dir = mkTestDir("anyswitch-panel-effort-");
     const relayDataRoot = join(dir, "Anyswitch");
     mkdirSync(relayDataRoot, { recursive: true });
     return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir: relayDataRoot };

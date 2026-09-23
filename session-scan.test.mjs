@@ -7,15 +7,15 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import { createSessionScanner } from "./session-scan.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeTmp() {
-  return mkdtempSync(join(tmpdir(), "anyswitch-session-scan-"));
+  return mkTestDir("anyswitch-session-scan-");
 }
 
 // Build a scanner where EVERY endpoint root is a fresh empty temp dir except
