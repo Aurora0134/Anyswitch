@@ -672,11 +672,12 @@ export function createPanelRouter({
     }
     const id = typeof body?.id === "string" ? body.id : null;
     const action = typeof body?.action === "string" ? body.action : null;
-    const { clientLifecycleKind, CLIENT_ACTIONS } = await import("./client-lifecycle.mjs");
-    if (!id || !clientLifecycleKind(id)) {
+    const { clientLifecycleKind, clientLifecycleActions } = await import("./client-lifecycle.mjs");
+    const kind = clientLifecycleKind(id);
+    if (!id || !kind) {
       return sendJson(res, 404, { ok: false, error: "unknown_client", message: "未找到这个客户端" });
     }
-    if (!CLIENT_ACTIONS.includes(action)) {
+    if (!clientLifecycleActions(id).includes(action)) {
       return sendJson(res, 400, { ok: false, error: "unsupported_action", message: "不支持的操作" });
     }
     lifecycleActive ??= new Map();
@@ -703,7 +704,20 @@ export function createPanelRouter({
         const before = (await getEnvironmentService().then((service) => service.getState()))
           .clients.find((client) => client.id === id);
         const beforeVersion = before?.installations?.[0]?.version ?? null;
-        const command = await runClientLifecycleFn({ id, action });
+        // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
+        // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
+        const pinnedVersion = kind === "native"
+          ? await getReleaseService()
+            .then((service) => service.getClientLatest(id))
+            .then((data) => (data?.state === "ok" ? data.version : null))
+            .catch(() => null)
+          : null;
+        const command = await runClientLifecycleFn({
+          id,
+          action,
+          commandPath: before?.installations?.[0]?.path ?? null,
+          targetVersion: pinnedVersion,
+        });
         // 重查本地与官方版本时强制绕过 TTL——刚装完，缓存结果就是错的。
         const after = (await getEnvironmentService().then((service) => service.getState({ force: true })))
           .clients.find((client) => client.id === id);

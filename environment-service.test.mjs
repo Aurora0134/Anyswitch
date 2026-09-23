@@ -231,7 +231,8 @@ test("Grok Build reads its version from the CLI's own report", async (t) => {
   const found = installation(ok, "grok");
   assert.equal(found.status, "found");
   assert.equal(found.path, exe);
-  assert.equal(found.remoteId, null);
+  // 本地版本读执行体自报，官方最新仍查 @xai-official/grok 的 npm dist-tag（remoteId 交出去）
+  assert.equal(found.remoteId, "grok");
   assert.equal(found.version, "1.0.30");
   assert.equal(found.versionSource, "cli --version");
   assert.equal(found.issue, null);

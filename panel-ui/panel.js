@@ -1990,12 +1990,18 @@ async function api(method, path, body) {
       pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
       kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
       dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],
+      // 原生二进制没有公开仓库发布页，官方来源只有 npm 包页（与服务端 release-service 同源）。
+      grok: ["", "@xai-official/grok"],
       zcode: [], qoder: [],
     };
-    // 面板可代管安装/更新的客户端（npm 全局包）。与服务端 client-lifecycle.mjs
-    // 的 CLIENT_PACKAGES 保持同一份清单，两者的一致性由 client-lifecycle.test.mjs 钉住；
-    // 服务端仍是权威，这里只决定按钮是否出现。zcode/qoder 是桌面应用，走官方更新渠道。
-    const updatableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh"]);
+    // 面板可代管「更新」的客户端：npm 全局包按包名重装最新版，Grok Build 先跑它自身的
+    // 升级命令。服务端 client-lifecycle.mjs 的 CLIENT_PACKAGES / NATIVE_CLIENTS 才是权威，
+    // 这里只决定按钮是否出现，两份清单的一致性由 client-lifecycle.test.mjs 钉住。
+    const updatableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh", "grok"]);
+    // 未安装时面板代为装包的客户端：只有 npm 全局包这一条路。zcode / qoder 是桌面应用，
+    // 走官方更新渠道；Grok Build 未安装时只报未找到——从裸装起会把用户切进另一种安装
+    // 形态，这件事不由关于页的一个按钮代劳。
+    const installableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh"]);
     function safeLink(raw, id) {
       try {
         const url = new URL(raw);
@@ -2052,14 +2058,14 @@ async function api(method, path, body) {
     let lifecycleBatch = null; // { results }，批量更新进行中非 null；批量与单行整段时间互斥
     let lifecycleModalResolve = null;
     const lifecycleModalQueue = []; // 弹层是单例，同时到来的确认请求排队逐个弹
-    // 该安装项当前能做什么：可更新 > 未安装可安装；桌面应用与状态不明不给动作。
-    function installationAction(installation) {
+    // 该安装项当前能做什么：可更新 > 未安装可装；桌面应用、状态不明与不给装包的客户端不给动作。
+    function installationAction(client, installation) {
       if (!installation || installation.kind !== "cli") return null;
       const remote = remoteCache.get(cacheKey(installation))?.data;
       if (remote?.state === "ok" && remote.version && validLocal(installation) && remote.comparison === "update_available") {
         return { kind: "update", version: remote.version };
       }
-      if (installation.status === "not_found") return { kind: "install" };
+      if (installation.status === "not_found" && installableClients.has(client.id)) return { kind: "install" };
       return null;
     }
     function clientName(id) { return local?.clients.find((client) => client.id === id)?.name || id; }
@@ -2067,7 +2073,7 @@ async function api(method, path, body) {
       const button = get("aboutUpdateAll");
       if (!button) return;
       const count = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
-        .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update")).length;
+        .filter((client) => client.installations.some((installation) => installationAction(client, installation)?.kind === "update")).length;
       button.disabled = count === 0 || lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
       button.textContent = lifecycleBatch ? "批量更新中…" : count > 0 ? `全部更新 (${count})` : "全部更新";
     }
@@ -2167,7 +2173,7 @@ async function api(method, path, body) {
     async function startUpdateAll() {
       if (lifecycleRuns.size > 0 || lifecycleBatch) return;
       const targets = (local?.clients ?? []).filter((client) => updatableClients.has(client.id))
-        .filter((client) => client.installations.some((installation) => installationAction(installation)?.kind === "update"))
+        .filter((client) => client.installations.some((installation) => installationAction(client, installation)?.kind === "update"))
         .map((client) => ({ id: client.id, action: "update" }));
       if (!targets.length) return;
       const running = await runningClients(targets.map((target) => target.id));
@@ -2268,7 +2274,7 @@ async function api(method, path, body) {
         const localSpan = element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`);
         if (installation.status === "error" || installation.issue === "not_runnable") localSpan.dataset.tone = "danger";
         line.appendChild(localSpan);
-        // 无官方版本源的安装项（Grok Build）不查官方版本，官方列直述「自带更新」
+        // 没有官方版本源的安装项不查官方版本，官方列直述「自带更新」
         const remoteText = !installation.remoteId ? "自带更新" : goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
         line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
         const comparison = goodRemote && validLocal(installation) ? remote.comparison : "unknown";
@@ -2290,7 +2296,7 @@ async function api(method, path, body) {
           if (ownRun) {
             intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true };
           } else {
-            const act = installationAction(installation);
+            const act = installationAction(client, installation);
             if (act) intent = { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
           }
           if (intent) {

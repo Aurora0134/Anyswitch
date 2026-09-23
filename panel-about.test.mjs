@@ -59,7 +59,7 @@ function environment() {
     clients: ids.map((id) => ({
       id, name: id,
       installations: (id === "qoder" || id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
-        kind, remoteId: id === "grok" ? null : id, // Grok Build 无官方版本源，关于页不对其发起查询（与生产行为一致）
+        kind, remoteId: id, // 九个客户端都有官方版本源，逐行发起查询（与生产行为一致）
         status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
         versionSource: "package-json", issue: null,
       })),
@@ -201,7 +201,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 8);
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 9, "九个客户端都有官方版本源，各查一次");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -276,7 +276,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   await tick(); await tick();
   assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 8);
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 9, "九个客户端都有官方版本源，各查一次");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {
@@ -359,7 +359,7 @@ test("Codex 一张卡片两行：CLI 行带更新按钮，桌面行查 codex-des
   assert.match(cliActions[0].textContent, /更新到 1\.1\.0/);
   assert.equal(descendants(lines[1], (node) => node.tagName === "button" && node.className.includes("about-client-action")).length, 0, "桌面应用不经面板更新");
   assert.ok(h.calls.includes("/api/environment/latest/codex-desktop?localVersion=26.915.4065"), "桌面行的官方最新单元格走 codex-desktop 远端 id");
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(6\)/, "桌面行不把批量更新数多算一次");
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(7\)/, "桌面行不把批量更新数多算一次");
 });
 
 test("Codex 桌面行的官方来源链接放行 Microsoft Store，仿冒域名被丢弃", async () => {
@@ -389,6 +389,26 @@ test("Codex 桌面行的官方来源链接放行 Microsoft Store，仿冒域名�
   assert.equal(survivors[0].href, "https://github.com/openai/codex");
   const lines = descendants(rejected.row("codex"), (node) => node.className === "about-version-line");
   assert.match(lines[1].textContent, /官方最新 26\.915\.4066/, "只是不放链接，官方版本照常展示");
+});
+
+test("Grok Build 行按 npm 官方版本比对，链接只放行 npm 包页", async () => {
+  const grokRow = (url) => harness((path) => (path.includes("/latest/grok?") ? { ...latest("1.0.41"), url } : normal(path)));
+  const allowed = grokRow("https://www.npmjs.com/package/@xai-official/grok");
+  await allowed.controller.enter();
+  assert.ok(allowed.calls.includes("/api/environment/latest/grok?localVersion=1.0.0"), "grok 用自己的远端 id 查官方最新");
+  const lines = descendants(allowed.row("grok"), (node) => node.className === "about-version-line");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0].textContent, /本地.*1\.0\.0.*官方最新.*1\.0\.41.*有新版本/);
+  const actions = descendants(lines[0], (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].textContent, "更新到 1.0.41");
+  assert.deepEqual(descendants(allowed.row("grok"), (node) => node.tagName === "a").map((node) => node.href),
+    ["https://www.npmjs.com/package/@xai-official/grok"]);
+
+  const rejected = grokRow("https://npmjs.com.evil.test/package/@xai-official/grok");
+  await rejected.controller.enter();
+  assert.equal(descendants(rejected.row("grok"), (node) => node.tagName === "a").length, 0, "仿冒域名的链接被丢弃，版本比对照常");
+  assert.match(descendants(rejected.row("grok"), (node) => node.className === "about-version-line")[0].textContent, /官方最新.*1\.0\.41/);
 });
 
 test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", () => {
@@ -446,16 +466,20 @@ test("本地环境卡为可更新客户端出更新按钮，桌面应用只留�
   const h = harness(normal);
   await h.controller.enter();
   assert.match(actionButton(h, "claude").textContent, /更新到 1\.1\.0/);
+  assert.match(actionButton(h, "grok").textContent, /更新到 1\.1\.0/, "Grok Build 走自身升级命令，按钮与 npm 客户端同位");
   assert.equal(actionButton(h, "zcode"), undefined, "桌面应用不经面板更新");
   assert.equal(actionButton(h, "qoder"), undefined);
   assert.equal(h.get("aboutUpdateAll").disabled, false);
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(6\)/);
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(7\)/);
 });
 
 test("已是最新的客户端不出动作按钮，未安装的出安装按钮", async () => {
   const local = environment();
   local.clients[0].installations[0].status = "not_found";
   local.clients[0].installations[0].version = null;
+  // Grok Build 未安装时不给安装：首装会把用户切进另一种安装形态，面板只代管更新。
+  local.clients[8].installations[0].status = "not_found";
+  local.clients[8].installations[0].version = null;
   const h = harness((path) => {
     if (path.includes("/latest/claude")) return latest("1.1.0", "current");
     if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
@@ -464,6 +488,7 @@ test("已是最新的客户端不出动作按钮，未安装的出安装按钮",
   await h.controller.enter();
   assert.equal(actionButton(h, "claude").textContent, "安装");
   assert.match(actionButton(h, "codex").textContent, /更新到/);
+  assert.equal(actionButton(h, "grok"), undefined, "未安装的 grok 不给安装按钮");
 });
 
 test("目标客户端正在运行时先确认：取消不动手，确认后才发请求", async () => {

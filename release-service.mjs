@@ -1,22 +1,25 @@
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
-const npmSource = (name, repository) => ({
+const npmSource = (name, repository, url) => ({
   endpoint: `https://registry.npmjs.org/-/package/${encodeURIComponent(name)}/dist-tags`,
   source: `npm:${name}:latest`,
-  url: `https://github.com/${repository}/releases`,
+  url: url ?? `https://github.com/${repository}/releases`,
   field: "latest",
 });
 
 const CLIENTS = {
   claude: npmSource("@anthropic-ai/claude-code", "anthropics/claude-code"),
+  // Codex 的本地检测读的是 npm 全局 `@openai/codex` 的包清单，更新动作装的也是这个包，
+  // 官方最新版本因此同查 npm dist-tag。查 GitHub Release 时两源各自发版就会出现
+  // 「提示有新版本、装完版本没变」，还要分摊 api.github.com 的匿名限额。
+  codex: npmSource("@openai/codex", "openai/codex"),
   opencode: npmSource("opencode-ai", "anomalyco/opencode"),
   pi: npmSource("@earendil-works/pi-coding-agent", "earendil-works/pi"),
   kimi: npmSource("@moonshot-ai/kimi-code", "MoonshotAI/kimi-code"),
   dsh: npmSource("@deepseek-ai/dsh", "deepseek-ai/deepseek-harness"),
-  codex: {
-    endpoint: "https://api.github.com/repos/openai/codex/releases/latest",
-    source: "github:openai/codex:latest", format: "codex",
-  },
+  // Grok Build 的执行体是原生二进制，但官方分发与它自身的 `grok update` 都以
+  // `@xai-official/grok` 的 npm dist-tag 为准，官方链接因此指 npm 包页而非仓库发布页。
+  grok: npmSource("@xai-official/grok", null, "https://www.npmjs.com/package/@xai-official/grok"),
   "codex-desktop": {
     endpoint: "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json",
     source: "codex-desktop:windows-store:latest", format: "codex-desktop",
@@ -144,18 +147,15 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
         throw new ReleaseError(limited ? "rate_limited" : "http_error");
       }
       const data = spec.format === "yaml" ? null : parseJson(text);
-      if (spec.format === "codex" && (typeof data?.tag_name !== "string" || !data.tag_name.startsWith("rust-v")
-        || data.draft !== false || data.prerelease !== false)) throw new ReleaseError("invalid_response");
       if (spec.format === "codex-desktop" && (typeof data?.buildVersion !== "string"
         || !/^\d+\.\d+\.\d+(?:\.0)?$/.test(data.buildVersion))) throw new ReleaseError("invalid_response");
       const version = spec.format === "yaml" ? yamlVersion(text)
-        : spec.format === "codex" ? data.tag_name.slice(6)
         : spec.format === "codex-desktop" ? data.buildVersion.replace(/^(\d+\.\d+\.\d+)\.0$/, "$1")
         : data?.[spec.field];
       const parsed = parseVersion(version);
-      if (!parsed || (spec.format === "codex" && parsed.prerelease.length)) throw new ReleaseError("invalid_response");
+      if (!parsed) throw new ReleaseError("invalid_response");
       return {
-        state: "ok", version, url: spec.format === "codex" ? releaseUrl(data.html_url, "openai/codex", data.tag_name) : spec.url, source: spec.source,
+        state: "ok", version, url: spec.url, source: spec.source,
         checkedAt: new Date(now()).toISOString(), errorCode: null,
       };
     } catch (error) {
