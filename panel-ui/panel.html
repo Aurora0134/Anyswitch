@@ -1889,13 +1889,13 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话">
               <button type="button" class="terminal-tab active" role="tab" aria-selected="true" data-terminal-tab="checkout">
                 <span class="terminal-tab-shell">PS</span>
-                <span class="terminal-tab-copy"><strong>支付服务</strong><small>Codex CLI</small></span>
+                <span class="terminal-tab-copy"><strong>payment-service</strong><small>Codex CLI</small></span>
                 <span class="terminal-tab-state is-working" title="正在运行"></span>
                 <span class="terminal-tab-close" aria-hidden="true">×</span>
               </button>
               <button type="button" class="terminal-tab" role="tab" aria-selected="false" data-terminal-tab="portal">
                 <span class="terminal-tab-shell terminal-tab-shell-cmd">&gt;_</span>
-                <span class="terminal-tab-copy"><strong>平台门户</strong><small>Claude Code</small></span>
+                <span class="terminal-tab-copy"><strong>portal</strong><small>Claude Code</small></span>
                 <span class="terminal-tab-state is-idle" title="空闲"></span>
                 <span class="terminal-tab-close" aria-hidden="true">×</span>
               </button>
@@ -1907,7 +1907,7 @@ if (window.panelStartupController) panelStartupPlay();
 
           <div class="terminal-session-bar">
             <div class="terminal-session-context">
-              <span class="terminal-session-name" id="terminalSessionName">支付服务</span>
+              <span class="terminal-session-name" id="terminalSessionName">payment-service</span>
               <span class="terminal-session-path" id="terminalSessionPath">D:\\dev\\payment-service</span>
               <span class="terminal-session-branch" id="terminalSessionBranch">main</span>
             </div>
@@ -1929,6 +1929,7 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
           <div class="terminal-footbar">
             <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
+            <span id="terminalFootPid">PID 23140</span>
             <span>UTF-8</span>
             <span>120 × 34</span>
             <span class="terminal-foot-spacer"></span>
@@ -1942,8 +1943,11 @@ if (window.panelStartupController) panelStartupPlay();
         <aside class="terminal-inspector" id="terminalInspector" aria-label="终端状态">
           <div class="terminal-inspector-head">
             <div>
-              <span class="terminal-eyebrow">当前终端</span>
-              <h2 id="terminalInspectorTitle">Codex CLI</h2>
+              <span class="terminal-inspector-eyebrow-row">
+                <span class="terminal-eyebrow">当前终端</span>
+                <span class="terminal-agent-badge" id="terminalAgentBadge">Codex CLI</span>
+              </span>
+              <h2 id="terminalInspectorTitle">payment-service</h2>
             </div>
             <button type="button" class="icon-btn terminal-inspector-toggle" id="terminalInspectorToggle" title="收起状态面板" aria-label="收起状态面板" aria-expanded="true">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
