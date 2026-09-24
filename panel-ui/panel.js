@@ -3415,14 +3415,16 @@ async function api(method, path, body) {
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
+    $("terminalFootStats").hidden = !metrics;
     if (metrics) {
       $("terminalTtftVal").textContent = metrics.ttft;
       $("terminalTtftLamp").className = `lamp lamp-${metrics.ttftLamp}`;
       $("terminalTpsVal").textContent = metrics.tps;
       $("terminalCacheVal").textContent = metrics.cache;
       $("terminalWorkTimeVal").textContent = metrics.workTime;
-      $("terminalSessionReqs").textContent = `${metrics.requestCount} 次请求`;
-      $("terminalSessionTokens").textContent = metrics.tokens;
+      $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
+      $("terminalFootTokens").textContent = metrics.tokens;
+      $("terminalFootTokens").title = metrics.tokens;
       updateSparkline("terminalSparkTtft", metrics.sparkTtft);
       updateSparkline("terminalSparkTps", metrics.sparkTps);
       updateSparkline("terminalSparkCache", metrics.sparkCache);

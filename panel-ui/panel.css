@@ -996,12 +996,16 @@
   .terminal-cursor { width: 7px; height: 1.1em; margin-left: 1px; background: #dbeafe; animation: terminalCursorBlink 1.1s steps(2, start) infinite; }
   @keyframes terminalCursorBlink { 50% { opacity: 0; } }
   .terminal-footbar {
-    min-height: 27px; gap: 14px; padding: 0 14px; color: var(--text-4); background: var(--surface-sunken);
-    border-top: 1px solid var(--border); font: 10px var(--font-mono);
+    min-height: 30px; gap: 14px; padding: 0 14px; color: var(--text-3); background: var(--surface-sunken);
+    border-top: 1px solid var(--border-strong); font: 11px var(--font-mono);
   }
   .terminal-foot-dot { display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; }
   .terminal-foot-dot.is-green { background: var(--ok); }
   .terminal-foot-spacer { flex: 1 1 auto; }
+  .terminal-foot-stats { display: inline-flex; align-items: center; gap: 14px; min-width: 0; }
+  .terminal-foot-stats[hidden] { display: none; }
+  .terminal-foot-requests { color: var(--text-2); font-weight: 650; white-space: nowrap; }
+  .terminal-foot-tokens { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .terminal-inspector { display: flex; flex-direction: column; overflow: hidden; }
   .terminal-inspector-head {
     display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 74px;
@@ -1027,14 +1031,16 @@
   .terminal-live-status strong { color: currentColor; font-size: 12.5px; }
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 10.5px; overflow-wrap: anywhere; }
   .terminal-section-head { color: var(--text-3); font-size: 10.5px; }
-  /* 右栏监测区复用看板 telemetry 卡片，窄栏内固定 2×2 并收敛卡片尺寸 */
-  .terminal-metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 0; }
-  .terminal-metrics-grid .telemetry-card { padding: 10px 11px; }
-  .terminal-metrics-grid .telemetry-header { gap: 6px; }
-  .terminal-metrics-grid .telemetry-sparkline { width: 44px; }
-  .terminal-metrics-grid .telemetry-num { font-size: 17px; }
+  /* 右栏监测区：小灰标签 + 数值的直排 2×2，不套卡片盒；折线在格子右侧垂直居中 */
+  .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .terminal-metric { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+  .terminal-metric-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .terminal-metric-label { color: var(--text-3); font-size: 10.5px; }
+  .terminal-metric-spark { flex: none; width: 52px; height: 20px; }
+  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 700 14px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric strong .lamp { align-self: center; }
+  .terminal-metric-unit { color: var(--text-3); font-size: 10px; font-weight: 600; }
   .terminal-metrics-section[hidden] { display: none; }
-  .terminal-session-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   .terminal-inspector-section { padding: 15px 0; border-bottom: 1px solid var(--divider); }
   .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 10px; font-weight: 650; }
   .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10px var(--font-mono); }
@@ -1082,6 +1088,7 @@
     .terminal-inspector.is-collapsed .terminal-inspector-body { display: none; }
     .terminal-screen { padding: 16px 14px 12px; font-size: 12px; }
     .terminal-session-path { display: none; }
+    .terminal-foot-tokens { display: none; }
     .terminal-tab { min-width: 160px; }
   }
 

@@ -1932,7 +1932,10 @@ if (window.panelStartupController) panelStartupPlay();
             <span>UTF-8</span>
             <span>120 × 34</span>
             <span class="terminal-foot-spacer"></span>
-            <span>可输入</span>
+            <span class="terminal-foot-stats" id="terminalFootStats">
+              <span class="terminal-foot-requests" id="terminalFootRequests">14 次请求</span>
+              <span class="terminal-foot-tokens" id="terminalFootTokens">Prompt: 128,460 · Completion: 31,204 · Cached: 96,080</span>
+            </span>
           </div>
         </section>
 
@@ -1953,58 +1956,34 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
 
             <div class="terminal-inspector-section terminal-metrics-section" id="terminalMetricsSection">
-              <div class="telemetry-grid terminal-metrics-grid">
-                <div class="telemetry-card">
-                  <div class="telemetry-header">
-                    <span class="telemetry-label">首字响应时间</span>
-                    <div class="telemetry-sparkline" id="terminalSparkTtft"></div>
+              <div class="terminal-metric-grid">
+                <div class="terminal-metric">
+                  <div class="terminal-metric-main">
+                    <span class="terminal-metric-label">首字响应时间</span>
+                    <strong><i class="lamp lamp-gray" id="terminalTtftLamp"></i><span id="terminalTtftVal">-</span><span class="terminal-metric-unit">s</span></strong>
                   </div>
-                  <div class="telemetry-content">
-                    <div class="telemetry-num">
-                      <i class="lamp lamp-gray" id="terminalTtftLamp"></i>
-                      <span id="terminalTtftVal">-</span>
-                      <span class="telemetry-unit">s</span>
-                    </div>
+                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTtft"></span>
+                </div>
+                <div class="terminal-metric">
+                  <div class="terminal-metric-main">
+                    <span class="terminal-metric-label">生成速度</span>
+                    <strong><span id="terminalTpsVal">-</span><span class="terminal-metric-unit">tok/s</span></strong>
+                  </div>
+                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTps"></span>
+                </div>
+                <div class="terminal-metric">
+                  <div class="terminal-metric-main">
+                    <span class="terminal-metric-label">缓存命中率</span>
+                    <strong><span id="terminalCacheVal">-</span><span class="terminal-metric-unit">%</span></strong>
+                  </div>
+                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkCache"></span>
+                </div>
+                <div class="terminal-metric">
+                  <div class="terminal-metric-main">
+                    <span class="terminal-metric-label">已工作时间</span>
+                    <strong><span id="terminalWorkTimeVal">-</span></strong>
                   </div>
                 </div>
-                <div class="telemetry-card">
-                  <div class="telemetry-header">
-                    <span class="telemetry-label">生成速度</span>
-                    <div class="telemetry-sparkline" id="terminalSparkTps"></div>
-                  </div>
-                  <div class="telemetry-content">
-                    <div class="telemetry-num">
-                      <span id="terminalTpsVal">-</span>
-                      <span class="telemetry-unit">tok/s</span>
-                    </div>
-                  </div>
-                </div>
-                <div class="telemetry-card">
-                  <div class="telemetry-header">
-                    <span class="telemetry-label">缓存命中率</span>
-                    <div class="telemetry-sparkline" id="terminalSparkCache"></div>
-                  </div>
-                  <div class="telemetry-content">
-                    <div class="telemetry-num">
-                      <span id="terminalCacheVal">-</span>
-                      <span class="telemetry-unit">%</span>
-                    </div>
-                  </div>
-                </div>
-                <div class="telemetry-card">
-                  <div class="telemetry-header">
-                    <span class="telemetry-label">已工作时间</span>
-                  </div>
-                  <div class="telemetry-content">
-                    <div class="telemetry-num">
-                      <span id="terminalWorkTimeVal">-</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="terminal-session-line">
-                <span class="badge badge-neutral" id="terminalSessionReqs">0 次请求</span>
-                <span class="session-tokens-line" id="terminalSessionTokens">Prompt: 0 · Completion: 0 · Cached: 0</span>
               </div>
             </div>
 
