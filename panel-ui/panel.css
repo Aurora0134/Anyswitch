@@ -1026,10 +1026,15 @@
   .terminal-live-status > div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
   .terminal-live-status strong { color: currentColor; font-size: 12.5px; }
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 10.5px; overflow-wrap: anywhere; }
-  .terminal-context-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; padding: 16px 0; border-bottom: 1px solid var(--divider); }
-  .terminal-context-grid div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-  .terminal-context-grid span, .terminal-section-head { color: var(--text-3); font-size: 10.5px; }
-  .terminal-context-grid strong { overflow: hidden; text-overflow: ellipsis; color: var(--text-2); font: 11px var(--font-mono); white-space: nowrap; }
+  .terminal-section-head { color: var(--text-3); font-size: 10.5px; }
+  /* 右栏监测区复用看板 telemetry 卡片，窄栏内固定 2×2 并收敛卡片尺寸 */
+  .terminal-metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 0; }
+  .terminal-metrics-grid .telemetry-card { padding: 10px 11px; }
+  .terminal-metrics-grid .telemetry-header { gap: 6px; }
+  .terminal-metrics-grid .telemetry-sparkline { width: 44px; }
+  .terminal-metrics-grid .telemetry-num { font-size: 17px; }
+  .terminal-metrics-section[hidden] { display: none; }
+  .terminal-session-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
   .terminal-inspector-section { padding: 15px 0; border-bottom: 1px solid var(--divider); }
   .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 10px; font-weight: 650; }
   .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10px var(--font-mono); }
