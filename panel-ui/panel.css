@@ -1047,8 +1047,6 @@
   .terminal-route-node.is-muted { color: var(--text-4); }
   .terminal-route-arrow { color: var(--text-4); }
   .terminal-route-note { display: block; margin-top: 8px; color: var(--text-3); font-size: 10px; }
-  .terminal-agent-note { border-bottom: 0; }
-  .terminal-agent-note p { margin: 0; color: var(--text-2); font-size: 11px; line-height: 1.6; }
   @media (max-width: 900px) {
     .terminal-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
     .terminal-head { padding: 0 16px; }
