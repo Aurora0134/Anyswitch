@@ -259,6 +259,7 @@ async function api(method, path, body) {
     initStylePicker();
     initBrandVersion();
     initSettingsView();
+    if (typeof initTerminalPreview === "function") initTerminalPreview();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -316,6 +317,10 @@ async function api(method, path, body) {
   // restoreView 恢复设置页时待激活的子 tab（取自 panel-settings-subtab），
   // enterSettingsView 消费一次即清；主动点齿轮进入恒落「通用」，不看它。
   let settingsSubTabToRestore = null;
+  // 终端预览只保留返回设置页所需的瞬时导航上下文；真实终端接入后会由会话层接管。
+  let terminalReturnView = "settings";
+  let terminalReturnSettingsSubTab = "experimental";
+  let terminalReturnScrollTop = 0;
   // 看板渲染完成的通知钩子：恢复进「主题」子页时镜像快照拍到的是还没取到数据的空壳
   // 看板，靠它补拍一次（实现在 initSettingsView）。
   let notifyBoardRendered = () => {};
@@ -2746,8 +2751,10 @@ async function api(method, path, body) {
       switchView("settings");
     };
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
+    const terminalEntry = $("openTerminalPreviewBtn");
+    if (terminalEntry) terminalEntry.onclick = () => openTerminalPreview();
 
-    // 子 tab：通用 / 自动路由 / 主题 / 关于；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
+    // 子 tab：通用 / 自动路由 / 主题 / 关于 / 实验性功能；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
     const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelError });
     leaveSettingsView = () => about.leave();
@@ -2757,6 +2764,7 @@ async function api(method, path, body) {
       route: ["settingsTabRoute", "settingsPanelRoute"],
       theme: ["settingsTabTheme", "settingsPanelTheme"],
       about: ["settingsTabAbout", "settingsPanelAbout"],
+      experimental: ["settingsTabExperimental", "settingsPanelExperimental"],
     };
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
@@ -3223,6 +3231,215 @@ async function api(method, path, body) {
     loadSettingsState();
   }
 
+  // 纯前端布局预览：用两组静态会话把真实终端页的空间关系先呈现出来。
+  // 这里不创建进程、不请求后端；后续接入会话层时只替换这组数据与事件源。
+  const terminalPreviewSessions = {
+    checkout: {
+      name: "支付服务", path: "D:\\dev\\payment-service", branch: "main", shell: "PowerShell",
+      agent: "Codex CLI", status: "working", model: "kimi-k3", provider: "a6api-main", uptime: "18 分 42 秒",
+      note: "正在整理支付回调的错误处理，并准备运行相关测试。",
+      requests: [
+        { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "生成中 · 2,418 tokens", state: "ok" },
+        { model: "kimi-k3", provider: "a6api-main", metric: "0.94s", detail: "完成 · 1,106 tokens", state: "ok" },
+        { model: "kimi-k3", provider: "sensenova", metric: "3.10s", detail: "完成 · 842 tokens", state: "ok" },
+      ],
+      output: [
+        ["dim", "Windows PowerShell"],
+        ["dim", "Copyright (C) Microsoft Corporation. All rights reserved."],
+        ["", ""],
+        ["prompt-line", "PS D:\\dev\\payment-service> "],
+        ["command-line", "codex --model kimi-k3"],
+        ["dim", "╭──────────────────────────────────────────────────────────────╮"],
+        ["agent-line", "│ Codex CLI                                             v0.154.0 │"],
+        ["dim", "╰──────────────────────────────────────────────────────────────╯"],
+        ["", ""],
+        ["info-line", "  project  payment-service"],
+        ["info-line", "  branch   main"],
+        ["info-line", "  model    kimi-k3 · a6api-main"],
+        ["", ""],
+        ["agent-line", "› 检查支付回调的错误处理，并补充失败重试测试"],
+        ["", ""],
+        ["tool-line", "  ◇ 读取 src/payments/webhook.ts"],
+        ["tool-line", "  ◇ 读取 src/payments/retry-policy.ts"],
+        ["success-line", "  ✓ 找到 2 处未处理的超时异常"],
+        ["", ""],
+        ["agent-line", "  正在生成修改方案…"],
+      ],
+    },
+    portal: {
+      name: "平台门户", path: "D:\\dev\\portal", branch: "feature/permissions", shell: "命令提示符",
+      agent: "Claude Code", status: "idle", model: "claude-sonnet", provider: "a6api-main", uptime: "42 分 08 秒",
+      note: "上一轮已完成，终端当前等待新的命令。",
+      requests: [
+        { model: "claude-sonnet", provider: "a6api-main", metric: "1.14s", detail: "完成 · 3,820 tokens", state: "ok" },
+        { model: "claude-sonnet", provider: "a6api-main", metric: "0.88s", detail: "完成 · 1,672 tokens", state: "ok" },
+        { model: "claude-sonnet", provider: "a6api-main", metric: "—", detail: "上一轮请求", state: "ok" },
+      ],
+      output: [
+        ["dim", "Microsoft Windows [Version 10.0.26100.6584]"],
+        ["dim", "(c) Microsoft Corporation. All rights reserved."],
+        ["", ""],
+        ["prompt-line", "D:\\dev\\portal> "],
+        ["command-line", "claude"],
+        ["dim", "╭──────────────────────────────────────────────────────────────╮"],
+        ["agent-line", "│ Claude Code                                      Sonnet 4.5 │"],
+        ["dim", "╰──────────────────────────────────────────────────────────────╯"],
+        ["", ""],
+        ["success-line", "  ✓ 已完成权限矩阵重构"],
+        ["info-line", "  12 个文件已更新 · 36 项测试通过"],
+        ["", ""],
+        ["prompt-line", "D:\\dev\\portal> "],
+        ["command-line", "git status --short"],
+        ["info-line", " M src/auth/permissions.ts"],
+        ["info-line", " M src/routes/admin.ts"],
+        ["", ""],
+        ["dim", "等待输入…"],
+      ],
+    },
+  };
+  let activeTerminalPreviewId = "checkout";
+
+  function terminalPreviewLineHtml([kind, text]) {
+    return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
+  }
+
+  function renderTerminalPreviewTabs() {
+    const tabs = $("terminalTabs");
+    if (!tabs) return;
+    tabs.innerHTML = Object.entries(terminalPreviewSessions).map(([id, session]) => `
+      <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
+        aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
+        <span class="terminal-tab-shell${session.shell === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell === "PowerShell" ? "PS" : ">_"}</span>
+        <span class="terminal-tab-copy"><strong>${escapeHtml(session.name)}</strong><small>${escapeHtml(session.agent)}</small></span>
+        <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
+        <span class="terminal-tab-close" aria-hidden="true">×</span>
+      </button>
+    `).join("");
+  }
+
+  function renderTerminalPreviewSession() {
+    const session = terminalPreviewSessions[activeTerminalPreviewId];
+    if (!session) return;
+    $("terminalSessionName").textContent = session.name;
+    $("terminalSessionPath").textContent = session.path;
+    $("terminalSessionBranch").textContent = session.branch || "未设置分支";
+    $("terminalShellLabel").textContent = session.shell;
+    $("terminalPrompt").textContent = `${session.shell === "PowerShell" ? `PS ${session.path}>` : `${session.path}>`}`;
+    $("terminalInspectorTitle").textContent = session.agent;
+    $("terminalInspectorPath").textContent = session.path;
+    $("terminalInspectorUptime").textContent = session.uptime;
+    $("terminalInspectorModel").textContent = session.model;
+    $("terminalInspectorProvider").textContent = session.provider;
+    $("terminalAgentNote").textContent = session.note;
+    $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
+    $("terminalLiveDetail").textContent = session.status === "working" ? "正在等待模型继续输出" : "上一轮请求已完成，等待下一条命令";
+    $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
+    $("terminalRequestCount").textContent = String(session.requests.length);
+    $("terminalRequestList").innerHTML = session.requests.map((req) => `
+      <div class="terminal-request-item">
+        <i class="terminal-request-dot${req.state === "failed" ? " is-failed" : ""}"></i>
+        <div class="terminal-request-main"><strong>${escapeHtml(req.provider)}</strong><span>${escapeHtml(req.detail)}</span></div>
+        <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
+      </div>
+    `).join("");
+    $("terminalOutput").innerHTML = session.output.map(terminalPreviewLineHtml).join("");
+    renderTerminalPreviewTabs();
+    requestAnimationFrame(() => {
+      const screen = $("terminalScreen");
+      if (screen) screen.scrollTop = screen.scrollHeight;
+    });
+  }
+
+  function initTerminalPreview() {
+    const tabs = $("terminalTabs");
+    if (!tabs) return;
+    renderTerminalPreviewSession();
+    tabs.addEventListener("click", (event) => {
+      const tab = event.target.closest("[data-terminal-tab]");
+      if (!tab) return;
+      const id = tab.dataset.terminalTab;
+      if (!terminalPreviewSessions[id]) return;
+      if (event.target.closest(".terminal-tab-close")) {
+        const session = terminalPreviewSessions[id];
+        if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
+        const ids = Object.keys(terminalPreviewSessions);
+        if (ids.length <= 1) { toast("预览至少保留一个终端标签"); return; }
+        delete terminalPreviewSessions[id];
+        if (activeTerminalPreviewId === id) activeTerminalPreviewId = ids.find((item) => item !== id) || "checkout";
+        renderTerminalPreviewSession();
+        return;
+      }
+      activeTerminalPreviewId = id;
+      renderTerminalPreviewSession();
+    });
+    $("terminalReturnBtn").onclick = () => closeTerminalPreview();
+    $("terminalInspectorToggle").onclick = () => {
+      const inspector = $("terminalInspector");
+      const workspace = $("terminalWorkspace");
+      const button = $("terminalInspectorToggle");
+      const collapsed = inspector.classList.toggle("is-collapsed");
+      workspace?.classList.toggle("is-inspector-collapsed", collapsed);
+      button.setAttribute("aria-expanded", String(!collapsed));
+      button.title = collapsed ? "展开状态面板" : "收起状态面板";
+      button.setAttribute("aria-label", button.title);
+    };
+    $("terminalClearBtn").onclick = () => {
+      $("terminalOutput").innerHTML = '<div class="terminal-line dim">屏幕已清空</div>';
+      $("terminalCommandInput")?.focus();
+    };
+    $("terminalCommandInput").addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      const input = event.currentTarget;
+      const command = input.value.trim();
+      if (!command) return;
+      const session = terminalPreviewSessions[activeTerminalPreviewId];
+      const output = $("terminalOutput");
+      output.insertAdjacentHTML("beforeend", `<div class="terminal-line prompt-line">${escapeHtml($("terminalPrompt").textContent)} </div><div class="terminal-line command-line">${escapeHtml(command)}</div>`);
+      if (command === "git status" || command === "git status --short") {
+        output.insertAdjacentHTML("beforeend", '<div class="terminal-line info-line">工作区干净，没有待提交的文件。</div>');
+      } else if (command === "clear" || command === "cls") {
+        output.innerHTML = "";
+      } else if (command === "npm test") {
+        output.insertAdjacentHTML("beforeend", '<div class="terminal-line info-line">正在运行测试…</div><div class="terminal-line success-line">✓ 42 个测试通过</div>');
+      } else {
+        output.insertAdjacentHTML("beforeend", `<div class="terminal-line dim">预览不会执行“${escapeHtml(command)}”，这里只展示终端布局。</div>`);
+      }
+      input.value = "";
+      const screen = $("terminalScreen");
+      screen.scrollTop = screen.scrollHeight;
+      if (session) session.note = "刚刚输入了一条终端命令，预览输出已追加到当前屏幕。";
+      $("terminalAgentNote").textContent = session?.note || "";
+    });
+    $("terminalAddBtn").onclick = () => {
+      const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
+      terminalPreviewSessions[id] = {
+        name: "新终端", path: "D:\\dev", branch: "", shell: "PowerShell", agent: "空闲终端", status: "idle",
+        model: "—", provider: "—", uptime: "刚刚", note: "这是一个新的终端预览标签。",
+        requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
+      };
+      activeTerminalPreviewId = id;
+      renderTerminalPreviewSession();
+    };
+  }
+
+  function openTerminalPreview() {
+    terminalReturnView = "settings";
+    terminalReturnSettingsSubTab = "experimental";
+    terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+    switchView("terminal");
+    requestAnimationFrame(() => $("terminalCommandInput")?.focus());
+  }
+
+  function closeTerminalPreview() {
+    settingsSubTabToRestore = terminalReturnSettingsSubTab;
+    switchView(terminalReturnView);
+    requestAnimationFrame(() => {
+      window.scrollTo(0, terminalReturnScrollTop);
+      document.documentElement.scrollTop = terminalReturnScrollTop;
+      $("openTerminalPreviewBtn")?.focus();
+    });
+  }
+
   // 服务控制（启动 / 停止 / 重启）—— 按钮随 relay 状态动态切换
   // 运行中 → ⏹ 停止（红 btn-danger），停止 → ▶ 启动（蓝 btn-primary）。
   let currentRelayState = { status: "stopped" };
@@ -3490,6 +3707,7 @@ async function api(method, path, body) {
     const toggles = [
       { btn: $("themeToggle"), sun: $("icoSun"), moon: $("icoMoon") },
       { btn: $("settingsThemeToggle"), sun: $("settingsIcoSun"), moon: $("settingsIcoMoon") },
+      { btn: $("terminalThemeToggle"), sun: $("terminalIcoSun"), moon: $("terminalIcoMoon") },
     ].filter((t) => t.btn);
     function currentTheme() {
       const t = document.documentElement.getAttribute("data-theme");
@@ -3790,6 +4008,7 @@ async function api(method, path, body) {
     const presets = name === "presets";
     const sessions = name === "sessions";
     const settings = name === "settings";
+    const terminal = name === "terminal";
     resetPageScroll();
     currentView = name;
     document.querySelector(".telemetry-view").hidden = !board;
@@ -3799,8 +4018,10 @@ async function api(method, path, body) {
     $("statsView").hidden = !stats;
     $("sessionsView").hidden = !sessions;
     $("settingsView").hidden = !settings;
+    $("terminalView").hidden = !terminal;
+    document.body.classList.toggle("terminal-mode", terminal);
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
-    $("mainHeadInner").hidden = settings;
+    $("mainHeadInner").hidden = settings || terminal;
     $("settingsHeadInner").hidden = !settings;
     $("tabBoard").classList.toggle("active", board);
     $("tabSkills").classList.toggle("active", name === "skills");
@@ -3831,12 +4052,13 @@ async function api(method, path, body) {
         : store ? $("storeView")
         : stats ? $("statsView")
         : settings ? $("settingsView")
+        : terminal ? $("terminalView")
         : $("sessionsView");
       replayViewEnter(enteredView);
     }
     // panel-view 只存主视图（设置视图不覆盖它，那份留着当「←退出」的目标）；
     // 是否停在设置页由 panel-settings-open 单独记，restoreView 按这两个键恢复。
-    if (!settings) try { localStorage.setItem("panel-view", name); } catch {}
+    if (!settings && !terminal) try { localStorage.setItem("panel-view", name); } catch {}
     try { localStorage.setItem("panel-settings-open", settings ? "1" : "0"); } catch {}
     let viewReady;
     if (name === "skills") viewReady = refreshSkillsState();

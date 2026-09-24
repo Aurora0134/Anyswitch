@@ -85,7 +85,7 @@ try {
   // ③ 主视图取 panel-view，值为 "board"/缺失/不在册时看板就是 HTML 默认态，不写属性。
   if (window.panelStartupLaunch) return;
   const VIEW_NAMES = ["skills", "presets", "store", "stats", "sessions", "settings"];
-  const SUB_TAB_NAMES = ["general", "advanced", "route", "theme", "about"];
+  const SUB_TAB_NAMES = ["general", "advanced", "route", "theme", "about", "experimental"];
   let view = null;
   let subTab = null;
   try {
@@ -1580,6 +1580,7 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabRoute" role="tab" aria-selected="false" aria-controls="settingsPanelRoute" tabindex="-1">自动路由</button>
       <button class="view-tab" id="settingsTabTheme" role="tab" aria-selected="false" aria-controls="settingsPanelTheme" tabindex="-1">主题</button>
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
+      <button class="view-tab" id="settingsTabExperimental" role="tab" aria-selected="false" aria-controls="settingsPanelExperimental" tabindex="-1">实验性功能</button>
     </nav>
 
     <!-- 「通用」：六项按语义分四张卡——「启动」「抗截断」「Claude Code」带卡头（复用各
@@ -1784,6 +1785,30 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
     </div>
+
+    <div class="settings-panel" id="settingsPanelExperimental" hidden role="tabpanel" aria-labelledby="settingsTabExperimental">
+      <div class="panel-card experimental-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            虚拟终端
+          </h2>
+          <span class="badge badge-accent">预览</span>
+        </div>
+        <div class="card-body">
+          <div class="experimental-launch-row">
+            <div>
+              <div class="modal-item-title">在 Anyswitch 中运行 CLI Agent</div>
+              <div class="modal-item-desc">先查看终端、Agent 状态和请求信息的整体布局。当前为体验预览，暂不连接本机终端。</div>
+            </div>
+            <button type="button" class="btn btn-primary" id="openTerminalPreviewBtn">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+              打开虚拟终端
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
     <!-- 「高级选项」：数据迁移两张卡。版式沿用本页既有卡的写法——卡头右侧放动作按钮
          （与「关于」的本地环境卡同构），卡体第一行是 role=status 的状态行、第二行是
          次要明细，需要控件的行用 .modal-item；状态色调走 data-tone，与 about-status 同规则。 -->
@@ -1828,6 +1853,129 @@ if (window.panelStartupController) panelStartupPlay();
             <button type="button" class="btn btn-mini" id="dataSkillsPickBtn" disabled>更改位置</button>
           </div>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="terminal-view" id="terminalView" hidden aria-label="虚拟终端">
+    <div class="terminal-shell">
+      <header class="terminal-head">
+        <div class="terminal-head-left">
+          <button type="button" class="terminal-return-btn" id="terminalReturnBtn" title="返回设置页的实验性功能" aria-label="返回设置页的实验性功能">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+            返回设置
+          </button>
+          <span class="terminal-head-divider"></span>
+          <div class="terminal-page-title">
+            <span class="terminal-page-title-mark">⌘</span>
+            <div>
+              <strong>虚拟终端</strong>
+              <span>项目工作区</span>
+            </div>
+          </div>
+        </div>
+        <div class="terminal-head-right">
+          <span class="terminal-preview-pill"><i class="terminal-status-dot"></i>体验预览</span>
+          <button type="button" class="icon-btn terminal-head-icon" title="切换亮暗主题" aria-label="切换亮暗主题" id="terminalThemeToggle">
+            <svg id="terminalIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            <svg id="terminalIcoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="19.78" x2="19.78" y2="5.64"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <div class="terminal-workspace" id="terminalWorkspace">
+        <section class="terminal-main-pane">
+          <div class="terminal-tabs-bar">
+            <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话">
+              <button type="button" class="terminal-tab active" role="tab" aria-selected="true" data-terminal-tab="checkout">
+                <span class="terminal-tab-shell">PS</span>
+                <span class="terminal-tab-copy"><strong>支付服务</strong><small>Codex CLI</small></span>
+                <span class="terminal-tab-state is-working" title="正在运行"></span>
+                <span class="terminal-tab-close" aria-hidden="true">×</span>
+              </button>
+              <button type="button" class="terminal-tab" role="tab" aria-selected="false" data-terminal-tab="portal">
+                <span class="terminal-tab-shell terminal-tab-shell-cmd">&gt;_</span>
+                <span class="terminal-tab-copy"><strong>平台门户</strong><small>Claude Code</small></span>
+                <span class="terminal-tab-state is-idle" title="空闲"></span>
+                <span class="terminal-tab-close" aria-hidden="true">×</span>
+              </button>
+            </div>
+            <button type="button" class="icon-btn terminal-add-btn" id="terminalAddBtn" title="新建终端" aria-label="新建终端">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          </div>
+
+          <div class="terminal-session-bar">
+            <div class="terminal-session-context">
+              <span class="terminal-session-name" id="terminalSessionName">支付服务</span>
+              <span class="terminal-session-path" id="terminalSessionPath">D:\\dev\\payment-service</span>
+              <span class="terminal-session-branch" id="terminalSessionBranch">main</span>
+            </div>
+            <div class="terminal-session-actions">
+              <span class="terminal-shell-label" id="terminalShellLabel">PowerShell</span>
+              <button type="button" class="terminal-quiet-btn" title="清空当前屏幕" aria-label="清空当前屏幕" id="terminalClearBtn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="terminal-screen" id="terminalScreen" role="region" aria-label="终端输出">
+            <div class="terminal-output" id="terminalOutput"></div>
+            <div class="terminal-input-row">
+              <span class="terminal-prompt" id="terminalPrompt">PS D:\\dev\\payment-service&gt;</span>
+              <input type="text" class="terminal-command-input" id="terminalCommandInput" aria-label="终端命令" placeholder="输入命令…" autocomplete="off" spellcheck="false">
+              <span class="terminal-cursor" aria-hidden="true"></span>
+            </div>
+          </div>
+          <div class="terminal-footbar">
+            <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
+            <span>UTF-8</span>
+            <span>120 × 34</span>
+            <span class="terminal-foot-spacer"></span>
+            <span>可输入</span>
+          </div>
+        </section>
+
+        <aside class="terminal-inspector" id="terminalInspector" aria-label="终端状态">
+          <div class="terminal-inspector-head">
+            <div>
+              <span class="terminal-eyebrow">当前终端</span>
+              <h2 id="terminalInspectorTitle">Codex CLI</h2>
+            </div>
+            <button type="button" class="icon-btn terminal-inspector-toggle" id="terminalInspectorToggle" title="收起状态面板" aria-label="收起状态面板" aria-expanded="true">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+          </div>
+          <div class="terminal-inspector-body" id="terminalInspectorBody">
+            <div class="terminal-live-status is-working" id="terminalLiveStatus">
+              <span class="terminal-live-icon"><i></i></span>
+              <div><strong id="terminalLiveTitle">生成中</strong><span id="terminalLiveDetail">正在等待模型继续输出</span></div>
+            </div>
+
+            <div class="terminal-context-grid">
+              <div><span>工作目录</span><strong id="terminalInspectorPath">D:\\dev\\payment-service</strong></div>
+              <div><span>运行时间</span><strong id="terminalInspectorUptime">18 分 42 秒</strong></div>
+              <div><span>当前模型</span><strong id="terminalInspectorModel">kimi-k3</strong></div>
+              <div><span>当前渠道</span><strong id="terminalInspectorProvider">a6api-main</strong></div>
+            </div>
+
+            <div class="terminal-inspector-section">
+              <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-count" id="terminalRequestCount">3</span></div>
+              <div class="terminal-request-list" id="terminalRequestList"></div>
+            </div>
+
+            <div class="terminal-inspector-section terminal-route-section">
+              <div class="terminal-section-head"><span>路由链</span><span class="badge badge-ok">正常</span></div>
+              <div class="terminal-route-line"><span class="terminal-route-node is-current">a6api-main</span><span class="terminal-route-arrow">→</span><span class="terminal-route-node">sensenova</span><span class="terminal-route-arrow">→</span><span class="terminal-route-node is-muted">备用</span></div>
+              <span class="terminal-route-note">当前请求使用首选渠道</span>
+            </div>
+
+            <div class="terminal-inspector-section terminal-agent-note">
+              <div class="terminal-section-head"><span>Agent 会话</span><span class="badge badge-accent">已连接</span></div>
+              <p id="terminalAgentNote">正在整理支付回调的错误处理，并准备运行相关测试。</p>
+            </div>
+          </div>
+        </aside>
       </div>
     </div>
   </section>

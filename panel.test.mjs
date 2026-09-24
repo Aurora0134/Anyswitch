@@ -2417,7 +2417,7 @@ describe("panel.html 实例行状态徽标恒为生成中/待命（不随链归�
 
 describe("panel.html 设置全页视图", () => {
   // 设置从弹窗升级为全页视图：页头齿轮切入，原页头整行换成设置专用头行
-  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「自动路由」「主题」「关于」四个子 tab。
+  // （← 退出 + 「设置」标题 + 亮暗钮），内容区顶部「通用」「自动路由」「主题」「关于」「实验性功能」五个子 tab。
   // 设置视图不占 panel-view（那份留作「←退出」的目标），另由 panel-settings-open
   // 标记记录是否停在设置页：刷新与面板重启恢复都按这两个键回到原处。
   const panelHtml = readFileSync(
@@ -2425,7 +2425,7 @@ describe("panel.html 设置全页视图", () => {
     "utf8",
   );
 
-  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「自动路由」「主题」「关于」子 tab 与四块面板", () => {
+  it("设置视图 section 挂在 main 内且默认隐藏，含「通用」「自动路由」「主题」「关于」「实验性功能」子 tab与面板", () => {
     assert.ok(/<section class="settings-view" id="settingsView" hidden>/.test(panelHtml),
       "settingsView section 默认隐藏");
     const iView = panelHtml.indexOf('id="settingsView"');
@@ -2433,7 +2433,7 @@ describe("panel.html 设置全页视图", () => {
       "settingsView 位于 main 内（sessions 之后）");
     assert.ok(/<button class="view-tab active" id="settingsTabGeneral" role="tab" aria-selected="true"[^>]*>通用<\/button>/.test(panelHtml),
       "「通用」子 tab 默认选中");
-    for (const [name, label] of [["Route", "自动路由"], ["Theme", "主题"], ["About", "关于"]]) {
+    for (const [name, label] of [["Route", "自动路由"], ["Theme", "主题"], ["About", "关于"], ["Experimental", "实验性功能"]]) {
       assert.ok(new RegExp(`<button class="view-tab" id="settingsTab${name}" role="tab" aria-selected="false"[^>]*>${label}</button>`).test(panelHtml), `${label}子 tab 默认未选`);
       assert.ok(panelHtml.includes(`id="settingsPanel${name}" hidden`), `${label}面板默认隐藏`);
     }
@@ -2482,6 +2482,22 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!route.includes("ailureRate"), "路由子 tab 不含按失败率降级控件");
     assert.ok(!panelHtml.includes('id="routeChainCard"'), "Store 页旧折叠卡已移除");
     assert.ok(!panelHtml.includes("routeChainFoldBtn"), "折叠钮已移除");
+  });
+
+  it("「实验性功能」提供虚拟终端预览入口与整页返回结构", () => {
+    const iExperimental = panelHtml.indexOf('<div class="settings-panel" id="settingsPanelExperimental"');
+    const iAdvanced = panelHtml.indexOf('<div class="settings-panel" id="settingsPanelAdvanced"');
+    assert.ok(iExperimental > 0 && iAdvanced > iExperimental, "实验性功能面板位于高级选项面板之前");
+    const experimental = panelHtml.slice(iExperimental, iAdvanced);
+    assert.ok(experimental.includes('id="openTerminalPreviewBtn"'), "实验性功能面板含虚拟终端入口");
+    assert.ok(experimental.includes("打开虚拟终端"), "入口文案明确");
+    assert.ok(panelHtml.includes('<section class="terminal-view" id="terminalView" hidden'), "虚拟终端是独立整页视图");
+    assert.ok(panelHtml.includes('id="terminalReturnBtn"') && panelHtml.includes("返回设置"), "终端页含返回设置按钮");
+    for (const id of ["terminalTabs", "terminalOutput", "terminalInspector", "terminalRequestList"]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `终端预览含 #${id}`);
+    }
+    assert.ok(panelJs.includes('terminalReturnSettingsSubTab = "experimental"'), "返回路径落回实验性功能子 tab");
+    assert.ok(panelJs.includes("function openTerminalPreview()") && panelJs.includes("function closeTerminalPreview()"), "终端预览有进入/返回逻辑");
   });
 
   it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {
@@ -2667,10 +2683,10 @@ describe("panel.html 设置全页视图", () => {
     const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
     assert.ok(sw, "switchView found in panel.js");
     assert.ok(sw[1].includes('$("settingsView").hidden = !settings;'), "switchView 切换设置视图显隐");
-    assert.ok(sw[1].includes('$("mainHeadInner").hidden = settings;')
+    assert.ok(sw[1].includes('$("mainHeadInner").hidden = settings || terminal;')
       && sw[1].includes('$("settingsHeadInner").hidden = !settings;'),
-      "主头行与设置头行互斥切换");
-    assert.ok(/if \(!settings\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
+      "主头行、设置头行与终端页互斥切换");
+    assert.ok(/if \(!settings && !terminal\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
       "panel-view 只存主视图，设置视图不覆盖它");
     assert.ok(sw[1].includes('localStorage.setItem("panel-settings-open", settings ? "1" : "0")'),
       "进设置页打标记、离开即清");
@@ -2761,7 +2777,7 @@ describe("panel.html 设置全页视图", () => {
   // ③ switchView 摘属性的时机在 hidden 赋值之后、进入钩子之前。
   // ④ 子 tab 名单与 panel.js 的注册表同源——注册了新格子却漏了首帧规则，就会
   //    在「停在高级选项 → 重新加载」时先闪出通用。
-  const PREPAINT_SUB_TABS = ["general", "advanced", "route", "theme", "about"];
+  const PREPAINT_SUB_TABS = ["general", "advanced", "route", "theme", "about", "experimental"];
   const registeredSubTabs = [...panelJs.matchAll(/^ {6}([a-z]+): \["settingsTab[A-Za-z]+", "settingsPanel[A-Za-z]+"\],$/gm)].map((m) => m[1]);
   const prepaintSrc = (panelHtml.match(/<script id="panelViewPrepaint">([\s\S]*?)<\/script>/) || [])[1];
   const prepaintRestoreBody =
@@ -2933,8 +2949,8 @@ describe("panel.html 设置全页视图", () => {
       "首帧收起主头行（仅设置页）");
     const isList = (block.match(/:is\(([^)]*)\)/) || [, ""])[1]
       .split(",").map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
-    assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelAdvanced", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelAbout"],
-      "子 tab 整体收起规则覆盖五块面板");
+    assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelAdvanced", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelExperimental", "settingsPanelAbout"],
+      "子 tab 整体收起规则覆盖六块面板");
   });
 
   it("首帧不描子 tab 选中态：只把静态选中项减回基座外观，取值与三个主题都不冲突", () => {
