@@ -2505,6 +2505,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-route-line { display: flex; flex-wrap: nowrap;"), "长链保持单行横向溢出");
     assert.ok(panelCss.includes(".terminal-route-viewport") && panelCss.includes("overflow-x: auto"), "路由视窗可横向滚动");
     assert.ok(panelJs.includes("function renderTerminalPreviewRoute(session)"), "预览路由由会话数据渲染");
+    assert.ok(panelJs.includes("terminalRouteFocusSignature !== focusSignature"), "同状态重绘不重置用户滚到的视窗位置");
     assert.ok(panelJs.includes('section.hidden = route.length === 0'), "普通终端无路由链时不显示不存在的链");
     assert.ok(panelJs.includes('node.state === "failed" ? " is-failed"'), "不可用跳有独立红色状态");
     assert.ok(panelJs.includes("leadingUnavailable === currentIndex"), "前位全部不可用时按整组识别");

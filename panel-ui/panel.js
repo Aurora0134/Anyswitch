@@ -3313,6 +3313,8 @@ async function api(method, path, body) {
     },
   };
   let activeTerminalPreviewId = "checkout";
+  // 视窗位置只随路由状态变化重置；同一状态重绘不接管用户已经滚到的位置。
+  let terminalRouteFocusSignature = null;
 
   function terminalPreviewLineHtml([kind, text]) {
     return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
@@ -3342,6 +3344,7 @@ async function api(method, path, body) {
     if (route.length === 0) {
       line.innerHTML = "";
       viewport.scrollLeft = 0;
+      terminalRouteFocusSignature = null;
       return;
     }
     const currentIndex = Math.max(0, Math.min(session.routeCurrent ?? 0, route.length - 1));
@@ -3357,13 +3360,18 @@ async function api(method, path, body) {
       : leadingUnavailable === currentIndex
         ? `前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳`
         : `自动路由正使用第 ${currentIndex + 1} 跳`;
-    requestAnimationFrame(() => {
-      const current = line.querySelector(".terminal-route-node.is-current");
-      if (!current) return;
-      viewport.scrollLeft = currentIndex < 2
-        ? 0
-        : Math.max(0, current.offsetLeft - ((viewport.clientWidth - current.offsetWidth) / 2));
-    });
+    const focusSignature = `${activeTerminalPreviewId}:${currentIndex}:${route.map((node) => `${node.node}/${node.model}/${node.state || "ok"}`).join("|")}`;
+    const shouldReposition = terminalRouteFocusSignature !== focusSignature;
+    terminalRouteFocusSignature = focusSignature;
+    if (shouldReposition) {
+      requestAnimationFrame(() => {
+        const current = line.querySelector(".terminal-route-node.is-current");
+        if (!current) return;
+        viewport.scrollLeft = currentIndex < 2
+          ? 0
+          : Math.max(0, current.offsetLeft - ((viewport.clientWidth - current.offsetWidth) / 2));
+      });
+    }
   }
 
   function renderTerminalPreviewSession() {
