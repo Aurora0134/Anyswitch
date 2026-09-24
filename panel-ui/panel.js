@@ -3237,7 +3237,6 @@ async function api(method, path, body) {
     checkout: {
       name: "支付服务", path: "D:\\dev\\payment-service", branch: "main", shell: "PowerShell",
       agent: "Codex CLI", status: "working", model: "kimi-k3", provider: "a6api-main", uptime: "18 分 42 秒",
-      note: "正在整理支付回调的错误处理，并准备运行相关测试。",
       requests: [
         { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "生成中 · 2,418 tokens", state: "ok" },
         { model: "kimi-k3", provider: "a6api-main", metric: "0.94s", detail: "完成 · 1,106 tokens", state: "ok" },
@@ -3269,7 +3268,6 @@ async function api(method, path, body) {
     portal: {
       name: "平台门户", path: "D:\\dev\\portal", branch: "feature/permissions", shell: "命令提示符",
       agent: "Claude Code", status: "idle", model: "claude-sonnet", provider: "a6api-main", uptime: "42 分 08 秒",
-      note: "上一轮已完成，终端当前等待新的命令。",
       requests: [
         { model: "claude-sonnet", provider: "a6api-main", metric: "1.14s", detail: "完成 · 3,820 tokens", state: "ok" },
         { model: "claude-sonnet", provider: "a6api-main", metric: "0.88s", detail: "完成 · 1,672 tokens", state: "ok" },
@@ -3330,7 +3328,6 @@ async function api(method, path, body) {
     $("terminalInspectorUptime").textContent = session.uptime;
     $("terminalInspectorModel").textContent = session.model;
     $("terminalInspectorProvider").textContent = session.provider;
-    $("terminalAgentNote").textContent = session.note;
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
     $("terminalLiveDetail").textContent = session.status === "working" ? "正在等待模型继续输出" : "上一轮请求已完成，等待下一条命令";
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
@@ -3407,14 +3404,12 @@ async function api(method, path, body) {
       input.value = "";
       const screen = $("terminalScreen");
       screen.scrollTop = screen.scrollHeight;
-      if (session) session.note = "刚刚输入了一条终端命令，预览输出已追加到当前屏幕。";
-      $("terminalAgentNote").textContent = session?.note || "";
     });
     $("terminalAddBtn").onclick = () => {
       const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
       terminalPreviewSessions[id] = {
         name: "新终端", path: "D:\\dev", branch: "", shell: "PowerShell", agent: "空闲终端", status: "idle",
-        model: "—", provider: "—", uptime: "刚刚", note: "这是一个新的终端预览标签。",
+        model: "—", provider: "—", uptime: "刚刚",
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
       activeTerminalPreviewId = id;
