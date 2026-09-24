@@ -2496,8 +2496,22 @@ describe("panel.html 设置全页视图", () => {
     for (const id of ["terminalTabs", "terminalOutput", "terminalInspector", "terminalRequestList"]) {
       assert.ok(panelHtml.includes(`id="${id}"`), `终端预览含 #${id}`);
     }
+    assert.ok(panelHtml.includes('id="terminalRouteViewport"') && panelHtml.includes('id="terminalRouteLine"'), "路由链使用独立视窗与完整链容器");
     assert.ok(panelJs.includes('terminalReturnSettingsSubTab = "experimental"'), "返回路径落回实验性功能子 tab");
     assert.ok(panelJs.includes("function openTerminalPreview()") && panelJs.includes("function closeTerminalPreview()"), "终端预览有进入/返回逻辑");
+  });
+
+  it("虚拟终端预览的路由链长链不折行，第 3 跳起把当前跳聚焦到视窗中心", () => {
+    assert.ok(panelCss.includes(".terminal-route-line { display: flex; flex-wrap: nowrap;"), "长链保持单行横向溢出");
+    assert.ok(panelCss.includes(".terminal-route-viewport") && panelCss.includes("overflow-x: auto"), "路由视窗可横向滚动");
+    assert.ok(panelJs.includes("function renderTerminalPreviewRoute(session)"), "预览路由由会话数据渲染");
+    assert.ok(panelJs.includes('section.hidden = route.length === 0'), "普通终端无路由链时不显示不存在的链");
+    assert.ok(panelJs.includes('node.state === "failed" ? " is-failed"'), "不可用跳有独立红色状态");
+    assert.ok(panelJs.includes("leadingUnavailable === currentIndex"), "前位全部不可用时按整组识别");
+    assert.ok(panelJs.includes('前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳'), "前位全挂的当前跳文案只报告事实");
+    assert.ok(panelJs.includes("currentIndex < 2"), "第一、二跳不强行居中");
+    assert.ok(panelJs.includes("(viewport.clientWidth - current.offsetWidth) / 2"), "第三跳起按视窗中心定位");
+    assert.ok(panelJs.includes('自动路由正使用第 ${currentIndex + 1} 跳'), "非首选跳只显示当前跳位次");
   });
 
   it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {

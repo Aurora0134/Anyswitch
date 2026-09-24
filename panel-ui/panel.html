@@ -1955,8 +1955,6 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="terminal-context-grid">
               <div><span>工作目录</span><strong id="terminalInspectorPath">D:\\dev\\payment-service</strong></div>
               <div><span>运行时间</span><strong id="terminalInspectorUptime">18 分 42 秒</strong></div>
-              <div><span>当前模型</span><strong id="terminalInspectorModel">kimi-k3</strong></div>
-              <div><span>当前渠道</span><strong id="terminalInspectorProvider">a6api-main</strong></div>
             </div>
 
             <div class="terminal-inspector-section">
@@ -1966,8 +1964,10 @@ if (window.panelStartupController) panelStartupPlay();
 
             <div class="terminal-inspector-section terminal-route-section">
               <div class="terminal-section-head"><span>路由链</span><span class="badge badge-ok">正常</span></div>
-              <div class="terminal-route-line"><span class="terminal-route-node is-current">a6api-main</span><span class="terminal-route-arrow">→</span><span class="terminal-route-node">sensenova</span><span class="terminal-route-arrow">→</span><span class="terminal-route-node is-muted">备用</span></div>
-              <span class="terminal-route-note">当前请求使用首选渠道</span>
+              <div class="terminal-route-viewport" id="terminalRouteViewport">
+                <div class="terminal-route-line" id="terminalRouteLine"></div>
+              </div>
+              <span class="terminal-route-note" id="terminalRouteNote">当前请求使用首选渠道</span>
             </div>
           </div>
         </aside>

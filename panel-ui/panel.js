@@ -3236,7 +3236,16 @@ async function api(method, path, body) {
   const terminalPreviewSessions = {
     checkout: {
       name: "支付服务", path: "D:\\dev\\payment-service", branch: "main", shell: "PowerShell",
-      agent: "Codex CLI", status: "working", model: "kimi-k3", provider: "a6api-main", uptime: "18 分 42 秒",
+      agent: "Codex CLI", status: "working", uptime: "18 分 42 秒",
+      route: [
+        { node: "a6api-main", model: "kimi-k3" },
+        { node: "sensenova", model: "kimi-k3" },
+        { node: "sensenova-backup2", model: "kimi-k3" },
+        { node: "sensenova-backup3", model: "kimi-k3" },
+        { node: "sensenova-backup1", model: "kimi-k3" },
+        { node: "sensenova-hpAPI", model: "kimi-k3" },
+      ],
+      routeCurrent: 0,
       requests: [
         { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "生成中 · 2,418 tokens", state: "ok" },
         { model: "kimi-k3", provider: "a6api-main", metric: "0.94s", detail: "完成 · 1,106 tokens", state: "ok" },
@@ -3267,7 +3276,15 @@ async function api(method, path, body) {
     },
     portal: {
       name: "平台门户", path: "D:\\dev\\portal", branch: "feature/permissions", shell: "命令提示符",
-      agent: "Claude Code", status: "idle", model: "claude-sonnet", provider: "a6api-main", uptime: "42 分 08 秒",
+      agent: "Claude Code", status: "idle", uptime: "42 分 08 秒",
+      route: [
+        { node: "a6api-main", model: "claude-sonnet", state: "failed" },
+        { node: "sensenova", model: "claude-sonnet", state: "failed" },
+        { node: "sensenova-backup2", model: "claude-sonnet" },
+        { node: "sensenova-backup3", model: "claude-sonnet" },
+        { node: "sensenova-backup1", model: "claude-sonnet" },
+      ],
+      routeCurrent: 2,
       requests: [
         { model: "claude-sonnet", provider: "a6api-main", metric: "1.14s", detail: "完成 · 3,820 tokens", state: "ok" },
         { model: "claude-sonnet", provider: "a6api-main", metric: "0.88s", detail: "完成 · 1,672 tokens", state: "ok" },
@@ -3315,6 +3332,40 @@ async function api(method, path, body) {
     `).join("");
   }
 
+  function renderTerminalPreviewRoute(session) {
+    const line = $("terminalRouteLine");
+    const viewport = $("terminalRouteViewport");
+    if (!line || !viewport) return;
+    const route = Array.isArray(session.route) ? session.route : [];
+    const section = line.closest(".terminal-route-section");
+    section.hidden = route.length === 0;
+    if (route.length === 0) {
+      line.innerHTML = "";
+      viewport.scrollLeft = 0;
+      return;
+    }
+    const currentIndex = Math.max(0, Math.min(session.routeCurrent ?? 0, route.length - 1));
+    line.innerHTML = route.map((node, index) => `
+      <span class="terminal-route-node${index === currentIndex ? " is-current" : ""}${node.state === "failed" ? " is-failed" : ""}">
+        <strong>${escapeHtml(node.node)}</strong>
+        <span>${escapeHtml(node.model)}</span>
+      </span>${index < route.length - 1 ? '<span class="terminal-route-arrow" aria-hidden="true">→</span>' : ""}
+    `).join("");
+    const leadingUnavailable = route.slice(0, currentIndex).filter((node) => node.state === "failed").length;
+    $("terminalRouteNote").textContent = currentIndex === 0
+      ? "当前请求使用首选渠道"
+      : leadingUnavailable === currentIndex
+        ? `前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳`
+        : `自动路由正使用第 ${currentIndex + 1} 跳`;
+    requestAnimationFrame(() => {
+      const current = line.querySelector(".terminal-route-node.is-current");
+      if (!current) return;
+      viewport.scrollLeft = currentIndex < 2
+        ? 0
+        : Math.max(0, current.offsetLeft - ((viewport.clientWidth - current.offsetWidth) / 2));
+    });
+  }
+
   function renderTerminalPreviewSession() {
     const session = terminalPreviewSessions[activeTerminalPreviewId];
     if (!session) return;
@@ -3326,8 +3377,6 @@ async function api(method, path, body) {
     $("terminalInspectorTitle").textContent = session.agent;
     $("terminalInspectorPath").textContent = session.path;
     $("terminalInspectorUptime").textContent = session.uptime;
-    $("terminalInspectorModel").textContent = session.model;
-    $("terminalInspectorProvider").textContent = session.provider;
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
     $("terminalLiveDetail").textContent = session.status === "working" ? "正在等待模型继续输出" : "上一轮请求已完成，等待下一条命令";
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
@@ -3339,6 +3388,7 @@ async function api(method, path, body) {
         <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
       </div>
     `).join("");
+    renderTerminalPreviewRoute(session);
     $("terminalOutput").innerHTML = session.output.map(terminalPreviewLineHtml).join("");
     renderTerminalPreviewTabs();
     requestAnimationFrame(() => {

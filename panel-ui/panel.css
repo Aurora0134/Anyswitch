@@ -1041,11 +1041,25 @@
   .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font: 10.5px var(--font-mono); }
   .terminal-request-main span { color: var(--text-3); font-size: 10px; }
   .terminal-request-metric { color: var(--text-3); font: 10px var(--font-mono); white-space: nowrap; }
-  .terminal-route-line { flex-wrap: wrap; gap: 5px; font: 10px var(--font-mono); }
-  .terminal-route-node { padding: 4px 6px; border-radius: 5px; color: var(--text-2); background: var(--surface-sunken); border: 1px solid var(--border); }
-  .terminal-route-node.is-current { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); }
-  .terminal-route-node.is-muted { color: var(--text-4); }
-  .terminal-route-arrow { color: var(--text-4); }
+  .terminal-route-viewport {
+    overflow-x: auto; overflow-y: hidden; padding: 2px 1px 8px;
+    scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
+  }
+  .terminal-route-line { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 7px; width: max-content; min-width: 100%; font: 10px var(--font-mono); }
+  .terminal-route-node {
+    flex: none; width: 104px; max-width: 104px; min-height: 40px;
+    display: flex; flex-direction: column; justify-content: center; gap: 2px;
+    padding: 5px 7px; border-radius: 5px; color: var(--text-2);
+    background: var(--surface-sunken); border: 1px solid var(--border);
+  }
+  .terminal-route-node strong, .terminal-route-node span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .terminal-route-node strong { font-size: 10px; font-weight: 650; }
+  .terminal-route-node span { color: var(--text-3); font-size: 9.5px; }
+  .terminal-route-node.is-current { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); box-shadow: 0 0 0 1px var(--ok-border); }
+  .terminal-route-node.is-current span { color: color-mix(in srgb, var(--ok) 80%, var(--text-3)); }
+  .terminal-route-node.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+  .terminal-route-node.is-failed span { color: color-mix(in srgb, var(--danger) 78%, var(--text-3)); }
+  .terminal-route-arrow { display: inline-flex; flex: none; align-items: center; color: var(--text-4); }
   .terminal-route-note { display: block; margin-top: 8px; color: var(--text-3); font-size: 10px; }
   @media (max-width: 900px) {
     .terminal-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
