@@ -875,10 +875,12 @@
 
   /* 虚拟终端预览：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
      右侧状态面板使用普通面板 token，方便后续接入真实会话数据时不改工作区骨架。 */
+  body.terminal-mode { overflow: hidden; }
   body.terminal-mode header.site-head { display: none; }
   body.terminal-mode main.layout-container { max-width: none; padding: 0; margin: 0; }
-  .terminal-view { min-height: 100vh; background: var(--bg-page); }
-  .terminal-shell { min-height: 100vh; display: flex; flex-direction: column; }
+  body.terminal-mode > footer { display: none; }
+  .terminal-view { height: 100vh; overflow: hidden; background: var(--bg-page); }
+  .terminal-shell { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
   .terminal-head {
     min-height: 58px; display: flex; align-items: center; justify-content: space-between;
     gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--border);
@@ -918,7 +920,7 @@
   }
   .terminal-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr) 48px; }
   .terminal-main-pane, .terminal-inspector { min-width: 0; min-height: 0; background: var(--surface); }
-  .terminal-main-pane { display: flex; flex-direction: column; min-height: calc(100vh - 58px); }
+  .terminal-main-pane { display: flex; flex-direction: column; min-height: 0; }
   .terminal-tabs-bar {
     display: flex; align-items: stretch; gap: 8px; min-height: 54px; padding: 8px 12px 0;
     background: var(--surface-sunken); border-bottom: 1px solid var(--border);
@@ -1012,6 +1014,12 @@
     padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
   .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10px/1.2 var(--font-mono); text-transform: uppercase; }
+  .terminal-inspector-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .terminal-agent-badge {
+    flex: none; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-sunken); color: var(--text-2); font: 650 9.5px var(--font-mono);
+  }
+  .terminal-agent-badge.is-shell { color: var(--text-3); border-style: dashed; }
   .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
   .terminal-inspector-toggle svg { transition: transform 160ms var(--ease-out); }

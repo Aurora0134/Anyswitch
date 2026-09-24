@@ -3235,8 +3235,12 @@ async function api(method, path, body) {
   // 这里不创建进程、不请求后端；后续接入会话层时只替换这组数据与事件源。
   const terminalPreviewSessions = {
     checkout: {
-      name: "支付服务", path: "D:\\dev\\payment-service", branch: "main", shell: "PowerShell",
-      agent: "Codex CLI", status: "working",
+      // 归属链：终端会话 → shell 进程 → 检测到的 Agent 进程/实例 → 请求、指标与路由都挂在实例号下；
+      // 归属只认进程与实例号，不从终端输出文本里猜。Agent 退出后会话保留终端自身状态，监测区随 agent 一并隐藏。
+      label: "payment-service", cwd: "D:\\dev\\payment-service", branch: "main",
+      shell: { name: "PowerShell", pid: 23140 },
+      agent: { name: "Codex CLI", endpointId: "codex", instanceId: "codex-23140", pid: 24512 },
+      status: "working",
       metrics: {
         activeRequests: 1,
         ttft: "0.86", ttftLamp: "green",
@@ -3287,8 +3291,10 @@ async function api(method, path, body) {
       ],
     },
     portal: {
-      name: "平台门户", path: "D:\\dev\\portal", branch: "feature/permissions", shell: "命令提示符",
-      agent: "Claude Code", status: "idle",
+      label: "portal", cwd: "D:\\dev\\portal", branch: "feature/permissions",
+      shell: { name: "命令提示符", pid: 18972 },
+      agent: { name: "Claude Code", endpointId: "claude", instanceId: "claude-18972", pid: 19084 },
+      status: "idle",
       metrics: {
         activeRequests: 0,
         ttft: "1.32", ttftLamp: "yellow",
@@ -3350,8 +3356,8 @@ async function api(method, path, body) {
     tabs.innerHTML = Object.entries(terminalPreviewSessions).map(([id, session]) => `
       <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
         aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
-        <span class="terminal-tab-shell${session.shell === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell === "PowerShell" ? "PS" : ">_"}</span>
-        <span class="terminal-tab-copy"><strong>${escapeHtml(session.name)}</strong><small>${escapeHtml(session.agent)}</small></span>
+        <span class="terminal-tab-shell${session.shell.name === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell.name === "PowerShell" ? "PS" : ">_"}</span>
+        <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(session.agent ? session.agent.name : session.shell.name)}</small></span>
         <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
         <span class="terminal-tab-close" aria-hidden="true">×</span>
       </button>
@@ -3401,12 +3407,15 @@ async function api(method, path, body) {
   function renderTerminalPreviewSession() {
     const session = terminalPreviewSessions[activeTerminalPreviewId];
     if (!session) return;
-    $("terminalSessionName").textContent = session.name;
-    $("terminalSessionPath").textContent = session.path;
+    $("terminalSessionName").textContent = session.label;
+    $("terminalSessionPath").textContent = session.cwd;
     $("terminalSessionBranch").textContent = session.branch || "未设置分支";
-    $("terminalShellLabel").textContent = session.shell;
-    $("terminalPrompt").textContent = `${session.shell === "PowerShell" ? `PS ${session.path}>` : `${session.path}>`}`;
-    $("terminalInspectorTitle").textContent = session.agent;
+    $("terminalShellLabel").textContent = session.shell.name;
+    $("terminalPrompt").textContent = `${session.shell.name === "PowerShell" ? `PS ${session.cwd}>` : `${session.cwd}>`}`;
+    $("terminalInspectorTitle").textContent = session.label;
+    $("terminalAgentBadge").textContent = session.agent ? session.agent.name : session.shell.name;
+    $("terminalAgentBadge").classList.toggle("is-shell", !session.agent);
+    $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
     const metrics = session.metrics || null;
     $("terminalLiveDetail").textContent = session.status === "working" && metrics
@@ -3507,8 +3516,9 @@ async function api(method, path, body) {
     $("terminalAddBtn").onclick = () => {
       const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
       terminalPreviewSessions[id] = {
-        name: "新终端", path: "D:\\dev", branch: "", shell: "PowerShell", agent: "空闲终端", status: "idle",
-        metrics: null,
+        label: "新终端", cwd: "D:\\dev", branch: "",
+        shell: { name: "PowerShell", pid: 24100 + Object.keys(terminalPreviewSessions).length * 37 }, agent: null,
+        status: "idle", metrics: null,
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
       activeTerminalPreviewId = id;

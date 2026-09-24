@@ -2539,6 +2539,16 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
 
+  it("虚拟终端整页固定且隐藏全局页脚，终端身份按目录与检测到的 Agent 呈现", () => {
+    assert.ok(panelCss.includes("body.terminal-mode { overflow: hidden; }"), "终端页锁定整页滚动");
+    assert.ok(panelCss.includes("body.terminal-mode > footer { display: none; }"), "终端页隐藏全局页脚灰字行");
+    assert.ok(panelCss.includes(".terminal-shell { height: 100vh;"), "终端外壳固定为视口高度");
+    assert.ok(panelJs.includes('$("terminalFootPid").textContent = `PID ${session.shell.pid}`'), "底栏左侧显示 shell 进程号");
+    assert.ok(panelJs.includes("session.agent ? session.agent.name : session.shell.name"), "普通终端身份位回落显示 Shell");
+    assert.ok(panelHtml.includes('id="terminalAgentBadge"'), "右栏头部有检测到的 Agent 徽标位");
+    assert.ok(panelJs.includes('shell: { name: "PowerShell", pid:') && panelJs.includes("instanceId:"), "会话数据携带进程与实例归属");
+  });
+
   it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {
     assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr);"),
       "三列瓦片网格");
