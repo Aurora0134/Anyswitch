@@ -2518,14 +2518,24 @@ describe("panel.html 设置全页视图", () => {
   it("虚拟终端预览的监测区复用看板遥测口径，普通终端无监测块", () => {
     assert.ok(panelHtml.includes('terminal-metrics-section" id="terminalMetricsSection"'), "右栏含请求监测区");
     for (const label of ["首字响应时间", "生成速度", "缓存命中率", "已工作时间"]) {
-      assert.ok(panelHtml.includes(`<span class="telemetry-label">${label}</span>`), `监测区含看板口径「${label}」`);
+      assert.ok(panelHtml.includes(`<span class="terminal-metric-label">${label}`), `监测区含看板口径「${label}」`);
     }
-    assert.ok(panelHtml.includes('id="terminalSessionTokens"') && panelHtml.includes("Prompt: 0 · Completion: 0 · Cached: 0"), "tokens 行与看板同口径");
+    const metricsBlock = panelHtml.slice(panelHtml.indexOf('id="terminalMetricsSection"'), panelHtml.indexOf('id="terminalRequestList"'));
+    assert.ok(!metricsBlock.includes("telemetry-card"), "监测区为直排网格，不套卡片盒");
+    assert.ok(metricsBlock.includes('terminal-metric-spark" id="terminalSparkTtft"'), "折线图保留并在格子右侧居中");
+    assert.ok(!panelHtml.includes('id="terminalSessionTokens"'), "tokens 行已移出侧栏");
+    const footbar = panelHtml.slice(panelHtml.indexOf('class="terminal-footbar"'), panelHtml.indexOf('id="terminalInspector"'));
+    assert.ok(footbar.includes('id="terminalFootStats"') && footbar.includes('id="terminalFootRequests"') && footbar.includes('id="terminalFootTokens"'), "底栏右侧承载请求数与 tokens");
+    assert.ok(footbar.includes("Prompt:") && footbar.includes("Cached:"), "底栏 tokens 与看板同口径");
+    assert.ok(!footbar.includes("可输入"), "底栏移除纯装饰占位");
     assert.ok(panelJs.includes("个请求进行中"), "实况行报告在途请求数事实");
     assert.ok(panelJs.includes("当前没有进行中的请求"), "空闲实况只报告无在途请求");
     assert.ok(!panelJs.includes("正在等待模型继续输出") && !panelHtml.includes("正在等待模型继续输出"), "伪意图文案已移除");
     assert.ok(panelJs.includes('updateSparkline("terminalSparkTtft"'), "TTFT 折线复用看板渲染");
     assert.ok(panelJs.includes("metricsSection.hidden = !metrics"), "普通终端无监测数据时整块隐藏");
+    assert.ok(panelJs.includes('$("terminalFootStats").hidden = !metrics'), "普通终端无底栏统计");
+    assert.ok(/\.terminal-footbar \{[^}]*font: 11px var\(--font-mono\)/.test(panelCss), "底栏字号提到 11px 保证可见");
+    assert.ok(panelCss.includes(".terminal-foot-stats[hidden] { display: none; }"), "底栏统计隐藏显式兜底");
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
 
