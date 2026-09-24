@@ -2515,6 +2515,20 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelJs.includes('自动路由正使用第 ${currentIndex + 1} 跳'), "非首选跳只显示当前跳位次");
   });
 
+  it("虚拟终端预览的监测区复用看板遥测口径，普通终端无监测块", () => {
+    assert.ok(panelHtml.includes('terminal-metrics-section" id="terminalMetricsSection"'), "右栏含请求监测区");
+    for (const label of ["首字响应时间", "生成速度", "缓存命中率", "已工作时间"]) {
+      assert.ok(panelHtml.includes(`<span class="telemetry-label">${label}</span>`), `监测区含看板口径「${label}」`);
+    }
+    assert.ok(panelHtml.includes('id="terminalSessionTokens"') && panelHtml.includes("Prompt: 0 · Completion: 0 · Cached: 0"), "tokens 行与看板同口径");
+    assert.ok(panelJs.includes("个请求进行中"), "实况行报告在途请求数事实");
+    assert.ok(panelJs.includes("当前没有进行中的请求"), "空闲实况只报告无在途请求");
+    assert.ok(!panelJs.includes("正在等待模型继续输出") && !panelHtml.includes("正在等待模型继续输出"), "伪意图文案已移除");
+    assert.ok(panelJs.includes('updateSparkline("terminalSparkTtft"'), "TTFT 折线复用看板渲染");
+    assert.ok(panelJs.includes("metricsSection.hidden = !metrics"), "普通终端无监测数据时整块隐藏");
+    assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
+  });
+
   it("瓦片墙样式：三列网格 + 卡内小块质感（内陷面、自身无投影），质感与配置状态解耦（未配置仅文字降色）", () => {
     assert.ok(panelCss.includes(".route-ep-grid { display: grid; grid-template-columns: repeat(3, 1fr);"),
       "三列瓦片网格");

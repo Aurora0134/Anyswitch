@@ -3236,7 +3236,19 @@ async function api(method, path, body) {
   const terminalPreviewSessions = {
     checkout: {
       name: "支付服务", path: "D:\\dev\\payment-service", branch: "main", shell: "PowerShell",
-      agent: "Codex CLI", status: "working", uptime: "18 分 42 秒",
+      agent: "Codex CLI", status: "working",
+      metrics: {
+        activeRequests: 1,
+        ttft: "0.86", ttftLamp: "green",
+        tps: "42.6",
+        cache: "61",
+        workTime: "12 分 10 秒",
+        requestCount: 14,
+        tokens: "Prompt: 128,460 · Completion: 31,204 · Cached: 96,080",
+        sparkTtft: [0.92, 0.88, 1.05, 0.97, 0.84, 0.79, 0.91, 0.86, 0.9, 0.83, 0.88, 0.95, 0.87, 0.82, 0.86, 0.86],
+        sparkTps: [38, 41, 36, 44, 47, 39, 42, 45, 40, 43, 46, 41, 44, 42, 43, 42.6],
+        sparkCache: [52, 55, 58, 54, 60, 63, 59, 62, 64, 61, 65, 63, 66, 62, 64, 61],
+      },
       route: [
         { node: "a6api-main", model: "kimi-k3" },
         { node: "sensenova", model: "kimi-k3" },
@@ -3276,7 +3288,19 @@ async function api(method, path, body) {
     },
     portal: {
       name: "平台门户", path: "D:\\dev\\portal", branch: "feature/permissions", shell: "命令提示符",
-      agent: "Claude Code", status: "idle", uptime: "42 分 08 秒",
+      agent: "Claude Code", status: "idle",
+      metrics: {
+        activeRequests: 0,
+        ttft: "1.32", ttftLamp: "yellow",
+        tps: "35.4",
+        cache: "58",
+        workTime: "33 分 51 秒",
+        requestCount: 9,
+        tokens: "Prompt: 96,210 · Completion: 24,108 · Cached: 71,400",
+        sparkTtft: [1.08, 1.14, 1.22, 1.1, 1.18, 1.26, 1.2, 1.32, 1.24, 1.3, 1.28, 1.36, 1.31, 1.29, 1.33, 1.32],
+        sparkTps: [33, 36, 34, 38, 35, 37, 34, 36, 35, 38, 36, 34, 37, 35, 36, 35.4],
+        sparkCache: [48, 51, 53, 50, 55, 57, 54, 58, 56, 59, 57, 60, 58, 61, 59, 58],
+      },
       route: [
         { node: "a6api-main", model: "claude-sonnet", state: "failed" },
         { node: "sensenova", model: "claude-sonnet", state: "failed" },
@@ -3383,11 +3407,26 @@ async function api(method, path, body) {
     $("terminalShellLabel").textContent = session.shell;
     $("terminalPrompt").textContent = `${session.shell === "PowerShell" ? `PS ${session.path}>` : `${session.path}>`}`;
     $("terminalInspectorTitle").textContent = session.agent;
-    $("terminalInspectorPath").textContent = session.path;
-    $("terminalInspectorUptime").textContent = session.uptime;
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
-    $("terminalLiveDetail").textContent = session.status === "working" ? "正在等待模型继续输出" : "上一轮请求已完成，等待下一条命令";
+    const metrics = session.metrics || null;
+    $("terminalLiveDetail").textContent = session.status === "working" && metrics
+      ? `${metrics.activeRequests} 个请求进行中`
+      : "当前没有进行中的请求";
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
+    const metricsSection = $("terminalMetricsSection");
+    metricsSection.hidden = !metrics;
+    if (metrics) {
+      $("terminalTtftVal").textContent = metrics.ttft;
+      $("terminalTtftLamp").className = `lamp lamp-${metrics.ttftLamp}`;
+      $("terminalTpsVal").textContent = metrics.tps;
+      $("terminalCacheVal").textContent = metrics.cache;
+      $("terminalWorkTimeVal").textContent = metrics.workTime;
+      $("terminalSessionReqs").textContent = `${metrics.requestCount} 次请求`;
+      $("terminalSessionTokens").textContent = metrics.tokens;
+      updateSparkline("terminalSparkTtft", metrics.sparkTtft);
+      updateSparkline("terminalSparkTps", metrics.sparkTps);
+      updateSparkline("terminalSparkCache", metrics.sparkCache);
+    }
     $("terminalRequestCount").textContent = String(session.requests.length);
     $("terminalRequestList").innerHTML = session.requests.map((req) => `
       <div class="terminal-request-item">
@@ -3467,7 +3506,7 @@ async function api(method, path, body) {
       const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
       terminalPreviewSessions[id] = {
         name: "新终端", path: "D:\\dev", branch: "", shell: "PowerShell", agent: "空闲终端", status: "idle",
-        model: "—", provider: "—", uptime: "刚刚",
+        metrics: null,
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
       activeTerminalPreviewId = id;
