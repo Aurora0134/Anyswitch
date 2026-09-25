@@ -77,6 +77,10 @@ const panelJs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8",
 );
+const panelMjs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel.mjs"),
+  "utf8",
+);
 
 describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/ingest republishes a forwarded entry through the logger bus", async () => {
@@ -2499,6 +2503,9 @@ describe("panel.html 设置全页视图", () => {
       assert.ok(panelHtml.includes(`id="${id}"`), `终端预览含 #${id}`);
     }
     assert.ok(panelHtml.includes('/panel/assets/xterm.js') && panelHtml.includes('/panel/assets/xterm-fit.js'), "终端页加载 xterm 渲染运行时");
+    assert.ok(panelHtml.includes('/panel/assets/xterm-unicode11.js'), "终端页加载 unicode11 宽度表附加组件");
+    assert.ok(panelJs.includes('unicode.activeVersion = "11"'), "unicode11 宽度表激活（emoji 按 2 格记账）");
+    assert.ok(panelMjs.includes("/panel/assets/xterm-unicode11.js") && panelMjs.includes("addon-unicode11"), "panel-host 路由服务 unicode11 资产");
     assert.ok(panelJs.includes('fontFamily: \'ui-monospace, "Cascadia Mono"'), "终端使用稳定的等宽字体栈测量尺寸");
     assert.ok(panelJs.includes("function scheduleTerminalFit()"), "终端显示后重新调度一次尺寸适配");
     assert.ok(panelHtml.includes('id="terminalRouteViewport"') && panelHtml.includes('id="terminalRouteLine"'), "路由链使用独立视窗与完整链容器");
@@ -4839,20 +4846,51 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.equal(metrics.requestCount, 0);
   });
 
-  it("terminalRouteForEndpoint 由链配置 + 运行快照给出节点序列与当前跳", async () => {
+  it("terminalRouteForEndpoint 只在「配了链且本次运行真走过」时给出节点序列", async () => {
     const chains = [{ endpointId: "kimi", enabled: true, chain: [{ node: "a6api-main", model: "kimi-k3" }, { node: "sensenova", model: "kimi-k3" }] }];
-    const rt = { kimi: { current: { node: "sensenova", model: "kimi-k3" }, lamps: ["red", "green"], since: 1 } };
-    const hit = await vmFn("terminalRouteForEndpoint", ["kimi", chains, rt]);
+    const walked = {
+      kimi: {
+        current: { node: "sensenova", model: "kimi-k3" }, since: 1, lamps: ["red", "green"],
+        positions: [{ nodeId: "sensenova", model: "kimi-k3", since: 1 }],
+      },
+    };
+    const hit = await vmFn("terminalRouteForEndpoint", ["kimi", chains, walked], ["terminalAutoRouteLive"]);
     assert.deepEqual(hit.route, [
       { node: "a6api-main", model: "kimi-k3", state: "failed" },
       { node: "sensenova", model: "kimi-k3" },
     ]);
-    assert.equal(hit.routeCurrent, 1);
-    const noRuntime = await vmFn("terminalRouteForEndpoint", ["kimi", chains, null]);
-    assert.equal(noRuntime.routeCurrent, 0);
-    assert.equal(noRuntime.route[0].state, undefined);
-    const noChain = await vmFn("terminalRouteForEndpoint", ["codex", chains, rt]);
-    assert.deepEqual(noChain, { route: [], routeCurrent: 0 });
+    assert.equal(hit.routeCurrent, 1, "粘性位置落在第 2 跳");
+
+    // 走过链但落在链首（success 归位、since 仍为 null）：positions 就是证据。
+    const walkedHome = {
+      kimi: {
+        current: { node: "a6api-main", model: "kimi-k3" }, since: null, lamps: ["green", "green"],
+        positions: [{ nodeId: "a6api-main", model: "kimi-k3", since: null }],
+      },
+    };
+    const home = await vmFn("terminalRouteForEndpoint", ["kimi", chains, walkedHome], ["terminalAutoRouteLive"]);
+    assert.equal(home.route.length, 2, "走过链即画");
+    assert.equal(home.route[0].state, undefined, "绿跳不带失败态");
+
+    // 只配了链、本次启动还没人走过（runtime 条目是配置兜底：当前跳=链首、
+    // positions 空、全灰时链首被强制点亮）→ 不算「在自动路由」，整块隐藏。
+    const configuredOnly = {
+      kimi: { current: { node: "a6api-main", model: "kimi-k3" }, since: null, lamps: ["green", "gray"], positions: [] },
+    };
+    assert.deepEqual(await vmFn("terminalRouteForEndpoint", ["kimi", chains, configuredOnly], ["terminalAutoRouteLive"]),
+      { route: [], routeCurrent: 0 }, "配了链但没走过 → 不画配置链");
+
+    // 已降级退避但粘性位置还没落地：红跳本身就是走过链的证据。
+    const backoffOnly = {
+      kimi: { current: { node: "a6api-main", model: "kimi-k3" }, since: 5, lamps: ["red", "gray"], positions: [] },
+    };
+    const backoff = await vmFn("terminalRouteForEndpoint", ["kimi", chains, backoffOnly], ["terminalAutoRouteLive"]);
+    assert.equal(backoff.route.length, 2, "红跳即走过链的证据");
+
+    assert.deepEqual(await vmFn("terminalRouteForEndpoint", ["kimi", chains, null], ["terminalAutoRouteLive"]),
+      { route: [], routeCurrent: 0 }, "runtime 缺位整块隐藏");
+    assert.deepEqual(await vmFn("terminalRouteForEndpoint", ["codex", chains, walked], ["terminalAutoRouteLive"]),
+      { route: [], routeCurrent: 0 }, "端点未配链整块隐藏");
   });
 
   it("terminalRequestsFromRows 把 journal 行套成预览稿同形的展示行", async () => {
@@ -4890,6 +4928,174 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
     assert.ok(panelHtml.includes('id="terminalFootSize"'), "底栏行列占位可写");
     assert.ok(panelJs.includes("updateTerminalFootSize(session)"), "resize/SSE 会刷新底栏尺寸");
+  });
+});
+
+// 路由链区段的呈现口径（B1）：只在「归属了 agent 且该端点本次启动真走过自动
+// 路由」时出现，节点上显示名不上原始 id，状态位与文案都随 runtime。渲染函数
+// 在桩环境里真跑（同 terminalFontSizeSandbox 先例）。
+describe("虚拟终端路由链呈现（显示名 / 状态位 / 运行态文案）", () => {
+  function routeSandbox() {
+    const bodies = ["renderTerminalPreviewRoute", "routeNodeName"].map((fnName) => {
+      const src = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(src, `${fnName} found in panel.js`);
+      return src;
+    }).join("\n");
+    const state = {
+      pools: [{ id: "pool-a", displayName: "主力号池" }],
+      providers: [{ id: "a6api-main", displayName: "A6 主渠道" }],
+      frames: [],
+    };
+    const els = {
+      terminalRouteSection: { hidden: null },
+      terminalRouteLine: { innerHTML: "", closest: () => els.terminalRouteSection, querySelector: () => null },
+      terminalRouteViewport: { scrollLeft: 123 },
+      terminalRouteNote: { textContent: "" },
+      terminalRouteBadge: { hidden: false },
+    };
+    const fn = new Function("state", "els", `
+      let terminalRouteFocusSignature = null;
+      const activeTerminalPreviewId = "t1";
+      const escapeHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const requestAnimationFrame = (cb) => { state.frames.push(cb); };
+      function storePools() { return state.pools; }
+      function storeProviders() { return state.providers; }
+      let routeNodeInfoCache = null;
+      const $ = (id) => els[id] ?? null;
+      ${bodies}
+      return renderTerminalPreviewRoute;
+    `)(state, els);
+    return { fn, els, state };
+  }
+
+  it("路由节点显示显示名而非原始 id（号池/渠道 displayName，同看板口径）", () => {
+    const { fn, els } = routeSandbox();
+    fn({ route: [
+      { node: "pool-a", model: "kimi-k3", state: "failed" },
+      { node: "a6api-main", model: "kimi-k3" },
+    ], routeCurrent: 1 });
+    assert.ok(els.terminalRouteLine.innerHTML.includes("主力号池"), "号池跳显示号池 displayName");
+    assert.ok(els.terminalRouteLine.innerHTML.includes("A6 主渠道"), "渠道跳显示渠道 displayName");
+    assert.ok(!els.terminalRouteLine.innerHTML.includes("pool-a"), "原始池 id 不上屏");
+    assert.ok(!els.terminalRouteLine.innerHTML.includes("a6api-main"), "原始渠道 id 不上屏");
+    assert.ok(els.terminalRouteLine.innerHTML.includes("is-failed"), "红跳保留不可用样式");
+    assert.equal(els.terminalRouteBadge.hidden, false, "有红跳才显示「有节点不可用」");
+    assert.equal(els.terminalRouteNote.textContent, "前 1 跳不可用，自动路由正使用第 2 跳", "前位红跳说不可用");
+  });
+
+  it("显隐收口：空链（未归属/未配链/没走过）整块隐藏，首跳说正常，非首跳说位次", () => {
+    const { fn, els } = routeSandbox();
+    fn({ route: [], routeCurrent: 0 });
+    assert.equal(els.terminalRouteSection.hidden, true, "空链=整块隐藏（未归属/未配链/没走过都归一为空链）");
+    assert.equal(els.terminalRouteBadge.hidden, true, "隐藏时状态位一并不显");
+    fn({ route: [{ node: "a6api-main", model: "kimi-k3" }], routeCurrent: 0 });
+    assert.equal(els.terminalRouteSection.hidden, false, "真在自动路由时显示");
+    assert.equal(els.terminalRouteNote.textContent, "自动路由正常，当前使用首选节点", "首跳说正常，不再是写死的「当前请求使用首选渠道」");
+    assert.equal(els.terminalRouteBadge.hidden, true, "无红跳不出「有节点不可用」");
+    fn({ route: [{ node: "a6api-main", model: "kimi-k3" }, { node: "pool-a", model: "kimi-k3" }], routeCurrent: 1 });
+    assert.equal(els.terminalRouteNote.textContent, "自动路由正使用第 2 跳", "前位无红跳时只说位次");
+    fn({ route: [{ node: "a6api-main", model: "kimi-k3", state: "failed" }, { node: "pool-a", model: "kimi-k3" }], routeCurrent: 0 });
+    assert.equal(els.terminalRouteNote.textContent, "当前这一跳不可用，自动路由会继续向后退避", "当前跳跑红时直说不可用，不说「正常」");
+    assert.equal(els.terminalRouteBadge.hidden, false, "当前跳跑红也亮「有节点不可用」");
+  });
+
+  it("区段头不再恒显「正常」：静态 ok 徽章移除，状态位留 id 默认 hidden", () => {
+    const i = panelHtml.indexOf('class="terminal-inspector-section terminal-route-section"');
+    assert.ok(i > 0);
+    const head = panelHtml.slice(i, panelHtml.indexOf('id="terminalRouteViewport"'));
+    assert.ok(!head.includes("badge-ok"), "静态「正常」徽章已移除");
+    assert.ok(head.includes('id="terminalRouteBadge"') && head.includes("有节点不可用"), "状态位有 id 且文案就位");
+    assert.ok(panelHtml.includes('id="terminalRouteBadge" hidden'), "状态位默认 hidden，由 JS 驱动显隐");
+    const render = panelJs.match(/function renderTerminalPreviewRoute\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render.includes('$("terminalRouteBadge")') && render.includes("badge.hidden"), "状态位显隐由渲染层驱动");
+    const enrich = panelJs.match(/function enrichTerminalSessions\(agentsPayload\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(enrich.includes("terminalRouteForEndpoint(agent.endpointId"), "已归属会话走路由口计算");
+    assert.ok(enrich.includes("{ route: [], routeCurrent: 0 }"), "未归属 agent 的会话在 enrich 层即归一为空链");
+  });
+});
+
+// SSE 断线重连不重影（B2）：后端每次建连都重发 snapshot + 全量缓冲，前端
+// 对齐语义 = 每收到 snapshot 先 reset 再回放。纯函数在桩环境里真跑。
+describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
+  it("每个 snapshot 帧都先 reset 再对齐状态——重连后旧内容不叠加", () => {
+    const src = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "absorbTerminalSnapshot found in panel.js");
+    const state = { resets: 0, pidText: "", sizes: [] };
+    const term = { reset: () => { state.resets += 1; } };
+    const session = { backendState: null, shell: { pid: null } };
+    const fn = new Function("state", `
+      const $ = () => ({ set textContent(v) { state.pidText = v; } });
+      function updateTerminalFootSize() { state.sizes.push("foot"); }
+      ${src}
+      return absorbTerminalSnapshot;
+    `)(state);
+    fn(term, session, { pid: 8888, cols: 120, rows: 34 });
+    assert.equal(state.resets, 1, "建连首个 snapshot 先清屏");
+    assert.equal(session.backendState.pid, 8888);
+    assert.equal(session.shell.pid, 8888);
+    assert.equal(state.pidText, "PID 8888", "底栏 PID 随 snapshot 对齐");
+    assert.equal(state.sizes.length, 1, "底栏行列随 snapshot 刷新");
+    fn(term, session, { pid: 8888, cols: 100, rows: 30 });
+    assert.equal(state.resets, 2, "自动重连后的 snapshot 同样先清屏");
+  });
+
+  it("接线：snapshot 帧走 reset 入口，data 帧与 onerror 不 reset", () => {
+    const body = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(body, "connectTerminalStream found in panel.js");
+    assert.ok(body.includes("absorbTerminalSnapshot(term, session, JSON.parse(event.data))"), "snapshot 帧路由到 reset 入口");
+    const dataHandler = body.match(/addEventListener\("data"[\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(dataHandler && !dataHandler.includes("reset"), "稳态 data 帧不 reset，不误清屏");
+    const errorHandler = body.match(/onerror[\s\S]*?\n    \};/)?.[0];
+    assert.ok(errorHandler && !errorHandler.includes("reset"), "onerror 不 reset：断线瞬间不清屏，等重连后 snapshot 统一对齐");
+  });
+});
+
+// 窗口 resize 防抖（B3）：拖动动画里逐帧的事件合并到静默期后一次 fit。
+// 防抖函数在桩定时器环境里真跑。
+describe("虚拟终端 resize 防抖", () => {
+  function resizeDebounceSandbox() {
+    const src = panelJs.match(/function debounceTerminalFit\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "debounceTerminalFit found in panel.js");
+    const state = { fits: 0, seq: 0, pending: new Map() };
+    const setTimeoutStub = (cb, ms) => { const id = ++state.seq; state.pending.set(id, { cb, ms }); return id; };
+    const clearTimeoutStub = (id) => { state.pending.delete(id); };
+    const fn = new Function("state", "setTimeout", "clearTimeout", `
+      let terminalResizeDebounceTimer = null;
+      const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
+      function fitTerminalXterm() { state.fits += 1; }
+      ${src}
+      return debounceTerminalFit;
+    `)(state, setTimeoutStub, clearTimeoutStub);
+    const flush = () => {
+      const batch = [...state.pending.values()];
+      state.pending.clear();
+      for (const { cb } of batch) cb();
+    };
+    return { fn, state, flush };
+  }
+
+  it("连续 resize 事件只 fit 一次，静默期后再来一次再 fit 一次", () => {
+    const { fn, state, flush } = resizeDebounceSandbox();
+    fn(); fn(); fn();
+    assert.equal(state.fits, 0, "拖动过程中不逐帧 fit");
+    assert.equal(state.pending.size, 1, "重复事件合并成一个待触发定时器");
+    flush();
+    assert.equal(state.fits, 1, "静默期后恰好一次 fit");
+    fn();
+    flush();
+    assert.equal(state.fits, 2, "下一轮 resize 再补一次");
+    const delay = resizeDebounceSandbox();
+    delay.fn();
+    const ms = [...delay.state.pending.values()][0]?.ms;
+    assert.ok(ms >= 80 && ms <= 150, `防抖延迟 ${ms}ms 落在 80–150ms 区间`);
+  });
+
+  it("接线：resize 监听挂防抖入口，其它 fit 调用点不受影响", () => {
+    assert.ok(panelJs.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听走防抖");
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure.includes("requestAnimationFrame(fitTerminalXterm)"), "初次创建 xterm 仍直接 fit");
+    const schedule = panelJs.match(/function scheduleTerminalFit\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(schedule.includes("fitTerminalXterm()"), "终端页显示路径仍直接 fit");
   });
 });
 

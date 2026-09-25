@@ -1999,12 +1999,12 @@ if (window.panelStartupController) panelStartupPlay();
               <div class="terminal-request-list" id="terminalRequestList"></div>
             </div>
 
-            <div class="terminal-inspector-section terminal-route-section">
-              <div class="terminal-section-head"><span>路由链</span><span class="badge badge-ok">正常</span></div>
+            <div class="terminal-inspector-section terminal-route-section" hidden>
+              <div class="terminal-section-head"><span>路由链</span><span class="badge badge-warn" id="terminalRouteBadge" hidden>有节点不可用</span></div>
               <div class="terminal-route-viewport" id="terminalRouteViewport">
                 <div class="terminal-route-line" id="terminalRouteLine"></div>
               </div>
-              <span class="terminal-route-note" id="terminalRouteNote">当前请求使用首选渠道</span>
+              <span class="terminal-route-note" id="terminalRouteNote">自动路由正常，当前使用首选节点</span>
             </div>
           </div>
         </aside>
@@ -2155,6 +2155,7 @@ if (window.panelStartupController) panelStartupPlay();
 
 <script src="/panel/assets/xterm.js" defer></script>
 <script src="/panel/assets/xterm-fit.js" defer></script>
+<script src="/panel/assets/xterm-unicode11.js" defer></script>
 <script src="/panel/assets/panel.js" defer></script>
 </body>
 </html>
