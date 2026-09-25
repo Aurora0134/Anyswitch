@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>Anyswitch · 实时监测与状态看板</title>
 <link rel="stylesheet" href="/panel/assets/panel.css">
+<link rel="stylesheet" href="/panel/assets/xterm.css">
 <script>
 // 面板主题——绘制前恢复本机选择的主题，避免刷新时先闪过默认的 SaaS 主题
 // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 等历史主题已退役不可选：
@@ -1799,7 +1800,7 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="experimental-launch-row">
             <div>
               <div class="modal-item-title">在 Anyswitch 中运行 CLI Agent</div>
-              <div class="modal-item-desc">先查看终端、Agent 状态和请求信息的整体布局。当前为体验预览，暂不连接本机终端。</div>
+              <div class="modal-item-desc">打开后可连接本机终端运行 CLI Agent，并查看 Agent 状态与请求信息。当前为实验性功能。</div>
             </div>
             <button type="button" class="btn btn-primary" id="openTerminalPreviewBtn">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -1875,7 +1876,7 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
         <div class="terminal-head-right">
-          <span class="terminal-preview-pill"><i class="terminal-status-dot"></i>体验预览</span>
+          <span class="terminal-preview-pill"><i class="terminal-status-dot"></i>实验功能</span>
           <button type="button" class="icon-btn terminal-head-icon" title="切换亮暗主题" aria-label="切换亮暗主题" id="terminalThemeToggle">
             <svg id="terminalIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
             <svg id="terminalIcoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="19.78" x2="19.78" y2="5.64"/></svg>
@@ -1920,12 +1921,7 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
 
           <div class="terminal-screen" id="terminalScreen" role="region" aria-label="终端输出">
-            <div class="terminal-output" id="terminalOutput"></div>
-            <div class="terminal-input-row">
-              <span class="terminal-prompt" id="terminalPrompt">PS D:\\dev\\payment-service&gt;</span>
-              <input type="text" class="terminal-command-input" id="terminalCommandInput" aria-label="终端命令" placeholder="输入命令…" autocomplete="off" spellcheck="false">
-              <span class="terminal-cursor" aria-hidden="true"></span>
-            </div>
+            <div class="terminal-xterm-host" id="terminalXtermHost"></div>
           </div>
           <div class="terminal-footbar">
             <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
@@ -2150,6 +2146,8 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </footer>
 
+<script src="/panel/assets/xterm.js" defer></script>
+<script src="/panel/assets/xterm-fit.js" defer></script>
 <script src="/panel/assets/panel.js" defer></script>
 </body>
 </html>

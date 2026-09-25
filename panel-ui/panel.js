@@ -3231,8 +3231,9 @@ async function api(method, path, body) {
     loadSettingsState();
   }
 
-  // 纯前端布局预览：用两组静态会话把真实终端页的空间关系先呈现出来。
-  // 这里不创建进程、不请求后端；后续接入会话层时只替换这组数据与事件源。
+  // Terminal sessions are now backed by the persistent PTY host. The old mock
+  // records remain as a shape reference for the inspector, but are not used as
+  // a data source once the terminal page connects.
   const terminalPreviewSessions = {
     checkout: {
       // 归属链：终端会话 → shell 进程 → 检测到的 Agent 进程/实例 → 请求、指标与路由都挂在实例号下；
@@ -3343,6 +3344,125 @@ async function api(method, path, body) {
     },
   };
   let activeTerminalPreviewId = "checkout";
+  let terminalBackendSessions = {};
+  let terminalEventSource = null;
+  let terminalXterm = null;
+  let terminalFitAddon = null;
+  let terminalBackendReady = false;
+
+  function terminalSessionMap() {
+    return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
+  }
+
+  function terminalSessionFor(id) {
+    return terminalSessionMap()[id] || null;
+  }
+
+  function terminalBackendSession(item) {
+    return {
+      id: item.id,
+      label: item.label || "新终端",
+      cwd: item.cwd || "D:\\dev",
+      branch: "",
+      shell: { name: item.shell === "cmd" ? "命令提示符" : "PowerShell", pid: item.pid || "—" },
+      agent: null,
+      status: item.status === "running" ? "idle" : "idle",
+      metrics: null,
+      route: [],
+      routeCurrent: 0,
+      requests: [],
+      output: [],
+      backend: true,
+      backendState: item,
+    };
+  }
+
+  function rebuildTerminalBackendSessions(items) {
+    terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
+    if (!terminalBackendSessions[activeTerminalPreviewId]) {
+      activeTerminalPreviewId = Object.keys(terminalBackendSessions)[0] || null;
+    }
+  }
+
+  async function fetchTerminalSessions() {
+    const data = await api("GET", "/api/terminal/sessions");
+    rebuildTerminalBackendSessions(data.sessions);
+    terminalBackendReady = true;
+    if (!activeTerminalPreviewId) {
+      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 });
+      rebuildTerminalBackendSessions([...(data.sessions || []), created]);
+      activeTerminalPreviewId = created.id;
+    }
+  }
+
+  function closeTerminalStream() {
+    terminalEventSource?.close();
+    terminalEventSource = null;
+  }
+
+  function fitTerminalXterm() {
+    terminalFitAddon?.fit();
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session?.backend || !terminalXterm) return;
+    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols: terminalXterm.cols, rows: terminalXterm.rows }).catch(() => {});
+  }
+
+  function ensureTerminalXterm() {
+    const host = $("terminalXtermHost");
+    if (!host || terminalXterm || !window.Terminal) return terminalXterm;
+    terminalXterm = new window.Terminal({
+      convertEol: true,
+      cursorBlink: true,
+      fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',
+      fontSize: 13,
+      scrollback: 5000,
+      theme: { background: "#0b1220", foreground: "#d5e2f4", cursor: "#dbeafe", selectionBackground: "#29486d" },
+    });
+    if (window.FitAddon?.FitAddon) {
+      terminalFitAddon = new window.FitAddon.FitAddon();
+      terminalXterm.loadAddon(terminalFitAddon);
+    }
+    terminalXterm.open(host);
+    terminalXterm.onData((data) => {
+      const session = terminalSessionFor(activeTerminalPreviewId);
+      if (!session?.backend) return;
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch(() => {});
+    });
+    window.addEventListener("resize", fitTerminalXterm);
+    requestAnimationFrame(fitTerminalXterm);
+    return terminalXterm;
+  }
+
+  function connectTerminalStream(session) {
+    closeTerminalStream();
+    const term = ensureTerminalXterm();
+    if (!term) return;
+    term.reset();
+    if (!session?.backend) {
+      for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
+      return;
+    }
+    terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
+    terminalEventSource.addEventListener("snapshot", (event) => {
+      try {
+        const state = JSON.parse(event.data);
+        session.backendState = state;
+        session.shell.pid = state.pid || "—";
+        $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
+      } catch {}
+    });
+    terminalEventSource.addEventListener("data", (event) => {
+      try { term.write(JSON.parse(event.data)); } catch {}
+    });
+    terminalEventSource.onerror = () => {
+    };
+  }
+
+  function scheduleTerminalFit() {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (currentView === "terminal") fitTerminalXterm();
+    }));
+  }
   // 视窗位置只随路由状态变化重置；同一状态重绘不接管用户已经滚到的位置。
   let terminalRouteFocusSignature = null;
 
@@ -3353,7 +3473,8 @@ async function api(method, path, body) {
   function renderTerminalPreviewTabs() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
-    tabs.innerHTML = Object.entries(terminalPreviewSessions).map(([id, session]) => `
+    const sessions = terminalSessionMap();
+    tabs.innerHTML = Object.entries(sessions).map(([id, session]) => `
       <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
         aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
         <span class="terminal-tab-shell${session.shell.name === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell.name === "PowerShell" ? "PS" : ">_"}</span>
@@ -3405,13 +3526,12 @@ async function api(method, path, body) {
   }
 
   function renderTerminalPreviewSession() {
-    const session = terminalPreviewSessions[activeTerminalPreviewId];
+    const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session) return;
     $("terminalSessionName").textContent = session.label;
     $("terminalSessionPath").textContent = session.cwd;
     $("terminalSessionBranch").textContent = session.branch || "未设置分支";
     $("terminalShellLabel").textContent = session.shell.name;
-    $("terminalPrompt").textContent = `${session.shell.name === "PowerShell" ? `PS ${session.cwd}>` : `${session.cwd}>`}`;
     $("terminalInspectorTitle").textContent = session.label;
     $("terminalAgentBadge").textContent = session.agent ? session.agent.name : session.shell.name;
     $("terminalAgentBadge").classList.toggle("is-shell", !session.agent);
@@ -3447,29 +3567,37 @@ async function api(method, path, body) {
       </div>
     `).join("");
     renderTerminalPreviewRoute(session);
-    $("terminalOutput").innerHTML = session.output.map(terminalPreviewLineHtml).join("");
     renderTerminalPreviewTabs();
-    requestAnimationFrame(() => {
-      const screen = $("terminalScreen");
-      if (screen) screen.scrollTop = screen.scrollHeight;
-    });
+    connectTerminalStream(session);
+    if (currentView === "terminal") scheduleTerminalFit();
   }
 
   function initTerminalPreview() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
     renderTerminalPreviewSession();
+    fetchTerminalSessions().then(() => {
+      renderTerminalPreviewSession();
+    }).catch((error) => {
+      terminalBackendReady = false;
+      console.warn("[terminal] backend unavailable:", error);
+    });
+    if (terminalBackendReady) renderTerminalPreviewSession();
     tabs.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-terminal-tab]");
       if (!tab) return;
       const id = tab.dataset.terminalTab;
-      if (!terminalPreviewSessions[id]) return;
+      if (!terminalSessionFor(id)) return;
       if (event.target.closest(".terminal-tab-close")) {
-        const session = terminalPreviewSessions[id];
+        const session = terminalSessionFor(id);
         if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
-        const ids = Object.keys(terminalPreviewSessions);
+        const sessions = terminalSessionMap();
+        const ids = Object.keys(sessions);
         if (ids.length <= 1) { toast("预览至少保留一个终端标签"); return; }
-        delete terminalPreviewSessions[id];
+        if (session.backend) {
+          api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
+          delete terminalBackendSessions[id];
+        } else delete terminalPreviewSessions[id];
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = ids.find((item) => item !== id) || "checkout";
         renderTerminalPreviewSession();
         return;
@@ -3489,31 +3617,20 @@ async function api(method, path, body) {
       button.setAttribute("aria-label", button.title);
     };
     $("terminalClearBtn").onclick = () => {
-      $("terminalOutput").innerHTML = '<div class="terminal-line dim">屏幕已清空</div>';
-      $("terminalCommandInput")?.focus();
+      terminalXterm?.clear();
+      terminalXterm?.focus();
     };
-    $("terminalCommandInput").addEventListener("keydown", (event) => {
-      if (event.key !== "Enter") return;
-      const input = event.currentTarget;
-      const command = input.value.trim();
-      if (!command) return;
-      const session = terminalPreviewSessions[activeTerminalPreviewId];
-      const output = $("terminalOutput");
-      output.insertAdjacentHTML("beforeend", `<div class="terminal-line prompt-line">${escapeHtml($("terminalPrompt").textContent)} </div><div class="terminal-line command-line">${escapeHtml(command)}</div>`);
-      if (command === "git status" || command === "git status --short") {
-        output.insertAdjacentHTML("beforeend", '<div class="terminal-line info-line">工作区干净，没有待提交的文件。</div>');
-      } else if (command === "clear" || command === "cls") {
-        output.innerHTML = "";
-      } else if (command === "npm test") {
-        output.insertAdjacentHTML("beforeend", '<div class="terminal-line info-line">正在运行测试…</div><div class="terminal-line success-line">✓ 42 个测试通过</div>');
-      } else {
-        output.insertAdjacentHTML("beforeend", `<div class="terminal-line dim">预览不会执行“${escapeHtml(command)}”，这里只展示终端布局。</div>`);
-      }
-      input.value = "";
-      const screen = $("terminalScreen");
-      screen.scrollTop = screen.scrollHeight;
-    });
     $("terminalAddBtn").onclick = () => {
+      if (terminalBackendReady) {
+        api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 })
+          .then((created) => {
+            terminalBackendSessions[created.id] = terminalBackendSession(created);
+            activeTerminalPreviewId = created.id;
+            renderTerminalPreviewSession();
+          })
+          .catch((error) => toast(panelError(error, "无法新建终端"), true));
+        return;
+      }
       const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
       terminalPreviewSessions[id] = {
         label: "新终端", cwd: "D:\\dev", branch: "",
@@ -4124,6 +4241,12 @@ async function api(method, path, body) {
     $("settingsView").hidden = !settings;
     $("terminalView").hidden = !terminal;
     document.body.classList.toggle("terminal-mode", terminal);
+    if (terminal) {
+      // xterm is initialized while the terminal view is hidden during startup.
+      // Refit after the view is painted so the PTY and renderer share the real
+      // viewport dimensions instead of the hidden view's tiny fallback size.
+      scheduleTerminalFit();
+    }
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
     $("mainHeadInner").hidden = settings || terminal;
     $("settingsHeadInner").hidden = !settings;
