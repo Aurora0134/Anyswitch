@@ -25,5 +25,10 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Aurora0134/Anyswitch.git"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.1.0"
   }
 }

@@ -2491,11 +2491,16 @@ describe("panel.html 设置全页视图", () => {
     const experimental = panelHtml.slice(iExperimental, iAdvanced);
     assert.ok(experimental.includes('id="openTerminalPreviewBtn"'), "实验性功能面板含虚拟终端入口");
     assert.ok(experimental.includes("打开虚拟终端"), "入口文案明确");
+    assert.ok(experimental.includes("打开后可连接本机终端运行 CLI Agent"), "入口说明与真实终端能力一致");
     assert.ok(panelHtml.includes('<section class="terminal-view" id="terminalView" hidden'), "虚拟终端是独立整页视图");
     assert.ok(panelHtml.includes('id="terminalReturnBtn"') && panelHtml.includes("返回设置"), "终端页含返回设置按钮");
-    for (const id of ["terminalTabs", "terminalOutput", "terminalInspector", "terminalRequestList"]) {
+    assert.ok(panelHtml.includes("实验功能"), "终端页状态与实验性功能入口一致");
+    for (const id of ["terminalTabs", "terminalXtermHost", "terminalInspector", "terminalRequestList"]) {
       assert.ok(panelHtml.includes(`id="${id}"`), `终端预览含 #${id}`);
     }
+    assert.ok(panelHtml.includes('/panel/assets/xterm.js') && panelHtml.includes('/panel/assets/xterm-fit.js'), "终端页加载 xterm 渲染运行时");
+    assert.ok(panelJs.includes('fontFamily: \'ui-monospace, "Cascadia Mono"'), "终端使用稳定的等宽字体栈测量尺寸");
+    assert.ok(panelJs.includes("function scheduleTerminalFit()"), "终端显示后重新调度一次尺寸适配");
     assert.ok(panelHtml.includes('id="terminalRouteViewport"') && panelHtml.includes('id="terminalRouteLine"'), "路由链使用独立视窗与完整链容器");
     assert.ok(panelJs.includes('terminalReturnSettingsSubTab = "experimental"'), "返回路径落回实验性功能子 tab");
     assert.ok(panelJs.includes("function openTerminalPreview()") && panelJs.includes("function closeTerminalPreview()"), "终端预览有进入/返回逻辑");

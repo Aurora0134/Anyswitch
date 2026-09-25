@@ -27,6 +27,7 @@ import { isWatchdogAutostartEnabled, enableWatchdogAutostart } from "./autostart
 import { spawnWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
 import { dirname } from "node:path";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
+import { ensureTerminalHost } from "./terminal-process-manager.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 export const PANEL_PORT = 47820;
@@ -86,6 +87,11 @@ export async function startPanelHost(options = {}) {
   }
   const paths = options.paths ?? storePaths();
   const preferredPort = options.port ?? PANEL_PORT;
+  try {
+    await ensureTerminalHost(paths.root, { logger });
+  } catch (error) {
+    logger.warn(`terminal host unavailable (non-fatal): ${error.message}`);
+  }
   const { port, reused, close } = await listenLoopbackPanel(server, preferredPort);
   if (reused) {
     logger.warn(`panel port ${port} already in use; reusing existing panel`);

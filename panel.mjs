@@ -35,6 +35,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
+import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 
 const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const APP_INFO = Object.freeze({
@@ -48,6 +49,9 @@ const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui"
 const REPO_PANEL_CSS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css");
 const REPO_PANEL_JS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js");
 const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
+const REPO_XTERM_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "lib", "xterm.js");
+const REPO_XTERM_CSS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "css", "xterm.css");
+const REPO_XTERM_FIT_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
 const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
@@ -494,6 +498,45 @@ export function createPanelRouter({
       return loadOrGenerateToken(relayRoot);
     } catch {
       return null;
+    }
+  }
+
+  function terminalPullToken() {
+    try {
+      return loadOrGenerateToken(relayRoot);
+    } catch {
+      return null;
+    }
+  }
+
+  async function proxyTerminal(req, res, targetPath, method = req.method, body = undefined) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    try {
+      const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}${targetPath}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const contentType = response.headers.get("content-type") || "application/json";
+      res.writeHead(response.status, { "content-type": contentType, "cache-control": "no-cache" });
+      if (!response.body) return res.end();
+      const reader = response.body.getReader();
+      req.on("close", () => reader.cancel().catch(() => {}));
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        if (!res.write(Buffer.from(part.value))) {
+          await new Promise((resolve) => res.once("drain", resolve));
+        }
+      }
+      return res.end();
+    } catch (error) {
+      if (!res.headersSent) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable", detail: error.message });
+      res.end();
     }
   }
 
@@ -1321,6 +1364,27 @@ export function createPanelRouter({
       }
       return servePanelFile(res, req, REPO_PANEL_JS, "text/javascript; charset=utf-8");
     }
+    if (path === "/panel/assets/xterm.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm.css" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_CSS, "text/css; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm-fit.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_FIT_JS, "text/javascript; charset=utf-8");
+    }
 
     if (path === "/panel/assets/logo.png" && (method === "GET" || method === "HEAD")) {
       let body;
@@ -1389,6 +1453,26 @@ export function createPanelRouter({
     if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
     if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
     if (path === "/panel/api/session/report" && method === "POST") return handleSessionReport(req, res);
+    if (path === "/panel/api/terminal/sessions" && method === "GET") return proxyTerminal(req, res, "/terminal/sessions");
+    if (path === "/panel/api/terminal/sessions" && method === "POST") {
+      try {
+        return proxyTerminal(req, res, "/terminal/sessions", "POST", await readJsonBody(req));
+      } catch (error) {
+        return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+      }
+    }
+    if (path.startsWith("/panel/api/terminal/sessions/")) {
+      const suffix = path.slice("/panel/api/terminal/sessions/".length);
+      if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
+      if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);
+      if (method === "POST") {
+        try {
+          return proxyTerminal(req, res, `/terminal/sessions/${suffix}`, "POST", await readJsonBody(req));
+        } catch (error) {
+          return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+        }
+      }
+    }
     if (path === "/panel/api/logs" && method === "GET") return handleLogsSSE(res, req);
     if (path === "/panel/api/logs/ingest" && method === "POST") return handleLogIngest(req, res);
     if (path === "/panel/api/logs/clear" && method === "POST") return handleLogClear(res);
