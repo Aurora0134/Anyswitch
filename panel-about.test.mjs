@@ -624,6 +624,47 @@ test("单个更新按行独立：一行在更新时其他行照常可点，各�
   assert.equal(actionButton(h, "claude").disabled, false);
 });
 
+test("codex 双行卡片：CLI 行更新中时只有该行显「更新中…」，桌面行不出动作位", async () => {
+  const local = environment();
+  local.clients[1].installations = [
+    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
+  ];
+  const pending = new Map();
+  const h = harness(
+    (path) => {
+      if (path === "/api/agents") return { agents: [] };
+      if (path.includes("/latest/codex-desktop")) return latest("26.915.4065", "current");
+      if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
+      if (path.startsWith("/api/environment/update/")) {
+        const runId = path.slice("/api/environment/update/".length);
+        return new Promise((resolve) => pending.set(runId, resolve));
+      }
+      return normal(path);
+    },
+    { respondPost: () => ({ ok: true, runId: "run-x" }) },
+  );
+  await h.controller.enter();
+  const row = h.row("codex");
+  const idleLines = descendants(row, (node) => node.className === "about-version-line");
+  assert.match(idleLines[0].textContent, /有新版本/);
+  assert.match(idleLines[1].textContent, /与官方最新版本一致/);
+  assert.equal(actionButtons(idleLines[1]).length, 0, "空闲时桌面行没有动作位");
+  const first = actionButton(h, "codex").click();
+  await flush();
+  assert.deepEqual([h.mutations[0]?.body.id, h.mutations[0]?.body.action], ["codex", "update"]);
+  const busyLines = descendants(row, (node) => node.className === "about-version-line");
+  assert.match(actionButtons(busyLines[0])[0].textContent, /更新中/);
+  assert.equal(actionButtons(busyLines[0])[0].disabled, true);
+  assert.equal(actionButtons(busyLines[1]).length, 0, "任务按客户端加锁，也不给桌面行造出「更新中」按钮");
+  pending.get("run-x")(doneRun("run-x", "codex"));
+  await first;
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /codex 已更新到 1\.1\.0/);
+  const doneLines = descendants(row, (node) => node.className === "about-version-line");
+  assert.equal(actionButtons(doneLines[1]).length, 0, "收尾重检后桌面行仍无动作位");
+  assert.match(actionButtons(doneLines[0])[0].textContent, /更新到/);
+});
+
 test("同时到来的运行中确认排队逐个弹，离开关于页时排队项按取消收尾", async () => {
   const running = { agents: [{ id: "claude", status: "running" }, { id: "codex", status: "running" }] };
   const posts = [];
