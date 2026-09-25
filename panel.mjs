@@ -652,8 +652,11 @@ export function createPanelRouter({
     let rows = [];
     try {
       const today = dayKey(Date.now());
-      rows = usageJournalLazy().read("requests", { fromDay: today, toDay: today });
-    } catch { rows = []; }
+      rows = usageJournalLazy().readRequests({ fromDay: today, toDay: today });
+    } catch (err) {
+      logger?.warn?.(`terminal requests journal read failed: ${err.message}`);
+      rows = [];
+    }
     sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId }) });
   }
 
