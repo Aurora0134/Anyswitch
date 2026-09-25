@@ -1677,9 +1677,13 @@ const PS_REPL_COMMAND =
 // walks; cmd.exe joins the name filter because launcher → client chains pass
 // through a `cmd /c` shim (the launchers spawn via COMSPEC) and a missing
 // intermediate hop would break ancestor resolution. cmd.exe rows feed only
-// the lineage table — no counting branch claims them.
+// the lineage table — no counting branch claims them. powershell.exe /
+// pwsh.exe join for the same reason on the other side of the chain: the
+// virtual terminal's shell IS a powershell.exe process, so attributing a
+// terminal session to an agent client (shell pid → client pid) walks the
+// lineage table through the shell row. They too feed only the lineage table.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='cmd.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -1969,6 +1973,42 @@ export function createAgentMetricsCollector(options = {}) {
     });
 
     return pendingScanPromise;
+  }
+
+  // Terminal-session attribution surface: the live agent client processes the
+  // latest scan enumerated, each carrying its ancestor chain walked up the
+  // lineage table. The panel joins this list against terminal-host sessions
+  // by shell pid — a virtual-terminal session's shell IS a powershell/pwsh
+  // process, so the chain from a client to its shell crosses exactly the rows
+  // the probe scans. Engine-subset scoping mirrors normalizeInstanceId
+  // (codex/dsh/kimi fold against their engine sets, everyone else against the
+  // bucket set), so GUI shells and launcher wrappers never surface here.
+  // Served from the cached scan (≤ scan TTL old); an empty lineage table
+  // (tasklist fallback path) yields empty ancestor lists — the panel then
+  // cannot attribute and sessions stay plain shells.
+  const DETECTED_CLIENT_ENDPOINTS = ["codex", "dsh", "kimi", "claude", "opencode", "grok", "pi", "qoder"];
+
+  function getDetectedClientProcesses() {
+    const counts = cachedProcessCounts ?? createEmptyProcessScan();
+    const out = [];
+    for (const agentId of DETECTED_CLIENT_ENDPOINTS) {
+      const pids = counts[`${agentId}EnginePids`] ?? counts[`${agentId}Pids`];
+      if (!(pids instanceof Set) || pids.size === 0) continue;
+      for (const pid of pids) {
+        const ancestors = [];
+        let current = pid;
+        const seen = new Set([current]);
+        for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth++) {
+          const parent = counts.ppidByPid?.get(current);
+          if (parent === undefined || seen.has(parent)) break;
+          ancestors.push(parent);
+          seen.add(parent);
+          current = parent;
+        }
+        out.push({ agentId, pid, ancestors });
+      }
+    }
+    return out;
   }
 
   async function scanProcesses() {
@@ -3177,6 +3217,9 @@ export function createAgentMetricsCollector(options = {}) {
     // held inside ephemeral per-launch relay processes.
     getReportedChainRuntime: () => Array.from(reportedChainStates.values()),
     scanProcesses,
+    // Terminal-session attribution: live agent client pids + ancestor chains
+    // from the cached scan (see the function's note above).
+    getDetectedClientProcesses,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
     // accounting exactly when a restart is about to need it.

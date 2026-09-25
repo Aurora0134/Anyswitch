@@ -357,6 +357,11 @@ async function api(method, path, body) {
       refreshStatsState({ silent: true });
       return;
     }
+    if (currentView === "terminal") {
+      // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。
+      pollTerminalSessions();
+      return;
+    }
     if (!boardVisible()) return;
     refreshAgents();
     refreshModelStability();
@@ -3351,6 +3356,10 @@ async function api(method, path, body) {
   let terminalXterm = null;
   let terminalFitAddon = null;
   let terminalBackendReady = false;
+  // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
+  // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
+  let terminalPollTimer = null;
+  let terminalPollInFlight = false;
 
   function terminalSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
@@ -3367,7 +3376,9 @@ async function api(method, path, body) {
       cwd: item.cwd || "D:\\dev",
       branch: "",
       shell: { name: item.shell === "cmd" ? "命令提示符" : "PowerShell", pid: item.pid || "—" },
-      agent: null,
+      // 归属接线：panel 层已按 shell pid ↔ 检测进程祖先链注入 agent 字段
+      //（无归属的会话不带此键，保持纯外壳）。
+      agent: item.agent && typeof item.agent === "object" ? item.agent : null,
       status: item.status === "running" ? "idle" : "idle",
       metrics: null,
       route: [],
@@ -3377,6 +3388,77 @@ async function api(method, path, body) {
       backend: true,
       backendState: item,
     };
+  }
+
+  // ---- 归属后展示口径 ----
+  // 终端页的指标 / 路由 / 请求全部按看板同一数据口径取数：面板 agents 负载
+  // 里按 instanceId 找实例行（聚合端点的行挂在 sessions 下）。
+  function terminalInstanceRow(agentsPayload, agent) {
+    if (!agent || !agent.instanceId || !Array.isArray(agentsPayload)) return null;
+    const endpoint = agentsPayload.find((item) => item && item.id === agent.endpointId);
+    if (!endpoint) return null;
+    const rows = Array.isArray(endpoint.instances)
+      ? endpoint.instances
+      : (Array.isArray(endpoint.sessions) ? endpoint.sessions : []);
+    return rows.find((inst) => inst && inst.id === agent.instanceId) || null;
+  }
+
+  function terminalMetricNum(value, digits = 1) {
+    return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
+  }
+
+  function terminalMetricsFromInstance(inst) {
+    if (!inst) return null;
+    const tokens = inst.tokens || {};
+    const fmt = (n) => (typeof n === "number" && Number.isFinite(n) ? n.toLocaleString("en-US") : "0");
+    return {
+      activeRequests: typeof inst.activeRequests === "number" ? inst.activeRequests : 0,
+      ttft: typeof inst.lastTtftMs === "number" && inst.lastTtftMs > 0 ? (inst.lastTtftMs / 1000).toFixed(2) : "—",
+      ttftLamp: typeof inst.ttftColor === "string" ? inst.ttftColor : "gray",
+      tps: terminalMetricNum(inst.tps),
+      cache: typeof inst.cacheHitRate === "number" && Number.isFinite(inst.cacheHitRate) ? String(Math.round(inst.cacheHitRate)) : "—",
+      workTime: typeof inst.activeDurationFormatted === "string" ? inst.activeDurationFormatted : "0秒",
+      requestCount: typeof inst.requests === "number" ? inst.requests : 0,
+      tokens: `Prompt: ${fmt(tokens.prompt)} · Completion: ${fmt(tokens.completion)} · Cached: ${fmt(tokens.cached)}`,
+      sparkTtft: Array.isArray(inst.sparkHistory?.ttft) ? inst.sparkHistory.ttft : [],
+      sparkTps: Array.isArray(inst.sparkHistory?.tps) ? inst.sparkHistory.tps : [],
+      sparkCache: Array.isArray(inst.sparkHistory?.cache) ? inst.sparkHistory.cache : [],
+    };
+  }
+
+  // 路由链：链配置给节点序列（含各跳属性），运行快照给当前跳与不可用节点；
+  // 普通终端无 agent / 端点未配链一律空链（规范：路由区域整块隐藏）。
+  function terminalRouteForEndpoint(endpointId, chains, runtimeCache) {
+    const entry = (Array.isArray(chains) ? chains : []).find(
+      (item) => item && item.endpointId === endpointId && Array.isArray(item.chain) && item.chain.length > 0 && item.enabled !== false,
+    );
+    if (!entry) return { route: [], routeCurrent: 0 };
+    const rt = runtimeCache && typeof runtimeCache === "object" ? runtimeCache[endpointId] : null;
+    const route = entry.chain.map((node, index) => ({
+      node: node.node,
+      model: node.model,
+      ...(Array.isArray(rt?.lamps) && rt.lamps[index] === "red" ? { state: "failed" } : {}),
+    }));
+    let routeCurrent = 0;
+    if (rt?.current) {
+      const idx = entry.chain.findIndex((node) => node.node === rt.current.node && node.model === rt.current.model);
+      if (idx >= 0) routeCurrent = idx;
+    }
+    return { route, routeCurrent };
+  }
+
+  // 最近请求：usage journal 的结算行，展示措辞与预览稿同形（metric 取 TTFT）。
+  function terminalRequestsFromRows(rows) {
+    if (!Array.isArray(rows)) return [];
+    return rows.map((row) => ({
+      model: typeof row?.model === "string" && row.model ? row.model : "—",
+      provider: typeof row?.providerId === "string" && row.providerId ? row.providerId : "—",
+      metric: typeof row?.ttftMs === "number" && row.ttftMs > 0 ? `${(row.ttftMs / 1000).toFixed(2)}s` : "—",
+      detail: row?.ok === false
+        ? "请求失败"
+        : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
+      state: row?.ok === false ? "failed" : "ok",
+    }));
   }
 
   function rebuildTerminalBackendSessions(items) {
@@ -3402,11 +3484,27 @@ async function api(method, path, body) {
     terminalEventSource = null;
   }
 
+  function updateTerminalFootSize(session) {
+    const el = $("terminalFootSize");
+    if (!el) return;
+    const cols = session?.backendState?.cols;
+    const rows = session?.backendState?.rows;
+    if (Number.isFinite(cols) && Number.isFinite(rows)) el.textContent = `${cols} × ${rows}`;
+  }
+
   function fitTerminalXterm() {
     terminalFitAddon?.fit();
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session?.backend || !terminalXterm) return;
-    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols: terminalXterm.cols, rows: terminalXterm.rows }).catch(() => {});
+    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols: terminalXterm.cols, rows: terminalXterm.rows })
+      .then((result) => {
+        // resize 回执即真实行列数：底栏事实跟 resize 联动，不再是静态占位。
+        if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
+          session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
+          updateTerminalFootSize(session);
+        }
+      })
+      .catch(() => {});
   }
 
   function ensureTerminalXterm() {
@@ -3451,6 +3549,7 @@ async function api(method, path, body) {
         session.backendState = state;
         session.shell.pid = state.pid || "—";
         $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
+        updateTerminalFootSize(session);
       } catch {}
     });
     terminalEventSource.addEventListener("data", (event) => {
@@ -3527,7 +3626,61 @@ async function api(method, path, body) {
     }
   }
 
-  function renderTerminalPreviewSession() {
+  // ---- 归属数据轮询（虚拟终端接真实 Agent 流量） ----
+  // 每拍：拉会话列表（panel 已按 shell pid 归属注好 agent）→ 拉 agents 负载
+  // → 按 instanceId 找实例行，套看板口径的指标 / 状态；路由链按端点画；
+  // 最近请求只查活动标签的那一个实例。普通终端（无归属）session.agent 恒为
+  // null，监测区按规范整块隐藏。
+
+  function enrichTerminalSessions(agentsPayload) {
+    const chains = boardRoutingChains();
+    const runtime = routeRuntimeState === "ok" ? routeRuntimeCache : null;
+    for (const session of Object.values(terminalBackendSessions)) {
+      if (!session?.backend) continue;
+      const agent = session.agent || null;
+      const instance = terminalInstanceRow(agentsPayload, agent);
+      session.status = instance && instance.activeRequests > 0 ? "working" : "idle";
+      session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
+      const { route, routeCurrent } = agent
+        ? terminalRouteForEndpoint(agent.endpointId, chains, runtime)
+        : { route: [], routeCurrent: 0 };
+      session.route = route;
+      session.routeCurrent = routeCurrent;
+    }
+  }
+
+  async function refreshActiveTerminalRequests() {
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session?.backend || !session.agent?.instanceId) {
+      if (session?.backend) session.requests = [];
+      return;
+    }
+    const query = new URLSearchParams({ agentId: session.agent.endpointId, instanceId: session.agent.instanceId });
+    const data = await api("GET", `/api/terminal/requests?${query.toString()}`).catch(() => null);
+    if (!data || !Array.isArray(data.requests)) return; // 失败帧保留上一帧
+    session.requests = terminalRequestsFromRows(data.requests);
+  }
+
+  async function pollTerminalSessions() {
+    if (!terminalBackendReady || terminalPollInFlight) return;
+    terminalPollInFlight = true;
+    try {
+      const data = await api("GET", "/api/terminal/sessions");
+      rebuildTerminalBackendSessions(data.sessions);
+      await refreshRouteRuntimeCache();
+      const agentsData = await api("GET", "/api/agents").catch(() => null);
+      enrichTerminalSessions(agentsData?.agents ?? null);
+      await refreshActiveTerminalRequests();
+      renderTerminalSessionData();
+      renderTerminalPreviewTabs();
+    } catch {
+      // 归属面任何一环失败都不清屏：上一帧继续显示，下一拍自然重试。
+    } finally {
+      terminalPollInFlight = false;
+    }
+  }
+
+  function renderTerminalSessionData() {
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session) return;
     $("terminalSessionName").textContent = session.label;
@@ -3538,6 +3691,7 @@ async function api(method, path, body) {
     $("terminalAgentBadge").textContent = session.agent ? session.agent.name : session.shell.name;
     $("terminalAgentBadge").classList.toggle("is-shell", !session.agent);
     $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
+    updateTerminalFootSize(session);
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
     const metrics = session.metrics || null;
     $("terminalLiveDetail").textContent = session.status === "working" && metrics
@@ -3569,6 +3723,12 @@ async function api(method, path, body) {
       </div>
     `).join("");
     renderTerminalPreviewRoute(session);
+  }
+
+  function renderTerminalPreviewSession() {
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session) return;
+    renderTerminalSessionData();
     renderTerminalPreviewTabs();
     connectTerminalStream(session);
     if (currentView === "terminal") scheduleTerminalFit();
@@ -3580,11 +3740,19 @@ async function api(method, path, body) {
     renderTerminalPreviewSession();
     fetchTerminalSessions().then(() => {
       renderTerminalPreviewSession();
+      pollTerminalSessions();
     }).catch((error) => {
       terminalBackendReady = false;
       console.warn("[terminal] backend unavailable:", error);
     });
     if (terminalBackendReady) renderTerminalPreviewSession();
+    if (!terminalPollTimer) {
+      terminalPollTimer = setInterval(() => {
+        if (document.hidden) return;
+        if (currentView !== "terminal") return;
+        pollTerminalSessions();
+      }, 1000);
+    }
     tabs.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-terminal-tab]");
       if (!tab) return;
@@ -3593,14 +3761,19 @@ async function api(method, path, body) {
       if (event.target.closest(".terminal-tab-close")) {
         const session = terminalSessionFor(id);
         if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
-        const sessions = terminalSessionMap();
-        const ids = Object.keys(sessions);
-        if (ids.length <= 1) { toast("预览至少保留一个终端标签"); return; }
         if (session.backend) {
           api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
           delete terminalBackendSessions[id];
         } else delete terminalPreviewSessions[id];
-        if (activeTerminalPreviewId === id) activeTerminalPreviewId = ids.find((item) => item !== id) || "checkout";
+        const remaining = Object.keys(terminalSessionMap());
+        if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
+        if (remaining.length === 0) {
+          // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
+          // 标签照常可关，关完即离开终端页；重新进入时初始化路径会新开会话。
+          closeTerminalStream();
+          closeTerminalPreview();
+          return;
+        }
         renderTerminalPreviewSession();
         return;
       }

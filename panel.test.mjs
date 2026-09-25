@@ -4713,3 +4713,181 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
       "容器改出 flex/grid 之外就得同步换掉首帧接管机制");
   });
 });
+
+// 虚拟终端归属接线：panel 路由层把 shell pid ↔ 祖先链 join 进会话列表，
+// 最近请求走当日 usage journal；前端把归属后的实例行套看板口径渲染。
+describe("虚拟终端归属接线（terminal sessions list + recent requests）", () => {
+  function terminalRouter({ sessions, detected, agents, journalRows } = {}) {
+    return createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => agents ?? null,
+      fetchRelayDetectedProcesses: async () => detected ?? null,
+      fetchTerminalSessionsList: async () => sessions ?? null,
+      usageJournal: {
+        appendRequest() {}, appendSession() {},
+        read: () => journalRows ?? [],
+      },
+    });
+  }
+
+  it("会话列表按 shell pid 归属注 agent 并剥掉输出缓冲", async () => {
+    const router = terminalRouter({
+      sessions: [{ id: "t1", label: "新终端", cwd: "D:\\dev", shell: "powershell", pid: 8888, status: "running", cols: 120, rows: 34, buffer: ["chunk-a", "chunk-b"] }],
+      detected: [
+        { agentId: "kimi", pid: 4321, ancestors: [8888, 9000] },
+        { agentId: "codex", pid: 6100, ancestors: [7777, 8888] }, // 距壳更远，取最近者
+      ],
+      agents: [
+        { id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] },
+        { id: "codex", name: "Codex", instances: [{ id: "codex-6100" }] },
+      ],
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    const body = json();
+    assert.equal(body.sessions.length, 1);
+    assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321" });
+    assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
+  });
+
+  it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {
+    const router = terminalRouter({ sessions: [{ id: "t1", pid: 8888 }], detected: null });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().sessions[0].agent, undefined, "无检测面时不得造归属");
+  });
+
+  it("terminal-host 不可用时返回 503 terminal_host_unavailable", async () => {
+    const router = terminalRouter({ sessions: null });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 503);
+    assert.equal(json().error, "terminal_host_unavailable");
+  });
+
+  it("最近请求按 agentId+instanceId 严格过滤、最新在前", async () => {
+    const rows = [
+      { ts: 1, agentId: "kimi", instanceId: "kimi-4321", model: "m1", ok: true },
+      { ts: 2, agentId: "kimi", instanceId: "kimi-9999", model: "m2", ok: true },
+      { ts: 3, agentId: "kimi", model: "m3", ok: true },
+      { ts: 4, agentId: "kimi", instanceId: "kimi-4321", model: "m4", ok: true },
+    ];
+    const router = terminalRouter({ journalRows: rows });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/requests?agentId=kimi&instanceId=kimi-4321", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().requests.map((r) => r.ts), [4, 1], "无实例声明的行不匹配绑定实例");
+  });
+
+  it("最近请求缺参数返回空列表而不是报错", async () => {
+    const router = terminalRouter({ journalRows: [{ ts: 1, agentId: "kimi" }] });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/requests", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().requests, []);
+  });
+});
+
+// 前端接线：适配层读注入的 agent 字段、指标/路由/请求按看板口径映射，
+// 最后一标签可关、底栏行列随 resize 联动。映射函数在 vm 里真跑。
+describe("虚拟终端归属前端（adapter + 映射口径）", () => {
+  async function vmFn(name, args, deps = []) {
+    const source = [name, ...deps].map((fnName) => {
+      const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const result = fn(...args);
+    // vm 域里 new 出来的对象原型链与宿域不同，deepEqual 会误判：出口统一 JSON 往返。
+    return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
+  }
+
+  it("terminalBackendSession 把注入的 agent 原样挂进会话模型", async () => {
+    const session = await vmFn("terminalBackendSession", [{
+      id: "t1", label: "新终端", cwd: "D:/dev", shell: "powershell", pid: 8888,
+      agent: { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321" },
+    }]);
+    assert.deepEqual(session.agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321" });
+    assert.equal(session.metrics, null, "指标仍由富化轮询补，不在适配层编造");
+  });
+
+  it("terminalMetricsFromInstance 按看板口径套指标（TTFT 秒 / TPS 一位小数 / tokens 千分位）", async () => {
+    const metrics = await vmFn("terminalMetricsFromInstance", [{
+      activeRequests: 2, lastTtftMs: 860, ttftColor: "green", tps: 42.64, cacheHitRate: 60.9,
+      activeDurationFormatted: "12分10秒", requests: 14,
+      tokens: { prompt: 128460, completion: 31204, cached: 96080 },
+      sparkHistory: { ttft: [0.8], tps: [40], cache: [55] },
+    }], ["terminalMetricNum"]);
+    assert.deepEqual(metrics, {
+      activeRequests: 2, ttft: "0.86", ttftLamp: "green", tps: "42.6", cache: "61",
+      workTime: "12分10秒", requestCount: 14,
+      tokens: "Prompt: 128,460 · Completion: 31,204 · Cached: 96,080",
+      sparkTtft: [0.8], sparkTps: [40], sparkCache: [55],
+    });
+  });
+
+  it("terminalMetricsFromInstance 对空实例行不编造数字", async () => {
+    const metrics = await vmFn("terminalMetricsFromInstance", [{ activeRequests: 0, requests: 0, ttftColor: "gray" }], ["terminalMetricNum"]);
+    assert.equal(metrics.ttft, "—");
+    assert.equal(metrics.tps, "—");
+    assert.equal(metrics.cache, "—");
+    assert.equal(metrics.requestCount, 0);
+  });
+
+  it("terminalRouteForEndpoint 由链配置 + 运行快照给出节点序列与当前跳", async () => {
+    const chains = [{ endpointId: "kimi", enabled: true, chain: [{ node: "a6api-main", model: "kimi-k3" }, { node: "sensenova", model: "kimi-k3" }] }];
+    const rt = { kimi: { current: { node: "sensenova", model: "kimi-k3" }, lamps: ["red", "green"], since: 1 } };
+    const hit = await vmFn("terminalRouteForEndpoint", ["kimi", chains, rt]);
+    assert.deepEqual(hit.route, [
+      { node: "a6api-main", model: "kimi-k3", state: "failed" },
+      { node: "sensenova", model: "kimi-k3" },
+    ]);
+    assert.equal(hit.routeCurrent, 1);
+    const noRuntime = await vmFn("terminalRouteForEndpoint", ["kimi", chains, null]);
+    assert.equal(noRuntime.routeCurrent, 0);
+    assert.equal(noRuntime.route[0].state, undefined);
+    const noChain = await vmFn("terminalRouteForEndpoint", ["codex", chains, rt]);
+    assert.deepEqual(noChain, { route: [], routeCurrent: 0 });
+  });
+
+  it("terminalRequestsFromRows 把 journal 行套成预览稿同形的展示行", async () => {
+    const out = await vmFn("terminalRequestsFromRows", [[
+      { model: "kimi-k3", providerId: "a6api-main", ttftMs: 1820, completion: 2418, ok: true },
+      { model: "m2", providerId: "p2", ok: false },
+    ]]);
+    assert.deepEqual(out, [
+      { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", state: "ok" },
+      { model: "m2", provider: "p2", metric: "—", detail: "请求失败", state: "failed" },
+    ]);
+  });
+
+  it("terminalInstanceRow 在 instances 缺位时回退到聚合端点的 sessions 行", async () => {
+    const agents = [
+      { id: "kimi", instances: [{ id: "kimi-4321" }] },
+      { id: "claude", sessions: [{ id: "claude-9001" }] },
+    ];
+    const bound = await vmFn("terminalInstanceRow", [agents, { endpointId: "kimi", instanceId: "kimi-4321" }]);
+    assert.equal(bound.id, "kimi-4321");
+    const viaSessions = await vmFn("terminalInstanceRow", [agents, { endpointId: "claude", instanceId: "claude-9001" }]);
+    assert.equal(viaSessions.id, "claude-9001");
+    const unbound = await vmFn("terminalInstanceRow", [agents, { endpointId: "kimi", instanceId: null }]);
+    assert.equal(unbound, null, "未绑定实例不出行（codex 流量前状态）");
+  });
+
+  it("接线结构：渲染拆成数据层与结构层、最后一标签可关、底栏尺寸有 id", () => {
+    assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
+    const renderBody = panelJs.match(/function renderTerminalPreviewSession\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(renderBody.includes("renderTerminalSessionData();"), "结构层渲染复用数据层");
+    assert.ok(renderBody.includes("connectTerminalStream(session);"), "SSE 只在结构层重连");
+    assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
+    assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
+    assert.ok(panelJs.includes("remaining.length === 0"), "关完即离开终端页");
+    assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
+    assert.ok(panelHtml.includes('id="terminalFootSize"'), "底栏行列占位可写");
+    assert.ok(panelJs.includes("updateTerminalFootSize(session)"), "resize/SSE 会刷新底栏尺寸");
+  });
+});

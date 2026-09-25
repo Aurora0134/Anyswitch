@@ -1079,3 +1079,53 @@ describe("wire id 统计口径（anthropic/ 前缀不进 journal）", () => {
     assert.equal(lines[0].providerId, "chan-a");
   });
 });
+
+// 终端归属喂给路由（/api/internal/detected-processes）：面板按 shell pid ↔
+// 祖先链 join 的唯一进程面数据源，守卫与 /api/internal/agents 同口径。
+describe("terminal attribution feed endpoint (/api/internal/detected-processes)", () => {
+  function getProcesses(port, token = TOKEN) {
+    return fetch(`http://127.0.0.1:${port}/api/internal/detected-processes`, {
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    });
+  }
+
+  it("rejects callers without the relay token", async () => {
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port, null);
+      assert.equal(res.status, 401);
+      const bad = await getProcesses(port, "wrong-token");
+      assert.equal(bad.status, 401);
+    });
+  });
+
+  it("serves the collector's detected client processes verbatim", async () => {
+    const feed = [
+      { agentId: "codex", pid: 6100, ancestors: [8888, 9000] },
+      { agentId: "kimi", pid: 4321, ancestors: [8888] },
+    ];
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    deps.metricsCollector = { getDetectedClientProcesses: () => feed };
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.processes, feed);
+    });
+  });
+
+  it("serves an empty feed when the collector lacks the surface", async () => {
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.processes, []);
+    });
+  });
+});
