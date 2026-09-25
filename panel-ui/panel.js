@@ -3467,14 +3467,29 @@ async function api(method, path, body) {
     };
   }
 
-  // 路由链：链配置给节点序列（含各跳属性），运行快照给当前跳与不可用节点；
-  // 普通终端无 agent / 端点未配链一律空链（规范：路由区域整块隐藏）。
+  // 「当前确实在自动路由」vs「只配了链」：runtime 对每条启用链都下发条目
+  //（current 缺省为链首、lamps 全灰时把链首强制点亮），所以「有条目」只证明
+  // 配了链。真实走过链的证据只有两样——positions = 本 process 里链机制记过的
+  // 粘性位置（首个请求走完 noteSuccess 就记下），红灯 = 节点已被降级退避
+  //（CHAIN_DEMOTE_AFTER_FAILURES 次连续失败）。一样都没有 = 本次启动没人走
+  // 过这条链：视为「不在自动路由」，隐藏而不是拿配置链冒充态。
+  function terminalAutoRouteLive(rt) {
+    if (!rt) return false;
+    if (Array.isArray(rt.positions) && rt.positions.length > 0) return true;
+    return Array.isArray(rt.lamps) && rt.lamps.includes("red");
+  }
+
+  // 路由链：链配置给节点序列（含各跳属性），运行快照给当前跳与不可用节点。
+  // 显隐收口在这里——端点未配启用链、runtime 缺位、或只有配置没有本次运行的
+  // 路由证据（terminalAutoRouteLive）一律空链，调用方（renderTerminalPreviewRoute）
+  // 按空链整块隐藏；普通终端无 agent 归属在 enrich 处就已给空链。
   function terminalRouteForEndpoint(endpointId, chains, runtimeCache) {
     const entry = (Array.isArray(chains) ? chains : []).find(
       (item) => item && item.endpointId === endpointId && Array.isArray(item.chain) && item.chain.length > 0 && item.enabled !== false,
     );
     if (!entry) return { route: [], routeCurrent: 0 };
     const rt = runtimeCache && typeof runtimeCache === "object" ? runtimeCache[endpointId] : null;
+    if (!terminalAutoRouteLive(rt)) return { route: [], routeCurrent: 0 };
     const route = entry.chain.map((node, index) => ({
       node: node.node,
       model: node.model,
@@ -3548,6 +3563,19 @@ async function api(method, path, body) {
       .catch(() => {});
   }
 
+  // 窗口 resize 的 fit 走防抖：拖动/最大化动画里事件逐帧来，逐跳 fit 会让
+  // xterm 每帧 reflow 并连发 resize 请求；合并到静默期后一次即可。其它调用点
+  //（终端页显示、字号变更）仍直接调 fitTerminalXterm，不被这条入口影响。
+  const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
+  let terminalResizeDebounceTimer = null;
+  function debounceTerminalFit(delayMs = TERMINAL_RESIZE_DEBOUNCE_MS) {
+    if (terminalResizeDebounceTimer !== null) clearTimeout(terminalResizeDebounceTimer);
+    terminalResizeDebounceTimer = setTimeout(() => {
+      terminalResizeDebounceTimer = null;
+      fitTerminalXterm();
+    }, delayMs);
+  }
+
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
@@ -3563,15 +3591,33 @@ async function api(method, path, body) {
       terminalFitAddon = new window.FitAddon.FitAddon();
       terminalXterm.loadAddon(terminalFitAddon);
     }
+    if (window.Unicode11Addon?.Unicode11Addon) {
+      terminalXterm.loadAddon(new window.Unicode11Addon.Unicode11Addon());
+      terminalXterm.unicode.activeVersion = "11";
+    }
     terminalXterm.open(host);
     terminalXterm.onData((data) => {
       const session = terminalSessionFor(activeTerminalPreviewId);
       if (!session?.backend) return;
       api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch(() => {});
     });
-    window.addEventListener("resize", fitTerminalXterm);
+    window.addEventListener("resize", debounceTerminalFit);
     requestAnimationFrame(fitTerminalXterm);
     return terminalXterm;
+  }
+
+  // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
+  // 的连接——包括 SSE 断线后浏览器自动发起的重连——都先发一个 snapshot 帧、
+  // 再把全量缓冲以 data 帧从头回放到当前。所以处理 snapshot 之前必须把屏幕
+  // 清空，否则重连后旧内容与新回放的缓冲叠加成双份。稳态连接只在建连时收一
+  // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
+  // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
+  function absorbTerminalSnapshot(term, session, state) {
+    term.reset();
+    session.backendState = state;
+    session.shell.pid = state.pid || "—";
+    $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
+    updateTerminalFootSize(session);
   }
 
   function connectTerminalStream(session) {
@@ -3586,11 +3632,7 @@ async function api(method, path, body) {
     terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     terminalEventSource.addEventListener("snapshot", (event) => {
       try {
-        const state = JSON.parse(event.data);
-        session.backendState = state;
-        session.shell.pid = state.pid || "—";
-        $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
-        updateTerminalFootSize(session);
+        absorbTerminalSnapshot(term, session, JSON.parse(event.data));
       } catch {}
     });
     terminalEventSource.addEventListener("data", (event) => {
@@ -3634,6 +3676,9 @@ async function api(method, path, body) {
     const route = Array.isArray(session.route) ? session.route : [];
     const section = line.closest(".terminal-route-section");
     section.hidden = route.length === 0;
+    const unavailableCount = route.filter((node) => node.state === "failed").length;
+    const badge = $("terminalRouteBadge");
+    if (badge) badge.hidden = route.length === 0 || unavailableCount === 0;
     if (route.length === 0) {
       line.innerHTML = "";
       viewport.scrollLeft = 0;
@@ -3641,18 +3686,25 @@ async function api(method, path, body) {
       return;
     }
     const currentIndex = Math.max(0, Math.min(session.routeCurrent ?? 0, route.length - 1));
+    // 节点名走看板同款的显示名解析（routeNodeName：号池/渠道 displayName 后备），
+    // 不上原始 id。
     line.innerHTML = route.map((node, index) => `
       <span class="terminal-route-node${index === currentIndex ? " is-current" : ""}${node.state === "failed" ? " is-failed" : ""}">
-        <strong>${escapeHtml(node.node)}</strong>
+        <strong>${escapeHtml(routeNodeName(node.node))}</strong>
         <span>${escapeHtml(node.model)}</span>
       </span>${index < route.length - 1 ? '<span class="terminal-route-arrow" aria-hidden="true">→</span>' : ""}
     `).join("");
+    // 区块只在确实自动路由时可见（terminalRouteForEndpoint 已闸），所以 note
+    // 直接随 runtime 说现状：当前这一跳跑红=说不可用、停在首选节点=正常、
+    // 停在后续跳=说位次（前位全红时把「哪几跳不可用」一并说出来）。
     const leadingUnavailable = route.slice(0, currentIndex).filter((node) => node.state === "failed").length;
-    $("terminalRouteNote").textContent = currentIndex === 0
-      ? "当前请求使用首选渠道"
-      : leadingUnavailable === currentIndex
-        ? `前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳`
-        : `自动路由正使用第 ${currentIndex + 1} 跳`;
+    $("terminalRouteNote").textContent = route[currentIndex].state === "failed"
+      ? "当前这一跳不可用，自动路由会继续向后退避"
+      : currentIndex === 0
+        ? "自动路由正常，当前使用首选节点"
+        : leadingUnavailable === currentIndex
+          ? `前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳`
+          : `自动路由正使用第 ${currentIndex + 1} 跳`;
     const focusSignature = `${activeTerminalPreviewId}:${currentIndex}:${route.map((node) => `${node.node}/${node.model}/${node.state || "ok"}`).join("|")}`;
     const shouldReposition = terminalRouteFocusSignature !== focusSignature;
     terminalRouteFocusSignature = focusSignature;

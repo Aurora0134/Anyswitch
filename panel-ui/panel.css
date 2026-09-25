@@ -1033,14 +1033,14 @@
     display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 74px;
     padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
-  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10px/1.2 var(--font-mono); text-transform: uppercase; }
+  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10.5px/1.2 var(--font-mono); text-transform: uppercase; }
   .terminal-inspector-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .terminal-agent-badge {
-    flex: none; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border);
-    background: var(--surface-sunken); color: var(--text-2); font: 650 9.5px var(--font-mono);
+    flex: none; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-sunken); color: var(--text-2); font: 600 11px var(--font-mono);
   }
   .terminal-agent-badge.is-shell { color: var(--text-3); border-style: dashed; }
-  .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 700; }
+  .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
   .terminal-inspector-toggle svg { transition: transform 160ms var(--ease-out); }
   .terminal-inspector.is-collapsed { width: 48px; }
@@ -1056,50 +1056,50 @@
   .terminal-live-icon { width: 25px; height: 25px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: currentColor; }
   .terminal-live-icon i { width: 8px; height: 8px; display: block; border-radius: 50%; background: var(--surface); }
   .terminal-live-status > div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
-  .terminal-live-status strong { color: currentColor; font-size: 12.5px; }
-  .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 10.5px; overflow-wrap: anywhere; }
-  .terminal-section-head { color: var(--text-3); font-size: 10.5px; }
+  .terminal-live-status strong { color: currentColor; font-size: 13px; font-weight: 650; }
+  .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
+  .terminal-section-head { color: var(--text-3); font-size: 11.5px; }
   /* 右栏监测区：小灰标签 + 数值的直排 2×2，不套卡片盒；折线在格子右侧垂直居中 */
-  .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  .terminal-metric { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+  .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 12px; }
+  .terminal-metric { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
   .terminal-metric-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .terminal-metric-label { color: var(--text-3); font-size: 10.5px; }
-  .terminal-metric-spark { flex: none; width: 52px; height: 20px; }
-  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 700 14px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric-label { color: var(--text-3); font-size: 11.5px; }
+  .terminal-metric-spark { flex: none; width: 64px; height: 24px; }
+  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 800 18px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-metric strong .lamp { align-self: center; }
-  .terminal-metric-unit { color: var(--text-3); font-size: 10px; font-weight: 600; }
+  .terminal-metric-unit { color: var(--text-3); font-size: 11px; }
   .terminal-metrics-section[hidden] { display: none; }
   .terminal-inspector-section { padding: 15px 0; border-bottom: 1px solid var(--divider); }
-  .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 10px; font-weight: 650; }
-  .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10px var(--font-mono); }
+  .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 10px; font-weight: 600; }
+  .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10.5px var(--font-mono); }
   .terminal-request-list { display: flex; flex-direction: column; gap: 7px; }
   .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
   .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
   .terminal-request-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-  .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font: 10.5px var(--font-mono); }
-  .terminal-request-main span { color: var(--text-3); font-size: 10px; }
-  .terminal-request-metric { color: var(--text-3); font: 10px var(--font-mono); white-space: nowrap; }
+  .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 11.5px var(--font-mono); }
+  .terminal-request-main span { color: var(--text-3); font-size: 11px; }
+  .terminal-request-metric { color: var(--text-3); font: 11px var(--font-mono); white-space: nowrap; }
   .terminal-route-viewport {
     overflow-x: auto; overflow-y: hidden; padding: 2px 1px 8px;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  .terminal-route-line { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 7px; width: max-content; min-width: 100%; font: 10px var(--font-mono); }
+  .terminal-route-line { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 7px; width: max-content; min-width: 100%; font: 13px var(--font-mono); }
   .terminal-route-node {
-    flex: none; width: 104px; max-width: 104px; min-height: 40px;
+    flex: none; min-width: 0; max-width: 160px; min-height: 40px;
     display: flex; flex-direction: column; justify-content: center; gap: 2px;
-    padding: 5px 7px; border-radius: 5px; color: var(--text-2);
+    padding: 5px 7px; border-radius: 5px; color: var(--text-2); overflow: hidden;
     background: var(--surface-sunken); border: 1px solid var(--border);
   }
   .terminal-route-node strong, .terminal-route-node span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .terminal-route-node strong { font-size: 10px; font-weight: 650; }
-  .terminal-route-node span { color: var(--text-3); font-size: 9.5px; }
+  .terminal-route-node strong { font-size: 11px; font-weight: 650; }
+  .terminal-route-node span { color: var(--text-3); font-size: 10.5px; }
   .terminal-route-node.is-current { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); box-shadow: 0 0 0 1px var(--ok-border); }
   .terminal-route-node.is-current span { color: color-mix(in srgb, var(--ok) 80%, var(--text-3)); }
   .terminal-route-node.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
   .terminal-route-node.is-failed span { color: color-mix(in srgb, var(--danger) 78%, var(--text-3)); }
-  .terminal-route-arrow { display: inline-flex; flex: none; align-items: center; color: var(--text-4); }
-  .terminal-route-note { display: block; margin-top: 8px; color: var(--text-3); font-size: 10px; }
+  .terminal-route-arrow { display: inline-flex; flex: none; align-items: center; color: var(--text-3); font-size: 12px; font-weight: 600; }
+  .terminal-route-note { display: block; margin-top: 8px; color: var(--text-3); font-size: 11px; }
   @media (max-width: 900px) {
     .terminal-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
     .terminal-head { padding: 0 16px; }
