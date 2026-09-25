@@ -3580,6 +3580,7 @@ async function api(method, path, body) {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
     terminalXterm = new window.Terminal({
+      allowProposedApi: true,
       convertEol: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',

@@ -2505,6 +2505,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelHtml.includes('/panel/assets/xterm.js') && panelHtml.includes('/panel/assets/xterm-fit.js'), "终端页加载 xterm 渲染运行时");
     assert.ok(panelHtml.includes('/panel/assets/xterm-unicode11.js'), "终端页加载 unicode11 宽度表附加组件");
     assert.ok(panelJs.includes('unicode.activeVersion = "11"'), "unicode11 宽度表激活（emoji 按 2 格记账）");
+    assert.ok(panelJs.includes("allowProposedApi: true"), "xterm 构造开启 allowProposedApi（unicode 附件属提案 API，不开则 loadAddon 抛错）");
     assert.ok(panelMjs.includes("/panel/assets/xterm-unicode11.js") && panelMjs.includes("addon-unicode11"), "panel-host 路由服务 unicode11 资产");
     assert.ok(panelJs.includes('fontFamily: \'ui-monospace, "Cascadia Mono"'), "终端使用稳定的等宽字体栈测量尺寸");
     assert.ok(panelJs.includes("function scheduleTerminalFit()"), "终端显示后重新调度一次尺寸适配");
