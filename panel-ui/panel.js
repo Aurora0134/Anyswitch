@@ -2474,16 +2474,18 @@ async function api(method, path, body) {
         }
         if (loading && remote) line.appendChild(element("span", "about-meta", "查询中…"));
         // 动作位：本行任务在跑 > 可更新/可安装；其他行在跑不影响本行（锁按客户端分）。
+        // 「更新中…」只落在本来有动作位的行：客户端锁防的是同一个 npm 包并发安装，
+        // 不代表卡片里每行安装项都被动到（codex 桌面行不经面板更新，不该陪跑显示更新中）。
         if (updatableClients.has(client.id)) {
           let intent = null;
+          const act = installationAction(client, installation);
           const ownRun = lifecycleRuns.get(client.id);
-          // 批量更新按行串行推进：正在跑的那行显「更新中…」，排队等着的行先禁点，
-          // 免得出两个任务同时更新同一行。
-          if (ownRun) {
-            intent = { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true };
-          } else {
-            const act = installationAction(client, installation);
-            if (act) intent = { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
+          if (act) {
+            // 批量更新按行串行推进：正在跑的那行显「更新中…」，排队等着的行先禁点，
+            // 免得出两个任务同时更新同一行。
+            intent = ownRun
+              ? { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true }
+              : { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
           }
           if (intent) {
             const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
