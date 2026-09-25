@@ -1965,29 +1965,29 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="terminal-inspector-section terminal-metrics-section" id="terminalMetricsSection">
               <div class="terminal-metric-grid">
                 <div class="terminal-metric">
-                  <div class="terminal-metric-main">
-                    <span class="terminal-metric-label">首字响应时间</span>
+                  <span class="terminal-metric-label">首字响应时间</span>
+                  <div class="terminal-metric-row">
                     <strong><i class="lamp lamp-gray" id="terminalTtftLamp"></i><span id="terminalTtftVal">-</span><span class="terminal-metric-unit">s</span></strong>
+                    <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTtft"></span>
                   </div>
-                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTtft"></span>
                 </div>
                 <div class="terminal-metric">
-                  <div class="terminal-metric-main">
-                    <span class="terminal-metric-label">生成速度</span>
+                  <span class="terminal-metric-label">生成速度</span>
+                  <div class="terminal-metric-row">
                     <strong><span id="terminalTpsVal">-</span><span class="terminal-metric-unit">tok/s</span></strong>
+                    <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTps"></span>
                   </div>
-                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTps"></span>
                 </div>
                 <div class="terminal-metric">
-                  <div class="terminal-metric-main">
-                    <span class="terminal-metric-label">缓存命中率</span>
+                  <span class="terminal-metric-label">缓存命中率</span>
+                  <div class="terminal-metric-row">
                     <strong><span id="terminalCacheVal">-</span><span class="terminal-metric-unit">%</span></strong>
+                    <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkCache"></span>
                   </div>
-                  <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkCache"></span>
                 </div>
                 <div class="terminal-metric">
-                  <div class="terminal-metric-main">
-                    <span class="terminal-metric-label">已工作时间</span>
+                  <span class="terminal-metric-label">已工作时间</span>
+                  <div class="terminal-metric-row">
                     <strong><span id="terminalWorkTimeVal">-</span></strong>
                   </div>
                 </div>
