@@ -377,6 +377,31 @@ export function createOpenAIRelayServer(deps) {
       return;
     }
 
+    // Internal loopback terminal-attribution feed for the standalone control
+    // panel (47820): live agent client pids with their ancestor chains, so the
+    // panel can attribute a virtual-terminal session (whose shell pid rides
+    // the terminal-host snapshot) to the agent running inside it. Same guard
+    // rail as /api/internal/agents: loopback + pi-relay-token.
+    if (path === "/api/internal/detected-processes" && req.method === "GET") {
+      const authHeader = req.headers["authorization"];
+      const token = authHeader?.replace(/^Bearer\s+/i, "");
+      if (!token || token !== deps.token) {
+        sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
+        return;
+      }
+      if (!deps.metricsCollector?.getDetectedClientProcesses) {
+        sendJson(res, 200, { ok: true, processes: [] });
+        return;
+      }
+      try {
+        const processes = deps.metricsCollector.getDetectedClientProcesses();
+        sendJson(res, 200, { ok: true, processes });
+      } catch (err) {
+        sendJson(res, 500, openAIError("api_error", `failed to get detected client processes: ${err.message}`));
+      }
+      return;
+    }
+
     if (path === "/api/internal/model-stability" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");

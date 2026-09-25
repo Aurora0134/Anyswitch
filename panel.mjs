@@ -31,7 +31,8 @@ import { createDataBundleService } from "./data-bundle.mjs";
 import { createPromptsService } from "./agent-prompts.mjs";
 import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
-import { createUsageJournal } from "./usage-journal.mjs";
+import { createUsageJournal, dayKey } from "./usage-journal.mjs";
+import { attributeTerminalSessions, filterTerminalRequestRows } from "./terminal-attribution.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
@@ -303,6 +304,51 @@ async function defaultFetchRelayChainRuntime(root, token) {
   }
 }
 
+// Pull-mode terminal attribution: the relay's live agent client processes,
+// each with its ancestor chain (47821/api/internal/detected-processes), for
+// joining terminal-host sessions by shell pid. Returns the processes array,
+// or null on failure — the caller degrades to unannotated sessions rather
+// than erroring the whole session list.
+async function defaultFetchRelayDetectedProcesses(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/api/internal/detected-processes", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.processes)) return data.processes;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Direct terminal-host session-list fetch (47823). Injectable so the router
+// is unit-testable without a live terminal-host; the real one resolves the
+// same pi-relay-token the proxy uses.
+async function defaultFetchTerminalSessionsList(root) {
+  let token = null;
+  try {
+    token = loadOrGenerateToken(root);
+  } catch {
+    return null;
+  }
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.sessions)) return data.sessions;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 // Bridge the relay's logger (a separate process on 47821) into this panel
 // process's log bus. The 实时输出 window subscribes to the panel-host's own
 // logger, so after the panel/relay split relay-side entries (keep-alive
@@ -438,6 +484,8 @@ export function createPanelRouter({
    fetchRelayAgents = defaultFetchRelayAgents,
    fetchRelayStability = defaultFetchRelayStability,
    fetchRelayChainRuntime = defaultFetchRelayChainRuntime,
+   fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
+   fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
   // Skills tab service (agent-skills.mjs). Injectable so the router is
   // unit-testable without real home directories, junctions, or PowerShell.
   // `null` lazily builds the real service on first skills request.
@@ -538,6 +586,74 @@ export function createPanelRouter({
       if (!res.headersSent) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable", detail: error.message });
       res.end();
     }
+  }
+
+  // ---- Terminal session attribution (virtual terminal) ----
+  // The session list stopped being a blind passthrough the moment sessions
+  // had to carry owner info: the list joins terminal-host snapshots (shell
+  // pid) with the relay's detected client processes (ancestor chains) into a
+  // per-session `agent` field. Relay outage degrades to plain shell sessions
+  // — never to a failed list.
+  const PULLED_DETECTED_STALE_MAX_MS = 5000;
+  let lastPulledDetected = null; // { at, processes }
+
+  async function pulledDetectedProcesses(token) {
+    const pulled = await fetchRelayDetectedProcesses(relayRoot, token);
+    if (pulled) {
+      lastPulledDetected = { at: Date.now(), processes: pulled };
+      return pulled;
+    }
+    if (lastPulledDetected && Date.now() - lastPulledDetected.at <= PULLED_DETECTED_STALE_MAX_MS) {
+      return lastPulledDetected.processes;
+    }
+    // Last resort, mirroring handleAgents' local-collector fallback: this
+    // process's own collector scans processes too (it owns no traffic, but
+    // the lineage table is traffic-independent).
+    if (metricsCollector?.getDetectedClientProcesses) {
+      try { return metricsCollector.getDetectedClientProcesses(); } catch { return null; }
+    }
+    return null;
+  }
+
+  // Fresh agents for the attribution join: live pull, then the same bounded
+  // staleness window handleAgents serves, else null (names and instance
+  // binding fall back inside attributeTerminalSessions).
+  async function pulledAgentsForJoin(token) {
+    const pulled = await fetchRelayAgents(relayRoot, token);
+    if (pulled) {
+      lastPulledAgents = { at: Date.now(), agents: pulled };
+      return pulled;
+    }
+    if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+      return lastPulledAgents.agents;
+    }
+    return null;
+  }
+
+  async function handleTerminalSessionsList(res) {
+    const list = await fetchTerminalSessionsList(relayRoot);
+    if (list === null) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    // Output buffers belong to the SSE stream, not the polling list.
+    const sessions = list.map(({ buffer, ...rest }) => rest);
+    const detected = await pulledDetectedProcesses(terminalPullToken());
+    if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
+    const agents = await pulledAgentsForJoin(terminalPullToken());
+    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents) });
+  }
+
+  // Recent requests for one attributed terminal instance, read off today's
+  // usage journal (the only durable per-request ledger). filterTerminalRequest-
+  // Rows returns the matching tail newest-first; display shaping stays with
+  // the frontend.
+  function handleTerminalRequests(url, res) {
+    const agentId = url.searchParams.get("agentId") || "";
+    const instanceId = url.searchParams.get("instanceId") || "";
+    let rows = [];
+    try {
+      const today = dayKey(Date.now());
+      rows = usageJournalLazy().read("requests", { fromDay: today, toDay: today });
+    } catch { rows = []; }
+    sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId }) });
   }
 
   // 导入是整份覆盖 settings.json，走不到设置路由那条副作用链上，而
@@ -1453,7 +1569,7 @@ export function createPanelRouter({
     if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
     if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
     if (path === "/panel/api/session/report" && method === "POST") return handleSessionReport(req, res);
-    if (path === "/panel/api/terminal/sessions" && method === "GET") return proxyTerminal(req, res, "/terminal/sessions");
+    if (path === "/panel/api/terminal/sessions" && method === "GET") return handleTerminalSessionsList(res);
     if (path === "/panel/api/terminal/sessions" && method === "POST") {
       try {
         return proxyTerminal(req, res, "/terminal/sessions", "POST", await readJsonBody(req));
@@ -1473,6 +1589,7 @@ export function createPanelRouter({
         }
       }
     }
+    if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
     if (path === "/panel/api/logs" && method === "GET") return handleLogsSSE(res, req);
     if (path === "/panel/api/logs/ingest" && method === "POST") return handleLogIngest(req, res);
     if (path === "/panel/api/logs/clear" && method === "POST") return handleLogClear(res);

@@ -4821,3 +4821,53 @@ describe("metrics snapshot persistence across collector recreations", () => {
     }
   });
 });
+
+// 虚拟终端归属喂给（getDetectedClientProcesses）：shell 行只进谱系不进桶，
+// 检测面按引擎子集出活进程并带祖先链（panel 按 shell pid join）。
+describe("terminal attribution feed (getDetectedClientProcesses)", () => {
+  // PowerShell 探测行格式 <pid>,<ppid>,<name>,<cmdline>：两个会话壳
+  //（powershell.exe / pwsh.exe）、codex 引擎 + ChatGPT 桌面壳、kimi node 进程，
+  // 其中 codex 引擎与 kimi 进程都挂在 powershell 8888 之下。
+  const PS_TERMINAL_ATTRIBUTION_SCAN = [
+    String.raw`6100,8888,codex.exe,C:\Codex\bin\1\codex.exe app-server`,
+    String.raw`6200,7000,ChatGPT.exe,C:\ChatGPT\ChatGPT.exe`,
+    String.raw`4321,8888,node.exe,C:\app\node_modules\@moonshot-ai\kimi-code\dist\main.mjs`,
+    String.raw`8888,9000,powershell.exe,C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoLogo -NoProfile`,
+    String.raw`8890,9001,pwsh.exe,C:\Tools\pwsh\pwsh.exe -NoLogo`,
+  ].join("\r\n") + "\r\n";
+  const terminalAttributionExec = (cmd, opts, cb) => cb(null, PS_TERMINAL_ATTRIBUTION_SCAN);
+
+  it("shell rows feed the lineage table only, never a counting bucket or pid set", async () => {
+    const collector = testCollector({ execFn: terminalAttributionExec, nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.ppidByPid.get(8888), 9000, "powershell.exe 进谱系表");
+    assert.equal(procs.ppidByPid.get(8890), 9001, "pwsh.exe 同样只进谱系");
+    assert.equal(procs.kimi, 1);
+    assert.equal(procs.codex, 2, "codex.exe 与 ChatGPT 主进程照常计数");
+    for (const key of ["zcode", "claude", "opencode", "dsh", "pi", "qoder", "grok"]) {
+      assert.equal(procs[key], 0, `${key} 不受 shell 行影响`);
+    }
+    assert.equal(procs.kimiPids.has(8888), false);
+    assert.equal(procs.kimiEnginePids.has(8888), false);
+    assert.equal(procs.codexPids.has(8890), false);
+    assert.equal(procs.codexEnginePids.has(8888), false);
+    assert.equal(procs.ppidByPid.has(6100), true, "引擎行照常进谱系");
+  });
+
+  it("feed lists engine clients with ancestor chains, skipping non-engine family members", async () => {
+    const collector = testCollector({ execFn: terminalAttributionExec, nowFn: () => 10000, kimiRegistryLookup: async () => new Map() });
+    await collector.scanProcesses();
+    const feed = collector.getDetectedClientProcesses();
+    assert.equal(feed.length, 2, "ChatGPT 桌面壳不是引擎，不进检测面");
+    const codexEntry = feed.find((p) => p.agentId === "codex");
+    assert.deepEqual(codexEntry, { agentId: "codex", pid: 6100, ancestors: [8888, 9000] });
+    const kimiEntry = feed.find((p) => p.agentId === "kimi");
+    assert.deepEqual(kimiEntry, { agentId: "kimi", pid: 4321, ancestors: [8888, 9000] });
+    assert.equal(feed.some((p) => p.pid === 6200), false);
+  });
+
+  it("before any scan lands the feed is empty (no phantom clients)", () => {
+    const collector = testCollector({ execFn: () => {}, nowFn: () => 10000 });
+    assert.deepEqual(collector.getDetectedClientProcesses(), []);
+  });
+});
