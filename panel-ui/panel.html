@@ -1914,6 +1914,11 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <div class="terminal-session-actions">
               <span class="terminal-shell-label" id="terminalShellLabel">PowerShell</span>
+              <span class="terminal-font-size">
+                <button type="button" class="terminal-quiet-btn terminal-font-btn" title="缩小终端字号" aria-label="缩小终端字号" id="terminalFontDecBtn">−</button>
+                <span class="terminal-font-value" id="terminalFontSizeValue">13</span>
+                <button type="button" class="terminal-quiet-btn terminal-font-btn" title="放大终端字号" aria-label="放大终端字号" id="terminalFontIncBtn">+</button>
+              </span>
               <button type="button" class="terminal-quiet-btn" title="清空当前屏幕" aria-label="清空当前屏幕" id="terminalClearBtn">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v5M14 11v5"/></svg>
               </button>
@@ -1924,10 +1929,12 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="terminal-xterm-host" id="terminalXtermHost"></div>
           </div>
           <div class="terminal-footbar">
-            <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
-            <span id="terminalFootPid">PID 23140</span>
-            <span>UTF-8</span>
-            <span id="terminalFootSize">120 × 34</span>
+            <span class="terminal-foot-status">
+              <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
+              <span id="terminalFootPid">PID 23140</span>
+              <span>UTF-8</span>
+              <span id="terminalFootSize">120 × 34</span>
+            </span>
             <span class="terminal-foot-spacer"></span>
             <span class="terminal-foot-stats" id="terminalFootStats">
               <span class="terminal-foot-requests" id="terminalFootRequests">14 次请求</span>

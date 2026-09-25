@@ -2540,6 +2540,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelJs.includes("metricsSection.hidden = !metrics"), "普通终端无监测数据时整块隐藏");
     assert.ok(panelJs.includes('$("terminalFootStats").hidden = !metrics'), "普通终端无底栏统计");
     assert.ok(/\.terminal-footbar \{[^}]*font: 11px var\(--font-mono\)/.test(panelCss), "底栏字号提到 11px 保证可见");
+    assert.ok(panelCss.includes(".terminal-foot-status > span") && footbar.includes('class="terminal-foot-status"'), "底栏状态区胶囊化提升存在感");
     assert.ok(panelCss.includes(".terminal-foot-stats[hidden] { display: none; }"), "底栏统计隐藏显式兜底");
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
@@ -4889,5 +4890,129 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
     assert.ok(panelHtml.includes('id="terminalFootSize"'), "底栏行列占位可写");
     assert.ok(panelJs.includes("updateTerminalFootSize(session)"), "resize/SSE 会刷新底栏尺寸");
+  });
+});
+
+
+// 终端字号调节：全局单一字号，10–24px 钳制，localStorage 记忆，
+// 快捷键 Ctrl± 与 Ctrl+滚轮（仅在终端页生效）。纯函数在 vm 里真跑，
+// 事件路径在桩环境里真跑（同 restoreView 先例）。
+describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
+  async function vmFn(name, args, deps = []) {
+    const source = [name, ...deps].map((fnName) => {
+      const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const result = fn(...args);
+    return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
+  }
+
+  // applyTerminalFontSize / nudgeTerminalFontSize / restoreTerminalFontSize 依赖
+  // 模块态（terminalFontSize / terminalXterm / $ / fitTerminalXterm / localStorage），
+  // 按文件先例抽出函数体放进桩环境真跑。
+  function fontSizeSandbox(store = {}, withXterm = true) {
+    const bodies = ["clampTerminalFontSize", "terminalFontSizeFromStored",
+      "applyTerminalFontSize", "nudgeTerminalFontSize", "restoreTerminalFontSize"]
+      .map((fnName) => {
+        const src = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${fnName} found in panel.js`);
+        return src;
+      }).join("\n");
+    const state = { readout: { textContent: "13" }, fits: [], xterm: withXterm ? { options: { fontSize: 13 } } : null };
+    const api = new Function("store", "state", `
+      let terminalFontSize = 13;
+      let terminalXterm = state.xterm;
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+      };
+      const $ = (id) => (id === "terminalFontSizeValue" ? state.readout : null);
+      function fitTerminalXterm() { state.fits.push(terminalXterm.options.fontSize); }
+      ${bodies}
+      return {
+        nudge: nudgeTerminalFontSize,
+        restore: restoreTerminalFontSize,
+        size: () => terminalFontSize,
+      };
+    `)(store, state);
+    return { api, state, store };
+  }
+
+  it("clampTerminalFontSize 钳制边界、非数字回退 13", async () => {
+    assert.equal(await vmFn("clampTerminalFontSize", [9]), 10);
+    assert.equal(await vmFn("clampTerminalFontSize", [25]), 24);
+    assert.equal(await vmFn("clampTerminalFontSize", [13]), 13);
+    assert.equal(await vmFn("clampTerminalFontSize", ["abc"]), 13);
+    assert.equal(await vmFn("clampTerminalFontSize", [undefined]), 13);
+  });
+
+  it("terminalFontSizeFromStored 非法值（非数字 / 越界）回退 13", async () => {
+    assert.equal(await vmFn("terminalFontSizeFromStored", ["17"]), 17);
+    assert.equal(await vmFn("terminalFontSizeFromStored", ["9"]), 13, "越界（偏小）回退");
+    assert.equal(await vmFn("terminalFontSizeFromStored", ["25"]), 13, "越界（偏大）回退");
+    assert.equal(await vmFn("terminalFontSizeFromStored", ["abc"]), 13, "非数字回退");
+    assert.equal(await vmFn("terminalFontSizeFromStored", [""]), 13);
+  });
+
+  it("± 事件改字号：读数、xterm、localStorage 同步，越界处钳住", () => {
+    const { api, state, store } = fontSizeSandbox();
+    api.nudge(1);
+    assert.equal(api.size(), 14);
+    assert.equal(state.readout.textContent, "14", "读数同步");
+    assert.equal(state.xterm.options.fontSize, 14, "已有 xterm 立即生效");
+    assert.equal(store["panel-terminal-font-size"], "14", "每次改动写 localStorage");
+    assert.deepEqual(state.fits, [14], "改动后重新 fit（底栏行列联动入口）");
+    api.nudge(-1);
+    api.nudge(-1);
+    assert.equal(api.size(), 12);
+    assert.equal(store["panel-terminal-font-size"], "12");
+    for (let i = 0; i < 20; i++) api.nudge(-1);
+    assert.equal(api.size(), 10, "下限钳在 10");
+    for (let i = 0; i < 40; i++) api.nudge(1);
+    assert.equal(api.size(), 24, "上限钳在 24");
+  });
+
+  it("restoreTerminalFontSize 读取记忆值应用，非法存储回退 13 且不回写", () => {
+    const good = fontSizeSandbox({ "panel-terminal-font-size": "17" }, false);
+    good.api.restore();
+    assert.equal(good.api.size(), 17);
+    assert.equal(good.state.readout.textContent, "17");
+    const junk = fontSizeSandbox({ "panel-terminal-font-size": "abc" }, false);
+    junk.api.restore();
+    assert.equal(junk.api.size(), 13, "非数字回退 13");
+    assert.equal(junk.store["panel-terminal-font-size"], "abc", "恢复路径不回写存储");
+    const outOfRange = fontSizeSandbox({ "panel-terminal-font-size": "99" }, false);
+    outOfRange.api.restore();
+    assert.equal(outOfRange.api.size(), 13, "越界回退 13");
+    const empty = fontSizeSandbox({}, false);
+    empty.api.restore();
+    assert.equal(empty.api.size(), 13, "无存储默认 13");
+  });
+
+  it("isTerminalFontZoomKey 只认 Ctrl±（含小键盘）", async () => {
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, key: "=" }]), 1);
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, key: "+" }]), 1);
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, code: "NumpadAdd" }]), 1);
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, key: "-" }]), -1);
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, code: "NumpadSubtract" }]), -1);
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ key: "=" }]), 0, "无 Ctrl 不触发");
+    assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, key: "0" }]), 0);
+  });
+
+  it("接线结构：按钮组落在清空按钮左侧、xterm 初始字号取记忆值、快捷键只在终端页生效", () => {
+    const actions = panelHtml.slice(panelHtml.indexOf('class="terminal-session-actions"'), panelHtml.indexOf('id="terminalClearBtn"'));
+    assert.ok(actions.includes('id="terminalFontDecBtn"'), "− 按钮在清空按钮左侧");
+    assert.ok(actions.includes('id="terminalFontSizeValue"'), "字号读数在清空按钮左侧");
+    assert.ok(actions.includes('id="terminalFontIncBtn"'), "+ 按钮在清空按钮左侧");
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure?.includes("fontSize: terminalFontSize"), "新建 xterm 实例使用记住的字号");
+    const apply = panelJs.match(/function applyTerminalFontSize\(size[\s\S]*?\n  \}/)?.[0];
+    assert.ok(apply?.includes("fitTerminalXterm()"), "字号变更后重新 fit，底栏行列随 resize 联动");
+    assert.ok(panelJs.includes('if (currentView !== "terminal") return;'), "快捷键路径只在终端页激活态生效");
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init?.includes("restoreTerminalFontSize()"), "终端页初始化即恢复记忆字号");
+    assert.ok(panelJs.includes('localStorage.setItem("panel-terminal-font-size"'), "持久化键沿用 panel- 前缀");
   });
 });
