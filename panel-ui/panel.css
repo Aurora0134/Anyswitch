@@ -1049,30 +1049,30 @@
   .terminal-inspector.is-collapsed .terminal-inspector-toggle svg { transform: rotate(180deg); }
   .terminal-inspector-body { overflow-y: auto; padding: 14px 16px 20px; }
   .terminal-live-status {
-    display: flex; align-items: center; gap: 10px; padding: 11px 12px; border: 1px solid var(--ok-border);
+    display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--ok-border);
     border-radius: var(--radius-md, 8px); background: var(--ok-soft); color: var(--ok);
   }
   .terminal-live-status.is-idle { border-color: var(--border); background: var(--surface-sunken); color: var(--text-2); }
-  .terminal-live-icon { width: 25px; height: 25px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: currentColor; }
+  .terminal-live-icon { width: 20px; height: 20px; flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: currentColor; }
   .terminal-live-icon i { width: 8px; height: 8px; display: block; border-radius: 50%; background: var(--surface); }
   .terminal-live-status > div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
   .terminal-live-status strong { color: currentColor; font-size: 13px; font-weight: 650; }
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
   .terminal-section-head { color: var(--text-3); font-size: 11.5px; }
-  /* 右栏监测区：小灰标签 + 数值的直排 2×2，不套卡片盒；折线在格子右侧垂直居中 */
-  .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 12px; }
-  .terminal-metric { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
-  .terminal-metric-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；折线与数值同行、贴右垂直居中 */
+  .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
+  .terminal-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+  .terminal-metric-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
   .terminal-metric-label { color: var(--text-3); font-size: 11.5px; }
-  .terminal-metric-spark { flex: none; width: 64px; height: 24px; }
-  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 800 18px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric-spark { flex: none; width: 52px; height: 20px; }
+  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 700 16px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-metric strong .lamp { align-self: center; }
-  .terminal-metric-unit { color: var(--text-3); font-size: 11px; }
+  .terminal-metric-unit { color: var(--text-3); font-size: 10.5px; }
   .terminal-metrics-section[hidden] { display: none; }
-  .terminal-inspector-section { padding: 15px 0; border-bottom: 1px solid var(--divider); }
-  .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 10px; font-weight: 600; }
+  .terminal-inspector-section { padding: 12px 0; border-bottom: 1px solid var(--divider); }
+  .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 8px; font-weight: 600; }
   .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10.5px var(--font-mono); }
-  .terminal-request-list { display: flex; flex-direction: column; gap: 7px; }
+  .terminal-request-list { display: flex; flex-direction: column; gap: 6px; }
   .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
   .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
