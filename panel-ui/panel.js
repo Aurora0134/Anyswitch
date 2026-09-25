@@ -3360,6 +3360,47 @@ async function api(method, path, body) {
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
   let terminalPollTimer = null;
   let terminalPollInFlight = false;
+  let terminalFontSize = 13;
+
+  function clampTerminalFontSize(value) {
+    const size = Number.parseInt(value, 10);
+    if (!Number.isFinite(size)) return 13;
+    return Math.min(24, Math.max(10, size));
+  }
+
+  function terminalFontSizeFromStored(raw) {
+    const size = Number.parseInt(raw, 10);
+    if (!Number.isFinite(size) || size < 10 || size > 24) return 13;
+    return size;
+  }
+
+  function applyTerminalFontSize(size, { persist = true } = {}) {
+    terminalFontSize = clampTerminalFontSize(size);
+    const readout = $("terminalFontSizeValue");
+    if (readout) readout.textContent = String(terminalFontSize);
+    if (terminalXterm) {
+      terminalXterm.options.fontSize = terminalFontSize;
+      fitTerminalXterm();
+    }
+    if (persist) try { localStorage.setItem("panel-terminal-font-size", String(terminalFontSize)); } catch {}
+  }
+
+  function nudgeTerminalFontSize(delta) {
+    applyTerminalFontSize(terminalFontSize + delta);
+  }
+
+  function restoreTerminalFontSize() {
+    let raw = null;
+    try { raw = localStorage.getItem("panel-terminal-font-size"); } catch {}
+    applyTerminalFontSize(raw === null ? 13 : terminalFontSizeFromStored(raw), { persist: false });
+  }
+
+  function isTerminalFontZoomKey(event) {
+    if (!event.ctrlKey) return 0;
+    if (event.key === "+" || event.key === "=" || event.code === "NumpadAdd") return 1;
+    if (event.key === "-" || event.code === "NumpadSubtract") return -1;
+    return 0;
+  }
 
   function terminalSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
@@ -3514,7 +3555,7 @@ async function api(method, path, body) {
       convertEol: true,
       cursorBlink: true,
       fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',
-      fontSize: 13,
+      fontSize: terminalFontSize,
       scrollback: 5000,
       theme: { background: "#0b1220", foreground: "#d5e2f4", cursor: "#dbeafe", selectionBackground: "#29486d" },
     });
@@ -3737,6 +3778,7 @@ async function api(method, path, body) {
   function initTerminalPreview() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
+    restoreTerminalFontSize();
     renderTerminalPreviewSession();
     fetchTerminalSessions().then(() => {
       renderTerminalPreviewSession();
@@ -3795,6 +3837,20 @@ async function api(method, path, body) {
       terminalXterm?.clear();
       terminalXterm?.focus();
     };
+    $("terminalFontDecBtn").onclick = () => nudgeTerminalFontSize(-1);
+    $("terminalFontIncBtn").onclick = () => nudgeTerminalFontSize(1);
+    $("terminalScreen").addEventListener("wheel", (event) => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      nudgeTerminalFontSize(event.deltaY < 0 ? 1 : -1);
+    }, { passive: false });
+    document.addEventListener("keydown", (event) => {
+      if (currentView !== "terminal") return;
+      const delta = isTerminalFontZoomKey(event);
+      if (!delta) return;
+      event.preventDefault();
+      nudgeTerminalFontSize(delta);
+    });
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
         api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 })
