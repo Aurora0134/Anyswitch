@@ -24,23 +24,32 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 - **Multi-BaseURL failover** — per-provider `fallbackURLs` with a 180s generation budget per attempt, exponential backoff, and real upstream 5xx pass-through.
 - **Web control panel** — a standalone, always-available panel on `127.0.0.1:47820` for managing providers, sealing keys, monitoring, and usage statistics.
 - **Client launchers** — per-client launchers inject the relay endpoint and auth token into each supported coding agent listed below.
-- **Zero dependencies** — plain Node.js ESM, no `npm install` required.
+- **No dependencies for the relay and panel** — plain Node.js ESM; the relay, panel and launchers run straight from a clone. The experimental virtual terminal is the one exception and needs its packages installed once (see Prerequisites).
+- **Virtual terminal** — a local terminal page inside the panel for running CLI agents, with the same routing and telemetry the dashboard shows.
 
 ### Prerequisites
 
 - Windows (the credential store relies on Windows DPAPI)
 - **Node.js 24 LTS recommended.** Required API range: `>=22.15.0 <23 || >=23.8.0`. Session reading uses Node's built-in SQLite and zstd APIs; the range states the API minimum, not that every matching Node version has been tested.
-- No dependencies — nothing to install via npm
+- Nothing to install for the relay and panel. For the experimental virtual terminal, run `npm install` once in the install directory — it pulls one terminal process binding plus a terminal renderer and two add-ons. Without it everything else still runs; only the virtual terminal page fails to open.
 
 ### Installation
 
-Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0` is the first stable release, preceded by the `v0.5.0-preview` prerelease; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.1`, clone into a new directory:
+Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0` is the first stable release, preceded by the `v0.5.0-preview` prerelease; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.2`, clone into a new directory:
 
 ```bat
-git clone --branch v0.5.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 The conventional location is `%LOCALAPPDATA%\Anyswitch\app`; another location works too. For a first installation from a source archive, extract into a new `app` directory. Do not extract over an existing installation.
+
+To use the experimental virtual terminal, install its packages once from the repository directory:
+
+```bat
+npm install
+```
+
+The relay, panel and launchers need nothing installed; skipping this step only leaves the virtual terminal page unable to open.
 
 `panel-app.vbs` is the desktop entry point: it locates `panel-launcher.mjs` relative to itself, so it works from any clone location. It starts the panel host and opens the panel in your browser. Point a desktop shortcut at it for one-click access. Manual fallback entry: `node panel-launcher.mjs` (or `node panel-host.mjs`) from the repo directory.
 
@@ -61,12 +70,14 @@ For an existing Git clone, first schedule a break in active sessions and inspect
 git status --short
 ```
 
-If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.1`:
+If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.2`:
 
 ```bat
-git fetch --no-tags origin tag v0.5.1
-git switch --detach v0.5.1
+git fetch --no-tags origin tag v0.5.2
+git switch --detach v0.5.2
 ```
+
+Then run `npm install` once in the repository directory for the experimental virtual terminal (see Installation).
 
 A detached checkout is normal for a release installation. These steps are for users running a release clone; maintainers working on the local development `master` keep that branch and do not switch it to a release tag. For an archive-based installation, unpack into a separate directory and compare/apply source-file changes, including removed files, while retaining user data and existing Git metadata; do not overlay the entire directory.
 
@@ -185,7 +196,7 @@ No. The panel (47820), relay (47821), and watchdog marker (47822) ports are fixe
 npm test
 ```
 
-Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for single-file runs and environment notes.
+The suite needs the virtual terminal's packages installed once (`npm install`), because it exercises the terminal host; see [CONTRIBUTING.md](CONTRIBUTING.md) for single-file runs and environment notes.
 
 ### Naming
 
@@ -211,23 +222,32 @@ Zero-dependency `node --test` suite; see [CONTRIBUTING.md](CONTRIBUTING.md) for 
 - **多 BaseURL 无感退避** — provider 级 `fallbackURLs`，每次尝试 180s 生成预算、指数退避、真实透传上游 5xx。
 - **Web 控制面板** — 独立常驻面板 `127.0.0.1:47820`，管理 provider、封存 Key、监测与使用统计。
 - **客户端启动器** — 各客户端启动器自动注入 relay 端点与鉴权 token，覆盖下表所列各家 coding agent。
-- **零依赖** — 纯 Node.js ESM，无需 `npm install`。
+- **relay 与面板零依赖** — 纯 Node.js ESM；relay、面板与各启动器克隆下来即可运行。唯一例外是实验性的虚拟终端，它需要安装一次依赖（见「前置条件」）。
+- **虚拟终端** — 面板内的一页本机终端，可在其中运行 CLI Agent，并复用看板的同一套路由与遥测口径。
 
 ### 前置条件
 
 - Windows（凭据封存依赖 Windows DPAPI）
 - **推荐 Node.js 24 LTS。** API 下限范围为 `>=22.15.0 <23 || >=23.8.0`。会话读取使用 Node 内置 SQLite 与 zstd API；此范围说明 API 最低要求，不表示每个符合范围的 Node 版本均已实测。
-- 零依赖，无需 npm 安装任何东西
+- relay 与面板无需安装任何东西。实验性的虚拟终端需要在安装目录执行一次 `npm install`，它会装入一个终端进程绑定，以及一个终端渲染器与两个附加组件。不装也不影响其余功能，只是虚拟终端那一页打不开。
 
 ### 安装
 
-Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0` 是首个稳定版，此前发布过它的预览版 `v0.5.0-preview`；0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.1` 为例，克隆到一个新目录：
+Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0` 是首个稳定版，此前发布过它的预览版 `v0.5.0-preview`；0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.2` 为例，克隆到一个新目录：
 
 ```bat
-git clone --branch v0.5.1 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.5.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 约定位置是 `%LOCALAPPDATA%\Anyswitch\app`，也可使用其他位置。首次使用源码归档安装时，解压到一个新的 `app` 目录，不要解压覆盖已有安装。
+
+要用实验性的虚拟终端，先在仓库目录安装一次它的依赖：
+
+```bat
+npm install
+```
+
+relay、面板与各启动器无需安装任何东西；跳过这一步只会让虚拟终端那一页打不开。
 
 `panel-app.vbs` 是桌面入口：按脚本自身位置定位 `panel-launcher.mjs`，克隆到任意路径都能用。它会拉起面板宿主并在浏览器中打开面板。给它建一个桌面快捷方式即可一键进入。手动备用入口：在仓库目录下执行 `node panel-launcher.mjs`（或 `node panel-host.mjs`）。
 
@@ -248,12 +268,14 @@ git clone --branch v0.5.1 --single-branch https://github.com/Aurora0134/Anyswitc
 git status --short
 ```
 
-若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.1` 为例，执行：
+若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.2` 为例，执行：
 
 ```bat
-git fetch --no-tags origin tag v0.5.1
-git switch --detach v0.5.1
+git fetch --no-tags origin tag v0.5.2
+git switch --detach v0.5.2
 ```
+
+随后在仓库目录执行一次 `npm install`，用于实验性的虚拟终端（见「安装」）。
 
 发布版安装处于 detached HEAD 状态是正常的。这套步骤适用于使用发布版 clone 的用户；维护者的本机开发 `master` 保持原分支，不按此步骤切到发布标签。源码归档用户应先解压到单独目录，对照应用源文件变更（包括已删除的文件），保留用户数据和已有 Git 元数据，不要整目录覆盖。
 
@@ -372,7 +394,7 @@ provider 可在主 `baseURL` 后排 `fallbackURLs`。每次尝试有 180s 生成
 npm test
 ```
 
-零依赖 `node --test` 测试套件；单文件跑法与环境说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+测试套件需要先执行一次 `npm install`（其中有用例覆盖虚拟终端的终端宿主）；单文件跑法与环境说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ### 命名说明
 
