@@ -4735,7 +4735,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
       fetchTerminalSessionsList: async () => sessions ?? null,
       usageJournal: {
         appendRequest() {}, appendSession() {},
-        read: () => journalRows ?? [],
+        readRequests: () => journalRows ?? [],
       },
     });
   }
@@ -4797,6 +4797,13 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json().requests, []);
+  });
+
+  it("端点源码钉死：当日 journal 走公开 API readRequests，不得再调不存在的 read", () => {
+    assert.ok(panelMjs.includes('usageJournalLazy().readRequests({ fromDay: today, toDay: today })'),
+      "最近请求端点必须调 journal 的真实公开方法 readRequests");
+    assert.ok(!panelMjs.includes('.read("requests"'),
+      "journal 没有 read 方法，旧写法只会抛 TypeError 被空 catch 吞成恒空列表");
   });
 });
 
