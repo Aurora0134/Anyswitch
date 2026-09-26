@@ -98,6 +98,90 @@ test("terminal host owns persistent session metadata and PTY controls", async ()
   }
 });
 
+// 回放窗口按字节计，不按块数计：忙的 TUI 每 ~80ms 一块，旧的 400 块上限只装得下
+// 约 31 秒输出，而它喂的 xterm 留着 5000 行滚屏——整页刷新等于把用户眼前的历史丢掉。
+// 这里钉四件事：窗口按字节裁、只整块从头部丢、轮询列表不带走窗口、落盘尾部另按更紧
+// 的预算（整文件按防抖重写）。最后一件顺带钉住「从盘上恢复的会话，字节位是重算的」
+// ——不重算就是 NaN 比较，裁尾静默失效，窗口无上限地长。
+test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带窗口、落盘尾部更紧", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-budget-`);
+  const first = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path, base = port) => `http://127.0.0.1:${base}${path}`;
+  const token = (h) => ({ authorization: `Bearer ${h.token}` });
+  const waitPersist = () => new Promise((resolve) => setTimeout(resolve, 320));
+  const KB = 1024;
+  // FakePty 把写入原样回显成 "echo:<data>"，所以整块判据要连前缀一起认。
+  const whole = /^echo:#\d+ x+$/;
+  let restoredHost = null;
+  let hostClosed = false;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: { ...token(host), "content-type": "application/json" },
+      body: JSON.stringify({ label: "预算", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    const pty = first.calls[first.calls.length - 1].pty;
+    const marker = (index) => `#${index} `;
+    const bigChunk = (index) => `${marker(index)}${"x".repeat(4 * KB)}`;
+    for (let i = 0; i < 200; i += 1) pty.write(bigChunk(i));
+
+    const live = await fetch(url(`/terminal/sessions/${created.id}`), { headers: token(host) }).then((r) => r.json());
+    const liveBytes = Buffer.byteLength(live.buffer.join(""));
+    assert.ok(live.buffer.length < 200, `裁尾后仍存 ${live.buffer.length} 块，等于按块数没裁动`);
+    assert.ok(liveBytes <= 512 * KB, `内存窗口 ${liveBytes} 字节，超 512KB 预算`);
+    assert.ok(liveBytes > 400 * KB, `内存窗口只剩 ${liveBytes} 字节，比改前的 400 块还小`);
+    for (const kept of live.buffer) assert.ok(whole.test(kept), "只许整块丢，留下的每块都完整");
+    assert.ok(live.buffer[live.buffer.length - 1].includes(marker(199)), "最新一块必留");
+    assert.ok(!live.buffer.some((chunk) => chunk.includes(marker(0))), "最旧一块已丢出窗口");
+
+    const listed = await fetch(url("/terminal/sessions"), { headers: token(host) }).then((r) => r.json());
+    assert.equal(listed.sessions[0].buffer, undefined, "窗口属 SSE 流，不上百秒一轮的轮询列表");
+
+    await waitPersist();
+    const onDisk = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
+    const diskBytes = Buffer.byteLength(onDisk.sessions[0].buffer.join(""));
+    assert.ok(diskBytes <= 128 * KB, `落盘尾部 ${diskBytes} 字节，超 128KB 预算`);
+    assert.ok(diskBytes > 100 * KB, `落盘尾部只剩 ${diskBytes} 字节，裁得比预算狠`);
+    assert.ok(diskBytes < liveBytes, "落盘尾部紧于内存窗口：整文件重写按防抖跑");
+    assert.ok(onDisk.sessions[0].buffer.every((chunk) => whole.test(chunk)), "落盘尾部同样整块");
+    await host.close();
+    hostClosed = true;
+
+    // 从盘上恢复后继续输出：裁尾仍按字节生效（字节位重算过，不是 undefined/NaN）
+    const second = capturingPtyModule();
+    restoredHost = createTerminalHost({ root, port: 0, ptyModule: second.ptyModule, logger: { warn() {} } });
+    const restoredPort = await listen(restoredHost);
+    const restoredSession = restoredHost.sessions.get(created.id);
+    assert.equal(restoredSession.pty, null, "恢复的会话不自动复活");
+    assert.ok(restoredSession.bufferBytes > 100 * KB && restoredSession.bufferBytes <= 128 * KB,
+      `恢复即按盘上尾部重算字节位（实得 ${restoredSession.bufferBytes}）`);
+    await fetch(url(`/terminal/sessions/${created.id}/restart`, restoredPort), {
+      method: "POST", headers: { ...token(restoredHost), "content-type": "application/json" }, body: "{}",
+    });
+    const revived = second.calls[second.calls.length - 1].pty;
+    // 单块就超整份预算：最新一块必须留着，窗口不得变成无上限
+    revived.write(`${marker(900)}${"y".repeat(600 * KB)}`);
+    const afterRestore = await fetch(url(`/terminal/sessions/${created.id}`, restoredPort), { headers: token(restoredHost) }).then((r) => r.json());
+    assert.equal(afterRestore.buffer.length, 1, "超预算的单块独占窗口，旧块整块让位");
+    assert.ok(afterRestore.buffer[0].includes(marker(900)), "留下的就是最新那块");
+    const restoredLive = restoredHost.sessions.get(created.id);
+    assert.ok(Number.isFinite(restoredLive.bufferBytes) && restoredLive.bufferBytes > 0,
+      "字节位保持有限值（NaN 比较会让裁尾静默失效）");
+
+    // 落盘尾部同样「最新一块无条件留」：单块超 128KB 预算也得存下去，
+    // 否则宿主再重启一次，恢复回来的就是一块白屏而不是那张画满的屏。
+    await waitPersist();
+    const diskAgain = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
+    assert.equal(diskAgain.sessions[0].buffer.length, 1, "超预算的单块照样落盘");
+    assert.ok(diskAgain.sessions[0].buffer[0].includes(marker(900)), "落的就是最新那块");
+  } finally {
+    if (!hostClosed) await host.close().catch(() => {});
+    if (restoredHost) await restoredHost.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("stripTerminalReplyProbes strips each query class", () => {
   const probes = {
     "DA1": "\x1b[c",

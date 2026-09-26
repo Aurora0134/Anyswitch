@@ -19,6 +19,17 @@ export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
+// Replay windows are budgeted in bytes, not in chunk counts. A busy TUI emits a
+// chunk roughly every 80ms, so the old 400-chunk tail held about 31 seconds of
+// output while the xterm it repaints keeps a 5000-line scrollback — a page reload
+// threw away nearly everything the user had on screen. Chunks are dropped whole
+// from the head so no escape sequence is ever cut in half.
+const TERMINAL_BUFFER_MAX_BYTES = 512 * 1024;
+const TERMINAL_BUFFER_MAX_CHUNKS = 4000;
+// The state file is rewritten whole on a 250ms debounce, so the durable tail is
+// budgeted tighter than the live one: enough to repaint after a host restart
+// without turning every debounce tick into a half-megabyte write.
+const TERMINAL_BUFFER_PERSIST_MAX_BYTES = 128 * 1024;
 
 function json(res, status, body) {
   const text = JSON.stringify(body);
@@ -154,6 +165,39 @@ export function stripTerminalReplyProbes(text) {
   return String(text).replace(REPLY_PROBE_PATTERN, "");
 }
 
+// Byte accounting for the replay ring is in UTF-8 bytes — the unit the budget is
+// stated in and the unit the state file costs on disk.
+function chunkBytes(chunk) {
+  return Buffer.byteLength(chunk);
+}
+
+// Drop whole chunks from the head until the window fits both budgets. The newest
+// chunk always survives: a single repaint over budget is a session that replays
+// nothing at all if it gets dropped too.
+function trimReplayBuffer(session, maxBytes, maxChunks) {
+  const buffer = session.buffer;
+  while (buffer.length > 1 && (buffer.length > maxChunks || session.bufferBytes > maxBytes)) {
+    session.bufferBytes -= chunkBytes(buffer.shift());
+  }
+}
+
+// Tail slice for the state file: walk back from the newest chunk while the
+// running total fits the durable budget. The newest chunk is kept unconditionally
+// (same rule as the live window) — a single repaint over budget must still come
+// back as a painted screen after a host restart, not as a blank terminal.
+function persistedBufferTail(buffer) {
+  if (buffer.length === 0) return [];
+  let bytes = chunkBytes(buffer[buffer.length - 1]);
+  let start = buffer.length - 1;
+  while (start > 0) {
+    const size = chunkBytes(buffer[start - 1]);
+    if (bytes + size > TERMINAL_BUFFER_PERSIST_MAX_BYTES) break;
+    bytes += size;
+    start -= 1;
+  }
+  return buffer.slice(start);
+}
+
 // Non-secret session metadata for agent-launched sessions: what runs here and
 // how it was started. The env delta is deliberately absent — credentials stay
 // in memory, never in a snapshot, never on disk.
@@ -165,6 +209,11 @@ function agentMetadata(session) {
   };
 }
 
+// Session metadata shape for the API. The replay buffer is deliberately absent:
+// the list route is the panel's 1s poll, and carrying the window there would put
+// it on the wire every tick (the panel strips it before the browser sees it — an
+// old host sending it is still handled). Callers that want the window read one
+// session directly, or attach to the SSE stream that repaints a terminal.
 function snapshot(session) {
   return {
     id: session.id,
@@ -178,7 +227,6 @@ function snapshot(session) {
     lastActiveAt: session.lastActiveAt,
     cols: session.cols,
     rows: session.rows,
-    buffer: session.buffer,
     ...agentMetadata(session),
   };
 }
@@ -203,7 +251,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       lastActiveAt: session.lastActiveAt,
       cols: session.cols,
       rows: session.rows,
-      buffer: session.buffer.slice(-200),
+      buffer: persistedBufferTail(session.buffer),
       status: session.pty ? "running" : "exited",
       exitCode: session.exitCode,
       ...agentMetadata(session),
@@ -224,7 +272,14 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     try {
       const raw = JSON.parse(readFileSync(statePath, "utf8"));
       for (const item of Array.isArray(raw?.sessions) ? raw.sessions : []) {
-        sessions.set(item.id, { ...item, pty: null, listeners: new Set(), buffer: Array.isArray(item.buffer) ? item.buffer : [] });
+        const buffer = Array.isArray(item.buffer) ? item.buffer : [];
+        sessions.set(item.id, {
+          ...item,
+          pty: null,
+          listeners: new Set(),
+          buffer,
+          bufferBytes: buffer.reduce((total, chunk) => total + chunkBytes(String(chunk)), 0),
+        });
       }
     } catch {
       // First start or a partially written state file: start empty.
@@ -232,8 +287,10 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
   }
 
   function emit(session, chunk) {
-    session.buffer.push(String(chunk));
-    if (session.buffer.length > 400) session.buffer.splice(0, session.buffer.length - 400);
+    const text = String(chunk);
+    session.buffer.push(text);
+    session.bufferBytes += chunkBytes(text);
+    trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     session.lastActiveAt = Date.now();
     for (const listener of session.listeners) listener(String(chunk));
     schedulePersist();
@@ -293,7 +350,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
-    res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot(session), buffer: [] })}\n\n`);
+    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
     // Replay is probe-stripped and joined across chunk boundaries so a query
     // split between PTY writes is still recognized; live chunks pass through.
     const replay = stripTerminalReplyProbes(session.buffer.join(""));
@@ -347,6 +404,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
           rows: Math.max(1, Math.min(120, Number(body.rows) || 34)),
           exitCode: null,
           buffer: [],
+          bufferBytes: 0,
           pty: null,
           listeners: new Set(),
         };
@@ -358,7 +416,9 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       if (!match) return json(res, 404, { error: "not_found" });
       const session = requireSession(match[1]);
       const action = match[2];
-      if (!action && req.method === "GET") return json(res, 200, snapshot(session));
+      // One session read on demand: the replay window comes along with it. The
+      // list route is the polled surface, and that one stays buffer-free.
+      if (!action && req.method === "GET") return json(res, 200, { ...snapshot(session), buffer: session.buffer });
       if (action === "stream" && req.method === "GET") return stream(session, res);
       if (action === "input" && req.method === "POST") {
         const body = await readBody(req);
@@ -388,6 +448,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         if (session.pty) session.pty.kill();
         session.exitCode = null;
         session.buffer = [];
+        session.bufferBytes = 0;
         spawnSession(session);
         return json(res, 200, snapshot(session));
       }
