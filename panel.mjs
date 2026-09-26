@@ -440,6 +440,153 @@ export function startRelayLogBridge(logger, relayRoot) {
   };
 }
 
+// Bridge the relay's agent-activity stream (47821 /api/internal/agents-activity,
+// same pi-relay-token guard as the agents pull) into this panel process. The
+// relay pushes absolute activeRequests states for (endpointId, instanceId)
+// pairs: a snapshot frame first, then activity frames only on 0↔N transitions,
+// with comment-line heartbeats in between. The bridge keeps a latest-state Map
+// so the browser-side /panel/api/agents-activity route can send a fresh client
+// the cached snapshot the moment it connects, then forwards frames verbatim;
+// relay heartbeat comment lines pass straight through to keep the panel→
+// browser SSE alive too. The relay being down is not an error: the bridge
+// retries with exponential backoff and the cache keeps the last known truth.
+//
+// Unlike the log bridge, subscribing the relay to its own stream would only be
+// wasteful, not self-amplifying (nothing re-enters the source bus) — still,
+// the bridge is created lazily on the first browser subscription, and the
+// panel page lives on panel-host only, so relay-host never starts one in
+// practice.
+export function startRelayActivityBridge(relayRoot) {
+  let stopped = false;
+  let controller = null;
+  let retryTimer = null;
+  let failures = 0;
+  const subscribers = new Set();
+  const latest = new Map();
+
+  const keyOf = (endpointId, instanceId) => `${endpointId} ${instanceId ?? ""}`;
+
+  // The session model every browser client aligns to on connect: one
+  // snapshot frame built from the latest per-key state.
+  function snapshotFrame() {
+    return { type: "snapshot", instances: [...latest.values()] };
+  }
+
+  function publish(block) {
+    for (const subscriber of subscribers) {
+      try {
+        subscriber(block);
+      } catch {
+        // A broken subscriber must never kill the bridge.
+      }
+    }
+  }
+
+  function absorbLine(line) {
+    if (line.startsWith(":")) {
+      publish(`${line}\n\n`);
+      return;
+    }
+    if (!line.startsWith("data:")) return;
+    let frame = null;
+    try {
+      frame = JSON.parse(line.slice(5).trim());
+    } catch {
+      // Malformed frame: skip it, never kill the bridge.
+      return;
+    }
+    if (frame?.type === "snapshot" && Array.isArray(frame.instances)) {
+      latest.clear();
+      for (const inst of frame.instances) {
+        if (!inst || typeof inst.endpointId !== "string") continue;
+        latest.set(keyOf(inst.endpointId, inst.instanceId ?? null), {
+          endpointId: inst.endpointId,
+          instanceId: inst.instanceId ?? null,
+          activeRequests: typeof inst.activeRequests === "number" ? inst.activeRequests : 0,
+          at: typeof inst.at === "number" ? inst.at : null,
+        });
+      }
+    } else if (frame?.type === "activity" && typeof frame.endpointId === "string") {
+      latest.set(keyOf(frame.endpointId, frame.instanceId ?? null), {
+        endpointId: frame.endpointId,
+        instanceId: frame.instanceId ?? null,
+        activeRequests: typeof frame.activeRequests === "number" ? frame.activeRequests : 0,
+        at: typeof frame.at === "number" ? frame.at : null,
+      });
+    } else {
+      return;
+    }
+    publish(`${line}\n\n`);
+  }
+
+  // 指数退避：1s 起翻倍，30s 封顶；一次成功握手即归零。
+  function scheduleRetry() {
+    if (stopped) return;
+    retryTimer = setTimeout(connect, Math.min(30_000, 1_000 * 2 ** failures));
+    failures += 1;
+  }
+
+  async function connect() {
+    if (stopped) return;
+    let token;
+    try {
+      token = loadOrGenerateToken(relayRoot);
+    } catch {
+      scheduleRetry();
+      return;
+    }
+    if (!token) {
+      scheduleRetry();
+      return;
+    }
+    controller = new AbortController();
+    try {
+      const response = await fetch("http://127.0.0.1:47821/api/internal/agents-activity", {
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        scheduleRetry();
+        return;
+      }
+      failures = 0;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Frames are single JSON lines; blank lines and the blank line that
+        // terminates each SSE block are skipped by absorbLine.
+        let sep;
+        while ((sep = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 1);
+          absorbLine(line.replace(/\r$/, ""));
+        }
+      }
+    } catch {
+      // Relay stopped mid-stream or fetch failed — fall through to retry.
+    }
+    scheduleRetry();
+  }
+
+  connect();
+  return {
+    subscribe(subscriber) {
+      subscribers.add(subscriber);
+      return () => subscribers.delete(subscriber);
+    },
+    snapshotFrame,
+    stop() {
+      stopped = true;
+      clearTimeout(retryTimer);
+      controller?.abort();
+    },
+  };
+}
+
 export function createPanelRouter({
   storePaths,
   logger,
@@ -487,6 +634,12 @@ export function createPanelRouter({
    fetchRelayChainRuntime = defaultFetchRelayChainRuntime,
    fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
+  // Agent-activity push bridge (startRelayActivityBridge): this process's
+  // subscription to the relay's agents-activity SSE plus its latest-state
+  // cache. Injectable so tests never touch 47821; `null` lazily builds the
+  // real bridge on the first browser subscription, so a panel-host nobody is
+  // watching does not hold a relay connection open.
+  agentsActivityBridge = null,
   // Skills tab service (agent-skills.mjs). Injectable so the router is
   // unit-testable without real home directories, junctions, or PowerShell.
   // `null` lazily builds the real service on first skills request.
@@ -1116,6 +1269,35 @@ export function createPanelRouter({
     req.on("error", cleanup);
   }
 
+  // 活跃真值浏览器出口。与日志流同型：GET 免 token（loopback 是网络边界，
+  // 只有写操作才过 CSRF 闸）。客户端建连即收到桥缓存的当前快照整帧对齐，其后
+  // 逐帧转发桥事件；relay 侧的注释心跳行由桥原样直通，保浏览器侧连接。
+  let agentsActivityBridgeInstance = agentsActivityBridge;
+  function getAgentsActivityBridge() {
+    if (!agentsActivityBridgeInstance) agentsActivityBridgeInstance = startRelayActivityBridge(storePaths.root);
+    return agentsActivityBridgeInstance;
+  }
+
+  function handleAgentsActivitySSE(res, req) {
+    const bridge = getAgentsActivityBridge();
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    res.write(`data: ${JSON.stringify(bridge.snapshotFrame())}\n\n`);
+    const unsubscribe = bridge.subscribe((block) => {
+      try {
+        res.write(block);
+      } catch {
+        // socket gone; unsubscribe will happen on close below
+      }
+    });
+    const cleanup = () => unsubscribe();
+    req.on("close", cleanup);
+    req.on("error", cleanup);
+  }
+
   async function handleAutostartStatus(res) {
     const enabled = await isAutostartEnabled();
     sendJson(res, 200, { enabled });
@@ -1602,6 +1784,7 @@ export function createPanelRouter({
     }
     if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
     if (path === "/panel/api/logs" && method === "GET") return handleLogsSSE(res, req);
+    if (path === "/panel/api/agents-activity" && method === "GET") return handleAgentsActivitySSE(res, req);
     if (path === "/panel/api/logs/ingest" && method === "POST") return handleLogIngest(req, res);
     if (path === "/panel/api/logs/clear" && method === "POST") return handleLogClear(res);
     if (path === "/panel/api/autostart" && method === "GET") return handleAutostartStatus(res);

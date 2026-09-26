@@ -332,6 +332,31 @@ function resolveChannelModelSlug(path, body, deps) {
   return { path: buildOpenAIPath(hit.channelId, parsed.subpath), body: { ...body, model: hit.modelId } };
 }
 
+// Derive the /api/internal/agents-activity snapshot rows from a getAgentsStatus
+// result. Aggregate endpoints contribute one (instanceId: null) row from their
+// 全局汇总 session plus one row per instance bucket; the per-session endpoint
+// (claude) contributes one row per live launch session — one row per stream
+// identity the collector's activity frames may carry.
+export function agentsActivitySnapshotFromAgents(agents) {
+  const at = Date.now();
+  const rows = [];
+  for (const agent of agents ?? []) {
+    if (!agent || typeof agent.id !== "string") continue;
+    if (agent.sessionMode === "per_session") {
+      for (const s of agent.sessions ?? []) {
+        rows.push({ endpointId: agent.id, instanceId: s.id ?? null, activeRequests: Number(s.activeRequests) || 0, at });
+      }
+      continue;
+    }
+    const aggregate = Array.isArray(agent.sessions) ? agent.sessions[0] : null;
+    rows.push({ endpointId: agent.id, instanceId: null, activeRequests: Number(aggregate?.activeRequests) || 0, at });
+    for (const inst of agent.instances ?? []) {
+      rows.push({ endpointId: agent.id, instanceId: inst.id ?? null, activeRequests: Number(inst.activeRequests) || 0, at });
+    }
+  }
+  return rows;
+}
+
 export function createOpenAIRelayServer(deps) {
   const handler = createOpenAIHandler(deps);
   const anthropicHandler = createHandler(deps);
@@ -374,6 +399,71 @@ export function createOpenAIRelayServer(deps) {
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get agent metrics: ${err.message}`));
       }
+      return;
+    }
+
+    // Internal loopback activity feed for the standalone control panel: one
+    // snapshot frame with every currently-known (endpointId, instanceId) row's
+    // in-flight count, then an absolute-state data frame on each 0↔N
+    // transition published by the metrics collector (agent-metrics.mjs
+    // onActivity). Same guard rail as /api/internal/agents: loopback-only plus
+    // the pi-relay-token that lives only in %LOCALAPPDATA%\Anyswitch.
+    if (path === "/api/internal/agents-activity" && req.method === "GET") {
+      const authHeader = req.headers["authorization"];
+      const token = authHeader?.replace(/^Bearer\s+/i, "");
+      if (!token || token !== deps.token) {
+        sendJson(res, 401, openAIError("authentication_error", "invalid relay token"));
+        return;
+      }
+      const instances = [];
+      if (deps.metricsCollector?.getAgentsStatus) {
+        try {
+          const agents = await deps.metricsCollector.getAgentsStatus();
+          instances.push(...agentsActivitySnapshotFromAgents(agents));
+        } catch {
+          // A snapshot build failure must not kill the stream — clients learn
+          // the state from the activity frames that follow.
+        }
+      }
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        connection: "keep-alive",
+      });
+      // Immediate flush so the subscription itself is visible (see
+      // /api/internal/logs).
+      if (typeof res.flushHeaders === "function") res.flushHeaders();
+      const writeFrame = (frame) => {
+        try {
+          res.write(`data: ${JSON.stringify(frame)}\n\n`);
+        } catch {
+          // socket gone; the close path below unsubscribes
+        }
+      };
+      writeFrame({ type: "snapshot", instances });
+      const listener = (frame) => writeFrame(frame);
+      const unsubscribe = typeof deps.metricsCollector?.onActivity === "function"
+        ? deps.metricsCollector.onActivity(listener)
+        : () => {};
+      // 15s comment-line heartbeat keeps proxies and idling SSE clients from
+      // reaping an otherwise quiet connection (same practice as
+      // terminal-host.mjs streams).
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(": keep-alive\n\n");
+        } catch {
+          /* close path cleans up */
+        }
+      }, 15000);
+      let cleaned = false;
+      const close = () => {
+        if (cleaned) return;
+        cleaned = true;
+        clearInterval(heartbeat);
+        try { unsubscribe?.(); } catch { /* never block socket teardown */ }
+      };
+      req.on("close", close);
+      req.on("error", close);
       return;
     }
 

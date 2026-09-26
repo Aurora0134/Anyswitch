@@ -4871,3 +4871,114 @@ describe("terminal attribution feed (getDetectedClientProcesses)", () => {
     assert.deepEqual(collector.getDetectedClientProcesses(), []);
   });
 });
+
+describe("activity transition publish (onActivity)", () => {
+  // The activity frame shape every jump publisher emits: an absolute-state
+  // row for one (endpointId, instanceId) pair, never a delta.
+  const sig = (f) => [f.type, f.endpointId, f.instanceId, f.activeRequests];
+  const collect = (collector) => {
+    const frames = [];
+    collector.onActivity((f) => frames.push(f));
+    return frames;
+  };
+
+  it("publishes the aggregate 0↔N jump only; intra-busy deltas and duplicate ends stay silent", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    const frames = collect(collector);
+
+    const r1 = collector.startRequest({ agentId: "kimi", model: "m1" });
+    const r2 = collector.startRequest({ agentId: "kimi", model: "m1" });
+    assert.deepEqual(frames.map(sig), [["activity", "kimi", null, 1]],
+      "0→1 publishes once; the 1→2 overlap is not a jump");
+    assert.equal(typeof frames[0].at, "number", "frame carries its emit timestamp");
+
+    r2.recordEnd({ status: 200, usage: {} });
+    assert.equal(frames.length, 1, "2→1 is not a jump");
+    r1.recordEnd({ status: 200, usage: {} });
+    r1.recordEnd({ status: 200, usage: {} });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "kimi", null, 1],
+      ["activity", "kimi", null, 0],
+    ], "N→0 publishes once — the second recordEnd is a no-op, not a repeat");
+  });
+
+  it("publishes the tagged instance mirror as a second identity alongside the aggregate", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    const frames = collect(collector);
+
+    const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-1010", model: "m1" });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "kimi", null, 1],
+      ["activity", "kimi", "kimi-1010", 1],
+    ], "aggregate and mirror each own their identity's 0→N jump");
+
+    r.recordEnd({ status: 200, usage: {} });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "kimi", null, 1],
+      ["activity", "kimi", "kimi-1010", 1],
+      ["activity", "kimi", null, 0],
+      ["activity", "kimi", "kimi-1010", 0],
+    ], "both identities publish their N→0 jump on the same end");
+  });
+
+  it("a late attachInstance publishes only the mirror jump, never an aggregate one", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    const frames = collect(collector);
+
+    const r = collector.startRequest({ agentId: "kimi", model: "m1" });
+    r.attachInstance("kimi-1010");
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "kimi", null, 1],
+      ["activity", "kimi", "kimi-1010", 1],
+    ], "the mirror opens at 0→N from the attach moment; the aggregate stays at 1");
+  });
+
+  it("publishes claude per-launch merges at 0↔N boundaries with the session id", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    const frames = collect(collector);
+
+    collector.reportSession("tok_C", { pid: 4444, sessionId: "sess_A", activeRequests: 2 });
+    assert.deepEqual(frames.map(sig), [["activity", "claude", "sess_A", 2]],
+      "0→2 lands past 1 and is still one jump");
+    collector.reportSession("tok_C", { pid: 4444, activeRequests: 3 });
+    assert.equal(frames.length, 1, "2→3 is not a jump");
+    collector.reportSession("tok_C", { pid: 4444, activeRequests: 0 });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "claude", "sess_A", 2],
+      ["activity", "claude", "sess_A", 0],
+    ]);
+  });
+
+  it("isolates a throwing listener from the request path and from other listeners", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    collector.onActivity(() => {
+      throw new Error("subscriber bug");
+    });
+    const frames = collect(collector);
+
+    const r = collector.startRequest({ agentId: "kimi", model: "m1" });
+    r.recordEnd({ status: 200, usage: {} });
+    assert.deepEqual(frames.map(sig), [
+      ["activity", "kimi", null, 1],
+      ["activity", "kimi", null, 0],
+    ], "the recording listener sees both frames despite its neighbor throwing");
+  });
+
+  it("unsubscribe (returned from onActivity) and offActivity both stop delivery", () => {
+    const collector = testCollector({ nowFn: () => 10000 });
+    const keep = collect(collector);
+    const removed = [];
+    const removedListener = (f) => removed.push(f);
+    collector.onActivity(removedListener);
+    collector.offActivity(removedListener);
+    const unsubbed = [];
+    const unsub = collector.onActivity((f) => unsubbed.push(f));
+    unsub();
+
+    collector.startRequest({ agentId: "zcode", model: "m1" });
+    assert.equal(keep.length, 1, "still-subscribed listener receives");
+    assert.equal(removed.length, 0);
+    assert.equal(unsubbed.length, 0);
+    assert.equal(keep[0].endpointId, "zcode");
+  });
+});

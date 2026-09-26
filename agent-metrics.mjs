@@ -1056,7 +1056,7 @@ function pruneStaleAggregateFaults(state, nowFn, ttlMs) {
   }
 }
 
-function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId) {
+function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability, journal, agentId, onTransition = null) {
   const startTime = nowFn();
   // 后台请求（codex 引擎/GUI 自发流量——记忆整理、guardian、预热、线程标题/
   // 摘要生成等，由 openai-server 的分类器打上 meta.background）与全部展示面
@@ -1070,8 +1070,12 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   // Optional per-instance tag (multi-instance endpoints). Validated once here
   // so the journal row and the instance bucket never see a raw header value.
   const journalInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
-  if (state.activeRequests === 0) state.activeWallStart = startTime;
+  // onTransition fires only at busy-idle boundaries (0→N on this start, N→0 in
+  // recordEnd); the activity publisher fans it out as an absolute-state frame.
+  const crossedIdleToActive = state.activeRequests === 0;
+  if (crossedIdleToActive) state.activeWallStart = startTime;
   state.activeRequests += 1;
+  if (crossedIdleToActive) onTransition?.(state.activeRequests);
   state.totalRequests += 1;
   if (state.firstRequestAt === null) state.firstRequestAt = startTime;
   state.lastRequestAt = startTime;
@@ -1268,6 +1272,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       else if (info?.error || (typeof info?.status === "number" && info.status >= 400)) endedWithFault = true;
       ended = true;
       state.activeRequests = Math.max(0, state.activeRequests - 1);
+      if (state.activeRequests === 0) onTransition?.(0);
       // Decrement the key this request currently occupies — displayModel, not
       // meta.model, because setCurrentMember may have re-pointed an "auto"
       // request at the serving node's bound model. The composite ledger
@@ -1821,6 +1826,31 @@ export function createAgentMetricsCollector(options = {}) {
     nowFn,
     persistPath: options.stabilityPath ?? (persistRoot ? join(persistRoot, STABILITY_FILENAME) : null),
   });
+
+  // In-flight activity push surface: subscribers receive one absolute-state
+  // frame per 0↔N transition of an endpoint aggregate or an instance mirror
+  // (never for 1→2-style intra-busy deltas). Fan-out is synchronous and each
+  // listener is isolated — a throwing subscriber must never break the request
+  // path it just observed.
+  const activityListeners = new Set();
+  function publishActivity(endpointId, instanceId, activeRequests) {
+    const frame = { type: "activity", endpointId, instanceId, activeRequests, at: Date.now() };
+    for (const listener of activityListeners) {
+      try {
+        listener(frame);
+      } catch {
+        // Subscriber bug: drop the frame, never the request.
+      }
+    }
+  }
+  function onActivity(listener) {
+    if (typeof listener !== "function") return () => {};
+    activityListeners.add(listener);
+    return () => activityListeners.delete(listener);
+  }
+  function offActivity(listener) {
+    activityListeners.delete(listener);
+  }
 
   // Process detection cache — stale-while-revalidate, never blocking past the
   // first snapshot.
@@ -2381,7 +2411,8 @@ export function createAgentMetricsCollector(options = {}) {
     const effMeta = normalized !== null && normalized.id !== rawInstanceId
       ? { ...meta, instanceId: normalized.id }
       : meta;
-    const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId);
+    const primary = trackAggregateRequest(targetState, effMeta, nowFn, recentSampleWindow, stability, journal, bucketAgentId,
+      (count) => publishActivity(bucketAgentId, null, count));
     // A request start already moved totalRequests/activeRequests: mark the
     // snapshot dirty so a restart mid-turn still carries the start forward.
     markMetricsDirty();
@@ -2409,7 +2440,8 @@ export function createAgentMetricsCollector(options = {}) {
         markMetricsDirty();
       }
       if (norm.label !== null) entry.label = norm.label;
-      const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId);
+      const mirror = trackAggregateRequest(entry.state, { ...effMeta, instanceId }, nowFn, recentSampleWindow, null, null, bucketAgentId,
+        (count) => publishActivity(bucketAgentId, instanceId, count));
       instanceAttached = true;
       composed = composeInstanceTracker(primary, mirror);
       // 迟到挂载补标：链归属（resolver + 当前成员）只在请求开头的成员循环里
@@ -2542,7 +2574,15 @@ export function createAgentMetricsCollector(options = {}) {
     session.lastSeen = now;
     session.token = token;
     if (typeof report.requests === "number") session.requests = report.requests;
-    if (typeof report.activeRequests === "number") session.activeRequests = report.activeRequests;
+    if (typeof report.activeRequests === "number") {
+      const prevActive = session.activeRequests;
+      session.activeRequests = report.activeRequests;
+      // 0↔N jump of the merged per-session counter — publish the absolute
+      // state; same busy-idle boundary semantics as the aggregate trackers.
+      if ((prevActive === 0) !== (session.activeRequests === 0)) {
+        publishActivity("claude", session.id, session.activeRequests);
+      }
+    }
     if (typeof report.activeDurationMs === "number") session.activeDurationMs = report.activeDurationMs;
     if (typeof report.promptTokens === "number") session.promptTokens = report.promptTokens;
     if (typeof report.completionTokens === "number") session.completionTokens = report.completionTokens;
@@ -3210,6 +3250,8 @@ export function createAgentMetricsCollector(options = {}) {
     startRequest,
     reportSession,
     getAgentsStatus,
+    onActivity,
+    offActivity,
     getModelStability: () => stability.snapshot(nowFn()),
     // Latest route-chain runtime dump per live per-launch session, in the
     // same { positions, nodes } shape buildChainRuntime merges — lets the
