@@ -78,6 +78,23 @@ export function listenLoopbackPanel(server, port = PANEL_PORT) {
   });
 }
 
+// Discovery only: the terminal host is spawned and stopped by the relay (see
+// createTerminalHostSupervisor in relay-host.mjs). A missing backend just
+// means the relay is down — the panel frontend renders that as the terminal
+// empty state — so this never throws and never repairs.
+export async function discoverTerminalBackend(root, { ensureFn = ensureTerminalHost, logger } = {}) {
+  try {
+    const result = await ensureFn(root, { logger });
+    if (!result?.ok) {
+      logger?.warn?.("terminal host not reachable; the terminal view stays empty until the relay is running");
+    }
+    return result;
+  } catch (error) {
+    logger?.warn?.(`terminal host unavailable (non-fatal): ${error.message}`);
+    return { ok: false };
+  }
+}
+
 export async function startPanelHost(options = {}) {
   const { server, logger, metricsCollector } = createPanelServer(options);
   try {
@@ -87,11 +104,8 @@ export async function startPanelHost(options = {}) {
   }
   const paths = options.paths ?? storePaths();
   const preferredPort = options.port ?? PANEL_PORT;
-  try {
-    await ensureTerminalHost(paths.root, { logger });
-  } catch (error) {
-    logger.warn(`terminal host unavailable (non-fatal): ${error.message}`);
-  }
+  // Never fatal to the panel — see discoverTerminalBackend.
+  await discoverTerminalBackend(paths.root, { logger, ensureFn: options.ensureTerminalHostFn });
   const { port, reused, close } = await listenLoopbackPanel(server, preferredPort);
   if (reused) {
     logger.warn(`panel port ${port} already in use; reusing existing panel`);

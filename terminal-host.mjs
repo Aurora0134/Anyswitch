@@ -12,8 +12,11 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as pty from "node-pty";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
+import { isPidAlive } from "./relay-process-manager.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
+export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 
@@ -58,6 +61,32 @@ function shellSpec(shell) {
     args: ["-NoLogo", "-NoProfile"],
     name: "PowerShell",
   };
+}
+
+// Request-response probe sequences PTY programs send to interrogate the
+// terminal (device attributes, mode/status reports, DECRQSS/XTGETTCAP
+// payloads, kitty keyboard negotiation). Replaying them into xterm makes it
+// auto-answer again and the answers land in the PTY as stray visible input.
+// Only complete query forms match; the answer bytes (ESC[?1;2c, ESC[?1049;2$y,
+// ESC[row;colR, ...) and any partial tail never match, so plain drawing,
+// colors and text pass through untouched.
+const REPLY_PROBE_PATTERN = new RegExp([
+  String.raw`\x1b\[0?c`, // DA1: ESC[c / ESC[0c
+  String.raw`\x1b\[>0?c`, // DA2: ESC[>c / ESC[>0c
+  String.raw`\x1b\[=0?c`, // DA3: ESC[=c
+  String.raw`\x1b\[\?\d+(?:;\d+)*\$p`, // DECRQM private: ESC[?N$p
+  String.raw`\x1b\[\d+(?:;\d+)*\$p`, // DECRQM ANSI: ESC[N$p
+  String.raw`\x1b\[(?:5|6)n`, // DSR / cursor position report: ESC[5n / ESC[6n
+  String.raw`\x1b\[\?\d+n`, // private DSR: ESC[?Nn (DECDSR answers carry params, kept)
+  String.raw`\x1bP\$q[^\x1b\x07]*(?:\x1b\\|\x07)`, // DECRQSS: DCS $q ... ST
+  String.raw`\x1bP\+q[^\x1b\x07]*(?:\x1b\\|\x07)`, // XTGETTCAP: DCS +q ... ST
+  String.raw`\x1b\[\?u`, // kitty keyboard query: ESC[?u
+  String.raw`\x1b\[>\d+(?:;\d+)*u`, // kitty keyboard flag push: ESC[>Nu
+].join("|"), "g");
+
+export function stripTerminalReplyProbes(text) {
+  if (!text) return "";
+  return String(text).replace(REPLY_PROBE_PATTERN, "");
 }
 
 function snapshot(session) {
@@ -179,7 +208,10 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       connection: "keep-alive",
     });
     res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot(session), buffer: [] })}\n\n`);
-    for (const chunk of session.buffer) res.write(`event: data\ndata: ${JSON.stringify(chunk)}\n\n`);
+    // Replay is probe-stripped and joined across chunk boundaries so a query
+    // split between PTY writes is still recognized; live chunks pass through.
+    const replay = stripTerminalReplyProbes(session.buffer.join(""));
+    if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
     const listener = (chunk) => {
       if (chunk === null) res.write("event: exit\ndata: {}\n\n");
       else res.write(`event: data\ndata: ${JSON.stringify(chunk)}\n\n`);
@@ -297,11 +329,44 @@ export async function startTerminalHost(options = {}) {
   return host;
 }
 
+// Death pact with the owning relay: a non-detached Windows child does NOT die
+// with its parent, and the pre-update history of this host (detached and
+// ownerless, outliving every app update) is exactly the failure being closed
+// out. While TERMINAL_PARENT_PID_ENV names a live relay, the relay's graceful
+// shutdown kills this child first; this poller is the backstop for every path
+// that doesn't (hard kill of the relay alone, fatal exit). Returns null when
+// no valid parent pid was supplied, leaving manual/test runs untouched.
+export function watchParentProcess({
+  parentPid,
+  isAlive = isPidAlive,
+  intervalMs = PARENT_WATCHDOG_INTERVAL_MS,
+  setIntervalFn = setInterval,
+  onDead,
+}) {
+  if (!Number.isInteger(parentPid) || parentPid <= 0) return null;
+  let fired = false;
+  const timer = setIntervalFn(() => {
+    if (fired || isAlive(parentPid)) return;
+    fired = true;
+    onDead?.();
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
+
 const isMain = process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
 if (isMain) {
   startTerminalHost().then((host) => {
     process.on("SIGINT", () => host.close().then(() => process.exit(0)));
     process.on("SIGTERM", () => host.close().then(() => process.exit(0)));
+    // Relay-owned mode: the parent relay pid arrives via env; when the relay
+    // is gone this host must follow. Without the env var (tests, single
+    // runs) nothing changes.
+    const parentPid = Number.parseInt(process.env[TERMINAL_PARENT_PID_ENV] ?? "", 10);
+    watchParentProcess({
+      parentPid,
+      onDead: () => host.close().then(() => process.exit(0)),
+    });
   }).catch((error) => {
     process.stderr.write(`[terminal-host] failed: ${error.stack || error}\n`);
     process.exit(1);

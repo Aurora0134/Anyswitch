@@ -33,9 +33,12 @@ import { createStoreWatcher } from "./agent-sync.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { createInstanceSocketOwner } from "./instance-socket-owner.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
+import { stopStaleTerminalHost, TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
+import { spawn } from "node:child_process";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const RELAY_PORT = 47821;
+const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("terminal-host.mjs", import.meta.url));
 const LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
 
 // Startup-only log rotation: once relay-host.log crosses the threshold, rename
@@ -79,6 +82,78 @@ function relayDataRoot(base = process.env) {
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
     "Anyswitch",
   );
+}
+
+// Terminal host ownership. Pre-update builds had the PANEL spawn
+// terminal-host DETACHED and never stop it, so an app update left the old
+// process serving old terminal code forever. The resident relay now owns the
+// terminal host as a plain NON-detached child held by handle (never unref'd):
+// it starts right after the relay starts listening, stop() kills it before
+// every relay exit, and a foreign survivor on 47823 is reported, never
+// murdered. The child additionally self-watches TERMINAL_PARENT_PID_ENV as
+// the crash backstop (Windows children do not die with their parent).
+//
+// A terminal host that fails to spawn or exits early (port still held,
+// missing pty binding) must NEVER take the relay down — the panel already
+// renders that as an empty terminal view, so a warn log is the whole
+// handling.
+export function createTerminalHostSupervisor({
+  root,
+  spawnFn = spawn,
+  logger = console,
+  env = process.env,
+  selfPid = process.pid,
+  cleanupStale = (rootArg, depsArg) => stopStaleTerminalHost(rootArg, depsArg),
+  script = TERMINAL_HOST_SCRIPT,
+} = {}) {
+  let child = null;
+  return {
+    async start() {
+      // One-time migration sweep (see stopStaleTerminalHost). A refusal means
+      // 47823 belongs to a foreign process: skip the spawn rather than fight
+      // for the port.
+      try {
+        const cleanup = await cleanupStale(root, { logger });
+        if (cleanup.killed?.length) {
+          logger.info(`stale terminal host(s) ${cleanup.killed.join(", ")} terminated before respawn`);
+        }
+        if (!cleanup.ok) {
+          logger.warn(`terminal host not started this run: ${cleanup.reason}`);
+          return { ok: false, skipped: true, reason: cleanup.reason };
+        }
+      } catch (error) {
+        logger.warn(`stale terminal host sweep failed (continuing): ${error.message}`);
+      }
+      let spawned;
+      try {
+        spawned = spawnFn(process.execPath, [script], {
+          cwd: __dirname,
+          stdio: "ignore",
+          windowsHide: true,
+          env: { ...env, [TERMINAL_PARENT_PID_ENV]: String(selfPid) },
+        });
+      } catch (error) {
+        logger.warn(`terminal host spawn failed (terminal view stays empty until the next relay start): ${error.message}`);
+        return { ok: false, skipped: false };
+      }
+      child = spawned;
+      child.on?.("exit", (code, signal) => {
+        if (child !== spawned) return; // our own stop() raced us to it
+        child = null;
+        logger.warn(`terminal host exited early (code ${code ?? "null"}, signal ${signal ?? "none"}); terminal view stays empty until the next relay start`);
+      });
+      return { ok: true, pid: child.pid ?? null };
+    },
+    stop() {
+      if (!child) return;
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      child = null;
+    },
+  };
 }
 
 // Mirror of zcode-launcher.mjs createOpenAIProductionDeps, but injecting the
@@ -229,6 +304,12 @@ export async function startResidentRelay(options = {}) {
   writeRelayPid(process.pid, pidPath);
   const clearPid = () => clearRelayPid(pidPath);
 
+  // The terminal host lives and dies with THIS relay (see
+  // createTerminalHostSupervisor): swept-and-spawned here, killed in
+  // shutdown() below, replaced wholesale on every update.
+  const terminalSupervisor = options.terminalSupervisor ?? createTerminalHostSupervisor({ root, logger });
+  await terminalSupervisor.start();
+
   // Initial sync of all agent configs (zcode, dsh, pi, kimi, qoder, codex,
   // opencode, grok).
   // Spawned as a child process so the merge logic always loads from disk —
@@ -266,6 +347,8 @@ export async function startResidentRelay(options = {}) {
   // the pid file so relay-process-manager sees "stopped" and can start cleanly.
   const shutdown = async (signal) => {
     logger.info(`${signal} received, shutting down`);
+    // The terminal host child goes first — it must never outlive this relay.
+    terminalSupervisor.stop();
     // Final snapshot flush: the next relay (restart, login respawn) restores
     // the board's metric history from this file instead of starting at zero.
     try { deps.metricsCollector?.persistMetricsSnapshot?.(); } catch { /* shutdown must not fail on the sidecar */ }
@@ -280,7 +363,10 @@ export async function startResidentRelay(options = {}) {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
-  process.on("exit", () => clearPid());
+  process.on("exit", () => {
+    terminalSupervisor.stop();
+    clearPid();
+  });
 
   return { port, token: deps.token, close, logger, reused };
 }
