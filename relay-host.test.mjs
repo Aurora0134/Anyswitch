@@ -8,7 +8,8 @@ import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache } from "./relay-host.mjs";
+import { EventEmitter } from "node:events";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor } from "./relay-host.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeLogPath() {
@@ -102,4 +103,149 @@ test("warmProcessScanCache tolerates missing or throwing collectors", () => {
   assert.doesNotThrow(() => warmProcessScanCache({
     scanProcesses: () => { throw new Error("sync boom"); },
   }), "injected double that throws synchronously");
+});
+
+// createTerminalHostSupervisor: the relay owns the terminal host as a plain
+// non-detached child (starts after listen, killed before exit), with the
+// pre-start stale sweep in front and a refuse-to-fight stance on foreign port
+// owners. spawnFn/cleanupStale/logger are injected — no real process ever
+// starts.
+
+function fakeChild(pid = 5150) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.killed = false;
+  child.kill = () => {
+    child.killed = true;
+  };
+  return child;
+}
+
+function recordingLogger() {
+  const logged = { info: [], warn: [] };
+  return {
+    logged,
+    info: (line) => logged.info.push(String(line)),
+    warn: (line) => logged.warn.push(String(line)),
+  };
+}
+
+test("createTerminalHostSupervisor spawns a non-detached child carrying the relay pid env", async () => {
+  const child = fakeChild();
+  const calls = [];
+  const supervisor = createTerminalHostSupervisor({
+    root: "root-dir",
+    spawnFn: (file, args, options) => {
+      calls.push({ file, args, options });
+      return child;
+    },
+    logger: recordingLogger(),
+    env: { EXISTING: "1" },
+    selfPid: 4242,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  const result = await supervisor.start();
+  assert.equal(result.ok, true);
+  assert.equal(result.pid, 5150);
+  assert.equal(calls.length, 1);
+  const { file, args, options } = calls[0];
+  assert.equal(file, process.execPath);
+  assert.ok(args[0].endsWith("terminal-host.mjs"), `expected the terminal host script, got ${args[0]}`);
+  assert.equal(options.stdio, "ignore");
+  assert.equal(options.windowsHide, true);
+  assert.ok(!("detached" in options), "the child must stay in the relay's process tree — no detached flag");
+  assert.equal(options.env.ANYSWITCH_TERMINAL_PARENT_PID, "4242", "the child learns its parent through the env");
+  assert.equal(options.env.EXISTING, "1", "the ambient environment is passed through");
+});
+
+test("createTerminalHostSupervisor sweeps stale hosts before spawning", async () => {
+  const order = [];
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      order.push("spawn");
+      return fakeChild();
+    },
+    logger,
+    cleanupStale: async () => {
+      order.push("sweep");
+      return { ok: true, killed: [2384], refused: [] };
+    },
+  });
+
+  await supervisor.start();
+  assert.deepEqual(order, ["sweep", "spawn"]);
+  assert.ok(logger.logged.info.some((line) => line.includes("2384")), "the sweep is visible in the log");
+});
+
+test("createTerminalHostSupervisor skips the spawn when the sweep refuses a foreign owner", async () => {
+  let spawns = 0;
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      spawns += 1;
+      return fakeChild();
+    },
+    logger,
+    cleanupStale: async () => ({
+      ok: false,
+      killed: [],
+      refused: [777],
+      reason: "refused to kill PID 777: command line does not identify it as an Anyswitch app process",
+    }),
+  });
+
+  const result = await supervisor.start();
+  assert.equal(result.ok, false);
+  assert.equal(result.skipped, true);
+  assert.equal(spawns, 0, "no fight for a port the sweep could not free");
+  assert.ok(logger.logged.warn.some((line) => line.includes("777")), "the refusal reaches the log");
+});
+
+test("createTerminalHostSupervisor.start never breaks the relay when spawn throws", async () => {
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      throw new Error("spawn ENOENT");
+    },
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  const result = await supervisor.start();
+  assert.equal(result.ok, false, "a failed spawn is a result, not an exception");
+  assert.ok(logger.logged.warn.some((line) => line.includes("spawn ENOENT")));
+});
+
+test("createTerminalHostSupervisor logs an early child exit without throwing", async () => {
+  const child = fakeChild();
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => child,
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  await supervisor.start();
+  child.emit("exit", 1, null); // e.g. port 47823 still held by a zombie
+
+  assert.ok(logger.logged.warn.some((line) => line.includes("exited early")), "the early exit is logged");
+  supervisor.stop(); // the dead child is forgotten — stopping again is a no-op
+});
+
+test("createTerminalHostSupervisor.stop kills the child exactly once and tolerates repeats", async () => {
+  const child = fakeChild();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => child,
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  await supervisor.start();
+  supervisor.stop();
+  assert.equal(child.killed, true, "shutdown kills the terminal host first");
+  child.emit("exit", null, "SIGTERM"); // our own kill landing must not warn
+  supervisor.stop();
+  assert.doesNotThrow(() => supervisor.stop());
 });
