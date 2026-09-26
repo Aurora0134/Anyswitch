@@ -2808,6 +2808,8 @@ describe("panel.html 设置全页视图", () => {
     const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
     assert.ok(init && init[0].includes('view === "settings" ? $("settingsView")'),
       "开屏淡出后的入场动画覆盖设置视图");
+    assert.ok(init && init[0].includes('view === "terminal" ? $("terminalView")'),
+      "开屏淡出后的入场动画覆盖终端页（漏一格就落在链尾的会话页上播）");
   });
 
   it("恢复决策实测：设置页标记决定落点，返回目标取主视图，launcher 首开清标记", () => {
@@ -2855,6 +2857,133 @@ describe("panel.html 设置全页视图", () => {
     // 没停在设置页：标记为 0 时不得凭空进设置
     const mainOnly = run({ "panel-view": "stats", "panel-settings-open": "0" }, {});
     assert.deepEqual(mainOnly.calls, ["stats"], "只恢复主视图");
+  });
+
+  // ── 终端页整页加载恢复（外部刷新不再弹回主页）──────────────────────────
+  // 9-21 那次给设置页补的是「localStorage 标记 + 首帧预绘」；终端页 9-24 接进来时
+  // 跟着设置页的旧规则一起被排除在视图恢复之外，于是「在终端页遭遇外部刷新直接回到
+  // 主页」在同一条链上复现。三条红线在此钉死：标记优先序、返回目标不被终端页吃掉、
+  // 活动标签按存档回读（否则多标签时永远落最早那个，看着就是「历史丢了」）。
+  it("终端页存档：switchView 写两把键，panel-view 那份仍是主视图", () => {
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found in panel.js");
+    assert.ok(sw[1].includes('localStorage.setItem("panel-terminal-open", terminal ? "1" : "0")'),
+      "进终端页打标记、离开即清");
+    assert.ok(/if \(!settings && !terminal\) try \{ localStorage\.setItem\("panel-view", name\)/.test(sw[1]),
+      "终端页与设置页同样不占 panel-view——那份仍是设置页「←退出」的目标");
+  });
+
+  it("恢复决策实测：终端页标记优先于设置页，返回目标仍是主视图，首开两把键一起清", () => {
+    const body = (panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/) || [])[1];
+    assert.ok(body, "restoreView found in panel.js");
+    const run = (store, win) => {
+      const calls = [];
+      return new Function("store", "win", "calls", `
+        let suppressViewEnter = false, settingsReturnView = "board", settingsSubTabToRestore = null,
+            restartEnterView = null, currentView = "board";
+        const window = win;
+        const localStorage = {
+          getItem: (k) => (k in store ? store[k] : null),
+          setItem: (k, v) => { store[k] = v; },
+        };
+        function switchView(name) { currentView = name; calls.push(name); }
+        function restoreView() {
+        ${body}
+        }
+        restoreView();
+        return { calls, currentView, settingsReturnView, settingsSubTabToRestore, restartEnterView, store };
+      `)(store, win, calls);
+    };
+
+    // 停在终端页（进终端前在渠道页）：主视图先落位，终端页是最后一屏
+    const onTerminal = run({ "panel-view": "store", "panel-settings-open": "0", "panel-terminal-open": "1" }, {});
+    assert.deepEqual(onTerminal.calls, ["store", "terminal"], "先恢复主视图再落终端页");
+    assert.strictEqual(onTerminal.settingsReturnView, "store", "终端页 ← 设置页 ← 渠道页，两跳返回目标都在");
+    assert.strictEqual(onTerminal.restartEnterView, null, "普通刷新不记重启入场动画");
+
+    // 两把键同时为真（存档被手改的形态）：按终端页走，不落设置页
+    const both = run({ "panel-view": "board", "panel-settings-open": "1", "panel-terminal-open": "1" }, {});
+    assert.deepEqual(both.calls, ["terminal"], "终端页标记压过设置页标记");
+
+    // 面板服务重启后自动刷新回来：落终端页，入场动画记到终端视图
+    const afterRestart = run({ "panel-view": "board", "panel-settings-open": "0", "panel-terminal-open": "1" }, { panelStartupRestart: true });
+    assert.deepEqual(afterRestart.calls, ["terminal"], "重启回来仍在终端页");
+    assert.strictEqual(afterRestart.restartEnterView, "terminal", "开屏淡出后播终端页入场");
+
+    // 没停在终端页：标记为 0 / 值不是 1 一律不凭空进终端
+    assert.deepEqual(run({ "panel-view": "stats", "panel-settings-open": "0", "panel-terminal-open": "0" }, {}).calls,
+      ["stats"], "标记为 0 时只恢复主视图");
+    assert.deepEqual(run({ "panel-view": "stats", "panel-settings-open": "0", "panel-terminal-open": "yes" }, {}).calls,
+      ["stats"], "标记值不是 1 按未停进终端处理");
+
+    // 设置页那条链逐条保持改前行为（本改动不许动它）
+    const onSettings = run({ "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "theme" }, {});
+    assert.deepEqual(onSettings.calls, ["store", "settings"], "设置页恢复链不受终端页分支影响");
+    assert.strictEqual(onSettings.settingsSubTabToRestore, "theme", "子 tab 存档照常交棒");
+    assert.strictEqual(onSettings.settingsReturnView, "store", "设置页返回目标仍取主视图");
+
+    // launcher 首开：固定落看板，两把键一起清——留着任何一把，本页第一次刷新就跳进去
+    const launched = run({ "panel-view": "store", "panel-settings-open": "1", "panel-terminal-open": "1" }, { panelStartupLaunch: true });
+    assert.deepEqual(launched.calls, [], "首开不恢复，停在看板");
+    assert.strictEqual(launched.store["panel-settings-open"], "0", "首开清设置页标记");
+    assert.strictEqual(launched.store["panel-terminal-open"], "0", "首开清终端页标记");
+  });
+
+  it("活动标签按存档回读：存档在册优先，认不到才回落第一个并改写存档", () => {
+    const srcOf = (name) => {
+      const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(src, `${name} found in panel.js`);
+      return src;
+    };
+    const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
+      "terminalBackendSession", "rebuildTerminalBackendSessions"].map(srcOf).join("\n");
+    // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
+    const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
+      let activeTerminalPreviewId = initialId;
+      let terminalBackendSessions = {};
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = v; },
+        removeItem: (k) => { delete store[k]; },
+      };
+      const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";
+      ${bodies}
+      rebuildTerminalBackendSessions(items);
+      return { active: activeTerminalPreviewId, ids: Object.keys(terminalBackendSessions) };
+    `)(store, items, initialId);
+    const three = [{ id: "t-old" }, { id: "t-mid" }, { id: "t-new" }];
+
+    const remembered = run({ "panel-terminal-session": "t-mid" }, three);
+    assert.strictEqual(remembered.active, "t-mid", "刷新后回到刷新前看着的那个标签，而不是最早创建的");
+
+    const staleStore = { "panel-terminal-session": "t-gone" };
+    const stale = run(staleStore, three);
+    assert.strictEqual(stale.active, "t-old", "存档里的会话已被别处关掉 → 回落第一个");
+    assert.strictEqual(staleStore["panel-terminal-session"], "t-old", "回落即改写存档，不留失效值再踩一次");
+
+    const freshStore = {};
+    run(freshStore, three);
+    assert.strictEqual(freshStore["panel-terminal-session"], "t-old", "没有存档时仍是第一个（改前行为），并把落定的 id 记进存档");
+
+    const goneStore = { "panel-terminal-session": "t-gone" };
+    const none = run(goneStore, []);
+    assert.strictEqual(none.active, null, "零会话不硬造活跃标签");
+    assert.ok(!("panel-terminal-session" in goneStore), "零会话即摘存档，下次恢复不认领不存在的会话");
+
+    // 预览稿假 id 不进存档：降级下点「+」产的 "preview-N" 服务端根本不认
+    const previewStore = {};
+    new Function("store", `
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = v; },
+        removeItem: (k) => { delete store[k]; },
+      };
+      ${srcOf("rememberTerminalSessionId")}
+      rememberTerminalSessionId("preview-1");
+      rememberTerminalSessionId("t-real");
+    `)(previewStore);
+    assert.ok(!("panel-terminal-session" in previewStore) || previewStore["panel-terminal-session"] === "t-real",
+      "preview- 一律当无值处理，真 id 才写档");
   });
 
   // ── 首帧视图落位：整页加载不再先画出看板 ──────────────────────────────
@@ -2921,6 +3050,20 @@ describe("panel.html 设置全页视图", () => {
       store: { "panel-view": "stats", "panel-settings-open": "0" } },
     { name: "停在会话页", view: "sessions", subTab: null,
       store: { "panel-view": "sessions", "panel-settings-open": "0" } },
+    { name: "停在终端页（进终端前在渠道页）", view: "terminal", subTab: null,
+      store: { "panel-view": "store", "panel-settings-open": "0", "panel-terminal-open": "1" } },
+    { name: "停在终端页且设置页标记也在（存档被手改）→ 终端页优先", view: "terminal", subTab: null,
+      store: { "panel-view": "board", "panel-settings-open": "1", "panel-settings-subtab": "theme", "panel-terminal-open": "1" } },
+    { name: "终端页标记值不是 1 → 按主视图走，不凭空进终端", view: "stats", subTab: null,
+      store: { "panel-view": "stats", "panel-settings-open": "0", "panel-terminal-open": "yes" } },
+    { name: "停在终端页时子 tab 存档不参与首帧（首帧是终端页本身）", view: "terminal", subTab: null,
+      store: { "panel-view": "sessions", "panel-settings-open": "0", "panel-settings-subtab": "about", "panel-terminal-open": "1" } },
+    { name: "launcher 首开固定落看板（终端页标记同属上一次会话）", view: "board", subTab: null,
+      store: { "panel-view": "store", "panel-settings-open": "0", "panel-terminal-open": "1" },
+      win: { panelStartupLaunch: true } },
+    { name: "面板服务重启后的自动刷新回终端页", view: "terminal", subTab: null,
+      store: { "panel-view": "board", "panel-settings-open": "0", "panel-terminal-open": "1" },
+      win: { panelStartupRestart: true } },
     { name: "没有任何存档 → 看板就是 HTML 默认，不写属性", view: "board", subTab: null, store: {} },
     { name: "panel-view 值不在册 → 同上", view: "board", subTab: null,
       store: { "panel-view": "nope", "panel-settings-open": "0" } },
@@ -3022,8 +3165,8 @@ describe("panel.html 设置全页视图", () => {
         reveals.push({ id, display, hidden: sel.includes("[hidden]"), important: decl.includes("!important") });
       }
     }
-    assert.ok(reveals.length >= 11,
-      `取得显示侧规则 ${reveals.length} 条，少于六视图+设置头行+四块子面板`);
+    assert.ok(reveals.length >= 12,
+      `取得显示侧规则 ${reveals.length} 条，少于六主视图+终端页+设置头行+四块子面板`);
     for (const r of reveals) {
       assert.strictEqual(r.display, ownDisplay(r.id), `${r.id} 首帧 display=${r.display}，容器自身是 ${ownDisplay(r.id)}`);
       if (r.hidden) {
@@ -3036,7 +3179,29 @@ describe("panel.html 设置全页视图", () => {
       "首帧收起看板");
     assert.ok(/html\[data-prepaint-view="settings"\] #mainHeadInner \{ display: none; \}/.test(block),
       "首帧收起主头行（仅设置页）");
-    const isList = (block.match(/:is\(([^)]*)\)/) || [, ""])[1]
+    // 终端页整页形态：body.terminal-mode 那四条要等 switchView 挂类，首帧没有类，
+    // 必须按属性前缀重述一遍——漏一条就是「首帧带着站点头与页脚、落定后整屏跳一次」。
+    assert.ok(/html\[data-prepaint-view="terminal"\] #mainHeadInner \{ display: none; \}/.test(block),
+      "首帧收起主头行（终端页）");
+    for (const probe of [
+      /html\[data-prepaint-view="terminal"\] body \{ overflow: hidden; \}/,
+      /html\[data-prepaint-view="terminal"\] body header\.site-head \{ display: none; \}/,
+      /html\[data-prepaint-view="terminal"\] body > footer \{ display: none; \}/,
+      /html\[data-prepaint-view="terminal"\] body main\.layout-container \{ max-width: none; padding: 0; margin: 0; \}/,
+    ]) {
+      assert.ok(probe.test(block), `终端页首帧整页形态缺一条：${probe.source}`);
+    }
+    // 终端页的会话级静态种子（设计稿遗留）首帧一律不露
+    const terminalSeedIs = (block.match(/:is\(([^)]*terminal-session-bar[^)]*)\)/) || [, ""])[1]
+      .split(",").map((s) => s.trim().replace(/^[.#]/, "")).filter(Boolean);
+    assert.deepEqual(terminalSeedIs, ["terminal-session-bar", "terminal-foot-status", "terminal-foot-stats", "terminalInspector"],
+      "终端页首帧收起的静态种子名单：假会话栏 / 假底栏两段 / 假监测区");
+    assert.ok(/html\[data-prepaint-view="terminal"\] \.terminal-workspace \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(block),
+      "终端页首帧工作区收成单列（取值须与 .terminal-workspace.is-empty 逐字同）");
+    assert.ok(/\.terminal-workspace\.is-empty \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(base),
+      "运行时的 is-empty 单列规则仍是首帧那条的取值来源");
+    // 六块子面板的整收起规则按内容认：块里现在不止一处 :is()，位置不再唯一
+    const isList = (block.match(/:is\(([^)]*settingsPanelGeneral[^)]*)\)/) || [, ""])[1]
       .split(",").map((s) => s.trim().replace(/^#/, "")).filter(Boolean);
     assert.deepEqual(isList, ["settingsPanelGeneral", "settingsPanelAdvanced", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelExperimental", "settingsPanelAbout"],
       "子 tab 整体收起规则覆盖六块面板");
@@ -6131,10 +6296,13 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       "空态「重新连接」重跑 fetch 成功链路");
     const render = extractFn("renderTerminalPreviewSession");
     assert.ok(render.includes("terminalBackendReady === false"), "降级闸判定键是就绪位，不是会话数");
+    assert.ok(render.includes("if (!terminalFirstConnectSettled) renderTerminalPendingState();"),
+      "降级闸先看首连定性位：未定性落 pending，不落「服务未运行」");
     assert.ok(render.includes("renderTerminalUnavailableState();"), "降级时渲染通路整体改落空态");
     assert.ok(render.includes("renderTerminalEmptyState();"), "零会话（含回归）落空态，不再静默 return 挂占位数据");
     assert.ok(unavailable.includes('tabs.innerHTML = ""'), "落空态即清空静态假页签");
-    assert.ok(unavailable.includes('querySelector(".terminal-session-bar")'), "落空态即隐藏假会话栏");
+    assert.ok(unavailable.includes("setTerminalSessionChromeVisible(false)"),
+      "假会话栏/假底栏/假监测区与零会话共用同一套退场，不留空 column");
     assert.ok(unavailable.includes("terminalEmpty"), "降级空态优先：零会话覆盖层一并收起");
     assert.ok(render.includes('querySelector(".terminal-foot-status")'), "就绪路径恢复底栏左段");
   });
@@ -6159,7 +6327,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
 
   function unavailableSandbox() {
     const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "renderTerminalEmptyState",
-      "clearTerminalEmptyState", "syncTerminalAddBtn", "connectTerminalBackend"]
+      "clearTerminalEmptyState", "setTerminalSessionChromeVisible", "renderTerminalPendingState",
+      "syncTerminalAddBtn", "connectTerminalBackend"]
       .map(extractFn).join("\n");
     const els = {
       terminalUnavailable: { hidden: true },
@@ -6171,7 +6340,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       terminalAddBtn: { disabled: false },
       terminalInspector: { style: {} },
       terminalTabs: { innerHTML: "<button>payment-service</button>" },
-      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c) }, classes: new Set() },
+      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
       ".terminal-session-bar": { style: {} },
       ".terminal-foot-status": { style: {} },
     };
@@ -6183,6 +6352,9 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const $ = (id) => els[id] ?? null;
       const document = { querySelector: (sel) => els[sel] ?? null };
       let terminalBackendReady = false;
+      // 默认按「首连已定性」起沙盒：既有降级三态测的是失败之后的画面；
+      // 首连在飞那一态由 setSettled(false) 单独摆出来。
+      let terminalFirstConnectSettled = true;
       const activeTerminalPreviewId = "t1";
       const currentView = "terminal";
       const console = { warn: () => {} };
@@ -6202,10 +6374,13 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       return {
         render: renderTerminalPreviewSession,
         renderUnavailable: renderTerminalUnavailableState,
+        renderPending: renderTerminalPendingState,
         syncAddBtn: syncTerminalAddBtn,
         connect: connectTerminalBackend,
         setReady: (v) => { terminalBackendReady = v; },
         ready: () => terminalBackendReady,
+        setSettled: (v) => { terminalFirstConnectSettled = v; },
+        settled: () => terminalFirstConnectSettled,
       };
     `)(els, state);
     return { sandbox, els, state };
@@ -6223,6 +6398,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(els.terminalTabs.innerHTML, "", "降级清空静态假页签（payment-service/portal 种子）");
     assert.equal(els[".terminal-session-bar"].style.display, "none", "降级隐藏静态假会话栏");
     assert.equal(els[".terminal-foot-status"].style.display, "none", "降级隐藏静态假底栏左段（PID/尺寸种子）");
+    assert.equal(els.terminalInspector.style.display, "none", "降级隐藏静态假监测区（payment-service/Codex CLI 种子）");
+    assert.ok(els.terminalWorkspace.classList.contains("is-empty"), "监测区退场即收成单列，不留 340px 空 column");
     assert.equal(state.connected, null, "不建流——mock 横幅不进屏");
     assert.equal(state.renderedData, 0, "假会话数据不渲染");
 
@@ -6280,10 +6457,10 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     // function 起匹配会丢掉它，函数体里的 await 会直接语法错误）。
     const pollSrc = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
     assert.ok(pollSrc, "pollTerminalSessions found in panel.js");
-    const bodies = [pollSrc, extractFn("renderTerminalEmptyState")].join("\n");
+    const bodies = [pollSrc, extractFn("renderTerminalEmptyState"), extractFn("setTerminalSessionChromeVisible")].join("\n");
     const els = {
       terminalEmpty: { hidden: true },
-      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c) }, classes: new Set() },
+      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
       terminalTabs: { innerHTML: "" },
     };
     const state = { data: 0, enriched: 0, requested: 0, renderedData: 0, renderedTabs: 0 };
@@ -6332,6 +6509,31 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(state.polled, 1, "成功链路补拍归属轮询");
     assert.equal(state.synced, 1, "成功链路同步活跃真值流");
     assert.deepEqual(state.connected, { id: "t1", backend: true }, "成功链路建流进真会话");
+  });
+
+  it("首连在飞那一帧不落降级空态：静态种子退场、覆盖层不盖，定性失败才落空态", async () => {
+    // 刷新恢复直接落进终端页时，就绪位还是 false 而列表请求还在飞（实测一个往返
+    // 16–41ms）。这一帧的空白是「还不知道」：既不能谎称服务未运行，也不能谎称零会话。
+    const { sandbox, els, state } = unavailableSandbox();
+    sandbox.setSettled(false);
+    state.session = { id: "t1", backend: true };
+    sandbox.render();
+    assert.equal(els.terminalUnavailable.hidden, true, "未定性不盖「终端服务未运行」");
+    assert.equal(els.terminalEmpty.hidden, true, "未定性也不盖「当前没有终端」");
+    assert.equal(els.terminalTabs.innerHTML, "", "未定性即清空静态假页签");
+    assert.equal(els[".terminal-session-bar"].style.display, "none", "假会话栏退场");
+    assert.equal(els[".terminal-foot-status"].style.display, "none", "假底栏左段（PID/尺寸种子）退场");
+    assert.equal(els.terminalInspector.style.display, "none", "假监测区（payment-service/Codex CLI）退场");
+    assert.equal(els.terminalAddBtn.disabled, true, "「+」按未就绪保持禁用");
+    assert.equal(state.connected, null, "未定性不建流");
+    assert.equal(state.renderedData, 0, "未定性不渲会话数据");
+
+    // 首连真失败即定性，降级空态照旧落下（改前后行为一致）
+    await sandbox.connect();
+    assert.equal(sandbox.settled(), true, "首连失败即定性");
+    assert.equal(sandbox.ready(), false, "失败仍是未就绪");
+    assert.equal(els.terminalUnavailable.hidden, false, "定性失败落降级空态");
+    assert.equal(els.terminalEmpty.hidden, true, "降级空态优先于零会话空态");
   });
 });
 
@@ -6482,7 +6684,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
 
   function addMenuSandbox({ environment, environmentError } = {}) {
     const bodies = ["closeTerminalAddMenu", "loadInstalledTerminalAgents", "renderTerminalAddMenuList",
-      "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize"]
+      "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize",
+      // 新终端置活跃要写存档；沙盒没有 localStorage，正好真跑一遍助手里的兜底分支。
+      "rememberTerminalSessionId"]
       .map(extractFn).join("\n");
     const btnRect = { left: 400, right: 430, top: 12, bottom: 42 };
     const barRect = { left: 0, top: 0, width: 1200 };

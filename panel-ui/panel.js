@@ -289,6 +289,7 @@ async function api(method, path, body) {
               : view === "store" ? $("storeView")
               : view === "stats" ? $("statsView")
               : view === "settings" ? $("settingsView")
+              : view === "terminal" ? $("terminalView")
               : $("sessionsView");
             enteredView.classList.remove("view-enter");
             void enteredView.offsetWidth;
@@ -3391,6 +3392,29 @@ async function api(method, path, body) {
   let terminalImeFitPending = false;
   let terminalImeAnchorTextarea = null;
   let terminalBackendReady = false;
+  // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
+  // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
+  // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
+  let terminalFirstConnectSettled = false;
+  // 终端页位置存档，形状照设置页那次定案：panel-view 继续只存主视图（它是设置页
+  // 「←退出」的目标），「停在终端页」记 panel-terminal-open（switchView 写、
+  // restoreView 读），「看着哪个标签」记 panel-terminal-session（下面两个助手）。
+  // 键名一律用字面量：restoreView 会被测试抽进桩环境真跑，那份环境只有 localStorage。
+
+  function storedTerminalSessionId() {
+    try { return localStorage.getItem("panel-terminal-session"); } catch { return null; }
+  }
+
+  // 只记后端会话：预览稿的假 id（"preview-N"）不进存档，否则下一次恢复会拿一个
+  // 服务端根本不存在的 id 去认领。
+  function rememberTerminalSessionId(id) {
+    if (typeof id === "string" && id.startsWith("preview-")) id = null;
+    try {
+      if (id) localStorage.setItem("panel-terminal-session", id);
+      else localStorage.removeItem("panel-terminal-session");
+    } catch {}
+  }
+
   // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
   let terminalPollTimer = null;
@@ -3666,7 +3690,15 @@ async function api(method, path, body) {
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     if (!terminalBackendSessions[activeTerminalPreviewId]) {
-      activeTerminalPreviewId = Object.keys(terminalBackendSessions)[0] || null;
+      // 刷新后「看着哪个标签」从存档回读：整页加载把内存里的活动 id 打回预览稿遗留的
+      // 初值，直接取会话表第一个键等于永远落回最早创建的那个终端——多标签时这就是
+      // 「历史丢了」。认不到（别的窗口关了它、宿主换过）才回落第一个，并把落定的
+      // id 写回存档，不留着失效值让下一次恢复再踩。
+      const remembered = storedTerminalSessionId();
+      activeTerminalPreviewId = (remembered && terminalBackendSessions[remembered])
+        ? remembered
+        : (Object.keys(terminalBackendSessions)[0] || null);
+      rememberTerminalSessionId(activeTerminalPreviewId);
     }
   }
 
@@ -3690,6 +3722,7 @@ async function api(method, path, body) {
       const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: TERMINAL_DEFAULT_CWD, shell: "powershell", ...terminalCreateSize() });
       rebuildTerminalBackendSessions([...(data.sessions || []), created]);
       activeTerminalPreviewId = created.id;
+      rememberTerminalSessionId(created.id);
     }
   }
 
@@ -4152,36 +4185,55 @@ async function api(method, path, body) {
     renderTerminalPreviewRoute(session);
   }
 
+  // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，
+  // 页签栏、会话名/路径/分支那条、底栏左段（本地终端 / PID / 行列数）、右侧监测区
+  // 都是设计稿遗留，一帧都不能露；监测区退场后工作区收成全宽，否则右侧空一列、
+  // 空背景被切成半幅。
+  function setTerminalSessionChromeVisible(visible) {
+    const mode = visible ? "" : "none";
+    const sessionBar = document.querySelector(".terminal-session-bar");
+    if (sessionBar) sessionBar.style.display = mode;
+    const footStatus = document.querySelector(".terminal-foot-status");
+    if (footStatus) footStatus.style.display = mode;
+    const inspector = $("terminalInspector");
+    if (inspector) inspector.style.display = mode;
+    const workspace = $("terminalWorkspace");
+    if (workspace) workspace.classList.toggle("is-empty", !visible);
+  }
+
   // 零会话空态：终端页一个终端都没有时（关掉最后一个标签、或回归时本就是零
   // 会话），盖一层空背景 + 文字提示，不退出终端页——退出后再进入只会挂一个
-  // 没有会话的空页；也不伪装会话。会话栏 / 底栏左段 / 监测区整块属于当前
-  // 会话，没有会话时连静态种子一起退场；「+」留在页签栏原处可直接新建。
+  // 没有会话的空页；也不伪装会话。
   function renderTerminalEmptyState() {
     const overlay = $("terminalEmpty");
     if (overlay) overlay.hidden = false;
-    const sessionBar = document.querySelector(".terminal-session-bar");
-    if (sessionBar) sessionBar.style.display = "none";
-    const footStatus = document.querySelector(".terminal-foot-status");
-    if (footStatus) footStatus.style.display = "none";
-    // 监测区整块属于当前会话：没有会话时连静态种子一起退场，只留空背景。
-    const inspector = $("terminalInspector");
-    if (inspector) inspector.style.display = "none";
-    // 监测区退场后工作区收成全宽：否则右侧留一条空列，空背景被切成半幅。
-    const workspace = $("terminalWorkspace");
-    if (workspace) workspace.classList.add("is-empty");
+    setTerminalSessionChromeVisible(false);
   }
 
   function clearTerminalEmptyState() {
     const overlay = $("terminalEmpty");
     if (overlay) overlay.hidden = true;
-    const sessionBar = document.querySelector(".terminal-session-bar");
-    if (sessionBar) sessionBar.style.display = "";
-    const footStatus = document.querySelector(".terminal-foot-status");
-    if (footStatus) footStatus.style.display = "";
-    const inspector = $("terminalInspector");
-    if (inspector) inspector.style.display = "";
-    const workspace = $("terminalWorkspace");
-    if (workspace) workspace.classList.remove("is-empty");
+    setTerminalSessionChromeVisible(true);
+  }
+
+  // 首连在飞那一帧：与降级空态同一套种子退场，只是不盖「服务未运行」那层文字——
+  // 此刻还没拿到任何证据，说服务不在是编造。新建键按就绪位保持禁用，画面等首连
+  // 定性后由就绪/降级两条路各自重绘。
+  function renderTerminalPendingState() {
+    const unavailable = $("terminalUnavailable");
+    if (unavailable) unavailable.hidden = true;
+    const empty = $("terminalEmpty");
+    if (empty) empty.hidden = true;
+    const metricsSection = $("terminalMetricsSection");
+    if (metricsSection) metricsSection.hidden = true;
+    const footStats = $("terminalFootStats");
+    if (footStats) footStats.hidden = true;
+    const routeSection = $("terminalRouteLine")?.closest(".terminal-route-section");
+    if (routeSection) routeSection.hidden = true;
+    const tabs = $("terminalTabs");
+    if (tabs) tabs.innerHTML = "";
+    setTerminalSessionChromeVisible(false);
+    syncTerminalAddBtn();
   }
 
   // 降级空态：terminal-host 不在（面板路由回 503 terminal_host_unavailable）时，
@@ -4194,8 +4246,6 @@ async function api(method, path, body) {
     // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
     const empty = $("terminalEmpty");
     if (empty) empty.hidden = true;
-    const workspace = $("terminalWorkspace");
-    if (workspace) workspace.classList.remove("is-empty");
     const metricsSection = $("terminalMetricsSection");
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
@@ -4204,14 +4254,12 @@ async function api(method, path, body) {
     if (routeSection) routeSection.hidden = true;
     const addBtn = $("terminalAddBtn");
     if (addBtn) addBtn.disabled = true;
-    // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏（payment-service/portal、
-    // PID 23140 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
+    // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏/假监测区（payment-service/portal、
+    // PID 23140、Codex CLI 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
+    // 会话级那几条与零会话共用同一套退场动作（含工作区收成单列，不留空 column）。
     const tabs = $("terminalTabs");
     if (tabs) tabs.innerHTML = "";
-    const sessionBar = document.querySelector(".terminal-session-bar");
-    if (sessionBar) sessionBar.style.display = "none";
-    const footStatus = document.querySelector(".terminal-foot-status");
-    if (footStatus) footStatus.style.display = "none";
+    setTerminalSessionChromeVisible(false);
   }
 
   // 新建键与就绪位同拍：降级态禁用（「+」不再产假会话），就绪态放开。
@@ -4323,6 +4371,7 @@ async function api(method, path, body) {
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
         activeTerminalPreviewId = created.id;
+        rememberTerminalSessionId(created.id);
         renderTerminalPreviewSession();
       })
       .catch((error) => toast(panelError(error, "无法启动这个终端"), true));
@@ -4337,6 +4386,7 @@ async function api(method, path, body) {
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
           activeTerminalPreviewId = created.id;
+          rememberTerminalSessionId(created.id);
           renderTerminalPreviewSession();
         })
         .catch((error) => toast(panelError(error, "无法新建终端"), true));
@@ -4350,11 +4400,13 @@ async function api(method, path, body) {
   // 同一通路，三处复用防止再漏改。
   function connectTerminalBackend() {
     return fetchTerminalSessions().then(() => {
+      terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
       renderTerminalPreviewSession();
       pollTerminalSessions();
       syncTerminalActivityStream();
     }).catch((error) => {
+      terminalFirstConnectSettled = true;
       terminalBackendReady = false;
       console.warn("[terminal] backend unavailable:", error);
       renderTerminalUnavailableState();
@@ -4365,7 +4417,10 @@ async function api(method, path, body) {
     // 降级闸：判定键是就绪位本身，不是会话数——零会话会被 fetch 的自动补建
     // 兜住；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
-      renderTerminalUnavailableState();
+      // 首连还在飞：这一帧什么都不知道，既不冒充降级也不冒充零会话，只把静态
+      // 种子收走（见 renderTerminalPendingState）。定性失败才落降级空态。
+      if (!terminalFirstConnectSettled) renderTerminalPendingState();
+      else renderTerminalUnavailableState();
       return;
     }
     const unavailable = $("terminalUnavailable");
@@ -4455,6 +4510,7 @@ async function api(method, path, body) {
         } else delete terminalPreviewSessions[id];
         const remaining = Object.keys(terminalSessionMap());
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
+        rememberTerminalSessionId(activeTerminalPreviewId);
         if (remaining.length === 0) {
           // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
           // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
@@ -4468,6 +4524,7 @@ async function api(method, path, body) {
         return;
       }
       activeTerminalPreviewId = id;
+      rememberTerminalSessionId(id);
       renderTerminalPreviewSession();
     });
     $("terminalReturnBtn").onclick = () => closeTerminalPreview();
@@ -5198,8 +5255,11 @@ async function api(method, path, body) {
     }
     // panel-view 只存主视图（设置视图不覆盖它，那份留着当「←退出」的目标）；
     // 是否停在设置页由 panel-settings-open 单独记，restoreView 按这两个键恢复。
+    // 终端页与设置页同形：它也是从主视图切出去的全页视图，不占 panel-view，
+    // 「停在终端页」由 panel-terminal-open 自己记（刷新恢复按它落回终端页）。
     if (!settings && !terminal) try { localStorage.setItem("panel-view", name); } catch {}
     try { localStorage.setItem("panel-settings-open", settings ? "1" : "0"); } catch {}
+    try { localStorage.setItem("panel-terminal-open", terminal ? "1" : "0"); } catch {}
     let viewReady;
     if (name === "skills") viewReady = refreshSkillsState();
     if (presets) viewReady = refreshPresetsState();
@@ -5246,19 +5306,25 @@ async function api(method, path, body) {
 
   // 刷新页面后留在原 tab（默认看板）；launcher 启动的那一次固定落看板，
   // 刷新与普通访问不受影响，仍按 panel-view 恢复。设置页由 panel-settings-open
-  // 独立标记恢复，「←退出」的目标就是 panel-view 里那份主视图。
+  // 独立标记恢复，「←退出」的目标就是 panel-view 里那份主视图；终端页由
+  // panel-terminal-open 独立标记恢复，优先级排在设置页之前。
   function restoreView() {
     if (window.panelStartupLaunch) {
       // 首开这一跳不算「回来」，可标记是上一次会话留下的：不就地清掉，本页之后第一次
-      // 刷新就会跳进设置页——「固定落看板」只剩首屏那一下管用。
-      try { localStorage.setItem("panel-settings-open", "0"); } catch {}
+      // 刷新就会跳进设置页——「固定落看板」只剩首屏那一下管用。终端页同一回事。
+      try {
+        localStorage.setItem("panel-settings-open", "0");
+        localStorage.setItem("panel-terminal-open", "0");
+      } catch {}
       return;
     }
     let saved = null;
     let settingsOpen = false;
+    let terminalOpen = false;
     try {
       saved = localStorage.getItem("panel-view");
       settingsOpen = localStorage.getItem("panel-settings-open") === "1";
+      terminalOpen = localStorage.getItem("panel-terminal-open") === "1";
     } catch {}
     // 刷新恢复落位不播入场动画；仅命中分支时置位——saved 为 "board"/无效值时不调
     // switchView，无条件置位会让标志残留，顺延吞掉下一次主动切换的动画。
@@ -5270,7 +5336,15 @@ async function api(method, path, body) {
     else if (saved === "store") switchView("store");
     else if (saved === "stats") switchView("stats");
     else if (saved === "sessions") switchView("sessions");
-    if (settingsOpen) {
+    if (terminalOpen) {
+      // 终端页排在设置页之前：进终端页那一刻 panel-settings-open 已被写成 "0"，两把键
+      // 同时为真只可能是存档被手改，按终端页走。上面 saved 链刚落好的主视图仍是设置页
+      // 「←退出」的目标；终端页自己的返回上下文用声明处的默认值（设置页 + 实验性子 tab），
+      // 与点按钮进来那条路同一套，不必另存。
+      settingsReturnView = currentView;
+      suppressViewEnter = true;
+      switchView("terminal");
+    } else if (settingsOpen) {
       // 上面那条链落好的就是进设置前的主视图（没命中则为看板），直接拿来当返回目标；
       // 子 tab 存档交给 enterSettingsView 消费。置位口径同主视图恢复：落位不播动画。
       settingsReturnView = currentView;
@@ -5282,7 +5356,8 @@ async function api(method, path, body) {
       // saved 为 "board"/null/无效值时看板是 HTML 默认显示的、不经 switchView，同样
       // 靠这个标记补播。
       restartEnterView = (saved === "skills" || saved === "presets" || saved === "store" || saved === "stats" || saved === "sessions") ? saved : "board";
-      if (settingsOpen) restartEnterView = "settings";
+      if (settingsOpen && !terminalOpen) restartEnterView = "settings";
+      if (terminalOpen) restartEnterView = "terminal";
     }
   }
 
