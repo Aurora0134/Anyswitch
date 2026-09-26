@@ -2620,6 +2620,26 @@ async function api(method, path, body) {
       updateTask = task;
       return task;
     }
+    function adoptRunningUpdates() {
+      return fetchOnce("/api/environment/updates/active").then((data) => {
+        if (!active) return;
+        for (const run of data?.runs ?? []) {
+          if (run?.state !== "running" || !run.clientId || lifecycleRuns.has(run.clientId)) continue;
+          const tracked = { clientId: run.clientId, action: run.action, runId: run.runId, poll: null };
+          lifecycleRuns.set(run.clientId, tracked);
+          void pollLifecycle(tracked, run.runId).then(
+            (status) => { if (active) reportLifecycleOutcome(status, run.clientId); },
+            () => {},
+          ).finally(() => {
+            lifecycleRuns.delete(run.clientId);
+            if (tracked.poll !== null) { cancelSchedule(tracked.poll); tracked.poll = null; }
+            if (active) { renderLocal(); updateBatchButton(); loadEnvironment(true); }
+          });
+        }
+        renderLocal();
+        updateBatchButton();
+      }, () => {});
+    }
     function enter() {
       if (active) return environmentTask || Promise.resolve();
       active = true;
@@ -2630,7 +2650,10 @@ async function api(method, path, body) {
       // 进页自动查一次（非强制、吃后端缓存）：没查过、上次失败、或结果超过 10 分钟才查；
       // 「检查更新」按钮保留 refresh=1 的强制语义
       if (!update || update.state === "error" || now() - updateAt >= 600_000) checkUpdates(false);
-      return loadEnvironment();
+      // 面板关掉再打开时，安装还在脱离的进程里跑。进页把还没结束的接回来，
+      // 否则按钮会重新变成可点，同一个客户端会被再开一次。
+      const resumed = adoptRunningUpdates();
+      return Promise.all([loadEnvironment(), resumed]);
     }
     function leave() {
       active = false;

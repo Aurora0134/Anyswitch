@@ -36,6 +36,16 @@ import { attributeTerminalSessions, filterTerminalRequestRows } from "./terminal
 import { AGENT_TERMINAL_TARGETS, AGENT_RELAY_PORT, buildAgentSessionLaunch } from "./agent-session-env.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
+import {
+  clientUpdateJournalDir,
+  clientUpdateStatus,
+  listClientUpdateRuns,
+  readClientUpdateRun,
+  reapDeadClientUpdateRuns,
+  runningClientUpdate,
+  spawnClientUpdateWorker,
+  writeClientUpdateRun,
+} from "./client-update-journal.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 
@@ -697,9 +707,10 @@ export function createPanelRouter({
   sessionScanService = null,
   environmentService = null,
   releaseService = null,
-  // 客户端生命周期执行器（client-lifecycle.mjs 的 runClientLifecycle）。
-  // 注入给测试；`null` 在首个安装/更新请求时绑定真实模块。
-  runClientLifecycleFn = null,
+  // 客户端更新的脱离进程。注入给测试；`null` 用真实的脱离拉起。
+  // 安装不在面板进程里跑：面板退出会把还没脱离的子进程一起带走，全局目录留半截。
+  spawnClientUpdateWorkerFn = null,
+  clientUpdateJournalDir: clientUpdateDir = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
@@ -1113,12 +1124,17 @@ export function createPanelRouter({
   // npm 报 ENOTEMPTY、包清单与命令入口一起消失），所以同一个客户端同时只允许一个
   // 任务，同客户端并发 409。不同客户端各装各的包、互不触碰对方的目录，可以并行——
   // 关于页因此能同时开多个更新，而不是一次只放行一个。
-  // 任务跑在后台，前端按 runId 轮询——npm 安装可能慢到超过一次 HTTP 请求的合理等待，
-  // 长连接会先超时丢响应而不是先装完。结果保留在 panel 进程内存里，面板重启即弃；
-  // 页面丢失 runId 后走重新检测自愈（检测结果本身是权威的）。
-  const CLIENT_UPDATE_RUNS_MAX = 20;
-  let lifecycleRuns = null; // Map<runId, run>，首个任务到来才建
-  let lifecycleActive = null; // Map<clientId, run>，按客户端持有的锁
+  // 安装跑在脱离面板的进程里，进度记在本机数据目录：关掉或重启面板不会杀掉正在
+  // 进行的安装，新面板读同一份记录继续报进度。进程已经不在、记录却还写着进行中
+  // 的，按中断收尾，否则这个客户端会被永久锁住。
+  const updateJournalDir = clientUpdateDir ?? clientUpdateJournalDir(relayRoot);
+  const spawnUpdateWorker = spawnClientUpdateWorkerFn ?? ((request) => spawnClientUpdateWorker(request));
+
+  function refreshClientUpdates() {
+    reapDeadClientUpdateRuns(updateJournalDir, (pid) => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    });
+  }
 
   async function handleClientUpdate(req, res) {
     let body;
@@ -1137,8 +1153,8 @@ export function createPanelRouter({
     if (!clientLifecycleActions(id).includes(action)) {
       return sendJson(res, 400, { ok: false, error: "unsupported_action", message: "不支持的操作" });
     }
-    lifecycleActive ??= new Map();
-    const active = lifecycleActive.get(id);
+    refreshClientUpdates();
+    const active = runningClientUpdate(updateJournalDir, id);
     if (active) {
       return sendJson(res, 409, {
         ok: false,
@@ -1146,88 +1162,66 @@ export function createPanelRouter({
         message: `已有客户端任务在进行中（${id}），请等待完成`,
       });
     }
-    if (!runClientLifecycleFn) {
-      const { runClientLifecycle } = await import("./client-lifecycle.mjs");
-      runClientLifecycleFn ??= runClientLifecycle;
-    }
-    lifecycleRuns ??= new Map();
+    const before = (await getEnvironmentService().then((service) => service.getState()))
+      .clients.find((client) => client.id === id);
+    // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
+    // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
+    const targetVersion = kind === "native"
+      ? await getReleaseService()
+        .then((service) => service.getClientLatest(id))
+        .then((data) => (data?.state === "ok" ? data.version : null))
+        .catch(() => null)
+      : null;
     const runId = randomUUID();
-    const run = { runId, clientId: id, action, state: "running", startedAt: new Date().toISOString(), finishedAt: null, result: null };
-    lifecycleRuns.set(runId, run);
-    while (lifecycleRuns.size > CLIENT_UPDATE_RUNS_MAX) lifecycleRuns.delete(lifecycleRuns.keys().next().value);
-    lifecycleActive.set(id, run);
-    void (async () => {
-      try {
-        const before = (await getEnvironmentService().then((service) => service.getState()))
-          .clients.find((client) => client.id === id);
-        const beforeVersion = before?.installations?.[0]?.version ?? null;
-        // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
-        // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
-        const pinnedVersion = kind === "native"
-          ? await getReleaseService()
-            .then((service) => service.getClientLatest(id))
-            .then((data) => (data?.state === "ok" ? data.version : null))
-            .catch(() => null)
-          : null;
-        const command = await runClientLifecycleFn({
-          id,
-          action,
-          commandPath: before?.installations?.[0]?.path ?? null,
-          targetVersion: pinnedVersion,
-        });
-        // 重查本地与官方版本时强制绕过 TTL——刚装完，缓存结果就是错的。
-        const after = (await getEnvironmentService().then((service) => service.getState({ force: true })))
-          .clients.find((client) => client.id === id);
-        const installation = after?.installations?.[0] ?? null;
-        const afterVersion = installation?.version ?? null;
-        const latest = await getReleaseService().then((service) => service.getClientLatest(id, { force: true }));
-        const { compareVersions } = await import("./version-check.mjs");
-        const order = latest?.state === "ok" && afterVersion ? compareVersions(afterVersion, latest.version) : null;
-        const comparison = order === null ? "unknown" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
-        let result;
-        if (!command.ok) {
-          result = {
-            outcome: "failed",
-            message: command.npmMissing
-              ? "更新工具缺失（npm），请修复或重装 Node.js 后重试"
-              : command.timedOut
-                ? "更新用时过长被中止，请检查网络后重新检测确认结果"
-                : "更新命令执行失败，请稍后重试",
-            detail: command.output || undefined,
-          };
-        } else if (installation?.issue === "not_runnable") {
-          result = { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" };
-        } else if (!afterVersion) {
-          result = { outcome: "not_found_after", message: "命令已执行，但仍未找到该客户端，请重新检测确认" };
-        } else if (beforeVersion && beforeVersion === afterVersion && comparison === "update_available") {
-          // npm 返回成功但版本原地踏步：多半有另一处安装盖过 npm 全局目录里的这一份。
-          result = { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效" };
-        } else {
-          result = { outcome: "updated", message: `已更新到 ${afterVersion}` };
-        }
-        run.result = { ...result, beforeVersion, afterVersion, latestVersion: latest?.state === "ok" ? latest.version : null, comparison };
-        run.state = "done";
-        run.finishedAt = new Date().toISOString();
-      } catch {
-        run.result = { outcome: "failed", message: "更新失败，请重新检测确认结果" };
-        run.state = "done";
-        run.finishedAt = new Date().toISOString();
-      } finally {
-        // 只放掉自己那一把：别的客户端这时可能正跑着，整表清空会把它们一起解锁。
-        if (lifecycleActive.get(id) === run) lifecycleActive.delete(id);
-      }
-    })();
+    const run = {
+      runId,
+      clientId: id,
+      action,
+      state: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      result: null,
+      workerPid: null,
+      targetVersion,
+      commandPath: before?.installations?.[0]?.path ?? null,
+      beforeVersion: before?.installations?.[0]?.version ?? null,
+    };
+    // 先落盘再拉起：进程抢在登记之前退出时，不能留下一个没有记录的安装。
+    writeClientUpdateRun(updateJournalDir, run);
+    let workerPid = null;
+    try {
+      workerPid = spawnUpdateWorker({ runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      writeClientUpdateRun(updateJournalDir, {
+        ...run,
+        state: "done",
+        finishedAt: new Date().toISOString(),
+        result: { outcome: "failed", message: "更新失败，请重新检测确认结果" },
+      });
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新失败，请重新检测确认结果" });
+    }
+    writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
     return sendJson(res, 202, { ok: true, runId, clientId: id, action });
   }
 
   function handleClientUpdateStatus(res, runId) {
-    const run = lifecycleRuns?.get(runId);
+    refreshClientUpdates();
+    const run = readClientUpdateRun(updateJournalDir, runId);
     if (!run) {
       return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务，请重新检测确认结果" });
     }
-    const payload = { ok: true, runId, clientId: run.clientId, action: run.action, state: run.state, startedAt: run.startedAt };
-    if (run.state === "done") Object.assign(payload, { finishedAt: run.finishedAt }, run.result);
-    return sendJson(res, 200, payload);
+    return sendJson(res, 200, clientUpdateStatus(run));
+  }
+
+  function handleClientUpdatesActive(res) {
+    refreshClientUpdates();
+    const runs = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.state === "running")
+      .map((run) => clientUpdateStatus(run));
+    return sendJson(res, 200, { ok: true, runs });
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
@@ -1806,6 +1800,7 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/environment/update" && method === "POST") return handleClientUpdate(req, res);
+    if (path === "/panel/api/environment/updates/active" && method === "GET") return handleClientUpdatesActive(res);
     if (path.startsWith("/panel/api/environment/update/") && method === "GET") {
       return handleClientUpdateStatus(res, path.slice("/panel/api/environment/update/".length));
     }
