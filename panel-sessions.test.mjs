@@ -130,8 +130,28 @@ describe("panel router sessions routes", () => {
     );
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
-    assert.deepEqual(json(), { ok: true, messages });
+    // 目录条目（turns）随正文一起下发：由 session-scan 判定，路由不自己认角色。
+    assert.deepEqual(json(), {
+      ok: true,
+      messages,
+      turns: [{ index: 0, preview: "hi", ts: 1 }],
+    });
     assert.deepEqual(svc.calls.loadMessages, [["claude", "C:/s/abc.jsonl"]]);
+  });
+
+  it("messages turns exclude injected user-role text", async () => {
+    const messages = [
+      { role: "user", content: "# AGENTS.md instructions <INSTRUCTIONS>x</INSTRUCTIONS>", ts: 1 },
+      { role: "tool", content: "Successfully modified file: panel.css", ts: 2 },
+      { role: "user", content: "把右栏修好", ts: 3 },
+    ];
+    const router = sessionsRouter(mockSessionScan({ messagesResult: messages }));
+    const { req, res, json } = fakeReqRes(
+      `/panel/api/sessions/messages?endpoint=qoder&path=${encodeURIComponent("C:/s/x.jsonl")}`,
+      "GET",
+    );
+    await router.handle(req, res);
+    assert.deepEqual(json().turns, [{ index: 2, preview: "把右栏修好", ts: 3 }]);
   });
 
   it("messages rejects a missing endpoint or path with 400", async () => {

@@ -46,7 +46,7 @@ import {
   spawnClientUpdateWorker,
   writeClientUpdateRun,
 } from "./client-update-journal.mjs";
-import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
+import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 
 const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
@@ -2216,7 +2216,10 @@ export function createPanelRouter({
         }
         try {
           const messages = await svc.loadMessages(endpoint, file);
-          return sendJson(res, 200, { ok: true, messages });
+          // The directory (「对话目录」) rides along with the transcript: session-scan
+          // owns what counts as a round a human typed, so the panel draws turns
+          // instead of re-judging nine transcript formats in the browser.
+          return sendJson(res, 200, { ok: true, messages, turns: sessionBuildTurns(messages) });
         } catch (err) {
           return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
         }

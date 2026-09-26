@@ -11,6 +11,10 @@
 // loadMessages(file) returns { role, content, ts }[] (or a degraded note for
 // endpoints without a real transcript). delete(file) removes the session after
 // a canonicalize + roots() whitelist check (path-traversal guard).
+// buildTurns(messages) reduces that array to the rounds a human actually typed
+// — the 「对话目录」 the panel renders. Injected user-role text (tool output
+// riding in a user record, command echoes, system reminders) stays in the
+// transcript but never becomes a directory row.
 //
 // Privacy red line: session CONTENT is never written to any log/journal — this
 // module only reads from disk and returns data to the panel router.
@@ -149,6 +153,85 @@ function extractTextFromItem(item) {
     return text !== "" ? text : null;
   }
   return null;
+}
+
+// A user-role record whose content blocks are ALL tool results is machine
+// output travelling in a human envelope, not a turn somebody typed. claude
+// carried this rule inline; qoder ships the same Anthropic-shaped transcripts and
+// never applied it — a 25-session sample found 5072 such records, and zero of
+// the remaining user rows were noise, so this one rule is all qoder was missing.
+// Shared so every block-shaped format applies it before assigning a role.
+function allToolResultBlocks(content) {
+  return (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        (item.type === "tool_result" || item.type === "toolResult"),
+    )
+  );
+}
+
+// User-role TEXT that a client injected rather than a human typed: slash-command
+// echoes, system reminders, compaction handoffs, agent-to-agent notices. Every
+// signature below was observed in this machine's own transcripts across the
+// nine endpoints (survey: claude 85 `<command-name>` + 82 `<local-command-stdout`
+// rows, zcode 223 TodoWrite nudges + 20 task notifications, codex 31 AGENTS.md
+// preludes, qoder/claude 44+25 interruption markers), plus the IDE prelude
+// cc-switch documents for Codex. Matched at the START on purpose: a real prompt
+// that merely quotes one of these tags stays a real prompt.
+const INJECTED_USER_TEXT_PREFIXES = Object.freeze([
+  "<system-reminder",
+  "<environment_context",
+  "<command-name",
+  "<command-message",
+  "<local-command-stdout",
+  "<local-command-caveat",
+  "<task-notification",
+  "<subagent-message",
+  "[Request interrupted by user]",
+  "# AGENTS.md instructions",
+  "# Context from my IDE setup",
+  "This session is being continued from a previous conversation",
+  "The TodoWrite tool hasn't been used",
+]);
+
+// zcode stores a tool call as a plain-text user message ("Called the Read tool
+// with the following input:"). Deliberately narrow: one sentence shape, tool
+// name as the only variable.
+const INJECTED_USER_TEXT_PATTERNS = Object.freeze([/^Called the [A-Za-z]+ tool with\b/]);
+
+// One line of a transcript: empty, or an envelope a client injected.
+function isInjectedUserTurn(text) {
+  const trimmed = String(text ?? "").trim();
+  if (trimmed === "") return true;
+  if (INJECTED_USER_TEXT_PREFIXES.some((prefix) => trimmed.startsWith(prefix))) return true;
+  return INJECTED_USER_TEXT_PATTERNS.some((re) => re.test(trimmed));
+}
+
+// Directory preview cap. The panel used to slice 40 raw characters off whatever
+// landed first — usually a tag or a file path — so the row said nothing about
+// the round it pointed at.
+const TURN_PREVIEW_MAX_CHARS = 40;
+
+// The 「对话目录」 the panel draws: one entry per round a human typed, each
+// carrying its index into `messages` so the frontend can jump without
+// re-deriving turns per format. Derived here rather than in the frontend for
+// the same reason resume commands are assembled server-side.
+function buildTurns(messages) {
+  const out = [];
+  for (const [index, message] of (Array.isArray(messages) ? messages : []).entries()) {
+    if (!message || message.role !== "user") continue;
+    if (isInjectedUserTurn(message.content)) continue;
+    out.push({
+      index,
+      preview: truncateText(String(message.content).replace(/\s+/g, " "), TURN_PREVIEW_MAX_CHARS),
+      ts: message.ts ?? null,
+    });
+  }
+  return out;
 }
 
 // Parse one JSONL text into objects, skipping blank/corrupt lines (never throw).
@@ -506,13 +589,7 @@ function createClaudeAdapter(roots) {
         if (!message || typeof message !== "object") continue;
         let role = typeof message.role === "string" ? message.role : "unknown";
         // Claude wraps tool_result inside user messages; reclassify as "tool".
-        if (role === "user" && Array.isArray(message.content)) {
-          const items = message.content;
-          const allToolResults =
-            items.length > 0 &&
-            items.every((item) => item && typeof item === "object" && item.type === "tool_result");
-          if (allToolResults) role = "tool";
-        }
+        if (role === "user" && allToolResultBlocks(message.content)) role = "tool";
         const content = extractText(message.content);
         if (content.trim() === "") continue;
         messages.push({ role, content, ts: parseTimestampMs(value.timestamp) });
@@ -658,6 +735,15 @@ function createKimiAdapter(roots) {
       // top-level "text" / "tool.call" events — they are nested inside
       // "context.append_loop_event" as content.part / tool.call / tool.result.
       // Reading only top-level events yields an empty transcript for every file.
+      // prompt.accepted is the interactive input, and that same text then arrives
+      // again as a user-role context.append_message (measured on this machine:
+      // prompt first, echo second in 313 of 332 same-text pairs) — so the echo
+      // is dropped only when it repeats the prompt right before it, and a human
+      // typing "继续" twice still counts as two rounds. The point of reading the
+      // append rows at all: sessions driven from the desktop UI write them with
+      // NO prompt.accepted (27 of 200 session dirs sampled), which is what left
+      // their 目录 empty end to end.
+      let lastPromptEcho = null;
       for (const value of parseJsonl(readFileSync(wire, "utf8"))) {
         if (value.type === "prompt.accepted") {
           // turn.prompt carries the same user input — not read here, or every
@@ -665,7 +751,17 @@ function createKimiAdapter(roots) {
           const content = extractText(value.content);
           if (content.trim() !== "") {
             messages.push({ role: "user", content, ts: parseTimestampMs(value.time) });
+            lastPromptEcho = content;
           }
+        } else if (value.type === "context.append_message") {
+          const content = extractText(value.message?.content);
+          if (value.message?.role !== "user" || content.trim() === "") continue;
+          if (content === lastPromptEcho) {
+            lastPromptEcho = null;
+            continue;
+          }
+          lastPromptEcho = null;
+          messages.push({ role: "user", content, ts: parseTimestampMs(value.time) });
         } else if (value.type === "context.append_loop_event") {
           const ev = value.event;
           if (!ev || typeof ev !== "object") continue;
@@ -1073,7 +1169,12 @@ function createQoderAdapter(roots) {
       for (const value of parseJsonl(readFileSync(target, "utf8"))) {
         if (value.type !== "user" && value.type !== "assistant") continue;
         if (!value.message) continue;
-        const role = value.message.role === "assistant" ? "assistant" : "user";
+        // Qoder transcripts are Anthropic-shaped too: tool output comes back
+        // inside a user-role record, so "not assistant" is not "the human typed
+        // this". Without the shared reclassification one session listed 1203
+        // "user" turns of which 1216 records were tool results.
+        let role = value.message.role === "assistant" ? "assistant" : "user";
+        if (role === "user" && allToolResultBlocks(value.message.content)) role = "tool";
         const content = extractText(value.message.content);
         if (content.trim() === "") continue;
         messages.push({
@@ -1719,3 +1820,8 @@ export const defaultScanner = createSessionScanner();
 export const scanAll = () => defaultScanner.scanAll();
 export const loadMessages = (endpoint, file) => defaultScanner.loadMessages(endpoint, file);
 export const deleteSessions = (items) => defaultScanner.deleteSessions(items);
+
+// Directory rows for one transcript. Exported for the panel router: turns come
+// out of this module so the nine formats' quirks stay in one place instead of
+// being re-derived in the browser.
+export { buildTurns };
