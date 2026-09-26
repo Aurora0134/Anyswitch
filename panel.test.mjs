@@ -6597,7 +6597,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     await flush();
     assert.deepEqual(blank.log.posts, [{
       method: "POST", path: "/api/terminal/sessions",
-      body: { label: "新终端", cwd: "D:\\work", shell: "powershell", cols: 120, rows: 34 },
+      body: { label: "Anyswitch", cwd: "D:\\work", shell: "powershell", cols: 120, rows: 34 },
     }], "空白终端用菜单里填的工作目录，不再写死 D:\\dev");
 
     // 启动失败：服务端 4xx/5xx（英文短码）→ toast 落中文兜底，不登记会话。
@@ -6713,6 +6713,6 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(fetchCreate?.includes("cwd: TERMINAL_DEFAULT_CWD"), "首载自动补建用默认目录常量");
     const confirmSrc = extractFn("confirmTerminalAddMenu");
     assert.ok(confirmSrc.includes("|| TERMINAL_DEFAULT_CWD"), "菜单未填目录时回落默认目录");
-    assert.ok(confirmSrc.includes('{ label: "新终端", cwd, shell: "powershell"'), "空白终端用菜单里填的工作目录，不写死");
+    assert.ok(confirmSrc.includes('{ label: "Anyswitch", cwd, shell: "powershell"'), "空白终端用菜单里填的工作目录，不写死");
   });
 });
