@@ -1630,6 +1630,71 @@
   /* 正文查阅弹窗加宽（修饰类挂在 overlay 上，其他弹窗保持原宽度） */
   .skills-modal-wide .modal-card { max-width: 860px; }
 
+  /* ── 异常卡整卡折叠（默认收起）──────────────────────────────
+     卡身 hidden 时卡头那道底边会悬空，跟着收掉；卡头右侧徽标与折叠钮同行排。 */
+  .panel-card.folded .card-header { border-bottom: none; }
+  .skills-anomaly-head-tools { display: inline-flex; align-items: center; gap: 8px; }
+  /* 折叠全靠 [hidden]，而 .card-body 一旦在哪条规则里被重设 display 就会把它打回
+     展开（设置页那两张卡正写着 display:flex）。这里给本卡补一条同特异性兜底。 */
+  #skillsAnomalyBody[hidden] { display: none; }
+
+  /* ── 「查看差异」两栏逐行对照弹窗 ──────────────────────────
+     左＝主仓库、右＝该端点，四列网格（左行号 左正文 | 右行号 右正文），
+     两侧同处一行所以改动天然对齐。860px 那一档容不下并排正文，diff 再放宽
+     一档；弹窗本体没有滚动规则，长差异会顶出视口，故由卡身自己滚。 */
+  .skills-modal-diff .modal-card {
+    max-width: min(1180px, 94vw); max-height: 86vh;
+    display: flex; flex-direction: column;
+  }
+  .skills-modal-diff .modal-body { overflow: auto; min-height: 0; }
+  .skills-diff { font-family: var(--font-mono); font-size: 11.5px; }
+  .sd-legend {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
+    font-family: var(--font-sans); font-size: 12px; color: var(--text-3);
+  }
+  .sd-legend .sd-stat { margin-left: auto; }
+  .sd-side { font-weight: 700; color: var(--text-2); }
+  .sd-stat { font-family: var(--font-sans); font-size: 11px; color: var(--text-4); }
+  .sd-file {
+    border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+    overflow: hidden; margin-bottom: 10px;
+  }
+  .sd-file:last-of-type { margin-bottom: 0; }
+  .sd-file-head {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    background: var(--surface-sunken); border-bottom: 1px solid var(--border);
+    font-family: var(--font-sans); font-size: 12px;
+  }
+  .sd-file-flat .sd-file-head { border-bottom: none; }
+  .sd-file-head code { color: var(--text); word-break: break-all; }
+  .sd-file-head .sd-stat { margin-left: auto; }
+  .sd-row {
+    display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px minmax(0, 1fr);
+    column-gap: 8px;
+  }
+  .sd-no {
+    text-align: right; color: var(--text-4); user-select: none;
+    padding: 1px 4px 1px 6px; font-variant-numeric: tabular-nums;
+  }
+  .sd-tx {
+    white-space: pre-wrap; word-break: break-word; min-height: 16px;
+    padding: 1px 8px 1px 2px; color: var(--text-2);
+  }
+  .sd-no-b { border-left: 1px solid var(--divider); }
+  /* 改动的两侧：仓库侧红、端点侧绿，与「以主仓库覆盖端点 / 以端点覆盖主仓库」
+     两个方向的红绿读法一致 */
+  .sd-row.sd-del .sd-a, .sd-row.sd-mod .sd-a { background: var(--danger-soft); }
+  .sd-row.sd-ins .sd-b, .sd-row.sd-mod .sd-b { background: var(--ok-soft); }
+  .sd-row.sd-del .sd-no-a, .sd-row.sd-mod .sd-no-a { color: var(--danger); }
+  .sd-row.sd-ins .sd-no-b, .sd-row.sd-mod .sd-no-b { color: var(--ok); }
+  /* 只有另一侧有内容的行，空着的那半铺一层底色，读作"这一侧没有这行" */
+  .sd-row.sd-del .sd-b, .sd-row.sd-ins .sd-a { background: var(--surface-sunken); }
+  .sd-gap {
+    padding: 2px 10px; background: var(--surface-sunken); color: var(--text-4);
+    border-top: 1px solid var(--divider); border-bottom: 1px solid var(--divider);
+    font-family: var(--font-sans); font-size: 11px;
+  }
+
   /* Store 管理视图（布局复用 .skills-grid/.skills-col/.skills-list*，此处仅 store 专属件） */
   .store-summary { font-size: 12.5px; color: var(--text-2); margin-bottom: 10px; }
   .store-resume-note {
@@ -3667,6 +3732,7 @@
 :root[data-style="sepia"] .skills-repo-path,
 :root[data-style="sepia"] .skills-dup-warn,
 :root[data-style="sepia"] .skills-diff-list,
+:root[data-style="sepia"] .sd-file,
 :root[data-style="sepia"] .skills-body-view .md-code {
   border-radius: 2px;
 }

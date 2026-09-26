@@ -1153,16 +1153,20 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="card-body" id="skillsDetailBody"></div>
         </div>
 
-        <!-- 卡片 D：端点条目与异常（跨端点全局聚合） -->
-        <div class="panel-card">
+        <!-- 卡片 D：端点条目与异常（跨端点全局聚合）。整卡默认收起：body 直接
+             带 hidden，等 JS 之前也不会闪一下展开态；展开与否记 localStorage -->
+        <div class="panel-card folded" id="skillsAnomalyCard">
           <div class="card-header">
             <h2 class="card-title">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
               端点条目与异常
             </h2>
-            <span class="badge badge-neutral" id="skillsAnomalyBadge" hidden></span>
+            <span class="skills-anomaly-head-tools">
+              <span class="badge badge-neutral" id="skillsAnomalyBadge" hidden></span>
+              <button type="button" class="agent-detail-fold" id="skillsAnomalyFold" aria-expanded="false">展开 ▾</button>
+            </span>
           </div>
-          <div class="card-body" id="skillsAnomalyBody"></div>
+          <div class="card-body" id="skillsAnomalyBody" hidden></div>
         </div>
       </div>
 

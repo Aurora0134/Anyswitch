@@ -32,6 +32,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { relayDataRoot } from "./relay-settings.mjs";
+import { diffFileText } from "./skill-diff.mjs";
 
 // Endpoint registry. `relSkillsDir` is relative to the user's home directory.
 export const ENDPOINT_DEFS = Object.freeze([
@@ -1096,6 +1097,78 @@ export function diffLocalSkill({ endpointId, skillName, repoPath }, { homeDir = 
   return { ok: true, diffs: diffDirs(repoSkill.absPath, localPath) };
 }
 
+// 逐行对照的读盘边界。上限按本机实测的最重 skill 定：仓库侧最大的一个 55 个
+// 文件、3.8MB、15 个二进制、单文件最大 3954 行（内置三方 JS）。越过边界的
+// 文件一律如实标"未比对"并给原因，而不是从清单里悄悄漏掉。
+const DIFF_MAX_FILE_BYTES = 256 * 1024;
+const DIFF_MAX_FILES = 12;
+
+// 读一侧文件，返回文本或"为什么没读"。symlink 标记（listFiles 的 link: 前缀）
+// 不在此处解引用：仓库与端点两侧都只比实体文件，链接目标另说。
+function readSideForDiff(dir, rel) {
+  const abs = join(dir, ...rel.split("/"));
+  let buf;
+  try {
+    buf = readFileSync(abs);
+  } catch {
+    return { error: "unreadable" };
+  }
+  if (buf.includes(0)) return { error: "binary" };
+  if (buf.length > DIFF_MAX_FILE_BYTES) return { error: "oversize" };
+  return { text: buf.toString("utf8") };
+}
+
+/**
+ * 逐行左右对照差异：给面板「查看差异」弹窗用。
+ * 与 diffLocalSkill 同一套校验（只比端点私有 skills 目录下的实体目录），
+ * 差别只在返回粒度——这里每个"内容不同"的文件带对齐行与两侧行号。
+ * state：different（有对照行）/ only-repo / only-endpoint / eol-only（换行符
+ * 风格不同而内容一致）/ binary / oversize / unreadable / too-many。
+ */
+export function diffSkillContent({ endpointId, skillName, repoPath }, { homeDir = homedir() } = {}) {
+  const endpoint = findEndpoint(endpointId, homeDir);
+  if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
+  assertPlainSkillDirName(skillName);
+  const localPath = join(endpoint.skillsDir, skillName);
+  if (!existsSync(localPath) || isJunction(localPath)) {
+    throw new Error(`端点上不存在本地实体目录: ${skillName}`);
+  }
+  const repoSkill = findRepoSkill(repoPath, skillName);
+  if (!repoSkill) throw new Error(`repo 中不存在 skill: ${skillName}`);
+
+  const diffs = diffDirs(repoSkill.absPath, localPath);
+  const files = [];
+  let read = 0;
+  for (const d of diffs) {
+    if (d.kind === "only-a") { files.push({ path: d.path, state: "only-repo", rows: [] }); continue; }
+    if (d.kind === "only-b") { files.push({ path: d.path, state: "only-endpoint", rows: [] }); continue; }
+    if (read >= DIFF_MAX_FILES) { files.push({ path: d.path, state: "too-many", rows: [] }); continue; }
+    read++;
+    const a = readSideForDiff(repoSkill.absPath, d.path);
+    const b = readSideForDiff(localPath, d.path);
+    if (a.error) { files.push({ path: d.path, state: a.error, rows: [] }); continue; }
+    if (b.error) { files.push({ path: d.path, state: b.error, rows: [] }); continue; }
+    const one = diffFileText(a.text, b.text);
+    // 哈希不同但逐行读下来一致：两侧只差换行符风格（或末尾空行），
+    // 这仍是一条该让用户知道的差异，不能报成"无差异"。
+    if (one.state !== "diff") {
+      files.push({ path: d.path, state: "eol-only", rows: [], aLines: one.aLines, bLines: one.bLines });
+      continue;
+    }
+    files.push({
+      path: d.path,
+      state: "different",
+      rows: one.rows,
+      changed: one.changed,
+      added: one.added,
+      removed: one.removed,
+      aLines: one.aLines,
+      bLines: one.bLines,
+    });
+  }
+  return { ok: true, endpointId, skillName, files };
+}
+
 /**
  * Read a repo skill's SKILL.md by its relPath (the scanRepo unique key).
  * The relPath is resolved under repoPath and must stay inside it — anything
@@ -1270,6 +1343,11 @@ export function createSkillsService({
     diffLocalSkill({ endpointId, skillName }) {
       const repoPath = requireExistingRepo();
       return diffLocalSkill({ endpointId, skillName, repoPath }, { homeDir });
+    },
+
+    diffSkillContent({ endpointId, skillName }) {
+      const repoPath = requireExistingRepo();
+      return diffSkillContent({ endpointId, skillName, repoPath }, { homeDir });
     },
 
     readSkillBody(relPath) {

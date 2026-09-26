@@ -2345,6 +2345,15 @@ export function createPanelRouter({
             });
             return sendJson(res, 200, { ok: true, diffs: result.diffs || [] });
           }
+          // 逐行左右对照（异常卡「查看差异」弹窗）。与上一条同校验、不同粒度：
+          // 这里连"没比"的文件（二进制 / 超限）也一并回清单，弹窗要说清哪些没比。
+          if (path === "/panel/api/skills/diff/content") {
+            const result = await svc.diffSkillContent({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: true, files: result.files || [] });
+          }
           if (path === "/panel/api/skills/body") {
             const result = await svc.readSkillBody(requireString(body.relPath, "relPath"));
             return sendJson(res, 200, { ok: true, ...result });

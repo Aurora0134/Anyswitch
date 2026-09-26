@@ -334,6 +334,7 @@
 :root[data-style="sepia"] .skills-repo-path,
 :root[data-style="sepia"] .skills-dup-warn,
 :root[data-style="sepia"] .skills-diff-list,
+:root[data-style="sepia"] .sd-file,
 :root[data-style="sepia"] .skills-body-view .md-code {
   border-radius: 2px;
 }

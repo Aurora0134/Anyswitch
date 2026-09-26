@@ -13,6 +13,7 @@ import {
   deploy,
   diffDirs,
   diffLocalSkill,
+  diffSkillContent,
   ensureFolderPickerHelper,
   hashDir,
   importSkill,
@@ -845,6 +846,141 @@ describe("diffLocalSkill", () => {
     } finally {
       cleanup();
     }
+  });
+});
+
+describe("diffSkillContent", () => {
+  // 「查看差异」弹窗的数据源：与 diffLocalSkill 同一套校验，差别在返回粒度。
+  const pair = (dir, { localFiles = {}, repoFiles = {} } = {}) => {
+    const home = join(dir, "home");
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const local = join(home, ".claude", "skills", "skill-a");
+    cpSync(join(repo, "skill-a"), local, { recursive: true });
+    for (const [rel, text] of Object.entries(repoFiles)) {
+      mkdirSync(dirname(join(repo, "skill-a", rel)), { recursive: true });
+      writeFileSync(join(repo, "skill-a", rel), text);
+    }
+    for (const [rel, text] of Object.entries(localFiles)) {
+      mkdirSync(dirname(join(local, rel)), { recursive: true });
+      writeFileSync(join(local, rel), text);
+    }
+    return { home, repo, local };
+  };
+  const contentDiff = (home, repo, skillName = "skill-a") =>
+    diffSkillContent({ endpointId: "claude", skillName, repoPath: repo }, { homeDir: home });
+
+  it("内容不同的文件给出逐行对照，mod 行两侧行号与文本都在", () => {
+    const { dir, cleanup } = tempRoot();
+    const { home, repo } = pair(dir, {
+      repoFiles: { "notes.md": "keep\nold\ntail\n" },
+      localFiles: { "notes.md": "keep\nnew\nextra\ntail\n" },
+    });
+    try {
+      const f = contentDiff(home, repo).files.find((x) => x.path === "notes.md");
+      assert.equal(f.state, "different");
+      assert.equal(f.aLines, 3);
+      assert.equal(f.bLines, 4);
+      const mod = f.rows.find((r) => r.op === "mod");
+      assert.deepEqual([mod.aNo, mod.aText, mod.bNo, mod.bText], [2, "old", 2, "new"]);
+      const ins = f.rows.find((r) => r.op === "ins");
+      assert.deepEqual([ins.aNo, ins.bNo, ins.bText], [null, 3, "extra"]);
+      assert.equal(f.added, 2);
+      assert.equal(f.removed, 1);
+    } finally { cleanup(); }
+  });
+
+  it("只有换行符风格不同：如实标 eol-only，既不报整文件改动也不漏报", () => {
+    const { dir, cleanup } = tempRoot();
+    const { home, repo } = pair(dir, {
+      repoFiles: { "notes.md": "a\nb\n" },
+      localFiles: { "notes.md": "a\r\nb\r\n" },
+    });
+    try {
+      const f = contentDiff(home, repo).files.find((x) => x.path === "notes.md");
+      assert.equal(f.state, "eol-only");
+      assert.deepEqual(f.rows, []);
+    } finally { cleanup(); }
+  });
+
+  it("仅一侧有的文件照样进清单，并写明缺在哪一侧", () => {
+    const { dir, cleanup } = tempRoot();
+    const { home, repo, local } = pair(dir, {});
+    writeFileSync(join(local, "only-here.txt"), "x");
+    rmSync(join(repo, "skill-a", "helper.txt"));
+    try {
+      const states = Object.fromEntries(contentDiff(home, repo).files.map((f) => [f.path, f.state]));
+      assert.equal(states["helper.txt"], "only-endpoint", "仓库侧被删掉 = 只剩端点侧");
+      assert.equal(states["only-here.txt"], "only-endpoint");
+    } finally { cleanup(); }
+  });
+
+  it("二进制与超大文件不比对，但如实进清单并给原因", () => {
+    const { dir, cleanup } = tempRoot();
+    const big = "y".repeat(300 * 1024);
+    const { home, repo } = pair(dir, {
+      repoFiles: { "blob.bin": "head\u0000tail\n", "big.txt": big },
+      localFiles: { "blob.bin": "head\u0000other\n", "big.txt": `${big}z` },
+    });
+    try {
+      const states = Object.fromEntries(contentDiff(home, repo).files.map((f) => [f.path, f.state]));
+      assert.equal(states["blob.bin"], "binary");
+      assert.equal(states["big.txt"], "oversize");
+    } finally { cleanup(); }
+  });
+
+  it("一次最多对照 12 个文件，越界的那些标 too-many 而不是被丢掉", () => {
+    const { dir, cleanup } = tempRoot();
+    const repoFiles = {};
+    const localFiles = {};
+    for (let i = 0; i < 14; i++) {
+      repoFiles[`f${i}.txt`] = `a\nb${i}\n`;
+      localFiles[`f${i}.txt`] = `a\nchanged${i}\n`;
+    }
+    const { home, repo } = pair(dir, { repoFiles, localFiles });
+    try {
+      const files = contentDiff(home, repo).files;
+      assert.deepEqual(
+        files.filter((f) => f.state === "too-many").map((f) => f.path),
+        // 排序按路径逐字符走：f0,f1,f10,f11,f12,f13,f2…f7 占满前 12 个名额，
+        // 落在门外的是 f8/f9 —— 证明上限按清单顺序生效，不是随便挑两个
+        ["f8.txt", "f9.txt"],
+        "按路径排序后越界的两个标 too-many",
+      );
+      assert.equal(files.filter((f) => f.state === "different").length, 12);
+    } finally { cleanup(); }
+  });
+
+  it("校验与 diffLocalSkill 同款：越界 skillName、不存在的目录、仓库里没有同名 skill", () => {
+    const { dir, cleanup } = tempRoot();
+    const { home, repo } = pair(dir, {});
+    writeSkill(join(home, ".claude", "other"), { name: "other" });
+    try {
+      assert.throws(
+        () => contentDiff(home, repo, join("..", "other")),
+        (err) => err.statusCode === 400 && /skillName/.test(err.message),
+      );
+      assert.throws(() => contentDiff(home, repo, "ghost"), /不存在本地实体目录/);
+      mkdirSync(join(home, ".claude", "skills", "stray"), { recursive: true });
+      writeFileSync(join(home, ".claude", "skills", "stray", "SKILL.md"), "x");
+      assert.throws(() => contentDiff(home, repo, "stray"), /repo 中不存在 skill/);
+    } finally { cleanup(); }
+  });
+
+  it("服务层从已配置仓库取 repoPath，未配置时报错而不是猜", () => {
+    const { dir, cleanup } = tempRoot();
+    const svc = createSkillsService({
+      homeDir: join(dir, "home"),
+      base: {}, // 无 ANYSWITCH_SKILLS_REPO → 未配置主仓库
+      spawnFn: () => {},
+      recycleDirFn: mockRecycle([]),
+    });
+    try {
+      assert.throws(
+        () => svc.diffSkillContent({ endpointId: "claude", skillName: "skill-a" }),
+        /尚未设置主仓库/,
+      );
+    } finally { cleanup(); }
   });
 });
 

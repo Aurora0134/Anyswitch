@@ -66,6 +66,7 @@ function mockService(overrides = {}) {
     mergeLocalSkill: async () => ({ ok: true }),
     resolveConflictSkill: async () => ({ ok: true }),
     diffLocalSkill: async () => ({ ok: true, diffs: [] }),
+    diffSkillContent: async () => ({ ok: true, files: [] }),
     readSkillBody: (relPath) => ({ name: relPath, dirName: relPath, relPath, content: "---\n---\n" }),
     ...overrides,
   };
@@ -287,6 +288,27 @@ describe("panel router skills routes", () => {
     assert.equal(res.statusCode, 200);
     assert.deepEqual(got, { endpointId: "kimi", skillName: "s" });
     assert.deepEqual(json().diffs, diffs);
+  });
+
+  it("POST /panel/api/skills/diff/content returns the line-by-line pair", async () => {
+    const files = [{ path: "SKILL.md", state: "different", rows: [{ op: "mod", aNo: 2, aText: "old", bNo: 2, bText: "new" }] }];
+    let got = null;
+    const router = skillsRouter(mockService({
+      diffSkillContent: async (args) => { got = args; return { ok: true, files }; },
+    }));
+    const { req, res, json } = fakeReqRes("/panel/api/skills/diff/content", "POST", { endpointId: "kimi", skillName: "s" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(got, { endpointId: "kimi", skillName: "s" });
+    assert.deepEqual(json().files, files);
+  });
+
+  it("POST /panel/api/skills/diff/content refuses a missing endpointId", async () => {
+    const router = skillsRouter(mockService());
+    const { req, res, json } = fakeReqRes("/panel/api/skills/diff/content", "POST", { skillName: "s" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(json().ok, false);
   });
 
   it("POST /panel/api/skills/body returns the SKILL.md content and maps service errors", async () => {
@@ -783,5 +805,179 @@ describe("panel.html skills change diff highlighting", () => {
     assert.deepEqual(run(200, 100, false)[2].log, ["translateY(-55px)", ""]);
     // reduced-motion：整套位移反馈跳过，行直接落在新位置
     assert.deepEqual(run(0, 100, true).flatMap((r) => r.log), []);
+  });
+});
+
+// ── 异常卡整卡折叠（默认收起）+「查看差异」两栏逐行对照弹窗 ──
+// 折叠标记与弹窗样式看 panel.html / panel.css 的结构，弹窗正文则把 panel.js 里的
+// 渲染函数抠出来真跑一遍：喂一份与后端 diffSkillContent 同形状的 payload，
+// 验两侧行号、着色类、"没比"的文件有没有被悄悄漏掉。
+describe("skills anomaly card fold and side-by-side diff modal", () => {
+  const read = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "panel-ui", name), "utf8");
+  const panelHtml = read("panel.html");
+  const panelJs = read("panel.js");
+  const panelCss = read("panel.css").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  function extractFn(name, params) {
+    const m = panelJs.match(
+      new RegExp(`function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
+    );
+    assert.ok(m, `panel.js must contain function ${name}`);
+    return m[0];
+  }
+  const escapeHtml = (s) => String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  it("默认折叠写在 markup 里：卡身带 hidden、卡头带 folded、钮标着展开", () => {
+    assert.match(panelHtml, /<div class="panel-card folded" id="skillsAnomalyCard">/);
+    assert.match(panelHtml, /<div class="card-body" id="skillsAnomalyBody" hidden>/);
+    assert.match(panelHtml, /id="skillsAnomalyFold" aria-expanded="false">展开 ▾<\/button>/);
+    // 折叠态唯一的线索就是那条「N 项」徽标，它必须留在卡头里
+    assert.match(panelHtml, /skillsAnomalyBadge" hidden><\/span>[\s\S]{0,220}id="skillsAnomalyFold"/);
+  });
+
+  it("折叠不会被 CSS 打回展开：收起的卡头不留底边，卡身有 [hidden] 兜底", () => {
+    assert.match(panelCss, /\.panel-card\.folded \.card-header \{ border-bottom: none; \}/);
+    assert.match(panelCss, /\.skills-anomaly-head-tools \{ display: inline-flex;/);
+    // 折叠全靠 UA 的 [hidden]{display:none}；同文件里设置页两张卡给 .card-body 写了
+    // display:flex，将来谁把它套到本卡上就会静默打回展开，故本卡自带一条兜底并钉住
+    assert.match(panelCss, /#skillsAnomalyBody\[hidden\] \{ display: none; \}/);
+    const selectors = [...panelCss.matchAll(/([^{}]*\.card-body[^{}]*)\{[^}]*display:/g)].map((m) => m[1].trim());
+    assert.deepEqual(
+      selectors.filter((sel) => !/#settingsPanel(Advanced|Experimental)/.test(sel) && sel !== "#skillsAnomalyBody"),
+      [],
+      "除设置页两张卡与本卡的 [hidden] 兜底外，不得再给 .card-body 写 display",
+    );
+  });
+
+  it("折叠钮把一次点击落到三处：卡身显隐、folded 类、钮上文案与 aria", () => {
+    const mkEl = () => {
+      const set = new Set();
+      return {
+        hidden: false, textContent: "", attrs: {},
+        classList: {
+          add: (c) => set.add(c), remove: (c) => set.delete(c),
+          toggle: (c, on) => (on ? set.add(c) : set.delete(c)),
+          contains: (c) => set.has(c),
+        },
+        setAttribute(k, v) { this.attrs[k] = v; },
+      };
+    };
+    const card = mkEl(); card.classList.add("panel-card");
+    const body = mkEl(); body.hidden = true;
+    const btn = mkEl();
+    const apply = (open) => new Function(
+      "$", "anomalyCardOpen", `${extractFn("applyAnomalyCardFold", "")}\n return applyAnomalyCardFold;`,
+    )((id) => ({ skillsAnomalyCard: card, skillsAnomalyBody: body, skillsAnomalyFold: btn })[id], open)();
+
+    apply(false);
+    assert.equal(body.hidden, true, "收起时卡身必须真的 hidden（不是靠高度或透明度）");
+    assert.equal(card.classList.contains("folded"), true);
+    assert.equal(btn.textContent, "展开 ▾");
+    assert.equal(btn.attrs["aria-expanded"], "false");
+
+    apply(true);
+    assert.equal(body.hidden, false);
+    assert.equal(card.classList.contains("folded"), false);
+    assert.equal(btn.textContent, "收起 ▴");
+    assert.equal(btn.attrs["aria-expanded"], "true");
+  });
+
+  // 与后端 diffSkillContent 的真实返回同形（ZCode 上 ai4math-suite 实测过一条）
+  const payload = [
+    {
+      path: "SKILL.md", state: "different", changed: 4, added: 2, removed: 2, aLines: 33, bLines: 36,
+      rows: [
+        { op: "equal", aNo: 1, aText: "---", bNo: 1, bText: "---" },
+        { op: "mod", aNo: 2, aText: "<img onerror=alert(1)>", bNo: 2, bText: "new text" },
+        { op: "ins", aNo: null, aText: null, bNo: 3, bText: "extra" },
+        { op: "gap", hidden: 16 },
+        { op: "del", aNo: 4, aText: "gone", bNo: null, bText: null },
+      ],
+    },
+    { path: "assets/logo.png", state: "binary", rows: [] },
+    { path: "notes.md", state: "only-repo", rows: [] },
+    { path: "scripts/run.py", state: "oversize", rows: [] },
+    { path: "SKILL-zh.md", state: "eol-only", rows: [] },
+  ];
+  const render = (files, epLabel = "ZCode") => new Function(
+    "escapeHtml", `${extractFn("skillDiffHtml", "endpointId, skillName, files, epLabel")}\n return skillDiffHtml;`,
+  )(escapeHtml)("zcode", "ai4math-suite", files, epLabel);
+
+  it("改动的两侧同行并列，行号各走各的，正文按 HTML 转义", () => {
+    const html = render(payload);
+    const mod = /<div class="sd-row sd-mod">([\s\S]*?)<\/div>/.exec(html)[1];
+    assert.match(mod, /<span class="sd-no sd-a">2<\/span>/);
+    assert.match(mod, /<span class="sd-no sd-b">2<\/span>/);
+    assert.ok(mod.includes("&lt;img onerror=alert(1)&gt;"), "仓库侧正文必须转义，不能拼成活的标签");
+    assert.ok(!/<img/.test(html), "整段正文里不许出现未转义标签");
+    assert.ok(mod.includes("new text"), "端点侧同格给出改后的内容");
+  });
+
+  it("只有单侧存在的行：另一侧四格留空，不画假行号", () => {
+    const html = render(payload);
+    const ins = /<div class="sd-row sd-ins">([\s\S]*?)<\/div>/.exec(html)[1];
+    assert.ok(ins.startsWith('<span class="sd-no sd-a"></span><span class="sd-tx sd-a"></span>'), "插入行左栏空");
+    assert.match(ins, /<span class="sd-no sd-b">3<\/span>/);
+    const del = /<div class="sd-row sd-del">([\s\S]*?)<\/div>/.exec(html)[1];
+    assert.match(del, /<span class="sd-no sd-a">4<\/span>/);
+    assert.match(del, /<span class="sd-tx sd-b"><\/span>/, "删除行右栏空");
+  });
+
+  it("折掉的段落写成一条说明，数量与后端给的一致", () => {
+    assert.match(render(payload), /<div class="sd-gap">⋮ 中间 16 行两侧一致，已折叠<\/div>/);
+  });
+
+  it("没比对的文件照样进清单，并写明原因；徽标用警示色", () => {
+    const html = render(payload);
+    for (const [file, label] of [
+      ["assets/logo.png", "未比对：二进制文件"],
+      ["scripts/run.py", "未比对：文件过大"],
+      ["notes.md", "仅仓库有"],
+      ["SKILL-zh.md", "只有换行符不同"],
+    ]) {
+      const esc = file.replace(/\./g, "\\.");
+      assert.match(
+        html,
+        new RegExp(
+          `<section class="sd-file sd-file-flat"><div class="sd-file-head"><code>${esc}<\/code>` +
+          `<span class="badge badge-warn">${label}<\/span><\/div><\/section>`,
+        ),
+        `${file} 应带「${label}」进清单，且没有半截的对照区`,
+      );
+    }
+    // 真正逐行对照的那个文件不套 flat 类，并给出 +N −M 摘要
+    assert.match(
+      html,
+      /<section class="sd-file"><div class="sd-file-head"><code>SKILL\.md<\/code><span class="badge badge-neutral">内容不同<\/span><span class="sd-stat">\+2 −2<\/span>/,
+    );
+  });
+
+  it("图例说清左右各是什么、几个文件真在对照", () => {
+    const html = render(payload);
+    assert.ok(html.includes("左 · 主仓库"), "左栏是主仓库");
+    assert.ok(html.includes("右 · ZCode"), "右栏用端点显示名，不是 claude/zcode 那种内部 id");
+    assert.ok(html.includes("5 个文件不一致 · 1 个逐行对照 · 改动 4 行"));
+    assert.ok(render([]).includes("两侧内容一致，没有需要对照的文件"));
+  });
+
+  it("端点没有显示名时退回内部 id，图例不会写空", () => {
+    assert.match(render(payload, ""), /右 · zcode</);
+  });
+
+  it("两栏对照的样式：一套四列行网格 + 弹窗自己滚", () => {
+    assert.match(panelCss, /\.sd-row \{\s*display: grid; grid-template-columns: 40px minmax\(0, 1fr\) 40px minmax\(0, 1fr\);/);
+    assert.match(panelCss, /\.skills-modal-diff \.modal-card \{[\s\S]*?max-height: 86vh;[\s\S]*?display: flex; flex-direction: column;/);
+    // 弹窗本体没有滚动规则，长差异会顶出视口；滚的必须是有 min-height:0 的正文那一层
+    assert.match(panelCss, /\.skills-modal-diff \.modal-body \{ overflow: auto; min-height: 0; \}/);
+    assert.match(panelCss, /\.sd-tx \{\s*white-space: pre-wrap; word-break: break-word; min-height: 16px;/);
+  });
+
+  it("仓库侧红、端点侧绿，空着的那半铺底色", () => {
+    assert.match(panelCss, /\.sd-row\.sd-del \.sd-a, \.sd-row\.sd-mod \.sd-a \{ background: var\(--danger-soft\); \}/);
+    assert.match(panelCss, /\.sd-row\.sd-ins \.sd-b, \.sd-row\.sd-mod \.sd-b \{ background: var\(--ok-soft\); \}/);
+    assert.match(panelCss, /\.sd-row\.sd-del \.sd-b, \.sd-row\.sd-ins \.sd-a \{ background: var\(--surface-sunken\); \}/);
+    // 颜色只走 token，5 套主题与亮暗才不用各写一遍
+    assert.doesNotMatch(panelCss, /\.sd-(row|file|gap|no|tx)[^{]*\{[^}]*(#[0-9a-f]{3,8}|rgba?\()/i);
   });
 });

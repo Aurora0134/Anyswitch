@@ -4918,6 +4918,30 @@ async function api(method, path, body) {
   // renderSkillsAnomalies 每次刷新重建 innerHTML，挂在 DOM 上会被冲掉
   let anomalyFold = { matching: true, unique: true };
 
+  // 整卡折叠（卡头那颗钮）：默认收起，panel.html 里卡身就带 hidden，JS 之前也不闪。
+  // 同样外置 + 跨刷新记住，理由与分组折叠一致：这张卡每次刷新都重建 innerHTML。
+  let anomalyCardOpen = readAnomalyCardOpen();
+  function readAnomalyCardOpen() {
+    try { return localStorage.getItem("panel-skills-anomaly-open") === "1"; } catch { return false; }
+  }
+  // 折叠态落到 DOM：卡身显隐、卡头去掉那道悬空底边、钮上文案与 aria-expanded。
+  // 文案沿用遥测卡那套「展开 ▾ / 收起 ▴」，不另造一套符号。
+  function applyAnomalyCardFold() {
+    const card = $("skillsAnomalyCard");
+    const body = $("skillsAnomalyBody");
+    const btn = $("skillsAnomalyFold");
+    if (!card || !body || !btn) return;
+    card.classList.toggle("folded", !anomalyCardOpen);
+    body.hidden = !anomalyCardOpen;
+    btn.setAttribute("aria-expanded", anomalyCardOpen ? "true" : "false");
+    btn.textContent = anomalyCardOpen ? "收起 ▴" : "展开 ▾";
+  }
+  function toggleAnomalyCardFold() {
+    anomalyCardOpen = !anomalyCardOpen;
+    try { localStorage.setItem("panel-skills-anomaly-open", anomalyCardOpen ? "1" : "0"); } catch {}
+    applyAnomalyCardFold();
+  }
+
   // ── 收藏（迭代3）：relPath 集合，localStorage 持久化（与 panel-view 同模式）。
   // 收藏与选中正交：选中是高光/操作对象，收藏只是标记，跨刷新保留。
   let skillsFavorites = loadSkillsFavorites();
@@ -4968,6 +4992,9 @@ async function api(method, path, body) {
     $("skillsImportBtn").onclick = () => importSkillViaPicker("skillsImportBtn", "/api/skills/repo/import-pick");
     $("skillsImportZipBtn").onclick = () => importSkillViaPicker("skillsImportZipBtn", "/api/skills/repo/import-pick-zip");
     $("skillsRefreshBtn").onclick = runSkillsRefreshWithFeedback;
+    // 卡片 D：整卡折叠钮（默认收起，点一下展开；展开态跨刷新记住）
+    $("skillsAnomalyFold").onclick = toggleAnomalyCardFold;
+    applyAnomalyCardFold();
     // 卡片 B：过滤 + 主从列表选中
     $("skillsFilterInput").oninput = (e) => {
       skillsFilter = e.target.value.trim().toLowerCase();
@@ -6301,12 +6328,18 @@ async function api(method, path, body) {
       ));
     }
     body.innerHTML = sections.join("");
+    applyAnomalyCardFold(); // 重建卡身时把折叠态再压一遍，展开/收起不随刷新回落
 
     body.querySelectorAll("button[data-remove-broken]").forEach((btn) => {
       btn.onclick = () => removeBrokenJunction(...btn.getAttribute("data-remove-broken").split(SEP));
     });
     body.querySelectorAll("button[data-diff]").forEach((btn) => {
-      btn.onclick = () => showLocalDiff(...btn.getAttribute("data-diff").split(SEP));
+      // 弹窗右栏要写端点的显示名（ZCode / Kimi Code…），不写 claude 那种内部 id
+      btn.onclick = () => {
+        const [endpointId, skillName] = btn.getAttribute("data-diff").split(SEP);
+        const label = (skillsState.endpoints || []).find((e) => e.id === endpointId)?.label;
+        showLocalDiff(endpointId, skillName, label);
+      };
     });
     body.querySelectorAll("button[data-resolve-repo]").forEach((btn) => {
       const [endpointId, skillName] = btn.getAttribute("data-resolve-repo").split(SEP);
@@ -6395,13 +6428,62 @@ async function api(method, path, body) {
     return d.diffs || [];
   }
 
-  async function showLocalDiff(endpointId, skillName) {
+  // 「查看差异」两栏对照弹窗的正文，一个自包含函数（只依赖 escapeHtml）：
+  // panel-skills.test.mjs 会把它从主脚本里抠出来直接执行，用后端真实形状的
+  // payload 验两侧行号与着色类——光看源码结构的断言看不见这一层。
+  // 左＝主仓库、右＝该端点。二进制 / 超限这些"没比"的文件同样进清单并写明原因，
+  // 否则用户看到的是一份悄悄缩水过的差异。
+  function skillDiffHtml(endpointId, skillName, files, epLabel) {
+    const STATE_LABEL = {
+      different: "内容不同",
+      "only-repo": "仅仓库有",
+      "only-endpoint": "仅端点有",
+      "eol-only": "只有换行符不同",
+      binary: "未比对：二进制文件",
+      oversize: "未比对：文件过大",
+      "too-many": "未比对：本次要对照的文件太多",
+      unreadable: "未比对：读不到文件",
+    };
+    const stateLabel = (f) => STATE_LABEL[f.state] || "未比对";
+    // 四格：左行号 左正文 | 右行号 右正文。缺一侧的那格留空、由 CSS 铺底，
+    // 两栏同处一行才不会对不上。
+    const cell = (no, text, side) =>
+      `<span class="sd-no sd-${side}">${no ?? ""}</span>` +
+      `<span class="sd-tx sd-${side}">${text == null ? "" : escapeHtml(text)}</span>`;
+    const rowHtml = (row) => {
+      if (row.op === "gap") return `<div class="sd-gap">⋮ 中间 ${row.hidden} 行两侧一致，已折叠</div>`;
+      const op = row.op === "mod" ? "mod" : row.op === "del" ? "del" : row.op === "ins" ? "ins" : "equal";
+      return `<div class="sd-row sd-${op}">` +
+        cell(row.aNo, row.aText, "a") + cell(row.bNo, row.bText, "b") + "</div>";
+    };
+    const fileHtml = (f) => {
+      const stat = f.state === "different" ? `+${f.added ?? 0} −${f.removed ?? 0}` : "";
+      const head = `<div class="sd-file-head"><code>${escapeHtml(f.path)}</code>` +
+        `<span class="badge ${f.state === "different" ? "badge-neutral" : "badge-warn"}">${escapeHtml(stateLabel(f))}</span>` +
+        (stat ? `<span class="sd-stat">${stat}</span>` : "") + "</div>";
+      if (f.state !== "different") return `<section class="sd-file sd-file-flat">${head}</section>`;
+      return `<section class="sd-file">${head}<div class="sd-body">${(f.rows || []).map(rowHtml).join("")}</div></section>`;
+    };
+    const diffFiles = files.filter((f) => f.state === "different");
+    const changed = diffFiles.reduce((n, f) => n + (f.changed || 0), 0);
+    const legend = `<div class="sd-legend">` +
+      `<span class="sd-side">左 · 主仓库</span>` +
+      `<span class="sd-side">右 · ${escapeHtml(epLabel || endpointId)}</span>` +
+      `<span class="sd-stat">${files.length} 个文件不一致 · ${diffFiles.length} 个逐行对照 · 改动 ${changed} 行</span></div>`;
+    if (!files.length) return `${legend}<div class="empty-hint">两侧内容一致，没有需要对照的文件</div>`;
+    return `<div class="skills-diff">${legend}${files.map(fileHtml).join("")}</div>`;
+  }
+
+  // 差异弹窗：逐行左右对照由后端算好（后端知道两侧到底哪边是哪个目录），
+  // 前端只负责把每一行摆进两栏里。
+  async function showLocalDiff(endpointId, skillName, epLabel) {
     try {
-      const diffs = await fetchLocalDiffs(endpointId, skillName);
+      const d = await api("POST", "/api/skills/diff/content", { endpointId, skillName });
       showSkillsModal({
         title: `差异：${skillName}`,
         danger: false,
-        bodyHtml: `端点 <b>${escapeHtml(endpointId)}</b> 的实体目录与主仓库同名 skill 的内容差异：${diffListHtml(diffs) || "（无差异）"}`,
+        diff: true,
+        bodyHtml: skillDiffHtml(endpointId, skillName, d.files || [], epLabel),
         confirmText: "知道了",
         onConfirm: null,
       });
@@ -6539,7 +6621,8 @@ async function api(method, path, body) {
   }
 
   // ── 共用确认 modal ──
-  function showSkillsModal({ title, bodyHtml, confirmText, danger, wide, onConfirm }) {
+  // wide = 正文查阅那一档宽度；diff = 再宽一档并允许更高，两栏逐行对照需要横向空间
+  function showSkillsModal({ title, bodyHtml, confirmText, danger, wide, diff, onConfirm }) {
     $("storeAddPoolCtl")?.remove(); // 新增渠道弹窗注入标题的建池控件，防跨弹窗残留
     $("skillsModalTitle").textContent = title;
     $("skillsModalBody").innerHTML = bodyHtml;
@@ -6549,7 +6632,8 @@ async function api(method, path, body) {
     btn.className = "btn" + (danger ? " btn-danger" : " btn-primary");
     skillsModalConfirm = onConfirm || null;
     skillsModalGen++;
-    $("skillsModal").classList.toggle("skills-modal-wide", !!wide); // 仅正文查阅加宽
+    $("skillsModal").classList.toggle("skills-modal-wide", !!wide || !!diff); // 仅正文查阅加宽
+    $("skillsModal").classList.toggle("skills-modal-diff", !!diff);
     $("skillsModal").classList.add("show");
   }
 
