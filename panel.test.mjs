@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter, startRelayActivityBridge } from "./panel.mjs";
+import { AGENT_TERMINAL_TARGETS } from "./agent-session-env.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 
@@ -2554,6 +2555,30 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
 
+  it("最近请求 5 行视窗 + 四宫格数值改细 + 折线垂直居中", () => {
+    // 视窗：行高 40px、间距 6px，max-height = 5×40+4×6 = 224px，刚好 5 行；
+    // 不足 5 条自然变矮（flex 列高由内容决定，无 min-height 撑高）。
+    const listRule = panelCss.match(/\.terminal-request-list \{([^}]*)\}/)[1];
+    assert.ok(listRule.includes("max-height: 224px"), "视窗封顶 5 行");
+    assert.ok(listRule.includes("overflow-y: auto"), "超出在窗内滚动");
+    assert.ok(listRule.includes("scrollbar-width: thin") && listRule.includes("scrollbar-color: var(--border-strong) transparent"), "滚动条与路由链视窗同款");
+    assert.ok(!listRule.includes("min-height"), "列表不设最小高度，不足 5 条不留空白");
+    assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
+    assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内两栏垂直居中");
+    // 四宫格：数值改细、折线缩至 44×17 并块级化（消 inline 基线间隙才真居中）
+    assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
+    assert.ok(panelCss.includes(".terminal-metric-spark { flex: none; width: 44px; height: 17px; }"), "折线稍缩小");
+    assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; }"), "折线 SVG 块级化");
+    assert.ok(/\.terminal-metric-row \{[^}]*align-items: center/.test(panelCss), "数值行保持垂直居中");
+    // 来源语义色：号池紫（--pool 既有）+ 渠道青（--chan 新增，亮暗两值）
+    assert.ok(panelCss.includes("--chan: #0e7490"), "亮色渠道青");
+    assert.ok(panelCss.includes("--chan: #4cd6ef"), "暗色渠道青");
+    assert.ok(/\.terminal-request-main strong\.is-pool \{ color: var\(--pool\); \}/.test(panelCss), "号池来源紫");
+    assert.ok(/\.terminal-request-main strong\.is-channel \{ color: var\(--chan\); \}/.test(panelCss), "渠道来源青");
+    assert.ok(/\.terminal-request-main strong\.is-unknown \{ color: var\(--text\); \}/.test(panelCss), "未知来源随正文色");
+    assert.ok(/\.terminal-request-data \{[^}]*align-items: flex-end/.test(panelCss), "右栏两行右对齐");
+  });
+
   it("虚拟终端整页固定且隐藏全局页脚，终端身份按目录与检测到的 Agent 呈现", () => {
     assert.ok(panelCss.includes("body.terminal-mode { overflow: hidden; }"), "终端页锁定整页滚动");
     assert.ok(panelCss.includes("body.terminal-mode > footer { display: none; }"), "终端页隐藏全局页脚灰字行");
@@ -4902,15 +4927,67 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { route: [], routeCurrent: 0 }, "端点未配链整块隐藏");
   });
 
-  it("terminalRequestsFromRows 把 journal 行套成预览稿同形的展示行", async () => {
+  it("terminalRequestsFromRows 把 journal 行套成预览稿同形的展示行（含缓存 token 兜底）", async () => {
     const out = await vmFn("terminalRequestsFromRows", [[
-      { model: "kimi-k3", providerId: "a6api-main", ttftMs: 1820, completion: 2418, ok: true },
+      { model: "kimi-k3", providerId: "a6api-main", ttftMs: 1820, completion: 2418, cached: 1360000, ok: true },
       { model: "m2", providerId: "p2", ok: false },
+      { model: "m3", providerId: "p3", completion: 5, cached: undefined, ok: true },
     ]]);
     assert.deepEqual(out, [
-      { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", state: "ok" },
-      { model: "m2", provider: "p2", metric: "—", detail: "请求失败", state: "failed" },
+      { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok" },
+      { model: "m2", provider: "p2", metric: "—", detail: "请求失败", cached: 0, state: "failed" },
+      { model: "m3", provider: "p3", metric: "—", detail: "完成 · 5 tokens", cached: 0, state: "ok" },
     ]);
+  });
+
+  it("terminalRequestSourceKind 按号池/渠道两张 Map 定来源色种，查不到一律回落 unknown", async () => {
+    const nodeInfo = {
+      pools: new Map([["pool-a", "主力号池"]]),
+      providers: new Map([["a6api-main", "A6 主渠道"]]),
+    };
+    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", nodeInfo]), "pool", "命中号池表 → 紫");
+    assert.equal(await vmFn("terminalRequestSourceKind", ["a6api-main", nodeInfo]), "channel", "命中渠道表 → 青");
+    assert.equal(await vmFn("terminalRequestSourceKind", ["ghost-id", nodeInfo]), "unknown", "两表都没有 → 随正文色");
+    // 缓存未填充 / 入参异常：安全回落，不抛错
+    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", null]), "unknown", "缓存未填充不抛错");
+    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", {}]), "unknown", "缺 Map 不抛错");
+    assert.equal(await vmFn("terminalRequestSourceKind", ["", nodeInfo]), "unknown", "空 id 不抛错");
+    assert.equal(await vmFn("terminalRequestSourceKind", [null, nodeInfo]), "unknown", "非字符串 id 不抛错");
+  });
+
+  it("最近请求行模板：左栏身份两行 + 右栏数据两行，来源色三态，缓存后缀只在成功行出现", async () => {
+    const ok = await vmFn("terminalRequestItemHtml", [{
+      model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok",
+    }, { kind: "pool", label: "主力号池" }], ["escapeHtml"]);
+    assert.ok(ok.includes('<strong class="is-pool">kimi-k3</strong>'), "左栏上行：模型名大字，号池紫");
+    assert.ok(ok.includes("<span>主力号池</span>"), "左栏下行：来源显示名小灰字");
+    assert.ok(ok.includes('class="terminal-request-metric">1.82s<'), "右栏上行：TTFT");
+    assert.ok(ok.includes('class="terminal-request-detail">完成 · 2,418 tokens · 缓存 1,360,000<'), "右栏下行：明细带缓存后缀");
+
+    const chan = await vmFn("terminalRequestItemHtml", [{
+      model: "claude-opus-5", provider: "chan-a", metric: "0.94s", detail: "完成 · 12 tokens", cached: 0, state: "ok",
+    }, { kind: "channel", label: "A6 主渠道" }], ["escapeHtml"]);
+    assert.ok(chan.includes('<strong class="is-channel">claude-opus-5</strong>'), "命中渠道表 → 青");
+    assert.ok(!chan.includes("缓存"), "cached 为 0 不出现缓存后缀");
+
+    const unknown = await vmFn("terminalRequestItemHtml", [{
+      model: "m3", provider: "ghost-id", metric: "—", detail: "完成 · 5 tokens", cached: 42, state: "ok",
+    }, null], ["escapeHtml"]);
+    assert.ok(unknown.includes('<strong class="is-unknown">m3</strong>'), "查不到来源 → 随正文色");
+    assert.ok(unknown.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id");
+    assert.ok(unknown.includes("缓存 42"), "cached > 0 即有缓存后缀");
+
+    const failed = await vmFn("terminalRequestItemHtml", [{
+      model: "m4", provider: "pool-a", metric: "—", detail: "请求失败", cached: 99, state: "failed",
+    }, { kind: "pool", label: "主力号池" }], ["escapeHtml"]);
+    assert.ok(failed.includes('<i class="terminal-request-dot is-failed">'), "失败行圆点语义不变");
+    assert.ok(failed.includes('class="terminal-request-detail">请求失败<'), "失败行只显示请求失败");
+    assert.ok(!failed.includes("缓存"), "失败行不追加缓存后缀");
+
+    const escaped = await vmFn("terminalRequestItemHtml", [{
+      model: "<b>x</b>", provider: "p", metric: "—", detail: "完成 · 1 tokens", cached: 0, state: "ok",
+    }, { kind: "unknown", label: "<i>y</i>" }], ["escapeHtml"]);
+    assert.ok(escaped.includes("&lt;b&gt;x&lt;/b&gt;") && escaped.includes("&lt;i&gt;y&lt;/i&gt;"), "模型名与显示名都转义");
   });
 
   it("terminalInstanceRow 在 instances 缺位时回退到聚合端点的 sessions 行", async () => {
@@ -5066,7 +5143,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "connectTerminalStream"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "connectTerminalStream", "terminalClipboardKeyIntent"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -5078,6 +5155,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       let terminalEventSource = null;
       let terminalXterm = null;
       let terminalFitAddon = null;
+      let terminalHostResizeObserver = null;
       let terminalInputDisposable = null;
       const terminalFontSize = 13;
       const host = {};
@@ -5096,6 +5174,9 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
         write(text) { this.writes.push(text); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+        attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
+        focus() { this.focusCount = (this.focusCount || 0) + 1; }
+        hasSelection() { return this.hasSelectionValue === true; }
       };
       class FakeEventSource {
         constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
@@ -5224,10 +5305,14 @@ describe("虚拟终端 resize 防抖", () => {
     assert.ok(ms >= 80 && ms <= 150, `防抖延迟 ${ms}ms 落在 80–150ms 区间`);
   });
 
-  it("接线：resize 监听挂防抖入口，其它 fit 调用点不受影响", () => {
+  it("接线：resize 监听挂防抖入口；建流先同步 fit 再开流（回放到达前列宽已量准）", () => {
     assert.ok(panelJs.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听走防抖");
-    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(ensure.includes("requestAnimationFrame(fitTerminalXterm)"), "初次创建 xterm 仍直接 fit");
+    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(connect, "connectTerminalStream found in panel.js");
+    const fitAt = connect.indexOf("fitTerminalXterm();");
+    const streamAt = connect.indexOf("terminalEventSource = new EventSource");
+    assert.ok(fitAt > 0 && streamAt > 0 && fitAt < streamAt,
+      "建流先同步 fit 再开 SSE——首帧回放不再按 xterm 出厂默认列宽（80）折行");
     const schedule = panelJs.match(/function scheduleTerminalFit\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(schedule.includes("fitTerminalXterm()"), "终端页显示路径仍直接 fit");
   });
@@ -5242,7 +5327,7 @@ describe("虚拟终端 resize 防抖", () => {
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "debounceTerminalFit", "ensureTerminalXterm", "connectTerminalStream", "closeTerminalStream"]
+    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -5253,6 +5338,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       measured: { cols: 119, rows: 26 },
       hiddenFallback: { cols: 12, rows: 6 },
       session: { id: "sess-a", backend: true, backendState: null, shell: {} },
+      warns: [], resizeObservers: [], resizeFailures: 0,
     };
     const view = { hidden: viewHidden };
     const host = {};
@@ -5261,13 +5347,22 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalEventSource = null;
       let terminalXterm = null;
       let terminalFitAddon = null;
+      let terminalHostResizeObserver = null;
       let terminalInputDisposable = null;
       let activeTerminalPreviewId = "sess-a";
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = {};
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
-      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      const console = { warn: (...args) => { state.warns.push(args.map(String).join(" ")); } };
+      const api = (method, url, body) => {
+        state.posts.push({ method, url, body });
+        if (method === "POST" && url.includes("/resize") && state.resizeFailures > 0) {
+          state.resizeFailures -= 1;
+          return Promise.reject(new Error("resize 失败（测试注入）"));
+        }
+        return Promise.resolve({});
+      };
       function updateTerminalFootSize() {}
       function terminalSessionFor(id) { return state.session; }
       function requestAnimationFrame(cb) { cb(); }
@@ -5282,7 +5377,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       }
       const window = { FitAddon: { FitAddon: FakeFitAddon } };
       window.Terminal = class {
-        constructor(options) { this.options = options; this.cols = 80; this.rows = 24; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); state.terms.push(this); }
+        constructor(options) { this.options = options; this.cols = 80; this.rows = 24; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); this.focusCount = 0; this.keyEventHandler = null; this.selection = false; state.terms.push(this); }
         loadAddon() {}
         open(hostEl) { this.openedHost = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
@@ -5290,6 +5385,9 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         write(text) { this.writes.push(text); }
         reset() { this.resetCount += 1; }
         dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+        attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
+        focus() { this.focusCount += 1; }
+        hasSelection() { return this.selection; }
       };
       class FakeEventSource {
         constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
@@ -5298,6 +5396,12 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         close() { this.closed = true; }
       }
       const EventSource = FakeEventSource;
+      class FakeResizeObserver {
+        constructor(cb) { this.cb = cb; this.observed = []; this.disconnected = false; state.resizeObservers.push(this); }
+        observe(el) { this.observed.push(el); }
+        disconnect() { this.disconnected = true; }
+      }
+      const ResizeObserver = FakeResizeObserver;
       let terminalResizeDebounceTimer = null;
       const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
       const pendingTimers = [];
@@ -5313,6 +5417,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         xterm: () => terminalXterm, source: () => terminalEventSource,
         host: () => host,
         setViewHidden: (v) => { view.hidden = v; },
+        setMeasured: (cols, rows) => { state.measured = { cols, rows }; },
+        observers: () => state.resizeObservers,
       };
     `)(state);
     return { sandbox, state, view };
@@ -5369,6 +5475,112 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.ok(m, "switchView found in panel.js");
     const branch = m.slice(m.indexOf("if (terminal) {"));
     assert.ok(branch.includes("renderTerminalPreviewSession()"), "终端分支建流：xterm 在可见容器里创建再收全量回放");
+  });
+
+  it("剪贴板键位：裸 Ctrl+V 交还浏览器、Ctrl+C 有选中才交还复制，建流即回焦", () => {
+    const { sandbox } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    assert.ok(term.keyEventHandler, "xterm 实例挂了自定义键位处理器");
+    assert.ok(term.focusCount >= 1, "建流后焦点回守终端（进页/切签/新建同一入口）");
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, key: "v" }), false, "裸 Ctrl+V 整体交还浏览器（原生粘贴 → xterm paste 通路 → PTY）");
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, key: "c" }), true, "无选中时 Ctrl+C 交回 xterm 照旧发中断");
+    term.selection = true;
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, key: "c" }), false, "有选中时 Ctrl+C 交还浏览器 copy 事件（选中即复制）");
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, shiftKey: true, key: "C" }), true, "Ctrl+Shift+C 不接管，维持既有复制通路");
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, shiftKey: true, key: "V" }), true, "Ctrl+Shift+V 不接管，维持既有粘贴通路");
+    assert.equal(term.keyEventHandler({ type: "keydown", ctrlKey: true, key: "x" }), true, "其余组合键交回 xterm 原语义");
+    assert.equal(term.keyEventHandler({ type: "keyup", ctrlKey: true, key: "v" }), true, "keyup 不拦（xterm 自身的焦点自愈逻辑不受影响）");
+  });
+
+  it("宿主尺寸观察：inspector 收放等不经 window resize 的宽度变动也触发防抖 fit", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    assert.equal(state.resizeObservers.length, 1, "xterm 打开进宿主后挂上 ResizeObserver");
+    const observer = state.resizeObservers[0];
+    assert.deepEqual(observer.observed, [sandbox.host()], "观察的是终端宿主元素");
+    assert.equal(resizePosts(state).length, 1, "建流同步 fit 一次");
+
+    // observe 的首次即时机不重复 POST（建流前的同步 fit 已量准）
+    observer.cb();
+    sandbox.flushTimers();
+    assert.equal(resizePosts(state).length, 1, "首次即时机被跳过，不同尺寸重复 POST");
+
+    // inspector 收起：宿主变宽（不经 window resize），防抖合并后按新实测尺寸纠正 PTY
+    sandbox.setMeasured(96, 30);
+    observer.cb();
+    observer.cb();
+    assert.equal(resizePosts(state).length, 1, "防抖窗口内不逐次 POST");
+    sandbox.flushTimers();
+    const posts = resizePosts(state);
+    assert.equal(posts.length, 2, "静默期后补一次 resize");
+    assert.deepEqual(posts[1].body, { cols: 96, rows: 30 }, "按变动后的实测尺寸纠正 PTY 列宽");
+  });
+
+  it("关流即摘观察器：旧宿主的尺寸变动不再触发 fit", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const observer = state.resizeObservers[0];
+    sandbox.close();
+    assert.equal(observer.disconnected, true, "关流时 disconnect 观察器");
+  });
+
+  it("resize POST 失败：短重试一次，成功即纠正（PTY 不再停在旧列宽）", async () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    state.resizeFailures = 1;
+    sandbox.connect(backendSession("sess-a"));
+    await new Promise((r) => setTimeout(r, 0)); // 等首次 POST 的失败落定
+    assert.equal(resizePosts(state).length, 1, "首次 POST 发出（被注入失败）");
+    sandbox.flushTimers(); // 250ms 重试到场
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(resizePosts(state).length, 2, "失败后短重试一次");
+    assert.deepEqual(resizePosts(state)[1].body, { cols: 119, rows: 26 }, "重试补上真实尺寸");
+    assert.equal(state.warns.length, 0, "重试成功不告警");
+  });
+
+  it("resize 两次失败才告警；重试执行前用户已 resize 过的更新测量优先，旧重试不回溯", async () => {
+    const twice = terminalGateSandbox({ viewHidden: false });
+    twice.state.resizeFailures = 2;
+    twice.sandbox.connect(backendSession("sess-a"));
+    await new Promise((r) => setTimeout(r, 0));
+    twice.sandbox.flushTimers();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(resizePosts(twice.state).length, 2, "最多重试一次，不无限重");
+    assert.equal(twice.state.warns.length, 1, "两次都失败才告警（会话可能已关闭，属预期末路）");
+    assert.ok(twice.state.warns[0].includes("resize failed"), "告警带 resize 关键词");
+
+    const superseded = terminalGateSandbox({ viewHidden: false });
+    superseded.state.resizeFailures = 1;
+    superseded.sandbox.connect(backendSession("sess-a"));
+    await new Promise((r) => setTimeout(r, 0));
+    // 用户在重试到场前又改了窗口：新一次 fit 量到别的大小并成功
+    superseded.sandbox.setMeasured(100, 30);
+    superseded.sandbox.fit();
+    superseded.sandbox.flushTimers(); // 旧重试到场：xterm 已换尺寸，跳过
+    await new Promise((r) => setTimeout(r, 0));
+    const posts = resizePosts(superseded.state);
+    assert.equal(posts.length, 2, "旧重试被跳过，不发旧尺寸");
+    assert.deepEqual(posts[1].body, { cols: 100, rows: 30 }, "PTY 停在更新后的实测尺寸，不回溯");
+  });
+
+  it("接线结构：新会话初始行列取实测尺寸、inspector 收放补 fit（TUI 溢我方修复）", () => {
+    assert.equal((panelJs.match(/\.\.\.terminalCreateSize\(\)/g) || []).length, 3, "三处会话创建点全部改用实测尺寸");
+    assert.ok(!panelJs.includes('shell: "powershell", cols: 120'), "创建入参不再硬编码列宽");
+    const create = panelJs.match(/function terminalCreateSize\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(create, "terminalCreateSize found in panel.js");
+    assert.ok(create.includes("terminalXterm.cols"), "有 xterm 实例时取其实测 cols/rows");
+    const withXterm = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)({ cols: 96, rows: 30 });
+    assert.deepEqual(withXterm(), { cols: 96, rows: 30 });
+    const fallback = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)(null);
+    assert.deepEqual(fallback(), { cols: 120, rows: 34 }, "首装载入尚无实例才回落兜底值");
+    const junk = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)({ cols: "x", rows: null });
+    assert.deepEqual(junk(), { cols: 120, rows: 34 }, "实例尺寸异常时回落兜底");
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init, "initTerminalPreview found in panel.js");
+    const toggleAt = init.indexOf('$("terminalInspectorToggle").onclick');
+    assert.ok(toggleAt > 0, "inspector 开关接线在位");
+    const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalClearBtn").onclick'));
+    assert.ok(toggleBody.includes("scheduleTerminalFit()"), "inspector 收放即调度一次尺寸适配（±292px 不经 window resize）");
   });
 });
 
@@ -5478,6 +5690,34 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, code: "NumpadSubtract" }]), -1);
     assert.equal(await vmFn("isTerminalFontZoomKey", [{ key: "=" }]), 0, "无 Ctrl 不触发");
     assert.equal(await vmFn("isTerminalFontZoomKey", [{ ctrlKey: true, key: "0" }]), 0);
+  });
+
+  it("terminalClipboardKeyIntent 只认裸 Ctrl+C / Ctrl+V，组合键一律放行", async () => {
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, key: "v" }]), "paste");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, key: "V" }]), "paste");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, key: "c" }]), "copy");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, key: "C" }]), "copy");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, shiftKey: true, key: "C" }]), null, "Ctrl+Shift+C 不接管（放行浏览器复制）");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, shiftKey: true, key: "V" }]), null, "Ctrl+Shift+V 不接管（放行粘贴为纯文本）");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, altKey: true, key: "v" }]), null, "带 Alt 不接管");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, metaKey: true, key: "v" }]), null, "带 Meta 不接管");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", key: "v" }]), null, "无 Ctrl 不触发");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true, key: "x" }]), null);
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keyup", ctrlKey: true, key: "v" }]), null, "只看 keydown");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [null]), null, "空事件不炸");
+    assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true }]), null, "缺 key 字段不误判");
+  });
+
+  it("接线结构：剪贴板键位交还浏览器、焦点四路回守、死焦点调用已清除", () => {
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure?.includes("term.attachCustomKeyEventHandler("), "每个 xterm 实例挂自定义键位处理器");
+    assert.ok(ensure?.includes('if (intent === "paste") return false;'), "裸 Ctrl+V 整体交还浏览器（原生粘贴 → xterm paste 通路 → PTY）");
+    assert.ok(ensure?.includes('if (intent === "copy" && term.hasSelection()) return false;'), "裸 Ctrl+C 有选中才交还复制，无选中交回 xterm 发中断");
+    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(connect?.includes("term.focus()"), "建流（进页/切签/新建/降级重试）后焦点回守");
+    assert.ok(panelJs.includes("terminalXterm?.focus()"), "字号 ± 与终端屏点击后焦点回守");
+    assert.ok(panelJs.includes("else terminalXterm.focus();"), "重进终端页（实例尚存）也回焦");
+    assert.ok(!panelJs.includes("terminalCommandInput"), "聚焦不存在输入框的死调用已清除");
   });
 
   it("接线结构：按钮组落在清空按钮左侧、xterm 初始字号取记忆值、快捷键只在终端页生效", () => {
@@ -5691,5 +5931,522 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     const tick = panelJs.match(/terminalPollTimer = setInterval\(\(\) => \{[\s\S]*?\}, 1000\);/)?.[0];
     assert.ok(tick?.includes("syncTerminalActivityStream();"), "推送流开关随每秒轮询节拍走");
     assert.ok(tick?.includes("pollTerminalSessions();"), "1s 轮询原样保留");
+  });
+});
+
+
+// 降级路径收口：terminal-host 不可达（面板路由 503 terminal_host_unavailable / fetch
+// 直接失败）时，终端页不再把 mock 假会话（假指标/假路由/假请求/假横幅）端给用户，
+// 改给真空态——xterm 区盖空态覆盖层、监测区/路由链沿用 hidden 通路、「+」禁用；
+// 重试走空态「重新连接」与进页自动重试。判定键是就绪位本身，不是会话数（零会话会
+// 被 fetch 的自动补建兜住）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
+describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）", () => {
+  function extractFn(name) {
+    const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
+
+  it("源钉死：初始化不再先渲 mock，fetch 失败分支必调空态渲染", () => {
+    const init = extractFn("initTerminalPreview");
+    const head = init.slice(init.indexOf("restoreTerminalFontSize()"), init.indexOf("connectTerminalBackend();"));
+    assert.ok(!head.includes("renderTerminalPreviewSession"), "初始化首拍不再先渲 mock 会话");
+    assert.ok(!init.includes("fetchTerminalSessions().then"), "初装连接走共用通路，不再内联 fetch+then");
+    const connect = extractFn("connectTerminalBackend");
+    assert.ok(connect.includes("fetchTerminalSessions()"), "连接通路以 fetch 会话列表为就绪判定");
+    assert.ok(connect.includes("renderTerminalPreviewSession();"), "成功链路重渲会话（三件套之一）");
+    assert.ok(connect.includes("pollTerminalSessions();"), "成功链路立即补拍归属轮询（三件套之二）");
+    assert.ok(connect.includes("syncTerminalActivityStream();"), "成功链路同步活跃真值流（三件套之三）");
+    const catchBranch = connect.slice(connect.indexOf(".catch("));
+    assert.ok(catchBranch.includes("terminalBackendReady = false"), "失败分支置回未就绪");
+    assert.ok(catchBranch.includes("renderTerminalUnavailableState();"), "失败分支必调空态渲染");
+  });
+
+  it("源钉死：「+」在降级下禁用，openTerminalPreview 含降级重试分支", () => {
+    const sync = extractFn("syncTerminalAddBtn");
+    assert.ok(sync.includes("addBtn.disabled = !terminalBackendReady"), "新建键禁用位与就绪位同拍");
+    const unavailable = extractFn("renderTerminalUnavailableState");
+    assert.ok(unavailable.includes("addBtn.disabled = true"), "落空态即禁用「+」，不再产假会话");
+    const open = extractFn("openTerminalPreview");
+    assert.ok(open.includes("if (!terminalBackendReady) connectTerminalBackend();"), "进页未就绪自动重试一次");
+    assert.ok(panelJs.includes('$("terminalRetryBtn").onclick = () => connectTerminalBackend();'),
+      "空态「重新连接」重跑 fetch 成功链路");
+    const render = extractFn("renderTerminalPreviewSession");
+    assert.ok(render.includes("terminalBackendReady === false"), "降级闸判定键是就绪位，不是会话数");
+    assert.ok(render.includes("renderTerminalUnavailableState();"), "降级时渲染通路整体改落空态");
+    assert.ok(unavailable.includes('tabs.innerHTML = ""'), "落空态即清空静态假页签");
+    assert.ok(unavailable.includes('querySelector(".terminal-session-bar")'), "落空态即隐藏假会话栏");
+    assert.ok(render.includes('querySelector(".terminal-foot-status")'), "就绪路径恢复底栏左段");
+  });
+
+  it("HTML/CSS：空态节点存在于 xterm 区内且默认隐藏", () => {
+    assert.ok(panelHtml.includes('id="terminalUnavailable" hidden'), "空态覆盖层默认 hidden");
+    const screen = panelHtml.slice(panelHtml.indexOf('id="terminalScreen"'), panelHtml.indexOf('class="terminal-footbar"'));
+    assert.ok(screen.indexOf('id="terminalUnavailable"') > screen.indexOf('id="terminalXtermHost"'),
+      "覆盖层在 xterm 宿主之后，同容器内天然压在上层");
+    assert.ok(screen.includes("终端服务未运行"), "空态标题就位");
+    assert.ok(screen.includes("终端服务随 relay 一同启动，relay 运行后即可使用。"), "空态说明就位");
+    assert.ok(screen.includes('id="terminalRetryBtn"') && screen.includes("重新连接"), "空态重试按钮就位");
+    assert.ok(panelCss.includes(".terminal-unavailable[hidden] { display: none; }"), "hidden 语义不被 flex 布局覆盖");
+    assert.ok(/\.terminal-screen \{[^}]*position: relative/.test(panelCss), "screen 是覆盖层的定位祖先");
+    assert.ok(panelCss.includes(".terminal-add-btn:disabled"), "「+」禁用态有视觉反馈");
+  });
+
+  function unavailableSandbox() {
+    const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "syncTerminalAddBtn", "connectTerminalBackend"]
+      .map(extractFn).join("\n");
+    const els = {
+      terminalUnavailable: { hidden: true },
+      terminalMetricsSection: { hidden: false },
+      terminalFootStats: { hidden: false },
+      terminalRouteSection: { hidden: false },
+      terminalRouteLine: { closest: () => els.terminalRouteSection },
+      terminalAddBtn: { disabled: false },
+      terminalTabs: { innerHTML: "<button>payment-service</button>" },
+      ".terminal-session-bar": { style: {} },
+      ".terminal-foot-status": { style: {} },
+    };
+    const state = {
+      backendUp: false, session: null,
+      fetches: 0, polled: 0, synced: 0, renderedData: 0, renderedTabs: 0, connected: null,
+    };
+    const sandbox = new Function("els", "state", `
+      const $ = (id) => els[id] ?? null;
+      const document = { querySelector: (sel) => els[sel] ?? null };
+      let terminalBackendReady = false;
+      const activeTerminalPreviewId = "t1";
+      const currentView = "terminal";
+      const console = { warn: () => {} };
+      async function fetchTerminalSessions() {
+        state.fetches += 1;
+        if (!state.backendUp) throw new Error("terminal_host_unavailable");
+        terminalBackendReady = true;
+      }
+      function terminalSessionFor() { return state.session; }
+      function renderTerminalSessionData() { state.renderedData += 1; }
+      function renderTerminalPreviewTabs() { state.renderedTabs += 1; }
+      function connectTerminalStream(session) { state.connected = session; }
+      function scheduleTerminalFit() {}
+      function pollTerminalSessions() { state.polled += 1; }
+      function syncTerminalActivityStream() { state.synced += 1; }
+      ${bodies}
+      return {
+        render: renderTerminalPreviewSession,
+        renderUnavailable: renderTerminalUnavailableState,
+        syncAddBtn: syncTerminalAddBtn,
+        connect: connectTerminalBackend,
+        setReady: (v) => { terminalBackendReady = v; },
+        ready: () => terminalBackendReady,
+      };
+    `)(els, state);
+    return { sandbox, els, state };
+  }
+
+  it("vm 真跑空态渲染三态：降级 → 就绪恢复 → 再降级，幂等可重进", () => {
+    const { sandbox, els, state } = unavailableSandbox();
+    // 态一：未就绪 → 渲染整体落空态，不进 connectTerminalStream（mock 横幅不进屏）
+    sandbox.render();
+    assert.equal(els.terminalUnavailable.hidden, false, "降级时空态覆盖层盖上");
+    assert.equal(els.terminalMetricsSection.hidden, true, "监测区走 hidden 通路");
+    assert.equal(els.terminalFootStats.hidden, true, "底栏统计随监测区一并隐藏");
+    assert.equal(els.terminalRouteSection.hidden, true, "路由链走 hidden 通路");
+    assert.equal(els.terminalAddBtn.disabled, true, "「+」随降级禁用");
+    assert.equal(els.terminalTabs.innerHTML, "", "降级清空静态假页签（payment-service/portal 种子）");
+    assert.equal(els[".terminal-session-bar"].style.display, "none", "降级隐藏静态假会话栏");
+    assert.equal(els[".terminal-foot-status"].style.display, "none", "降级隐藏静态假底栏左段（PID/尺寸种子）");
+    assert.equal(state.connected, null, "不建流——mock 横幅不进屏");
+    assert.equal(state.renderedData, 0, "假会话数据不渲染");
+
+    // 态二：就绪 → 同一会话渲真数据，覆盖层收起，「+」放开
+    sandbox.setReady(true);
+    state.session = { id: "t1", backend: true };
+    sandbox.render();
+    assert.equal(els.terminalUnavailable.hidden, true, "就绪渲染收起覆盖层");
+    assert.equal(els[".terminal-session-bar"].style.display, "", "就绪恢复会话栏");
+    assert.equal(els[".terminal-foot-status"].style.display, "", "就绪恢复底栏左段");
+    assert.deepEqual(state.connected, { id: "t1", backend: true }, "就绪时进 connectTerminalStream 建流");
+    assert.equal(state.renderedData, 1, "就绪渲染真实会话数据");
+    assert.equal(state.renderedTabs, 1, "就绪渲染会话标签");
+    sandbox.syncAddBtn();
+    assert.equal(els.terminalAddBtn.disabled, false, "就绪后「+」放开");
+
+    // 态三：再降级 → 空态重落且幂等（重试按钮反复按不炸）
+    sandbox.setReady(false);
+    sandbox.render();
+    assert.equal(els.terminalUnavailable.hidden, false, "再降级覆盖层重新盖上");
+    assert.equal(els.terminalAddBtn.disabled, true, "再降级「+」回禁");
+    sandbox.renderUnavailable();
+    sandbox.renderUnavailable();
+    assert.equal(els.terminalUnavailable.hidden, false, "空态渲染幂等可重进");
+  });
+
+  it("vm 真跑连接通路：失败落空态，成功链路三件套各一拍且「+」放开", async () => {
+    const { sandbox, els, state } = unavailableSandbox();
+    await sandbox.connect();
+    assert.equal(state.fetches, 1, "发起一次会话拉取");
+    assert.equal(sandbox.ready(), false, "失败置回未就绪");
+    assert.equal(els.terminalUnavailable.hidden, false, "失败即落空态");
+    assert.equal(els.terminalAddBtn.disabled, true, "失败「+」禁用");
+    assert.equal(state.polled, 0, "失败不补拍轮询");
+    assert.equal(state.synced, 0, "失败不同步活跃流");
+    assert.equal(state.connected, null, "失败不建流");
+
+    state.backendUp = true;
+    state.session = { id: "t1", backend: true };
+    await sandbox.connect();
+    assert.equal(sandbox.ready(), true, "成功置就绪");
+    assert.equal(els.terminalUnavailable.hidden, true, "成功收起覆盖层");
+    assert.equal(els.terminalAddBtn.disabled, false, "成功「+」放开");
+    assert.equal(state.renderedData, 1, "成功链路重渲会话");
+    assert.equal(state.polled, 1, "成功链路补拍归属轮询");
+    assert.equal(state.synced, 1, "成功链路同步活跃真值流");
+    assert.deepEqual(state.connected, { id: "t1", backend: true }, "成功链路建流进真会话");
+  });
+});
+
+// 一键启动 CLI Agent：面板路由把「选中的 agent + 工作目录」在服务端组装成
+// launch（cmd /c 包装，归属链硬前提）与 env（凭证只走环境变量），透传给
+// terminal-host；env 不落盘也不回显。createTerminalSession 注入式假实现，
+// 不起真 terminal-host。
+describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
+  function agentTerminalRouter({ createSession, root } = {}) {
+    const calls = [];
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      createTerminalSession: createSession ?? (async (body, options) => {
+        calls.push({ body, options });
+        return {
+          status: 201,
+          body: {
+            id: "t-agent-1", label: body.label, cwd: body.cwd, shell: "cmd", pid: 777,
+            status: "running", agentId: body.agentId, agentName: body.agentName, launch: body.launch,
+          },
+        };
+      }),
+    });
+    return { router, calls };
+  }
+
+  // kimi 的可执行文件走 KIMI_EXECUTABLE 指向的临时文件：组装层要求它真实存在，
+  // 且测试不能依赖本机装没装 kimi。进程环境用后即还。
+  function withFakeKimiExecutable(fn) {
+    const root = mkTestDir("anyswitch-agent-route-");
+    const exe = join(root, "kimi.cmd");
+    writeFileSync(exe, "");
+    const saved = process.env.KIMI_EXECUTABLE;
+    process.env.KIMI_EXECUTABLE = exe;
+    return fn(root).finally(() => {
+      if (saved === undefined) delete process.env.KIMI_EXECUTABLE;
+      else process.env.KIMI_EXECUTABLE = saved;
+    });
+  }
+
+  it("组装好的 launch/env 透传，token 与代理同源，响应不回显 env", async () => {
+    await withFakeKimiExecutable(async (cwd) => {
+      const root = mkTestDir("anyswitch-agent-route-root-");
+      const { router, calls } = agentTerminalRouter({ root });
+      const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd, cols: 120, rows: 34 });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 201);
+      const body = json();
+      assert.equal(body.id, "t-agent-1");
+      assert.equal(body.agentId, "kimi");
+      assert.equal(body.agentName, "Kimi Code");
+      assert.ok(body.launch, "非密 launch 元数据随快照回传");
+
+      assert.equal(calls.length, 1, "走注入的 createTerminalSession，不起真 terminal-host");
+      const forwarded = calls[0].body;
+      assert.equal(forwarded.shell, "cmd");
+      assert.equal(forwarded.cwd, cwd);
+      assert.equal(forwarded.label, "Kimi Code");
+      assert.deepEqual(forwarded.launch.args.slice(0, 2), ["/d", "/c"], "cmd 包装：session.pid 落在扫描名单内");
+      assert.equal(forwarded.launch.args[2], process.env.KIMI_EXECUTABLE);
+      assert.equal(forwarded.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:47821", "base 恒为常驻 relay");
+      assert.equal(forwarded.env.ANTHROPIC_AUTH_TOKEN, loadOrGenerateToken(root));
+      assert.ok(forwarded.env.KIMI_CODE_CUSTOM_HEADERS.includes("x-agent-id: kimi"));
+      assert.equal(forwarded.env.ANTHROPIC_API_KEY, null, "上游真键以 null 标删");
+      assert.equal(calls[0].options.token, loadOrGenerateToken(root), "token 取法与 terminal 代理一致");
+      // env 不经响应体回显：回给浏览器的只有 terminal-host 的快照（无 env 键，
+      // 也不含令牌明文——凭证只存在于转发给 terminal-host 的那一次请求体里）。
+      assert.equal("env" in body, false, "响应不含 env");
+      assert.ok(!JSON.stringify(body).includes(loadOrGenerateToken(root)), "响应不含令牌明文");
+    });
+  });
+
+  it("未知 agentId / 目录不存在返回 400，文案面向用户", async () => {
+    await withFakeKimiExecutable(async (cwd) => {
+      const root = mkTestDir("anyswitch-agent-route-root-");
+      const { router, calls } = agentTerminalRouter({ root });
+
+      const unknown = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "zcode", cwd });
+      await router.handle(unknown.req, unknown.res);
+      assert.equal(unknown.res.statusCode, 400);
+      assert.match(unknown.json().error, /[\u4e00-\u9fff]/, "中文产品文案，不是机器码");
+      assert.equal(calls.length, 0, "白名单外不转发");
+
+      const missing = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd: join(cwd, "no-such-dir") });
+      await router.handle(missing.req, missing.res);
+      assert.equal(missing.res.statusCode, 400);
+      assert.match(missing.json().error, /工作目录/);
+      assert.equal(calls.length, 0, "目录不存在不静默回落");
+
+      const empty = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi" });
+      await router.handle(empty.req, empty.res);
+      assert.equal(empty.res.statusCode, 400);
+    });
+  });
+
+  it("terminal-host 不在（假实现返回 null 或抛错）返回 503", async () => {
+    await withFakeKimiExecutable(async (cwd) => {
+      for (const createSession of [
+        async () => null,
+        async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:47823"); },
+      ]) {
+        const root = mkTestDir("anyswitch-agent-route-root-");
+        const { router } = agentTerminalRouter({ root, createSession });
+        const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 503);
+        assert.match(json().error, /[\u4e00-\u9fff]/);
+      }
+    });
+  });
+
+  it("源码钉死：路由字面量、组装调用、可注入依赖、Bearer 头都在位", () => {
+    assert.ok(panelMjs.includes('if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);'),
+      "新路由挂在终端路由块内");
+    assert.ok(panelMjs.includes("buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base })"),
+      "launch/env 在服务端组装，不在前端拼");
+    assert.ok(panelMjs.includes("createTerminalSession = defaultCreateTerminalSession"),
+      "createTerminalSession 可注入，测试不起真 terminal-host");
+    assert.ok(panelMjs.includes('headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }'),
+      "默认实现用与代理相同的 pi-relay-token Bearer 头");
+    assert.ok(panelMjs.includes("return sendJson(res, created.status || 201, created.body ?? {});"),
+      "响应只透传 terminal-host 快照，面板不自行拼装——env 无从回显");
+  });
+});
+
+// 前端：「+」开菜单（已安装 CLI Agent 单选 + 工作目录）、createAgentTerminal
+// 走新路由、成功分支登记会话并渲染；空白终端保留原 POST 逻辑。
+describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
+  function extractFn(name) {
+    const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
+
+  // 纯函数在 vm 里真跑（同归属前科的取样式）；出口统一 JSON 往返，防跨原型误判。
+  async function vmFn(name, args, deps = []) {
+    const source = [name, ...deps].map(extractFn).join("\n");
+    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const result = fn(...args);
+    return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
+  }
+
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  function addMenuSandbox({ environment, environmentError } = {}) {
+    const bodies = ["closeTerminalAddMenu", "loadInstalledTerminalAgents", "renderTerminalAddMenuList",
+      "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize"]
+      .map(extractFn).join("\n");
+    const els = {
+      terminalAddMenu: { hidden: true },
+      terminalAddMenuList: { innerHTML: "", querySelectorAll: () => [] },
+      terminalAddMenuNote: { hidden: true, textContent: "" },
+      terminalAddMenuCwd: { value: "D:\\work" },
+    };
+    const log = { posts: [], toasts: [], renders: 0, environmentFetches: 0 };
+    const api = (method, path, body) => {
+      if (path === "/api/environment") {
+        log.environmentFetches += 1;
+        return environmentError ? Promise.reject(environmentError) : Promise.resolve(environment);
+      }
+      log.posts.push({ method, path, body });
+      return Promise.resolve({ id: "t-new", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "D:\\work" });
+    };
+    const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const sandbox = new Function("$", "api", "toast", "panelError", "terminalBackendSession",
+      "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", `
+      let activeTerminalPreviewId = null;
+      let terminalXterm = null;
+      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"];
+      let terminalAddMenuAgents = [];
+      let terminalAddMenuAgentsAt = 0;
+      let terminalAddMenuSelection = "";
+      ${bodies}
+      return {
+        load: loadInstalledTerminalAgents,
+        render: renderTerminalAddMenuList,
+        open: openTerminalAddMenu,
+        select: selectTerminalAddAgent,
+        confirm: confirmTerminalAddMenu,
+        activeId: () => activeTerminalPreviewId,
+        sessions: terminalBackendSessions,
+      };
+    `)((id) => els[id] ?? null, api,
+      (msg, isErr) => log.toasts.push({ msg, isErr }),
+      (err, fallback) => fallback,
+      (item) => ({ ...item }),
+      {}, () => { log.renders += 1; }, escapeHtml);
+    return { sandbox, els, log };
+  }
+
+  const ENVIRONMENT = {
+    clients: [
+      { id: "claude", name: "Claude Code", installations: [{ status: "found", kind: "cli", path: "C:\\claude.exe" }] },
+      { id: "codex", name: "Codex", installations: [{ status: "not_found", kind: "cli" }] },
+      { id: "kimi", name: "Kimi Code", installations: [{ status: "found", kind: "cli", path: "C:\\kimi.cmd" }] },
+      { id: "zcode", name: "ZCode", installations: [{ status: "found", kind: "desktop" }] },
+      { id: "qoder", name: "Qoder", installations: [{ status: "found", kind: "cli" }] },
+    ],
+  };
+
+  it("已安装清单：只收白名单内 status=found 且 kind=cli 的端点", async () => {
+    const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
+    const agents = await sandbox.load();
+    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi"], "未安装/桌面 GUI/白名单外一律不进菜单");
+    assert.equal(log.environmentFetches, 1);
+    await sandbox.load();
+    assert.equal(log.environmentFetches, 1, "60s TTL 内不重复探测");
+
+    sandbox.render(agents);
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("空白终端"), "首项恒为空白终端");
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("Claude Code"));
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("Kimi Code"));
+    assert.ok(!els.terminalAddMenuList.innerHTML.includes("Qoder"));
+    assert.equal(els.terminalAddMenuNote.hidden, true, "有可用 agent 时不显示提示");
+  });
+
+  it("探测失败只留空白终端并说明；一个都没装也说明", async () => {
+    const failed = addMenuSandbox({ environmentError: new Error("HTTP 500") });
+    assert.equal(await failed.sandbox.load(), null, "失败返回 null 且不进缓存");
+    failed.sandbox.render(null);
+    assert.equal(failed.els.terminalAddMenuNote.hidden, false);
+    assert.equal(failed.els.terminalAddMenuNote.textContent, "暂时读不到已安装的 CLI Agent，可以先建空白终端");
+
+    const none = addMenuSandbox({ environment: { clients: [{ id: "kimi", name: "Kimi Code", installations: [{ status: "not_found", kind: "cli" }] }] } });
+    assert.deepEqual(await none.sandbox.load(), []);
+    none.sandbox.render([]);
+    assert.equal(none.els.terminalAddMenuNote.hidden, false);
+    assert.equal(none.els.terminalAddMenuNote.textContent, "尚未安装可用的 CLI Agent，可以先建空白终端");
+  });
+
+  it("createAgentTerminal POST 到新路由，成功分支登记会话、置活跃、重渲", async () => {
+    const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
+    await sandbox.load();
+    sandbox.select("kimi");
+    await sandbox.confirm();
+    await flush();
+    assert.equal(els.terminalAddMenu.hidden, true, "确认即收起菜单");
+    assert.deepEqual(log.posts, [{
+      method: "POST", path: "/api/terminal/agent-sessions",
+      body: { agentId: "kimi", cwd: "D:\\work", cols: 120, rows: 34 },
+    }], "只递 agentId 与工作目录，凭证在服务端组装");
+    assert.ok(sandbox.sessions["t-new"], "成功分支登记终端会话");
+    assert.equal(sandbox.activeId(), "t-new", "新终端置为活跃");
+    assert.equal(log.renders, 1, "成功分支重渲会话");
+    assert.equal(log.toasts.length, 0);
+  });
+
+  it("空白终端保留原 POST 逻辑；启动失败落 toast 不建会话", async () => {
+    const blank = addMenuSandbox({ environment: ENVIRONMENT });
+    await blank.sandbox.confirm(); // 默认选中空白终端
+    await flush();
+    assert.deepEqual(blank.log.posts, [{
+      method: "POST", path: "/api/terminal/sessions",
+      body: { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 },
+    }], "空白终端与升级前完全一致：原 label/cwd/shell/cols/rows");
+
+    // 启动失败：服务端 4xx/5xx（英文短码）→ toast 落中文兜底，不登记会话。
+    const toasts = [];
+    const sessions = {};
+    const rejectApi = (method, path) => (path === "/api/terminal/agent-sessions"
+      ? Promise.reject(Object.assign(new Error("HTTP 400"), { code: "invalid_cwd" }))
+      : Promise.resolve({}));
+    const fn = new Function("api", "toast", "panelError", "terminalBackendSession",
+      "terminalBackendSessions", "renderTerminalPreviewSession", `
+      let activeTerminalPreviewId = null;
+      let terminalXterm = null;
+      ${extractFn("terminalCreateSize")}
+      ${extractFn("createAgentTerminal")}
+      return { createAgentTerminal, sessions: terminalBackendSessions };
+    `)(rejectApi, (msg, isErr) => toasts.push({ msg, isErr }), (err, fallback) => fallback,
+      (item) => ({ ...item }), sessions, () => {});
+    await fn.createAgentTerminal({ agentId: "claude", cwd: "D:\\gone" });
+    assert.equal(toasts.length, 1);
+    assert.equal(toasts[0].isErr, true);
+    assert.equal(toasts[0].msg, "无法启动这个终端", "英文短码落中文兜底；服务端中文文案会优先上屏");
+    assert.deepEqual(Object.keys(fn.sessions), [], "失败不登记会话");
+  });
+
+  it("open 开菜单即拉清单并渲染；「+」onclick 切换菜单", async () => {
+    const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
+    await sandbox.open();
+    await flush();
+    assert.equal(els.terminalAddMenu.hidden, false, "开菜单");
+    assert.equal(log.environmentFetches, 1);
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("空白终端"), "开菜单即渲染清单");
+
+    const onclick = panelJs.match(/\$\("terminalAddBtn"\)\.onclick = \(\) => \{[\s\S]*?\n    \};/)?.[0];
+    assert.ok(onclick, "「+」的 onclick 可取样");
+    assert.ok(onclick.includes("openTerminalAddMenu()"), "就绪即开新建菜单");
+    assert.ok(onclick.includes("closeTerminalAddMenu()"), "再点一次收起");
+    assert.ok(onclick.includes("terminalPreviewSessions"), "降级预览分支原样保留");
+  });
+
+  it("标签副行优先显示 agentName；terminalBackendSession 带上 agent 身份", async () => {
+    const carried = await vmFn("terminalBackendSession", [{
+      id: "t1", label: "Kimi Code", cwd: "D:\\work", shell: "cmd", pid: 777,
+      agentId: "kimi", agentName: "Kimi Code",
+    }]);
+    assert.equal(carried.agentId, "kimi");
+    assert.equal(carried.agentName, "Kimi Code");
+    const plain = await vmFn("terminalBackendSession", [{ id: "t2", label: "新终端", shell: "powershell", pid: 1 }]);
+    assert.equal(plain.agentId, null, "纯外壳会话不带 agent 身份");
+    assert.equal(plain.agentName, null);
+
+    const src = extractFn("renderTerminalPreviewTabs");
+    const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const runTabs = (sessions) => {
+      const tabs = { innerHTML: "" };
+      const fn = new Function("$", "escapeHtml", "sessions", "activeTerminalPreviewId", `
+        function terminalSessionMap() { return sessions; }
+        ${src}
+        return renderTerminalPreviewTabs;
+      `)((id) => (id === "terminalTabs" ? tabs : null), escapeHtml, sessions, "t1");
+      fn();
+      return tabs.innerHTML;
+    };
+    const agentTab = runTabs({
+      t1: { label: "Kimi Code", shell: { name: "命令提示符" }, agentName: "Kimi Code", agent: null, status: "idle" },
+    });
+    assert.ok(agentTab.includes("<small>Kimi Code</small>"), "快照自带 agentName 时优先显示");
+    const attributedTab = runTabs({
+      t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: { name: "Claude Code" }, status: "idle" },
+    });
+    assert.ok(attributedTab.includes("<small>Claude Code</small>"), "归属注入的 agent.name 次之");
+    const shellTab = runTabs({
+      t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
+    });
+    assert.ok(shellTab.includes("<small>PowerShell</small>"), "都没有时回落外壳名");
+  });
+
+  it("源码钉死：白名单与后端一致，菜单结构与样式就位", () => {
+    const ids = panelJs.match(/const TERMINAL_ADD_MENU_AGENT_IDS = \[([^\]]+)\]/)?.[1];
+    assert.ok(ids, "前端白名单可取样");
+    const frontendIds = ids.split(",").map((s) => s.trim().replace(/"/g, ""));
+    assert.deepEqual(frontendIds, Object.keys(AGENT_TERMINAL_TARGETS),
+      "前端白名单与 agent-session-env 的 AGENT_TERMINAL_TARGETS 一一对应，禁漂移");
+
+    assert.ok(panelHtml.includes('id="terminalAddMenu" hidden'), "菜单默认隐藏");
+    for (const id of ["terminalAddMenuList", "terminalAddMenuNote", "terminalAddMenuCwd", "terminalAddMenuCancel", "terminalAddMenuConfirm"]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `菜单节点 ${id} 就位`);
+    }
+    assert.ok(panelHtml.includes(">空白终端<") === false && panelJs.includes("空白终端"), "空白首项由脚本渲染，HTML 不写死");
+    assert.ok(panelCss.includes(".terminal-add-menu {"), "菜单样式就位");
+    assert.ok(panelCss.includes(".terminal-add-menu[hidden] { display: none; }"), "hidden 语义不被 flex 覆盖");
+    assert.ok(panelCss.includes(".terminal-add-menu-item.is-selected"), "选中态有视觉反馈");
   });
 });

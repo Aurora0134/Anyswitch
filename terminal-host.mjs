@@ -7,7 +7,7 @@
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as pty from "node-pty";
@@ -63,6 +63,71 @@ function shellSpec(shell) {
   };
 }
 
+// One-click CLI Agent launches arrive as an optional `launch` (what to spawn —
+// the cmd /c wrapper around the agent executable, see agent-session-env.mjs)
+// plus an optional `env` delta (Anyswitch credentials, environment variables
+// only). Both are validated here so a malformed body can never reach spawn:
+// the launch file must be an absolute path, args a flat string array, and the
+// env a flat string→string map — with null meaning "delete this key from the
+// inherited environment" (how upstream real keys are kept out of the PTY).
+// The env is NEVER persisted or echoed back: it lives in memory for the
+// session's lifetime only.
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MAX_ENV_ENTRIES = 512;
+const MAX_ENV_VALUE_BYTES = 32_000;
+const MAX_ENV_TOTAL_BYTES = 256 * 1024;
+const MAX_LAUNCH_ARG_BYTES = 4096;
+const MAX_LAUNCH_ARGS = 64;
+
+function badRequest(error) {
+  return Object.assign(new Error(error), { statusCode: 400 });
+}
+
+function normalizeLaunch(launch) {
+  if (launch === undefined || launch === null) return null;
+  if (typeof launch !== "object" || Array.isArray(launch)) throw badRequest("invalid_launch");
+  const file = launch.file;
+  if (typeof file !== "string" || !isAbsolute(file) || file.length > MAX_LAUNCH_ARG_BYTES) throw badRequest("invalid_launch");
+  if (!Array.isArray(launch.args) || launch.args.length > MAX_LAUNCH_ARGS) throw badRequest("invalid_launch");
+  const args = launch.args.map((arg) => {
+    if (typeof arg !== "string" || arg.length > MAX_LAUNCH_ARG_BYTES) throw badRequest("invalid_launch");
+    return arg;
+  });
+  return { file, args };
+}
+
+function normalizeInjectedEnv(env) {
+  if (env === undefined || env === null) return null;
+  if (typeof env !== "object" || Array.isArray(env)) throw badRequest("invalid_env");
+  const out = {};
+  let total = 0;
+  for (const [key, value] of Object.entries(env)) {
+    if (!ENV_KEY_PATTERN.test(key)) throw badRequest("invalid_env");
+    if (value === null) {
+      out[key] = null;
+      continue;
+    }
+    if (typeof value !== "string" || value.length > MAX_ENV_VALUE_BYTES) throw badRequest("invalid_env");
+    total += key.length + value.length;
+    if (total > MAX_ENV_TOTAL_BYTES) throw badRequest("invalid_env");
+    out[key] = value;
+  }
+  if (Object.keys(out).length > MAX_ENV_ENTRIES) throw badRequest("invalid_env");
+  return out;
+}
+
+// Merge an injected env delta over a base environment: a string value
+// overrides the inherited one (injected values must win), null deletes the key
+// from the inherited environment.
+function mergeInjectedEnv(base, injected) {
+  const env = { ...base };
+  for (const [key, value] of Object.entries(injected ?? {})) {
+    if (value === null) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
 // Request-response probe sequences PTY programs send to interrogate the
 // terminal (device attributes, mode/status reports, DECRQSS/XTGETTCAP
 // payloads, kitty keyboard negotiation). Replaying them into xterm makes it
@@ -89,6 +154,17 @@ export function stripTerminalReplyProbes(text) {
   return String(text).replace(REPLY_PROBE_PATTERN, "");
 }
 
+// Non-secret session metadata for agent-launched sessions: what runs here and
+// how it was started. The env delta is deliberately absent — credentials stay
+// in memory, never in a snapshot, never on disk.
+function agentMetadata(session) {
+  return {
+    ...(session.agentId ? { agentId: session.agentId } : {}),
+    ...(session.agentName ? { agentName: session.agentName } : {}),
+    ...(session.launch ? { launch: session.launch } : {}),
+  };
+}
+
 function snapshot(session) {
   return {
     id: session.id,
@@ -103,6 +179,7 @@ function snapshot(session) {
     cols: session.cols,
     rows: session.rows,
     buffer: session.buffer,
+    ...agentMetadata(session),
   };
 }
 
@@ -129,6 +206,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       buffer: session.buffer.slice(-200),
       status: session.pty ? "running" : "exited",
       exitCode: session.exitCode,
+      ...agentMetadata(session),
     }));
     writeFileSync(statePath, JSON.stringify({ version: 1, sessions: state }, null, 2), "utf8");
   }
@@ -176,13 +254,21 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
   }
 
   function spawnSession(session) {
-    const spec = shellSpec(session.shell);
+    // An agent launch replaces the shell spec entirely (the cmd /c wrapper is
+    // already in the launch args); a plain shell session behaves exactly as
+    // before. The env delta is merged over this process's environment with
+    // injected values winning, then the two terminal-identity variables are
+    // pinned last so nothing inherited or injected can shadow them.
+    const spec = session.launch ?? shellSpec(session.shell);
+    const env = mergeInjectedEnv(process.env, session.env);
+    env.TERM = "xterm-256color";
+    env.ANYSWITCH_TERMINAL_SESSION = session.id;
     const child = ptyModule.spawn(spec.file, spec.args, {
       name: "xterm-256color",
       cols: session.cols,
       rows: session.rows,
       cwd: safeCwd(session.cwd),
-      env: { ...process.env, TERM: "xterm-256color", ANYSWITCH_TERMINAL_SESSION: session.id },
+      env,
       useConpty: true,
       useConptyDll: true,
       windowsHide: true,
@@ -239,12 +325,21 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       }
       if (url.pathname === "/terminal/sessions" && req.method === "POST") {
         const body = await readBody(req);
-        const shell = body.shell === "cmd" ? "cmd" : "powershell";
+        const launch = normalizeLaunch(body.launch);
+        const env = normalizeInjectedEnv(body.env);
+        // An agent launch must not fall back to a silent default directory: a
+        // wrong cwd would start the agent somewhere the user never chose.
+        const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
+        if (launch && (!cwd || !existsSync(cwd))) return json(res, 400, { error: "invalid_cwd" });
         const session = {
           id: randomUUID(),
           label: typeof body.label === "string" && body.label.trim() ? body.label.trim().slice(0, 80) : "新终端",
-          cwd: safeCwd(body.cwd),
-          shell,
+          cwd: launch ? cwd : safeCwd(body.cwd),
+          shell: body.shell === "cmd" ? "cmd" : "powershell",
+          launch,
+          env,
+          agentId: typeof body.agentId === "string" && body.agentId.trim() ? body.agentId.trim().slice(0, 64) : null,
+          agentName: typeof body.agentName === "string" && body.agentName.trim() ? body.agentName.trim().slice(0, 80) : null,
           pid: null,
           createdAt: Date.now(),
           lastActiveAt: Date.now(),
@@ -283,6 +378,13 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         return json(res, 200, { ok: true, cols, rows });
       }
       if (action === "restart" && req.method === "POST") {
+        // Optional env re-injection: a caller that holds fresh credentials
+        // (e.g. a relay restart) merges them in before the respawn. Merged,
+        // never echoed — the response snapshot carries no env.
+        const body = await readBody(req);
+        if (body?.env !== undefined && body.env !== null) {
+          session.env = mergeInjectedEnv(session.env ?? {}, normalizeInjectedEnv(body.env) ?? {});
+        }
         if (session.pty) session.pty.kill();
         session.exitCode = null;
         session.buffer = [];

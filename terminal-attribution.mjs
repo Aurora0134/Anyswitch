@@ -9,14 +9,15 @@
 // Join terminal sessions with detected client processes + the agents payload.
 //   sessions: terminal-host snapshots ({ id, pid, ... }) — NOT mutated.
 //   detected: [{ agentId, pid, ancestors: [pid, ...] }] | null (relay feed)
-//   agents:   [{ id, name, instances?: [{ id, ... }] }] | null (display names
-//             + the pid-tailed instance rows that decide instanceId binding)
+//   agents:   [{ id, name, instances?: [{ id, ... }], sessions?: [{ id, ... }] }]
+//             (display names + the pid-tailed rows that decide instanceId
+//             binding — per-launch claude ships its rows under `sessions`)
 // Returns a NEW array; each attributed session gains
 //   agent: { endpointId, name, pid, instanceId | null }
-// instanceId binds only when a matching "<agentId>-<pid>" instance row exists
-// in the agents payload — codex ships no placeholder rows, so a freshly
-// detected codex client attributes with instanceId null until its first
-// request materializes one. Sessions whose shell pid matches no ancestor
+// instanceId binds only when a matching "<agentId>-<pid>" row exists in the
+// agents payload's instances ∪ sessions — codex ships no placeholder rows, so
+// a freshly detected codex client attributes with instanceId null until its
+// first request materializes one. Sessions whose shell pid matches no ancestor
 // chain, and all sessions when `detected` is null/empty, pass through
 // unannotated.
 export function attributeTerminalSessions(sessions, detected, agents) {
@@ -46,6 +47,9 @@ export function attributeTerminalSessions(sessions, detected, agents) {
       if (typeof agent.name === "string" && agent.name.length > 0) agentName.set(agent.id, agent.name);
       for (const inst of Array.isArray(agent.instances) ? agent.instances : []) {
         if (inst && typeof inst.id === "string") instanceRow.set(`${agent.id}:${inst.id}`, true);
+      }
+      for (const sess of Array.isArray(agent.sessions) ? agent.sessions : []) {
+        if (sess && typeof sess.id === "string") instanceRow.set(`${agent.id}:${sess.id}`, true);
       }
     }
   }

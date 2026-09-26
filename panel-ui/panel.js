@@ -3358,6 +3358,9 @@ async function api(method, path, body) {
   let terminalActivitySource = null;
   let terminalXterm = null;
   let terminalFitAddon = null;
+  // 宿主尺寸观察：inspector 收放、字号变化等任何改变终端区宽度的动作都不经
+  // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
+  let terminalHostResizeObserver = null;
   let terminalInputDisposable = null;
   let terminalBackendReady = false;
   // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
@@ -3406,6 +3409,18 @@ async function api(method, path, body) {
     return 0;
   }
 
+  // 剪贴板键位意图：只认裸 Ctrl+C / Ctrl+V。带 Shift/Alt/Meta 的组合一律不
+  // 接管——Ctrl+Shift+C / Ctrl+Shift+V 是 xterm 放行给浏览器的既有可用通路
+  // （复制 / 粘贴为纯文本），保持原样。
+  function terminalClipboardKeyIntent(event) {
+    if (!event || event.type !== "keydown") return null;
+    if (!event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return null;
+    const key = typeof event.key === "string" ? event.key.toLowerCase() : "";
+    if (key === "v") return "paste";
+    if (key === "c") return "copy";
+    return null;
+  }
+
   function terminalSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
   }
@@ -3424,6 +3439,10 @@ async function api(method, path, body) {
       // 归属接线：panel 层已按 shell pid ↔ 检测进程祖先链注入 agent 字段
       //（无归属的会话不带此键，保持纯外壳）。
       agent: item.agent && typeof item.agent === "object" ? item.agent : null,
+      // 一键启动的 CLI Agent 会话：terminal-host 快照直接带这两个非密字段，
+      // 归属轮询落地前标签就能显示是哪个 agent。
+      agentId: typeof item.agentId === "string" ? item.agentId : null,
+      agentName: typeof item.agentName === "string" ? item.agentName : null,
       status: item.status === "running" ? "idle" : "idle",
       metrics: null,
       route: [],
@@ -3508,6 +3527,7 @@ async function api(method, path, body) {
   }
 
   // 最近请求：usage journal 的结算行，展示措辞与预览稿同形（metric 取 TTFT）。
+  // cached = 缓存命中的 token 数（明细行「缓存 N」的数据源，0 不显示）。
   function terminalRequestsFromRows(rows) {
     if (!Array.isArray(rows)) return [];
     return rows.map((row) => ({
@@ -3517,8 +3537,45 @@ async function api(method, path, body) {
       detail: row?.ok === false
         ? "请求失败"
         : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
+      cached: Number(row?.cached) || 0,
       state: row?.ok === false ? "failed" : "ok",
     }));
+  }
+
+  // 最近请求的来源色种：providerId 命中号池表 → "pool"（紫），命中渠道表 →
+  // "channel"（青），两表都没有 → "unknown"（随正文色）。nodeInfo 即
+  // routeNodeInfoCache（面板启动时随链配置一并拉取的 providers/pools 两张
+  // Map，与路由链区同源）；未填充/查不到一律安全回落，不抛错。
+  function terminalRequestSourceKind(providerId, nodeInfo) {
+    const id = typeof providerId === "string" ? providerId : "";
+    if (!id || !nodeInfo || typeof nodeInfo !== "object") return "unknown";
+    if (nodeInfo.pools?.has?.(id)) return "pool";
+    if (nodeInfo.providers?.has?.(id)) return "channel";
+    return "unknown";
+  }
+
+  // 最近请求行：左栏身份两行（上=模型名大字、下来源显示名小灰字），右栏数据
+  // 两行右对齐（上=TTFT、下=明细）。source = { kind, label }：kind 定模型名
+  // 字色（terminalRequestSourceKind），label 是来源显示名（routeNodeName 同
+  // 口径，未命中回落原始 id）。缓存 token 只在成功行追加，失败行照旧只说失败。
+  function terminalRequestItemHtml(req, source) {
+    const kind = source?.kind === "pool" || source?.kind === "channel" ? source.kind : "unknown";
+    const label = typeof source?.label === "string" && source.label ? source.label : req.provider;
+    const detail = req.state === "failed"
+      ? req.detail
+      : `${req.detail}${req.cached > 0 ? ` · 缓存 ${req.cached.toLocaleString("en-US")}` : ""}`;
+    return `
+      <div class="terminal-request-item">
+        <i class="terminal-request-dot${req.state === "failed" ? " is-failed" : ""}"></i>
+        <div class="terminal-request-main">
+          <strong class="is-${kind}">${escapeHtml(req.model)}</strong>
+          <span>${escapeHtml(label)}</span>
+        </div>
+        <div class="terminal-request-data">
+          <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
+          <span class="terminal-request-detail">${escapeHtml(detail)}</span>
+        </div>
+      </div>`;
   }
 
   // ---- 活跃真值推送（工作/空闲即时落地） ----
@@ -3580,12 +3637,24 @@ async function api(method, path, body) {
     }
   }
 
+  // 新会话的初始行列数取当前实测值：PTY 若以固定猜测值（120×34）起步，而
+  // 可见区其实是别的尺寸，SSE 首帧回放与 TUI 首帧排版就会按错宽度折行——xterm
+  // 加大列宽不重排已折行内容，首帧画错就一直错。已有 xterm 实例时直接取它的
+  // 实测 cols/rows；尚未创建（首装载入路径）才回落兜底值，随后的建流前 fit
+  // 会立刻把真实尺寸补正。
+  function terminalCreateSize() {
+    if (terminalXterm && Number.isFinite(terminalXterm.cols) && Number.isFinite(terminalXterm.rows)) {
+      return { cols: terminalXterm.cols, rows: terminalXterm.rows };
+    }
+    return { cols: 120, rows: 34 };
+  }
+
   async function fetchTerminalSessions() {
     const data = await api("GET", "/api/terminal/sessions");
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
     if (!activeTerminalPreviewId) {
-      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 });
+      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", ...terminalCreateSize() });
       rebuildTerminalBackendSessions([...(data.sessions || []), created]);
       activeTerminalPreviewId = created.id;
     }
@@ -3604,6 +3673,8 @@ async function api(method, path, body) {
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
+    terminalHostResizeObserver?.disconnect();
+    terminalHostResizeObserver = null;
   }
 
   function updateTerminalFootSize(session) {
@@ -3623,15 +3694,31 @@ async function api(method, path, body) {
     terminalFitAddon?.fit();
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session?.backend || !terminalXterm) return;
-    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols: terminalXterm.cols, rows: terminalXterm.rows })
+    postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
+  }
+
+  // resize 回执即真实行列数：底栏事实跟 resize 联动，不再是静态占位。POST 失败
+  // 不再静默吞掉——PTY 停在旧列宽而 xterm 已按新宽度渲染，TUI 按旧列宽排版时
+  // 右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。失败短重试一次；安排
+  // 与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的更新测量
+  // 优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
+  function postTerminalResize(session, cols, rows, attempt = 0) {
+    api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
-        // resize 回执即真实行列数：底栏事实跟 resize 联动，不再是静态占位。
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
           session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
           updateTerminalFootSize(session);
         }
       })
-      .catch(() => {});
+      .catch((error) => {
+        const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
+        if (!stillCurrent()) return; // 已有更新的测量接管，旧失败不回溯也不告警
+        if (attempt === 0) {
+          setTimeout(() => { if (stillCurrent()) postTerminalResize(session, cols, rows, 1); }, 250);
+          return;
+        }
+        console.warn("[terminal] resize failed:", error);
+      });
   }
 
   // 窗口 resize 的 fit 走防抖：拖动/最大化动画里事件逐帧来，逐跳 fit 会让
@@ -3650,10 +3737,11 @@ async function api(method, path, body) {
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
-    // 隐藏期不创建：open 进 display:none 的宿主后，紧随其后的 rAF fit 量到的
-    // 就是兜底尺寸，xterm 一出厂就是错的列宽（见 fitTerminalXterm 的闸）。
+    // 隐藏期不创建：open 进 display:none 的宿主后，任何 fit 量到的都是兜底尺寸，
+    // xterm 一出厂就是错的列宽（见 fitTerminalXterm 的闸）；建流前的同步 fit 同样
+    // 经该闸拦下。
     if ($("terminalView")?.hidden) return terminalXterm;
-    terminalXterm = new window.Terminal({
+    const term = new window.Terminal({
       allowProposedApi: true,
       convertEol: true,
       cursorBlink: true,
@@ -3661,6 +3749,21 @@ async function api(method, path, body) {
       fontSize: terminalFontSize,
       scrollback: 5000,
       theme: { background: "#0b1220", foreground: "#d5e2f4", cursor: "#dbeafe", selectionBackground: "#29486d" },
+    });
+    terminalXterm = term;
+    // 剪贴板键位收口：xterm 内核对裸 Ctrl+V 会改发不可见控制字节并阻止浏览器
+    // 粘贴（剪贴板内容永远进不了 PTY），对裸 Ctrl+C 恒发中断且同样阻止复制。
+    // 自定义键位处理器先于 xterm 求值，返回 false 即把该键整体交还浏览器：
+    //   Ctrl+V——原生粘贴落进 xterm 既有的 paste 监听（换行归一与 bracketed
+    //     paste 包装不变），内容直达 PTY，不依赖剪贴板权限；
+    //   Ctrl+C——有选中时交还浏览器 copy 事件，由 xterm 元素级 copy 监听把终端
+    //     选中写进剪贴板（与 Ctrl+Shift+C 同一条通路）；无选中则交回 xterm
+    //     照旧发中断。
+    term.attachCustomKeyEventHandler((event) => {
+      const intent = terminalClipboardKeyIntent(event);
+      if (intent === "paste") return false;
+      if (intent === "copy" && term.hasSelection()) return false;
+      return true;
     });
     if (window.FitAddon?.FitAddon) {
       terminalFitAddon = new window.FitAddon.FitAddon();
@@ -3671,7 +3774,21 @@ async function api(method, path, body) {
       terminalXterm.unicode.activeVersion = "11";
     }
     terminalXterm.open(host);
-    requestAnimationFrame(fitTerminalXterm);
+    // 宿主尺寸观察：inspector 收放（约 ±292px）、字号变化等任何改变终端区宽度
+    // 的动作都不触发 window resize，只挂窗口监听会漏掉——直接观察宿主元素，
+    // 变动走与窗口 resize 同一条防抖入口。首次回调是 observe 的即时机，跳过
+    // （建流前的同步 fit 已量准，避免同尺寸重复 POST）。
+    if (typeof ResizeObserver === "function") {
+      let hostObserverPrimed = false;
+      terminalHostResizeObserver = new ResizeObserver(() => {
+        if (!hostObserverPrimed) {
+          hostObserverPrimed = true;
+          return;
+        }
+        debounceTerminalFit();
+      });
+      terminalHostResizeObserver.observe(host);
+    }
     return terminalXterm;
   }
 
@@ -3697,7 +3814,14 @@ async function api(method, path, body) {
     closeTerminalStream();
     const term = ensureTerminalXterm();
     if (!term) return;
+    // 建流前先同步 fit：SSE 首帧回放与 rAF 谁先到达是竞速，回放若按 xterm 出厂
+    // 默认列宽（80）落进缓冲区，之后加大列宽不会重排已折行内容——先量准列宽、
+    // 把真实尺寸 POST 进 PTY，再开流收首帧。
+    fitTerminalXterm();
     term.reset();
+    // 建流即焦点回守：进页、切签、新建、降级重试都经此处，终端的隐藏输入框
+    // 重新拿到焦点，其后的键入与 Ctrl+C/V 才不会静默落空。
+    term.focus();
     // 应答定投：该 xterm 实例只服务本次连接的会话，键入与 TUI 查询的自动应答
     // 一律发往建连时固化的会话 id，不读当前活动会话——切换后旧会话迟到的字节
     // 与其回调不可能经此实例打进别的 PTY。预览会话无后端，定投为空，键入直接
@@ -3740,15 +3864,20 @@ async function api(method, path, body) {
     const tabs = $("terminalTabs");
     if (!tabs) return;
     const sessions = terminalSessionMap();
-    tabs.innerHTML = Object.entries(sessions).map(([id, session]) => `
+    tabs.innerHTML = Object.entries(sessions).map(([id, session]) => {
+      // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
+      // 其后才是归属注入的 agent.name，最后回落外壳名。
+      const tabAgent = session.agentName || (session.agent ? session.agent.name : session.shell.name);
+      return `
       <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
         aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
         <span class="terminal-tab-shell${session.shell.name === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell.name === "PowerShell" ? "PS" : ">_"}</span>
-        <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(session.agent ? session.agent.name : session.shell.name)}</small></span>
+        <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(tabAgent)}</small></span>
         <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
         <span class="terminal-tab-close" aria-hidden="true">×</span>
       </button>
-    `).join("");
+    `;
+    }).join("");
   }
 
   function renderTerminalPreviewRoute(session) {
@@ -3890,17 +4019,178 @@ async function api(method, path, body) {
       updateSparkline("terminalSparkCache", metrics.sparkCache);
     }
     $("terminalRequestCount").textContent = String(session.requests.length);
-    $("terminalRequestList").innerHTML = session.requests.map((req) => `
-      <div class="terminal-request-item">
-        <i class="terminal-request-dot${req.state === "failed" ? " is-failed" : ""}"></i>
-        <div class="terminal-request-main"><strong>${escapeHtml(req.provider)}</strong><span>${escapeHtml(req.detail)}</span></div>
-        <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
-      </div>
-    `).join("");
+    // 来源解析与路由链区同源：色种走 routeNodeInfoCache 两张 Map，显示名走
+    // routeNodeName（未命中回落原始 id，不暴露查不到的内部结构）。
+    $("terminalRequestList").innerHTML = session.requests.map((req) => terminalRequestItemHtml(req, {
+      kind: terminalRequestSourceKind(req.provider, routeNodeInfoCache),
+      label: routeNodeName(req.provider),
+    })).join("");
     renderTerminalPreviewRoute(session);
   }
 
+  // 降级空态：terminal-host 不在（面板路由回 503 terminal_host_unavailable）时，
+  // 终端页只给「服务未运行 + 重试」，不再把 mock 假会话端给用户。xterm 区盖
+  // 空态覆盖层、不建流；监测区、底栏统计与路由链沿用既有 hidden 通路；新建键
+  // 随降级禁用。
+  function renderTerminalUnavailableState() {
+    const overlay = $("terminalUnavailable");
+    if (overlay) overlay.hidden = false;
+    const metricsSection = $("terminalMetricsSection");
+    if (metricsSection) metricsSection.hidden = true;
+    const footStats = $("terminalFootStats");
+    if (footStats) footStats.hidden = true;
+    const routeSection = $("terminalRouteLine")?.closest(".terminal-route-section");
+    if (routeSection) routeSection.hidden = true;
+    const addBtn = $("terminalAddBtn");
+    if (addBtn) addBtn.disabled = true;
+    // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏（payment-service/portal、
+    // PID 23140 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
+    const tabs = $("terminalTabs");
+    if (tabs) tabs.innerHTML = "";
+    const sessionBar = document.querySelector(".terminal-session-bar");
+    if (sessionBar) sessionBar.style.display = "none";
+    const footStatus = document.querySelector(".terminal-foot-status");
+    if (footStatus) footStatus.style.display = "none";
+  }
+
+  // 新建键与就绪位同拍：降级态禁用（「+」不再产假会话），就绪态放开。
+  function syncTerminalAddBtn() {
+    const addBtn = $("terminalAddBtn");
+    if (addBtn) addBtn.disabled = !terminalBackendReady;
+  }
+
+  // 「+」新建菜单：先选一个已安装的 CLI Agent（或空白终端），再填工作目录。
+  // agent 清单取自环境检测（60s 缓存）；拉取失败只留空白终端，不挡住新建。
+  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"];
+  let terminalAddMenuAgents = [];
+  let terminalAddMenuAgentsAt = 0;
+  let terminalAddMenuSelection = "";
+
+  function closeTerminalAddMenu() {
+    const menu = $("terminalAddMenu");
+    if (menu) menu.hidden = true;
+  }
+
+  function loadInstalledTerminalAgents() {
+    if (terminalAddMenuAgentsAt && Date.now() - terminalAddMenuAgentsAt < 60000) {
+      return Promise.resolve(terminalAddMenuAgents);
+    }
+    return api("GET", "/api/environment")
+      .then((state) => {
+        const clients = Array.isArray(state.clients) ? state.clients : [];
+        const agents = [];
+        for (const client of clients) {
+          if (!client || !TERMINAL_ADD_MENU_AGENT_IDS.includes(client.id)) continue;
+          const installations = Array.isArray(client.installations) ? client.installations : [];
+          const installed = installations.find((item) => item && item.status === "found" && item.kind === "cli");
+          if (installed) agents.push({ id: client.id, name: client.name || client.id });
+        }
+        terminalAddMenuAgents = agents;
+        terminalAddMenuAgentsAt = Date.now();
+        return agents;
+      })
+      .catch(() => null); // 失败不进缓存：下次开菜单再试，当前只留空白终端
+  }
+
+  function renderTerminalAddMenuList(agents) {
+    const list = $("terminalAddMenuList");
+    if (!list) return;
+    const items = [{ id: "", name: "空白终端" }, ...(Array.isArray(agents) ? agents : [])];
+    list.innerHTML = items.map((agent) => `
+      <button type="button" class="terminal-add-menu-item${agent.id === terminalAddMenuSelection ? " is-selected" : ""}" role="radio"
+        aria-checked="${agent.id === terminalAddMenuSelection ? "true" : "false"}" data-terminal-add-agent="${escapeHtml(agent.id)}">
+        <span class="terminal-add-menu-radio" aria-hidden="true"></span>
+        <span class="terminal-add-menu-name">${escapeHtml(agent.name)}</span>
+      </button>
+    `).join("");
+    const note = $("terminalAddMenuNote");
+    if (note) {
+      if (Array.isArray(agents) && agents.length > 0) {
+        note.hidden = true;
+      } else {
+        note.hidden = false;
+        note.textContent = agents === null
+          ? "暂时读不到已安装的 CLI Agent，可以先建空白终端"
+          : "尚未安装可用的 CLI Agent，可以先建空白终端";
+      }
+    }
+  }
+
+  function openTerminalAddMenu() {
+    const menu = $("terminalAddMenu");
+    if (!menu) return;
+    menu.hidden = false;
+    loadInstalledTerminalAgents().then((agents) => renderTerminalAddMenuList(agents));
+  }
+
+  function selectTerminalAddAgent(agentId) {
+    terminalAddMenuSelection = agentId;
+    const list = $("terminalAddMenuList");
+    if (!list) return;
+    for (const item of list.querySelectorAll("[data-terminal-add-agent]")) {
+      const selected = item.getAttribute("data-terminal-add-agent") === agentId;
+      item.classList.toggle("is-selected", selected);
+      item.setAttribute("aria-checked", selected ? "true" : "false");
+    }
+  }
+
+  // 一键启动：凭证只走环境变量注入（服务端组装），这里只递 agentId 与工作目录。
+  function createAgentTerminal({ agentId, cwd }) {
+    return api("POST", "/api/terminal/agent-sessions", { agentId, cwd, ...terminalCreateSize() })
+      .then((created) => {
+        terminalBackendSessions[created.id] = terminalBackendSession(created);
+        activeTerminalPreviewId = created.id;
+        renderTerminalPreviewSession();
+      })
+      .catch((error) => toast(panelError(error, "无法启动这个终端"), true));
+  }
+
+  function confirmTerminalAddMenu() {
+    const cwdInput = $("terminalAddMenuCwd");
+    const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || "D:\\dev";
+    closeTerminalAddMenu();
+    if (!terminalAddMenuSelection) {
+      api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", ...terminalCreateSize() })
+        .then((created) => {
+          terminalBackendSessions[created.id] = terminalBackendSession(created);
+          activeTerminalPreviewId = created.id;
+          renderTerminalPreviewSession();
+        })
+        .catch((error) => toast(panelError(error, "无法新建终端"), true));
+      return;
+    }
+    createAgentTerminal({ agentId: terminalAddMenuSelection, cwd });
+  }
+
+  // 连接 terminal-host 的成功链路：就绪后重渲会话、立即补拍归属轮询、同步活跃
+  // 真值流；失败即置回未就绪并落空态。初装、空态「重新连接」、进页自动重试共用
+  // 同一通路，三处复用防止再漏改。
+  function connectTerminalBackend() {
+    return fetchTerminalSessions().then(() => {
+      syncTerminalAddBtn();
+      renderTerminalPreviewSession();
+      pollTerminalSessions();
+      syncTerminalActivityStream();
+    }).catch((error) => {
+      terminalBackendReady = false;
+      console.warn("[terminal] backend unavailable:", error);
+      renderTerminalUnavailableState();
+    });
+  }
+
   function renderTerminalPreviewSession() {
+    // 降级闸：判定键是就绪位本身，不是会话数——零会话会被 fetch 的自动补建
+    // 兜住；backend 中途死掉的轮询不动就绪位，仍保上一帧。
+    if (terminalBackendReady === false) {
+      renderTerminalUnavailableState();
+      return;
+    }
+    const unavailable = $("terminalUnavailable");
+    if (unavailable) unavailable.hidden = true;
+    const sessionBar = document.querySelector(".terminal-session-bar");
+    if (sessionBar) sessionBar.style.display = "";
+    const footStatus = document.querySelector(".terminal-foot-status");
+    if (footStatus) footStatus.style.display = "";
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session) return;
     renderTerminalSessionData();
@@ -3943,15 +4233,10 @@ async function api(method, path, body) {
     // 挂在 ensureTerminalXterm 会随每次重建重复注册。fit 入口本身对空实例空操作。
     window.addEventListener("resize", debounceTerminalFit);
     restoreTerminalFontSize();
-    renderTerminalPreviewSession();
-    fetchTerminalSessions().then(() => {
-      renderTerminalPreviewSession();
-      pollTerminalSessions();
-      syncTerminalActivityStream();
-    }).catch((error) => {
-      terminalBackendReady = false;
-      console.warn("[terminal] backend unavailable:", error);
-    });
+    // 不再先渲 mock：降级态只给真空态（renderTerminalUnavailableState），就绪
+    // 与否由连接通路的成功/失败分支落定——失败分支会重落空态，不再静默。
+    syncTerminalAddBtn();
+    connectTerminalBackend();
     if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {
       terminalPollTimer = setInterval(() => {
@@ -3999,18 +4284,25 @@ async function api(method, path, body) {
       button.setAttribute("aria-expanded", String(!collapsed));
       button.title = collapsed ? "展开状态面板" : "收起状态面板";
       button.setAttribute("aria-label", button.title);
+      // inspector 收放直接改变终端区宽度（约 292px）却不触发 window resize：
+      // 不补一次 fit，xterm 列数与可见区错位、PTY 停在旧列宽，TUI 按旧列宽排版
+      // 时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。
+      scheduleTerminalFit();
     };
     $("terminalClearBtn").onclick = () => {
       terminalXterm?.clear();
       terminalXterm?.focus();
     };
-    $("terminalFontDecBtn").onclick = () => nudgeTerminalFontSize(-1);
-    $("terminalFontIncBtn").onclick = () => nudgeTerminalFontSize(1);
+    $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); terminalXterm?.focus(); };
+    $("terminalFontIncBtn").onclick = () => { nudgeTerminalFontSize(1); terminalXterm?.focus(); };
     $("terminalScreen").addEventListener("wheel", (event) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
       nudgeTerminalFontSize(event.deltaY < 0 ? 1 : -1);
     }, { passive: false });
+    // 点终端屏（含 xterm 四周留白）也聚焦：留白区的点击不会触发 xterm 自身的
+    // 聚焦，其后的键入会静默落空。
+    $("terminalScreen").addEventListener("mousedown", () => terminalXterm?.focus());
     document.addEventListener("keydown", (event) => {
       if (currentView !== "terminal") return;
       const delta = isTerminalFontZoomKey(event);
@@ -4018,15 +4310,15 @@ async function api(method, path, body) {
       event.preventDefault();
       nudgeTerminalFontSize(delta);
     });
+    $("terminalRetryBtn").onclick = () => connectTerminalBackend();
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
-        api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 })
-          .then((created) => {
-            terminalBackendSessions[created.id] = terminalBackendSession(created);
-            activeTerminalPreviewId = created.id;
-            renderTerminalPreviewSession();
-          })
-          .catch((error) => toast(panelError(error, "无法新建终端"), true));
+        const menu = $("terminalAddMenu");
+        if (menu && !menu.hidden) {
+          closeTerminalAddMenu();
+          return;
+        }
+        openTerminalAddMenu();
         return;
       }
       const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
@@ -4039,6 +4331,29 @@ async function api(method, path, body) {
       activeTerminalPreviewId = id;
       renderTerminalPreviewSession();
     };
+    $("terminalAddMenuCancel").onclick = () => closeTerminalAddMenu();
+    $("terminalAddMenuConfirm").onclick = () => confirmTerminalAddMenu();
+    $("terminalAddMenuList").addEventListener("click", (event) => {
+      const item = event.target.closest("[data-terminal-add-agent]");
+      if (item) selectTerminalAddAgent(item.getAttribute("data-terminal-add-agent") || "");
+    });
+    $("terminalAddMenuCwd").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        confirmTerminalAddMenu();
+      }
+    });
+    // 点菜单外面或按 Esc 收起；点「+」自身不收起（交给 onclick 的切换）。
+    document.addEventListener("pointerdown", (event) => {
+      const menu = $("terminalAddMenu");
+      if (!menu || menu.hidden) return;
+      if (menu.contains(event.target)) return;
+      if (event.target && typeof event.target.closest === "function" && event.target.closest("#terminalAddBtn")) return;
+      closeTerminalAddMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (currentView === "terminal" && event.key === "Escape") closeTerminalAddMenu();
+    });
   }
 
   function openTerminalPreview() {
@@ -4046,7 +4361,8 @@ async function api(method, path, body) {
     terminalReturnSettingsSubTab = "experimental";
     terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
     switchView("terminal");
-    requestAnimationFrame(() => $("terminalCommandInput")?.focus());
+    // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
+    if (!terminalBackendReady) connectTerminalBackend();
   }
 
   function closeTerminalPreview() {
@@ -4644,6 +4960,7 @@ async function api(method, path, body) {
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
       // 离开本页后保持存活——已有实例的再次进入只补一次 fit，不重建不重放。
       if (!terminalXterm) renderTerminalPreviewSession();
+      else terminalXterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
     }

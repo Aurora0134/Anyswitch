@@ -765,7 +765,7 @@ describe("claude session reporter model fields", () => {
     collector.reportSession("tok", last);
 
     const claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
-    const session = claude.sessions.find((s) => s.id === "pid-4321");
+    const session = claude.sessions.find((s) => s.id === "claude-4321");
     assert.ok(session);
     assert.equal(session.model, "claude-opus-5");
     assert.equal(session.providerId, "poke-api");

@@ -1231,14 +1231,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // not, counts into the pool row. meta.providerId is the URL segment, so
       // it is never empty; memberId stays only as a non-pool legacy fallback.
       if (stability && meta.model) {
-        const u = usage && typeof usage === "object" ? usage : {};
-        const prompt = Number(u.prompt_tokens) || 0;
-        const cached = Number(
-          u.prompt_tokens_details?.cached_tokens ??
-          u.prompt_cache_hit_tokens ??
-          u.cached_tokens ??
-          0,
-        ) || 0;
+        const { prompt, cached } = normalizeUsageTokens(usage);
         const attr = resolvedAttributeFor(memberId ?? null);
         stability.record({
           providerId: attr?.providerId || meta.providerId || memberId || state.lastProvider || "",
@@ -1383,14 +1376,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
 
       const usage = info.usage;
       if (usage && typeof usage === "object") {
-        const prompt = Number(usage.prompt_tokens) || 0;
-        const completion = Number(usage.completion_tokens) || 0;
-        const cached = Number(
-          usage.prompt_tokens_details?.cached_tokens ??
-          usage.prompt_cache_hit_tokens ??
-          usage.cached_tokens ??
-          0,
-        ) || 0;
+        const { prompt, completion, cached } = normalizeUsageTokens(usage);
 
         state.totalPromptTokens += prompt;
         state.totalCompletionTokens += completion;
@@ -1418,14 +1404,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // 模型稳定性是用户流量的路由健康信号：后台请求（硬编码后台模型的
       // 404 之类）不写入，否则稳定性页会留下永不恢复的全红行。
       if (stability && meta.model && !aborted && !background) {
-        const u = usage && typeof usage === "object" ? usage : {};
-        const prompt = Number(u.prompt_tokens) || 0;
-        const cached = Number(
-          u.prompt_tokens_details?.cached_tokens ??
-          u.prompt_cache_hit_tokens ??
-          u.cached_tokens ??
-          0,
-        ) || 0;
+        const { prompt, cached } = normalizeUsageTokens(usage);
         // Same pool-level attribution as recordRetry: meta.providerId is the
         // pool id for pool requests, and successes and failures both belong
         // to the pool's single stability row. Chain (auto) requests override
@@ -1454,21 +1433,16 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // the model-stability attribution above.
       if (journal && !aborted) {
         try {
-          const u = usage && typeof usage === "object" ? usage : {};
           const status = Number(info.error?.status ?? info.status) || null;
+          const { prompt, completion, cached } = normalizeUsageTokens(usage);
           journal.appendRequest({
             ts: endTime,
             agentId,
             providerId: attr?.providerId || meta.providerId || memberId || state.lastProvider || "",
             model: attr?.model || meta.model || state.lastModel || null,
-            prompt: Number(u.prompt_tokens) || 0,
-            completion: Number(u.completion_tokens) || 0,
-            cached: Number(
-              u.prompt_tokens_details?.cached_tokens ??
-              u.prompt_cache_hit_tokens ??
-              u.cached_tokens ??
-              0,
-            ) || 0,
+            prompt,
+            completion,
+            cached,
             ttftMs: hadError ? null : journalTtftMs,
             durationMs: reqDuration,
             ok: !hadError,
@@ -2552,7 +2526,11 @@ export function createAgentMetricsCollector(options = {}) {
     }
 
     const session = claudeSessions.get(key) || {
-      id: report.sessionId || `pid-${pid}`,
+      // Canonical `<agentId>-<pid>` id — the same key terminal attribution
+      // joins against (`<agentId>-<detected client pid>`), so a virtual
+      // terminal binds and the activity frame identity below matches the
+      // row the panel highlights.
+      id: `claude-${pid}`,
       pid,
       token,
       startedAt: now,
@@ -2677,7 +2655,7 @@ export function createAgentMetricsCollector(options = {}) {
     for (const pid of livePids) {
       if (!claudeSessions.has(pid)) {
         claudeSessions.set(pid, {
-          id: `pid-${pid}`,
+          id: `claude-${pid}`,
           pid,
           token: null,
           startedAt: now,
@@ -3292,6 +3270,20 @@ function extractCachedTokens(usage) {
   ) || 0;
 }
 
+// usage 归一：OpenAI 形状（prompt_tokens/completion_tokens）与 Anthropic 形状
+// （input_tokens/output_tokens/cache_read_input_tokens）都能提出
+// {prompt, completion, cached}。上游两种形状都会原样到达记账口（stream-pipe
+// 的 Anthropic 上行、OpenAI 透传、会话 reporter），只认一种形状会让另一条
+// 渠道的 token 恒记 0。session reporter 的 normalizedUsage 与本函数同口径。
+function normalizeUsageTokens(usage) {
+  if (!usage || typeof usage !== "object") return { prompt: 0, completion: 0, cached: 0 };
+  return {
+    prompt: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
+    completion: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
+    cached: extractCachedTokens(usage),
+  };
+}
+
 export function createSessionReporter({ token = null, reportUrl, journal = null, nowFn = Date.now, fetchFn = fetch, agentId = "claude", heartbeatIntervalMs = SESSION_REPORTER_HEARTBEAT_MS }) {
   let sessionToken = token;
   let claudePid = null;
@@ -3438,14 +3430,6 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   const bindMember = (ctx, memberId) => {
     ctx.memberId = typeof memberId === "string" && memberId.length > 0 ? memberId : null;
     sendSnapshotIfIdentityChanged();
-  };
-  const normalizedUsage = (usage) => {
-    if (!usage || typeof usage !== "object") return { prompt: 0, completion: 0, cached: 0 };
-    return {
-      prompt: Number(usage.prompt_tokens ?? usage.input_tokens) || 0,
-      completion: Number(usage.completion_tokens ?? usage.output_tokens) || 0,
-      cached: extractCachedTokens(usage),
-    };
   };
 
   async function post(report) {
@@ -3632,7 +3616,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
     // produce no tps point). TPS mirrors its cap rule too (300 tok/s guard
     // against degenerate sub-100ms generations).
     const reqDuration = Math.max(1, endTime - ctx.startTime);
-    const norm = normalizedUsage(usage);
+    const norm = normalizeUsageTokens(usage);
     if (!hadError && !aborted) {
       if (norm.completion > 0) {
         pushSessionSample({
@@ -3661,6 +3645,12 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
         journal.appendRequest({
           ts: endTime,
           agentId,
+          // Terminal-attribution identity, `<agentId>-<pid>`: the same key
+          // the panel's session row id and the attribution join use, so a
+          // bound terminal's request tail matches its own rows. Absent until
+          // the launcher declares its pid (setClaudePid) — claiming no
+          // identity beats claiming the wrong process's.
+          ...(claudePid ? { instanceId: `${agentId}-${claudePid}` } : {}),
           providerId: attr?.providerId || ctx.meta?.providerId || "",
           model: attr?.model || ctx.meta?.model || null,
           prompt: norm.prompt,
