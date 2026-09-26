@@ -2313,11 +2313,18 @@
   .sessions-drawer-mask { position: fixed; inset: 0; z-index: 100; background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms; }
   .sessions-drawer-mask.show { opacity: 1; pointer-events: auto; }
   .sessions-drawer-open-btn { display: none; }
-  /* 响应式：<1280px TOC 转浮动按钮；<768px 左栏转抽屉 */
-  @media (max-width: 1279px) {
+  /* 响应式：<1024px TOC 转浮动按钮；<768px 左栏转抽屉。
+     门槛原先是 1280：这台机器 150% 缩放下满屏折合约 1707 CSS px，面板窗常落在
+     1024–1280 之间，那一档里右栏整条消失、又没有备用入口，等于没有目录。
+     浮动按钮不再绑死媒体查询，改绑「会话页在场」（panel.js 的 body.sessions-mode），
+     宽屏则由下面那条关回右栏的查询收掉，两个入口不同时出现。 */
+  @media (max-width: 1023px) {
     .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
     .toc-side { display: none; }
-    .toc-fab.has-toc { display: flex; }
+  }
+  body.sessions-mode .toc-fab.has-toc { display: flex; }
+  @media (min-width: 1024px) {
+    body.sessions-mode .toc-fab.has-toc { display: none; }
   }
   @media (max-width: 767px) {
     .sessions-master-detail { grid-template-columns: minmax(0, 1fr); }

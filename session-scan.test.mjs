@@ -11,7 +11,7 @@ import { mkdirSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:f
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
-import { createSessionScanner } from "./session-scan.mjs";
+import { createSessionScanner, buildTurns } from "./session-scan.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeTmp() {
@@ -648,6 +648,39 @@ test("pi: parses the session header line and message entries", async () => {
   );
 });
 
+// kimi 桌面端/swarm 驱动的会话只写 context.append_message，没有 prompt.accepted
+// （本机 200 个会话目录里 27 个是这种），而交互输入的同一文本会先出现在
+// prompt.accepted、再以 append 回声出现（实测同文本配对 313:19 次都是这个方向）。
+// 只读 prompt.accepted 会让前者的目录整条空白，回声无脑收则会让后者翻倍。
+test("kimi: user turns come from context.append_message without doubling prompts", async () => {
+  const root = makeTmp();
+  const sessionDir = join(root, "sessions", "wd_desk", "session_desk");
+  mkdirSync(join(sessionDir, "agents", "main"), { recursive: true });
+  writeFileSync(
+    join(sessionDir, "agents", "main", "wire.jsonl"),
+    [
+      JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "继续" }], time: 1788000001000 }),
+      JSON.stringify({ type: "context.append_message", message: { role: "user", content: [{ type: "text", text: "继续" }] }, time: 1788000001500 }),
+      JSON.stringify({ type: "context.append_message", message: { role: "user", content: [{ type: "text", text: "把右栏修好" }] }, time: 1788000002000 }),
+      // 人连着打了两次「继续」：第二条仍是独立一轮，不能被去重吃掉
+      JSON.stringify({ type: "prompt.accepted", content: [{ type: "text", text: "继续" }], time: 1788000003000 }),
+      JSON.stringify({ type: "context.append_message", message: { role: "user", content: [{ type: "text", text: "继续" }] }, time: 1788000003500 }),
+      // 助手侧的 append 不参与：正文由 loop event 承担，收了会重复
+      JSON.stringify({ type: "context.append_message", message: { role: "assistant", content: [{ type: "text", text: "收到" }] }, time: 1788000004000 }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  const messages = await testScanner({ kimi: [root] }).loadMessages("kimi", sessionDir);
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "继续"],
+      ["user", "把右栏修好"],
+      ["user", "继续"],
+    ],
+  );
+});
+
 // --- qoder --------------------------------------------------------------------
 
 function writeQoderSession(root, projectDir, fileName, lines) {
@@ -694,6 +727,57 @@ test("qoder: transcripts without any user turn are excluded", async () => {
   ]);
   const { sessions } = await testScanner({ qoder: [root] }).scanAll();
   assert.deepEqual(sessions, []);
+});
+
+// Qoder 与 claude 同形：工具结果以 user 角色回写。缺了 claude 那条重标规则时，
+// 本机一条会话把 1231 条 user 记录里的 1216 条工具输出当成了用户轮。
+test("qoder: tool results wrapped in user records are not human turns", async () => {
+  const root = makeTmp();
+  const sessionId = "aaaa1111-0000-0000-0000-000000000001";
+  writeQoderSession(root, "C--work-qoderproj", `${sessionId}.jsonl`, [
+    JSON.stringify({ type: "workspace-directories", sessionId, directories: ["C:\\work\\qoderproj"] }),
+    JSON.stringify({ type: "runtime-config", sessionId, model: "auto", timestamp: 1788000000000 }),
+    JSON.stringify({ type: "user", uuid: "u1", timestamp: "2026-09-01T01:13:50.000Z", message: { role: "user", content: [{ type: "text", text: "把右栏修好" }] } }),
+    JSON.stringify({ type: "user", uuid: "u2", timestamp: "2026-09-01T01:13:51.000Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "Successfully modified file: panel.css" }] } }),
+    JSON.stringify({ type: "assistant", uuid: "a1", timestamp: "2026-09-01T01:13:55.000Z", message: { role: "assistant", content: [{ type: "text", text: "改好了" }] } }),
+    // 混合块（人打的字 + 附带的工具结果）仍是人的一轮，不能被重标吞掉
+    JSON.stringify({ type: "user", uuid: "u3", timestamp: "2026-09-01T01:13:56.000Z", message: { role: "user", content: [{ type: "text", text: "继续" }, { type: "tool_result", tool_use_id: "t2", content: "ok" }] } }),
+  ]);
+  const messages = await testScanner({ qoder: [root] }).loadMessages("qoder", join(root, "C--work-qoderproj", `${sessionId}.jsonl`));
+  assert.deepEqual(
+    messages.map((m) => m.role),
+    ["user", "tool", "assistant", "user"],
+  );
+  assert.deepEqual(buildTurns(messages).map((t) => t.index), [0, 3]);
+});
+
+// --- turn/目录 rules (shared by every adapter) --------------------------------
+
+test("buildTurns: 目录只列人打的字，注入的 user 文本不算轮", () => {
+  const long = "这".repeat(60);
+  const messages = [
+    { role: "user", content: "# AGENTS.md instructions <INSTRUCTIONS>读代码</INSTRUCTIONS>", ts: 1 },
+    { role: "user", content: "把 TOC 修好", ts: 2 },
+    { role: "tool", content: "Successfully modified file: panel.css", ts: 3 },
+    { role: "user", content: "<command-name>/effort</command-name>\n<command-args>max</command-args>", ts: 4 },
+    { role: "assistant", content: "好", ts: 5 },
+    { role: "user", content: "<system-reminder>\nThe TodoWrite tool has not been used\n</system-reminder>", ts: 6 },
+    { role: "user", content: "The TodoWrite tool hasn't been used recently; consider cleaning up", ts: 7 },
+    { role: "user", content: "Called the Read tool with the following input: {\"path\":\"x\"}", ts: 8 },
+    { role: "user", content: "   ", ts: 9 },
+    { role: "user", content: "这条里带了 <system-reminder> 字样但确实是人在说话", ts: 10 },
+    { role: "user", content: "[Request interrupted by user]", ts: 11 },
+    { role: "user", content: "This session is being continued from a previous conversation that ran out of context", ts: 12 },
+    { role: "user", content: "<task-notification>swarm agent-3 finished</task-notification>", ts: 13 },
+    { role: "user", content: long, ts: 14 },
+  ];
+  const turns = buildTurns(messages);
+  // 命中的三条按 messages 下标回指，长文本压成单行并截到预览宽度
+  assert.deepEqual(turns.map((t) => t.index), [1, 9, 13]);
+  assert.deepEqual(
+    turns.map((t) => [t.preview, t.ts]),
+    [["把 TOC 修好", 2], ["这条里带了 <system-reminder> 字样但确实是人在说话", 10], [`${"这".repeat(40)}...`, 14]],
+  );
 });
 
 // --- codex ------------------------------------------------------------------

@@ -1423,6 +1423,36 @@ describe("panel.html sessions tab", () => {
     assert.ok(body.includes('["tabSessions", sessions]'), "aria-selected sync covers tabSessions");
   });
 
+  it("目录读后端 turns、窄窗有备用入口、长会话分帧", () => {
+    // 目录曾经整条看不见，两件事叠在一起：右栏在窄窗被断点关掉，唯一的备用按钮又
+    // 只在「有目录条目」时出现，而条目是前端按 role==="user" 现算的——qoder 一条会话
+    // 因此报出 1203 个"用户轮"（全是工具输出），kimi 则普遍算出 0 个。
+    assert.ok(panelJs.includes("Array.isArray(s.turns)"), "目录条目取自后端 turns");
+    assert.ok(!panelJs.includes("function sessTocEntries"), "前端不再按角色自己现算目录");
+    assert.ok(/const SESS_TOC_MIN_TURNS = 2/.test(panelJs), "一两轮的会话不占栏");
+    assert.ok(panelJs.includes('block: "center"'), "跳转居中对齐，避开吸顶头行");
+    assert.ok(/const SESS_RENDER_CHUNK = 120/.test(panelJs), "消息流按帧建节点");
+    assert.ok(panelJs.includes("function ensureSessMessageRendered"), "跳转前补齐未渲染的帧");
+    assert.ok(
+      panelJs.includes('document.body.classList.toggle("sessions-mode", sessions)'),
+      "☰ 与弹层随会话页在场",
+    );
+    const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+    assert.ok(
+      /@media \(max-width: 1023px\) \{[\s\S]*?\.toc-side \{ display: none; \}/.test(css),
+      "窄窗收右栏",
+    );
+    assert.ok(
+      css.includes("body.sessions-mode .toc-fab.has-toc { display: flex; }"),
+      "窄窗目录备用入口挂在会话页在场，不再绑死媒体查询",
+    );
+    assert.ok(
+      /@media \(min-width: 1024px\) \{[\s\S]*?\.toc-fab\.has-toc \{ display: none; \}/.test(css),
+      "宽窗走右栏，不留两个入口",
+    );
+    assert.ok(!/@media \(max-width: 1279px\)/.test(css), "1280 断点已下调到 1024");
+  });
+
   it("resets page scroll to the top on every main or settings sub-tab switch", () => {
     const reset = panelJs.match(/function resetPageScroll\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(reset, "resetPageScroll found in panel.js");

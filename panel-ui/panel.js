@@ -5178,6 +5178,9 @@ async function api(method, path, body) {
     $("settingsView").hidden = !settings;
     $("terminalView").hidden = !terminal;
     document.body.classList.toggle("terminal-mode", terminal);
+    // 目录的窄屏入口（☰ 与弹层）挂在 </main> 之外，不随视图 hidden 一起消失；
+    // 用同一个 body 类把它收进会话页，离开即不可见也不可达。
+    document.body.classList.toggle("sessions-mode", sessions);
     if (terminal) {
       // 进页才建流：xterm 只在可见容器里创建、按实测尺寸收全量回放，首帧即正确
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
@@ -11343,7 +11346,10 @@ async function api(method, path, body) {
   let sessMsgObserver = null;          // TOC 高亮用的 IntersectionObserver
   let sessInited = false;              // initSessionsTab 一次性事件绑定标记
   let sessListReqSeq = 0;              // 列表取数竞态守卫
+  let sessRenderCursor = 0;            // 消息流分帧：下一条待建的下标
   const SESS_FOLD_LIMIT = 3000, SESS_FOLD_HEAD = 1500; // 超长消息折叠阈值与预览长度
+  const SESS_RENDER_CHUNK = 120;       // 消息流每帧条数
+  const SESS_TOC_MIN_TURNS = 2;        // 目录起显门槛：一两轮的会话不占栏
 
   /* ============================================================
      数据拉取
@@ -11624,100 +11630,124 @@ async function api(method, path, body) {
     const flow = $("sessMsgFlow");
     flow.innerHTML = `<div style="padding:8px 0;"><div class="sessions-skel" style="height:64px;margin-bottom:14px;"></div><div class="sessions-skel" style="height:64px;width:80%;margin-left:auto;"></div></div>`;
     let messages = [];
+    let turns = [];
     try {
       const res = await api("GET", "/api/sessions/messages?endpoint=" + encodeURIComponent(s.endpoint) + "&path=" + encodeURIComponent(s.file));
       messages = Array.isArray(res.messages) ? res.messages : [];
+      // 目录条目由后端算好下发（session-scan 认「哪一轮是人打的字」）：九种转录格式
+      // 的角色写法各不相同，前端按 role==="user" 现算会把工具输出当作用户轮。
+      turns = Array.isArray(res.turns) ? res.turns : [];
     } catch (err) {
       // 会话可能已被删/移动：回退空消息流并提示
+      s.messages = [];
+      s.turns = [];
       flow.innerHTML = `<div class="sessions-list-empty">${esc(panelError(err, "消息加载失败"))}</div>`;
       return;
     }
     // 竞态：拉取期间用户已改选其它会话 → 丢弃
     if (sessState.selectedId !== s.id) return;
     s.messages = messages; // 缓存到会话对象，TOC/复制/折叠共用
+    s.turns = turns;
     renderSessMessages(s);
   }
 
-  function renderSessMessages(s) {
+  /* 消息流分帧渲染：一条 2.5k 消息的长会话一次性建满 DOM 会把主线程钉住，而目录
+     跳转恰恰要落进那段没画出来的区间 —— 所以首屏只建一帧，滚动接近底部续建，
+     跳转前按目标下标补齐缺口。 */
+  function sessMessageNode(s, m, i, kw) {
+    const div = document.createElement("div");
+    div.className = "msg " + m.role;
+    div.id = "sess-msg-" + i;
+    const roleName = { user: "我", assistant: sessEpName(s.endpoint), system: "系统", tool: "工具调用" }[m.role] || m.role;
+
+    const long = (m.content || "").length > SESS_FOLD_LIMIT;
+    // 折叠态消息若含搜索命中，自动展开（临时视图状态，不写回数据）
+    const hit = kw && (m.content || "").toLowerCase().includes(kw.toLowerCase());
+    const expanded = hit || !long;
+    const shown = expanded ? m.content : String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…";
+
+    div.innerHTML = `
+      <span class="msg-role">${esc(roleName)}</span>
+      <div class="msg-body">${sessHighlight(shown, kw)}</div>
+      ${long ? `<button class="fold-toggle">${expanded ? "收起" : `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`}</button>` : ""}
+      <span class="msg-copy"><button title="复制该条消息">⧉</button></span>`;
+
+    // 折叠/展开：按钮文案即状态来源，点击后切换本条消息的显示内容
+    if (long) {
+      div.querySelector(".fold-toggle").addEventListener("click", () => {
+        const body = div.querySelector(".msg-body");
+        const btn = div.querySelector(".fold-toggle");
+        const nowCollapsed = btn.textContent.startsWith("展开");
+        if (nowCollapsed) {
+          body.innerHTML = sessHighlight(m.content, kw);
+          btn.textContent = "收起";
+        } else {
+          body.innerHTML = sessHighlight(String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…", kw);
+          btn.textContent = `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`;
+        }
+      });
+    }
+    // 复制该条消息
+    div.querySelector(".msg-copy button").addEventListener("click", (e) => {
+      e.stopPropagation();
+      sessCopyText(m.content, "消息内容已复制");
+    });
+    return div;
+  }
+
+  // 追加一帧消息节点（sessRenderCursor 是下一条待建的下标）。
+  function appendSessMessageChunk(s) {
+    const messages = s.messages || [];
+    if (sessRenderCursor >= messages.length) return;
     const kw = sessState.search.trim();
     const flow = $("sessMsgFlow");
-    flow.innerHTML = "";
-    (s.messages || []).forEach((m, i) => {
-      const div = document.createElement("div");
-      div.className = "msg " + m.role;
-      div.id = "sess-msg-" + i;
-      const roleName = { user: "我", assistant: sessEpName(s.endpoint), system: "系统", tool: "工具调用" }[m.role] || m.role;
+    const stop = Math.min(sessRenderCursor + SESS_RENDER_CHUNK, messages.length);
+    for (let i = sessRenderCursor; i < stop; i++) flow.appendChild(sessMessageNode(s, messages[i], i, kw));
+    sessRenderCursor = stop;
+    observeSessUserTurns(s); // 每补一帧把新出现的用户轮挂上跟随高亮
+  }
 
-      const long = (m.content || "").length > SESS_FOLD_LIMIT;
-      // 折叠态消息若含搜索命中，自动展开（临时视图状态，不写回数据）
-      const hit = kw && (m.content || "").toLowerCase().includes(kw.toLowerCase());
-      const expanded = hit || !long;
-      const shown = expanded ? m.content : String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…";
+  // 把目录跳转的目标下标画进 DOM：目标在未渲染区间时逐帧补齐。
+  function ensureSessMessageRendered(s, index) {
+    let guard = 0;
+    while (sessRenderCursor <= index && sessRenderCursor < (s.messages || []).length && guard++ < 5000) {
+      appendSessMessageChunk(s);
+    }
+  }
 
-      div.innerHTML = `
-        <span class="msg-role">${esc(roleName)}</span>
-        <div class="msg-body">${sessHighlight(shown, kw)}</div>
-        ${long ? `<button class="fold-toggle">${expanded ? "收起" : `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`}</button>` : ""}
-        <span class="msg-copy"><button title="复制该条消息">⧉</button></span>`;
-
-      // 折叠/展开：按钮文案即状态来源，点击后切换本条消息的显示内容
-      if (long) {
-        div.querySelector(".fold-toggle").addEventListener("click", () => {
-          const body = div.querySelector(".msg-body");
-          const btn = div.querySelector(".fold-toggle");
-          const nowCollapsed = btn.textContent.startsWith("展开");
-          if (nowCollapsed) {
-            body.innerHTML = sessHighlight(m.content, kw);
-            btn.textContent = "收起";
-          } else {
-            body.innerHTML = sessHighlight(String(m.content || "").slice(0, SESS_FOLD_HEAD) + "\n…", kw);
-            btn.textContent = `展开完整内容（约 ${(m.content.length / 1000).toFixed(1)}k 字符）`;
-          }
-        });
-      }
-      // 复制该条消息
-      div.querySelector(".msg-copy button").addEventListener("click", (e) => {
-        e.stopPropagation();
-        sessCopyText(m.content, "消息内容已复制");
-      });
-      flow.appendChild(div);
-    });
+  function renderSessMessages(s) {
+    sessRenderCursor = 0;
+    $("sessMsgFlow").innerHTML = "";
+    appendSessMessageChunk(s);
   }
 
   /* ============================================================
      消息目录 TOC
      ============================================================ */
-  function sessTocEntries(s) {
-    if (!s || !Array.isArray(s.messages)) return [];
-    const out = [];
-    s.messages.forEach((m, i) => {
-      if (m.role !== "user") return;
-      const clean = String(m.content || "").replace(/^\s+/, "");
-      if (!clean) return;
-      out.push({ idx: out.length + 1, msgIdx: i, text: clean.slice(0, 40) });
-    });
-    return out;
-  }
-
   function renderSessToc(s) {
-    const entries = sessTocEntries(s);
-    const has = entries.length > 0;
+    // 条目由后端 turns 给（下标指向 messages，预览已按各格式清洗过）
+    const turns = s && Array.isArray(s.turns) ? s.turns : [];
+    const has = turns.length > SESS_TOC_MIN_TURNS; // 一两轮的会话不值得占一栏
     $("sessTocSide").hidden = !has;
     $("sessTocFab").classList.toggle("has-toc", has);
     if (!has) { $("sessTocPop").hidden = true; return; }
 
-    const html = entries.map((e) =>
-      `<div class="toc-item" data-msg="${e.msgIdx}"><span class="t-idx">${e.idx}</span><span class="t-text">${esc(e.text)}</span></div>`
+    const html = turns.map((t, n) =>
+      `<div class="toc-item" data-msg="${Number(t.index) || 0}"><span class="t-idx">${n + 1}</span><span class="t-text">${esc(t.preview || "")}</span></div>`
     ).join("");
     $("sessTocList").innerHTML = html;
     $("sessTocPopList").innerHTML = html;
 
-    // 点击定位：平滑滚动 + 高亮闪烁 2 秒
+    // 点击定位：目标可能落在还没画的帧里，先补齐再滚
     $$(".toc-item").forEach((item) => {
       item.addEventListener("click", () => {
-        const target = document.getElementById("sess-msg-" + item.dataset.msg);
+        const idx = Number(item.dataset.msg) || 0;
+        const cur = currentSession();
+        if (cur) ensureSessMessageRendered(cur, idx);
+        const target = document.getElementById("sess-msg-" + idx);
         if (!target) return;
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        // 居中对齐：详情区随页面滚动，顶部对齐会把目标行塞到吸顶头行底下。
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
         target.classList.remove("flash");
         void target.offsetWidth; // 重启动画
         target.classList.add("flash");
@@ -11726,8 +11756,14 @@ async function api(method, path, body) {
       });
     });
 
-    // 当前可视消息对应的 TOC 项高亮
+    observeSessUserTurns(s);
+  }
+
+  // 当前可视消息对应的 TOC 项高亮。分帧渲染下每补一帧都要重挂一次，
+  // 否则新画出来的用户轮没有跟随状态。
+  function observeSessUserTurns(s) {
     if (sessMsgObserver) sessMsgObserver.disconnect();
+    if (!s || !Array.isArray(s.turns)) return;
     sessMsgObserver = new IntersectionObserver((ents) => {
       for (const en of ents) {
         if (!en.isIntersecting) continue;
@@ -11735,12 +11771,10 @@ async function api(method, path, body) {
         $$(".toc-item").forEach((t) => t.classList.toggle("active", t.dataset.msg === i));
       }
     }, { root: null, threshold: 0.4 });
-    (s.messages || []).forEach((m, i) => {
-      if (m.role === "user") {
-        const el = document.getElementById("sess-msg-" + i);
-        if (el) sessMsgObserver.observe(el);
-      }
-    });
+    for (const t of s.turns) {
+      const el = document.getElementById("sess-msg-" + t.index);
+      if (el) sessMsgObserver.observe(el);
+    }
   }
 
   /* ============================================================
@@ -11903,6 +11937,8 @@ async function api(method, path, body) {
   function leaveSessionsView() {
     if (sessTimer) { clearInterval(sessTimer); sessTimer = null; }
     if (sessMsgObserver) { sessMsgObserver.disconnect(); sessMsgObserver = null; }
+    // ☰ 靠 body 类随视图收起，弹层是属性控制的：不收就会在回来时挂着开着的空层。
+    $("sessTocPop").hidden = true;
   }
 
   /* 一次性事件绑定（enterSessionsView 首进时执行；restoreView 可能先于 init 到达） */
@@ -12024,6 +12060,16 @@ async function api(method, path, body) {
     document.addEventListener("click", (e) => {
       if (!$("sessTocPop").hidden && !e.target.closest("#sessTocPop") && !e.target.closest("#sessTocFab")) $("sessTocPop").hidden = true;
     });
+
+    // 长会话分帧：消息流随页面滚动（它自己没有滚动容器），滚到接近底部续建一帧。
+    window.addEventListener("scroll", () => {
+      if ($("sessionsView").hidden) return;
+      const cur = currentSession();
+      if (!cur || !Array.isArray(cur.messages) || sessRenderCursor >= cur.messages.length) return;
+      const doc = document.documentElement;
+      if (doc.scrollTop + doc.clientHeight < doc.scrollHeight - 800) return;
+      appendSessMessageChunk(cur);
+    }, { passive: true });
 
     // 移动端抽屉
     $("sessDrawerOpenBtn").addEventListener("click", () => {
