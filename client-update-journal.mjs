@@ -1,0 +1,166 @@
+// Client update jobs outlive the panel. The record lives next to the panel's
+// other data, and the install itself runs in a detached process: closing or
+// restarting the panel must not kill an install halfway through a global
+// package directory.
+import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { atomicWriteFile } from "./atomic-write.mjs";
+
+const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function clientUpdateJournalDir(root) {
+  return join(root, "client-updates");
+}
+
+export function readClientUpdateRun(dir, runId) {
+  if (!RUN_ID.test(String(runId ?? ""))) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, `${runId}.json`), "utf8"));
+    if (parsed?.runId !== runId || (parsed.state !== "running" && parsed.state !== "done")) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function listClientUpdateRuns(dir) {
+  let names;
+  try { names = readdirSync(dir); } catch { return []; }
+  return names
+    .filter((name) => name.endsWith(".json"))
+    .map((name) => readClientUpdateRun(dir, name.slice(0, -".json".length)))
+    .filter(Boolean);
+}
+
+export function writeClientUpdateRun(dir, run) {
+  mkdirSync(dir, { recursive: true });
+  atomicWriteFile(join(dir, `${run.runId}.json`), `${JSON.stringify(run)}\n`);
+}
+
+// A record that still says "running" after its process is gone is a crash,
+// not an install that is still going. The lock for that client has to come
+// off, or the next update of the same client is refused forever.
+export function reapDeadClientUpdateRuns(dir, alive, now = () => new Date().toISOString()) {
+  for (const run of listClientUpdateRuns(dir)) {
+    if (run.state !== "running") continue;
+    if (Number.isInteger(run.workerPid) && run.workerPid > 0 && alive(run.workerPid)) continue;
+    writeClientUpdateRun(dir, {
+      ...run,
+      state: "done",
+      finishedAt: now(),
+      result: { outcome: "failed", message: "更新中断，请重新检测确认结果" },
+    });
+  }
+}
+
+export function runningClientUpdate(dir, clientId) {
+  return listClientUpdateRuns(dir).find((run) => run.state === "running" && run.clientId === clientId) ?? null;
+}
+
+export function clientUpdateStatus(run) {
+  const payload = {
+    ok: true,
+    runId: run.runId,
+    clientId: run.clientId,
+    action: run.action,
+    state: run.state,
+    startedAt: run.startedAt,
+  };
+  if (run.state === "done") Object.assign(payload, { finishedAt: run.finishedAt }, run.result);
+  return payload;
+}
+
+function processAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The worker is detached and its pipes are dropped, so the panel exiting
+// does not take the install with it. Returns the worker pid.
+export function spawnClientUpdateWorker({
+  runId,
+  journalDir,
+  spawnFn = spawn,
+  execPath = process.execPath,
+  workerPath = fileURLToPath(new URL("./client-update-worker.mjs", import.meta.url)),
+} = {}) {
+  const child = spawnFn(execPath, [workerPath, runId, journalDir], {
+    detached: true,
+    windowsHide: true,
+    stdio: "ignore",
+    shell: false,
+  });
+  child.unref?.();
+  return child.pid;
+}
+
+// Entry used by the worker. Reads the request the panel already recorded,
+// runs the install, then writes the same outcome the panel used to compute
+// in memory. A worker that dies before this returns leaves the record as
+// "running"; the next panel start reaps it.
+export async function executeClientUpdate({
+  runId,
+  journalDir,
+  runLifecycle,
+  environment,
+  releases,
+  compareVersions,
+  alive = processAlive,
+  now = () => new Date().toISOString(),
+}) {
+  const run = readClientUpdateRun(journalDir, runId);
+  if (!run || run.state !== "running") return null;
+  writeClientUpdateRun(journalDir, { ...run, workerPid: process.pid });
+  let result;
+  try {
+    // 动手前的版本由面板登记。安装进程不再读一遍：那次读取没有 force，
+    // 读到的是缓存，而面板已经拿过同一份。
+    const beforeVersion = run.beforeVersion ?? null;
+    const command = await runLifecycle({
+      id: run.clientId,
+      action: run.action,
+      commandPath: run.commandPath ?? null,
+      targetVersion: run.targetVersion,
+    });
+    const after = (await environment.getState({ force: true })).clients.find((client) => client.id === run.clientId);
+    const installation = after?.installations?.[0] ?? null;
+    const afterVersion = installation?.version ?? null;
+    const latest = await releases.getClientLatest(run.clientId, { force: true });
+    const order = latest?.state === "ok" && afterVersion ? compareVersions(afterVersion, latest.version) : null;
+    const comparison = order === null ? "unknown" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
+    if (!command.ok) {
+      result = {
+        outcome: "failed",
+        message: command.npmMissing
+          ? "更新工具缺失（npm），请修复或重装 Node.js 后重试"
+          : command.timedOut
+            ? "更新用时过长被中止，请检查网络后重新检测确认结果"
+            : "更新命令执行失败，请稍后重试",
+        detail: command.output || undefined,
+      };
+    } else if (installation?.issue === "not_runnable") {
+      result = { outcome: "installed_not_runnable", message: "已安装但无法运行，请先检查运行环境（如 Node 版本）" };
+    } else if (!afterVersion) {
+      result = { outcome: "not_found_after", message: "命令已执行，但仍未找到该客户端，请重新检测确认" };
+    } else if (beforeVersion && beforeVersion === afterVersion && comparison === "update_available") {
+      result = { outcome: "unchanged", message: "更新已完成，但本地版本未变化，可能仍有旧版本在生效" };
+    } else {
+      result = { outcome: "updated", message: `已更新到 ${afterVersion}` };
+    }
+    result = { ...result, beforeVersion, afterVersion, latestVersion: latest?.state === "ok" ? latest.version : null, comparison };
+  } catch {
+    result = { outcome: "failed", message: "更新失败，请重新检测确认结果" };
+  }
+  const current = readClientUpdateRun(journalDir, runId) ?? run;
+  if (!alive(process.pid)) return result;
+  writeClientUpdateRun(journalDir, { ...current, state: "done", finishedAt: now(), result, workerPid: process.pid });
+  return result;
+}
+
+

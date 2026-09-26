@@ -665,6 +665,20 @@ test("codex 双行卡片：CLI 行更新中时只有该行显「更新中…」�
   assert.match(actionButtons(doneLines[0])[0].textContent, /更新到/);
 });
 
+test("重新打开关于页时，面板重启前没跑完的更新继续显示为更新中", async () => {
+  const h = harness((path) => {
+    if (path === "/api/environment/updates/active") {
+      return { ok: true, runs: [{ ok: true, runId: "run-kept", clientId: "claude", action: "update", state: "running" }] };
+    }
+    if (path.startsWith("/api/environment/update/")) return new Promise(() => {});
+    return normal(path);
+  });
+  await h.controller.enter();
+  assert.match(actionButton(h, "claude").textContent, /更新中/);
+  assert.equal(actionButton(h, "claude").disabled, true);
+  assert.equal(actionButton(h, "codex").disabled, false, "别的客户端没有在跑，按钮照常可点");
+});
+
 test("同时到来的运行中确认排队逐个弹，离开关于页时排队项按取消收尾", async () => {
   const running = { agents: [{ id: "claude", status: "running" }, { id: "codex", status: "running" }] };
   const posts = [];
