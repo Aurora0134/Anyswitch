@@ -3615,6 +3615,11 @@ async function api(method, path, body) {
   }
 
   function fitTerminalXterm() {
+    // 终端页隐藏期不测量：FitAddon 从 display:none 的宿主只能量到百分比兜底值
+    // （实测把 xterm 压成 12×6），按这个宽度折行的回放会把整行提示符碎成几段，
+    // 而 xterm 加大列宽时不重排已折行内容——首帧画错就一直错。窗口 resize 的
+    // 防抖路径也经由此闸：切到别的页后 resize 不再把兜底尺寸 POST 进 PTY。
+    if ($("terminalView")?.hidden) return;
     terminalFitAddon?.fit();
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session?.backend || !terminalXterm) return;
@@ -3645,6 +3650,9 @@ async function api(method, path, body) {
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
+    // 隐藏期不创建：open 进 display:none 的宿主后，紧随其后的 rAF fit 量到的
+    // 就是兜底尺寸，xterm 一出厂就是错的列宽（见 fitTerminalXterm 的闸）。
+    if ($("terminalView")?.hidden) return terminalXterm;
     terminalXterm = new window.Terminal({
       allowProposedApi: true,
       convertEol: true,
@@ -3682,6 +3690,10 @@ async function api(method, path, body) {
   }
 
   function connectTerminalStream(session) {
+    // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
+    // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
+    // 终端页后活着的那条流，不能被隐藏期的重渲染路径（fetch 完成、轮询）关掉。
+    if ($("terminalView")?.hidden) return;
     closeTerminalStream();
     const term = ensureTerminalXterm();
     if (!term) return;
@@ -4628,9 +4640,11 @@ async function api(method, path, body) {
     $("terminalView").hidden = !terminal;
     document.body.classList.toggle("terminal-mode", terminal);
     if (terminal) {
-      // xterm is initialized while the terminal view is hidden during startup.
-      // Refit after the view is painted so the PTY and renderer share the real
-      // viewport dimensions instead of the hidden view's tiny fallback size.
+      // 进页才建流：xterm 只在可见容器里创建、按实测尺寸收全量回放，首帧即正确
+      // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
+      // 离开本页后保持存活——已有实例的再次进入只补一次 fit，不重建不重放。
+      if (!terminalXterm) renderTerminalPreviewSession();
+      // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
     }
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥

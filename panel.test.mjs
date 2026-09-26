@@ -5233,6 +5233,145 @@ describe("虚拟终端 resize 防抖", () => {
   });
 });
 
+// 首次开启碎屏修复：面板加载后终端页还是隐藏的（display:none），旧初始化路径
+// 已经在隐藏容器里建流、fit 并收全量回放。FitAddon 从隐藏宿主只能量到百分比
+// 兜底值（实测把 xterm 压成 12×6），整行提示符按 12 列折成 4 段；之后可见 fit
+// 虽把 PTY 纠正到 119×26，xterm 加大列宽却不重排已折行内容——首帧画错就一直
+// 是错的，实时输出再和旧折行缝成「Frankenstein」画面。修法=隐藏期整体闸下
+// 建流与测量，进页（可见）才建流。函数体抽进桩环境真跑，FitAddon 桩按视图
+// 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
+describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
+  function terminalGateSandbox({ viewHidden = true } = {}) {
+    const bodies = ["fitTerminalXterm", "debounceTerminalFit", "ensureTerminalXterm", "connectTerminalStream", "closeTerminalStream"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const state = {
+      posts: [], eventSources: [], terms: [],
+      measured: { cols: 119, rows: 26 },
+      hiddenFallback: { cols: 12, rows: 6 },
+      session: { id: "sess-a", backend: true, backendState: null, shell: {} },
+    };
+    const view = { hidden: viewHidden };
+    const host = {};
+    const sandbox = new Function("state", `
+      const API_BASE = "http://panel.test";
+      let terminalEventSource = null;
+      let terminalXterm = null;
+      let terminalFitAddon = null;
+      let terminalInputDisposable = null;
+      let activeTerminalPreviewId = "sess-a";
+      const terminalFontSize = 13;
+      const view = { hidden: ${JSON.stringify(viewHidden)} };
+      const host = {};
+      const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
+      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function updateTerminalFootSize() {}
+      function terminalSessionFor(id) { return state.session; }
+      function requestAnimationFrame(cb) { cb(); }
+      class FakeFitAddon {
+        fit() {
+          if (!terminalXterm) return;
+          // 复刻真实测量：视图隐藏时 getComputedStyle 只能给出百分比兜底值
+          const m = view.hidden ? state.hiddenFallback : state.measured;
+          terminalXterm.cols = m.cols;
+          terminalXterm.rows = m.rows;
+        }
+      }
+      const window = { FitAddon: { FitAddon: FakeFitAddon } };
+      window.Terminal = class {
+        constructor(options) { this.options = options; this.cols = 80; this.rows = 24; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); state.terms.push(this); }
+        loadAddon() {}
+        open(hostEl) { this.openedHost = hostEl; }
+        onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
+        fire(data) { this._fire?.(data); }
+        write(text) { this.writes.push(text); }
+        reset() { this.resetCount += 1; }
+        dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+      };
+      class FakeEventSource {
+        constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
+        addEventListener() {}
+        set onerror(fn) {}
+        close() { this.closed = true; }
+      }
+      const EventSource = FakeEventSource;
+      let terminalResizeDebounceTimer = null;
+      const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
+      const pendingTimers = [];
+      const setTimeoutStub = (cb, ms) => { const id = pendingTimers.length + 1; pendingTimers.push({ id, cb, ms }); return id; };
+      const clearTimeoutStub = (id) => { const i = pendingTimers.findIndex((t) => t.id === id); if (i >= 0) pendingTimers.splice(i, 1); };
+      const setTimeout = setTimeoutStub;
+      const clearTimeout = clearTimeoutStub;
+      ${bodies}
+      return {
+        connect: connectTerminalStream, close: closeTerminalStream,
+        fit: fitTerminalXterm, debounce: debounceTerminalFit,
+        flushTimers: () => { for (const { cb } of pendingTimers.splice(0)) cb(); },
+        xterm: () => terminalXterm, source: () => terminalEventSource,
+        host: () => host,
+        setViewHidden: (v) => { view.hidden = v; },
+      };
+    `)(state);
+    return { sandbox, state, view };
+  }
+  const backendSession = (id) => ({ id, label: id, backend: true, shell: {}, output: [] });
+  const resizePosts = (state) => state.posts.filter((p) => p.method === "POST" && p.url.includes("/resize"));
+
+  it("首次开启：终端页隐藏期不建流不测量，点开可见后才建流并按可见尺寸收首帧", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: true });
+    // 面板加载即初始化：终端页还在隐藏（display:none）
+    sandbox.connect(backendSession("sess-a"));
+    assert.equal(sandbox.xterm(), null, "隐藏期不创建 xterm 实例");
+    assert.equal(state.terms.length, 0, "隐藏期不把 xterm 打开进宿主");
+    assert.equal(state.eventSources.length, 0, "隐藏期不开 SSE 流");
+    assert.deepEqual(state.posts, [], "隐藏期没有任何 resize/input POST——12×6 兜底尺寸不进 PTY");
+
+    // 用户点开终端页：DOM 先可见，建流路径才放行
+    sandbox.setViewHidden(false);
+    sandbox.connect(backendSession("sess-a"));
+    assert.ok(sandbox.xterm(), "可见期创建 xterm");
+    assert.equal(sandbox.xterm().openedHost, sandbox.host(), "xterm 打开进终端页宿主");
+    assert.equal(state.eventSources.length, 1, "可见期建立 SSE 流");
+    assert.equal(resizePosts(state).length, 1, "建流后首帧 fit 恰好一次");
+    assert.deepEqual(resizePosts(state)[0].body, { cols: 119, rows: 26 },
+      "首帧按可见容器实测尺寸——回放不再按 12 列折行，提示符不碎");
+  });
+
+  it("流保持存活：离开终端页不断流，隐藏期的 fit 与窗口 resize 都不把兜底尺寸写进 PTY", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    const source = sandbox.source();
+    assert.equal(resizePosts(state).length, 1, "建流首帧一次 fit");
+
+    // 用户切到别的页：流与实例保持存活（离开即断流的备选未采纳）
+    sandbox.setViewHidden(true);
+    sandbox.fit();
+    sandbox.debounce();
+    sandbox.flushTimers();
+    assert.equal(sandbox.xterm(), term, "离开页面不销毁 xterm");
+    assert.equal(sandbox.source(), source, "离开页面不断 SSE");
+    assert.equal(resizePosts(state).length, 1, "隐藏期直接 fit 与防抖 resize 都不再 POST——兜底值不进 PTY");
+
+    // 回到终端页：实例还在，补一次 fit 即按可见尺寸纠正
+    sandbox.setViewHidden(false);
+    sandbox.fit();
+    const posts = resizePosts(state);
+    assert.equal(posts.length, 2, "回页补一次 fit");
+    assert.deepEqual(posts[1].body, { cols: 119, rows: 26 }, "回页补的 fit 按可见尺寸");
+  });
+
+  it("接线：进入终端页时建流（可见容器里创建 xterm），不再只补一次 fit", () => {
+    const m = panelJs.match(/function switchView\(name\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(m, "switchView found in panel.js");
+    const branch = m.slice(m.indexOf("if (terminal) {"));
+    assert.ok(branch.includes("renderTerminalPreviewSession()"), "终端分支建流：xterm 在可见容器里创建再收全量回放");
+  });
+});
+
 
 // 终端字号调节：全局单一字号，10–24px 钳制，localStorage 记忆，
 // 快捷键 Ctrl± 与 Ctrl+滚轮（仅在终端页生效）。纯函数在 vm 里真跑，
