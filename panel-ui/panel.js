@@ -3449,6 +3449,11 @@ async function api(method, path, body) {
     return null;
   }
 
+  // 新终端的默认工作目录与终端宿主自身的启动目录一致（Anyswitch 安装目录）：
+  // 写死一个本机不存在的路径，每次新建都只会被宿主静默回落到这个目录，
+  // 不如直接把默认值给对。
+  const TERMINAL_DEFAULT_CWD = "C:\\Users\\86183\\AppData\\Local\\Anyswitch\\app";
+
   function terminalSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
   }
@@ -3461,7 +3466,7 @@ async function api(method, path, body) {
     return {
       id: item.id,
       label: item.label || "新终端",
-      cwd: item.cwd || "D:\\dev",
+      cwd: item.cwd || TERMINAL_DEFAULT_CWD,
       branch: "",
       shell: { name: item.shell === "cmd" ? "命令提示符" : "PowerShell", pid: item.pid || "—" },
       // 归属接线：panel 层已按 shell pid ↔ 检测进程祖先链注入 agent 字段
@@ -3682,7 +3687,7 @@ async function api(method, path, body) {
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
     if (!activeTerminalPreviewId) {
-      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", ...terminalCreateSize() });
+      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: TERMINAL_DEFAULT_CWD, shell: "powershell", ...terminalCreateSize() });
       rebuildTerminalBackendSessions([...(data.sessions || []), created]);
       activeTerminalPreviewId = created.id;
     }
@@ -4088,8 +4093,14 @@ async function api(method, path, body) {
       const agentsData = await api("GET", "/api/agents").catch(() => null);
       enrichTerminalSessions(agentsData?.agents ?? null);
       await refreshActiveTerminalRequests();
-      renderTerminalSessionData();
       renderTerminalPreviewTabs();
+      if (Object.keys(terminalBackendSessions).length === 0) {
+        // 会话在别处被关光（另一个面板窗口、服务端重建后的空列表）：与关最后
+        // 一个标签同路落空态，不挂上一会话的残留数据。
+        renderTerminalEmptyState();
+        return;
+      }
+      renderTerminalSessionData();
     } catch {
       // 归属面任何一环失败都不清屏：上一帧继续显示，下一拍自然重试。
     } finally {
@@ -4141,6 +4152,38 @@ async function api(method, path, body) {
     renderTerminalPreviewRoute(session);
   }
 
+  // 零会话空态：终端页一个终端都没有时（关掉最后一个标签、或回归时本就是零
+  // 会话），盖一层空背景 + 文字提示，不退出终端页——退出后再进入只会挂一个
+  // 没有会话的空页；也不伪装会话。会话栏 / 底栏左段 / 监测区整块属于当前
+  // 会话，没有会话时连静态种子一起退场；「+」留在页签栏原处可直接新建。
+  function renderTerminalEmptyState() {
+    const overlay = $("terminalEmpty");
+    if (overlay) overlay.hidden = false;
+    const sessionBar = document.querySelector(".terminal-session-bar");
+    if (sessionBar) sessionBar.style.display = "none";
+    const footStatus = document.querySelector(".terminal-foot-status");
+    if (footStatus) footStatus.style.display = "none";
+    // 监测区整块属于当前会话：没有会话时连静态种子一起退场，只留空背景。
+    const inspector = $("terminalInspector");
+    if (inspector) inspector.style.display = "none";
+    // 监测区退场后工作区收成全宽：否则右侧留一条空列，空背景被切成半幅。
+    const workspace = $("terminalWorkspace");
+    if (workspace) workspace.classList.add("is-empty");
+  }
+
+  function clearTerminalEmptyState() {
+    const overlay = $("terminalEmpty");
+    if (overlay) overlay.hidden = true;
+    const sessionBar = document.querySelector(".terminal-session-bar");
+    if (sessionBar) sessionBar.style.display = "";
+    const footStatus = document.querySelector(".terminal-foot-status");
+    if (footStatus) footStatus.style.display = "";
+    const inspector = $("terminalInspector");
+    if (inspector) inspector.style.display = "";
+    const workspace = $("terminalWorkspace");
+    if (workspace) workspace.classList.remove("is-empty");
+  }
+
   // 降级空态：terminal-host 不在（面板路由回 503 terminal_host_unavailable）时，
   // 终端页只给「服务未运行 + 重试」，不再把 mock 假会话端给用户。xterm 区盖
   // 空态覆盖层、不建流；监测区、底栏统计与路由链沿用既有 hidden 通路；新建键
@@ -4148,6 +4191,11 @@ async function api(method, path, body) {
   function renderTerminalUnavailableState() {
     const overlay = $("terminalUnavailable");
     if (overlay) overlay.hidden = false;
+    // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
+    const empty = $("terminalEmpty");
+    if (empty) empty.hidden = true;
+    const workspace = $("terminalWorkspace");
+    if (workspace) workspace.classList.remove("is-empty");
     const metricsSection = $("terminalMetricsSection");
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
@@ -4229,10 +4277,32 @@ async function api(method, path, body) {
     }
   }
 
+  // 菜单挂「+」右侧：左缘贴加号右缘；右侧放不下就翻到加号左侧（右缘贴加号
+  // 左缘），始终紧邻加号、不出血。顶缘贴加号底缘，页签栏高度变化也不漂。
+  // 定位祖先是 .terminal-tabs-bar（position: relative）。
+  function positionTerminalAddMenu() {
+    const menu = $("terminalAddMenu");
+    const btn = $("terminalAddBtn");
+    if (!menu || !btn || typeof menu.closest !== "function" || typeof btn.getBoundingClientRect !== "function") return;
+    const bar = menu.closest(".terminal-tabs-bar");
+    if (!bar || typeof bar.getBoundingClientRect !== "function") return;
+    const barRect = bar.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    const gap = 8;
+    const width = menu.offsetWidth || 0;
+    let left = btnRect.right - barRect.left + gap;
+    if (left + width > barRect.width - 12) {
+      left = btnRect.left - barRect.left - gap - width;
+    }
+    menu.style.left = `${Math.max(12, left)}px`;
+    menu.style.top = `${Math.max(0, btnRect.bottom - barRect.top + 6)}px`;
+  }
+
   function openTerminalAddMenu() {
     const menu = $("terminalAddMenu");
     if (!menu) return;
     menu.hidden = false;
+    positionTerminalAddMenu();
     loadInstalledTerminalAgents().then((agents) => renderTerminalAddMenuList(agents));
   }
 
@@ -4260,10 +4330,10 @@ async function api(method, path, body) {
 
   function confirmTerminalAddMenu() {
     const cwdInput = $("terminalAddMenuCwd");
-    const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || "D:\\dev";
+    const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || TERMINAL_DEFAULT_CWD;
     closeTerminalAddMenu();
     if (!terminalAddMenuSelection) {
-      api("POST", "/api/terminal/sessions", { label: "新终端", cwd: "D:\\dev", shell: "powershell", ...terminalCreateSize() })
+      api("POST", "/api/terminal/sessions", { label: "新终端", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
           activeTerminalPreviewId = created.id;
@@ -4300,12 +4370,18 @@ async function api(method, path, body) {
     }
     const unavailable = $("terminalUnavailable");
     if (unavailable) unavailable.hidden = true;
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    if (!session) {
+      // 零会话：关掉最后一个标签后，或退出再回归时本就是零会话——留在终端页
+      // 落空态（空背景 + 文字提示），不退出、也不挂静态占位数据。
+      renderTerminalEmptyState();
+      return;
+    }
+    clearTerminalEmptyState();
     const sessionBar = document.querySelector(".terminal-session-bar");
     if (sessionBar) sessionBar.style.display = "";
     const footStatus = document.querySelector(".terminal-foot-status");
     if (footStatus) footStatus.style.display = "";
-    const session = terminalSessionFor(activeTerminalPreviewId);
-    if (!session) return;
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
     connectTerminalStream(session);
@@ -4345,6 +4421,11 @@ async function api(method, path, body) {
     // xterm 逐连接重建（见 closeTerminalStream），resize 监听只能在此一次性绑定：
     // 挂在 ensureTerminalXterm 会随每次重建重复注册。fit 入口本身对空实例空操作。
     window.addEventListener("resize", debounceTerminalFit);
+    // 新建菜单开着的状态下改窗口大小：加号随页签栏移动，菜单跟着重挂，不脱节。
+    window.addEventListener("resize", () => {
+      const menu = $("terminalAddMenu");
+      if (menu && !menu.hidden) positionTerminalAddMenu();
+    });
     restoreTerminalFontSize();
     // 不再先渲 mock：降级态只给真空态（renderTerminalUnavailableState），就绪
     // 与否由连接通路的成功/失败分支落定——失败分支会重落空态，不再静默。
@@ -4376,9 +4457,11 @@ async function api(method, path, body) {
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
         if (remaining.length === 0) {
           // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
-          // 标签照常可关，关完即离开终端页；重新进入时初始化路径会新开会话。
+          // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
+          // 的空页。留在页内落空态（空背景 + 文字提示），「+」留在原处直接新建。
           closeTerminalStream();
-          closeTerminalPreview();
+          renderTerminalPreviewTabs();
+          renderTerminalEmptyState();
           return;
         }
         renderTerminalPreviewSession();

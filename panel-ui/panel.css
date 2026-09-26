@@ -924,6 +924,8 @@
     gap: 1px; background: var(--border);
   }
   .terminal-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr) 48px; }
+  /* 零会话空态：监测区整块退场，主区收成全宽，右侧不留空列 */
+  .terminal-workspace.is-empty { grid-template-columns: minmax(0, 1fr); }
   .terminal-main-pane, .terminal-inspector { min-width: 0; min-height: 0; background: var(--surface); }
   .terminal-main-pane { display: flex; flex-direction: column; min-height: 0; }
   .terminal-tabs-bar {
@@ -955,20 +957,22 @@
   .terminal-tab:hover .terminal-tab-close, .terminal-tab.active .terminal-tab-close { opacity: 1; }
   .terminal-add-btn { flex: none; width: 30px; height: 30px; margin-top: 4px; }
   .terminal-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-  /* 「+」新建菜单：选一个已安装的 CLI Agent（或空白终端）+ 工作目录 */
+  /* 「+」新建菜单：选一个已安装的 CLI Agent（或空白终端）+ 工作目录。
+     定位由 openTerminalAddMenu 内联写死（挂「+」右侧，空间不足翻左侧），
+     这里的 left/top 只是 JS 定位前的默认值。 */
   .terminal-add-menu {
-    position: absolute; top: 46px; left: 12px; z-index: 60; width: 272px;
-    display: flex; flex-direction: column; gap: 10px; padding: 12px;
+    position: absolute; top: 46px; left: 12px; z-index: 60; width: 256px;
+    display: flex; flex-direction: column; gap: 8px; padding: 10px;
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-lg);
   }
   .terminal-add-menu[hidden] { display: none; }
-  .terminal-add-menu-head { font-size: 12px; font-weight: 700; color: var(--text); }
-  .terminal-add-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 236px; overflow-y: auto; }
+  .terminal-add-menu-head { font-size: 11.5px; font-weight: 700; color: var(--text); }
+  .terminal-add-menu-list { display: flex; flex-direction: column; gap: 2px; max-height: 176px; overflow-y: auto; }
   .terminal-add-menu-item {
     appearance: none; display: flex; align-items: center; gap: 8px; width: 100%;
-    padding: 7px 8px; border: 1px solid transparent; border-radius: var(--radius-sm, 6px);
-    background: transparent; color: var(--text-2); font: inherit; font-size: 12.5px;
+    padding: 6px 8px; border: 1px solid transparent; border-radius: var(--radius-sm, 6px);
+    background: transparent; color: var(--text-2); font: inherit; font-size: 12px;
     text-align: left; cursor: pointer; transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
   }
   .terminal-add-menu-item:hover { background: var(--surface-hover); color: var(--text); }
@@ -985,13 +989,13 @@
   .terminal-add-menu-note { margin: 0; font-size: 11px; line-height: 1.5; color: var(--text-3); }
   .terminal-add-menu-field { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--text-3); }
   .terminal-add-menu-field input {
-    appearance: none; padding: 6px 8px; border: 1px solid var(--border);
+    appearance: none; padding: 5px 8px; border: 1px solid var(--border);
     border-radius: var(--radius-sm, 6px); background: var(--surface-sunken);
     color: var(--text); font: 11.5px var(--font-mono);
   }
   .terminal-add-menu-field input:focus { border-color: var(--accent); outline: none; }
   .terminal-add-menu-actions { display: flex; justify-content: flex-end; gap: 8px; }
-  .terminal-add-menu-actions .btn { font-size: 12px; padding: 5px 12px; }
+  .terminal-add-menu-actions .btn { font-size: 11.5px; padding: 4px 10px; }
   .terminal-session-bar {
     display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 43px;
     padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--surface);
@@ -1043,6 +1047,16 @@
   .terminal-unavailable[hidden] { display: none; }
   .terminal-unavailable-title { color: #d5e2f4; font-size: 15px; font-weight: 700; }
   .terminal-unavailable-desc { margin: 0; color: #71829a; font-size: 12px; line-height: 1.7; }
+  /* 零会话空态：关掉最后一个标签（或回归时本就是零会话）时盖在终端画区上，
+     与降级空态同款深色底，只给文字提示；「+」留在页签栏原处可直接新建。 */
+  .terminal-empty {
+    position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center;
+    background: #0b1220;
+  }
+  .terminal-empty[hidden] { display: none; }
+  .terminal-empty-title { color: #d5e2f4; font-size: 15px; font-weight: 700; }
+  .terminal-empty-desc { margin: 0; color: #71829a; font-size: 12px; line-height: 1.7; }
   .terminal-backend-state { color: var(--text-3); font: 10px var(--font-mono); }
   .terminal-output { flex: 1 1 auto; min-height: 0; }
   .terminal-line { min-height: 1.65em; white-space: pre-wrap; overflow-wrap: anywhere; }

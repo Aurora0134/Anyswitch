@@ -1910,7 +1910,7 @@ if (window.panelStartupController) panelStartupPlay();
               <p class="terminal-add-menu-note" id="terminalAddMenuNote" hidden></p>
               <label class="terminal-add-menu-field" for="terminalAddMenuCwd">
                 <span>工作目录</span>
-                <input type="text" id="terminalAddMenuCwd" value="D:\dev" spellcheck="false" autocomplete="off" />
+                <input type="text" id="terminalAddMenuCwd" value="C:\Users\86183\AppData\Local\Anyswitch\app" spellcheck="false" autocomplete="off" />
               </label>
               <div class="terminal-add-menu-actions">
                 <button type="button" class="btn" id="terminalAddMenuCancel">取消</button>
@@ -1944,6 +1944,10 @@ if (window.panelStartupController) panelStartupPlay();
               <strong class="terminal-unavailable-title">终端服务未运行</strong>
               <p class="terminal-unavailable-desc">终端服务随 relay 一同启动，relay 运行后即可使用。</p>
               <button type="button" class="btn btn-accent" id="terminalRetryBtn">重新连接</button>
+            </div>
+            <div class="terminal-empty" id="terminalEmpty" hidden>
+              <strong class="terminal-empty-title">当前没有终端</strong>
+              <p class="terminal-empty-desc">点上方「+」新建一个终端，就能在这里运行 CLI Agent。</p>
             </div>
           </div>
           <div class="terminal-footbar">

@@ -5010,7 +5010,13 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(renderBody.includes("connectTerminalStream(session);"), "SSE 只在结构层重连");
     assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
     assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
-    assert.ok(panelJs.includes("remaining.length === 0"), "关完即离开终端页");
+    assert.ok(panelJs.includes("remaining.length === 0"), "最后一个标签照常可关");
+    const zeroBranch = panelJs.match(/if \(remaining\.length === 0\) \{[\s\S]*?\n        \}/)?.[0];
+    assert.ok(zeroBranch, "零会话分支可取样");
+    assert.ok(zeroBranch.includes("closeTerminalStream()"), "零会话分支先收流");
+    assert.ok(zeroBranch.includes("renderTerminalPreviewTabs()"), "零会话分支重渲页签，关掉的标签即时退场");
+    assert.ok(zeroBranch.includes("renderTerminalEmptyState()"), "关完最后一个标签留在页内落空态，不退出终端页");
+    assert.ok(!zeroBranch.includes("closeTerminalPreview"), "零会话不再退出终端页（退出再回归只会挂一个没有会话的空页）");
     assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
     assert.ok(panelHtml.includes('id="terminalFootSize"'), "底栏行列占位可写");
     assert.ok(panelJs.includes("updateTerminalFootSize(session)"), "resize/SSE 会刷新底栏尺寸");
@@ -6126,8 +6132,10 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     const render = extractFn("renderTerminalPreviewSession");
     assert.ok(render.includes("terminalBackendReady === false"), "降级闸判定键是就绪位，不是会话数");
     assert.ok(render.includes("renderTerminalUnavailableState();"), "降级时渲染通路整体改落空态");
+    assert.ok(render.includes("renderTerminalEmptyState();"), "零会话（含回归）落空态，不再静默 return 挂占位数据");
     assert.ok(unavailable.includes('tabs.innerHTML = ""'), "落空态即清空静态假页签");
     assert.ok(unavailable.includes('querySelector(".terminal-session-bar")'), "落空态即隐藏假会话栏");
+    assert.ok(unavailable.includes("terminalEmpty"), "降级空态优先：零会话覆盖层一并收起");
     assert.ok(render.includes('querySelector(".terminal-foot-status")'), "就绪路径恢复底栏左段");
   });
 
@@ -6139,22 +6147,31 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.ok(screen.includes("终端服务未运行"), "空态标题就位");
     assert.ok(screen.includes("终端服务随 relay 一同启动，relay 运行后即可使用。"), "空态说明就位");
     assert.ok(screen.includes('id="terminalRetryBtn"') && screen.includes("重新连接"), "空态重试按钮就位");
+    assert.ok(panelHtml.includes('id="terminalEmpty" hidden'), "零会话空态覆盖层默认 hidden");
+    assert.ok(screen.includes("当前没有终端"), "零会话空态标题就位");
+    assert.ok(screen.includes("点上方「+」新建一个终端，就能在这里运行 CLI Agent。"), "零会话空态说明就位");
     assert.ok(panelCss.includes(".terminal-unavailable[hidden] { display: none; }"), "hidden 语义不被 flex 布局覆盖");
+    assert.ok(panelCss.includes(".terminal-empty[hidden] { display: none; }"), "零会话空态 hidden 语义不被 flex 布局覆盖");
+    assert.ok(panelCss.includes(".terminal-workspace.is-empty"), "零会话空态工作区收全宽，右侧不留空列");
     assert.ok(/\.terminal-screen \{[^}]*position: relative/.test(panelCss), "screen 是覆盖层的定位祖先");
     assert.ok(panelCss.includes(".terminal-add-btn:disabled"), "「+」禁用态有视觉反馈");
   });
 
   function unavailableSandbox() {
-    const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "syncTerminalAddBtn", "connectTerminalBackend"]
+    const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "renderTerminalEmptyState",
+      "clearTerminalEmptyState", "syncTerminalAddBtn", "connectTerminalBackend"]
       .map(extractFn).join("\n");
     const els = {
       terminalUnavailable: { hidden: true },
+      terminalEmpty: { hidden: true },
       terminalMetricsSection: { hidden: false },
       terminalFootStats: { hidden: false },
       terminalRouteSection: { hidden: false },
       terminalRouteLine: { closest: () => els.terminalRouteSection },
       terminalAddBtn: { disabled: false },
+      terminalInspector: { style: {} },
       terminalTabs: { innerHTML: "<button>payment-service</button>" },
+      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c) }, classes: new Set() },
       ".terminal-session-bar": { style: {} },
       ".terminal-foot-status": { style: {} },
     };
@@ -6214,6 +6231,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     state.session = { id: "t1", backend: true };
     sandbox.render();
     assert.equal(els.terminalUnavailable.hidden, true, "就绪渲染收起覆盖层");
+    assert.equal(els.terminalEmpty.hidden, true, "就绪渲染收起零会话空态");
     assert.equal(els[".terminal-session-bar"].style.display, "", "就绪恢复会话栏");
     assert.equal(els[".terminal-foot-status"].style.display, "", "就绪恢复底栏左段");
     assert.deepEqual(state.connected, { id: "t1", backend: true }, "就绪时进 connectTerminalStream 建流");
@@ -6230,6 +6248,67 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     sandbox.renderUnavailable();
     sandbox.renderUnavailable();
     assert.equal(els.terminalUnavailable.hidden, false, "空态渲染幂等可重进");
+  });
+
+  it("vm 真跑零会话空态：就绪但无会话 → 落空态留页内，来会话即恢复", () => {
+    const { sandbox, els, state } = unavailableSandbox();
+    sandbox.setReady(true);
+    state.session = null;
+    sandbox.render();
+    assert.equal(els.terminalEmpty.hidden, false, "零会话盖上空态覆盖层");
+    assert.equal(els[".terminal-session-bar"].style.display, "none", "空态隐藏静态假会话栏");
+    assert.equal(els[".terminal-foot-status"].style.display, "none", "空态隐藏静态假底栏左段");
+    assert.equal(els.terminalInspector.style.display, "none", "空态隐藏监测区（没有会话可监测）");
+    assert.ok(els.terminalWorkspace.classList.contains("is-empty"), "监测区退场后工作区收成全宽，右侧不留空列");
+    assert.equal(state.connected, null, "零会话不建流");
+    assert.equal(state.renderedData, 0, "零会话不渲会话数据");
+    sandbox.render();
+    assert.equal(els.terminalEmpty.hidden, false, "空态渲染幂等可重进（回归路径重跑同一分支）");
+
+    state.session = { id: "t1", backend: true };
+    sandbox.render();
+    assert.equal(els.terminalEmpty.hidden, true, "来会话即收起空态");
+    assert.equal(els[".terminal-session-bar"].style.display, "", "会话栏恢复");
+    assert.equal(els[".terminal-foot-status"].style.display, "", "底栏左段恢复");
+    assert.equal(els.terminalInspector.style.display, "", "监测区恢复");
+    assert.ok(!els.terminalWorkspace.classList.contains("is-empty"), "来会话即恢复双栏工作区");
+    assert.deepEqual(state.connected, { id: "t1", backend: true }, "来会话即建流");
+  });
+
+  it("vm 真跑轮询零会话：别处关光会话也落空态，不挂残留数据", () => {
+    // pollTerminalSessions 是 async 函数：手工取样带上 async 前缀（extractFn 的正则从
+    // function 起匹配会丢掉它，函数体里的 await 会直接语法错误）。
+    const pollSrc = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(pollSrc, "pollTerminalSessions found in panel.js");
+    const bodies = [pollSrc, extractFn("renderTerminalEmptyState")].join("\n");
+    const els = {
+      terminalEmpty: { hidden: true },
+      terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c) }, classes: new Set() },
+      terminalTabs: { innerHTML: "" },
+    };
+    const state = { data: 0, enriched: 0, requested: 0, renderedData: 0, renderedTabs: 0 };
+    const sandbox = new Function("els", "state", `
+      const $ = (id) => els[id] ?? null;
+      const document = { querySelector: () => null };
+      const terminalBackendReady = true;
+      let terminalPollInFlight = false;
+      const terminalBackendSessions = {};
+      async function api() { state.data += 1; return { sessions: [] }; }
+      function rebuildTerminalBackendSessions() {}
+      async function refreshRouteRuntimeCache() {}
+      async function refreshActiveTerminalRequests() { state.requested += 1; }
+      function enrichTerminalSessions() { state.enriched += 1; }
+      function renderTerminalSessionData() { state.renderedData += 1; }
+      function renderTerminalPreviewTabs() { state.renderedTabs += 1; }
+      ${bodies}
+      return { poll: pollTerminalSessions };
+    `)(els, state);
+    return sandbox.poll().then(() => {
+      assert.equal(state.renderedTabs, 1, "轮询照常重渲页签");
+      assert.equal(state.renderedData, 0, "零会话不渲会话数据（无会话可渲）");
+      assert.equal(els.terminalEmpty.hidden, false, "别处关光会话也落空态");
+      assert.ok(els.terminalWorkspace.classList.contains("is-empty"), "轮询路径同样收全宽工作区");
+    });
   });
 
   it("vm 真跑连接通路：失败落空态，成功链路三件套各一拍且「+」放开", async () => {
@@ -6390,9 +6469,11 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   }
 
   // 纯函数在 vm 里真跑（同归属前科的取样式）；出口统一 JSON 往返，防跨原型误判。
+  // terminalBackendSession / confirmTerminalAddMenu 引用模块级默认目录常量，vm 域里补一份同值定义。
+  const VM_TERMINAL_DEFAULT_CWD = 'const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";';
   async function vmFn(name, args, deps = []) {
     const source = [name, ...deps].map(extractFn).join("\n");
-    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const fn = await vm.runInNewContext(`(() => { ${VM_TERMINAL_DEFAULT_CWD}\n${source}; return ${name}; })()`, {});
     const result = fn(...args);
     return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
   }
@@ -6401,13 +6482,20 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
 
   function addMenuSandbox({ environment, environmentError } = {}) {
     const bodies = ["closeTerminalAddMenu", "loadInstalledTerminalAgents", "renderTerminalAddMenuList",
-      "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize"]
+      "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize"]
       .map(extractFn).join("\n");
+    const btnRect = { left: 400, right: 430, top: 12, bottom: 42 };
+    const barRect = { left: 0, top: 0, width: 1200 };
+    const bar = { getBoundingClientRect: () => barRect };
     const els = {
-      terminalAddMenu: { hidden: true },
+      terminalAddMenu: {
+        hidden: true, style: {}, offsetWidth: 256,
+        closest: (sel) => (sel === ".terminal-tabs-bar" ? bar : null),
+      },
       terminalAddMenuList: { innerHTML: "", querySelectorAll: () => [] },
       terminalAddMenuNote: { hidden: true, textContent: "" },
       terminalAddMenuCwd: { value: "D:\\work" },
+      terminalAddBtn: { getBoundingClientRect: () => btnRect },
     };
     const log = { posts: [], toasts: [], renders: 0, environmentFetches: 0 };
     const api = (method, path, body) => {
@@ -6423,6 +6511,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", `
       let activeTerminalPreviewId = null;
       let terminalXterm = null;
+      const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";
       const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"];
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
@@ -6442,7 +6531,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       (err, fallback) => fallback,
       (item) => ({ ...item }),
       {}, () => { log.renders += 1; }, escapeHtml);
-    return { sandbox, els, log };
+    return { sandbox, els, log, btnRect };
   }
 
   const ENVIRONMENT = {
@@ -6508,8 +6597,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     await flush();
     assert.deepEqual(blank.log.posts, [{
       method: "POST", path: "/api/terminal/sessions",
-      body: { label: "新终端", cwd: "D:\\dev", shell: "powershell", cols: 120, rows: 34 },
-    }], "空白终端与升级前完全一致：原 label/cwd/shell/cols/rows");
+      body: { label: "新终端", cwd: "D:\\work", shell: "powershell", cols: 120, rows: 34 },
+    }], "空白终端用菜单里填的工作目录，不再写死 D:\\dev");
 
     // 启动失败：服务端 4xx/5xx（英文短码）→ toast 落中文兜底，不登记会话。
     const toasts = [];
@@ -6546,6 +6635,20 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(onclick.includes("openTerminalAddMenu()"), "就绪即开新建菜单");
     assert.ok(onclick.includes("closeTerminalAddMenu()"), "再点一次收起");
     assert.ok(onclick.includes("terminalPreviewSessions"), "降级预览分支原样保留");
+  });
+
+  it("菜单挂「+」右侧：左缘贴加号右缘，右侧放不下时翻到加号左侧", async () => {
+    const { sandbox, els, btnRect } = addMenuSandbox({ environment: ENVIRONMENT });
+    await sandbox.open();
+    await flush();
+    assert.equal(els.terminalAddMenu.style.left, "438px", "默认开在加号右侧（左缘贴加号右缘）");
+    assert.equal(els.terminalAddMenu.style.top, "48px", "顶缘贴加号底缘，不盖页签");
+    btnRect.left = 1160;
+    btnRect.right = 1190;
+    await sandbox.open();
+    assert.equal(els.terminalAddMenu.style.left, "896px", "右侧放不下时翻到加号左侧，始终紧邻加号不出血");
+    assert.ok(panelJs.includes("if (menu && !menu.hidden) positionTerminalAddMenu();"),
+      "窗口 resize 时开着的菜单跟着加号重挂，不脱节");
   });
 
   it("标签副行优先显示 agentName；terminalBackendSession 带上 agent 身份", async () => {
@@ -6600,5 +6703,16 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(panelCss.includes(".terminal-add-menu {"), "菜单样式就位");
     assert.ok(panelCss.includes(".terminal-add-menu[hidden] { display: none; }"), "hidden 语义不被 flex 覆盖");
     assert.ok(panelCss.includes(".terminal-add-menu-item.is-selected"), "选中态有视觉反馈");
+
+    // 默认工作目录：与终端宿主自身的启动目录同源（Anyswitch 安装目录），不再
+    // 写死一个本机不存在的路径让宿主每次静默回落。
+    assert.ok(panelJs.includes('const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app"'),
+      "默认工作目录常量与宿主启动目录一致");
+    assert.ok(panelHtml.includes('value="C:\\Users\\86183\\AppData\\Local\\Anyswitch\\app"'), "目录输入框默认值同源");
+    const fetchCreate = panelJs.match(/if \(!activeTerminalPreviewId\) \{[\s\S]*?\n    \}/)?.[0];
+    assert.ok(fetchCreate?.includes("cwd: TERMINAL_DEFAULT_CWD"), "首载自动补建用默认目录常量");
+    const confirmSrc = extractFn("confirmTerminalAddMenu");
+    assert.ok(confirmSrc.includes("|| TERMINAL_DEFAULT_CWD"), "菜单未填目录时回落默认目录");
+    assert.ok(confirmSrc.includes('{ label: "新终端", cwd, shell: "powershell"'), "空白终端用菜单里填的工作目录，不写死");
   });
 });
