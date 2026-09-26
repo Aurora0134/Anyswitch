@@ -3385,6 +3385,11 @@ async function api(method, path, body) {
   // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
   let terminalHostResizeObserver = null;
   let terminalInputDisposable = null;
+  // 输入法锚点：组字期间钉住隐藏输入框。空闲为 null；组字中为 { textarea, left, top, width, height, lineHeight }。
+  let terminalImeHold = null;
+  let terminalImeHoldFrame = null;
+  let terminalImeFitPending = false;
+  let terminalImeAnchorTextarea = null;
   let terminalBackendReady = false;
   // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
@@ -3698,6 +3703,15 @@ async function api(method, path, body) {
     terminalFitAddon = null;
     terminalHostResizeObserver?.disconnect();
     terminalHostResizeObserver = null;
+    if (terminalImeAnchorTextarea) {
+      terminalImeAnchorTextarea.removeEventListener("compositionstart", armTerminalImeAnchor);
+      terminalImeAnchorTextarea.removeEventListener("compositionend", releaseTerminalImeAnchor);
+      terminalImeAnchorTextarea = null;
+    }
+    terminalImeHold = null;
+    terminalImeFitPending = false;
+    if (terminalImeHoldFrame !== null) cancelAnimationFrame(terminalImeHoldFrame);
+    terminalImeHoldFrame = null;
   }
 
   function updateTerminalFootSize(session) {
@@ -3714,6 +3728,12 @@ async function api(method, path, body) {
     // 而 xterm 加大列宽时不重排已折行内容——首帧画错就一直错。窗口 resize 的
     // 防抖路径也经由此闸：切到别的页后 resize 不再把兜底尺寸 POST 进 PTY。
     if ($("terminalView")?.hidden) return;
+    // 组字期间不重排：锚点钉在组字开始的格子上，终端一变宽它会跟着整块挪走。
+    // 记下，组字结束后补一次。
+    if (terminalImeHold) {
+      terminalImeFitPending = true;
+      return;
+    }
     terminalFitAddon?.fit();
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session?.backend || !terminalXterm) return;
@@ -3797,6 +3817,7 @@ async function api(method, path, body) {
       terminalXterm.unicode.activeVersion = "11";
     }
     terminalXterm.open(host);
+    installTerminalImeAnchor(terminalXterm);
     // 宿主尺寸观察：inspector 收放（约 ±292px）、字号变化等任何改变终端区宽度
     // 的动作都不触发 window resize，只挂窗口监听会漏掉——直接观察宿主元素，
     // 变动走与窗口 resize 同一条防抖入口。首次回调是 observe 的即时机，跳过
@@ -3813,6 +3834,75 @@ async function api(method, path, body) {
       terminalHostResizeObserver.observe(host);
     }
     return terminalXterm;
+  }
+
+  // 输入法只认焦点输入框。xterm 的隐藏框平时停在屏幕外，组字时再按光标拉回，
+  // 但光标闪烁、回显和拼音变长会在组字未结束时继续改它，候选框就跟着抽、跟着飞。
+  // 组字开始后只钉一次落在画面内的位置，结束前逐帧拉回；结束后再放开。
+  function terminalImeAnchorReady(textarea) {
+    const left = Number.parseFloat(textarea.style.left);
+    const top = Number.parseFloat(textarea.style.top);
+    const width = Number.parseFloat(textarea.style.width);
+    const height = Number.parseFloat(textarea.style.height);
+    return Number.isFinite(left) && left >= 0
+      && Number.isFinite(top) && top >= 0
+      && Number.isFinite(width) && width > 0
+      && Number.isFinite(height) && height > 0;
+  }
+
+  function syncTerminalImeAnchor() {
+    terminalImeHoldFrame = null;
+    const hold = terminalImeHold;
+    if (!hold) return;
+    const { textarea } = hold;
+    if (!textarea.isConnected) {
+      releaseTerminalImeAnchor();
+      return;
+    }
+    textarea.style.left = hold.left;
+    textarea.style.top = hold.top;
+    textarea.style.width = hold.width;
+    textarea.style.height = hold.height;
+    textarea.style.lineHeight = hold.lineHeight;
+    terminalImeHoldFrame = requestAnimationFrame(syncTerminalImeAnchor);
+  }
+
+  function armTerminalImeAnchor() {
+    terminalImeHoldFrame = null;
+    const textarea = terminalImeAnchorTextarea;
+    if (!textarea || terminalImeHold) return;
+    if (!terminalImeAnchorReady(textarea)) {
+      terminalImeHoldFrame = requestAnimationFrame(armTerminalImeAnchor);
+      return;
+    }
+    terminalImeHold = {
+      textarea,
+      left: textarea.style.left,
+      top: textarea.style.top,
+      width: textarea.style.width,
+      height: textarea.style.height,
+      lineHeight: textarea.style.lineHeight,
+    };
+    terminalImeHoldFrame = requestAnimationFrame(syncTerminalImeAnchor);
+  }
+
+  function releaseTerminalImeAnchor() {
+    const pendingFit = terminalImeFitPending;
+    terminalImeHold = null;
+    terminalImeFitPending = false;
+    if (terminalImeHoldFrame !== null) {
+      cancelAnimationFrame(terminalImeHoldFrame);
+      terminalImeHoldFrame = null;
+    }
+    if (pendingFit) fitTerminalXterm();
+  }
+
+  function installTerminalImeAnchor(term) {
+    const textarea = term?.element?.querySelector(".xterm-helper-textarea");
+    if (!textarea) return;
+    terminalImeAnchorTextarea = textarea;
+    textarea.addEventListener("compositionstart", armTerminalImeAnchor);
+    textarea.addEventListener("compositionend", releaseTerminalImeAnchor);
   }
 
   // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
