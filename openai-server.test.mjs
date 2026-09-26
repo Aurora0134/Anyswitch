@@ -1838,3 +1838,105 @@ describe("channel-qualified model slugs (<channel>~<model>)", () => {
     });
   });
 });
+
+describe("agent activity stream (/api/internal/agents-activity)", () => {
+  const AGENTS_FIXTURE = [
+    { id: "kimi", sessions: [{ activeRequests: 2 }], instances: [{ id: "kimi-1010", activeRequests: 1 }] },
+    { id: "claude", sessionMode: "per_session", sessions: [{ id: "sess_A", activeRequests: 1 }] },
+    { id: "zcode", sessions: [{ activeRequests: 0 }] },
+  ];
+
+  function makeCollector(agents = AGENTS_FIXTURE) {
+    const listeners = new Set();
+    return {
+      listeners,
+      publish: (frame) => { for (const l of listeners) l(frame); },
+      getAgentsStatus: async () => agents,
+      onActivity: (listener) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      offActivity: (listener) => listeners.delete(listener),
+    };
+  }
+
+  async function readFrame(reader, decoderBox) {
+    for (;;) {
+      const sep = decoderBox.buffer.indexOf("\n\n");
+      if (sep !== -1) {
+        const frame = decoderBox.buffer.slice(0, sep);
+        decoderBox.buffer = decoderBox.buffer.slice(sep + 2);
+        const line = frame.split("\n").find((l) => l.startsWith("data:"));
+        if (line) return JSON.parse(line.slice(5).trim());
+        continue;
+      }
+      const { done, value } = await reader.read();
+      if (done) return null;
+      decoderBox.buffer += decoderBox.decoder.decode(value, { stream: true });
+    }
+  }
+
+  it("rejects clients without the relay token", async () => {
+    const collector = makeCollector();
+    await withServer({ ...deps(null), metricsCollector: collector }, async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/internal/agents-activity`);
+      assert.equal(res.status, 401);
+      await res.text();
+    });
+  });
+
+  it("streams the snapshot first, then forwards collector activity frames, and unsubscribes on client close", async () => {
+    const collector = makeCollector();
+    await withServer({ ...deps(null), metricsCollector: collector }, async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/internal/agents-activity`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(res.status, 200);
+      assert.match(res.headers.get("content-type"), /text\/event-stream/);
+
+      const reader = res.body.getReader();
+      const box = { decoder: new TextDecoder(), buffer: "" };
+
+      const snapshot = await readFrame(reader, box);
+      assert.equal(snapshot.type, "snapshot");
+      assert.deepEqual(
+        snapshot.instances.map((i) => [i.endpointId, i.instanceId, i.activeRequests]),
+        [
+          ["kimi", null, 2],
+          ["kimi", "kimi-1010", 1],
+          ["claude", "sess_A", 1],
+          ["zcode", null, 0],
+        ],
+        "aggregate rows, instance rows and per-session rows all land in the snapshot",
+      );
+
+      assert.equal(collector.listeners.size, 1, "the stream subscribed exactly one listener");
+      collector.publish({ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 0, at: 123 });
+      const activity = await readFrame(reader, box);
+      assert.deepEqual(activity, { type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 0, at: 123 });
+
+      await reader.cancel().catch(() => {});
+      // Client close must drop the subscription (no listener leak): poll up
+      // to 2s for the server-side close event to arrive.
+      const deadline = Date.now() + 2000;
+      while (collector.listeners.size > 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.equal(collector.listeners.size, 0, "client close unsubscribed the listener");
+    });
+  });
+
+  it("serves an empty snapshot when no collector is wired, and keeps streaming", async () => {
+    await withServer(deps(null), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/api/internal/agents-activity`, {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      });
+      assert.equal(res.status, 200);
+      const reader = res.body.getReader();
+      const box = { decoder: new TextDecoder(), buffer: "" };
+      const snapshot = await readFrame(reader, box);
+      assert.deepEqual(snapshot, { type: "snapshot", instances: [] });
+      await reader.cancel().catch(() => {});
+    });
+  });
+});

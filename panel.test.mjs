@@ -5,8 +5,9 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createPanelRouter } from "./panel.mjs";
+import { createPanelRouter, startRelayActivityBridge } from "./panel.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 
 // Minimal fake HTTP req/res pair. res captures the status code, headers, and
 // JSON body the router writes, so a test can assert on them. `body` (optional)
@@ -5058,6 +5059,131 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   });
 });
 
+// 应答定投（C 案）：每连接独占一个 xterm 实例，onData 闭包绑定建连时固化的
+// 会话 id，不再读 activeTerminalPreviewId；旧连接关闭时实例随流销毁，WriteBuffer
+// 里排队未解析的旧字节（大回放跨事件循环切片、续跑定时器不可取消）解析时只能
+// 打进监听器表已清空的旧实例——DA/CPR 应答不会再投进新会话的 PTY。函数体抽出
+// 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
+describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
+  function streamSandbox() {
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "connectTerminalStream"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const state = { posts: [], eventSources: [], terms: [] };
+    const sandbox = new Function("state", `
+      const API_BASE = "http://panel.test";
+      let terminalEventSource = null;
+      let terminalXterm = null;
+      let terminalFitAddon = null;
+      let terminalInputDisposable = null;
+      const terminalFontSize = 13;
+      const host = {};
+      const $ = (id) => (id === "terminalXtermHost" ? host : null);
+      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function fitTerminalXterm() {}
+      function requestAnimationFrame(cb) { cb(); }
+      class FakeFitAddon {}
+      const window = { Terminal: null, FitAddon: { FitAddon: FakeFitAddon } };
+      window.Terminal = class {
+        constructor(options) { this.options = options; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); state.terms.push(this); }
+        loadAddon() {}
+        open(hostEl) { this.hostEl = hostEl; }
+        onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
+        fire(data) { this._fire?.(data); }
+        write(text) { this.writes.push(text); }
+        reset() { this.resetCount += 1; }
+        dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+      };
+      class FakeEventSource {
+        constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
+        addEventListener() {}
+        set onerror(fn) {}
+        close() { this.closed = true; }
+      }
+      const EventSource = FakeEventSource;
+      ${bodies}
+      return {
+        connect: connectTerminalStream, close: closeTerminalStream,
+        xterm: () => terminalXterm, source: () => terminalEventSource,
+        fitAddon: () => terminalFitAddon, input: () => terminalInputDisposable,
+      };
+    `)(state);
+    return { sandbox, state };
+  }
+  const backendSession = (id) => ({ id, label: id, backend: true, shell: {}, output: [] });
+  const inputUrls = (state) => state.posts.filter((p) => p.method === "POST" && p.url.includes("/input")).map((p) => p.url);
+
+  it("键入只进该 xterm 绑定的会话；A 切 B 后旧实例销毁、B 键入不落 A，会话 C 也不沾边", () => {
+    const { sandbox, state } = streamSandbox();
+    sandbox.connect(backendSession("sess-a"));
+    const termA = sandbox.xterm();
+    assert.equal(sandbox.source().url, "http://panel.test/api/terminal/sessions/sess-a/stream", "A 连接指向 A 的流");
+    termA.fire("ls\r");
+    assert.deepEqual(inputUrls(state), ["/api/terminal/sessions/sess-a/input"], "活跃期间键入POST给A");
+
+    sandbox.connect(backendSession("sess-b"));
+    const termB = sandbox.xterm();
+    assert.equal(termA.disposed, true, "切换时旧 xterm 随旧流销毁");
+    assert.notEqual(termB, termA, "新连接是新实例，不复用旧 xterm");
+    assert.deepEqual(inputUrls(state), ["/api/terminal/sessions/sess-a/input"], "切换动作本身不产生 POST");
+
+    termB.fire("pwd\r");
+    termA.fire("\x1b[?1;2c"); // 旧会话积压里迟到的 DA 应答打进已销毁实例
+    assert.deepEqual(inputUrls(state), [
+      "/api/terminal/sessions/sess-a/input",
+      "/api/terminal/sessions/sess-b/input",
+    ], "B 键入定投进 B；旧实例的迟到应答无监听器可打、不落任何会话");
+    assert.ok(!inputUrls(state).some((u) => u.includes("sess-c")), "任何数据都不进第三方会话");
+  });
+
+  it("closeTerminalStream 单独调用也断干净：源关闭、实例销毁、键入彻底无出口", () => {
+    const { sandbox, state } = streamSandbox();
+    sandbox.connect(backendSession("sess-a"));
+    sandbox.close();
+    assert.equal(sandbox.source(), null, "EventSource 释放");
+    assert.equal(sandbox.xterm(), null, "xterm 引用释放");
+    assert.equal(sandbox.fitAddon(), null, "fitAddon 引用释放");
+    assert.equal(sandbox.input(), null, "onData disposable 引用释放");
+    assert.equal(state.eventSources[0].closed, true, "旧 SSE 已 close");
+    assert.equal(state.terms[0].disposed, true, "旧 xterm 已 dispose");
+    state.terms[0].fire("x");
+    assert.deepEqual(inputUrls(state), [], "流关闭后键入无出口");
+  });
+
+  it("无后端的预览会话：静态输出照旧回放，键入落空不产生 POST", () => {
+    const { sandbox, state } = streamSandbox();
+    sandbox.connect({ id: "preview-1", backend: false, shell: {}, output: [["dim", "Windows PowerShell"], ["prompt-line", "PS D:\\dev> "]] });
+    assert.equal(sandbox.source(), null, "预览会话不开 SSE");
+    assert.deepEqual(sandbox.xterm().writes, ["Windows PowerShell\r\n", "PS D:\\dev> \r\n"], "静态输出逐行回放");
+    sandbox.xterm().fire("dir\r");
+    assert.deepEqual(inputUrls(state), [], "预览会话键入落空");
+  });
+
+  it("接线结构：onData 移出 ensure、定投不读活动会话、清理路径销毁实例、resize 监听只绑一次", () => {
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure, "ensureTerminalXterm found in panel.js");
+    assert.ok(!ensure.includes("onData"), "ensure 不再注册 onData");
+    assert.ok(!ensure.includes("activeTerminalPreviewId"), "ensure 不读活动会话");
+    assert.ok(!ensure.includes('addEventListener("resize"'), "resize 监听移出 ensure（防逐连接重复注册）");
+    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(connect, "connectTerminalStream found in panel.js");
+    assert.ok(connect.includes("session?.backend ? session.id : null"), "建连时固化会话 id");
+    assert.ok(connect.includes("term.onData("), "onData 挂在每连接专属实例上");
+    assert.ok(connect.includes("encodeURIComponent(boundSessionId)"), "input POST 走固化的会话 id");
+    assert.ok(!connect.includes("activeTerminalPreviewId"), "connect 全链路不再读活动会话");
+    const close = panelJs.match(/function closeTerminalStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(close, "closeTerminalStream found in panel.js");
+    assert.ok(close.includes("terminalInputDisposable?.dispose()"), "清理路径先拆 onData 监听器");
+    assert.ok(close.includes("terminalXterm?.dispose()"), "清理路径销毁 xterm 实例");
+    assert.ok(close.includes("terminalFitAddon = null"), "fitAddon 引用随实例释放");
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听收编到初始化一次性绑定");
+  });
+});
+
 // 窗口 resize 防抖（B3）：拖动动画里逐帧的事件合并到静默期后一次 fit。
 // 防抖函数在桩定时器环境里真跑。
 describe("虚拟终端 resize 防抖", () => {
@@ -5228,5 +5354,203 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init?.includes("restoreTerminalFontSize()"), "终端页初始化即恢复记忆字号");
     assert.ok(panelJs.includes('localStorage.setItem("panel-terminal-font-size"'), "持久化键沿用 panel- 前缀");
+  });
+});
+// 活跃真值推送：panel 侧长驻订阅 relay 的 /api/internal/agents-activity，缓存
+// (endpointId, instanceId) 最新在途状态；浏览器经 /panel/api/agents-activity 建连
+// 先拿缓存快照、其后收转发事件；前端把帧按真值键落到终端标签圆点与实况行。
+// 与 panel-log-bridge 同路取证：桥硬编码 47821，测试用假 fetch 喂流直读真代码。
+describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", () => {
+  async function vmFn(name, args, deps = []) {
+    const source = [name, ...deps].map((fnName) => {
+      const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const result = fn(...args);
+    return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
+  }
+
+  it("桥：snapshot 整帧建缓存、activity 定点更新、心跳注释直通、坏行跳过", async () => {
+    const lines = [
+      `data: ${JSON.stringify({ type: "snapshot", instances: [
+        { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 2, at: 100 },
+        { endpointId: "codex", instanceId: null, activeRequests: 1, at: 101 },
+      ] })}\n\n`,
+      `data: ${JSON.stringify({ type: "activity", endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: 102 })}\n\n`,
+      ": keepalive\n\n",
+      "data: {not json}\n\n",
+      `data: ${JSON.stringify({ type: "activity", endpointId: "kimi", instanceId: "kimi-9999", activeRequests: 3, at: 103 })}\n\n`,
+    ];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const line of lines) controller.enqueue(encoder.encode(line));
+        controller.close();
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(stream, { status: 200 });
+
+    const received = [];
+    const root = mkTestDir("anyswitch-activity-bridge-");
+    let bridge;
+    try {
+      loadOrGenerateToken(root);
+      bridge = startRelayActivityBridge(root);
+      bridge.subscribe((block) => received.push(block));
+
+      const deadline = Date.now() + 3000;
+      while (received.length < 4 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+
+      assert.equal(received.length, 4, "3 条 data + 1 条心跳注释全部送达");
+      assert.equal(received.filter((b) => b.startsWith("data:")).length, 3, "snapshot + 两帧 activity 转发");
+      assert.ok(received.some((b) => b === ": keepalive\n\n"), "心跳注释行直通");
+      assert.ok(!received.some((b) => b.includes("not json")), "坏行被跳过且不杀流");
+      const frame = JSON.parse(received[0].slice(5));
+      assert.equal(frame.type, "snapshot", "第一帧是快照（推送顺序落地）");
+
+      // 缓存：snapshot 建表 → activity 定点归零 kimi-4321 → kimi-9999 独立落键不互踩。
+      assert.deepEqual(bridge.snapshotFrame(), {
+        type: "snapshot",
+        instances: [
+          { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: 102 },
+          { endpointId: "codex", instanceId: null, activeRequests: 1, at: 101 },
+          { endpointId: "kimi", instanceId: "kimi-9999", activeRequests: 3, at: 103 },
+        ],
+      });
+    } finally {
+      bridge?.stop();
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("桥：relay 不可达时退避重试、stop 干净", async () => {
+    const originalFetch = globalThis.fetch;
+    let attempts = 0;
+    globalThis.fetch = async () => {
+      attempts += 1;
+      throw new Error("ECONNREFUSED");
+    };
+    const root = mkTestDir("anyswitch-activity-down-");
+    let bridge;
+    try {
+      loadOrGenerateToken(root);
+      bridge = startRelayActivityBridge(root);
+      await new Promise((r) => setTimeout(r, 120));
+      assert.ok(attempts >= 1, "桥会尝试建连");
+      assert.deepEqual(bridge.snapshotFrame(), { type: "snapshot", instances: [] }, "未连上时缓存为空快照");
+      bridge.stop();
+      const atStop = attempts;
+      await new Promise((r) => setTimeout(r, 1100));
+      assert.equal(attempts, atStop, "stop 后不再重试");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("路由：/panel/api/agents-activity 建连先发缓存快照、其后转发订阅事件", async () => {
+    let subscribed = null;
+    const bridge = {
+      snapshotFrame: () => ({ type: "snapshot", instances: [{ endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 2, at: 100 }] }),
+      subscribe: (fn) => { subscribed = fn; return () => {}; },
+    };
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      agentsActivityBridge: bridge,
+    });
+    const { req, res } = fakeReqRes("/panel/api/agents-activity", "GET");
+    res.write = (chunk) => { res.body += chunk; return true; };
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/event-stream");
+    assert.match(res.body, /data: \{"type":"snapshot","instances":\[\{"endpointId":"kimi","instanceId":"kimi-4321","activeRequests":2,"at":100\}\]\}\n\n/,
+      "建连即收桥缓存的当前快照帧");
+    assert.ok(subscribed, "建连挂上桥订阅");
+    const forward = `data: ${JSON.stringify({ type: "activity", endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: 101 })}\n\n`;
+    subscribed(forward);
+    assert.ok(res.body.endsWith(forward), "桥事件逐帧转发");
+  });
+
+  it("前端：terminalActivityApplyToSession 口径（>0 working / 0 idle / 明细即时）", async () => {
+    const session = { status: "idle", metrics: { activeRequests: 0, ttft: "—" } };
+    await vmFn("terminalActivityApplyToSession", [session, 2]);
+    assert.equal(session.status, "working");
+    assert.equal(session.metrics.activeRequests, 2, "「N 个请求进行中」明细用真值即时更新");
+    await vmFn("terminalActivityApplyToSession", [session, 0]);
+    assert.equal(session.status, "idle");
+    assert.equal(session.metrics.activeRequests, 0);
+    const bare = { status: "idle", metrics: null };
+    await vmFn("terminalActivityApplyToSession", [bare, 5]);
+    assert.equal(bare.status, "working");
+    assert.equal(bare.metrics, null, "metrics 未富化出来时不编造空指标行");
+  });
+
+  it("前端：terminalActivityApplyFrame 定点更新不串键、snapshot 整帧对齐", async () => {
+    const mk = (endpointId, instanceId, status = "idle") => ({
+      status,
+      metrics: { activeRequests: 0 },
+      agent: instanceId === null
+        ? { endpointId, name: endpointId, pid: 6100, instanceId: null }
+        : { endpointId, name: endpointId, pid: 4321, instanceId },
+    });
+    const kimi = mk("kimi", "kimi-4321");
+    const claude = mk("claude", "claude-9001", "working");
+
+    // activity 帧按 (endpointId, instanceId) 严格配对：只动命中会话。
+    assert.equal(await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "claude", instanceId: "claude-9001", activeRequests: 2, at: 1 },
+        { t1: kimi, t2: claude }],
+      ["terminalActivityApplyToSession", "terminalActivityKey"]), true);
+    assert.equal(claude.status, "working");
+    assert.equal(claude.metrics.activeRequests, 2);
+    assert.equal(kimi.status, "idle", "键不匹配的会话不动");
+
+    // null instanceId 的帧不放大到端点下已归属实例的会话。
+    assert.equal(await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 9, at: 2 },
+        { t1: kimi, t2: claude }],
+      ["terminalActivityApplyToSession", "terminalActivityKey"]), false,
+      "未命中任何会话返回 false（不重绘）");
+    assert.equal(kimi.status, "idle");
+
+    // snapshot 帧整帧对齐：快照里查不到的归属会话回落 0。
+    kimi.status = "working";
+    kimi.metrics.activeRequests = 7;
+    assert.equal(await vmFn("terminalActivityApplyFrame",
+      [{ type: "snapshot", instances: [{ endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 1, at: 3 }] },
+        { t1: kimi, t2: claude }],
+      ["terminalActivityApplyToSession", "terminalActivityKey"]), true);
+    assert.equal(kimi.status, "working", "快照里命中的键用真值");
+    assert.equal(kimi.metrics.activeRequests, 1);
+    assert.equal(claude.status, "idle", "快照里查不到的键一律回落 0");
+
+    assert.equal(await vmFn("terminalActivityApplyFrame", [{ type: "other" }, { t1: kimi }],
+      ["terminalActivityApplyToSession", "terminalActivityKey"]), false, "未知帧型忽略");
+    assert.equal(await vmFn("terminalActivityApplyFrame", [null, { t1: kimi }],
+      ["terminalActivityApplyToSession", "terminalActivityKey"]), false, "空帧忽略");
+  });
+
+  it("接线结构：路由就位、桥注释行直通、轮询原样 1s、EventSource 按活性同拍开合", () => {
+    assert.ok(panelMjs.includes('if (path === "/panel/api/agents-activity" && method === "GET")'),
+      "panel 侧浏览器出口路由存在");
+    assert.ok(panelMjs.includes("agentsActivityBridge = null"), "桥可注入、惰性起真桥");
+    assert.ok(panelMjs.includes("line.startsWith(\":\")"), "桥透传注释心跳行");
+    const source = panelJs.match(/function syncTerminalActivityStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(source?.includes("new EventSource(`${API_BASE}/api/agents-activity`)"), "前端订阅 /panel/api/agents-activity");
+    assert.ok(source?.includes("terminalActivityApplyFrame(frame, terminalSessionMap())"), "帧落到当前会话图");
+    const wanted = panelJs.match(/function terminalActivityStreamWanted\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(wanted?.includes("terminalBackendReady") && wanted?.includes("!document.hidden") && wanted?.includes('currentView === "terminal"'),
+      "活性门控与轮询一致：backend 就绪 + 页面可见 + 终端页");
+    const tick = panelJs.match(/terminalPollTimer = setInterval\(\(\) => \{[\s\S]*?\}, 1000\);/)?.[0];
+    assert.ok(tick?.includes("syncTerminalActivityStream();"), "推送流开关随每秒轮询节拍走");
+    assert.ok(tick?.includes("pollTerminalSessions();"), "1s 轮询原样保留");
   });
 });

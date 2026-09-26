@@ -3353,8 +3353,12 @@ async function api(method, path, body) {
   let activeTerminalPreviewId = "checkout";
   let terminalBackendSessions = {};
   let terminalEventSource = null;
+  // 活跃真值流：panel 转发的 relay 工作/空闲绝对态 SSE。轮询（1s）仍是校准
+  // 与指标数据源；这个流只负责把工作/空闲与在途请求数即时落到标签与实况行。
+  let terminalActivitySource = null;
   let terminalXterm = null;
   let terminalFitAddon = null;
+  let terminalInputDisposable = null;
   let terminalBackendReady = false;
   // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
@@ -3517,6 +3521,58 @@ async function api(method, path, body) {
     }));
   }
 
+  // ---- 活跃真值推送（工作/空闲即时落地） ----
+  // relay 推 (endpointId, instanceId) 绝对状态，帧对键成对匹配 session.agent；
+  // instanceId 为 null 的帧是端点级真值，只匹配同样未归属实例的会话，不放大到
+  // 端点下所有实例会话。
+  function terminalActivityKey(endpointId, instanceId) {
+    return `${endpointId} ${instanceId ?? ""}`;
+  }
+
+  // 口径：activeRequests > 0 → working，== 0 → idle。「N 个请求进行中」明细
+  // 取自真值；metrics 还没被轮询富化出来时（活了一辈子但还没等满一拍）只落
+  // 状态位，不为了一行明细编造空指标。
+  function terminalActivityApplyToSession(session, activeRequests) {
+    const count = Number.isFinite(activeRequests) && activeRequests > 0 ? Math.trunc(activeRequests) : 0;
+    session.status = count > 0 ? "working" : "idle";
+    if (session.metrics) session.metrics.activeRequests = count;
+    return count;
+  }
+
+  // activity 帧定点更新匹配的会话；snapshot 帧整帧对齐——快照里查不到键的
+  // 归属会话一律回落 0（relay 侧该实例当前没有在途请求）。任何会话被真值
+  // 触过才返回 true，调用方据此决定是否重绘。
+  function terminalActivityApplyFrame(frame, sessionMap) {
+    if (!frame || typeof frame !== "object" || !sessionMap || typeof sessionMap !== "object") return false;
+    let countByKey = null;
+    if (frame.type === "snapshot" && Array.isArray(frame.instances)) {
+      countByKey = new Map();
+      for (const inst of frame.instances) {
+        if (inst && typeof inst.endpointId === "string") {
+          countByKey.set(terminalActivityKey(inst.endpointId, inst.instanceId ?? null), inst.activeRequests);
+        }
+      }
+    } else if (frame.type === "activity" && typeof frame.endpointId === "string") {
+      countByKey = new Map([[terminalActivityKey(frame.endpointId, frame.instanceId ?? null), frame.activeRequests]]);
+    } else {
+      return false;
+    }
+    let touched = false;
+    for (const session of Object.values(sessionMap)) {
+      const agent = session?.agent || null;
+      if (!agent || typeof agent.endpointId !== "string") continue;
+      const key = terminalActivityKey(agent.endpointId, agent.instanceId ?? null);
+      if (countByKey.has(key)) {
+        terminalActivityApplyToSession(session, countByKey.get(key));
+        touched = true;
+      } else if (frame.type === "snapshot") {
+        terminalActivityApplyToSession(session, 0);
+        touched = true;
+      }
+    }
+    return touched;
+  }
+
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     if (!terminalBackendSessions[activeTerminalPreviewId]) {
@@ -3535,9 +3591,19 @@ async function api(method, path, body) {
     }
   }
 
+  // 流的生命周期即 xterm 的生命周期，旧连接的一切随关闭一并销毁。此前复用
+  // 单例 xterm：onData 监听器虽随切换拆除，但 WriteBuffer 里旧会话已排队未解析
+  // 的字节（大回放跨越多个事件循环切片，setTimeout 续跑不可取消）会在之后解析
+  // 时触发当前监听器，把旧会话的 DA/CPR 自动应答 POST 进新会话的 PTY。逐连接
+  // 重建 xterm 后，旧积压只能打进监听器表已随之清空的旧实例，彻底落空。
   function closeTerminalStream() {
     terminalEventSource?.close();
     terminalEventSource = null;
+    terminalInputDisposable?.dispose();
+    terminalInputDisposable = null;
+    terminalXterm?.dispose();
+    terminalXterm = null;
+    terminalFitAddon = null;
   }
 
   function updateTerminalFootSize(session) {
@@ -3597,12 +3663,6 @@ async function api(method, path, body) {
       terminalXterm.unicode.activeVersion = "11";
     }
     terminalXterm.open(host);
-    terminalXterm.onData((data) => {
-      const session = terminalSessionFor(activeTerminalPreviewId);
-      if (!session?.backend) return;
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch(() => {});
-    });
-    window.addEventListener("resize", debounceTerminalFit);
     requestAnimationFrame(fitTerminalXterm);
     return terminalXterm;
   }
@@ -3626,6 +3686,15 @@ async function api(method, path, body) {
     const term = ensureTerminalXterm();
     if (!term) return;
     term.reset();
+    // 应答定投：该 xterm 实例只服务本次连接的会话，键入与 TUI 查询的自动应答
+    // 一律发往建连时固化的会话 id，不读当前活动会话——切换后旧会话迟到的字节
+    // 与其回调不可能经此实例打进别的 PTY。预览会话无后端，定投为空，键入直接
+    // 落空（与旧行为一致）。
+    const boundSessionId = session?.backend ? session.id : null;
+    terminalInputDisposable = term.onData((data) => {
+      if (boundSessionId === null) return;
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch(() => {});
+    });
     if (!session?.backend) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
       return;
@@ -3828,14 +3897,45 @@ async function api(method, path, body) {
     if (currentView === "terminal") scheduleTerminalFit();
   }
 
+  // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
+  // 当前在终端页才连，缺一即断。断线交给 EventSource 自动重连；重连服务端会
+  // 重发快照帧，前端按整帧对齐恢复，不需要补偿逻辑。
+  function terminalActivityStreamWanted() {
+    return terminalBackendReady && !document.hidden && currentView === "terminal";
+  }
+
+  function syncTerminalActivityStream() {
+    if (terminalActivityStreamWanted()) {
+      if (terminalActivitySource) return;
+      const source = new EventSource(`${API_BASE}/api/agents-activity`);
+      terminalActivitySource = source;
+      source.onmessage = (event) => {
+        let frame = null;
+        try { frame = JSON.parse(event.data); } catch { return; }
+        if (terminalActivityApplyFrame(frame, terminalSessionMap())) {
+          renderTerminalSessionData();
+          renderTerminalPreviewTabs();
+        }
+      };
+      source.onerror = () => {};
+    } else if (terminalActivitySource) {
+      terminalActivitySource.close();
+      terminalActivitySource = null;
+    }
+  }
+
   function initTerminalPreview() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
+    // xterm 逐连接重建（见 closeTerminalStream），resize 监听只能在此一次性绑定：
+    // 挂在 ensureTerminalXterm 会随每次重建重复注册。fit 入口本身对空实例空操作。
+    window.addEventListener("resize", debounceTerminalFit);
     restoreTerminalFontSize();
     renderTerminalPreviewSession();
     fetchTerminalSessions().then(() => {
       renderTerminalPreviewSession();
       pollTerminalSessions();
+      syncTerminalActivityStream();
     }).catch((error) => {
       terminalBackendReady = false;
       console.warn("[terminal] backend unavailable:", error);
@@ -3843,11 +3943,13 @@ async function api(method, path, body) {
     if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {
       terminalPollTimer = setInterval(() => {
+        syncTerminalActivityStream();
         if (document.hidden) return;
         if (currentView !== "terminal") return;
         pollTerminalSessions();
       }, 1000);
     }
+    syncTerminalActivityStream();
     tabs.addEventListener("click", (event) => {
       const tab = event.target.closest("[data-terminal-tab]");
       if (!tab) return;
