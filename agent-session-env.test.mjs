@@ -104,13 +104,14 @@ test("kimi 与 claude 同协议，x-agent-id 随自定义头出站", () => {
     assert.equal(env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${AGENT_RELAY_PORT}`);
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, TOKEN);
     assert.ok(env.KIMI_CODE_CUSTOM_HEADERS.includes("x-agent-id: kimi"), "x-agent-id 是 relay 白名单与自动链的查找键");
+    assert.equal(env.KIMI_CODE_CUSTOM_HEADERS, "x-agent-id: kimi", "只发端点身份，不发实例标签：实例行要认的身份是 relay 反查连接属主合成的 \"<agentId>-<pid>\"，自造的随机标签折不进规范形，会把一次会话拆成占位行与流量行两行");
     assert.equal(env.ANTHROPIC_API_KEY, null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("codex/grok 只补实例 id 与 NO_PROXY，grok 双真键标删", () => {
+test("codex 补实例 id 与 NO_PROXY，grok 只补 NO_PROXY 且双真键标删", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const codex = buildAgentSessionEnv({ agentId: "codex", token: TOKEN, base: fakeBase(root) });
@@ -119,9 +120,7 @@ test("codex/grok 只补实例 id 与 NO_PROXY，grok 双真键标删", () => {
     assert.equal("ANYSWITCH_RELAY_TOKEN" in codex, false, "codex 的 relay 令牌在托管 config.toml 里，不走 env");
 
     const grok = buildAgentSessionEnv({ agentId: "grok", token: TOKEN, base: fakeBase(root) });
-    assert.deepEqual(Object.keys(grok).sort(), [
-      "ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy",
-    ]);
+    assert.deepEqual(Object.keys(grok).sort(), ["GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy"]);
     assert.equal(grok.XAI_API_KEY, null, "xAI 真钥标删：内置直连不得绕过 relay");
     assert.equal(grok.GROK_CODE_XAI_API_KEY, null);
   } finally {
@@ -129,7 +128,7 @@ test("codex/grok 只补实例 id 与 NO_PROXY，grok 双真键标删", () => {
   }
 });
 
-test("pi/dsh/opencode 带 relay 令牌，opencode 另带实例变量", () => {
+test("pi/dsh/opencode 带 relay 令牌，实例标签只有 pi 还发", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const pi = buildAgentSessionEnv({ agentId: "pi", token: TOKEN, base: fakeBase(root) });
@@ -141,7 +140,7 @@ test("pi/dsh/opencode 带 relay 令牌，opencode 另带实例变量", () => {
     assert.equal(dsh.ANYSWITCH_RELAY_TOKEN, TOKEN);
 
     const opencode = buildAgentSessionEnv({ agentId: "opencode", token: TOKEN, base: fakeBase(root) });
-    assert.deepEqual(Object.keys(opencode).sort(), ["ANYSWITCH_AGENT_INSTANCE", "ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"]);
+    assert.deepEqual(Object.keys(opencode).sort(), ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"]);
     assert.equal(opencode.ANYSWITCH_RELAY_TOKEN, TOKEN);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -173,6 +172,40 @@ test("同一工作目录连开两个终端，实例 id 不撞车", () => {
     for (const id of [first.env.ANYSWITCH_INSTANCE_ID, second.env.ANYSWITCH_INSTANCE_ID]) {
       assert.ok(id.length <= 64);
       assert.match(id, /^anyswitch-agent-env-[A-Za-z0-9-]+-t[0-9a-f]{8}$/, "cwd 基名 + 每会话随机标签");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("终端启动的实例身份：能按连接属主认出来的端点一律不自造标签", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = { ...fakeBase(root), cwd: root };
+    // 这三家（加 dsh：它的 build*Env 本就不收实例 id）不带 x-agent-instance
+    // 时，relay 用 netstat 反查连接属主合成 "<agentId>-<pid>"，那才是实例行
+    // 唯一能对上进程扫描的身份。自造的随机标签只有数字尾巴折得进规范形，
+    // 折不进就把一次会话拆成两行：带面徽标的进程占位行零计数、带全部计数的
+    // 流量行读不出面，终端页的监测区与最近请求还按占位行 id 取数取到全零。
+    for (const agentId of ["kimi", "grok", "opencode", "dsh"]) {
+      const env = buildAgentSessionEnv({ agentId, token: TOKEN, base });
+      assert.equal("ANYSWITCH_INSTANCE_ID" in env, false, `${agentId} 不发实例标签变量`);
+      assert.equal("ANYSWITCH_AGENT_INSTANCE" in env, false, `${agentId} 不发实例标签变量`);
+      assert.ok(!JSON.stringify(env).includes("x-agent-instance"), `${agentId} 的出站头里不含实例标签`);
+    }
+    // 经 launch 组装（面板走的这条）同样不发：标签只在服务那两个客户端的
+    // 配置契约时才造。
+    const kimiLaunch = buildAgentSessionLaunch({ agentId: "kimi", cwd: root, token: TOKEN, base });
+    assert.equal("ANYSWITCH_INSTANCE_ID" in kimiLaunch.env, false, "launch 路径与 env 路径同口径");
+    assert.equal(kimiLaunch.env.KIMI_CODE_CUSTOM_HEADERS, "x-agent-id: kimi");
+
+    // 两个例外按各自契约保留：pi 的 models.json 用 ${ANYSWITCH_INSTANCE_ID}
+    // 占位符、缺变量启动即抛；codex 的实例身份正源是 prompt_cache_key，标签
+    // 只是防撞车兜底。
+    for (const agentId of ["pi", "codex"]) {
+      const env = buildAgentSessionEnv({ agentId, token: TOKEN, base });
+      assert.match(env.ANYSWITCH_INSTANCE_ID, /^anyswitch-agent-env-[A-Za-z0-9._:-]+-t[0-9a-f]{8}$/,
+        `${agentId} 保留每会话随机标签`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
