@@ -3465,7 +3465,7 @@ async function api(method, path, body) {
   function terminalBackendSession(item) {
     return {
       id: item.id,
-      label: item.label || "新终端",
+      label: item.label || "Anyswitch",
       cwd: item.cwd || TERMINAL_DEFAULT_CWD,
       branch: "",
       shell: { name: item.shell === "cmd" ? "命令提示符" : "PowerShell", pid: item.pid || "—" },
@@ -3687,7 +3687,7 @@ async function api(method, path, body) {
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
     if (!activeTerminalPreviewId) {
-      const created = await api("POST", "/api/terminal/sessions", { label: "新终端", cwd: TERMINAL_DEFAULT_CWD, shell: "powershell", ...terminalCreateSize() });
+      const created = await api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd: TERMINAL_DEFAULT_CWD, shell: "powershell", ...terminalCreateSize() });
       rebuildTerminalBackendSessions([...(data.sessions || []), created]);
       activeTerminalPreviewId = created.id;
     }
@@ -4333,7 +4333,7 @@ async function api(method, path, body) {
     const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || TERMINAL_DEFAULT_CWD;
     closeTerminalAddMenu();
     if (!terminalAddMenuSelection) {
-      api("POST", "/api/terminal/sessions", { label: "新终端", cwd, shell: "powershell", ...terminalCreateSize() })
+      api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
           activeTerminalPreviewId = created.id;
