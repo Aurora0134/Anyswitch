@@ -5157,12 +5157,21 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       let terminalFitAddon = null;
       let terminalHostResizeObserver = null;
       let terminalInputDisposable = null;
+      let terminalImeHold = null;
+      let terminalImeHoldFrame = null;
+      let terminalImeFitPending = false;
+      let terminalImeAnchorTextarea = null;
       const terminalFontSize = 13;
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function fitTerminalXterm() {}
       function requestAnimationFrame(cb) { cb(); }
+      function cancelAnimationFrame() {}
+      function terminalImeAnchorReady() { return false; }
+      function armTerminalImeAnchor() {}
+      function releaseTerminalImeAnchor() {}
+      function installTerminalImeAnchor() {}
       class FakeFitAddon {}
       const window = { Terminal: null, FitAddon: { FitAddon: FakeFitAddon } };
       window.Terminal = class {
@@ -5349,6 +5358,10 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalFitAddon = null;
       let terminalHostResizeObserver = null;
       let terminalInputDisposable = null;
+      let terminalImeHold = null;
+      let terminalImeHoldFrame = null;
+      let terminalImeFitPending = false;
+      let terminalImeAnchorTextarea = null;
       let activeTerminalPreviewId = "sess-a";
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
@@ -5409,6 +5422,11 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       const clearTimeoutStub = (id) => { const i = pendingTimers.findIndex((t) => t.id === id); if (i >= 0) pendingTimers.splice(i, 1); };
       const setTimeout = setTimeoutStub;
       const clearTimeout = clearTimeoutStub;
+      function cancelAnimationFrame() {}
+      function terminalImeAnchorReady() { return false; }
+      function armTerminalImeAnchor() {}
+      function releaseTerminalImeAnchor() {}
+      function installTerminalImeAnchor() {}
       ${bodies}
       return {
         connect: connectTerminalStream, close: closeTerminalStream,
@@ -5581,6 +5599,140 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.ok(toggleAt > 0, "inspector 开关接线在位");
     const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalClearBtn").onclick'));
     assert.ok(toggleBody.includes("scheduleTerminalFit()"), "inspector 收放即调度一次尺寸适配（±292px 不经 window resize）");
+  });
+});
+
+// 输入法候选框抽搐：组字期间隐藏输入框被光标重绘、回显和尺寸自适应反复搬走。
+// 组字开始后锚点钉在落位时的位置；还停在屏幕外时不钉；组字结束才放开。
+// 尺寸自适应在组字期间先记下，结束后再补一次。
+describe("虚拟终端组字期间输入法锚点不动", () => {
+  function imeAnchorSandbox() {
+    const bodies = ["terminalImeAnchorReady", "syncTerminalImeAnchor", "armTerminalImeAnchor", "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const textarea = {
+      isConnected: true,
+      style: { left: "", top: "", width: "", height: "", lineHeight: "" },
+      dataset: {},
+      listeners: {},
+      addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
+      dispatch(type) { for (const fn of this.listeners[type] || []) fn(); },
+    };
+    const term = { element: { querySelector: (sel) => (sel === ".xterm-helper-textarea" ? textarea : null) } };
+    const frames = [];
+    let frameSeq = 0;
+    const api = new Function("textarea", "term", `
+      let terminalImeHold = null;
+      let terminalImeHoldFrame = null;
+      let terminalImeFitPending = false;
+      let terminalImeAnchorTextarea = null;
+      const frames = [];
+      let frameSeq = 0;
+      function requestAnimationFrame(cb) { const id = ++frameSeq; frames.push({ id, cb }); return id; }
+      function cancelAnimationFrame(id) { const i = frames.findIndex((f) => f.id === id); if (i >= 0) frames.splice(i, 1); }
+      ${bodies}
+      return {
+        install: () => installTerminalImeAnchor(term),
+        flushFrame: () => { const frame = frames.shift(); if (frame) frame.cb(); },
+        queuedFrames: () => frames.length,
+      };
+    `)(textarea, term);
+    return { api, textarea, term, frames };
+  }
+
+  it("组字期间锚点停在落位处，屏幕外的停靠位不钉，结束后才跟着光标走", () => {
+    const { api, textarea } = imeAnchorSandbox();
+    api.install();
+    textarea.style.left = "-9999em";
+    textarea.style.top = "0px";
+    textarea.style.width = "0px";
+    textarea.style.height = "0px";
+    textarea.dispatch("compositionstart");
+    api.flushFrame();
+    textarea.style.left = "48px";
+    textarea.style.top = "64px";
+    textarea.style.width = "16px";
+    textarea.style.height = "18px";
+    textarea.style.lineHeight = "18px";
+    api.flushFrame();
+    textarea.style.left = "900px";
+    textarea.style.top = "2px";
+    textarea.style.width = "320px";
+    textarea.style.height = "40px";
+    textarea.style.lineHeight = "40px";
+    api.flushFrame();
+    assert.equal(textarea.style.left, "48px", "重绘把锚点甩走后，下一帧拉回组字落位");
+    assert.equal(textarea.style.top, "64px");
+    assert.equal(textarea.style.width, "16px", "拼音变长不再把锚点撑宽");
+    assert.equal(textarea.style.height, "18px");
+    assert.equal(textarea.style.lineHeight, "18px");
+    textarea.style.left = "-9999em";
+    api.flushFrame();
+    assert.equal(textarea.style.left, "48px", "光标闪烁不会把锚点送回屏幕外");
+    textarea.dispatch("compositionend");
+    textarea.style.left = "80px";
+    textarea.style.top = "96px";
+    api.flushFrame();
+    assert.equal(textarea.style.left, "80px", "组字结束后锚点回到光标，不再被旧位置拽回");
+    assert.equal(textarea.style.top, "96px");
+    assert.equal(api.queuedFrames(), 0, "组字结束后不再逐帧改锚点");
+    textarea.style.left = "80px";
+    textarea.style.top = "96px";
+    textarea.style.width = "16px";
+    textarea.style.height = "18px";
+    textarea.style.lineHeight = "18px";
+    textarea.dispatch("compositionstart");
+    api.flushFrame();
+    textarea.style.left = "10px";
+    api.flushFrame();
+    assert.equal(textarea.style.left, "80px", "下一次组字钉在新的光标上");
+  });
+
+  it("组字期间尺寸变化先不缩放，组字结束后补一次", () => {
+    const fitSrc = panelJs.match(/function fitTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const releaseSrc = panelJs.match(/function releaseTerminalImeAnchor\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(fitSrc && releaseSrc);
+    const state = { fits: 0 };
+    const api = new Function("state", `
+      let terminalImeHold = null;
+      let terminalImeHoldFrame = null;
+      let terminalImeFitPending = false;
+      const terminalFitAddon = { fit() { state.fits += 1; } };
+      const terminalXterm = { cols: 80, rows: 24 };
+      const activeTerminalPreviewId = "sess-a";
+      const $ = () => ({ hidden: false });
+      function terminalSessionFor() { return null; }
+      function postTerminalResize() {}
+      function cancelAnimationFrame() {}
+      ${fitSrc}
+      ${releaseSrc}
+      return {
+        fit: fitTerminalXterm,
+        hold: () => { terminalImeHold = { textarea: {} }; },
+        release: releaseTerminalImeAnchor,
+      };
+    `)(state);
+    api.fit();
+    assert.equal(state.fits, 1, "平时缩放照常");
+    api.hold();
+    api.fit();
+    api.fit();
+    assert.equal(state.fits, 1, "组字期间连续缩放都不立刻重排");
+    api.release();
+    assert.equal(state.fits, 2, "组字结束后把记下的缩放补一次");
+    api.fit();
+    assert.equal(state.fits, 3, "放开后缩放恢复即时");
+  });
+
+  it("隐藏输入框仍留在画面上：字和光标看不见，框本身不透明", () => {
+    assert.match(panelCss, /\.terminal-xterm-host \.xterm-helper-textarea\s*\{[^}]*opacity:\s*1;/, "焦点框不再完全透明");
+    const rule = panelCss.match(/\.terminal-xterm-host \.xterm-helper-textarea\s*\{[^}]*\}/)?.[0];
+    assert.ok(rule?.includes("color: transparent"), "框里的字看不见");
+    assert.ok(rule?.includes("caret-color: transparent"), "框里的光标看不见");
+    assert.ok(rule?.includes("background: transparent"), "框底不盖住终端");
   });
 });
 
