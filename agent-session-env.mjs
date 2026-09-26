@@ -11,10 +11,10 @@
 // with their source cited (the launchers do not export them):
 //   - withStoreSmallFastDefault (launcher.mjs:309-330) — the store-derived
 //     small-fast (classifier) wire id for Claude;
-//   - the buildInstanceId scheme (each launcher) — the launcher pid is replaced
-//     by a per-session random tag: the session's shell pid only exists after
-//     terminal-host spawns it, and two terminals opened from one panel process
-//     must land in different instance buckets.
+//   - the buildInstanceId scheme (each launcher), and only for the two clients
+//     that cannot do without it (see TERMINAL_INSTANCE_ID_FROM_SOCKET): the
+//     session's shell pid does not exist yet at assembly time, so the launcher
+//     pid in that scheme becomes a per-session random tag.
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
@@ -97,13 +97,36 @@ function withStoreSmallFastDefault(base) {
   return base;
 }
 
+// 终端一键启动不再自造实例标签的端点。这些客户端不带 x-agent-instance 时，
+// relay 用 netstat 反查连接属主合成规范的 "<agentId>-<pid>"（兜底白名单见
+// late-socket-instance.mjs），而那才是实例行唯一能对上进程扫描的身份：折叠
+// 只认数字尾巴（agent-metrics.mjs normalizeInstanceId），随机标签折不进去，
+// 于是同一次会话被拆成两行——进程扫描的占位行带着面徽标却是零计数，流量行
+// 带着全部计数却读不出面；终端页的监测区、最近请求与「生成中」灯按占位行的
+// id 取数，一并落在空的那行上。这三家的托管配置都写明「无该环境变量即省略
+// 该头」，所以省掉标签就等于用户在终端里自己敲这条命令的既有形态。
+// pi 不在列：models.json 里的 ${ANYSWITCH_INSTANCE_ID} 占位符缺变量会在启动时
+// 抛错（pi-launcher.mjs 头注）。codex 不在列：它的实例身份正源是
+// prompt_cache_key 的会话 id（GUI 多会话复用一个引擎进程，进程粒度根本不成立），
+// 标签只是该源缺失时的防撞车兜底，且 codex 不出进程占位行、拆不出第二行。
+const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode"]);
+
 // Per-session instance id, same shape as each launcher's buildInstanceId
 // ("<cwd basename>-<launcher pid>"): the pid becomes a random per-session tag
-// because the shell pid does not exist yet at assembly time.
+// because the shell pid does not exist yet at assembly time. Only reached for
+// the two clients above — everyone else ships no tag at all.
 function terminalInstanceId(cwd, endpoint) {
   const base = basename(String(cwd || "")).replace(/[^A-Za-z0-9._:-]/g, "-");
   const tag = randomUUID().replace(/-/g, "").slice(0, 8);
   return `${base || endpoint}-t${tag}`.slice(0, INSTANCE_ID_MAX_LEN);
+}
+
+// 本会话要注入的实例标签：调用方显式给的算（测试与将来的显式身份用），否则
+// 按端点决定要不要现造一个随机标签，不要就返回 null——下游每个 build*Env 都
+// 把 null 读成「这条头不发」。
+function sessionInstanceId(agentId, cwd, instanceId) {
+  if (instanceId !== null) return instanceId;
+  return TERMINAL_INSTANCE_ID_FROM_SOCKET.has(agentId) ? null : terminalInstanceId(cwd, agentId);
 }
 
 const EXECUTABLE_RESOLVERS = {
@@ -140,7 +163,7 @@ function resolveAgentExecutable(agentId, base) {
 // ANTHROPIC_API_KEY, XAI's pair) are kept out of the PTY.
 export function buildAgentSessionEnv({ agentId, port = AGENT_RELAY_PORT, token, base = {}, instanceId = null }) {
   const target = requireTarget(agentId);
-  const instance = instanceId ?? terminalInstanceId(base.cwd ?? process.cwd(), agentId);
+  const instance = sessionInstanceId(agentId, base.cwd ?? process.cwd(), instanceId);
   const env = buildTargetEnv(agentId, { port, token, base, instanceId: instance });
   for (const key of target.unset) env[key] = null;
   return env;
@@ -189,7 +212,7 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
   if (!directory) throw agentError("请先填写工作目录", "invalid_cwd");
   if (!existsSync(directory)) throw agentError("工作目录不存在，请检查后重试", "invalid_cwd");
   const executable = resolveAgentExecutable(agentId, base);
-  const instance = instanceId ?? terminalInstanceId(directory, agentId);
+  const instance = sessionInstanceId(agentId, directory, instanceId);
   return {
     label: target.name,
     shell: "cmd",

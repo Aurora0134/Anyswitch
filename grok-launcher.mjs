@@ -93,7 +93,11 @@ export function buildInstanceId({ cwd = process.cwd(), pid = process.pid, endpoi
 // socket-owner fallback). NO_PROXY keeps relay traffic on loopback.
 export function buildGrokLauncherEnv({ instanceId = buildInstanceId(), base = {} }) {
   const env = { ...base };
-  env.ANYSWITCH_INSTANCE_ID = instanceId;
+  // Guarded rather than assigned blindly: an explicit null means "this client
+  // ships no instance tag" (the virtual-terminal launch for endpoints the relay
+  // identifies by socket owner), and a null reaching child_process.spawn would
+  // be stringified into a bucket literally named "null".
+  if (instanceId) env.ANYSWITCH_INSTANCE_ID = instanceId;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
   // Strip the real upstream credentials so grok's built-in xAI path cannot
