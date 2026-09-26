@@ -2,9 +2,40 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createPanelRouter } from "./panel.mjs";
+import { executeClientUpdate } from "./client-update-journal.mjs";
+import { compareVersions } from "./version-check.mjs";
+
+// 面板只负责登记并拉起。测试里的「安装进程」就在本进程里把登记跑完，
+// 这样结果断言仍看得到，又不会让面板自己去跑安装。
+function driveWorker(services, lifecycle) {
+  return ({ runId, journalDir }) => {
+    void executeClientUpdate({
+      runId,
+      journalDir,
+      runLifecycle: lifecycle,
+      environment: services.environmentService,
+      releases: services.releaseService,
+      compareVersions,
+      // 测试里的「安装进程」与面板是同一个进程。收尾时若按真实进程号判活，
+      // 会把刚写完的结果当成面板自己的，这里固定视为安装进程还在。
+      alive: () => true,
+    });
+    return process.pid;
+  };
+}
 
 async function withPanel(options, run) {
+  const journalDir = options.clientUpdateJournalDir ?? mkdtempSync(join(tmpdir(), "anys-client-update-"));
+  const ownsJournal = !options.clientUpdateJournalDir;
+  options = {
+    ...options,
+    clientUpdateJournalDir: journalDir,
+    spawnClientUpdateWorkerFn: options.spawnClientUpdateWorkerFn ?? (() => process.pid),
+  };
   const forbidden = () => { throw new Error("unexpected production operation"); };
   const router = createPanelRouter({
     storePaths: { root: "C:/unused-about-test" },
@@ -53,6 +84,7 @@ async function withPanel(options, run) {
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    if (ownsJournal) rmSync(journalDir, { recursive: true, force: true });
   }
 }
 
@@ -219,7 +251,7 @@ test("客户端更新接口沿用面板写闸门，缺写头直接拒绝", async
 
 test("客户端更新只接受可代管客户端与合法动作，非法请求不触发任何安装", async () => {
   let spawned = 0;
-  await withPanel({ runClientLifecycleFn: async () => { spawned += 1; return { ok: true, output: "" }; } }, async (get, post) => {
+  await withPanel({ spawnClientUpdateWorkerFn: () => { spawned += 1; return process.pid; } }, async (get, post) => {
     assert.equal((await post("/panel/api/environment/update", { id: "zcode", action: "update" })).status, 404, "桌面应用不经面板更新");
     assert.equal((await post("/panel/api/environment/update", { id: "qoder", action: "install" })).status, 404);
     assert.equal((await post("/panel/api/environment/update", { id: "not-a-client", action: "update" })).status, 404);
@@ -233,10 +265,13 @@ test("客户端更新只接受可代管客户端与合法动作，非法请求�
 
 test("客户端更新按客户端分锁：同一客户端任务进行中再来的请求被 409 拒绝，不同客户端并行放行", async () => {
   const gate = deferred();
-  await withPanel({
+  const services = {
     environmentService: { async getState() { return clientState(); } },
     releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
-    runClientLifecycleFn: async () => { await gate.promise; return { ok: true, output: "" }; },
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async () => { await gate.promise; return { ok: true, output: "" }; }),
   }, async (get, post) => {
     const first = await post("/panel/api/environment/update", { id: "claude", action: "update" });
     assert.equal(first.status, 202);
@@ -265,10 +300,18 @@ test("一个客户端跑完不会解锁另一个客户端正在进行的任务",
   const slow = deferred();
   const gates = { claude: fast, codex: slow };
   const started = [];
-  await withPanel({
+  const services = {
     environmentService: { async getState() { return clientState(); } },
     releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
-    runClientLifecycleFn: async ({ id }) => { started.push(id); await gates[id].promise; return { ok: true, output: "" }; },
+  };
+  const order = ["claude", "codex", "codex"];
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: (request) => {
+      const id = order[started.length];
+      started.push(id);
+      return driveWorker(services, async () => { await gates[id].promise; return { ok: true, output: "" }; })(request);
+    },
   }, async (get, post) => {
     const claude = await post("/panel/api/environment/update", { id: "claude", action: "update" });
     const codex = await post("/panel/api/environment/update", { id: "codex", action: "update" });
@@ -289,7 +332,7 @@ test("一个客户端跑完不会解锁另一个客户端正在进行的任务",
 
 test("更新完成后回传新本地版本、官方最新与比对结论", async () => {
   const probes = [];
-  await withPanel({
+  const services = {
     environmentService: {
       async getState(options = {}) {
         probes.push(Boolean(options.force));
@@ -299,14 +342,17 @@ test("更新完成后回传新本地版本、官方最新与比对结论", async
     releaseService: {
       async getClientLatest(id, options) {
         assert.equal(id, "claude");
-        assert.deepEqual(options, { force: true });
+        if (options) assert.deepEqual(options, { force: true });
         return latestFor("1.1.0");
       },
     },
-    runClientLifecycleFn: async ({ id, action }) => {
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async ({ id, action }) => {
       assert.deepEqual({ id, action }, { id: "claude", action: "update" });
       return { ok: true, output: "" };
-    },
+    }),
   }, async (get, post) => {
     const started = await post("/panel/api/environment/update", { id: "claude", action: "update" });
     const finished = await waitForRun(get, started.body.runId);
@@ -314,15 +360,18 @@ test("更新完成后回传新本地版本、官方最新与比对结论", async
     assert.equal(finished.body.latestVersion, "1.1.0");
     assert.equal(finished.body.comparison, "current");
     assert.match(finished.body.message, /1\.1\.0/);
-    assert.deepEqual(probes.slice(0, 2), [false, true], "安装后重查本地版本必须绕过 TTL 缓存");
+    assert.deepEqual(probes, [false, true], "动手前读一次本地版本，装完必须绕过缓存再读");
   });
 });
 
 test("命令成功但版本原地踏步归为未生效，不误报成功", async () => {
-  await withPanel({
+  const services = {
     environmentService: { async getState() { return clientState({ claude: "1.0.0" }); } },
     releaseService: { async getClientLatest() { return latestFor("2.0.0"); } },
-    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async () => ({ ok: true, output: "" })),
   }, async (get, post) => {
     const started = await post("/panel/api/environment/update", { id: "claude", action: "update" });
     const finished = await waitForRun(get, started.body.runId);
@@ -333,10 +382,13 @@ test("命令成功但版本原地踏步归为未生效，不误报成功", async
 });
 
 test("更新命令失败带出末行错误，不谎报成功", async () => {
-  await withPanel({
+  const services = {
     environmentService: { async getState() { return clientState(); } },
     releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
-    runClientLifecycleFn: async () => ({ ok: false, output: "npm warn deprecated x\nnpm error code EACCES\nnpm error path C:\\npm" }),
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async () => ({ ok: false, output: "npm warn deprecated x\nnpm error code EACCES\nnpm error path C:\\npm" })),
   }, async (get, post) => {
     const started = await post("/panel/api/environment/update", { id: "kimi", action: "update" });
     const finished = await waitForRun(get, started.body.runId);
@@ -346,14 +398,17 @@ test("更新命令失败带出末行错误，不谎报成功", async () => {
 });
 
 test("装上了却跑不起来给出运行环境提示，而非报成安装成功", async () => {
-  await withPanel({
+  const services = {
     environmentService: {
       async getState(options = {}) {
         return options.force ? clientState({ codex: null }, { codex: "not_runnable" }) : clientState({ codex: "1.0.0" });
       },
     },
     releaseService: { async getClientLatest() { return latestFor("1.0.0"); } },
-    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async () => ({ ok: true, output: "" })),
   }, async (get, post) => {
     const started = await post("/panel/api/environment/update", { id: "codex", action: "update" });
     const finished = await waitForRun(get, started.body.runId);
@@ -367,7 +422,6 @@ test("未安装的 grok 不给安装动作，更新动作仍然受理", async ()
   await withPanel({
     environmentService: { async getState() { return clientState({ grok: null }); } },
     releaseService: { async getClientLatest() { return latestFor("1.0.41"); } },
-    runClientLifecycleFn: async () => ({ ok: true, output: "" }),
   }, async (get, post) => {
     assert.equal((await post("/panel/api/environment/update", { id: "grok", action: "install" })).status, 400,
       "首装会把用户切进另一种安装形态，不由面板代劳");
@@ -377,7 +431,7 @@ test("未安装的 grok 不给安装动作，更新动作仍然受理", async ()
 
 test("grok 更新前先把官方最新版本取来钉住兜底安装，执行体路径用检测到的那份", async () => {
   const requested = [];
-  await withPanel({
+  const services = {
     environmentService: {
       async getState(options = {}) {
         return clientState({ grok: options.force ? "1.0.41" : "1.0.30" });
@@ -389,12 +443,15 @@ test("grok 更新前先把官方最新版本取来钉住兜底安装，执行体
         return latestFor(id === "grok" ? "1.0.41" : "1.0.0");
       },
     },
-    runClientLifecycleFn: async ({ id, action, commandPath, targetVersion }) => {
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async ({ id, action, commandPath, targetVersion }) => {
       assert.deepEqual({ id, action }, { id: "grok", action: "update" });
       assert.equal(commandPath, "C:/fixture/grok", "执行体路径来自本地检测，请求体换不掉它");
       assert.equal(targetVersion, "1.0.41", "降级安装要钉住查到的官方版本，不能跟 dist-tag");
       return { ok: true, output: "" };
-    },
+    }),
   }, async (get, post) => {
     const started = await post("/panel/api/environment/update", { id: "grok", action: "update" });
     const finished = await waitForRun(get, started.body.runId);
@@ -402,6 +459,47 @@ test("grok 更新前先把官方最新版本取来钉住兜底安装，执行体
     assert.match(finished.body.message, /1\.0\.41/);
     assert.deepEqual(requested.slice(0, 1), [{ id: "grok", force: false }], "动手前先查一次官方版本，走缓存不打扰远端");
   });
+});
+
+test("面板进程退出后，进行中的更新仍可查询，且同一客户端不能再开一次", async () => {
+  const journalDir = mkdtempSync(join(tmpdir(), "anys-client-update-"));
+  const spawned = [];
+  const options = {
+    clientUpdateJournalDir: journalDir,
+    environmentService: { async getState() { return clientState(); } },
+    releaseService: { async getClientLatest() { return latestFor("1.1.0"); } },
+    // 安装必须离开面板进程。测试里的面板进程若自己去跑，就是还没修。
+    runClientLifecycleFn: async () => { throw new Error("update must not run inside the panel process"); },
+    spawnClientUpdateWorkerFn: () => { spawned.push("claude"); return process.pid; },
+  };
+  try {
+    let runId;
+    await withPanel(options, async (get, post) => {
+      const started = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+      assert.equal(started.status, 202);
+      runId = started.body.runId;
+      const live = await get(`/panel/api/environment/update/${runId}`);
+      assert.equal(live.status, 200);
+      assert.equal(live.body.state, "running");
+      assert.equal(live.body.clientId, "claude");
+    });
+    // 上一座面板已经关掉：内存里的任务登记不复存在。新面板只能看见留下来的那一份。
+    await withPanel(options, async (get, post) => {
+      const resumed = await get(`/panel/api/environment/update/${runId}`);
+      assert.equal(resumed.status, 200);
+      assert.equal(resumed.body.state, "running");
+      assert.equal(resumed.body.clientId, "claude");
+      const again = await post("/panel/api/environment/update", { id: "claude", action: "update" });
+      assert.equal(again.status, 409, "同一个客户端的安装还在跑，不能再开一次");
+      assert.equal(again.body.error, "busy");
+      const active = await get("/panel/api/environment/updates/active");
+      assert.equal(active.status, 200);
+      assert.deepEqual(active.body.runs.map((run) => run.clientId), ["claude"]);
+    });
+    assert.equal(spawned.length, 1, "第二次请求没有再起一个安装");
+  } finally {
+    rmSync(journalDir, { recursive: true, force: true });
+  }
 });
 
 test("未知运行编号返回 404，页面可据此走重新检测自愈", async () => {
