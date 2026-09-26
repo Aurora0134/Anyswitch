@@ -81,17 +81,20 @@ try {
   // restoreView 逐条对齐，两边不一致就会出现「首帧一屏、落定后另一屏」的新闪烁：
   // ① launcher 首开固定落看板——直接消费 panelStartupBootstrap 算好的
   //    panelStartupLaunch，连它那句 navigation.type 判定一起继承，不重复实现；
-  // ② 停设置页由 panel-settings-open 决定，它优先于 panel-view（那份留作「←退出」
+  // ② 停在终端页由 panel-terminal-open 决定，它优先于设置页与主视图（终端页是从
+  //    设置页切出去的全页视图，首帧该露的就是终端页本身）；
+  // ③ 停设置页由 panel-settings-open 决定，它优先于 panel-view（那份留作「←退出」
   //    的目标，不是首帧该露的屏）；
-  // ③ 主视图取 panel-view，值为 "board"/缺失/不在册时看板就是 HTML 默认态，不写属性。
+  // ④ 主视图取 panel-view，值为 "board"/缺失/不在册时看板就是 HTML 默认态，不写属性。
   if (window.panelStartupLaunch) return;
-  const VIEW_NAMES = ["skills", "presets", "store", "stats", "sessions", "settings"];
+  const VIEW_NAMES = ["skills", "presets", "store", "stats", "sessions", "settings", "terminal"];
   const SUB_TAB_NAMES = ["general", "advanced", "route", "theme", "about", "experimental"];
   let view = null;
   let subTab = null;
   try {
     view = localStorage.getItem("panel-view");
     if (localStorage.getItem("panel-settings-open") === "1") view = "settings";
+    if (localStorage.getItem("panel-terminal-open") === "1") view = "terminal";
     subTab = localStorage.getItem("panel-settings-subtab");
   } catch (e) {
     return; // localStorage 不可用：与 restoreView 同样落看板默认态

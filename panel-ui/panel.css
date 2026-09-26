@@ -3920,7 +3920,7 @@
      显示侧取值 = 各容器自己的 display，一处都不能凭印象：.stats-view /
      .sessions-view / #settingsPanel{General,Advanced,Route,About} / .site-head .head-inner
      是 flex，其余在册容器（.telemetry-view / .settings-view / .skills-view 含
-     store·presets / #settingsPanelTheme）无作者 display 规则即 block。
+     store·presets / .terminal-view / #settingsPanelTheme）无作者 display 规则即 block。
      panel.test.mjs 把每条取值与对应规则逐字比对，改样式要连断言一起改。
      全局 [hidden]{display:none !important} 压住「把带 hidden 的容器显示出来」，
      故带 [hidden] 的显示侧规则用 !important：选择器含 ID，特异性已高于那条单属性
@@ -3934,6 +3934,24 @@
   html[data-prepaint-view="stats"] #statsView[hidden],
   html[data-prepaint-view="sessions"] #sessionsView[hidden],
   html[data-prepaint-view="settings"] #settingsHeadInner[hidden] { display: flex !important; }
+  /* 终端页（停在终端页时刷新 / 面板服务重启后跳回来）：主头行让位、整页形态先立住。
+     body.terminal-mode 那四条要等 switchView 挂上类才生效，首帧没有类，按同一属性
+     前缀重述一遍——漏一条就是「首帧带站点头与页脚、落定后整屏跳一次」。 */
+  html[data-prepaint-view="terminal"] #mainHeadInner { display: none; }
+  html[data-prepaint-view="terminal"] #terminalView[hidden] { display: block !important; }
+  html[data-prepaint-view="terminal"] body { overflow: hidden; }
+  html[data-prepaint-view="terminal"] body header.site-head { display: none; }
+  html[data-prepaint-view="terminal"] body > footer { display: none; }
+  html[data-prepaint-view="terminal"] body main.layout-container { max-width: none; padding: 0; margin: 0; }
+  /* 监测区首帧就退场，工作区必须同帧收成单列：CSS Grid 的轨道按模板排，藏掉子项
+     只会留下一条 340px 的背景缝——那一帧的空白列与随后 is-empty 收全宽的主区，
+     等于让终端屏宽跳一次、PTY 跟着重排一次。取值抄 .terminal-workspace.is-empty。 */
+  html[data-prepaint-view="terminal"] .terminal-workspace { grid-template-columns: minmax(0, 1fr); }
+  /* 终端页的会话级静态种子（设计稿遗留：假页签 payment-service / 假会话栏 / 假底栏
+     两段 / 假监测区）首帧一律不露，等 JS 的 renderTerminalPendingState 接手同一套退场。
+     「+」在页签栏里，随容器留着，只收假页签本身。 */
+  html[data-prepaint-view="terminal"] .terminal-tabs .terminal-tab { display: none; }
+  html[data-prepaint-view="terminal"] :is(.terminal-session-bar, .terminal-foot-status, .terminal-foot-stats, #terminalInspector) { display: none; }
   /* 设置子 tab：先按标记整体收起，再放出归档那一个——顺序敏感，「通用」不带 hidden，
      收起与放出同特异，靠下面那条在后胜出。 */
   html[data-prepaint-view="settings"][data-prepaint-subtab]
