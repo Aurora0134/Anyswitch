@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, PARENT_WATCHDOG_INTERVAL_MS } from "./terminal-host.mjs";
 
@@ -17,6 +17,22 @@ class FakePty {
   write(data) { this.dataListener?.(`echo:${data}`); }
   resize(cols, rows) { this.cols = cols; this.rows = rows; }
   kill() { this.exitListener?.({ exitCode: 0 }); }
+}
+
+// Captures every spawn (file/args/options) the host makes, so a test can assert
+// the cmd wrapper and the merged environment without a real PTY.
+function capturingPtyModule() {
+  const calls = [];
+  return {
+    calls,
+    ptyModule: {
+      spawn: (file, args, options) => {
+        const pty = new FakePty();
+        calls.push({ file, args, options, pty });
+        return pty;
+      },
+    },
+  };
 }
 
 function headers(host) {
@@ -244,4 +260,198 @@ test("watchParentProcess without a parent pid leaves behavior untouched", () => 
   assert.equal(watchParentProcess({ parentPid: 0, setIntervalFn, onDead: () => {} }), null);
   assert.equal(watchParentProcess({ parentPid: -5, setIntervalFn, onDead: () => {} }), null);
   assert.equal(scheduled, 0, "no parent pid, no poller — manual runs behave exactly as before");
+});
+
+// One-click CLI Agent launch: POST /terminal/sessions accepts an optional
+// launch (the cmd /c wrapper around the agent executable) plus an env delta of
+// Anyswitch credentials. The wrapper is load-bearing for attribution: under
+// ConPTY a directly-spawned agent's parent is conhost, which is NOT in
+// agent-metrics' process scan list, so monitoring/metrics/recent requests
+// would all lose the session — session.pid must be a cmd.exe (on the list).
+test("agent launch：cmd 包装 spawn、注入值覆盖继承值、真键标删、会话身份变量在最后", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+
+  // A hostile inherited environment: a real upstream key and a corporate proxy
+  // that relay traffic must never ride. Restored no matter how the test ends.
+  const savedAnthropicKey = process.env.ANTHROPIC_API_KEY;
+  const savedNoProxy = process.env.NO_PROXY;
+  process.env.ANTHROPIC_API_KEY = "leaked-real-key";
+  process.env.NO_PROXY = "http://corp-proxy:8080";
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "Kimi Code",
+        cwd: root,
+        shell: "cmd",
+        cols: 120,
+        rows: 34,
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+        env: {
+          ANTHROPIC_BASE_URL: "http://127.0.0.1:47821",
+          ANTHROPIC_AUTH_TOKEN: "relay-token-xyz",
+          ANTHROPIC_API_KEY: null,
+          NO_PROXY: "127.0.0.1,localhost",
+        },
+        agentId: "kimi",
+        agentName: "Kimi Code",
+      }),
+    });
+    assert.equal(created.status, 201);
+    const snapshot = await created.json();
+
+    assert.equal(calls.length, 1, "创建即 spawn");
+    const spawn_ = calls[0];
+    assert.equal(spawn_.file, process.env.ComSpec, "经 cmd 启动：session.pid 落在扫描名单内，归属不断");
+    assert.deepEqual(spawn_.args, ["/d", "/c", "C:\\fake\\kimi.cmd"], "命令行只有可执行路径，无凭证");
+    assert.equal(spawn_.options.env.ANTHROPIC_AUTH_TOKEN, "relay-token-xyz", "注入值覆盖同名继承值");
+    assert.equal(spawn_.options.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:47821");
+    assert.equal(spawn_.options.env.NO_PROXY, "127.0.0.1,localhost", "回环不走公司代理");
+    assert.equal(spawn_.options.env.ANTHROPIC_API_KEY, undefined, "null 标删：上游真键不进 PTY");
+    assert.equal(spawn_.options.env.TERM, "xterm-256color");
+    assert.equal(spawn_.options.env.ANYSWITCH_TERMINAL_SESSION, snapshot.id);
+    assert.equal(spawn_.options.cwd, root);
+
+    assert.equal(snapshot.agentId, "kimi");
+    assert.equal(snapshot.agentName, "Kimi Code");
+    assert.deepEqual(snapshot.launch, { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] });
+    assert.equal("env" in snapshot, false, "快照不回显 env");
+
+    // 密不上盘：落盘状态文件既无 env 键，也不含令牌明文。
+    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
+    assert.equal(persisted.sessions.length, 1);
+    assert.equal("env" in persisted.sessions[0], false, "env 绝不落盘");
+    assert.equal(persisted.sessions[0].agentId, "kimi");
+    assert.equal(persisted.sessions[0].agentName, "Kimi Code");
+    assert.ok(persisted.sessions[0].launch, "非密 launch 元数据随会话落盘");
+    const raw = readFileSync(host.statePath, "utf8");
+    assert.ok(!raw.includes("relay-token-xyz"), "落盘文件不含令牌明文");
+    assert.ok(!raw.includes("leaked-real-key"), "落盘文件不含被删掉的上游真键");
+  } finally {
+    if (savedAnthropicKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedAnthropicKey;
+    if (savedNoProxy === undefined) delete process.env.NO_PROXY;
+    else process.env.NO_PROXY = savedNoProxy;
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restore 后快照带 agentId/agentName/launch，且不自动重新 spawn", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const first = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+    method: "POST",
+    headers: headers(host),
+    body: JSON.stringify({
+      label: "Claude Code", cwd: root, shell: "cmd",
+      launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\claude.exe"] },
+      env: { ANTHROPIC_AUTH_TOKEN: "relay-token-xyz" },
+      agentId: "claude", agentName: "Claude Code",
+    }),
+  });
+  await host.close();
+
+  const second = capturingPtyModule();
+  const restored = createTerminalHost({ root, port: 0, ptyModule: second.ptyModule, logger: { warn() {} } });
+  const restoredPort = await listen(restored);
+  try {
+    assert.equal(second.calls.length, 0, "restore 只还原元数据，不代跑 spawn");
+    const listed = await fetch(`http://127.0.0.1:${restoredPort}/terminal/sessions`, { headers: headers(restored) }).then((r) => r.json());
+    assert.equal(listed.sessions.length, 1);
+    assert.equal(listed.sessions[0].agentId, "claude");
+    assert.equal(listed.sessions[0].agentName, "Claude Code");
+    assert.deepEqual(listed.sessions[0].launch, { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\claude.exe"] });
+    assert.equal(listed.sessions[0].status, "exited");
+    assert.equal("env" in listed.sessions[0], false);
+  } finally {
+    await restored.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart 接受可选 env 合并后再 spawn，响应不回显", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "Kimi Code", cwd: root, shell: "cmd",
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+        env: { ANTHROPIC_AUTH_TOKEN: "relay-token-old", ANTHROPIC_API_KEY: null },
+        agentId: "kimi", agentName: "Kimi Code",
+      }),
+    }).then((r) => r.json());
+
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: "relay-token-new", EXTRA_FLAG: "1" } }),
+    });
+    assert.equal(restarted.status, 200);
+    assert.equal(calls.length, 2, "restart 重新 spawn");
+    const env = calls[1].options.env;
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, "relay-token-new", "新注入覆盖旧值");
+    assert.equal(env.EXTRA_FLAG, "1", "合并进新键");
+    assert.equal(env.ANTHROPIC_API_KEY, undefined, "上一轮的 null 标删在合并后依然生效");
+    assert.equal(env.ANYSWITCH_TERMINAL_SESSION, created.id);
+    const body = await restarted.json();
+    assert.equal("env" in body, false, "restart 响应同样不回显 env");
+
+    // 不带 body 的 restart 保持原 env（旧调用方不受影响）。
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) });
+    assert.equal(calls[2].options.env.ANTHROPIC_AUTH_TOKEN, "relay-token-new", "无 body 时沿用会话内 env");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("launch/env 输入校验：畸形一律 400，cwd 缺失不静默回落", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const post = (body) => fetch(url("/terminal/sessions"), {
+    method: "POST", headers: headers(host), body: JSON.stringify(body),
+  });
+  try {
+    const cases = [
+      ["相对路径 file", { cwd: root, launch: { file: "cmd.exe", args: [] } }, "invalid_launch"],
+      ["args 非字符串", { cwd: root, launch: { file: process.env.ComSpec, args: [123] } }, "invalid_launch"],
+      ["args 超量", { cwd: root, launch: { file: process.env.ComSpec, args: new Array(65).fill("x") } }, "invalid_launch"],
+      ["env 嵌套值", { cwd: root, env: { A: { b: "c" } } }, "invalid_env"],
+      ["env 非法键名", { cwd: root, env: { "BAD KEY": "v" } }, "invalid_env"],
+      ["env 超长值", { cwd: root, env: { A: "x".repeat(32_001) } }, "invalid_env"],
+      ["launch 会话 cwd 不存在", { cwd: `${root}\\gone`, launch: { file: process.env.ComSpec, args: ["/d", "/c", "x"] } }, "invalid_cwd"],
+      ["launch 会话 cwd 为空", { cwd: "  ", launch: { file: process.env.ComSpec, args: ["/d", "/c", "x"] } }, "invalid_cwd"],
+    ];
+    for (const [name, body, error] of cases) {
+      const response = await post(body);
+      assert.equal(response.status, 400, name);
+      assert.equal((await response.json()).error, error, name);
+    }
+    assert.equal(calls.length, 0, "畸形请求一个都不许 spawn");
+
+    // 普通外壳会话不受影响：cwd 不存在仍静默回落（既有行为）。
+    const plain = await post({ label: "新终端", cwd: `${root}\\gone`, shell: "powershell" });
+    assert.equal(plain.status, 201);
+    assert.equal(calls.length, 1);
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

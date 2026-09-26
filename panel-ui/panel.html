@@ -1904,6 +1904,19 @@ if (window.panelStartupController) panelStartupPlay();
             <button type="button" class="icon-btn terminal-add-btn" id="terminalAddBtn" title="新建终端" aria-label="新建终端">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
+            <div class="terminal-add-menu" id="terminalAddMenu" hidden>
+              <div class="terminal-add-menu-head">新建终端</div>
+              <div class="terminal-add-menu-list" id="terminalAddMenuList" role="radiogroup" aria-label="启动方式"></div>
+              <p class="terminal-add-menu-note" id="terminalAddMenuNote" hidden></p>
+              <label class="terminal-add-menu-field" for="terminalAddMenuCwd">
+                <span>工作目录</span>
+                <input type="text" id="terminalAddMenuCwd" value="D:\dev" spellcheck="false" autocomplete="off" />
+              </label>
+              <div class="terminal-add-menu-actions">
+                <button type="button" class="btn" id="terminalAddMenuCancel">取消</button>
+                <button type="button" class="btn btn-primary" id="terminalAddMenuConfirm">启动</button>
+              </div>
+            </div>
           </div>
 
           <div class="terminal-session-bar">
@@ -1927,6 +1940,11 @@ if (window.panelStartupController) panelStartupPlay();
 
           <div class="terminal-screen" id="terminalScreen" role="region" aria-label="终端输出">
             <div class="terminal-xterm-host" id="terminalXtermHost"></div>
+            <div class="terminal-unavailable" id="terminalUnavailable" hidden>
+              <strong class="terminal-unavailable-title">终端服务未运行</strong>
+              <p class="terminal-unavailable-desc">终端服务随 relay 一同启动，relay 运行后即可使用。</p>
+              <button type="button" class="btn btn-accent" id="terminalRetryBtn">重新连接</button>
+            </div>
           </div>
           <div class="terminal-footbar">
             <span class="terminal-foot-status">

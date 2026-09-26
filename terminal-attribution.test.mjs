@@ -48,6 +48,36 @@ describe("attributeTerminalSessions", () => {
     assert.equal(out[0].agent.endpointId, "kimi", "distance 1 beats distance 2");
   });
 
+  it("binds a claude terminal via the sessions rows (claude ships no instances)", () => {
+    // The claude card only carries `sessions` ({ id: "claude-<pid>" }), never
+    // `instances` — the existence index must read both buckets or every
+    // claude attribution stays unbound.
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code", sessions: [{ id: "claude-4321" }] }],
+    );
+    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: "claude-4321" });
+  });
+
+  it("does not bind aggregate session rows (zcode-global and friends have no pid tail)", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "zcode", pid: 4321, ancestors: [8888] }],
+      [{ id: "zcode", name: "ZCode", sessions: [{ id: "zcode-global" }] }],
+    );
+    assert.deepEqual(out[0].agent, { endpointId: "zcode", name: "ZCode", pid: 4321, instanceId: null });
+  });
+
+  it("claude attribution stays unbound while the sessions bucket is absent", () => {
+    const out = attributeTerminalSessions(
+      [baseSession],
+      [{ agentId: "claude", pid: 4321, ancestors: [8888] }],
+      [{ id: "claude", name: "Claude Code" }],
+    );
+    assert.deepEqual(out[0].agent, { endpointId: "claude", name: "Claude Code", pid: 4321, instanceId: null });
+  });
+
   it("attributes before instance binding (codex has no placeholder rows pre-traffic)", () => {
     const out = attributeTerminalSessions(
       [baseSession],

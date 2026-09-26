@@ -33,6 +33,7 @@ import { createPromptsInjector } from "./agent-prompts-inject.mjs";
 import { createStoreService } from "./store-service.mjs";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
 import { attributeTerminalSessions, filterTerminalRequestRows } from "./terminal-attribution.mjs";
+import { AGENT_TERMINAL_TARGETS, AGENT_RELAY_PORT, buildAgentSessionLaunch } from "./agent-session-env.mjs";
 import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions } from "./session-scan.mjs";
@@ -350,6 +351,27 @@ async function defaultFetchTerminalSessionsList(root) {
   }
 }
 
+// One-click CLI Agent launch: the assembled launch + env delta go straight to
+// terminal-host as a session-create body. Injectable like the list fetch so
+// the router is unit-testable without a live host; the real one authorises with
+// the same pi-relay-token the proxy uses. Returns { status, body }, or null
+// when the host is unreachable (the caller answers 503).
+async function defaultCreateTerminalSession(body, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
 // Bridge the relay's logger (a separate process on 47821) into this panel
 // process's log bus. The 实时输出 window subscribes to the panel-host's own
 // logger, so after the panel/relay split relay-side entries (keep-alive
@@ -634,6 +656,7 @@ export function createPanelRouter({
    fetchRelayChainRuntime = defaultFetchRelayChainRuntime,
    fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
+   createTerminalSession = defaultCreateTerminalSession,
   // Agent-activity push bridge (startRelayActivityBridge): this process's
   // subscription to the relay's agents-activity SSE plus its latest-state
   // cache. Injectable so tests never touch 47821; `null` lazily builds the
@@ -793,6 +816,49 @@ export function createPanelRouter({
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
     const agents = await pulledAgentsForJoin(terminalPullToken());
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents) });
+  }
+
+  // 一键启动 CLI Agent：本路由只做组装与转发。launch（cmd /c 包装——归属链
+  // 的硬前提，见 agent-session-env.mjs）与 env（Anyswitch 凭证，只走环境变
+  // 量）在服务端拼好后交给 terminal-host 起 PTY；env 不落盘，也不经响应回
+  // 显。写 agent 配置文件、把密钥拼进行面的事一概不做。
+  async function handleTerminalAgentSessionCreate(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+    }
+    const agentId = typeof body?.agentId === "string" ? body.agentId.trim() : "";
+    if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, agentId)) {
+      return sendJson(res, 400, { ok: false, error: "请选择一个要启动的 CLI Agent" });
+    }
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
+    let launch;
+    try {
+      launch = buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base });
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: error.message });
+    }
+    let created = null;
+    try {
+      created = await createTerminalSession({
+        label: launch.label,
+        cwd: launch.cwd,
+        shell: "cmd",
+        cols: Math.max(2, Math.min(240, Number(body?.cols) || 120)),
+        rows: Math.max(1, Math.min(120, Number(body?.rows) || 34)),
+        launch: launch.launch,
+        env: launch.env,
+        agentId: launch.agentId,
+        agentName: launch.agentName,
+      }, { token });
+    } catch {
+      created = null;
+    }
+    if (!created) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
+    return sendJson(res, created.status || 201, created.body ?? {});
   }
 
   // Recent requests for one attributed terminal instance, read off today's
@@ -1770,6 +1836,7 @@ export function createPanelRouter({
         return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
       }
     }
+    if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);
     if (path.startsWith("/panel/api/terminal/sessions/")) {
       const suffix = path.slice("/panel/api/terminal/sessions/".length);
       if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });

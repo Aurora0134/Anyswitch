@@ -698,7 +698,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_claude_1", {
       pid: 4444,
-      sessionId: "sess_001",
       requests: 3,
       activeRequests: 1,
       // 15s of session busy time, of which only 5s was generation — the Claude
@@ -715,7 +714,7 @@ describe("createAgentMetricsCollector", () => {
     let claude = status.find((a) => a.id === "claude");
     assert.equal(claude.status, "running");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "sess_001");
+    assert.equal(claude.sessions[0].id, "claude-4444");
     assert.equal(claude.sessions[0].ttftColor, "yellow");
     // 300 tokens over the 5s generation window. Dividing by the 15s of busy
     // time instead reports 20 — first-token waits booked as generation time.
@@ -731,7 +730,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_claude_old", {
       pid: 4444,
-      sessionId: "sess_old",
       requests: 5,
       activeRequests: 0,
       activeDurationMs: 60000,
@@ -758,7 +756,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_claude_silent", {
       pid: 4444,
-      sessionId: "sess_silent",
       requests: 1,
       activeRequests: 1,
     });
@@ -795,7 +792,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("tok_A", {
       pid: 4444,
-      sessionId: "sess_A",
       requests: 3,
       activeRequests: 1,
       activeDurationMs: 15000,
@@ -806,7 +802,6 @@ describe("createAgentMetricsCollector", () => {
     mockTime = 12000;
     collector.reportSession("tok_B", {
       pid: 5555,
-      sessionId: "sess_B",
       requests: 5,
       activeRequests: 0,
       activeDurationMs: 8000,
@@ -817,10 +812,10 @@ describe("createAgentMetricsCollector", () => {
 
     const status = await collector.getAgentsStatus();
     const claude = status.find((a) => a.id === "claude");
-    // Only sess_A is generating → its model is the active capsule.
+    // Only pid 4444 is generating → its model is the active capsule.
     assert.deepEqual(claude.activeModels, ["anthropic/chan-a/qwen-max"]);
     assert.equal(claude.currentModel, "anthropic/chan-a/qwen-max");
-    // sess_B reported later → its model is the latest-seen "最近" fallback.
+    // pid 5555 reported later → its model is the latest-seen "最近" fallback.
     assert.equal(claude.lastModel, "anthropic/chan-b/glm-5.3");
   });
 
@@ -833,7 +828,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("tok_A", {
       pid: 4444,
-      sessionId: "sess_A",
       requests: 2,
       activeRequests: 1,
       activeDurationMs: 5000,
@@ -843,7 +837,6 @@ describe("createAgentMetricsCollector", () => {
     });
     collector.reportSession("tok_A", {
       pid: 4444,
-      sessionId: "sess_A",
       requests: 3,
       activeRequests: 0,
       activeDurationMs: 9000,
@@ -866,11 +859,11 @@ describe("createAgentMetricsCollector", () => {
 
     const collector = testCollector({ execFn: mockExec, nowFn });
     collector.reportSession("tok_A", {
-      pid: 4444, sessionId: "sess_A", requests: 3, activeRequests: 1,
+      pid: 4444, requests: 3, activeRequests: 1,
       model: "claude-opus-5", providerId: "chan-a", viaAuto: true,
     });
     collector.reportSession("tok_B", {
-      pid: 5555, sessionId: "sess_B", requests: 5, activeRequests: 2,
+      pid: 5555, requests: 5, activeRequests: 2,
       model: "qwen-max", providerId: "chan-b", viaAuto: false,
     });
 
@@ -892,7 +885,7 @@ describe("createAgentMetricsCollector", () => {
 
     // 自动路由请求刚发出、链上节点还没定下来。
     collector.reportSession("tok_A", {
-      pid: 4444, sessionId: "sess_A", requests: 1, activeRequests: 1, model: null, providerId: null, viaAuto: false,
+      pid: 4444, requests: 1, activeRequests: 1, model: null, providerId: null, viaAuto: false,
     });
     let claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
     assert.deepEqual(claude.activeModels, [], "节点没定下来就没有活跃模型，胶囊回落到最近/待命");
@@ -901,7 +894,7 @@ describe("createAgentMetricsCollector", () => {
 
     // 节点宣布 → 真实渠道/模型上屏。
     collector.reportSession("tok_A", {
-      pid: 4444, sessionId: "sess_A", requests: 1, activeRequests: 1,
+      pid: 4444, requests: 1, activeRequests: 1,
       model: "claude-opus-5", providerId: "chan-a", viaAuto: true,
     });
     claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
@@ -909,7 +902,7 @@ describe("createAgentMetricsCollector", () => {
 
     // 请求结束（快照回到无身份）→ 灰胶囊「最近」保留真实渠道/模型。
     collector.reportSession("tok_A", {
-      pid: 4444, sessionId: "sess_A", requests: 2, activeRequests: 0, model: null, providerId: null, viaAuto: false,
+      pid: 4444, requests: 2, activeRequests: 0, model: null, providerId: null, viaAuto: false,
     });
     claude = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
     assert.deepEqual(claude.activeTargets, []);
@@ -929,7 +922,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_claude_1", {
       pid: 4444,
-      sessionId: "sess_001",
       requests: 1,
       activeRequests: 0,
       activeDurationMs: 5000,
@@ -968,7 +960,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_A", {
       pid: 7777,
-      sessionId: "sess_A",
       requests: 5,
       activeRequests: 0,
       activeDurationMs: 10000,
@@ -981,7 +972,6 @@ describe("createAgentMetricsCollector", () => {
     // Same PID, different token — OS recycled the PID for a new Claude session
     collector.reportSession("token_B", {
       pid: 7777,
-      sessionId: "sess_B",
       requests: 1,
       activeRequests: 1,
       activeDurationMs: 1000,
@@ -994,7 +984,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "sess_B");
+    assert.equal(claude.sessions[0].id, "claude-7777");
     assert.equal(claude.sessions[0].requests, 1);
   });
 
@@ -1010,13 +1000,12 @@ describe("createAgentMetricsCollector", () => {
     let status = await collector.getAgentsStatus();
     let claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1, "placeholder session created by process scan");
-    assert.equal(claude.sessions[0].id, "pid-8888");
+    assert.equal(claude.sessions[0].id, "claude-8888");
     assert.equal(claude.sessions[0].requests, 0);
 
     // Now the real session report arrives with a real token — should replace the placeholder
     collector.reportSession("token_real", {
       pid: 8888,
-      sessionId: "sess_real",
       requests: 2,
       activeRequests: 1,
       activeDurationMs: 5000,
@@ -1030,7 +1019,7 @@ describe("createAgentMetricsCollector", () => {
     status = await collector.getAgentsStatus();
     claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1, "must not briefly show two sessions");
-    assert.equal(claude.sessions[0].id, "sess_real");
+    assert.equal(claude.sessions[0].id, "claude-8888");
     assert.equal(claude.sessions[0].requests, 2);
     assert.equal(claude.sessions[0].tokens.prompt, 300);
     assert.equal(claude.sessions[0].tokens.completion, 50);
@@ -1046,7 +1035,6 @@ describe("createAgentMetricsCollector", () => {
 
     collector.reportSession("token_claude_1", {
       pid: 4444,
-      sessionId: "sess_err",
       requests: 2,
       lastTtftMs: 1200,
       lastError: { status: 502, message: "Upstream Bad Gateway", time: 9500 },
@@ -1061,7 +1049,6 @@ describe("createAgentMetricsCollector", () => {
     // Cumulative snapshot semantics: the reporter's recovery overwrites state
     collector.reportSession("token_claude_1", {
       pid: 4444,
-      sessionId: "sess_err",
       requests: 3,
       lastTtftMs: 1300,
       lastError: { status: 502, message: "Upstream Bad Gateway", time: 9500 },
@@ -1079,7 +1066,6 @@ describe("createAgentMetricsCollector", () => {
     const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
 
     collector.reportSession("token_no_pid", {
-      sessionId: "sess_nopid",
       requests: 1,
     });
 
@@ -1106,7 +1092,6 @@ describe("createAgentMetricsCollector", () => {
     collector.reportSession("tok_kimi", {
       pid: 5555,
       agentId: "kimi",
-      sessionId: "sess_kimi",
       requests: 2,
       activeRequests: 1,
       activeDurationMs: 3000,
@@ -1130,7 +1115,7 @@ describe("createAgentMetricsCollector", () => {
     status = await collector.getAgentsStatus();
     claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "pid-5555", "must be the placeholder, not the kimi session");
+    assert.equal(claude.sessions[0].id, "claude-5555", "must be the placeholder, not the kimi session");
     assert.equal(claude.sessions[0].requests, 0);
   });
 
@@ -1142,7 +1127,6 @@ describe("createAgentMetricsCollector", () => {
     collector.reportSession("tok_explicit_claude", {
       pid: 4444,
       agentId: "claude",
-      sessionId: "sess_explicit",
       requests: 1,
       activeRequests: 0,
     });
@@ -1150,7 +1134,7 @@ describe("createAgentMetricsCollector", () => {
     const status = await collector.getAgentsStatus();
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "sess_explicit");
+    assert.equal(claude.sessions[0].id, "claude-4444");
     assert.equal(claude.sessions[0].requests, 1);
   });
 
@@ -1167,14 +1151,13 @@ describe("createAgentMetricsCollector", () => {
     collector.reportSession("tok_garbage_agent", {
       pid: 4444,
       agentId: 42,
-      sessionId: "sess_garbage",
       requests: 1,
     });
 
     const status = await collector.getAgentsStatus();
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "sess_garbage");
+    assert.equal(claude.sessions[0].id, "claude-4444");
   });
 
   it("trims a padded claude agentId instead of early-returning (panel journal parity)", async () => {
@@ -1188,14 +1171,13 @@ describe("createAgentMetricsCollector", () => {
     collector.reportSession("tok_padded_claude", {
       pid: 4444,
       agentId: " claude ",
-      sessionId: "sess_padded",
       requests: 1,
     });
 
     const status = await collector.getAgentsStatus();
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "sess_padded");
+    assert.equal(claude.sessions[0].id, "claude-4444");
   });
 
   it("automatically detects running claude.exe process even before first reportSession call", async () => {
@@ -1207,7 +1189,7 @@ describe("createAgentMetricsCollector", () => {
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.status, "running");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "pid-4444");
+    assert.equal(claude.sessions[0].id, "claude-4444");
     assert.equal(claude.sessions[0].requests, 0);
     assert.equal(claude.sessions[0].status, "idle");
   });
@@ -1223,7 +1205,7 @@ describe("createAgentMetricsCollector", () => {
     const claude = status.find((a) => a.id === "claude");
     assert.equal(claude.status, "running");
     assert.equal(claude.sessionsCount, 1);
-    assert.equal(claude.sessions[0].id, "pid-9876");
+    assert.equal(claude.sessions[0].id, "claude-9876");
   });
 
   it("detects Pi running under node with pi-coding-agent package", async () => {
@@ -2449,6 +2431,27 @@ describe("createSessionReporter", () => {
     assert.equal(row.path, "anthropic");
     assert.equal(row.ttftMs, 500, "first-chunk TTFT");
     assert.equal(row.durationMs, 3000);
+  });
+
+  it("journal rows carry the canonical instanceId once the pid is set, and omit it before", async () => {
+    // Terminal attribution binds a shell to `claude-<pid>` rows; the journal
+    // row must carry that very key or a bound terminal can never see its own
+    // requests. Before setClaudePid the reporter has no identity to claim —
+    // the key stays absent rather than pointing at the wrong process.
+    const pidSet = reporterHarness();
+    pidSet.reporter.setClaudePid(4242);
+    pidSet.reporter.startRequest({ model: "claude-opus-5", stream: false, path: "anthropic" });
+    pidSet.tick(2000);
+    pidSet.reporter.recordEnd({ status: 200, usage: { input_tokens: 8, output_tokens: 4 } });
+    assert.equal(pidSet.lines.length, 1);
+    assert.equal(pidSet.lines[0].instanceId, "claude-4242");
+
+    const pidUnset = reporterHarness();
+    pidUnset.reporter.startRequest({ model: "claude-opus-5", stream: false, path: "anthropic" });
+    pidUnset.tick(2000);
+    pidUnset.reporter.recordEnd({ status: 200, usage: { input_tokens: 8, output_tokens: 4 } });
+    assert.equal(pidUnset.lines.length, 1);
+    assert.ok(!("instanceId" in pidUnset.lines[0]), "no claimed identity before the pid is known");
   });
 
   it("journals request rows and snapshots under the configured agentId (kimi), default stays claude", async () => {
@@ -4258,7 +4261,7 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
     const card = claude(await collector.getAgentsStatus());
     assert.equal(card.processCount, 1, "rg helper is not a claude session process");
     assert.equal(card.sessionsCount, 1, "no phantom second session row");
-    assert.equal(card.sessions[0].id, "pid-24956");
+    assert.equal(card.sessions[0].id, "claude-24956");
   });
 
   it("still accepts claude.exe rows in the plain tasklist fallback (no command line column)", async () => {
@@ -4280,7 +4283,7 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
     const card = claude(await collector.getAgentsStatus());
     assert.equal(card.processCount, 1, "npm view maintenance process is not a session");
     assert.equal(card.sessionsCount, 1, "no third session row from the updater");
-    assert.equal(card.sessions[0].id, "pid-24956");
+    assert.equal(card.sessions[0].id, "claude-24956");
   });
 
   it("does not register npm maintenance processes as kimi/pi instances, but keeps real ones", async () => {
@@ -4329,7 +4332,7 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
     await new Promise((r) => setTimeout(r, 20));
     card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 1, "live PID revives the row instead of staying hidden behind the ended latch");
-    assert.equal(card.sessions[0].id, "pid-5555");
+    assert.equal(card.sessions[0].id, "claude-5555");
   });
 });
 
@@ -4937,15 +4940,15 @@ describe("activity transition publish (onActivity)", () => {
     const collector = testCollector({ nowFn: () => 10000 });
     const frames = collect(collector);
 
-    collector.reportSession("tok_C", { pid: 4444, sessionId: "sess_A", activeRequests: 2 });
-    assert.deepEqual(frames.map(sig), [["activity", "claude", "sess_A", 2]],
+    collector.reportSession("tok_C", { pid: 4444, activeRequests: 2 });
+    assert.deepEqual(frames.map(sig), [["activity", "claude", "claude-4444", 2]],
       "0→2 lands past 1 and is still one jump");
     collector.reportSession("tok_C", { pid: 4444, activeRequests: 3 });
     assert.equal(frames.length, 1, "2→3 is not a jump");
     collector.reportSession("tok_C", { pid: 4444, activeRequests: 0 });
     assert.deepEqual(frames.map(sig), [
-      ["activity", "claude", "sess_A", 2],
-      ["activity", "claude", "sess_A", 0],
+      ["activity", "claude", "claude-4444", 2],
+      ["activity", "claude", "claude-4444", 0],
     ]);
   });
 
@@ -4980,5 +4983,99 @@ describe("activity transition publish (onActivity)", () => {
     assert.equal(removed.length, 0);
     assert.equal(unsubbed.length, 0);
     assert.equal(keep[0].endpointId, "zcode");
+  });
+});
+
+// usage 归一（统计口径）：上游两种 usage 形状都会原样到达记账口——OpenAI
+// 透传带 prompt_tokens/completion_tokens，Anthropic 上行（stream-pipe 的
+// onTerminalResult / pipe 结果）带 input_tokens/output_tokens/
+// cache_read_input_tokens。聚合 tracker 只认前一种时，Anthropic 渠道的
+// prompt/completion/cached 恒 0；归一后两种形状都照实入账。
+describe("usage 形状归一（OpenAI / Anthropic 两种 usage 都照实入账）", () => {
+  function fakeJournal() {
+    const lines = [];
+    return { lines, appendRequest: (entry) => lines.push(entry) };
+  }
+  // wmic-shaped CSV reporting one live kimi node.exe process with the given PID.
+  const kimiWmicRow = (pid) =>
+    `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,${pid}\r\n`;
+
+  it("Anthropic 形状 usage 经 recordEnd 后实例行与聚合桶的 tokens 照实入账", async () => {
+    let t = 3000;
+    const execFn = (cmd, opts, cb) => cb(null, kimiWmicRow(21564));
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    let kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(kimi.instances.length, 1, "placeholder listed before any request");
+
+    const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-21564", providerId: "chan-a", model: "kimi-k3", stream: true, path: "anthropic" });
+    t += 800;
+    r.recordFirstChunk();
+    t += 1200;
+    r.recordEnd({ status: 200, usage: { input_tokens: 1200, output_tokens: 80, cache_read_input_tokens: 900 } });
+
+    t += 3000; // past the scan cache so the read rescans (pid still alive)
+    kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.deepEqual(kimi.instances[0].tokens, { prompt: 1200, completion: 80, cached: 900 },
+      "实例行不再对 Anthropic 形状记 0");
+    assert.deepEqual(kimi.metrics.tokens, { prompt: 1200, completion: 80, cached: 900 },
+      "聚合桶同步照实");
+    assert.equal(kimi.metrics.cacheHitRate, 75, "缓存命中率随真实 cached 落地（900/1200）");
+  });
+
+  it("Anthropic 形状 usage 的 journal 行同样入账", () => {
+    let t = 1000;
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => t, journal });
+
+    const r = collector.startRequest({ agentId: "kimi", providerId: "chan-a", model: "kimi-k3", stream: true, path: "anthropic" });
+    t = 1800;
+    r.recordFirstChunk();
+    t = 4000;
+    r.recordEnd({ status: 200, usage: { input_tokens: 64, output_tokens: 16, cache_read_input_tokens: 48 } });
+
+    assert.equal(journal.lines.length, 1);
+    assert.deepEqual(
+      { prompt: journal.lines[0].prompt, completion: journal.lines[0].completion, cached: journal.lines[0].cached },
+      { prompt: 64, completion: 16, cached: 48 },
+    );
+  });
+
+  it("OpenAI 形状 usage 行为不变（回归：prompt_tokens_details.cached_tokens 优先）", () => {
+    let t = 1000;
+    const journal = fakeJournal();
+    const collector = testCollector({ nowFn: () => t, journal });
+
+    const r = collector.startRequest({ agentId: "kimi", providerId: "chan-a", model: "kimi-k3", stream: true, path: "openai" });
+    t = 1800;
+    r.recordFirstChunk();
+    t = 4000;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 20, prompt_tokens_details: { cached_tokens: 30 } } });
+
+    assert.deepEqual(
+      { prompt: journal.lines[0].prompt, completion: journal.lines[0].completion, cached: journal.lines[0].cached },
+      { prompt: 100, completion: 20, cached: 30 },
+    );
+  });
+
+  it("两种形状混用不回退歧义：各行的 token 只按自己行的形状入账", async () => {
+    let t = 1000;
+    const journal = fakeJournal();
+    const execFn = (cmd, opts, cb) => cb(null, "");
+    const collector = testCollector({ execFn, nowFn: () => t, journal });
+
+    const a = collector.startRequest({ agentId: "kimi", providerId: "chan-a", model: "m1", stream: true, path: "openai" });
+    a.recordFirstChunk();
+    a.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: { cached_tokens: 40 } } });
+    const b = collector.startRequest({ agentId: "kimi", providerId: "chan-b", model: "m2", stream: true, path: "anthropic" });
+    b.recordFirstChunk();
+    b.recordEnd({ status: 200, usage: { input_tokens: 50, output_tokens: 5, cache_read_input_tokens: 20 } });
+
+    assert.deepEqual(journal.lines.map((l) => [l.prompt, l.completion, l.cached]), [
+      [100, 10, 40],
+      [50, 5, 20],
+    ], "每行各按自己的形状，互不串味");
+    const kimi = (await collector.getAgentsStatus()).find((x) => x.id === "kimi");
+    assert.deepEqual(kimi.metrics.tokens, { prompt: 150, completion: 15, cached: 60 }, "聚合桶为两行之和");
   });
 });
