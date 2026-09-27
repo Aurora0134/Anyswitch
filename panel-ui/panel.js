@@ -4149,11 +4149,6 @@ async function api(method, path, body) {
     $("terminalSessionBranch").textContent = session.branch || "未设置分支";
     $("terminalShellLabel").textContent = session.shell.name;
     $("terminalInspectorTitle").textContent = session.label;
-    // 徽标与页签副行同一口径（快照 agentName 优先、实时归属次之）；外壳名不上
-    // 徽标——页签图标与会话栏已标外壳，监测区顶着外壳名只会冒充 agent 身份。
-    const badgeAgent = session.agentName || (session.agent ? session.agent.name : null);
-    $("terminalAgentBadge").textContent = badgeAgent || "";
-    $("terminalAgentBadge").hidden = !badgeAgent;
     $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
     updateTerminalFootSize(session);
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";

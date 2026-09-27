@@ -1111,10 +1111,6 @@
   }
   .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10.5px/1.2 var(--font-mono); text-transform: uppercase; }
   .terminal-inspector-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .terminal-agent-badge {
-    flex: none; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
-    background: var(--surface-sunken); color: var(--text-2); font: 600 11px var(--font-mono);
-  }
   .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
   .terminal-inspector-toggle svg { transition: transform 160ms var(--ease-out); }
