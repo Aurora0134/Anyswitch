@@ -8038,6 +8038,26 @@ async function api(method, path, body) {
   let storeTestBusy = false;
   // ids：按可见行展开后的渠道 id 序列；labelMap 解析显示名（池行取池名）。
   // opts：{ btn } 仅详情钮传——按下即禁用改文案，finally 复位；右键菜单不传。
+  // 测试失败原因上屏：后端 /api/store/test 的 error 是英文技术语，界面只出产品
+  // 语言、原文进控制台（panelError 既有契约），这里按已知模式翻成用户语义，
+  // 翻不出走 panelError 兜底。HTTP 200 例外：它只出现在 api() 给 message 拼的
+  // 「HTTP <状态>：」前缀里（后端 error 缺失落到 message 时），不是渠道返回的状态码
+  function storeTestErrorText(e) {
+    const raw = String((e && e.code) || (e && e.message) || "");
+    const m = raw.match(/HTTP (\d{3})/);
+    if (m && m[1] !== "200") {
+      const s = m[1];
+      if (s === "401" || s === "403") return `渠道拒绝了测试请求（HTTP ${s}），请检查密钥是否有效`;
+      if (s === "404") return "接口地址不存在（HTTP 404），请检查 Base URL";
+      if (s.startsWith("5")) return `渠道服务端异常（HTTP ${s}）`;
+      return `渠道返回 HTTP ${s}`;
+    }
+    if (/timed out/i.test(raw)) return "测试请求超时，渠道长时间未响应";
+    if (/request failed/i.test(raw)) return "网络请求发不出去，请检查网络与接口地址";
+    if (/not managed by Anyswitch/.test(raw)) return "该渠道已不存在，请刷新渠道列表";
+    if (/store is unavailable/.test(raw)) return "渠道配置库暂不可用，请稍后再试";
+    return panelError(e, "连接测试未通过");
+  }
   async function runStoreTest(ids, opts) {
     if (storeTestBusy) return null;
     storeTestBusy = true;
@@ -8051,7 +8071,7 @@ async function api(method, path, body) {
     }
     const multi = ids.length > 1;
     let ok = 0;
-    const failed = [];
+    const failed = []; // { label, reason }
     try {
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
@@ -8064,9 +8084,10 @@ async function api(method, path, body) {
           setStoreRefreshStatus("正在测试连接..", "busy",
             `<span class="srs-pos">${escapeHtml(label)} 可用（${r.modelCount} 个模型）</span>${prog}`);
         } catch (e) {
-          failed.push(`${label}：${panelError(e, "连不上")}`);
+          const reason = storeTestErrorText(e);
+          failed.push({ label, reason });
           setStoreRefreshStatus("正在测试连接..", "busy",
-            `<span class="srs-neg">${escapeHtml(label)} 连不上</span>${prog}`);
+            `<span class="srs-neg">${escapeHtml(label)} 连不上：${escapeHtml(reason)}</span>${prog}`);
         }
       }
       const last = labelMap.get(ids[ids.length - 1]) || ids[ids.length - 1];
@@ -8076,12 +8097,17 @@ async function api(method, path, body) {
           : `<span class="srs-pos">${escapeHtml(last)} 可用</span>`;
         setStoreRefreshStatus("测试完成", "done", tail);
         toast(multi ? `${ok} 个渠道全部可用` : `${last} 可用`);
-      } else {
+      } else if (multi) {
+        // 号池/多选才上汇总结构；单渠道直接一句结论带原因
+        const detail = failed.map((f) => `${f.label}：${f.reason}`).join("；");
         setStoreRefreshStatus("测试完成", "err",
-          `<span class="srs-neg">${ok} 个可用、${failed.length} 个连不上（${escapeHtml(failed.join("；"))}）</span>`);
-        toast(multi
-          ? `${ok} 个渠道可用、${failed.length} 个连不上（${failed.join("；")}）`
-          : `${failed.join("；")}`, true);
+          `<span class="srs-neg">${ok} 个可用、${failed.length} 个连不上（${escapeHtml(detail)}）</span>`);
+        toast(`${ok} 个渠道可用、${failed.length} 个连不上（${detail}）`, true);
+      } else {
+        const f = failed[0];
+        setStoreRefreshStatus("测试完成", "err",
+          `<span class="srs-neg">${escapeHtml(f.label)} 连不上：${escapeHtml(f.reason)}</span>`);
+        toast(`${f.label} 连不上：${f.reason}`, true);
       }
       return { ok, failed };
     } finally {
@@ -8160,6 +8186,9 @@ async function api(method, path, body) {
   //      中途单渠道失败只红该渠道 tail 分段，完成态永不整行染红；
   //      err 仅用于 cas-conflict 或整次异常。
   let storeStatusTimer = null;
+  // 当前小字模式：busy 整段在途只有开头一次写入，淡出兜底要长过最长在途时长
+  // （后端探测 30s 超时硬顶），结论态维持 10s
+  let storeStatusMode = null;
   // 「等切回」一次性标记：刷新终态落小字那一刻人不在渠道 tab → 置位并暂停 10s
   // 淡出计时，直到用户切回（switchView 消费、重新计一个完整 10s）；此后再切走
   // 不再暂停。完成时人就在 tab、之后才走的不置位——结果已被亲眼看到
@@ -8187,6 +8216,7 @@ async function api(method, path, body) {
       diff.onclick = () => { openStoreDiffModal(); };
     }
     el.classList.toggle("err", mode === "err");
+    storeStatusMode = mode;
     const key = `${mode}:${text}`;
     if (prefix.dataset.key !== key) {
       prefix.dataset.key = key;
@@ -8199,15 +8229,16 @@ async function api(method, path, body) {
     el.classList.add("show");
     armStoreStatusTimer();
   }
-  // 10s 淡出计时：弹窗打开期间暂停（计时器清掉、不重新武装），关闭弹窗时
-  // 若状态小字仍可见则重新武装一个完整 10s
+  // 淡出计时：结论态 10s；busy 态 60s——在途整段只有开头一次写入，兜底要长过
+  // 最长在途时长（后端探测 30s 超时硬顶）。弹窗打开期间暂停（计时器清掉、不
+  // 重新武装），关闭弹窗时若状态小字仍可见则按当前模式重新武装一个完整周期
   function armStoreStatusTimer() {
     const el = $("storeRefreshStatus");
     if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
     storeStatusTimer = setTimeout(() => {
       el.classList.remove("show");
       storeStatusTimer = null;
-    }, 10000);
+    }, storeStatusMode === "busy" ? 60000 : 10000);
   }
   function disarmStoreStatusTimer() {
     if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
