@@ -2615,7 +2615,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-shell { height: 100vh;"), "终端外壳固定为视口高度");
     assert.ok(panelJs.includes('$("terminalFootPid").textContent = `PID ${session.shell.pid}`'), "底栏左侧显示 shell 进程号");
     assert.ok(panelJs.includes("session.agent ? session.agent.name : session.shell.name"), "普通终端身份位回落显示 Shell");
-    assert.ok(panelHtml.includes('id="terminalAgentBadge"'), "右栏头部有检测到的 Agent 徽标位");
+    assert.ok(!panelHtml.includes("terminalAgentBadge"), "右栏头部的 agent 徽标已整体退役");
     assert.ok(panelJs.includes('shell: { name: "PowerShell", pid:') && panelJs.includes("instanceId:"), "会话数据携带进程与实例归属");
   });
 
@@ -6922,16 +6922,12 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(shellTab.includes("<small>PowerShell</small>"), "都没有时回落外壳名");
   });
 
-  it("监测区徽标只认 agent 身份：agentName 优先，外壳名不上徽标", () => {
-    const render = extractFn("renderTerminalSessionData");
-    assert.ok(render.includes("session.agentName || (session.agent ? session.agent.name : null)"),
-      "徽标口径与页签副行一致：快照 agentName 优先、实时归属次之（归属随进程退出丢失也能显名）");
-    assert.ok(!/terminalAgentBadge[^;]*shell\.name/.test(panelJs),
-      "外壳名禁止回落上徽标——页签图标与会话栏已标外壳，顶着外壳名只会冒充 agent 身份");
-    assert.ok(render.includes('$("terminalAgentBadge").hidden = !badgeAgent'),
-      "无 agent 身份时徽标整枚隐藏，不留空壳");
-    assert.ok(!panelCss.includes("terminal-agent-badge.is-shell"),
-      "is-shell 虚线样式随外壳名回落一并退役");
+  it("监测区 agent 徽标整体退役：身份标注由页签副行承担，节点/JS/CSS 无残留", () => {
+    assert.ok(!panelHtml.includes("terminalAgentBadge"), "HTML 无徽标节点");
+    assert.ok(!panelJs.includes("terminalAgentBadge"), "JS 无徽标引用残留（写入或类名切换漏删都会让徽标诈尸）");
+    assert.ok(!panelCss.includes("terminal-agent-badge"), "CSS 徽标样式一并退役");
+    assert.ok(extractFn("renderTerminalPreviewTabs").includes("session.agentName || (session.agent ? session.agent.name : session.shell.name)"),
+      "页签副行仍是唯一 agent 身份位：agentName 优先、实时归属次之、外壳名兜底");
   });
 
   it("源码钉死：白名单与后端一致，菜单结构与样式就位", () => {
