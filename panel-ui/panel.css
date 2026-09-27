@@ -953,7 +953,8 @@
   .terminal-tab-state { flex: none; width: 7px; height: 7px; border-radius: 50%; }
   .terminal-tab-state.is-working { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
   .terminal-tab-state.is-idle { background: var(--text-4); }
-  .terminal-tab-close { flex: none; color: var(--text-4); font-size: 16px; line-height: 1; opacity: .5; }
+  /* 关闭叉放大一号并垫出命中区：负外边距抵消内边距，字形位置与行内布局不动。 */
+  .terminal-tab-close { flex: none; margin: -3px -5px; padding: 3px 5px; color: var(--text-4); font-size: 18px; line-height: 1; opacity: .5; }
   .terminal-tab:hover .terminal-tab-close, .terminal-tab.active .terminal-tab-close { opacity: 1; }
   .terminal-add-btn { flex: none; width: 30px; height: 30px; margin-top: 4px; }
   .terminal-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -1114,7 +1115,6 @@
     flex: none; padding: 3px 8px; border-radius: 999px; border: 1px solid var(--border);
     background: var(--surface-sunken); color: var(--text-2); font: 600 11px var(--font-mono);
   }
-  .terminal-agent-badge.is-shell { color: var(--text-3); border-style: dashed; }
   .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
   .terminal-inspector-toggle svg { transition: transform 160ms var(--ease-out); }

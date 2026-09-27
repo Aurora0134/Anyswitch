@@ -6922,6 +6922,18 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(shellTab.includes("<small>PowerShell</small>"), "都没有时回落外壳名");
   });
 
+  it("监测区徽标只认 agent 身份：agentName 优先，外壳名不上徽标", () => {
+    const render = extractFn("renderTerminalSessionData");
+    assert.ok(render.includes("session.agentName || (session.agent ? session.agent.name : null)"),
+      "徽标口径与页签副行一致：快照 agentName 优先、实时归属次之（归属随进程退出丢失也能显名）");
+    assert.ok(!/terminalAgentBadge[^;]*shell\.name/.test(panelJs),
+      "外壳名禁止回落上徽标——页签图标与会话栏已标外壳，顶着外壳名只会冒充 agent 身份");
+    assert.ok(render.includes('$("terminalAgentBadge").hidden = !badgeAgent'),
+      "无 agent 身份时徽标整枚隐藏，不留空壳");
+    assert.ok(!panelCss.includes("terminal-agent-badge.is-shell"),
+      "is-shell 虚线样式随外壳名回落一并退役");
+  });
+
   it("源码钉死：白名单与后端一致，菜单结构与样式就位", () => {
     const ids = panelJs.match(/const TERMINAL_ADD_MENU_AGENT_IDS = \[([^\]]+)\]/)?.[1];
     assert.ok(ids, "前端白名单可取样");
