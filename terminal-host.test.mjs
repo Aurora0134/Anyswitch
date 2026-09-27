@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, PARENT_WATCHDOG_INTERVAL_MS } from "./terminal-host.mjs";
+import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
   constructor() {
@@ -282,6 +283,130 @@ test("stream() strips probes from replayed history but passes live chunks throug
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// SSE 是长连接：读一帧就要主动 abort，等 response.text() 会永远挂住。
+async function firstReplayFrame(response, controller) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let received = "";
+  try {
+    while (true) {
+      const start = received.indexOf("event: data\ndata:");
+      if (start >= 0) {
+        const end = received.indexOf("\n\n", start + 17);
+        if (end > 0) return JSON.parse(received.slice(start + 17, end));
+      }
+      const { done, value } = await reader.read();
+      if (done) throw new Error("stream ended before the replay frame");
+      received += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    controller.abort();
+  }
+}
+
+// A full-screen TUI repaints with relative moves, so replaying a head-truncated byte
+// window leaves the picture floating (measured on a live kimi session: zero scrolls,
+// ~20 blank rows under the frame, nothing above the frame reachable). The host now
+// replays its rendered mirror instead. This drives the HTTP route end to end and
+// re-parses the replay exactly as xterm would.
+test("stream() 回放走渲染镜像：TUI 重绘后画面落底、历史逐行回得来", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-mirror-`);
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const controller = new AbortController();
+  const frame = (index, height = 10) => {
+    let out = "\x1b[?2026h\x1b[" + height + "A";
+    for (let line = 0; line < height; line += 1) out += `\r\x1b[2K帧${index}第${line}行${"z".repeat(8)}\r\n`;
+    return out + `\x1b[${height - 3}B\x1b[6G\x1b[?2026l`;
+  };
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "镜像", cwd: root, shell: "powershell", cols: 60, rows: 12 }),
+    }).then((response) => response.json());
+    for (let i = 1; i <= 40; i += 1) pty.dataListener(`转录行 ${i} ${"y".repeat(20)}\r\n`);
+    for (let f = 0; f < 25; f += 1) pty.dataListener(frame(f));
+
+    const response = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
+      headers: { authorization: `Bearer ${host.token}` },
+      signal: controller.signal,
+    });
+    const replay = await firstReplayFrame(response, controller);
+    assert.ok(replay.includes("\x1b[2J"), "回放必须是自足重绘（先清屏）");
+    assert.ok(/\x1b\[\d+;1H/.test(replay), "回放必须用绝对定位落位，而不是靠相对位移猜");
+    assert.ok(!/\x1b\[6n|\x1b\[c/.test(replay), "渲染出来的回放里不该再有查询探针");
+
+    const again = createScreenMirror({ cols: 60, rows: 12 });
+    again.write(replay);
+    const lines = again.screenLines();
+    let last = 0;
+    for (let r = lines.length - 1; r >= 0; r -= 1) if (lines[r].trim() !== "") { last = r + 1; break; }
+    assert.ok(last >= 9, `回放后画面必须落在底部区，实得第 ${last}/12 行（浮空即用户看到的「每刷一次上移一段」）`);
+    assert.ok(lines.join("|").includes("帧24第9行"), "最后一帧的内容必须原样回来");
+    const history = again.historyLines();
+    const live = host.sessions.get(created.id).screen.info();
+    assert.equal(history.length, live.historyLines, "滚动区必须逐行等价，不多不少");
+    assert.ok(history.some((line) => line.includes("转录行 5")), "刷新前视窗之上的内容必须还能滚回去");
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The durable format is still the raw byte tail this round: after a host restart the
+// mirror is rebuilt from that tail, so the replay must still come back painted and
+// still carry what the tail covered.
+test("宿主换新进程后由盘上尾部重建镜像，回放仍出画面不出白屏", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-restore-mirror-`);
+  const first = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path, base = port) => `http://127.0.0.1:${base}${path}`;
+  let restoredPort = null;
+  let restored = null;
+  const controller = new AbortController();
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: { ...headers(host), authorization: `Bearer ${host.token}` },
+      body: JSON.stringify({ label: "重启", cwd: root, shell: "powershell", cols: 40, rows: 8 }),
+    }).then((response) => response.json());
+    const pty = first.calls[first.calls.length - 1].pty;
+    for (let i = 1; i <= 12; i += 1) pty.dataListener(`盘上行 ${i}\r\n`);
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    await host.close();
+
+    restored = createTerminalHost({
+      root,
+      port: 0,
+      ptyModule: { spawn: () => new FakePty() },
+      logger: { warn() {} },
+    });
+    restoredPort = await listen(restored);
+    const session = restored.sessions.get(created.id);
+    assert.ok(session.screen.info().consumedBytes > 0, "恢复即把盘上尾部喂进镜像");
+    const response = await fetch(url(`/terminal/sessions/${created.id}/stream`, restoredPort), {
+      headers: { authorization: `Bearer ${restored.token}` },
+      signal: controller.signal,
+    });
+    const replay = await firstReplayFrame(response, controller);
+    assert.ok(replay.includes("盘上行 12"), `重建后的回放要带回首屏内容，实得 ${JSON.stringify(replay.slice(-80))}`);
+  } finally {
+    controller.abort();
+    if (restored) await restored.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 // watchParentProcess: the relay-owned child's death pact. Without a parent
 // pid env (single runs, tests) nothing is scheduled; with one, a dead parent

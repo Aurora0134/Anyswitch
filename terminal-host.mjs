@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as pty from "node-pty";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
 import { isPidAlive } from "./relay-process-manager.mjs";
 
@@ -19,11 +20,17 @@ export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
-// Replay windows are budgeted in bytes, not in chunk counts. A busy TUI emits a
-// chunk roughly every 80ms, so the old 400-chunk tail held about 31 seconds of
-// output while the xterm it repaints keeps a 5000-line scrollback — a page reload
-// threw away nearly everything the user had on screen. Chunks are dropped whole
-// from the head so no escape sequence is ever cut in half.
+// Raw output window, budgeted in bytes rather than chunk counts. Chunks are dropped
+// whole from the head so no escape sequence is ever cut in half.
+//
+// This is NOT what a client replays with any more — see terminal-screen.mjs. A
+// full-screen TUI's byte stream is a run of relative repaints, so a head-truncated
+// slice of it repaints the wrong rows (measured on a live kimi session: 512KB, 1400
+// frames, 0 scrolls, ~20 blank rows below the frame). The replay now comes from the
+// session's rendered mirror. The raw window stays because it is what survives in the
+// state file, and the mirror is rebuilt from it after a host restart — that restart
+// path inherits the trim, which is why the durable format is the next thing to move
+// to rendered lines.
 const TERMINAL_BUFFER_MAX_BYTES = 512 * 1024;
 const TERMINAL_BUFFER_MAX_CHUNKS = 4000;
 // The state file is rewritten whole on a 250ms debounce, so the durable tail is
@@ -273,16 +280,34 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       const raw = JSON.parse(readFileSync(statePath, "utf8"));
       for (const item of Array.isArray(raw?.sessions) ? raw.sessions : []) {
         const buffer = Array.isArray(item.buffer) ? item.buffer : [];
-        sessions.set(item.id, {
+        const session = {
           ...item,
           pty: null,
           listeners: new Set(),
           buffer,
           bufferBytes: buffer.reduce((total, chunk) => total + chunkBytes(String(chunk)), 0),
-        });
+          screen: createScreenMirror({ cols: item.cols || 120, rows: item.rows || 34 }),
+        };
+        // Rebuild the rendered picture from the durable tail. The tail is trimmed,
+        // so a restored session repaints approximately — no worse than replaying
+        // those same bytes raw, and it gets exact again on the next output chunk.
+        for (const chunk of buffer) feedMirror(session, String(chunk));
+        sessions.set(item.id, session);
       }
     } catch {
       // First start or a partially written state file: start empty.
+    }
+  }
+
+  // The mirror renders what a client replays on connect. It is deliberately a
+  // one-way passenger: a parser bug or a sequence we do not model must degrade to
+  // "that chunk was not rendered", never to "output stopped forwarding".
+  function feedMirror(session, text) {
+    try {
+      if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      session.screen.write(text);
+    } catch (error) {
+      logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
     }
   }
 
@@ -291,6 +316,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     session.buffer.push(text);
     session.bufferBytes += chunkBytes(text);
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
+    feedMirror(session, text);
     session.lastActiveAt = Date.now();
     for (const listener of session.listeners) listener(String(chunk));
     schedulePersist();
@@ -351,9 +377,20 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       connection: "keep-alive",
     });
     res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
-    // Replay is probe-stripped and joined across chunk boundaries so a query
-    // split between PTY writes is still recognized; live chunks pass through.
-    const replay = stripTerminalReplyProbes(session.buffer.join(""));
+    // Replay comes from the rendered mirror: an absolutely positioned repaint plus
+    // the rows that scrolled away, so it is correct regardless of where the raw
+    // window's head fell and it restores a scrollable scrollback. The raw byte path
+    // stays as the fallback for a session whose mirror was skipped (a parser fault,
+    // a state file written before the mirror existed) — degraded, never dead.
+    let rendered = "";
+    try {
+      rendered = session.screen && session.screen.info().consumedBytes > 0 ? session.screen.toReplay() : "";
+    } catch (error) {
+      logger.warn?.(`[terminal-host] rendered replay unavailable (${session.id}): ${error.message}`);
+    }
+    // Live chunks pass through verbatim; the raw replay is probe-stripped so a query
+    // split between PTY writes is still recognized.
+    const replay = rendered || stripTerminalReplyProbes(session.buffer.join(""));
     if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
     const listener = (chunk) => {
       if (chunk === null) res.write("event: exit\ndata: {}\n\n");
@@ -405,6 +442,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
           exitCode: null,
           buffer: [],
           bufferBytes: 0,
+          screen: createScreenMirror({ cols: Math.max(2, Math.min(240, Number(body.cols) || 120)), rows: Math.max(1, Math.min(120, Number(body.rows) || 34)) }),
           pty: null,
           listeners: new Set(),
         };
@@ -433,6 +471,12 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         const rows = Math.max(1, Math.min(120, Number(body.rows) || session.rows));
         session.cols = cols;
         session.rows = rows;
+        try {
+          if (!session.screen) session.screen = createScreenMirror({ cols, rows });
+          else session.screen.resize(cols, rows);
+        } catch (error) {
+          logger.warn?.(`[terminal-host] screen mirror resize skipped (${session.id}): ${error.message}`);
+        }
         session.pty?.resize(cols, rows);
         persistNow();
         return json(res, 200, { ok: true, cols, rows });
@@ -449,6 +493,9 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         session.exitCode = null;
         session.buffer = [];
         session.bufferBytes = 0;
+        // A respawn is a blank screen for the application too: the mirror's history
+        // belongs to the process that just died.
+        session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
         spawnSession(session);
         return json(res, 200, snapshot(session));
       }
