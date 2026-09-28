@@ -21,9 +21,9 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createHash } from "node:crypto";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
 // Re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel } from "./merge-common.mjs";
+export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { extractManagedProviders } from "./pool-providers.mjs";
 import { buildAgentPrefixedSegment } from "./openai-path.mjs";
@@ -265,7 +265,7 @@ export function writeQoderSettingsWithBackup(filePath, data) {
 // back with backup. Returns { ok, unchanged, backupPath?, reason? }.
 export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "qoder");
+  const autoChannel = deriveAnyswitchChannel(store, "qoder");
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };

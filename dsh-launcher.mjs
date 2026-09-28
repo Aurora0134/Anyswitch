@@ -15,7 +15,7 @@ import {
   mergeDshSettings,
   writeDshSettingsWithBackup,
   extractManagedProviders,
-  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
   readSidecar,
   writeSidecar,
   validateDshSettings,
@@ -87,7 +87,7 @@ export function dshPackageRoot(base = process.env) {
 export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const yaml = await getYamlModule();
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "dsh");
+  const autoChannel = deriveAnyswitchChannel(store, "dsh");
   // Last channel deleted: what the previous sync wrote into the client config
   // is only recorded in the sidecar, so an empty previous managed set is what
   // makes bailing out safe — otherwise the merge has to run to drop the stale

@@ -25,7 +25,7 @@ import {
   mergeModelsJson,
   writeModelsJsonWithBackup,
   extractManagedProviders,
-  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
   readSidecar,
   writeSidecar,
   validatePiModelsConfig,
@@ -80,7 +80,7 @@ export async function startOpenAIRelay(options = {}) {
 
 export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MODELS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "pi");
+  const autoChannel = deriveAnyswitchChannel(store, "pi");
   // Last channel deleted: what the previous sync wrote into the client config
   // is only recorded in the sidecar, so an empty previous managed set is what
   // makes bailing out safe — otherwise the merge has to run to drop the stale

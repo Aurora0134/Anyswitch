@@ -235,7 +235,7 @@ describe("buildQoderProviders", () => {
   it("honours baseUrlSegment for pseudo-channels (auto routing)", () => {
     const providers = {
       auto: {
-        channelName: "自动路由",
+        channelName: "Anyswitch",
         baseUrlSegment: "poke-api",
         models: { auto: { displayName: "auto" } },
       },
@@ -244,7 +244,7 @@ describe("buildQoderProviders", () => {
     const conn = map[managedConnectionId("auto")];
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(conn.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);
-    assert.equal(conn.displayName, "自动路由");
+    assert.equal(conn.displayName, "Anyswitch");
   });
 });
 
@@ -446,7 +446,7 @@ describe("auto routing channel (_auto)", () => {
     );
     const autoConn = config.providers[managedConnectionId("auto")];
     assert.ok(autoConn, "auto connection must be injected");
-    assert.equal(autoConn.displayName, "自动路由");
+    assert.equal(autoConn.displayName, "Anyswitch");
     assert.equal(autoConn.apiKey, TOKEN);
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(autoConn.baseUrl, `http://127.0.0.1:${PORT}/openai/qoder~poke-api/v1`);

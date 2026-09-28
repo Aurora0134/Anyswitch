@@ -13,7 +13,7 @@ import {
   mergeOpencodeConfig,
   writeOpencodeConfigWithBackup,
   extractManagedProviders,
-  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
   readSidecar,
   writeSidecar,
   relayTokenFileRef,
@@ -72,7 +72,7 @@ export async function startOpenAIRelay(options = {}) {
 // `{file:...}` reference to the relay token file, not a literal value.
 export async function writeOpencodeConfig(store, port, sidecarRoot, configPath = opencodeConfigPath(), catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "opencode");
+  const autoChannel = deriveAnyswitchChannel(store, "opencode");
   // Last channel deleted: what the previous sync wrote into the client config
   // is only recorded in the sidecar, so an empty previous managed set is what
   // makes bailing out safe — otherwise the merge has to run to drop the stale

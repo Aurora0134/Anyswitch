@@ -62,10 +62,10 @@ import { readFileSync, existsSync, copyFileSync, mkdirSync, rmSync } from "node:
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel } from "./merge-common.mjs";
+export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
@@ -598,7 +598,7 @@ function removeCatalogFile(codexDir) {
 // never overwritten.
 export function writeCodexConfig(store, port, token, sidecarRoot, configPath = codexConfigPath(), catalog = null, effortsEnabled = null, catalogTemplateOverride = undefined) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "codex");
+  const autoChannel = deriveAnyswitchChannel(store, "codex");
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models", catalog: untouchedCatalog() };

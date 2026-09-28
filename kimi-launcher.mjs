@@ -18,7 +18,7 @@ import { realpathSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
 import {
   extractManagedProviders,
-  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
   mergeKimiConfigToml,
   readKimiConfigToml,
   writeKimiConfigTomlWithBackup,
@@ -36,7 +36,7 @@ export function kimiConfigPath(base = process.env) {
 
 export async function writeKimiConfig(store, port, token, sidecarRoot, configPath = kimiConfigPath(), effort = null) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "kimi");
+  const autoChannel = deriveAnyswitchChannel(store, "kimi");
   // 最后一个渠道被删空时也要走完合并：上一轮写进 config.toml 的托管块只能
   // 靠 sidecar 记住——它记录的是上一轮托管了哪些渠道，为空才说明确实没有
   // 残留需要清理，这时早退才是安全的。

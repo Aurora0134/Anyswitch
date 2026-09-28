@@ -1129,3 +1129,113 @@ describe("terminal attribution feed endpoint (/api/internal/detected-processes)"
     });
   });
 });
+
+// 虚拟模型（端点无关命名链）：裸名请求走自己的链，任何端点一致；链状态
+// 也跨端点共享（同一个全局路由键）。
+describe("virtual model routing (openai 路径，端点无关)", () => {
+  const VM_STORE = {
+    ...STORE,
+    virtualModels: [
+      { name: "my-vm", chain: [{ node: "chan-a", model: "model-a" }, { node: "chan-b", model: "model-b" }] },
+      { name: "off-vm", enabled: false, chain: [{ node: "chan-a", model: "model-a" }] },
+    ],
+  };
+  function createVmDeps({ upstreamFetch, store = VM_STORE } = {}) {
+    return {
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store }),
+      loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
+      upstreamFetch,
+      recordGeneration: () => {},
+      readGeneration: () => null,
+      getKeepAliveConfig: NO_RETRY,
+    };
+  }
+
+  it("请求我的虚拟模型名：先节点失败后退避下一节点，上游收到节点绑定模型", async () => {
+    const { upstreamFetch, calls, bodies } = memberRouter({
+      "chan-a": () => statusError(503),
+      "chan-b": () => healthyStream("recovered on B via vm"),
+    });
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      const res = await postChat(port, { model: "my-vm" });
+      assert.equal(res.status, 200);
+      const text = await res.text();
+      assert.ok(text.includes("recovered on B via vm"));
+      assert.deepEqual(calls, ["chan-a", "chan-b"]);
+      assert.equal(bodies[1].model, "model-b", "上游收到第二节点的绑定模型，不是虚拟模型名");
+    });
+  });
+
+  it("停用的虚拟模型名不被拦截：未知端点 + 名字直接 404，不碰上游", async () => {
+    const { upstreamFetch, calls } = memberRouter({});
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      // off-vm 是停用的虚拟模型；url 段 chan-a 上该 model 不存在 → 经典路径 404。
+      const res = await postChat(port, { model: "off-vm" });
+      assert.equal(res.status, 404);
+      assert.deepEqual(calls, [], "停用模型不查链、不发起上游调用");
+    });
+  });
+
+  it("未命名（不存在的虚拟模型）不拦截，由经典路径按 provider 模型 404 处理", async () => {
+    const { upstreamFetch, calls } = memberRouter({});
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      const res = await postChat(port, { model: "not-a-vm" });
+      assert.equal(res.status, 404);
+      assert.deepEqual(calls, []);
+    });
+  });
+
+  it("链状态跨端点共享：一个端点打出的降级粘位，另一端点的下一请求直接接走", async () => {
+    const { upstreamFetch, calls } = memberRouter({
+      "chan-a": () => statusError(503),
+      "chan-b": () => healthyStream("on B"),
+    });
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      // 前两次请求让 chan-a 连续失败（单次失败不降级——黄灯语义），降级锁定
+      // 后位置停在 chan-b。两次都从 zcode 发起。
+      for (let i = 0; i < 2; i += 1) {
+        const res = await postChat(port, { model: "my-vm", agentId: "zcode" });
+        assert.equal(res.status, 200);
+        await res.text();
+      }
+      assert.deepEqual(calls, ["chan-a", "chan-b", "chan-a", "chan-b"]);
+      // 第三次换成 kimi（不同端点）：链状态按虚拟模型名全局共享，plan 从粘位
+      // chan-b 起，不再探 chan-a。
+      const third = await postChat(port, { model: "my-vm", agentId: "kimi" });
+      assert.equal(third.status, 200);
+      await third.text();
+      assert.deepEqual(calls.slice(4), ["chan-b"], "降级粘位跨端点共享");
+    });
+  });
+
+  it("(models) 常驻 /v1/models（anthropic 通道）：无识别也列启用的虚拟模型；auto 不列", async () => {
+    const { upstreamFetch } = memberRouter({});
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
+        headers: { authorization: TOKEN },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      const ids = body.data.map((m) => m.id);
+      assert.ok(ids.includes("anthropic/my-vm"), "启用的虚拟模型对任何呼叫方可见（anthropic 别名）");
+      assert.ok(!ids.includes("anthropic/off-vm"), "停用的虚拟模型不出目录");
+      assert.ok(!ids.includes(AUTO_MODEL_ANTHROPIC_ID), "auto 需可识别端点且其链存在");
+    });
+  });
+
+  it("(models) per-provider /openai/<seg>/v1/models 同样列启用的虚拟模型", async () => {
+    const { upstreamFetch } = memberRouter({});
+    await withServer(createVmDeps({ upstreamFetch }), async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/openai/chan-a/v1/models`, {
+        headers: { authorization: TOKEN, "x-agent-id": "zcode" },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      const ids = body.data.map((m) => m.id);
+      assert.ok(ids.includes("auto"), "可识别端点 zcode 有链 → auto 在列");
+      assert.ok(ids.includes("my-vm"));
+      assert.ok(!ids.includes("off-vm"));
+    });
+  });
+});
