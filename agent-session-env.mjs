@@ -26,6 +26,7 @@ import { buildGrokLauncherEnv } from "./grok-launcher.mjs";
 import { buildPiLauncherEnv } from "./pi-launcher.mjs";
 import { buildDshLauncherEnv } from "./dsh-launcher.mjs";
 import { buildOpencodeLauncherEnv } from "./opencode-launcher.mjs";
+import { buildQoderLauncherEnv } from "./qoder-launcher.mjs";
 import {
   resolveClaudeExecutable,
   resolveCodexExecutable,
@@ -34,6 +35,7 @@ import {
   resolveDshExecutable,
   resolveOpencodeExecutable,
   resolveGrokExecutable,
+  resolveQoderCliExecutable,
 } from "./agent-discovery.mjs";
 
 // The resident relay on 47821 is the only credential route: the base URL is
@@ -46,10 +48,10 @@ const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 // Instance-id scheme caps, same as agent-metrics.mjs:158 (INSTANCE_ID_MAX_LEN).
 const INSTANCE_ID_MAX_LEN = 64;
 
-// Which CLI Agents may be launched into a terminal. zcode/qoder (and the Codex
-// desktop app) are GUI programs — they do not belong in a terminal tab. `name`
-// is the display name shared with environment-service.mjs CLIENTS so the tab,
-// the menu and the environment page all read the same.
+// 允许进终端的 CLI Agent。zcode 与 Codex 桌面端是纯 GUI 程序，不属于终端页签；
+// qoder 已有独立 CLI 形态（qodercli.exe，与环境检测同一执行体），收进白名单。
+// `name` 是显示名，与 environment-service.mjs CLIENTS 共用：页签、菜单与环境页
+// 读的是同一句。
 export const AGENT_TERMINAL_TARGETS = {
   claude: { name: "Claude Code", kind: "cli", unset: ["ANTHROPIC_API_KEY"] },
   codex: { name: "Codex", kind: "cli", unset: [] },
@@ -58,6 +60,7 @@ export const AGENT_TERMINAL_TARGETS = {
   dsh: { name: "DSH", kind: "cli", unset: [] },
   opencode: { name: "OpenCode", kind: "cli", unset: [] },
   grok: { name: "Grok Build", kind: "cli", unset: ["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"] },
+  qoder: { name: "Qoder", kind: "cli", unset: [] },
 };
 
 function agentError(message, code, cause) {
@@ -137,6 +140,7 @@ const EXECUTABLE_RESOLVERS = {
   dsh: resolveDshExecutable,
   opencode: resolveOpencodeExecutable,
   grok: resolveGrokExecutable,
+  qoder: resolveQoderCliExecutable,
 };
 
 function resolveAgentExecutable(agentId, base) {
@@ -197,6 +201,8 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       return buildDshLauncherEnv({ port, token, base: {} });
     case "opencode":
       return buildOpencodeLauncherEnv({ token, instanceId, base: {} });
+    case "qoder":
+      return buildQoderLauncherEnv({ token, base: {} });
     default:
       throw requireTarget(agentId);
   }

@@ -32,12 +32,17 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined } = {}) 
     DSH_EXECUTABLE: exe("dsh.cmd"),
     OPENCODE_EXECUTABLE: exe("opencode.exe"),
     GROK_EXECUTABLE: exe("grok.exe"),
-    // Codex is discovered by globbing <LOCALAPPDATA>\OpenAI\Codex\bin\<hash>\codex.exe
+    // Codex is discovered by globbing <LOCALAPPDATA>\OpenAI\Codex\bin\<hash>\codex.exe；
+    // qoder CLI 固定在 <USERPROFILE>\.qoder\bin\qodercli\qodercli.exe（resolveQoderCliExecutable
+    // 不收覆盖变量），fakeBase 直接摆出这份目录。
     LOCALAPPDATA: join(root, "local"),
+    USERPROFILE: join(root, "user"),
     ...(claudeSmallFast === undefined ? {} : { ANTHROPIC_SMALL_FAST_MODEL: claudeSmallFast }),
   };
   mkdirSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1"), { recursive: true });
   writeFileSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"), "");
+  mkdirSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
+  writeFileSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"), "");
   if (withStore) {
     mkdirSync(join(base.LOCALAPPDATA, "Anyswitch"), { recursive: true });
     writeFileSync(join(base.LOCALAPPDATA, "Anyswitch", "store.json"), JSON.stringify(withStore));
@@ -46,8 +51,8 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined } = {}) 
 }
 
 test("白名单只含进终端的 CLI Agent，桌面 GUI 不在列", () => {
-  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"]);
-  for (const banned of ["zcode", "qoder", "codex-desktop"]) {
+  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"]);
+  for (const banned of ["zcode", "codex-desktop"]) {
     assert.equal(AGENT_TERMINAL_TARGETS[banned], undefined, `${banned} 不得进终端`);
   }
   for (const [id, target] of Object.entries(AGENT_TERMINAL_TARGETS)) {
@@ -142,6 +147,11 @@ test("pi/dsh/opencode 带 relay 令牌，实例标签只有 pi 还发", () => {
     const opencode = buildAgentSessionEnv({ agentId: "opencode", token: TOKEN, base: fakeBase(root) });
     assert.deepEqual(Object.keys(opencode).sort(), ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"]);
     assert.equal(opencode.ANYSWITCH_RELAY_TOKEN, TOKEN);
+
+    // 与 dsh 同型：relay 令牌 + NO_PROXY 三键；实例 id 与 BYOK 配置同步都不收
+    const qoder = buildAgentSessionEnv({ agentId: "qoder", token: TOKEN, base: fakeBase(root) });
+    assert.deepEqual(Object.keys(qoder).sort(), ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"]);
+    assert.equal(qoder.ANYSWITCH_RELAY_TOKEN, TOKEN);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -182,12 +192,12 @@ test("终端启动的实例身份：能按连接属主认出来的端点一律�
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = { ...fakeBase(root), cwd: root };
-    // 这三家（加 dsh：它的 build*Env 本就不收实例 id）不带 x-agent-instance
-    // 时，relay 用 netstat 反查连接属主合成 "<agentId>-<pid>"，那才是实例行
-    // 唯一能对上进程扫描的身份。自造的随机标签只有数字尾巴折得进规范形，
-    // 折不进就把一次会话拆成两行：带面徽标的进程占位行零计数、带全部计数的
-    // 流量行读不出面，终端页的监测区与最近请求还按占位行 id 取数取到全零。
-    for (const agentId of ["kimi", "grok", "opencode", "dsh"]) {
+    // 这几家（加 dsh/qoder：它们的 build*Env 本就不收实例 id）不带
+    // x-agent-instance 时，relay 用 netstat 反查连接属主合成 "<agentId>-<pid>"，
+    // 那才是实例行唯一能对上进程扫描的身份。自造的随机标签只有数字尾巴折得进
+    // 规范形，折不进就把一次会话拆成两行：带面徽标的进程占位行零计数、带全部
+    // 计数的流量行读不出面，终端页的监测区与最近请求还按占位行 id 取数取到全零。
+    for (const agentId of ["kimi", "grok", "opencode", "dsh", "qoder"]) {
       const env = buildAgentSessionEnv({ agentId, token: TOKEN, base });
       assert.equal("ANYSWITCH_INSTANCE_ID" in env, false, `${agentId} 不发实例标签变量`);
       assert.equal("ANYSWITCH_AGENT_INSTANCE" in env, false, `${agentId} 不发实例标签变量`);

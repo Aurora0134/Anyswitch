@@ -562,6 +562,16 @@ export function kimiSurfaceLabel(surface) {
   return KIMI_SURFACE_LABELS[surface];
 }
 
+// claude 实例行的形态徽标：目前只有桌面合成行（foldClaudeDesktopSessions）
+// 会带形态，token 与 kimi 面徽标同源（"Desktop" 已在徽标与关于页使用，
+// 不新造文案）。未标形态的返回 null，行上不贴徽标。
+const CLAUDE_SURFACE_LABELS = { desktop: "Desktop" };
+
+export function claudeSurfaceLabel(surface) {
+  if (typeof surface !== "string" || !(surface in CLAUDE_SURFACE_LABELS)) return null;
+  return CLAUDE_SURFACE_LABELS[surface];
+}
+
 // 共用的分面计数：按面聚合 engine 进程号，读不出的那一档（null）排在最后，
 // 于是「副行加总 = 卡上进程数」是恒等式而不是巧合。
 function groupSurfaceCounts(enginePids, surfaceByPid) {
@@ -644,7 +654,31 @@ export function parseDshConsoleQueryOutput(out) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+}
+
+// Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
+// 取证 1.37937.1.0），镜像落在 C:\Program Files\WindowsApps\Claude_<版本>_…\
+// 下——同一形态约 5 个进程，逐 PID 成行会把一个桌面端拆成一排幽灵分身。
+// 桌面托管引擎按 <根>\claude-code\<semver>\claude.exe 落位，根只认
+// %LOCALAPPDATA%\Claude-3p、%LOCALAPPDATA%\Claude、%USERPROFILE%\.claude
+// 三个（真机取证 Claude-3p\claude-code\2.1.246\claude.exe），且锚定用户目录
+// 布局：Claude-3p / Claude 必须在 …\Users\<用户>\AppData\Local\ 之下，.claude
+// 必须在 …\Users\<用户>\ 正下——任意其他深度下同名的 claude 目录（用户手工
+// 维护的同形副本，如 D:\tools\claude\claude-code\<semver>\claude.exe）不折。
+// npm 全局 CLI 的下一段是 bin（…\node_modules\@anthropic-ai\claude-code\
+// bin\claude.exe），天然不命中引擎形状，保持逐 PID 旧行为。命中返回
+// "desktop"；无命令行或路径不在白名单一律返回 null——调用侧对 null 保持
+// 旧行为：宁可漏折，不可误折。
+const CLAUDE_DESKTOP_SHELL_PATH_RE = /[\\/]windowsapps[\\/]claude_\d/;
+const CLAUDE_DESKTOP_ENGINE_PATH_RE = /[\\/]users[\\/][^\\/]+[\\/](?:appdata[\\/]local[\\/]claude(?:-3p)?|\.claude)[\\/]claude-code[\\/]\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?[\\/]claude\.exe(?:[\s"']|$)/;
+
+export function claudeDesktopForm(commandLine) {
+  if (typeof commandLine !== "string" || commandLine.length === 0) return null;
+  const lower = commandLine.toLowerCase();
+  if (CLAUDE_DESKTOP_SHELL_PATH_RE.test(lower)) return "desktop";
+  if (CLAUDE_DESKTOP_ENGINE_PATH_RE.test(lower)) return "desktop";
+  return null;
 }
 
 function parseTasklistCsv(stdout) {
@@ -731,7 +765,12 @@ function parseTasklistCsv(stdout) {
       // keep the accept-by-name behavior (last fallback).
       if (commandLine === null || commandLine.includes("claude")) {
         result.claude += 1;
-        if (pid) result.claudePids.add(pid);
+        if (pid) {
+          result.claudePids.add(pid);
+          // 桌面形态标记（实例行折叠的唯一直接依据）：只认镜像路径白名单
+          // 形状，认不出不标——未标的 pid 维持逐 PID 成行。
+          if (claudeDesktopForm(commandLine) !== null) result.claudeDesktopPids.add(pid);
+        }
       }
     } else if (bucket === "opencode") {
       result.opencode += 1;
@@ -2642,6 +2681,76 @@ export function createAgentMetricsCollector(options = {}) {
     claudeSessions.set(key, session);
   }
 
+  // Claude 桌面形态收敛：MSIX 桌面壳（单形态约 5 个进程）与桌面托管引擎
+  // 同属一个桌面形态，逐 PID 成行会把一个桌面端拆成一排幽灵分身（Claude
+  // 3p 桌面端验证现场实测约 5 行）。扫描按镜像路径分型（claudeDesktopPids），
+  // 本轮读取时把分型命中的会话折成一条合成行 claude-desktop：计数类求和，
+  // 速率/错误/模型/spark 类取 lastSeen 最新的有值成员，startedAt 取最早、
+  // lastSeen 取最晚，形态标注 surface: "desktop" 供面板贴 Desktop 徽标。
+  // 折叠是纯读取侧呈现：claudeSessions 仍按 PID 跟踪生灭，PID 全灭时成员
+  // 一个不剩，合成行自然消失。分型读不出的行（CLI、无命令行的 tasklist
+  // 兜底、白名单外路径）原样逐 PID 保留——宁可漏折，不可误折。行序保持
+  // 首个桌面成员的原位置。
+  function foldClaudeDesktopSessions(sessions, desktopPids) {
+    if (!(desktopPids instanceof Set)) return sessions;
+    const members = sessions.filter((s) => desktopPids.has(s.pid));
+    if (members.length === 0) return sessions;
+    // 「lastSeen 最新的有值成员」读取器：合成行的速率/错误/模型类字段全部
+    // 走它，值与它的时间戳永远来自同一个成员会话。
+    const newestWith = (field) => {
+      let best = null;
+      for (const m of members) {
+        if (m[field] === null || m[field] === undefined) continue;
+        if (best === null || m.lastSeen >= best.lastSeen) best = m;
+      }
+      return best;
+    };
+    const ttftHolder = newestWith("lastTtftMs");
+    const sparkHolder = newestWith("sparkHistory");
+    const samplesHolder = newestWith("samples");
+    const modelHolder = newestWith("model");
+    const lastModelHolder = newestWith("lastModel");
+    const folded = {
+      id: "claude-desktop",
+      pid: null,
+      token: null,
+      surface: "desktop",
+      startedAt: Math.min(...members.map((m) => m.startedAt)),
+      lastSeen: Math.max(...members.map((m) => m.lastSeen)),
+      requests: members.reduce((sum, m) => sum + m.requests, 0),
+      activeRequests: members.reduce((sum, m) => sum + m.activeRequests, 0),
+      activeDurationMs: members.reduce((sum, m) => sum + m.activeDurationMs, 0),
+      promptTokens: members.reduce((sum, m) => sum + m.promptTokens, 0),
+      completionTokens: members.reduce((sum, m) => sum + m.completionTokens, 0),
+      cachedTokens: members.reduce((sum, m) => sum + m.cachedTokens, 0),
+      lastTtftMs: ttftHolder?.lastTtftMs ?? null,
+      lastError: newestWith("lastError")?.lastError ?? null,
+      errorActive: members.some((m) => m.errorActive),
+      sparkHistory: sparkHolder?.sparkHistory ?? null,
+      samples: samplesHolder?.samples ?? null,
+      model: modelHolder?.model ?? null,
+      providerId: modelHolder?.providerId ?? null,
+      viaAuto: modelHolder?.viaAuto === true,
+      lastModel: lastModelHolder?.lastModel ?? null,
+      lastProvider: lastModelHolder?.lastProvider ?? null,
+      lastViaAuto: lastModelHolder?.lastViaAuto === true,
+      ended: false,
+    };
+    const out = [];
+    let inserted = false;
+    for (const s of sessions) {
+      if (desktopPids.has(s.pid)) {
+        if (!inserted) {
+          out.push(folded);
+          inserted = true;
+        }
+        continue;
+      }
+      out.push(s);
+    }
+    return out;
+  }
+
   // Liveness is decided by the process list, not by a TTL. A session is alive
   // if its claude.exe PID is still running. Sessions whose PID has vanished
   // are marked ended; ended sessions linger for ENDED_DISPLAY_MS then purge.
@@ -2713,7 +2822,7 @@ export function createAgentMetricsCollector(options = {}) {
       }
       active.push(s);
     }
-    return active;
+    return foldClaudeDesktopSessions(active, procCounts.claudeDesktopPids);
   }
 
   async function getAgentsStatus() {
@@ -3035,6 +3144,9 @@ export function createAgentMetricsCollector(options = {}) {
         // reporter starts sending it) — feeds the per-session model badge.
         model: s.model ?? null,
         providerId: s.providerId ?? null,
+        // 形态徽标：仅桌面合成行（claude-desktop）携带，贴 "Desktop"；
+        // 逐 PID 的 CLI/未分型行不贴，外观与折叠前逐字一致。
+        ...(s.surface ? { surface: claudeSurfaceLabel(s.surface) } : {}),
       };
     });
 

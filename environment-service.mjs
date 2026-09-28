@@ -4,13 +4,13 @@ import { join, dirname, resolve, isAbsolute, extname, basename, relative } from 
 import {
   resolveClaudeExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
-  resolveZcodeExecutable, resolveGrokExecutable,
+  resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
 } from "./agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
-// Qoder is a desktop-only client here: ~/.qoder/entry/qoder.cmd is the IDE's
-// own command dispatcher (the `code.cmd`-style shim the IDE installer drops),
-// not a separately installed CLI product, so it is not a detection target.
+// Qoder 桌面端在这里检测；~/.qoder/entry/qoder.cmd 是 IDE 自带的命令调度器
+// （IDE 安装器丢下的 code.cmd 式垫片），不是独立安装的 CLI 产品，不做检测目标。
+// CLI 形态的检测目标是 ~/.qoder/bin/qodercli/qodercli.exe（resolveQoderCliExecutable）。
 function resolveQoderExecutable(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
 }
@@ -96,6 +96,24 @@ const CLIENTS = [
 ];
 
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
+
+// 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
+// --version（inspect 里的 probeVersion 分支），探不出来降级 not_runnable。
+const PROBE_VERSION_CLIENTS = new Set(["grok", "qoder-cli"]);
+
+// 各端点实际存在的产品形态枚举（数据面常量）。表与数组双层冻结：这是关于页
+// 与各形态接线共用的跨模块契约，运行期不许改写。
+export const CLIENT_ENTRY_FORMS = Object.freeze({
+  kimi: Object.freeze(["CLI", "Desktop", "Web"]),
+  codex: Object.freeze(["CLI", "Desktop"]),
+  qoder: Object.freeze(["CLI", "Desktop"]),
+  claude: Object.freeze(["CLI", "Desktop"]),
+  dsh: Object.freeze(["CLI", "Web"]),
+  pi: Object.freeze(["CLI"]),
+  opencode: Object.freeze(["CLI"]),
+  grok: Object.freeze(["CLI"]),
+  zcode: Object.freeze(["Desktop"]),
+});
 
 function missing(error) {
   return ["ENOENT", "ENOTDIR"].includes(error?.code);
@@ -222,7 +240,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       if (["codex", "pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
       if (!path || !isFile(path)) return result;
       Object.assign(result, { status: "found", path, issue: "version_unavailable" });
-      if (id === "grok") {
+      if (PROBE_VERSION_CLIENTS.has(id)) {
         const probe = await probeVersion(path);
         if (probe?.missing) return { ...result, status: "not_found", path: null, issue: "entry_missing" };
         return probe?.version
@@ -277,12 +295,15 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     const at = now();
     if (!force && cache && at - cache.at < ttl) return cache.state;
     const clients = await Promise.all(CLIENTS.map(async ([id, name, resolver]) => {
-      // Codex is two installations in one card: the npm CLI (index 0, what the
-      // update button manages) and the Microsoft Store desktop app.
+      // Codex 与 Qoder 都是一张卡两条安装记录（顺序照 Codex 先例 [cli, desktop]）：
+      // Codex index 0 是更新按钮代管的 npm CLI、index 1 是 Microsoft Store 桌面端；
+      // Qoder index 0 是 qodercli.exe 原生 CLI、index 1 是桌面 IDE。
       const installations = await Promise.all(id === "codex"
         ? [inspect(id, "cli", resolver), inspectCodexDesktop()]
-        : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
-      return { id, name, installations };
+        : id === "qoder"
+          ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
+          : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
+      return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };
     cache = { at, state };

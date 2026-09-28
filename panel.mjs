@@ -1166,9 +1166,11 @@ export function createPanelRouter({
       .clients.find((client) => client.id === id);
     // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
     // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
+    // 查询渠道按被更新那条安装项的 remoteId 取：qoder 的客户端 id 挂在桌面端渠道上，
+    // CLI 形态的官方版本要走 installations[0] 的 "qoder-cli"。
     const targetVersion = kind === "native"
       ? await getReleaseService()
-        .then((service) => service.getClientLatest(id))
+        .then((service) => service.getClientLatest(before?.installations?.[0]?.remoteId ?? id))
         .then((data) => (data?.state === "ok" ? data.version : null))
         .catch(() => null)
       : null;
@@ -1185,6 +1187,8 @@ export function createPanelRouter({
       targetVersion,
       commandPath: before?.installations?.[0]?.path ?? null,
       beforeVersion: before?.installations?.[0]?.version ?? null,
+      // 逐形态 before 版本与 beforeVersion 是同一刻快照：worker 不再自己读。
+      beforeByForm: Object.fromEntries((before?.installations ?? []).map((i) => [i.kind, i.version ?? null])),
     };
     // 先落盘再拉起：进程抢在登记之前退出时，不能留下一个没有记录的安装。
     writeClientUpdateRun(updateJournalDir, run);
@@ -1781,7 +1785,7 @@ export function createPanelRouter({
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].includes(id)) {
+      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "qoder-cli", "grok"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {

@@ -1425,9 +1425,11 @@ async function api(method, path, body) {
 
       // 实例按行排列：无实例时用会话求和派生的聚合量渲染一行「全局汇总」伪实例行，
       // 收起态不为空；静态「全局汇总」行的门控/展开规则与其他多实例栏一致。
+      // showSurface：桌面形态收敛成的 claude-desktop 行贴一枚 Desktop 徽标
+      //（与 kimi 行徽标同一渲染位、同一 token），逐 PID 行无徽标不变。
       const isGenerating = sessions.some((s) => s.activeRequests > 0 || s.status === "active");
       const agg = claudeAggregateMetrics(sessions);
-      renderInstanceRows({ prefix: "cc", listEl: list, instances: sessions, aggregateFallback: buildAggregateFallback(agg, c, isGenerating) });
+      renderInstanceRows({ prefix: "cc", listEl: list, instances: sessions, showSurface: true, aggregateFallback: buildAggregateFallback(agg, c, isGenerating) });
       applyDetailFold("cc");
       gateAggregateRow("cc", $("ccSessionRow"), sessions.length);
 
@@ -2184,12 +2186,13 @@ async function api(method, path, body) {
       dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],
       // 原生二进制没有公开仓库发布页，官方来源只有 npm 包页（与服务端 release-service 同源）。
       grok: ["", "@xai-official/grok"],
+      "qoder-cli": ["", "@qoder-ai/qodercli"],
       zcode: [], qoder: [],
     };
-    // 面板可代管「更新」的客户端：npm 全局包按包名重装最新版，Grok Build 先跑它自身的
-    // 升级命令。服务端 client-lifecycle.mjs 的 CLIENT_PACKAGES / NATIVE_CLIENTS 才是权威，
-    // 这里只决定按钮是否出现，两份清单的一致性由 client-lifecycle.test.mjs 钉住。
-    const updatableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh", "grok"]);
+    // 面板可代管「更新」的客户端：npm 全局包按包名重装最新版，Grok Build / Qoder CLI
+    // 跑自身的升级命令。服务端 client-lifecycle.mjs 的 CLIENT_PACKAGES / NATIVE_CLIENTS
+    // 才是权威，这里只决定按钮是否出现，两份清单的一致性由 client-lifecycle.test.mjs 钉住。
+    const updatableClients = new Set(["claude", "codex", "opencode", "pi", "kimi", "dsh", "grok", "qoder"]);
     // 未安装时面板代为装包的客户端：只有 npm 全局包这一条路。zcode / qoder 是桌面应用，
     // 走官方更新渠道；Grok Build 未安装时只报未找到——从裸装起会把用户切进另一种安装
     // 形态，这件事不由关于页的一个按钮代劳。
@@ -2451,66 +2454,98 @@ async function api(method, path, body) {
       details.appendChild(element("summary", "", "路径与版本来源"));
       const list = element("dl", "");
       function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
+      // 主行归并为每端点一行：徽标｜本地版本｜官方最新｜结论｜动作位。
+      // 徽标是端点入口形态枚举（服务端 entryForms 数据下发），「/」连写。
+      const primary = client.installations[0] ?? null;
+      const forms = Array.isArray(client.entryForms) && client.entryForms.length
+        ? client.entryForms
+        : [...new Set(client.installations.map((installation) => (installation.kind === "desktop" ? "Desktop" : "CLI")))];
+      const remoteOf = (installation) => (installation?.remoteId ? remoteCache.get(cacheKey(installation))?.data ?? null : null);
+      const goodRemote = (installation) => {
+        const remote = remoteOf(installation);
+        return remote?.state === "ok" && remote.version ? remote : null;
+      };
+      const formTag = (installation) => (installation.kind === "desktop" ? "Desktop" : "CLI");
+      const localStatus = (installation) => installation.status === "not_found" ? "未找到"
+        : installation.status !== "found" ? "检测失败"
+        : installation.issue === "not_runnable" ? "已安装但无法运行"
+        : !validLocal(installation) ? "版本无法读取" : "已发现";
+      const line = element("div", "about-version-line");
+      line.appendChild(element("span", "about-kind", forms.join("/")));
+      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex 例外：两形态的版本都摆，
+      // 带形态小注并排；某形态没装（not_found）不占位，装着却读不出版本时状态词占它的位。
+      const localParts = [];
+      if (client.id === "codex") {
+        for (const installation of client.installations) {
+          if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
+          else if (installation.status !== "not_found") localParts.push(localStatus(installation));
+        }
+      } else if (primary && primary.status === "found" && primary.version) {
+        localParts.push(primary.version);
+      }
+      const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : primary ? localStatus(primary) : "未找到"}`);
+      if (primary && (primary.status === "error" || primary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
+      line.appendChild(localSpan);
+      // 官方最新格：主更新形态那条渠道的版本。codex 的桌面渠道官方版本查得到就同口径并排，
+      // 查不到不占位；没有官方版本源的端点直述「自带更新」。
+      const primaryRemote = goodRemote(primary);
+      let remoteText = "自带更新";
+      if (primary?.remoteId) {
+        const remoteParts = [];
+        if (primaryRemote) remoteParts.push(client.id === "codex" ? `${formTag(primary)} ${primaryRemote.version}` : primaryRemote.version);
+        else remoteParts.push(loading ? "查询中…" : "查询失败");
+        if (client.id === "codex") {
+          for (const installation of client.installations.slice(1)) {
+            const remote = goodRemote(installation);
+            if (remote) remoteParts.push(`${formTag(installation)} ${remote.version}`);
+          }
+        }
+        remoteText = remoteParts.join(" · ");
+      }
+      line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
+      // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿，前端不拼逐形态消息。
+      const comparison = primaryRemote && validLocal(primary) ? primaryRemote.comparison : "unknown";
+      const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
+      // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词
+      const resultText = compared || (primaryRemote ? "无法比较版本" : "");
+      if (resultText) {
+        const result = element("span", "about-result", resultText);
+        result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "";
+        line.appendChild(result);
+      }
+      if (loading && remoteOf(primary)) line.appendChild(element("span", "about-meta", "查询中…"));
+      // 动作位端点级一颗：本端点任务在跑 > 可更新/可安装；锁按客户端分，别人在跑不影响本行。
+      if (primary && updatableClients.has(client.id)) {
+        let intent = null;
+        const act = installationAction(client, primary);
+        const ownRun = lifecycleRuns.get(client.id);
+        if (act) {
+          intent = ownRun
+            ? { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true }
+            : { label: act.kind === "update" ? "更新" : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
+        }
+        if (intent) {
+          const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
+          actionButton.type = "button";
+          actionButton.disabled = intent.disabled;
+          if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
+          line.appendChild(actionButton);
+        }
+      }
+      lines.appendChild(line);
+      // 详情区逐形态补行：路径、版本来源、官方来源、查询时间，一条安装记录一组。
       for (const installation of client.installations) {
-        const cached = remoteCache.get(cacheKey(installation));
-        const remote = cached?.data;
-        const goodRemote = remote?.state === "ok" && !!remote.version;
         const kind = installation.kind === "desktop" ? "桌面" : "CLI";
-        const found = installation.status === "found";
-        const localStatus = installation.status === "not_found" ? "未找到"
-          : !found ? "检测失败"
-          : installation.issue === "not_runnable" ? "已安装但无法运行"
-          : !validLocal(installation) ? "版本无法读取" : "已发现";
-        const line = element("div", "about-version-line");
-        line.appendChild(element("span", "about-kind", kind));
-        const localSpan = element("span", "about-version", `本地 ${found && installation.version ? installation.version : localStatus}`);
-        if (installation.status === "error" || installation.issue === "not_runnable") localSpan.dataset.tone = "danger";
-        line.appendChild(localSpan);
-        // 没有官方版本源的安装项不查官方版本，官方列直述「自带更新」
-        const remoteText = !installation.remoteId ? "自带更新" : goodRemote ? remote.version : loading ? "查询中…" : "查询失败";
-        line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
-        const comparison = goodRemote && validLocal(installation) ? remote.comparison : "unknown";
-        const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
-        // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词
-        const resultText = compared || (goodRemote ? "无法比较版本" : "");
-        if (resultText) {
-          const result = element("span", "about-result", resultText);
-          result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "";
-          line.appendChild(result);
-        }
-        if (loading && remote) line.appendChild(element("span", "about-meta", "查询中…"));
-        // 动作位：本行任务在跑 > 可更新/可安装；其他行在跑不影响本行（锁按客户端分）。
-        // 「更新中…」只落在本来有动作位的行：客户端锁防的是同一个 npm 包并发安装，
-        // 不代表卡片里每行安装项都被动到（codex 桌面行不经面板更新，不该陪跑显示更新中）。
-        if (updatableClients.has(client.id)) {
-          let intent = null;
-          const act = installationAction(client, installation);
-          const ownRun = lifecycleRuns.get(client.id);
-          if (act) {
-            // 批量更新按行串行推进：正在跑的那行显「更新中…」，排队等着的行先禁点，
-            // 免得出两个任务同时更新同一行。
-            intent = ownRun
-              ? { label: ownRun.action === "install" ? "安装中…" : "更新中…", disabled: true }
-              : { label: act.kind === "update" ? `更新到 ${act.version}` : "安装", action: act.kind, disabled: Boolean(lifecycleBatch) };
-          }
-          if (intent) {
-            const actionButton = element("button", "btn btn-mini about-client-action", intent.label);
-            actionButton.type = "button";
-            actionButton.disabled = intent.disabled;
-            if (!intent.disabled) actionButton.onclick = () => updateClient(client.id, intent.action);
-            line.appendChild(actionButton);
-          }
-        }
-        lines.appendChild(line);
         detail(`${kind} 路径`, installation.path || "未找到");
         detail(`${kind} 版本来源`, sourceText(installation.versionSource));
-        const href = safeLink(remote?.url, installation.remoteId);
+        const href = safeLink(remoteOf(installation)?.url, installation.remoteId);
         if (href) {
           const target = element("dd", "");
           const link = element("a", "about-link", "查看官方版本");
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
           target.appendChild(link); list.append(element("dt", "", `${kind} 官方来源`), target);
         }
+        const remote = remoteOf(installation);
         if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));
       }
       if (local?.checkedAt) detail("检测时间", timeText(local.checkedAt));
@@ -4268,7 +4303,7 @@ async function api(method, path, body) {
 
   // 「+」新建菜单：先选一个已安装的 CLI Agent（或空白终端），再填工作目录。
   // agent 清单取自环境检测（60s 缓存）；拉取失败只留空白终端，不挡住新建。
-  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"];
+  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"];
   let terminalAddMenuAgents = [];
   let terminalAddMenuAgentsAt = 0;
   let terminalAddMenuSelection = "";

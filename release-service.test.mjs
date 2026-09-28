@@ -1,6 +1,7 @@
 import { it } from "node:test";
 import assert from "node:assert/strict";
-import { createReleaseService } from "./release-service.mjs";
+import { readFileSync } from "node:fs";
+import { createReleaseService, CLIENTS } from "./release-service.mjs";
 
 const checkedAt = "2026-09-18T08:00:00.000Z";
 const now = () => Date.parse(checkedAt);
@@ -261,6 +262,8 @@ it("queries npm latest for each fixed CLI package, preserving preview channels",
     ["pi", "@earendil-works/pi-coding-agent", "0.85.1", "https://github.com/earendil-works/pi/releases"],
     ["kimi", "@moonshot-ai/kimi-code", "2.0.0", "https://github.com/MoonshotAI/kimi-code/releases"],
     ["dsh", "@deepseek-ai/dsh", "0.1.5-rc.2", "https://github.com/deepseek-ai/deepseek-harness/releases"],
+    // Qoder CLI 与 Grok Build 同型（原生二进制、官方分发走 npm），官方链接指 npm 包页。
+    ["qoder-cli", "@qoder-ai/qodercli", "1.1.64", "https://www.npmjs.com/package/@qoder-ai/qodercli"],
   ];
   for (const [id, name, version, page] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {
@@ -274,4 +277,16 @@ it("queries npm latest for each fixed CLI package, preserving preview channels",
       state: "ok", version, url: page, source: `npm:${name}:latest`, checkedAt, errorCode: null,
     });
   }
+});
+
+it("pins the panel /latest whitelist to the full CLIENTS table — 加客户端漏一侧即红", () => {
+  // 白名单是 panel.mjs 路由里的数组字面量，CLIENTS 是本模块的查询表，两张表分居
+  // 两处：此前只有 qoder-cli / codex-desktop 两个单点钉，新增客户端漏改一侧不会
+  // 被任何测试抓住。照 client-lifecycle.test.mjs 读 panel.js 源码比对的钉法，这里
+  // 读 panel.mjs 源码取出白名单键集合，与 CLIENTS 键集合排序后双向比对：任一侧
+  // 多出或缺少客户端都会红。
+  const panelSource = readFileSync(new URL("./panel.mjs", import.meta.url), "utf8");
+  const match = panelSource.match(/startsWith\("\/panel\/api\/environment\/latest\/"\)[\s\S]*?if \(!(\[[^\]]*\])\.includes\(id\)\)/);
+  assert.ok(match, "panel.mjs 的 /latest 路由里存在白名单数组字面量");
+  assert.deepEqual(JSON.parse(match[1]).sort(), Object.keys(CLIENTS).sort());
 });

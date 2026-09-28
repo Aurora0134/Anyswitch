@@ -7,6 +7,8 @@ import {
   createAgentMetricsCollector,
   createSessionReporter,
   buildDshConsoleQuery,
+  claudeDesktopForm,
+  claudeSurfaceLabel,
   dshProfileNameFrom,
   kimiSurfaceLabel,
   summarizeKimiSurfaces,
@@ -4333,6 +4335,171 @@ describe("claude process-scan helper filtering and ended-latch revival", () => {
     card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 1, "live PID revives the row instead of staying hidden behind the ended latch");
     assert.equal(card.sessions[0].id, "claude-5555");
+  });
+});
+
+describe("claude desktop form folding (MSIX shell + managed engine → one claude-desktop row)", () => {
+  const wmic = (rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const claude = (status) => status.find((a) => a.id === "claude");
+  const SHELL = "C:\\Program Files\\WindowsApps\\Claude_1.37937.1.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe";
+  const ENGINE_3P = "C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.246\\claude.exe";
+
+  it("classifies desktop shell/engine image paths and rejects CLI or unknown shapes", () => {
+    // MSIX 桌面壳（真机包路径形状 1.37937.1.0），主进程与 --type= 助手同一形态
+    assert.equal(claudeDesktopForm(SHELL), "desktop");
+    assert.equal(claudeDesktopForm(`${SHELL} --type=renderer`), "desktop");
+    assert.equal(claudeDesktopForm(`"${SHELL}"`), "desktop");
+    // 桌面托管引擎的三个根（3p 真机取证 claude-code\2.1.246\claude.exe）
+    assert.equal(claudeDesktopForm(ENGINE_3P), "desktop");
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\.claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
+    // npm 全局 CLI：claude-code 的下一段是 bin 而非 semver —— 不折
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"), null);
+    // 引擎根锚定用户目录布局：%LOCALAPPDATA%\claude 根照样折
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\claude\\claude-code\\9.9.9\\claude.exe"), "desktop");
+    // 非用户目录下同名的 claude 目录（用户手工维护的同形副本）不认，退回逐 PID 旧行
+    assert.equal(claudeDesktopForm("D:\\tools\\claude\\claude-code\\9.9.9\\claude.exe"), null);
+    // 白名单外路径 / 无命令行：认不出，退回逐 PID 旧行为
+    assert.equal(claudeDesktopForm("C:\\Programs\\claude.exe"), null);
+    assert.equal(claudeDesktopForm(""), null);
+    assert.equal(claudeDesktopForm(null), null);
+  });
+
+  it("exposes the Desktop badge token only for the desktop form", () => {
+    assert.equal(claudeSurfaceLabel("desktop"), "Desktop");
+    assert.equal(claudeSurfaceLabel("cli"), null);
+    assert.equal(claudeSurfaceLabel(null), null);
+  });
+
+  it("folds the multi-process MSIX shell (≈5 pids) into a single claude-desktop row", async () => {
+    const csv = wmic([
+      `LAPTOP,${SHELL},Claude.exe,6200`,
+      `LAPTOP,${SHELL} --type=gpu-process,Claude.exe,6201`,
+      `LAPTOP,${SHELL} --type=renderer,Claude.exe,6202`,
+      `LAPTOP,${SHELL} --type=utility,Claude.exe,6203`,
+      `LAPTOP,${SHELL} --type=crashpad-handler,Claude.exe,6204`,
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 5, "card process count keeps counting the whole family");
+    assert.equal(card.sessionsCount, 1, "one desktop form — one instance row");
+    assert.equal(card.sessions[0].id, "claude-desktop");
+    assert.equal(card.sessions[0].surface, "Desktop");
+    assert.equal(card.sessions[0].requests, 0);
+    assert.equal(card.sessions[0].status, "idle");
+  });
+
+  it("folds same-image desktop engine pids into the same synthetic row", async () => {
+    const csv = wmic([
+      `LAPTOP,${ENGINE_3P},claude.exe,6100`,
+      `LAPTOP,${ENGINE_3P},claude.exe,6101`,
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 1, "two engine processes are one desktop session row");
+    assert.equal(card.sessions[0].id, "claude-desktop");
+  });
+
+  it("keeps npm-CLI claude.exe rows per-pid — old behavior verbatim", async () => {
+    const csv = wmic([
+      "LAPTOP,C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,24956",
+      "LAPTOP,C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,24957",
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 2, "CLI sessions stay one row per pid");
+    assert.deepEqual(card.sessions.map((s) => s.id), ["claude-24956", "claude-24957"]);
+    assert.ok(card.sessions.every((s) => s.surface === undefined), "CLI rows carry no badge");
+  });
+
+  it("falls back to per-pid rows when the scan carries no command line (tasklist)", async () => {
+    const csv = `"claude.exe","6200","Console","1","55,000 K"\r\n"claude.exe","6201","Console","1","9,000 K"\r\n`;
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 2, "unreadable paths never fold — 宁可漏折不可误折");
+    assert.deepEqual(card.sessions.map((s) => s.id), ["claude-6200", "claude-6201"]);
+  });
+
+  it("lists the folded desktop row side by side with per-pid CLI rows", async () => {
+    const csv = wmic([
+      `LAPTOP,${SHELL},Claude.exe,6200`,
+      `LAPTOP,${SHELL} --type=renderer,Claude.exe,6201`,
+      "LAPTOP,C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,24956",
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 2);
+    assert.deepEqual(card.sessions.map((s) => s.id), ["claude-desktop", "claude-24956"],
+      "folded row takes the first desktop member's slot");
+    assert.equal(card.sessions[0].surface, "Desktop");
+    assert.equal(card.sessions[1].surface, undefined);
+  });
+
+  it("aggregates counters and keeps the freshest telemetry across folded members", async () => {
+    const csv = wmic([
+      `LAPTOP,${ENGINE_3P},claude.exe,6100`,
+      `LAPTOP,${ENGINE_3P},claude.exe,6101`,
+    ]);
+    let t = 10000;
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => t });
+
+    collector.reportSession("token_a", {
+      pid: 6100,
+      requests: 3,
+      activeRequests: 0,
+      activeDurationMs: 5000,
+      promptTokens: 300,
+      completionTokens: 60,
+      cachedTokens: 30,
+      lastTtftMs: 1200,
+    });
+    collector.reportSession("token_b", {
+      pid: 6101,
+      requests: 2,
+      activeRequests: 1,
+      activeDurationMs: 4000,
+      promptTokens: 200,
+      completionTokens: 40,
+      cachedTokens: 20,
+    });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 1);
+    const row = card.sessions[0];
+    assert.equal(row.id, "claude-desktop");
+    assert.equal(row.status, "active", "any busy member activates the folded row");
+    assert.equal(row.requests, 5, "counters sum across members");
+    assert.equal(row.tokens.prompt, 500);
+    assert.equal(row.tokens.completion, 100);
+    assert.equal(row.tokens.cached, 50);
+    assert.equal(row.activeDurationMs, 9000);
+    assert.equal(row.lastTtftMs, 1200, "telemetry comes from the freshest member carrying a value");
+  });
+
+  it("drops the folded row once every desktop process is gone", async () => {
+    let alive = true;
+    const execFn = (cmd, opts, cb) =>
+      cb(null, alive
+        ? wmic([`LAPTOP,${SHELL},Claude.exe,6200`, `LAPTOP,${SHELL} --type=gpu-process,Claude.exe,6201`])
+        : wmic([]));
+    let t = 10000;
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    let card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 1);
+    assert.equal(card.sessions[0].id, "claude-desktop");
+
+    alive = false;
+    t += 3000; // past the 2.5s scan cache so the read rescans
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+    card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 0, "members all ended → synthetic row vanishes with them");
   });
 });
 

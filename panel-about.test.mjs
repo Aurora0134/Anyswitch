@@ -53,16 +53,35 @@ function deferred() {
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const appInfo = { version: "0.5.0-preview", prerelease: true, platform: "win32", nodeVersion: "v24.13.0" };
 const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"];
+// 与生产 CLIENT_ENTRY_FORMS 同形的端点入口形态枚举（数据下发，徽标按它「/」连写）
+const ENTRY_FORMS = {
+  claude: ["CLI", "Desktop"], codex: ["CLI", "Desktop"], opencode: ["CLI"], pi: ["CLI"],
+  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Web"], zcode: ["Desktop"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
+};
 function environment() {
   return {
     platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
     clients: ids.map((id) => ({
-      id, name: id,
-      installations: (id === "qoder" || id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
-        kind, remoteId: id, // 九个客户端都有官方版本源，逐行发起查询（与生产行为一致）
-        status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
-        versionSource: "package-json", issue: null,
-      })),
+      id, name: id, entryForms: ENTRY_FORMS[id],
+      // 与生产同形：qoder / codex 一张卡两条安装记录。qoder index 0 是 qodercli.exe 原生
+      // CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；codex index 0 是 npm
+      // CLI、index 1 是 Store 桌面端、remoteId codex-desktop。九个客户端都有官方版本源，
+      // 逐安装记录发起查询，主行只呈现每端点一行。
+      installations: id === "qoder"
+        ? [
+          { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:\\Apps\\qoder\\qodercli.exe", version: "1.0.0", versionSource: "cli --version", issue: null },
+          { kind: "desktop", remoteId: "qoder", status: "found", path: "C:\\Apps\\qoder\\desktop", version: "2.0.0", versionSource: "app.asar/package.json", issue: null },
+        ]
+        : id === "codex"
+          ? [
+            { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+            { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
+          ]
+        : (id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
+          kind, remoteId: id,
+          status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
+          versionSource: "package-json", issue: null,
+        })),
     })),
   };
 }
@@ -136,9 +155,13 @@ test("enter renders local data before official replies; remote concurrency is bo
   for (let index = 1; index < pending.length; index++) { pending[index].resolve(latest()); await tick(); }
   await entering;
   assert.equal(h.get("aboutEnvironmentRefresh").disabled, false);
-  assert.match(h.row("qoder").textContent, /桌面.*本地.*2\.0\.0/);
-  assert.doesNotMatch(h.row("qoder").textContent, /CLI/);
-  assert.equal(descendants(h.row("qoder"), (node) => node.className === "about-version-line").length, 1);
+  const qoderLines = descendants(h.row("qoder"), (node) => node.className === "about-version-line");
+  assert.equal(qoderLines.length, 1, "qoder 双形态归并为每端点一行");
+  assert.equal(descendants(qoderLines[0], (node) => node.className === "about-kind")[0].textContent, "CLI/Desktop", "徽标读 entryForms「/」连写");
+  assert.match(qoderLines[0].textContent, /本地 1\.0\.0/);
+  assert.doesNotMatch(qoderLines[0].textContent, /2\.0\.0/, "桌面形态版本不在主行呈现");
+  assert.equal(descendants(h.row("kimi"), (node) => node.className === "about-kind")[0].textContent, "CLI/Desktop/Web");
+  assert.equal(descendants(h.row("pi"), (node) => node.className === "about-kind")[0].textContent, "CLI");
 });
 
 test("update check runs once on entry and the button forces a fresh check; all server states render", async () => {
@@ -201,7 +224,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 9, "九个客户端都有官方版本源，各查一次");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 11, "九个客户端都有官方版本源，各安装记录各查一次（qoder CLI 与桌面、codex CLI 与桌面各一条渠道）");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -276,7 +299,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   await tick(); await tick();
   assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 9, "九个客户端都有官方版本源，各查一次");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 11, "九个客户端都有官方版本源，各安装记录各查一次（qoder CLI 与桌面、codex CLI 与桌面各一条渠道）");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {
@@ -335,60 +358,49 @@ test("DSH 官方来源链接放行真实仓库 deepseek-harness", async () => {
   assert.equal(links[0].href, "https://github.com/deepseek-ai/deepseek-harness/releases");
 });
 
-test("Codex 一张卡片两行：CLI 行带更新按钮，桌面行查 codex-desktop 且无动作位", async () => {
-  const local = environment();
-  local.clients[1].installations = [
-    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
-    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
-  ];
+test("Codex 双形态归并为一行：徽标 CLI/Desktop、本地与官方格双版本并排带形态小注、端点级一个更新按钮", async () => {
   const h = harness((path) => {
     if (path.includes("/latest/codex-desktop")) return { ...latest("26.915.4066"), url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS" };
-    if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
     return normal(path);
   });
   await h.controller.enter();
   const row = h.row("codex");
   assert.equal(h.get("aboutClients").children.length, 9, "桌面安装项不额外开卡");
   const lines = descendants(row, (node) => node.className === "about-version-line");
-  assert.equal(lines.length, 2, "CLI 与桌面各占一行");
-  assert.deepEqual(lines.map((line) => descendants(line, (node) => node.className === "about-kind")[0].textContent), ["CLI", "桌面"]);
-  assert.match(lines[0].textContent, /本地.*1\.0\.0/);
-  assert.match(lines[1].textContent, /本地.*26\.915\.4065.*官方最新.*26\.915\.4066/);
-  const cliActions = descendants(lines[0], (node) => node.tagName === "button" && node.className.includes("about-client-action"));
-  assert.equal(cliActions.length, 1);
-  assert.match(cliActions[0].textContent, /更新到 1\.1\.0/);
-  assert.equal(descendants(lines[1], (node) => node.tagName === "button" && node.className.includes("about-client-action")).length, 0, "桌面应用不经面板更新");
-  assert.ok(h.calls.includes("/api/environment/latest/codex-desktop?localVersion=26.915.4065"), "桌面行的官方最新单元格走 codex-desktop 远端 id");
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(7\)/, "桌面行不把批量更新数多算一次");
+  assert.equal(lines.length, 1, "codex 两形态归并为每端点一行");
+  assert.equal(descendants(lines[0], (node) => node.className === "about-kind")[0].textContent, "CLI/Desktop");
+  assert.match(lines[0].textContent, /本地 CLI 1\.0\.0 · Desktop 26\.915\.4065/);
+  assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 26\.915\.4066/);
+  const actions = descendants(lines[0], (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "端点级一个动作位");
+  assert.equal(actions[0].textContent, "更新");
+  assert.ok(h.calls.includes("/api/environment/latest/codex-desktop?localVersion=26.915.4065"), "桌面渠道的官方版本照常按 codex-desktop 远端 id 查询");
+  assert.match(row.textContent, /桌面 路径C:\\Apps\\codex\\desktop/, "桌面形态的路径在详情区逐形态补行");
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/, "批量更新按端点计一次，qoder 同此");
 });
 
-test("Codex 桌面行的官方来源链接放行 Microsoft Store，仿冒域名被丢弃", async () => {
-  const local = environment();
-  local.clients[1].installations = [
-    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
-    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
-  ];
+test("Codex 桌面渠道的官方来源链接放行 Microsoft Store，仿冒域名被丢弃", async () => {
   const dual = (desktopUrl) => harness((path) => {
     if (path.includes("/latest/codex-desktop")) return { ...latest("26.915.4066"), url: desktopUrl };
     if (path.includes("/latest/codex?")) return { ...latest("1.1.0"), url: "https://github.com/openai/codex" };
-    if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
     return normal(path);
   });
   const allowed = dual("https://apps.microsoft.com/detail/9PLM9XGG6VKS");
   await allowed.controller.enter();
   const links = descendants(allowed.row("codex"), (node) => node.tagName === "a");
-  assert.equal(links.length, 2);
+  assert.equal(links.length, 2, "详情区逐形态各留一条官方来源链接");
   const store = links.find((node) => node.href === "https://apps.microsoft.com/detail/9PLM9XGG6VKS");
-  assert.ok(store, "桌面行的查看官方版本链接指向 Microsoft Store");
+  assert.ok(store, "桌面形态的查看官方版本链接指向 Microsoft Store");
   assert.equal(store.textContent, "查看官方版本");
   assert.ok(links.every((node) => node.rel === "noopener noreferrer" && node.target === "_blank"));
   const rejected = dual("https://apps.microsoft.com.evil.test/detail/9PLM9XGG6VKS");
   await rejected.controller.enter();
   const survivors = descendants(rejected.row("codex"), (node) => node.tagName === "a");
-  assert.equal(survivors.length, 1, "仿冒域名被丢弃，只留 CLI 行的链接");
+  assert.equal(survivors.length, 1, "仿冒域名被丢弃，只留 CLI 形态的链接");
   assert.equal(survivors[0].href, "https://github.com/openai/codex");
   const lines = descendants(rejected.row("codex"), (node) => node.className === "about-version-line");
-  assert.match(lines[1].textContent, /官方最新 26\.915\.4066/, "只是不放链接，官方版本照常展示");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 26\.915\.4066/, "只是不放链接，官方版本照常展示");
 });
 
 test("Grok Build 行按 npm 官方版本比对，链接只放行 npm 包页", async () => {
@@ -401,7 +413,7 @@ test("Grok Build 行按 npm 官方版本比对，链接只放行 npm 包页", as
   assert.match(lines[0].textContent, /本地.*1\.0\.0.*官方最新.*1\.0\.41.*有新版本/);
   const actions = descendants(lines[0], (node) => node.tagName === "button" && node.className.includes("about-client-action"));
   assert.equal(actions.length, 1);
-  assert.equal(actions[0].textContent, "更新到 1.0.41");
+  assert.equal(actions[0].textContent, "更新");
   assert.deepEqual(descendants(allowed.row("grok"), (node) => node.tagName === "a").map((node) => node.href),
     ["https://www.npmjs.com/package/@xai-official/grok"]);
 
@@ -409,6 +421,19 @@ test("Grok Build 行按 npm 官方版本比对，链接只放行 npm 包页", as
   await rejected.controller.enter();
   assert.equal(descendants(rejected.row("grok"), (node) => node.tagName === "a").length, 0, "仿冒域名的链接被丢弃，版本比对照常");
   assert.match(descendants(rejected.row("grok"), (node) => node.className === "about-version-line")[0].textContent, /官方最新.*1\.0\.41/);
+});
+
+test("Qoder CLI 形态的官方来源链接放行 npm 包页，仿冒域名被丢弃", async () => {
+  const qoderRow = (url) => harness((path) => (path.includes("/latest/qoder-cli") ? { ...latest("1.1.64"), url } : normal(path)));
+  const allowed = qoderRow("https://www.npmjs.com/package/@qoder-ai/qodercli");
+  await allowed.controller.enter();
+  assert.deepEqual(descendants(allowed.row("qoder"), (node) => node.tagName === "a").map((node) => node.href),
+    ["https://www.npmjs.com/package/@qoder-ai/qodercli"]);
+
+  const rejected = qoderRow("https://npmjs.com.evil.test/package/@qoder-ai/qodercli");
+  await rejected.controller.enter();
+  assert.equal(descendants(rejected.row("qoder"), (node) => node.tagName === "a").length, 0, "仿冒域名的链接被丢弃，版本比对照常");
+  assert.match(descendants(rejected.row("qoder"), (node) => node.className === "about-version-line")[0].textContent, /官方最新.*1\.1\.64/);
 });
 
 test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", () => {
@@ -468,12 +493,17 @@ const doneRun = (runId, clientId, extra = {}) => ({
 test("本地环境卡为可更新客户端出更新按钮，桌面应用只留官方入口", async () => {
   const h = harness(normal);
   await h.controller.enter();
-  assert.match(actionButton(h, "claude").textContent, /更新到 1\.1\.0/);
-  assert.match(actionButton(h, "grok").textContent, /更新到 1\.1\.0/, "Grok Build 走自身升级命令，按钮与 npm 客户端同位");
+  assert.equal(actionButton(h, "claude").textContent, "更新", "按钮文案端点级一个「更新」");
+  assert.equal(actionButton(h, "grok").textContent, "更新", "Grok Build 走自身升级命令，按钮与 npm 客户端同位");
   assert.equal(actionButton(h, "zcode"), undefined, "桌面应用不经面板更新");
-  assert.equal(actionButton(h, "qoder"), undefined);
+  // qoder 一张卡一个动作位：更新接口按端点 id 受理，服务端串行跑全腿
+  const qoderLines = descendants(h.row("qoder"), (node) => node.className === "about-version-line");
+  assert.equal(qoderLines.length, 1);
+  assert.equal(actionButtons(qoderLines[0]).length, 1);
+  assert.equal(actionButtons(qoderLines[0])[0].textContent, "更新", "Qoder CLI 走自身升级命令，按钮与 grok 同位");
+  assert.ok(h.calls.includes("/api/environment/latest/qoder-cli?localVersion=1.0.0"), "主更新形态用 qoder-cli 渠道查官方版本");
   assert.equal(h.get("aboutUpdateAll").disabled, false);
-  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(7\)/);
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(8\)/);
 });
 
 test("已是最新的客户端不出动作按钮，未安装的出安装按钮", async () => {
@@ -490,7 +520,7 @@ test("已是最新的客户端不出动作按钮，未安装的出安装按钮",
   });
   await h.controller.enter();
   assert.equal(actionButton(h, "claude").textContent, "安装");
-  assert.match(actionButton(h, "codex").textContent, /更新到/);
+  assert.equal(actionButton(h, "codex").textContent, "更新");
   assert.equal(actionButton(h, "grok"), undefined, "未安装的 grok 不给安装按钮");
 });
 
@@ -624,18 +654,12 @@ test("单个更新按行独立：一行在更新时其他行照常可点，各�
   assert.equal(actionButton(h, "claude").disabled, false);
 });
 
-test("codex 双行卡片：CLI 行更新中时只有该行显「更新中…」，桌面行不出动作位", async () => {
-  const local = environment();
-  local.clients[1].installations = [
-    { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
-    { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
-  ];
+test("codex 单行卡片：更新中按钮显「更新中…」并禁点，桌面形态不另出动作位", async () => {
   const pending = new Map();
   const h = harness(
     (path) => {
       if (path === "/api/agents") return { agents: [] };
       if (path.includes("/latest/codex-desktop")) return latest("26.915.4065", "current");
-      if (path === "/api/environment" || path.startsWith("/api/environment?")) return local;
       if (path.startsWith("/api/environment/update/")) {
         const runId = path.slice("/api/environment/update/".length);
         return new Promise((resolve) => pending.set(runId, resolve));
@@ -647,22 +671,24 @@ test("codex 双行卡片：CLI 行更新中时只有该行显「更新中…」�
   await h.controller.enter();
   const row = h.row("codex");
   const idleLines = descendants(row, (node) => node.className === "about-version-line");
+  assert.equal(idleLines.length, 1, "空闲时每端点一行");
   assert.match(idleLines[0].textContent, /有新版本/);
-  assert.match(idleLines[1].textContent, /与官方最新版本一致/);
-  assert.equal(actionButtons(idleLines[1]).length, 0, "空闲时桌面行没有动作位");
+  assert.equal(descendants(idleLines[0], (node) => node.className === "about-result").length, 1, "结论只看主更新形态一条");
   const first = actionButton(h, "codex").click();
   await flush();
   assert.deepEqual([h.mutations[0]?.body.id, h.mutations[0]?.body.action], ["codex", "update"]);
   const busyLines = descendants(row, (node) => node.className === "about-version-line");
+  assert.equal(busyLines.length, 1);
+  assert.equal(actionButtons(busyLines[0]).length, 1);
   assert.match(actionButtons(busyLines[0])[0].textContent, /更新中/);
   assert.equal(actionButtons(busyLines[0])[0].disabled, true);
-  assert.equal(actionButtons(busyLines[1]).length, 0, "任务按客户端加锁，也不给桌面行造出「更新中」按钮");
   pending.get("run-x")(doneRun("run-x", "codex"));
   await first;
   assert.match(h.toasts.map((toast) => toast.message).join("\n"), /codex 已更新到 1\.1\.0/);
   const doneLines = descendants(row, (node) => node.className === "about-version-line");
-  assert.equal(actionButtons(doneLines[1]).length, 0, "收尾重检后桌面行仍无动作位");
-  assert.match(actionButtons(doneLines[0])[0].textContent, /更新到/);
+  assert.equal(doneLines.length, 1, "收尾重检后仍每端点一行");
+  assert.equal(actionButtons(doneLines[0]).length, 1);
+  assert.equal(actionButtons(doneLines[0])[0].textContent, "更新");
 });
 
 test("重新打开关于页时，面板重启前没跑完的更新继续显示为更新中", async () => {

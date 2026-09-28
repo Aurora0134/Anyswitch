@@ -7,7 +7,7 @@ const npmSource = (name, repository, url) => ({
   field: "latest",
 });
 
-const CLIENTS = {
+export const CLIENTS = {
   claude: npmSource("@anthropic-ai/claude-code", "anthropics/claude-code"),
   // Codex 的本地检测读的是 npm 全局 `@openai/codex` 的包清单，更新动作装的也是这个包，
   // 官方最新版本因此同查 npm dist-tag。查 GitHub Release 时两源各自发版就会出现
@@ -34,6 +34,9 @@ const CLIENTS = {
     endpoint: "https://download.qoder.com.cn/qoder-app/releases/latest.yml",
     source: "qoder:desktop:latest", format: "yaml", url: "https://qoder.com/changelog",
   },
+  // Qoder CLI 是 Bun 单文件原生二进制（与 grok 同型）：官方最新以
+  // @qoder-ai/qodercli 的 npm dist-tag 为准，官方链接因此指 npm 包页而非发布页。
+  "qoder-cli": npmSource("@qoder-ai/qodercli", null, "https://www.npmjs.com/package/@qoder-ai/qodercli"),
 };
 
 function yamlVersion(text) {
