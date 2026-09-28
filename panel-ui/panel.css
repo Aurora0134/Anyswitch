@@ -1862,6 +1862,8 @@
   .route-cand-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text); }
   .route-cand-id { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); }
   .route-cand-row select.store-form-input { width: 150px; flex-shrink: 0; padding: 4px 8px; }
+  /* 虚拟模型新建流：编辑器正文顶部的模型名输入行（名称草稿即时驱动入口桩标签） */
+  .virtual-add-row { margin-top: 8px; }
 
   /* 链舞台（E1）：纵向排列，自上而下 = 降级方向。节点卡逐跳宽度递减 4%、
      透明度/边框亮度微降（内联 --k 驱动），左对齐形成收窄阶梯 */

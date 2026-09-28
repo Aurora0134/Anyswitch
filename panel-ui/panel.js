@@ -9369,16 +9369,27 @@ async function api(method, path, body) {
     return [...byEndpoint].map(([endpointId, remaining]) => ({ endpointId, remaining }));
   }
 
-  let routeChainEndpointId = null;   // 编辑器当前端点
+  // 编辑器目标：{kind:"endpoint", id} = 端点自动路由链；{kind:"virtual", id} = 虚拟模型。
+  // 两种目标共用同一弹窗与同一份草稿，差别只在标题/入口桩标签/保存去向。
+  let routeChainTarget = null;
   let routeChainDraft = [];          // 编辑中的链 [{node, model}]
   let routeChainCandModels = {};     // 候选区模型下拉选择（nodeId -> modelId），重渲染后保留
   let routeChainBusy = false;
+  let virtualModelCreating = false;  // 编辑器处于「新建虚拟模型」流（目标 kind:"virtual" 且 id 未定）
+  let virtualModelNameDraft = "";    // 新建流的模型名草稿（入口桩标签随输入即时更新）
 
   function storeRoutingChains() {
     return (storeState && storeState.routingChains) || [];
   }
   function storeRoutingChainFor(endpointId) {
     const entry = storeRoutingChains().find((c) => c.endpointId === endpointId);
+    return entry && Array.isArray(entry.chain) ? entry.chain : null;
+  }
+  function storeVirtualModels() {
+    return (storeState && storeState.virtualModels) || [];
+  }
+  function storeVirtualModelFor(name) {
+    const entry = storeVirtualModels().find((v) => v.name === name);
     return entry && Array.isArray(entry.chain) ? entry.chain : null;
   }
   function routeNodeIsPool(nodeId) {
@@ -9650,6 +9661,65 @@ async function api(method, path, body) {
           input.checked ? `已启用自动路由：${label}` : `已停用自动路由：${label}（链配置保留）`);
       };
     });
+    renderVirtualModels();
+  }
+
+  // ── 虚拟模型瓦片墙：与端点瓦片同一套 route-ep-tile 质感/网格，头部是模型名
+  // （即客户端模型选择器里看到的名字）而非端点图标；徽标/编辑/删除/启用与端点瓦片同语义。
+  // 「新建虚拟模型」瓦片固定在网格末位，打开编辑器的新建流（输入模型名 + 配链一起保存）。
+  function renderVirtualModels() {
+    const grid = $("virtualModelGrid");
+    if (!grid) return;
+    const list = storeVirtualModels();
+    let configured = 0;
+    grid.innerHTML = list.map((v) => {
+      const chain = Array.isArray(v.chain) ? v.chain : [];
+      if (!chain.length) return "";
+      configured++;
+      const enabled = v.enabled !== false;
+      return `<div class="route-ep-tile" data-virtual-model="${escapeHtml(v.name)}">
+        <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-name" style="font-family:var(--font-mono);">${escapeHtml(v.name)}</span></div><span class="badge ${enabled ? "badge-accent" : "badge-neutral"}">${enabled ? `${chain.length} 节点` : "已停用"}</span></div>
+        <div class="route-ep-tile-actions">
+          <label class="toggle" title="启用虚拟模型：开 = 该模型出现在各端点 Anyswitch 分组下并按链路由；关 = 链配置保留但模型不再出现"><input type="checkbox" data-vm-enabled="${escapeHtml(v.name)}"${enabled ? " checked" : ""}><span class="slider"></span></label>
+          <button class="btn" data-vm-edit="${escapeHtml(v.name)}">编辑</button>
+          <button class="btn btn-danger" data-vm-del="${escapeHtml(v.name)}">删除</button>
+        </div>
+      </div>`;
+    }).join("") + `<div class="route-ep-tile route-ep-tile--empty">
+      <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-name">新建虚拟模型</span></div><span class="badge badge-neutral">一条命名路由链</span></div>
+      <div class="route-ep-tile-actions">
+        <button class="btn" id="virtualModelAddBtn">＋ 新建</button>
+      </div>
+    </div>`;
+    $("virtualModelBadge").textContent = String(configured);
+    grid.querySelectorAll("[data-vm-edit]").forEach((btn) => {
+      btn.onclick = () => openVirtualModelModal(btn.getAttribute("data-vm-edit"));
+    });
+    grid.querySelectorAll("[data-vm-del]").forEach((btn) => {
+      btn.onclick = () => confirmVirtualModelDelete(btn.getAttribute("data-vm-del"));
+    });
+    grid.querySelectorAll("[data-vm-enabled]").forEach((input) => {
+      input.onchange = () => {
+        const name = input.getAttribute("data-vm-enabled");
+        storeAction("/api/store/virtual-model/enabled", { name, enabled: input.checked },
+          input.checked ? `已启用虚拟模型：${name}` : `已停用虚拟模型：${name}（链配置保留）`);
+      };
+    });
+    const addBtn = $("virtualModelAddBtn");
+    if (addBtn) addBtn.onclick = () => openVirtualModelModal(null);
+  }
+
+  function confirmVirtualModelDelete(name) {
+    showSkillsModal({
+      title: `删除虚拟模型 — ${name}`,
+      danger: true,
+      confirmText: "确认删除",
+      bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
+        删除后模型 <b>${escapeHtml(name)}</b> 将从各端点的 Anyswitch 分组中移除，请求它的调用会失败；渠道与号池本身不受影响。</div>`,
+      onConfirm: async () => {
+        await storeAction("/api/store/virtual-model/delete", { name }, `已删除虚拟模型：${name}`);
+      },
+    });
   }
 
   function confirmRouteChainDelete(endpointId) {
@@ -9672,12 +9742,41 @@ async function api(method, path, body) {
       toast("store 不可用，无法编辑路由链", true);
       return;
     }
-    routeChainEndpointId = endpointId;
+    routeChainTarget = { kind: "endpoint", id: endpointId };
+    virtualModelCreating = false;
+    virtualModelNameDraft = "";
     const saved = storeRoutingChainFor(endpointId);
     routeChainDraft = saved ? saved.map((it) => ({ node: it.node, model: it.model })) : [];
     routeChainCandModels = {};
     renderRouteChainBody();
     $("routeChainModal").classList.add("show");
+  }
+
+  // 虚拟模型：name 为 null 时进入新建流——目标先占位 kind:"virtual"、id 未定，
+  // 模型名输入框放在编辑器正文顶部（初始聚焦），入口桩标签随输入即时更新；
+  // 名字与链一起在保存时提交。已保存的名字锁定不改（它会被各端点的调用方引用）。
+  function openVirtualModelModal(name) {
+    if (!storeState || !storeState.storeOk) {
+      toast("store 不可用，无法编辑虚拟模型", true);
+      return;
+    }
+    if (name != null) {
+      routeChainTarget = { kind: "virtual", id: name };
+      virtualModelCreating = false;
+      virtualModelNameDraft = "";
+      const saved = storeVirtualModelFor(name);
+      routeChainDraft = saved ? saved.map((it) => ({ node: it.node, model: it.model })) : [];
+    } else {
+      routeChainTarget = { kind: "virtual", id: null };
+      virtualModelCreating = true;
+      virtualModelNameDraft = "";
+      routeChainDraft = [];
+    }
+    routeChainCandModels = {};
+    renderRouteChainBody();
+    $("routeChainModal").classList.add("show");
+    const nameInput = $("virtualModelNameInput");
+    if (nameInput) nameInput.focus();
   }
 
   function hideRouteChainModal() {
@@ -9713,10 +9812,15 @@ async function api(method, path, body) {
   // 链舞台 HTML（E1 纵向阶梯，自上而下 = 降级方向；编辑器无运行时状态数据，
   // 连接线一律按「冷备」基态渲染，is-active/is-down 等状态类为监测页预备）。
   // opts.enterAnim = 末跳「从链尾生长」入场动画标记（E5 添加成功时传入）
+  // 入口桩标签 = 编辑目标：端点链恒为 auto；虚拟模型 = 该模型名（新建流取草稿）。
   function renderRouteStageHtml(opts) {
     const enterAnim = !!(opts && opts.enterAnim);
     const items = routeChainDraft;
-    const parts = [`<div class="route-entry" aria-hidden="true"><span class="route-entry-tag">auto</span></div>`];
+    const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
+    const entryTag = isVirtual
+      ? (virtualModelCreating ? (virtualModelNameDraft.trim() || "模型名") : routeChainTarget.id)
+      : "auto";
+    const parts = [`<div class="route-entry" aria-hidden="true"><span class="route-entry-tag">${escapeHtml(entryTag)}</span></div>`];
     if (!items.length) {
       // 空链：入口桩下垂虚线 → 虚线空槽
       parts.push(`<div class="route-seg is-dangling" style="--i:0" aria-hidden="true"></div>`);
@@ -9807,8 +9911,13 @@ async function api(method, path, body) {
   }
 
   function renderRouteChainBody(opts) {
-    const label = routeChainEndpointLabel(routeChainEndpointId);
-    $("routeChainTitle").textContent = `编辑路由链 — ${label}`;
+    const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
+    const entryLabel = isVirtual
+      ? (virtualModelCreating ? virtualModelNameDraft : routeChainTarget.id)
+      : routeChainEndpointLabel(routeChainTarget.id);
+    $("routeChainTitle").textContent = isVirtual
+      ? (virtualModelCreating ? "新建虚拟模型" : `编辑虚拟模型 — ${entryLabel}`)
+      : `编辑路由链 — ${entryLabel}`;
     // 重渲会重建 innerHTML，先记住候选列表滚动位置，渲染后原地恢复（选择后列表不跳顶）
     const prevWrap = $("routeCandWrap");
     const prevScroll = prevWrap ? prevWrap.scrollTop : 0;
@@ -9835,12 +9944,19 @@ async function api(method, path, body) {
       </div>`;
     }).join("") : `<div class="route-cand-row" style="cursor:default;"><span class="route-cand-name" style="color:var(--text-4);">暂无渠道/号池，请先在「渠道管理」新增渠道</span></div>`;
     const summary = routeChainSummaryText();
+    const nameRow = isVirtual
+      ? `<div class="store-form-row virtual-add-row"><label class="store-form-label">模型名（小写字母、数字、. _ -；保存后名称固定）</label>
+          ${virtualModelCreating
+            ? `<input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(virtualModelNameDraft)}" placeholder="如 deepseek-pro" autocomplete="off" spellcheck="false">`
+            : `<input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(entryLabel)}" disabled title="虚拟模型名称保存后固定">`}</div>`
+      : "";
     $("routeChainBody").innerHTML = `
-      <div style="font-size:11.5px; color:var(--text-3);">
+      ${nameRow}
+      <div style="font-size:11.5px; color:var(--text-3);${isVirtual ? "" : " margin-top:8px;"}">
         链路自上而下按序路由，失败自动退避下一跳；节点卡可拖拽调序、右键移除。一条链最多 ${ROUTE_CHAIN_MAX_NODES} 跳，同一渠道/号池可绑定不同模型各占一跳。</div>
       <div class="route-editor">
         <div class="route-stage-col">
-          <div class="store-form-label">链路（入口 auto → 逐跳退避）</div>
+          <div class="store-form-label">链路（${escapeHtml(virtualModelCreating ? (virtualModelNameDraft.trim() || "模型名") : entryLabel)} → 逐跳退避）</div>
           <div class="route-stage" id="routeChainStage">${renderRouteStageHtml(opts)}</div>
         </div>
         <div class="route-cand-col${full ? " is-full" : ""}">
@@ -9855,6 +9971,23 @@ async function api(method, path, body) {
     `;
     const body = $("routeChainBody");
     const stage = $("routeChainStage");
+    const nameInput = $("virtualModelNameInput");
+    if (nameInput) {
+      // 新建流：模型名输入驱动入口桩标签即时更新（renderRouteChainBody 全量重建会
+      // 清输入值与焦点，故只改桩标签文本，不整渲）
+      nameInput.addEventListener("input", () => {
+        virtualModelNameDraft = nameInput.value;
+        const label = virtualModelNameDraft.trim() || "模型名";
+        const tag = stage.querySelector(".route-entry-tag");
+        if (tag) tag.textContent = label;
+        const stageLabel = stage.previousElementSibling;
+        if (stageLabel && stageLabel.classList.contains("store-form-label")) {
+          stageLabel.textContent = `链路（${label} → 逐跳退避）`;
+        }
+        const err = $("routeChainError");
+        if (err && !err.hidden) { err.hidden = true; err.textContent = ""; }
+      });
+    }
     body.querySelectorAll("[data-route-cand-model]").forEach((sel) => {
       // 切换模型后「已入链」判定随 node+model 口径变化，重渲候选区
       sel.onchange = () => {
@@ -9995,21 +10128,35 @@ async function api(method, path, body) {
       err.textContent = msg;
     };
     err.hidden = true;
+    const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
+    const nameErr = isVirtual ? virtualModelNameError() : null;
+    if (nameErr) return fail(nameErr);
     const validErr = routeChainValidate(routeChainDraft);
     if (validErr) return fail(validErr);
     const btn = $("routeChainConfirmBtn");
-    const label = routeChainEndpointLabel(routeChainEndpointId);
     routeChainBusy = true;
     btn.disabled = true;
     btn.textContent = "保存中…";
     try {
-      await api("POST", "/api/store/route-chain/save", {
-        endpointId: routeChainEndpointId,
-        chain: routeChainDraft.map((it) => ({ node: it.node, model: it.model })),
-      });
-      $("routeChainModal").classList.remove("show");
-      toast(`路由链已保存：${label}（${routeChainDraft.length} 个节点）`);
-      await refreshStoreState();
+      if (isVirtual) {
+        const name = virtualModelCreating ? virtualModelNameDraft.trim() : routeChainTarget.id;
+        await api("POST", "/api/store/virtual-model/save", {
+          name,
+          chain: routeChainDraft.map((it) => ({ node: it.node, model: it.model })),
+        });
+        $("routeChainModal").classList.remove("show");
+        toast(`虚拟模型已保存：${name}（${routeChainDraft.length} 个节点）`);
+        await refreshStoreState();
+      } else {
+        const label = routeChainEndpointLabel(routeChainTarget.id);
+        await api("POST", "/api/store/route-chain/save", {
+          endpointId: routeChainTarget.id,
+          chain: routeChainDraft.map((it) => ({ node: it.node, model: it.model })),
+        });
+        $("routeChainModal").classList.remove("show");
+        toast(`路由链已保存：${label}（${routeChainDraft.length} 个节点）`);
+        await refreshStoreState();
+      }
     } catch (e) {
       if (e.code === "cas-conflict") {
         fail("渠道配置已被其他操作改动，请稍后重试");
@@ -10020,8 +10167,21 @@ async function api(method, path, body) {
     } finally {
       routeChainBusy = false;
       btn.disabled = false;
-      btn.textContent = "保存路由链";
+      btn.textContent = isVirtual ? "保存虚拟模型" : "保存路由链";
     }
+  }
+
+  // 虚拟模型名与 store 渠道 id 同字符集（store-schema PROVIDER_ID 口径）：
+  // 小写字母开头，小写字母/数字/. _ - 组成；它同时充当链查找键与客户端模型 id。
+  function virtualModelNameError() {
+    const name = virtualModelNameDraft.trim();
+    if (!name) return "请填写模型名";
+    if (!/^[a-z][a-z0-9._-]*$/.test(name)) return "模型名格式不对：小写字母开头，只能含小写字母、数字、. _ -";
+    if (name.length > 64) return "模型名最长 64 字符";
+    if (routeChainDraft.some((it) => it.model === name)) {
+      return `模型名不能与链内模型重名（${name}）`;
+    }
+    return null;
   }
 
   // ── 右键菜单（复用 skills 菜单样式与弹层函数；多选菜单追加「组建号池」） ──
