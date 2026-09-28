@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, PARENT_WATCHDOG_INTERVAL_MS } from "./terminal-host.mjs";
+import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED } from "./terminal-host.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
@@ -95,6 +95,32 @@ test("terminal host owns persistent session metadata and PTY controls", async ()
     assert.equal(listed.sessions[0].status, "exited", "restored metadata waits for explicit restart");
     await restored.close();
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// PTY 已退出的会话此前会把输入无声丢弃还回 200（面板侧 .catch 看不到失败）。
+// 这里走真实退出路径（FakePty.kill → onExit → session.pty 置空）钉住显式 409。
+test("PTY 已退出的会话 POST input 返回 409 session_exited", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "exited-input", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    calls[0].pty.kill();
+    const inputResponse = await fetch(url(`/terminal/sessions/${created.id}/input`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ data: "hello\r" }),
+    });
+    assert.equal(inputResponse.status, 409);
+    assert.deepEqual(await inputResponse.json(), { error: "session_exited" });
+  } finally {
+    await host.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -410,8 +436,9 @@ test("宿主换新进程后由盘上尾部重建镜像，回放仍出画面不�
 
 // watchParentProcess: the relay-owned child's death pact. Without a parent
 // pid env (single runs, tests) nothing is scheduled; with one, a dead parent
-// fires onDead exactly once. The timer is captured through an injected
-// setIntervalFn — no real clock is armed here.
+// fires onDead exactly once after missesRequired consecutive dead verdicts
+// (any live verdict resets the count). The timer is captured through an
+// injected setIntervalFn — no real clock is armed here.
 test("watchParentProcess fires onDead once when the parent is gone", () => {
   let tick = null;
   let interval = null;
@@ -420,6 +447,7 @@ test("watchParentProcess fires onDead once when the parent is gone", () => {
   const handle = watchParentProcess({
     parentPid: 4242,
     isAlive: () => false,
+    missesRequired: 1,
     setIntervalFn: (fn, ms) => {
       tick = fn;
       interval = ms;
@@ -469,6 +497,111 @@ test("watchParentProcess without a parent pid leaves behavior untouched", () => 
   assert.equal(watchParentProcess({ parentPid: 0, setIntervalFn, onDead: () => {} }), null);
   assert.equal(watchParentProcess({ parentPid: -5, setIntervalFn, onDead: () => {} }), null);
   assert.equal(scheduled, 0, "no parent pid, no poller — manual runs behave exactly as before");
+});
+
+// isPidAlive 是 tasklist 同步探测，负载抖动下一次超时/报错就会被判成 false——
+// 单次 miss 不该触发死亡契约，存活判定要清零重新计数。
+test("watchParentProcess 单次 miss 不触发：false 之后出现 true 即清零", () => {
+  const verdicts = [false, true, false, true];
+  let call = 0;
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    isAlive: () => verdicts[call++ % verdicts.length],
+    missesRequired: 2,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  tick();
+  tick();
+  tick();
+  tick();
+  assert.equal(dead, 0, "isolated misses never fire the pact");
+});
+
+test("watchParentProcess 连续 miss 达到 missesRequired 才恰好触发一次", () => {
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    isAlive: () => false,
+    missesRequired: 3,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  tick();
+  tick();
+  assert.equal(dead, 0, "below missesRequired the host stays up");
+  tick();
+  assert.equal(dead, 1, "the consecutive-miss threshold fires the pact");
+  tick();
+  assert.equal(dead, 1, "the shutdown path fires exactly once");
+});
+
+test("watchParentProcess 存活判定复位计数：复位后重新数满才触发", () => {
+  const verdicts = [false, false, true, false, false, false];
+  let call = 0;
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    isAlive: () => verdicts[call++ % verdicts.length],
+    missesRequired: 3,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  tick();
+  tick();
+  assert.equal(dead, 0);
+  tick(); // 存活：前两次 miss 作废
+  tick();
+  tick();
+  assert.equal(dead, 0, "the count restarts from zero after a live verdict");
+  tick();
+  assert.equal(dead, 1, "only misses counted after the reset reach the threshold");
+});
+
+// 默认不注入 missesRequired 时取 WATCHDOG_MISSES_REQUIRED：误杀两次实锤的代价比
+// 晚触发约 25 秒（5 次 × 5s 轮询）高得多，这个值不许被悄悄改小。
+test("watchParentProcess 默认阈值取 WATCHDOG_MISSES_REQUIRED", () => {
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    isAlive: () => false,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  assert.equal(WATCHDOG_MISSES_REQUIRED, 5);
+  for (let i = 1; i <= WATCHDOG_MISSES_REQUIRED; i += 1) {
+    tick();
+    assert.equal(dead, i < WATCHDOG_MISSES_REQUIRED ? 0 : 1, `tick ${i}`);
+  }
 });
 
 // One-click CLI Agent launch: POST /terminal/sessions accepts an optional
