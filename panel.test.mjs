@@ -2201,6 +2201,49 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
     assert.ok(panelJs.includes("/api/store/route-chain/enabled"), "toggle posts to the enabled API");
   });
 
+  it("虚拟模型瓦片墙：复用 route-ep-tile 质感 + 三态控件 + 末位新建瓦片，随 renderRouteChains 一并刷新", () => {
+    assert.ok(panelHtml.includes('id="virtualModelGrid"'), "tile grid container exists in panel.html");
+    assert.ok(panelHtml.includes('id="virtualModelBadge"'), "count badge exists in panel.html");
+    assert.ok(panelJs.includes("function renderVirtualModels()"), "virtual model tile renderer exists");
+    assert.ok(panelJs.includes("data-vm-edit=") && panelJs.includes("data-vm-del=") && panelJs.includes("data-vm-enabled="),
+      "tiles carry edit/delete/enabled controls");
+    assert.ok(panelJs.includes('id="virtualModelAddBtn"'), "create tile pinned at grid end");
+    const m = panelJs.match(/function renderRouteChains\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(m && m[0].includes("renderVirtualModels()"), "endpoint tiles refresh the virtual grid too");
+  });
+
+  it("虚拟模型编辑器共用链编辑弹窗：新建流带名称输入并初始聚焦，编辑流名称锁定", () => {
+    assert.ok(panelJs.includes("function openVirtualModelModal("), "virtual editor open fn exists");
+    const bodyFn = panelJs.match(/function renderRouteChainBody\(opts\) \{[\s\S]*?\n  \}/);
+    assert.ok(bodyFn, "route chain body renderer found");
+    assert.ok(bodyFn[0].includes('id="virtualModelNameInput"'), "create flow renders a name input");
+    assert.ok(bodyFn[0].includes('disabled title="虚拟模型名称保存后固定"'), "saved names render locked (disabled input)");
+    assert.ok(bodyFn[0].includes("virtualModelCreating"), "create-vs-edit branching is explicit");
+  });
+
+  it("虚拟模型保存/删除/启用打到独立 API，保存体携带 name+chain", () => {
+    const save = panelJs.match(/api\("POST",\s*"\/api\/store\/virtual-model\/save",\s*\{[\s\S]*?\}\);/);
+    assert.ok(save, "save posts to virtual-model/save");
+    assert.ok(/\bname\b/.test(save[0]) && /chain:/.test(save[0]), "save body carries name and chain");
+    assert.ok(panelJs.includes('"/api/store/virtual-model/delete"'), "delete endpoint wired");
+    assert.ok(panelJs.includes('"/api/store/virtual-model/enabled"'), "enabled endpoint wired");
+  });
+
+  it("虚拟模型名称校验：小写字母开头 + 字符集 + 长度上限，且不得与链内模型重名", () => {
+    const m = panelJs.match(/function virtualModelNameError\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "name validator exists");
+    assert.ok(m[0].includes('^[a-z][a-z0-9._-]*$'), "charset anchored to store PROVIDER_ID shape");
+    assert.ok(m[0].includes("模型名不能与链内模型重名"), "chain-internal collision rejected");
+  });
+
+  it("新建流名称输入即时驱动入口桩与链路标签，且打字即清除报错", () => {
+    const m = panelJs.match(/nameInput\.addEventListener\("input", \(\) => \{[\s\S]*?\n      \}\);/);
+    assert.ok(m, "name input live listener exists");
+    assert.ok(m[0].includes('route-entry-tag'), "entry tag updates live");
+    assert.ok(m[0].includes("逐跳退避"), "stage label updates live");
+    assert.ok(m[0].includes('err.hidden = true'), "typing clears the inline error");
+  });
+
   it("瓦片墙渲染：三态瓦片 + 图标克隆看板 avatar + 进 tab 刷新 store 数据", () => {
     assert.ok(panelJs.includes('class="route-ep-tile'), "renders tiles");
     assert.ok(panelJs.includes("route-ep-tile--empty"), "未配置瓦片变体");
@@ -2505,16 +2548,20 @@ describe("panel.html 设置全页视图", () => {
       "设置行悬停整行淡底（--surface-hover）");
   });
 
-  it("「自动路由」子 tab：面板在通用与主题之间，含瓦片墙容器与卡头徽标，Store 旧折叠卡已移除", () => {
+  it("「自动路由」子 tab：面板在通用与主题之间，虚拟模型卡 + 端点瓦片墙双卡，Store 旧折叠卡已移除", () => {
     const iRoute = panelHtml.indexOf('id="settingsPanelRoute"');
     assert.ok(iRoute > panelHtml.indexOf('id="settingsPanelGeneral"'), "路由面板在通用面板之后");
     assert.ok(iRoute < panelHtml.indexOf('id="settingsPanelTheme"'), "路由面板在主题面板之前");
     const route = panelHtml.slice(iRoute, panelHtml.indexOf('id="settingsPanelTheme"'));
-    assert.ok(route.includes('id="routeChainGrid"'), "瓦片墙容器存在");
-    assert.ok(route.includes('id="routeChainBadge"'), "已配置计数徽标存在");
-    assert.ok(route.includes("按链顺序路由，失败自动退避下一节点"), "功能说明文案保留");
-    assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 1,
-      "路由面板一张 panel-card（仅瓦片墙）");
+    assert.ok(route.includes('id="routeChainGrid"'), "端点瓦片墙容器存在");
+    assert.ok(route.includes('id="routeChainBadge"'), "端点链已配置计数徽标存在");
+    assert.ok(route.includes('id="virtualModelGrid"'), "虚拟模型瓦片墙容器存在");
+    assert.ok(route.includes('id="virtualModelBadge"'), "虚拟模型计数徽标存在");
+    assert.ok(route.includes("按链顺序路由，失败自动退避下一节点"), "端点链功能说明文案保留");
+    assert.ok(route.includes("Anyswitch 分组"), "虚拟模型说明点名 Anyswitch 分组承载");
+    assert.ok(route.indexOf("虚拟模型") < route.indexOf('id="routeChainGrid"'), "虚拟模型卡在端点瓦片墙之前");
+    assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 2,
+      "路由面板两张 panel-card（虚拟模型 + 端点路由链）");
     assert.ok(!route.includes("ailureRate"), "路由子 tab 不含按失败率降级控件");
     assert.ok(!panelHtml.includes('id="routeChainCard"'), "Store 页旧折叠卡已移除");
     assert.ok(!panelHtml.includes("routeChainFoldBtn"), "折叠钮已移除");
