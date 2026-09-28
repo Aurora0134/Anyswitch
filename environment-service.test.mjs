@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import { dirname, join } from "node:path";
-import { createEnvironmentService, probeExecutableVersion } from "./environment-service.mjs";
+import { CLIENT_ENTRY_FORMS, createEnvironmentService, probeExecutableVersion } from "./environment-service.mjs";
 
 function fixture(t) {
   const parent = new URL("./.cptest/", import.meta.url);
@@ -113,7 +113,7 @@ test("Qoder reads its version from the newest installed payload, not the stale i
   const executable = f.put(join(installRoot, "Qoder.exe"));
   asarPackage(f, executable, "qoder", "0.1.3");
   const service = f.service();
-  const rootOnly = installation(await service.getState(), "qoder");
+  const rootOnly = installation(await service.getState(), "qoder", 1);
   assert.equal(rootOnly.path, executable);
   assert.equal(rootOnly.version, "0.1.3");
   for (const version of ["0.2.9", "0.2.10", "0.3.4"]) {
@@ -123,7 +123,7 @@ test("Qoder reads its version from the newest installed payload, not the stale i
   }
   f.put(join(installRoot, ".qoder-versions/0.4.0/Qoder.exe"));
   f.put(join(installRoot, ".qoder-versions/pending/Qoder.exe"));
-  const item = installation(await service.getState({ force: true }), "qoder");
+  const item = installation(await service.getState({ force: true }), "qoder", 1);
   assert.equal(item.status, "found");
   assert.equal(item.path, join(installRoot, ".qoder-versions/0.3.4/Qoder.exe"));
   assert.equal(item.version, "0.3.4");
@@ -138,11 +138,41 @@ test("An unreadable newest payload is reported as unreadable, never as the stale
   const payload = join(installRoot, ".qoder-versions/0.3.4/Qoder.exe");
   f.put(payload);
   f.put(join(installRoot, ".qoder-versions/0.3.4/resources/app.asar"), "garbage long enough to attempt a header read from");
-  const item = installation(await f.service().getState(), "qoder");
+  const item = installation(await f.service().getState(), "qoder", 1);
   assert.equal(item.status, "found");
   assert.equal(item.path, payload);
   assert.equal(item.version, null);
   assert.equal(item.issue, "version_unavailable");
+});
+
+test("Qoder CLI row reads its version from qodercli.exe's own --version report", async (t) => {
+  const f = fixture(t);
+  const exe = f.put(join(f.base.USERPROFILE, ".qoder/bin/qodercli/qodercli.exe"));
+  const ok = await f.service({ probeVersion: async (path) => (assert.equal(path, exe), { missing: false, version: "1.1.64" }) }).getState();
+  const found = installation(ok, "qoder", 0);
+  assert.equal(found.kind, "cli");
+  assert.equal(found.remoteId, "qoder-cli");
+  assert.equal(found.status, "found");
+  assert.equal(found.path, exe);
+  assert.equal(found.version, "1.1.64");
+  assert.equal(found.versionSource, "cli --version");
+  assert.equal(found.issue, null);
+  // 桌面条原样留在 index 1，与 CLI 条互不干扰。
+  const desktop = installation(ok, "qoder", 1);
+  assert.equal(desktop.kind, "desktop");
+  assert.equal(desktop.remoteId, "qoder");
+  assert.equal(desktop.status, "not_found");
+
+  const broken = installation(await f.service({ probeVersion: async () => ({ missing: false, version: null }) }).getState(), "qoder", 0);
+  assert.equal(broken.status, "found");
+  assert.equal(broken.version, null);
+  assert.equal(broken.issue, "not_runnable");
+
+  // 文件在 isFile 与探针之间被挪走：按未找到报，不把半个安装留成 error。
+  const vanished = installation(await f.service({ probeVersion: async () => ({ missing: true, version: null }) }).getState(), "qoder", 0);
+  assert.equal(vanished.status, "not_found");
+  assert.equal(vanished.path, null);
+  assert.equal(vanished.issue, "entry_missing");
 });
 
 test("Codex reads its CLI version from the npm package manifest, never from a probe", async (t) => {
@@ -256,7 +286,7 @@ test("probeExecutableVersion parses the first SemVer and classifies spawn failur
   assert.deepEqual(await run(timedOut), { missing: false, version: null });
 });
 
-test("an empty installation reports all nine clients and Qoder as one desktop product", async (t) => {
+test("an empty installation reports all nine clients, with Codex and Qoder as two-installation cards", async (t) => {
   const f = fixture(t);
   const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
   assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
@@ -264,10 +294,12 @@ test("an empty installation reports all nine clients and Qoder as one desktop pr
   assert.equal(state.nodeVersion, process.version);
   assert.deepEqual(state.clients.map((c) => c.id), ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"]);
   assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
-  assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["desktop", "qoder"]]);
+  // Qoder 与 Codex 同序 [cli, desktop]：index 0 是 qodercli.exe（remoteId qoder-cli）。
+  assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
-    assert.equal(client.installations.length, client.id === "codex" ? 2 : 1);
+    assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
+    assert.equal(client.installations.length, ["codex", "qoder"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");
@@ -277,4 +309,24 @@ test("an empty installation reports all nine clients and Qoder as one desktop pr
       assert.equal(item.issue, "entry_missing");
     }
   }
+});
+
+test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", async (t) => {
+  assert.ok(Object.isFrozen(CLIENT_ENTRY_FORMS));
+  for (const forms of Object.values(CLIENT_ENTRY_FORMS)) assert.ok(Object.isFrozen(forms), "形态数组同样冻结");
+  assert.deepEqual(CLIENT_ENTRY_FORMS, {
+    kimi: ["CLI", "Desktop", "Web"],
+    codex: ["CLI", "Desktop"],
+    qoder: ["CLI", "Desktop"],
+    claude: ["CLI", "Desktop"],
+    dsh: ["CLI", "Web"],
+    pi: ["CLI"],
+    opencode: ["CLI"],
+    grok: ["CLI"],
+    zcode: ["Desktop"],
+  });
+  const f = fixture(t);
+  const state = await f.service().getState();
+  assert.deepEqual(Object.keys(CLIENT_ENTRY_FORMS).sort(), state.clients.map((client) => client.id).sort(),
+    "注册表里每个客户端都有形态枚举，没有遗漏也没有多余");
 });

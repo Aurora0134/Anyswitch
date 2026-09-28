@@ -6746,7 +6746,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let activeTerminalPreviewId = null;
       let terminalXterm = null;
       const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";
-      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok"];
+      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"];
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
       let terminalAddMenuSelection = "";
@@ -6781,7 +6781,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   it("已安装清单：只收白名单内 status=found 且 kind=cli 的端点", async () => {
     const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
     const agents = await sandbox.load();
-    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi"], "未安装/桌面 GUI/白名单外一律不进菜单");
+    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi", "qoder"], "未安装/桌面 GUI/白名单外一律不进菜单");
     assert.equal(log.environmentFetches, 1);
     await sandbox.load();
     assert.equal(log.environmentFetches, 1, "60s TTL 内不重复探测");
@@ -6790,7 +6790,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(els.terminalAddMenuList.innerHTML.includes("空白终端"), "首项恒为空白终端");
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Claude Code"));
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Kimi Code"));
-    assert.ok(!els.terminalAddMenuList.innerHTML.includes("Qoder"));
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("Qoder"), "qoder 已有 CLI 形态，进新建菜单");
+    assert.ok(!els.terminalAddMenuList.innerHTML.includes("ZCode"), "zcode 纯桌面 GUI，仍不进菜单");
     assert.equal(els.terminalAddMenuNote.hidden, true, "有可用 agent 时不显示提示");
   });
 

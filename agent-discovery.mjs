@@ -128,3 +128,10 @@ export function resolveQoderExecutable(base = process.env, io = { existsSync }) 
   const entryPath = join(base.USERPROFILE ?? "", ".qoder", "entry", "qoder.cmd");
   return io.existsSync(entryPath) ? entryPath : join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
 }
+
+// Qoder CLI 的官方形态是 Bun 单文件 qodercli.exe，与桌面端共用 ~/.qoder 数据根；
+// 上面的 resolveQoderExecutable 偏向 IDE 的 qoder.cmd 调度器，环境检测与终端
+// 一键启动要的都是 CLI 执行体本身，路径因此单独解析。
+export function resolveQoderCliExecutable(base = process.env) {
+  return join(base.USERPROFILE ?? "", ".qoder", "bin", "qodercli", "qodercli.exe");
+}

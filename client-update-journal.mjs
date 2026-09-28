@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteFile } from "./atomic-write.mjs";
+import { OFFICIAL_MSIX_CLIENTS } from "./client-lifecycle.mjs";
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -131,10 +132,63 @@ export async function executeClientUpdate({
     const after = (await environment.getState({ force: true })).clients.find((client) => client.id === run.clientId);
     const installation = after?.installations?.[0] ?? null;
     const afterVersion = installation?.version ?? null;
-    const latest = await releases.getClientLatest(run.clientId, { force: true });
+    // 官方版本查询渠道跟被更新那条安装项的 remoteId 走：qoder 的客户端 id 是桌面端
+    // 渠道，CLI 更新要比对的是 installations[0] 的 "qoder-cli"。
+    const latest = await releases.getClientLatest(installation?.remoteId ?? run.clientId, { force: true });
     const order = latest?.state === "ok" && afterVersion ? compareVersions(afterVersion, latest.version) : null;
     const comparison = order === null ? "unknown" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
-    if (!command.ok) {
+    if (Array.isArray(command.legs)) {
+      // 多腿客户端：逐腿一句、按形态取名（CLI/Desktop，与关于页徽标同一口径），
+      // 顶层 outcome 归并——有失败即 failed，全未动即 unchanged，其余 updated。
+      const legViews = command.legs.map((leg) => {
+        const label = leg.form === "cli" ? "CLI" : "Desktop";
+        const inst = (after?.installations ?? []).find((i) => i.kind === leg.form) ?? null;
+        const legAfter = inst?.version ?? null;
+        const before = run.beforeByForm?.[leg.form] ?? null;
+        let legOutcome, legMessage;
+        if (!leg.ok) {
+          legOutcome = "failed";
+          legMessage = leg.networkError
+            ? "网络问题，请检查网络后重试"
+            : leg.appRunning
+              ? `Desktop 正在运行，请先退出 ${OFFICIAL_MSIX_CLIENTS[run.clientId]?.displayName ?? "对应"} 桌面端后重试`
+              : leg.form === "desktop"
+                ? leg.storePageOpened
+                  ? "Desktop 更新未完成，已打开应用商店页"
+                  : leg.wingetMissing
+                    ? "Desktop 更新工具缺失（winget），请安装后重试"
+                    : "Desktop 更新命令执行失败，请稍后重试"
+                : leg.npmMissing
+                  ? "CLI 更新工具缺失（npm），请修复或重装 Node.js 后重试"
+                  : leg.timedOut
+                    ? "CLI 更新用时过长被中止，请检查网络后重新检测确认结果"
+                    : "CLI 更新命令执行失败，请稍后重试";
+        } else if (leg.noUpgrade) {
+          legOutcome = "unchanged";
+          legMessage = `${label} 已是最新`;
+        } else if (leg.form === "cli" && before && legAfter && before === legAfter && comparison === "update_available") {
+          // 在案保护（grok 条目）：镜像源滞后时 npm 退出码 0 但版本原地踏步，
+          // 必须如实报「未变化」，与下方单腿分支同口径，不许谎报「已更新」。
+          legOutcome = "unchanged";
+          legMessage = `${label} 更新已完成，但本地版本未变化，可能仍有旧版本在生效`;
+        } else {
+          legOutcome = "updated";
+          const known = leg.installedVersion ?? legAfter;
+          legMessage = known ? `${label} 已更新到 ${known}` : `${label} 更新已完成`;
+        }
+        return { form: leg.form, outcome: legOutcome, versionBefore: before, versionAfter: legAfter, message: legMessage };
+      });
+      result = {
+        outcome: legViews.some((v) => v.outcome === "failed")
+          ? "failed"
+          : legViews.every((v) => v.outcome === "unchanged")
+            ? "unchanged"
+            : "updated",
+        message: legViews.map((v) => v.message).join("；"),
+        detail: command.output || undefined,
+        legs: legViews,
+      };
+    } else if (!command.ok) {
       result = {
         outcome: "failed",
         message: command.npmMissing

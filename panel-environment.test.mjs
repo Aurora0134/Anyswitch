@@ -161,6 +161,22 @@ test("Codex 桌面端纳入官方版本查询白名单，不再吃 unknown_clien
   });
 });
 
+test("qoder-cli 纳入官方版本查询白名单，与 qoder 桌面端渠道各查各的", async () => {
+  const latest = { state: "ok", version: "1.1.64", url: "https://www.npmjs.com/package/@qoder-ai/qodercli", source: "npm:@qoder-ai/qodercli:latest", checkedAt: "2026-09-18T00:00:00Z", errorCode: null };
+  await withPanel({ releaseService: { async getClientLatest(id, options) {
+    assert.equal(id, "qoder-cli", "远端 id 原样传给发布服务");
+    assert.deepEqual(options, { force: false });
+    return latest;
+  } } }, async (get) => {
+    const result = await get("/panel/api/environment/latest/qoder-cli");
+    assert.equal(result.status, 200, "qoder-cli 不落进 404 unknown_client");
+    assert.deepEqual(result.body, { ...latest, comparison: "unknown" });
+    const compared = await get("/panel/api/environment/latest/qoder-cli?localVersion=1.1.63");
+    assert.equal(compared.status, 200);
+    assert.equal(compared.body.comparison, "update_available", "comparison 字段照常按本地版本计算");
+  });
+});
+
 test("客户端预发布版本按数字比较，未知和查询失败保持无法比较", async () => {
   let offline = false;
   const service = { async getClientLatest() {
@@ -219,11 +235,18 @@ function clientState(versions = {}, issues = {}) {
     checkedAt: "2026-09-18T00:00:00.000Z", platform: "win32", nodeVersion: "v24.18.0",
     clients: ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "grok"].map((id) => ({
       id, name: id,
-      installations: [{
-        kind: id === "zcode" || id === "qoder" ? "desktop" : "cli",
-        remoteId: id, status: "found", path: `C:/fixture/${id}`,
-        version: Object.hasOwn(versions, id) ? versions[id] : "1.0.0", versionSource: "package.json", issue: issues[id] ?? null,
-      }],
+      installations: id === "qoder"
+        // 与生产同形：index 0 是 qodercli.exe 原生 CLI（更新按钮代管的就是它），
+        // index 1 是桌面 IDE（不经面板更新）。
+        ? [
+          { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:/fixture/qodercli.exe", version: Object.hasOwn(versions, id) ? versions[id] : "1.0.0", versionSource: "cli --version", issue: issues[id] ?? null },
+          { kind: "desktop", remoteId: "qoder", status: "found", path: "C:/fixture/qoder", version: "2.0.0", versionSource: "app.asar/package.json", issue: null },
+        ]
+        : [{
+          kind: id === "zcode" ? "desktop" : "cli",
+          remoteId: id, status: "found", path: `C:/fixture/${id}`,
+          version: Object.hasOwn(versions, id) ? versions[id] : "1.0.0", versionSource: "package.json", issue: issues[id] ?? null,
+        }],
     })),
   };
 }
@@ -253,7 +276,7 @@ test("客户端更新只接受可代管客户端与合法动作，非法请求�
   let spawned = 0;
   await withPanel({ spawnClientUpdateWorkerFn: () => { spawned += 1; return process.pid; } }, async (get, post) => {
     assert.equal((await post("/panel/api/environment/update", { id: "zcode", action: "update" })).status, 404, "桌面应用不经面板更新");
-    assert.equal((await post("/panel/api/environment/update", { id: "qoder", action: "install" })).status, 404);
+    assert.equal((await post("/panel/api/environment/update", { id: "qoder", action: "install" })).status, 400, "qoder 是原生自更新：不代装，只受理 update（受理路径见下方专门用例）");
     assert.equal((await post("/panel/api/environment/update", { id: "not-a-client", action: "update" })).status, 404);
     assert.equal((await post("/panel/api/environment/update", { id: "constructor", action: "update" })).status, 404, "原型链上的名字不能当客户端 id");
     assert.equal((await post("/panel/api/environment/update", { id: "claude", action: "uninstall" })).status, 400);
@@ -458,6 +481,68 @@ test("grok 更新前先把官方最新版本取来钉住兜底安装，执行体
     assert.equal(finished.body.outcome, "updated", "重查后本地版本已到位");
     assert.match(finished.body.message, /1\.0\.41/);
     assert.deepEqual(requested.slice(0, 1), [{ id: "grok", force: false }], "动手前先查一次官方版本，走缓存不打扰远端");
+  });
+});
+
+test("qoder 更新受理：执行体路径取 CLI 安装项，官方版本查询走 qoder-cli 渠道", async () => {
+  const requested = [];
+  const services = {
+    environmentService: {
+      async getState(options = {}) {
+        return clientState({ qoder: options.force ? "1.1.64" : "1.0.0" });
+      },
+    },
+    releaseService: {
+      async getClientLatest(id, options) {
+        requested.push({ id, force: Boolean(options?.force) });
+        return latestFor("1.1.64");
+      },
+    },
+  };
+  await withPanel({
+    ...services,
+    spawnClientUpdateWorkerFn: driveWorker(services, async ({ id, action, commandPath }) => {
+      assert.deepEqual({ id, action }, { id: "qoder", action: "update" });
+      assert.equal(commandPath, "C:/fixture/qodercli.exe", "执行体路径来自 CLI 安装项（installations[0]），不是桌面端");
+      return { ok: true, output: "" };
+    }),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "qoder", action: "update" });
+    assert.equal(started.status, 202);
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "updated");
+    assert.match(finished.body.message, /1\.1\.64/);
+    // 动手前（非 force）与收尾（force）两次官方查询都打 qoder-cli 渠道，
+    // 不能错用客户端 id 挂着的桌面端渠道。
+    assert.deepEqual(requested, [{ id: "qoder-cli", force: false }, { id: "qoder-cli", force: true }]);
+  });
+});
+
+test("qoder 命令成功但版本原地踏步归为未生效，命令失败带出末行错误", async () => {
+  const makeServices = () => ({
+    environmentService: { async getState() { return clientState({ qoder: "1.0.0" }); } },
+    releaseService: { async getClientLatest() { return latestFor("1.1.64"); } },
+  });
+  const stuck = makeServices();
+  await withPanel({
+    ...stuck,
+    spawnClientUpdateWorkerFn: driveWorker(stuck, async () => ({ ok: true, output: "" })),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "qoder", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "unchanged");
+    assert.match(finished.body.message, /版本未变化/);
+  });
+
+  const failing = makeServices();
+  await withPanel({
+    ...failing,
+    spawnClientUpdateWorkerFn: driveWorker(failing, async () => ({ ok: false, output: "qodercli update failed: quorum lost" })),
+  }, async (get, post) => {
+    const started = await post("/panel/api/environment/update", { id: "qoder", action: "update" });
+    const finished = await waitForRun(get, started.body.runId);
+    assert.equal(finished.body.outcome, "failed");
+    assert.match(finished.body.detail, /quorum lost/);
   });
 });
 

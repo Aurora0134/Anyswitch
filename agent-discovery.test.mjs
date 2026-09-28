@@ -5,7 +5,7 @@ import {
   defaultClaudeExecutable, resolveClaudeExecutable, resolveCodexExecutable,
   resolveOpencodeExecutable, resolvePiExecutable, resolveKimiExecutable,
   resolveDshExecutable, resolveZcodeExecutable, resolveQoderExecutable,
-  resolveGrokExecutable,
+  resolveQoderCliExecutable, resolveGrokExecutable,
 } from "./agent-discovery.mjs";
 
 test("standalone discovery preserves all nine launcher installation choices", () => {
@@ -19,6 +19,8 @@ test("standalone discovery preserves all nine launcher installation choices", ()
   assert.equal(resolveDshExecutable(base, { existsSync: () => true }), join(base.APPDATA, "npm/dsh.cmd"));
   assert.equal(resolveZcodeExecutable(base), join(base.LOCALAPPDATA, "Programs/zcode/ZCode.exe"));
   assert.equal(resolveQoderExecutable(base, { existsSync: () => true }), join(base.USERPROFILE, ".qoder/entry/qoder.cmd"));
+  // 环境检测与终端一键启动认 CLI 执行体本身，不经 IDE 的 qoder.cmd 调度器。
+  assert.equal(resolveQoderCliExecutable(base), join(base.USERPROFILE, ".qoder/bin/qodercli/qodercli.exe"));
   assert.equal(resolveGrokExecutable(base), join(base.USERPROFILE, ".grok/bin/grok.exe"));
   assert.equal(resolveGrokExecutable({ ...base, GROK_EXECUTABLE: "C:\\custom\\grok.exe" }), "C:\\custom\\grok.exe");
 });
