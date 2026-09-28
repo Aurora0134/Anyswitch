@@ -18,6 +18,13 @@ import { isPidAlive } from "./relay-process-manager.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
+// The watchdog is the backstop for the relay's hard-exit paths only (a graceful
+// relay stop kills this child first), so firing late costs nothing while firing
+// wrongly kills a healthy host. isPidAlive's tasklist probe reports false on a
+// timeout/error under load spikes — two false kills were observed that way —
+// so onDead requires this many consecutive dead verdicts, any live reading
+// resetting the count.
+export const WATCHDOG_MISSES_REQUIRED = 5;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 // Raw output window, budgeted in bytes rather than chunk counts. Chunks are dropped
@@ -461,6 +468,7 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       if (action === "input" && req.method === "POST") {
         const body = await readBody(req);
         if (typeof body.data !== "string" || body.data.length > 64 * 1024) return json(res, 400, { error: "invalid_input" });
+        if (!session.pty) return json(res, 409, { error: "session_exited" });
         session.pty?.write(body.data);
         session.lastActiveAt = Date.now();
         return json(res, 200, { ok: true });
@@ -544,19 +552,29 @@ export async function startTerminalHost(options = {}) {
 // ownerless, outliving every app update) is exactly the failure being closed
 // out. While TERMINAL_PARENT_PID_ENV names a live relay, the relay's graceful
 // shutdown kills this child first; this poller is the backstop for every path
-// that doesn't (hard kill of the relay alone, fatal exit). Returns null when
-// no valid parent pid was supplied, leaving manual/test runs untouched.
+// that doesn't (hard kill of the relay alone, fatal exit). onDead only fires
+// after missesRequired consecutive dead verdicts — a single miss may be a
+// probe hiccup, not a dead parent. Returns null when no valid parent pid was
+// supplied, leaving manual/test runs untouched.
 export function watchParentProcess({
   parentPid,
   isAlive = isPidAlive,
   intervalMs = PARENT_WATCHDOG_INTERVAL_MS,
+  missesRequired = WATCHDOG_MISSES_REQUIRED,
   setIntervalFn = setInterval,
   onDead,
 }) {
   if (!Number.isInteger(parentPid) || parentPid <= 0) return null;
   let fired = false;
+  let misses = 0;
   const timer = setIntervalFn(() => {
-    if (fired || isAlive(parentPid)) return;
+    if (fired) return;
+    if (isAlive(parentPid)) {
+      misses = 0;
+      return;
+    }
+    misses += 1;
+    if (misses < missesRequired) return;
     fired = true;
     onDead?.();
   }, intervalMs);
