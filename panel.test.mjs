@@ -5475,6 +5475,134 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   });
 });
 
+// 键盘兜底转发（首开吞字收口）：焦点不在 xterm 隐藏输入框（首开未就绪/未聚焦
+// 的窗口）时，按键落到页面主体直接丢字。捕获阶段监听把可打印键与回车/退格
+// 转投当前活动会话。函数体抽出进桩环境真跑：document 桩记录监听注册、处理器
+// 手动触发（无 DOM 事件派发），api 桩记录 POST。
+describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
+  function keydownSandbox() {
+    const src = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "initTerminalPreview found in panel.js");
+    const state = { posts: [], documentListeners: [], focusCount: 0 };
+    const sandbox = new Function("state", `
+      let currentView = "terminal";
+      let activeTerminalPreviewId = "sess-a";
+      let terminalBackendReady = true;
+      let terminalPollTimer = null;
+      let terminalXterm = null;
+      const terminalBackendSessions = {};
+      const terminalPreviewSessions = {};
+      const sessions = { "sess-a": { id: "sess-a", backend: true }, "sess-b": { id: "sess-b", backend: true } };
+      const document = {
+        hidden: false,
+        activeElement: null,
+        addEventListener(type, fn, capture) { state.documentListeners.push({ type, fn, capture: capture === true }); },
+      };
+      const elements = {};
+      const $ = (id) => {
+        if (!elements[id]) elements[id] = {
+          addEventListener() {}, hidden: true, contains() { return false; },
+          classList: { toggle() {}, contains() { return false; } },
+          setAttribute() {}, getAttribute() { return null; },
+        };
+        return elements[id];
+      };
+      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function terminalSessionFor(id) { return sessions[id] || null; }
+      function debounceTerminalFit() {}
+      function positionTerminalAddMenu() {}
+      function restoreTerminalFontSize() {}
+      function syncTerminalAddBtn() {}
+      function connectTerminalBackend() {}
+      function renderTerminalPreviewSession() {}
+      function syncTerminalActivityStream() {}
+      function pollTerminalSessions() {}
+      function nudgeTerminalFontSize() {}
+      function isTerminalFontZoomKey() { return 0; }
+      function rememberTerminalSessionId() {}
+      function closeTerminalPreview() {}
+      function closeTerminalStream() {}
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalEmptyState() {}
+      function openTerminalAddMenu() {}
+      function closeTerminalAddMenu() {}
+      function confirmTerminalAddMenu() {}
+      function selectTerminalAddAgent() {}
+      function setInterval(cb) { return 1; }
+      const window = { addEventListener() {}, confirm: () => true };
+      ${src}
+      terminalXterm = { focus() { state.focusCount += 1; } };
+      initTerminalPreview();
+      return {
+        document,
+        setActive: (v) => { activeTerminalPreviewId = v; },
+        setView: (v) => { currentView = v; },
+      };
+    `)(state);
+    const captureHandlers = state.documentListeners.filter((l) => l.type === "keydown" && l.capture);
+    assert.equal(captureHandlers.length, 1, "兜底转发恰一个，且注册在捕获阶段");
+    const fire = (event) => {
+      const prevented = [];
+      captureHandlers[0].fn({
+        preventDefault: () => prevented.push(true),
+        isComposing: false, keyCode: 0, ctrlKey: false, metaKey: false, altKey: false,
+        ...event,
+      });
+      return prevented.length > 0;
+    };
+    const inputPosts = () => state.posts.filter((p) => p.method === "POST" && p.url.includes("/input"));
+    return { sandbox, state, fire, inputPosts };
+  }
+
+  it("终端页焦点在页面主体：可打印键与 Enter/Backspace 转投当前活动会话并聚焦 xterm", () => {
+    const { sandbox, state, fire, inputPosts } = keydownSandbox();
+    sandbox.document.activeElement = { tagName: "BODY", classList: { contains: () => false } };
+    assert.equal(fire({ key: "a" }), true, "preventDefault 落地，字节不再落回页面主体");
+    assert.deepEqual(inputPosts(), [
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "a" } },
+    ]);
+    assert.equal(state.focusCount, 1, "转发后回焦 xterm，后续键入由 xterm 自收");
+    sandbox.setActive("sess-b");
+    fire({ key: "Enter" });
+    fire({ key: "Backspace" });
+    assert.deepEqual(inputPosts().slice(1), [
+      { method: "POST", url: "/api/terminal/sessions/sess-b/input", body: { data: "\r" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-b/input", body: { data: "\x7f" } },
+    ], "Enter/Backspace 映射成控制字节，发往触发时读到的活动会话");
+  });
+
+  it("焦点在其它输入控件（INPUT/TEXTAREA）或 xterm 自持输入框时不劫持", () => {
+    const { sandbox, fire, inputPosts } = keydownSandbox();
+    sandbox.document.activeElement = { tagName: "INPUT" };
+    assert.equal(fire({ key: "a" }), false, "INPUT 不劫持（新建菜单 cwd 框同型）");
+    sandbox.document.activeElement = { tagName: "TEXTAREA" };
+    assert.equal(fire({ key: "a" }), false, "TEXTAREA 不劫持");
+    sandbox.document.activeElement = { classList: { contains: (c) => c === "xterm-helper-textarea" } };
+    assert.equal(fire({ key: "a" }), false, "xterm 自持的隐藏输入框不劫持");
+    assert.deepEqual(inputPosts(), [], "以上路径均不产生 POST");
+  });
+
+  it("非 terminal 视图不劫持", () => {
+    const { sandbox, fire, inputPosts } = keydownSandbox();
+    sandbox.setView("sessions");
+    assert.equal(fire({ key: "a" }), false);
+    assert.deepEqual(inputPosts(), []);
+  });
+
+  it("IME 组字态（isComposing / keyCode 229）与不映射键（方向键、F 键、Tab）不劫持", () => {
+    const { fire, inputPosts } = keydownSandbox();
+    assert.equal(fire({ key: "a", keyCode: 229 }), false, "组字态 keyCode 229 不劫持");
+    assert.equal(fire({ key: "a", isComposing: true }), false, "isComposing 不劫持");
+    assert.equal(fire({ key: "a", ctrlKey: true }), false, "Ctrl 组合键不劫持");
+    assert.equal(fire({ key: "a", metaKey: true }), false, "Meta 组合键不劫持");
+    assert.equal(fire({ key: "a", altKey: true }), false, "Alt 组合键不劫持");
+    assert.equal(fire({ key: "ArrowUp" }), false, "方向键不劫持");
+    assert.equal(fire({ key: "F5" }), false, "F 键不劫持");
+    assert.equal(fire({ key: "Tab" }), false, "Tab 不劫持");
+    assert.deepEqual(inputPosts(), [], "以上路径均不产生 POST");
+  });
+});
+
 // 窗口 resize 防抖（B3）：拖动动画里逐帧的事件合并到静默期后一次 fit。
 // 防抖函数在桩定时器环境里真跑。
 describe("虚拟终端 resize 防抖", () => {

@@ -4015,7 +4015,7 @@ async function api(method, path, body) {
     const boundSessionId = session?.backend ? session.id : null;
     terminalInputDisposable = term.onData((data) => {
       if (boundSessionId === null) return;
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch(() => {});
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     });
     if (!session?.backend) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
@@ -4596,6 +4596,30 @@ async function api(method, path, body) {
       event.preventDefault();
       nudgeTerminalFontSize(delta);
     });
+    // 键盘兜底转发：xterm 靠隐藏输入框收键，首开未就绪/未聚焦的窗口里按键落到
+    // 页面主体直接丢失。捕获阶段把可打印键与回车/退格转投当前活动会话；方向键、
+    // F 键、Tab 等不劫持，宁缺毋错。这里读活动会话是刻意的：兜底只在焦点不在
+    // xterm 时触发，不存在 onData 定投机制所防的跨会话误投问题。
+    document.addEventListener("keydown", (event) => {
+      if (currentView !== "terminal") return;
+      // IME 组字态（isComposing / keyCode 229）最终字节未定，不转发。
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      let data = null;
+      if (event.key && event.key.length === 1) data = event.key;
+      else if (event.key === "Enter") data = "\r";
+      else if (event.key === "Backspace") data = "\x7f";
+      else return;
+      // 焦点守卫：xterm 自持输入时不劫持；其它输入控件（新建菜单 cwd 框等）不劫持。
+      const active = document.activeElement;
+      if (active?.classList?.contains("xterm-helper-textarea")) return;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+      const session = terminalSessionFor(activeTerminalPreviewId);
+      if (!session?.backend) return;
+      event.preventDefault();
+      terminalXterm?.focus();
+      api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+    }, true);
     $("terminalRetryBtn").onclick = () => connectTerminalBackend();
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
