@@ -309,7 +309,7 @@ describe("auto routing channel (_auto)", () => {
     );
     const entry = config.provider._auto;
     assert.ok(entry, "_auto channel must be injected");
-    assert.equal(entry.name, "自动路由");
+    assert.equal(entry.name, "Anyswitch");
     assert.equal(entry.kind, "openai-compatible");
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(entry.options.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");

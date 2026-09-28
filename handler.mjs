@@ -39,6 +39,7 @@ import {
   AUTO_MODEL,
   AUTO_MODEL_ANTHROPIC_ID,
   resolveChain,
+  resolveVirtualModelEntry,
   expandChainNode,
   createChainState,
   noteChainSuccess,
@@ -262,13 +263,28 @@ export function createHandler(deps) {
     // and is appended after collision checking, so it can never trip that check.
     // The catalog advertises it under AUTO_MODEL_ANTHROPIC_ID: Claude Code's
     // gateway discovery drops entries whose id fails /(claude|anthropic)/i,
-    // which the bare "auto" id always does (see chain-routing.mjs).
+    // which the bare "auto" id always does (see chain-routing.mjs). 分组标签
+    // 统一 "Anyswitch"——auto 与虚拟模型同在 Anyswitch provider 列表下。
     if (agentId !== undefined && (resolveChain(loaded.store, agentId)?.chain?.length ?? 0) > 0) {
       entries.push({
         wireId: AUTO_MODEL_ANTHROPIC_ID,
         providerId: agentId,
         modelId: AUTO_MODEL,
-        displayName: `[${agentId}] 自动路由 (auto)`,
+        displayName: "[Anyswitch] auto",
+      });
+    }
+    // 虚拟模型：不绑定端点，任何调用方（含 agentId 未知者）的目录都照列。
+    // 目录 id 沿 auto 的同一造法 "anthropic/<名字>"——前缀段内无 '/' 永不与真
+    // wire id 相撞、必过 Claude Code 的 /(claude|anthropic)/i 过滤，且
+    // planChainMessages 在 unpackWireId 之前拦截它。
+    for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
+      if (vm?.enabled === false) continue;
+      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      entries.push({
+        wireId: `anthropic/${vm.name}`,
+        providerId: agentId ?? "anyswitch",
+        modelId: vm.name,
+        displayName: `[Anyswitch] ${vm.name}`,
       });
     }
 
@@ -579,7 +595,12 @@ export function createHandler(deps) {
       return { ok: false, status: 400, body: errorBody("invalid_request_error", "request body must be a JSON object") };
     }
 
-    if (body.model !== AUTO_MODEL && body.model !== AUTO_MODEL_ANTHROPIC_ID) return null;
+    // Route selection (auto vs 虚拟模型): auto rides the requesting endpoint's
+    // chain (identifiable callers only); a virtual model name rides its own
+    // endpoint-agnostic chain. The chain state table keys off the route key —
+    // endpoint id for auto, the model name for a virtual model (save-time
+    // schema forbids endpoint ids as vm names, so the two key spaces never
+    // overlap). Both shapes expose .chain, so the expansion below is shared.
 
     // Normalize the picker-facing alias back to the canonical virtual model:
     // both call sites (per-launch relay, resident relay) read body.model for
@@ -590,8 +611,25 @@ export function createHandler(deps) {
     const loaded = loadValidStore();
     if (!loaded.ok) return null;
 
-    const chain = resolveChain(loaded.store, agentId);
+    let chain = null;
+    let routeKey = null;
+    if (body.model === AUTO_MODEL) {
+      chain = resolveChain(loaded.store, agentId);
+      routeKey = agentId;
+    } else {
+      chain = resolveVirtualModelEntry(loaded.store, body.model);
+      routeKey = chain?.name ?? null;
+    }
     if (!chain || chain.chain.length === 0) return null;
+
+    // 虚拟模型的目录别名 "anthropic/<名字>" 归一为裸名：与 auto 的别名归一同一
+    // 理由——下游归属读取 body.model，journal/统计保持裸名键。
+    if (body.model !== AUTO_MODEL && body.model.startsWith("anthropic/")) {
+      const bare = body.model.slice("anthropic/".length);
+      if (bare && !bare.includes("/") && resolveVirtualModelEntry(loaded.store, bare)) {
+        body.model = bare;
+      }
+    }
 
     // Reachable channels, derived from the CONFIGURED chain without touching
     // chainState: plan() re-anchors the backoff probe window, and a request
@@ -609,7 +647,7 @@ export function createHandler(deps) {
 
     // plan already applies "current node first + retry from the head every
     // RETRY_UPSTREAM_MS"; expand the entries in exactly the returned order.
-    const planned = chainState.plan(loaded.store, agentId, chain.chain, Date.now());
+    const planned = chainState.plan(loaded.store, routeKey, chain.chain, Date.now());
 
     const members = [];
     const byMemberId = new Map();
@@ -660,10 +698,12 @@ export function createHandler(deps) {
     }
 
     if (members.length === 0) {
+      // auto 的报错点名端点；虚拟模型点名模型名（链不绑定端点，名字才是路由键）。
+      const subject = body.model === AUTO_MODEL ? agentId : body.model;
       return {
         ok: false,
         status: 404,
-        body: errorBody("not_found_error", `no node in the route chain for "${agentId}" can serve the request`),
+        body: errorBody("not_found_error", `no node in the route chain for "${subject}" can serve the request`),
       };
     }
 
@@ -683,7 +723,7 @@ export function createHandler(deps) {
       noteSuccess: (memberId) => {
         const record = byMemberId.get(memberId);
         if (record === undefined) return;
-        noteChainSuccess(chainState, agentId, record.nodeId, record.model, Date.now());
+        noteChainSuccess(chainState, routeKey, record.nodeId, record.model, Date.now());
         if (record.poolId !== undefined) {
           stickyTable.noteSuccess(record.poolId, record.model, record.poolMemberId);
         }
@@ -701,7 +741,7 @@ export function createHandler(deps) {
         const key = chainNodeKey(record.nodeId, record.model);
         if (failedNodes.has(key)) return;
         failedNodes.add(key);
-        noteChainFailure(chainState, agentId, record.nodeId, record.model);
+        noteChainFailure(chainState, routeKey, record.nodeId, record.model);
       },
     };
   }

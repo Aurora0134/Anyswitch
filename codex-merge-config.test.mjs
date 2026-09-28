@@ -323,7 +323,7 @@ describe("auto routing channel (anyswitch-auto)", () => {
     const { text, managed } = mergeCodexConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", auto);
     assert.match(text, /\[model_providers\."anyswitch-auto"\]/);
     const autoBlock = text.match(/\[model_providers\."anyswitch-auto"\][^[]*/)[0];
-    assert.match(autoBlock, /name = "自动路由"/);
+    assert.match(autoBlock, /name = "Anyswitch"/);
     assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
     assert.match(autoBlock, /"x-agent-id" = "codex"/);
     assert.ok(managed.includes("auto"), "sidecar tracks the auto channel as managed");

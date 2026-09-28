@@ -4,7 +4,7 @@ import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel } from "./merge-common.mjs";
+export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { loadPiAiReasoningIndex, resolveKnowledgeReasoning } from "./reasoning-fallback.mjs";
 import { resolveModelEfforts, effortWireValue, intersectEffortVocabulary } from "./effort-catalog.mjs";

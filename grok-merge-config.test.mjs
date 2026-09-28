@@ -223,21 +223,19 @@ describe("grok catalog key packing", () => {
     assert.deepEqual(skipped, []);
   });
 
-  it("skips a repeated catalog key instead of emitting a second identically named table", () => {
-    // auto 伪渠道的特例只看渠道 id：一个 id 就叫 auto 的渠道挂了多条模型时，
-    // 每条都会落到 AUTO_MODEL_KEY 上，第二条必须跳过而不是写出同名表。
+  it("auto 触发词独占裸键，Anyswitch 渠道其余模型各占限定键（不再塌键跳过）", () => {
+    // 渠道 id 叫 auto 时（虚拟模型分组）：裸触发词 "auto" 落 AUTO_MODEL_KEY，
+    // 旗下虚拟模型按渠道限定 slug 各占一键——塌到同一键会被去重门整条跳过，
+    // 虚拟模型从 grok 目录里消失。
     const { text, managed, modelKeys, skipped } = buildGrokManagedToml(
       { auto: { models: { auto: {}, "m-2": {} } } },
       47821,
       "tok",
     );
-    assert.deepEqual(modelKeys, [AUTO_MODEL_KEY]);
-    assert.deepEqual(text.match(/^\[model\..*\]$/gm) ?? [], ['[model."' + AUTO_MODEL_KEY + '"]']);
+    assert.deepEqual(modelKeys, [AUTO_MODEL_KEY, "anyswitch-auto~m-2"]);
+    assert.deepEqual(text.match(/^\[model\..*\]$/gm) ?? [], ['[model."anyswitch-auto"]', '[model."anyswitch-auto~m-2"]']);
     assert.deepEqual(managed, ["auto"], "the channel itself stays managed");
-    assert.equal(skipped.length, 1);
-    assert.equal(skipped[0].key, AUTO_MODEL_KEY);
-    assert.equal(skipped[0].modelId, "m-2");
-    assert.match(skipped[0].reason, /duplicate catalog key/);
+    assert.deepEqual(skipped, [], "虚拟模型不再被当作重复键跳过");
   });
 
   it("packs the key with codex's ~ separator so the first ~ is the only channel/model boundary", () => {
@@ -448,17 +446,20 @@ describe("writeGrokConfig", () => {
     assert.deepEqual(readSidecar(dir), { providers: [] });
   });
 
-  it("reports duplicate catalog keys that had to be skipped", () => {
+  it("渠道 id 叫 auto 时触发词与虚拟模型各占一键，无跳过", () => {
     const dir = mkTestDir("grok-write-");
     const configPath = join(dir, ".grok", "config.toml");
-    // 渠道 id 就叫 auto 且挂了多条模型时，第二条会撞上 auto 触发词键。
+    // 渠道 id 就叫 auto 且挂了多条模型：裸触发词占 AUTO_MODEL_KEY，其余模型
+    // 按限定 slug 各占一键——同名表不再出现，配置始终可加载。
     const store = { version: 2, providers: { auto: { displayName: "Auto", models: { auto: {}, "m-2": {} } } } };
     const result = writeGrokConfig(store, 47821, "tok", dir, configPath);
     assert.equal(result.ok, true);
-    assert.equal(result.skipped.length, 1);
-    assert.match(result.skipped[0].reason, /duplicate catalog key/);
+    assert.deepEqual(result.skipped, []);
     const text = readFileSync(configPath, "utf8");
-    assert.equal((text.match(/^\[model\..*\]$/gm) ?? []).length, 1, "one table, never two with the same name");
+    const tables = text.match(/^\[model\..*\]$/gm) ?? [];
+    assert.equal(tables.length, 2, "auto 触发词与虚拟模型各一张表");
+    assert.ok(tables.includes('[model."anyswitch-auto"]'), "触发词占裸键");
+    assert.ok(tables.includes('[model."anyswitch-auto~m-2"]'), "虚拟模型占限定键");
   });
 
   it("fails closed on a truncated managed block and leaves the file untouched", () => {

@@ -10,7 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readSidecar, writeSidecar, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { readSidecar, writeSidecar, deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("merge-common sidecar", () => {
@@ -69,11 +69,12 @@ describe("deriveAutoRouteChannel", () => {
 
   it("derives the virtual auto channel from the endpoint's chain head", () => {
     const channel = deriveAutoRouteChannel(chainStore, "zcode");
-    assert.equal(channel.channelName, "自动路由");
+    assert.equal(channel.channelName, "Anyswitch");
     // The base URL segment is the chain HEAD node, never the literal "auto".
     assert.equal(channel.baseUrlSegment, "poke-api");
     assert.deepEqual(Object.keys(channel.models), ["auto"]);
-    // 模型显示名 = "auto"（与 provider 显示名「自动路由」对调后的口径）。
+    // 模型显示名 = "auto"（provider 显示名已归「Anyswitch」分组，模型侧保
+    // 留裸触发词——它是链路由触发词，不是真模型）。
     assert.equal(channel.models.auto.displayName, "auto");
   });
 
@@ -106,5 +107,43 @@ describe("deriveAutoRouteChannel", () => {
     };
     assert.ok(deriveAutoRouteChannel(enabled, "zcode") !== null);
     assert.ok(deriveAutoRouteChannel(chainStore, "zcode") !== null, "absent enabled = enabled");
+  });
+});
+
+describe("deriveAnyswitchChannel（Anyswitch 分组：auto + 虚拟模型）", () => {
+  const store = {
+    providers: { "poke-api": { models: { m1: {} } }, "nim": { models: { m2: {} } } },
+    routingChains: {
+      zcode: { chain: [{ node: "poke-api", model: "claude-opus-5" }] },
+    },
+    virtualModels: [
+      { name: "my-chain", chain: [{ node: "nim", model: "deepseek-chat" }] },
+      { name: "off-one", enabled: false, chain: [{ node: "poke-api", model: "m1" }] },
+    ],
+  };
+
+  it("auto 与启用的虚拟模型同组，provider 显示名 Anyswitch", () => {
+    const channel = deriveAnyswitchChannel(store, "zcode");
+    assert.equal(channel.channelName, "Anyswitch");
+    assert.deepEqual(Object.keys(channel.models), ["auto", "my-chain"], "auto + 启用中的虚拟模型");
+    assert.equal(channel.models["my-chain"].displayName, "my-chain", "虚拟模型显示名 = 裸名");
+    assert.equal(channel.baseUrlSegment, "poke-api", "有 auto 链时段取 auto 链头");
+  });
+
+  it("端点无 auto 链时 URL 段取第一个虚拟模型的链头；停用虚拟模型不出组", () => {
+    const channel = deriveAnyswitchChannel(store, "dsh");
+    assert.deepEqual(Object.keys(channel.models), ["my-chain"], "无 auto 链则无 auto 模型");
+    assert.equal(channel.baseUrlSegment, "nim");
+  });
+
+  it("无 auto 链且无启用虚拟模型 → null（托管块由既有清理路径移除）", () => {
+    assert.equal(deriveAnyswitchChannel({ providers: {} }, "kimi"), null);
+    const onlyOff = { providers: store.providers, virtualModels: [{ name: "off-one", enabled: false, chain: [{ node: "poke-api", model: "m1" }] }] };
+    assert.equal(deriveAnyswitchChannel(onlyOff, "kimi"), null);
+  });
+
+  it("链为空的虚拟模型不出组；缺 helpers 的脏数据不至于抛", () => {
+    const dirty = { providers: store.providers, virtualModels: [{ name: "empty", chain: [] }, "oops", null, { chain: [{ node: "nim", model: "m2" }] }] };
+    assert.equal(deriveAnyswitchChannel(dirty, "kimi"), null);
   });
 });

@@ -4,7 +4,7 @@ import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mj
 import { extractPresentedToken } from "./handler.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "./pool-routing.mjs";
-import { AUTO_MODEL, resolveChain, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
+import { AUTO_MODEL, resolveChain, resolveVirtualModelEntry, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 import { buildChannelModelSlugCatalog } from "./channel-model-slug.mjs";
 
@@ -232,6 +232,14 @@ export function createOpenAIHandler(deps) {
     // "auto" can ignore it.
     if (agentId && resolveChain(loaded.store, agentId)) {
       response.data.push({ id: AUTO_MODEL, object: "model" });
+    }
+
+    // 虚拟模型：不绑定端点，任何可识别的请求方都能看到（agentId 缺失也照列
+    // ——这正是与 auto 的区别）。裸 id 即模型名，拦截优先于一切 provider 解析。
+    for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
+      if (vm?.enabled === false) continue;
+      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      response.data.push({ id: vm.name, object: "model" });
     }
 
     // Bind this discovery result to the endpoint each channel resolves to.
@@ -465,10 +473,8 @@ export function createOpenAIHandler(deps) {
     const auth = authorize(headers);
     if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
 
-    // Not an object or not the virtual model: classic routing reports the
-    // shape error / handles the concrete model.
+    // Not an object: classic routing reports the shape error.
     if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
-    if (body.model !== AUTO_MODEL || !agentId) return null;
 
     const parsed = parseOpenAIPath(path);
     if (!parsed.ok) return null;
@@ -476,8 +482,24 @@ export function createOpenAIHandler(deps) {
     const loaded = loadValidStore();
     if (!loaded.ok) return null;
 
-    const chainEntry = resolveChain(loaded.store, agentId);
-    if (!chainEntry) return null;
+    // 路由键与链的来源：auto 走请求方端点的链（必须可识别），虚拟模型名走
+    // 自己的链（端点无关，agentId 缺失也照走——名字本身就是全局路由键）。
+    // 链状态表也按路由键分格：auto 沿用端点 id，虚拟模型用名字（保存时
+    // schema 禁用端点 id 撞名，两格永不重叠）。
+    let chainEntry = null;
+    let routeKey = null;
+    let requested = null;
+    if (body.model === AUTO_MODEL) {
+      if (!agentId) return null;
+      chainEntry = resolveChain(loaded.store, agentId);
+      routeKey = agentId;
+      requested = AUTO_MODEL;
+    } else {
+      chainEntry = resolveVirtualModelEntry(loaded.store, body.model);
+      routeKey = chainEntry?.name ?? null;
+      requested = body.model;
+    }
+    if (!chainEntry || !Array.isArray(chainEntry.chain) || chainEntry.chain.length === 0) return null;
 
     // Reachable channels, derived from the CONFIGURED chain without touching
     // chainState: plan() re-anchors the backoff probe window, and a request
@@ -493,7 +515,7 @@ export function createOpenAIHandler(deps) {
     const gate = generationCheck(loaded.store, reachable);
     if (!gate.ok) return { ok: false, status: gate.status, body: gate.body };
 
-    const plan = chainState.plan(loaded.store, agentId, chainEntry.chain, Date.now());
+    const plan = chainState.plan(loaded.store, routeKey, chainEntry.chain, Date.now());
     const members = [];
     const memberMeta = new Map(); // memberId -> { nodeId, model, poolMemberId? }
     // 本请求已计失败的节点（node+model 复合键）：noteFailure 的去重集。
@@ -531,10 +553,13 @@ export function createOpenAIHandler(deps) {
     }
 
     if (members.length === 0) {
+      // 保留既有 auto 报错口径（点名请求方端点）；虚拟模型请求 agentId 可缺，
+      // 缺则省略尾巴。requested 已点名模型（auto 或虚拟模型名）。
+      const tail = agentId ? ` for "${agentId}"` : "";
       return {
         ok: false,
         status: 404,
-        body: openAIError("not_found_error", `model "${AUTO_MODEL}" has no available nodes in the chain for "${agentId}"`),
+        body: openAIError("not_found_error", `model "${requested}" has no available nodes in the chain${tail}`),
       };
     }
 
@@ -559,7 +584,7 @@ export function createOpenAIHandler(deps) {
         // 以 undefined 写入链状态会拼出 "node\nundefined" 键，位置追踪静默失效。
         const model = meta?.model ?? chainEntry.chain.find((entry) => entry?.node === nodeId)?.model;
         if (!model) return;
-        noteChainSuccess(chainState, agentId, nodeId, model, Date.now());
+        noteChainSuccess(chainState, routeKey, nodeId, model, Date.now());
         if (meta?.poolMemberId) {
           stickyTable.noteSuccess(nodeId, meta.model, meta.poolMemberId);
         }
@@ -581,7 +606,7 @@ export function createOpenAIHandler(deps) {
         const key = chainNodeKey(nodeId, model);
         if (failedNodes.has(key)) return;
         failedNodes.add(key);
-        noteChainFailure(chainState, agentId, nodeId, model);
+        noteChainFailure(chainState, routeKey, nodeId, model);
       },
     };
   }

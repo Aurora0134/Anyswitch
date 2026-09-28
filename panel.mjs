@@ -2124,6 +2124,35 @@ export function createPanelRouter({
             const result = await svc.deleteRouteChain(body.endpointId.trim());
             return sendJson(res, 200, result);
           }
+          if (path === "/panel/api/store/virtual-model/save") {
+            // Route layer checks shape only (name string, chain array);
+            // per-element {node, model} validation lives in the service.
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            if (!Array.isArray(body.chain)) {
+              return sendJson(res, 400, { ok: false, error: "chain must be an array of { node, model } entries" });
+            }
+            const result = await svc.saveVirtualModel(body.name.trim(), body.chain);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/virtual-model/enabled") {
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            if (typeof body.enabled !== "boolean") {
+              return sendJson(res, 400, { ok: false, error: "enabled must be a boolean" });
+            }
+            const result = await svc.setVirtualModelEnabled(body.name.trim(), body.enabled);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/virtual-model/delete") {
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            const result = await svc.deleteVirtualModel(body.name.trim());
+            return sendJson(res, 200, result);
+          }
           if (path === "/panel/api/store/delete") {
             const result = await svc.deleteProvider(requireString(body.id, "id"));
             return sendJson(res, 200, result);

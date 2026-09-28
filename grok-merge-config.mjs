@@ -41,12 +41,12 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAutoRouteChannel } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { resolveEndpointEfforts, catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel } from "./merge-common.mjs";
+export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
 // Single shared implementation (pool-providers.mjs) — the merge modules must
 // never carry their own catalog semantics again.
 export { extractManagedProviders } from "./pool-providers.mjs";
@@ -125,7 +125,13 @@ export function grokConfigPath(base = process.env) {
 // and only channel/model boundary whatever the model id itself contains ("/",
 // even another "~").
 export function managedModelKey(channelId, modelId) {
-  if (channelId === AUTO_CHANNEL_KEY) return AUTO_MODEL_KEY;
+  // Anyswitch 伪渠道：唯一的裸触发词模型 "auto" 落 AUTO_MODEL_KEY；旗下虚拟
+  // 模型（同名分组下的其余模型）是独立请求名，必须各占一键——塌到同一个
+  // AUTO_MODEL_KEY 会被去重门整条跳过，虚拟模型从 grok 目录里消失。键保持
+  // anyswitch- 前缀 + 渠道限定 slug，陈表清理与真渠道同一套机制。
+  if (channelId === AUTO_CHANNEL_KEY) {
+    return modelId === AUTO_CHANNEL_KEY ? AUTO_MODEL_KEY : `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
+  }
   return `${MANAGED_ID_PREFIX}${packChannelModelSlug(channelId, modelId)}`;
 }
 
@@ -346,7 +352,7 @@ export function writeGrokConfigTomlWithBackup(filePath, text) {
 // reasoning_efforts sub-table (wholesale regeneration is also the cleanup).
 export function writeGrokConfig(store, port, token, sidecarRoot, configPath = grokConfigPath(), effort = null) {
   const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAutoRouteChannel(store, "grok");
+  const autoChannel = deriveAnyswitchChannel(store, "grok");
   const previousManaged = readSidecar(sidecarRoot).providers;
   if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };

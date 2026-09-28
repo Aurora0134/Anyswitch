@@ -80,6 +80,27 @@ export const AUTO_MODEL = "auto";
 // accepts it and normalizes the body back to AUTO_MODEL before planning.
 export const AUTO_MODEL_ANTHROPIC_ID = "anthropic/auto";
 
+// 虚拟模型（虚拟模型卡）的查链入口：store.virtualModels 是顶层数组
+// [{ name, chain, enabled? }]（schema 同端点链节点校验），不绑定端点——
+// 任何端点请求这个名字都走同一条链。命中条件与端点链开关同口径：
+// enabled !== false 且链非空。model 接受裸名（openai 路径与 merge 注入的
+// 模型 id 即裸名）或 "anthropic/<name>"（claude 目录别名，与
+// AUTO_MODEL_ANTHROPIC_ID 同一造法：前缀段内无 '/'，永不与真 wire id 相撞，
+// 且必过 Claude Code 目录的 /(claude|anthropic)/i 过滤）。返回命中的元素
+// （形状与 resolveChain 的返回兼容：调用方只读 .chain），未命中返回 null。
+// 优先级由调用方保证：auto 分支先判（"auto" 在此被显式排除），名字以
+// "anthropic/" 开头时剥前缀后只接受无 '/' 的单段——带 '/' 的名字是真
+// wire id，交回 unpackWireId 既有路径。
+export function resolveVirtualModelEntry(store, model) {
+  if (typeof model !== "string" || model.length === 0) return null;
+  const bare = model.startsWith("anthropic/") ? model.slice("anthropic/".length) : model;
+  if (bare.length === 0 || bare.includes("/") || bare === AUTO_MODEL) return null;
+  const entry = (store?.virtualModels ?? []).find((vm) => vm?.name === bare);
+  if (!entry || !Array.isArray(entry.chain) || entry.chain.length === 0) return null;
+  if (entry.enabled === false) return null;
+  return entry;
+}
+
 // The chain entry for an endpoint, or null. The shape is fixed with the store
 // layer: store.routingChains is a top-level map
 // endpointId -> { chain: [{ node, model }, ...], enabled?: boolean }.

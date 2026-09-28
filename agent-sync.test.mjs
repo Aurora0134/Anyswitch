@@ -368,7 +368,7 @@ describe("agent-sync auto routing channel", () => {
     // zcode has a chain: _auto points at the chain head (alpha) and lists "auto".
     const zcode = JSON.parse(readFileSync(join(tmpRoot, ".zcode", "v2", "config.json"), "utf8"));
     assert.ok(zcode.provider._auto, "zcode gets the _auto channel");
-    assert.equal(zcode.provider._auto.name, "自动路由");
+    assert.equal(zcode.provider._auto.name, "Anyswitch");
     assert.equal(zcode.provider._auto.options.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
     assert.deepEqual(Object.keys(zcode.provider._auto.models), ["auto"]);
 
@@ -392,7 +392,7 @@ describe("agent-sync auto routing channel", () => {
     // opencode has a chain headed by beta: the auto channel points at the head segment.
     const opencode = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
     assert.ok(opencode.provider.auto, "opencode gets the auto channel");
-    assert.equal(opencode.provider.auto.name, "自动路由");
+    assert.equal(opencode.provider.auto.name, "Anyswitch");
     assert.equal(opencode.provider.auto.options.baseURL, "http://127.0.0.1:47821/openai/beta/v1");
     assert.deepEqual(Object.keys(opencode.provider.auto.models), ["auto"]);
 

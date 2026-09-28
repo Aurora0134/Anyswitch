@@ -1727,7 +1727,7 @@ if (window.panelStartupController) panelStartupPlay();
           <span class="badge badge-neutral" id="virtualModelBadge">0</span>
         </div>
         <div class="card-body">
-          <div style="font-size:11.5px; color:var(--text-3); margin-bottom:8px;">同步到端点后，虚拟模型与 <span style="font-family:var(--font-mono);">auto</span> 显示在各端点模型列表的 Anyswitch 分组下。虚拟模型不绑定端点，任何端点请求它都走同一条链；<span style="font-family:var(--font-mono);">auto</span> 使用当前端点自己的路由链（在下方「自动路由」卡配置）。</div>
+          <div style="font-size:11.5px; color:var(--text-3); margin-bottom:8px;">端点请求虚拟模型时按链顺序路由，失败自动退避下一节点。</div>
           <div class="route-ep-grid" id="virtualModelGrid"></div>
         </div>
       </div>

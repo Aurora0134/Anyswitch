@@ -89,7 +89,7 @@ describe("buildOpencodeProviderEntry", () => {
       "opencode",
     );
     const entry = buildOpencodeProviderEntry("auto", autoChannel, 47821, "{file:C:/tok}");
-    assert.equal(entry.auto.name, "自动路由");
+    assert.equal(entry.auto.name, "Anyswitch");
     assert.equal(entry.auto.options.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
     assert.deepEqual(Object.keys(entry.auto.models), ["auto"]);
   });
@@ -182,7 +182,7 @@ describe("mergeOpencodeConfig", () => {
     const auto = deriveAutoRouteChannel(store, "opencode");
     const first = mergeOpencodeConfig({ provider: {} }, managed, 47821, "{file:C:/tok}", [], auto);
     assert.ok(first.config.provider.auto);
-    assert.equal(first.config.provider.auto.name, "自动路由");
+    assert.equal(first.config.provider.auto.name, "Anyswitch");
     assert.deepEqual(first.managed.sort(), ["alpha", "auto", "beta"]);
 
     const second = mergeOpencodeConfig(first.config, managed, 47821, "{file:C:/tok}", first.managed, null);

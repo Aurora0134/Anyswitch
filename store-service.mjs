@@ -29,7 +29,7 @@ import {
 } from "./store-io.mjs";
 import { protect as defaultProtect, unprotect as defaultUnprotect } from "./dpapi.mjs";
 import { atomicWriteFile as defaultAtomicWriteFile } from "./atomic-write.mjs";
-import { MAX_CHAIN_NODES, ROUTING_ENDPOINT_IDS } from "./store-schema.mjs";
+import { MAX_CHAIN_NODES, ROUTING_ENDPOINT_IDS, VIRTUAL_MODEL_ID, VIRTUAL_MODEL_MAX } from "./store-schema.mjs";
 import { chainNodeExists, chainNodeKey } from "./chain-routing.mjs";
 import {
   buildV2AddEntry,
@@ -135,21 +135,74 @@ function findCompleted(journalPath, providerId) {
 // chainNodeExists reports — only truly dead references are removed. A chain
 // stripped to zero entries is dropped whole (the schema forbids an empty
 // chain). Returns [{ endpointId, remaining }] for every chain that lost at
-// least one entry (remaining = hops left, 0 = the whole chain).
+// least one entry (remaining = hops left, 0 = the whole chain); 虚拟模型链
+// 同口径修剪，条目以 { virtualModel: name, remaining } 报告，链空则整个虚拟
+// 模型一并移除（无链的虚拟模型无存在意义）。
 function pruneRouteChainNodes(store, shouldGo) {
   const chains = store.routingChains;
-  if (!chains || typeof chains !== "object") return [];
   const pruned = [];
-  for (const [endpointId, entry] of Object.entries(chains)) {
-    if (!entry || !Array.isArray(entry.chain)) continue;
-    const remaining = entry.chain.filter((item) => !shouldGo(item?.node));
-    if (remaining.length === entry.chain.length) continue;
-    if (remaining.length === 0) delete chains[endpointId];
-    else entry.chain = remaining;
-    pruned.push({ endpointId, remaining: remaining.length });
+  if (chains && typeof chains === "object") {
+    for (const [endpointId, entry] of Object.entries(chains)) {
+      if (!entry || !Array.isArray(entry.chain)) continue;
+      const remaining = entry.chain.filter((item) => !shouldGo(item?.node));
+      if (remaining.length === entry.chain.length) continue;
+      if (remaining.length === 0) delete chains[endpointId];
+      else entry.chain = remaining;
+      pruned.push({ endpointId, remaining: remaining.length });
+    }
+    if (Object.keys(chains).length === 0) delete store.routingChains;
   }
-  if (Object.keys(chains).length === 0) delete store.routingChains;
+  const vms = store.virtualModels;
+  if (Array.isArray(vms)) {
+    const kept = [];
+    for (const vm of vms) {
+      if (!vm || typeof vm !== "object" || !Array.isArray(vm.chain)) {
+        kept.push(vm);
+        continue;
+      }
+      const remaining = vm.chain.filter((item) => !shouldGo(item?.node));
+      if (remaining.length === vm.chain.length) {
+        kept.push(vm);
+        continue;
+      }
+      pruned.push({ virtualModel: vm.name, remaining: remaining.length });
+      if (remaining.length === 0) continue;
+      kept.push({ ...vm, chain: remaining });
+    }
+    if (kept.length === 0) delete store.virtualModels;
+    else store.virtualModels = kept;
+  }
   return pruned;
+}
+
+// 链条目逐项校验（saveRouteChain / saveVirtualModel 共用）：返回错误文案或
+// null，逐条短路——第一条错即返回。与 store-schema 一致按 node+model 复合键
+// 去重：同节点不同模型可多次入链。
+function validateChainEntries(chain) {
+  const seenPairs = new Set();
+  for (const item of chain) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      return "route chain entries must be objects { node, model }";
+    }
+    const { node, model } = item;
+    if (typeof node !== "string" || node.length === 0) {
+      return "route chain entry node must be a non-empty string";
+    }
+    try {
+      validateProviderId(node);
+    } catch (error) {
+      return `route chain node "${node}": ${error.message}`;
+    }
+    if (typeof model !== "string" || model.trim().length === 0) {
+      return `route chain entry for node "${node}": model must be a non-empty string`;
+    }
+    const pairKey = chainNodeKey(node, model);
+    if (seenPairs.has(pairKey)) {
+      return `route chain contains duplicate node "${node}" with model "${model}"`;
+    }
+    seenPairs.add(pairKey);
+  }
+  return null;
 }
 
 /**
@@ -433,7 +486,7 @@ export function createStoreService({
       }
       const loaded = load();
       if (!loaded.ok) {
-        return { ok: true, storeOk: false, hash: null, storeError: loaded.reason, providers: [], pools: [], routingChains: [], resumeResult };
+        return { ok: true, storeOk: false, hash: null, storeError: loaded.reason, providers: [], pools: [], routingChains: [], virtualModels: [], resumeResult };
       }
       const rawPools = loaded.store.pools ?? {};
       // providerId -> poolId, for the panel's pool tag / delete gate.
@@ -472,7 +525,16 @@ export function createStoreService({
         //（store 里 absent = 开，向后兼容存量链）。
         enabled: entry?.enabled !== false,
       }));
-      return { ok: true, storeOk: true, hash: loaded.hash, providers, pools, routingChains, resumeResult };
+      // 虚拟模型：与端点链同口径（enabled 缺省 = 开），不绑定端点，链节点
+      // 与 routingChains 同构。前端据此渲染虚拟模型瓦片墙与入口桩。
+      const virtualModels = (Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : [])
+        .filter((vm) => vm && typeof vm === "object" && typeof vm.name === "string")
+        .map((vm) => ({
+          name: vm.name,
+          chain: Array.isArray(vm.chain) ? vm.chain : [],
+          enabled: vm?.enabled !== false,
+        }));
+      return { ok: true, storeOk: true, hash: loaded.hash, providers, pools, routingChains, virtualModels, resumeResult };
     },
 
     /** Verify a managed provider's credential against its live /models. */
@@ -998,30 +1060,8 @@ export function createStoreService({
       if (chain.length > MAX_CHAIN_NODES) {
         return { ok: false, error: `一条路由链最多 ${MAX_CHAIN_NODES} 个节点；当前 ${chain.length} 个` };
       }
-      const seenPairs = new Set();
-      for (const item of chain) {
-        if (item === null || typeof item !== "object" || Array.isArray(item)) {
-          return { ok: false, error: "route chain entries must be objects { node, model }" };
-        }
-        const { node, model } = item;
-        if (typeof node !== "string" || node.length === 0) {
-          return { ok: false, error: "route chain entry node must be a non-empty string" };
-        }
-        try {
-          validateProviderId(node);
-        } catch (error) {
-          return { ok: false, error: `route chain node "${node}": ${error.message}` };
-        }
-        if (typeof model !== "string" || model.trim().length === 0) {
-          return { ok: false, error: `route chain entry for node "${node}": model must be a non-empty string` };
-        }
-        // 与 store-schema 一致按 node+model 复合键去重：同节点不同模型可多次入链。
-        const pairKey = chainNodeKey(node, model);
-        if (seenPairs.has(pairKey)) {
-          return { ok: false, error: `route chain contains duplicate node "${node}" with model "${model}"` };
-        }
-        seenPairs.add(pairKey);
-      }
+      const chainError = validateChainEntries(chain);
+      if (chainError) return { ok: false, error: chainError };
       const loaded = load();
       if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
       const providers = loaded.store.providers ?? {};
@@ -1095,6 +1135,113 @@ export function createStoreService({
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
       return { ok: true, endpointId };
+    },
+
+    /**
+     * Save a virtual model (虚拟模型): an endpoint-agnostic named route chain.
+     * `name` is the wire-facing model id (lowercase-start [a-z0-9._-], ≤64;
+     * "auto" and endpoint ids are reserved — they are the chain-routing
+     * trigger word and the per-endpoint routing keys, a name collision would
+     * intercept requests to the wrong target) and `chain` is the exact
+     * saveRouteChain shape. The name is locked after first save: this is an
+     * upsert by name that either replaces the existing entry's chain (keeping
+     * its enabled flag, same rule as saveRouteChain — 重存链不把开关弹回开)
+     * or appends a new one. Pure bookkeeping: validate before load, then
+     * structuredClone → CAS write.
+     */
+    async saveVirtualModel(name, chain) {
+      if (typeof name !== "string" || !VIRTUAL_MODEL_ID.test(name)) {
+        return { ok: false, error: "虚拟模型名必须以小写字母开头，只能使用小写字母、数字与 . _ -" };
+      }
+      if (name.length > VIRTUAL_MODEL_MAX) {
+        return { ok: false, error: `虚拟模型名最多 ${VIRTUAL_MODEL_MAX} 个字符` };
+      }
+      if (name === "auto" || ROUTING_ENDPOINT_IDS.includes(name)) {
+        return { ok: false, error: `"${name}" 是保留名（自动路由与端点 id），虚拟模型不能用` };
+      }
+      if (!Array.isArray(chain) || chain.length === 0) {
+        return { ok: false, error: "route chain must be a non-empty array of { node, model } entries" };
+      }
+      if (chain.length > MAX_CHAIN_NODES) {
+        return { ok: false, error: `一条路由链最多 ${MAX_CHAIN_NODES} 个节点；当前 ${chain.length} 个` };
+      }
+      const chainError = validateChainEntries(chain);
+      if (chainError) return { ok: false, error: chainError };
+      const loaded = load();
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
+      const providers = loaded.store.providers ?? {};
+      const pools = loaded.store.pools ?? {};
+      for (const item of chain) {
+        if (!Object.hasOwn(providers, item.node) && !Object.hasOwn(pools, item.node)) {
+          return { ok: false, error: `route chain node "${item.node}" is neither a managed provider nor a pool` };
+        }
+      }
+      const nextStore = structuredClone(loaded.store);
+      const list = Array.isArray(nextStore.virtualModels) ? nextStore.virtualModels : [];
+      const index = list.findIndex((vm) => vm?.name === name);
+      const prevEnabled = index >= 0 ? list[index].enabled : undefined;
+      const entry = {
+        name,
+        chain: chain.map((item) => ({ node: item.node, model: item.model })),
+        ...(typeof prevEnabled === "boolean" ? { enabled: prevEnabled } : {}),
+      };
+      if (index >= 0) list[index] = entry;
+      else list.push(entry);
+      nextStore.virtualModels = list;
+      const written = write(nextStore, { expectedHash: loaded.hash });
+      if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
+      return { ok: true, name };
+    },
+
+    /**
+     * Flip a virtual model's enabled switch. Off keeps the chain config but
+     * stops exposing and serving the model everywhere (resolveVirtualModelEntry
+     * short-circuits, the Anyswitch channel drops it from the synced agent
+     * configs, and the catalogs no longer list it).
+     */
+    async setVirtualModelEnabled(name, enabled) {
+      if (typeof name !== "string" || name.length === 0) {
+        return { ok: false, error: "name must be a non-empty string" };
+      }
+      if (typeof enabled !== "boolean") {
+        return { ok: false, error: "enabled must be a boolean" };
+      }
+      const loaded = load();
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
+      const list = Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : [];
+      const index = list.findIndex((vm) => vm?.name === name);
+      if (index === -1) {
+        return { ok: false, error: `virtual model "${name}" does not exist` };
+      }
+      const nextStore = structuredClone(loaded.store);
+      nextStore.virtualModels[index] = { ...nextStore.virtualModels[index], enabled };
+      const written = write(nextStore, { expectedHash: loaded.hash });
+      if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
+      return { ok: true, name, enabled };
+    },
+
+    /**
+     * Remove a virtual model: drop the virtualModels entry only; providers
+     * and pools are untouched. No journal — there is no credential or other
+     * irreversible step involved. Requests for the name start failing with
+     * the ordinary "not registered" answer (the delete dialog says so).
+     */
+    async deleteVirtualModel(name) {
+      if (typeof name !== "string" || name.length === 0) {
+        return { ok: false, error: "name must be a non-empty string" };
+      }
+      const loaded = load();
+      if (!loaded.ok) return { ok: false, error: `the Anyswitch v2 store is unavailable: ${loaded.reason}` };
+      const list = Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : [];
+      if (!list.some((vm) => vm?.name === name)) {
+        return { ok: false, error: `virtual model "${name}" does not exist` };
+      }
+      const nextStore = structuredClone(loaded.store);
+      nextStore.virtualModels = nextStore.virtualModels.filter((vm) => vm?.name !== name);
+      if (nextStore.virtualModels.length === 0) delete nextStore.virtualModels;
+      const written = write(nextStore, { expectedHash: loaded.hash });
+      if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
+      return { ok: true, name };
     },
 
     /**
@@ -1192,12 +1339,14 @@ export function createStoreService({
         if (!detach.ok) return detach;
         const result = await deleteProviderOnce(id);
         // The detach write and the transaction write each pruned what their
-        // own snapshot made dead; merge per endpoint, keeping the final count.
+        // own snapshot made dead; merge per identity (endpoint chain 或虚拟模型，
+        // 身份键不同:端点 id 与虚拟模型名),取最后一次上报的形状原样返回。
         const merged = new Map();
         for (const item of [...detach.prunedChains, ...(result.prunedChains ?? [])]) {
-          merged.set(item.endpointId, item.remaining);
+          const key = item.virtualModel !== undefined ? `vm:${item.virtualModel}` : `ep:${item.endpointId}`;
+          merged.set(key, item);
         }
-        return { ok: true, ...result, prunedChains: [...merged].map(([endpointId, remaining]) => ({ endpointId, remaining })) };
+        return { ok: true, ...result, prunedChains: [...merged.values()] };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         // The journal-driven transaction surfaces the same recognizable conflict

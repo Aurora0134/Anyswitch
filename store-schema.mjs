@@ -312,6 +312,110 @@ export const ROUTING_ENDPOINT_IDS = Object.freeze([
 // same chain length limit instead of carrying its own magic number.
 export const MAX_CHAIN_NODES = 8;
 
+// Virtual models (虚拟模型)：用户自建、不绑定端点的命名路由链。store.virtualModels
+// 是顶层数组，元素形如 { name, chain: [{ node, model }, ...], enabled?: boolean }：
+// name 是端点可见的虚拟模型 id（小写字母开头，[a-z0-9._-]），chain 与 routingChains
+// 的节点完全同构（池优先解析、node+model 复合键去重），enabled 语义同端点链开关
+// （absent = 启用）。虚拟模型不绑定端点：任何端点请求这个名字都走同一条链，
+// 并与 auto 一起出现在各端点模型列表的 Anyswitch 分组下。名字在保存后锁定
+// （save 按名字 upsert，只换链不动名），且禁用端点 id 与 "auto"——它们分别是
+// 端点链路由键与链路由触发词，撞名会让请求被拦截到错误的目标。
+export const VIRTUAL_MODEL_ID = /^[a-z][a-z0-9._-]*$/;
+export const VIRTUAL_MODEL_MAX = 64;
+const RESERVED_VIRTUAL_MODEL_NAMES = new Set(["auto", ...ROUTING_ENDPOINT_IDS]);
+
+// 端点链与虚拟模型共用的节点序列校验：节点存在性（池优先由运行时解析，这里
+// 只查 id）、id 字符集、node+model 复合键去重、model 非空。model 故意不对
+// 节点目录硬校验（目录随发现刷新漂移，硬校验会让存好的链在下次刷新后失效），
+// 无法服务的模型在上游请求时自拒。where 是报错前缀，nodeIds 是当前可解析节点。
+function validateChainNodeList(chain, where, nodeIds, errors) {
+  const seen = new Set();
+  chain.forEach((item, index) => {
+    const itemWhere = `${where}.chain[${index}]`;
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      errors.push(`${itemWhere}: must be an object { node, model }`);
+      return;
+    }
+    const { node, model } = item;
+    if (typeof node !== "string" || node.length === 0) {
+      errors.push(`${itemWhere}.node: must be a non-empty string`);
+      return;
+    }
+    if (!PROVIDER_ID.test(node)) {
+      errors.push(`${itemWhere}.node: node id may only contain letters, digits, '.', '_', '-'`);
+      return;
+    }
+    if (!nodeIds.has(node)) {
+      errors.push(`${itemWhere}.node: node "${node}" does not exist as a provider or pool`);
+      return;
+    }
+    // 去重按 node+model 复合键：同一节点可绑定不同模型多次入链，
+    // 只有 node 与 model 完全相同的条目才算重复。
+    const pairKey = chainNodeKey(node, model);
+    if (seen.has(pairKey)) {
+      errors.push(`${itemWhere}: duplicate node "${node}" with model "${model}" in this chain`);
+      return;
+    }
+    seen.add(pairKey);
+    // model is deliberately NOT checked against the node's catalog:
+    // catalogs shift with discovered refreshes, so a hard check would break
+    // a saved chain on the next refresh. Only non-emptiness is enforced;
+    // an unservable model fails upstream at request time instead.
+    if (typeof model !== "string" || model.trim().length === 0) {
+      errors.push(`${itemWhere}.model: must be a non-empty string`);
+    }
+  });
+}
+
+function validateVirtualModels(store, errors) {
+  const vms = store.virtualModels;
+  if (vms === undefined) return;
+  if (!Array.isArray(vms)) {
+    errors.push(`virtualModels: must be an array when present`);
+    return;
+  }
+  const nodeIds = new Set([
+    ...Object.keys(store.providers ?? {}),
+    ...Object.keys(store.pools ?? {}),
+  ]);
+  const names = new Set();
+  for (const [index, vm] of vms.entries()) {
+    const where = `virtualModels[${index}]`;
+    if (vm === null || typeof vm !== "object" || Array.isArray(vm)) {
+      errors.push(`${where}: must be an object`);
+      continue;
+    }
+    if (typeof vm.name !== "string" || !VIRTUAL_MODEL_ID.test(vm.name)) {
+      errors.push(`${where}.name: must start with a lowercase letter and use only [a-z0-9._-]`);
+      continue;
+    }
+    if (vm.name.length > VIRTUAL_MODEL_MAX) {
+      errors.push(`${where}.name: must be at most ${VIRTUAL_MODEL_MAX} characters`);
+    }
+    const lowered = vm.name.toLowerCase();
+    if (names.has(lowered)) {
+      errors.push(`${where}.name: duplicate virtual model name differing only by case`);
+    } else {
+      names.add(lowered);
+    }
+    if (RESERVED_VIRTUAL_MODEL_NAMES.has(vm.name)) {
+      errors.push(`${where}.name: "${vm.name}" is reserved`);
+    }
+    // enabled: 虚拟模型启用开关（可选；缺省 = 开，与端点链开关同语义）。
+    if ("enabled" in vm && typeof vm.enabled !== "boolean") {
+      errors.push(`${where}.enabled: must be a boolean when present`);
+    }
+    if (!Array.isArray(vm.chain) || vm.chain.length === 0) {
+      errors.push(`${where}.chain: must be a non-empty array of node ids`);
+      continue;
+    }
+    if (vm.chain.length > MAX_CHAIN_NODES) {
+      errors.push(`${where}.chain: must contain 1-${MAX_CHAIN_NODES} node ids`);
+    }
+    validateChainNodeList(vm.chain, where, nodeIds, errors);
+  }
+}
+
 function validateRoutingChains(store, errors) {
   const routingChains = store.routingChains;
   if (routingChains === undefined) return;
@@ -343,42 +447,7 @@ function validateRoutingChains(store, errors) {
     if (entry.chain.length > MAX_CHAIN_NODES) {
       errors.push(`${where}.chain: must contain 1-${MAX_CHAIN_NODES} node ids`);
     }
-    const seen = new Set();
-    entry.chain.forEach((item, index) => {
-      const itemWhere = `${where}.chain[${index}]`;
-      if (item === null || typeof item !== "object" || Array.isArray(item)) {
-        errors.push(`${itemWhere}: must be an object { node, model }`);
-        return;
-      }
-      const { node, model } = item;
-      if (typeof node !== "string" || node.length === 0) {
-        errors.push(`${itemWhere}.node: must be a non-empty string`);
-        return;
-      }
-      if (!PROVIDER_ID.test(node)) {
-        errors.push(`${itemWhere}.node: node id may only contain letters, digits, '.', '_', '-'`);
-        return;
-      }
-      if (!nodeIds.has(node)) {
-        errors.push(`${itemWhere}.node: node "${node}" does not exist as a provider or pool`);
-        return;
-      }
-      // 去重按 node+model 复合键：同一节点可绑定不同模型多次入链，
-      // 只有 node 与 model 完全相同的条目才算重复。
-      const pairKey = chainNodeKey(node, model);
-      if (seen.has(pairKey)) {
-        errors.push(`${itemWhere}: duplicate node "${node}" with model "${model}" in this chain`);
-        return;
-      }
-      seen.add(pairKey);
-      // model is deliberately NOT checked against the node's catalog:
-      // catalogs shift with discovered refreshes, so a hard check would break
-      // a saved chain on the next refresh. Only non-emptiness is enforced;
-      // an unservable model fails upstream at request time instead.
-      if (typeof model !== "string" || model.trim().length === 0) {
-        errors.push(`${itemWhere}.model: must be a non-empty string`);
-      }
-    });
+    validateChainNodeList(entry.chain, where, nodeIds, errors);
   }
 }
 
@@ -410,12 +479,16 @@ export function validateStore(store) {
   validateClientPolicies(store.clientPolicies, errors);
   validatePools(store, errors);
   validateRoutingChains(store, errors);
+  validateVirtualModels(store, errors);
   findSecretKeys(store.providers ?? {}, "providers", errors);
   if (store.pools !== undefined) {
     findSecretKeys(store.pools, "pools", errors);
   }
   if (store.routingChains !== undefined) {
     findSecretKeys(store.routingChains, "routingChains", errors);
+  }
+  if (store.virtualModels !== undefined) {
+    findSecretKeys(store.virtualModels, "virtualModels", errors);
   }
   return { valid: errors.length === 0, errors };
 }

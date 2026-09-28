@@ -2558,7 +2558,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(route.includes('id="virtualModelGrid"'), "虚拟模型瓦片墙容器存在");
     assert.ok(route.includes('id="virtualModelBadge"'), "虚拟模型计数徽标存在");
     assert.ok(route.includes("按链顺序路由，失败自动退避下一节点"), "端点链功能说明文案保留");
-    assert.ok(route.includes("Anyswitch 分组"), "虚拟模型说明点名 Anyswitch 分组承载");
+    assert.ok(route.includes("端点请求虚拟模型时按链顺序路由，失败自动退避下一节点"), "虚拟模型说明行与端点链说明同式（模型auto→虚拟模型）");
     assert.ok(route.indexOf("虚拟模型") < route.indexOf('id="routeChainGrid"'), "虚拟模型卡在端点瓦片墙之前");
     assert.strictEqual((route.match(/<div class="panel-card">/g) || []).length, 2,
       "路由面板两张 panel-card（虚拟模型 + 端点路由链）");

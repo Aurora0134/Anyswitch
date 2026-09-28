@@ -85,6 +85,9 @@ function mockService(overrides = {}) {
     reorderProviders: async () => ({ ok: true }),
     saveRouteChain: async () => ({ ok: true, endpointId: "claude" }),
     deleteRouteChain: async () => ({ ok: true, endpointId: "claude" }),
+    saveVirtualModel: async () => ({ ok: true, name: "my-chain" }),
+    setVirtualModelEnabled: async () => ({ ok: true, name: "my-chain", enabled: false }),
+    deleteVirtualModel: async () => ({ ok: true, name: "my-chain" }),
     deleteProvider: async () => ({ ok: true, deleted: true, modelCount: 2, credentialFile: "prov.dpapi" }),
     ...overrides,
   };
@@ -623,5 +626,82 @@ describe("panel router store routes", () => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 404);
     assert.equal(json().error, "not found");
+  });
+});
+
+describe("panel router virtual-model routes（虚拟模型）", () => {
+  it("POST /panel/api/store/virtual-model/save forwards name and chain", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const chain = [{ node: "prov-a", model: "m1" }, { node: "pool-x", model: "m2" }];
+    const { req, res, json } = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "my-chain", chain });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, name: "my-chain" });
+    assert.deepEqual(svc.calls[0], { name: "saveVirtualModel", arg: ["my-chain", chain] });
+  });
+
+  it("POST /panel/api/store/virtual-model/save is 400 without a string name or an array chain", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const chain = [{ node: "prov-a", model: "m1" }];
+    const noName = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { chain });
+    await router.handle(noName.req, noName.res);
+    assert.equal(noName.res.statusCode, 400);
+    const badName = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: 42, chain });
+    await router.handle(badName.req, badName.res);
+    assert.equal(badName.res.statusCode, 400);
+    const noChain = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "my-chain" });
+    await router.handle(noChain.req, noChain.res);
+    assert.equal(noChain.res.statusCode, 400);
+    assert.deepEqual(svc.calls, []);
+  });
+
+  it("POST /panel/api/store/virtual-model/enabled forwards name and enabled", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const { req, res, json } = fakeReqRes("/panel/api/store/virtual-model/enabled", "POST", { name: "my-chain", enabled: false });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, name: "my-chain", enabled: false });
+    assert.deepEqual(svc.calls[0], { name: "setVirtualModelEnabled", arg: ["my-chain", false] });
+  });
+
+  it("POST /panel/api/store/virtual-model/enabled is 400 without a string name or a boolean enabled", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const noName = fakeReqRes("/panel/api/store/virtual-model/enabled", "POST", { enabled: true });
+    await router.handle(noName.req, noName.res);
+    assert.equal(noName.res.statusCode, 400);
+    const badEnabled = fakeReqRes("/panel/api/store/virtual-model/enabled", "POST", { name: "my-chain", enabled: "yes" });
+    await router.handle(badEnabled.req, badEnabled.res);
+    assert.equal(badEnabled.res.statusCode, 400);
+    assert.deepEqual(svc.calls, []);
+  });
+
+  it("POST /panel/api/store/virtual-model/delete forwards name; business failure surfaces as 200 + {ok:false}", async () => {
+    const svc = mockService({ deleteVirtualModel: async () => ({ ok: false, error: `virtual model "my-chain" does not exist` }) });
+    const router = storeRouter(svc);
+    const { req, res, json } = fakeReqRes("/panel/api/store/virtual-model/delete", "POST", { name: "my-chain" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().ok, false);
+    assert.match(json().error, /does not exist/);
+    const svc2 = mockService();
+    const router2 = storeRouter(svc2);
+    const ok = fakeReqRes("/panel/api/store/virtual-model/delete", "POST", { name: "my-chain" });
+    await router2.handle(ok.req, ok.res);
+    assert.equal(ok.res.statusCode, 200);
+    assert.deepEqual(ok.json(), { ok: true, name: "my-chain" });
+    assert.deepEqual(svc2.calls[0], { name: "deleteVirtualModel", arg: "my-chain" });
+  });
+
+  it("POST /panel/api/store/virtual-model/delete is 400 without a string name", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const noName = fakeReqRes("/panel/api/store/virtual-model/delete", "POST", {});
+    await router.handle(noName.req, noName.res);
+    assert.equal(noName.res.statusCode, 400);
+    assert.deepEqual(svc.calls, []);
   });
 });

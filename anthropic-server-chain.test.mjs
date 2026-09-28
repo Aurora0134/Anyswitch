@@ -287,7 +287,8 @@ describe("handleModels auto catalog entry", () => {
     const auto = result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID);
     assert.ok(auto, "the catalog must list the auto virtual model under the alias Claude Code's filter keeps");
     assert.equal(auto.type, "model");
-    assert.equal(auto.display_name, "[claude] 自动路由 (auto)");
+    // auto 已并入 Anyswitch provider 分组：行标签统一 "[Anyswitch] auto"。
+    assert.equal(auto.display_name, "[Anyswitch] auto");
     assert.equal(
       result.body.data.find((entry) => entry.id === AUTO_MODEL),
       undefined,
@@ -830,5 +831,74 @@ describe("per-launch claude usage journal（claude 端点进入按端点统计�
     assert.ok(runtime, "server.mjs 已把 handler 的 chainState 接进 reporter");
     const tailStat = runtime.nodes.find((n) => n.node === "chan-b");
     assert.ok(tailStat && tailStat.failures >= 2, "链尾 chan-b 的失败必须进节点成败计数");
+  });
+});
+
+
+// 虚拟模型（anthropic 路径）：目录出 "anthropic/<名字>"，请求同 id 走自己
+// 的链；与 auto 的区别是端点无关（无链端点同样可用）。
+describe("virtual model routing (anthropic 路径）", () => {
+  const VM_STORE = {
+    ...STORE,
+    virtualModels: [
+      { name: "my-vm", chain: [{ node: "chan-a", model: "claude-a" }, { node: "chan-b", model: "claude-b" }] },
+      { name: "off-vm", enabled: false, chain: [{ node: "chan-a", model: "claude-a" }] },
+    ],
+  };
+
+  function makeVmHandler(store = VM_STORE) {
+    return createHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store }),
+      loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
+      upstreamFetch: async () => nonStreamJson("hi"),
+      recordGeneration: () => {},
+      readGeneration: () => null,
+    });
+  }
+
+  it("catalog 把启用的虚拟模型列在 anthropic/<名字> 别名 + [Anyswitch] 标签下，停用不上目录", async () => {
+    const handler = makeVmHandler();
+    const result = await handler.handleModels({ authorization: TOKEN }, "claude");
+    assert.equal(result.status, 200);
+    const vm = result.body.data.find((entry) => entry.id === "anthropic/my-vm");
+    assert.ok(vm, "虚拟模型应出现在目录里");
+    assert.equal(vm.type, "model");
+    assert.equal(vm.display_name, "[Anyswitch] my-vm");
+    assert.ok(/(claude|anthropic)/i.test(vm.id), "别名必过 Claude Code 的网关过滤");
+    assert.equal(result.body.data.find((entry) => entry.id === "anthropic/off-vm"), undefined, "停用不出目录");
+    assert.equal(result.body.data.find((entry) => entry.id === "my-vm"), undefined, "不带 anthropic/ 前缀不上目录");
+  });
+
+  it("无链端点的目录没有 auto，但虚拟模型照列（端点无关）", async () => {
+    const handler = makeVmHandler();
+    const result = await handler.handleModels({ authorization: TOKEN }, "dsh");
+    assert.equal(result.status, 200);
+    assert.ok(result.body.data.find((entry) => entry.id === "anthropic/my-vm"), "dsh 无链，虚拟模型照列");
+    assert.equal(result.body.data.find((entry) => entry.id === AUTO_MODEL_ANTHROPIC_ID), undefined, "auto 仍按端点链控制");
+  });
+
+  it("per-launch /v1/messages（非流式）：model=anthropic/<名字> 走虚拟模型自己的链，先节点 5xx 后退避", async () => {
+    const { upstreamFetch, calls, bodies } = memberRouter({
+      "chan-a": () => statusError(500),
+      "chan-b": () => nonStreamJson("vm-anthropic route works"),
+    });
+    await withPerLaunch(createMockDeps({ upstreamFetch, store: VM_STORE, getKeepAliveConfig: NO_RETRY }), async (port) => {
+      const res = await postMessages(port, { model: "anthropic/my-vm" });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.type, "message");
+      assert.equal(body.content[0].text, "vm-anthropic route works");
+      assert.deepEqual(calls, ["chan-a", "chan-b"], "首节点 500 后链退避到第二节点");
+      assert.equal(bodies[1].model, "claude-b", "上游收到的是链节点绑定模型");
+    });
+  });
+
+  it("停用 / 未注册的虚拟模型名不被 planChainMessages 拦截", async () => {
+    const handler = makeVmHandler();
+    assert.equal(await handler.planChainMessages({ authorization: TOKEN }, { model: "anthropic/off-vm" }, "claude"), null);
+    assert.equal(await handler.planChainMessages({ authorization: TOKEN }, { model: "anthropic/nothere" }, "claude"), null);
+    assert.ok((await handler.planChainMessages({ authorization: TOKEN }, { model: "anthropic/my-vm" }, "claude")) !== null, "anthropic 别名可拦截");
+    assert.ok((await handler.planChainMessages({ authorization: TOKEN }, { model: "my-vm" }, "claude")) !== null, "裸名请求同样可拦截");
   });
 });

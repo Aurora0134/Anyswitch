@@ -1579,6 +1579,131 @@ describe("store-service routingChains enabled 开关（自动路由 per-endpoint
   });
 });
 
+describe("store-service virtualModels（虚拟模型）", () => {
+  function vmSeed(paths) {
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1", "m2"]),
+      "prov-b": richEntry("prov-b", ["m2", "m3"]),
+      "prov-c": richEntry("prov-c", ["m4"]),
+    }, {
+      pools: { "pool-x": { displayName: "主号池", members: ["prov-a", "prov-b"] } },
+    });
+  }
+
+  it("saveVirtualModel 写入 {name, chain}，getState 同口径下发（absent enabled = 开）", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    const chain = [
+      { node: "pool-x", model: "m1" },
+      { node: "prov-c", model: "m4" },
+    ];
+    const result = await svc.saveVirtualModel("my-chain", chain);
+    assert.equal(result.ok, true, result.error);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.virtualModels, [{ name: "my-chain", chain }]);
+
+    const state = await svc.getState();
+    assert.deepEqual(state.virtualModels, [{ name: "my-chain", chain, enabled: true }]);
+    assert.equal(JSON.stringify(state).includes("sk-"), false);
+  });
+
+  it("saveVirtualModel 同名 upsert 换链并保留 enabled:false，其他条目不动", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("my-chain", [{ node: "prov-a", model: "m1" }]);
+    await svc.saveVirtualModel("other-vm", [{ node: "prov-b", model: "m2" }]);
+    await svc.setVirtualModelEnabled("my-chain", false);
+    const next = [{ node: "prov-c", model: "m4" }];
+    const result = await svc.saveVirtualModel("my-chain", next);
+    assert.equal(result.ok, true, result.error);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.virtualModels, [
+      { name: "my-chain", chain: next, enabled: false },
+      { name: "other-vm", chain: [{ node: "prov-b", model: "m2" }] },
+    ]);
+  });
+
+  it("saveVirtualModel 拒绝非法名字：大写开头/超长/auto/端点 id", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    const chain = [{ node: "prov-a", model: "m1" }];
+    assert.match((await svc.saveVirtualModel("MyChain", chain)).error, /小写字母开头/);
+    assert.match((await svc.saveVirtualModel("x".repeat(65), chain)).error, new RegExp(`${64}`));
+    assert.match((await svc.saveVirtualModel("auto", chain)).error, /保留名/);
+    assert.match((await svc.saveVirtualModel("claude", chain)).error, /保留名/);
+    assert.equal(readStore(paths).store.virtualModels, undefined, "全拒，不落盘");
+  });
+
+  it("saveVirtualModel 拒绝坏链：空链/超 8 节点/节点不存在/同节点同模型重复", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    assert.match((await svc.saveVirtualModel("v1", [])).error, /non-empty/i);
+    const tooMany = Array.from({ length: MAX_CHAIN_NODES + 1 }, (_, i) => ({ node: "prov-a", model: `m-${i}` }));
+    assert.match((await svc.saveVirtualModel("v1", tooMany)).error, new RegExp(`最多 ${MAX_CHAIN_NODES} 个节点`));
+    assert.match((await svc.saveVirtualModel("v1", [{ node: "nope", model: "m1" }])).error, /neither a managed provider nor a pool/);
+    const dup = [{ node: "prov-a", model: "m1" }, { node: "prov-a", model: "m1" }];
+    assert.match((await svc.saveVirtualModel("v1", dup)).error, /duplicate/);
+    assert.equal(readStore(paths).store.virtualModels, undefined, "全拒，不落盘");
+  });
+
+  it("setVirtualModelEnabled(false) 持久化、getState 同步口径，且可再开回；拒绝未知名与非布尔", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("my-chain", [{ node: "prov-a", model: "m1" }]);
+    assert.equal((await svc.setVirtualModelEnabled("nope", false)).ok, false);
+    assert.match((await svc.setVirtualModelEnabled("my-chain", "yes")).error, /boolean/i);
+    assert.equal((await svc.setVirtualModelEnabled("my-chain", false)).ok, true);
+    let state = await svc.getState();
+    assert.equal(state.virtualModels[0].enabled, false);
+    assert.equal(readStore(paths).store.virtualModels[0].enabled, false);
+    assert.equal((await svc.setVirtualModelEnabled("my-chain", true)).ok, true);
+    state = await svc.getState();
+    assert.equal(state.virtualModels[0].enabled, true);
+  });
+
+  it("deleteVirtualModel 移除条目；清空后整键消失；拒绝未知名", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("vm-a", [{ node: "prov-a", model: "m1" }]);
+    await svc.saveVirtualModel("vm-b", [{ node: "prov-b", model: "m2" }]);
+    assert.match((await svc.deleteVirtualModel("nope")).error, /does not exist/);
+    assert.equal((await svc.deleteVirtualModel("vm-a")).ok, true);
+    assert.deepEqual(readStore(paths).store.virtualModels.map((v) => v.name), ["vm-b"]);
+    assert.equal((await svc.deleteVirtualModel("vm-b")).ok, true);
+    assert.equal(Object.hasOwn(readStore(paths).store, "virtualModels"), false, "空数组不落 virtualModels 键");
+  });
+
+  it("deleteProvider 剪掉虚拟模型链里的死节点；整条链死透则虚拟模型一并移除", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1"]),
+      "prov-c": richEntry("prov-c", ["m4"]),
+    }, {
+      virtualModels: [
+        { name: "vm-half", chain: [{ node: "prov-a", model: "m1" }, { node: "prov-c", model: "m4" }] },
+        { name: "vm-dead", chain: [{ node: "prov-a", model: "m1" }] },
+      ],
+    });
+    writeCredential(paths, "prov-a");
+    const svc = makeService(paths);
+
+    const result = await svc.deleteProvider("prov-a");
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.prunedChains, [
+      { virtualModel: "vm-half", remaining: 1 },
+      { virtualModel: "vm-dead", remaining: 0 },
+    ]);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.virtualModels, [{ name: "vm-half", chain: [{ node: "prov-c", model: "m4" }] }]);
+  });
+});
+
 describe("store-service reorderProviders (渠道排序)", () => {
   function orderSeed(paths) {
     seedStore(paths, {

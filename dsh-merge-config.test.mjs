@@ -381,7 +381,7 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
   );
   const entry = config["llm-pi-ai"].providers._auto;
   assert.ok(entry, "_auto channel must be injected");
-  assert.equal(entry.displayName, "自动路由");
+  assert.equal(entry.displayName, "Anyswitch");
   assert.equal(entry.api, "openai-completions");
   // The base URL points at the chain HEAD node, not at a literal "auto" segment.
   assert.equal(entry.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");

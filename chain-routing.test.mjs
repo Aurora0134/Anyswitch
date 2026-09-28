@@ -19,6 +19,7 @@ import {
   isChainFailoverStatus,
   buildChainRuntime,
   uniqueMemberId,
+  resolveVirtualModelEntry,
 } from "./chain-routing.mjs";
 
 const T0 = 1_000_000;
@@ -766,5 +767,41 @@ describe("uniqueMemberId", () => {
     const taken = new Set(["pool-x/m1"]);
     assert.equal(uniqueMemberId(taken, "pool-x/m1", "model-p"), "pool-x/m1#model-p");
     assert.equal(uniqueMemberId(taken, "pool-x/m2", "model-p"), "pool-x/m2");
+  });
+});
+
+describe("resolveVirtualModelEntry（虚拟模型查链）", () => {
+  const vmStore = {
+    version: 2,
+    providers: { "prov-a": { displayName: "A", baseURL: "https://a/v1", protocol: "openai-compatible", credentialFile: "a.dpapi", models: {} } },
+    virtualModels: [
+      { name: "my-chain", chain: [{ node: "prov-a", model: "m1" }] },
+      { name: "off-chain", enabled: false, chain: [{ node: "prov-a", model: "m1" }] },
+      { name: "empty-chain", chain: [] },
+    ],
+  };
+
+  it("裸名命中：返回含 name+chain 的条目（与 resolveChain 形状兼容）", () => {
+    const entry = resolveVirtualModelEntry(vmStore, "my-chain");
+    assert.equal(entry.name, "my-chain");
+    assert.deepEqual(entry.chain, [{ node: "prov-a", model: "m1" }]);
+  });
+
+  it("anthropic/<名字> 别名命中（claude 目录 id 造法），auto 路径不受影响", () => {
+    assert.equal(resolveVirtualModelEntry(vmStore, "anthropic/my-chain")?.name, "my-chain");
+    assert.equal(resolveVirtualModelEntry(vmStore, AUTO_MODEL), null, '"auto" 留给端点链分支');
+    assert.equal(resolveVirtualModelEntry(vmStore, "anthropic/auto"), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, "anthropic/a/b"), null, "带真分隔符的是 wire id，不是虚拟模型");
+  });
+
+  it("停用 / 空链 / 未知名 / 非字符串一律 null", () => {
+    assert.equal(resolveVirtualModelEntry(vmStore, "off-chain"), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, "empty-chain"), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, "nope"), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, undefined), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, null), null);
+    assert.equal(resolveVirtualModelEntry(vmStore, 42), null);
+    assert.equal(resolveVirtualModelEntry(undefined, "my-chain"), null);
+    assert.equal(resolveVirtualModelEntry({}, "my-chain"), null);
   });
 });
