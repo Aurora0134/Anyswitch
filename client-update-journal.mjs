@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { OFFICIAL_MSIX_CLIENTS } from "./client-lifecycle.mjs";
+import { alignDshTuiPlugins } from "./dsh-tui-align.mjs";
 
 const RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -101,6 +102,24 @@ export function spawnClientUpdateWorker({
   return child.pid;
 }
 
+// dsh-tui 插件对齐结果 → 结果句里追加的一句话。none/unknown 无话可说，保持沉默。
+function dshTuiAlignClause(align) {
+  switch (align?.state) {
+    case "updated": {
+      const versions = [...new Set((align.profiles ?? []).filter((p) => p.state === "updated" && p.to).map((p) => p.to))];
+      return versions.length ? `终端插件 dsh-tui 已一并更新到 ${versions.join("、")}` : null;
+    }
+    case "current":
+      return "终端插件 dsh-tui 已是最新适配版本";
+    case "incompatible-newer":
+      return "终端插件 dsh-tui 有新版本，但尚未适配当前 DSH 版本";
+    case "failed":
+      return "终端插件 dsh-tui 自动更新未完成，可稍后手工更新";
+    default:
+      return null;
+  }
+}
+
 // Entry used by the worker. Reads the request the panel already recorded,
 // runs the install, then writes the same outcome the panel used to compute
 // in memory. A worker that dies before this returns leaves the record as
@@ -112,6 +131,7 @@ export async function executeClientUpdate({
   environment,
   releases,
   compareVersions,
+  alignDshTui = alignDshTuiPlugins,
   alive = processAlive,
   now = () => new Date().toISOString(),
 }) {
@@ -208,6 +228,21 @@ export async function executeClientUpdate({
       result = { outcome: "updated", message: `已更新到 ${afterVersion}` };
     }
     result = { ...result, beforeVersion, afterVersion, latestVersion: latest?.state === "ok" ? latest.version : null, comparison };
+    // dsh 联动：本体更新流程收尾时对齐 dsh-tui profile 插件（每次点更新都查——
+    // 面板外的升级留下的插件失配同样借此自愈；2026-09-28 的 dsh-cli 事故即此
+    // 形态）。对齐只往结果上附加信息，永不翻转 CLI 腿本身的成败。
+    if (run.clientId === "dsh" && command.ok && !Array.isArray(command.legs)) {
+      let align;
+      try {
+        align = await alignDshTui({ dshVersion: afterVersion });
+      } catch {
+        align = { state: "failed", profiles: [] };
+      }
+      const clause = dshTuiAlignClause(align);
+      if (clause) result.message = `${result.message}；${clause}`;
+      const alignOutput = (align?.profiles ?? []).find((p) => p.state === "failed")?.output ?? align?.output;
+      if (align?.state === "failed" && alignOutput) result.detail = [result.detail, alignOutput].filter(Boolean).join("\n");
+    }
   } catch {
     result = { outcome: "failed", message: "更新失败，请重新检测确认结果" };
   }
