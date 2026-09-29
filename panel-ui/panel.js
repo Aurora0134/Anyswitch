@@ -4859,7 +4859,7 @@ async function api(method, path, body) {
       try {
         const data = await api("GET", "/api/agents");
         const agents = (data && data.agents) || [];
-        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DSH", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex", grok: "Grok Build" };
+        const labels = { zcode: "ZCode", claude: "Claude Code", dsh: "DeepSeek Harness", opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code", qoder: "Qoder", codex: "Codex", grok: "Grok Build" };
         const busy = agents.filter((a) => {
           const generating = (a.metrics && a.metrics.activeRequests > 0) || a.activeRequests > 0;
           return generating || a.status === "running";
@@ -10346,8 +10346,8 @@ async function api(method, path, body) {
         const names = failed.map((id) => statsEndpointLabel(id)).join("、");
         if (failed.length) {
           const head = synced.length
-            ? `已同步 ${synced.length} 个端点，${names} 没同步成功`
-            : `这些端点没同步成功：${names}`;
+            ? `已同步 ${synced.length} 个端点，${names} 未同步成功`
+            : `这些端点未同步成功：${names}`;
           setStoreRefreshStatus("端点同步未完成", "err", escapeHtml(`未成功：${names}`));
           toast(head, true);
         } else {
@@ -10492,7 +10492,7 @@ async function api(method, path, body) {
   // 「按端点」口径的端点 = 客户端 agent（与监测页卡片同名）；journal 落的是
   // 小写 agentId，展示层映射为端点显示名，未知 id 原样兜底。
   const STATS_ENDPOINT_LABELS = {
-    zcode: "ZCode", claude: "Claude Code", dsh: "DSH",
+    zcode: "ZCode", claude: "Claude Code", dsh: "DeepSeek Harness",
     opencode: "OpenCode", pi: "Pi", kimi: "Kimi Code",
     qoder: "Qoder", codex: "Codex", grok: "Grok Build",
   };

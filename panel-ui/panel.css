@@ -1042,6 +1042,15 @@
     background: transparent;
     caret-color: transparent;
   }
+  /* xterm 自带的组字预览块：默认黑底白字（上游写死，与主题无关），落在光标格上就是
+     一块把左边字符压掉一块的深色方块。改成终端底色=看不见方块；字色跟着透明，
+     理由与上面那个隐藏输入框同一条——预览由输入法自己的候选窗承担。
+     用固定值而不是变量：样式主题里的 --surface-sunken 是浅色面板色，
+     套到终端上就是一块亮块，比不改还糟。 */
+  .terminal-xterm-host .xterm .composition-view {
+    background: #0b1220;
+    color: transparent;
+  }
   /* 终端服务未运行的空态覆盖层：盖住 xterm 区，降级期唯一可见的屏幕内容 */
   .terminal-unavailable {
     position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;

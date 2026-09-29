@@ -45,7 +45,7 @@ export const PROMPT_ENDPOINTS = Object.freeze([
   { id: "claude", label: "Claude Code", hotReload: false, targetRel: "~/.claude/CLAUDE.md", home: [".claude", "CLAUDE.md"] },
   { id: "kimi", label: "Kimi Code", hotReload: true, targetRel: "~/.kimi-code/AGENTS.md", home: [".kimi-code", "AGENTS.md"] },
   { id: "zcode", label: "ZCode", hotReload: false, targetRel: "~/.zcode/AGENTS.md", home: [".zcode", "AGENTS.md"] },
-  { id: "dsh", label: "DSH", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
+  { id: "dsh", label: "DeepSeek Harness", hotReload: false, targetRel: "~/.dsh/AGENTS.md", home: [".dsh", "AGENTS.md"] },
   { id: "pi", label: "Pi", hotReload: false, targetRel: "~/.pi/agent/AGENTS.md", home: [".pi", "agent", "AGENTS.md"] },
   { id: "opencode", label: "OpenCode", hotReload: true, targetRel: "~/.config/opencode/AGENTS.md", home: [".config", "opencode", "AGENTS.md"] },
   { id: "qoder", label: "Qoder", hotReload: true, targetRel: "~/.qoder/rules/anyswitch-managed-prompts.md", home: [".qoder", "rules", "anyswitch-managed-prompts.md"] },

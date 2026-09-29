@@ -282,6 +282,48 @@ test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其�
   }
 });
 
+// 2026-09-29 事故的真实边界：dsh-tui 的 patch 被写坏（模板那行裸 `[]` 和真正的条目行
+// 并存）之后，面板与 dsh 用的是同一份严格 js-yaml（dsh 自带那份），两边读它都直接报
+// 「end of the stream or a document separator is expected」——同步器连合并都进不去，
+// 整份跳过并报失败，dsh 一键启动同时崩掉。**代码不会自己修好这种文件**：本次是靠人工
+// 按备份逐行修回（bridge/tmp/repair-dsh-cordis-patch.mjs）。
+// 本用例钉住这条边界里唯一能自动化的部分：patch 不是 YAML 数组时，跳过它、逐字节不动，
+// 同期其它界面照常写好——免得以后有人把「跳过」误读成「已修复」，再等一个不会来的自愈。
+test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面照常写好", async () => {
+  const yaml = await getYamlModule();
+  const dir = mkTestDir("dsh-patch-skip-");
+  try {
+    const profiles = join(dir, "profiles");
+    for (const name of ["dsh-tui", "web"]) mkdirSync(join(profiles, name), { recursive: true });
+    const theme = { id: "ui-theme", name: "@deepseek-ai/dsh-client-ui-theme", config: { preference: "dark" } };
+    const broken = "just a scalar, not a loader patch array\n";
+    const brokenPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    writeFileSync(brokenPath, broken, "utf8");
+    writeFileSync(join(profiles, "web", "cordis.patch.yml"), yaml.dump([theme]), "utf8");
+
+    const store = {
+      version: 2,
+      providers: {
+        poke: {
+          displayName: "Poke",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke.dpapi",
+          models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+        },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    assert.equal(result.ok, true, "一个界面坏掉不拖垮其它界面");
+    assert.deepEqual(result.skipped.map((p) => p.replace(/\\/g, "/")), [brokenPath.replace(/\\/g, "/")]);
+    assert.equal(readFileSync(brokenPath, "utf8"), broken, "被跳过的文件一个字节都不许动");
+    const web = yaml.load(readFileSync(join(profiles, "web", "cordis.patch.yml"), "utf8"));
+    assert.equal(web.find((entry) => entry.id === "llm-pi-ai").config.providers._poke.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("round-trip read/write settings with yaml backup", async () => {
   const yaml = await getYamlModule();
   const dir = mkTestDir("dsh-merge-test-");

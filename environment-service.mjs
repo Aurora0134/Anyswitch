@@ -85,7 +85,7 @@ const CLIENTS = [
   ["opencode", "OpenCode", resolveOpencodeExecutable],
   ["pi", "Pi", resolvePiExecutable],
   ["kimi", "Kimi Code", resolveKimiExecutable],
-  ["dsh", "DSH", resolveDshExecutable],
+  ["dsh", "DeepSeek Harness", resolveDshExecutable],
   ["zcode", "ZCode", resolveZcodeExecutable],
   ["qoder", "Qoder", resolveQoderExecutable],
   // Grok Build is the remaining native binary: its local version comes from the
