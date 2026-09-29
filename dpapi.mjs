@@ -53,7 +53,12 @@ function run(args, input, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       powershell,
-      ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", join(root, "dpapi.ps1"), ...args],
+      // Bypass is process-scoped and load-bearing: the app directory may carry
+      // a Low integrity label, which makes policy treat dpapi.ps1 as an
+      // Internet-zone script whose run prompt -NonInteractive can never
+      // answer (AuthorizationManager UnauthorizedAccess). Machine policy or
+      // label changes must not be load-bearing for credential access.
+      ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(root, "dpapi.ps1"), ...args],
       { env: minimalEnvironment(), shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
     );
 
