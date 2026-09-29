@@ -19,6 +19,8 @@ import {
   defaultClaudeExecutable,
   DEFAULT_SMALL_FAST_MODEL_WIRE_ID,
   realGetClaudeVersion,
+  withClaudeBypassPermissions,
+  CLAUDE_BYPASS_PERMISSIONS_ARG,
 } from "./launcher.mjs";
 
 // A fake relay handle that records whether it was closed.
@@ -55,6 +57,21 @@ function baseDeps(overrides = {}) {
     },
   };
 }
+
+test("withClaudeBypassPermissions：开关开才追加，已带不重复，关则原样", () => {
+  assert.equal(withClaudeBypassPermissions([], false).length, 0, "关 = 一个参数都不多");
+  assert.deepEqual(withClaudeBypassPermissions(["--model", "anthropic/a/m"], false), ["--model", "anthropic/a/m"]);
+  assert.deepEqual(
+    withClaudeBypassPermissions(["--model", "anthropic/a/m"], true),
+    [CLAUDE_BYPASS_PERMISSIONS_ARG, "--model", "anthropic/a/m"],
+  );
+  assert.deepEqual(
+    withClaudeBypassPermissions([CLAUDE_BYPASS_PERMISSIONS_ARG, "--model", "x"], true),
+    [CLAUDE_BYPASS_PERMISSIONS_ARG, "--model", "x"],
+    "用户已手带则绝不重复",
+  );
+  assert.deepEqual(withClaudeBypassPermissions(undefined, true), [CLAUDE_BYPASS_PERMISSIONS_ARG]);
+});
 
 test("buildLauncherEnv points Claude at the loopback relay and injects the token", () => {
   const env = buildLauncherEnv({

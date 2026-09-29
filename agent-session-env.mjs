@@ -19,7 +19,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildLauncherEnv } from "./launcher.mjs";
+import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG } from "./launcher.mjs";
 import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
 import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
 import { buildGrokLauncherEnv } from "./grok-launcher.mjs";
@@ -208,11 +208,17 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
   }
 }
 
+// bypassPermissions 附加参数只属于 claude：设置页开关打开时给 Claude Code 补
+// --dangerously-skip-permissions，其余端点不因这个开关多出任何参数。
+function claudeBypassArg(agentId, enabled) {
+  return agentId === "claude" && enabled === true ? [CLAUDE_BYPASS_PERMISSIONS_ARG] : [];
+}
+
 // Everything terminal-host needs to spawn the session: a cmd /c wrapper (see
 // the attribution note on `launch`), the injected env delta, and the non-secret
 // metadata the tab and the persisted snapshot display. Throws — never falls
 // back — when the working directory or the agent's executable is missing.
-export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT, token, base = process.env, instanceId = null }) {
+export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT, token, base = process.env, instanceId = null, claudeBypassPermissions = false }) {
   const target = requireTarget(agentId);
   const directory = typeof cwd === "string" ? cwd.trim() : "";
   if (!directory) throw agentError("请先填写工作目录", "invalid_cwd");
@@ -232,8 +238,10 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // carry the executable path only — never a credential.
       // dsh 是唯一还要带参数的：它的 CLI 不接裸调用（bin.js 要求显式
       // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
+      // claude 的 bypassPermissions 是设置页开关驱动的附加参数：开 = 跳过工具
+      // 权限确认（用户显式打开才带），关 = 一个参数都不加。
       file: base.ComSpec || "cmd.exe",
-      args: ["/d", "/c", executable, ...(target.launchArgs ?? [])],
+      args: ["/d", "/c", executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions))],
     },
     env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
     agentId,

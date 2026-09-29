@@ -846,9 +846,17 @@ export function createPanelRouter({
     }
     const token = terminalPullToken();
     if (!token) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
+    // bypassPermissions 开关现读现用：保存后下一次一键启动即生效。loadSettings
+    // 吞掉解析错误回退默认（关），读取失败不会挡住启动本身。
+    let claudeBypassPermissions = false;
+    try {
+      claudeBypassPermissions = loadSettings(settingsFile, base).settings.claudeBypassPermissions === true;
+    } catch {
+      claudeBypassPermissions = false;
+    }
     let launch;
     try {
-      launch = buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base });
+      launch = buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions });
     } catch (error) {
       return sendJson(res, 400, { ok: false, error: error.message });
     }

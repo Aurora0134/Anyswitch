@@ -10,6 +10,8 @@ import {
   parseSparkWindowPoints,
   parseInjectThinkingEffort,
   DEFAULT_INJECT_THINKING_EFFORT,
+  parseClaudeBypassPermissions,
+  parseClaudeTierMappingsEnabled,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
@@ -398,6 +400,58 @@ describe("claudeTierMappings", () => {
       const saved = saveSettings(path, { claudeTierMappings: { sonnet: "anthropic/c/m" } }, {});
       assert.deepEqual(saved.claudeTierMappings, { sonnet: "anthropic/c/m", opus: "anthropic/b/m" });
       assert.equal("subagent" in JSON.parse(readFileSync(path, "utf8")).claudeTierMappings, false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("claudeTierMappingsEnabled", () => {
+  it("defaults to on, so an upgrade keeps the old behaviour byte for byte", () => {
+    assert.equal(parseClaudeTierMappingsEnabled(undefined), true);
+    assert.equal(parseClaudeTierMappingsEnabled("nonsense"), true);
+    assert.equal(parseClaudeTierMappingsEnabled(true), true);
+    assert.equal(parseClaudeTierMappingsEnabled(false), false);
+  });
+
+  it("off pauses takeover without erasing the configured rows", () => {
+    const tmp = mkTestDir("anyswitch-tier-enabled-");
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { claudeTierMappings: { sonnet: "anthropic/a/m", haiku: "anthropic/b/m" } }, {});
+      const off = saveSettings(path, { claudeTierMappingsEnabled: false }, {});
+      // The relay reads through loadSettings: off means no tier is taken over.
+      assert.deepEqual(off.claudeTierMappings, {});
+      assert.equal(off.settings.claudeTierMappingsEnabled, false);
+      // The rows themselves survive on disk and come back when re-enabled.
+      const onDisk = JSON.parse(readFileSync(path, "utf8"));
+      assert.deepEqual(onDisk.claudeTierMappings, { sonnet: "anthropic/a/m", haiku: "anthropic/b/m" });
+      const on = saveSettings(path, { claudeTierMappingsEnabled: true }, {});
+      assert.deepEqual(on.claudeTierMappings, { sonnet: "anthropic/a/m", haiku: "anthropic/b/m" });
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("claudeBypassPermissions", () => {
+  it("defaults to off: only an explicit true turns it on", () => {
+    assert.equal(parseClaudeBypassPermissions(undefined), false);
+    assert.equal(parseClaudeBypassPermissions("true"), false);
+    assert.equal(parseClaudeBypassPermissions(true), true);
+  });
+
+  it("persists across saves and rides the settings payload the panel reads", () => {
+    const tmp = mkTestDir("anyswitch-bypass-");
+    const path = join(tmp, "settings.json");
+    try {
+      const off = loadSettings(path, {});
+      assert.equal(off.settings.claudeBypassPermissions, false);
+      const saved = saveSettings(path, { claudeBypassPermissions: true }, {});
+      assert.equal(saved.settings.claudeBypassPermissions, true);
+      assert.equal(loadSettings(path, {}).settings.claudeBypassPermissions, true);
+      const back = saveSettings(path, { claudeBypassPermissions: false }, {});
+      assert.equal(back.settings.claudeBypassPermissions, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

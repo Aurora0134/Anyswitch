@@ -6855,8 +6855,8 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
   it("源码钉死：路由字面量、组装调用、可注入依赖、Bearer 头都在位", () => {
     assert.ok(panelMjs.includes('if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);'),
       "新路由挂在终端路由块内");
-    assert.ok(panelMjs.includes("buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base })"),
-      "launch/env 在服务端组装，不在前端拼");
+    assert.ok(panelMjs.includes("buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions })"),
+      "launch/env 在服务端组装，不在前端拼；bypassPermissions 开关也由服务端现读设置传入");
     assert.ok(panelMjs.includes("createTerminalSession = defaultCreateTerminalSession"),
       "createTerminalSession 可注入，测试不起真 terminal-host");
     assert.ok(panelMjs.includes('headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }'),
