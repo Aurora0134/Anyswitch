@@ -4586,13 +4586,13 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
     assert.ok(btn.length > 500, "处理函数体必须真的被抓取到，got " + btn.length);
     assert.ok(btn.includes("`已同步到全部 ${synced.length} 个端点的配置`"), "成功口径只报端点数");
     assert.ok(btn.includes('setStoreRefreshStatus("端点同步完成", "done")'), "完成态不挂右侧小字");
-    assert.ok(btn.includes("没同步成功"), "部分失败仍点名未成功的端点");
+    assert.ok(btn.includes("未同步成功"), "部分失败仍点名未成功的端点");
     assert.ok(!/Codex/i.test(btn), "反馈里不得出现 Codex（含上游客户端实现限制类说明）");
     assert.ok(!allUiText.includes("syncCodexCatalogNote"), "拼句子的函数整体撤回，不得复活");
     assert.ok(!allUiText.includes("CODEX_PICKER_PAGE_SIZE"), "页容量常量随之撤回，不得复活");
     // 悬停名单是用户批准过的文案：动它要走单独同意，先钉住现文
     assert.ok(panelHtml.includes(
-      'title="把当前渠道/号池立即写入全部端点配置（Kimi Code、Codex、OpenCode、Pi、DSH、ZCode、Qoder、Grok Build）"'
+      'title="把当前渠道/号池立即写入全部端点配置（Kimi Code、Codex、OpenCode、Pi、DeepSeek Harness、ZCode、Qoder、Grok Build）"'
     ), "「同步到端点」悬停文案为已批准版本");
   });
 });

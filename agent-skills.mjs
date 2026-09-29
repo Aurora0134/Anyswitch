@@ -41,7 +41,7 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "opencode", label: "OpenCode", relSkillsDir: [".config", "opencode", "skills"] },
   { id: "pi", label: "Pi", relSkillsDir: [".pi", "agent", "skills"] },
   { id: "kimi", label: "Kimi Code", relSkillsDir: [".kimi-code", "skills"] },
-  { id: "dsh", label: "DSH", relSkillsDir: [".dsh", "skills"] },
+  { id: "dsh", label: "DeepSeek Harness", relSkillsDir: [".dsh", "skills"] },
   { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"] },
   { id: "codex", label: "Codex", relSkillsDir: [".codex", "skills"] },
   { id: "grok", label: "Grok Build", relSkillsDir: [".grok", "skills"] },

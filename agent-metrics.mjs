@@ -3249,7 +3249,7 @@ export function createAgentMetricsCollector(options = {}) {
     const dshAgent = {
       ...buildAggregateAgentStatus({
         id: "dsh",
-        name: "DSH",
+        name: "DeepSeek Harness",
         state: dshState,
         processCount: procCounts.dsh || 0,
         tpsWindow: recentSampleWindow,

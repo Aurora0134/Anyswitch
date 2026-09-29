@@ -57,7 +57,7 @@ export const AGENT_TERMINAL_TARGETS = {
   codex: { name: "Codex", kind: "cli", unset: [] },
   kimi: { name: "Kimi Code", kind: "cli", unset: ["ANTHROPIC_API_KEY"] },
   pi: { name: "Pi", kind: "cli", unset: [] },
-  dsh: { name: "DSH", kind: "cli", unset: [], launchArgs: ["--profile", "dsh-tui"] },
+  dsh: { name: "DeepSeek Harness", kind: "cli", unset: [], launchArgs: ["--profile", "dsh-tui"] },
   opencode: { name: "OpenCode", kind: "cli", unset: [] },
   grok: { name: "Grok Build", kind: "cli", unset: ["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"] },
   qoder: { name: "Qoder", kind: "cli", unset: [] },
