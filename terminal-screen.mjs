@@ -55,7 +55,13 @@ const blankRow = (cols) => ({
   attrs: new Array(cols).fill(""),
 });
 
-const isBlankRow = (row) => row.chars.every((ch) => ch === null || ch === "" || ch === " ");
+// A row of spaces is still a painted bar when those cells carry a background
+// or inverse. Treating it as blank drops the bar from the repaint.
+const isBlankRow = (row) => row.chars.every((ch, index) => {
+  if (!(ch === null || ch === "" || ch === " ")) return false;
+  const parts = String(row.attrs[index] ?? "").split(";");
+  return !parts.includes("7") && !parts.includes("48") && !parts.includes("49");
+});
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -375,11 +381,28 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     clampCursor();
   }
 
+  function cellPainted(attr) {
+    const parts = String(attr ?? "").split(";");
+    if (parts.includes("7")) return true;
+    for (let i = 0; i < parts.length; i += 1) {
+      if (parts[i] !== "48" && parts[i] !== "49") continue;
+      return true;
+    }
+    return false;
+  }
+
   function serializeRow(line) {
+    let end = line.chars.length;
+    while (end > 0) {
+      const ch = line.chars[end - 1];
+      const blank = ch === null || ch === undefined || ch === " ";
+      if (!blank || cellPainted(line.attrs[end - 1])) break;
+      end -= 1;
+    }
     let out = "";
     let current = "";
     let pending = null;
-    for (let c = 0; c < line.chars.length; c += 1) {
+    for (let c = 0; c < end; c += 1) {
       const ch = line.chars[c];
       const attr = line.attrs[c];
       const text = ch === null || ch === undefined ? " " : ch;
@@ -394,7 +417,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       pending = attr;
     }
     if (current !== "") out += flushRun(current, pending);
-    return out.replace(/ +$/, "");
+    return out;
   }
 
   function flushRun(text, attr) {
@@ -455,6 +478,17 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // Test/diagnostic surface: the rendered picture as plain lines.
     screenLines() {
       return grid.map((line) => line.chars.map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
+    },
+    // Same grid, one cell at a time, so a repaint can be checked for colour and
+    // not just for text. Background is whatever SGR 48 the cell carries.
+    screenAttrs() {
+      return grid.map((line) => line.chars.map((ch, index) => {
+        const attr = line.attrs[index] ?? "";
+        const bg = attr.split(";").includes("7")
+          ? "7"
+          : (attr.match(/(?:^|;)(48(?::[^;]*|;(?:5;\d+|2;\d+;\d+;\d+)))/)?.[1] ?? "");
+        return { ch: ch === null || ch === undefined ? " " : ch, bg };
+      }));
     },
     historyLines() {
       return history.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+$/, ""));

@@ -1,13 +1,20 @@
-import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, copyFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
+import {
+  readSidecar as readSidecarFile,
+  writeSidecar as writeSidecarFile,
+  AUTO_CHANNEL_KEY,
+  deriveAutoRouteChannel,
+  deriveAnyswitchChannel,
+} from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
-export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
+export { deriveAutoRouteChannel, deriveAnyswitchChannel, AUTO_CHANNEL_KEY };
 import { fallbackContextWindow } from "./context-fallback.mjs";
 import { loadPiAiReasoningIndex, resolveKnowledgeReasoning } from "./reasoning-fallback.mjs";
 import { resolveModelEfforts, effortWireValue, intersectEffortVocabulary } from "./effort-catalog.mjs";
+import { extractManagedProviders } from "./pool-providers.mjs";
 
 const SIDECAR_FILENAME = "dsh-sidecar.json";
 
@@ -252,6 +259,158 @@ export function readDshSettings(filePath, yaml) {
   }
 }
 
+// 0.1.7 retired ~/.dsh/settings.yaml: the first boot of a profile imports it
+// once into *that* profile's cordis.patch.yml and renames the file away. The
+// interactive surface (dsh-tui) never received the import, so writing the
+// retired file again cannot reach it. Each existing profile's own patch is
+// what that profile actually composes.
+export const DSH_LLM_ENTRY_ID = "llm-pi-ai";
+export const DSH_LLM_ENTRY_NAME = "@deepseek-ai/dsh-llm-pi-ai";
+
+export function dshProfilePatchPaths(dshHome) {
+  const profilesDir = join(dshHome, "profiles");
+  let entries;
+  try {
+    entries = readdirSync(profilesDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
+    .map((entry) => join(profilesDir, entry.name, "cordis.patch.yml"))
+    .sort();
+}
+
+function loadPatchEntries(filePath, yaml) {
+  if (!existsSync(filePath)) return [];
+  const parsed = yaml.load(stripBom(readFileSync(filePath, "utf8")));
+  if (parsed == null) return [];
+  if (!Array.isArray(parsed)) throw new UnparseableDshSettingsError(filePath);
+  return parsed;
+}
+
+// The profile patch is a YAML array of rows. Re-dumping the whole array
+// rewrites every other row's comments, quotes and key order, so the write
+// splices only the llm-pi-ai row and leaves the surrounding text byte for byte.
+function spliceProfileRow(text, rowText) {
+  const normalized = text.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  const lines = normalized.split("\n");
+  const rowStart = /^([ \t]*)- id:[ \t]+llm-pi-ai[ \t]*(?:#.*)?$/;
+  let start = -1;
+  let indent = "";
+  for (let i = 0; i < lines.length; i += 1) {
+    const match = rowStart.exec(lines[i]);
+    if (!match) continue;
+    start = i;
+    indent = match[1];
+    break;
+  }
+  const body = rowText.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n")
+    .map((line, index) => (index === 0 || line === "" ? line : `${indent}${line}`));
+  if (start < 0) {
+    const base = normalized.replace(/\n+$/, "");
+    const sep = base.length === 0 ? "" : "\n";
+    return `${base}${sep}${body.join("\n")}\n`;
+  }
+  let end = lines.length;
+  const sibling = new RegExp(`^${indent}- `);
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (sibling.test(lines[i])) { end = i; break; }
+  }
+  const next = [...lines.slice(0, start), ...body, ...lines.slice(end)];
+  return `${next.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+// Replace only the llm-pi-ai row's providers. Every other row, and any
+// provider the user added beside the managed ones, stays. A profile whose
+// patch is not a YAML array is left untouched and reported — one broken
+// profile must not sink the others.
+export function mergeDshProfilePatch(entries, providers, previousManaged = []) {
+  const next = entries.map((entry) => (entry && typeof entry === "object" ? { ...entry } : entry));
+  const index = next.findIndex((entry) => entry && entry.id === DSH_LLM_ENTRY_ID);
+  const row = index >= 0 ? { ...next[index] } : { id: DSH_LLM_ENTRY_ID };
+  if (typeof row.name !== "string" || row.name.length === 0) row.name = DSH_LLM_ENTRY_NAME;
+  const config = row.config && typeof row.config === "object" && !Array.isArray(row.config) ? { ...row.config } : {};
+  const existing = config.providers && typeof config.providers === "object" && !Array.isArray(config.providers)
+    ? { ...config.providers }
+    : {};
+  // Only the ids the previous sync wrote are removable. A provider the user
+  // added in DSH's own settings — even one whose name starts with "_" — stays.
+  const removable = new Set(previousManaged.map((id) => (String(id).startsWith("_") ? String(id) : `_${id}`)));
+  for (const key of Object.keys(existing)) {
+    if (removable.has(key) && !Object.hasOwn(providers, key)) delete existing[key];
+  }
+  Object.assign(existing, providers);
+  config.providers = existing;
+  row.config = config;
+  if (index >= 0) next[index] = row;
+  else next.push(row);
+  return next;
+}
+
+export function writeDshProfilePatches(store, port, sidecarRoot, dshHome, catalog = null, effortsEnabled = true, knowledge = null) {
+  return writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge);
+}
+
+async function writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge) {
+  const yaml = await getYamlModule();
+  const managedProviders = extractManagedProviders(store);
+  const autoChannel = deriveAnyswitchChannel(store, "dsh");
+  const previousManaged = readSidecar(sidecarRoot).providers;
+  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
+    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
+  }
+  const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
+  const built = {};
+  for (const [providerId, provider] of Object.entries(providers)) {
+    Object.assign(built, buildDshProviderEntry(providerId, provider, port, knowledge, catalog, effortsEnabled));
+  }
+  const paths = dshProfilePatchPaths(dshHome);
+  if (paths.length === 0) {
+    return { ok: true, unchanged: true, reason: "no dsh profiles" };
+  }
+  const staged = [];
+  const skipped = [];
+  let changed = false;
+  for (const filePath of paths) {
+    let entries;
+    try {
+      entries = loadPatchEntries(filePath, yaml);
+    } catch (error) {
+      if (error?.code === "UNPARSEABLE_DSH_SETTINGS") {
+        skipped.push(filePath);
+        continue;
+      }
+      throw error;
+    }
+    const merged = mergeDshProfilePatch(entries, built, previousManaged);
+    const row = merged.find((entry) => entry && entry.id === DSH_LLM_ENTRY_ID);
+    const rowText = yaml.dump([row], { indent: 2, lineWidth: -1, noRefs: true });
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
+    const text = spliceProfileRow(current, rowText);
+    if (contentHash(current) !== contentHash(text)) changed = true;
+    staged.push({ filePath, text });
+  }
+  if (skipped.length === paths.length) {
+    return { ok: false, unchanged: true, reason: "every dsh profile patch is unparseable" };
+  }
+  if (!changed) {
+    writeSidecar(sidecarRoot, Object.keys(providers));
+    return { ok: true, unchanged: true, skipped };
+  }
+  for (const { filePath, text } of staged) {
+    const dir = dirname(filePath);
+    mkdirSync(dir, { recursive: true });
+    if (existsSync(filePath)) {
+      copyFileSync(filePath, join(dir, `cordis.patch.backup.${timestamp()}.yml`));
+      pruneBackups(dir, "cordis.patch.backup.");
+    }
+    atomicWriteFile(filePath, text);
+  }
+  writeSidecar(sidecarRoot, Object.keys(providers));
+  return { ok: true, unchanged: false, written: staged.map((item) => item.filePath), skipped };
+}
+
 export function writeDshSettingsWithBackup(filePath, data, yaml) {
   const dir = dirname(filePath);
   mkdirSync(dir, { recursive: true });
@@ -277,7 +436,7 @@ export function writeDshSettingsWithBackup(filePath, data, yaml) {
   return { ok: true, unchanged: false, backupPath };
 }
 
-export { extractManagedProviders } from "./pool-providers.mjs";
+export { extractManagedProviders };
 
 export function validateDshSettings(settings) {
   if (!settings || typeof settings !== "object" || Array.isArray(settings)) {

@@ -108,7 +108,7 @@ After updating the source, the backend needs a new panel-host process. Refreshin
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — ensures the relay is available on 47821 and merges managed providers into `~/.config/opencode/opencode.json` using the built-in config writer. No companion plugin is required; your `opencode.jsonc` is left untouched. |
 | Pi | OpenAI | `node pi-launcher.mjs [pi args]` — syncs managed providers into `~/.pi/agent/models.json`, then launches pi. |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
-| DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into `~/.dsh/settings.yaml`. |
+| DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into each `~/.dsh/profiles/<name>/cordis.patch.yml`. |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.qoder/settings.json`, and starts Qoder's own `qoder.cmd` dispatcher with `ANYSWITCH_RELAY_TOKEN` + `NO_PROXY` set in the process environment only. Two behaviours are specific to Qoder and worth knowing up front: requests are attributed by an identity prefix in the URL segment (`/openai/qoder~<provider>/v1`) because Qoder has no way to send a custom header, and the launcher starts Qoder with a DevTools port bound to 127.0.0.1 so it can ask Qoder to reload its model catalog after a config change — that reload is best-effort and its failure never blocks startup. |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.grok/config.toml`, strips any inherited `XAI_API_KEY`, and starts Grok Build with `ANYSWITCH_INSTANCE_ID` and `NO_PROXY` set in the process environment only. |
 
@@ -306,7 +306,7 @@ git switch --detach v0.5.2
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 可用，由仓内配置写手把托管 provider 合并进 `~/.config/opencode/opencode.json`。无需配套插件，用户的 `opencode.jsonc` 保持不动。 |
 | Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` — 先把托管 provider 同步进 `~/.pi/agent/models.json`，再启动 pi。 |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
-| DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进 `~/.dsh/settings.yaml`。 |
+| DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进每个 `~/.dsh/profiles/<name>/cordis.patch.yml`。 |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.qoder/settings.json`，再经 Qoder 自家的 `qoder.cmd` 调度器启动，`ANYSWITCH_RELAY_TOKEN` 与 `NO_PROXY` 只走进程环境变量、不落盘。两处 Qoder 特有行为需先知晓：请求归属靠 URL 段里的身份前缀（`/openai/qoder~<provider>/v1`），因为 Qoder 没有下发自定义请求头的位置；启动器会带一个只绑 127.0.0.1 的 DevTools 端口拉起 Qoder，用于在配置变更后请它重载模型目录——该重载是尽力而为，失败也不阻塞启动。 |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.grok/config.toml`，剥离继承的 `XAI_API_KEY`，再以仅进程环境变量注入 `ANYSWITCH_INSTANCE_ID` 与 `NO_PROXY` 启动 Grok Build。 |
 
