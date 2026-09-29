@@ -249,6 +249,22 @@ test("launch 一律 cmd /d /c 包装：归属链的硬前提，参数无任何�
   }
 });
 
+test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const dsh = buildAgentSessionLaunch({ agentId: "dsh", cwd: root, token: TOKEN, base });
+    assert.deepEqual(dsh.launch.args.slice(3), ["--profile", "dsh-tui"], "dsh 必须带 profile 参数（与 dsh-cli 快捷命令同一口径）");
+    for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
+      if (agentId === "dsh") continue;
+      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
+      assert.equal(launch.launch.args.length, 3, `${agentId} 维持零附加参数`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {

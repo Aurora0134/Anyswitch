@@ -57,7 +57,7 @@ export const AGENT_TERMINAL_TARGETS = {
   codex: { name: "Codex", kind: "cli", unset: [] },
   kimi: { name: "Kimi Code", kind: "cli", unset: ["ANTHROPIC_API_KEY"] },
   pi: { name: "Pi", kind: "cli", unset: [] },
-  dsh: { name: "DSH", kind: "cli", unset: [] },
+  dsh: { name: "DSH", kind: "cli", unset: [], launchArgs: ["--profile", "dsh-tui"] },
   opencode: { name: "OpenCode", kind: "cli", unset: [] },
   grok: { name: "Grok Build", kind: "cli", unset: ["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"] },
   qoder: { name: "Qoder", kind: "cli", unset: [] },
@@ -230,8 +230,10 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // Wrapping in `cmd /d /c <exe>` makes session.pid a cmd.exe (on the scan
       // list), so the agent's ancestor chain reaches the session. The args
       // carry the executable path only — never a credential.
+      // dsh 是唯一还要带参数的：它的 CLI 不接裸调用（bin.js 要求显式
+      // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
       file: base.ComSpec || "cmd.exe",
-      args: ["/d", "/c", executable],
+      args: ["/d", "/c", executable, ...(target.launchArgs ?? [])],
     },
     env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
     agentId,
