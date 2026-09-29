@@ -796,14 +796,13 @@
   .data-bundle-meta:empty { display: none; }
   .data-bundle-note { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
   .data-bundle-note[data-tone="warn"] { color: var(--warn); }
-  /* Claude Code 档位映射行：复用 .modal-number 的全部取值（底色/边框/焦点环都走
-     主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名框」——
+  /* [CC] 档位映射行：复用 .modal-number 的全部取值（底色/边框/焦点环都走
+     主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名下拉」——
      不引入任何颜色声明，因此三套主题与亮暗都无需特化片段。 */
   .settings-tier-input {
     width: min(320px, 46vw); text-align: left;
     font-family: var(--font-mono); font-weight: 500;
   }
-  .settings-tier-input::placeholder { color: var(--text-3); font-weight: 500; }
   #settingsPanelAbout { display: flex; flex-direction: column; gap: 20px; }
   .about-card-head { flex-wrap: wrap; gap: 12px; }
   .about-app-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
