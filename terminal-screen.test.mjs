@@ -98,6 +98,17 @@ test("SGR 与宽字符：颜色随回放保留，中日韩字不切碎行", () =
   assert.equal(terminalCharWidth("a"), 1);
 });
 
+test("铺满一行的色块和字后面的色块，重画后还在", () => {
+  const mirror = createScreenMirror({ cols: 20, rows: 4 });
+  mirror.write(`\u001b[48;5;236m${" ".repeat(20)}\u001b[0m\r\n`);
+  mirror.write(`\u001b[0mModels\u001b[48;5;236m${" ".repeat(14)}\u001b[0m`);
+  const again = repaint(mirror.toReplay(), 20, 4);
+  const rows = again.screenAttrs();
+  assert.equal(rows[0].every((cell) => cell.bg === "48;5;236"), true, "整行色块重画后必须铺满");
+  assert.equal(rows[1].slice(0, 6).every((cell) => cell.bg === ""), true, "文字本身不该被染上后面的色块");
+  assert.equal(rows[1].slice(6).every((cell) => cell.bg === "48;5;236"), true, "字后面的色块必须画到行尾");
+});
+
 test("resize 保留画面与历史，畸形/未知序列吞掉且不影响后续", () => {
   const mirror = createScreenMirror({ cols: 40, rows: 10 });
   for (let i = 1; i <= 25; i += 1) mirror.write(`行 ${i}\r\n`);

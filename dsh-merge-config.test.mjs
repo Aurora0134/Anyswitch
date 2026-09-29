@@ -8,12 +8,13 @@ import {
   extractManagedProviders,
   readSidecar,
   writeSidecar,
+  writeDshProfilePatches,
   validateDshSettings,
   UnparseableDshSettingsError,
   getYamlModule,
   deriveAutoRouteChannel,
 } from "./dsh-merge-config.mjs";
-import { rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -209,6 +210,76 @@ test("validateDshSettings validates structure", () => {
     }).valid,
     true,
   );
+});
+
+test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其它设置保持原样", async () => {
+  const yaml = await getYamlModule();
+  const dir = mkTestDir("dsh-patch-test-");
+  try {
+    const profiles = join(dir, "profiles");
+    const theme = {
+      id: "ui-theme",
+      name: "@deepseek-ai/dsh-client-ui-theme",
+      config: { preference: "dark" },
+    };
+    const headlessOnly = {
+      id: "permission",
+      name: "@deepseek-ai/dsh-permission-presets",
+      config: { defaultPreset: "danger-full-access" },
+    };
+    writeFileSync(join(dir, "cordis.patch.yml"), yaml.dump([theme]), "utf8");
+    for (const name of ["dsh-tui", "web", "headless"]) {
+      mkdirSync(join(profiles, name), { recursive: true });
+    }
+    writeFileSync(join(profiles, "web", "cordis.patch.yml"), yaml.dump([
+      theme,
+      {
+        id: "llm-pi-ai",
+        name: "@deepseek-ai/dsh-llm-pi-ai",
+        config: { providers: { _mine: { displayName: "Mine", api: "openai-completions", baseURL: "https://mine.example/v1", models: [{ id: "m" }] } } },
+      },
+    ]), "utf8");
+    writeFileSync(join(profiles, "headless", "cordis.patch.yml"), yaml.dump([headlessOnly]), "utf8");
+
+    const store = {
+      version: 2,
+      providers: {
+        poke: {
+          displayName: "Poke",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke.dpapi",
+          models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+        },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    assert.equal(result.ok, true);
+    assert.equal(result.unchanged, false);
+    assert.equal(existsSync(join(dir, "settings.yaml")), false, "已弃用的全局设置文件不再写出");
+
+    for (const name of ["dsh-tui", "web", "headless"]) {
+      const entries = yaml.load(readFileSync(join(profiles, name, "cordis.patch.yml"), "utf8"));
+      const row = entries.find((entry) => entry.id === "llm-pi-ai");
+      assert.ok(row, `${name} 必须有 llm-pi-ai 行`);
+      assert.equal(row.name, "@deepseek-ai/dsh-llm-pi-ai");
+      const channel = row.config.providers["_poke"];
+      assert.equal(channel.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
+      assert.equal(channel.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
+      assert.deepEqual(channel.headers, { "x-agent-id": "dsh" });
+      assert.equal(channel.models[0].id, "claude-opus-5");
+    }
+
+    const web = yaml.load(readFileSync(join(profiles, "web", "cordis.patch.yml"), "utf8"));
+    assert.equal(web.find((entry) => entry.id === "ui-theme").config.preference, "dark");
+    assert.ok(web.find((entry) => entry.id === "llm-pi-ai").config.providers._mine, "界面里自己加的渠道必须留下");
+    const headless = yaml.load(readFileSync(join(profiles, "headless", "cordis.patch.yml"), "utf8"));
+    assert.equal(headless.find((entry) => entry.id === "permission").config.defaultPreset, "danger-full-access");
+    const home = yaml.load(readFileSync(join(dir, "cordis.patch.yml"), "utf8"));
+    assert.equal(home.find((entry) => entry.id === "llm-pi-ai"), undefined, "家目录那一层不是界面配置，不能写渠道");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("round-trip read/write settings with yaml backup", async () => {

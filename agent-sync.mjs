@@ -151,14 +151,15 @@ export async function syncAllAgentConfigs({
     logger?.error?.(`zcode config sync failed: ${err.message}`);
   }
 
-  // 2. DSH settings.yaml sync (~/.dsh/settings.yaml)
+  // 2. DSH profile patches (~/.dsh/profiles/<name>/cordis.patch.yml). 0.1.7
+  // retired the home-level settings.yaml; each existing profile reads its own.
   try {
     const dshResult = await writeDshConfig(store, port, root, dshSettingsPath(base));
     results.dsh = dshResult;
     if (!dshResult.ok) {
-      logger?.warn?.(`dsh settings.yaml not updated: ${dshResult.reason ?? "unknown"}`);
+      logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);
     } else if (!dshResult.unchanged) {
-      logger?.info?.("dsh settings.yaml synced");
+      logger?.info?.("dsh profile patches synced");
     }
   } catch (err) {
     results.dsh = { ok: false, error: err.message };

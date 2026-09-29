@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { join, isAbsolute } from "node:path";
+import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync, existsSync } from "node:fs";
 import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
@@ -10,17 +10,7 @@ import { createLogger } from "./logger.mjs";
 import { createPanelRouter } from "./panel.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
-import {
-  readDshSettings,
-  mergeDshSettings,
-  writeDshSettingsWithBackup,
-  extractManagedProviders,
-  deriveAnyswitchChannel,
-  readSidecar,
-  writeSidecar,
-  validateDshSettings,
-  getYamlModule,
-} from "./dsh-merge-config.mjs";
+import { writeDshProfilePatches } from "./dsh-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
 
@@ -85,50 +75,12 @@ export function dshPackageRoot(base = process.env) {
 }
 
 export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
-  const yaml = await getYamlModule();
-  const managedProviders = extractManagedProviders(store);
-  const autoChannel = deriveAnyswitchChannel(store, "dsh");
-  // Last channel deleted: what the previous sync wrote into the client config
-  // is only recorded in the sidecar, so an empty previous managed set is what
-  // makes bailing out safe — otherwise the merge has to run to drop the stale
-  // entries instead of leaving them behind forever.
-  const previousManaged = readSidecar(sidecarRoot).providers;
-  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
-    return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
-  }
-  let existing;
-  try {
-    existing = readDshSettings(settingsPath, yaml);
-  } catch (error) {
-    if (error?.code === "UNPARSEABLE_DSH_SETTINGS") {
-      return { ok: false, unchanged: true, reason: error.message };
-    }
-    throw error;
-  }
-  // The pi-ai database shipped inside the installed DSH package is the
-  // reasoning-effort knowledge source for models whose upstream /v1/models
-  // listing discloses nothing. Empty (and skipped) when DSH is not installed.
-  // Behind it sits the hub's own thinking-effort library (effort-catalog.mjs),
-  // which covers the gateway-private ids no catalog describes.
+  // 0.1.7 reads each profile's cordis.patch.yml, not settings.yaml. The path
+  // argument stays so older callers keep compiling; the home is its parent.
+  const dshHome = dirname(settingsPath);
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
-  // Switch off → DSH is told nothing about levels, at any tier. Store-declared
-  // rows would otherwise be written through by the entry builder, so the flag
-  // goes all the way in rather than just nulling the library. The wholesale
-  // entry rebuild drops the reasoningEfforts a previous sync wrote, which is
-  // the switch's cleanup path.
   const includeEfforts = effortsEnabled ?? effortSupplementEnabled(sidecarRoot);
-  const { config, managed } = mergeDshSettings(existing, managedProviders, port, previousManaged, knowledge, autoChannel, catalog, includeEfforts);
-
-  const gate = validateDshSettings(config);
-  if (!gate.valid) {
-    return { ok: false, unchanged: true, reason: `dsh settings.yaml would be invalid: ${gate.error}` };
-  }
-
-  const writeResult = writeDshSettingsWithBackup(settingsPath, config, yaml);
-  if (writeResult.ok) {
-    writeSidecar(sidecarRoot, managed);
-  }
-  return writeResult;
+  return writeDshProfilePatches(store, port, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
 }
 
 import { resolveDshExecutable } from "./agent-discovery.mjs";
@@ -174,9 +126,9 @@ export async function runDshLauncher({
       const sidecarRoot = relayDataRoot(base);
       const writeResult = await writeConfig(loaded.store, relay.port, sidecarRoot);
       if (!writeResult.ok) {
-        log(`warning: dsh settings.yaml not updated: ${writeResult.reason ?? "unknown error"}`);
+        log(`warning: dsh profile patch not updated: ${writeResult.reason ?? "unknown error"}`);
       } else if (!writeResult.unchanged) {
-        log(`dsh settings.yaml updated (backup: ${writeResult.backupPath ?? "none"})`);
+        log("dsh profile patches updated");
       }
     }
 
