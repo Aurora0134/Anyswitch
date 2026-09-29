@@ -28,6 +28,7 @@ import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync, readFileSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
+import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
 
 // The Claude MINOR family whose gateway-discovery filter behaviour is verified
 // (first proven on 2.1.220). Discovery is enabled for any patch release in
@@ -51,6 +52,18 @@ export function isVerifiedDiscoveryVersion(version) {
 }
 
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
+
+// Claude Code 的 bypassPermissions 启动参数：设置页开关打开时，由本启动器与
+// 面板终端一键启动两条路径注入；用户自己已在命令行带上时不重复添加。
+export const CLAUDE_BYPASS_PERMISSIONS_ARG = "--dangerously-skip-permissions";
+
+// 纯函数：按开关决定是否给 Claude 追加 bypassPermissions 参数。已带则原样
+// 返回，绝不重复；关闭或非 claude 场景由调用方不传 enabled。
+export function withClaudeBypassPermissions(args, enabled) {
+  const list = Array.isArray(args) ? args.map(String) : [];
+  if (enabled !== true || list.includes(CLAUDE_BYPASS_PERMISSIONS_ARG)) return list;
+  return [CLAUDE_BYPASS_PERMISSIONS_ARG, ...list];
+}
 
 // Fallback wire ID (anthropic/<provider>/<model>) for Claude Code's small-fast
 // model family: the auto-mode permission classifier, the background classifier
@@ -336,13 +349,21 @@ export async function main(argv = process.argv.slice(2)) {
   process.on("unhandledRejection", (reason) => {
     process.stderr.write(`relay warning: unhandled rejection: ${reason?.message ?? reason}\n`);
   });
+  // bypassPermissions 开关现读现用：设置页保存后，下一次从这里启动即生效，
+  // 无需重启任何常驻进程（与档位映射、抗截断同一口径）。
+  let bypass = false;
+  try {
+    bypass = loadSettings(defaultSettingsPath()).settings.claudeBypassPermissions === true;
+  } catch {
+    bypass = false;
+  }
   const code = await runLauncher({
     startRelay: () => startProductionRelay({ logger: createForwardingLogger() }),
     getClaudeVersion: realGetClaudeVersion,
     spawnClaude: realSpawnClaude,
     log: (line) => process.stderr.write(`${line}\n`),
     base: withStoreSmallFastDefault(process.env),
-    claudeArgs: argv,
+    claudeArgs: withClaudeBypassPermissions(argv, bypass),
   });
   return code;
 }

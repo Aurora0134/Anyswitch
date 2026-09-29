@@ -63,6 +63,24 @@ export function parseInjectThinkingEffort(raw) {
   return raw === false ? false : DEFAULT_INJECT_THINKING_EFFORT;
 }
 
+// 以 bypassPermissions 启动 Claude Code：开启后 Anyswitch 拉起 Claude 时带上
+// --dangerously-skip-permissions，跳过工具权限确认。默认关——这是把安全确认
+// 整个交出去的选项，必须由用户显式打开（缺少或畸形值都保持关闭）。
+export const DEFAULT_CLAUDE_BYPASS_PERMISSIONS = false;
+
+export function parseClaudeBypassPermissions(raw) {
+  return raw === true ? true : DEFAULT_CLAUDE_BYPASS_PERMISSIONS;
+}
+
+// Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
+// 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
+// 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
+export const DEFAULT_CLAUDE_TIER_MAPPINGS_ENABLED = true;
+
+export function parseClaudeTierMappingsEnabled(raw) {
+  return raw === false ? DEFAULT_CLAUDE_TIER_MAPPINGS_ENABLED === false : DEFAULT_CLAUDE_TIER_MAPPINGS_ENABLED;
+}
+
 // Claude 档位映射: the four Claude Code tier entries (sonnet/opus/fable/haiku)
 // each optionally name one Anyswitch-hosted model. An unset or blank tier means
 // "not taken over", so an unconfigured install relays exactly as before —
@@ -183,7 +201,13 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
-  const claudeTierMappings = parseClaudeTierMappings(raw.claudeTierMappings);
+  const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
+  const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
+  // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
+  // 读取路径都经过 loadSettings，无需各自判断开关。
+  const claudeTierMappings = claudeTierMappingsEnabled
+    ? parseClaudeTierMappings(raw.claudeTierMappings)
+    : {};
   return {
     raw,
     settings: {
@@ -191,11 +215,15 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       keepAlive,
       sparkWindowPoints,
       injectThinkingEffort,
+      claudeBypassPermissions,
+      claudeTierMappingsEnabled,
       claudeTierMappings,
     },
     keepAlive,
     sparkWindowPoints,
     injectThinkingEffort,
+    claudeBypassPermissions,
+    claudeTierMappingsEnabled,
     claudeTierMappings,
   };
 }
@@ -268,6 +296,16 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "injectThinkingEffort")) {
     updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "claudeBypassPermissions")) {
+    updated.claudeBypassPermissions = parseClaudeBypassPermissions(patch.claudeBypassPermissions);
+  }
+
+  // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启
+  // 即恢复，所以这里不触碰 claudeTierMappings。
+  if (Object.prototype.hasOwnProperty.call(patch, "claudeTierMappingsEnabled")) {
+    updated.claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(patch.claudeTierMappingsEnabled);
   }
 
   if (patch.claudeTierMappings && typeof patch.claudeTierMappings === "object" && !Array.isArray(patch.claudeTierMappings)) {

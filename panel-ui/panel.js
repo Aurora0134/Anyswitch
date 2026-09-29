@@ -2726,6 +2726,8 @@ async function api(method, path, body) {
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
     const injectEffortToggle = $("injectEffortToggle");
+    const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
+    const claudeTierEnabledToggle = $("claudeTierEnabledToggle");
     const sparkWindowInput = $("sparkWindowInput");
     const keepAliveRetriesInput = $("keepAliveRetriesInput");
     const KEEP_ALIVE_MODES = ["off", "enhanced"];
@@ -2743,7 +2745,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -2975,6 +2977,9 @@ async function api(method, path, body) {
         if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
           injectEffortToggle.checked = d.settings.injectThinkingEffort;
         }
+        if (!settingsSaving.claudeBypassPermissions && claudeBypassPermissionsToggle && d.settings && typeof d.settings.claudeBypassPermissions === "boolean") {
+          claudeBypassPermissionsToggle.checked = d.settings.claudeBypassPermissions;
+        }
         if (!settingsSaving.spark) {
           const fromApi = d.sparkWindowPoints ?? d.settings?.sparkWindowPoints;
           sparkWindowPoints = clampSparkWindow(fromApi ?? sparkWindowPoints);
@@ -2982,12 +2987,18 @@ async function api(method, path, body) {
           if (sparkWindowInput) sparkWindowInput.value = String(sparkWindowPoints);
           Object.values(historyBuffers).forEach(pruneSparkBuffer);
         }
+        // 档位接管总开关：正在保存的那次切换不被轮询回灌盖回。
+        if (!settingsSaving.claudeTierEnabled && claudeTierEnabledToggle && d.settings && typeof d.settings.claudeTierMappingsEnabled === "boolean") {
+          claudeTierEnabled = d.settings.claudeTierMappingsEnabled;
+          claudeTierEnabledToggle.checked = claudeTierEnabled;
+        }
         // 档位映射按服务端归一值回灌；某行正在保存时不回灌，免得把用户刚敲进
-        // 那一行的值按旧结果盖掉。
+        // 那一行的值按旧结果盖掉。收起态与回灌解耦：一次行内保存不该把四行的
+        // 显隐卡在旧状态上，所以 applyClaudeTierUi 放在守卫之外。
         if (!anyClaudeTierSaving()) {
           claudeTierMappings = { ...(d.settings?.claudeTierMappings ?? {}) };
-          applyClaudeTierUi();
         }
+        applyClaudeTierUi();
       } catch {}
     }
 
@@ -3102,22 +3113,27 @@ async function api(method, path, body) {
     }
 
     // ── Claude Code 档位映射 ────────────────────────────────────────────
-    // 四行「不接管」下拉：值 = anyswitch 托管模型的完整模型名，「不接管」= 该档位
+    // 四行「可输入的下拉」：值 = anyswitch 托管模型的完整模型名，留空 = 该档位
     // 不接管。逐行独立「即改即存 + 失败回滚」，与本页其余设置项同一语义；中继侧
-    // 每次请求都重读设置，所以保存即生效，不需要重启任何端点。
+    // 每次请求都重读设置，所以保存即生效，不需要重启任何端点。四行的显隐由
+    // 「接管默认模型」总开关驱动：关 = 收起且映射暂停生效（服务端返回空映射），
+    // 已填的值保留。
     const claudeTierInputs = {
       sonnet: $("claudeTierSonnetInput"),
       opus: $("claudeTierOpusInput"),
       fable: $("claudeTierFableInput"),
       haiku: $("claudeTierHaikuInput"),
     };
+    const claudeTierRows = $("claudeTierRows");
     let claudeTierMappings = {};
+    let claudeTierEnabled = true;
     // 逐档各自的在存标记：一行在存时既挡住轮询回灌（不覆盖用户正在编辑的那行），
     // 也不牵连另一行——单一布尔会把并发的那次保存静默丢掉。
     const claudeTierSaving = { sonnet: false, opus: false, fable: false, haiku: false };
     const anyClaudeTierSaving = () => Object.values(claudeTierSaving).some(Boolean);
 
     function applyClaudeTierUi() {
+      if (claudeTierRows) claudeTierRows.hidden = !claudeTierEnabled;
       for (const [tier, input] of Object.entries(claudeTierInputs)) {
         if (!input) continue;
         if (claudeTierSaving[tier]) continue;
@@ -3125,14 +3141,14 @@ async function api(method, path, body) {
       }
     }
 
-    // 下拉选项 = 中继此刻真的认得的模型全集 + 首项「不接管」：与「自动路由」同源
-    // 的 storeRows()（号池按合并行出、成员行不重复出现），成员并集即该池的可见
-    // 目录；值就是中继的完整模型名。渠道增删后重进「通用」即随 store state 一起
-    // 刷新。已存的值不在候选集时（渠道已删/模型下架）补一项「已失效」如实显示——
-    // 与链编辑器「已保存但目录里消失的模型补入选项」同一口径。
+    // 下拉选项 = 中继此刻真的认得的模型全集：与「自动路由」同源的 storeRows()
+    // （号池按合并行出、成员行不重复出现），成员并集即该池的可见目录；值就是
+    // 中继的完整模型名。渠道增删后重进「通用」即随 store state 一起刷新。
     function renderClaudeTierOptions() {
+      const list = $("claudeTierModelOptions");
+      if (!list) return;
       const seen = new Set();
-      const base = [`<option value="">不接管</option>`];
+      const options = [];
       for (const row of storeRows()) {
         const label = row.kind === "pool" ? (row.displayName || row.id) : ((row.p && row.p.displayName) || row.id);
         const models = {};
@@ -3146,18 +3162,15 @@ async function api(method, path, body) {
           if (seen.has(wireId)) continue;
           seen.add(wireId);
           const shown = (models[modelId] && models[modelId].displayName) || modelId;
-          base.push(`<option value="${esc(wireId)}">${esc(`[${label}] ${shown}`)}</option>`);
+          options.push(`<option value="${esc(wireId)}">${esc(`[${label}] ${shown}`)}</option>`);
         }
       }
-      for (const [tier, input] of Object.entries(claudeTierInputs)) {
-        if (!input) continue;
-        const options = base.slice();
-        const current = claudeTierMappings[tier] ?? "";
-        if (current && !seen.has(current)) {
-          options.push(`<option value="${esc(current)}">已失效，请重选</option>`);
-        }
-        input.innerHTML = options.join("");
-      }
+      list.innerHTML = options.join("");
+      // 重画选项后必须按已存映射把四行回填一遍：进「通用」子页每次都重画，
+      // 而重画会把控件内容重建（select 形态下直接跳回首项），不回填就会出现
+      // 「切页回来显示与磁盘真值不符」——正是这个卡修掉的掉回默认问题。
+      // 正在保存的那一行按 claudeTierSaving 跳过，不会被旧选项盖掉。
+      applyClaudeTierUi();
     }
 
     async function persistClaudeTier(tier, raw) {
@@ -3196,6 +3209,12 @@ async function api(method, path, body) {
     for (const [tier, input] of Object.entries(claudeTierInputs)) {
       if (!input) continue;
       input.onchange = () => persistClaudeTier(tier, input.value);
+      input.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          persistClaudeTier(tier, input.value);
+        }
+      };
     }
 
     async function persistKeepAliveRetries(raw) {
@@ -3292,6 +3311,72 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.injectEffort = false;
           injectEffortToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 以 bypassPermissions 启动：只改「下一次从 Anyswitch 拉起 Claude Code」
+    // 的启动参数，已在跑的会话不受影响，也不需要重启任何常驻进程。
+    if (claudeBypassPermissionsToggle) {
+      claudeBypassPermissionsToggle.onchange = async () => {
+        if (settingsSaving.claudeBypassPermissions) {
+          claudeBypassPermissionsToggle.checked = !claudeBypassPermissionsToggle.checked;
+          return;
+        }
+        const next = claudeBypassPermissionsToggle.checked;
+        settingsSaving.claudeBypassPermissions = true;
+        settingsLoadGen += 1;
+        claudeBypassPermissionsToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { claudeBypassPermissions: next });
+          if (!d.ok) {
+            claudeBypassPermissionsToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.claudeBypassPermissions;
+            if (typeof saved === "boolean") claudeBypassPermissionsToggle.checked = saved;
+            toast(next ? "已开启 bypassPermissions 启动" : "已关闭 bypassPermissions 启动");
+          }
+        } catch (e) {
+          claudeBypassPermissionsToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.claudeBypassPermissions = false;
+          claudeBypassPermissionsToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 接管默认模型总开关：关 = 四行收起 + 映射暂停生效（服务端 loadSettings
+    // 直接返回空映射），已填的值保留不清；开 = 四行展开、按已存值显示。
+    if (claudeTierEnabledToggle) {
+      claudeTierEnabledToggle.onchange = async () => {
+        if (settingsSaving.claudeTierEnabled) {
+          claudeTierEnabledToggle.checked = !claudeTierEnabledToggle.checked;
+          return;
+        }
+        const next = claudeTierEnabledToggle.checked;
+        settingsSaving.claudeTierEnabled = true;
+        settingsLoadGen += 1;
+        claudeTierEnabledToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { claudeTierMappingsEnabled: next });
+          if (!d.ok) {
+            claudeTierEnabledToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.claudeTierMappingsEnabled;
+            if (typeof saved === "boolean") claudeTierEnabledToggle.checked = saved;
+            claudeTierEnabled = saved !== false;
+            applyClaudeTierUi();
+            toast(next ? "已开启默认模型接管" : "已暂停默认模型接管");
+          }
+        } catch (e) {
+          claudeTierEnabledToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.claudeTierEnabled = false;
+          claudeTierEnabledToggle.removeAttribute("aria-busy");
         }
       };
     }

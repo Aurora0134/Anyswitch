@@ -265,6 +265,25 @@ test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动
   }
 });
 
+test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissions，关 = 原样", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const off = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base });
+    assert.equal(off.launch.args.length, 3, "开关关着（默认）不多出参数");
+    const on = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
+    assert.deepEqual(on.launch.args.slice(3), ["--dangerously-skip-permissions"]);
+    // 开关只属于 claude：其余端点不该因它多出任何参数。
+    for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
+      if (agentId === "claude") continue;
+      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
+      assert.equal(launch.launch.args.length, agentId === "dsh" ? 5 : 3, `${agentId} 不受 bypassPermissions 开关影响`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
