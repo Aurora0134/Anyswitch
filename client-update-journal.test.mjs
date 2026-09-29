@@ -294,3 +294,101 @@ test("claude 官渠腿成功句带元数据版本，检测不到桌面版本也�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function dshHarness(dir, { lifecycleResult, align, afterVersion = "0.1.7-rc.2", clientId = "dsh" }) {
+  return executeClientUpdate({
+    runId: running().runId,
+    journalDir: dir,
+    runLifecycle: async () => lifecycleResult ?? { ok: true, output: "" },
+    environment: {
+      async getState() {
+        return { clients: [{ id: clientId, installations: [{ version: afterVersion, path: "C:/fixture/dsh", issue: null }] }] };
+      },
+    },
+    releases: { async getClientLatest() { return { state: "ok", version: afterVersion }; } },
+    compareVersions: (left, right) => (left === right ? 0 : -1),
+    alive: () => true,
+    now: () => "2026-09-28T00:02:00.000Z",
+    alignDshTui: align,
+  });
+}
+
+test("dsh 更新收尾触发插件对齐：成功子句进 message，dsh 版本用装完重读的那份", async () => {
+  const dir = scratch();
+  try {
+    writeClientUpdateRun(dir, running({ clientId: "dsh", beforeVersion: "0.1.5-rc.2" }));
+    const seen = [];
+    const result = await dshHarness(dir, {
+      align: async (options) => {
+        seen.push(options);
+        return { state: "updated", profiles: [{ profile: "dsh-tui", state: "updated", from: "0.10.2", to: "0.11.1" }] };
+      },
+    });
+    assert.equal(result.outcome, "updated");
+    assert.match(result.message, /终端插件 dsh-tui 已一并更新到 0\.11\.1/);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].dshVersion, "0.1.7-rc.2", "对齐判定基于装完重读的 dsh 版本，不是面板登记的前值");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("插件对齐失败如实附句并留 detail，但不翻转 CLI 更新结果", async () => {
+  const dir = scratch();
+  try {
+    writeClientUpdateRun(dir, running({ clientId: "dsh", beforeVersion: "0.1.7-rc.2" }));
+    const result = await dshHarness(dir, {
+      align: async () => { throw new Error("替身爆炸"); },
+    });
+    assert.equal(result.outcome, "updated");
+    assert.match(result.message, /终端插件 dsh-tui 自动更新未完成，可稍后手工更新/);
+
+    writeClientUpdateRun(dir, running({ clientId: "dsh" }));
+    const withOutput = await dshHarness(dir, {
+      align: async () => ({ state: "failed", profiles: [{ profile: "dsh-tui", state: "failed", output: "pnpm broke" }] }),
+      lifecycleResult: { ok: true, output: "" },
+    });
+    assert.match(withOutput.message, /自动更新未完成/);
+    assert.match(withOutput.detail ?? "", /pnpm broke/, "失败输出进 detail 供排查");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("插件对齐其余状态各归其句，无对齐对象时保持沉默", async () => {
+  const cases = [
+    [{ state: "current", profiles: [] }, /终端插件 dsh-tui 已是最新适配版本/],
+    [{ state: "incompatible-newer", profiles: [] }, /终端插件 dsh-tui 有新版本，但尚未适配当前 DSH 版本/],
+    [{ state: "none", profiles: [] }, null],
+    [{ state: "unknown", profiles: [] }, null],
+  ];
+  for (const [alignResult, pattern] of cases) {
+    const dir = scratch();
+    try {
+      writeClientUpdateRun(dir, running({ clientId: "dsh" }));
+      const result = await dshHarness(dir, { align: async () => alignResult });
+      if (pattern) assert.match(result.message, pattern);
+      else assert.ok(!result.message.includes("dsh-tui"), `状态 ${alignResult.state} 不该提插件`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("非 dsh 客户端与 dsh 命令失败都不触发插件对齐", async () => {
+  const dir = scratch();
+  try {
+    let calls = 0;
+    const align = async () => { calls++; return { state: "none", profiles: [] }; };
+    writeClientUpdateRun(dir, running({ clientId: "claude", beforeVersion: "1.0.0" }));
+    await dshHarness(dir, { clientId: "claude", align, afterVersion: "1.0.0" });
+    assert.equal(calls, 0, "claude 不做 dsh 插件对齐");
+
+    writeClientUpdateRun(dir, running({ clientId: "dsh" }));
+    const result = await dshHarness(dir, { align, lifecycleResult: { ok: false, output: "boom" } });
+    assert.equal(result.outcome, "failed");
+    assert.equal(calls, 0, "CLI 腿失败时不动 profile");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
