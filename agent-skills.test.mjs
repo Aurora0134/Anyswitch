@@ -2,7 +2,7 @@ import test, { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { cpSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import {
@@ -1644,6 +1644,27 @@ describe("pickFolder", () => {
       const script = ps.args[ps.args.indexOf("-Command") + 1];
       assert.ok(script.includes("Pick('it''s a title', $true)"), "C# chain title embedded and escaped");
       assert.ok(script.includes("$fbd.Description = 'it''s a title'"), "WinForms fallback title embedded");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("选择框不借用前台窗口做属主（借了会让框弹不出来或自行取消）", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const { base, csc64 } = pickerFixture(dir);
+      const { spawnFn } = fakeSpawn(pickerHandler(csc64, "CANCELLED\r\n"));
+      await pickFolder({ spawnFn, base });
+      const cs = readFileSync(join(base.LOCALAPPDATA, "Anyswitch", "bin", "folder-picker.cs"), "utf8");
+      // 实测：点击时前台窗口属于浏览器（另一个进程），而 picker 自己没有窗口可借。
+      // 把外来窗口交给 IFileDialog 会让 shell 拒绝：Show 要么 E_FAIL（框根本不出现），
+      // 要么几秒后返回 ERROR_CANCELLED（框闪一下就没，用户没碰过它）。两种都会让
+      // 整个导出功能不可用，所以必须无属主显示。
+      assert.ok(/Show\(\s*IntPtr\.Zero\s*\)/.test(cs), "应以无属主显示选择框");
+      assert.ok(
+        !/Show\(\s*GetForegroundWindow\(\)\s*\)/.test(cs),
+        "不得把点击时的前台窗口（外来进程）交给 IFileDialog 做属主",
+      );
     } finally {
       cleanup();
     }
