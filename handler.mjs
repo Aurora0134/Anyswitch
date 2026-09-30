@@ -31,6 +31,11 @@ import {
   resolveTierEntry,
 } from "./claude-tier-mapping.mjs";
 import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
+import {
+  buildDesktopCatalogView,
+  resolveDesktopAlias,
+  passesDesktopPickerFilter,
+} from "./desktop-route-alias.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 import { validateStore } from "./store-schema.mjs";
@@ -250,20 +255,13 @@ export function createHandler(deps) {
   // (per-launch relay: the launched agent; resident relay: UA detection) pass
   // it so the catalog can offer the endpoint's route chain as the AUTO_MODEL
   // virtual model. Unidentifiable callers get the plain wire catalog.
-  async function handleModels(headers, agentId) {
-    const auth = authorize(headers);
-    if (!auth.ok) return { status: auth.status, body: auth.body };
-
-    const loaded = loadValidStore();
-    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
-
-    let entries;
-    try {
-      entries = buildWireCatalog(loaded.store);
-    } catch (error) {
-      // A wire ID collision fails the WHOLE catalog. No partial output.
-      return { status: 500, body: errorBody("api_error", error.message) };
-    }
+  // The full model catalog one /v1/models response is built from: the wire
+  // catalog (with context windows), the requesting endpoint's "auto" virtual
+  // model, and every enabled virtual model. Shared by handleModels and the
+  // inbound alias resolution so both sides derive the SAME alias table.
+  // Throws on a wire ID collision — callers turn that into a 500.
+  function modelCatalogEntries(loaded, agentId) {
+    const entries = buildWireCatalog(loaded.store);
 
     // 自动路由: an endpoint with a configured chain can ask for the virtual
     // model "auto". It is deliberately not a wire id (no provider carries it)
@@ -294,10 +292,99 @@ export function createHandler(deps) {
         displayName: `[Anyswitch] ${vm.name}`,
       });
     }
+    return entries;
+  }
+
+  // Claude Desktop 的目录请求判据：3p profile 注入的 x-agent-id 头（CLI 不发
+  // 这个头——它的归属靠 UA 嗅探）叠加 UA 不是 claude-cli。两个条件都留着：
+  // 任何单独一条都可能漂移（将来 CLI 若开始发同名头，或桌面换 UA）。
+  function isDesktopCatalogRequest(headers) {
+    const explicit =
+      typeof headers?.["x-agent-id"] === "string" ? headers["x-agent-id"].trim().toLowerCase() : "";
+    const ua = (headers?.["user-agent"] || "").toLowerCase();
+    return explicit === "claude" && !ua.includes("claude-cli");
+  }
+
+  async function handleModels(headers, agentId) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { status: auth.status, body: auth.body };
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
+
+    let entries;
+    try {
+      entries = modelCatalogEntries(loaded, agentId);
+    } catch (error) {
+      // A wire ID collision fails the WHOLE catalog. No partial output.
+      return { status: 500, body: errorBody("api_error", error.message) };
+    }
+
+    // 桌面视图：Claude Desktop 的拾取器按官方 3p 品牌过滤只收长得像 Anthropic
+    // 模型的 id，过不了的黑名单条目换成确定性路由别名（显示名不变，请求回来
+    // 由 normalizeInboundModel 换回真实 wire id）。CLI 与其他端点拿原目录。
+    if (isDesktopCatalogRequest(headers)) {
+      const view = buildDesktopCatalogView(entries);
+      logger?.info?.(
+        `[desktop-catalog] 桌面视图目录 ${view.entries.length} 条（别名 ${view.aliases.size} 条，UA="${(headers["user-agent"] || "").slice(0, 80)}"）`,
+      );
+      entries = view.entries;
+    }
 
     // Bind this discovery result to the endpoint each channel resolves to.
     recordGeneration(providerRoutingShapes(loaded.store));
     return { status: 200, body: buildModelsResponse(entries) };
+  }
+
+  // Inbound model normalization — the FIRST plan in the caller, ahead of the
+  // 档位映射 takeover, the pool and chain plans and the tracker opening the
+  // request. Rewrites `body.model` in place so pool fan-out, chain routing,
+  // the journal row, model stability and the response echo all carry the real
+  // destination, exactly like planTierEntryMessages does:
+  //   1. strip a trailing "[1m]" variant marker: both Claude clients append it
+  //      to the model id when the 1M-context variant is picked (the engine
+  //      derives its 1M window from the marker), and the real model is the
+  //      bare id;
+  //   2. resolve a desktop route alias back to the real wire id: the desktop
+  //      picker only lists Claude-shaped ids, so the catalog serves
+  //      blocklisted models under deterministic aliases.
+  // No-op for every model the strict rules already accept.
+  async function normalizeInboundModel(headers, body) {
+    const auth = authorize(headers);
+    if (!auth.ok) return null;
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+    if (typeof body.model !== "string" || body.model.length === 0) return null;
+
+    let model = body.model;
+    const changes = [];
+    if (model.endsWith("[1m]") && model.length > "[1m]".length) {
+      model = model.slice(0, -"[1m]".length);
+      changes.push("1M 变体标记");
+    }
+    // Only a single-segment "anthropic/<code>" can be an alias — real wire ids
+    // always carry a provider segment, so they skip the store load entirely.
+    if (model.startsWith("anthropic/") && !model.slice("anthropic/".length).includes("/")) {
+      const loaded = loadValidStore();
+      if (loaded.ok) {
+        let real = null;
+        try {
+          real = resolveDesktopAlias(model, modelCatalogEntries(loaded, undefined));
+        } catch {
+          real = null;
+        }
+        if (real !== null) {
+          model = real;
+          changes.push("桌面路由别名");
+        }
+      }
+    }
+    if (changes.length === 0) return null;
+
+    body.model = model;
+    logger?.info?.(
+      `入站模型归一："${changes.join(" + ")}" 归一为真实模型 "${model}"`,
+    );
+    return model;
   }
 
   // options.signal  — the client abort signal, forwarded to the upstream call.
@@ -753,5 +840,14 @@ export function createHandler(deps) {
     };
   }
 
-  return { authorize, handleModels, handleMessages, planTierEntryMessages, planPoolMessages, planChainMessages, chainState };
+  return {
+    authorize,
+    handleModels,
+    handleMessages,
+    normalizeInboundModel,
+    planTierEntryMessages,
+    planPoolMessages,
+    planChainMessages,
+    chainState,
+  };
 }

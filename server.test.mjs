@@ -87,9 +87,10 @@ test("discovery over HTTP returns wire ids and requires the token", async () => 
     });
     assert.equal(res.status, 200);
     const body = await res.json();
+    // claude-opus-5 命中 1M 档：主行 + [1m] 伴生行（Claude 客户端的 1M 变体通道）。
     assert.deepEqual(
       body.data.map((m) => m.id),
-      ["anthropic/poke-api/claude-opus-5"],
+      ["anthropic/poke-api/claude-opus-5", "anthropic/poke-api/claude-opus-5[1m]"],
     );
   });
 });

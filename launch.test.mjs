@@ -550,10 +550,13 @@ test("startProductionRelay serves discovery and messages against a temp store", 
   });
   assert.equal(discovery.status, 200);
   const catalog = await discovery.json();
+  // model-one 无 contextWindow 元数据，走 1M 兜底档：主行 + [1m] 伴生行。
   assert.deepEqual(
     catalog.data.map((entry) => entry.id),
-    ["anthropic/alpha/model-one"],
+    ["anthropic/alpha/model-one", "anthropic/alpha/model-one[1m]"],
   );
+  assert.equal(catalog.data[1].display_name, `${catalog.data[0].display_name} 1M`);
+  assert.equal(catalog.data[1].max_input_tokens, 1_000_000);
 
   const completion = await fetch(`${base}/v1/messages`, {
     method: "POST",

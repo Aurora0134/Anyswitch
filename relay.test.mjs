@@ -450,11 +450,27 @@ test("openAIToAnthropic without reasoning emits no thinking block", () => {
   assert.deepEqual(out.content, [{ type: "text", text: "答" }]);
 });
 
-test("buildModelsResponse emits wire ids only", () => {
+test("buildModelsResponse emits wire ids only, 1M rows gain a [1m] companion", () => {
   const body = buildModelsResponse(buildWireCatalog(syntheticStore()));
-  assert.equal(body.data.length, 3);
+  // 三模型全部命中 1M 档（claude-opus / claude-sonnet-5 档位规则，deepseek
+  // 未命中落 1M 兜底），各带一条 [1m] 伴生行——Claude 系客户端的 1M 变体通道。
+  assert.equal(body.data.length, 6);
   assert.ok(body.data.every((m) => m.id.startsWith("anthropic/")));
   assert.equal(body.has_more, false);
+  const opus1m = body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5[1m]");
+  assert.equal(opus1m.display_name, "[poke-api] Claude Opus 5 1M");
+  assert.equal(opus1m.max_input_tokens, 1_000_000);
+  assert.equal(body.first_id, body.data[0].id);
+  assert.equal(body.last_id, body.data[body.data.length - 1].id);
+});
+
+test("store 真值 contextWindow 盖过档位兜底，sub-1M 行不带 [1m] 伴生", () => {
+  const store = syntheticStore();
+  store.providers["poke-api"].models["claude-opus-5"] = { displayName: "Claude Opus 5", contextWindow: 128_000 };
+  const body = buildModelsResponse(buildWireCatalog(store));
+  const opus = body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5");
+  assert.equal(opus.max_input_tokens, 128_000);
+  assert.equal(body.data.find((m) => m.id === "anthropic/poke-api/claude-opus-5[1m]"), undefined);
 });
 
 // ---------- auth ----------
@@ -507,6 +523,80 @@ test("discovery also requires the token", async () => {
   const handler = createHandler(makeDeps());
   assert.equal((await handler.handleModels({})).status, 401);
   assert.equal((await handler.handleModels(AUTH)).status, 200);
+});
+
+// ---------- Claude Desktop catalog view + inbound model normalization ----------
+
+// Claude Desktop 的拾取器按官方 3p 品牌黑名单只收长得像 Anthropic 模型的 id。
+// 撞黑名单的条目在目录响应里换成确定性路由别名（显示名不变），请求回来由
+// normalizeInboundModel 反解回真实 wire id；CLI 与其他端点拿原目录。
+function desktopStore() {
+  const store = syntheticStore();
+  store.providers["poke-api"].models["kimi-k3"] = { displayName: "Kimi K3" };
+  return store;
+}
+
+const DESKTOP_HEADERS = { authorization: TOKEN, "x-agent-id": "claude", "user-agent": "Claude/2.99 Electron/37" };
+const CLI_HEADERS = { authorization: TOKEN, "user-agent": "claude-cli/2.1.285 (Windows)" };
+
+test("handleModels 桌面请求发别名视图：撞黑名单的条目换别名，显示名照旧", async () => {
+  const handler = createHandler(makeDeps({ store: desktopStore() }));
+
+  const desktop = await handler.handleModels(DESKTOP_HEADERS, "claude");
+  assert.equal(desktop.status, 200);
+  const kimiRow = desktop.body.data.find((m) => m.display_name === "[poke-api] Kimi K3");
+  assert.match(kimiRow.id, /^anthropic\/[a-z0-9]{6}$/, "kimi 撞品牌黑名单：确定性单段别名");
+  assert.equal(desktop.body.data.find((m) => m.id === "anthropic/poke-api/kimi-k3"), undefined, "原 wire id 不出现在桌面视图");
+  assert.equal(desktop.body.data.find((m) => m.id === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro"), undefined);
+  assert.ok(desktop.body.data.some((m) => m.id === `${kimiRow.id}[1m]`), "1M 伴生行骑别名 id，同样过拾取器过滤");
+  assert.ok(desktop.body.data.some((m) => m.id === "anthropic/poke-api/claude-opus-5"), "过滤通过的条目原样保留");
+
+  const cli = await handler.handleModels(CLI_HEADERS, "claude");
+  assert.equal(cli.status, 200);
+  assert.ok(cli.body.data.some((m) => m.id === "anthropic/poke-api/kimi-k3"), "CLI 拿原 wire id 目录");
+  assert.ok(cli.body.data.some((m) => m.id === "anthropic/nvidia-nim/deepseek-ai/deepseek-v4-pro"));
+
+  // 判据双保险：CLI 即便开始发 x-agent-id 头，claude-cli 的 UA 仍把它排除在桌面视图外。
+  const cliWithHeader = await handler.handleModels({ ...CLI_HEADERS, "x-agent-id": "claude" }, "claude");
+  assert.ok(cliWithHeader.body.data.some((m) => m.id === "anthropic/poke-api/kimi-k3"));
+});
+
+test("normalizeInboundModel 剥 [1m] 变体标记并反解桌面别名，回程回显归一后的 id", async () => {
+  const handler = createHandler(makeDeps({ store: desktopStore() }));
+
+  // CLI 选中 1M 行：模型名带 [1m] 标记，真实模型是裸 id（服务层先归一再路由）。
+  const oneM = messageBody("anthropic/poke-api/kimi-k3[1m]");
+  assert.equal(await handler.normalizeInboundModel(CLI_HEADERS, oneM), "anthropic/poke-api/kimi-k3");
+  assert.equal(oneM.model, "anthropic/poke-api/kimi-k3");
+  const out = await handler.handleMessages(CLI_HEADERS, oneM);
+  assert.equal(out.status, 200);
+  assert.equal(out.body.model, "anthropic/poke-api/kimi-k3", "回程回显归一后的 wire id");
+
+  // 桌面选中别名行（1M 伴生行也骑别名 id）：变体标记与别名一步归一。
+  const desktop = await handler.handleModels(DESKTOP_HEADERS, "claude");
+  const kimiRow = desktop.body.data.find((m) => m.display_name === "[poke-api] Kimi K3");
+  const aliased = messageBody(`${kimiRow.id}[1m]`);
+  assert.equal(await handler.normalizeInboundModel(DESKTOP_HEADERS, aliased), "anthropic/poke-api/kimi-k3");
+  const aliasOut = await handler.handleMessages(DESKTOP_HEADERS, aliased);
+  assert.equal(aliasOut.status, 200);
+  assert.equal(aliasOut.body.model, "anthropic/poke-api/kimi-k3");
+
+  // 不需要归一的模型：返回 null 且 body 原样（裸别名查无、真 wire id、档位名）。
+  const noAlias = messageBody("anthropic/zzz999");
+  assert.equal(await handler.normalizeInboundModel(AUTH, noAlias), null);
+  assert.equal(noAlias.model, "anthropic/zzz999");
+  const plain = messageBody("anthropic/poke-api/claude-opus-5");
+  assert.equal(await handler.normalizeInboundModel(AUTH, plain), null);
+  const tier = messageBody("claude-sonnet-5");
+  assert.equal(await handler.normalizeInboundModel(AUTH, tier), null, "档位名留给档位接管处理");
+
+  // 未授权或坏 body：不归一也不抛。
+  const noAuth = messageBody("anthropic/poke-api/kimi-k3[1m]");
+  assert.equal(await handler.normalizeInboundModel({}, noAuth), null);
+  assert.equal(noAuth.model, "anthropic/poke-api/kimi-k3[1m]");
+  for (const bad of [null, "str", [1], {}, { model: 42 }]) {
+    assert.equal(await handler.normalizeInboundModel(AUTH, bad), null);
+  }
 });
 
 // ---------- error surface ----------

@@ -17,7 +17,7 @@ const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 // under one temp root (agent-discovery's overrides all accept absolute paths),
 // ComSpec points at a fake cmd.exe, and no store.json exists unless a test
 // writes one.
-function fakeBase(root, { withStore = null, claudeSmallFast = undefined } = {}) {
+function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudePackageVersion = undefined } = {}) {
   const exe = (name) => {
     const path = join(root, "bin", name);
     mkdirSync(join(root, "bin"), { recursive: true });
@@ -39,6 +39,12 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined } = {}) 
     USERPROFILE: join(root, "user"),
     ...(claudeSmallFast === undefined ? {} : { ANTHROPIC_SMALL_FAST_MODEL: claudeSmallFast }),
   };
+  // claude 版本文件就在 exe 的上一级（npm-global 布局
+  // <npm>/node_modules/@anthropic-ai/claude-code/bin/claude.exe 旁的
+  // package.json）；fake 布局里 root/bin/claude.exe 对应 root/package.json。
+  if (claudePackageVersion !== undefined) {
+    writeFileSync(join(root, "package.json"), JSON.stringify({ version: claudePackageVersion }));
+  }
   mkdirSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1"), { recursive: true });
   writeFileSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"), "");
   mkdirSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
@@ -74,8 +80,42 @@ test("claude 注入三件套 + NO_PROXY，上游真键标删，discovery 不注�
     assert.equal(env.NO_PROXY, LOOPBACK_NO_PROXY);
     assert.equal(env.no_proxy, LOOPBACK_NO_PROXY);
     assert.equal(env.ANTHROPIC_API_KEY, null, "上游真钥以 null 标删，不随继承环境带进 PTY");
-    assert.equal("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in env, false, "终端流不探版本，discovery 恒不注入");
+    assert.equal(
+      "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in env,
+      false,
+      "fake 布局没有 claude 的 package.json，版本读不到，discovery 保持关闭",
+    );
     assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/your-provider/your-small-fast-model", "无 store 时落 launcher 占位 wire id");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("claude discovery 版本门：装的是已验证 2.1.x 族才注入发现开关", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    // 已验证族内的 patch 版本：开。面板终端 /model 拉常驻 relay 的 /v1/models。
+    const inFamily = buildAgentSessionEnv({
+      agentId: "claude", token: TOKEN, base: fakeBase(root, { claudePackageVersion: "2.1.220" }),
+    });
+    assert.equal(inFamily.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, "1", "2.1.220 在已验证 2.1.x 族内");
+
+    const familyPatch = buildAgentSessionEnv({
+      agentId: "claude", token: TOKEN, base: fakeBase(root, { claudePackageVersion: "2.1.9" }),
+    });
+    assert.equal(familyPatch.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, "1", "族内任意 patch 同样开：patch 不改发现过滤行为");
+
+    // 族外大/小版本：门关——发现过滤行为未验证，不能承诺拉到的清单可用。
+    const outOfFamily = buildAgentSessionEnv({
+      agentId: "claude", token: TOKEN, base: fakeBase(root, { claudePackageVersion: "2.2.0" }),
+    });
+    assert.equal("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in outOfFamily, false, "2.2.x 未验证，discovery 不注入");
+
+    // 版本字段非字符串（读得到 package.json 但 version 不是合法形态）同样关。
+    const malformed = buildAgentSessionEnv({
+      agentId: "claude", token: TOKEN, base: fakeBase(root, { claudePackageVersion: null }),
+    });
+    assert.equal("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in malformed, false, "version 非字符串按未验证处理");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

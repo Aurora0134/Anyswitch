@@ -34,6 +34,7 @@
 
 import { resolvePool, poolModelsUnion } from "./pool-routing.mjs";
 import { deriveVisibleChannels } from "./pool-providers.mjs";
+import { fallbackContextWindow } from "./context-fallback.mjs";
 
 export const WIRE_PREFIX = "anthropic/";
 
@@ -215,7 +216,7 @@ export function buildWireCatalog(store) {
   const entries = [];
   const seen = new Map();
 
-  function emit(providerId, modelId, modelLabel) {
+  function emit(providerId, modelId, modelLabel, contextWindow) {
     const wireId = packWireId(providerId, modelId);
     if (seen.has(wireId)) {
       throw new Error(
@@ -228,12 +229,20 @@ export function buildWireCatalog(store) {
       providerId,
       modelId,
       displayName: `[${providerId}] ${modelLabel}`,
+      // 上下文库三级链的目录侧出口：与 codex/zcode 等七个写手同一优先级
+      // （store 真值优先，档位关键词表兜底，未命中 1M）——目录行把它交给
+      // 客户端的模型元数据字段，Claude 系客户端据此派生 1M 变体。
+      contextWindow,
     });
   }
 
   for (const [providerId, channel] of Object.entries(channels)) {
     for (const [modelId, model] of Object.entries(channel?.models ?? {})) {
-      emit(providerId, modelId, model?.displayName ?? modelId);
+      const contextWindow =
+        Number.isInteger(model?.contextWindow) && model.contextWindow > 0
+          ? model.contextWindow
+          : fallbackContextWindow(modelId);
+      emit(providerId, modelId, model?.displayName ?? modelId, contextWindow);
     }
   }
   return entries;

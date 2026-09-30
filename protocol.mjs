@@ -274,16 +274,40 @@ export function openAIToAnthropic(response, wireId) {
 // ---------- discovery ----------
 
 // GET /v1/models payload. Non-secret metadata only.
+//
+// `max_input_tokens` carries the context library's window so Claude clients
+// can derive their 1M variants: the desktop reads the field (>= 1e6 flags the
+// entry), and both clients append a "[1m]" variant id when that variant is
+// picked — which the engine itself maps to a 1M window. The companion row
+// ("<id>[1m]") is the same convention listed gateways are documented to use;
+// the desktop folds it into the base entry's 1M variant, the CLI lists it as
+// its own row.
+const ONE_MILLION_TOKENS = 1_000_000;
+
 export function buildModelsResponse(entries) {
-  return {
-    data: entries.map((entry) => ({
+  const data = [];
+  for (const entry of entries) {
+    const row = {
       type: "model",
       id: entry.wireId,
       display_name: entry.displayName,
       created_at: "2026-01-01T00:00:00Z",
-    })),
+    };
+    const window = Number.isInteger(entry.contextWindow) && entry.contextWindow > 0 ? entry.contextWindow : null;
+    if (window !== null) {
+      row.max_input_tokens = window;
+      if (window >= ONE_MILLION_TOKENS) {
+        data.push(row);
+        data.push({ ...row, id: `${entry.wireId}[1m]`, display_name: `${entry.displayName} 1M` });
+        continue;
+      }
+    }
+    data.push(row);
+  }
+  return {
+    data,
     has_more: false,
-    first_id: entries.length > 0 ? entries[0].wireId : null,
-    last_id: entries.length > 0 ? entries[entries.length - 1].wireId : null,
+    first_id: data.length > 0 ? data[0].id : null,
+    last_id: data.length > 0 ? data[data.length - 1].id : null,
   };
 }

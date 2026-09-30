@@ -127,6 +127,9 @@ export function createRelayServer(deps) {
           // attribution below all see the destination, never the entry name.
           // No-op for every other endpoint and for any model the strict rules
           // already resolve.
+          // 入站模型归一（[1m] 变体标记 + 桌面路由别名）先于档位接管运行：
+          // 归一后的 body.model 才是档位接管、池/链规划、记账与回显看到的模型。
+          await handler.normalizeInboundModel(req.headers, body);
           await handler.planTierEntryMessages(req.headers, body, agentId);
 
           // Pool routing: a body.model of anthropic/<pool-id>/<model>
