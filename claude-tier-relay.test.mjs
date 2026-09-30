@@ -40,6 +40,7 @@ function syntheticStore() {
         models: {
           "flash-lite": { displayName: "Flash Lite" },
           "claude-sonnet-dup": { displayName: "Dup Sonnet (B)" },
+          "glm-twin": { displayName: "GLM Twin (B)" },
         },
       },
       "host-c": {
@@ -48,9 +49,13 @@ function syntheticStore() {
         protocol: "openai-compatible",
         credentialFile: "host-c.dpapi",
         models: {
-          // Same model name as host-b: ambiguous on purpose, so the strict path
-          // owns it and no tier takeover may.
+          // Same model name as host-b: ambiguous on purpose. It is Claude's
+          // default-model shape, so a mapped tier takes it over; unmapped, the
+          // refusal points at the row.
           "claude-sonnet-dup": { displayName: "Dup Sonnet (C)" },
+          // Ambiguous like the one above but not a tier entry: no takeover may
+          // touch it, the plain multiple-provider refusal owns it.
+          "glm-twin": { displayName: "GLM Twin (C)" },
           // Unique to this provider, and deliberately named like a tier: the
           // strict unqualified scan must resolve it before the map is consulted.
           "solo-sonnet-mini": { displayName: "Solo Sonnet Mini" },
@@ -158,6 +163,19 @@ describe("handler: takeover rewrites the name before routing", () => {
     assert.match(takeover[0].message, /Opus/);
   });
 
+  it("takes over a claude-family name that is ambiguous across channels", async () => {
+    // The default-model shape Claude actually sends: an official id several
+    // channels carry. The sonnet row is the operator's disambiguation of it,
+    // never a guess between the channels that happen to have the name.
+    const { handler, sent } = makeDeps();
+    const body = messagesBody("claude-sonnet-dup");
+    const out = await relayMessages(handler, body, "claude");
+
+    assert.equal(out.status, 200);
+    assert.equal(sent[0].model, "kimi-k3", "the mapped destination, never a guessed channel");
+    assert.equal(out.body.model, "anthropic/host-a/kimi-k3");
+  });
+
   it("takes nothing over for a name the strict rules already resolve", async () => {
     const { handler, sent, logs } = makeDeps();
     // Registered on exactly one provider, and its name carries a tier word:
@@ -216,10 +234,21 @@ describe("handler: every refusal stays a refusal", () => {
     assert.equal(sent.length, 0);
     assert.match(out.body.error.message, /is not registered in this relay/);
 
-    // Ambiguous across channels: several real models, only the operator knows.
-    const ambiguous = await relayMessages(handler, messagesBody("claude-sonnet-dup"), "claude");
+    // Ambiguous across channels and not a tier entry: several real models,
+    // only the operator knows — the plain refusal, no takeover vocabulary.
+    const ambiguous = await relayMessages(handler, messagesBody("glm-twin"), "claude");
     assert.equal(ambiguous.status, 400);
     assert.match(ambiguous.body.error.message, /multiple relay providers/);
+  });
+
+  it("an ambiguous tier-entry name whose tier is unmapped points at the row", async () => {
+    const { handler, sent } = makeDeps({ mappings: { opus: DEFAULT_MAPPINGS.opus } });
+    const out = await relayMessages(handler, messagesBody("claude-sonnet-dup"), "claude");
+
+    assert.equal(out.status, 400);
+    assert.equal(sent.length, 0);
+    assert.match(out.body.error.message, /Sonnet tier/);
+    assert.match(out.body.error.message, /not mapped/);
   });
 
   it("refuses the virtual model and the endpoint's own vocabulary", async () => {
