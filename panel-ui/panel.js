@@ -1407,7 +1407,9 @@ async function api(method, path, body) {
     // Claude telemetry is per-session: aggregate every session's active fault
     // into one banner so an upstream error surfaces here the same way it does
     // on the aggregate endpoints.
-    const sessions = c.sessions || [];
+    // Claude exposes the same instance contract as Kimi. `sessions` remains
+    // a compatibility field for older relay snapshots only.
+    const sessions = Array.isArray(c.instances) ? c.instances : (c.sessions || []);
     const activeFaults = sessions.filter((s) => s.errorActive && s.lastError).map((s) => s.lastError);
     applyFaultBanner(
       { errorActive: activeFaults.length > 0, activeErrors: activeFaults },

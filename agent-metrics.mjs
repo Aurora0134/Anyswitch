@@ -562,32 +562,31 @@ export function kimiSurfaceLabel(surface) {
   return KIMI_SURFACE_LABELS[surface];
 }
 
-// claude 实例行的形态徽标：目前只有桌面合成行（foldClaudeDesktopSessions）
-// 会带形态，token 与 kimi 面徽标同源（"Desktop" 已在徽标与关于页使用，
-// 不新造文案）。未标形态的返回 null，行上不贴徽标。
-const CLAUDE_SURFACE_LABELS = { desktop: "Desktop" };
+// Claude client-form labels are derived from process classification. They are
+// independent from the transport used to attribute metrics: Desktop uses the
+// resident relay, while CLI normally uses a per-launch reporter.
+const CLAUDE_SURFACE_LABELS = { cli: "CLI", desktop: "Desktop" };
 
 export function claudeSurfaceLabel(surface) {
   if (typeof surface !== "string" || !(surface in CLAUDE_SURFACE_LABELS)) return null;
   return CLAUDE_SURFACE_LABELS[surface];
 }
 
-// 卡头副行的 claude 档：与 DSH / Kimi 同一个副行位、同一枚文案，但计数口径跟着
-// claude 卡的形状走——它按形态折叠成行（foldClaudeDesktopSessions），一个桌面
-// 端就是一行，所以这里数的是**行**而不是进程：真机一个桌面端有 12 个进程，报成
-// Desktop ×12 会和旁边「1 实例」的胶囊当着用户的面打架。面是封闭集合，集合外的
-// 值只可能是我们自己读错了，如实不贴而不是原样上屏（与 claudeSurfaceLabel 同口径）。
-export function summarizeClaudeSurfaces(sessions) {
-  const counts = new Map();
-  for (const s of Array.isArray(sessions) ? sessions : []) {
-    if (typeof s?.surface !== "string" || claudeSurfaceLabel(s.surface) === null) continue;
-    counts.set(s.surface, (counts.get(s.surface) ?? 0) + 1);
-  }
-  return [...counts.entries()].map(([surface, count]) => ({
-    surface,
-    label: claudeSurfaceLabel(surface),
-    count,
-  }));
+// The card summary follows logical client groups, not raw process count: one
+// Desktop app may own several claude.exe processes. CLI rows remain one group
+// per client PID, matching the instance rows below.
+export function summarizeClaudeSurfaces(procCounts) {
+  const desktopPids = procCounts?.claudeDesktopPids instanceof Set
+    ? procCounts.claudeDesktopPids
+    : new Set();
+  const claudePids = procCounts?.claudePids instanceof Set
+    ? procCounts.claudePids
+    : new Set();
+  const rows = [];
+  if (desktopPids.size > 0) rows.push({ surface: "desktop", label: "Desktop", count: 1 });
+  const cliCount = [...claudePids].filter((pid) => !desktopPids.has(pid)).length;
+  if (cliCount > 0) rows.push({ surface: "cli", label: "CLI", count: cliCount });
+  return rows;
 }
 
 // 共用的分面计数：按面聚合 engine 进程号，读不出的那一档（null）排在最后，
@@ -672,7 +671,7 @@ export function parseDshConsoleQueryOutput(out) {
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -787,7 +786,12 @@ function parseTasklistCsv(stdout) {
           result.claudePids.add(pid);
           // 桌面形态标记（实例行折叠的唯一直接依据）：只认镜像路径白名单
           // 形状，认不出不标——未标的 pid 维持逐 PID 成行。
-          if (claudeDesktopForm(commandLine) !== null) result.claudeDesktopPids.add(pid);
+          if (claudeDesktopForm(commandLine) !== null) {
+            result.claudeDesktopPids.add(pid);
+            result.claudeSurfaceByPid.set(pid, "desktop");
+          } else {
+            result.claudeSurfaceByPid.set(pid, "cli");
+          }
         }
       }
     } else if (bucket === "opencode") {
@@ -2619,6 +2623,9 @@ export function createAgentMetricsCollector(options = {}) {
       samples: null,
       lastSeen: now,
       ended: false,
+      clientForm: "cli",
+      transport: "per-launch",
+      identitySource: "reporter",
     };
 
     session.lastSeen = now;
@@ -2724,7 +2731,7 @@ export function createAgentMetricsCollector(options = {}) {
   // 一个不剩，合成行自然消失。分型读不出的行（CLI、无命令行的 tasklist
   // 兜底、白名单外路径）原样逐 PID 保留——宁可漏折，不可误折。行序保持
   // 首个桌面成员的原位置。
-  function foldClaudeDesktopSessions(sessions, desktopPids) {
+  function groupClaudeClientInstances(sessions, desktopPids) {
     if (!(desktopPids instanceof Set)) return sessions;
     const members = sessions.filter((s) => desktopPids.has(s.pid));
     if (members.length === 0) return sessions;
@@ -2748,6 +2755,9 @@ export function createAgentMetricsCollector(options = {}) {
       pid: null,
       token: null,
       surface: "desktop",
+      clientForm: "desktop",
+      transport: "resident",
+      identitySource: members.some((m) => m.identitySource === "socket-pid") ? "socket-pid" : "process-scan",
       startedAt: Math.min(...members.map((m) => m.startedAt)),
       lastSeen: Math.max(...members.map((m) => m.lastSeen)),
       requests: members.reduce((sum, m) => sum + m.requests, 0),
@@ -2858,6 +2868,9 @@ export function createAgentMetricsCollector(options = {}) {
           samples: null,
           lastSeen: now,
           ended: false,
+          clientForm: null,
+          transport: "resident",
+          identitySource: "process-scan",
         });
       }
     }
@@ -2897,10 +2910,18 @@ export function createAgentMetricsCollector(options = {}) {
         s.activeRequests = 0;
         s.errorActive = false;
       }
+      // Process classification is the source of client form. Reporter
+      // presence only describes transport and attribution quality.
+      s.surface = procCounts.claudeSurfaceByPid?.get(s.pid) ?? "cli";
+      s.clientForm = s.surface;
+      s.transport = s.token !== null ? "per-launch" : "resident";
+      s.identitySource = s.token !== null
+        ? "reporter"
+        : (instanceBuckets.claude.has(`claude-${s.pid}`) ? "socket-pid" : "process-scan");
       mergeResidentClaudeMetrics(s, now);
       active.push(s);
     }
-    return foldClaudeDesktopSessions(active, procCounts.claudeDesktopPids);
+    return groupClaudeClientInstances(active, procCounts.claudeDesktopPids);
   }
 
   async function getAgentsStatus() {
@@ -3222,6 +3243,9 @@ export function createAgentMetricsCollector(options = {}) {
         // reporter starts sending it) — feeds the per-session model badge.
         model: s.model ?? null,
         providerId: s.providerId ?? null,
+        clientForm: s.clientForm ?? null,
+        transport: s.transport ?? null,
+        identitySource: s.identitySource ?? null,
         // 形态徽标：仅桌面合成行（claude-desktop）携带，贴 "Desktop"；
         // 逐 PID 的 CLI/未分型行不贴，外观与折叠前逐字一致。
         ...(s.surface ? { surface: claudeSurfaceLabel(s.surface) } : {}),
@@ -3296,13 +3320,15 @@ export function createAgentMetricsCollector(options = {}) {
       name: "Claude Code",
       status: claudeIsRunning ? "running" : "stopped",
       processCount: claudeProcessCount,
-      sessionMode: "per_session",
+      sessionMode: "per_instance",
       sessionsCount: claudeSessionsFormatted.length,
       sessions: claudeSessionsFormatted,
-      // 卡头形态副行（"Desktop ×1"）：与 DSH / Kimi 同一位、同一渲染器。取值
-      // 必须走**折叠后**的行（claudeRawSessions 已由 getActiveClaudeSessions
-      // 折叠过），所以一个桌面端恒为 ×1，与卡上「1 实例」胶囊同口径。
-      surfaces: summarizeClaudeSurfaces(claudeRawSessions),
+      // The card form summary and instance rows come from the same process
+      // snapshot. Desktop's several helper processes are one logical group.
+      surfaces: summarizeClaudeSurfaces(procCounts),
+      // Claude now follows the same public instance contract as Kimi. The
+      // legacy sessions field remains above for older panel consumers.
+      instances: claudeSessionsFormatted,
       // Model fields ride the aggregate claude tracker bucket (resident
       // /v1/messages traffic, UA-sniffed agentId "claude") so the panel's
       // auto-route chain indicator works on the claude card the same way it

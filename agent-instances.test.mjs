@@ -166,10 +166,12 @@ describe("per-instance aggregate tracking", () => {
     // 下发 instances 数组——claude 卡是 per-session 报表，那些桶计数由
     // getActiveClaudeSessions 按 PID 并进会话行（见 agent-instances.test.mjs 的
     // 「常驻中继流量按连接属主进程落会话行」一组测试）。
-    for (const agentId of ["zcode", "qoder", "claude"]) {
+    for (const agentId of ["zcode", "qoder"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.equal("instances" in agent, false, `${agentId} must stay aggregate-only`);
     }
+    const claude = status.find((a) => a.id === "claude");
+    assert.ok(Array.isArray(claude.instances), "claude exposes the unified instance contract");
   });
 
   it("drops an invalid instanceId silently and tracks aggregate-only", async () => {
@@ -868,7 +870,10 @@ describe("claude 常驻中继流量按连接属主进程落会话行", () => {
       t += 3000;
       const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
       assert.deepEqual(card.sessions.map((s) => s.id), ["claude-4321"], "CLI 行保持逐 PID 身份");
-      assert.equal(card.sessions[0].surface, undefined, "CLI 行不贴形态徽标");
+      assert.equal(card.sessions[0].surface, "CLI", "CLI 行标明客户端形态");
+      assert.equal(card.instances[0].clientForm, "cli");
+      assert.equal(card.instances[0].transport, "resident");
+      assert.equal(card.instances[0].identitySource, "socket-pid");
       assert.equal(card.sessions[0].requests, 1);
       assert.equal(card.sessions[0].tokens.prompt, 100);
     } finally {
