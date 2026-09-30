@@ -66,12 +66,19 @@ const UNPACK_STATUS = {
   [UNPACK_REASON.UNKNOWN_UNQUALIFIED]: 400,
 };
 
-// Only these two refusals describe "a model name this relay could not look up".
+// Only these refusals describe "a model name this relay could not look up".
 // The rest are structural (no model field, blank, non-string), where a 档位映射
-// hint would be noise — and AMBIGUOUS_UNQUALIFIED is deliberately excluded: that
-// name IS several real Anyswitch models, and only the operator can say which one
-// was meant, so it stays a plain refusal rather than a tier takeover.
-const TIER_ELIGIBLE_REASONS = new Set([UNPACK_REASON.NOT_WIRE_ID, UNPACK_REASON.UNKNOWN_UNQUALIFIED]);
+// hint would be noise. AMBIGUOUS_UNQUALIFIED is included deliberately: Claude's
+// own default-model names (`claude-opus-5-5`, …) are exactly names several
+// channels carry, and the operator's mapped model is the only honest
+// disambiguation for them. classifyTierEntryName still bounds the takeover to
+// unmistakable tier-entry names, so a non-Claude ambiguous name keeps the plain
+// "multiple relay providers" refusal.
+const TIER_ELIGIBLE_REASONS = new Set([
+  UNPACK_REASON.NOT_WIRE_ID,
+  UNPACK_REASON.UNKNOWN_UNQUALIFIED,
+  UNPACK_REASON.AMBIGUOUS_UNQUALIFIED,
+]);
 
 // The panel section's user-facing address, reused by every 档位映射 message so
 // the operator is always sent to the same place.

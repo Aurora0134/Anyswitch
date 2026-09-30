@@ -20,8 +20,11 @@
 //   2. Only after strict resolution failed. A full wire ID and an unqualified
 //      model that names exactly one channel are both real Anyswitch models and
 //      always win — including when their id happens to contain a tier word.
-//      An ambiguous unqualified hit is refused too: several channels carry that
-//      name and only the operator knows which one was meant.
+//      An ambiguous unqualified hit falls to the classifier: a tier-entry name
+//      is disambiguated by the operator's mapping (Claude's default-model ids
+//      are exactly names several channels can carry), while anything else
+//      stays a loud 400 — several channels carry it and only the operator
+//      knows which one was meant.
 //   3. Only names that are unmistakably Claude's. The bare tier word, or an id
 //      whose family segment is literally `claude` and which carries exactly one
 //      tier word. Anything else stays a loud 400 — silently routing an
