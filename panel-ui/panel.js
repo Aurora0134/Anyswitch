@@ -1448,10 +1448,14 @@ async function api(method, path, body) {
       } else {
         ccLastModelTag.textContent = "模型: 待命";
       }
+      renderSurfaceSummary("cc", c.surfaces);
     } else {
       setInstanceCount("cc", 0);
       empty.hidden = false;
       block.hidden = true;
+      // 停止态必须显式清掉副行：卡收起时 CSS 不藏徽标，脏值会一直挂到下一轮
+      // running 刷新（DSH / Kimi 同一处置）。
+      renderSurfaceSummary("cc", []);
     }
   }
 

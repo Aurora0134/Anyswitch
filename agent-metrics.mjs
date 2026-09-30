@@ -572,6 +572,24 @@ export function claudeSurfaceLabel(surface) {
   return CLAUDE_SURFACE_LABELS[surface];
 }
 
+// 卡头副行的 claude 档：与 DSH / Kimi 同一个副行位、同一枚文案，但计数口径跟着
+// claude 卡的形状走——它按形态折叠成行（foldClaudeDesktopSessions），一个桌面
+// 端就是一行，所以这里数的是**行**而不是进程：真机一个桌面端有 12 个进程，报成
+// Desktop ×12 会和旁边「1 实例」的胶囊当着用户的面打架。面是封闭集合，集合外的
+// 值只可能是我们自己读错了，如实不贴而不是原样上屏（与 claudeSurfaceLabel 同口径）。
+export function summarizeClaudeSurfaces(sessions) {
+  const counts = new Map();
+  for (const s of Array.isArray(sessions) ? sessions : []) {
+    if (typeof s?.surface !== "string" || claudeSurfaceLabel(s.surface) === null) continue;
+    counts.set(s.surface, (counts.get(s.surface) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([surface, count]) => ({
+    surface,
+    label: claudeSurfaceLabel(surface),
+    count,
+  }));
+}
+
 // 共用的分面计数：按面聚合 engine 进程号，读不出的那一档（null）排在最后，
 // 于是「副行加总 = 卡上进程数」是恒等式而不是巧合。
 function groupSurfaceCounts(enginePids, surfaceByPid) {
@@ -1537,6 +1555,22 @@ function activeTargetList(state) {
   }));
 }
 
+// Authoritative spark history for one aggregate state: one point per measured
+// request, from the very samples the card's numbers are computed over. Shared by
+// the endpoint cards and by the claude session rows mirrored off the resident
+// relay, so a curve is always the same population as the figure beside it.
+function sparkHistoryForState(state) {
+  const sparkLimit = parseSparkWindowPoints(state.sparkWindowPoints);
+  return {
+    ttft: state.ttftHistory.slice(-sparkLimit).map((ms) => Number((ms / 1000).toFixed(2))),
+    tps: state.recentSamples.map(sampleTps).filter((v) => v !== null).slice(-sparkLimit),
+    cache: state.recentSamples.map((s) => {
+      if (s.prompt > 0) return Number(((s.cached / s.prompt) * 100).toFixed(1));
+      return 0;
+    }).slice(-sparkLimit),
+  };
+}
+
 function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = RECENT_SAMPLE_WINDOW, nowFn = Date.now, instances = null }) {
   const isRunning = processCount > 0 || state.activeRequests > 0;
 
@@ -1603,15 +1637,7 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
     },
   ];
 
-  const sparkLimit = parseSparkWindowPoints(state.sparkWindowPoints);
-  const sparkHistory = {
-    ttft: state.ttftHistory.slice(-sparkLimit).map((ms) => Number((ms / 1000).toFixed(2))),
-    tps: state.recentSamples.map(sampleTps).filter((v) => v !== null).slice(-sparkLimit),
-    cache: state.recentSamples.map((s) => {
-      if (s.prompt > 0) return Number(((s.cached / s.prompt) * 100).toFixed(1));
-      return 0;
-    }).slice(-sparkLimit),
-  };
+  const sparkHistory = sparkHistoryForState(state);
 
   return {
     id,
@@ -2116,10 +2142,10 @@ export function createAgentMetricsCollector(options = {}) {
   const unattributedState = createAggregateState();
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / codex / grok / dsh): instanceId -> { state, firstSeen }. Only requests
-  // carrying a valid instanceId land here, and they ALSO land in the endpoint
-  // aggregate above, so the existing cards are unchanged. claude is
-  // per-session already; zcode/qoder stay aggregate-only by design.
+  // pi / codex / grok / dsh / claude): instanceId -> { state, firstSeen }. Only
+  // requests carrying a valid instanceId land here, and they ALSO land in the
+  // endpoint aggregate above, so the existing cards are unchanged. zcode/qoder
+  // stay aggregate-only by design.
   // dsh joins on the same socket-reverse-lookup mechanism the other CLI
   // endpoints use: every DSH surface (web UI, TUI, any custom profile) talks to
   // the loopback relay over its own keep-alive connection, so one row per
@@ -2129,7 +2155,14 @@ export function createAgentMetricsCollector(options = {}) {
   // the wire (its compat gate withholds the session-affinity headers), so
   // per-conversation truth stays on the ~/.dsh/sessions scan, where it is
   // already accurate.
-  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map() };
+  // claude's bucket does NOT feed an `instances` array (the claude card stays
+  // per-session — see the card assembly): it is the accumulation slot for the
+  // resident relay's claude traffic, which getActiveClaudeSessions merges into
+  // the card's session rows by PID. It exists in this map so the request path,
+  // the late-attach mechanism and the PID housekeeping all work unmodified —
+  // the desktop app points its gateway straight at the resident relay, so it
+  // has no session reporter and the socket reverse lookup is its only identity.
+  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), claude: new Map() };
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -2754,6 +2787,50 @@ export function createAgentMetricsCollector(options = {}) {
   // Liveness is decided by the process list, not by a TTL. A session is alive
   // if its claude.exe PID is still running. Sessions whose PID has vanished
   // are marked ended; ended sessions linger for ENDED_DISPLAY_MS then purge.
+  //
+  // Resident-relay attribution: a claude process that talks to the resident relay
+  // itself (the desktop app, or `claude` started with our base URL) has no
+  // session reporter — nothing would ever fill its row. The request path already
+  // mirrors that traffic into instanceBuckets.claude keyed by the reverse-looked-up
+  // owner PID; here it is merged onto the same per-PID row the process scan
+  // created. The two sources are mutually exclusive by construction: a row that
+  // HAS a reporter (token !== null) is never merged, so one request is counted
+  // once — the per-launch relay and the resident relay never serve the same
+  // request.
+  function mergeResidentClaudeMetrics(session, now) {
+    if (session.token !== null || session.pid === null) return;
+    const entry = instanceBuckets.claude.get(`claude-${session.pid}`);
+    if (entry === undefined) return;
+    const state = entry.state;
+    session.requests = state.totalRequests;
+    session.activeRequests = state.activeRequests;
+    session.activeDurationMs = state.activeWallClockMs
+      + (state.activeWallStart !== null ? Math.max(0, now - state.activeWallStart) : 0);
+    session.promptTokens = state.totalPromptTokens;
+    session.completionTokens = state.totalCompletionTokens;
+    session.cachedTokens = state.totalCachedTokens;
+    if (state.lastTtftMs !== null) session.lastTtftMs = state.lastTtftMs;
+    session.lastError = state.lastError ?? null;
+    session.errorActive = state.errorActive;
+    session.samples = state.recentSamples.length > 0 ? state.recentSamples.slice() : null;
+    // Same window rule and same population as an endpoint card's sparkline (see
+    // sparkHistoryForState), so the session curve matches the number beside it.
+    session.sparkHistory = state.recentSamples.length > 0 || state.ttftHistory.length > 0
+      ? sparkHistoryForState(state)
+      : null;
+    session.model = state.currentModel;
+    session.providerId = state.currentProvider;
+    session.viaAuto = state.currentViaAuto === true;
+    if (state.lastModel !== null) {
+      session.lastModel = state.lastModel;
+      session.lastProvider = state.lastProvider;
+      session.lastViaAuto = state.lastViaAuto === true;
+    }
+    if (state.lastRequestAt !== null && state.lastRequestAt > session.lastSeen) {
+      session.lastSeen = state.lastRequestAt;
+    }
+  }
+
   async function getActiveClaudeSessions() {
     const procCounts = await scanProcesses();
     const livePids = procCounts.claudePids;
@@ -2820,6 +2897,7 @@ export function createAgentMetricsCollector(options = {}) {
         s.activeRequests = 0;
         s.errorActive = false;
       }
+      mergeResidentClaudeMetrics(s, now);
       active.push(s);
     }
     return foldClaudeDesktopSessions(active, procCounts.claudeDesktopPids);
@@ -2899,7 +2977,7 @@ export function createAgentMetricsCollector(options = {}) {
     // Remaining custom ids (no numeric tail — normalizeInstanceId already
     // had its say at ingest) keep the idle TTL; an instance with in-flight
     // requests never expires on that path.
-    const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState };
+    const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       // Endpoints with an ENGINE subset reconcile their canonical rows against
@@ -3221,6 +3299,10 @@ export function createAgentMetricsCollector(options = {}) {
       sessionMode: "per_session",
       sessionsCount: claudeSessionsFormatted.length,
       sessions: claudeSessionsFormatted,
+      // 卡头形态副行（"Desktop ×1"）：与 DSH / Kimi 同一位、同一渲染器。取值
+      // 必须走**折叠后**的行（claudeRawSessions 已由 getActiveClaudeSessions
+      // 折叠过），所以一个桌面端恒为 ×1，与卡上「1 实例」胶囊同口径。
+      surfaces: summarizeClaudeSurfaces(claudeRawSessions),
       // Model fields ride the aggregate claude tracker bucket (resident
       // /v1/messages traffic, UA-sniffed agentId "claude") so the panel's
       // auto-route chain indicator works on the claude card the same way it
