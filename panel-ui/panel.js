@@ -3508,6 +3508,10 @@ async function api(method, path, body) {
   // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
   let terminalHostResizeObserver = null;
   let terminalInputDisposable = null;
+  // 定投会话 id：connectTerminalStream 建连时固化、closeTerminalStream 清空，值与
+  // onData 闭包内的定投局部量同。附着在 xterm 实例上的键位处理器不再随连接重建
+  // 闭包，改经此量读到与 onData 一致的定投目标，同样不读活动会话。
+  let terminalBoundSessionId = null;
   // 输入法锚点：组字期间钉住隐藏输入框。空闲为 null；组字中为 { textarea, left, top, width, height, lineHeight }。
   let terminalImeHold = null;
   let terminalImeHoldFrame = null;
@@ -3593,6 +3597,20 @@ async function api(method, path, body) {
     if (key === "v") return "paste";
     if (key === "c") return "copy";
     return null;
+  }
+
+  // 换行键位意图：只认不带 Alt/Meta 的 Ctrl+Enter / Shift+Enter。xterm 5.5
+  // 内核求值 Enter 只保留 Alt，Ctrl/Shift 被忽略、折叠成普通 "\r"；而 opencode
+  // 在拿不到 kitty 键盘协议的终端里，换行绑定可直接靠 ctrl+j（LF 字节）触发——
+  // 拦下这类键改定投 "\n" 即它的换行语义。IME 组字态（isComposing / keyCode
+  // 229）最终字节未定，不接管。
+  function terminalNewlineEnterKey(event) {
+    if (!event || event.type !== "keydown") return false;
+    if (event.isComposing || event.keyCode === 229) return false;
+    if (event.key !== "Enter") return false;
+    if (!event.ctrlKey && !event.shiftKey) return false;
+    if (event.altKey || event.metaKey) return false;
+    return true;
   }
 
   // 新终端的默认工作目录与终端宿主自身的启动目录一致（Anyswitch 安装目录）：
@@ -3858,6 +3876,7 @@ async function api(method, path, body) {
     terminalEventSource = null;
     terminalInputDisposable?.dispose();
     terminalInputDisposable = null;
+    terminalBoundSessionId = null;
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
@@ -3966,6 +3985,15 @@ async function api(method, path, body) {
       const intent = terminalClipboardKeyIntent(event);
       if (intent === "paste") return false;
       if (intent === "copy" && term.hasSelection()) return false;
+      // 修饰 Enter 接管为换行：见 terminalNewlineEnterKey 的语义注释。return
+      // false 把键从 xterm 内核求值中摘出（它只会折叠成 "\r" 触发提交），改走
+      // 与键入定投同一条 input POST 通路发单字节 "\n"；无定投会话（预览态）只拦不发。
+      if (terminalNewlineEnterKey(event)) {
+        if (terminalBoundSessionId !== null) {
+          api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalBoundSessionId)}/input`, { data: "\n" }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+        }
+        return false;
+      }
       return true;
     });
     if (window.FitAddon?.FitAddon) {
@@ -4100,6 +4128,7 @@ async function api(method, path, body) {
     // 与其回调不可能经此实例打进别的 PTY。预览会话无后端，定投为空，键入直接
     // 落空（与旧行为一致）。
     const boundSessionId = session?.backend ? session.id : null;
+    terminalBoundSessionId = boundSessionId;
     terminalInputDisposable = term.onData((data) => {
       if (boundSessionId === null) return;
       api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));

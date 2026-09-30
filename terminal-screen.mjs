@@ -50,18 +50,34 @@ export function terminalCharWidth(ch) {
   return 1;
 }
 
-const blankRow = (cols) => ({
+const blankRow = (cols, attr = "") => ({
   chars: new Array(cols).fill(null),
-  attrs: new Array(cols).fill(""),
+  attrs: new Array(cols).fill(attr),
 });
 
 // A row of spaces is still a painted bar when those cells carry a background
-// or inverse. Treating it as blank drops the bar from the repaint.
+// or inverse. Treating it as blank drops the bar from the repaint. Covers every
+// background form the SGR stream can carry: 7 inverse, 40-47 and 100-107 basic
+// and bright backgrounds, 48 extended, 49 default.
+const cellPainted = (attr) => {
+  for (const part of String(attr ?? "").split(";")) {
+    const n = Number(part);
+    if (!Number.isFinite(n)) continue;
+    if (n === 7) return true;
+    if (n >= 40 && n <= 47) return true;
+    if (n >= 100 && n <= 107) return true;
+    if (n === 48 || n === 49) return true;
+  }
+  return false;
+};
+
 const isBlankRow = (row) => row.chars.every((ch, index) => {
   if (!(ch === null || ch === "" || ch === " ")) return false;
-  const parts = String(row.attrs[index] ?? "").split(";");
-  return !parts.includes("7") && !parts.includes("48") && !parts.includes("49");
+  return !cellPainted(row.attrs[index]);
 });
+
+// 回放要重放的应用态模式：鼠标族（1000/1002/1003/1006/1015）与括号粘贴（2004）。
+const REPLAYED_MODES = [1000, 1002, 1003, 1006, 1015, 2004];
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -79,11 +95,23 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   let autoWrap = true;
   let insertMode = false;
   let cursorVisible = true;
+  // 应用态模式的记录表：只在被显式 set/reset 过后才入表；从未出现过的模式
+  // 保持「未记录」，回放时不发任何模式序列，与旧行为一致。
+  let appModes = {};
   let history = [];
   let historyTotal = 0;
   let consumedBytes = 0;
 
   const attrsString = () => (sgr.length ? sgr.join(";") : "");
+
+  // BCE（xterm.js 5.5 行为）：擦除填入的只有当前 SGR 的背景属性，前景与其余属性都不带。
+  const bgString = () =>
+    sgr
+      .filter((code) => {
+        const n = Number(code);
+        return (n >= 40 && n <= 47) || (n >= 100 && n <= 107) || /^48;/.test(String(code));
+      })
+      .join(";");
 
   function rebuild(newCols, newRows) {
     const next = Array.from({ length: newRows }, (_, r) => {
@@ -173,18 +201,26 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     const line = grid[row];
     const from = mode === 1 ? 0 : mode === 2 ? 0 : col;
     const to = mode === 0 ? width - 1 : mode === 1 ? col : width - 1;
-    for (let c = from; c <= to; c += 1) { line.chars[c] = null; line.attrs[c] = ""; }
+    const fill = bgString();
+    for (let c = from; c <= to; c += 1) { line.chars[c] = null; line.attrs[c] = fill; }
   }
 
   function eraseDisplay(mode) {
+    if (mode === 3) {
+      // ESC[3J 只清滚动区，当前画面原样保留。
+      history = [];
+      historyTotal = 0;
+      return;
+    }
+    const fill = bgString();
     if (mode === 0) {
       eraseLine(0);
-      for (let r = row + 1; r < height; r += 1) grid[r] = blankRow(width);
+      for (let r = row + 1; r < height; r += 1) grid[r] = blankRow(width, fill);
     } else if (mode === 1) {
       eraseLine(1);
-      for (let r = 0; r < row; r += 1) grid[r] = blankRow(width);
+      for (let r = 0; r < row; r += 1) grid[r] = blankRow(width, fill);
     } else {
-      grid = grid.map(() => blankRow(width));
+      grid = grid.map(() => blankRow(width, fill));
     }
   }
 
@@ -221,8 +257,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         else if (p === 4 && !value) insertMode = false;
         else if (p === 4 && value) insertMode = true;
         else if (p === 1049 || p === 1047 || p === 47) setAlt(value);
-        // 1 (cursor keys), 12 (blink), 2004 (bracketed paste), 2026 (synchronised
-        // output), 6 (origin), 1000+ mouse modes: consumed, no grid effect here.
+        else if (REPLAYED_MODES.includes(p)) appModes[p] = value;
+        // 1 (cursor keys), 12 (blink), 2026 (synchronised output), 6 (origin):
+        // consumed, no grid effect here. Mouse modes and bracketed paste are
+        // recorded above so toReplay can restore them.
       }
     }
   }
@@ -259,15 +297,23 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       case "H": case "f": row = arg(0, 1) - 1; col = arg(1, 1) - 1; break;
       case "J": eraseDisplay(priv ? 0 : (nums[0] || 0)); break;
       case "K": eraseLine(nums[0] || 0); break;
-      case "L": for (let r = row; r <= bottom; r += 1) grid[r] = blankRow(width); for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } break;
+      // IL 插入行：光标行及以下整体下移 n 行，底部多出滚动区外的行丢弃。
+      case "L": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } break;
       case "M": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = row; r < bottom; r += 1) grid[r] = grid[r + 1]; grid[bottom] = blankRow(width); } break;
-      case "P": case "X": {
+      case "P": {
         const n = arg(0, 1);
         for (let c = col; c < width; c += 1) {
-          const shift = final === "P" ? c + n : c;
-          if (final === "X" && c >= col + n) { grid[row].chars[c] = null; grid[row].attrs[c] = ""; }
-          else { grid[row].chars[c] = shift < width ? grid[row].chars[shift] : null; grid[row].attrs[c] = shift < width ? grid[row].attrs[shift] : ""; }
+          const src = c + n;
+          grid[row].chars[c] = src < width ? grid[row].chars[src] : null;
+          grid[row].attrs[c] = src < width ? grid[row].attrs[src] : "";
         }
+        break;
+      }
+      case "X": {
+        // ECH 是擦除填充：从光标起擦 n 格（BCE 背景），右侧内容保持不动；不是 DCH 那样的左移删除。
+        const n = arg(0, 1);
+        const fill = bgString();
+        for (let c = col; c < Math.min(width, col + n); c += 1) { grid[row].chars[c] = null; grid[row].attrs[c] = fill; }
         break;
       }
       case "@": {
@@ -381,16 +427,6 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     clampCursor();
   }
 
-  function cellPainted(attr) {
-    const parts = String(attr ?? "").split(";");
-    if (parts.includes("7")) return true;
-    for (let i = 0; i < parts.length; i += 1) {
-      if (parts[i] !== "48" && parts[i] !== "49") continue;
-      return true;
-    }
-    return false;
-  }
-
   function serializeRow(line) {
     let end = line.chars.length;
     while (end > 0) {
@@ -432,6 +468,15 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   function toReplay() {
     const parts = ["\u001b[0m\u001b[2J\u001b[H"];
     let bytes = 8;
+    // 画面前先回放记录过的应用态模式（鼠标族 / 括号粘贴），让客户端与应用的当前状态对齐。
+    // 明确不发 1049 备屏与 2026 同步：1049 会把回放切进备用屏，丢掉刻意保留的滚屏历史；
+    // 2026 是同帧批处理标记，回放只有单帧画面，发了没有意义。
+    for (const p of REPLAYED_MODES) {
+      if (!(p in appModes)) continue;
+      const seq = `\u001b[?${p}${appModes[p] ? "h" : "l"}`;
+      parts.push(seq);
+      bytes += seq.length;
+    }
     const keep = [];
     for (let k = history.length - 1; k >= 0; k -= 1) {
       const size = history[k].length + 2;
@@ -480,13 +525,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       return grid.map((line) => line.chars.map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
     },
     // Same grid, one cell at a time, so a repaint can be checked for colour and
-    // not just for text. Background is whatever SGR 48 the cell carries.
+    // not just for text. Background is whatever background SGR the cell carries.
     screenAttrs() {
       return grid.map((line) => line.chars.map((ch, index) => {
         const attr = line.attrs[index] ?? "";
         const bg = attr.split(";").includes("7")
           ? "7"
-          : (attr.match(/(?:^|;)(48(?::[^;]*|;(?:5;\d+|2;\d+;\d+;\d+)))/)?.[1] ?? "");
+          : (attr.match(/(?:^|;)((?:4[0-7]|10[0-7]|48|49)(?::[^;]*|;(?:5;\d+|2;\d+;\d+;\d+))?)/)?.[1] ?? "");
         return { ch: ch === null || ch === undefined ? " " : ch, bg };
       }));
     },
