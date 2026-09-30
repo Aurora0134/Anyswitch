@@ -3507,6 +3507,7 @@ async function api(method, path, body) {
   let terminalActivitySource = null;
   let terminalXterm = null;
   let terminalFitAddon = null;
+  let terminalWebglAddon = null;
   // 宿主尺寸观察：inspector 收放、字号变化等任何改变终端区宽度的动作都不经
   // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
   let terminalHostResizeObserver = null;
@@ -3883,6 +3884,7 @@ async function api(method, path, body) {
     terminalXterm?.dispose();
     terminalXterm = null;
     terminalFitAddon = null;
+    terminalWebglAddon = null;
     terminalHostResizeObserver?.disconnect();
     terminalHostResizeObserver = null;
     if (terminalImeAnchorTextarea) {
@@ -4008,6 +4010,19 @@ async function api(method, path, body) {
       terminalXterm.unicode.activeVersion = "11";
     }
     terminalXterm.open(host);
+    if (window.WebglAddon?.WebglAddon) {
+      try {
+        terminalWebglAddon = new window.WebglAddon.WebglAddon();
+        terminalWebglAddon.onContextLoss(() => {
+          terminalWebglAddon?.dispose();
+          terminalWebglAddon = null;
+        });
+        terminalXterm.loadAddon(terminalWebglAddon);
+      } catch (error) {
+        terminalWebglAddon = null;
+        console.warn("[terminal] WebGL renderer unavailable, using DOM renderer:", error);
+      }
+    }
     installTerminalImeAnchor(terminalXterm);
     // 宿主尺寸观察：inspector 收放（约 ±292px）、字号变化等任何改变终端区宽度
     // 的动作都不触发 window resize，只挂窗口监听会漏掉——直接观察宿主元素，
