@@ -2133,6 +2133,16 @@
   /* F/G1：TTFT/TPS 并排双卡网格（借用 .skills-grid 的两列与窄屏折叠，只改成等宽列） */
   .skills-grid.stats-quad { grid-template-columns: 1fr 1fr; }
   @media (max-width: 960px) { .skills-grid.stats-quad { grid-template-columns: 1fr; } }
+  /* F/G1 双卡等高（以 TTFT 卡为准）：网格拉伸 + 卡片纵向撑满 + 卡体纵列吃满；
+     榜容器（grid）用 flex:1 顶满卡体，短卡多出的空白沉在榜区底部。
+     卡体走专用类 .stats-quad-body 而非通用 .card-body：panel-skills 的哨兵测试禁止
+     给通用 .card-body 写 display（同 .logs-card-body 先例），且通用钩子会盖掉折叠卡的
+     UA [hidden]{display:none}。 */
+  .skills-grid.stats-quad { align-items: stretch; }
+  .skills-grid.stats-quad .panel-card { height: 100%; display: flex; flex-direction: column; }
+  .skills-grid.stats-quad .stats-quad-body { flex: 1; display: flex; flex-direction: column; }
+  #statsTtftBars, #statsTpsBars { flex: 1; align-content: start; }
+  @media (max-width: 960px) { .skills-grid.stats-quad .panel-card { height: auto; } }
   /* C 区卡头：标题 + 三组 seg 同行放不下时换行 */
   .card-header.stats-trend-head { flex-wrap: wrap; gap: 8px; }
   .stats-seg-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
@@ -2196,16 +2206,35 @@
   /* 横向条（F 按模型 / G1 TPS） */
   /* 横向条（F 按模型 / G1 TPS）：容器 grid 三列（标签 38% / 轨道 1fr / 数值 max-content），
      数值列宽取全组最长行 → 各行轨道右端严格对齐（旧 flex 行 val 为 auto 宽，右端参差） */
-  .stats-bars { display: grid; grid-template-columns: minmax(0, 38%) minmax(0, 1fr) max-content; column-gap: 8px; font-size: 11.5px; }
+  .stats-bars { display: grid; grid-template-columns: max-content minmax(0, 38%) minmax(0, 1fr) max-content; column-gap: 8px; font-size: 11.5px; }
   .stats-bars .empty-hint { grid-column: 1 / -1; }
   .stats-bar-row { display: contents; }
   .stats-bar-row > * { align-self: center; margin: 4px 0; }
+  /* 排名序号（F/G1 卡内榜与全量弹窗同构）：复用看板状态检测卡 .ms-rank/.top
+     （10px mono 灰字，1-2 名 accent 色）；grid 语境下 .ms-rank 的 flex:none
+     被忽略，width:13px 照常生效。 */
+  /* 占位行（榜单缺位补齐固定行数，配合双卡等高）：虚线行跨满四列，
+     高度贴近常规榜行（11.5px 字行高约 16px + 上下 4px 边距） */
+  .stats-bar-placeholder {
+    grid-column: 1 / -1; height: 24px; margin: 4px 0;
+    border-bottom: 1px dashed var(--divider); opacity: 0.6;
+  }
   .stats-bar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-2); }
   .stats-bar-track { height: 8px; background: var(--surface-sunken); border: 1px solid var(--border); border-radius: 4px; overflow: hidden; }
   /* fill 必须块级：span 默认 inline，width/height 不生效会塌陷成零宽，轨道只剩一条空黑条 */
   .stats-bar-fill { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
   .stats-bar-fill.ok { background: var(--ok); }
   .stats-bar-val { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); white-space: nowrap; text-align: right; }
+  /* F/G1 全量排名弹窗（720px 档，两列纵向连续，整体一根纵向滚动条、窗高固定） */
+  .stats-rank-modal-overlay .modal-card { max-width: 720px; }
+  .stats-rank-modal-overlay .modal-body { max-height: 52vh; overflow-y: auto; }
+  .stats-rank-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; }
+  @media (max-width: 640px) { .stats-rank-cols { grid-template-columns: 1fr; } }
+  .stats-rank-col { display: flex; flex-direction: column; min-width: 0; }
+  .stats-rank-row { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; border-bottom: 1px dashed var(--divider); font-size: 11.5px; }
+  .stats-rank-row:last-child { border-bottom: none; }
+  .stats-rank-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); color: var(--text-2); }
+  .stats-rank-val { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); white-space: nowrap; }
 
 
   /* 页头：视图标题 + 页面级刷新钮（从今日概览卡头移出） */

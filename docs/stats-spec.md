@@ -18,11 +18,11 @@
 | 90 天热力图 | 固定 90 天日轴（日历运算防 DST），tokens=prompt+completion，**只算 request 行**，零填充。 |
 | Token 趋势 | days=1 → 24×1h 本地整点桶；days=7 → 21×8h 桶（对齐本地 0/8/16 点）；末桶进行中。三口径：渠道=providerId / 端点=agentId / 模型=`providerId/model` 复合键。值=各桶 prompt+completion。 |
 | 模型用量卡 | **独立时间 seg（近 24h/近 7 日）**，不随全局 days seg；后端单次响应同时下发 `usage["1"]`/`usage["7"]` 双窗口，切换只本地重渲。窗口内单节点总量；**model 口径=裸模型名跨渠道合并**（与趋势的复合键不同，usage-stats.mjs buildUsage 注释）。**版式：卡体左右两栏**——左=环形图+图例排行榜，右=竖直柱状图（同源同排序同色，复用 `statsUsageColorOf(key, allNodes)`，「其他」灰同出场；柱从地面线生长，与环同一 `USAGE_REVEAL_MS`/easeOutCubic/同一 rAF，触发时机同一 `revealNow` 判定）。 |
-| TTFT | 仅 `ok===true && ttftMs>0` 的行；按桶 avg/p95（nearest-rank）+ 按模型 Top5。**非流式请求的 ttftMs 是全时长代理**（采集侧约定）。**样本 <10 的模型整行不显示**（与 TPS 同一机制，见 R-21）。 |
-| TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
+| TTFT | 仅 `ok===true && ttftMs>0` 的行；按桶 avg/p95（nearest-rank）+ 按模型 Top5（**按 avg 升序，越快越前**，并列按 key 字母序，见 R-27）。**非流式请求的 ttftMs 是全时长代理**（采集侧约定）。**样本 <10 的模型整行不显示**（与 TPS 同一机制，见 R-21）。 |
+| TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**卡内榜单 Top10**（avgTps 降序，并列按 key 字母序，见 R-27）。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
 | 端点工时表 | 按 agentId：requests / tokens / sessions(30min 空档切段数 + sessionEnds) / workMs(busy 区间并集)。**legacy session 行 tokens 计入本卡但不进热力图/趋势**——两口径对不上是设计使然。 |
 
-布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**不可见不取数不渲染**（R-25）。
+布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**双卡等高**（以 TTFT 卡为准，网格 stretch + 卡片纵向撑满，见 R-28）；卡内榜单不足固定行数（TTFT 5 / TPS 10）时尾部补虚线占位行；**空态（暂无数据）为例外**，不等高、不补占位。**不可见不取数不渲染**（R-25）。
 
 子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/7d/30d/all（含当天往前推 0/6/29/89 天，日历运算防 DST），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
 
@@ -149,6 +149,15 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 日志子页激活时统计视图挂 `logs-fixed`：视图高度钉在视口余量内（100dvh − 站点头 56 − 主区顶距 24 − 屏底余量 16），页面本身不滚；筛选行钉顶、表体在卡内 `overflow-y:auto` 滚动（表头 sticky）、分页条钉屏底（对齐 new-api）。总览子页保持文档流原样。min-height:0 链条（pane→card→card-body→table-wrap）是 flex 内滚动的硬要求，缺一截链即失效。
 - 锚点：panel.css `.stats-view.logs-fixed` 规则组；panel.js `activateStatsSubTab` 的 class 切换
 - ⚠️ 无自动化测试钉住（布局），改动时人工核对
+### R-27 TTFT/TPS 卡内榜单：排序口径 + 截断 + 排名序号
+TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字母序；TPS 卡内榜按 `avgTps` **降序**（后端已排好的顺序，前端只做同规则兜底重排），并列按 key 字母序。排序纯前端完成——后端 `byModel`（按样本数排）/`tps`（按 avgTps 降序）均全量下发，前端经 `statsTtftRankedAll` / `statsTpsRankedAll` 重排。TTFT 截断 Top5（小标题「按模型 Top5（均值）」），TPS 截断 Top10（小标题「按模型 Top10」）。榜行首列带排名序号 1..N，复用看板状态检测卡 `.ms-rank/.top`（10px mono 灰字，1-2 名 accent 色，不新造渐变）；TTFT/TPS 卡内榜与全量弹窗同构。榜区悬停提示统一为「双击查看全部模型」。
+- 锚点：panel.js `statsTtftRankedAll` / `statsTpsRankedAll` / `STATS_TTFT_TOP_N = 5` / `STATS_TPS_TOP_N = 10` / `statsRenderBars(el, rows, {placeholders})` / `statsRankEl`（复用 `.ms-rank/.top`）；panel.css `.stats-bars` 四列
+- 钉住：panel.test.mjs「TTFT 榜按 avg 升序 + Top5」「TPS 卡内榜 Top10」「排名序号复用 .ms-rank/.top」
+
+### R-28 TTFT/TPS 双卡等高 + 全量排名弹窗
+双卡等高以 TTFT 卡为准：`.skills-grid.stats-quad` 切 stretch + 卡片纵向撑满 + 卡体纵列吃满，榜容器 `flex:1` 顶满；榜单不足固定行数时尾部补虚线占位行（`.stats-bar-placeholder`，TTFT 补足 5 行、TPS 补足 10 行）。**空态为例外**：任一卡无数据时走现有 `empty-hint`，不等高、不补占位。榜区双击出一卡一窗的全量弹窗（`#statsRankModal`，720px 档复用差异弹窗规格，内容区 `max-height:52vh` 内部滚动）：窗内分两列纵向连续（偶均分、奇左多一），序号 1..N 延续与卡片同构，行用紧凑文本（序号+模型名+数值，复用卡内 `valText` 格式，无横条）；两列共用一根纵向滚动条、窗高固定；关闭走 ✕/按钮/遮罩/Esc；空态（全量为零）不开窗。
+- 锚点：panel.js `openStatsRankModal(kind)` / `hideStatsRankModal` + `initStatsTab` 双击接线；panel.html `#statsRankModal`；panel.css `.skills-grid.stats-quad` 等高块 + `.stats-rank-modal-overlay` + `.stats-rank-cols`
+- 钉住：panel.test.mjs「双卡等高：stretch + 占位行」「全量弹窗一卡一窗 + 两列均分 + 空态不开窗」
 
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
@@ -156,6 +165,11 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 |---|---|---|
 | 横条上限 85 | panel.js `STATS_BAR_FILL_MAX` | panel.test.mjs 断言（R-01） |
 | 趋势 Top N=5 | usage-stats.mjs `TOP_N` | usage-stats.test.mjs（R-02） |
+| TTFT 卡内 Top5（按 avg 升序，越快越前） | panel.js `STATS_TTFT_TOP_N` + `statsTtftRankedAll` | panel.test.mjs（R-27） |
+| TPS 卡内 Top10（avgTps 降序） | panel.js `STATS_TPS_TOP_N` + `statsTpsRankedAll` | panel.test.mjs（R-27） |
+| 排名序号复用 .ms-rank/.top（1-2 名 accent 色） | panel.js `statsRankEl`（复用看板状态检测卡类） | panel.test.mjs（R-27） |
+| 双卡等高 + 占位行（空态例外） | panel.css `.skills-grid.stats-quad` 等高块 + `.stats-bar-placeholder` | panel.test.mjs（R-28） |
+| 全量弹窗 720px / 内容区 52vh 内部滚动 | panel.js `openStatsRankModal` + panel.css `.stats-rank-modal-overlay` | panel.test.mjs（R-28） |
 | TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
 | TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
 | TTFT 出榜样本下限 10（不足整行不显示，与 TPS 同机制） | usage-stats.mjs `TTFT_MIN_SAMPLES` | usage-stats.test.mjs「drops TTFT rows with < 10 samples」 |

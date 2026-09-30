@@ -11522,6 +11522,29 @@ async function api(method, path, body) {
     $("statsTabOverview").onclick = () => activateStatsSubTab("overview");
     $("statsTabLogs").onclick = () => activateStatsSubTab("logs");
     initLogsPane();
+    // F/G1 全量弹窗：榜区双击一卡一窗（空态无数据不開窗）；关闭走 ✕/按钮/遮罩/Esc
+    const ttftBarsEl = $("statsTtftBars");
+    if (ttftBarsEl && !ttftBarsEl._rankDbl) {
+      ttftBarsEl._rankDbl = true;
+      ttftBarsEl.addEventListener("dblclick", () => openStatsRankModal("ttft"));
+    }
+    const tpsBarsEl = $("statsTpsBars");
+    if (tpsBarsEl && !tpsBarsEl._rankDbl) {
+      tpsBarsEl._rankDbl = true;
+      tpsBarsEl.addEventListener("dblclick", () => openStatsRankModal("tps"));
+    }
+    const rankCloseBtn = $("statsRankCloseBtn");
+    if (rankCloseBtn) rankCloseBtn.onclick = hideStatsRankModal;
+    const rankCancelBtn = $("statsRankCancelBtn");
+    if (rankCancelBtn) rankCancelBtn.onclick = hideStatsRankModal;
+    const rankModal = $("statsRankModal");
+    if (rankModal && !rankModal._rankWired) {
+      rankModal._rankWired = true;
+      rankModal.addEventListener("click", (e) => { if (e.target === rankModal) hideStatsRankModal(); });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && rankModal.classList.contains("show")) hideStatsRankModal();
+      });
+    }
   }
 
   // 手动刷新的视觉反馈：按钮走 .btn:disabled 的 45% 变暗（与看板「重启」键、
@@ -12229,14 +12252,20 @@ async function api(method, path, body) {
   // ── 横向条通用渲染 ──
   // 填充上限 85%：最长条不顶到轨道右端，留出呼吸余量
   const STATS_BAR_FILL_MAX = 85;
-  function statsRenderBars(el, rows) {
-    // rows: [{label, value(0-1 之外任意正数), valText, ok?}]
+  function statsRenderBars(el, rows, opts) {
+    // rows: [{label, value(0-1 之外任意正数), valText, ok?, rank?}]
+    // rank!=null 时首列渲染排名序号（复用看板状态检测卡 .ms-rank/.top，
+    // 1-2 名挂 .top 走 accent 色，不新造渐变）；
+    // opts.placeholders>0 时尾部补虚线占位行（固定榜单行数，配合双卡等高）。
+    // 注意：容器是 grid 四列（序号 max-content / 标签 38% / 轨道 1fr / 数值
+    // max-content），调用方须保证要么每行都带 rank、要么都不带，否则错列。
     el.textContent = "";
-    el.classList.add("stats-bars"); // grid 三列共享列宽，各行轨道右端对齐
+    el.classList.add("stats-bars"); // grid 四列共享列宽，各行轨道右端对齐
     const maxV = rows.reduce((m, r) => Math.max(m, r.value || 0), 0) || 1;
     rows.forEach((r) => {
       const row = document.createElement("div");
       row.className = "stats-bar-row";
+      if (r.rank != null) row.appendChild(statsRankEl(r.rank));
       const lab = document.createElement("span");
       lab.className = "stats-bar-label";
       lab.textContent = r.label;
@@ -12253,6 +12282,21 @@ async function api(method, path, body) {
       row.appendChild(lab); row.appendChild(track); row.appendChild(val);
       el.appendChild(row);
     });
+    const ph = opts && opts.placeholders > 0 ? Math.floor(opts.placeholders) : 0;
+    for (let i = 0; i < ph; i += 1) {
+      const d = document.createElement("div");
+      d.className = "stats-bar-placeholder";
+      el.appendChild(d);
+    }
+  }
+
+  // 排名序号小件（TTFT/TPS 卡内榜与全量弹窗同构）：复用看板状态检测卡
+  // .ms-rank/.top（10px mono 灰字，1-2 名 accent 色），不新造渐变。
+  function statsRankEl(n) {
+    const rk = document.createElement("span");
+    rk.className = "ms-rank" + (n <= 2 ? " top" : "");
+    rk.textContent = String(n);
+    return rk;
   }
 
   // ── H：模型用量（两栏：左=环形图 zcode 版式 + 图例榜，右=同色生长柱状图） ──
@@ -12528,13 +12572,27 @@ async function api(method, path, body) {
   }
 
   // ── F：首字响应 TTFT（按桶 avg/p95 双线 + 按模型 Top5 均值条） ──
+  // 榜单按 avg 升序（越快越前），并列按 key 字母序；后端 byModel 全量下发
+  // （按样本数排），排序纯前端完成。卡内固定 Top5，不足补占位行；空态例外。
+  const STATS_TTFT_TOP_N = 5;
+  const STATS_TPS_TOP_N = 10;
+  function statsTtftRankedAll() {
+    const ttft = statsData && statsData.ttft ? statsData.ttft : {};
+    const byModel = Array.isArray(ttft.byModel) ? ttft.byModel : [];
+    return byModel.filter((r) => r.avg != null)
+      .sort((a, b) => (a.avg - b.avg) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
+  function statsTpsRankedAll() {
+    const rows = statsData && Array.isArray(statsData.tps) ? statsData.tps : [];
+    return rows.filter((r) => r.avgTps != null && r.avgTps > 0)
+      .sort((a, b) => (b.avgTps - a.avgTps) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  }
   function renderStatsTtft() {
     const chartEl = $("statsTtftChart");
     const barsEl = $("statsTtftBars");
     if (!chartEl || !barsEl) return;
     const ttft = statsData && statsData.ttft ? statsData.ttft : {};
     const daily = Array.isArray(ttft.daily) ? ttft.daily : [];
-    const byModel = Array.isArray(ttft.byModel) ? ttft.byModel : [];
     if (daily.some((d) => d.avg != null || d.p95 != null)) {
       renderStatsLineChart(chartEl, {
         labels: daily.map((d) => statsFmtBucketLabel(d.start)),
@@ -12549,30 +12607,86 @@ async function api(method, path, body) {
     } else {
       chartEl.innerHTML = '<div class="empty-hint">暂无数据</div>';
     }
-    const rows = byModel.filter((r) => r.avg != null).slice(0, 5);
+    const rows = statsTtftRankedAll().slice(0, STATS_TTFT_TOP_N);
     if (rows.length) {
-      statsRenderBars(barsEl, rows.map((r) => ({
+      statsRenderBars(barsEl, rows.map((r, i) => ({
+        rank: i + 1,
         label: r.key,
         value: r.avg,
         valText: `${statsFmtTtft(r.avg)} · p95 ${statsFmtTtft(r.p95)} · ${statsFmtInt(r.samples)} 次`,
-      })));
+      })), { placeholders: STATS_TTFT_TOP_N - rows.length });
     } else {
       barsEl.textContent = "";
     }
   }
 
-  // ── G1：TPS 生成速度（按模型横条） ──
+  // ── G1：TPS 生成速度（按模型横条 Top10 + 占位行；空态例外） ──
   function renderStatsTps() {
     const el = $("statsTpsBars");
     if (!el) return;
-    const rows = statsData && Array.isArray(statsData.tps) ? statsData.tps : [];
-    const valid = rows.filter((r) => r.avgTps != null && r.avgTps > 0);
+    const valid = statsTpsRankedAll();
     if (!valid.length) { el.innerHTML = '<div class="empty-hint">暂无数据</div>'; return; }
-    statsRenderBars(el, valid.map((r) => ({
+    const top = valid.slice(0, STATS_TPS_TOP_N);
+    statsRenderBars(el, top.map((r, i) => ({
+      rank: i + 1,
       label: r.key,
       value: r.avgTps,
       valText: `${Number(r.avgTps).toFixed(1)} tok/s · ${statsFmtInt(r.samples)} 样本`,
-    })));
+    })), { placeholders: STATS_TPS_TOP_N - top.length });
+  }
+
+  // ── F/G1 全量排名弹窗（一卡一窗：kind=ttft/tps；窗内两列纵向连续均分，
+  // 偶均分/奇左多一；序号 1..N 延续与卡片同构；紧凑文本行无横条） ──
+  function hideStatsRankModal() {
+    const m = $("statsRankModal");
+    if (m) m.classList.remove("show");
+  }
+  function openStatsRankModal(kind) {
+    const modal = $("statsRankModal");
+    const titleEl = $("statsRankTitle");
+    const bodyEl = $("statsRankBody");
+    if (!modal || !titleEl || !bodyEl) return;
+    let items;
+    if (kind === "ttft") {
+      titleEl.textContent = "首字响应 TTFT · 全部模型";
+      items = statsTtftRankedAll().map((r) => ({
+        label: r.key,
+        valText: `${statsFmtTtft(r.avg)} · p95 ${statsFmtTtft(r.p95)} · ${statsFmtInt(r.samples)} 次`,
+      }));
+    } else {
+      titleEl.textContent = "TPS 生成速度 · 全部模型";
+      items = statsTpsRankedAll().map((r) => ({
+        label: r.key,
+        valText: `${Number(r.avgTps).toFixed(1)} tok/s · ${statsFmtInt(r.samples)} 样本`,
+      }));
+    }
+    if (!items.length) return; // 空态不開窗（卡内已有「暂无数据」）
+    bodyEl.textContent = "";
+    const wrap = document.createElement("div");
+    wrap.className = "stats-rank-cols";
+    const mid = Math.ceil(items.length / 2); // 奇数左多一
+    [items.slice(0, mid), items.slice(mid)].forEach((colItems, ci) => {
+      const col = document.createElement("div");
+      col.className = "stats-rank-col";
+      colItems.forEach((it, i) => {
+        const n = (ci === 0 ? 0 : mid) + i + 1; // 序号跨列延续
+        const row = document.createElement("div");
+        row.className = "stats-rank-row";
+        row.appendChild(statsRankEl(n));
+        const nm = document.createElement("span");
+        nm.className = "stats-rank-name";
+        nm.textContent = it.label;
+        nm.title = it.label;
+        const vv = document.createElement("span");
+        vv.className = "stats-rank-val";
+        vv.textContent = it.valText;
+        row.appendChild(nm); row.appendChild(vv);
+        col.appendChild(row);
+      });
+      wrap.appendChild(col);
+    });
+    bodyEl.appendChild(wrap);
+    modal.classList.add("show");
   }
 
   // ── G2：端点会话 / 工时（整宽表） ──
