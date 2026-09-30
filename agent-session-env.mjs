@@ -17,9 +17,9 @@
 //     pid in that scheme becomes a per-session random tag.
 
 import { existsSync, readFileSync } from "node:fs";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG } from "./launcher.mjs";
+import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG, isVerifiedDiscoveryVersion } from "./launcher.mjs";
 import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
 import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
 import { buildGrokLauncherEnv } from "./grok-launcher.mjs";
@@ -173,14 +173,33 @@ export function buildAgentSessionEnv({ agentId, port = AGENT_RELAY_PORT, token, 
   return env;
 }
 
+// The terminal flow has no process to probe `claude --version` (assembly happens
+// before any session exists), so the version is read statically from the
+// package.json that ships beside the resolved exe (npm-global layout:
+// <npm>/node_modules/@anthropic-ai/claude-code/bin/claude.exe). The verified
+// 2.1.x family (launcher.mjs) turns discovery on; an unreadable version or one
+// outside the family keeps it off — the same downgrade the per-launch shim
+// applies, now derived instead of hardcoded.
+function claudeDiscoveryEnabled(base) {
+  try {
+    const executable = resolveClaudeExecutable(base);
+    const pkg = JSON.parse(readFileSync(join(dirname(executable), "..", "package.json"), "utf8"));
+    return isVerifiedDiscoveryVersion(pkg?.version);
+  } catch {
+    return false;
+  }
+}
+
 function buildTargetEnv(agentId, { port, token, base, instanceId }) {
   switch (agentId) {
     case "claude": {
-      // discovery is false: no version probe runs in the terminal flow, so the
-      // gateway-discovery flag stays off — the launcher's unverified-family
-      // downgrade. An explicit ANTHROPIC_SMALL_FAST_MODEL in the environment
-      // wins and is NOT injected (the inherited value rides along untouched).
-      const env = buildLauncherEnv({ port, token, discovery: false, base: {} });
+      // discovery is version-gated from the installed package.json: within the
+      // verified family the gateway-discovery flag rides the env and the /model
+      // picker fills from the relay catalog; outside it (or unreadable) the
+      // flag stays off. An explicit ANTHROPIC_SMALL_FAST_MODEL in the
+      // environment wins and is NOT injected (the inherited value rides along
+      // untouched).
+      const env = buildLauncherEnv({ port, token, discovery: claudeDiscoveryEnabled(base), base: {} });
       if (base.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
         const derived = withStoreSmallFastDefault(base);
         env.ANTHROPIC_SMALL_FAST_MODEL = derived.ANYSWITCH_SMALL_FAST_MODEL ?? env.ANTHROPIC_SMALL_FAST_MODEL;

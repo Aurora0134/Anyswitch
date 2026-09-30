@@ -972,6 +972,9 @@ export function createOpenAIRelayServer(deps) {
         // 档位映射接管（Claude 档位名 → 托管模型）：与 per-launch 中继同一顺序纪律，
         // 必须排在号池/链规划与归属读取之前。agentId 由 x-agent-id 或 UA 判定，
         // 所以认不出是 Claude 的请求一律不接管——这条映射只服务 Claude 的词表。
+        // 入站模型归一（[1m] 变体标记 + 桌面路由别名）先于档位接管运行：
+        // 归一后的 body.model 才是档位接管、池/链规划、记账与回显看到的模型。
+        await anthropicHandler.normalizeInboundModel(req.headers, body);
         await anthropicHandler.planTierEntryMessages(req.headers, body, agentId);
 
         // Chain routing (自动路由): body.model === "auto" walks the
