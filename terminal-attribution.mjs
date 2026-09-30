@@ -11,11 +11,11 @@
 //   detected: [{ agentId, pid, ancestors: [pid, ...] }] | null (relay feed)
 //   agents:   [{ id, name, instances?: [{ id, ... }], sessions?: [{ id, ... }] }]
 //             (display names + the pid-tailed rows that decide instanceId
-//             binding — per-launch claude ships its rows under `sessions`)
+//             binding; Claude publishes both `instances` and legacy `sessions`)
 // Returns a NEW array; each attributed session gains
 //   agent: { endpointId, name, pid, instanceId | null }
 // instanceId binds only when a matching "<agentId>-<pid>" row exists in the
-// agents payload's instances ∪ sessions — codex ships no placeholder rows, so
+// agents payload's instances or sessions; codex ships no placeholder rows, so
 // a freshly detected codex client attributes with instanceId null until its
 // first request materializes one. Sessions whose shell pid matches no ancestor
 // chain, and all sessions when `detected` is null/empty, pass through

@@ -1892,7 +1892,7 @@ describe("createAgentMetricsCollector", () => {
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0, "claude traffic must not fall back into the zcode bucket");
     const claude = status.find((a) => a.id === "claude");
-    assert.equal(claude.sessionMode, "per_session", "the claude panel card stays on the per-session path");
+    assert.equal(claude.sessionMode, "per_instance", "the claude panel card uses the unified instance path");
   });
 
   it("never surfaces the virtual chain model on the claude card; the serving node replaces it", async () => {
@@ -1913,7 +1913,7 @@ describe("createAgentMetricsCollector", () => {
 
     let status = await collector.getAgentsStatus();
     let claude = status.find((a) => a.id === "claude");
-    assert.equal(claude.sessionMode, "per_session");
+    assert.equal(claude.sessionMode, "per_instance");
     assert.deepEqual(claude.activeModels, [], "未归因的 auto 请求不进入活跃模型");
     assert.equal(claude.currentModel, null, "auto 不是模型名");
     assert.equal(claude.lastModel, null);
@@ -4367,7 +4367,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
 
   it("exposes the Desktop badge token only for the desktop form", () => {
     assert.equal(claudeSurfaceLabel("desktop"), "Desktop");
-    assert.equal(claudeSurfaceLabel("cli"), null);
+    assert.equal(claudeSurfaceLabel("cli"), "CLI");
     assert.equal(claudeSurfaceLabel(null), null);
   });
 
@@ -4412,7 +4412,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 2, "CLI sessions stay one row per pid");
     assert.deepEqual(card.sessions.map((s) => s.id), ["claude-24956", "claude-24957"]);
-    assert.ok(card.sessions.every((s) => s.surface === undefined), "CLI rows carry no badge");
+    assert.ok(card.sessions.every((s) => s.surface === "CLI"), "CLI rows carry the client-form badge");
   });
 
   it("falls back to per-pid rows when the scan carries no command line (tasklist)", async () => {
@@ -4437,7 +4437,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     assert.deepEqual(card.sessions.map((s) => s.id), ["claude-desktop", "claude-24956"],
       "folded row takes the first desktop member's slot");
     assert.equal(card.sessions[0].surface, "Desktop");
-    assert.equal(card.sessions[1].surface, undefined);
+    assert.equal(card.sessions[1].surface, "CLI");
   });
 
   it("aggregates counters and keeps the freshest telemetry across folded members", async () => {
@@ -4505,7 +4505,10 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const card = claude(await collector.getAgentsStatus());
     assert.deepEqual(
       card.surfaces,
-      [{ surface: "desktop", label: "Desktop", count: 1 }],
+      [
+        { surface: "desktop", label: "Desktop", count: 1 },
+        { surface: "cli", label: "CLI", count: 1 },
+      ],
       "并排的 CLI 行不占形态位：这一格只回答「桌面端开着没有」",
     );
   });
@@ -4517,7 +4520,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
 
     const card = claude(await collector.getAgentsStatus());
-    assert.deepEqual(card.surfaces, [], "没有桌面形态就没有形态副行，不拿「未知」顶替");
+    assert.deepEqual(card.surfaces, [{ surface: "cli", label: "CLI", count: 1 }], "CLI 形态由进程扫描直接提供");
   });
 
   it("drops the folded row once every desktop process is gone", async () => {
