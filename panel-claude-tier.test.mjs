@@ -4,8 +4,9 @@
 // 带任何主题特化」。
 //
 // 文案面钉的是用户拍板过的原句：卡头 Claude Code + 两个开关（以 bypassPermissions
-// 启动 / 接管默认模型，各带一句描述）+ 四行档位名 + placeholder「留空不接管」。
-// 四行本身保持极简、不加解释句。日后要改文案必须连这份断言一起改。
+// 启动 / 接管默认模型，各带一句描述）+ 四行档位名。四行本身保持极简、不加解释句；
+// 下拉首项「不接管」与兜底项「已失效，请重选」是 JS 注入的选项文案，钉在渲染
+// 断言里。日后要改文案必须连这份断言一起改。
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -68,17 +69,22 @@ describe("panel.html · Claude Code 档位映射卡", () => {
     }
   });
 
-  it("每行都是可输入的下拉：共用 datalist + 留空即不接管的占位文案", () => {
-    const inputs = [...tierRows.matchAll(/<input\b[^>]*>/g)].map((m) => m[0]);
-    assert.equal(inputs.length, 4);
-    for (const input of inputs) {
-      assert.match(input, /list="claudeTierModelOptions"/);
-      assert.match(input, /placeholder="留空不接管"/);
-      assert.match(input, /type="text"/);
-      assert.match(input, /autocomplete="off"/);
-      assert.match(input, /class="modal-number settings-tier-input"/);
+  it("每行都是下拉选择：选项由 JS 注入，卡面不出现 wire 前缀或输入残留", () => {
+    const selects = [...tierRows.matchAll(/<select\b[^>]*>/g)].map((m) => m[0]);
+    assert.equal(selects.length, 4);
+    for (const tier of ["Sonnet", "Opus", "Fable", "Haiku"]) {
+      const hit = selects.find((s) => s.includes(`id="claudeTier${tier}Input"`));
+      assert.ok(hit, `claudeTier${tier}Input 必须是 select`);
+      assert.match(hit, /class="modal-number settings-tier-input"/);
     }
-    assert.equal((html.match(/<datalist id="claudeTierModelOptions">/g) ?? []).length, 1);
+    // 静态 markup 不带任何 option（选项全部由 renderClaudeTierOptions 注入），
+    // datalist 形态与输入框残留一并清零。
+    assert.equal(tierRows.includes("<option"), false);
+    assert.equal((html.match(/<datalist id="claudeTierModelOptions">/g) ?? []).length, 0);
+    assert.equal((html.match(/list="claudeTierModelOptions"/g) ?? []).length, 0);
+    assert.equal((html.match(/<input class="modal-number settings-tier-input"/g) ?? []).length, 0);
+    // anthropic/ 前缀只是线上身份，不得以任何静态属性形式进卡面。
+    assert.equal(tierRows.includes("anthropic/"), false);
   });
 
   it("四行保持极简形态：只有档位名与控件，不加解释句", () => {
@@ -88,11 +94,9 @@ describe("panel.html · Claude Code 档位映射卡", () => {
 });
 
 describe("panel.js · 逐行即改即存与回滚", () => {
-  it("四行各自绑定 change 与回车，落到带档位名的保存调用", () => {
-    const block = sliceBetween(js, "for (const [tier, input] of Object.entries(claudeTierInputs))", "\n  }\n", "档位行绑定");
-    assert.match(block, /input\.onchange = \(\) => persistClaudeTier\(tier, input\.value\)/);
-    assert.match(block, /e\.key === "Enter"/);
-    assert.match(block, /persistClaudeTier\(tier, input\.value\)/);
+  it("四行各自绑定 change（下拉无回车路径），落到带档位名的保存调用", () => {
+    assert.match(js, /input\.onchange = \(\) => persistClaudeTier\(tier, input\.value\)/);
+    assert.equal(js.includes("input.onkeydown = (e) => {"), false, "下拉形态不再有回车保存路径");
   });
 
   it("PATCH 只带本次改动的那一档，其余三档不受牵连", () => {
@@ -141,7 +145,7 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.match(js, /claudeBypassPermissionsToggle\.checked = d\.settings\.claudeBypassPermissions;/);
   });
 
-  it("下拉选项取 storeRows 同源（号池出合并行、成员并集），值是中继认得的完整模型名", () => {
+  it("下拉选项取 storeRows 同源（号池出合并行、成员并集），值是完整模型名、文本无 wire 前缀", () => {
     const render = sliceBetween(js, "function renderClaudeTierOptions()", "\n    async function persistClaudeTier(", "renderClaudeTierOptions");
     assert.match(render, /for \(const row of storeRows\(\)\)/);
     assert.match(render, /anthropic\/\$\{row\.id\}\/\$\{modelId\}/);
@@ -149,9 +153,14 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     // 名称来自用户自填的渠道/模型显示名，进 DOM 与属性都必须过转义。
     assert.match(render, /value="\$\{esc\(wireId\)\}"/);
     assert.match(render, /">\$\{esc\(`\[\$\{label\}\] \$\{shown\}`\)\}<\/option>/);
-    // 修掉的掉回默认：重画选项后按已存映射回填四行（select 形态下重画会跳回
-    // 首项，不回填则切页回来显示与磁盘真值不符）。
-    assert.match(render, /list\.innerHTML = options\.join\(""\);\n\s*\/\/ 重画选项后必须按已存映射把四行回填一遍/);
+    // 首项固定「不接管」；已存值不在候选集时补「已失效，请重选」——与链编辑器
+    // 「已保存但目录里消失的模型补入选项」同一口径。
+    assert.match(render, /const base = \[`<option value="">不接管<\/option>`\];/);
+    assert.match(render, /options\.push\(`<option value="\$\{esc\(current\)\}">已失效，请重选<\/option>`\);/);
+    // 逐行各自的选项表挂到各自的 select；wire 前缀只存在于 value，不进显示文本。
+    assert.match(render, /input\.innerHTML = options\.join\(""\);/);
+    // 修掉的掉回默认：重画选项后按已存映射回填四行（select 重画会跳回首项，
+    // 不回填则切页回来显示与磁盘真值不符）。
     assert.match(render, /\n\s*applyClaudeTierUi\(\);\n\s*\}/);
   });
 
@@ -167,6 +176,8 @@ describe("panel.css · 档位行只管版式", () => {
     assert.equal(/(background|border|color|outline|box-shadow)\s*:/.test(rule), false);
     assert.match(rule, /width: min\(320px, 46vw\)/);
     assert.match(rule, /text-align: left/);
+    // select 形态没有 placeholder，输入框时代的占位规则不得回潮成死代码。
+    assert.equal(css.includes(".settings-tier-input::placeholder"), false);
   });
 
   it("收起容器显式声明 [hidden]，不依赖 UA 默认样式", () => {
