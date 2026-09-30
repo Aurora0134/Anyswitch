@@ -65,6 +65,7 @@ const REPO_XTERM_JS = join(dirname(fileURLToPath(import.meta.url)), "node_module
 const REPO_XTERM_CSS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "css", "xterm.css");
 const REPO_XTERM_FIT_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
 const REPO_XTERM_UNICODE11_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-unicode11", "lib", "addon-unicode11.js");
+const REPO_XTERM_WEBGL_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-webgl", "lib", "addon-webgl.js");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
 const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
@@ -1765,6 +1766,13 @@ export function createPanelRouter({
         return res.end();
       }
       return servePanelFile(res, req, REPO_XTERM_UNICODE11_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm-webgl.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_WEBGL_JS, "text/javascript; charset=utf-8");
     }
 
     if (path === "/panel/assets/logo.png" && (method === "GET" || method === "HEAD")) {

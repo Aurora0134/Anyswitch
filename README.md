@@ -31,7 +31,7 @@ A local AI credential relay for Windows: it funnels multiple OpenAI-compatible u
 
 - Windows (the credential store relies on Windows DPAPI)
 - **Node.js 24 LTS recommended.** Required API range: `>=22.15.0 <23 || >=23.8.0`. Session reading uses Node's built-in SQLite and zstd APIs; the range states the API minimum, not that every matching Node version has been tested.
-- Nothing to install for the relay and panel. For the experimental virtual terminal, run `npm install` once in the install directory — it pulls one terminal process binding plus a terminal renderer and two add-ons. Without it everything else still runs; only the virtual terminal page fails to open.
+- Nothing to install for the relay and panel. For the experimental virtual terminal, run `npm install` once in the install directory — it pulls one terminal process binding plus a terminal renderer and three add-ons. Without it everything else still runs; only the virtual terminal page fails to open.
 
 ### Installation
 
