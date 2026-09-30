@@ -150,7 +150,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 ### 流转发与保活
 - `stream-pipe.mjs` — 三条 relay 管线（OpenAI 直通、常驻 Anthropic、一次性 Anthropic）共用的流转发管道：抗截断保活、重试、usage 采集与错误归因都在此一处实现，各前端只传入自己的渠道描述符。
 - `keepalive-backoff.mjs` — 保活重试的退避时长表，纯函数、RNG 可注入，便于测试钉死具体数值。
-- `late-socket-instance.mjs` — socket 归属晚于请求开始时的实例补挂：把已开始的请求挂到后到的进程身份上。参与端点是白名单（`SOCKET_FALLBACK_AGENT_IDS`，与 collector 的 `instanceBuckets` 同口径：kimi/opencode/pi/codex/grok/dsh），未列入的端点一律不兜底。
+- `late-socket-instance.mjs` — socket 归属晚于请求开始时的实例补挂：把已开始的请求挂到后到的进程身份上。参与端点是白名单（`SOCKET_FALLBACK_AGENT_IDS`，与 collector 的 `instanceBuckets` 同口径：kimi/opencode/pi/codex/grok/dsh/claude），未列入的端点一律不兜底。claude 在列是因为桌面端从不经过本机启动器（它把网关直接指向常驻 relay，因而没有每会话上报器），反查属主进程是它唯一的身份来源。
 
 ### 观测·统计·会话
 - `agent-metrics.mjs` — 进程与请求观测采集器：扫描各家客户端进程、维护端点级与会话级实时状态、按 agentId 分桶，向面板下发看板所需的计数、折线样本与链归因；含实例 id 归一与迟到挂载重放。累计量与样本窗跨进程重启持久化（`agent-metrics-snapshot.json`，30s 防抖 + 退出前冲刷）：relay 重启/换新后看板立即回到重启前的数据，不再出现整段空窗；在飞计数与故障闩锁属活状态，恢复时一律归零。

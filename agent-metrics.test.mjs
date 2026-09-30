@@ -4481,6 +4481,45 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     assert.equal(row.lastTtftMs, 1200, "telemetry comes from the freshest member carrying a value");
   });
 
+  it("publishes the desktop surface summary as one entry per folded row", async () => {
+    // 卡头副行的计数口径是**折叠后的行数**，不是进程数：一个桌面端 = 一张
+    // 界面形态，与卡上「N 实例」胶囊同口径。12 个进程不会变成 Desktop ×12。
+    const csv = wmic([
+      `LAPTOP,${SHELL},Claude.exe,6200`,
+      `LAPTOP,${SHELL} --type=gpu-process,Claude.exe,6201`,
+      `LAPTOP,${SHELL} --type=renderer,Claude.exe,6202`,
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }]);
+  });
+
+  it("keeps the desktop entry at one row when a CLI session runs alongside it", async () => {
+    const csv = wmic([
+      `LAPTOP,${SHELL},Claude.exe,6200`,
+      "LAPTOP,C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,24956",
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.deepEqual(
+      card.surfaces,
+      [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "并排的 CLI 行不占形态位：这一格只回答「桌面端开着没有」",
+    );
+  });
+
+  it("publishes no surface summary when only per-pid CLI rows exist", async () => {
+    const csv = wmic([
+      "LAPTOP,C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,24956",
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.deepEqual(card.surfaces, [], "没有桌面形态就没有形态副行，不拿「未知」顶替");
+  });
+
   it("drops the folded row once every desktop process is gone", async () => {
     let alive = true;
     const execFn = (cmd, opts, cb) =>

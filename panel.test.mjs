@@ -3925,6 +3925,23 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
       "卡头走同源胶囊列表（虚拟 auto 已被过滤）");
   });
 
+  it("claude 卡头有形态副行位，且与其他多实例卡同序、同渲染器", () => {
+    const cardStart = panelHtml.indexOf('data-agent-id="claude"');
+    const cardEnd = panelHtml.indexOf('data-agent-id="', cardStart + 20);
+    const ccCard = panelHtml.slice(cardStart, cardEnd);
+    assert.ok(cardStart > 0, "claude card container exists");
+    assert.ok(ccCard.includes('id="ccSurfaceSummary"'), "卡头有形态副行位");
+    assert.ok(
+      ccCard.indexOf('id="ccInstanceCount"') < ccCard.indexOf('id="ccSurfaceSummary"'),
+      "副行排在实例计数胶囊之后（与 DSH/Kimi 卡同序）",
+    );
+
+    const m = panelJs.match(/function renderClaude\(c\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderClaude found in panel.js");
+    assert.ok(m[0].includes('renderSurfaceSummary("cc", c.surfaces)'), "卡头副行按形态汇总");
+    assert.ok(m[0].includes('renderSurfaceSummary("cc", [])'), "停止态显式清副行（CSS 不藏徽标，脏值会挂到下一轮）");
+  });
+
   it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {    const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "claudeAggregateMetrics exists in panel.js");
     assert.ok(m[1].includes("tokens.prompt += tk.prompt || 0;"), "tokens 累加");

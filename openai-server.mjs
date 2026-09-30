@@ -72,9 +72,12 @@ function explicitInstanceId(headers) {
 // Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。x-agent-instance
 // 头仍是唯一正源且优先；只有头缺失（或非法
 // 被静默丢弃）时，才对多实例端点（白名单在 late-socket-instance.mjs，与
-// agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh）
+// agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh/claude）
 // 用 netstat 快照反查 keep-alive 连接对端进程，
-// 合成 "<agentId>-<pid>"。zcode/claude 保持聚合一桶，一律不兜底。
+// 合成 "<agentId>-<pid>"。zcode 保持聚合一桶，一律不兜底。
+// claude 在列是因为它的桌面端不经过本机启动器：桌面端把网关直接指向常驻中继
+// （没有每会话上报器），反查属主进程是它唯一的身份来源；经启动器起的 Claude
+// Code 仍走自己的 per-launch 中继、仍有上报器行，两条路径互斥不重复计数。
 // pid === process.pid 说明该 socket 归 relay 自己（自环/进程内转发），同样不
 // 兜底，避免把 relay 进程伪造成一个实例。
 // 两条路径的 id 都在 collector.startRequest 内过 normalizeInstanceId（消费侧

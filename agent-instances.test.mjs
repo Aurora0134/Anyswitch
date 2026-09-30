@@ -161,7 +161,11 @@ describe("per-instance aggregate tracking", () => {
       assert.deepEqual(agent.instances.map((i) => i.id), [`${agentId}-one`], `${agentId} instance`);
     }
     // dsh became instance-capable with the DSH-TUI integration (一行 = 一个 DSH
-    // 进程); zcode/qoder/claude keep the aggregate-only shape.
+    // 进程); zcode/qoder keep the aggregate-only shape. claude 也在这一组里，
+    // 但理由不同：它有一个 instanceBuckets.claude 承载常驻中继的流量，却**不**
+    // 下发 instances 数组——claude 卡是 per-session 报表，那些桶计数由
+    // getActiveClaudeSessions 按 PID 并进会话行（见 agent-instances.test.mjs 的
+    // 「常驻中继流量按连接属主进程落会话行」一组测试）。
     for (const agentId of ["zcode", "qoder", "claude"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.equal("instances" in agent, false, `${agentId} must stay aggregate-only`);
@@ -735,6 +739,178 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
       const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
       assert.deepEqual(kimi.instances, [], "self-loop pid must not become a fake instance");
       assert.equal(kimi.metrics.totalRequests, 1);
+    } finally {
+      await close();
+    }
+  });
+});
+
+describe("claude 常驻中继流量按连接属主进程落会话行", () => {
+  // Claude Desktop 从不经过 anys 启动器，所以它没有 per-launch 会话上报器：
+  // 卡上那一行的全部数值此前恒空，只有进程扫描给的存活状态。这里把常驻中继
+  // 上归到 claude 的流量按 netstat 反查出的属主进程记账，桌面端（与终端里自己
+  // 敲 claude 的形态）就都能在有流量时出数。
+  const TOKEN = "test-token-claude-owner";
+  const STORE = {
+    version: 2,
+    providers: {
+      "poke-api": {
+        displayName: "Poke",
+        baseURL: "https://upstream.invalid/v1",
+        protocol: "openai-compatible",
+        credentialFile: "poke-api.dpapi",
+        models: { "claude-opus-5": { displayName: "Opus 5" } },
+      },
+    },
+  };
+  const NO_RETRY = () => ({ enabled: false, maxRetries: 0, backoffMs: 1 });
+
+  const ENGINE = "C:\\Users\\tester\\AppData\\Local\\Claude-3p\\claude-code\\2.1.246\\claude.exe";
+
+  // `advance` 在首字与末字之间拨钟：TPS 只在真实生成窗口（首 token → 请求结束，
+  // 且 ≥200ms）上有值，不拨钟的流是同一毫秒里开始又结束，量不出速度。
+  function anthropicSse(advance = () => {}) {
+    return (async function* () {
+      const enc = new TextEncoder();
+      yield enc.encode('data: {"id":"1","choices":[{"delta":{"content":"hi"}}]}\n\n');
+      advance();
+      yield enc.encode('data: {"id":"1","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":20}}\n\n');
+      yield enc.encode("data: [DONE]\n\n");
+    })();
+  }
+
+  function claudeCollector(execFn, opts = {}) {
+    const patched = { loadSparkSettings: false, execFn, ...opts };
+    patched.spawnFn = makeShimPsSpawn(execFn);
+    return createAgentMetricsCollector(patched);
+  }
+
+  function desktopDeps(collector, socketOwner, advance = () => {}) {
+    return {
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store: STORE }),
+      loadCredential: async () => ({ ok: true, value: "SENTINEL" }),
+      upstreamFetch: async () => ({ ok: true, status: 200, body: anthropicSse(advance) }),
+      recordGeneration: () => {},
+      readGeneration: () => null,
+      metricsCollector: collector,
+      socketOwner,
+      getKeepAliveConfig: NO_RETRY,
+    };
+  }
+
+  // 桌面端 3p profile 在部署配置里注入了 x-agent-id: claude，UA 不是 claude-cli
+  // （实测就是 Electron/Chromium 那串）——这正是 relay 认桌面请求的两个判据。
+  function postDesktopMessage(port) {
+    return fetch(`http://127.0.0.1:${port}/v1/messages`, {
+      method: "POST",
+      headers: {
+        authorization: TOKEN,
+        "content-type": "application/json",
+        "x-agent-id": "claude",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+      },
+      body: JSON.stringify({
+        model: "anthropic/poke-api/claude-opus-5",
+        max_tokens: 64,
+        stream: true,
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    });
+  }
+
+  it("常驻中继收到的 claude 流量落到属主进程那一行，并带 Desktop 徽标", async () => {
+    let t = 1000;
+    const execFn = (cmd, opts, cb) => cb(null, `Node,CommandLine,Name,ProcessId\r\nLAPTOP,${ENGINE},claude.exe,6200\r\n`);
+    const collector = claudeCollector(execFn, { nowFn: () => t });
+    const socketOwner = { lookup: () => 6200 };
+    const server = createOpenAIRelayServer(desktopDeps(collector, socketOwner, () => { t += 1000; }));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postDesktopMessage(port);
+      assert.equal(res.status, 200);
+      await res.text();
+
+      t += 3000;
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.equal(card.sessionsCount, 1, "桌面形态折叠成一行");
+      const row = card.sessions[0];
+      assert.equal(row.id, "claude-desktop");
+      assert.equal(row.surface, "Desktop", "折叠行照样贴桌面徽标");
+      assert.equal(row.requests, 1, "请求数进这一行");
+      assert.equal(row.tokens.prompt, 100, "prompt token 进这一行");
+      assert.equal(row.tokens.completion, 20, "completion token 进这一行");
+      assert.ok(row.tps > 0, "有生成窗口就有速度，四宫格不再恒空");
+      assert.ok(row.lastTtftMs > 0, "首字响应有值");
+      assert.ok(
+        Array.isArray(row.sparkHistory?.tps) && row.sparkHistory.tps.length > 0,
+        "折线历史随行下发，刷新后曲线能整线恢复",
+      );
+    } finally {
+      await close();
+    }
+  });
+
+  it("终端里自己起的 claude 归到自己那一行，不并进桌面形态", async () => {
+    let t = 1000;
+    // 终端形态的镜像路径是 npm 全局 CLI：不折，逐 PID 成行。
+    const cliExe = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+    const execFn = (cmd, opts, cb) => cb(null, `Node,CommandLine,Name,ProcessId\r\nLAPTOP,${cliExe},claude.exe,4321\r\n`);
+    const collector = claudeCollector(execFn, { nowFn: () => t });
+    const socketOwner = { lookup: () => 4321 };
+    const server = createOpenAIRelayServer(desktopDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postDesktopMessage(port);
+      assert.equal(res.status, 200);
+      await res.text();
+
+      t += 3000;
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.deepEqual(card.sessions.map((s) => s.id), ["claude-4321"], "CLI 行保持逐 PID 身份");
+      assert.equal(card.sessions[0].surface, undefined, "CLI 行不贴形态徽标");
+      assert.equal(card.sessions[0].requests, 1);
+      assert.equal(card.sessions[0].tokens.prompt, 100);
+    } finally {
+      await close();
+    }
+  });
+
+  it("反查看不出属主时不记账到任何行，端点聚合照常计数", async () => {
+    let t = 1000;
+    const execFn = (cmd, opts, cb) => cb(null, "");
+    const collector = claudeCollector(execFn, { nowFn: () => t });
+    const socketOwner = { lookup: () => null };
+    const server = createOpenAIRelayServer(desktopDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postDesktopMessage(port);
+      assert.equal(res.status, 200);
+      await res.text();
+
+      t += 3000;
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.equal(card.sessionsCount, 0, "没有进程也没有上报器时不出幽灵行");
+    } finally {
+      await close();
+    }
+  });
+
+  it("属主进程报的是中继自己的进程号（自环）时同样不记账", async () => {
+    let t = 1000;
+    const execFn = (cmd, opts, cb) => cb(null, "");
+    const collector = claudeCollector(execFn, { nowFn: () => t });
+    const socketOwner = { lookup: () => process.pid };
+    const server = createOpenAIRelayServer(desktopDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postDesktopMessage(port);
+      assert.equal(res.status, 200);
+      await res.text();
+
+      t += 3000;
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.equal(card.sessionsCount, 0, "中继进程自己不是 claude 会话");
     } finally {
       await close();
     }

@@ -5,8 +5,16 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // opencode have: each DSH surface (web UI, TUI, custom profile) is its own
 // process holding its own keep-alive connection to the loopback relay, and it
 // sends no instance header of its own — the terminal user launches `dsh`/`dst`,
-// not an Anyswitch launcher. zcode/claude stay aggregate-only.
-const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok"]);
+// not an Anyswitch launcher. zcode stays aggregate-only.
+//
+// claude joins because its desktop app never crosses our launcher: the app
+// points its gateway at the resident relay itself (no per-launch relay, hence no
+// session reporter), so the reverse lookup is the only way to tell which claude
+// process a resident request belongs to. Requests from a launcher-started Claude
+// Code still arrive on their own per-launch relay and keep their reporter rows;
+// a request whose owner cannot be resolved stays on the aggregate bucket, and
+// the card falls back to the process scan for liveness (unchanged behavior).
+const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "claude"]);
 
 export function instanceIdFromSocket(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;
