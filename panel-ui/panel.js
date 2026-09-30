@@ -3113,7 +3113,7 @@ async function api(method, path, body) {
     }
 
     // ── Claude Code 档位映射 ────────────────────────────────────────────
-    // 四行「可输入的下拉」：值 = anyswitch 托管模型的完整模型名，留空 = 该档位
+    // 四行「不接管」下拉：值 = anyswitch 托管模型的完整模型名，「不接管」= 该档位
     // 不接管。逐行独立「即改即存 + 失败回滚」，与本页其余设置项同一语义；中继侧
     // 每次请求都重读设置，所以保存即生效，不需要重启任何端点。四行的显隐由
     // 「接管默认模型」总开关驱动：关 = 收起且映射暂停生效（服务端返回空映射），
@@ -3141,14 +3141,16 @@ async function api(method, path, body) {
       }
     }
 
-    // 下拉选项 = 中继此刻真的认得的模型全集：与「自动路由」同源的 storeRows()
-    // （号池按合并行出、成员行不重复出现），成员并集即该池的可见目录；值就是
-    // 中继的完整模型名。渠道增删后重进「通用」即随 store state 一起刷新。
+    // 下拉选项 = 中继此刻真的认得的模型全集 + 首项「不接管」：与「自动路由」同源
+    // 的 storeRows()（号池按合并行出、成员行不重复出现），成员并集即该池的可见
+    // 目录；值就是中继的完整模型名，卡面上只见「[渠道名] 模型显示名」——
+    // anthropic/ 前缀只是骗过 Claude Code 目录过滤的线上身份，不进任何用户可读
+    // 文本（统计页剥前缀是同一口径）。渠道增删后重进「通用」即随 store state
+    // 一起刷新。已存的值不在候选集时（渠道已删/模型下架）补一项「已失效」如实
+    // 显示——与链编辑器「已保存但目录里消失的模型补入选项」同一口径。
     function renderClaudeTierOptions() {
-      const list = $("claudeTierModelOptions");
-      if (!list) return;
       const seen = new Set();
-      const options = [];
+      const base = [`<option value="">不接管</option>`];
       for (const row of storeRows()) {
         const label = row.kind === "pool" ? (row.displayName || row.id) : ((row.p && row.p.displayName) || row.id);
         const models = {};
@@ -3162,14 +3164,21 @@ async function api(method, path, body) {
           if (seen.has(wireId)) continue;
           seen.add(wireId);
           const shown = (models[modelId] && models[modelId].displayName) || modelId;
-          options.push(`<option value="${esc(wireId)}">${esc(`[${label}] ${shown}`)}</option>`);
+          base.push(`<option value="${esc(wireId)}">${esc(`[${label}] ${shown}`)}</option>`);
         }
       }
-      list.innerHTML = options.join("");
+      for (const [tier, input] of Object.entries(claudeTierInputs)) {
+        if (!input) continue;
+        const options = base.slice();
+        const current = claudeTierMappings[tier] ?? "";
+        if (current && !seen.has(current)) {
+          options.push(`<option value="${esc(current)}">已失效，请重选</option>`);
+        }
+        input.innerHTML = options.join("");
+      }
       // 重画选项后必须按已存映射把四行回填一遍：进「通用」子页每次都重画，
-      // 而重画会把控件内容重建（select 形态下直接跳回首项），不回填就会出现
-      // 「切页回来显示与磁盘真值不符」——正是这个卡修掉的掉回默认问题。
-      // 正在保存的那一行按 claudeTierSaving 跳过，不会被旧选项盖掉。
+      // 重画会把 select 重建跳回首项，不回填就会出现「切页回来显示与磁盘真值
+      // 不符」——正在保存的那一行按 claudeTierSaving 跳过，不会被旧选项盖掉。
       applyClaudeTierUi();
     }
 
@@ -3209,12 +3218,6 @@ async function api(method, path, body) {
     for (const [tier, input] of Object.entries(claudeTierInputs)) {
       if (!input) continue;
       input.onchange = () => persistClaudeTier(tier, input.value);
-      input.onkeydown = (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          persistClaudeTier(tier, input.value);
-        }
-      };
     }
 
     async function persistKeepAliveRetries(raw) {

@@ -803,7 +803,6 @@
     width: min(320px, 46vw); text-align: left;
     font-family: var(--font-mono); font-weight: 500;
   }
-  .settings-tier-input::placeholder { color: var(--text-3); font-weight: 500; }
   /* 四档行的收起容器：总开关关掉时整块藏起（显式声明打底，防止将来给容器加
      display 规则时盖掉 UA 的 [hidden] 行为——见 panel.css:515 同因注释）。 */
   #claudeTierRows[hidden] { display: none; }

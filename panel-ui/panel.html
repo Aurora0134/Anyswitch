@@ -1671,9 +1671,10 @@ if (window.panelStartupController) panelStartupPlay();
 
       <!-- Claude Code 卡：一个启动开关 + 一组档位接管。bypassPermissions 开 =
            一键启动 Claude Code 时跳过工具权限确认；「接管默认模型」是四档映射的
-           总开关，关时收起下方四行、映射暂停生效但已填的值保留。四行「可输入的
-           下拉」（input + 共用 datalist），值 = anyswitch 托管模型的完整模型名
-           （anthropic/渠道/模型），留空 = 该档位不接管。选项由 panel.js 从 store
+           总开关，关时收起下方四行、映射暂停生效但已填的值保留。四行是下拉选择
+           （select），值 = anyswitch 托管模型的完整模型名（anthropic/渠道/模型），
+           首项「不接管」= 该档位不接管；卡面只显示「[渠道名] 模型显示名」，wire
+           前缀不进用户可读文本。选项由 panel.js 从 store
            state 生成（与「自动路由」同源，号池取成员并集）。控件沿用 modal-item /
            modal-number 既有类，新增类只管宽度与文字对齐、不带任何颜色取值，因此
            三套主题与亮暗无需特化。 -->
@@ -1710,27 +1711,26 @@ if (window.panelStartupController) panelStartupPlay();
               <div>
                 <div class="modal-item-title">Sonnet</div>
               </div>
-              <input class="modal-number settings-tier-input" type="text" id="claudeTierSonnetInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+              <select class="modal-number settings-tier-input" id="claudeTierSonnetInput"></select>
             </div>
             <div class="modal-item">
               <div>
                 <div class="modal-item-title">Opus</div>
               </div>
-              <input class="modal-number settings-tier-input" type="text" id="claudeTierOpusInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+              <select class="modal-number settings-tier-input" id="claudeTierOpusInput"></select>
             </div>
             <div class="modal-item">
               <div>
                 <div class="modal-item-title">Fable</div>
               </div>
-              <input class="modal-number settings-tier-input" type="text" id="claudeTierFableInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+              <select class="modal-number settings-tier-input" id="claudeTierFableInput"></select>
             </div>
             <div class="modal-item">
               <div>
                 <div class="modal-item-title">Haiku</div>
               </div>
-              <input class="modal-number settings-tier-input" type="text" id="claudeTierHaikuInput" list="claudeTierModelOptions" placeholder="留空不接管" autocomplete="off" spellcheck="false">
+              <select class="modal-number settings-tier-input" id="claudeTierHaikuInput"></select>
             </div>
-            <datalist id="claudeTierModelOptions"></datalist>
           </div>
         </div>
       </div>
