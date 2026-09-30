@@ -578,7 +578,7 @@ test("安装动作走 install，完成后重新检测", async () => {
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
 });
 
-test("批量更新逐行串行、批量期间各行动作位禁用、收尾汇总并重新检测", async () => {
+test("批量更新并行派出：一次确认后两个 POST 同时发、批量期间各行动作位禁用、收尾汇总并重新检测", async () => {
   const pending = new Map();
   const posts = [];
   let seq = 0;
@@ -600,12 +600,15 @@ test("批量更新逐行串行、批量期间各行动作位禁用、收尾汇�
   assert.match(h.get("aboutUpdateAll").textContent, /全部更新 \(2\)/);
   const batch = h.get("aboutUpdateAll").click();
   await flush();
-  assert.deepEqual(posts.map((post) => post.id), ["claude"], "批量逐行推进，同一时刻只动一行");
-  assert.equal(actionButton(h, "codex").disabled, true, "批量进行中其他行先禁点，免得同一行被两个任务同时更新");
-  pending.get("run-1")(doneRun("run-1", "claude"));
-  await flush();
-  assert.deepEqual(posts.map((post) => post.id), ["claude", "codex"]);
+  // 服务端锁按客户端分，不同客户端互不触碰对方目录，批量一次并发派出全部任务
+  assert.deepEqual([...posts.map((post) => post.id)].sort(), ["claude", "codex"], "批量一次性并行派出，不逐行等前一个完成");
+  assert.equal(actionButton(h, "claude").disabled, true, "批量进行中动作位禁点，免得同一行被两个任务同时更新");
+  assert.equal(actionButton(h, "codex").disabled, true);
   pending.get("run-2")(doneRun("run-2", "codex", { message: "已更新到 1.2.0" }));
+  await flush();
+  assert.match(h.toasts.map((toast) => toast.message).join("\n"), /codex 已更新到 1\.2\.0/, "先回包的先提示，不等整批");
+  assert.match(h.get("aboutUpdateAll").textContent, /批量更新中/);
+  pending.get("run-1")(doneRun("run-1", "claude"));
   await batch;
   assert.match(h.toasts.map((toast) => toast.message).join("\n"), /批量更新完成：2 个客户端已更新/);
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
