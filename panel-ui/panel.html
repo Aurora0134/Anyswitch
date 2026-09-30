@@ -1466,10 +1466,10 @@ if (window.panelStartupController) panelStartupPlay();
               首字响应 TTFT
             </h2>
           </div>
-          <div class="card-body">
+          <div class="card-body stats-quad-body">
             <div class="stats-chart" id="statsTtftChart"></div>
             <div class="stats-subhead">按模型 Top5（均值）</div>
-            <div id="statsTtftBars"></div>
+            <div id="statsTtftBars" title="双击查看全部模型"></div>
           </div>
         </div>
       </div>
@@ -1483,7 +1483,10 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="stats-card-note">仅统计流式请求</span>
             </h2>
           </div>
-          <div class="card-body" id="statsTpsBars"></div>
+          <div class="card-body stats-quad-body">
+            <div class="stats-subhead" style="margin-top:0;">按模型 Top10</div>
+            <div id="statsTpsBars" title="双击查看全部模型"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -2381,6 +2384,20 @@ if (window.panelStartupController) panelStartupPlay();
           <span class="slider"></span>
         </label>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 使用统计：TTFT/TPS 全量排名弹窗（一卡一窗，窗内两列纵向连续，条目过多内部滚动） -->
+<div class="modal-overlay stats-rank-modal-overlay" id="statsRankModal">
+  <div class="modal-card" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3 id="statsRankTitle">全部模型</h3>
+      <button class="modal-close-btn" id="statsRankCloseBtn" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body" id="statsRankBody"></div>
+    <div class="modal-foot">
+      <button class="btn" id="statsRankCancelBtn">关闭</button>
     </div>
   </div>
 </div>

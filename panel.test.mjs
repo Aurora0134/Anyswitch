@@ -2099,12 +2099,13 @@ describe("panel.html stats 横条：右端对齐 + 上限留白", () => {
     "utf8",
   );
 
-  it("容器改 grid 三列共享列宽（数值列 max-content 取全组最长行，各行轨道右端严格对齐）", () => {
+  it("容器改 grid 四列共享列宽（序号 max-content + 标签 38% + 轨道 1fr + 数值 max-content，各行轨道右端严格对齐）", () => {
     assert.ok(panelJs.includes('el.classList.add("stats-bars")'), "statsRenderBars 给容器挂 grid 类");
     const m = panelCss.match(/\.stats-bars \{([^}]*)\}/);
     assert.ok(m, ".stats-bars rule found in panel.css");
     assert.match(m[1], /display:\s*grid/, "container is grid");
     assert.match(m[1], /max-content/, "value column sized to the longest row");
+    assert.match(m[1], /max-content minmax\(0, 38%\)/, "首列为序号 max-content 列（R-27），标签列仍 38%");
     assert.ok(panelCss.includes(".stats-bar-row { display: contents"), "rows join the shared grid");
     assert.ok(!panelCss.includes(".stats-bar-row { display: flex"), "old per-row flex rule gone");
     assert.ok(
@@ -2122,6 +2123,116 @@ describe("panel.html stats 横条：右端对齐 + 上限留白", () => {
       panelJs.includes("/ maxV) * STATS_BAR_FILL_MAX"),
       "fill width scales by the cap instead of 100%",
     );
+  });
+});
+
+describe("panel.html stats TTFT/TPS 排名序号 + 双卡等高 + 全量弹窗（R-27/R-28）", () => {
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelCss = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css"),
+    "utf8",
+  );
+
+  it("TTFT 榜按 avg 升序（越快越前）+ 卡内截断 Top5（R-27）", () => {
+    assert.ok(panelJs.includes("const STATS_TTFT_TOP_N = 5"), "TTFT Top5 常量存在");
+    const m = panelJs.match(/function statsTtftRankedAll\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsTtftRankedAll found in panel.js");
+    assert.match(m[1], /a\.avg - b\.avg/, "TTFT 按 avg 升序（越快越前）");
+    assert.match(m[1], /a\.key < b\.key/, "并列按 key 字母序");
+    assert.ok(
+      panelJs.includes("statsTtftRankedAll().slice(0, STATS_TTFT_TOP_N)"),
+      "卡内榜取 Top5（后端全量下发，前端截断）",
+    );
+    assert.ok(panelHtml.includes("按模型 Top5（均值）"), "TTFT 卡小标题仍为 Top5");
+  });
+
+  it("TPS 卡内榜 Top10 + avgTps 降序兜底（R-27）", () => {
+    assert.ok(panelJs.includes("const STATS_TPS_TOP_N = 10"), "TPS Top10 常量存在");
+    const m = panelJs.match(/function statsTpsRankedAll\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "statsTpsRankedAll found in panel.js");
+    assert.match(m[1], /b\.avgTps - a\.avgTps/, "TPS 按 avgTps 降序");
+    assert.ok(
+      panelJs.includes("valid.slice(0, STATS_TPS_TOP_N)"),
+      "卡内榜从全量截断 Top10（此前全量直出）",
+    );
+    assert.ok(panelHtml.includes("按模型 Top10"), "TPS 卡小标题为 Top10");
+  });
+
+  it("排名序号 1..N 复用看板状态检测卡 .ms-rank/.top（R-27）", () => {
+    assert.ok(panelJs.includes("function statsRankEl(n)"), "序号小件 statsRankEl 存在");
+    assert.ok(panelJs.includes('rk.className = "ms-rank"'), "序号复用 .ms-rank 基类（不新造）");
+    assert.ok(panelJs.includes("n <= 2"), "1-2 名挂 .top 走 accent 色");
+    // 卡内榜传 rank：TTFT 与 TPS 同构
+    assert.ok(panelJs.includes("rank: i + 1,"), "卡内榜行带 rank 序号");
+    // CSS：不新造渐变规则；复用看板 .ms-rank/.top（10px mono 灰字，首名 accent）
+    assert.ok(panelCss.includes(".ms-rank {"), "看板 .ms-rank 基类仍在");
+    assert.ok(panelCss.includes(".ms-rank.top"), "看板 .ms-rank.top 首名规则仍在");
+    assert.ok(!panelCss.includes(".stats-bar-rank"), "无新造 .stats-bar-rank 规则");
+    assert.ok(!panelCss.includes("#FFD54F") && !panelCss.includes("#B8860B"), "无金渐变硬编码色");
+    assert.ok(!panelCss.includes("#CFD8DC") && !panelCss.includes("#78909C"), "无银渐变硬编码色");
+  });
+
+  it("榜区悬停提示统一措辞（R-27）", () => {
+    const hits = panelHtml.match(/title="双击查看全部模型"/g) || [];
+    assert.equal(hits.length, 2, "TTFT/TPS 两榜区各一个悬停提示");
+  });
+
+  it("双卡等高：stretch + 卡片纵向撑满 + 占位行补齐（空态例外，R-28）", () => {
+    assert.ok(
+      panelCss.includes(".skills-grid.stats-quad { align-items: stretch; }"),
+      "网格切 stretch（覆盖基座 start）",
+    );
+    assert.ok(
+      panelCss.includes(".skills-grid.stats-quad .panel-card { height: 100%; display: flex; flex-direction: column; }"),
+      "卡片纵向撑满",
+    );
+    assert.ok(panelCss.includes("#statsTtftBars, #statsTpsBars { flex: 1;"), "榜容器 flex:1 顶满卡体");
+    // 占位行：虚线、跨满列、高度贴近常规榜行
+    assert.ok(panelCss.includes(".stats-bar-placeholder {"), "占位行规则存在");
+    assert.ok(panelCss.includes("border-bottom: 1px dashed"), "占位行为虚线行");
+    assert.ok(panelJs.includes("placeholders: STATS_TTFT_TOP_N - rows.length"), "TTFT 缺位补足 5 行");
+    assert.ok(panelJs.includes("placeholders: STATS_TPS_TOP_N - top.length"), "TPS 缺位补足 10 行");
+    // 空态例外：无数据走 empty-hint，不补占位
+    assert.ok(panelJs.includes('<div class="empty-hint">暂无数据</div>'), "空态仍走 empty-hint");
+  });
+
+  it("全量弹窗一卡一窗 + 窗内两列均分 + 空态不开窗（R-28）", () => {
+    for (const id of ["statsRankModal", "statsRankTitle", "statsRankBody", "statsRankCloseBtn", "statsRankCancelBtn"]) {
+      assert.ok(panelHtml.includes(`id="${id}"`), `弹窗骨架 #${id} 存在`);
+    }
+    assert.ok(panelJs.includes("function openStatsRankModal(kind)"), "开窗函数存在");
+    assert.ok(panelJs.includes('openStatsRankModal("ttft")'), "TTFT 榜双击开 TTFT 窗");
+    assert.ok(panelJs.includes('openStatsRankModal("tps")'), "TPS 榜双击开 TPS 窗");
+    assert.ok(panelJs.includes('addEventListener("dblclick"'), "榜区双击接线（非卡头按钮）");
+    // 一卡一窗：kind 分支取各自全量 + 各自标题
+    assert.ok(panelJs.includes('titleEl.textContent = "首字响应 TTFT · 全部模型"'), "TTFT 窗标题");
+    assert.ok(panelJs.includes('titleEl.textContent = "TPS 生成速度 · 全部模型"'), "TPS 窗标题");
+    // 两列纵向连续：奇左多一 + 序号跨列延续 + 紧凑文本行（复用 valText，无横条）
+    assert.ok(panelJs.includes("Math.ceil(items.length / 2)"), "偶均分/奇左多一");
+    assert.ok(panelJs.includes("stats-rank-cols") && panelJs.includes("stats-rank-col"), "两列容器类");
+    assert.ok(panelJs.includes("stats-rank-row") && panelJs.includes("stats-rank-name") && panelJs.includes("stats-rank-val"),
+      "紧凑文本行（序号+模型名+数值）");
+    assert.ok(!panelJs.match(/function openStatsRankModal[\s\S]{0,2000}stats-bar-track/),
+      "弹窗行无横条轨道");
+    // 720px 档 + 内容区 52vh 内部滚动 + 两列 grid（窄屏折单列）
+    assert.ok(panelCss.includes(".stats-rank-modal-overlay .modal-card { max-width: 720px; }"),
+      "弹窗 720px 档（复用差异弹窗规格）");
+    assert.ok(panelCss.includes(".stats-rank-modal-overlay .modal-body { max-height: 52vh; overflow-y: auto; }"),
+      "内容区 52vh 内部滚动（整体一根纵向滚动条、窗高固定）");
+    assert.ok(panelCss.includes(".stats-rank-cols { display: grid; grid-template-columns: 1fr 1fr;"),
+      "窗内两列 grid");
+    // 关闭：✕/按钮/遮罩/Esc；空态不开窗
+    assert.ok(panelJs.includes("function hideStatsRankModal()"), "关窗函数存在");
+    assert.ok(panelJs.includes('e.key === "Escape"'), "Esc 关窗");
+    assert.ok(panelJs.includes("if (e.target === rankModal) hideStatsRankModal()"), "遮罩点击关窗");
+    assert.ok(panelJs.includes("if (!items.length) return;"), "空态不开窗（卡内已有暂无数据）");
   });
 });
 
