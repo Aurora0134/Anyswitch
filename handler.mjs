@@ -356,10 +356,10 @@ export function createHandler(deps) {
     if (typeof body.model !== "string" || body.model.length === 0) return null;
 
     let model = body.model;
-    const changes = [];
+    let changed = false;
     if (model.endsWith("[1m]") && model.length > "[1m]".length) {
       model = model.slice(0, -"[1m]".length);
-      changes.push("1M 变体标记");
+      changed = true;
     }
     // Only a single-segment "anthropic/<code>" can be an alias — real wire ids
     // always carry a provider segment, so they skip the store load entirely.
@@ -374,16 +374,16 @@ export function createHandler(deps) {
         }
         if (real !== null) {
           model = real;
-          changes.push("桌面路由别名");
+          changed = true;
         }
       }
     }
-    if (changes.length === 0) return null;
+    if (!changed) return null;
 
+    // 改写保持静默，不落日志：这是桌面端每个请求都要走的内部步骤（拾取器
+    // 黑名单模型一律以别名下发），播报进面板实时输出只会逐请求刷屏；模型
+    // 的真实落点由统计与会话行呈现，无需在此重复一遍。
     body.model = model;
-    logger?.info?.(
-      `入站模型归一："${changes.join(" + ")}" 归一为真实模型 "${model}"`,
-    );
     return model;
   }
 
