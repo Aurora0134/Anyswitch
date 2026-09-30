@@ -2369,7 +2369,9 @@ async function api(method, path, body) {
       await performLifecycleRun({ id, action });
       if (active) await loadEnvironment(true);
     }
-    // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后在页面串行跑完。
+    // 批量：只挑「有新版本」的，不给未安装的客户端静默装机；一次确认后全部并行派出。
+    // 服务端锁按客户端分（同客户端并发 409），不同客户端互不触碰对方的 npm 目录，
+    // 本机隔离前缀实测过多客户端并发安装互不干扰，不限并发上限。
     // 批量与单行整段时间互斥：否则同一行会被批量与本行同时更新，那正是会互相搬目录的场景。
     async function startUpdateAll() {
       if (lifecycleRuns.size > 0 || lifecycleBatch) return;
@@ -2383,11 +2385,11 @@ async function api(method, path, body) {
       lifecycleBatch = { results: [] };
       const batch = lifecycleBatch;
       updateBatchButton();
-      for (const target of targets) {
-        const result = await performLifecycleRun(target);
-        batch.results.push(result);
-        if (lifecycleBatch !== batch) return; // 中途离开关于页，批量收尾交给服务端与下次检测
-      }
+      // 各目标一任务直发并发跑；中途离开（lifecycleBatch 已置空）就不弹汇总，
+      // 各任务自身的轮询、提示与解锁由 performLifecycleRun 自理，服务端照样跑完。
+      const settled = await Promise.all(targets.map((target) => performLifecycleRun(target)));
+      if (lifecycleBatch !== batch) return; // 中途离开关于页，批量收尾交给服务端与下次检测
+      batch.results = settled;
       lifecycleBatch = null;
       const ran = batch.results.filter((result) => result.outcome !== "skipped");
       if (active) {
