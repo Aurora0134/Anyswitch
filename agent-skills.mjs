@@ -480,14 +480,23 @@ public static class AnySwitchFolderPicker {
   private const uint SIGDN_FILESYSPATH = 0x80058000;
   private const int ERROR_CANCELLED = unchecked((int)0x800704C7);
 
-  [DllImport("user32.dll")]
-  private static extern IntPtr GetForegroundWindow();
-
   // Returns the chosen path, or null when the user cancels. pickFolders
   // toggles FOS_PICKFOLDERS (folder selection, OK only accepts folders);
   // without it this is a plain file-open dialog (OK only accepts files).
   // The stock dialog cannot accept "a folder OR a file" in one box, so the
   // import flow uses file mode and asks for SKILL.md / .zip instead.
+  //
+  // The dialog is shown OWNERLESS on purpose. Owning it to the window that
+  // happened to be foreground at click time looks harmless, but that window
+  // always belongs to another process here (the browser the user just clicked
+  // in — this process has no window of its own to lend). Measured, the shell
+  // refuses such an owner in two different ways, both fatal to the feature:
+  // Show fails outright with E_FAIL so no dialog is ever drawn (the click reads
+  // as dead), or it returns ERROR_CANCELLED a few seconds later with no user
+  // input at all (the dialog flashes and vanishes). Ownerless is the
+  // configuration the dialog is stable in. The cost is cosmetic: it may open
+  // behind the browser and, being an ownerless top-level window, earns its own
+  // taskbar button.
   public static string Pick(string title, bool pickFolders) {
     var dlg = (IFileDialog)(object)new FileOpenDialog();
     uint options;
@@ -496,11 +505,7 @@ public static class AnySwitchFolderPicker {
     if (pickFolders) flags |= FOS_PICKFOLDERS;
     dlg.SetOptions(flags);
     dlg.SetTitle(title);
-    // Owner the dialog to the foreground window (the browser, at click time).
-    // Without an owner the dialog can surface UNDER the browser and, as an
-    // ownerless top-level window, earns its own taskbar button showing the
-    // host process icon.
-    int hr = dlg.Show(GetForegroundWindow());
+    int hr = dlg.Show(IntPtr.Zero);
     if (hr == ERROR_CANCELLED) return null;
     if (hr < 0) Marshal.ThrowExceptionForHR(hr);
     object resultObj;
