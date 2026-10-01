@@ -3670,6 +3670,13 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
   const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
   const launcherRow = (pid, idx) => nodeRow(pid, `"${TUI_LAUNCHERS[idx]}"`);
   const harnessRow = (pid, args) => nodeRow(pid, `"${DSH_BIN}" ${args}`);
+  // The official desktop package: image `DeepSeek Harness.exe`. The shell row
+  // runs the app itself; the host child runs the same image with the bundled
+  // host script — that child is what boots the `desktop` profile.
+  const DESKTOP_EXE = "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe";
+  const DESKTOP_HOST = "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js";
+  const desktopShellRow = (pid, args) => `LAPTOP,"${DESKTOP_EXE}"${args ? ` ${args}` : ""},DeepSeek Harness.exe,${pid}`;
+  const desktopHostRow = (pid) => `LAPTOP,"${DESKTOP_EXE}" --expose-internals "${DESKTOP_HOST}",DeepSeek Harness.exe,${pid}`;
   const wmic = (...rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
   const surfacesOf = (agent) => Object.fromEntries(agent.surfaces.map((s) => [s.label, s.count]));
 
@@ -3774,6 +3781,120 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
     assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4700", "Web"]]);
     assert.equal(dsh.processCount, 1);
+  });
+
+  it("counts the DSH desktop app's host child as one Desktop session, and its shell not at all", async () => {
+    // The official Electron package: `DeepSeek Harness.exe` spawns the same
+    // image again with --expose-internals pointing at its bundled host, and
+    // THAT child boots profile `desktop`. Neither the image name (dsh.exe is
+    // the pip packaging, a different product) nor the engine signature
+    // (…\dsh\lib\bin.js) matches either row, so the desktop used to be absent
+    // from the card entirely — no process, no subline entry, no instance row.
+    // The shell must stay out of the count: counting by image name would read
+    // one boot as two sessions.
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      desktopShellRow(4800, ""),
+      desktopShellRow(4801, "--type=renderer"),
+      desktopHostRow(4802),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.status, "running");
+    assert.equal(dsh.processCount, 1, "只有承载会话的宿主进程计数，桌面壳与渲染进程都不算");
+    assert.deepEqual(surfacesOf(dsh), { Desktop: 1 });
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4802", "Desktop"]]);
+  });
+
+  it("accepts the desktop host on the 3-column probe shape, where the image is argv[0]", async () => {
+    // The legacy probe dump has no Name field: the row is
+    // Node,CommandLine,ProcessId and the image is the command line's leading
+    // token — which for the desktop app contains a space.
+    const execFn = (cmd, opts, cb) => cb(null,
+      `Node,CommandLine,ProcessId\r\nLAPTOP,"C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe" --expose-internals "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js",4900\r\n`);
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { Desktop: 1 });
+  });
+
+  it("does not relabel a user's own `desktop` profile as the desktop app", async () => {
+    // A CLI boot of a profile that happens to be named `desktop` is still a
+    // command-line session; only the bundled host child is the app.
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4850, "--profile desktop"),
+      desktopShellRow(4851, ""),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1, "桌面壳这一行不计数");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4850", "Desktop"]]);
+  });
+
+  it("adds the desktop surface to a mixed set and keeps the subline summing to the count", async () => {
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4860, "web --port 3080"),
+      harnessRow(4861, "--profile dsh-tui"),
+      desktopHostRow(4862),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 3);
+    assert.deepEqual(dsh.surfaces, [
+      { profile: "desktop", label: "Desktop", count: 1 },
+      { profile: "dsh-tui", label: "TUI", count: 1 },
+      { profile: "web", label: "Web", count: 1 },
+    ]);
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]).sort(), [
+      ["dsh-4860", "Web"],
+      ["dsh-4861", "TUI"],
+      ["dsh-4862", "Desktop"],
+    ]);
+  });
+
+  it("asks the resident probe for the desktop image by name", async () => {
+    // 行的第一道门是探针的 WHERE 名单：查询里没有桌面端镜像名，后面所有谓词
+    // 都拿不到这一行。这条把查询文本本身钉住。
+    const seen = [];
+    const spawnFn = () => {
+      const child = new EventEmitter();
+      const stdout = new EventEmitter();
+      stdout.setEncoding = () => {};
+      const stderr = new EventEmitter();
+      stderr.resume = () => {};
+      child.stdin = {
+        write: (text) => {
+          seen.push(text);
+          const marker = (text.match(/Write-Output '([^']+)'/) ?? [])[1] ?? "";
+          stdout.emit("data", `__unused__${marker}\r\n`);
+        },
+      };
+      child.stdout = stdout;
+      child.stderr = stderr;
+      child.kill = () => child.emit("exit", 0);
+      child.unref = () => {};
+      return child;
+    };
+    const collector = testCollector({ nowFn: () => 3000, spawnFn, execFn: (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n") });
+    await collector.getAgentsStatus();
+    assert.ok(seen.length > 0, "探针被问过");
+    assert.ok(seen[0].includes("name='DeepSeek Harness.exe'"), `常驻查询要含桌面端镜像名，实际：${seen[0].slice(0, 200)}`);
+  });
+
+  it("keeps the fire-and-forget desktop shell out of the process count", async () => {
+    // The shell alone (no host child yet, e.g. while it is starting) is not a
+    // session: the card must stay dark until the process that boots a profile
+    // exists.
+    const execFn = (cmd, opts, cb) => cb(null, wmic(desktopShellRow(4900, "")));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 0);
+    assert.equal(dsh.status, "stopped");
+    assert.deepEqual(dsh.instances, []);
   });
 
   it("folds a launcher-tailed instance id against the engine pid, not the shell", () => {

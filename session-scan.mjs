@@ -797,14 +797,83 @@ function createKimiAdapter(roots) {
 }
 
 // ---------------------------------------------------------------------------
-// dsh — ~/.dsh/sessions/--<munged-cwd>--/<uuid>/session.jsonl.zstd. The file is
-// a concatenated-frame zstd container (readZstdContainer above), not a stream.
-// Records are event objects { type, seq, time, data }: the first is the
+// dsh — ~/.dsh/sessions/--<munged-cwd>--/<uuid>/session[.v<N>].jsonl.zstd. The
+// file is a concatenated-frame zstd container (readZstdContainer above), not a
+// stream. Records are event objects { type, seq, time, data }: the first is the
 // {"type":"session"} header carrying id/cwd/createdAt, and the conversation
 // lives in data.content (user/message) and data.message.content
 // (assistant/message, tool/result) — there is no top-level role/content pair
 // anywhere in a real log.
+//
+// The basename carries the on-disk format generation the transcript was written
+// with, and the name is generation-scoped: `session.jsonl` is released v0,
+// `session.v<N>.jsonl` every later one (0.2 writes v4). The harness itself
+// reads "the numerically highest canonical generation" in a session directory
+// (dsh-session-persistence-jsonl README, "On-disk layout"), and a directory
+// keeps one file per generation it has seen — a session continued across an
+// upgrade holds both its old and its current file. Two rules follow, and both
+// are load-bearing:
+//   * listing must pick the highest generation, not a fixed name — otherwise
+//     every session written since 0.2 is invisible (the 2026-10-01 drift: the
+//     adapter still looked for `session.jsonl.zstd` and saw none of the 71 v4
+//     logs on this machine);
+//   * deleting must remove every generation in the directory — removing only
+//     the listed file leaves the older one behind and puts the session back on
+//     the list under its previous generation.
+// The name grammar is the harness's own CANONICAL_LOG_FILENAME (lowercase
+// `.vN`, no leading zero, `.v0` is not a name it writes); `.jsonl` without the
+// compression suffix is the same generation under `compression: 'none'`.
 // ---------------------------------------------------------------------------
+
+const DSH_SESSION_FILE_RE = /^session(?:\.v([1-9][0-9]*))?\.jsonl(\.zstd)?$/;
+
+// Format generation and physical encoding of one candidate basename, or null
+// when the name is not a session log at all.
+function dshSessionName(name) {
+  const match = DSH_SESSION_FILE_RE.exec(name);
+  if (match === null) return null;
+  return { generation: match[1] === undefined ? 0 : Number(match[1]), compressed: match[2] !== undefined };
+}
+
+// Every session-log basename in one session directory, newest generation first.
+function dshSessionNames(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return []; // dir vanished or unreadable — nothing to list
+  }
+  const found = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const parsed = dshSessionName(entry.name);
+    if (parsed !== null) found.push({ name: entry.name, ...parsed });
+  }
+  // A directory holds one encoding (the root's `compression` setting is
+  // root-wide and the harness refuses a mixed root), so generation decides
+  // alone; compressed wins if a directory ever holds both.
+  return found
+    .sort((a, b) => (b.generation - a.generation) || (Number(b.compressed) - Number(a.compressed)) || (a.name < b.name ? -1 : 1))
+    .map((entry) => entry.name);
+}
+
+// The transcript the harness would open: the highest generation in the dir.
+function dshSessionFile(sessionDir) {
+  const [newest] = dshSessionNames(sessionDir);
+  return newest === undefined ? null : join(sessionDir, newest);
+}
+
+// One container for either encoding: a `.jsonl.zstd` file is the frame chain
+// readZstdContainer decodes, a plain `.jsonl` file is one frame of lines.
+function readDshContainer(path) {
+  if (path.endsWith(".zstd")) return readZstdContainer(path);
+  const records = parseJsonl(readFileSync(path, "utf8"));
+  return {
+    frames: [records],
+    decode: (index) => (index === 0 ? records : []),
+    allRecords: () => records,
+  };
+}
 
 // Frames decoded per session while LISTING. A session's first user turn sits
 // near the head of its transcript, so the head is enough for a title and a
@@ -875,10 +944,10 @@ function createDshAdapter(roots) {
           }
           for (const sessionDir of sessionDirs) {
             if (!sessionDir.isDirectory()) continue;
-            const sessionFile = join(projectPath, sessionDir.name, "session.jsonl.zstd");
-            if (!existsSync(sessionFile)) continue;
+            const sessionFile = dshSessionFile(join(projectPath, sessionDir.name));
+            if (sessionFile === null) continue;
             try {
-              const container = readZstdContainer(sessionFile);
+              const container = readDshContainer(sessionFile);
               const head = [];
               const headFrames = Math.min(container.frames.length, DSH_HEAD_MAX_FRAMES);
               for (let i = 0; i < headFrames; i++) {
@@ -929,7 +998,7 @@ function createDshAdapter(roots) {
       // and tool/result records. The assistant/chunk deltas and the packed
       // text-/reasoning-/tool-call-chunks rows repeat the very same content, so
       // they are not read here — reading both would double every turn.
-      for (const record of readZstdContainer(target).allRecords()) {
+      for (const record of readDshContainer(target).allRecords()) {
         const message = dshRecordMessage(record);
         if (message !== null) messages.push(message);
       }
@@ -937,9 +1006,19 @@ function createDshAdapter(roots) {
     },
     async delete(file) {
       const target = assertUnderRoots(file, roots);
-      // The .zstd file is the only artifact inside its <uuid>/ dir — remove both.
-      rmSync(target);
-      const dir = dirname(target);
+      // Every generation in the <uuid>/ dir goes, not only the listed file:
+      // leaving an older generation behind would put the session straight back
+      // on the list under that generation (see the section comment above).
+      // Anything else the directory holds is left alone, and the directory
+      // itself is removed only once it is empty.
+      const dir = assertUnderRoots(dirname(target), roots);
+      for (const name of dshSessionNames(dir)) {
+        try {
+          rmSync(join(dir, name));
+        } catch {
+          // already gone — the remaining names still get their turn
+        }
+      }
       try {
         if (readdirSync(dir).length === 0) rmSync(dir, { recursive: true });
       } catch {

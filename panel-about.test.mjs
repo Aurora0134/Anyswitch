@@ -56,17 +56,18 @@ const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder
 // 与生产 CLIENT_ENTRY_FORMS 同形的端点入口形态枚举（数据下发，徽标按它「/」连写）
 const ENTRY_FORMS = {
   claude: ["CLI", "Desktop"], codex: ["CLI", "Desktop"], opencode: ["CLI"], pi: ["CLI"],
-  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Web"], zcode: ["Desktop"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
+  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop", "Web"], zcode: ["Desktop"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
 };
 function environment() {
   return {
     platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
     clients: ids.map((id) => ({
       id, name: id, entryForms: ENTRY_FORMS[id],
-      // 与生产同形：qoder / codex 一张卡两条安装记录。qoder index 0 是 qodercli.exe 原生
-      // CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；codex index 0 是 npm
-      // CLI、index 1 是 Store 桌面端、remoteId codex-desktop。九个客户端都有官方版本源，
-      // 逐安装记录发起查询，主行只呈现每端点一行。
+      // 与生产同形：qoder / codex / dsh 一张卡两条安装记录。qoder index 0 是 qodercli.exe
+      // 原生 CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；codex index 0 是
+      // npm CLI、index 1 是 Store 桌面端、remoteId codex-desktop；dsh index 0 是 npm 全局
+      // CLI、index 1 是官方桌面端、remoteId dsh-desktop。九个客户端都有官方版本源，逐安装
+      // 记录发起查询，主行只呈现每端点一行。
       installations: id === "qoder"
         ? [
           { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:\\Apps\\qoder\\qodercli.exe", version: "1.0.0", versionSource: "cli --version", issue: null },
@@ -77,6 +78,11 @@ function environment() {
             { kind: "cli", remoteId: "codex", status: "found", path: "C:\\Apps\\codex\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
             { kind: "desktop", remoteId: "codex-desktop", status: "found", path: "C:\\Apps\\codex\\desktop", version: "26.915.4065", versionSource: "appx manifest", issue: null },
           ]
+          : id === "dsh"
+            ? [
+              { kind: "cli", remoteId: "dsh", status: "found", path: "C:\\Apps\\dsh\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+              { kind: "desktop", remoteId: "dsh-desktop", status: "found", path: "C:\\Apps\\dsh\\desktop", version: "3.0.0", versionSource: "app.asar/package.json", issue: null },
+            ]
         : (id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
           kind, remoteId: id,
           status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
@@ -224,7 +230,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 11, "九个客户端都有官方版本源，各安装记录各查一次（qoder CLI 与桌面、codex CLI 与桌面各一条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 12, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh 各两条渠道）");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -299,7 +305,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   await tick(); await tick();
   assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 11, "九个客户端都有官方版本源，各安装记录各查一次（qoder CLI 与桌面、codex CLI 与桌面各一条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 12, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh 各两条渠道）");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {

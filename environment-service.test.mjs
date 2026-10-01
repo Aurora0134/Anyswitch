@@ -296,10 +296,14 @@ test("an empty installation reports all nine clients, with Codex and Qoder as tw
   assert.deepEqual(state.clients[1].installations.map((i) => [i.kind, i.remoteId]), [["cli", "codex"], ["desktop", "codex-desktop"]]);
   // Qoder 与 Codex 同序 [cli, desktop]：index 0 是 qodercli.exe（remoteId qoder-cli）。
   assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
+  // DSH 官方桌面端上线后同样是两条安装记录：index 0 是 npm 全局 CLI（更新按钮装的
+  // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。
+  const dsh = state.clients.find((c) => c.id === "dsh");
+  assert.deepEqual(dsh.installations.map((i) => [i.kind, i.remoteId]), [["cli", "dsh"], ["desktop", "dsh-desktop"]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, ["codex", "qoder"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, ["codex", "qoder", "dsh"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");
@@ -319,7 +323,7 @@ test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", 
     codex: ["CLI", "Desktop"],
     qoder: ["CLI", "Desktop"],
     claude: ["CLI", "Desktop"],
-    dsh: ["CLI", "Web"],
+    dsh: ["CLI", "Desktop", "Web"],
     pi: ["CLI"],
     opencode: ["CLI"],
     grok: ["CLI"],

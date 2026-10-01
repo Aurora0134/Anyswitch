@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { CLIENT_PACKAGES, CLIENT_ACTIONS, NATIVE_CLIENTS, WINGET_CLIENTS, OFFICIAL_MSIX_CLIENTS, clientLifecycleKind, clientLifecycleActions, clientLifecycleLegs, resolveNpmCli, runClientLifecycle } from "./client-lifecycle.mjs";
+import { CLIENT_PACKAGES, CLIENT_ACTIONS, NATIVE_CLIENTS, WINGET_CLIENTS, OFFICIAL_MSIX_CLIENTS, OFFICIAL_FEED_CLIENTS, clientLifecycleKind, clientLifecycleActions, clientLifecycleLegs, resolveNpmCli, runClientLifecycle } from "./client-lifecycle.mjs";
+import { createHash } from "node:crypto";
+import { rmSync, writeFileSync } from "node:fs";
 
 const ALL_CLIENTS = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder"];
 
@@ -58,15 +60,17 @@ function fakeSpawn(impl) {
 }
 
 test("安装命令：node 直跑 npm-cli.js，不经 shell，包名来自服务端固定表", async () => {
+  // dsh 现在是两腿端点（CLI + 桌面端），CLI 腿自身的口径仍与单据端点逐字一致；
+  // 多腿的装配在下面单独钉。这里取一个仍只有单腿的 npm 客户端。
   const { calls, spawn } = fakeSpawn((_, callback) => callback(null, "", ""));
   const npmCli = "C:\\node\\node_modules\\npm\\bin\\npm-cli.js";
   const io = { existsSync: (path) => path === npmCli };
-  const result = await runClientLifecycle({ id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io });
+  const result = await runClientLifecycle({ id: "kimi", action: "update", spawn, execPath: "C:\\node\\node.exe", io });
   assert.equal(result.ok, true);
   assert.equal(calls.length, 1);
   const { file, args, options } = calls[0];
   assert.equal(file, "C:\\node\\node.exe");
-  assert.deepEqual(args, [npmCli, "install", "--global", "--no-audit", "--no-fund", "@deepseek-ai/dsh@latest"]);
+  assert.deepEqual(args, [npmCli, "install", "--global", "--no-audit", "--no-fund", "@moonshot-ai/kimi-code@latest"]);
   assert.equal(options.shell, undefined, "不经 shell，参数是数组逐项传递");
   assert.equal(options.windowsHide, true);
   assert.ok(options.timeout >= 5 * 60 * 1000, "超时是分钟级兜底，不会中途杀掉慢安装");
@@ -237,12 +241,14 @@ test("qoder 检测不到执行体时不执行任何命令", async () => {
 test("形态腿清单：codex 与 claude 双腿，其余单腿或没有", () => {
   assert.deepEqual(clientLifecycleLegs("codex"), [{ form: "cli", kind: "npm" }, { form: "desktop", kind: "winget" }]);
   assert.deepEqual(clientLifecycleLegs("claude"), [{ form: "cli", kind: "npm" }, { form: "desktop", kind: "official-msix" }]);
+  assert.deepEqual(clientLifecycleLegs("dsh"), [{ form: "cli", kind: "npm" }, { form: "desktop", kind: "official-feed" }]);
   assert.deepEqual(clientLifecycleLegs("kimi"), [{ form: "cli", kind: "npm" }]);
   assert.deepEqual(clientLifecycleLegs("qoder"), [{ form: "cli", kind: "native" }]);
   assert.deepEqual([...clientLifecycleLegs("zcode")], []);
   assert.deepEqual([...clientLifecycleLegs("constructor")], [], "原型链上的名字不是客户端");
   assert.throws(() => { WINGET_CLIENTS.codex.packageId = "evil"; }, TypeError);
   assert.throws(() => { OFFICIAL_MSIX_CLIENTS.claude.packageName = "evil"; }, TypeError);
+  assert.throws(() => { OFFICIAL_FEED_CLIENTS.dsh.feedUrl = "evil"; }, TypeError);
 });
 
 test("codex 双腿串行：先 npm 后 winget，两跳都不经 shell", async () => {
@@ -307,6 +313,175 @@ test("codex 任一腿被超时杀掉都会向上聚合 timedOut", async () => {
     call.file === "winget" ? Object.assign(new Error("killed"), { killed: true, signal: "SIGTERM" }) : null, "", ""));
   const result = await runClientLifecycle({ id: "codex", action: "update", spawn, execPath: "C:\node\node.exe", io: { existsSync: () => true } });
   assert.equal(result.timedOut, true);
+});
+
+// ── DSH 双腿：CLI 走 npm，桌面端走它自己的官方发布文件 ──────────────────
+
+// 发布文件与安装包都按真实形状造：electron-builder 的 channel 文件（多行折叠
+// 标量）加一个 sha512 与 size。安装包内容随意，摘要按内容算出来。
+function desktopFeedBody(installer, version = "0.2.0-rc.3") {
+  const sha = createHash("sha512").update(installer).digest("base64");
+  return [
+    `version: ${version}`,
+    "files:",
+    "  - url: >-",
+    `      https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-${version}-win-x64.exe`,
+    "    sha512: >-",
+    `      ${sha}`,
+    `    size: ${installer.length}`,
+    "path: >-",
+    `  https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-${version}-win-x64.exe`,
+    `sha512: >-`,
+    `  ${sha}`,
+    "releaseDate: '2026-09-30T10:35:27.666Z'",
+    "",
+  ].join("\n");
+}
+
+function feedFetch(body, { fail = null, notFound = false } = {}) {
+  const seen = [];
+  const fetchFn = (url) => {
+    seen.push(url);
+    if (fail !== null) return Promise.reject(new Error(fail));
+    if (url.includes("feeds/")) {
+      if (notFound) return Promise.resolve({ ok: false, status: 404, text: () => Promise.resolve("") });
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(body) });
+    }
+    const installer = INSTALLER_BYTES;
+    return Promise.resolve({
+      ok: true, status: 200,
+      arrayBuffer: () => Promise.resolve(installer.buffer.slice(installer.byteOffset, installer.byteOffset + installer.byteLength)),
+    });
+  };
+  return { seen, fetchFn };
+}
+
+const INSTALLER_BYTES = Buffer.from("NSIS-installer-payload-for-tests");
+const NPM_CLI = "C:\\node\\node_modules\\npm\\bin\\npm-cli.js";
+// 只在临时目录写下载物；其余路径不碰（npm 那一跳的 io 查询靠 existsSync 桩）。
+// existsSync 必须按路径回答：npm 那一跳会把 npm-cli.js 接上后再 stat 一次。
+const feedIo = {
+  existsSync: (path) => path === NPM_CLI,
+  readFileSync: () => "",
+  rmSync: (path) => { try { rmSync(path, { force: true }); } catch { /* 清不掉不影响断言 */ } },
+  writeFileSync: (path, bytes) => writeFileSync(path, bytes),
+};
+const npmOk = (call, callback) => callback(null, "", "");
+// tasklist 问「DeepSeek Harness 在跑吗」：未在跑的回答。
+const notRunningTasklist = (call, callback) =>
+  callback(null, "INFO: No tasks are running which match the specified criteria.\r\n", "");
+
+test("dsh 双腿串行：先 npm 后官方发布文件，安装参数取自 electron-updater 的静默更新口径", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => {
+    calls.push({ file, args, options });
+    if (file === "tasklist") return notRunningTasklist(null, callback);
+    return npmOk(null, callback);
+  };
+  const { fetchFn, seen } = feedFetch(desktopFeedBody(INSTALLER_BYTES));
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: { ...feedIo, existsSync: () => true }, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.2" },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.legs.map((l) => l.form), ["cli", "desktop"]);
+  assert.equal(calls[0].file, "C:\\node\\node.exe", "CLI 腿照旧走 npm-cli.js");
+  const installer = calls[calls.length - 1];
+  assert.match(installer.file, /anys-.*\.exe$/, "执行的是下载下来的安装包");
+  assert.deepEqual(installer.args, ["--updated", "/S"]);
+  assert.equal(installer.options.shell, undefined, "不经 shell，参数逐项传递");
+  assert.equal(installer.options.windowsHide, true);
+  assert.deepEqual(seen, [
+    "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
+    "https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.2.0-rc.3-win-x64.exe",
+  ]);
+});
+
+test("dsh 桌面腿：本地已是官方最新时不下载、不执行安装包", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => { calls.push({ file, args }); return npmOk(null, callback); };
+  const { fetchFn, seen } = feedFetch(desktopFeedBody(INSTALLER_BYTES));
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: feedIo, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.3" },
+  });
+  const desktop = result.legs.find((l) => l.form === "desktop");
+  assert.equal(desktop.ok, true);
+  assert.equal(desktop.noUpgrade, true);
+  assert.equal(seen.length, 1, "比对得出已最新，安装包一次都不取");
+  assert.equal(calls.some((c) => /\.exe$/.test(c.file) && !c.file.endsWith("node.exe")), false);
+});
+
+test("dsh 桌面腿：安装包摘要与发布文件不符时中止，绝不执行下载物", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => {
+    calls.push({ file, args });
+    if (file === "tasklist") return notRunningTasklist(null, callback);
+    return npmOk(null, callback);
+  };
+  // 把 files[] 里那条的摘要换成错的（发布文件顶层的 sha512 是同一个值，别动它：
+  // 顶层的 sha512 不是这条腿读的字段）。
+  const feed = desktopFeedBody(INSTALLER_BYTES).replace(/    sha512: >-\n      \S+/, "    sha512: >-\n      not-the-real-digest");
+  const { fetchFn } = feedFetch(feed);
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: { ...feedIo, existsSync: () => true }, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.2" },
+  });
+  const desktop = result.legs.find((l) => l.form === "desktop");
+  assert.equal(desktop.ok, false);
+  assert.equal(calls.some((c) => /anys-.*\.exe$/.test(c.file)), false, "摘要不过就不执行");
+  assert.equal(result.ok, false, "有腿失败，整体记失败");
+});
+
+test("dsh 桌面腿：应用在跑时不装，如实记失败", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => {
+    calls.push({ file, args });
+    if (file === "tasklist") return callback(null, '"DeepSeek Harness.exe","1234","Console","1","280,000 K"\r\n', "");
+    return npmOk(null, callback);
+  };
+  const { fetchFn } = feedFetch(desktopFeedBody(INSTALLER_BYTES));
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: feedIo, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.2" },
+  });
+  const desktop = result.legs.find((l) => l.form === "desktop");
+  assert.equal(desktop.ok, false);
+  assert.equal(desktop.appRunning, true);
+  assert.equal(calls.some((c) => /anys-.*\.exe$/.test(c.file)), false);
+});
+
+test("dsh 桌面腿：发布文件取不到时归网络失败，CLI 腿的结果不受牵连", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => { calls.push({ file }); return npmOk(null, callback); };
+  const { fetchFn } = feedFetch("", { fail: "getaddrinfo ENOTFOUND download.deepseek.com" });
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: feedIo, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.2" },
+  });
+  const cli = result.legs.find((l) => l.form === "cli");
+  const desktop = result.legs.find((l) => l.form === "desktop");
+  assert.equal(cli.ok, true, "CLI 已经装好了");
+  assert.equal(desktop.ok, false);
+  assert.equal(desktop.networkError, true);
+  assert.equal(result.ok, false);
+});
+
+test("dsh 桌面腿：发布文件里没有可用的同源 https 安装包时不猜，如实报读不出", async () => {
+  const calls = [];
+  const spawn = (file, args, options, callback) => { calls.push({ file }); return npmOk(null, callback); };
+  const body = desktopFeedBody(INSTALLER_BYTES).replace(
+    "https://download.deepseek.com/dsh-desk/bin/win-x64/deepseek-harness-0.2.0-rc.3-win-x64.exe",
+    "https://evil.example.com/deepseek-harness.exe",
+  );
+  const { fetchFn } = feedFetch(body);
+  const result = await runClientLifecycle({
+    id: "dsh", action: "update", spawn, execPath: "C:\\node\\node.exe", io: feedIo, fetchFn,
+    installedVersionByForm: { cli: "0.2.0-rc.2", desktop: "0.2.0-rc.2" },
+  });
+  const desktop = result.legs.find((l) => l.form === "desktop");
+  assert.equal(desktop.ok, false, "异源地址不接受");
+  assert.equal(calls.some((c) => /\.exe$/.test(c.file) && !c.file.endsWith("node.exe")), false);
 });
 
 // ── Claude 双腿：CLI 走 npm，桌面走官渠 MSIX（全 PowerShell，全替身） ──────────

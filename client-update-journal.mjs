@@ -148,6 +148,9 @@ export async function executeClientUpdate({
       action: run.action,
       commandPath: run.commandPath ?? null,
       targetVersion: run.targetVersion,
+      // 逐形态的动手前版本：桌面腿自己比对要用它（CLI 与桌面端的版本可以不同，
+      // 面板登记的是每一形态各自的版本）。
+      installedVersionByForm: run.beforeByForm ?? null,
     });
     const after = (await environment.getState({ force: true })).clients.find((client) => client.id === run.clientId);
     const installation = after?.installations?.[0] ?? null;

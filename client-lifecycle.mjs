@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "node:path";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { compareVersions } from "./version-check.mjs";
+import { compareVersions, parseVersion } from "./version-check.mjs";
 
 // npm 全局安装的客户端：本地检测（environment-service）读的就是这些包在 npm
 // 全局目录里的落点，所以“更新/安装”也走 npm，两个方向口径一致。zcode 是纯桌面
@@ -49,6 +50,27 @@ export const WINGET_CLIENTS = Object.freeze({
   }),
 });
 
+// 走官渠发布文件升级的桌面客户端：DSH 桌面端（官方 Electron 包）。它的发布源就是
+// 它自己更新通道读的那份 nightly.yml（见 release-service 的 "dsh-desktop" 条目），
+// 包里带 electron-builder 的 sha512，安装包是 NSIS 安装器——同一份文件由这条腿自
+// 己下载、自己验摘要、再按该项目的安装参数静默执行，全程不经过任何商店或第三方工具。
+//
+// 安装参数取自包内 electron-updater 的 NsisUpdater.doInstall：`--updated` 是「这是一次
+// 更新」的标记（装完由安装器重启应用），`/S` 是静默。这里不追加 `--force-run`，并额外
+// 传 `/D=<安装目录>`：electron-updater 装完会把应用拉起来，而面板正在服务这次更新，
+// 抢在收尾前重启应用会让「更新完成」的判定跑在一个刚被替换的安装目录上。
+//
+// 摘要不合就中止、绝不落盘执行；应用在跑时不装（Windows 下正在使用的文件换不掉，
+// 硬装只会留下半个安装）。
+export const OFFICIAL_FEED_CLIENTS = Object.freeze({
+  dsh: Object.freeze({
+    displayName: "DeepSeek Harness",
+    // 与 app-update.yml 的 provider/url/channel 是同一份事实。
+    feedUrl: "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
+    processName: "DeepSeek Harness",
+  }),
+});
+
 // 桌面形态走官渠 MSIX 升级的客户端：claude 桌面端不在任何包管理器里，官方更新
 // 通道是「元数据端点拿版本与 MSIX 直链 → Invoke-WebRequest 下载 → 验签 →
 // Add-AppxPackage」。元数据与下载一律走 Invoke-WebRequest：本机官渠必须经系统
@@ -63,15 +85,16 @@ export const OFFICIAL_MSIX_CLIENTS = Object.freeze({
   }),
 });
 
-// 一次「更新」要动的形态腿：npm / 原生客户端天然只有 CLI 一条腿；codex 与 claude
-// 各多一条桌面腿（codex 走 winget 商店源、claude 走官渠 MSIX，都串行执行），成败
-// 按腿分别记录。
+// 一次「更新」要动的形态腿：npm / 原生客户端天然只有 CLI 一条腿；claude 多一条
+// 官渠 MSIX 桌面腿，codex 多一条商店腿，dsh 多一条官渠发布文件桌面腿。多腿串行
+// 执行，成败按腿分别记录。
 export function clientLifecycleLegs(id) {
   const kind = clientLifecycleKind(id);
   if (!kind) return Object.freeze([]);
   const legs = [{ form: "cli", kind }];
   if (Object.hasOwn(WINGET_CLIENTS, id)) legs.push({ form: "desktop", kind: "winget" });
   if (Object.hasOwn(OFFICIAL_MSIX_CLIENTS, id)) legs.push({ form: "desktop", kind: "official-msix" });
+  if (Object.hasOwn(OFFICIAL_FEED_CLIENTS, id)) legs.push({ form: "desktop", kind: "official-feed" });
   return Object.freeze(legs);
 }
 
@@ -291,6 +314,192 @@ function lastJsonLine(stdout) {
   try { return JSON.parse(line); } catch { return null; }
 }
 
+// 发布文件（electron-builder 的 channel 文件）读法。这里只认「版本 + 指向安装包
+// 的 url + sha512 + size」四件事实，字段缺失即判为读不出——宁可报失败也不猜。
+//
+// 两个形态细节是这段解析存在的全部理由，写成普通 YAML 直觉就会读错：
+//   * 折叠标量：`- url: >-` 后面缩进的那一行才是值，`>` 那个标记本身不是值；
+//   * `sha512` 在文件里出现两次——`files[]` 里那次是这条安装包的摘要，文件顶层
+//     那次是整条 channel 的摘要。把顶层那个当成安装包摘要，校验就会拿错误的值
+//     去比（实测会让「摘要不符」这条防线静默失效）。
+// 于是状态机按缩进认条目：`- url:` 开启一条文件条目，其后同级缩进的 `sha512`
+// 属于该条目；文件顶层的 `path:`/`sha512:`（缩进更浅）不属于任何条目，忽略。
+//
+// 下载地址必须是 https，且与发布文件同源：那份文件的绝对地址由官方镜像给出，
+// 我们不接受它把我们指向别处。
+function parseOfficialFeed(text, feedUrl) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
+  const scalar = (group) => group[0] ?? group[1] ?? group[2] ?? null;
+  const indentOf = (line) => line.length - line.trimStart().length;
+  let version = null;
+  const files = [];
+  let current = null;
+  let itemIndent = null; // 当前文件条目的字段缩进；更浅的 sha512 是顶层字段
+  let pending = null; // 上一行是裸的块指示符，值在下一行
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (pending !== null) {
+      const apply = pending;
+      pending = null;
+      apply(line);
+      continue;
+    }
+    const blockKey = /^(?:-\s*)?(version|url|sha512)\s*:\s*[|>][-+]?\s*$/.exec(line);
+    if (blockKey !== null) {
+      const key = blockKey[1];
+      const startsItem = /^-\s*url\s*:/.test(line);
+      const indent = indentOf(rawLine);
+      pending = (value) => {
+        if (key === "version") { version = value; return; }
+        if (key === "url") {
+          current = { url: value };
+          itemIndent = indent;
+          files.push(current);
+          return;
+        }
+        // sha512：只收属于当前条目的那一次。
+        if (current !== null && itemIndent !== null && indent >= itemIndent) current.sha512 = value;
+      };
+      continue;
+    }
+    const versionMatch = /^version\s*:\s*(?:"([^"\\]*)"|'([^']*)'|([^\s#'"]+))/.exec(line);
+    if (versionMatch) { version = scalar(versionMatch.slice(1)); continue; }
+    const urlMatch = /^-\s*url\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s#'"]+))/.exec(line);
+    if (urlMatch) {
+      current = { url: scalar(urlMatch.slice(1)) };
+      itemIndent = indentOf(rawLine);
+      files.push(current);
+      continue;
+    }
+    if (current === null || itemIndent === null || indentOf(rawLine) < itemIndent) continue;
+    const shaMatch = /^sha512\s*:\s*(?:"([^"]+)"|'([^']+)'|([^\s#'"]+))/.exec(line);
+    if (shaMatch) { current.sha512 = scalar(shaMatch.slice(1)); continue; }
+    const sizeMatch = /^size\s*:\s*(\d+)\s*$/.exec(line);
+    if (sizeMatch) current.size = Number(sizeMatch[1]);
+  }
+  const parsed = parseVersion(version);
+  if (!parsed) return null;
+  const feedOrigin = new URL(feedUrl).origin;
+  const resolved = files.map((file) => {
+    if (typeof file.url !== "string") return null;
+    try {
+      const url = new URL(file.url, feedUrl);
+      if (url.protocol !== "https:" || url.origin !== feedOrigin) return null;
+      return { url: url.href, sha512: file.sha512 ?? null, size: Number.isSafeInteger(file.size) ? file.size : null };
+    } catch { return null; }
+  }).filter((file) => file !== null && typeof file.sha512 === "string" && file.sha512.length > 0);
+  return resolved.length === 0 ? null : { version, file: resolved[0] };
+}
+
+function digestBase64(buffer, algorithm) {
+  return createHash(algorithm).update(buffer).digest("base64");
+}
+
+// 下载到系统临时目录。整包进内存核摘要：落盘的就是已核过的那份字节，且不论
+// 路径如何都先过一遍 sha512 才可能被当成安装器执行。安装包约 300MB，这条腿在
+// 后台进程里跑，一次性占用可以接受。
+async function downloadToTemp(file, { fetchFn, io, timeoutMs, maxOutputChars }) {
+  const clamp = (value, max) => String(value ?? "").slice(0, max);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchFn(file.url, { credentials: "omit", redirect: "error", signal: controller.signal });
+    if (!response.ok) return { ok: false, networkError: true, timedOut: false, output: `下载失败（HTTP ${response.status}）` };
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (controller.signal.aborted) return { ok: false, networkError: true, timedOut: true, output: "下载超时" };
+    if (file.size !== null && bytes.length !== file.size) {
+      return { ok: false, networkError: true, timedOut: false, output: "安装包大小与发布文件不符" };
+    }
+    const path = join(tmpdir(), `anys-update-${file.sha512.slice(0, 16)}.exe`);
+    io.writeFileSync(path, bytes);
+    return { ok: true, path, bytes };
+  } catch (error) {
+    return { ok: false, networkError: true, timedOut: controller.signal.aborted, output: clamp(error?.message, maxOutputChars) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// NSIS 静默更新。参数与说明见 OFFICIAL_FEED_CLIENTS 上方。安装器是被替换应用
+// 自己产出的可执行文件，路径由我们拼、不与任何远端字符串相接。
+function runInstaller({ installerPath, spec, spawn, timeoutMs, maxOutputChars }) {
+  const args = ["--updated", "/S"];
+  if (typeof spec.installDir === "string" && isAbsolute(spec.installDir)) args.push(`/D=${spec.installDir}`);
+  return new Promise((done) => {
+    spawn(
+      installerPath,
+      args,
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" },
+      (error, stdout, stderr) => {
+        const output = tailLines(`${stdout ?? ""}\n${stderr ?? ""}`.trim(), 8, maxOutputChars);
+        done({ ok: !error, timedOut: Boolean(error?.killed), output });
+      },
+    );
+  });
+}
+
+// tasklist 判活：桌面端是否在跑。读不出来时按「在跑」处理——装不了总比硬装坏好。
+function desktopProcessRunning({ processName, spawn }) {
+  return new Promise((done) => {
+    spawn(
+      "tasklist",
+      ["/FI", `IMAGENAME eq ${processName}.exe`, "/NH", "/FO", "CSV"],
+      { timeout: 15000, windowsHide: true, maxBuffer: 1024 * 1024, encoding: "utf8" },
+      (error, stdout) => {
+        if (error) return done(true);
+        const text = String(stdout ?? "");
+        if (/no tasks are running|没有运行的任务/i.test(text)) return done(false);
+        return done(new RegExp(`"${processName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\.exe"`, "i").test(text));
+      },
+    );
+  });
+}
+
+// 官渠发布文件腿：拉发布文件 → 比对本地版本 → 挡运行中的桌面端 → 下载 → 验摘要
+// → 静默执行安装器。网络类失败（发布文件、下载）归 networkError；摘要不符即中止，
+// 绝不执行下载物；桌面端在跑归 appRunning。目标版本只从发布文件读，不接受调用方
+// 传入（那条路是 native 自升级腿的降级安装，形态不同）。
+async function runOfficialFeedUpdate(spec, { spawn, io, fetchFn, timeoutMs, maxOutputChars, installedVersion = null }) {
+  const clamp = (value, max) => String(value ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(-8).join("\n").slice(0, max);
+  let feedText;
+  try {
+    const response = await fetchFn(spec.feedUrl, { credentials: "omit", redirect: "error", headers: { Accept: "text/yaml, text/plain" } });
+    if (!response.ok) throw new Error(`feed http ${response.status}`);
+    feedText = await response.text();
+  } catch (error) {
+    return { ok: false, networkError: true, timedOut: false, output: clamp(error?.message, maxOutputChars) };
+  }
+  const feed = parseOfficialFeed(feedText, spec.feedUrl);
+  if (feed === null) return { ok: false, timedOut: false, output: "发布文件无法解读" };
+  const targetVersion = feed.version;
+  // 已装版本由调用方给出（环境检测读的是应用自己的版本）；缺了就走不了比对，
+  // 但也不能因此放弃这次更新——照常装，文档里如实报「已更新」。
+  if (installedVersion !== null) {
+    const order = compareVersions(installedVersion, targetVersion);
+    if (order !== null && order >= 0) return { ok: true, noUpgrade: true, timedOut: false, output: "" };
+  }
+  if (await desktopProcessRunning({ processName: spec.processName, spawn })) {
+    return { ok: false, appRunning: true, timedOut: false, output: "" };
+  }
+  const download = await downloadToTemp(feed.file, { fetchFn, io, timeoutMs, maxOutputChars });
+  if (!download.ok) return download;
+  const installerPath = download.path;
+  try {
+    // 摘要不贴合就绝不执行：这里是防「下载到的东西不是官方发布的那一份」的最后
+    // 一道闸，比对用的值必须来自发布文件本身（parseOfficialFeed 已经保证它存在）。
+    const digest = digestBase64(download.bytes, "sha512");
+    if (typeof feed.file.sha512 !== "string" || digest !== feed.file.sha512) {
+      // 摘要对不上：下载物一律不执行，也不留在盘上。
+      return { ok: false, timedOut: false, output: "安装包校验不通过，已丢弃" };
+    }
+    const install = await runInstaller({ installerPath, spec, spawn, timeoutMs, maxOutputChars });
+    if (!install.ok) return install;
+    return { ok: true, timedOut: false, installedVersion: targetVersion, output: install.output };
+  } finally {
+    try { io.rmSync(installerPath, { force: true }); } catch { /* 临时文件清不掉不遮结果 */ }
+  }
+}
+
 // ant-did 里存的是 base64，解出来才是官渠元数据端点要的 device_id。3p 数据目录
 // 优先、1p 目录兜底（用户从哪个形态用都有可能）；两份都读不到就不带参数试一次。
 function readMsixDeviceId(io) {
@@ -354,9 +563,11 @@ export function runClientLifecycle({
   action,
   commandPath = null,
   targetVersion = null,
+  installedVersionByForm = null,
   spawn = execFile,
   execPath = process.execPath,
   io = { existsSync, readFileSync, rmSync },
+  fetchFn = fetch,
   timeoutMs = 20 * 60 * 1000,
   maxOutputChars = 2000,
 } = {}) {
@@ -373,6 +584,7 @@ export function runClientLifecycle({
         !r.ok && !r.noUpgrade && !r.wingetMissing ? { ...r, storePageOpened: openStorePage({ spec, spawn }) } : r);
     }
     if (leg.kind === "official-msix") return runOfficialMsixUpdate(OFFICIAL_MSIX_CLIENTS[id], shared);
+    if (leg.kind === "official-feed") return runOfficialFeedUpdate(OFFICIAL_FEED_CLIENTS[id], { fetchFn, installedVersion: installedVersionByForm?.[leg.form] ?? null, ...shared });
     if (leg.kind === "native") return runNativeSelfUpdate({ id, commandPath, targetVersion, ...shared });
     return runNpmInstall({ pkg: packageFor(id), ...shared });
   };
