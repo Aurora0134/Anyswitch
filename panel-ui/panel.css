@@ -1272,6 +1272,13 @@
     border-radius: var(--radius-sm, 6px); padding: 8px 10px; word-break: break-all; margin-bottom: 10px;
   }
   .skills-repo-candidates { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  /* 候选仓库区的折叠钮：文本级弱化入口，与 btn 系列区分开——它是次级操作，
+     不该和真正的切换按钮抢视觉 */
+  .skills-cand-toggle {
+    background: none; border: none; padding: 2px 4px; cursor: pointer;
+    color: var(--text-3); font-size: 12px; align-self: center;
+  }
+  .skills-cand-toggle:hover { color: var(--text-2); }
   .skills-btn-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
   /* Store 刷新状态小字（「全部刷新」按钮右侧）：半透明，10s 无更新自动淡出。

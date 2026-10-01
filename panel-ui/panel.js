@@ -5229,18 +5229,49 @@ async function api(method, path, body) {
     applyAnomalyCardFold();
   }
 
-  // ── 收藏（迭代3）：relPath 集合，localStorage 持久化（与 panel-view 同模式）。
+  // ── 收藏（迭代3 起，v2 分桶）：按主仓库路径分桶的 relPath 集合，localStorage 持久化。
   // 收藏与选中正交：选中是高光/操作对象，收藏只是标记，跨刷新保留。
-  let skillsFavorites = loadSkillsFavorites();
-  function loadSkillsFavorites() {
+  // 分桶是切换仓库教训的产物：v1 是单张全局 relPath 列表，仓库一切换，reconcile 的
+  // 同步清理就把新仓库里不存在的 relPath 全部删掉——收藏当场蒸发且不可恢复。v2 里
+  // 每个仓库一个桶，切换时换桶、切回即恢复；同一仓库内删掉的 skill 仍会从桶里清掉。
+  let skillsFavorites = new Set();   // 当前仓库桶的内存态（装载前为空）
+  let favoritesRepoPath = null;      // skillsFavorites 对应的仓库；null = 尚未装载
+  function loadFavoriteBuckets() {
+    // v2 结构损坏按无数据处理；v1 旧键（单张数组）由首次装载整表收编当前仓库后删除
     try {
-      const raw = localStorage.getItem("skills-favorites");
-      const arr = raw ? JSON.parse(raw) : [];
-      return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
-    } catch { return new Set(); }
+      const obj = JSON.parse(localStorage.getItem("skills-favorites-v2") || "null");
+      if (obj && typeof obj === "object" && !Array.isArray(obj)) return { buckets: obj, legacy: null };
+    } catch {}
+    try {
+      const arr = JSON.parse(localStorage.getItem("skills-favorites") || "null");
+      if (Array.isArray(arr)) return { buckets: {}, legacy: arr.filter((x) => typeof x === "string") };
+    } catch {}
+    return { buckets: {}, legacy: null };
+  }
+  // 每次拿到 Skills 状态后调用：首次装载 / 仓库切换时换桶。装载前对收藏的任何改动
+  // 都不落盘（saveSkillsFavorites 的 null 守卫），防止空集合把某个桶抹掉。
+  function ensureFavoritesForRepo(repoPath) {
+    if (!repoPath || favoritesRepoPath === repoPath) return;
+    if (favoritesRepoPath !== null) saveSkillsFavorites();
+    const { buckets, legacy } = loadFavoriteBuckets();
+    const own = legacy !== null ? legacy : (Array.isArray(buckets[repoPath]) ? buckets[repoPath] : []);
+    if (legacy !== null) {
+      buckets[repoPath] = legacy;
+      try {
+        localStorage.setItem("skills-favorites-v2", JSON.stringify(buckets));
+        localStorage.removeItem("skills-favorites");
+      } catch {}
+    }
+    favoritesRepoPath = repoPath;
+    skillsFavorites = new Set(own);
   }
   function saveSkillsFavorites() {
-    try { localStorage.setItem("skills-favorites", JSON.stringify([...skillsFavorites])); } catch {}
+    if (favoritesRepoPath === null) return;
+    try {
+      const { buckets } = loadFavoriteBuckets();
+      buckets[favoritesRepoPath] = [...skillsFavorites];
+      localStorage.setItem("skills-favorites-v2", JSON.stringify(buckets));
+    } catch {}
   }
   function toggleSkillFavorite(relPath) {
     if (skillsFavorites.has(relPath)) skillsFavorites.delete(relPath);
@@ -5628,7 +5659,9 @@ async function api(method, path, body) {
     const relPaths = new Set(skills.map((s) => s.relPath));
     for (const k of [...skillsSelection]) if (!relPaths.has(k)) skillsSelection.delete(k);
     if (!skillsSelection.has(skillsFocusKey)) skillsFocusKey = lastSelectionKey();
-    // 收藏同步 prune：仓库中已消失的 relPath 不再保留（与选中集合同思路）
+    // 收藏同步 prune：仓库中已消失的 relPath 不再保留（与选中集合同思路）。
+    // 安全性依赖 ensureFavoritesForRepo：内存集合保证对应当前仓库的桶，仓库
+    // 切换发生在装载之前，这里清掉的只会是本仓库内已删除的 skill。
     let favPruned = false;
     for (const k of [...skillsFavorites]) {
       if (!relPaths.has(k)) { skillsFavorites.delete(k); favPruned = true; }
@@ -5699,6 +5732,9 @@ async function api(method, path, body) {
       const firstLoad = skillsState === null;
       const prev = skillsState;
       skillsState = res;
+      // 收藏桶必须赶在 reconcile 之前对齐本次状态里的仓库：换仓即换桶，
+      // reconcile 的收藏清理才只作用于当前仓库自己的桶
+      ensureFavoritesForRepo(res.repoPath);
       diffSkillsState(prev, res);
       // 唯一自动选中：首次加载（skillsState 由 null 变非 null）且集合为空时
       // 集合 = {第一行}、焦点 = 第一行，保持"打开 tab 即见详情"；此后不再复活空选中。
@@ -5720,6 +5756,22 @@ async function api(method, path, body) {
   }
 
   // ── 卡片 A：主仓库 ──
+  // 候选区生命周期：未设置主仓库时默认展开（新用户靠它一键上手），设置后默认
+  // 收起、只留一行弱化入口——按钮常驻显眼处时误触即换仓库，而老手基本用不上。
+  // 显式点过展开/收起后以存档为准，默认不再介入。
+  const SKILLS_CANDIDATES_OPEN_KEY = "skills-candidates-open";
+  function skillsCandidatesOpen() {
+    try {
+      const saved = localStorage.getItem(SKILLS_CANDIDATES_OPEN_KEY);
+      if (saved === "1") return true;
+      if (saved === "0") return false;
+    } catch {}
+    return !(skillsState && skillsState.repoConfigured);
+  }
+  function setCandidatesOpen(open) {
+    try { localStorage.setItem(SKILLS_CANDIDATES_OPEN_KEY, open ? "1" : "0"); } catch {}
+    renderSkillsRepo();
+  }
   function renderSkillsRepo() {
     const badge = $("skillsRepoBadge");
     const pathEl = $("skillsRepoPath");
@@ -5741,11 +5793,18 @@ async function api(method, path, body) {
     if (skillsFlashCount) { badge.classList.remove("badge-flash"); void badge.offsetWidth; badge.classList.add("badge-flash"); }
     const candidates = (skillsState && skillsState.candidates) || [];
     const usable = candidates.filter((c) => c.exists && c.path !== (skillsState && skillsState.repoPath));
-    candEl.innerHTML = usable.length
-      ? usable.map((c) => `<button class="btn btn-mini" data-cand="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">使用 ${escapeHtml(shortHomePath(c.path))}</button>`).join("")
-      : "";
+    const candOpen = skillsCandidatesOpen();
+    candEl.innerHTML = !usable.length
+      ? ""
+      : candOpen
+        ? usable.map((c) => `<button class="btn btn-mini" data-cand="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">使用 ${escapeHtml(shortHomePath(c.path))}</button>`).join("") +
+          `<button class="skills-cand-toggle" title="收起候选仓库，需要时再展开">收起 ▴</button>`
+        : `<button class="skills-cand-toggle" title="展开候选仓库目录，可一键切换主仓库">候选仓库（${usable.length}）▾</button>`;
     candEl.querySelectorAll("button[data-cand]").forEach((btn) => {
       btn.onclick = () => setSkillsRepo(btn.getAttribute("data-cand"));
+    });
+    candEl.querySelectorAll(".skills-cand-toggle").forEach((btn) => {
+      btn.onclick = () => setCandidatesOpen(!candOpen);
     });
   }
 
@@ -5770,14 +5829,28 @@ async function api(method, path, body) {
     return p;
   }
 
-  async function setSkillsRepo(path) {
-    try {
-      const d = await api("POST", "/api/skills/repo", { repoPath: path });
-      toast(`主仓库已设置（${d.skillCount} 个 skill）`);
-    } catch (e) {
-      toast(panelError(e, "设置主仓库失败"), true);
-    }
-    refreshSkillsState();
+  // 已有主仓库且换到不同路径时先过确认弹窗：候选按钮是一键直切，没有这道闸，
+  // 误点一下主仓库就换了。首次设置（含尚未设置、路径失效后的重设）不设闸，
+  // 那是用户本来就要走完的流程。
+  function setSkillsRepo(path) {
+    const switching = Boolean(skillsState && skillsState.repoConfigured && skillsState.repoPath !== path);
+    const apply = async () => {
+      try {
+        const d = await api("POST", "/api/skills/repo", { repoPath: path });
+        toast(`主仓库已设置（${d.skillCount} 个 skill）`);
+      } catch (e) {
+        toast(panelError(e, "设置主仓库失败"), true);
+      }
+      refreshSkillsState();
+    };
+    if (!switching) { apply(); return; }
+    showSkillsModal({
+      title: "切换主仓库",
+      bodyHtml: `将把 Skills 主仓库切换到 <b>${escapeHtml(path)}</b>。` +
+        "当前仓库的收藏会保留，切回即恢复；已部署到各端点的 skill 目录不会移动。",
+      confirmText: "切换",
+      onConfirm: apply,
+    });
   }
 
   async function pickSkillsRepo() {
