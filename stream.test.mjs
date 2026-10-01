@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { StreamTranslator, SSEParser, sseEvent, REASONING_FIELDS } from "./stream.mjs";
+import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 
 // Feed one parsed OpenAI chunk through a fresh translator and return the
 // emitted Anthropic event frames as [{ event, data }] pairs.
@@ -99,12 +100,13 @@ test("reasoning deltas translate to a thinking block with thinking_delta events"
   ]);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
   );
   assert.equal(events[1].data.content_block.type, "thinking");
   assert.equal(events[2].data.delta.type, "thinking_delta");
   assert.equal(events[2].data.delta.thinking, "想");
   assert.equal(events[3].data.delta.thinking, "想");
+  assert.equal(events[4].data.delta.type, "signature_delta", "the block closes with a narration signature");
 });
 
 test("thinking then text closes the thinking block before the text block starts", () => {
@@ -115,13 +117,13 @@ test("thinking then text closes the thinking block before the text block starts"
   ]);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
   );
   assert.equal(events[1].data.content_block.type, "thinking");
-  assert.equal(events[3].data.index, 0, "the thinking block is closed at its own index");
-  assert.equal(events[4].data.content_block.type, "text");
-  assert.equal(events[4].data.index, 1);
-  assert.equal(events[5].data.delta.text, "你好");
+  assert.equal(events[4].data.index, 0, "the thinking block is closed at its own index");
+  assert.equal(events[5].data.content_block.type, "text");
+  assert.equal(events[5].data.index, 1);
+  assert.equal(events[6].data.delta.text, "你好");
 });
 
 test("thinking then tool_use closes the thinking block before the tool block starts", () => {
@@ -132,10 +134,10 @@ test("thinking then tool_use closes the thinking block before the tool block sta
   ]);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "content_block_start", "content_block_stop", "message_delta", "message_stop"],
+    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "content_block_start", "content_block_stop", "message_delta", "message_stop"],
   );
   assert.equal(events[1].data.content_block.type, "thinking");
-  assert.equal(events[4].data.content_block.type, "tool_use");
+  assert.equal(events[5].data.content_block.type, "tool_use");
 });
 
 test("every reasoning field alias maps to thinking", () => {
@@ -158,7 +160,7 @@ test("an unclosed thinking block is closed by finish()", () => {
   const events = parseEvents(out);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
   );
 });
 
@@ -182,10 +184,37 @@ test("reasoning and content arriving in the same chunk emit thinking first, then
   ]);
   assert.deepEqual(
     events.map((e) => e.event),
-    ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
+    ["message_start", "content_block_start", "content_block_delta", "content_block_delta", "content_block_stop", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"],
   );
   assert.equal(events[1].data.content_block.type, "thinking");
-  assert.equal(events[4].data.content_block.type, "text");
+  assert.equal(events[5].data.content_block.type, "text");
+});
+
+// ---------- the narration signature ----------
+
+test("a closing thinking block carries its narration signature before the stop", () => {
+  const events = translate([
+    { id: "c11", choices: [{ index: 0, delta: { reasoning_content: "想" } }] },
+    { id: "c11", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] },
+  ]);
+  const lastThinkingAt = events.findIndex((e) => e.event === "content_block_delta" && e.data.delta.type === "thinking_delta");
+  const signatureAt = events.findIndex((e) => e.event === "content_block_delta" && e.data.delta.type === "signature_delta");
+  const stopAt = events.findIndex((e) => e.event === "content_block_stop");
+  assert.ok(signatureAt !== -1, "a signature_delta must be emitted");
+  assert.ok(signatureAt > lastThinkingAt && signatureAt < stopAt, "the signature lands after the last thinking_delta and before the stop");
+  assert.equal(events[signatureAt].data.delta.signature, NARRATION_THINKING_SIGNATURE);
+  assert.equal(events[signatureAt].data.index, events[1].data.index, "the signature rides on the thinking block's own index");
+});
+
+test("a thinking block closed for a tool_use block also carries the signature", () => {
+  const events = translate([
+    { id: "c12", choices: [{ index: 0, delta: { reasoning_content: "要调工具" } }] },
+    { id: "c12", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", function: { name: "Bash", arguments: "{}" } }] } }] },
+    { id: "c12", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] },
+  ]);
+  const signature = events.find((e) => e.event === "content_block_delta" && e.data.delta.type === "signature_delta");
+  assert.ok(signature, "the signature must be emitted when the thinking block closes mid-stream");
+  assert.equal(signature.data.delta.signature, NARRATION_THINKING_SIGNATURE);
 });
 
 // ---------- SSEParser: untouched by the translator change ----------

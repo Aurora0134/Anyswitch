@@ -12,6 +12,8 @@
 // Text and tool_use blocks are indexed in first-seen order. Tool argument JSON
 // arrives as input_json_delta fragments, matching Anthropic's own wire shape.
 
+import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
+
 const STOP_REASON = {
   stop: "end_turn",
   length: "max_tokens",
@@ -174,7 +176,18 @@ export class StreamTranslator {
     if (this.thinkingIndex === null) return "";
     const index = this.thinkingIndex;
     this.thinkingIndex = null;
-    return sseEvent("content_block_stop", { type: "content_block_stop", index });
+    // The signature lands after the last thinking_delta and before the stop:
+    // clients display a thinking block only when its signature names the
+    // narration kind (see thinking-signature.mjs). A block only opens on a
+    // non-empty delta, so a close here always closes a block that has content.
+    return (
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index,
+        delta: { type: "signature_delta", signature: NARRATION_THINKING_SIGNATURE },
+      }) +
+      sseEvent("content_block_stop", { type: "content_block_stop", index })
+    );
   }
 
   closeText() {

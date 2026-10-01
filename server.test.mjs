@@ -240,10 +240,12 @@ test("streaming request surfaces upstream reasoning as a thinking block", async 
       assert.equal(res.status, 200);
       const text = await res.text();
 
-      // thinking block opens, streams, and closes BEFORE the text block opens.
+      // thinking block opens, streams, gains a signature, and closes BEFORE
+      // the text block opens.
       const order = [
         "message_start",
         "content_block_start",
+        "content_block_delta",
         "content_block_delta",
         "content_block_delta",
         "content_block_stop",

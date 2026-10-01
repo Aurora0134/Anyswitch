@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
+import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 
@@ -427,7 +428,7 @@ test("openAIToAnthropic surfaces reasoning as a thinking block ahead of the answ
     "anthropic/poke-api/claude-opus-5",
   );
   assert.deepEqual(out.content, [
-    { type: "thinking", thinking: "想一下" },
+    { type: "thinking", thinking: "想一下", signature: NARRATION_THINKING_SIGNATURE },
     { type: "text", text: "你好" },
   ]);
 });
@@ -438,7 +439,7 @@ test("openAIToAnthropic recognizes every reasoning field alias", () => {
       { choices: [{ message: { [field]: "想", content: "答" }, finish_reason: "stop" }] },
       "w",
     );
-    assert.deepEqual(out.content[0], { type: "thinking", thinking: "想" }, field);
+    assert.deepEqual(out.content[0], { type: "thinking", thinking: "想", signature: NARRATION_THINKING_SIGNATURE }, field);
   }
 });
 
