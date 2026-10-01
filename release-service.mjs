@@ -25,6 +25,16 @@ export const CLIENTS = {
     source: "codex-desktop:windows-store:latest", format: "codex-desktop",
     url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS",
   },
+  // DSH 桌面端（官方 Electron 包）的发布源是它自己的更新通道文件，也就是这个
+  // 应用内置的 electron-updater 会去读的那一份（resources/app-update.yml 的
+  // provider/url/channel）——代更新按钮拿它与本地安装比对、再去同一个源取安装
+  // 包，两处口径因此完全一致。频道 nightly、平台 win-x64 固定为常量：它们与
+  // app-update.yml 是同一份事实，改了要跟着改。
+  "dsh-desktop": {
+    endpoint: "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
+    source: "dsh-desktop:win-x64:nightly", format: "yaml",
+    url: "https://harness.deepseek.com",
+  },
   zcode: {
     endpoint: "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1",
     source: "zcode:windows-x86_64:stable", format: "yaml", url: "https://zcode.z.ai/cn/changelog",

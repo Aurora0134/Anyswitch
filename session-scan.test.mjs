@@ -437,11 +437,18 @@ function dshHeader(id, cwd, createdAt = 1788000000000) {
   return { type: "session", version: 0, id, createdAt, cwd, delegationDepth: 0 };
 }
 
-// One frame per batch, exactly like the harness container.
-function writeDshSession(root, dirName, id, batches, { tornTail = false } = {}) {
+// One frame per batch, exactly like the harness container. `fileName` selects
+// the format generation and the physical encoding: `session.jsonl.zstd` is
+// released v0 compressed, `session.v<N>.jsonl.zstd` every later generation,
+// and the same names without `.zstd` are a root configured `compression: none`.
+function writeDshSession(root, dirName, id, batches, { tornTail = false, fileName = "session.jsonl.zstd" } = {}) {
   const sessionDir = join(root, dirName, id);
   mkdirSync(sessionDir, { recursive: true });
-  const file = join(sessionDir, "session.jsonl.zstd");
+  const file = join(sessionDir, fileName);
+  if (!fileName.endsWith(".zstd")) {
+    writeFileSync(file, batches.flat().map((record) => JSON.stringify(record)).join("\n") + "\n");
+    return { sessionDir, file };
+  }
   const frames = batches.map((records) =>
     zstdCompressSync(
       Buffer.from(records.map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8"),
@@ -590,6 +597,133 @@ test("dsh: header-only shell sessions are excluded from the list", async () => {
   const root = makeTmp();
   const id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
   writeDshSession(root, "--C-work-dshproj--", id, [[dshHeader(id, "C:\\work\\dshproj")]]);
+
+  const { sessions } = await testScanner({ dsh: [root] }).scanAll();
+  assert.deepEqual(sessions, []);
+});
+
+test("dsh: a session written in a later format generation is listed", async () => {
+  // 0.2 writes `session.v4.jsonl.zstd`; the adapter's fixed `session.jsonl.zstd`
+  // matched none of them, so every session since the upgrade was invisible.
+  const root = makeTmp();
+  const id = "33333333-4444-5555-6666-777777777777";
+  const { file } = writeDshSession(
+    root,
+    "--C-work-dshproj--",
+    id,
+    [
+      [dshHeader(id, "C:\\work\\dshproj")],
+      [
+        {
+          type: "user/message",
+          seq: 1,
+          time: 1788000001000,
+          data: { content: [{ type: "text", text: "升级后的会话" }] },
+        },
+      ],
+    ],
+    { fileName: "session.v4.jsonl.zstd" },
+  );
+
+  const scanner = testScanner({ dsh: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1, "v4 代际的会话必须在列表里");
+  assert.equal(sessions[0].id, id);
+  assert.equal(sessions[0].title, "升级后的会话");
+  assert.equal(sessions[0].file, file);
+  const messages = await scanner.loadMessages("dsh", file);
+  assert.deepEqual(messages.map((m) => m.content), ["升级后的会话"]);
+});
+
+test("dsh: a directory holding two generations lists once, from the newest", async () => {
+  // A session continued across the upgrade keeps its old file next to the new
+  // one; the harness reads the numerically highest generation, so listing the
+  // older one (or both) would show a stale transcript twice.
+  const root = makeTmp();
+  const id = "55555555-6666-7777-8888-999999999999";
+  writeDshSession(root, "--C-work-dshproj--", id, [
+    [dshHeader(id, "C:\\work\\dshproj")],
+    [
+      {
+        type: "user/message",
+        seq: 1,
+        time: 1788000001000,
+        data: { content: [{ type: "text", text: "升级前" }] },
+      },
+    ],
+  ], { fileName: "session.v3.jsonl.zstd" });
+  const { sessionDir, file } = writeDshSession(root, "--C-work-dshproj--", id, [
+    [dshHeader(id, "C:\\work\\dshproj")],
+    [
+      {
+        type: "user/message",
+        seq: 1,
+        time: 1788000001000,
+        data: { content: [{ type: "text", text: "升级前" }] },
+      },
+      {
+        type: "assistant/message",
+        seq: 2,
+        time: 1788000002000,
+        data: { message: { role: "assistant", content: [{ type: "text", text: "升级后" }] } },
+      },
+    ],
+  ], { fileName: "session.v4.jsonl.zstd" });
+
+  const scanner = testScanner({ dsh: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1, "两代同目录只出一行");
+  assert.equal(sessions[0].file, file, "读的是最高代际");
+  const messages = await scanner.loadMessages("dsh", file);
+  assert.deepEqual(messages.map((m) => m.role), ["user", "assistant"]);
+
+  // Deleting the session has to take the older generation with it: leaving it
+  // behind would put the session back on the list under v3.
+  const del = await scanner.deleteSessions([{ endpoint: "dsh", file }]);
+  assert.equal(del.ok.length, 1);
+  assert.ok(!existsSync(sessionDir), "整目录删除，不留下旧代际");
+});
+
+test("dsh: an uncompressed root is read as well", async () => {
+  // `compression: 'none'` writes the same generation names without `.zstd`.
+  const root = makeTmp();
+  const id = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+  const { file } = writeDshSession(
+    root,
+    "--C-work-dshproj--",
+    id,
+    [
+      [dshHeader(id, "C:\\work\\dshproj")],
+      [
+        {
+          type: "user/message",
+          seq: 1,
+          time: 1788000001000,
+          data: { content: [{ type: "text", text: "未压缩" }] },
+        },
+      ],
+    ],
+    { fileName: "session.v4.jsonl" },
+  );
+
+  const scanner = testScanner({ dsh: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].title, "未压缩");
+  const messages = await scanner.loadMessages("dsh", file);
+  assert.deepEqual(messages.map((m) => m.content), ["未压缩"]);
+});
+
+test("dsh: a non-canonical name is not a session log", async () => {
+  // The harness refuses `.v0`, leading zeros and uppercase; a directory holding
+  // only such a name has no session (and must not be read as one).
+  const root = makeTmp();
+  const id = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
+  const sessionDir = join(root, "--C-work-dshproj--", id);
+  mkdirSync(sessionDir, { recursive: true });
+  for (const name of ["session.v0.jsonl.zstd", "session.v04.jsonl.zstd", "SESSION.jsonl.zstd", "session.v4.jsonl.zstd.tmp"]) {
+    writeFileSync(join(sessionDir, name), Buffer.from([]));
+  }
 
   const { sessions } = await testScanner({ dsh: [root] }).scanAll();
   assert.deepEqual(sessions, []);

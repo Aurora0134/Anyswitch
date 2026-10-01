@@ -375,6 +375,12 @@ const AGENT_IMAGE_BUCKETS = [
   // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
   // 不到它（步 1 of kimi-desktop-integration-plan.md §3：桌面端在进程面全盲）。
   ["kimi code.exe", "kimi"],
+  // The official DSH desktop app is Electron too, but its image name must not
+  // in itself make a DSH session: the app spawns itself as the harness host,
+  // and the desktop branch claims only the child that carries the host flag
+  // (see the DSH_DESKTOP_* block above). The row exists so the shell — and the
+  // helpers it spawns — are at least visible to the lineage table.
+  ["deepseek harness.exe", "dsh-desktop"],
   ["node.exe", "node"],
   ["cmd.exe", "cmd"],
 ];
@@ -483,6 +489,38 @@ const DSH_WEB_ALIAS_RE = /bin\.js["']?\s+web(?:\s|$)/;
 // separators) is treated as unreadable rather than pasted into a badge.
 const DSH_PROFILE_NAME_RE = /^[^"'\\\s/]{1,40}$/;
 
+// ---------------------------------------------------------------------------
+// DSH Desktop (the official Electron package, 0.2). Same endpoint, third
+// interface — the "one product, several interfaces" shape kimi already has,
+// so nothing here introduces an endpoint of its own (dsh-tui-integration-plan
+// §8, still binding).
+//
+// It is invisible on the process plane for a reason worth writing down: the
+// app does not boot the harness as a script we can recognize. `DeepSeek
+// Harness.exe` spawns the SAME image as a child with
+// `--expose-internals <runtimeDir>/node_modules/@deepseek-ai/dsh-desktop-host/lib/index.js`,
+// which is where the profile `desktop` is booted from, so the child's command
+// line carries no `--profile` and no `\dsh\lib\bin.js` — neither the engine
+// signature nor the profile parse matches it. And unlike kimi's desktop app,
+// the main process is not a session owner either: it is the Electron shell
+// (its `--type=` children are renderers), while the session lives in the host
+// child the same image runs. So the image name must NOT join the engine set —
+// one boot would then read as two sessions.
+//
+// The surface label is the profile directory name `desktop`, which is the same
+// fact the profile map carries for every other interface; only its display
+// text is DSH's own and carries no local invention (kimi's `kimiSurfaceLabel`
+// draws the same line).
+const DSH_DESKTOP_PROFILE = "desktop";
+// The Electron shell's image name — the row that owns `--type=` children and
+// the parent of the host child, never a session itself.
+const DSH_DESKTOP_SHELL_IMAGE = "deepseek harness.exe";
+// `…\@deepseek-ai\dsh-desktop-host\lib\index.js` on the host child's command
+// line. A user's own profile may be named `desktop` too, so the flag is what
+// makes the profile map entry honest — a bare `desktop` profile name from a
+// CLI boot would otherwise be relabeled as the desktop app.
+const DSH_DESKTOP_HOST_RE = /dsh-desktop-host[\\/]lib[\\/]index\.js/;
+
 // Profile name this DSH command line boots, or null when it cannot be read
 // (management invocation, plain-tasklist rows with no command line, a custom
 // profile launched through a wrapper that dropped the flag). Case is preserved:
@@ -507,14 +545,26 @@ function isDshEngineCommandLine(lower) {
     && !DSH_MANAGEMENT_RE.test(lower);
 }
 
+// Is this DSH-family command line the desktop app's host child? The image name
+// is the desktop shell's, so the flag on the row is what decides — see the
+// DSH_DESKTOP_* block above.
+function isDshDesktopCommandLine(lower, image) {
+  return image === DSH_DESKTOP_SHELL_IMAGE && DSH_DESKTOP_HOST_RE.test(lower);
+}
+
 // Panel display names for the profiles whose UI form is not the directory
 // name: `web` is DSH's browser UI (also spelled by its `dsh web` alias), and
 // the community terminal front end installs itself as profile `dsh-tui`
 // (`dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui`).
+// `desktop` is the official Electron package's own profile directory, so the
+// map is a display-name table, not a surface enum: it is keyed by the very
+// name DSH uses on disk (DSH_DESKTOP_PROFILE), which is why a user profile of
+// the same name is only held to it when the desktop host is really on the
+// command line (isDshDesktopCommandLine).
 // The badge axis is the interface, not the product: unknown profiles show
 // the product name (bare `dsh` is a real bootable profile) — the badge's
 // "which surface is this" question has no answer there.
-const DSH_SURFACE_LABELS = { web: "Web", "dsh-tui": "TUI", tui: "TUI" };
+const DSH_SURFACE_LABELS = { web: "Web", "dsh-tui": "TUI", tui: "TUI", desktop: "Desktop" };
 const DSH_UNKNOWN_SURFACE_LABEL = "未知";
 
 export function dshSurfaceLabel(profile) {
@@ -829,6 +879,21 @@ function parseTasklistCsv(stdout) {
           result.kimiPids.add(pid);
           result.kimiEnginePids.add(pid);
           result.kimiSurfaceByPid.set(pid, "desktop");
+        }
+      }
+    } else if (bucket === "dsh-desktop") {
+      // `DeepSeek Harness.exe` (the official Electron package). Only the child
+      // whose command line names the bundled host is a session: it is the
+      // process that boots the `desktop` profile and talks to the relay. The
+      // Electron shell itself is the app, not a session (its helper children
+      // carry --type=), so neither joins the count — one desktop boot is one
+      // DSH process, exactly like one terminal boot.
+      if (isDshDesktopCommandLine(lower, image)) {
+        result.dsh += 1;
+        if (pid) {
+          result.dshPids.add(pid);
+          result.dshEnginePids.add(pid);
+          result.dshProfileByPid.set(pid, DSH_DESKTOP_PROFILE);
         }
       }
     } else if (bucket === "grok") {
@@ -1731,7 +1796,7 @@ const PS_REPL_COMMAND =
 // terminal session to an agent client (shell pid → client pid) walks the
 // lineage table through the shell row. They too feed only the lineage table.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='DeepSeek Harness.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;

@@ -2480,10 +2480,11 @@ async function api(method, path, body) {
         : !validLocal(installation) ? "版本无法读取" : "已发现";
       const line = element("div", "about-version-line");
       line.appendChild(element("span", "about-kind", forms.join("/")));
-      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex 例外：两形态的版本都摆，
-      // 带形态小注并排；某形态没装（not_found）不占位，装着却读不出版本时状态词占它的位。
+      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex 与 dsh 例外：
+      // 两形态的版本都摆，带形态小注并排；某形态没装（not_found）不占位，装着却
+      // 读不出版本时状态词占它的位。
       const localParts = [];
-      if (client.id === "codex") {
+      if (client.id === "codex" || client.id === "dsh") {
         for (const installation of client.installations) {
           if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
           else if (installation.status !== "not_found") localParts.push(localStatus(installation));
@@ -2494,15 +2495,16 @@ async function api(method, path, body) {
       const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : primary ? localStatus(primary) : "未找到"}`);
       if (primary && (primary.status === "error" || primary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
       line.appendChild(localSpan);
-      // 官方最新格：主更新形态那条渠道的版本。codex 的桌面渠道官方版本查得到就同口径并排，
-      // 查不到不占位；没有官方版本源的端点直述「自带更新」。
+      // 官方最新格：主更新形态那条渠道的版本。codex 与 dsh 的桌面渠道官方版本查得到就
+      // 同口径并排，查不到不占位；没有官方版本源的端点直述「自带更新」。
       const primaryRemote = goodRemote(primary);
+      const perFormRemotes = client.id === "codex" || client.id === "dsh";
       let remoteText = "自带更新";
       if (primary?.remoteId) {
         const remoteParts = [];
-        if (primaryRemote) remoteParts.push(client.id === "codex" ? `${formTag(primary)} ${primaryRemote.version}` : primaryRemote.version);
+        if (primaryRemote) remoteParts.push(perFormRemotes ? `${formTag(primary)} ${primaryRemote.version}` : primaryRemote.version);
         else remoteParts.push(loading ? "查询中…" : "查询失败");
-        if (client.id === "codex") {
+        if (perFormRemotes) {
           for (const installation of client.installations.slice(1)) {
             const remote = goodRemote(installation);
             if (remote) remoteParts.push(`${formTag(installation)} ${remote.version}`);
@@ -2511,7 +2513,8 @@ async function api(method, path, body) {
         remoteText = remoteParts.join(" · ");
       }
       line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
-      // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿，前端不拼逐形态消息。
+      // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿（CLI 腿 +
+      // 桌面腿），前端不拼逐形态消息。
       const comparison = primaryRemote && validLocal(primary) ? primaryRemote.comparison : "unknown";
       const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
       // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词

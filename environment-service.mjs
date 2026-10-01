@@ -15,6 +15,12 @@ function resolveQoderExecutable(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Qoder", "Qoder.exe");
 }
 
+// DSH 官方桌面端（Electron 包，安装器默认落点）。它在进程面上自带运行时，
+// 不经过我们的启动器，因此检测只认它自己的安装目录；未安装时这一行如实报未找到。
+export function resolveDshDesktopExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "DeepSeek Harness", "DeepSeek Harness.exe");
+}
+
 // The Codex CLI line must describe the same artifact the update button
 // installs — the npm-global @openai/codex package — not the launcher's
 // bundled engine under %LOCALAPPDATA%\OpenAI\Codex\bin, so detection follows
@@ -95,7 +101,14 @@ const CLIENTS = [
   ["grok", "Grok Build", resolveGrokExecutable],
 ];
 
+// 桌面端与 CLI 不是同一条安装记录（各自的落点、版本源、更新通道都不同），
+// 但它们同属一个端点：客户端 id 仍是 dsh，客户端行仍是 `dsh` 那一行。
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
+
+// 端点级动作按下表取安装记录：0 是「面板代管更新的那条形态」，桌面形态另列。
+// dsh 的 index 0 是 npm 全局 CLI（更新按钮装的就是这个包），index 1 是官方
+// 桌面端——两者版本可以不同，各自显示。
+const DESKTOP_INSTALLATION_CLIENTS = new Set(["dsh"]);
 
 // 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
 // --version（inspect 里的 probeVersion 分支），探不出来降级 not_runnable。
@@ -108,7 +121,9 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   codex: Object.freeze(["CLI", "Desktop"]),
   qoder: Object.freeze(["CLI", "Desktop"]),
   claude: Object.freeze(["CLI", "Desktop"]),
-  dsh: Object.freeze(["CLI", "Web"]),
+  // 官方桌面端上线后 DSH 与 kimi 同形：一个端点 id、一份家目录之上有终端、
+  // 浏览器与桌面三个界面。
+  dsh: Object.freeze(["CLI", "Desktop", "Web"]),
   pi: Object.freeze(["CLI"]),
   opencode: Object.freeze(["CLI"]),
   grok: Object.freeze(["CLI"]),
@@ -192,8 +207,12 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       if (!entry || entry.unpacked || entry.link) return null;
       if (!/^\d+$/.test(entry.offset) || entry.size > 1024 * 1024) throw Object.assign(new Error(), { code: "METADATA_INVALID" });
       const pkg = JSON.parse(readAt(entry.size, 8 + headerSize + Number(entry.offset)).toString("utf8"));
-      const expected = id === "zcode" ? "zcode" : "qoder";
-      return [pkg.name, pkg.productName].some((name) => typeof name === "string" && name.toLowerCase() === expected)
+      // 只认归档确实属于这个产品：目录里的 app.asar 可能是别人的，包名对不上
+      // 就不报版本（与 qoder / zcode 同一条防线）。
+      const expected = id === "zcode" ? ["zcode"]
+        : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
+        : ["qoder"];
+      return [pkg.name, pkg.productName].some((name) => typeof name === "string" && expected.includes(name.toLowerCase()))
         ? productVersion(pkg.version) : null;
     } finally { io.closeSync(fd); }
   }
@@ -290,19 +309,44 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
+  // The DSH desktop app. Its version is the product version the package
+  // manifest carries, read from inside the Electron archive: the executable's
+  // own resource is the Electron artifact version (44.0.0 for every Electron
+  // build, so it can never answer "which DSH is installed"), and the bundled
+  // runtime manifest (`dsh/package.json` inside the archive) reports the
+  // runtime's version rather than the app's — for the shipped build both are
+  // 0.2.0-rc.2, but the app's own version is the one the official feed keys
+  // on. remoteId is "dsh-desktop" so the panel queries the desktop release
+  // feed for it, and the update is run by the app's own signed installer.
+  async function inspectDshDesktop() {
+    const result = { kind: "desktop", remoteId: "dsh-desktop", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const path = resolveDshDesktopExecutable(base);
+      if (!isFile(path)) return result;
+      const found = { ...result, status: "found", path, issue: "version_unavailable" };
+      const version = asarProductVersion("dsh-desktop", join(dirname(path), "resources", "app.asar"));
+      return version ? { ...found, version, versionSource: "app.asar/package.json", issue: null } : found;
+    } catch (error) {
+      if (missing(error) && result.status !== "found") return result;
+      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
+    }
+  }
+
   let cache = null;
   async function getState({ force = false } = {}) {
     const at = now();
     if (!force && cache && at - cache.at < ttl) return cache.state;
     const clients = await Promise.all(CLIENTS.map(async ([id, name, resolver]) => {
-      // Codex 与 Qoder 都是一张卡两条安装记录（顺序照 Codex 先例 [cli, desktop]）：
-      // Codex index 0 是更新按钮代管的 npm CLI、index 1 是 Microsoft Store 桌面端；
-      // Qoder index 0 是 qodercli.exe 原生 CLI、index 1 是桌面 IDE。
+      // 每个端点的主安装记录在 index 0：codex 的 0 是面板代管更新的 npm CLI、1 是
+      // Microsoft Store 桌面端；qoder 的 0 是原生 CLI、1 是桌面 IDE；dsh 的 0 是
+      // npm 全局 CLI、1 是官方桌面端。顺序即「动作位认哪一条」的约定。
       const installations = await Promise.all(id === "codex"
         ? [inspect(id, "cli", resolver), inspectCodexDesktop()]
         : id === "qoder"
           ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
-          : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
+          : DESKTOP_INSTALLATION_CLIENTS.has(id)
+            ? [inspect(id, "cli", resolver), inspectDshDesktop()]
+            : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
       return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };

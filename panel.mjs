@@ -1801,7 +1801,7 @@ export function createPanelRouter({
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
       const id = path.slice("/panel/api/environment/latest/".length);
-      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "zcode", "qoder", "qoder-cli", "grok"].includes(id)) {
+      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "dsh-desktop", "zcode", "qoder", "qoder-cli", "grok"].includes(id)) {
         return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
       }
       try {
