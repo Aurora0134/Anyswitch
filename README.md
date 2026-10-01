@@ -10,20 +10,20 @@
 > *"Set up a channel once. Nine agents share it."*
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
-[![Version: 0.6.0-preview](https://img.shields.io/badge/Version-0.6.0--preview-e05d44.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.6.0-preview)
+[![Version: 0.6.0](https://img.shields.io/badge/Version-0.6.0-007ec6.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.6.0)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
 [![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
 
 **一个跑在你自己机器上的 relay 和控制面板：多家模型渠道在一处配，九个 coding agent 从一处接。**
 
-<sub>Windows 本地运行 · 凭据用 DPAPI 封存 · relay 只听环回地址 · 当前版本 0.6.0 preview</sub>
+<sub>Windows 本地运行 · 凭据用 DPAPI 封存 · relay 只听环回地址 · 当前版本 0.6.0</sub>
 
 给第一个 agent 配渠道，谁都乐意：填 baseURL、填 key、勾模型，五分钟的事。到第四个 agent，你在把同样几十条配置往第四份配置文件里抄——而且每一份里的 API Key 都是明文，躺在每个 agent 进程都读得到的目录里。
 
 这个工具存在的全部理由，是让「只配一次」和「只存一份密文」同时成立。
 
 ```bat
-git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.6.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 源码发行，没有安装器。先看画面，再决定装不装。
@@ -70,12 +70,12 @@ Claude Code / Codex / 其他 agent
 
 - Windows。凭据封存走 Windows DPAPI，开机自启走计划任务。
 - Node.js。`package.json` 要求 `>=22.15.0 <23 || >=23.8.0`，推荐 24 LTS。
-- 一个新的安装目录。不要把预览版覆盖到正在运行的目录上。
+- 一个新的安装目录。不要把新源码覆盖到正在运行的目录上。
 
 ### 第一次安装
 
 ```bat
-git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.6.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
@@ -172,7 +172,7 @@ npm test
 
 ---
 
-## 0.6.0 preview 修好的那些「明明配好了」
+## 0.6.0 修好的那些「明明配好了」
 
 **DeepSeek Harness 0.2：90 个会话文件曾整个消失。** 0.2 把会话文件改成代际命名，旧适配器只认 `session.jsonl.zstd`——实测一台升级后的机器：218 个会话文件里 71 个 v4 和 19 个 v3 在列表里整条不出现，零报错，TUI 和 Web 同样中招。本版读同目录代际最高的规范文件，删除时清掉全部代际；列表从 127 条回到 198 条。官方桌面端不经过启动器，面板现在按桌面宿主标志认出它，桌面形态与 TUI、Web 在同一个 DeepSeek Harness 下统计。
 
@@ -182,7 +182,7 @@ npm test
 
 **会话目录只数你真正说过的话。** 旧版按消息角色数轮次——实测一条 1231 条记录的会话里，1216 条是工具结果在冒充用户输入；抽样 25 条会话共数出 5072 条同类噪声。本版把轮次判定收进数据层，目录中位数从 134 回到 4。
 
-**两个「点不动」的故障收口。** 安装目录带低完整性标记时，Windows 曾把凭据解密脚本当 Internet 区脚本硬拒——所有渠道探测失败、上游请求 502，本版按进程级执行策略调用。导出配置包曾借浏览器窗口做原生选择框的属主，被 shell 拒绝、框根本不画出来，本版改无属主显示。
+**两个「点不动」的故障收口。** 安装目录带低完整性标记时，Windows 曾把凭据解密脚本当 Internet 区脚本硬拒——所有渠道探测失败、上游请求 502，本版按进程级执行策略调用。导出配置包曾借浏览器窗口做原生选择框的属主，被 shell 拒绝、框根本不画出来；本版改用本进程自建的置顶小窗口承载，框正常弹出并显示在浏览器之上。
 
 ---
 
@@ -255,19 +255,19 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 ## 这些边界要先接受
 
 - **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows，没有其它平台的实现。
-- **没有安装器，也没有自更新。** 0.6.0 preview 以源码发行；升级就是换个 tag、再重启进程。
+- **没有安装器，也没有自更新。** 0.6.0 以源码发行；升级就是换个 tag、再重启进程。
 - **端口是固定的。** 47820 / 47821 / 47822 写死在代码里，面板里改不了。
 - **虚拟终端还是预览。** 它要单独装依赖，panel-host 重启会带走当时的终端进程。
 - **有三条真实路径只验到代码与测试层。** 8 个 CLI 的面板内启动、虚拟模型在九个客户端选择器里的逐一显示、关于页的真实安装按钮——都对着真实文件与官方发布格式核过，但没有替你在每台客户端上按完一遍。
 - **Claude 桌面端的菜单过滤是客户端自己的。** 我们能给发现目录、别名视图和严格路由，不能替它拆掉编译进去的品牌黑名单。
 
-这是一个 0.6.0 的预览版，不是 1.0 的成品。对「渠道散落在九个配置文件里」的人来说，预览版已经够用；要拿它上生产流水线的，等正式版。
+0.6.0 是正式版，但它不是 1.0 的成品：上面那几条边界仍然成立，虚拟终端仍是预览功能。对「渠道散落在九个配置文件里」的人来说，这一版已经够用；要拿它上生产流水线之前，先照上面那几条边界对一遍。
 
 ---
 
 ## 升级时，保留数据和 `.git`
 
-从 `v0.5.2` 升到 `v0.6.0-preview`，用户数据仍在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设和用量记录不随源码目录一起替换。
+从 `v0.5.2` 升到 `v0.6.0`，用户数据仍在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设和用量记录不随源码目录一起替换。
 
 先安排现有会话的空档，再检查安装目录的工作树：
 
@@ -279,8 +279,8 @@ git status --short
 有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
 
 ```bat
-git fetch --no-tags origin tag v0.6.0-preview
-git switch --detach v0.6.0-preview
+git fetch --no-tags origin tag v0.6.0
+git switch --detach v0.6.0
 npm install
 ```
 
@@ -288,7 +288,7 @@ npm install
 
 源码换好后，要新的 panel-host 进程后端才生效——浏览器刷新只重读页面文件。面板里的**重启**会先重启 relay 再重启 panel-host，可能中断请求和终端会话，请在空档执行。
 
-这是预览版：稳定版安装不会自动收到它，`v0.5.2` 正式版 Release 保持原样。
+这是正式版：按正式版身份运行的安装不会看到 `v0.6.0-preview`，直接从 `v0.5.2` 升到 `v0.6.0`；`v0.6.0-preview` 那个预览版 Release 保持原样。
 
 ---
 
@@ -317,7 +317,7 @@ Anyswitch/
 想核对本版的实际提交范围：
 
 ```bat
-git log --no-merges --oneline v0.5.2..v0.6.0-preview
+git log --no-merges --oneline v0.5.2..v0.6.0
 ```
 
 ---
@@ -363,7 +363,7 @@ Setting up a provider for your first agent is fun: base URL, API key, pick model
 This tool exists to make "configure once" and "store exactly one sealed copy" true at the same time.
 
 ```bat
-git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.6.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
 Source-distributed, no installer. Supported agents: Claude Code, Kimi Code, Codex, OpenCode, Pi, ZCode, DeepSeek Harness, Qoder, Grok Build.
@@ -390,10 +390,10 @@ Real screenshots live in [`docs/screenshots/`](docs/screenshots/) — clone and 
 
 ### Install
 
-You need: Windows (credentials are sealed with Windows DPAPI; autostart uses Task Scheduler), Node.js `>=22.15.0 <23 || >=23.8.0` (24 LTS recommended), and a fresh install directory — do not unpack the preview over a running installation.
+You need: Windows (credentials are sealed with Windows DPAPI; autostart uses Task Scheduler), Node.js `>=22.15.0 <23 || >=23.8.0` (24 LTS recommended), and a fresh install directory — do not unpack the new source over a running installation.
 
 ```bat
-git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.6.0 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
 wscript panel-app.vbs
@@ -474,7 +474,7 @@ Naming: starts with a lowercase letter, may contain digits and `. _ -`, at most 
 
 The last safety net sits on the provider itself: a `baseURL` plus several `fallbackURLs`. Each address gets a 180-second generation budget, and retries back off exponentially (1s up to a 4s cap); 4xx is terminal and stays put, 5xx moves to the next address. When every address is exhausted, the last real upstream 5xx passes through; pure transport failures return 502.
 
-### What 0.6.0 preview fixed
+### What 0.6.0 fixed
 
 **DeepSeek Harness 0.2: 90 session files had vanished.** 0.2 renamed session files by generation, and the old adapter only recognized `session.jsonl.zstd` — on a real upgraded machine, 71 v4 and 19 v3 files out of 218 were entirely absent from the list, with zero errors, hitting TUI and Web alike. This release reads the highest canonical generation per directory and clears all generations on delete; the session list went from 127 back to 198 entries. The official desktop app bypasses the launcher entirely, so the panel now recognizes it by its desktop-host signature and counts Desktop alongside TUI and Web under one DeepSeek Harness entry.
 
@@ -484,7 +484,7 @@ The last safety net sits on the provider itself: a `baseURL` plus several `fallb
 
 **Session catalogs only count what you actually said.** The old version counted turns by message role — in one measured session, 1216 of 1231 "user" records were tool outputs; a 25-session sample contained 5072 such noise records. Turn detection now lives in the data layer, and the median catalog length dropped from 134 to 4.
 
-**Two "nothing happens when I click" bugs closed.** When the install directory carried a low-integrity label, Windows rejected the credential-decryption script as an Internet-zone script — every channel probe failed and upstream requests returned 502; the script now runs with a process-level execution policy. The config-export dialog used to borrow the browser window as its owner and got refused by the shell, so no dialog ever appeared; it now shows ownerless.
+**Two "nothing happens when I click" bugs closed.** When the install directory carried a low-integrity label, Windows rejected the credential-decryption script as an Internet-zone script — every channel probe failed and upstream requests returned 502; the script now runs with a process-level execution policy. The config-export dialog used to borrow the browser window as its owner and got refused by the shell, so no dialog ever appeared; it is now carried by a small topmost window the process creates itself, so the dialog opens and renders above the browser.
 
 ### The terminal page: refresh no longer wipes your screen
 
@@ -545,17 +545,17 @@ This is not implemented yet. It is written here so you know the direction — an
 ### Accept these boundaries first
 
 - **Windows only; no macOS / Linux support.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows, and no other platform implementation exists.
-- **No installer, no self-update.** 0.6.0 preview ships as source; upgrading means fetching a tag and restarting processes.
+- **No installer, no self-update.** 0.6.0 ships as source; upgrading means fetching a tag and restarting processes.
 - **Ports are fixed.** 47820 / 47821 / 47822 are constants in the code and cannot be changed from the panel.
 - **The virtual terminal is still preview.** It needs its own dependencies, and a panel-host restart takes the running PTYs with it.
 - **Three real paths are verified only to code and test level.** Panel-launched sessions for the 8 CLIs, virtual models appearing in all nine clients' pickers, and the real install buttons on the About page — each checked against real files and official release formats, but not clicked through on every client for you.
 - **Claude Desktop's menu filter belongs to the client.** We provide discovery catalogs, the alias view and strict routing; the brand blacklist compiled into their app is not ours to remove.
 
-This is a 0.6.0 preview, not a 1.0 product. If your pain is "channels scattered across nine config files", the preview is already enough. If you want it on a production pipeline, wait for the stable release.
+0.6.0 is a stable release, but it is not a 1.0 product: the boundaries above still hold, and the virtual terminal is still a preview feature. If your pain is "channels scattered across nine config files", this release is already enough; before putting it on a production pipeline, walk the boundaries above once.
 
 ### Upgrading: keep your data and `.git`
 
-From `v0.5.2` to `v0.6.0-preview`, user data stays above `app` in `%LOCALAPPDATA%\Anyswitch\`: providers, credentials, settings, presets and usage records are not replaced with the source directory.
+From `v0.5.2` to `v0.6.0`, user data stays above `app` in `%LOCALAPPDATA%\Anyswitch\`: providers, credentials, settings, presets and usage records are not replaced with the source directory.
 
 Park your running sessions, then check the working tree:
 
@@ -567,8 +567,8 @@ git status --short
 If it prints anything, deal with your own changes first — do not discard them for an upgrade. With a clean tree, fetch only the target tag:
 
 ```bat
-git fetch --no-tags origin tag v0.6.0-preview
-git switch --detach v0.6.0-preview
+git fetch --no-tags origin tag v0.6.0
+git switch --detach v0.6.0
 npm install
 ```
 
@@ -576,7 +576,7 @@ Do not unpack new source over an old install, and do not upgrade with `git reset
 
 New source needs a new panel-host process for the backend to take effect — a browser refresh only re-reads page files. The panel's **Restart** restarts the relay and then panel-host, and may interrupt requests and terminal sessions; run it between sessions.
 
-This is a preview: stable installations will not receive it automatically, and the `v0.5.2` Release stays as it is.
+This is a stable release: an installation running a stable identity never sees `v0.6.0-preview` and goes straight from `v0.5.2` to `v0.6.0`; the `v0.6.0-preview` Release stays as it is.
 
 ### Where the code lives
 
@@ -603,7 +603,7 @@ Anyswitch/
 To audit what actually changed in this release:
 
 ```bat
-git log --no-merges --oneline v0.5.2..v0.6.0-preview
+git log --no-merges --oneline v0.5.2..v0.6.0
 ```
 
 ### Feedback and contributing
