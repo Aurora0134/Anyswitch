@@ -1,405 +1,625 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="Anyswitch logo" width="128">
-</p>
+<sub>🌐 <b>中文</b> · <a href="#english">English</a></sub>
+
+<div align="center">
+
+<p><img src="docs/assets/logo.png" alt="Anyswitch logo" width="128"></p>
 
 # Anyswitch
 
+> *「渠道配一次，九个 agent 一起用。」*
+> *"Set up a channel once. Nine agents share it."*
+
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-2ea44f.svg)](LICENSE)
+[![Version: 0.6.0-preview](https://img.shields.io/badge/Version-0.6.0--preview-e05d44.svg)](https://github.com/Aurora0134/Anyswitch/tree/v0.6.0-preview)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6.svg)](#这些边界要先接受)
+[![Node.js: 22.15+](https://img.shields.io/badge/Node.js-22.15%2B-339933.svg)](package.json)
+
+**一个跑在你自己机器上的 relay 和控制面板：多家模型渠道在一处配，九个 coding agent 从一处接。**
+
+<sub>Windows 本地运行 · 凭据用 DPAPI 封存 · relay 只听环回地址 · 当前版本 0.6.0 preview</sub>
+
+给第一个 agent 配渠道，谁都乐意：填 baseURL、填 key、勾模型，五分钟的事。到第四个 agent，你在把同样几十条配置往第四份配置文件里抄——而且每一份里的 API Key 都是明文，躺在每个 agent 进程都读得到的目录里。
+
+这个工具存在的全部理由，是让「只配一次」和「只存一份密文」同时成立。
+
+```bat
+git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+```
+
+源码发行，没有安装器。先看画面，再决定装不装。
+
+[看效果](#效果渠道配一次九处都见它) · [安装](#装上就能用) · [路由](#挂了一个渠道流水线不该停) · [机制](#机制不是转发器是本机的配置真相源) · [边界](#这些边界要先接受)
+
+</div>
+
+---
+
+## 效果：渠道配一次，九处都见它
+
+面板在 `http://127.0.0.1:47820/panel`，relay 在 `127.0.0.1:47821`。面板管配置，relay 转请求——两个进程互不惊扰：relay 停了，面板照样打开给你看状态。
+
 <p align="center">
-  <a href="#english"><b>English</b></a> · <a href="#中文"><b>中文</b></a>
+  <img src="docs/screenshots/s1-board.png" alt="看板：服务状态、近期请求、agent 实例与实时输出" width="48%">
+  <img src="docs/screenshots/s2-channels.png" alt="渠道管理：渠道、号池与模型清单" width="48%">
+  <img src="docs/screenshots/s3-stats.png" alt="使用统计：今日概览、90 天热力图与 Token 趋势" width="48%">
+  <img src="docs/screenshots/s4-skills.png" alt="Skills 管理：主仓库与各 agent 部署" width="48%">
 </p>
 
-A local AI credential relay for Windows: it funnels multiple OpenAI-compatible upstreams into a single loopback relay on 127.0.0.1, served through two protocol frontends — OpenAI-native and Anthropic Messages (via translation). Upstream API keys are sealed with Windows DPAPI and never leave your machine. It is meant for developers who put several model providers behind one endpoint, or who run more than one coding agent at the same time.
+一条请求走的路：
+
+```text
+Claude Code / Codex / 其他 agent
+              │
+              ▼
+      127.0.0.1:47821 relay
+       鉴权 · 路由 · 协议转换
+              │
+              ▼
+       你配置的 OpenAI 兼容上游
+```
+
+面板里直接看得到的：看板（relay 状态、路由链实况、近期请求、agent 实例）、渠道管理（渠道、模型发现、号池、路由链）、虚拟模型、Skills 主仓库与各 agent 部署、用量统计（今日概览、90 天热力图、TTFT、TPS）、设置与客户端更新。
+
+截图在 [`docs/screenshots/`](docs/screenshots/)，克隆后可直接打开核对页面形态。
+
+---
+
+## 装上就能用
+
+### 先准备这三件事
+
+- Windows。凭据封存走 Windows DPAPI，开机自启走计划任务。
+- Node.js。`package.json` 要求 `>=22.15.0 <23 || >=23.8.0`，推荐 24 LTS。
+- 一个新的安装目录。不要把预览版覆盖到正在运行的目录上。
+
+### 第一次安装
+
+```bat
+git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+cd /d "%LOCALAPPDATA%\Anyswitch\app"
+npm install
+wscript panel-app.vbs
+```
+
+`npm install` 只为虚拟终端装依赖；不装它，relay、面板、渠道管理、启动器、统计照常用，只是终端页打不开。
+
+手动启动面板也行：`node panel-launcher.mjs`。`panel-app.vbs` 按自身位置找启动器，安装目录不必固定，桌面快捷方式直接指它。
+
+### 四步跑通第一条请求
+
+1. 打开 `http://127.0.0.1:47820/panel`，进渠道管理。
+2. 新增渠道：填渠道 ID、上游 Base URL、API Key。保存时 key 用当前 Windows 用户的 DPAPI 封存。
+3. 等模型自动发现；上游没有 `GET /v1/models` 就手动补模型 ID。要容灾，再填备用地址。
+4. 用对应 agent 的启动器拉起客户端——relay 地址、鉴权和实例身份由启动器交给它，其余参数原样透传。
+
+装完自检：
+
+```bat
+node --version
+node --check panel-host.mjs
+npm test
+```
+
+---
+
+## 九个 agent，一种接法
+
+| agent | 协议面 | 启动方式 |
+| --- | --- | --- |
+| Claude Code | Anthropic Messages | `node launcher.mjs [claude 参数]` |
+| Kimi Code | Anthropic Messages | `node kimi-launcher.mjs [kimi 参数]` |
+| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex 参数]` |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` |
+| Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` |
+| ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` |
+| DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh 参数]` |
+| Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` |
+| Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` |
+
+配置同步把托管渠道写进各 agent 自己的配置位置，你手写的其它内容原样保留：
+
+| agent | Anyswitch 写入的位置 |
+| --- | --- |
+| Kimi Code | `~/.kimi-code/config.toml` |
+| Codex | `~/.codex/config.toml` 与生成的模型目录 |
+| OpenCode | `~/.config/opencode/opencode.json`（你的 `opencode.jsonc` 不动） |
+| Pi | `~/.pi/agent/models.json` |
+| ZCode | `~/.zcode/v2/config.json` |
+| DeepSeek Harness | `~/.dsh/profiles/<name>/cordis.patch.yml` |
+| Qoder | `~/.qoder/settings.json` |
+| Grok Build | `~/.grok/config.toml` |
+
+写进这些文件的是本地 relay 地址和一枚本地 token——上游的真实 key 不进任何 agent 的配置目录。Claude Code 走启动器注入，另可在设置页配置档位接管。直接在终端里启动客户端也支持：relay 会按连接属主进程把流量归到正确的实例上。
+
+---
+
+## 挂了一个渠道，流水线不该停
+
+面板里管流量走向的有三样东西：号池、路由链、备用地址。它们各管一层，可以叠着用。
+
+### 号池：一个渠道挂了，先试另一个
+
+把 2–5 个渠道收进一个号池。请求命中号池后在成员间保持粘性——同一段会话不会每句话换一个渠道；当前成员失败，按顺序退到下一个。agent 看到的是号池这一个入口，不是一堆散渠道。
+
+### 路由链：模型名不绑死渠道
+
+每个 agent 可以有自己的 `auto` 链：发 `auto` 的请求按链顺序逐跳尝试。链上的节点可以是渠道，也可以是号池——两层容灾叠着用。
+
+```text
+模型名
+  └─ 节点 A：主渠道
+       └─ 节点 B：号池
+            └─ 节点 C：备用渠道
+```
+
+节点失败逐跳退避；连续失败的节点暂时锁定，等锁定期过了由真实请求驱动回到链首重试。删渠道、解散号池时，引用它的链条目在同一笔写入里被剪掉，不留悬空节点。链的每一跳在看板上有实况灯：哪跳在走、哪跳降级，直接看得到。
+
+<p align="center">
+  <img src="docs/screenshots/s5-route-chain.png" alt="路由链编辑器：逐跳退避的链与候选瓦片墙" width="80%">
+</p>
+
+### 虚拟模型：一个名字，九个 agent 都认
+
+虚拟模型是你自建的名字，绑一条不专属任何 agent 的链（1–8 个节点）。启用后，它和 `auto` 一起出现在全部九个 agent 模型列表的 Anyswitch 分组里；停用即从所有目录消失。
+
+它解决的是「同一个角色，到处叫同一个名字」：把 `deepseek-pro` 定义成「主渠道 → 备用池」，之后 Claude Code 里选它、Codex 里选它，走的是同一条链。链状态还是跨 agent 共享的——一个 agent 把某节点打降级了，另一个 agent 的请求直接绕开它，不重复交学费。
+
+命名规则：小写字母开头，可含数字和 `. _ -`，最长 64 字符，不能与链内模型重名；名字保存后锁定，之后改的只是链。
+
+### 备用地址：服务商有多个入口
+
+渠道自己还有最后一道保险：`baseURL` 加多个 `fallbackURLs`。每个地址 180 秒生成预算，重试间隔指数退避（1 秒起、4 秒封顶）；4xx 是请求终态，不再换地址；5xx 才换下一个。全部地址耗尽时，透传最后一个真实上游 5xx；纯传输失败返回 502。
+
+---
+
+## 0.6.0 preview 修好的那些「明明配好了」
+
+**DeepSeek Harness 0.2：90 个会话文件曾整个消失。** 0.2 把会话文件改成代际命名，旧适配器只认 `session.jsonl.zstd`——实测一台升级后的机器：218 个会话文件里 71 个 v4 和 19 个 v3 在列表里整条不出现，零报错，TUI 和 Web 同样中招。本版读同目录代际最高的规范文件，删除时清掉全部代际；列表从 127 条回到 198 条。官方桌面端不经过启动器，面板现在按桌面宿主标志认出它，桌面形态与 TUI、Web 在同一个 DeepSeek Harness 下统计。
+
+**Claude Code：档位、发现、上下文窗口终于分开。** 设置页给 Sonnet / Opus / Fable / Haiku 各自指定托管模型，总开关可暂停接管而保留选择；CLI 只在已验证的版本族里打开模型发现；目录每行带上下文窗口，百万级窗口另出 `[1m]` 伴生行。Claude 桌面端的菜单品牌过滤是它自己编译进去的——实测三态：现状 28 条、给目录补字段仍 28 条、换确定性别名后 148 条全过滤链通过。本版用别名视图把全量送回菜单；客户端那道黑名单本身，谁也替它拆不了。
+
+**客户端更新不再绑死面板。** 「全部更新」并行派发不同客户端；安装跑在独立进程里，关掉面板不杀任务，重开关于页能接回结果；Claude 桌面端走官方 MSIX 并校验签名。
+
+**会话目录只数你真正说过的话。** 旧版按消息角色数轮次——实测一条 1231 条记录的会话里，1216 条是工具结果在冒充用户输入；抽样 25 条会话共数出 5072 条同类噪声。本版把轮次判定收进数据层，目录中位数从 134 回到 4。
+
+**两个「点不动」的故障收口。** 安装目录带低完整性标记时，Windows 曾把凭据解密脚本当 Internet 区脚本硬拒——所有渠道探测失败、上游请求 502，本版按进程级执行策略调用。导出配置包曾借浏览器窗口做原生选择框的属主，被 shell 拒绝、框根本不画出来，本版改无属主显示。
+
+---
+
+## 终端页：刷新不再洗掉屏幕
+
+面板里内置虚拟终端，能直接拉起本机已装好的 8 个 CLI agent（ZCode 与 Codex 桌面端是图形程序，不在此列）。凭据只走会话环境变量，不写进任何终端配置文件。
+
+这一版的核心修复是回放。实测同一条真实会话：旧路径回放 470,208 字节，换来 **0 行**可回滚历史；新的「宿主渲染镜像、按行重发」用 65,131 字节换回 **1583 行**。整页刷新后，你仍停在终端页，仍停在原来的页签。
+
+中文输入法组字、Ctrl+C 复制、OpenCode 的 Ctrl+Enter 换行、块字符与 WebGL 渲染，都在这一版收口。
+
+它还是预览功能：要多装一次 npm 依赖，panel-host 重启会结束当时的终端进程——历史画面保留，会话标记为已退出。
+
+---
+
+## 机制：不是转发器，是本机的配置真相源
+
+```text
+%LOCALAPPDATA%\Anyswitch\
+├── store.json       渠道、模型、号池、路由链、虚拟模型的元数据
+├── credentials\     每个渠道一个 DPAPI 密文文件
+├── settings.json    面板与各 agent 开关
+├── usage\           按日记录的请求与会话用量
+└── app\             本仓库：relay、面板、启动器
+```
+
+- **`store.json` 不放秘密。** schema 内置词表（apikey、token、secret、password……）逐段匹配字段名，命中即拒绝写入；key 只以 `credentialFile` 引用的形式连到凭据目录。复算：`grep -n "SECRET_WORDS" store-schema.mjs`。
+- **relay 只听环回。** 面板 `127.0.0.1:47820`、relay `127.0.0.1:47821`、watchdog 标记 `47822`；环回地址强制进 `NO_PROXY`，本地请求不会被继承的代理带走。
+- **key 只在请求那一刻解密。** DPAPI 用当前用户作用域；明文不写 store、不进日志、不长期缓存。
+- **写入有并发保护。** 面板写 store 走内容哈希 CAS 加文件锁；路由目录带 generation 摘要，配置在请求中途变化时拒绝用旧目录。
+- **业务代码零 npm 依赖。** 全部 5 个依赖都属于虚拟终端，`.mjs` 里 import 第三方包的只有一处。复算：`grep -n 'from "node-pty"\|from "@xterm' *.mjs` ——只有 `terminal-host.mjs:13`。
+
+上游请求当然会离开本机，去往你在渠道里填的服务商地址。Anyswitch 守的是凭据存储、路由配置和本地控制面——不会把上游调用伪装成离线运行。
+
+---
+
+## 和 CC Switch 的关系：它改文件，我过流量
+
+| | **Anyswitch** | [CC Switch](https://github.com/farion1231/cc-switch) |
+| --- | --- | --- |
+| 定位 | 转发控制台 | 配置切换器 |
+| 动作对象 | 请求流量：relay 转发、协议转换、退避重试 | 配置文件：往各 CLI 的配置里写供应商 |
+| 核心资产 | 转发链、号池、凭据不出本机、用量观测 | 供应商数据库、live 配置双向同步 |
+| 形态 | 常驻 relay + Web 面板 | Tauri 桌面应用 |
+
+两句公道话：CC Switch 成熟、管理面广，供应商预设库和双向同步是它的强项；Anyswitch 强在转发质量与凭据边界，代价是你得自己跑一个本地服务。对比基于 cc-switch v3.20.3 的只读调研，核查日期 2026-09-17。
+
+---
+
+## 提示词预设，也不要手改配置
+
+附带可选技能 [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md)：让 coding agent 帮你编写和管理面板里的提示词预设。预设由面板写进各 agent 自己的全局指令文件——多数是 `AGENTS.md`，Claude Code 是 `CLAUDE.md`。
+
+```bat
+xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E /I
+```
+
+写入走面板 API（`http://127.0.0.1:47820`），不要手改 `prompts.json`。注意：写入的是你家目录里属于其他 agent 的文件，启用前先确认这一点。
+
+---
+
+## 接下来要去哪
+
+规划中的下一步：**把 agent 本地已经堆好的配置收编进中控。** 检测各 agent 配置目录里现存的渠道与模型，拉取进 Anyswitch 统一管理——哪怕你已经在某一个 agent 里攒了几十条配置，也能一次转移；之后配其他 agent 时直接扩散，不用再抄一遍。
+
+这条还没实现。写出来是让你知道方向，也是让它可以被催——想要的，去 issue 里说一声。
+
+---
+
+## 这些边界要先接受
+
+- **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows，没有其它平台的实现。
+- **没有安装器，也没有自更新。** 0.6.0 preview 以源码发行；升级就是换个 tag、再重启进程。
+- **端口是固定的。** 47820 / 47821 / 47822 写死在代码里，面板里改不了。
+- **虚拟终端还是预览。** 它要单独装依赖，panel-host 重启会带走当时的终端进程。
+- **有三条真实路径只验到代码与测试层。** 8 个 CLI 的面板内启动、虚拟模型在九个客户端选择器里的逐一显示、关于页的真实安装按钮——都对着真实文件与官方发布格式核过，但没有替你在每台客户端上按完一遍。
+- **Claude 桌面端的菜单过滤是客户端自己的。** 我们能给发现目录、别名视图和严格路由，不能替它拆掉编译进去的品牌黑名单。
+
+这是一个 0.6.0 的预览版，不是 1.0 的成品。对「渠道散落在九个配置文件里」的人来说，预览版已经够用；要拿它上生产流水线的，等正式版。
+
+---
+
+## 升级时，保留数据和 `.git`
+
+从 `v0.5.2` 升到 `v0.6.0-preview`，用户数据仍在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设和用量记录不随源码目录一起替换。
+
+先安排现有会话的空档，再检查安装目录的工作树：
+
+```bat
+cd /d "%LOCALAPPDATA%\Anyswitch\app"
+git status --short
+```
+
+有输出就先处理自己的改动，别为了升级直接丢弃。工作树干净后，只取目标标签：
+
+```bat
+git fetch --no-tags origin tag v0.6.0-preview
+git switch --detach v0.6.0-preview
+npm install
+```
+
+不要把新源码整目录覆盖到旧安装，也不要用 `git reset --hard` 升级。保留 `.git` 以及它指向的外部 Git 对象库；升级前备份 `%LOCALAPPDATA%\Anyswitch\`。
+
+源码换好后，要新的 panel-host 进程后端才生效——浏览器刷新只重读页面文件。面板里的**重启**会先重启 relay 再重启 panel-host，可能中断请求和终端会话，请在空档执行。
+
+这是预览版：稳定版安装不会自动收到它，`v0.5.2` 正式版 Release 保持原样。
+
+---
+
+## 代码在哪，数据在哪
+
+```text
+Anyswitch/
+├── panel-host.mjs              # 47820 面板宿主
+├── relay-host.mjs              # 47821 常驻 relay 宿主
+├── panel.mjs                   # 面板 API 与静态页面路由
+├── panel-ui/                   # 面板页面、样式和脚本
+├── launch.mjs                  # relay 生产装配与请求转发
+├── launcher.mjs                # Claude Code 启动器
+├── *-launcher.mjs              # 其他八个 agent 的启动器
+├── agent-sync.mjs              # 托管渠道同步到各 agent 配置
+├── agent-metrics.mjs           # 进程、请求、实例和看板读数
+├── session-scan.mjs            # 各 agent 的会话读取与适配
+├── agent-skills.mjs            # Skills 主仓库与部署
+├── skills/anyswitch-preset/    # 可选的预设管理技能
+├── docs/                       # 架构文档与真实截图
+├── package.json                # 版本、Node 范围、虚拟终端依赖
+├── SECURITY.md                 # 漏洞报告与安全模型
+└── LICENSE                     # Apache-2.0
+```
+
+想核对本版的实际提交范围：
+
+```bat
+git log --no-merges --oneline v0.5.2..v0.6.0-preview
+```
+
+---
+
+## 反馈与贡献
+
+- **Bug**：写清 Windows 版本、Node 版本、客户端形态、复现步骤和实际错误；不要附 API Key、凭据文件或完整会话内容。
+- **功能提案**：先说你的工作流在哪一步停住，再说期望的结果；实现方案留在讨论里。
+- **代码修改**：遵循 [`CONTRIBUTING.md`](CONTRIBUTING.md)——Node.js ESM、内置 `node:test`、规格与代码同笔更新。
+- **安全问题**：走 [`SECURITY.md`](SECURITY.md) 指向的 GitHub Security Advisories，不要公开发可利用细节。
+
+## 致谢与灵感来源
+
+- 提示词预设管理的功能灵感来自 [RP-Hub](https://github.com/STA1N156/RP-Hub)。
+- 使用统计页的设计，部分参考了 ZCode。
+- 部分功能借鉴自 [CC Switch](https://github.com/farion1231/cc-switch)——它与 Anyswitch 的定位差异见[上文的对比节](#和-cc-switch-的关系它改文件我过流量)。
+- 虚拟模型与自动路由的设计借鉴了 [autoAPI](https://github.com/happy66dev/AutoAPI)。
+
+## License
+
+[Apache-2.0](LICENSE)——可以用，可以改，可以分发，保留协议与版权声明。第三方产品名称和商标归各自所有者，见 [`NOTICE`](NOTICE)。
+
+---
+
+<div align="center">
+
+**Anyswitch** 管渠道、管路由、管凭据。<br>
+**你**，只需要配一次。<br>
+*渠道配一次，九个 agent 一起用。*
+
+</div>
 
 ---
 
 ## English
 
-### Features
+A Windows-local relay and control panel: you configure model providers once, and nine coding agents connect through the same place.
 
-- **Credentials stay on your machine** — upstream API keys are sealed per-provider with Windows DPAPI (entropy `ApiCred|DPAPI|v2|<ProviderId>`), decrypted only in memory at request time, never cached, never written to disk in plaintext.
-- **Single source of truth** — one v2 `store.json` describes all providers, models, and routing metadata; it contains no secrets, only a controlled `credentialFile` reference.
-- **Two protocol frontends, one relay** — the loopback relay on `127.0.0.1:47821` serves OpenAI-compatible requests natively (`/openai/<provider>/v1/...`) and Anthropic Messages requests via translation, so clients of both protocol families can share the same credential store.
-- **Loopback-only, token-authenticated** — the relay refuses non-loopback peers and authenticates each request: Anthropic-protocol clients get a one-shot 256-bit session token that lives and dies with the launch; OpenAI-protocol clients share a persistent relay token stored under the data root.
-- **Provider pools & route chains** — group 2–5 providers into a pool that fans a request out across its members with sticky failover; or build a per-endpoint route chain that serves the virtual model `auto`, walking channels and pools in order and backing off to the next node on failure.
-- **Multi-BaseURL failover** — per-provider `fallbackURLs` with a 180s generation budget per attempt, exponential backoff, and real upstream 5xx pass-through.
-- **Web control panel** — a standalone, always-available panel on `127.0.0.1:47820` for managing providers, sealing keys, monitoring, and usage statistics.
-- **Client launchers** — per-client launchers inject the relay endpoint and auth token into each supported coding agent listed below.
-- **No dependencies for the relay and panel** — plain Node.js ESM; the relay, panel and launchers run straight from a clone. The experimental virtual terminal is the one exception and needs its packages installed once (see Prerequisites).
-- **Virtual terminal** — a local terminal page inside the panel for running CLI agents, with the same routing and telemetry the dashboard shows.
+> *"Set up a channel once. Nine agents share it."*
 
-### Prerequisites
+Setting up a provider for your first agent is fun: base URL, API key, pick models — five minutes. By the fourth agent, you are copying the same dozens of entries into a fourth config file — and every copy of your API key sits there in plaintext, in a directory each agent process can read.
 
-- Windows (the credential store relies on Windows DPAPI)
-- **Node.js 24 LTS recommended.** Required API range: `>=22.15.0 <23 || >=23.8.0`. Session reading uses Node's built-in SQLite and zstd APIs; the range states the API minimum, not that every matching Node version has been tested.
-- Nothing to install for the relay and panel. For the experimental virtual terminal, run `npm install` once in the install directory — it pulls one terminal process binding plus a terminal renderer and three add-ons. Without it everything else still runs; only the virtual terminal page fails to open.
-
-### Installation
-
-Anyswitch is distributed as source code. GitHub Releases provide source archives, with no `.exe`/`.msi` installer; the panel does not install updates itself. Choose a published tag from the [Releases page](https://github.com/Aurora0134/Anyswitch/releases). `v0.5.0` is the first stable release, preceded by the `v0.5.0-preview` prerelease; versions before 0.5.0 were early development builds with no release published, so choose a published release tag rather than an earlier tag. To install `v0.5.2`, clone into a new directory:
+This tool exists to make "configure once" and "store exactly one sealed copy" true at the same time.
 
 ```bat
-git clone --branch v0.5.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
 ```
 
-The conventional location is `%LOCALAPPDATA%\Anyswitch\app`; another location works too. For a first installation from a source archive, extract into a new `app` directory. Do not extract over an existing installation.
+Source-distributed, no installer. Supported agents: Claude Code, Kimi Code, Codex, OpenCode, Pi, ZCode, DeepSeek Harness, Qoder, Grok Build.
 
-To use the experimental virtual terminal, install its packages once from the repository directory:
+### What you see is what runs
+
+The panel lives at `http://127.0.0.1:47820/panel`, the relay at `127.0.0.1:47821`. The panel manages configuration; the relay forwards requests. They are separate processes — if the relay stops, the panel still opens and shows you the state.
+
+<p align="center">
+  <img src="docs/screenshots/s1-board.png" alt="Board: service status, recent requests, agent instances and live output" width="48%">
+  <img src="docs/screenshots/s2-channels.png" alt="Channels: providers, pools and model lists" width="48%">
+  <img src="docs/screenshots/s3-stats.png" alt="Statistics: today at a glance, 90-day heatmap and token trends" width="48%">
+  <img src="docs/screenshots/s4-skills.png" alt="Skills: master repository and per-agent deployment" width="48%">
+</p>
+
+- **Board**: relay status, live route chains, recent requests, agent instances.
+- **Channels**: providers, model discovery, pools, route chains.
+- **Virtual models**: named, agent-agnostic route chains published to all nine agents.
+- **Skills**: one master repository, deployed to or adopted from each agent, with line-by-line diffs.
+- **Statistics**: today at a glance, a 90-day heatmap, TTFT, TPS, per-agent usage.
+- **Settings & About**: themes, Claude Code tier mapping, thinking-effort injection, environment detection, client updates.
+
+Real screenshots live in [`docs/screenshots/`](docs/screenshots/) — clone and open them directly to verify the pages.
+
+### Install
+
+You need: Windows (credentials are sealed with Windows DPAPI; autostart uses Task Scheduler), Node.js `>=22.15.0 <23 || >=23.8.0` (24 LTS recommended), and a fresh install directory — do not unpack the preview over a running installation.
 
 ```bat
+git clone --branch v0.6.0-preview --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
+cd /d "%LOCALAPPDATA%\Anyswitch\app"
 npm install
+wscript panel-app.vbs
 ```
 
-The relay, panel and launchers need nothing installed; skipping this step only leaves the virtual terminal page unable to open.
+`npm install` only prepares the virtual terminal's dependencies. Without it, the relay, panel, channel management, launchers and statistics all work; only the terminal page stays closed.
 
-`panel-app.vbs` is the desktop entry point: it locates `panel-launcher.mjs` relative to itself, so it works from any clone location. It starts the panel host and opens the panel in your browser. Point a desktop shortcut at it for one-click access. Manual fallback entry: `node panel-launcher.mjs` (or `node panel-host.mjs`) from the repo directory.
+Four steps to your first request:
 
-Notes:
+1. Open `http://127.0.0.1:47820/panel` and go to channel management.
+2. Add a provider: ID, upstream base URL, API key. The key is sealed with the current Windows user's DPAPI on save.
+3. Wait for model discovery; if the upstream has no `GET /v1/models`, enter model IDs manually. Add fallback URLs for failover.
+4. Launch your client through its launcher — it hands over the relay address, credentials and instance identity; every other argument passes through untouched.
 
-- Node.js must be on `PATH` or installed at `%ProgramFiles%\nodejs`.
-- The autostart scheduled tasks (`AnyswitchRelay` / `AnyswitchWatchdog`) bake in the repo path at registration time. If you move the install directory, re-toggle autostart in the panel so the tasks pick up the new path.
+### Nine agents, one way in
 
-### Upgrading
+| Agent | Protocol | Launch |
+| --- | --- | --- |
+| Claude Code | Anthropic Messages | `node launcher.mjs [claude args]` |
+| Kimi Code | Anthropic Messages | `node kimi-launcher.mjs [kimi args]` |
+| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex args]` |
+| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` |
+| Pi | OpenAI | `node pi-launcher.mjs [pi args]` |
+| ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` |
+| DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh args]` |
+| Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` |
+| Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` |
 
-Open **设置 → 关于 (Settings → About)** and click **检查更新 (Check for updates)** to check Anyswitch releases, then read the linked release notes. Preview versions include prereleases in the comparison; stable versions check stable releases only. A failed check is reported as unavailable, not as up to date. Checking does not download, replace, or restart Anyswitch, and does not upgrade your coding agents.
+Config sync writes managed channels into each agent's own config location and leaves everything you wrote by hand untouched:
 
-Keep your user data in the parent directory `%LOCALAPPDATA%\Anyswitch\`: `store.json`, `credentials`, settings, presets, and usage records belong there, outside `app`. Back it up before upgrading, and preserve the repository's `.git` file or directory and any external Git object store it points to. Do not replace the whole installation directory or use `git reset --hard` to upgrade.
+| Agent | Where Anyswitch writes |
+| --- | --- |
+| Kimi Code | `~/.kimi-code/config.toml` |
+| Codex | `~/.codex/config.toml` plus a generated model catalog |
+| OpenCode | `~/.config/opencode/opencode.json` (your `opencode.jsonc` is never touched) |
+| Pi | `~/.pi/agent/models.json` |
+| ZCode | `~/.zcode/v2/config.json` |
+| DeepSeek Harness | `~/.dsh/profiles/<name>/cordis.patch.yml` |
+| Qoder | `~/.qoder/settings.json` |
+| Grok Build | `~/.grok/config.toml` |
 
-For an existing Git clone, first schedule a break in active sessions and inspect the working tree from the repository directory:
+These files receive a loopback relay address and a local token — your real upstream keys never enter any agent's config directory. Claude Code is wired through its launcher instead, with optional tier mapping in Settings. Starting clients directly from a terminal also works: the relay attributes traffic to the right instance by owning process.
+
+### A dead channel should not stop the pipeline
+
+Three things in the panel steer your traffic: pools, route chains and fallback URLs. Each covers one layer, and they stack.
+
+#### Pools: one provider down, try another
+
+Group 2–5 providers into a pool. Requests stick to a member — one conversation does not hop providers mid-way — and a failing member fails over in order. Agents see one pool entry, not a pile of loose providers.
+
+#### Route chains: a model name is not married to one provider
+
+Each agent can have its own `auto` chain: requests sent as `auto` try the chain hop by hop. A chain node can be a provider or a pool — two layers of failover, stacked.
+
+```text
+model name
+  └─ node A: primary provider
+       └─ node B: pool
+            └─ node C: fallback provider
+```
+
+Failing nodes degrade hop by hop; repeatedly failing nodes are latched aside until their window expires, then real requests re-anchor the chain at the head. Deleting a provider or dissolving a pool prunes every chain reference in the same write — no dangling nodes. Every hop shows a live lamp on the board: which hop is carrying traffic, which one is degraded.
+
+<p align="center">
+  <img src="docs/screenshots/s5-route-chain.png" alt="Route chain editor: hop-by-hop failover chain and candidate tiles" width="80%">
+</p>
+
+#### Virtual models: one name, recognized by all nine agents
+
+A virtual model is your own name bound to a chain that belongs to no single agent (1–8 nodes). While enabled, it appears together with `auto` in the Anyswitch group of all nine agents' model lists; disable it and it disappears from every catalog.
+
+It answers "the same role should have the same name everywhere": define `deepseek-pro` as "primary provider → backup pool", then pick it in Claude Code or in Codex — the same chain carries the request. Chain state is shared across agents too: if one agent gets a node latched as degraded, another agent's requests skip it directly instead of paying the same tuition.
+
+Naming: starts with a lowercase letter, may contain digits and `. _ -`, at most 64 characters, and cannot collide with a model inside its own chain. The name locks on save — afterwards you edit the chain, not the name.
+
+#### Fallback URLs: the vendor has more than one entrance
+
+The last safety net sits on the provider itself: a `baseURL` plus several `fallbackURLs`. Each address gets a 180-second generation budget, and retries back off exponentially (1s up to a 4s cap); 4xx is terminal and stays put, 5xx moves to the next address. When every address is exhausted, the last real upstream 5xx passes through; pure transport failures return 502.
+
+### What 0.6.0 preview fixed
+
+**DeepSeek Harness 0.2: 90 session files had vanished.** 0.2 renamed session files by generation, and the old adapter only recognized `session.jsonl.zstd` — on a real upgraded machine, 71 v4 and 19 v3 files out of 218 were entirely absent from the list, with zero errors, hitting TUI and Web alike. This release reads the highest canonical generation per directory and clears all generations on delete; the session list went from 127 back to 198 entries. The official desktop app bypasses the launcher entirely, so the panel now recognizes it by its desktop-host signature and counts Desktop alongside TUI and Web under one DeepSeek Harness entry.
+
+**Claude Code: tiers, discovery and context windows finally separated.** Settings map Sonnet / Opus / Fable / Haiku to managed models, with a master switch that pauses mapping while keeping your choices; the CLI only opens model discovery on verified version families; every catalog row carries its context window, and million-token windows get a `[1m]` companion row. Claude Desktop's menu brand filter is compiled into the client — measured three ways: 28 entries as-is, still 28 with extra catalog fields, and all 148 passing the full filter chain once given deterministic aliases. This release ships that alias view; the blacklist itself belongs to the client, and nobody can remove it for them.
+
+**Client updates no longer die with the panel.** "Update all" dispatches different clients in parallel; installs run in a detached process, so closing the panel does not kill them, and reopening the About page reattaches to the result; Claude Desktop updates go through the official MSIX with signature verification.
+
+**Session catalogs only count what you actually said.** The old version counted turns by message role — in one measured session, 1216 of 1231 "user" records were tool outputs; a 25-session sample contained 5072 such noise records. Turn detection now lives in the data layer, and the median catalog length dropped from 134 to 4.
+
+**Two "nothing happens when I click" bugs closed.** When the install directory carried a low-integrity label, Windows rejected the credential-decryption script as an Internet-zone script — every channel probe failed and upstream requests returned 502; the script now runs with a process-level execution policy. The config-export dialog used to borrow the browser window as its owner and got refused by the shell, so no dialog ever appeared; it now shows ownerless.
+
+### The terminal page: refresh no longer wipes your screen
+
+The panel embeds a virtual terminal that can launch the 8 installed CLI agents directly (ZCode and Codex Desktop are graphical apps and stay out). Credentials travel only through session environment variables — nothing is written into terminal config files.
+
+The core fix this release is replay. Measured on the same real session: the old path replayed 470,208 bytes into **0 lines** of scrollback; the new "host-side rendered mirror, replayed line by line" turns 65,131 bytes into **1583 lines**. After a full page refresh you are still on the terminal page, still on the same tab.
+
+IME composition for Chinese input, Ctrl+C copy, OpenCode's Ctrl+Enter newline, block glyphs and WebGL rendering all landed in this release.
+
+It is still a preview feature: it needs one extra `npm install`, and restarting panel-host ends the PTYs running at that moment — their screens are kept, marked as exited.
+
+### Not a forwarder — the local source of truth for configuration
+
+```text
+%LOCALAPPDATA%\Anyswitch\
+├── store.json       provider, model, pool, route-chain and virtual-model metadata
+├── credentials\     one DPAPI-sealed file per provider
+├── settings.json    panel and per-agent switches
+├── usage\           daily request and session usage
+└── app\             this repository: relay, panel, launchers
+```
+
+- **No secrets in `store.json`.** The schema carries a word list (apikey, token, secret, password…), matches field names segment by segment, and refuses the write on a hit; keys connect to the credentials directory only through `credentialFile` references. Verify: `grep -n "SECRET_WORDS" store-schema.mjs`.
+- **Loopback only.** Panel `127.0.0.1:47820`, relay `127.0.0.1:47821`, watchdog marker `47822`; loopback addresses are forced into `NO_PROXY` so inherited proxies cannot carry local requests away.
+- **Keys are decrypted only at request time.** DPAPI runs at current-user scope; plaintext never enters the store, the logs, or any long-lived cache.
+- **Writes are concurrency-guarded.** Panel writes go through content-hash CAS with a file lock; routing catalogs carry a generation digest, and a configuration that changes mid-request refuses to serve the stale one.
+- **Zero npm dependencies in the business code.** All 5 dependencies belong to the virtual terminal; exactly one `.mjs` file imports a third-party package. Verify: `grep -n 'from "node-pty"\|from "@xterm' *.mjs` — only `terminal-host.mjs:13`.
+
+Upstream requests obviously leave the machine, toward the provider addresses you configured. Anyswitch guards credential storage, routing configuration and the local control plane — it does not pretend upstream calls are offline.
+
+### Relationship to CC Switch: it edits files, we carry traffic
+
+| | **Anyswitch** | [CC Switch](https://github.com/farion1231/cc-switch) |
+| --- | --- | --- |
+| Positioning | Forwarding console | Configuration switcher |
+| Acts on | Request traffic: relay, protocol translation, backoff and retry | Config files: writes providers into each CLI's configuration |
+| Core assets | Route chains, pools, keys never leave the machine, usage telemetry | Provider database, two-way live-config sync |
+| Form | Resident relay + web panel | Tauri desktop app |
+
+To be fair: CC Switch is mature and broad, and its provider preset library with two-way sync is genuinely strong; Anyswitch wins on forwarding quality and credential boundaries, at the cost of running a local service yourself. Comparison based on a read-only review of cc-switch v3.20.3, checked 2026-09-17.
+
+### Prompt presets: don't hand-edit those files either
+
+Ships with an optional skill, [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md), that lets a coding agent author and manage the panel's prompt presets. The panel writes active presets into each agent's own global instruction file — `AGENTS.md` for most, `CLAUDE.md` for Claude Code.
 
 ```bat
+xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E /I
+```
+
+Writes go through the panel API (`http://127.0.0.1:47820`); do not hand-edit `prompts.json`. Note that these writes land in other agents' files under your home directory — confirm that before enabling.
+
+### Where this is going
+
+The planned next step: **pulling configurations that already exist in agents' local directories into the central store.** Detect the providers and models already sitting in each agent's config directory and import them into Anyswitch — so even if you have accumulated dozens of entries in one agent over months, you migrate once, and every other agent picks them up without another round of copying.
+
+This is not implemented yet. It is written here so you know the direction — and so you can push it forward: ask for it in an issue.
+
+### Accept these boundaries first
+
+- **Windows only; no macOS / Linux support.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows, and no other platform implementation exists.
+- **No installer, no self-update.** 0.6.0 preview ships as source; upgrading means fetching a tag and restarting processes.
+- **Ports are fixed.** 47820 / 47821 / 47822 are constants in the code and cannot be changed from the panel.
+- **The virtual terminal is still preview.** It needs its own dependencies, and a panel-host restart takes the running PTYs with it.
+- **Three real paths are verified only to code and test level.** Panel-launched sessions for the 8 CLIs, virtual models appearing in all nine clients' pickers, and the real install buttons on the About page — each checked against real files and official release formats, but not clicked through on every client for you.
+- **Claude Desktop's menu filter belongs to the client.** We provide discovery catalogs, the alias view and strict routing; the brand blacklist compiled into their app is not ours to remove.
+
+This is a 0.6.0 preview, not a 1.0 product. If your pain is "channels scattered across nine config files", the preview is already enough. If you want it on a production pipeline, wait for the stable release.
+
+### Upgrading: keep your data and `.git`
+
+From `v0.5.2` to `v0.6.0-preview`, user data stays above `app` in `%LOCALAPPDATA%\Anyswitch\`: providers, credentials, settings, presets and usage records are not replaced with the source directory.
+
+Park your running sessions, then check the working tree:
+
+```bat
+cd /d "%LOCALAPPDATA%\Anyswitch\app"
 git status --short
 ```
 
-If this prints anything, preserve and resolve your local changes before proceeding; do not discard them to make the command succeed. With a clean working tree, fetch only the chosen published tag and switch to it. For `v0.5.2`:
+If it prints anything, deal with your own changes first — do not discard them for an upgrade. With a clean tree, fetch only the target tag:
 
 ```bat
-git fetch --no-tags origin tag v0.5.2
-git switch --detach v0.5.2
-```
-
-Then run `npm install` once in the repository directory for the experimental virtual terminal (see Installation).
-
-A detached checkout is normal for a release installation. These steps are for users running a release clone; maintainers working on the local development `master` keep that branch and do not switch it to a release tag. For an archive-based installation, unpack into a separate directory and compare/apply source-file changes, including removed files, while retaining user data and existing Git metadata; do not overlay the entire directory.
-
-After updating the source, the backend needs a new panel-host process. Refreshing the browser only reloads static page files; it does not replace the old backend or its recorded version. The existing panel **重启 (Restart)** button restarts the relay first and then the panel host, interrupting active relay requests and potentially coding sessions. Use it only at a time you have arranged, then reopen or refresh the panel and confirm the version in About.
-
-### Quick start
-
-1. Open the panel at `http://127.0.0.1:47820/panel` (via `panel-app.vbs`). The panel UI is Chinese; tab names below are given in both languages.
-2. In the **渠道管理 (Channels)** tab, click **新增渠道 (Add provider)** and fill in:
-   - **ID** — letters, digits, `.`, `_`, `-` only (e.g. `deepseek`);
-   - **Display name** — optional, defaults to the ID;
-   - **Base URL(s)** — the upstream's OpenAI-compatible endpoint; extra lines become failover `fallbackURLs`;
-   - **API Key** — sealed with DPAPI the moment you save.
-   
-   On save, Anyswitch discovers the model list from the upstream's `GET /v1/models`. If discovery fails (the upstream has no models endpoint), you can paste model IDs manually instead.
-3. Optionally, in the same tab: group providers into a **号池 (pool)**, or edit a **路由链 (route chain)** so that requesting the model `auto` walks your channels in order. Click **同步到端点 (Sync to endpoints)** to write the managed channels into client configs — this also happens automatically whenever the store changes (Kimi Code, Codex, OpenCode, Pi, DSH, ZCode, Qoder, Grok Build).
-
-   ![Route chain editor](docs/screenshots/s5-route-chain.png)
-4. Start your coding agent through its launcher (see the table below), e.g. `node launcher.mjs` for Claude Code. The launcher injects the relay endpoint and token automatically; any extra arguments are passed straight through to the client.
-
-### Supported clients
-
-| Client | Protocol | How to connect |
-| --- | --- | --- |
-| Claude Code | Anthropic | `node launcher.mjs [claude args]` — starts a per-launch relay on an ephemeral loopback port and injects `ANTHROPIC_BASE_URL` + a one-shot `ANTHROPIC_AUTH_TOKEN` via process env only; the relay and token die when Claude exits. |
-| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi args]` — same per-launch injection, plus managed providers merged into `~/.kimi-code/config.toml`. The native desktop app shares that same home directory, so it reads the managed channels, `AGENTS.md` and skills with no extra setup; the board tags its rows `Desktop`. |
-| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex args]` — ensures the relay is available on 47821, merges managed providers into `~/.codex/config.toml`, and supplies a model catalog unless you have chosen your own. Relay authentication is written into the managed config; the launcher passes instance identity through the process environment. |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` — ensures the relay is available on 47821 and merges managed providers into `~/.config/opencode/opencode.json` using the built-in config writer. No companion plugin is required; your `opencode.jsonc` is left untouched. |
-| Pi | OpenAI | `node pi-launcher.mjs [pi args]` — syncs managed providers into `~/.pi/agent/models.json`, then launches pi. |
-| ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` — merges managed providers into `~/.zcode/v2/config.json`. |
-| DSH | OpenAI | `node dsh-launcher.mjs [dsh args]` — merges managed providers into each `~/.dsh/profiles/<name>/cordis.patch.yml`. |
-| Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.qoder/settings.json`, and starts Qoder's own `qoder.cmd` dispatcher with `ANYSWITCH_RELAY_TOKEN` + `NO_PROXY` set in the process environment only. Two behaviours are specific to Qoder and worth knowing up front: requests are attributed by an identity prefix in the URL segment (`/openai/qoder~<provider>/v1`) because Qoder has no way to send a custom header, and the launcher starts Qoder with a DevTools port bound to 127.0.0.1 so it can ask Qoder to reload its model catalog after a config change — that reload is best-effort and its failure never blocks startup. |
-| Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` — reuses the resident relay on 47821 (or brings one up), merges managed providers into `~/.grok/config.toml`, strips any inherited `XAI_API_KEY`, and starts Grok Build with `ANYSWITCH_INSTANCE_ID` and `NO_PROXY` set in the process environment only. |
-
-For the config-merging clients (Kimi Code, Codex, OpenCode, Pi, ZCode, DSH, Qoder, Grok Build), the resident relay watches the store and re-syncs the client configs on every change, so adding or rotating a provider in the panel needs no launcher re-run.
-
-### Agent skills
-
-Anyswitch ships an optional agent skill that teaches a coding agent the correct way to author and manage Anyswitch **presets** — prompt presets that the panel writes into each supported client's own global instruction file (`AGENTS.md` for most clients, `CLAUDE.md` for Claude Code, dedicated `~/.qoder/rules/` and `~/.grok/rules/` files for Qoder and Grok Build) through the panel API. The skill lives at [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md) in this repo.
-
-Installing a preset changes files in your home directory that belong to your other tools, not just files in this repository; the panel exposes a master switch and a per-client switch so you can turn that off at any time.
-
-To install it into a coding agent that loads skills from a directory (e.g. Kimi Code), copy the folder into that agent's skills directory:
-
-```bat
-xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E
-```
-
-```bash
-cp -r skills/anyswitch-preset ~/.kimi-code/skills/
-```
-
-Once installed, the agent follows the skill's rules: it writes presets only through the panel API at `http://127.0.0.1:47820` (never by hand-editing `prompts.json`), and reports when each endpoint actually picks up the change (hot-reload endpoints apply immediately; the other six apply on next session).
-
-### Panel overview
-
-The panel is served by a standalone panel host decoupled from the relay, so it stays up even when the relay is down. Its features include:
-
-- **看板 (Board)** — service status (listen address, uptime, autostart toggle, relay stop/restart), recent-call health per model, route-chain lamps, a live log window, and per-endpoint instance rows for every supported client. On the DSH card one row is one DSH process, tagged with the surface it came from (Web vs. the terminal front end), and the card header counts the surfaces. The Kimi Code card works the same way over its three surfaces — `TUI`, `Web` and the native desktop app (`Desktop`).
-- **Skills 管理 (Skills)** — one master skills repo; import skills from a directory or zip, deploy/undeploy them to agent endpoints, and surface endpoint anomalies.
-- **渠道管理 (Channels)** — provider management (add, rotate key, delete, model filter) with DPAPI key sealing; model discovery refresh plus manual model add/remove; pools (号池) and route-chain (自动路由) editing; manual **同步到端点** sync.
-- **使用统计 (Stats)** — today's overview, 90-day heatmap, token trends, TTFT/TPS, per-endpoint work hours — see `docs/stats-spec.md`.
-- **设置 (Settings)** — **通用 (General) / 主题 (Theme) / 关于 (About)**. About has two stacked cards: Anyswitch version and update checks above, local environment below.
-
-The upper card shows the version of the running panel process and a preview label where applicable. Opening About loads that version and checks for updates once against the cached result; clicking **检查更新 (Check for updates)** always forces a fresh lookup. When a newer release is found, a link to the matching release notes appears — and if only a preview release exists, it is offered and clearly marked as a preview rather than reported as "no releases".
-
-The lower **本地环境 (Local environment)** card shows Windows, the Node version used by the panel, and all nine clients listed above. Detection reads installation locations and product metadata without launching a client — the only exceptions are Grok Build and the Qoder CLI, whose native binaries carry no readable version metadata, so each is asked once for its own `--version` report under a timeout; an installation that fails that probe is shown as installed but not runnable. Endpoints with several product forms collapse into one row whose badge joins the form names with "/" (CLI/Desktop, CLI/Desktop/Web); Codex and Qoder each keep two installation records behind that row — for Codex the CLI record's version comes from the npm-global `@openai/codex` package manifest and the desktop record reports the installed Microsoft Store package `OpenAI.Codex`, normalized from its four-segment Appx version, while Qoder's CLI record reads the version its `qodercli.exe` self-reports and its desktop record follows Qoder's versioned installs. Qoder's desktop updater installs every update as a complete release under a versioned subdirectory of its install root and leaves the copy in the install root at the first installed version, so detection reports the newest versioned install it can read and its details point at that same install; when no version can be read it says so instead of falling back to the stale number. Official versions are queried separately per client. Local results appear first; official versions fill in per client. **重新检测 (Refresh detection)** refreshes both. Paths, version sources, and query times are available in details; one failed query does not hide the other results.
-
-Detection distinguishes an installation found, not found, a version that cannot be read, installed but not runnable, and a detection failure. It does not prove a client can run, is signed in, or is connected to the relay. Official `latest` is the published channel being queried, not a claim about your selected update channel or a guarantee of a stable release; prerelease labels are retained. Qoder's `qoder.cmd` dispatcher belongs to the desktop IDE installation and is not a separate product, so detection never treats it as the CLI; the real CLI form is the `qodercli.exe` binary sharing the desktop IDE's `~/.qoder` home directory, compared against the `@qoder-ai/qodercli` npm dist-tag, while the desktop form is compared against the official desktop channel. Unknown local versions remain unknown even when an official version is available.
-
-The card can also act on eight clients: the six npm-managed CLI clients (Claude Code, Codex, OpenCode, Pi, Kimi, DSH) are reinstalled from their fixed global package; Grok Build first runs its own updater and falls back to installing `@xai-official/grok` at the official version we just read; and the Qoder CLI runs its own `qodercli update` with no npm fallback (a missing Grok Build or Qoder CLI gets no install button — first install stays with the official installer). One update button per endpoint covers every updatable form: for Codex the npm reinstall is followed by a winget upgrade of the Store-managed desktop MSIX — when winget itself is missing the panel says so plainly instead of reporting a failed update, and other winget failures open the official Store page so you can finish by hand; for Claude the npm reinstall is followed by the official MSIX channel — version comparison against Anthropic's metadata endpoint, download over the system proxy via Invoke-WebRequest, an Authenticode signature check that only accepts Anthropic, PBC, and `Add-AppxPackage` only once no desktop process is running — with metadata and download failures reported as network problems. A stale row offers one endpoint-level **更新 (Update)** button — clicking it runs every updatable form of that endpoint in turn and reports one result line per form — and a missing row offers **安装 (Install)**, while ZCode is a desktop product that stays on its own update channel and only gets links to official releases. The server runs one task per client at a time — two clients can update in parallel, while a second task for the same client is refused, because two concurrent global installs of the same package move each other's directories aside. The install runs in its own process, so closing or restarting the panel does not interrupt an update already underway; reopening the About page picks that update back up. The panel polls each task's result, so a slow download does not hold an HTTP connection open. If the target client is running, a confirmation dialog asks you to quit it first. When the command succeeds but the local version does not move, the panel says so instead of claiming success. **全部更新 (Update all)** dispatches every stale client's task at once — the server locks per client and different clients never touch each other's directories — and stays exclusive with the per-row buttons, so no client is ever updated by two tasks at once. Both buttons finish by re-detecting the local environment, so the displayed state always comes from a fresh probe.
-
-<p align="center">
-  <img src="docs/screenshots/s1-board.png" alt="Board tab" width="720">
-  <img src="docs/screenshots/s2-channels.png" alt="Channels tab" width="720">
-  <img src="docs/screenshots/s3-stats.png" alt="Stats tab" width="720">
-  <img src="docs/screenshots/s4-skills.png" alt="Skills tab" width="720">
-</p>
-
-### Security model
-
-- Keys are sealed with Windows DPAPI under the current user; ciphertext lives in `%LOCALAPPDATA%\Anyswitch\credentials\`, one file per provider.
-- `store.json` holds routing/metadata only and is schema-validated to reject any secret-looking field.
-- Session tokens are generated with a CSPRNG — the per-launch token is never persisted or logged; the shared relay token lives only under the data root.
-- Everything is fail-closed: no default provider, no fuzzy prefix matching, no fallback to another key on decryption failure; error messages are generalized and never leak URLs, credentials, upstream bodies, or stack traces. The one bounded exception is the Claude Code tier mapping: once you map a tier (Sonnet/Opus/Fable/Haiku) to a hosted model in Settings → General, the relay redirects exactly that tier name to it — Claude traffic only, only after strict resolution already refused the name, and never onto a tier you did not configure.
-- See `SECURITY.md` for reporting vulnerabilities.
-
-### FAQ
-
-**Is it Windows-only?**
-Yes. Key sealing relies on Windows DPAPI, autostart uses Windows scheduled tasks, and `package.json` declares `"os": ["win32"]`. There is no macOS/Linux support.
-
-**Where are my API keys stored, and is that safe?**
-Each provider's key is sealed with Windows DPAPI under your user account and stored as one ciphertext file per provider in `%LOCALAPPDATA%\Anyswitch\credentials\`. The plaintext exists only in memory while a request is being forwarded — it is never cached, never logged, and never written to `store.json` (the schema validator rejects secret-looking fields outright).
-
-**What happens if the relay crashes?**
-It stays down — crash-without-self-healing is a deliberate design choice, so a fault can't be masked by a restart loop. The control panel is a separate process on port 47820 and remains fully usable; restart the relay from the Board tab. If you enable autostart, the `AnyswitchWatchdog` scheduled task also revives the relay automatically when a coding agent appears.
-
-**Which upstreams are supported?**
-Any OpenAI-compatible endpoint — the store schema fixes `protocol: "openai-compatible"`. The upstream only needs chat completions; a `GET /v1/models` endpoint is used for model discovery, but you can enter model IDs manually when it is missing. Anthropic-protocol clients are served by translating to that same OpenAI-compatible upstream.
-
-**How does multi-BaseURL failover behave?**
-A provider can list `fallbackURLs` behind its primary `baseURL`. Each attempt gets a 180s generation budget with exponential backoff; 4xx is terminal (your request's problem, passed through), while 5xx moves to the next address. When every address is exhausted you get the last real upstream 5xx, or 502 for pure transport failures.
-
-**Can I change the ports?**
-No. The panel (47820), relay (47821), and watchdog marker (47822) ports are fixed constants in code, shared as the single source of truth by the launchers, panel, and watchdog — that is how all the pieces reliably find each other without configuration.
-
-### Documentation
-
-- [Architecture (Chinese)](docs/architecture.md) — layering, module map, security model
-- [Usage stats spec (Chinese)](docs/stats-spec.md) — the living spec of the stats tab
-
-### Tests
-
-```bat
-npm test
-```
-
-The suite needs the virtual terminal's packages installed once (`npm install`), because it exercises the terminal host; see [CONTRIBUTING.md](CONTRIBUTING.md) for single-file runs and environment notes.
-
-### Naming
-
-- This project is named **Anyswitch**. It was developed under the working name "ApiCred". The install location, data directory, and durable git object store now all use the Anyswitch name (`%LOCALAPPDATA%\Anyswitch`, `%LOCALAPPDATA%\Anyswitch-git`); pre-rename installs are migrated in place. One load-bearing identifier intentionally keeps the old name: the DPAPI entropy prefix `ApiCred|DPAPI|v2|` - changing it would seal out every stored key.
-
-### License
-
-[Apache-2.0](LICENSE). See [NOTICE](NOTICE) for third-party trademark attributions.
-
----
-
-## 中文
-
-一个 Windows 本地 AI 凭据 relay：把多家 OpenAI 兼容上游统一收口到 127.0.0.1 本地 relay，对外提供两种协议前端——OpenAI 原生、Anthropic Messages（经协议转换）。上游 API Key 用 Windows DPAPI 封存，不出本机。面向把多家模型服务商收在一个入口后使用、或同时使用多个 coding agent 的开发者。
-
-### 特性
-
-- **凭据不出本机** — 上游 API Key 用 Windows DPAPI 按提供方熵封存（`ApiCred|DPAPI|v2|<ProviderId>`），仅在请求时内存中即时解密，从不缓存、从不落盘明文。
-- **store 单一真相源** — 一份 v2 `store.json` 描述全部 provider/模型/路由元数据；不含任何秘密，只保留受控的 `credentialFile` 引用。
-- **双协议前端，一个 relay** — 环回 relay（`127.0.0.1:47821`）同时承载：OpenAI 兼容原生转发（`/openai/<provider>/v1/...`）、Anthropic Messages 协议转换，两个协议族的客户端共享同一份凭据 store。
-- **仅环回监听 + token 鉴权** — relay 拒绝非环回连接并逐请求鉴权：Anthropic 协议客户端拿随启动生灭的一次性 256-bit 会话 token；OpenAI 协议客户端共用存放在数据目录下的常驻 relay token。
-- **渠道池与路由链** — 把 2–5 个 provider 组成号池，请求在成员间粘性分发、故障自动切换；或为端点配置路由链，用虚拟模型 `auto` 按渠道/号池顺序逐跳路由，失败自动退避下一节点。
-- **多 BaseURL 无感退避** — provider 级 `fallbackURLs`，每次尝试 180s 生成预算、指数退避、真实透传上游 5xx。
-- **Web 控制面板** — 独立常驻面板 `127.0.0.1:47820`，管理 provider、封存 Key、监测与使用统计。
-- **客户端启动器** — 各客户端启动器自动注入 relay 端点与鉴权 token，覆盖下表所列各家 coding agent。
-- **relay 与面板零依赖** — 纯 Node.js ESM；relay、面板与各启动器克隆下来即可运行。唯一例外是实验性的虚拟终端，它需要安装一次依赖（见「前置条件」）。
-- **虚拟终端** — 面板内的一页本机终端，可在其中运行 CLI Agent，并复用看板的同一套路由与遥测口径。
-
-### 前置条件
-
-- Windows（凭据封存依赖 Windows DPAPI）
-- **推荐 Node.js 24 LTS。** API 下限范围为 `>=22.15.0 <23 || >=23.8.0`。会话读取使用 Node 内置 SQLite 与 zstd API；此范围说明 API 最低要求，不表示每个符合范围的 Node 版本均已实测。
-- relay 与面板无需安装任何东西。实验性的虚拟终端需要在安装目录执行一次 `npm install`，它会装入一个终端进程绑定，以及一个终端渲染器与两个附加组件。不装也不影响其余功能，只是虚拟终端那一页打不开。
-
-### 安装
-
-Anyswitch 以源码发行。GitHub Release 提供源码归档，没有 `.exe`/`.msi` 安装器，面板也不含自更新功能。先在 [Releases 页面](https://github.com/Aurora0134/Anyswitch/releases) 选择已发布标签。`v0.5.0` 是首个稳定版，此前发布过它的预览版 `v0.5.0-preview`；0.5.0 之前的版本均为早期开发版本，没有对应的 Release，因此请选择已发布标签而不是更早的标签；以 `v0.5.2` 为例，克隆到一个新目录：
-
-```bat
-git clone --branch v0.5.2 --single-branch https://github.com/Aurora0134/Anyswitch.git "%LOCALAPPDATA%\Anyswitch\app"
-```
-
-约定位置是 `%LOCALAPPDATA%\Anyswitch\app`，也可使用其他位置。首次使用源码归档安装时，解压到一个新的 `app` 目录，不要解压覆盖已有安装。
-
-要用实验性的虚拟终端，先在仓库目录安装一次它的依赖：
-
-```bat
+git fetch --no-tags origin tag v0.6.0-preview
+git switch --detach v0.6.0-preview
 npm install
 ```
 
-relay、面板与各启动器无需安装任何东西；跳过这一步只会让虚拟终端那一页打不开。
+Do not unpack new source over an old install, and do not upgrade with `git reset --hard`. Keep `.git` and the external object database it points to; back up `%LOCALAPPDATA%\Anyswitch\` first.
 
-`panel-app.vbs` 是桌面入口：按脚本自身位置定位 `panel-launcher.mjs`，克隆到任意路径都能用。它会拉起面板宿主并在浏览器中打开面板。给它建一个桌面快捷方式即可一键进入。手动备用入口：在仓库目录下执行 `node panel-launcher.mjs`（或 `node panel-host.mjs`）。
+New source needs a new panel-host process for the backend to take effect — a browser refresh only re-reads page files. The panel's **Restart** restarts the relay and then panel-host, and may interrupt requests and terminal sessions; run it between sessions.
 
-注意事项：
+This is a preview: stable installations will not receive it automatically, and the `v0.5.2` Release stays as it is.
 
-- Node.js 需在 `PATH` 中，或安装在 `%ProgramFiles%\nodejs`。
-- 开机自启的计划任务（`AnyswitchRelay` / `AnyswitchWatchdog`）固化注册时的仓库路径。移动安装目录后，需在面板中重开自启，让任务更新为新路径。
+### Where the code lives
 
-### 升级
+```text
+Anyswitch/
+├── panel-host.mjs              # panel host on 47820
+├── relay-host.mjs              # resident relay host on 47821
+├── panel.mjs                   # panel API and static routes
+├── panel-ui/                   # panel pages, styles and scripts
+├── launch.mjs                  # relay assembly and request forwarding
+├── launcher.mjs                # Claude Code launcher
+├── *-launcher.mjs              # launchers for the other eight agents
+├── agent-sync.mjs              # syncs managed channels into agent configs
+├── agent-metrics.mjs           # processes, requests, instances and board readings
+├── session-scan.mjs            # session readers and adapters per agent
+├── agent-skills.mjs            # skills master repository and deployment
+├── skills/anyswitch-preset/    # optional preset-management skill
+├── docs/                       # architecture docs and real screenshots
+├── package.json                # version, Node range, terminal dependencies
+├── SECURITY.md                 # vulnerability reports and security model
+└── LICENSE                     # Apache-2.0
+```
 
-打开 **设置 → 关于**，点 **检查更新** 查询 Anyswitch 新版，再查看结果链接中的发布说明。预览版会把预发布纳入比较，正式版仅检查正式发布；检查失败会显示暂时无法检查，不会误报为最新。检查不会下载、替换或重启 Anyswitch，也不会升级你的 coding agent。
-
-保留 `app` 上层 `%LOCALAPPDATA%\Anyswitch\` 中的用户数据：`store.json`、`credentials`、设置、预设和用量记录等都在这里。升级前备份数据，并保留仓库的 `.git` 文件或目录及其指向的外部 Git 对象库。不要整目录替换安装，也不要用 `git reset --hard` 升级。
-
-已有 Git clone 的用户应先安排会话空档，在仓库目录检查工作树：
+To audit what actually changed in this release:
 
 ```bat
-git status --short
+git log --no-merges --oneline v0.5.2..v0.6.0-preview
 ```
 
-若有输出，先妥善保存并处理本地修改，不要为了继续升级而丢弃它们。确认工作树干净后，只获取所选已发布标签，再切到该标签；以 `v0.5.2` 为例，执行：
+### Feedback and contributing
 
-```bat
-git fetch --no-tags origin tag v0.5.2
-git switch --detach v0.5.2
-```
+- **Bugs**: include Windows version, Node version, client flavor, reproduction steps and the actual error; never attach API keys, credential files or full session contents.
+- **Feature proposals**: say where your workflow stops today, then the outcome you want; leave implementation to the discussion.
+- **Code**: follow [`CONTRIBUTING.md`](CONTRIBUTING.md) — Node.js ESM, built-in `node:test`, specs updated in the same commit as the code.
+- **Security**: use the GitHub Security Advisories route in [`SECURITY.md`](SECURITY.md); do not publish exploitable details.
 
-随后在仓库目录执行一次 `npm install`，用于实验性的虚拟终端（见「安装」）。
+### Acknowledgements
 
-发布版安装处于 detached HEAD 状态是正常的。这套步骤适用于使用发布版 clone 的用户；维护者的本机开发 `master` 保持原分支，不按此步骤切到发布标签。源码归档用户应先解压到单独目录，对照应用源文件变更（包括已删除的文件），保留用户数据和已有 Git 元数据，不要整目录覆盖。
+- The prompt-preset feature was inspired by [RP-Hub](https://github.com/STA1N156/RP-Hub).
+- The statistics page is partly designed after ZCode.
+- Some features borrow from [CC Switch](https://github.com/farion1231/cc-switch) — see the comparison section above for how the two differ.
+- Virtual models and auto-routing borrow from [autoAPI](https://github.com/happy66dev/AutoAPI).
 
-源码更新后，后端需要换成新的 panel-host 进程。浏览器刷新只会重新加载静态页面，不会替换旧后端或更新其记录的运行版本。面板已有的 **重启** 按钮会先重启 relay，再重启面板宿主，中断正在转发的请求，可能打断 coding 会话。请自行安排合适时机使用，随后重新打开或刷新面板，在关于页确认版本。
+## License
 
-### 快速开始
-
-1. 打开面板 `http://127.0.0.1:47820/panel`（经 `panel-app.vbs`）。
-2. 在 **渠道管理** tab 点 **新增渠道**，填写：
-   - **ID** — 仅限字母、数字、`.`、`_`、`-`（如 `deepseek`）；
-   - **显示名** — 可选，默认同 ID；
-   - **Base URL** — 上游的 OpenAI 兼容端点；多填几行即为备用地址（`fallbackURLs`）；
-   - **API Key** — 保存即用 DPAPI 封存。
-
-   保存时 Anyswitch 自动通过上游的 `GET /v1/models` 拉取模型列表；若发现失败（上游没有 models 端点），可以改为手动粘贴模型 ID。
-3. 可选：在同一个 tab 里把多个渠道组成 **号池**，或编辑 **路由链**（请求模型 `auto` 时按链逐跳路由）。点 **同步到端点** 把托管渠道写入各客户端配置——store 每次变更时也会自动同步（Kimi Code、Codex、OpenCode、Pi、DSH、ZCode、Qoder、Grok Build）。
-
-   ![路由链编辑器](docs/screenshots/s5-route-chain.png)
-4. 通过对应启动器启动 coding agent（见下表），例如 Claude Code 用 `node launcher.mjs`。启动器自动注入 relay 端点与 token；多余参数原样透传给客户端。
-
-### 支持的客户端
-
-| 客户端 | 协议 | 接入方式 |
-| --- | --- | --- |
-| Claude Code | Anthropic | `node launcher.mjs [claude 参数]` — 在临时环回端口拉起一次性 relay，仅以进程环境变量注入 `ANTHROPIC_BASE_URL` + 一次性 `ANTHROPIC_AUTH_TOKEN`；Claude 退出时 relay 与 token 一并销毁。 |
-| Kimi Code | Anthropic | `node kimi-launcher.mjs [kimi 参数]` — 同样的一次性注入，另把托管 provider 合并进 `~/.kimi-code/config.toml`。官方桌面端与 CLI 共用同一份家目录，托管渠道、`AGENTS.md` 与 skills 一并读到，无需额外接入；看板上它的实例行标为 `Desktop`。 |
-| Codex CLI | OpenAI Responses | `node codex-launcher.mjs [codex 参数]` — 确保 47821 relay 可用，把托管 provider 合并进 `~/.codex/config.toml`；未自选模型目录时提供托管模型目录。relay 鉴权写入托管配置，启动器通过进程环境传递实例标识。 |
-| OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` — 确保 47821 relay 可用，由仓内配置写手把托管 provider 合并进 `~/.config/opencode/opencode.json`。无需配套插件，用户的 `opencode.jsonc` 保持不动。 |
-| Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` — 先把托管 provider 同步进 `~/.pi/agent/models.json`，再启动 pi。 |
-| ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` — 合并托管 provider 进 `~/.zcode/v2/config.json`。 |
-| DSH | OpenAI | `node dsh-launcher.mjs [dsh 参数]` — 合并托管 provider 进每个 `~/.dsh/profiles/<name>/cordis.patch.yml`。 |
-| Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.qoder/settings.json`，再经 Qoder 自家的 `qoder.cmd` 调度器启动，`ANYSWITCH_RELAY_TOKEN` 与 `NO_PROXY` 只走进程环境变量、不落盘。两处 Qoder 特有行为需先知晓：请求归属靠 URL 段里的身份前缀（`/openai/qoder~<provider>/v1`），因为 Qoder 没有下发自定义请求头的位置；启动器会带一个只绑 127.0.0.1 的 DevTools 端口拉起 Qoder，用于在配置变更后请它重载模型目录——该重载是尽力而为，失败也不阻塞启动。 |
-| Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` — 复用 47821 常驻 relay（不在则拉起），把托管 provider 合并进 `~/.grok/config.toml`，剥离继承的 `XAI_API_KEY`，再以仅进程环境变量注入 `ANYSWITCH_INSTANCE_ID` 与 `NO_PROXY` 启动 Grok Build。 |
-
-对会合并配置的客户端（Kimi Code、Codex、OpenCode、Pi、ZCode、DSH、Qoder、Grok Build），常驻 relay 监听 store 变更并自动重同步客户端配置，在面板里新增或轮换渠道后无需重跑启动器。
-
-### 智能体技能
-
-Anyswitch 附带一个可选的智能体技能，教 coding agent 以正确的方式编写与管理 Anyswitch **预设**——预设正文由面板写入各客户端自家的全局指令文件（多数客户端是 `AGENTS.md`，Claude Code 是 `CLAUDE.md`，Qoder 与 Grok Build 是各自规则目录下的专属文件 `~/.qoder/rules/`、`~/.grok/rules/`），写入只经面板 API。技能位于本仓库的 [`skills/anyswitch-preset/`](skills/anyswitch-preset/SKILL.md)。
-
-需要先知晓：写入预设改动的是你家目录里属于其他工具的文件，不局限于本仓库；面板提供总开关与逐端点开关，随时可关。
-
-要把它装进从目录加载技能的 coding agent（如 Kimi Code），把该目录复制到对应 agent 的 skills 目录即可：
-
-```bat
-xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset" /E
-```
-
-```bash
-cp -r skills/anyswitch-preset ~/.kimi-code/skills/
-```
-
-安装后，agent 会遵循该技能的规则：只通过 `http://127.0.0.1:47820` 的面板 API 写预设（绝不手改 `prompts.json`），并如实报告各端点的生效时机（热加载端点立即生效，其余六个下次会话生效）。
-
-### 面板功能简介
-
-面板由独立面板宿主承载，与 relay 解耦，relay 停止/崩溃时面板仍可用。主要功能包括：
-
-- **看板** — 服务状态（监听地址、已连续运行、开机自启开关、relay 停止/重启）、各模型近期调用健康度、路由链灯、实时输出日志窗，以及全部端点的实例行；DSH 卡的实例行一行对应一个 DSH 进程，并按界面标明来历（Web 与终端前端各一行，卡头给出各界面的数量）。Kimi Code 卡同一形状，覆盖它的三个界面：终端（`TUI`）、`kimi web`（`Web`）与原生桌面端（`Desktop`）。
-- **Skills 管理** — 单一 skills 主仓库：从目录或 zip 导入 skill、部署/解除到各 agent 端点、端点异常提示。
-- **渠道管理** — provider 管理（新增、轮换 Key、删除、模型过滤）并 DPAPI 封存 Key；模型发现刷新与手动增删模型；号池与路由链（自动路由）编辑；手动 **同步到端点**。
-- **使用统计** — 今日概览、90 天热力图、Token 趋势、TTFT/TPS、端点工时——见 `docs/stats-spec.md`。
-- **设置** — 分为 **通用｜主题｜关于**。关于页上下两张卡：上方是 Anyswitch 版本与检查更新，下方是本地环境。
-
-上卡显示当前面板进程的 Anyswitch 版本，并在预览版时标明预览状态。打开关于页先读取当前版本，并基于缓存结果自动检查一次更新；点击 **检查更新** 则总是强制重新查询。发现新版时可打开对应发布说明；若当前只有预览版可升，会如实显示为预览版而不是「暂无发布版本」。
-
-下方 **本地环境** 卡展示 Windows、面板使用的 Node 版本，以及上表中的九个客户端。检测只读取安装位置和产品资料，不启动客户端——例外只有 Grok Build 与 Qoder CLI 两家原生二进制：它们没有可读的版本信息，各自以带超时的一次 `--version` 自报为准；装了但探测无响应的，显示为已安装但无法运行。多形态端点在卡上归并为一行，徽标按入口形态枚举以「/」连写（CLI/Desktop、CLI/Desktop/Web）；Codex 与 Qoder 各在这一行背后带两条安装记录——Codex 的 CLI 记录版本来自 npm 全局 `@openai/codex` 的包清单，桌面记录显示已安装的 Microsoft Store 包 `OpenAI.Codex` 的版本（由四段 Appx 版本归一而来）；Qoder 的 CLI 记录版本认 `qodercli.exe` 的自报，桌面记录跟随它的版本目录安装。Qoder 桌面每次更新都把新版整包装进安装目录下的版本子目录，安装根目录那份从此停留在首次安装的版本，因此以版本子目录中最新且能读出的那一份为准，展开后的路径同样指向实际运行的那份安装；读不出时显示「版本无法读取」，不会退回旧版号。官方版本随后按客户端独立查询。本地结果先出现，官方版本逐项补齐；**重新检测** 会刷新两者。路径、版本来源和查询时间可展开查看，单项查询失败不会隐藏其他结果。
-
-检测区分已发现、未找到、版本无法读取、已安装但无法运行和检测失败，不表示客户端一定可运行、已登录或已接入转发。官方 `latest` 表示本次查询的发布渠道，不代表已读取用户选择的更新渠道，也不保证是稳定版；预发布标识会保留。Qoder 的 `qoder.cmd` 调度器属于桌面 IDE 安装、不是独立产品，检测从不把它当成 CLI；真正的 CLI 形态是与桌面 IDE 共用 `~/.qoder` 家目录的 `qodercli.exe`，与 `@qoder-ai/qodercli` 的 npm dist-tag 比较，桌面形态与官方桌面渠道比较。本地版本读不到时保留未知状态，官方版本仍可单独显示。
-
-这张卡也能对八个客户端动手：六个 npm 托管的 CLI 客户端（Claude Code、Codex、OpenCode、Pi、Kimi、DSH）按固定包名重装全局包；Grok Build 先跑它自身的升级命令、失败再按查到的官方版本装 `@xai-official/grok`；Qoder CLI 只跑自身的 `qodercli update`，没有 npm 兜底（Grok Build 与 Qoder CLI 未安装时不给安装按钮，首装仍归官方安装器）。每个端点一个更新按钮管全部可更新形态：Codex 在 npm 重装之后串行补跑桌面腿，用 winget 静默升级商店托管的桌面 MSIX——winget 本身缺失时如实告诉用户缺 winget，不伪装成更新失败，其余失败降级为打开官方商店条目页；Claude 同样先 npm 重装、再串行跑官渠 MSIX 桌面腿——照 Anthropic 元数据端点比对版本、经系统代理用 Invoke-WebRequest 下载、Authenticode 验签只认 Anthropic, PBC、确认没有桌面进程在跑才 Add-AppxPackage，元数据与下载的网络类失败按网络问题如实报告。落后的行出现一颗端点级的 **更新** 按钮，点击后按端点串行跑完全部可更新形态、逐形态各报一句结果，没安装的行出现 **安装** 按钮；ZCode 是桌面产品，仍走它自己的更新渠道，面板只提供官方版本入口。服务端每个客户端同一时间只跑一个任务——不同客户端可以并行更新，同一个客户端再来一个任务会被拒，因为同一个包的两份并发全局安装会把对方的目录搬走。安装在独立进程里进行，关掉或重启面板不会中断正在进行的更新；重新打开关于页会接回还没结束的那次。面板逐个任务轮询结果，因此慢下载不会占着一条 HTTP 连接。目标客户端正在运行时，会先弹确认请你退出。命令成功但本地版本没动时，面板如实说明未生效而不是报成功。**全部更新** 会把所有落后的客户端一次并发派出（服务端按客户端分锁，不同客户端互不触碰对方的目录），并与逐行按钮互斥，任何一个客户端都不会被两个任务同时更新。两类操作结束后都会重新检测本地环境，页面显示的状态始终来自最新一次探测。
-
-<p align="center">
-  <img src="docs/screenshots/s1-board.png" alt="看板" width="720">
-  <img src="docs/screenshots/s2-channels.png" alt="渠道管理" width="720">
-  <img src="docs/screenshots/s3-stats.png" alt="使用统计" width="720">
-  <img src="docs/screenshots/s4-skills.png" alt="Skills 管理" width="720">
-</p>
-
-### 安全模型要点
-
-- Key 用 Windows DPAPI 在当前用户作用域封存；密文存于 `%LOCALAPPDATA%\Anyswitch\credentials\`，每提供方一个文件。
-- `store.json` 只存路由/元数据，schema 校验递归拒绝任何秘密样字段。
-- 会话 token 由 CSPRNG 生成——一次性 token 不落盘、不记录；共享 relay token 只存放在数据目录下。
-- 全程 fail-closed：无默认 provider、无前缀模糊匹配、解密失败不回退其它 Key；错误信息泛化，绝不泄露 URL/凭据/上游响应体/栈。唯一有界例外是 Claude Code 档位映射：在 设置 → 通用 里为某个档位（Sonnet/Opus/Fable/Haiku）指定托管模型后，中继才把那个档位名改投过去——只作用在 Claude 端点、只在严格解析已经拒绝该名字之后、未配置的档位一律照原样拒绝。
-- 漏洞报告见 `SECURITY.md`。
-
-### FAQ
-
-**只支持 Windows 吗？**
-是。Key 封存依赖 Windows DPAPI，开机自启用 Windows 计划任务，`package.json` 也声明了 `"os": ["win32"]`。没有 macOS/Linux 支持。
-
-**我的 API Key 存在哪？安全吗？**
-每个 provider 的 Key 用 Windows DPAPI 在你的用户账户下封存，密文以每提供方一个文件存于 `%LOCALAPPDATA%\Anyswitch\credentials\`。明文只在转发请求的瞬间存在于内存——不缓存、不记录日志、也绝不会写进 `store.json`（schema 校验会直接拒绝任何秘密样字段）。
-
-**relay 崩了怎么办？**
-它会保持停止——崩溃不自愈是刻意设计，避免故障被重启循环掩盖。控制面板是 47820 上的独立进程，照常可用，在看板 tab 重启 relay 即可。如果开了开机自启，`AnyswitchWatchdog` 计划任务还会在 coding agent 出现时自动拉起 relay。
-
-**支持哪些上游？**
-任何 OpenAI 兼容端点——store schema 固定 `protocol: "openai-compatible"`。上游只需提供 chat completions；`GET /v1/models` 用于模型发现，缺了可以手动填模型 ID。Anthropic 协议的客户端由 relay 转换到这同一个 OpenAI 兼容上游。
-
-**多 BaseURL 的退避行为是怎样的？**
-provider 可在主 `baseURL` 后排 `fallbackURLs`。每次尝试有 180s 生成预算并按指数退避；4xx 视为终态（请求自身的问题，原样透传），5xx 切下一个地址。所有地址耗尽时透传最后一个真实上游 5xx，纯传输失败返回 502。
-
-**端口能改吗？**
-不能。面板（47820）、relay（47821）、watchdog 标记端口（47822）都是代码里的固定常量，作为启动器、面板、watchdog 共享的单一真相源——正是固定端口让各组件无需配置就能互相找到对方。
-
-### 文档
-
-- [架构说明](docs/architecture.md) — 分层、模块地图、安全模型
-- [使用统计页规格](docs/stats-spec.md) — 统计 tab 的单一现行规格
-
-### 测试
-
-```bat
-npm test
-```
-
-测试套件需要先执行一次 `npm install`（其中有用例覆盖虚拟终端的终端宿主）；单文件跑法与环境说明见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-### 命名说明
-
-- 本项目名为 **Anyswitch**，开发期曾用名 "ApiCred"。安装位置、数据目录与耐久 git 对象库现已统一为新名（`%LOCALAPPDATA%\Anyswitch`、`%LOCALAPPDATA%\Anyswitch-git`），改名前的旧安装就地迁移。唯一有意保留旧名的承重标识符是 DPAPI 熵前缀 `ApiCred|DPAPI|v2|`——改动将封死全部已存密钥。
-
-### License
-
-[Apache-2.0](LICENSE)。第三方商标声明见 [NOTICE](NOTICE)。
+[Apache-2.0](LICENSE) — use it, change it, redistribute it; keep the license and copyright notices. Third-party product names and trademarks belong to their owners; see [`NOTICE`](NOTICE).
