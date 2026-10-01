@@ -15,6 +15,7 @@ import { sendJson, runStreamWithKeepAlive, anthropicStreamChannel } from "./stre
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
 import { isChainFailoverStatus } from "./chain-routing.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
+import { isClaudeBackgroundMessagesRequest } from "./openai-server.mjs";
 
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
 
@@ -163,6 +164,11 @@ export function createRelayServer(deps) {
             model: wireIdToStatModel(body?.model),
             stream: body.stream === true,
             path: "anthropic",
+            // Claude 非流式 = 引擎内部噪声（标题/摘要/预览生成，journal 实测
+            // 从不带缓存命中），与 resident /v1/messages 的分类规则一致：
+            // background 标记让会话样本窗只描述用户流量。per-launch 中继也
+            // 服务 kimi（agentId 注入），分类只对 claude 生效。
+            background: isClaudeBackgroundMessagesRequest(agentId, body) === true,
           });
           // Claude Code fires concurrent in-session requests (side queries,
           // rapid re-send after Esc): terminal/first-chunk signals must go

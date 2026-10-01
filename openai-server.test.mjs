@@ -1177,6 +1177,109 @@ describe("resident /v1/messages non-streaming usage mapping", () => {
     }
   });
 
+  it("classifies non-streaming claude traffic as background — engine noise never books into cards", async () => {
+    // 调查现场（2026-10-01）：Claude 桌面端挂机/后台期间持续发 4-token 非流式
+    // 内部请求，全部流经常驻 relay 的 /v1/messages，把桌面成员 last-18 窗口的
+    // 速率/缓存率样本挤出去、缓存率按 cached=0/prompt>0 打到 0——切回前台时
+    // 「生成速度」「缓存命中率」两格消失。流式判定在请求起点即可得：桌面端
+    // 用户轮永远流式（journal 5 周 2627 条非流 claude 行零缓存命中，全部引擎
+    // 噪声），故 agentId=claude + stream!==true 即后台，与 codex 分类器同一
+    // 处置（meta.background 随记账隔离）。
+    let startedMeta = null;
+    const fakeCollector = {
+      startRequest: (meta) => {
+        startedMeta = meta;
+        return {
+          recordFirstChunk: () => {},
+          recordEnd: () => {},
+          attachInstance: () => {},
+        };
+      },
+    };
+
+    const server = createOpenAIRelayServer({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store: STORE }),
+      loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+      upstreamFetch: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: "cmpl-1",
+          choices: [{ message: { role: "assistant", content: "hi" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 9555, completion_tokens: 4 },
+        }),
+      }),
+      recordGeneration: () => {},
+      readGeneration: () => null,
+      metricsCollector: fakeCollector,
+    });
+
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      // 引擎噪声形状：非流式 + claude 身份（桌面端 UA）。
+      const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: {
+          authorization: TOKEN,
+          "content-type": "application/json",
+          "user-agent": "claude-cli/2.1.246 (external, cli)",
+        },
+        body: JSON.stringify({
+          model: "anthropic/poke-api/claude-opus-5",
+          max_tokens: 4,
+          messages: [{ role: "user", content: "classify" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.json();
+      assert.ok(startedMeta, "metricsCollector.startRequest was called");
+      assert.equal(startedMeta.background, true, "claude 非流式请求判后台");
+      assert.equal(startedMeta.agentId, "claude");
+
+      // 对照组：流式 claude 用户轮照常是用户流量。
+      const sse = (async function* () {
+        const encoder = new TextEncoder();
+        yield encoder.encode('data: {"id":"cmpl-1","choices":[{"delta":{"content":"hi"}}]}\n\n');
+        yield encoder.encode("data: [DONE]\n\n");
+      })();
+      const streamServer = createOpenAIRelayServer({
+        token: TOKEN,
+        loadStore: () => ({ ok: true, store: STORE }),
+        loadCredential: async () => ({ ok: true, value: "SENTINEL-UPSTREAM-KEY" }),
+        upstreamFetch: async () => ({ ok: true, status: 200, body: sse }),
+        recordGeneration: () => {},
+        readGeneration: () => null,
+        metricsCollector: fakeCollector,
+      });
+      // 新的 startedMeta 会覆盖上一条——对照请求再经同一桩跑一遍。
+      const { port: port2, close: close2 } = await listenLoopback(streamServer, 0);
+      try {
+        const streamRes = await fetch(`http://127.0.0.1:${port2}/v1/messages`, {
+          method: "POST",
+          headers: {
+            authorization: TOKEN,
+            "content-type": "application/json",
+            "user-agent": "claude-cli/2.1.246 (external, cli)",
+          },
+          body: JSON.stringify({
+            model: "anthropic/poke-api/claude-opus-5",
+            max_tokens: 64,
+            stream: true,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        });
+        assert.equal(streamRes.status, 200);
+        await streamRes.text();
+        assert.equal(startedMeta.background, false, "流式 claude 用户轮保持用户流量");
+      } finally {
+        await close2();
+      }
+    } finally {
+      await close();
+    }
+  });
+
   it("maps cache_read_input_tokens to cached_tokens (unit)", () => {
     assert.deepEqual(
       anthropicUsageToOpenAI({ input_tokens: 11, output_tokens: 7, cache_read_input_tokens: 9 }),
