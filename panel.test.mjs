@@ -83,6 +83,10 @@ const panelMjs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "panel.mjs"),
   "utf8",
 );
+const terminalHostJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "terminal-host.mjs"),
+  "utf8",
+);
 
 describe("panel router relay control + pull-mode agents", () => {
   it("POST /panel/api/logs/ingest republishes a forwarded entry through the logger bus", async () => {
@@ -3026,7 +3030,7 @@ describe("panel.html 设置全页视图", () => {
         setItem: (k, v) => { store[k] = v; },
         removeItem: (k) => { delete store[k]; },
       };
-      const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";
+      let terminalDefaultCwd = "";
       ${bodies}
       rebuildTerminalBackendSessions(items);
       return { active: activeTerminalPreviewId, ids: Object.keys(terminalBackendSessions) };
@@ -5618,6 +5622,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function positionTerminalAddMenu() {}
       function restoreTerminalFontSize() {}
       function syncTerminalAddBtn() {}
+      function fetchTerminalDefaultCwd() {}
       function connectTerminalBackend() {}
       function renderTerminalPreviewSession() {}
       function syncTerminalActivityStream() {}
@@ -6951,8 +6956,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   }
 
   // 纯函数在 vm 里真跑（同归属前科的取样式）；出口统一 JSON 往返，防跨原型误判。
-  // terminalBackendSession / confirmTerminalAddMenu 引用模块级默认目录常量，vm 域里补一份同值定义。
-  const VM_TERMINAL_DEFAULT_CWD = 'const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";';
+  // terminalBackendSession 引用模块级默认目录变量，vm 域里补一份同值定义。
+  const VM_TERMINAL_DEFAULT_CWD = 'let terminalDefaultCwd = "";';
   async function vmFn(name, args, deps = []) {
     const source = [name, ...deps].map(extractFn).join("\n");
     const fn = await vm.runInNewContext(`(() => { ${VM_TERMINAL_DEFAULT_CWD}\n${source}; return ${name}; })()`, {});
@@ -6965,8 +6970,10 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   function addMenuSandbox({ environment, environmentError } = {}) {
     const bodies = ["closeTerminalAddMenu", "loadInstalledTerminalAgents", "renderTerminalAddMenuList",
       "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize",
-      // 新终端置活跃要写存档；沙盒没有 localStorage，正好真跑一遍助手里的兜底分支。
-      "rememberTerminalSessionId"]
+      // 新终端置活跃要写存档；沙盒的 localStorage 用内存桩真跑，不碰真存档。
+      "rememberTerminalSessionId",
+      // 目录解析三件套：confirm 记目录、open 预填，都靠它们取默认值与持久化。
+      "rememberTerminalCwd", "loadTerminalCwd", "terminalCwdInitial"]
       .map(extractFn).join("\n");
     const btnRect = { left: 400, right: 430, top: 12, bottom: 42 };
     const barRect = { left: 0, top: 0, width: 1200 };
@@ -6991,11 +6998,17 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       return Promise.resolve({ id: "t-new", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "D:\\work" });
     };
     const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const store = {};
+    const localStorageStub = {
+      getItem: (k) => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: (k) => { delete store[k]; },
+    };
     const sandbox = new Function("$", "api", "toast", "panelError", "terminalBackendSession",
-      "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", `
+      "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", "localStorage", `
       let activeTerminalPreviewId = null;
       let terminalXterm = null;
-      const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app";
+      let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
       const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"];
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
@@ -7014,8 +7027,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       (msg, isErr) => log.toasts.push({ msg, isErr }),
       (err, fallback) => fallback,
       (item) => ({ ...item }),
-      {}, () => { log.renders += 1; }, escapeHtml);
-    return { sandbox, els, log, btnRect };
+      {}, () => { log.renders += 1; }, escapeHtml, localStorageStub);
+    return { sandbox, els, log, btnRect, store };
   }
 
   const ENVIRONMENT = {
@@ -7192,20 +7205,29 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     for (const id of ["terminalAddMenuList", "terminalAddMenuNote", "terminalAddMenuCwd", "terminalAddMenuCancel", "terminalAddMenuConfirm"]) {
       assert.ok(panelHtml.includes(`id="${id}"`), `菜单节点 ${id} 就位`);
     }
+    // 默认目录接口：面板转发到终端宿主的 /terminal/default-cwd，宿主按当前用户给主目录。
+    assert.ok(panelJs.includes('api("GET", "/api/terminal/default-cwd")'), "前端向默认目录接口取默认目录");
+    assert.ok(terminalHostJs.includes('"/terminal/default-cwd"'), "终端宿主提供默认目录接口");
+    assert.ok(terminalHostJs.includes("process.env.USERPROFILE"), "默认目录跟随当前用户主目录，不写死某个用户名");
     assert.ok(panelHtml.includes(">空白终端<") === false && panelJs.includes("空白终端"), "空白首项由脚本渲染，HTML 不写死");
     assert.ok(panelCss.includes(".terminal-add-menu {"), "菜单样式就位");
     assert.ok(panelCss.includes(".terminal-add-menu[hidden] { display: none; }"), "hidden 语义不被 flex 覆盖");
     assert.ok(panelCss.includes(".terminal-add-menu-item.is-selected"), "选中态有视觉反馈");
 
-    // 默认工作目录：与终端宿主自身的启动目录同源（Anyswitch 安装目录），不再
-    // 写死一个本机不存在的路径让宿主每次静默回落。
-    assert.ok(panelJs.includes('const TERMINAL_DEFAULT_CWD = "C:\\\\Users\\\\86183\\\\AppData\\\\Local\\\\Anyswitch\\\\app"'),
-      "默认工作目录常量与宿主启动目录一致");
-    assert.ok(panelHtml.includes('value="C:\\Users\\86183\\AppData\\Local\\Anyswitch\\app"'), "目录输入框默认值同源");
+    // 默认工作目录：跟随当前用户主目录，由后端接口给出，绝不写死某个用户名路径、
+    // 也绝不落到软件安装目录。前端不再持有写死常量，HTML 输入框不写死 value。
+    assert.ok(!panelJs.includes("AppData\\\\Local\\\\Anyswitch\\\\app"), "前端不再写死安装目录作默认");
+    assert.ok(!panelHtml.includes("AppData\\Local\\Anyswitch\\app"), "目录输入框不再写死默认值");
     const fetchCreate = panelJs.match(/if \(!activeTerminalPreviewId\) \{[\s\S]*?\n    \}/)?.[0];
-    assert.ok(fetchCreate?.includes("cwd: TERMINAL_DEFAULT_CWD"), "首载自动补建用默认目录常量");
+    assert.ok(fetchCreate?.includes("cwd: terminalCwdInitial()"), "首载自动补建用终端目录解析");
     const confirmSrc = extractFn("confirmTerminalAddMenu");
-    assert.ok(confirmSrc.includes("|| TERMINAL_DEFAULT_CWD"), "菜单未填目录时回落默认目录");
+    assert.ok(confirmSrc.includes("|| terminalCwdInitial()"), "菜单未填目录时回落终端目录解析");
+    assert.ok(confirmSrc.includes("rememberTerminalCwd(cwd)"), "确认即记住本次目录");
     assert.ok(confirmSrc.includes('{ label: "Anyswitch", cwd, shell: "powershell"'), "空白终端用菜单里填的工作目录，不写死");
+    // 取值顺序与持久化键钉死：上次目录优先于后端默认。
+    const initialSrc = extractFn("terminalCwdInitial");
+    assert.ok(initialSrc.includes("loadTerminalCwd() || terminalDefaultCwd"), "上次用过的目录优先于后端主目录默认");
+    assert.ok(extractFn("rememberTerminalCwd").includes('localStorage.setItem("panel-terminal-cwd"'), "目录持久化键 panel-terminal-cwd");
+    assert.ok(extractFn("openTerminalAddMenu").includes("cwdInput.value = terminalCwdInitial()"), "开菜单即预填解析出的目录");
   });
 });

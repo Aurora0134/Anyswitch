@@ -3628,10 +3628,34 @@ async function api(method, path, body) {
     return true;
   }
 
-  // 新终端的默认工作目录与终端宿主自身的启动目录一致（Anyswitch 安装目录）：
-  // 写死一个本机不存在的路径，每次新建都只会被宿主静默回落到这个目录，
-  // 不如直接把默认值给对。
-  const TERMINAL_DEFAULT_CWD = "C:\\Users\\86183\\AppData\\Local\\Anyswitch\\app";
+  // 新终端的默认工作目录跟随当前用户主目录，由终端宿主接口给出（谁的机器就是
+  // 谁的），绝不写死、也绝不落到软件安装目录。前端启动时向 /api/terminal/
+  // default-cwd 取一次并缓存；接口未就绪前用空串占位，输入框留空、创建时由后端
+  // safeCwd 兜底，两者都不会指到本体目录。
+  let terminalDefaultCwd = "";
+
+  // 用户在新建菜单里改过一次目录后记住它：下次预填上次的目录，而不是每次回到默认。
+  // 与字号、主题同级，走 localStorage。
+  function rememberTerminalCwd(cwd) {
+    if (!cwd) return;
+    try { localStorage.setItem("panel-terminal-cwd", cwd); } catch {}
+  }
+
+  function loadTerminalCwd() {
+    try { return localStorage.getItem("panel-terminal-cwd") || ""; } catch { return ""; }
+  }
+
+  // 新建菜单输入框的取值顺序：上次用过的目录 → 后端给的主目录默认。
+  function terminalCwdInitial() {
+    return loadTerminalCwd() || terminalDefaultCwd || "";
+  }
+
+  // 拉取一次默认目录并缓存。失败静默：默认值留空，创建时由后端兜底。
+  function fetchTerminalDefaultCwd() {
+    return api("GET", "/api/terminal/default-cwd")
+      .then((d) => { if (d && typeof d.cwd === "string" && d.cwd) terminalDefaultCwd = d.cwd; })
+      .catch(() => {});
+  }
 
   function terminalSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions;
@@ -3645,7 +3669,7 @@ async function api(method, path, body) {
     return {
       id: item.id,
       label: item.label || "Anyswitch",
-      cwd: item.cwd || TERMINAL_DEFAULT_CWD,
+      cwd: item.cwd || terminalDefaultCwd,
       branch: "",
       shell: { name: item.shell === "cmd" ? "命令提示符" : "PowerShell", pid: item.pid || "—" },
       // 归属接线：panel 层已按 shell pid ↔ 检测进程祖先链注入 agent 字段
@@ -3874,7 +3898,7 @@ async function api(method, path, body) {
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
     if (!activeTerminalPreviewId) {
-      const created = await api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd: TERMINAL_DEFAULT_CWD, shell: "powershell", ...terminalCreateSize() });
+      const created = await api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd: terminalCwdInitial(), shell: "powershell", ...terminalCreateSize() });
       rebuildTerminalBackendSessions([...(data.sessions || []), created]);
       activeTerminalPreviewId = created.id;
       rememberTerminalSessionId(created.id);
@@ -4529,6 +4553,8 @@ async function api(method, path, body) {
     if (!menu) return;
     menu.hidden = false;
     positionTerminalAddMenu();
+    const cwdInput = $("terminalAddMenuCwd");
+    if (cwdInput) cwdInput.value = terminalCwdInitial();
     loadInstalledTerminalAgents().then((agents) => renderTerminalAddMenuList(agents));
   }
 
@@ -4557,7 +4583,8 @@ async function api(method, path, body) {
 
   function confirmTerminalAddMenu() {
     const cwdInput = $("terminalAddMenuCwd");
-    const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || TERMINAL_DEFAULT_CWD;
+    const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || terminalCwdInitial();
+    rememberTerminalCwd(cwd);
     closeTerminalAddMenu();
     if (!terminalAddMenuSelection) {
       api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
@@ -4663,6 +4690,7 @@ async function api(method, path, body) {
     // 不再先渲 mock：降级态只给真空态（renderTerminalUnavailableState），就绪
     // 与否由连接通路的成功/失败分支落定——失败分支会重落空态，不再静默。
     syncTerminalAddBtn();
+    fetchTerminalDefaultCwd();
     connectTerminalBackend();
     if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {

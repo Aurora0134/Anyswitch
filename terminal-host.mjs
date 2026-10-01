@@ -421,6 +421,11 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     if (!authorized(req)) return json(res, 401, { error: "unauthorized" });
     const url = new URL(req.url, "http://127.0.0.1");
     try {
+      // 新建终端的默认工作目录：跟随当前用户主目录，谁的机器就是谁的，绝不回落
+      // 到面板自己的安装目录（那会把 agent 的工作区写进软件本体）。
+      if (url.pathname === "/terminal/default-cwd" && req.method === "GET") {
+        return json(res, 200, { cwd: process.env.USERPROFILE || process.cwd() });
+      }
       if (url.pathname === "/terminal/sessions" && req.method === "GET") {
         return json(res, 200, { sessions: [...sessions.values()].map(snapshot) });
       }

@@ -1843,6 +1843,7 @@ export function createPanelRouter({
     if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
     if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
     if (path === "/panel/api/session/report" && method === "POST") return handleSessionReport(req, res);
+    if (path === "/panel/api/terminal/default-cwd" && method === "GET") return proxyTerminal(req, res, "/terminal/default-cwd", "GET");
     if (path === "/panel/api/terminal/sessions" && method === "GET") return handleTerminalSessionsList(res);
     if (path === "/panel/api/terminal/sessions" && method === "POST") {
       try {
