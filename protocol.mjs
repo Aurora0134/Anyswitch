@@ -10,6 +10,7 @@
 // prefixed with the provider id.
 
 import { REASONING_FIELDS } from "./stream.mjs";
+import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 
 // ---------- Anthropic request -> OpenAI request ----------
 
@@ -233,11 +234,12 @@ export function openAIToAnthropic(response, wireId) {
   const content = [];
 
   // Reasoning surfaces as a thinking block ahead of the answer, same order the
-  // streaming translator emits it.
+  // streaming translator emits it. The signature is what makes client-side
+  // narration filters keep the block (see thinking-signature.mjs).
   for (const field of REASONING_FIELDS) {
     const value = message[field];
     if (typeof value === "string" && value.length > 0) {
-      content.push({ type: "thinking", thinking: value });
+      content.push({ type: "thinking", thinking: value, signature: NARRATION_THINKING_SIGNATURE });
       break;
     }
   }
