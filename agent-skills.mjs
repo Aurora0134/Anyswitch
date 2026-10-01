@@ -480,23 +480,47 @@ public static class AnySwitchFolderPicker {
   private const uint SIGDN_FILESYSPATH = 0x80058000;
   private const int ERROR_CANCELLED = unchecked((int)0x800704C7);
 
+  // Owner-window plumbing (see Pick for why the dialog needs one).
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+  private static extern IntPtr CreateWindowExW(int exStyle, string className, string windowName,
+    int style, int x, int y, int width, int height, IntPtr parent, IntPtr menu,
+    IntPtr instance, IntPtr param);
+  [DllImport("user32.dll")]
+  private static extern bool ShowWindow(IntPtr hWnd, int cmd);
+  [DllImport("user32.dll")]
+  private static extern bool DestroyWindow(IntPtr hWnd);
+
+  private const int WS_POPUP = unchecked((int)0x80000000);
+  private const int WS_EX_TOPMOST = 0x0008;
+  private const int SW_SHOWNOACTIVATE = 4;
+
   // Returns the chosen path, or null when the user cancels. pickFolders
   // toggles FOS_PICKFOLDERS (folder selection, OK only accepts folders);
   // without it this is a plain file-open dialog (OK only accepts files).
   // The stock dialog cannot accept "a folder OR a file" in one box, so the
   // import flow uses file mode and asks for SKILL.md / .zip instead.
   //
-  // The dialog is shown OWNERLESS on purpose. Owning it to the window that
-  // happened to be foreground at click time looks harmless, but that window
-  // always belongs to another process here (the browser the user just clicked
-  // in — this process has no window of its own to lend). Measured, the shell
-  // refuses such an owner in two different ways, both fatal to the feature:
-  // Show fails outright with E_FAIL so no dialog is ever drawn (the click reads
-  // as dead), or it returns ERROR_CANCELLED a few seconds later with no user
-  // input at all (the dialog flashes and vanishes). Ownerless is the
-  // configuration the dialog is stable in. The cost is cosmetic: it may open
-  // behind the browser and, being an ownerless top-level window, earns its own
-  // taskbar button.
+  // Owning the dialog to the window that happened to be foreground at click
+  // time looks harmless, but that window always belongs to another process
+  // here (the browser the user just clicked in — this process has no window
+  // of its own to lend). Measured, the shell refuses such a cross-process
+  // owner in two different ways, both fatal to the feature: Show fails
+  // outright with E_FAIL so no dialog is ever drawn (the click reads as
+  // dead), or it returns ERROR_CANCELLED a few seconds later with no user
+  // input at all (the dialog flashes and vanishes). Plain ownerless mode is
+  // stable but opens the dialog behind the browser, where the user has to
+  // dig it out of the taskbar.
+  //
+  // The third configuration measured stable AND on top: create this
+  // process's own 1x1 borderless TOPMOST window and own the dialog to it.
+  // An owned dialog always sits above its owner, and a TOPMOST owner lifts
+  // the whole pair above every normal window — the dialog now renders above
+  // the browser. The owner is shown with SW_SHOWNOACTIVATE so it never
+  // steals focus; the dialog therefore does not receive foreground either
+  // (the foreground lock denies it to a background process), so the user
+  // clicks the dialog once before typing — a fair price versus hunting the
+  // taskbar. If CreateWindowExW ever fails, Show(IntPtr.Zero) degrades to
+  // the stable ownerless behaviour.
   public static string Pick(string title, bool pickFolders) {
     var dlg = (IFileDialog)(object)new FileOpenDialog();
     uint options;
@@ -505,15 +529,22 @@ public static class AnySwitchFolderPicker {
     if (pickFolders) flags |= FOS_PICKFOLDERS;
     dlg.SetOptions(flags);
     dlg.SetTitle(title);
-    int hr = dlg.Show(IntPtr.Zero);
-    if (hr == ERROR_CANCELLED) return null;
-    if (hr < 0) Marshal.ThrowExceptionForHR(hr);
-    object resultObj;
-    dlg.GetResult(out resultObj);
-    var item = (IShellItem)resultObj;
-    string path;
-    item.GetDisplayName(SIGDN_FILESYSPATH, out path);
-    return path;
+    IntPtr owner = CreateWindowExW(WS_EX_TOPMOST, "Static", "AnySwitchFolderPickerOwner",
+      WS_POPUP, 0, 0, 1, 1, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+    if (owner != IntPtr.Zero) ShowWindow(owner, SW_SHOWNOACTIVATE);
+    try {
+      int hr = dlg.Show(owner);
+      if (hr == ERROR_CANCELLED) return null;
+      if (hr < 0) Marshal.ThrowExceptionForHR(hr);
+      object resultObj;
+      dlg.GetResult(out resultObj);
+      var item = (IShellItem)resultObj;
+      string path;
+      item.GetDisplayName(SIGDN_FILESYSPATH, out path);
+      return path;
+    } finally {
+      if (owner != IntPtr.Zero) DestroyWindow(owner);
+    }
   }
 
   // Standalone-exe entry point. Idle (never invoked) under the PowerShell
