@@ -268,6 +268,26 @@ function anthropicAgentIdFrom(headers) {
   return null;
 }
 
+// Claude 的非流式请求 = 引擎内部噪声，不是用户对话流量。调查现场
+// （2026-10-01）：桌面端挂机/后台期间持续发 4-token 非流式内部请求
+// （journal 实测成对 prompt 9555/524，间隔 2-3 分钟一轮），另有 30k-50k
+// prompt / 100-400 completion 的摘要器请求——它们流经常驻 relay 落进桌面
+// 成员实例桶的 last-18 滑窗，把速率/缓存率的可测量样本挤出去、缓存率按
+// cached=0/prompt>0 打到 0，切回前台时四宫格「生成速度」「缓存命中率」
+// 两格消失。判定必须在请求起点可得，而流式标志就是那条线：Claude 客户端
+// 的用户轮永远流式（/v1/messages 上 5 周 journal 跨全部非流 claude 行
+// 2627 条零缓存命中、零桌面成员真实轮——真轮 prompt 80k 缓存率 97%），
+// agentId=claude 且 stream!==true 即后台。非 claude 端点不受判定影响
+//（opencode/pi/zcode 的非流式语义与 claude 无关，照常记账）。
+// 命中后与 codex 分类器同一处置：meta.background=true，记账层（agent-metrics
+// trackAggregateRequest）隔离样本窗/TTFT/模型徽章/稳定性/故障闩锁，journal
+// 照落账但不再携带实例身份。宁可不判，判错线只可能在「用户确实发了非流式
+// claude 轮」——journal 全量反查没有任何一条这种行，故取非判错风险。
+function isClaudeBackgroundMessagesRequest(agentId, body) {
+  return agentId === "claude" && body?.stream !== true;
+}
+export { isClaudeBackgroundMessagesRequest };
+
 export class BodyTooLargeError extends Error {
   constructor() {
     super("request body too large");
@@ -971,6 +991,10 @@ export function createOpenAIRelayServer(deps) {
         // and chain (自动路由) lookup.
         const agentId = anthropicAgentIdFrom(req.headers);
         if (agentId === null) logUnattributedRequest(deps, "anthropic messages", req, body?.model);
+        // Claude 非流式 = 引擎内部噪声（见 isClaudeBackgroundMessagesRequest）：
+        // 记账面整体隔离，实例身份与 codex 后台同一规则跳过——不挂桶行、不走
+        // socket 反查、不订阅迟绑定。
+        const claudeBackground = isClaudeBackgroundMessagesRequest(agentId, body);
 
         // 档位映射接管（Claude 档位名 → 托管模型）：与 per-launch 中继同一顺序纪律，
         // 必须排在号池/链规划与归属读取之前。agentId 由 x-agent-id 或 UA 判定，
@@ -1016,17 +1040,20 @@ export function createOpenAIRelayServer(deps) {
           userAgent: req.headers["user-agent"],
           agentId,
           // 同 openai 路由：无归属即无实例身份。
-          instanceId: agentId === null ? null : instanceIdForRequest(req, agentId, deps),
+          instanceId: agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps),
           stream: body.stream === true,
           path: "anthropic",
+          background: claudeBackground,
         });
         // Auto-route stats attribution: journal/stability rows land on the
         // serving chain node (node + bound model) instead of the virtual
         // model "auto". Pool plans keep pool-level attribution (no resolver).
         if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
-        bindLateSocketInstance(req, agentId, deps, tracker, {
-          explicitId: explicitInstanceId(req.headers),
-        });
+        if (!claudeBackground) {
+          bindLateSocketInstance(req, agentId, deps, tracker, {
+            explicitId: explicitInstanceId(req.headers),
+          });
+        }
 
         const abortController = new AbortController();
         const onResAborted = () => {

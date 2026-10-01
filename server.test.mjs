@@ -544,6 +544,50 @@ test("non-streaming request calls startRequest and recordEnd with mapped usage w
   assert.equal(endCall.recordEnd.usage?.completion_tokens, 4);
 });
 
+test("claude per-launch relay classifies non-streaming traffic as background; other endpoints keep it user", async () => {
+  // Claude CLI/桌面端的非流式请求是引擎内部噪声（标题/摘要/预览生成，5 周
+  // journal 实测零缓存命中），不进会话样本窗。流式判定在请求起点即可得，
+  // 与 resident 侧同一条规则；per-launch 中继同时服务 kimi（agentId 注入），
+  // 分类只对 claude 生效。
+  const claudeTracker = mockTracker();
+  await withServer(
+    deps({ sessionTracker: claudeTracker, agentId: "claude" }),
+    async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: { authorization: "test-token-abc", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "anthropic/poke-api/claude-opus-5",
+          max_tokens: 64,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.json();
+    },
+  );
+  assert.equal(claudeTracker.startRequestMeta.background, true, "claude 非流式请求判后台");
+
+  const kimiTracker = mockTracker();
+  await withServer(
+    deps({ sessionTracker: kimiTracker, agentId: "kimi" }),
+    async (port) => {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+        method: "POST",
+        headers: { authorization: "test-token-abc", "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "anthropic/poke-api/claude-opus-5",
+          max_tokens: 64,
+          messages: [{ role: "user", content: "hello" }],
+        }),
+      });
+      assert.equal(res.status, 200);
+      await res.json();
+    },
+  );
+  assert.notEqual(kimiTracker.startRequestMeta?.background, true, "kimi 非流式请求不受该分类影响");
+});
+
 test("non-streaming upstream error records the fault without a fake first chunk", async () => {
   const tracker = mockTracker();
 
