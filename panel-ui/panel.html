@@ -1307,13 +1307,21 @@ if (window.panelStartupController) panelStartupPlay();
   <!-- 使用统计视图：A 今日概览 / B 热力图 / C 趋势 / D·F·G1 双列 / G2 端点工时 -->
   <section class="stats-view" id="statsView" hidden>
 
-    <!-- 页头：视图标题 + 页面级手动刷新（重拉整页统计数据；今日概览卡的旧位按钮移至此处） -->
+    <!-- 页头：视图标题 + 子 tab（总览/请求日志）+ 页面级手动刷新（重拉整页统计数据；今日概览卡的旧位按钮移至此处） -->
     <div class="stats-pagehead">
-      <h2 class="stats-pagehead-title">使用统计</h2>
+      <div class="stats-pagehead-lead">
+        <h2 class="stats-pagehead-title">使用统计</h2>
+        <nav class="view-tabs stats-subtabs" role="tablist" aria-label="统计分类">
+          <button class="view-tab active" id="statsTabOverview" role="tab" aria-selected="true" aria-controls="statsOverviewPane">总览</button>
+          <button class="view-tab" id="statsTabLogs" role="tab" aria-selected="false" aria-controls="statsLogsPane" tabindex="-1">请求日志</button>
+        </nav>
+      </div>
       <div class="stats-header-actions">
         <button class="btn" id="statsRefreshBtn" title="立即重新拉取使用统计数据（页面停留期间每 30s 也会自动刷新）">刷新</button>
       </div>
     </div>
+
+    <div id="statsOverviewPane">
 
     <!-- 上半区双栏：左=今日概览 + 热力图，右=Token 趋势 -->
     <div class="stats-top-grid">
@@ -1452,6 +1460,66 @@ if (window.panelStartupController) panelStartupPlay();
         </h2>
       </div>
       <div class="card-body" id="statsEndpoints"></div>
+    </div>
+
+    </div><!-- /statsOverviewPane -->
+
+    <!-- 请求日志子页：筛选行 + 明细表 + 分页条（行点击就地展开详情；空态/错误态由 JS 渲染进 tbody） -->
+    <div id="statsLogsPane" hidden>
+      <div class="logs-filters">
+        <select class="logs-sel" id="logRangeFilter">
+          <option value="today" selected>今天</option>
+          <option value="7d">近 7 天</option>
+          <option value="30d">近 30 天</option>
+          <option value="all">全部</option>
+        </select>
+        <select class="logs-sel" id="logAgentFilter"><option value="" selected>全部来源</option></select>
+        <select class="logs-sel" id="logProviderFilter"><option value="" selected>全部渠道</option></select>
+        <select class="logs-sel" id="logModelFilter"><option value="" selected>全部模型</option></select>
+        <select class="logs-sel" id="logStatusFilter">
+          <option value="all" selected>全部状态</option>
+          <option value="ok">成功</option>
+          <option value="http_429">失败·429</option>
+          <option value="http_5xx">失败·5xx</option>
+          <option value="http_4xx">失败·4xx</option>
+          <option value="network">失败·网络错误</option>
+          <option value="timeout">失败·超时</option>
+        </select>
+      </div>
+      <div class="panel-card">
+        <div class="card-body">
+          <div class="stats-table-wrap">
+            <table class="stats-table logs-table">
+              <thead>
+                <tr>
+                  <th><button type="button" class="logs-th-sort" id="logsSortTs" data-sort="ts">时间<span class="logs-sort-arrow" aria-hidden="true"></span></button></th>
+                  <th>来源</th>
+                  <th>渠道</th>
+                  <th>模型</th>
+                  <th>Tokens</th>
+                  <th><button type="button" class="logs-th-sort" id="logsSortDuration" data-sort="durationMs">用时<span class="logs-sort-arrow" aria-hidden="true"></span></button></th>
+                  <th>状态</th>
+                </tr>
+              </thead>
+              <tbody id="logsTbody"></tbody>
+            </table>
+          </div>
+          <div class="logs-pager" id="logsPager" hidden>
+            <span class="logs-total" id="logsTotal"></span>
+            <div class="logs-pager-right">
+              <button type="button" class="btn btn-mini" id="logsPrevBtn">上一页</button>
+              <span class="logs-pages" id="logsPages"></span>
+              <button type="button" class="btn btn-mini" id="logsNextBtn">下一页</button>
+              <input type="text" class="logs-jump" id="logsJump" inputmode="numeric" autocomplete="off" aria-label="跳至页码">
+              <select class="logs-sel" id="logPageSize">
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
   </section>

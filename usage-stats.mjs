@@ -64,6 +64,23 @@ function num(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+// 剥 wire 前缀（"anthropic/<provider>/<model>"）的读侧口径：model 剥到裸模型名，
+// wire 的 provider 段在 providerId 为空时回填。导出给 panel.mjs 请求日志路由
+// 复用（modelDisplay），与统计聚合保持同一份实现，不复制第二份。
+export function stripWirePrefix(model, providerId) {
+  if (typeof model === "string" && model.startsWith(WIRE_PREFIX)) {
+    const rest = model.slice(WIRE_PREFIX.length);
+    const cut = rest.indexOf("/");
+    if (cut > 0) {
+      if (typeof providerId !== "string" || providerId === "") providerId = rest.slice(0, cut);
+      model = rest.slice(cut + 1);
+    } else {
+      model = rest;
+    }
+  }
+  return { providerId, model };
+}
+
 // Only 24h (days=1) and 7-day (days=7) windows exist; anything else clamps
 // onto them (finite values <= 1 → 1, everything else including NaN/undefined → 7).
 export function clampStatDays(days) {
@@ -192,24 +209,13 @@ export function createUsageStats({ journal, now = () => Date.now(), channelLabel
   // The wire prefix is endpoint identity spoofing, not statistics, so both
   // segments are stripped here — old and new rows aggregate into the same
   // series, and the wire's provider segment backfills rows whose providerId
-  // never resolved (e.g. pre-routing 409 failures).
+  // never resolved (e.g. pre-routing 409 failures). 剥离实现见 stripWirePrefix。
   function tagRows(raw) {
     const rows = [];
     for (const r of raw) {
       const ts = Number(r?.ts);
       if (!Number.isFinite(ts)) continue;
-      let providerId = r?.providerId;
-      let model = r?.model;
-      if (typeof model === "string" && model.startsWith(WIRE_PREFIX)) {
-        const rest = model.slice(WIRE_PREFIX.length);
-        const cut = rest.indexOf("/");
-        if (cut > 0) {
-          if (typeof providerId !== "string" || providerId === "") providerId = rest.slice(0, cut);
-          model = rest.slice(cut + 1);
-        } else {
-          model = rest;
-        }
-      }
+      const { providerId, model } = stripWirePrefix(r?.model, r?.providerId);
       rows.push({ ...r, providerId, model, _ts: ts, _day: dayKey(ts) });
     }
     return rows;

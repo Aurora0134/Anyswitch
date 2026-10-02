@@ -34,7 +34,7 @@ import { createStoreService } from "./store-service.mjs";
 import { createUsageJournal, dayKey } from "./usage-journal.mjs";
 import { attributeTerminalSessions, filterTerminalRequestRows } from "./terminal-attribution.mjs";
 import { AGENT_TERMINAL_TARGETS, AGENT_RELAY_PORT, buildAgentSessionLaunch } from "./agent-session-env.mjs";
-import { createUsageStats, clampStatDays } from "./usage-stats.mjs";
+import { createUsageStats, clampStatDays, stripWirePrefix } from "./usage-stats.mjs";
 import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
 import {
   clientUpdateJournalDir,
@@ -85,6 +85,14 @@ const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 // background round refreshes. POST followAgent invalidates so the next GET
 // re-probes synchronously and never reports pre-toggle drift.
 const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
+
+// 请求日志路由（/panel/api/stats/logs）的枚举与钳制口径：range 档位 → 含当天
+// 往前推的天数（all = 90 天 retention 窗口）；status 档位同时是 errKind 枚举
+// 子集（ok 单独映射 ok=true）；pageSize 白名单。非法值一律回落默认。
+const LOG_RANGES = ["today", "7d", "30d", "all"];
+const LOG_RANGE_BACK_DAYS = { today: 0, "7d": 6, "30d": 29, all: 89 };
+const LOG_STATUSES = ["all", "ok", "http_429", "http_5xx", "http_4xx", "network", "timeout"];
+const LOG_PAGE_SIZES = [20, 50, 100];
 
 // All legitimate panel bodies are KB-scale JSON (settings, aliases, store
 // writes). Anything past 1MB is a malfunctioning or hostile client, so the
@@ -2237,6 +2245,83 @@ export function createPanelRouter({
       }
       await refreshStatsChannelLabels();
       const svc = statsService;
+
+      // 请求日志（统计页「请求日志」子 tab）：journal 行级透传查询，不聚合。
+      // range=today|7d|30d|all 映射到本地自然日闭区间（all=90 天 retention 窗，
+      // 日历运算推起点防 DST）；status=ok→ok=true，其余失败档→errKind；
+      // agent/provider/model 原值直传（agent="__none__" 是「未知来源」哨兵，
+      // 由 journal 匹配 agentId 为 null 的行）；非法 range/status/sort/dir 一律
+      // 回落默认，pageSize 只认 {20,50,100}。GET 无 CSRF 门（与 stats 一致）。
+      if (path === "/panel/api/stats/logs" && method === "GET") {
+        try {
+          const sp = url.searchParams;
+          const rangeRaw = sp.get("range");
+          const range = LOG_RANGES.includes(rangeRaw) ? rangeRaw : "today";
+          const nowTs = Date.now();
+          const todayKey = dayKey(nowTs);
+          const [yy, mm, dd] = todayKey.split("-").map(Number);
+          const fromDay = dayKey(new Date(yy, mm - 1, dd - LOG_RANGE_BACK_DAYS[range]).getTime());
+          const statusRaw = sp.get("status");
+          const status = LOG_STATUSES.includes(statusRaw) ? statusRaw : "all";
+          const sortRaw = sp.get("sort");
+          const sortBy = sortRaw === "durationMs" ? "durationMs" : "ts";
+          const dirRaw = sp.get("dir");
+          const sortDir = dirRaw === "asc" ? "asc" : "desc";
+          let page = Number.parseInt(sp.get("page") ?? "", 10);
+          if (!Number.isFinite(page) || page < 1) page = 1;
+          const pageSizeRaw = Number.parseInt(sp.get("pageSize") ?? "", 10);
+          const pageSize = LOG_PAGE_SIZES.includes(pageSizeRaw) ? pageSizeRaw : 20;
+          const q = (name) => {
+            const v = sp.get(name);
+            return v === null || v === "" ? undefined : v;
+          };
+          const result = usageJournalLazy().readRequestsLog({
+            fromDay,
+            toDay: todayKey,
+            agentId: q("agent"),
+            providerId: q("provider"),
+            model: q("model"),
+            ok: status === "ok" ? true : undefined,
+            errKind: status !== "all" && status !== "ok" ? status : undefined,
+            sortBy,
+            sortDir,
+            page,
+            pageSize,
+          });
+          // 渠道显示名读取时解析（同 stats 契约：id→displayName，失败回落裸 id）；
+          // modelDisplay 剥 wire 前缀（stripWirePrefix 与聚合层同一实现）。
+          // journal 行是共享缓存对象，禁止原地改——映射出新对象。
+          const labelChannel = (id) => statsChannelLabels.map.get(id) ?? id;
+          const rows = result.rows.map((r) => ({
+            ...r,
+            providerLabel: labelChannel(r.providerId ?? ""),
+            modelDisplay: stripWirePrefix(r.model).model,
+          }));
+          const facets = {
+            // agents 的 label 就是 id 原值（null 保持 null，前端翻成「未知来源」）；
+            // providers/models 过滤 null/空串——无哨兵语义的维度里它们不可选。
+            agents: result.facets.agents.map((id) => ({ id, label: id })),
+            providers: result.facets.providers
+              .filter((id) => typeof id === "string" && id !== "")
+              .map((id) => ({ id, label: labelChannel(id) })),
+            models: result.facets.models
+              .filter((raw) => typeof raw === "string" && raw !== "")
+              .map((raw) => ({ raw, display: stripWirePrefix(raw).model })),
+          };
+          return sendJson(res, 200, {
+            ok: true,
+            generatedAt: nowTs,
+            range,
+            rows,
+            total: result.total,
+            page: result.page,
+            pageSize: result.pageSize,
+            facets,
+          });
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
 
       if (path === "/panel/api/stats/state" && method === "GET") {
         try {

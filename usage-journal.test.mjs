@@ -243,3 +243,160 @@ test("dayKey uses the local timezone date", () => {
   assert.equal(dayKey(ts), expected);
   assert.match(dayKey(0), /^\d{4}-\d{2}-\d{2}$/);
 });
+
+// ── errMsg 消毒（写侧单点，R-22） ──
+
+test("errMsg is sanitized: whitespace collapsed, trimmed, truncated to 200 chars", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  journal.appendRequest({ ts: 1, ok: false, errMsg: "  rate   limited\n\nplease   slow\t down  " });
+  journal.appendRequest({ ts: 2, ok: false, errMsg: "x".repeat(300) });
+  const rows = journal.readRequests();
+  assert.equal(rows[0].errMsg, "rate limited please slow down");
+  assert.equal(rows[1].errMsg, "x".repeat(200));
+  assert.equal(rows[1].errMsg.length, 200);
+});
+
+test("errMsg key is dropped for success rows, non-strings and blanks; old keyless rows stay compatible", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  journal.appendRequest({ ts: 1, ok: true, errMsg: null }); // 成功行传 null
+  journal.appendRequest({ ts: 2, ok: true }); // 成功行不传
+  journal.appendRequest({ ts: 3, ok: false, errMsg: 12345 }); // 非字符串
+  journal.appendRequest({ ts: 4, ok: false, errMsg: "   " }); // 折叠后为空串
+  journal.appendRequest({ ts: 5, ok: false, errMsg: "boom" });
+  const rows = journal.readRequests();
+  for (const row of rows.slice(0, 4)) {
+    assert.ok(!("errMsg" in row), `no errMsg key on ${JSON.stringify(row)}`);
+  }
+  assert.equal(rows[4].errMsg, "boom");
+  // 旧行（无 errMsg 键）原样读回，形状不变
+  assert.deepEqual(Object.keys(rows[0]).sort(), ["ok", "ts"]);
+});
+
+// ── readRequestsLog（请求日志查询面） ──
+
+function logRow(over = {}) {
+  return {
+    ts: 1000, agentId: "kimi", providerId: "p1", model: "m1",
+    prompt: 1, completion: 1, cached: 0, ttftMs: 100, durationMs: 1000,
+    ok: true, status: 200, errKind: null, stream: true, path: "openai",
+    ...over,
+  };
+}
+
+test("readRequestsLog defaults to ts desc and reports total/page/pageSize", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  journal.appendRequest(logRow({ ts: 100 }));
+  journal.appendRequest(logRow({ ts: 300 }));
+  journal.appendRequest(logRow({ ts: 200 }));
+  const res = journal.readRequestsLog();
+  assert.deepEqual(res.rows.map((r) => r.ts), [300, 200, 100]);
+  assert.equal(res.total, 3);
+  assert.equal(res.page, 1);
+  assert.equal(res.pageSize, 20);
+});
+
+test("readRequestsLog day range is a closed interval over local days", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  let current = t0;
+  const journal = createUsageJournal({ dir, now: () => current });
+  const day0 = dayKey(t0);
+  const day1 = dayKey(t0 + DAY_MS);
+  const day2 = dayKey(t0 + 2 * DAY_MS);
+  journal.appendRequest(logRow({ ts: t0, model: "d0" }));
+  current = t0 + DAY_MS;
+  journal.appendRequest(logRow({ ts: t0 + DAY_MS, model: "d1" }));
+  current = t0 + 2 * DAY_MS;
+  journal.appendRequest(logRow({ ts: t0 + 2 * DAY_MS, model: "d2" }));
+
+  const one = journal.readRequestsLog({ fromDay: day1, toDay: day1 });
+  assert.deepEqual(one.rows.map((r) => r.model), ["d1"]);
+  assert.equal(one.total, 1);
+  const all = journal.readRequestsLog({ fromDay: day0, toDay: day2 });
+  assert.equal(all.total, 3, "both ends of the interval are inclusive");
+  const none = journal.readRequestsLog({ fromDay: day2, toDay: day0 });
+  assert.equal(none.total, 0, "inverted range matches nothing");
+});
+
+test("readRequestsLog filters: exact agentId/providerId/model, __none__ sentinel, ok, errKind", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  journal.appendRequest(logRow({ ts: 1, agentId: "kimi", providerId: "p1", model: "m1", ok: true, errKind: null }));
+  journal.appendRequest(logRow({ ts: 2, agentId: null, providerId: "p2", model: "m2", ok: false, errKind: "http_429", status: 429 }));
+  journal.appendRequest(logRow({ ts: 3, agentId: "zcode", providerId: "p1", model: "m2", ok: false, errKind: "network", status: null }));
+
+  assert.equal(journal.readRequestsLog({ agentId: "kimi" }).total, 1);
+  const none = journal.readRequestsLog({ agentId: "__none__" });
+  assert.equal(none.total, 1, "sentinel matches the null-agentId row");
+  assert.equal(none.rows[0].agentId, null);
+  assert.deepEqual(journal.readRequestsLog({ providerId: "p1" }).rows.map((r) => r.ts), [3, 1]);
+  assert.equal(journal.readRequestsLog({ model: "m2" }).total, 2);
+  assert.equal(journal.readRequestsLog({ model: "m3" }).total, 0);
+  assert.equal(journal.readRequestsLog({ ok: true }).total, 1);
+  assert.equal(journal.readRequestsLog({ ok: false }).total, 2);
+  assert.equal(journal.readRequestsLog({ errKind: "http_429" }).total, 1);
+  assert.equal(journal.readRequestsLog({ errKind: "network" }).total, 1);
+  assert.equal(journal.readRequestsLog({ providerId: "p1", ok: false }).total, 1);
+});
+
+test("readRequestsLog sorts by durationMs in both directions with ts desc tiebreak", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  journal.appendRequest(logRow({ ts: 10, durationMs: 500 }));
+  journal.appendRequest(logRow({ ts: 20, durationMs: 100 }));
+  journal.appendRequest(logRow({ ts: 30, durationMs: 500 })); // ties with ts:10 → ts desc wins
+  const desc = journal.readRequestsLog({ sortBy: "durationMs", sortDir: "desc" });
+  assert.deepEqual(desc.rows.map((r) => r.ts), [30, 10, 20]);
+  const asc = journal.readRequestsLog({ sortBy: "durationMs", sortDir: "asc" });
+  assert.deepEqual(asc.rows.map((r) => r.ts), [20, 30, 10]);
+  const tsAsc = journal.readRequestsLog({ sortBy: "ts", sortDir: "asc" });
+  assert.deepEqual(tsAsc.rows.map((r) => r.ts), [10, 20, 30]);
+});
+
+test("readRequestsLog clamps page/pageSize and keeps total truthful beyond the last page", () => {
+  const dir = tempDir();
+  const journal = createUsageJournal({ dir });
+  for (let i = 1; i <= 5; i += 1) journal.appendRequest(logRow({ ts: i }));
+
+  const p0 = journal.readRequestsLog({ page: 0, pageSize: 2 });
+  assert.equal(p0.page, 1, "page clamps to >= 1");
+  assert.deepEqual(p0.rows.map((r) => r.ts), [5, 4]);
+  assert.equal(journal.readRequestsLog({ page: -3, pageSize: 2 }).page, 1);
+  assert.equal(journal.readRequestsLog({ page: "abc", pageSize: 2 }).page, 1);
+  assert.equal(journal.readRequestsLog({ pageSize: 500 }).pageSize, 100, "pageSize clamps to <= 100");
+  assert.equal(journal.readRequestsLog({ pageSize: 0 }).pageSize, 1, "pageSize clamps to >= 1");
+
+  const p2 = journal.readRequestsLog({ page: 2, pageSize: 2 });
+  assert.deepEqual(p2.rows.map((r) => r.ts), [3, 2]);
+  const p3 = journal.readRequestsLog({ page: 3, pageSize: 2 });
+  assert.deepEqual(p3.rows.map((r) => r.ts), [1]);
+  const deep = journal.readRequestsLog({ page: 99, pageSize: 20 });
+  assert.deepEqual(deep.rows, [], "out-of-range page returns empty rows");
+  assert.equal(deep.total, 5, "total stays truthful");
+  assert.equal(deep.page, 99);
+});
+
+test("readRequestsLog facets come from the time-range-only row set (filters never shrink them)", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  let current = t0;
+  const journal = createUsageJournal({ dir, now: () => current });
+  journal.appendRequest(logRow({ ts: t0, agentId: "kimi", providerId: "p1", model: "m1", ok: true }));
+  journal.appendRequest(logRow({ ts: t0 + 1, agentId: null, providerId: "p2", model: "m2", ok: false, errKind: "http_429" }));
+  journal.appendRequest(logRow({ ts: t0 + 2, agentId: "zcode", providerId: "p1", model: "m1", ok: true }));
+  current = t0 + DAY_MS;
+  journal.appendRequest(logRow({ ts: t0 + DAY_MS, agentId: "dsh", providerId: "p9", model: "m9", ok: true }));
+
+  const res = journal.readRequestsLog({ agentId: "kimi", ok: true });
+  assert.equal(res.total, 1, "filters apply to rows/total");
+  assert.deepEqual(res.facets.agents, [null, "dsh", "kimi", "zcode"], "null first, then alphabetical");
+  assert.deepEqual(res.facets.providers, ["p1", "p2", "p9"]);
+  assert.deepEqual(res.facets.models, ["m1", "m2", "m9"]);
+
+  const narrowed = journal.readRequestsLog({ fromDay: dayKey(t0 + DAY_MS), toDay: dayKey(t0 + DAY_MS) });
+  assert.deepEqual(narrowed.facets.models, ["m9"], "only the time range shrinks facets");
+  assert.deepEqual(narrowed.facets.agents, ["dsh"]);
+});

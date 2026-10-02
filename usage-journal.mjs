@@ -15,10 +15,13 @@
 //     "prompt": 1234, "completion": 567, "cached": 100,
 //     "ttftMs": 850, "durationMs": 5200, "ok": true, "status": 200,
 //     "errKind": null, "stream": true, "path": "openai|anthropic",
+//     "errMsg": "上游错误原文（可选：仅失败行；消毒：折叠空白/trim/截 200 字符）",
 //     "instanceId": "ws-1" /* 可选：多实例端点的实例标签，有则写 */ }
 //   agentId: null 表示「未知来源」（认不出归属的请求）：行照记作审计账，
 //   但不进任何端点维度——看板卡与统计页端点行/端点趋势/端点用量都不显示它。
 //   errKind enum: null | "http_429" | "http_5xx" | "http_4xx" | "network" | "timeout" | "abort"
+//   errMsg: 调用方传上游错误原文，journal 统一消毒（非字符串/空串丢弃不写该键），
+//   成功行不传——旧行无此键，读侧按可缺省处理。
 //   Missing fields are tolerated: readers/aggregators treat them as 0/null.
 //
 // sessions line (endpoint session / work-hours, written mainly by the panel
@@ -43,6 +46,10 @@ const FILE_RE = /^(requests|sessions)-(\d{4}-\d{2}-\d{2})\.jsonl$/;
 // read (90-day retention × 2 kinds ≈ 180 files) so range-less stats reads
 // never thrash it.
 const READ_CACHE_LIMIT = 200;
+// errMsg 消毒上限：上游错误原文可能带大段堆栈/HTML，日志行只留可读头 200 字符。
+const ERR_MSG_MAX = 200;
+// agentId 过滤的「未知来源」哨兵：null 是合法行值，不能直接当查询参数传。
+export const AGENT_ID_NONE = "__none__";
 
 // Local-timezone day key, exported for the aggregation layer.
 export function dayKey(ts) {
@@ -51,6 +58,19 @@ export function dayKey(ts) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+// errMsg 消毒（写侧单点）：非字符串丢弃；连续空白折叠为单空格 + trim +
+// 截断 200 字符；结果为空串则视为没有（不落键）。
+function sanitizeErrMsg(value) {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\s+/g, " ").trim().slice(0, ERR_MSG_MAX);
+  return cleaned === "" ? null : cleaned;
+}
+
+function num(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.now() }) {
@@ -143,6 +163,22 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
     }
   }
 
+  // 请求行写入：errMsg 在 journal 内统一消毒（写侧单点，各写点传原值即可）。
+  // 消毒结果为空则整键摘除——成功行与无消息失败行的落盘形状与旧版完全一致。
+  function appendRequest(entry) {
+    const errMsg = sanitizeErrMsg(entry?.errMsg);
+    let row = entry;
+    if (errMsg === null) {
+      if (entry && typeof entry === "object" && "errMsg" in entry) {
+        const { errMsg: _drop, ...rest } = entry;
+        row = rest;
+      }
+    } else {
+      row = { ...entry, errMsg };
+    }
+    append("requests", row);
+  }
+
   function read(kind, { fromDay, toDay } = {}) {
     let names;
     try {
@@ -173,11 +209,107 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
 
   cleanup(); // retention sweep at create time
 
+  // 请求日志查询面（统计页「请求日志」子 tab 的数据源）：在 requests 流上做
+  // 筛选/排序/分页，行原样透传不聚合。范围 [fromDay, toDay] 闭区间，按天
+  // 新→旧读（复用 readLinesCached 的解析缓存）。facets 只受时间范围影响：
+  // 在仅时间过滤的行集上收集 distinct agentId（可含 null）/providerId/model，
+  // 供筛选下拉回填——筛选项自身不会把自己从下拉里筛没。
+  function readRequestsLog({
+    fromDay, toDay,
+    agentId, providerId, model, ok, errKind,
+    sortBy = "ts", sortDir = "desc",
+    page = 1, pageSize = 20,
+  } = {}) {
+    const sortField = sortBy === "durationMs" ? "durationMs" : "ts";
+    const asc = sortDir === "asc";
+    let pageNo = Math.floor(Number(page));
+    if (!Number.isFinite(pageNo) || pageNo < 1) pageNo = 1;
+    let size = Math.floor(Number(pageSize));
+    if (!Number.isFinite(size)) size = 20;
+    size = Math.min(100, Math.max(1, size));
+
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      names = null; // missing dir == empty journal
+    }
+    const days = [];
+    if (names) {
+      for (const name of names) {
+        const match = FILE_RE.exec(name);
+        if (!match || match[1] !== "requests") continue;
+        const day = match[2];
+        if (fromDay && day < fromDay) continue;
+        if (toDay && day > toDay) continue;
+        days.push(day);
+      }
+      days.sort();
+      days.reverse(); // 新→旧
+    }
+
+    const rangeRows = []; // 仅时间范围过滤（facets 的行集）
+    const matched = [];   // 再叠加筛选条件后的全量匹配集
+    for (const day of days) {
+      const lines = readLinesCached(fileFor("requests", day));
+      if (lines === null) continue; // file vanished between readdir and read
+      for (const r of lines) {
+        rangeRows.push(r);
+        if (agentId !== undefined && agentId !== null) {
+          // 哨兵 "__none__" 匹配归属缺失（null/缺键）的行
+          if (agentId === AGENT_ID_NONE) {
+            if (r.agentId !== null && r.agentId !== undefined) continue;
+          } else if (r.agentId !== agentId) continue;
+        }
+        if (providerId !== undefined && providerId !== null && r.providerId !== providerId) continue;
+        if (model !== undefined && model !== null && r.model !== model) continue;
+        if (ok !== undefined && ok !== null && r.ok !== ok) continue;
+        if (errKind !== undefined && errKind !== null && r.errKind !== errKind) continue;
+        matched.push(r);
+      }
+    }
+
+    // 全量匹配集上排序（90 天 retention 封顶约十万行，内存排序成立）；
+    // 主键并列时 ts desc 兜底，再并列保持读入顺序（sort 稳定）。
+    matched.sort((a, b) => {
+      const av = num(a?.[sortField]);
+      const bv = num(b?.[sortField]);
+      if (av !== bv) return asc ? av - bv : bv - av;
+      return num(b?.ts) - num(a?.ts);
+    });
+
+    // distinct 值字母序，null 排最前（未知来源在筛选下拉里固定置顶语义由前端定）
+    const facetSort = (a, b) => (a === null ? (b === null ? 0 : -1) : b === null ? 1 : a < b ? -1 : a > b ? 1 : 0);
+    const agents = new Set();
+    const providers = new Set();
+    const models = new Set();
+    for (const r of rangeRows) {
+      agents.add(r.agentId ?? null);
+      providers.add(r.providerId ?? null);
+      models.add(r.model ?? null);
+    }
+
+    const total = matched.length;
+    const start = (pageNo - 1) * size;
+    return {
+      rows: matched.slice(start, start + size), // 页超界 → 空 rows，total 如实
+      total,
+      page: pageNo,
+      pageSize: size,
+      facets: {
+        agents: [...agents].sort(facetSort),
+        providers: [...providers].sort(facetSort),
+        models: [...models].sort(facetSort),
+      },
+    };
+  }
+
   return {
-    appendRequest: (entry) => append("requests", entry),
+    appendRequest,
     appendSession: (entry) => append("sessions", entry),
     readRequests: (range) => read("requests", range),
     readSessions: (range) => read("sessions", range),
+    readRequestsLog,
     cleanup,
   };
 }
