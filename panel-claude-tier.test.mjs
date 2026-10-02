@@ -184,8 +184,8 @@ describe("panel.css · 档位行只管版式", () => {
     assert.match(css, /#claudeTierRows\[hidden\] \{ display: none; \}/);
   });
 
-  it("「通用」结构注释与四张卡的实际形态一致", () => {
-    assert.match(css, /「通用」分组：八项按语义分四张卡/);
-    assert.match(html, /「通用」：八项按语义分四张卡/);
+  it("「通用」结构注释与五张卡的实际形态一致", () => {
+    assert.match(css, /「通用」分组：九项按语义分五张卡/);
+    assert.match(html, /「通用」：九项按语义分五张卡/);
   });
 });

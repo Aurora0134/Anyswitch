@@ -44,9 +44,12 @@ describe("relay log bridge", () => {
     // The bridge hardcodes 47821. For the test we reach into the same code
     // path by faking fetch: one SSE connection built from the real endpoint's
     // semantics (history replay + live frames), delivered as a ReadableStream.
+    // Frames carry the level in the field only — the shape the relay emits since
+    // the level contract landed (the legacy "[warn] " prefix is covered by its
+    // own test below).
     const frames = [
-      `data: ${JSON.stringify({ ts: 1, level: "warn", message: "[warn] keep-alive: retrying request" })}\n\n`,
-      `data: ${JSON.stringify({ ts: 2, level: "info", message: "[info] keep-alive: recovered" })}\n\n`,
+      `data: ${JSON.stringify({ ts: 1, level: "warn", message: "keep-alive: retrying request" })}\n\n`,
+      `data: ${JSON.stringify({ ts: 2, level: "info", message: "keep-alive: recovered" })}\n\n`,
     ];
     const encoder = new TextEncoder();
     let pushed = 0;
@@ -63,7 +66,7 @@ describe("relay log bridge", () => {
           } else {
             pushed += 1;
             controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify({ ts: 3, level: "error", message: "[error] live fault" })}\n\n`),
+              encoder.encode(`data: ${JSON.stringify({ ts: 3, level: "error", message: "live fault" })}\n\n`),
             );
           }
         }, 20);
@@ -98,6 +101,47 @@ describe("relay log bridge", () => {
       globalThis.fetch = originalFetch;
       rmSync(root, { recursive: true, force: true });
       await close();
+    }
+  });
+
+  // 升级窗口：面板可能先重启，对面还是把级别写进文本的旧中继。旧帧自带 "[level] "
+  // 前缀，原样透传会让窗口里出现两个级别标签，所以桥接处剥掉一个前导级别标记。
+  // 新中继不产生这个前缀，这一条只守旧格式。
+  it("strips a leading level tag from a pre-0.6.x relay entry", async () => {
+    const frames = [
+      `data: ${JSON.stringify({ ts: 1, level: "warn", message: "[warn] legacy prefixed entry" })}\n\n`,
+    ];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(frames[0]));
+        setTimeout(() => controller.close(), 40);
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(stream, { status: 200 });
+
+    const panelLogger = createLogger({ sink: () => {} });
+    const received = [];
+    const unsubscribe = panelLogger.subscribe((entry) => received.push(entry));
+
+    const root = mkTestDir("anyswitch-bridge-legacy-");
+    try {
+      loadOrGenerateToken(root);
+      const stop = startRelayLogBridge(panelLogger, root);
+      const deadline = Date.now() + 3000;
+      while (received.length < 1 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      stop();
+      unsubscribe();
+
+      assert.equal(received.length, 1, "the legacy frame still bridges");
+      assert.equal(received[0].level, "warn", "the level comes from the field, never the text");
+      assert.equal(received[0].message, "legacy prefixed entry", "the stale level tag is stripped once");
+    } finally {
+      globalThis.fetch = originalFetch;
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

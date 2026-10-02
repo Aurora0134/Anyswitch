@@ -34,6 +34,7 @@
 
 - **Stats tab**: any change to stats-tab behavior must update the corresponding entry in `docs/stats-spec.md` in the same commit. That file is the single living spec — it records what is true *now*.
 - **Theme / style-lab**: `panel-ui/style-lab/*.css` files are the source of truth; edits must be mirrored into the corresponding banner block embedded in `panel-ui/panel.css` (see `panel-ui/style-lab/CONTRACT.md`). `style-lab-sync.test.mjs` fails on any drift.
+- **Logging**: the log bus (`logger.mjs`) holds two contracts. The level is carried by the entry's `level` field and by nothing else — never write a level word into a message, and never parse one back out of it. A caller that needs a different level calls `warn`/`error` instead of typing the word into the text. Second, every persisted line carries a wall-clock stamp; a line without one cannot be lined up against a user's report of when something broke. `logger.test.mjs` fails on both.
 
 ### Release note conventions
 
@@ -81,6 +82,7 @@ Release notes are the changelog a user reaches from the About page, so their aud
 
 - **统计页**：凡改动统计页行为的提交，必须同笔更新 `docs/stats-spec.md` 对应条目。该文件是单一现行规格——只记录「现在是什么」。
 - **主题 / style-lab**：`panel-ui/style-lab/*.css` 是源文件，改动必须同步嵌入 `panel-ui/panel.css` 对应横幅块（见 `panel-ui/style-lab/CONTRACT.md`）；`style-lab-sync.test.mjs` 对漂移直接判红。
+- **日志**：日志总线（`logger.mjs`）守两条契约。级别只由条目的 `level` 字段承载，别处不得再写一份——消息文本里不许出现级别字样，也不许反过来从文本里解析级别；需要别的级别就调 `warn`/`error`，不要把级别词敲进正文。其二，落盘的每一行都带墙钟时间戳，没有时间戳的行无法与用户「什么时候坏的」对齐。两条都由 `logger.test.mjs` 判红。
 
 ### 发布说明撰写约定
 

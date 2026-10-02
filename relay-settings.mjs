@@ -8,7 +8,7 @@
 // thrown instead (loadSettings keeps swallowing parse errors — it runs on every
 // request — so a corrupt file degrades to defaults on the read path).
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { CLAUDE_TIERS, parseClaudeTierMappings } from "./claude-tier-mapping.mjs";
@@ -61,6 +61,15 @@ export const DEFAULT_INJECT_THINKING_EFFORT = true;
 
 export function parseInjectThinkingEffort(raw) {
   return raw === false ? false : DEFAULT_INJECT_THINKING_EFFORT;
+}
+
+// 运行日志总开关。默认开——日志是排障时唯一的凭据，升级上来的安装必须与旧行为
+// 一致，不能因为多出一个开关就默认把记录关掉。只有显式写入 false 才关（缺失、
+// 畸形、旧版本没有这个键，全部保持开）。
+export const DEFAULT_LOGGING_ENABLED = true;
+
+export function parseLoggingEnabled(raw) {
+  return raw === false ? false : DEFAULT_LOGGING_ENABLED;
 }
 
 // 以 bypassPermissions 启动 Claude Code：开启后 Anyswitch 拉起 Claude 时带上
@@ -201,6 +210,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const keepAlive = parseKeepAliveConfig(raw.keepAlive, env);
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
+  const loggingEnabled = parseLoggingEnabled(raw.loggingEnabled);
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
@@ -215,6 +225,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       keepAlive,
       sparkWindowPoints,
       injectThinkingEffort,
+      loggingEnabled,
       claudeBypassPermissions,
       claudeTierMappingsEnabled,
       claudeTierMappings,
@@ -222,6 +233,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     keepAlive,
     sparkWindowPoints,
     injectThinkingEffort,
+    loggingEnabled,
     claudeBypassPermissions,
     claudeTierMappingsEnabled,
     claudeTierMappings,
@@ -298,6 +310,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     updated.injectThinkingEffort = parseInjectThinkingEffort(patch.injectThinkingEffort);
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, "loggingEnabled")) {
+    updated.loggingEnabled = parseLoggingEnabled(patch.loggingEnabled);
+  }
+
   if (Object.prototype.hasOwnProperty.call(patch, "claudeBypassPermissions")) {
     updated.claudeBypassPermissions = parseClaudeBypassPermissions(patch.claudeBypassPermissions);
   }
@@ -330,4 +346,30 @@ export function saveSettings(settingsPath, patch, env = process.env) {
   mkdirSync(dirname(settingsPath), { recursive: true });
   atomicWriteFile(settingsPath, text);
   return loadSettings(settingsPath, env);
+}
+
+// A live read of the 运行日志 switch, for long-lived processes that must honour a
+// toggle without being restarted. relay-host owns the only persisted log file,
+// and a switch that only took effect at the next restart would leave that file
+// growing exactly when the user asked it to stop.
+//
+// Cost is one stat per log write — log writes are rare events, not a hot path —
+// and the full parse only runs when the file's mtime actually moved. An
+// unreadable or missing file keeps the last known value, so a transient read
+// error can never silently stop recording.
+export function createLoggingEnabledGate(settingsPath = defaultSettingsPath(), env = process.env) {
+  let cachedMtime = null;
+  let cachedValue = DEFAULT_LOGGING_ENABLED;
+  return function isLoggingEnabled() {
+    try {
+      const mtime = statSync(settingsPath).mtimeMs;
+      if (mtime !== cachedMtime) {
+        cachedMtime = mtime;
+        cachedValue = parseLoggingEnabled(loadSettings(settingsPath, env).settings.loggingEnabled);
+      }
+    } catch {
+      /* unreadable: keep the last known value */
+    }
+    return cachedValue;
+  };
 }

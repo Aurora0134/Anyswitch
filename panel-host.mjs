@@ -22,7 +22,7 @@ import { createPanelRouter, startRelayLogBridge } from "./panel.mjs";
 import { createLogger } from "./logger.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { storePaths } from "./store-io.mjs";
-import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
+import { loadSettings, defaultSettingsPath, createLoggingEnabledGate } from "./relay-settings.mjs";
 import { isWatchdogAutostartEnabled, enableWatchdogAutostart } from "./autostart.mjs";
 import { spawnWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
 import { dirname } from "node:path";
@@ -38,7 +38,14 @@ function isLoopback(remoteAddress) {
 
 export function createPanelServer(options = {}) {
   const paths = options.paths ?? storePaths();
-  const logger = options.logger ?? createLogger({ sink: (line) => process.stderr.write(line) });
+  // 运行日志开关：闸门按 settings.json 的 mtime 缓存读取，关掉后下一次写入即停，
+  // 不需要重启面板。面板自己的记录只活在内存环形缓冲里（stderr 无人接收），所以
+  // 关掉这一处就等于把实时输出整条链路关掉——中继条目经桥、各端点条目经 ingest
+  // 都汇入同一个 logger。
+  const logger = options.logger ?? createLogger({
+    sink: (line) => process.stderr.write(line),
+    isEnabled: options.isLoggingEnabled ?? createLoggingEnabledGate(options.settingsFile ?? defaultSettingsPath()),
+  });
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
   const startTime = options.startTime ?? Date.now();
   const router = createPanelRouter({ storePaths: paths, logger, metricsCollector, startTime });
