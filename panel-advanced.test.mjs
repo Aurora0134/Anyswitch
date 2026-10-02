@@ -36,6 +36,10 @@ function harness({ respondPost, confirmAnswer = true, errorText } = {}) {
   for (const match of html.matchAll(/<([a-z0-9]+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
     const el = new El();
     el.hidden = /\bhidden\b/.test(match[0]);
+    // 初值照 markup 填进来：真 DOM 里这些字本来就画在页面上。给个空壳的话，
+    // 「控制器不抢写初值」「离开回初值」这类断言测的就是个假状态——控制器从
+    // DOM 里取到的初值会变成空串，而线上取到的是 markup 那句，两边不一致。
+    el.textContent = initialText(match[2]);
     nodes.set(match[2], el);
   }
   const doc = { getElementById: (id) => nodes.get(id) };
@@ -96,7 +100,7 @@ const EXPORT_OK = {
 };
 
 const applyHarness = (watchdog, applyResult = {}) => harness({
-  respondPost: ({ path }) => (path === "/panel/api/data/import-pick"
+  respondPost: ({ path }) => (path === "/api/data/import-pick"
     ? { ok: true, token: "t1", counts: { providers: 3 }, skillsSourcePath: null }
     : { ok: true, backupId: "b7", counts: { providers: 3 }, ...applyResult, ...(watchdog ? { watchdog } : {}) }),
 });
@@ -119,7 +123,7 @@ test("markup 与控制器共用同一批 id，且注册表里有高级选项子 
   }
   assert.equal(initialText("dataExportStatus"), "尚未导出", "状态行要有初始值，与「关于」的尚未检查更新同一写法");
   assert.equal(initialText("dataImportSummary"), "尚未选择导出包");
-  assert.equal(h.exportStatus().text, "", "控制器不抢写初始值");
+  assert.equal(h.exportStatus().text, "尚未导出", "控制器不抢写初始值（保持 markup 那份）");
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "没选包之前不给写入");
   assert.equal(h.get("dataSkillsPickBtn").disabled, true, "没选包之前不能改 Skills 位置");
 });
@@ -193,17 +197,17 @@ test("导入：预览后状态行是中性摘要、明细行摆计数，两个�
 test("导入：确认框里选取消则一个写入请求都不发，票据还留着", async () => {
   const h = harness({
     confirmAnswer: false,
-    respondPost: ({ path }) => (path === "/panel/api/data/import-pick" ? PREVIEW : { ok: true }),
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : { ok: true }),
   });
   await pickPackage(h);
   await click(h, "dataImportApplyBtn");
-  assert.deepEqual(h.mutations.map((m) => m.path), ["/panel/api/data/import-pick"], "取消确认不该写入");
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"], "取消确认不该写入");
   assert.equal(h.get("dataImportApplyBtn").disabled, false, "取消后不必重选包");
 });
 
 test("导入：写入成功回填备份号，票据一次性", async () => {
   const h = harness({
-    respondPost: ({ path }) => (path === "/panel/api/data/import-pick"
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
       ? { ok: true, token: "t1", counts: { providers: 3 }, skillsSourcePath: null }
       : { ok: true, backupId: "20260923-125900", counts: { providers: 3 }, applied: { store: true, credentials: 3 } }),
   });
@@ -216,8 +220,8 @@ test("导入：写入成功回填备份号，票据一次性", async () => {
   assert.equal(h.toasts.at(-1).isErr, false);
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "票据用掉后不许再点一次");
   await click(h, "dataImportApplyBtn");
-  assert.equal(h.mutations.filter((m) => m.path === "/panel/api/data/import-apply").length, 1);
-  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/panel/api/data/import-apply").body),
+  assert.equal(h.mutations.filter((m) => m.path === "/api/data/import-apply").length, 1);
+  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body),
     JSON.stringify({ token: "t1", skillsRepoPath: null }));
 });
 
@@ -231,7 +235,7 @@ test("导入：读包与写入失败都退回未选择态并转 danger", async (
   assert.equal(badZip.get("dataImportApplyBtn").disabled, true, "坏包不留写入通道");
 
   const expired = harness({
-    respondPost: ({ path }) => (path === "/panel/api/data/import-pick"
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
       ? { ok: true, token: "gone", counts: { providers: 3 }, skillsSourcePath: "C:\\skills" }
       : { ok: false, error: "导入确认已过期，请重新选择导出包" }),
   });
@@ -276,9 +280,9 @@ test("导入后 followAgent 没对齐回来：状态行转提醒色，明细行�
 
 test("导入：可改 Skills 位置，改完的路径随写入请求交回后端", async () => {
   const h = harness({
-    respondPost: ({ path }) => (path === "/panel/api/data/import-pick"
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
       ? { ok: true, token: "t9", counts: {}, skillsSourcePath: "C:\\old\\skills" }
-      : path === "/panel/api/skills/repo/pick"
+      : path === "/api/skills/repo/pick"
         ? { ok: true, path: "D:\\new\\skills" }
         : { ok: true, backupId: "b1", counts: {} }),
   });
@@ -288,3 +292,91 @@ test("导入：可改 Skills 位置，改完的路径随写入请求交回后端
   await click(h, "dataImportApplyBtn", 3);
   assert.equal(JSON.stringify(h.mutations.at(-1).body), JSON.stringify({ token: "t9", skillsRepoPath: "D:\\new\\skills" }));
 });
+
+// ─────────────────────────────────────────────────────────────
+// 文案生命周期：结果离开即复位，状态随票据留着，离开期间落地的结果等切回
+//
+// 本卡文本有两种身份，复位规则不同（见 createDataBundleController 的注释）：
+//   状态 = 票据还活着时的预览摘要 + Skills 落点行 → 离开再回来必须还在
+//   结果 = 导出 / 导入的一次性回执 → 离开即回初值
+// 复位用的初值一律取 markup 里写的那份，控制器不另造文案。
+// 没有这套规则时的实际症状：导出成功后「已导出 xxx.zip」永不复位，切子 tab、
+// 回看板、再回来都还挂着，文件删了界面照样说已导出，只有整页刷新才回初值。
+
+test("生命周期：导出结果离开子页即回初值，且复位文案就是 markup 的初值", async () => {
+  const h = harness({ respondPost: () => EXPORT_OK });
+  h.controller.enter(); // 用户就停在高级选项页上
+  await click(h, "dataExportBtn");
+  assert.equal(h.exportStatus().text, "已导出 anyswitch-export-20260923-120000.zip");
+  h.controller.leave();
+  assert.equal(h.exportStatus().text, initialText("dataExportStatus"), "回初值，不另造文案");
+  assert.equal(h.exportStatus().tone, undefined, "色调一并摘掉，不留半截态");
+  assert.equal(h.exportMeta(), "", "明细行一起收");
+});
+
+test("生命周期：票据还在时离开，预览是状态，必须留着（不逼用户重挑包）", async () => {
+  const h = harness({ respondPost: () => PREVIEW });
+  h.controller.enter();
+  await pickPackage(h);
+  assert.match(h.summary().text, /^已读取包内容：/);
+  h.controller.leave();
+  assert.match(h.summary().text, /^已读取包内容：/, "预览是状态，离开不清");
+  assert.equal(h.meta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22", "明细也留着");
+  assert.equal(h.get("dataImportApplyBtn").disabled, false, "票据还有效，写入通道不能关");
+  assert.equal(h.get("dataSkillsPickBtn").disabled, false, "Skills 位置也还能改");
+});
+
+test("生命周期：离开期间落地的结果等切回，看过之后下次离开才复位", async () => {
+  const h = harness({ respondPost: () => EXPORT_OK });
+  h.controller.leave(); // 人先离开，此时还没有任何结果
+  assert.equal(h.exportStatus().text, initialText("dataExportStatus"));
+  await click(h, "dataExportBtn"); // 结果在人不在的时候落地
+  const landed = "已导出 anyswitch-export-20260923-120000.zip";
+  assert.equal(h.exportStatus().text, landed, "结果照常写入，不能在没人看的时候被丢掉");
+  h.controller.leave(); // 用户还没切回来就又离开：仍要留着
+  assert.equal(h.exportStatus().text, landed, "没看过就不清");
+  h.controller.enter(); // 切回，这下看到了
+  assert.equal(h.exportStatus().text, landed, "切回时结果还在，用户能看到");
+  h.controller.leave(); // 看过了，这次才复位
+  assert.equal(h.exportStatus().text, initialText("dataExportStatus"));
+});
+
+test("生命周期：导入结果离开也复位，Skills 落点行一起回初值", async () => {
+  const h = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
+      ? { ok: true, token: "t9", counts: {}, skillsSourcePath: "C:\\old\\skills" }
+      : path === "/api/skills/repo/pick"
+        ? { ok: true, path: "D:\\new\\skills" }
+        : { ok: false, error: "导入确认已过期，请重新选择导出包" }),
+  });
+  h.controller.enter();
+  await pickPackage(h);
+  await click(h, "dataSkillsPickBtn");
+  await click(h, "dataImportApplyBtn", 3);
+  assert.equal(h.summary().tone, "danger");
+  h.controller.leave();
+  assert.equal(h.summary().text, initialText("dataImportSummary"), "失败回执也回初值");
+  assert.equal(h.get("dataSkillsPath").textContent, initialText("dataSkillsPath"), "改过的落点行跟着收");
+});
+
+test("生命周期：导出侧的复位不碰导入侧的状态（两半互不牵连）", async () => {
+  const h = harness({ respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : EXPORT_OK) });
+  h.controller.enter();
+  await pickPackage(h);
+  await click(h, "dataExportBtn");
+  h.controller.leave();
+  assert.equal(h.exportStatus().text, initialText("dataExportStatus"), "导出结果复位");
+  assert.match(h.summary().text, /^已读取包内容：/, "票据还在，导入预览不受影响");
+});
+
+test("生命周期：控制器真的接进了设置页子 tab 机制，不留「有钩子没人调」的死代码", () => {
+  // 这条是本次问题的根：控制器原先声明了 reset() 却零调用点，等于没有生命周期。
+  assert.ok(source.includes('if (which !== "advanced") dataBundle.leave();'), "切走高级选项时离开");
+  assert.ok(source.includes('if (which === "advanced") return dataBundle.enter();'), "切回高级选项时进入");
+  assert.ok(source.includes("leaveSettingsView = () => { about.leave(); dataBundle.leave(); };"),
+    "整个设置视图关掉时也要复位（否则从看板回来还挂着旧结果）");
+  assert.ok(source.includes("enter() { away = false; awaitReturn = false; }"), "enter 消费「等切回」");
+  assert.ok(source.includes("leave() { away = true; if (awaitReturn) return; resetResults(); }"), "leave 按等切回决定清不清");
+  assert.ok(!source.includes("dataBundle.reset"), "旧的死钩子不该留着");
+});
+

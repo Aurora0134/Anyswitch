@@ -7231,3 +7231,160 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(extractFn("openTerminalAddMenu").includes("cwdInput.value = terminalCwdInitial()"), "开菜单即预填解析出的目录");
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// 前端调用路径 ↔ 服务端路由契约
+//
+// panel.js 的 api() / request() 会把 API_BASE（origin + "/panel"）拼在传入路径前面，
+// 所以传入路径必须以 /api/ 开头。写成 "/panel/api/..." 会拼出 /panel/panel/api/...，
+// 落到路由表末尾的 404；而 404 的 error 是英文 "not found"，会被前端的 panelError
+// 折成调用方的中文兜底，界面上只剩一句笼统的失败，看不出是路径写错。
+//
+// 2026-10-02 修的就是这一类：数据搬迁的四条调用（导出选位置、导入选包、导入落定、
+// 改 Skills 位置）全部写成双前缀，该功能自 09-23 上线起从未可用——连选择框都没被
+// 调到过，所以前两次「修选择框归属」的改动自然都没效果。
+//
+// 原先只有一条守卫，且正则把被调函数名写死为 api(，改用 request( 的四条直接逃逸。
+// 这里改成两道：按调用形式收全所有路径 + 逐条对服务端路由表。新增端点若只改了
+// 一边，这条会立刻红。
+describe("panel.html 前端调用路径与服务端路由一致", () => {
+  // 客户端拼 URL 的三种写法：api()/request() 传路径、API_BASE + 字面量、模板串。
+  const CLIENT_CALL_RES = [
+    /\b(?:api|request)\(\s*"(?:GET|POST|PUT|DELETE)",\s*"([^"]+)"/g,
+    /API_BASE\s*\+\s*"([^"]+)"/g,
+    /\$\{API_BASE\}([^`"']*)/g,
+  ];
+
+  function clientPaths(source) {
+    const found = new Map(); // 路径 → 首次出现的行号
+    for (const re of CLIENT_CALL_RES) {
+      for (const m of source.matchAll(re)) {
+        let p = m[1];
+        if (!p.startsWith("/")) continue;
+        const dollar = p.indexOf("$");
+        if (dollar >= 0) p = p.slice(0, dollar); // 模板变量段截断，留静态前缀
+        if (!p) continue;
+        if (!found.has(p)) found.set(p, source.slice(0, m.index).split("\n").length);
+      }
+    }
+    return found;
+  }
+
+  // 服务端路由表：panel.mjs 里 path === / path.startsWith 的 /panel/api/... 字面量。
+  function serverRoutes(source) {
+    const exact = new Set();
+    const prefixes = new Set();
+    for (const m of source.matchAll(/path ===\s*"(\/panel\/api\/[^"]*)"/g)) exact.add(m[1]);
+    for (const m of source.matchAll(/path\.startsWith\(\s*"(\/panel\/api\/[^"]*)"/g)) prefixes.add(m[1]);
+    return { exact, prefixes };
+  }
+
+  const paths = clientPaths(panelJs);
+  const { exact, prefixes } = serverRoutes(panelMjs);
+  const routed = (full) => exact.has(full) || [...prefixes].some((pre) => full.startsWith(pre));
+
+  it("每条前端路径都不带 /panel 前缀（双前缀 404 回归）", () => {
+    assert.ok(paths.size > 0, "前端路径可取样");
+    const bad = [...paths].filter(([p]) => p.startsWith("/panel/"));
+    assert.deepEqual(bad, [],
+      "以下调用会再拼一层 /panel 得到 /panel/panel/... → 404：\n" +
+      bad.map(([p, line]) => `  panel.js:${line}  ${p}`).join("\n"));
+  });
+
+  it("每条前端路径都能在服务端找到对应路由", () => {
+    const missing = [...paths].filter(([p]) => !routed("/panel" + p));
+    assert.deepEqual(missing, [],
+      "以下前端路径拼出的完整路径对不上任何服务端路由：\n" +
+      missing.map(([p, line]) => `  panel.js:${line}  ${p}  →  /panel${p}`).join("\n"));
+  });
+
+  it("数据搬迁四条调用走 /api/ 且路由齐备（本次回归的钉子）", () => {
+    for (const p of [
+      "/api/data/export-pick",
+      "/api/data/import-pick",
+      "/api/data/import-apply",
+      "/api/skills/repo/pick",
+    ]) {
+      assert.ok(paths.has(p), `前端应有 ${p}`);
+      assert.ok(exact.has("/panel" + p), `服务端应有 /panel${p}`);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 被折叠的失败要留下可查的痕迹
+//
+// panelError 会把非中文的服务端原文换成调用方兜底，用户只看到一句笼统的话。
+// 2026-10-02 的「导出未完成」正是这样：真因是路径写错拿到 404，而 404 的
+// "not found" 没有中文，被折成兜底后界面上完全看不出。所以两条都要钉住：
+//   1) 原文必须进面板日志（面板的日志页就能查到），不能只丢浏览器控制台；
+//   2) 数据搬迁卡在被折叠时要说清「刷新页面重试」这条有意义的下一步。
+describe("面板失败文案：折叠时留痕 + 数据搬迁给下一步", () => {
+  // 从 panel.js 里摘出这几个纯函数单独跑，与 panel-advanced.test.mjs 摘
+  // createDataBundleController 是同一手法。
+  function loadHelpers() {
+    const block = panelJs.match(/const PANEL_UI_COPY_RE = [\s\S]*?\n(?=async function api\()/);
+    assert.ok(block, "panel.js 里的文案辅助块可取样");
+    const warns = [];
+    const posts = [];
+    const ctx = {
+      API_BASE: "http://127.0.0.1:47820/panel",
+      console: { warn: (...a) => warns.push(a.join(" ")) },
+      fetch: (url, opts) => { posts.push({ url, opts }); return Promise.resolve({ ok: true }); },
+      String, JSON, Promise,
+    };
+    const helpers = vm.runInNewContext(
+      `(() => { ${block[0]}\n return { panelError, panelFailure, PANEL_FAILURE_HINT }; })()`,
+      ctx,
+    );
+    return { helpers, warns, posts };
+  }
+
+  it("中文服务端原文照原样上屏，不加尾巴、不记日志", () => {
+    const { helpers, warns, posts } = loadHelpers();
+    const err = Object.assign(new Error("HTTP 200：导出目录不存在，请重新选择"), { code: "导出目录不存在，请重新选择" });
+    assert.equal(helpers.panelFailure(err, "导出未完成"), "导出目录不存在，请重新选择");
+    assert.equal(warns.length, 0, "业务原因不算折叠，不必记日志");
+    assert.equal(posts.length, 0);
+  });
+
+  it("非中文原文被折叠时：数据搬迁卡补「刷新页面重试」，并把原文送进面板日志", () => {
+    const { helpers, warns, posts } = loadHelpers();
+    const err = Object.assign(new Error("HTTP 404：not found"), { code: "not found" });
+    assert.equal(helpers.panelFailure(err, "导出未完成"),
+      "导出未完成（请刷新页面后重试；详情见面板日志）");
+    assert.equal(warns.length, 1, "原文仍留一份到控制台");
+    assert.equal(posts.length, 1, "原文要进面板日志");
+    assert.equal(posts[0].url, "http://127.0.0.1:47820/panel/api/logs/ingest");
+    const body = JSON.parse(posts[0].opts.body);
+    assert.equal(body.level, "warn");
+    assert.ok(body.message.includes("not found"), "日志里要带服务端原文，否则查不到真因");
+    assert.ok(body.message.includes("导出未完成"), "日志里要带用户看到的兜底，便于对上号");
+  });
+
+  it("普通调用方的 panelError 保持原样（不补尾巴），但同样把原文记入日志", () => {
+    const { helpers, posts } = loadHelpers();
+    const err = Object.assign(new Error("HTTP 500：boom"), { code: "boom" });
+    assert.equal(helpers.panelError(err, "请求失败"), "请求失败");
+    assert.equal(posts.length, 1);
+    assert.ok(JSON.parse(posts[0].opts.body).message.includes("boom"));
+  });
+
+  it("上报本身失败也绝不改变返回的文案", () => {
+    const block = panelJs.match(/const PANEL_UI_COPY_RE = [\s\S]*?\n(?=async function api\()/)[0];
+    const ctx = {
+      API_BASE: "http://127.0.0.1:47820/panel",
+      console: { warn: () => {} },
+      fetch: () => { throw new Error("上报通道也挂了"); },
+      String, JSON, Promise,
+    };
+    const helpers = vm.runInNewContext(
+      `(() => { ${block}\n return { panelFailure }; })()`,
+      ctx,
+    );
+    const err = Object.assign(new Error("HTTP 404：not found"), { code: "not found" });
+    assert.equal(helpers.panelFailure(err, "导出未完成"),
+      "导出未完成（请刷新页面后重试；详情见面板日志）",
+      "上报是顺带的事，不能把原错误盖掉");
+  });
+});
