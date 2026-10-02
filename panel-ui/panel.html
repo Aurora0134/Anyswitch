@@ -91,20 +91,25 @@ try {
   const SUB_TAB_NAMES = ["general", "advanced", "route", "theme", "about", "experimental"];
   let view = null;
   let subTab = null;
+  let statsSubTab = null;
   try {
     view = localStorage.getItem("panel-view");
     if (localStorage.getItem("panel-settings-open") === "1") view = "settings";
     if (localStorage.getItem("panel-terminal-open") === "1") view = "terminal";
     subTab = localStorage.getItem("panel-settings-subtab");
+    statsSubTab = localStorage.getItem("panel-stats-subtab");
   } catch (e) {
     return; // localStorage 不可用：与 restoreView 同样落看板默认态
   }
   if (VIEW_NAMES.indexOf(view) < 0) return;
   const root = document.documentElement;
   root.setAttribute("data-prepaint-view", view);
-  // 子 tab 只影响设置页内部那一格内容，别的视图下没有意义
+  // 子 tab 只影响所属视图内部那一格内容，别的视图下没有意义
   if (view === "settings" && SUB_TAB_NAMES.indexOf(subTab) >= 0) {
     root.setAttribute("data-prepaint-subtab", subTab);
+  } else if (view === "stats" && statsSubTab === "logs") {
+    // 统计页「请求日志」子 tab：落在总览（overview）就是 HTML 静态默认，不写属性
+    root.setAttribute("data-prepaint-subtab", "logs");
   }
 })();
 </script>
@@ -1487,7 +1492,7 @@ if (window.panelStartupController) panelStartupPlay();
         </select>
       </div>
       <div class="panel-card">
-        <div class="card-body">
+        <div class="card-body logs-card-body">
           <div class="stats-table-wrap">
             <table class="stats-table logs-table">
               <thead>

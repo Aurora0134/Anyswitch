@@ -10937,21 +10937,17 @@ async function api(method, path, body) {
     statsTrendPrev = null; // 进 tab 首张图走 reveal 揭示动画
     statsUsageRevealed = false; // 环形图揭示同理：每次进 tab 重播（与趋势图一致）
     loadStatsPrefs(); // 兜底：restoreView 可能先于 initStatsTab 到达
-    // 缓存热渲染：切走时 leaveStatsView 只取消 rAF 不清 DOM，旧画面会残留在
-    // 容器里直到网络返回——先同步用已缓存数据重渲（此时 reveal 标记刚被重置，
-    // 趋势图与环均从零起步立即重播生长动画），消除「旧图静置、动画迟到」的
-    // 割裂与空窗。fetch 落地后：数据未变由守卫跳过静默重渲（环 _usageRaf、
-    // 趋势图同终点签名），已变则趋势图 morph 从在飞位置半途接管，均不打断动画。
-    if (statsData) { renderStatsTrend(); renderStatsUsage(); }
-    // 子 tab 恢复：默认「总览」，存档为 logs 时激活请求日志（挂 5s 轮询 + 取数；
-    // 切走不重置，回来仍在离开时的子页——leave 已停轮询，这里经 activate 补挂）
+    // 子 tab 恢复：默认「总览」，存档为 logs 时激活请求日志。两侧子页各自负责
+    // 自己的取数与渲染（总览=缓存热渲染+refreshStatsState，日志=enterLogsPane
+    // 挂 5s 轮询，均见 activateStatsSubTab）——不可见的一侧不取数也不渲染，
+    // 不会出现在日志子页前台时总览图表还在后台跑动画/重渲的情况。
     let statsSubTabSaved = "overview";
     try { if (localStorage.getItem("panel-stats-subtab") === "logs") statsSubTabSaved = "logs"; } catch {}
-    activateStatsSubTab(statsSubTabSaved);
-    const firstReady = refreshStatsState();
+    const firstReady = activateStatsSubTab(statsSubTabSaved, { enter: true });
     if (!statsTimer) {
       statsTimer = setInterval(() => {
         if (document.hidden) return;
+        if (statsSubTab !== "overview") return; // 日志子页前台：总览停取停渲
         refreshStatsState({ silent: true });
       }, 30000);
     }
@@ -10999,6 +10995,10 @@ async function api(method, path, body) {
   }
 
   function renderStatsAll() {
+    // 不可见不渲染的硬闸：切走统计页（视图 hidden）或日志子页前台时，迟落地
+    // 的在飞响应到这里丢弃——含图表 reveal/morph 的 rAF 也不会再起。回到可见
+    // 时由 activateStatsSubTab 的进入路径补一次完整取数+渲染。
+    if ($("statsView").hidden || statsSubTab !== "overview") return;
     renderStatsOverview();
     renderStatsHeatmap();
     renderStatsTrend();
@@ -11983,9 +11983,12 @@ async function api(method, path, body) {
   let statsSubTab = "overview";
   let logsTimer = null;
 
-  function activateStatsSubTab(which) {
-    const selected = statsSubTabs[which];
-    if (!selected) which = "overview";
+  // opts.enter：从 enterStatsView 来的首次激活（总览侧需要一次取数+渲染）。
+  // 返回该子页首个数据落地的 promise，供 enterStatsView 接力 startupViewReady。
+  function activateStatsSubTab(which, opts) {
+    const enter = !!(opts && opts.enter);
+    if (!statsSubTabs[which]) which = "overview";
+    const prev = statsSubTab;
     statsSubTab = which === "logs" ? "logs" : "overview";
     for (const [name, [tabId, paneId]] of Object.entries(statsSubTabs)) {
       const on = name === statsSubTab;
@@ -11995,13 +11998,29 @@ async function api(method, path, body) {
       $(paneId).hidden = !on;
     }
     try { localStorage.setItem("panel-stats-subtab", statsSubTab); } catch {}
-    if (statsSubTab === "logs") enterLogsPane(); else leaveLogsPane();
+    // 日志子页=整页固定布局（页面不滚、表体内部滚动、分页条钉屏底）；总览恢复文档流
+    $("statsView").classList.toggle("logs-fixed", statsSubTab === "logs");
+    if (statsSubTab === "logs") return enterLogsPane();
+    leaveLogsPane();
+    // 总览只在可见时取数+渲染：首次进统计页或从日志子页切回时补一次（日志
+    // 子页前台期间 30s 轮询对总览停取停渲，切回在这里即刻补齐）。已在总览
+    // 上重复点 tab 不触发重取。子 tab 切回 = 进 tab 范式：重置 reveal 标记，
+    // 缓存热渲染时趋势图清屏生长、环形图一笔画重播（同 enterStatsView 语义：
+    // 切走时 leaveStatsView 只取消 rAF 不清 DOM，先同步用缓存数据重渲，fetch
+    // 落地后由同终点签名守卫跳过或 morph 半途接管，均不打断动画）。
+    if (enter || prev === "logs") {
+      if (prev === "logs") { statsTrendPrev = null; statsUsageRevealed = false; }
+      if (statsData) { renderStatsTrend(); renderStatsUsage(); }
+      return refreshStatsState();
+    }
+    return undefined;
   }
 
   const logsState = { range: "today", agent: "", provider: "", model: "", status: "all", sort: "ts", dir: "desc", page: 1, pageSize: 20, seq: 0 };
   let logsRows = []; // 最近一次成功渲染的行（详情展开的数据源）
   let logsTotal = 0; // 最近一次成功响应的总数（跳页钳制用）
   let logsCorrecting = false; // 深页超界自动回末页的一次性守卫（防循环）
+  let logsLastSig = null; // 最近一次落地渲染的签名（loadLogs 同签名跳过重渲）
   const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
   const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
 
@@ -12063,13 +12082,15 @@ async function api(method, path, body) {
 
   function enterLogsPane() {
     syncLogsSortHeaders();
-    loadLogs();
+    const ready = loadLogs();
     if (!logsTimer) {
       logsTimer = setInterval(() => {
         if (document.hidden) return; // 页面隐藏暂停，与统计 30s 轮询同模式
+        if (statsSubTab !== "logs") return; // 兜底：子页已切走则空转（leaveLogsPane 已清，双保险）
         loadLogs();
       }, 5000);
     }
+    return ready;
   }
 
   function leaveLogsPane() {
@@ -12101,6 +12122,21 @@ async function api(method, path, body) {
         try { await loadLogs(); } finally { logsCorrecting = false; }
         return;
       }
+      // 不可见不渲染：切走统计页或切回总览子页后迟落地的响应到此丢弃
+      if ($("statsView").hidden || statsSubTab !== "logs") return;
+      // 同签名跳过：journal 行只增不改，total+页状态+首尾行键+facets 全同
+      // 即画面无变化——5s 轮询空转时 DOM 一概不动（分页条也在签名覆盖内）
+      const rows = Array.isArray(res.rows) ? res.rows : [];
+      const sig = [
+        res.total || 0, res.page, res.pageSize, logsState.sort, logsState.dir,
+        rows.length ? logsRowKey(rows[0]) : "",
+        rows.length ? logsRowKey(rows[rows.length - 1]) : "",
+        (res.facets?.agents || []).map((f) => f.id).join(","),
+        (res.facets?.providers || []).map((f) => f.id).join(","),
+        (res.facets?.models || []).map((f) => f.raw).join(","),
+      ].join("|");
+      if (sig === logsLastSig) return;
+      logsLastSig = sig;
       renderLogs(res);
       refillLogsFilters(res.facets);
     } catch {
@@ -12108,7 +12144,6 @@ async function api(method, path, body) {
       renderLogsError();
     }
   }
-
   // 筛选下拉回填（facets 只受时间范围影响）：保留当前选中值——选中项恰好不在
   // 新 facets 里（如收窄时间范围后该值无行）时补一项占位，不让筛选静默丢失。
   function refillLogsFilters(facets) {
@@ -12199,6 +12234,7 @@ async function api(method, path, body) {
   }
 
   function renderLogsError() {
+    logsLastSig = null; // 错误态不进签名：恢复后同数据也必须能重渲出来
     const tbody = $("logsTbody");
     if (!tbody) return;
     tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">日志加载失败 <button type="button" class="btn btn-mini" data-logs-retry>重试</button></div></td></tr>';

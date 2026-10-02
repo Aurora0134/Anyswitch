@@ -9,10 +9,11 @@
 
 数据源：usage journal（`%LOCALAPPDATA%\Anyswitch\usage\`，requests/sessions-YYYY-MM-DD.jsonl，按日滚动，90 天自清理）。
 聚合：usage-stats.mjs `createUsageStats().getState(days)`，每次调用重读 journal（无聚合缓存）；读取已分段——热力图口径单独读 90 天，其余口径只读所选窗口。
-接口：`GET /panel/api/stats/state?days=1|7`（panel.mjs，days 经 clampStatDays 单点钳制；usage 块恒同时返回 24h+7d 双窗口，见 R-04）。
+接口：`GET /panel/api/stats/state?days=1|7`（panel.mjs，days 经 clampStatDays 单点钳制；usage 块恒同时返回 24h+7d 双窗口，见 R-04）；请求日志子 tab：`GET /panel/api/stats/logs`（行级透传，口径见 R-23）。
 
 | 卡 | 口径 |
 |---|---|
+| 请求日志（子 tab） | journal requests 行**原样透传不聚合**，读侧装饰 providerLabel（channelLabel 解析）与 modelDisplay（剥 wire 前缀）。时间窗 today/7d/30d/all（all=90 天 retention 窗），本地自然日闭区间。失败行可带 errMsg（上游错误原文，截 200，R-22）。**取消请求不出现**（R-13 延伸）。 |
 | 今日概览 | **本地自然日**，与 days seg 无关。请求数 / 总 tokens(prompt+completion) / 缓存命中率(cached/prompt) / 平均 TTFT(仅成功且 ttftMs>0) / 成功率（**不含用户取消**，abort 不落行）。 |
 | 90 天热力图 | 固定 90 天日轴（日历运算防 DST），tokens=prompt+completion，**只算 request 行**，零填充。 |
 | Token 趋势 | days=1 → 24×1h 本地整点桶；days=7 → 21×8h 桶（对齐本地 0/8/16 点）；末桶进行中。三口径：渠道=providerId / 端点=agentId / 模型=`providerId/model` 复合键。值=各桶 prompt+completion。 |
@@ -21,7 +22,7 @@
 | TPS | 每模型 `Σcompletion / Σ((durationMs-ttftMs)/1000)`（总量加权，非单请求平均）；排除 completion<=0 或生成段 <0.2s。**非流式流量因 ttft 代理恒被排除**（见 R-14）。**样本 <10 的模型整行不显示**（小样本均值被单请求噪声主导，见 R-17）。 |
 | 端点工时表 | 按 agentId：requests / tokens / sessions(30min 空档切段数 + sessionEnds) / workMs(busy 区间并集)。**legacy session 行 tokens 计入本卡但不进热力图/趋势**——两口径对不上是设计使然。 |
 
-布局：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。
+布局：页头为「使用统计」标题 + 双子 tab（总览 | 请求日志，localStorage `panel-stats-subtab` 存档，默认总览）；总览即原有全部卡片。总览内：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。**不可见不取数不渲染**（R-25）。
 
 子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/7d/30d/all（含当天往前推 0/6/29/89 天，日历运算防 DST），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
 
@@ -139,6 +140,16 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 - 锚点：panel.mjs `LOG_RANGES` / `LOG_RANGE_BACK_DAYS` / `LOG_STATUSES` / `LOG_PAGE_SIZES`
 - 钉住：panel-logs.test.mjs 参数钳制组
 
+### R-25 统计页「不可见不取数不渲染」
+统计页内容只在可见时取数与渲染。离开统计页（视图 hidden）：30s 轮询与日志 5s 轮询都停止（leaveStatsView 统一收），在飞请求迟落地的响应被 renderStatsAll / loadLogs 的可见性硬闸丢弃（图表 reveal/morph 的 rAF 也不会再起）。日志子页前台时：总览停取停渲（30s 轮询的子页闸 + renderStatsAll 硬闸），切回总览由 activateStatsSubTab 即刻补取补渲——子 tab 切回按进 tab 范式处理：重置 reveal 标记（statsTrendPrev/statsUsageRevealed），缓存热渲染即重播趋势图清屏生长与环形图一笔画，再 refreshStatsState。日志 5s 轮询空转按签名（total+页状态+首尾行键+facets）跳过整次 DOM 重建。
+- 锚点：panel.js `activateStatsSubTab` / `enterStatsView`（statsTimer 子页闸）/ `renderStatsAll`（硬闸）/ `loadLogs`（落地闸 + `logsLastSig` 签名）
+- ⚠️ 无自动化测试钉住（UI 行为），改动时人工核对
+
+### R-26 请求日志子页=整页固定布局
+日志子页激活时统计视图挂 `logs-fixed`：视图高度钉在视口余量内（100dvh − 站点头 56 − 主区顶距 24 − 屏底余量 16），页面本身不滚；筛选行钉顶、表体在卡内 `overflow-y:auto` 滚动（表头 sticky）、分页条钉屏底（对齐 new-api）。总览子页保持文档流原样。min-height:0 链条（pane→card→card-body→table-wrap）是 flex 内滚动的硬要求，缺一截链即失效。
+- 锚点：panel.css `.stats-view.logs-fixed` 规则组；panel.js `activateStatsSubTab` 的 class 切换
+- ⚠️ 无自动化测试钉住（布局），改动时人工核对
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -150,7 +161,7 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 | TTFT 出榜样本下限 10（不足整行不显示，与 TPS 同机制） | usage-stats.mjs `TTFT_MIN_SAMPLES` | usage-stats.test.mjs「drops TTFT rows with < 10 samples」 |
 | 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.js `STATS_MORPH_MS` / `STATS_MORPH_EASE` | — |
 | 环形图一笔画 1400ms easeOutCubic（柱状图生长同节奏同 rAF） | panel.js `USAGE_REVEAL_MS` | panel.test.mjs「模型用量卡两栏…同一 rAF 生长揭示」 |
-| 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新** → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.js `enterStatsView` 缓存热渲染 + renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
+| 趋势动画路径分配：进 tab 首张（有缓存即热渲染、动画随进 tab 即时起跑不等接口返回；落地数据未变由同终点签名守卫跳过、已变则 morph 半途接管）/空态恢复/**切口径 seg**/**手动刷新**/**日志子 tab 切回总览**（同进 tab 范式，R-25） → 清屏重绘左至右生长（reveal）；days seg（跨桶数索引映射）/图例显隐/30s 轮询 → morph | panel.js `enterStatsView` 缓存热渲染 + `activateStatsSubTab`（子 tab 切回重置 reveal 标记）+ renderStatsTrend 动画决策 + `statsSegScope` wiring + `refreshStatsState(opts.replay)`（R-18） | panel.test.mjs「趋势图进 tab 缓存热渲染」+「趋势图切口径 seg…不走 morph」+「手动刷新重播生长动画」 |
 | journal 保留 90 天 | usage-journal.mjs retentionDays | usage-journal 测试 |
 | 监测页实例陈旧 2min | panel.js `INSTANCE_STALE_MS` | 属监测页，统计页不用 |
 

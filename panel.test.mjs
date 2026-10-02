@@ -3135,15 +3135,19 @@ describe("panel.html 设置全页视图", () => {
       store: { "panel-view": "store", "panel-settings-open": "1", "panel-settings-subtab": "nope" } },
     { name: "停在渠道页", view: "store", subTab: null,
       store: { "panel-view": "store", "panel-settings-open": "0" } },
-    { name: "停在统计页", view: "stats", subTab: null,
+    { name: "停在统计页", view: "stats", subTab: "overview",
       store: { "panel-view": "stats", "panel-settings-open": "0" } },
+    { name: "停在统计页·请求日志子 tab", view: "stats", subTab: "logs",
+      store: { "panel-view": "stats", "panel-settings-open": "0", "panel-stats-subtab": "logs" } },
+    { name: "统计页子 tab 存档不在册 → 与 enterStatsView 同样回落总览", view: "stats", subTab: "overview",
+      store: { "panel-view": "stats", "panel-settings-open": "0", "panel-stats-subtab": "nope" } },
     { name: "停在会话页", view: "sessions", subTab: null,
       store: { "panel-view": "sessions", "panel-settings-open": "0" } },
     { name: "停在终端页（进终端前在渠道页）", view: "terminal", subTab: null,
       store: { "panel-view": "store", "panel-settings-open": "0", "panel-terminal-open": "1" } },
     { name: "停在终端页且设置页标记也在（存档被手改）→ 终端页优先", view: "terminal", subTab: null,
       store: { "panel-view": "board", "panel-settings-open": "1", "panel-settings-subtab": "theme", "panel-terminal-open": "1" } },
-    { name: "终端页标记值不是 1 → 按主视图走，不凭空进终端", view: "stats", subTab: null,
+    { name: "终端页标记值不是 1 → 按主视图走，不凭空进终端", view: "stats", subTab: "overview",
       store: { "panel-view": "stats", "panel-settings-open": "0", "panel-terminal-open": "yes" } },
     { name: "停在终端页时子 tab 存档不参与首帧（首帧是终端页本身）", view: "terminal", subTab: null,
       store: { "panel-view": "sessions", "panel-settings-open": "0", "panel-settings-subtab": "about", "panel-terminal-open": "1" } },
@@ -3175,12 +3179,15 @@ describe("panel.html 设置全页视图", () => {
       assert.strictEqual(attrs["data-prepaint-view"] ?? "board", out.currentView,
         `${c.name}：首帧那一屏与落定那一屏不一致`);
       // 首帧没有子 tab 属性时，HTML 默认露出的就是「通用」——与 enterSettingsView
-      // 拿不到有效存档时的回落同一格。
+      // 拿不到有效存档时的回落同一格。统计页同理：默认露出「总览」（overview），
+      // 落定侧是 enterStatsView 读 panel-stats-subtab（仅 "logs" 切日志页）。
       const jsSub = out.currentView === "settings"
         ? (PREPAINT_SUB_TABS.includes(out.settingsSubTabToRestore) ? out.settingsSubTabToRestore : "general")
-        : null;
+        : out.currentView === "stats"
+          ? (c.store["panel-stats-subtab"] === "logs" ? "logs" : "overview")
+          : null;
       const paintSub = attrs["data-prepaint-subtab"]
-        ?? (out.currentView === "settings" ? "general" : null);
+        ?? (out.currentView === "settings" ? "general" : out.currentView === "stats" ? "overview" : null);
       assert.strictEqual(paintSub, jsSub, `${c.name}：首帧子 tab 与落定子 tab 不一致`);
       assert.strictEqual(jsSub, c.subTab, `${c.name}：子 tab 落点与预期不符`);
     }
@@ -3622,20 +3629,29 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("趋势图进 tab 缓存热渲染：动画随进 tab 即时起跑，不等 stats 接口返回", () => {
-    const m = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
-    assert.ok(m, "enterStatsView found in panel.js");
-    const body = m[1];
+    // 结构（R-25 起）：enterStatsView 重置 reveal 标记后经 activateStatsSubTab
+    // （{enter:true}）进总览分支——缓存热渲染（趋势+环）必须先于 refreshStatsState()
+    const enter = panelJs.match(/function enterStatsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(enter, "enterStatsView found in panel.js");
+    const enterBody = enter[1];
+    const enterResetIdx = enterBody.indexOf("statsTrendPrev = null");
+    const activateIdx = enterBody.indexOf("activateStatsSubTab(statsSubTabSaved, { enter: true })");
+    assert.ok(enterResetIdx !== -1 && activateIdx !== -1 && enterResetIdx < activateIdx,
+      "reveal flag reset before subtab activation on tab enter");
     // 回归根因：热渲染曾只有环形图，趋势图首渲等 refreshStatsState 的网络往返
     // 落地（实测热 300~500ms）才触发，reveal 起跑随之延迟同款时长。
+    const act = panelJs.match(/function activateStatsSubTab\(which, opts\) \{([\s\S]*?)\n  \}/);
+    assert.ok(act, "activateStatsSubTab found in panel.js");
+    const body = act[1];
     const fetchIdx = body.indexOf("refreshStatsState()");
-    assert.ok(fetchIdx !== -1, "fetch kicked off on tab enter");
     const trendIdx = body.indexOf("renderStatsTrend()");
     const usageIdx = body.indexOf("renderStatsUsage()");
+    assert.ok(fetchIdx !== -1, "overview branch kicks off the fetch");
     assert.ok(trendIdx !== -1 && trendIdx < fetchIdx, "trend hot-rendered from cache before the fetch");
     assert.ok(usageIdx !== -1 && usageIdx < fetchIdx, "donut hot-render preserved");
-    // 热渲染时刻 reveal 标记已重置 → 首渲走 reveal 清屏生长而非 morph
-    const resetIdx = body.indexOf("statsTrendPrev = null");
-    assert.ok(resetIdx !== -1 && resetIdx < trendIdx, "reveal flag reset before hot-render");
+    // 日志子 tab 切回总览同属进 tab 范式（R-25）：热渲染前重置 reveal 标记
+    const subResetIdx = body.indexOf("statsTrendPrev = null");
+    assert.ok(subResetIdx !== -1 && subResetIdx < trendIdx, "subtab switch-back resets reveal flag before hot-render");
     // 接口落地重渲不打断在飞动画的兜底仍在：数据未变由同终点签名守卫整体跳过
     assert.ok(panelJs.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg)"),
       "same-endpoint guard skips the fetch-landing re-render when data is unchanged");
