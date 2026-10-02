@@ -24,7 +24,8 @@ import { loadStore, storePaths } from "./store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { writeZcodeConfig } from "./zcode-launcher.mjs";
 import { writeDshConfig } from "./dsh-launcher.mjs";
-import { createLogger } from "./logger.mjs";
+import { createLogger, formatLogStamp } from "./logger.mjs";
+import { createLoggingEnabledGate, defaultSettingsPath } from "./relay-settings.mjs";
 import { createPanelRouter } from "./panel.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
@@ -69,9 +70,13 @@ export function rotateLogIfNeeded(logPath, thresholdBytes = LOG_ROTATE_THRESHOLD
 // Synchronous crash trace. process.exit() truncates any pending async stream
 // writes, so the fatal handlers below must land their line with appendFileSync
 // BEFORE exiting — otherwise the crash trace is lost exactly when it matters.
+//
+// Deliberately OUTSIDE the 运行日志 switch: a fatal fault is not a log line, it is
+// the evidence of why the process died, and a user who turned recording off is
+// exactly the user who will later ask what happened.
 export function appendCrashLog(logPath, label, detail) {
   try {
-    appendFileSync(logPath, `[${label}] ${detail?.stack ?? detail}\n`, "utf8");
+    appendFileSync(logPath, `[${formatLogStamp(Date.now())}] [${label}] ${detail?.stack ?? detail}\n`, "utf8");
   } catch {
     /* log file may be unwritable; exiting anyway */
   }
@@ -257,7 +262,13 @@ export async function startResidentRelay(options = {}) {
   const logPath = join(__dirname, "logs", "relay-host.log");
   rotateLogIfNeeded(logPath);
   const setFatalHook = redirectStderrToFile(logPath);
-  const logger = createLogger({ sink: (line) => process.stderr.write(line) });
+  // 运行日志开关的活闸门：中继拥有唯一持久化的日志文件，开关必须当场生效，否则
+  // 用户刚关掉记录、文件却还在长，开关就等于没关。崩溃记录走 appendCrashLog 的
+  // 直写路径，不受此闸门影响（见 appendCrashLog 的注释）。
+  const logger = createLogger({
+    sink: (line) => process.stderr.write(line),
+    isEnabled: createLoggingEnabledGate(defaultSettingsPath(options.base ?? process.env)),
+  });
   try {
     logGitAnchorResult(logger, ensureGitAnchor(__dirname));
   } catch {

@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter, startRelayActivityBridge } from "./panel.mjs";
+import { createLogger } from "./logger.mjs";
+import { createLoggingEnabledGate, saveSettings } from "./relay-settings.mjs";
 import { AGENT_TERMINAL_TARGETS } from "./agent-session-env.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
@@ -2533,21 +2535,24 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
-  it("「通用」子 tab 六项分四张卡：启动/抗截断/Claude Code 带图标卡头，其余未归类平卡", () => {
+  it("「通用」子 tab 分五张卡：启动/抗截断/Claude Code 带图标卡头，其余未归类平卡；「实时输出」是第五张", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
       panelHtml.indexOf('id="settingsPanelRoute"'),
     );
-    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 4,
-      "通用面板恰四张 panel-card");
-    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 3,
-      "仅三张卡有 card-header（杂项卡保持无头）");
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5,
+      "通用面板恰五张 panel-card");
+    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 4,
+      "仅四张卡有 card-header（杂项卡保持无头）");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*启动\s*<\/h2>/.test(general),
       "「启动」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*抗截断\s*<\/h2>/.test(general),
       "「抗截断」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*Claude Code\s*<\/h2>/.test(general),
       "「Claude Code」卡带 stroke 图标卡头（档位映射四行都在卡内）");
+    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*实时输出\s*<\/h2>/.test(general),
+      "「实时输出」卡带 stroke 图标卡头");
+    assert.ok(general.includes('id="loggingEnabledToggle"'), "运行日志开关在卡内");
     assert.ok(panelCss.includes("#settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }"),
       "设置行悬停整行淡底（--surface-hover）");
   });
@@ -4548,6 +4553,253 @@ describe("设置项「注入推理强度」", () => {
     assert.ok(desc, "说明文案存在");
     assert.doesNotMatch(desc[1], /reasoning_effort|injectThinkingEffort|support_efforts|default_effort|thinkingLevelMap|thinkingFormat/, "正文不出现字段名");
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase 标识符");
+  });
+});
+
+describe("设置项「运行日志」", () => {
+  function loggingRouter({ logger, base }) {
+    return createPanelRouter({
+      base,
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      enableWatchdogAutostartFn: async () => ({ ok: true }),
+      disableWatchdogAutostartFn: async () => ({ ok: true }),
+      isWatchdogAutostartEnabledFn: async () => false,
+      spawnWatchdogFn: async () => ({ ok: true }),
+      stopWatchdogFn: async () => ({ ok: true }),
+      probeWatchdogFn: async () => false,
+      fetchRelayAgents: async () => null,
+      spawnAgentSyncFn: async () => ({ ok: true, stdout: "" }),
+    });
+  }
+  function loggingBase() {
+    const dir = mkTestDir("anyswitch-panel-logging-");
+    const relayDataRoot = join(dir, "Anyswitch");
+    mkdirSync(relayDataRoot, { recursive: true });
+    return { base: { LOCALAPPDATA: dir, USERPROFILE: join(dir, "user") }, dir: relayDataRoot };
+  }
+
+  it("未落盘时默认为开，POST false 后 GET 回读为 false", async () => {
+    const { base, dir } = loggingBase();
+    const router = loggingRouter({ logger: null, base });
+
+    const initial = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(initial.req, initial.res);
+    assert.equal(JSON.parse(initial.res.body).settings.loggingEnabled, true, "开关默认开——升级上来的安装行为不变");
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { loggingEnabled: false });
+    await router.handle(post.req, post.res);
+    assert.equal(JSON.parse(post.res.body).ok, true);
+
+    const after = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(JSON.parse(after.res.body).settings.loggingEnabled, false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("关掉时丢掉已缓冲内容并向所有打开的面板窗口广播清空", async () => {
+    const { base, dir } = loggingBase();
+    const logger = createLogger({ sink: () => {} });
+    const router = loggingRouter({ logger, base });
+    logger.info("before-off");
+
+    const frames = [];
+    const unsubscribe = logger.subscribe((entry) => frames.push(entry));
+    const post = fakeReqRes("/panel/api/settings", "POST", { loggingEnabled: false });
+    await router.handle(post.req, post.res);
+    unsubscribe();
+
+    assert.equal(logger.getHistory().length, 0,
+      "不丢的话，重新打开会先涌出一批关闭前的旧行，看着像「关掉没生效」");
+    assert.ok(frames.some((f) => f.type === "clear"), "清空帧广播出去，别的窗口一起空");
+
+    // 重新开启时窗口从新日志开始。
+    const back = fakeReqRes("/panel/api/settings", "POST", { loggingEnabled: true });
+    await router.handle(back.req, back.res);
+    logger.info("after-on");
+    assert.deepEqual(logger.getHistory().map((e) => e.message), ["after-on"]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("开着时日志流正常建连；关掉时以 204 收尾，不挂一条只会干等的 SSE", async () => {
+    const { base, dir } = loggingBase();
+    // 闸门挂在 logger 上（生产里由 panel-host 装配）：SSE 端点问的是它，而不是
+    // 每次请求去读一遍设置文件。
+    const settingsPath = join(dir, "settings.json");
+    const logger = createLogger({
+      sink: () => {},
+      isEnabled: createLoggingEnabledGate(settingsPath, {}),
+    });
+    const router = loggingRouter({ logger, base });
+
+    const on = fakeReqRes("/panel/api/logs", "GET");
+    let flushed = 0;
+    on.res.flushHeaders = () => { flushed += 1; };
+    await router.handle(on.req, on.res);
+    assert.equal(on.res.statusCode, 200);
+    assert.equal(flushed, 1,
+      "必须显式冲头：空闲时一个字节都不写，不冲头浏览器会一直停在「正在重连」");
+
+    const off = fakeReqRes("/panel/api/settings", "POST", { loggingEnabled: false });
+    await router.handle(off.req, off.res);
+    const stream = fakeReqRes("/panel/api/logs", "GET");
+    await router.handle(stream.req, stream.res);
+    assert.equal(stream.res.statusCode, 204, "记录停着就不该建这条流");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("写入闸门按设置实时开关：关掉后不再落盘、不再进缓冲", () => {
+    const { base, dir } = loggingBase();
+    const lines = [];
+    const gate = createLoggingEnabledGate(join(dir, "settings.json"), {});
+    const logger = createLogger({ sink: (line) => lines.push(line), isEnabled: gate });
+
+    logger.info("recorded");
+    assert.equal(lines.length, 1);
+
+    saveSettings(join(dir, "settings.json"), { loggingEnabled: false }, {});
+    logger.info("dropped");
+    assert.equal(lines.length, 1, "关掉后写入即停，不需要重启进程");
+    assert.equal(logger.getHistory().length, 1, "也不进环形缓冲");
+
+    saveSettings(join(dir, "settings.json"), { loggingEnabled: true }, {});
+    logger.info("recorded-again");
+    assert.equal(lines.length, 2);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+
+  it("挂在「通用」子页的「实时输出」卡里，沿用既有 .toggle 控件", () => {
+    const item = panelHtml.match(/<div class="modal-item">[\s\S]*?记录运行日志[\s\S]*?<\/label>\s*<\/div>/);
+    assert.ok(item, "条目挂在设置页内");
+    assert.ok(item[0].includes('<label class="toggle">'), "沿用全局开关控件与各主题皮肤");
+    assert.ok(item[0].includes('id="loggingEnabledToggle"'), "开关有稳定 id 供读写");
+    assert.ok(item[0].includes("关闭后停止记录，左侧的实时输出一并隐藏"), "说明写清关闭后的后果");
+  });
+
+  it("左侧实时输出卡有稳定 id，供开关驱动整卡显隐", () => {
+    assert.ok(panelHtml.includes('<div class="panel-card" id="liveLogCard">'), "实时输出卡可被定位");
+  });
+
+  it("关掉时断流、清空并隐去整卡；重新打开才重新建连", () => {
+    const source = panelJs.match(/function applyLoggingEnabled\(enabled\) \{[\s\S]*?\n  \}/);
+    assert.ok(source, "applyLoggingEnabled 在 panel.js 里");
+    const card = { hidden: false };
+    const body = { innerHTML: "old rows" };
+    const state = { es: { closed: false, close() { this.closed = true; } } };
+    let connects = 0;
+    const run = new Function(
+      "card", "body", "state", "onConnect",
+      `const $ = (id) => (id === "liveLogCard" ? card : id === "logBody" ? body : null);
+       let es = state.es;
+       function connectLogStream() { onConnect(); }
+       let loggingEnabled = null;
+       ${source[0]}
+       const apply = applyLoggingEnabled;
+       return {
+         apply,
+         get es() { return es; },
+         get loggingEnabled() { return loggingEnabled; },
+       };`,
+    );
+    const api = run(card, body, state, () => { connects += 1; });
+
+    api.apply(false);
+    assert.equal(card.hidden, true, "整卡隐去——记录停了，留一张空窗只是噪声");
+    assert.equal(body.innerHTML, "", "已缓冲的内容一并清掉");
+    assert.equal(api.es, null, "流断开，不再挂着一条永远没内容的连接");
+    assert.equal(api.loggingEnabled, false);
+
+    api.apply(true);
+    assert.equal(card.hidden, false, "重新打开立刻回来，不需要刷新");
+    assert.equal(connects, 1, "只有重新打开才重新建连");
+  });
+
+  it("首次问开关发生在建流之前，且不覆盖用户已经切过的值", async () => {
+    const source = panelJs.match(/async function startLogStream\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(source, "startLogStream 在 panel.js 里");
+    const order = [];
+    // 替身照着真身的行为：定态之后，开着才建流（真身里那一步是 applyLoggingEnabled
+    // 转给 connectLogStream，这里只关心它发生在问开关之后）。
+    const run = new Function(
+      "order", "settingsResult",
+      `const $ = () => ({ addEventListener() {}, onclick: null });
+       const api = async () => { order.push("ask"); return settingsResult; };
+       let loggingEnabled = null;
+       function applyLoggingEnabled(v) { loggingEnabled = v; order.push("apply:" + v); if (v) connectLogStream(); }
+       function connectLogStream() { order.push("connect"); }
+       ${source[0]}
+       return {
+         start: startLogStream,
+         setSeen(v) { loggingEnabled = v; },
+       };`,
+    );
+
+    const off = run(order, { settings: { loggingEnabled: false } });
+    await off.start();
+    assert.deepEqual(order, ["ask", "apply:false"], "关着时不建流");
+
+    order.length = 0;
+    const on = run(order, { settings: { loggingEnabled: true } });
+    await on.start();
+    assert.deepEqual(order, ["ask", "apply:true", "connect"], "开着时先定态再建流");
+
+    // 问的途中用户在设置页切过开关：那一次是用户的决定，晚到的这次结果不许把它盖回。
+    order.length = 0;
+    const raced = run(order, { settings: { loggingEnabled: true } });
+    raced.setSeen(false);
+    await raced.start();
+    assert.deepEqual(order, ["ask"], "已经有定论时不再覆盖界面");
+  });
+
+  it("保存失败时开关弹回原状并报错，成功则按服务端回读值落地", async () => {
+    const source = panelJs.match(/loggingEnabledToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+    assert.ok(source, "onchange 处理器在 panel.js 里");
+    const runHandler = (checked, apiResult) => {
+      const toggle = { checked, setAttribute() {}, removeAttribute() {} };
+      const calls = [];
+      const toasts = [];
+      const settingsSaving = { loggingEnabled: false };
+      const applied = [];
+      const run = new Function(
+        "loggingEnabledToggle", "settingsSaving", "api", "toast", "applyLoggingEnabled",
+        `let settingsLoadGen = 0; ${source[0]} return loggingEnabledToggle.onchange();`,
+      );
+      return {
+        done: run(toggle, settingsSaving,
+          async (method, path, body) => { calls.push({ method, path, body }); return apiResult; },
+          (message) => toasts.push(message),
+          (v) => applied.push(v)),
+        calls, toasts, toggle, applied,
+        savingAfter: () => settingsSaving.loggingEnabled,
+      };
+    };
+
+    const on = runHandler(true, { ok: true, settings: { loggingEnabled: true } });
+    await on.done;
+    assert.deepEqual(on.calls, [{ method: "POST", path: "/api/settings", body: { loggingEnabled: true } }]);
+    assert.deepEqual(on.applied, [true], "界面跟着服务端回读值走");
+    assert.deepEqual(on.toasts, ["已开启运行日志"]);
+    assert.equal(on.savingAfter(), false, "保存中标记已释放");
+
+    const off = runHandler(false, { ok: true, settings: { loggingEnabled: false } });
+    await off.done;
+    assert.deepEqual(off.applied, [false]);
+    assert.deepEqual(off.toasts, ["已关闭运行日志"]);
+
+    const failed = runHandler(false, { ok: false });
+    await failed.done;
+    assert.equal(failed.toggle.checked, true, "回滚到点击前状态");
+    assert.deepEqual(failed.applied, [], "失败不落地界面");
+    assert.deepEqual(failed.toasts, ["设置保存失败"]);
   });
 });
 

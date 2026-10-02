@@ -992,7 +992,8 @@ describe("openai relay transport", () => {
         }
       };
       const first = await readFrame();
-      assert.equal(first.message, "[info] relay-entry-1", "history replays for late joiners");
+      assert.equal(first.level, "info");
+      assert.equal(first.message, "relay-entry-1", "history replays for late joiners, level carried by the field only");
       logger.warn("relay-entry-live");
       const second = await readFrame();
       assert.equal(second.level, "warn");
