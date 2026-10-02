@@ -10893,6 +10893,10 @@ async function api(method, path, body) {
     // 手动刷新键：立即重拉一次（非静默——失败弹 toast；30s 自动轮询不受影响），
     // 反馈与重播由 runStatsRefreshWithFeedback 承担
     $("statsRefreshBtn").onclick = () => runStatsRefreshWithFeedback();
+    // 子 tab：总览 / 请求日志
+    $("statsTabOverview").onclick = () => activateStatsSubTab("overview");
+    $("statsTabLogs").onclick = () => activateStatsSubTab("logs");
+    initLogsPane();
   }
 
   // 手动刷新的视觉反馈：按钮走 .btn:disabled 的 45% 变暗（与看板「重启」键、
@@ -10903,12 +10907,26 @@ async function api(method, path, body) {
   // 自然刷新。等待串在刷新之后而不是与请求并行取最大值：reveal 只能在数据
   // 落地那次渲染起跑，从点击起算会让亮起早于动画收尾一个请求耗时。
   async function runStatsRefreshWithFeedback() {
+    // 请求日志子 tab 激活时，同一颗键改驱动日志刷新（同款 disabled 变暗反馈）
+    if (statsSubTab === "logs") return runLogsRefreshWithFeedback();
     const btn = $("statsRefreshBtn");
     if (btn.disabled) return;
     btn.disabled = true;
     try {
       await refreshStatsState({ replay: true });
       await new Promise((r) => setTimeout(r, STATS_MORPH_MS));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // 日志刷新的变暗反馈：暗着即「还没好」，连点被挡；无动画要等，数据落地即亮
+  async function runLogsRefreshWithFeedback() {
+    const btn = $("statsRefreshBtn");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await loadLogs();
     } finally {
       btn.disabled = false;
     }
@@ -10925,6 +10943,11 @@ async function api(method, path, body) {
     // 割裂与空窗。fetch 落地后：数据未变由守卫跳过静默重渲（环 _usageRaf、
     // 趋势图同终点签名），已变则趋势图 morph 从在飞位置半途接管，均不打断动画。
     if (statsData) { renderStatsTrend(); renderStatsUsage(); }
+    // 子 tab 恢复：默认「总览」，存档为 logs 时激活请求日志（挂 5s 轮询 + 取数；
+    // 切走不重置，回来仍在离开时的子页——leave 已停轮询，这里经 activate 补挂）
+    let statsSubTabSaved = "overview";
+    try { if (localStorage.getItem("panel-stats-subtab") === "logs") statsSubTabSaved = "logs"; } catch {}
+    activateStatsSubTab(statsSubTabSaved);
     const firstReady = refreshStatsState();
     if (!statsTimer) {
       statsTimer = setInterval(() => {
@@ -10937,6 +10960,7 @@ async function api(method, path, body) {
 
   function leaveStatsView() {
     if (statsTimer) { clearInterval(statsTimer); statsTimer = null; }
+    leaveLogsPane(); // 请求日志子 tab 的 5s 轮询随统计页离开即停
     // 统一取消在飞动画 rAF：趋势 morph/reveal 与环形图揭示，离开 tab 后不再
     // 对着已隐藏的容器提交帧；进 tab 重播由 enterStatsView 重置标记负责。
     const chartEl = $("statsTrendChart");
@@ -11944,6 +11968,348 @@ async function api(method, path, body) {
       `<div class="stats-table-wrap"><table class="stats-table">` +
       `<thead><tr><th>端点</th><th>请求数</th><th>Tokens（入/出）</th><th>会话数</th><th>活跃工时</th></tr></thead>` +
       `<tbody>${body}</tbody></table></div>`;
+  }
+
+  // ═══════════════════════════════════════════════
+  // 统计页「请求日志」子 tab
+  // ═══════════════════════════════════════════════
+  // 子 tab 切换照设置页模式（hidden + active + aria-selected + tabIndex），
+  // 存档键 panel-stats-subtab（overview|logs，默认 overview）。logs 子页激活且
+  // 页面可见时 5s 轮询；离开子页或统计页即停（leaveStatsView 统一收）。
+  const statsSubTabs = {
+    overview: ["statsTabOverview", "statsOverviewPane"],
+    logs: ["statsTabLogs", "statsLogsPane"],
+  };
+  let statsSubTab = "overview";
+  let logsTimer = null;
+
+  function activateStatsSubTab(which) {
+    const selected = statsSubTabs[which];
+    if (!selected) which = "overview";
+    statsSubTab = which === "logs" ? "logs" : "overview";
+    for (const [name, [tabId, paneId]] of Object.entries(statsSubTabs)) {
+      const on = name === statsSubTab;
+      $(tabId).classList.toggle("active", on);
+      $(tabId).setAttribute("aria-selected", String(on));
+      $(tabId).tabIndex = on ? 0 : -1;
+      $(paneId).hidden = !on;
+    }
+    try { localStorage.setItem("panel-stats-subtab", statsSubTab); } catch {}
+    if (statsSubTab === "logs") enterLogsPane(); else leaveLogsPane();
+  }
+
+  const logsState = { range: "today", agent: "", provider: "", model: "", status: "all", sort: "ts", dir: "desc", page: 1, pageSize: 20, seq: 0 };
+  let logsRows = []; // 最近一次成功渲染的行（详情展开的数据源）
+  let logsTotal = 0; // 最近一次成功响应的总数（跳页钳制用）
+  let logsCorrecting = false; // 深页超界自动回末页的一次性守卫（防循环）
+  const logsExpanded = new Set(); // 展开中的行键：轮询重建 tbody 后按键重新展开
+  const logsRowKey = (r) => `${r.ts}|${r.providerId ?? ""}|${r.model ?? ""}`;
+
+  function initLogsPane() {
+    // 筛选：任一变更 → 回第 1 页 → 立即重载
+    const bindFilter = (id, key) => {
+      const el = $(id);
+      if (el) el.onchange = () => { logsState[key] = el.value; logsState.page = 1; loadLogs(); };
+    };
+    bindFilter("logRangeFilter", "range");
+    bindFilter("logAgentFilter", "agent");
+    bindFilter("logProviderFilter", "provider");
+    bindFilter("logModelFilter", "model");
+    bindFilter("logStatusFilter", "status");
+    // 可排序表头：再点同列翻转方向，换列回落 desc；改排序回第 1 页
+    for (const id of ["logsSortTs", "logsSortDuration"]) {
+      const btn = $(id);
+      if (!btn) continue;
+      btn.onclick = () => {
+        const field = btn.getAttribute("data-sort");
+        if (logsState.sort === field) logsState.dir = logsState.dir === "desc" ? "asc" : "desc";
+        else { logsState.sort = field; logsState.dir = "desc"; }
+        logsState.page = 1;
+        syncLogsSortHeaders();
+        loadLogs();
+      };
+    }
+    syncLogsSortHeaders();
+    // 分页条
+    const prev = $("logsPrevBtn");
+    const next = $("logsNextBtn");
+    if (prev) prev.onclick = () => { if (logsState.page > 1) { logsState.page -= 1; loadLogs(); } };
+    if (next) next.onclick = () => { logsState.page += 1; loadLogs(); };
+    const jump = $("logsJump");
+    if (jump) jump.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      const pages = Math.max(1, Math.ceil(logsTotal / logsState.pageSize));
+      const v = Number.parseInt(jump.value, 10);
+      if (!Number.isFinite(v)) { jump.value = ""; return; }
+      logsState.page = Math.min(pages, Math.max(1, v)); // 越界钳制
+      jump.value = "";
+      loadLogs();
+    });
+    const sizeSel = $("logPageSize");
+    if (sizeSel) sizeSel.onchange = () => {
+      logsState.pageSize = Number(sizeSel.value) || 20;
+      logsState.page = 1;
+      loadLogs();
+    };
+    // 行展开/收起 + 错误态重试：事件委托（tbody 由 innerHTML 整体重建）
+    const tbody = $("logsTbody");
+    if (tbody) tbody.addEventListener("click", (e) => {
+      if (e.target.closest("[data-logs-retry]")) { loadLogs(); return; }
+      const tr = e.target.closest("tr.logs-row");
+      if (!tr) return;
+      toggleLogsDetail(tr);
+    });
+  }
+
+  function enterLogsPane() {
+    syncLogsSortHeaders();
+    loadLogs();
+    if (!logsTimer) {
+      logsTimer = setInterval(() => {
+        if (document.hidden) return; // 页面隐藏暂停，与统计 30s 轮询同模式
+        loadLogs();
+      }, 5000);
+    }
+  }
+
+  function leaveLogsPane() {
+    if (logsTimer) { clearInterval(logsTimer); logsTimer = null; }
+  }
+
+  async function loadLogs() {
+    // 竞态守卫（同 statsReqSeq 模式）：慢的旧响应后到丢弃，不覆盖新筛选的结果
+    const seq = ++logsState.seq;
+    const sp = new URLSearchParams({
+      range: logsState.range,
+      sort: logsState.sort,
+      dir: logsState.dir,
+      page: String(logsState.page),
+      pageSize: String(logsState.pageSize),
+    });
+    if (logsState.agent) sp.set("agent", logsState.agent);
+    if (logsState.provider) sp.set("provider", logsState.provider);
+    if (logsState.model) sp.set("model", logsState.model);
+    if (logsState.status !== "all") sp.set("status", logsState.status);
+    try {
+      const res = await api("GET", "/api/stats/logs?" + sp.toString());
+      if (seq !== logsState.seq) return;
+      // 深页超界（轮询期间总量缩小/跨午夜）：一次性钳回末页重载
+      const pages = Math.max(1, Math.ceil((res.total || 0) / logsState.pageSize));
+      if ((res.total || 0) > 0 && res.rows.length === 0 && res.page > pages && !logsCorrecting) {
+        logsCorrecting = true;
+        logsState.page = pages;
+        try { await loadLogs(); } finally { logsCorrecting = false; }
+        return;
+      }
+      renderLogs(res);
+      refillLogsFilters(res.facets);
+    } catch {
+      if (seq !== logsState.seq) return;
+      renderLogsError();
+    }
+  }
+
+  // 筛选下拉回填（facets 只受时间范围影响）：保留当前选中值——选中项恰好不在
+  // 新 facets 里（如收窄时间范围后该值无行）时补一项占位，不让筛选静默丢失。
+  function refillLogsFilters(facets) {
+    if (!facets) return;
+    const fill = (id, key, items, toOption) => {
+      const sel = $(id);
+      if (!sel) return;
+      while (sel.options.length > 1) sel.remove(1);
+      let hasCurrent = !logsState[key];
+      for (const item of items) {
+        const [value, label] = toOption(item);
+        if (value === logsState[key]) hasCurrent = true;
+        const opt = document.createElement("option");
+        opt.value = value;
+        opt.textContent = label;
+        sel.appendChild(opt);
+      }
+      if (!hasCurrent) {
+        const opt = document.createElement("option");
+        opt.value = logsState[key];
+        opt.textContent = logsOptionLabel(key, logsState[key]);
+        sel.appendChild(opt);
+      }
+      sel.value = logsState[key];
+    };
+    fill("logAgentFilter", "agent", Array.isArray(facets.agents) ? facets.agents : [],
+      (f) => [f.id === null ? "__none__" : String(f.id), logsAgentLabel(f.id)]);
+    fill("logProviderFilter", "provider", Array.isArray(facets.providers) ? facets.providers : [],
+      (f) => [String(f.id), String(f.label ?? f.id)]);
+    fill("logModelFilter", "model", Array.isArray(facets.models) ? facets.models : [],
+      (f) => [String(f.raw), String(f.display ?? f.raw)]);
+  }
+
+  function logsAgentLabel(id) {
+    if (id === null || id === undefined || id === "") return "未知来源";
+    return STATS_ENDPOINT_LABELS[id] || String(id);
+  }
+
+  function logsOptionLabel(key, value) {
+    if (key === "agent") return logsAgentLabel(value === "__none__" ? null : value);
+    return value;
+  }
+
+  function syncLogsSortHeaders() {
+    for (const id of ["logsSortTs", "logsSortDuration"]) {
+      const btn = $(id);
+      if (!btn) continue;
+      const on = btn.getAttribute("data-sort") === logsState.sort;
+      const arrow = btn.querySelector(".logs-sort-arrow");
+      if (arrow) arrow.textContent = on ? (logsState.dir === "desc" ? "▼" : "▲") : "";
+    }
+  }
+
+  function logsFmtTime(ts) {
+    const d = new Date(Number(ts));
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function logsFmtTimeFull(ts) {
+    const d = new Date(Number(ts));
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+
+  function logsFmtDur(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0) return "0.0s";
+    return (n / 1000).toFixed(1) + "s";
+  }
+
+  function renderLogs(res) {
+    const tbody = $("logsTbody");
+    if (!tbody) return;
+    logsRows = Array.isArray(res.rows) ? res.rows : [];
+    logsTotal = res.total || 0;
+    if (!logsRows.length) {
+      tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">该筛选条件下暂无请求记录</div></td></tr>';
+      renderLogsPager(res);
+      return;
+    }
+    tbody.innerHTML = logsRows.map((r) => logsRowHtml(r)).join("");
+    // 轮询重建后按行键恢复展开中的详情行
+    logsRows.forEach((r, i) => {
+      if (logsExpanded.has(logsRowKey(r))) appendLogsDetail(tbody.children[i], r);
+    });
+    renderLogsPager(res);
+  }
+
+  function renderLogsError() {
+    const tbody = $("logsTbody");
+    if (!tbody) return;
+    tbody.innerHTML = '<tr class="logs-state-row"><td colspan="7"><div class="empty-hint">日志加载失败 <button type="button" class="btn btn-mini" data-logs-retry>重试</button></div></td></tr>';
+    const pager = $("logsPager");
+    if (pager) pager.hidden = true;
+  }
+
+  function logsRowHtml(r) {
+    const ok = r.ok === true;
+    const durMs = Number(r.durationMs) || 0;
+    const durCls = durMs < 15000 ? "logs-dur-fast" : durMs < 60000 ? "logs-dur-mid" : "logs-dur-slow";
+    const sub = [];
+    if (r.ttftMs !== null && r.ttftMs !== undefined) sub.push(`首字 ${statsFmtTtft(Number(r.ttftMs))}`);
+    if (ok && Number(r.completion) > 0 && durMs > 0) sub.push(`${(Number(r.completion) / (durMs / 1000)).toFixed(1)} t/s`);
+    const statusBadge = ok
+      ? '<span class="badge badge-ok">成功</span>'
+      : `<span class="badge badge-danger">失败${r.status !== null && r.status !== undefined && r.status !== "" ? " " + esc(r.status) : ""}</span>`;
+    return `<tr class="logs-row${ok ? "" : " logs-row-fail"}" data-logs-key="${esc(logsRowKey(r))}">`
+      + `<td class="logs-cell-main">${esc(logsFmtTime(r.ts))}</td>`
+      + `<td>${esc(logsAgentLabel(r.agentId))}</td>`
+      + `<td title="${esc(r.providerId ?? "")}">${esc(r.providerLabel || r.providerId || "—")}</td>`
+      + `<td title="${esc(r.model ?? "")}">${esc(r.modelDisplay ?? r.model ?? "—")}${r.stream === true ? '<span class="logs-stream-tag">流</span>' : ""}</td>`
+      + `<td>输入 ${esc(formatTokensCn(r.prompt))} / 输出 ${esc(formatTokensCn(r.completion))}${Number(r.cached) > 0 ? `<span class="logs-sub">缓存 ${esc(formatTokensCn(r.cached))}</span>` : ""}</td>`
+      + `<td><span class="${durCls}">${esc(logsFmtDur(durMs))}</span>${sub.length ? `<span class="logs-sub">${esc(sub.join(" · "))}</span>` : ""}</td>`
+      + `<td>${statusBadge}</td>`
+      + `</tr>`;
+  }
+
+  function logsDetailHtml(r) {
+    const items = [];
+    if (r.ok !== true) items.push(["错误信息", typeof r.errMsg === "string" && r.errMsg ? r.errMsg : "—"]);
+    items.push(["接口格式", r.path === "openai" ? "OpenAI" : r.path === "anthropic" ? "Anthropic" : "—"]);
+    items.push(["流式", r.stream === true ? "流式" : "非流式"]);
+    if (r.instanceId) items.push(["实例", String(r.instanceId)]);
+    items.push(["请求模型", r.model ?? "—"]);
+    items.push(["渠道 ID", r.providerId || "—"]);
+    items.push(["结束时间", logsFmtTimeFull(r.ts)]);
+    items.push(["首字耗时", r.ttftMs !== null && r.ttftMs !== undefined ? statsFmtTtft(Number(r.ttftMs)) : "—"]);
+    items.push(["总耗时", r.durationMs !== null && r.durationMs !== undefined ? logsFmtDur(r.durationMs) : "—"]);
+    return `<dl class="logs-detail-grid">${items.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>`;
+  }
+
+  function appendLogsDetail(tr, row) {
+    const detailTr = document.createElement("tr");
+    detailTr.className = "logs-detail-row";
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.innerHTML = logsDetailHtml(row);
+    detailTr.appendChild(td);
+    tr.after(detailTr);
+  }
+
+  function toggleLogsDetail(tr) {
+    const next = tr.nextElementSibling;
+    const key = tr.getAttribute("data-logs-key");
+    if (next && next.classList.contains("logs-detail-row")) {
+      next.remove();
+      if (key) logsExpanded.delete(key);
+      return;
+    }
+    // 按行键找数据：tbody children 里夹着已展开的详情行，DOM 索引不可靠
+    const row = logsRows.find((r) => logsRowKey(r) === key);
+    if (!row) return;
+    appendLogsDetail(tr, row);
+    if (key) logsExpanded.add(key);
+  }
+
+  // 分页条：total=0 整条隐藏；页码 >9 页时头 3 + 尾 3 + 当前±1，中间 …
+  function renderLogsPager(res) {
+    const pager = $("logsPager");
+    if (!pager) return;
+    const total = res.total || 0;
+    if (total === 0) { pager.hidden = true; return; }
+    pager.hidden = false;
+    $("logsTotal").textContent = `共 ${total} 条`;
+    const pages = Math.max(1, Math.ceil(total / logsState.pageSize));
+    const cur = res.page;
+    const nums = [];
+    if (pages <= 9) {
+      for (let i = 1; i <= pages; i += 1) nums.push(i);
+    } else {
+      const keep = new Set([1, 2, 3, pages - 2, pages - 1, pages, cur - 1, cur, cur + 1]);
+      let prevNum = 0;
+      for (let i = 1; i <= pages; i += 1) {
+        if (!keep.has(i)) continue;
+        if (prevNum && i - prevNum > 1) nums.push("…");
+        nums.push(i);
+        prevNum = i;
+      }
+    }
+    const host = $("logsPages");
+    host.textContent = "";
+    for (const n of nums) {
+      if (n === "…") {
+        const dots = document.createElement("span");
+        dots.className = "logs-pages-ellipsis";
+        dots.textContent = "…";
+        host.appendChild(dots);
+        continue;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "logs-page-btn" + (n === cur ? " active" : "");
+      btn.textContent = String(n);
+      btn.onclick = () => { if (logsState.page !== n) { logsState.page = n; loadLogs(); } };
+      host.appendChild(btn);
+    }
+    const prev = $("logsPrevBtn");
+    const next = $("logsNextBtn");
+    if (prev) prev.disabled = cur <= 1;
+    if (next) next.disabled = cur >= pages;
   }
 
   // ═══════════════════════════════════════════════

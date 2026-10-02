@@ -23,6 +23,8 @@
 
 布局：TTFT 与 TPS 两卡在 `.skills-grid.stats-quad` 网格并排一行（左列=TTFT，右列=TPS，窄屏折行）。
 
+子 tab：统计页分「总览 | 请求日志」（页头标题右侧，localStorage `panel-stats-subtab` 记忆，默认总览）。总览=本节上述全部卡片，原样保留。请求日志=journal 行级透传列表：`GET /panel/api/stats/logs` → usage-journal `readRequestsLog`，范围 today/7d/30d/all（含当天往前推 0/6/29/89 天，日历运算防 DST），筛选=来源/渠道/模型/状态，排序=时间/用时双向（表头点击），服务端分页 20/50/100，子 tab 激活且页面可见时 5s 轮询。渠道名读取时解析（R-16 同一解析器），模型显示名剥 wire 前缀（`stripWirePrefix`，与聚合层同一实现）。失败行整行淡红底，点击就地展开详情（错误信息/接口格式/流式/实例/请求模型/渠道 ID/精确时间）。
+
 ## 2. 红线约束
 
 R-03 与 R-10 已作废，编号不再复用，其余编号保持稳定。
@@ -122,6 +124,21 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 - 锚点：usage-stats.mjs `TTFT_MIN_SAMPLES = 10` + 聚合出口 `.filter((e) => e.samples >= TTFT_MIN_SAMPLES)`
 - 钉住：usage-stats.test.mjs「drops TTFT rows with < 10 samples」（9 样本剔除 / 10 样本出榜边界）
 
+### R-22 errMsg 仅失败行、写侧单点消毒截 200
+失败行可带上游错误原文 `errMsg`：非字符串/消毒后空串则整键不落（成功行与历史行形状完全一致），消毒=连续空白折叠为单空格 + trim + 截 200 字符。消毒只在 journal 写侧单点实现，两处写点（常驻 collector / per-launch reporter）传原值。取消（abort）请求维持不落行（R-13 延伸至日志页：日志里同样不存在取消请求）。
+- 锚点：usage-journal.mjs `ERR_MSG_MAX` / `sanitizeErrMsg` / `appendRequest`；agent-metrics.mjs 两处 journal 写点
+- 钉住：usage-journal.test.mjs errMsg 消毒组
+
+### R-23 请求日志=行级透传，facets 只受时间范围影响
+`readRequestsLog` 不做聚合与字段改写，行原样返回；渠道显示名与模型显示名由 panel 路由在读取时附加为新键（providerLabel/modelDisplay），journal 缓存对象禁原地改。facets（来源/渠道/模型 distinct 值）在「仅时间范围过滤」的行集上收集——筛选项不会把自己从下拉里筛没。`agentId="__none__"` 是「未知来源」（agentId null/缺键行）的查询哨兵。
+- 锚点：usage-journal.mjs `readRequestsLog` / `AGENT_ID_NONE`；panel.mjs `/panel/api/stats/logs` 行映射
+- 钉住：usage-journal.test.mjs readRequestsLog 组；panel-logs.test.mjs
+
+### R-24 logs API 参数钳制：非法值一律回落默认
+range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network,timeout}、sort∈{ts,durationMs}、dir∈{asc,desc} 非法一律回落默认；pageSize 只认 {20,50,100}（非法→20）；page<1→1。枚举钳制单点在 panel.mjs 路由常量，journal 侧另有数值兜底。
+- 锚点：panel.mjs `LOG_RANGES` / `LOG_RANGE_BACK_DAYS` / `LOG_STATUSES` / `LOG_PAGE_SIZES`
+- 钉住：panel-logs.test.mjs 参数钳制组
+
 ## 3. 阈值/参数镜像清单（改一处必须查另一处）
 
 | 值 | 位置 | 镜像/钉住处 |
@@ -151,3 +168,4 @@ codex 卡的实例行只对应 codex.exe 引擎进程（桌面 GUI 每会话拉�
 10. **复合键 `${providerId}/${model}` 分隔符碰撞面**：model 含 "/"（openrouter 风格）时可撞键；裸拼接碰撞已注释处理，分隔符碰撞未处理。
 11. **多进程写同一 journal 目录**（relay/panel/各 launcher）：跨进程 append 可能读到半行（JSON.parse 容错兜底），cleanup 无锁（已容错）。
 12. **一次性 relay 捎带通道的残余边界**（R-20）：常驻 relay 不可达期间，batch 暂存 reporter 内存（500 条上限，溢出丢最旧），恢复后按事件时间补落桶；reporter 进程被强杀则未上报部分丢失（与 §4.1 崩溃丢失同类）。Flow Rail 的 per-launch 链状态随会话行清除（ended 60s 后）消失，回到常驻自有状态。kimi 的 batch 被 reportSession 的 claude-only 闸门丢弃——kimi 实际流量走常驻 relay，其一次性 relay 是空转旁路，无实际影响。
+13. **请求日志页码位移**：5s 轮询下新行到达会把深页内容整体后移（OFFSET 分页固有，ccswitch 同款）；已按「当前页超界一次性钳回末页」兜底空页，不防位移本身。行展开态以 `ts|providerId|model` 为键，同毫秒同渠道同模型的两行会串展开态（本地量级下近似不发生，已接受）。

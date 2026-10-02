@@ -1576,6 +1576,9 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
             errKind: hadError
               ? classifyErrKind({ status, message: info.error?.message })
               : null,
+            // 上游真实错误文本，仅失败行携带（成功行不带键，行形状不变）；
+            // 消毒（折叠空白/截 200）由 journal 写侧统一做。
+            ...(hadError ? { errMsg: info.error?.message ?? null } : {}),
             stream: meta.stream === true,
             path: typeof meta.path === "string" ? meta.path : null,
             // 有则写：未注入实例的客户端不产生这个键，保持旧行形状不变。
@@ -3949,6 +3952,8 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
           ok: !hadError,
           status: httpStatus,
           errKind: hadError ? classifyErrKind({ status: httpStatus, message: error?.message }) : null,
+          // 与常驻 collector 写点同款：仅失败行携带上游错误原文，消毒在 journal 侧。
+          ...(hadError ? { errMsg: error?.message ?? null } : {}),
           stream: ctx.meta?.stream === true,
           path: typeof ctx.meta?.path === "string" ? ctx.meta.path : "anthropic",
         });

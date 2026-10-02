@@ -2184,6 +2184,51 @@
   .stats-usage-bar-val { font-family: var(--font-mono); font-size: 10px; fill: var(--text-3); text-anchor: middle; font-variant-numeric: tabular-nums; }
   .stats-usage-bar-name { font-family: var(--font-mono); font-size: 10.5px; fill: var(--text-4); text-anchor: middle; }
 
+  /* ── 请求日志子 tab（统计页双子 tab：总览 | 请求日志） ── */
+  /* 页头左组：标题 + 子 tab 并排，子 tab 与标题间距拉大（复用 view-tabs 视觉） */
+  .stats-pagehead-lead { display: flex; align-items: center; min-width: 0; }
+  .stats-subtabs { margin-left: 22px; }
+  /* 总览内容包了一层 pane 后不再是 .stats-view 的直接 flex 子项，
+     原 .stats-view 的列向 16px gap 随之失效，pane 上重声明同一布局 */
+  #statsOverviewPane { display: flex; flex-direction: column; gap: 16px; }
+  /* 筛选行：五个下拉 flex 排布，窄屏折行 */
+  .logs-filters { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .logs-sel { background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12.5px; padding: 6px 8px; outline: none; font-family: inherit; max-width: 240px; }
+  .logs-sel:focus { border-color: var(--accent); }
+  /* 可排序表头：按钮继承 th 文字样式，当前排序列箭头着色 */
+  .logs-th-sort { appearance: none; border: 0; background: transparent; color: inherit; font: inherit; font-size: inherit; font-weight: inherit; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .logs-th-sort:hover { color: var(--text); }
+  .logs-sort-arrow { font-size: 9px; min-width: 10px; color: var(--accent); }
+  /* 明细行：点击展开详情；失败行整行淡红底 */
+  .logs-table tbody tr.logs-row { cursor: pointer; }
+  .logs-table tbody tr.logs-row-fail { background: var(--danger-soft); }
+  .logs-table tbody tr.logs-row-fail:hover { background: var(--danger-soft); }
+  .logs-table td.logs-cell-main { color: var(--text); }
+  /* 单元格第二行小字（缓存 / 首字·t/s） */
+  .logs-sub { display: block; font-size: 10.5px; color: var(--text-4); margin-top: 2px; }
+  /* 用时三档染色：<15s 绿 / <60s 黄 / ≥60s 红 */
+  .logs-dur-fast { color: var(--ok); }
+  .logs-dur-mid { color: var(--warn); }
+  .logs-dur-slow { color: var(--danger); }
+  /* 流式小标签（模型列，「流」） */
+  .logs-stream-tag { display: inline-block; font-size: 9.5px; line-height: 1; padding: 2px 4px; margin-left: 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-border); vertical-align: 1px; }
+  /* 详情行：label-value 网格 */
+  .logs-table tbody tr.logs-detail-row td { background: var(--surface-sunken); padding: 10px 14px; cursor: default; }
+  .logs-detail-grid { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 14px; row-gap: 6px; font-size: 12px; }
+  .logs-detail-grid dt { color: var(--text-3); white-space: nowrap; }
+  .logs-detail-grid dd { margin: 0; color: var(--text-2); word-break: break-all; font-family: var(--font-mono); font-size: 11.5px; }
+  /* 分页条：左「共 N 条」，右 上一页/页码/下一页 + 跳页 + 页大小 */
+  .logs-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .logs-total { font-size: 12px; color: var(--text-3); }
+  .logs-pager-right { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .logs-pages { display: inline-flex; align-items: center; gap: 4px; }
+  .logs-page-btn { min-width: 26px; height: 26px; padding: 0 6px; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); background: var(--surface); color: var(--text-3); font-size: 11.5px; font-family: var(--font-mono); cursor: pointer; box-sizing: border-box; }
+  .logs-page-btn:hover { color: var(--text); background: var(--surface-hover); }
+  .logs-page-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .logs-pages-ellipsis { color: var(--text-4); padding: 0 2px; font-size: 11.5px; }
+  .logs-jump { width: 52px; background: var(--surface-sunken); border: 1px solid var(--border-strong); border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; padding: 5px 6px; outline: none; font-family: var(--font-mono); text-align: center; box-sizing: border-box; }
+  .logs-jump:focus { border-color: var(--accent); }
+
   /* ═══════════════════════════════════════════════
      会话管理视图（sessions- 前缀为布局/容器作用域类；
      sess / msg / toc 三族为原型特有组件类，与全站零冲突原样保留；
