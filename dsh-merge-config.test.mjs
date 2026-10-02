@@ -12,6 +12,7 @@ import {
   validateDshSettings,
   UnparseableDshSettingsError,
   getYamlModule,
+  dshYamlSchema,
   deriveAutoRouteChannel,
 } from "./dsh-merge-config.mjs";
 import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
@@ -289,6 +290,95 @@ test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其�
 // 按备份逐行修回（bridge/tmp/repair-dsh-cordis-patch.mjs）。
 // 本用例钉住这条边界里唯一能自动化的部分：patch 不是 YAML 数组时，跳过它、逐字节不动，
 // 同期其它界面照常写好——免得以后有人把「跳过」误读成「已修复」，再等一个不会来的自愈。
+// dsh 0.1.7 自带的 patch 用 cordis 的 !!js 标签按平台启停 bash/pwsh 插件；js-yaml 4
+// 删掉了全部 js 类型，裸 load 直接抛 unknown tag，四个界面的同步曾因此整批跳过。
+// 解析要把表达式收进包装、写回时原样带回标签——不许求值、不许丢标签。
+test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节留在原地", async () => {
+  const yaml = await getYamlModule();
+  const dir = mkTestDir("dsh-patch-js-expr-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "dsh-tui"), { recursive: true });
+    const patchPath = join(profiles, "dsh-tui", "cordis.patch.yml");
+    const patch = [
+      "- id: tool-bash",
+      "  name: '@deepseek-ai/dsh-tool-bash'",
+      "  disabled: !!js process.platform === 'win32'",
+      "- id: tool-pwsh",
+      "  name: '@deepseek-ai/dsh-tool-pwsh'",
+      "  disabled: !!js process.platform !== 'win32'",
+      "",
+    ].join("\n");
+    writeFileSync(patchPath, patch, "utf8");
+
+    const store = {
+      version: 2,
+      providers: {
+        poke: {
+          displayName: "Poke",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke.dpapi",
+          models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+        },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    assert.deepEqual(result.skipped ?? [], []);
+
+    const after = readFileSync(patchPath, "utf8");
+    assert.ok(after.includes("disabled: !!js process.platform === 'win32'"), "!!js 表达式必须逐字节留下");
+    assert.ok(after.includes("disabled: !!js process.platform !== 'win32'"), "!!js 表达式必须逐字节留下");
+    const entries = yaml.load(after, { schema: dshYamlSchema(yaml) });
+    const row = entries.find((entry) => entry.id === "llm-pi-ai");
+    assert.equal(row.config.providers._poke.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
+
+    const second = await writeDshProfilePatches(store, 47821, dir, dir);
+    assert.equal(second.unchanged, true, "同样的 store 再同步不得改动文件");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("llm-pi-ai 行自带的 !!js 值在重写该行后仍带标签", async () => {
+  const yaml = await getYamlModule();
+  const dir = mkTestDir("dsh-patch-js-row-");
+  try {
+    const profiles = join(dir, "profiles");
+    mkdirSync(join(profiles, "web"), { recursive: true });
+    const patchPath = join(profiles, "web", "cordis.patch.yml");
+    writeFileSync(patchPath, [
+      "- id: llm-pi-ai",
+      "  name: '@deepseek-ai/dsh-llm-pi-ai'",
+      "  disabled: !!js process.platform === 'linux'",
+      "  config:",
+      "    providers: {}",
+      "",
+    ].join("\n"), "utf8");
+
+    const store = {
+      version: 2,
+      providers: {
+        poke: {
+          displayName: "Poke",
+          baseURL: "https://poke.example/v1",
+          protocol: "openai-compatible",
+          credentialFile: "poke.dpapi",
+          models: { "claude-opus-5": { contextWindow: 200000 } },
+        },
+      },
+    };
+    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    assert.equal(result.ok, true, result.reason);
+    const after = readFileSync(patchPath, "utf8");
+    assert.ok(after.includes("disabled: !!js process.platform === 'linux'"), "重写 llm-pi-ai 行后表达式仍带 !!js 标签");
+    assert.ok(after.includes("_poke:"));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面照常写好", async () => {
   const yaml = await getYamlModule();
   const dir = mkTestDir("dsh-patch-skip-");
