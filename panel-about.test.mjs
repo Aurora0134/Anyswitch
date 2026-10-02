@@ -454,9 +454,12 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   const activate = source.match(/    function activateSettingsSubTab\(which, animate\) \{[\s\S]*?\n    \}/);
   const bind = source.match(/    function bindSettingsSubTabs\(\) \{[\s\S]*?\n    \}/);
   assert.ok(tabs && activate && bind);
-  let enters = 0, leaves = 0, mirrors = 0, pageScrollResets = 0;
+  let enters = 0, leaves = 0, mirrors = 0, pageScrollResets = 0, bundleEnters = 0, bundleLeaves = 0;
   const context = vm.createContext({
     $: h.get, about: { enter() { enters++; }, leave() { leaves++; } },
+    // 数据搬迁卡与 About 同待遇：切走 / 切回都要走它的生命周期钩子，否则
+    // 「导出成功」那类一次性结果会一直挂在屏上（离开时复位正是靠这个钩子）。
+    dataBundle: { enter() { bundleEnters++; }, leave() { bundleLeaves++; } },
     replayViewEnter() {}, captureSettingsMirror() { mirrors++; },
     resetPageScroll() { pageScrollResets++; },
     // 「通用」子页会拉 store state 生成档位映射下拉的选项（与「自动路由」同源），
@@ -482,6 +485,15 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
   assert.equal(h.get("settingsPanelAbout").hidden, true);
   assert.equal(pageScrollResets, 4);
   assert.match(source, /if \(settings\) viewReady = enterSettingsView\(\); else leaveSettingsView\(\);/);
+  // 数据搬迁卡：每次切到「非高级选项」的子页都要让它离开（结果文案据此复位），
+  // 切回高级选项才进入。此前它声明的复位钩子零调用点，等于没有生命周期。
+  assert.equal(bundleLeaves, 4, "此前每次切走非高级选项子页都已让它离开");
+  assert.equal(bundleEnters, 0, "还没进过高级选项");
+  h.get("settingsTabAdvanced").click();
+  assert.equal(bundleEnters, 1, "切到高级选项要进入数据搬迁卡");
+  assert.equal(bundleLeaves, 4, "切进高级选项本身不算离开");
+  h.get("settingsTabGeneral").click();
+  assert.equal(bundleLeaves, 5, "切走高级选项要让它离开");
 });
 
 // ── 本地环境卡：安装/更新动作位 ───────────────────────

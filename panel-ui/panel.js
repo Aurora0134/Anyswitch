@@ -54,8 +54,9 @@
 
   // /panel/api/* 的失败文本按语言分两种身份：中文句子是为这个界面写的，可以直接
   // 上屏；英文短句是校验语、短码（"cas-conflict"、"pool members must be an array…"）
-  // 或系统错误，一律换成调用方自带的中文兜底，原文交给控制台。新增端点文案要落中文，
-  // 否则会被当开发者文本吞掉。短码分支一律读 err.code（err.message 带 "HTTP <status>：" 前缀）。
+  // 或系统错误，一律换成调用方自带的中文兜底，原文交给控制台**并记入面板日志**。
+  // 新增端点文案要落中文，否则会被当开发者文本吞掉。短码分支一律读 err.code
+  // （err.message 带 "HTTP <status>：" 前缀）。
   const PANEL_UI_COPY_RE = /[\u4e00-\u9fff]/;
 
   function panelCopy(raw, fallback) {
@@ -66,8 +67,34 @@
   function panelError(err, fallback) {
     const raw = (err && err.code) || (err && err.message) || "";
     const text = panelCopy(raw, fallback);
-    if (text === fallback) console.warn("[panel] " + fallback + " ← " + raw);
+    if (text === fallback) {
+      console.warn("[panel] " + fallback + " ← " + raw);
+      reportMaskedPanelError(fallback, raw);
+    }
     return text;
+  }
+
+  // 被折叠掉的服务端原文原先只进浏览器控制台：用户看不到，面板日志里也没有，界面上
+  // 只剩一句笼统的兜底，出了事无从查起（2026-10-02 那次「导出未完成」查不出原因就是
+  // 卡在这里）。这里把原文一并送进面板日志，面板的日志页即可看到。走裸 fetch 而非
+  // api()：本函数正处在报错路径上，上报失败必须彻底静默，绝不能把原错误盖掉。
+  function reportMaskedPanelError(fallback, raw) {
+    try {
+      fetch(API_BASE + "/api/logs/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-AnySwitch-Panel": "1" },
+        body: JSON.stringify({ level: "warn", message: `[面板] ${fallback}（服务端原文：${raw}）` }),
+        keepalive: true,
+      }).catch(() => { /* 上报是顺带的事 */ });
+    } catch { /* 同上 */ }
+  }
+
+  // 数据搬迁卡专用：服务端给了中文说明就照原样上屏（那是业务原因，刷新无用）；只有
+  // 被折叠时才是「这次请求没送达或服务端出错」，刷新页面重试才是有意义的下一步。
+  const PANEL_FAILURE_HINT = "（请刷新页面后重试；详情见面板日志）";
+  function panelFailure(err, fallback) {
+    const text = panelError(err, fallback);
+    return text === fallback ? text + PANEL_FAILURE_HINT : text;
   }
 
 async function api(method, path, body) {
@@ -2017,12 +2044,26 @@ async function api(method, path, body) {
     const importMeta = get("dataImportMeta");
     const skillsLine = get("dataSkillsPath");
     const skillsBtn = get("dataSkillsPickBtn");
-    if (!exportBtn || !pickBtn || !applyBtn) return { reset() {} };
+    if (!exportBtn || !pickBtn || !applyBtn) return { enter() {}, leave() {} };
 
     let ticket = null;
     let skillsRepoPath = null;
     let skillsEnabled = false;
     let busy = false;
+    // 本卡文本分两种身份，复位规则不同——混为一谈就会出现「成功文案无限期挂着」：
+    //   状态 = 随前置条件存在。票据还活着时的预览摘要与 Skills 落点行都是状态，
+    //          离开再回来必须还在，否则等于逼用户重挑一次包。
+    //   结果 = 一次性回执。导出成功/失败、导入完成/失败、取消都是结果，必须有界：
+    //          离开本页即回初值；若结果是用户离开期间才落地的，留到切回看过，再于
+    //          下次离开复位（与渠道刷新小字的「等切回」同精神）。
+    // 初值一律取 markup 里写的那份，不在这里另造文案，两边不会漂。
+    const initial = {
+      export: exportStatus.textContent,
+      import: summaryLine.textContent,
+      skills: skillsLine.textContent,
+    };
+    let away = true;         // 卡片默认不可见：设置视图没打开时它不在屏上
+    let awaitReturn = false; // 离开期间落了结果，留到用户切回看过再复位
 
     const baseName = (p) => String(p || "").split(/[\\/]/).filter(Boolean).pop() || "";
     const COUNT_LABELS = [
@@ -2044,6 +2085,17 @@ async function api(method, path, body) {
       else delete el.dataset.tone;
     }
     function showMeta(el, text) { el.textContent = text ?? ""; }
+    // 结果落地：人不在本页就置「等切回」，别让结果在没人看的时候被复位掉。
+    function resultLanded() { if (away) awaitReturn = true; }
+    // 复位结果：导出侧回初值；导入侧票据还在就保留预览（那是状态，不是结果）。
+    function resetResults() {
+      show(exportStatus, "", initial.export);
+      showMeta(exportMeta, "");
+      if (ticket) return;
+      show(summaryLine, "", initial.import);
+      showMeta(importMeta, "");
+      skillsLine.textContent = initial.skills;
+    }
     function setBusy(on) {
       busy = on;
       exportBtn.disabled = on;
@@ -2058,18 +2110,21 @@ async function api(method, path, body) {
       show(exportStatus, "busy", "正在打包…");
       showMeta(exportMeta, "");
       try {
-        const result = await request("POST", "/panel/api/data/export-pick", {});
+        const result = await request("POST", "/api/data/export-pick", {});
         if (result.cancelled) {
           show(exportStatus, "", "未选择导出位置");
+          resultLanded();
           return;
         }
         const skipped = (result.skippedCredentials ?? []).length;
         show(exportStatus, "ok", `已导出 ${baseName(result.path)}`);
         showMeta(exportMeta, `${countsText(result.counts)}${skipped ? ` · ${skipped} 个密钥未取到` : ""}`);
+        resultLanded();
         notify("导出完成", false);
       } catch (err) {
         show(exportStatus, "danger", errorText(err, "导出未完成"));
         showMeta(exportMeta, "");
+        resultLanded();
       } finally {
         setBusy(false);
       }
@@ -2088,6 +2143,7 @@ async function api(method, path, body) {
       setBusy(false);
     }
     // 退回未选择态：票据与 Skills 落点一起收，只留状态行上那句话，不留半截状态。
+    // 只被「结果」分支调用（取消 / 读包失败 / 写入失败），所以在这里统一记一次落地。
     function clearPreview(tone, text) {
       ticket = null;
       skillsRepoPath = null;
@@ -2095,6 +2151,7 @@ async function api(method, path, body) {
       showMeta(importMeta, "");
       skillsLine.textContent = "沿用导出包里记录的原始位置";
       show(summaryLine, tone, text);
+      resultLanded();
       setBusy(false);
     }
 
@@ -2104,7 +2161,7 @@ async function api(method, path, body) {
       show(summaryLine, "busy", "正在读取包内容…");
       showMeta(importMeta, "");
       try {
-        const result = await request("POST", "/panel/api/data/import-pick", {});
+        const result = await request("POST", "/api/data/import-pick", {});
         if (result.cancelled) { clearPreview("", "未选择导出包"); return; }
         showPreview(result);
       } catch (err) {
@@ -2117,7 +2174,7 @@ async function api(method, path, body) {
     async function runSkillsPick() {
       if (busy) return;
       try {
-        const result = await request("POST", "/panel/api/skills/repo/pick", {});
+        const result = await request("POST", "/api/skills/repo/pick", {});
         if (result.cancelled || !result.path) return;
         skillsRepoPath = result.path;
         skillsLine.textContent = `导入时放到：${result.path}`;
@@ -2139,7 +2196,7 @@ async function api(method, path, body) {
       try {
         // 业务失败（HTTP 200 + ok:false）由 api() 统一抛出并把服务端原文挂到 err.code，
         // 这里不再判一次 ok，否则重造出的 Error 会丢掉原文。
-        const result = await request("POST", "/panel/api/data/import-apply", { token: usedTicket, skillsRepoPath });
+        const result = await request("POST", "/api/data/import-apply", { token: usedTicket, skillsRepoPath });
         // 「跟随 Coding Agent 启动」的登录自启或自愈进程没对齐回来时，数据已经换完，
         // 坏的是那一层：状态行仍报导入完成、只是转成提醒色，没跟上的具体是什么写进明细。
         const wd = result.watchdog;
@@ -2156,6 +2213,7 @@ async function api(method, path, body) {
         show(summaryLine, note ? "warn" : "ok",
           `导入完成 · 备份号 ${result.backupId}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
         showMeta(importMeta, [countsText(result.counts), note].filter(Boolean).join(" · "));
+        resultLanded();
         notify(`导入完成，已备份为 ${result.backupId}`, false);
       } catch (err) {
         const detail = errorText(err, "导入未完成");
@@ -2172,7 +2230,12 @@ async function api(method, path, body) {
     skillsBtn.onclick = runSkillsPick;
     // 初始显隐由控制器定，不靠 markup 上的 disabled：票据状态只有一处真相。
     setBusy(false);
-    return { reset: () => clearPreview("", "尚未选择导出包") };
+    // 视图作用域钩子，由设置页子 tab 机制调用（与「关于」的 enter/leave 同款）。
+    // 离开时复位结果，但「离开期间才落地的结果」要留到用户切回看过。
+    return {
+      enter() { away = false; awaitReturn = false; },
+      leave() { away = true; if (awaitReturn) return; resetResults(); },
+    };
   }
 
   function createAboutController({ request, doc, now = () => Date.now(), notify = () => {}, schedule = setTimeout, cancelSchedule = clearTimeout }) {
@@ -2835,8 +2898,10 @@ async function api(method, path, body) {
 
     // 子 tab：通用 / 自动路由 / 主题 / 关于 / 实验性功能；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
-    const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelError });
-    leaveSettingsView = () => about.leave();
+    // 数据搬迁用 panelFailure：被折叠的失败要额外告诉用户「刷新页面重试」这条
+    // 有意义的下一步，并指向面板日志里的服务端原文。
+    const dataBundle = createDataBundleController({ request: api, doc: document, notify: toast, errorText: panelFailure });
+    leaveSettingsView = () => { about.leave(); dataBundle.leave(); };
     const settingsSubTabs = {
       general: ["settingsTabGeneral", "settingsPanelGeneral"],
       advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"],
@@ -2850,6 +2915,7 @@ async function api(method, path, body) {
       if (!selected || $(selected[0]).classList.contains("active")) return;
       resetPageScroll();
       if (which !== "about") about.leave();
+      if (which !== "advanced") dataBundle.leave();
       for (const [name, [tabId, panelId]] of Object.entries(settingsSubTabs)) {
         const on = name === which;
         $(tabId).classList.toggle("active", on);
@@ -2872,6 +2938,7 @@ async function api(method, path, body) {
       // 重生成选项，于是渠道增删/改名后回到这一页看到的就是最新模型清单。
       // 拉取失败保留上一次生成的选项，不让一次网络抖动把四行变成空下拉。
       if (which === "general") refreshStoreState().then(renderClaudeTierOptions, () => {});
+      if (which === "advanced") return dataBundle.enter();
       if (which === "about") return about.enter();
     }
     // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
