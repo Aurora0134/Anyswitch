@@ -327,6 +327,24 @@ describe("validatePersonalProviderConfig", () => {
     };
     assert.equal(validatePersonalProviderConfig(real).valid, true);
   });
+
+  it("accepts the per-model enabled toggle ZCode writes into auto model rules", () => {
+    // ZCode 的模型列表给每个模型一个启用开关，写在 providerModelRules 的
+    // config.enabled 里。白名单不认识它时整份文件被写入闸拒写，同步卡死。
+    const withRule = (config) => ({
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: {
+          providerModelRules: [{ providerId: "account:bigmodel-start-plan", modelId: "glm-5.3-flash", config }],
+        },
+      },
+    });
+    assert.equal(validatePersonalProviderConfig(withRule({ enabled: true })).valid, true);
+    assert.equal(validatePersonalProviderConfig(withRule({ enabled: false, properties: { contextWindow: 128000 } })).valid, true);
+    assert.equal(validatePersonalProviderConfig(withRule({ enabled: "yes" })).valid, false);
+    assert.equal(validatePersonalProviderConfig(withRule({ bogus: 1 })).valid, false);
+  });
 });
 
 describe("which client-side rules Anyswitch owns", () => {
@@ -621,6 +639,41 @@ describe("ZCode sync end to end", () => {
         doc.config.modelConfigRules.providerModelRules.filter((r) => r.providerId === "_handmade"),
         [{ providerId: "_handmade", modelId: "m-mine", config: { properties: { contextWindow: 4096 } } }],
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("syncs past a client-side model rule that carries the enabled toggle", async () => {
+    // 2026-10 事故：ZCode 客户端往自己的 provider_config.json 写了
+    // config.enabled（模型列表的逐模型开关），写入闸把它当未知键，整次同步拒写。
+    const dir = tmpRoot();
+    try {
+      const configPath = join(dir, "config.json");
+      const accountRule = { providerId: "account:bigmodel-start-plan", modelId: "glm-5.3-flash", config: { enabled: true } };
+      writeFileSync(
+        join(dir, PERSONAL_CONFIG_FILENAME),
+        JSON.stringify({
+          schemaVersion: 1,
+          config: {
+            providerConfigRules: {
+              providerRules: [{ providerId: "account:bigmodel-start-plan", config: { group: "bigmodel-family" } }],
+            },
+            modelConfigRules: { providerModelRules: [accountRule] },
+          },
+        }),
+      );
+
+      const result = await writeZcodeConfig(channelStore(), 47821, "tok-1", dir, configPath);
+      assert.equal(result.ok, true, result.reason);
+
+      const doc = readPersonal(dir);
+      assert.deepEqual(
+        doc.config.modelConfigRules.providerModelRules.find((r) => r.providerId === "account:bigmodel-start-plan"),
+        accountRule,
+        "客户端自己写的开关规则逐字节保留",
+      );
+      assert.ok(ruleOf(doc, "_poke-api"), "托管渠道照常进客户端列表");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
