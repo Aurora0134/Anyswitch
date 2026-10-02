@@ -48,6 +48,33 @@ export async function getYamlModule() {
   return cachedYaml.default ?? cachedYaml;
 }
 
+// dsh's own profile patches gate plugins on platform with cordis's !!js tag
+// (e.g. tool-bash gets `disabled: !!js process.platform === 'win32'`), and
+// js-yaml 4 dropped every js type for safety, so a plain load throws
+// "unknown tag" on an untouched vendor file. Parse the expression into a
+// wrapper and re-emit the tag on dump: the expression round-trips verbatim
+// instead of being evaluated or sinking the whole profile.
+export class JsExpression {
+  constructor(source) {
+    this.source = source;
+  }
+}
+
+let cachedSchema = null;
+let cachedSchemaYaml = null;
+export function dshYamlSchema(yaml) {
+  if (cachedSchema && cachedSchemaYaml === yaml) return cachedSchema;
+  const jsType = new yaml.Type("tag:yaml.org,2002:js", {
+    kind: "scalar",
+    instanceOf: JsExpression,
+    construct: (source) => new JsExpression(source),
+    represent: (value) => value.source,
+  });
+  cachedSchema = yaml.DEFAULT_SCHEMA.extend([jsType]);
+  cachedSchemaYaml = yaml;
+  return cachedSchema;
+}
+
 export function sidecarPath(root) {
   return join(root, SIDECAR_FILENAME);
 }
@@ -283,7 +310,7 @@ export function dshProfilePatchPaths(dshHome) {
 
 function loadPatchEntries(filePath, yaml) {
   if (!existsSync(filePath)) return [];
-  const parsed = yaml.load(stripBom(readFileSync(filePath, "utf8")));
+  const parsed = yaml.load(stripBom(readFileSync(filePath, "utf8")), { schema: dshYamlSchema(yaml) });
   if (parsed == null) return [];
   if (!Array.isArray(parsed)) throw new UnparseableDshSettingsError(filePath);
   return parsed;
@@ -385,7 +412,7 @@ async function writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome,
     }
     const merged = mergeDshProfilePatch(entries, built, previousManaged);
     const row = merged.find((entry) => entry && entry.id === DSH_LLM_ENTRY_ID);
-    const rowText = yaml.dump([row], { indent: 2, lineWidth: -1, noRefs: true });
+    const rowText = yaml.dump([row], { indent: 2, lineWidth: -1, noRefs: true, schema: dshYamlSchema(yaml) });
     const current = existsSync(filePath) ? readFileSync(filePath, "utf8") : "";
     const text = spliceProfileRow(current, rowText);
     if (contentHash(current) !== contentHash(text)) changed = true;

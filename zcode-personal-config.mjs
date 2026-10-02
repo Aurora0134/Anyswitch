@@ -254,6 +254,7 @@ const PROVIDER_CONFIG_KEYS = new Set([
   "group", "logo", "access", "api", "builtinModelIds", "personalModelIds", "modelOrder", "visibility",
 ]);
 const MODEL_RULE_KEYS = new Set(["providerId", "modelId", "config"]);
+const MODEL_RULE_CONFIG_KEYS = new Set(["properties", "optionSpecs", "enabled"]);
 const GROUPS = new Set(["standard-personal", "zai-family", "bigmodel-family"]);
 const API_TYPES = new Set(["anthropic-messages", "openai-chat-completions", "openai-responses"]);
 const ACCESS_TYPES = new Set(["api-key", "zhipu-coding-plan-api-key", "zhipu-account"]);
@@ -380,8 +381,14 @@ export function validatePersonalProviderConfig(config) {
       if (!isNonEmptyString(rule.providerId)) return fail(`${label}[${index}].providerId must be a non-empty string`);
       if (!isNonEmptyString(rule.modelId)) return fail(`${label}[${index}].modelId must be a non-empty string`);
       if (!isRecord(rule.config)) return fail(`${label}[${index}].config must be an object`);
-      if (label === "providerModelRules" && !isNonEmptyString(rule.config.providerId) && Object.keys(rule.config).some((k) => k !== "properties" && k !== "optionSpecs")) {
-        return fail(`providerModelRules[${index}].config has unknown key "${Object.keys(rule.config).find((k) => k !== "properties" && k !== "optionSpecs")}"`);
+      if (label === "providerModelRules" && !isNonEmptyString(rule.config.providerId)) {
+        // 「enabled」是客户端模型列表里的逐模型开关，由 ZCode 自己写入；
+        // 白名单不认它会把整份文件拒写，同步因此卡死。
+        const unknown = Object.keys(rule.config).find((k) => !MODEL_RULE_CONFIG_KEYS.has(k));
+        if (unknown) return fail(`providerModelRules[${index}].config has unknown key "${unknown}"`);
+        if (rule.config.enabled !== undefined && typeof rule.config.enabled !== "boolean") {
+          return fail(`providerModelRules[${index}].config.enabled must be a boolean`);
+        }
       }
       const key = `${rule.providerId}\u0000${rule.modelId}`;
       if (label === "providerModelRules") {
