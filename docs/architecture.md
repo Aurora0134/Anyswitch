@@ -101,8 +101,8 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `launcher.mjs` — Claude 启动器：注入端点与 token、设置 NO_PROXY、剥离继承 API Key；设置页「以 bypassPermissions 启动」开关注入的 `--dangerously-skip-permissions` 也在这里现读现用（用户已手带则不重复）。
 
 ### 控制面层
-- `relay-host.mjs` — 常驻 relay 宿主（127.0.0.1:47821，crash 不自愈是刻意设计）。
-- `panel-host.mjs` — 独立常驻控制面板宿主（127.0.0.1:47820）：relay 停止/崩溃时面板仍可用，并承载 followAgent 探活 watcher。
+- `relay-host.mjs` — 常驻 relay 宿主（127.0.0.1:47821，crash 不自愈是刻意设计）。它同时是唯一把日志落盘的进程（`logs/relay-host.log`，stderr 分流一份），因此运行日志开关的活闸门装在这里：关掉后文件立刻停止增长。崩溃记录（`uncaughtException` / `unhandledRejection` 经 `appendCrashLog`）走直写路径，不受开关管——那不是一条日志，是进程为什么没了的凭据，而关掉记录的人恰恰是最会回头问「刚才怎么了」的人。
+- `panel-host.mjs` — 独立常驻控制面板宿主（127.0.0.1:47820）：relay 停止/崩溃时面板仍可用，并承载 followAgent 探活 watcher。它自己也持一份运行日志开关闸门：面板的记录只活在内存环形缓冲里（stderr 无人接收），关掉这一处等于把实时输出整条链路关掉——中继条目经桥、各端点条目经 ingest 都汇入同一个 logger。
 - `panel.mjs` — 面板路由（`/panel` 与 `/panel/api/*`），relay 与 panel-host 两个进程共用。关于页通过 `app-info`、`updates`、`environment` 及逐客户端官方版本接口访问只读服务；客户端安装/更新走 `POST /panel/api/environment/update` 加 `GET /panel/api/environment/update/<runId>` 查询进度：写请求沿用面板写闸门，服务端锁按客户端分（同一个客户端并发第二个任务 409，不同客户端并行放行——同一个包的两份并发全局安装会互搬目录，不同包各写各的目录）。安装跑在脱离面板的进程里，进度记在本机数据目录的 `client-updates`，关掉或重启面板不会把进行中的安装一起杀掉；新面板读同一份记录继续报进度，进程已经不在而记录仍写着进行中的按中断收尾。安装完成或失败后强制重查本地检测与官方最新，再归为已更新/未生效/失败/装上了跑不起来。当前 Anyswitch 版本在模块随进程启动加载时读取相邻 `package.json` 并保存，不在首次查询时重读磁盘，避免将尚未运行的新代码报成当前版本。
 - `panel-ui/panel.html` — 面板 Web UI 骨架（DOM + 防闪烁/开屏内联小脚本，2026-09-17 起样式与主脚本外链到 `panel-ui/panel.css` / `panel-ui/panel.js`）；静态文件按请求检查 mtime 缓存与 ETag，刷新可加载新的页面资源。后端模块和进程版本需 panel-host 换新进程才生效；现有「重启」按钮先重启 relay、再重启 panel-host，会中断在途请求，执行时机由用户安排。
 - `agent-discovery.mjs` — 无启动副作用的客户端路径发现，供启动器和本地环境检测共享；除 Grok Build 与 Qoder CLI 各一次有界 `--version` 自报外，检测不得调用启动器或目标客户端。
@@ -115,7 +115,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
 - `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode/grok）。
-- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。
+- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）也归这里：`createLoggingEnabledGate` 按 settings.json 的 mtime 缓存读取，relay-host 与 panel-host 各自持一份，因此开关当场生效、不需要重启任何常驻进程；原子写每次换新临时文件再改名，mtime 必然变化，闸门不会漏掉一次保存。文件读不到时保持上次已知值，损坏时按默认（开）回落——两个方向都不会让一次读失败把记录静默关掉。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
@@ -158,7 +158,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `model-stability.mjs` — 模型稳定性：8 小时滚动窗、10 分钟桶、按调用量取前 5，进程内存态＋可选 sidecar 持久化，供面板链灯与统计页判渠道健康。
 - `usage-journal.mjs` — 逐请求用量流水：数据根 `usage\` 下按日滚动的 JSONL（requests / sessions 两条流），90 天自清理。它是 relay 热路径的旁路——写失败只告警，绝不抛回调用方。
 - `usage-stats.mjs` — 在流水之上做聚合，产出使用统计页的状态。每次 `getState()` 现读且分段读取（热力图读它固定的 90 天，其余口径只读所选窗口），不设聚合缓存；各项口径的定义与红线见 `docs/stats-spec.md`。
-- `logger.mjs` — 进程内日志器：环形缓冲＋发布订阅，面板的实时输出窗口经 SSE 订阅它。
+- `logger.mjs` — 进程内日志器：环形缓冲＋发布订阅，面板的实时输出窗口经 SSE 订阅它。两条契约：落盘的每一行带本地墙钟时间戳（日志是拿来和用户「三点左右坏的」对齐的，没时间戳的行对不上）；级别只由条目的 `level` 字段承载，消息文本是纯散文——级别曾同时存在字段与文本里，于是出现过 `[info] … WARN …` 这种字段与正文互相矛盾的行，消费方还得回头从文本里解析一个本来就有的级别。写入前过一道实时开关闸门（`isEnabled`），关掉即不再落盘、不再进缓冲、不再广播，无需重启进程；`clear()` 不受闸门管——清空缓冲是控制操作，不是一条日志。
 - `session-scan.mjs` — 面板「会话管理」的数据层：按需现扫各客户端自己的会话存储，不建索引、不自建数据库，每次列表都重读对方文件；各家记录形状的差异（含多帧压缩容器、派生索引滞后等）在本模块内适配掉。
 
 ### 预设注入层

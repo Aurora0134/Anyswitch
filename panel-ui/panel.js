@@ -272,6 +272,7 @@ async function api(method, path, body) {
     // 并行拉取，二者互不阻塞；失败各自走下一轮轮询重试。
     await Promise.allSettled([refreshRouteChainsCache(), refreshRouteRuntimeCache()]);
     const firstStatus = startStatusPolling();
+    // 日志流入口：内部先问运行日志开关再决定连不连，不阻塞开屏 ready。
     startLogStream();
     if (window.panelStartupController) {
       // 重启恢复的入场动画挂开屏淡出起点（onLeave）：ready() 调用时刻 settled 未必
@@ -1913,13 +1914,49 @@ async function api(method, path, body) {
   // 实时 SSE 日志流
   const LOG_LINE_CAP = 25;
   let followLogs = true;
-  function startLogStream() {
+  // 运行日志开关的当前值。null = 还没问出来，此时不覆盖界面。
+  let loggingEnabled = null;
+
+  // 运行日志开关的落地面（开关本体在设置→通用）。关掉时左侧那张卡整卡隐去、日志流
+  // 断开并清空：记录已经停了，留一张永远空着的窗只是噪声。
+  function applyLoggingEnabled(enabled) {
+    loggingEnabled = enabled;
+    const card = $("liveLogCard");
+    if (card) card.hidden = !enabled;
+    if (enabled) {
+      connectLogStream();
+      return;
+    }
+    if (es) { es.close(); es = null; }
     const body = $("logBody");
-    if (es) es.close();
-    // 滚动跟随：贴底时自动跟随新日志；上翻查看旧日志即暂停，回到底部自动恢复。
+    if (body) body.innerHTML = "";
+  }
+
+  // 页面加载时的入口：先问开关，再决定连不连流。这一问发生在开屏层还盖着的时候，
+  // 所以不影响首屏；读不到就按默认开——日志是排障时唯一的凭据，一次读失败不该把它
+  // 静默关掉。问的途中用户已经在设置页切过开关，就以那次为准，不被这次结果盖回。
+  async function startLogStream() {
+    // 滚动跟随只挂一次：贴底时自动跟随新日志，上翻查看旧日志即暂停，回到底部自动
+    // 恢复。挂在开与关之外，反复切开关不会越积越多份监听。
+    const body = $("logBody");
     body.addEventListener("scroll", () => {
       followLogs = body.scrollTop + body.clientHeight >= body.scrollHeight - 24;
     });
+    // 真清空：服务端缓冲一并清掉，刷新不再复活旧日志，其它打开的面板窗口同步清空。
+    $("clearLog").onclick = async () => {
+      body.innerHTML = "";
+      try { await api("POST", "/api/logs/clear"); } catch {}
+    };
+    let enabled = true;
+    try {
+      const d = await api("GET", "/api/settings");
+      enabled = d?.settings?.loggingEnabled !== false;
+    } catch { /* 按默认开 */ }
+    if (loggingEnabled === null) applyLoggingEnabled(enabled);
+  }
+
+  function connectLogStream() {
+    if (es) return;
     es = new EventSource(API_BASE + "/api/logs");
     es.onopen = () => {
       $("logConn").textContent = "● 实时传输";
@@ -1935,11 +1972,6 @@ async function api(method, path, body) {
       $("logConn").className = "log-status";
       $("logConnBadge").textContent = "○ 重连";
       $("logConnBadge").className = "badge badge-warn";
-    };
-    // 真清空：服务端缓冲一并清掉，刷新不再复活旧日志，其它打开的面板窗口同步清空。
-    $("clearLog").onclick = async () => {
-      body.innerHTML = "";
-      try { await api("POST", "/api/logs/clear"); } catch {}
     };
   }
 
@@ -2737,6 +2769,7 @@ async function api(method, path, body) {
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
     const injectEffortToggle = $("injectEffortToggle");
+    const loggingEnabledToggle = $("loggingEnabledToggle");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
     const claudeTierEnabledToggle = $("claudeTierEnabledToggle");
     const sparkWindowInput = $("sparkWindowInput");
@@ -2756,7 +2789,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -2987,6 +3020,12 @@ async function api(method, path, body) {
         }
         if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
           injectEffortToggle.checked = d.settings.injectThinkingEffort;
+        }
+        // 运行日志开关：回灌时把左侧那张实时输出卡的显隐一并跟上，免得设置页与看板
+        // 各说各话。
+        if (!settingsSaving.loggingEnabled && loggingEnabledToggle && d.settings && typeof d.settings.loggingEnabled === "boolean") {
+          loggingEnabledToggle.checked = d.settings.loggingEnabled;
+          applyLoggingEnabled(d.settings.loggingEnabled);
         }
         if (!settingsSaving.claudeBypassPermissions && claudeBypassPermissionsToggle && d.settings && typeof d.settings.claudeBypassPermissions === "boolean") {
           claudeBypassPermissionsToggle.checked = d.settings.claudeBypassPermissions;
@@ -3325,6 +3364,39 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.injectEffort = false;
           injectEffortToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 运行日志：与其它项同构的即改即存，但保存成功后要立刻把左侧那张实时输出卡显隐
+    // 掉——这个开关的意义就是「不再记录」，界面不跟着动就看不出它生效了。
+    if (loggingEnabledToggle) {
+      loggingEnabledToggle.onchange = async () => {
+        if (settingsSaving.loggingEnabled) {
+          loggingEnabledToggle.checked = !loggingEnabledToggle.checked;
+          return;
+        }
+        const next = loggingEnabledToggle.checked;
+        settingsSaving.loggingEnabled = true;
+        settingsLoadGen += 1;
+        loggingEnabledToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { loggingEnabled: next });
+          if (!d.ok) {
+            loggingEnabledToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.loggingEnabled;
+            if (typeof saved === "boolean") loggingEnabledToggle.checked = saved;
+            applyLoggingEnabled(saved !== false);
+            toast(next ? "已开启运行日志" : "已关闭运行日志");
+          }
+        } catch (e) {
+          loggingEnabledToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.loggingEnabled = false;
+          loggingEnabledToggle.removeAttribute("aria-busy");
         }
       };
     }
