@@ -466,8 +466,9 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
 
-        <!-- 实时输出日志窗 -->
-        <div class="panel-card">
+        <!-- 实时输出日志窗。整卡显隐由设置→通用的「记录运行日志」开关驱动
+             （panel.js#applyLoggingEnabled）：记录停掉后这张窗只会一直空着。 -->
+        <div class="panel-card" id="liveLogCard">
           <div class="card-header">
             <h2 class="card-title">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -1592,7 +1593,7 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabExperimental" role="tab" aria-selected="false" aria-controls="settingsPanelExperimental" tabindex="-1">实验性功能</button>
     </nav>
 
-    <!-- 「通用」：八项按语义分四张卡——「启动」「抗截断」「Claude Code」带卡头（复用各
+    <!-- 「通用」：九项按语义分五张卡——「启动」「抗截断」「Claude Code」、实时输出「实时输出」带卡头（复用各
          视图通用的 card-header/card-title 标准件），其余两项暂不归类、平卡放置；
          控件 id、逐项独立保存/失败回滚语义不变 -->
     <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral">
@@ -1732,6 +1733,30 @@ if (window.panelStartupController) panelStartupPlay();
               </div>
               <select class="modal-number settings-tier-input" id="claudeTierHaikuInput"></select>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 「实时输出」卡：一个总开关，与「启动」卡同构（单开关、带卡头）。关掉后
+           左侧那张实时输出卡整卡隐去——记录已经停了，留一张永远空着的窗只是噪声。
+           默认开，升级上来的安装行为不变。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            实时输出
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">记录运行日志</div>
+              <div class="modal-item-desc">记录 Anyswitch 自身与各端点的运行日志，显示在左侧的实时输出中。关闭后停止记录，左侧的实时输出一并隐藏。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="loggingEnabledToggle">
+              <span class="slider"></span>
+            </label>
           </div>
         </div>
       </div>

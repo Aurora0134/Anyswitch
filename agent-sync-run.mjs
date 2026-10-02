@@ -36,10 +36,14 @@ function parsePort(argv) {
   return value;
 }
 
+// 级别由「走哪条流」承载，不写进文本：stdout 是正常输出，stderr 是异常。父进程
+// （agent-sync-spawn.mjs）按流定级。文本里再出现 WARN/ERROR 就是第二份级别，且
+// 可能与流自相矛盾——曾经因此落盘成 "[info] [agent-sync] WARN sync finished…"，
+// 级别字段于是不再可信。
 const logger = {
   info: (message) => process.stdout.write(`[agent-sync] ${message}\n`),
-  warn: (message) => process.stdout.write(`[agent-sync] WARN ${message}\n`),
-  error: (message) => process.stderr.write(`[agent-sync] ERROR ${message}\n`),
+  warn: (message) => process.stderr.write(`[agent-sync] ${message}\n`),
+  error: (message) => process.stderr.write(`[agent-sync] ${message}\n`),
 };
 
 async function main() {
@@ -68,6 +72,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  process.stderr.write(`[agent-sync] ERROR ${err.message}\n`);
+  process.stderr.write(`[agent-sync] ${err.message}\n`);
   process.exit(1);
 });

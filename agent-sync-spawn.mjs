@@ -62,10 +62,11 @@ export function spawnAgentSync({ port, logger = null, timeoutMs = 120_000 }) {
       clearTimeout(timer);
       const lines = (text) => text.trim().split(/\r?\n/).filter(Boolean);
       const humanLines = (text) => lines(text).filter((line) => !line.includes(SYNC_RESULT_PREFIX));
+      // 级别由流决定，不由退出码决定：stderr 一律是 warn。原来只在退出码非 0 时才
+      // 转 stderr，于是「退出码 0 但个别端点没同步上」那条警告整条丢掉——而它恰恰
+      // 是最需要被看到的一类。
       for (const line of humanLines(stdout)) logger?.info?.(line);
-      if (code !== 0) {
-        for (const line of lines(stderr)) logger?.warn?.(line);
-      }
+      for (const line of humanLines(stderr)) logger?.warn?.(line);
       resolve({ ok: code === 0, code, stdout, stderr });
     });
   });

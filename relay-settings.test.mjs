@@ -10,6 +10,9 @@ import {
   parseSparkWindowPoints,
   parseInjectThinkingEffort,
   DEFAULT_INJECT_THINKING_EFFORT,
+  DEFAULT_LOGGING_ENABLED,
+  parseLoggingEnabled,
+  createLoggingEnabledGate,
   parseClaudeBypassPermissions,
   parseClaudeTierMappingsEnabled,
   loadSettings,
@@ -263,6 +266,90 @@ describe("injectThinkingEffort", () => {
 
       const malformed = saveSettings(path, { injectThinkingEffort: "nonsense" }, {});
       assert.equal(malformed.settings.injectThinkingEffort, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("loggingEnabled", () => {
+  it("records by default — only an explicit false turns it off", () => {
+    assert.equal(DEFAULT_LOGGING_ENABLED, true);
+    assert.equal(parseLoggingEnabled(undefined), true);
+    assert.equal(parseLoggingEnabled(true), true);
+    assert.equal(parseLoggingEnabled(false), false);
+    assert.equal(parseLoggingEnabled("false"), true, "a stray string is not a user's off switch");
+  });
+
+  it("survives a save round-trip without disturbing neighbouring keys", () => {
+    const tmp = mkTestDir("anyswitch-logging-setting-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ followAgent: true, sparkWindowPoints: 24 }));
+      assert.equal(loadSettings(path, {}).settings.loggingEnabled, true, "an install predating the switch keeps recording");
+
+      const saved = saveSettings(path, { loggingEnabled: false }, {});
+      assert.equal(saved.settings.loggingEnabled, false);
+      assert.equal(saved.settings.followAgent, true);
+      assert.equal(saved.settings.sparkWindowPoints, 24);
+      assert.equal(loadSettings(path, {}).settings.loggingEnabled, false);
+
+      const malformed = saveSettings(path, { loggingEnabled: "nonsense" }, {});
+      assert.equal(malformed.settings.loggingEnabled, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the live gate follows the file, so a long-lived process needs no restart", () => {
+    const tmp = mkTestDir("anyswitch-logging-gate-");
+    const path = join(tmp, "settings.json");
+    try {
+      const gate = createLoggingEnabledGate(path, {});
+      assert.equal(gate(), true, "missing settings.json still records");
+
+      saveSettings(path, { loggingEnabled: false }, {});
+      assert.equal(gate(), false, "the switch takes effect on the next write");
+
+      saveSettings(path, { loggingEnabled: true }, {});
+      assert.equal(gate(), true, "and back on again");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the default — recording ON — when settings.json is corrupt", () => {
+    const tmp = mkTestDir("anyswitch-logging-gate-broken-");
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { loggingEnabled: false }, {});
+      const gate = createLoggingEnabledGate(path, {});
+      assert.equal(gate(), false);
+
+      // loadSettings deliberately swallows parse errors (it runs on every
+      // request), so a corrupt file reads as defaults. For this switch that
+      // means recording RESUMES — the right failure direction: a damaged file
+      // must not be able to silently stop recording, and the log path must
+      // never throw. The corrupt file is quarantined by saveSettings, so the
+      // user is not left with a silently-ignored setting.
+      writeFileSync(path, "{ not json");
+      assert.equal(gate(), true, "a corrupt file must not silently stop recording");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the last known value while settings.json is unreadable", () => {
+    const tmp = mkTestDir("anyswitch-logging-gate-missing-");
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { loggingEnabled: false }, {});
+      const gate = createLoggingEnabledGate(path, {});
+      assert.equal(gate(), false);
+      // A vanished file (no mtime to compare) keeps the last known state rather
+      // than flipping recording back on mid-session.
+      rmSync(path, { force: true });
+      assert.equal(gate(), false, "an unreadable file keeps the last known state");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

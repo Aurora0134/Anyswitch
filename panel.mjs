@@ -449,8 +449,9 @@ export function startRelayLogBridge(logger, relayRoot) {
           try {
             const entry = JSON.parse(line.slice(5).trim());
             if (entry && entry.level && entry.message) {
-              // The relay entry's message already carries its own "[level] "
-              // prefix; strip it so logger.log() doesn't double it up.
+              // 级别只取字段。中继自 0.6.x 起不再把级别写进消息文本，但升级过程中
+              // 面板可能先重启、对面还是旧进程，旧格式的消息自带 "[level] " 前缀；
+              // 原样透传会让窗口里出现两个级别标签，所以这里剥掉一个前导级别标记。
               const message = entry.message.replace(/^\[(info|warn|error)\]\s?/, "");
               logger.log(entry.level, message);
             }
@@ -1321,11 +1322,21 @@ export function createPanelRouter({
   }
 
   function handleLogsSSE(res, req) {
+    // 记录关着时这条流永远不会有内容：直接 204 收尾，比挂一条只会干等的 SSE 诚实。
+    if (typeof logger.isEnabled === "function" && !logger.isEnabled()) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     res.writeHead(200, {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
       connection: "keep-alive",
     });
+    // 必须显式冲头。本端点在没有历史可重放时一个字节都不写，而浏览器要等响应头落地
+    // 才算建连成功：不冲头就会一直停在「正在重连」，直到下一条日志写入才恢复（点完
+    // 「清空」再刷新页面正是这个形状）。中继侧的同类端点早已这么做，这份漏了。
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
     // Replay history for late joiners, then stream live entries.
     for (const entry of logger.getHistory()) {
       res.write(`data: ${JSON.stringify(entry)}\n\n`);
@@ -1912,6 +1923,16 @@ export function createPanelRouter({
         const updated = saveSettings(settingsFile, body, base);
         if (metricsCollector && typeof metricsCollector.setSparkWindowPoints === "function") {
           metricsCollector.setSparkWindowPoints(updated.sparkWindowPoints);
+        }
+        // 关掉运行日志时把已缓冲的内容一并丢掉。不丢的话，重新打开会先涌出一批关闭
+        // 之前的旧行，看着像「关掉没生效」；clear() 同时向所有打开的面板窗口广播清空
+        // 帧，所以这一下不只清当前这个页面。重新开启时窗口从新日志开始，符合预期。
+        if (body.loggingEnabled === false) {
+          try {
+            logger?.clear?.();
+          } catch (err) {
+            logger?.warn?.(`运行日志已关闭，但缓冲清空失败：${err.message}`);
+          }
         }
         // 注入推理强度 controls what every endpoint's config is told about
         // levels, and those configs are only rewritten by a sync. Fire one so
