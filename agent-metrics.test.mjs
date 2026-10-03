@@ -5409,3 +5409,123 @@ describe("usage 形状归一（OpenAI / Anthropic 两种 usage 都照实入账�
     assert.deepEqual(kimi.metrics.tokens, { prompt: 150, completion: 15, cached: 60 }, "聚合桶为两行之和");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 进程扫描降级轮（P0 根因回归）。
+//
+// 常驻 PowerShell 探针一轮没答完就回落 `tasklist /NH /FO CSV`，而那条路上每一
+// 行都没有命令行：kimi/pi/dsh/opencode 靠命令行里的安装路径识别，于是这一轮这
+// 些端点的进程数直接变 0。修复前这个 0 被当成「进程都没了」的证据——实例行被
+// 删、在途计数被清零、累计请求数随行一起消失，终端页的「生成中」永不出现、
+// 「最近请求」永远为空、「关标签不弹确认」都是这一条的下游。修复后：不完整轮
+// 只判生死（本轮全量 pid），不判归属，也不结算计数；健康轮一切照旧。
+describe("进程扫描降级轮（tasklist 回落）不得销毁实例状态", () => {
+  const KIMI_PID = 41376;
+  // 健康轮：常驻探针形状 <Node>,<CommandLine>,<Name>,<ProcessId>，带命令行。
+  const healthyScan = (pid) =>
+    `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@moonshot-ai\\kimi-code\\dist\\main.mjs,node.exe,${pid}\r\n`;
+  // 降级轮：tasklist CSV 形状，只有镜像名与 pid——node.exe 行认不出属于哪个 agent。
+  const tasklistScan = (...pids) =>
+    pids.map((pid) => `"node.exe","${pid}","Console","1","120,000 K"`).join("\r\n") + "\r\n";
+  const unrelatedScan = '"explorer.exe","9001","Console","1","40,000 K"\r\n';
+  const noSurfaces = async () => new Map();
+  // 一次读只服务上一轮快照，扫描在后台落地：先踢一轮，等它落地，再读。
+  const settleRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  const kimiCard = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+  const startDone = (collector) => {
+    const r = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${KIMI_PID}`, providerId: "p1", model: "m1", stream: true, path: "openai" });
+    r.recordFirstChunk();
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+  };
+
+  it("保留实例行、累计请求数与在途计数，恢复健康轮后仍然在", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan(KIMI_PID);
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistScan(KIMI_PID) : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t, kimiRegistryLookup: noSurfaces });
+
+    let kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances.map((i) => i.id), [`kimi-${KIMI_PID}`], "健康轮列出实例行");
+
+    for (let i = 0; i < 5; i += 1) startDone(collector);
+    const inflight = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${KIMI_PID}`, providerId: "p1", model: "m1", stream: true, path: "openai" });
+
+    kimi = await kimiCard(collector);
+    assert.equal(kimi.instances[0].requests, 6);
+    assert.equal(kimi.instances[0].activeRequests, 1);
+    assert.equal(kimi.metrics.activeRequests, 1);
+
+    // 探针空答 → 该轮回落 tasklist（无命令行）；时间同时推过 3s 的「进程没了」
+    // 结算门槛，修复前这一步就会清空在途计数。
+    psAnswer = "";
+    t += 10_000;
+    await settleRound(collector);
+    kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances.map((i) => i.id), [`kimi-${KIMI_PID}`], "降级轮不得删实例行");
+    assert.equal(kimi.instances[0].requests, 6, "降级轮不得清零累计请求数");
+    assert.equal(kimi.instances[0].activeRequests, 1, "降级轮不得清零在途计数");
+    assert.equal(kimi.metrics.activeRequests, 1, "端点聚合在途也不得被清零");
+
+    // 连续降级轮同样不得清算。
+    t += 10_000;
+    await settleRound(collector);
+    kimi = await kimiCard(collector);
+    assert.equal(kimi.instances[0].activeRequests, 1, "多轮降级仍不清零");
+    assert.equal(kimi.instances[0].requests, 6);
+
+    // 恢复健康轮：行与计数都在，在途请求照常收尾。
+    psAnswer = healthyScan(KIMI_PID);
+    t += 10_000;
+    await settleRound(collector);
+    kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances.map((i) => i.id), [`kimi-${KIMI_PID}`]);
+    assert.equal(kimi.instances[0].requests, 6);
+    assert.equal(kimi.instances[0].activeRequests, 1);
+    inflight.recordEnd({ status: 200, usage: { prompt_tokens: 3, completion_tokens: 2 } });
+    kimi = await kimiCard(collector);
+    assert.equal(kimi.instances[0].activeRequests, 0, "恢复后请求正常收尾");
+    assert.equal(kimi.instances[0].requests, 6);
+  });
+
+  it("降级轮里进程真死了，仍然即时淘汰并结算它泄漏的在途", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan(KIMI_PID);
+    let tasklistAnswer = tasklistScan(KIMI_PID);
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistAnswer : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t, kimiRegistryLookup: noSurfaces });
+
+    await collector.getAgentsStatus();
+    collector.startRequest({ agentId: "kimi", instanceId: `kimi-${KIMI_PID}`, providerId: "p1", model: "m1" });
+    assert.equal((await kimiCard(collector)).metrics.activeRequests, 1);
+
+    // 进程真的没了：探针空答，回落的全量 pid 列表里也没有这个 pid。
+    psAnswer = "";
+    tasklistAnswer = unrelatedScan;
+    t += 10_000;
+    await settleRound(collector);
+    const kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances, [], "本轮全量 pid 里没有它 → 照样即时淘汰");
+    assert.equal(kimi.metrics.activeRequests, 0, "泄漏的在途在端点聚合里一并结算");
+  });
+
+  it("健康轮里进程退出，淘汰照旧（闸门只作用于不完整轮）", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan(KIMI_PID);
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistScan(KIMI_PID) : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t, kimiRegistryLookup: noSurfaces });
+
+    await collector.getAgentsStatus();
+    collector.startRequest({ agentId: "kimi", instanceId: `kimi-${KIMI_PID}`, providerId: "p1", model: "m1" });
+
+    // 完整轮（带命令行）里 kimi 进程消失：桶内 pid 集为空即判死。
+    psAnswer = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Windows\\explorer.exe,explorer.exe,9001\r\n`;
+    t += 10_000;
+    await settleRound(collector);
+    const kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.instances, [], "完整轮仍然按桶内 pid 集即时淘汰");
+    assert.equal(kimi.metrics.activeRequests, 0);
+  });
+});
