@@ -65,20 +65,75 @@ export function readRelayPid(pidPath) {
   }
 }
 
-// Windows process liveness via tasklist (no wmic dependency). true = alive.
-export function isPidAlive(pid) {
-  if (!pid || pid <= 0) return false;
+// Windows process liveness, in three states rather than two.
+//
+// "The OS says there is no such process" and "the probe could not find out"
+// are different findings, and collapsing them into a single `false` is how a
+// healthy terminal host came to be killed by its own parent watchdog: the
+// tasklist fallback below reports false on a timeout or a spawn error under
+// load, which is indistinguishable from a dead parent.
+//
+//   "alive"   — positively running
+//   "dead"    — positively absent (the OS rejected the probe with ESRCH, or
+//               tasklist answered and this PID was not in its output)
+//   "unknown" — the probe itself failed; proves nothing either way
+//
+// The primary probe is the OS handle check: it spawns nothing and parses no
+// output, so it has no timeout to blow and no text to misread. It is also
+// three orders of magnitude cheaper (measured ~0.04ms against ~130ms for
+// tasklist on this machine).
+export function probePidLiveness(pid, deps = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return "dead";
+  const nativeProbe = deps.nativeProbe ?? nativeLivenessProbe;
+  const crossCheck = deps.crossCheck ?? tasklistLivenessProbe;
+  const verdict = nativeProbe(pid);
+  if (verdict === "alive" || verdict === "dead") return verdict;
+  return crossCheck(pid);
+}
+
+// process.kill(pid, 0) delivers no signal — it only asks the kernel whether
+// the process can be opened. EPERM means it exists but belongs to someone we
+// may not signal, which is still alive. Anything else is a libuv error we do
+// not model, and therefore inconclusive rather than death.
+function nativeLivenessProbe(pid) {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    if (error?.code === "ESRCH") return "dead";
+    if (error?.code === "EPERM") return "alive";
+    return "unknown";
+  }
+}
+
+// Cross-check for the rare native verdict we could not interpret. The failure
+// contract is the whole point: a timeout, a spawn error or a non-zero exit
+// leaves the output unreadable, and unreadable output proves NOTHING — that is
+// "unknown", never "dead".
+function tasklistLivenessProbe(pid) {
   try {
     const r = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
       windowsHide: true,
       timeout: 2000,
     });
-    const out = r.stdout ? r.stdout.toString() : "";
+    if (r.error || r.status !== 0 || !r.stdout) return "unknown";
+    const out = r.stdout.toString();
     // tasklist prints a CSV row containing the pid in quotes when it exists.
-    return new RegExp(`"${pid}"`).test(out);
+    return new RegExp(`"${pid}"`).test(out) ? "alive" : "dead";
   } catch {
-    return false;
+    return "unknown";
   }
+}
+
+// Boolean view for callers whose question really is "may I act on this PID?"
+// (the kill gates in stopRelay / stopStaleTerminalHost, the pid-file display
+// path). Deliberately conservative and deliberately unchanged: an
+// inconclusive probe answers false, exactly as it always did, so no kill
+// decision changes meaning. Only the terminal host's parent watchdog — the
+// one caller that acts by EXITING on a death verdict — asks for the
+// tri-state, because for it a wrong "dead" is unrecoverable.
+export function isPidAlive(pid) {
+  return probePidLiveness(pid) === "alive";
 }
 
 const NETSTAT_TIMEOUT_MS = 3000;

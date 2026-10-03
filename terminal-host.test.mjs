@@ -446,7 +446,7 @@ test("watchParentProcess fires onDead once when the parent is gone", () => {
   let dead = 0;
   const handle = watchParentProcess({
     parentPid: 4242,
-    isAlive: () => false,
+    probeLiveness: () => "dead",
     missesRequired: 1,
     setIntervalFn: (fn, ms) => {
       tick = fn;
@@ -472,7 +472,7 @@ test("watchParentProcess stays quiet while the parent lives", () => {
   let dead = 0;
   watchParentProcess({
     parentPid: 4242,
-    isAlive: () => true,
+    probeLiveness: () => "alive",
     setIntervalFn: (fn) => {
       tick = fn;
       return { unref() {} };
@@ -499,16 +499,15 @@ test("watchParentProcess without a parent pid leaves behavior untouched", () => 
   assert.equal(scheduled, 0, "no parent pid, no poller — manual runs behave exactly as before");
 });
 
-// isPidAlive 是 tasklist 同步探测，负载抖动下一次超时/报错就会被判成 false——
-// 单次 miss 不该触发死亡契约，存活判定要清零重新计数。
-test("watchParentProcess 单次 miss 不触发：false 之后出现 true 即清零", () => {
-  const verdicts = [false, true, false, true];
+// 单次探不到不该触发死亡契约：只要其间拿到一次存活判定，之前累积的确认死亡就作废。
+test("watchParentProcess 单次 miss 不触发：死亡判定之后出现存活即清零", () => {
+  const verdicts = ["dead", "alive", "dead", "alive"];
   let call = 0;
   let tick = null;
   let dead = 0;
   watchParentProcess({
     parentPid: 4242,
-    isAlive: () => verdicts[call++ % verdicts.length],
+    probeLiveness: () => verdicts[call++ % verdicts.length],
     missesRequired: 2,
     setIntervalFn: (fn) => {
       tick = fn;
@@ -531,7 +530,7 @@ test("watchParentProcess 连续 miss 达到 missesRequired 才恰好触发一次
   let dead = 0;
   watchParentProcess({
     parentPid: 4242,
-    isAlive: () => false,
+    probeLiveness: () => "dead",
     missesRequired: 3,
     setIntervalFn: (fn) => {
       tick = fn;
@@ -552,13 +551,13 @@ test("watchParentProcess 连续 miss 达到 missesRequired 才恰好触发一次
 });
 
 test("watchParentProcess 存活判定复位计数：复位后重新数满才触发", () => {
-  const verdicts = [false, false, true, false, false, false];
+  const verdicts = ["dead", "dead", "alive", "dead", "dead", "dead"];
   let call = 0;
   let tick = null;
   let dead = 0;
   watchParentProcess({
     parentPid: 4242,
-    isAlive: () => verdicts[call++ % verdicts.length],
+    probeLiveness: () => verdicts[call++ % verdicts.length],
     missesRequired: 3,
     setIntervalFn: (fn) => {
       tick = fn;
@@ -587,7 +586,7 @@ test("watchParentProcess 默认阈值取 WATCHDOG_MISSES_REQUIRED", () => {
   let dead = 0;
   watchParentProcess({
     parentPid: 4242,
-    isAlive: () => false,
+    probeLiveness: () => "dead",
     setIntervalFn: (fn) => {
       tick = fn;
       return { unref() {} };
@@ -602,6 +601,58 @@ test("watchParentProcess 默认阈值取 WATCHDOG_MISSES_REQUIRED", () => {
     tick();
     assert.equal(dead, i < WATCHDOG_MISSES_REQUIRED ? 0 : 1, `tick ${i}`);
   }
+});
+
+// 「系统确认父进程不在」与「这次探针没探出结论」是两件事。把后者读成前者，
+// 就是健康宿主被自己的看门狗杀掉的根因（tasklist 探针在负载尖峰下超时/报错
+// 也返回 false），而宿主一死整个终端服务静默下线、不会再回来。误杀一个健康
+// 宿主的代价，远高于晚一点回收一个真孤儿。
+test("watchParentProcess 探针拿不到结论时永不触发死亡契约", () => {
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    probeLiveness: () => "unknown",
+    missesRequired: 3,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  for (let i = 0; i < 10; i += 1) tick();
+  assert.equal(dead, 0, "再多次无法定论的探针也换不来一次误杀");
+});
+
+test("watchParentProcess 无法定论的结果不作废已确认的死亡计数", () => {
+  const verdicts = ["dead", "unknown", "dead", "unknown", "dead"];
+  let call = 0;
+  let tick = null;
+  let dead = 0;
+  watchParentProcess({
+    parentPid: 4242,
+    probeLiveness: () => verdicts[call++ % verdicts.length],
+    missesRequired: 3,
+    setIntervalFn: (fn) => {
+      tick = fn;
+      return { unref() {} };
+    },
+    onDead: () => {
+      dead += 1;
+    },
+  });
+
+  tick();
+  tick();
+  assert.equal(dead, 0);
+  tick();
+  tick();
+  assert.equal(dead, 0, "unknown 只是透明：既不算存活，也不算死亡");
+  tick();
+  assert.equal(dead, 1, "第三次确认死亡即达阈值");
 });
 
 // One-click CLI Agent launch: POST /terminal/sessions accepts an optional
