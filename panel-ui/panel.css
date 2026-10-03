@@ -812,7 +812,7 @@
   .settings-head-left { display: flex; align-items: center; gap: 12px; }
   .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
   .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
-  /* 「通用」分组：九项按语义分五张卡（启动 / 抗截断 / Claude Code / 实时输出 / 未归类平卡），卡间距对齐
+  /* 「通用」分组：十项按语义分五张卡（启动 / 抗截断 / Claude Code / 实时输出 / 未归类平卡），卡间距对齐
      侧栏列的 20px；设置行悬停整行淡底（--surface-hover 既有悬停 token，与主题列表
      项同手感），行块左右外扩 10px 让底色有呼吸感，文本与原位置对齐。 */
   #settingsPanelGeneral { display: flex; flex-direction: column; gap: 20px; }
