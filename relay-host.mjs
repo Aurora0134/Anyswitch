@@ -51,6 +51,12 @@ const CLEAR_SESSIONS_TIMEOUT_MS = 2000;
 // A healthy host dies on kill() immediately; this only caps a wedged child so a
 // stop can never hang the relay shutdown path.
 const TERMINAL_HOST_STOP_TIMEOUT_MS = 5000;
+// spawn() resolving only means the process exists — the host still needs a
+// moment to bind 47823, and the panel connects the moment POST
+// /terminal-host/start answers. The start route therefore holds its answer
+// until the sessions endpoint actually serves; these cap and pace that wait.
+const TERMINAL_HOST_START_READY_TIMEOUT_MS = 5000;
+const TERMINAL_HOST_START_READY_INTERVAL_MS = 150;
 
 // Startup-only log rotation: once relay-host.log crosses the threshold, rename
 // it to .old (overwriting the previous .old). Never rotate while running —
@@ -268,6 +274,25 @@ async function requestClearAllSessions({ token, fetchFn, hostPort, timeoutMs }) 
   return response.json();
 }
 
+// Readiness probe for the start route: the sessions endpoint answering 200 is
+// the first moment the host is actually connectable. ECONNREFUSED and non-200
+// answers both just mean "not yet" — only the deadline ends the wait.
+async function waitForTerminalHostReady({ token, fetchFn, hostPort, timeoutMs, intervalMs }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const response = await fetchFn(`http://127.0.0.1:${hostPort}/terminal/sessions`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+      if (response.status === 200) return true;
+    } catch {
+      /* not listening yet — the interval below paces the retries */
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export function createTerminalHostRoutes({
   supervisor,
   token,
@@ -279,6 +304,8 @@ export function createTerminalHostRoutes({
   saveSettingsFn = saveSettings,
   hostPort = TERMINAL_HOST_PORT,
   clearSessionsTimeoutMs = CLEAR_SESSIONS_TIMEOUT_MS,
+  startReadyTimeoutMs = TERMINAL_HOST_START_READY_TIMEOUT_MS,
+  startReadyIntervalMs = TERMINAL_HOST_START_READY_INTERVAL_MS,
 }) {
   const persistManualStop = (value) => {
     saveSettingsFn(settingsPath, { terminalHostManualStop: value }, env);
@@ -293,6 +320,20 @@ export function createTerminalHostRoutes({
       const result = await supervisor.start();
       if (!result.ok) {
         return sendRouteJson(res, 500, { ok: false, error: result.reason ?? "terminal host failed to start" });
+      }
+      // The process being up is not the host being connectable: answering now
+      // would send the panel's connect straight into a not-yet-bound port.
+      // Wait for the sessions endpoint to serve (the alreadyRunning path takes
+      // the same probe — a live child can still be mid-bind after a respawn).
+      const ready = await waitForTerminalHostReady({
+        token,
+        fetchFn,
+        hostPort,
+        timeoutMs: startReadyTimeoutMs,
+        intervalMs: startReadyIntervalMs,
+      });
+      if (!ready) {
+        return sendRouteJson(res, 500, { ok: false, error: "terminal_host_start_timeout" });
       }
       // The manual-stop flag only clears once the host is actually up: clearing
       // it first would let a failed start read back as "never stopped".

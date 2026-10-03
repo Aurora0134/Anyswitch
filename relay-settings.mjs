@@ -100,6 +100,15 @@ export function parseTerminalHostManualStop(raw) {
   return raw === true ? true : DEFAULT_TERMINAL_HOST_MANUAL_STOP;
 }
 
+// 终端会话恢复开关：终端服务启动后按上次的会话记录把标签页拉回来。默认开——缺失、
+// 畸形、旧版本没有这个键，一律按「恢复」处理，升级上来的安装维持原有行为；只有显式
+// 写入 false 才不再恢复。
+export const DEFAULT_TERMINAL_RESTORE_SESSIONS = true;
+
+export function parseTerminalRestoreSessions(raw) {
+  return raw === false ? false : DEFAULT_TERMINAL_RESTORE_SESSIONS;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -233,6 +242,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const logLevel = parseLogLevel(raw.logLevel);
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
   const terminalHostManualStop = parseTerminalHostManualStop(raw.terminalHostManualStop);
+  const terminalRestoreSessions = parseTerminalRestoreSessions(raw.terminalRestoreSessions);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -250,6 +260,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       logLevel,
       claudeBypassPermissions,
       terminalHostManualStop,
+      terminalRestoreSessions,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -260,6 +271,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     logLevel,
     claudeBypassPermissions,
     terminalHostManualStop,
+    terminalRestoreSessions,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -349,6 +361,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "terminalHostManualStop")) {
     updated.terminalHostManualStop = parseTerminalHostManualStop(patch.terminalHostManualStop);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "terminalRestoreSessions")) {
+    updated.terminalRestoreSessions = parseTerminalRestoreSessions(patch.terminalRestoreSessions);
   }
 
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启

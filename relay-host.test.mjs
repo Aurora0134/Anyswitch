@@ -348,7 +348,7 @@ test("createTerminalHostSupervisor.status reports stopped-manual only while the 
 // /terminal-host/* routes: spliced in front of the relay server's own listener
 // by mountTerminalHostRoutes, guarded by loopback + the pi-relay-token, driving
 // the supervisor and persisting the manual-stop flag through settings.json.
-function routeHarness({ manualStop = false, fetchFn, spawnFn } = {}) {
+function routeHarness({ manualStop = false, fetchFn, spawnFn, startReadyTimeoutMs, startReadyIntervalMs } = {}) {
   const root = mkTestDir("anyswitch-th-routes-");
   const settingsPath = join(root, "settings.json");
   let child = fakeChild();
@@ -371,7 +371,9 @@ function routeHarness({ manualStop = false, fetchFn, spawnFn } = {}) {
     settingsPath,
     root,
     logger,
-    fetchFn: fetchFn ?? (async () => ({ ok: true, json: async () => ({ ok: true, cleared: 0 }) })),
+    fetchFn: fetchFn ?? (async () => ({ ok: true, status: 200, json: async () => ({ ok: true, cleared: 0 }) })),
+    startReadyTimeoutMs,
+    startReadyIntervalMs,
   });
   const server = createServer((req, res) => {
     res.writeHead(200, { "content-type": "text/plain" });
@@ -459,6 +461,90 @@ test("POST /terminal-host/start answers 500 when the host fails to start", async
     assert.equal(res.status, 500);
     assert.equal((await res.json()).ok, false);
     assert.equal(existsSync(h.settingsPath), false, "a failed start never touches the flag");
+  } finally {
+    await h.close();
+  }
+});
+
+// The panel connects the moment start answers, so the route must hold its
+// answer until the host's sessions endpoint actually serves — spawn()
+// resolving only means the process exists, not that 47823 is bound.
+test("POST /terminal-host/start holds its answer until the sessions endpoint serves", async () => {
+  let probeCalls = 0;
+  let releaseProbe;
+  const h = routeHarness({
+    startReadyIntervalMs: 5,
+    fetchFn: async () => {
+      probeCalls += 1;
+      if (probeCalls === 1) {
+        return new Promise((resolve) => { releaseProbe = () => resolve({ ok: true, status: 200 }); });
+      }
+      return { ok: true, status: 200 };
+    },
+  });
+  const port = await h.listen();
+  try {
+    const pending = fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    let answered = false;
+    pending.then(() => { answered = true; });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(probeCalls, 1, "the readiness probe is in flight");
+    assert.equal(answered, false, "未就绪前不得回答 —— 否则前端紧跟的连接必然 503");
+    releaseProbe();
+    const res = await pending;
+    assert.equal(res.status, 200);
+    assert.equal((await res.json()).ok, true);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/start retries non-200 probes against the sessions endpoint with the relay token", async () => {
+  const probes = [];
+  const h = routeHarness({
+    startReadyIntervalMs: 5,
+    fetchFn: async (url, options) => {
+      probes.push({ url, authorization: options.headers.authorization });
+      return { ok: probes.length >= 3, status: probes.length < 3 ? 503 : 200 };
+    },
+  });
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.host.state, "running");
+    assert.ok(probes.length >= 3, "非 200 的回答要继续探测，直到 host 就绪");
+    for (const probe of probes) {
+      assert.equal(probe.url, "http://127.0.0.1:47823/terminal/sessions");
+      assert.equal(probe.authorization, "Bearer test-token");
+    }
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/start answers 500 on a readiness timeout and never clears the manual-stop flag", async () => {
+  let probes = 0;
+  const h = routeHarness({
+    manualStop: true,
+    startReadyTimeoutMs: 40,
+    startReadyIntervalMs: 5,
+    fetchFn: async () => {
+      probes += 1;
+      return { ok: false, status: 503 };
+    },
+  });
+  writeFileSync(h.settingsPath, JSON.stringify({ terminalHostManualStop: true }));
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    assert.equal(res.status, 500);
+    assert.deepEqual(await res.json(), { ok: false, error: "terminal_host_start_timeout" });
+    assert.ok(probes > 1, "超时窗口内探测是重试的");
+    assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).terminalHostManualStop, true, "失败不能清掉手动关停标记");
+    assert.equal(h.supervisor.isManualStop(), true);
   } finally {
     await h.close();
   }
