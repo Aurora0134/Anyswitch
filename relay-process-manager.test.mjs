@@ -24,6 +24,8 @@ import {
   findPortOwnerPid,
   createCachedPortOwnerFinder,
   PORT_OWNER_CACHE_TTL_MS,
+  probePidLiveness,
+  isPidAlive,
 } from "./relay-process-manager.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -338,4 +340,47 @@ test("stopRelay accepts an async (Promise-returning) injected command-line mappe
   const result = await stopRelay(root, deps);
   assert.equal(result.ok, true);
   assert.deepEqual(killed, [111], "the awaited async mapper must verify and reach the kill");
+});
+
+// --- liveness probe: three states, not two ------------------------------
+//
+// "The OS says no such process" and "the probe could not tell" are different
+// findings, and collapsing them into one false is how a healthy terminal host
+// came to be killed by its own parent watchdog (the tasklist probe reports
+// false on a timeout/error under load). Only a positive finding of absence may
+// count as death; a probe that failed proves nothing either way.
+
+test("probePidLiveness 区分「确认死亡」与「探针无结论」", () => {
+  let crossed = 0;
+  const crossCheck = () => {
+    crossed += 1;
+    return "alive";
+  };
+
+  // A native verdict that is already conclusive must not pay for a tasklist run.
+  assert.equal(probePidLiveness(4242, { nativeProbe: () => "alive", crossCheck }), "alive");
+  assert.equal(probePidLiveness(4242, { nativeProbe: () => "dead", crossCheck }), "dead");
+  assert.equal(crossed, 0, "a conclusive native verdict skips the cross-check entirely");
+
+  // Inconclusive native probe → the cross-check decides; inconclusive there too
+  // → unknown, never dead.
+  assert.equal(probePidLiveness(4242, { nativeProbe: () => "unknown", crossCheck: () => "dead" }), "dead");
+  assert.equal(probePidLiveness(4242, { nativeProbe: () => "unknown", crossCheck: () => "alive" }), "alive");
+  assert.equal(probePidLiveness(4242, { nativeProbe: () => "unknown", crossCheck: () => "unknown" }), "unknown");
+});
+
+test("probePidLiveness 对无效 PID 与真实进程给出正确结论", () => {
+  assert.equal(probePidLiveness(0), "dead");
+  assert.equal(probePidLiveness(-1), "dead");
+  assert.equal(probePidLiveness(Number.NaN), "dead");
+  assert.equal(probePidLiveness(process.pid), "alive", "本进程必然活着");
+  // A PID that cannot exist is a positive finding of absence, not an
+  // inconclusive probe: the watchdog still has to be able to clean up orphans.
+  assert.equal(probePidLiveness(999999), "dead", "不存在的 PID 是确认死亡，不是无结论");
+});
+
+test("isPidAlive 保持保守口径：无结论不算存活", () => {
+  assert.equal(isPidAlive(process.pid), true);
+  assert.equal(isPidAlive(0), false);
+  assert.equal(isPidAlive(999999), false);
 });

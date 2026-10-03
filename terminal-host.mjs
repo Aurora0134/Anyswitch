@@ -14,16 +14,17 @@ import * as pty from "node-pty";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
-import { isPidAlive } from "./relay-process-manager.mjs";
+import { probePidLiveness } from "./relay-process-manager.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
 // The watchdog is the backstop for the relay's hard-exit paths only (a graceful
 // relay stop kills this child first), so firing late costs nothing while firing
-// wrongly kills a healthy host. isPidAlive's tasklist probe reports false on a
-// timeout/error under load spikes — two false kills were observed that way —
-// so onDead requires this many consecutive dead verdicts, any live reading
-// resetting the count.
+// wrongly kills a healthy host — and a wrongly killed host takes the whole
+// terminal service down with it, silently and without coming back. Death
+// therefore has to be a POSITIVE finding (see probePidLiveness): only "dead"
+// counts, and onDead additionally requires this many consecutive dead
+// verdicts, any live reading resetting the count.
 export const WATCHDOG_MISSES_REQUIRED = 5;
 const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -557,13 +558,19 @@ export async function startTerminalHost(options = {}) {
 // ownerless, outliving every app update) is exactly the failure being closed
 // out. While TERMINAL_PARENT_PID_ENV names a live relay, the relay's graceful
 // shutdown kills this child first; this poller is the backstop for every path
-// that doesn't (hard kill of the relay alone, fatal exit). onDead only fires
-// after missesRequired consecutive dead verdicts — a single miss may be a
-// probe hiccup, not a dead parent. Returns null when no valid parent pid was
-// supplied, leaving manual/test runs untouched.
+// that doesn't (hard kill of the relay alone, fatal exit).
+//
+// The probe answers in three states, and only one of them is death. An
+// inconclusive probe ("the probe failed") is transparent here: it neither
+// counts toward the pact nor resets it. That is the difference between "the
+// relay is gone" and "we could not tell this time", and reading the second as
+// the first is how healthy hosts used to be killed by their own watchdog.
+// onDead only fires after missesRequired consecutive CONFIRMED dead verdicts.
+// Returns null when no valid parent pid was supplied, leaving manual/test runs
+// untouched.
 export function watchParentProcess({
   parentPid,
-  isAlive = isPidAlive,
+  probeLiveness = probePidLiveness,
   intervalMs = PARENT_WATCHDOG_INTERVAL_MS,
   missesRequired = WATCHDOG_MISSES_REQUIRED,
   setIntervalFn = setInterval,
@@ -574,10 +581,12 @@ export function watchParentProcess({
   let misses = 0;
   const timer = setIntervalFn(() => {
     if (fired) return;
-    if (isAlive(parentPid)) {
+    const verdict = probeLiveness(parentPid);
+    if (verdict === "alive") {
       misses = 0;
       return;
     }
+    if (verdict !== "dead") return;
     misses += 1;
     if (misses < missesRequired) return;
     fired = true;
