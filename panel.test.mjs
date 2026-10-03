@@ -4750,7 +4750,9 @@ describe("设置项「运行日志」", () => {
       `const $ = () => ({ addEventListener() {}, onclick: null });
        const api = async () => { order.push("ask"); return settingsResult; };
        let loggingEnabled = null;
+       let logLevel = null;
        function applyLoggingEnabled(v) { loggingEnabled = v; order.push("apply:" + v); if (v) connectLogStream(); }
+       function applyLogLevel(v) { logLevel = v; order.push("level:" + v); }
        function connectLogStream() { order.push("connect"); }
        ${source[0]}
        return {
@@ -4761,19 +4763,25 @@ describe("设置项「运行日志」", () => {
 
     const off = run(order, { settings: { loggingEnabled: false } });
     await off.start();
-    assert.deepEqual(order, ["ask", "apply:false"], "关着时不建流");
+    assert.deepEqual(order, ["ask", "level:info", "apply:false"], "关着时不建流");
 
     order.length = 0;
     const on = run(order, { settings: { loggingEnabled: true } });
     await on.start();
-    assert.deepEqual(order, ["ask", "apply:true", "connect"], "开着时先定态再建流");
+    assert.deepEqual(order, ["ask", "level:info", "apply:true", "connect"],
+      "开着时先定态再建流；级别定在建流之前，重放第一帧就按这一档走");
 
-    // 问的途中用户在设置页切过开关：那一次是用户的决定，晚到的这次结果不许把它盖回。
     order.length = 0;
     const raced = run(order, { settings: { loggingEnabled: true } });
     raced.setSeen(false);
     await raced.start();
-    assert.deepEqual(order, ["ask"], "已经有定论时不再覆盖界面");
+    assert.deepEqual(order, ["ask", "level:info"], "已经有定论时不再覆盖界面");
+
+    // 服务端存着级别时，建流之前用的就是它，不是默认的「显示全部」。
+    order.length = 0;
+    const withLevel = run(order, { settings: { loggingEnabled: true, logLevel: "error" } });
+    await withLevel.start();
+    assert.deepEqual(order, ["ask", "level:error", "apply:true", "connect"]);
   });
 
   it("保存失败时开关弹回原状并报错，成功则按服务端回读值落地", async () => {
@@ -4816,6 +4824,243 @@ describe("设置项「运行日志」", () => {
     assert.equal(failed.toggle.checked, true, "回滚到点击前状态");
     assert.deepEqual(failed.applied, [], "失败不落地界面");
     assert.deepEqual(failed.toasts, ["设置保存失败"]);
+  });
+
+  // ── 「日志级别」：过滤只发生在 SSE 出口，档案与缓冲一律全量 ──────────────
+  // res.write 不在通用 fakeReqRes 上（SSE 端点才会逐帧写），所以这里就地补一个能
+  // 收下帧的假 res，再把 data: 行还原成条目。
+  function ssePair(url) {
+    const pair = fakeReqRes(url, "GET");
+    const chunks = [];
+    pair.res.write = (s) => { chunks.push(String(s)); return true; };
+    pair.res.flushHeaders = () => {};
+    pair.frames = () => chunks.join("").split("\n\n").filter(Boolean)
+      .map((frame) => JSON.parse(frame.replace(/^data: /, "")));
+    return pair;
+  }
+
+  async function routerWithLevels(initialLevel) {
+    const { base, dir } = loggingBase();
+    const lines = [];
+    const logger = createLogger({ sink: (line) => lines.push(line) });
+    const router = loggingRouter({ logger, base });
+    if (initialLevel) {
+      const post = fakeReqRes("/panel/api/settings", "POST", { logLevel: initialLevel });
+      await router.handle(post.req, post.res);
+    }
+    return { router, logger, lines, dir };
+  }
+
+  it("重放按门槛筛：info 全给，warn 只剩警告与错误，error 只剩错误", async () => {
+    const cases = [["info", ["a", "b", "c"]], ["warn", ["b", "c"]], ["error", ["c"]]];
+    for (const [level, expected] of cases) {
+      const { router, logger, dir } = await routerWithLevels(level);
+      logger.info("a"); logger.warn("b"); logger.error("c");
+      const pair = ssePair("/panel/api/logs");
+      await router.handle(pair.req, pair.res);
+      assert.deepEqual(pair.frames().map((f) => f.message), expected, `门槛 ${level} 时的重放结果`);
+      assert.equal(logger.getHistory().length, 3,
+        "环形缓冲不因门槛变窄——档案与缓冲全量，只有显示出口在筛");
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("已建着的流逐帧过闸：换门槛不必重连就不再收到低级别新行", async () => {
+    const { router, logger, dir } = await routerWithLevels("info");
+    const pair = ssePair("/panel/api/logs");
+    await router.handle(pair.req, pair.res);
+    assert.equal(pair.frames().length, 0, "空缓冲建连，先什么都不给");
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { logLevel: "error" });
+    await router.handle(post.req, post.res);
+
+    logger.info("noise");
+    logger.warn("still-noise");
+    logger.error("keep me");
+    assert.deepEqual(pair.frames().map((f) => f.message), ["keep me"],
+      "同一条连接当场按新门槛走，别的已打开窗口不必重连");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("清空帧与认不出的级别一律放行", async () => {
+    const { router, logger, dir } = await routerWithLevels("error");
+    const pair = ssePair("/panel/api/logs");
+    await router.handle(pair.req, pair.res);
+
+    // 清空是控制操作、不是一条日志：它没有 level，被筛掉的话窗口就再也空不了。
+    logger.clear();
+    // 将来真加第四级时，它不该因为一个显示过滤器不认识它就从面板上消失。
+    logger.log("debug", "future level");
+    const frames = pair.frames();
+    assert.ok(frames.some((f) => f.type === "clear"), "清空帧照到");
+    assert.ok(frames.some((f) => f.message === "future level"), "未知级别不被吞掉");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("抬门槛不碰落盘：中继那条写文件的路一行不少", async () => {
+    const { router, logger, lines, dir } = await routerWithLevels("error");
+    logger.info("info line");
+    logger.warn("warn line");
+    logger.error("error line");
+    assert.equal(lines.length, 3, "sink 收到全部三行");
+    assert.ok(lines.every((line, i) => line.includes(["info line", "warn line", "error line"][i])),
+      "落盘内容与顺序都不变");
+    assert.equal(logger.getHistory().length, 3, "缓冲同样全量");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("设置往返：写入后 GET 回读，畸形值回落成 info", async () => {
+    const { router, dir } = await routerWithLevels(null);
+    const initial = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(initial.req, initial.res);
+    assert.equal(JSON.parse(initial.res.body).settings.logLevel, "info",
+      "没落盘时是「显示全部」那一档，升级上来的安装行为不变");
+
+    const post = fakeReqRes("/panel/api/settings", "POST", { logLevel: "warn" });
+    await router.handle(post.req, post.res);
+    assert.equal(JSON.parse(post.res.body).settings.logLevel, "warn");
+
+    const after = fakeReqRes("/panel/api/settings", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(JSON.parse(after.res.body).settings.logLevel, "warn");
+
+    const bogus = fakeReqRes("/panel/api/settings", "POST", { logLevel: "trace" });
+    await router.handle(bogus.req, bogus.res);
+    assert.equal(JSON.parse(bogus.res.body).settings.logLevel, "info", "认不出的值不落盘成畸形值");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("从属行在「实时输出」卡内、随总开关收起，控件有稳定 id", () => {
+    const toggleAt = panelHtml.indexOf('id="loggingEnabledToggle"');
+    const rowsAt = panelHtml.indexOf('<div id="logLevelRows" hidden>');
+    const selectAt = panelHtml.indexOf('id="logLevelSelect"');
+    const panelEnd = panelHtml.indexOf('id="settingsPanelRoute"');
+    assert.ok(toggleAt > 0 && rowsAt > toggleAt && selectAt > rowsAt, "级别行紧跟在总开关之后");
+    assert.ok(rowsAt < panelEnd, "整段仍在「通用」子页内，没有漏到别的 tab");
+    assert.ok(panelHtml.slice(rowsAt, selectAt + 40).includes("日志级别"), "行标题是「日志级别」");
+    assert.ok(panelHtml.includes('<option value="info">信息</option>')
+      && panelHtml.includes('<option value="warn">警告</option>')
+      && panelHtml.includes('<option value="error">错误</option>'), "三档选项齐备");
+    assert.ok(panelHtml.slice(rowsAt, panelEnd).includes("级别说明："), "图例在段内");
+    for (const tag of ["ERROR", "WARN", "INFO"]) {
+      assert.ok(panelHtml.slice(rowsAt, panelEnd).includes(tag), `图例覆盖 ${tag}`);
+    }
+  });
+
+  it("从属段说明只讲用户看得懂的行为，不出现字段名", () => {
+    const desc = panelHtml.match(/<div class="modal-item-desc">(实时输出只显示[^<]*)<\/div>/);
+    assert.ok(desc, "说明文案存在");
+    assert.equal(desc[1], "实时输出只显示所选级别及其更高级别的日志行。", "文案逐字定稿");
+    assert.doesNotMatch(desc[1], /logLevel|loggingEnabled|logger|SSE|level/, "正文不出现标识符与机制词");
+    assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase");
+  });
+
+  it("整段的显隐只在 applyLoggingEnabled 一处切，级别行不另立第二套判据", () => {
+    const source = panelJs.match(/function applyLoggingEnabled\(enabled\) \{[\s\S]*?\n  \}/);
+    assert.ok(source, "applyLoggingEnabled 在 panel.js 里");
+    const card = { hidden: false };
+    const rows = { hidden: true };
+    const body = { innerHTML: "old rows" };
+    const run = new Function(
+      "card", "rows", "body", "onConnect",
+      `const $ = (id) => (id === "liveLogCard" ? card : id === "logBody" ? body : id === "logLevelRows" ? rows : null);
+       let es = { close() {} };
+       function connectLogStream() { onConnect(); }
+       let loggingEnabled = null;
+       ${source[0]}
+       return { apply: applyLoggingEnabled, get es() { return es; } };`,
+    );
+    const api = run(card, rows, body, () => {});
+    api.apply(false);
+    assert.equal(rows.hidden, true, "记录停了，选级别没有意义 → 整段收起");
+    api.apply(true);
+    assert.equal(rows.hidden, false, "重新打开立刻回到原来那一档");
+  });
+
+  it("只有已经建着流时换档才重连；同值与开屏定态都不动", () => {
+    const source = panelJs.match(/function applyLogLevel\(level\) \{[\s\S]*?\n  \}/);
+    assert.ok(source, "applyLogLevel 在 panel.js 里");
+    const sel = { value: "" };
+    let restarts = 0;
+    const run = new Function(
+      "sel", "onRestart", "stream",
+      `const $ = () => sel;
+       function restartLogStream() { onRestart(); }
+       let es = stream.es;
+       let logLevel = null;
+       ${source[0]}
+       return { apply: applyLogLevel, get level() { return logLevel; } };`,
+    );
+
+    // 开屏：流还没建（applyLoggingEnabled 随后才连），此时不该抢先重连一次。
+    const cold = run(sel, () => { restarts += 1; }, { es: null });
+    cold.apply("info");
+    assert.equal(sel.value, "info", "首次定态把选框对齐");
+    assert.equal(restarts, 0, "流还没建，谈不上重连");
+
+    // 已建流：进设置页重读设置回灌同一档，不许把流拆了重建（屏幕会闪一下）。
+    const stream = { es: { close() {} } };
+    const same = run(sel, () => { restarts += 1; }, stream);
+    same.apply("warn");
+    same.apply("warn");
+    assert.equal(restarts, 1, "第一次换档重连一次");
+    assert.equal(same.level, "warn");
+
+    same.apply("error");
+    assert.equal(restarts, 2, "再换一档，再重连一次");
+    assert.equal(same.level, "error");
+  });
+
+  it("级别保存：成功按服务端回读落地，失败弹回原档且不重连", async () => {
+    const source = panelJs.match(/logLevelSelect\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+    assert.ok(source, "onchange 处理器在 panel.js 里");
+    const runHandler = (value, apiResult, opts = {}) => {
+      const calls = [];
+      const toasts = [];
+      const applied = [];
+      const settingsSaving = { logLevel: false };
+      const select = {
+        value,
+        selectedOptions: [{ textContent: value === "warn" ? "警告" : "错误" }],
+        setAttribute() {},
+        removeAttribute() {},
+      };
+      const run = new Function(
+        "logLevelSelect", "settingsSaving", "api", "toast", "applyLogLevel", "panelError", "logLevel",
+        `let settingsLoadGen = 0; ${source[0]} return logLevelSelect.onchange();`,
+      );
+      const done = run(
+        select, settingsSaving,
+        async (method, path, body) => {
+          calls.push({ method, path, body });
+          if (opts.throwOnPost) throw new Error("boom");
+          return apiResult;
+        },
+        (message) => toasts.push(message),
+        (v) => applied.push(v),
+        (e, fallback) => fallback,
+        opts.knownLevel ?? "info",
+      );
+      return { done, calls, toasts, applied, select, savingAfter: () => settingsSaving.logLevel };
+    };
+
+    const ok = runHandler("warn", { ok: true, settings: { logLevel: "warn" } });
+    await ok.done;
+    assert.deepEqual(ok.calls, [{ method: "POST", path: "/api/settings", body: { logLevel: "warn" } }]);
+    assert.deepEqual(ok.applied, ["warn"], "界面跟着服务端回读值走");
+    assert.deepEqual(ok.toasts, ["日志级别已设为警告"], "toast 说结果＋新值，措辞抄选项文字");
+    assert.equal(ok.savingAfter(), false, "保存中标记已释放");
+
+    const failed = runHandler("error", { ok: false }, { knownLevel: "warn" });
+    await failed.done;
+    assert.equal(failed.select.value, "warn", "回滚到上一档");
+    assert.deepEqual(failed.applied, [], "失败不落地界面、不重连");
+    assert.deepEqual(failed.toasts, ["设置保存失败"]);
+
+    const threw = runHandler("error", null, { throwOnPost: true, knownLevel: "info" });
+    await threw.done;
+    assert.equal(threw.select.value, "info", "异常同样回滚");
+    assert.deepEqual(threw.toasts, ["请求失败"]);
   });
 });
 

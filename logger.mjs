@@ -22,6 +22,24 @@
 
 const DEFAULT_CAPACITY = 500;
 
+// The level vocabulary this bus knows, ranked so "at least WARN" can be answered
+// honestly. Never compare level strings: alphabetically that orders error < info
+// < warn, which would rank the noisiest level as the most urgent.
+export const LOG_LEVEL_ORDER = { info: 10, warn: 20, error: 30 };
+
+// Whether an entry clears a minimum-level filter used by a viewer (the panel's
+// 实时输出). Both unknowns pass: an entry whose level is not in the table must not
+// vanish from the panel because of someone else's display preference, and an
+// unrecognised filter value means "no filter", not "filter everything out".
+// This is a read-side predicate only — it never gates what is buffered or written.
+export function logLevelAllows(entryLevel, minLevel) {
+  const floor = LOG_LEVEL_ORDER[minLevel];
+  if (floor === undefined) return true;
+  const at = LOG_LEVEL_ORDER[entryLevel];
+  if (at === undefined) return true;
+  return at >= floor;
+}
+
 // Local wall-clock, deliberately not UTC: the file is read beside a user's
 // "it broke around 3pm", and a UTC stamp would silently disagree with that.
 export function formatLogStamp(ts) {

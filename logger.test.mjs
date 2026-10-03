@@ -1,11 +1,11 @@
 // logger.mjs tests: the two contracts the log bus holds — a persisted line carries
 // a wall-clock stamp, and the level lives in exactly ONE place (the entry field),
 // never duplicated into the message text — plus the live on/off gate that the
-// 运行日志 switch drives.
+// 运行日志 switch drives, and the level order a viewer uses to filter what it shows.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createLogger, formatLogStamp } from "./logger.mjs";
+import { createLogger, formatLogStamp, logLevelAllows, LOG_LEVEL_ORDER } from "./logger.mjs";
 
 // 2026-09-28 14:42:16, built from LOCAL parts because the stamp is deliberately
 // local wall-clock (it gets read next to a user's "it broke around 3pm"). Deriving
@@ -88,5 +88,36 @@ describe("logger ring buffer", () => {
     const logger = createLogger({ sink: () => {}, capacity: 3, now: () => FIXED_TS });
     for (const n of ["a", "b", "c", "d"]) logger.info(n);
     assert.deepEqual(logger.getHistory().map((e) => e.message), ["b", "c", "d"]);
+  });
+});
+
+describe("level order for a viewer's minimum-level filter", () => {
+  it("ranks by severity, not alphabetically", () => {
+    // 字典序会把 error 排在 info 之前（e < i < w），拿它当严重度排序，最吵的一档
+    // 会被当成最紧急的。表里只有这三个级别，序必须写死在这里。
+    assert.ok(LOG_LEVEL_ORDER.info < LOG_LEVEL_ORDER.warn);
+    assert.ok(LOG_LEVEL_ORDER.warn < LOG_LEVEL_ORDER.error);
+    assert.deepEqual(Object.keys(LOG_LEVEL_ORDER).sort(), ["error", "info", "warn"]);
+  });
+
+  it("shows an entry when it is at or above the floor", () => {
+    assert.equal(logLevelAllows("info", "info"), true);
+    assert.equal(logLevelAllows("warn", "info"), true);
+    assert.equal(logLevelAllows("error", "info"), true);
+    assert.equal(logLevelAllows("info", "warn"), false);
+    assert.equal(logLevelAllows("warn", "warn"), true);
+    assert.equal(logLevelAllows("error", "warn"), true);
+    assert.equal(logLevelAllows("info", "error"), false);
+    assert.equal(logLevelAllows("warn", "error"), false);
+    assert.equal(logLevelAllows("error", "error"), true);
+  });
+
+  it("passes anything it cannot rank, in either direction", () => {
+    // 认不出来的条目级别：将来真加第四级时，它不该因为一个显示过滤器不认识它就从
+    // 面板上消失——那将是查无此行的故障。认不出来的门槛：等于没有门槛。
+    assert.equal(logLevelAllows("debug", "error"), true);
+    assert.equal(logLevelAllows(undefined, "error"), true, "控制帧没有 level，必须放行");
+    assert.equal(logLevelAllows("info", "bogus"), true);
+    assert.equal(logLevelAllows("info", undefined), true);
   });
 });

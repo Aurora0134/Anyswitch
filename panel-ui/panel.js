@@ -1943,13 +1943,37 @@ async function api(method, path, body) {
   let followLogs = true;
   // 运行日志开关的当前值。null = 还没问出来，此时不覆盖界面。
   let loggingEnabled = null;
+  // 实时输出级别过滤的当前值。null = 还没问出来，此时不重连已有的流。
+  let logLevel = null;
 
-  // 运行日志开关的落地面（开关本体在设置→通用）。关掉时左侧那张卡整卡隐去、日志流
-  // 断开并清空：记录已经停了，留一张永远空着的窗只是噪声。
+  // 换级别后重连一次：服务端按新门槛重放缓冲里最近 500 条，屏幕立刻换成筛过的结果，
+  // 而不是等下一条新日志来证明这一项生效了。记录停着时没有流可重连，跳过。
+  function restartLogStream() {
+    if (loggingEnabled === false) return;
+    if (es) { es.close(); es = null; }
+    const body = $("logBody");
+    if (body) body.innerHTML = "";
+    connectLogStream();
+  }
+
+  // 级别的落地面。同值不动（进设置页会重读一次设置，不该每次都闪一下）；只有已经
+  // 建着流时才重连——开屏那一次定态发生在建流之前，服务端按这一档重放即可。
+  function applyLogLevel(level) {
+    const sel = $("logLevelSelect");
+    if (sel) sel.value = level;
+    if (logLevel === level) return;
+    logLevel = level;
+    if (es) restartLogStream();
+  }
+
+  // 运行日志开关的落地面（开关本体在设置→通用）。「日志级别」是它的从属项：记录都
+  // 停了，选级别没有意义，所以整段跟着一起收起，只藏控件、不重置已选值。
   function applyLoggingEnabled(enabled) {
     loggingEnabled = enabled;
     const card = $("liveLogCard");
     if (card) card.hidden = !enabled;
+    const levelRows = $("logLevelRows");
+    if (levelRows) levelRows.hidden = !enabled;
     if (enabled) {
       connectLogStream();
       return;
@@ -1975,10 +1999,15 @@ async function api(method, path, body) {
       try { await api("POST", "/api/logs/clear"); } catch {}
     };
     let enabled = true;
+    let level = "info";
     try {
       const d = await api("GET", "/api/settings");
       enabled = d?.settings?.loggingEnabled !== false;
+      const saved = d?.settings?.logLevel;
+      level = saved === "warn" || saved === "error" ? saved : "info";
     } catch { /* 按默认开 */ }
+    // 先定级别再建流：门槛在重放那一刻就生效，窗口不会先把全量闪一遍再筛。
+    if (logLevel === null) applyLogLevel(level);
     if (loggingEnabled === null) applyLoggingEnabled(enabled);
   }
 
@@ -2833,6 +2862,7 @@ async function api(method, path, body) {
     const followAgentToggle = $("followAgentToggle");
     const injectEffortToggle = $("injectEffortToggle");
     const loggingEnabledToggle = $("loggingEnabledToggle");
+    const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
     const claudeTierEnabledToggle = $("claudeTierEnabledToggle");
     const sparkWindowInput = $("sparkWindowInput");
@@ -2852,7 +2882,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -3093,6 +3123,12 @@ async function api(method, path, body) {
         if (!settingsSaving.loggingEnabled && loggingEnabledToggle && d.settings && typeof d.settings.loggingEnabled === "boolean") {
           loggingEnabledToggle.checked = d.settings.loggingEnabled;
           applyLoggingEnabled(d.settings.loggingEnabled);
+        }
+        // 日志级别：从属于上面那个总开关，回灌只同步选框与门槛本身；整段显隐归
+        // applyLoggingEnabled 管，两处不各说各话。认不出的值按「显示全部」处理，
+        // 与服务端同一口径——这一项是拿来少看的，读不到时不该反过来多看不见。
+        if (!settingsSaving.logLevel && logLevelSelect && d.settings && typeof d.settings.logLevel === "string") {
+          applyLogLevel(d.settings.logLevel === "warn" || d.settings.logLevel === "error" ? d.settings.logLevel : "info");
         }
         if (!settingsSaving.claudeBypassPermissions && claudeBypassPermissionsToggle && d.settings && typeof d.settings.claudeBypassPermissions === "boolean") {
           claudeBypassPermissionsToggle.checked = d.settings.claudeBypassPermissions;
@@ -3464,6 +3500,37 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.loggingEnabled = false;
           loggingEnabledToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 日志级别：即改即存，保存成功后按新门槛重连日志流（在 applyLogLevel 里）。
+    // 选项文字只写在 panel.html 一处，toast 从选中的那个 option 现取，不在脚本里
+    // 另立一份中文级别名。
+    if (logLevelSelect) {
+      logLevelSelect.onchange = async () => {
+        if (settingsSaving.logLevel) return;
+        const next = logLevelSelect.value;
+        const nextLabel = logLevelSelect.selectedOptions?.[0]?.textContent ?? next;
+        settingsSaving.logLevel = true;
+        settingsLoadGen += 1;
+        logLevelSelect.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { logLevel: next });
+          if (!d.ok) {
+            logLevelSelect.value = logLevel ?? "info";
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.logLevel;
+            applyLogLevel(typeof saved === "string" ? saved : next);
+            toast(`日志级别已设为${nextLabel}`);
+          }
+        } catch (e) {
+          logLevelSelect.value = logLevel ?? "info";
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.logLevel = false;
+          logLevelSelect.removeAttribute("aria-busy");
         }
       };
     }

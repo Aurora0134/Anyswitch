@@ -485,9 +485,9 @@
   .log-line { margin-bottom: 3px; word-break: break-all; }
   .log-line .ts { color: #64748b; margin-right: 6px; }
   .log-line .lvl { font-weight: 600; margin-right: 6px; }
-  .log-line.info .lvl { color: #38bdf8; }
-  .log-line.warn .lvl { color: #fbbf24; }
-  .log-line.error .lvl { color: #f87171; }
+  .log-line.info .lvl, .log-level-legend .lvl.info { color: #38bdf8; }
+  .log-line.warn .lvl, .log-level-legend .lvl.warn { color: #fbbf24; }
+  .log-line.error .lvl, .log-level-legend .lvl.error { color: #f87171; }
 
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
@@ -806,6 +806,22 @@
   /* 四档行的收起容器：总开关关掉时整块藏起（显式声明打底，防止将来给容器加
      display 规则时盖掉 UA 的 [hidden] 行为——见 panel.css:515 同因注释）。 */
   #claudeTierRows[hidden] { display: none; }
+  /* 「日志级别」从属段：与上面四档行同一套收起写法（显式声明打底，防止将来给容器加
+     display 规则时盖掉 UA 的 [hidden] 行为）。段内首行必须把分隔线补回来——
+     `.modal-item:first-of-type` 会按「本层第一个」摘掉上边线，包一层容器后它就成了
+     本层第一个，不补的话这一段看着像悬在半空。 */
+  #logLevelRows[hidden] { display: none; }
+  #logLevelRows .modal-item:first-of-type { border-top: 1px solid var(--divider); }
+  /* 级别图例：把实时输出里那三个大写标签和选项的中文对上。边框底色取全站「卡内小块」
+     那一档（纯 token），标签文字色与实时输出行共用上面那组 .lvl 规则。 */
+  .log-level-legend {
+    margin: 4px -10px 0; padding: 10px 12px;
+    background: var(--surface-sunken); border: 1px solid var(--border);
+    border-radius: var(--radius-md, 8px);
+    font-size: 11.5px; color: var(--text-3); line-height: 1.7;
+  }
+  .log-level-legend-title { font-weight: 600; color: var(--text); margin-bottom: 2px; }
+  .log-level-legend .lvl { font-family: var(--font-mono); font-weight: 600; margin-right: 6px; }
   #settingsPanelAbout { display: flex; flex-direction: column; gap: 20px; }
   .about-card-head { flex-wrap: wrap; gap: 12px; }
   .about-app-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
@@ -3776,9 +3792,9 @@
   color: #f2e9da;
 }
 :root[data-style="sepia"] .log-line .ts { color: #655846; }
-:root[data-style="sepia"] .log-line.info .lvl { color: #8593a6; }
-:root[data-style="sepia"] .log-line.warn .lvl { color: #d4a446; }
-:root[data-style="sepia"] .log-line.error .lvl { color: #db6650; }
+:root[data-style="sepia"] .log-line.info .lvl, :root[data-style="sepia"] .log-level-legend .lvl.info { color: #8593a6; }
+:root[data-style="sepia"] .log-line.warn .lvl, :root[data-style="sepia"] .log-level-legend .lvl.warn { color: #d4a446; }
+:root[data-style="sepia"] .log-line.error .lvl, :root[data-style="sepia"] .log-level-legend .lvl.error { color: #db6650; }
 
 /* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
 
