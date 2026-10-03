@@ -25,7 +25,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { writeZcodeConfig } from "./zcode-launcher.mjs";
 import { writeDshConfig } from "./dsh-launcher.mjs";
 import { createLogger, formatLogStamp } from "./logger.mjs";
-import { createLoggingEnabledGate, defaultSettingsPath } from "./relay-settings.mjs";
+import { createLoggingEnabledGate, defaultSettingsPath, loadSettings, saveSettings } from "./relay-settings.mjs";
 import { createPanelRouter } from "./panel.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
@@ -34,13 +34,23 @@ import { createStoreWatcher } from "./agent-sync.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { createInstanceSocketOwner } from "./instance-socket-owner.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
-import { stopStaleTerminalHost, TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
+import { stopStaleTerminalHost, TERMINAL_PARENT_PID_ENV, TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 import { spawn } from "node:child_process";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const RELAY_PORT = 47821;
 const TERMINAL_HOST_SCRIPT = fileURLToPath(new URL("terminal-host.mjs", import.meta.url));
 const LOG_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024;
+// Mirrors TERMINAL_STATE_FILE in terminal-host.mjs. Duplicated instead of
+// imported: importing terminal-host.mjs here would drag node-pty's native
+// binding into the relay process, which never spawns a PTY itself.
+const TERMINAL_STATE_FILE = "terminal-sessions.json";
+// stop({clearSessions}) asks the live host to wipe its sessions first; a wedged
+// host must not hold the relay's stop route open, so the call is capped.
+const CLEAR_SESSIONS_TIMEOUT_MS = 2000;
+// A healthy host dies on kill() immediately; this only caps a wedged child so a
+// stop can never hang the relay shutdown path.
+const TERMINAL_HOST_STOP_TIMEOUT_MS = 5000;
 
 // Startup-only log rotation: once relay-host.log crosses the threshold, rename
 // it to .old (overwriting the previous .old). Never rotate while running —
@@ -93,10 +103,18 @@ function relayDataRoot(base = process.env) {
 // terminal-host DETACHED and never stop it, so an app update left the old
 // process serving old terminal code forever. The resident relay now owns the
 // terminal host as a plain NON-detached child held by handle (never unref'd):
-// it starts right after the relay starts listening, stop() kills it before
-// every relay exit, and a foreign survivor on 47823 is reported, never
-// murdered. The child additionally self-watches TERMINAL_PARENT_PID_ENV as
-// the crash backstop (Windows children do not die with their parent).
+// it starts right after the relay starts listening (unless the persisted
+// manual-stop flag says the user shut it down), stop() kills it before every
+// relay exit, and a foreign survivor on 47823 is reported, never murdered. The
+// child additionally self-watches TERMINAL_PARENT_PID_ENV as the crash backstop
+// (Windows children do not die with their parent).
+//
+// Lifecycle for the panel: start() is idempotent (a live child is a no-op),
+// stop() kills the child and waits for its exit, and status() reports
+// { state, pid, lastExit } — "running" while the child lives,
+// "stopped-manual" while the manual-stop flag is set, "crashed" after an
+// unexpected exit that has not been restarted, "stopped" otherwise. An exit
+// that stop() did not initiate is recorded as lastExit = { code, signal, at }.
 //
 // A terminal host that fails to spawn or exits early (port still held,
 // missing pty binding) must NEVER take the relay down — the panel already
@@ -110,10 +128,16 @@ export function createTerminalHostSupervisor({
   selfPid = process.pid,
   cleanupStale = (rootArg, depsArg) => stopStaleTerminalHost(rootArg, depsArg),
   script = TERMINAL_HOST_SCRIPT,
+  manualStop = false,
+  stopTimeoutMs = TERMINAL_HOST_STOP_TIMEOUT_MS,
 } = {}) {
   let child = null;
+  let lastExit = null;
+  let stopping = false;
+  let manualStopFlag = manualStop === true;
   return {
     async start() {
+      if (child) return { ok: true, pid: child.pid ?? null, alreadyRunning: true };
       // One-time migration sweep (see stopStaleTerminalHost). A refusal means
       // 47823 belongs to a foreign process: skip the spawn rather than fight
       // for the port.
@@ -138,27 +162,217 @@ export function createTerminalHostSupervisor({
           env: { ...env, [TERMINAL_PARENT_PID_ENV]: String(selfPid) },
         });
       } catch (error) {
-        logger.warn(`terminal host spawn failed (terminal view stays empty until the next relay start): ${error.message}`);
+        logger.warn(`terminal host spawn failed (terminal view stays empty until the host is started again): ${error.message}`);
         return { ok: false, skipped: false };
       }
+      stopping = false;
+      lastExit = null;
       child = spawned;
       child.on?.("exit", (code, signal) => {
         if (child !== spawned) return; // our own stop() raced us to it
         child = null;
-        logger.warn(`terminal host exited early (code ${code ?? "null"}, signal ${signal ?? "none"}); terminal view stays empty until the next relay start`);
+        if (stopping) {
+          stopping = false;
+          logger.info("terminal host stopped");
+          return;
+        }
+        lastExit = { code: code ?? null, signal: signal ?? null, at: Date.now() };
+        logger.warn(`terminal host exited early (code ${code ?? "null"}, signal ${signal ?? "none"}); terminal view stays empty until the host is started again`);
       });
       return { ok: true, pid: child.pid ?? null };
     },
-    stop() {
-      if (!child) return;
-      try {
-        child.kill();
-      } catch {
-        /* already gone */
-      }
-      child = null;
+    async stop() {
+      const target = child;
+      if (!target) return;
+      stopping = true;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, stopTimeoutMs);
+        timer.unref?.();
+        target.once?.("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        try {
+          target.kill();
+        } catch {
+          /* already gone */
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      if (child === target) child = null;
+    },
+    status() {
+      let state = "stopped";
+      if (child) state = "running";
+      else if (manualStopFlag) state = "stopped-manual";
+      else if (lastExit) state = "crashed";
+      return { state, pid: child?.pid ?? null, lastExit };
+    },
+    setManualStop(value) {
+      manualStopFlag = value === true;
+    },
+    isManualStop() {
+      return manualStopFlag;
     },
   };
+}
+
+// ---- Terminal host lifecycle routes (/terminal-host/*) --------------------
+// The panel drives these cross-process (47820 → 47821). They live in
+// relay-host rather than openai-server.mjs because the supervisor handle only
+// exists here; mounting wraps the server's request listener (see
+// mountTerminalHostRoutes). Same guard rail as the /api/internal/* routes:
+// loopback-only plus the pi-relay-token.
+
+function sendRouteJson(res, status, body) {
+  const text = JSON.stringify(body);
+  res.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
+  res.end(text);
+}
+
+function readRouteBody(req, maxBytes = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let text = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      text += chunk;
+      if (text.length > maxBytes) {
+        reject(Object.assign(new Error("request body too large"), { statusCode: 413 }));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      try {
+        resolve(text ? JSON.parse(text) : {});
+      } catch {
+        reject(Object.assign(new Error("invalid json"), { statusCode: 400 }));
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function isLoopbackAddress(address) {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+async function requestClearAllSessions({ token, fetchFn, hostPort, timeoutMs }) {
+  const response = await fetchFn(`http://127.0.0.1:${hostPort}/terminal/sessions/clear-all`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: "{}",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`clear-all answered ${response.status}`);
+  return response.json();
+}
+
+export function createTerminalHostRoutes({
+  supervisor,
+  token,
+  settingsPath,
+  root,
+  logger = console,
+  env = process.env,
+  fetchFn = fetch,
+  saveSettingsFn = saveSettings,
+  hostPort = TERMINAL_HOST_PORT,
+  clearSessionsTimeoutMs = CLEAR_SESSIONS_TIMEOUT_MS,
+}) {
+  const persistManualStop = (value) => {
+    saveSettingsFn(settingsPath, { terminalHostManualStop: value }, env);
+    supervisor.setManualStop(value);
+  };
+
+  const routes = {
+    "GET /terminal-host/status": async (req, res) => {
+      sendRouteJson(res, 200, { ok: true, host: supervisor.status() });
+    },
+    "POST /terminal-host/start": async (req, res) => {
+      const result = await supervisor.start();
+      if (!result.ok) {
+        return sendRouteJson(res, 500, { ok: false, error: result.reason ?? "terminal host failed to start" });
+      }
+      // The manual-stop flag only clears once the host is actually up: clearing
+      // it first would let a failed start read back as "never stopped".
+      try {
+        persistManualStop(false);
+      } catch (error) {
+        return sendRouteJson(res, 500, { ok: false, error: error.message });
+      }
+      return sendRouteJson(res, 200, { ok: true, host: supervisor.status() });
+    },
+    "POST /terminal-host/stop": async (req, res) => {
+      const body = await readRouteBody(req);
+      const clearSessions = body?.clearSessions === true;
+      try {
+        persistManualStop(true);
+      } catch (error) {
+        return sendRouteJson(res, 500, { ok: false, error: error.message });
+      }
+      let clearFailed = false;
+      if (clearSessions) {
+        try {
+          await requestClearAllSessions({ token, fetchFn, hostPort, timeoutMs: clearSessionsTimeoutMs });
+        } catch (error) {
+          clearFailed = true;
+          logger.warn?.(`terminal sessions clear-all failed (${error.message}); will delete the state file after the host is down`);
+        }
+      }
+      await supervisor.stop();
+      // The host was unreachable, so its persisted session records may still
+      // name live tabs: with the child dead, deleting the file is the only
+      // remaining way to honour the clear.
+      if (clearSessions && clearFailed) {
+        try {
+          unlinkSync(join(root, TERMINAL_STATE_FILE));
+        } catch {
+          /* nothing persisted — nothing to delete */
+        }
+      }
+      return sendRouteJson(res, 200, { ok: true, host: supervisor.status() });
+    },
+  };
+
+  // Returns true when the request was claimed (answer already sent or on its
+  // way), false when the path is not ours and the upstream relay routes should
+  // see it.
+  return function handleTerminalHostRoute(req, res) {
+    const url = new URL(req.url, "http://127.0.0.1");
+    if (!url.pathname.startsWith("/terminal-host/")) return false;
+    if (!isLoopbackAddress(req.socket.remoteAddress)) {
+      sendRouteJson(res, 403, { ok: false, error: "loopback_only" });
+      return true;
+    }
+    if (token && req.headers.authorization !== `Bearer ${token}`) {
+      sendRouteJson(res, 401, { ok: false, error: "unauthorized" });
+      return true;
+    }
+    const route = routes[`${req.method} ${url.pathname}`];
+    if (!route) {
+      sendRouteJson(res, 404, { ok: false, error: "not_found" });
+      return true;
+    }
+    Promise.resolve(route(req, res)).catch((error) => {
+      logger.warn?.(`terminal-host route ${req.method} ${url.pathname} failed: ${error.message}`);
+      if (!res.headersSent) {
+        sendRouteJson(res, error.statusCode ?? 500, { ok: false, error: error.message });
+      }
+    });
+    return true;
+  };
+}
+
+// Splice the terminal-host routes in front of the relay server's own request
+// listener: openai-server.mjs owns every other path and is not touched.
+export function mountTerminalHostRoutes(server, handleTerminalHostRoute) {
+  const upstream = server.listeners("request");
+  server.removeAllListeners("request");
+  server.on("request", (req, res) => {
+    if (handleTerminalHostRoute(req, res)) return;
+    for (const listener of upstream) listener.call(server, req, res);
+  });
 }
 
 // Mirror of zcode-launcher.mjs createOpenAIProductionDeps, but injecting the
@@ -317,9 +531,29 @@ export async function startResidentRelay(options = {}) {
 
   // The terminal host lives and dies with THIS relay (see
   // createTerminalHostSupervisor): swept-and-spawned here, killed in
-  // shutdown() below, replaced wholesale on every update.
-  const terminalSupervisor = options.terminalSupervisor ?? createTerminalHostSupervisor({ root, logger });
-  await terminalSupervisor.start();
+  // shutdown() below, replaced wholesale on every update. A persisted
+  // manual-stop flag means the user shut it down from the panel — the relay
+  // respects that and leaves it down instead of resurrecting it.
+  const settingsPath = defaultSettingsPath(options.base ?? process.env);
+  let terminalHostManualStop = false;
+  try {
+    terminalHostManualStop = loadSettings(settingsPath).settings.terminalHostManualStop === true;
+  } catch {
+    /* an unreadable settings file must never keep the host down */
+  }
+  const terminalSupervisor = options.terminalSupervisor ?? createTerminalHostSupervisor({ root, logger, manualStop: terminalHostManualStop });
+  mountTerminalHostRoutes(server, createTerminalHostRoutes({
+    supervisor: terminalSupervisor,
+    token: deps.token,
+    settingsPath,
+    root,
+    logger,
+  }));
+  if (terminalHostManualStop) {
+    logger.info("terminal host was stopped manually; leaving it down (start it from the panel to resume)");
+  } else {
+    await terminalSupervisor.start();
+  }
 
   // Initial sync of all agent configs (zcode, dsh, pi, kimi, qoder, codex,
   // opencode, grok).

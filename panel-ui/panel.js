@@ -287,6 +287,9 @@ async function api(method, path, body) {
     initBrandVersion();
     initSettingsView();
     if (typeof initTerminalPreview === "function") initTerminalPreview();
+    // 与 initTerminalPreview 同款 typeof 守卫：panel-startup 测试把 init() 抽进桩环境
+    // 真跑，桩里只提供固定名单上的函数。
+    if (typeof initTerminalHostControls === "function") initTerminalHostControls();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -431,6 +434,8 @@ async function api(method, path, body) {
         sbState.className = "badge badge-danger";
         sbState.textContent = "已停止";
       }
+      // 终端宿主状态随状态帧一起下发：驱动入口卡与终端页头的徽标与起停钮
+      applyTerminalHostState(normalizeTerminalHostState(res?.terminalHost?.state));
     } catch {
       // 面板服务正在换新进程：47820 整个不可达是预期内的，徽标已由
       // watchPanelHostComeBack 写成「面板服务重启中…」，这里不能再把它改判成
@@ -441,6 +446,8 @@ async function api(method, path, body) {
       $("sbStateBadge").className = "badge badge-danger";
       $("sbStateBadge").textContent = "已停止";
       updateRelayControls({ status: "stopped" });
+      // 状态帧取不到时宿主状态同样不可知：徽标落「状态未知」、起停钮禁用
+      applyTerminalHostState("unknown");
     }
   }
 
@@ -4365,7 +4372,7 @@ async function api(method, path, body) {
     updateTerminalFootSize(session);
   }
 
-  function connectTerminalStream(session) {
+  async function connectTerminalStream(session) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
     // 终端页后活着的那条流，不能被隐藏期的重渲染路径（fetch 完成、轮询）关掉。
@@ -4394,6 +4401,14 @@ async function api(method, path, body) {
     if (!session?.backend) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
       return;
+    }
+    // 从上次中断继续回来的会话进程已死（快照 status: exited）：点开页签先在原
+    // cwd/壳上重启它再建流——一次点击就是新壳，否则键入只会落进 409。
+    if (session.backendState?.status === "exited") {
+      try {
+        const revived = await api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`);
+        if (revived) session.backendState = revived;
+      } catch (error) { console.warn(`[terminal] session revive failed (${session.id}):`, error); }
     }
     terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     terminalEventSource.addEventListener("snapshot", (event) => {
@@ -4649,6 +4664,20 @@ async function api(method, path, body) {
   // 随降级禁用。
   function renderTerminalUnavailableState() {
     const overlay = $("terminalUnavailable");
+    // 「已停止 / 启动中」两态改写过同一覆盖层的文案与动作钮：回到未运行态先填回定稿
+    const titleEl = $("terminalUnavailableTitle");
+    if (titleEl) titleEl.textContent = "终端服务未运行";
+    const descEl = $("terminalUnavailableDesc");
+    if (descEl) {
+      descEl.hidden = false;
+      descEl.textContent = "终端服务随 relay 一同启动，relay 运行后即可使用。";
+    }
+    const retryBtn = $("terminalRetryBtn");
+    if (retryBtn) {
+      retryBtn.hidden = false;
+      retryBtn.textContent = "重新连接";
+      retryBtn.onclick = () => connectTerminalBackend();
+    }
     if (overlay) overlay.hidden = false;
     // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
     const empty = $("terminalEmpty");
@@ -4673,6 +4702,224 @@ async function api(method, path, body) {
   function syncTerminalAddBtn() {
     const addBtn = $("terminalAddBtn");
     if (addBtn) addBtn.disabled = !terminalBackendReady;
+  }
+
+  // ── 终端宿主（terminal-host）生命周期 ──
+  // 状态真值在 relay，随 /api/status 每秒下发（refreshStatus → applyTerminalHostState）；
+  // 起停走 /api/terminal/host/start|stop，relay 不可达时这两个端点回 503（api() 抛出）。
+  // 状态词表即定稿四态：running / stopped（手动关停）/ exited（异常退出）/ unknown。
+  // 面板路由透传 relay 的细分词（stopped-manual / crashed），入前端前一律先归一，
+  // 分支与徽标只认归一后的词。
+  let terminalHostState = "unknown";
+  // 起停在飞标志：一轮起停未落地前按住页头起停钮（轮询每拍重算可用态，不压住会重复
+  // 触发），同时挡住「重新运行」迁移里的自动补连（它会与启动通路的连接抢出双建会话）。
+  let terminalHostOpInFlight = false;
+
+  function normalizeTerminalHostState(raw) {
+    if (raw === "running") return "running";
+    if (raw === "stopped" || raw === "stopped-manual") return "stopped";
+    if (raw === "exited" || raw === "crashed") return "exited";
+    return "unknown";
+  }
+
+  const TERMINAL_HOST_BADGE_MAP = {
+    running: ["badge badge-ok", "运行中"],
+    stopped: ["badge badge-neutral", "已停止"],
+    exited: ["badge badge-danger", "异常"],
+  };
+
+  function syncTerminalHostControls() {
+    const [cls, label] = TERMINAL_HOST_BADGE_MAP[terminalHostState] || ["badge badge-neutral", "状态未知"];
+    for (const el of [$("terminalHostBadge"), $("terminalHostHeadBadge")]) {
+      if (!el) continue;
+      el.className = cls;
+      // 文案写在 .badge-text 内层：窄屏档只藏内层留圆点，外层类名与底色不动
+      (el.firstElementChild || el).textContent = label;
+    }
+    // 起停二合一钮：运行中呈关停、已停止/异常呈启动，状态未知按住不动
+    const toggleBtn = $("terminalHostToggleBtn");
+    if (!toggleBtn) return;
+    const canStop = terminalHostState === "running";
+    const canStart = terminalHostState === "stopped" || terminalHostState === "exited";
+    toggleBtn.disabled = terminalHostOpInFlight || (!canStop && !canStart);
+    const iconStart = $("terminalHostIconStart");
+    const iconStop = $("terminalHostIconStop");
+    if (iconStart) iconStart.hidden = canStop;
+    if (iconStop) iconStop.hidden = !canStop;
+    const action = canStop ? "关停终端服务" : "启动终端服务";
+    toggleBtn.title = action;
+    toggleBtn.setAttribute("aria-label", action);
+  }
+
+  function applyTerminalHostState(state, { reconnect = true } = {}) {
+    const prev = terminalHostState;
+    terminalHostState = state;
+    syncTerminalHostControls();
+    if (prev === state) return;
+    if (state === "stopped") {
+      // 手动关停（含在别的窗口操作）：本地会话只是服务端真值的缓存，host 一停即失效，
+      // 清空后落「已停止」页；保留与否由关停时带的 clearSessions 交给服务端记。
+      clearTerminalLocalSessions();
+      if (currentView === "terminal") renderTerminalStoppedState();
+    } else if (reconnect && state === "running" && prev !== "unknown" && currentView === "terminal" && !terminalBackendReady && !terminalHostOpInFlight) {
+      // 停在终端页期间宿主重新运行（别处拉起）：本地未就绪就补连一次。prev 为
+      // "unknown" 的帧排除掉——那是面板初载，初装连接已在飞，再补一次会双建会话。
+      connectTerminalBackend();
+    }
+    // exited：页签保留不动（停在最后一帧），只转徽标（syncTerminalHostControls 已做），
+    // 不收现场、不自动拉起——拉起只发生在进页时。
+  }
+
+  // 「从上次中断的地方继续」开关：localStorage 键 panel-terminal-restore-sessions，缺省视为开。
+  function terminalRestoreEnabled() {
+    try { return localStorage.getItem("panel-terminal-restore-sessions") !== "0"; } catch { return true; }
+  }
+
+  // 关停后清空本地会话状态：页签、流、活动 id 一并走，下次启动从服务端清单重建。
+  // 页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时它读的是预览稿种子会话。
+  function clearTerminalLocalSessions() {
+    closeTerminalStream();
+    terminalBackendReady = false;
+    terminalBackendSessions = {};
+    activeTerminalPreviewId = null;
+    rememberTerminalSessionId(null);
+    const tabs = $("terminalTabs");
+    if (tabs) tabs.innerHTML = "";
+  }
+
+  // 「已停止」状态页：与「未运行」同一覆盖层、同一套退场动作，文案与动作钮随即改写。
+  function renderTerminalStoppedState() {
+    renderTerminalUnavailableState();
+    const titleEl = $("terminalUnavailableTitle");
+    if (titleEl) titleEl.textContent = "终端服务已停止";
+    const descEl = $("terminalUnavailableDesc");
+    if (descEl) descEl.hidden = true;
+    const btn = $("terminalRetryBtn");
+    if (btn) {
+      btn.hidden = false;
+      btn.textContent = "启动终端服务";
+      btn.onclick = () => startTerminalHost();
+    }
+  }
+
+  // 「启动中」状态页：同一覆盖层，只给标题，不给自己打断自己的动作钮。
+  function renderTerminalStartingState() {
+    renderTerminalUnavailableState();
+    const titleEl = $("terminalUnavailableTitle");
+    if (titleEl) titleEl.textContent = "正在启动终端服务…";
+    const descEl = $("terminalUnavailableDesc");
+    if (descEl) descEl.hidden = true;
+    const btn = $("terminalRetryBtn");
+    if (btn) btn.hidden = true;
+  }
+
+  // 启动通路：拉起成功后立即落地返回的宿主状态（徽标/起停钮不等多 1s 轮询帧），
+  // 再走既有连接通路（其失败分支自落「未运行」空态）。
+  async function startTerminalHost() {
+    if (terminalHostOpInFlight) return;
+    terminalHostOpInFlight = true;
+    syncTerminalHostControls();
+    try {
+      const d = await api("POST", "/api/terminal/host/start");
+      applyTerminalHostState(d && typeof d.state === "string" ? normalizeTerminalHostState(d.state) : "running", { reconnect: false });
+      await connectTerminalBackend();
+    } catch (e) {
+      toast(panelError(e, "无法启动终端服务"), true);
+      if (terminalHostState === "stopped") renderTerminalStoppedState();
+      else renderTerminalUnavailableState();
+    } finally {
+      terminalHostOpInFlight = false;
+      syncTerminalHostControls();
+    }
+  }
+
+  // 异常退出的自动拉起（只在进页时发生，无开关）：拉起期间盖住画区，失败落
+  // 「未运行」空态，空态「重新连接」可再试。
+  async function autoStartTerminalHost() {
+    if (terminalHostOpInFlight) return;
+    terminalHostOpInFlight = true;
+    renderTerminalStartingState();
+    try {
+      const d = await api("POST", "/api/terminal/host/start");
+      applyTerminalHostState(d && typeof d.state === "string" ? normalizeTerminalHostState(d.state) : "running", { reconnect: false });
+      await connectTerminalBackend();
+    } catch {
+      terminalBackendReady = false;
+      renderTerminalUnavailableState();
+    } finally {
+      terminalHostOpInFlight = false;
+      syncTerminalHostControls();
+    }
+  }
+
+  // 关停入口：零会话直接停；有会话先弹确认，正文写清未退出会话数与保留/移除后果。
+  function requestStopTerminalHost() {
+    if (terminalHostOpInFlight) return;
+    const clearSessions = !terminalRestoreEnabled();
+    const sessions = Object.values(terminalBackendSessions);
+    if (!sessions.length) {
+      executeStopTerminalHost(clearSessions);
+      return;
+    }
+    const liveCount = sessions.filter((s) => (s?.backendState?.status ?? s?.status) !== "exited").length;
+    showSkillsModal({
+      title: "关停终端服务",
+      danger: clearSessions,
+      bodyHtml: (liveCount > 0
+          ? `<p style="margin:0 0 8px;">${liveCount} 个会话中的终端进程将全部终止，进行中的命令与输出将无法保留。</p>`
+          : "")
+        + (clearSessions
+          ? `<p style="margin:0;">页面将被永久移除，下次启动为空白。</p>`
+          : `<p style="margin:0;">页面将在服务下次启动时恢复，可从上次中断的地方继续。</p>`),
+      confirmText: clearSessions ? "永久关停" : "关停",
+      onConfirm: () => executeStopTerminalHost(clearSessions),
+    });
+  }
+
+  async function executeStopTerminalHost(clearSessions) {
+    if (terminalHostOpInFlight) return;
+    terminalHostOpInFlight = true;
+    syncTerminalHostControls();
+    try {
+      await api("POST", "/api/terminal/host/stop", { clearSessions });
+      // host 已停：页签本地直接清（不逐条打 close），徽标立即转「已停止」不等轮询帧
+      clearTerminalLocalSessions();
+      applyTerminalHostState("stopped");
+      if (currentView === "terminal") renderTerminalStoppedState();
+    } catch (e) {
+      toast(panelError(e, "无法关停终端服务"), true);
+    } finally {
+      terminalHostOpInFlight = false;
+      syncTerminalHostControls();
+    }
+  }
+
+  // 宿主生命周期控件装配：页头起停二合一钮 + 设置小窗（遮罩/✕关闭，开关即改即存）。
+  // 独立于 initTerminalPreview：键盘兜底测试把 initTerminalPreview 抽进桩环境真跑，
+  // 生命周期函数不在那份环境里，装配放自己的入口。
+  function initTerminalHostControls() {
+    syncTerminalHostControls();
+    const toggleBtn = $("terminalHostToggleBtn");
+    if (toggleBtn) toggleBtn.onclick = () => {
+      if (terminalHostState === "running") requestStopTerminalHost();
+      else startTerminalHost();
+    };
+    const settingsModal = $("terminalSettingsModal");
+    const restoreToggle = $("terminalRestoreToggle");
+    const closeTerminalSettings = () => { if (settingsModal) settingsModal.classList.remove("show"); };
+    const settingsGear = $("terminalSettingsBtn");
+    if (settingsGear) settingsGear.onclick = () => {
+      if (restoreToggle) restoreToggle.checked = terminalRestoreEnabled();
+      if (settingsModal) settingsModal.classList.add("show");
+    };
+    const closeBtn = $("terminalSettingsCloseBtn");
+    if (closeBtn) closeBtn.onclick = closeTerminalSettings;
+    if (settingsModal) settingsModal.onclick = (e) => {
+      if (e.target === settingsModal) closeTerminalSettings();
+    };
+    if (restoreToggle) restoreToggle.onchange = () => {
+      try { localStorage.setItem("panel-terminal-restore-sessions", restoreToggle.checked ? "1" : "0"); } catch {}
+    };
   }
 
   // 「+」新建菜单：先选一个已安装的 CLI Agent（或空白终端），再填工作目录。
@@ -5044,12 +5291,37 @@ async function api(method, path, body) {
     });
   }
 
-  function openTerminalPreview() {
+  async function openTerminalPreview() {
     terminalReturnView = currentView;
     terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
     switchView("terminal");
-    // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
-    if (!terminalBackendReady) connectTerminalBackend();
+    // 进页判定现取宿主状态，不用 1s 轮询的上一帧：轮询帧可能停在进页前的旧态。
+    let hostState = terminalHostState;
+    try {
+      const d = await api("GET", "/api/terminal/host/status");
+      if (d && typeof d.state === "string") hostState = normalizeTerminalHostState(d.state);
+    } catch {
+      hostState = "unknown";
+    }
+    // reconnect:false——running 的补连由下面分支自己发，不经 applyTerminalHostState
+    // 的迁移分支，两处同发会在零会话时抢出双建会话。
+    applyTerminalHostState(hostState, { reconnect: false });
+    if (hostState === "running") {
+      // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
+      if (!terminalBackendReady) connectTerminalBackend();
+    } else if (hostState === "stopped") {
+      // 手动关停后回归：本地缓存已失效，清空后落「已停止」页
+      clearTerminalLocalSessions();
+      renderTerminalStoppedState();
+    } else if (hostState === "exited") {
+      // 异常退出：进页自动拉起一次（无开关），拉起期间盖「启动中」
+      autoStartTerminalHost();
+    } else {
+      // unknown：宿主状态不可知（面板初载或 relay 不可达）——落既有不可用空态
+      terminalBackendReady = false;
+      terminalFirstConnectSettled = true;
+      renderTerminalUnavailableState();
+    }
   }
 
   function closeTerminalPreview() {

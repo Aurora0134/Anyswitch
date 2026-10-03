@@ -91,6 +91,15 @@ export function parseClaudeBypassPermissions(raw) {
   return raw === true ? true : DEFAULT_CLAUDE_BYPASS_PERMISSIONS;
 }
 
+// 终端宿主手动关停标记：面板关停终端服务时置真，relay 启动时尊重它、不擅自把
+// host 拉回来；手动启动清回 false。默认 false——缺失、畸形、旧版本没有这个键，
+// 一律按「从未手动关停」处理，升级上来的安装维持原有的随 relay 拉起行为。
+export const DEFAULT_TERMINAL_HOST_MANUAL_STOP = false;
+
+export function parseTerminalHostManualStop(raw) {
+  return raw === true ? true : DEFAULT_TERMINAL_HOST_MANUAL_STOP;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -223,6 +232,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const loggingEnabled = parseLoggingEnabled(raw.loggingEnabled);
   const logLevel = parseLogLevel(raw.logLevel);
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
+  const terminalHostManualStop = parseTerminalHostManualStop(raw.terminalHostManualStop);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -239,6 +249,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       loggingEnabled,
       logLevel,
       claudeBypassPermissions,
+      terminalHostManualStop,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -248,6 +259,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     loggingEnabled,
     logLevel,
     claudeBypassPermissions,
+    terminalHostManualStop,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -333,6 +345,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "claudeBypassPermissions")) {
     updated.claudeBypassPermissions = parseClaudeBypassPermissions(patch.claudeBypassPermissions);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "terminalHostManualStop")) {
+    updated.terminalHostManualStop = parseTerminalHostManualStop(patch.terminalHostManualStop);
   }
 
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启

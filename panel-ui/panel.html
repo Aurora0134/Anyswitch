@@ -453,10 +453,11 @@ if (window.panelStartupController) panelStartupPlay();
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
               虚拟终端
             </h2>
+            <span class="badge" id="terminalHostBadge"><span class="badge-text">状态未知</span></span>
           </div>
           <div class="card-body">
             <div class="terminal-entry-desc">打开后可连接本机终端运行 CLI Agent，并查看 Agent 状态与请求信息。</div>
-            <button type="button" class="btn btn-accent terminal-entry-btn" id="openTerminalPreviewBtn">
+            <button type="button" class="btn terminal-entry-btn" id="openTerminalPreviewBtn">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
               打开虚拟终端
             </button>
@@ -2037,6 +2038,17 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
         </div>
         <div class="terminal-head-right">
+          <span class="badge" id="terminalHostHeadBadge"><span class="badge-text">状态未知</span></span>
+          <button type="button" class="icon-btn terminal-head-icon" title="启动终端服务" aria-label="启动终端服务" id="terminalHostToggleBtn" disabled>
+            <svg id="terminalHostIconStart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+            <svg id="terminalHostIconStop" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+          <button type="button" class="icon-btn terminal-head-icon" title="终端设置" aria-label="终端设置" id="terminalSettingsBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
           <button type="button" class="icon-btn terminal-head-icon" title="切换亮暗主题" aria-label="切换亮暗主题" id="terminalThemeToggle">
             <svg id="terminalIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
             <svg id="terminalIcoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="19.78" x2="19.78" y2="5.64"/></svg>
@@ -2101,8 +2113,8 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="terminal-screen" id="terminalScreen" role="region" aria-label="终端输出">
             <div class="terminal-xterm-host" id="terminalXtermHost"></div>
             <div class="terminal-unavailable" id="terminalUnavailable" hidden>
-              <strong class="terminal-unavailable-title">终端服务未运行</strong>
-              <p class="terminal-unavailable-desc">终端服务随 relay 一同启动，relay 运行后即可使用。</p>
+              <strong class="terminal-unavailable-title" id="terminalUnavailableTitle">终端服务未运行</strong>
+              <p class="terminal-unavailable-desc" id="terminalUnavailableDesc">终端服务随 relay 一同启动，relay 运行后即可使用。</p>
               <button type="button" class="btn btn-accent" id="terminalRetryBtn">重新连接</button>
             </div>
             <div class="terminal-empty" id="terminalEmpty" hidden>
@@ -2322,6 +2334,29 @@ if (window.panelStartupController) panelStartupPlay();
     <div class="modal-foot">
       <button class="btn" id="routeChainCancelBtn">取消</button>
       <button class="btn btn-primary" id="routeChainConfirmBtn">保存路由链</button>
+    </div>
+  </div>
+</div>
+
+<!-- 终端设置小窗（复用 .modal-overlay/.modal-card 骨架：卡头标题 + ✕，点遮罩与 ✕ 关闭；
+     开关即改即存，无卡脚动作钮） -->
+<div class="modal-overlay" id="terminalSettingsModal">
+  <div class="modal-card" style="max-width:440px;" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h3>终端设置</h3>
+      <button class="modal-close-btn" id="terminalSettingsCloseBtn" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-item">
+        <div>
+          <div class="modal-item-title">从上次中断的地方继续</div>
+          <div class="modal-item-desc">保留关停前的页面，终端服务下次启动时恢复；关闭后，关停服务时将永久移除所有页面。</div>
+        </div>
+        <label class="toggle">
+          <input type="checkbox" id="terminalRestoreToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
     </div>
   </div>
 </div>

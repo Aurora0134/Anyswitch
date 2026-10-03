@@ -440,8 +440,7 @@
   .prop-val { font-family: var(--font-mono); font-weight: 600; color: var(--text); }
 
   /* 看板左栏的虚拟终端入口卡：纵向排——说明在上、按钮占满整行（左栏只有 320px，
-     横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc；钮走淡底强调款
-     .btn-accent——实心 .btn-primary 的渐变+光晕在素色看板上是全场唯一色块，抢视野。 */
+     横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc。 */
   .terminal-entry-desc { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin-bottom: 14px; }
   .terminal-entry-btn { display: flex; width: 100%; justify-content: center; }
 
@@ -925,6 +924,7 @@
   .terminal-page-title strong { font-size: 14px; color: var(--text); line-height: 1.15; }
   .terminal-page-title span:not(.terminal-page-title-mark) { font-size: 10.5px; color: var(--text-3); }
   .terminal-head-icon { width: 30px; height: 30px; }
+  #terminalHostToggleBtn:disabled { opacity: 0.45; cursor: not-allowed; }
   .terminal-workspace {
     flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px;
     gap: 1px; background: var(--border);
@@ -1207,6 +1207,11 @@
   @media (max-width: 700px) {
     .terminal-head { min-height: 52px; padding: 0 10px; }
     .terminal-head-divider, .terminal-page-title span:not(.terminal-page-title-mark) { display: none; }
+    /* 窄屏头行：徽标省略文字只留圆点（色即状态），让位给起停钮与设置齿轮 */
+    .terminal-head-right { gap: 8px; }
+    #terminalHostHeadBadge { padding-left: 6px; padding-right: 6px; }
+    #terminalHostHeadBadge .badge-text { display: none; }
+    #terminalHostHeadBadge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
     .terminal-workspace { display: flex; flex-direction: column; }
     .terminal-main-pane { min-height: calc(100vh - 52px); }
     .terminal-inspector { max-height: 330px; border-top: 1px solid var(--border); }
