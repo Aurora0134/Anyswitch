@@ -70,6 +70,25 @@
   --store-drag-accent: var(--accent);
   --store-drag-glow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
   --store-drag-ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+
+  /* 控制台与终端屏幕：亮色取暖纸面 */
+  --console-bg: #faf6ec;
+  --console-toolbar-bg: #f0e8d5;
+  --console-border: #e0d3b3;
+  --console-fg: #3d3424;
+  --console-muted: #8a7a5c;
+  --console-hover-bg: #e7dcc3;
+  --console-hover-fg: #2b2318;
+  --console-live: #3d8b62;
+  --console-info: #6b7f94;
+  --console-warn: #a3762b;
+  --console-error: #c05a44;
+
+  --terminal-bg: #faf6ec;
+  --terminal-fg: #3d3424;
+  --terminal-cursor: #78350f;
+  --terminal-selection: #e7d9b8;
+  --terminal-muted: #8a7a5c;
 }
 
 /* 2) 暗色 token 全集（显式 dark） */
@@ -131,6 +150,25 @@
   --radius-lg: 4px;
   --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
   --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+  /* 控制台与终端屏幕：暗色收为暖炭 */
+  --console-bg: #120d08;
+  --console-toolbar-bg: #181209;
+  --console-border: #241c12;
+  --console-fg: #d9cdb8;
+  --console-muted: #9c8e76;
+  --console-hover-bg: #241c12;
+  --console-hover-fg: #f2e9da;
+  --console-live: #5cb584;
+  --console-info: #8593a6;
+  --console-warn: #d4a446;
+  --console-error: #db6650;
+
+  --terminal-bg: #120d08;
+  --terminal-fg: #d9cdb8;
+  --terminal-cursor: #f2e9da;
+  --terminal-selection: #4a3a24;
+  --terminal-muted: #9c8e76;
 }
 
 /* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
@@ -193,6 +231,25 @@
     --radius-lg: 4px;
     --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
     --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+    /* 控制台与终端屏幕：暗色收为暖炭（与显式 dark 同值） */
+    --console-bg: #120d08;
+    --console-toolbar-bg: #181209;
+    --console-border: #241c12;
+    --console-fg: #d9cdb8;
+    --console-muted: #9c8e76;
+    --console-hover-bg: #241c12;
+    --console-hover-fg: #f2e9da;
+    --console-live: #5cb584;
+    --console-info: #8593a6;
+    --console-warn: #d4a446;
+    --console-error: #db6650;
+
+    --terminal-bg: #120d08;
+    --terminal-fg: #d9cdb8;
+    --terminal-cursor: #f2e9da;
+    --terminal-selection: #4a3a24;
+    --terminal-muted: #9c8e76;
   }
 }
 
@@ -275,29 +332,6 @@
   box-shadow: none;
 }
 
-/* 实时日志控制台：亮暗都收为暖炭纸块，字色去饱和（暖炭属 UI 色，页面背景不加暖） */
-:root[data-style="sepia"] .log-console {
-  background: #211a12;
-  color: #ece2d0;
-  border: 1px solid #211a12;
-  border-radius: 4px;
-}
-:root[data-style="sepia"] .log-toolbar {
-  background: #2b2318;
-  border-bottom-color: #3b2f20;
-}
-:root[data-style="sepia"] .log-status { color: #9c8e76; }
-:root[data-style="sepia"] .log-status.live { color: #5cb584; }
-:root[data-style="sepia"] .log-clear-btn { color: #9c8e76; }
-:root[data-style="sepia"] .log-clear-btn:hover {
-  background: #3b2f20;
-  color: #f2e9da;
-}
-:root[data-style="sepia"] .log-line .ts { color: #655846; }
-:root[data-style="sepia"] .log-line.info .lvl, :root[data-style="sepia"] .log-level-legend .lvl.info { color: #8593a6; }
-:root[data-style="sepia"] .log-line.warn .lvl, :root[data-style="sepia"] .log-level-legend .lvl.warn { color: #d4a446; }
-:root[data-style="sepia"] .log-line.error .lvl, :root[data-style="sepia"] .log-level-legend .lvl.error { color: #db6650; }
-
 /* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
 
 /* seg-control / view-tabs：方角分段 */
@@ -375,20 +409,6 @@
   background: #1e1509;
   box-shadow: none;
 }
-:root[data-style="sepia"][data-theme="dark"] .log-console {
-  background: #120d08;
-  border-color: #241c12;
-  color: #d9cdb8;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-toolbar {
-  background: #181209;
-  border-bottom-color: #241c12;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-clear-btn:hover {
-  background: #241c12;
-  color: #f2e9da;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-line .ts { color: #544a39; }
 
 @media (prefers-color-scheme: dark) {
   :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
@@ -401,20 +421,6 @@
     background: #1e1509;
     box-shadow: none;
   }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
-    background: #120d08;
-    border-color: #241c12;
-    color: #d9cdb8;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-toolbar {
-    background: #181209;
-    border-bottom-color: #241c12;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-clear-btn:hover {
-    background: #241c12;
-    color: #f2e9da;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-line .ts { color: #544a39; }
 }
 
 /* Store 刷新状态小字：斜体铅字感，窄波扫过点亮赭橙 accent */
