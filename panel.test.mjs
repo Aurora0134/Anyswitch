@@ -2590,7 +2590,8 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelHtml.includes('<section class="terminal-view" id="terminalView" hidden'), "虚拟终端是独立整页视图");
     assert.ok(panelHtml.includes('id="terminalReturnBtn" title="返回看板" aria-label="返回看板"'),
       "终端页返回钮的文字、悬停与读屏都说返回看板");
-    assert.ok(panelHtml.includes("实验功能"), "终端页状态胶囊保留");
+    assert.ok(!panelHtml.includes("实验功能"), "终端页不再挂「实验功能」胶囊（已转正式功能）");
+    assert.ok(!entry.includes(">预览</span>"), "入口卡头不再挂「预览」徽标（已转正式功能）");
     for (const id of ["terminalTabs", "terminalXtermHost", "terminalInspector", "terminalRequestList"]) {
       assert.ok(panelHtml.includes(`id="${id}"`), `终端预览含 #${id}`);
     }
