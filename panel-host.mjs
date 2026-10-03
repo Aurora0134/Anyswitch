@@ -38,7 +38,8 @@ function isLoopback(remoteAddress) {
 
 export function createPanelServer(options = {}) {
   const paths = options.paths ?? storePaths();
-  // 运行日志开关：闸门按 settings.json 的 mtime 缓存读取，关掉后下一次写入即停，
+  // 运行日志开关：闸门每次调用现读 settings.json（不按 mtime 缓存——同刻度的连写会
+  // 骗过 mtime，见 relay-settings.mjs 的 createSettingGate），关掉后下一次写入即停，
   // 不需要重启面板。面板自己的记录只活在内存环形缓冲里（stderr 无人接收），所以
   // 关掉这一处就等于把实时输出整条链路关掉——中继条目经桥、各端点条目经 ingest
   // 都汇入同一个 logger。

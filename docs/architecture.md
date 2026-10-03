@@ -115,7 +115,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
 - `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
 - `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode/grok）。
-- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）也归这里：`createLoggingEnabledGate` 按 settings.json 的 mtime 缓存读取，relay-host 与 panel-host 各自持一份，因此开关当场生效、不需要重启任何常驻进程；原子写每次换新临时文件再改名，mtime 必然变化，闸门不会漏掉一次保存。文件读不到时保持上次已知值，损坏时按默认（开）回落——两个方向都不会让一次读失败把记录静默关掉。
+- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）与实时输出的最低显示级别（`logLevel`，默认 info＝显示全部，只管面板显示出口、不窄化落盘与缓冲）也归这里：`createLoggingEnabledGate` / `createLogLevelGate` 每次调用现读 settings.json，relay-host 与 panel-host 各自持一份，因此设置当场生效、不需要重启任何常驻进程。**闸门不按 mtime 缓存**——mtime 证明不了文件没动：本机实测 300 对连续保存里 33 对共享同一个 `mtimeMs`，`birthtimeMs`/`ctimeMs` 跟着一起撞，按 mtime 缓存会把旧值一直端到下下次「运气好」的写入，而那次写入可能永远不来（关掉记录后文件继续长、换了级别面板照旧筛，正是这两个闸门存在的理由）。现读的代价实测 160µs/次（真文件 1096 字节，仅 `statSync` 是 35µs），触发频率是每行日志与每条转发帧，平均远低于每秒一次。文件读不到时保持上次已知值，损坏时按默认（开 / 显示全部）回落——两个方向都不会让一次读失败把记录静默关掉、或把日志行静默藏掉。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
@@ -158,7 +158,7 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `model-stability.mjs` — 模型稳定性：8 小时滚动窗、10 分钟桶、按调用量取前 5，进程内存态＋可选 sidecar 持久化，供面板链灯与统计页判渠道健康。
 - `usage-journal.mjs` — 逐请求用量流水：数据根 `usage\` 下按日滚动的 JSONL（requests / sessions 两条流），90 天自清理。它是 relay 热路径的旁路——写失败只告警，绝不抛回调用方。两个读取面：`readRequests`/`readSessions`（整天范围升序，供聚合层）与 `readRequestsLog`（筛选/排序/分页的行级透传查询，供统计页「请求日志」子 tab，经 `GET /panel/api/stats/logs` 暴露；facets 只受时间范围影响）。失败行可带 `errMsg`（上游错误原文，写侧单点消毒：折叠空白/截 200 字符）。
 - `usage-stats.mjs` — 在流水之上做聚合，产出使用统计页的状态。每次 `getState()` 现读且分段读取（热力图读它固定的 90 天，其余口径只读所选窗口），不设聚合缓存；各项口径的定义与红线见 `docs/stats-spec.md`。
-- `logger.mjs` — 进程内日志器：环形缓冲＋发布订阅，面板的实时输出窗口经 SSE 订阅它。两条契约：落盘的每一行带本地墙钟时间戳（日志是拿来和用户「三点左右坏的」对齐的，没时间戳的行对不上）；级别只由条目的 `level` 字段承载，消息文本是纯散文——级别曾同时存在字段与文本里，于是出现过 `[info] … WARN …` 这种字段与正文互相矛盾的行，消费方还得回头从文本里解析一个本来就有的级别。写入前过一道实时开关闸门（`isEnabled`），关掉即不再落盘、不再进缓冲、不再广播，无需重启进程；`clear()` 不受闸门管——清空缓冲是控制操作，不是一条日志。
+- `logger.mjs` — 进程内日志器：环形缓冲＋发布订阅，面板的实时输出窗口经 SSE 订阅它。两条契约：落盘的每一行带本地墙钟时间戳（日志是拿来和用户「三点左右坏的」对齐的，没时间戳的行对不上）；级别只由条目的 `level` 字段承载，消息文本是纯散文——级别曾同时存在字段与文本里，于是出现过 `[info] … WARN …` 这种字段与正文互相矛盾的行，消费方还得回头从文本里解析一个本来就有的级别。写入前过一道实时开关闸门（`isEnabled`），关掉即不再落盘、不再进缓冲、不再广播，无需重启进程；`clear()` 不受闸门管——清空缓冲是控制操作，不是一条日志。级别另有一条**只作用于显示出口**的过滤：面板 SSE 端点按设置项「日志级别」筛掉低于门槛的条目（`createLogLevelGate` 活读、逐帧现判），写入闸门、环形缓冲与落盘档案都不因它变窄，没有 `level` 的清空帧与序表之外的级别一律放行。
 - `session-scan.mjs` — 面板「会话管理」的数据层：按需现扫各客户端自己的会话存储，不建索引、不自建数据库，每次列表都重读对方文件；各家记录形状的差异（含多帧压缩容器、派生索引滞后等）在本模块内适配掉。
 
 ### 预设注入层

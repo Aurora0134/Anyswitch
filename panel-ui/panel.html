@@ -1810,9 +1810,9 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
-      <!-- 「实时输出」卡：一个总开关，与「启动」卡同构（单开关、带卡头）。关掉后
-           左侧那张实时输出卡整卡隐去——记录已经停了，留一张永远空着的窗只是噪声。
-           默认开，升级上来的安装行为不变。 -->
+      <!-- 「实时输出」卡：主开关「记录运行日志」+ 从属项「日志级别」。关掉后左侧那张
+           实时输出卡整卡隐去——记录已经停了，留一张永远空着的窗只是噪声。默认开，
+           升级上来的安装行为不变。级别只挑「窗里显示哪些行」，日志文件照旧全量。 -->
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">
@@ -1830,6 +1830,27 @@ if (window.panelStartupController) panelStartupPlay();
               <input type="checkbox" id="loggingEnabledToggle">
               <span class="slider"></span>
             </label>
+          </div>
+          <!-- 从属段随主开关收起：记录都停了，选级别没有意义。折叠只藏控件，不重置
+               已选值，重新打开开关即回到原来那一档。 -->
+          <div id="logLevelRows" hidden>
+            <div class="modal-item">
+              <div>
+                <div class="modal-item-title">日志级别</div>
+                <div class="modal-item-desc">实时输出只显示所选级别及其更高级别的日志行。</div>
+              </div>
+              <select class="logs-sel" id="logLevelSelect">
+                <option value="info">信息</option>
+                <option value="warn">警告</option>
+                <option value="error">错误</option>
+              </select>
+            </div>
+            <div class="log-level-legend">
+              <div class="log-level-legend-title">级别说明：</div>
+              <div><span class="lvl error">ERROR</span> - 只显示错误行</div>
+              <div><span class="lvl warn">WARN</span> - 显示警告与错误行</div>
+              <div><span class="lvl info">INFO</span> - 显示全部运行日志</div>
+            </div>
           </div>
         </div>
       </div>

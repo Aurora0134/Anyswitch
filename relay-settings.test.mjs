@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync, utimesSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_KEEPALIVE_CONFIG,
@@ -13,6 +13,9 @@ import {
   DEFAULT_LOGGING_ENABLED,
   parseLoggingEnabled,
   createLoggingEnabledGate,
+  DEFAULT_LOG_LEVEL,
+  parseLogLevel,
+  createLogLevelGate,
   parseClaudeBypassPermissions,
   parseClaudeTierMappingsEnabled,
   loadSettings,
@@ -350,6 +353,124 @@ describe("loggingEnabled", () => {
       // than flipping recording back on mid-session.
       rmSync(path, { force: true });
       assert.equal(gate(), false, "an unreadable file keeps the last known state");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("logLevel", () => {
+  it("accepts exactly the three levels this bus knows", () => {
+    assert.equal(parseLogLevel("info"), "info");
+    assert.equal(parseLogLevel("warn"), "warn");
+    assert.equal(parseLogLevel("error"), "error");
+  });
+
+  it("falls back to showing everything on anything unrecognised", () => {
+    // 这一项决定「少看」哪些行，所以认不出来的值必须回到「全看」：一个拼错的
+    // debug、一份大写字母、一个旧版本根本没写过的键，都不该让窗口安静下来。
+    assert.equal(parseLogLevel(undefined), "info");
+    assert.equal(parseLogLevel(null), "info");
+    assert.equal(parseLogLevel("debug"), "info");
+    assert.equal(parseLogLevel("WARN"), "info");
+    assert.equal(parseLogLevel(42), "info");
+    assert.equal(DEFAULT_LOG_LEVEL, "info", "默认值就是「显示全部」那一档");
+  });
+
+  it("exposes logLevel through loadSettings and keeps it canonical through saveSettings", () => {
+    const tmp = mkTestDir("anyswitch-loglevel-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.logLevel, "info", "未落盘时为 info");
+
+      const saved = saveSettings(path, { logLevel: "warn" }, {});
+      assert.equal(saved.settings.logLevel, "warn");
+      assert.equal(loadSettings(path, {}).settings.logLevel, "warn");
+
+      const bogus = saveSettings(path, { logLevel: "trace" }, {});
+      assert.equal(bogus.settings.logLevel, "info", "畸形值不落盘成畸形值");
+
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.logLevel, "info", "改别的设置项不会把这一项挤掉");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the live gate follows the file, so an open panel needs no restart", () => {
+    const tmp = mkTestDir("anyswitch-loglevel-gate-");
+    const path = join(tmp, "settings.json");
+    try {
+      const gate = createLogLevelGate(path, {});
+      assert.equal(gate(), "info", "missing settings.json shows everything");
+
+      saveSettings(path, { logLevel: "error" }, {});
+      assert.equal(gate(), "error", "selection takes effect on the next frame");
+
+      saveSettings(path, { logLevel: "warn" }, {});
+      assert.equal(gate(), "warn", "and back down again");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("follows a save even when mtime never moves", () => {
+    // 这条钉的是闸门的一个真实失效模式：它若按 mtime 判断文件动没动，就会被同刻度的
+    // 连写骗过去——本机实测 300 对连续保存里 33 对共享同一个 mtimeMs，而且
+    // birthtimeMs / ctimeMs 跟着一起撞。那样它会一直端着旧值，直到某次「运气好」的
+    // 写入把刻度挪开，而那次写入可能永远不来。这里把 mtime 钉死不动，两次保存都必须
+    // 立刻跟到。
+    const tmp = mkTestDir("anyswitch-loglevel-gate-tick-");
+    const path = join(tmp, "settings.json");
+    const pinned = new Date(Date.UTC(2026, 9, 3, 12, 0, 0));
+    const writePinned = (logLevel) => {
+      saveSettings(path, { logLevel }, {});
+      utimesSync(path, pinned, pinned);
+    };
+    try {
+      const gate = createLogLevelGate(path, {});
+      writePinned("error");
+      assert.equal(gate(), "error");
+
+      writePinned("warn");
+      assert.equal(statSync(path).mtimeMs, pinned.getTime(),
+        "前提成立：两次保存的 mtime 一模一样，按 mtime 缓存的闸门必然看不见这次变化");
+      assert.equal(gate(), "warn", "刻度没动也必须当场跟到新值");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to showing everything when settings.json is corrupt", () => {
+    const tmp = mkTestDir("anyswitch-loglevel-gate-broken-");
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { logLevel: "error" }, {});
+      const gate = createLogLevelGate(path, {});
+      assert.equal(gate(), "error");
+
+      // loadSettings swallows parse errors and reads defaults, so a damaged file
+      // widens the view back to "everything" — the right direction for a filter
+      // whose whole job is hiding lines. (Saving over a corrupt file is a
+      // separate, deliberate refusal: see UnparseableSettingsError.)
+      writeFileSync(path, "{ not json");
+      assert.equal(gate(), "info", "a corrupt file must not keep lines hidden");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the last known filter while settings.json is unreadable", () => {
+    const tmp = mkTestDir("anyswitch-loglevel-gate-missing-");
+    const path = join(tmp, "settings.json");
+    try {
+      saveSettings(path, { logLevel: "error" }, {});
+      const gate = createLogLevelGate(path, {});
+      assert.equal(gate(), "error");
+      // A vanished file has no mtime to compare, so the gate holds instead of
+      // re-widening the view under an already-open window.
+      rmSync(path, { force: true });
+      assert.equal(gate(), "error", "an unreadable file keeps the last known filter");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

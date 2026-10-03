@@ -294,9 +294,9 @@
   color: #f2e9da;
 }
 :root[data-style="sepia"] .log-line .ts { color: #655846; }
-:root[data-style="sepia"] .log-line.info .lvl { color: #8593a6; }
-:root[data-style="sepia"] .log-line.warn .lvl { color: #d4a446; }
-:root[data-style="sepia"] .log-line.error .lvl { color: #db6650; }
+:root[data-style="sepia"] .log-line.info .lvl, :root[data-style="sepia"] .log-level-legend .lvl.info { color: #8593a6; }
+:root[data-style="sepia"] .log-line.warn .lvl, :root[data-style="sepia"] .log-level-legend .lvl.warn { color: #d4a446; }
+:root[data-style="sepia"] .log-line.error .lvl, :root[data-style="sepia"] .log-level-legend .lvl.error { color: #db6650; }
 
 /* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
 

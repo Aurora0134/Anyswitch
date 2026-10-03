@@ -22,7 +22,8 @@ import { fileURLToPath } from "node:url";
 import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
 import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "./autostart.mjs";
 import { spawnWatchdog, stopWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
-import { loadSettings, saveSettings, defaultSettingsPath } from "./relay-settings.mjs";
+import { loadSettings, saveSettings, defaultSettingsPath, createLogLevelGate } from "./relay-settings.mjs";
+import { logLevelAllows } from "./logger.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
@@ -723,6 +724,9 @@ export function createPanelRouter({
   clientUpdateJournalDir: clientUpdateDir = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
+  // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
+  // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
+  const logLevelGate = createLogLevelGate(settingsFile, base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
   // answers instantly once a probe round has settled; POST followAgent invalidates.
@@ -1345,13 +1349,21 @@ export function createPanelRouter({
     // 才算建连成功：不冲头就会一直停在「正在重连」，直到下一条日志写入才恢复（点完
     // 「清空」再刷新页面正是这个形状）。中继侧的同类端点早已这么做，这份漏了。
     if (typeof res.flushHeaders === "function") res.flushHeaders();
+    // 级别过滤只发生在这一个出口。写入侧照旧全量：日志文件与环形缓冲都不因用户选了
+    // 高级别而少一行，档案是排障时唯一的凭据。逐帧现读闸门，是为了让已经打开的其它
+    // 窗口不必重连就不再收到低于门槛的新行；它们屏幕上已经显示出去的旧行，随客户端
+    // 25 行上限自然滚掉。清空帧没有 level，判定一律放行——它不是日志。
+    const writeEntryFrame = (entry) => {
+      if (!logLevelAllows(entry.level, logLevelGate())) return;
+      res.write(`data: ${JSON.stringify(entry)}\n\n`);
+    };
     // Replay history for late joiners, then stream live entries.
     for (const entry of logger.getHistory()) {
-      res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      writeEntryFrame(entry);
     }
     const unsubscribe = logger.subscribe((entry) => {
       try {
-        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+        writeEntryFrame(entry);
       } catch {
         // socket gone; unsubscribe will happen on close below
       }
