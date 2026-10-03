@@ -6,10 +6,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor } from "./relay-host.mjs";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes } from "./relay-host.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeLogPath() {
@@ -248,4 +249,292 @@ test("createTerminalHostSupervisor.stop kills the child exactly once and tolerat
   child.emit("exit", null, "SIGTERM"); // our own kill landing must not warn
   supervisor.stop();
   assert.doesNotThrow(() => supervisor.stop());
+});
+
+test("createTerminalHostSupervisor.start is idempotent while the child is alive", async () => {
+  const child = fakeChild();
+  let sweeps = 0;
+  let spawns = 0;
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      spawns += 1;
+      return child;
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => {
+      sweeps += 1;
+      return { ok: true, killed: [], refused: [] };
+    },
+  });
+
+  await supervisor.start();
+  const again = await supervisor.start();
+  assert.equal(again.ok, true);
+  assert.equal(again.alreadyRunning, true);
+  assert.equal(spawns, 1, "a live child means no second spawn");
+  assert.equal(sweeps, 1, "and no second stale sweep either");
+});
+
+test("createTerminalHostSupervisor.status tracks stopped → running → crashed → running", async () => {
+  let child = fakeChild();
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => child,
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  assert.deepEqual(supervisor.status(), { state: "stopped", pid: null, lastExit: null });
+
+  await supervisor.start();
+  assert.deepEqual(supervisor.status(), { state: "running", pid: 5150, lastExit: null });
+
+  child.emit("exit", 1, null); // unexpected: stop() did not ask for this
+  const crashed = supervisor.status();
+  assert.equal(crashed.state, "crashed");
+  assert.equal(crashed.pid, null);
+  assert.equal(crashed.lastExit.code, 1);
+  assert.equal(crashed.lastExit.signal, null);
+  assert.equal(typeof crashed.lastExit.at, "number");
+
+  child = fakeChild(6161);
+  await supervisor.start();
+  assert.deepEqual(supervisor.status(), { state: "running", pid: 6161, lastExit: null }, "a successful start clears the crash record");
+});
+
+test("createTerminalHostSupervisor.stop waits for the exit and records no crash", async () => {
+  const child = fakeChild();
+  child.kill = () => {
+    child.killed = true;
+    setTimeout(() => child.emit("exit", null, "SIGTERM"), 10); // async, like a real process
+  };
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => child,
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  await supervisor.start();
+  await supervisor.stop();
+  assert.equal(child.killed, true);
+  assert.deepEqual(supervisor.status(), { state: "stopped", pid: null, lastExit: null }, "a stop()-initiated exit is not a crash");
+  assert.ok(!logger.logged.warn.some((line) => line.includes("exited early")), "our own kill must not warn");
+});
+
+test("createTerminalHostSupervisor.status reports stopped-manual only while the flag is set", async () => {
+  const child = fakeChild();
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => child,
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    manualStop: true,
+    stopTimeoutMs: 50, // fakeChild.kill never emits exit; the cap ends the wait
+  });
+
+  assert.equal(supervisor.isManualStop(), true);
+  assert.equal(supervisor.status().state, "stopped-manual");
+
+  await supervisor.start();
+  assert.equal(supervisor.status().state, "running", "running wins over the flag");
+
+  await supervisor.stop();
+  assert.equal(supervisor.status().state, "stopped-manual", "the flag survives until the route layer clears it");
+
+  supervisor.setManualStop(false);
+  assert.deepEqual(supervisor.status(), { state: "stopped", pid: null, lastExit: null });
+});
+
+// /terminal-host/* routes: spliced in front of the relay server's own listener
+// by mountTerminalHostRoutes, guarded by loopback + the pi-relay-token, driving
+// the supervisor and persisting the manual-stop flag through settings.json.
+function routeHarness({ manualStop = false, fetchFn, spawnFn } = {}) {
+  const root = mkTestDir("anyswitch-th-routes-");
+  const settingsPath = join(root, "settings.json");
+  let child = fakeChild();
+  let spawns = 0;
+  const logger = recordingLogger();
+  const supervisor = createTerminalHostSupervisor({
+    root,
+    spawnFn: spawnFn ?? (() => {
+      spawns += 1;
+      return child;
+    }),
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    manualStop,
+    stopTimeoutMs: 50,
+  });
+  const handler = createTerminalHostRoutes({
+    supervisor,
+    token: "test-token",
+    settingsPath,
+    root,
+    logger,
+    fetchFn: fetchFn ?? (async () => ({ ok: true, json: async () => ({ ok: true, cleared: 0 }) })),
+  });
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("upstream");
+  });
+  mountTerminalHostRoutes(server, handler);
+  return {
+    root,
+    settingsPath,
+    supervisor,
+    logger,
+    server,
+    spawns: () => spawns,
+    auth: { authorization: "Bearer test-token", "content-type": "application/json" },
+    listen: () => new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => resolve(server.address().port));
+    }),
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+test("GET /terminal-host/status requires the token and reports the supervisor state", async () => {
+  const h = routeHarness({ manualStop: true });
+  const port = await h.listen();
+  try {
+    const denied = await fetch(`http://127.0.0.1:${port}/terminal-host/status`);
+    assert.equal(denied.status, 401);
+
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/status`, { headers: h.auth });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), { ok: true, host: { state: "stopped-manual", pid: null, lastExit: null } });
+  } finally {
+    await h.close();
+  }
+});
+
+test("non-/terminal-host paths fall through to the relay's own routes", async () => {
+  const h = routeHarness();
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/hello`);
+    assert.equal(res.status, 200);
+    assert.equal(await res.text(), "upstream");
+
+    const unknown = await fetch(`http://127.0.0.1:${port}/terminal-host/nope`, { headers: h.auth });
+    assert.equal(unknown.status, 404);
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/start starts the host, clears the persisted flag, and is idempotent", async () => {
+  const h = routeHarness({ manualStop: true });
+  writeFileSync(h.settingsPath, JSON.stringify({ terminalHostManualStop: true, sparkWindowPoints: 24 }));
+  const port = await h.listen();
+  try {
+    const first = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    assert.equal(first.status, 200);
+    const firstBody = await first.json();
+    assert.equal(firstBody.ok, true);
+    assert.equal(firstBody.host.state, "running");
+
+    const onDisk = JSON.parse(readFileSync(h.settingsPath, "utf8"));
+    assert.equal(onDisk.terminalHostManualStop, false, "manual start clears the persisted flag");
+    assert.equal(onDisk.sparkWindowPoints, 24, "neighbouring settings survive the write");
+
+    const second = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    assert.equal(second.status, 200);
+    assert.equal(h.spawns(), 1, "a running host makes start a no-op");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/start answers 500 when the host fails to start", async () => {
+  const h = routeHarness({
+    spawnFn: () => {
+      throw new Error("spawn ENOENT");
+    },
+  });
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/start`, { method: "POST", headers: h.auth });
+    assert.equal(res.status, 500);
+    assert.equal((await res.json()).ok, false);
+    assert.equal(existsSync(h.settingsPath), false, "a failed start never touches the flag");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/stop sets the flag, clears sessions via the host, then kills it", async () => {
+  const order = [];
+  let h;
+  h = routeHarness({
+    fetchFn: async (url, options) => {
+      order.push("clear-all");
+      assert.equal(url, "http://127.0.0.1:47823/terminal/sessions/clear-all");
+      assert.equal(options.method, "POST");
+      assert.equal(options.headers.authorization, "Bearer test-token");
+      assert.equal(h.supervisor.status().state, "running", "清场调用发生在 kill 子进程之前");
+      return { ok: true, json: async () => ({ ok: true, cleared: 3 }) };
+    },
+  });
+  const port = await h.listen();
+  try {
+    await h.supervisor.start();
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, {
+      method: "POST",
+      headers: h.auth,
+      body: JSON.stringify({ clearSessions: true }),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.host.state, "stopped-manual");
+    assert.deepEqual(order, ["clear-all"], "sessions are cleared before the kill");
+    assert.equal(JSON.parse(readFileSync(h.settingsPath, "utf8")).terminalHostManualStop, true);
+
+    // Idempotent: already stopped is still ok.
+    const again = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, { method: "POST", headers: h.auth });
+    assert.equal(again.status, 200);
+    assert.equal((await again.json()).host.state, "stopped-manual");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/stop with clearSessions deletes the state file when the host is unreachable", async () => {
+  const h = routeHarness({
+    fetchFn: async () => {
+      throw new Error("connect ECONNREFUSED");
+    },
+  });
+  const stateFile = join(h.root, "terminal-sessions.json");
+  writeFileSync(stateFile, JSON.stringify({ version: 1, sessions: [{ id: "leftover" }] }));
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, {
+      method: "POST",
+      headers: h.auth,
+      body: JSON.stringify({ clearSessions: true }),
+    });
+    assert.equal(res.status, 200, "an unreachable host must not fail the stop");
+    assert.equal((await res.json()).ok, true);
+    assert.equal(existsSync(stateFile), false, "the leftover session records are deleted best-effort");
+    assert.equal(h.logger.logged.warn.some((line) => line.includes("clear-all")), true, "the failed clear reaches the log");
+  } finally {
+    await h.close();
+  }
+});
+
+test("POST /terminal-host/stop without clearSessions leaves the state file alone", async () => {
+  const h = routeHarness();
+  const stateFile = join(h.root, "terminal-sessions.json");
+  writeFileSync(stateFile, JSON.stringify({ version: 1, sessions: [{ id: "kept" }] }));
+  const port = await h.listen();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/terminal-host/stop`, { method: "POST", headers: h.auth });
+    assert.equal(res.status, 200);
+    assert.equal(existsSync(stateFile), true, "关停不清场时会话记录原样保留（「从上次中断的地方继续」）");
+  } finally {
+    await h.close();
+  }
 });

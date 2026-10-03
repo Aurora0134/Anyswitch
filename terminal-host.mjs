@@ -26,7 +26,7 @@ export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
 // counts, and onDead additionally requires this many consecutive dead
 // verdicts, any live reading resetting the count.
 export const WATCHDOG_MISSES_REQUIRED = 5;
-const TERMINAL_STATE_FILE = "terminal-sessions.json";
+export const TERMINAL_STATE_FILE = "terminal-sessions.json";
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
 // Raw output window, budgeted in bytes rather than chunk counts. Chunks are dropped
 // whole from the head so no escape sequence is ever cut in half.
@@ -462,6 +462,25 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         sessions.set(session.id, session);
         spawnSession(session);
         return json(res, 201, snapshot(session));
+      }
+      // 清空全部会话（relay 关停宿主前的清场）：杀掉存活 PTY、通知流端退出、
+      // 内存表与落盘文件一起归零。必须在下面的按 id 匹配之前，否则 "clear-all"
+      // 会被当成会话 id 走到 404。
+      if (url.pathname === "/terminal/sessions/clear-all" && req.method === "POST") {
+        let cleared = 0;
+        for (const session of [...sessions.values()]) {
+          try {
+            session.pty?.kill();
+          } catch {
+            /* already gone */
+          }
+          for (const listener of session.listeners) listener(null);
+          session.listeners.clear();
+          sessions.delete(session.id);
+          cleared += 1;
+        }
+        persistNow();
+        return json(res, 200, { ok: true, cleared });
       }
       const match = url.pathname.match(/^\/terminal\/sessions\/([^/]+)(?:\/(input|resize|stream|restart|close))?$/);
       if (!match) return json(res, 404, { error: "not_found" });

@@ -848,3 +848,55 @@ test("launch/env 输入校验：畸形一律 400，cwd 缺失不静默回落", a
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// relay 关停宿主前的清场（stop 带 clearSessions）：存活 PTY 杀掉、挂着流的
+// 监听器收到退出通知、内存表与落盘文件一起归零。
+test("POST /terminal/sessions/clear-all 杀掉存活 PTY、清空内存表与落盘文件", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-clearall-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ label: "甲", cwd: root, shell: "powershell" }),
+    });
+    const second = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ label: "乙", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    // 已退出的会话同样在清空范围内；它挂着的流靠 clear-all 自己通知。
+    calls[1].pty.kill();
+    const exitNotices = [];
+    host.sessions.get(second.id).listeners.add((chunk) => {
+      if (chunk === null) exitNotices.push(second.id);
+    });
+
+    const response = await fetch(url("/terminal/sessions/clear-all"), { method: "POST", headers: headers(host) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, cleared: 2 });
+    assert.equal(host.sessions.size, 0, "内存会话表清空");
+    assert.deepEqual(exitNotices, [second.id], "挂着流的会话收到退出通知");
+    assert.deepEqual(JSON.parse(readFileSync(host.statePath, "utf8")).sessions, [], "落盘文件写成空");
+
+    const listed = await fetch(url("/terminal/sessions"), { headers: headers(host) }).then((r) => r.json());
+    assert.deepEqual(listed.sessions, []);
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("POST /terminal/sessions/clear-all 空表也是 ok，且不许被当成会话 id", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-clearall-`);
+  const host = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const response = await fetch(url("/terminal/sessions/clear-all"), { method: "POST", headers: headers(host) });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, cleared: 0 });
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

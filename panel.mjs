@@ -392,6 +392,63 @@ async function defaultCreateTerminalSession(body, { token } = {}) {
   }
 }
 
+// Terminal-host lifecycle pull: the relay (47821) owns the host child and
+// reports its state at /terminal-host/status (same pi-relay-token guard as
+// /api/internal/*). Returns the parsed payload, or null when the relay is
+// unreachable so callers degrade instead of erroring.
+async function defaultFetchTerminalHostStatus(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/terminal-host/status", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && typeof data === "object") return data;
+    return null;
+  } catch {
+    // Relay may be stopped, starting, or not yet listening.
+    return null;
+  }
+}
+
+// start/stop against the same relay routes. The stop route waits for the child
+// to actually exit (plus the optional session sweep), so the action budget sits
+// well above the status pull's. Returns { status, body }, or null when the
+// relay is unreachable (the caller answers 503 relay_unavailable).
+async function defaultCallTerminalHostAction(action, body, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:47821/terminal-host/${action}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(15000),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
+// The relay answers with the state nested under `host`; the panel-facing
+// payload is flat. The state vocabulary itself (running / stopped /
+// stopped-manual / crashed) passes through verbatim — the panel page renders
+// it directly — and manualStop is derived when the relay only encodes it in
+// the state name.
+function normalizeTerminalHostStatus(data) {
+  const raw = data?.host && typeof data.host === "object" ? data.host : data;
+  const state = typeof raw?.state === "string" ? raw.state : "unknown";
+  return {
+    state,
+    pid: typeof raw?.pid === "number" ? raw.pid : null,
+    manualStop: raw?.manualStop === true || state === "stopped-manual",
+    lastExit: raw?.lastExit && typeof raw.lastExit === "object" ? raw.lastExit : null,
+  };
+}
+
 // Bridge the relay's logger (a separate process on 47821) into this panel
 // process's log bus. The 实时输出 window subscribes to the panel-host's own
 // logger, so after the panel/relay split relay-side entries (keep-alive
@@ -678,6 +735,12 @@ export function createPanelRouter({
    fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
    createTerminalSession = defaultCreateTerminalSession,
+   // Terminal-host lifecycle against the relay (47821 /terminal-host/*): the
+   // relay owns the host child, so status/start/stop all live there behind the
+   // same pi-relay-token guard as /api/internal/*. Injectable so tests never
+   // touch a live relay.
+   fetchTerminalHostStatus = defaultFetchTerminalHostStatus,
+   callTerminalHostAction = defaultCallTerminalHostAction,
   // Agent-activity push bridge (startRelayActivityBridge): this process's
   // subscription to the relay's agents-activity SSE plus its latest-state
   // cache. Injectable so tests never touch 47821; `null` lazily builds the
@@ -912,6 +975,63 @@ export function createPanelRouter({
     sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId }) });
   }
 
+  // ---- Terminal host lifecycle (relay-owned child, panel drives it) ----
+  // /api/status 每秒一拍，host 状态随帧下发；若每拍都直取 relay 等于给它多开
+  // 一条轮询，所以轮询侧走短 TTL 缓存。终端页进页要拿现值判态（等不起上一帧），
+  // 专用端点永远直取并顺手刷新缓存；start/stop 落地后作废缓存，下一拍立即重取。
+  const TERMINAL_HOST_STATUS_TTL_MS = 1500;
+  let terminalHostStatusCache = null; // { at, value: object|null }
+
+  async function pullTerminalHostStatus() {
+    let value = null;
+    try {
+      value = await fetchTerminalHostStatus(relayRoot, relayPullToken());
+    } catch {
+      value = null; // 注入实现抛错与 relay 不可达同等待遇：轮询链不炸
+    }
+    terminalHostStatusCache = { at: Date.now(), value };
+    return value;
+  }
+
+  async function getTerminalHostStatusCached() {
+    if (terminalHostStatusCache && Date.now() - terminalHostStatusCache.at < TERMINAL_HOST_STATUS_TTL_MS) {
+      return terminalHostStatusCache.value;
+    }
+    return pullTerminalHostStatus();
+  }
+
+  async function handleTerminalHostStatus(res) {
+    const data = await pullTerminalHostStatus();
+    if (!data) return sendJson(res, 200, { ok: true, state: "unknown", pid: null, manualStop: false, lastExit: null });
+    sendJson(res, 200, { ok: true, ...normalizeTerminalHostStatus(data) });
+  }
+
+  async function handleTerminalHostStart(res) {
+    logger?.info("Terminal host start requested from panel control");
+    const result = await callTerminalHostAction("start", {}, { token: relayPullToken() });
+    if (!result) return sendJson(res, 503, { ok: false, error: "relay_unavailable" });
+    terminalHostStatusCache = null;
+    const payload = result.body;
+    if (payload?.ok === true) return sendJson(res, 200, { ok: true, state: normalizeTerminalHostStatus(payload).state });
+    return sendJson(res, result.status || 500, payload ?? { ok: false, error: "terminal_host_start_failed" });
+  }
+
+  async function handleTerminalHostStop(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+    }
+    logger?.info("Terminal host stop requested from panel control");
+    const result = await callTerminalHostAction("stop", body, { token: relayPullToken() });
+    if (!result) return sendJson(res, 503, { ok: false, error: "relay_unavailable" });
+    terminalHostStatusCache = null;
+    const payload = result.body;
+    if (payload?.ok === true) return sendJson(res, 200, { ok: true });
+    return sendJson(res, result.status || 500, payload ?? { ok: false, error: "terminal_host_stop_failed" });
+  }
+
   // 导入是整份覆盖 settings.json，走不到设置路由那条副作用链上，而
   // followAgent 恰好是唯一带持久副作用的开关：值与登录计划、自愈进程脱节时，
   // 「包里关、本机开」会留下一个界面写着关、登录照旧自启、每 3 秒把 relay 拉
@@ -1034,6 +1154,15 @@ export function createPanelRouter({
     } catch (err) {
       logger?.error(`relay status probe failed: ${err.message}`);
     }
+    // 终端宿主状态随状态帧下发：真值在 relay（宿主是它的子进程），面板进程本地
+    // 没有等价物。走短 TTL 缓存避免秒级轮询翻倍 relay 压力；relay 不可达时报
+    // unknown，不拖垮状态帧本身。
+    let terminalHost = { state: "unknown", manualStop: false };
+    const hostStatus = await getTerminalHostStatusCached();
+    if (hostStatus) {
+      const normalized = normalizeTerminalHostStatus(hostStatus);
+      terminalHost = { state: normalized.state, manualStop: normalized.manualStop };
+    }
     sendJson(res, 200, {
       running: relay.status === "running",
       panelPort: 47820,
@@ -1043,6 +1172,7 @@ export function createPanelRouter({
       storeOk,
       providers: providerCount,
       relay,
+      terminalHost,
     });
   }
 
@@ -1875,6 +2005,9 @@ export function createPanelRouter({
     if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
     if (path === "/panel/api/session/report" && method === "POST") return handleSessionReport(req, res);
     if (path === "/panel/api/terminal/default-cwd" && method === "GET") return proxyTerminal(req, res, "/terminal/default-cwd", "GET");
+    if (path === "/panel/api/terminal/host/status" && method === "GET") return handleTerminalHostStatus(res);
+    if (path === "/panel/api/terminal/host/start" && method === "POST") return handleTerminalHostStart(res);
+    if (path === "/panel/api/terminal/host/stop" && method === "POST") return handleTerminalHostStop(req, res);
     if (path === "/panel/api/terminal/sessions" && method === "GET") return handleTerminalSessionsList(res);
     if (path === "/panel/api/terminal/sessions" && method === "POST") {
       try {

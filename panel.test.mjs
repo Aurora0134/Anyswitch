@@ -64,6 +64,7 @@ function routerWith({ relayStatus, relayResult, pulledAgents, metricsCollector }
     stopRelayFn: async () => relayResult ?? { ok: true, relay: { status: "stopped", pid: null, port: 47821 } },
     restartRelayFn: async () => relayResult ?? { ok: true, relay: { status: "running", pid: 4243, port: 47821 } },
     fetchRelayAgents: async () => pulledAgents ?? null,
+    fetchTerminalHostStatus: async () => null,
   });
 }
 
@@ -3026,7 +3027,7 @@ describe("panel.html 设置全页视图", () => {
 
   it("活动标签按存档回读：存档在册优先，认不到才回落第一个并改写存档", () => {
     const srcOf = (name) => {
-      const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
       assert.ok(src, `${name} found in panel.js`);
       return src;
     };
@@ -4169,6 +4170,7 @@ describe("panel-host self-restart endpoint + control-plane-only page", () => {
       aliasResolver: null,
       aliasPath: null,
       fetchRelayAgents: async () => null,
+      fetchTerminalHostStatus: async () => null,
       hostKind,
       spawnPanelHostRestartFn: spawnImpl ?? (() => { calls.spawns += 1; }),
       exitPanelHostFn: exitImpl ?? ((code) => calls.exits.push(code)),
@@ -5936,7 +5938,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
     const bodies = ["closeTerminalStream", "ensureTerminalXterm", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
       .map((name) => {
-        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
@@ -6296,7 +6298,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
   function terminalGateSandbox({ viewHidden = true } = {}) {
     const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
       .map((name) => {
-        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
@@ -6568,7 +6570,7 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
   function imeAnchorSandbox() {
     const bodies = ["terminalImeAnchorReady", "syncTerminalImeAnchor", "armTerminalImeAnchor", "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
       .map((name) => {
-        const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
@@ -7069,7 +7071,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
 // 被 fetch 的自动补建兜住）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
 describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）", () => {
   function extractFn(name) {
-    const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
     assert.ok(src, `${name} found in panel.js`);
     return src;
   }
@@ -7469,7 +7471,7 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
 // 走新路由、成功分支登记会话并渲染；空白终端保留原 POST 逻辑。
 describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   function extractFn(name) {
-    const src = panelJs.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
     assert.ok(src, `${name} found in panel.js`);
     return src;
   }
@@ -7905,5 +7907,164 @@ describe("面板失败文案：折叠时留痕 + 数据搬迁给下一步", () =
     assert.equal(helpers.panelFailure(err, "导出未完成"),
       "导出未完成（请刷新页面后重试；详情见面板日志）",
       "上报是顺带的事，不能把原错误盖掉");
+  });
+});
+
+// 终端宿主生命周期代理：状态/起停的真值都在 relay（47821 /terminal-host/*），
+// 面板路由只做转发与兜底。relay 实现的应答把状态嵌在 host 下，面板端下发
+// 平铺结构；状态词表（running/stopped/stopped-manual/crashed）原样透传——
+// panel.js 的徽标与起停钮按这套词表渲染。
+describe("panel router terminal-host lifecycle proxy", () => {
+  function terminalHostRouter({ statusPayload = null, actionImpl = null } = {}) {
+    const calls = { statusPulls: 0, actions: [] };
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null,
+      metricsCollector: null,
+      aliasResolver: null,
+      aliasPath: null,
+      getRelayStatusFn: async () => ({ status: "running", pid: 1234, port: 47821 }),
+      fetchRelayAgents: async () => null,
+      fetchTerminalHostStatus: async () => {
+        calls.statusPulls += 1;
+        return typeof statusPayload === "function" ? statusPayload() : statusPayload;
+      },
+      callTerminalHostAction: async (action, body) => {
+        calls.actions.push({ action, body });
+        return actionImpl ? actionImpl(action, body) : { status: 200, body: { ok: true, host: { state: "running", pid: 55, lastExit: null } } };
+      },
+    });
+    return { router, calls };
+  }
+
+  it("GET /panel/api/terminal/host/status flattens the relay's host payload", async () => {
+    const { router } = terminalHostRouter({
+      statusPayload: { ok: true, host: { state: "running", pid: 4321, lastExit: null } },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, state: "running", pid: 4321, manualStop: false, lastExit: null });
+  });
+
+  it("GET /panel/api/terminal/host/status passes a flat relay payload through", async () => {
+    const { router } = terminalHostRouter({
+      statusPayload: { ok: true, state: "stopped", pid: null, manualStop: true, lastExit: null },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, state: "stopped", pid: null, manualStop: true, lastExit: null });
+  });
+
+  it("GET /panel/api/terminal/host/status keeps the state vocabulary and derives manualStop from stopped-manual", async () => {
+    const { router } = terminalHostRouter({
+      statusPayload: { ok: true, host: { state: "stopped-manual", pid: null, lastExit: null } },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(json().state, "stopped-manual");
+    assert.equal(json().manualStop, true);
+  });
+
+  it("GET /panel/api/terminal/host/status answers unknown instead of erroring when the relay is unreachable", async () => {
+    const { router } = terminalHostRouter({ statusPayload: null });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, state: "unknown", pid: null, manualStop: false, lastExit: null });
+  });
+
+  it("POST /panel/api/terminal/host/start proxies to the relay and answers the resulting state", async () => {
+    const { router, calls } = terminalHostRouter();
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/start", "POST", {});
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true, state: "running" });
+    assert.deepEqual(calls.actions, [{ action: "start", body: {} }]);
+  });
+
+  it("POST /panel/api/terminal/host/start answers 503 relay_unavailable when the relay is unreachable", async () => {
+    const { router } = terminalHostRouter({ actionImpl: () => null });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/start", "POST", {});
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 503);
+    assert.deepEqual(json(), { ok: false, error: "relay_unavailable" });
+  });
+
+  it("POST /panel/api/terminal/host/start passes a relay-side failure through untouched", async () => {
+    const { router } = terminalHostRouter({
+      actionImpl: () => ({ status: 500, body: { ok: false, error: "terminal host failed to start" } }),
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/start", "POST", {});
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 500);
+    assert.deepEqual(json(), { ok: false, error: "terminal host failed to start" });
+  });
+
+  it("POST /panel/api/terminal/host/stop forwards the body verbatim and answers ok", async () => {
+    const { router, calls } = terminalHostRouter({
+      actionImpl: () => ({ status: 200, body: { ok: true, host: { state: "stopped-manual", pid: null, lastExit: null } } }),
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/stop", "POST", { clearSessions: true });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json(), { ok: true });
+    assert.deepEqual(calls.actions, [{ action: "stop", body: { clearSessions: true } }]);
+  });
+
+  it("POST /panel/api/terminal/host/stop answers 503 relay_unavailable when the relay is unreachable", async () => {
+    const { router } = terminalHostRouter({ actionImpl: () => null });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/host/stop", "POST", { clearSessions: false });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 503);
+    assert.deepEqual(json(), { ok: false, error: "relay_unavailable" });
+  });
+
+  it("GET /panel/api/status carries terminalHost { state, manualStop } from the relay", async () => {
+    const { router } = terminalHostRouter({
+      statusPayload: { ok: true, host: { state: "crashed", pid: null, lastExit: { code: 1, signal: null, at: 999 } } },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().terminalHost, { state: "crashed", manualStop: false });
+    assert.equal(json().relay.status, "running");
+  });
+
+  it("GET /panel/api/status reports terminalHost unknown when the relay is unreachable", async () => {
+    const { router } = terminalHostRouter({ statusPayload: null });
+    const { req, res, json } = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().terminalHost, { state: "unknown", manualStop: false });
+  });
+
+  it("GET /panel/api/status caches the host-status pull within its TTL instead of doubling relay pressure", async () => {
+    const { router, calls } = terminalHostRouter({
+      statusPayload: { ok: true, host: { state: "running", pid: 55, lastExit: null } },
+    });
+    const first = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(first.req, first.res);
+    const second = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(second.req, second.res);
+    assert.equal(calls.statusPulls, 1);
+    assert.deepEqual(second.json().terminalHost, { state: "running", manualStop: false });
+  });
+
+  it("host start/stop invalidates the cached status so the next poll re-pulls", async () => {
+    const { router, calls } = terminalHostRouter({
+      statusPayload: { ok: true, host: { state: "running", pid: 55, lastExit: null } },
+    });
+    const before = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(before.req, before.res);
+    assert.equal(calls.statusPulls, 1);
+    const start = fakeReqRes("/panel/api/terminal/host/start", "POST", {});
+    await router.handle(start.req, start.res);
+    assert.equal(start.res.statusCode, 200);
+    const after = fakeReqRes("/panel/api/status", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(calls.statusPulls, 2);
   });
 });

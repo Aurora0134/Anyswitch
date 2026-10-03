@@ -17,6 +17,8 @@ import {
   parseLogLevel,
   createLogLevelGate,
   parseClaudeBypassPermissions,
+  parseTerminalHostManualStop,
+  DEFAULT_TERMINAL_HOST_MANUAL_STOP,
   parseClaudeTierMappingsEnabled,
   loadSettings,
   saveSettings,
@@ -660,6 +662,40 @@ describe("claudeBypassPermissions", () => {
       assert.equal(loadSettings(path, {}).settings.claudeBypassPermissions, true);
       const back = saveSettings(path, { claudeBypassPermissions: false }, {});
       assert.equal(back.settings.claudeBypassPermissions, false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("terminalHostManualStop", () => {
+  it("defaults to off: only an explicit true marks a manual stop", () => {
+    assert.equal(DEFAULT_TERMINAL_HOST_MANUAL_STOP, false);
+    assert.equal(parseTerminalHostManualStop(undefined), false);
+    assert.equal(parseTerminalHostManualStop("true"), false);
+    assert.equal(parseTerminalHostManualStop(1), false);
+    assert.equal(parseTerminalHostManualStop(true), true);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-terminal-stop-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.terminalHostManualStop, false, "an install predating the key starts the host as before");
+
+      const stopped = saveSettings(path, { terminalHostManualStop: true }, {});
+      assert.equal(stopped.settings.terminalHostManualStop, true);
+      assert.equal(loadSettings(path, {}).settings.terminalHostManualStop, true);
+
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.terminalHostManualStop, true, "改别的设置项不会把这个标记挤掉");
+
+      const back = saveSettings(path, { terminalHostManualStop: false }, {});
+      assert.equal(back.settings.terminalHostManualStop, false);
+      assert.equal(loadSettings(path, {}).settings.terminalHostManualStop, false);
+
+      const malformed = saveSettings(path, { terminalHostManualStop: "yes" }, {});
+      assert.equal(malformed.settings.terminalHostManualStop, false, "stored value stays canonical");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
