@@ -346,9 +346,9 @@ async function api(method, path, body) {
   // restoreView 恢复设置页时待激活的子 tab（取自 panel-settings-subtab），
   // enterSettingsView 消费一次即清；主动点齿轮进入恒落「通用」，不看它。
   let settingsSubTabToRestore = null;
-  // 终端预览只保留返回设置页所需的瞬时导航上下文；真实终端接入后会由会话层接管。
-  let terminalReturnView = "settings";
-  let terminalReturnSettingsSubTab = "experimental";
+  // 终端页的返回上下文：入口是看板左栏那张卡，离开终端页一律落回看板——别的视图上没有
+  // 这张卡，落过去用户就找不回入口。滚动位置随进来那一眼记下，返回时补回。
+  let terminalReturnView = "board";
   let terminalReturnScrollTop = 0;
   // 看板渲染完成的通知钩子：恢复进「主题」子页时镜像快照拍到的是还没取到数据的空壳
   // 看板，靠它补拍一次（实现在 initSettingsView）。
@@ -2959,7 +2959,7 @@ async function api(method, path, body) {
     const terminalEntry = $("openTerminalPreviewBtn");
     if (terminalEntry) terminalEntry.onclick = () => openTerminalPreview();
 
-    // 子 tab：通用 / 自动路由 / 主题 / 关于 / 实验性功能；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
+    // 子 tab：通用 / 自动路由 / 主题 / 关于；主动进入设置固定落「通用」，刷新恢复回到离开前那一个。
     const about = createAboutController({ request: api, doc: document, notify: toast });
     // 数据搬迁用 panelFailure：被折叠的失败要额外告诉用户「刷新页面重试」这条
     // 有意义的下一步，并指向面板日志里的服务端原文。
@@ -2971,7 +2971,6 @@ async function api(method, path, body) {
       route: ["settingsTabRoute", "settingsPanelRoute"],
       theme: ["settingsTabTheme", "settingsPanelTheme"],
       about: ["settingsTabAbout", "settingsPanelAbout"],
-      experimental: ["settingsTabExperimental", "settingsPanelExperimental"],
     };
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
@@ -5046,8 +5045,7 @@ async function api(method, path, body) {
   }
 
   function openTerminalPreview() {
-    terminalReturnView = "settings";
-    terminalReturnSettingsSubTab = "experimental";
+    terminalReturnView = currentView;
     terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
     switchView("terminal");
     // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
@@ -5055,7 +5053,6 @@ async function api(method, path, body) {
   }
 
   function closeTerminalPreview() {
-    settingsSubTabToRestore = terminalReturnSettingsSubTab;
     switchView(terminalReturnView);
     requestAnimationFrame(() => {
       window.scrollTo(0, terminalReturnScrollTop);
@@ -5836,8 +5833,8 @@ async function api(method, path, body) {
     if (terminalOpen) {
       // 终端页排在设置页之前：进终端页那一刻 panel-settings-open 已被写成 "0"，两把键
       // 同时为真只可能是存档被手改，按终端页走。上面 saved 链刚落好的主视图仍是设置页
-      // 「←退出」的目标；终端页自己的返回上下文用声明处的默认值（设置页 + 实验性子 tab），
-      // 与点按钮进来那条路同一套，不必另存。
+      // 「←退出」的目标；终端页的返回上下文用声明处的默认值（看板——入口就在左栏那张卡
+      // 上），与点卡上按钮进来那条路同一套，不必另存。
       settingsReturnView = currentView;
       suppressViewEnter = true;
       switchView("terminal");
