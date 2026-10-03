@@ -440,7 +440,8 @@
   .prop-val { font-family: var(--font-mono); font-weight: 600; color: var(--text); }
 
   /* 看板左栏的虚拟终端入口卡：纵向排——说明在上、按钮占满整行（左栏只有 320px，
-     横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc，钮走 .btn-primary 基座。 */
+     横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc；钮走淡底强调款
+     .btn-accent——实心 .btn-primary 的渐变+光晕在素色看板上是全场唯一色块，抢视野。 */
   .terminal-entry-desc { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin-bottom: 14px; }
   .terminal-entry-btn { display: flex; width: 100%; justify-content: center; }
 
