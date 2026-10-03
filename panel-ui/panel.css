@@ -439,6 +439,11 @@
   .prop-name { color: var(--text-3); font-weight: 500; }
   .prop-val { font-family: var(--font-mono); font-weight: 600; color: var(--text); }
 
+  /* 看板左栏的虚拟终端入口卡：纵向排——说明在上、按钮占满整行（左栏只有 320px，
+     横向两栏会把说明压成一竖条）。说明的字号与色档抄 .modal-item-desc，钮走 .btn-primary 基座。 */
+  .terminal-entry-desc { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin-bottom: 14px; }
+  .terminal-entry-btn { display: flex; width: 100%; justify-content: center; }
+
   /* 按钮通用组件 */
   .btn {
     display: inline-flex; align-items: center; gap: 6px;
@@ -775,18 +780,6 @@
   }
   #settingsPanelAdvanced .modal-item:hover { background: var(--surface-hover); }
   #settingsPanelAdvanced .card-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-  #settingsPanelExperimental { display: flex; flex-direction: column; gap: 20px; }
-  #settingsPanelExperimental .card-body { display: flex; flex-direction: column; gap: 8px; }
-  .experimental-card .card-header { align-items: center; }
-  .experimental-launch-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 20px;
-    min-height: 92px;
-  }
-  .experimental-launch-row > :first-child { min-width: 0; }
-  .experimental-launch-row .btn { flex: none; }
-  @media (max-width: 640px) {
-    .experimental-launch-row { align-items: flex-start; flex-direction: column; }
-  }
   .data-bundle-status { font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
   .data-bundle-status[data-tone="busy"] { color: var(--accent); }
   .data-bundle-status[data-tone="ok"] { color: var(--ok); }
@@ -4050,11 +4043,10 @@
   /* 设置子 tab：先按标记整体收起，再放出归档那一个——顺序敏感，「通用」不带 hidden，
      收起与放出同特异，靠下面那条在后胜出。 */
   html[data-prepaint-view="settings"][data-prepaint-subtab]
-    :is(#settingsPanelGeneral, #settingsPanelAdvanced, #settingsPanelRoute, #settingsPanelTheme, #settingsPanelExperimental, #settingsPanelAbout) { display: none; }
+    :is(#settingsPanelGeneral, #settingsPanelAdvanced, #settingsPanelRoute, #settingsPanelTheme, #settingsPanelAbout) { display: none; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="general"] #settingsPanelGeneral { display: flex; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="advanced"] #settingsPanelAdvanced[hidden] { display: flex !important; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="route"] #settingsPanelRoute[hidden],
-  html[data-prepaint-view="settings"][data-prepaint-subtab="experimental"] #settingsPanelExperimental[hidden],
   html[data-prepaint-view="settings"][data-prepaint-subtab="about"] #settingsPanelAbout[hidden] { display: flex !important; }
   html[data-prepaint-view="settings"][data-prepaint-subtab="theme"] #settingsPanelTheme[hidden] { display: block !important; }
   /* 统计子 tab：停在「请求日志」时首帧直落日志页——总览 pane 退场、日志 pane

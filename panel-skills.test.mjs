@@ -839,14 +839,14 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
   it("折叠不会被 CSS 打回展开：收起的卡头不留底边，卡身有 [hidden] 兜底", () => {
     assert.match(panelCss, /\.panel-card\.folded \.card-header \{ border-bottom: none; \}/);
     assert.match(panelCss, /\.skills-anomaly-head-tools \{ display: inline-flex;/);
-    // 折叠全靠 UA 的 [hidden]{display:none}；同文件里设置页两张卡给 .card-body 写了
+    // 折叠全靠 UA 的 [hidden]{display:none}；同文件里设置页那张卡给 .card-body 写了
     // display:flex，将来谁把它套到本卡上就会静默打回展开，故本卡自带一条兜底并钉住
     assert.match(panelCss, /#skillsAnomalyBody\[hidden\] \{ display: none; \}/);
     const selectors = [...panelCss.matchAll(/([^{}]*\.card-body[^{}]*)\{[^}]*display:/g)].map((m) => m[1].trim());
     assert.deepEqual(
-      selectors.filter((sel) => !/#settingsPanel(Advanced|Experimental)/.test(sel) && sel !== "#skillsAnomalyBody"),
+      selectors.filter((sel) => !/#settingsPanelAdvanced/.test(sel) && sel !== "#skillsAnomalyBody"),
       [],
-      "除设置页两张卡与本卡的 [hidden] 兜底外，不得再给 .card-body 写 display",
+      "除设置页那张卡与本卡的 [hidden] 兜底外，不得再给 .card-body 写 display",
     );
   });
 
