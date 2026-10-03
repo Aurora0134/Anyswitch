@@ -96,9 +96,23 @@
     radial-gradient(980px 460px at 10% -180px, rgba(56, 189, 248, 0.15), transparent 70%),
     radial-gradient(900px 440px at 88% -140px, rgba(167, 139, 250, 0.11), transparent 72%),
     radial-gradient(820px 560px at 55% 130%, rgba(244, 114, 182, 0.08), transparent 76%);
-  --console-bg: #081423;
-  --console-toolbar-bg: #0d1f31;
-  --console-border: rgba(103, 232, 249, 0.12);
+  --console-bg: #f2fafd;
+  --console-toolbar-bg: #e2f2f8;
+  --console-border: rgba(14, 116, 144, 0.2);
+  --console-fg: #14313d;
+  --console-muted: #52798a;
+  --console-hover-bg: #d5eaf2;
+  --console-hover-fg: #0c2530;
+  --console-live: var(--ok);
+  --console-info: #0284c7;
+  --console-warn: #b45309;
+  --console-error: #dc2626;
+
+  --terminal-bg: #eef7fb;
+  --terminal-fg: #14313d;
+  --terminal-cursor: #155e75;
+  --terminal-selection: #bfe7f5;
+  --terminal-muted: #52798a;
   --card-hairline: linear-gradient(90deg, rgba(14, 165, 233, 0.4), rgba(139, 92, 246, 0.3), rgba(236, 72, 153, 0.26));
 }
 
@@ -178,6 +192,20 @@
   --console-bg: #050e1a;
   --console-toolbar-bg: #0a1a2b;
   --console-border: rgba(103, 232, 249, 0.12);
+  --console-fg: #d4e9f4;
+  --console-muted: #5b8597;
+  --console-hover-bg: #0d1f31;
+  --console-hover-fg: #e6f6fc;
+  --console-live: var(--ok);
+  --console-info: #4cd6ef;
+  --console-warn: #fbbf24;
+  --console-error: #f87171;
+
+  --terminal-bg: #050e1a;
+  --terminal-fg: #d4e9f4;
+  --terminal-cursor: #a5f3fc;
+  --terminal-selection: #164e63;
+  --terminal-muted: #5b8597;
   --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
 }
 
@@ -258,6 +286,20 @@
     --console-bg: #050e1a;
     --console-toolbar-bg: #0a1a2b;
     --console-border: rgba(103, 232, 249, 0.12);
+    --console-fg: #d4e9f4;
+    --console-muted: #5b8597;
+    --console-hover-bg: #0d1f31;
+    --console-hover-fg: #e6f6fc;
+    --console-live: var(--ok);
+    --console-info: #4cd6ef;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+
+    --terminal-bg: #050e1a;
+    --terminal-fg: #d4e9f4;
+    --terminal-cursor: #a5f3fc;
+    --terminal-selection: #164e63;
+    --terminal-muted: #5b8597;
     --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
   }
 }
@@ -358,7 +400,7 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：极夜冰蓝壳 + 青色描边微光，亮暗两套都保持深色机身 */
+/* 日志控制台：壳色随 --console-* token 亮暗换肤，青色描边微光与玻璃圆角保持皮肤语言 */
 :root[data-style="aurora"] .log-console {
   background: var(--console-bg);
   border-color: var(--console-border);
