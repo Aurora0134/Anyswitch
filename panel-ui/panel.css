@@ -924,7 +924,6 @@
   .terminal-page-title strong { font-size: 14px; color: var(--text); line-height: 1.15; }
   .terminal-page-title span:not(.terminal-page-title-mark) { font-size: 10.5px; color: var(--text-3); }
   .terminal-head-icon { width: 30px; height: 30px; }
-  #terminalHostToggleBtn:disabled { opacity: 0.45; cursor: not-allowed; }
   .terminal-workspace {
     flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px;
     gap: 1px; background: var(--border);

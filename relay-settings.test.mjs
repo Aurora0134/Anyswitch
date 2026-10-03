@@ -19,6 +19,8 @@ import {
   parseClaudeBypassPermissions,
   parseTerminalHostManualStop,
   DEFAULT_TERMINAL_HOST_MANUAL_STOP,
+  parseTerminalRestoreSessions,
+  DEFAULT_TERMINAL_RESTORE_SESSIONS,
   parseClaudeTierMappingsEnabled,
   loadSettings,
   saveSettings,
@@ -696,6 +698,45 @@ describe("terminalHostManualStop", () => {
 
       const malformed = saveSettings(path, { terminalHostManualStop: "yes" }, {});
       assert.equal(malformed.settings.terminalHostManualStop, false, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("terminalRestoreSessions", () => {
+  it("stays on unless explicitly switched off", () => {
+    assert.equal(DEFAULT_TERMINAL_RESTORE_SESSIONS, true);
+    assert.equal(parseTerminalRestoreSessions(undefined), true);
+    assert.equal(parseTerminalRestoreSessions(true), true);
+    assert.equal(parseTerminalRestoreSessions(false), false);
+    assert.equal(parseTerminalRestoreSessions("false"), true, "a stray string is not a user's off switch");
+    assert.equal(parseTerminalRestoreSessions(0), true);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-restore-sessions-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ terminalHostManualStop: true, sparkWindowPoints: 24 }));
+      assert.equal(loadSettings(path, {}).settings.terminalRestoreSessions, true, "an install predating the key restores as before");
+
+      const off = saveSettings(path, { terminalRestoreSessions: false }, {});
+      assert.equal(off.settings.terminalRestoreSessions, false);
+      assert.equal(loadSettings(path, {}).settings.terminalRestoreSessions, false);
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).terminalRestoreSessions, false, "落盘的值就是关闭");
+      assert.equal(off.settings.terminalHostManualStop, true, "邻键不受影响");
+      assert.equal(off.settings.sparkWindowPoints, 24);
+
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.terminalRestoreSessions, false, "改别的设置项不会把这个开关挤掉");
+
+      const back = saveSettings(path, { terminalRestoreSessions: true }, {});
+      assert.equal(back.settings.terminalRestoreSessions, true);
+      assert.equal(loadSettings(path, {}).settings.terminalRestoreSessions, true);
+
+      const malformed = saveSettings(path, { terminalRestoreSessions: "no" }, {});
+      assert.equal(malformed.settings.terminalRestoreSessions, true, "stored value stays canonical");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
