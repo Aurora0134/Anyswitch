@@ -890,8 +890,8 @@
   .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
 
-  /* 虚拟终端预览：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
-     右侧状态面板使用普通面板 token，方便后续接入真实会话数据时不改工作区骨架。 */
+  /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
+     右侧状态面板使用普通面板 token，与看板遥测同源。 */
   body.terminal-mode { overflow: hidden; }
   body.terminal-mode header.site-head { display: none; }
   body.terminal-mode main.layout-container { max-width: none; padding: 0; margin: 0; }
@@ -924,12 +924,6 @@
   .terminal-page-title div { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .terminal-page-title strong { font-size: 14px; color: var(--text); line-height: 1.15; }
   .terminal-page-title span:not(.terminal-page-title-mark) { font-size: 10.5px; color: var(--text-3); }
-  .terminal-preview-pill {
-    display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px;
-    border: 1px solid var(--warn-border); border-radius: var(--radius-sm, 6px);
-    color: var(--warn); background: var(--warn-soft); font: 600 10.5px/1.2 var(--font-mono);
-  }
-  .terminal-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
   .terminal-head-icon { width: 30px; height: 30px; }
   .terminal-workspace {
     flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px;
@@ -1212,7 +1206,7 @@
   }
   @media (max-width: 700px) {
     .terminal-head { min-height: 52px; padding: 0 10px; }
-    .terminal-head-divider, .terminal-page-title span:not(.terminal-page-title-mark), .terminal-preview-pill { display: none; }
+    .terminal-head-divider, .terminal-page-title span:not(.terminal-page-title-mark) { display: none; }
     .terminal-workspace { display: flex; flex-direction: column; }
     .terminal-main-pane { min-height: calc(100vh - 52px); }
     .terminal-inspector { max-height: 330px; border-top: 1px solid var(--border); }
