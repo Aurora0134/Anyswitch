@@ -720,8 +720,24 @@ export function parseDshConsoleQueryOutput(out) {
 
 // The empty scan result both parseTasklistCsv and the collector's cache init
 // start from: zero counts, empty pid sets, empty lineage table.
+// 每轮扫描的结果对象自带一个「桶内计数可信」位 countsAuthoritative，回答的是
+// 读侧唯一关心的那个问题：这一轮各端点的进程数能不能当成事实用（0 就是真没了）。
+//
+// - 常驻 PowerShell 探针那一路带命令行与父进程列，是唯一能认全 node 型客户端
+//   的扫描形状 → 可信。
+// - 退回到 `tasklist /NH /FO CSV` 那一路，每一行都没有命令行，node.exe 行认不出
+//   属于哪个 agent，靠安装路径识别的 kimi/pi/dsh/opencode 在这一轮是全盲的
+//   （镜像名原生可辨的 claude/codex/qoder/grok/zcode 不受影响）→ 不可信：这一轮
+//   的 0 是「没看见」，不是「不在了」。唯一的例外是回落也报了零行——两份探针都
+//   说没有任何进程，此时没有可误判归属的行，沿用「端点已关闭」这一既有语义。
+//
+// 读侧据此区分「这轮没看见」与「这些进程真的不在了」：不可信轮不得据桶内 pid 集
+// 删实例行、不得据零进程数清在途计数——这是「生成中永不出现 / 实例行被删 / 最近
+// 请求永远为空」那一串症状的共同根因。seenPids 是这一轮探针报上来的全部 pid
+// （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
+// 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -764,6 +780,9 @@ function parseTasklistCsv(stdout) {
     // them. tasklist rows yield ppid null and simply never enter the map.
     const ppid = extractParentPid(trimmed);
     if (pid !== null && ppid !== null) result.ppidByPid.set(pid, ppid);
+    // 本轮报上来的全部 pid，含下面所有分支都不认领的行（node.exe 启动器、cmd
+    // 垫片、无关进程）：不完整轮只能靠它回答「这个 pid 还在不在」。
+    if (pid !== null) result.seenPids.add(pid);
 
     // Claim by image name only (see resolveProbeRow). The probe wrapper's
     // command line embeds every agent name literal; a whole-line includes()
@@ -2076,6 +2095,9 @@ export function createAgentMetricsCollector(options = {}) {
       const psOut = await psProbe.query().catch(() => null);
       if (typeof psOut === "string" && psOut.trim().length > 0) {
         const counts = parseTasklistCsv(psOut);
+        // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
+        // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
+        counts.countsAuthoritative = true;
         // Terminal-orphan reap before landing: the snapshot the panel reads
         // must already exclude the reaped session.
         await reapDshTerminalOrphans(counts);
@@ -2091,6 +2113,10 @@ export function createAgentMetricsCollector(options = {}) {
         execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, async (err, stdout) => {
           if (!err && typeof stdout === "string") {
             const counts = parseTasklistCsv(stdout);
+            // 这半张视图认不出 node 型客户端：报了行的轮次其桶内计数不可信
+            // （见 createEmptyProcessScan 上方）；零行则没有可误判归属的行，
+            // 沿用「端点已关闭」这一既有语义。
+            counts.countsAuthoritative = counts.seenPids.size === 0;
             await attachKimiSurfaces(counts);
             land(counts);
           } else {
@@ -3003,6 +3029,10 @@ export function createAgentMetricsCollector(options = {}) {
     }
     const procCounts = await scanProcesses();
     const now = nowFn();
+    // 这一轮的桶内计数可信吗（口径见 createEmptyProcessScan 上方）。不可信轮的
+    // 「零进程」是看不见而不是不在：据进程归属做的破坏性收敛整批跳过，实例淘汰
+    // 降级为「本轮全量 pid」存活判定。可信轮一切照旧。
+    const countsTrusted = procCounts.countsAuthoritative === true;
 
     // Expire abandoned-model faults (idle > faultIdleTtlMs) before building
     // status so the panel banner reflects only still-live faults.
@@ -3038,15 +3068,18 @@ export function createAgentMetricsCollector(options = {}) {
       }
     }
 
-    settleAbandonedAggregateState(zcodeState, procCounts.zcode || 0);
-    settleAbandonedAggregateState(dshState, procCounts.dsh || 0);
-    settleAbandonedAggregateState(piState, procCounts.pi || 0);
-    settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
-    settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
-    settleAbandonedAggregateState(codexState, procCounts.codex || 0);
-    settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
-    settleAbandonedAggregateState(grokState, procCounts.grok || 0);
-    settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
+    // 只在完整轮结算：不完整轮的零进程数是「没看见」，不是「进程没了」。
+    if (countsTrusted) {
+      settleAbandonedAggregateState(zcodeState, procCounts.zcode || 0);
+      settleAbandonedAggregateState(dshState, procCounts.dsh || 0);
+      settleAbandonedAggregateState(piState, procCounts.pi || 0);
+      settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
+      settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
+      settleAbandonedAggregateState(codexState, procCounts.codex || 0);
+      settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
+      settleAbandonedAggregateState(grokState, procCounts.grok || 0);
+      settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
+    }
 
     // Instance housekeeping mirrors the endpoint-level one: settle orphans,
     // expire stale fault latches, drop stale entries. Read-driven, no timers.
@@ -3090,7 +3123,8 @@ export function createAgentMetricsCollector(options = {}) {
         // 在且本行无在途请求就清行（这些计数随空闲 TTL 本来也要丢，
         // journal 已逐请求落账不受影响）；有在途请求留到其收尾后的下一
         // 轮读再收敛。
-        if (pidMatch === null && !isCodexSessionRow) {
+        // 重折叠读的是本轮快照里的 pid 归属：不完整轮答不出归属，跳过。
+        if (countsTrusted && pidMatch === null && !isCodexSessionRow) {
           const refold = normalizeInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
@@ -3109,10 +3143,19 @@ export function createAgentMetricsCollector(options = {}) {
         }
         let evict = false;
         if (pidMatch !== null) {
-          evict = !livePids.has(Number(pidMatch[1]));
-        } else if (isCodexSessionRow) {
+          // 完整轮：桶内 pid 集说了算（认不出这个桶即视为该行已不属于此端点）。
+          // 不完整轮：桶内集对 node 型端点是空的，改用本轮全量 pid——只判生死，
+          // 不判归属，进程真死了照样即时淘汰。快照里没有全量 pid（外部注入的
+          // 旧形状）时不淘汰，宁可留一行也不误删。
+          if (countsTrusted) {
+            evict = !livePids.has(Number(pidMatch[1]));
+          } else {
+            const seenPids = procCounts.seenPids;
+            evict = seenPids instanceof Set && !seenPids.has(Number(pidMatch[1]));
+          }
+        } else if (countsTrusted && isCodexSessionRow) {
           evict = count === 0;
-        } else if (bucket === "codex") {
+        } else if (countsTrusted && bucket === "codex") {
           const tail = instId.match(/-(\d+)$/);
           evict = tail !== null && scanPidLiveness(Number(tail[1]), procCounts) === false;
         }
@@ -3137,7 +3180,8 @@ export function createAgentMetricsCollector(options = {}) {
           instMap.delete(instId);
           continue;
         }
-        settleAbandonedAggregateState(entry.state, count);
+        // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
+        if (countsTrusted) settleAbandonedAggregateState(entry.state, count);
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
         if (pidMatch === null) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
