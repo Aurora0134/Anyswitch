@@ -284,6 +284,14 @@ async function api(method, path, body) {
     } catch { /* 接口不可达（面板服务换新中）：不显示版本，不进控制台噪音 */ }
   }
 
+  // 「开屏动画」本机偏好：与 head 里的 panelStartupBootstrap 读同一条存档、同一缺省
+  // 口径（缺省按「开」处理）。绘制前的那一份判定只能同步读 localStorage——主脚本是
+  // defer 外链、HTML 由后端按静态文件直出，服务端存档读回来首绘已经过去了。
+  // 这里只负责绘制之后的两处：设置页这颗开关的回显与写入、看板「重启」的复播入口。
+  function startupAnimationEnabled() {
+    try { return localStorage.getItem("panel-startup-animation") !== "0"; } catch { return true; }
+  }
+
   let startupViewReady = Promise.resolve();
   async function init() {
     initTheme();
@@ -2876,6 +2884,7 @@ async function api(method, path, body) {
     const keepAliveTitle = $("keepAliveTitle");
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
+    const startupAnimationToggle = $("startupAnimationToggle");
     const injectEffortToggle = $("injectEffortToggle");
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
@@ -3458,6 +3467,19 @@ async function api(method, path, body) {
           settingsSaving.followAgent = false;
           followAgentToggle.removeAttribute("aria-busy");
         }
+      };
+    }
+
+    if (startupAnimationToggle) {
+      // 本机浏览器偏好，逐控件即时写存档、不 POST：开屏在绘制前就要决定出不出，
+      // 走 /api/settings 就赶不上那一帧（同主题、面板样式、终端字号）。
+      // 写下去的值对当前这一页不再有影响——开屏只在页面起点出现一次，
+      // 下一次打开面板、或下一次看板重启回跳的那个新页面按新值走。
+      startupAnimationToggle.checked = startupAnimationEnabled();
+      startupAnimationToggle.onchange = () => {
+        try {
+          localStorage.setItem("panel-startup-animation", startupAnimationToggle.checked ? "1" : "0");
+        } catch {}
       };
     }
 
@@ -5734,7 +5756,10 @@ async function api(method, path, body) {
     // 失败路径显式收回，把页面还给用户。兜底时限取恢复超时外加余量。
     // 显式传 true：这是用户主动点重启触发的播放，无论本页是不是上次重启恢复来的，
     // 都该完整播一遍脉冲。不传的话，停在上次恢复页上再点重启会被静默吞成定格。
+    // 现读存档而不是沿用本页加载时那份判定：用户刚在这页上关掉开屏动画就点重启，
+    // 不该看到开屏——三条失败收回路径都用可选链，图层不在场时 dropStartupSplash 自然空转。
     const playStartupSplash = () => {
+      if (!startupAnimationEnabled()) return;
       window.panelStartupBegin?.(PANEL_RESTART_RECOVERY_TIMEOUT_MS + 5_000);
       window.panelStartupPlay?.(true);
     };

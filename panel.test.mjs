@@ -2531,7 +2531,7 @@ describe("panel.html 设置全页视图", () => {
     const iRoute = panelHtml.indexOf('id="settingsPanelRoute"');
     assert.ok(iGeneral > 0 && iRoute > iGeneral, "通用面板在自动路由面板之前");
     const general = panelHtml.slice(iGeneral, iRoute);
-    for (const id of ["followAgentToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
+    for (const id of ["followAgentToggle", "startupAnimationToggle", "keepAliveToggle", "keepAliveEndpoints", "keepAliveRetriesInput", "injectEffortToggle", "sparkWindowInput"]) {
       assert.ok(general.includes(`id="${id}"`), `通用面板保留控件 #${id}`);
     }
   });
@@ -4310,6 +4310,27 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
   });
 
+  it("开屏动画关到「关」时，看板重启的复播入口整层不出", () => {
+    // 真跑：把 startupAnimationEnabled 与 playStartupSplash 两段源码原样取出来，
+    // 配上假 localStorage 与记录了调用次数的假 window，比复述它的逻辑更接近页面行为。
+    const reader = (panelJs.match(/^ {2}function startupAnimationEnabled\(\) \{[\s\S]*?\n {2}\}/m) || [])[0];
+    const entry = (panelJs.match(/^ {4}const playStartupSplash = \(\) => \{[\s\S]*?\n {4}\};/m) || [])[0];
+    assert.ok(reader && entry, "未真正取到 startupAnimationEnabled 与 playStartupSplash，后续断言会全部落空");
+    for (const [stored, begins] of [[null, 1], ["1", 1], ["0", 0], ["denied", 1]]) {
+      let begun = 0, played = 0;
+      const localStorage = stored === "denied"
+        ? { getItem: () => { throw new Error("denied"); }, setItem() {} }
+        : { getItem: () => stored, setItem() {} };
+      vm.runInNewContext(`${reader};\n${entry}\nplayStartupSplash();`, {
+        localStorage,
+        window: { panelStartupBegin: () => { begun += 1; }, panelStartupPlay: () => { played += 1; } },
+        PANEL_RESTART_RECOVERY_TIMEOUT_MS: 20_000,
+      });
+      assert.equal(begun, begins, `${String(stored)}：起层次数`);
+      assert.equal(played, begins, `${String(stored)}：不起层就不播动画`);
+    }
+  });
+
   it("launcher 启动固定落看板页，刷新仍恢复上次 tab", () => {
     assert.ok(panelHtml.includes("window.panelStartupLaunch = true"), "标记只在 launcher URL 路径打点");
     const restoreStart = panelJs.indexOf("function restoreView()");
@@ -4563,6 +4584,70 @@ describe("设置项「注入推理强度」", () => {
     assert.ok(desc, "说明文案存在");
     assert.doesNotMatch(desc[1], /reasoning_effort|injectThinkingEffort|support_efforts|default_effort|thinkingLevelMap|thinkingFormat/, "正文不出现字段名");
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+/, "正文不出现 snake_case / camelCase 标识符");
+  });
+});
+
+describe("设置项「开屏动画」", () => {
+  // 真跑注入块：把 startupAnimationEnabled 与 if (startupAnimationToggle) {...} 两段
+  // 源码原样取出来配假 localStorage 执行——回显与写档是这个设置项的全部行为，
+  // 复述逻辑就等于没测。
+  function runStartupToggleRow(stored, nextChecked) {
+    const reader = (panelJs.match(/^ {2}function startupAnimationEnabled\(\) \{[\s\S]*?\n {2}\}/m) || [])[0];
+    const wiring = (panelJs.match(/^ {4}if \(startupAnimationToggle\) \{[\s\S]*?\n {4}\}/m) || [])[0];
+    assert.ok(reader && wiring, "未真正取到 startupAnimationEnabled 与开关注入块，后续断言会全部落空");
+    const writes = [];
+    const store = { "panel-startup-animation": stored }; // stored 为 null 即从未设过（缺省）
+    const toggle = { checked: false, onchange: null };
+    vm.runInNewContext(`${reader};\n${wiring}`, {
+      startupAnimationToggle: toggle,
+      localStorage: {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { writes.push([k, v]); },
+      },
+    });
+    const shown = toggle.checked;
+    assert.equal(typeof toggle.onchange, "function", "开关接上了 onchange");
+    toggle.checked = nextChecked;
+    toggle.onchange();
+    return { shown, writes, wiring };
+  }
+
+  it("回显按存档、点一下把新值写回存档", () => {
+    assert.equal(runStartupToggleRow(null, true).shown, true, "缺省视为开——升级上来的安装行为不变");
+    assert.equal(runStartupToggleRow("1", false).shown, true);
+    assert.equal(runStartupToggleRow("0", true).shown, false);
+    assert.deepEqual(runStartupToggleRow("1", false).writes, [["panel-startup-animation", "0"]], "关下去写 \"0\"");
+    assert.deepEqual(runStartupToggleRow("0", true).writes, [["panel-startup-animation", "1"]], "开回来写 \"1\"");
+  });
+
+  it("本机偏好不占服务端设置：注入块里没有 POST、保存态与回滚", () => {
+    // 钉住这个承载面：开屏在绘制前就要决定出不出，等服务端存档就赶不上那一帧。
+    // 以后若真要把它挪进 /api/settings，得先解决绘制前的同步读，不该由这颗开关顺手带。
+    assert.doesNotMatch(runStartupToggleRow(null, false).wiring, /api\(|settingsSaving|settingsLoadGen|aria-busy|toast\(/,
+      "逐控件即时写本地存档，不进服务端保存链");
+  });
+
+  it("行在「启动」卡内、排在「跟随 Coding Agent 启动」之后，沿用同一套 .toggle 控件", () => {
+    const atFollow = panelHtml.indexOf('id="followAgentToggle"');
+    const atStartup = panelHtml.indexOf('id="startupAnimationToggle"');
+    const atKeepAlive = panelHtml.indexOf('id="keepAliveToggle"');
+    assert.ok(atFollow > 0 && atFollow < atStartup && atStartup < atKeepAlive,
+      "新行落在「启动」卡内、「抗截断」卡之前");
+    const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atStartup), atStartup + 200);
+    assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
+    // 卡数与卡头数不变：设置项从九项变十项，只多一行、不多一张卡。
+    const general = panelHtml.slice(panelHtml.indexOf('id="settingsPanelGeneral"'), panelHtml.indexOf('id="settingsPanelRoute"'));
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5, "通用仍是五张卡");
+    assert.ok(panelHtml.includes("「通用」：十项按语义分五张卡"), "卡上注释的项数跟着改到十项");
+  });
+
+  it("说明文案就是用户拍板的那两句，不出现字段名也不替用户判断", () => {
+    const desc = panelHtml.match(/<div class="modal-item-title">开屏动画<\/div>\s*<div class="modal-item-desc">([^<]*)<\/div>/);
+    assert.ok(desc, "行标题「开屏动画」与说明在册");
+    assert.equal(desc[1], "关闭时不展示开屏动画；开启时，打开面板与看板重启后展示开屏动画。");
+    assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+|panel-startup-animation|localStorage/,
+      "正文不出现标识符、字段名与承载面");
+    assert.doesNotMatch(desc[1], /默认|建议|更快|更稳|代价/, "不写变更日志口吻、不替用户判断");
   });
 });
 

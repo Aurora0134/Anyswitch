@@ -27,7 +27,7 @@ function element() {
     dispatch(type) { listeners.get(type)?.({ type, matches: type === "change" }); },
   };
 }
-function page(url = "http://127.0.0.1:47820/panel?startup=1", { reduce = false, navigation = "navigate" } = {}) {
+function page(url = "http://127.0.0.1:47820/panel?startup=1", { reduce = false, navigation = "navigate", splashAnim = null } = {}) {
   let now = 0, serial = 0;
   const timers = new Map(), frames = new Map(), root = element();
   const elements = new Map(["panelStartup", "startupSvg", "startupEdges", "startupNodes", "startupLogo"].map((id) => [id, element()]));
@@ -44,6 +44,14 @@ function page(url = "http://127.0.0.1:47820/panel?startup=1", { reduce = false, 
     cancelAnimationFrame(id) { frames.delete(id); },
   };
   context.window = context;
+  // 桩环境本来没有 localStorage，bootstrap 的读档落在 try/catch 里按「开」处理——
+  // 未点明 splashAnim 的那些用例因此一字不用改。点明了才造一个真读得到存档的环境：
+  // true/false 是开关的两个存档值，"denied" 模拟本地存储整个读不了（隐私模式／桩缺件）。
+  if (splashAnim !== null) {
+    context.localStorage = splashAnim === "denied"
+      ? { getItem: () => { throw new Error("denied"); }, setItem() {} }
+      : { getItem: (k) => (k === "panel-startup-animation" ? (splashAnim ? "1" : "0") : null), setItem() {} };
+  }
   return { context, root, elements, timers, frames,
     bootstrap() { runInNewContext(script("panelStartupBootstrap"), context); },
     start() { this.bootstrap(); runInNewContext(script("panelStartupAnimation"), context); },
@@ -88,6 +96,41 @@ describe("launcher-only startup screen", () => {
     assert.equal(p.context.panelStartupRestart, true, "重启恢复打点，restoreView 据此播入场动画");
     assert.equal(p.context.panelStartupLaunch, undefined, "不打 launcher 首开点——不固定落看板，仍恢复上次 tab");
     assert.equal(p.context.location.href, "http://127.0.0.1:47820/panel?keep=yes", "标记即清，二次刷新不复播");
+  });
+
+  it("关掉开屏动画：遮挡层连定格画面都不出现，URL 标记照消费、首开落看板照打点", () => {
+    const p = page("http://127.0.0.1:47820/panel?startup=1&keep=yes", { splashAnim: false });
+    p.start(); // bootstrap + panelStartupPlay：后者开头就问控制器在不在，不在即整条链路空转
+    assert.equal(p.root.getAttribute("data-startup"), null, "关着就不挂遮挡层");
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.frames.size, 0, "不起脉冲帧");
+    assert.equal(p.timers.size, 0, "连兜底时限都不起");
+    assert.equal(p.context.panelStartupLaunch, true, "落位规则与开屏无关：launcher 首开仍固定落看板");
+    assert.equal(p.context.location.href, "http://127.0.0.1:47820/panel?keep=yes", "标记照消费，二次刷新不再认首开");
+  });
+
+  it("关掉开屏动画：重启回跳不出层，也不打恢复点", () => {
+    // 恢复点是主脚本「入场动画等开屏淡出那一帧再播」的发令枪，而它只在开屏控制器
+    // 在场时才被消费并清掉。没有控制器还打点，那份待播入场动画名就永久悬着，下一次
+    // 重启会把上一次的也一起放出来。不打点则重启回跳落回普通刷新的既有表现：直接落位。
+    const p = page("http://127.0.0.1:47820/panel?startup=restart&keep=yes", { splashAnim: false });
+    p.start();
+    assert.equal(p.root.getAttribute("data-startup"), null);
+    assert.equal(p.context.panelStartupController, undefined);
+    assert.equal(p.timers.size, 0);
+    assert.equal(p.context.panelStartupRestart, undefined, "不打恢复点");
+    assert.equal(p.context.panelStartupLaunch, undefined, "重启回跳不是首开");
+    assert.equal(p.context.location.href, "http://127.0.0.1:47820/panel?keep=yes", "标记即清");
+  });
+
+  it("开屏动画显式存「开」与读不到存档，都按原样出层播脉冲", () => {
+    for (const splashAnim of [true, "denied"]) {
+      const p = page("http://127.0.0.1:47820/panel?startup=1", { splashAnim });
+      p.start();
+      assert.equal(p.root.getAttribute("data-startup"), "playing", `${splashAnim} 仍出层`);
+      assert.ok(p.frames.size > 0, "照常播脉冲");
+      assert.equal(p.context.panelStartupLaunch, true);
+    }
   });
 
   it("settles immediately on restart recovery instead of replaying the pulse animation", () => {

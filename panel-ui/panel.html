@@ -60,15 +60,28 @@ try {
   try { history.replaceState(history.state, "", url.href); } catch {}
   const navigation = performance.getEntriesByType("navigation")[0];
   if (navigation && navigation.type !== "navigate") return;
+  // 「开屏动画」设置（设置 → 通用 → 启动卡）：拨到「关」时整层都不出现——不是把脉冲
+  // 掐掉留一张定格图，而是首帧直接就是看板页。必须在绘制前读这条存档：主脚本是
+  // defer 外链，等它跑起来首绘已经过去；HTML 由后端按静态文件直出，也没有注入位。
+  // 读不到存档（禁用本地存储 / 桩环境）一律按「开」处理，与主题存档同一兜底口径。
+  // 上面那句 URL 标记的消费不受影响——标记不清掉，下一次刷新就会再认一次首开。
+  let startupAnimOn = true;
+  try {
+    startupAnimOn = localStorage.getItem("panel-startup-animation") !== "0";
+  } catch (e) {}
   if (startupParam === "1") {
     // 本页来自 launcher 首开：主脚本 restoreView 据此固定落看板页（刷新/普通访问仍恢复上次 tab）
+    // 这一条与开屏出不出无关（它管的是落位，不是画面），所以关掉开屏动画照旧打点。
     window.panelStartupLaunch = true;
-  } else {
+  } else if (startupAnimOn) {
     // 本页来自看板「重启」后的自动刷新：开屏层从首绘起接力旧页面的定格画面，
     // restoreView 据此恢复上次 tab 且不静默入场动画（重启回来的那次切换播 view-enter/board-enter）。
+    // 关着开屏动画时这个点一律不打：主脚本只在「开屏控制器在场」时才消费并清掉那份待播
+    // 入场动画名，控制器不在场还打点，那份名字就永久悬着、这一遍入场动画也放不出来。
+    // 不打点等于让重启回跳落回普通刷新的既有表现——直接落位，不补入场动画。
     window.panelStartupRestart = true;
   }
-  window.panelStartupBegin();
+  if (startupAnimOn) window.panelStartupBegin();
 })();
 </script>
 <script id="panelViewPrepaint">
@@ -1684,9 +1697,10 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
     </nav>
 
-    <!-- 「通用」：九项按语义分五张卡——「启动」「抗截断」「Claude Code」、实时输出「实时输出」带卡头（复用各
+    <!-- 「通用」：十项按语义分五张卡——「启动」「抗截断」「Claude Code」、实时输出「实时输出」带卡头（复用各
          视图通用的 card-header/card-title 标准件），其余两项暂不归类、平卡放置；
-         控件 id、逐项独立保存/失败回滚语义不变 -->
+         控件 id、逐项独立保存/失败回滚语义不变。「开屏动画」是本机浏览器偏好，不占
+         /api/settings：它必须在绘制前就能被读到，等服务端存档就晚了（同主题/样式/终端字号） -->
     <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral">
       <div class="panel-card">
         <div class="card-header">
@@ -1703,6 +1717,19 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <label class="toggle">
               <input type="checkbox" id="followAgentToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <!-- 开屏动画：存档在 localStorage 的 panel-startup-animation（"1"/"0"，缺省视为开），
+               由 head 里的 panelStartupBootstrap 在绘制前读，主脚本只在两处跟随——设置页
+               回显这颗开关、看板「重启」的复播入口问它。不 POST、不进 settingsSaving。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">开屏动画</div>
+              <div class="modal-item-desc">关闭时不展示开屏动画；开启时，打开面板与看板重启后展示开屏动画。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="startupAnimationToggle">
               <span class="slider"></span>
             </label>
           </div>
