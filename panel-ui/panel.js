@@ -4330,14 +4330,6 @@ async function api(method, path, body) {
     terminalImeHoldFrame = null;
   }
 
-  function updateTerminalFootSize(session) {
-    const el = $("terminalFootSize");
-    if (!el) return;
-    const cols = session?.backendState?.cols;
-    const rows = session?.backendState?.rows;
-    if (Number.isFinite(cols) && Number.isFinite(rows)) el.textContent = `${cols} × ${rows}`;
-  }
-
   function fitTerminalXterm() {
     // 终端页隐藏期不测量：FitAddon 从 display:none 的宿主只能量到百分比兜底值
     // （实测把 xterm 压成 12×6），按这个宽度折行的回放会把整行提示符碎成几段，
@@ -4356,17 +4348,15 @@ async function api(method, path, body) {
     postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
   }
 
-  // resize 回执即真实行列数：底栏事实跟 resize 联动，不再是静态占位。POST 失败
-  // 不再静默吞掉——PTY 停在旧列宽而 xterm 已按新宽度渲染，TUI 按旧列宽排版时
-  // 右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。失败短重试一次；安排
-  // 与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的更新测量
-  // 优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
+  // resize POST 失败不再静默吞掉——PTY 停在旧列宽而 xterm 已按新宽度渲染，TUI 按
+  // 旧列宽排版时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。失败短重试
+  // 一次；安排与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的
+  // 更新测量优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
   function postTerminalResize(session, cols, rows, attempt = 0) {
     api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
           session.backendState = { ...session.backendState, cols: result.cols, rows: result.rows };
-          updateTerminalFootSize(session);
         }
       })
       .catch((error) => {
@@ -4586,8 +4576,6 @@ async function api(method, path, body) {
     term.reset();
     session.backendState = state;
     session.shell.pid = state.pid || "—";
-    $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
-    updateTerminalFootSize(session);
   }
 
   async function connectTerminalStream(session) {
@@ -4738,8 +4726,6 @@ async function api(method, path, body) {
     $("terminalSessionBranch").textContent = session.branch || "未设置分支";
     $("terminalShellLabel").textContent = session.shell.name;
     $("terminalInspectorTitle").textContent = session.label;
-    $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
-    updateTerminalFootSize(session);
     // 空壳侧栏：无归属会话没有任何 Agent 监测数据可展示，整列隐藏、工作区收
     // 单列（与零会话空态同一套 is-empty 机制）；列宽变了终端要重排尺寸。
     const inspector = $("terminalInspector");
@@ -4764,6 +4750,7 @@ async function api(method, path, body) {
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
     $("terminalFootStats").hidden = !metrics;
+    $("terminalFootCache").hidden = !metrics || metrics.requestCount === 0;
     if (metrics) {
       $("terminalTtftVal").textContent = metrics.ttft;
       $("terminalTtftLamp").className = `lamp lamp-${metrics.ttftLamp}`;
@@ -4772,6 +4759,7 @@ async function api(method, path, body) {
       $("terminalWorkTimeVal").textContent = metrics.workTime;
       $("terminalWorkTimeUnit").textContent = metrics.workTimeUnit;
       $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
+      $("terminalFootCache").textContent = `缓存 ${metrics.cache}%`;
       $("terminalFootTokens").textContent = metrics.tokens;
       $("terminalFootTokensTip").textContent = metrics.tokens;
       updateSparkline("terminalSparkTtft", metrics.sparkTtft, undefined, undefined, TERMINAL_SPARK_SIZE);
@@ -4791,7 +4779,7 @@ async function api(method, path, body) {
   }
 
   // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，
-  // 页签栏、会话名/路径/分支那条、底栏左段（本地终端 / PID / 行列数）、右侧监测区
+  // 页签栏、会话名/路径/分支那条、底栏左段（本地终端）、右侧监测区
   // 都是设计稿遗留，一帧都不能露；监测区退场后工作区收成全宽，否则右侧空一列、
   // 空背景被切成半幅。
   function setTerminalSessionChromeVisible(visible) {
@@ -5496,6 +5484,10 @@ async function api(method, path, body) {
       api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     }, true);
     $("terminalRetryBtn").onclick = () => connectTerminalBackend();
+    $("terminalFootRequests").onclick = () => {
+      switchView("stats");
+      activateStatsSubTab("logs");
+    };
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
         const menu = $("terminalAddMenu");

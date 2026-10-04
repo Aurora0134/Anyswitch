@@ -2665,7 +2665,6 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes("body.terminal-mode { overflow: hidden; }"), "终端页锁定整页滚动");
     assert.ok(panelCss.includes("body.terminal-mode > footer { display: none; }"), "终端页隐藏全局页脚灰字行");
     assert.ok(panelCss.includes(".terminal-shell { height: 100vh;"), "终端外壳固定为视口高度");
-    assert.ok(panelJs.includes('$("terminalFootPid").textContent = `PID ${session.shell.pid}`'), "底栏左侧显示 shell 进程号");
     assert.ok(panelJs.includes("session.agent ? session.agent.name : session.shell.name"), "普通终端身份位回落显示 Shell");
     assert.ok(!panelHtml.includes("terminalAgentBadge"), "右栏头部的 agent 徽标已整体退役");
     assert.ok(panelJs.includes('shell: { name: "PowerShell", pid:') && panelJs.includes("instanceId:"), "会话数据携带进程与实例归属");
@@ -5787,7 +5786,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.equal(unbound, null, "未绑定实例不出行（codex 流量前状态）");
   });
 
-  it("接线结构：渲染拆成数据层与结构层、最后一标签可关、底栏尺寸有 id", () => {
+  it("接线结构：渲染拆成数据层与结构层、最后一标签可关", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
     const renderBody = panelJs.match(/function renderTerminalPreviewSession\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(renderBody.includes("renderTerminalSessionData();"), "结构层渲染复用数据层");
@@ -5802,8 +5801,6 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(zeroBranch.includes("renderTerminalEmptyState()"), "关完最后一个标签留在页内落空态，不退出终端页");
     assert.ok(!zeroBranch.includes("closeTerminalPreview"), "零会话不再退出终端页（退出再回归只会挂一个没有会话的空页）");
     assert.ok(panelJs.includes("pollTerminalSessions()"), "归属数据轮询存在");
-    assert.ok(panelHtml.includes('id="terminalFootSize"'), "底栏行列占位可写");
-    assert.ok(panelJs.includes("updateTerminalFootSize(session)"), "resize/SSE 会刷新底栏尺寸");
   });
 });
 
@@ -5885,7 +5882,9 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 
 // 底栏（E）：tokens 截断串悬停显全从原生 title 升级 styled tooltip（统计页
 // 同款）；近有失败请求时「N 次请求」pill 转 danger 系，与列表红点同源。
-describe("虚拟终端底栏（悬停显全 / 失败语义色）", () => {
+// 三阶段：左段撤 PID/UTF-8/尺寸徽标改缓存命中 pill；请求数 pill 可点击，
+// 跳统计页并落请求日志子页。
+describe("虚拟终端底栏（悬停显全 / 失败语义色 / 缓存 pill / 请求跳转）", () => {
   it("tokens 悬停显全：原生 title 退役，styled tooltip 向上浮出且不被截断串裁剪", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(!render.includes("terminalFootTokens\").title"), "原生 title 赋值已退役");
@@ -5902,6 +5901,29 @@ describe("虚拟终端底栏（悬停显全 / 失败语义色）", () => {
       "pill 随最近请求失败行转 danger（与列表红点同源同拍）");
     assert.ok(panelCss.includes(".terminal-foot-requests.is-failed"), "danger 变体样式就位");
   });
+
+  it("缓存命中 pill：底栏左段原徽标槽位，无指标或零请求时隐藏", () => {
+    assert.ok(panelHtml.includes('id="terminalFootCache"'), "底栏左段有缓存命中 pill");
+    assert.ok(!panelHtml.includes("terminalFootPid") && !panelHtml.includes("terminalFootSize"), "PID/UTF-8/尺寸徽标已撤除");
+    assert.ok(!panelJs.includes("updateTerminalFootSize"), "底栏尺寸写入随徽标清退");
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render.includes('$("terminalFootCache").hidden = !metrics || metrics.requestCount === 0'), "无指标或零请求时 pill 隐藏");
+    assert.ok(render.includes('$("terminalFootCache").textContent = `缓存 ${metrics.cache}%`'), "pill 文案随轮询同拍更新");
+    assert.ok(panelCss.includes(".terminal-foot-cache[hidden]"), "pill 隐藏不被左段 pill 样式盖回");
+  });
+
+  it("请求数 pill 可点击：跳统计页并落请求日志子页", () => {
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init, "initTerminalPreview found in panel.js");
+    const bindAt = init.indexOf('$("terminalFootRequests").onclick');
+    assert.ok(bindAt > 0, "请求数 pill 在终端一次性绑定区接线");
+    const bind = init.slice(bindAt, init.indexOf("};", bindAt));
+    assert.ok(bind.includes('switchView("stats")'), "点击切到统计页");
+    assert.ok(bind.includes('activateStatsSubTab("logs")'), "落地请求日志子页");
+    assert.ok(/\.terminal-foot-requests \{[^}]*cursor: pointer/.test(panelCss), "pill 光标可点");
+    assert.ok(panelCss.includes(".terminal-foot-requests:hover"), "pill 有悬停态");
+    assert.ok(panelCss.indexOf(".terminal-foot-requests:hover") < panelCss.indexOf(".terminal-foot-requests.is-failed"), "悬停态不盖失败语义色");
+  });
 });
 
 // SSE 断线重连不重影（B2）：后端每次建连都重发 snapshot + 全量缓冲，前端
@@ -5910,23 +5932,16 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   it("每个 snapshot 帧都先 reset 再对齐状态——重连后旧内容不叠加", () => {
     const src = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "absorbTerminalSnapshot found in panel.js");
-    const state = { resets: 0, pidText: "", sizes: [] };
-    const term = { reset: () => { state.resets += 1; } };
+    const seen = { resets: 0 };
+    const term = { reset: () => { seen.resets += 1; } };
     const session = { backendState: null, shell: { pid: null } };
-    const fn = new Function("state", `
-      const $ = () => ({ set textContent(v) { state.pidText = v; } });
-      function updateTerminalFootSize() { state.sizes.push("foot"); }
-      ${src}
-      return absorbTerminalSnapshot;
-    `)(state);
+    const fn = new Function(`${src}\nreturn absorbTerminalSnapshot;`)();
     fn(term, session, { pid: 8888, cols: 120, rows: 34 });
-    assert.equal(state.resets, 1, "建连首个 snapshot 先清屏");
+    assert.equal(seen.resets, 1, "建连首个 snapshot 先清屏");
     assert.equal(session.backendState.pid, 8888);
-    assert.equal(session.shell.pid, 8888);
-    assert.equal(state.pidText, "PID 8888", "底栏 PID 随 snapshot 对齐");
-    assert.equal(state.sizes.length, 1, "底栏行列随 snapshot 刷新");
+    assert.equal(session.shell.pid, 8888, "会话进程号随 snapshot 对齐");
     fn(term, session, { pid: 8888, cols: 100, rows: 30 });
-    assert.equal(state.resets, 2, "自动重连后的 snapshot 同样先清屏");
+    assert.equal(seen.resets, 2, "自动重连后的 snapshot 同样先清屏");
   });
 
   it("接线：snapshot 帧走 reset 入口，data 帧与 onerror 不 reset", () => {
@@ -6354,7 +6369,6 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
         }
         return Promise.resolve({});
       };
-      function updateTerminalFootSize() {}
       function terminalSessionFor(id) { return state.session; }
       function requestAnimationFrame(cb) { cb(); }
       class FakeFitAddon {
