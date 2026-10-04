@@ -345,6 +345,256 @@ test("createTerminalHostSupervisor.status reports stopped-manual only while the 
   assert.deepEqual(supervisor.status(), { state: "stopped", pid: null, lastExit: null });
 });
 
+// Auto-restart (crash resilience) and child output capture. The restart is
+// scheduled, never synchronous — tests drive it with a manual scheduler so no
+// real timer ever pends. nowFn drives the rolling breaker window.
+function manualScheduler() {
+  const timers = [];
+  return {
+    timers,
+    scheduleFn: (fn) => {
+      const timer = { fn, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    cancelScheduleFn: (timer) => {
+      timer.cancelled = true;
+    },
+    fireAll: () => {
+      for (const timer of timers.splice(0)) {
+        if (!timer.cancelled) timer.fn();
+      }
+    },
+  };
+}
+
+const flushMicrotasks = () => new Promise((resolve) => setImmediate(resolve));
+
+test("createTerminalHostSupervisor auto-restarts after an unexpected exit", async () => {
+  const scheduler = manualScheduler();
+  const logger = recordingLogger();
+  const children = [];
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      const spawned = fakeChild(5150 + children.length);
+      children.push(spawned);
+      return spawned;
+    },
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+  });
+
+  await supervisor.start();
+  children[0].emit("exit", 3221226505, null); // the node-pty fast-fail signature
+  assert.equal(supervisor.status().state, "crashed", "the crash is visible until the restart lands");
+  assert.equal(scheduler.timers.length, 1, "the restart is scheduled, not synchronous");
+
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(children.length, 2, "a fresh child was spawned");
+  assert.deepEqual(supervisor.status(), { state: "running", pid: 5151, lastExit: null });
+  assert.ok(logger.logged.warn.some((line) => line.includes("exited early")), "the crash itself is still logged");
+  assert.ok(logger.logged.warn.some((line) => line.includes("restart")), "the restart decision is logged too");
+});
+
+test("createTerminalHostSupervisor does not auto-restart after a stop()-initiated exit", async () => {
+  const scheduler = manualScheduler();
+  let spawns = 0;
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      spawns += 1;
+      const spawned = fakeChild();
+      spawned.kill = () => {
+        spawned.killed = true;
+        setTimeout(() => spawned.emit("exit", null, "SIGTERM"), 0);
+      };
+      return spawned;
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+  });
+
+  await supervisor.start();
+  await supervisor.stop();
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(scheduler.timers.length, 0, "no restart was ever scheduled");
+  assert.equal(spawns, 1, "a death the supervisor ordered is final");
+});
+
+test("createTerminalHostSupervisor does not auto-restart while the manual-stop flag is set", async () => {
+  const scheduler = manualScheduler();
+  let spawns = 0;
+  const children = [];
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      spawns += 1;
+      const spawned = fakeChild();
+      children.push(spawned);
+      return spawned;
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    manualStop: true,
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+  });
+
+  await supervisor.start();
+  children[0].emit("exit", 1, null);
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(spawns, 1, "a manual-stop context leaves a dead host down");
+  assert.equal(supervisor.status().state, "stopped-manual", "the flag outranks the crash record in the status contract");
+  assert.equal(supervisor.status().lastExit?.code, 1, "the crash is still recorded for diagnosis");
+});
+
+test("createTerminalHostSupervisor suspends auto-restart once the window budget is spent", async () => {
+  const scheduler = manualScheduler();
+  const logger = recordingLogger();
+  const children = [];
+  let now = 1_000_000;
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      const spawned = fakeChild(100 + children.length);
+      children.push(spawned);
+      return spawned;
+    },
+    logger,
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+    nowFn: () => now,
+    restartBudget: 3,
+    restartWindowMs: 60_000,
+  });
+
+  await supervisor.start();
+  for (let i = 0; i < 3; i += 1) {
+    children[children.length - 1].emit("exit", 1, null);
+    scheduler.fireAll();
+    await flushMicrotasks();
+  }
+  assert.equal(children.length, 4, "three auto-restarts landed within budget");
+
+  children[children.length - 1].emit("exit", 1, null);
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(children.length, 4, "the breaker holds: no fourth restart");
+  assert.equal(supervisor.status().state, "crashed", "a suspended host reports crashed, not running");
+  assert.ok(logger.logged.warn.some((line) => line.includes("suspended")), "the suspension reaches the log");
+});
+
+test("createTerminalHostSupervisor resets the restart budget on a manual start", async () => {
+  const scheduler = manualScheduler();
+  const children = [];
+  let now = 1_000_000;
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      const spawned = fakeChild(100 + children.length);
+      children.push(spawned);
+      return spawned;
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+    nowFn: () => now,
+    restartBudget: 2,
+    restartWindowMs: 60_000,
+  });
+
+  await supervisor.start();
+  for (let i = 0; i < 3; i += 1) {
+    children[children.length - 1].emit("exit", 1, null);
+    scheduler.fireAll();
+    await flushMicrotasks();
+  }
+  assert.equal(children.length, 3, "budget 2 → two restarts, third crash suspended");
+
+  await supervisor.start(); // manual start: deliberate intervention resets the budget
+  assert.equal(children.length, 4);
+  children[children.length - 1].emit("exit", 1, null);
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(children.length, 5, "auto-restart is armed again after the manual start");
+});
+
+test("createTerminalHostSupervisor supersedes a pending auto-restart when a manual start lands first", async () => {
+  const scheduler = manualScheduler();
+  const children = [];
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      const spawned = fakeChild(100 + children.length);
+      children.push(spawned);
+      return spawned;
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+    scheduleFn: scheduler.scheduleFn,
+    cancelScheduleFn: scheduler.cancelScheduleFn,
+  });
+
+  await supervisor.start();
+  children[0].emit("exit", 1, null);
+  assert.equal(scheduler.timers.length, 1);
+  await supervisor.start(); // the panel's start button beat the timer to it
+  assert.equal(children.length, 2);
+  assert.equal(scheduler.timers[0].cancelled, true, "the pending restart is cancelled");
+  scheduler.fireAll();
+  await flushMicrotasks();
+  assert.equal(children.length, 2, "no double spawn from the superseded timer");
+});
+
+test("createTerminalHostSupervisor shares a single spawn across concurrent starts", async () => {
+  let spawns = 0;
+  const sweeps = [];
+  const supervisor = createTerminalHostSupervisor({
+    spawnFn: () => {
+      spawns += 1;
+      return fakeChild();
+    },
+    logger: recordingLogger(),
+    // Resolve every sweep the code asks for: if the in-flight guard regresses,
+    // this test must fail on the spawn count, not hang on a lost resolve.
+    cleanupStale: () => new Promise((resolve) => sweeps.push(resolve)),
+  });
+
+  const first = supervisor.start();
+  const second = supervisor.start();
+  for (const resolve of sweeps) resolve({ ok: true, killed: [], refused: [] });
+  const [one, two] = await Promise.all([first, second]);
+  assert.equal(spawns, 1, "an in-flight start is reused, not duplicated");
+  assert.equal(one.pid, two.pid);
+});
+
+test("createTerminalHostSupervisor tees child output into logPath, rotating an oversized log per spawn", async () => {
+  const logPath = join(mkTestDir("anyswitch-rh-"), "terminal-host.log");
+  writeFileSync(logPath, "x".repeat(6 * 1024 * 1024));
+  let seen;
+  const supervisor = createTerminalHostSupervisor({
+    logPath,
+    spawnFn: (file, args, options) => {
+      seen = options;
+      return fakeChild();
+    },
+    logger: recordingLogger(),
+    cleanupStale: async () => ({ ok: true, killed: [], refused: [] }),
+  });
+
+  await supervisor.start();
+  assert.ok(Array.isArray(seen.stdio), "a wired log file turns stdio into an explicit fd trio");
+  assert.equal(seen.stdio[0], "ignore");
+  assert.equal(typeof seen.stdio[1], "number", "stdout goes to the log fd");
+  assert.equal(seen.stdio[2], seen.stdio[1], "stderr shares the same log fd");
+  assert.ok(existsSync(`${logPath}.old`), "an oversized log is rotated out before the spawn inherits the fd");
+  assert.equal(readFileSync(logPath, "utf8"), "", "the fresh log starts empty");
+});
+
 // /terminal-host/* routes: spliced in front of the relay server's own listener
 // by mountTerminalHostRoutes, guarded by loopback + the pi-relay-token, driving
 // the supervisor and persisting the manual-stop flag through settings.json.

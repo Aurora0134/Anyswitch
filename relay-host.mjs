@@ -15,8 +15,8 @@
 // (relay-host.log) and fixing, not papering over with a 2s poll. Re-login or
 // re-run restores it.
 
-import { createWriteStream, mkdirSync, realpathSync, appendFileSync, statSync, renameSync, existsSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
+import { createWriteStream, mkdirSync, realpathSync, appendFileSync, statSync, renameSync, existsSync, unlinkSync, openSync, closeSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOpenAIRelayServer, listenLoopback } from "./openai-server.mjs";
 import { createProductionDeps } from "./launch.mjs";
@@ -57,6 +57,18 @@ const TERMINAL_HOST_STOP_TIMEOUT_MS = 5000;
 // until the sessions endpoint actually serves; these cap and pace that wait.
 const TERMINAL_HOST_START_READY_TIMEOUT_MS = 5000;
 const TERMINAL_HOST_START_READY_INTERVAL_MS = 150;
+// Crash auto-restart policy (09-26's "no auto-revival" ruling was made for the
+// watchdog suicide era — the host died cleanly and silently with no evidence;
+// that is fixed, and the crashes the host actually dies of now are node-pty's
+// native aborts, upstream issues microsoft/node-pty#951/#904, unfixable from
+// JS). A crashed host therefore gets respawned automatically after a short
+// delay, bounded by a rolling budget so a host that crashes the moment it is
+// spawned cannot churn forever: once restartBudget restarts land inside
+// restartWindowMs the supervisor gives up and reports "crashed" until someone
+// starts the host deliberately (which resets the budget).
+const TERMINAL_HOST_RESTART_DELAY_MS = 1000;
+const TERMINAL_HOST_RESTART_WINDOW_MS = 10 * 60 * 1000;
+const TERMINAL_HOST_RESTART_BUDGET = 5;
 
 // Startup-only log rotation: once relay-host.log crosses the threshold, rename
 // it to .old (overwriting the previous .old). Never rotate while running —
@@ -115,12 +127,22 @@ function relayDataRoot(base = process.env) {
 // child additionally self-watches TERMINAL_PARENT_PID_ENV as the crash backstop
 // (Windows children do not die with their parent).
 //
-// Lifecycle for the panel: start() is idempotent (a live child is a no-op),
-// stop() kills the child and waits for its exit, and status() reports
-// { state, pid, lastExit } — "running" while the child lives,
-// "stopped-manual" while the manual-stop flag is set, "crashed" after an
+// Child output: with logPath wired, the spawn tees the child's stdout AND
+// stderr into that file through a shared append fd (the parent closes its own
+// copy right after spawn — the child inherited its own). The host dying of a
+// native abort otherwise leaves nothing behind: its stderr is exactly where
+// node-pty/V8 say why. An oversized log is rotated to .old at each spawn
+// (startup-only rotation — the running host holds the file open).
+//
+// Lifecycle for the panel: start() is idempotent (a live child is a no-op, an
+// in-flight start is shared), stop() kills the child and waits for its exit,
+// and status() reports { state, pid, lastExit } — "running" while the child
+// lives, "stopped-manual" while the manual-stop flag is set, "crashed" after an
 // unexpected exit that has not been restarted, "stopped" otherwise. An exit
-// that stop() did not initiate is recorded as lastExit = { code, signal, at }.
+// that stop() did not initiate is recorded as lastExit = { code, signal, at }
+// and — unless the manual-stop flag is set — schedules an automatic restart
+// (see the TERMINAL_HOST_RESTART_* policy above). A manual start() supersedes
+// and cancels a pending restart and resets the breaker budget.
 //
 // A terminal host that fails to spawn or exits early (port still held,
 // missing pty binding) must NEVER take the relay down — the panel already
@@ -136,58 +158,138 @@ export function createTerminalHostSupervisor({
   script = TERMINAL_HOST_SCRIPT,
   manualStop = false,
   stopTimeoutMs = TERMINAL_HOST_STOP_TIMEOUT_MS,
+  logPath = null,
+  autoRestart = true,
+  restartDelayMs = TERMINAL_HOST_RESTART_DELAY_MS,
+  restartWindowMs = TERMINAL_HOST_RESTART_WINDOW_MS,
+  restartBudget = TERMINAL_HOST_RESTART_BUDGET,
+  scheduleFn = setTimeout,
+  cancelScheduleFn = clearTimeout,
+  nowFn = Date.now,
 } = {}) {
   let child = null;
   let lastExit = null;
   let stopping = false;
   let manualStopFlag = manualStop === true;
-  return {
-    async start() {
-      if (child) return { ok: true, pid: child.pid ?? null, alreadyRunning: true };
-      // One-time migration sweep (see stopStaleTerminalHost). A refusal means
-      // 47823 belongs to a foreign process: skip the spawn rather than fight
-      // for the port.
-      try {
-        const cleanup = await cleanupStale(root, { logger });
-        if (cleanup.killed?.length) {
-          logger.info(`stale terminal host(s) ${cleanup.killed.join(", ")} terminated before respawn`);
-        }
-        if (!cleanup.ok) {
-          logger.warn(`terminal host not started this run: ${cleanup.reason}`);
-          return { ok: false, skipped: true, reason: cleanup.reason };
-        }
-      } catch (error) {
-        logger.warn(`stale terminal host sweep failed (continuing): ${error.message}`);
+  let startInFlight = null;
+  let restartTimer = null;
+  const restarts = [];
+
+  function openChildLog() {
+    if (!logPath) return null;
+    try {
+      mkdirSync(dirname(logPath), { recursive: true });
+      rotateLogIfNeeded(logPath);
+      return openSync(logPath, "a");
+    } catch (error) {
+      logger.warn(`terminal host log unavailable (${error.message}); child output will be discarded`);
+      return null;
+    }
+  }
+
+  function scheduleRestart() {
+    const now = nowFn();
+    while (restarts.length && now - restarts[0] > restartWindowMs) restarts.shift();
+    if (restarts.length >= restartBudget) {
+      logger.warn(`terminal host auto-restart suspended: ${restarts.length} restarts within ${Math.round(restartWindowMs / 60000)} min; start it from the panel to resume`);
+      return;
+    }
+    restarts.push(now);
+    logger.warn(`restarting the terminal host automatically (crash ${restarts.length}/${restartBudget} within ${Math.round(restartWindowMs / 60000)} min)`);
+    restartTimer = scheduleFn(() => {
+      restartTimer = null;
+      if (stopping || manualStopFlag || child) return;
+      start({ auto: true }).catch((error) => logger.warn(`terminal host auto-restart failed: ${error.message}`));
+    }, restartDelayMs);
+    restartTimer?.unref?.();
+  }
+
+  async function startInner() {
+    // One-time migration sweep (see stopStaleTerminalHost). A refusal means
+    // 47823 belongs to a foreign process: skip the spawn rather than fight
+    // for the port.
+    try {
+      const cleanup = await cleanupStale(root, { logger });
+      if (cleanup.killed?.length) {
+        logger.info(`stale terminal host(s) ${cleanup.killed.join(", ")} terminated before respawn`);
       }
-      let spawned;
-      try {
-        spawned = spawnFn(process.execPath, [script], {
-          cwd: __dirname,
-          stdio: "ignore",
-          windowsHide: true,
-          env: { ...env, [TERMINAL_PARENT_PID_ENV]: String(selfPid) },
-        });
-      } catch (error) {
-        logger.warn(`terminal host spawn failed (terminal view stays empty until the host is started again): ${error.message}`);
-        return { ok: false, skipped: false };
+      if (!cleanup.ok) {
+        logger.warn(`terminal host not started this run: ${cleanup.reason}`);
+        return { ok: false, skipped: true, reason: cleanup.reason };
       }
-      stopping = false;
-      lastExit = null;
-      child = spawned;
-      child.on?.("exit", (code, signal) => {
-        if (child !== spawned) return; // our own stop() raced us to it
-        child = null;
-        if (stopping) {
-          stopping = false;
-          logger.info("terminal host stopped");
-          return;
-        }
-        lastExit = { code: code ?? null, signal: signal ?? null, at: Date.now() };
-        logger.warn(`terminal host exited early (code ${code ?? "null"}, signal ${signal ?? "none"}); terminal view stays empty until the host is started again`);
+    } catch (error) {
+      logger.warn(`stale terminal host sweep failed (continuing): ${error.message}`);
+    }
+    let spawned;
+    let logFd = null;
+    try {
+      logFd = openChildLog();
+      spawned = spawnFn(process.execPath, [script], {
+        cwd: __dirname,
+        stdio: logFd === null ? "ignore" : ["ignore", logFd, logFd],
+        windowsHide: true,
+        env: { ...env, [TERMINAL_PARENT_PID_ENV]: String(selfPid) },
       });
-      return { ok: true, pid: child.pid ?? null };
-    },
+    } catch (error) {
+      if (logFd !== null) {
+        try { closeSync(logFd); } catch { /* the relay must not leak the handle on a failed spawn */ }
+      }
+      logger.warn(`terminal host spawn failed (terminal view stays empty until the host is started again): ${error.message}`);
+      return { ok: false, skipped: false };
+    }
+    // spawn() already handed the fd to the child; the parent's copy would only
+    // leak one handle per respawn and hold the file open against rotation.
+    if (logFd !== null) {
+      try { closeSync(logFd); } catch { /* already closed — the child owns its copy either way */ }
+    }
+    stopping = false;
+    lastExit = null;
+    child = spawned;
+    child.on?.("exit", (code, signal) => {
+      if (child !== spawned) return; // our own stop() raced us to it
+      child = null;
+      if (stopping) {
+        stopping = false;
+        logger.info("terminal host stopped");
+        return;
+      }
+      lastExit = { code: code ?? null, signal: signal ?? null, at: Date.now() };
+      const crashed = `terminal host exited early (code ${code ?? "null"}, signal ${signal ?? "none"})`;
+      if (!autoRestart || manualStopFlag) {
+        logger.warn(`${crashed}; terminal view stays empty until the host is started again`);
+        return;
+      }
+      logger.warn(crashed);
+      scheduleRestart();
+    });
+    return { ok: true, pid: child.pid ?? null };
+  }
+
+  function start({ auto = false } = {}) {
+    if (child) return Promise.resolve({ ok: true, pid: child.pid ?? null, alreadyRunning: true });
+    if (!auto) {
+      // A deliberate (re)start — panel button, relay boot — supersedes any
+      // pending auto-restart and re-arms the breaker.
+      restarts.length = 0;
+      if (restartTimer) {
+        cancelScheduleFn(restartTimer);
+        restartTimer = null;
+      }
+    }
+    if (startInFlight) return startInFlight;
+    startInFlight = startInner().finally(() => {
+      startInFlight = null;
+    });
+    return startInFlight;
+  }
+
+  return {
+    start,
     async stop() {
+      if (restartTimer) {
+        cancelScheduleFn(restartTimer);
+        restartTimer = null;
+      }
       const target = child;
       if (!target) return;
       stopping = true;
@@ -582,7 +684,14 @@ export async function startResidentRelay(options = {}) {
   } catch {
     /* an unreadable settings file must never keep the host down */
   }
-  const terminalSupervisor = options.terminalSupervisor ?? createTerminalHostSupervisor({ root, logger, manualStop: terminalHostManualStop });
+  const terminalSupervisor = options.terminalSupervisor ?? createTerminalHostSupervisor({
+    root,
+    logger,
+    manualStop: terminalHostManualStop,
+    // The host is windowless; tee its stdout/stderr into a sibling log so a
+    // native abort (node-pty/microsoft#951 style) leaves its last words on disk.
+    logPath: join(__dirname, "logs", "terminal-host.log"),
+  });
   mountTerminalHostRoutes(server, createTerminalHostRoutes({
     supervisor: terminalSupervisor,
     token: deps.token,

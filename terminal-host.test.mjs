@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED } from "./terminal-host.mjs";
+import { join } from "node:path";
+import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED } from "./terminal-host.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
@@ -898,5 +899,52 @@ test("POST /terminal/sessions/clear-all 空表也是 ok，且不许被当成会�
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// installTerminalHostFaultHandlers: the host normally runs windowless with its
+// stderr tee'd into logs/terminal-host.log by the spawning relay. These tests
+// drive the returned handlers directly — emitting real process events would
+// race the test runner's own listeners.
+test("installTerminalHostFaultHandlers records uncaughtException and unhandledRejection to the log file and stderr sink", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-faults-"));
+  const logPath = join(root, "logs", "terminal-host.log"); // logs/ does not exist yet — the handler must create it
+  const written = [];
+  const handle = installTerminalHostFaultHandlers({ logPath, write: (line) => written.push(line) });
+  try {
+    handle.onUncaught(new Error("socket exploded"));
+    handle.onUnhandled(new Error("stray rejection"));
+  } finally {
+    handle.dispose();
+  }
+  const text = readFileSync(logPath, "utf8");
+  assert.ok(text.includes("[uncaughtException]"), "the uncaught exception is labelled");
+  assert.ok(text.includes("socket exploded"), "and carries the trace");
+  assert.ok(text.includes("[unhandledRejection]"), "the rejection is labelled");
+  assert.ok(text.includes("stray rejection"));
+  assert.equal(written.length, 2, "the stderr sink receives the same two lines");
+  assert.ok(/^\[\d{4}-\d{2}-\d{2} /m.test(text), "every line carries a wall-clock stamp");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("installTerminalHostFaultHandlers registers and disposes its process listeners", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-faults-"));
+  const beforeU = process.listenerCount("uncaughtException");
+  const beforeR = process.listenerCount("unhandledRejection");
+  const handle = installTerminalHostFaultHandlers({ logPath: join(root, "terminal-host.log"), write: () => {} });
+  assert.equal(process.listenerCount("uncaughtException"), beforeU + 1);
+  assert.equal(process.listenerCount("unhandledRejection"), beforeR + 1);
+  handle.dispose();
+  assert.equal(process.listenerCount("uncaughtException"), beforeU, "dispose removes the listener");
+  assert.equal(process.listenerCount("unhandledRejection"), beforeR);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("installTerminalHostFaultHandlers never throws on an unwritable log path", () => {
+  const handle = installTerminalHostFaultHandlers({ logPath: "Z:\no-such-drive\terminal-host.log", write: () => {} });
+  try {
+    assert.doesNotThrow(() => handle.onUncaught(new Error("boom")), "a dead log file must not kill the crash handler");
+  } finally {
+    handle.dispose();
   }
 });

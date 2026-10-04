@@ -6,8 +6,8 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import * as pty from "node-pty";
@@ -15,6 +15,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
 import { probePidLiveness } from "./relay-process-manager.mjs";
+import { formatLogStamp } from "./logger.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
 export const PARENT_WATCHDOG_INTERVAL_MS = 5000;
@@ -572,6 +573,57 @@ export async function startTerminalHost(options = {}) {
   return host;
 }
 
+// Crash-evidence channel for the windowless host. The relay tees this
+// process's stdout/stderr into logs/terminal-host.log (see
+// createTerminalHostSupervisor's logPath), and these handlers append the two
+// fatal-ish JS events synchronously so they survive even a follow-on abort:
+// appendFileSync lands BEFORE anything else can go wrong, the stderr write is
+// best-effort on top.
+//
+// Both handlers LOG AND CONTINUE — deliberately different from a generic
+// "crash on uncaught" service:
+//   * The reachable uncaught sources here are node-pty's per-socket error
+//     rethrows (upstream microsoft/node-pty#960 / #942: a broken ConPTY pipe
+//     becomes a thrown 'error' event). The socket in question is already dead;
+//     the fault is session-scoped. Exiting would kill every OTHER healthy PTY
+//     session to answer one dead pipe — that trade is exactly the outage this
+//     handler exists to soften.
+//   * unhandledRejection has never killed anything useful; Node's default
+//     crash-on-rejection would turn a stray promise into a full terminal
+//     service outage.
+// The native abort class (0xC0000409, node-pty/microsoft#951) never reaches
+// JS handlers at all — that evidence comes from the teed stderr, not here.
+// Returns the handlers plus dispose() so tests can register/drive/remove them
+// without racing the test runner's own process listeners.
+export function installTerminalHostFaultHandlers({ logPath, write = (line) => process.stderr.write(line) } = {}) {
+  const record = (label, detail) => {
+    const line = `[${formatLogStamp(Date.now())}] [${label}] ${detail?.stack ?? detail}\n`;
+    try {
+      mkdirSync(dirname(logPath), { recursive: true });
+      appendFileSync(logPath, line, "utf8");
+    } catch {
+      /* the log file may be unwritable; the stderr mirror below still runs */
+    }
+    try {
+      write(line);
+    } catch {
+      /* a dead stderr must not take the crash handler down with it */
+    }
+  };
+  const onUncaught = (error) => record("uncaughtException", error);
+  const onUnhandled = (reason) => record("unhandledRejection", reason);
+  process.on("uncaughtException", onUncaught);
+  process.on("unhandledRejection", onUnhandled);
+  return {
+    onUncaught,
+    onUnhandled,
+    dispose() {
+      process.removeListener("uncaughtException", onUncaught);
+      process.removeListener("unhandledRejection", onUnhandled);
+    },
+  };
+}
+
 // Death pact with the owning relay: a non-detached Windows child does NOT die
 // with its parent, and the pre-update history of this host (detached and
 // ownerless, outliving every app update) is exactly the failure being closed
@@ -617,7 +669,11 @@ export function watchParentProcess({
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
 if (isMain) {
+  installTerminalHostFaultHandlers({ logPath: join(APP_DIR, "logs", "terminal-host.log") });
   startTerminalHost().then((host) => {
+    // Startup anchor for the tee'd log: every crash line after this one belongs
+    // to this process incarnation.
+    process.stderr.write(`[${formatLogStamp(Date.now())}] [info] terminal host listening on 127.0.0.1:${host.port} (pid ${process.pid})\n`);
     process.on("SIGINT", () => host.close().then(() => process.exit(0)));
     process.on("SIGTERM", () => host.close().then(() => process.exit(0)));
     // Relay-owned mode: the parent relay pid arrives via env; when the relay
