@@ -1160,6 +1160,7 @@
   .terminal-foot-status > span:first-child {
     background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok); font-weight: 650;
   }
+  .terminal-foot-cache[hidden] { display: none; }
   .terminal-foot-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
   .terminal-foot-dot.is-green { background: var(--ok); }
   .terminal-foot-spacer { flex: 1 1 auto; }
@@ -1167,8 +1168,9 @@
   .terminal-foot-stats[hidden] { display: none; }
   .terminal-foot-requests {
     padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
-    color: var(--text); font-weight: 700; white-space: nowrap;
+    color: var(--text); font-weight: 700; white-space: nowrap; cursor: pointer;
   }
+  .terminal-foot-requests:hover { background: var(--surface-hover); border-color: var(--border-strong); }
   /* 近有失败：pill 转 danger 系，与最近请求列表失败行同一语义色 */
   .terminal-foot-requests.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
   /* tokens 截断串的悬停显全：浮层不能塞进带 overflow:hidden 的串内（会被裁），
