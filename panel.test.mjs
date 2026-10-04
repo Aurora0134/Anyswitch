@@ -5883,6 +5883,27 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
   });
 });
 
+// 底栏（E）：tokens 截断串悬停显全从原生 title 升级 styled tooltip（统计页
+// 同款）；近有失败请求时「N 次请求」pill 转 danger 系，与列表红点同源。
+describe("虚拟终端底栏（悬停显全 / 失败语义色）", () => {
+  it("tokens 悬停显全：原生 title 退役，styled tooltip 向上浮出且不被截断串裁剪", () => {
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(!render.includes("terminalFootTokens\").title"), "原生 title 赋值已退役");
+    assert.ok(render.includes('$("terminalFootTokensTip").textContent = metrics.tokens'), "浮层文本随轮询同拍更新");
+    assert.ok(panelHtml.includes('class="stats-tooltip terminal-foot-tip" id="terminalFootTokensTip"'), "浮层复用 stats-tooltip 组件");
+    assert.ok(panelHtml.includes("terminal-foot-tokens-wrap"), "截断串外加定位壳（浮层不进 overflow:hidden 内）");
+    assert.ok(/\.terminal-foot-tip \{[^}]*bottom: calc\(100% \+ 8px\)[^}]*right: 0/.test(panelCss), "底栏贴屏幕底，浮层向上且右对齐不出窗");
+    assert.ok(panelCss.includes(".terminal-foot-tokens-wrap:hover .terminal-foot-tip"), "悬停浮出");
+  });
+
+  it("失败语义色：最近请求带失败行时「N 次请求」pill 转 danger 系", () => {
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render.includes('classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"))'),
+      "pill 随最近请求失败行转 danger（与列表红点同源同拍）");
+    assert.ok(panelCss.includes(".terminal-foot-requests.is-failed"), "danger 变体样式就位");
+  });
+});
+
 // SSE 断线重连不重影（B2）：后端每次建连都重发 snapshot + 全量缓冲，前端
 // 对齐语义 = 每收到 snapshot 先 reset 再回放。纯函数在桩环境里真跑。
 describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {

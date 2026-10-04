@@ -4773,7 +4773,7 @@ async function api(method, path, body) {
       $("terminalWorkTimeUnit").textContent = metrics.workTimeUnit;
       $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
       $("terminalFootTokens").textContent = metrics.tokens;
-      $("terminalFootTokens").title = metrics.tokens;
+      $("terminalFootTokensTip").textContent = metrics.tokens;
       updateSparkline("terminalSparkTtft", metrics.sparkTtft, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkTps", metrics.sparkTps, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkCache", metrics.sparkCache, undefined, undefined, TERMINAL_SPARK_SIZE);
@@ -4785,6 +4785,9 @@ async function api(method, path, body) {
       label: routeNodeName(req.provider),
       expanded: terminalRequestExpanded.has(req.key),
     })).join("");
+    // 底栏失败语义色：最近请求里带失败行，「N 次请求」pill 转 danger（数据即
+    // 轮询面的 per-request ok 标志，与列表红点同源）。
+    $("terminalFootRequests").classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"));
   }
 
   // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，

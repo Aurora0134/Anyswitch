@@ -1169,7 +1169,14 @@
     padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
     color: var(--text); font-weight: 700; white-space: nowrap;
   }
+  /* 近有失败：pill 转 danger 系，与最近请求列表失败行同一语义色 */
+  .terminal-foot-requests.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+  /* tokens 截断串的悬停显全：浮层不能塞进带 overflow:hidden 的串内（会被裁），
+     外加定位壳；底栏贴屏幕底，浮层向上、右对齐不出窗 */
+  .terminal-foot-tokens-wrap { position: relative; display: inline-flex; min-width: 0; }
   .terminal-foot-tokens { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-weight: 650; }
+  .terminal-foot-tip { top: auto; bottom: calc(100% + 8px); left: auto; right: 0; }
+  .terminal-foot-tokens-wrap:hover .terminal-foot-tip { display: block; }
   .terminal-inspector { display: flex; flex-direction: column; overflow: hidden; }
   .terminal-inspector-head {
     display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 74px;
@@ -1266,7 +1273,7 @@
     .terminal-inspector.is-collapsed .terminal-inspector-body { display: none; }
     .terminal-screen { padding: 16px 14px 12px; font-size: 12px; }
     .terminal-session-path { display: none; }
-    .terminal-foot-tokens { display: none; }
+    .terminal-foot-tokens-wrap { display: none; }
     .terminal-tab { min-width: 160px; }
   }
 
