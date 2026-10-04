@@ -4024,25 +4024,6 @@ async function api(method, path, body) {
   // 同形）；点击失败行切换展开，1s 轮询重建列表时按此集合恢复。
   const terminalRequestExpanded = new Set();
 
-  // 最近请求行用的相对时间：随 1s 轮询每拍重算。journal 只取当日行，
-  // 跨天兜底落 HH:MM（本不该出现，防御）。
-  function terminalRelTime(ts) {
-    const t = Number(ts);
-    if (!Number.isFinite(t) || t <= 0) return "";
-    const diff = Date.now() - t;
-    if (diff < 0) return "刚刚";
-    const s = Math.floor(diff / 1000);
-    if (s < 15) return "刚刚";
-    if (s < 60) return `${s} 秒前`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m} 分钟前`;
-    const h = Math.floor(m / 60);
-    if (h < 24) return `${h} 小时前`;
-    const d = new Date(t);
-    const p = (n) => String(n).padStart(2, "0");
-    return `${p(d.getHours())}:${p(d.getMinutes())}`;
-  }
-
   // 最近请求：usage journal 的结算行，与统计页请求日志同一份字段口径
   // （metric 取 TTFT）。cached = 缓存命中的 token 数（明细行「缓存 N」的数据源，
   // 0 不显示）。失败行额外保留 status/errMsg/durationMs，供「失败 · 429」式明细
@@ -4054,10 +4035,12 @@ async function api(method, path, body) {
       const statusText = row?.status === null || row?.status === undefined || row?.status === "" ? "" : String(row.status);
       const ts = Number(row?.ts);
       let at = "";
+      let rel = "";
       if (Number.isFinite(ts) && ts > 0) {
         const d = new Date(ts);
         const p = (n) => String(n).padStart(2, "0");
         at = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+        rel = `${p(d.getHours())}:${p(d.getMinutes())}`;
       }
       return {
         model: typeof row?.model === "string" && row.model ? row.model : "—",
@@ -4068,7 +4051,7 @@ async function api(method, path, body) {
           : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
         cached: Number(row?.cached) || 0,
         state: failed ? "failed" : "ok",
-        rel: terminalRelTime(row?.ts),
+        rel,
         key: `${row?.ts ?? ""}|${typeof row?.providerId === "string" ? row.providerId : ""}|${typeof row?.model === "string" ? row.model : ""}`,
         errMsg: typeof row?.errMsg === "string" ? row.errMsg : "",
         at,
@@ -4077,7 +4060,7 @@ async function api(method, path, body) {
     });
   }
 
-  // 最近请求行：左栏身份两行（上=模型名大字，下=相对时间 · 来源显示名小灰字），
+  // 最近请求行：左栏身份两行（上=模型名大字，下=绝对时间 HH:MM · 来源显示名小灰字），
   // 右栏数据两行右对齐（上=TTFT、下=明细）。label 是来源显示名（routeNodeName 同
   // 口径，未命中回落原始 id）。缓存 token 只在成功行追加；失败行明细带失败类型
   // （对齐请求日志大板「失败 429」徽标），且可点击展开错误信息——展开态由调用方
@@ -5484,10 +5467,6 @@ async function api(method, path, body) {
       api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     }, true);
     $("terminalRetryBtn").onclick = () => connectTerminalBackend();
-    $("terminalFootRequests").onclick = () => {
-      switchView("stats");
-      activateStatsSubTab("logs");
-    };
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
         const menu = $("terminalAddMenu");
