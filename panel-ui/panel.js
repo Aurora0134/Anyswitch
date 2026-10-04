@@ -5354,6 +5354,7 @@ async function api(method, path, body) {
     syncTerminalAddBtn();
     fetchTerminalDefaultCwd();
     connectTerminalBackend();
+    loadInstalledTerminalAgents(); // 启动即预热新建菜单的启动方式列表，点「+」即弹不等探测
     if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {
       terminalPollTimer = setInterval(() => {
@@ -6215,6 +6216,7 @@ async function api(method, path, body) {
       else terminalXterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
+      loadInstalledTerminalAgents(); // 进页补热：60s TTL 内近零成本，过期才真实探测
     }
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
     $("mainHeadInner").hidden = settings || terminal;
