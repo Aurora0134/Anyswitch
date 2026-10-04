@@ -6196,6 +6196,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function closeTerminalAddMenu() {}
       function confirmTerminalAddMenu() {}
       function selectTerminalAddAgent() {}
+      function loadInstalledTerminalAgents() {}
       function setInterval(cb) { return 1; }
       const window = { addEventListener() {}, confirm: () => true };
       ${src}
@@ -7825,6 +7826,17 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Qoder"), "qoder 已有 CLI 形态，进新建菜单");
     assert.ok(!els.terminalAddMenuList.innerHTML.includes("ZCode"), "zcode 纯桌面 GUI，仍不进菜单");
     assert.equal(els.terminalAddMenuNote.hidden, true, "有可用 agent 时不显示提示");
+  });
+
+  it("启动方式列表双预热：面板启动与进终端页各补一次", () => {
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init, "initTerminalPreview found in panel.js");
+    assert.ok(init.includes("loadInstalledTerminalAgents()"), "面板启动即预热，点「+」不等探测");
+    const sw = panelJs.match(/function switchView\(name\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(sw, "switchView found in panel.js");
+    const termBranch = sw.slice(sw.indexOf("if (terminal) {"));
+    const branchBody = termBranch.slice(0, termBranch.indexOf("\n    }"));
+    assert.ok(branchBody.includes("loadInstalledTerminalAgents()"), "进终端页补热——60s TTL 内近零成本，过期才真实探测");
   });
 
   it("探测失败只留空白终端并说明；一个都没装也说明", async () => {
