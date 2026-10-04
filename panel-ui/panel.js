@@ -4812,11 +4812,14 @@ async function api(method, path, body) {
 
   function syncTerminalHostControls() {
     const [cls, label] = TERMINAL_HOST_BADGE_MAP[terminalHostState] || ["badge badge-neutral", "状态未知"];
+    // 同态异词：入口卡（看板侧）在服务从未启动过的冷态也会出现，「未运行」是
+    // 中性事实；终端页头徽标多在关停动作后看到，「已停止」承接动作语境。
+    const entryLabel = terminalHostState === "stopped" ? "未运行" : label;
     for (const el of [$("terminalHostBadge"), $("terminalHostHeadBadge")]) {
       if (!el) continue;
       el.className = cls;
       // 文案写在 .badge-text 内层：窄屏档只藏内层留圆点，外层类名与底色不动
-      (el.firstElementChild || el).textContent = label;
+      (el.firstElementChild || el).textContent = el.id === "terminalHostBadge" ? entryLabel : label;
     }
     // 起停二合一钮：运行中呈关停、已停止/异常呈启动，状态未知按住不动
     const toggleBtn = $("terminalHostToggleBtn");
