@@ -3781,6 +3781,12 @@ async function api(method, path, body) {
   let terminalImeFitPending = false;
   let terminalImeAnchorTextarea = null;
   let terminalBackendReady = false;
+  // 空壳侧栏锁存（renderTerminalSessionData 的收拢状态机）：系统收拢标记记
+  // 「当前 is-collapsed 是空壳自动收的」，归属恢复时只展开这一次；用户锁定集合
+  // 记「用户在哪个空壳会话手动拉回过」，该会话保持空壳期间轮询不再收拢（防
+  // 1s 轮询与用户意图拉锯）。
+  let terminalInspectorHollowCollapsed = false;
+  const terminalInspectorUserPinned = new Set();
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -4760,15 +4766,51 @@ async function api(method, path, body) {
     $("terminalSessionBranch").textContent = session.branch || "未设置分支";
     $("terminalShellLabel").textContent = session.shell.name;
     $("terminalInspectorTitle").textContent = session.label;
-    // 空壳侧栏：无归属会话没有任何 Agent 监测数据可展示，整列隐藏、工作区收
-    // 单列（与零会话空态同一套 is-empty 机制）；列宽变了终端要重排尺寸。
+    // 空壳侧栏：无归属会话没有 Agent 监测数据可展示——不再整列 display:none
+    //（收放开关在列内，藏列即藏唯一拉回入口，刷新落到无归属页签后侧栏就无痕
+    // 消失），改自动收成 48px 细条：开关保留可随时拉回，展开后指标照实显「—」。
+    // 收放都改变终端区宽度（340↔48px）且不经 window resize，须补一次重排。
     const inspector = $("terminalInspector");
     const workspace = $("terminalWorkspace");
     if (inspector && workspace) {
-      const empty = !session.agent;
-      if (workspace.classList.contains("is-empty") !== empty) scheduleTerminalFit();
-      inspector.style.display = empty ? "none" : "";
-      workspace.classList.toggle("is-empty", empty);
+      const hollow = !session.agent;
+      const wasEmpty = workspace.classList.contains("is-empty");
+      const wasCollapsed = inspector.classList.contains("is-collapsed");
+      let collapsed = wasCollapsed;
+      if (hollow) {
+        if (terminalInspectorUserPinned.has(session.id)) {
+          // 用户在此会话空壳态拉回过：保持展开，换页签回来也不缩回
+          collapsed = false;
+          terminalInspectorHollowCollapsed = false;
+        } else {
+          collapsed = true;
+          terminalInspectorHollowCollapsed = true;
+        }
+      } else {
+        terminalInspectorUserPinned.delete(session.id);
+        if (terminalInspectorHollowCollapsed) {
+          // 归属恢复只展开「系统收拢」的那次；用户自己收起的不动
+          collapsed = false;
+        }
+        terminalInspectorHollowCollapsed = false;
+      }
+      inspector.classList.toggle("is-collapsed", collapsed);
+      workspace.classList.toggle("is-inspector-collapsed", collapsed);
+      if (wasCollapsed !== collapsed) {
+        // 细条形态随归属自动切换，开关的悬停/读屏口径必须同拍跟上，否则收拢
+        // 态的按钮还挂着「收起状态面板」，悬停说反话。
+        const button = $("terminalInspectorToggle");
+        if (button) {
+          button.setAttribute("aria-expanded", String(!collapsed));
+          button.title = collapsed ? "展开状态面板" : "收起状态面板";
+          button.setAttribute("aria-label", button.title);
+        }
+      }
+      // 可见性归本函数管的只剩「从退场态回来」：poll 直达不经 clearTerminalEmpty-
+      // State，is-empty 单列只属零会话/未连接两态的退场机制，在此摘掉。
+      inspector.style.display = "";
+      workspace.classList.remove("is-empty");
+      if (wasEmpty || wasCollapsed !== collapsed) scheduleTerminalFit();
     }
     // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
     // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
@@ -5457,6 +5499,12 @@ async function api(method, path, body) {
       button.setAttribute("aria-expanded", String(!collapsed));
       button.title = collapsed ? "展开状态面板" : "收起状态面板";
       button.setAttribute("aria-label", button.title);
+      // 手动收放即接管：清系统收拢标记；空壳态拉回再按会话锁存，1s 轮询的
+      // 空壳自动收拢不再与之打架（归属恢复时锁存一并出集合，回默认形态）。
+      terminalInspectorHollowCollapsed = false;
+      const session = terminalSessionFor(activeTerminalPreviewId);
+      if (session && !collapsed && !session.agent) terminalInspectorUserPinned.add(session.id);
+      else if (session) terminalInspectorUserPinned.delete(session.id);
       // inspector 收放直接改变终端区宽度（约 292px）却不触发 window resize：
       // 不补一次 fit，xterm 列数与可见区错位、PTY 停在旧列宽，TUI 按旧列宽排版
       // 时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。

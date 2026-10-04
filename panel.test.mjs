@@ -6068,11 +6068,105 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
     assert.ok(!panelCss.includes(".terminal-route-node") && !panelCss.includes(".terminal-route-viewport"), "路由链样式族已撤除");
   });
 
-  it("空壳侧栏：无归属会话整列隐藏、工作区收单列，列宽变化触发终端重排", () => {
+  it("空壳侧栏：无归属会话不再整列消失，收拢成细条保留开关可拉回", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(render.includes('workspace.classList.toggle("is-empty", empty)'), "无归属即收单列（与零会话空态同一机制）");
-    assert.ok(render.includes('inspector.style.display = empty ? "none" : ""'), "监测区整列随归属显隐");
-    assert.ok(render.includes("scheduleTerminalFit()"), "列宽变化后终端重排尺寸");
+    assert.ok(!render.includes('inspector.style.display = empty ? "none" : ""'),
+      "整列 display:none 已退役——开关在列内，藏列即无拉回通路");
+    assert.ok(!render.includes('workspace.classList.toggle("is-empty", empty)'),
+      "is-empty 单列只属零会话/未连接退场，空壳不走它");
+    assert.ok(render.includes('workspace.classList.toggle("is-inspector-collapsed", collapsed)'),
+      "无归属走收拢机制：48px 细条、开关按钮保留在列内可拉回");
+    assert.ok(render.includes('inspector.style.display = ""'), "从零会话/未连接退场回来恢复可见（poll 直达不经 clear）");
+    assert.ok(render.includes('collapsed ? "展开状态面板" : "收起状态面板"'), "自动收拢同步开关文案与 aria（细条悬停不说反话）");
+    assert.ok(render.includes("scheduleTerminalFit()"), "收拢与拉回都改变终端区宽度，须触发终端重排尺寸");
+  });
+
+  it("空壳收拢防拉锯：归属恢复不自动展开用户已手动收拢的侧栏，手动拉回不被轮询打回", () => {
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render.includes("terminalInspectorHollowCollapsed") && render.includes("terminalInspectorUserPinned"),
+      "系统收拢与用户锁定分两个状态位，轮询不覆盖用户选择");
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const toggleAt = init.indexOf('$("terminalInspectorToggle").onclick');
+    assert.ok(toggleAt > 0, "inspector 开关接线在位");
+    const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalRedrawBtn").onclick'));
+    assert.ok(toggleBody.includes("terminalInspectorUserPinned"), "手动收放写锁定位，空壳自动收拢不再与之打架");
+    assert.ok(toggleBody.includes("scheduleTerminalFit()"), "手动收放保留尺寸适配");
+  });
+
+  it("vm 真跑空壳收拢状态机：细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
+    const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "renderTerminalSessionData found in panel.js");
+    const state = { session: null, fits: 0 };
+    const sandbox = new Function("state", `
+      const elCache = {};
+      const el = (id) => elCache[id] ??= {
+        textContent: "", innerHTML: "", title: "", hidden: false, style: {}, className: "",
+        classes: new Set(),
+        classList: {
+          add: (c) => elCache[id].classes.add(c),
+          remove: (c) => elCache[id].classes.delete(c),
+          contains: (c) => elCache[id].classes.has(c),
+          toggle: (c, on) => { if (on === undefined) on = !elCache[id].classes.has(c); if (on) elCache[id].classes.add(c); else elCache[id].classes.delete(c); return on; },
+        },
+        setAttribute() {},
+        getAttribute: () => null,
+      };
+      const $ = (id) => el(id);
+      let activeTerminalPreviewId = "s1";
+      const terminalSessionFor = () => state.session;
+      const terminalRequestExpanded = new Set();
+      let terminalInspectorHollowCollapsed = false;
+      const terminalInspectorUserPinned = new Set();
+      function scheduleTerminalFit() { state.fits += 1; }
+      function updateSparkline() {}
+      function routeNodeName(x) { return x; }
+      function terminalServingLabel() { return ""; }
+      function terminalRequestItemHtml() { return ""; }
+      ${src}
+      return {
+        render: renderTerminalSessionData,
+        el: el,
+        pin: (id) => terminalInspectorUserPinned.add(id),
+        unpin: (id) => terminalInspectorUserPinned.delete(id),
+        pinned: (id) => terminalInspectorUserPinned.has(id),
+      };
+    `)(state);
+    const { render, el, pin, unpin, pinned } = sandbox;
+
+    // ① 无归属 → 自动收拢细条、退出 is-empty、触发一次重排；稳态不再重排
+    state.session = { id: "s1", label: "外壳", cwd: "C:\\", branch: "", shell: { name: "PowerShell" }, status: "idle", metrics: null, requests: [], agent: null };
+    render();
+    const inspector = el("terminalInspector");
+    const workspace = el("terminalWorkspace");
+    assert.ok(inspector.classes.has("is-collapsed"), "无归属 → 自动收拢成细条");
+    assert.strictEqual(workspace.classes.has("is-empty"), false, "空壳不走零会话单列机制");
+    assert.ok(state.fits >= 1, "收拢改变终端列宽 → 触发重排");
+    const fitsAfterFirst = state.fits;
+    render();
+    assert.strictEqual(state.fits, fitsAfterFirst, "稳态轮询同形态不重复触发重排");
+
+    // ② 用户拉回（等价开关点击的 DOM 效果 + 锁存写入）→ 下一拍不得打回
+    inspector.classes.delete("is-collapsed");
+    workspace.classes.delete("is-inspector-collapsed");
+    pin("s1");
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "用户拉回后轮询不再收拢（锁定生效）");
+
+    // ③ 归属恢复：维持展开、清锁定；用户随后手动收拢 → 轮询不得替用户展开
+    state.session.agent = { endpointId: "dsh", name: "DeepSeek Harness", pid: 1, instanceId: "dsh-1" };
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "归属恢复维持展开");
+    assert.strictEqual(pinned("s1"), false, "归属恢复清用户锁定");
+    inspector.classes.add("is-collapsed");
+    workspace.classes.add("is-inspector-collapsed");
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), true, "用户手动收拢被尊重（归属态不自动展开）");
+
+    // ④ 归属再掉 → 自动收拢回细条
+    state.session.agent = null;
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), true, "归属再掉自动收拢回细条");
+    unpin("s1");
   });
 
   it("排印收口：末端分隔线收边、字阶并档 11/12、数值行同轴、TTFT 灯色图例悬停浮出", () => {
