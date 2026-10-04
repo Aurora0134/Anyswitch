@@ -958,7 +958,7 @@
   }
   .terminal-head-left, .terminal-head-right, .terminal-return-btn, .terminal-page-title,
   .terminal-session-context, .terminal-session-actions, .terminal-footbar,
-  .terminal-section-head, .terminal-route-line { display: flex; align-items: center; }
+  .terminal-section-head { display: flex; align-items: center; }
   .terminal-head-left, .terminal-head-right { gap: 14px; min-width: 0; }
   .terminal-return-btn {
     gap: 8px; border: 0; background: transparent; color: var(--text-2); cursor: pointer;
@@ -1175,7 +1175,7 @@
     display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 74px;
     padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
-  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10.5px/1.2 var(--font-mono); }
+  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 11px/1.2 var(--font-mono); }
   .terminal-inspector-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
@@ -1194,24 +1194,30 @@
   .terminal-live-icon i { width: 8px; height: 8px; display: block; border-radius: 50%; background: var(--surface); }
   .terminal-live-status > div { display: flex; flex-direction: column; min-width: 0; gap: 2px; }
   .terminal-live-status strong { color: currentColor; font-size: 13px; font-weight: 650; }
-  .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
-  .terminal-section-head { color: var(--text-3); font-size: 11.5px; }
+  .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+  .terminal-section-head { color: var(--text-3); font-size: 12px; }
   /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；
      折线占格子右列、跨标签/数值两行垂直居中，原生 56×22 与生成器同规格不拉伸 */
   .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
-  .terminal-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; min-width: 0; }
+  .terminal-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; min-width: 0; position: relative; }
   .terminal-metric-row { display: contents; }
-  .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 11.5px; }
+  .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; }
   .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 56px; height: 22px; }
   /* 折线 SVG 置块级：消掉 inline 基线间隙 */
   .terminal-metric-spark svg { display: block; }
-  .terminal-metric strong { grid-column: 1; display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; }
-  .terminal-metric strong .lamp { align-self: center; }
-  .terminal-metric-unit { color: var(--text-3); font-size: 10.5px; }
+  /* 数值行统一一条居中轴：数字、单位、TTFT 灯全按中线对齐，不再 baseline/居中混用 */
+  .terminal-metric strong { grid-column: 1; display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--text); font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric-unit { color: var(--text-3); font-size: 11px; }
+  /* TTFT 灯色图例：复用 stats-tooltip 组件，悬停 TTFT 格子浮出口径说明；
+     格子是定位祖先，浮层落格子下方（上方贴着栏顶会被裁） */
+  .terminal-metric-tip { top: calc(100% + 6px); }
+  .terminal-metric-ttft:hover .terminal-metric-tip { display: block; }
   .terminal-metrics-section[hidden] { display: none; }
   .terminal-inspector-section { padding: 12px 0; border-bottom: 1px solid var(--divider); }
+  /* 末端区块收边：最后一块不再悬空一条分隔线 */
+  .terminal-inspector-section:last-child { border-bottom: none; }
   .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 8px; font-weight: 600; }
-  .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 10.5px var(--font-mono); }
+  .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 11px var(--font-mono); }
   /* 最近请求视窗：行高固定 40px、间距 6px，max-height 按 5×40+4×6 取 224px，
      刚好显示 5 行，超出在窗内滚动；不足 5 条时列表自然变矮不出滚动条 */
   .terminal-request-list {
@@ -1239,26 +1245,6 @@
   }
   .terminal-request-err { color: var(--danger); overflow-wrap: anywhere; }
   .terminal-request-expand-meta { color: var(--text-4); margin-top: 2px; }
-  .terminal-route-viewport {
-    overflow-x: auto; overflow-y: hidden; padding: 2px 1px 8px;
-    scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
-  }
-  .terminal-route-line { display: flex; flex-wrap: nowrap; align-items: stretch; gap: 7px; width: max-content; min-width: 100%; font: 13px var(--font-mono); }
-  .terminal-route-node {
-    flex: none; min-width: 0; max-width: 160px; min-height: 40px;
-    display: flex; flex-direction: column; justify-content: center; gap: 2px;
-    padding: 5px 7px; border-radius: 5px; color: var(--text-2); overflow: hidden;
-    background: var(--surface-sunken); border: 1px solid var(--border);
-  }
-  .terminal-route-node strong, .terminal-route-node span { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .terminal-route-node strong { font-size: 11px; font-weight: 650; }
-  .terminal-route-node span { color: var(--text-3); font-size: 10.5px; }
-  .terminal-route-node.is-current { color: var(--ok); border-color: var(--ok-border); background: var(--ok-soft); box-shadow: 0 0 0 1px var(--ok-border); }
-  .terminal-route-node.is-current span { color: color-mix(in srgb, var(--ok) 80%, var(--text-3)); }
-  .terminal-route-node.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
-  .terminal-route-node.is-failed span { color: color-mix(in srgb, var(--danger) 78%, var(--text-3)); }
-  .terminal-route-arrow { display: inline-flex; flex: none; align-items: center; color: var(--text-3); font-size: 12px; font-weight: 600; }
-  .terminal-route-note { display: block; margin-top: 8px; color: var(--text-3); font-size: 11px; }
   @media (max-width: 900px) {
     .terminal-workspace { grid-template-columns: minmax(0, 1fr) 300px; }
     .terminal-head { padding: 0 16px; }
