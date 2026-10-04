@@ -3047,6 +3047,9 @@ export function createAgentMetricsCollector(options = {}) {
     // The same applies to latched faults: the endpoint's lifecycle ended, so
     // its banner must fold now instead of lingering until the idle fault TTL.
     // lastError history is kept — only the active latch is ended.
+    // 「已工作时间」同属本次运行期：进程全灭（过同一道宽限）即清零，下次启动
+    // 从 0 重计；totalRequests/tokens 等终身累计量不动（2026-10-04 报障：
+    // 该计数自快照持久化后永不清零，关闭再开接着旧值走）。
     function settleAbandonedAggregateState(state, processCount) {
       if (processCount > 0) return;
       const idleSince = state.activeWallStart ?? state.lastRequestAt ?? now;
@@ -3066,6 +3069,7 @@ export function createAgentMetricsCollector(options = {}) {
         state.keylessFaultAt = null;
         state.errorActive = false;
       }
+      state.activeWallClockMs = 0;
     }
 
     // 只在完整轮结算：不完整轮的零进程数是「没看见」，不是「进程没了」。

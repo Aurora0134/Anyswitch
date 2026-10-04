@@ -5529,3 +5529,122 @@ describe("进程扫描降级轮（tasklist 回落）不得销毁实例状态", (
     assert.equal(kimi.metrics.activeRequests, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 「已工作时间」随端点关闭清零（2026-10-04 用户报障：zcode 卡工时会随着总
+// 运行时间一直涨，中途关掉再开不清零）。根因：该计数自建仓起是终身累计的
+// 忙碌区间并集，09-17 快照持久化（927be08）后又跨 relay 重启续命，全程没有
+// 任何一处归零。规则：可信扫描轮确认端点进程数归零、且距最后活动已过
+// PROCESS_GONE_ACTIVE_REQUEST_TTL_MS（与孤儿请求结算同一道 3s 闸门），该端点
+// 的已工作时间清零，下次启动从 0 重计；请求数/tokens 等累计量不动。
+describe("已工作时间随端点关闭清零", () => {
+  const ZCODE_PID = 20588;
+  const zcodeScan = (pid) =>
+    `Node,CommandLine,ProcessId\r\nLAPTOP,C:\\Programs\\ZCode.exe,${pid}\r\n`;
+  // 健康轮里只剩无关进程：计数可信、zcode 桶为 0。
+  const goneScan = `Node,CommandLine,ProcessId\r\nLAPTOP,C:\\Windows\\explorer.exe,9001\r\n`;
+  const tasklistUnrelated = '"explorer.exe","9001","Console","1","40,000 K"\r\n';
+  const settleRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  const zcodeCard = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "zcode");
+
+  it("进程退出过 3s 宽限，已工作时间清零；重开从 0 重新累计", async () => {
+    let t = 3000;
+    let scan = zcodeScan(ZCODE_PID);
+    const execFn = (cmd, opts, cb) => cb(null, scan);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector); // 扫描落地：zcode 在跑
+    let zcode = await zcodeCard(collector);
+    assert.equal(zcode.status, "running");
+
+    const r = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 起点 3000
+    t = 7000;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 结算 4000ms
+
+    t = 13000; // 进程活着、空闲 6s：计数不走字
+    zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeDurationMs, 4000, "空闲不计时，只累计忙碌区间");
+
+    scan = goneScan;
+    t = 17000; // 过扫描缓存（新一轮认不出 zcode），距收尾 10000ms > 3s 宽限
+    await settleRound(collector);
+    zcode = await zcodeCard(collector);
+    assert.equal(zcode.status, "stopped");
+    assert.equal(zcode.metrics.activeDurationMs, 0, "端点关闭过宽限，已工作时间清零");
+    assert.equal(zcode.sessions[0].activeDurationMs, 0, "全局汇总行同步清零");
+    assert.equal(zcode.metrics.totalRequests, 1, "请求数是终身累计量，不随工时清零");
+
+    // 重开（新 pid）：从 0 起，不接旧值。
+    scan = zcodeScan(20604);
+    t = 21000;
+    await settleRound(collector);
+    const r2 = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 21000
+    t = 21500;
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 500ms
+    zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeDurationMs, 500, "重开后从 0 重新累计");
+    assert.equal(zcode.metrics.totalRequests, 2, "请求数继续累计");
+  });
+
+  it("3s 宽限期内不清零，过宽限才清", async () => {
+    let t = 3000;
+    let scan = zcodeScan(ZCODE_PID);
+    const execFn = (cmd, opts, cb) => cb(null, scan);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    const r = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 3000
+    t = 6000;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 结算 3000ms
+
+    scan = goneScan;
+    t = 8000; // 距收尾 2000ms ≤ 宽限
+    await settleRound(collector);
+    let zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeDurationMs, 3000, "宽限期内不清零");
+
+    t = 12000; // 距收尾 6000ms > 宽限
+    await settleRound(collector);
+    zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeDurationMs, 0, "过宽限即清零");
+  });
+
+  it("降级轮（tasklist 回落、认不出归属）不清零", async () => {
+    let t = 3000;
+    let psAnswer = zcodeScan(ZCODE_PID);
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? tasklistUnrelated : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    const r = collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 3000
+    t = 6000;
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 3000ms
+
+    // 探针空答 → 回落 tasklist；有一行无关进程 → 桶内计数不可信（50a41fc 口径）。
+    psAnswer = "";
+    t = 12000; // 距收尾 6000ms > 宽限，但本轮不可信
+    await settleRound(collector);
+    const zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeDurationMs, 3000, "不可信轮的「零进程」是看不见，不清零");
+  });
+
+  it("在飞请求随进程死亡先结算，工时不留下结算出的尾巴", async () => {
+    let t = 3000;
+    let scan = zcodeScan(ZCODE_PID);
+    const execFn = (cmd, opts, cb) => cb(null, scan);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    collector.startRequest({ agentId: "zcode", providerId: "p1", model: "m1" }); // 3000，永不收尾
+
+    scan = goneScan;
+    t = 12000; // 距在飞起点 9000ms > 宽限
+    await settleRound(collector);
+    const zcode = await zcodeCard(collector);
+    assert.equal(zcode.metrics.activeRequests, 0, "孤儿请求照旧结算");
+    assert.equal(zcode.metrics.activeDurationMs, 0, "工时随关闭清零，连孤儿尾巴一并清");
+  });
+});
