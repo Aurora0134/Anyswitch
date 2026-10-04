@@ -2388,11 +2388,12 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </div>
 
-<!-- 使用统计：TTFT/TPS 全量排名弹窗（一卡一窗，窗内两列纵向连续，条目过多内部滚动） -->
+<!-- 使用统计：TTFT/TPS 全量排名弹窗（一卡一窗，窗内两列纵向连续，条目过多内部滚动）
+     卡头标题由 openStatsRankModal 按 kind 现写为对应卡片名，故静态留空 -->
 <div class="modal-overlay stats-rank-modal-overlay" id="statsRankModal">
   <div class="modal-card" role="dialog" aria-modal="true">
     <div class="modal-head">
-      <h3 id="statsRankTitle">全部模型</h3>
+      <h3 id="statsRankTitle"></h3>
       <button class="modal-close-btn" id="statsRankCloseBtn" aria-label="关闭">✕</button>
     </div>
     <div class="modal-body" id="statsRankBody"></div>

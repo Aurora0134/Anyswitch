@@ -2168,7 +2168,12 @@ describe("panel.html stats TTFT/TPS 排名序号 + 双卡等高 + 全量弹窗�
   it("排名序号 1..N 复用看板状态检测卡 .ms-rank/.top（R-27）", () => {
     assert.ok(panelJs.includes("function statsRankEl(n)"), "序号小件 statsRankEl 存在");
     assert.ok(panelJs.includes('rk.className = "ms-rank"'), "序号复用 .ms-rank 基类（不新造）");
-    assert.ok(panelJs.includes("n <= 2"), "1-2 名挂 .top 走 accent 色");
+    // 仅第 1 名 accent：与看板状态检测卡同构（那边是 idx === 0 挂 .top），不是 1-2 名
+    assert.ok(panelJs.includes('rk.className = "ms-rank" + (n === 1 ? " top" : "")'),
+      "仅第 1 名挂 .top 走 accent 色");
+    assert.ok(!panelJs.includes("n <= 2"), "旧「1-2 名 accent」写法已撤");
+    assert.ok(panelJs.includes('rank.className = "ms-rank" + (idx === 0 ? " top" : "")'),
+      "看板同构实现仍在（仅第 1 名），两边同规则");
     // 卡内榜传 rank：TTFT 与 TPS 同构
     assert.ok(panelJs.includes("rank: i + 1,"), "卡内榜行带 rank 序号");
     // CSS：不新造渐变规则；复用看板 .ms-rank/.top（10px mono 灰字，首名 accent）
@@ -2211,9 +2216,11 @@ describe("panel.html stats TTFT/TPS 排名序号 + 双卡等高 + 全量弹窗�
     assert.ok(panelJs.includes('openStatsRankModal("ttft")'), "TTFT 榜双击开 TTFT 窗");
     assert.ok(panelJs.includes('openStatsRankModal("tps")'), "TPS 榜双击开 TPS 窗");
     assert.ok(panelJs.includes('addEventListener("dblclick"'), "榜区双击接线（非卡头按钮）");
-    // 一卡一窗：kind 分支取各自全量 + 各自标题
-    assert.ok(panelJs.includes('titleEl.textContent = "首字响应 TTFT · 全部模型"'), "TTFT 窗标题");
-    assert.ok(panelJs.includes('titleEl.textContent = "TPS 生成速度 · 全部模型"'), "TPS 窗标题");
+    // 一卡一窗：kind 分支取各自全量 + 各自标题（标题只写卡片名，不带「· 全部模型」后缀）
+    assert.ok(panelJs.includes('titleEl.textContent = "首字响应 TTFT"'), "TTFT 窗标题为卡片名");
+    assert.ok(panelJs.includes('titleEl.textContent = "TPS 生成速度"'), "TPS 窗标题为卡片名");
+    assert.ok(!panelJs.includes("· 全部模型"), "窗标题不带「· 全部模型」后缀");
+    assert.ok(panelHtml.includes('<h3 id="statsRankTitle"></h3>'), "markup 静态标题留空（开窗前现写）");
     // 两列纵向连续：奇左多一 + 序号跨列延续 + 紧凑文本行（复用 valText，无横条）
     assert.ok(panelJs.includes("Math.ceil(items.length / 2)"), "偶均分/奇左多一");
     assert.ok(panelJs.includes("stats-rank-cols") && panelJs.includes("stats-rank-col"), "两列容器类");

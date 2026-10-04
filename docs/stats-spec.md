@@ -149,13 +149,14 @@ range∈{today,7d,30d,all}、status∈{all,ok,http_429,http_5xx,http_4xx,network
 日志子页激活时统计视图挂 `logs-fixed`：视图高度钉在视口余量内（100dvh − 站点头 56 − 主区顶距 24 − 屏底余量 16），页面本身不滚；筛选行钉顶、表体在卡内 `overflow-y:auto` 滚动（表头 sticky）、分页条钉屏底（对齐 new-api）。总览子页保持文档流原样。min-height:0 链条（pane→card→card-body→table-wrap）是 flex 内滚动的硬要求，缺一截链即失效。
 - 锚点：panel.css `.stats-view.logs-fixed` 规则组；panel.js `activateStatsSubTab` 的 class 切换
 - ⚠️ 无自动化测试钉住（布局），改动时人工核对
+
 ### R-27 TTFT/TPS 卡内榜单：排序口径 + 截断 + 排名序号
-TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字母序；TPS 卡内榜按 `avgTps` **降序**（后端已排好的顺序，前端只做同规则兜底重排），并列按 key 字母序。排序纯前端完成——后端 `byModel`（按样本数排）/`tps`（按 avgTps 降序）均全量下发，前端经 `statsTtftRankedAll` / `statsTpsRankedAll` 重排。TTFT 截断 Top5（小标题「按模型 Top5（均值）」），TPS 截断 Top10（小标题「按模型 Top10」）。榜行首列带排名序号 1..N，复用看板状态检测卡 `.ms-rank/.top`（10px mono 灰字，1-2 名 accent 色，不新造渐变）；TTFT/TPS 卡内榜与全量弹窗同构。榜区悬停提示统一为「双击查看全部模型」。
+TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字母序；TPS 卡内榜按 `avgTps` **降序**（后端已排好的顺序，前端只做同规则兜底重排），并列按 key 字母序。排序纯前端完成——后端 `byModel`（按样本数排）/`tps`（按 avgTps 降序）均全量下发，前端经 `statsTtftRankedAll` / `statsTpsRankedAll` 重排。TTFT 截断 Top5（小标题「按模型 Top5（均值）」），TPS 截断 Top10（小标题「按模型 Top10」）。榜行首列带排名序号 1..N，复用看板状态检测卡 `.ms-rank/.top`（10px mono 灰字，**仅第 1 名** accent 色，与看板状态检测卡 `idx === 0` 同规则，不新造渐变）；TTFT/TPS 卡内榜与全量弹窗同构。榜区悬停提示统一为「双击查看全部模型」。
 - 锚点：panel.js `statsTtftRankedAll` / `statsTpsRankedAll` / `STATS_TTFT_TOP_N = 5` / `STATS_TPS_TOP_N = 10` / `statsRenderBars(el, rows, {placeholders})` / `statsRankEl`（复用 `.ms-rank/.top`）；panel.css `.stats-bars` 四列
 - 钉住：panel.test.mjs「TTFT 榜按 avg 升序 + Top5」「TPS 卡内榜 Top10」「排名序号复用 .ms-rank/.top」
 
 ### R-28 TTFT/TPS 双卡等高 + 全量排名弹窗
-双卡等高以 TTFT 卡为准：`.skills-grid.stats-quad` 切 stretch + 卡片纵向撑满 + 卡体纵列吃满，榜容器 `flex:1` 顶满；榜单不足固定行数时尾部补虚线占位行（`.stats-bar-placeholder`，TTFT 补足 5 行、TPS 补足 10 行）。**空态为例外**：任一卡无数据时走现有 `empty-hint`，不等高、不补占位。榜区双击出一卡一窗的全量弹窗（`#statsRankModal`，720px 档复用差异弹窗规格，内容区 `max-height:52vh` 内部滚动）：窗内分两列纵向连续（偶均分、奇左多一），序号 1..N 延续与卡片同构，行用紧凑文本（序号+模型名+数值，复用卡内 `valText` 格式，无横条）；两列共用一根纵向滚动条、窗高固定；关闭走 ✕/按钮/遮罩/Esc；空态（全量为零）不开窗。
+双卡等高以 TTFT 卡为准：`.skills-grid.stats-quad` 切 stretch + 卡片纵向撑满 + 卡体纵列吃满，榜容器 `flex:1` 顶满；榜单不足固定行数时尾部补虚线占位行（`.stats-bar-placeholder`，TTFT 补足 5 行、TPS 补足 10 行）。**空态为例外**：任一卡无数据时走现有 `empty-hint`，不等高、不补占位。榜区双击出一卡一窗的全量弹窗（`#statsRankModal`，720px 档复用差异弹窗规格，内容区 `max-height:52vh` 内部滚动）：窗内分两列纵向连续（偶均分、奇左多一），序号 1..N 延续与卡片同构，行用紧凑文本（序号+模型名+数值，复用卡内 `valText` 格式，无横条）；两列共用一根纵向滚动条、窗高固定；关闭走 ✕/按钮/遮罩/Esc；空态（全量为零）不开窗。窗标题即发起卡片名（TTFT 窗「首字响应 TTFT」、TPS 窗「TPS 生成速度」），不挂「· 全部模型」类后缀——窗本身即全量，后缀是重复信息；markup 里静态留空，标题由 `openStatsRankModal` 在开窗前按 kind 现写（弹窗只能经该函数显示，故空标题不会被看到）。
 - 锚点：panel.js `openStatsRankModal(kind)` / `hideStatsRankModal` + `initStatsTab` 双击接线；panel.html `#statsRankModal`；panel.css `.skills-grid.stats-quad` 等高块 + `.stats-rank-modal-overlay` + `.stats-rank-cols`
 - 钉住：panel.test.mjs「双卡等高：stretch + 占位行」「全量弹窗一卡一窗 + 两列均分 + 空态不开窗」
 
@@ -167,7 +168,7 @@ TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字�
 | 趋势 Top N=5 | usage-stats.mjs `TOP_N` | usage-stats.test.mjs（R-02） |
 | TTFT 卡内 Top5（按 avg 升序，越快越前） | panel.js `STATS_TTFT_TOP_N` + `statsTtftRankedAll` | panel.test.mjs（R-27） |
 | TPS 卡内 Top10（avgTps 降序） | panel.js `STATS_TPS_TOP_N` + `statsTpsRankedAll` | panel.test.mjs（R-27） |
-| 排名序号复用 .ms-rank/.top（1-2 名 accent 色） | panel.js `statsRankEl`（复用看板状态检测卡类） | panel.test.mjs（R-27） |
+| 排名序号复用 .ms-rank/.top（仅第 1 名 accent 色） | panel.js `statsRankEl`（复用看板状态检测卡类） | panel.test.mjs（R-27） |
 | 双卡等高 + 占位行（空态例外） | panel.css `.skills-grid.stats-quad` 等高块 + `.stats-bar-placeholder` | panel.test.mjs（R-28） |
 | 全量弹窗 720px / 内容区 52vh 内部滚动 | panel.js `openStatsRankModal` + panel.css `.stats-rank-modal-overlay` | panel.test.mjs（R-28） |
 | TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |

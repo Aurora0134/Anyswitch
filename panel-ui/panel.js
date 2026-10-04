@@ -12255,7 +12255,7 @@ async function api(method, path, body) {
   function statsRenderBars(el, rows, opts) {
     // rows: [{label, value(0-1 之外任意正数), valText, ok?, rank?}]
     // rank!=null 时首列渲染排名序号（复用看板状态检测卡 .ms-rank/.top，
-    // 1-2 名挂 .top 走 accent 色，不新造渐变）；
+    // 仅第 1 名挂 .top 走 accent 色，不新造渐变）；
     // opts.placeholders>0 时尾部补虚线占位行（固定榜单行数，配合双卡等高）。
     // 注意：容器是 grid 四列（序号 max-content / 标签 38% / 轨道 1fr / 数值
     // max-content），调用方须保证要么每行都带 rank、要么都不带，否则错列。
@@ -12291,10 +12291,11 @@ async function api(method, path, body) {
   }
 
   // 排名序号小件（TTFT/TPS 卡内榜与全量弹窗同构）：复用看板状态检测卡
-  // .ms-rank/.top（10px mono 灰字，1-2 名 accent 色），不新造渐变。
+  // .ms-rank/.top（10px mono 灰字，仅第 1 名 accent 色），不新造渐变。
+  // 「仅第 1 名」与看板状态检测卡同构——那边是 idx === 0 挂 .top。
   function statsRankEl(n) {
     const rk = document.createElement("span");
-    rk.className = "ms-rank" + (n <= 2 ? " top" : "");
+    rk.className = "ms-rank" + (n === 1 ? " top" : "");
     rk.textContent = String(n);
     return rk;
   }
@@ -12648,13 +12649,13 @@ async function api(method, path, body) {
     if (!modal || !titleEl || !bodyEl) return;
     let items;
     if (kind === "ttft") {
-      titleEl.textContent = "首字响应 TTFT · 全部模型";
+      titleEl.textContent = "首字响应 TTFT";
       items = statsTtftRankedAll().map((r) => ({
         label: r.key,
         valText: `${statsFmtTtft(r.avg)} · p95 ${statsFmtTtft(r.p95)} · ${statsFmtInt(r.samples)} 次`,
       }));
     } else {
-      titleEl.textContent = "TPS 生成速度 · 全部模型";
+      titleEl.textContent = "TPS 生成速度";
       items = statsTpsRankedAll().map((r) => ({
         label: r.key,
         valText: `${Number(r.avgTps).toFixed(1)} tok/s · ${statsFmtInt(r.samples)} 样本`,

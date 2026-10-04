@@ -2211,8 +2211,8 @@
   .stats-bar-row { display: contents; }
   .stats-bar-row > * { align-self: center; margin: 4px 0; }
   /* 排名序号（F/G1 卡内榜与全量弹窗同构）：复用看板状态检测卡 .ms-rank/.top
-     （10px mono 灰字，1-2 名 accent 色）；grid 语境下 .ms-rank 的 flex:none
-     被忽略，width:13px 照常生效。 */
+     （10px mono 灰字，仅第 1 名 accent 色，与看板 idx===0 同规则）；grid 语境下
+     .ms-rank 的 flex:none 被忽略，width:13px 照常生效。 */
   /* 占位行（榜单缺位补齐固定行数，配合双卡等高）：虚线行跨满四列，
      高度贴近常规榜行（11.5px 字行高约 16px + 上下 4px 边距） */
   .stats-bar-placeholder {
