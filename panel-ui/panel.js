@@ -539,6 +539,10 @@ async function api(method, path, body) {
   // + JSON.stringify(agent)。routeChainsVer 由链配置引用变化驱动（R9：Store tab
   // 改链后 storeState.routingChains 换引用即失配，切回看板另有清表+补刷兜底）。
   const agentRenderFp = {};
+  // 最近一次 /api/agents 的 payload：看板侧活跃真值流（boardActivityApplyFrame）按它
+  // 定位要改的端点/实例行。随每次轮询整体换引用；SSE 渲染只改字段、不换引用，
+  // 指纹闸依旧只由轮询维护（agentRenderFp 不变即跳过重渲，口径由轮询收口）。
+  let lastBoardAgents = [];
   let routeChainsVer = 0;
   let msModelsCacheVer = 0;
   let routeRuntimeVer = 0;
@@ -619,6 +623,7 @@ async function api(method, path, body) {
     try {
       const res = await api("GET", "/api/agents");
       if (res && res.agents) {
+        lastBoardAgents = res.agents;
         syncRouteChainsVer();
         reorderAgentCards(res.agents);
         const zc = res.agents.find(a => a.id === "zcode");
@@ -4127,6 +4132,105 @@ async function api(method, path, body) {
     return touched;
   }
 
+  // 看板侧活跃真值应用：帧改的是数据不是 DOM。命中端点按 (endpointId, instanceId)
+  // 落到 metrics.activeRequests（端点级 / null）或 instances/sessions 行的 activeRequests
+  // 与 status（实例行徽标由 status 派生，两个字段必须同改），返回命中端点 id 列表，
+  // 由调用方调对应渲染器整卡重渲（复用既有渲染口径，指纹闸不动）。
+  // instanceId 查不到归属行（归属行还没被轮询建出来）时不编造，等下一拍轮询自然出现。
+  //
+  // 两条链路的取信口径不同：
+  //  · activity 帧的 at 是发布时刻、毫秒级到达，直接采用——这正是降延迟的来源；
+  //  · snapshot 帧是桥缓存的最新态，其 at 是「最后一次听到这个身份」的时刻。被合并
+  //    计数的身份（如桌面行与其壳内引擎会话互为镜像）可能几十秒没帧，带着旧 at 的
+  //    值写上去就是把旧值盖到比它新的一拍轮询上。所以快照按 at 取时效：点到「且
+  //    新鲜」（BOARD_ACTIVITY_SNAPSHOT_TRUST_MS）的行才写、才命中；没点到或过期的
+  //    行一律原样不动，口径交回轮询。「没听到」不等于「该归零」。
+  //  终端页语义不动（那条链路由归属保证同身份，见 terminalActivityApplyFrame）。
+  function boardActivityApplyFrame(frame, agents) {
+    const hit = [];
+    const BOARD_ACTIVITY_SNAPSHOT_TRUST_MS = 3000;
+    if (!frame || typeof frame !== "object" || !Array.isArray(agents)) return hit;
+    const applyTo = (endpointId, instanceId, count) => {
+      const agent = agents.find((a) => a && a.id === endpointId);
+      if (!agent) return false;
+      const n = Number.isFinite(count) && count > 0 ? Math.trunc(count) : 0;
+      if (instanceId === null || instanceId === undefined) {
+        if (!agent.metrics || typeof agent.metrics !== "object") return false;
+        agent.metrics.activeRequests = n;
+        return true;
+      }
+      const rows = Array.isArray(agent.instances) ? agent.instances
+        : (Array.isArray(agent.sessions) ? agent.sessions : []);
+      const row = rows.find((r) => r && r.id === instanceId);
+      if (!row) return false;
+      row.activeRequests = n;
+      // 实例行的「生成中」徽标由 status 派生（renderInstanceRows 读 inst.status），
+      // 与 activeRequests 是两个字段：只改数不改状态，行徽标会停在旧态。这里按服务端
+      // 同一口径镜像（instances/sessions 行只在 active/idle 之间取值）。
+      row.status = n > 0 ? "active" : "idle";
+      return true;
+    };
+    if (frame.type === "activity" && typeof frame.endpointId === "string") {
+      if (applyTo(frame.endpointId, frame.instanceId ?? null, frame.activeRequests)) hit.push(frame.endpointId);
+      return hit;
+    }
+    if (frame.type === "snapshot" && Array.isArray(frame.instances)) {
+      const now = Date.now();
+      // 一行一判：点到「且 fresh」才写、才命中；没点到或过期都原样留着，口径交回轮询。
+      // 「没听到这个身份」不等于「该归零」——被合并计数的身份（桌面行 vs 壳内引擎会话）
+      // 可能几十秒没帧，按 0 写就是把旧值盖到比它新的一拍轮询上。
+      const trusted = (endpointId, instanceId) => {
+        const raw = frame.instances.find((i) => i && i.endpointId === endpointId && (i.instanceId ?? null) === instanceId);
+        if (!raw) return null;
+        if (typeof raw.at !== "number" || now - raw.at > BOARD_ACTIVITY_SNAPSHOT_TRUST_MS) return null;
+        return raw;
+      };
+      const countOf = (raw) => (raw && Number.isFinite(raw.activeRequests) && raw.activeRequests > 0 ? Math.trunc(raw.activeRequests) : 0);
+      for (const agent of agents) {
+        if (!agent || typeof agent.id !== "string") continue;
+        let touched = false;
+        if (agent.metrics && typeof agent.metrics === "object") {
+          const raw = trusted(agent.id, null);
+          if (raw) {
+            const n = countOf(raw);
+            if (agent.metrics.activeRequests !== n) agent.metrics.activeRequests = n;
+            touched = true;
+          }
+        }
+        const rows = Array.isArray(agent.instances) ? agent.instances
+          : (Array.isArray(agent.sessions) ? agent.sessions : []);
+        for (const row of rows) {
+          if (!row || row.id === undefined || row.id === null) continue;
+          const raw = trusted(agent.id, row.id);
+          if (!raw) continue;
+          const n = countOf(raw);
+          if (row.activeRequests !== n || row.status !== (n > 0 ? "active" : "idle")) {
+            row.activeRequests = n;
+            row.status = n > 0 ? "active" : "idle";
+          }
+          touched = true;
+        }
+        if (touched) hit.push(agent.id);
+      }
+      return hit;
+    }
+    return hit;
+  }
+
+  // 看板各端点的整卡渲染器：boardActivityApplyFrame 命中后按 id 调对应渲染器重渲。
+  // 覆盖全部九个端点；表外端点的帧照样改数据，只是不即时重渲（等下一拍轮询）。
+  const BOARD_RENDERERS = {
+    zcode: (a) => renderZcode(a),
+    claude: (a) => renderClaude(a),
+    dsh: (a) => renderDsh(a),
+    pi: (a) => renderPi(a),
+    kimi: (a) => renderKimi(a),
+    qoder: (a) => renderQoder(a),
+    opencode: (a) => renderOpencode(a),
+    codex: (a) => renderCodex(a),
+    grok: (a) => renderGrok(a),
+  };
+
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     if (!terminalBackendSessions[activeTerminalPreviewId]) {
@@ -5230,20 +5334,33 @@ async function api(method, path, body) {
   }
 
   // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
-  // 当前在终端页才连，缺一即断。断线交给 EventSource 自动重连；重连服务端会
-  // 重发快照帧，前端按整帧对齐恢复，不需要补偿逻辑。
-  function terminalActivityStreamWanted() {
-    return terminalBackendReady && !document.hidden && currentView === "terminal";
+  // 当前在终端页或看板页才连，缺一即断。断线交给 EventSource 自动重连；重连服务端会
+  // 重发快照帧，前端按整帧对齐恢复，不需要补偿逻辑。看板与终端页共用同一条流：
+  // 帧按当前视图分流（见 onmessage），离开这两页即断开，不占中继一条空转连接。
+  function activityStreamWanted() {
+    return terminalBackendReady && !document.hidden && (currentView === "terminal" || currentView === "board");
   }
 
   function syncTerminalActivityStream() {
-    if (terminalActivityStreamWanted()) {
+    if (activityStreamWanted()) {
       if (terminalActivitySource) return;
       const source = new EventSource(`${API_BASE}/api/agents-activity`);
       terminalActivitySource = source;
       source.onmessage = (event) => {
         let frame = null;
         try { frame = JSON.parse(event.data); } catch { return; }
+        if (currentView === "board") {
+          // 看板侧：帧改数据不改 DOM，命中端点交其自身渲染器整卡重渲（口径与轮询同源）。
+          // claude 是已知边界：其权威行是折叠后的 claude-desktop，而流身份是壳内引擎
+          // 会话（claude-<pid>）与端点级，两侧对不上——帧对该卡既不写数也不重渲，
+          // 由 1s 轮询单独承载，这是刻意保留（宁可不加速，不把不可比的值写上卡）。
+          for (const id of boardActivityApplyFrame(frame, lastBoardAgents)) {
+            const target = lastBoardAgents.find((a) => a && a.id === id);
+            const render = BOARD_RENDERERS[id];
+            if (target && render) render(target);
+          }
+          return;
+        }
         if (terminalActivityApplyFrame(frame, terminalSessionMap())) {
           renderTerminalSessionData();
           renderTerminalPreviewTabs();
