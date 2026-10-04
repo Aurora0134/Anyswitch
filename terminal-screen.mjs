@@ -21,9 +21,12 @@
 // fell, and history is budgeted in rendered lines rather than in repaint bytes.
 //
 // Scope, on purpose: the sequence set that terminal output actually produces here
-// (CR/LF/BS/TAB, CUU/CUD/CUF/CUB/CNL/CPL/CHA/VPA/CUP, ED/EL/IL/DL/DCH/ICH/ECH,
-// SU/SD, DECSTBM, SGR incl. 256/truecolor, DECSC/DECRC, cursor visibility, alt
-// screen 1049/1047/47, autowrap 7, IRM 4) plus OSC and DCS strings consumed whole.
+// (CR/LF/VT/FF/BS/TAB, CUU/CUD/CUF/CUB/CNL/CPL/CHA/VPA/CUP, ED/EL/IL/DL/DCH/ICH/ECH,
+// SU/SD, DECSTBM, SGR incl. 256/truecolor, DECSC/DECRC, cursor visibility, alt screen
+// 1049/1047/47, autowrap 7, IRM 4, convertEol 20) plus OSC and DCS strings consumed
+// whole. The C0 line-feed family must match the client's emulator exactly: a lost
+// line feed drifts the whole mirror one row above the real screen, and the client
+// only sees it when it rebuilds from a replay.
 // Unknown sequences are consumed and ignored — the mirror must never be able to
 // break forwarding. Reflow on resize is deliberately not modelled: a resize makes
 // the application repaint its own frame, so only historical rows keep their old
@@ -76,8 +79,10 @@ const isBlankRow = (row) => row.chars.every((ch, index) => {
   return !cellPainted(row.attrs[index]);
 });
 
-// 回放要重放的应用态模式：鼠标族（1000/1002/1003/1006/1015）与括号粘贴（2004）。
-const REPLAYED_MODES = [1000, 1002, 1003, 1006, 1015, 2004];
+// 回放要重放的应用态模式：鼠标族（1000/1002/1003/1006/1015）、括号粘贴（2004）
+// 与 convertEol 开关（20，见 write 里的换行语义）。20 必须重放：客户端重建后
+// 会退回「默认开着」的选项值，应用显式关掉时回放不带上它，两边换行就又不一致。
+const REPLAYED_MODES = [20, 1000, 1002, 1003, 1006, 1015, 2004];
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -93,6 +98,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   let bottom = height - 1;
   let sgr = [];
   let autoWrap = true;
+  // 客户端（面板的 xterm）开着 convertEol：裸 LF 会把列一并归零。镜像必须跟它
+  // 一样，否则同一段字节在镜像里和屏幕上排成两种样子。应用可以用 ?20h/?20l 在
+  // 运行时改这个开关，所以它是状态而非常量。
+  let convertEol = true;
   let insertMode = false;
   let cursorVisible = true;
   // 应用态模式的记录表：只在被显式 set/reset 过后才入表；从未出现过的模式
@@ -256,6 +265,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         else if (p === 7) autoWrap = value;
         else if (p === 4 && !value) insertMode = false;
         else if (p === 4 && value) insertMode = true;
+        else if (p === 20) { convertEol = value; appModes[p] = value; }
         else if (p === 1049 || p === 1047 || p === 47) setAlt(value);
         else if (REPLAYED_MODES.includes(p)) appModes[p] = value;
         // 1 (cursor keys), 12 (blink), 2026 (synchronised output), 6 (origin):
@@ -408,7 +418,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       const ch = input[i];
       if (ch === "\u001b") { i = consumeEscape(input, i); continue; }
       if (ch === "\r") { col = 0; pendingWrap = false; i += 1; continue; }
-      if (ch === "\n") { lineFeed(); i += 1; continue; }
+      if (ch === "\n" || ch === "\u000b" || ch === "\u000c") {
+        // xterm 把 LF、VT、FF 一并交给 lineFeed()（换行是这三个字符共同的语义），
+        // convertEol 打开时列一并归零。镜像少认一个换行，画面就比屏幕高一行，
+        // 回放出去的整屏会整体错位——自带背景、成片刷新的 TUI 字节流里这些控制
+        // 字符很常见，它们正是「切页签回来画面坏掉」的形态。
+        if (convertEol) { col = 0; pendingWrap = false; }
+        lineFeed();
+        i += 1;
+        continue;
+      }
       if (ch === "\u0008") { col = Math.max(0, col - 1); pendingWrap = false; i += 1; continue; }
       if (ch === "\u0009") { col = Math.min(width - 1, (Math.floor(col / 8) + 1) * 8); pendingWrap = false; i += 1; continue; }
       if (ch < " ") { i += 1; continue; }
@@ -468,9 +487,9 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   function toReplay() {
     const parts = ["\u001b[0m\u001b[2J\u001b[H"];
     let bytes = 8;
-    // 画面前先回放记录过的应用态模式（鼠标族 / 括号粘贴），让客户端与应用的当前状态对齐。
-    // 明确不发 1049 备屏与 2026 同步：1049 会把回放切进备用屏，丢掉刻意保留的滚屏历史；
-    // 2026 是同帧批处理标记，回放只有单帧画面，发了没有意义。
+    // 画面前先回放记录过的应用态模式（鼠标族 / 括号粘贴 / convertEol 开关），让客户端
+    // 与应用的当前状态对齐。明确不发 1049 备屏与 2026 同步：1049 会把回放切进备用屏，
+    // 丢掉刻意保留的滚屏历史；2026 是同帧批处理标记，回放只有单帧画面，发了没有意义。
     for (const p of REPLAYED_MODES) {
       if (!(p in appModes)) continue;
       const seq = `\u001b[?${p}${appModes[p] ? "h" : "l"}`;

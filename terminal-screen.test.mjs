@@ -175,9 +175,46 @@ test("鼠标族与括号粘贴：显式设置过的模式进回放，未记录�
   const legacy = createScreenMirror({ cols: 40, rows: 10 });
   legacy.write("旧会话\r\n");
   const legacyReplay = legacy.toReplay();
-  for (const p of [1000, 1002, 1003, 1006, 1015, 2004]) {
+  for (const p of [20, 1000, 1002, 1003, 1006, 1015, 2004]) {
     assert.ok(!legacyReplay.includes(`?${p}`), `未记录时回放不得含 ?${p}`);
   }
+});
+
+test("换行语义与客户端一致：LF/VT/FF 都换行，convertEol 下连列一起归零", () => {
+  // xterm 把 LF、VT、FF 一并挂到 lineFeed()；面板的 xterm 开着 convertEol，
+  // 裸 LF 连列一起归零。镜像少认一个换行，画面就比屏幕高一行——回放出去的
+  // 整屏会整体错位，这正是「切页签回来 TUI 那块区域没了」的形态。
+  for (const [name, ch] of [["LF", "\n"], ["VT", "\u000b"], ["FF", "\u000c"]]) {
+    const mirror = createScreenMirror({ cols: 20, rows: 4 });
+    mirror.write(`one${ch}two`);
+    assert.deepEqual(mirror.screenLines().slice(0, 2), ["one", "two"], `${name} 必须换行且列归零`);
+  }
+
+  // ?20l 之后 LF 只下移、保留列位（xterm 允许应用运行时关掉 convertEol）
+  const off = createScreenMirror({ cols: 20, rows: 4 });
+  off.write("\u001b[?20l");
+  off.write("one\ntwo");
+  assert.deepEqual(off.screenLines().slice(0, 2), ["one", "   two"], "关掉 convertEol 后 LF 保留列位");
+  assert.ok(off.toReplay().includes("\u001b[?20l"), "显式关掉的 convertEol 必须进回放，否则重建后又退回默认值");
+  assert.deepEqual(repaint(off.toReplay(), 20, 4).screenLines(), off.screenLines(), "回放必须还原同一张画面");
+
+  const on = createScreenMirror({ cols: 20, rows: 4 });
+  on.write("\u001b[?20l\u001b[?20h");
+  on.write("one\ntwo");
+  assert.deepEqual(on.screenLines().slice(0, 2), ["one", "two"], "?20h 恢复列归零");
+});
+
+test("NUL/STX 填充与 FF：填充字节不占列，FF 之后的内容落到下一行", () => {
+  // grok build 经 conpty 转发时成片出现这种形态：行内夹 NUL/STX/DC1 填充，
+  // 行尾用 FF 断行。填充字节两边都忽略、不占列，FF 必须断行。
+  const mirror = createScreenMirror({ cols: 12, rows: 4 });
+  mirror.write(`\u001b[1;1Hm${"\u0000".repeat(5)}n`);
+  mirror.write("\u001b[2;1H`}\u0002\u0000\u0011Z\u000cAFTER");
+  const lines = mirror.screenLines();
+  assert.equal(lines[0], "mn", "NUL 填充不占列");
+  assert.equal(lines[1], "`}Z", "FF 之前的内容留在本行");
+  assert.equal(lines[2], "AFTER", "FF 之后的内容落到下一行");
+  assert.deepEqual(repaint(mirror.toReplay(), 12, 4).screenLines(), lines, "回放必须还原同一张画面");
 });
 
 test("ESC[3J 只清滚动区、IL 只移位、ECH 擦除填充", () => {
