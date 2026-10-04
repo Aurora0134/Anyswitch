@@ -47,12 +47,29 @@
     --pool-soft: #f5f3ff;
     --pool-border: #ddd6fe;
 
-    /* 来源语义色（最近请求模型名的字色）：号池紫 / 渠道青，与端点品牌色错开 */
-    --chan: #0e7490;
-
-    --spark-line: #3b82f6;
-    --spark-fill: rgba(59, 130, 246, 0.12);
+    --spark-line: var(--accent);
+    --spark-fill: color-mix(in srgb, var(--accent) 12%, transparent);
     --danger-glow: rgba(220, 38, 38, 0.18);
+
+    /* 控制台与虚拟终端屏幕的亮暗 token：实时输出卡（.log-console）与终端屏
+       （.terminal-screen 一族）共用这套口径；三皮肤段按各自色板覆盖。 */
+    --console-bg: #ffffff;
+    --console-toolbar-bg: #f8fafc;
+    --console-border: #e2e8f0;
+    --console-fg: #1e293b;
+    --console-muted: #64748b;
+    --console-hover-bg: #e2e8f0;
+    --console-hover-fg: #0f172a;
+    --console-live: var(--ok);
+    --console-info: #0284c7;
+    --console-warn: #b45309;
+    --console-error: #dc2626;
+
+    --terminal-bg: #f8fafc;
+    --terminal-fg: #1e293b;
+    --terminal-cursor: #334155;
+    --terminal-selection: #bfdbfe;
+    --terminal-muted: #64748b;
 
     /* 端点品牌色（会话视图的圆点与徽标共用）：与语义色刻意错开色相，
        免得端点标识被误读成状态。pi 的白与 zcode 的黑本身在某一侧底色上
@@ -125,11 +142,28 @@
     --pool-soft: rgba(167, 139, 250, 0.16);
     --pool-border: #6d28d9;
 
-    --chan: #4cd6ef;
-
     --spark-line: #60a5fa;
     --spark-fill: rgba(96, 165, 250, 0.18);
     --danger-glow: rgba(239, 68, 68, 0.32);
+
+    /* 控制台与终端屏幕：暗色 token（亮色值见 :root 段） */
+    --console-bg: #090d16;
+    --console-toolbar-bg: #0f172a;
+    --console-border: #1e293b;
+    --console-fg: #e2e8f0;
+    --console-muted: #94a3b8;
+    --console-hover-bg: #1e293b;
+    --console-hover-fg: #f8fafc;
+    --console-live: var(--ok);
+    --console-info: #38bdf8;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+
+    --terminal-bg: #0b1220;
+    --terminal-fg: #d5e2f4;
+    --terminal-cursor: #dbeafe;
+    --terminal-selection: #29486d;
+    --terminal-muted: #71829a;
 
     /* 端点品牌色：色相与亮色一致，明度提亮以适配暗底；pi 的白与 zcode 的
        黑保持本色不变，靠翻成浅色的内描边环收边。 */
@@ -197,6 +231,25 @@
       --spark-line: #60a5fa;
       --spark-fill: rgba(96, 165, 250, 0.18);
       --danger-glow: rgba(239, 68, 68, 0.32);
+
+      /* 跟随系统的暗色：控制台与终端屏幕同显式 dark 一套值 */
+      --console-bg: #090d16;
+      --console-toolbar-bg: #0f172a;
+      --console-border: #1e293b;
+      --console-fg: #e2e8f0;
+      --console-muted: #94a3b8;
+      --console-hover-bg: #1e293b;
+      --console-hover-fg: #f8fafc;
+      --console-live: var(--ok);
+      --console-info: #38bdf8;
+      --console-warn: #fbbf24;
+      --console-error: #f87171;
+
+      --terminal-bg: #0b1220;
+      --terminal-fg: #d5e2f4;
+      --terminal-cursor: #dbeafe;
+      --terminal-selection: #29486d;
+      --terminal-muted: #71829a;
 
       /* 与显式 dark 段一致：跟随系统的暗色下同样翻回深棕砖 */
       --cc-avatar-bg: #2b1810;
@@ -464,35 +517,35 @@
   .btn-accent:hover:not(:disabled) { filter: brightness(1.05); }
   .btn-mini { font-size: 11.5px; padding: 4px 10px; border-radius: var(--radius-sm, 6px); }
 
-  /* 实时日志控制台 */
+  /* 实时日志控制台：颜色全部走 --console-* token（亮暗与三皮肤各有一套值） */
   .log-console {
-    background: #090d16; color: #e2e8f0; border-radius: var(--radius-md, 8px);
+    background: var(--console-bg); color: var(--console-fg); border-radius: var(--radius-md, 8px);
     font-family: var(--font-mono); font-size: 11.5px; line-height: 1.6;
-    overflow: hidden; border: 1px solid #1e293b;
+    overflow: hidden; border: 1px solid var(--console-border);
     display: flex; flex-direction: column; height: 320px;
   }
   .log-toolbar {
     display: flex; align-items: center; justify-content: space-between;
-    padding: 6px 10px; background: #0f172a; border-bottom: 1px solid #1e293b;
+    padding: 6px 10px; background: var(--console-toolbar-bg); border-bottom: 1px solid var(--console-border);
     font-size: 11px;
   }
-  .log-status { display: flex; align-items: center; gap: 6px; color: #94a3b8; }
-  .log-status.live { color: #10b981; }
+  .log-status { display: flex; align-items: center; gap: 6px; color: var(--console-muted); }
+  .log-status.live { color: var(--console-live); }
   .log-clear-btn {
-    background: none; border: none; color: #94a3b8; cursor: pointer;
+    background: none; border: none; color: var(--console-muted); cursor: pointer;
     font-size: 11px; font-family: inherit; padding: 2px 6px; border-radius: 4px;
   }
-  .log-clear-btn:hover { color: #f8fafc; background: #1e293b; }
+  .log-clear-btn:hover { color: var(--console-hover-fg); background: var(--console-hover-bg); }
   .log-stream {
     flex: 1; overflow-y: auto; padding: 8px 10px; scroll-behavior: smooth;
     contain: layout;
   }
   .log-line { margin-bottom: 3px; word-break: break-all; }
-  .log-line .ts { color: #64748b; margin-right: 6px; }
+  .log-line .ts { color: var(--console-muted); margin-right: 6px; }
   .log-line .lvl { font-weight: 600; margin-right: 6px; }
-  .log-line.info .lvl, .log-level-legend .lvl.info { color: #38bdf8; }
-  .log-line.warn .lvl, .log-level-legend .lvl.warn { color: #fbbf24; }
-  .log-line.error .lvl, .log-level-legend .lvl.error { color: #f87171; }
+  .log-line.info .lvl, .log-level-legend .lvl.info { color: var(--console-info); }
+  .log-line.warn .lvl, .log-level-legend .lvl.warn { color: var(--console-warn); }
+  .log-line.error .lvl, .log-level-legend .lvl.error { color: var(--console-error); }
 
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
@@ -1030,8 +1083,8 @@
   }
   .terminal-screen {
     position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: auto;
-    padding: 22px 24px 16px; color: #d5e2f4; background: #0b1220; font: 13px/1.65 var(--font-mono);
-    color-scheme: dark; user-select: text; -webkit-user-select: text;
+    padding: 22px 24px 16px; color: var(--terminal-fg); background: var(--terminal-bg); font: 13px/1.65 var(--font-mono);
+    user-select: text; -webkit-user-select: text;
   }
   .terminal-xterm-host { width: 100%; height: 100%; min-height: 0; }
   .terminal-xterm-host .xterm { height: 100%; padding: 0; }
@@ -1046,31 +1099,31 @@
   }
   /* xterm 自带的组字预览块：默认黑底白字（上游写死，与主题无关），落在光标格上就是
      一块把左边字符压掉一块的深色方块。底色改全透明——方块彻底消失，压字问题消失，
-     底下的 TUI 画面（含左边字符）原样透出；字色给终端前景色的固定值（非变量，终端
-     恒为深底），组字预览重新可见，不依赖输入法候选窗是否回显。 */
+     底下的 TUI 画面（含左边字符）原样透出；字色跟随终端前景 token，组字预览重新可见，
+     不依赖输入法候选窗是否回显。 */
   .terminal-xterm-host .xterm .composition-view {
     background: transparent;
-    color: #d5e2f4;
+    color: var(--terminal-fg);
   }
   /* 终端服务未运行的空态覆盖层：盖住 xterm 区，降级期唯一可见的屏幕内容 */
   .terminal-unavailable {
     position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center;
-    background: #0b1220;
+    background: var(--terminal-bg);
   }
   .terminal-unavailable[hidden] { display: none; }
-  .terminal-unavailable-title { color: #d5e2f4; font-size: 15px; font-weight: 700; }
-  .terminal-unavailable-desc { margin: 0; color: #71829a; font-size: 12px; line-height: 1.7; }
+  .terminal-unavailable-title { color: var(--terminal-fg); font-size: 15px; font-weight: 700; }
+  .terminal-unavailable-desc { margin: 0; color: var(--terminal-muted); font-size: 12px; line-height: 1.7; }
   /* 零会话空态：关掉最后一个标签（或回归时本就是零会话）时盖在终端画区上，
-     与降级空态同款深色底，只给文字提示；「+」留在页签栏原处可直接新建。 */
+     与降级空态同款底色，只给文字提示；「+」留在页签栏原处可直接新建。 */
   .terminal-empty {
     position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 8px; padding: 24px; text-align: center;
-    background: #0b1220;
+    background: var(--terminal-bg);
   }
   .terminal-empty[hidden] { display: none; }
-  .terminal-empty-title { color: #d5e2f4; font-size: 15px; font-weight: 700; }
-  .terminal-empty-desc { margin: 0; color: #71829a; font-size: 12px; line-height: 1.7; }
+  .terminal-empty-title { color: var(--terminal-fg); font-size: 15px; font-weight: 700; }
+  .terminal-empty-desc { margin: 0; color: var(--terminal-muted); font-size: 12px; line-height: 1.7; }
   .terminal-backend-state { color: var(--text-3); font: 10px var(--font-mono); }
   .terminal-output { flex: 1 1 auto; min-height: 0; }
   .terminal-line { min-height: 1.65em; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1122,7 +1175,7 @@
     display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 74px;
     padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
   }
-  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10.5px/1.2 var(--font-mono); text-transform: uppercase; }
+  .terminal-eyebrow { display: block; margin-bottom: 3px; color: var(--text-3); font: 10.5px/1.2 var(--font-mono); }
   .terminal-inspector-eyebrow-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .terminal-inspector-head h2 { margin: 0; color: var(--text); font-size: 16px; font-weight: 700; }
   .terminal-inspector-toggle { width: 28px; height: 28px; }
@@ -1143,15 +1196,16 @@
   .terminal-live-status strong { color: currentColor; font-size: 13px; font-weight: 650; }
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 11.5px; overflow-wrap: anywhere; }
   .terminal-section-head { color: var(--text-3); font-size: 11.5px; }
-  /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；折线与数值同行、贴右垂直居中 */
+  /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；
+     折线占格子右列、跨标签/数值两行垂直居中，原生 56×22 与生成器同规格不拉伸 */
   .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
-  .terminal-metric { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-  .terminal-metric-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-  .terminal-metric-label { color: var(--text-3); font-size: 11.5px; }
-  .terminal-metric-spark { flex: none; width: 44px; height: 17px; }
-  /* 折线 SVG 置块级：消掉 inline 基线间隙，数值与折线在行内才真正垂直居中 */
+  .terminal-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; min-width: 0; }
+  .terminal-metric-row { display: contents; }
+  .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 11.5px; }
+  .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 56px; height: 22px; }
+  /* 折线 SVG 置块级：消掉 inline 基线间隙 */
   .terminal-metric-spark svg { display: block; }
-  .terminal-metric strong { display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric strong { grid-column: 1; display: flex; align-items: baseline; gap: 4px; min-width: 0; color: var(--text); font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-metric strong .lamp { align-self: center; }
   .terminal-metric-unit { color: var(--text-3); font-size: 10.5px; }
   .terminal-metrics-section[hidden] { display: none; }
@@ -1168,17 +1222,23 @@
   .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
   .terminal-request-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-  /* 左栏两行：上=模型名大字（字色表达来源：号池紫 / 渠道青 / 未知随正文），
-     下=来源显示名小灰字；溢出均省略号截断 */
-  .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
-  .terminal-request-main strong.is-pool { color: var(--pool); }
-  .terminal-request-main strong.is-channel { color: var(--chan); }
-  .terminal-request-main strong.is-unknown { color: var(--text); }
+  /* 左栏两行：上=模型名大字，下=「相对时间 · 来源显示名」小灰字；溢出均省略号截断 */
+  .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-request-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
   /* 右栏两行右对齐：上=TTFT，下=明细（完成/失败 + tokens + 缓存） */
   .terminal-request-data { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; min-width: 0; white-space: nowrap; }
   .terminal-request-metric { color: var(--text-2); font: 11px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .terminal-request-detail { color: var(--text-3); font-size: 11px; white-space: nowrap; }
+  .terminal-request-detail.is-failed { color: var(--danger); }
+  /* 失败行可点击展开错误详情（行内 hover 提示可点，与大板行展开同语义） */
+  .terminal-request-item.is-expandable { cursor: pointer; border-radius: var(--radius-sm, 6px); }
+  .terminal-request-item.is-expandable:hover { background: var(--surface-hover); }
+  .terminal-request-expand {
+    margin: -2px 0 4px 15px; padding: 6px 8px; font-size: 11px; line-height: 1.6;
+    background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+  }
+  .terminal-request-err { color: var(--danger); overflow-wrap: anywhere; }
+  .terminal-request-expand-meta { color: var(--text-4); margin-top: 2px; }
   .terminal-route-viewport {
     overflow-x: auto; overflow-y: hidden; padding: 2px 1px 8px;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
@@ -2513,9 +2573,23 @@
   --overlay-bg: rgba(23, 24, 28, 0.32);
   --glass-blur: blur(22px) saturate(190%);
   --page-bg-image: radial-gradient(920px 460px at 50% -180px, rgba(11, 138, 163, 0.09), transparent 70%);
-  --console-bg: #0c0f16;
-  --console-toolbar-bg: #12151e;
-  --console-border: rgba(255, 255, 255, 0.07);
+  --console-bg: #ffffff;
+  --console-toolbar-bg: #f8fafc;
+  --console-border: #e2e8f0;
+  --console-fg: #1e293b;
+  --console-muted: #64748b;
+  --console-hover-bg: #e2e8f0;
+  --console-hover-fg: #0f172a;
+  --console-live: var(--ok);
+  --console-info: #0284c7;
+  --console-warn: #b45309;
+  --console-error: #dc2626;
+
+  --terminal-bg: #f8fafc;
+  --terminal-fg: #1e293b;
+  --terminal-cursor: #334155;
+  --terminal-selection: #bfdbfe;
+  --terminal-muted: #64748b;
 }
 
 /* 2) 暗色 token 全集（显式 dark） */
@@ -2585,6 +2659,20 @@
   --console-bg: #0a0c11;
   --console-toolbar-bg: #10131a;
   --console-border: rgba(255, 255, 255, 0.07);
+  --console-fg: #e2e8f0;
+  --console-muted: #94a3b8;
+  --console-hover-bg: #1e293b;
+  --console-hover-fg: #f8fafc;
+  --console-live: var(--ok);
+  --console-info: #38bdf8;
+  --console-warn: #fbbf24;
+  --console-error: #f87171;
+
+  --terminal-bg: #0a0c11;
+  --terminal-fg: #d8dee9;
+  --terminal-cursor: #e5e9f0;
+  --terminal-selection: #2a3446;
+  --terminal-muted: #7b8798;
 }
 
 /* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
@@ -2655,6 +2743,20 @@
     --console-bg: #0a0c11;
     --console-toolbar-bg: #10131a;
     --console-border: rgba(255, 255, 255, 0.07);
+    --console-fg: #e2e8f0;
+    --console-muted: #94a3b8;
+    --console-hover-bg: #1e293b;
+    --console-hover-fg: #f8fafc;
+    --console-live: var(--ok);
+    --console-info: #38bdf8;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+
+    --terminal-bg: #0a0c11;
+    --terminal-fg: #d8dee9;
+    --terminal-cursor: #e5e9f0;
+    --terminal-selection: #2a3446;
+    --terminal-muted: #7b8798;
   }
 }
 
@@ -2739,7 +2841,7 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：柔化硬编码深色壳，圆角对齐整体语言 */
+/* 日志控制台：壳色随 --console-* token 亮暗换肤，圆角对齐整体语言 */
 :root[data-style="saas"] .log-console {
   background: var(--console-bg);
   border-color: var(--console-border);
@@ -3001,9 +3103,23 @@
     radial-gradient(980px 460px at 10% -180px, rgba(56, 189, 248, 0.15), transparent 70%),
     radial-gradient(900px 440px at 88% -140px, rgba(167, 139, 250, 0.11), transparent 72%),
     radial-gradient(820px 560px at 55% 130%, rgba(244, 114, 182, 0.08), transparent 76%);
-  --console-bg: #081423;
-  --console-toolbar-bg: #0d1f31;
-  --console-border: rgba(103, 232, 249, 0.12);
+  --console-bg: #f2fafd;
+  --console-toolbar-bg: #e2f2f8;
+  --console-border: rgba(14, 116, 144, 0.2);
+  --console-fg: #14313d;
+  --console-muted: #52798a;
+  --console-hover-bg: #d5eaf2;
+  --console-hover-fg: #0c2530;
+  --console-live: var(--ok);
+  --console-info: #0284c7;
+  --console-warn: #b45309;
+  --console-error: #dc2626;
+
+  --terminal-bg: #eef7fb;
+  --terminal-fg: #14313d;
+  --terminal-cursor: #155e75;
+  --terminal-selection: #bfe7f5;
+  --terminal-muted: #52798a;
   --card-hairline: linear-gradient(90deg, rgba(14, 165, 233, 0.4), rgba(139, 92, 246, 0.3), rgba(236, 72, 153, 0.26));
 }
 
@@ -3083,6 +3199,20 @@
   --console-bg: #050e1a;
   --console-toolbar-bg: #0a1a2b;
   --console-border: rgba(103, 232, 249, 0.12);
+  --console-fg: #d4e9f4;
+  --console-muted: #5b8597;
+  --console-hover-bg: #0d1f31;
+  --console-hover-fg: #e6f6fc;
+  --console-live: var(--ok);
+  --console-info: #4cd6ef;
+  --console-warn: #fbbf24;
+  --console-error: #f87171;
+
+  --terminal-bg: #050e1a;
+  --terminal-fg: #d4e9f4;
+  --terminal-cursor: #a5f3fc;
+  --terminal-selection: #164e63;
+  --terminal-muted: #5b8597;
   --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
 }
 
@@ -3163,6 +3293,20 @@
     --console-bg: #050e1a;
     --console-toolbar-bg: #0a1a2b;
     --console-border: rgba(103, 232, 249, 0.12);
+    --console-fg: #d4e9f4;
+    --console-muted: #5b8597;
+    --console-hover-bg: #0d1f31;
+    --console-hover-fg: #e6f6fc;
+    --console-live: var(--ok);
+    --console-info: #4cd6ef;
+    --console-warn: #fbbf24;
+    --console-error: #f87171;
+
+    --terminal-bg: #050e1a;
+    --terminal-fg: #d4e9f4;
+    --terminal-cursor: #a5f3fc;
+    --terminal-selection: #164e63;
+    --terminal-muted: #5b8597;
     --card-hairline: linear-gradient(90deg, rgba(76, 214, 239, 0.55), rgba(139, 92, 246, 0.45), rgba(236, 72, 153, 0.38));
   }
 }
@@ -3263,7 +3407,7 @@
   box-shadow: var(--shadow-xs), inset 0 1px 0 var(--hl-inset);
 }
 
-/* 日志控制台：极夜冰蓝壳 + 青色描边微光，亮暗两套都保持深色机身 */
+/* 日志控制台：壳色随 --console-* token 亮暗换肤，青色描边微光与玻璃圆角保持皮肤语言 */
 :root[data-style="aurora"] .log-console {
   background: var(--console-bg);
   border-color: var(--console-border);
@@ -3560,6 +3704,25 @@
   --store-drag-accent: var(--accent);
   --store-drag-glow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
   --store-drag-ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+
+  /* 控制台与终端屏幕：亮色取暖纸面 */
+  --console-bg: #faf6ec;
+  --console-toolbar-bg: #f0e8d5;
+  --console-border: #e0d3b3;
+  --console-fg: #3d3424;
+  --console-muted: #8a7a5c;
+  --console-hover-bg: #e7dcc3;
+  --console-hover-fg: #2b2318;
+  --console-live: #3d8b62;
+  --console-info: #6b7f94;
+  --console-warn: #a3762b;
+  --console-error: #c05a44;
+
+  --terminal-bg: #faf6ec;
+  --terminal-fg: #3d3424;
+  --terminal-cursor: #78350f;
+  --terminal-selection: #e7d9b8;
+  --terminal-muted: #8a7a5c;
 }
 
 /* 2) 暗色 token 全集（显式 dark） */
@@ -3621,6 +3784,25 @@
   --radius-lg: 4px;
   --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
   --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+  /* 控制台与终端屏幕：暗色收为暖炭 */
+  --console-bg: #120d08;
+  --console-toolbar-bg: #181209;
+  --console-border: #241c12;
+  --console-fg: #d9cdb8;
+  --console-muted: #9c8e76;
+  --console-hover-bg: #241c12;
+  --console-hover-fg: #f2e9da;
+  --console-live: #5cb584;
+  --console-info: #8593a6;
+  --console-warn: #d4a446;
+  --console-error: #db6650;
+
+  --terminal-bg: #120d08;
+  --terminal-fg: #d9cdb8;
+  --terminal-cursor: #f2e9da;
+  --terminal-selection: #4a3a24;
+  --terminal-muted: #9c8e76;
 }
 
 /* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
@@ -3683,6 +3865,25 @@
     --radius-lg: 4px;
     --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
     --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+    /* 控制台与终端屏幕：暗色收为暖炭（与显式 dark 同值） */
+    --console-bg: #120d08;
+    --console-toolbar-bg: #181209;
+    --console-border: #241c12;
+    --console-fg: #d9cdb8;
+    --console-muted: #9c8e76;
+    --console-hover-bg: #241c12;
+    --console-hover-fg: #f2e9da;
+    --console-live: #5cb584;
+    --console-info: #8593a6;
+    --console-warn: #d4a446;
+    --console-error: #db6650;
+
+    --terminal-bg: #120d08;
+    --terminal-fg: #d9cdb8;
+    --terminal-cursor: #f2e9da;
+    --terminal-selection: #4a3a24;
+    --terminal-muted: #9c8e76;
   }
 }
 
@@ -3765,29 +3966,6 @@
   box-shadow: none;
 }
 
-/* 实时日志控制台：亮暗都收为暖炭纸块，字色去饱和（暖炭属 UI 色，页面背景不加暖） */
-:root[data-style="sepia"] .log-console {
-  background: #211a12;
-  color: #ece2d0;
-  border: 1px solid #211a12;
-  border-radius: 4px;
-}
-:root[data-style="sepia"] .log-toolbar {
-  background: #2b2318;
-  border-bottom-color: #3b2f20;
-}
-:root[data-style="sepia"] .log-status { color: #9c8e76; }
-:root[data-style="sepia"] .log-status.live { color: #5cb584; }
-:root[data-style="sepia"] .log-clear-btn { color: #9c8e76; }
-:root[data-style="sepia"] .log-clear-btn:hover {
-  background: #3b2f20;
-  color: #f2e9da;
-}
-:root[data-style="sepia"] .log-line .ts { color: #655846; }
-:root[data-style="sepia"] .log-line.info .lvl, :root[data-style="sepia"] .log-level-legend .lvl.info { color: #8593a6; }
-:root[data-style="sepia"] .log-line.warn .lvl, :root[data-style="sepia"] .log-level-legend .lvl.warn { color: #d4a446; }
-:root[data-style="sepia"] .log-line.error .lvl, :root[data-style="sepia"] .log-level-legend .lvl.error { color: #db6650; }
-
 /* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
 
 /* seg-control / view-tabs：方角分段 */
@@ -3865,20 +4043,6 @@
   background: #1e1509;
   box-shadow: none;
 }
-:root[data-style="sepia"][data-theme="dark"] .log-console {
-  background: #120d08;
-  border-color: #241c12;
-  color: #d9cdb8;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-toolbar {
-  background: #181209;
-  border-bottom-color: #241c12;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-clear-btn:hover {
-  background: #241c12;
-  color: #f2e9da;
-}
-:root[data-style="sepia"][data-theme="dark"] .log-line .ts { color: #544a39; }
 
 @media (prefers-color-scheme: dark) {
   :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
@@ -3891,20 +4055,6 @@
     background: #1e1509;
     box-shadow: none;
   }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-console {
-    background: #120d08;
-    border-color: #241c12;
-    color: #d9cdb8;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-toolbar {
-    background: #181209;
-    border-bottom-color: #241c12;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-clear-btn:hover {
-    background: #241c12;
-    color: #f2e9da;
-  }
-  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .log-line .ts { color: #544a39; }
 }
 
 /* Store 刷新状态小字：斜体铅字感，窄波扫过点亮赭橙 accent */

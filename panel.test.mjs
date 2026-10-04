@@ -2661,17 +2661,18 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!listRule.includes("min-height"), "列表不设最小高度，不足 5 条不留空白");
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
     assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内两栏垂直居中");
-    // 四宫格：数值改细、折线缩至 44×17 并块级化（消 inline 基线间隙才真居中）
+    // 四宫格：数值改细、折线放大到原生 56×22（与生成器同规格，viewBox 1:1 不再拉伸），
+    // 格子改 grid——折线占右列、跨标签/数值两行垂直居中
     assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
-    assert.ok(panelCss.includes(".terminal-metric-spark { flex: none; width: 44px; height: 17px; }"), "折线稍缩小");
+    assert.ok(panelCss.includes("width: 56px; height: 22px;"), "折线原生 56×22");
     assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; }"), "折线 SVG 块级化");
-    assert.ok(/\.terminal-metric-row \{[^}]*align-items: center/.test(panelCss), "数值行保持垂直居中");
-    // 来源语义色：号池紫（--pool 既有）+ 渠道青（--chan 新增，亮暗两值）
-    assert.ok(panelCss.includes("--chan: #0e7490"), "亮色渠道青");
-    assert.ok(panelCss.includes("--chan: #4cd6ef"), "暗色渠道青");
-    assert.ok(/\.terminal-request-main strong\.is-pool \{ color: var\(--pool\); \}/.test(panelCss), "号池来源紫");
-    assert.ok(/\.terminal-request-main strong\.is-channel \{ color: var\(--chan\); \}/.test(panelCss), "渠道来源青");
-    assert.ok(/\.terminal-request-main strong\.is-unknown \{ color: var\(--text\); \}/.test(panelCss), "未知来源随正文色");
+    assert.ok(panelCss.includes(".terminal-metric-row { display: contents; }"), "数值行拆盒并入格子 grid");
+    assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行居中");
+    assert.ok(panelJs.includes("TERMINAL_SPARK_SIZE"), "侧栏折线尺寸随调用方传入生成器");
+    // 来源语义改纯文本（副行「相对时间 · 来源名」）：无图例的紫/青色编码退役
+    assert.ok(!panelCss.includes("is-pool") && !panelCss.includes("--chan"), "来源色类与 --chan 已退役");
+    assert.ok(panelCss.includes(".terminal-request-detail.is-failed { color: var(--danger); }"), "失败明细红字");
+    assert.ok(panelCss.includes(".terminal-request-expand"), "失败行展开块样式齐备");
     assert.ok(/\.terminal-request-data \{[^}]*align-items: flex-end/.test(panelCss), "右栏两行右对齐");
   });
 
@@ -5714,66 +5715,65 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { route: [], routeCurrent: 0 }, "端点未配链整块隐藏");
   });
 
-  it("terminalRequestsFromRows 把 journal 行套成预览稿同形的展示行（含缓存 token 兜底）", async () => {
+  it("terminalRequestsFromRows 把 journal 行套成展示行：相对时间、失败类型码、展开字段齐备", async () => {
     const out = await vmFn("terminalRequestsFromRows", [[
       { model: "kimi-k3", providerId: "a6api-main", ttftMs: 1820, completion: 2418, cached: 1360000, ok: true },
       { model: "m2", providerId: "p2", ok: false },
       { model: "m3", providerId: "p3", completion: 5, cached: undefined, ok: true },
-    ]]);
+    ]], ["terminalRelTime"]);
     assert.deepEqual(out, [
-      { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok" },
-      { model: "m2", provider: "p2", metric: "—", detail: "请求失败", cached: 0, state: "failed" },
-      { model: "m3", provider: "p3", metric: "—", detail: "完成 · 5 tokens", cached: 0, state: "ok" },
+      { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "", key: "|a6api-main|kimi-k3", errMsg: "", at: "", duration: "" },
+      { model: "m2", provider: "p2", metric: "—", detail: "失败", cached: 0, state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
+      { model: "m3", provider: "p3", metric: "—", detail: "完成 · 5 tokens", cached: 0, state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
     ]);
+
+    const withTs = await vmFn("terminalRequestsFromRows", [[
+      { model: "m5", providerId: "p5", ok: false, status: 429, errMsg: "boom", ts: Date.now() - 125000, durationMs: 3400 },
+    ]], ["terminalRelTime"]);
+    assert.equal(withTs[0].detail, "失败 · 429", "失败明细带类型码（对齐大板徽标口径）");
+    assert.equal(withTs[0].rel, "2 分钟前", "相对时间按 journal ts 计算");
+    assert.equal(withTs[0].duration, "3.4s", "总耗时保留给展开块");
+    assert.equal(withTs[0].errMsg, "boom", "错误信息保留给展开块");
+    assert.ok(withTs[0].at.includes(":"), "绝对时间落 HH:MM:SS");
+    assert.equal(withTs[0].key.split("|")[1], "p5", "行键与大板 logsRowKey 同形");
   });
 
-  it("terminalRequestSourceKind 按号池/渠道两张 Map 定来源色种，查不到一律回落 unknown", async () => {
-    const nodeInfo = {
-      pools: new Map([["pool-a", "主力号池"]]),
-      providers: new Map([["a6api-main", "A6 主渠道"]]),
-    };
-    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", nodeInfo]), "pool", "命中号池表 → 紫");
-    assert.equal(await vmFn("terminalRequestSourceKind", ["a6api-main", nodeInfo]), "channel", "命中渠道表 → 青");
-    assert.equal(await vmFn("terminalRequestSourceKind", ["ghost-id", nodeInfo]), "unknown", "两表都没有 → 随正文色");
-    // 缓存未填充 / 入参异常：安全回落，不抛错
-    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", null]), "unknown", "缓存未填充不抛错");
-    assert.equal(await vmFn("terminalRequestSourceKind", ["pool-a", {}]), "unknown", "缺 Map 不抛错");
-    assert.equal(await vmFn("terminalRequestSourceKind", ["", nodeInfo]), "unknown", "空 id 不抛错");
-    assert.equal(await vmFn("terminalRequestSourceKind", [null, nodeInfo]), "unknown", "非字符串 id 不抛错");
-  });
-
-  it("最近请求行模板：左栏身份两行 + 右栏数据两行，来源色三态，缓存后缀只在成功行出现", async () => {
+  it("最近请求行模板：左栏身份两行 + 右栏数据两行，失败行带类型码且可就地展开", async () => {
     const ok = await vmFn("terminalRequestItemHtml", [{
-      model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok",
-    }, { kind: "pool", label: "主力号池" }], ["escapeHtml"]);
-    assert.ok(ok.includes('<strong class="is-pool">kimi-k3</strong>'), "左栏上行：模型名大字，号池紫");
-    assert.ok(ok.includes("<span>主力号池</span>"), "左栏下行：来源显示名小灰字");
+      model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "2 分钟前", key: "k1", errMsg: "", at: "", duration: "",
+    }, { label: "主力号池" }], ["escapeHtml"]);
+    assert.ok(ok.includes("<strong>kimi-k3</strong>"), "左栏上行：模型名大字（不再挂来源色类）");
+    assert.ok(ok.includes("<span>2 分钟前 · 主力号池</span>"), "左栏下行：相对时间 · 来源显示名");
     assert.ok(ok.includes('class="terminal-request-metric">1.82s<'), "右栏上行：TTFT");
     assert.ok(ok.includes('class="terminal-request-detail">完成 · 2,418 tokens · 缓存 1,360,000<'), "右栏下行：明细带缓存后缀");
+    assert.ok(!ok.includes("is-expandable") && !ok.includes("terminal-request-expand"), "成功行不可展开");
 
-    const chan = await vmFn("terminalRequestItemHtml", [{
-      model: "claude-opus-5", provider: "chan-a", metric: "0.94s", detail: "完成 · 12 tokens", cached: 0, state: "ok",
-    }, { kind: "channel", label: "A6 主渠道" }], ["escapeHtml"]);
-    assert.ok(chan.includes('<strong class="is-channel">claude-opus-5</strong>'), "命中渠道表 → 青");
-    assert.ok(!chan.includes("缓存"), "cached 为 0 不出现缓存后缀");
-
-    const unknown = await vmFn("terminalRequestItemHtml", [{
-      model: "m3", provider: "ghost-id", metric: "—", detail: "完成 · 5 tokens", cached: 42, state: "ok",
+    const noLabel = await vmFn("terminalRequestItemHtml", [{
+      model: "m3", provider: "ghost-id", metric: "—", detail: "完成 · 5 tokens", cached: 42, state: "ok", rel: "", key: "k2", errMsg: "", at: "", duration: "",
     }, null], ["escapeHtml"]);
-    assert.ok(unknown.includes('<strong class="is-unknown">m3</strong>'), "查不到来源 → 随正文色");
-    assert.ok(unknown.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id");
-    assert.ok(unknown.includes("缓存 42"), "cached > 0 即有缓存后缀");
+    assert.ok(noLabel.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id（无相对时间不造分隔符）");
+    assert.ok(noLabel.includes("缓存 42"), "cached > 0 即有缓存后缀");
 
     const failed = await vmFn("terminalRequestItemHtml", [{
-      model: "m4", provider: "pool-a", metric: "—", detail: "请求失败", cached: 99, state: "failed",
-    }, { kind: "pool", label: "主力号池" }], ["escapeHtml"]);
-    assert.ok(failed.includes('<i class="terminal-request-dot is-failed">'), "失败行圆点语义不变");
-    assert.ok(failed.includes('class="terminal-request-detail">请求失败<'), "失败行只显示请求失败");
+      model: "m4", provider: "pool-a", metric: "—", detail: "失败 · 429", cached: 99, state: "failed",
+      rel: "刚刚", key: "k3", errMsg: "upstream exploded", at: "12:03:04", duration: "3.4s",
+    }, { label: "主力号池", expanded: true }], ["escapeHtml"]);
+    assert.ok(failed.includes('class="terminal-request-item is-failed is-expandable"'), "失败行带可展开标记");
+    assert.ok(failed.includes('data-req-key="k3"'), "行键落 data 属性供点击回查");
+    assert.ok(failed.includes('class="terminal-request-detail is-failed">失败 · 429<'), "失败明细红字带类型码");
+    assert.ok(failed.includes("upstream exploded"), "展开块含错误信息");
+    assert.ok(failed.includes("时间 12:03:04 · 耗时 3.4s"), "展开块含时间与耗时元信息");
     assert.ok(!failed.includes("缓存"), "失败行不追加缓存后缀");
 
+    const collapsedFail = await vmFn("terminalRequestItemHtml", [{
+      model: "m4", provider: "pool-a", metric: "—", detail: "失败", cached: 0, state: "failed",
+      rel: "3 分钟前", key: "k4", errMsg: "x", at: "12:03:04", duration: "1.0s",
+    }, { label: "主力号池" }], ["escapeHtml"]);
+    assert.ok(collapsedFail.includes("is-expandable") && !collapsedFail.includes("terminal-request-expand"), "未展开的失败行只有行体");
+
     const escaped = await vmFn("terminalRequestItemHtml", [{
-      model: "<b>x</b>", provider: "p", metric: "—", detail: "完成 · 1 tokens", cached: 0, state: "ok",
-    }, { kind: "unknown", label: "<i>y</i>" }], ["escapeHtml"]);
+      model: "<b>x</b>", provider: "p", metric: "—", detail: "完成 · 1 tokens", cached: 0, state: "ok", rel: "", key: "k5", errMsg: "", at: "", duration: "",
+    }, { label: "<i>y</i>" }], ["escapeHtml"]);
     assert.ok(escaped.includes("&lt;b&gt;x&lt;/b&gt;") && escaped.includes("&lt;i&gt;y&lt;/i&gt;"), "模型名与显示名都转义");
   });
 
@@ -5936,7 +5936,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -5958,6 +5958,9 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       const terminalFontSize = 13;
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
+      // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
+      const document = { documentElement: {} };
+      const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function fitTerminalXterm() {}
       function requestAnimationFrame(cb) { cb(); }
@@ -6296,7 +6299,7 @@ describe("虚拟终端 resize 防抖", () => {
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
+    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -6328,6 +6331,9 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = {};
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
+      // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
+      const document = { documentElement: {} };
+      const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const console = { warn: (...args) => { state.warns.push(args.map(String).join(" ")); } };
       const api = (method, url, body) => {
         state.posts.push({ method, url, body });

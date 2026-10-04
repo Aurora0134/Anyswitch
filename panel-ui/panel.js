@@ -146,12 +146,16 @@ async function api(method, path, body) {
   // ═══════════════════════════════════════════════
   // 折线图 (Sparkline) 渲染
   // ═══════════════════════════════════════════════
-  function updateSparkline(containerId, dataPoints, minVal, maxVal) {
+  function updateSparkline(containerId, dataPoints, minVal, maxVal, size) {
     const container = $(containerId);
     if (!container) return;
+    // 盒子尺寸随调用方传入并与 CSS 盒等大：viewBox 1:1 映射像素，线宽/圆角不失真
+    // （看板 68×26 与终端侧栏 56×22 是两个原生规格，不再互相拉伸）。
+    const w = Number(size?.w) > 0 ? size.w : 68;
+    const h = Number(size?.h) > 0 ? size.h : 26;
     // B3 路径级 diff：已有正常态 SVG（area+line 两个 path 子节点）时只改 d，
     // d 相同零 DOM 写；空态 1-path SVG 不命中判定，维持现状重建（不劣化）。
-    const EMPTY_D = "M0,13 L68,13";
+    const EMPTY_D = `M0,${h / 2} L${w},${h / 2}`;
     if (!dataPoints || dataPoints.length < 2) {
       const svg0 = container.firstElementChild;
       if (svg0 && svg0.tagName === "svg" && svg0.children.length === 2) {
@@ -165,10 +169,10 @@ async function api(method, path, body) {
         if (line0.hasAttribute("stroke-linejoin")) line0.removeAttribute("stroke-linejoin");
         return;
       }
-      container.innerHTML = '<svg viewBox="0 0 68 26" preserveAspectRatio="none"><path d="M0,13 L68,13" fill="none" stroke="var(--spark-line)" stroke-width="1.5" stroke-dasharray="2,2"/></svg>';
+      container.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><path d="${EMPTY_D}" fill="none" stroke="var(--spark-line)" stroke-width="1.5" stroke-dasharray="2,2"/></svg>`;
       return;
     }
-    const w = 68, h = 26, pad = 3;
+    const pad = 3;
     const availH = h - pad * 2;
     const min = (minVal !== undefined) ? minVal : Math.min(...dataPoints);
     const max = (maxVal !== undefined) ? maxVal : Math.max(...dataPoints);
@@ -3984,56 +3988,96 @@ async function api(method, path, body) {
     return { route, routeCurrent };
   }
 
-  // 最近请求：usage journal 的结算行，展示措辞与预览稿同形（metric 取 TTFT）。
-  // cached = 缓存命中的 token 数（明细行「缓存 N」的数据源，0 不显示）。
+  // 最近请求：失败行的展开态集合（行键 = ts|providerId|model，与大板 logsRowKey
+  // 同形）；点击失败行切换展开，1s 轮询重建列表时按此集合恢复。
+  const terminalRequestExpanded = new Set();
+
+  // 最近请求行用的相对时间：随 1s 轮询每拍重算。journal 只取当日行，
+  // 跨天兜底落 HH:MM（本不该出现，防御）。
+  function terminalRelTime(ts) {
+    const t = Number(ts);
+    if (!Number.isFinite(t) || t <= 0) return "";
+    const diff = Date.now() - t;
+    if (diff < 0) return "刚刚";
+    const s = Math.floor(diff / 1000);
+    if (s < 15) return "刚刚";
+    if (s < 60) return `${s} 秒前`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} 小时前`;
+    const d = new Date(t);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  // 最近请求：usage journal 的结算行，与统计页请求日志同一份字段口径
+  // （metric 取 TTFT）。cached = 缓存命中的 token 数（明细行「缓存 N」的数据源，
+  // 0 不显示）。失败行额外保留 status/errMsg/durationMs，供「失败 · 429」式明细
+  // 与点击展开的错误详情使用；key 即大板 logsRowKey 同形，用于跨轮询记忆展开态。
   function terminalRequestsFromRows(rows) {
     if (!Array.isArray(rows)) return [];
-    return rows.map((row) => ({
-      model: typeof row?.model === "string" && row.model ? row.model : "—",
-      provider: typeof row?.providerId === "string" && row.providerId ? row.providerId : "—",
-      metric: typeof row?.ttftMs === "number" && row.ttftMs > 0 ? `${(row.ttftMs / 1000).toFixed(2)}s` : "—",
-      detail: row?.ok === false
-        ? "请求失败"
-        : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
-      cached: Number(row?.cached) || 0,
-      state: row?.ok === false ? "failed" : "ok",
-    }));
+    return rows.map((row) => {
+      const failed = row?.ok === false;
+      const statusText = row?.status === null || row?.status === undefined || row?.status === "" ? "" : String(row.status);
+      const ts = Number(row?.ts);
+      let at = "";
+      if (Number.isFinite(ts) && ts > 0) {
+        const d = new Date(ts);
+        const p = (n) => String(n).padStart(2, "0");
+        at = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+      }
+      return {
+        model: typeof row?.model === "string" && row.model ? row.model : "—",
+        provider: typeof row?.providerId === "string" && row.providerId ? row.providerId : "—",
+        metric: typeof row?.ttftMs === "number" && row.ttftMs > 0 ? `${(row.ttftMs / 1000).toFixed(2)}s` : "—",
+        detail: failed
+          ? `失败${statusText ? " · " + statusText : ""}`
+          : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
+        cached: Number(row?.cached) || 0,
+        state: failed ? "failed" : "ok",
+        rel: terminalRelTime(row?.ts),
+        key: `${row?.ts ?? ""}|${typeof row?.providerId === "string" ? row.providerId : ""}|${typeof row?.model === "string" ? row.model : ""}`,
+        errMsg: typeof row?.errMsg === "string" ? row.errMsg : "",
+        at,
+        duration: typeof row?.durationMs === "number" && row.durationMs > 0 ? `${(row.durationMs / 1000).toFixed(1)}s` : "",
+      };
+    });
   }
 
-  // 最近请求的来源色种：providerId 命中号池表 → "pool"（紫），命中渠道表 →
-  // "channel"（青），两表都没有 → "unknown"（随正文色）。nodeInfo 即
-  // routeNodeInfoCache（面板启动时随链配置一并拉取的 providers/pools 两张
-  // Map，与路由链区同源）；未填充/查不到一律安全回落，不抛错。
-  function terminalRequestSourceKind(providerId, nodeInfo) {
-    const id = typeof providerId === "string" ? providerId : "";
-    if (!id || !nodeInfo || typeof nodeInfo !== "object") return "unknown";
-    if (nodeInfo.pools?.has?.(id)) return "pool";
-    if (nodeInfo.providers?.has?.(id)) return "channel";
-    return "unknown";
-  }
-
-  // 最近请求行：左栏身份两行（上=模型名大字、下来源显示名小灰字），右栏数据
-  // 两行右对齐（上=TTFT、下=明细）。source = { kind, label }：kind 定模型名
-  // 字色（terminalRequestSourceKind），label 是来源显示名（routeNodeName 同
-  // 口径，未命中回落原始 id）。缓存 token 只在成功行追加，失败行照旧只说失败。
+  // 最近请求行：左栏身份两行（上=模型名大字，下=相对时间 · 来源显示名小灰字），
+  // 右栏数据两行右对齐（上=TTFT、下=明细）。label 是来源显示名（routeNodeName 同
+  // 口径，未命中回落原始 id）。缓存 token 只在成功行追加；失败行明细带失败类型
+  // （对齐请求日志大板「失败 429」徽标），且可点击展开错误信息——展开态由调用方
+  // 以行键记忆，轮询重建不丢。
   function terminalRequestItemHtml(req, source) {
-    const kind = source?.kind === "pool" || source?.kind === "channel" ? source.kind : "unknown";
     const label = typeof source?.label === "string" && source.label ? source.label : req.provider;
-    const detail = req.state === "failed"
+    const failed = req.state === "failed";
+    const detail = failed
       ? req.detail
       : `${req.detail}${req.cached > 0 ? ` · 缓存 ${req.cached.toLocaleString("en-US")}` : ""}`;
+    const sub = req.rel ? `${escapeHtml(req.rel)} · ${escapeHtml(label)}` : escapeHtml(label);
+    let expand = "";
+    if (failed && source?.expanded) {
+      const meta = [req.at ? `时间 ${req.at}` : "", req.duration ? `耗时 ${req.duration}` : ""].filter(Boolean).join(" · ");
+      expand = `
+      <div class="terminal-request-expand">
+        ${req.errMsg ? `<div class="terminal-request-err">${escapeHtml(req.errMsg)}</div>` : ""}
+        ${meta ? `<div class="terminal-request-expand-meta">${escapeHtml(meta)}</div>` : ""}
+      </div>`;
+    }
     return `
-      <div class="terminal-request-item">
-        <i class="terminal-request-dot${req.state === "failed" ? " is-failed" : ""}"></i>
+      <div class="terminal-request-item${failed ? " is-failed is-expandable" : ""}"${failed ? ` data-req-key="${escapeHtml(req.key)}"` : ""}>
+        <i class="terminal-request-dot${failed ? " is-failed" : ""}"></i>
         <div class="terminal-request-main">
-          <strong class="is-${kind}">${escapeHtml(req.model)}</strong>
-          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(req.model)}</strong>
+          <span>${sub}</span>
         </div>
         <div class="terminal-request-data">
           <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
-          <span class="terminal-request-detail">${escapeHtml(detail)}</span>
+          <span class="terminal-request-detail${failed ? " is-failed" : ""}">${escapeHtml(detail)}</span>
         </div>
-      </div>`;
+      </div>${expand}`;
   }
 
   // ---- 活跃真值推送（工作/空闲即时落地） ----
@@ -4317,6 +4361,39 @@ async function api(method, path, body) {
     }, delayMs);
   }
 
+  // xterm 主题与终端屏 CSS token 同源：底色/前景/光标/选区从 --terminal-* 现值取，
+  // 亮暗与三皮肤换肤即换终端。亮态追加一套浅底可读的 ANSI 调色板（xterm 内置默认
+  // 色按深底设计，直接放浅底黄/亮绿会洗没）；暗态不动 ANSI，沿用内核默认。
+  const TERMINAL_ANSI_LIGHT = {
+    black: "#1f2937", red: "#dc2626", green: "#16a34a", yellow: "#b45309",
+    blue: "#2563eb", magenta: "#9333ea", cyan: "#0e7490", white: "#d1d5db",
+    brightBlack: "#6b7280", brightRed: "#ef4444", brightGreen: "#22c55e", brightYellow: "#d97706",
+    brightBlue: "#3b82f6", brightMagenta: "#a855f7", brightCyan: "#0891b2", brightWhite: "#111827",
+  };
+  function terminalXtermTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    const pick = (name, fallback) => {
+      const v = cs.getPropertyValue(name).trim();
+      return v || fallback;
+    };
+    const theme = {
+      background: pick("--terminal-bg", "#0b1220"),
+      foreground: pick("--terminal-fg", "#d5e2f4"),
+      cursor: pick("--terminal-cursor", "#dbeafe"),
+      selectionBackground: pick("--terminal-selection", "#29486d"),
+    };
+    if (cs.colorScheme !== "dark") Object.assign(theme, TERMINAL_ANSI_LIGHT);
+    return theme;
+  }
+  // 主题/皮肤/系统亮暗变化后重刷在跑的 xterm；不在跑（未建流）则等下次创建时自然取新值
+  function applyTerminalXtermTheme() {
+    if (terminalXterm) terminalXterm.options.theme = terminalXtermTheme();
+  }
+
+  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×22），
+  // viewBox 1:1 映射像素，线宽/round 端点不失真
+  const TERMINAL_SPARK_SIZE = { w: 56, h: 22 };
+
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
@@ -4331,7 +4408,7 @@ async function api(method, path, body) {
       fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',
       fontSize: terminalFontSize,
       scrollback: 5000,
-      theme: { background: "#0b1220", foreground: "#d5e2f4", cursor: "#dbeafe", selectionBackground: "#29486d" },
+      theme: terminalXtermTheme(),
     });
     terminalXterm = term;
     // 剪贴板键位收口：xterm 内核对裸 Ctrl+V 会改发不可见控制字节并阻止浏览器
@@ -4702,16 +4779,16 @@ async function api(method, path, body) {
       $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
       $("terminalFootTokens").textContent = metrics.tokens;
       $("terminalFootTokens").title = metrics.tokens;
-      updateSparkline("terminalSparkTtft", metrics.sparkTtft);
-      updateSparkline("terminalSparkTps", metrics.sparkTps);
-      updateSparkline("terminalSparkCache", metrics.sparkCache);
+      updateSparkline("terminalSparkTtft", metrics.sparkTtft, undefined, undefined, TERMINAL_SPARK_SIZE);
+      updateSparkline("terminalSparkTps", metrics.sparkTps, undefined, undefined, TERMINAL_SPARK_SIZE);
+      updateSparkline("terminalSparkCache", metrics.sparkCache, undefined, undefined, TERMINAL_SPARK_SIZE);
     }
     $("terminalRequestCount").textContent = String(session.requests.length);
-    // 来源解析与路由链区同源：色种走 routeNodeInfoCache 两张 Map，显示名走
-    // routeNodeName（未命中回落原始 id，不暴露查不到的内部结构）。
+    // 来源显示名走 routeNodeName 口径（未命中回落原始 id）；失败行展开态按行键
+    // 跨轮询保留（与请求日志大板 logsExpanded 同模式）。
     $("terminalRequestList").innerHTML = session.requests.map((req) => terminalRequestItemHtml(req, {
-      kind: terminalRequestSourceKind(req.provider, routeNodeInfoCache),
       label: routeNodeName(req.provider),
+      expanded: terminalRequestExpanded.has(req.key),
     })).join("");
     renderTerminalPreviewRoute(session);
   }
@@ -4839,11 +4916,14 @@ async function api(method, path, body) {
 
   function syncTerminalHostControls() {
     const [cls, label] = TERMINAL_HOST_BADGE_MAP[terminalHostState] || ["badge badge-neutral", "状态未知"];
+    // 同态异词：入口卡（看板侧）在服务从未启动过的冷态也会出现，「未运行」是
+    // 中性事实；终端页头徽标多在关停动作后看到，「已停止」承接动作语境。
+    const entryLabel = terminalHostState === "stopped" ? "未运行" : label;
     for (const el of [$("terminalHostBadge"), $("terminalHostHeadBadge")]) {
       if (!el) continue;
       el.className = cls;
       // 文案写在 .badge-text 内层：窄屏档只藏内层留圆点，外层类名与底色不动
-      (el.firstElementChild || el).textContent = label;
+      (el.firstElementChild || el).textContent = el.id === "terminalHostBadge" ? entryLabel : label;
     }
     // 起停二合一钮：运行中呈关停、已停止/异常呈启动，状态未知按住不动
     const toggleBtn = $("terminalHostToggleBtn");
@@ -4851,7 +4931,7 @@ async function api(method, path, body) {
     const canStop = terminalHostState === "running";
     const canStart = terminalHostState === "stopped" || terminalHostState === "exited";
     toggleBtn.disabled = terminalHostOpInFlight || (!canStop && !canStart);
-    toggleBtn.textContent = canStop ? "关停" : "启动";
+    toggleBtn.textContent = canStop ? "关停终端服务" : "启动终端服务";
     toggleBtn.classList.toggle("btn-danger", canStop);
     const action = canStop ? "关停终端服务" : "启动终端服务";
     toggleBtn.title = action;
@@ -5372,6 +5452,17 @@ async function api(method, path, body) {
     };
     $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); terminalXterm?.focus(); };
     $("terminalFontIncBtn").onclick = () => { nudgeTerminalFontSize(1); terminalXterm?.focus(); };
+    // 最近请求：失败行点击就地展开/收起错误详情（与请求日志大板行展开同模式）；
+    // 列表每拍轮询重建，展开态由 terminalRequestExpanded 行键集合承载。
+    $("terminalRequestList")?.addEventListener("click", (e) => {
+      const item = e.target.closest(".terminal-request-item.is-expandable");
+      if (!item) return;
+      const key = item.getAttribute("data-req-key") || "";
+      if (!key) return;
+      if (terminalRequestExpanded.has(key)) terminalRequestExpanded.delete(key);
+      else terminalRequestExpanded.add(key);
+      renderTerminalSessionData();
+    });
     $("terminalScreen").addEventListener("wheel", (event) => {
       if (!event.ctrlKey) return;
       event.preventDefault();
@@ -5790,6 +5881,14 @@ async function api(method, path, body) {
       else document.documentElement.removeAttribute("data-theme");
       try { localStorage.setItem("panel-theme", mode); } catch {}
       syncBtns();
+      applyTerminalXtermTheme();
+    }
+    // 系统亮暗变化（用户未显式选定主题时）：同步图标，并重刷终端屏配色
+    if (window.matchMedia) {
+      window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
+        syncBtns();
+        applyTerminalXtermTheme();
+      });
     }
     const saved = localStorage.getItem("panel-theme");
     setTheme(saved === "light" || saved === "dark" ? saved : "auto");
@@ -5819,6 +5918,7 @@ async function api(method, path, body) {
       document.documentElement.setAttribute("data-style", s);
       try { localStorage.setItem("panel-style", s); } catch {}
       syncBtns();
+      applyTerminalXtermTheme();
     }
     picker.addEventListener("click", (e) => {
       const b = e.target.closest(".settings-theme-item");
