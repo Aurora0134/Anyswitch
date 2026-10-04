@@ -3933,6 +3933,18 @@ async function api(method, path, body) {
     return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "—";
   }
 
+  // 已工作时间并轨其他三格的「数字 + 小单位」排印：取最大单位整数截断
+  //（秒/分钟/小时/天），不再把「12分10秒」式长中文串塞进 16px 等宽数值位。
+  function terminalWorkTime(ms) {
+    const s = Math.floor((typeof ms === "number" && Number.isFinite(ms) && ms > 0 ? ms : 0) / 1000);
+    if (s < 60) return { workTime: String(s), workTimeUnit: "秒" };
+    const m = Math.floor(s / 60);
+    if (m < 60) return { workTime: String(m), workTimeUnit: "分钟" };
+    const h = Math.floor(m / 60);
+    if (h < 24) return { workTime: String(h), workTimeUnit: "小时" };
+    return { workTime: String(Math.floor(h / 24)), workTimeUnit: "天" };
+  }
+
   function terminalMetricsFromInstance(inst) {
     if (!inst) return null;
     const tokens = inst.tokens || {};
@@ -3943,8 +3955,12 @@ async function api(method, path, body) {
       ttftLamp: typeof inst.ttftColor === "string" ? inst.ttftColor : "gray",
       tps: terminalMetricNum(inst.tps),
       cache: typeof inst.cacheHitRate === "number" && Number.isFinite(inst.cacheHitRate) ? String(Math.round(inst.cacheHitRate)) : "—",
-      workTime: typeof inst.activeDurationFormatted === "string" ? inst.activeDurationFormatted : "0秒",
+      ...terminalWorkTime(inst.activeDurationMs),
       requestCount: typeof inst.requests === "number" ? inst.requests : 0,
+      // 实例身份（reporter 快照的 model/providerId，null 直至上报）：实况行
+      // 「谁在服务」的首选数据源，auto 链缺位时回落路由当前跳。
+      model: typeof inst.model === "string" ? inst.model : "",
+      providerId: typeof inst.providerId === "string" ? inst.providerId : "",
       tokens: `Prompt: ${fmt(tokens.prompt)} · Completion: ${fmt(tokens.completion)} · Cached: ${fmt(tokens.cached)}`,
       sparkTtft: Array.isArray(inst.sparkHistory?.ttft) ? inst.sparkHistory.ttft : [],
       sparkTps: Array.isArray(inst.sparkHistory?.tps) ? inst.sparkHistory.tps : [],
@@ -3957,17 +3973,18 @@ async function api(method, path, body) {
   // 配了链。真实走过链的证据只有两样——positions = 本 process 里链机制记过的
   // 粘性位置（首个请求走完 noteSuccess 就记下），红灯 = 节点已被降级退避
   //（CHAIN_DEMOTE_AFTER_FAILURES 次连续失败）。一样都没有 = 本次启动没人走
-  // 过这条链：视为「不在自动路由」，隐藏而不是拿配置链冒充态。
+  // 过这条链：视为「不在自动路由」，不拿配置链冒充态。
   function terminalAutoRouteLive(rt) {
     if (!rt) return false;
     if (Array.isArray(rt.positions) && rt.positions.length > 0) return true;
     return Array.isArray(rt.lamps) && rt.lamps.includes("red");
   }
 
-  // 路由链：链配置给节点序列（含各跳属性），运行快照给当前跳与不可用节点。
-  // 显隐收口在这里——端点未配启用链、runtime 缺位、或只有配置没有本次运行的
-  // 路由证据（terminalAutoRouteLive）一律空链，调用方（renderTerminalPreviewRoute）
-  // 按空链整块隐藏；普通终端无 agent 归属在 enrich 处就已给空链。
+  // 路由链运行态：链配置给节点序列（含各跳属性），运行快照给当前跳与不可用
+  // 节点。证据收口在这里——端点未配启用链、runtime 缺位、或只有配置没有本次
+  // 运行的路由证据（terminalAutoRouteLive）一律空链；实况行归属
+  //（terminalServingLabel）只在实例身份缺位（auto 链）时取当前跳作后备，
+  // 普通终端无 agent 归属在 enrich 处就已给空链。
   function terminalRouteForEndpoint(endpointId, chains, runtimeCache) {
     const entry = (Array.isArray(chains) ? chains : []).find(
       (item) => item && item.endpointId === endpointId && Array.isArray(item.chain) && item.chain.length > 0 && item.enabled !== false,
@@ -3986,6 +4003,21 @@ async function api(method, path, body) {
       if (idx >= 0) routeCurrent = idx;
     }
     return { route, routeCurrent };
+  }
+
+  // 实况行「谁在服务」标签：优先实例身份（metrics.model/providerId，看板胶囊
+  // 同一口径 routeNodeName/模型名），缺位或虚拟 auto 时回落路由当前跳——auto
+  // 链的真实服务方只在路由运行态里。两头都没有 = 没有可说的服务方，归空串。
+  function terminalServingLabel(session) {
+    const usable = (providerId, model) => hasDisplayIdentity(providerId, model) && model !== "auto";
+    const metrics = session?.metrics;
+    if (metrics && usable(metrics.providerId, metrics.model)) return capsuleLabel(metrics.providerId, metrics.model);
+    const route = Array.isArray(session?.route) ? session.route : [];
+    if (route.length > 0) {
+      const hop = route[Math.max(0, Math.min(session.routeCurrent ?? 0, route.length - 1))];
+      if (hop && usable(hop.node, hop.model)) return capsuleLabel(hop.node, hop.model);
+    }
+    return "";
   }
 
   // 最近请求：失败行的展开态集合（行键 = ts|providerId|model，与大板 logsRowKey
@@ -4614,9 +4646,6 @@ async function api(method, path, body) {
       if (currentView === "terminal") fitTerminalXterm();
     }));
   }
-  // 视窗位置只随路由状态变化重置；同一状态重绘不接管用户已经滚到的位置。
-  let terminalRouteFocusSignature = null;
-
   function terminalPreviewLineHtml([kind, text]) {
     return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
   }
@@ -4641,61 +4670,11 @@ async function api(method, path, body) {
     }).join("");
   }
 
-  function renderTerminalPreviewRoute(session) {
-    const line = $("terminalRouteLine");
-    const viewport = $("terminalRouteViewport");
-    if (!line || !viewport) return;
-    const route = Array.isArray(session.route) ? session.route : [];
-    const section = line.closest(".terminal-route-section");
-    section.hidden = route.length === 0;
-    const unavailableCount = route.filter((node) => node.state === "failed").length;
-    const badge = $("terminalRouteBadge");
-    if (badge) badge.hidden = route.length === 0 || unavailableCount === 0;
-    if (route.length === 0) {
-      line.innerHTML = "";
-      viewport.scrollLeft = 0;
-      terminalRouteFocusSignature = null;
-      return;
-    }
-    const currentIndex = Math.max(0, Math.min(session.routeCurrent ?? 0, route.length - 1));
-    // 节点名走看板同款的显示名解析（routeNodeName：号池/渠道 displayName 后备），
-    // 不上原始 id。
-    line.innerHTML = route.map((node, index) => `
-      <span class="terminal-route-node${index === currentIndex ? " is-current" : ""}${node.state === "failed" ? " is-failed" : ""}">
-        <strong>${escapeHtml(routeNodeName(node.node))}</strong>
-        <span>${escapeHtml(node.model)}</span>
-      </span>${index < route.length - 1 ? '<span class="terminal-route-arrow" aria-hidden="true">→</span>' : ""}
-    `).join("");
-    // 区块只在确实自动路由时可见（terminalRouteForEndpoint 已闸），所以 note
-    // 直接随 runtime 说现状：当前这一跳跑红=说不可用、停在首选节点=正常、
-    // 停在后续跳=说位次（前位全红时把「哪几跳不可用」一并说出来）。
-    const leadingUnavailable = route.slice(0, currentIndex).filter((node) => node.state === "failed").length;
-    $("terminalRouteNote").textContent = route[currentIndex].state === "failed"
-      ? "当前这一跳不可用，自动路由会继续向后退避"
-      : currentIndex === 0
-        ? "自动路由正常，当前使用首选节点"
-        : leadingUnavailable === currentIndex
-          ? `前 ${currentIndex} 跳不可用，自动路由正使用第 ${currentIndex + 1} 跳`
-          : `自动路由正使用第 ${currentIndex + 1} 跳`;
-    const focusSignature = `${activeTerminalPreviewId}:${currentIndex}:${route.map((node) => `${node.node}/${node.model}/${node.state || "ok"}`).join("|")}`;
-    const shouldReposition = terminalRouteFocusSignature !== focusSignature;
-    terminalRouteFocusSignature = focusSignature;
-    if (shouldReposition) {
-      requestAnimationFrame(() => {
-        const current = line.querySelector(".terminal-route-node.is-current");
-        if (!current) return;
-        viewport.scrollLeft = currentIndex < 2
-          ? 0
-          : Math.max(0, current.offsetLeft - ((viewport.clientWidth - current.offsetWidth) / 2));
-      });
-    }
-  }
-
   // ---- 归属数据轮询（虚拟终端接真实 Agent 流量） ----
   // 每拍：拉会话列表（panel 已按 shell pid 归属注好 agent）→ 拉 agents 负载
-  // → 按 instanceId 找实例行，套看板口径的指标 / 状态；路由链按端点画；
-  // 最近请求只查活动标签的那一个实例。普通终端（无归属）session.agent 恒为
-  // null，监测区按规范整块隐藏。
+  // → 按 instanceId 找实例行，套看板口径的指标 / 状态 / 服务归属（实例身份
+  // 优先、路由当前跳后备）；最近请求只查活动标签的那一个实例。普通终端
+  //（无归属）session.agent 恒为 null，监测区按规范整列隐藏。
 
   function enrichTerminalSessions(agentsPayload) {
     const chains = boardRoutingChains();
@@ -4761,11 +4740,26 @@ async function api(method, path, body) {
     $("terminalInspectorTitle").textContent = session.label;
     $("terminalFootPid").textContent = `PID ${session.shell.pid}`;
     updateTerminalFootSize(session);
+    // 空壳侧栏：无归属会话没有任何 Agent 监测数据可展示，整列隐藏、工作区收
+    // 单列（与零会话空态同一套 is-empty 机制）；列宽变了终端要重排尺寸。
+    const inspector = $("terminalInspector");
+    const workspace = $("terminalWorkspace");
+    if (inspector && workspace) {
+      const empty = !session.agent;
+      if (workspace.classList.contains("is-empty") !== empty) scheduleTerminalFit();
+      inspector.style.display = empty ? "none" : "";
+      workspace.classList.toggle("is-empty", empty);
+    }
+    // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
+    // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
+    const serving = terminalServingLabel(session);
     $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
     const metrics = session.metrics || null;
     $("terminalLiveDetail").textContent = session.status === "working" && metrics
-      ? `${metrics.activeRequests} 个请求进行中`
-      : "当前没有进行中的请求";
+      ? [serving, `${metrics.activeRequests} 个请求进行中`].filter(Boolean).join(" · ")
+      : serving
+        ? `最近由 ${serving} 服务`
+        : "当前没有进行中的请求";
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
@@ -4776,6 +4770,7 @@ async function api(method, path, body) {
       $("terminalTpsVal").textContent = metrics.tps;
       $("terminalCacheVal").textContent = metrics.cache;
       $("terminalWorkTimeVal").textContent = metrics.workTime;
+      $("terminalWorkTimeUnit").textContent = metrics.workTimeUnit;
       $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
       $("terminalFootTokens").textContent = metrics.tokens;
       $("terminalFootTokens").title = metrics.tokens;
@@ -4790,7 +4785,6 @@ async function api(method, path, body) {
       label: routeNodeName(req.provider),
       expanded: terminalRequestExpanded.has(req.key),
     })).join("");
-    renderTerminalPreviewRoute(session);
   }
 
   // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，
@@ -4836,8 +4830,6 @@ async function api(method, path, body) {
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
     if (footStats) footStats.hidden = true;
-    const routeSection = $("terminalRouteLine")?.closest(".terminal-route-section");
-    if (routeSection) routeSection.hidden = true;
     const tabs = $("terminalTabs");
     if (tabs) tabs.innerHTML = "";
     setTerminalSessionChromeVisible(false);
@@ -4846,7 +4838,7 @@ async function api(method, path, body) {
 
   // 降级空态：terminal-host 不在（面板路由回 503 terminal_host_unavailable）时，
   // 终端页只给「服务未运行 + 重试」，不再把 mock 假会话端给用户。xterm 区盖
-  // 空态覆盖层、不建流；监测区、底栏统计与路由链沿用既有 hidden 通路；新建键
+  // 空态覆盖层、不建流；监测区与底栏统计沿用既有 hidden 通路；新建键
   // 随降级禁用。
   function renderTerminalUnavailableState() {
     const overlay = $("terminalUnavailable");
@@ -4872,8 +4864,6 @@ async function api(method, path, body) {
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
     if (footStats) footStats.hidden = true;
-    const routeSection = $("terminalRouteLine")?.closest(".terminal-route-section");
-    if (routeSection) routeSection.hidden = true;
     const addBtn = $("terminalAddBtn");
     if (addBtn) addBtn.disabled = true;
     // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏/假监测区（payment-service/portal、

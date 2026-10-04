@@ -2154,11 +2154,18 @@ if (window.panelStartupController) panelStartupPlay();
 
             <div class="terminal-inspector-section terminal-metrics-section" id="terminalMetricsSection">
               <div class="terminal-metric-grid">
-                <div class="terminal-metric">
+                <div class="terminal-metric terminal-metric-ttft">
                   <span class="terminal-metric-label">首字响应时间</span>
                   <div class="terminal-metric-row">
                     <strong><i class="lamp lamp-gray" id="terminalTtftLamp"></i><span id="terminalTtftVal">-</span><span class="terminal-metric-unit">s</span></strong>
                     <span class="telemetry-sparkline terminal-metric-spark" id="terminalSparkTtft"></span>
+                  </div>
+                  <div class="stats-tooltip terminal-metric-tip">
+                    <div class="stt-day">首字响应时间灯色</div>
+                    <div><span style="color:var(--ok)">●</span> 不足 5 秒</div>
+                    <div><span style="color:var(--warn)">●</span> 5–15 秒</div>
+                    <div><span style="color:var(--danger)">●</span> 超过 15 秒</div>
+                    <div><span style="color:var(--text-4)">●</span> 暂无数据</div>
                   </div>
                 </div>
                 <div class="terminal-metric">
@@ -2178,7 +2185,7 @@ if (window.panelStartupController) panelStartupPlay();
                 <div class="terminal-metric">
                   <span class="terminal-metric-label">已工作时间</span>
                   <div class="terminal-metric-row">
-                    <strong><span id="terminalWorkTimeVal">-</span></strong>
+                    <strong><span id="terminalWorkTimeVal">-</span><span class="terminal-metric-unit" id="terminalWorkTimeUnit">秒</span></strong>
                   </div>
                 </div>
               </div>
@@ -2187,14 +2194,6 @@ if (window.panelStartupController) panelStartupPlay();
             <div class="terminal-inspector-section">
               <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-count" id="terminalRequestCount">3</span></div>
               <div class="terminal-request-list" id="terminalRequestList"></div>
-            </div>
-
-            <div class="terminal-inspector-section terminal-route-section" hidden>
-              <div class="terminal-section-head"><span>路由链</span><span class="badge badge-warn" id="terminalRouteBadge" hidden>有节点不可用</span></div>
-              <div class="terminal-route-viewport" id="terminalRouteViewport">
-                <div class="terminal-route-line" id="terminalRouteLine"></div>
-              </div>
-              <span class="terminal-route-note" id="terminalRouteNote">自动路由正常，当前使用首选节点</span>
             </div>
           </div>
         </aside>
