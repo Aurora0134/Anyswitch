@@ -7060,12 +7060,224 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     const source = panelJs.match(/function syncTerminalActivityStream\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(source?.includes("new EventSource(`${API_BASE}/api/agents-activity`)"), "前端订阅 /panel/api/agents-activity");
     assert.ok(source?.includes("terminalActivityApplyFrame(frame, terminalSessionMap())"), "帧落到当前会话图");
-    const wanted = panelJs.match(/function terminalActivityStreamWanted\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(wanted?.includes("terminalBackendReady") && wanted?.includes("!document.hidden") && wanted?.includes('currentView === "terminal"'),
-      "活性门控与轮询一致：backend 就绪 + 页面可见 + 终端页");
+    const wanted = panelJs.match(/function activityStreamWanted\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(wanted?.includes("terminalBackendReady") && wanted?.includes("!document.hidden") && wanted?.includes('currentView === "terminal"') && wanted?.includes('currentView === "board"'),
+      "活性门控与轮询一致：backend 就绪 + 页面可见 +（终端页 或 看板）");
     const tick = panelJs.match(/terminalPollTimer = setInterval\(\(\) => \{[\s\S]*?\}, 1000\);/)?.[0];
     assert.ok(tick?.includes("syncTerminalActivityStream();"), "推送流开关随每秒轮询节拍走");
     assert.ok(tick?.includes("pollTerminalSessions();"), "1s 轮询原样保留");
+  });
+});
+
+// 看板侧活跃真值应用：帧改的是数据不是 DOM，命中端点返回其 id、由调用方调对应渲染器
+// 整卡重渲（复用既有渲染口径）；指纹只在轮询里更新，SSE 渲染不碰 agentRenderFp。
+describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
+  async function vmFn(name, args, deps = []) {
+    const source = [name, ...deps].map((fnName) => {
+      const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const result = fn(...args);
+    return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
+  }
+
+  const mkBoardAgents = () => ([
+    { id: "kimi", metrics: { activeRequests: 0 }, instances: [{ id: "kimi-4321", activeRequests: 0, status: "idle" }] },
+    { id: "claude", sessions: [{ id: "claude-9001", activeRequests: 1, status: "active" }] },
+    { id: "dsh", metrics: { activeRequests: 2 }, instances: [{ id: "dsh-26304", activeRequests: 2, status: "active" }] },
+  ]);
+
+  it("activity 帧：端点级(null)改 metrics、实例级改 instances 行，返回命中端点 id", async () => {
+    const agents = mkBoardAgents();
+    let hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 3, at: 1 }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["kimi"]);
+    assert.equal(agents[0].metrics.activeRequests, 3, "端点级帧落到 metrics.activeRequests");
+
+    hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "activity", endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 1, at: 2 }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["kimi"]);
+    assert.equal(agents[0].instances[0].activeRequests, 1, "实例级帧落到 instances[].activeRequests");
+    assert.equal(agents[0].instances[0].status, "active", "实例行 status 同步镜像（徽标派生源）");
+    assert.equal(agents[2].metrics.activeRequests, 2, "未命中端点不动");
+
+    await vmFn("boardActivityApplyFrame",
+      [{ type: "activity", endpointId: "dsh", instanceId: "dsh-26304", activeRequests: 0, at: 3 }, agents],
+      ["terminalActivityKey"]);
+    assert.equal(agents[2].instances[0].status, "idle", "归零时 status 回落 idle");
+  });
+
+  it("claude 按 sessions 行匹配（无端点桶），未知实例 id 不编造", async () => {
+    const agents = mkBoardAgents();
+    const hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "activity", endpointId: "claude", instanceId: "claude-9001", activeRequests: 0, at: 3 }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["claude"]);
+    assert.equal(agents[1].sessions[0].activeRequests, 0, "claude 帧落到 sessions[].activeRequests");
+    assert.equal(agents[1].sessions[0].status, "idle", "claude 会话行 status 同步镜像");
+
+    const miss = await vmFn("boardActivityApplyFrame",
+      [{ type: "activity", endpointId: "claude", instanceId: "claude-7777", activeRequests: 5, at: 4 }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(miss, [], "实例 id 查不到归属行时不命中、不编造行");
+  });
+
+  it("snapshot 帧：点到且新鲜的行按真值写，没点到的身份交给轮询", async () => {
+    const agents = mkBoardAgents();
+    const now = Date.now();
+    const hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "snapshot", instances: [
+        { endpointId: "kimi", instanceId: null, activeRequests: 3, at: now },
+        { endpointId: "claude", instanceId: "claude-9001", activeRequests: 0, at: now },
+        { endpointId: "dsh", instanceId: "dsh-26304", activeRequests: 0, at: now },
+      ] }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit.sort(), ["claude", "dsh", "kimi"]);
+    assert.equal(agents[0].metrics.activeRequests, 3, "点到且新鲜的端点级行按真值写");
+    assert.equal(agents[1].sessions[0].activeRequests, 0, "点到且新鲜的会话行按真值写");
+    assert.equal(agents[1].sessions[0].status, "idle", "会话行 status 同步镜像");
+    assert.equal(agents[2].instances[0].activeRequests, 0, "点到且新鲜的实例行按真值写");
+    assert.equal(agents[2].instances[0].status, "idle", "实例行 status 同步镜像");
+    assert.equal(agents[2].metrics.activeRequests, 2, "端点级键没点到 → 原样不动（不擅自归零）");
+  });
+
+  it("snapshot 帧按 at 取时效：过期行不改数不命中（合并计数身份的桥缓存旧值）", async () => {
+    const agents = mkBoardAgents();
+    const now = Date.now();
+    const hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "snapshot", instances: [
+        { endpointId: "kimi", instanceId: null, activeRequests: 0, at: now - 60000 },
+        { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: now - 60000 },
+        { endpointId: "dsh", instanceId: null, activeRequests: 2, at: now - 100 },
+      ] }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["dsh"], "只有 at 新鲜的行算真值触达");
+    assert.equal(agents[0].metrics.activeRequests, 0, "过期行不改写 kimi 端点计数");
+    assert.equal(agents[0].instances[0].activeRequests, 0, "过期行不改写 kimi 实例计数");
+    assert.equal(agents[2].metrics.activeRequests, 2, "新鲜行照常按真值写");
+  });
+
+  it("snapshot 帧按 at 取时效：过期行不改数不命中（合并计数身份的桥缓存旧值）", async () => {
+    const agents = mkBoardAgents();
+    const now = Date.now();
+    const hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "snapshot", instances: [
+        { endpointId: "kimi", instanceId: null, activeRequests: 0, at: now - 60000 },
+        { endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 0, at: now - 60000 },
+        { endpointId: "dsh", instanceId: null, activeRequests: 2, at: now - 100 },
+      ] }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["dsh"], "只有 at 新鲜的行算真值触达");
+    assert.equal(agents[0].metrics.activeRequests, 0, "过期行不改写 kimi 端点计数");
+    assert.equal(agents[0].instances[0].activeRequests, 0, "过期行不改写 kimi 实例计数");
+    assert.equal(agents[2].metrics.activeRequests, 2, "新鲜行照常按真值写");
+  });
+
+  it("未知帧型与空帧忽略", async () => {
+    const agents = mkBoardAgents();
+    assert.deepEqual(await vmFn("boardActivityApplyFrame", [{ type: "other" }, agents], ["terminalActivityKey"]), []);
+    assert.deepEqual(await vmFn("boardActivityApplyFrame", [null, agents], ["terminalActivityKey"]), []);
+  });
+
+  it("端点级键缺失时不擅自归零；径路渲染器映射覆盖九端点", async () => {
+    // 与按 at 取时效同源：端点级键没被点到 → 没有真值可写，metrics 原样留着；
+    // 同一端点只由命中行上报一次，不会一帧把一张卡重渲两遍。
+    const agents = mkBoardAgents();
+    const now = Date.now();
+    let hit = await vmFn("boardActivityApplyFrame",
+      [{ type: "snapshot", instances: [{ endpointId: "dsh", instanceId: "dsh-26304", activeRequests: 0, at: now }] }, agents],
+      ["terminalActivityKey"]);
+    assert.deepEqual(hit, ["dsh"], "只由命中的实例行上报一次");
+    assert.equal(hit.filter((x) => x === "dsh").length, 1, "同一端点不重复上报（端点级与实例行同卡）");
+    assert.equal(agents[2].metrics.activeRequests, 2, "端点级键没点到 → 不改写（不擅自归零）");
+    assert.equal(agents[2].instances[0].activeRequests, 0, "实例行按真值写");
+
+    // 帧改数据 → 调用方按 id 整卡重渲：九端点各有渲染器，键与卡 id 一一对应
+    const rStart = panelJs.indexOf("const BOARD_RENDERERS = {");
+    const rEnd = panelJs.indexOf("};", rStart);
+    const renderers = rStart >= 0 ? panelJs.slice(rStart, rEnd) : "";
+    assert.ok(renderers.length > 0, "BOARD_RENDERERS 映射表存在");
+    for (const id of ["zcode", "claude", "dsh", "pi", "kimi", "qoder", "opencode", "codex", "grok"]) {
+      assert.ok(renderers.includes(`${id}: (a) => render`), `${id} 有对应渲染器`);
+    }
+    const sync = panelJs.match(/function syncTerminalActivityStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(sync?.includes("boardActivityApplyFrame(frame, lastBoardAgents)"), "看板分支以留存 payload 应用帧");
+    assert.ok(sync?.includes("BOARD_RENDERERS[id]"), "命中端点按映射整卡重渲");
+    assert.ok(panelJs.includes("lastBoardAgents = res.agents;"), "refreshAgents 留存本轮 payload 供 SSE 定位");
+  });
+
+  it("接线结构：闸门放宽到看板、onmessage 按视图分流、轮询 1s 与指纹口径不动", () => {
+    const wanted = panelJs.match(/function activityStreamWanted\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(wanted, "闸门更名为 activityStreamWanted");
+    assert.ok(wanted?.includes("terminalBackendReady") && wanted?.includes("!document.hidden"),
+      "backend 就绪 + 页面可见保留");
+    assert.ok(wanted?.includes('currentView === "terminal"') && wanted?.includes('currentView === "board"'),
+      "连流条件放宽到 终端页 或 看板");
+    const sync = panelJs.match(/function syncTerminalActivityStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(sync?.includes("boardActivityApplyFrame"), "onmessage 接入看板侧应用");
+    assert.ok(sync?.includes("terminalActivityApplyFrame(frame, terminalSessionMap())"), "终端页路径原样保留");
+    assert.ok(!panelJs.includes("boardRenderFp"), "看板 SSE 渲染不经指纹闸（指纹仍只由轮询维护）");
+  });
+
+  it("真实调度：看板视图下帧只重渲命中端点、离开看板即断开", async () => {
+    const source = ["activityStreamWanted", "boardActivityApplyFrame", "terminalActivityKey", "syncTerminalActivityStream"]
+      .map((fnName) => {
+        const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(body, `${fnName} found in panel.js`);
+        return body;
+      }).join("\n");
+    const state = { rendered: [], es: null, closed: false, terminalRendered: 0 };
+    const agents = [
+      { id: "kimi", metrics: { activeRequests: 0 }, instances: [] },
+      { id: "dsh", metrics: { activeRequests: 0 }, instances: [] },
+    ];
+    class FakeEventSource {
+      constructor(url) { this.url = url; this.onmessage = null; this.onerror = null; state.es = this; }
+      close() { state.closed = true; }
+    }
+    const sandbox = {
+      API_BASE: "http://127.0.0.1:47820",
+      EventSource: FakeEventSource,
+      document: { hidden: false },
+      terminalBackendReady: true,
+      currentView: "board",
+      lastBoardAgents: agents,
+      BOARD_RENDERERS: {
+        kimi: (a) => state.rendered.push(["kimi", a.metrics.activeRequests]),
+        dsh: (a) => state.rendered.push(["dsh", a.metrics.activeRequests]),
+      },
+      terminalSessionMap: () => ({}),
+      terminalActivityApplyFrame: () => true,
+      renderTerminalSessionData: () => { state.terminalRendered += 1; },
+      renderTerminalPreviewTabs: () => {},
+    };
+    const sync = vm.runInNewContext(
+      `(() => { let terminalActivitySource = null; ${source}; return syncTerminalActivityStream; })()`,
+      sandbox,
+    );
+
+    sync();
+    assert.ok(state.es, "看板视图建立了 SSE 连接");
+    assert.equal(state.es.url, "http://127.0.0.1:47820/api/agents-activity");
+
+    // 一帧只改命中端点：kimi 的 metrics 被写成真值并只重渲 kimi 的卡。
+    state.es.onmessage({ data: JSON.stringify({ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 2, at: 1 }) });
+    assert.equal(agents[0].metrics.activeRequests, 2, "帧先把数据改成真值");
+    assert.deepEqual(state.rendered, [["kimi", 2]], "只触发命中端点的整卡重渲");
+    assert.equal(state.terminalRendered, 0, "看板视图不抄终端页的渲染路径");
+
+    // 未命中的端点（无归属行/无 metrics）不出现在渲染里。
+    state.es.onmessage({ data: JSON.stringify({ type: "activity", endpointId: "pi", instanceId: null, activeRequests: 4, at: 2 }) });
+    assert.equal(state.rendered.length, 1, "查不到的端点不重渲");
+
+    // 离开看板：同一条流断开（不在终端的视图不留空转连接）。
+    sandbox.currentView = "stats";
+    sync();
+    assert.equal(state.closed, true, "离开看板即断开");
   });
 });
 
