@@ -8,7 +8,7 @@ import { validateStore } from "./store-schema.mjs";
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
 import { isChainFailoverStatus, buildChainRuntime } from "./chain-routing.mjs";
 import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
-import { instanceIdFromSocket, bindLateSocketInstance } from "./late-socket-instance.mjs";
+import { instanceIdFromSocket, bindLateSocketInstance, SOCKET_OVERRIDE_AGENT_IDS } from "./late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model-slug.mjs";
 
@@ -69,12 +69,16 @@ function explicitInstanceId(headers) {
   return sanitizeInstanceId(headers["x-agent-instance"]);
 }
 
-// Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。x-agent-instance
-// 头仍是唯一正源且优先；只有头缺失（或非法
+// Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。override 集合
+// （SOCKET_OVERRIDE_AGENT_IDS，见 late-socket-instance.mjs）之外，
+// x-agent-instance 头仍是唯一正源且优先；只有头缺失（或非法
 // 被静默丢弃）时，才对多实例端点（白名单在 late-socket-instance.mjs，与
 // agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh/claude）
 // 用 netstat 快照反查 keep-alive 连接对端进程，
-// 合成 "<agentId>-<pid>"。zcode 保持聚合一桶，一律不兜底。
+// 合成 "<agentId>-<pid>"。override 端点（pi）相反：头存在仅为满足托管配置的
+// 占位符（models.json 缺变量启动即抛错），值是折不进进程身份的随机标签——
+// 头照发但不采用，身份一律以连接属主进程归一，socket 未解析时按无身份处理、
+// 走迟到绑定。zcode 保持聚合一桶，一律不兜底。
 // claude 在列是因为它的桌面端不经过本机启动器：桌面端把网关直接指向常驻中继
 // （没有每会话上报器），反查属主进程是它唯一的身份来源；经启动器起的 Claude
 // Code 仍走自己的 per-launch 中继、仍有上报器行，两条路径互斥不重复计数。
@@ -85,6 +89,7 @@ function explicitInstanceId(headers) {
 // "<cwd基名>-<launcher pid>" 折入规范的 "<agentId>-<客户端 pid>"；socket 兜底
 // 本已规范，归一对它是恒等映射。
 function instanceIdForRequest(req, agentId, deps) {
+  if (SOCKET_OVERRIDE_AGENT_IDS.has(agentId ?? "")) return instanceIdFromSocket(req, agentId, deps);
   const explicit = explicitInstanceId(req.headers);
   if (explicit !== null) return explicit;
   return instanceIdFromSocket(req, agentId, deps);
@@ -675,18 +680,19 @@ export function createOpenAIRelayServer(deps) {
         const parsedRoute = parseOpenAIPath(routePath);
         const openaiAgentId = openaiAgentIdFrom(req.headers, parsedRoute.agentHint);
         if (openaiAgentId === null) logUnattributedRequest(deps, "openai chat", req, body?.model);
+        // 无归属的请求连实例身份也不携带：journal 行与桶都不该留半个身份。
+        const requestInstanceId = openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps);
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : chatMatch[1],
           model: body?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
-          // 无归属的请求连实例身份也不携带：journal 行与桶都不该留半个身份。
-          instanceId: openaiAgentId === null ? null : instanceIdForRequest(req, openaiAgentId, deps),
+          instanceId: requestInstanceId,
           stream: body.stream === true,
           path: "openai",
         });
         bindLateSocketInstance(req, openaiAgentId, deps, tracker, {
-          explicitId: explicitInstanceId(req.headers),
+          explicitId: requestInstanceId,
         });
 
         const abortController = new AbortController();
@@ -877,20 +883,21 @@ export function createOpenAIRelayServer(deps) {
         // 只用于归属：翻译层字段白名单不含它，绝不透给上游。
         const sessionInstanceId = codexBackground || openaiAgentId !== "codex" ? null : codexSessionInstanceId(body);
         const chatBody = { ...translateResponsesRequest(body), stream: true };
+        // 同 chat 路由：无归属即无实例身份。
+        const requestInstanceId = codexBackground || openaiAgentId === null ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps));
         const tracker = deps.metricsCollector?.startRequest({
           providerId: parsedRoute.ok ? parsedRoute.providerId : responsesMatch[1],
           model: chatBody?.model,
           userAgent: req.headers["user-agent"],
           agentId: openaiAgentId,
-          // 同 chat 路由：无归属即无实例身份。
-          instanceId: codexBackground || openaiAgentId === null ? null : (sessionInstanceId ?? instanceIdForRequest(req, openaiAgentId, deps)),
+          instanceId: requestInstanceId,
           stream: true,
           path: "openai",
           background: codexBackground,
         });
         if (!codexBackground) {
           bindLateSocketInstance(req, openaiAgentId, deps, tracker, {
-            explicitId: sessionInstanceId ?? explicitInstanceId(req.headers),
+            explicitId: requestInstanceId,
           });
         }
 
@@ -1026,6 +1033,8 @@ export function createOpenAIRelayServer(deps) {
         // bound model), pool plans keep 404 request-shaped (passthrough).
         const isFailoverStatus = chainPlan ? isChainFailoverStatus : isPoolFailoverStatus;
 
+        // 同 openai 路由：无归属即无实例身份。
+        const requestInstanceId = agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps);
         const tracker = deps.metricsCollector?.startRequest({
           // The tracker's main key is the pool id for pool requests; member
           // attribution rides failure/retry entries as memberId. Plain
@@ -1039,8 +1048,7 @@ export function createOpenAIRelayServer(deps) {
           model: wireIdToStatModel(body?.model),
           userAgent: req.headers["user-agent"],
           agentId,
-          // 同 openai 路由：无归属即无实例身份。
-          instanceId: agentId === null || claudeBackground ? null : instanceIdForRequest(req, agentId, deps),
+          instanceId: requestInstanceId,
           stream: body.stream === true,
           path: "anthropic",
           background: claudeBackground,
@@ -1051,7 +1059,7 @@ export function createOpenAIRelayServer(deps) {
         if (chainPlan) tracker?.setAttributeResolver?.((memberId) => chainPlan.attributeOf?.(memberId) ?? null);
         if (!claudeBackground) {
           bindLateSocketInstance(req, agentId, deps, tracker, {
-            explicitId: explicitInstanceId(req.headers),
+            explicitId: requestInstanceId,
           });
         }
 
