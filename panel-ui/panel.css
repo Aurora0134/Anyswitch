@@ -1160,19 +1160,16 @@
   .terminal-foot-status > span:first-child {
     background: var(--ok-soft); border-color: var(--ok-border); color: var(--ok); font-weight: 650;
   }
+  .terminal-foot-cache { color: var(--text-2); font-weight: 650; white-space: nowrap; }
   .terminal-foot-cache[hidden] { display: none; }
   .terminal-foot-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 16%, transparent); }
   .terminal-foot-dot.is-green { background: var(--ok); }
   .terminal-foot-spacer { flex: 1 1 auto; }
   .terminal-foot-stats { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
   .terminal-foot-stats[hidden] { display: none; }
-  .terminal-foot-requests {
-    padding: 2px 9px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
-    color: var(--text); font-weight: 700; white-space: nowrap; cursor: pointer;
-  }
-  .terminal-foot-requests:hover { background: var(--surface-hover); border-color: var(--border-strong); }
-  /* 近有失败：pill 转 danger 系，与最近请求列表失败行同一语义色 */
-  .terminal-foot-requests.is-failed { color: var(--danger); border-color: var(--danger-border); background: var(--danger-soft); }
+  .terminal-foot-requests { color: var(--text-2); font-weight: 650; white-space: nowrap; }
+  /* 近有失败：请求数字串转 danger 字色，与最近请求列表失败行同一语义色 */
+  .terminal-foot-requests.is-failed { color: var(--danger); }
   /* tokens 截断串的悬停显全：浮层不能塞进带 overflow:hidden 的串内（会被裁），
      外加定位壳；底栏贴屏幕底，浮层向上、右对齐不出窗 */
   .terminal-foot-tokens-wrap { position: relative; display: inline-flex; min-width: 0; }
@@ -1228,16 +1225,17 @@
   .terminal-section-head { justify-content: space-between; gap: 8px; margin-bottom: 8px; font-weight: 600; }
   .terminal-section-count { display: inline-flex; min-width: 20px; justify-content: center; padding: 2px 6px; border-radius: 5px; background: var(--surface-sunken); border: 1px solid var(--border); font: 11px var(--font-mono); }
   /* 最近请求视窗：行高固定 40px、间距 6px，max-height 按 5×40+4×6 取 224px，
-     刚好显示 5 行，超出在窗内滚动；不足 5 条时列表自然变矮不出滚动条 */
+     刚好显示 5 行，超出在窗内滚动；不足 5 条时列表自然变矮不出滚动条。
+     行不可压：flex 子项默认 shrink 会把 40px 行高压扁、视窗被塞进 6+ 行 */
   .terminal-request-list {
     display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 224px;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; height: 40px; }
+  .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; height: 40px; flex: none; }
   .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
   .terminal-request-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-  /* 左栏两行：上=模型名大字，下=「相对时间 · 来源显示名」小灰字；溢出均省略号截断 */
+  /* 左栏两行：上=模型名大字，下=「绝对时间 · 来源显示名」小灰字；溢出均省略号截断 */
   .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-request-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
   /* 右栏两行右对齐：上=TTFT，下=明细（完成/失败 + tokens + 缓存） */

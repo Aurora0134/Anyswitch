@@ -2645,6 +2645,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(listRule.includes("scrollbar-width: thin") && listRule.includes("scrollbar-color: var(--border-strong) transparent"), "滚动条为细款窄条");
     assert.ok(!listRule.includes("min-height"), "列表不设最小高度，不足 5 条不留空白");
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
+    assert.ok(/\.terminal-request-item \{[^}]*flex: none/.test(panelCss), "行不可压——flex 子项默认 shrink 会压扁行高、视窗塞进 6+ 行");
     assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内两栏垂直居中");
     // 四宫格：数值改细、折线放大到原生 56×22（与生成器同规格，viewBox 1:1 不再拉伸），
     // 格子改 grid——折线占右列、跨标签/数值两行垂直居中
@@ -2654,7 +2655,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-metric-row { display: contents; }"), "数值行拆盒并入格子 grid");
     assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行居中");
     assert.ok(panelJs.includes("TERMINAL_SPARK_SIZE"), "侧栏折线尺寸随调用方传入生成器");
-    // 来源语义改纯文本（副行「相对时间 · 来源名」）：无图例的紫/青色编码退役
+    // 来源语义改纯文本（副行「绝对时间 · 来源名」）：无图例的紫/青色编码退役
     assert.ok(!panelCss.includes("is-pool") && !panelCss.includes("--chan"), "来源色类与 --chan 已退役");
     assert.ok(panelCss.includes(".terminal-request-detail.is-failed { color: var(--danger); }"), "失败明细红字");
     assert.ok(panelCss.includes(".terminal-request-expand"), "失败行展开块样式齐备");
@@ -5711,35 +5712,39 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { route: [], routeCurrent: 0 }, "端点未配链整块隐藏");
   });
 
-  it("terminalRequestsFromRows 把 journal 行套成展示行：相对时间、失败类型码、展开字段齐备", async () => {
+  it("terminalRequestsFromRows 把 journal 行套成展示行：绝对时间 HH:MM、失败类型码、展开字段齐备", async () => {
     const out = await vmFn("terminalRequestsFromRows", [[
       { model: "kimi-k3", providerId: "a6api-main", ttftMs: 1820, completion: 2418, cached: 1360000, ok: true },
       { model: "m2", providerId: "p2", ok: false },
       { model: "m3", providerId: "p3", completion: 5, cached: undefined, ok: true },
-    ]], ["terminalRelTime"]);
+    ]]);
     assert.deepEqual(out, [
       { model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "", key: "|a6api-main|kimi-k3", errMsg: "", at: "", duration: "" },
       { model: "m2", provider: "p2", metric: "—", detail: "失败", cached: 0, state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
       { model: "m3", provider: "p3", metric: "—", detail: "完成 · 5 tokens", cached: 0, state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
     ]);
 
+    const ts = Date.now() - 125000;
     const withTs = await vmFn("terminalRequestsFromRows", [[
-      { model: "m5", providerId: "p5", ok: false, status: 429, errMsg: "boom", ts: Date.now() - 125000, durationMs: 3400 },
-    ]], ["terminalRelTime"]);
+      { model: "m5", providerId: "p5", ok: false, status: 429, errMsg: "boom", ts, durationMs: 3400 },
+    ]]);
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, "0");
     assert.equal(withTs[0].detail, "失败 · 429", "失败明细带类型码（对齐大板徽标口径）");
-    assert.equal(withTs[0].rel, "2 分钟前", "相对时间按 journal ts 计算");
+    assert.equal(withTs[0].rel, `${p(d.getHours())}:${p(d.getMinutes())}`, "副行时间改 24 小时制 HH:MM 绝对时间");
     assert.equal(withTs[0].duration, "3.4s", "总耗时保留给展开块");
     assert.equal(withTs[0].errMsg, "boom", "错误信息保留给展开块");
-    assert.ok(withTs[0].at.includes(":"), "绝对时间落 HH:MM:SS");
+    assert.equal(withTs[0].at, `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`, "展开块绝对时间落 HH:MM:SS");
     assert.equal(withTs[0].key.split("|")[1], "p5", "行键与大板 logsRowKey 同形");
+    assert.ok(!panelJs.includes("terminalRelTime"), "相对时间函数已退役");
   });
 
   it("最近请求行模板：左栏身份两行 + 右栏数据两行，失败行带类型码且可就地展开", async () => {
     const ok = await vmFn("terminalRequestItemHtml", [{
-      model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "2 分钟前", key: "k1", errMsg: "", at: "", duration: "",
+      model: "kimi-k3", provider: "a6api-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(ok.includes("<strong>kimi-k3</strong>"), "左栏上行：模型名大字（不再挂来源色类）");
-    assert.ok(ok.includes("<span>2 分钟前 · 主力号池</span>"), "左栏下行：相对时间 · 来源显示名");
+    assert.ok(ok.includes("<span>15:48 · 主力号池</span>"), "左栏下行：绝对时间 · 来源显示名");
     assert.ok(ok.includes('class="terminal-request-metric">1.82s<'), "右栏上行：TTFT");
     assert.ok(ok.includes('class="terminal-request-detail">完成 · 2,418 tokens · 缓存 1,360,000<'), "右栏下行：明细带缓存后缀");
     assert.ok(!ok.includes("is-expandable") && !ok.includes("terminal-request-expand"), "成功行不可展开");
@@ -5747,12 +5752,12 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     const noLabel = await vmFn("terminalRequestItemHtml", [{
       model: "m3", provider: "ghost-id", metric: "—", detail: "完成 · 5 tokens", cached: 42, state: "ok", rel: "", key: "k2", errMsg: "", at: "", duration: "",
     }, null], ["escapeHtml"]);
-    assert.ok(noLabel.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id（无相对时间不造分隔符）");
+    assert.ok(noLabel.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id（无时间位不造分隔符）");
     assert.ok(noLabel.includes("缓存 42"), "cached > 0 即有缓存后缀");
 
     const failed = await vmFn("terminalRequestItemHtml", [{
       model: "m4", provider: "pool-a", metric: "—", detail: "失败 · 429", cached: 99, state: "failed",
-      rel: "刚刚", key: "k3", errMsg: "upstream exploded", at: "12:03:04", duration: "3.4s",
+      rel: "12:03", key: "k3", errMsg: "upstream exploded", at: "12:03:04", duration: "3.4s",
     }, { label: "主力号池", expanded: true }], ["escapeHtml"]);
     assert.ok(failed.includes('class="terminal-request-item is-failed is-expandable"'), "失败行带可展开标记");
     assert.ok(failed.includes('data-req-key="k3"'), "行键落 data 属性供点击回查");
@@ -5763,7 +5768,7 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 
     const collapsedFail = await vmFn("terminalRequestItemHtml", [{
       model: "m4", provider: "pool-a", metric: "—", detail: "失败", cached: 0, state: "failed",
-      rel: "3 分钟前", key: "k4", errMsg: "x", at: "12:03:04", duration: "1.0s",
+      rel: "12:03", key: "k4", errMsg: "x", at: "12:03:04", duration: "1.0s",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(collapsedFail.includes("is-expandable") && !collapsedFail.includes("terminal-request-expand"), "未展开的失败行只有行体");
 
@@ -5881,10 +5886,10 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 });
 
 // 底栏（E）：tokens 截断串悬停显全从原生 title 升级 styled tooltip（统计页
-// 同款）；近有失败请求时「N 次请求」pill 转 danger 系，与列表红点同源。
-// 三阶段：左段撤 PID/UTF-8/尺寸徽标改缓存命中 pill；请求数 pill 可点击，
-// 跳统计页并落请求日志子页。
-describe("虚拟终端底栏（悬停显全 / 失败语义色 / 缓存 pill / 请求跳转）", () => {
+// 同款）；近有失败请求时「N 次请求」字串转 danger 字色，与列表红点同源。
+// 字式化修订：请求数/缓存命中都去徽标壳改纯文字（与 tokens 字串同构），请求数
+// 不再绑跳转；缓存字串挪出状态 pill 容器，做左段独立元素。
+describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数字串）", () => {
   it("tokens 悬停显全：原生 title 退役，styled tooltip 向上浮出且不被截断串裁剪", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(!render.includes("terminalFootTokens\").title"), "原生 title 赋值已退役");
@@ -5895,34 +5900,37 @@ describe("虚拟终端底栏（悬停显全 / 失败语义色 / 缓存 pill / �
     assert.ok(panelCss.includes(".terminal-foot-tokens-wrap:hover .terminal-foot-tip"), "悬停浮出");
   });
 
-  it("失败语义色：最近请求带失败行时「N 次请求」pill 转 danger 系", () => {
+  it("失败语义色：最近请求带失败行时「N 次请求」字串转 danger 字色", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(render.includes('classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"))'),
-      "pill 随最近请求失败行转 danger（与列表红点同源同拍）");
-    assert.ok(panelCss.includes(".terminal-foot-requests.is-failed"), "danger 变体样式就位");
+      "字串随最近请求失败行转 danger（与列表红点同源同拍）");
+    assert.ok(panelCss.includes(".terminal-foot-requests.is-failed { color: var(--danger); }"), "失败语义降格为纯字色，不带边框与底色");
   });
 
-  it("缓存命中 pill：底栏左段原徽标槽位，无指标或零请求时隐藏", () => {
-    assert.ok(panelHtml.includes('id="terminalFootCache"'), "底栏左段有缓存命中 pill");
+  it("缓存命中字串：左段独立元素，无指标或零请求时隐藏", () => {
+    assert.ok(panelHtml.includes('id="terminalFootCache"'), "底栏左段有缓存命中字串");
+    assert.ok(panelHtml.includes('</span>\n            <span id="terminalFootCache"'), "字串挪出状态 pill 容器，做左段独立元素（间距走底栏框架档）");
     assert.ok(!panelHtml.includes("terminalFootPid") && !panelHtml.includes("terminalFootSize"), "PID/UTF-8/尺寸徽标已撤除");
     assert.ok(!panelJs.includes("updateTerminalFootSize"), "底栏尺寸写入随徽标清退");
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(render.includes('$("terminalFootCache").hidden = !metrics || metrics.requestCount === 0'), "无指标或零请求时 pill 隐藏");
-    assert.ok(render.includes('$("terminalFootCache").textContent = `缓存 ${metrics.cache}%`'), "pill 文案随轮询同拍更新");
-    assert.ok(panelCss.includes(".terminal-foot-cache[hidden]"), "pill 隐藏不被左段 pill 样式盖回");
+    assert.ok(render.includes('$("terminalFootCache").hidden = !metrics || metrics.requestCount === 0'), "无指标或零请求时隐藏");
+    assert.ok(render.includes('$("terminalFootCache").textContent = `缓存 ${metrics.cache}%`'), "文案随轮询同拍更新");
+    const cacheRule = panelCss.match(/\.terminal-foot-cache \{([^}]*)\}/)?.[1];
+    assert.ok(cacheRule && !/border|background|padding/.test(cacheRule), "无徽标壳，纯文字与 tokens 字串同构");
+    assert.ok(panelCss.includes(".terminal-foot-cache[hidden]"), "隐藏显式兜底");
   });
 
-  it("请求数 pill 可点击：跳统计页并落请求日志子页", () => {
+  it("请求数字串：无壳无跳转，与 tokens 字串同构", () => {
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init, "initTerminalPreview found in panel.js");
-    const bindAt = init.indexOf('$("terminalFootRequests").onclick');
-    assert.ok(bindAt > 0, "请求数 pill 在终端一次性绑定区接线");
-    const bind = init.slice(bindAt, init.indexOf("};", bindAt));
-    assert.ok(bind.includes('switchView("stats")'), "点击切到统计页");
-    assert.ok(bind.includes('activateStatsSubTab("logs")'), "落地请求日志子页");
-    assert.ok(/\.terminal-foot-requests \{[^}]*cursor: pointer/.test(panelCss), "pill 光标可点");
-    assert.ok(panelCss.includes(".terminal-foot-requests:hover"), "pill 有悬停态");
-    assert.ok(panelCss.indexOf(".terminal-foot-requests:hover") < panelCss.indexOf(".terminal-foot-requests.is-failed"), "悬停态不盖失败语义色");
+    assert.ok(!init.includes('$("terminalFootRequests").onclick'), "请求数不再绑跳转（E4 退役）");
+    const reqRule = panelCss.match(/\.terminal-foot-requests \{([^}]*)\}/)?.[1];
+    assert.ok(reqRule && !/border|background|padding|cursor/.test(reqRule), "徽标壳与可点外壳全撤");
+    assert.ok(!panelCss.includes(".terminal-foot-requests:hover"), "悬停态随可点性退役");
+    const tokensRule = panelCss.match(/\.terminal-foot-tokens \{([^}]*)\}/)?.[1];
+    for (const decl of ["color: var(--text-2)", "font-weight: 650"]) {
+      assert.ok(reqRule.includes(decl) && tokensRule.includes(decl), `与 tokens 字串同构（${decl}）`);
+    }
   });
 });
 
