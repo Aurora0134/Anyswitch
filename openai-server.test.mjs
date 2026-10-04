@@ -1818,7 +1818,8 @@ describe("openai relay /responses routes (codex)", () => {
       assert.equal(startedMeta.background, false);
       assert.equal(startedMeta.instanceId, "codex-987654", "user traffic keeps the socket pid fallback");
       const afterControl = { ...counters };
-      assert.ok(afterControl.lookups > 0 && afterControl.subscriptions > 0, "control request must exercise the stub");
+      assert.ok(afterControl.lookups > 0, "control request must exercise the stub");
+      assert.equal(afterControl.subscriptions, 0, "起始身份已落定（socket 命中），不再空订阅迟绑通道");
 
       const bgRes = await postResponses(port, "/v1/responses", {
         "x-agent-id": "codex",

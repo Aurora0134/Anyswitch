@@ -16,6 +16,12 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // the card falls back to the process scan for liveness (unchanged behavior).
 const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "claude"]);
 
+// 这些端点的 x-agent-instance 头存在仅为满足客户端托管配置的占位符（pi 的
+// models.json 写死 ${ANYSWITCH_INSTANCE_ID}，缺变量启动即抛错），其值是折不进
+// 进程身份的随机标签：relay 忽略头值，实例身份以连接属主进程为唯一来源；
+// socket 未解析时按无身份处理，走 bindLateSocketInstance 迟到绑定。
+export const SOCKET_OVERRIDE_AGENT_IDS = new Set(["pi"]);
+
 export function instanceIdFromSocket(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;
   const pid = deps.socketOwner.lookup({ localPort: req.socket.localPort, remotePort: req.socket.remotePort });
@@ -25,9 +31,10 @@ export function instanceIdFromSocket(req, agentId, deps) {
 
 // First-request netstat miss: startRequest already ran with no instanceId.
 // Subscribe once to the shared snapshot refresh and attach the in-flight
-// tracker if a PID appears before the request ends. Header-tagged requests
-// never subscribe. Unsub on first hit and when the caller unbinds so a
-// keep-alive socket cannot leak listeners.
+// tracker if a PID appears before the request ends. options.explicitId 是
+// 调用方在请求开始时算出的最终身份（override 端点即 socket 归一结果，不是
+// 头值）——已有身份不订阅，无身份才等快照。Unsub on first hit and when the
+// caller unbinds so a keep-alive socket cannot leak listeners.
 export function bindLateSocketInstance(req, agentId, deps, tracker, options = {}) {
   if (!tracker?.attachInstance) return () => {};
   if (options.explicitId) return () => {};

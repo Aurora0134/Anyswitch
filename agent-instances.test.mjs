@@ -9,7 +9,9 @@
 // covers clients launched straight from the terminal (bypassing the
 // launcher): a netstat socket→PID snapshot synthesizes "<agentId>-<pid>"
 // when the header is absent
-// (instance-socket-owner.mjs; the header always wins).
+// (instance-socket-owner.mjs; the header always wins — except override
+// endpoints like pi, whose header is a placeholder-driven random tag the
+// relay ignores in favor of the connection owner process).
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -523,6 +525,8 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
   // 绕过 launcher 直连（终端敲 npm shim）的客户端不带 x-agent-instance，
   // relay 用 netstat 快照反查 keep-alive 连接对端进程，合成
   // "<agentId>-<pid>"（instance-socket-owner.mjs）。这里注入桩 socketOwner。
+  // pi 是 override：头照发（models.json 占位符所迫）但值是折不进进程身份的
+  // 随机标签，relay 忽略头值、身份一律按连接属主进程归一。
 
   const TOKEN = "test-token-123";
   const STORE = {
@@ -663,6 +667,81 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
 
       const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
       assert.deepEqual(kimi.instances.map((i) => i.id), ["ws-A"], "launcher-injected header is the source of truth");
+    } finally {
+      await close();
+    }
+  });
+
+  it("pi 头照发但值不采用：身份按连接属主进程归一（socket override）", async () => {
+    // pi 的 models.json 写死 ${ANYSWITCH_INSTANCE_ID} 占位符（缺变量启动即抛错，
+    // pi-launcher.mjs 头注），头只能照发；值是 "agent-home-t3db95104" 形随机
+    // 标签，折不进进程身份。override 集合成员与上面 kimi 用例恰成对照：头值不进
+    // 身份，实例行只认连接属主进程。
+    const piPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js,node.exe,4321\r\n");
+    const journalLines = [];
+    const collector = testCollector({ execFn: piPidExec, journal: { appendRequest: (e) => journalLines.push(e) } });
+    const { seen, socketOwner } = stubOwner(4321);
+    const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postChat(port, { "x-agent-id": "pi", "x-agent-instance": "agent-home-t3db95104" });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.equal(seen.length, 1, "pi 带头也查 socket——头值不进身份");
+      const pi = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
+      assert.deepEqual(pi.instances.map((i) => i.id), ["pi-4321"], "实例行按属主进程归一");
+      assert.equal(pi.instances[0].requests, 1);
+      assert.equal(pi.metrics.totalRequests, 1);
+      assert.equal(journalLines.length, 1);
+      assert.equal(journalLines[0].instanceId, "pi-4321", "journal 行同口径，随机标签不落盘");
+    } finally {
+      await close();
+    }
+  });
+
+  it("pi 带头但 socket 首拍未解析：起始无身份，迟到绑定随快照归位", async () => {
+    const piPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js,node.exe,4321\r\n");
+    const collector = testCollector({ execFn: piPidExec });
+    const listeners = new Set();
+    const socketOwner = {
+      lookup: () => null,
+      onRefresh: (fn) => {
+        listeners.add(fn);
+        return () => listeners.delete(fn);
+      },
+    };
+    // 中途断言窗口做成确定性的：上游取数被调用时，起始归属与订阅必然已落定。
+    let upstreamReached;
+    const upstreamReady = new Promise((r) => { upstreamReached = r; });
+    const delayedUpstream = async () => {
+      upstreamReached();
+      await new Promise((r) => setImmediate(r));
+      socketOwner.lookup = () => 4321;
+      for (const fn of [...listeners]) fn();
+      await new Promise((r) => setImmediate(r));
+      return { ok: true, status: 200, body: sseUpstream() };
+    };
+    const deps = relayDeps(collector, socketOwner);
+    deps.upstreamFetch = delayedUpstream;
+    const server = createOpenAIRelayServer(deps);
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const pending = postChat(port, { "x-agent-id": "pi", "x-agent-instance": "agent-home-t3db95104" });
+      await upstreamReady;
+      assert.equal(listeners.size, 1, "头值不采用：起始无身份，迟到绑定已订阅");
+      const mid = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
+      assert.ok(!mid.instances.some((i) => i.id.includes("t3db95104")), "随机标签不落实例行");
+
+      const res = await pending;
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.equal(listeners.size, 0, "命中即退订");
+      const pi = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
+      assert.deepEqual(pi.instances.map((i) => i.id), ["pi-4321"], "netstat 快照落地后归位属主进程行");
+      assert.equal(pi.instances[0].requests, 1);
+      assert.equal(pi.metrics.totalRequests, 1);
     } finally {
       await close();
     }
