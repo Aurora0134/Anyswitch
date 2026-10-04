@@ -4353,6 +4353,35 @@ async function api(method, path, body) {
       });
   }
 
+  // 「重画终端画面」：画面看着不对时的兜底入口。两件事各治一半——
+  //   1) 让 agent 重画一帧：把宽度挤掉一列再恢复。TUI 只在收到尺寸变化时整屏重画，
+  //      这是唯一能把「已经画错的画面」盖掉的动作（手动调字号能救回来就是这个道理）。
+  //      xterm 必须跟着一起缩：只改 PTY 不改客户端，agent 按新列宽排版、客户端按旧
+  //      列宽渲染，右侧反而会错位。
+  //   2) 重建客户端画面：把流重开一遍，客户端拿到的是后端镜像的整屏回放，等价于一次
+  //      页签切换，客户端侧的残留状态随之清掉（重建时那次 fit 会把真实尺寸 POST 回去）。
+  // 挤宽度与恢复之间要留一拍：两次尺寸变化挨得太近，应用可能只看到净结果（没变），
+  // 那样它不会重画，这一下就白点了。
+  const TERMINAL_REDRAW_NUDGE_MS = 150;
+  function redrawTerminalScreen() {
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    const term = terminalXterm;
+    if (!term || !session) return;
+    if (!session.backend || term.cols <= 2) {
+      // 预览会话没有 PTY 可挤，只能重建客户端画面
+      connectTerminalStream(session);
+      return;
+    }
+    const cols = term.cols;
+    const rows = term.rows;
+    term.resize(cols - 1, rows);
+    postTerminalResize(session, cols - 1, rows);
+    setTimeout(() => {
+      if (terminalXterm !== term) return;
+      connectTerminalStream(session);
+    }, TERMINAL_REDRAW_NUDGE_MS);
+  }
+
   // 窗口 resize 的 fit 走防抖：拖动/最大化动画里事件逐帧来，逐跳 fit 会让
   // xterm 每帧 reflow 并连发 resize 请求；合并到静默期后一次即可。其它调用点
   //（终端页显示、字号变更）仍直接调 fitTerminalXterm，不被这条入口影响。
@@ -5411,8 +5440,8 @@ async function api(method, path, body) {
       // 时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。
       scheduleTerminalFit();
     };
-    $("terminalClearBtn").onclick = () => {
-      terminalXterm?.clear();
+    $("terminalRedrawBtn").onclick = () => {
+      redrawTerminalScreen();
       terminalXterm?.focus();
     };
     $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); terminalXterm?.focus(); };

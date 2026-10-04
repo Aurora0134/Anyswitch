@@ -6598,7 +6598,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.ok(init, "initTerminalPreview found in panel.js");
     const toggleAt = init.indexOf('$("terminalInspectorToggle").onclick');
     assert.ok(toggleAt > 0, "inspector 开关接线在位");
-    const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalClearBtn").onclick'));
+    const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalRedrawBtn").onclick'));
     assert.ok(toggleBody.includes("scheduleTerminalFit()"), "inspector 收放即调度一次尺寸适配（±292px 不经 window resize）");
   });
 });
@@ -6889,11 +6889,11 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     assert.ok(!panelJs.includes("terminalCommandInput"), "聚焦不存在输入框的死调用已清除");
   });
 
-  it("接线结构：按钮组落在清空按钮左侧、xterm 初始字号取记忆值、快捷键只在终端页生效", () => {
-    const actions = panelHtml.slice(panelHtml.indexOf('class="terminal-session-actions"'), panelHtml.indexOf('id="terminalClearBtn"'));
-    assert.ok(actions.includes('id="terminalFontDecBtn"'), "− 按钮在清空按钮左侧");
-    assert.ok(actions.includes('id="terminalFontSizeValue"'), "字号读数在清空按钮左侧");
-    assert.ok(actions.includes('id="terminalFontIncBtn"'), "+ 按钮在清空按钮左侧");
+  it("接线结构：按钮组落在重画按钮左侧、xterm 初始字号取记忆值、快捷键只在终端页生效", () => {
+    const actions = panelHtml.slice(panelHtml.indexOf('class="terminal-session-actions"'), panelHtml.indexOf('id="terminalRedrawBtn"'));
+    assert.ok(actions.includes('id="terminalFontDecBtn"'), "− 按钮在重画按钮左侧");
+    assert.ok(actions.includes('id="terminalFontSizeValue"'), "字号读数在重画按钮左侧");
+    assert.ok(actions.includes('id="terminalFontIncBtn"'), "+ 按钮在重画按钮左侧");
     const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure?.includes("fontSize: terminalFontSize"), "新建 xterm 实例使用记住的字号");
     const apply = panelJs.match(/function applyTerminalFontSize\(size[\s\S]*?\n  \}/)?.[0];
@@ -6902,6 +6902,88 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init?.includes("restoreTerminalFontSize()"), "终端页初始化即恢复记忆字号");
     assert.ok(panelJs.includes('localStorage.setItem("panel-terminal-font-size"'), "持久化键沿用 panel- 前缀");
+  });
+});
+
+// 「重画终端画面」按钮：画面看着不对时的兜底入口。它做两件事——先把宽度挤掉一列
+// 再恢复，逼 agent 整屏重画（手动调字号能救回来就是这个道理）；再重建客户端画面，
+// 让客户端拿到后端镜像的整屏回放。旧按钮调的是终端的 clear()，那会真的删掉滚动
+// 历史，只是顺带触发一次重绘。
+describe("终端重画按钮（挤宽度让 agent 重画 + 重建客户端画面）", () => {
+  const redrawSource = () => {
+    const body = panelJs.match(/const TERMINAL_REDRAW_NUDGE_MS = \d+;\n  function redrawTerminalScreen\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(body, "redrawTerminalScreen found in panel.js");
+    return body;
+  };
+
+  function sandbox(term, session) {
+    const calls = { posted: [], rebuilt: 0, timers: [] };
+    const api = new Function("term", "session", "calls", `
+      let terminalXterm = term;
+      const activeTerminalPreviewId = "s1";
+      function terminalSessionFor() { return session; }
+      function postTerminalResize(s, cols, rows) { calls.posted.push([cols, rows]); }
+      function connectTerminalStream() { calls.rebuilt += 1; }
+      function setTimeout(fn, ms) { calls.timers.push({ fn, ms }); return calls.timers.length; }
+      ${redrawSource()}
+      return {
+        redraw: redrawTerminalScreen,
+        flushTimers: () => { for (const t of calls.timers.splice(0)) t.fn(); },
+        swapTerm: (next) => { terminalXterm = next; },
+      };
+    `)(term, session, calls);
+    return { api, calls };
+  }
+
+  const makeTerm = () => ({
+    cols: 100, rows: 30, resized: [],
+    resize(cols, rows) { this.resized.push([cols, rows]); this.cols = cols; this.rows = rows; },
+  });
+
+  it("接线结构：按钮改叫重画、旧清空调用已下线", () => {
+    assert.ok(!panelHtml.includes("terminalClearBtn"), "旧的清空按钮已下线");
+    assert.ok(panelHtml.includes('id="terminalRedrawBtn"'), "重画按钮在位");
+    assert.ok(panelHtml.includes('title="重画终端画面"') && panelHtml.includes('aria-label="重画终端画面"'),
+      "文案用产品语义：重画终端画面");
+    assert.ok(panelJs.includes('$("terminalRedrawBtn").onclick'), "重画按钮已接线");
+    assert.ok(!panelJs.includes("terminalXterm?.clear()"), "不得再调终端的 clear()：那会真的删掉滚动历史");
+  });
+
+  it("有后端：先挤掉一列并 POST，留一拍再重建客户端画面", () => {
+    const term = makeTerm();
+    const { api, calls } = sandbox(term, { id: "s1", backend: {} });
+    api.redraw();
+    assert.deepEqual(term.resized, [[99, 30]], "先把宽度挤掉一列");
+    assert.deepEqual(calls.posted, [[99, 30]], "PTY 必须跟着缩：只改 PTY 会让 agent 按新列宽排版、客户端按旧列宽渲染");
+    assert.equal(calls.rebuilt, 0, "挤宽度这一拍先不重建：两次尺寸变化挨太近会被合成一次，agent 就不重画了");
+    assert.ok(calls.timers[0].ms >= 100, "留一拍再恢复");
+    api.flushTimers();
+    assert.equal(calls.rebuilt, 1, "恢复那一拍重建客户端画面，重建时的 fit 会把真实尺寸 POST 回去");
+  });
+
+  it("挤宽度期间终端实例已换：恢复那一拍不再动别人的屏", () => {
+    const term = makeTerm();
+    const { api, calls } = sandbox(term, { id: "s1", backend: {} });
+    api.redraw();
+    api.swapTerm(makeTerm());
+    api.flushTimers();
+    assert.equal(calls.rebuilt, 0, "实例已换，旧定时器不得再重建");
+  });
+
+  it("预览会话没有 PTY 可挤：直接重建客户端画面", () => {
+    const term = makeTerm();
+    const { api, calls } = sandbox(term, { id: "p1", backend: null });
+    api.redraw();
+    assert.deepEqual(term.resized, [], "预览会话不挤宽度");
+    assert.deepEqual(calls.posted, [], "预览会话不 POST 尺寸");
+    assert.equal(calls.rebuilt, 1, "预览会话直接重建客户端画面");
+  });
+
+  it("终端页未建流（没有实例）时什么都不做", () => {
+    const { api, calls } = sandbox(null, { id: "s1", backend: {} });
+    api.redraw();
+    assert.equal(calls.rebuilt, 0);
+    assert.deepEqual(calls.posted, []);
   });
 });
 // 活跃真值推送：panel 侧长驻订阅 relay 的 /api/internal/agents-activity，缓存
