@@ -199,6 +199,9 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
     ["grok", "https://registry.npmjs.org/-/package/%40xai-official%2Fgrok/dist-tags", { latest: "1.0.41", alpha: "1.0.41" }, "1.0.41", "https://www.npmjs.com/package/@xai-official/grok", "npm:@xai-official/grok:latest"],
     ["zcode", "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1", 'version: "3.12.3"\nfiles:\n  - version: 99.0.0\n', "3.12.3", "https://zcode.z.ai/cn/changelog", "zcode:windows-x86_64:stable"],
     ["qoder", "https://download.qoder.com.cn/qoder-app/releases/latest.yml", "version: '0.2.5' # product\nfiles:\n  - url: runtime-99.0.0.zip\n", "0.2.5", "https://qoder.com/changelog", "qoder:desktop:latest"],
+    // Kimi 桌面端与 DSH 桌面端同型：官方最新查它内置 electron-updater 的那份频道文件。
+    // endpoint 钉 CDN 最终地址（code.kimi.com 会 302，查询不追跳转）。
+    ["kimi-desktop", "https://cdn.kimi.com/kimi-code/desktop/latest.yml", "version: 1.0.4\nfiles:\n  - url: binaries/99.0.0/KimiCode-99.0.0-win-x64.exe\n", "1.0.4", "https://github.com/MoonshotAI/kimi-code-app", "kimi-desktop:win-x64:latest"],
   ];
   for (const [id, endpoint, payload, version, page, source] of fixtures) {
     const service = createReleaseService({ now, fetchFn: async (url, options) => {
@@ -211,6 +214,17 @@ it("uses the Codex and Grok npm dist-tags plus the official desktop manifests", 
     } });
     assert.deepEqual(await service.getClientLatest(id), { state: "ok", version, url: page, source, checkedAt, errorCode: null });
   }
+});
+
+it("answers the Claude desktop static source without any network request", async () => {
+  let fetched = 0;
+  const service = createReleaseService({ now, fetchFn: async () => { fetched++; return json({}); } });
+  assert.deepEqual(await service.getClientLatest("claude-desktop"), {
+    state: "ok", version: null, url: "https://claude.ai/download", source: "claude-desktop:win32-x64:msix", checkedAt, errorCode: null,
+  });
+  assert.equal(fetched, 0, "静态条目没有可请求的版本端点");
+  // 十分钟缓存同样覆盖静态条目：命中缓存时连结果对象都不重建。
+  assert.equal((await service.getClientLatest("claude-desktop")).checkedAt, checkedAt);
 });
 
 it("reads the Codex desktop version from the Windows Store update manifest", async () => {

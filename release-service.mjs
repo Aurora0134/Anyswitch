@@ -35,6 +35,26 @@ export const CLIENTS = {
     source: "dsh-desktop:win-x64:nightly", format: "yaml",
     url: "https://harness.deepseek.com",
   },
+  // Kimi Code 桌面端（官方 Electron 包）与 DSH 桌面端同型：发布源就是它内置的
+  // electron-updater 去读的那份频道文件（resources/app-update.yml 的 provider/
+  // url/channel——generic + https://code.kimi.com/kimi-code/desktop/ + latest）。
+  // 频道 latest、win-x64 固定为常量：与 app-update.yml 是同一份事实，改了要跟着改。
+  // endpoint 钉 CDN 最终地址：code.kimi.com 会 302 到 cdn.kimi.com，而这里的
+  // 查询一律 redirect: "error"，不追跳转。
+  "kimi-desktop": {
+    endpoint: "https://cdn.kimi.com/kimi-code/desktop/latest.yml",
+    source: "kimi-desktop:win-x64:latest", format: "yaml",
+    url: "https://github.com/MoonshotAI/kimi-code-app",
+  },
+  // Claude 桌面端（官方 MSIX 包）没有可匿名访问的版本源：官方更新元数据端点
+  // （api.anthropic.com/api/desktop/win32/x64/msix/update，更新腿在用）按出口
+  // 网络放行、直连一律拒绝，而 Node fetch 不读系统代理。关于页要的只是官方
+  // 来源链接，版本比对本来就留给更新腿，因此这里是不带 endpoint 的静态条目：
+  // 查询恒成功、永远不带版本号。
+  "claude-desktop": {
+    source: "claude-desktop:win32-x64:msix", format: "static",
+    url: "https://claude.ai/download",
+  },
   zcode: {
     endpoint: "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1",
     source: "zcode:windows-x86_64:stable", format: "yaml", url: "https://zcode.z.ai/cn/changelog",
@@ -150,6 +170,14 @@ export function createReleaseService({ currentVersion, fetchFn = fetch, now = Da
 
   async function queryClientLatest(id) {
     const spec = CLIENTS[id];
+    // 静态条目没有版本端点可查，直接给出官方来源链接；state ok 让详情区照常
+    // 渲染链接行，version null 表示「此渠道不提供可比对的版本号」。
+    if (spec.format === "static") {
+      return {
+        state: "ok", version: null, url: spec.url, source: spec.source,
+        checkedAt: new Date(now()).toISOString(), errorCode: null,
+      };
+    }
     try {
       const { response, text } = await request(spec.endpoint, {
         credentials: "omit", redirect: "error",

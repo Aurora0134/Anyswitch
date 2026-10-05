@@ -63,11 +63,12 @@ function environment() {
     platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
     clients: ids.map((id) => ({
       id, name: id, entryForms: ENTRY_FORMS[id],
-      // 与生产同形：qoder / codex / dsh 一张卡两条安装记录。qoder index 0 是 qodercli.exe
-      // 原生 CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；codex index 0 是
-      // npm CLI、index 1 是 Store 桌面端、remoteId codex-desktop；dsh index 0 是 npm 全局
-      // CLI、index 1 是官方桌面端、remoteId dsh-desktop。九个客户端都有官方版本源，逐安装
-      // 记录发起查询，主行只呈现每端点一行。
+      // 与生产同形：qoder / codex / dsh / claude / kimi 一张卡两条安装记录。qoder index 0
+      // 是 qodercli.exe 原生 CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；
+      // codex index 0 是 npm CLI、index 1 是 Store 桌面端、remoteId codex-desktop；dsh
+      // index 0 是 npm 全局 CLI、index 1 是官方桌面端、remoteId dsh-desktop；claude 与
+      // kimi 同 dsh 顺序，桌面端各走 claude-desktop / kimi-desktop 远端。九个客户端都有
+      // 官方版本源，逐安装记录发起查询，主行只呈现每端点一行。
       installations: id === "qoder"
         ? [
           { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:\\Apps\\qoder\\qodercli.exe", version: "1.0.0", versionSource: "cli --version", issue: null },
@@ -83,6 +84,16 @@ function environment() {
               { kind: "cli", remoteId: "dsh", status: "found", path: "C:\\Apps\\dsh\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
               { kind: "desktop", remoteId: "dsh-desktop", status: "found", path: "C:\\Apps\\dsh\\desktop", version: "3.0.0", versionSource: "app.asar/package.json", issue: null },
             ]
+            : id === "claude"
+              ? [
+                { kind: "cli", remoteId: "claude", status: "found", path: "C:\\Apps\\claude\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+                { kind: "desktop", remoteId: "claude-desktop", status: "found", path: "C:\\Apps\\claude\\desktop", version: "2.9939.2", versionSource: "appx manifest", issue: null },
+              ]
+              : id === "kimi"
+                ? [
+                  { kind: "cli", remoteId: "kimi", status: "found", path: "C:\\Apps\\kimi\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
+                  { kind: "desktop", remoteId: "kimi-desktop", status: "found", path: "C:\\Apps\\kimi\\desktop", version: "1.0.4", versionSource: "app.asar/package.json", issue: null },
+                ]
         : (id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
           kind, remoteId: id,
           status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
@@ -230,7 +241,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 12, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh 各两条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 14, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh / claude / kimi 各两条渠道）");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -305,7 +316,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   await tick(); await tick();
   assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 12, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh 各两条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 14, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh / claude / kimi 各两条渠道）");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {
@@ -407,6 +418,34 @@ test("Codex 桌面渠道的官方来源链接放行 Microsoft Store，仿冒域�
   const lines = descendants(rejected.row("codex"), (node) => node.className === "about-version-line");
   assert.equal(lines.length, 1);
   assert.match(lines[0].textContent, /官方最新 CLI 1\.1\.0 · Desktop 26\.915\.4066/, "只是不放链接，官方版本照常展示");
+});
+
+test("Claude 与 Kimi 桌面形态在详情区补行，官方来源各归各源", async () => {
+  const h = harness((path) => {
+    if (path.includes("/latest/claude-desktop")) return { ...latest(), version: null, comparison: "unknown", url: "https://claude.ai/download" };
+    if (path.includes("/latest/kimi-desktop")) return { ...latest("1.0.5", "update_available"), url: "https://github.com/MoonshotAI/kimi-code-app" };
+    return normal(path);
+  });
+  await h.controller.enter();
+  assert.ok(h.calls.includes("/api/environment/latest/claude-desktop?localVersion=2.9939.2"), "claude 桌面形态按自己的远端 id 查询");
+  assert.ok(h.calls.includes("/api/environment/latest/kimi-desktop?localVersion=1.0.4"), "kimi 桌面形态按自己的远端 id 查询");
+  const claudeRow = h.row("claude");
+  assert.match(claudeRow.textContent, /桌面 路径C:\\Apps\\claude\\desktop/, "claude 桌面形态的路径在详情区逐形态补行");
+  assert.ok(descendants(claudeRow, (node) => node.tagName === "a").some((node) => node.href === "https://claude.ai/download"),
+    "claude 桌面端官方来源指向官方下载页");
+  const kimiRow = h.row("kimi");
+  assert.match(kimiRow.textContent, /桌面 路径C:\\Apps\\kimi\\desktop/);
+  assert.ok(descendants(kimiRow, (node) => node.tagName === "a").some((node) => node.href === "https://github.com/MoonshotAI/kimi-code-app"),
+    "kimi 桌面端官方来源指向官方仓库");
+});
+
+test("Claude 桌面端官方来源只放行官方下载页域名", async () => {
+  const h = harness((path) => (path.includes("/latest/claude-desktop")
+    ? { ...latest(), version: null, comparison: "unknown", url: "https://claude.ai.evil.test/download" }
+    : normal(path)));
+  await h.controller.enter();
+  const links = descendants(h.row("claude"), (node) => node.tagName === "a").map((node) => node.href);
+  assert.deepEqual(links, ["https://www.npmjs.com/package/@anthropic-ai/claude-code"], "仿冒域名被丢弃，只留 CLI 形态的链接");
 });
 
 test("Grok Build 行按 npm 官方版本比对，链接只放行 npm 包页", async () => {
