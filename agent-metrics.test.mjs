@@ -5530,6 +5530,188 @@ describe("进程扫描降级轮（tasklist 回落）不得销毁实例状态", (
   });
 });
 
+// 降级轮不得把一个桌面端拆成一排「CLI 实例」（2026-10-05 用户报障：只开一个
+// Claude Desktop，claude 卡却出现十几个带 CLI 徽标的实例行，刷新页面后又好了）。
+// 根因：桌面形态的分型与折叠都以命令行为唯一依据，而回落 tasklist 的那一轮每一
+// 行都没有命令行——桌面壳和它的 Electron 子进程于是逐个成行，再按「认不出就当
+// CLI」的默认值各贴一枚 CLI 徽标，卡片副行跟着报出「CLI ×n」。修复后：降级轮只
+// 判生死（本轮全量 pid），分型与归属沿用上一轮可信扫描的答案；可信轮从未见过的
+// 新进程仍然不猜形态（「宁可漏折，不可误折」不动）。
+describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例行", () => {
+  // 真机取证：一个 Claude Desktop 的 claude.exe 全家福 = MSIX 桌面壳 + 其
+  // Electron 子进程（--type=）+ 桌面托管引擎（<根>\claude-code\<semver>\）。
+  const SHELL = "C:\\Program Files\\WindowsApps\\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc\\app\\Claude.exe";
+  const ENGINE = "C:\\Users\\tester\\AppData\\Local\\Claude-3p\\claude-code\\2.1.246\\claude.exe";
+  const SHELL_PID = 14640;
+  const HELPER_PID = 41728;
+  const ENGINE_A = 5416;
+  const ENGINE_B = 18392;
+  const ALL_PIDS = [SHELL_PID, HELPER_PID, ENGINE_A, ENGINE_B];
+  const healthyScan = () => [
+    "Node,CommandLine,Name,ProcessId",
+    `LAPTOP,${SHELL},claude.exe,${SHELL_PID}`,
+    `LAPTOP,${SHELL} --type=gpu-process --user-data-dir=C:\\Users\\tester\\AppData\\Local\\Claude-3p,claude.exe,${HELPER_PID}`,
+    `LAPTOP,${ENGINE} --output-format stream-json --verbose,claude.exe,${ENGINE_A}`,
+    `LAPTOP,${ENGINE} --output-format stream-json --verbose,claude.exe,${ENGINE_B}`,
+  ].join("\r\n") + "\r\n";
+  // 降级轮：同一批进程号，tasklist CSV 形状只给得出镜像名。
+  const blindScan = (pids = ALL_PIDS) =>
+    pids.map((pid) => `"claude.exe","${pid}","Console","1","120,000 K"`).join("\r\n") + "\r\n";
+  const settleRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  const claudeCard = async (collector) =>
+    (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+
+  it("健康轮折成一行的桌面端，降级轮到达时仍然只有那一行", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    let cc = await claudeCard(collector);
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop"], "健康轮：桌面端折叠成一行");
+    assert.equal(cc.surfaces.find((s) => s.label === "CLI"), undefined, "健康轮一个 CLI 客户端也没有");
+
+    // 探针这一轮不答 → 回落 tasklist：四个进程号全在，命令行一条都没有。
+    psAnswer = "";
+    t += 10_000;
+    await settleRound(collector);
+    cc = await claudeCard(collector);
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop"],
+      "降级轮的「读不到命令行」不是「这些是 CLI 会话」的证据");
+    assert.deepEqual(cc.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "副行照旧只报一个桌面端，不报 CLI ×n");
+  });
+
+  it("盲轮期间刚起的、可信轮没见过的进程不贴形态徽标", async () => {
+    let t = 3000;
+    const onlyShell = `Node,CommandLine,Name,ProcessId\r\nLAPTOP,${SHELL},claude.exe,${SHELL_PID}\r\n`;
+    let psAnswer = onlyShell;
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan([SHELL_PID, 99999]) : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    psAnswer = "";
+    t += 10_000;
+    await settleRound(collector);
+    const cc = await claudeCard(collector);
+    // 14640 沿用可信轮的桌面分型（并进那一行）；99999 是盲轮期间第一次被看到的
+    // 进程，谁也不知道它是什么——宁可这行少一枚徽标，也不把「看不见」说成「CLI」。
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop", "claude-99999"]);
+    assert.equal(cc.instances[0].surface, "Desktop", "沿用下来的桌面行照旧贴徽标");
+    assert.equal(cc.instances[1].surface, undefined, "读不出形态的行不贴徽标");
+    assert.deepEqual(cc.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "读不出形态的进程不计进 CLI 那一档");
+  });
+
+  it("恢复可信轮后按本轮命令行重新分型，不被上一轮的旧值盖住", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    psAnswer = "";
+    t += 10_000;
+    await settleRound(collector);
+
+    // 同一个进程号，这一轮读得到的命令行是 npm 全局 CLI 的形状：本轮的正证说话。
+    psAnswer = healthyScan().replace(
+      `${ENGINE} --output-format stream-json --verbose,claude.exe,${ENGINE_A}`,
+      "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe," + ENGINE_A,
+    );
+    t += 10_000;
+    await settleRound(collector);
+    const cc = await claudeCard(collector);
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop", `claude-${ENGINE_A}`],
+      "真 CLI 从桌面行里分出去");
+    assert.equal(cc.instances[1].surface, "CLI", "分型由本轮命令行决定");
+  });
+
+  it("终端里经 node 起的 claude 仍标明 CLI 形态", async () => {
+    const t = 3000;
+    const csv = "Node,CommandLine,Name,ProcessId\r\n"
+      + `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli-wrapper.cjs",node.exe,4321\r\n`;
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => t });
+
+    const cc = await claudeCard(collector);
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-4321"]);
+    assert.equal(cc.instances[0].surface, "CLI", "读得出命令行且不在桌面形状里＝CLI");
+    assert.deepEqual(cc.surfaces, [{ surface: "cli", label: "CLI", count: 1 }]);
+  });
+
+  it("沿用有时限：降级持续过窗口后不再猜形态，可信轮回来即恢复折叠", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    psAnswer = "";
+    // 一直读不到命令行，且推过沿用窗口（30s）：进程号还活着，所以行不会消失，
+    // 但也不再拿一分钟内都不知所措的旧分型把它们说成桌面端——行留在卡上、
+    // 不贴任何形态徽标，宁可漏折不可误折。
+    t += 60_000;
+    await settleRound(collector);
+    let cc = await claudeCard(collector);
+    assert.equal(cc.instances.length, ALL_PIDS.length, "过窗后按本轮逐进程成行");
+    assert.ok(cc.instances.every((i) => i.surface === undefined), "过窗后一律不贴形态徽标");
+    assert.deepEqual(cc.surfaces, [], "既读不出形态，副行就没有任何一档可写");
+
+    // 可信轮回来：折叠与徽标立刻恢复。
+    psAnswer = healthyScan();
+    t += 10_000;
+    await settleRound(collector);
+    cc = await claudeCard(collector);
+    assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop"]);
+    assert.equal(cc.instances[0].surface, "Desktop");
+  });
+});
+
+// Kimi 卡同一条链的另一处症状：桌面端 Electron 子进程在降级轮里被当成会话宿主
+// （认出「这是子进程」靠的也是命令行），于是一张卡裂成多行、副行报出成倍的桌面端。
+describe("进程扫描降级轮不把 kimi 桌面端的子进程当成会话宿主", () => {
+  const KIMI_SHELL = "C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi\\Kimi Code.exe";
+  const MAIN_PID = 7100;
+  const HELPER_PID = 7101;
+  const healthyScan = () => [
+    "Node,CommandLine,Name,ProcessId",
+    `LAPTOP,"${KIMI_SHELL}",Kimi Code.exe,${MAIN_PID}`,
+    `LAPTOP,"${KIMI_SHELL}" --type=renderer,Kimi Code.exe,${HELPER_PID}`,
+  ].join("\r\n") + "\r\n";
+  const blindScan = () => [MAIN_PID, HELPER_PID]
+    .map((pid) => `"Kimi Code.exe","${pid}","Console","1","150,000 K"`).join("\r\n") + "\r\n";
+  const settleRound = async (collector) => {
+    await collector.getAgentsStatus();
+    await new Promise((r) => setTimeout(r, 20));
+  };
+  const kimiCard = async (collector) => (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+
+  it("降级轮里桌面端仍然只算一个会话宿主", async () => {
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : psAnswer);
+    const collector = testCollector({
+      execFn, nowFn: () => t, kimiRegistryLookup: async () => new Map(),
+    });
+
+    await settleRound(collector);
+    let kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "健康轮：主进程算宿主，--type= 子进程不算");
+
+    psAnswer = "";
+    t += 10_000;
+    await settleRound(collector);
+    kimi = await kimiCard(collector);
+    assert.deepEqual(kimi.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "降级轮不得因为读不出 --type= 就把子进程也报成宿主");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // 「已工作时间」随端点关闭清零（2026-10-04 用户报障：zcode 卡工时会随着总
 // 运行时间一直涨，中途关掉再开不清零）。根因：该计数自建仓起是终身累计的
