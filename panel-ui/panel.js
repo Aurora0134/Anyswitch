@@ -5975,7 +5975,7 @@ async function api(method, path, body) {
     // CSS 片段已随退役删除；历史 localStorage 存档的退役样式
     // 由 <head> 恢复脚本兜底回落 SaaS。
     // 与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份清单，改动需两侧同步（panel.test.mjs 有同值断言）
-    const STYLES = ["saas", "aurora", "sepia"];
+    const STYLES = ["saas", "aurora", "sepia", "anthropic"];
     function currentStyle() {
       const s = document.documentElement.getAttribute("data-style") || "";
       return STYLES.includes(s) ? s : "saas";

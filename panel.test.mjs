@@ -2422,9 +2422,9 @@ describe("panel.html 渠道列表拖拽重排（DnD + FLIP + 皮肤差分）", (
     assert.ok(m[1].includes("suppressStoreClick"), "click delegate swallows the click after drag");
   });
 
-  it("基础层 + saas/aurora/sepia 三皮肤段均定义 --store-drag-accent", () => {
+  it("基础层 + saas/aurora/sepia/anthropic 四皮肤段均定义 --store-drag-accent", () => {
     assert.match(panelCss, /:root \{[\s\S]*?--store-drag-accent:/, "base :root defines --store-drag-accent");
-    for (const skin of ["saas", "aurora", "sepia"]) {
+    for (const skin of ["saas", "aurora", "sepia", "anthropic"]) {
       const re = new RegExp(`:root\\[data-style="${skin}"\\] \\{[\\s\\S]*?--store-drag-accent:`);
       assert.ok(re.test(panelCss), `${skin} skin defines --store-drag-accent`);
     }
@@ -2914,13 +2914,13 @@ describe("panel.html 设置全页视图", () => {
     assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
   });
 
-  it("「主题」子 tab：左栏三项点选即生效，右栏预览为真实看板镜像", () => {
+  it("「主题」子 tab：左栏四项点选即生效，右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
     const items = [...picker[1].matchAll(/class="settings-theme-item" data-style="([^"]*)" role="radio" aria-checked="([^"]*)"[^>]*>([^<]+)<\/button>/g)];
     assert.deepEqual(items.map((m) => [m[1], m[3], m[2]]), [
-      ["saas", "SaaS", "true"], ["aurora", "极光", "false"], ["sepia", "暖纸", "false"],
-    ], "三项主题与样式值一一对应，SaaS 按钮静态 aria-checked=\"true\"");
+      ["saas", "SaaS", "true"], ["aurora", "极光", "false"], ["sepia", "暖纸", "false"], ["anthropic", "Anthropic", "false"],
+    ], "四项主题与样式值一一对应，SaaS 按钮静态 aria-checked=\"true\"");
     assert.ok(panelJs.includes('picker.querySelectorAll(".settings-theme-item")'),
       "initStylePicker 同步选中态到新列表项");
     assert.ok(/id="settingsThemePreview" inert/.test(panelHtml), "预览整体不响应交互");
@@ -2946,9 +2946,9 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
   });
 
-  it("主题存档恢复：内联脚本三项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
-    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia"];'),
-      "PANEL_STYLES 恰为 saas/aurora/sepia 三项");
+  it("主题存档恢复：内联脚本四项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
+    assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia", "anthropic"];'),
+      "PANEL_STYLES 恰为 saas/aurora/sepia/anthropic 四项");
     assert.ok(panelHtml.includes('? panelStyleRaw : "saas"'),
       "缺失或非法存档一律回落 \"saas\"");
     assert.ok(panelHtml.includes("if (panelStyleRaw !== panelStyle)"),
@@ -2961,8 +2961,8 @@ describe("panel.html 设置全页视图", () => {
       "panel.html 无 removeAttribute(\"data-style\") 分支");
     assert.ok(!panelJs.includes('removeAttribute("data-style")'),
       "panel.js 无 removeAttribute(\"data-style\") 分支");
-    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia"];'),
-      "panel.js 的 STYLES 数组恰为三项");
+    assert.ok(panelJs.includes('const STYLES = ["saas", "aurora", "sepia", "anthropic"];'),
+      "panel.js 的 STYLES 数组恰为四项");
   });
 
   it("齿轮改为切入设置视图，退出回到进入前视图；设置页另用 panel-settings-open 持久化", () => {
