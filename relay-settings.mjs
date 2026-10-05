@@ -109,6 +109,18 @@ export function parseTerminalRestoreSessions(raw) {
   return raw === false ? false : DEFAULT_TERMINAL_RESTORE_SESSIONS;
 }
 
+// 上游密钥缓存开关：开启后解密出的密钥在本进程内保留，后续请求不再每次重新
+// 读取；关掉时立即丢弃已保留的明文。默认开——每请求一次的密钥读取是链路上最
+// 脆的一环（要起一个外部进程，实测约 0.4s，且它在 2026-10-05 那次连续 70 分钟
+// 的请求全败里就是落点），而 Anyswitch 以用户自身身份运行在回环地址上，能读取
+// 本进程内存的程序同样能读取凭据密文并以同一身份解开，边际暴露很小。只有显式
+// 写入 false 才关（缺失、畸形、旧版本没有这个键，一律保持开）。
+export const DEFAULT_CREDENTIAL_CACHE_ENABLED = true;
+
+export function parseCredentialCacheEnabled(raw) {
+  return raw === false ? false : DEFAULT_CREDENTIAL_CACHE_ENABLED;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -243,6 +255,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
   const terminalHostManualStop = parseTerminalHostManualStop(raw.terminalHostManualStop);
   const terminalRestoreSessions = parseTerminalRestoreSessions(raw.terminalRestoreSessions);
+  const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -261,6 +274,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       claudeBypassPermissions,
       terminalHostManualStop,
       terminalRestoreSessions,
+      credentialCacheEnabled,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -272,6 +286,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     claudeBypassPermissions,
     terminalHostManualStop,
     terminalRestoreSessions,
+    credentialCacheEnabled,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -367,6 +382,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     updated.terminalRestoreSessions = parseTerminalRestoreSessions(patch.terminalRestoreSessions);
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, "credentialCacheEnabled")) {
+    updated.credentialCacheEnabled = parseCredentialCacheEnabled(patch.credentialCacheEnabled);
+  }
+
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启
   // 即恢复，所以这里不触碰 claudeTierMappings。
   if (Object.prototype.hasOwnProperty.call(patch, "claudeTierMappingsEnabled")) {
@@ -454,5 +473,19 @@ export function createLogLevelGate(settingsPath = defaultSettingsPath(), env = p
     env,
     initial: DEFAULT_LOG_LEVEL,
     read: (settings) => parseLogLevel(settings.logLevel),
+  });
+}
+
+// A live read of the 上游密钥缓存 switch. The relay is long-lived, so a switch
+// that only took effect at the next restart would leave the resident process
+// holding plaintext in memory after the user turned caching off — the one
+// direction this switch must never lag in. Read per credential load, which is
+// once per request.
+export function createCredentialCacheEnabledGate(settingsPath = defaultSettingsPath(), env = process.env) {
+  return createSettingGate({
+    settingsPath,
+    env,
+    initial: DEFAULT_CREDENTIAL_CACHE_ENABLED,
+    read: (settings) => parseCredentialCacheEnabled(settings.credentialCacheEnabled),
   });
 }

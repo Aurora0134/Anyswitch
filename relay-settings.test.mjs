@@ -22,6 +22,9 @@ import {
   parseTerminalRestoreSessions,
   DEFAULT_TERMINAL_RESTORE_SESSIONS,
   parseClaudeTierMappingsEnabled,
+  parseCredentialCacheEnabled,
+  DEFAULT_CREDENTIAL_CACHE_ENABLED,
+  createCredentialCacheEnabledGate,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
@@ -737,6 +740,55 @@ describe("terminalRestoreSessions", () => {
 
       const malformed = saveSettings(path, { terminalRestoreSessions: "no" }, {});
       assert.equal(malformed.settings.terminalRestoreSessions, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("credentialCacheEnabled", () => {
+  it("defaults to ON: only an explicit false turns caching off", () => {
+    // 默认开是有意的：每请求一次的密钥读取要起一个外部进程，是链路上最脆的一环，
+    // 而升级上来的安装不该因为多出一个开关就默默退回更慢、更容易失败的路径。
+    assert.equal(DEFAULT_CREDENTIAL_CACHE_ENABLED, true);
+    assert.equal(parseCredentialCacheEnabled(undefined), true);
+    assert.equal(parseCredentialCacheEnabled("false"), true, "畸形值按缺省处理，不误关");
+    assert.equal(parseCredentialCacheEnabled(0), true);
+    assert.equal(parseCredentialCacheEnabled(true), true);
+    assert.equal(parseCredentialCacheEnabled(false), false);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-cred-cache-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.credentialCacheEnabled, true, "全新安装默认开");
+      const off = saveSettings(path, { credentialCacheEnabled: false }, {});
+      assert.equal(off.settings.credentialCacheEnabled, false);
+      assert.equal(loadSettings(path, {}).settings.credentialCacheEnabled, false);
+      const other = saveSettings(path, { sparkWindowPoints: 24 }, {});
+      assert.equal(other.settings.credentialCacheEnabled, false, "改别的设置项不会把它挤掉");
+      const back = saveSettings(path, { credentialCacheEnabled: true }, {});
+      assert.equal(back.settings.credentialCacheEnabled, true);
+      const malformed = saveSettings(path, { credentialCacheEnabled: "yes" }, {});
+      assert.equal(malformed.settings.credentialCacheEnabled, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the live gate follows the file, so a switch flipped off takes effect without a restart", () => {
+    // relay 是长活进程；关掉缓存的意图是「别再留着明文了」，如果这个开关要等重启
+    // 才生效，就等于没关。
+    const tmp = mkTestDir("anyswitch-cred-gate-");
+    const path = join(tmp, "settings.json");
+    try {
+      const gate = createCredentialCacheEnabledGate(path, {});
+      assert.equal(gate(), true, "缺省开");
+      saveSettings(path, { credentialCacheEnabled: false }, {});
+      assert.equal(gate(), false, "落盘后立刻读到关");
+      saveSettings(path, { credentialCacheEnabled: true }, {});
+      assert.equal(gate(), true, "再打开同样立刻生效");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

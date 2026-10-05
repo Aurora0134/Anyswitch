@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { existsSync, writeFileSync, readFileSync, unlinkSync, realpathSync } from "node:fs";
 import { createAgentWatcher } from "./agent-watcher.mjs";
 import { createAgentMetricsCollector } from "./agent-metrics.mjs";
-import { startRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLineAsync, isOwnProcess } from "./relay-process-manager.mjs";
+import { startRelay, restartRelay, getRelayStatus, findPortOwnerPid, isPidAlive, getProcessCommandLineAsync, isOwnProcess } from "./relay-process-manager.mjs";
 import { loadSettings, defaultSettingsPath, relayDataRoot } from "./relay-settings.mjs";
 import { createLogger } from "./logger.mjs";
 
@@ -225,6 +225,13 @@ export async function startWatchdogHost(options = {}) {
   logger.info(`Anyswitch follow-agent watchdog alive on 127.0.0.1:${WATCHDOG_PORT}`);
 
   const root = relayDataRoot(options.base ?? process.env);
+  // 认领标记端口之后立刻写下自己的 pid。这条路径正是开机自启（计划任务 / Run 项）
+  // 走的，而写 pid 原本只发生在 spawnWatchdog 里，于是开机起的那个 watchdog 从来
+  // 没写过 pid 文件——磁盘上一直留着一个早已死掉的 pid，stopWatchdog 的 pid 候选
+  // 因此长期是错的（靠标记端口属主兜住才没出事）。谁在服务，pid 文件就该是谁。
+  const pidPath = getWatchdogPidPath(root);
+  writeWatchdogPid(process.pid, pidPath);
+
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
   // watcherDeps exists so tests can observe the follow-agent path without real
   // process/port side effects; production passes nothing and gets the real deps.
@@ -233,6 +240,8 @@ export async function startWatchdogHost(options = {}) {
     root,
     scanProcesses: deps.scanProcesses ?? (() => metricsCollector.scanProcesses()),
     startRelay: deps.startRelay ?? (() => startRelay(root)),
+    // 服务异常走重启（先停后起），不是再拉一个：端口被自己占着时「启动」是空操作。
+    restartRelay: deps.restartRelay ?? (() => restartRelay(root)),
     getRelayStatus: deps.getRelayStatus ?? (() => getRelayStatus(root)),
     // The watcher passes the data ROOT directory, not a file path — forwarding
     // it made readFileSync fail on a directory and the tick saw empty settings
@@ -244,6 +253,7 @@ export async function startWatchdogHost(options = {}) {
 
   const shutdown = async (signal) => {
     logger.info(`${signal} received, watchdog exiting`);
+    clearWatchdogPid(pidPath);
     try {
       await close();
     } catch {
@@ -253,6 +263,8 @@ export async function startWatchdogHost(options = {}) {
   };
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
+  // Windows 上 SIGTERM 未必送达（任务结束 / 注销），exit 兜住另一条路。
+  process.on("exit", () => clearWatchdogPid(pidPath));
 
   return { reused: false, close };
 }

@@ -10,7 +10,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
-import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes } from "./relay-host.mjs";
+import { rotateLogIfNeeded, appendCrashLog, warmProcessScanCache, createTerminalHostSupervisor, createTerminalHostRoutes, mountTerminalHostRoutes, describeRelayStartupFailure } from "./relay-host.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeLogPath() {
@@ -873,4 +873,26 @@ test("POST /terminal-host/stop without clearSessions leaves the state file alone
   } finally {
     await h.close();
   }
+});
+
+// 启动失败的归因（2026-10-05）。
+//
+// 失败行以前是子进程直写的裸文本：没有时间、没有 PID，而多个实例共写同一个文件，
+// 事后只能靠前后文反推时间线；更要紧的是「端口被外人占用」与「自家 relay 在、只是
+// 没答上来」被压成同一句话——这两者的处置完全不同。
+test("describeRelayStartupFailure separates a foreign port from an unexpected fault", () => {
+  const foreign = new Error("port 47821 is in use by another process");
+  foreign.code = "RELAY_PORT_FOREIGN";
+
+  const blocked = describeRelayStartupFailure(foreign, 4242);
+  assert.equal(blocked.label, "relayStartupBlocked");
+  assert.match(blocked.detail, /47821/);
+  assert.match(blocked.detail, /does not answer as our relay/, "不断言它一定是外人：探针认不出自家 relay 时两种情况都可能");
+  assert.match(blocked.detail, /pid 4242/, "带上自身进程号，多实例共写一个文件时才分得清是谁");
+
+  const crash = describeRelayStartupFailure(new Error("the Anyswitch global store is not usable"), 777);
+  assert.equal(crash.label, "relayStartupFailed");
+  assert.match(crash.detail, /the Anyswitch global store is not usable/, "意外故障保留原始信息");
+  assert.match(crash.detail, /pid 777/);
+  assert.notEqual(blocked.detail, crash.detail);
 });

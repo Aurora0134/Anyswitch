@@ -116,6 +116,7 @@ export function createOpenAIHandler(deps) {
     readGeneration,
     logger = null,
     effortInjector = null,
+    serviceHealth = null,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
@@ -145,10 +146,12 @@ export function createOpenAIHandler(deps) {
   function loadValidStore() {
     const loaded = loadStore();
     if (!loaded.ok) {
+      serviceHealth?.recordFailure("store");
       return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store could not be read") };
     }
     const result = validateStore(loaded.store);
     if (!result.valid) {
+      serviceHealth?.recordFailure("store");
       return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store failed schema validation") };
     }
     return { ok: true, store: loaded.store };
@@ -286,8 +289,16 @@ export function createOpenAIHandler(deps) {
   // One upstream attempt against a single provider. Shared by the classic
   // single-provider path and by each member call of a pool request.
   async function attemptChatCompletion(providerId, provider, body, options = {}) {
+    // 凭据在请求时刻取；是否缓存由 credentialCacheEnabled 决定（见 launch.mjs）。
+    const credentialStartedAt = Date.now();
     const credential = await loadCredential(providerId, provider);
     if (!credential.ok) {
+      // 这一条日志是这类故障唯一的证据来源：客户端只看到一句笼统的 502，而
+      // 原因（文件缺失 / 助手没起来 / 助手超时 / 解密失败）只有中继知道。
+      serviceHealth?.recordFailure("credential");
+      logger?.error?.(
+        `credential load failed for provider "${providerId}" (${credential.reason}, ${Date.now() - credentialStartedAt}ms)`,
+      );
       return { status: 502, body: openAIError("api_error", "the upstream credential for this provider could not be loaded") };
     }
 
@@ -337,6 +348,10 @@ export function createOpenAIHandler(deps) {
       }
       return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
     }
+
+    // 请求真的到了上游：凭据读得出、网络出得去，中继自己的活干完了。上游之后回
+    // 429/5xx 是上游的问题，不改变「我还能服务」这个事实。
+    serviceHealth?.recordSuccess();
 
     // A gateway that does not take the parameter at all gets the same request
     // back off without it, once; the channel is then left alone for the rest of

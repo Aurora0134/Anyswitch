@@ -33,6 +33,26 @@ const powershell = join(
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const MAX_OUTPUT_BYTES = 131072;
 
+// Stable machine-readable fault codes. The messages below are already free of
+// payload and provider entropy, but a caller that must CLASSIFY a failure cannot
+// parse prose without coupling to its exact wording — and the categories lead to
+// different remedies ("the helper never started" is a policy/permission problem;
+// "the helper timed out" is a load problem). The code carries the category, the
+// message stays human-readable, and neither ever carries the secret.
+export const DPAPI_CODES = Object.freeze({
+  TIMEOUT: "DPAPI_TIMEOUT",
+  SPAWN_FAILED: "DPAPI_SPAWN_FAILED",
+  FAILED: "DPAPI_FAILED",
+  BAD_RESPONSE: "DPAPI_BAD_RESPONSE",
+  OUTPUT_LIMIT: "DPAPI_OUTPUT_LIMIT",
+});
+
+function dpapiError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
 // Mirrors the ps1 ValidatePattern so a bad id fails before a process is spawned.
 export function assertProviderId(providerId) {
   if (typeof providerId !== "string" || !PROVIDER_ID.test(providerId)) {
@@ -66,7 +86,7 @@ function run(args, input, timeoutMs) {
     let size = 0;
     let settled = false;
 
-    const timer = setTimeout(() => finish(new Error("DPAPI operation timed out")), timeoutMs);
+    const timer = setTimeout(() => finish(dpapiError(DPAPI_CODES.TIMEOUT, "DPAPI operation timed out")), timeoutMs);
 
     function wipe() {
       input?.fill?.(0);
@@ -108,20 +128,20 @@ function run(args, input, timeoutMs) {
       size += chunk.length;
       if (size > MAX_OUTPUT_BYTES) {
         chunk.fill(0);
-        finish(new Error("DPAPI output exceeded the limit"));
+        finish(dpapiError(DPAPI_CODES.OUTPUT_LIMIT, "DPAPI output exceeded the limit"));
         return;
       }
       output.push(chunk);
     });
     // Never surface stderr text: it could echo payload fragments.
     child.stderr?.on("data", (chunk) => chunk.fill(0));
-    child.on("error", () => finish(new Error("DPAPI helper could not start")));
+    child.on("error", () => finish(dpapiError(DPAPI_CODES.SPAWN_FAILED, "DPAPI helper could not start")));
     child.on("close", (code) => {
       if (settled) return;
       const combined = Buffer.concat(output);
       if (code !== 0) {
         combined.fill(0);
-        finish(new Error("DPAPI operation failed"));
+        finish(dpapiError(DPAPI_CODES.FAILED, "DPAPI operation failed"));
         return;
       }
       finish(null, combined);
@@ -138,7 +158,7 @@ function decodeResponse(buffer) {
     if (parsed?.ok !== true || typeof parsed.payloadBase64 !== "string") throw new Error();
     return Buffer.from(parsed.payloadBase64, "base64");
   } catch {
-    throw new Error("DPAPI returned an invalid response");
+    throw dpapiError(DPAPI_CODES.BAD_RESPONSE, "DPAPI returned an invalid response");
   } finally {
     buffer.fill(0);
   }

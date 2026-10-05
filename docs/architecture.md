@@ -4,7 +4,7 @@
 
 Anyswitch 是一套把多家 OpenAI 兼容上游（以及经由协议转换的 Anthropic 客户端）统一收口到本地 relay 的凭据与路由系统。核心目标：
 
-- **凭据不出本机**：上游 API Key 用 Windows DPAPI 按提供方熵封存，relay 仅在请求时即时解密、用后即焚，从不缓存、从不落盘明文。
+- **凭据不出本机**：上游 API Key 用 Windows DPAPI 按提供方熵封存，relay 仅在请求时即时解密，**从不落盘明文**。解密结果是否在本进程内保留由设置项「缓存上游密钥」决定（`credentialCacheEnabled`，默认开）：关闭时用后即焚、每个请求重新解密；开启时按**凭据密文哈希**复用已解出的值，密文一变（轮换密钥／改 `credentialFile`／换 store）立即失效，开关关掉的当下即清空内存中的明文。默认开是因为那一跳要起一个外部进程（本机实测约 0.4s）且最脆——2026-10-05 那次连续 70 分钟的请求全败就落在它上面；而 relay 以用户自身身份运行在回环地址上，能读本进程内存的程序同样能读凭据密文并以同一身份解开。
 - **store 即唯一真相源**：一份 v2 `store.json` 描述全部 provider/模型/路由元数据，relay 路由纯靠它，管理面（panel）写、relay 与各端点配置写手读。
 - **无感多地址退避 + 协议透传**：主地址失败自动按序重试备用地址（180s 生成预算、5xx 透传）；Anthropic 客户端经 relay 无缝对接 OpenAI 兼容上游。
 - **解耦独立常驻**：常驻 relay 宿主与独立常驻 Web 控制面板分离，relay 停止/崩溃时面板仍可用；支持免管理员权限开机自启（计划任务 AnyswitchRelay/AnyswitchWatchdog）。
@@ -92,12 +92,14 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `openai-stream-guard.mjs` — OpenAI 流式响应守卫（坏流过滤、孤儿 tool_call 拦截、reasoning 字段即时放行）；可选的信封补齐（`fillChunkEnvelope`，仅 grok 开启）为缺 `id`/`created`/`model` 的数据块补字段并回显首值。
 
 ### relay / 服务层
-- `handler.mjs` — Anthropic 路径请求处理器：恒定时间 token 鉴权 → 加载 store → 档位映射接管预检（仅 Claude 端点、仅严格解析已拒的档位名）→ 解包 wire ID → generation 校验 → 解密凭据 → 协议转换 → fallback URL 列表发上游；除该预检外全程 fail-closed。
+- `handler.mjs` — Anthropic 路径请求处理器：恒定时间 token 鉴权 → 加载 store → 档位映射接管预检（仅 Claude 端点、仅严格解析已拒的档位名）→ 解包 wire ID → generation 校验 → 解密凭据 → 协议转换 → fallback URL 列表发上游；除该预检外全程 fail-closed。两条请求路径（本模块与原生路径处理器）在凭据取不到时都会落一条带端点名、原因分类与耗时的 error 日志，并把这次失败计入 relay 自检——客户端只看到一句泛化的 502，原因只有中继知道，不留痕就等于这类故障永远查不出（2026-10-05 连续三天、累计 120 次失败在 relay 侧一个字都没留下）。日志不含任何密钥材料。
 - `openai-handler.mjs` — OpenAI 原生路径处理器：`/v1/models` 与 `/chat/completions` 直通到 OpenAI 兼容上游（不做协议翻译）。
 - `openai-path.mjs` — OpenAI relay 路径解析。
 - `server.mjs` — Anthropic 前端 loopback HTTP 服务（127.0.0.1、随机会话 token）。
 - `openai-server.mjs` — OpenAI 前端 loopback HTTP 服务。
-- `launch.mjs` — 生产装配线：组装 loadStore + DPAPI loadCredential + `createRetryingFetch`（180s 超时/指数退避/5xx 透传/502 兜底）。
+- `launch.mjs` — 生产装配线：组装 loadStore + DPAPI loadCredential + `createRetryingFetch`（180s 超时/指数退避/5xx 透传/502 兜底）。密钥加载独立成 `createCredentialLoader`：IO（读密文/解密）可注入，便于精确验证缓存语义；复用判据是**凭据密文的哈希**而非 mtime 或时间窗，因此轮换密钥、改 `credentialFile`、换 store 全部自动失效（漏失效一次的代价是拿着旧密钥发请求）；失败按 `dpapi.mjs` 的固定错误码归类成可落日志的原因，绝不回显底层文本。
+- `service-health.mjs` — relay 自检：只统计「中继自身原因」的失败（取不到凭据、store 读不了或校验不过），连续 5 次即 `degraded`；清零信号是「真的把请求送到了上游」（它同时证明凭据读得出、网络出得去），客户端 4xx 与上游 429/5xx 都不计。存在的理由：2026-10-05 那次 relay 进程活着、47821 在监听、探针也答得出来，但每一个真实请求都失败，连续 70 分钟没有警报、没有自愈、事后也几乎没留下可查的证据——因为当时所有监管者问的只有「端口答不答」。结论随根路由下发，面板与 watchdog 据此才问得出「它还能不能服务」。
+- 端口归属判定（`openai-server.mjs` 的 `listenLoopback` + 根路由自检字段）— 启动时端口被占**重试 4 次、间隔 750ms**再判归属：一次探针不答不等于端口是外人的（中继事件循环可能只是被短暂卡住），2026-10-05 那天 48 次启动失败全部栽在「一次定生死」上，而端口从头到尾都握在自家 relay 手里；每次都不认才判 `RELAY_PORT_FOREIGN`，且与「自家 relay 在但没答上来」分成两条带时间戳与 PID 的归因记录。根路由的 `service` 标记仍是端口归属的唯一依据（外人 200 不算自家 relay），新增的 `degraded` / `consecutiveFailures` / `lastFailureKind` 只是附加字段。
 - `launcher.mjs` — Claude 启动器：注入端点与 token、设置 NO_PROXY、剥离继承 API Key；设置页「以 bypassPermissions 启动」开关注入的 `--dangerously-skip-permissions` 也在这里现读现用（用户已手带则不重复）。
 
 ### 控制面层
@@ -112,10 +114,10 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `version-check.mjs` / `release-service.mjs` — 版本比较与固定官方来源查询。Anyswitch 查固定仓库 Releases，排除草稿；preview 身份包含预发布，正式版身份优先正式发布、正式渠道一个 Release 都没有时回退到最新预览版并带预览标识；按 SemVer 选择目标并返回对应真实发布页；分页不完整或网络失败不能报「已是最新」。客户端官方版本逐项查询，失败互不影响；远端缓存十分钟、本地检测缓存一分钟，进关于页自动查一次走缓存、手动检查强制刷新但复用同一进行中请求，不接入每秒看板轮询。
 - `panel-launcher.mjs` / `panel-app.vbs` — 桌面快捷方式入口：拉起 panel-host 并打开浏览器面板。
 - `agent-skills.mjs` — Skills 管理 tab 后端：主仓库扫描（递归识别含 SKILL.md 的目录）、NTFS junction 部署/解除到各 agent 端点（claude/codex/zcode/opencode/pi/kimi/dsh/qoder/grok）、回收站删除、端点本地 skill 收编合并、原生目录选择对话框；配置存 `%LOCALAPPDATA%\Anyswitch\skills.json`（仅存 repoPath，部署状态以文件系统为准）。
-- `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。
-- `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起。
+- `relay-process-manager.mjs` — relay 生命周期（按记录 PID 启停/重启）。探针在「答不答」之外还带回 relay 的自检结论（`degraded` 等），但 `status` 仍只有 running/starting/stopped 三态：把服务异常折进 `status` 会连带改掉 `startRelay` 的复用短路（那里只认 `running`），使每次巡检都去 spawn 一个注定退出的重复实例。停用路径把探针统一压成布尔——等待轮询写的是 `!probe(...)`，而对象恒为真值，不归一就会把「已经停了」误判成「还在答」。
+- `agent-watcher.mjs` — followAgent 自愈：检测到 coding agent 运行而 relay 未启时静默拉起；relay 在跑但自检报服务异常时改走**重启**（端口被自己占着时「启动」是空操作），带宽限期（60s）、递增退避（30/60/120/300s）与滚动窗口预算（30 分钟 3 次），用尽即停手并明确记录「需要人工介入」。预算**不因一次「看起来恢复了」而归还**——重启后新进程必然干净、探针立刻报正常，若据此重置，「30 分钟 3 次」就形同虚设（每次重启都重置，实际节奏退化成「宽限期＋退避」一次）。
 - `agent-sync.mjs` — store 变更毫秒级同步下游 agent 配置（zcode/dsh/pi/kimi/qoder/codex/opencode/grok）。
-- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）与实时输出的最低显示级别（`logLevel`，默认 info＝显示全部，只管面板显示出口、不窄化落盘与缓冲）也归这里：`createLoggingEnabledGate` / `createLogLevelGate` 每次调用现读 settings.json，relay-host 与 panel-host 各自持一份，因此设置当场生效、不需要重启任何常驻进程。**闸门不按 mtime 缓存**——mtime 证明不了文件没动：本机实测 300 对连续保存里 33 对共享同一个 `mtimeMs`，`birthtimeMs`/`ctimeMs` 跟着一起撞，按 mtime 缓存会把旧值一直端到下下次「运气好」的写入，而那次写入可能永远不来（关掉记录后文件继续长、换了级别面板照旧筛，正是这两个闸门存在的理由）。现读的代价实测 160µs/次（真文件 1096 字节，仅 `statSync` 是 35µs），触发频率是每行日志与每条转发帧，平均远低于每秒一次。文件读不到时保持上次已知值，损坏时按默认（开 / 显示全部）回落——两个方向都不会让一次读失败把记录静默关掉、或把日志行静默藏掉。
+- `relay-settings.mjs` — 持久设置（`%LOCALAPPDATA%\Anyswitch\settings.json`，原子写）；抗截断的总开关与各端点开关（`keepAlive.endpoints[agentId]`）同在此规整，端点开关按端点深合并、缺省跟随总开关。Claude 四档接管的总开关（`claudeTierMappingsEnabled`，默认开）与 bypassPermissions 启动开关（`claudeBypassPermissions`，默认关）也归这里：总开关关时 `claudeTierMappings` 归一为空映射（映射值保留不清），中继每请求现读，两条 relay 路径同时覆盖。运行日志总开关（`loggingEnabled`，默认开）与实时输出的最低显示级别（`logLevel`，默认 info＝显示全部，只管面板显示出口、不窄化落盘与缓冲）也归这里：`createLoggingEnabledGate` / `createLogLevelGate` 每次调用现读 settings.json，relay-host 与 panel-host 各自持一份，因此设置当场生效、不需要重启任何常驻进程。上游密钥缓存开关（`credentialCacheEnabled`，默认开）同归这里，由 `createCredentialCacheEnabledGate` 每请求现读：密钥解密要起一个外部进程（本机实测约 0.4s），缓存掉的是这一跳，而它正是 2026-10-05 那次连续 70 分钟请求全败的落点；关掉开关的**当下**就清空已留存的明文——这个开关的方向是「别再留着」，留到下次请求才清等于关不掉。**闸门不按 mtime 缓存**——mtime 证明不了文件没动：本机实测 300 对连续保存里 33 对共享同一个 `mtimeMs`，`birthtimeMs`/`ctimeMs` 跟着一起撞，按 mtime 缓存会把旧值一直端到下下次「运气好」的写入，而那次写入可能永远不来（关掉记录后文件继续长、换了级别面板照旧筛，正是这两个闸门存在的理由）。现读的代价实测 160µs/次（真文件 1096 字节，仅 `statSync` 是 35µs），触发频率是每行日志与每条转发帧，平均远低于每秒一次。文件读不到时保持上次已知值，损坏时按默认（开 / 显示全部）回落——两个方向都不会让一次读失败把记录静默关掉、或把日志行静默藏掉。
 - `instance-socket-owner.mjs` — relay 侧 socket→PID 兜底数据源：解析 netstat 输出维护「连接对端端口 → 客户端进程 PID」缓存（同步查快照、后台 fire-and-forget 刷新），openai 服务器在请求无 `x-agent-instance` 头时用它合成 `<agentId>-<PID>` 实例 id（此即规范形态，消费侧归一对它是恒等映射）。
 - `autostart.mjs` — 开机自启管理（每用户计划任务 AnyswitchRelay/AnyswitchWatchdog，免管理员权限）。
 - `git-anchor.mjs` — 将 `app/.git` 锚定为指向耐久对象库（`%LOCALAPPDATA%\Anyswitch-git\objects`）的 gitfile；默认关闭（每次启动直接跳过），设 `ANYSWITCH_GIT_ANCHOR=1` 才开启。
@@ -166,13 +168,13 @@ B 层（本仓库）是 relay app：一个仅监听 127.0.0.1 的 HTTP 服务，
 - `agent-prompts-inject.mjs` — 预设注入面：把各端点的生效集渲染进该端点自家的全局指令文件，写成带 `# >>> anyswitch-managed-prompts` / `# <<< anyswitch-managed-prompts` 标记的托管块；只注正文不注标题，幂等、只剩托管块时删文件以字节级还原，单端点失败互不影响。各端点目标文件与时机见 `skills/anyswitch-preset/SKILL.md`。
 
 ### 进程与运维
-- `agent-watchdog.mjs` — followAgent 的独立看门狗进程（占用 47822 标记端口）：不依赖面板是否开着，检测到 coding agent 在跑而 relay 未启时拉起。
+- `agent-watchdog.mjs` — followAgent 的独立看门狗进程（占用 47822 标记端口）：不依赖面板是否开着，检测到 coding agent 在跑而 relay 未启时拉起。认领标记端口后**立刻写下自己的 pid**、退出时清除：这条路径正是开机自启走的，而写 pid 原先只发生在面板拉起的 `spawnWatchdog` 里，于是开机起的 watchdog 从不写盘，磁盘上长期留着一个早已死掉的 pid（`stopWatchdog` 的 pid 候选因此长期是错的，只靠标记端口属主兜住）。
 - `agent-sync-run.mjs` / `agent-sync-spawn.mjs` — 配置同步的独立短命进程与其拉起助手。同步刻意跑在常驻进程之外：每次新进程都从磁盘现读 `agent-sync` 与各 merge 模块，因此改动这些模块无需重启 relay 或面板。
 - `panel-host-restart-helper.mjs` — 一次性重启助手：面板页的「重启」按钮由 panel-host 自己承载，进程无法重启自身，故由本助手等旧进程退出、拉起新进程并确认应答。
 - `git-anchor-repair.mjs` — 运维脚本：修复或迁移 git 锚点（含把改名前路径下的旧对象库搬到 `%LOCALAPPDATA%\Anyswitch-git\objects`、重设 ACL）。会改动权限与对象库，属需人工授权的一次性操作。
 
 ### 安全与加解密
-- `dpapi.mjs` — DPAPI 桥（调用 `dpapi.ps1`）：`protect`/`unprotect`，不缓存不记录、自分配缓冲区退出清零；v2 熵 `ApiCred|DPAPI|v2|<ProviderId>`。
+- `dpapi.mjs` — DPAPI 桥（调用 `dpapi.ps1`）：`protect`/`unprotect`，不缓存不记录、自分配缓冲区退出清零；v2 熵 `ApiCred|DPAPI|v2|<ProviderId>`。失败带**固定错误码**（超时／助手起不来／助手失败／应答不可读／输出超限）：调用方需要区分这些情况（处置不同），但绝不能拿到可能回显 payload 的底层文本，所以只认码、不读 message。
 - `pi-relay-token.mjs` — 常驻 relay 令牌的生成与读取（数据根下按端点存放），供无法自带鉴权头的客户端复用。
 
 ## 5. 安全模型

@@ -17,7 +17,7 @@ import { existsSync, writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { probeRelay } from "./openai-server.mjs";
+import { probeRelay, probeRelayHealth } from "./openai-server.mjs";
 
 const RELAY_PORT = 47821;
 const RELAY_HOST_SCRIPT = fileURLToPath(new URL("relay-host.mjs", import.meta.url));
@@ -369,7 +369,9 @@ async function waitForRelayUp(timeoutMs = START_TIMEOUT_MS) {
 }
 
 export async function getRelayStatus(root, deps = {}) {
-  const probe = deps.probe ?? ((port) => probeRelay(port));
+  // 默认探针取完整自检对象（含 degraded）。注入的布尔探针继续按原语义工作：
+  // 两种形状都归一成对象，所以既有调用方与测试替身一行都不用改。
+  const probe = deps.probe ?? ((port) => probeRelayHealth(port));
   // Display path: cached port-owner lookup (5s TTL). The cached value never
   // feeds a kill decision — startRelay's reuse short-circuit is guarded by
   // the live HTTP probe, not by this PID.
@@ -378,22 +380,34 @@ export async function getRelayStatus(root, deps = {}) {
 
   const pidPath = getRelayPidPath(root);
   const filePid = readRelayPid(pidPath);
-  const serving = await probe(RELAY_PORT);
+  const raw = await probe(RELAY_PORT);
+  const health = typeof raw === "object" && raw !== null ? raw : { serving: raw === true };
+  const serving = health.serving === true;
 
   if (serving) {
     // The port owner is authoritative — a stale relay.pid (left by a dead
     // process that was since replaced) must not be reported as the relay's PID.
     const ownerPid = await findOwner(RELAY_PORT);
     const pid = Number.isFinite(ownerPid) ? ownerPid : filePid;
-    return { status: "running", pid, port: RELAY_PORT };
+    // status 刻意保持 "running"：degraded 是附加事实，不是第四种生命周期状态。
+    // 把它折进 status 会连带改掉 startRelay 的复用短路（那里只认 "running"），
+    // 于是每次巡检都会去 spawn 一个注定退出的重复实例。
+    return {
+      status: "running",
+      pid,
+      port: RELAY_PORT,
+      degraded: health.degraded === true,
+      consecutiveFailures: health.consecutiveFailures ?? 0,
+      lastFailureKind: health.lastFailureKind ?? null,
+    };
   }
   // Port not answering. Distinguish starting (pid alive) from stopped
   // (no live pid) and clean a stale pid file so a later start is clean.
   if (filePid && isAlive(filePid)) {
-    return { status: "starting", pid: filePid, port: RELAY_PORT };
+    return { status: "starting", pid: filePid, port: RELAY_PORT, degraded: false };
   }
   if (filePid) clearRelayPid(pidPath);
-  return { status: "stopped", pid: null, port: RELAY_PORT };
+  return { status: "stopped", pid: null, port: RELAY_PORT, degraded: false };
 }
 
 export async function startRelay(root, env = process.env) {
@@ -413,7 +427,14 @@ export async function startRelay(root, env = process.env) {
 }
 
 export async function stopRelay(root, deps = {}) {
-  const probe = deps.probe ?? ((port) => probeRelay(port));
+  // 停用路径只关心「还答不答」，所以这里把探针统一压成布尔：注入的替身可能返回
+  // 完整自检对象，而下面的等待轮询写的是 `!probe(...)`——对象恒为真值，会把
+  // 「已经停了」误判成「还在答」。
+  const rawProbe = deps.probe ?? ((port) => probeRelay(port));
+  const probe = async (port) => {
+    const raw = await rawProbe(port);
+    return typeof raw === "object" && raw !== null ? raw.serving === true : raw === true;
+  };
   // Kill path: UNCACHED port-owner lookup — the kill gate must see the fresh
   // owner PID, never a cached one, and must not share the display cache's
   // in-flight slot.

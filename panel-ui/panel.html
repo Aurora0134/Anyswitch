@@ -1782,6 +1782,20 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
+          <!-- 缓存上游密钥：安全与速度的取舍，交给用户。开 = 密钥留在 relay 内存里，
+               请求不再每次重新读取（省掉一次外部进程往返）；关 = 用完即弃，代价是
+               每个请求都要重新读一次。密钥文件一变即自动失效重读，所以轮换密钥不
+               需要用户额外做什么。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">缓存上游密钥</div>
+              <div class="modal-item-desc">开启后，上游密钥在 Anyswitch 运行期间保留在内存，请求不再每次重新读取——响应更快，代价是密钥常驻内存：建议仅在受信任环境中开启</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="credentialCacheToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
           <div class="modal-item">
             <div>
               <div class="modal-item-title">折线视窗节点数</div>

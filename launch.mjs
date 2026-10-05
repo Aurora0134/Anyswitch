@@ -5,20 +5,29 @@
 //   loadCredential -> store-io.mjs readCiphertext() + dpapi.mjs unprotect(v2)
 //   upstreamFetch  -> retrying wrapper around global fetch
 //
-// Credential rules carried over from handler.mjs: decrypt only at
-// request time, hand the plaintext to exactly one upstream call, never cache,
-// never log. Every ciphertext/plaintext Buffer this module controls is zeroed
-// in a finally; the one unavoidable exception is the JS string handed to the
-// HTTP Authorization header, whose lifetime is bounded by the runtime and
-// cannot be explicitly overwritten.
+// Credential rules carried over from handler.mjs: decrypt at request time, hand
+// the plaintext to exactly one upstream call, never log it. Every
+// ciphertext/plaintext Buffer this module controls is zeroed in a finally; the
+// one unavoidable exception is the JS string handed to the HTTP Authorization
+// header, whose lifetime is bounded by the runtime and cannot be explicitly
+// overwritten.
+//
+// Caching is the user's call, not this module's (settings: credentialCacheEnabled,
+// default on). The expensive part of a load is not the read — it is spawning the
+// DPAPI helper process, measured ~0.4s here — and that per-request spawn is the
+// link that failed for 70 straight minutes on 2026-10-05. With caching on, the
+// decrypted value is retained per provider and reused until the ciphertext itself
+// changes; with it off, the cache is dropped on the spot and every request pays
+// the helper again.
 
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { loadStore as ioLoadStore, readCiphertext, storePaths } from "./store-io.mjs";
-import { unprotect } from "./dpapi.mjs";
+import { unprotect, DPAPI_CODES } from "./dpapi.mjs";
 import { createRelayServer, generateToken, listenLoopback } from "./server.mjs";
 import { createSessionReporter } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
-import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
+import { loadSettings, defaultSettingsPath, createCredentialCacheEnabledGate } from "./relay-settings.mjs";
 import { defaultEffortInjector } from "./effort-injection.mjs";
 
 // Per-endpoint upstream deadline. This bounds fetch() resolve time, which for
@@ -188,6 +197,84 @@ export function createRetryingFetch(
   };
 }
 
+// 上游密钥加载器。
+//
+// 独立成工厂而不是塞在 createProductionDeps 里，是因为「什么时候可以复用上一次
+// 解出的明文」是这段代码里最容易错、也最不该靠人工推演的部分：缓存要能在密钥轮
+// 换后立刻失效（否则拿着旧密钥去请求），要在开关关掉时立刻丢弃（否则「关掉」等
+// 于没关），还要在失败时给出可分类、且绝不回显密钥材料的原因。这些都需要用替身
+// 精确验证，所以 IO（读密文、解密）在这里是可注入的。
+//
+// 复用判据是凭据密文本身的哈希，不是 mtime、不是时间窗：密文一变哈希就变，于是
+// 轮换密钥、改 credentialFile、换 store 全部自动失效，不需要维护任何「何时该失
+// 效」的清单——而漏失效一次的代价是拿着旧密钥发请求。
+export function createCredentialLoader({
+  paths = storePaths(),
+  readCiphertext: readCipher = readCiphertext,
+  unprotect: decrypt = unprotect,
+  isCacheEnabled = () => true,
+} = {}) {
+  const cache = new Map();
+
+  // dpapi.mjs 的固定错误码 → 可分类、可落日志、不含密钥材料的原因。调用方需要
+  // 区分「助手没起来」和「助手超时」（两者处置不同），但绝不能拿到可能回显
+  // payload 的底层文本，所以这里只认码、不读 message。
+  function failureReason(error) {
+    switch (error?.code) {
+      case DPAPI_CODES.TIMEOUT: return "the credential helper timed out";
+      case DPAPI_CODES.SPAWN_FAILED: return "the credential helper could not start";
+      case DPAPI_CODES.FAILED: return "the credential helper failed";
+      case DPAPI_CODES.BAD_RESPONSE: return "the credential helper returned an unreadable response";
+      case DPAPI_CODES.OUTPUT_LIMIT: return "the credential helper returned too much output";
+      default: return "credential could not be decrypted";
+    }
+  }
+
+  return async function loadCredential(providerId, provider) {
+    if (typeof providerId !== "string" || providerId.length === 0) {
+      return { ok: false, reason: "a provider id is required to load a credential" };
+    }
+    if (provider === null || typeof provider !== "object" || typeof provider.credentialFile !== "string") {
+      return { ok: false, reason: "a provider entry with a credentialFile is required" };
+    }
+
+    let ciphertext = null;
+    let plaintext = null;
+    try {
+      const read = readCipher(provider.credentialFile, paths);
+      if (!read.ok) return { ok: false, reason: read.reason };
+      ciphertext = read.ciphertext;
+
+      const cacheEnabled = isCacheEnabled();
+      // 关掉开关的当下就把已留存的明文丢掉：这个开关的方向是「别再留着」，
+      // 留到下次请求才清就等于关不掉。
+      if (!cacheEnabled && cache.size > 0) cache.clear();
+      const fingerprint = cacheEnabled ? createHash("sha256").update(ciphertext).digest("hex") : null;
+      if (fingerprint !== null) {
+        const hit = cache.get(providerId);
+        if (hit !== undefined && hit.fingerprint === fingerprint) {
+          return { ok: true, value: hit.value, cached: true };
+        }
+      }
+
+      plaintext = await decrypt(ciphertext, providerId, { generation: "v2" });
+      if (plaintext.length === 0) {
+        return { ok: false, reason: "credential decrypted to an empty value" };
+      }
+      // The handler interpolates the value into one Authorization header. Give
+      // it a string and keep the buffer lifetime entirely inside this call.
+      const value = plaintext.toString("utf8");
+      if (fingerprint !== null) cache.set(providerId, { fingerprint, value });
+      return { ok: true, value };
+    } catch (error) {
+      // Reason is a category, never the helper's own text (see failureReason).
+      return { ok: false, reason: failureReason(error) };
+    } finally {
+      wipe(ciphertext, plaintext);
+    }
+  };
+}
+
 // The handler passes the already-validated providerId explicitly alongside the
 // provider entry, so the DPAPI entropy is derived from stable request-scoped
 // input. No cross-request shared state and no object-identity reverse lookup,
@@ -201,6 +288,7 @@ export function createProductionDeps({
   effortInjector,
   logger = null,
   agentId = "claude",
+  credentialCacheEnabledGate,
 } = {}) {
   function loadStore() {
     const loaded = ioLoadStore(paths);
@@ -208,35 +296,12 @@ export function createProductionDeps({
     return { ok: true, store: loaded.store };
   }
 
-  async function loadCredential(providerId, provider) {
-    if (typeof providerId !== "string" || providerId.length === 0) {
-      return { ok: false, reason: "a provider id is required to load a credential" };
-    }
-    if (provider === null || typeof provider !== "object" || typeof provider.credentialFile !== "string") {
-      return { ok: false, reason: "a provider entry with a credentialFile is required" };
-    }
-
-    let ciphertext = null;
-    let plaintext = null;
-    try {
-      const read = readCiphertext(provider.credentialFile, paths);
-      if (!read.ok) return { ok: false, reason: read.reason };
-      ciphertext = read.ciphertext;
-      plaintext = await unprotect(ciphertext, providerId, { generation: "v2" });
-      if (plaintext.length === 0) {
-        return { ok: false, reason: "credential decrypted to an empty value" };
-      }
-      // The handler interpolates the value into one Authorization header. Give
-      // it a string and keep the buffer lifetime entirely inside this call.
-      const value = plaintext.toString("utf8");
-      return { ok: true, value };
-    } catch {
-      // Generic by design: DPAPI/helper errors never surface (dpapi.mjs).
-      return { ok: false, reason: "credential could not be decrypted" };
-    } finally {
-      wipe(ciphertext, plaintext);
-    }
-  }
+  // 是否缓存由设置项决定，且每请求现读：开关关掉后不必等重启，内存里的明文立刻
+  // 被清掉（见 createCredentialLoader）。
+  const loadCredential = createCredentialLoader({
+    paths,
+    isCacheEnabled: credentialCacheEnabledGate ?? createCredentialCacheEnabledGate(),
+  });
 
   // The catalog generation binding is process-local state.
   let generation = null;
