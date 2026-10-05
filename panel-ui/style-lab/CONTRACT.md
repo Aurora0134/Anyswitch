@@ -1,6 +1,6 @@
 # 面板美术风格重构 · 风格片段契约（常驻主题机制）
 
-目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 4 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia` / `anthropic`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上。
+目标：面板三文件 `../panel.html`（DOM + 开屏内联脚本）/ `../panel.css`（全部样式）/ `../panel.js`（主脚本），现有 3 套可切换面板主题片段（`saas` 默认 / `aurora` / `sepia`），覆盖于 panel.css 基座（结构基础层，本身不再是可选主题）之上。
 **布局、DOM 结构、文案、既有注释一律不动**；只换皮肤。
 
 主题已转正为常驻设置：片段以横幅块形式存于 panel.css（每块带 `/* ===== style-lab: SLUG ===== */`
@@ -13,8 +13,8 @@
 
 ## 切换机制（集成方实现，片段作者只需了解）
 
-- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` / `anthropic` = 四套风格。
-  已退役的 `blueprint` / `neon` / `industrial` / `editorial` 片段随退役删除；
+- `<html>` 上新增 `data-style` 属性：`saas`（默认）/ `aurora` / `sepia` = 三套风格。
+  已退役的 `blueprint` / `neon` / `industrial` / `editorial` / `anthropic` 片段随退役删除；
   存档缺失、空串、上述退役值或任何未知值，首帧一律解析为 `saas` 并覆写存档。
 - 亮暗仍由既有 `data-theme="light|dark"` + `prefers-color-scheme` 决定，与 `data-style` 正交，
   亮暗由右上角按钮独立控制。

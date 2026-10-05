@@ -8,11 +8,12 @@
 <link rel="stylesheet" href="/panel/assets/panel.css">
 <link rel="stylesheet" href="/panel/assets/xterm.css">
 <script>
-// 面板主题——绘制前恢复本机选择的主题，避免刷新时先闪过默认的 SaaS 主题
-// 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 等历史主题已退役不可选：
-// 缺失、空值或任何非法存档一律回落 SaaS 并改写存档，避免残留已删样式
+// 面板主题——绘制前恢复本机选择的主题，避免刷新时先闪过默认主题（Default）
+// 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
+// 等历史主题已退役不可选：缺失、空值或任何非法存档一律回落默认主题（saas）并改写存档，
+// 避免残留已删样式
 // 这份清单与 panel.js 的 STYLES 是同一份，改动需两侧同步（panel.test.mjs 有同值断言）
-var PANEL_STYLES = ["saas", "aurora", "sepia", "anthropic"];
+var PANEL_STYLES = ["saas", "aurora", "sepia"];
 var panelStyleRaw = null;
 try {
   panelStyleRaw = localStorage.getItem("panel-style");
@@ -1958,10 +1959,9 @@ if (window.panelStartupController) panelStartupPlay();
       <p class="settings-theme-desc">点选主题即时生效并记住选择；亮暗模式由右上角按钮单独控制。</p>
       <div class="settings-theme-grid">
         <div class="settings-theme-list" id="stylePicker" role="radiogroup" aria-label="主题">
-          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">SaaS</button>
-          <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">极光</button>
-          <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">暖纸</button>
-          <button type="button" class="settings-theme-item" data-style="anthropic" role="radio" aria-checked="false">Anthropic</button>
+          <button type="button" class="settings-theme-item" data-style="saas" role="radio" aria-checked="true">Default</button>
+          <button type="button" class="settings-theme-item" data-style="aurora" role="radio" aria-checked="false">Aurora</button>
+          <button type="button" class="settings-theme-item" data-style="sepia" role="radio" aria-checked="false">Sepia</button>
         </div>
         <!-- 预览 = 真实看板镜像：进主题子页时克隆看板页当前 DOM（剥 id、inert、CSS
              缩放），换主题/切亮暗经全局 token 即时反映；看板改版预览自动跟随 -->
