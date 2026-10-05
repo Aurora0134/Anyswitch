@@ -411,6 +411,47 @@ async function api(method, path, body) {
     refreshModelStability();
   });
 
+  // relay 状态 → 顶栏与侧栏的呈现。抽成纯函数是为了这段判断能在测试里真跑一遍，
+  // 而不是只对源码做正则断言。
+  //
+  // 四种呈现：运行中 / 服务异常 / 启动中 / 已停止。「服务异常」这一态是因为
+  // 2026-10-05 那次连续 70 分钟的请求全败被显示成「运行中 / 运行正常」——进程在、
+  // 端口在、探针也答得出来，但每一个真实请求都在失败。它不是「已停止」（进程还
+  // 活着，停止按钮该给的是「停止」），也不是「正常」。
+  function relayStatusPresentation(relay, defaultPort) {
+    const port = relay.port || defaultPort;
+    if (relay.status === "running" && relay.degraded === true) {
+      return {
+        dotClass: "pulse-dot stopped",
+        statusText: `Relay 服务异常 (${port})`,
+        badgeClass: "badge badge-warn",
+        badgeText: "服务异常",
+      };
+    }
+    if (relay.status === "running") {
+      return {
+        dotClass: "pulse-dot running",
+        statusText: `Relay 运行中 (${port})`,
+        badgeClass: "badge badge-ok",
+        badgeText: "运行正常",
+      };
+    }
+    if (relay.status === "starting") {
+      return {
+        dotClass: "pulse-dot starting",
+        statusText: "Relay 启动中...",
+        badgeClass: "badge badge-warn",
+        badgeText: "启动中",
+      };
+    }
+    return {
+      dotClass: "pulse-dot stopped",
+      statusText: "Relay 已停止",
+      badgeClass: "badge badge-danger",
+      badgeText: "已停止",
+    };
+  }
+
   async function refreshStatus() {
     try {
       const res = await api("GET", "/api/status");
@@ -426,25 +467,18 @@ async function api(method, path, body) {
       // Drive the start/stop toggle (text + red/blue) from the relay's real state.
       updateRelayControls(relay);
 
+      // 四态呈现由 relayStatusPresentation 决定（含「服务异常」——在跑但每个请求
+      // 都在失败），这里只负责落到 DOM 上。
+      const presentation = relayStatusPresentation(relay, 47821);
+      dot.className = presentation.dotClass;
+      statusText.textContent = presentation.statusText;
+      sbState.className = presentation.badgeClass;
+      sbState.textContent = presentation.badgeText;
       if (relay.status === "running") {
-        dot.className = "pulse-dot running";
-        statusText.textContent = `Relay 运行中 (${relay.port || 47821})`;
-        sbState.className = "badge badge-ok";
-        sbState.textContent = "运行正常";
         hostEl.textContent = `127.0.0.1:${relay.port || 47821}`;
         if (res && res.startTime) {
           uptimeEl.textContent = formatDurationSeconds(Date.now() - res.startTime);
         }
-      } else if (relay.status === "starting") {
-        dot.className = "pulse-dot starting";
-        statusText.textContent = "Relay 启动中...";
-        sbState.className = "badge badge-warn";
-        sbState.textContent = "启动中";
-      } else {
-        dot.className = "pulse-dot stopped";
-        statusText.textContent = "Relay 已停止";
-        sbState.className = "badge badge-danger";
-        sbState.textContent = "已停止";
       }
       // 终端宿主状态随状态帧一起下发：驱动入口卡与终端页头的徽标与起停钮
       applyTerminalHostState(normalizeTerminalHostState(res?.terminalHost?.state));
@@ -2891,6 +2925,7 @@ async function api(method, path, body) {
     const followAgentToggle = $("followAgentToggle");
     const startupAnimationToggle = $("startupAnimationToggle");
     const injectEffortToggle = $("injectEffortToggle");
+    const credentialCacheToggle = $("credentialCacheToggle");
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
@@ -2912,7 +2947,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -3151,6 +3186,9 @@ async function api(method, path, body) {
         }
         if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
           injectEffortToggle.checked = d.settings.injectThinkingEffort;
+        }
+        if (!settingsSaving.credentialCache && credentialCacheToggle && d.settings && typeof d.settings.credentialCacheEnabled === "boolean") {
+          credentialCacheToggle.checked = d.settings.credentialCacheEnabled;
         }
         // 运行日志开关：回灌时把左侧那张实时输出卡的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -3514,6 +3552,38 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.injectEffort = false;
           injectEffortToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 缓存上游密钥：与其它项同构的即改即存。改完当场生效——relay 每次取密钥都
+    // 现读这个开关，所以关掉之后不必等重启，内存里的明文立刻被清掉。
+    if (credentialCacheToggle) {
+      credentialCacheToggle.onchange = async () => {
+        if (settingsSaving.credentialCache) {
+          credentialCacheToggle.checked = !credentialCacheToggle.checked;
+          return;
+        }
+        const next = credentialCacheToggle.checked;
+        settingsSaving.credentialCache = true;
+        settingsLoadGen += 1;
+        credentialCacheToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { credentialCacheEnabled: next });
+          if (!d.ok) {
+            credentialCacheToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.credentialCacheEnabled;
+            if (typeof saved === "boolean") credentialCacheToggle.checked = saved;
+            toast(next ? "已开启缓存上游密钥" : "已关闭缓存上游密钥");
+          }
+        } catch (e) {
+          credentialCacheToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.credentialCache = false;
+          credentialCacheToggle.removeAttribute("aria-busy");
         }
       };
     }

@@ -3,7 +3,8 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createOpenAIRelayServer, listenLoopback, anthropicUsageToOpenAI, probeRelay, isCodexBackgroundRequest } from "./openai-server.mjs";
+import { createOpenAIRelayServer, listenLoopback, anthropicUsageToOpenAI, probeRelay, probeRelayHealth, isCodexBackgroundRequest } from "./openai-server.mjs";
+import { createServiceHealth } from "./service-health.mjs";
 import { INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 
 const TOKEN = "test-token-123";
@@ -2042,6 +2043,98 @@ describe("agent activity stream (/api/internal/agents-activity)", () => {
       const snapshot = await readFrame(reader, box);
       assert.deepEqual(snapshot, { type: "snapshot", instances: [] });
       await reader.cancel().catch(() => {});
+    });
+  });
+});
+
+// --- self-health on the probe + port-ownership retry (2026-10-05) -----------
+//
+// Two gaps this closes, both found by one 70-minute outage: the probe could only
+// answer "is the port answering?" (so a relay failing every request looked
+// healthy), and a single 2s probe miss at startup was read as "the port belongs
+// to someone else" (so a transient stall stopped the relay from ever binding).
+
+describe("root endpoint self-health", () => {
+  it("reports serving with nothing degraded on a fresh relay", async () => {
+    await withServer({ ...deps(null), serviceHealth: createServiceHealth() }, async (port) => {
+      const body = await (await fetch(`http://127.0.0.1:${port}/`)).json();
+      assert.equal(body.service, "anyswitch-relay");
+      assert.equal(body.degraded, false);
+      assert.equal(body.consecutiveFailures, 0);
+    });
+  });
+
+  it("reports degraded while STILL serving — the whole point of the field", async () => {
+    const health = createServiceHealth({ threshold: 2 });
+    health.recordFailure("credential");
+    health.recordFailure("credential");
+    await withServer({ ...deps(null), serviceHealth: health }, async (port) => {
+      const probe = await probeRelayHealth(port);
+      assert.equal(probe.serving, true, "它还在服务——所以旧的布尔探针看不出任何问题");
+      assert.equal(probe.degraded, true);
+      assert.equal(probe.consecutiveFailures, 2);
+      assert.equal(probe.lastFailureKind, "credential");
+      assert.equal(await probeRelay(port), true, "布尔视图语义不变：答得出来仍是 true");
+    });
+  });
+
+  it("keeps the boolean view false for a foreign 200 body", async () => {
+    const { createServer } = await import("node:http");
+    const server = createServer((req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const health = await probeRelayHealth(server.address().port);
+      assert.equal(health.serving, false, "外人服务不得被当成自家 relay");
+      assert.equal(health.degraded, false);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+describe("listenLoopback port-ownership retry", () => {
+  async function withOccupiedPort(fn) {
+    const { createServer } = await import("node:http");
+    const blocker = createServer((req, res) => { res.writeHead(200); res.end(); });
+    await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+    try {
+      return await fn(blocker.address().port);
+    } finally {
+      await new Promise((resolve) => blocker.close(resolve));
+    }
+  }
+
+  it("waits out a transient probe miss instead of declaring the port foreign", async () => {
+    await withOccupiedPort(async (port) => {
+      const { createServer } = await import("node:http");
+      const server = createServer();
+      let calls = 0;
+      const probe = async () => { calls += 1; return calls >= 3; };
+      const result = await listenLoopback(server, port, {
+        probe, attempts: 4, delayMs: 0, sleep: async () => {},
+      });
+      assert.equal(result.reused, true, "瞬时没答上不该判死");
+      assert.equal(calls, 3, "前两次没答上不算数，第三次认出来即复用");
+      await result.close();
+    });
+  });
+
+  it("still rejects a port that never answers as our relay", async () => {
+    await withOccupiedPort(async (port) => {
+      const { createServer } = await import("node:http");
+      const server = createServer();
+      await assert.rejects(
+        () => listenLoopback(server, port, {
+          probe: async () => false, attempts: 3, delayMs: 0, sleep: async () => {},
+        }),
+        (err) => {
+          assert.equal(err.code, "RELAY_PORT_FOREIGN", "带码，调用方才能与「自家 relay 没答上来」分开记");
+          return true;
+        },
+      );
     });
   });
 });

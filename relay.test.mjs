@@ -9,6 +9,7 @@ import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffort
 import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
+import { createServiceHealth } from "./service-health.mjs";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -655,6 +656,84 @@ test("credential load failure is 502 and never reaches upstream", async () => {
   const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/claude-opus-5"));
   assert.equal(out.status, 502);
   assert.equal(upstreamCalls, 0);
+});
+
+// --- failure visibility (2026-10-05) ----------------------------------------
+//
+// The relay could not say WHY a credential load failed, and it could not say that
+// it was failing at all: the client saw a generic 502 and the relay's own log
+// stayed empty. One such fault ran for 70 minutes undetected.
+
+// Wire id 从 catalog 推出来，不写死：模型名会变，catalog 才是「什么能路由」的正源。
+function pokeWireId() {
+  const entry = buildWireCatalog(syntheticStore()).find((e) => e.providerId === "poke-api");
+  assert.ok(entry, "syntheticStore 必须产出一个 poke-api 的 catalog 条目");
+  return entry.wireId;
+}
+
+test("a credential failure is logged with its cause and counted toward degraded health", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  const logged = [];
+  const handler = createHandler({
+    ...makeDeps({ loadCredential: async () => ({ ok: false, reason: "the credential helper timed out" }) }),
+    serviceHealth,
+    logger: { info() {}, warn() {}, error: (m) => logged.push(m) },
+  });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(out.status, 502, "凭据取不到就是 502，客户端口径不变");
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 1);
+  assert.equal(logged.length, 1, "这类故障唯一的证据来源就是这一行");
+  assert.match(logged[0], /poke-api/);
+  assert.match(logged[0], /the credential helper timed out/);
+  assert.ok(!logged[0].includes("synthetic-key"), "日志不得带密钥材料");
+
+  await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(serviceHealth.snapshot().degraded, true, "连续 2 次即越线");
+  assert.equal(serviceHealth.snapshot().lastFailureKind, "credential");
+});
+
+test("an unreadable store counts as a relay-side failure too", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 1 });
+  const handler = createHandler({
+    ...makeDeps({ loadStore: () => ({ ok: false }) }),
+    serviceHealth,
+  });
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+  assert.equal(out.status, 502);
+  assert.equal(serviceHealth.snapshot().degraded, true);
+  assert.equal(serviceHealth.snapshot().lastFailureKind, "store");
+});
+
+test("reaching the upstream clears the failure count", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  serviceHealth.recordFailure("credential");
+  const handler = createHandler({ ...makeDeps(), serviceHealth });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+
+  assert.equal(out.status, 200);
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 0, "送达上游即证明中继自身是好的");
+});
+
+test("an upstream 429 does not count against relay health", async () => {
+  const serviceHealth = createServiceHealth({ threshold: 2 });
+  const handler = createHandler({
+    ...makeDeps({
+      upstreamFetch: async () => ({
+        ok: false,
+        status: 429,
+        text: async () => "rate limited",
+        json: async () => ({ error: { message: "rate limited" } }),
+      }),
+    }),
+    serviceHealth,
+  });
+
+  const out = await handler.handleMessages(AUTH, messageBody(pokeWireId()));
+
+  assert.equal(out.status, 429);
+  assert.equal(serviceHealth.snapshot().consecutiveFailures, 0, "上游限流是中继之外的问题，不该报成自己降级");
 });
 
 test("error bodies never contain the credential or the token", async () => {

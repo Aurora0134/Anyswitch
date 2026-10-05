@@ -231,3 +231,154 @@ test("startWatchdogHost wires the real settings file (not the data root dir) int
   assert.equal(calls.getRelayStatus, 1, "tick 必须读到真 settings.json 并走到 relay 状态探测");
   assert.equal(calls.startRelay, 1);
 });
+
+// --- degraded relay self-heal (2026-10-05) ----------------------------------
+//
+// "Does the port answer?" was the only question the watcher asked, so a relay
+// that stayed up while failing EVERY request was never touched. These tests lock
+// the reaction and its guard rails together: the old shape acted on every tick
+// forever, failures included, which spawned 48 relays that each died on the
+// occupied port — 2.5 hours of churn that made a bad situation worse.
+
+function makeDegradedWatcher({ status, now, restarts, errors = [], options = {} }) {
+  return createAgentWatcher({
+    root: "C:/x",
+    scanProcesses: async () => ({ dsh: 1 }),
+    startRelay: async () => { restarts.push("start"); },
+    restartRelay: async () => { restarts.push("restart"); },
+    getRelayStatus: async () => status.value,
+    loadSettings: () => ({ settings: { followAgent: true } }),
+    intervalMs: 60 * 60 * 1000,
+    logger: { info() {}, warn() {}, error: (m) => errors.push(m) },
+    now: () => now.value,
+    degradedGraceMs: 60_000,
+    healBackoffMs: [30_000],
+    healBudget: 3,
+    healBudgetWindowMs: 30 * 60_000,
+    ...options,
+  });
+}
+
+test("degraded relay: nothing happens while the relay serves", async () => {
+  const status = { value: { status: "running", degraded: false } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+  await w.tick();
+  assert.deepEqual(restarts, [], "健康的中继一次都不该被动");
+});
+
+test("degraded relay: the grace period is waited out before anything is touched", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 5, lastFailureKind: "credential" } };
+  const now = { value: 1_000_000 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+
+  await w.tick(); // first sighting starts the clock
+  assert.deepEqual(restarts, [], "刚看见降级就重启 = 把偶发抖动变成一次重启");
+  now.value += 30_000;
+  await w.tick();
+  assert.deepEqual(restarts, [], "宽限期内不动手");
+  now.value += 31_000; // 61s since the first sighting
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"], "过宽限期走重启（端口被自己占着时「启动」是空操作）");
+});
+
+test("degraded relay: backoff spaces the attempts out", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+
+  await w.tick();
+  now.value = 60_000;
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"]);
+  now.value = 70_000; // inside the 30s backoff
+  await w.tick();
+  assert.deepEqual(restarts, ["restart"], "退避未到不再动手");
+  now.value = 90_000;
+  await w.tick();
+  assert.deepEqual(restarts, ["restart", "restart"], "退避走完才允许下一次");
+});
+
+test("degraded relay: gives up after the budget and records why", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const errors = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts, errors,
+    options: { healBudget: 2, healBackoffMs: [0] },
+  });
+
+  await w.tick(); // sighting
+  now.value = 60_000;
+  await w.tick(); // attempt 1
+  now.value = 61_000;
+  await w.tick(); // attempt 2
+  assert.equal(restarts.length, 2);
+  now.value = 62_000;
+  await w.tick();
+  now.value = 300_000;
+  await w.tick();
+  assert.equal(restarts.length, 2, "预算用完即停手，不再无限拉进程");
+  assert.equal(errors.length, 1, "停手必须留一条明确的记录，而不是静默放弃");
+  assert.match(errors[0], /auto-heal stopped/);
+});
+
+test("degraded relay: a brief recovery does NOT hand the budget back", async () => {
+  // 重启之后新进程当然是干净的、探针立刻报正常。如果这就把预算还回去，「30 分钟
+  // 内最多 3 次」形同虚设——每次重启都重置，实际节奏退化成「宽限期 + 退避」一次，
+  // 比原来的每 tick 一拉还密。
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts,
+    options: { healBudget: 1, healBackoffMs: [0] },
+  });
+
+  await w.tick(); // sighting
+  now.value = 60_000;
+  await w.tick(); // attempt 1（预算 1，已用完）
+  assert.equal(restarts.length, 1);
+
+  status.value = { status: "running", degraded: false };
+  now.value = 61_000;
+  await w.tick(); // 短暂恢复
+  status.value = { status: "running", degraded: true, consecutiveFailures: 3, lastFailureKind: "credential" };
+  now.value = 200_000;
+  await w.tick(); // 重新计时
+  now.value = 400_000;
+  await w.tick(); // 宽限期早过，但预算还没还
+  assert.equal(restarts.length, 1, "窗口内已用掉的额度不因一次恢复而归还");
+});
+
+test("degraded relay: the budget comes back once the window has passed", async () => {
+  const status = { value: { status: "running", degraded: true, consecutiveFailures: 9, lastFailureKind: "credential" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({
+    status, now, restarts,
+    options: { healBudget: 1, healBackoffMs: [0], healBudgetWindowMs: 30 * 60_000 },
+  });
+
+  await w.tick();
+  now.value = 60_000;
+  await w.tick();
+  assert.equal(restarts.length, 1);
+
+  now.value = 60_000 + 31 * 60_000; // 窗口已过
+  await w.tick();
+  assert.equal(restarts.length, 2, "窗口滑过去之后额度自然恢复");
+});
+
+test("degraded relay: a stopped relay still takes the plain start path", async () => {
+  const status = { value: { status: "stopped" } };
+  const now = { value: 0 };
+  const restarts = [];
+  const w = makeDegradedWatcher({ status, now, restarts });
+  await w.tick();
+  assert.deepEqual(restarts, ["start"], "原有自愈路径不变");
+});

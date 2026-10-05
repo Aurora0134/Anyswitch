@@ -384,3 +384,80 @@ test("isPidAlive 保持保守口径：无结论不算存活", () => {
   assert.equal(isPidAlive(0), false);
   assert.equal(isPidAlive(999999), false);
 });
+
+// --- degraded reporting (2026-10-05) ----------------------------------------
+//
+// getRelayStatus must be able to say "running, but not able to serve". The status
+// string deliberately stays "running": startRelay short-circuits on it, and a
+// fourth lifecycle state there would make every watchdog tick spawn a duplicate
+// relay that dies on the occupied port.
+
+test("getRelayStatus carries degraded facts while keeping status 'running'", async () => {
+  const root = makeRoot();
+  writeRelayPid(1234, getRelayPidPath(root));
+
+  const status = await getRelayStatus(root, {
+    probe: async () => ({ serving: true, degraded: true, consecutiveFailures: 7, lastFailureKind: "credential" }),
+    findPortOwnerPid: () => 1234,
+    isPidAlive: () => true,
+  });
+
+  assert.equal(status.status, "running", "degraded 是附加事实，不是第四种生命周期状态");
+  assert.equal(status.degraded, true);
+  assert.equal(status.consecutiveFailures, 7);
+  assert.equal(status.lastFailureKind, "credential");
+  assert.equal(status.pid, 1234, "端口属主仍是权威 pid");
+});
+
+test("getRelayStatus accepts a boolean probe (existing doubles) and reports not degraded", async () => {
+  const root = makeRoot();
+  writeRelayPid(4321, getRelayPidPath(root));
+
+  const status = await getRelayStatus(root, {
+    probe: async () => true,
+    findPortOwnerPid: () => 4321,
+    isPidAlive: () => true,
+  });
+
+  assert.equal(status.status, "running");
+  assert.equal(status.degraded, false);
+  assert.equal(status.consecutiveFailures, 0);
+});
+
+test("getRelayStatus reports no degradation while the port is not serving", async () => {
+  const root = makeRoot();
+  writeRelayPid(555, getRelayPidPath(root));
+
+  const status = await getRelayStatus(root, {
+    probe: async () => ({ serving: false, degraded: true, consecutiveFailures: 9 }),
+    findPortOwnerPid: () => null,
+    isPidAlive: () => true,
+  });
+
+  assert.equal(status.status, "starting", "pid 还活着但端口不答 = 启动中");
+  assert.equal(status.degraded, false, "没在服务的进程不该被报成服务异常");
+});
+
+test("stopRelay normalizes an object probe: a still-serving relay is not 'down'", async () => {
+  // 归一化的理由：停用路径的等待轮询写的是 `!probe(...)`，而对象恒为真值——
+  // 不压成布尔就会把「一直还在答」误判成「已经停了」。
+  const root = makeRoot();
+  const { deps, killed } = makeStopDeps({ portAnswering: false });
+  deps.probe = async () => ({ serving: true, degraded: false });
+
+  const result = await stopRelay(root, deps);
+
+  assert.equal(result.ok, false, "端口还在答，停用不算成功");
+  assert.deepEqual(killed, []);
+});
+
+test("stopRelay treats an object probe reporting not-serving as down", async () => {
+  const root = makeRoot();
+  const { deps } = makeStopDeps({ portAnswering: false });
+  deps.probe = async () => ({ serving: false, degraded: false });
+
+  const result = await stopRelay(root, deps);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.relay.status, "stopped");
+});

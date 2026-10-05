@@ -19,15 +19,22 @@ const MAX_BODY_BYTES = 32 * 1024 * 1024;
 // the resident relay (relay-host.mjs) binds.
 export const DEFAULT_RELAY_PORT = 47821;
 
-// Liveness + identity probe for the relay's own port. GET / must answer a
-// JSON body whose service field is "anyswitch-relay" (see the root route) —
-// a bare 200 from some unrelated loopback service must not count.
-export function probeRelay(port) {
+// Liveness + identity + self-health probe for the relay's own port. GET / must
+// answer a JSON body whose service field is "anyswitch-relay" (see the root
+// route) — a bare 200 from some unrelated loopback service must not count.
+//
+// `serving` keeps exactly the old boolean meaning, so every port-ownership
+// decision that depends on it is unchanged (a foreign listener still reads as
+// not-serving). `degraded` answers a question the old probe could not ask at
+// all — "is this relay still ABLE to serve?" — which is why a 70-minute total
+// outage on 2026-10-05 stayed invisible while every probe kept answering.
+export function probeRelayHealth(port) {
+  const notServing = { serving: false, degraded: false, consecutiveFailures: 0, lastFailureKind: null };
   return new Promise((resolve) => {
     const req = request(`http://127.0.0.1:${port}/`, { method: "GET", timeout: 2000 }, (res) => {
       if (res.statusCode !== 200) {
         res.resume();
-        resolve(false);
+        resolve(notServing);
         return;
       }
       let body = "";
@@ -35,18 +42,34 @@ export function probeRelay(port) {
       res.on("data", (chunk) => { body += chunk; });
       res.on("end", () => {
         try {
-          const service = JSON.parse(body)?.service;
-          resolve(service === "anyswitch-relay" || service === "apicred-relay");
+          const parsed = JSON.parse(body);
+          const service = parsed?.service;
+          if (service !== "anyswitch-relay" && service !== "apicred-relay") {
+            resolve(notServing);
+            return;
+          }
+          resolve({
+            serving: true,
+            degraded: parsed?.degraded === true,
+            consecutiveFailures: Number.isFinite(parsed?.consecutiveFailures) ? parsed.consecutiveFailures : 0,
+            lastFailureKind: typeof parsed?.lastFailureKind === "string" ? parsed.lastFailureKind : null,
+          });
         } catch {
-          resolve(false);
+          resolve(notServing);
         }
       });
-      res.on("error", () => resolve(false));
+      res.on("error", () => resolve(notServing));
     });
-    req.on("error", () => resolve(false));
-    req.on("timeout", () => { req.destroy(); resolve(false); });
+    req.on("error", () => resolve(notServing));
+    req.on("timeout", () => { req.destroy(); resolve(notServing); });
     req.end();
   });
+}
+
+// Boolean view, for the many callers whose question really is only "is our relay
+// answering on this port?".
+export function probeRelay(port) {
+  return probeRelayHealth(port).then((health) => health.serving);
 }
 
 // 已知端点 id 白名单（与 usage-journal 的 agentId 枚举一致）。显式
@@ -626,9 +649,19 @@ export function createOpenAIRelayServer(deps) {
     }
 
     // GET / — root endpoint liveness probe. Return a minimal JSON body so
-    // connectivity checks see a reachable API.
+    // connectivity checks see a reachable API. The self-health fields ride along
+    // because this route is the only surface an OUTSIDE observer can ask: it is
+    // what the panel and the watchdog poll, and without them neither can tell a
+    // relay that serves from one that merely listens.
     if ((path === "/" || path === "/v1") && (req.method === "GET" || req.method === "HEAD")) {
-      sendJson(res, 200, { status: "ok", service: "anyswitch-relay" });
+      const health = deps.serviceHealth?.snapshot?.() ?? {};
+      sendJson(res, 200, {
+        status: "ok",
+        service: "anyswitch-relay",
+        degraded: health.degraded === true,
+        consecutiveFailures: health.consecutiveFailures ?? 0,
+        lastFailureKind: health.lastFailureKind ?? null,
+      });
       return;
     }
 
@@ -1185,24 +1218,46 @@ export function createOpenAIRelayServer(deps) {
   return server;
 }
 
-export function listenLoopback(server, preferredPort = DEFAULT_RELAY_PORT) {
+// 端口被占时的归属判定必须重试，不能一次定生死。
+//
+// 一次探针不答并不等于「端口是外人的」：中继的事件循环可能只是被短暂卡住，或
+// 机器正忙。2026-10-05 那天 48 次启动失败全部栽在这个一次性判定上——端口从头到
+// 尾都握在我们自己的 relay 手里，每一次启动却都判成「外人占用」然后退出。重试
+// 之后，瞬时抖动只会让启动慢几秒，不会让它永久起不来；真被外人占着的端口仍然
+// 会被正确判出去（每一次都认不出自家 relay）。
+export const PORT_OWNER_PROBE_ATTEMPTS = 4;
+export const PORT_OWNER_PROBE_DELAY_MS = 750;
+
+export function listenLoopback(server, preferredPort = DEFAULT_RELAY_PORT, deps = {}) {
+  const probe = deps.probe ?? probeRelay;
+  const attempts = deps.attempts ?? PORT_OWNER_PROBE_ATTEMPTS;
+  const delayMs = deps.delayMs ?? PORT_OWNER_PROBE_DELAY_MS;
+  const sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+
   return new Promise((resolve, reject) => {
     server.once("error", (err) => {
-      if (err.code === "EADDRINUSE") {
-        probeRelay(preferredPort).then((isOurs) => {
-          if (isOurs) {
+      if (err.code !== "EADDRINUSE") {
+        reject(err);
+        return;
+      }
+      (async () => {
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          if (attempt > 0) await sleep(delayMs);
+          if (await probe(preferredPort)) {
             resolve({
               port: preferredPort,
               reused: true,
               close: () => Promise.resolve(),
             });
-          } else {
-            reject(new Error(`port ${preferredPort} is in use by another process`));
+            return;
           }
-        }, reject);
-      } else {
-        reject(err);
-      }
+        }
+        // 每一次都认不出自家 relay：端口确实在别人手里。带上码，调用方才能把
+        // 这一条与「自家 relay 在、只是没答上来」分开记——两者处置完全不同。
+        const conflict = new Error(`port ${preferredPort} is in use by another process`);
+        conflict.code = "RELAY_PORT_FOREIGN";
+        reject(conflict);
+      })().catch(reject);
     });
     server.listen(preferredPort, "127.0.0.1", () => {
       resolve({

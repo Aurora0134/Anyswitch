@@ -8,10 +8,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { protect } from "./dpapi.mjs";
+import { protect, DPAPI_CODES } from "./dpapi.mjs";
 import {
   buildUpstreamURLs,
   createProductionDeps,
+  createCredentialLoader,
   createRetryingFetch,
   startProductionRelay,
   DEFAULT_UPSTREAM_TIMEOUT_MS,
@@ -606,4 +607,144 @@ test("startProductionRelay keeps the claude agentId default", needsDpapi, async 
   const rows = journal.readRequests();
   assert.equal(rows.length, 1);
   assert.equal(rows[0].agentId, "claude");
+});
+
+// --- credential cache + failure classification (2026-10-05) -----------------
+//
+// 这段用替身而不是真 DPAPI：要验的是「什么时候复用上一次解出的明文」和「失败怎么
+// 归类」，这两件事都不该靠跑一次真解密来间接观察。缓存复用掉的是每个请求一次外部
+// 进程往返（实测约 0.4s），也正是 2026-10-05 那次连续 70 分钟请求全败的落点。
+
+function makeLoader({ ciphertext = Buffer.from("sealed"), decrypt, cacheEnabled = true } = {}) {
+  const calls = { read: 0, decrypt: 0 };
+  const loader = createCredentialLoader({
+    paths: { credentialsDir: "C:/creds" },
+    readCiphertext: () => {
+      calls.read += 1;
+      return { ok: true, ciphertext: Buffer.from(ciphertext) };
+    },
+    unprotect: async () => {
+      calls.decrypt += 1;
+      if (decrypt) return decrypt();
+      return Buffer.from(`secret-${calls.decrypt}`);
+    },
+    isCacheEnabled: () => (typeof cacheEnabled === "function" ? cacheEnabled() : cacheEnabled),
+  });
+  return { loader, calls };
+}
+
+const PROVIDER = { credentialFile: "alpha.dpapi" };
+
+test("a second load of an unchanged credential reuses the decrypted value", async () => {
+  const { loader, calls } = makeLoader();
+
+  const first = await loader("alpha", PROVIDER);
+  const second = await loader("alpha", PROVIDER);
+
+  assert.equal(first.ok, true);
+  assert.equal(first.value, "secret-1");
+  assert.equal(first.cached, undefined, "第一次是真解出来的");
+  assert.equal(second.value, "secret-1");
+  assert.equal(second.cached, true);
+  assert.equal(calls.decrypt, 1, "复用生效时不再起第二次解密");
+});
+
+test("a rotated credential invalidates the cache by itself", async () => {
+  // 判据是密文哈希，不是时间：漏失效一次的代价是拿着旧密钥去请求。
+  let ciphertext = Buffer.from("sealed-one");
+  const calls = { decrypt: 0 };
+  const loader = createCredentialLoader({
+    paths: { credentialsDir: "C:/creds" },
+    readCiphertext: () => ({ ok: true, ciphertext: Buffer.from(ciphertext) }),
+    unprotect: async () => { calls.decrypt += 1; return Buffer.from(`key-${calls.decrypt}`); },
+    isCacheEnabled: () => true,
+  });
+
+  assert.equal((await loader("alpha", PROVIDER)).value, "key-1");
+  ciphertext = Buffer.from("sealed-two"); // 轮换
+  const rotated = await loader("alpha", PROVIDER);
+  assert.equal(rotated.value, "key-2", "密文一变就必须重新解密");
+  assert.equal(rotated.cached, undefined);
+  assert.equal(calls.decrypt, 2);
+});
+
+test("turning the switch off drops what was already held", async () => {
+  let enabled = true;
+  const { loader, calls } = makeLoader({ cacheEnabled: () => enabled });
+
+  await loader("alpha", PROVIDER);
+  assert.equal((await loader("alpha", PROVIDER)).cached, true);
+
+  enabled = false;
+  await loader("alpha", PROVIDER);
+  assert.equal(calls.decrypt, 2, "关掉之后每个请求都重新解密");
+
+  enabled = true;
+  const after = await loader("alpha", PROVIDER);
+  assert.equal(after.cached, undefined, "关掉的那一刻已留存的明文被清掉，不留到下次请求");
+});
+
+test("failures are classified without ever echoing the helper's own text", async () => {
+  const cases = [
+    [DPAPI_CODES.TIMEOUT, "the credential helper timed out"],
+    [DPAPI_CODES.SPAWN_FAILED, "the credential helper could not start"],
+    [DPAPI_CODES.FAILED, "the credential helper failed"],
+    [DPAPI_CODES.BAD_RESPONSE, "the credential helper returned an unreadable response"],
+    [DPAPI_CODES.OUTPUT_LIMIT, "the credential helper returned too much output"],
+    [undefined, "credential could not be decrypted"],
+  ];
+  for (const [code, expected] of cases) {
+    const { loader } = makeLoader({
+      decrypt: () => { const e = new Error("raw helper text must never surface"); e.code = code; throw e; },
+    });
+    const result = await loader("alpha", PROVIDER);
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, expected);
+    assert.ok(!result.reason.includes("raw helper text"));
+  }
+});
+
+test("a missing credential file is reported as such, not as a decrypt failure", async () => {
+  const loader = createCredentialLoader({
+    paths: { credentialsDir: "C:/creds" },
+    readCiphertext: () => ({ ok: false, reason: "credential file is missing" }),
+    unprotect: async () => { throw new Error("must not be reached"); },
+    isCacheEnabled: () => true,
+  });
+  const result = await loader("alpha", PROVIDER);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "credential file is missing");
+});
+
+test("the production wiring caches through the real DPAPI path, and the switch turns it off live", needsDpapi, async (t) => {
+  // 生产装配的真跑一遍：真 store、真 DPAPI 密文、真开关读取。上面那些替身测的是
+  // 缓存语义，这一条测的是「生产线上确实接上了」。
+  const paths = makePaths(t);
+  await writeFixture(paths);
+  let enabled = true;
+  const deps = createProductionDeps({
+    paths,
+    upstreamFetch: okUpstream(t, {}),
+    credentialCacheEnabledGate: () => enabled,
+  });
+  const entry = deps.loadStore().store.providers.alpha;
+
+  const first = await deps.loadCredential("alpha", entry);
+  assert.equal(first.ok, true);
+  assert.equal(first.value, PLAINTEXT, "真解密拿到的就是原文");
+  assert.equal(first.cached, undefined);
+
+  const second = await deps.loadCredential("alpha", entry);
+  assert.equal(second.ok, true);
+  assert.equal(second.value, PLAINTEXT);
+  assert.equal(second.cached, true, "同一个密文复用已解出的值");
+
+  enabled = false;
+  const afterOff = await deps.loadCredential("alpha", entry);
+  assert.equal(afterOff.ok, true);
+  assert.equal(afterOff.cached, undefined, "关掉之后重新解密，不留用旧值");
+
+  enabled = true;
+  const reArmed = await deps.loadCredential("alpha", entry);
+  assert.equal(reArmed.cached, undefined, "关掉的那一刻已留存的明文被清掉");
 });

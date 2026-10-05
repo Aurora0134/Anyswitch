@@ -8707,3 +8707,104 @@ describe("panel router terminal-host lifecycle proxy", () => {
     assert.equal(calls.statusPulls, 2);
   });
 });
+
+// 2026-10-05：relay 进程活着、47821 在监听、探针也答得出来，但每一个真实请求都
+// 在失败，连续 70 分钟。看板当时显示的是「运行中 / 运行正常」——把一次全灭盖成
+// 了正常。这里锁住新增的第四态，以及它和原有三态的分界。
+describe("看板 relay 状态呈现（含「服务异常」第四态）", () => {
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  function presentation(relay) {
+    const source = panelJs.match(/function relayStatusPresentation\(relay, defaultPort\) \{[\s\S]*?\n  \}/);
+    assert.ok(source, "relayStatusPresentation 在 panel.js 里，且是可直接取出的纯函数");
+    const fn = new Function(`${source[0]}; return relayStatusPresentation;`)();
+    return fn(relay, 47821);
+  }
+
+  it("在跑但服务不了 → 「服务异常」，不是「运行正常」", () => {
+    const view = presentation({ status: "running", degraded: true, port: 47821 });
+    assert.equal(view.statusText, "Relay 服务异常 (47821)");
+    assert.equal(view.badgeText, "服务异常");
+    assert.equal(view.badgeClass, "badge badge-warn", "既不是正常（ok）也不是已停止（danger）");
+  });
+
+  it("在跑且服务得了 → 仍是原来的「运行中 / 运行正常」", () => {
+    const view = presentation({ status: "running", degraded: false, port: 47821 });
+    assert.equal(view.statusText, "Relay 运行中 (47821)");
+    assert.equal(view.badgeText, "运行正常");
+    assert.equal(view.badgeClass, "badge badge-ok");
+  });
+
+  it("缺 degraded 字段（旧服务端）不误报服务异常", () => {
+    const view = presentation({ status: "running", port: 47821 });
+    assert.equal(view.badgeText, "运行正常", "没有这个字段就按正常显示，不能凭空报警");
+  });
+
+  it("启动中 / 已停止两态文案不变", () => {
+    assert.equal(presentation({ status: "starting" }).statusText, "Relay 启动中...");
+    assert.equal(presentation({ status: "starting" }).badgeText, "启动中");
+    assert.equal(presentation({ status: "stopped" }).statusText, "Relay 已停止");
+    assert.equal(presentation({ status: "stopped" }).badgeText, "已停止");
+    assert.equal(presentation({ status: "stopped" }).badgeClass, "badge badge-danger");
+  });
+});
+
+describe("设置项「缓存上游密钥」", () => {
+  const panelJs = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+    "utf8",
+  );
+  const panelHtml = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html"),
+    "utf8",
+  );
+
+  it("以既有的 .toggle 开关呈现，文案按约定", () => {
+    // 只取这一条自己的 DOM 窗口：从它所属的 modal-item 开始到它自己的 </label>
+    // 结束，否则非贪婪匹配会从文件里更早的 modal-item 起算，把别张卡的文字也算进来。
+    const title = panelHtml.indexOf('<div class="modal-item-title">缓存上游密钥</div>');
+    assert.ok(title > 0, "条目标题存在");
+    const item = panelHtml.slice(
+      panelHtml.lastIndexOf('<div class="modal-item">', title),
+      panelHtml.indexOf("</label>", title) + "</label>".length,
+    );
+    assert.ok(item.includes('<label class="toggle">'), "沿用全局开关控件与各主题皮肤");
+    assert.ok(item.includes('id="credentialCacheToggle"'), "开关有稳定 id 供读写");
+    assert.ok(item.includes("建议仅在受信任环境中开启"), "把代价写在开关旁边，而不是留给用户去猜");
+    // 这条是安全与速度的取舍，属于用户的决定；文案不得暗示实现细节。
+    assert.ok(!/DPAPI|dpapi|进程|缓存命中|哈希|失效/.test(item), "不向用户暴露实现细节");
+  });
+
+  it("切换后 POST 该设置并以服务端回读值为准", async () => {
+    const source = panelJs.match(/credentialCacheToggle\.onchange = async \(\) => \{[\s\S]*?\n      \};/);
+    assert.ok(source, "onchange 处理器在 panel.js 里");
+    const toggle = { checked: true, setAttribute() {}, removeAttribute() {} };
+    const calls = [];
+    const toasts = [];
+    const settingsSaving = { credentialCache: false };
+    const api = async (method, path, body) => {
+      calls.push({ method, path, body });
+      return { ok: true, settings: { credentialCacheEnabled: true } };
+    };
+    const run = new Function(
+      "credentialCacheToggle", "settingsSaving", "api", "toast",
+      `let settingsLoadGen = 0; ${source[0]} return credentialCacheToggle.onchange();`,
+    );
+    await run(toggle, settingsSaving, api, (m) => toasts.push(m));
+
+    assert.deepEqual(calls, [{
+      method: "POST",
+      path: "/api/settings",
+      body: { credentialCacheEnabled: true },
+    }]);
+    assert.equal(settingsSaving.credentialCache, false, "保存标记必须复位");
+    assert.equal(toasts.length, 1);
+  });
+});

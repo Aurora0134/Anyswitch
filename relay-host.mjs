@@ -33,6 +33,7 @@ import { writeRelayPid, clearRelayPid, getRelayPidPath } from "./relay-process-m
 import { createStoreWatcher } from "./agent-sync.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
 import { createInstanceSocketOwner } from "./instance-socket-owner.mjs";
+import { createServiceHealth } from "./service-health.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
 import { stopStaleTerminalHost, TERMINAL_PARENT_PID_ENV, TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 import { spawn } from "node:child_process";
@@ -539,6 +540,9 @@ function createResidentDeps(options = {}) {
   // netstat；机制见 instance-socket-owner.mjs）。per-launch 路径（launch.mjs）
   // 不下发——那里保持原行为。测试可注入替身。
   const socketOwner = options.socketOwner ?? createInstanceSocketOwner();
+  // 中继自检：请求路径在「自身原因失败」与「真的送达上游」两处打点，根路由把
+  // 结果随探针下发，面板与 watchdog 才问得出「它还能不能服务」。见 service-health.mjs。
+  const serviceHealth = options.serviceHealth ?? createServiceHealth();
   const token = loadOrGenerateToken(root);
 
   return {
@@ -553,6 +557,7 @@ function createResidentDeps(options = {}) {
     getKeepAliveConfig: options.getKeepAliveConfig ?? claudeDeps.getKeepAliveConfig,
     getClaudeTierMapping: options.getClaudeTierMapping ?? claudeDeps.getClaudeTierMapping,
     socketOwner,
+    serviceHealth,
     panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector, hostKind: "relay-host" }),
     metricsCollector,
     logger,
@@ -615,6 +620,23 @@ export function warmProcessScanCache(metricsCollector) {
   }
 }
 
+// 启动失败的归因。抽出来是为了能验：这一段以前是子进程直写的裸文本，没有时间、
+// 没有 PID，而多个实例共写同一个文件，事后只能靠前后文反推时间线；更要紧的是
+// 「端口被外人占用」和「自家 relay 在、只是没答上来」被压成同一句话，而这两者的
+// 处置完全不同（前者要用户去看谁占了端口，后者是自家进程卡住了）。
+//
+// 措辞刻意只说「那个进程不按我们的 relay 应答」，不断言它一定是外人：探针认不出
+// 自家 relay 时，两种情况都可能。
+export function describeRelayStartupFailure(error, pid = process.pid) {
+  const foreign = error?.code === "RELAY_PORT_FOREIGN";
+  return {
+    label: foreign ? "relayStartupBlocked" : "relayStartupFailed",
+    detail: foreign
+      ? `port ${RELAY_PORT} is held by a process that does not answer as our relay; this resident host will not start (pid ${pid})`
+      : `${error?.stack ?? error} (pid ${pid})`,
+  };
+}
+
 export async function startResidentRelay(options = {}) {
   const logPath = join(__dirname, "logs", "relay-host.log");
   rotateLogIfNeeded(logPath);
@@ -651,7 +673,18 @@ export async function startResidentRelay(options = {}) {
 
   const server = createOpenAIRelayServer(deps);
   const startTime = Date.now();
-  const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
+  let listened;
+  try {
+    listened = await listenLoopback(server, RELAY_PORT);
+  } catch (error) {
+    // 启动失败必须落一条带时间戳、带自身进程号的记录，且不受运行日志开关影响：
+    // 关掉记录的人正是事后要问「为什么起不来」的人。
+    const { label, detail } = describeRelayStartupFailure(error);
+    appendCrashLog(logPath, label, detail);
+    error.loggedByRelayHost = true;
+    throw error;
+  }
+  const { port, reused, close } = listened;
 
   if (reused) {
     // Port 47821 already answers the relay probe — another relay (likely a
@@ -788,7 +821,13 @@ if (isEntryModule(process.argv[1], import.meta.url)) {
       // keep alive; the server's listen() holds the event loop open
     },
     (error) => {
-      process.stderr.write(`relay-host failed: ${error.message}\n`);
+      // 兜底：startResidentRelay 已经归因记录过的（监听失败）不再重复落一条。
+      // 走到这里的是更早的抛出——装配、store 预检之类——同样要带时间戳与进程号，
+      // 否则又回到「裸文本、多个实例共写一个文件」那种事后无从归因的状态。
+      if (error?.loggedByRelayHost !== true) {
+        const { label, detail } = describeRelayStartupFailure(error);
+        appendCrashLog(join(__dirname, "logs", "relay-host.log"), label, detail);
+      }
       process.exit(1);
     },
   );
