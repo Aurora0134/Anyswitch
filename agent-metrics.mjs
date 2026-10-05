@@ -625,6 +625,9 @@ export function claudeSurfaceLabel(surface) {
 // The card summary follows logical client groups, not raw process count: one
 // Desktop app may own several claude.exe processes. CLI rows remain one group
 // per client PID, matching the instance rows below.
+// CLI 只统计「分型明确是 CLI」的进程号：原先「不在桌面集合里就算 CLI」的写法，
+// 在命令行读不到的那一轮会把整个桌面端的进程数报成 CLI 客户端数。既读不出、
+// 又不算 CLI 的那部分不写进副行——这一档的存在由实例行上不贴徽标如实表达。
 export function summarizeClaudeSurfaces(procCounts) {
   const desktopPids = procCounts?.claudeDesktopPids instanceof Set
     ? procCounts.claudeDesktopPids
@@ -632,9 +635,12 @@ export function summarizeClaudeSurfaces(procCounts) {
   const claudePids = procCounts?.claudePids instanceof Set
     ? procCounts.claudePids
     : new Set();
+  const surfaceByPid = procCounts?.claudeSurfaceByPid instanceof Map
+    ? procCounts.claudeSurfaceByPid
+    : new Map();
   const rows = [];
   if (desktopPids.size > 0) rows.push({ surface: "desktop", label: "Desktop", count: 1 });
-  const cliCount = [...claudePids].filter((pid) => !desktopPids.has(pid)).length;
+  const cliCount = [...claudePids].filter((pid) => surfaceByPid.get(pid) === "cli").length;
   if (cliCount > 0) rows.push({ surface: "cli", label: "CLI", count: cliCount });
   return rows;
 }
@@ -858,7 +864,12 @@ function parseTasklistCsv(stdout) {
           if (claudeDesktopForm(commandLine) !== null) {
             result.claudeDesktopPids.add(pid);
             result.claudeSurfaceByPid.set(pid, "desktop");
-          } else {
+          } else if (commandLine !== null) {
+            // 读得到命令行、又不在桌面形状白名单里，才谈得上 CLI 形态：这是正证。
+            // 回落 tasklist 那一轮根本没有命令行列，认不出不等于「那就是 CLI」——
+            // 当时把这些 pid 一律标成 cli，会把一个桌面端的壳与子进程报成一排
+            // CLI 会话（2026-10-05 报障）。读不到就留空，呈现侧按「读不出形态」
+            // 处理：不贴徽标。
             result.claudeSurfaceByPid.set(pid, "cli");
           }
         }
@@ -936,7 +947,12 @@ function parseTasklistCsv(stdout) {
         lower.includes("claude-code\\bin\\claude.js");
       if (isClaudeNode) {
         result.claude += 1;
-        if (pid) result.claudePids.add(pid);
+        if (pid) {
+          result.claudePids.add(pid);
+          // node.exe 跑的是 @anthropic-ai/claude-code 包：命令行读得出来，形态就
+          // 是终端里敲的 CLI——同上面镜像名分支一样属正证，不留给呈现侧猜。
+          result.claudeSurfaceByPid.set(pid, "cli");
+        }
       }
       const isDshNode =
         lower.includes("@deepseek-ai/dsh") ||
@@ -2080,9 +2096,69 @@ export function createAgentMetricsCollector(options = {}) {
     }
   }
 
+  // 降级轮的分类延续（2026-10-05 报障：只开一个 Claude Desktop，claude 卡上却
+  // 出现十几个带 CLI 徽标的实例行）。回落 tasklist 的那一轮读不到命令行，而
+  // 「这个进程是什么形态」「它是谁的子进程」「哪个进程算会话宿主」三件事全都
+  // 只有命令行能给答案——于是桌面端被拆成逐进程行、kimi 的桌面子进程被当成会话
+  // 宿主、终端会话的父子链路折不回主进程行。
+  //
+  // 延续的范围只在「分型与归属」：本轮真看到的进程号、进程数、存活判定一概用
+  // 本轮自己的数据，所以「不可信轮的零进程是没看见，不是不在」这条既有口径不
+  // 受影响。分型的取法：可信轮认过的进程号沿用可信轮的值；可信轮没认过的（盲
+  // 轮期间刚起的新进程）保持「读不出」——不贴徽标、不折叠，宁可漏折不可误折。
+  // 时窗是给 PID 复用的兜底：超过窗口的旧分型不再沿用，免得把窗口结束后起来的
+  // 真 CLI 并进桌面那一行。
+  const TRUSTED_FORM_CARRY_MS = 30_000;
+  const CARRIED_FORM_KEYS = [
+    ["claudeSurfaceByPid", "map"],
+    ["claudeDesktopPids", "set"],
+    ["kimiSurfaceByPid", "map"],
+    ["kimiEnginePids", "set"],
+    ["dshProfileByPid", "map"],
+    ["ppidByPid", "map"],
+  ];
+  let lastTrustedScan = null;
+  let lastTrustedScanTime = 0;
+
+  // 把可信轮的一份归属并进降级轮：先收本轮还活着的可信值，再补上可信轮根本没
+  // 枚举过的进程号的本轮答案（后者通常为空——命令行读不出就没有归属可言）。
+  function mergeCarriedForm(trusted, blind, trustedSaw, alive) {
+    const isMap = trusted instanceof Map;
+    if (isMap !== (blind instanceof Map) || !(trustedSaw instanceof Set) || !(alive instanceof Set)) {
+      return blind;
+    }
+    const merged = isMap ? new Map() : new Set();
+    for (const key of (isMap ? blind.keys() : blind)) {
+      if (!trustedSaw.has(key) && alive.has(key)) {
+        if (isMap) merged.set(key, blind.get(key)); else merged.add(key);
+      }
+    }
+    for (const [key, value] of (isMap ? trusted : [...trusted].map((pid) => [pid, pid]))) {
+      if (alive.has(key)) {
+        if (isMap) merged.set(key, value); else merged.add(key);
+      }
+    }
+    return merged;
+  }
+
+  function carryTrustedForm(blind) {
+    if (lastTrustedScan === null || nowFn() - lastTrustedScanTime > TRUSTED_FORM_CARRY_MS) return;
+    // 本轮的全量进程号是唯一判据：可信轮没见过、本轮也没列出的进程一律不再出现。
+    if (!(blind.seenPids instanceof Set)) return;
+    for (const [key, kind] of CARRIED_FORM_KEYS) {
+      const trusted = lastTrustedScan[key];
+      if (!(kind === "map" ? trusted instanceof Map : trusted instanceof Set)) continue;
+      blind[key] = mergeCarriedForm(trusted, blind[key] ?? (kind === "map" ? new Map() : new Set()), lastTrustedScan.seenPids, blind.seenPids);
+    }
+  }
+
   function startProcessScan() {
     pendingScanPromise = (async () => {
       const land = (counts) => {
+        if (counts.countsAuthoritative === true) {
+          lastTrustedScan = counts;
+          lastTrustedScanTime = nowFn();
+        }
         cachedProcessCounts = counts;
         // Stamped where the data lands, not when the probe started, so the age
         // math in scanProcesses() means "how fresh is what I'm serving".
@@ -2117,6 +2193,10 @@ export function createAgentMetricsCollector(options = {}) {
             // （见 createEmptyProcessScan 上方）；零行则没有可误判归属的行，
             // 沿用「端点已关闭」这一既有语义。
             counts.countsAuthoritative = counts.seenPids.size === 0;
+            // 只有真读不到命令行的轮次才需要延续；零行的可信轮不需要（也没有
+            // 任何进程号可挂）。放在 kimi 注册表提级之前：注册表能把沿用下来的
+            // 终端那一档照样提成 web。
+            if (counts.countsAuthoritative === false) carryTrustedForm(counts);
             await attachKimiSurfaces(counts);
             land(counts);
           } else {
@@ -3006,7 +3086,11 @@ export function createAgentMetricsCollector(options = {}) {
       }
       // Process classification is the source of client form. Reporter
       // presence only describes transport and attribution quality.
-      s.surface = procCounts.claudeSurfaceByPid?.get(s.pid) ?? "cli";
+      // 读不出形态就是读不出：这里曾经把落空一律当成 "cli"，于是命令行读不到的
+      // 那一轮（回落 tasklist）会把一个桌面端的每个进程都报成 CLI 会话，卡片
+      // 因此多出十几个带 CLI 徽标的实例行（2026-10-05 报障）。留 null 时行上不
+      // 贴徽标，与下发侧「未分型行不贴」的口径一致。
+      s.surface = procCounts.claudeSurfaceByPid?.get(s.pid) ?? null;
       s.clientForm = s.surface;
       s.transport = s.token !== null ? "per-launch" : "resident";
       s.identitySource = s.token !== null
