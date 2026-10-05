@@ -6041,11 +6041,11 @@ async function api(method, path, body) {
   function initStylePicker() {
     const picker = $("stylePicker");
     if (!picker) return;
-    // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial) 等历史主题均已退役，
-    // CSS 片段已随退役删除；历史 localStorage 存档的退役样式
-    // 由 <head> 恢复脚本兜底回落 SaaS。
+    // 「赛博」(neon)、「工业+」(industrial)、「极简」(editorial)、「Anthropic」(anthropic)
+    // 等历史主题均已退役，CSS 片段已随退役删除；历史 localStorage 存档的退役样式
+    // 由 <head> 恢复脚本兜底回落默认主题（saas）。
     // 与 panel.html 头部恢复脚本的 PANEL_STYLES 同一份清单，改动需两侧同步（panel.test.mjs 有同值断言）
-    const STYLES = ["saas", "aurora", "sepia", "anthropic"];
+    const STYLES = ["saas", "aurora", "sepia"];
     function currentStyle() {
       const s = document.documentElement.getAttribute("data-style") || "";
       return STYLES.includes(s) ? s : "saas";
