@@ -254,6 +254,75 @@ test("Codex desktop row reports an absent package and a failed probe without dis
   assert.equal(desktop.issue, "discovery_failed");
 });
 
+test("Claude desktop row reads the official MSIX manifest and never disturbs the CLI row", async (t) => {
+  const f = fixture(t);
+  const { entry } = npmInstall(f, "claude", "@anthropic-ai/claude-code", "2.1.276", "bin/claude.exe");
+  const location = "C:\\Program Files\\WindowsApps\\Claude_2.9939.2.0_x64__pzs8sxrjxfjjc";
+  let pkg = { Name: "Claude", Version: "2.9939.2.0", InstallLocation: location };
+  const service = f.service({ readAppxPackage: async (name) => (assert.equal(name, "Claude"), pkg) });
+  const found = installation(await service.getState(), "claude", 1);
+  assert.equal(found.kind, "desktop");
+  assert.equal(found.remoteId, "claude-desktop");
+  assert.equal(found.status, "found");
+  assert.equal(found.path, location);
+  assert.equal(found.version, "2.9939.2");
+  assert.equal(found.versionSource, "appx manifest");
+  assert.equal(found.issue, null);
+
+  pkg = { ...pkg, Version: "2.9939.2" };
+  const threeSegment = installation(await service.getState({ force: true }), "claude", 1);
+  assert.equal(threeSegment.version, "2.9939.2", "三段版本原样保留");
+
+  const failed = await f.service({ readAppxPackage: async () => { throw Object.assign(new Error(), { code: "RESOURCE_FAILED" }); } }).getState();
+  const cli = installation(failed, "claude", 0);
+  assert.equal(cli.kind, "cli");
+  assert.equal(cli.status, "found");
+  // claude 执行体路径按 agent-discovery 的约定是正斜杠（与 codex 的 npmTarget 反斜杠不同形）
+  assert.ok(cli.path.endsWith("node_modules/@anthropic-ai/claude-code/bin/claude.exe"));
+  assert.equal(cli.version, "2.1.276");
+  assert.equal(cli.issue, null);
+  const desktop = installation(failed, "claude", 1);
+  assert.equal(desktop.status, "error");
+  assert.equal(desktop.path, null);
+  assert.equal(desktop.version, null);
+  assert.equal(desktop.issue, "discovery_failed");
+
+  const absent = installation(await f.service().getState(), "claude", 1);
+  assert.equal(absent.kind, "desktop");
+  assert.equal(absent.remoteId, "claude-desktop");
+  assert.equal(absent.status, "not_found");
+  assert.equal(absent.issue, "entry_missing");
+});
+
+test("Kimi desktop row reads the app package from its Electron archive", async (t) => {
+  const f = fixture(t);
+  const executable = f.put(join(f.base.LOCALAPPDATA, "Programs/Kimi Code/Kimi Code.exe"));
+  asarPackage(f, executable, "kimi-code-app", "1.0.4");
+  const found = installation(await f.service().getState(), "kimi", 1);
+  assert.equal(found.kind, "desktop");
+  assert.equal(found.remoteId, "kimi-desktop");
+  assert.equal(found.status, "found");
+  assert.equal(found.path, executable);
+  assert.equal(found.version, "1.0.4");
+  assert.equal(found.versionSource, "app.asar/package.json");
+  assert.equal(found.issue, null);
+
+  // 只认归档确实属于这个产品：包名对不上就不报版本，与 qoder / zcode 同一条防线。
+  asarPackage(f, executable, "some-other-app", "9.9.9");
+  const unreadable = installation(await f.service().getState({ force: true }), "kimi", 1);
+  assert.equal(unreadable.status, "found");
+  assert.equal(unreadable.path, executable);
+  assert.equal(unreadable.version, null);
+  assert.equal(unreadable.issue, "version_unavailable");
+
+  const g = fixture(t);
+  const absent = installation(await g.service().getState(), "kimi", 1);
+  assert.equal(absent.kind, "desktop");
+  assert.equal(absent.remoteId, "kimi-desktop");
+  assert.equal(absent.status, "not_found");
+  assert.equal(absent.issue, "entry_missing");
+});
+
 test("Grok Build reads its version from the CLI's own report", async (t) => {
   const f = fixture(t);
   const exe = f.put(join(f.base.USERPROFILE, ".grok/bin/grok.exe"));
@@ -286,7 +355,7 @@ test("probeExecutableVersion parses the first SemVer and classifies spawn failur
   assert.deepEqual(await run(timedOut), { missing: false, version: null });
 });
 
-test("an empty installation reports all nine clients, with Codex and Qoder as two-installation cards", async (t) => {
+test("an empty installation reports all nine clients, with five dual-installation cards", async (t) => {
   const f = fixture(t);
   const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
   assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
@@ -300,10 +369,16 @@ test("an empty installation reports all nine clients, with Codex and Qoder as tw
   // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。
   const dsh = state.clients.find((c) => c.id === "dsh");
   assert.deepEqual(dsh.installations.map((i) => [i.kind, i.remoteId]), [["cli", "dsh"], ["desktop", "dsh-desktop"]]);
+  // Claude 与 Kimi 各补一条官方桌面端副记录：index 0 仍是面板代管更新的 npm CLI，
+  // index 1 的官方来源各自走 claude-desktop / kimi-desktop 远端。
+  const claude = state.clients.find((c) => c.id === "claude");
+  assert.deepEqual(claude.installations.map((i) => [i.kind, i.remoteId]), [["cli", "claude"], ["desktop", "claude-desktop"]]);
+  const kimi = state.clients.find((c) => c.id === "kimi");
+  assert.deepEqual(kimi.installations.map((i) => [i.kind, i.remoteId]), [["cli", "kimi"], ["desktop", "kimi-desktop"]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, ["codex", "qoder", "dsh"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, ["codex", "qoder", "dsh", "claude", "kimi"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");

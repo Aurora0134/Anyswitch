@@ -21,6 +21,12 @@ export function resolveDshDesktopExecutable(base = process.env) {
   return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "DeepSeek Harness", "DeepSeek Harness.exe");
 }
 
+// Kimi Code 官方桌面端（Electron 包，electron-builder NSIS 安装器的默认落点，
+// 与 DSH 桌面端同型）。检测只认它自己的安装目录；未安装时这一行如实报未找到。
+export function resolveKimiDesktopExecutable(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "Kimi Code", "Kimi Code.exe");
+}
+
 // The Codex CLI line must describe the same artifact the update button
 // installs — the npm-global @openai/codex package — not the launcher's
 // bundled engine under %LOCALAPPDATA%\OpenAI\Codex\bin, so detection follows
@@ -104,11 +110,6 @@ const CLIENTS = [
 // 桌面端与 CLI 不是同一条安装记录（各自的落点、版本源、更新通道都不同），
 // 但它们同属一个端点：客户端 id 仍是 dsh，客户端行仍是 `dsh` 那一行。
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
-
-// 端点级动作按下表取安装记录：0 是「面板代管更新的那条形态」，桌面形态另列。
-// dsh 的 index 0 是 npm 全局 CLI（更新按钮装的就是这个包），index 1 是官方
-// 桌面端——两者版本可以不同，各自显示。
-const DESKTOP_INSTALLATION_CLIENTS = new Set(["dsh"]);
 
 // 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
 // --version（inspect 里的 probeVersion 分支），探不出来降级 not_runnable。
@@ -211,6 +212,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       // 就不报版本（与 qoder / zcode 同一条防线）。
       const expected = id === "zcode" ? ["zcode"]
         : id === "dsh-desktop" ? ["@deepseek-ai/dsh-desktop"]
+        : id === "kimi-desktop" ? ["kimi-code-app"]
         : ["qoder"];
       return [pkg.name, pkg.productName].some((name) => typeof name === "string" && expected.includes(name.toLowerCase()))
         ? productVersion(pkg.version) : null;
@@ -309,6 +311,30 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
+  // The Claude desktop app is an official MSIX package (packageName "Claude"),
+  // distributed outside any store or package manager. Like the Codex row, the
+  // manifest carries a four-segment version (2.9939.2.0) whose trailing ".0" is
+  // stripped; remoteId is "claude-desktop" so the panel resolves its official
+  // source through the desktop entry. The update itself is run by the
+  // client-lifecycle official-MSIX leg, not by npm.
+  async function inspectClaudeDesktop() {
+    const result = { kind: "desktop", remoteId: "claude-desktop", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const pkg = await readAppxPackage("Claude");
+      if (!pkg) return result;
+      const found = {
+        ...result,
+        status: "found",
+        path: typeof pkg.InstallLocation === "string" ? pkg.InstallLocation : null,
+        issue: "version_unavailable",
+      };
+      const version = typeof pkg.Version === "string" ? productVersion(pkg.Version.replace(/^(\d+\.\d+\.\d+)\.0$/, "$1")) : null;
+      return version ? { ...found, version, versionSource: "appx manifest", issue: null } : found;
+    } catch {
+      return { ...result, status: "error", issue: "discovery_failed" };
+    }
+  }
+
   // The DSH desktop app. Its version is the product version the package
   // manifest carries, read from inside the Electron archive: the executable's
   // own resource is the Electron artifact version (44.0.0 for every Electron
@@ -338,15 +364,19 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     if (!force && cache && at - cache.at < ttl) return cache.state;
     const clients = await Promise.all(CLIENTS.map(async ([id, name, resolver]) => {
       // 每个端点的主安装记录在 index 0：codex 的 0 是面板代管更新的 npm CLI、1 是
-      // Microsoft Store 桌面端；qoder 的 0 是原生 CLI、1 是桌面 IDE；dsh 的 0 是
-      // npm 全局 CLI、1 是官方桌面端。顺序即「动作位认哪一条」的约定。
-      const installations = await Promise.all(id === "codex"
-        ? [inspect(id, "cli", resolver), inspectCodexDesktop()]
-        : id === "qoder"
-          ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
-          : DESKTOP_INSTALLATION_CLIENTS.has(id)
-            ? [inspect(id, "cli", resolver), inspectDshDesktop()]
-            : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver)]);
+      // Microsoft Store 桌面端；qoder 的 0 是原生 CLI、1 是桌面 IDE；claude 与 dsh
+      // 的 0 是 npm 全局 CLI（更新按钮装的就是这个包）、1 是官方桌面端；kimi 的
+      // 1 是官方桌面应用。顺序即「动作位认哪一条」的约定。
+      const desktopInstallations = {
+        codex: inspectCodexDesktop,
+        dsh: inspectDshDesktop,
+        claude: inspectClaudeDesktop,
+        kimi: () => inspect("kimi-desktop", "desktop", resolveKimiDesktopExecutable),
+      };
+      const installations = await Promise.all(id === "qoder"
+        ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
+        : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver),
+          ...(desktopInstallations[id] ? [desktopInstallations[id]()] : [])]);
       return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };
