@@ -3803,7 +3803,8 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.equal(dsh.status, "running");
     assert.equal(dsh.processCount, 1, "只有承载会话的宿主进程计数，桌面壳与渲染进程都不算");
     assert.deepEqual(surfacesOf(dsh), { Desktop: 1 });
-    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4802", "Desktop"]]);
+    // 行 id 是面级稳定行（dsh-desktop），不是宿主 pid——引擎换代不再换行。
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]]);
   });
 
   it("accepts the desktop host on the 3-column probe shape, where the image is argv[0]", async () => {
@@ -3851,8 +3852,117 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]).sort(), [
       ["dsh-4860", "Web"],
       ["dsh-4861", "TUI"],
-      ["dsh-4862", "Desktop"],
+      ["dsh-desktop", "Desktop"],
     ]);
+  });
+
+  it("keeps one desktop row across engine generations so churn no longer resets it", async () => {
+    // 用量日志实证（2026-10-04）：桌面 App 的宿主引擎一天换代 11 次，逐 pid
+    // 行每次换代连请求计数带 sparkHistory 一起清零，看板切回前台只能从零慢
+    // 慢重画。稳定行以面为键：换代只是换 pid，行不换。
+    let t = 3000;
+    let hostPid = 4910;
+    const execFn = (cmd, opts, cb) => cb(null, wmic(desktopHostRow(hostPid)));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses(); // warm the cache — the panel-open steady state
+
+    const r1 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordFirstChunk();
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    // The desktop app recycles its engine. The panel's poll refreshes the scan
+    // before the next request (two-step read: first serves stale and kicks the
+    // round, second serves what landed).
+    hostPid = 4911;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const r2 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordFirstChunk();
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]]);
+    assert.equal(dsh.instances[0].requests, 2, "both engine generations land on the same row");
+    assert.equal(dsh.instances[0].tokens.prompt, 150);
+  });
+
+  it("folds desktop-host traffic onto the stable row while TUI traffic keeps its pid row", async () => {
+    const execFn = (cmd, opts, cb) => cb(null, wmic(
+      harnessRow(4920, "--profile dsh-tui"),
+      desktopHostRow(4921),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+    await collector.scanProcesses();
+
+    const tui = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4920", model: "m1", stream: true, path: "openai" });
+    tui.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 4 } });
+    const desktop = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4921", model: "m1", stream: true, path: "openai" });
+    desktop.recordEnd({ status: 200, usage: { prompt_tokens: 20, completion_tokens: 8 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]).sort(), [
+      ["dsh-4920", "TUI"],
+      ["dsh-desktop", "Desktop"],
+    ]);
+  });
+
+  it("does not fold a CLI boot of a profile named desktop onto the stable row", async () => {
+    // 折叠判据是宿主集合（HOST_RE 命中的行），不是 profile 名：同名 CLI 会话
+    // 仍按逐 pid 行记账。与扫描侧的同名 profile 测试互为表里，这里钉的是请
+    // 求归一面。
+    const execFn = (cmd, opts, cb) => cb(null, wmic(harnessRow(4930, "--profile desktop")));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4930", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 5, completion_tokens: 2 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-4930", "Desktop"]]);
+  });
+
+  it("keeps the idle desktop row while the app runs and retires it with the app", async () => {
+    // 稳定行无 pid 可对账：宿主活着就与逐 pid 行同权常驻（空闲不清行），
+    // 宿主退场才交给空闲 TTL 收口。
+    let t = 3000;
+    let hostAlive = true;
+    const execFn = (cmd, opts, cb) => cb(null, hostAlive ? wmic(desktopHostRow(4940)) : wmic());
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4940", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 8, completion_tokens: 3 } });
+
+    t += 20 * 60 * 1000; // far past the 10-minute idle TTL
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-desktop"], "an idle row survives while the desktop app runs");
+
+    hostAlive = false;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const gone = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(gone.instances, [], "the row retires with the app");
+    assert.equal(gone.status, "stopped");
+  });
+
+  it("refolds a request that landed before the scan saw the host onto the stable row", async () => {
+    // 请求路径只读扫描缓存、从不触发扫描：宿主刚换代、缓存还没赶上时，请
+    // 求先落在原始 pid 行上；缓存跟上后的下一轮读重折叠归位，计数随行保留。
+    let t = 3000;
+    let hostUp = false;
+    const execFn = (cmd, opts, cb) => cb(null, hostUp ? wmic(desktopHostRow(4950)) : "Node,CommandLine,Name,ProcessId\r\n");
+    const collector = testCollector({ execFn, nowFn: () => t });
+    const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4950", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+
+    hostUp = true;
+    t += 3000;
+    await collector.scanProcesses();
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]], "the cold pid row folds onto the stable row");
+    assert.equal(dsh.instances[0].requests, 1);
+    assert.equal(dsh.instances[0].tokens.prompt, 30);
   });
 
   it("asks the resident probe for the desktop image by name", async () => {
