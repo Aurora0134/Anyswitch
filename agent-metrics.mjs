@@ -209,15 +209,19 @@ export function findDescendantClientPid(ancestorPid, clientPids, ppidByPid) {
 // snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional; an
 // endpoint that tracks an engine subset folds against `${agentId}EnginePids`
 // instead — codex and dsh do, see their bucket comments).
-// Returns { id, label }: id is the canonical "<agentId>-<client pid>" when
-// the numeric tail resolves, otherwise the input unchanged; label is the
-// id's prefix (cwd basename) on a successful fold, else null. Returns null
-// for an invalid rawId (same rule as sanitizeInstanceId).
-export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
+// Returns { id, label, clientPid }: id is the canonical "<agentId>-<client pid>"
+// when the numeric tail resolves, otherwise the input unchanged; label is the
+// id's prefix (cwd basename) on a successful fold, else null; clientPid is the
+// resolved client pid (null when the tail did not resolve). The desktop-row
+// generation settlement needs that pid at the fold site, which is why the
+// detailed shape exists — normalizeInstanceId below is the compatibility
+// wrapper for callers that only read id/label. Returns null for an invalid
+// rawId (same rule as sanitizeInstanceId).
+function resolveInstanceId(agentId, rawId, procSnapshot = null) {
   const id = sanitizeInstanceId(rawId);
   if (id === null || typeof agentId !== "string" || agentId.length === 0) return null;
   const tail = id.match(/-(\d+)$/);
-  if (tail === null) return { id, label: null };
+  if (tail === null) return { id, label: null, clientPid: null };
   const tailPid = Number(tail[1]);
   // Endpoints that own an engine subset fold against it, not the whole bucket:
   // codex's ChatGPT.exe (the desktop GUI shell — typically the engine's PARENT,
@@ -230,22 +234,28 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
   if (clientPid === null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
   }
-  if (clientPid === null) return { id, label: null };
+  if (clientPid === null) return { id, label: null, clientPid: null };
   // DSH 桌面宿主与 kimi 桌面主进程折稳定行：canonical 尾解析到桌面 App 的
-  // 宿主/主进程时，id 落到各自的面级稳定行（DSH/KIMI_DESKTOP_INSTANCE_ID），
-  // 下一代引擎进程折到同一行——请求计数、工时、sparkHistory 跨换代连续。
+  // 宿主/主进程时，id 落到各自的面级稳定行（DSH/KIMI_DESKTOP_INSTANCE_ID）。
+  // 行身份跨代稳定，但账目是否延续由代际结算另判（见桌面代际锚注释）——
+  // 这里只负责「请求归属哪一行」。
   // TUI/web 引擎不受影响，保持逐 pid。判据用各自的宿主集合而非 profile/面名
   // （CLI 自建同名 profile 不是桌面 App；kimi 的面来自镜像名，集合语义同源）。
   if (agentId === "dsh" && procSnapshot?.dshDesktopHostPids instanceof Set
     && procSnapshot.dshDesktopHostPids.has(clientPid)) {
-    return { id: DSH_DESKTOP_INSTANCE_ID, label: null };
+    return { id: DSH_DESKTOP_INSTANCE_ID, label: null, clientPid };
   }
   if (agentId === "kimi" && procSnapshot?.kimiDesktopPids instanceof Set
     && procSnapshot.kimiDesktopPids.has(clientPid)) {
-    return { id: KIMI_DESKTOP_INSTANCE_ID, label: null };
+    return { id: KIMI_DESKTOP_INSTANCE_ID, label: null, clientPid };
   }
   const prefix = id.slice(0, tail.index);
-  return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null };
+  return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null, clientPid };
+}
+
+export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
+  const resolved = resolveInstanceId(agentId, rawId, procSnapshot);
+  return resolved === null ? null : { id: resolved.id, label: resolved.label };
 }
 
 // Liveness verdict for a custom id's numeric tail — a launcher pid that
@@ -537,16 +547,16 @@ const DSH_DESKTOP_HOST_RE = /dsh-desktop-host[\\/]lib[\\/]index\.js/;
 // 稳定行 id：DSH 桌面端的实例行按「面」记账，不按引擎 pid。桌面 App 每轮对话
 // 都换宿主引擎进程（journal 实测 2026-10-04 一天 11 个 pid），逐 pid 行在每次
 // 换代时删旧建新——请求数、工时、折线全部从零，看板上读作「历史凭空消失」。
-// 桌面宿主进程统一折到这个 id，换代对看板不可见；行存活对账「桌面宿主还在」
-// 而非单个 pid。判据必须是宿主子进程集合（上面的 HOST_RE），不能只看 profile
-// 名：CLI 自建 `--profile desktop` 的会话 profile 同名，却不是桌面 App。
+// 桌面宿主进程统一折到这个 id，换代对看板不可见。判据必须是宿主子进程集合
+// （上面的 HOST_RE），不能只看 profile 名：CLI 自建 `--profile desktop` 的
+// 会话 profile 同名，却不是桌面 App。
+//
+// 行身份与账目是两件事，各自的判据都锚在进程上、与空闲时长无关：
+// 行可见性 = 面的进程存活（宿主或壳任一在，行就在；全灭即收，与逐 pid 行
+// 同权即时），账目 = 面的当前一代（DSH 的一代 = 一次 App 运行，锚是宿主
+// 引擎的父进程即 Electron 壳：壳不变，换代续账；壳换了且旧壳全灭 = 真重启，
+// 重开账）。见 settleDesktopGenerationOnFold 的注释。
 const DSH_DESKTOP_INSTANCE_ID = "dsh-desktop";
-// 桌面宿主进程是否还在（稳定行的存活判据）。换代间隙（旧宿主已死、新宿主未
-// 入扫描）此谓词答 false，行交给空闲 TTL 兜底——最近有请求就不会被洗掉。
-function dshDesktopHostAlive(procCounts) {
-  const hosts = procCounts?.dshDesktopHostPids;
-  return hosts instanceof Set && hosts.size > 0;
-}
 
 // Profile name this DSH command line boots, or null when it cannot be read
 // (management invocation, plain-tasklist rows with no command line, a custom
@@ -640,13 +650,59 @@ export function kimiSurfaceLabel(surface) {
 }
 
 // Kimi 桌面端的面级稳定行：主进程（"Kimi Code.exe"，无 --type=）是会话属主，
-// 换代换 pid 不换行——请求计数、工时、sparkHistory 跨换代连续。DSH 同款
-// （2026-10-06 b26a776 先落 DSH 侧），kimi 的宿主集合是 kimiDesktopPids，
-// Electron 辅助子进程（--type=）只进家族集、永不进它。
+// Electron 辅助子进程（--type=）只进家族集、永不进宿主集合 kimiDesktopPids。
+// 行身份与账目分治（与 DSH 同款，2026-10-06 b26a776 先落 DSH 侧）：行可见性
+// = 主进程集合非空；账目 = 主进程的一生——journal 实证（2026-10-02~06）主
+// 进程换代都发生在会话尺度（旧死隔至少数分钟新生，或新旧短暂共存），不存在
+// 活跃期内的静默换血，所以「旧主全灭 + 新主出现」即真重启，重开账；共存则
+// 续账。判据见 settleDesktopGenerationOnFold。
 const KIMI_DESKTOP_INSTANCE_ID = "kimi-desktop";
-function kimiDesktopHostAlive(procCounts) {
-  const hosts = procCounts?.kimiDesktopPids;
-  return hosts instanceof Set && hosts.size > 0;
+
+// 桌面稳定行的账目代际锚：hostPids 记本代喂过账的宿主/主进程，shellPids 仅
+// DSH 有意义（宿主引擎的父进程 = Electron 壳 = 一次 App 运行的锚）。行对象
+// 上的可缺字段——旧快照还原的行没有它，首次折叠/扫描证据到来时补建。
+function ensureDesktopGen(entry) {
+  if (!entry.desktopGen || !(entry.desktopGen.hostPids instanceof Set)) {
+    entry.desktopGen = { hostPids: new Set(), shellPids: new Set() };
+  }
+  if (!(entry.desktopGen.shellPids instanceof Set)) entry.desktopGen.shellPids = new Set();
+  return entry.desktopGen;
+}
+
+// 把源行的已完成计数并入目标行（重折叠合并路径用）。只累加累计量与样本环，
+// 不碰在途/活跃字段（调用侧保证源行 activeRequests === 0）；样本按「目标在
+// 前、源在后」拼接——源的请求必然更晚，时序天然成立，超窗从头裁掉。
+function absorbAggregateState(target, source, keep) {
+  target.totalRequests += source.totalRequests;
+  target.totalActiveDurationMs += source.totalActiveDurationMs;
+  target.totalGenerationDurationMs += source.totalGenerationDurationMs;
+  target.activeWallClockMs += source.activeWallClockMs;
+  target.totalPromptTokens += source.totalPromptTokens;
+  target.totalCompletionTokens += source.totalCompletionTokens;
+  target.totalCachedTokens += source.totalCachedTokens;
+  target.keepAliveRetries += source.keepAliveRetries;
+  target.keepAliveRecoveries += source.keepAliveRecoveries;
+  target.keepAliveExhausted += source.keepAliveExhausted;
+  if (source.recentSamples.length > 0) {
+    target.recentSamples.push(...source.recentSamples);
+    while (target.recentSamples.length > keep) target.recentSamples.shift();
+  }
+  if (source.ttftHistory.length > 0) {
+    target.ttftHistory.push(...source.ttftHistory);
+    while (target.ttftHistory.length > keep) target.ttftHistory.shift();
+  }
+  if (source.lastTtftMs !== null) target.lastTtftMs = source.lastTtftMs;
+  if (target.firstRequestAt === null) target.firstRequestAt = source.firstRequestAt;
+  if (source.lastRequestAt !== null) target.lastRequestAt = source.lastRequestAt;
+  if (source.totalRequests > 0) {
+    if (source.lastModel !== null) target.lastModel = source.lastModel;
+    if (source.lastProvider !== null) target.lastProvider = source.lastProvider;
+    target.lastViaAuto = source.lastViaAuto;
+  }
+  if (source.lastError !== null
+    && (target.lastError === null || (source.lastError.time ?? 0) > (target.lastError.time ?? 0))) {
+    target.lastError = source.lastError;
+  }
 }
 
 // Claude client-form labels are derived from process classification. They are
@@ -2357,6 +2413,103 @@ export function createAgentMetricsCollector(options = {}) {
   const claudeState = createAggregateState();
   const codexState = createAggregateState();
   const grokState = createAggregateState();
+  const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
+
+  // 桌面稳定行的账目代际与生死结算（折叠路径与读取家务共用，所以挂工厂层，
+  // 能同时够到 cachedProcessCounts / nowFn / 聚合桶）。语义细节见各函数注释。
+  // 在途请求的属主行被收走/重开时，它在端点聚合里占的那份在途计数要就地
+  // 结算（与 settleAbandonedAggregateState 同一处境）：行自己的计数随行消亡，
+  // 聚合侧不能凭空多出永远收不了的 in-flight。
+  function settleLeakedInstanceRequests(bucket, state, at) {
+    const leaked = state.activeRequests;
+    if (leaked <= 0) return;
+    const agg = bucketAggregateState[bucket];
+    agg.activeRequests = Math.max(0, agg.activeRequests - leaked);
+    if (agg.activeRequests === 0 && agg.activeWallStart !== null) {
+      agg.activeWallClockMs += Math.max(1, at - agg.activeWallStart);
+      agg.activeWallStart = null;
+      agg.currentModel = null;
+      agg.currentProvider = null;
+      agg.activeModels.clear();
+    }
+  }
+  // 重开账：真重启（DSH 换壳、kimi 旧主全灭后来新主）在稳定行上就地清零
+  // 请求数/token/工时/折线，行 id 与标签不动。旧账的在途请求按上面的规矩
+  // 结算进端点聚合。代际锚替换为新宿主（dsh 连同新壳）。
+  function reopenDesktopAccount(bucket, entry, clientPid, parentPid) {
+    settleLeakedInstanceRequests(bucket, entry.state, nowFn());
+    entry.state = createAggregateState();
+    entry.firstSeen = nowFn();
+    entry.desktopGen = {
+      hostPids: new Set([clientPid]),
+      shellPids: parentPid != null ? new Set([parentPid]) : new Set(),
+    };
+    markMetricsDirty();
+  }
+  // 账目代际结算：一个确认活着的桌面宿主/主进程 pid 要落进稳定行时，先判
+  // 它和行上现有账目是否同一代。
+  // kimi：行上记过的主进程还有活口（共存换代，journal 实证的唯一非重启换
+  // 代形状）就续账；全灭 = App 真死过，重开账。
+  // DSH：折叠 pid 的父进程（ppidByPid）还是行上记过的 Electron 壳 = 同一次
+  // App 运行内的引擎换代，续账（任意长的换代空档都不断账）；壳换了且旧壳
+  // 全灭 = 真重启，重开账。父指针缺席（降级形状没有命令行列）仲裁不了，
+  // 保守续账——宁可少清一次，不可误清活跃账。
+  // 行上还没有锚（占位行/旧快照行）时只收编不重开：空账没有可清的东西。
+  // 扫描看不见 pid 生死（seenPids 缺席）时同样保守续账。
+  function settleDesktopGenerationOnFold(bucket, entry, clientPid, procCounts) {
+    if (clientPid == null) return;
+    const gen = ensureDesktopGen(entry);
+    if (gen.hostPids.has(clientPid)) return;
+    const seen = procCounts?.seenPids instanceof Set ? procCounts.seenPids : null;
+    if (bucket === "kimi") {
+      if (gen.hostPids.size > 0 && seen !== null) {
+        const oldAlive = [...gen.hostPids].some((pid) => seen.has(pid));
+        if (!oldAlive) {
+          reopenDesktopAccount(bucket, entry, clientPid, null);
+          return;
+        }
+      }
+      gen.hostPids.add(clientPid);
+      return;
+    }
+    const parent = procCounts?.ppidByPid instanceof Map ? procCounts.ppidByPid.get(clientPid) : undefined;
+    if (parent != null && gen.shellPids.has(parent)) {
+      gen.hostPids.add(clientPid);
+      return;
+    }
+    if (gen.shellPids.size > 0 && seen !== null) {
+      const shellAlive = [...gen.shellPids].some((pid) => seen.has(pid));
+      if (!shellAlive) {
+        reopenDesktopAccount(bucket, entry, clientPid, parent);
+        return;
+      }
+    }
+    gen.hostPids.add(clientPid);
+    if (parent != null) gen.shellPids.add(parent);
+  }
+  // 读取时的同款结算：把本轮扫描里的每个宿主 pid 都过一遍折叠判据。这是
+  // 隐藏期桥接的收敛路径——App 在无人观看时重启，折叠时缓存跟不上，请求落
+  // 在原始 pid 行；面板回来后的第一轮读在这里把旧账收口、按新代呈现。
+  function settleDesktopGenerationOnRead(bucket, entry, procCounts) {
+    const hosts = bucket === "dsh" ? procCounts.dshDesktopHostPids : procCounts.kimiDesktopPids;
+    if (!(hosts instanceof Set)) return;
+    for (const pid of hosts) {
+      if (ensureDesktopGen(entry).hostPids.has(pid)) continue;
+      settleDesktopGenerationOnFold(bucket, entry, pid, procCounts);
+    }
+  }
+  // 行可见性 = 面的进程家族还在：kimi 看主进程集合，DSH 看宿主集合或 Electron
+  // 壳（引擎换代的任意长空档里壳都活着，座席不该消失）。降级轮不进这条判据
+  // （调用侧 countsTrusted 门），与逐 pid 行「旧形状不淘汰」同一保守守卫。
+  function isDesktopFamilyAlive(bucket, entry, procCounts) {
+    const hosts = bucket === "dsh" ? procCounts.dshDesktopHostPids : procCounts.kimiDesktopPids;
+    if (hosts instanceof Set && hosts.size > 0) return true;
+    if (bucket !== "dsh") return false;
+    const gen = ensureDesktopGen(entry);
+    const seen = procCounts.seenPids;
+    return gen.shellPids.size > 0 && seen instanceof Set
+      && [...gen.shellPids].some((pid) => seen.has(pid));
+  }
 
   // 无归属请求的专用承载态：不进 endpointStates（看板不可见、快照不持久化）、
   // 不进 instanceBuckets（无实例行），存在只为让 tracker 生命周期复用
@@ -2419,12 +2572,23 @@ export function createAgentMetricsCollector(options = {}) {
     }
     const instances = {};
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
-      instances[bucket] = [...instMap.entries()].map(([id, entry]) => ({
-        id,
-        firstSeen: entry.firstSeen,
-        label: entry.label,
-        state: serializeAggregateState(entry.state),
-      }));
+      instances[bucket] = [...instMap.entries()].map(([id, entry]) => {
+        const row = {
+          id,
+          firstSeen: entry.firstSeen,
+          label: entry.label,
+          state: serializeAggregateState(entry.state),
+        };
+        // 桌面稳定行的账目代际锚随行落盘：relay 重启期间 App 若重启过，还原
+        // 后的第一次结算要能认出「旧代全灭 + 新代出现」并重开账。
+        if (entry.desktopGen) {
+          row.desktopGen = {
+            hostPids: [...entry.desktopGen.hostPids],
+            shellPids: [...entry.desktopGen.shellPids],
+          };
+        }
+        return row;
+      });
     }
     return { version: METRICS_SNAPSHOT_VERSION, savedAt: now, endpoints, instances };
   }
@@ -2480,6 +2644,16 @@ export function createAgentMetricsCollector(options = {}) {
             label: typeof row.label === "string" ? row.label : null,
           };
           restoreAggregateState(entry.state, row.state, sampleKeep);
+          // 代际锚容忍缺字段（旧版快照没写它）：缺了就当空锚，首次结算按
+          // 「还没有账」收编，不触发重开。字段在就按数组还原，非数值项丢弃。
+          if (row.desktopGen && Array.isArray(row.desktopGen.hostPids)) {
+            entry.desktopGen = {
+              hostPids: new Set(row.desktopGen.hostPids.filter((pid) => Number.isFinite(pid))),
+              shellPids: new Set(Array.isArray(row.desktopGen.shellPids)
+                ? row.desktopGen.shellPids.filter((pid) => Number.isFinite(pid))
+                : []),
+            };
+          }
           instMap.set(row.id, entry);
         }
       }
@@ -2675,7 +2849,7 @@ export function createAgentMetricsCollector(options = {}) {
     const rawInstanceId = background ? null : sanitizeInstanceId(meta.instanceId);
     const instMap = instanceBuckets[bucketAgentId];
     const normalized = rawInstanceId !== null && instMap !== undefined
-      ? normalizeInstanceId(bucketAgentId, rawInstanceId, cachedProcessCounts)
+      ? resolveInstanceId(bucketAgentId, rawInstanceId, cachedProcessCounts)
       : null;
     const effMeta = normalized !== null && normalized.id !== rawInstanceId
       ? { ...meta, instanceId: normalized.id }
@@ -2702,9 +2876,19 @@ export function createAgentMetricsCollector(options = {}) {
     function bindInstance(norm) {
       if (instanceAttached || instMap === undefined || !norm) return composed;
       const instanceId = norm.id;
+      const isDesktopStableRow = instanceId === DSH_DESKTOP_INSTANCE_ID || instanceId === KIMI_DESKTOP_INSTANCE_ID;
       let entry = instMap.get(instanceId);
+      if (entry !== undefined && isDesktopStableRow) {
+        // 折叠入稳定行先结算账目代际：真重启在此就地重开账，本请求的计数落进
+        // 新账——清零不依赖任何读取时机（面板隐藏期间的重启也在此收敛）。
+        settleDesktopGenerationOnFold(bucketAgentId, entry, norm.clientPid, cachedProcessCounts);
+      }
       if (!entry) {
         entry = { state: createAggregateState(), firstSeen: nowFn(), label: null };
+        if (isDesktopStableRow) {
+          ensureDesktopGen(entry);
+          settleDesktopGenerationOnFold(bucketAgentId, entry, norm.clientPid, cachedProcessCounts);
+        }
         instMap.set(instanceId, entry);
         markMetricsDirty();
       }
@@ -2729,7 +2913,7 @@ export function createAgentMetricsCollector(options = {}) {
       if (bucketAgentId === null) return; // 无归属请求永远没有实例行
       const raw = sanitizeInstanceId(rawId);
       if (raw === null) return;
-      bindInstance(normalizeInstanceId(bucketAgentId, raw, cachedProcessCounts));
+      bindInstance(resolveInstanceId(bucketAgentId, raw, cachedProcessCounts));
     }
 
     if (normalized !== null) {
@@ -3230,12 +3414,12 @@ export function createAgentMetricsCollector(options = {}) {
     // they clear the moment the whole codex process family exits, or after
     // CODEX_SESSION_IDLE_TTL_MS without traffic — whichever comes first.
     // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）与 kimi 的桌面稳定行
-    // （KIMI_DESKTOP_INSTANCE_ID）同属无属主 pid 一档：宿主进程活着就常驻
-    // （判据是各自扫描的宿主集合，见 normalizeInstanceId 上方注释），宿主
-    // 退场后交空闲 TTL。 Remaining custom ids (no numeric tail —
+    // （KIMI_DESKTOP_INSTANCE_ID）也是无属主 pid 一档，但生死判据是「面的
+    // 进程家族还在」而非空闲时长：宿主在（DSH 壳也在）行就在，家族全灭即
+    // 当轮收行——与逐 pid 行同权即时，空闲 TTL 从稳定行的生死里彻底出局。
+    // Remaining custom ids (no numeric tail —
     // normalizeInstanceId already had its say at ingest) keep the idle TTL; an
     // instance with in-flight requests never expires on that path.
-    const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
       // Endpoints with an ENGINE subset reconcile their canonical rows against
@@ -3256,9 +3440,9 @@ export function createAgentMetricsCollector(options = {}) {
         // 临时行要等 10 分钟空闲 TTL 才消失（pi 现场 2026-09-14）。这里
         // 拿本读的新快照重试折叠：目标行不存在就把整行改名归位（在途镜
         // 像写的是同一 state 对象，随之归位，不受改名影响）；目标行已存
-        // 在且本行无在途请求就清行（这些计数随空闲 TTL 本来也要丢，
-        // journal 已逐请求落账不受影响）；有在途请求留到其收尾后的下一
-        // 轮读再收敛。
+        // 在且本行无在途请求就清行（桌面稳定行把已完成计数并账保住，见
+        // 下；其余行这些计数随空闲 TTL 本来也要丢，journal 已逐请求落账
+        // 不受影响）；有在途请求留到其收尾后的下一轮读再收敛。
         // 重折叠读的是本轮快照里的 pid 归属：不完整轮答不出归属，跳过。
         // dsh 与 kimi 的 pid 形行也在列：冷缓存窗口里桌面宿主/主进程的请求
         // 没折进稳定行（归一化当时读不到宿主集合），落在原始 "dsh-<pid>" /
@@ -3266,17 +3450,32 @@ export function createAgentMetricsCollector(options = {}) {
         // 对 TUI/web 的 pid 行，归一化是恒等映射，重折叠空转。
         if (countsTrusted && !isCodexSessionRow
           && (pidMatch === null || bucket === "dsh" || bucket === "kimi")) {
-          const refold = normalizeInstanceId(bucket, instId, procCounts);
+          const refold = resolveInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
             if (target === undefined) {
               instMap.delete(instId);
               if (refold.label !== null) entry.label = refold.label;
+              if (refold.id === DSH_DESKTOP_INSTANCE_ID || refold.id === KIMI_DESKTOP_INSTANCE_ID) {
+                // 冷缓存窗口的整行改名归位：raw 行的计数本来就是当前代攒下的，
+                // 随行落稳定行，同时初始化代际锚（宿主 = 折叠 pid，dsh 连记父壳）。
+                ensureDesktopGen(entry);
+                settleDesktopGenerationOnFold(bucket, entry, refold.clientPid, procCounts);
+              }
               instMap.set(refold.id, entry);
               continue;
             }
             if (target.label === null && refold.label !== null) target.label = refold.label;
             if (entry.state.activeRequests === 0) {
+              if (refold.id === DSH_DESKTOP_INSTANCE_ID || refold.id === KIMI_DESKTOP_INSTANCE_ID) {
+                // 合并保账：先结算目标行的账目代际（App 在冷缓存窗口里重启过就
+                // 在此重开），再把临时行的已完成计数并入。这个窗口横跨整个隐藏
+                // 期时临时行可能攒了大量当前代计数，直接丢弃等于重演「历史凭空
+                // 消失」；并账对同代合并同样成立（relay 重启还原 + 冷缓存继续跑）。
+                settleDesktopGenerationOnFold(bucket, target, refold.clientPid, procCounts);
+                absorbAggregateState(target.state, entry.state,
+                  Math.max(recentSampleWindow, target.state.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS));
+              }
               instMap.delete(instId);
               continue;
             }
@@ -3299,6 +3498,13 @@ export function createAgentMetricsCollector(options = {}) {
         } else if (countsTrusted && bucket === "codex") {
           const tail = instId.match(/-(\d+)$/);
           evict = tail !== null && scanPidLiveness(Number(tail[1]), procCounts) === false;
+        } else if (countsTrusted
+          && (instId === DSH_DESKTOP_INSTANCE_ID || instId === KIMI_DESKTOP_INSTANCE_ID)) {
+          // 稳定桌面行：先结算账目代际（App 在无人观看时重启的收敛点，见上），
+          // 再按「面的进程家族还在」即时判生死——空闲时长不参与，与逐 pid 行
+          // 同权：家族在行就在，家族灭行即收。
+          settleDesktopGenerationOnRead(bucket, entry, procCounts);
+          evict = !isDesktopFamilyAlive(bucket, entry, procCounts);
         }
         if (evict) {
           // The owning process is gone — evict now. Its in-flight requests
@@ -3306,37 +3512,20 @@ export function createAgentMetricsCollector(options = {}) {
           // situation as settleAbandonedAggregateState), and they were ALSO
           // counted in the endpoint aggregate, so settle that share there;
           // the instance's own counters vanish with the entry.
-          const leaked = entry.state.activeRequests;
-          if (leaked > 0) {
-            const agg = bucketAggregateState[bucket];
-            agg.activeRequests = Math.max(0, agg.activeRequests - leaked);
-            if (agg.activeRequests === 0 && agg.activeWallStart !== null) {
-              agg.activeWallClockMs += Math.max(1, now - agg.activeWallStart);
-              agg.activeWallStart = null;
-              agg.currentModel = null;
-              agg.currentProvider = null;
-              agg.activeModels.clear();
-            }
-          }
+          settleLeakedInstanceRequests(bucket, entry.state, now);
           instMap.delete(instId);
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
         if (countsTrusted) settleAbandonedAggregateState(entry.state, count);
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
-        if (pidMatch === null) {
+        if (pidMatch === null && instId !== DSH_DESKTOP_INSTANCE_ID && instId !== KIMI_DESKTOP_INSTANCE_ID) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
           const idleTtlMs = isCodexSessionRow ? CODEX_SESSION_IDLE_TTL_MS : INSTANCE_IDLE_TTL_MS;
-          // 稳定桌面行（dsh 宿主引擎、kimi 桌面主进程）没有属主 pid 可对账，
-          // 存活判据换成「宿主还在」：宿主活着行就常驻（与逐 pid 行同权——
-          // 进程在行就在）；宿主没了交给空闲 TTL 收口。换代间隙（旧宿主已死、
-          // 新宿主未入扫描）最近请求的 TTL 兜住，行连同历史一起被误洗只会发
-          // 生在「换代且超过 TTL 无请求」——那本来也是该收行的时刻。
-          const desktopRowKept = countsTrusted && (
-            (bucket === "dsh" && instId === DSH_DESKTOP_INSTANCE_ID && dshDesktopHostAlive(procCounts))
-            || (bucket === "kimi" && instId === KIMI_DESKTOP_INSTANCE_ID && kimiDesktopHostAlive(procCounts))
-          );
-          if (!desktopRowKept && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
+          // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
+          // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
+          // 桌面行的生死走上面的进程家族判据，与空闲时长无关。
+          if (entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
           }
         }
@@ -3361,7 +3550,14 @@ export function createAgentMetricsCollector(options = {}) {
             ? (bucket === "dsh" ? DSH_DESKTOP_INSTANCE_ID : KIMI_DESKTOP_INSTANCE_ID)
             : `${bucket}-${pid}`;
           if (!instMap.has(placeholderId)) {
-            instMap.set(placeholderId, { state: createAggregateState(), firstSeen: now, label: null });
+            const placeholder = { state: createAggregateState(), firstSeen: now, label: null };
+            if (placeholderId !== `${bucket}-${pid}`) {
+              // 桌面占位行直接带代际锚起账：宿主 = 本 pid，dsh 连记父壳。这样
+              // App 开着还没发过请求时，读取侧的代际结算与生死判据就有锚可用。
+              ensureDesktopGen(placeholder);
+              settleDesktopGenerationOnFold(bucket, placeholder, pid, procCounts);
+            }
+            instMap.set(placeholderId, placeholder);
           }
         }
       }
