@@ -11376,40 +11376,6 @@ async function api(method, path, body) {
     $("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal);
     $("storeDiffMask").addEventListener("click", (e) => { if (e.target === $("storeDiffMask")) closeStoreDiffModal(); });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && $("storeDiffMask").classList.contains("show")) closeStoreDiffModal(); });
-    $("storeSyncAgentsBtn").onclick = async () => {
-      // 立即把当前渠道配置推送到各端点——走独立同步进程，现读磁盘上的 merge 逻辑，
-      // 因此写层的修复不需要重启服务即可生效。结果按同步接口如实反馈：全部成功、
-      // 或部分端点没成功（点名端点）。
-      const btn = $("storeSyncAgentsBtn");
-      if (btn.disabled) return;
-      btn.disabled = true;
-      setStoreRefreshStatus("正在同步到端点..", "busy");
-      try {
-        const r = await api("POST", "/api/sync-agents");
-        // synced/failed 由同步接口下发，尚未上线时取不到：取不到就按全部成功处理，不报错
-        const synced = Array.isArray(r.synced) ? r.synced : [];
-        const failed = Array.isArray(r.failed) ? r.failed : [];
-        const names = failed.map((id) => statsEndpointLabel(id)).join("、");
-        if (failed.length) {
-          const head = synced.length
-            ? `已同步 ${synced.length} 个端点，${names} 未同步成功`
-            : `这些端点未同步成功：${names}`;
-          setStoreRefreshStatus("端点同步未完成", "err", escapeHtml(`未成功：${names}`));
-          toast(head, true);
-        } else {
-          const head = synced.length
-            ? `已同步到全部 ${synced.length} 个端点的配置`
-            : "已同步到全部端点的配置";
-          setStoreRefreshStatus("端点同步完成", "done");
-          toast(head);
-        }
-      } catch (err) {
-        setStoreRefreshStatus("同步失败", "err");
-        toast(panelError(err, "端点同步失败"), true);
-      } finally {
-        btn.disabled = false;
-      }
-    };
     $("storeFilterInput").addEventListener("input", renderStoreList);
     initStoreListDrag();
 
