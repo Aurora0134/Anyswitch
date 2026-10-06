@@ -8848,3 +8848,77 @@ describe("设置项「缓存上游密钥」", () => {
     assert.equal(toasts.length, 1);
   });
 });
+
+describe("自动同步失败上屏（sync-status 落盘 + 轮询 + 文案锚点）", () => {
+  // 10-06 定稿：自动同步失败原先只进 relay 日志，而日志有「运行日志」活闸门——
+  // 用户关掉后失败整条丢弃、完全静默。现在每次同步把结果落 sync-status.json，
+  // 面板 3s 轮询上屏。这里钉住：状态小字容器、两句失败文案与 title 模板、
+  // 轮询接线、路由注册，以及文案不得暴露实现细节。
+  const here = dirname(fileURLToPath(import.meta.url));
+  const panelHtml = readFileSync(join(here, "panel-ui", "panel.html"), "utf8");
+  const panelJs = readFileSync(join(here, "panel-ui", "panel.js"), "utf8");
+  const panelMjs = readFileSync(join(here, "panel.mjs"), "utf8");
+  const relayHost = readFileSync(join(here, "relay-host.mjs"), "utf8");
+
+  it("渠道页状态小字容器存在，复用刷新小字同款样式类", () => {
+    assert.ok(
+      panelHtml.includes('<span class="store-refresh-status" id="storeSyncStatus" aria-live="polite"></span>'),
+      "storeSyncStatus DOM 存在且复用 store-refresh-status 样式类",
+    );
+  });
+
+  it("两句失败文案与发生时间 title 模板上屏锚点", () => {
+    assert.ok(panelJs.includes("上次同步未成功：${failed.map((id) => statsEndpointLabel(id)).join(\"、\")}"),
+      "部分失败点名端点（经显示名翻译）");
+    assert.ok(panelJs.includes("上次同步未成功：端点配置未更新"), "进程级失败的兜底句");
+    assert.ok(panelJs.includes("发生时间：${formatSyncStatusAt(status.at)}"), "title 带发生时间");
+  });
+
+  it("失败文案不得暴露实现细节（store.json / 子进程 / watcher / 状态文件名）", () => {
+    const copyLines = panelJs.split("\n").filter((line) =>
+      line.includes("上次同步未成功") || line.includes("发生时间："));
+    assert.ok(copyLines.length >= 3, "三句文案都被抓到");
+    for (const line of copyLines) {
+      assert.ok(!/store\.json|子进程|watcher|sync-status|防抖/.test(line),
+        `文案含实现细节词: ${line.trim()}`);
+    }
+  });
+
+  it("3s 轮询接线：跟随既有轮询写法，页面隐藏不取数", () => {
+    assert.ok(panelJs.includes("function startSyncStatusPolling()"), "轮询入口存在");
+    assert.ok(panelJs.includes('api("GET", "/api/sync-status")'), "api 自动加 /panel 前缀");
+    const start = panelJs.indexOf("function startSyncStatusPolling()");
+    const body = panelJs.slice(start, panelJs.indexOf("\n  }", start));
+    assert.ok(body.includes("if (document.hidden) return;"), "隐藏页不取数");
+    assert.ok(body.includes("3000"), "3 秒间隔");
+    // init() 在文件前部、函数定义在后部：钉调用点与 startStatusPolling 同处，
+    // 不能用「调用出现在定义之后」这种位置判据。
+    const initAnchor = panelJs.indexOf("const firstStatus = startStatusPolling();");
+    assert.ok(initAnchor >= 0, "init() 轮询起点锚点");
+    assert.ok(panelJs.slice(initAnchor, initAnchor + 300).includes("startSyncStatusPolling();"),
+      "init() 里接上了调用点");
+  });
+
+  it("边缘触发 toast：at 变化才弹、首帧历史失败不弹", () => {
+    const start = panelJs.indexOf("async function pollSyncStatus()");
+    assert.ok(start >= 0, "轮询函数存在");
+    const body = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(body.includes("syncStatusLastAt !== undefined"), "首帧不弹 toast 的守卫");
+    assert.ok(body.includes("status.at !== syncStatusLastAt"), "新失败按 at 变化判定");
+    assert.ok(body.includes("toast(syncStatusFailureText(status), true)"), "新失败弹 err toast");
+  });
+
+  it("路由注册存在，读不出文件时按「无从报告」返回而非 500", () => {
+    assert.ok(panelMjs.includes('if (path === "/panel/api/sync-status" && method === "GET") return handleSyncStatus(res);'),
+      "GET /panel/api/sync-status 路由注册");
+    assert.ok(panelMjs.includes('{ ok: true, at: null, failed: [], synced: [] }'),
+      "文件缺失/损坏的「无从报告」兜底形状");
+  });
+
+  it("四条同步路径都落盘（relay 启动/监视器/设置切换/手动路由）", () => {
+    assert.ok(relayHost.includes('syncStatusFromResult(syncResult, "startup")'), "relay 启动同步");
+    assert.ok(relayHost.includes('syncStatusFromResult(syncResult, "store-change")'), "store 监视器同步");
+    assert.ok(panelMjs.includes('syncStatusFromResult(syncResult, "settings")'), "推理强度设置切换");
+    assert.ok(panelMjs.includes('syncStatusFromResult(result, "manual")'), "手动同步路由");
+  });
+});

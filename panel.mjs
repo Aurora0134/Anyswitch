@@ -27,6 +27,7 @@ import { logLevelAllows } from "./logger.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
+import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "./sync-status.mjs";
 import { createSkillsService, pickFile, pickFolder } from "./agent-skills.mjs";
 import { createDataBundleService } from "./data-bundle.mjs";
 import { createPromptsService } from "./agent-prompts.mjs";
@@ -1400,6 +1401,14 @@ export function createPanelRouter({
           }
         : null;
       const result = await spawnAgentSyncFn({ port: 47821, logger: uiLogger });
+      // 失败上屏的落盘点（source "manual"）：结果写进 sync-status.json，面板轮询
+      // 渲染「上次同步未成功」。运行日志关掉时日志行会被活闸门丢弃，这份文件是
+      // 失败最后剩下的可见面。落盘失败不影响本路由的响应。
+      try {
+        writeSyncStatus(relayRoot, syncStatusFromResult(result, "manual"));
+      } catch (err) {
+        logger?.warn?.(`sync status write failed: ${err.message}`);
+      }
       // 同步进程在 stdout 上留了一行机器可读摘要。个别端点写不进去不再算整次
       // 失败：其余端点已经同步好，按钮只把没写进去的端点报出来。仓库数据读不
       // 出来或同步进程自己崩了，才是真的失败。
@@ -1415,6 +1424,15 @@ export function createPanelRouter({
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err.message });
     }
+  }
+
+  // 最近一次同步的结果（sync-status.json，每次同步后落盘）。文件不存在或读不出
+  // ＝「无从报告」：按无异常返回 ok:true/at:null，前端据此不渲染任何提示——
+  // 这份文件不是错误证据，读不出来本身也不构成一次失败。
+  function handleSyncStatus(res) {
+    const status = readSyncStatus(relayRoot);
+    if (!status) return sendJson(res, 200, { ok: true, at: null, failed: [], synced: [] });
+    return sendJson(res, 200, status);
   }
 
   // Log ingest for per-launch Claude relays. Each Claude Code session runs its
@@ -2000,6 +2018,7 @@ export function createPanelRouter({
     if (path === "/panel/api/relay/restart" && method === "POST") return handleRelayRestart(res);
     if (path === "/panel/api/panel-host/restart" && method === "POST") return handlePanelHostRestart(res);
     if (path === "/panel/api/sync-agents" && method === "POST") return handleAgentSync(res);
+    if (path === "/panel/api/sync-status" && method === "GET") return handleSyncStatus(res);
     if (path === "/panel/api/agents" && method === "GET") return handleAgents(res);
     if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
     if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
@@ -2094,7 +2113,14 @@ export function createPanelRouter({
         // sync just leaves the endpoints as they were until the next one.
         if (typeof body.injectThinkingEffort === "boolean") {
           try {
-            await spawnAgentSyncFn({ port: 47821, logger });
+            const syncResult = await spawnAgentSyncFn({ port: 47821, logger });
+            // 与启动/监视器两处同口径落盘（source "settings"），让这条路径的
+            // 失败同样能上屏；落盘失败不影响设置保存的既有行为。
+            try {
+              writeSyncStatus(relayRoot, syncStatusFromResult(syncResult, "settings"));
+            } catch (err) {
+              logger?.warn?.(`sync status write failed: ${err.message}`);
+            }
           } catch (err) {
             logger?.warn?.(`推理强度设置已保存，但端点重新同步失败：${err.message}`);
           }
