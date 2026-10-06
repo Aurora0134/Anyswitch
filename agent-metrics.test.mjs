@@ -1,8 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync, rmSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import {
   createAgentMetricsCollector,
   createSessionReporter,
@@ -3677,6 +3678,11 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
   const DESKTOP_HOST = "C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js";
   const desktopShellRow = (pid, args) => `LAPTOP,"${DESKTOP_EXE}"${args ? ` ${args}` : ""},DeepSeek Harness.exe,${pid}`;
   const desktopHostRow = (pid) => `LAPTOP,"${DESKTOP_EXE}" --expose-internals "${DESKTOP_HOST}",DeepSeek Harness.exe,${pid}`;
+  // 常驻探针的真实形状带父进程列（壳锚判据的生产输入）：壳行与宿主行各带
+  // ParentProcessId。
+  const wmic5 = (...rows) => `Node,CommandLine,Name,ParentProcessId,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+  const desktopShellRow5 = (pid, ppid) => `LAPTOP,"${DESKTOP_EXE}",DeepSeek Harness.exe,${ppid},${pid}`;
+  const desktopHostRow5 = (pid, ppid) => `LAPTOP,"${DESKTOP_EXE}" --expose-internals "${DESKTOP_HOST}",DeepSeek Harness.exe,${ppid},${pid}`;
   const wmic = (...rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
   const surfacesOf = (agent) => Object.fromEntries(agent.surfaces.map((s) => [s.label, s.count]));
 
@@ -3923,8 +3929,10 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
   });
 
   it("keeps the idle desktop row while the app runs and retires it with the app", async () => {
-    // 稳定行无 pid 可对账：宿主活着就与逐 pid 行同权常驻（空闲不清行），
-    // 宿主退场才交给空闲 TTL 收口。
+    // 稳定行无 pid 可对账：宿主活着就与逐 pid 行同权常驻（空闲不清行）；
+    // 宿主退场当轮收行，与空闲时长无关——下面故意在刚发生请求（行不空闲）
+    // 时退场，钉住「死即收、不等任何 TTL」。此夹具无父进程列（降级形状），
+    // 壳锚缺席时家族判据退化为宿主集合，空轮即死。
     let t = 3000;
     let hostAlive = true;
     const execFn = (cmd, opts, cb) => cb(null, hostAlive ? wmic(desktopHostRow(4940)) : wmic());
@@ -3933,9 +3941,12 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     const r = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4940", model: "m1", stream: true, path: "openai" });
     r.recordEnd({ status: 200, usage: { prompt_tokens: 8, completion_tokens: 3 } });
 
-    t += 20 * 60 * 1000; // far past the 10-minute idle TTL
+    t += 20 * 60 * 1000; // far past the old 10-minute idle TTL
     const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
     assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-desktop"], "an idle row survives while the desktop app runs");
+
+    const r2 = collector.startRequest({ agentId: "dsh", instanceId: "dsh-4940", model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
 
     // 读驱动的重扫在微任务里落地，且可能横跨下一次读：「读→等→读」两步不足以
     // 保证服务到的快照是宿主退场后的那一轮（后台在途轮会先于读者落不了地）。
@@ -3951,6 +3962,105 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     }
     assert.ok(gone !== null, "the row retires with the app");
     assert.equal(gone.status, "stopped");
+  });
+
+  it("keeps one account across engine generations when the Electron shell anchors them", async () => {
+    // 生产形状（常驻探针带父进程列）：两个宿主引擎同父（同一个壳）= 同一次
+    // App 运行，换代续账。壳镜像本来就在探针查询名单里，父锚可对账。
+    let t = 3000;
+    let hostPid = 4910;
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      desktopShellRow5(4900, 100),
+      desktopHostRow5(hostPid, 4900),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+
+    const r1 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    hostPid = 4911;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const r2 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]]);
+    assert.equal(dsh.instances[0].requests, 2, "same shell = same app run = one account");
+    assert.equal(dsh.instances[0].tokens.prompt, 150);
+  });
+
+  it("reopens the account when the desktop app restarts (new shell), no idle wait", async () => {
+    // 真重启 = 壳换了且旧壳全灭：新代请求重开账，秒级重启也不等任何 TTL。
+    let t = 3000;
+    let shellPid = 4900;
+    let hostPid = 4910;
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      desktopShellRow5(shellPid, 100),
+      desktopHostRow5(hostPid, shellPid),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+
+    const r1 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    shellPid = 4901;
+    hostPid = 4920;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const r2 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]], "the row itself survives the restart");
+    assert.equal(dsh.instances[0].requests, 1, "a new app run reopens the account");
+    assert.equal(dsh.instances[0].tokens.prompt, 50, "the previous run's tokens do not carry over");
+  });
+
+  it("keeps the row and account through an engine gap while the shell stays up", async () => {
+    // 引擎换代空档（旧宿主已死、新宿主未起）里壳还在 = App 开着：行常驻、
+    // 账目保留，空闲时长无关（这里推 20 分钟，远超旧实现 10 分钟的误洗线）。
+    let t = 3000;
+    let hostUp = true;
+    let hostPid = 4910;
+    const execFn = (cmd, opts, cb) => cb(null, hostUp
+      ? wmic5(desktopShellRow5(4900, 100), desktopHostRow5(hostPid, 4900))
+      : wmic5(desktopShellRow5(4900, 100)));
+    const collector = testCollector({ execFn, nowFn: () => t });
+    await collector.scanProcesses();
+
+    const r1 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    hostUp = false;
+    t += 20 * 60 * 1000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const mid = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(mid.instances.map((i) => i.id), ["dsh-desktop"], "the seat survives the engine gap");
+    assert.equal(mid.instances[0].requests, 1, "the account is untouched by the gap");
+
+    hostUp = true;
+    hostPid = 4911;
+    t += 3000;
+    // scanProcesses 是「陈旧即回、后台刷新」语义：踢出的轮（含 reap 的控制台
+    // 查询延迟）未必在下一个微任务前落地。轮询到缓存真正看到新宿主再发请求，
+    // 不赌落地时机。
+    for (let tries = 0; tries < 10; tries += 1) {
+      const procs = await collector.scanProcesses();
+      if (procs.dshDesktopHostPids.has(4911)) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const r2 = collector.startRequest({ agentId: "dsh", instanceId: `dsh-${hostPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.instances[0].requests, 2, "the next engine generation continues the account");
   });
 
   it("refolds a request that landed before the scan saw the host onto the stable row", async () => {
@@ -4241,9 +4351,11 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "只有主进程出行");
   });
 
-  it("keeps one desktop row across main-process generations so churn no longer resets it", async () => {
-    // 与 DSH 桌面端同一种换代病：主进程是会话属主，行跟 pid 走就随换代清零。
-    // 稳定行以面为键：换代只是换 pid，行不换。
+  it("reopens the account when the main process is replaced, row identity intact", async () => {
+    // 主进程是会话属主，它死了 = 这一代账目结束：新主进程的请求重新开账
+    // （请求数/工时/折线从零），行 id 与 Desktop 标签保持稳定。判定只看进程
+    // 生死、与空闲时长无关——journal 实证（2026-10-02~06）主进程换代都发生在
+    // 会话尺度，旧主全灭 + 新主出现即真重启。
     let t = 3000;
     let mainPid = 6401;
     const collector = testCollector({
@@ -4259,7 +4371,9 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
 
     // The desktop app relaunches its core; the panel's poll refreshes the scan
     // before the next request (two-step read: first serves stale and kicks the
-    // round, second serves what landed).
+    // round, second serves what landed). The read itself settles the generation:
+    // the old main is gone from the scan, so the account reopens before the
+    // new generation's first request lands.
     mainPid = 6402;
     t += 3000;
     await collector.getAgentsStatus();
@@ -4271,8 +4385,8 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
 
     const card = kimi(await collector.getAgentsStatus());
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
-    assert.equal(card.instances[0].requests, 2, "both generations land on the same row");
-    assert.equal(card.instances[0].tokens.prompt, 150);
+    assert.equal(card.instances[0].requests, 1, "a replaced main process reopens the account");
+    assert.equal(card.instances[0].tokens.prompt, 50, "the old generation's tokens do not carry over");
   });
 
   it("folds desktop traffic onto the stable row while terminal traffic keeps its pid row", async () => {
@@ -4293,8 +4407,9 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
   });
 
   it("keeps the idle desktop row while the app runs and retires it with the app", async () => {
-    // 稳定行无 pid 可对账：主进程活着就与逐 pid 行同权常驻（空闲不清行），
-    // App 退场才交给空闲 TTL 收口。
+    // 稳定行无 pid 可对账：主进程活着就与逐 pid 行同权常驻（空闲不清行）；
+    // App 退场当轮收行，与空闲时长无关——下面故意在刚发生请求（行不空闲）时
+    // 退场，钉住「死即收、不等任何 TTL」。
     let t = 3000;
     let appUp = true;
     const collector = testCollector({
@@ -4306,9 +4421,12 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6421", model: "m1", stream: true, path: "openai" });
     r.recordEnd({ status: 200, usage: { prompt_tokens: 8, completion_tokens: 3 } });
 
-    t += 20 * 60 * 1000; // far past the 10-minute idle TTL
+    t += 20 * 60 * 1000; // far past the old 10-minute idle TTL
     const card = kimi(await collector.getAgentsStatus());
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "an idle row survives while the desktop app runs");
+
+    const r2 = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6421", model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
 
     // 读驱动的重扫在微任务里落地，且可能横跨下一次读：「读→等→读」两步不足以
     // 保证服务到的快照是 App 退场后的那一轮（后台在途轮会先于读者落不了地）。
@@ -4324,6 +4442,75 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     }
     assert.ok(gone !== null, "the row retires with the app");
     assert.equal(gone.status, "stopped");
+  });
+
+  it("keeps one account while two main processes coexist (overlap churn)", async () => {
+    // journal 实证的共存换代（2026-10-04 两个主进程共存约 25 分钟）：旧主还有
+    // 活口就续账，新主并入同一行同一账；全部退场后的新主才重开账。
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(desktopRow(6401), desktopRow(6402))),
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+
+    const r1 = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+    const r2 = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6402", model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
+    assert.equal(card.instances[0].requests, 2, "coexisting mains share one account");
+  });
+
+  it("does not reopen the account on idle time alone while the app keeps running", async () => {
+    // 空闲时长不参与账目判定：同主进程闲置多久后续跑都是同代续账。
+    let t = 3000;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, wmic(desktopRow(6401))),
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+    const r1 = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    t += 20 * 60 * 1000;
+    const r2 = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
+    assert.equal(card.instances[0].requests, 2, "same main process = same account, however long the idle");
+  });
+
+  it("keeps the desktop row through a degraded round that lost the app", async () => {
+    // 降级轮（tasklist 有行但无命令行列）答不出桌面端生死：不收行也不重开账，
+    // 与逐 pid 行「旧形状不淘汰」同一保守守卫。旧实现此场景会把空闲行交给
+    // 10 分钟 TTL 洗掉。
+    let t = 3000;
+    let trusted = true;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => {
+        if (cmd.includes("tasklist")) {
+          return cb(null, trusted ? "" : '"explorer.exe","999","Console","1","80,000 K"\r\n');
+        }
+        return cb(null, trusted ? wmic(desktopRow(6401)) : "");
+      },
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 8, completion_tokens: 3 } });
+
+    trusted = false;
+    t += 20 * 60 * 1000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "an untrusted round never retires the row");
   });
 
   it("refolds a request that landed before the scan saw the desktop app onto the stable row", async () => {
@@ -4509,6 +4696,87 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.equal(kimiSurfaceLabel("desktop"), "Desktop");
     assert.equal(kimiSurfaceLabel(undefined), "未知");
     assert.equal(kimiSurfaceLabel("Kimi Code"), "未知", "产品名不当界面名用");
+  });
+
+  it("carries generation anchors across a relay restart: same main continues the account", async () => {
+    // 代际锚随指标快照落盘还原：relay 重启（缓存清零）后同一主进程的请求仍是
+    // 同一代，续账不重开。快照落盘走真实定时器，需真等一拍。
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-metrics-snapshot-"));
+    const snapPath = join(dir, "metrics-snapshot.json");
+    try {
+      let t = 3000;
+      const opts = () => ({
+        nowFn: () => t,
+        metricsSnapshotPath: snapPath,
+        metricsSnapshotEveryMs: 30,
+        execFn: (cmd, opts2, cb) => cb(null, wmic(desktopRow(6401))),
+        kimiRegistryLookup: registry([]),
+      });
+      const a = testCollector(opts());
+      await a.scanProcesses();
+      const r1 = a.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+      t += 100;
+      await new Promise((resolve) => setTimeout(resolve, 80)); // 让快照定时器真正落一次盘
+
+      const b = testCollector(opts());
+      await b.scanProcesses();
+      const r2 = b.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+      const card = kimi(await b.getAgentsStatus());
+      assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
+      assert.equal(card.instances[0].requests, 2, "same main process across a relay restart = same account");
+      assert.equal(card.instances[0].tokens.prompt, 150);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens the restored account when the app restarted during the relay downtime", async () => {
+    // relay 停机期间 App 重启过：还原的旧账在新主进程证据到来时收口重开，新
+    // 主落在原始 pid 行上的计数经重折叠并账进入新账——隐藏期攒下的历史不丢。
+    const dir = mkdtempSync(join(tmpdir(), "anyswitch-metrics-snapshot-"));
+    const snapPath = join(dir, "metrics-snapshot.json");
+    try {
+      let t = 3000;
+      let mainPid = 6401;
+      const a = testCollector({
+        nowFn: () => t,
+        metricsSnapshotPath: snapPath,
+        metricsSnapshotEveryMs: 30,
+        execFn: (cmd, opts2, cb) => cb(null, wmic(desktopRow(mainPid))),
+        kimiRegistryLookup: registry([]),
+      });
+      await a.scanProcesses();
+      const r1 = a.startRequest({ agentId: "kimi", instanceId: "kimi-6401", model: "m1", stream: true, path: "openai" });
+      r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+      t += 100;
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      mainPid = 6402;
+      t += 3000;
+      const b = testCollector({
+        nowFn: () => t,
+        metricsSnapshotPath: snapPath,
+        metricsSnapshotEveryMs: 30,
+        execFn: (cmd, opts2, cb) => cb(null, wmic(desktopRow(mainPid))),
+        kimiRegistryLookup: registry([]),
+      });
+      // B 的缓存冷着：请求先落原始 pid 行（真正的隐藏期桥接形状）。
+      const r2 = b.startRequest({ agentId: "kimi", instanceId: "kimi-6402", model: "m1", stream: true, path: "openai" });
+      r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+      await b.scanProcesses();
+      const card = kimi(await b.getAgentsStatus());
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const settled = kimi(await b.getAgentsStatus());
+
+      assert.deepEqual(rowsOf(settled), [["kimi-desktop", "Desktop"]], "the cold pid row folds onto the stable row");
+      assert.equal(settled.instances[0].requests, 1, "the old era's account was reopened");
+      assert.equal(settled.instances[0].tokens.prompt, 50, "the new era's counts survive the refold merge");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
