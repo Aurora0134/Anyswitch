@@ -164,7 +164,7 @@ npm test
 
 它解决的是「同一个角色，到处叫同一个名字」：把 `deepseek-pro` 定义成「主渠道 → 备用池」，之后 Claude Code 里选它、Codex 里选它，走的是同一条链。链状态还是跨 agent 共享的——一个 agent 把某节点打降级了，另一个 agent 的请求直接绕开它，不重复交学费。
 
-命名规则：小写字母开头，可含数字和 `. _ -`，最长 64 字符，不能与链内模型重名；名字保存后锁定，之后改的只是链。
+命名规则：小写字母开头，可含数字和 `. _ -`，最长 64 字符，不能与链内模型重名，也不能与别的虚拟模型同名；改名后旧名字立即失效，链、启用开关与位次都保留。
 
 ### 备用地址：服务商有多个入口
 
@@ -468,7 +468,7 @@ A virtual model is your own name bound to a chain that belongs to no single agen
 
 It answers "the same role should have the same name everywhere": define `deepseek-pro` as "primary provider → backup pool", then pick it in Claude Code or in Codex — the same chain carries the request. Chain state is shared across agents too: if one agent gets a node latched as degraded, another agent's requests skip it directly instead of paying the same tuition.
 
-Naming: starts with a lowercase letter, may contain digits and `. _ -`, at most 64 characters, and cannot collide with a model inside its own chain. The name locks on save — afterwards you edit the chain, not the name.
+Naming: starts with a lowercase letter, may contain digits and `. _ -`, at most 64 characters, and cannot collide with a model inside its own chain or with another virtual model. Renaming retires the old name immediately — the chain, its enabled switch and its position all stay.
 
 #### Fallback URLs: the vendor has more than one entrance
 

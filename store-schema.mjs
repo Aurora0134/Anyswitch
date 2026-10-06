@@ -317,9 +317,10 @@ export const MAX_CHAIN_NODES = 8;
 // name 是端点可见的虚拟模型 id（小写字母开头，[a-z0-9._-]），chain 与 routingChains
 // 的节点完全同构（池优先解析、node+model 复合键去重），enabled 语义同端点链开关
 // （absent = 启用）。虚拟模型不绑定端点：任何端点请求这个名字都走同一条链，
-// 并与 auto 一起出现在各端点模型列表的 Anyswitch 分组下。名字在保存后锁定
-// （save 按名字 upsert，只换链不动名），且禁用端点 id 与 "auto"——它们分别是
-// 端点链路由键与链路由触发词，撞名会让请求被拦截到错误的目标。
+// 并与 auto 一起出现在各端点模型列表的 Anyswitch 分组下。save 按名字 upsert（只换链
+// 不动名）；带 previousName 时按原名原位换名（位次与启用开关保留）——名字就是对外
+// 模型 id，改名后旧名的调用随即失效。名字禁用端点 id 与 "auto"——它们分别是端点链
+// 路由键与链路由触发词，撞名会让请求被拦截到错误的目标。
 export const VIRTUAL_MODEL_ID = /^[a-z][a-z0-9._-]*$/;
 export const VIRTUAL_MODEL_MAX = 64;
 const RESERVED_VIRTUAL_MODEL_NAMES = new Set(["auto", ...ROUTING_ENDPOINT_IDS]);

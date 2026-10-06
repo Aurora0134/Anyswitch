@@ -638,7 +638,8 @@ describe("panel router virtual-model routes（虚拟模型）", () => {
     await router.handle(req, res);
     assert.equal(res.statusCode, 200);
     assert.deepEqual(json(), { ok: true, name: "my-chain" });
-    assert.deepEqual(svc.calls[0], { name: "saveVirtualModel", arg: ["my-chain", chain] });
+    assert.deepEqual(svc.calls[0], { name: "saveVirtualModel", arg: ["my-chain", chain, undefined] },
+      "不带原名时第三参数为 undefined（普通 upsert 路径不变）");
   });
 
   it("POST /panel/api/store/virtual-model/save is 400 without a string name or an array chain", async () => {
@@ -654,6 +655,37 @@ describe("panel router virtual-model routes（虚拟模型）", () => {
     const noChain = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "my-chain" });
     await router.handle(noChain.req, noChain.res);
     assert.equal(noChain.res.statusCode, 400);
+    assert.deepEqual(svc.calls, []);
+  });
+
+  it("POST /panel/api/store/virtual-model/save forwards previousName when present（改名）", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const chain = [{ node: "prov-a", model: "m1" }];
+    const renamed = fakeReqRes("/panel/api/store/virtual-model/save", "POST",
+      { name: "new-name", chain, previousName: "old-name" });
+    await router.handle(renamed.req, renamed.res);
+    assert.equal(renamed.res.statusCode, 200);
+    assert.deepEqual(renamed.json(), { ok: true, name: "my-chain" });
+    assert.deepEqual(svc.calls[0], { name: "saveVirtualModel", arg: ["new-name", chain, "old-name"] });
+
+    const plain = mockService();
+    const router2 = storeRouter(plain);
+    const noPrev = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "new-name", chain });
+    await router2.handle(noPrev.req, noPrev.res);
+    assert.deepEqual(plain.calls[0], { name: "saveVirtualModel", arg: ["new-name", chain, undefined] },
+      "不带原名时第三参数为 undefined（普通 upsert 路径不变）");
+  });
+
+  it("POST /panel/api/store/virtual-model/save is 400 on a non-string or blank previousName", async () => {
+    const svc = mockService();
+    const router = storeRouter(svc);
+    const chain = [{ node: "prov-a", model: "m1" }];
+    for (const previousName of [42, "", "   "]) {
+      const { req, res } = fakeReqRes("/panel/api/store/virtual-model/save", "POST", { name: "new-name", chain, previousName });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 400, `previousName=${JSON.stringify(previousName)}`);
+    }
     assert.deepEqual(svc.calls, []);
   });
 

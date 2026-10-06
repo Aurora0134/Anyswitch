@@ -2337,35 +2337,84 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
     assert.ok(m && m[0].includes("renderVirtualModels()"), "endpoint tiles refresh the virtual grid too");
   });
 
-  it("虚拟模型编辑器共用链编辑弹窗：新建流带名称输入并初始聚焦，编辑流名称锁定", () => {
+  it("虚拟模型编辑器共用链编辑弹窗：新建与编辑同一形态，名字输入可编辑并带初值", () => {
     assert.ok(panelJs.includes("function openVirtualModelModal("), "virtual editor open fn exists");
+    const open = panelJs.match(/function openVirtualModelModal\(name\) \{[\s\S]*?\n  \}/);
+    assert.ok(open && /virtualModelNameDraft = name;/.test(open[0]), "编辑流把当前名填进草稿");
     const bodyFn = panelJs.match(/function renderRouteChainBody\(opts\) \{[\s\S]*?\n  \}/);
     assert.ok(bodyFn, "route chain body renderer found");
-    assert.ok(bodyFn[0].includes('id="virtualModelNameInput"'), "create flow renders a name input");
-    assert.ok(bodyFn[0].includes('disabled title="虚拟模型名称保存后固定"'), "saved names render locked (disabled input)");
+    assert.ok(bodyFn[0].includes('id="virtualModelNameInput"'), "the editor renders a name input");
+    const nameInput = bodyFn[0].split("\n").find((l) => l.includes('id="virtualModelNameInput"'));
+    assert.ok(nameInput && !nameInput.includes("disabled"), "名字输入不再禁用（改名走保存）");
     assert.ok(bodyFn[0].includes("virtualModelCreating"), "create-vs-edit branching is explicit");
+    assert.ok(bodyFn[0].includes('$("routeChainConfirmBtn").textContent = isVirtual ? "保存虚拟模型"'),
+      "底部按钮按目标分叉，不再在虚拟模型编辑器里写「保存路由链」");
   });
 
-  it("虚拟模型保存/删除/启用打到独立 API，保存体携带 name+chain", () => {
+  it("虚拟模型保存/删除/启用打到独立 API，保存体携带 name+chain（改名时带 previousName）", () => {
     const save = panelJs.match(/api\("POST",\s*"\/api\/store\/virtual-model\/save",\s*\{[\s\S]*?\}\);/);
     assert.ok(save, "save posts to virtual-model/save");
     assert.ok(/\bname\b/.test(save[0]) && /chain:/.test(save[0]), "save body carries name and chain");
+    assert.ok(save[0].includes("previousName"), "改名时保存体带原名");
     assert.ok(panelJs.includes('"/api/store/virtual-model/delete"'), "delete endpoint wired");
     assert.ok(panelJs.includes('"/api/store/virtual-model/enabled"'), "enabled endpoint wired");
   });
 
-  it("虚拟模型名称校验：小写字母开头 + 字符集 + 长度上限，且不得与链内模型重名", () => {
+  it("虚拟模型名称校验：小写字母开头 + 字符集 + 长度上限，不得与链内模型重名，也不得占用别的虚拟模型名", () => {
     const m = panelJs.match(/function virtualModelNameError\(\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "name validator exists");
     assert.ok(m[0].includes('^[a-z][a-z0-9._-]*$'), "charset anchored to store PROVIDER_ID shape");
     assert.ok(m[0].includes("模型名不能与链内模型重名"), "chain-internal collision rejected");
+    assert.ok(m[0].includes("这个名字已被占用"), "other virtual models' names rejected");
   });
 
-  it("新建流名称输入即时驱动入口桩与链路标签，且打字即清除报错", () => {
+  it("编辑已有虚拟模型：名字取自当前名，校验放行（回归：曾误报「请填写模型名」）", () => {
+    const src = ["virtualModelNameValue", "virtualModelNameError"].map((fnName) => {
+      const body = panelJs.match(new RegExp(`function ${fnName}\\(\\)[\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    const chain = [{ node: "prov-a", model: "m1" }];
+    const existing = [{ name: "deepseek-pro" }, { name: "other-vm" }];
+    const call = (over) => {
+      const ctx = {
+        virtualModelNameDraft: "deepseek-pro",
+        virtualModelCreating: false,
+        routeChainTarget: { kind: "virtual", id: "deepseek-pro" },
+        routeChainDraft: chain,
+        storeVirtualModels: () => existing,
+        ...over,
+      };
+      return vm.runInNewContext(`(() => { ${src}; return virtualModelNameError; })()`, ctx)();
+    };
+    assert.equal(call({}), null, "编辑流保留原名必须放行（曾恒报「请填写模型名」）");
+    assert.equal(call({ virtualModelNameDraft: "  " }), "请填写模型名", "清空名字仍报缺名");
+    assert.equal(call({ virtualModelNameDraft: "MyName" }).startsWith("模型名格式不对"), true, "格式校验不变");
+    assert.equal(call({ virtualModelNameDraft: "other-vm" }), "这个名字已被占用：other-vm", "改名撞名拦在保存前");
+    assert.equal(
+      call({ virtualModelNameDraft: "deepseek-pro", virtualModelCreating: true, routeChainTarget: { kind: "virtual", id: null } }),
+      "这个名字已被占用：deepseek-pro",
+      "新建撞名不再静默覆盖那条模型的链",
+    );
+  });
+
+  it("改名虚拟模型：写盘前过一次确认，写盘带 previousName，成功提示点名新旧名", () => {
+    const confirm = panelJs.match(/async function confirmRouteChainSave\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(confirm, "save entry point found");
+    assert.ok(confirm[0].includes("showSkillsModal"), "改名先过确认弹窗");
+    assert.ok(confirm[0].includes("commitRouteChainSave()"), "确认后走同一次写盘");
+    const commit = panelJs.match(/async function commitRouteChainSave\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(commit, "commit fn found");
+    assert.ok(commit[0].includes("previousName"), "改名写盘带原名");
+    assert.ok(commit[0].includes("虚拟模型已改名："), "改名成功提示点名新旧名");
+  });
+
+  it("名字输入即时驱动入口桩与链路标签（新建与编辑同源），且打字即清除报错", () => {
     const m = panelJs.match(/nameInput\.addEventListener\("input", \(\) => \{[\s\S]*?\n      \}\);/);
     assert.ok(m, "name input live listener exists");
     assert.ok(m[0].includes('route-entry-tag'), "entry tag updates live");
     assert.ok(m[0].includes("逐跳退避"), "stage label updates live");
+    assert.ok(m[0].includes("编辑虚拟模型 — "), "编辑流标题随输入更新");
     assert.ok(m[0].includes('err.hidden = true'), "typing clears the inline error");
   });
 
