@@ -1379,6 +1379,9 @@
      可见态显式开回命中测试。限定在 .show 下——10s 淡出只摘 .show、不把小字置
      hidden，无条件开 auto 会在按钮行右侧留一个看不见但能点的热区 */
   .store-refresh-status.show .srs-diff-link { pointer-events: auto; }
+  /* 同步失败小字常驻展示，title 带发生时间：同上一条的理由，可见态开回命中
+     测试让悬停 tooltip 能浮出（无点击行为，只读） */
+  #storeSyncStatus.show { pointer-events: auto; }
   .skills-path-input {
     flex: 1; min-width: 0; background: var(--surface-sunken); border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm, 6px); color: var(--text); font-size: 12px; font-family: var(--font-mono);

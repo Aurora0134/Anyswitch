@@ -314,6 +314,8 @@ async function api(method, path, body) {
     // 并行拉取，二者互不阻塞；失败各自走下一轮轮询重试。
     await Promise.allSettled([refreshRouteChainsCache(), refreshRouteRuntimeCache()]);
     const firstStatus = startStatusPolling();
+    // 自动同步失败上屏：3s 轮询，独立启动不阻塞开屏 ready。
+    startSyncStatusPolling();
     // 日志流入口：内部先问运行日志开关再决定连不连，不阻塞开屏 ready。
     startLogStream();
     if (window.panelStartupController) {
@@ -9432,6 +9434,60 @@ async function api(method, path, body) {
   }
   function disarmStoreStatusTimer() {
     if (storeStatusTimer) { clearTimeout(storeStatusTimer); storeStatusTimer = null; }
+  }
+
+  // ── 自动同步失败上屏 ──
+  // 每次同步（relay 启动、渠道改动自动触发、推理强度切换）后结果落在服务端，
+  // 这里每 3s 轮询一次：失败时把「上次同步未成功」持久挂在「全部刷新」按钮旁
+  // （状态而非一次性回执——前置条件还在就该在；成功或「无从报告」时清空隐藏），
+  // 且 at 变化（＝发生了一次新的失败）时无论人在哪个页签都弹一次 toast。
+  // 首帧拉到的历史失败只渲染不弹，避免进面板就被旧失败轰炸。
+  let syncStatusLastAt = undefined; // undefined = 首帧尚未拉到
+  function formatSyncStatusAt(at) {
+    const d = new Date(at);
+    if (isNaN(d.getTime())) return String(at);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  }
+  function syncStatusFailureText(status) {
+    const failed = Array.isArray(status.failed) ? status.failed : [];
+    return failed.length
+      ? `上次同步未成功：${failed.map((id) => statsEndpointLabel(id)).join("、")}`
+      : "上次同步未成功：端点配置未更新";
+  }
+  function renderSyncStatus(status) {
+    const el = $("storeSyncStatus");
+    if (!el) return;
+    if (!status || status.at == null || status.ok !== false) {
+      el.textContent = "";
+      el.removeAttribute("title");
+      el.classList.remove("show", "err");
+      return;
+    }
+    el.textContent = syncStatusFailureText(status);
+    el.title = `发生时间：${formatSyncStatusAt(status.at)}`;
+    el.classList.add("show", "err");
+  }
+  async function pollSyncStatus() {
+    let status;
+    try {
+      status = await api("GET", "/api/sync-status");
+    } catch {
+      return; // 拉不到保持现状，下轮再试
+    }
+    const isNewFailure =
+      syncStatusLastAt !== undefined && status && status.ok === false &&
+      status.at != null && status.at !== syncStatusLastAt;
+    renderSyncStatus(status);
+    if (status && status.at != null) syncStatusLastAt = status.at;
+    if (isNewFailure) toast(syncStatusFailureText(status), true);
+  }
+  function startSyncStatusPolling() {
+    pollSyncStatus();
+    setInterval(() => {
+      if (document.hidden) return;
+      pollSyncStatus();
+    }, 3000);
   }
 
   // 刷新终态远离通报：人不在渠道 tab 时弹结果 toast（8s 驻留，比常规 3s 长——

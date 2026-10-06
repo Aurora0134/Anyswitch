@@ -32,6 +32,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 import { writeRelayPid, clearRelayPid, getRelayPidPath } from "./relay-process-manager.mjs";
 import { createStoreWatcher } from "./agent-sync.mjs";
 import { spawnAgentSync } from "./agent-sync-spawn.mjs";
+import { writeSyncStatus, syncStatusFromResult } from "./sync-status.mjs";
 import { createInstanceSocketOwner } from "./instance-socket-owner.mjs";
 import { createServiceHealth } from "./service-health.mjs";
 import { ensureGitAnchor, logGitAnchorResult } from "./git-anchor.mjs";
@@ -745,6 +746,15 @@ export async function startResidentRelay(options = {}) {
   // this resident host.
   try {
     const syncResult = await spawnAgentSync({ port, logger });
+    // 失败上屏的落盘点：结果写进 sync-status.json（与 store.json 同级），面板
+    // 轮询它渲染「上次同步未成功」——运行日志被用户关掉时 logger.error 那行会
+    // 被活闸门整条丢弃，这份文件是失败最后剩下的可见面。落盘失败不得反过来
+    // 弄坏同步本身。
+    try {
+      writeSyncStatus(root, syncStatusFromResult(syncResult, "startup"));
+    } catch (err) {
+      logger.warn?.(`sync status write failed: ${err.message}`);
+    }
     if (!syncResult.ok) {
       logger.error(`initial agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
     }
@@ -760,6 +770,12 @@ export async function startResidentRelay(options = {}) {
     onStoreChange: async () => {
       logger.info("store.json changed; re-syncing agent configurations");
       const syncResult = await spawnAgentSync({ port, logger });
+      // 同启动同步：结果落 sync-status.json 供面板上屏（详见上方注释）。
+      try {
+        writeSyncStatus(root, syncStatusFromResult(syncResult, "store-change"));
+      } catch (err) {
+        logger.warn?.(`sync status write failed: ${err.message}`);
+      }
       if (!syncResult.ok) {
         logger.error(`agent config sync failed: ${syncResult.error ?? `runner exit ${syncResult.code}`}`);
       }
