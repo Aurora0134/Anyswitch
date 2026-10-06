@@ -1625,6 +1625,49 @@ describe("store-service virtualModels（虚拟模型）", () => {
     ]);
   });
 
+  it("saveVirtualModel 带 previousName 改名：原位换名，链与启用开关一起换，位次不变", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("vm-a", [{ node: "prov-a", model: "m1" }]);
+    await svc.saveVirtualModel("vm-b", [{ node: "prov-b", model: "m2" }]);
+    await svc.setVirtualModelEnabled("vm-a", false);
+    const next = [{ node: "prov-c", model: "m4" }];
+    const result = await svc.saveVirtualModel("vm-renamed", next, "vm-a");
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(readStore(paths).store.virtualModels, [
+      { name: "vm-renamed", chain: next, enabled: false },
+      { name: "vm-b", chain: [{ node: "prov-b", model: "m2" }] },
+    ]);
+    const state = await svc.getState();
+    assert.deepEqual(state.virtualModels.map((v) => v.name), ["vm-renamed", "vm-b"]);
+  });
+
+  it("saveVirtualModel 改名拒绝：原名不存在 / 新名已被别的虚拟模型占用（两条都不动）", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("vm-a", [{ node: "prov-a", model: "m1" }]);
+    await svc.saveVirtualModel("vm-b", [{ node: "prov-b", model: "m2" }]);
+    const chain = [{ node: "prov-c", model: "m4" }];
+    assert.match((await svc.saveVirtualModel("vm-c", chain, "nope")).error, /不存在/);
+    assert.match((await svc.saveVirtualModel("vm-b", chain, "vm-a")).error, /已被占用/);
+    assert.deepEqual(readStore(paths).store.virtualModels.map((v) => v.name), ["vm-a", "vm-b"], "拒了就不写盘");
+  });
+
+  it("saveVirtualModel previousName 等于 name 时等同普通保存；非字符串/空串直接拒绝", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("vm-a", [{ node: "prov-a", model: "m1" }]);
+    const next = [{ node: "prov-c", model: "m4" }];
+    assert.equal((await svc.saveVirtualModel("vm-a", next, "vm-a")).ok, true, "同名等于普通 upsert");
+    assert.deepEqual(readStore(paths).store.virtualModels, [{ name: "vm-a", chain: next }]);
+    assert.match((await svc.saveVirtualModel("vm-b", next, 42)).error, /previousName/);
+    assert.match((await svc.saveVirtualModel("vm-b", next, "")).error, /previousName/);
+    assert.deepEqual(readStore(paths).store.virtualModels.map((v) => v.name), ["vm-a"], "拒了就不写盘");
+  });
+
   it("saveVirtualModel 拒绝非法名字：大写开头/超长/auto/端点 id", async () => {
     const paths = makeRoot();
     vmSeed(paths);

@@ -10509,7 +10509,14 @@ async function api(method, path, body) {
   let routeChainCandModels = {};     // 候选区模型下拉选择（nodeId -> modelId），重渲染后保留
   let routeChainBusy = false;
   let virtualModelCreating = false;  // 编辑器处于「新建虚拟模型」流（目标 kind:"virtual" 且 id 未定）
-  let virtualModelNameDraft = "";    // 新建流的模型名草稿（入口桩标签随输入即时更新）
+  let virtualModelNameDraft = "";    // 名字草稿（新建流起始为空、编辑流起始为当前名）
+
+  // 虚拟模型名取值口径：草稿是唯一来源——新建流由输入驱动，编辑流打开即填入当前名。
+  // 桩标签、编辑器标题、链路标签、名字校验、保存去向五处共用这一个取值，
+  // 避免再出现「编辑流读目标名、校验读草稿」这种两套口径对不上的情况。
+  function virtualModelNameValue() {
+    return virtualModelNameDraft.trim();
+  }
 
   function storeRoutingChains() {
     return (storeState && storeState.routingChains) || [];
@@ -10887,7 +10894,8 @@ async function api(method, path, body) {
 
   // 虚拟模型：name 为 null 时进入新建流——目标先占位 kind:"virtual"、id 未定，
   // 模型名输入框放在编辑器正文顶部（初始聚焦），入口桩标签随输入即时更新；
-  // 名字与链一起在保存时提交。已保存的名字锁定不改（它会被各端点的调用方引用）。
+  // 名字与链一起在保存时提交。名字可改：编辑流把当前名填进草稿（输入框可编辑），
+  // 保存时带原名走改名分支；改名换掉的是对外模型 id，故保存前过一次确认。
   function openVirtualModelModal(name) {
     if (!storeState || !storeState.storeOk) {
       toast("store 不可用，无法编辑虚拟模型", true);
@@ -10896,7 +10904,7 @@ async function api(method, path, body) {
     if (name != null) {
       routeChainTarget = { kind: "virtual", id: name };
       virtualModelCreating = false;
-      virtualModelNameDraft = "";
+      virtualModelNameDraft = name;   // 草稿 = 当前名：名字可编辑，校验/保存都读它
       const saved = storeVirtualModelFor(name);
       routeChainDraft = saved ? saved.map((it) => ({ node: it.node, model: it.model })) : [];
     } else {
@@ -10945,14 +10953,12 @@ async function api(method, path, body) {
   // 链舞台 HTML（E1 纵向阶梯，自上而下 = 降级方向；编辑器无运行时状态数据，
   // 连接线一律按「冷备」基态渲染，is-active/is-down 等状态类为监测页预备）。
   // opts.enterAnim = 末跳「从链尾生长」入场动画标记（E5 添加成功时传入）
-  // 入口桩标签 = 编辑目标：端点链恒为 auto；虚拟模型 = 该模型名（新建流取草稿）。
+  // 入口桩标签 = 编辑目标：端点链恒为 auto；虚拟模型 = 名字草稿（新建与编辑同一口径）。
   function renderRouteStageHtml(opts) {
     const enterAnim = !!(opts && opts.enterAnim);
     const items = routeChainDraft;
     const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
-    const entryTag = isVirtual
-      ? (virtualModelCreating ? (virtualModelNameDraft.trim() || "模型名") : routeChainTarget.id)
-      : "auto";
+    const entryTag = isVirtual ? (virtualModelNameValue() || "模型名") : "auto";
     const parts = [`<div class="route-entry" aria-hidden="true"><span class="route-entry-tag">${escapeHtml(entryTag)}</span></div>`];
     if (!items.length) {
       // 空链：入口桩下垂虚线 → 虚线空槽
@@ -11045,12 +11051,15 @@ async function api(method, path, body) {
 
   function renderRouteChainBody(opts) {
     const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
-    const entryLabel = isVirtual
-      ? (virtualModelCreating ? virtualModelNameDraft : routeChainTarget.id)
-      : routeChainEndpointLabel(routeChainTarget.id);
+    // 虚拟模型的名字一律取草稿（编辑流打开时草稿 = 当前名）：标题、桩标签、
+    // 链路标签与保存去向都跟着草稿走，不再分「新建读草稿 / 编辑读目标名」两套。
+    const vmName = virtualModelNameValue();
+    const entryLabel = isVirtual ? (vmName || routeChainTarget.id || "") : routeChainEndpointLabel(routeChainTarget.id);
     $("routeChainTitle").textContent = isVirtual
       ? (virtualModelCreating ? "新建虚拟模型" : `编辑虚拟模型 — ${entryLabel}`)
       : `编辑路由链 — ${entryLabel}`;
+    // 底部按钮随目标分叉：虚拟模型编辑器里不该写「保存路由链」
+    $("routeChainConfirmBtn").textContent = isVirtual ? "保存虚拟模型" : "保存路由链";
     // 重渲会重建 innerHTML，先记住候选列表滚动位置，渲染后原地恢复（选择后列表不跳顶）
     const prevWrap = $("routeCandWrap");
     const prevScroll = prevWrap ? prevWrap.scrollTop : 0;
@@ -11077,11 +11086,11 @@ async function api(method, path, body) {
       </div>`;
     }).join("") : `<div class="route-cand-row" style="cursor:default;"><span class="route-cand-name" style="color:var(--text-4);">暂无渠道/号池，请先在「渠道管理」新增渠道</span></div>`;
     const summary = routeChainSummaryText();
+    // 名字输入框：新建与编辑同一形态（可编辑）。编辑流的初值就是当前名，
+    // 改名与改链一起在保存时提交，改名前过一次确认。
     const nameRow = isVirtual
-      ? `<div class="store-form-row virtual-add-row"><label class="store-form-label">模型名（小写字母、数字、. _ -；保存后名称固定）</label>
-          ${virtualModelCreating
-            ? `<input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(virtualModelNameDraft)}" placeholder="如 deepseek-pro" autocomplete="off" spellcheck="false">`
-            : `<input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(entryLabel)}" disabled title="虚拟模型名称保存后固定">`}</div>`
+      ? `<div class="store-form-row virtual-add-row"><label class="store-form-label">模型名（小写字母、数字、. _ -；改名后旧名字立即失效）</label>
+          <input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(vmName)}" placeholder="如 deepseek-pro" autocomplete="off" spellcheck="false"></div>`
       : "";
     $("routeChainBody").innerHTML = `
       ${nameRow}
@@ -11089,7 +11098,7 @@ async function api(method, path, body) {
         链路自上而下按序路由，失败自动退避下一跳；节点卡可拖拽调序、右键移除。一条链最多 ${ROUTE_CHAIN_MAX_NODES} 跳，同一渠道/号池可绑定不同模型各占一跳。</div>
       <div class="route-editor">
         <div class="route-stage-col">
-          <div class="store-form-label">链路（${escapeHtml(virtualModelCreating ? (virtualModelNameDraft.trim() || "模型名") : entryLabel)} → 逐跳退避）</div>
+          <div class="store-form-label">链路（${escapeHtml(isVirtual ? (vmName || "模型名") : entryLabel)} → 逐跳退避）</div>
           <div class="route-stage" id="routeChainStage">${renderRouteStageHtml(opts)}</div>
         </div>
         <div class="route-cand-col${full ? " is-full" : ""}">
@@ -11106,17 +11115,19 @@ async function api(method, path, body) {
     const stage = $("routeChainStage");
     const nameInput = $("virtualModelNameInput");
     if (nameInput) {
-      // 新建流：模型名输入驱动入口桩标签即时更新（renderRouteChainBody 全量重建会
-      // 清输入值与焦点，故只改桩标签文本，不整渲）
+      // 模型名输入驱动入口桩标签/链路标签/编辑器标题即时更新（renderRouteChainBody
+      // 全量重建会清输入值与焦点，故只改这几处文本，不整渲）。编辑流同样走这条：
+      // 改名时标题跟着草稿走，保存后才真正换 id。
       nameInput.addEventListener("input", () => {
         virtualModelNameDraft = nameInput.value;
-        const label = virtualModelNameDraft.trim() || "模型名";
+        const label = virtualModelNameValue() || "模型名";
         const tag = stage.querySelector(".route-entry-tag");
         if (tag) tag.textContent = label;
         const stageLabel = stage.previousElementSibling;
         if (stageLabel && stageLabel.classList.contains("store-form-label")) {
           stageLabel.textContent = `链路（${label} → 逐跳退避）`;
         }
+        if (!virtualModelCreating) $("routeChainTitle").textContent = `编辑虚拟模型 — ${label}`;
         const err = $("routeChainError");
         if (err && !err.hidden) { err.hidden = true; err.textContent = ""; }
       });
@@ -11254,31 +11265,62 @@ async function api(method, path, body) {
     });
   }
 
+  // 行内报错出口（校验与写盘失败共用一处，避免两个函数各持一份 fail 闭包）
+  function routeChainErrorShow(msg) {
+    const err = $("routeChainError");
+    if (!err) return;
+    err.hidden = false;
+    err.textContent = msg;
+  }
+
   async function confirmRouteChainSave() {
     const err = $("routeChainError");
-    const fail = (msg) => {
-      err.hidden = false;
-      err.textContent = msg;
-    };
     err.hidden = true;
     const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
     const nameErr = isVirtual ? virtualModelNameError() : null;
-    if (nameErr) return fail(nameErr);
+    if (nameErr) return routeChainErrorShow(nameErr);
     const validErr = routeChainValidate(routeChainDraft);
-    if (validErr) return fail(validErr);
+    if (validErr) return routeChainErrorShow(validErr);
+    // 虚拟模型改名：换掉的是对外模型 id，各 agent 里选过旧名的调用会失效，
+    // 故写盘前先过一次确认（取消即什么都不发生）。
+    if (isVirtual && !virtualModelCreating && routeChainTarget.id !== virtualModelNameValue()) {
+      const prev = routeChainTarget.id;
+      const next = virtualModelNameValue();
+      showSkillsModal({
+        title: `改名虚拟模型 — ${prev} → ${next}`,
+        confirmText: "确认改名",
+        bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
+          改名后 <b>${escapeHtml(prev)}</b> 立即失效、<b>${escapeHtml(next)}</b> 立刻生效：链、启用开关与位次都不变。
+          各 agent 里选过 <b>${escapeHtml(prev)}</b> 的地方需要重新选一次。</div>`,
+        onConfirm: () => commitRouteChainSave(),
+      });
+      return;
+    }
+    await commitRouteChainSave();
+  }
+
+  // 写盘：端点链与虚拟模型共用一条 CAS 路径；虚拟模型改名与改链在同一次请求里落，
+  // 要么都成、要么都不动（不会留下「改了一半」的两条记录）。
+  async function commitRouteChainSave() {
+    const isVirtual = !!routeChainTarget && routeChainTarget.kind === "virtual";
     const btn = $("routeChainConfirmBtn");
     routeChainBusy = true;
     btn.disabled = true;
     btn.textContent = "保存中…";
     try {
       if (isVirtual) {
-        const name = virtualModelCreating ? virtualModelNameDraft.trim() : routeChainTarget.id;
+        const name = virtualModelNameValue();
+        const previousName = virtualModelCreating ? null : routeChainTarget.id;
+        const renamed = !!previousName && previousName !== name;
         await api("POST", "/api/store/virtual-model/save", {
           name,
           chain: routeChainDraft.map((it) => ({ node: it.node, model: it.model })),
+          ...(renamed ? { previousName } : {}),
         });
         $("routeChainModal").classList.remove("show");
-        toast(`虚拟模型已保存：${name}（${routeChainDraft.length} 个节点）`);
+        toast(renamed
+          ? `虚拟模型已改名：${previousName} → ${name}（${routeChainDraft.length} 个节点）`
+          : `虚拟模型已保存：${name}（${routeChainDraft.length} 个节点）`);
         await refreshStoreState();
       } else {
         const label = routeChainEndpointLabel(routeChainTarget.id);
@@ -11292,10 +11334,10 @@ async function api(method, path, body) {
       }
     } catch (e) {
       if (e.code === "cas-conflict") {
-        fail("渠道配置已被其他操作改动，请稍后重试");
+        routeChainErrorShow("渠道配置已被其他操作改动，请稍后重试");
         await refreshStoreState();
       } else {
-        fail(panelError(e, "操作失败"));
+        routeChainErrorShow(panelError(e, "操作失败"));
       }
     } finally {
       routeChainBusy = false;
@@ -11306,13 +11348,20 @@ async function api(method, path, body) {
 
   // 虚拟模型名与 store 渠道 id 同字符集（store-schema PROVIDER_ID 口径）：
   // 小写字母开头，小写字母/数字/. _ - 组成；它同时充当链查找键与客户端模型 id。
+  // 名字取自草稿（编辑流打开即填入当前名），故编辑已有虚拟模型时不会误报缺名。
   function virtualModelNameError() {
-    const name = virtualModelNameDraft.trim();
+    const name = virtualModelNameValue();
     if (!name) return "请填写模型名";
     if (!/^[a-z][a-z0-9._-]*$/.test(name)) return "模型名格式不对：小写字母开头，只能含小写字母、数字、. _ -";
     if (name.length > 64) return "模型名最长 64 字符";
     if (routeChainDraft.some((it) => it.model === name)) {
       return `模型名不能与链内模型重名（${name}）`;
+    }
+    // 占用校验：与别的虚拟模型同名一律拦在保存之前——新建撞名会静默换掉那条模型的链，
+    // 改名撞名会顶掉别人的对外 id。编辑流按目标 id 排除自己。
+    const self = virtualModelCreating ? null : routeChainTarget.id;
+    if (storeVirtualModels().some((v) => v && v.name === name && v.name !== self)) {
+      return `这个名字已被占用：${name}`;
     }
     return null;
   }

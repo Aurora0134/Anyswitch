@@ -1143,13 +1143,20 @@ export function createStoreService({
      * "auto" and endpoint ids are reserved — they are the chain-routing
      * trigger word and the per-endpoint routing keys, a name collision would
      * intercept requests to the wrong target) and `chain` is the exact
-     * saveRouteChain shape. The name is locked after first save: this is an
-     * upsert by name that either replaces the existing entry's chain (keeping
-     * its enabled flag, same rule as saveRouteChain — 重存链不把开关弹回开)
-     * or appends a new one. Pure bookkeeping: validate before load, then
-     * structuredClone → CAS write.
+     * saveRouteChain shape.
+     *
+     * `previousName` (optional) turns the write into a rename: the entry
+     * stored under previousName moves to `name` in place — its array position
+     * and its enabled flag survive, and the chain is replaced in the same CAS
+     * write (a rename can never land half-applied). Renaming onto a name
+     * another virtual model already holds is refused rather than overwriting
+     * that entry. Without previousName this is the plain upsert by name
+     * (either replaces the existing entry's chain, keeping its enabled flag —
+     * same rule as saveRouteChain, 重存链不把开关弹回开 — or appends a new
+     * one). Pure bookkeeping: validate before load, then structuredClone →
+     * CAS write.
      */
-    async saveVirtualModel(name, chain) {
+    async saveVirtualModel(name, chain, previousName) {
       if (typeof name !== "string" || !VIRTUAL_MODEL_ID.test(name)) {
         return { ok: false, error: "虚拟模型名必须以小写字母开头，只能使用小写字母、数字与 . _ -" };
       }
@@ -1159,6 +1166,10 @@ export function createStoreService({
       if (name === "auto" || ROUTING_ENDPOINT_IDS.includes(name)) {
         return { ok: false, error: `"${name}" 是保留名（自动路由与端点 id），虚拟模型不能用` };
       }
+      if (previousName !== undefined && (typeof previousName !== "string" || previousName.length === 0)) {
+        return { ok: false, error: "previousName must be a non-empty string when present" };
+      }
+      const renaming = typeof previousName === "string" && previousName !== name;
       if (!Array.isArray(chain) || chain.length === 0) {
         return { ok: false, error: "route chain must be a non-empty array of { node, model } entries" };
       }
@@ -1178,14 +1189,25 @@ export function createStoreService({
       }
       const nextStore = structuredClone(loaded.store);
       const list = Array.isArray(nextStore.virtualModels) ? nextStore.virtualModels : [];
-      const index = list.findIndex((vm) => vm?.name === name);
-      const prevEnabled = index >= 0 ? list[index].enabled : undefined;
+      // 目标位次：同名条目（普通 upsert）或改名来源条目（原位换名，位次不变）。
+      let target = list.findIndex((vm) => vm?.name === name);
+      if (renaming) {
+        const source = list.findIndex((vm) => vm?.name === previousName);
+        if (source === -1) {
+          return { ok: false, error: `虚拟模型 "${previousName}" 不存在` };
+        }
+        if (target >= 0) {
+          return { ok: false, error: `虚拟模型名 "${name}" 已被占用` };
+        }
+        target = source;
+      }
+      const prevEnabled = target >= 0 ? list[target].enabled : undefined;
       const entry = {
         name,
         chain: chain.map((item) => ({ node: item.node, model: item.model })),
         ...(typeof prevEnabled === "boolean" ? { enabled: prevEnabled } : {}),
       };
-      if (index >= 0) list[index] = entry;
+      if (target >= 0) list[target] = entry;
       else list.push(entry);
       nextStore.virtualModels = list;
       const written = write(nextStore, { expectedHash: loaded.hash });

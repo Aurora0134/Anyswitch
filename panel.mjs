@@ -2316,15 +2316,24 @@ export function createPanelRouter({
             return sendJson(res, 200, result);
           }
           if (path === "/panel/api/store/virtual-model/save") {
-            // Route layer checks shape only (name string, chain array);
-            // per-element {node, model} validation lives in the service.
+            // Route layer checks shape only (name string, chain array, optional
+            // previousName string); per-element {node, model} validation and
+            // the rename rules live in the service.
             if (typeof body.name !== "string" || !body.name.trim()) {
               return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
             }
             if (!Array.isArray(body.chain)) {
               return sendJson(res, 400, { ok: false, error: "chain must be an array of { node, model } entries" });
             }
-            const result = await svc.saveVirtualModel(body.name.trim(), body.chain);
+            if (body.previousName !== undefined
+              && (typeof body.previousName !== "string" || !body.previousName.trim())) {
+              return sendJson(res, 400, { ok: false, error: "previousName must be a non-empty string when present" });
+            }
+            const result = await svc.saveVirtualModel(
+              body.name.trim(),
+              body.chain,
+              body.previousName === undefined ? undefined : body.previousName.trim(),
+            );
             return sendJson(res, 200, result);
           }
           if (path === "/panel/api/store/virtual-model/enabled") {
