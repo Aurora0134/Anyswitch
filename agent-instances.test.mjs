@@ -629,6 +629,31 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     }
   });
 
+  it("folds a desktop app request onto the stable dsh-desktop row via the socket fallback", async () => {
+    // 桌面 App 的请求同样不带实例头：行身份来自 netstat 反查的宿主引擎 pid，
+    // 面级稳定行让引擎换代不再重置这行。请求先于扫描落地（relay 只同步读缓
+    // 存），首轮状态读的冷缓存重折叠把它归位——整条链与 TUI 同路，只差折叠。
+    const dshDesktopExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\n" +
+      "LAPTOP,\"C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\DeepSeek Harness.exe\" --expose-internals \"C:\\Users\\tester\\AppData\\Local\\Programs\\DeepSeek Harness\\resources\\app.asar\\dsh\\node_modules\\@deepseek-ai\\dsh-desktop-host\\lib\\index.js\",DeepSeek Harness.exe,4321\r\n");
+    const collector = testCollector({ execFn: dshDesktopExec });
+    const { seen, socketOwner } = stubOwner(4321);
+    const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
+    const { port, close } = await listenLoopback(server, 0);
+    try {
+      const res = await postChat(port, { "x-agent-id": "dsh" });
+      assert.equal(res.status, 200);
+      await res.text();
+
+      assert.equal(seen.length, 1, "dsh 在套接字兜底白名单内");
+      const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+      assert.deepEqual(dsh.instances.map((i) => [i.id, i.surface]), [["dsh-desktop", "Desktop"]]);
+      assert.equal(dsh.instances[0].requests, 1);
+      assert.equal(dsh.metrics.totalRequests, 1);
+    } finally {
+      await close();
+    }
+  });
+
   it("synthesizes kimi-<pid> for a desktop app started by double-click, labelled Desktop", async () => {
     // 桌面端不经过 Anyswitch 启动器：既没有 x-agent-id 也没有 x-agent-instance，
     // 归属只能靠 UA 嗅探（内嵌核心发的是 kimi-code-desktop/<ver>），行身份靠

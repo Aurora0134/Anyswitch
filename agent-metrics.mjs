@@ -231,6 +231,14 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
   }
   if (clientPid === null) return { id, label: null };
+  // DSH 桌面宿主折稳定行：canonical 尾解析到桌面 App 的宿主引擎时，id 落到
+  // 面级稳定行（DSH_DESKTOP_INSTANCE_ID），下一代引擎进程折到同一行——请求
+  // 计数、工时、sparkHistory 跨换代连续。TUI/web 引擎不受影响，保持逐 pid。
+  // 判据用宿主集合而非 profile 名（CLI 自建同名 profile 不是桌面 App）。
+  if (agentId === "dsh" && procSnapshot?.dshDesktopHostPids instanceof Set
+    && procSnapshot.dshDesktopHostPids.has(clientPid)) {
+    return { id: DSH_DESKTOP_INSTANCE_ID, label: null };
+  }
   const prefix = id.slice(0, tail.index);
   return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null };
 }
@@ -521,6 +529,20 @@ const DSH_DESKTOP_SHELL_IMAGE = "deepseek harness.exe";
 // CLI boot would otherwise be relabeled as the desktop app.
 const DSH_DESKTOP_HOST_RE = /dsh-desktop-host[\\/]lib[\\/]index\.js/;
 
+// 稳定行 id：DSH 桌面端的实例行按「面」记账，不按引擎 pid。桌面 App 每轮对话
+// 都换宿主引擎进程（journal 实测 2026-10-04 一天 11 个 pid），逐 pid 行在每次
+// 换代时删旧建新——请求数、工时、折线全部从零，看板上读作「历史凭空消失」。
+// 桌面宿主进程统一折到这个 id，换代对看板不可见；行存活对账「桌面宿主还在」
+// 而非单个 pid。判据必须是宿主子进程集合（上面的 HOST_RE），不能只看 profile
+// 名：CLI 自建 `--profile desktop` 的会话 profile 同名，却不是桌面 App。
+const DSH_DESKTOP_INSTANCE_ID = "dsh-desktop";
+// 桌面宿主进程是否还在（稳定行的存活判据）。换代间隙（旧宿主已死、新宿主未
+// 入扫描）此谓词答 false，行交给空闲 TTL 兜底——最近有请求就不会被洗掉。
+function dshDesktopHostAlive(procCounts) {
+  const hosts = procCounts?.dshDesktopHostPids;
+  return hosts instanceof Set && hosts.size > 0;
+}
+
 // Profile name this DSH command line boots, or null when it cannot be read
 // (management invocation, plain-tasklist rows with no command line, a custom
 // profile launched through a wrapper that dropped the flag). Case is preserved:
@@ -743,7 +765,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -923,6 +945,9 @@ function parseTasklistCsv(stdout) {
         if (pid) {
           result.dshPids.add(pid);
           result.dshEnginePids.add(pid);
+          // 宿主集合：稳定行折叠与存活判据的唯一依据。profile 图里 CLI 自建
+          // 的 `--profile desktop` 同名，区分只在这条命令行谓词上。
+          result.dshDesktopHostPids.add(pid);
           result.dshProfileByPid.set(pid, DSH_DESKTOP_PROFILE);
         }
       }
@@ -2061,6 +2086,7 @@ export function createAgentMetricsCollector(options = {}) {
       counts.dsh = Math.max(0, (counts.dsh ?? 0) - 1);
       counts.dshEnginePids?.delete(pid);
       counts.dshPids?.delete(pid);
+      counts.dshDesktopHostPids?.delete(pid);
       counts.dshProfileByPid?.delete(pid);
       dshDeadConsoleStreak.delete(pid);
       try {
@@ -2115,6 +2141,7 @@ export function createAgentMetricsCollector(options = {}) {
     ["kimiSurfaceByPid", "map"],
     ["kimiEnginePids", "set"],
     ["dshProfileByPid", "map"],
+    ["dshDesktopHostPids", "set"],
     ["ppidByPid", "map"],
   ];
   let lastTrustedScan = null;
@@ -3184,9 +3211,11 @@ export function createAgentMetricsCollector(options = {}) {
     // codex session rows ("codex-sess-<session id>") declare no PID at all:
     // they clear the moment the whole codex process family exits, or after
     // CODEX_SESSION_IDLE_TTL_MS without traffic — whichever comes first.
-    // Remaining custom ids (no numeric tail — normalizeInstanceId already
-    // had its say at ingest) keep the idle TTL; an instance with in-flight
-    // requests never expires on that path.
+    // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）同属无属主 pid 一档：宿主引擎
+    // 进程活着就常驻（判据是扫描的宿主集合，见 normalizeInstanceId 上方注释），
+    // 宿主退场后交空闲 TTL。 Remaining custom ids (no numeric tail —
+    // normalizeInstanceId already had its say at ingest) keep the idle TTL; an
+    // instance with in-flight requests never expires on that path.
     const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
     for (const [bucket, instMap] of Object.entries(instanceBuckets)) {
       const count = procCounts[bucket] || 0;
@@ -3212,7 +3241,11 @@ export function createAgentMetricsCollector(options = {}) {
         // journal 已逐请求落账不受影响）；有在途请求留到其收尾后的下一
         // 轮读再收敛。
         // 重折叠读的是本轮快照里的 pid 归属：不完整轮答不出归属，跳过。
-        if (countsTrusted && pidMatch === null && !isCodexSessionRow) {
+        // dsh 的 pid 形行也在列：冷缓存窗口里桌面宿主的请求没折进稳定行
+        // （归一化当时读不到宿主集合），落在原始 "dsh-<pid>" 上；缓存跟上后
+        // 这里折回 DSH_DESKTOP_INSTANCE_ID。对 TUI/web 的 pid 行，归一化是
+        // 恒等映射，重折叠空转。
+        if (countsTrusted && !isCodexSessionRow && (pidMatch === null || bucket === "dsh")) {
           const refold = normalizeInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
@@ -3274,7 +3307,14 @@ export function createAgentMetricsCollector(options = {}) {
         if (pidMatch === null) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
           const idleTtlMs = isCodexSessionRow ? CODEX_SESSION_IDLE_TTL_MS : INSTANCE_IDLE_TTL_MS;
-          if (entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
+          // 稳定桌面行没有属主 pid 可对账，存活判据换成「桌面宿主还在」：
+          // 宿主活着行就常驻（与逐 pid 行同权——进程在行就在）；宿主没了交给
+          // 空闲 TTL 收口。换代间隙（旧宿主已死、新宿主未入扫描）最近请求的
+          // TTL 兜住，行连同历史一起被误洗只会发生在「换代且超过 TTL 无请求」
+          // ——那本来也是该收行的时刻。
+          const desktopRowKept = bucket === "dsh" && instId === DSH_DESKTOP_INSTANCE_ID
+            && countsTrusted && dshDesktopHostAlive(procCounts);
+          if (!desktopRowKept && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
           }
         }
@@ -3290,7 +3330,12 @@ export function createAgentMetricsCollector(options = {}) {
       // engine included — never spawn placeholder rows.
       if (bucket !== "codex") {
         for (const pid of livePids) {
-          const placeholderId = `${bucket}-${pid}`;
+          // 桌面宿主的占位行挂稳定 id：起进程即可见的那一行，就是请求将要落的
+          // 那一行——换代换 pid 不换行。其余引擎照旧逐 pid 占位。
+          const placeholderId = bucket === "dsh" && procCounts.dshDesktopHostPids instanceof Set
+            && procCounts.dshDesktopHostPids.has(pid)
+            ? DSH_DESKTOP_INSTANCE_ID
+            : `${bucket}-${pid}`;
           if (!instMap.has(placeholderId)) {
             instMap.set(placeholderId, { state: createAggregateState(), firstSeen: now, label: null });
           }
@@ -3314,6 +3359,9 @@ export function createAgentMetricsCollector(options = {}) {
     // so the profile comes from the same process-scan map that feeds the card
     // subline. An unreadable profile yields no badge instead of a guess.
     const dshInstanceSurface = (instId) => {
+      // 稳定行无 pid 尾，面由行语义直接给出（折叠判据保证了进来的一定是
+      // 桌面宿主流量）。
+      if (instId === DSH_DESKTOP_INSTANCE_ID) return dshSurfaceLabel(DSH_DESKTOP_PROFILE);
       const pidMatch = instId.match(/^dsh-(\d+)$/);
       if (pidMatch === null) return null;
       const profile = procCounts.dshProfileByPid?.get(Number(pidMatch[1])) ?? null;
