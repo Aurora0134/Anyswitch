@@ -3937,12 +3937,19 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
     assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-desktop"], "an idle row survives while the desktop app runs");
 
+    // 读驱动的重扫在微任务里落地，且可能横跨下一次读：「读→等→读」两步不足以
+    // 保证服务到的快照是宿主退场后的那一轮（后台在途轮会先于读者落不了地）。
+    // 每轮都把时钟推过缓存窗口再等一拍，直到某轮读到空扫描、行被收掉为止。
     hostAlive = false;
     t += 3000;
-    await collector.getAgentsStatus();
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    const gone = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
-    assert.deepEqual(gone.instances, [], "the row retires with the app");
+    let gone = null;
+    for (let round = 0; round < 25 && gone === null; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      t += 3000; // past the cache window so this read serves the last landed scan
+      const c = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+      if (c.instances.length === 0) gone = c;
+    }
+    assert.ok(gone !== null, "the row retires with the app");
     assert.equal(gone.status, "stopped");
   });
 
@@ -4230,7 +4237,115 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.equal(card.status, "running", "只开桌面端就要点亮卡片");
     assert.equal(card.processCount, 1, "辅助子进程不计数");
     assert.deepEqual(surfacesOf(card), { Desktop: 1 });
-    assert.deepEqual(rowsOf(card), [["kimi-6001", "Desktop"]], "只有主进程出行");
+    // 主进程出行挂面级稳定行（kimi-desktop），不是它的 pid——换代不再换行。
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "只有主进程出行");
+  });
+
+  it("keeps one desktop row across main-process generations so churn no longer resets it", async () => {
+    // 与 DSH 桌面端同一种换代病：主进程是会话属主，行跟 pid 走就随换代清零。
+    // 稳定行以面为键：换代只是换 pid，行不换。
+    let t = 3000;
+    let mainPid = 6401;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, wmic(desktopRow(mainPid))),
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+
+    const r1 = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${mainPid}`, model: "m1", stream: true, path: "openai" });
+    r1.recordFirstChunk();
+    r1.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 40 } });
+
+    // The desktop app relaunches its core; the panel's poll refreshes the scan
+    // before the next request (two-step read: first serves stale and kicks the
+    // round, second serves what landed).
+    mainPid = 6402;
+    t += 3000;
+    await collector.getAgentsStatus();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const r2 = collector.startRequest({ agentId: "kimi", instanceId: `kimi-${mainPid}`, model: "m1", stream: true, path: "openai" });
+    r2.recordFirstChunk();
+    r2.recordEnd({ status: 200, usage: { prompt_tokens: 50, completion_tokens: 20 } });
+
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
+    assert.equal(card.instances[0].requests, 2, "both generations land on the same row");
+    assert.equal(card.instances[0].tokens.prompt, 150);
+  });
+
+  it("folds desktop traffic onto the stable row while terminal traffic keeps its pid row", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(kimiRow(6411), desktopRow(6412))),
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+
+    const tui = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6411", model: "m1", stream: true, path: "openai" });
+    tui.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 4 } });
+    const desktop = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6412", model: "m1", stream: true, path: "openai" });
+    desktop.recordEnd({ status: 200, usage: { prompt_tokens: 20, completion_tokens: 8 } });
+
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card).sort(), [["kimi-6411", "TUI"], ["kimi-desktop", "Desktop"]]);
+  });
+
+  it("keeps the idle desktop row while the app runs and retires it with the app", async () => {
+    // 稳定行无 pid 可对账：主进程活着就与逐 pid 行同权常驻（空闲不清行），
+    // App 退场才交给空闲 TTL 收口。
+    let t = 3000;
+    let appUp = true;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, appUp ? wmic(desktopRow(6421)) : "Node,CommandLine,Name,ProcessId\r\n"),
+      kimiRegistryLookup: registry([]),
+    });
+    await collector.scanProcesses();
+    const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6421", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 8, completion_tokens: 3 } });
+
+    t += 20 * 60 * 1000; // far past the 10-minute idle TTL
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "an idle row survives while the desktop app runs");
+
+    // 读驱动的重扫在微任务里落地，且可能横跨下一次读：「读→等→读」两步不足以
+    // 保证服务到的快照是 App 退场后的那一轮（后台在途轮会先于读者落不了地）。
+    // 每轮都把时钟推过缓存窗口再等一拍，直到某轮读到空扫描、行被收掉为止。
+    appUp = false;
+    t += 3000;
+    let gone = null;
+    for (let round = 0; round < 25 && gone === null; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      t += 3000; // past the cache window so this read serves the last landed scan
+      const c = kimi(await collector.getAgentsStatus());
+      if (c.instances.length === 0) gone = c;
+    }
+    assert.ok(gone !== null, "the row retires with the app");
+    assert.equal(gone.status, "stopped");
+  });
+
+  it("refolds a request that landed before the scan saw the desktop app onto the stable row", async () => {
+    // 请求路径只读扫描缓存、从不触发扫描：App 刚换代、缓存还没赶上时，请求
+    // 先落在原始 pid 行上；缓存跟上后的下一轮读重折叠归位，计数随行保留。
+    let t = 3000;
+    let appUp = false;
+    const collector = testCollector({
+      nowFn: () => t,
+      execFn: (cmd, opts, cb) => cb(null, appUp ? wmic(desktopRow(6431)) : "Node,CommandLine,Name,ProcessId\r\n"),
+      kimiRegistryLookup: registry([]),
+    });
+    const r = collector.startRequest({ agentId: "kimi", instanceId: "kimi-6431", model: "m1", stream: true, path: "openai" });
+    r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+
+    appUp = true;
+    t += 3000;
+    await collector.scanProcesses();
+    const card = kimi(await collector.getAgentsStatus());
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "the cold pid row folds onto the stable row");
+    assert.equal(card.instances[0].requests, 1);
+    assert.equal(card.instances[0].tokens.prompt, 30);
   });
 
   it("accepts a plain-tasklist desktop row by image name (no command line on that probe)", async () => {
@@ -4291,7 +4406,7 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     const card = kimi(await collector.getAgentsStatus());
     assert.equal(card.processCount, 3);
     assert.deepEqual(surfacesOf(card), { Desktop: 1, TUI: 1, Web: 1 }, "副行加总 = 进程数");
-    assert.deepEqual(rowsOf(card).sort(), [["kimi-6101", "TUI"], ["kimi-6102", "Web"], ["kimi-6103", "Desktop"]]);
+    assert.deepEqual(rowsOf(card).sort(), [["kimi-6101", "TUI"], ["kimi-6102", "Web"], ["kimi-desktop", "Desktop"]]);
   });
 
   it("flips a process's face when it hands its session to the browser mid-life, with the row identity intact", async () => {

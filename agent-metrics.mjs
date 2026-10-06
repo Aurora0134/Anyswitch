@@ -231,13 +231,18 @@ export function normalizeInstanceId(agentId, rawId, procSnapshot = null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
   }
   if (clientPid === null) return { id, label: null };
-  // DSH 桌面宿主折稳定行：canonical 尾解析到桌面 App 的宿主引擎时，id 落到
-  // 面级稳定行（DSH_DESKTOP_INSTANCE_ID），下一代引擎进程折到同一行——请求
-  // 计数、工时、sparkHistory 跨换代连续。TUI/web 引擎不受影响，保持逐 pid。
-  // 判据用宿主集合而非 profile 名（CLI 自建同名 profile 不是桌面 App）。
+  // DSH 桌面宿主与 kimi 桌面主进程折稳定行：canonical 尾解析到桌面 App 的
+  // 宿主/主进程时，id 落到各自的面级稳定行（DSH/KIMI_DESKTOP_INSTANCE_ID），
+  // 下一代引擎进程折到同一行——请求计数、工时、sparkHistory 跨换代连续。
+  // TUI/web 引擎不受影响，保持逐 pid。判据用各自的宿主集合而非 profile/面名
+  // （CLI 自建同名 profile 不是桌面 App；kimi 的面来自镜像名，集合语义同源）。
   if (agentId === "dsh" && procSnapshot?.dshDesktopHostPids instanceof Set
     && procSnapshot.dshDesktopHostPids.has(clientPid)) {
     return { id: DSH_DESKTOP_INSTANCE_ID, label: null };
+  }
+  if (agentId === "kimi" && procSnapshot?.kimiDesktopPids instanceof Set
+    && procSnapshot.kimiDesktopPids.has(clientPid)) {
+    return { id: KIMI_DESKTOP_INSTANCE_ID, label: null };
   }
   const prefix = id.slice(0, tail.index);
   return { id: `${agentId}-${clientPid}`, label: prefix.length > 0 && prefix !== agentId ? prefix : null };
@@ -634,6 +639,16 @@ export function kimiSurfaceLabel(surface) {
   return KIMI_SURFACE_LABELS[surface];
 }
 
+// Kimi 桌面端的面级稳定行：主进程（"Kimi Code.exe"，无 --type=）是会话属主，
+// 换代换 pid 不换行——请求计数、工时、sparkHistory 跨换代连续。DSH 同款
+// （2026-10-06 b26a776 先落 DSH 侧），kimi 的宿主集合是 kimiDesktopPids，
+// Electron 辅助子进程（--type=）只进家族集、永不进它。
+const KIMI_DESKTOP_INSTANCE_ID = "kimi-desktop";
+function kimiDesktopHostAlive(procCounts) {
+  const hosts = procCounts?.kimiDesktopPids;
+  return hosts instanceof Set && hosts.size > 0;
+}
+
 // Claude client-form labels are derived from process classification. They are
 // independent from the transport used to attribute metrics: Desktop uses the
 // resident relay, while CLI normally uses a per-launch reporter.
@@ -765,7 +780,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -930,6 +945,8 @@ function parseTasklistCsv(stdout) {
         if (pid) {
           result.kimiPids.add(pid);
           result.kimiEnginePids.add(pid);
+          // 宿主集合：面级稳定行的折叠与存活判据，只收主进程。
+          result.kimiDesktopPids.add(pid);
           result.kimiSurfaceByPid.set(pid, "desktop");
         }
       }
@@ -2140,6 +2157,7 @@ export function createAgentMetricsCollector(options = {}) {
     ["claudeDesktopPids", "set"],
     ["kimiSurfaceByPid", "map"],
     ["kimiEnginePids", "set"],
+    ["kimiDesktopPids", "set"],
     ["dshProfileByPid", "map"],
     ["dshDesktopHostPids", "set"],
     ["ppidByPid", "map"],
@@ -3211,9 +3229,10 @@ export function createAgentMetricsCollector(options = {}) {
     // codex session rows ("codex-sess-<session id>") declare no PID at all:
     // they clear the moment the whole codex process family exits, or after
     // CODEX_SESSION_IDLE_TTL_MS without traffic — whichever comes first.
-    // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）同属无属主 pid 一档：宿主引擎
-    // 进程活着就常驻（判据是扫描的宿主集合，见 normalizeInstanceId 上方注释），
-    // 宿主退场后交空闲 TTL。 Remaining custom ids (no numeric tail —
+    // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）与 kimi 的桌面稳定行
+    // （KIMI_DESKTOP_INSTANCE_ID）同属无属主 pid 一档：宿主进程活着就常驻
+    // （判据是各自扫描的宿主集合，见 normalizeInstanceId 上方注释），宿主
+    // 退场后交空闲 TTL。 Remaining custom ids (no numeric tail —
     // normalizeInstanceId already had its say at ingest) keep the idle TTL; an
     // instance with in-flight requests never expires on that path.
     const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
@@ -3241,11 +3260,12 @@ export function createAgentMetricsCollector(options = {}) {
         // journal 已逐请求落账不受影响）；有在途请求留到其收尾后的下一
         // 轮读再收敛。
         // 重折叠读的是本轮快照里的 pid 归属：不完整轮答不出归属，跳过。
-        // dsh 的 pid 形行也在列：冷缓存窗口里桌面宿主的请求没折进稳定行
-        // （归一化当时读不到宿主集合），落在原始 "dsh-<pid>" 上；缓存跟上后
-        // 这里折回 DSH_DESKTOP_INSTANCE_ID。对 TUI/web 的 pid 行，归一化是
-        // 恒等映射，重折叠空转。
-        if (countsTrusted && !isCodexSessionRow && (pidMatch === null || bucket === "dsh")) {
+        // dsh 与 kimi 的 pid 形行也在列：冷缓存窗口里桌面宿主/主进程的请求
+        // 没折进稳定行（归一化当时读不到宿主集合），落在原始 "dsh-<pid>" /
+        // "kimi-<pid>" 上；缓存跟上后这里折回各自的 DSH/KIMI_DESKTOP_INSTANCE_ID。
+        // 对 TUI/web 的 pid 行，归一化是恒等映射，重折叠空转。
+        if (countsTrusted && !isCodexSessionRow
+          && (pidMatch === null || bucket === "dsh" || bucket === "kimi")) {
           const refold = normalizeInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
@@ -3307,13 +3327,15 @@ export function createAgentMetricsCollector(options = {}) {
         if (pidMatch === null) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
           const idleTtlMs = isCodexSessionRow ? CODEX_SESSION_IDLE_TTL_MS : INSTANCE_IDLE_TTL_MS;
-          // 稳定桌面行没有属主 pid 可对账，存活判据换成「桌面宿主还在」：
-          // 宿主活着行就常驻（与逐 pid 行同权——进程在行就在）；宿主没了交给
-          // 空闲 TTL 收口。换代间隙（旧宿主已死、新宿主未入扫描）最近请求的
-          // TTL 兜住，行连同历史一起被误洗只会发生在「换代且超过 TTL 无请求」
-          // ——那本来也是该收行的时刻。
-          const desktopRowKept = bucket === "dsh" && instId === DSH_DESKTOP_INSTANCE_ID
-            && countsTrusted && dshDesktopHostAlive(procCounts);
+          // 稳定桌面行（dsh 宿主引擎、kimi 桌面主进程）没有属主 pid 可对账，
+          // 存活判据换成「宿主还在」：宿主活着行就常驻（与逐 pid 行同权——
+          // 进程在行就在）；宿主没了交给空闲 TTL 收口。换代间隙（旧宿主已死、
+          // 新宿主未入扫描）最近请求的 TTL 兜住，行连同历史一起被误洗只会发
+          // 生在「换代且超过 TTL 无请求」——那本来也是该收行的时刻。
+          const desktopRowKept = countsTrusted && (
+            (bucket === "dsh" && instId === DSH_DESKTOP_INSTANCE_ID && dshDesktopHostAlive(procCounts))
+            || (bucket === "kimi" && instId === KIMI_DESKTOP_INSTANCE_ID && kimiDesktopHostAlive(procCounts))
+          );
           if (!desktopRowKept && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
           }
@@ -3330,11 +3352,13 @@ export function createAgentMetricsCollector(options = {}) {
       // engine included — never spawn placeholder rows.
       if (bucket !== "codex") {
         for (const pid of livePids) {
-          // 桌面宿主的占位行挂稳定 id：起进程即可见的那一行，就是请求将要落的
-          // 那一行——换代换 pid 不换行。其余引擎照旧逐 pid 占位。
-          const placeholderId = bucket === "dsh" && procCounts.dshDesktopHostPids instanceof Set
-            && procCounts.dshDesktopHostPids.has(pid)
-            ? DSH_DESKTOP_INSTANCE_ID
+          // 桌面宿主（dsh 宿主引擎 / kimi 桌面主进程）的占位行挂稳定 id：起进
+          // 程即可见的那一行，就是请求将要落的那一行——换代换 pid 不换行。其
+          // 余引擎照旧逐 pid 占位。
+          const desktopSet = bucket === "dsh" ? procCounts.dshDesktopHostPids
+            : bucket === "kimi" ? procCounts.kimiDesktopPids : null;
+          const placeholderId = desktopSet instanceof Set && desktopSet.has(pid)
+            ? (bucket === "dsh" ? DSH_DESKTOP_INSTANCE_ID : KIMI_DESKTOP_INSTANCE_ID)
             : `${bucket}-${pid}`;
           if (!instMap.has(placeholderId)) {
             instMap.set(placeholderId, { state: createAggregateState(), firstSeen: now, label: null });
@@ -3373,6 +3397,9 @@ export function createAgentMetricsCollector(options = {}) {
     // a terminal row to web), never from the request plane. A row whose process
     // the scan cannot resolve stays unbadged instead of guessing.
     const kimiInstanceSurface = (instId) => {
+      // 稳定行无 pid 尾，面由行语义直接给出（折叠判据保证了进来的一定是桌面
+      // 主进程流量）。
+      if (instId === KIMI_DESKTOP_INSTANCE_ID) return kimiSurfaceLabel("desktop");
       const pidMatch = instId.match(/^kimi-(\d+)$/);
       if (pidMatch === null) return null;
       const surface = procCounts.kimiSurfaceByPid?.get(Number(pidMatch[1])) ?? null;
