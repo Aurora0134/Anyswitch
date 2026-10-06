@@ -5309,25 +5309,16 @@ describe("panel.html 界面文案边界（实现细节不上屏）", () => {
     }
   });
 
-  it("「同步到端点」的反馈止于端点结果，Codex 目录那两句不得复现", () => {
-    // 边界由用户 09-21 定稿（app 仓 02d531f 撤回 ed5f703 挂上来的 Codex 目录提示）：
-    // 这颗按钮写八个端点，反馈语义只到「哪些写进去了、哪些没写进去」。往这里加任何
-    // 用户可见文本都属文案改动，须先经用户单独同意——本用例是那条红线的 diff 级锚点：
-    // 改文案必然红，红了必然进 diff。细则见 bridge/anyswitch/PANEL-COPY-SPEC.md §六。
-    const btnStart = panelJs.indexOf('$("storeSyncAgentsBtn").onclick');
-    assert.ok(btnStart >= 0, "同步按钮处理函数存在");
-    const btn = panelJs.slice(btnStart, panelJs.indexOf('$("storeFilterInput").addEventListener', btnStart));
-    assert.ok(btn.length > 500, "处理函数体必须真的被抓取到，got " + btn.length);
-    assert.ok(btn.includes("`已同步到全部 ${synced.length} 个端点的配置`"), "成功口径只报端点数");
-    assert.ok(btn.includes('setStoreRefreshStatus("端点同步完成", "done")'), "完成态不挂右侧小字");
-    assert.ok(btn.includes("未同步成功"), "部分失败仍点名未成功的端点");
-    assert.ok(!/Codex/i.test(btn), "反馈里不得出现 Codex（含上游客户端实现限制类说明）");
+  it("「同步到端点」按钮与它的反馈整体下线，Codex 目录那两句不得借机复活", () => {
+    // 用户 10-06 定稿：渠道配置一变、relay 一启动都会自动同步，这颗手动按钮没有
+    // 存在必要，按钮 DOM、点击处理与它的反馈文案一并删除。09-21 那条红线（反馈
+    // 只到「哪些端点写进去了」）随按钮消失，两个常量仍是「不得复活」的锚点：
+    // 谁要把它们加回界面，本用例必红、必进 diff。
+    assert.ok(!panelHtml.includes("storeSyncAgentsBtn"), "按钮 DOM 不得残留");
+    assert.ok(!panelJs.includes("storeSyncAgentsBtn"), "点击处理不得残留");
+    assert.ok(!panelHtml.includes("同步到端点"), "按钮文案不得残留");
     assert.ok(!allUiText.includes("syncCodexCatalogNote"), "拼句子的函数整体撤回，不得复活");
     assert.ok(!allUiText.includes("CODEX_PICKER_PAGE_SIZE"), "页容量常量随之撤回，不得复活");
-    // 悬停名单是用户批准过的文案：动它要走单独同意，先钉住现文
-    assert.ok(panelHtml.includes(
-      'title="把当前渠道/号池立即写入全部端点配置（Kimi Code、Codex、OpenCode、Pi、DeepSeek Harness、ZCode、Qoder、Grok Build）"'
-    ), "「同步到端点」悬停文案为已批准版本");
   });
 });
 
