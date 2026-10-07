@@ -11,8 +11,8 @@ import { createServer } from "node:http";
 import { writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost } from "./agent-watchdog.mjs";
-import { createAgentWatcher } from "./agent-watcher.mjs";
+import { probeWatchdog, stopWatchdog, getWatchdogPidPath, startWatchdogHost, WATCHDOG_PROCESS_SCAN_TTL_MS } from "./agent-watchdog.mjs";
+import { createAgentWatcher, DEFAULT_INTERVAL_MS } from "./agent-watcher.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const APP_DIR = fileURLToPath(new URL(".", import.meta.url));
@@ -381,4 +381,16 @@ test("degraded relay: a stopped relay still takes the plain start path", async (
   const w = makeDegradedWatcher({ status, now, restarts });
   await w.tick();
   assert.deepEqual(restarts, ["start"], "原有自愈路径不变");
+});
+
+test("看门狗的扫描缓存窗口宽于自己的巡检节拍", () => {
+  // 巡检每 DEFAULT_INTERVAL_MS 一拍，且每拍都 await scanProcesses()。窗口比节拍短时
+  // 等于每拍强制重扫——常驻的那一路 CIM 行 dump 就是这么来的（本机实测看门狗那口子
+  // 进程连续存活 76 分钟，从未闲置）。窗口压到节拍之上，常驻并发少一路：看门狗要的
+  // 只是「有没有 agent 活着」这种粗判，代价是发现新 agent、进而拉起 relay 的延迟
+  // 从 ≤3s 变成 ≤窗口，所以上界也一并钉住，不许无限放宽。
+  assert.ok(WATCHDOG_PROCESS_SCAN_TTL_MS > DEFAULT_INTERVAL_MS,
+    "窗口必须大于节拍，否则看门狗每拍都在重扫");
+  assert.ok(WATCHDOG_PROCESS_SCAN_TTL_MS <= 10_000,
+    "窗口再大就开始拖慢「agent 起来了要拉起 relay」的反应");
 });

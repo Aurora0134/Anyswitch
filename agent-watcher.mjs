@@ -23,7 +23,7 @@
 // trivially testable. The polling timer is unref'd so it never keeps the event
 // loop alive on its own.
 
-const DEFAULT_INTERVAL_MS = 3000;
+export const DEFAULT_INTERVAL_MS = 3000;
 
 // 服务异常持续多久才动手。低于这个时长的抖动不该惊动重启——重启会掐掉在途请求，
 // 而一两次凭据读取抖动本来就会自己恢复。

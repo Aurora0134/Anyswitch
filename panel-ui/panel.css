@@ -547,6 +547,30 @@
   .log-line.warn .lvl, .log-level-legend .lvl.warn { color: var(--console-warn); }
   .log-line.error .lvl, .log-level-legend .lvl.error { color: var(--console-error); }
 
+  /* ── 看板加载态（<html data-board="pending">）───────────────────────────────
+     看板九张卡的静态默认是「数据态」：八张写着「未检测到运行中的 X 客户端」，ZCode
+     那张甚至是「运行中」徽标加四宫格 0 读数。主脚本是 defer 外链，首绘必然早于第一拍
+     取数，于是从页面出现到拿到数据之间，画面把「还没取到数」说成「什么都没在跑」
+     （2026-10-07 报障）。解法与上面「首帧卡序落位」同一形状、同一成因：由 <html> 上
+     这一条静态属性把那一帧直接画对——卡内除品牌行与骨架条以外一律不出现。
+     panel.js 收到第一帧 frame.ready=true 就把属性改写成 live，这段样式整体失效，
+     不留 DOM 清理债；JS 不跑或被禁用时它停在加载态，而不是停在谎话态。
+     骨架条复用会话页的 .sessions-skel（同一枚 shimmer），宽度在这里给，
+     reduced-motion 下由文件末尾那条通配规则停成静帧。 */
+  .board-card-loading { display: none; }
+  /* 用 `> div >` 而不是 `.card-body`：本文件靠后的那条闸门禁止再给 .card-body 写
+     display（一张折叠卡身靠 UA 的 [hidden]{display:none} 收着，任何 display 都可能把
+     它静默打回展开）。这里要压的是卡身**里面的数据块**，不碰卡身本身，选择器也就不该
+     出现那个类名——写成 .card-body 会被闸门判成违规，而它担心的事与本条无关。 */
+  html[data-board="pending"] .agent-cards-container .panel-card > div > :not(.agent-top-bar):not(.board-card-loading) { display: none; }
+  html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 9px; margin: 2px 0 2px; }
+  html[data-board="pending"] .board-skel-a { width: 62%; height: 14px; }
+  html[data-board="pending"] .board-skel-b { width: 38%; height: 11px; }
+  html[data-board="pending"] .board-skel-c { width: 52%; height: 11px; }
+  /* 卡头留品牌与端点名，但徽标、折叠钮、实例计数都是数据位：visibility 而非 display，
+     加载完不会因为标题换行而整屏跳一次。 */
+  html[data-board="pending"] .agent-cards-container .agent-actions { visibility: hidden; }
+
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
   .agent-top-bar {
