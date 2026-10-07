@@ -6120,9 +6120,9 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 
   it("接线结构：渲染拆成数据层与结构层、最后一标签可关", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
-    const renderBody = panelJs.match(/function renderTerminalPreviewSession\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const renderBody = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
     assert.ok(renderBody.includes("renderTerminalSessionData();"), "结构层渲染复用数据层");
-    assert.ok(renderBody.includes("connectTerminalStream(session);"), "SSE 只在结构层重连");
+    assert.ok(renderBody.includes("connectTerminalStream(session, { revive });"), "SSE 只在结构层重连，且把复活口径透传下去");
     assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
     assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
     assert.ok(panelJs.includes("remaining.length === 0"), "最后一个标签照常可关");
@@ -6374,7 +6374,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   });
 
   it("接线：snapshot 帧走 reset 入口，data 帧与 onerror 不 reset", () => {
-    const body = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    const body = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(body, "connectTerminalStream found in panel.js");
     assert.ok(body.includes("absorbTerminalSnapshot(term, session, JSON.parse(event.data))"), "snapshot 帧路由到 reset 入口");
     const dataHandler = body.match(/addEventListener\("data"[\s\S]*?\n    \}\);/)?.[0];
@@ -6569,7 +6569,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.ok(!ensure.includes("onData"), "ensure 不再注册 onData");
     assert.ok(!ensure.includes("activeTerminalPreviewId"), "ensure 不读活动会话");
     assert.ok(!ensure.includes('addEventListener("resize"'), "resize 监听移出 ensure（防逐连接重复注册）");
-    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect, "connectTerminalStream found in panel.js");
     assert.ok(connect.includes("session?.backend ? session.id : null"), "建连时固化会话 id");
     assert.ok(connect.includes("term.onData("), "onData 挂在每连接专属实例上");
@@ -6582,6 +6582,71 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.ok(close.includes("terminalFitAddon = null"), "fitAddon 引用随实例释放");
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听收编到初始化一次性绑定");
+  });
+
+  it("被动重挂不复活：exited 会话照挂流回放最后一屏，restart 仍只由主动通路发出", async () => {
+    const { sandbox, state } = streamSandbox();
+    const exitedSession = () => ({ id: "sess-x", backend: true, shell: {}, output: [], backendState: { status: "exited" } });
+    await sandbox.connect(exitedSession(), { revive: false });
+    assert.deepEqual(state.posts, [], "切回前台/回页补挂这类被动重挂绝不发 restart");
+    assert.equal(state.eventSources.length, 1, "仍然挂流：画面来自宿主镜像的最后一屏（挂流不要求进程还在）");
+    await sandbox.connect(exitedSession(), { revive: true });
+    const restarts = state.posts.filter((p) => p.url.includes("/restart"));
+    assert.equal(restarts.length, 1, "点页签等主动通路照旧一次点击一个新壳");
+    assert.equal(restarts[0].url, "/api/terminal/sessions/sess-x/restart", "复活打在该会话上");
+  });
+});
+
+// 挂后台/切回的总闸：终端页各数据源对 document.hidden 的分工在这一个处理器里。
+// 处理器整体抽进桩环境真跑——不靠字符串比对猜"接了线"，每个视图分支按调用序列钉。
+describe("虚拟终端后台转折：进后台拆流、切回按镜像重建且不复活", () => {
+  const handlerBody = panelJs.match(/document\.addEventListener\("visibilitychange", \(\) => \{([\s\S]*?)\n  \}\);/)?.[1];
+  assert.ok(handlerBody, "visibilitychange 处理器可取样");
+
+  function run(view, hidden) {
+    const state = { view, calls: [] };
+    new Function("state", "document", `
+      function refreshStatus() { state.calls.push("refreshStatus"); return Promise.resolve(); }
+      function refreshAgents() { state.calls.push("refreshAgents"); }
+      function refreshModelStability() { state.calls.push("refreshModelStability"); }
+      function refreshStatsState() { state.calls.push("refreshStatsState"); }
+      function pollTerminalSessions() { state.calls.push("pollTerminalSessions"); }
+      function renderTerminalPreviewSession(opts) { state.calls.push("renderPreview:revive=" + (opts && opts.revive)); }
+      function syncTerminalDataStream() { state.calls.push("syncTerminalDataStream"); }
+      function boardVisible() { return state.view === "board"; }
+      let currentView = state.view;
+      let terminalVisibilityWasHidden = false;
+      ${handlerBody}
+    `)(state, { hidden });
+    return state.calls;
+  }
+
+  it("进后台：只拆流，其余一概不刷", () => {
+    assert.deepEqual(run("terminal", true), ["syncTerminalDataStream"]);
+    assert.deepEqual(run("board", true), ["syncTerminalDataStream"]);
+  });
+
+  it("切回终端页：先核一次闸（可见即空操作），补一拍归属数据，并按被动重挂口径重建画面", () => {
+    assert.deepEqual(run("terminal", false), [
+      "syncTerminalDataStream", "refreshStatus", "pollTerminalSessions", "renderPreview:revive=false",
+    ]);
+  });
+
+  it("切回看板/统计/其它页：不碰终端重建，看板照常补两拍", () => {
+    assert.deepEqual(run("board", false), ["syncTerminalDataStream", "refreshStatus", "refreshAgents", "refreshModelStability"]);
+    assert.deepEqual(run("stats", false), ["syncTerminalDataStream", "refreshStatus", "refreshStatsState"]);
+    assert.deepEqual(run("sessions", false), ["syncTerminalDataStream", "refreshStatus"]);
+  });
+
+  it("1s 兜底拍：只补漏掉的转折，开局即 hidden 不算转折（不把常驻隐藏环境的终端页拆成空白）", () => {
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init, "initTerminalPreview found in panel.js");
+    assert.ok(init.includes("terminalVisibilityWasHidden = document.hidden;"), "定时器建立时按当下可见性起算初值");
+    const at = init.indexOf("terminalPollTimer = setInterval");
+    const tick = init.slice(at, init.indexOf("}, 1000);", at));
+    assert.ok(tick.includes("document.hidden && !terminalVisibilityWasHidden"), "拆流核拍以转折为条件，不是以隐藏为条件");
+    assert.ok(tick.indexOf("syncTerminalDataStream") < tick.indexOf('if (document.hidden) return;'), "核拍排在隐藏早退之前，否则隐藏期根本跑不到");
+    assert.ok(tick.indexOf("syncTerminalActivityStream()") < tick.indexOf("syncTerminalDataStream()"), "两条流的闸同拍，字节流不落在真值流后面");
   });
 });
 
@@ -6773,7 +6838,7 @@ describe("虚拟终端 resize 防抖", () => {
 
   it("接线：resize 监听挂防抖入口；建流先同步 fit 再开流（回放到达前列宽已量准）", () => {
     assert.ok(panelJs.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听走防抖");
-    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect, "connectTerminalStream found in panel.js");
     const fitAt = connect.indexOf("fitTerminalXterm();");
     const streamAt = connect.indexOf("terminalEventSource = new EventSource");
@@ -6793,7 +6858,7 @@ describe("虚拟终端 resize 防抖", () => {
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -6805,8 +6870,11 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       hiddenFallback: { cols: 12, rows: 6 },
       session: { id: "sess-a", backend: true, backendState: null, shell: {} },
       warns: [], resizeObservers: [], resizeFailures: 0,
+      windowHidden: false,
     };
     const view = { hidden: viewHidden };
+    const fitFloorSrc = panelJs.match(/const TERMINAL_FIT_MIN_HOST_WIDTH_PX = \d+;[\s\S]{0,80}?const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = \d+;/)?.[0];
+    assert.ok(fitFloorSrc, "窗口级尺寸闸的下限可从 panel.js 取到（测试不抄数字）");
     const host = {};
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
@@ -6823,10 +6891,11 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let activeTerminalPreviewId = "sess-a";
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
-      const host = {};
+      const host = { clientWidth: 1200, clientHeight: 600 };
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
       // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
-      const document = { documentElement: {} };
+      // document.hidden 走 state.windowHidden：视图显隐与窗口可见性是两件事，各自可摆。
+      const document = { documentElement: {}, get hidden() { return state.windowHidden; } };
       const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const console = { warn: (...args) => { state.warns.push(args.map(String).join(" ")); } };
       const api = (method, url, body) => {
@@ -6877,6 +6946,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       const ResizeObserver = FakeResizeObserver;
       let terminalResizeDebounceTimer = null;
       const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
+      // 尺寸闸下限从源码取，测试不另抄一份数字：阈值改了这里就红，不靠人记得改。
+      ${fitFloorSrc}
       const pendingTimers = [];
       const setTimeoutStub = (cb, ms) => { const id = pendingTimers.length + 1; pendingTimers.push({ id, cb, ms }); return id; };
       const clearTimeoutStub = (id) => { const i = pendingTimers.findIndex((t) => t.id === id); if (i >= 0) pendingTimers.splice(i, 1); };
@@ -6891,10 +6962,13 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       return {
         connect: connectTerminalStream, close: closeTerminalStream,
         fit: fitTerminalXterm, debounce: debounceTerminalFit,
+        sync: syncTerminalDataStream,
         flushTimers: () => { for (const { cb } of pendingTimers.splice(0)) cb(); },
         xterm: () => terminalXterm, source: () => terminalEventSource,
         host: () => host,
         setViewHidden: (v) => { view.hidden = v; },
+        setWindowHidden: (v) => { state.windowHidden = v; },
+        setHostSize: (w, h) => { host.clientWidth = w; host.clientHeight = h; },
         setMeasured: (cols, rows) => { state.measured = { cols, rows }; },
         observers: () => state.resizeObservers,
       };
@@ -6952,7 +7026,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const m = panelJs.match(/function switchView\(name\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(m, "switchView found in panel.js");
     const branch = m.slice(m.indexOf("if (terminal) {"));
-    assert.ok(branch.includes("renderTerminalPreviewSession()"), "终端分支建流：xterm 在可见容器里创建再收全量回放");
+    assert.ok(branch.includes("renderTerminalPreviewSession({ revive: false })"), "终端分支建流：xterm 在可见容器里创建再收全量回放");
+    assert.ok(!branch.includes("renderTerminalPreviewSession();"), "回页补挂是被动重挂，不替用户重开已退会话");
   });
 
   it("剪贴板键位：裸 Ctrl+V 交还浏览器、Ctrl+C 有选中才交还复制，建流即回焦", () => {
@@ -7060,6 +7135,60 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const toggleBody = init.slice(toggleAt, init.indexOf('$("terminalRedrawBtn").onclick'));
     assert.ok(toggleBody.includes("scheduleTerminalFit()"), "inspector 收放即调度一次尺寸适配（±292px 不经 window resize）");
   });
+
+  // 挂后台这一路：视图没被隐藏、隐藏的是整个窗口，上面那道视图闸管不到。实测真实
+  // 行为：0×0 宿主让 FitAddon 把 xterm 收成 2 列 1 行且不会自己回弹；隐藏期字节照投
+  // 递而解析被钳成每秒一片、rAF 零帧。下面三例分别钉住"塌陷尺寸不进 PTY""进后台即拆
+  // 流""可见时绝不误拆、无事时拆流是空操作"。
+  it("窗口最小化把宿主压成 0×0：既不缩放也不 POST，窗口恢复后按真实尺寸补一次", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    assert.equal(resizePosts(state).length, 1, "建流首帧一次 fit");
+    assert.equal(term.cols, 119, "首帧按可见尺寸");
+
+    sandbox.setHostSize(0, 0); // 视口塌陷：宿主量得到 0×0，视图却没隐藏
+    sandbox.fit();
+    sandbox.debounce();
+    sandbox.flushTimers();
+    assert.equal(resizePosts(state).length, 1, "塌陷尺寸不 POST 进 PTY——TUI 不会被打成 2 列碎条");
+    assert.equal(term.cols, 119, "xterm 行列不被塌陷测量改写");
+
+    sandbox.setHostSize(1200, 600); // 窗口恢复：ResizeObserver / window resize 再叫一次
+    sandbox.fit();
+    assert.equal(resizePosts(state).length, 2, "恢复后照常按真实尺寸上报");
+    assert.deepEqual(resizePosts(state)[1].body, { cols: 119, rows: 26 });
+  });
+
+  it("进后台即拆会话字节流：连接断开、实例销毁，未解析积压随实例一起清掉", () => {
+    const { sandbox, state } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const term = sandbox.xterm();
+    const source = sandbox.source();
+    sandbox.setWindowHidden(true);
+    sandbox.sync();
+    assert.equal(source.closed, true, "SSE 断开：隐藏期不再收字节，宿主也不再为这个客户端堆缓冲");
+    assert.equal(term.disposed, true, "xterm 实例随流销毁：WriteBuffer 里排队的旧字节不会被切回时一次成吨解析");
+    assert.equal(sandbox.xterm(), null, "实例引用清空，回前台走新建实例重建");
+    assert.equal(sandbox.source(), null, "流引用清空");
+    assert.equal(state.terms.length, 1, "拆流不顺手新建实例");
+  });
+
+  it("可见时不误拆、无流时拆是空操作", () => {
+    const { sandbox } = terminalGateSandbox({ viewHidden: false });
+    sandbox.connect(backendSession("sess-a"));
+    const source = sandbox.source();
+    sandbox.setWindowHidden(false);
+    sandbox.sync();
+    assert.equal(source.closed, false, "正在看着的终端不被核拍收走");
+    assert.notEqual(sandbox.xterm(), null, "实例保持存活");
+
+    const idle = terminalGateSandbox({ viewHidden: false });
+    idle.sandbox.setWindowHidden(true);
+    idle.sandbox.sync();
+    assert.equal(idle.state.terms.length, 0, "无实例无流：拆流不建、不报错");
+    assert.equal(idle.state.eventSources.length, 0, "同上，没有连接被打开");
+  });
 });
 
 // 输入法候选框抽搐：组字期间隐藏输入框被光标重绘、回显和尺寸自适应反复搬走。
@@ -7153,8 +7282,10 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
 
   it("组字期间尺寸变化先不缩放，组字结束后补一次", () => {
     const fitSrc = panelJs.match(/function fitTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const measurableSrc = panelJs.match(/function terminalHostMeasurable\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const fitFloorSrc = panelJs.match(/const TERMINAL_FIT_MIN_HOST_WIDTH_PX = \d+;[\s\S]{0,80}?const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = \d+;/)?.[0];
     const releaseSrc = panelJs.match(/function releaseTerminalImeAnchor\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(fitSrc && releaseSrc);
+    assert.ok(fitSrc && releaseSrc && measurableSrc && fitFloorSrc);
     const state = { fits: 0 };
     const api = new Function("state", `
       let terminalImeHold = null;
@@ -7163,10 +7294,12 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
       const terminalFitAddon = { fit() { state.fits += 1; } };
       const terminalXterm = { cols: 80, rows: 24 };
       const activeTerminalPreviewId = "sess-a";
-      const $ = () => ({ hidden: false });
+      const $ = (id) => (id === "terminalXtermHost" ? { clientWidth: 1200, clientHeight: 600 } : { hidden: false });
       function terminalSessionFor() { return null; }
       function postTerminalResize() {}
       function cancelAnimationFrame() {}
+      ${fitFloorSrc}
+      ${measurableSrc}
       ${fitSrc}
       ${releaseSrc}
       return {
@@ -7352,7 +7485,7 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     assert.ok(ensure?.includes("term.attachCustomKeyEventHandler("), "每个 xterm 实例挂自定义键位处理器");
     assert.ok(ensure?.includes('if (intent === "paste") return false;'), "裸 Ctrl+V 整体交还浏览器（原生粘贴 → xterm paste 通路 → PTY）");
     assert.ok(ensure?.includes('if (intent === "copy" && term.hasSelection()) return false;'), "裸 Ctrl+C 有选中才交还复制，无选中交回 xterm 发中断");
-    const connect = panelJs.match(/function connectTerminalStream\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect?.includes("term.focus()"), "建流（进页/切签/新建/降级重试）后焦点回守");
     assert.ok(panelJs.includes("terminalXterm?.focus()"), "字号 ± 与终端屏点击后焦点回守");
     assert.ok(panelJs.includes("else terminalXterm.focus();"), "重进终端页（实例尚存）也回焦");

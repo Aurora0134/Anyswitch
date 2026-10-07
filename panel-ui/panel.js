@@ -410,6 +410,11 @@ async function api(method, path, body) {
   // 折线图也因没有新帧而不更新。按当前视图各补一次即可，不新起定时器：
   // refreshAgents / refreshModelStability / refreshStatsState 自带在飞与序号守卫。
   document.addEventListener("visibilitychange", () => {
+    // 先记账再动手：这条转折由本处处理完了，兜底那一拍就不必再补一次。
+    terminalVisibilityWasHidden = document.hidden;
+    // 进后台第一件事是拆掉会话字节流（理由见 syncTerminalDataStream）；回前台由下面
+    // 各视图分支重建。这条转折漏发也不要紧：1s 轮询拍里同一个函数再核一次。
+    syncTerminalDataStream();
     if (document.hidden) return;
     refreshStatus();
     if (currentView === "stats") {
@@ -419,6 +424,10 @@ async function api(method, path, body) {
     if (currentView === "terminal") {
       // 后台切回：隐藏期定时器被节流到分钟级，立即补一拍归属数据。
       pollTerminalSessions();
+      // 隐藏期这条流连同它的未解析积压已经被拆掉，画面按宿主镜像重建一次。
+      // revive:false——切回来不是"用户挑了这条会话"，进程已退就只回放最后一屏，
+      // 不因为回来了就替他重开一个空壳；要新壳仍然点页签，那是既有通路。
+      renderTerminalPreviewSession({ revive: false });
       return;
     }
     if (!boardVisible()) return;
@@ -3881,6 +3890,8 @@ async function api(method, path, body) {
   let activeTerminalPreviewId = "checkout";
   let terminalBackendSessions = {};
   let terminalEventSource = null;
+  // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
+  let terminalVisibilityWasHidden = false;
   // 活跃真值流：panel 转发的 relay 工作/空闲绝对态 SSE。轮询（1s）仍是校准
   // 与指标数据源；这个流只负责把工作/空闲与在途请求数即时落到标签与实况行。
   let terminalActivitySource = null;
@@ -4471,12 +4482,31 @@ async function api(method, path, body) {
     terminalImeHoldFrame = null;
   }
 
+  // 窗口级尺寸闸的下限：按 13px 字号一格约 7.8×17px 取整，80×34 约合 10 列 2 行。
+  // 正常布局不会掉到这条线以下，视口塌陷则一定掉到它以下——阈值只用来区分这两件事，
+  // 不承担"最小可用终端尺寸"的承诺。
+  const TERMINAL_FIT_MIN_HOST_WIDTH_PX = 80;
+  const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = 34;
+
+  function terminalHostMeasurable() {
+    const host = $("terminalXtermHost");
+    return !!host
+      && host.clientWidth >= TERMINAL_FIT_MIN_HOST_WIDTH_PX
+      && host.clientHeight >= TERMINAL_FIT_MIN_HOST_HEIGHT_PX;
+  }
+
   function fitTerminalXterm() {
     // 终端页隐藏期不测量：FitAddon 从 display:none 的宿主只能量到百分比兜底值
     // （实测把 xterm 压成 12×6），按这个宽度折行的回放会把整行提示符碎成几段，
     // 而 xterm 加大列宽时不重排已折行内容——首帧画错就一直错。窗口 resize 的
     // 防抖路径也经由此闸：切到别的页后 resize 不再把兜底尺寸 POST 进 PTY。
     if ($("terminalView")?.hidden) return;
+    // 视图闸只管"这一屏被藏起来"，管不了"整个窗口被最小化"：后者宿主量得到 0×0，
+    // FitAddon 会把 xterm 收成 2 列 1 行（实测），这个尺寸还会被 POST 进 PTY——承载
+    // 的 TUI 当场按 2 列重排成碎条，而宿主尺寸回来后 xterm 不会自己回弹（实测停在
+    // 2×1）。量不到可信尺寸就既不 fit 也不 POST；窗口恢复时 ResizeObserver 与
+    // window resize 会再叫一次此入口，无需在这里补测。
+    if (!terminalHostMeasurable()) return;
     // 组字期间不重排：锚点钉在组字开始的格子上，终端一变宽它会跟着整块挪走。
     // 记下，组字结束后补一次。
     if (terminalImeHold) {
@@ -4750,7 +4780,7 @@ async function api(method, path, body) {
     session.shell.pid = state.pid || "—";
   }
 
-  async function connectTerminalStream(session) {
+  async function connectTerminalStream(session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
     // 终端页后活着的那条流，不能被隐藏期的重渲染路径（fetch 完成、轮询）关掉。
@@ -4782,7 +4812,10 @@ async function api(method, path, body) {
     }
     // 从上次中断继续回来的会话进程已死（快照 status: exited）：点开页签先在原
     // cwd/壳上重启它再建流——一次点击就是新壳，否则键入只会落进 409。
-    if (session.backendState?.status === "exited") {
+    // revive:false 是被动重挂（切回前台、回终端页补挂），不等于用户挑了这条会话：
+    // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开一个空壳（宿主的重开路由
+    // 自己写着"重开对应用就是一张空白屏"，且挂流并不要求进程还在）。
+    if (revive && session.backendState?.status === "exited") {
       try {
         const revived = await api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`);
         if (revived) session.backendState = revived;
@@ -5492,7 +5525,9 @@ async function api(method, path, body) {
     });
   }
 
-  function renderTerminalPreviewSession() {
+  // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
+  // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
+  function renderTerminalPreviewSession({ revive = true } = {}) {
     // 降级闸：判定键是就绪位本身，不是会话数——零会话会被 fetch 的自动补建
     // 兜住；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
@@ -5518,8 +5553,24 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
-    connectTerminalStream(session);
+    connectTerminalStream(session, { revive });
     if (currentView === "terminal") scheduleTerminalFit();
+  }
+
+  // 挂后台时的会话字节流闸门。终端页其余数据源（1s 归属轮询、看板活跃真值流、统计
+  // 页 30s）早就都带 document.hidden 闸，唯独这条字节流没有：隐藏期浏览器照旧投递
+  // （实测 5 分钟 7673 帧 / 1.24MB），而 xterm 的解析被钳成每秒只有一个 12ms 时间片
+  // （实测灌 2MB：4 片、片间隔 989–999ms）、渲染挂在 rAF 上而隐藏页 rAF 零帧——整段
+  // 输出只进不出地挂在页面的 xterm 实例上；浏览器把标签页冻结时更狠，恢复一刻成吨
+  // 回灌。切回即卡一阵、只有终端区卡，就是这么来的。
+  //
+  // 拆流不丢任何东西：PTY 归宿主进程所有，宿主对每段输出都无条件喂回放窗与镜像，
+  // 有没有观众都一样画（实测断开流 9 秒，pid、尺寸、产出全不变）。切回时重建，画面
+  // 来自镜像的自足重绘（实测跑了 3 小时的会话回放才 22KB，上限 2MB 约合 50ms 工作量）。
+  // 顺带一并清掉的还有：错列宽折行、组字锚点悬挂、以及连接已死却无人重建的死角。
+  function syncTerminalDataStream() {
+    if (!document.hidden) return;
+    if (terminalEventSource || terminalXterm) closeTerminalStream();
   }
 
   // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
@@ -5582,8 +5633,18 @@ async function api(method, path, body) {
     loadInstalledTerminalAgents(); // 启动即预热新建菜单的启动方式列表，点「+」即弹不等探测
     if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {
+      // 初值按"当下"起步：常驻隐藏的环境里这不是转折，兜底拍不该把终端页拆成空白。
+      terminalVisibilityWasHidden = document.hidden;
       terminalPollTimer = setInterval(() => {
         syncTerminalActivityStream();
+        // 拆流的兜底一拍：只在「本该已进后台但那次转折没送达」时收流。开局就是 hidden
+        // 不算转折（terminalVisibilityWasHidden 按初值认），所以常驻隐藏的环境里终端页
+        // 照常能建流，不把可验证性一起拆掉。回前台那一侧重建有天然退路——回终端页时
+        // 实例为空就补挂（见 switchView）。
+        if (document.hidden && !terminalVisibilityWasHidden) {
+          terminalVisibilityWasHidden = true;
+          syncTerminalDataStream();
+        }
         if (document.hidden) return;
         if (currentView !== "terminal") return;
         pollTerminalSessions();
@@ -6450,7 +6511,10 @@ async function api(method, path, body) {
       // 进页才建流：xterm 只在可见容器里创建、按实测尺寸收全量回放，首帧即正确
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在
       // 离开本页后保持存活——已有实例的再次进入只补一次 fit，不重建不重放。
-      if (!terminalXterm) renderTerminalPreviewSession();
+      // 例外是挂过后台：那条流连同实例已被可见性闸拆掉，这里就是它的重挂点。补挂
+      // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
+      // 最后一屏，要新壳仍然点页签。
+      if (!terminalXterm) renderTerminalPreviewSession({ revive: false });
       else terminalXterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
