@@ -23,6 +23,8 @@ import {
   windowTps,
   TTFT_THRESHOLDS,
   METRICS_SNAPSHOT_FILENAME,
+  PS_PROBE_TIMEOUT_MS,
+  PS_PROBE_OPTIONAL_TIMEOUT_MS,
 } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -5541,6 +5543,187 @@ describe("persistent PowerShell probe transport", () => {
     const collector = testCollector({ spawnFn, execFn, nowFn: () => 3000 });
     const procs = await collector.scanProcesses();
     assert.equal(procs.zcode, 1, "超时轮必须落到 tasklist 兜底而不是挂死");
+  });
+});
+
+// 探针超时判罚。这条链原来的形状是「任何一条查询超时 = 子进程卡死 = 杀掉」，于是
+// 一轮里那条**可选**的终端存活复查能把刚刚正常答过进程扫描的热子进程打死，下一轮
+// 重付冷启动（本机实测冷轮 556ms、热轮 149–185ms），而复查在新子进程里还要现场
+// 编译一段 Win32 互操作代码（实测 188ms）——杀完必回冷态，下轮又要编译，链条自持。
+// 更要紧的是落数据原本排在这条可选复查之后：面板读到的快照被可选工作拖住最长 3 秒，
+// 而面板给 relay 的拉取预算只有 1500ms。2026-10-07 用假子进程驱动真实采集器实测：
+// 扫描 20ms 就答完，整轮仍 3032ms 才落地，且那只子进程被 kill、下一轮重新 spawn。
+describe("探针超时判罚：可选复查不杀热子进程，落地不等复查", () => {
+  const DSH_BIN = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js";
+  const HEADER = "Node,CommandLine,Name,ProcessId\r\n";
+  const dshTuiRow = (pid) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "${DSH_BIN}" --profile dsh-tui,node.exe,${pid}`;
+  const zcodeRow = (pid) => `LAPTOP,C:\\Programs\\ZCode.exe,ZCode.exe,${pid}`;
+  const tuiScan = HEADER + dshTuiRow(6001) + "\r\n";
+  const cleanScan = HEADER + dshTuiRow(6001) + "\r\n";
+
+  function raceWithPending(promise, ms) {
+    return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve("__pending__"), ms))]);
+  }
+
+  function makeChild(onWrite) {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    child.stdin = { write: (text) => onWrite(child, stdout, text) };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.killed = true; child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  }
+  const markerOf = (text) => (text.match(/Write-Output '([^']+)'/) || [])[1] || "";
+
+  it("可选复查还挂在半空时，扫描结果必须已经能读走", async () => {
+    // 落地的判据是「本轮进程事实到手」，不是「本轮所有可选附加工作都跑完」。
+    let t = 3000;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        setTimeout(() => stdout.emit("data", `c=6001/0\r\n${marker}\r\n`), 400); // 复查慢，但会答
+        return;
+      }
+      stdout.emit("data", tuiScan + marker + "\r\n");
+    });
+    const collector = testCollector({ spawnFn, nowFn: () => t });
+    const firstRound = collector.scanProcesses(); // 首轮在飞（复查未答完）
+    await new Promise((r) => setTimeout(r, 60));
+    const read = await raceWithPending(collector.scanProcesses(), 30);
+    assert.notEqual(read, "__pending__", "复查挂半空不得让第二次读排队等整轮");
+    assert.equal(read.dsh, 1, "读到的就是本轮扫描的进程事实");
+    await firstRound;
+  });
+
+  it("复查超时不得打死刚答过扫描的子进程；同一只第二次超时才换掉", async () => {
+    let t = 3000;
+    const kids = [];
+    const spawnFn = () => {
+      const child = makeChild((c, stdout, text) => {
+        if (text.includes("AttachErr")) return; // 永不回话：模拟争用下卡住的可选复查
+        stdout.emit("data", tuiScan + markerOf(text) + "\r\n");
+      });
+      kids.push(child);
+      return child;
+    };
+    const collector = testCollector({
+      spawnFn,
+      killFn: () => false,
+      nowFn: () => t,
+      psProbeTimeoutMs: 6000,
+      psProbeOptionalTimeoutMs: 40,
+    });
+
+    const first = await collector.scanProcesses();
+    assert.equal(first.dsh, 1, "复查不回话也必须把本轮进程数据交出来");
+    assert.equal(kids.length, 1);
+    assert.equal(kids[0].killed, undefined, "第一次复查超时：热子进程不得被判死");
+    assert.equal(collector.getProbeStats().optionalTimeouts, 1);
+
+    t = 10000; // 过 TTL → 第二轮仍走同一只热子进程（不重付冷启动）
+    await collector.scanProcesses();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(kids.length, 1, "第二轮必须复用子进程");
+    const stats = collector.getProbeStats();
+    assert.equal(stats.optionalTimeouts, 2, "第二轮同样放弃复查");
+    assert.equal(stats.childKills, 1, "同一只子进程第二次复查超时即换掉，不得无限拖着");
+
+    t = 20000; // 被判罚之后，下一轮必须重新 spawn
+    await collector.scanProcesses();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(kids.length, 2, "换掉的子进程下一轮重起，真卡死的不得永久占用");
+  });
+
+  it("被放弃那条复查迟到的回话不得混进下一轮读数", async () => {
+    let t = 3000;
+    let abandonedMarker = null;
+    let scanWrites = 0;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        abandonedMarker = marker; // 记下被放弃那条的标记，稍后迟到
+        return;
+      }
+      scanWrites += 1;
+      if (scanWrites === 1) {
+        stdout.emit("data", tuiScan + marker + "\r\n");
+        return;
+      }
+      // 第二轮：先把第一轮那条被放弃的复查回话吐出来（内容故意伪装成进程行），
+      // 再吐本轮真正的扫描结果。序列上迟到段一定排在当轮答案之前。
+      setTimeout(() => stdout.emit("data", HEADER + zcodeRow(9111) + "\r\n" + abandonedMarker + "\r\n"), 5);
+      setTimeout(() => stdout.emit("data", cleanScan + marker + "\r\n"), 12);
+    });
+    const collector = testCollector({
+      spawnFn,
+      killFn: () => false,
+      nowFn: () => t,
+      psProbeTimeoutMs: 6000,
+      psProbeOptionalTimeoutMs: 30,
+    });
+
+    await collector.scanProcesses(); // 第 1 轮：扫描到手，复查被放弃
+    t = 10000;
+    collector.scanProcesses(); // 踢第 2 轮（后台重验）
+    await new Promise((r) => setTimeout(r, 80)); // 等第 2 轮落地
+    const second = await collector.scanProcesses();
+    assert.equal(second.zcode, 0, "迟到段不得当成本轮进程行计数");
+    assert.equal(second.dsh, 1, "本轮自己的扫描结果照常落地");
+    assert.ok(collector.getProbeStats().lateAnswersDiscarded >= 1, "迟到段必须被显式丢弃并计数");
+  });
+
+  it("必需的进程扫描超时照旧换子进程并回落 tasklist", async () => {
+    let t = 3000;
+    const kids = [];
+    const spawnFn = () => {
+      const child = makeChild(() => { /* 扫描也不回话：整轮不可用 */ });
+      kids.push(child);
+      return child;
+    };
+    const execFn = (cmd, opts, cb) => {
+      if (cmd.includes("tasklist")) return cb(null, '"ZCode.exe","20588","Console","1","50,000 K"\r\n');
+      return cb(new Error("unexpected exec"));
+    };
+    const collector = testCollector({
+      spawnFn, execFn, killFn: () => false, nowFn: () => t,
+      psProbeTimeoutMs: 40, psProbeOptionalTimeoutMs: 40,
+    });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.zcode, 1, "必需查询超时仍须兜底出数据");
+    assert.ok(kids[0].killed, "必需查询超时的子进程必须被换掉——数据不可信的那条路不放宽");
+  });
+
+  it("可选预算短于必需预算", () => {
+    assert.ok(PS_PROBE_OPTIONAL_TIMEOUT_MS < PS_PROBE_TIMEOUT_MS,
+      "可选查询的预算必须明显短于必需查询，否则可选工作又能拖住整轮");
+  });
+
+  it("processScanTtlMs 放宽后，未到窗口的读不再踢新的一轮", async () => {
+    let t = 100_000; // 纪元量级的时钟：首轮没有快照，必须无条件踢一次
+    let scanQueries = 0;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        stdout.emit("data", `c=6001/0\r\n${marker}\r\n`);
+        return;
+      }
+      scanQueries += 1;
+      stdout.emit("data", tuiScan + marker + "\r\n");
+    });
+    const collector = testCollector({ spawnFn, nowFn: () => t, processScanTtlMs: 6000 });
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 1);
+    t = 103_000; // 距今 3000ms：默认窗口(2500)会踢新一轮，放宽到 6000 则不该踢
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 1, "未到缓存窗口不得重扫——少一路并发就是少一份争用");
+    t = 109_500; // 距今 6500ms：过窗，正常重验
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 2);
   });
 });
 
