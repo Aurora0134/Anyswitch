@@ -1433,7 +1433,7 @@ export function createPanelRouter({
     }
     refreshClientUpdates();
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
-      return sendJson(res, 409, { ok: false, error: "busy", message: "已有自更新任务在进行中，请等待完成" });
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
     }
     const runId = randomUUID();
     const run = {
@@ -1466,9 +1466,9 @@ export function createPanelRouter({
         ...run,
         state: "done",
         finishedAt: new Date().toISOString(),
-        result: { outcome: "failed", message: "自更新未能启动，请稍后重试" },
+        result: { outcome: "failed", message: "更新未能启动，请稍后重试" },
       });
-      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "自更新未能启动，请稍后重试" });
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
     }
     writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
     armSelfUpdateWatcher();
@@ -1479,7 +1479,7 @@ export function createPanelRouter({
     refreshClientUpdates();
     const run = readClientUpdateRun(updateJournalDir, runId);
     if (!run || run.clientId !== SELF_UPDATE_CLIENT_ID) {
-      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个自更新任务" });
+      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务" });
     }
     return sendJson(res, 200, selfUpdateStatusPayload(run));
   }

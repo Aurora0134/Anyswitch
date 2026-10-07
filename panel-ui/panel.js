@@ -2439,10 +2439,7 @@ async function api(method, path, body) {
       return new Promise((resolve) => { lifecycleModalResolve = resolve; });
     }
     function showClientUpdateModal(names, many) {
-      return showLifecycleModal({
-        title: many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`,
-        body: `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`,
-      });
+      return showLifecycleModal(clientUpdateModalPayload(names, many));
     }
     // 弹层是单例：已经有一个确认在屏上时，后到的请求排队等它答完再弹，
     // 否则两个并发任务会互相覆盖对方的标题与按钮归属。
@@ -2574,10 +2571,10 @@ async function api(method, path, body) {
     // 借 anyswitch:self-update-swap 事件把恢复监视交给顶栏（watchPanelHostComeBack），
     // 面板身份变化后整页刷新到新版。中途离开关于页只是放弃轮询，任务照跑。
     const SELF_UPDATE_PHASES = {
-      staging: (target) => `正在拉取 ${target}…`,
-      installing: () => "代码已就位，正在安装依赖…",
-      "ready-to-restart": () => "正在重启 relay…",
-      "waiting-panel": () => "正在换装面板，页面即将自动恢复…",
+      staging: (target) => `正在下载 ${target}…`,
+      installing: () => "下载完成，正在安装…",
+      "ready-to-restart": () => "正在重启 Relay…",
+      "waiting-panel": () => "正在重启面板，页面即将自动恢复…",
     };
     let selfUpdateRun = null; // { runId, poll }，全局单飞
     let selfUpdateAdopted = false; // enter() 时接回检查完成前，按钮先不出
@@ -2585,7 +2582,7 @@ async function api(method, path, body) {
     function renderSelfUpdateProgress(status) {
       const statusEl = get("aboutUpdateStatus");
       const phaseText = SELF_UPDATE_PHASES[status?.phase];
-      statusEl.textContent = phaseText ? phaseText(status?.targetVersion || "") : "自更新进行中…";
+      statusEl.textContent = phaseText ? phaseText(status?.targetVersion || "") : "更新进行中…";
       statusEl.dataset.tone = "";
       get("aboutUpdateTime").textContent = "";
       get("aboutSelfUpdate").hidden = true;
@@ -2597,15 +2594,15 @@ async function api(method, path, body) {
       const copy = {
         updated: `已更新到 ${status?.afterVersion || status?.latestVersion || ""}`,
         updated_pending_restart: status?.message || "新版本已就位，重启面板后生效",
-        rolled_back: status?.message || "已回滚到更新前版本",
-        failed: status?.message || "自更新失败，请重新检查更新",
+        rolled_back: status?.message || "已恢复到更新前版本",
+        failed: status?.message || "更新失败，请重新检查更新",
       };
-      statusEl.textContent = copy[status?.outcome] || "自更新已结束";
+      statusEl.textContent = copy[status?.outcome] || "更新已结束";
       statusEl.dataset.tone = status?.outcome === "updated" ? "ok" : status?.outcome === "updated_pending_restart" ? "" : "danger";
       get("aboutSelfUpdate").hidden = true;
       // 页面多半已随面板换新重载（outcome=updated 时）；这里的 notify 服务于
       // 未换装收场（pending_restart / 回滚 / 失败）与竞态下留在旧页的情况。
-      notify(copy[status?.outcome] || "自更新已结束", status?.outcome !== "updated");
+      notify(copy[status?.outcome] || "更新已结束", status?.outcome !== "updated");
       void checkUpdates(true);
     }
     function pollSelfUpdate(runId) {
@@ -2638,9 +2635,9 @@ async function api(method, path, body) {
       try {
         const data = await fetchOnce("/api/agents");
         const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
-        if (running.length) warning = `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），换装会打断其请求。`;
+        if (running.length) warning = `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），更新会打断其请求。`;
       } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
-      const confirmed = await confirmSelfUpdate(`更新 Anyswitch 到 ${target}`, `${warning || "更新期间面板与 relay 会自动换装重启，秒级中断。"}确认现在更新？`);
+      const confirmed = await confirmSelfUpdate(`更新 Anyswitch 到 ${target}`, `${warning || "更新期间面板与 Relay 会自动重启，有秒级中断；安装目录里的手动修改会被覆盖。"}确认现在更新？`);
       if (!confirmed) return;
       if (selfUpdateRun) return; // 确认期间可能已从 adopt 接回
       try {
@@ -2652,7 +2649,7 @@ async function api(method, path, body) {
       } catch (error) {
         if (error?.abandoned) return;
         selfUpdateRun = null;
-        notify(error?.code === "busy" ? "已有自更新任务在进行中" : "自更新未能启动，请稍后重试", true);
+        notify(error?.code === "busy" ? "已有更新任务在进行中" : "更新未能启动，请稍后重试", true);
         renderUpdate();
       }
     }

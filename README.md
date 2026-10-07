@@ -267,7 +267,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 
 ## 升级时，保留数据和 `.git`
 
-首选入口在面板里：**设置 → 关于 → 检查更新 → 立即更新**。目标版本与「检查更新」同源（release tag，预览版身份自动跟随）；确认后后台 worker 浅拉取目标 tag、就地换装工作树、装好依赖，再自动重启 relay 与 panel-host——面板身份变化时页面自己刷新到新版。自更新把工作树当作自己的领地：checkout 一律 `--detach --force`，手动同步留下的漂移会被收敛成目标版本；`.git` 在首次更新时自动引导（浅拉取，logs 与 node_modules 等运行时文件不受影响），换装前记录的 HEAD 就是回滚点，新面板起不来会自动退回旧版。想手动走同样的路径，步骤如下：
+首选入口在面板里：**设置 → 关于 → 检查更新 → 立即更新**。目标版本与「检查更新」同源（release tag，预览版身份自动跟随）；确认后后台 worker 浅拉取目标 tag、就地换装工作树、装好依赖，再自动重启 relay 与 panel-host——面板身份变化时页面自己刷新到新版。自更新把工作树当作自己的领地：checkout 一律 `--detach --force`，手动同步留下的漂移会被收敛成目标版本（确认弹窗会提示这一点）；`.git` 在首次更新时自动引导（浅拉取，logs 与 node_modules 等运行时文件不受影响），换装前记录的 HEAD 就是回滚点：新面板起不来会自动退回旧版并重装依赖，换装后的校验或依赖安装失败也会先把文件还原到更新前状态。想手动走同样的路径，步骤如下：
 
 从 `v0.5.2` 升到 `v0.6.0`，用户数据仍在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设和用量记录不随源码目录一起替换。
 
@@ -557,7 +557,7 @@ This is not implemented yet. It is written here so you know the direction — an
 
 ### Upgrading: keep your data and `.git`
 
-The preferred entry is in the panel: **Settings → About → Check for updates → Update now**. The target comes from the same source as the update check (the release tag, with the preview identity following the running version); after confirmation a background worker shallow-fetches the target tag, swaps the working tree in place, installs dependencies, then restarts the relay and panel-host automatically — the page refreshes itself onto the new version when the panel identity changes. The updater owns the working tree: checkouts are always `--detach --force`, so drift left by manual syncing is converged onto the target version; `.git` is bootstrapped on the first update (shallow fetch; runtime files like logs and node_modules are untouched), the HEAD recorded before the swap is the rollback point, and if the new panel fails to come up the previous version is restored automatically. To walk the same path by hand:
+The preferred entry is in the panel: **Settings → About → Check for updates → Update now**. The target comes from the same source as the update check (the release tag, with the preview identity following the running version); after confirmation a background worker shallow-fetches the target tag, swaps the working tree in place, installs dependencies, then restarts the relay and panel-host automatically — the page refreshes itself onto the new version when the panel identity changes. The updater owns the working tree: checkouts are always `--detach --force`, so drift left by manual syncing is converged onto the target version (the confirmation dialog says so); `.git` is bootstrapped on the first update (shallow fetch; runtime files like logs and node_modules are untouched), the HEAD recorded before the swap is the rollback point — if the new panel fails to come up the previous version is restored together with its dependencies, and a failed post-swap check or dependency install likewise restores the files to the pre-update state first. To walk the same path by hand:
 
 From `v0.5.2` to `v0.6.0`, user data stays above `app` in `%LOCALAPPDATA%\Anyswitch\`: providers, credentials, settings, presets and usage records are not replaced with the source directory.
 
