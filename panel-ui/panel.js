@@ -3945,18 +3945,28 @@ async function api(method, path, body) {
     return null;
   }
 
-  // 换行键位意图：只认不带 Alt/Meta 的 Ctrl+Enter / Shift+Enter。xterm 5.5
-  // 内核求值 Enter 只保留 Alt，Ctrl/Shift 被忽略、折叠成普通 "\r"；而 opencode
-  // 在拿不到 kitty 键盘协议的终端里，换行绑定可直接靠 ctrl+j（LF 字节）触发——
-  // 拦下这类键改定投 "\n" 即它的换行语义。IME 组字态（isComposing / keyCode
-  // 229）最终字节未定，不接管。
+  // 换行键位意图：只认不带 Alt/Meta 的 Ctrl+Enter / Shift+Enter，keydown 与其后的
+  // keypress 两条都要认——内核在 keydown 之后还会吃 keypress，Shift+Enter 的那一条
+  // （charCode 13）会被折叠成普通 "\r" 补发，真机上的表现是「先换行、紧接着发送」；
+  // Ctrl+Enter 的 keypress 不折叠，所以只有 Shift 侧漏。内核求值 Enter 只保留 Alt，
+  // Ctrl/Shift 被忽略；而 opencode 与 Claude Code 在拿不到 kitty 键盘协议的终端里，
+  // 换行绑定可直接靠 ctrl+j（LF 字节）触发——拦下这类键改定投 "\n" 即它们的换行语义。
+  // 拦截与投递分家：这条键任何时候都不许回到内核求值，组字态则只拦不发（见下）。
   function terminalNewlineEnterKey(event) {
-    if (!event || event.type !== "keydown") return false;
-    if (event.isComposing || event.keyCode === 229) return false;
+    if (!event || (event.type !== "keydown" && event.type !== "keypress")) return false;
     if (event.key !== "Enter") return false;
     if (!event.ctrlKey && !event.shiftKey) return false;
     if (event.altKey || event.metaKey) return false;
     return true;
+  }
+
+  // 换行字节的投递闸门：组字态（isComposing / keyCode 229）这条键归输入法提交候选词，
+  // 面板只把键从内核求值里摘出来、不替用户发字节——候选词由内核的 compositionend 通路
+  // 上屏（实测照旧发出），要换行等字上屏后再按一次即可；兜底转发已经投过的那一条
+  // （defaultPrevented）也不再第二次投，一次按键只落一个换行字节。
+  function terminalNewlineDeliveryBlocked(event) {
+    if (!event) return false;
+    return !!(event.isComposing || event.keyCode === 229 || event.defaultPrevented);
   }
 
   // 新终端的默认工作目录跟随当前用户主目录，由终端宿主接口给出（谁的机器就是
@@ -4563,10 +4573,12 @@ async function api(method, path, body) {
       if (intent === "paste") return false;
       if (intent === "copy" && term.hasSelection()) return false;
       // 修饰 Enter 接管为换行：见 terminalNewlineEnterKey 的语义注释。return
-      // false 把键从 xterm 内核求值中摘出（它只会折叠成 "\r" 触发提交），改走
-      // 与键入定投同一条 input POST 通路发单字节 "\n"；无定投会话（预览态）只拦不发。
+      // false 把键从 xterm 内核求值中摘出（keydown 会被折叠成 "\r" 触发提交，
+      // keypress 同样会补折叠一次），换行字节只在 keydown 那一次走与键入定投同一条
+      // input POST 通路发单字节 "\n"；组字态与已被兜底转发处理过的那一条按
+      // terminalNewlineDeliveryBlocked 只拦不发，无定投会话（预览态）同样只拦不发。
       if (terminalNewlineEnterKey(event)) {
-        if (terminalBoundSessionId !== null) {
+        if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && terminalBoundSessionId !== null) {
           api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalBoundSessionId)}/input`, { data: "\n" }).catch((error) => console.warn("[terminal] input delivery failed:", error));
         }
         return false;
@@ -5627,9 +5639,13 @@ async function api(method, path, body) {
       if (currentView !== "terminal") return;
       // IME 组字态（isComposing / keyCode 229）最终字节未定，不转发。
       if (event.isComposing || event.keyCode === 229) return;
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      // 修饰 Enter 与内核通路共用同一道闸门：这条路径把 Ctrl/Shift+Enter 也发成
+      // "\r" 就等于替用户按下提交；Ctrl/Meta/Alt 的放行只针对其余键。
+      const newlineEnter = terminalNewlineEnterKey(event);
+      if (!newlineEnter && (event.ctrlKey || event.metaKey || event.altKey)) return;
       let data = null;
-      if (event.key && event.key.length === 1) data = event.key;
+      if (newlineEnter) data = "\n";
+      else if (event.key && event.key.length === 1) data = event.key;
       else if (event.key === "Enter") data = "\r";
       else if (event.key === "Backspace") data = "\x7f";
       else return;
