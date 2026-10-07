@@ -56,8 +56,9 @@ function syntheticStore() {
           // Ambiguous like the one above but not a tier entry: no takeover may
           // touch it, the plain multiple-provider refusal owns it.
           "glm-twin": { displayName: "GLM Twin (C)" },
-          // Unique to this provider, and deliberately named like a tier: the
-          // strict unqualified scan must resolve it before the map is consulted.
+          // Unique to this provider, tier-worded but NOT Claude's vocabulary
+          // (no claude- family): a resolvable bare name outside the four tier
+          // entries is never steered, mapped sonnet row or not.
           "solo-sonnet-mini": { displayName: "Solo Sonnet Mini" },
         },
       },
@@ -176,7 +177,51 @@ describe("handler: takeover rewrites the name before routing", () => {
     assert.equal(out.body.model, "anthropic/host-a/kimi-k3");
   });
 
-  it("takes nothing over for a name the strict rules already resolve", async () => {
+  it("takes over a tier-entry name a channel really carries, pool-resolved", async () => {
+    // The 2026-10-07 incident shape: Claude Code 2.1.292 resolves the Opus
+    // picker to the concrete id "claude-opus-5-5", and one pool member
+    // carries that exact name, so the unqualified scan resolves the bare name
+    // through the pool. The name is still unmistakably Claude's tier
+    // vocabulary: the operator's mapped row owns the tier, not the collision.
+    const store = syntheticStore();
+    store.providers["host-a"].models["claude-opus-5-5"] = { displayName: "Claude Opus 5.5 (A)" };
+    const { handler, sent, logs } = makeDeps({ store });
+    const body = messagesBody("claude-opus-5-5");
+    const out = await relayMessages(handler, body, "claude");
+
+    assert.equal(out.status, 200);
+    assert.equal(body.model, "anthropic/host-a/glm-5.3");
+    assert.equal(sent[0].model, "glm-5.3", "the upstream must never see the tier-entry name");
+    assert.equal(sent[0].host, "host-a", "the mapped channel, not the colliding pool");
+    assert.equal(logs.filter((line) => line.message.includes("档位映射接管")).length, 1);
+  });
+
+  it("takes over a tier-entry name a channel really carries, provider-resolved", async () => {
+    // Same collision under a non-pool channel: the scan resolves the bare
+    // name to one provider, and the mapped tier still outranks the hit.
+    const store = syntheticStore();
+    store.providers["host-c"].models["claude-opus-5-5"] = { displayName: "Claude Opus 5.5 (C)" };
+    const { handler, sent } = makeDeps({ store });
+    const out = await relayMessages(handler, messagesBody("claude-opus-5-5"), "claude");
+
+    assert.equal(out.status, 200);
+    assert.equal(sent[0].model, "glm-5.3");
+  });
+
+  it("keeps serving a resolvable tier-entry name when its tier is unmapped", async () => {
+    // The strict hit stays the fallback: with no honest destination for the
+    // tier, the channel that carries the name serves it exactly as before.
+    const store = syntheticStore();
+    store.providers["host-c"].models["claude-opus-5-5"] = { displayName: "Claude Opus 5.5 (C)" };
+    const { handler, sent, logs } = makeDeps({ store, mappings: { sonnet: DEFAULT_MAPPINGS.sonnet } });
+    const out = await relayMessages(handler, messagesBody("claude-opus-5-5"), "claude");
+
+    assert.equal(out.status, 200);
+    assert.equal(sent[0].model, "claude-opus-5-5");
+    assert.equal(logs.some((line) => line.message.includes("接管")), false);
+  });
+
+  it("takes nothing over for a resolvable name that is not Claude's vocabulary", async () => {
     const { handler, sent, logs } = makeDeps();
     // Registered on exactly one provider, and its name carries a tier word:
     // the unqualified scan owns it, and the sonnet row must not steal it.

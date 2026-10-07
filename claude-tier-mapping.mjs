@@ -17,14 +17,20 @@
 //   1. Only the Claude endpoint. The five tier names are Claude's vocabulary;
 //      OpenCode / Pi / Kimi send their own model names, and a name they mean
 //      literally must never be steered into a Claude tier's destination.
-//   2. Only after strict resolution failed. A full wire ID and an unqualified
-//      model that names exactly one channel are both real Anyswitch models and
-//      always win — including when their id happens to contain a tier word.
-//      An ambiguous unqualified hit falls to the classifier: a tier-entry name
-//      is disambiguated by the operator's mapping (Claude's default-model ids
-//      are exactly names several channels can carry), while anything else
-//      stays a loud 400 — several channels carry it and only the operator
-//      knows which one was meant.
+//   2. Strict resolution wins only over names the map cannot own. A full wire
+//      ID names its destination outright and always wins. An unqualified model
+//      that resolves to exactly one channel wins too — UNLESS the name is
+//      unmistakably one of Claude's four tier entries: since Claude Code
+//      2.1.292 moved the Opus picker to the concrete default id
+//      "claude-opus-5-5", tier-entry ids can collide with real models a
+//      channel carries, and the operator's mapped row — not the accident of
+//      naming — owns the tier. Ambiguous and unknown unqualified hits fall to
+//      the classifier the same way: a tier-entry name is disambiguated by the
+//      operator's mapping (Claude's default-model ids are exactly names several
+//      channels can carry), while anything else stays a loud 400 — several
+//      channels carry it and only the operator knows which one was meant.
+//      An unmapped tier never steals a resolvable collision either: with no
+//      honest destination the channel that carries the name keeps serving it.
 //   3. Only names that are unmistakably Claude's. The bare tier word, or an id
 //      whose family segment is literally `claude` and which carries exactly one
 //      tier word. Anything else stays a loud 400 — silently routing an

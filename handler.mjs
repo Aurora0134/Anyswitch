@@ -575,10 +575,12 @@ export function createHandler(deps) {
   //
   // Returns the takeover record, or null whenever this request is not the
   // mechanism's business: another endpoint, an unauthorized call (the paths
-  // below report that identically), a name the strict rules already resolved,
-  // or a tier the operator did not configure. A refusal it declines to act on
-  // still gets an explanatory 400 from handleMessages, which sees the same
-  // classification.
+  // below report that identically), a full wire ID, a name the strict rules
+  // resolve that is not Claude's tier vocabulary, a refusal that is not tier-
+  // eligible, or a tier the operator did not configure (its colliding bare
+  // name then keeps serving from the channel that carries it). A refusal it
+  // declines to act on still gets an explanatory 400 from handleMessages,
+  // which sees the same classification.
   async function planTierEntryMessages(headers, body, agentId) {
     if (agentId !== CLAUDE_TIER_AGENT_ID) return null;
     const auth = authorize(headers);
@@ -588,11 +590,23 @@ export function createHandler(deps) {
     if (!loaded.ok) return null;
 
     const strict = unpackWireId(body.model, loaded.store);
-    if (strict.ok || !TIER_ELIGIBLE_REASONS.has(strict.reason)) return null;
+    // A full wire ID names its destination outright and is never steered.
+    if (strict.ok && strict.legacy !== true) return null;
+    if (!strict.ok && !TIER_ELIGIBLE_REASONS.has(strict.reason)) return null;
+    // Since 2.1.292 moved Claude Code's Opus picker to the concrete default id
+    // "claude-opus-5-5", a tier-entry name can collide with a real model one
+    // channel carries — the unqualified scan then resolves it (legacy hit) and
+    // the takeover used to stand down. It no longer does: a bare name that is
+    // unmistakably one of Claude's four tier entries belongs to the map even
+    // when the scan resolves it, because the operator's row — not an accident
+    // of naming — is what says where that tier runs. A resolvable bare name
+    // outside Claude's vocabulary keeps its strict hit untouched.
+    if (strict.ok && !classifyTierEntryName(body.model).ok) return null;
 
-    // Read the configuration only now: a request whose model name already
-    // resolves never costs a settings read, which keeps the normal path exactly
-    // as cheap as it was before this mechanism existed.
+    // Read the configuration only now: names this mechanism cannot steer — a
+    // full wire ID, a resolvable name outside Claude's tier vocabulary, a
+    // refusal without tier eligibility — all returned above, so the common
+    // path costs no settings read, exactly as it did before this existed.
     const mappings = currentTierMappings();
     if (Object.keys(mappings).length === 0) return null;
 
