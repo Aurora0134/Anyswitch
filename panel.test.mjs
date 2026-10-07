@@ -6307,7 +6307,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -6420,7 +6420,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.deepEqual(inputUrls(state), [], "预览会话键入落空");
   });
 
-  it("Ctrl/Shift+Enter 接管为换行：拦下 xterm 求值，向定投会话 POST 单字节 LF", () => {
+  it("Ctrl/Shift+Enter 接管为换行：拦下 xterm 求值（keydown 与 keypress 两条），向定投会话 POST 单字节 LF", () => {
     const { sandbox, state } = streamSandbox();
     sandbox.connect(backendSession("sess-a"));
     const termA = sandbox.xterm();
@@ -6429,7 +6429,16 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
       { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
       { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
-    ], "换行定投 LF 字节（opencode 的 ctrl+j 换行语义），不是 CR");
+    ], "换行定投 LF 字节（opencode 与 Claude Code 的 ctrl+j 换行语义），不是 CR");
+
+    // 真机漏点：keydown 摘出后内核还会吃 keypress，Shift+Enter 在那里被补折叠成 CR，
+    // 用户看到的是「先换行、紧接着发送」。keypress 只拦不投，字节数保持不变。
+    assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", shiftKey: true, keyCode: 13, charCode: 13 }), false, "Shift+Enter 的 keypress 一并摘出");
+    assert.equal(termA.keyEventHandler({ type: "keypress", key: "Enter", ctrlKey: true, keyCode: 13, charCode: 13 }), false, "Ctrl+Enter 的 keypress 一并摘出");
+    assert.deepEqual(state.posts.filter((p) => p.url.includes("/input")), [
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+      { method: "POST", url: "/api/terminal/sessions/sess-a/input", body: { data: "\n" } },
+    ], "一次按键只有一个换行字节：keypress 不重复投");
 
     sandbox.connect(backendSession("sess-b"));
     const termB = sandbox.xterm();
@@ -6437,16 +6446,29 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.deepEqual(inputUrls(state).slice(2), ["/api/terminal/sessions/sess-b/input"], "换行定投随建连会话走：A 切 B 后落 B，不落旧会话");
   });
 
-  it("裸 Enter、Alt/Meta 组合与 IME 组字态不拦：交回 xterm 原语义，不产生 POST", () => {
+  it("兜底转发处理过的修饰 Enter 不重复投字节，但仍拦下内核补折叠", () => {
+    const { sandbox, state } = streamSandbox();
+    sandbox.connect(backendSession("sess-a"));
+    const handler = sandbox.xterm().keyEventHandler;
+    assert.equal(handler({ type: "keydown", key: "Enter", shiftKey: true, defaultPrevented: true }), false, "仍从内核求值摘出");
+    assert.equal(handler({ type: "keypress", key: "Enter", shiftKey: true, defaultPrevented: true }), false, "keypress 同样摘出");
+    assert.deepEqual(inputUrls(state), [], "字节已由兜底转发投过，这里不再第二次投");
+  });
+
+  it("裸 Enter 与 Alt/Meta 组合交回 xterm 原语义；IME 组字态只拦不发", () => {
     const { sandbox, state } = streamSandbox();
     sandbox.connect(backendSession("sess-a"));
     const handler = sandbox.xterm().keyEventHandler;
     assert.equal(handler({ type: "keydown", key: "Enter" }), true, "裸 Enter 交回 xterm（照常走提交语义）");
+    assert.equal(handler({ type: "keypress", key: "Enter", keyCode: 13, charCode: 13 }), true, "裸 Enter 的 keypress 照旧交回 xterm（闸门只多管修饰 Enter）");
     assert.equal(handler({ type: "keydown", key: "Enter", ctrlKey: true, altKey: true }), true, "Ctrl+Alt+Enter 放行（保留 xterm 的 Alt+Enter 原语义）");
     assert.equal(handler({ type: "keydown", key: "Enter", shiftKey: true, metaKey: true }), true, "带 Meta 放行");
-    assert.equal(handler({ type: "keydown", key: "Enter", ctrlKey: true, isComposing: true }), true, "IME 组字中不接管（isComposing）");
-    assert.equal(handler({ type: "keydown", key: "Enter", ctrlKey: true, keyCode: 229 }), true, "IME 组字中不接管（keyCode 229）");
     assert.equal(handler({ type: "keyup", key: "Enter", ctrlKey: true }), true, "keyup 不拦");
+    // 组字态：键必须摘出内核求值（否则内核上屏候选词后补折叠一个 CR，等于替用户提交），
+    // 但字节归输入法，面板不投——换行等字上屏后再按一次。
+    assert.equal(handler({ type: "keydown", key: "Enter", ctrlKey: true, isComposing: true }), false, "组字中 Ctrl+Enter 仍摘出内核求值");
+    assert.equal(handler({ type: "keydown", key: "Enter", shiftKey: true, keyCode: 229 }), false, "组字中 Shift+Enter（keyCode 229）仍摘出");
+    assert.equal(handler({ type: "keypress", key: "Enter", shiftKey: true, isComposing: true }), false, "组字中的 keypress 一并摘出");
     assert.deepEqual(inputUrls(state), [], "以上路径均不产生 input POST");
   });
 
@@ -6487,6 +6509,8 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
   function keydownSandbox() {
     const src = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "initTerminalPreview found in panel.js");
+    const newlineGate = panelJs.match(/function terminalNewlineEnterKey\(event\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(newlineGate, "terminalNewlineEnterKey found in panel.js");
     const state = { posts: [], documentListeners: [], focusCount: 0 };
     const sandbox = new Function("state", `
       let currentView = "terminal";
@@ -6536,6 +6560,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function loadInstalledTerminalAgents() {}
       function setInterval(cb) { return 1; }
       const window = { addEventListener() {}, confirm: () => true };
+      ${newlineGate}
       ${src}
       terminalXterm = { focus() { state.focusCount += 1; } };
       initTerminalPreview();
@@ -6551,7 +6576,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       const prevented = [];
       captureHandlers[0].fn({
         preventDefault: () => prevented.push(true),
-        isComposing: false, keyCode: 0, ctrlKey: false, metaKey: false, altKey: false,
+        type: "keydown", isComposing: false, keyCode: 0, ctrlKey: false, metaKey: false, altKey: false,
         ...event,
       });
       return prevented.length > 0;
@@ -6575,6 +6600,19 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       { method: "POST", url: "/api/terminal/sessions/sess-b/input", body: { data: "\r" } },
       { method: "POST", url: "/api/terminal/sessions/sess-b/input", body: { data: "\x7f" } },
     ], "Enter/Backspace 映射成控制字节，发往触发时读到的活动会话");
+  });
+
+  it("焦点不在 xterm 时修饰 Enter 同走换行闸门：只投 LF，绝不出现提交字节", () => {
+    const { sandbox, fire, inputPosts } = keydownSandbox();
+    sandbox.document.activeElement = { tagName: "BODY", classList: { contains: () => false } };
+    assert.equal(fire({ key: "Enter", shiftKey: true }), true, "Shift+Enter 被兜底接管（此前按 Ctrl/Meta/Alt 闸门放行）");
+    assert.equal(fire({ key: "Enter", ctrlKey: true }), true, "Ctrl+Enter 同样接管（此前整条键静默丢失）");
+    assert.deepEqual(inputPosts().map((p) => p.body.data), ["\n", "\n"], "兜底转发发的是换行字节");
+    assert.ok(!inputPosts().some((p) => p.body.data === "\r"), "兜底通路里没有提交字节");
+    // 裸 Enter 与其余 Ctrl 组合键的既有语义不受影响
+    fire({ key: "Enter" });
+    fire({ key: "c", ctrlKey: true });
+    assert.deepEqual(inputPosts().slice(2).map((p) => p.body.data), ["\r"], "裸 Enter 照旧 CR 提交，其余 Ctrl 组合键不劫持");
   });
 
   it("焦点在其它输入控件（INPUT/TEXTAREA）或 xterm 自持输入框时不劫持", () => {
@@ -6671,7 +6709,7 @@ describe("虚拟终端 resize 防抖", () => {
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey"]
+    const bodies = ["fitTerminalXterm", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -7198,20 +7236,31 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     assert.equal(await vmFn("terminalClipboardKeyIntent", [{ type: "keydown", ctrlKey: true }]), null, "缺 key 字段不误判");
   });
 
-  it("terminalNewlineEnterKey 只认不带 Alt/Meta 的 Ctrl/Shift+Enter，组字态与 keyup 不接管", async () => {
+  it("terminalNewlineEnterKey 认 keydown 与 keypress 两道的 Ctrl/Shift+Enter（含组字态），keyup 不认", async () => {
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true }]), true, "Ctrl+Enter");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", shiftKey: true }]), true, "Shift+Enter");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true, shiftKey: true }]), true, "Ctrl+Shift+Enter 同属换行");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keypress", key: "Enter", shiftKey: true, keyCode: 13, charCode: 13 }]), true, "Shift+Enter 的 keypress 一并认（内核在这里补折叠 CR）");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keypress", key: "Enter", ctrlKey: true, keyCode: 13, charCode: 13 }]), true, "Ctrl+Enter 的 keypress 一并认");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", shiftKey: true, isComposing: true }]), true, "组字态也认：这条键任何时候都不许回内核求值");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true, keyCode: 229 }]), true, "keyCode 229 组字态也认");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter" }]), false, "裸 Enter 不接管");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keypress", key: "Enter" }]), false, "裸 Enter 的 keypress 不接管（提交语义照旧）");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", altKey: true }]), false, "Alt+Enter 不接管（保留 xterm 的 Alt 语义）");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true, altKey: true }]), false, "Ctrl+Alt+Enter 不接管");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", shiftKey: true, metaKey: true }]), false, "带 Meta 不接管");
-    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true, isComposing: true }]), false, "IME 组字中不接管");
-    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "Enter", ctrlKey: true, keyCode: 229 }]), false, "keyCode 229 组字态不接管");
-    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keyup", key: "Enter", ctrlKey: true }]), false, "只看 keydown");
+    assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keyup", key: "Enter", ctrlKey: true }]), false, "keyup 不接管（只认 keydown/keypress）");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", key: "j", ctrlKey: true }]), false, "非 Enter 键不接管");
     assert.equal(await vmFn("terminalNewlineEnterKey", [null]), false, "空事件不炸");
     assert.equal(await vmFn("terminalNewlineEnterKey", [{ type: "keydown", ctrlKey: true }]), false, "缺 key 字段不误判");
+  });
+
+  it("terminalNewlineDeliveryBlocked 只在组字态与兜底已处理时挡住投递", async () => {
+    assert.equal(await vmFn("terminalNewlineDeliveryBlocked", [{ type: "keydown", key: "Enter", shiftKey: true }]), false, "非组字态照常投递");
+    assert.equal(await vmFn("terminalNewlineDeliveryBlocked", [{ type: "keydown", key: "Enter", shiftKey: true, isComposing: true }]), true, "isComposing 挡住");
+    assert.equal(await vmFn("terminalNewlineDeliveryBlocked", [{ type: "keydown", key: "Enter", ctrlKey: true, keyCode: 229 }]), true, "keyCode 229 挡住");
+    assert.equal(await vmFn("terminalNewlineDeliveryBlocked", [{ type: "keydown", key: "Enter", ctrlKey: true, defaultPrevented: true }]), true, "兜底转发投过的挡住（一次按键只有一个换行）");
+    assert.equal(await vmFn("terminalNewlineDeliveryBlocked", [null]), false, "空事件不炸");
   });
 
   it("接线结构：剪贴板键位交还浏览器、焦点四路回守、死焦点调用已清除", () => {
