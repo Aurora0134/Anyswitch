@@ -1,6 +1,7 @@
 {
   "version": 1,
   "generatedAt": "2026-09-12T05:14:45.365Z",
+  "updated": "2026-10-07T03:49:51.304Z",
   "levelsOrder": [
     "off",
     "light",
@@ -52,10 +53,6 @@
         "what": "Claude opus/sonnet 4.6 及以上补 high"
       },
       {
-        "id": "qwen3.8-flash-max-xhigh-max",
-        "what": "qwen3.8 flash/max 补 xhigh/max"
-      },
-      {
         "id": "grok-4.5-4.6-xhigh-max",
         "what": "grok 4.5/4.6 补 xhigh/max"
       },
@@ -66,6 +63,28 @@
       {
         "id": "gpt-5.6+-light-set",
         "what": "gpt-5.6 及以上挡位改为 light/medium/high/xhigh/max"
+      },
+      {
+        "id": "deepseek-v4.1-native",
+        "what": "DeepSeek V4.1 Flash（含官方改名 deepseek-flash）用原生三档 low/high/max"
+      },
+      {
+        "id": "qwen3.8-max-flash-native",
+        "what": "qwen3.8 max/flash 用原生三档 low/medium/xhigh"
+      },
+      {
+        "id": "step-5-preview-native",
+        "what": "step-5-preview 按官方文档三档 low/medium/high"
+      }
+    ],
+    "updateNotes": [
+      {
+        "at": "2026-10-07",
+        "scope": "step-5-preview, deepseek-flash, deepseek-v4.1-flash, qwen3.8, qwen3.8-flash",
+        "what": "补查后改用各模型原生分档：step-5-preview low/medium/high；deepseek-flash 与 deepseek-v4.1-flash low/high/max；qwen3.8 max·flash low/medium/xhigh（默认 xhigh）",
+        "evidence": "StepFun 官方模型页与推理模型接入页；DeepSeek 官方思考模式页与 V4.1 Flash 公告页；阿里云百炼 OpenAI 兼容页与思考模式页；pi-ai 目录 deepseek.json / qwen-token-plan*.json",
+        "ruleChange": "build.mjs 新增 step-5-preview-native / deepseek-v4.1-native / qwen3.8-max-flash-native 三条 set 型规则；deepseek-xhigh 的 test 排除 V4.1 两枚官方名；撤掉 2026-09-12 的 qwen3.8-flash-max-xhigh-max（证据显示 high/max 都折到 xhigh）",
+        "notApplied": "wire 与 thinkingFormat 未写入（DSH compat 方言轴，本次未授权）"
       }
     ]
   },
@@ -504,6 +523,18 @@
       "kind": "reasoning",
       "userEdited": false
     },
+    "deepseek-flash": {
+      "levels": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default": "high",
+      "source": "pi-ai",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false
+    },
     "deepseek-ocr": {
       "levels": null,
       "default": null,
@@ -730,23 +761,15 @@
     },
     "deepseek-v4.1-flash": {
       "levels": [
+        "low",
         "high",
-        "xhigh",
         "max"
       ],
       "default": "high",
-      "source": "operator-rule",
+      "source": "pi-ai",
       "confidence": "high",
       "kind": "reasoning",
-      "userEdited": false,
-      "preOperator": {
-        "levels": [
-          "high",
-          "max"
-        ],
-        "kind": "reasoning"
-      },
-      "rule": "deepseek 系列补 xhigh"
+      "userEdited": false
     },
     "dev": {
       "levels": null,
@@ -1972,24 +1995,15 @@
     },
     "qwen3.8": {
       "levels": [
+        "low",
         "medium",
-        "high",
-        "xhigh",
-        "max"
+        "xhigh"
       ],
-      "default": "high",
-      "source": "operator-rule",
+      "default": "xhigh",
+      "source": "pi-ai",
       "confidence": "high",
       "kind": "reasoning",
-      "userEdited": false,
-      "preOperator": {
-        "levels": [
-          "medium",
-          "high"
-        ],
-        "kind": "reasoning"
-      },
-      "rule": "qwen3.8 flash/max 补 xhigh/max"
+      "userEdited": false
     },
     "qwen3.8-27b": {
       "levels": [
@@ -2004,24 +2018,15 @@
     },
     "qwen3.8-flash": {
       "levels": [
+        "low",
         "medium",
-        "high",
-        "xhigh",
-        "max"
+        "xhigh"
       ],
-      "default": "high",
-      "source": "operator-rule",
+      "default": "xhigh",
+      "source": "pi-ai",
       "confidence": "high",
       "kind": "reasoning",
-      "userEdited": false,
-      "preOperator": {
-        "levels": [
-          "medium",
-          "high"
-        ],
-        "kind": "reasoning"
-      },
-      "rule": "qwen3.8 flash/max 补 xhigh/max"
+      "userEdited": false
     },
     "sensenova-6.7-flash-lite": {
       "levels": [
@@ -2088,6 +2093,27 @@
       "confidence": "certain",
       "kind": "non-text",
       "userEdited": false
+    },
+    "step-5-preview": {
+      "levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": "high",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "high",
+          "xhigh",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "step-5-preview 按官方文档三档 low/medium/high"
     },
     "telespeechasr": {
       "levels": null,
