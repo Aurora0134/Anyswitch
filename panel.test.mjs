@@ -326,6 +326,90 @@ describe("panel router relay control + pull-mode agents", () => {
     assert.deepEqual(second.json().agents, pulled, "上一次真快照优先于本地盲帧");
   });
 
+  // ── 看板首帧闸（2026-10-07 报障：从页面出现到加载出数据之间，卡面把「还没取到数」
+  // 画成「什么都没跑」）── frame.ready 是看板唯一能据以开口的字段：真快照 / 可续的陈旧
+  // 快照 / relay 真停了时的本地收集器都算 ready；relay 活着只是这一拍没答上、且手里没有
+  // 可续快照时宁可不给数据。前端据此决定 data-board 是 pending（骨架条）还是 live。
+  it("GET /panel/api/agents marks a pulled frame ready with its source", async () => {
+    const pulled = [{ id: "zcode", status: "running", metrics: { totalRequests: 5 } }];
+    const router = routerWith({ pulledAgents: pulled });
+    const { req, res, json } = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(req, res);
+    assert.deepEqual(json().frame, { ready: true, source: "relay" });
+  });
+
+  it("GET /panel/api/agents answers not-ready instead of substituting the zero-traffic collector on a pull timeout", async () => {
+    let localAsked = false;
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: { getAgentsStatus: async () => { localAsked = true; return [{ id: "claude", status: "running" }]; } },
+      // 面板自己那 1500ms 预算撞上 relay 冷探针时，真实现返回超时标记（不是 null）。
+      fetchRelayAgents: async () => ({ pullTimeout: true }),
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().agents, [], "没有可续快照时不发一份看起来像数据的空壳");
+    assert.equal(json().frame.ready, false);
+    assert.equal(json().frame.reason, "relay-timeout");
+    assert.equal(localAsked, false, "relay 活着，绝不拿不经流量的本地收集器顶这一帧");
+  });
+
+  it("GET /panel/api/agents keeps serving the last pull across a pull timeout", async () => {
+    const pulled = [{ id: "qoder", status: "running", metrics: { totalRequests: 67 } }];
+    let answer = pulled;
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: null,
+      fetchRelayAgents: async () => answer,
+    });
+    const first = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().frame.source, "relay");
+
+    answer = { pullTimeout: true };
+    const second = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(second.req, second.res);
+    assert.deepEqual(second.json().agents, pulled);
+    assert.deepEqual(second.json().frame, { ready: true, source: "relay-stale" }, "陈旧的真数据仍是能说的话");
+  });
+
+  it("GET /panel/api/agents still falls back to the local collector when the relay is unreachable", async () => {
+    // relay 真停了：它确实不经任何流量，本地收集器报的零是事实，看板照常画 stopped/running。
+    const local = [{ id: "claude", status: "stopped" }];
+    const router = createPanelRouter({
+      storePaths: { root: "C:/fake/anyswitch" },
+      logger: null, aliasResolver: null, aliasPath: null,
+      metricsCollector: { getAgentsStatus: async () => local },
+      fetchRelayAgents: async () => null,
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(req, res);
+    assert.deepEqual(json().agents, local);
+    assert.deepEqual(json().frame, { ready: true, source: "panel-local" });
+  });
+
+  it("GET /panel/api/agents answers not-ready when this process has no source at all", async () => {
+    const router = routerWith({ pulledAgents: null });
+    const { req, res, json } = fakeReqRes("/panel/api/agents", "GET");
+    await router.handle(req, res);
+    assert.deepEqual(json().agents, []);
+    assert.equal(json().frame.ready, false);
+    assert.equal(json().frame.reason, "no-source");
+  });
+
+  it("defaultFetchRelayAgents 把超时报成标记，把连不上报成 null", async () => {
+    // 两种「拉不到」的处置完全不同（见 panel.mjs 该函数上方），所以出口必须分得开。
+    const src = readFileSync(new URL("./panel.mjs", import.meta.url), "utf8");
+    const fn = src.match(/async function defaultFetchRelayAgents\([\s\S]*?\n\}/)?.[0];
+    assert.ok(fn, "defaultFetchRelayAgents 在册");
+    assert.match(fn, /err\?\.name === "TimeoutError"/, "超时与中断分别命名");
+    assert.match(fn, /return \{ pullTimeout: true \};/, "预算内没答上 → 超时标记");
+    assert.match(fn, /\n {4}return null;\n {2}\}\n\}$/, "连不上 → null（沿用可注入契约，测试替身不受影响）");
+  });
+
   it("GET /panel/api/model-stability uses pulled relay snapshot when available", async () => {
     const pulled = { window: "8h", buckets: 48, models: [{ model: "glm-4.7", provider: "bigmodel", total: 12, successRate: 99, status: "green", cells: [] }] };
     const router = createPanelRouter({
@@ -9167,5 +9251,67 @@ describe("新增渠道表单：显示名上移 + 渠道 ID 随显示名联动", 
       "单渠道 id 行回填联动态");
     assert.ok(panelJs.includes('class="store-form-input set-id" value="${escapeHtml(s.id || "")}" data-touched="${s.idTouched ? "1" : "0"}"'),
       "资料组 id 行回填联动态");
+  });
+});
+
+// ── 看板加载态（2026-10-07 报障：页面出现到加载出数据之间的中间态畸形）──
+// 一页两件事：① 首帧静态默认必须是加载态而不是数据态；② 只有后端明说「这一帧能当
+// 事实说」才翻 live。判定抽在 boardFrameVerdict 里，在 vm 里真跑（同 relayStatusPresentation
+// 与终端字号的先例），静态那半钉住 html/css 的契约。
+describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
+  async function verdict(res) {
+    const body = panelJs.match(/function boardFrameVerdict\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(body, "boardFrameVerdict 在册");
+    return vm.runInNewContext(`(() => { ${body}; return boardFrameVerdict; })()`)(res);
+  }
+
+  it("可信帧与非可信帧按后端的话分", async () => {
+    assert.equal(await verdict({ agents: [{ id: "claude" }], frame: { ready: true, source: "relay" } }), true);
+    assert.equal(await verdict({ agents: [], frame: { ready: false, reason: "relay-timeout" } }), false);
+    assert.equal(await verdict({ agents: [{ id: "claude" }], frame: { ready: false, reason: "relay-timeout" } }), false,
+      "带着数据却明说不能当事实：仍不开口");
+  });
+
+  it("空帧与缺字段一律算「还没取到」", async () => {
+    assert.equal(await verdict({ agents: [] }), false, "空数组不是成功帧（relay 停了以外没有理由发它）");
+    assert.equal(await verdict({}), false);
+    assert.equal(await verdict(null), false);
+    assert.equal(await verdict(undefined), false);
+  });
+
+  it("旧后端不带 frame 时按非空 agents 兜底，行为与改前一致", async () => {
+    assert.equal(await verdict({ agents: [{ id: "kimi" }] }), true);
+  });
+
+  it("首帧静态默认是加载态：九张卡都带骨架条，html 带 data-board=pending", () => {
+    assert.ok(/<html lang="zh-CN" data-board="pending">/.test(panelHtml),
+      "主脚本是 defer 外链，首绘早于第一拍取数——加载态只能由静态 HTML 自己带");
+    assert.equal((panelHtml.match(/class="board-card-loading"/g) ?? []).length, 9);
+    for (const id of ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok"]) {
+      const at = panelHtml.indexOf(`<div class="panel-card" data-agent-id="${id}">`);
+      assert.ok(at >= 0, `${id} 卡在册`);
+      assert.ok(panelHtml.slice(at, at + 700).includes("board-card-loading"),
+        `${id} 卡内有骨架条（骨架条是卡片自己的第一块内容，不靠 JS 后补）`);
+    }
+  });
+
+  it("加载态把卡内数据位整块压掉，只留品牌行与骨架条", () => {
+    assert.ok(/html\[data-board="pending"\] \.agent-cards-container \.panel-card > div > :not\(\.agent-top-bar\):not\(\.board-card-loading\)\s*\{\s*display: none;?\s*\}/.test(panelCss),
+      "pending 期卡内除品牌行与骨架条以外不出现");
+    assert.ok(!/html\[data-board="pending"\][^{]*\.card-body/.test(panelCss),
+      "压的是卡身里的数据块，不给 .card-body 写 display（skills 那张折叠卡的闸门会判违规）");
+    assert.ok(/\.board-card-loading \{ display: none; \}/.test(panelCss),
+      "非 pending 期骨架条不出（live 后不留残影）");
+    assert.ok(/html\[data-board="pending"\] \.agent-cards-container \.agent-actions \{ visibility: hidden; \}/.test(panelCss),
+      "徽标/折叠钮/实例计数是数据位，pending 期藏而不删，标题不换位");
+  });
+
+  it("flip 只有一处，且只在可信帧后发生", () => {
+    assert.equal((panelJs.match(/setAttribute\("data-board", "live"\)/g) ?? []).length, 1,
+      "翻转点唯一");
+    const refresh = panelJs.match(/async function refreshAgents\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(refresh);
+    assert.match(refresh, /if \(!boardFrameVerdict\(res\)\) return;\n\s*markBoardLive\(\);/,
+      "不可信帧在渲染之前就返回，一帧都不画");
   });
 });

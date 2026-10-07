@@ -992,18 +992,28 @@ function parseTasklistCsv(stdout) {
       // kimi core runs embedded inside it and holds the relay connection), so
       // unlike DSH's launcher shells it counts and it joins the engine set —
       // and the image name alone is what makes it the Desktop surface. Plain
-      // tasklist rows carry no command line, so they stay accept-by-name.
-      // Helper children feed the family pid set only (lineage / liveness).
+      // tasklist rows carry no command line: they count, but claim no host and
+      // no surface (see the note below). Helper children feed the family pid
+      // set only (lineage / liveness).
+      //
+      // 命令行列缺席的那一轮不得主张宿主/引擎/面（2026-10-07 报障：看板加载中间态副行
+      // 报出「Desktop ×5」，一张卡还挂着空数据行）：「这是主进程还是 --type= 子进程」只有
+      // 命令行能答，靠镜像名整批收进宿主集合就是把一个桌面端报成五次会话——那是误折，
+      // 99e4d9c 立的「宁可漏折不可误折」正好禁止它。宿主与面由 carry 从可信轮供回（用例
+      // 「降级轮里桌面端仍然只算一个会话宿主」），可信轮没见过的新进程等下一轮可信轮说话。
+      // 进程数与家族 pid 照旧由本轮给（50a41fc 的边界不动）。
       if (commandLine?.includes("--type=")) {
         if (pid) result.kimiPids.add(pid);
       } else {
         result.kimi += 1;
         if (pid) {
           result.kimiPids.add(pid);
-          result.kimiEnginePids.add(pid);
-          // 宿主集合：面级稳定行的折叠与存活判据，只收主进程。
-          result.kimiDesktopPids.add(pid);
-          result.kimiSurfaceByPid.set(pid, "desktop");
+          if (commandLine !== null) {
+            result.kimiEnginePids.add(pid);
+            // 宿主集合：面级稳定行的折叠与存活判据，只收主进程。
+            result.kimiDesktopPids.add(pid);
+            result.kimiSurfaceByPid.set(pid, "desktop");
+          }
         }
       }
     } else if (bucket === "dsh-desktop") {
@@ -1905,14 +1915,26 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
 // query itself is the same Get-CimInstance row dump the fallback used to run.
 //
 // Protocol: each query is one line on the child's stdin, answered by the CSV
-// rows followed by a unique end-marker line. A query that times out, or a
-// child that dies mid-query, rejects — the caller then falls back to tasklist
-// for that round, and the next query spawns a fresh child. An idle child is
-// killed after PS_PROBE_IDLE_MS so a hidden panel leaves zero resident
-// processes behind. Children are unref'd (they never keep the host process
-// alive) and are killed from one shared process-exit hook.
+// rows followed by a unique end-marker line. Queries are NOT equal: the process
+// scan is what a round is FOR, the DSH console recheck riding the same child is
+// optional extra work. A timeout is therefore penalised per kind —
+//   · scan timeout  → the data is untrustworthy: drop the child, fall back to
+//     tasklist for this round (unchanged behaviour).
+//   · optional timeout → give up this round's recheck only. The child just
+//     answered the scan, so killing it converts an optional miss into a cold
+//     respawn on the next round (measured on this machine: cold round 556ms vs
+//     warm 160ms) and the recheck then re-compiles its P/Invoke helper in the
+//     fresh child (measured 188ms) — murder is self-sustaining, so the penalty
+//     is deferred until the same child has failed the optional query twice.
+// An idle child is still killed after PS_PROBE_IDLE_MS so a hidden panel leaves
+// zero resident processes behind. Children are unref'd (they never keep the
+// host process alive) and are killed from one shared process-exit hook.
 // ---------------------------------------------------------------------------
-const PS_PROBE_TIMEOUT_MS = 3000;
+export const PS_PROBE_TIMEOUT_MS = 3000;
+export const PS_PROBE_OPTIONAL_TIMEOUT_MS = 1200;
+// 同一只子进程被放弃几次可选查询之后就认定它卡住了。1 次太松（真卡死的会一直占着
+// 序列），3 次以上就把可选工作的代价重新堆回整轮。
+const PS_PROBE_OPTIONAL_KILL_LIMIT = 2;
 const PS_PROBE_IDLE_MS = 60000;
 
 // `-Command -` would buffer stdin to EOF before executing — useless for a
@@ -1937,17 +1959,49 @@ const PS_PROCESS_SCAN_QUERY =
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
 
-function createPersistentPsProbe({ spawnFn, queryText }) {
+function createPersistentPsProbe({
+  spawnFn,
+  queryText,
+  timeoutMs = PS_PROBE_TIMEOUT_MS,
+  optionalTimeoutMs = PS_PROBE_OPTIONAL_TIMEOUT_MS,
+}) {
   let child = null;
   let stdoutBuf = "";
-  let pending = null; // { marker, resolve, reject, timer }
+  let pending = null; // { marker, resolve, reject, timer, optional }
   let querySeq = 0;
   let idleTimer = null;
+  // 被放弃那条查询的标记。REPL 单线程按行读-执-印，所以它日后若回话，一定排在后续
+  // 查询的答案之前——不整段切掉丢掉，下一轮就会把上一轮的字节当本轮进程行读。
+  let staleMarkers = [];
+  let optionalTimeoutsOnChild = 0;
+
+  // 探针自己的账。这条链以前完全静默：两处调用点各自 `.catch(() => null)` 把超时
+  // 错误吞掉，既不计数也不落日志，于是「降级轮为什么概率出现」在机器上不留凭据，
+  // 报障只能靠用户截图。这组数字只进日志，不进界面。
+  const stats = {
+    spawns: 0,
+    scanTimeouts: 0,
+    optionalTimeouts: 0,
+    childKills: 0,
+    lateAnswersDiscarded: 0,
+    consecutiveTimeouts: 0,
+  };
+
+  function logPenalty() {
+    // 连续超时才有报道价值：单次抖动是常态。一条连胜链只在第 2 次时落一行
+    // （计数继续走，日志不刷屏）；链断开重起时会再报一次。
+    if (stats.consecutiveTimeouts === 2) {
+      console.warn(`[agent-metrics] ps probe wedged: ${stats.consecutiveTimeouts} timeouts in a row `
+        + `(scan=${stats.scanTimeouts} optional=${stats.optionalTimeouts} childKills=${stats.childKills} spawns=${stats.spawns})`);
+    }
+  }
 
   const dropChild = (err) => {
     const c = child;
     child = null;
     stdoutBuf = "";
+    staleMarkers = [];
+    optionalTimeoutsOnChild = 0;
     if (idleTimer !== null) {
       clearTimeout(idleTimer);
       idleTimer = null;
@@ -1972,6 +2026,9 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
 
   const ensureChild = () => {
     if (child !== null) return child;
+    stats.spawns += 1;
+    optionalTimeoutsOnChild = 0;
+    staleMarkers = [];
     const c = spawnFn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", PS_REPL_COMMAND], { windowsHide: true });
     stdoutBuf = "";
     c.stdout.setEncoding("utf8");
@@ -1981,11 +2038,28 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
       if (pending === null) return;
       const markerIdx = stdoutBuf.indexOf(pending.marker);
       if (markerIdx === -1) return;
-      const out = stdoutBuf.slice(0, markerIdx);
+      let out = stdoutBuf.slice(0, markerIdx);
       stdoutBuf = stdoutBuf.slice(markerIdx + pending.marker.length);
+      // 迟到段整段丢掉：被放弃的查询若日后回话，它的字节（含它自己那枚标记）排在
+      // 本轮答案之前，留着就会被 parseTasklistCsv 当本轮进程行计数。
+      let cut = 0;
+      const consumed = [];
+      for (const stale of staleMarkers) {
+        const at = out.indexOf(stale, cut);
+        if (at === -1) continue;
+        cut = at + stale.length;
+        consumed.push(stale);
+      }
+      if (cut > 0) {
+        out = out.slice(cut);
+        stats.lateAnswersDiscarded += consumed.length;
+        staleMarkers = staleMarkers.filter((stale) => !consumed.includes(stale));
+      }
       const p = pending;
       pending = null;
       clearTimeout(p.timer);
+      stats.consecutiveTimeouts = 0;
+      if (p.optional) optionalTimeoutsOnChild = 0;
       p.resolve(out);
     });
     c.on("error", (err) => dropChild(err));
@@ -2010,7 +2084,9 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
   return {
     // `text` defaults to the probe's standing query (the process scan); the
     // DSH console check passes its own one-liner through the same REPL.
-    query(text) {
+    // `optional: true` marks work a round can afford to skip: it gets the short
+    // budget and, on its first miss, costs only itself.
+    query(text, { optional = false } = {}) {
       return new Promise((resolve, reject) => {
         if (pending !== null) {
           reject(new Error("ps probe query already in flight"));
@@ -2028,10 +2104,33 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
           marker,
           resolve,
           reject,
+          optional,
           timer: setTimeout(() => {
-            // A wedged child never answers: drop it so the next round respawns.
-            dropChild(new Error("ps probe query timeout"));
-          }, PS_PROBE_TIMEOUT_MS),
+            const p = pending;
+            pending = null;
+            clearTimeout(p.timer);
+            stats.consecutiveTimeouts += 1;
+            if (!p.optional) {
+              // 必需查询：这一轮的数据不可信，判罚照旧（换子进程 + 调用方回落
+              // tasklist）。放宽它就是把「没看见」当「不在」，那条口径不动。
+              stats.scanTimeouts += 1;
+              stats.childKills += 1;
+              logPenalty();
+              p.reject(new Error("ps probe query timeout"));
+              dropChild(new Error("ps probe query timeout"));
+              return;
+            }
+            stats.optionalTimeouts += 1;
+            optionalTimeoutsOnChild += 1;
+            staleMarkers.push(marker);
+            if (staleMarkers.length > 8) staleMarkers.shift();
+            p.reject(new Error("ps probe optional query timeout"));
+            logPenalty();
+            if (optionalTimeoutsOnChild >= PS_PROBE_OPTIONAL_KILL_LIMIT) {
+              stats.childKills += 1;
+              dropChild(new Error("ps probe optional query wedged twice"));
+            }
+          }, optional ? optionalTimeoutMs : timeoutMs),
         };
         // NOTE: the query timer stays REF'd on purpose. Child and stdio are
         // unref'd so an idle probe never holds the host's event loop — but
@@ -2048,13 +2147,19 @@ function createPersistentPsProbe({ spawnFn, queryText }) {
         }
       });
     },
+    stats,
   };
 }
 
 export function createAgentMetricsCollector(options = {}) {
   const execFn = options.execFn ?? exec;
   const nowFn = options.nowFn ?? Date.now;
-  const psProbe = createPersistentPsProbe({ spawnFn: options.spawnFn ?? spawn, queryText: PS_PROCESS_SCAN_QUERY });
+  const psProbe = createPersistentPsProbe({
+    spawnFn: options.spawnFn ?? spawn,
+    queryText: PS_PROCESS_SCAN_QUERY,
+    timeoutMs: options.psProbeTimeoutMs ?? PS_PROBE_TIMEOUT_MS,
+    optionalTimeoutMs: options.psProbeOptionalTimeoutMs ?? PS_PROBE_OPTIONAL_TIMEOUT_MS,
+  });
   let sparkWindowPoints = parseSparkWindowPoints(options.sparkWindowPoints ?? DEFAULT_SPARK_WINDOW_POINTS);
   const recentSampleWindow = options.recentSampleWindow ?? RECENT_SAMPLE_WINDOW;
   const faultIdleTtlMs = options.faultIdleTtlMs ?? FAULT_IDLE_TTL_MS;
@@ -2111,7 +2216,10 @@ export function createAgentMetricsCollector(options = {}) {
   // stall a user feels when switching back to the panel. The only blocking
   // case left is a collector with no snapshot at all (process startup), where
   // there is nothing to serve.
-  const PROCESS_SCAN_TTL_MS = 2500;
+  // 缓存窗口默认 2500ms；调用方可以按自己的用途放宽——看门狗只要「有没有 agent
+  // 活着」这种粗判，它每 3s 一拍、每拍都读，窗口比拍节短就等于每拍强制重扫一次
+  // 常驻 CIM 行 dump（并发路数是这条链超时的燃料，见 createPersistentPsProbe 上方）。
+  const PROCESS_SCAN_TTL_MS = options.processScanTtlMs ?? 2500;
   let lastProcessScanTime = 0;
   // No snapshot has landed since this collector was created. Until one does,
   // there is nothing worth serving: the initial empty scan is not process state.
@@ -2140,7 +2248,7 @@ export function createAgentMetricsCollector(options = {}) {
     if (tuiPids.length === 0) return;
     const query = buildDshConsoleQuery(tuiPids);
     if (query === null) return;
-    const out = await psProbe.query(query).catch(() => null);
+    const out = await psProbe.query(query, { optional: true }).catch(() => null);
     const verdicts = parseDshConsoleQueryOutput(out);
     if (verdicts.size === 0) return; // unreadable round: every pid keeps its row
     const reaped = [];
@@ -2275,11 +2383,18 @@ export function createAgentMetricsCollector(options = {}) {
         // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
         // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
         counts.countsAuthoritative = true;
-        // Terminal-orphan reap before landing: the snapshot the panel reads
-        // must already exclude the reaped session.
+        // 先落地，再跑本轮的附加工作。读路径的判据是「本轮进程事实到手」，不是
+        // 「这条子进程今天所有事都办完」：可选复查曾排在 land 之前，于是一条慢复查
+        // 会把已经拿到手的数据一起扣住（本机实测：扫描 20ms 答完、整轮 3032ms 才
+        // 落地），而面板给 relay 的拉取预算只有 1500ms。
+        land(counts);
+        // 附加工作仍在本轮 Promise 里 await 到底，不许改成 fire-and-forget：探针只有
+        // 一个在飞槽位，复查还在飞时放下一轮扫描进去会被「already in flight」直接
+        // 拒掉，整轮白降到 tasklist——那比多等一会儿糟得多。
+        // reap 就地修正已落地的同一份快照，所以下一次读仍能看到被回收的会话，
+        // 语义与改前一致（只是不再挡住第一次读）。
         await reapDshTerminalOrphans(counts);
         await attachKimiSurfaces(counts);
-        land(counts);
         return cachedProcessCounts;
       }
 
@@ -3251,8 +3366,23 @@ export function createAgentMetricsCollector(options = {}) {
     const active = [];
 
     // Ensure all currently running claude.exe PIDs have a session tracked immediately
+    //
+    // 冷/降级轮的例外（2026-10-07 报障：看板加载中间态概率出现数个空实例卡）：读不到
+    // 命令行列的那一轮，「这个 pid 是不是会话进程、是什么形态」答不出，而这里给桶里每个
+    // pid 都建一行。本机实测：冷降级轮一次出 10 行「会话 #N / 待命 / 0 请求 / tokens 全 0
+    // / 无徽标」的空实例卡——一个桌面端裂成一排。
+    //
+    // 闸门只认一种状态：这一轮是降级轮，**且此刻手里没有任何可信依据**（从未落地过可信轮，
+    // 或可信轮已过 99e4d9c 的 30s 沿用窗）。前者是面板/中继刚起的第一轮，后者是探针被闲置
+    // 回收后再冷启动的那一轮——两者都一样「每个 pid 都陌生」，逐 pid 成行必然是一排空卡。
+    // 沿用窗之内的降级轮维持既有裁决：可信轮没见过的新进程照样建行、只是不贴徽标
+    // （用例「盲轮期间刚起的、可信轮没见过的进程不贴形态徽标」钉着，不在这里动）。
+    // 边界同 99e4d9c：只管「分型与归属」，进程数与存活判定仍由本轮说了算（50a41fc）。
+    const blindWithoutBasis = procCounts.countsAuthoritative !== true
+      && (lastTrustedScan === null || nowFn() - lastTrustedScanTime > TRUSTED_FORM_CARRY_MS);
     for (const pid of livePids) {
       if (!claudeSessions.has(pid)) {
+        if (blindWithoutBasis) continue;
         claudeSessions.set(pid, {
           id: `claude-${pid}`,
           pid,
@@ -3928,6 +4058,10 @@ export function createAgentMetricsCollector(options = {}) {
     // held inside ephemeral per-launch relay processes.
     getReportedChainRuntime: () => Array.from(reportedChainStates.values()),
     scanProcesses,
+    // 探针自己的账（spawns / scanTimeouts / optionalTimeouts / childKills /
+    // lateAnswersDiscarded / consecutiveTimeouts）。只给日志和测试用，不进任何
+    // 面板接口——这条链的可见性是运维凭据，不是给用户看的产品文案。
+    getProbeStats: () => ({ ...psProbe.stats }),
     // Terminal-session attribution: live agent client pids + ancestor chains
     // from the cached scan (see the function's note above).
     getDetectedClientProcesses,

@@ -23,6 +23,8 @@ import {
   windowTps,
   TTFT_THRESHOLDS,
   METRICS_SNAPSHOT_FILENAME,
+  PS_PROBE_TIMEOUT_MS,
+  PS_PROBE_OPTIONAL_TIMEOUT_MS,
 } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -4544,8 +4546,28 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
       kimiRegistryLookup: registry([]),
     });
     const card = kimi(await collector.getAgentsStatus());
+    // 2026-10-07 改判：命令行列缺席的那一轮不再主张宿主与面（见 parseTasklistCsv 的
+    // kimi 分支）。这一行的进程数照旧是本轮的事实，面那一档要等可信轮或 carry 说话——
+    // 本机实测降级轮把一个 Kimi 桌面端的每个 Electron 进程都收进宿主集，副行报出
+    // 「Desktop ×5」，正是看板加载中间态空实例卡同源的那次误折。
     assert.equal(card.processCount, 1);
-    assert.deepEqual(surfacesOf(card), { Desktop: 1 });
+    assert.deepEqual(surfacesOf(card), {}, "读不到命令行的轮次不报面");
+    assert.deepEqual(rowsOf(card), [], "读不到命令行的轮次不造实例行");
+  });
+
+  it("claims the desktop face as soon as a probe can read the command line", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, [
+        "Node,CommandLine,Name,ProcessId",
+        'LAPTOP,"C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi\\Kimi Code.exe",Kimi Code.exe,6301',
+      ].join("\r\n") + "\r\n"),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1);
+    assert.deepEqual(surfacesOf(card), { Desktop: 1 }, "命令行读得到：主进程就是桌面宿主");
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
   });
 
   it("asks the resident probe for the desktop image by name", async () => {
@@ -5524,6 +5546,187 @@ describe("persistent PowerShell probe transport", () => {
   });
 });
 
+// 探针超时判罚。这条链原来的形状是「任何一条查询超时 = 子进程卡死 = 杀掉」，于是
+// 一轮里那条**可选**的终端存活复查能把刚刚正常答过进程扫描的热子进程打死，下一轮
+// 重付冷启动（本机实测冷轮 556ms、热轮 149–185ms），而复查在新子进程里还要现场
+// 编译一段 Win32 互操作代码（实测 188ms）——杀完必回冷态，下轮又要编译，链条自持。
+// 更要紧的是落数据原本排在这条可选复查之后：面板读到的快照被可选工作拖住最长 3 秒，
+// 而面板给 relay 的拉取预算只有 1500ms。2026-10-07 用假子进程驱动真实采集器实测：
+// 扫描 20ms 就答完，整轮仍 3032ms 才落地，且那只子进程被 kill、下一轮重新 spawn。
+describe("探针超时判罚：可选复查不杀热子进程，落地不等复查", () => {
+  const DSH_BIN = "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js";
+  const HEADER = "Node,CommandLine,Name,ProcessId\r\n";
+  const dshTuiRow = (pid) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" "${DSH_BIN}" --profile dsh-tui,node.exe,${pid}`;
+  const zcodeRow = (pid) => `LAPTOP,C:\\Programs\\ZCode.exe,ZCode.exe,${pid}`;
+  const tuiScan = HEADER + dshTuiRow(6001) + "\r\n";
+  const cleanScan = HEADER + dshTuiRow(6001) + "\r\n";
+
+  function raceWithPending(promise, ms) {
+    return Promise.race([promise, new Promise((resolve) => setTimeout(() => resolve("__pending__"), ms))]);
+  }
+
+  function makeChild(onWrite) {
+    const child = new EventEmitter();
+    const stdout = new EventEmitter();
+    stdout.setEncoding = () => {};
+    const stderr = new EventEmitter();
+    stderr.resume = () => {};
+    child.stdin = { write: (text) => onWrite(child, stdout, text) };
+    child.stdout = stdout;
+    child.stderr = stderr;
+    child.kill = () => { child.killed = true; child.emit("exit", 0); };
+    child.unref = () => {};
+    return child;
+  }
+  const markerOf = (text) => (text.match(/Write-Output '([^']+)'/) || [])[1] || "";
+
+  it("可选复查还挂在半空时，扫描结果必须已经能读走", async () => {
+    // 落地的判据是「本轮进程事实到手」，不是「本轮所有可选附加工作都跑完」。
+    let t = 3000;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        setTimeout(() => stdout.emit("data", `c=6001/0\r\n${marker}\r\n`), 400); // 复查慢，但会答
+        return;
+      }
+      stdout.emit("data", tuiScan + marker + "\r\n");
+    });
+    const collector = testCollector({ spawnFn, nowFn: () => t });
+    const firstRound = collector.scanProcesses(); // 首轮在飞（复查未答完）
+    await new Promise((r) => setTimeout(r, 60));
+    const read = await raceWithPending(collector.scanProcesses(), 30);
+    assert.notEqual(read, "__pending__", "复查挂半空不得让第二次读排队等整轮");
+    assert.equal(read.dsh, 1, "读到的就是本轮扫描的进程事实");
+    await firstRound;
+  });
+
+  it("复查超时不得打死刚答过扫描的子进程；同一只第二次超时才换掉", async () => {
+    let t = 3000;
+    const kids = [];
+    const spawnFn = () => {
+      const child = makeChild((c, stdout, text) => {
+        if (text.includes("AttachErr")) return; // 永不回话：模拟争用下卡住的可选复查
+        stdout.emit("data", tuiScan + markerOf(text) + "\r\n");
+      });
+      kids.push(child);
+      return child;
+    };
+    const collector = testCollector({
+      spawnFn,
+      killFn: () => false,
+      nowFn: () => t,
+      psProbeTimeoutMs: 6000,
+      psProbeOptionalTimeoutMs: 40,
+    });
+
+    const first = await collector.scanProcesses();
+    assert.equal(first.dsh, 1, "复查不回话也必须把本轮进程数据交出来");
+    assert.equal(kids.length, 1);
+    assert.equal(kids[0].killed, undefined, "第一次复查超时：热子进程不得被判死");
+    assert.equal(collector.getProbeStats().optionalTimeouts, 1);
+
+    t = 10000; // 过 TTL → 第二轮仍走同一只热子进程（不重付冷启动）
+    await collector.scanProcesses();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(kids.length, 1, "第二轮必须复用子进程");
+    const stats = collector.getProbeStats();
+    assert.equal(stats.optionalTimeouts, 2, "第二轮同样放弃复查");
+    assert.equal(stats.childKills, 1, "同一只子进程第二次复查超时即换掉，不得无限拖着");
+
+    t = 20000; // 被判罚之后，下一轮必须重新 spawn
+    await collector.scanProcesses();
+    await new Promise((r) => setTimeout(r, 120));
+    assert.equal(kids.length, 2, "换掉的子进程下一轮重起，真卡死的不得永久占用");
+  });
+
+  it("被放弃那条复查迟到的回话不得混进下一轮读数", async () => {
+    let t = 3000;
+    let abandonedMarker = null;
+    let scanWrites = 0;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        abandonedMarker = marker; // 记下被放弃那条的标记，稍后迟到
+        return;
+      }
+      scanWrites += 1;
+      if (scanWrites === 1) {
+        stdout.emit("data", tuiScan + marker + "\r\n");
+        return;
+      }
+      // 第二轮：先把第一轮那条被放弃的复查回话吐出来（内容故意伪装成进程行），
+      // 再吐本轮真正的扫描结果。序列上迟到段一定排在当轮答案之前。
+      setTimeout(() => stdout.emit("data", HEADER + zcodeRow(9111) + "\r\n" + abandonedMarker + "\r\n"), 5);
+      setTimeout(() => stdout.emit("data", cleanScan + marker + "\r\n"), 12);
+    });
+    const collector = testCollector({
+      spawnFn,
+      killFn: () => false,
+      nowFn: () => t,
+      psProbeTimeoutMs: 6000,
+      psProbeOptionalTimeoutMs: 30,
+    });
+
+    await collector.scanProcesses(); // 第 1 轮：扫描到手，复查被放弃
+    t = 10000;
+    collector.scanProcesses(); // 踢第 2 轮（后台重验）
+    await new Promise((r) => setTimeout(r, 80)); // 等第 2 轮落地
+    const second = await collector.scanProcesses();
+    assert.equal(second.zcode, 0, "迟到段不得当成本轮进程行计数");
+    assert.equal(second.dsh, 1, "本轮自己的扫描结果照常落地");
+    assert.ok(collector.getProbeStats().lateAnswersDiscarded >= 1, "迟到段必须被显式丢弃并计数");
+  });
+
+  it("必需的进程扫描超时照旧换子进程并回落 tasklist", async () => {
+    let t = 3000;
+    const kids = [];
+    const spawnFn = () => {
+      const child = makeChild(() => { /* 扫描也不回话：整轮不可用 */ });
+      kids.push(child);
+      return child;
+    };
+    const execFn = (cmd, opts, cb) => {
+      if (cmd.includes("tasklist")) return cb(null, '"ZCode.exe","20588","Console","1","50,000 K"\r\n');
+      return cb(new Error("unexpected exec"));
+    };
+    const collector = testCollector({
+      spawnFn, execFn, killFn: () => false, nowFn: () => t,
+      psProbeTimeoutMs: 40, psProbeOptionalTimeoutMs: 40,
+    });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.zcode, 1, "必需查询超时仍须兜底出数据");
+    assert.ok(kids[0].killed, "必需查询超时的子进程必须被换掉——数据不可信的那条路不放宽");
+  });
+
+  it("可选预算短于必需预算", () => {
+    assert.ok(PS_PROBE_OPTIONAL_TIMEOUT_MS < PS_PROBE_TIMEOUT_MS,
+      "可选查询的预算必须明显短于必需查询，否则可选工作又能拖住整轮");
+  });
+
+  it("processScanTtlMs 放宽后，未到窗口的读不再踢新的一轮", async () => {
+    let t = 100_000; // 纪元量级的时钟：首轮没有快照，必须无条件踢一次
+    let scanQueries = 0;
+    const spawnFn = () => makeChild((child, stdout, text) => {
+      const marker = markerOf(text);
+      if (text.includes("AttachErr")) {
+        stdout.emit("data", `c=6001/0\r\n${marker}\r\n`);
+        return;
+      }
+      scanQueries += 1;
+      stdout.emit("data", tuiScan + marker + "\r\n");
+    });
+    const collector = testCollector({ spawnFn, nowFn: () => t, processScanTtlMs: 6000 });
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 1);
+    t = 103_000; // 距今 3000ms：默认窗口(2500)会踢新一轮，放宽到 6000 则不该踢
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 1, "未到缓存窗口不得重扫——少一路并发就是少一份争用");
+    t = 109_500; // 距今 6500ms：过窗，正常重验
+    await collector.scanProcesses();
+    assert.equal(scanQueries, 2);
+  });
+});
+
 // Cross-restart display history. A relay restart used to zero every aggregate
 // and instance bucket, and the board showed zeros/empty cells until the next
 // request finished settling — a whole coding turn for kimi. The snapshot
@@ -6098,6 +6301,43 @@ describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例�
     assert.equal(cc.instances[1].surface, undefined, "读不出形态的行不贴徽标");
     assert.deepEqual(cc.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
       "读不出形态的进程不计进 CLI 那一档");
+  });
+
+  it("冷启动第一轮就是降级轮时，不造逐进程的空实例行", async () => {
+    // 2026-10-07 报障的另一半：上面两条的前提都是「先有过一轮可信扫描」。面板/中继
+    // 刚起的那一轮没有可信轮可沿，carry 直接空转，于是桌面端全家福逐个成行——本机实测
+    // 一次冷降级轮出 10 行「0 请求 / tokens 全 0 / 无徽标」的空实例卡，正是看板从出现到
+    // 加载出数据那段中间态。规则：这一轮是降级轮且手里没有任何可信依据时，不新建行。
+    let t = 3000;
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : "");
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    const cc = await claudeCard(collector);
+    assert.equal(cc.status, "running", "进程数仍是本轮的事实：桌面端确实在跑");
+    assert.deepEqual(cc.instances, [], "读不出归属的那一轮不逐进程建行");
+    assert.deepEqual(cc.surfaces, [], "也不报面");
+  });
+
+  it("可信轮过了沿用窗之后的降级轮，不再新增逐进程的空行", async () => {
+    // 探针闲置 60s 被回收 → 下一次冷启动超时 → 落 tasklist；此时最近一次可信轮已在
+    // 30s 沿用窗之外，carry 拒供。本条只管「不再凭空添行」：已有行带着自己攒下的账，
+    // 折叠丢了就退回逐 pid（那是 50a41fc/99e4d9c 定下的保守保行，不在这里动）；但一个
+    // 谁都不认识的进程号在这种轮次里新建一行，就是零请求零 tokens 的空实例卡。
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const extraPid = 99999;
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist")
+      ? blindScan([...ALL_PIDS, extraPid]) : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    psAnswer = "";
+    t += 60_000;
+    await settleRound(collector);
+    const cc = await claudeCard(collector);
+    assert.ok(!cc.instances.some((i) => i.id === `claude-${extraPid}`),
+      "没有可沿依据的降级轮不给陌生进程号建空行");
+    assert.ok(cc.instances.length > 0, "可信轮认过的行一律留着，不因为降级轮而消失");
   });
 
   it("恢复可信轮后按本轮命令行重新分型，不被上一轮的旧值盖住", async () => {

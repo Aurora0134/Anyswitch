@@ -349,16 +349,23 @@ describe("launcher-only startup screen", () => {
     assert.ok(!css.includes(':not(#panelStartup):not(script)'), "不用 :not() 反选压过浮动层默认态");
   });
 
-  it("signals readiness only after initial status and the restored view have settled", async () => {
+  it("signals readiness only after initial status, the restored view and a trustworthy first board frame have settled", async () => {
     const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init);
-    let statusDone, viewDone, ready = false;
+    let statusDone, viewDone, boardDone, ready = false;
     const context = {
       window: { panelStartupController: { ready: () => { ready = true; } } },
       restartEnterView: null,
       startupViewReady: new Promise((resolve) => { viewDone = resolve; }),
       startStatusPolling: () => new Promise((resolve) => { statusDone = resolve; }),
       requestAnimationFrame: (fn) => fn(),
+      // 看板首帧闸：落看板页时开屏要等「这一帧能当事实说」（frame.ready，见 refreshAgents
+      // 的帧闸）才退——请求一 resolve 就揭会把遮挡层掀在「什么都没跑」的静态基线上。
+      // Promise.race 的 2500ms 上限由这里的 setTimeout 桩供，取数不通也让开屏照常淡出。
+      boardVisible: () => true,
+      boardLivePromise: new Promise((resolve) => { boardDone = resolve; }),
+      setTimeout: () => 1,
+      Promise,
     };
     for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream", "startSyncStatusPolling"]) context[name] = () => {};
     const pending = runInNewContext(`${init}; init()`, context);
@@ -367,8 +374,59 @@ describe("launcher-only startup screen", () => {
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(ready, false);
     viewDone();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ready, false, "前两样都 settled 但看板还没拿到可信帧：不开屏不退场");
+    boardDone();
     await pending;
-    assert.equal(ready, true);
+    assert.equal(ready, true, "可信首帧到位即退场");
+  });
+
+  it("caps the board-frame wait so a board that never gets data still releases the splash", async () => {
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init);
+    const asked = [];
+    const controller = { readyCount: 0, ready() { this.readyCount += 1; } };
+    const context = {
+      window: { panelStartupController: controller },
+      restartEnterView: null,
+      startupViewReady: Promise.resolve(),
+      startStatusPolling: () => Promise.resolve(),
+      requestAnimationFrame: (fn) => fn(),
+      boardVisible: () => true,
+      // 永不到来的首帧（relay 一直超预算）：不能把用户锁在开屏动画后面。
+      boardLivePromise: new Promise(() => {}),
+      // 桩里没有真时钟：init 挂的那道时限由这里记下再手动触发。
+      setTimeout(fn, ms) { asked.push({ fn, ms }); return asked.length; },
+      Promise,
+    };
+    for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream", "startSyncStatusPolling"]) context[name] = () => {};
+    const pending = runInNewContext(`${init}; init()`, context);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(asked.length, 1, "等首帧挂了时限");
+    assert.equal(asked[0].ms, 2500, "上限 2500ms，早于开屏自己的兜底时限");
+    asked[0].fn();
+    await pending;
+    assert.equal(controller.readyCount, 1, "到点照常退场，画面交给骨架条");
+  });
+
+  it("does not wait for a board frame when the landing view is not the board", async () => {
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init);
+    const controller = { readyCount: 0, ready() { this.readyCount += 1; } };
+    const context = {
+      window: { panelStartupController: controller },
+      restartEnterView: null,
+      startupViewReady: Promise.resolve(),
+      startStatusPolling: () => Promise.resolve(),
+      requestAnimationFrame: (fn) => fn(),
+      boardVisible: () => false,
+      boardLivePromise: new Promise(() => {}),
+      setTimeout: () => 1,
+      Promise,
+    };
+    for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream", "startSyncStatusPolling"]) context[name] = () => {};
+    await runInNewContext(`${init}; init()`, context);
+    assert.equal(controller.readyCount, 1, "非看板落点不等那一帧，退场时机与改前一致");
   });
 
   it("hooks the restored view's enter animation onto onLeave when recovering from a restart", async () => {
@@ -382,6 +440,9 @@ describe("launcher-only startup screen", () => {
       startStatusPolling: () => Promise.resolve(),
       requestAnimationFrame: (fn) => fn(),
       playBoardEnter() {},
+      boardVisible: () => true,
+      boardLivePromise: Promise.resolve(),
+      setTimeout: () => 1,
     };
     for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream", "startSyncStatusPolling"]) context[name] = () => {};
     await runInNewContext(`${init}; init()`, context);
@@ -399,6 +460,9 @@ describe("launcher-only startup screen", () => {
       startupViewReady: Promise.resolve(),
       startStatusPolling: () => Promise.resolve(),
       requestAnimationFrame: (fn) => fn(),
+      boardVisible: () => true,
+      boardLivePromise: Promise.resolve(),
+      setTimeout: () => 1,
     };
     for (const name of ["initTheme", "initStylePicker", "initBrandVersion", "initSettingsView", "initRelayControls", "initSkillsTab", "initPresetsTab", "initStoreTab", "initStatsTab", "initSessionsTab", "loadAutostartState", "refreshRouteChainsCache", "refreshRouteRuntimeCache", "startLogStream", "startSyncStatusPolling"]) context[name] = () => {};
     await runInNewContext(`${init}; init()`, context);

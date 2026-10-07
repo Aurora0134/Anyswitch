@@ -27,6 +27,10 @@ import { loadSettings, defaultSettingsPath, relayDataRoot } from "./relay-settin
 import { createLogger } from "./logger.mjs";
 
 export const WATCHDOG_PORT = 47822;
+// 看门狗那份收集器的进程扫描缓存窗口，必须宽于 agent-watcher 的巡检拍节
+// （3000ms）：否则每拍都过一次期，等于常驻一路 CIM 全行 dump。上限钉在 10s——
+// 再宽就开始拖慢「发现 agent 起来了要把 relay 拉起来」那件事。
+export const WATCHDOG_PROCESS_SCAN_TTL_MS = 6000;
 const WATCHDOG_SCRIPT = fileURLToPath(new URL("agent-watchdog.mjs", import.meta.url));
 
 const SPAWN_POLL_MS = 300;
@@ -232,7 +236,13 @@ export async function startWatchdogHost(options = {}) {
   const pidPath = getWatchdogPidPath(root);
   writeWatchdogPid(process.pid, pidPath);
 
-  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
+  // 看门狗用的扫描缓存窗口：宽于 watcher 的 3s 拍节，让它不再每拍都踢一次常驻
+  // CIM 行 dump。代价是「发现 agent 起来了 → 拉起 relay」的延迟从 ≤3s 变成 ≤本值，
+  // 只影响 relay 已经不在的那个分支；换来的是常驻并发少一路，即探针超时那条链
+  // 少一份燃料（判罚与代价见 agent-metrics.mjs 的 createPersistentPsProbe 上方）。
+  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({
+    processScanTtlMs: WATCHDOG_PROCESS_SCAN_TTL_MS,
+  });
   // watcherDeps exists so tests can observe the follow-agent path without real
   // process/port side effects; production passes nothing and gets the real deps.
   const deps = options.watcherDeps ?? {};
