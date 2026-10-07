@@ -274,6 +274,14 @@ export function isTrustedPanelMutation(req) {
 // its internal loopback endpoint (47821/api/internal/agents). Returns the agents
 // array, or null if the relay is down/unreachable so the caller can fall back.
 // Loopback-only and Bearer pi-relay-token guarded on the relay side.
+//
+// 「拉不到」有两种完全不同的含义，只有一种该让面板自己的收集器顶上：
+// - relay 没在听（停止、还没起、端口被占）：它确实不经任何流量，0 请求就是事实；
+// - relay 活着只是这一拍没答上（1500ms 预算撞上冷探针，本机实测冷探针一轮
+//   0.64–0.87s，承压时更久）：流量全在它那边，自家收集器交出的是一幅结构相同
+//   的假帧——端点显示运行中、请求数与四宫格全空。
+// 所以超时单独返回 `{ pullTimeout: true }`（不是数组，调用侧据此分路），注入的
+// 测试替身照旧返回数组或 null，两条既有分支都不受影响。
 async function defaultFetchRelayAgents(root, token) {
   if (!token) return null;
   try {
@@ -285,7 +293,11 @@ async function defaultFetchRelayAgents(root, token) {
     const data = await response.json();
     if (data && Array.isArray(data.agents)) return data.agents;
     return null;
-  } catch {
+  } catch (err) {
+    // AbortSignal.timeout 抛的是 TimeoutError：连接已建立、只是没在预算内答完。
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      return { pullTimeout: true };
+    }
     // Relay may be stopped, starting, or not yet listening.
     return null;
   }
@@ -891,7 +903,8 @@ export function createPanelRouter({
   // binding fall back inside attributeTerminalSessions).
   async function pulledAgentsForJoin(token) {
     const pulled = await fetchRelayAgents(relayRoot, token);
-    if (pulled) {
+    // 超时标记不是 agents 数组（见 defaultFetchRelayAgents），不能当成一份快照存进缓存。
+    if (Array.isArray(pulled)) {
       lastPulledAgents = { at: Date.now(), agents: pulled };
       return pulled;
     }
@@ -1729,22 +1742,48 @@ export function createPanelRouter({
     // the relay is back. (A relay restart zeroes the relay's counters; the cache
     // can then show a few seconds of pre-restart numbers, and the next successful
     // pull overwrites it.)
+    //
+    // frame.ready 是看板「这一帧能不能当事实说」的唯一判据（2026-10-07 报障：从出现到
+    // 加载出数据那段中间态，卡面把「还没取到数」画成「什么都没跑」）。ready:false 只可能
+    // 出现在两种地方：relay 活着但这一拍没答上且手里没有可续的陈旧快照；以及这个进程压根
+    // 没有数据源。此时不发一份看起来像数据的空壳，看板自己盖加载态。
+    // 超时这一路明确不去叫自家收集器：它不经流量，交回来的是「运行中 + 全空读数」的假帧。
     const token = relayPullToken();
     const pulled = await fetchRelayAgents(relayRoot, token);
-    if (pulled) {
+    if (Array.isArray(pulled)) {
       lastPulledAgents = { at: Date.now(), agents: pulled };
-      return sendJson(res, 200, { ok: true, agents: pulled });
+      sendJson(res, 200, { ok: true, agents: pulled, frame: { ready: true, source: "relay" } });
+      return;
+    }
+    if (pulled && pulled.pullTimeout === true) {
+      if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+        sendJson(res, 200, {
+          ok: true, agents: lastPulledAgents.agents, frame: { ready: true, source: "relay-stale" },
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true, agents: [], frame: { ready: false, reason: "relay-timeout" },
+      });
+      return;
     }
     if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
-      return sendJson(res, 200, { ok: true, agents: lastPulledAgents.agents });
+      sendJson(res, 200, {
+        ok: true, agents: lastPulledAgents.agents, frame: { ready: true, source: "relay-stale" },
+      });
+      return;
     }
     if (!metricsCollector) {
-      sendJson(res, 200, { ok: true, agents: [] });
+      sendJson(res, 200, {
+        ok: true, agents: [], frame: { ready: false, reason: "no-source" },
+      });
       return;
     }
     try {
       const agents = await metricsCollector.getAgentsStatus();
-      sendJson(res, 200, { ok: true, agents });
+      sendJson(res, 200, {
+        ok: true, agents, frame: { ready: true, source: "panel-local" },
+      });
     } catch (err) {
       sendJson(res, 500, { ok: false, error: err.message });
     }

@@ -4544,8 +4544,28 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
       kimiRegistryLookup: registry([]),
     });
     const card = kimi(await collector.getAgentsStatus());
+    // 2026-10-07 改判：命令行列缺席的那一轮不再主张宿主与面（见 parseTasklistCsv 的
+    // kimi 分支）。这一行的进程数照旧是本轮的事实，面那一档要等可信轮或 carry 说话——
+    // 本机实测降级轮把一个 Kimi 桌面端的每个 Electron 进程都收进宿主集，副行报出
+    // 「Desktop ×5」，正是看板加载中间态空实例卡同源的那次误折。
     assert.equal(card.processCount, 1);
-    assert.deepEqual(surfacesOf(card), { Desktop: 1 });
+    assert.deepEqual(surfacesOf(card), {}, "读不到命令行的轮次不报面");
+    assert.deepEqual(rowsOf(card), [], "读不到命令行的轮次不造实例行");
+  });
+
+  it("claims the desktop face as soon as a probe can read the command line", async () => {
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, [
+        "Node,CommandLine,Name,ProcessId",
+        'LAPTOP,"C:\\Users\\tester\\AppData\\Local\\Programs\\Kimi\\Kimi Code.exe",Kimi Code.exe,6301',
+      ].join("\r\n") + "\r\n"),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1);
+    assert.deepEqual(surfacesOf(card), { Desktop: 1 }, "命令行读得到：主进程就是桌面宿主");
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]]);
   });
 
   it("asks the resident probe for the desktop image by name", async () => {
@@ -6098,6 +6118,43 @@ describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例�
     assert.equal(cc.instances[1].surface, undefined, "读不出形态的行不贴徽标");
     assert.deepEqual(cc.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
       "读不出形态的进程不计进 CLI 那一档");
+  });
+
+  it("冷启动第一轮就是降级轮时，不造逐进程的空实例行", async () => {
+    // 2026-10-07 报障的另一半：上面两条的前提都是「先有过一轮可信扫描」。面板/中继
+    // 刚起的那一轮没有可信轮可沿，carry 直接空转，于是桌面端全家福逐个成行——本机实测
+    // 一次冷降级轮出 10 行「0 请求 / tokens 全 0 / 无徽标」的空实例卡，正是看板从出现到
+    // 加载出数据那段中间态。规则：这一轮是降级轮且手里没有任何可信依据时，不新建行。
+    let t = 3000;
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist") ? blindScan() : "");
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    const cc = await claudeCard(collector);
+    assert.equal(cc.status, "running", "进程数仍是本轮的事实：桌面端确实在跑");
+    assert.deepEqual(cc.instances, [], "读不出归属的那一轮不逐进程建行");
+    assert.deepEqual(cc.surfaces, [], "也不报面");
+  });
+
+  it("可信轮过了沿用窗之后的降级轮，不再新增逐进程的空行", async () => {
+    // 探针闲置 60s 被回收 → 下一次冷启动超时 → 落 tasklist；此时最近一次可信轮已在
+    // 30s 沿用窗之外，carry 拒供。本条只管「不再凭空添行」：已有行带着自己攒下的账，
+    // 折叠丢了就退回逐 pid（那是 50a41fc/99e4d9c 定下的保守保行，不在这里动）；但一个
+    // 谁都不认识的进程号在这种轮次里新建一行，就是零请求零 tokens 的空实例卡。
+    let t = 3000;
+    let psAnswer = healthyScan();
+    const extraPid = 99999;
+    const execFn = (cmd, opts, cb) => cb(null, cmd.includes("tasklist")
+      ? blindScan([...ALL_PIDS, extraPid]) : psAnswer);
+    const collector = testCollector({ execFn, nowFn: () => t });
+
+    await settleRound(collector);
+    psAnswer = "";
+    t += 60_000;
+    await settleRound(collector);
+    const cc = await claudeCard(collector);
+    assert.ok(!cc.instances.some((i) => i.id === `claude-${extraPid}`),
+      "没有可沿依据的降级轮不给陌生进程号建空行");
+    assert.ok(cc.instances.length > 0, "可信轮认过的行一律留着，不因为降级轮而消失");
   });
 
   it("恢复可信轮后按本轮命令行重新分型，不被上一轮的旧值盖住", async () => {
