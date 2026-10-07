@@ -2426,17 +2426,35 @@ async function api(method, path, body) {
       button.disabled = count === 0 || lifecycleRuns.size > 0 || Boolean(lifecycleBatch);
       button.textContent = lifecycleBatch ? "批量更新中…" : count > 0 ? `全部更新 (${count})` : "全部更新";
     }
-    function showClientUpdateModal(names, many) {
-      get("clientUpdateModalTitle").textContent = many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`;
-      get("clientUpdateModalBody").textContent = `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`;
+    function clientUpdateModalPayload(names, many) {
+      return {
+        title: many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`,
+        body: `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`,
+      };
+    }
+    function showLifecycleModal({ title, body }) {
+      get("clientUpdateModalTitle").textContent = title;
+      get("clientUpdateModalBody").textContent = body;
       get("clientUpdateModal").classList.toggle("show", true);
       return new Promise((resolve) => { lifecycleModalResolve = resolve; });
+    }
+    function showClientUpdateModal(names, many) {
+      return showLifecycleModal({
+        title: many ? `${names.length} 个客户端正在运行` : `${names[0]} 正在运行`,
+        body: `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`,
+      });
     }
     // 弹层是单例：已经有一个确认在屏上时，后到的请求排队等它答完再弹，
     // 否则两个并发任务会互相覆盖对方的标题与按钮归属。
     function confirmClientUpdate(names, many) {
-      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ names, many, resolve }); });
+      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ ...clientUpdateModalPayload(names, many), resolve }); });
       return showClientUpdateModal(names, many);
+    }
+    // 自更新与客户端更新共用同一只弹层；自更新是全局单飞，不会与单行更新并发争抢，
+    // 排队只是防「弹层还开着时用户点了别的确认」的兜底。
+    function confirmSelfUpdate(title, body) {
+      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ title, body, resolve }); });
+      return showLifecycleModal({ title, body });
     }
     function closeLifecycleModal(decision) {
       get("clientUpdateModal").classList.toggle("show", false);
@@ -2444,7 +2462,7 @@ async function api(method, path, body) {
       lifecycleModalResolve = null;
       if (resolve) resolve(decision);
       const next = lifecycleModalQueue.shift();
-      if (next) void showClientUpdateModal(next.names, next.many).then(next.resolve);
+      if (next) void showLifecycleModal(next).then(next.resolve);
     }
     // 离开关于页：排队中的确认一律按取消作答，不留悬挂的 Promise 等着一个不会出现的弹层。
     function drainLifecycleModalQueue(decision) {
@@ -2550,6 +2568,111 @@ async function api(method, path, body) {
         updateBatchButton();
       }
     }
+    // ── 自身更新（一键自更新）────────────────────────────────────────
+    // 与客户端更新同构：登记 runId 后轮询 journal 状态。区别在收尾——worker 推进到
+    // 换装阶段（ready-to-restart / waiting-panel）时 panel-host 会自杀换新，本页面
+    // 借 anyswitch:self-update-swap 事件把恢复监视交给顶栏（watchPanelHostComeBack），
+    // 面板身份变化后整页刷新到新版。中途离开关于页只是放弃轮询，任务照跑。
+    const SELF_UPDATE_PHASES = {
+      staging: (target) => `正在拉取 ${target}…`,
+      installing: () => "代码已就位，正在安装依赖…",
+      "ready-to-restart": () => "正在重启 relay…",
+      "waiting-panel": () => "正在换装面板，页面即将自动恢复…",
+    };
+    let selfUpdateRun = null; // { runId, poll }，全局单飞
+    let selfUpdateAdopted = false; // enter() 时接回检查完成前，按钮先不出
+    let selfUpdateGen = 0; // leave() 时 +1，丢弃迟到的轮询回调
+    function renderSelfUpdateProgress(status) {
+      const statusEl = get("aboutUpdateStatus");
+      const phaseText = SELF_UPDATE_PHASES[status?.phase];
+      statusEl.textContent = phaseText ? phaseText(status?.targetVersion || "") : "自更新进行中…";
+      statusEl.dataset.tone = "";
+      get("aboutUpdateTime").textContent = "";
+      get("aboutSelfUpdate").hidden = true;
+    }
+    function renderSelfUpdateOutcome(status) {
+      selfUpdateRun = null;
+      if (!active) return;
+      const statusEl = get("aboutUpdateStatus");
+      const copy = {
+        updated: `已更新到 ${status?.afterVersion || status?.latestVersion || ""}`,
+        updated_pending_restart: status?.message || "新版本已就位，重启面板后生效",
+        rolled_back: status?.message || "已回滚到更新前版本",
+        failed: status?.message || "自更新失败，请重新检查更新",
+      };
+      statusEl.textContent = copy[status?.outcome] || "自更新已结束";
+      statusEl.dataset.tone = status?.outcome === "updated" ? "ok" : status?.outcome === "updated_pending_restart" ? "" : "danger";
+      get("aboutSelfUpdate").hidden = true;
+      // 页面多半已随面板换新重载（outcome=updated 时）；这里的 notify 服务于
+      // 未换装收场（pending_restart / 回滚 / 失败）与竞态下留在旧页的情况。
+      notify(copy[status?.outcome] || "自更新已结束", status?.outcome !== "updated");
+      void checkUpdates(true);
+    }
+    function pollSelfUpdate(runId) {
+      const gen = selfUpdateGen;
+      return new Promise((resolve, reject) => {
+        let swapAnnounced = false;
+        const step = async () => {
+          let status;
+          try { status = await fetchOnce(`/api/self-update/${encodeURIComponent(runId)}`); }
+          catch { status = null; }
+          if (!active || gen !== selfUpdateGen) { reject(Object.assign(new Error("self update abandoned"), { abandoned: true })); return; }
+          // 换装窗口期轮询失败是预期（面板正在退场），继续等；恢复监视归顶栏。
+          if ((status?.phase === "ready-to-restart" || status?.phase === "waiting-panel") && !swapAnnounced) {
+            swapAnnounced = true;
+            doc.dispatchEvent(new CustomEvent("anyswitch:self-update-swap"));
+          }
+          if (status?.state === "running") { if (selfUpdateRun) selfUpdateRun.poll = schedule(step, 1500); return; }
+          if (!status) { if (selfUpdateRun) selfUpdateRun.poll = schedule(step, 3000); return; }
+          resolve(status);
+        };
+        void step();
+      });
+    }
+    async function startSelfUpdate() {
+      if (selfUpdateRun || !selfUpdateAdopted) return;
+      const target = update?.release?.version || "";
+      if (!target) return;
+      // 与客户端更新同一层确认：换装窗口会打断进行中的 relay 请求。
+      let warning = "";
+      try {
+        const data = await fetchOnce("/api/agents");
+        const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
+        if (running.length) warning = `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），换装会打断其请求。`;
+      } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
+      const confirmed = await confirmSelfUpdate(`更新 Anyswitch 到 ${target}`, `${warning || "更新期间面板与 relay 会自动换装重启，秒级中断。"}确认现在更新？`);
+      if (!confirmed) return;
+      if (selfUpdateRun) return; // 确认期间可能已从 adopt 接回
+      try {
+        const started = await request("POST", "/api/self-update", {});
+        selfUpdateRun = { runId: started.runId, poll: null };
+        renderSelfUpdateProgress({ phase: "staging", targetVersion: started.targetVersion });
+        const status = await pollSelfUpdate(started.runId);
+        renderSelfUpdateOutcome(status);
+      } catch (error) {
+        if (error?.abandoned) return;
+        selfUpdateRun = null;
+        notify(error?.code === "busy" ? "已有自更新任务在进行中" : "自更新未能启动，请稍后重试", true);
+        renderUpdate();
+      }
+    }
+    async function adoptSelfUpdate() {
+      selfUpdateAdopted = false;
+      selfUpdateRun = null;
+      try {
+        const data = await fetchOnce("/api/self-update/active");
+        const run = data?.runs?.[0] ?? null;
+        if (run) {
+          selfUpdateRun = { runId: run.runId, poll: null };
+          renderSelfUpdateProgress(run);
+          void pollSelfUpdate(run.runId).then(renderSelfUpdateOutcome, () => {});
+        }
+      } catch { /* 服务不可用：按钮按检查结果呈现 */ }
+      selfUpdateAdopted = true;
+      // 进页的自动检查可能还在途（enter 先 checkUpdates 再 adopt）：此刻状态行
+      // 归它所有，重绘要保留「正在检查更新…」，不能盖回「尚未检查更新」。
+      if (active) renderUpdate(Boolean(updateTask));
+    }
     function renderApp() {
       get("aboutAppVersion").textContent = appInfo?.version || "版本暂时无法读取";
       get("aboutPreviewBadge").hidden = !appInfo?.prerelease;
@@ -2557,6 +2680,11 @@ async function api(method, path, body) {
       if (system) get("aboutSystem").textContent = `${({ win32: "Windows", darwin: "macOS", linux: "Linux" })[system.platform] || "当前系统"} · Node ${system.nodeVersion || "版本未知"}`;
     }
     function renderUpdate(checking = false) {
+      // 自更新进行中：状态行归进度渲染所有，检查结果不插话（完成态由收尾渲染）。
+      if (selfUpdateRun) {
+        get("aboutSelfUpdate").hidden = true;
+        return;
+      }
       const state = update?.state;
       const releaseVersion = update?.release?.version || "";
       const copy = {
@@ -2572,6 +2700,9 @@ async function api(method, path, body) {
       const href = !checking && safeLink(update?.release?.url, "app");
       link.hidden = !href;
       if (href) link.href = href; else link.removeAttribute("href");
+      // 一键自更新：只在确认有新版本且接回检查完成时出现（检查出错/暂无发布不出现）。
+      const selfBtn = get("aboutSelfUpdate");
+      if (selfBtn) selfBtn.hidden = checking || !selfUpdateAdopted || state !== "update_available";
     }
     function sourceText(raw) {
       if (!raw) return "未提供";
@@ -2848,11 +2979,12 @@ async function api(method, path, body) {
       // 面板关掉再打开时，安装还在脱离的进程里跑。进页把还没结束的接回来，
       // 否则按钮会重新变成可点，同一个客户端会被再开一次。
       const resumed = adoptRunningUpdates();
-      return Promise.all([loadEnvironment(), resumed]);
+      const selfResumed = adoptSelfUpdate();
+      return Promise.all([loadEnvironment(), resumed, selfResumed]);
     }
     function leave() {
       active = false;
-      environmentGen++; updateGen++; lifecycleGen++;
+      environmentGen++; updateGen++; lifecycleGen++; selfUpdateGen++;
       environmentTask = null; updateTask = null;
       // 更新任务交给服务端跑完：离开即放弃轮询与本地标记，结果由下次进页的重新检测呈现
       for (const run of lifecycleRuns.values()) {
@@ -2860,6 +2992,9 @@ async function api(method, path, body) {
       }
       lifecycleRuns.clear();
       lifecycleBatch = null;
+      // 自更新同理：任务在后台照跑，下次进页由 adoptSelfUpdate 接回或按结果呈现。
+      if (selfUpdateRun?.poll) { cancelSchedule(selfUpdateRun.poll); selfUpdateRun.poll = null; }
+      selfUpdateRun = null;
       // 先作废排队中的确认（它们还没上屏），再关掉屏上那个——否则关掉时会顺手把
       // 队列里的下一个弹出来，落在一个已经离开的页面上。
       drainLifecycleModalQueue(false);
@@ -2868,6 +3003,7 @@ async function api(method, path, body) {
       busy("aboutCheckUpdates", false, "检查更新", "检查中…");
     }
     get("aboutCheckUpdates").onclick = () => checkUpdates(true);
+    get("aboutSelfUpdate").onclick = () => { void startSelfUpdate(); };
     get("aboutEnvironmentRefresh").onclick = () => loadEnvironment(true);
     get("aboutUpdateAll").onclick = () => startUpdateAll();
     get("clientUpdateModalCancel").onclick = () => closeLifecycleModal(false);
@@ -5858,6 +5994,12 @@ async function api(method, path, body) {
         }
       }, PANEL_RESTART_POLL_MS);
     }
+
+    // 关于页一键自更新进入换装阶段（worker 就绪、panel-host 即将自杀换新）：
+    // 由这里接管页面恢复监视，与手动「重启」走同一套 watchPanelHostComeBack 编排水。
+    document.addEventListener("anyswitch:self-update-swap", () => {
+      if (!panelRestarting) watchPanelHostComeBack();
+    });
 
     if (stopConfirmBtn) {
       stopConfirmBtn.onclick = async () => {

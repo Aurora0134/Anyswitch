@@ -1979,6 +1979,9 @@ if (window.panelStartupController) panelStartupPlay();
           <span class="about-status" id="aboutUpdateStatus" role="status" aria-live="polite">尚未检查更新</span>
           <span class="about-meta" id="aboutUpdateTime"></span>
           <a class="about-link" id="aboutReleaseLink" target="_blank" rel="noopener noreferrer" hidden>查看发布说明</a>
+          <!-- 自更新就绪（update_available）时出现：确认后由后台 worker 拉取 tag、
+               换装工作树，再经面板内监听器自动换装重启（见 panel.js 自更新段）。 -->
+          <button type="button" class="btn btn-mini" id="aboutSelfUpdate" hidden>立即更新</button>
         </div>
       </div>
       <div class="panel-card">
