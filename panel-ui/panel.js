@@ -9725,6 +9725,7 @@ async function api(method, path, body) {
       poolId: $("storeAddPoolId")?.value ?? "",
       poolIdTouched: ($("storeAddPoolId")?.dataset.touched || "") === "1",
       id: $("storeAddId")?.value.trim() ?? "",
+      idTouched: ($("storeAddId")?.dataset.touched || "") === "1",
       displayName: $("storeAddName")?.value.trim() ?? "",
       baseURLs: $("storeAddUrls")?.value.trim() ?? "",
       modelIdsText: $("storeAddModels")?.value ?? "",
@@ -9733,6 +9734,7 @@ async function api(method, path, body) {
     body.querySelectorAll(".store-add-set").forEach((setEl) => {
       v.sets.push({
         id: setEl.querySelector(".set-id").value.trim(),
+        idTouched: (setEl.querySelector(".set-id").dataset.touched || "") === "1",
         displayName: setEl.querySelector(".set-name").value.trim(),
         baseURLs: setEl.querySelector(".set-urls").value.trim(),
         modelIdsText: setEl.querySelector(".set-models").value,
@@ -9745,10 +9747,10 @@ async function api(method, path, body) {
     return `
       <div class="store-add-set">
         <div class="store-add-set-title">资料 ${k + 1}</div>
-        <div class="store-form-row"><label class="store-form-label">渠道 ID（字母数字 . _ -，不可含 /）</label>
-          <input class="store-form-input set-id" value="${escapeHtml(s.id || "")}" placeholder="如 myprovider-${k + 1}"></div>
         <div class="store-form-row"><label class="store-form-label">显示名</label>
           <input class="store-form-input set-name" value="${escapeHtml(s.displayName || "")}"></div>
+        <div class="store-form-row"><label class="store-form-label">渠道 ID（字母数字 . _ -，不可含 /）</label>
+          <input class="store-form-input set-id" value="${escapeHtml(s.id || "")}" data-touched="${s.idTouched ? "1" : "0"}" placeholder="如 myprovider-${k + 1}"></div>
         <div class="store-form-row"><label class="store-form-label">Base URL${k === 0 ? "（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）" : "（留空 = 与资料 1 一致）"}</label>
           <input class="store-form-input set-urls" value="${escapeHtml(s.baseURLs || "")}" placeholder="${k === 0 ? "https://api.example.com/v1" : "留空 = 与资料 1 一致"}"></div>
         <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机加密保存，保存后不再显示）</label>
@@ -9756,6 +9758,24 @@ async function api(method, path, body) {
         <div class="store-form-row"><label class="store-form-label">模型 IDs（可选，每行一个；留空则在线发现）</label>
           <textarea class="store-form-textarea set-models">${escapeHtml(s.modelIdsText || "")}</textarea></div>
       </div>`;
+  }
+
+  // 显示名 → 渠道 ID 的联动合法化：小写化、非法字符段折叠为 -、剥离开头非字母
+  // 数字、上限 127（沿用 poolSlugify 那套规则再截长）；纯中文等合法化结果为空
+  // 的场景留空不硬造。
+  function storeAddIdFromName(name) {
+    return poolSlugify(name).slice(0, 127);
+  }
+
+  // 显示名输入时 id 行实时联动自动填；用户手动改过 id 行后联动即断，
+  // 再清空 id 行可恢复联动（data-touched 是唯一真相，随 collectAddModalValues 跨重开留存）
+  function wireStoreAddNameIdLinkage(nameInput, idInput) {
+    nameInput.oninput = () => {
+      if (idInput.dataset.touched !== "1") idInput.value = storeAddIdFromName(nameInput.value);
+    };
+    idInput.oninput = () => {
+      idInput.dataset.touched = idInput.value.trim() ? "1" : "0";
+    };
   }
 
   function showAddModal(prefill) {
@@ -9775,10 +9795,10 @@ async function api(method, path, body) {
         </div>
         <div class="store-form-error" id="storeAddError" hidden></div>`
       : `
-        <div class="store-form-row"><label class="store-form-label">渠道 ID（字母数字 . _ -，不可含 /）</label>
-          <input class="store-form-input" id="storeAddId" value="${escapeHtml(v.id || "")}" placeholder="如 myprovider"></div>
         <div class="store-form-row"><label class="store-form-label">显示名</label>
           <input class="store-form-input" id="storeAddName" value="${escapeHtml(v.displayName || "")}" placeholder="如 My Provider"></div>
+        <div class="store-form-row"><label class="store-form-label">渠道 ID（字母数字 . _ -，不可含 /）</label>
+          <input class="store-form-input" id="storeAddId" value="${escapeHtml(v.id || "")}" data-touched="${v.idTouched ? "1" : "0"}" placeholder="如 myprovider"></div>
         <div class="store-form-row"><label class="store-form-label">Base URL（逗号分隔，首个为主、其余为回退；不写协议默认 https，需要 http 时显式以 http:// 开头）</label>
           <input class="store-form-input" id="storeAddUrls" value="${escapeHtml(v.baseURLs || "")}" placeholder="https://api.example.com/v1"></div>
         <div class="store-form-row"><label class="store-form-label">API 密钥（仅本机加密保存，保存后不再显示）</label>
@@ -9823,6 +9843,12 @@ async function api(method, path, body) {
       idInput.oninput = () => {
         idInput.dataset.touched = idInput.value.trim() ? "1" : "0";
       };
+      // 每份资料同规则：显示名联动渠道 ID，手动改过即断、清空恢复
+      $("skillsModalBody").querySelectorAll(".store-add-set").forEach((setEl) => {
+        wireStoreAddNameIdLinkage(setEl.querySelector(".set-name"), setEl.querySelector(".set-id"));
+      });
+    } else {
+      wireStoreAddNameIdLinkage($("storeAddName"), $("storeAddId"));
     }
   }
 
@@ -9843,8 +9869,8 @@ async function api(method, path, body) {
       renderStoreList();
       renderStoreDetail();
     } catch (e) {
-      // 校验/发现失败：保留已填内容重开弹窗并展示错误（密钥不回填）
-      showAddModal({ id, displayName, baseURLs, modelIdsText });
+      // 校验/发现失败：保留已填内容重开弹窗并展示错误（密钥不回填；id 联动态随回填恢复）
+      showAddModal({ id, displayName, baseURLs, modelIdsText, idTouched: $("storeAddId")?.dataset.touched === "1" });
       const err = $("storeAddError");
       err.hidden = false;
       err.textContent = /provide modelIds/.test(e.code || "")
@@ -9927,6 +9953,152 @@ async function api(method, path, body) {
     renderStoreList();
     renderStoreDetail();
   }
+  // ── 「导入本地配置」弹窗（渠道总览按钮行入口）─────────────────────────────
+  // 扫各端点本地手配渠道 → 弹窗勾选 → 入库并随同步分发全端点。票据制：scan 发
+  // 15 分钟内存票据 + 分组候选（密钥明文只留在票据里，绝不进 DOM），apply 按勾选
+  // keys 落库；业务失败一律 200 + ok:false，由 api() 统一抛出。回执落渠道总览
+  // 状态小字 + toast，生命周期与刷新小字同款：结论 10s 淡出；人不在渠道 tab 则
+  // 置「等切回」暂停计时，切回看过再计一个完整周期。
+  let byokImportTicket = null;  // scan 给的票据（内存态）
+  let byokImportEntries = [];   // 摊平的候选行；勾选框只带下标，key 不序列化进 DOM
+
+  // 回执拼装：导入计数打底，部分失败/本地移除失败追加；纯函数便于摘出单测
+  function byokImportReceiptText(result, deleteLocal) {
+    const parts = [
+      deleteLocal
+        ? `已导入 ${result.imported} 条渠道，本地原始配置已移除（原文件已备份）`
+        : `已导入 ${result.imported} 条渠道，本地配置原样保留`,
+    ];
+    const failedCount = (result.failed || []).length;
+    if (failedCount) parts.push(`${failedCount} 条失败（详情见面板日志）`);
+    const removeFailedCount = (result.removeFailed || []).length;
+    if (removeFailedCount) parts.push(`${removeFailedCount} 处本地配置移除失败（详情见面板日志）`);
+    return parts.join("，");
+  }
+
+  // 每条渠道一行：勾选框 + 「渠道名 · 上游地址 · N 个模型」；status 决定是否可选
+  // 及其右侧标注（duplicate 置灰徽标，密钥类不可选给原因）
+  function byokImportRowHtml(entry, idx) {
+    const selectable = entry.status === "ok";
+    const main = `${escapeHtml(entry.displayName || "")} · ${escapeHtml(entry.baseURL || "")} · ${Number(entry.modelCount) || 0} 个模型`;
+    let side = "";
+    if (entry.status === "duplicate") side = `<span class="badge badge-neutral">已在库</span>`;
+    else if (entry.status === "unresolved-key") side = `<span class="byok-import-skip">密钥无法读取，跳过</span>`;
+    else if (entry.status === "no-key") side = `<span class="byok-import-skip">未配置密钥，跳过</span>`;
+    return `<label class="byok-import-row${selectable ? "" : " is-disabled"}">` +
+      `<input type="checkbox" data-byok-idx="${idx}"${selectable ? " checked" : " disabled"}>` +
+      `<span class="byok-import-row-main">${main}</span>${side}</label>`;
+  }
+
+  // 回执落点：渠道总览状态小字（结论 10s 淡出）+ toast；人不在渠道 tab 置
+  // 「等切回」标记并暂停淡出计时，切回看过再复位（与刷新终态同一惯例）
+  function landByokImportReceipt(text, isErr) {
+    setStoreRefreshStatus(text, isErr ? "err" : "done");
+    if (currentView !== "store") {
+      storeStatusAwaitReturn = true;
+      disarmStoreStatusTimer();
+    }
+    toast(text, isErr);
+  }
+
+  function byokImportSelectedKeys() {
+    const box = $("byokImportGroups");
+    if (!box) return [];
+    return [...box.querySelectorAll('input[type="checkbox"][data-byok-idx]:checked')]
+      .map((cb) => (byokImportEntries[Number(cb.dataset.byokIdx)] || {}).key)
+      .filter(Boolean);
+  }
+
+  function updateByokImportConfirm() {
+    const btn = $("skillsModalConfirmBtn");
+    if (!btn) return;
+    const n = byokImportSelectedKeys().length;
+    btn.textContent = `导入所选（${n}）`;
+    btn.disabled = n === 0;
+  }
+
+  function renderByokImportGroups(result) {
+    const box = $("byokImportGroups");
+    if (!box) return;
+    byokImportTicket = result.ticket || null;
+    byokImportEntries = [];
+    const groups = Array.isArray(result.groups) ? result.groups : [];
+    if (!groups.length) {
+      box.innerHTML = `<div class="byok-import-empty">未检出可导入的本地渠道配置</div>`;
+      updateByokImportConfirm();
+      return;
+    }
+    box.innerHTML = groups.map((g) => {
+      const rows = (g.entries || []).map((entry) => {
+        const idx = byokImportEntries.length;
+        byokImportEntries.push(entry);
+        return byokImportRowHtml(entry, idx);
+      }).join("");
+      return `<div class="byok-import-group">` +
+        `<div class="byok-import-group-title">${escapeHtml(statsEndpointLabel(g.agentId))}</div>${rows}</div>`;
+    }).join("");
+    box.querySelectorAll('input[type="checkbox"][data-byok-idx]').forEach((cb) => {
+      cb.onchange = updateByokImportConfirm;
+    });
+    updateByokImportConfirm();
+  }
+
+  async function runByokImportScan() {
+    const gen = skillsModalGen;
+    try {
+      const r = await api("POST", "/api/byok-import/scan", {});
+      if (gen !== skillsModalGen) return; // 弹窗已换主/已重开，旧扫描结果作废
+      renderByokImportGroups(r);
+    } catch (e) {
+      if (gen !== skillsModalGen) return;
+      const box = $("byokImportGroups");
+      if (box) box.innerHTML = `<div class="store-form-error">${escapeHtml(panelError(e, "导入未完成"))}</div>`;
+    }
+  }
+
+  function openByokImportModal() {
+    byokImportTicket = null;
+    byokImportEntries = [];
+    showSkillsModal({
+      title: "从本地配置导入",
+      wide: true,
+      confirmText: "导入所选（0）",
+      bodyHtml: `
+        <div class="byok-import-lead">以下是各端点本地配置中检出、尚未入库的渠道。勾选后导入中央库，并随同步分发到所有端点。</div>
+        <div class="byok-import-groups" id="byokImportGroups"><div class="byok-import-empty">加载中…</div></div>
+        <label class="byok-import-delete"><input type="checkbox" id="byokImportDeleteLocal" checked>导入后移除端点本地的原始配置</label>
+        <div class="byok-import-note">移除前自动备份原文件；取消勾选则仅入库，本地原样保留。</div>
+        <div class="byok-import-footnote">Claude Code 没有可读取的本地渠道配置，不在其列</div>`,
+      onConfirm: applyByokImportSelection,
+    });
+    $("skillsModalConfirmBtn").disabled = true; // 扫描回话且确有勾选前不给确认
+    runByokImportScan();
+  }
+
+  async function applyByokImportSelection() {
+    const keys = byokImportSelectedKeys();
+    if (!keys.length || !byokImportTicket) return;
+    const deleteLocal = !!$("byokImportDeleteLocal")?.checked;
+    try {
+      const r = await api("POST", "/api/byok-import/apply", { ticket: byokImportTicket, keys, deleteLocal });
+      byokImportTicket = null;
+      // 被折叠的服务端原文一律并送面板日志（与 panelError 同一通道）
+      for (const f of r.failed || []) reportMaskedPanelError("导入本地配置：条目入库失败", `${f.key}：${f.error}`);
+      for (const f of r.removeFailed || []) reportMaskedPanelError("导入本地配置：本地原始配置移除失败", `${f.key}：${f.error}`);
+      const hasFailure = (r.failed || []).length > 0 || (r.removeFailed || []).length > 0;
+      landByokImportReceipt(byokImportReceiptText(r, deleteLocal), hasFailure);
+      await refreshStoreState();
+    } catch (e) {
+      if (e.code === "ticket-expired") {
+        // 票据 15 分钟有效，过期只能重新扫描，不做静默重试
+        byokImportTicket = null;
+        landByokImportReceipt("导入票据已过期，请重新扫描", true);
+      } else {
+        landByokImportReceipt(panelError(e, "导入未完成"), true);
+      }
+    }
+  }
+
   // 重命名：只改显示名，渠道 id / 池 id 是 wire 身份不可改。预填不走 value
   // 属性（escapeHtml 不转义双引号，显示名含引号会破属性），渲染后由 JS 赋值。
   function showRenameProviderModal(p) {
@@ -11492,6 +11664,7 @@ async function api(method, path, body) {
   function initStoreTab() {
     $("tabStore").onclick = () => switchView("store");
     $("storeAddBtn").onclick = () => showAddModal();
+    $("storeImportLocalBtn").onclick = () => openByokImportModal();
     $("storeRefreshAllBtn").onclick = () => storeRefresh(null);
     // 「查看差异」弹窗关闭：关闭钮 / 点遮罩 / Esc（与会话删除确认弹窗同模式）
     $("storeDiffCloseBtn").addEventListener("click", closeStoreDiffModal);

@@ -17,6 +17,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
@@ -757,6 +758,10 @@ export function createPanelRouter({
   dataBundleService = null,
   pickFolderFn = pickFolder,
   pickFileFn = pickFile,
+  // BYOK 渠道导入服务（byok-import.mjs 装配 byok-remove.mjs）。可注入以便单测；
+  // `null` 时首次请求按当前 relayRoot 惰性建真服务。真实模块经动态 import 装入
+  // （见路由块注释），所以注入假服务的测试永远不会加载真模块。
+  byokImportService = null,
   // Prompts tab facade (createPromptsPanelService). Injectable for tests;
   // `null` lazily builds the real facade on the first prompts request.
   promptsService = null,
@@ -1783,6 +1788,28 @@ export function createPanelRouter({
   function usageJournalLazy() {
     if (!usageJournal) usageJournal = createUsageJournal({ dir: join(relayRoot, "usage") });
     return usageJournal;
+  }
+
+  // BYOK 导入服务惰性装配：storeRoot 用面板同一个数据根（store.json 所在），
+  // 端点本地配置扫 homeDir 下的各端点目录；removeFn 绑定删除器，备份落数据根
+  // backups/（与数据搬迁同一备份约定；面板是组合根，backupRoot 以这里为准，
+  // 服务自带的默认备份目录不生效）。两个真模块由并行工人交付，动态 import
+  // 让它们缺席或半成品时只拖垮这两条路由，不影响 panel.mjs 整体加载。
+  async function byokImportServiceLazy() {
+    if (!byokImportService) {
+      const [{ createByokImportService }, { removeImportedEntries }] = await Promise.all([
+        import("./byok-import.mjs"),
+        import("./byok-remove.mjs"),
+      ]);
+      byokImportService = createByokImportService({
+        storeRoot: relayRoot,
+        homeDir: homedir(),
+        env: base,
+        removeFn: (entries, opts = {}) =>
+          removeImportedEntries(entries, { ...opts, backupRoot: join(relayRoot, "backups") }),
+      });
+    }
+    return byokImportService;
   }
 
   // Session-end journaling. The per-launch reporter POSTs cumulative
@@ -2863,6 +2890,56 @@ export function createPanelRouter({
       }
     }
 
+    // ── BYOK 渠道导入（扫端点本地手配渠道 → 勾选入库 → 默认删本地原始条目）──
+    // 与数据搬迁同一惯例：业务失败一律 200 + { ok:false, error }（ticket-expired、
+    // unknown-selection 都是可用信息，不是异常）；校验错抛 statusCode 按码落地。
+    // scan 无 body；响应形状由服务保证（entries 不含明文 key）。票据只活在内存，
+    // 面板宿主退出时经 dropByokImportTickets 丢掉。
+    if (path.startsWith("/panel/api/byok-import/")) {
+      if (method === "POST") {
+        try {
+          if (path === "/panel/api/byok-import/scan") {
+            const svc = await byokImportServiceLazy();
+            const result = await svc.scanLocalConfigs();
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/byok-import/apply") {
+            // readJsonBody 必须在第一个 await 之前挂上 data/end 监听：客户端的
+            // 请求体可能随微任务立刻到达，先 await 装配服务会永久丢 body。
+            const bodyPromise = readJsonBody(req);
+            const svc = await byokImportServiceLazy();
+            const body = await bodyPromise;
+            const requireString = (value, field) => {
+              if (typeof value !== "string" || !value.trim()) {
+                const error = new Error(`${field} 不能为空`);
+                error.statusCode = 400;
+                throw error;
+              }
+              return value.trim();
+            };
+            if (!Array.isArray(body.keys) || body.keys.some((k) => typeof k !== "string" || !k.trim())) {
+              const error = new Error("keys 必须是非空字符串数组");
+              error.statusCode = 400;
+              throw error;
+            }
+            if (typeof body.deleteLocal !== "boolean") {
+              const error = new Error("deleteLocal 必须是布尔值");
+              error.statusCode = 400;
+              throw error;
+            }
+            const result = await svc.applyImport({
+              ticket: requireString(body.ticket, "ticket"),
+              keys: body.keys.map((k) => k.trim()),
+              deleteLocal: body.deleteLocal,
+            });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
     sendJson(res, 404, { error: "not found" });
   }
 
@@ -2875,11 +2952,23 @@ export function createPanelRouter({
     },
     // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
     // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。
+    // BYOK 导入票据同样攥着明文 key 内存副本，随同一退出钩子丢掉（panel-host
+    // 只调 dropDataBundleTickets，所以这里一并带上；单独清理走下面的方法）。
     dropDataBundleTickets() {
       try {
         dataBundleService?.dropAllTickets?.();
       } catch (err) {
         logger?.warn?.(`导入暂存清理失败：${err.message}`);
+      }
+      this.dropByokImportTickets();
+    },
+    // BYOK 导入票据清理：服务还没建起来时静默跳过（不能为了清理而把服务建起来），
+    // 清理失败也不能卡住退出路径。
+    dropByokImportTickets() {
+      try {
+        byokImportService?.dropTickets?.();
+      } catch (err) {
+        logger?.warn?.(`BYOK 导入票据清理失败：${err.message}`);
       }
     },
   };
