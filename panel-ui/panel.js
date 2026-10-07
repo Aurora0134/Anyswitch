@@ -343,7 +343,20 @@ async function api(method, path, body) {
           }
         };
       }
-      await Promise.allSettled([firstStatus, startupViewReady]);
+      // 开屏层的退场判据从「请求 resolve 了」改成「看板拿到能当事实说的首帧」
+      // （frame.ready，见 refreshAgents 的帧闸）。前者会把遮挡层掀在那幅静态基线上——
+      // 八张「未检测到运行中的 X」加一张带「运行中」徽标的空 ZCode，正是 2026-10-07 报的
+      // 中间态。落点不是看板页时不等这一帧（看板没渲染，等它只会白等）。
+      // 2500ms 上限：取数一直不通就让开屏照常淡出、由 data-board=pending 的骨架条接着
+      // 盖住画面，不把用户锁在动画后面；开屏自己的兜底时限仍在。
+      const startupWaits = [firstStatus, startupViewReady];
+      if (boardVisible()) {
+        startupWaits.push(Promise.race([
+          boardLivePromise,
+          new Promise((resolve) => setTimeout(resolve, 2500)),
+        ]));
+      }
+      await Promise.allSettled(startupWaits);
       requestAnimationFrame(() => requestAnimationFrame(() => window.panelStartupController?.ready()));
     }
   }
@@ -661,11 +674,41 @@ async function api(method, path, body) {
     render(agent);
   }
 
+  // 看板首帧闸：pending → live 的唯一翻转点。
+  //
+  // 判据是「后端明说这一帧能当事实说」（frame.ready），不是「请求成功了吗」：relay 没起、
+  // 面板跨进程拉取超时又手里没有可续的陈旧快照时，回来的是一帧结构完整但空有其形的东西，
+  // 渲染它就把「还没取到数」画成「什么都没跑」（2026-10-07 报的那段中间态）。此时什么都不画，
+  // 画面继续停在 HTML 静态带的 data-board="pending" 上——卡内只有骨架条（见 panel.css 同名段）。
+  // 兼容不带 frame 的旧后端：非空 agents 即算数，行为与改前一致。
+  //
+  // 判定抽成纯函数是为了让这段逻辑能在测试里真跑一遍（与 relayStatusPresentation 同因），
+  // 而不是只对源码做正则断言。
+  function boardFrameVerdict(res) {
+    const agents = res && Array.isArray(res.agents) ? res.agents : null;
+    if (!agents || agents.length === 0) return false;
+    if (res.frame) return res.frame.ready === true;
+    return true;
+  }
+
+  let boardLive = false;
+  let boardLiveSettled = null;
+  const boardLivePromise = new Promise((resolve) => { boardLiveSettled = resolve; });
+  function markBoardLive() {
+    if (boardLive) return;
+    boardLive = true;
+    document.documentElement.setAttribute("data-board", "live");
+    // 一次性消费：开屏层用它决定退场时机（拿到可信首帧才揭，而不是请求一 resolve 就揭）。
+    if (boardLiveSettled) boardLiveSettled();
+  }
+
   async function refreshAgents() {
     if (agentsInFlight) return;
     agentsInFlight = true;
     try {
       const res = await api("GET", "/api/agents");
+      if (!boardFrameVerdict(res)) return;
+      markBoardLive();
       if (res && res.agents) {
         lastBoardAgents = res.agents;
         syncRouteChainsVer();

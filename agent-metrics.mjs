@@ -992,18 +992,28 @@ function parseTasklistCsv(stdout) {
       // kimi core runs embedded inside it and holds the relay connection), so
       // unlike DSH's launcher shells it counts and it joins the engine set —
       // and the image name alone is what makes it the Desktop surface. Plain
-      // tasklist rows carry no command line, so they stay accept-by-name.
-      // Helper children feed the family pid set only (lineage / liveness).
+      // tasklist rows carry no command line: they count, but claim no host and
+      // no surface (see the note below). Helper children feed the family pid
+      // set only (lineage / liveness).
+      //
+      // 命令行列缺席的那一轮不得主张宿主/引擎/面（2026-10-07 报障：看板加载中间态副行
+      // 报出「Desktop ×5」，一张卡还挂着空数据行）：「这是主进程还是 --type= 子进程」只有
+      // 命令行能答，靠镜像名整批收进宿主集合就是把一个桌面端报成五次会话——那是误折，
+      // 99e4d9c 立的「宁可漏折不可误折」正好禁止它。宿主与面由 carry 从可信轮供回（用例
+      // 「降级轮里桌面端仍然只算一个会话宿主」），可信轮没见过的新进程等下一轮可信轮说话。
+      // 进程数与家族 pid 照旧由本轮给（50a41fc 的边界不动）。
       if (commandLine?.includes("--type=")) {
         if (pid) result.kimiPids.add(pid);
       } else {
         result.kimi += 1;
         if (pid) {
           result.kimiPids.add(pid);
-          result.kimiEnginePids.add(pid);
-          // 宿主集合：面级稳定行的折叠与存活判据，只收主进程。
-          result.kimiDesktopPids.add(pid);
-          result.kimiSurfaceByPid.set(pid, "desktop");
+          if (commandLine !== null) {
+            result.kimiEnginePids.add(pid);
+            // 宿主集合：面级稳定行的折叠与存活判据，只收主进程。
+            result.kimiDesktopPids.add(pid);
+            result.kimiSurfaceByPid.set(pid, "desktop");
+          }
         }
       }
     } else if (bucket === "dsh-desktop") {
@@ -3251,8 +3261,23 @@ export function createAgentMetricsCollector(options = {}) {
     const active = [];
 
     // Ensure all currently running claude.exe PIDs have a session tracked immediately
+    //
+    // 冷/降级轮的例外（2026-10-07 报障：看板加载中间态概率出现数个空实例卡）：读不到
+    // 命令行列的那一轮，「这个 pid 是不是会话进程、是什么形态」答不出，而这里给桶里每个
+    // pid 都建一行。本机实测：冷降级轮一次出 10 行「会话 #N / 待命 / 0 请求 / tokens 全 0
+    // / 无徽标」的空实例卡——一个桌面端裂成一排。
+    //
+    // 闸门只认一种状态：这一轮是降级轮，**且此刻手里没有任何可信依据**（从未落地过可信轮，
+    // 或可信轮已过 99e4d9c 的 30s 沿用窗）。前者是面板/中继刚起的第一轮，后者是探针被闲置
+    // 回收后再冷启动的那一轮——两者都一样「每个 pid 都陌生」，逐 pid 成行必然是一排空卡。
+    // 沿用窗之内的降级轮维持既有裁决：可信轮没见过的新进程照样建行、只是不贴徽标
+    // （用例「盲轮期间刚起的、可信轮没见过的进程不贴形态徽标」钉着，不在这里动）。
+    // 边界同 99e4d9c：只管「分型与归属」，进程数与存活判定仍由本轮说了算（50a41fc）。
+    const blindWithoutBasis = procCounts.countsAuthoritative !== true
+      && (lastTrustedScan === null || nowFn() - lastTrustedScanTime > TRUSTED_FORM_CARRY_MS);
     for (const pid of livePids) {
       if (!claudeSessions.has(pid)) {
+        if (blindWithoutBasis) continue;
         claudeSessions.set(pid, {
           id: `claude-${pid}`,
           pid,
