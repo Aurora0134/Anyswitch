@@ -8971,3 +8971,201 @@ describe("自动同步失败上屏（sync-status 落盘 + 轮询 + 文案锚点�
     assert.ok(panelMjs.includes('syncStatusFromResult(result, "manual")'), "手动同步路由");
   });
 });
+
+// ─────────────────────────────────────────────────────────────
+// BYOK「导入本地配置」（面板前端）：入口按钮、勾选弹窗、回执生命周期。
+// 服务端路由与票据服务由 panel.mjs / byok-import.mjs 承担（路由侧另有
+// byok-import-api 测试）；这里钉前端的契约形状与逐字文案。纯函数摘出来在
+// vm 里真跑（与 createDataBundleController 的摘取手法同源），胶水层走源码断言。
+describe("BYOK 导入本地配置（面板前端）", () => {
+  // 摘 panel.js 顶层的 2 空格缩进函数进 vm 跑；deps 先行注入（如 escapeHtml）
+  function vmFn(name, deps = []) {
+    const parts = [...deps, name].map((fnName) => {
+      const body = panelJs.match(new RegExp(`  function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    return vm.runInNewContext(`(() => { ${parts}; return ${name}; })()`, {});
+  }
+
+  it("入口按钮在渠道总览按钮行（新增渠道与全部刷新之间）", () => {
+    assert.ok(
+      /id="storeAddBtn">新增渠道<\/button>[\s\S]{0,200}?id="storeImportLocalBtn">导入本地配置<\/button>[\s\S]{0,200}?id="storeRefreshAllBtn">全部刷新<\/button>/.test(panelHtml),
+      "按钮行：新增渠道 → 导入本地配置 → 全部刷新",
+    );
+    assert.ok(panelJs.includes('$("storeImportLocalBtn").onclick = () => openByokImportModal();'),
+      "点击接线到弹窗");
+  });
+
+  it("弹窗逐字文案在线（标题/导语/删除开关/脚注/空态/扫描中）", () => {
+    const openStart = panelJs.indexOf("function openByokImportModal(");
+    assert.ok(openStart >= 0, "openByokImportModal 存在");
+    const open = panelJs.slice(openStart, panelJs.indexOf("\n  }\n", openStart));
+    assert.ok(open.includes('title: "从本地配置导入"'), "弹窗标题");
+    assert.ok(open.includes("以下是各端点本地配置中检出、尚未入库的渠道。勾选后导入中央库，并随同步分发到所有端点。"), "导语");
+    assert.ok(open.includes("导入后移除端点本地的原始配置"), "删除本地开关标签");
+    assert.ok(open.includes("移除前自动备份原文件；取消勾选则仅入库，本地原样保留。"), "删除开关小字");
+    assert.ok(open.includes("Claude Code 没有可读取的本地渠道配置，不在其列"), "固定脚注");
+    assert.ok(open.includes("加载中…"), "弹窗内先呈扫描中状态（复用既有文案）");
+    assert.ok(open.includes('id="byokImportDeleteLocal" checked'), "删除本地默认勾选");
+    assert.ok(open.includes('confirmText: "导入所选（0）"'), "确认按钮初始文案（0 时禁用）");
+    assert.ok(open.includes("wide: true"), "宽弹窗");
+    assert.ok(open.includes("onConfirm: applyByokImportSelection"), "确认接线");
+    assert.ok(panelJs.includes("未检出可导入的本地渠道配置"), "空态文案");
+  });
+
+  it("扫描与入库走契约路径与契约 body", () => {
+    assert.ok(panelJs.includes('api("POST", "/api/byok-import/scan", {})'), "scan 调用（无 body）");
+    assert.ok(panelJs.includes('api("POST", "/api/byok-import/apply", { ticket: byokImportTicket, keys, deleteLocal })'),
+      "apply body = { ticket, keys, deleteLocal }");
+  });
+
+  it("候选 key 不序列化进 DOM（勾选框只带下标）", () => {
+    const start = panelJs.indexOf("function byokImportRowHtml(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes("data-byok-idx"), "行内只带下标");
+    assert.ok(!fn.includes("entry.key"), "key 不进 DOM（票据内存态）");
+  });
+
+  it("行渲染：ok 默认勾选，duplicate/密钥问题禁选并给逐字标注", () => {
+    const rowHtml = vmFn("byokImportRowHtml", ["escapeHtml"]);
+    const okRow = rowHtml({ key: "k1", displayName: "A6 API", baseURL: "https://a6.example.com/v1", modelCount: 3, status: "ok" }, 0);
+    assert.ok(okRow.includes(" checked") && !okRow.includes("disabled"), "ok 行默认勾选、可改");
+    assert.ok(okRow.includes("A6 API · https://a6.example.com/v1 · 3 个模型"), "行 = 渠道名 · 上游地址 · N 个模型");
+    const dup = rowHtml({ key: "k2", displayName: "Dup", baseURL: "https://d.example.com", modelCount: 1, status: "duplicate" }, 1);
+    assert.ok(dup.includes("disabled") && !dup.includes(" checked"), "duplicate 置灰禁选");
+    assert.ok(dup.includes("已在库"), "duplicate 徽标");
+    const unresolved = rowHtml({ key: "k3", displayName: "U", baseURL: "https://u.example.com", modelCount: 0, status: "unresolved-key" }, 2);
+    assert.ok(unresolved.includes("disabled") && unresolved.includes("密钥无法读取，跳过"), "unresolved-key 标注");
+    const noKey = rowHtml({ key: "k4", displayName: "N", baseURL: "https://n.example.com", modelCount: 0, status: "no-key" }, 3);
+    assert.ok(noKey.includes("disabled") && noKey.includes("未配置密钥，跳过"), "no-key 标注");
+  });
+
+  it("回执拼装：删/不删打底，部分失败与移除失败依次追加", () => {
+    const receipt = vmFn("byokImportReceiptText");
+    assert.equal(receipt({ imported: 3, failed: [], removeFailed: [] }, true),
+      "已导入 3 条渠道，本地原始配置已移除（原文件已备份）");
+    assert.equal(receipt({ imported: 2, failed: [], removeFailed: [] }, false),
+      "已导入 2 条渠道，本地配置原样保留");
+    assert.equal(receipt({ imported: 2, failed: [{ key: "a", error: "x" }], removeFailed: [] }, false),
+      "已导入 2 条渠道，本地配置原样保留，1 条失败（详情见面板日志）");
+    assert.equal(receipt({ imported: 1, failed: [], removeFailed: [{ key: "b", error: "y" }] }, true),
+      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），1 处本地配置移除失败（详情见面板日志）");
+    assert.equal(receipt({
+      imported: 1,
+      failed: [{ key: "a", error: "x" }, { key: "b", error: "z" }],
+      removeFailed: [{ key: "c", error: "y" }],
+    }, true),
+      "已导入 1 条渠道，本地原始配置已移除（原文件已备份），2 条失败（详情见面板日志），1 处本地配置移除失败（详情见面板日志）");
+  });
+
+  it("回执落点：状态小字 + toast，人不在渠道 tab 置「等切回」", () => {
+    const start = panelJs.indexOf("function landByokImportReceipt(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes('setStoreRefreshStatus(text, isErr ? "err" : "done")'), "落渠道总览状态小字");
+    assert.ok(fn.includes('if (currentView !== "store")'), "人不在渠道 tab 才置标记");
+    assert.ok(fn.includes("storeStatusAwaitReturn = true;"), "等切回标记");
+    assert.ok(fn.includes("disarmStoreStatusTimer()"), "暂停淡出等人切回");
+    assert.ok(fn.includes("toast(text, isErr)"), "结果 toast");
+  });
+
+  it("票据过期给逐字提示且只认重新扫描；被折叠原文进面板日志", () => {
+    const start = panelJs.indexOf("async function applyByokImportSelection(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes('e.code === "ticket-expired"'), "过期短码分支");
+    assert.ok(fn.includes('"导入票据已过期，请重新扫描"'), "过期逐字文案");
+    assert.ok(!fn.includes("runByokImportScan()"), "过期不做静默重扫");
+    assert.ok(fn.includes("reportMaskedPanelError("), "失败条目原文进面板日志");
+    assert.ok(fn.includes("await refreshStoreState()"), "完成后走既有路径刷新渠道列表");
+  });
+
+  it("扫描中先呈加载态，回话按 skillsModalGen 代际防串台", () => {
+    const openStart = panelJs.indexOf("function openByokImportModal(");
+    const open = panelJs.slice(openStart, panelJs.indexOf("\n  }\n", openStart));
+    assert.ok(open.includes("加载中…"), "弹窗内先呈扫描中状态");
+    const scanStart = panelJs.indexOf("async function runByokImportScan(");
+    const scan = panelJs.slice(scanStart, panelJs.indexOf("\n  }\n", scanStart));
+    assert.ok(scan.includes("const gen = skillsModalGen"), "取代际");
+    assert.ok(scan.includes("gen !== skillsModalGen"), "代际不符作废旧回话");
+  });
+
+  it("确认按钮文案随勾选数联动、0 时禁用", () => {
+    const start = panelJs.indexOf("function updateByokImportConfirm(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes("`导入所选（${n}）`"), "导入所选（N）");
+    assert.ok(fn.includes("btn.disabled = n === 0"), "0 时禁用");
+  });
+
+  it("组头用端点显示名（取自既有 agent 元数据映射）", () => {
+    const start = panelJs.indexOf("function renderByokImportGroups(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes("statsEndpointLabel(g.agentId)"), "端点显示名取自 STATS_ENDPOINT_LABELS");
+  });
+});
+
+// 新增渠道表单：显示名行移到渠道 ID 行上方；显示名输入时 id 行实时联动
+// （合法化 = poolSlugify 同款规则再截 127），手动改过即断、清空恢复。
+describe("新增渠道表单：显示名上移 + 渠道 ID 随显示名联动", () => {
+  function vmFn(name, deps = []) {
+    const parts = [...deps, name].map((fnName) => {
+      const body = panelJs.match(new RegExp(`  function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
+      assert.ok(body, `${fnName} found in panel.js`);
+      return body;
+    }).join("\n");
+    return vm.runInNewContext(`(() => { ${parts}; return ${name}; })()`, {});
+  }
+
+  it("单渠道表单：显示名行在渠道 ID 行上方", () => {
+    const start = panelJs.indexOf("function showAddModal(");
+    const fn = panelJs.slice(start, panelJs.indexOf("showSkillsModal({", start));
+    const nameAt = fn.indexOf('id="storeAddName"');
+    const idAt = fn.indexOf('id="storeAddId"');
+    assert.ok(nameAt >= 0 && idAt >= 0, "两行都在");
+    assert.ok(nameAt < idAt, "显示名在上");
+  });
+
+  it("号池资料组同样显示名在渠道 ID 上方", () => {
+    const start = panelJs.indexOf("function addSetHtml(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    const nameAt = fn.indexOf("set-name");
+    const idAt = fn.indexOf("set-id");
+    assert.ok(nameAt >= 0 && idAt >= 0 && nameAt < idAt, "资料组内显示名在上");
+  });
+
+  it("联动合法化：小写、非法段折叠为 -、剥开头非字母数字、上限 127、纯中文留空", () => {
+    const slug = vmFn("storeAddIdFromName", ["poolSlugify"]);
+    assert.equal(slug("My Provider"), "my-provider");
+    assert.equal(slug("  ANTHROPIC 专用 "), "anthropic");
+    assert.equal(slug(".hidden"), "hidden");
+    assert.equal(slug("渠道"), "", "纯中文合法化结果为空，留空不硬造");
+    assert.equal(slug("a/b/c"), "a-b-c");
+    assert.equal(slug("x".repeat(200)).length, 127, "上限 127");
+    assert.ok(/^[a-z0-9][a-z0-9._-]*$/.test(slug("A Very Long Provider_Name.v2")), "产出恒合法形");
+  });
+
+  it("联动接线：手动改过即断、清空恢复；单渠道与资料组都接上", () => {
+    const start = panelJs.indexOf("function wireStoreAddNameIdLinkage(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes('idInput.dataset.touched !== "1"'), "未手动改过才联动");
+    assert.ok(fn.includes("storeAddIdFromName(nameInput.value)"), "合法化后填入");
+    assert.ok(fn.includes('idInput.dataset.touched = idInput.value.trim() ? "1" : "0"'), "清空即恢复联动");
+    const modalStart = panelJs.indexOf("function showAddModal(");
+    const modal = panelJs.slice(modalStart, panelJs.indexOf("async function submitAddSingleModal(", modalStart));
+    assert.ok(modal.includes('wireStoreAddNameIdLinkage($("storeAddName"), $("storeAddId"))'), "单渠道接线");
+    assert.ok(modal.includes('wireStoreAddNameIdLinkage(setEl.querySelector(".set-name"), setEl.querySelector(".set-id"))'), "资料组逐组接线");
+  });
+
+  it("开关切换与失败重开回填联动态（data-touched 随收集留存）", () => {
+    const start = panelJs.indexOf("function collectAddModalValues(");
+    const fn = panelJs.slice(start, panelJs.indexOf("\n  }\n", start));
+    assert.ok(fn.includes('idTouched: ($("storeAddId")?.dataset.touched || "") === "1"'), "单渠道联动态入收集");
+    assert.ok(fn.includes('idTouched: (setEl.querySelector(".set-id").dataset.touched || "") === "1"'), "资料组联动态入收集");
+    const subStart = panelJs.indexOf("async function submitAddSingleModal(");
+    const sub = panelJs.slice(subStart, panelJs.indexOf("\n  }\n", subStart));
+    assert.ok(sub.includes('idTouched: $("storeAddId")?.dataset.touched === "1"'), "失败重开带回联动态");
+    assert.ok(panelJs.includes('id="storeAddId" value="${escapeHtml(v.id || "")}" data-touched="${v.idTouched ? "1" : "0"}"'),
+      "单渠道 id 行回填联动态");
+    assert.ok(panelJs.includes('class="store-form-input set-id" value="${escapeHtml(s.id || "")}" data-touched="${s.idTouched ? "1" : "0"}"'),
+      "资料组 id 行回填联动态");
+  });
+});
