@@ -10,6 +10,7 @@ const RUN_ID = "00000000-0000-4000-8000-000000000000";
 const APP_DIR = "C:/app";
 const REPO_URL = "https://github.com/Aurora0134/Anyswitch.git";
 const NPM_CLI = join("/node", "node_modules", "npm", "bin", "npm-cli.js");
+const NPM_ARGS = ["install", "--no-audit", "--no-fund", "--registry=https://registry.npmjs.org"];
 
 function runningRun(overrides = {}) {
   return {
@@ -102,7 +103,6 @@ function baseDeps(overrides = {}) {
     delay: clock.delay,
     now: () => "2026-10-07T01:00:00.000Z",
     nowMs: clock.nowMs,
-    alive: () => true,
     ...overrides,
   };
   return {
@@ -143,7 +143,7 @@ describe("runSelfUpdate", () => {
       assert.ok(checkoutCall, "checkout must be a forced detach onto FETCH_HEAD");
       const npm = git.calls.find(npmCall);
       assert.ok(npm, "npm install must run through the local npm-cli");
-      assert.deepEqual(npm.args.slice(1), ["install", "--no-audit", "--no-fund"]);
+      assert.deepEqual(npm.args.slice(1), NPM_ARGS);
       assert.equal(npm.options.cwd, APP_DIR);
       // 进程面：relay 换新一次、面板没有回滚拉起、watchdog 默认不在跑则不动。
       assert.equal(events.relayRestarts, 1);
@@ -158,7 +158,7 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("镜像安装首次引导：没有 .git 就 init + remote add，无回滚点也照常更新", async () => {
+  test("镜像安装首次引导：没有 .git 就 init + remote add，无恢复点也照常更新", async () => {
     const probe = scriptedProbe([null, { version: "0.7.0" }]);
     const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { error: { code: 128 } } : { stdout: "" }));
     const { deps, events, journalDir, cleanup } = baseDeps({
@@ -192,7 +192,22 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("检出版本与目标不一致：在中止点收场，relay 与面板都没被动过", async () => {
+  test("目标 tag 形态无效：直接失败，一个 git 命令都不发", async () => {
+    const git = fakeSpawn(() => ({ stdout: "" }));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ targetTag: "-bad" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /更新目标无效/);
+      assert.equal(git.calls.length, 0);
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("检出版本与目标不一致：还原工作树后收场，relay 与面板都没被动过", async () => {
     const { probePanelFn, probe } = scriptedProbe([{ version: "0.6.1-preview" }]);
     const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }));
     const { deps, events, journalDir, cleanup } = baseDeps({
@@ -205,6 +220,10 @@ describe("runSelfUpdate", () => {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
       assert.match(result.message, /不一致/);
+      assert.match(result.message, /已还原/);
+      assert.equal(result.afterVersion, "0.6.1-preview");
+      // 中止还原：换装后必须把工作树退回记录的 HEAD，不留新代码配旧进程。
+      assert.ok(git.calls.some((call) => args0("checkout", "--detach", "--force", "abc123def")(call.args)), "abort must restore the recorded HEAD");
       assert.equal(events.relayRestarts, 0);
       assert.equal(probe.calls, 0);
     } finally {
@@ -230,14 +249,37 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("拉取失败：网络/git 层面的失败在服务无损的前提下收场", async () => {
+  test("依赖安装失败：还原工作树后如实报失败", async () => {
+    const { probePanelFn, probe } = scriptedProbe([{ version: "0.6.1-preview" }]);
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "HEAD")(args)) return { stdout: "abc123def\n" };
+      if (args[0] === NPM_CLI) return { error: { code: 1 }, stderr: "npm error" };
+      return { stdout: "" };
+    });
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /组件安装失败/);
+      assert.match(result.message, /已还原/);
+      assert.equal(result.afterVersion, "0.6.1-preview");
+      assert.ok(git.calls.some((call) => args0("checkout", "--detach", "--force", "abc123def")(call.args)), "abort must restore the recorded HEAD");
+      assert.equal(events.relayRestarts, 0);
+      assert.equal(probe.calls, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("下载失败：网络/git 层面的失败在服务无损的前提下收场", async () => {
     const git = fakeSpawn(({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(args) ? { error: { code: 128 }, stderr: "fatal: could not read" } : { stdout: "" }));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
     writeJournal(journalDir, runningRun());
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
-      assert.match(result.message, /拉取 v0.7.0/);
+      assert.match(result.message, /下载 v0.7.0/);
       assert.equal(result.detail, "fatal: could not read");
       assert.equal(events.relayRestarts, 0);
     } finally {
@@ -264,12 +306,12 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("新面板未接管且有回滚点：退回 beforeHead、重拉面板与 relay，outcome=rolled_back", async () => {
+  test("新面板未接管且有恢复点：退回 beforeHead、重装依赖、重拉面板与 relay，outcome=rolled_back", async () => {
     const probe = scriptedProbe([
       { version: "0.6.1-preview" }, // 退场前仍在应答
       null,                          // 面板退场
       null,                          // 新面板迟迟不来（超时窗口内一直如此）
-      { version: "0.6.1-preview" },  // 回滚后的旧面板回来了
+      { version: "0.6.1-preview" },  // 恢复后的旧面板回来了
     ]);
     const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
@@ -277,9 +319,11 @@ describe("runSelfUpdate", () => {
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "rolled_back");
-      assert.match(result.message, /已回滚/);
+      assert.match(result.message, /已恢复/);
       const rollback = git.calls.find((call) => args0("checkout", "--detach", "--force", "abc123def")(call.args));
       assert.ok(rollback, "rollback must force-checkout the recorded HEAD");
+      // 恢复完整 = 旧代码配旧依赖：退回后必须再跑一次 npm install。
+      assert.equal(git.calls.filter(npmCall).length, 2, "rollback must re-run npm install");
       assert.equal(events.panelHostSpawns, 1);
       assert.equal(events.relayRestarts, 2);
     } finally {
@@ -287,7 +331,34 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("新面板未接管且无回滚点：尽力拉起面板并如实报 failed", async () => {
+  test("恢复后依赖重装失败：如实附加组件未完全恢复，不谎报恢复完整", async () => {
+    const probe = scriptedProbe([
+      { version: "0.6.1-preview" },
+      null,
+      null,
+      { version: "0.6.1-preview" },
+    ]);
+    let npmCount = 0;
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "HEAD")(args)) return { stdout: "abc123def\n" };
+      if (args[0] === NPM_CLI) {
+        npmCount += 1;
+        return npmCount === 2 ? { error: { code: 1 }, stderr: "npm error" } : { stdout: "" };
+      }
+      return { stdout: "" };
+    });
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "rolled_back");
+      assert.match(result.message, /运行组件未完全恢复/);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("新面板未接管且无恢复点：尽力拉起面板并如实报 failed", async () => {
     const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, null]);
     const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { error: { code: 128 } } : { stdout: "" }));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
@@ -295,7 +366,7 @@ describe("runSelfUpdate", () => {
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
-      assert.match(result.message, /首次引导更新没有回滚点/);
+      assert.match(result.message, /没有可退回的旧版本/);
       assert.equal(events.panelHostSpawns, 1);
     } finally {
       cleanup();

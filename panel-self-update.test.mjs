@@ -4,7 +4,8 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "./panel.mjs";
 import { readClientUpdateRun, writeClientUpdateRun } from "./client-update-journal.mjs";
 
@@ -114,7 +115,8 @@ describe("POST /panel/api/self-update", () => {
       assert.equal(recorded.targetVersion, "0.7.0");
       assert.equal(recorded.targetTag, "v0.7.0");
       assert.equal(recorded.beforeVersion, "0.6.1-preview");
-      assert.equal(recorded.appDir.replaceAll("\\", "/").endsWith("Anyswitch"), true);
+      // appDir 就是 panel.mjs 所在目录（与测试文件同目录），与检出位置的名字无关。
+      assert.equal(recorded.appDir, dirname(fileURLToPath(import.meta.url)));
       assert.equal(watch.scheduled, 1, "the swap watcher must be armed");
     });
   });
