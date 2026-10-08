@@ -285,11 +285,12 @@
   letter-spacing: -0.02em;
 }
 
-/* 遥测四宫格与会话列表：方角 + 编辑栏题字距 */
+/* 遥测四宫格、会话列表与骨架条：方角 + 编辑栏题字距 */
 :root[data-style="sepia"] .telemetry-card,
 :root[data-style="sepia"] .session-table-wrapper,
 :root[data-style="sepia"] .alert-box,
-:root[data-style="sepia"] .empty-hint {
+:root[data-style="sepia"] .empty-hint,
+:root[data-style="sepia"] .sessions-skel {
   border-radius: 3px;
 }
 :root[data-style="sepia"] .telemetry-label {

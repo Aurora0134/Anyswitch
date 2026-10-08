@@ -565,11 +565,12 @@
   html[data-board="pending"] .agent-cards-container .panel-card > div > :not(.agent-top-bar):not(.board-card-loading) { display: none; }
   /* 骨架块跟在品牌行之后（pending 与 live 品牌行同位，flip 时标题不跳），上下间距零自设：
      上与品牌行相隔 14px 由 .agent-top-bar 自己的 margin-bottom 给——与 live 期标题到内容的
-     间距分毫不差；下贴卡身 padding，与 live 内容块同样不收尾距。 */
-  html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 9px; margin: 0; }
-  html[data-board="pending"] .board-skel-a { width: 62%; height: 14px; }
-  html[data-board="pending"] .board-skel-b { width: 38%; height: 11px; }
-  html[data-board="pending"] .board-skel-c { width: 52%; height: 11px; }
+     间距分毫不差；下贴卡身 padding，与 live 内容块同样不收尾距。两条骨架取会话行的剪影
+     （名称行短而高、tokens 行长而矮）——看板卡 live 后最常见的内容形态就是会话行，骨架
+     与落下来的真内容同形，flip 时形差不抢眼（2026-10-08 由段落三杠改会话行两杠）。 */
+  html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 7px; margin: 0; }
+  html[data-board="pending"] .board-skel-a { width: 30%; height: 12px; }
+  html[data-board="pending"] .board-skel-b { width: 55%; height: 11px; }
   /* 卡头留品牌与端点名，但徽标、折叠钮、实例计数都是数据位：visibility 而非 display，
      加载完不会因为标题换行而整屏跳一次。 */
   html[data-board="pending"] .agent-cards-container .agent-actions { visibility: hidden; }
@@ -3992,11 +3993,12 @@
   letter-spacing: -0.02em;
 }
 
-/* 遥测四宫格与会话列表：方角 + 编辑栏题字距 */
+/* 遥测四宫格、会话列表与骨架条：方角 + 编辑栏题字距 */
 :root[data-style="sepia"] .telemetry-card,
 :root[data-style="sepia"] .session-table-wrapper,
 :root[data-style="sepia"] .alert-box,
-:root[data-style="sepia"] .empty-hint {
+:root[data-style="sepia"] .empty-hint,
+:root[data-style="sepia"] .sessions-skel {
   border-radius: 3px;
 }
 :root[data-style="sepia"] .telemetry-label {

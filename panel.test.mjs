@@ -1639,6 +1639,20 @@ describe("panel.html sessions tab", () => {
     assert.ok(m[1].includes('hero ? "board-card-enter-scale" : "board-card-enter"'), "hero card uses the scale variant");
   });
 
+  it("staggers by the archived visual order while the prepaint card order is still in force", () => {
+    // 2026-10-08 报障：加载态窗口期切回看板，卡片浮出次序混乱。根因是首帧卡序接管
+    // （panel.html 的 data-prepaint-card-order）只用 CSS order 改绘制序、不改 DOM 序，
+    // 可信首帧落地前按 DOM 序发延迟就会跟屏上卡序对不上。
+    const m = panelJs.match(/function playBoardEnter\(view\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "playBoardEnter found in panel.js");
+    assert.ok(m[1].includes('document.documentElement.getAttribute("data-prepaint-card-order")'),
+      "首帧卡序接管生效期间读存档序");
+    assert.ok(m[1].includes('rank.get(a.getAttribute("data-agent-id")) - rank.get(b.getAttribute("data-agent-id"))'),
+      "端点卡槽位按存档视觉序填回，阶梯延迟跟着屏上卡序走");
+    assert.ok(m[1].indexOf("data-prepaint-card-order") < m[1].indexOf("cards.forEach"),
+      "重排发生在发延迟之前");
+  });
+
   it("restores the sessions tab from localStorage", () => {
     const m = panelJs.match(/function restoreView\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "restoreView found in panel.js");
@@ -9449,5 +9463,35 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
     assert.ok(refresh);
     assert.match(refresh, /if \(!boardFrameVerdict\(res\)\) return;\n\s*markBoardLive\(\);/,
       "不可信帧在渲染之前就返回，一帧都不画");
+  });
+
+  it("拿到可信首帧后把看板入场重播一遍，开屏层还在或落在别屏则不播", () => {
+    const refresh = panelJs.match(/async function refreshAgents\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(refresh);
+    assert.ok(refresh.includes("const boardWasPending = !boardLive;"),
+      "只在「本拍翻转」时播——1s 轮询的后续帧不再重播");
+    assert.ok(refresh.includes('boardWasPending && boardVisible() && !document.documentElement.hasAttribute("data-startup")'),
+      "无遮挡层且正停看板才补播：开屏窗口的入场归 onLeave，别屏的入场归 switchView");
+    assert.ok(refresh.indexOf('playBoardEnter(document.querySelector(".telemetry-view"))')
+      > refresh.indexOf("notifyBoardRendered()"),
+      "时点放在整卡渲染完之后：动画首帧看到的就是真内容");
+  });
+
+  it("骨架条取会话行剪影：两条（名称行 + tokens 行），不再砌段落三杠", () => {
+    assert.equal((panelHtml.match(/sessions-skel board-skel-bar/g) ?? []).length, 18,
+      "九卡各两条骨架");
+    assert.ok(!panelHtml.includes("board-skel-c"), "第三条段落杠已从 HTML 移除");
+    assert.ok(!panelCss.includes("board-skel-c"), "c 杠的 CSS 规则同步移除");
+    assert.ok(panelCss.includes('html[data-board="pending"] .board-skel-a { width: 30%; height: 12px; }'),
+      "名称行剪影：短而高");
+    assert.ok(panelCss.includes('html[data-board="pending"] .board-skel-b { width: 55%; height: 11px; }'),
+      "tokens 行剪影：长而矮");
+    assert.ok(panelCss.includes('html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 7px; margin: 0; }'),
+      "两条形行距 7px，上下间距仍零自设");
+  });
+
+  it("sepia 皮肤下骨架条收 3px 方角，与 empty-hint 同档", () => {
+    assert.ok(/:root\[data-style="sepia"\] \.sessions-skel \{\s*border-radius: 3px;/.test(panelCss),
+      "骨架族（看板加载态 + 会话页）统一收进 sepia 的方角口径");
   });
 });
