@@ -563,7 +563,10 @@
      它静默打回展开）。这里要压的是卡身**里面的数据块**，不碰卡身本身，选择器也就不该
      出现那个类名——写成 .card-body 会被闸门判成违规，而它担心的事与本条无关。 */
   html[data-board="pending"] .agent-cards-container .panel-card > div > :not(.agent-top-bar):not(.board-card-loading) { display: none; }
-  html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 9px; margin: 2px 0 2px; }
+  /* 骨架块跟在品牌行之后（pending 与 live 品牌行同位，flip 时标题不跳），上下间距零自设：
+     上与品牌行相隔 14px 由 .agent-top-bar 自己的 margin-bottom 给——与 live 期标题到内容的
+     间距分毫不差；下贴卡身 padding，与 live 内容块同样不收尾距。 */
+  html[data-board="pending"] .board-card-loading { display: flex; flex-direction: column; gap: 9px; margin: 0; }
   html[data-board="pending"] .board-skel-a { width: 62%; height: 14px; }
   html[data-board="pending"] .board-skel-b { width: 38%; height: 11px; }
   html[data-board="pending"] .board-skel-c { width: 52%; height: 11px; }

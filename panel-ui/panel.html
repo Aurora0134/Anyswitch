@@ -533,15 +533,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 1. ZCode 模块 -->
           <div class="panel-card" data-agent-id="zcode">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。-->
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -556,6 +547,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <span class="badge badge-ok" id="zcStateBadge">运行中</span>
                   <button type="button" class="agent-detail-fold" id="zcDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。-->
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="zcErrorBanner" hidden>
@@ -664,15 +665,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 2. Claude Code 模块 -->
           <div class="panel-card" data-agent-id="claude">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:var(--cc-avatar-bg); border:1px solid var(--cc-avatar-border);">
@@ -691,6 +683,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="ccModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="cc" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div id="ccEmpty" class="empty-hint">未检测到运行中的 Claude Code 实例</div>
@@ -727,15 +729,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 3. DeepSeek Harness 模块 -->
           <div class="panel-card" data-agent-id="dsh">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:#f4f4f5; border:1px solid #e4e4e7;">
@@ -755,6 +748,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <span class="badge badge-neutral" id="dshStateBadge">未运行</span>
                   <button type="button" class="agent-detail-fold" data-prefix="dsh" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="dshErrorBanner" hidden>
@@ -793,15 +796,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 5. Pi 模块 -->
           <div class="panel-card" data-agent-id="pi">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:#1a1a2e; border:1px solid #16213e;">
@@ -816,6 +810,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="piModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="pi" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="piErrorBanner" hidden>
@@ -852,15 +856,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 6.5. Qoder 模块 -->
           <div class="panel-card" data-agent-id="qoder">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -875,6 +870,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <span class="badge badge-neutral" id="qoderStateBadge">未运行</span>
                   <button type="button" class="agent-detail-fold" id="qoderDetailFoldBtn" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="qoderErrorBanner" hidden>
@@ -982,15 +987,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 7. Kimi Code 模块 -->
           <div class="panel-card" data-agent-id="kimi">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -1006,6 +1002,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="kimiModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="kimi" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="kimiErrorBanner" hidden>
@@ -1042,15 +1048,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 8. OpenCode 模块 -->
           <div class="panel-card" data-agent-id="opencode">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -1065,6 +1062,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="opencodeModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="opencode" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="opencodeErrorBanner" hidden>
@@ -1101,15 +1108,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 9. Codex 模块 -->
           <div class="panel-card" data-agent-id="codex">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -1124,6 +1122,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="codexModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="codex" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="codexErrorBanner" hidden>
@@ -1160,15 +1168,6 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 10. Grok Build 模块 -->
           <div class="panel-card" data-agent-id="grok">
             <div class="card-body">
-              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
-                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
-                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
-                   画成「什么都没跑」。--> 
-              <div class="board-card-loading" aria-hidden="true">
-                <div class="sessions-skel board-skel-bar board-skel-a"></div>
-                <div class="sessions-skel board-skel-bar board-skel-b"></div>
-                <div class="sessions-skel board-skel-bar board-skel-c"></div>
-              </div>
               <div class="agent-top-bar">
                 <div class="agent-brand">
                   <div class="agent-avatar" style="background:transparent; border:none; overflow:hidden;">
@@ -1183,6 +1182,16 @@ if (window.panelStartupController) panelStartupPlay();
                   <div id="grokModelBadgesList" style="display:inline-flex; align-items:center; gap:6px; flex-wrap:wrap;"></div>
                   <button type="button" class="agent-detail-fold" data-prefix="grok" aria-expanded="false" title="展开/收起详细遥测">展开 ▾</button>
                 </div>
+              </div>
+
+              <!-- 加载态骨架条：看板首帧到「拿到可信帧」之间唯一可见的内容块（口径见
+                   panel.css 的 data-board=pending 段与 panel.mjs handleAgents 的 frame.ready）。
+                   卡面静态默认是数据态，取不到数时必须被它自己盖住，否则「还没取到」会被
+                   画成「什么都没跑」。--> 
+              <div class="board-card-loading" aria-hidden="true">
+                <div class="sessions-skel board-skel-bar board-skel-a"></div>
+                <div class="sessions-skel board-skel-bar board-skel-b"></div>
+                <div class="sessions-skel board-skel-bar board-skel-c"></div>
               </div>
 
               <div class="alert-box danger" id="grokErrorBanner" hidden>
