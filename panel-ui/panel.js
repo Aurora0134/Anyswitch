@@ -716,6 +716,7 @@ async function api(method, path, body) {
     agentsInFlight = true;
     try {
       const res = await api("GET", "/api/agents");
+      const boardWasPending = !boardLive;
       if (!boardFrameVerdict(res)) return;
       markBoardLive();
       if (res && res.agents) {
@@ -744,6 +745,15 @@ async function api(method, path, body) {
         renderRouteChainBoard();
         // 看板内容已真实：通知设置页主题镜像补拍恢复路径下那张空壳快照（一次性）
         notifyBoardRendered();
+        // 落数据重播入屏揭示：无开屏层遮挡时（普通刷新、关开屏、开屏兜底超时已退场）
+        // 加载态骨架一直露在屏上，拿到可信帧这一刻把看板阶梯入场补播一遍，「骨架→真容」
+        // 有个落位交代而不是硬切。开屏层还在时不播：首开/重启窗口内的那次入场已挂在
+        // 开屏淡出起点（onLeave），这里再播只会在遮挡层底下空放一遍；落在别的视图也
+        // 不播，那一屏的入场归 switchView 管。时点放在整卡渲染完之后：动画首帧看到的
+        // 就是真内容，且 reorderAgentCards 已摘掉首帧卡序属性，阶梯按真卡序发延迟。
+        if (boardWasPending && boardVisible() && !document.documentElement.hasAttribute("data-startup")) {
+          playBoardEnter(document.querySelector(".telemetry-view"));
+        }
       }
     } catch {}
     finally { agentsInFlight = false; }
@@ -6588,7 +6598,7 @@ async function api(method, path, body) {
   }
 
   // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
-  // 上浮 10px 立即开始；可见 .panel-card 按文档顺序逐张阶梯——首卡（服务状态）用 scale
+  // 上浮 10px 立即开始；可见 .panel-card 按视觉顺序逐张阶梯——首卡（服务状态）用 scale
   // 变奏、延迟 100ms，其余淡入+上浮、延迟 150ms+i×40ms。隐藏卡（如无链时的路由链卡）
   // 跳过不占延迟位；播完即清，1s 轮询只更新卡片内容不重建节点，不会打断动画。
   function playBoardEnter(view) {
@@ -6597,6 +6607,22 @@ async function api(method, path, body) {
     view.classList.add("board-enter");
     view.addEventListener("animationend", () => view.classList.remove("board-enter"), { once: true });
     const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
+    // 首帧卡序接管（panel.html 的 data-prepaint-card-order）生效期间，端点卡的视觉序是
+    // 存档序而非 DOM 序——CSS order 只改绘制不改文档。可信首帧落地前（reorderAgentCards
+    // 尚未摘属性重排）播这段阶梯，按 DOM 序发延迟会把浮入次序画乱（2026-10-08 报障：
+    // 加载态窗口期切回看板，卡片浮出顺序与屏上卡序对不上）。这里把端点卡占的槽位按
+    // 存档序填回；侧栏卡不携 data-agent-id，槽位与延迟天然不动。
+    const prepaintOrder = document.documentElement.getAttribute("data-prepaint-card-order");
+    if (prepaintOrder) {
+      const rank = new Map(prepaintOrder.split(",").map((id, idx) => [id, idx]));
+      const agentCards = cards
+        .filter((el) => rank.has(el.getAttribute("data-agent-id")))
+        .sort((a, b) => rank.get(a.getAttribute("data-agent-id")) - rank.get(b.getAttribute("data-agent-id")));
+      let nextAgent = 0;
+      for (let i = 0; i < cards.length; i++) {
+        if (rank.has(cards[i].getAttribute("data-agent-id"))) cards[i] = agentCards[nextAgent++];
+      }
+    }
     cards.forEach((el, i) => {
       const hero = i === 0;
       el.style.setProperty("--board-delay", hero ? "100ms" : `${150 + (i - 1) * 40}ms`);
