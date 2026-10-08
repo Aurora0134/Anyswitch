@@ -9423,8 +9423,11 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
     for (const id of ["zcode", "claude", "dsh", "pi", "qoder", "kimi", "opencode", "codex", "grok"]) {
       const at = panelHtml.indexOf(`<div class="panel-card" data-agent-id="${id}">`);
       assert.ok(at >= 0, `${id} 卡在册`);
-      assert.ok(panelHtml.slice(at, at + 700).includes("board-card-loading"),
-        `${id} 卡内有骨架条（骨架条是卡片自己的第一块内容，不靠 JS 后补）`);
+      const topBar = panelHtml.indexOf('<div class="agent-top-bar">', at);
+      const skel = panelHtml.indexOf('class="board-card-loading"', at);
+      const nextCard = panelHtml.indexOf('<div class="panel-card" data-agent-id="', at + 1);
+      assert.ok(topBar >= 0 && skel > topBar && (nextCard < 0 || skel < nextCard),
+        `${id} 骨架条在品牌行之后、本卡之内——立在数据位上，pending 与 live 品牌行同位，flip 时标题不跳（2026-10-08 位置修正）`);
     }
   });
 
