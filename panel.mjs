@@ -809,6 +809,11 @@ export function createPanelRouter({
   spawnSelfUpdateWorkerFn = null,
   selfUpdateWatchScheduleFn = (fn, ms) => setInterval(fn, ms),
   selfUpdateWatchCancelFn = (timer) => clearInterval(timer),
+  // 自动检测并下载更新的调度（首开一拍 + 周期拍），同一注入纪律。默认 null =
+  // 不布拍节：createPanelRouter 的默认 hostKind 就是 panel-host，单测里到处建
+  // 路由器，真实拍节只能由 panel-host.mjs 显式传入——否则测试进程里 60 秒后
+  // 会真的去查更新、真的拉起 worker。
+  selfUpdateAutoDownloadScheduleFn = null,
  }) {
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
@@ -1421,44 +1426,38 @@ export function createPanelRouter({
     return sendJson(res, 200, { ok: true, runs });
   }
 
-  // ── 自身更新（一键自更新）────────────────────────────────────────
+  // ── 自身更新（下载 → 应用 两步）──────────────────────────────────────
   // 目标版本与「检查更新」同源：releaseService.getAppUpdate 给出的 release
   // （tag + 版本，预览版/稳定版渠道判定都在那一层）。执行跑在脱离 worker 里
-  // （app-self-update.mjs）：就地浅拉取 tag、换装 app 工作树、装依赖，然后重启
-  // relay，最后等本进程经 startPanelHostReplacement 退场、新面板接管。
+  // （app-self-update.mjs），按记录里的 step 分两阶段：download 只把目标 tag
+  // 浅拉进本地仓库并核版本（不动工作树、不动进程），完成后记录停在
+  // 「已下载待应用」（phase=staged）；apply 由用户再点一次触发，做换装、装
+  // 依赖、重启 relay，最后等本进程经 startPanelHostReplacement 退场、新面板接管。
   // journal 复用 client-updates 目录与记录形态：running 记录即单飞锁，worker
   // 崩溃由既有惰性 reap 收割；多出来的 phase 字段是 worker → 监听器/页面的进度通道。
   const SELF_UPDATE_WATCH_MS = 1000;
   let selfUpdateWatchTimer = null;
 
   function selfUpdateStatusPayload(run) {
-    return { ...clientUpdateStatus(run), phase: run.phase ?? null, targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null };
+    return { ...clientUpdateStatus(run), phase: run.phase ?? null, step: run.step ?? "download", targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null };
   }
 
-  async function handleSelfUpdateStart(req, res) {
-    if (hostKind !== "panel-host") {
-      // 与 panel-host/restart 同一条红线：relay 副本只是 API 面，换装自杀必须
-      // 由 47820 的控制面自己做。
-      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
-    }
-    let update = null;
-    try {
-      update = await getReleaseService().then((service) => service.getAppUpdate({ force: true }));
-    } catch {
-      update = null;
-    }
-    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
-      return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
-    }
-    refreshClientUpdates();
-    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
-      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
-    }
+  // 最近一条「已下载待应用」的记录（finishedAt 最新的为准）。
+  function findStagedSelfUpdate() {
+    return listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done" && run.result?.outcome === "downloaded")
+      .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+  }
+
+  // 登记 + 拉起下载 worker。HTTP 面与自动下载调度共用；返回登记好的 run，
+  // 拉起失败时记录如实落 failed 并返回 null。
+  function registerSelfUpdateDownload(update) {
     const runId = randomUUID();
     const run = {
       runId,
       clientId: SELF_UPDATE_CLIENT_ID,
       action: "update",
+      step: "download",
       state: "running",
       startedAt: new Date().toISOString(),
       finishedAt: null,
@@ -1487,11 +1486,79 @@ export function createPanelRouter({
         finishedAt: new Date().toISOString(),
         result: { outcome: "failed", message: "更新未能启动，请稍后重试" },
       });
-      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+      return null;
     }
     writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
+    return run;
+  }
+
+  async function handleSelfUpdateStart(req, res) {
+    if (hostKind !== "panel-host") {
+      // 与 panel-host/restart 同一条红线：relay 副本只是 API 面，换装自杀必须
+      // 由 47820 的控制面自己做。
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    let update = null;
+    try {
+      update = await getReleaseService().then((service) => service.getAppUpdate({ force: true }));
+    } catch {
+      update = null;
+    }
+    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
+      return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
+    }
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const run = registerSelfUpdateDownload(update);
+    if (!run) {
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    return sendJson(res, 202, { ok: true, runId: run.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "download", targetVersion: run.targetVersion });
+  }
+
+  // 应用已下载的更新：同一条记录翻回 running、step=apply，worker 以同一 runId 再起。
+  // body.runId 钉住要应用的那条（防「点应用时下载刚换了新目标」的错位）。
+  async function handleSelfUpdateApply(req, res) {
+    if (hostKind !== "panel-host") {
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    const body = await readJsonBody(req);
+    const wantRunId = typeof body?.runId === "string" ? body.runId : null;
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const staged = findStagedSelfUpdate();
+    if (!staged || (wantRunId && staged.runId !== wantRunId)) {
+      return sendJson(res, 409, { ok: false, error: "no_staged", message: "没有已下载待应用的更新，请先检查更新" });
+    }
+    const next = {
+      ...staged,
+      step: "apply",
+      state: "running",
+      phase: "installing",
+      result: null,
+      finishedAt: null,
+      startedAt: new Date().toISOString(),
+      workerPid: null,
+    };
+    writeClientUpdateRun(updateJournalDir, next);
+    let workerPid = null;
+    try {
+      workerPid = spawnSelfUpdate({ runId: staged.runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      // 拉起失败：记录翻回「已下载待应用」，不吞掉这次已下载的成果。
+      writeClientUpdateRun(updateJournalDir, staged);
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    writeClientUpdateRun(updateJournalDir, { ...next, workerPid });
     armSelfUpdateWatcher();
-    return sendJson(res, 202, { ok: true, runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", targetVersion: run.targetVersion });
+    return sendJson(res, 202, { ok: true, runId: staged.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "apply", targetVersion: staged.targetVersion });
   }
 
   function handleSelfUpdateRunStatus(res, runId) {
@@ -1508,7 +1575,44 @@ export function createPanelRouter({
     const runs = listClientUpdateRuns(updateJournalDir)
       .filter((run) => run.state === "running" && run.clientId === SELF_UPDATE_CLIENT_ID)
       .map((run) => selfUpdateStatusPayload(run));
-    return sendJson(res, 200, { ok: true, runs });
+    const staged = findStagedSelfUpdate();
+    return sendJson(res, 200, { ok: true, runs, staged: staged ? selfUpdateStatusPayload(staged) : null });
+  }
+
+  // 最近一次自身更新结论：换装后的新页面靠它把最终结局（尤其 Relay 子句）补显
+  // 一次——旧页面在换装瞬间带走一切，结论不能只活在那最后一帧里。
+  function handleSelfUpdateLast(res) {
+    refreshClientUpdates();
+    const last = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done")
+      .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+    if (!last) return sendJson(res, 404, { ok: false, error: "no_runs" });
+    return sendJson(res, 200, selfUpdateStatusPayload(last));
+  }
+
+  // 「自动检测并下载更新」（设置项，默认开）：面板常驻期间按拍节检查，有更新且
+  // 没有在跑/待应用的任务就登记一次下载。只走 download 阶段，绝不自动应用。
+  async function maybeAutoDownloadSelfUpdate() {
+    if (hostKind !== "panel-host") return;
+    try {
+      if (loadSettings(settingsFile, base).settings.autoDownloadUpdates === false) return;
+    } catch {
+      return; // 设置读不出就不动：自动下载是便览功能，不为它冒险
+    }
+    let update = null;
+    try {
+      update = await getReleaseService().then((service) => service.getAppUpdate({ force: false }));
+    } catch {
+      return;
+    }
+    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) return;
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) return;
+    if (findStagedSelfUpdate()) return;
+    const run = registerSelfUpdateDownload(update);
+    logger?.info(run
+      ? `Self update auto-download registered: ${run.targetTag}`
+      : "Self update auto-download failed to spawn its worker");
   }
 
   // 换装监听器：worker 把阶段推到 ready-to-restart / waiting-panel 后，等的就是
@@ -1556,6 +1660,9 @@ export function createPanelRouter({
       refreshClientUpdates();
       if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) armSelfUpdateWatcher();
     } catch { /* journal 尚不存在：无需接管 */ }
+    // 「自动检测并下载更新」的常驻拍节：首开一拍 + 每 6 小时。开关每拍现读设置。
+    // 只有显式传入调度器才布点——见注入项注释（单测到处建路由器，不能默认挂真定时器）。
+    selfUpdateAutoDownloadScheduleFn?.(() => maybeAutoDownloadSelfUpdate());
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
@@ -2229,7 +2336,9 @@ export function createPanelRouter({
       return handleClientUpdateStatus(res, path.slice("/panel/api/environment/update/".length));
     }
     if (path === "/panel/api/self-update" && method === "POST") return handleSelfUpdateStart(req, res);
+    if (path === "/panel/api/self-update/apply" && method === "POST") return handleSelfUpdateApply(req, res);
     if (path === "/panel/api/self-update/active" && method === "GET") return handleSelfUpdateActive(res);
+    if (path === "/panel/api/self-update/last" && method === "GET") return handleSelfUpdateLast(res);
     if (path.startsWith("/panel/api/self-update/") && method === "GET") return handleSelfUpdateRunStatus(res, path.slice("/panel/api/self-update/".length));
     if (path === "/panel/api/environment" && method === "GET") {
       try {

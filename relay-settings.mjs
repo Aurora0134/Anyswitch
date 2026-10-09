@@ -121,6 +121,16 @@ export function parseCredentialCacheEnabled(raw) {
   return raw === false ? false : DEFAULT_CREDENTIAL_CACHE_ENABLED;
 }
 
+// 自动检测并下载更新：面板常驻期间按拍节查「检查更新」同源判定，有新版就只把
+// 比特下载进本地仓库（不动工作树、不动进程），应用永远由用户在关于页点
+// 「应用更新」触发。默认开——下载零中断零风险，省下的是用户等下载的那几分钟。
+// 只有显式写入 false 才关。
+export const DEFAULT_AUTO_DOWNLOAD_UPDATES = true;
+
+export function parseAutoDownloadUpdates(raw) {
+  return raw === false ? false : DEFAULT_AUTO_DOWNLOAD_UPDATES;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -256,6 +266,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const terminalHostManualStop = parseTerminalHostManualStop(raw.terminalHostManualStop);
   const terminalRestoreSessions = parseTerminalRestoreSessions(raw.terminalRestoreSessions);
   const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
+  const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -275,6 +286,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       terminalHostManualStop,
       terminalRestoreSessions,
       credentialCacheEnabled,
+      autoDownloadUpdates,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -287,6 +299,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     terminalHostManualStop,
     terminalRestoreSessions,
     credentialCacheEnabled,
+    autoDownloadUpdates,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -384,6 +397,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "credentialCacheEnabled")) {
     updated.credentialCacheEnabled = parseCredentialCacheEnabled(patch.credentialCacheEnabled);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "autoDownloadUpdates")) {
+    updated.autoDownloadUpdates = parseAutoDownloadUpdates(patch.autoDownloadUpdates);
   }
 
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启

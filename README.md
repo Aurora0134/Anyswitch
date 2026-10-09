@@ -255,7 +255,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 ## 这些边界要先接受
 
 - **只支持 Windows，不支持 macOS / Linux。** DPAPI、计划任务、原生客户端检测、部分更新路径都依赖 Windows，没有其它平台的实现。
-- **没有安装器。** 0.6.0 以源码发行。升级有了一键形态：关于页「检查更新 → 立即更新」会自动拉取 release tag、换装工作树并重启面板与 relay（见「升级」一节）；首次安装与换机仍是源码部署。
+- **没有安装器。** 0.6.0 以源码发行。升级有了面板内形态：关于页「检查更新 → 立即更新（下载）→ 应用更新」两步——下载只把 release tag 拉进本地仓库（不动当前运行），应用才换装工作树并重启面板与 relay（见「升级」一节）；首次安装与换机仍是源码部署。
 - **端口是固定的。** 47820 / 47821 / 47822 写死在代码里，面板里改不了。
 - **虚拟终端还是预览。** 它要单独装依赖，panel-host 重启会带走当时的终端进程。
 - **有三条真实路径只验到代码与测试层。** 8 个 CLI 的面板内启动、虚拟模型在九个客户端选择器里的逐一显示、关于页的真实安装按钮——都对着真实文件与官方发布格式核过，但没有替你在每台客户端上按完一遍。
@@ -267,7 +267,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 
 ## 升级时，保留数据和 `.git`
 
-首选入口在面板里：**设置 → 关于 → 检查更新 → 立即更新**。目标版本与「检查更新」同源（release tag，预览版身份自动跟随）；确认后后台 worker 浅拉取目标 tag、就地换装工作树、装好依赖，再自动重启 relay 与 panel-host——面板身份变化时页面自己刷新到新版。自更新把工作树当作自己的领地：checkout 一律 `--detach --force`，手动同步留下的漂移会被收敛成目标版本（确认弹窗会提示这一点）；`.git` 在首次更新时自动引导（浅拉取，logs 与 node_modules 等运行时文件不受影响），换装前记录的 HEAD 就是回滚点：新面板起不来会自动退回旧版并重装依赖，换装后的校验或依赖安装失败也会先把文件还原到更新前状态。想手动走同样的路径，步骤如下：
+首选入口在面板里：**设置 → 关于 → 检查更新 → 立即更新**。更新分两步：第一步「下载」只把目标 tag 浅拉进本地 git 仓库并核对版本——不碰工作树、不动进程，下完状态行显示「已下载，应用后生效」（设置页「自动检测并下载更新」默认开着，这一步通常已经替你做好了）；第二步「应用更新」由你挑时机点：就地换装工作树、装好依赖，再自动重启 relay 与 panel-host——面板身份变化时页面自己刷新到新版，最终结论在新页面补显。目标版本与「检查更新」同源（release tag，预览版身份自动跟随）。自更新把工作树当作自己的领地：checkout 一律 `--detach --force`，手动同步留下的漂移会被收敛成目标版本（确认弹窗会提示这一点）；`.git` 在首次更新时自动引导（浅拉取，logs 与 node_modules 等运行时文件不受影响），应用前记录的 HEAD 就是回滚点：新面板起不来会自动退回旧版并重装依赖，换装后的校验或依赖安装失败也会先把文件还原到更新前状态。想手动走同样的路径，步骤如下：
 
 从 `v0.5.2` 升到 `v0.6.0`，用户数据仍在 `%LOCALAPPDATA%\Anyswitch\` 的 `app` 上层：渠道、凭据、设置、预设和用量记录不随源码目录一起替换。
 
@@ -547,7 +547,7 @@ This is not implemented yet. It is written here so you know the direction — an
 ### Accept these boundaries first
 
 - **Windows only; no macOS / Linux support.** DPAPI, Task Scheduler, native client detection and parts of the update path all depend on Windows, and no other platform implementation exists.
-- **No installer.** 0.6.0 ships as source. Upgrading has a one-click form: the About page's "Check for updates → Update now" fetches the release tag, swaps the working tree and restarts the relay and panel host automatically (see "Upgrading" below); first installs and machine moves are still source deployments.
+- **No installer.** 0.6.0 ships as source. Upgrading has an in-panel form: the About page's "Check for updates → Update now (download) → Apply update" two-step flow — downloading only pulls the release tag into the local repository (the running install is untouched), and applying is what swaps the working tree and restarts the relay and panel host (see "Upgrading" below); first installs and machine moves are still source deployments.
 - **Ports are fixed.** 47820 / 47821 / 47822 are constants in the code and cannot be changed from the panel.
 - **The virtual terminal is still preview.** It needs its own dependencies, and a panel-host restart takes the running PTYs with it.
 - **Three real paths are verified only to code and test level.** Panel-launched sessions for the 8 CLIs, virtual models appearing in all nine clients' pickers, and the real install buttons on the About page — each checked against real files and official release formats, but not clicked through on every client for you.
@@ -557,7 +557,7 @@ This is not implemented yet. It is written here so you know the direction — an
 
 ### Upgrading: keep your data and `.git`
 
-The preferred entry is in the panel: **Settings → About → Check for updates → Update now**. The target comes from the same source as the update check (the release tag, with the preview identity following the running version); after confirmation a background worker shallow-fetches the target tag, swaps the working tree in place, installs dependencies, then restarts the relay and panel-host automatically — the page refreshes itself onto the new version when the panel identity changes. The updater owns the working tree: checkouts are always `--detach --force`, so drift left by manual syncing is converged onto the target version (the confirmation dialog says so); `.git` is bootstrapped on the first update (shallow fetch; runtime files like logs and node_modules are untouched), the HEAD recorded before the swap is the rollback point — if the new panel fails to come up the previous version is restored together with its dependencies, and a failed post-swap check or dependency install likewise restores the files to the pre-update state first. To walk the same path by hand:
+The preferred entry is in the panel: **Settings → About → Check for updates → Update now**. Updating comes in two steps: "download" only shallow-fetches the target tag into the local git repository and verifies its version — the working tree and every process stay untouched, and the status line reads "downloaded, takes effect when you apply it" (the "Automatically check for and download updates" setting is on by default, so this step has usually already been done for you); "Apply update" is yours to time: it swaps the working tree in place, installs dependencies, then restarts the relay and panel-host automatically — the page refreshes itself onto the new version when the panel identity changes, and the final outcome is surfaced once more on the fresh page. The target comes from the same source as the update check (the release tag, with the preview identity following the running version). The updater owns the working tree: checkouts are always `--detach --force`, so drift left by manual syncing is converged onto the target version (the confirmation dialog says so); `.git` is bootstrapped on the first update (shallow fetch; runtime files like logs and node_modules are untouched), the HEAD recorded before applying is the rollback point — if the new panel fails to come up the previous version is restored together with its dependencies, and a failed post-swap check or dependency install likewise restores the files to the pre-update state first. To walk the same path by hand:
 
 From `v0.5.2` to `v0.6.0`, user data stays above `app` in `%LOCALAPPDATA%\Anyswitch\`: providers, credentials, settings, presets and usage records are not replaced with the source directory.
 

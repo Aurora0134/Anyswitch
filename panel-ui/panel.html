@@ -1879,6 +1879,18 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
+          <!-- 自动检测并下载更新：只下载不应用（应用永远在关于页由用户点
+               「应用更新」），下载本身不动工作树、不动进程。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">自动检测并下载更新</div>
+              <div class="modal-item-desc">开启后，有新版本时 Anyswitch 会在后台提前下载好；下载不影响当前运行，你可以在关于页选择合适时机应用。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="autoDownloadUpdatesToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
           <div class="modal-item">
             <div>
               <div class="modal-item-title">折线视窗节点数</div>

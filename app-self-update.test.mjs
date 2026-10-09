@@ -17,8 +17,9 @@ function runningRun(overrides = {}) {
     runId: RUN_ID,
     clientId: SELF_UPDATE_CLIENT_ID,
     action: "update",
+    step: "download",
     state: "running",
-    startedAt: "2026-10-07T00:00:00.000Z",
+    startedAt: "2026-10-09T00:00:00.000Z",
     finishedAt: null,
     result: null,
     workerPid: null,
@@ -35,6 +36,7 @@ function runningRun(overrides = {}) {
 
 // execFile 形态的脚本化替身：按 args 前缀匹配应答，记录每一次调用。
 // git 与 npm 的调用在 args[0] 上天然可分（npm 的第一参是 npm-cli.js 路径）。
+// git show FETCH_HEAD:package.json 默认应答目标版本（下载阶段的「不脱裤查验」）。
 function fakeSpawn(script) {
   const calls = [];
   const spawnFn = (file, args, options, callback) => {
@@ -48,6 +50,11 @@ function fakeSpawn(script) {
 
 const args0 = (...prefix) => (args) => prefix.every((arg, i) => args[i] === arg);
 const npmCall = (call) => call.args[0] === NPM_CLI;
+const gitShowPackage = (args) => args0("show", "FETCH_HEAD:package.json")(args);
+const withTagVersion = (script, version = "0.7.0") => (call, n) => {
+  if (gitShowPackage(call.args)) return { stdout: JSON.stringify({ version }) };
+  return script(call, n);
+};
 
 // io 替身：app/.git 是否存在、package.json 的版本、npm-cli 可解析。
 function fakeIo({ hasGit = true, version = "0.7.0", npmPresent = true } = {}) {
@@ -90,7 +97,7 @@ function baseDeps(overrides = {}) {
     runId: RUN_ID,
     journalDir,
     io: fakeIo(),
-    spawnFn: fakeSpawn(() => ({ stdout: "" })).spawnFn,
+    spawnFn: fakeSpawn(withTagVersion(() => ({ stdout: "" }))).spawnFn,
     execPath: "/node/node.exe",
     env: {},
     fetchFn: async () => { throw new Error("no network in tests"); },
@@ -101,7 +108,7 @@ function baseDeps(overrides = {}) {
     spawnPanelHostFn: () => { events.panelHostSpawns += 1; return 424242; },
     probePanelFn: async () => null,
     delay: clock.delay,
-    now: () => "2026-10-07T01:00:00.000Z",
+    now: () => "2026-10-09T01:00:00.000Z",
     nowMs: clock.nowMs,
     ...overrides,
   };
@@ -122,70 +129,58 @@ function readJournal(journalDir) {
   return readClientUpdateRun(journalDir, RUN_ID);
 }
 
-describe("runSelfUpdate", () => {
-  test("快乐路径：换装、装依赖、重启 relay、等新面板接管，outcome=updated", async () => {
-    const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, { version: "0.7.0" }]);
-    const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }));
-    const { deps, events, journalDir, cleanup } = baseDeps({
-      spawnFn: git.spawnFn,
-      probePanelFn: probe.probePanelFn,
-    });
+describe("runSelfUpdate · download 阶段", () => {
+  test("快乐路径：拉取 + 核版本后停在 staged，工作树与进程一个都不动", async () => {
+    const git = fakeSpawn(withTagVersion(() => ({ stdout: "" })));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
     writeJournal(journalDir, runningRun());
     try {
       const result = await runSelfUpdate({ ...deps });
-      assert.equal(result.outcome, "updated");
-      assert.equal(result.beforeVersion, "0.6.1-preview");
-      assert.equal(result.afterVersion, "0.7.0");
-      // git 步骤的形状：浅拉取钉 tag、强制 detach 检出、npm 在 app 目录里装。
-      const fetchCall = git.calls.find((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(call.args));
-      assert.ok(fetchCall, "fetch must shallow-pin the target tag");
-      const checkoutCall = git.calls.find((call) => args0("checkout", "--detach", "--force", "FETCH_HEAD")(call.args));
-      assert.ok(checkoutCall, "checkout must be a forced detach onto FETCH_HEAD");
-      const npm = git.calls.find(npmCall);
-      assert.ok(npm, "npm install must run through the local npm-cli");
-      assert.deepEqual(npm.args.slice(1), NPM_ARGS);
-      assert.equal(npm.options.cwd, APP_DIR);
-      // 进程面：relay 换新一次、面板没有回滚拉起、watchdog 默认不在跑则不动。
-      assert.equal(events.relayRestarts, 1);
-      assert.equal(events.panelHostSpawns, 0);
+      assert.equal(result.outcome, "downloaded");
+      assert.match(result.message, /已下载 0\.7\.0，应用后生效/);
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(call.args)), "download must shallow-pin the target tag");
+      assert.ok(git.calls.some((call) => gitShowPackage(call.args)), "download must verify the tag's package.json without touching the tree");
+      // 下载阶段的红线：不换装、不装依赖、不停 watchdog、不重启 relay、不拉起面板。
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "download must never checkout");
+      assert.equal(git.calls.some(npmCall), false, "download must never run npm");
+      assert.equal(events.relayRestarts, 0);
       assert.equal(events.watchdogStops, 0);
+      assert.equal(events.panelHostSpawns, 0);
       const done = readJournal(journalDir);
       assert.equal(done.state, "done");
-      assert.equal(done.phase, "waiting-panel");
-      assert.equal(done.result.outcome, "updated");
+      assert.equal(done.phase, "staged");
+      assert.equal(done.result.outcome, "downloaded");
     } finally {
       cleanup();
     }
   });
 
-  test("镜像安装首次引导：没有 .git 就 init + remote add，无恢复点也照常更新", async () => {
-    const probe = scriptedProbe([null, { version: "0.7.0" }]);
-    const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { error: { code: 128 } } : { stdout: "" }));
-    const { deps, events, journalDir, cleanup } = baseDeps({
+  test("镜像安装首次引导：没有 .git 就 init + remote add，再正常下载", async () => {
+    const git = fakeSpawn(withTagVersion(() => ({ stdout: "" })));
+    const { deps, journalDir, cleanup } = baseDeps({
       io: fakeIo({ hasGit: false }),
       spawnFn: git.spawnFn,
-      probePanelFn: probe.probePanelFn,
     });
     writeJournal(journalDir, runningRun());
     try {
       const result = await runSelfUpdate({ ...deps });
-      assert.equal(result.outcome, "updated");
+      assert.equal(result.outcome, "downloaded");
       assert.ok(git.calls.some((call) => args0("init")(call.args)), "bootstrap must git init");
       assert.ok(git.calls.some((call) => args0("remote", "add", "origin", REPO_URL)(call.args)));
-      assert.equal(events.relayRestarts, 1);
     } finally {
       cleanup();
     }
   });
 
   test("remote 漂移被校正：origin 指向别处时 set-url 回权威源", async () => {
-    const probe = scriptedProbe([null, { version: "0.7.0" }]);
-    const git = fakeSpawn(({ args }) => (args0("remote", "get-url", "origin")(args) ? { stdout: "https://github.com/someone/else.git\n" } : { stdout: "" }));
-    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
+    const git = fakeSpawn(withTagVersion(
+      ({ args }) => (args0("remote", "get-url", "origin")(args) ? { stdout: "https://github.com/someone/else.git\n" } : { stdout: "" }),
+    ));
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
     writeJournal(journalDir, runningRun());
     try {
       const result = await runSelfUpdate({ ...deps });
-      assert.equal(result.outcome, "updated");
+      assert.equal(result.outcome, "downloaded");
       assert.ok(git.calls.some((call) => args0("remote", "set-url", "origin", REPO_URL)(call.args)));
     } finally {
       cleanup();
@@ -207,15 +202,83 @@ describe("runSelfUpdate", () => {
     }
   });
 
+  test("tag 里的版本与目标不一致：中止，磁盘上什么都没动过", async () => {
+    const git = fakeSpawn(withTagVersion(() => ({ stdout: "" }), "0.6.9"));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /不一致/);
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "nothing to restore: the tree was never touched");
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("下载失败：网络/git 层面的失败如实收场", async () => {
+    const git = fakeSpawn(withTagVersion(
+      ({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(args) ? { error: { code: 128 }, stderr: "fatal: could not read" } : { stdout: "" }),
+    ));
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载 v0.7.0/);
+      assert.equal(result.detail, "fatal: could not read");
+      assert.equal(events.relayRestarts, 0);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("runSelfUpdate · apply 阶段", () => {
+  test("快乐路径：补拉、换装、装依赖、重启 relay、等新面板接管，outcome=updated", async () => {
+    const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, { version: "0.7.0" }]);
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
+    const { deps, events, journalDir, cleanup } = baseDeps({
+      spawnFn: git.spawnFn,
+      probePanelFn: probe.probePanelFn,
+    });
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.equal(result.beforeVersion, "0.6.1-preview");
+      assert.equal(result.afterVersion, "0.7.0");
+      // git 步骤的形状：幂等补拉钉 tag、强制 detach 检出、npm 在 app 目录里装。
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(call.args)), "apply re-fetches the tag idempotently");
+      const checkoutCall = git.calls.find((call) => args0("checkout", "--detach", "--force", "FETCH_HEAD")(call.args));
+      assert.ok(checkoutCall, "checkout must be a forced detach onto FETCH_HEAD");
+      const npm = git.calls.find(npmCall);
+      assert.ok(npm, "npm install must run through the local npm-cli");
+      assert.deepEqual(npm.args.slice(1), NPM_ARGS);
+      assert.equal(npm.options.cwd, APP_DIR);
+      // 进程面：relay 换新一次、面板没有回滚拉起、watchdog 默认不在跑则不动。
+      assert.equal(events.relayRestarts, 1);
+      assert.equal(events.panelHostSpawns, 0);
+      assert.equal(events.watchdogStops, 0);
+      const done = readJournal(journalDir);
+      assert.equal(done.state, "done");
+      assert.equal(done.phase, "waiting-panel");
+      assert.equal(done.result.outcome, "updated");
+    } finally {
+      cleanup();
+    }
+  });
+
   test("检出版本与目标不一致：还原工作树后收场，relay 与面板都没被动过", async () => {
     const { probePanelFn, probe } = scriptedProbe([{ version: "0.6.1-preview" }]);
-    const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }));
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
     const { deps, events, journalDir, cleanup } = baseDeps({
       io: fakeIo({ version: "0.6.9" }),
       spawnFn: git.spawnFn,
       probePanelFn,
     });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
@@ -237,7 +300,7 @@ describe("runSelfUpdate", () => {
       io: fakeIo({ npmPresent: false }),
       probePanelFn,
     });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
@@ -251,13 +314,13 @@ describe("runSelfUpdate", () => {
 
   test("依赖安装失败：还原工作树后如实报失败", async () => {
     const { probePanelFn, probe } = scriptedProbe([{ version: "0.6.1-preview" }]);
-    const git = fakeSpawn(({ args }) => {
+    const git = fakeSpawn(withTagVersion(({ args }) => {
       if (args0("rev-parse", "HEAD")(args)) return { stdout: "abc123def\n" };
       if (args[0] === NPM_CLI) return { error: { code: 1 }, stderr: "npm error" };
       return { stdout: "" };
-    });
+    }));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
@@ -272,28 +335,13 @@ describe("runSelfUpdate", () => {
     }
   });
 
-  test("下载失败：网络/git 层面的失败在服务无损的前提下收场", async () => {
-    const git = fakeSpawn(({ args }) => (args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(args) ? { error: { code: 128 }, stderr: "fatal: could not read" } : { stdout: "" }));
-    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
-    writeJournal(journalDir, runningRun());
-    try {
-      const result = await runSelfUpdate({ ...deps });
-      assert.equal(result.outcome, "failed");
-      assert.match(result.message, /下载 v0.7.0/);
-      assert.equal(result.detail, "fatal: could not read");
-      assert.equal(events.relayRestarts, 0);
-    } finally {
-      cleanup();
-    }
-  });
-
   test("面板不退场：updated_pending_restart，不谎报已生效", async () => {
     const probe = scriptedProbe([{ version: "0.6.1-preview" }]);
     const { deps, events, journalDir, cleanup } = baseDeps({
       probeWatchdogFn: async () => true,
       probePanelFn: probe.probePanelFn,
     });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "updated_pending_restart");
@@ -311,11 +359,11 @@ describe("runSelfUpdate", () => {
     // 探测从不见 null，但答话的已是目标版本——这就是换装完成。
     const probe = scriptedProbe([{ version: "0.6.1-preview" }, { version: "0.7.0" }]);
     const { deps, journalDir, cleanup } = baseDeps({
-      spawnFn: fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })).spawnFn,
+      spawnFn: fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }))).spawnFn,
       probePanelFn: probe.probePanelFn,
       restartRelayFn: async () => ({ ok: false }), // Relay 重启失败不得被 updated 吞掉
     });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "updated");
@@ -333,9 +381,9 @@ describe("runSelfUpdate", () => {
       null,                          // 新面板迟迟不来（超时窗口内一直如此）
       { version: "0.6.1-preview" },  // 恢复后的旧面板回来了
     ]);
-    const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }));
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "rolled_back");
@@ -359,16 +407,16 @@ describe("runSelfUpdate", () => {
       { version: "0.6.1-preview" },
     ]);
     let npmCount = 0;
-    const git = fakeSpawn(({ args }) => {
+    const git = fakeSpawn(withTagVersion(({ args }) => {
       if (args0("rev-parse", "HEAD")(args)) return { stdout: "abc123def\n" };
       if (args[0] === NPM_CLI) {
         npmCount += 1;
         return npmCount === 2 ? { error: { code: 1 }, stderr: "npm error" } : { stdout: "" };
       }
       return { stdout: "" };
-    });
+    }));
     const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "rolled_back");
@@ -380,27 +428,14 @@ describe("runSelfUpdate", () => {
 
   test("新面板未接管且无恢复点：尽力拉起面板并如实报 failed", async () => {
     const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, null]);
-    const git = fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { error: { code: 128 } } : { stdout: "" }));
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { error: { code: 128 } } : { stdout: "" })));
     const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "failed");
       assert.match(result.message, /没有可退回的旧版本/);
       assert.equal(events.panelHostSpawns, 1);
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("journal 记录不属于自更新或不在 running 态：直接返回 null，一个进程都不动", async () => {
-    const { deps, events, journalDir, cleanup } = baseDeps();
-    writeJournal(journalDir, runningRun({ clientId: "claude" }));
-    try {
-      assert.equal(await runSelfUpdate({ ...deps }), null);
-      writeJournal(journalDir, runningRun({ state: "done" }));
-      assert.equal(await runSelfUpdate({ ...deps }), null);
-      assert.equal(events.relayRestarts, 0);
     } finally {
       cleanup();
     }
@@ -412,12 +447,27 @@ describe("runSelfUpdate", () => {
       probeWatchdogFn: async () => true,
       probePanelFn: probe.probePanelFn,
     });
-    writeJournal(journalDir, runningRun());
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
     try {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "updated");
       assert.equal(events.watchdogStops, 1);
       assert.equal(events.watchdogSpawns, 1);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("runSelfUpdate · 通用闸门", () => {
+  test("journal 记录不属于自更新或不在 running 态：直接返回 null，一个进程都不动", async () => {
+    const { deps, events, journalDir, cleanup } = baseDeps();
+    writeJournal(journalDir, runningRun({ clientId: "claude" }));
+    try {
+      assert.equal(await runSelfUpdate({ ...deps }), null);
+      writeJournal(journalDir, runningRun({ state: "done" }));
+      assert.equal(await runSelfUpdate({ ...deps }), null);
+      assert.equal(events.relayRestarts, 0);
     } finally {
       cleanup();
     }
@@ -450,13 +500,16 @@ describe("spawnSelfUpdateWorker", () => {
   });
 });
 
-// 前后端契约的静态钉子：按钮、阶段文案与换装事件名必须同时在两端存在，
+// 前后端契约的静态钉子：按钮、阶段文案、换装事件与两步入口必须同时在两端存在，
 // 防止单独改掉任何一头（client-lifecycle.test.mjs 对清单漂移的同款防线）。
-test("关于页 UI 契约：自更新按钮、阶段文案与换装事件两端对齐", () => {
+test("关于页 UI 契约：自更新按钮、两步入口与换装事件两端对齐", () => {
   const panelJs = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
   const panelHtml = readFileSync(new URL("./panel-ui/panel.html", import.meta.url), "utf8");
   assert.match(panelHtml, /id="aboutSelfUpdate"/);
   assert.match(panelJs, /aboutSelfUpdate/);
   assert.match(panelJs, /anyswitch:self-update-swap/);
   assert.match(panelJs, /\/api\/self-update\/active/);
+  assert.match(panelJs, /\/api\/self-update\/apply/);
+  assert.match(panelJs, /\/api\/self-update\/last/);
+  assert.match(panelJs, /应用更新/);
 });
