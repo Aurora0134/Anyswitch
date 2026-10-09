@@ -2535,9 +2535,11 @@ async function api(method, path, body) {
         body: `${names.join("、")} 正在运行，更新可能失败或打断当前会话。建议先退出后再更新。`,
       };
     }
-    function showLifecycleModal({ title, body }) {
+    function showLifecycleModal({ title, body, confirmLabel }) {
       get("clientUpdateModalTitle").textContent = title;
       get("clientUpdateModalBody").textContent = body;
+      // 确认键跟随本次动作命名（下载/应用/更新），不沿用上一次弹层留下的字面。
+      get("clientUpdateModalConfirm").textContent = confirmLabel || "仍要更新";
       get("clientUpdateModal").classList.toggle("show", true);
       return new Promise((resolve) => { lifecycleModalResolve = resolve; });
     }
@@ -2552,9 +2554,9 @@ async function api(method, path, body) {
     }
     // 自更新与客户端更新共用同一只弹层；自更新是全局单飞，不会与单行更新并发争抢，
     // 排队只是防「弹层还开着时用户点了别的确认」的兜底。
-    function confirmSelfUpdate(title, body) {
-      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ title, body, resolve }); });
-      return showLifecycleModal({ title, body });
+    function confirmSelfUpdate(title, body, confirmLabel) {
+      if (lifecycleModalResolve) return new Promise((resolve) => { lifecycleModalQueue.push({ title, body, confirmLabel, resolve }); });
+      return showLifecycleModal({ title, body, confirmLabel });
     }
     function closeLifecycleModal(decision) {
       get("clientUpdateModal").classList.toggle("show", false);
@@ -2688,7 +2690,10 @@ async function api(method, path, body) {
     let selfUpdateGen = 0; // leave() 时 +1，丢弃迟到的轮询回调
     function renderSelfUpdateProgress(status) {
       const statusEl = get("aboutUpdateStatus");
-      const phaseText = SELF_UPDATE_PHASES[status?.phase];
+      let phaseText = SELF_UPDATE_PHASES[status?.phase];
+      // 换装恢复页（本页就是换装的产物）上，换装类相位早已发生——再播报「正在重启
+      // Relay / 正在重启面板」是把已完成的事说成进行中，统一交代「正在完成更新」。
+      if (window.panelStartupRestart && (status?.phase === "ready-to-restart" || status?.phase === "waiting-panel")) phaseText = () => "正在完成更新…";
       statusEl.textContent = phaseText ? phaseText(status?.targetVersion || "") : "更新进行中…";
       statusEl.dataset.tone = "";
       get("aboutUpdateTime").textContent = "";
@@ -2718,16 +2723,26 @@ async function api(method, path, body) {
       }
       selfUpdateStaged = null;
       if (status?.outcome === "updated") {
-        // 换装完成、页面随换新刷新在即：旧页面上只交代「即将刷新」，版本结论交给
-        // 新页面补显（adoptSelfUpdate 的 /last 通道），不与旧版本号同框。
+        get("aboutSelfUpdate").hidden = true;
+        if (window.panelStartupRestart) {
+          // 本页就是换装后的新页面（结局经接回的轮询落在这里）：直接显示最终结论，
+          // 不存在「即将刷新」。同时记入已读，/last 补显通道不再为它重弹一次。
+          selfUpdateLastOutcome = status;
+          statusEl.textContent = status?.message || `已更新到 ${status?.targetVersion || ""}`;
+          statusEl.dataset.tone = "ok";
+          try { if (status?.runId) localStorage.setItem(`anyswitch:self-update-shown:${status.runId}`, "1"); } catch { /* 存档不可写：/last 会再补显一次 */ }
+          if (status?.message) notify(status.message);
+          return;
+        }
+        // 旧页面（本页发起的应用）：换装完成、页面随换新刷新在即，只交代「即将刷新」，
+        // 版本结论交给新页面（上面那条分支），不与旧版本号同框。
         statusEl.textContent = "更新完成，页面即将刷新…";
         statusEl.dataset.tone = "ok";
-        get("aboutSelfUpdate").hidden = true;
         if (status?.message) notify(status.message);
         return;
       }
       const copy = {
-        updated_pending_restart: status?.message || "新版本已就位，重启面板后生效",
+        updated_pending_restart: status?.message || "新版本已安装，重启面板后生效",
         rolled_back: status?.message || "已恢复到更新前版本",
         failed: status?.message || "更新失败，请重新检查更新",
       };
@@ -2736,7 +2751,7 @@ async function api(method, path, body) {
       get("aboutSelfUpdate").hidden = true;
       notify(copy[status?.outcome] || "更新已结束", true);
     }
-    function pollSelfUpdate(runId) {
+    function pollSelfUpdate(runId, isApply) {
       const gen = selfUpdateGen;
       return new Promise((resolve, reject) => {
         let swapAnnounced = false;
@@ -2745,30 +2760,42 @@ async function api(method, path, body) {
           try { status = await fetchOnce(`/api/self-update/${encodeURIComponent(runId)}`); }
           catch { status = null; }
           if (!active || gen !== selfUpdateGen) { reject(Object.assign(new Error("self update abandoned"), { abandoned: true })); return; }
-          // 换装窗口期轮询失败是预期（面板正在退场），继续等；恢复监视归顶栏。
-          if ((status?.phase === "ready-to-restart" || status?.phase === "waiting-panel") && !swapAnnounced) {
+          // 换装信号有两路：worker 自报 ready-to-restart / waiting-panel，或应用中轮询
+          // 开始落空（面板已退场）。后者才是多数情况下真实的第一信号——服务端监听器
+          // 在 ready-to-restart 落盘后一秒内就点火自退，1.5s 的页面轮询经常来不及看到
+          // 那个相位，等看到相位再盖开屏就永远盖不上。
+          // 重启恢复页（panelStartupRestart）不派换装事件：本页就是换装的产物，
+          // 顶栏监视只会空等一次永远不会再来的身份变化，超时后谎报重启失败。
+          const swapSignal = isApply && (status === null || status?.phase === "ready-to-restart" || status?.phase === "waiting-panel");
+          if (swapSignal && !swapAnnounced && !window.panelStartupRestart) {
             swapAnnounced = true;
             doc.dispatchEvent(new CustomEvent("anyswitch:self-update-swap"));
           }
           if (status?.state === "running") { if (selfUpdateRun) selfUpdateRun.poll = schedule(step, 1500); return; }
-          if (!status) { if (selfUpdateRun) selfUpdateRun.poll = schedule(step, 3000); return; }
+          // 应用中的落空轮询按 1s 补：面板退场窗口就那么几秒，3s 一拍容易把开屏
+          // 拖到换装快结束才盖上。
+          if (!status) { if (selfUpdateRun) selfUpdateRun.poll = schedule(step, isApply ? 1000 : 3000); return; }
           resolve(status);
         };
         void step();
       });
     }
-    function trackSelfUpdate(runId, targetVersion, firstPhase) {
+    function trackSelfUpdate(runId, targetVersion, firstPhase, isApply = false) {
       selfUpdateStaged = null;
       selfUpdateRun = { runId, poll: null };
       renderSelfUpdateProgress({ phase: firstPhase, targetVersion });
-      void pollSelfUpdate(runId).then(renderSelfUpdateOutcome, () => {});
+      void pollSelfUpdate(runId, isApply).then(renderSelfUpdateOutcome, () => {});
     }
     async function startSelfUpdate() {
       if (selfUpdateRun || !selfUpdateAdopted) return;
       const target = update?.release?.version || "";
       if (!target) return;
       // 下载不动任何运行中的东西，确认只交代两步形态与文件覆盖。
-      const confirmed = await confirmSelfUpdate(`更新 Anyswitch 到 ${target}`, `更新分两步：先下载，再由你点「应用」完成换装；安装目录里的手动修改会被覆盖。确认下载 ${target}？`);
+      const confirmed = await confirmSelfUpdate(
+        `更新 Anyswitch 到 ${target}`,
+        `将下载新版本 ${target}，下载不影响当前使用；下载完成后由你选择何时应用，应用前仍是当前版本。安装目录中的手动修改会被覆盖。`,
+        "下载",
+      );
       if (!confirmed) return;
       if (selfUpdateRun) return; // 确认期间可能已从 adopt 接回
       try {
@@ -2783,19 +2810,20 @@ async function api(method, path, body) {
     async function startSelfUpdateApply() {
       if (selfUpdateRun || !selfUpdateStaged) return;
       const staged = selfUpdateStaged;
-      // 应用这一步才打断服务：与客户端更新同一层确认，带在跑 Agent 警示。
-      let warning = "";
+      // 应用这一步才打断服务：与客户端更新同一层确认。重启提示是底线，有在跑
+      // Agent 时把中断警示叠加上去——两条都要让用户看到，不能互相顶替。
+      let warning = "应用期间面板与 Relay 会自动重启，服务中断几秒钟。";
       try {
         const data = await fetchOnce("/api/agents");
         const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
-        if (running.length) warning = `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），应用会打断其请求。`;
+        if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
       } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
-      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.targetVersion || ""}`, `${warning || "应用期间面板与 Relay 会自动重启，有秒级中断。"}确认现在应用？`);
+      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
       if (!confirmed) return;
       if (selfUpdateRun || selfUpdateStaged !== staged) return;
       try {
         await request("POST", "/api/self-update/apply", { runId: staged.runId });
-        trackSelfUpdate(staged.runId, staged.targetVersion, "installing");
+        trackSelfUpdate(staged.runId, staged.targetVersion, "installing", true);
       } catch (error) {
         notify(error?.code === "busy" ? "已有更新任务在进行中" : error?.code === "no_staged" ? "没有已下载待应用的更新，请先检查更新" : "更新未能启动，请稍后重试", true);
         void adoptSelfUpdate();
@@ -2826,7 +2854,7 @@ async function api(method, path, body) {
         const data = await fetchOnce("/api/self-update/active");
         const run = data?.runs?.[0] ?? null;
         if (run) {
-          trackSelfUpdate(run.runId, run.targetVersion, run.phase);
+          trackSelfUpdate(run.runId, run.targetVersion, run.phase, run.step === "apply");
         } else if (data?.staged) {
           selfUpdateStaged = data.staged;
           renderSelfUpdateStaged();
@@ -6364,8 +6392,13 @@ async function api(method, path, body) {
 
     // 关于页一键自更新进入换装阶段（worker 就绪、panel-host 即将自杀换新）：
     // 由这里接管页面恢复监视，与手动「重启」走同一套 watchPanelHostComeBack 编排水。
+    // 同时拉起开屏层：脉冲播完定格盖住换装窗口，新页面（startup=restart）的定格
+    // 才有「旧页面刚播过」的接力语义——旧页面不播，新页面就只剩一张无动画的闪屏。
     document.addEventListener("anyswitch:self-update-swap", () => {
-      if (!panelRestarting) watchPanelHostComeBack();
+      if (!panelRestarting) {
+        playStartupSplash();
+        watchPanelHostComeBack();
+      }
     });
 
     if (stopConfirmBtn) {

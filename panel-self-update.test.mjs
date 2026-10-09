@@ -288,6 +288,25 @@ describe("GET /panel/api/self-update/*", () => {
     });
   });
 
+  test("进行中的自更新不出现在客户端更新活跃列表（避免关于页两条通道重复接回）", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, {
+        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
+        workerPid: process.pid, phase: "installing", targetVersion: "0.7.0", targetTag: "v0.7.0",
+      });
+      writeClientUpdateRun(ctx.journalDir, {
+        runId: "00000000-0000-4000-8000-000000000009", clientId: "claude", action: "update", state: "running",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
+        workerPid: process.pid,
+      });
+      const selfActive = await get("/panel/api/self-update/active");
+      assert.equal(selfActive.body.runs.length, 1, "自更新通道照常接回");
+      const clientActive = await get("/panel/api/environment/updates/active");
+      assert.deepEqual(clientActive.body.runs.map((run) => run.clientId), ["claude"], "客户端通道只见客户端更新");
+    });
+  });
+
   test("last 返回最近一次结论；一条记录都没有时 404", async () => {
     await withPanel({}, async (get, post, ctx) => {
       const empty = await get("/panel/api/self-update/last");

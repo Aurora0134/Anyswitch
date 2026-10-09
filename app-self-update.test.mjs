@@ -368,7 +368,7 @@ describe("runSelfUpdate · apply 阶段", () => {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "updated");
       assert.match(result.message, /已更新到 0\.7\.0/);
-      assert.match(result.message, /Relay 重启未完成/);
+      assert.match(result.message, /Relay 未能自动重启/);
     } finally {
       cleanup();
     }
