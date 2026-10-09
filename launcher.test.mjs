@@ -12,6 +12,7 @@ import { EventEmitter } from "node:events";
 import {
   runLauncher,
   buildLauncherEnv,
+  buildNativeFallbackEnv,
   EXPECTED_CLAUDE_VERSION,
   VERIFIED_CLAUDE_MINOR,
   isVerifiedDiscoveryVersion,
@@ -242,24 +243,72 @@ test("relay is closed even when the version check throws", async () => {
   assert.equal(state.closed, true);
 });
 
-test("if the relay refuses to start, Claude is never spawned", async () => {
+test("buildNativeFallbackEnv passes the inherited environment through untouched", () => {
+  const base = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-real", NO_PROXY: "user-proxy-exceptions" };
+  const env = buildNativeFallbackEnv({ base });
+  assert.deepEqual(env, base);
+  assert.notEqual(env, base, "a copy, so callers may mutate it without touching process.env");
+});
+
+test("if the relay refuses to start, Claude is launched with its native configuration", async () => {
   const spawned = [];
-  await assert.rejects(
-    () =>
-      runLauncher({
-        startRelay: async () => {
-          throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
-        },
-        getClaudeVersion: async () => EXPECTED_CLAUDE_VERSION,
-        spawnClaude: async ({ env, args }) => {
-          spawned.push({ env, args });
-          return 0;
-        },
-        log: () => {},
-      }),
-    /not usable/,
-  );
-  assert.equal(spawned.length, 0);
+  const logs = [];
+  let versionProbed = false;
+  const code = await runLauncher({
+    startRelay: async () => {
+      throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
+    },
+    getClaudeVersion: async () => {
+      versionProbed = true;
+      return EXPECTED_CLAUDE_VERSION;
+    },
+    spawnClaude: async ({ env, args }) => {
+      spawned.push({ env, args });
+      return 0;
+    },
+    log: (line) => logs.push(line),
+    base: {
+      PATH: "/usr/bin",
+      ANTHROPIC_API_KEY: "sk-real-anthropic-key",
+      ANTHROPIC_BASE_URL: "https://user-native.example",
+    },
+  });
+
+  assert.equal(code, 0);
+  assert.equal(spawned.length, 1);
+  // Nothing injected, nothing stripped: the inherited environment rides as-is.
+  assert.equal(spawned[0].env.ANTHROPIC_API_KEY, "sk-real-anthropic-key", "a real key is the user's native config");
+  assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, "https://user-native.example", "an inherited base URL is left alone");
+  assert.equal(spawned[0].env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(spawned[0].env.ANTHROPIC_SMALL_FAST_MODEL, undefined);
+  assert.equal(spawned[0].env.CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY, undefined);
+  assert.equal(versionProbed, false, "the version probe only feeds relay-mode discovery, so it is skipped");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /not usable/);
+  assert.match(logs[0], /native configuration/);
+});
+
+test("the native fallback triggers on any relay start failure, forwards args and propagates the exit code", async () => {
+  const spawned = [];
+  const logs = [];
+  const code = await runLauncher({
+    startRelay: async () => {
+      throw new Error("listen EADDRINUSE");
+    },
+    getClaudeVersion: async () => EXPECTED_CLAUDE_VERSION,
+    spawnClaude: async ({ env, args }) => {
+      spawned.push({ env, args });
+      return 3;
+    },
+    log: (line) => logs.push(line),
+    claudeArgs: ["--resume", "session-1"],
+  });
+
+  assert.equal(code, 3);
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].args, ["--resume", "session-1"]);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /EADDRINUSE/);
 });
 
 test("the session token never appears in any log line", async () => {

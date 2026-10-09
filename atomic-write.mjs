@@ -16,24 +16,36 @@
 //     check and the rename.
 // `atomicWriteFile` stays unlocked by design: it carries no precondition, so
 // there is nothing to violate; it is the documented last-writer-wins path.
+//
+// `withDirectoryLock` is a second, unrelated lock shape: a sibling
+// `<target>.lock` DIRECTORY holding an owner credential file, mirroring
+// ZCode's own acquireFileLock (packages/shared/src/node/atomicFileLock.ts) so
+// Anyswitch and a running ZCode client mutually exclude each other on files
+// both sides write (e.g. ~/.zcode/v2/provider_config.json). Never mix the two
+// lock shapes on one target: the single-file lock and the directory lock at
+// the same path cannot even see each other reliably.
 
 import {
   existsSync as realExistsSync,
+  mkdirSync as realMkdirSync,
   readFileSync as realReadFileSync,
   readdirSync as realReaddirSync,
   renameSync as realRenameSync,
+  rmdirSync as realRmdirSync,
   rmSync as realRmSync,
   statSync as realStatSync,
   writeFileSync as realWriteFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 
 const realFs = {
   existsSync: realExistsSync,
+  mkdirSync: realMkdirSync,
   readFileSync: realReadFileSync,
   readdirSync: realReaddirSync,
   renameSync: realRenameSync,
+  rmdirSync: realRmdirSync,
   rmSync: realRmSync,
   statSync: realStatSync,
   writeFileSync: realWriteFileSync,
@@ -261,4 +273,297 @@ export function casWriteFile(target, content, { expectedHash, fs = realFs, lockW
     },
     { fs, waitMs: lockWaitMs },
   );
+}
+
+// ---------------------------------------------------------------------------
+// ZCode-compatible directory lock
+//
+// ZCode serializes its own writes to the files it owns (notably
+// ~/.zcode/v2/provider_config.json, which the running client rewrites with the
+// user's default model selection) through a directory lock: a bare mkdir of
+// "<file>.lock", then an owner credential file `owner-<pid>-<ts>-<rand>.json`
+// holding {"pid","createdAt","token"} plus a trailing newline. withFileLock
+// above is a single FILE at the same ".lock" path, which cannot interoperate:
+// mkdir over an existing file and a file create over an existing directory do
+// not collide on the same errno semantics across platforms. Files a ZCode
+// process can write must therefore use this lock instead.
+//
+// Everything below mirrors the semantics of ZCode's acquireFileLock /
+// removeAbandonedLock (packages/shared/src/node/atomicFileLock.ts), ported to
+// this module's synchronous discipline (the lock retry loop already blocks via
+// sleepSync; our callers are short-lived launcher/sync processes, so a bounded
+// blocking wait is acceptable):
+//   - same lock path (<file>.lock), same directory shape, same owner file
+//     naming and payload, so ZCode's stale checks judge our locks exactly like
+//     its own;
+//   - ownership re-verified after the owner write (a swapped directory or a
+//     second owner means we lost the race and fall back to contention);
+//   - a lock is reclaimable only when its owner's process is gone, or when it
+//     carries no usable pid and has outlived the ownerless grace — a live
+//     owner is never reclaimed no matter how long we have waited, because a
+//     waiter's own waiting time says nothing about the current holder;
+//   - legacy single-file locks left by older ZCode versions are reclaimed
+//     under the same rules (content re-read before deletion);
+//   - release removes only our own owner file and best-effort rmdir's the
+//     directory, so a lock taken over meanwhile is never disturbed.
+
+const DIR_LOCK_RETRY_DELAYS_MS = [25, 50, 100, 200, 400];
+const DIR_LOCK_OWNERLESS_GRACE_MS = 100;
+const DIR_LOCK_WAIT_MS = 8_000;
+// Owner metadata timestamps further in the future than this are treated as
+// corrupt (clock skew tolerance), same bound as ZCode.
+const DIR_LOCK_MAX_CLOCK_SKEW_MS = 5 * 60_000;
+
+function dirLockErrorCode(error) {
+  return typeof error?.code === "string" ? error.code : undefined;
+}
+
+// A timestamp is usable only when finite, non-negative and not beyond the
+// tolerated clock skew; anything else falls back to the file mtime so corrupt
+// metadata cannot park an ownerless lock forever.
+function parseDirLockTimestamp(value, observedAt) {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    value >= 0 &&
+    value <= observedAt + DIR_LOCK_MAX_CLOCK_SKEW_MS
+    ? value
+    : null;
+}
+
+function parseDirLockMetadata(raw, observedAt) {
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      createdAt: parseDirLockTimestamp(parsed?.createdAt, observedAt),
+      // Only a positive safe-integer pid carries owner semantics: 0, negatives
+      // or fractions could make process.kill misjudge a dead owner as alive
+      // and strand the lock forever.
+      pid:
+        typeof parsed?.pid === "number" && Number.isSafeInteger(parsed.pid) && parsed.pid > 0
+          ? parsed.pid
+          : null,
+    };
+  } catch {
+    return { createdAt: null, pid: null };
+  }
+}
+
+// ZCode's liveness rule: a pid counts as alive unless the OS says it does not
+// exist. pidAlive above is stricter (EPERM-only) because the store lock prefers
+// reclaiming over waiting on another account's process; the credential format
+// here is ZCode's, so its judgement rule applies verbatim.
+function dirLockOwnerAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return dirLockErrorCode(error) !== "ESRCH";
+  }
+}
+
+// When both the metadata timestamp and the mtime are unusable, the grace clock
+// can only start when this process first sees that exact lock instance; a
+// replaced lock (new dev/ino/birthtime/mtime) restarts it.
+function createDirLockObserver() {
+  const observations = new Map();
+  return (lockPath, lockStat, observedAt) => {
+    const identity = [lockStat.dev, lockStat.ino, lockStat.birthtimeMs, lockStat.mtimeMs].join(":");
+    const previous = observations.get(lockPath);
+    if (previous?.identity === identity) return previous.firstObservedAt;
+    observations.set(lockPath, { firstObservedAt: observedAt, identity });
+    return observedAt;
+  };
+}
+
+function dirLockOwnerReclaimable(fs, ownerFile, ownerlessGraceMs, observe) {
+  const observedAt = Date.now();
+  const raw = fs.readFileSync(ownerFile, "utf8");
+  const metadata = parseDirLockMetadata(raw, observedAt);
+  let createdAt = metadata.createdAt;
+  if (createdAt === null) {
+    const ownerStat = fs.statSync(ownerFile);
+    createdAt =
+      parseDirLockTimestamp(ownerStat.mtimeMs, observedAt) ?? observe(ownerFile, ownerStat, observedAt);
+  }
+  const ownerExited = metadata.pid !== null && !dirLockOwnerAlive(metadata.pid);
+  const ownerlessLockIsStale = metadata.pid === null && observedAt - createdAt >= ownerlessGraceMs;
+  return ownerExited || ownerlessLockIsStale;
+}
+
+// Best-effort stale-lock reclamation, mirroring ZCode's removeAbandonedLock.
+// {removed:false} means "still owned or raced — keep waiting", never an error
+// the caller must handle; a genuine fs failure rides back as `error` so the
+// acquire loop can surface EACCES/EPERM instead of a misleading timeout.
+function removeAbandonedDirLock(fs, lockPath, ownerlessGraceMs, observe) {
+  try {
+    const lockStat = fs.statSync(lockPath);
+    if (lockStat.isDirectory()) {
+      const entries = fs.readdirSync(lockPath);
+      const owners = entries.filter((entry) => entry.startsWith("owner-") && entry.endsWith(".json"));
+      if (owners.length === 1) {
+        const ownerFile = join(lockPath, owners[0]);
+        if (!dirLockOwnerReclaimable(fs, ownerFile, ownerlessGraceMs, observe)) {
+          return { removed: false };
+        }
+        // Deleting the one observed owner file doubles as the ownership check:
+        // if the directory was replaced by a new lock, the new owner's
+        // different file name survives this rm and the rmdir below lands on a
+        // non-empty directory and refuses.
+        fs.rmSync(ownerFile, { force: true });
+        fs.rmdirSync(lockPath);
+        return { removed: true };
+      }
+
+      const observedAt = Date.now();
+      const directoryTimestamp =
+        parseDirLockTimestamp(lockStat.mtimeMs, observedAt) ?? observe(lockPath, lockStat, observedAt);
+      if (observedAt - directoryTimestamp < ownerlessGraceMs) return { removed: false };
+      for (const owner of owners) {
+        if (!dirLockOwnerReclaimable(fs, join(lockPath, owner), ownerlessGraceMs, observe)) {
+          return { removed: false };
+        }
+      }
+      // An empty directory is what a crash between mkdir and the owner write
+      // leaves behind; a corrupt one may hold several owners. Only the entries
+      // observed above are removed — a fresh owner landing meanwhile makes the
+      // rmdir fail instead of being deleted. rmSync(force) swallows individual
+      // entries racing away; any other failure aborts the reclaim via the
+      // outer catch, same as ZCode's rejecting Promise.all.
+      for (const entry of entries) {
+        fs.rmSync(join(lockPath, entry), { force: true });
+      }
+      fs.rmdirSync(lockPath);
+      return { removed: true };
+    }
+
+    // Legacy single-file lock left by an older ZCode. Reclaim only when the
+    // content is still exactly what was judged stale — a replaced file means a
+    // new lock we have no verdict on.
+    const raw = fs.readFileSync(lockPath, "utf8");
+    if (!dirLockOwnerReclaimable(fs, lockPath, ownerlessGraceMs, observe)) {
+      return { removed: false };
+    }
+    if (fs.readFileSync(lockPath, "utf8") !== raw) return { removed: false };
+    fs.rmSync(lockPath, { force: true });
+    return { removed: true };
+  } catch (error) {
+    if (dirLockErrorCode(error) === "ENOENT" || dirLockErrorCode(error) === "ENOTEMPTY") {
+      return { removed: false };
+    }
+    return { removed: false, error };
+  }
+}
+
+// Run `fn` while holding the ZCode-compatible directory lock on `target`.
+// Contention is retried on `retryDelaysMs` until `waitMs` elapses, then
+// LockTimeoutError is thrown (or the underlying EACCES/EPERM when stale-lock
+// reclamation failed with it). `ownerlessGraceMs` is how long a lock without
+// a usable owner pid must sit before it may be reclaimed, capped at half of
+// `waitMs` exactly as ZCode caps it. `fn` runs synchronously and must not
+// re-enter this lock on the same target: our own pid is alive, so the nested
+// acquire would wait the full timeout and fail.
+export function withDirectoryLock(target, fn, {
+  fs = realFs,
+  waitMs = DIR_LOCK_WAIT_MS,
+  retryDelaysMs = DIR_LOCK_RETRY_DELAYS_MS,
+  ownerlessGraceMs = DIR_LOCK_OWNERLESS_GRACE_MS,
+} = {}) {
+  const lockPath = `${target}.lock`;
+  // ZCode acquires with a bare mkdir, so the parent must already exist; its
+  // own withFileLock wrapper performs the same recursive ensure first.
+  fs.mkdirSync(dirname(lockPath), { recursive: true });
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const ownerName = `owner-${token}.json`;
+  const ownerFile = join(lockPath, ownerName);
+  const payload = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token })}\n`;
+  const startedAt = Date.now();
+  const effectiveOwnerlessGraceMs = Math.min(
+    Math.max(ownerlessGraceMs, 0),
+    Math.max(Math.floor(waitMs / 2), 0),
+  );
+  const observe = createDirLockObserver();
+  let lastRemovalError;
+
+  for (let attempt = 0; ; attempt += 1) {
+    let createdLock = false;
+    try {
+      fs.mkdirSync(lockPath);
+      createdLock = true;
+      const createdLockStat = fs.statSync(lockPath);
+      fs.writeFileSync(ownerFile, payload, { encoding: "utf8", flag: "wx" });
+      const currentLockStat = fs.statSync(lockPath);
+      const currentOwners = fs
+        .readdirSync(lockPath)
+        .filter((entry) => entry.startsWith("owner-") && entry.endsWith(".json"));
+      if (
+        currentLockStat.dev !== createdLockStat.dev ||
+        currentLockStat.ino !== createdLockStat.ino ||
+        currentOwners.length !== 1 ||
+        currentOwners[0] !== ownerName
+      ) {
+        // The directory was swapped under us between mkdir and the ownership
+        // check; take the same contention path as a plain EEXIST.
+        throw Object.assign(new Error("directory lock ownership changed during acquire"), {
+          code: "EEXIST",
+        });
+      }
+      break;
+    } catch (error) {
+      if (createdLock) {
+        try {
+          fs.rmSync(ownerFile, { force: true });
+        } catch {
+          // raced away
+        }
+        try {
+          fs.rmdirSync(lockPath);
+        } catch {
+          // taken over or not empty — nothing of ours left to remove
+        }
+      }
+      const lostCreatedLock = createdLock && dirLockErrorCode(error) === "ENOENT";
+      if (dirLockErrorCode(error) !== "EEXIST" && !lostCreatedLock) throw error;
+
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= waitMs) {
+        const removalErrorCode = dirLockErrorCode(lastRemovalError);
+        if (removalErrorCode === "EACCES" || removalErrorCode === "EPERM") throw lastRemovalError;
+        throw new LockTimeoutError(
+          `timed out after ${elapsedMs}ms waiting for the directory lock on ${target}`,
+        );
+      }
+      const removal = removeAbandonedDirLock(fs, lockPath, effectiveOwnerlessGraceMs, observe);
+      if (removal.removed) continue;
+      if (removal.error) lastRemovalError = removal.error;
+
+      const remainingMs = Math.max(waitMs - elapsedMs, 0);
+      if (retryDelaysMs.length === 0 || remainingMs === 0) {
+        const removalErrorCode = dirLockErrorCode(lastRemovalError);
+        if (removalErrorCode === "EACCES" || removalErrorCode === "EPERM") throw lastRemovalError;
+        throw new LockTimeoutError(
+          `timed out after ${elapsedMs}ms waiting for the directory lock on ${target}`,
+        );
+      }
+      const retryDelayMs = retryDelaysMs[Math.min(attempt, retryDelaysMs.length - 1)] ?? remainingMs;
+      sleepSync(Math.min(retryDelayMs, remainingMs));
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    // Release touches only this writer's owner file; if the lock was reclaimed
+    // and taken over while fn ran, a later writer's credential is never ours
+    // to delete, and rmdir on a non-empty directory simply fails.
+    try {
+      fs.rmSync(ownerFile, { force: true });
+    } catch {
+      // already gone
+    }
+    try {
+      fs.rmdirSync(lockPath);
+    } catch {
+      // taken over or not empty — best-effort cleanup
+    }
+  }
 }

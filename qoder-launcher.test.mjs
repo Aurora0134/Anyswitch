@@ -215,6 +215,48 @@ test("runQoderLauncher starts a per-launch relay when the resident one is down",
   assert.equal(deps.calls.includes("loadToken"), false, "per-launch path must not read the shared token file");
 });
 
+test("runQoderLauncher launches natively when both relay levels fail", async () => {
+  const deps = recordingDeps({ probeRelay: async () => false });
+  let capturedEnv = null;
+
+  const code = await runQoderLauncher({
+    ...deps,
+    startRelay: async () => {
+      deps.calls.push("startRelay");
+      throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
+    },
+    spawnQoder: async ({ env, args, onSpawned }) => {
+      deps.calls.push("spawnQoder");
+      capturedEnv = env;
+      // The onSpawned hook (CDP catalog warm-up) is not relay-specific and
+      // stays wired in native mode.
+      assert.equal(typeof onSpawned, "function");
+      assert.deepEqual(args, ["--resume"]);
+      return 7;
+    },
+    base: FAKE_BASE,
+    qoderArgs: ["--resume"],
+  });
+
+  assert.equal(code, 7, "the child exit code passes through in native mode too");
+  assert.deepEqual(deps.calls, ["startRelay", "loadToken", "writeConfig", "spawnQoder"]);
+  // Native mode: no relay token, no NO_PROXY — the environment passes through
+  // verbatim.
+  assert.equal("ANYSWITCH_RELAY_TOKEN" in capturedEnv, false);
+  assert.equal("NO_PROXY" in capturedEnv, false);
+  // The BYOK sync still runs, against the well-known port with the shared
+  // token file's token, so the managed providers revive with the resident relay.
+  assert.deepEqual(deps.written, {
+    store: FAKE_STORE,
+    port: RELAY_PORT,
+    token: "resident-token",
+    sidecarRoot: join(FAKE_LOCAL, "Anyswitch"),
+    settingsPath: join(FAKE_HOME, ".qoder", "settings.json"),
+  });
+  assert.equal(deps.calls.includes("closeRelay"), false, "native mode has no relay to tear down");
+  assert.ok(deps.logs.some((l) => l.includes("Anyswitch relay unavailable") && l.includes("launching qoder with its native configuration")));
+});
+
 test("runQoderLauncher tears the relay down even when spawn fails", async () => {
   const deps = recordingDeps();
 

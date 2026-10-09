@@ -16,10 +16,10 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // the card falls back to the process scan for liveness (unchanged behavior).
 const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "claude"]);
 
-// 这些端点的 x-agent-instance 头存在仅为满足客户端托管配置的占位符（pi 的
-// models.json 写死 ${ANYSWITCH_INSTANCE_ID}，缺变量启动即抛错），其值是折不进
-// 进程身份的随机标签：relay 忽略头值，实例身份以连接属主进程为唯一来源；
-// socket 未解析时按无身份处理，走 bindLateSocketInstance 迟到绑定。
+// pi 的 x-agent-instance 头值对折进程身份没有贡献：models.json 落静态值
+//（sync 写盘为 direct；launcher 拉起时改写成 <cwd>-<pid> 实例值、退出恢复——
+// pi-merge-models.mjs），即使改写生效 relay 也忽略头值，实例身份以连接属主进
+// 程为唯一来源；socket 未解析时按无身份处理，走 bindLateSocketInstance 迟到绑定。
 export const SOCKET_OVERRIDE_AGENT_IDS = new Set(["pi"]);
 
 export function instanceIdFromSocket(req, agentId, deps) {

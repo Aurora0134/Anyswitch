@@ -271,6 +271,43 @@ describe("runOpencodeLauncher", () => {
     assert.deepEqual(calls, ["warning: opencode.json not updated: unparseable"]);
   });
 
+  it("launches natively when the relay cannot start: verbatim env, config still synced, nothing to close", async () => {
+    const calls = [];
+    const code = await runOpencodeLauncher({
+      startRelay: async () => {
+        calls.push("startRelay");
+        throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
+      },
+      base,
+      opencodeArgs: ["--model", "x"],
+      writeConfig: async (store, port, sidecarRoot) => {
+        calls.push({ writeConfig: { port, sidecarRoot } });
+        return { ok: true, unchanged: true };
+      },
+      log: (line) => calls.push({ log: line }),
+      spawnFn: (cmd, args, opts) => {
+        calls.push({ spawn: { env: opts.env, args } });
+        return fakeOpencodeChild({ code: 4 });
+      },
+    });
+
+    assert.equal(code, 4, "the child exit code passes through in native mode too");
+    const spawn = calls.find((c) => c.spawn).spawn;
+    // Native mode: verbatim environment — no token, no instance tag, no NO_PROXY.
+    assert.equal("ANYSWITCH_RELAY_TOKEN" in spawn.env, false);
+    assert.equal("ANYSWITCH_AGENT_INSTANCE" in spawn.env, false);
+    assert.equal("NO_PROXY" in spawn.env, false);
+    assert.equal(spawn.env.CUSTOM_VAR, "kept");
+    // The config sync still runs, against the well-known port (the apiKey is a
+    // {file:...} reference, so no token is involved), so the managed providers
+    // revive with the resident relay.
+    assert.deepEqual(calls.find((c) => c.writeConfig), {
+      writeConfig: { port: 47821, sidecarRoot: "C:\\Users\\tester\\AppData\\Local\\Anyswitch" },
+    });
+    assert.ok(calls.some((c) => c.log?.includes("Anyswitch relay unavailable") && c.log?.includes("launching opencode with its native configuration")));
+    assert.equal(calls.includes("closeRelay"), false, "native mode has no relay to tear down");
+  });
+
   it("skips config sync entirely when no writeConfig is wired (default no-op)", async () => {
     // The existing runOpencodeLauncher tests above all exercise this default:
     // none of them wires writeConfig and none touches the disk. Pin it so a

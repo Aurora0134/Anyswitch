@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, existsSync, rmSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   PERSONAL_CONFIG_FILENAME,
@@ -13,6 +13,8 @@ import {
   validatePersonalProviderConfig,
   writePersonalConfigWithBackup,
   syncZcodePersonalConfig,
+  defaultCliModelSelection,
+  resolveBuiltinReasoningLevels,
 } from "./zcode-personal-config.mjs";
 import { buildZcodeProviderEntry } from "./zcode-merge-config.mjs";
 import { writeZcodeConfig } from "./zcode-launcher.mjs";
@@ -127,6 +129,31 @@ describe("mergePersonalProviderConfig on a fresh file", () => {
     assert.deepEqual(config.config.providerConfigRules.providerRules.map((r) => r.providerId), ["_poke-api"]);
     assert.deepEqual(config.config.modelConfigRules.providerModelRules.map((r) => r.modelId), ["m-alpha"]);
     assert.deepEqual(managed, ["_poke-api"]);
+    assert.equal(validatePersonalProviderConfig(config).valid, true);
+  });
+
+  it("always emits manualProviderModelRules, [] when the user has no manual rules", () => {
+    // CLI 的 zod schema 把 manualProviderModelRules 定为必填：缺键的文件被整份
+    // 拒收、静默 recovery 成空 personal 层（报 Select a model before
+    // continuing）。恒输出也是客户端自己回写的 canonical 形态。
+    const { prefixedId, entry } = injectedEntry({ providerId: "poke-api" });
+    const { config } = mergePersonalProviderConfig(null, { [prefixedId]: entry }, []);
+    assert.deepEqual(config.config.modelConfigRules.manualProviderModelRules, []);
+    assert.equal(validatePersonalProviderConfig(config).valid, true);
+  });
+
+  it("repairs an existing file that lacks manualProviderModelRules", () => {
+    // 旧同步/旧客户端留下的缺键形态：下一轮 merge 把键补上（[]），不再透传缺失。
+    const { prefixedId, entry } = injectedEntry({ providerId: "poke-api" });
+    const existing = {
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: { providerModelRules: [] },
+      },
+    };
+    const { config } = mergePersonalProviderConfig(existing, { [prefixedId]: entry }, []);
+    assert.deepEqual(config.config.modelConfigRules.manualProviderModelRules, []);
     assert.equal(validatePersonalProviderConfig(config).valid, true);
   });
 });
@@ -252,6 +279,43 @@ describe("mergePersonalProviderConfig against an existing file", () => {
     const before = JSON.stringify(doc.config.providerConfigRules.providerRules[0]);
     const { config } = mergePersonalProviderConfig(doc, { [pokeId]: same.entry }, [pokeId]);
     assert.equal(JSON.stringify(config.config.providerConfigRules.providerRules[0]), before);
+  });
+
+  it("carries the client-side per-model enabled toggle over a rebuilt managed rule", () => {
+    const { doc, pokeId } = seededDisk();
+    // ZCode writes config.enabled into providerModelRules when the user toggles
+    // a model in its list — including models of providers we manage. The rule
+    // is ours to rebuild, the toggle is not ours to drop.
+    doc.config.modelConfigRules.providerModelRules[0].config.enabled = false;
+    const fresh = injectedEntry({
+      providerId: "poke-api",
+      models: { "m-alpha": { contextWindow: 1000000 }, "m-new": { contextWindow: 8192 } },
+    });
+    const { config } = mergePersonalProviderConfig(doc, { [pokeId]: fresh.entry }, [pokeId]);
+
+    const rebuilt = config.config.modelConfigRules.providerModelRules.filter((r) => r.providerId === pokeId);
+    assert.deepEqual(
+      rebuilt.find((r) => r.modelId === "m-alpha"),
+      { providerId: pokeId, modelId: "m-alpha", config: { enabled: false, properties: { contextWindow: 1000000 } } },
+      "the disabled toggle survives the sync",
+    );
+    assert.deepEqual(
+      rebuilt.find((r) => r.modelId === "m-new"),
+      { providerId: pokeId, modelId: "m-new", config: { properties: { contextWindow: 8192 } } },
+      "a model the client never toggled gets no enabled key",
+    );
+    assert.equal(validatePersonalProviderConfig(config).valid, true);
+  });
+
+  it("passes unknown config-level keys through the merge instead of dropping them", () => {
+    const { doc, pokeId } = seededDisk();
+    doc.config.experimentalField = { future: true };
+    const same = injectedEntry({ providerId: "poke-api", models: { "m-alpha": { contextWindow: 1000000 } } });
+    const { config } = mergePersonalProviderConfig(doc, { [pokeId]: same.entry }, [pokeId]);
+    assert.deepEqual(config.config.experimentalField, { future: true });
+    // The strict gate then refuses the document, so the sync fails closed with
+    // the file untouched — an unknown key is never written back stripped.
+    assert.equal(validatePersonalProviderConfig(config).valid, false);
   });
 });
 
@@ -491,6 +555,59 @@ describe("personal config IO", () => {
     assert.ok(existsSync(result.backupPath));
     assert.equal(JSON.parse(readFileSync(result.backupPath, "utf8")).config.providerConfigRules.providerRules.length, 0);
     assert.deepEqual(readdirSync(root).filter((f) => f.startsWith("provider_config.backup.")).length, 1);
+  });
+
+  it("matches ZCode's byte format: 2-space indent and no trailing newline", () => {
+    const root = tmpRoot();
+    const path = join(root, PERSONAL_CONFIG_FILENAME);
+    const doc = {
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [{ providerId: "_x", config: { group: "standard-personal" } }] },
+        modelConfigRules: { providerModelRules: [] },
+      },
+    };
+    const result = writePersonalConfigWithBackup(path, doc);
+    assert.equal(result.ok, true);
+    const text = readFileSync(path, "utf8");
+    assert.equal(text, JSON.stringify(doc, null, 2), "byte-identical to ZCode's own serialization");
+    assert.equal(text.endsWith("\n"), false, "ZCode writes this file with no trailing newline");
+    assert.ok(text.includes('\n  "schemaVersion"'), "2-space indent");
+  });
+
+  it("fails closed under a live foreign lock and leaves no backup behind", () => {
+    const root = tmpRoot();
+    const path = join(root, PERSONAL_CONFIG_FILENAME);
+    const doc = { schemaVersion: 1, config: { providerConfigRules: { providerRules: [] }, modelConfigRules: { providerModelRules: [] } } };
+    writePersonalConfigWithBackup(path, doc);
+    const before = readFileSync(path, "utf8");
+
+    // A running ZCode holding its directory lock looks exactly like this.
+    const lockPath = `${path}.lock`;
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, "owner-4321-1-zcode.json"),
+      `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "zcode" })}\n`,
+    );
+
+    const next = {
+      schemaVersion: 1,
+      config: {
+        providerConfigRules: { providerRules: [{ providerId: "_x", config: { group: "standard-personal" } }] },
+        modelConfigRules: { providerModelRules: [{ providerId: "_x", modelId: "m-1", config: { properties: { contextWindow: 1 } } }] },
+      },
+    };
+    const refused = writePersonalConfigWithBackup(path, next, { lockWaitMs: 120 });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.unchanged, true);
+    assert.equal(readFileSync(path, "utf8"), before, "a refused write never touches the file");
+    assert.deepEqual(
+      readdirSync(root).filter((f) => f.startsWith("provider_config.backup.")),
+      [],
+      "no backup is taken for a write that never happened",
+    );
+    assert.ok(existsSync(join(lockPath, "owner-4321-1-zcode.json")), "the live foreign lock survives");
+    rmSync(lockPath, { recursive: true, force: true });
   });
 });
 
@@ -764,6 +881,327 @@ describe("ZCode sync end to end", () => {
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps the user's default model selection and ordering through a sync", async () => {
+    const dir = tmpRoot();
+    try {
+      const configPath = join(dir, "config.json");
+      // What ZCode leaves on disk while it runs: the user's picked default
+      // model and provider ordering live in the same file we rewrite.
+      writeFileSync(
+        join(dir, PERSONAL_CONFIG_FILENAME),
+        JSON.stringify({
+          schemaVersion: 1,
+          config: {
+            providerOrder: ["builtin:zai"],
+            defaultModelSelection: { providerId: "builtin:zai", modelId: "GLM-5.3" },
+            providerConfigRules: {
+              providerRules: [{ providerId: "builtin:zai", config: { group: "zai-family", access: { type: "zhipu-coding-plan-api-key" } } }],
+            },
+            modelConfigRules: { providerModelRules: [] },
+          },
+        }),
+      );
+
+      const result = await writeZcodeConfig(channelStore(), 47821, "tok-1", dir, configPath);
+      assert.equal(result.ok, true, result.reason);
+
+      const doc = readPersonal(dir);
+      assert.deepEqual(doc.config.defaultModelSelection, { providerId: "builtin:zai", modelId: "GLM-5.3" });
+      assert.deepEqual(doc.config.providerOrder, ["builtin:zai"]);
+      assert.deepEqual(
+        doc.config.providerConfigRules.providerRules.map((r) => r.providerId),
+        ["builtin:zai", "_poke-api", "_squall-api"],
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves a file carrying an unknown config-level key byte-identical (fail closed)", async () => {
+    const dir = tmpRoot();
+    try {
+      const configPath = join(dir, "config.json");
+      const seeded = {
+        schemaVersion: 1,
+        config: {
+          experimentalField: { future: true },
+          providerConfigRules: { providerRules: [] },
+          modelConfigRules: { providerModelRules: [] },
+        },
+      };
+      const before = JSON.stringify(seeded, null, 2);
+      writeFileSync(join(dir, PERSONAL_CONFIG_FILENAME), before);
+
+      const result = await writeZcodeConfig(channelStore(), 47821, "tok-1", dir, configPath);
+      assert.equal(result.ok, false);
+      assert.match(result.reason, /would be invalid/);
+      assert.equal(
+        readFileSync(join(dir, PERSONAL_CONFIG_FILENAME), "utf8"),
+        before,
+        "a field the writer does not own is never silently stripped",
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed while ZCode holds the file lock and syncs once it is released", async () => {
+    const dir = tmpRoot();
+    try {
+      const configPath = join(dir, "config.json");
+      const personalPath = join(dir, PERSONAL_CONFIG_FILENAME);
+      const seeded = {
+        schemaVersion: 1,
+        config: {
+          defaultModelSelection: { providerId: "builtin:zai", modelId: "GLM-5.3" },
+          providerConfigRules: {
+            providerRules: [{ providerId: "builtin:zai", config: { group: "zai-family", access: { type: "zhipu-coding-plan-api-key" } } }],
+          },
+          modelConfigRules: { providerModelRules: [] },
+        },
+      };
+      const before = JSON.stringify(seeded, null, 2);
+      writeFileSync(personalPath, before);
+
+      // The running client holds its directory lock (a live owner pid).
+      const lockPath = `${personalPath}.lock`;
+      mkdirSync(lockPath);
+      writeFileSync(
+        join(lockPath, "owner-4321-1-zcode.json"),
+        `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "zcode" })}\n`,
+      );
+
+      const managedEntries = {
+        "_poke-api": buildZcodeProviderEntry(
+          "poke-api",
+          { channelName: "poke-api", models: { "m-alpha": { contextWindow: 1000000 } } },
+          47821,
+          "tok-1",
+        )["_poke-api"],
+      };
+      const refused = syncZcodePersonalConfig({ configPath, managedEntries, previousManaged: [], lockWaitMs: 120 });
+      assert.equal(refused.ok, false);
+      assert.equal(refused.unchanged, true);
+      assert.equal(readFileSync(personalPath, "utf8"), before, "the client file is never written under a held lock");
+
+      rmSync(lockPath, { recursive: true, force: true });
+      const synced = syncZcodePersonalConfig({ configPath, managedEntries, previousManaged: [], lockWaitMs: 120 });
+      assert.equal(synced.ok, true, synced.reason);
+      const doc = readPersonal(dir);
+      assert.ok(doc.config.providerConfigRules.providerRules.some((r) => r.providerId === "_poke-api"));
+      assert.deepEqual(
+        doc.config.defaultModelSelection,
+        { providerId: "builtin:zai", modelId: "GLM-5.3" },
+        "the client's own writes survive the sync that follows",
+      );
+      assert.ok(doc.config.providerConfigRules.providerRules.some((r) => r.providerId === "builtin:zai"));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("defaultCliModelSelection（CLI 槽位的默认模型选择）", () => {
+  // 与 CLI 随包 zcode-builtin.json 同构的最小规则集：catch-all 提供
+  // ["disabled","enabled"]，更具体的规则按文档序覆盖；apiType/baseUrl 限定的
+  // 规则只在条件命中时参与覆盖。
+  const builtinRules = {
+    modelRules: [
+      { modelMatch: ".*", config: { optionSpecs: { reasoningLevel: { values: ["disabled", "enabled"] } } } },
+      { modelMatch: ".*kimi-k3(?:[.\\-:/\\[].*)?", config: { optionSpecs: { reasoningLevel: { values: ["low", "high", "max"] } } } },
+    ],
+    modelApiRules: [
+      { modelMatch: ".*kimi-k3(?:[.\\-:/\\[].*)?", apiTypeMatch: "anthropic-messages", config: { optionSpecs: { reasoningLevel: { values: ["max"] } } } },
+    ],
+    providerSiteRules: [
+      { modelMatch: "kimi-k3", baseUrlMatch: "https://opencode\\.ai/zen/go/v1/?", apiTypeMatch: "openai-chat-completions", config: { optionSpecs: { reasoningLevel: { values: ["max"] } } } },
+    ],
+  };
+
+  function cliEntryOf(providerId, modelIds) {
+    return injectedEntry({
+      providerId,
+      models: Object.fromEntries(modelIds.map((modelId) => [modelId, {}])),
+    }).entry;
+  }
+
+  it("prefers the _auto channel: first model, level from the resolved legal set", () => {
+    const selection = defaultCliModelSelection({ _auto: cliEntryOf("auto", ["auto", "kimi-k3-mix"]) }, builtinRules);
+    assert.deepEqual(selection, { providerId: "_auto", modelId: "auto", options: { reasoningLevel: "disabled" } });
+  });
+
+  it("picks a value inside the resolved set when the model does not offer \"disabled\"", () => {
+    // kimi-k3-mix 命中更具体的 builtin 规则，解析值域 ["low","high","max"] 不含
+    // disabled——默认选择必须取值域内的项（值不配会被 CLI 校验器静默退回
+    // registry-fallback），而不是机械写 disabled。
+    const selection = defaultCliModelSelection({ _auto: cliEntryOf("auto", ["kimi-k3-mix"]) }, builtinRules);
+    assert.deepEqual(selection, { providerId: "_auto", modelId: "kimi-k3-mix", options: { reasoningLevel: "low" } });
+  });
+
+  it("ignores rules gated on an apiType or baseUrl the managed entry does not have", () => {
+    // kimi-k3：anthropic-messages 的 modelApi 规则（→["max"]）和 opencode.ai
+    // 的站点规则（→["max"]）都不该命中——托管条目是 openai-chat-completions +
+    // 回环 baseUrl，只有 modelRules 里的 kimi-k3 规则生效（→["low","high","max"]）。
+    const selection = defaultCliModelSelection({ _auto: cliEntryOf("auto", ["kimi-k3"]) }, builtinRules);
+    assert.deepEqual(selection, { providerId: "_auto", modelId: "kimi-k3", options: { reasoningLevel: "low" } });
+  });
+
+  it("falls back to _free-pool's first model + disabled when builtin rules cannot be resolved", () => {
+    // 验收锚点：_free-pool/mimo-v2.6-flash-free + disabled 是真实请求跑通过的形态。
+    const entries = {
+      _auto: cliEntryOf("auto", ["auto"]),
+      "_free-pool": cliEntryOf("free-pool", ["mimo-v2.6-flash-free", "other-model"]),
+    };
+    assert.deepEqual(defaultCliModelSelection(entries, null), {
+      providerId: "_free-pool",
+      modelId: "mimo-v2.6-flash-free",
+      options: { reasoningLevel: "disabled" },
+    });
+  });
+
+  it("resolves the free-pool anchor too when rules are available", () => {
+    const entries = { "_free-pool": cliEntryOf("free-pool", ["mimo-v2.6-flash-free"]) };
+    assert.deepEqual(defaultCliModelSelection(entries, builtinRules), {
+      providerId: "_free-pool",
+      modelId: "mimo-v2.6-flash-free",
+      options: { reasoningLevel: "disabled" },
+    });
+  });
+
+  it("falls back to the first managed channel when neither _auto nor _free-pool exists", () => {
+    const entries = { _poke: cliEntryOf("poke", ["some-model"]) };
+    assert.deepEqual(defaultCliModelSelection(entries, null), {
+      providerId: "_poke",
+      modelId: "some-model",
+      options: { reasoningLevel: "disabled" },
+    });
+  });
+
+  it("returns null when there is nothing to select", () => {
+    assert.equal(defaultCliModelSelection({}, builtinRules), null);
+    assert.equal(defaultCliModelSelection({ _auto: cliEntryOf("auto", []) }, builtinRules), null);
+  });
+
+  it("treats a rule that explicitly clears the reasoning spec as unresolvable", () => {
+    const clearing = {
+      modelRules: [
+        { modelMatch: ".*", config: { optionSpecs: { reasoningLevel: { values: ["disabled", "enabled"] } } } },
+        { modelMatch: ".*", config: { optionSpecs: { reasoningLevel: null } } },
+      ],
+    };
+    assert.equal(
+      resolveBuiltinReasoningLevels(clearing, {
+        modelId: "auto",
+        apiType: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:47821/openai/auto/v1",
+      }),
+      null,
+    );
+  });
+});
+
+describe("mergePersonalProviderConfig 的 defaultModelSelection 选项", () => {
+  it("applies the caller-supplied selection only to a file that has none", () => {
+    const { prefixedId, entry } = injectedEntry({ providerId: "poke-api" });
+    const selection = { providerId: prefixedId, modelId: "m-alpha", options: { reasoningLevel: "disabled" } };
+    const fresh = mergePersonalProviderConfig(null, { [prefixedId]: entry }, [], { defaultModelSelection: selection });
+    assert.deepEqual(fresh.config.config.defaultModelSelection, selection);
+    assert.equal(validatePersonalProviderConfig(fresh.config).valid, true);
+
+    // 已有选择的文件（无论选择长什么样）原样保留——生成值绝不覆盖用户选择。
+    const seeded = {
+      schemaVersion: 1,
+      config: {
+        defaultModelSelection: { providerId: "builtin:zai", modelId: "GLM-5.3" },
+        providerConfigRules: { providerRules: [] },
+        modelConfigRules: { providerModelRules: [] },
+      },
+    };
+    const merged = mergePersonalProviderConfig(seeded, { [prefixedId]: entry }, [], { defaultModelSelection: selection });
+    assert.deepEqual(merged.config.config.defaultModelSelection, { providerId: "builtin:zai", modelId: "GLM-5.3" });
+  });
+
+  it("keeps the desktop slot shape: no selection is invented without the option", () => {
+    const { prefixedId, entry } = injectedEntry({ providerId: "poke-api" });
+    const { config } = mergePersonalProviderConfig(null, { [prefixedId]: entry }, []);
+    assert.equal("defaultModelSelection" in config.config, false);
+  });
+});
+
+describe("防乒乓：客户端 canonical 重写后的同步", () => {
+  function readDoc(dir) {
+    return JSON.parse(readFileSync(join(dir, PERSONAL_CONFIG_FILENAME), "utf8"));
+  }
+
+  // 验收实测：CLI（与桌面版同一套 NodePersonalProviderConfigRepository）读取时
+  // 会把文件规范化为自己的 canonical 键序重写一次——模型规则变成
+  // {modelId, config, providerId}，选择变成 {providerId, modelId, options}。
+  function cliCanonicalRewrite(doc) {
+    const clone = JSON.parse(JSON.stringify(doc));
+    const rules = clone.config?.modelConfigRules;
+    if (Array.isArray(rules?.providerModelRules)) {
+      rules.providerModelRules = rules.providerModelRules.map((rule) => {
+        const { modelId, config, providerId, ...rest } = rule;
+        return { modelId, config, ...rest, providerId };
+      });
+    }
+    const selection = clone.config?.defaultModelSelection;
+    if (selection) {
+      const { providerId, modelId, ...rest } = selection;
+      clone.config.defaultModelSelection = { providerId, modelId, ...rest };
+    }
+    return clone;
+  }
+
+  it("treats a client-canonicalized rewrite as unchanged instead of rewriting and rolling backups", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const { prefixedId, entry } = injectedEntry({ providerId: "poke-api", models: { "m-alpha": { contextWindow: 1000000 } } });
+      const first = syncZcodePersonalConfig({ configPath, managedEntries: { [prefixedId]: entry }, previousManaged: [] });
+      assert.equal(first.ok, true, first.reason);
+      assert.equal(first.unchanged, false);
+
+      // 客户端规范化重写落盘：键序变了，语义没变。
+      const personalPath = join(root, PERSONAL_CONFIG_FILENAME);
+      writeFileSync(personalPath, JSON.stringify(cliCanonicalRewrite(readDoc(root)), null, 2));
+      const before = readFileSync(personalPath, "utf8");
+
+      const second = syncZcodePersonalConfig({ configPath, managedEntries: { [prefixedId]: entry }, previousManaged: [prefixedId] });
+      assert.equal(second.ok, true, second.reason);
+      assert.equal(second.unchanged, true, "canonical 键序差异不得触发重写");
+      assert.equal(readFileSync(personalPath, "utf8"), before, "文件保持客户端的 canonical 形态");
+      assert.deepEqual(readdirSync(root).filter((f) => f.includes("backup")), [], "只有无意义重写才会滚备份");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still rewrites when the content actually changed under a canonicalized file", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const firstEntry = injectedEntry({ providerId: "poke-api", models: { "m-alpha": { contextWindow: 1000000 } } });
+      syncZcodePersonalConfig({ configPath, managedEntries: { [firstEntry.prefixedId]: firstEntry.entry }, previousManaged: [] });
+      writeFileSync(join(root, PERSONAL_CONFIG_FILENAME), JSON.stringify(cliCanonicalRewrite(readDoc(root)), null, 2));
+
+      const grown = injectedEntry({
+        providerId: "poke-api",
+        models: { "m-alpha": { contextWindow: 1000000 }, "m-beta": { contextWindow: 8192 } },
+      });
+      const result = syncZcodePersonalConfig({ configPath, managedEntries: { [grown.prefixedId]: grown.entry }, previousManaged: [grown.prefixedId] });
+      assert.equal(result.ok, true, result.reason);
+      assert.equal(result.unchanged, false, "真实内容变化照常重写");
+      assert.deepEqual(
+        readDoc(root).config.providerConfigRules.providerRules[0].config.personalModelIds,
+        ["m-alpha", "m-beta"],
+      );
+      assert.equal(readdirSync(root).filter((f) => f.includes("backup")).length, 1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

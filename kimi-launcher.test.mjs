@@ -5,7 +5,7 @@ import { describe, it, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { runKimiLauncher, buildKimiLauncherEnv, buildInstanceId, writeKimiConfig } from "./kimi-launcher.mjs";
+import { runKimiLauncher, buildKimiLauncherEnv, buildKimiNativeFallbackEnv, buildInstanceId, writeKimiConfig } from "./kimi-launcher.mjs";
 import { readSidecar } from "./kimi-merge-config.mjs";
 import { sanitizeInstanceId } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
@@ -177,6 +177,50 @@ test("runKimiLauncher works without a session tracker (older relay handles)", as
   });
   assert.equal(code, 3);
   assert.equal(state.closed, true);
+});
+
+test("buildKimiNativeFallbackEnv passes the inherited environment through untouched", () => {
+  const base = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-real", KIMI_CODE_CUSTOM_HEADERS: "x-user: 1" };
+  const env = buildKimiNativeFallbackEnv({ base });
+  assert.deepEqual(env, base);
+  assert.notEqual(env, base, "a copy, so callers may mutate it without touching process.env");
+});
+
+test("runKimiLauncher falls back to the native configuration when the relay cannot start", async () => {
+  const spawned = [];
+  const logs = [];
+  let buildEnvCalled = false;
+
+  const code = await runKimiLauncher({
+    startRelay: async () => {
+      throw new Error("the Anyswitch global store is not usable; refusing to start the relay");
+    },
+    buildEnv: (args) => {
+      buildEnvCalled = true;
+      return buildKimiLauncherEnv(args);
+    },
+    spawnKimi: async ({ env, args }) => {
+      spawned.push({ env, args });
+      return 0;
+    },
+    log: (line) => logs.push(line),
+    base: { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-real-anthropic-key" },
+    kimiArgs: ["--resume", "session-1"],
+  });
+
+  assert.equal(code, 0);
+  assert.equal(spawned.length, 1);
+  // 原生回落：不注入 relay 三件套与身份头，也不删用户自己的 ANTHROPIC_API_KEY。
+  assert.equal(spawned[0].env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(spawned[0].env.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(spawned[0].env.KIMI_CODE_CUSTOM_HEADERS, undefined);
+  assert.equal(spawned[0].env.ANTHROPIC_API_KEY, "sk-real-anthropic-key");
+  assert.equal(spawned[0].env.PATH, "/usr/bin");
+  assert.equal(buildEnvCalled, false, "the relay-mode env builder must not run on the fallback path");
+  assert.deepEqual(spawned[0].args, ["--resume", "session-1"]);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /not usable/);
+  assert.match(logs[0], /native configuration/);
 });
 
 describe("writeKimiConfig", () => {

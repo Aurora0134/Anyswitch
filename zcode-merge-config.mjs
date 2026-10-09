@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
+import { contentHash, atomicWriteFile, pruneBackups, withDirectoryLock, LockTimeoutError } from "./atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
@@ -23,6 +23,23 @@ export function readSidecar(root) {
 
 export function writeSidecar(root, providerIds) {
   writeSidecarFile(sidecarPath(root), providerIds);
+}
+
+// CLI 槽位（zcode-cli）：独立配置文件落在 <root>\zcode-cli\，sidecar 与桌面版
+// zcode-sidecar.json 并排落在 root（zcode-cli-sidecar.json）。两个槽位各记各
+// 的上一轮托管集合——共用一份会让一个槽位的退役清理认不出另一个槽位注入的条
+// 目。启动时同步（zcode-cli-launcher.mjs）与周期同步（zcode-launcher.mjs 的
+// syncZcodeCliSlot）读写同一份 sidecar。常量住在这里而不是任一 launcher：
+// 两个 launcher 都已 import 本模块，避免引入 launcher 间的互相依赖。
+export const ZCODE_CLI_SLOT_DIRNAME = "zcode-cli";
+export const ZCODE_CLI_SIDECAR_FILENAME = "zcode-cli-sidecar.json";
+
+export function zcodeCliSlotDir(root) {
+  return join(root, ZCODE_CLI_SLOT_DIRNAME);
+}
+
+export function zcodeCliSidecarPath(root) {
+  return join(root, ZCODE_CLI_SIDECAR_FILENAME);
 }
 
 function timestamp() {
@@ -131,29 +148,49 @@ export function readZcodeConfig(filePath) {
   }
 }
 
-export function writeZcodeConfigWithBackup(filePath, data) {
+// The unchanged-check → backup → write sequence runs inside the
+// ZCode-compatible directory lock (atomic-write.mjs withDirectoryLock): the
+// resident relay's store watcher and a per-launch launcher can both sync at
+// once, so the check-and-write must not interleave. The ZCode-shaped lock (not
+// withFileLock) keeps this file on the same exclusion discipline as the
+// provider_config.json written next to it. A lock timeout fails the round
+// closed ({ok:false}, nothing written) — the next store change retries.
+export function writeZcodeConfigWithBackup(filePath, data, { lockWaitMs } = {}) {
   const dir = dirname(filePath);
   mkdirSync(dir, { recursive: true });
 
-  const text = JSON.stringify(data, null, 2) + "\n";
-  const hash = contentHash(text);
+  try {
+    return withDirectoryLock(
+      filePath,
+      () => {
+        const text = JSON.stringify(data, null, 2) + "\n";
+        const hash = contentHash(text);
 
-  if (existsSync(filePath)) {
-    const existing = readFileSync(filePath, "utf8");
-    if (contentHash(existing) === hash) return { ok: true, unchanged: true };
+        if (existsSync(filePath)) {
+          const existing = readFileSync(filePath, "utf8");
+          if (contentHash(existing) === hash) return { ok: true, unchanged: true };
+        }
+
+        let backupPath;
+        if (existsSync(filePath)) {
+          backupPath = join(dir, `config.backup.${timestamp()}.json`);
+          copyFileSync(filePath, backupPath);
+        }
+
+        atomicWriteFile(filePath, text);
+        // Trim to the newest 5 backups: unbounded retention had already piled up
+        // 233 token-bearing config copies in ~/.zcode/v2.
+        pruneBackups(dir, "config.backup.");
+        return { ok: true, unchanged: false, backupPath };
+      },
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      return { ok: false, unchanged: true, reason: error.message };
+    }
+    throw error;
   }
-
-  let backupPath;
-  if (existsSync(filePath)) {
-    backupPath = join(dir, `config.backup.${timestamp()}.json`);
-    copyFileSync(filePath, backupPath);
-  }
-
-  atomicWriteFile(filePath, text);
-  // Trim to the newest 5 backups: unbounded retention had already piled up
-  // 233 token-bearing config copies in ~/.zcode/v2.
-  pruneBackups(dir, "config.backup.");
-  return { ok: true, unchanged: false, backupPath };
 }
 
 export { extractManagedProviders } from "./pool-providers.mjs";

@@ -235,6 +235,73 @@ test("runGrokLauncher falls back to a per-launch relay when the probe throws", a
   assert.ok(deps.logs.some((l) => l.includes("probe failed") && l.includes("falling back to per-launch relay")));
 });
 
+test("runGrokLauncher launches natively when both relay levels fail", async () => {
+  const deps = recordingDeps({
+    probeRelay: async () => false,
+    // The native launch must not strip grok's own credentials.
+    base: { ...FAKE_BASE, XAI_API_KEY: "xai-real-key", GROK_CODE_XAI_API_KEY: "grok-code-real-key" },
+  });
+
+  const code = await runGrokLauncher({
+    ...deps,
+    startRelay: async () => {
+      deps.calls.push("startRelay");
+      throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
+    },
+    spawnGrok: async ({ env, args, onPid }) => {
+      deps.calls.push("spawnGrok");
+      deps.spawned = { env, args };
+      onPid?.(4321);
+      return 0;
+    },
+    grokArgs: ["--resume", "sess-1"],
+  });
+
+  assert.equal(code, 0);
+  assert.deepEqual(deps.calls, ["startRelay", "writeConfig", "spawnGrok"]);
+  // Native mode: no relay env injection of any kind.
+  assert.equal("ANYSWITCH_INSTANCE_ID" in deps.spawned.env, false);
+  assert.equal("NO_PROXY" in deps.spawned.env, false);
+  // grok's own upstream credentials survive untouched (relay mode deletes them).
+  assert.equal(deps.spawned.env.XAI_API_KEY, "xai-real-key");
+  assert.equal(deps.spawned.env.GROK_CODE_XAI_API_KEY, "grok-code-real-key");
+  assert.deepEqual(deps.spawned.args, ["--resume", "sess-1"]);
+  // The config sync still runs, against the well-known port with the shared
+  // token file's token, so the managed tables revive with the resident relay.
+  assert.deepEqual(deps.written, {
+    store: FAKE_STORE,
+    port: RELAY_PORT,
+    token: "shared-resident-token",
+    sidecarRoot: join(FAKE_LOCAL, "Anyswitch"),
+    configPath: join(FAKE_HOME, ".grok", "config.toml"),
+  });
+  // No relay token → no session reporter; no relay → nothing to tear down.
+  assert.equal(deps.calls.includes("createTracker"), false);
+  assert.equal(deps.calls.includes("closeRelay"), false);
+  assert.ok(deps.logs.some((l) => l.includes("Anyswitch relay unavailable") && l.includes("launching grok with its native configuration")));
+});
+
+test("runGrokLauncher native mode skips only the config sync when the shared token is unreadable", async () => {
+  const deps = recordingDeps({
+    probeRelay: async () => false,
+    loadToken: () => { throw new Error("token dir gone"); },
+  });
+
+  const code = await runGrokLauncher({
+    ...deps,
+    startRelay: async () => { throw new Error("the Anyswitch global store is not usable"); },
+    spawnGrok: async () => {
+      deps.calls.push("spawnGrok");
+      return 3;
+    },
+  });
+
+  assert.equal(code, 3, "the child exit code passes through in native mode too");
+  assert.equal(deps.calls.includes("writeConfig"), false);
+  assert.equal(deps.calls.includes("spawnGrok"), true);
+  assert.ok(deps.logs.some((l) => l.includes("relay token unavailable") && l.includes("token dir gone")));
+});
+
 test("runGrokLauncher syncs config.toml with the relay port, token and resolved paths", async () => {
   const deps = recordingDeps({
     writeConfig: async (store, port, token, sidecarRoot, configPath) => {

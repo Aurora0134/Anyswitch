@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync, mkdirSync, renameSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { join } from "node:path";
 import {
   atomicWriteFile,
@@ -12,6 +12,7 @@ import {
   contentHash,
   pruneBackups,
   withFileLock,
+  withDirectoryLock,
   PreconditionFailedError,
   LockTimeoutError,
 } from "./atomic-write.mjs";
@@ -282,4 +283,209 @@ test("pruneBackups defaults to keeping 5", () => {
   const remaining = readdirSync(dir).sort();
   assert.equal(remaining.length, 5);
   assert.equal(remaining[0], "config.backup.2026-01-04T00-00-00-000Z.toml");
+});
+
+// --- withDirectoryLock: the ZCode-compatible directory lock -----------------
+//
+// ZCode locks the files it owns (e.g. ~/.zcode/v2/provider_config.json) with a
+// "<file>.lock" directory holding an owner-<pid>-<ts>-<rand>.json credential
+// (packages/shared/src/node/atomicFileLock.ts). These tests pin the on-disk
+// shape our lock leaves, the mutual exclusion against a ZCode-style holder,
+// and the stale-reclamation rules — all aligned with ZCode's own.
+
+// A foreign holder exactly as ZCode's acquireFileLock leaves it on disk.
+function holdZcodeStyleLock(target, { pid, createdAt = Date.now(), token = "foreign" } = {}) {
+  const lockPath = `${target}.lock`;
+  mkdirSync(lockPath);
+  const ownerName = `owner-${pid}-${createdAt}-${token}.json`;
+  writeFileSync(join(lockPath, ownerName), `${JSON.stringify({ pid, createdAt, token })}\n`, "utf8");
+  return { lockPath, ownerName };
+}
+
+test("withDirectoryLock runs the critical section and releases the lock directory", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+
+  const result = withDirectoryLock(target, () => {
+    // While held, the on-disk shape is exactly what a ZCode acquirer expects:
+    // a lock directory with a single owner credential it can parse.
+    const owners = readdirSync(`${target}.lock`).filter((e) => e.startsWith("owner-") && e.endsWith(".json"));
+    assert.equal(owners.length, 1);
+    assert.match(owners[0], /^owner-\d+-\d+-[a-z0-9]+\.json$/);
+    const raw = readFileSync(join(`${target}.lock`, owners[0]), "utf8");
+    assert.ok(raw.endsWith("\n"), "owner credential ends with a newline like ZCode's");
+    const meta = JSON.parse(raw);
+    assert.equal(meta.pid, process.pid);
+    assert.equal(typeof meta.createdAt, "number");
+    assert.equal(typeof meta.token, "string");
+    return "done";
+  });
+  assert.equal(result, "done");
+  assert.equal(existsSync(`${target}.lock`), false, "lock directory must be released");
+});
+
+test("withDirectoryLock releases the lock when fn throws", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  assert.throws(() => withDirectoryLock(target, () => { throw new Error("boom"); }), /boom/);
+  assert.equal(existsSync(`${target}.lock`), false, "lock must be released on throw");
+});
+
+test("withDirectoryLock times out against a live ZCode-style holder and leaves it untouched", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  // A live owner pid (this process) is exactly what a running ZCode client
+  // holding the lock looks like from the outside.
+  const { lockPath, ownerName } = holdZcodeStyleLock(target, { pid: process.pid });
+
+  let ran = false;
+  const startedAt = Date.now();
+  assert.throws(
+    () => withDirectoryLock(target, () => { ran = true; }, { waitMs: 150 }),
+    (error) => error instanceof LockTimeoutError,
+  );
+  assert.ok(Date.now() - startedAt >= 140, "the contender actually waited");
+  assert.equal(ran, false, "fn must not run under a foreign lock");
+  assert.deepEqual(readdirSync(lockPath), [ownerName], "the live foreign lock is never reclaimed");
+  rmSync(lockPath, { recursive: true, force: true });
+
+  // Once the holder releases, the same target locks immediately.
+  let after = false;
+  withDirectoryLock(target, () => { after = true; }, { waitMs: 150 });
+  assert.equal(after, true);
+});
+
+test("withDirectoryLock reclaims the lock of a dead owner", async () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+
+  // A real child process that we terminate: its pid is a genuine dead owner.
+  const dead = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    child.once("spawn", () => {
+      child.kill();
+      child.once("exit", () => resolve(child.pid));
+    });
+    child.once("error", reject);
+  });
+  assert.ok(dead > 0);
+  holdZcodeStyleLock(target, { pid: dead });
+
+  let ran = false;
+  withDirectoryLock(target, () => { ran = true; });
+  assert.equal(ran, true, "a dead owner's lock must be reclaimed");
+  assert.equal(existsSync(`${target}.lock`), false);
+});
+
+test("withDirectoryLock reclaims an ownerless lock once it outlives the grace", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  // No usable pid in the credential: only the age can retire it.
+  const lockPath = `${target}.lock`;
+  mkdirSync(lockPath);
+  writeFileSync(join(lockPath, "owner-0-0-x.json"), JSON.stringify({ createdAt: Date.now() - 60_000 }), "utf8");
+
+  let ran = false;
+  withDirectoryLock(target, () => { ran = true; }, { ownerlessGraceMs: 50 });
+  assert.equal(ran, true, "an ownerless lock past the grace must be reclaimed");
+});
+
+test("withDirectoryLock reclaims an empty lock directory left by a crashed acquirer", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  // Crash between mkdir and the owner write leaves a bare directory.
+  mkdirSync(`${target}.lock`);
+
+  let ran = false;
+  withDirectoryLock(target, () => { ran = true; }, { ownerlessGraceMs: 50, waitMs: 2_000 });
+  assert.equal(ran, true, "an empty lock directory past the grace must be reclaimed");
+  assert.equal(existsSync(`${target}.lock`), false);
+});
+
+test("withDirectoryLock respects a legacy single-file lock with a live owner", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  // Older ZCode versions left a plain file at the .lock path; a live one is
+  // still a held lock and must survive our timeout untouched.
+  const lockPath = `${target}.lock`;
+  const content = `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "legacy" })}\n`;
+  writeFileSync(lockPath, content, "utf8");
+
+  let ran = false;
+  assert.throws(
+    () => withDirectoryLock(target, () => { ran = true; }, { waitMs: 150 }),
+    (error) => error instanceof LockTimeoutError,
+  );
+  assert.equal(ran, false);
+  assert.equal(readFileSync(lockPath, "utf8"), content, "the live legacy lock is never reclaimed");
+});
+
+test("withDirectoryLock reclaims a legacy single-file lock whose owner is gone", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+  writeFileSync(`${target}.lock`, JSON.stringify({ createdAt: Date.now() - 60_000 }), "utf8");
+
+  let ran = false;
+  withDirectoryLock(target, () => { ran = true; }, { ownerlessGraceMs: 50 });
+  assert.equal(ran, true);
+  assert.equal(existsSync(`${target}.lock`), false, "the reclaimed legacy lock is gone after release");
+});
+
+test("withDirectoryLock never reclaims a live holder, not even for a nested acquire", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+
+  withDirectoryLock(target, () => {
+    // A nested acquire sees our own credential: the pid is alive, so the lock
+    // is not stale no matter how long the outer section takes — it waits out
+    // the timeout instead of breaking the exclusion.
+    assert.throws(
+      () => withDirectoryLock(target, () => {}, { waitMs: 120 }),
+      (error) => error instanceof LockTimeoutError,
+    );
+    assert.ok(existsSync(`${target}.lock`), "the outer lock survives the nested timeout");
+  });
+  assert.equal(existsSync(`${target}.lock`), false);
+});
+
+test("withDirectoryLock is seen as a live foreign lock by a ZCode-style acquirer", () => {
+  const dir = tempDir();
+  const target = join(dir, "provider_config.json");
+
+  // While we hold the lock, a separate process running ZCode's acquire steps
+  // (bare mkdir, then owner inspection) must see EEXIST and judge the owner
+  // alive — the two directions of the exclusion both hold.
+  const childScript = `
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const lockPath = process.argv[1];
+    const out = { mkdir: null, owners: null, payloadOk: null, ownerAlive: null };
+    try {
+      fs.mkdirSync(lockPath);
+      out.mkdir = "ACQUIRED";
+    } catch (error) {
+      out.mkdir = error.code;
+    }
+    if (out.mkdir === "EEXIST") {
+      const owners = fs.readdirSync(lockPath).filter((e) => e.startsWith("owner-") && e.endsWith(".json"));
+      out.owners = owners.length;
+      if (owners.length === 1) {
+        const meta = JSON.parse(fs.readFileSync(path.join(lockPath, owners[0]), "utf8"));
+        out.payloadOk = Number.isSafeInteger(meta.pid) && meta.pid > 0 &&
+          typeof meta.createdAt === "number" && typeof meta.token === "string";
+        try { process.kill(meta.pid, 0); out.ownerAlive = true; }
+        catch (error) { out.ownerAlive = error.code !== "ESRCH"; }
+      }
+    }
+    process.stdout.write(JSON.stringify(out));
+  `;
+  withDirectoryLock(target, () => {
+    const child = spawnSync(process.execPath, ["-e", childScript, `${target}.lock`], { encoding: "utf8" });
+    assert.equal(child.status, 0, child.stderr);
+    const seen = JSON.parse(child.stdout);
+    assert.equal(seen.mkdir, "EEXIST", "ZCode's mkdir collides with our held lock directory");
+    assert.equal(seen.owners, 1);
+    assert.equal(seen.payloadOk, true, "our owner credential parses under ZCode's metadata rules");
+    assert.equal(seen.ownerAlive, true, "ZCode's liveness rule judges our process alive");
+  });
 });

@@ -10,6 +10,11 @@
 //      streaming all work,
 //   5. tears the relay down when Claude exits, so the token dies with it.
 //
+// If the relay cannot start at all (the store preflight refuses to listen, the
+// loopback bind fails, ...), the launcher falls back to Claude's NATIVE
+// configuration instead of exiting: nothing is injected, nothing is stripped,
+// and one stderr line says the session is not routed through Anyswitch.
+//
 // runLauncher() takes every side effect as an injected dependency, so the whole
 // control flow (version gate, discovery downgrade, env injection, teardown) is
 // testable with zero real spawn, zero real relay and zero API cost. The real
@@ -120,6 +125,16 @@ export function buildLauncherEnv({ port, token, discovery, base = {} }) {
   return env;
 }
 
+// Native-fallback env, used when the relay cannot start. Claude is launched
+// with exactly the inherited environment: no ANTHROPIC_BASE_URL /
+// ANTHROPIC_AUTH_TOKEN injection, and ANTHROPIC_API_KEY is NOT stripped —
+// with no relay there is no session token for a real key to shadow, so the
+// key is simply the user's own native configuration. The shallow copy keeps
+// callers free to mutate the result without touching process.env.
+export function buildNativeFallbackEnv({ base = {} } = {}) {
+  return { ...base };
+}
+
 // Decide whether gateway discovery may be enabled for this Claude version, and
 // emit the appropriate operator-facing warning. Pure apart from the injected log.
 function resolveDiscovery(version, log) {
@@ -160,10 +175,21 @@ export async function runLauncher({
   base = process.env,
   claudeArgs = [],
 }) {
-  // If the relay refuses to start (e.g. the store is unusable), this throws
-  // before we have a handle. We must NOT spawn Claude and there is nothing to
-  // close, so let it propagate directly.
-  const relay = await startRelay();
+  // Native fallback: a relay that cannot start (the store preflight refuses
+  // to listen, the loopback bind fails, ...) must not block Claude itself —
+  // launch it on its own configuration instead. Nothing is injected or
+  // stripped, the version probe is skipped (its only consumer is the
+  // relay-mode discovery decision) and there is no relay handle to tear down.
+  let relay;
+  try {
+    relay = await startRelay();
+  } catch (error) {
+    log(
+      `Anyswitch relay could not start (${error?.message ?? error}); ` +
+        `launching Claude with its native configuration — this session is not routed through Anyswitch.`,
+    );
+    return await spawnClaude({ env: buildNativeFallbackEnv({ base }), args: claudeArgs });
+  }
   const tracker = relay.sessionTracker ?? null;
 
   try {

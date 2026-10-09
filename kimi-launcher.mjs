@@ -10,6 +10,11 @@
 //      via process-level environment variables only (never written to disk),
 //   3. passes the terminal straight through,
 //   4. tears the relay down when kimi exits, so the token dies with it.
+//
+// If the relay cannot start at all (the store preflight refuses to listen, the
+// loopback bind fails, ...), the launcher falls back to kimi's NATIVE
+// configuration instead of exiting: nothing is injected, nothing is stripped,
+// and one stderr line says the session is not routed through Anyswitch.
 
 import { spawn } from "node:child_process";
 import { join, basename } from "node:path";
@@ -128,6 +133,15 @@ export function buildKimiLauncherEnv({ port, token, base = {}, instanceId = null
   return env;
 }
 
+// Native-fallback env, used when the relay cannot start: kimi is launched with
+// exactly the inherited environment. No ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN,
+// no KIMI_CODE_CUSTOM_HEADERS (the x-agent-id / x-agent-instance headers exist
+// solely for the Anyswitch relay's attribution), and ANTHROPIC_API_KEY is NOT
+// stripped — with no relay session token there is nothing for it to shadow.
+export function buildKimiNativeFallbackEnv({ base = {} } = {}) {
+  return { ...base };
+}
+
 import { resolveKimiExecutable } from "./agent-discovery.mjs";
 export { resolveKimiExecutable };
 
@@ -173,7 +187,20 @@ export async function runKimiLauncher({
   base = process.env,
   kimiArgs = [],
 }) {
-  const relay = await startRelay();
+  // 原生回落：relay 起不来（preflight 拒绝监听、loopback 绑定失败……）不应
+  // 挡住 kimi 本身——按原生配置拉起，不注入也不删除任何变量。注入的 buildEnv
+  // 是 relay 形态专用，回落路径固定走 buildKimiNativeFallbackEnv；没有 relay
+  // 句柄，session tracker 与拆除逻辑整体不涉及。
+  let relay;
+  try {
+    relay = await startRelay();
+  } catch (error) {
+    log(
+      `Anyswitch relay could not start (${error?.message ?? error}); ` +
+        `launching kimi with its native configuration — this session is not routed through Anyswitch.`,
+    );
+    return await spawnKimi({ env: buildKimiNativeFallbackEnv({ base }), args: kimiArgs });
+  }
   const tracker = relay.sessionTracker ?? null;
   // One instance id per launcher process (launcher 与客户端实例一一对应)，
   // 经 KIMI_CODE_CUSTOM_HEADERS 随子进程出站请求打到 relay 的实例桶。

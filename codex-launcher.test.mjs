@@ -228,6 +228,55 @@ test("runCodexLauncher passes the child exit code through", async () => {
   assert.equal(code, 7);
 });
 
+test("runCodexLauncher launches natively when the relay cannot start", async () => {
+  // Native mode reads/generates the shared relay token file under the data
+  // root for the config sync — point base at a real temp dir so nothing lands
+  // under the live profile.
+  const dir = mkTestDir("codex-native-");
+  try {
+    const deps = recordingDeps();
+    let capturedEnv = null;
+
+    const code = await runCodexLauncher({
+      ...deps,
+      startRelay: async () => {
+        deps.calls.push("startRelay");
+        throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
+      },
+      spawnCodex: async ({ env }) => {
+        deps.calls.push("spawnCodex");
+        capturedEnv = env;
+        return 9;
+      },
+      base: { USERPROFILE: join(dir, "home"), LOCALAPPDATA: join(dir, "local"), PATH: "/usr/bin", CUSTOM_VAR: "kept" },
+      codexArgs: ["exec"],
+    });
+
+    assert.equal(code, 9, "the child exit code passes through in native mode too");
+    assert.deepEqual(deps.calls, ["startRelay", "writeConfig", "spawnCodex"]);
+    // Native mode: verbatim environment — no instance tag, no NO_PROXY.
+    assert.equal("ANYSWITCH_INSTANCE_ID" in capturedEnv, false);
+    assert.equal("NO_PROXY" in capturedEnv, false);
+    assert.equal(capturedEnv.CUSTOM_VAR, "kept");
+    // The config sync still runs against the well-known port; its token comes
+    // from the shared token file (generated on demand under the data root).
+    const sharedToken = readFileSync(join(dir, "local", "Anyswitch", "pi-relay-token"), "utf8").trim();
+    assert.ok(sharedToken.length > 0);
+    assert.deepEqual(deps.written, {
+      store: FAKE_STORE,
+      port: RELAY_PORT,
+      token: sharedToken,
+      sidecarRoot: join(dir, "local", "Anyswitch"),
+      configPath: join(dir, "home", ".codex", "config.toml"),
+    });
+    // No relay → nothing to tear down.
+    assert.equal(deps.calls.includes("closeRelay"), false);
+    assert.ok(deps.logs.some((l) => l.includes("Anyswitch relay unavailable") && l.includes("launching codex with its native configuration")));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runCodexLauncher tears the relay down even when spawn fails", async () => {
   const deps = recordingDeps();
 

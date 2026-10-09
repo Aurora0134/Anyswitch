@@ -29,11 +29,16 @@
 //
 // Pure functions plus one guarded write: a file we cannot parse is never
 // treated as empty, and a newer schemaVersion we cannot decode is never
-// rewritten in our older shape.
+// rewritten in our older shape. The read → merge → write of a sync runs under
+// the same directory lock ZCode itself takes (atomic-write.mjs
+// withDirectoryLock), because the running client rewrites this file with the
+// user's default model selection — an unlocked sync could silently overwrite
+// that write, and a client write landing mid-sync would be lost from ours.
 
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
+import { contentHash, atomicWriteFile, pruneBackups, withDirectoryLock, LockTimeoutError } from "./atomic-write.mjs";
+import { AUTO_CHANNEL_KEY } from "./merge-common.mjs";
 
 export const PERSONAL_CONFIG_FILENAME = "provider_config.json";
 export const PERSONAL_SCHEMA_VERSION = 1;
@@ -160,9 +165,13 @@ function ownedIds(managedIds, previousManaged) {
  * @param {object|null} existing parsed provider_config.json, or null when absent
  * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
  * @param {string[]} previousManaged prefixed ids injected by the last sync
+ * @param {object} [options]
+ * @param {object} [options.defaultModelSelection] used only when the file has no
+ *   defaultModelSelection of its own (CLI slot bootstrap; the desktop slot never
+ *   passes one, so its document shape is unchanged)
  * @returns {{ config: object, managed: string[] }} managed is the new prefixed id set
  */
-export function mergePersonalProviderConfig(existing, managedEntries, previousManaged = []) {
+export function mergePersonalProviderConfig(existing, managedEntries, previousManaged = [], options = {}) {
   const managedIds = Object.keys(managedEntries ?? {});
   const { managed, wasManaged } = ownedIds(managedIds, previousManaged);
   const source = isRecord(existing?.config) ? existing.config : {};
@@ -218,11 +227,26 @@ export function mergePersonalProviderConfig(existing, managedEntries, previousMa
     if (typeof providerId !== "string") return true;
     return !(ownedOnDisk.has(providerId) || managed.has(providerId) || wasManaged.has(providerId));
   });
+  // The rebuilt rules for managed providers are ours, but ZCode mixes one
+  // piece of client state into them: config.enabled, the per-model toggle in
+  // its model list. Dropping it on every sync would silently re-enable a model
+  // the user switched off, so the client-written flag rides along on the rule
+  // we regenerate. (Non-boolean values are not carried: the write gate would
+  // reject the document.)
+  const managedEnabled = new Map();
+  for (const rule of existingModelRules) {
+    if (typeof rule?.providerId !== "string" || !managed.has(rule.providerId)) continue;
+    if (typeof rule?.config?.enabled === "boolean") {
+      if (!managedEnabled.has(rule.providerId)) managedEnabled.set(rule.providerId, new Map());
+      managedEnabled.get(rule.providerId).set(rule.modelId, rule.config.enabled);
+    }
+  }
   const nextModelRules = [...keptModelRules];
   for (const providerId of managedIds) {
     for (const rule of built.get(providerId).modelRules) {
       if (manualKeys.has(`${rule.providerId}\u0000${rule.modelId}`)) continue;
-      nextModelRules.push(rule);
+      const enabled = managedEnabled.get(rule.providerId)?.get(rule.modelId);
+      nextModelRules.push(enabled === undefined ? rule : { ...rule, config: { enabled, ...rule.config } });
     }
   }
 
@@ -231,9 +255,20 @@ export function mergePersonalProviderConfig(existing, managedEntries, previousMa
     providerConfigRules: { providerRules },
     modelConfigRules: {
       providerModelRules: nextModelRules,
-      ...(manualRules ? { manualProviderModelRules: manualRules } : {}),
+      // ZCode 的 schema 把 manualProviderModelRules 定为必填（zcode-src
+      // packages/provider/src/config/rule-data-schema.ts
+      // personalModelConfigRulesSchema）：缺这个键的文件会被 CLI 整份拒收、静默
+      // recovery 成空 personal 层（界面报 Select a model before continuing）。
+      // 恒输出——没有手动规则就是 []——也与客户端自己回写的 canonical 形态一致。
+      manualProviderModelRules: manualRules ?? [],
     },
-    ...source.defaultModelSelection === undefined ? {} : { defaultModelSelection: source.defaultModelSelection },
+    // The user's own picked model survives untouched; only a file that has no
+    // selection at all may take the caller-supplied one.
+    ...source.defaultModelSelection !== undefined
+      ? { defaultModelSelection: source.defaultModelSelection }
+      : options.defaultModelSelection
+        ? { defaultModelSelection: options.defaultModelSelection }
+        : {},
   };
   // Anything else already in the document is user or client data with no place
   // in a rule merge, but it must not be silently dropped either: pass it
@@ -245,6 +280,153 @@ export function mergePersonalProviderConfig(existing, managedEntries, previousMa
   }
 
   return { config: { schemaVersion: PERSONAL_SCHEMA_VERSION, config }, managed: managedIds };
+}
+
+/* ---------- CLI 槽位的默认模型选择 ---------- */
+
+// The CLI refuses to run headless against a fresh provider_config.json — the
+// registry validator (compiled zcode.cjs validateModelSelectionOptions) rejects
+// a defaultModelSelection without options.reasoningLevel
+// (reasoning-level-missing) or with a level outside the model's resolved
+// reasoningLevel.values (reasoning-level-not-supported), both silently falling
+// back, and with no selection at all it stops at "Select a model before
+// continuing". A fresh CLI slot therefore gets one generated selection whose
+// reasoningLevel is provably legal for the chosen model.
+//
+// Anchor verified by the acceptance run with real requests: _free-pool's
+// mimo-v2.6-flash-free resolves to reasoningLevel.values ["disabled","enabled"],
+// so "disabled" is a legal, working level there. "free-pool" is a channel id
+// from the operator's store, not a code-level constant — hence the literal.
+const CLI_AUTO_PROVIDER_ID = `_${AUTO_CHANNEL_KEY}`;
+const CLI_FALLBACK_PROVIDER_ID = "_free-pool";
+const CLI_FALLBACK_REASONING_LEVEL = "disabled";
+
+function firstModelIdOf(entry) {
+  const modelIds = Object.keys(entry?.models ?? {});
+  return modelIds.length > 0 ? modelIds[0] : undefined;
+}
+
+// Rule matching mirrors ModelConfigRules.resolve (zcode-src
+// packages/provider/src/config/model-config.ts): modelMatch is
+// case-insensitive, apiTypeMatch/baseUrlMatch are case-sensitive, and the
+// baseUrl is normalized (trailing slashes stripped) before matching.
+function rulePatternMatches(pattern, value, ignoreCase) {
+  if (typeof pattern !== "string" || typeof value !== "string") return false;
+  try {
+    return new RegExp(`^(?:${pattern})$`, ignoreCase ? "i" : undefined).test(value);
+  } catch {
+    return false;
+  }
+}
+
+function normalizeBaseUrlForRuleMatch(value) {
+  try {
+    const parsed = new URL(value);
+    const suffix = `${parsed.search}${parsed.hash}`;
+    const serialized = parsed.toString();
+    const endpoint = suffix.length === 0 ? serialized : serialized.slice(0, -suffix.length);
+    return `${endpoint.replace(/\/+$/, "")}${suffix}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve one model's legal reasoningLevel values the way the CLI does: walk
+ * the builtin rules in document order (modelRules → modelApiRules →
+ * providerSiteRules — template-model rules need a templateId and
+ * builtin-provider rules name builtin provider ids, neither can match a
+ * personal provider) and let every matching rule overlay
+ * optionSpecs.reasoningLevel.values onto the running result.
+ *
+ * @param {object|null} rules parsed zcode-builtin.json's config.modelConfigRules
+ * @returns {string[]|null} the resolved legal values, or null when the model's
+ *   values cannot be resolved (no builtin rules, the spec explicitly cleared, …)
+ */
+export function resolveBuiltinReasoningLevels(rules, { modelId, apiType, baseUrl } = {}) {
+  if (!isRecord(rules)) return null;
+  const flat = [
+    ...(Array.isArray(rules.modelRules) ? rules.modelRules : []).map((rule) => ({ kind: "model", ...rule })),
+    ...(Array.isArray(rules.modelApiRules) ? rules.modelApiRules : []).map((rule) => ({ kind: "model-api", ...rule })),
+    ...(Array.isArray(rules.providerSiteRules) ? rules.providerSiteRules : []).map((rule) => ({ kind: "provider-site", ...rule })),
+  ];
+  const normalizedBaseUrl = normalizeBaseUrlForRuleMatch(baseUrl);
+  let values;
+  for (const rule of flat) {
+    if (!isRecord(rule)) continue;
+    if (!rulePatternMatches(rule.modelMatch, modelId, true)) continue;
+    if ((rule.kind === "model-api" || rule.kind === "provider-site") && rule.apiTypeMatch !== undefined) {
+      if (apiType == null || !rulePatternMatches(rule.apiTypeMatch, apiType, false)) continue;
+    }
+    if (
+      rule.kind === "provider-site" &&
+      (normalizedBaseUrl === undefined || !rulePatternMatches(rule.baseUrlMatch, normalizedBaseUrl, false))
+    ) {
+      continue;
+    }
+    const spec = isRecord(rule.config) ? rule.config.optionSpecs?.reasoningLevel : undefined;
+    if (spec === undefined) continue;
+    // ConfigOverlay 语义：null 显式清除整份 spec；spec 里只有 values 键出现才
+    // 覆盖取值集合（只带 map 的规则不动 values）。
+    if (spec === null) {
+      values = null;
+      continue;
+    }
+    if (isRecord(spec) && "values" in spec) values = spec.values;
+  }
+  return Array.isArray(values) && values.length > 0 && values.every((v) => typeof v === "string" && v.length > 0)
+    ? values
+    : null;
+}
+
+// 合法项里优先 "disabled"（思考关闭，与验收锚点同形态）；模型不支持时退到解析
+// 集合的第一项——值一定来自解析结果，保证过 validateModelSelectionOptions。
+function pickLegalReasoningLevel(values) {
+  return values.includes(CLI_FALLBACK_REASONING_LEVEL) ? CLI_FALLBACK_REASONING_LEVEL : values[0];
+}
+
+/**
+ * The default selection a fresh CLI slot file gets. 通用规则：优先 _auto 渠道
+ * （首模型，reasoningLevel 取该模型经 builtin 规则解析后的合法项）；不可解析
+ * （builtin 规则不可用或没解析出取值集合）则回落到验收锚点形态——_free-pool
+ * 首模型 + "disabled"。两个锚点都不在时取第一个有模型的托管渠道，同样先解析、
+ * 解析不出才用 "disabled" 兜底：兜底值即便不合法，CLI 也只是静默退回
+ * registry-fallback，仍好过没有选择直接报 Select a model before continuing。
+ *
+ * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
+ * @param {object|null} builtinModelRules parsed zcode-builtin.json's config.modelConfigRules
+ * @returns {{ providerId: string, modelId: string, options: { reasoningLevel: string } } | null}
+ */
+export function defaultCliModelSelection(managedEntries, builtinModelRules) {
+  const entries = isRecord(managedEntries) ? managedEntries : {};
+  const buildSelection = (providerId, entry, { requireResolved }) => {
+    const modelId = firstModelIdOf(entry);
+    if (modelId === undefined) return undefined;
+    const values = resolveBuiltinReasoningLevels(builtinModelRules, {
+      modelId,
+      // Managed entries always reach the client as one openai-chat-completions
+      // api block (personalRuleFromProviderEntry), so that is the apiType the
+      // CLI resolves these models with.
+      apiType: CHAT_COMPLETIONS_API,
+      baseUrl: entry?.options?.baseURL,
+    });
+    if (values === null) {
+      return requireResolved
+        ? undefined
+        : { providerId, modelId, options: { reasoningLevel: CLI_FALLBACK_REASONING_LEVEL } };
+    }
+    return { providerId, modelId, options: { reasoningLevel: pickLegalReasoningLevel(values) } };
+  };
+
+  const autoSelection = buildSelection(CLI_AUTO_PROVIDER_ID, entries[CLI_AUTO_PROVIDER_ID], { requireResolved: true });
+  if (autoSelection) return autoSelection;
+  const fallbackSelection = buildSelection(CLI_FALLBACK_PROVIDER_ID, entries[CLI_FALLBACK_PROVIDER_ID], { requireResolved: false });
+  if (fallbackSelection) return fallbackSelection;
+  for (const [providerId, entry] of Object.entries(entries)) {
+    const selection = buildSelection(providerId, entry, { requireResolved: false });
+    if (selection) return selection;
+  }
+  return null;
 }
 
 const TOP_LEVEL_KEYS = new Set(["schemaVersion", "config"]);
@@ -418,8 +600,64 @@ function timestamp() {
  * Write the client list. Bytes match what ZCode itself writes (2-space indent,
  * no trailing newline) so an unchanged sync cannot register as a model-list
  * change on the client side.
+ *
+ * Unchanged 判定有两层：先比字节哈希（我们产出的形态与客户端写回的一致时直接
+ * 短路）；字节不等再做语义比较（忽略 JSON 键序）。第二层是给「客户端规范化
+ * 重写」准备的——ZCode 桌面版和 CLI 读取时都会把文件 decode→encode 成自己的
+ * canonical 键序（模型规则变成 {modelId, config, providerId}）重写一次，只看
+ * 字节会让每次同步都无意义重写+滚备份（乒乓），而客户端的变化检测本身就建立在
+ * canonical 内容上（revision = decode→encode 后的哈希），键序差异对它不可见。
+ *
+ * The unchanged-check → backup → write sequence runs inside the
+ * ZCode-compatible directory lock (atomic-write.mjs withDirectoryLock): the
+ * running ZCode client rewrites this same file (default model selection,
+ * per-model toggles), so the check-and-write must not interleave with it. A
+ * lock timeout fails closed — `{ ok: false, unchanged: true }`, nothing
+ * written — and the next sync retries.
  */
-export function writePersonalConfigWithBackup(filePath, data) {
+export function writePersonalConfigWithBackup(filePath, data, { lockWaitMs } = {}) {
+  try {
+    return withDirectoryLock(
+      filePath,
+      () => writePersonalConfigWithBackupUnlocked(filePath, data),
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
+  } catch (error) {
+    if (error instanceof LockTimeoutError) {
+      return { ok: false, unchanged: true, reason: error.message };
+    }
+    throw error;
+  }
+}
+
+// 语义比较只看 JSON 结构（对象忽略键序，数组保序）；两边都是 JSON.parse 能产
+// 生的值，不存在 undefined/function/NaN。
+function sameJsonSemantics(a, b) {
+  if (a === b) return true;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) &&
+      Array.isArray(b) &&
+      a.length === b.length &&
+      a.every((item, index) => sameJsonSemantics(item, b[index]))
+    );
+  }
+  if (isRecord(a) && isRecord(b)) {
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    return (
+      keysA.length === keysB.length &&
+      keysA.every((key) => Object.hasOwn(b, key) && sameJsonSemantics(a[key], b[key]))
+    );
+  }
+  return false;
+}
+
+// The write itself, for callers already holding the directory lock
+// (syncZcodePersonalConfig locks around the whole read → merge → write).
+// `existing` is the already-parsed on-disk document when the caller has it,
+// saving the semantic check a re-read.
+function writePersonalConfigWithBackupUnlocked(filePath, data, existing) {
   const dir = dirname(filePath);
   mkdirSync(dir, { recursive: true });
 
@@ -428,6 +666,18 @@ export function writePersonalConfigWithBackup(filePath, data) {
 
   if (existsSync(filePath)) {
     if (contentHash(readFileSync(filePath, "utf8")) === hash) return { ok: true, unchanged: true };
+    const onDisk =
+      existing !== undefined
+        ? existing
+        : (() => {
+            try {
+              return JSON.parse(readFileSync(filePath, "utf8"));
+            } catch {
+              return undefined;
+            }
+          })();
+    // 客户端规范化重写（canonical 键序）后的内容视为未变更：跳过重写，乒乓止息。
+    if (onDisk !== undefined && sameJsonSemantics(onDisk, data)) return { ok: true, unchanged: true };
   }
 
   let backupPath;
@@ -444,30 +694,53 @@ export function writePersonalConfigWithBackup(filePath, data) {
 /**
  * One sync of the client-side list, from the config.json entries that were just
  * written. Never throws for a client-side problem: an unreadable or newer file,
- * or a document that would not decode, comes back as `{ ok: false }` with the
- * file left exactly as it was, because ZCode falls back to an empty list when
- * this file is unusable — overwriting it with guesses would clear every channel.
+ * a document that would not decode, or a lock the client keeps holding comes
+ * back as `{ ok: false }` with the file left exactly as it was, because ZCode
+ * falls back to an empty list when this file is unusable — overwriting it with
+ * guesses would clear every channel. The whole read → merge → write runs under
+ * the directory lock so a defaultModelSelection the client writes cannot land
+ * between our read and our write and be silently overwritten.
  *
  * @param {string} configPath path of the injected config.json
  * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
  * @param {string[]} previousManaged prefixed ids injected by the last sync
+ * @param {object} [defaultModelSelection] CLI 槽位专用：只在文件本身没有
+ *   defaultModelSelection 时补进文档（桌面版槽位不传，行为不变）
  */
-export function syncZcodePersonalConfig({ configPath, managedEntries, previousManaged = [] }) {
+export function syncZcodePersonalConfig({ configPath, managedEntries, previousManaged = [], lockWaitMs, defaultModelSelection }) {
   const path = personalConfigPath(configPath);
-  let existing;
   try {
-    existing = readPersonalConfig(path);
+    return withDirectoryLock(
+      path,
+      () => {
+        let existing;
+        try {
+          existing = readPersonalConfig(path);
+        } catch (error) {
+          if (error?.code === "UNPARSEABLE_PERSONAL_CONFIG") return { ok: false, unchanged: true, path, reason: error.message };
+          throw error;
+        }
+
+        const { config, managed } = mergePersonalProviderConfig(
+          existing,
+          managedEntries,
+          previousManaged,
+          defaultModelSelection === undefined ? {} : { defaultModelSelection },
+        );
+        const gate = validatePersonalProviderConfig(config);
+        if (!gate.valid) {
+          return { ok: false, unchanged: true, path, reason: `zcode provider_config.json would be invalid: ${gate.error}` };
+        }
+
+        const written = writePersonalConfigWithBackupUnlocked(path, config, existing ?? undefined);
+        return { ...written, path, managed };
+      },
+      lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },
+    );
   } catch (error) {
-    if (error?.code === "UNPARSEABLE_PERSONAL_CONFIG") return { ok: false, unchanged: true, path, reason: error.message };
+    if (error instanceof LockTimeoutError) {
+      return { ok: false, unchanged: true, path, reason: error.message };
+    }
     throw error;
   }
-
-  const { config, managed } = mergePersonalProviderConfig(existing, managedEntries, previousManaged);
-  const gate = validatePersonalProviderConfig(config);
-  if (!gate.valid) {
-    return { ok: false, unchanged: true, path, reason: `zcode provider_config.json would be invalid: ${gate.error}` };
-  }
-
-  const written = writePersonalConfigWithBackup(path, config);
-  return { ...written, path, managed };
 }

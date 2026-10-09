@@ -8,6 +8,8 @@
 // The integration is:
 //   1. reuse the resident relay on 47821 when it is already serving (probe),
 //      otherwise start a per-launch OpenAI relay against the real v2 store;
+//      when BOTH fail, Qoder still launches on its own native configuration
+//      (no relay token injected) instead of the launch being refused;
 //   2. write the BYOK config into ~/.qoder/settings.json (via qoder-merge-config);
 //   3. spawn the qoder.cmd dispatcher (COMSPEC /d /c, like the other .cmd
 //      CLIs) with ANYSWITCH_RELAY_TOKEN injected via process-level env vars
@@ -29,6 +31,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 import { loadStore } from "./store-io.mjs";
 import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
 import { refreshQoderModelCatalog, QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
 
@@ -117,20 +120,24 @@ export async function runQoderLauncher({
     }
   }
 
-  let relay;
-  try {
-    const reused = await probeRelayFn(RELAY_PORT);
-    if (reused) {
-      const token = loadToken(relayDataRoot(base));
-      relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
-      log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
-    } else {
-      relay = await startRelay();
-    }
-  } catch (error) {
-    log(`probe failed (${error.message}); falling back to per-launch relay`);
-    relay = await startRelay();
-  }
+  // Two-level relay acquisition (probe resident → start per-launch), then a
+  // native fallback: when both levels fail, relay is null and Qoder launches
+  // on its own configuration below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "qoder",
+    port: RELAY_PORT,
+    log,
+    probeRelay: probeRelayFn,
+    // The resident relay outlives this launch, so the reuse handle closes as a
+    // no-op; only a per-launch relay we started gets torn down.
+    residentRelay: async () => ({
+      port: RELAY_PORT,
+      token: loadToken(relayDataRoot(base)),
+      close: async () => {},
+      reused: true,
+    }),
+    startRelay,
+  });
 
   try {
     // Sync BYOK config into Qoder's settings.json before spawning so the
@@ -138,23 +145,34 @@ export async function runQoderLauncher({
     // never block the launch — Qoder can still start with stale or no BYOK.
     try {
       const loaded = loadStoreFn();
-      if (loaded.ok) {
-        const sidecarRoot = relayDataRoot(base);
-        const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
-        const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot, settingsPath);
-        if (!writeResult.ok) {
-          log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
-        } else if (!writeResult.unchanged) {
-          log(`qoder settings.json updated (backup: ${writeResult.backupPath ?? "none"})`);
-        }
-      } else {
+      if (!loaded.ok) {
         log("warning: Anyswitch store could not be read; qoder settings not updated");
+      } else {
+        // Native mode syncs against the well-known port too, so the managed
+        // providers revive with the resident relay; the token then comes from
+        // the shared token file, and an unreadable token only skips the sync.
+        const syncToken = relay ? relay.token : loadNativeSyncToken({ loadToken, root: relayDataRoot(base), endpoint: "qoder", log });
+        if (syncToken) {
+          const sidecarRoot = relayDataRoot(base);
+          const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
+          const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, syncToken, sidecarRoot, settingsPath);
+          if (!writeResult.ok) {
+            log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
+          } else if (!writeResult.unchanged) {
+            log(`qoder settings.json updated (backup: ${writeResult.backupPath ?? "none"})`);
+          }
+        }
       }
     } catch (syncErr) {
       log(`warning: qoder BYOK config sync failed: ${syncErr.message}`);
     }
 
-    const env = buildQoderLauncherEnv({ token: relay.token, base });
+    // Relay mode injects ANYSWITCH_RELAY_TOKEN + NO_PROXY; native mode passes
+    // the environment through verbatim so Qoder behaves exactly as if started
+    // without Anyswitch.
+    const env = relay
+      ? buildQoderLauncherEnv({ token: relay.token, base })
+      : buildNativeLauncherEnv({ base });
     const exitCode = await spawnQoder({ env, args: qoderArgs, onSpawned: () => {
       // Best-effort model-catalog warm-up: a cold start can leave the composer
       // with an empty model list and the model button disabled. Nudge a reload
@@ -165,7 +183,9 @@ export async function runQoderLauncher({
     } });
     return exitCode;
   } finally {
-    await relay.close();
+    // A reused resident relay's close is a no-op; only a per-launch relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
   }
 }
 
