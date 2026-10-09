@@ -302,7 +302,7 @@ export async function runSelfUpdate({
       watchdogStopped = stopped?.ok === true;
     }
     const relay = await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
-    const relayClause = relay?.ok ? null : "Relay 重启未完成，可稍后在面板手动重启";
+    const relayClause = relay?.ok ? null : "Relay 未能自动重启，请在面板中手动重启 Relay";
     // 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
     // 注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
     // 还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
@@ -320,7 +320,7 @@ export async function runSelfUpdate({
       // 面板没有退场：文件已换装而旧面板还在跑旧代码。如实记录，不谎报已生效。
       return finish({
         outcome: "updated_pending_restart",
-        message: relayClause ? `新版本已就位；${relayClause}，重启面板后生效` : "新版本已就位，重启面板后生效",
+        message: `新版本已安装，重启面板后生效${relayClause ? `；${relayClause}` : ""}`,
         beforeVersion,
         afterVersion: targetVersion,
         latestVersion: targetVersion,

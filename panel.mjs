@@ -1421,7 +1421,10 @@ export function createPanelRouter({
   function handleClientUpdatesActive(res) {
     refreshClientUpdates();
     const runs = listClientUpdateRuns(updateJournalDir)
-      .filter((run) => run.state === "running")
+      // 自身更新记录与客户端更新同住一个 journal 目录，但接回通道是它自己的
+      // /api/self-update/active——这里若把它放出去，关于页会把同一条任务接回两次，
+      // 结论提示也跟着弹两次。
+      .filter((run) => run.state === "running" && run.clientId !== SELF_UPDATE_CLIENT_ID)
       .map((run) => clientUpdateStatus(run));
     return sendJson(res, 200, { ok: true, runs });
   }

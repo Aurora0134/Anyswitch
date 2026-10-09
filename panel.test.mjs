@@ -4570,9 +4570,30 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.equal(exec.split("dropStartupSplash()").length - 1, 2,
       "relay 换新失败与面板换新被拒两条失败路径都要收回开屏");
     const recoveryStart = panelJs.indexOf("function watchPanelHostComeBack()");
-    const recovery = panelJs.slice(recoveryStart, panelJs.indexOf("if (stopConfirmBtn)", recoveryStart));
+    const recovery = panelJs.slice(recoveryStart, panelJs.indexOf('document.addEventListener("anyswitch:self-update-swap"', recoveryStart));
     assert.ok(recovery.includes("dropStartupSplash()"), "恢复超时路径也要收回开屏");
-    assert.ok(!recovery.includes("playStartupSplash()"), "恢复期不得重复盖屏");
+    assert.ok(!recovery.includes("playStartupSplash()"), "恢复监视本身不得重复盖屏");
+    // 自更新换装由 swap 事件接管：同一套恢复监视，但先播开屏定格盖住换装窗口——
+    // 旧页面不播，新页面（startup=restart）的定格就没有接力来源，只剩无动画闪屏。
+    const swapStart = panelJs.indexOf('document.addEventListener("anyswitch:self-update-swap"');
+    const swap = panelJs.slice(swapStart, panelJs.indexOf("if (stopConfirmBtn)", swapStart));
+    assert.ok(swap.includes("playStartupSplash()"), "自更新换装窗口先盖开屏再接恢复监视");
+    assert.ok(swap.includes("watchPanelHostComeBack()"), "自更新换装仍走同一套恢复监视");
+  });
+
+  it("换装恢复页不再派换装事件、不再谎称即将刷新", () => {
+    // 新页面就是换装的产物：再派 swap 事件会让恢复监视空等一次永远不会来的身份
+    // 变化（超时后谎报重启失败）；结局渲染在新页面直接给最终结论，「页面即将刷新」
+    // 只属于旧页面。
+    assert.ok(panelJs.includes("swapSignal && !swapAnnounced && !window.panelStartupRestart"), "换装事件在重启恢复页上不得派发");
+    // 换装信号不能只靠看到 ready-to-restart：服务端监听器在该相位落盘后一秒内就
+    // 点火自退，页面轮询经常来不及看到——应用中轮询落空（面板已退场）必须也算数。
+    assert.ok(/isApply && \(status === null \|\| status\?\.phase === "ready-to-restart" \|\| status\?\.phase === "waiting-panel"\)/.test(panelJs),
+      "换装信号必须覆盖「应用中轮询落空」，否则开屏在真实时序下永远盖不上");
+    const outcomeStart = panelJs.indexOf('if (status?.outcome === "updated")', panelJs.indexOf("function renderSelfUpdateOutcome"));
+    const outcome = panelJs.slice(outcomeStart, outcomeStart + 1500);
+    assert.ok(outcome.includes("window.panelStartupRestart"), "updated 结局按「本页是否换装产物」分流");
+    assert.ok(outcome.includes("anyswitch:self-update-shown:"), "新页面直接显示结论时记入已读，/last 不重复补显");
   });
 
   it("开屏动画关到「关」时，看板重启的复播入口整层不出", () => {
