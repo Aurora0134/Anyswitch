@@ -3187,6 +3187,44 @@ describe("createSessionReporter", () => {
     assert.deepEqual(wsA.sparkHistory.tps, [50, 25]);
   });
 
+  it("实例行折线按「折线视窗」设置收点：建行时取当前设置，设置改宽后已在列的行跟着变宽", async () => {
+    // 折线视窗是「折线画几个请求」，不是端点的私产：同一份历史在端点卡和
+    // 实例行上必须同宽，否则把视窗从默认 16 调大只在端点级看得出变化。
+    let mockTime = 1000;
+    const nowFn = () => mockTime;
+    const mockExec = (cmd, opts, cb) => cb(null, "");
+    let diskWindow = 20;
+    const collector = testCollector({
+      execFn: mockExec,
+      nowFn,
+      sparkWindowPoints: 20,
+      loadSparkSettings: () => ({ sparkWindowPoints: diskWindow }),
+    });
+    const issue = (n) => {
+      for (let i = 0; i < n; i++) {
+        const r = collector.startRequest({ agentId: "kimi", instanceId: "ws-a", providerId: "p1", model: "m1", stream: true, path: "openai" });
+        mockTime += 500;
+        r.recordFirstChunk();
+        mockTime += 1000;
+        r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 50 } });
+        mockTime += 60_000;
+      }
+    };
+
+    issue(20);
+    const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(kimi.metrics.sparkHistory.ttft.length, 20, "端点级按设置收满 20 点");
+    assert.equal(kimi.instances[0].sparkHistory.ttft.length, 20, "实例行与端点级同宽");
+    assert.equal(kimi.instances[0].sparkHistory.tps.length, 20);
+    assert.equal(kimi.instances[0].sparkHistory.cache.length, 20);
+
+    // 面板把视窗调宽：环里已有的历史必须一起交给折线，而不是等新请求从头攒。
+    diskWindow = 24;
+    const wider = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.equal(wider.metrics.sparkHistory.ttft.length, 20, "环里只有 20 个样本");
+    assert.equal(wider.instances[0].sparkHistory.ttft.length, 20, "实例行同样给到环里的全部样本");
+  });
+
   it("carries per-session sparkHistory so cc-card sparklines survive page reloads", async () => {
     // Session reporter builds a per-request sample ring and ships it in every
     // snapshot; the collector persists it on the claudeSessions row and the
