@@ -49,6 +49,7 @@ import {
   spawnClientUpdateWorker,
   writeClientUpdateRun,
 } from "./client-update-journal.mjs";
+import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 
@@ -803,6 +804,11 @@ export function createPanelRouter({
   // 安装不在面板进程里跑：面板退出会把还没脱离的子进程一起带走，全局目录留半截。
   spawnClientUpdateWorkerFn = null,
   clientUpdateJournalDir: clientUpdateDir = null,
+  // 自身更新的脱离进程与面板内换装监听器，同一注入纪律：单测不起真进程、不挂
+  // 真定时器，监听器的点火由测试手动泵（捕获 scheduleFn 的回调后自行调用）。
+  spawnSelfUpdateWorkerFn = null,
+  selfUpdateWatchScheduleFn = (fn, ms) => setInterval(fn, ms),
+  selfUpdateWatchCancelFn = (timer) => clearInterval(timer),
  }) {
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
@@ -1241,17 +1247,10 @@ export function createPanelRouter({
   // that waits for the release and spawns the new host. Order matters: answer
   // first, exit after the response has flushed, or the browser sees a dead
   // connection with no way to tell "restarting" from "failed".
-  async function handlePanelHostRestart(res) {
-    if (hostKind !== "panel-host") {
-      // The relay is not the control plane, and a lifecycle request it handled
-      // would be one process reaching across to kill another. relay-host's
-      // /panel redirects to 47820, so this is unreachable from the UI.
-      return sendJson(res, 409, {
-        ok: false,
-        error: "panel host restart must be requested from the control panel on 47820",
-      });
-    }
-    logger?.info("Panel host restart requested from panel control");
+  // 自杀换新共用的编排：拉起一次性 helper（等 47820 释放再拉起新 panel-host），
+  // 并武装兜底退出。退出时机交给调用方——HTTP 重启钩在响应 flush 上，自更新
+  // 监听器没有响应可等，进宽限即退。spawn 失败返回 null：调用方如实应答，不退出。
+  function startPanelHostReplacement({ onSpawnError } = {}) {
     let scheduled = false;
     let backstopTimer = null;
     const scheduleExit = () => {
@@ -1263,15 +1262,36 @@ export function createPanelRouter({
     try {
       spawnPanelHostRestartFn();
     } catch (err) {
-      return sendJson(res, 500, { ok: false, error: err.message });
+      onSpawnError?.(err);
+      return null;
+    }
+    backstopTimer = setTimeout(scheduleExit, PANEL_HOST_EXIT_BACKSTOP_MS);
+    return scheduleExit;
+  }
+
+  async function handlePanelHostRestart(res) {
+    if (hostKind !== "panel-host") {
+      // The relay is not the control plane, and a lifecycle request it handled
+      // would be one process reaching across to kill another. relay-host's
+      // /panel redirects to 47820, so this is unreachable from the UI.
+      return sendJson(res, 409, {
+        ok: false,
+        error: "panel host restart must be requested from the control panel on 47820",
+      });
+    }
+    logger?.info("Panel host restart requested from panel control");
+    let spawnError = null;
+    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => { spawnError = err; } });
+    if (!scheduleExit) {
+      return sendJson(res, 500, { ok: false, error: spawnError?.message ?? "restart helper failed" });
     }
     res.once("finish", scheduleExit);
     sendJson(res, 200, { ok: true, pid: process.pid });
-    // Backstop: if the client is gone before the flush completes, "finish"
-    // never fires — and the frontend deliberately reads a dropped response as
-    // "restart started" (the exit can beat the flush), so it is sitting in its
-    // recovery poll waiting for a port we still owe it.
-    backstopTimer = setTimeout(scheduleExit, PANEL_HOST_EXIT_BACKSTOP_MS);
+    // Backstop is armed inside startPanelHostReplacement: if the client is gone
+    // before the flush completes, "finish" never fires — and the frontend
+    // deliberately reads a dropped response as "restart started" (the exit can
+    // beat the flush), so it is sitting in its recovery poll waiting for a port
+    // we still owe it.
   }
 
   async function getEnvironmentService() {
@@ -1300,6 +1320,8 @@ export function createPanelRouter({
   // 的，按中断收尾，否则这个客户端会被永久锁住。
   const updateJournalDir = clientUpdateDir ?? clientUpdateJournalDir(relayRoot);
   const spawnUpdateWorker = spawnClientUpdateWorkerFn ?? ((request) => spawnClientUpdateWorker(request));
+  // 自身更新的 worker 拉起：与客户端更新同一形态（脱离、丢管道、unref）。
+  const spawnSelfUpdate = spawnSelfUpdateWorkerFn ?? ((request) => spawnSelfUpdateWorker(request));
 
   function refreshClientUpdates() {
     reapDeadClientUpdateRuns(updateJournalDir, (pid) => {
@@ -1397,6 +1419,143 @@ export function createPanelRouter({
       .filter((run) => run.state === "running")
       .map((run) => clientUpdateStatus(run));
     return sendJson(res, 200, { ok: true, runs });
+  }
+
+  // ── 自身更新（一键自更新）────────────────────────────────────────
+  // 目标版本与「检查更新」同源：releaseService.getAppUpdate 给出的 release
+  // （tag + 版本，预览版/稳定版渠道判定都在那一层）。执行跑在脱离 worker 里
+  // （app-self-update.mjs）：就地浅拉取 tag、换装 app 工作树、装依赖，然后重启
+  // relay，最后等本进程经 startPanelHostReplacement 退场、新面板接管。
+  // journal 复用 client-updates 目录与记录形态：running 记录即单飞锁，worker
+  // 崩溃由既有惰性 reap 收割；多出来的 phase 字段是 worker → 监听器/页面的进度通道。
+  const SELF_UPDATE_WATCH_MS = 1000;
+  let selfUpdateWatchTimer = null;
+
+  function selfUpdateStatusPayload(run) {
+    return { ...clientUpdateStatus(run), phase: run.phase ?? null, targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null };
+  }
+
+  async function handleSelfUpdateStart(req, res) {
+    if (hostKind !== "panel-host") {
+      // 与 panel-host/restart 同一条红线：relay 副本只是 API 面，换装自杀必须
+      // 由 47820 的控制面自己做。
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    let update = null;
+    try {
+      update = await getReleaseService().then((service) => service.getAppUpdate({ force: true }));
+    } catch {
+      update = null;
+    }
+    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
+      return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
+    }
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const runId = randomUUID();
+    const run = {
+      runId,
+      clientId: SELF_UPDATE_CLIENT_ID,
+      action: "update",
+      state: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      result: null,
+      workerPid: null,
+      targetVersion: update.release.version,
+      targetTag: update.release.tag,
+      beforeVersion: appInfo.version,
+      appDir: dirname(fileURLToPath(import.meta.url)),
+      repoUrl: APP_REPO_URL,
+      relayRoot,
+      phase: "staging",
+    };
+    // 先落盘再拉起：进程抢在登记之前退出时，不能留下一个没有记录的安装。
+    writeClientUpdateRun(updateJournalDir, run);
+    let workerPid = null;
+    try {
+      workerPid = spawnSelfUpdate({ runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      writeClientUpdateRun(updateJournalDir, {
+        ...run,
+        state: "done",
+        finishedAt: new Date().toISOString(),
+        result: { outcome: "failed", message: "更新未能启动，请稍后重试" },
+      });
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
+    armSelfUpdateWatcher();
+    return sendJson(res, 202, { ok: true, runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", targetVersion: run.targetVersion });
+  }
+
+  function handleSelfUpdateRunStatus(res, runId) {
+    refreshClientUpdates();
+    const run = readClientUpdateRun(updateJournalDir, runId);
+    if (!run || run.clientId !== SELF_UPDATE_CLIENT_ID) {
+      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务" });
+    }
+    return sendJson(res, 200, selfUpdateStatusPayload(run));
+  }
+
+  function handleSelfUpdateActive(res) {
+    refreshClientUpdates();
+    const runs = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.state === "running" && run.clientId === SELF_UPDATE_CLIENT_ID)
+      .map((run) => selfUpdateStatusPayload(run));
+    return sendJson(res, 200, { ok: true, runs });
+  }
+
+  // 换装监听器：worker 把阶段推到 ready-to-restart / waiting-panel 后，等的就是
+  // 这一枪——拉起 helper 并按宽限自退。本进程已是目标版本时绝不点火：换装后的
+  // 新面板接管时会扫到进行中的 run（worker 正在验证复活），点火等于自杀刚接班
+  // 的自己。定时器只在有进行中的自更新任务时存在。
+  function stopSelfUpdateWatcher() {
+    if (selfUpdateWatchTimer !== null) {
+      selfUpdateWatchCancelFn(selfUpdateWatchTimer);
+      selfUpdateWatchTimer = null;
+    }
+  }
+
+  function pumpSelfUpdateWatcher() {
+    if (hostKind !== "panel-host") return false;
+    let run = null;
+    try {
+      refreshClientUpdates();
+      run = runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID);
+    } catch {
+      run = null;
+    }
+    if (!run) {
+      stopSelfUpdateWatcher();
+      return false;
+    }
+    const atSwap = run.phase === "ready-to-restart" || run.phase === "waiting-panel";
+    if (!atSwap || appInfo.version === run.targetVersion) return false;
+    stopSelfUpdateWatcher();
+    logger?.info("Self update reached swap phase; scheduling panel host replacement");
+    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
+    if (scheduleExit) scheduleExit(); // 没有响应 flush 可等：进宽限即退
+    return true;
+  }
+
+  function armSelfUpdateWatcher() {
+    if (hostKind !== "panel-host" || selfUpdateWatchTimer !== null) return;
+    selfUpdateWatchTimer = selfUpdateWatchScheduleFn(pumpSelfUpdateWatcher, SELF_UPDATE_WATCH_MS);
+  }
+
+  // 面板启动时接管：上一个进程可能死在自更新进行中（手动重启、崩溃）。有进行中的
+  // 自更新任务就把监听器重新布上——worker 在换装阶段等的正是这一枪。
+  if (hostKind === "panel-host") {
+    try {
+      refreshClientUpdates();
+      if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) armSelfUpdateWatcher();
+    } catch { /* journal 尚不存在：无需接管 */ }
   }
 
   // Push the current store to every agent endpoint config (zcode, dsh, pi,
@@ -2069,6 +2228,9 @@ export function createPanelRouter({
     if (path.startsWith("/panel/api/environment/update/") && method === "GET") {
       return handleClientUpdateStatus(res, path.slice("/panel/api/environment/update/".length));
     }
+    if (path === "/panel/api/self-update" && method === "POST") return handleSelfUpdateStart(req, res);
+    if (path === "/panel/api/self-update/active" && method === "GET") return handleSelfUpdateActive(res);
+    if (path.startsWith("/panel/api/self-update/") && method === "GET") return handleSelfUpdateRunStatus(res, path.slice("/panel/api/self-update/".length));
     if (path === "/panel/api/environment" && method === "GET") {
       try {
         const service = await getEnvironmentService();
