@@ -2,7 +2,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,17 +12,36 @@ import { readClientUpdateRun, writeClientUpdateRun } from "./client-update-journ
 const RUN_ID = "00000000-0000-4000-8000-000000000001";
 
 // 自更新登记是纯登记 + 拉起：worker 的实际执行在 app-self-update.test.mjs 里
-// 全注入覆盖，这里把 spawn 换成捕获桩，专注 API 面与换装监听器的行为。
+// 全注入覆盖，这里把 spawn 换成捕获桩，专注 API 面、两步衔接与换装监听器的行为。
 function selfUpdateReleaseService(state = "update_available") {
   return {
     getAppUpdate: async () => ({
       currentVersion: "0.6.1-preview",
       state,
-      checkedAt: "2026-10-07T00:00:00.000Z",
+      checkedAt: "2026-10-09T00:00:00.000Z",
       release: state === "update_available" ? { version: "0.7.0", tag: "v0.7.0", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.7.0" } : null,
       errorCode: null,
     }),
     getClientLatest: async () => { throw new Error("not used by self update"); },
+  };
+}
+
+// 已下载待应用的 journal 记录（下载阶段完成的落点）。
+function stagedRun(overrides = {}) {
+  return {
+    runId: RUN_ID,
+    clientId: "anyswitch",
+    action: "update",
+    step: "download",
+    state: "done",
+    startedAt: "2026-10-09T00:00:00.000Z",
+    finishedAt: "2026-10-09T00:01:00.000Z",
+    result: { outcome: "downloaded", message: "已下载 0.7.0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.7.0" },
+    workerPid: process.pid,
+    targetVersion: "0.7.0",
+    targetTag: "v0.7.0",
+    phase: "staged",
+    ...overrides,
   };
 }
 
@@ -91,8 +110,8 @@ async function withPanel(options, run) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-describe("POST /panel/api/self-update", () => {
-  test("有可用更新：登记 journal、拉起脱离 worker、布上换装监听器，返回 202", async () => {
+describe("POST /panel/api/self-update（下载）", () => {
+  test("有可用更新：登记 download 任务、拉起脱离 worker、布监听器，返回 202", async () => {
     const spawned = [];
     const watch = { scheduled: 0, canceled: 0, pump: null };
     await withPanel({
@@ -105,10 +124,12 @@ describe("POST /panel/api/self-update", () => {
       assert.equal(result.status, 202);
       assert.equal(result.body.ok, true);
       assert.equal(result.body.clientId, "anyswitch");
+      assert.equal(result.body.step, "download");
       assert.equal(result.body.targetVersion, "0.7.0");
       assert.equal(spawned.length, 1);
       const recorded = readClientUpdateRun(spawned[0].journalDir, result.body.runId);
       assert.equal(recorded.clientId, "anyswitch");
+      assert.equal(recorded.step, "download");
       assert.equal(recorded.state, "running");
       assert.equal(recorded.workerPid, 424242);
       assert.equal(recorded.phase, "staging");
@@ -117,7 +138,7 @@ describe("POST /panel/api/self-update", () => {
       assert.equal(recorded.beforeVersion, "0.6.1-preview");
       // appDir 就是 panel.mjs 所在目录（与测试文件同目录），与检出位置的名字无关。
       assert.equal(recorded.appDir, dirname(fileURLToPath(import.meta.url)));
-      assert.equal(watch.scheduled, 1, "the swap watcher must be armed");
+      assert.equal(watch.scheduled, 0, "下载阶段不布换装监听器：它只等换装阶段，应用时才布");
     });
   });
 
@@ -141,8 +162,8 @@ describe("POST /panel/api/self-update", () => {
       spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
     }, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, {
-        runId: RUN_ID, clientId: "anyswitch", action: "update", state: "running",
-        startedAt: "2026-10-07T00:00:00.000Z", finishedAt: null, result: null,
+        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "download", state: "running",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
         workerPid: process.pid, phase: "staging", targetVersion: "0.7.0",
       });
       const result = await post("/panel/api/self-update", {});
@@ -166,19 +187,85 @@ describe("POST /panel/api/self-update", () => {
   });
 });
 
+describe("POST /panel/api/self-update/apply（应用）", () => {
+  test("有已下载记录：同一 runId 翻回 running、step=apply，返回 202", async () => {
+    const spawned = [];
+    const watch = { scheduled: 0 };
+    await withPanel({
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
+      selfUpdateWatchScheduleFn: (fn) => { watch.scheduled += 1; return 42; },
+      selfUpdateWatchCancelFn: () => {},
+    }, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const result = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(result.status, 202);
+      assert.equal(result.body.step, "apply");
+      assert.equal(result.body.runId, RUN_ID);
+      assert.equal(result.body.targetVersion, "0.7.0");
+      const recorded = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(recorded.state, "running");
+      assert.equal(recorded.step, "apply");
+      assert.equal(recorded.phase, "installing");
+      assert.equal(recorded.result, null);
+      assert.equal(recorded.workerPid, 424242);
+      assert.equal(watch.scheduled, 1, "the swap watcher must be armed");
+    });
+  });
+
+  test("没有已下载记录：409 no_staged，不登记不拉起", async () => {
+    const spawned = [];
+    await withPanel({
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+    }, async (get, post) => {
+      const result = await post("/panel/api/self-update/apply", {});
+      assert.equal(result.status, 409);
+      assert.equal(result.body.error, "no_staged");
+      assert.equal(spawned.length, 0);
+    });
+  });
+
+  test("runId 钉不住已下载记录：409 no_staged（防错位应用）", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const result = await post("/panel/api/self-update/apply", { runId: "ffffffff-ffff-4fff-8fff-ffffffffffff" });
+      assert.equal(result.status, 409);
+      assert.equal(result.body.error, "no_staged");
+    });
+  });
+
+  test("已有进行中的任务：409 busy，staged 记录原样保留", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      writeClientUpdateRun(ctx.journalDir, {
+        runId: "00000000-0000-4000-8000-000000000009", clientId: "anyswitch", action: "update", step: "download", state: "running",
+        startedAt: "2026-10-09T00:02:00.000Z", finishedAt: null, result: null,
+        workerPid: process.pid, phase: "staging", targetVersion: "0.7.0",
+      });
+      const result = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(result.status, 409);
+      assert.equal(result.body.error, "busy");
+      const staged = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(staged.state, "done", "staged record must survive the refused apply");
+      assert.equal(staged.result.outcome, "downloaded");
+    });
+  });
+});
+
 describe("GET /panel/api/self-update/*", () => {
-  test("active 与按 runId 状态查询带 phase；未知 run 404", async () => {
+  test("active 与按 runId 状态查询带 phase/step；未知 run 404", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, {
-        runId: RUN_ID, clientId: "anyswitch", action: "update", state: "running",
-        startedAt: "2026-10-07T00:00:00.000Z", finishedAt: null, result: null,
+        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
         workerPid: process.pid, phase: "installing", targetVersion: "0.7.0", targetTag: "v0.7.0",
       });
       const active = await get("/panel/api/self-update/active");
       assert.equal(active.status, 200);
       assert.equal(active.body.runs.length, 1);
       assert.equal(active.body.runs[0].phase, "installing");
+      assert.equal(active.body.runs[0].step, "apply");
       assert.equal(active.body.runs[0].targetVersion, "0.7.0");
+      assert.equal(active.body.staged, null);
       const status = await get(`/panel/api/self-update/${RUN_ID}`);
       assert.equal(status.status, 200);
       assert.equal(status.body.state, "running");
@@ -188,11 +275,42 @@ describe("GET /panel/api/self-update/*", () => {
     });
   });
 
+  test("active 带回待应用记录：staged 载荷完整", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const active = await get("/panel/api/self-update/active");
+      assert.equal(active.status, 200);
+      assert.equal(active.body.runs.length, 0);
+      assert.equal(active.body.staged.runId, RUN_ID);
+      assert.equal(active.body.staged.outcome, "downloaded");
+      assert.equal(active.body.staged.targetVersion, "0.7.0");
+      assert.equal(active.body.staged.targetTag, "v0.7.0");
+    });
+  });
+
+  test("last 返回最近一次结论；一条记录都没有时 404", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      const empty = await get("/panel/api/self-update/last");
+      assert.equal(empty.status, 404);
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      writeClientUpdateRun(ctx.journalDir, stagedRun({
+        runId: "00000000-0000-4000-8000-000000000009",
+        finishedAt: "2026-10-09T00:05:00.000Z",
+        result: { outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1-preview", afterVersion: "0.7.0", latestVersion: "0.7.0" },
+      }));
+      const last = await get("/panel/api/self-update/last");
+      assert.equal(last.status, 200);
+      assert.equal(last.body.runId, "00000000-0000-4000-8000-000000000009");
+      assert.equal(last.body.outcome, "updated");
+      assert.equal(last.body.message, "已更新到 0.7.0");
+    });
+  });
+
   test("完成态把 result 展开进状态负载", async () => {
     await withPanel({}, async (get, post, ctx) => {
       writeClientUpdateRun(ctx.journalDir, {
-        runId: RUN_ID, clientId: "anyswitch", action: "update", state: "done",
-        startedAt: "2026-10-07T00:00:00.000Z", finishedAt: "2026-10-07T00:05:00.000Z",
+        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "done",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: "2026-10-09T00:05:00.000Z",
         result: { outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1-preview", afterVersion: "0.7.0", latestVersion: "0.7.0" },
         workerPid: process.pid, phase: "waiting-panel", targetVersion: "0.7.0",
       });
@@ -221,14 +339,17 @@ describe("自更新换装监听器", () => {
     const capture = watchCapture();
     await withPanel({
       releaseService: selfUpdateReleaseService(),
+      spawnSelfUpdateWorkerFn: () => process.pid,
       ...capture,
     }, async (get, post, ctx) => {
-      const started = await post("/panel/api/self-update", {});
+      // 应用入口才布监听器：先落一条已下载记录，走 /apply 翻回 running。
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const started = await post("/panel/api/self-update/apply", { runId: RUN_ID });
       assert.equal(started.status, 202);
       // worker 把阶段推到换装点（这里直接改写 journal 模拟）。
       const run = readClientUpdateRun(ctx.journalDir, started.body.runId);
       writeClientUpdateRun(ctx.journalDir, { ...run, phase: "ready-to-restart" });
-      assert.equal(capture.watch.pumps.length, 1);
+      assert.equal(capture.watch.pumps.length, 1, "apply must arm the swap watcher");
       capture.watch.pumps[0]();
       assert.equal(capture.watch.restarts, 1, "the restart helper must be spawned");
       assert.equal(capture.watch.canceled, 1, "the watcher must be withdrawn after firing");
@@ -244,8 +365,8 @@ describe("自更新换装监听器", () => {
     const journalDir = mkdtempSync(join(tmpdir(), "anys-self-update-panel-"));
     // 种子在 router 创建之前落盘：boot-scan 才扫得到这个进行中的 run。
     writeClientUpdateRun(journalDir, {
-      runId: RUN_ID, clientId: "anyswitch", action: "update", state: "running",
-      startedAt: "2026-10-07T00:00:00.000Z", finishedAt: null, result: null,
+      runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
+      startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null,
       workerPid: process.pid, phase: "waiting-panel", targetVersion: "0.7.0", targetTag: "v0.7.0",
     });
     try {
@@ -265,17 +386,100 @@ describe("自更新换装监听器", () => {
     }
   });
 
-  test("phase 还在 staging：泵了也不动（换装前每一步失败都服务无损）", async () => {
+  test("下载阶段不布换装监听器（下载永远挨不到换装，布了也是空转）", async () => {
     const capture = watchCapture();
     await withPanel({
       releaseService: selfUpdateReleaseService(),
       ...capture,
-    }, async (get, post, ctx) => {
+    }, async (get, post) => {
       const started = await post("/panel/api/self-update", {});
       assert.equal(started.status, 202);
-      capture.watch.pumps[0]();
+      assert.equal(capture.watch.pumps.length, 0, "download must not arm the swap watcher");
       assert.equal(capture.watch.restarts, 0);
       assert.deepEqual(capture.watch.exits, []);
     });
+  });
+});
+
+describe("自动检测并下载更新（设置项默认开）", () => {
+  // 拍节调度是注入的：捕获回调后手动泵。settings 经 base.LOCALAPPDATA 重定向到临时目录。
+  function autoDownloadCapture() {
+    const captured = { pump: null };
+    return {
+      captured,
+      selfUpdateAutoDownloadScheduleFn: (fn) => { captured.pump = fn; return null; },
+    };
+  }
+
+  function withSettings(baseDir, settings) {
+    mkdirSync(join(baseDir, "Anyswitch"), { recursive: true });
+    writeFileSync(join(baseDir, "Anyswitch", "settings.json"), JSON.stringify(settings));
+  }
+
+  test("首开一拍：有更新就登记 download；设置关掉或已有待应用则不动作", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const spawned = [];
+    try {
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...capture,
+      }, async (get, post, ctx) => {
+        assert.ok(capture.captured.pump, "the auto-download cadence must be armed on panel-host");
+        await capture.captured.pump();
+        const runs = (await get("/panel/api/self-update/active")).body;
+        assert.equal(runs.runs.length, 1, "one download run must be registered");
+        assert.equal(runs.runs[0].step, "download");
+        assert.equal(runs.runs[0].phase, "staging");
+        assert.equal(spawned.length, 1);
+        // 已有在跑任务时再泵一拍：不重复登记。
+        await capture.captured.pump();
+        assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("设置显式关闭：一拍什么都不登记", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const spawned = [];
+    try {
+      withSettings(baseDir, { autoDownloadUpdates: false });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...capture,
+      }, async () => {
+        await capture.captured.pump();
+        assert.equal(spawned.length, 0);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("已有待应用记录：不重复下载（同一个版本攒两份没有意义）", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const spawned = [];
+    try {
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...capture,
+      }, async (get, post, ctx) => {
+        writeClientUpdateRun(ctx.journalDir, stagedRun());
+        await capture.captured.pump();
+        assert.equal(spawned.length, 0);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
   });
 });

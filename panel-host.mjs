@@ -49,7 +49,21 @@ export function createPanelServer(options = {}) {
   });
   const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector();
   const startTime = options.startTime ?? Date.now();
-  const router = createPanelRouter({ storePaths: paths, logger, metricsCollector, startTime });
+  const router = createPanelRouter({
+    storePaths: paths,
+    logger,
+    metricsCollector,
+    startTime,
+    // 自动检测并下载更新的真实拍节（首开一拍 + 周期拍），只在常驻 panel-host
+    // 进程里布——panel.mjs 侧的默认值刻意是「不布」。
+    selfUpdateAutoDownloadScheduleFn: options.selfUpdateAutoDownloadScheduleFn ?? ((fn) => {
+      const first = setTimeout(fn, 60_000);
+      const interval = setInterval(fn, 6 * 3600_000);
+      first.unref?.();
+      interval.unref?.();
+      return { first, interval };
+    }),
+  });
   // Warm the watchdog drift snapshot at startup: the panel frontend fetches
   // /api/settings on every page load to hydrate the 抗截断 toggle, and an
   // un-primed first GET would otherwise pay the ~1s probe round inline.

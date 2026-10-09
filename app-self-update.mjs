@@ -1,14 +1,16 @@
-// Anyswitch 自身的一键更新。面板把目标 release tag 登记进 journal 后拉起本模块
-// 的脱离 worker：就地浅拉取 tag、换装 app 工作树、装依赖，然后重启 relay、等
-// panel-host 经 restart-helper 自杀换新并验证复活。
+// Anyswitch 自身的更新执行面，分两步：下载与应用。
 //
-// 安全语义与 client-lifecycle 一致——失败绝不留半截服务：真正动进程的只有 relay
-// 重启（秒级）与面板自退（helper 负责拉起新面板）；换装前的每一步（git fetch /
-// checkout / npm install）都在旧面板与 relay 照常服务期间完成，失败时服务无损。
-// 换装之后的两个中止点（版本校验不符、依赖安装失败）会先把工作树还原到换装前
-// 记录的 HEAD，不让磁盘停在「新代码配旧进程」的半截状态。工作树归更新器全权
-// 管理：checkout 一律 --force（收敛手动同步留下的漂移），logs/node_modules 等
-// 运行时文件在 .gitignore 里不受影响。
+// 下载（step=download）：把目标 release tag 浅拉进本地 git 仓库，并用
+// git show 核对 tag 里的 package.json 版本——全程不碰工作树、不动任何进程，
+// 失败即服务无损。完成后记录停在「已下载待应用」（phase=staged）。
+//
+// 应用（step=apply）：同一条记录被面板翻回 running 后由新 worker 接管——幂等
+// 补拉、记录回滚点、--detach --force 换装、复核树版本、装依赖（中止都先还原
+// 工作树），然后停 watchdog、重启 relay、等 panel-host 经 restart-helper 自杀
+// 换新并验证复活；新面板未接管以回滚点退回旧版并重装依赖。
+//
+// 工作树归更新器全权管理：checkout 一律 --force（收敛手动同步留下的漂移），
+// logs/node_modules 等运行时文件在 .gitignore 里不受影响。
 import { execFile as execFileDefault, spawn as spawnDefault } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -48,22 +50,23 @@ function tailLines(text, limit, maxChars) {
 
 // execFile 形态的一跳：git / npm 共用。stdout 与 stderr 谁非空取谁（git 的进度
 // 与报错走 stderr，rev-parse/get-url 的数据走 stdout），ENOENT 单独标出。
-function runCommand({ file, args, cwd = null, spawnFn = execFileDefault, timeoutMs = GIT_TIMEOUT_MS }) {
+// raw 模式保留完整 stdout（git show 读文件内容用，8 行收尾会把 JSON 截残）。
+function runCommand({ file, args, cwd = null, spawnFn = execFileDefault, timeoutMs = GIT_TIMEOUT_MS, raw = false }) {
   return new Promise((done) => {
     spawnFn(file, args, { ...(cwd ? { cwd } : {}), timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024, encoding: "utf8" }, (error, stdout, stderr) => {
-      const raw = String(stderr ?? "").trim() || String(stdout ?? "").trim();
-      done({ ok: !error, missing: error?.code === "ENOENT", timedOut: Boolean(error?.killed), output: tailLines(raw, 8, MAX_OUTPUT_CHARS) });
+      const output = raw && !error ? String(stdout ?? "") : tailLines(String(stderr ?? "").trim() || String(stdout ?? "").trim(), 8, MAX_OUTPUT_CHARS);
+      done({ ok: !error, missing: error?.code === "ENOENT", timedOut: Boolean(error?.killed), output });
     });
   });
 }
 
 // 快捷方式拉起的进程 PATH 可能很窄（client-lifecycle 的 npm 同理），git 依次试
 // PATH 与标准安装位；ENOENT 换下一个候选，其余错误当场定夺。
-async function runGit({ args, cwd, spawnFn, env, timeoutMs = GIT_TIMEOUT_MS }) {
+async function runGit({ args, cwd, spawnFn, env, timeoutMs = GIT_TIMEOUT_MS, raw = false }) {
   const candidates = ["git", join(env.ProgramFiles ?? "C:\\Program Files", "Git", "cmd", "git.exe")];
   let last = { ok: false, missing: true, timedOut: false, output: "" };
   for (const candidate of candidates) {
-    const result = await runCommand({ file: candidate, args, cwd, spawnFn, timeoutMs });
+    const result = await runCommand({ file: candidate, args, cwd, spawnFn, timeoutMs, raw });
     if (!result.missing) return result;
     last = result;
   }
@@ -126,9 +129,9 @@ function normalizeRepoUrl(url) {
 }
 
 // Entry used by the worker. Reads the request the panel already recorded and
-// drives the whole update. Every step writes its phase back so the panel (and
-// the page) can render progress; the final result uses the same shape the
-// client-update journal does.
+// drives the step the record names (download by default). Every step writes its
+// phase back so the panel (and the page) can render progress; the final result
+// uses the same shape the client-update journal does.
 export async function runSelfUpdate({
   runId,
   journalDir,
@@ -155,6 +158,7 @@ export async function runSelfUpdate({
 } = {}) {
   const run = readClientUpdateRun(journalDir, runId);
   if (!run || run.state !== "running" || run.clientId !== SELF_UPDATE_CLIENT_ID) return null;
+  const step = run.step === "apply" ? "apply" : "download";
   writeClientUpdateRun(journalDir, { ...run, workerPid: process.pid });
   const appDir = run.appDir ?? null;
   const targetVersion = run.targetVersion ?? null;
@@ -173,12 +177,57 @@ export async function runSelfUpdate({
     writeClientUpdateRun(journalDir, { ...current, state: "done", finishedAt: now(), result, workerPid: process.pid });
     return result;
   };
-  const gitFailure = (step, r) => r.missing
+  const gitFailure = (stepName, r) => r.missing
     ? `未检测到 Git，请先安装 Git 后重试`
     : r.timedOut
-      ? `${step}用时过长被中止，请检查网络后重试`
-      : `${step}失败，请稍后重试`;
+      ? `${stepName}用时过长被中止，请检查网络后重试`
+      : `${stepName}失败，请稍后重试`;
 
+  if (!appDir || !targetVersion || !targetTag) {
+    return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
+  }
+  if (!TARGET_TAG_PATTERN.test(targetTag)) {
+    return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
+  }
+
+  // 确保 app 工作树有 git 身份：镜像安装（无 .git）首次引导；clone 安装只校正 remote。
+  const ensureGitReady = async () => {
+    if (!io.existsSync(join(appDir, ".git"))) {
+      const init = await runGit({ args: ["init"], cwd: appDir, spawnFn, env });
+      if (!init.ok) return gitFailure("准备更新环境", init);
+      const remote = await runGit({ args: ["remote", "add", "origin", repoUrl], cwd: appDir, spawnFn, env });
+      if (!remote.ok) return gitFailure("连接更新源", remote);
+      return null;
+    }
+    const current = await runGit({ args: ["remote", "get-url", "origin"], cwd: appDir, spawnFn, env });
+    if (current.ok && normalizeRepoUrl(current.output) !== normalizeRepoUrl(repoUrl)) {
+      await runGit({ args: ["remote", "set-url", "origin", repoUrl], cwd: appDir, spawnFn, env });
+    }
+    return null;
+  };
+
+  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", "tag", targetTag], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
+
+  if (step === "download") {
+    // ── 下载：只把比特拉进本地仓库，工作树与进程一个都不动 ──
+    setPhase("staging");
+    const readyError = await ensureGitReady();
+    if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
+    const fetched = await fetchTarget();
+    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    // 不脱裤查验：直接读 tag 里的 package.json，版本不符在此止步——磁盘上什么都没动。
+    const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
+    let tagVersion = null;
+    try { tagVersion = JSON.parse(shown.output).version ?? null; } catch { tagVersion = null; }
+    if (!shown.ok || tagVersion !== targetVersion) {
+      return finish({ outcome: "failed", message: `下载的代码版本（${tagVersion ?? "未知"}）与目标（${targetVersion}）不一致，已中止更新`, beforeVersion, latestVersion: targetVersion });
+    }
+    // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
+    setPhase("staged");
+    return finish({ outcome: "downloaded", message: `已下载 ${targetVersion}，应用后生效`, beforeVersion, latestVersion: targetVersion });
+  }
+
+  // ── 应用：换装 + 依赖 + 重启 ──
   let watchdogStopped = false;
   const restoreWatchdog = async () => {
     if (!watchdogStopped) return;
@@ -186,26 +235,14 @@ export async function runSelfUpdate({
   };
 
   try {
-    if (!appDir || !targetVersion || !targetTag) {
-      return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-    }
-    if (!TARGET_TAG_PATTERN.test(targetTag)) {
-      return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-    }
-    setPhase("staging");
-    // 1. 确保 app 工作树有 git 身份：镜像安装（无 .git）首次引导；clone 安装只校正 remote。
-    if (!io.existsSync(join(appDir, ".git"))) {
-      const init = await runGit({ args: ["init"], cwd: appDir, spawnFn, env });
-      if (!init.ok) return finish({ outcome: "failed", message: gitFailure("准备更新环境", init), detail: init.output || undefined, beforeVersion, latestVersion: targetVersion });
-      const remote = await runGit({ args: ["remote", "add", "origin", repoUrl], cwd: appDir, spawnFn, env });
-      if (!remote.ok) return finish({ outcome: "failed", message: gitFailure("连接更新源", remote), detail: remote.output || undefined, beforeVersion, latestVersion: targetVersion });
-    } else {
-      const current = await runGit({ args: ["remote", "get-url", "origin"], cwd: appDir, spawnFn, env });
-      if (current.ok && normalizeRepoUrl(current.output) !== normalizeRepoUrl(repoUrl)) {
-        await runGit({ args: ["remote", "set-url", "origin", repoUrl], cwd: appDir, spawnFn, env });
-      }
-    }
-    // 2. 换装前记住恢复点。首次引导没有 HEAD，恢复分支如实告知。
+    setPhase("installing");
+    const readyError = await ensureGitReady();
+    if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
+    // 幂等补拉：已下载过的 tag 秒回；也兜住「下载后对象被 gc」的边角。
+    const fetched = await fetchTarget();
+    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    // 回滚点在应用开始时现取：HEAD 此刻仍是旧版（下载阶段不碰工作树）。首次引导
+    // 没有 HEAD，回滚分支如实告知。
     const head = await runGit({ args: ["rev-parse", "HEAD"], cwd: appDir, spawnFn, env });
     const beforeHead = head.ok ? head.output.split(/\r?\n/)[0]?.trim() || null : null;
     // 换装之后的中止都先把工作树还原到这个点：进程还活着（旧模块在内存里服务），
@@ -215,13 +252,10 @@ export async function runSelfUpdate({
       const back = await runGit({ args: ["checkout", "--detach", "--force", beforeHead], cwd: appDir, spawnFn, env });
       return back.ok;
     };
-    // 3. 浅拉取目标 tag：只取这一层历史，几 MB 量级，走与「检查更新」同一网络前提。
-    const fetched = await runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", "tag", targetTag], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
-    // 4. 就地换装。force 是所有权声明：手动同步留下的漂移在这里被收敛成目标版本。
+    // 就地换装。force 是所有权声明：手动同步留下的漂移在这里被收敛成目标版本。
     const checkedOut = await runGit({ args: ["checkout", "--detach", "--force", "FETCH_HEAD"], cwd: appDir, spawnFn, env });
     if (!checkedOut.ok) return finish({ outcome: "failed", message: gitFailure("应用新版本", checkedOut), detail: checkedOut.output || undefined, beforeVersion, latestVersion: targetVersion });
-    // 5. 落盘的版本必须与目标一致，否则还原工作树后止步——面板与 relay 都还没动过。
+    // 落盘的版本必须与目标一致，否则还原工作树后止步——面板与 relay 都还没动过。
     let treeVersion = null;
     try { treeVersion = JSON.parse(io.readFileSync(join(appDir, "package.json"), "utf8")).version ?? null; } catch { treeVersion = null; }
     if (treeVersion !== targetVersion) {
@@ -234,9 +268,8 @@ export async function runSelfUpdate({
         latestVersion: targetVersion,
       });
     }
-    // 6. 依赖安装：仍在旧进程服务期间做，不占中断窗口。registry 钉回官方源，
-    //    用户 npm 配置里同步落后的镜像不会掺进这次安装。
-    setPhase("installing");
+    // 依赖安装：仍在旧进程服务期间做，不占中断窗口。registry 钉回官方源，
+    // 用户 npm 配置里同步落后的镜像不会掺进这次安装。
     const npmCli = resolveNpmCli({ execPath, io });
     if (!npmCli) {
       const restored = await restoreTree();
@@ -260,8 +293,8 @@ export async function runSelfUpdate({
         latestVersion: targetVersion,
       });
     }
-    // 7. 中断窗口开始：watchdog 先停（防 3s 轮询在窗口内拉起旧代码 relay；即使拉起，
-    //    磁盘已是新代码，只是时序变脏），relay 换新，然后交棒给面板自换。
+    // 中断窗口开始：watchdog 先停（防 3s 轮询在窗口内拉起旧代码 relay；即使拉起，
+    // 磁盘已是新代码，只是时序变脏），relay 换新，然后交棒给面板自换。
     setPhase("ready-to-restart");
     const watchdogUp = await probeWatchdogFn().catch(() => false);
     if (watchdogUp) {
@@ -270,10 +303,10 @@ export async function runSelfUpdate({
     }
     const relay = await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
     const relayClause = relay?.ok ? null : "Relay 重启未完成，可稍后在面板手动重启";
-    // 8. 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
-    //    注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
-    //    还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
-    //    新面板还没起），或答话的已是目标版本（换装抢在轮询前完成）。两种都算数。
+    // 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
+    // 注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
+    // 还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
+    // 新面板还没起），或答话的已是目标版本（换装抢在轮询前完成）。两种都算数。
     setPhase("waiting-panel");
     let downSeen = false;
     const downDeadline = nowMs() + panelDownTimeoutMs;
@@ -293,7 +326,7 @@ export async function runSelfUpdate({
         latestVersion: targetVersion,
       });
     }
-    // 9. 等新面板接管（helper 拉起的新 panel-host 载的就是刚换装的代码）。
+    // 等新面板接管（helper 拉起的新 panel-host 载的就是刚换装的代码）。
     let revived = null;
     const upDeadline = nowMs() + panelUpTimeoutMs;
     while (nowMs() < upDeadline) {
@@ -305,8 +338,8 @@ export async function runSelfUpdate({
       await restoreWatchdog();
       return finish({ outcome: "updated", message: `已更新到 ${targetVersion}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion });
     }
-    // 10. 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
-    //     完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。
+    // 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
+    // 完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。
     if (beforeHead && (await restoreTree())) {
       let rollbackDepsOk = true;
       const rollbackNpmCli = resolveNpmCli({ execPath, io });
