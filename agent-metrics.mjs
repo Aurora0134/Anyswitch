@@ -1123,7 +1123,10 @@ function parseTasklistCsv(stdout) {
   return result;
 }
 
-function createAggregateState() {
+// 折线视窗（「折线画几个请求」）是进程级设置，不是某个态的私产：每个聚合态
+// 出生时就带上当前设置。不带参数时取默认值，只为兼容「设置还没读进来」的
+// 构造时机；实例行与端点卡必须同窗，否则同一份历史会按两套窗口画。
+function createAggregateState(sparkWindowPoints = DEFAULT_SPARK_WINDOW_POINTS) {
   return {
     totalRequests: 0,
     activeRequests: 0,
@@ -1168,7 +1171,7 @@ function createAggregateState() {
     keepAliveRecoveries: 0,
     keepAliveExhausted: 0,
     lastKeepAliveAt: null,
-    sparkWindowPoints: DEFAULT_SPARK_WINDOW_POINTS,
+    sparkWindowPoints: parseSparkWindowPoints(sparkWindowPoints),
   };
 }
 
@@ -2519,15 +2522,15 @@ export function createAgentMetricsCollector(options = {}) {
   }
 
   // Aggregate metrics state
-  const zcodeState = createAggregateState();
-  const dshState = createAggregateState();
-  const piState = createAggregateState();
-  const kimiState = createAggregateState();
-  const qoderState = createAggregateState();
-  const opencodeState = createAggregateState();
-  const claudeState = createAggregateState();
-  const codexState = createAggregateState();
-  const grokState = createAggregateState();
+  const zcodeState = createAggregateState(sparkWindowPoints);
+  const dshState = createAggregateState(sparkWindowPoints);
+  const piState = createAggregateState(sparkWindowPoints);
+  const kimiState = createAggregateState(sparkWindowPoints);
+  const qoderState = createAggregateState(sparkWindowPoints);
+  const opencodeState = createAggregateState(sparkWindowPoints);
+  const claudeState = createAggregateState(sparkWindowPoints);
+  const codexState = createAggregateState(sparkWindowPoints);
+  const grokState = createAggregateState(sparkWindowPoints);
   const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
 
   // 桌面稳定行的账目代际与生死结算（折叠路径与读取家务共用，所以挂工厂层，
@@ -2553,7 +2556,7 @@ export function createAgentMetricsCollector(options = {}) {
   // 结算进端点聚合。代际锚替换为新宿主（dsh 连同新壳）。
   function reopenDesktopAccount(bucket, entry, clientPid, parentPid) {
     settleLeakedInstanceRequests(bucket, entry.state, nowFn());
-    entry.state = createAggregateState();
+    entry.state = createAggregateState(sparkWindowPoints);
     entry.firstSeen = nowFn();
     entry.desktopGen = {
       hostPids: new Set([clientPid]),
@@ -2630,7 +2633,7 @@ export function createAgentMetricsCollector(options = {}) {
   // 不进 instanceBuckets（无实例行），存在只为让 tracker 生命周期复用
   // trackAggregateRequest 的既有记账逻辑、给 journal 留 agentId: null 的
   // 审计行。渠道×模型稳定性是与端点无关的上游健康视图，照常记录。
-  const unattributedState = createAggregateState();
+  const unattributedState = createAggregateState(sparkWindowPoints);
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
   // pi / codex / grok / dsh / claude): instanceId -> { state, firstSeen }. Only
@@ -2754,7 +2757,7 @@ export function createAgentMetricsCollector(options = {}) {
           if (sanitizeInstanceId(row.id) !== row.id) continue;
           if (instMap.has(row.id)) continue;
           const entry = {
-            state: createAggregateState(),
+            state: createAggregateState(sparkWindowPoints),
             firstSeen: snapshotFinite(row.firstSeen) || nowFn(),
             label: typeof row.label === "string" ? row.label : null,
           };
@@ -2785,13 +2788,25 @@ export function createAgentMetricsCollector(options = {}) {
     : null;
   metricsSnapshotTimer?.unref?.();
 
+  // 一个聚合态的折线视窗：记下窗口长度，并把样本环裁到 keep（环可以比窗口长，
+  // 视窗收窄时超窗的历史才丢得掉）。端点态、实例镜像态、无归属态共用这一条。
+  function applySparkWindowToState(state, keep) {
+    state.sparkWindowPoints = sparkWindowPoints;
+    while (state.ttftHistory.length > keep) state.ttftHistory.shift();
+    while (state.recentSamples.length > keep) state.recentSamples.shift();
+  }
+
   function applySparkWindow(n) {
     sparkWindowPoints = parseSparkWindowPoints(n);
     const keep = Math.max(recentSampleWindow, sparkWindowPoints);
-    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState]) {
-      state.sparkWindowPoints = sparkWindowPoints;
-      while (state.ttftHistory.length > keep) state.ttftHistory.shift();
-      while (state.recentSamples.length > keep) state.recentSamples.shift();
+    for (const state of [zcodeState, dshState, piState, kimiState, qoderState, opencodeState, claudeState, codexState, grokState, unattributedState]) {
+      applySparkWindowToState(state, keep);
+    }
+    // 实例行（dsh / kimi / opencode / pi / codex / grok，以及 claude 卡会话行
+    // 所镜像的那份）与端点卡同窗：面板的折线视窗设置只推给端点态时，实例行会
+    // 一直停在出生时的窗口上，把视窗调大也看不出变化。
+    for (const instMap of Object.values(instanceBuckets)) {
+      for (const entry of instMap.values()) applySparkWindowToState(entry.state, keep);
     }
   }
   applySparkWindow(sparkWindowPoints);
@@ -2999,7 +3014,7 @@ export function createAgentMetricsCollector(options = {}) {
         settleDesktopGenerationOnFold(bucketAgentId, entry, norm.clientPid, cachedProcessCounts);
       }
       if (!entry) {
-        entry = { state: createAggregateState(), firstSeen: nowFn(), label: null };
+        entry = { state: createAggregateState(sparkWindowPoints), firstSeen: nowFn(), label: null };
         if (isDesktopStableRow) {
           ensureDesktopGen(entry);
           settleDesktopGenerationOnFold(bucketAgentId, entry, norm.clientPid, cachedProcessCounts);
@@ -3680,7 +3695,7 @@ export function createAgentMetricsCollector(options = {}) {
             ? (bucket === "dsh" ? DSH_DESKTOP_INSTANCE_ID : KIMI_DESKTOP_INSTANCE_ID)
             : `${bucket}-${pid}`;
           if (!instMap.has(placeholderId)) {
-            const placeholder = { state: createAggregateState(), firstSeen: now, label: null };
+            const placeholder = { state: createAggregateState(sparkWindowPoints), firstSeen: now, label: null };
             if (placeholderId !== `${bucket}-${pid}`) {
               // 桌面占位行直接带代际锚起账：宿主 = 本 pid，dsh 连记父壳。这样
               // App 开着还没发过请求时，读取侧的代际结算与生死判据就有锚可用。
