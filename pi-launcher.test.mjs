@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { buildInstanceId, buildPiLauncherEnv, runPiLauncher, writePiModels, resolvePiExecutable } from "./pi-launcher.mjs";
 import { readSidecar } from "./pi-merge-models.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 describe("buildInstanceId", () => {
@@ -141,6 +142,126 @@ describe("runPiLauncher", () => {
     });
     assert.equal(code, 1);
   });
+
+  it("launches pi with the plain base env when the relay cannot be acquired", async () => {
+    const logs = [];
+    let writeCalled = false;
+    let spawned = null;
+    const code = await runPiLauncher({
+      startRelay: async () => {
+        throw new Error("port 47821 is held by a foreign process");
+      },
+      writeModels: async () => {
+        writeCalled = true;
+        return { unchanged: true };
+      },
+      spawnPi: async ({ env, args }) => {
+        spawned = { env, args };
+        return 3;
+      },
+      log: (line) => logs.push(line),
+      base: { PATH: "x" },
+      piArgs: ["--help"],
+    });
+    assert.equal(code, 3, "pi's own exit code passes through");
+    assert.equal(writeCalled, false, "models sync must not run without a relay");
+    assert.deepEqual(spawned.env, { PATH: "x" }, "no relay env is injected on the fallback path");
+    assert.deepEqual(spawned.args, ["--help"]);
+    assert.ok(logs.some((line) => line.includes("relay unavailable")), "stderr explains the fallback");
+  });
+
+  // 托管条目的盘上形态：静态 token + "direct" 实例值，直启不崩；launcher 拉起前
+  // 改写为本次启动值、退出后恢复静态值。
+  const managedModelsJson = () => ({
+    providers: {
+      _poke: {
+        name: "poke",
+        baseUrl: "http://127.0.0.1:7000/openai/poke/v1",
+        apiKey: "stable-token",
+        api: "openai-completions",
+        headers: { "x-agent-id": "pi", "x-agent-instance": "direct" },
+        models: [{ id: "m1" }],
+      },
+      "user-own": {
+        name: "mine",
+        baseUrl: "https://x.example/v1",
+        apiKey: "sk-user",
+        headers: { "x-agent-id": "custom" },
+        models: [{ id: "u1" }],
+      },
+    },
+  });
+
+  it("retags managed providers for the launch and restores the static values on exit", async () => {
+    const dir = mkTestDir("pi-launch-tag-");
+    const modelsPath = join(dir, "models.json");
+    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+    let duringSpawn = null;
+    let spawnedInstance = null;
+    const code = await runPiLauncher({
+      startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
+      writeModels: async () => ({ unchanged: true }),
+      spawnPi: async ({ env }) => {
+        spawnedInstance = env.ANYSWITCH_INSTANCE_ID;
+        duringSpawn = JSON.parse(readFileSync(modelsPath, "utf8"));
+        return 0;
+      },
+      base: {},
+      modelsPath,
+    });
+    assert.equal(code, 0);
+    assert.equal(duringSpawn.providers._poke.apiKey, "relay-tok", "launch token on disk while pi runs");
+    assert.equal(duringSpawn.providers._poke.headers["x-agent-instance"], spawnedInstance);
+    assert.notEqual(spawnedInstance, "direct");
+    assert.equal(duringSpawn.providers["user-own"].apiKey, "sk-user", "foreign provider never retagged");
+    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+    assert.equal(after.providers._poke.headers["x-agent-instance"], "direct", "static value restored after exit");
+  });
+
+  it("leaves a concurrent launcher's retag in place on exit", async () => {
+    const dir = mkTestDir("pi-launch-tag-");
+    const modelsPath = join(dir, "models.json");
+    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+    await runPiLauncher({
+      startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
+      writeModels: async () => ({ unchanged: true }),
+      spawnPi: async () => {
+        // A second launcher retags the same entry while this pi is running.
+        const config = JSON.parse(readFileSync(modelsPath, "utf8"));
+        config.providers._poke.headers["x-agent-instance"] = "other-launcher-999";
+        writeFileSync(modelsPath, JSON.stringify(config, null, 2) + "\n", "utf8");
+        return 0;
+      },
+      base: {},
+      modelsPath,
+    });
+    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+    assert.equal(
+      after.providers._poke.headers["x-agent-instance"],
+      "other-launcher-999",
+      "restore must not clobber a tag this launch did not write",
+    );
+  });
+
+  it("restores the static instance value even when spawn throws", async () => {
+    const dir = mkTestDir("pi-launch-tag-");
+    const modelsPath = join(dir, "models.json");
+    writeFileSync(modelsPath, JSON.stringify(managedModelsJson(), null, 2) + "\n", "utf8");
+    await assert.rejects(
+      runPiLauncher({
+        startRelay: async () => ({ port: 7000, token: "relay-tok", close: async () => {} }),
+        writeModels: async () => ({ unchanged: true }),
+        spawnPi: async () => {
+          throw new Error("spawn failed");
+        },
+        base: {},
+        modelsPath,
+      }),
+      /spawn failed/,
+    );
+    const after = JSON.parse(readFileSync(modelsPath, "utf8"));
+    assert.equal(after.providers._poke.headers["x-agent-instance"], "direct");
+  });
 });
 
 describe("writePiModels", () => {
@@ -175,7 +296,10 @@ describe("writePiModels", () => {
     const written = JSON.parse(readFileSync(modelsPath, "utf8"));
     assert.ok(written.providers["_poke-api"]);
     assert.equal(written.providers["_poke-api"].baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
-    assert.equal(written.providers["_poke-api"].apiKey, "${ANYSWITCH_RELAY_TOKEN}");
+    // 落盘的是稳定 relay token（token 文件就在 sidecarRoot 下），不是占位符——
+    // 直启 pi 时 pi CLI 不再因缺变量抛错。
+    assert.equal(written.providers["_poke-api"].apiKey, loadOrGenerateToken(dir));
+    assert.equal(written.providers["_poke-api"].headers["x-agent-instance"], "direct");
     assert.equal(written.providers["_poke-api"].models[0].id, "claude-opus-5");
     const sidecar = JSON.parse(readFileSync(join(dir, "pi-sidecar.json"), "utf8"));
     assert.deepEqual(sidecar.providers, ["poke-api"]);

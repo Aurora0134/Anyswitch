@@ -15,8 +15,15 @@ import {
   sidecarPath,
   UnparseableModelsError,
   deriveAutoRouteChannel,
+  DIRECT_INSTANCE_ID,
+  tagManagedProvidersForLaunch,
+  restoreManagedProvidersAfterLaunch,
 } from "./pi-merge-models.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
+
+// Stands in for the stable per-install relay token (loadOrGenerateToken) the
+// merge now writes into managed entries instead of a ${VAR} placeholder.
+const RELAY_TOKEN = "test-relay-token";
 
 const STORE = {
   version: 2,
@@ -43,14 +50,14 @@ const STORE = {
 
 describe("buildPiProviderEntry", () => {
   it("generates provider-level entry with _ prefix", () => {
-    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821);
+    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821, null, RELAY_TOKEN);
     assert.ok(entry["_poke-api"]);
     const p = entry["_poke-api"];
     assert.equal(p.name, "poke-api");
     assert.equal(p.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
-    assert.equal(p.apiKey, "${ANYSWITCH_RELAY_TOKEN}");
+    assert.equal(p.apiKey, RELAY_TOKEN);
     assert.equal(p.api, "openai-completions");
-    assert.deepEqual(p.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
+    assert.deepEqual(p.headers, { "x-agent-id": "pi", "x-agent-instance": "direct" });
     assert.equal(p.models.length, 2);
     assert.equal(p.models[0].id, "claude-opus-5");
     assert.equal(p.models[0].name, "Claude Opus 5");
@@ -335,13 +342,13 @@ describe("pool channels", () => {
   };
 
   it("surfaces a pool as one provider with unioned, deduped models", () => {
-    const { config, managed } = mergeModelsJson({ providers: {} }, extractManagedProviders(POOL_STORE), 47821, []);
+    const { config, managed } = mergeModelsJson({ providers: {} }, extractManagedProviders(POOL_STORE), 47821, [], null, null, RELAY_TOKEN);
     const pool = config.providers["_pool-claude"];
     assert.ok(pool);
     assert.equal(pool.name, "Claude Pool");
     assert.equal(pool.baseUrl, "http://127.0.0.1:47821/openai/pool-claude/v1");
-    assert.equal(pool.apiKey, "${ANYSWITCH_RELAY_TOKEN}");
-    assert.deepEqual(pool.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
+    assert.equal(pool.apiKey, RELAY_TOKEN);
+    assert.deepEqual(pool.headers, { "x-agent-id": "pi", "x-agent-instance": "direct" });
     assert.deepEqual(pool.models.map((m) => m.id), ["claude-opus-5", "claude-sonnet-4", "deepseek-v4"]);
     // First member in pool order wins the shared model's metadata.
     assert.equal(pool.models[0].name, "Claude Opus 5");
@@ -402,6 +409,8 @@ describe("auto routing channel (_auto)", () => {
       47821,
       [],
       auto,
+      null,
+      RELAY_TOKEN,
     );
     const entry = config.providers._auto;
     assert.ok(entry, "_auto channel must be injected");
@@ -409,7 +418,7 @@ describe("auto routing channel (_auto)", () => {
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(entry.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
     assert.equal(entry.api, "openai-completions");
-    assert.deepEqual(entry.headers, { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" });
+    assert.deepEqual(entry.headers, { "x-agent-id": "pi", "x-agent-instance": "direct" });
     assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
     assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
     assert.equal(validatePiModelsConfig(config).valid, true);
@@ -448,14 +457,16 @@ describe("auto routing channel (_auto)", () => {
     assert.ok(!second.managed.includes("auto"));
   });
 });
-describe("per-instance header env expansion feasibility", () => {
-  // 可行性结论：pi CLI 对 provider headers 的值做与 apiKey 相同的 ${VAR} 展开，
-  // 证据（本机安装 @earendil-works/pi-coding-agent）：
-  //   dist/core/resolve-config-value.js:222 resolveHeaders —— 逐值走 resolveConfigValue 模板展开
-  //   dist/core/provider-composer.js:242 —— models.json 的 provider headers 经 resolveHeadersOrThrow 解析
-  // 因此 launcher 每次启动生成 ANYSWITCH_INSTANCE_ID 即可实现 per-instance 头注入，
-  // 前提是 merge 管线把 ${VAR} 占位符原样写进 models.json。以下测试钉住该前提与注入行为。
-  // 注意：resolveHeadersOrThrow 对缺失变量会抛错，注入的变量必须由 launcher 保证存在。
+describe("static on-disk auth values (direct-launch decoupling)", () => {
+  // 结论（2026-10，证据为本机安装 @earendil-works/pi-coding-agent 1.0.4）：
+  // pi 对 apiKey 与 header 值做 ${VAR} 模板展开、缺变量即抛错
+  // （dist/core/resolve-config-value.js resolveConfigValueOrThrow /
+  // resolveHeadersOrThrow），且模板语法没有 ${VAR:-default} 默认值形式——
+  // "${...}" 内容不匹配变量名正则时按字面量原样保留。占位符路径因此必然把
+  // 直启（绕过 launcher）锁死在启动抛错上。新方案：models.json 落真实值
+  // （apiKey = 稳定 relay token，x-agent-instance = 静态 "direct"），按实例
+  // 标签改由 launcher 启动前改写、退出后恢复承担（见下方 launch-time retag
+  // 测试）。本组测试钉住「真实值落盘、直启不崩」这一前提。
   it("preserves ${VAR} placeholders in a non-managed provider's headers verbatim", () => {
     const existing = {
       providers: {
@@ -470,45 +481,121 @@ describe("per-instance header env expansion feasibility", () => {
     assert.equal(config.providers["my-custom"].headers["x-instance-id"], "${ANYSWITCH_INSTANCE_ID}");
   });
 
-  it("keeps the literal ${VAR} placeholder through a write/read round-trip on disk", () => {
-    const dir = mkTestDir("pi-merge-test-");
-    const filePath = join(dir, "models.json");
-    const { config } = mergeModelsJson(
-      {
-        providers: {
-          "my-custom": {
-            baseUrl: "http://x",
-            headers: { "x-instance-id": "${ANYSWITCH_INSTANCE_ID}" },
-            models: [{ id: "m1" }],
-          },
-        },
-      },
-      STORE.providers,
-      47821,
-    );
-    writeModelsJsonWithBackup(filePath, config);
-    const reread = readModelsJson(filePath);
-    assert.equal(reread.providers["my-custom"].headers["x-instance-id"], "${ANYSWITCH_INSTANCE_ID}");
-    // apiKey 侧的 ${ANYSWITCH_RELAY_TOKEN} 占位符同样原样落盘。
-    assert.equal(reread.providers["_poke-api"].apiKey, "${ANYSWITCH_RELAY_TOKEN}");
-  });
-
-  it("injects the ${ANYSWITCH_INSTANCE_ID} header into every managed provider", () => {
-    const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
+  it("writes real values (never placeholders) into every managed provider", () => {
+    const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821, [], null, null, RELAY_TOKEN);
     for (const id of ["_poke-api", "_deepseek"]) {
-      assert.equal(config.providers[id].headers["x-agent-instance"], "${ANYSWITCH_INSTANCE_ID}");
+      assert.equal(config.providers[id].apiKey, RELAY_TOKEN);
+      assert.equal(config.providers[id].headers["x-agent-instance"], DIRECT_INSTANCE_ID);
       // 已有的 x-agent-id 静态头保留不动。
       assert.equal(config.providers[id].headers["x-agent-id"], "pi");
+      assert.ok(!JSON.stringify(config.providers[id]).includes("${"), "no ${VAR} placeholder may reach the disk file");
     }
   });
 
-  it("keeps the managed provider's instance placeholder through a disk round-trip", () => {
+  it("keeps the real values through a write/read round-trip on disk", () => {
     const dir = mkTestDir("pi-merge-test-");
     const filePath = join(dir, "models.json");
-    const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821);
+    const { config } = mergeModelsJson({ providers: {} }, STORE.providers, 47821, [], null, null, RELAY_TOKEN);
     writeModelsJsonWithBackup(filePath, config);
     const reread = readModelsJson(filePath);
-    assert.equal(reread.providers["_poke-api"].headers["x-agent-instance"], "${ANYSWITCH_INSTANCE_ID}");
+    assert.equal(reread.providers["_poke-api"].apiKey, RELAY_TOKEN);
+    assert.equal(reread.providers["_poke-api"].headers["x-agent-instance"], DIRECT_INSTANCE_ID);
+  });
+
+  it("omits apiKey entirely when no token reaches the merge", () => {
+    // 调用方拿不到 token 时宁可写一个无 key 的 provider（pi 仅在使用该
+    // provider 时才报鉴权问题），也不能让占位符或 null 落盘把直启崩掉。
+    const entry = buildPiProviderEntry("poke-api", STORE.providers["poke-api"], 47821);
+    assert.equal("apiKey" in entry["_poke-api"], false);
+  });
+});
+
+describe("launch-time instance retag", () => {
+  const managedConfig = () => ({
+    providers: {
+      _poke: {
+        name: "poke",
+        baseUrl: "http://127.0.0.1:47821/openai/poke/v1",
+        apiKey: "stable-token",
+        api: "openai-completions",
+        headers: { "x-agent-id": "pi", "x-agent-instance": DIRECT_INSTANCE_ID },
+        models: [{ id: "m1" }],
+      },
+      "user-own": {
+        name: "mine",
+        baseUrl: "https://x.example/v1",
+        apiKey: "sk-user",
+        headers: { "x-agent-id": "custom" },
+        models: [{ id: "u1" }],
+      },
+    },
+  });
+
+  it("rewrites managed entries to the launch values and leaves foreign providers alone", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    writeFileSync(filePath, JSON.stringify(managedConfig(), null, 2) + "\n", "utf8");
+    const result = tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(result, { ok: true, tagged: ["_poke"] });
+    const written = readModelsJson(filePath);
+    assert.equal(written.providers._poke.apiKey, "launch-token");
+    assert.equal(written.providers._poke.headers["x-agent-instance"], "proj-123");
+    assert.equal(written.providers["user-own"].apiKey, "sk-user", "foreign provider untouched");
+  });
+
+  it("restores the static instance value after the launch", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    writeFileSync(filePath, JSON.stringify(managedConfig(), null, 2) + "\n", "utf8");
+    tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(restore, { ok: true, restored: ["_poke"] });
+    const written = readModelsJson(filePath);
+    assert.equal(written.providers._poke.headers["x-agent-instance"], DIRECT_INSTANCE_ID);
+    // The launch token equals the static token in production (same
+    // loadOrGenerateToken source), so restore keeps it as-is.
+    assert.equal(written.providers._poke.apiKey, "launch-token");
+  });
+
+  it("restore leaves a concurrent launcher's retag alone", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    writeFileSync(filePath, JSON.stringify(managedConfig(), null, 2) + "\n", "utf8");
+    tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    // A second launcher retags the same entry with its own instance id.
+    tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "other-456" });
+    const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(restore, { ok: true, restored: [] });
+    assert.equal(readModelsJson(filePath).providers._poke.headers["x-agent-instance"], "other-456");
+  });
+
+  it("is a no-op when no managed entries exist", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    const original = JSON.stringify({ providers: { "user-own": managedConfig().providers["user-own"] } }, null, 2) + "\n";
+    writeFileSync(filePath, original, "utf8");
+    const result = tagManagedProvidersForLaunch(filePath, { token: "t", instanceId: "i" });
+    assert.deepEqual(result, { ok: true, tagged: [] });
+    assert.equal(readFileSync(filePath, "utf8"), original, "file untouched");
+  });
+
+  it("treats a missing models.json as nothing to tag", () => {
+    const dir = mkTestDir("pi-retag-");
+    const result = tagManagedProvidersForLaunch(join(dir, "models.json"), { token: "t", instanceId: "i" });
+    assert.deepEqual(result, { ok: true, tagged: [] });
+    assert.equal(existsSync(join(dir, "models.json")), false, "no file is created");
+  });
+
+  it("returns ok:false instead of throwing on an unparseable models.json", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    writeFileSync(filePath, "{ not valid json", "utf8");
+    const tag = tagManagedProvidersForLaunch(filePath, { token: "t", instanceId: "i" });
+    assert.equal(tag.ok, false);
+    assert.equal(tag.tagged.length, 0);
+    const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "t", instanceId: "i" });
+    assert.equal(restore.ok, false);
+    assert.equal(readFileSync(filePath, "utf8"), "{ not valid json", "corrupt file left untouched");
   });
 });
 

@@ -13,6 +13,17 @@ import { fallbackContextWindow } from "./context-fallback.mjs";
 
 const SIDECAR_FILENAME = "pi-sidecar.json";
 
+// Static x-agent-instance value written into models.json. The pi CLI expands
+// $VAR/${VAR} placeholders in apiKey and header values and THROWS when the
+// variable is missing, and its template syntax has no ${VAR:-default} form
+// (pi-coding-agent dist/core/resolve-config-value.js: a "${...}" whose content
+// is not a plain variable name is kept as a literal string, never a default).
+// Placeholders would therefore chain every start to the launcher; real values
+// on disk keep a direct (launcher-bypassing) start working, attributed to this
+// one stable bucket. The launcher retags the managed entries with its
+// per-launch instance id right before spawn (tagManagedProvidersForLaunch).
+export const DIRECT_INSTANCE_ID = "direct";
+
 export function sidecarPath(root) {
   return join(root, SIDECAR_FILENAME);
 }
@@ -31,7 +42,7 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-export function buildPiProviderEntry(providerId, provider, port, catalog = null) {
+export function buildPiProviderEntry(providerId, provider, port, catalog = null, token = null) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -68,20 +79,24 @@ export function buildPiProviderEntry(providerId, provider, port, catalog = null)
     [prefixedId]: {
       name: provider.channelName ?? providerId,
       baseUrl,
-      apiKey: "${ANYSWITCH_RELAY_TOKEN}",
+      // The real stable relay token (loadOrGenerateToken), not a placeholder —
+      // see DIRECT_INSTANCE_ID above for why ${VAR} must never land on disk.
+      // Omitted entirely when no token reaches the builder, so a misconfigured
+      // call site degrades to "provider without key" instead of a crash file.
+      ...(token ? { apiKey: token } : {}),
       api: "openai-completions",
       // Tag all Pi-managed providers so the relay can route their requests to
       // the Pi metrics bucket instead of the default ZCode bucket. The
-      // x-agent-instance placeholder stays literal on disk — the pi CLI
-      // expands ${VAR} in header values at runtime (same mechanism as apiKey)
-      // from ANYSWITCH_INSTANCE_ID, which the launcher always sets.
-      headers: { "x-agent-id": "pi", "x-agent-instance": "${ANYSWITCH_INSTANCE_ID}" },
+      // instance header carries the static DIRECT_INSTANCE_ID; the launcher
+      // rewrites it (and apiKey) to this launch's values right before spawn
+      // and restores the static values on exit.
+      headers: { "x-agent-id": "pi", "x-agent-instance": DIRECT_INSTANCE_ID },
       models,
     },
   };
 }
 
-export function mergeModelsJson(existing, managedProviders, port, previousManaged = [], autoChannel = null, catalog = null) {
+export function mergeModelsJson(existing, managedProviders, port, previousManaged = [], autoChannel = null, catalog = null, token = null) {
   const merged = { ...existing, providers: { ...(existing.providers ?? {}) } };
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
@@ -98,7 +113,7 @@ export function mergeModelsJson(existing, managedProviders, port, previousManage
   }
 
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildPiProviderEntry(providerId, provider, port, catalog);
+    const entry = buildPiProviderEntry(providerId, provider, port, catalog, token);
     Object.assign(merged.providers, entry);
     currentManaged.push(providerId);
   }
@@ -153,6 +168,66 @@ export function writeModelsJsonWithBackup(filePath, data) {
   // touched (a loose "models.backup"-style match would risk catching them).
   pruneBackups(dir, "models.backup.");
   return { ok: true, unchanged: false, backupPath };
+}
+
+// A managed entry is recognized by the double marker mergeModelsJson writes:
+// a "_" prefixed key plus the static x-agent-id header. Requiring both keeps
+// the launch-time retag away from any user-defined provider.
+function isManagedEntry(key, provider) {
+  return key.startsWith("_") && provider?.headers?.["x-agent-id"] === "pi";
+}
+
+// Transient per-launch rewrite: same on-disk shape as the sync writer, but no
+// backup churn — the sync path owns backups, these two mutate the file twice
+// per launch.
+function writeModelsJsonAtomic(modelsPath, config) {
+  atomicWriteFile(modelsPath, JSON.stringify(config, null, 2) + "\n");
+}
+
+// Retag the managed providers' auth pair with this launch's values right before
+// pi starts: the static on-disk values (DIRECT_INSTANCE_ID) keep direct
+// launches crash-free, while a launcher run still gets its per-instance tag
+// onto the wire. Fail-soft — a tagging problem must never stop a launch.
+export function tagManagedProvidersForLaunch(modelsPath, { token, instanceId }) {
+  try {
+    const config = readModelsJson(modelsPath);
+    const tagged = [];
+    for (const [key, provider] of Object.entries(config.providers ?? {})) {
+      if (!isManagedEntry(key, provider)) continue;
+      provider.apiKey = token;
+      provider.headers["x-agent-instance"] = instanceId;
+      tagged.push(key);
+    }
+    if (tagged.length > 0) writeModelsJsonAtomic(modelsPath, config);
+    return { ok: true, tagged };
+  } catch (error) {
+    return { ok: false, tagged: [], reason: error.message };
+  }
+}
+
+// Restore the static on-disk values after the launch — but only entries still
+// carrying THIS launch's values: a concurrent launcher may have retagged the
+// same entry with its own instance id, and that newer tag must win (last one
+// out restores; the attribution overlap under concurrency is a precision
+// issue, not a correctness one).
+export function restoreManagedProvidersAfterLaunch(modelsPath, { token, instanceId }) {
+  try {
+    const config = readModelsJson(modelsPath);
+    const restored = [];
+    for (const [key, provider] of Object.entries(config.providers ?? {})) {
+      if (!isManagedEntry(key, provider)) continue;
+      if (provider.headers["x-agent-instance"] !== instanceId || provider.apiKey !== token) continue;
+      // The token this launch wrote equals the static value sync writes (same
+      // loadOrGenerateToken source), so only the instance header needs
+      // restoring.
+      provider.headers["x-agent-instance"] = DIRECT_INSTANCE_ID;
+      restored.push(key);
+    }
+    if (restored.length > 0) writeModelsJsonAtomic(modelsPath, config);
+    return { ok: true, restored };
+  } catch (error) {
+    return { ok: false, restored: [], reason: error.message };
+  }
 }
 
 export function validatePiModelsConfig(config) {

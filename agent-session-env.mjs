@@ -108,10 +108,10 @@ function withStoreSmallFastDefault(base) {
 // 带着全部计数却读不出面；终端页的监测区、最近请求与「生成中」灯按占位行的
 // id 取数，一并落在空的那行上。这三家的托管配置都写明「无该环境变量即省略
 // 该头」，所以省掉标签就等于用户在终端里自己敲这条命令的既有形态。
-// pi 不在列：models.json 里的 ${ANYSWITCH_INSTANCE_ID} 占位符缺变量会在启动时
-// 抛错（pi-launcher.mjs 头注），头只能照发——但 relay 侧把 pi 归进 socket
-// override 集合（late-socket-instance.mjs），头值被忽略、身份以连接属主进程
-// 归一，随机标签不再拆出第二行。codex 不在列：它的实例身份正源是
+// pi 不在列：models.json 的 x-agent-instance 落的是静态值（sync 写盘为
+// direct，launcher 拉起时改写成实例值、退出恢复——pi-merge-models.mjs），头照
+// 发——但 relay 侧把 pi 归进 socket override 集合（late-socket-instance.mjs），
+// 头值被忽略、身份以连接属主进程归一，随机标签不再拆出第二行。codex 不在列：它的实例身份正源是
 // prompt_cache_key 的会话 id（GUI 多会话复用一个引擎进程，进程粒度根本不成立），
 // 标签只是该源缺失时的防撞车兜底，且 codex 不出进程占位行、拆不出第二行。
 const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode"]);

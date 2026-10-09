@@ -13,6 +13,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 import { writeDshProfilePatches } from "./dsh-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv } from "./launcher-native-fallback.mjs";
 
 export function dshSettingsPath(base = process.env) {
   return join(base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh"), "settings.yaml");
@@ -103,20 +104,24 @@ export async function runDshLauncher({
   dshArgs = [],
   probeRelay: probeRelayFn = async () => false,
 }) {
-  let relay;
-  try {
-    const reused = await probeRelayFn(RELAY_PORT);
-    if (reused) {
-      const token = loadOrGenerateToken(relayDataRoot(base));
-      relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
-      log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
-    } else {
-      relay = await startRelay();
-    }
-  } catch (error) {
-    log(`probe failed (${error.message}); falling back to per-launch relay`);
-    relay = await startRelay();
-  }
+  // Two-level relay acquisition (probe resident → start per-launch), then a
+  // native fallback: when both levels fail, relay is null and dsh launches on
+  // its own configuration below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "dsh",
+    port: RELAY_PORT,
+    log,
+    probeRelay: probeRelayFn,
+    // The resident relay outlives this launch, so the reuse handle closes as a
+    // no-op; only a per-launch relay we started gets torn down.
+    residentRelay: async () => ({
+      port: RELAY_PORT,
+      token: loadOrGenerateToken(relayDataRoot(base)),
+      close: async () => {},
+      reused: true,
+    }),
+    startRelay,
+  });
 
   try {
     const loaded = loadStore();
@@ -124,7 +129,9 @@ export async function runDshLauncher({
       log("warning: Anyswitch store could not be read; dsh settings not updated");
     } else {
       const sidecarRoot = relayDataRoot(base);
-      const writeResult = await writeConfig(loaded.store, relay.port, sidecarRoot);
+      // Native mode syncs against the well-known port too (dsh's writeConfig
+      // takes no token), so the managed profiles revive with the resident relay.
+      const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: dsh profile patch not updated: ${writeResult.reason ?? "unknown error"}`);
       } else if (!writeResult.unchanged) {
@@ -132,10 +139,17 @@ export async function runDshLauncher({
       }
     }
 
-    const env = buildDshLauncherEnv({ port: relay.port, token: relay.token, base });
+    // Relay mode injects ANYSWITCH_RELAY_TOKEN + NO_PROXY; native mode passes
+    // the environment through verbatim so dsh behaves exactly as if started
+    // without Anyswitch.
+    const env = relay
+      ? buildDshLauncherEnv({ port: relay.port, token: relay.token, base })
+      : buildNativeLauncherEnv({ base });
     return await spawnDsh({ env, args: dshArgs });
   } finally {
-    await relay.close();
+    // A reused resident relay's close is a no-op; only a per-launch relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
   }
 }
 

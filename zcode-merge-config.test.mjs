@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -75,6 +75,19 @@ describe("mergeZcodeConfig", () => {
     assert.ok(config.provider["_poke-api"]);
     assert.ok(config.provider["_nvidia-nim"]);
     assert.deepEqual(managed.sort(), ["nvidia-nim", "poke-api"]);
+  });
+
+  it("keeps top-level fields the merge does not own", () => {
+    // config.json carries more than the provider map ($schema, user keys the
+    // current ZCode schema passes through); a sync must not strip them.
+    const existing = {
+      $schema: "https://example.invalid/zcode-config.schema.json",
+      provider: { "my-custom": { kind: "custom" } },
+      userKey: { nested: [1, 2, 3] },
+    };
+    const { config } = mergeZcodeConfig(existing, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(config.$schema, "https://example.invalid/zcode-config.schema.json");
+    assert.deepEqual(config.userKey, { nested: [1, 2, 3] });
   });
 
   it("removes previously managed providers that disappeared from the store", () => {
@@ -180,6 +193,37 @@ describe("writeZcodeConfigWithBackup", () => {
     assert.equal(backups.length, 5);
     assert.equal(backups[0], "config.backup.2020-01-03T00-00-00-000Z.json", "oldest backups pruned");
     assert.ok(backups.includes(result.backupPath.split(/[\\/]/).pop()), "fresh backup kept");
+  });
+
+  it("fails closed while a live ZCode-style lock is held, then writes after release", () => {
+    const dir = mkTestDir("zcode-merge-test-");
+    const filePath = join(dir, "config.json");
+    const before = JSON.stringify({ provider: { existing: true } });
+    writeFileSync(filePath, before, "utf8");
+
+    // A running ZCode holding its directory lock looks exactly like this.
+    const lockPath = `${filePath}.lock`;
+    mkdirSync(lockPath);
+    writeFileSync(
+      join(lockPath, "owner-1234-1-foreign.json"),
+      `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "foreign" })}\n`,
+      "utf8",
+    );
+
+    const refused = writeZcodeConfigWithBackup(filePath, { provider: { new: true } }, { lockWaitMs: 120 });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.unchanged, true);
+    assert.match(refused.reason, /directory lock/);
+    assert.equal(readFileSync(filePath, "utf8"), before, "a refused write never touches the file");
+    assert.deepEqual(readdirSync(dir).filter((n) => n.startsWith("config.backup.")), [], "no backup either");
+    assert.ok(existsSync(join(lockPath, "owner-1234-1-foreign.json")), "the live foreign lock survives");
+
+    rmSync(lockPath, { recursive: true, force: true });
+    const written = writeZcodeConfigWithBackup(filePath, { provider: { new: true } }, { lockWaitMs: 120 });
+    assert.equal(written.ok, true);
+    assert.equal(written.unchanged, false);
+    assert.equal(JSON.parse(readFileSync(filePath, "utf8")).provider.new, true);
+    assert.equal(existsSync(lockPath), false, "our own lock is released afterwards");
   });
 });
 

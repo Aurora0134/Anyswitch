@@ -15,12 +15,17 @@
 // The flow:
 //   1. reuse the resident relay on 47821 when it answers the identity probe
 //      (probeRelay); otherwise start a fallback OpenAI relay on the same port
-//      which exits with grok — the resident relay is never touched;
+//      which exits with grok — the resident relay is never touched. When BOTH
+//      levels fail, grok still launches on its own native configuration (no
+//      relay env injected, its own xAI keys left alone) instead of the launch
+//      being refused;
 //   2. best-effort sync of the managed model tables into ~/.grok/config.toml
-//      (errors are logged, never block the launch);
+//      (errors are logged, never block the launch; runs in native mode too, so
+//      the tables revive with the resident relay);
 //   3. spawn the real grok.exe with argv passed through verbatim;
 //   4. report the session lifecycle (pid bind on spawn, "ended" on exit) to
-//      the panel exactly the way the kimi launcher does (session reporter).
+//      the panel exactly the way the kimi launcher does (session reporter;
+//      skipped in native mode — no relay token, no reachable panel).
 
 import { spawn } from "node:child_process";
 import { join, basename } from "node:path";
@@ -33,6 +38,7 @@ import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, createSessionReporter, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
 import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 import { resolveGrokExecutable } from "./agent-discovery.mjs";
 export { resolveGrokExecutable, grokConfigPath };
 
@@ -105,7 +111,8 @@ export function buildGrokLauncherEnv({ instanceId = buildInstanceId(), base = {}
   // strips ANTHROPIC_API_KEY for the same reason). The managed tables are
   // unaffected: each carries its own literal api_key (the relay token).
   // Functional variables like GROK_HOME stay — they configure where grok
-  // reads its files, not where it sends traffic.
+  // reads its files, not where it sends traffic. Relay launches only: the
+  // native fallback passes the environment through verbatim, keys included.
   delete env.XAI_API_KEY;
   delete env.GROK_CODE_XAI_API_KEY;
   return env;
@@ -143,28 +150,32 @@ export async function runGrokLauncher({
     }
   }
 
-  let relay;
-  try {
-    const reused = await probeRelayFn(RELAY_PORT);
-    if (reused) {
-      const token = loadToken(relayDataRoot(base));
+  // Two-level relay acquisition (probe resident → start per-launch), then a
+  // native fallback: when both levels fail, relay is null and grok launches on
+  // its own configuration below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "grok",
+    port: RELAY_PORT,
+    log,
+    probeRelay: probeRelayFn,
+    residentRelay: async () => ({
+      port: RELAY_PORT,
+      token: loadToken(relayDataRoot(base)),
       // close is a no-op on purpose: the resident relay outlives this launch
       // (常驻不随进程拆); only a fallback relay we started gets torn down.
-      relay = { port: RELAY_PORT, token, close: async () => {}, reused: true };
-      log(`resident relay already running on ${RELAY_PORT}; reusing, no spawn of a new relay`);
-    } else {
-      relay = await startRelay();
-    }
-  } catch (error) {
-    log(`probe failed (${error.message}); falling back to per-launch relay`);
-    relay = await startRelay();
-  }
+      close: async () => {},
+      reused: true,
+    }),
+    startRelay,
+  });
 
   // Session lifecycle reporter (kimi pattern): bind the child pid on spawn so
   // the panel can tell the session is alive, send "ended" before exit. The
   // reporter posts to the resident panel relay; when it is unreachable
-  // (fallback mode) the posts fail silently — reporting never blocks a launch.
-  const tracker = createTracker({ token: relay.token }) ?? null;
+  // (per-launch fallback mode) the posts fail silently — reporting never
+  // blocks a launch. Native mode has no relay token and no reachable panel,
+  // so no reporter is created at all.
+  const tracker = relay ? (createTracker({ token: relay.token }) ?? null) : null;
   // One instance id per launcher process (launcher 与客户端实例一一对应)，
   // 经 env_http_headers 随子进程出站请求打到 relay 的实例桶。
   const instanceId = buildInstanceId();
@@ -175,22 +186,33 @@ export async function runGrokLauncher({
     // with a stale or hand-written config.
     try {
       const loaded = loadStoreFn();
-      if (loaded.ok) {
-        const sidecarRoot = relayDataRoot(base);
-        const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot, grokConfigPath(base));
-        if (!writeResult.ok) {
-          log(`warning: grok config.toml not updated: ${writeResult.reason ?? "unknown error"}`);
-        } else if (!writeResult.unchanged) {
-          log(`grok config.toml updated (backup: ${writeResult.backupPath ?? "none"})`);
-        }
-      } else {
+      if (!loaded.ok) {
         log("warning: Anyswitch store could not be read; grok config not updated");
+      } else {
+        // Native mode syncs against the well-known port too, so the managed
+        // tables revive with the resident relay; the token then comes from the
+        // shared token file, and an unreadable token only skips the sync.
+        const syncToken = relay ? relay.token : loadNativeSyncToken({ loadToken, root: relayDataRoot(base), endpoint: "grok", log });
+        if (syncToken) {
+          const sidecarRoot = relayDataRoot(base);
+          const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, syncToken, sidecarRoot, grokConfigPath(base));
+          if (!writeResult.ok) {
+            log(`warning: grok config.toml not updated: ${writeResult.reason ?? "unknown error"}`);
+          } else if (!writeResult.unchanged) {
+            log(`grok config.toml updated (backup: ${writeResult.backupPath ?? "none"})`);
+          }
+        }
       }
     } catch (syncErr) {
       log(`warning: grok config sync failed: ${syncErr.message}`);
     }
 
-    const env = buildGrokLauncherEnv({ instanceId, base });
+    // Relay mode injects the instance tag + NO_PROXY and strips grok's own
+    // xAI keys; native mode passes the environment through verbatim so grok
+    // behaves exactly as if started without Anyswitch.
+    const env = relay
+      ? buildGrokLauncherEnv({ instanceId, base })
+      : buildNativeLauncherEnv({ base });
     return await spawnGrok({
       env,
       args: grokArgs,
@@ -202,10 +224,12 @@ export async function runGrokLauncher({
     });
   } finally {
     // 与 kimi 一致：relay 拆除前先向面板发 ended 信号；若 grok 被强杀走
-    // 不到这里，面板的 PID 扫描会兜底回收会话。
+    // 不到这里，面板的 PID 扫描会兜底回收会话。Native mode has no tracker —
+    // both sides of the teardown no-op.
     tracker?.reportEnd();
-    // A reused resident relay's close is a no-op; only a fallback relay dies here.
-    await relay.close();
+    // A reused resident relay's close is a no-op; only a fallback relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
   }
 }
 

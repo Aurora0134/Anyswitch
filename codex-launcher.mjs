@@ -1,5 +1,8 @@
 // Codex launcher: starts the fallback OpenAI relay, merges the Anyswitch
 // managed providers into ~/.codex/config.toml, then spawns the real codex CLI.
+// When the relay cannot be acquired at all (store unusable, 47821 held by a
+// foreign process), codex still launches on its own native configuration — no
+// relay env injected — instead of the launch being refused.
 //
 // Instance-tagging coupling: the managed providers in config.toml carry an
 // env_http_headers placeholder `x-agent-instance=ANYSWITCH_INSTANCE_ID` (see
@@ -18,6 +21,7 @@ import { loadStore } from "./store-io.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createAgentMetricsCollector, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
 import { createUsageJournal } from "./usage-journal.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function codexConfigPath(base = process.env) {
   return join(base.USERPROFILE ?? "", ".codex", "config.toml");
@@ -115,7 +119,16 @@ export async function runCodexLauncher({
     }
   }
 
-  const relay = await startRelay();
+  // Relay acquisition with a native fallback: codex has no resident-probe
+  // level (resident reuse happens inside listenLoopback), so startRelay
+  // failing means relay === null and codex launches on its own configuration
+  // below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "codex",
+    port: RELAY_PORT,
+    log,
+    startRelay,
+  });
 
   try {
     // Merge the managed providers into ~/.codex/config.toml before spawning.
@@ -123,25 +136,40 @@ export async function runCodexLauncher({
     // with a stale or hand-written config.
     try {
       const loaded = loadStoreFn();
-      if (loaded.ok) {
-        const sidecarRoot = relayDataRoot(base);
-        const writeResult = await writeConfig(loaded.store, relay.port, relay.token, sidecarRoot, codexConfigPath(base));
-        if (!writeResult.ok) {
-          log(`warning: codex config.toml not updated: ${writeResult.reason ?? "unknown error"}`);
-        } else if (!writeResult.unchanged) {
-          log(`codex config.toml updated (backup: ${writeResult.backupPath ?? "none"})`);
-        }
-      } else {
+      if (!loaded.ok) {
         log("warning: Anyswitch store could not be read; codex config not updated");
+      } else {
+        // Native mode syncs against the well-known port too, so the managed
+        // providers revive with the resident relay; the token then comes from
+        // the shared token file, and an unreadable token only skips the sync.
+        const syncToken = relay
+          ? relay.token
+          : loadNativeSyncToken({ loadToken: loadOrGenerateToken, root: relayDataRoot(base), endpoint: "codex", log });
+        if (syncToken) {
+          const sidecarRoot = relayDataRoot(base);
+          const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, syncToken, sidecarRoot, codexConfigPath(base));
+          if (!writeResult.ok) {
+            log(`warning: codex config.toml not updated: ${writeResult.reason ?? "unknown error"}`);
+          } else if (!writeResult.unchanged) {
+            log(`codex config.toml updated (backup: ${writeResult.backupPath ?? "none"})`);
+          }
+        }
       }
     } catch (syncErr) {
       log(`warning: codex config sync failed: ${syncErr.message}`);
     }
 
-    const env = buildCodexLauncherEnv({ instanceId: buildInstanceId(), base });
+    // Relay mode injects the instance tag + NO_PROXY; native mode passes the
+    // environment through verbatim so codex behaves exactly as if started
+    // without Anyswitch.
+    const env = relay
+      ? buildCodexLauncherEnv({ instanceId: buildInstanceId(), base })
+      : buildNativeLauncherEnv({ base });
     return await spawnCodex({ env, args: codexArgs });
   } finally {
-    await relay.close();
+    // A reused resident relay's close is a no-op; only a fallback relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
   }
 }
 

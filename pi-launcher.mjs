@@ -1,15 +1,18 @@
 // pi launcher: starts the fallback OpenAI relay, syncs pi's models.json with
-// the Anyswitch managed providers, then spawns the real pi CLI.
+// the Anyswitch managed providers, retags them with this launch's instance id,
+// then spawns the real pi CLI.
 //
-// Instance-tagging coupling: managed providers in models.json carry a literal
-// "${ANYSWITCH_INSTANCE_ID}" x-agent-instance header placeholder (see
-// pi-merge-models.mjs). The pi CLI expands header placeholders via
-// resolveHeadersOrThrow and THROWS when the env var is missing, so once
-// models.json has been written, invoking pi directly (bypassing this launcher)
-// fails at startup. That is accepted on purpose: the Anyswitch shim routes every
-// `pi` command through this launcher (resolvePiExecutable's recursion guard
-// documents the shim), and the launcher always sets ANYSWITCH_INSTANCE_ID in the
-// spawned environment below.
+// models.json carries real values, not ${VAR} placeholders: the pi CLI expands
+// $VAR/${VAR} in apiKey and header values and THROWS when the variable is
+// missing, and its template syntax has no ${VAR:-default} form (pi-coding-agent
+// dist/core/resolve-config-value.js), so a placeholder file makes every direct
+// (launcher-bypassing) start crash at startup. Sync therefore writes the stable
+// relay token and the static DIRECT_INSTANCE_ID (see pi-merge-models.mjs); the
+// launcher retags the managed entries with its per-launch instance id right
+// before spawn and restores the static values on exit (restore touches only
+// entries still carrying this launch's tag, so concurrent launchers never
+// clobber each other's restore). If the relay can be neither reused nor
+// started, pi is launched with its on-disk configuration as-is.
 import { spawn } from "node:child_process";
 import { join, isAbsolute, basename } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +32,8 @@ import {
   readSidecar,
   writeSidecar,
   validatePiModelsConfig,
+  tagManagedProvidersForLaunch,
+  restoreManagedProvidersAfterLaunch,
 } from "./pi-merge-models.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 
@@ -101,7 +106,12 @@ export async function writePiModels(store, port, sidecarRoot, modelsPath = PI_MO
     }
     throw error;
   }
-  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel, effectiveCatalog);
+  // The token landing on disk is the same stable per-install token the relay
+  // (resident or fallback) requires: sidecarRoot IS the relay data root on
+  // both call paths (this launcher and agent-sync). Derived here, after the
+  // early bails, so a no-op sync never touches the token file.
+  const token = loadOrGenerateToken(sidecarRoot);
+  const { config, managed } = mergeModelsJson(existing, managedProviders, port, previousManaged, autoChannel, effectiveCatalog, token);
 
   const gate = validatePiModelsConfig(config);
   if (!gate.valid) {
@@ -131,9 +141,12 @@ export function buildInstanceId({ cwd = process.cwd(), pid = process.pid, endpoi
 
 export function buildPiLauncherEnv({ port, token, instanceId = buildInstanceId(), base = {} }) {
   const env = { ...base };
+  // Legacy insurance: models.json now carries real values (see the header
+  // comment), so pi never consults these variables — unless a placeholder
+  // file written by an older version survived (e.g. this run's sync bailed),
+  // in which case the injected variables keep pi's ${VAR} expansion from
+  // throwing at startup.
   env.ANYSWITCH_RELAY_TOKEN = token;
-  // Consumed by the pi CLI's ${VAR} expansion of the x-agent-instance header
-  // placeholder that mergeModelsJson writes into models.json.
   env.ANYSWITCH_INSTANCE_ID = instanceId;
   env.NO_PROXY = "127.0.0.1,localhost";
   env.no_proxy = "127.0.0.1,localhost";
@@ -147,9 +160,21 @@ export async function runPiLauncher({
   log = () => {},
   base = process.env,
   piArgs = [],
+  modelsPath = null,
 }) {
-  const relay = await startRelay();
+  let relay;
+  try {
+    relay = await startRelay();
+  } catch (error) {
+    // Both relay acquisition levels failed (resident probe + own bind) —
+    // launch pi with its on-disk configuration instead of failing the command
+    // outright. No relay env rides along: pi behaves as a native install.
+    log(`warning: Anyswitch relay unavailable (${error.message}); launching pi with its existing configuration`);
+    return await spawnPi({ env: { ...base }, args: piArgs });
+  }
 
+  const instanceId = buildInstanceId();
+  let tagged = false;
   try {
     const loaded = loadStore();
     if (!loaded.ok) {
@@ -164,9 +189,23 @@ export async function runPiLauncher({
       }
     }
 
-    const env = buildPiLauncherEnv({ port: relay.port, token: relay.token, instanceId: buildInstanceId(), base });
+    // Per-launch instance tag onto the managed entries on disk (the static
+    // values are what keep direct launches working). modelsPath stays null in
+    // tests and library use so the real user config is never touched; main()
+    // wires the real path.
+    if (modelsPath) {
+      const tag = tagManagedProvidersForLaunch(modelsPath, { token: relay.token, instanceId });
+      tagged = tag.ok && tag.tagged.length > 0;
+      if (!tag.ok) log(`warning: could not retag pi models.json for this launch: ${tag.reason}`);
+    }
+
+    const env = buildPiLauncherEnv({ port: relay.port, token: relay.token, instanceId, base });
     return await spawnPi({ env, args: piArgs });
   } finally {
+    if (tagged) {
+      const restore = restoreManagedProvidersAfterLaunch(modelsPath, { token: relay.token, instanceId });
+      if (!restore.ok) log(`warning: could not restore pi models.json instance tags: ${restore.reason}`);
+    }
     await relay.close();
   }
 }
@@ -208,6 +247,7 @@ export async function main(argv = process.argv.slice(2)) {
     spawnPi: realSpawnPi,
     log: (line) => process.stderr.write(`${line}\n`),
     piArgs: argv,
+    modelsPath: PI_MODELS_PATH,
   });
   return code;
 }

@@ -113,6 +113,48 @@ test("runDshLauncher falls back to per-launch relay when resident probe fails", 
   assert.equal(dshSpawned, true);
 });
 
+test("runDshLauncher launches natively when both relay levels fail", async () => {
+  let relayStarted = false;
+  let relayClosed = false;
+  let dshSpawned = false;
+  let configPort = null;
+  let capturedEnv = null;
+  const logs = [];
+
+  const code = await runDshLauncher({
+    startRelay: async () => {
+      relayStarted = true;
+      throw Object.assign(new Error("port 47821 is in use by another process"), { code: "RELAY_PORT_FOREIGN" });
+    },
+    writeConfig: async (store, port) => {
+      configPort = port;
+      return { ok: true, unchanged: true };
+    },
+    spawnDsh: async ({ env }) => {
+      dshSpawned = true;
+      capturedEnv = env;
+      return 5;
+    },
+    probeRelay: async () => false, // No resident relay
+    log: (line) => logs.push(line),
+    base: { PATH: "/usr/bin", CUSTOM_VAR: "kept" },
+    dshArgs: [],
+  });
+
+  assert.equal(code, 5, "the child exit code passes through in native mode too");
+  assert.equal(relayStarted, true);
+  assert.equal(relayClosed, false, "native mode has no relay to close");
+  assert.equal(dshSpawned, true);
+  // Native mode: verbatim environment — no relay token, no NO_PROXY.
+  assert.equal("ANYSWITCH_RELAY_TOKEN" in capturedEnv, false);
+  assert.equal("NO_PROXY" in capturedEnv, false);
+  assert.equal(capturedEnv.CUSTOM_VAR, "kept");
+  // The profile sync still runs, against the well-known port (dsh's writeConfig
+  // takes no token), so the managed profiles revive with the resident relay.
+  assert.equal(configPort, 47821);
+  assert.ok(logs.some((l) => l.includes("Anyswitch relay unavailable") && l.includes("launching dsh with its native configuration")));
+});
+
 function dshChannelStore() {
   return {
     version: 2,

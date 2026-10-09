@@ -10,6 +10,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { DEFAULT_RELAY_PORT } from "./openai-server.mjs";
 import { RELAY_PORT as ZCODE_RELAY_PORT } from "./zcode-launcher.mjs";
+import { RELAY_PORT as ZCODE_CLI_RELAY_PORT } from "./zcode-cli-launcher.mjs";
 import { RELAY_PORT as DSH_RELAY_PORT } from "./dsh-launcher.mjs";
 import { RELAY_PORT as PI_RELAY_PORT } from "./pi-launcher.mjs";
 import { RELAY_PORT as OPENCODE_RELAY_PORT } from "./opencode-launcher.mjs";
@@ -22,6 +23,7 @@ describe("relay port has a single source of truth", () => {
 
   it("every launcher binds the shared port, not a private copy", () => {
     assert.equal(ZCODE_RELAY_PORT, DEFAULT_RELAY_PORT);
+    assert.equal(ZCODE_CLI_RELAY_PORT, DEFAULT_RELAY_PORT);
     assert.equal(DSH_RELAY_PORT, DEFAULT_RELAY_PORT);
     assert.equal(PI_RELAY_PORT, DEFAULT_RELAY_PORT);
     assert.equal(OPENCODE_RELAY_PORT, DEFAULT_RELAY_PORT);
