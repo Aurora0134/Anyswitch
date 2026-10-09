@@ -271,11 +271,15 @@ export async function runSelfUpdate({
     const relay = await restartRelayFn(relayRoot).catch(() => ({ ok: false }));
     const relayClause = relay?.ok ? null : "Relay 重启未完成，可稍后在面板手动重启";
     // 8. 面板内监听器看到 ready-to-restart 就会拉起 helper 并按宽限自退；这里等它退场。
+    //    注意监听器在 ready-to-restart 就点火：relay 重启要花几秒，面板可能在我们
+    //    还没到这一步时就换完了。所以「退场」的证据有两种——探测落空（旧面板走了、
+    //    新面板还没起），或答话的已是目标版本（换装抢在轮询前完成）。两种都算数。
     setPhase("waiting-panel");
     let downSeen = false;
     const downDeadline = nowMs() + panelDownTimeoutMs;
     while (nowMs() < downDeadline) {
-      if ((await probePanelFn(panelPort)) === null) { downSeen = true; break; }
+      const identity = await probePanelFn(panelPort);
+      if (identity === null || identity?.version === targetVersion) { downSeen = true; break; }
       await delay(pollMs);
     }
     if (!downSeen) {
@@ -299,7 +303,7 @@ export async function runSelfUpdate({
     }
     if (revived) {
       await restoreWatchdog();
-      return finish({ outcome: "updated", message: `已更新到 ${targetVersion}`, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion });
+      return finish({ outcome: "updated", message: `已更新到 ${targetVersion}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion });
     }
     // 10. 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
     //     完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。

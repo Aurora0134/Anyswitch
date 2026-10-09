@@ -306,6 +306,26 @@ describe("runSelfUpdate", () => {
     }
   });
 
+  test("换装抢在轮询前完成：down 等待直接见到新版本即算数，不误报 pending_restart", async () => {
+    // 监听器在 ready-to-restart 就点火，relay 重启的几秒里面板已换完：
+    // 探测从不见 null，但答话的已是目标版本——这就是换装完成。
+    const probe = scriptedProbe([{ version: "0.6.1-preview" }, { version: "0.7.0" }]);
+    const { deps, journalDir, cleanup } = baseDeps({
+      spawnFn: fakeSpawn(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })).spawnFn,
+      probePanelFn: probe.probePanelFn,
+      restartRelayFn: async () => ({ ok: false }), // Relay 重启失败不得被 updated 吞掉
+    });
+    writeJournal(journalDir, runningRun());
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已更新到 0\.7\.0/);
+      assert.match(result.message, /Relay 重启未完成/);
+    } finally {
+      cleanup();
+    }
+  });
+
   test("新面板未接管且有恢复点：退回 beforeHead、重装依赖、重拉面板与 relay，outcome=rolled_back", async () => {
     const probe = scriptedProbe([
       { version: "0.6.1-preview" }, // 退场前仍在应答
