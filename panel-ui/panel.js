@@ -2964,11 +2964,11 @@ async function api(method, path, body) {
         : !validLocal(installation) ? "版本无法读取" : "已发现";
       const line = element("div", "about-version-line");
       line.appendChild(element("span", "about-kind", forms.join("/")));
-      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex 与 dsh 例外：
+      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex / dsh / kimi 例外：
       // 两形态的版本都摆，带形态小注并排；某形态没装（not_found）不占位，装着却
       // 读不出版本时状态词占它的位。
       const localParts = [];
-      if (client.id === "codex" || client.id === "dsh") {
+      if (client.id === "codex" || client.id === "dsh" || client.id === "kimi") {
         for (const installation of client.installations) {
           if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
           else if (installation.status !== "not_found") localParts.push(localStatus(installation));
@@ -2979,10 +2979,10 @@ async function api(method, path, body) {
       const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : primary ? localStatus(primary) : "未找到"}`);
       if (primary && (primary.status === "error" || primary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
       line.appendChild(localSpan);
-      // 官方最新格：主更新形态那条渠道的版本。codex 与 dsh 的桌面渠道官方版本查得到就
-      // 同口径并排，查不到不占位；没有官方版本源的端点直述「自带更新」。
+      // 官方最新格：主更新形态那条渠道的版本。codex / dsh / kimi 的桌面渠道官方版本
+      // 查得到就同口径并排，查不到不占位；没有官方版本源的端点直述「自带更新」。
       const primaryRemote = goodRemote(primary);
-      const perFormRemotes = client.id === "codex" || client.id === "dsh";
+      const perFormRemotes = client.id === "codex" || client.id === "dsh" || client.id === "kimi";
       let remoteText = "自带更新";
       if (primary?.remoteId) {
         const remoteParts = [];

@@ -107,13 +107,19 @@ const CLIENTS = [
   ["grok", "Grok Build", resolveGrokExecutable],
 ];
 
-// 桌面端与 CLI 不是同一条安装记录（各自的落点、版本源、更新通道都不同），
-// 但它们同属一个端点：客户端 id 仍是 dsh，客户端行仍是 `dsh` 那一行。
+// 只有桌面形态的端点：本地那条记录就是桌面端，inspect 走 kind="desktop" 分支
+// （版本从 app.asar 读）。dsh / kimi / codex / qoder 是「CLI + 桌面端」两形态，
+// 不在此列。
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
 
 // 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
 // --version（inspect 里的 probeVersion 分支），探不出来降级 not_runnable。
 const PROBE_VERSION_CLIENTS = new Set(["grok", "qoder-cli"]);
+
+// 两种安装形态都有的端点：npm 形态读包清单，原生形态（执行体旁边没有
+// package.json）回退到 --version。Kimi Code 是唯一两者兼备的客户端——npm 全局包
+// 与官方原生 SEA 可执行体都由官方分发，机器上装的是哪一种得看实际情况。
+const PROBE_VERSION_FALLBACK_CLIENTS = new Set(["kimi"]);
 
 // 各端点实际存在的产品形态枚举（数据面常量）。表与数组双层冻结：这是关于页
 // 与各形态接线共用的跨模块契约，运行期不许改写。
@@ -150,11 +156,31 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       ? bytes.subarray(2).toString("utf16le") : bytes.toString("utf8").replace(/^\uFEFF/, "");
   }
 
+  // shim 里的路径按 cmd 的规矩展开：%~dp0 是 shim 自己所在目录，%NAME% 从环境取。
+  // 只认这几种（官方安装器写下的启动器用的就是它们），展开不了的变量原样留着，
+  // 于是路径不成绝对路径、isFile 判假，如实落到「未找到」。
+  function expandShimPath(raw, shimDir) {
+    return raw
+      .replace(/%~dp0[\\/]?/gi, `${shimDir}\\`)
+      .replace(/%([A-Za-z_][A-Za-z0-9_]*)%/g, (whole, name) => base[name] ?? whole);
+  }
+
+  // npm 生成的 shim 解到它真正的入口，好让 packageVersion 顺着目录往上读
+  // package.json；官方原生安装器写下的启动器（shim 直指原生执行体，既没有
+  // %dp0% 也没有 node_modules）解到那个执行体。两者都不成立时原样返回而不是
+  // null：shim 本身就是真实存在的执行体，判成「没找到」是假阴性——Kimi Code
+  // 的原生形态走的正是这条路径。
   function npmTarget(path) {
     if (![".cmd", ".ps1", ""].includes(extname(path).toLowerCase())) return path;
     const text = readText(path);
-    const match = text?.match(/(?:%dp0%|%~dp0|\$basedir)[\\/]+(node_modules[\\/][^"\r\n]+)["]/i);
-    return match ? resolve(dirname(path), match[1].replace(/[\\/]/g, "/")) : null;
+    const entry = text?.match(/(?:%dp0%|%~dp0|\$basedir)[\\/]+(node_modules[\\/][^"\r\n]+)["]/i);
+    if (entry) return resolve(dirname(path), entry[1].replace(/[\\/]/g, "/"));
+    const direct = text?.match(/"([^"\r\n]*\.exe)"|((?:[A-Za-z]:)?[^\s"\r\n]*\.exe)/i);
+    if (direct) {
+      const expanded = expandShimPath(direct[1] ?? direct[2], dirname(path));
+      if (isAbsolute(expanded)) return resolve(expanded);
+    }
+    return path;
   }
 
   // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
@@ -281,6 +307,15 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         if (version && peVersion && version !== peVersion) return { ...result, issue: "version_conflict" };
         if (version || peVersion) return { ...result, version: version || peVersion, versionSource: version && peVersion ? "package.json+pe" : version ? "package.json" : "pe", issue: null };
       }
+      // 两种形态都有的客户端：包清单读不出（原生执行体旁没有 package.json）时，
+      // 本地版本改由执行体自报，与纯原生客户端同一口径。
+      if (!version && PROBE_VERSION_FALLBACK_CLIENTS.has(id) && /\.exe$/i.test(path)) {
+        const probe = await probeVersion(path);
+        if (probe?.missing) return { ...result, status: "not_found", path: null, issue: "entry_missing" };
+        return probe?.version
+          ? { ...result, version: probe.version, versionSource: "cli --version", issue: null }
+          : { ...result, issue: "not_runnable" };
+      }
       return version ? { ...result, version, versionSource: "package.json", issue: null } : result;
     } catch (error) {
       if (missing(error) && result.status !== "found") return result;
@@ -357,6 +392,27 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
     }
   }
+
+  // Kimi Code 的官方桌面端（Electron 包，安装器默认落点）。与 DSH 桌面端同型：
+  // 版本取归档里的产品版本（包名 kimi-code-app），执行体自身的 PE 资源写的是
+  // Electron 的版本、答不了「装的是哪个 Kimi Code」。
+  async function inspectKimiDesktop() {
+    const result = { kind: "desktop", remoteId: "kimi-desktop", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const path = resolveKimiDesktopExecutable(base);
+      if (!isFile(path)) return result;
+      const found = { ...result, status: "found", path, issue: "version_unavailable" };
+      const version = asarProductVersion("kimi-desktop", join(dirname(path), "resources", "app.asar"));
+      return version ? { ...found, version, versionSource: "app.asar/package.json", issue: null } : found;
+    } catch (error) {
+      if (missing(error) && result.status !== "found") return result;
+      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
+    }
+  }
+
+  // 一卡两形态（index 0 = CLI，index 1 = 官方桌面端）的端点 → 桌面端检测器。
+  // codex / qoder 的桌面形态另有自己的入口（商店 MSIX / IDE 目录），在 getState 里单列。
+  const desktopInspectors = { dsh: inspectDshDesktop, kimi: inspectKimiDesktop };
 
   let cache = null;
   async function getState({ force = false } = {}) {
