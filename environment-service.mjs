@@ -22,9 +22,10 @@ export function resolveDshDesktopExecutable(base = process.env) {
 }
 
 // The Codex CLI line must describe the same artifact the update button
-// installs — the npm-global @openai/codex package — not the launcher's
-// bundled engine under %LOCALAPPDATA%\OpenAI\Codex\bin, so detection follows
-// the npm shim like the other npm-based clients, never resolveCodexExecutable.
+// installs — the npm-global @openai/codex package. Detection therefore follows
+// the npm shim like the other npm-based clients, and resolveCodexExecutable
+// now prefers that same shim, so the terminal one-click launch and this card
+// agree on which file is installed.
 function resolveCodexShim(base = process.env) {
   return join(base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"), "npm", "codex.cmd");
 }

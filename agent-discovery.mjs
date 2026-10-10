@@ -41,9 +41,19 @@ export function resolveClaudeExecutable(base = process.env) {
   return override.replace(/\\/g, "/");
 }
 
+// Codex has two install shapes, and the terminal one-click launch, the launcher
+// and the environment card must all resolve the same one. The npm-global shim
+// is preferred because it is the artifact the panel's update button installs
+// and the one environment-service detects (resolveCodexShim); the official
+// native install layout stays as the fallback so a Codex installed that way
+// keeps working. The shim is a .cmd, which both callers already wrap in
+// `cmd /d /c`.
 export function resolveCodexExecutable(base = process.env, io = { readdirSync, existsSync, statSync }) {
   const override = absoluteOverride(base, "CODEX_EXECUTABLE");
   if (override !== null) return override;
+  // Prefer the shim; see the note above for why this is the shared artifact.
+  const shim = join(roamingNpm(base), "codex.cmd");
+  if (io.existsSync(shim)) return shim;
   const binRoot = join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "OpenAI", "Codex", "bin");
   let candidates = [];
   try {
@@ -55,7 +65,7 @@ export function resolveCodexExecutable(base = process.env, io = { readdirSync, e
   }
   if (candidates.length === 0) {
     const error = new Error(
-      `no codex.exe found under ${binRoot}; is the Codex CLI installed? ` +
+      `no codex.exe found under ${binRoot} and no npm shim at ${shim}; is the Codex CLI installed? ` +
         `Set CODEX_EXECUTABLE to an absolute path to point the launcher at it.`,
     );
     error.code = "ENOENT";

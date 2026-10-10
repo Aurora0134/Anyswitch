@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   AGENT_TERMINAL_TARGETS,
   AGENT_RELAY_PORT,
@@ -32,9 +32,11 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeP
     DSH_EXECUTABLE: exe("dsh.cmd"),
     OPENCODE_EXECUTABLE: exe("opencode.exe"),
     GROK_EXECUTABLE: exe("grok.exe"),
-    // Codex is discovered by globbing <LOCALAPPDATA>\OpenAI\Codex\bin\<hash>\codex.exe；
-    // qoder CLI 固定在 <USERPROFILE>\.qoder\bin\qodercli\qodercli.exe（resolveQoderCliExecutable
-    // 不收覆盖变量），fakeBase 直接摆出这份目录。
+    // Codex 两种安装形态：npm 全局 shim（APPDATA/npm/codex.cmd）优先，官方原生
+    // 安装位（LOCALAPPDATA/[OI]/Codex/bin/<hash>/codex.exe）是回退。fakeBase 默认
+    // 只摆原生那份以验证回退；需要 shim 优先的用例自行写 shim 并设 APPDATA。
+    // qoder CLI 固定在 USERPROFILE/.qoder/bin/qodercli/qodercli.exe
+    // （resolveQoderCliExecutable 不收覆盖变量），fakeBase 直接摆出这份目录。
     LOCALAPPDATA: join(root, "local"),
     USERPROFILE: join(root, "user"),
     ...(claudeSmallFast === undefined ? {} : { ANTHROPIC_SMALL_FAST_MODEL: claudeSmallFast }),
@@ -340,6 +342,22 @@ test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () 
       assert.match(error.message, /[\u4e00-\u9fff]/, "面向用户的 product 文案");
       return true;
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("终端一键启动 codex：npm 全局 shim 存在时用它，不再误报未安装", () => {
+  // 回归：面板更新按钮装的是 npm 全局包，检测侧认的也是它；终端侧若只解析官方
+  // 原生安装位，npm 装的 codex 会在「+」菜单里列出却一点就报「没有找到程序」。
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = { ...fakeBase(root), APPDATA: join(root, "roaming") };
+    const shim = join(base.APPDATA, "npm", "codex.cmd");
+    mkdirSync(dirname(shim), { recursive: true });
+    writeFileSync(shim, "");
+    const launch = buildAgentSessionLaunch({ agentId: "codex", cwd: root, token: TOKEN, base });
+    assert.equal(launch.launch.args[2], shim, "npm 全局装的 codex 走 shim，与检测侧同源");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -63,12 +63,14 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-// The Codex CLI installs under %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe
-// where the hash directory changes with every package upgrade — discover it by
-// glob, never hardcode it. Multiple hash dirs can linger after an upgrade, so
-// the newest codex.exe wins. The CODEX_EXECUTABLE override must be absolute:
-// a bare name or relative path could resolve back to the Anyswitch shim and
-// make the launcher recurse into itself.
+// The Codex CLI has two install shapes. The npm-global shim is preferred when
+// it exists — that is the artifact the panel update button installs and the one
+// the environment card reports (resolveCodexExecutable). The official native
+// install layout, whose hash directory changes with every package upgrade, is
+// the fallback: discover it by glob, never hardcode it, and the newest
+// codex.exe wins when several hash dirs linger. The CODEX_EXECUTABLE override
+// must be absolute: a bare name or relative path could resolve back to the
+// Anyswitch shim and make the launcher recurse into itself.
 import { resolveCodexExecutable } from "./agent-discovery.mjs";
 export { resolveCodexExecutable };
 
