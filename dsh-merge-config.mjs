@@ -163,7 +163,7 @@ export function buildReasoningEffortsMap(levels, wireValues) {
   return map;
 }
 
-export function buildDshProviderEntry(providerId, provider, port, knowledge, catalog = null, includeEfforts = true) {
+export function buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog = null, includeEfforts = true) {
   const prefixedId = `_${providerId}`;
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
@@ -208,14 +208,22 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge, cat
     models.push(entry);
   }
 
+  // 凭据随 profile 走，不依赖启动环境变量。官方桌面端由自己的快捷方式直接拉起，
+  // 不经过任何 Anyswitch 启动器，因此进程环境里没有 ANYSWITCH_RELAY_TOKEN；而
+  // dsh 的 profile schema 里凭据只能是引用（没有字面 apiKey 字段），引用解析为空
+  // 又会先抛 MISSING_CREDENTIAL、根本轮不到 headers——所以令牌只能落在 headers
+  // 里，并且不能再写 apiKeyEnv，否则请求在解析引用时就死了。
+  const headers = { "x-agent-id": "dsh" };
+  // 没有令牌时不写这条头：native 回退启动（本机 relay 不可用）下读不到令牌，
+  // 写一个空 Bearer 只会让请求以 401 失败，profile 保持无密钥更诚实。
+  if (typeof token === "string" && token.length > 0) {
+    headers.Authorization = `Bearer ${token}`;
+  }
   const profile = {
     displayName: provider.channelName ?? providerId,
     api: "openai-completions",
     baseURL,
-    apiKeyEnv: "ANYSWITCH_RELAY_TOKEN",
-    headers: {
-      "x-agent-id": "dsh",
-    },
+    headers,
     models,
   };
 
@@ -231,7 +239,7 @@ export function buildDshProviderEntry(providerId, provider, port, knowledge, cat
   };
 }
 
-export function mergeDshSettings(existingSettings, managedProviders, port, previousManaged = [], knowledge = null, autoChannel = null, catalog = null, includeEfforts = true) {
+export function mergeDshSettings(existingSettings, managedProviders, port, token, previousManaged = [], knowledge = null, autoChannel = null, catalog = null, includeEfforts = true) {
   const settings = typeof existingSettings === "object" && existingSettings !== null ? { ...existingSettings } : {};
   const llmPiAi = { ...(settings["llm-pi-ai"] ?? {}) };
   const existingProviders = { ...(llmPiAi.providers ?? {}) };
@@ -252,7 +260,7 @@ export function mergeDshSettings(existingSettings, managedProviders, port, previ
   // 2. Inject current active providers
   const currentManaged = [];
   for (const [providerId, provider] of Object.entries(providers)) {
-    const entry = buildDshProviderEntry(providerId, provider, port, knowledge, catalog, includeEfforts);
+    const entry = buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, includeEfforts);
     Object.assign(existingProviders, entry);
     currentManaged.push(providerId);
   }
@@ -375,11 +383,11 @@ export function mergeDshProfilePatch(entries, providers, previousManaged = []) {
   return next;
 }
 
-export function writeDshProfilePatches(store, port, sidecarRoot, dshHome, catalog = null, effortsEnabled = true, knowledge = null) {
-  return writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge);
+export function writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog = null, effortsEnabled = true, knowledge = null) {
+  return writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge);
 }
 
-async function writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge) {
+async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, dshHome, catalog, effortsEnabled, knowledge) {
   const yaml = await getYamlModule();
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "dsh");
@@ -390,7 +398,7 @@ async function writeDshProfilePatchesWithYaml(store, port, sidecarRoot, dshHome,
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
   const built = {};
   for (const [providerId, provider] of Object.entries(providers)) {
-    Object.assign(built, buildDshProviderEntry(providerId, provider, port, knowledge, catalog, effortsEnabled));
+    Object.assign(built, buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, effortsEnabled));
   }
   const paths = dshProfilePatchPaths(dshHome);
   if (paths.length === 0) {

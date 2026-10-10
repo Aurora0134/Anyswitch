@@ -19,6 +19,10 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync
 import { join } from "node:path";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
+// Every provider profile carries the relay token in its headers; the tests
+// thread one fixed value through the builders and assert it lands verbatim.
+const TOKEN = "test-relay-token";
+
 test("buildDshProviderEntry creates valid dsh profile", () => {
   const provider = {
     models: {
@@ -29,18 +33,36 @@ test("buildDshProviderEntry creates valid dsh profile", () => {
       },
     },
   };
-  const entry = buildDshProviderEntry("deepseek", provider, 47821);
+  const entry = buildDshProviderEntry("deepseek", provider, 47821, TOKEN);
   assert.ok(entry._deepseek);
   assert.equal(entry._deepseek.displayName, "deepseek");
   assert.equal(entry._deepseek.api, "openai-completions");
   assert.equal(entry._deepseek.baseURL, "http://127.0.0.1:47821/openai/deepseek/v1");
-  assert.equal(entry._deepseek.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
-  assert.deepEqual(entry._deepseek.headers, { "x-agent-id": "dsh" });
+  // The credential rides the profile's headers: the schema has no literal
+  // apiKey field, and an apiKeyEnv reference would be resolved (and fail)
+  // before any header is read.
+  assert.equal(entry._deepseek.apiKeyEnv, undefined);
+  assert.deepEqual(entry._deepseek.headers, {
+    "x-agent-id": "dsh",
+    Authorization: `Bearer ${TOKEN}`,
+  });
   assert.equal(entry._deepseek.models.length, 1);
   assert.equal(entry._deepseek.models[0].id, "deepseek-chat");
   assert.equal(entry._deepseek.models[0].name, "DeepSeek V3");
   assert.equal(entry._deepseek.models[0].contextWindow, 64000);
   assert.equal(entry._deepseek.models[0].maxTokens, 8000);
+});
+
+test("buildDshProviderEntry omits the credential header when no token is available", () => {
+  // Native fallback has no relay of its own, so the token read comes back null.
+  // Writing an empty "Bearer " would only fail the request with a 401; a
+  // keyless profile is the honest shape.
+  const provider = { models: { m: { displayName: "M" } } };
+  for (const token of [null, undefined, ""]) {
+    const entry = buildDshProviderEntry("p", provider, 47821, token);
+    assert.equal(entry._p.apiKeyEnv, undefined);
+    assert.deepEqual(entry._p.headers, { "x-agent-id": "dsh" });
+  }
 });
 
 test("buildDshProviderEntry attaches compat and reasoningEfforts when reasoning configured", () => {
@@ -53,7 +75,7 @@ test("buildDshProviderEntry attaches compat and reasoningEfforts when reasoning 
       },
     },
   };
-  const entry = buildDshProviderEntry("deepseek-r1", provider, 47821);
+  const entry = buildDshProviderEntry("deepseek-r1", provider, 47821, TOKEN);
   assert.ok(entry["_deepseek-r1"].compat);
   assert.equal(entry["_deepseek-r1"].compat.thinkingFormat, "deepseek");
   assert.equal(entry["_deepseek-r1"].compat.supportsReasoningEffort, true);
@@ -94,7 +116,7 @@ test("buildDshProviderEntry falls back to the pi-ai knowledge base by model id",
       "embedding-bge-m3": {},
     },
   };
-  const entry = buildDshProviderEntry("vendorb", provider, 47821, knowledge);
+  const entry = buildDshProviderEntry("vendorb", provider, 47821, TOKEN, knowledge);
   const models = Object.fromEntries(entry._vendorb.models.map((m) => [m.id, m]));
 
   // glm-5.2: DSH "low" dispatches as zai wire "high"
@@ -142,7 +164,7 @@ test("buildDshProviderEntry knowledge tier never overrides store-declared levels
       "my-model": { reasoningEffortLevels: ["medium", "max"] },
     },
   };
-  const entry = buildDshProviderEntry("p", provider, 47821, knowledge);
+  const entry = buildDshProviderEntry("p", provider, 47821, TOKEN, knowledge);
   assert.deepEqual(entry._p.models[0].reasoningEfforts, {
     off: null,
     medium: "medium",
@@ -176,7 +198,7 @@ test("mergeDshSettings manages lifecycle and preserves user sections", () => {
     },
   };
 
-  const { config, managed } = mergeDshSettings(existing, activeProviders, 47821, ["old_provider"]);
+  const { config, managed } = mergeDshSettings(existing, activeProviders, 47821, TOKEN, ["old_provider"]);
 
   assert.equal(config["ui-theme"].preference, "dark");
   assert.ok(config["llm-pi-ai"].providers.custom_manual, "user custom provider preserved");
@@ -254,7 +276,7 @@ test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其�
         },
       },
     };
-    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
     assert.equal(result.ok, true);
     assert.equal(result.unchanged, false);
     assert.equal(existsSync(join(dir, "settings.yaml")), false, "已弃用的全局设置文件不再写出");
@@ -266,8 +288,11 @@ test("0.1.7 的每个已有界面都能读到托管渠道，界面自己的其�
       assert.equal(row.name, "@deepseek-ai/dsh-llm-pi-ai");
       const channel = row.config.providers["_poke"];
       assert.equal(channel.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
-      assert.equal(channel.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
-      assert.deepEqual(channel.headers, { "x-agent-id": "dsh" });
+      assert.equal(channel.apiKeyEnv, undefined);
+      assert.deepEqual(channel.headers, {
+        "x-agent-id": "dsh",
+        Authorization: `Bearer ${TOKEN}`,
+      });
       assert.equal(channel.models[0].id, "claude-opus-5");
     }
 
@@ -323,7 +348,7 @@ test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节�
         },
       },
     };
-    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
     assert.equal(result.ok, true, result.reason);
     assert.deepEqual(result.skipped ?? [], []);
 
@@ -334,7 +359,7 @@ test("带 !!js 平台表达式的官方 patch 照常同步，表达式逐字节�
     const row = entries.find((entry) => entry.id === "llm-pi-ai");
     assert.equal(row.config.providers._poke.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
 
-    const second = await writeDshProfilePatches(store, 47821, dir, dir);
+    const second = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
     assert.equal(second.unchanged, true, "同样的 store 再同步不得改动文件");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -369,7 +394,7 @@ test("llm-pi-ai 行自带的 !!js 值在重写该行后仍带标签", async () =
         },
       },
     };
-    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
     assert.equal(result.ok, true, result.reason);
     const after = readFileSync(patchPath, "utf8");
     assert.ok(after.includes("disabled: !!js process.platform === 'linux'"), "重写 llm-pi-ai 行后表达式仍带 !!js 标签");
@@ -403,7 +428,7 @@ test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面�
         },
       },
     };
-    const result = await writeDshProfilePatches(store, 47821, dir, dir);
+    const result = await writeDshProfilePatches(store, 47821, TOKEN, dir, dir);
     assert.equal(result.ok, true, "一个界面坏掉不拖垮其它界面");
     assert.deepEqual(result.skipped.map((p) => p.replace(/\\/g, "/")), [brokenPath.replace(/\\/g, "/")]);
     assert.equal(readFileSync(brokenPath, "utf8"), broken, "被跳过的文件一个字节都不许动");
@@ -508,14 +533,17 @@ test("pool surfaces as one dsh channel with unioned models and dissolves cleanly
   };
 
   const managedProviders = extractManagedProviders(store);
-  const { config, managed } = mergeDshSettings({}, managedProviders, 47821, []);
+  const { config, managed } = mergeDshSettings({}, managedProviders, 47821, TOKEN, []);
   const providers = config["llm-pi-ai"].providers;
   const pool = providers["_pool-ab"];
   assert.ok(pool);
   assert.equal(pool.displayName, "Pool AB");
   assert.equal(pool.baseURL, "http://127.0.0.1:47821/openai/pool-ab/v1");
-  assert.equal(pool.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
-  assert.deepEqual(pool.headers, { "x-agent-id": "dsh" });
+  assert.equal(pool.apiKeyEnv, undefined);
+  assert.deepEqual(pool.headers, {
+    "x-agent-id": "dsh",
+    Authorization: `Bearer ${TOKEN}`,
+  });
   assert.deepEqual(pool.models.map((m) => m.id), ["model-a", "model-shared", "model-b"]);
   // First member in pool order wins the shared model's metadata.
   assert.equal(pool.models[1].name, "Shared (alpha)");
@@ -530,6 +558,7 @@ test("pool surfaces as one dsh channel with unioned models and dissolves cleanly
     config,
     extractManagedProviders({ version: 2, providers: store.providers }),
     47821,
+    TOKEN,
     managed,
   );
   assert.equal(withoutPool.config["llm-pi-ai"].providers["_pool-ab"], undefined);
@@ -547,7 +576,7 @@ test("pool id equal to a member provider id absorbs all members into one channel
       alpha: { displayName: "Alpha Pool", members: ["alpha", "beta"] },
     },
   };
-  const { config, managed } = mergeDshSettings({}, extractManagedProviders(store), 47821, []);
+  const { config, managed } = mergeDshSettings({}, extractManagedProviders(store), 47821, TOKEN, []);
   const providers = config["llm-pi-ai"].providers;
   assert.equal(providers._alpha.displayName, "Alpha Pool");
   assert.equal(providers._alpha.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
@@ -578,6 +607,7 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
     {},
     extractManagedProviders(DSH_CHAIN_STORE),
     47821,
+    TOKEN,
     [],
     null,
     auto,
@@ -588,8 +618,11 @@ test("mergeDshSettings injects the _auto channel when the endpoint has a route c
   assert.equal(entry.api, "openai-completions");
   // The base URL points at the chain HEAD node, not at a literal "auto" segment.
   assert.equal(entry.baseURL, "http://127.0.0.1:47821/openai/poke-api/v1");
-  assert.equal(entry.apiKeyEnv, "ANYSWITCH_RELAY_TOKEN");
-  assert.deepEqual(entry.headers, { "x-agent-id": "dsh" });
+  assert.equal(entry.apiKeyEnv, undefined);
+  assert.deepEqual(entry.headers, {
+    "x-agent-id": "dsh",
+    Authorization: `Bearer ${TOKEN}`,
+  });
   assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
   assert.ok(!entry.models[0].reasoningEfforts, "the virtual model carries no reasoning levels");
   assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
@@ -601,6 +634,7 @@ test("mergeDshSettings does not inject _auto without a route chain", () => {
     {},
     extractManagedProviders(DSH_CHAIN_STORE),
     47821,
+    TOKEN,
     [],
     null,
     deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
@@ -614,6 +648,7 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
     {},
     extractManagedProviders(DSH_CHAIN_STORE),
     47821,
+    TOKEN,
     [],
     null,
     deriveAutoRouteChannel(DSH_CHAIN_STORE, "dsh"),
@@ -623,6 +658,7 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
     first.config,
     extractManagedProviders(DSH_CHAIN_STORE),
     47821,
+    TOKEN,
     first.managed,
     null,
     deriveAutoRouteChannel({ providers: DSH_CHAIN_STORE.providers }, "dsh"),
@@ -638,7 +674,7 @@ test("mergeDshSettings cleans up _auto on the re-sync after the chain is deleted
 
 test("library tier: no catalog keeps today's shape for an unknown model", () => {
   const provider = { models: { "mimo-v2.5-pro": { displayName: "Mimo" } } };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null);
   const model = entry._poke.models[0];
   assert.equal(model.reasoningEfforts, undefined);
   assert.equal(entry._poke.compat, undefined);
@@ -651,7 +687,7 @@ test("library tier: an unknown text model gets levels, not a route dialect", () 
       ["mimo-v2.5-pro", { kind: "reasoning", levels: ["high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
     ]),
   };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   const model = entry._poke.models[0];
   // DSH rejects a non-off level whose wire value is empty, so every level lands
   // with the level name itself.
@@ -669,7 +705,7 @@ test("library tier: a level outside DSH's fixed set is clipped, not written", ()
       ["gpt-5.6-sol", { kind: "reasoning", levels: ["light", "medium", "high", "xhigh", "max"], default: "high", wire: { light: "light" }, thinkingFormat: null }],
     ]),
   };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   assert.deepEqual(entry._poke.models[0].reasoningEfforts, { off: null, medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
 });
 
@@ -680,7 +716,7 @@ test("library tier: a model the library calls non-text stays exempt", () => {
       ["agnes-image-2.0-flash", { kind: "non-text", levels: [], default: null, wire: {}, thinkingFormat: null }],
     ]),
   };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   assert.equal(entry._poke.models[0].reasoningEfforts, undefined);
 });
 
@@ -693,7 +729,7 @@ test("library tier sits behind the store and provider declarations", () => {
       ["glm-5.3", { kind: "reasoning", levels: ["medium", "high", "xhigh", "max"], default: "high", wire: {}, thinkingFormat: null }],
     ]),
   };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   assert.deepEqual(Object.keys(entry._poke.models[0].reasoningEfforts), ["off", "low", "high"]);
 });
 
@@ -704,7 +740,7 @@ test("a library dialect is written per model, not as a route default", () => {
       ["deepseek-v4-flash", { kind: "reasoning", levels: ["high", "max"], default: "high", wire: {}, thinkingFormat: "deepseek" }],
     ]),
   };
-  const entry = buildDshProviderEntry("poke", provider, 47821, null, catalog);
+  const entry = buildDshProviderEntry("poke", provider, 47821, TOKEN, null, catalog);
   assert.deepEqual(entry._poke.models[0].compat, { thinkingFormat: "deepseek" });
   assert.equal(entry._poke.compat, undefined);
 });
