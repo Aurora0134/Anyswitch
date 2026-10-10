@@ -9681,7 +9681,7 @@ async function api(method, path, body) {
       return `渠道返回 HTTP ${s}`;
     }
     if (/timed out/i.test(raw)) return "测试请求超时，渠道长时间未响应";
-    if (/request failed/i.test(raw)) return "网络请求发不出去，请检查网络与接口地址";
+    if (/request failed/i.test(raw)) return "无法发出网络请求，请检查网络连接与接口地址";
     if (/not managed by Anyswitch/.test(raw)) return "该渠道已不存在，请刷新渠道列表";
     if (/store is unavailable/.test(raw)) return "渠道配置库暂不可用，请稍后再试";
     return panelError(e, "连接测试未通过");
@@ -9715,7 +9715,7 @@ async function api(method, path, body) {
           const reason = storeTestErrorText(e);
           failed.push({ label, reason });
           setStoreRefreshStatus("正在测试连接..", "busy",
-            `<span class="srs-neg">${escapeHtml(label)} 连不上：${escapeHtml(reason)}</span>${prog}`);
+            `<span class="srs-neg">${escapeHtml(label)} 连接失败：${escapeHtml(reason)}</span>${prog}`);
         }
       }
       const last = labelMap.get(ids[ids.length - 1]) || ids[ids.length - 1];
@@ -9729,13 +9729,13 @@ async function api(method, path, body) {
         // 号池/多选才上汇总结构；单渠道直接一句结论带原因
         const detail = failed.map((f) => `${f.label}：${f.reason}`).join("；");
         setStoreRefreshStatus("测试完成", "err",
-          `<span class="srs-neg">${ok} 个可用、${failed.length} 个连不上（${escapeHtml(detail)}）</span>`);
-        toast(`${ok} 个渠道可用、${failed.length} 个连不上（${detail}）`, true);
+          `<span class="srs-neg">${ok} 个可用、${failed.length} 个连接失败（${escapeHtml(detail)}）</span>`);
+        toast(`${ok} 个渠道可用、${failed.length} 个连接失败（${detail}）`, true);
       } else {
         const f = failed[0];
         setStoreRefreshStatus("测试完成", "err",
-          `<span class="srs-neg">${escapeHtml(f.label)} 连不上：${escapeHtml(f.reason)}</span>`);
-        toast(`${f.label} 连不上：${f.reason}`, true);
+          `<span class="srs-neg">${escapeHtml(f.label)} 连接失败：${escapeHtml(f.reason)}</span>`);
+        toast(`${f.label} 连接失败：${f.reason}`, true);
       }
       return { ok, failed };
     } finally {
