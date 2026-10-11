@@ -110,7 +110,7 @@ describe("panel data routes", () => {
     assert.equal(spy.calls.length, 1, "取消后不应继续调用服务");
   });
 
-  it("import-preview 回摘要与票据，import-apply 只交票据与可选的 skills 位置", async () => {
+  it("import-preview 回摘要与票据，import-apply 交票据与 Skills 落点决定", async () => {
     const spy = spyBundle();
     const router = dataRouter({ dataBundleService: spy.service });
     const prev = fakeReqRes("/panel/api/data/import-preview", "POST", { zipPath: "C:/in/a.zip" });
@@ -118,19 +118,19 @@ describe("panel data routes", () => {
     assert.equal(json2(prev).token, "t1");
     assert.equal(json2(prev).hasPlaintextKeys, true);
 
-    const apply = fakeReqRes("/panel/api/data/import-apply", "POST", { token: "t1", skillsRepoPath: "D:/new/skills" });
+    const apply = fakeReqRes("/panel/api/data/import-apply", "POST", { token: "t1", skillsMode: "custom", skillsTarget: " D:/new/skills " });
     await router.handle(apply.req, apply.res);
     assert.equal(spy.calls[1][0], "apply");
-    assert.deepEqual(spy.calls[1][1], { token: "t1", skillsRepoPath: "D:/new/skills" });
+    assert.deepEqual(spy.calls[1][1], { token: "t1", skillsMode: "custom", skillsTarget: "D:/new/skills" });
     assert.equal(json2(apply).backupId, okApply.backupId);
   });
 
-  it("skillsRepoPath 缺省时交 undefined，让服务用包内记的来源路径", async () => {
+  it("skillsMode/skillsTarget 缺省时交 undefined，由服务按 skip 处理", async () => {
     const spy = spyBundle();
     const router = dataRouter({ dataBundleService: spy.service });
     const { req, res } = fakeReqRes("/panel/api/data/import-apply", "POST", { token: "t1" });
     await router.handle(req, res);
-    assert.equal(spy.calls[0][1].skillsRepoPath, undefined);
+    assert.deepEqual(spy.calls[0][1], { token: "t1", skillsMode: undefined, skillsTarget: undefined });
   });
 
   it("业务失败以 200 + ok:false 回界面（坏包、过期票据都是可用信息，不是异常）", async () => {

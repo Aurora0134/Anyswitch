@@ -42,7 +42,8 @@ function validStore(id = "alpha") {
 }
 
 // 造一台"待迁移的机器"：渠道、relay 设置、预设、Skills 主仓库、两份密钥。
-function fakeMachine({ store = validStore(), settings = true, prompts = true, skills = 2, withCredential = true } = {}) {
+// skillsConfig=false 模拟「本机没配过 Skills 仓库」（盘上无 skills.json）。
+function fakeMachine({ store = validStore(), settings = true, prompts = true, skills = 2, withCredential = true, skillsConfig = true, homeDir } = {}) {
   const localAppData = mkTestDir("anyswitch-bundle-machine-");
   const base = { LOCALAPPDATA: localAppData };
   const root = join(localAppData, "Anyswitch");
@@ -59,15 +60,16 @@ function fakeMachine({ store = validStore(), settings = true, prompts = true, sk
       writeFileSync(join(repoPath, `skill-${i}`, "references", "a.txt"), "deep\n", "utf8");
     }
   }
-  writeFileSync(join(root, "skills.json"), JSON.stringify({ repoPath }) + "\n", "utf8");
+  if (skillsConfig) writeFileSync(join(root, "skills.json"), JSON.stringify({ repoPath }) + "\n", "utf8");
   if (withCredential) {
     for (const id of Object.keys(store?.providers ?? {})) {
       writeFileSync(join(paths.credentialsDir, `${id}.dpapi`), Buffer.from(FAKE_MARK + "sk-secret-" + id, "utf8"));
     }
   }
   const targetDir = mkTestDir("anyswitch-bundle-target-");
-  const service = () => createDataBundleService({ base, protect: fakeProtect, unprotect: fakeUnprotect });
-  return { base, root, paths, repoPath, targetDir, service };
+  const home = homeDir ?? mkTestDir("anyswitch-bundle-home-");
+  const service = () => createDataBundleService({ base, homeDir: home, protect: fakeProtect, unprotect: fakeUnprotect });
+  return { base, root, paths, repoPath, targetDir, homeDir: home, service };
 }
 
 const listZip = async (zipPath) => {
@@ -157,6 +159,8 @@ test("预览给出摘要、含明文密钥标记与来源主机", async () => {
   assert.equal(preview.includes.settings, true);
   assert.equal(typeof preview.token, "string");
   assert.ok(preview.skillsSourcePath.endsWith("skill-repo"));
+  assert.equal(preview.skillsRepoPath, m.repoPath, "预览带本机此刻的仓库路径，供落点 UI 用");
+  assert.equal(preview.skillsDefaultPath, join(m.homeDir, ".agents", "skills"), "预览带未配仓库时的默认落点");
 
   // 用户看完摘要就走：暂存必须能被一次退出清理收走，测试也不往 %TEMP% 丢东西。
   const stale = importStagingDirs().filter((n) => !before.includes(n));
@@ -210,7 +214,7 @@ test("预览拒绝：非 zip、缺 manifest、格式版本不符、store 非法"
   rmSync(bad, { recursive: true, force: true });
 });
 
-test("落定：整体覆盖、先备份、凭据重新加密、skills 位置回写", async () => {
+test("落定：整体覆盖、先备份、凭据重新加密、skills 落进已配仓库", async () => {
   const src = fakeMachine();
   const exporter = src.service();
   const exp = await exporter.exportBundle({ targetDir: src.targetDir });
@@ -220,7 +224,7 @@ test("落定：整体覆盖、先备份、凭据重新加密、skills 位置回�
   const importer = dst.service();
   const preview = await importer.previewBundle(exp.path);
   assert.equal(preview.ok, true, preview.error);
-  const applied = await importer.applyBundle({ token: preview.token });
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "repo" });
   assert.equal(applied.ok, true, applied.error);
 
   const imported = JSON.parse(readFileSync(dst.paths.storeFile, "utf8"));
@@ -232,8 +236,10 @@ test("落定：整体覆盖、先备份、凭据重新加密、skills 位置回�
   assert.equal(applied.applied.skills, true);
   assert.deepEqual(JSON.parse(readFileSync(join(dst.root, "settings.json"), "utf8")), { followAgent: true });
   assert.equal(readFileSync(join(dst.paths.credentialsDir, "alpha.dpapi"), "utf8").startsWith(FAKE_MARK), true, "落盘密钥必须重新加密，不存明文");
+  assert.equal(applied.applied.skillsTarget, dst.repoPath, "repo 模式落进本机已配的仓库");
+  assert.equal(applied.applied.skillsRepoChanged, false, "指向本来就是它，不算改指");
   const skillsCfg = JSON.parse(readFileSync(join(dst.root, "skills.json"), "utf8"));
-  assert.equal(skillsCfg.repoPath, applied.applied.skillsTarget);
+  assert.equal(skillsCfg.repoPath, dst.repoPath, "skills.json 指向不动");
   assert.equal(existsSync(join(skillsCfg.repoPath, "skill-1", "references", "a.txt")), true, "嵌套 skill 文件要原样落回");
 
   // 备份：旧 store 与旧凭据都在，且能读回被覆盖掉的那一笔。
@@ -287,16 +293,116 @@ test("落定拒绝复用票据与无效票据", async () => {
   assert.match(second.error, /过期|无效/);
 });
 
-test("目标机上包内 skills 有内容但没位置时跳过 skills，其余照落", async () => {
+test("落定：skip 不碰 Skills，repo 模式撞上未配仓库如实记原因，其余照落", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+
+  // skip：用户这次不导 Skills
+  const dstSkip = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const skipSvc = dstSkip.service();
+  const skipApplied = await skipSvc.applyBundle({
+    token: (await skipSvc.previewBundle(exp.path)).token,
+    skillsMode: "skip",
+  });
+  assert.equal(skipApplied.ok, true, skipApplied.error);
+  assert.equal(skipApplied.applied.skills, false);
+  assert.equal(skipApplied.applied.skillsSkippedReason, "未导入 Skills");
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(dstSkip.paths.storeFile, "utf8")).providers), ["alpha"], "其余部分照常落定");
+  assert.equal(existsSync(join(dstSkip.repoPath, "skill-1")), false, "Skills 一个都不落");
+
+  // repo：界面给了仓库模式，但本机此刻没配仓库（预览后配置被清了）
+  const dstBare = fakeMachine({ store: validStore("beta"), skills: 0, skillsConfig: false });
+  const bareSvc = dstBare.service();
+  const bareApplied = await bareSvc.applyBundle({
+    token: (await bareSvc.previewBundle(exp.path)).token,
+    skillsMode: "repo",
+  });
+  assert.equal(bareApplied.ok, true, bareApplied.error);
+  assert.equal(bareApplied.applied.skills, false);
+  assert.equal(bareApplied.applied.skillsSkippedReason, "本机未配置 Skills 仓库");
+  assert.equal(existsSync(join(dstBare.root, "skills.json")), false, "没落成就不该凭空造指向");
+});
+
+test("落定：default 落进 ~/.agents/skills 并成为本机仓库（未配过仓库的形态）", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0, skillsConfig: false });
+  const importer = dst.service();
+  const preview = await importer.previewBundle(exp.path);
+  assert.equal(preview.skillsRepoPath, null, "没配过仓库时预览不带仓库路径");
+  assert.equal(preview.skillsDefaultPath, join(dst.homeDir, ".agents", "skills"), "默认落点给界面预填");
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "default" });
+  assert.equal(applied.ok, true, applied.error);
+  assert.equal(applied.applied.skills, true);
+  assert.equal(applied.applied.skillsTarget, join(dst.homeDir, ".agents", "skills"));
+  assert.equal(applied.applied.skillsRepoChanged, true);
+  const skillsCfg = JSON.parse(readFileSync(join(dst.root, "skills.json"), "utf8"));
+  assert.equal(skillsCfg.repoPath, join(dst.homeDir, ".agents", "skills"), "导入后此目录成为本机 Skills 仓库");
+  assert.equal(existsSync(join(skillsCfg.repoPath, "skill-2", "SKILL.md")), true);
+});
+
+test("落定：custom 自选位置——未配过仓库时改指，已配仓库时不动指向", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+
+  // 未配过仓库 + 自选：落盘后该目录成为本机仓库
+  const dstBare = fakeMachine({ store: validStore("beta"), skills: 0, skillsConfig: false });
+  const bareSvc = dstBare.service();
+  const bareTarget = join(dstBare.root, "picked-skills");
+  const bareApplied = await bareSvc.applyBundle({
+    token: (await bareSvc.previewBundle(exp.path)).token,
+    skillsMode: "custom", skillsTarget: bareTarget,
+  });
+  assert.equal(bareApplied.ok, true, bareApplied.error);
+  assert.equal(bareApplied.applied.skillsTarget, bareTarget);
+  assert.equal(bareApplied.applied.skillsRepoChanged, true);
+  assert.equal(JSON.parse(readFileSync(join(dstBare.root, "skills.json"), "utf8")).repoPath, bareTarget);
+
+  // 已配仓库 + 自选别处：只落盘，主仓库指向未变
+  const dstRepo = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const repoSvc = dstRepo.service();
+  const customTarget = join(dstRepo.root, "elsewhere");
+  const repoApplied = await repoSvc.applyBundle({
+    token: (await repoSvc.previewBundle(exp.path)).token,
+    skillsMode: "custom", skillsTarget: customTarget,
+  });
+  assert.equal(repoApplied.ok, true, repoApplied.error);
+  assert.equal(repoApplied.applied.skillsTarget, customTarget);
+  assert.equal(repoApplied.applied.skillsRepoChanged, false);
+  assert.equal(JSON.parse(readFileSync(join(dstRepo.root, "skills.json"), "utf8")).repoPath, dstRepo.repoPath, "主仓库指向未变");
+  assert.equal(existsSync(join(customTarget, "skill-1", "SKILL.md")), true, "落盘本身照常");
+});
+
+test("落定：Skills 落盘失败不掀翻整单，原因如实记在 applied 里", async () => {
   const src = fakeMachine();
   const exp = await src.service().exportBundle({ targetDir: src.targetDir });
   const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
-  writeFileSync(join(dst.root, "skills.json"), "{}\n", "utf8");
+  // 落点路径被一个同名文件占住：mkdirSync 必抛，复现异机导入撞 EPERM 的那一类炸点
+  const blocked = join(dst.root, "blocked-target");
+  writeFileSync(blocked, "i am a file, not a dir", "utf8");
   const importer = dst.service();
   const preview = await importer.previewBundle(exp.path);
-  const applied = await importer.applyBundle({ token: preview.token, skillsRepoPath: "" });
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "custom", skillsTarget: blocked });
   assert.equal(applied.ok, true, applied.error);
-  assert.equal(applied.applied.skills, true, "包内记了来源路径时按该路径落盘");
+  assert.equal(applied.applied.skills, false);
+  assert.match(applied.applied.skillsSkippedReason, /Skills 落盘未完成：/);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(dst.paths.storeFile, "utf8")).providers), ["alpha"], "渠道等其余部分已换完");
+  assert.equal(JSON.parse(readFileSync(join(dst.root, "skills.json"), "utf8")).repoPath, dst.repoPath, "指向不被失败写坏");
+});
+
+test("仓库指向现读现用：建服务后改了 skills.json，预览与落定都跟新值", async () => {
+  const src = fakeMachine();
+  const exp = await src.service().exportBundle({ targetDir: src.targetDir });
+  const dst = fakeMachine({ store: validStore("beta"), skills: 0 });
+  const importer = dst.service();
+  const moved = join(dst.root, "moved-repo");
+  mkdirSync(moved, { recursive: true });
+  writeFileSync(join(dst.root, "skills.json"), JSON.stringify({ repoPath: moved }) + "\n", "utf8");
+  const preview = await importer.previewBundle(exp.path);
+  assert.equal(preview.skillsRepoPath, moved, "预览要给界面的是此刻的仓库，不是建服务时那份");
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "repo" });
+  assert.equal(applied.applied.skillsTarget, moved);
+  assert.equal(existsSync(join(moved, "skill-1", "SKILL.md")), true);
 });
 
 test("Skills 仓库的 .git 不进包、不计数、也不回拷", async () => {
@@ -318,11 +424,12 @@ test("Skills 仓库的 .git 不进包、不计数、也不回拷", async () => {
   const importer = dst.service();
   const preview = await importer.previewBundle(exp.path);
   assert.equal(preview.counts.skillDirs, 2);
-  // 显式给一个全新落点：缺省时按包内记的来源路径落，那在源机上本就带着 .git。
+  // 自选一个全新落点（本机已配仓库：只落盘、不改指）
   const freshTarget = join(dst.root, "restored-skills");
-  const applied = await importer.applyBundle({ token: preview.token, skillsRepoPath: freshTarget });
+  const applied = await importer.applyBundle({ token: preview.token, skillsMode: "custom", skillsTarget: freshTarget });
   assert.equal(applied.ok, true, applied.error);
   assert.equal(applied.applied.skillsTarget, freshTarget);
+  assert.equal(applied.applied.skillsRepoChanged, false, "已配仓库时自选别处不动指向");
   assert.equal(existsSync(join(freshTarget, ".git")), false, "落点不该出现 .git");
   assert.equal(existsSync(join(freshTarget, "skill-1", ".git")), false, "嵌套 .git 也要跳过");
   assert.equal(existsSync(join(freshTarget, "skill-2", "SKILL.md")), true, "正常内容照常落回");

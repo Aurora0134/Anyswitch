@@ -3187,7 +3187,8 @@ export function createPanelRouter({
           if (path === "/panel/api/data/import-apply") {
             const result = await svc.applyBundle({
               token: requireString(body.token, "token"),
-              skillsRepoPath: typeof body.skillsRepoPath === "string" ? body.skillsRepoPath.trim() : undefined,
+              skillsMode: typeof body.skillsMode === "string" ? body.skillsMode : undefined,
+              skillsTarget: typeof body.skillsTarget === "string" ? body.skillsTarget.trim() : undefined,
             });
             // 只有真的换掉了 settings.json 才有对齐的必要；包里没带设置文件时
             // 盘上还是原来那份，计划与进程本来就和它对应，别去动。

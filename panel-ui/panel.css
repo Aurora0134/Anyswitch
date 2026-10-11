@@ -772,13 +772,14 @@
   /* 浮动 Toast */
   /* 顶部居中浮层：落在 56px 顶栏下方 12px 处，不遮顶栏 tab——底部位置实测难以
      察觉（带动作的刷新结果报信需要更高可见性，全站 toast 统一上移）；
-     入场由上方 8px 滑下 */
+     入场由上方 8px 滑下。z-index 须在 modal-overlay（300）之上：弹窗开着时
+     弹出的报错（如导入弹窗里的互斥提示）不能被蒙层盖住。 */
   .toast {
     position: fixed; top: 68px; left: 50%; transform: translateX(-50%) translateY(-8px);
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-md); padding: 8px 16px;
     font-size: 12.5px; font-weight: 600; color: var(--text); opacity: 0;
-    transition: all 180ms var(--ease-out); pointer-events: none; z-index: 200;
+    transition: all 180ms var(--ease-out); pointer-events: none; z-index: 400;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.err { color: var(--danger); border-color: var(--danger-border); }
@@ -855,11 +856,6 @@
      少一格就没有 flex、没有卡间距，整块会贴成一坨。 */
   #settingsPanelAdvanced { display: flex; flex-direction: column; gap: 20px; }
   #settingsPanelAdvanced .card-body { display: flex; flex-direction: column; gap: 8px; }
-  #settingsPanelAdvanced .modal-item {
-    margin: 0 -10px; padding: 12px 10px;
-    transition: background 120ms var(--ease-out);
-  }
-  #settingsPanelAdvanced .modal-item:hover { background: var(--surface-hover); }
   #settingsPanelAdvanced .card-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
   .data-bundle-status { font-size: 12px; line-height: 1.6; color: var(--text-2); overflow-wrap: anywhere; }
   .data-bundle-status[data-tone="busy"] { color: var(--accent); }
@@ -870,6 +866,19 @@
   .data-bundle-meta:empty { display: none; }
   .data-bundle-note { font-size: 11.5px; line-height: 1.6; color: var(--text-3); }
   .data-bundle-note[data-tone="warn"] { color: var(--warn); }
+  /* 导入弹窗里的 Skills 落点：仓库勾选是小字注释量级（不是正栏），路径等宽再小一档；
+     自选位置与勾选互斥——自选选到文件夹后勾选强制退出并锁定，锁定的点击在 JS 里
+     拦下弹报错，这里只负责把它画得不可点。 */
+  .modal-item[hidden] { display: none; }
+  .data-skills-inline { padding: 12px 0 0; font-size: 11.5px; color: var(--text-3); line-height: 1.5; }
+  .data-skills-inline label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .data-skills-inline input[type="checkbox"] { accent-color: var(--accent); margin: 0; }
+  .data-skills-inline.is-locked label { opacity: .45; cursor: not-allowed; }
+  .data-skills-path { font-family: var(--font-mono); font-size: 11px; color: var(--text-3); overflow-wrap: anywhere; }
+  .data-skills-inline .data-skills-path { padding-left: 20px; }
+  /* 导入是双击确认：第一击进确认态（实色危险底），常驻到落定或取消，不自动复位 */
+  .btn-danger-armed { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .btn-danger-armed:hover:not(:disabled) { filter: brightness(1.05); }
   /* Claude Code 档位映射行：复用 .modal-number 的全部取值（底色/边框/焦点环都走
      主题 token），这里只把它从「右对齐的小数字框」改成「左对齐的模型名框」——
      不引入任何颜色声明，因此三套主题与亮暗都无需特化片段。 */

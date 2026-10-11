@@ -2143,20 +2143,12 @@ if (window.panelStartupController) panelStartupPlay();
             导入配置包
           </h2>
           <div class="card-head-actions">
-            <button type="button" class="btn btn-mini" id="dataImportPickBtn">选择导出包</button>
-            <button type="button" class="btn btn-primary" id="dataImportApplyBtn" disabled>备份并导入</button>
+            <button type="button" class="btn btn-mini" id="dataImportPickBtn">选择配置包</button>
           </div>
         </div>
         <div class="card-body">
-          <div class="data-bundle-status" id="dataImportSummary" role="status" aria-live="polite">尚未选择导出包</div>
+          <div class="data-bundle-status" id="dataImportSummary" role="status" aria-live="polite">尚未选择配置包</div>
           <div class="data-bundle-meta" id="dataImportMeta"></div>
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">Skills 保存位置</div>
-              <div class="modal-item-desc" id="dataSkillsPath">沿用导出包里记录的原始位置</div>
-            </div>
-            <button type="button" class="btn btn-mini" id="dataSkillsPickBtn" disabled>更改位置</button>
-          </div>
         </div>
       </div>
     </div>
@@ -2385,6 +2377,55 @@ if (window.panelStartupController) panelStartupPlay();
     <div class="modal-foot">
       <button class="btn" id="sessDlgCancel">取消</button>
       <button class="btn btn-danger" id="sessDlgConfirm">确认删除</button>
+    </div>
+  </div>
+</div>
+
+<!-- 导入配置包：包内容预览与 Skills 落点选择都在这个弹窗里确认（复用 .modal-overlay 体系）。
+     已配仓库时勾选收成小字注释行，自选位置常开、与勾选互斥——自选一旦选到文件夹，
+     勾选就强制退出并锁定（点它弹报错，清除自选后解锁）；未配过仓库时勾选行整段不出，
+     直接给默认落点。「备份并导入」是双击确认：第一击变红常驻，第二击才落。 -->
+<div class="modal-overlay" id="dataImportModal">
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dataImportModalTitle">
+    <div class="modal-head">
+      <h3 id="dataImportModalTitle">导入配置包</h3>
+      <button class="modal-close-btn" id="dataImportModalClose" aria-label="关闭">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="data-bundle-status" id="dataImportModalSummary"></div>
+      <div class="data-bundle-meta" id="dataImportModalMeta"></div>
+      <div class="data-skills-inline" id="dataSkillsRepoLine" hidden>
+        <label id="dataSkillsRepoLabel">
+          <input type="checkbox" id="dataSkillsRepoCheck" checked>
+          导入到这台机器的 Skills 仓库
+        </label>
+        <div class="data-skills-path" id="dataSkillsRepoPath"></div>
+      </div>
+      <div class="modal-item" id="dataSkillsCustomItem" hidden>
+        <div>
+          <div class="modal-item-title">自选位置</div>
+          <div class="data-skills-path" id="dataSkillsCustomPath">尚未选择文件夹（不导入 Skills）</div>
+        </div>
+        <div style="display:flex; gap:8px; flex:none;">
+          <button type="button" class="btn btn-mini" id="dataSkillsCustomClearBtn" hidden>清除</button>
+          <button type="button" class="btn btn-mini" id="dataSkillsCustomPickBtn">选择文件夹</button>
+        </div>
+      </div>
+      <div class="modal-item" id="dataSkillsDefaultItem" hidden>
+        <div>
+          <div class="modal-item-title">Skills 保存位置</div>
+          <div class="data-skills-path" id="dataSkillsDefaultPath"></div>
+          <div class="modal-item-desc">导入后此目录会成为这台机器的 Skills 仓库</div>
+        </div>
+        <button type="button" class="btn btn-mini" id="dataSkillsDefaultPickBtn">更改位置</button>
+      </div>
+      <div class="data-bundle-status" id="dataImportModalError" data-tone="danger" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" id="dataImportModalCancel">取消</button>
+      <button class="btn btn-primary" id="dataImportApplyBtn">备份并导入</button>
     </div>
   </div>
 </div>

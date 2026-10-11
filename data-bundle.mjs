@@ -18,7 +18,7 @@
 
 import { spawn } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { homedir, hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { protect as defaultProtect, unprotect as defaultUnprotect } from "./dpapi.mjs";
@@ -153,7 +153,10 @@ export function createDataBundleService({
   paths = storePaths(root),
   settingsPath = defaultSettingsPath(base),
   promptsJsonPath = promptsPath(base),
-  skillsCfg = loadSkillsConfig({ base }),
+  // Skills 仓库指向在每次导出/预览/落定时现读，不在建服务时缓存：面板服务是惰性
+  // 单例，用户可能在两次操作之间改过仓库位置，读到旧值会把 skills 落去错地方。
+  skillsConfigFn = () => loadSkillsConfig({ base }),
+  homeDir = homedir(),
   tarPath = DEFAULT_TAR,
   spawnFn = spawn,
   protect = defaultProtect,
@@ -246,7 +249,7 @@ export function createDataBundleService({
       const skillsJsonText = readTextIfExists(skillsConfigPath(base));
       if (skillsJsonText !== null) writeFileSync(join(staging, "skills.json"), skillsJsonText, "utf8");
 
-      const skillsSource = skillsCfg?.repoPath || null;
+      const skillsSource = skillsConfigFn()?.repoPath || null;
       const skillDirs = topLevelDirs(skillsSource);
       if (skillDirs.length) {
         copyTree(skillsSource, join(staging, SKILLS_DIR_NAME));
@@ -322,7 +325,15 @@ export function createDataBundleService({
       // 用户看完摘要放弃导入时，Temp 里剩下的只是渠道、预设这些不含密钥的部分。
       const credentialEntries = liftCredentialsOut(staging);
       const token = issueTicket(staging, checked.summary, credentialEntries);
-      return { ok: true, token, ...checked.summary };
+      // 落点选择的两个候选在预览时给界面：本机已配的仓库（可能为空）与未配仓库
+      // 时的默认落点。包里记录的导出机原路径只作摘要信息展示，不再是落点候选。
+      return {
+        ok: true,
+        token,
+        ...checked.summary,
+        skillsRepoPath: skillsConfigFn()?.repoPath ?? null,
+        skillsDefaultPath: join(homeDir, ".agents", "skills"),
+      };
     } catch (error) {
       rmSafe(staging);
       throw error;
@@ -394,7 +405,12 @@ export function createDataBundleService({
   }
 
   // ── 导入落定 ─────────────────────────────────────────────
-  async function applyBundle({ token, skillsRepoPath }) {
+  // skillsMode 由界面在确认弹窗里选定："repo"（已配仓库，同名覆盖）/ "default"
+  // （未配过仓库时的默认落点 ~/.agents/skills）/ "custom"（自选位置，路径随
+  // skillsTarget 传入）/ "skip"（这次不导 Skills）。包里记录的导出机原路径不再
+  // 作为落点候选——异机导入时那条路径往往建不出来，曾在落盘处把整单炸成
+  // 「导入未完成」，而渠道与密钥其实已换完。
+  async function applyBundle({ token, skillsMode, skillsTarget }) {
     const got = takeTicket(token);
     if (!got.ok) return { ok: false, error: got.error };
     const { dir } = got.ticket;
@@ -465,16 +481,37 @@ export function createDataBundleService({
       const bundledSkills = join(dir, SKILLS_DIR_NAME);
       const skillDirs = topLevelDirs(bundledSkills);
       if (skillDirs.length) {
-        const target = (skillsRepoPath && String(skillsRepoPath).trim()) || got.ticket.summary.skillsSourcePath;
-        if (!target) {
-          applied.skillsSkippedReason = "包里带了 Skills 目录，但目标位置为空，未落盘";
+        const cfg = skillsConfigFn();
+        const mode = typeof skillsMode === "string" ? skillsMode : "skip";
+        let target = null;
+        if (mode === "repo") target = cfg?.repoPath || null;
+        else if (mode === "default") target = join(homeDir, ".agents", "skills");
+        else if (mode === "custom") target = (skillsTarget && String(skillsTarget).trim()) || null;
+        if (mode === "skip") {
+          applied.skillsSkippedReason = "未导入 Skills";
+        } else if (!target) {
+          applied.skillsSkippedReason = mode === "repo" ? "本机未配置 Skills 仓库" : "Skills 落点为空";
         } else {
-          mkdirSync(target, { recursive: true });
-          copyTree(bundledSkills, target);
-          saveSkillsConfig({ repoPath: target }, { base });
-          applied.skills = true;
-          applied.skillsTarget = target;
-          applied.skillDirs = skillDirs.length;
+          // Skills 落盘失败不掀翻整单：渠道/设置/密钥已换完、备份已落，把原因
+          // 如实记进 applied 交界面呈现，而不是把半完成报成整单失败。
+          try {
+            mkdirSync(target, { recursive: true });
+            copyTree(bundledSkills, target);
+            applied.skills = true;
+            applied.skillsTarget = target;
+            applied.skillDirs = skillDirs.length;
+            // 改指规则：落点是已配仓库、或本机未配过仓库 → skills.json 指过去；
+            // 已配仓库但自选别处 → 只落盘，主仓库指向不动。
+            if (!cfg?.repoPath || cfg.repoPath === target) {
+              if (cfg?.repoPath !== target) saveSkillsConfig({ repoPath: target }, { base });
+              applied.skillsRepoChanged = cfg?.repoPath !== target;
+            } else {
+              applied.skillsRepoChanged = false;
+            }
+          } catch (error) {
+            applied.skills = false;
+            applied.skillsSkippedReason = `Skills 落盘未完成：${error.message}`;
+          }
         }
       }
 

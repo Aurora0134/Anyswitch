@@ -6,36 +6,49 @@ import vm from "node:vm";
 // 高级选项页的数据搬迁界面：控制器按 panel-about.test.mjs 的同一种做法从
 // panel.js 原文里摘出来跑，元素全部按 panel.html 真实存在的 id 建，所以这条
 // 套件同时钉住「markup 里的 id ↔ JS 里取的 id ↔ 注册表里的子 tab」三者一致。
-// 版式沿用本页其它设置卡：卡头右侧放动作按钮，卡体第一行状态行、第二行明细行，
-// 需要独立控件的行用 .modal-item；状态色只由 data-tone 决定。
+// 导入的预览与 Skills 落点选择都在确认弹窗里：已配仓库时勾选收成小字注释行、
+// 自选位置常开且与勾选互斥（自选有内容即锁勾选，点它弹报错）；未配过仓库时
+// 直接给默认落点。「备份并导入」是双击确认，第一击变红常驻。
 
 const source = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
 const html = readFileSync(new URL("./panel-ui/panel.html", import.meta.url), "utf8");
 const css = readFileSync(new URL("./panel-ui/panel.css", import.meta.url), "utf8");
 
 class El {
-  constructor() {
+  constructor(tag = "") {
     this.textContent = "";
-    this.disabled = false;
+    this.disabled = /\bdisabled\b/.test(tag);
+    this.hidden = /\bhidden\b/.test(tag);
+    this.checked = /\bchecked\b/.test(tag);
     this.onclick = null;
-    this.className = "";
+    this.onchange = null;
     this.dataset = {};
-    this.hidden = false;
+    const cls = (tag.match(/class="([^"]*)"/) || [, ""])[1];
+    this._cls = new Set(cls.split(/\s+/).filter(Boolean));
+    this.classList = {
+      add: (c) => this._cls.add(c),
+      remove: (c) => this._cls.delete(c),
+      toggle: (c, force) => { (force ?? !this._cls.has(c)) ? this._cls.add(c) : this._cls.delete(c); },
+      contains: (c) => this._cls.has(c),
+    };
   }
 }
 
 const IDS = [
   "settingsTabAdvanced", "settingsPanelAdvanced",
   "dataExportBtn", "dataExportStatus", "dataExportMeta",
-  "dataImportPickBtn", "dataImportApplyBtn", "dataImportSummary", "dataImportMeta",
-  "dataSkillsPath", "dataSkillsPickBtn",
+  "dataImportPickBtn", "dataImportSummary", "dataImportMeta",
+  "dataImportModal", "dataImportModalClose", "dataImportModalCancel",
+  "dataImportModalSummary", "dataImportModalMeta", "dataImportModalError", "dataImportApplyBtn",
+  "dataSkillsRepoLine", "dataSkillsRepoLabel", "dataSkillsRepoCheck", "dataSkillsRepoPath",
+  "dataSkillsCustomItem", "dataSkillsCustomPath", "dataSkillsCustomPickBtn", "dataSkillsCustomClearBtn",
+  "dataSkillsDefaultItem", "dataSkillsDefaultPath", "dataSkillsDefaultPickBtn",
 ];
 
-function harness({ respondPost, confirmAnswer = true, errorText } = {}) {
+function harness({ respondPost, errorText } = {}) {
   const nodes = new Map();
   for (const match of html.matchAll(/<([a-z0-9]+)\b[^>]*\bid="([^"]+)"[^>]*>/g)) {
-    const el = new El();
-    el.hidden = /\bhidden\b/.test(match[0]);
+    const el = new El(match[0]);
     // 初值照 markup 填进来：真 DOM 里这些字本来就画在页面上。给个空壳的话，
     // 「控制器不抢写初值」「离开回初值」这类断言测的就是个假状态——控制器从
     // DOM 里取到的初值会变成空串，而线上取到的是 markup 那句，两边不一致。
@@ -68,7 +81,6 @@ function harness({ respondPost, confirmAnswer = true, errorText } = {}) {
     doc,
     notify: (message, isErr) => toasts.push({ message, isErr }),
     errorText: errorText ?? ((err, fallback) => err?.code || fallback),
-    askConfirm: () => confirmAnswer,
   });
   const line = (id) => ({ text: nodes.get(id).textContent, tone: nodes.get(id).dataset.tone });
   return {
@@ -78,6 +90,10 @@ function harness({ respondPost, confirmAnswer = true, errorText } = {}) {
     exportMeta: () => nodes.get("dataExportMeta").textContent,
     summary: () => line("dataImportSummary"),
     meta: () => nodes.get("dataImportMeta").textContent,
+    modalOpen: () => nodes.get("dataImportModal").classList.contains("show"),
+    modalSummary: () => line("dataImportModalSummary"),
+    modalMeta: () => nodes.get("dataImportModalMeta").textContent,
+    modalError: () => ({ ...line("dataImportModalError"), hidden: nodes.get("dataImportModalError").hidden }),
   };
 }
 
@@ -90,8 +106,15 @@ const initialText = (id) => (html.match(new RegExp(`id="${id}"[^>]*>([^<]*)<`)) 
 const PREVIEW = {
   ok: true, token: "t1", sourceComputer: "DESKTOP-A1B2C3", createdAt: "2026-09-23T04:00:00.000Z",
   counts: { providers: 22, pools: 4, routingChains: 2, presets: 8, skillDirs: 25, credentials: 22 },
+  includes: { settings: true, prompts: true, skills: true },
   skillsSourcePath: "C:\\Users\\me\\Desktop\\agent-home\\skills",
+  skillsRepoPath: "C:\\Users\\me\\Desktop\\agent-home\\skills",
+  skillsDefaultPath: "C:\\Users\\me\\.agents\\skills",
 };
+// 形态 B：本机没配过 Skills 仓库
+const PREVIEW_NO_REPO = { ...PREVIEW, token: "t2", skillsRepoPath: null };
+// 包里不含 Skills
+const PREVIEW_NO_SKILLS = { ok: true, token: "t3", counts: { providers: 1 }, includes: { settings: true, prompts: true, skills: false }, skillsRepoPath: "C:\\repo", skillsDefaultPath: "C:\\d" };
 
 const EXPORT_OK = {
   ok: true, path: "C:\\out\\anyswitch-export-20260923-120000.zip",
@@ -99,46 +122,53 @@ const EXPORT_OK = {
   skippedCredentials: [],
 };
 
+const APPLY_OK = { ok: true, backupId: "20260923-125900", counts: { providers: 3 }, applied: { store: true, credentials: 3 } };
+
 const applyHarness = (watchdog, applyResult = {}) => harness({
   respondPost: ({ path }) => (path === "/api/data/import-pick"
-    ? { ok: true, token: "t1", counts: { providers: 3 }, skillsSourcePath: null }
-    : { ok: true, backupId: "b7", counts: { providers: 3 }, ...applyResult, ...(watchdog ? { watchdog } : {}) }),
+    ? PREVIEW_NO_SKILLS
+    : { ok: true, backupId: "b7", counts: { providers: 3 }, applied: { store: true, credentials: 3 }, ...applyResult, ...(watchdog ? { watchdog } : {}) }),
 });
 
-async function click(h, id, rounds = 2) {
-  h.get(id).onclick();
+async function click(h, id, rounds = 2, ev) {
+  h.get(id).onclick(ev ?? {});
   for (let i = 0; i < rounds; i += 1) await tick();
   return h;
 }
 
 const pickPackage = (h) => click(h, "dataImportPickBtn");
+// 双击确认：第一击进确认态，第二击才落
+const confirmApply = (h, rounds = 3) => click(h, "dataImportApplyBtn", rounds).then(() => click(h, "dataImportApplyBtn", rounds));
 
 test("markup 与控制器共用同一批 id，且注册表里有高级选项子 tab", () => {
   for (const id of IDS) assert.ok(html.includes(`id="${id}"`), `panel.html 缺 #${id}`);
   assert.ok(source.includes('advanced: ["settingsTabAdvanced", "settingsPanelAdvanced"]'),
     "settingsSubTabs 注册高级选项子 tab");
   const h = harness({ respondPost: () => ({ ok: true }) });
-  for (const id of ["dataExportBtn", "dataImportPickBtn", "dataImportApplyBtn", "dataSkillsPickBtn"]) {
+  for (const id of ["dataExportBtn", "dataImportPickBtn", "dataImportApplyBtn", "dataImportModalClose", "dataImportModalCancel", "dataSkillsCustomPickBtn", "dataSkillsCustomClearBtn", "dataSkillsDefaultPickBtn"]) {
     assert.equal(typeof h.get(id).onclick, "function", `#${id} 应被控制器接管`);
   }
   assert.equal(initialText("dataExportStatus"), "尚未导出", "状态行要有初始值，与「关于」的尚未检查更新同一写法");
-  assert.equal(initialText("dataImportSummary"), "尚未选择导出包");
+  assert.equal(initialText("dataImportSummary"), "尚未选择配置包");
   assert.equal(h.exportStatus().text, "尚未导出", "控制器不抢写初始值（保持 markup 那份）");
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "没选包之前不给写入");
-  assert.equal(h.get("dataSkillsPickBtn").disabled, true, "没选包之前不能改 Skills 位置");
+  assert.equal(h.modalOpen(), false, "弹窗初始不开");
 });
 
 test("版式按 id 挂：本页各子面板的 display 都写在 id 上，漏一格就贴成一坨", () => {
   assert.match(css, /#settingsPanelAdvanced \{ display: flex; flex-direction: column; gap: 20px; \}/,
     "高级选项面板要有自己的 display 规则，与通用/关于同一待遇");
-  assert.match(css, /#settingsPanelAdvanced \.modal-item \{/,
-    "Skills 那行要跟通用页的 modal-item 同一手感（含悬停底）");
   for (const tone of ["busy", "ok", "warn", "danger"]) {
     assert.ok(css.includes(`.data-bundle-status[data-tone="${tone}"] { color: var(--`), `状态行缺 ${tone} 色调`);
   }
   assert.match(css,
     /html\[data-prepaint-view="settings"\]\[data-prepaint-subtab="advanced"\] #settingsPanelAdvanced\[hidden\] \{ display: flex !important; \}/,
     "停在高级选项时首帧要有落位规则，否则先闪「通用」");
+  assert.match(css, /\.data-skills-inline \{/, "仓库勾选是小字注释行，样式要落档");
+  assert.match(css, /\.data-skills-path \{/, "落点路径等宽小字");
+  assert.match(css, /\.modal-item\[hidden\] \{ display: none; \}/, "modal-item 的 flex 会盖掉 hidden，必须显式补回");
+  assert.match(css, /\.btn-danger-armed \{/, "导入确认态要有常驻危险底");
+  assert.match(css, /\.toast \{[\s\S]*?z-index: 400;/, "toast 要浮在弹窗蒙层（300）之上，否则弹窗内的报错被盖住");
 });
 
 test("导出：状态行报结果、明细行摆计数，按钮始终在卡头右侧", async () => {
@@ -178,74 +208,190 @@ test("导出：取消目录框是中性色，失败原因出服务端原文并�
   assert.equal(failed.exportMeta(), "");
 });
 
-test("导入：预览后状态行是中性摘要、明细行摆计数，两个按钮同时放开", async () => {
+test("导入：选包后预览进弹窗，卡面回初值；形态 A 的勾选与自选行都在", async () => {
   const h = harness({ respondPost: () => PREVIEW });
   await pickPackage(h);
-  assert.equal(h.summary().tone, undefined, "读到包内容只是中间步骤，不上成功色");
-  assert.match(h.summary().text, /^已读取包内容：来自 DESKTOP-A1B2C3 · /);
-  assert.equal(h.meta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22");
+  assert.equal(h.modalOpen(), true, "预览以整体弹窗呈现");
+  assert.match(h.modalSummary().text, /^已读取包内容：来自 DESKTOP-A1B2C3 · /);
+  assert.equal(h.modalMeta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22");
+  assert.equal(h.summary().text, "尚未选择配置包", "卡面不占预览内容");
+  assert.equal(h.get("dataSkillsRepoLine").hidden, false);
+  assert.equal(h.get("dataSkillsRepoPath").textContent, "C:\\Users\\me\\Desktop\\agent-home\\skills");
+  assert.equal(h.get("dataSkillsRepoCheck").checked, true, "默认导入到本机仓库");
+  assert.equal(h.get("dataSkillsCustomItem").hidden, false, "自选行常开");
+  assert.equal(h.get("dataSkillsCustomPickBtn").disabled, false, "自选随时可点");
+  assert.equal(h.get("dataSkillsCustomClearBtn").hidden, true, "还没选过就没有清除");
+  assert.equal(h.get("dataSkillsDefaultItem").hidden, true, "已配仓库不出默认落点行");
   assert.equal(h.get("dataImportApplyBtn").disabled, false);
-  assert.equal(h.get("dataSkillsPickBtn").disabled, false);
-  assert.match(h.get("dataSkillsPath").textContent, /沿用导出包里记录的原始位置：C:\\Users\\me\\Desktop\\agent-home\\skills/);
-
-  const bare = harness({ respondPost: () => ({ ok: true, token: "t2", counts: { providers: 1 }, skillsSourcePath: null }) });
-  await click(bare, "dataImportPickBtn");
-  assert.equal(bare.get("dataSkillsPickBtn").disabled, true, "包里没 Skills 就不给改位置");
-  assert.equal(bare.get("dataSkillsPath").textContent, "包里不含 Skills 目录");
+  assert.match(html, /导入到这台机器的 Skills 仓库(?![^<]*同名覆盖)/, "勾选文案不含「同名覆盖」");
 });
 
-test("导入：确认框里选取消则一个写入请求都不发，票据还留着", async () => {
+test("导入：形态 B（未配过仓库）出默认落点行，勾选与自选整段不出", async () => {
+  const h = harness({ respondPost: () => PREVIEW_NO_REPO });
+  await pickPackage(h);
+  assert.equal(h.get("dataSkillsRepoLine").hidden, true);
+  assert.equal(h.get("dataSkillsCustomItem").hidden, true);
+  assert.equal(h.get("dataSkillsDefaultItem").hidden, false);
+  assert.equal(h.get("dataSkillsDefaultPath").textContent, "C:\\Users\\me\\.agents\\skills");
+  await confirmApply(h);
+  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t2", skillsMode: "default" }));
+});
+
+test("导入：形态 B 改过落点按 custom 交回；包里不含 Skills 时三段都不出、按 skip 落", async () => {
+  const moved = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
+      ? PREVIEW_NO_REPO
+      : path === "/api/skills/repo/pick"
+        ? { ok: true, path: "D:\\picked\\skills" }
+        : APPLY_OK),
+  });
+  await pickPackage(moved);
+  await click(moved, "dataSkillsDefaultPickBtn");
+  assert.equal(moved.get("dataSkillsDefaultPath").textContent, "D:\\picked\\skills");
+  await confirmApply(moved);
+  assert.equal(JSON.stringify(moved.mutations.find((m) => m.path === "/api/data/import-apply").body),
+    JSON.stringify({ token: "t2", skillsMode: "custom", skillsTarget: "D:\\picked\\skills" }));
+
+  const bare = harness({ respondPost: () => PREVIEW_NO_SKILLS });
+  await pickPackage(bare);
+  assert.equal(bare.get("dataSkillsRepoLine").hidden, true);
+  assert.equal(bare.get("dataSkillsCustomItem").hidden, true);
+  assert.equal(bare.get("dataSkillsDefaultItem").hidden, true);
+  await confirmApply(bare);
+  assert.equal(JSON.stringify(bare.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t3", skillsMode: "skip" }));
+});
+
+test("导入：双击确认——第一击只进确认态不发请求，第二击才落定", async () => {
   const h = harness({
-    confirmAnswer: false,
-    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : { ok: true }),
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : APPLY_OK),
   });
   await pickPackage(h);
   await click(h, "dataImportApplyBtn");
-  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"], "取消确认不该写入");
-  assert.equal(h.get("dataImportApplyBtn").disabled, false, "取消后不必重选包");
-});
-
-test("导入：写入成功回填备份号，票据一次性", async () => {
-  const h = harness({
-    respondPost: ({ path }) => (path === "/api/data/import-pick"
-      ? { ok: true, token: "t1", counts: { providers: 3 }, skillsSourcePath: null }
-      : { ok: true, backupId: "20260923-125900", counts: { providers: 3 }, applied: { store: true, credentials: 3 } }),
-  });
-  await pickPackage(h);
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"], "确认态不该写入");
+  assert.equal(h.get("dataImportApplyBtn").textContent, "确认导入？再点一次");
+  assert.equal(h.get("dataImportApplyBtn").classList.contains("btn-danger-armed"), true);
   await click(h, "dataImportApplyBtn", 3);
+  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t1", skillsMode: "repo" }));
+  assert.equal(h.modalOpen(), false, "落定后弹窗收起");
   assert.equal(h.summary().tone, "ok");
   assert.equal(h.summary().text, "导入完成 · 备份号 20260923-125900");
   assert.equal(h.meta(), "渠道 3");
   assert.equal(h.toasts.at(-1).message, "导入完成，已备份为 20260923-125900");
-  assert.equal(h.toasts.at(-1).isErr, false);
   assert.equal(h.get("dataImportApplyBtn").disabled, true, "票据用掉后不许再点一次");
   await click(h, "dataImportApplyBtn");
-  assert.equal(h.mutations.filter((m) => m.path === "/api/data/import-apply").length, 1);
-  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body),
-    JSON.stringify({ token: "t1", skillsRepoPath: null }));
+  assert.equal(h.mutations.filter((m) => m.path === "/api/data/import-apply").length, 1, "票据一次性");
 });
 
-test("导入：读包与写入失败都退回未选择态并转 danger", async () => {
+test("导入：Skills 落到哪、指向动没动，如实进结果明细", async () => {
+  const landed = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : {
+      ok: true, backupId: "b8", counts: { providers: 3 },
+      applied: { store: true, credentials: 3, skills: true, skillsTarget: "C:\\Users\\me\\Desktop\\agent-home\\skills", skillsRepoChanged: false },
+    }),
+  });
+  await pickPackage(landed);
+  await confirmApply(landed);
+  assert.equal(landed.summary().text, "导入完成 · 备份号 b8");
+  assert.match(landed.meta(), /Skills 落到：C:\\Users\\me\\Desktop\\agent-home\\skills/);
+  assert.match(landed.meta(), /主仓库指向未变/, "已配仓库自选别处时要注明指向未动");
+
+  const skipped = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : {
+      ok: true, backupId: "b9", counts: { providers: 3 },
+      applied: { store: true, credentials: 3, skills: false, skillsSkippedReason: "Skills 落盘未完成：EPERM" },
+    }),
+  });
+  await pickPackage(skipped);
+  await confirmApply(skipped);
+  assert.equal(skipped.summary().text, "导入完成 · 备份号 b9（Skills 未导入）");
+  assert.match(skipped.meta(), /Skills 落盘未完成：EPERM/, "落盘失败的原因要如实可见");
+});
+
+test("导入：自选与勾选互斥——自选有内容即锁勾选，点锁弹报错，清除后还原", async () => {
+  const h = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
+      ? PREVIEW
+      : path === "/api/skills/repo/pick"
+        ? { ok: true, path: "D:\\elsewhere\\skills" }
+        : APPLY_OK),
+  });
+  await pickPackage(h);
+  await click(h, "dataSkillsCustomPickBtn");
+  assert.equal(h.get("dataSkillsCustomPath").textContent, "D:\\elsewhere\\skills");
+  assert.equal(h.get("dataSkillsRepoCheck").checked, false, "自选有内容，勾选强制退出");
+  assert.equal(h.get("dataSkillsRepoLine").classList.contains("is-locked"), true, "勾选进锁定态");
+  assert.equal(h.get("dataSkillsCustomClearBtn").hidden, false);
+
+  let prevented = false;
+  h.get("dataSkillsRepoCheck").onclick({ preventDefault: () => { prevented = true; } });
+  assert.equal(prevented, true, "锁定后点勾选要被拦下");
+  assert.equal(h.get("dataSkillsRepoCheck").checked, false, "勾选保持退出");
+  assert.equal(h.toasts.at(-1).isErr, true);
+  assert.match(h.toasts.at(-1).message, /清除自选位置/);
+
+  await confirmApply(h);
+  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body),
+    JSON.stringify({ token: "t1", skillsMode: "custom", skillsTarget: "D:\\elsewhere\\skills" }));
+
+  const cleared = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick"
+      ? PREVIEW
+      : path === "/api/skills/repo/pick"
+        ? { ok: true, path: "D:\\elsewhere\\skills" }
+        : APPLY_OK),
+  });
+  await pickPackage(cleared);
+  await click(cleared, "dataSkillsCustomPickBtn");
+  await click(cleared, "dataSkillsCustomClearBtn");
+  assert.equal(cleared.get("dataSkillsRepoCheck").checked, true, "清除自选后勾选还原");
+  assert.equal(cleared.get("dataSkillsRepoLine").classList.contains("is-locked"), false);
+  assert.equal(cleared.get("dataSkillsCustomClearBtn").hidden, true);
+  await confirmApply(cleared);
+  assert.equal(JSON.stringify(cleared.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t1", skillsMode: "repo" }));
+});
+
+test("导入：只摘掉勾选、不选自选，就是不导 Skills", async () => {
+  const h = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : APPLY_OK),
+  });
+  await pickPackage(h);
+  h.get("dataSkillsRepoCheck").checked = false;
+  h.get("dataSkillsRepoCheck").onchange();
+  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "改落点要解除确认态");
+  await confirmApply(h);
+  assert.equal(JSON.stringify(h.mutations.find((m) => m.path === "/api/data/import-apply").body), JSON.stringify({ token: "t1", skillsMode: "skip" }));
+});
+
+test("导入：取消/关闭弹窗丢弃这次选择，一个写入请求都不发", async () => {
+  const h = harness({ respondPost: () => PREVIEW });
+  await pickPackage(h);
+  await click(h, "dataImportModalCancel");
+  assert.equal(h.modalOpen(), false);
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/data/import-pick"]);
+  assert.equal(h.summary().text, "尚未选择配置包");
+  assert.equal(h.get("dataImportApplyBtn").textContent, "备份并导入", "确认态随取消解除");
+});
+
+test("导入：读包失败在卡面转 danger；写入失败在弹窗里出原文、票据作废", async () => {
   const badZip = harness({
     respondPost: () => { const err = new Error("HTTP 200：包里缺 manifest.json，不像 anyswitch 导出包"); err.code = "包里缺 manifest.json，不像 anyswitch 导出包"; throw err; },
   });
   await pickPackage(badZip);
+  assert.equal(badZip.modalOpen(), false, "坏包不开弹窗");
   assert.equal(badZip.summary().tone, "danger");
   assert.equal(badZip.summary().text, "包里缺 manifest.json，不像 anyswitch 导出包");
-  assert.equal(badZip.get("dataImportApplyBtn").disabled, true, "坏包不留写入通道");
 
   const expired = harness({
     respondPost: ({ path }) => (path === "/api/data/import-pick"
-      ? { ok: true, token: "gone", counts: { providers: 3 }, skillsSourcePath: "C:\\skills" }
-      : { ok: false, error: "导入确认已过期，请重新选择导出包" }),
+      ? PREVIEW
+      : { ok: false, error: "导入确认已过期或无效，请重新选择导出包" }),
   });
   await pickPackage(expired);
-  await click(expired, "dataImportApplyBtn", 3);
-  assert.equal(expired.summary().tone, "danger");
-  assert.equal(expired.summary().text, "导入确认已过期，请重新选择导出包", "服务端原文直接可见");
-  assert.equal(expired.get("dataImportApplyBtn").disabled, true, "过期票据只能重选包，不做静默重试");
-  assert.equal(expired.get("dataSkillsPath").textContent, "沿用导出包里记录的原始位置", "Skills 行退回初始说法");
-  assert.equal(expired.meta(), "");
+  await confirmApply(expired);
+  assert.equal(expired.modalOpen(), true, "失败留在弹窗里，原因可见");
+  assert.equal(expired.modalError().hidden, false);
+  assert.equal(expired.modalError().text, "导入确认已过期或无效，请重新选择导出包", "服务端原文直接可见");
+  assert.equal(expired.get("dataImportApplyBtn").disabled, true, "票据已作废，只能取消后重选包");
   assert.equal(expired.toasts.at(-1).isErr, true);
 });
 
@@ -263,7 +409,9 @@ test("导入后 followAgent 没对齐回来：状态行转提醒色，明细行�
     },
   ];
   for (const c of cases) {
-    const h = await click(await pickPackage(applyHarness(c.watchdog)), "dataImportApplyBtn", 3);
+    const h = applyHarness(c.watchdog);
+    await pickPackage(h);
+    await confirmApply(h);
     assert.equal(h.summary().tone, "warn", c.name);
     assert.equal(h.summary().text, "导入完成 · 备份号 b7，但「跟随 Coding Agent 启动」没完全跟上", c.name);
     assert.match(h.meta(), /渠道 3 · 「跟随 Coding Agent 启动」/, c.name);
@@ -271,37 +419,23 @@ test("导入后 followAgent 没对齐回来：状态行转提醒色，明细行�
     assert.equal(h.toasts.at(-1).isErr, false, "数据已换完，不该报成失败");
   }
 
-  const clean = await click(await pickPackage(applyHarness({ desired: true, task: "registered", process: "started", warnings: [], reasons: {} })), "dataImportApplyBtn", 3);
+  const clean = applyHarness({ desired: true, task: "registered", process: "started", warnings: [], reasons: {} });
+  await pickPackage(clean);
+  await confirmApply(clean);
   assert.equal(clean.summary().tone, "ok", "对齐顺利就是一句成功，不多话");
   assert.equal(clean.meta(), "渠道 3");
-  const noWatchdog = await click(await pickPackage(applyHarness(null)), "dataImportApplyBtn", 3);
+  const noWatchdog = applyHarness(null);
+  await pickPackage(noWatchdog);
+  await confirmApply(noWatchdog);
   assert.equal(noWatchdog.summary().tone, "ok");
 });
 
-test("导入：可改 Skills 位置，改完的路径随写入请求交回后端", async () => {
-  const h = harness({
-    respondPost: ({ path }) => (path === "/api/data/import-pick"
-      ? { ok: true, token: "t9", counts: {}, skillsSourcePath: "C:\\old\\skills" }
-      : path === "/api/skills/repo/pick"
-        ? { ok: true, path: "D:\\new\\skills" }
-        : { ok: true, backupId: "b1", counts: {} }),
-  });
-  await pickPackage(h);
-  await click(h, "dataSkillsPickBtn");
-  assert.equal(h.get("dataSkillsPath").textContent, "导入时放到：D:\\new\\skills");
-  await click(h, "dataImportApplyBtn", 3);
-  assert.equal(JSON.stringify(h.mutations.at(-1).body), JSON.stringify({ token: "t9", skillsRepoPath: "D:\\new\\skills" }));
-});
-
 // ─────────────────────────────────────────────────────────────
-// 文案生命周期：结果离开即复位，状态随票据留着，离开期间落地的结果等切回
+// 文案生命周期：结果离开即复位；离开期间落地的结果等切回
 //
-// 本卡文本有两种身份，复位规则不同（见 createDataBundleController 的注释）：
-//   状态 = 票据还活着时的预览摘要 + Skills 落点行 → 离开再回来必须还在
-//   结果 = 导出 / 导入的一次性回执 → 离开即回初值
+// 预览与落点选择都在弹窗里（弹窗不关就不受子 tab 切换影响），卡面只有初始行
+// 与一次性回执，所以复位规则只剩「结果」这一半要管。
 // 复位用的初值一律取 markup 里写的那份，控制器不另造文案。
-// 没有这套规则时的实际症状：导出成功后「已导出 xxx.zip」永不复位，切子 tab、
-// 回看板、再回来都还挂着，文件删了界面照样说已导出，只有整页刷新才回初值。
 
 test("生命周期：导出结果离开子页即回初值，且复位文案就是 markup 的初值", async () => {
   const h = harness({ respondPost: () => EXPORT_OK });
@@ -314,16 +448,27 @@ test("生命周期：导出结果离开子页即回初值，且复位文案就�
   assert.equal(h.exportMeta(), "", "明细行一起收");
 });
 
-test("生命周期：票据还在时离开，预览是状态，必须留着（不逼用户重挑包）", async () => {
+test("生命周期：导入弹窗开着时离开不受影响，卡面本就只占初始行", async () => {
   const h = harness({ respondPost: () => PREVIEW });
   h.controller.enter();
   await pickPackage(h);
-  assert.match(h.summary().text, /^已读取包内容：/);
+  assert.equal(h.modalOpen(), true);
   h.controller.leave();
-  assert.match(h.summary().text, /^已读取包内容：/, "预览是状态，离开不清");
-  assert.equal(h.meta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22", "明细也留着");
-  assert.equal(h.get("dataImportApplyBtn").disabled, false, "票据还有效，写入通道不能关");
-  assert.equal(h.get("dataSkillsPickBtn").disabled, false, "Skills 位置也还能改");
+  assert.equal(h.modalOpen(), true, "弹窗是确认现场，离开不收");
+  assert.equal(h.summary().text, initialText("dataImportSummary"));
+});
+
+test("生命周期：导入完成的结果离开也复位", async () => {
+  const h = harness({
+    respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : APPLY_OK),
+  });
+  h.controller.enter();
+  await pickPackage(h);
+  await confirmApply(h);
+  assert.equal(h.summary().tone, "ok");
+  h.controller.leave();
+  assert.equal(h.summary().text, initialText("dataImportSummary"), "完成回执离开即回初值");
+  assert.equal(h.meta(), "");
 });
 
 test("生命周期：离开期间落地的结果等切回，看过之后下次离开才复位", async () => {
@@ -341,34 +486,6 @@ test("生命周期：离开期间落地的结果等切回，看过之后下次�
   assert.equal(h.exportStatus().text, initialText("dataExportStatus"));
 });
 
-test("生命周期：导入结果离开也复位，Skills 落点行一起回初值", async () => {
-  const h = harness({
-    respondPost: ({ path }) => (path === "/api/data/import-pick"
-      ? { ok: true, token: "t9", counts: {}, skillsSourcePath: "C:\\old\\skills" }
-      : path === "/api/skills/repo/pick"
-        ? { ok: true, path: "D:\\new\\skills" }
-        : { ok: false, error: "导入确认已过期，请重新选择导出包" }),
-  });
-  h.controller.enter();
-  await pickPackage(h);
-  await click(h, "dataSkillsPickBtn");
-  await click(h, "dataImportApplyBtn", 3);
-  assert.equal(h.summary().tone, "danger");
-  h.controller.leave();
-  assert.equal(h.summary().text, initialText("dataImportSummary"), "失败回执也回初值");
-  assert.equal(h.get("dataSkillsPath").textContent, initialText("dataSkillsPath"), "改过的落点行跟着收");
-});
-
-test("生命周期：导出侧的复位不碰导入侧的状态（两半互不牵连）", async () => {
-  const h = harness({ respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : EXPORT_OK) });
-  h.controller.enter();
-  await pickPackage(h);
-  await click(h, "dataExportBtn");
-  h.controller.leave();
-  assert.equal(h.exportStatus().text, initialText("dataExportStatus"), "导出结果复位");
-  assert.match(h.summary().text, /^已读取包内容：/, "票据还在，导入预览不受影响");
-});
-
 test("生命周期：控制器真的接进了设置页子 tab 机制，不留「有钩子没人调」的死代码", () => {
   // 这条是本次问题的根：控制器原先声明了 reset() 却零调用点，等于没有生命周期。
   assert.ok(source.includes('if (which !== "advanced") dataBundle.leave();'), "切走高级选项时离开");
@@ -379,4 +496,3 @@ test("生命周期：控制器真的接进了设置页子 tab 机制，不留「
   assert.ok(source.includes("leave() { away = true; if (awaitReturn) return; resetResults(); }"), "leave 按等切回决定清不清");
   assert.ok(!source.includes("dataBundle.reset"), "旧的死钩子不该留着");
 });
-

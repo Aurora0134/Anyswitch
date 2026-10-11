@@ -2216,26 +2216,39 @@ async function api(method, path, body) {
   // 票据，用户点「备份并导入」才写入；票据过期只能重选包，不做静默重试。
   // 结构沿用本页其它设置卡的写法：卡头右侧放动作按钮，卡体第一行是状态行、第二行是
   // 次要明细，需要独立控件的行用 .modal-item；状态色只由 data-tone 决定。
-  function createDataBundleController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback, askConfirm = (text) => window.confirm(text) }) {
+  function createDataBundleController({ request, doc, notify = () => {}, errorText = (err, fallback) => err?.code || fallback }) {
     const get = (id) => doc.getElementById(id);
     const exportBtn = get("dataExportBtn");
     const exportStatus = get("dataExportStatus");
     const exportMeta = get("dataExportMeta");
     const pickBtn = get("dataImportPickBtn");
-    const applyBtn = get("dataImportApplyBtn");
     const summaryLine = get("dataImportSummary");
     const importMeta = get("dataImportMeta");
-    const skillsLine = get("dataSkillsPath");
-    const skillsBtn = get("dataSkillsPickBtn");
-    if (!exportBtn || !pickBtn || !applyBtn) return { enter() {}, leave() {} };
+    const modal = get("dataImportModal");
+    if (!exportBtn || !pickBtn || !modal) return { enter() {}, leave() {} };
+    const modalSummary = get("dataImportModalSummary");
+    const modalMeta = get("dataImportModalMeta");
+    const modalError = get("dataImportModalError");
+    const applyBtn = get("dataImportApplyBtn");
+    const repoLine = get("dataSkillsRepoLine");
+    const repoLabel = get("dataSkillsRepoLabel");
+    const repoCheck = get("dataSkillsRepoCheck");
+    const repoPath = get("dataSkillsRepoPath");
+    const customItem = get("dataSkillsCustomItem");
+    const customPathLine = get("dataSkillsCustomPath");
+    const customPickBtn = get("dataSkillsCustomPickBtn");
+    const customClearBtn = get("dataSkillsCustomClearBtn");
+    const defaultItem = get("dataSkillsDefaultItem");
+    const defaultPathLine = get("dataSkillsDefaultPath");
+    const defaultPickBtn = get("dataSkillsDefaultPickBtn");
 
     let ticket = null;
-    let skillsRepoPath = null;
-    let skillsEnabled = false;
+    let preview = null;
+    let customPath = null;
+    let applyArmed = false;
     let busy = false;
     // 本卡文本分两种身份，复位规则不同——混为一谈就会出现「成功文案无限期挂着」：
-    //   状态 = 随前置条件存在。票据还活着时的预览摘要与 Skills 落点行都是状态，
-    //          离开再回来必须还在，否则等于逼用户重挑一次包。
+    //   状态 = 卡面初始行。预览摘要与 Skills 落点选择都在弹窗里，不占卡面。
     //   结果 = 一次性回执。导出成功/失败、导入完成/失败、取消都是结果，必须有界：
     //          离开本页即回初值；若结果是用户离开期间才落地的，留到切回看过，再于
     //          下次离开复位（与渠道刷新小字的「等切回」同精神）。
@@ -2243,7 +2256,6 @@ async function api(method, path, body) {
     const initial = {
       export: exportStatus.textContent,
       import: summaryLine.textContent,
-      skills: skillsLine.textContent,
     };
     let away = true;         // 卡片默认不可见：设置视图没打开时它不在屏上
     let awaitReturn = false; // 离开期间落了结果，留到用户切回看过再复位
@@ -2270,21 +2282,17 @@ async function api(method, path, body) {
     function showMeta(el, text) { el.textContent = text ?? ""; }
     // 结果落地：人不在本页就置「等切回」，别让结果在没人看的时候被复位掉。
     function resultLanded() { if (away) awaitReturn = true; }
-    // 复位结果：导出侧回初值；导入侧票据还在就保留预览（那是状态，不是结果）。
+    // 复位结果：导出与导入都回 markup 初值。
     function resetResults() {
       show(exportStatus, "", initial.export);
       showMeta(exportMeta, "");
-      if (ticket) return;
       show(summaryLine, "", initial.import);
       showMeta(importMeta, "");
-      skillsLine.textContent = initial.skills;
     }
     function setBusy(on) {
       busy = on;
       exportBtn.disabled = on;
       pickBtn.disabled = on;
-      applyBtn.disabled = on || !ticket;
-      skillsBtn.disabled = on || !ticket || !skillsEnabled;
     }
 
     async function runExport() {
@@ -2313,29 +2321,63 @@ async function api(method, path, body) {
       }
     }
 
+    // ── 导入：预览与落点选择全在弹窗里 ──────────────────────────
+    // 「备份并导入」是双击确认：内置浏览器里 window.confirm 会卡死，第一击变红
+    // 常驻（不自动复位），换包/改落点/取消/落定才解除。
+    function disarmApply() {
+      applyArmed = false;
+      applyBtn.textContent = "备份并导入";
+      applyBtn.classList.remove("btn-danger-armed");
+    }
+    function openModal() { modal.classList.add("show"); }
+    // 取消/关闭 = 丢弃这次选择：票据作废（服务端留着等过期扫掉），卡面回初值。
+    function closeModal() {
+      modal.classList.remove("show");
+      ticket = null;
+      preview = null;
+      customPath = null;
+      disarmApply();
+      show(summaryLine, "", initial.import);
+      showMeta(importMeta, "");
+    }
+
+    // 自选位置与「导入到仓库」勾选互斥：自选一旦选到文件夹，勾选强制退出并锁定，
+    // 再点弹报错；清除自选后勾选恢复默认打上。锁定不置 disabled——禁用的控件
+    // 点不出任何反馈，用户只会以为坏了。
+    const repoLocked = () => customPath != null;
+    function syncRepoLock() { repoLine.classList.toggle("is-locked", repoLocked()); }
+    function repoLockGuard(ev) {
+      if (!repoLocked()) return;
+      ev?.preventDefault?.();
+      notify("已选择自选位置，与导入到仓库二选一；如需改回，请先清除自选位置", true);
+    }
+
     function showPreview(result) {
       ticket = result.token ?? null;
-      skillsRepoPath = null;
-      skillsEnabled = Boolean(result.skillsSourcePath);
+      preview = result;
+      customPath = null;
+      disarmApply();
+      applyBtn.disabled = !ticket;
+      modalError.hidden = true;
       const from = result.sourceComputer ? `来自 ${result.sourceComputer} · ` : "";
-      show(summaryLine, "", `已读取包内容：${from}${timeText(result.createdAt)}`);
-      showMeta(importMeta, countsText(result.counts));
-      skillsLine.textContent = result.skillsSourcePath
-        ? `沿用导出包里记录的原始位置：${result.skillsSourcePath}`
-        : "包里不含 Skills 目录";
-      setBusy(false);
-    }
-    // 退回未选择态：票据与 Skills 落点一起收，只留状态行上那句话，不留半截状态。
-    // 只被「结果」分支调用（取消 / 读包失败 / 写入失败），所以在这里统一记一次落地。
-    function clearPreview(tone, text) {
-      ticket = null;
-      skillsRepoPath = null;
-      skillsEnabled = false;
-      showMeta(importMeta, "");
-      skillsLine.textContent = "沿用导出包里记录的原始位置";
-      show(summaryLine, tone, text);
-      resultLanded();
-      setBusy(false);
+      show(modalSummary, "", `已读取包内容：${from}${timeText(result.createdAt)}`);
+      showMeta(modalMeta, countsText(result.counts));
+      repoLine.hidden = true;
+      customItem.hidden = true;
+      defaultItem.hidden = true;
+      if (result.includes?.skills && result.skillsRepoPath) {
+        repoLine.hidden = false;
+        customItem.hidden = false;
+        repoPath.textContent = result.skillsRepoPath;
+        repoCheck.checked = true;
+        syncRepoLock();
+        customPathLine.textContent = "尚未选择文件夹（不导入 Skills）";
+        customClearBtn.hidden = true;
+      } else if (result.includes?.skills) {
+        defaultItem.hidden = false;
+        defaultPathLine.textContent = result.skillsDefaultPath;
+      }
+      openModal();
     }
 
     async function runPick() {
@@ -2345,22 +2387,51 @@ async function api(method, path, body) {
       showMeta(importMeta, "");
       try {
         const result = await request("POST", "/api/data/import-pick", {});
-        if (result.cancelled) { clearPreview("", "未选择导出包"); return; }
+        if (result.cancelled) {
+          show(summaryLine, "", "未选择配置包");
+          resultLanded();
+          return;
+        }
+        show(summaryLine, "", initial.import);
         showPreview(result);
       } catch (err) {
-        clearPreview("danger", errorText(err, "包内容读取失败"));
+        show(summaryLine, "danger", errorText(err, "包内容读取失败"));
+        resultLanded();
       } finally {
         setBusy(false);
       }
     }
 
-    async function runSkillsPick() {
-      if (busy) return;
+    async function runCustomPick() {
       try {
         const result = await request("POST", "/api/skills/repo/pick", {});
         if (result.cancelled || !result.path) return;
-        skillsRepoPath = result.path;
-        skillsLine.textContent = `导入时放到：${result.path}`;
+        customPath = result.path;
+        customPathLine.textContent = customPath;
+        customClearBtn.hidden = false;
+        repoCheck.checked = false;
+        syncRepoLock();
+        disarmApply();
+      } catch (err) {
+        notify(errorText(err, "位置选择失败"), true);
+      }
+    }
+
+    function runCustomClear() {
+      customPath = null;
+      customPathLine.textContent = "尚未选择文件夹（不导入 Skills）";
+      customClearBtn.hidden = true;
+      repoCheck.checked = true;
+      syncRepoLock();
+      disarmApply();
+    }
+
+    async function runDefaultPick() {
+      try {
+        const result = await request("POST", "/api/skills/repo/pick", {});
+        if (result.cancelled || !result.path) return;
+        defaultPathLine.textContent = result.path;
+        disarmApply();
       } catch (err) {
         notify(errorText(err, "位置选择失败"), true);
       }
@@ -2368,18 +2439,38 @@ async function api(method, path, body) {
 
     async function runApply() {
       if (busy || !ticket) return;
-      const confirmed = askConfirm(
-        "导入会替换当前的渠道、号池、路由链、提示词预设与 API 密钥。\n" +
-        "写入前会自动备份当前配置。确定继续？",
-      );
-      if (!confirmed) return;
+      if (!applyArmed) {
+        applyArmed = true;
+        applyBtn.textContent = "确认导入？再点一次";
+        applyBtn.classList.add("btn-danger-armed");
+        return;
+      }
+      disarmApply();
       const usedTicket = ticket;
+      const usedPreview = preview;
+      let decision = { skillsMode: "skip" };
+      if (usedPreview?.includes?.skills) {
+        if (usedPreview.skillsRepoPath) {
+          decision = repoCheck.checked
+            ? { skillsMode: "repo" }
+            : customPath
+              ? { skillsMode: "custom", skillsTarget: customPath }
+              : { skillsMode: "skip" };
+        } else {
+          const shown = defaultPathLine.textContent;
+          decision = shown === usedPreview.skillsDefaultPath
+            ? { skillsMode: "default" }
+            : { skillsMode: "custom", skillsTarget: shown };
+        }
+      }
       setBusy(true);
-      show(summaryLine, "busy", "正在备份并导入…");
+      applyBtn.disabled = true;
+      applyBtn.textContent = "正在备份并导入…";
+      modalError.hidden = true;
       try {
         // 业务失败（HTTP 200 + ok:false）由 api() 统一抛出并把服务端原文挂到 err.code，
         // 这里不再判一次 ok，否则重造出的 Error 会丢掉原文。
-        const result = await request("POST", "/api/data/import-apply", { token: usedTicket, skillsRepoPath });
+        const result = await request("POST", "/api/data/import-apply", { token: usedTicket, ...decision });
         // 「跟随 Coding Agent 启动」的登录自启或自愈进程没对齐回来时，数据已经换完，
         // 坏的是那一层：状态行仍报导入完成、只是转成提醒色，没跟上的具体是什么写进明细。
         const wd = result.watchdog;
@@ -2390,17 +2481,34 @@ async function api(method, path, body) {
         } else if (wd && (wd.process === "failed" || wd.process === "unknown")) {
           note = `「跟随 Coding Agent 启动」的开关已更新，但自愈进程没跟上${reason(wd.reasons?.process)}。当前实际行为可能和设置显示的不一致。`;
         }
+        // Skills 落点结果如实进明细：落到哪、主仓库指向动没动、没导是为什么。
+        const applied = result.applied ?? {};
+        let summary = `导入完成 · 备份号 ${result.backupId}`;
+        const metaParts = [countsText(result.counts)];
+        if (applied.skills) {
+          metaParts.push(`Skills 落到：${applied.skillsTarget}`);
+          if (usedPreview?.skillsRepoPath && applied.skillsRepoChanged === false) metaParts.push("主仓库指向未变");
+        } else if (usedPreview?.includes?.skills && applied.skillsSkippedReason) {
+          summary += "（Skills 未导入）";
+          metaParts.push(applied.skillsSkippedReason);
+        }
         ticket = null;
-        skillsRepoPath = null;
-        skillsEnabled = false;
+        preview = null;
+        customPath = null;
+        modal.classList.remove("show");
         show(summaryLine, note ? "warn" : "ok",
-          `导入完成 · 备份号 ${result.backupId}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
-        showMeta(importMeta, [countsText(result.counts), note].filter(Boolean).join(" · "));
+          `${summary}${note ? "，但「跟随 Coding Agent 启动」没完全跟上" : ""}`);
+        showMeta(importMeta, [...metaParts, note].filter(Boolean).join(" · "));
         resultLanded();
         notify(`导入完成，已备份为 ${result.backupId}`, false);
       } catch (err) {
+        // 票据在服务端已一次性作废，留在弹窗里只能取消后重选包。
         const detail = errorText(err, "导入未完成");
-        clearPreview("danger", detail);
+        ticket = null;
+        preview = null;
+        applyBtn.disabled = true;
+        modalError.hidden = false;
+        show(modalError, "danger", detail);
         notify(detail, true);
       } finally {
         setBusy(false);
@@ -2410,9 +2518,17 @@ async function api(method, path, body) {
     exportBtn.onclick = runExport;
     pickBtn.onclick = runPick;
     applyBtn.onclick = runApply;
-    skillsBtn.onclick = runSkillsPick;
+    get("dataImportModalClose").onclick = closeModal;
+    get("dataImportModalCancel").onclick = closeModal;
+    repoLabel.onclick = repoLockGuard;
+    repoCheck.onclick = repoLockGuard;
+    repoCheck.onchange = disarmApply;
+    customPickBtn.onclick = runCustomPick;
+    customClearBtn.onclick = runCustomClear;
+    defaultPickBtn.onclick = runDefaultPick;
     // 初始显隐由控制器定，不靠 markup 上的 disabled：票据状态只有一处真相。
     setBusy(false);
+    applyBtn.disabled = true; // 弹窗只能随预览打开，打开时才按票据放开
     // 视图作用域钩子，由设置页子 tab 机制调用（与「关于」的 enter/leave 同款）。
     // 离开时复位结果，但「离开期间才落地的结果」要留到用户切回看过。
     return {
