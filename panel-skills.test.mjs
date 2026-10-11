@@ -660,6 +660,32 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(init, /\$\("presetsRefreshBtn"\)\.onclick = runPresetsRefreshWithFeedback;/);
   });
 
+  it("presets selection goes multi (Set + focus) with skills click semantics", () => {
+    const init = extractFn("initPresetsTab", "");
+    // Ctrl/⌘+点击切换成员：加入时焦点跟随，移除焦点行回退集合最后一员
+    assert.match(
+      init,
+      /if \(e\.ctrlKey \|\| e\.metaKey\) \{[\s\S]*?presetsSelection\.delete\(id\);[\s\S]*?if \(presetsFocusId === id\) presetsFocusId = presetsLastSelectionId\(\);[\s\S]*?presetsSelection\.add\(id\);\s*\n\s*presetsFocusId = id;/
+    );
+    // 再点唯一选中行取消；空白处清空集合与焦点
+    assert.match(init, /presetsSelection\.size === 1 && presetsSelection\.has\(id\)/);
+    assert.match(init, /if \(presetsSelection\.size\) \{\s*\n\s*presetsSelection\.clear\(\);\s*\n\s*presetsFocusId = null;/);
+  });
+
+  it("multi-select context menu keeps the selection and offers batch delete", () => {
+    const init = extractFn("initPresetsTab", "");
+    // 集合内行集合不变，多成员弹多选菜单（只留批量删除）；集合外行重置为单选
+    assert.match(init, /if \(presetsSelection\.has\(id\)\) \{[\s\S]*?已选 \$\{presetsSelection\.size\} 项[\s\S]*?label: "删除选中项", danger: true, fn: confirmDeleteSelectedPresets/);
+    assert.match(init, /presetsSelection\.clear\(\);\s*\n\s*presetsSelection\.add\(id\);\s*\n\s*presetsFocusId = id;/);
+  });
+
+  it("confirmDeleteSelectedPresets lists, serially deletes, toasts, refreshes once", () => {
+    const fn = extractFn("confirmDeleteSelectedPresets", "");
+    assert.match(fn, /presets\.filter\(\(p\) => presetsSelection\.has\(p\.id\)\)/);
+    assert.match(fn, /for \(const p of selected\) \{[\s\S]*?api\("POST", "\/api\/prompts\/preset\/delete", \{ id: p\.id \}\);\s*\n\s*removed\.push\(p\.id\);[\s\S]*?\} catch \{\s*\n\s*failCount\+\+;/);
+    assert.match(fn, /await refreshPresetsState\(\);\s*\n\s*\},\s*\n\s*\}\);/);
+  });
+
   it("runPresetsRefreshWithFeedback dims the button, hides the list, and always restores", () => {
     const fn = extractFn("runPresetsRefreshWithFeedback", "");
     // 串行而非 Promise.all 取最大值：cascade 在数据落地那次渲染才起跑
@@ -679,6 +705,8 @@ describe("panel.html skills change diff highlighting", () => {
     assert.ok(renderList.indexOf('classList.remove("is-blank")') > 0);
     assert.match(renderList, /const rowStyle = /);
     assert.match(renderList, /style="\$\{rowStyle\}"/);
+    // 多选：行高亮按选中集合成员判断（照 skills）
+    assert.match(renderList, /presetsSelection\.has\(p\.id\)/);
     assert.match(renderList, /listEl\.scrollTop = prevScrollTop;[\s\S]*?playSkillsListCascade\(listEl, prevScrollTop\)/);
   });
 

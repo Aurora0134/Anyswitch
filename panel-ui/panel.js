@@ -8351,13 +8351,22 @@ async function api(method, path, body) {
 
   // ══════════════════════════════════════════════════════════════════
   // 预设管理 tab（预设 = 预注入到各端点全局指令文件的 prompt 文本）
-  // 完全照 skills 范式：单选（选中即焦点）驱动右侧详情卡，行内不放操作按钮，
-  // 编辑/删除走详情卡按钮 + 右键菜单；端点注入开关在详情卡内逐端点 toggle。
+  // 完全照 skills 范式：多选集合（Ctrl+点击切换成员）+ 焦点驱动右侧详情卡，行内
+  // 不放操作按钮，编辑/删除走详情卡按钮 + 右键菜单（多选时只留「删除选中项」批量
+  // 入口）；端点注入开关在详情卡内逐端点 toggle。
   // 布局/样式零新增类，全量复用 skills-*/store-form-* 既有类（皮肤自动生效）。
   // ══════════════════════════════════════════════════════════════════
   let presetsState = null;       // GET /panel/api/prompts/state 最近一次结果
-  let presetsSelection = null;   // 单选：选中预设 id（选中即焦点，驱动详情卡）
+  let presetsSelection = new Set(); // 选中预设 id 集合（高亮即选中，照 skills）
+  let presetsFocusId = null;     // 焦点 = 集合中最后加入且仍在的成员，驱动详情卡
   let presetsFilter = "";
+
+  // Set 保持插入序：最后一员即「最后加入且仍在集合中的」成员（焦点回退用，照 skills）
+  function presetsLastSelectionId() {
+    let last = null;
+    for (const id of presetsSelection) last = id;
+    return last;
+  }
 
   // 注入计数口径：预设 enabled 且不在该端点 off 列表 = 计 1（总开关不影响计数）。
   // 详情卡「已注入」徽标更严格：还需总开关 enabled。
@@ -8396,9 +8405,9 @@ async function api(method, path, body) {
       presetsState = res;
       // 唯一自动选中：首次加载且未选中时落首项，保持「打开 tab 即见详情」；
       // 此后用户清空的选中不被刷新复活。
-      if (firstLoad && presetsSelection === null) {
+      if (firstLoad && !presetsSelection.size) {
         const first = (res.presets || [])[0];
-        if (first) presetsSelection = first.id;
+        if (first) { presetsSelection.add(first.id); presetsFocusId = first.id; }
       }
       reconcilePresetsSelection();
       renderPresetsMaster();
@@ -8429,13 +8438,20 @@ async function api(method, path, body) {
     }
   }
 
-  // reconcile（每次刷新后）：选中项已消失则回落首项（无条目则清空）
+  // reconcile（每次刷新后）：prune 集合中已消失的 id；全部消失则回落首项（无条目
+  // 则清空，与单选时代同语义）；焦点不在集合内则回退最后一员
   function reconcilePresetsSelection() {
-    if (presetsSelection === null) return;
+    if (!presetsSelection.size) return;
     const presets = (presetsState && presetsState.presets) || [];
-    if (!presets.some((p) => p.id === presetsSelection)) {
-      presetsSelection = presets.length ? presets[0].id : null;
+    const ids = new Set(presets.map((p) => p.id));
+    for (const id of [...presetsSelection]) if (!ids.has(id)) presetsSelection.delete(id);
+    if (!presetsSelection.size) {
+      const first = presets[0];
+      if (first) presetsSelection.add(first.id);
+      presetsFocusId = first ? first.id : null;
+      return;
     }
+    if (!presetsSelection.has(presetsFocusId)) presetsFocusId = presetsLastSelectionId();
   }
 
   function initPresetsTab() {
@@ -8447,37 +8463,68 @@ async function api(method, path, body) {
       renderPresetsList();
     };
     initPresetsListDrag();
-    // 单选（选中即焦点）：左键选中/再点取消；点列表空白处清空选中
+    // 多选（照 skills）：Ctrl/⌘+点击切换成员资格，普通左键集合={该行}，再点唯一
+    // 选中行取消；点列表空白处清空选中与焦点
     $("presetsList").addEventListener("click", (e) => {
       // 拖拽重排落位后的合成 click：吞掉，不当成选中操作
       if (suppressPresetClick) { suppressPresetClick = false; return; }
       const row = e.target.closest("[data-preset]");
       if (!row) {
-        if (presetsSelection !== null) {
-          presetsSelection = null;
+        if (presetsSelection.size) {
+          presetsSelection.clear();
+          presetsFocusId = null;
           renderPresetsList();
           renderPresetDetail();
         }
         return;
       }
       const id = row.getAttribute("data-preset");
-      presetsSelection = presetsSelection === id ? null : id;
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+左键：切换成员资格；加入时焦点跟随，移除焦点行则回退到集合剩余最后一员
+        if (presetsSelection.has(id)) {
+          presetsSelection.delete(id);
+          if (presetsFocusId === id) presetsFocusId = presetsLastSelectionId();
+        } else {
+          presetsSelection.add(id);
+          presetsFocusId = id;
+        }
+      } else if (presetsSelection.size === 1 && presetsSelection.has(id)) {
+        // 再点当前唯一选中行：取消选中（详情卡随之收起）
+        presetsSelection.clear();
+        presetsFocusId = null;
+      } else {
+        // 普通左键：集合 = {该行}，焦点 = 该行
+        presetsSelection.clear();
+        presetsSelection.add(id);
+        presetsFocusId = id;
+      }
       renderPresetsList();
       renderPresetDetail();
     });
-    // 右键菜单（复用 skills 菜单基建 popSkillsContextMenu）：编辑 / 启用|停用 / 删除
+    // 右键菜单（复用 skills 菜单基建 popSkillsContextMenu）：按目标行是否在选中
+    // 集合分流——集合外行重置为单选弹单选菜单；集合内行集合不变，多成员弹多选
+    // 菜单（只留「删除选中项」批量入口），单成员弹单选菜单
     $("presetsList").addEventListener("contextmenu", (e) => {
       e.preventDefault();
       const row = e.target.closest("[data-preset]");
       if (!row) return;
       const id = row.getAttribute("data-preset");
-      if (presetsSelection !== id) {
-        presetsSelection = id;
+      const preset = ((presetsState && presetsState.presets) || []).find((p) => p.id === id);
+      if (!preset) return;
+      if (presetsSelection.has(id)) {
+        if (presetsSelection.size > 1) {
+          popSkillsContextMenu(e.clientX, e.clientY, `已选 ${presetsSelection.size} 项`, [
+            { label: "删除选中项", danger: true, fn: confirmDeleteSelectedPresets },
+          ]);
+          return;
+        }
+      } else {
+        presetsSelection.clear();
+        presetsSelection.add(id);
+        presetsFocusId = id;
         renderPresetsList();
         renderPresetDetail();
       }
-      const preset = ((presetsState && presetsState.presets) || []).find((p) => p.id === id);
-      if (!preset) return;
       popSkillsContextMenu(e.clientX, e.clientY, preset.title, [
         { label: "编辑", fn: () => showPresetFormModal(preset) },
         { label: preset.enabled ? "停用" : "启用", fn: () => setPresetEnabled(preset, !preset.enabled) },
@@ -8599,7 +8646,7 @@ async function api(method, path, body) {
       const firstLine = (p.content || "").split("\n").find((l) => l.trim()) || "（无内容）";
       // 未启用的预设行整体压暗（内联透明度）；--i 供 cascade 交错（窗口内重基见 playSkillsListCascade）
       const rowStyle = (p.enabled ? "" : "opacity:0.55;") + "--i:" + i;
-      return `<div class="skills-list-row${presetsSelection === p.id ? " selected" : ""}" style="${rowStyle}" data-preset="${escapeHtml(p.id)}" data-preset-index="${i}"${drag}>
+      return `<div class="skills-list-row${presetsSelection.has(p.id) ? " selected" : ""}" style="${rowStyle}" data-preset="${escapeHtml(p.id)}" data-preset-index="${i}"${drag}>
         <div class="skills-list-line1">
           <span class="skills-list-name">${escapeHtml(p.title)}</span>${tagBadge}
           <span class="skills-ep-dots">${lenBadge}${epCount}</span>
@@ -8760,7 +8807,7 @@ async function api(method, path, body) {
   function renderPresetDetail() {
     const body = $("presetsDetailBody");
     const presets = (presetsState && presetsState.presets) || [];
-    const preset = presets.find((p) => p.id === presetsSelection) || null;
+    const preset = presets.find((p) => p.id === presetsFocusId) || null;
     // 无选中时整卡收起；empty-hint 仅作结构兜底（与 skills 详情卡同手法）
     const card = body.closest(".panel-card");
     if (card) card.hidden = !preset;
@@ -8883,6 +8930,35 @@ async function api(method, path, body) {
     });
   }
 
+  // 多选删除（照 skills confirmDeleteSelectedSkills）：红色确认列出将删除的预设，
+  // 确认后逐个走既有 preset/delete（服务端级联清除各端点注入内容），计数收尾一次刷新
+  function confirmDeleteSelectedPresets() {
+    const presets = (presetsState && presetsState.presets) || [];
+    const selected = presets.filter((p) => presetsSelection.has(p.id));
+    if (!selected.length) return;
+    const listHtml = selected.map((p) => `<div>· <b>${escapeHtml(p.title)}</b></div>`).join("");
+    showSkillsModal({
+      title: `删除选中的 ${selected.length} 个预设`,
+      danger: true,
+      bodyHtml: `将删除以下预设，并从所有端点全局指令文件中移除其注入内容。<div style="margin-top:8px;">${listHtml}</div>`,
+      confirmText: "删除",
+      onConfirm: async () => {
+        let failCount = 0;
+        const removed = [];
+        for (const p of selected) {
+          try {
+            await api("POST", "/api/prompts/preset/delete", { id: p.id });
+            removed.push(p.id);
+          } catch {
+            failCount++;
+          }
+        }
+        toast(failCount ? `删除完成：成功 ${removed.length}、失败 ${failCount}` : `已删除 ${removed.length} 个预设`, failCount > 0);
+        await refreshPresetsState();
+      },
+    });
+  }
+
   // ── 新增/编辑预设表单弹窗（store showAddModal 范式：showSkillsModal wide +
   // 表单 HTML 注入 + store-form-error 错误条，校验/提交失败保留已填内容重开）──
   function showPresetFormModal(preset, values, errorMsg) {
@@ -8919,7 +8995,7 @@ async function api(method, path, body) {
             toast("预设已保存");
           } else {
             const created = await api("POST", "/api/prompts/preset/create", { title, tag, content });
-            if (created?.preset?.id) presetsSelection = created.preset.id;
+            if (created?.preset?.id) { presetsSelection = new Set([created.preset.id]); presetsFocusId = created.preset.id; }
             toast("预设已创建");
           }
         } catch (e) {
