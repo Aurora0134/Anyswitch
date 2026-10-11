@@ -103,6 +103,59 @@ test("ZCode reads only the selected desktop package from ASAR, not Electron or P
   assert.equal(item.versionSource, "app.asar/package.json");
 });
 
+test("ZCode CLI row resolves the default build tree and reads its version from the package manifest", async (t) => {
+  const f = fixture(t);
+  // 默认构建树即 defaultZcodeCliExecutable 给出的落点：发行树 bin\zcode.mjs
+  // 上两级是带版本号的包清单（name zcode-runtime）。
+  const tree = join(f.base.USERPROFILE, "Desktop/agent-home/zcode-src/dist/zcode/debug/zcode");
+  const entry = f.put(join(tree, "bin/zcode.mjs"), "export {};");
+  f.put(join(tree, "package.json"), JSON.stringify({ name: "zcode-runtime", version: "3.14.3" }));
+  const found = installation(await f.service().getState(), "zcode", 1);
+  assert.equal(found.kind, "cli");
+  // 本机源码构建没有官方 release 渠道：remoteId 恒为 null，关于页不为它发查询。
+  assert.equal(found.remoteId, null);
+  assert.equal(found.status, "found");
+  assert.equal(found.path, entry);
+  assert.equal(found.version, "3.14.3");
+  assert.equal(found.versionSource, "package.json");
+  assert.equal(found.issue, null);
+});
+
+test("ZCode CLI row honors ZCODE_CLI_EXECUTABLE and degrades to version_unavailable without a manifest", async (t) => {
+  const f = fixture(t);
+  const tree = join(f.root, "custom-zcode");
+  const entry = f.put(join(tree, "bin/zcode.mjs"), "export {};");
+  f.put(join(tree, "package.json"), JSON.stringify({ name: "zcode-runtime", version: "3.14.3" }));
+  const service = f.service({ base: { ...f.base, ZCODE_CLI_EXECUTABLE: entry } });
+  const found = installation(await service.getState(), "zcode", 1);
+  assert.equal(found.status, "found");
+  assert.equal(found.path, entry);
+  assert.equal(found.version, "3.14.3");
+  assert.equal(found.versionSource, "package.json");
+
+  fs.unlinkSync(join(tree, "package.json"));
+  const degraded = installation(await service.getState({ force: true }), "zcode", 1);
+  assert.equal(degraded.status, "found");
+  assert.equal(degraded.path, entry);
+  assert.equal(degraded.version, null);
+  assert.equal(degraded.versionSource, null);
+  assert.equal(degraded.issue, "version_unavailable");
+});
+
+test("ZCode CLI row reports not_found, never error, when the build tree is absent", async (t) => {
+  const f = fixture(t);
+  // resolveZcodeCliExecutable 找不到候选时返回 null：必须如实 not_found，
+  // 不能把 null 交给 isFile 炸成 error。
+  const item = installation(await f.service().getState(), "zcode", 1);
+  assert.equal(item.kind, "cli");
+  assert.equal(item.remoteId, null);
+  assert.equal(item.status, "not_found");
+  assert.equal(item.path, null);
+  assert.equal(item.version, null);
+  assert.equal(item.versionSource, null);
+  assert.equal(item.issue, "entry_missing");
+});
+
 function installation(state, id, index = 0) {
   return state.clients.find((client) => client.id === id).installations[index];
 }
@@ -355,7 +408,7 @@ test("probeExecutableVersion parses the first SemVer and classifies spawn failur
   assert.deepEqual(await run(timedOut), { missing: false, version: null });
 });
 
-test("an empty installation reports all nine clients, with five dual-installation cards", async (t) => {
+test("an empty installation reports all nine clients, with six dual-installation cards", async (t) => {
   const f = fixture(t);
   const state = await f.service({ now: () => Date.parse("2026-09-18T08:00:00Z") }).getState();
   assert.equal(state.checkedAt, "2026-09-18T08:00:00.000Z");
@@ -375,10 +428,14 @@ test("an empty installation reports all nine clients, with five dual-installatio
   assert.deepEqual(claude.installations.map((i) => [i.kind, i.remoteId]), [["cli", "claude"], ["desktop", "claude-desktop"]]);
   const kimi = state.clients.find((c) => c.id === "kimi");
   assert.deepEqual(kimi.installations.map((i) => [i.kind, i.remoteId]), [["cli", "kimi"], ["desktop", "kimi-desktop"]]);
+  // ZCode 与 Qoder 同为双安装记录但主形态相反：index 0 是桌面主形态，index 1 是
+  // 本机源码构建的 CLI——CLI 没有官方 release 渠道，remoteId 恒为 null。
+  const zcode = state.clients.find((c) => c.id === "zcode");
+  assert.deepEqual(zcode.installations.map((i) => [i.kind, i.remoteId]), [["desktop", "zcode"], ["cli", null]]);
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, ["codex", "qoder", "dsh", "claude", "kimi"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, ["codex", "qoder", "dsh", "claude", "kimi", "zcode"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");
@@ -402,7 +459,7 @@ test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", 
     pi: ["CLI"],
     opencode: ["CLI"],
     grok: ["CLI"],
-    zcode: ["Desktop"],
+    zcode: ["Desktop", "CLI"],
   });
   const f = fixture(t);
   const state = await f.service().getState();

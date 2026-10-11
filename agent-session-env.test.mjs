@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AGENT_TERMINAL_TARGETS,
   AGENT_RELAY_PORT,
@@ -32,6 +33,9 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeP
     DSH_EXECUTABLE: exe("dsh.cmd"),
     OPENCODE_EXECUTABLE: exe("opencode.exe"),
     GROK_EXECUTABLE: exe("grok.exe"),
+    // zcode CLI 入口是 node 拉起的 .mjs：覆盖变量指向一个真实存在的假文件，
+    // 终端侧验证入口后实际交给 cmd 的执行体是 process.execPath（node.exe）。
+    ZCODE_CLI_EXECUTABLE: exe("zcode.mjs"),
     // Codex is discovered by globbing <LOCALAPPDATA>\OpenAI\Codex\bin\<hash>\codex.exe；
     // qoder CLI 固定在 <USERPROFILE>\.qoder\bin\qodercli\qodercli.exe（resolveQoderCliExecutable
     // 不收覆盖变量），fakeBase 直接摆出这份目录。
@@ -57,8 +61,8 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeP
 }
 
 test("白名单只含进终端的 CLI Agent，桌面 GUI 不在列", () => {
-  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"]);
-  for (const banned of ["zcode", "codex-desktop"]) {
+  assert.deepEqual(Object.keys(AGENT_TERMINAL_TARGETS), ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"]);
+  for (const banned of ["codex-desktop"]) {
     assert.equal(AGENT_TERMINAL_TARGETS[banned], undefined, `${banned} 不得进终端`);
   }
   for (const [id, target] of Object.entries(AGENT_TERMINAL_TARGETS)) {
@@ -281,8 +285,8 @@ test("launch 一律 cmd /d /c 包装：归属链的硬前提，参数无任何�
       // 与文件路径里不允许出现任何令牌。
       const commandLine = JSON.stringify({ file: launch.launch.file, args: launch.launch.args });
       assert.ok(!commandLine.includes(TOKEN), `${agentId} 的命令行不含 relay 令牌`);
-      assert.ok(JSON.stringify(launch.env).includes(TOKEN) || agentId === "codex" || agentId === "grok",
-        `${agentId} 的令牌经 env 注入（codex/grok 的令牌在各自托管配置里）`);
+      assert.ok(JSON.stringify(launch.env).includes(TOKEN) || agentId === "codex" || agentId === "grok" || agentId === "zcode",
+        `${agentId} 的令牌经 env 注入（codex/grok 的令牌在各自托管配置里，zcode 的由 launcher 落槽位 provider_config.json）`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -298,7 +302,8 @@ test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "dsh") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
-      assert.equal(launch.launch.args.length, 3, `${agentId} 维持零附加参数`);
+      // zcode 固定 4 段：/d /c + node.exe + launcher 路径（launcher 形态见专项测试）。
+      assert.equal(launch.launch.args.length, agentId === "zcode" ? 4 : 3, `${agentId} 维持零附加参数`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -317,7 +322,7 @@ test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissi
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "claude") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
-      assert.equal(launch.launch.args.length, agentId === "dsh" ? 5 : 3, `${agentId} 不受 bypassPermissions 开关影响`);
+      assert.equal(launch.launch.args.length, agentId === "dsh" ? 5 : agentId === "zcode" ? 4 : 3, `${agentId} 不受 bypassPermissions 开关影响`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -345,12 +350,56 @@ test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () 
   }
 });
 
+test("zcode 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，env 零注入", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const launch = buildAgentSessionLaunch({ agentId: "zcode", cwd: root, token: TOKEN, base });
+    assert.equal(launch.label, "ZCode");
+    assert.equal(launch.agentName, "ZCode");
+    assert.equal(launch.shell, "cmd");
+    assert.equal(launch.launch.file, base.ComSpec, "经 cmd 启动（归属链硬前提）");
+    // CLI 入口是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs：
+    // 执行体是 node.exe 本身（process.execPath），launcher 绝对路径作为参数。
+    const launcherPath = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
+    assert.deepEqual(launch.launch.args, ["/d", "/c", process.execPath, launcherPath]);
+    // 凭证不骑环境变量：relay token 由 launcher 作为 apiKey 落进槽位
+    // provider_config.json，终端注入为零。
+    assert.deepEqual(launch.env, {});
+    assert.ok(!JSON.stringify({ file: launch.launch.file, args: launch.launch.args }).includes(TOKEN), "命令行不含 relay 令牌");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("zcode CLI 未装：入口解析不到即报 executable_missing 产品文案", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    // 覆盖变量指向不存在的绝对路径：agent-discovery 只验绝对路径，存在性
+    // 由终端侧包装补齐。
+    const brokenOverride = { ...base, ZCODE_CLI_EXECUTABLE: join(root, "bin", "gone.mjs") };
+    // 不设覆盖、默认构建路径也不存在：resolveZcodeCliExecutable 返回 null。
+    const noCli = { ...base };
+    delete noCli.ZCODE_CLI_EXECUTABLE;
+    for (const broken of [brokenOverride, noCli]) {
+      assert.throws(() => buildAgentSessionLaunch({ agentId: "zcode", cwd: root, token: TOKEN, base: broken }), (error) => {
+        assert.equal(error.code, "executable_missing");
+        assert.match(error.message, /[一-鿿]/, "面向用户的 product 文案");
+        return true;
+      });
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("未知 agentId 与缺失/不存在的工作目录都报错，不静默回落", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
     for (const build of [buildAgentSessionEnv, buildAgentSessionLaunch]) {
-      assert.throws(() => build({ agentId: "zcode", cwd: root, token: TOKEN, base }), (error) => {
+      assert.throws(() => build({ agentId: "codex-desktop", cwd: root, token: TOKEN, base }), (error) => {
         assert.equal(error.code, "unknown_agent");
         return true;
       });

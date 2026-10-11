@@ -4,7 +4,11 @@
 //
 // Credentials ride environment variables ONLY: no agent config file is written,
 // no secret is concatenated into the command line, and the env never reaches
-// disk (terminal-host keeps it in memory for the session's lifetime).
+// disk (terminal-host keeps it in memory for the session's lifetime). The one
+// exception is zcode: its terminal entry spawns zcode-cli-launcher.mjs and the
+// credential path lives entirely inside that launcher (the relay token lands as
+// the apiKey of the CLI slot's provider_config.json), so the terminal injects
+// no env for it at all.
 //
 // The env contract is imported from each launcher's exported build*Env, so the
 // panel and the launchers can never drift apart. Two pieces are copied locally
@@ -19,6 +23,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG, isVerifiedDiscoveryVersion } from "./launcher.mjs";
 import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
 import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
@@ -36,6 +41,7 @@ import {
   resolveOpencodeExecutable,
   resolveGrokExecutable,
   resolveQoderCliExecutable,
+  resolveZcodeCliExecutable,
 } from "./agent-discovery.mjs";
 
 // The resident relay on 47821 is the only credential route: the base URL is
@@ -48,8 +54,15 @@ const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 // Instance-id scheme caps, same as agent-metrics.mjs:158 (INSTANCE_ID_MAX_LEN).
 const INSTANCE_ID_MAX_LEN = 64;
 
-// 允许进终端的 CLI Agent。zcode 与 Codex 桌面端是纯 GUI 程序，不属于终端页签；
-// qoder 已有独立 CLI 形态（qodercli.exe，与环境检测同一执行体），收进白名单。
+// zcode 终端条目的拉起目标：同目录的 zcode-cli-launcher.mjs，绝对路径在模块
+// 加载时静态算出（随安装树整体移动，不吃任何环境变量）。
+const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
+
+// 允许进终端的 CLI Agent。zcode 桌面端是纯 GUI 程序，不属于终端页签；这里的
+// zcode 条目拉起的是 CLI 形态：经 zcode-cli-launcher.mjs 中转，因为 CLI 入口
+// 是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs；relay 复用、
+// 槽位同步与防物化 pin 全在 launcher 内部完成。qoder 已有独立 CLI 形态
+// （qodercli.exe，与环境检测同一执行体），同样收进白名单。
 // `name` 是显示名，与 environment-service.mjs CLIENTS 共用：页签、菜单与环境页
 // 读的是同一句。
 export const AGENT_TERMINAL_TARGETS = {
@@ -61,6 +74,9 @@ export const AGENT_TERMINAL_TARGETS = {
   opencode: { name: "OpenCode", kind: "cli", unset: [] },
   grok: { name: "Grok Build", kind: "cli", unset: ["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"] },
   qoder: { name: "Qoder", kind: "cli", unset: [] },
+  // launchArgs 即上面的 launcher 路径：zcode 的执行体解析结果是 node.exe
+  // （见 resolveZcodeTerminalExecutable），cmd /d /c node.exe <launcher> 成形。
+  zcode: { name: "ZCode", kind: "cli", unset: [], launchArgs: [ZCODE_CLI_LAUNCHER_PATH] },
 };
 
 function agentError(message, code, cause) {
@@ -134,6 +150,18 @@ function sessionInstanceId(agentId, cwd, instanceId) {
   return TERMINAL_INSTANCE_ID_FROM_SOCKET.has(agentId) ? null : terminalInstanceId(cwd, agentId);
 }
 
+// zcode 的终端形态是 launcher 拉起：真正要验证的是 CLI 入口（bin\zcode.mjs）
+// 存在，交给 cmd 的执行体则是 node.exe 本身（process.execPath 恒为绝对路径且
+// 存在，必过 resolveAgentExecutable 的检查）。agent-discovery 对默认构建路径
+// 自带 existsSync、对 ZCODE_CLI_EXECUTABLE 覆盖只验绝对路径，存在性在此一并
+// 补齐；入口解析不到返回 null，由 resolveAgentExecutable 转成 executable_missing
+// 的产品文案。
+function resolveZcodeTerminalExecutable(base) {
+  const entry = resolveZcodeCliExecutable(base);
+  if (typeof entry !== "string" || !existsSync(entry)) return null;
+  return process.execPath;
+}
+
 const EXECUTABLE_RESOLVERS = {
   claude: resolveClaudeExecutable,
   codex: resolveCodexExecutable,
@@ -143,6 +171,7 @@ const EXECUTABLE_RESOLVERS = {
   opencode: resolveOpencodeExecutable,
   grok: resolveGrokExecutable,
   qoder: resolveQoderCliExecutable,
+  zcode: resolveZcodeTerminalExecutable,
 };
 
 function resolveAgentExecutable(agentId, base) {
@@ -163,7 +192,8 @@ function resolveAgentExecutable(agentId, base) {
 
 // The env DELTA for one agent: only the keys this launch injects, built by the
 // launcher's own build*Env with an empty base so nothing depends on the
-// terminal-host's inherited environment. Keys listed in the target's `unset`
+// terminal-host's inherited environment (zcode injects nothing at all — its
+// launcher owns the env, see buildTargetEnv). Keys listed in the target's `unset`
 // come back as null — terminal-host reads null as "delete this key from the
 // inherited environment", which is how upstream real keys (a stray
 // ANTHROPIC_API_KEY, XAI's pair) are kept out of the PTY.
@@ -224,6 +254,10 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       return buildOpencodeLauncherEnv({ token, instanceId, base: {} });
     case "qoder":
       return buildQoderLauncherEnv({ token, base: {} });
+    case "zcode":
+      // env 全由 launcher 内部构造：凭证作为 apiKey 落在槽位
+      // provider_config.json，不骑环境变量，终端注入为零。
+      return {};
     default:
       throw requireTarget(agentId);
   }

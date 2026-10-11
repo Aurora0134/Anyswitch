@@ -38,7 +38,7 @@
 import { readFileSync, existsSync, mkdirSync, copyFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups, withDirectoryLock, LockTimeoutError } from "./atomic-write.mjs";
-import { AUTO_CHANNEL_KEY } from "./merge-common.mjs";
+import { AUTO_CHANNEL_KEY, readSidecar, writeSidecar } from "./merge-common.mjs";
 
 export const PERSONAL_CONFIG_FILENAME = "provider_config.json";
 export const PERSONAL_SCHEMA_VERSION = 1;
@@ -703,16 +703,30 @@ function writePersonalConfigWithBackupUnlocked(filePath, data, existing) {
  *
  * @param {string} configPath path of the injected config.json
  * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
- * @param {string[]} previousManaged prefixed ids injected by the last sync
+ * @param {string[]} previousManaged prefixed ids injected by the last sync；
+ *   sidecarPath 传入时该参数被忽略（上一轮记忆改由锁内读 sidecar 得到）
  * @param {object} [defaultModelSelection] CLI 槽位专用：只在文件本身没有
  *   defaultModelSelection 时补进文档（桌面版槽位不传，行为不变）
+ * @param {string} [sidecarPath] 与本文件同生死的 sidecar：传入后它的读
+ *   （previousManaged 的唯一来源）与写（本轮托管集合的落账）都收进同一把目录
+ *   锁——锁外读到的可能是另一轮同步的中间态，锁外落账则可能与文件终态分属两
+ *   轮，sidecar 失真会把托管条目当用户条目永久留下。不传则完全不碰 sidecar
+ *   （桌面版槽位的 sidecar 归调用方管，行为不变）。
+ * @param {string[]} [sidecarManaged] 同步成功后记进 sidecar 的托管 id 集合
+ *   （merge-common 形态：config.json 的未前缀 id，加 `_` 前缀才是本文件的规
+ *   则 id）；sidecarPath 传入时必传。
  */
-export function syncZcodePersonalConfig({ configPath, managedEntries, previousManaged = [], lockWaitMs, defaultModelSelection }) {
+export function syncZcodePersonalConfig({ configPath, managedEntries, previousManaged = [], lockWaitMs, defaultModelSelection, sidecarPath, sidecarManaged }) {
   const path = personalConfigPath(configPath);
   try {
     return withDirectoryLock(
       path,
       () => {
+        // 上一轮记忆的权威读取在锁内：锁外先读再传参，读到的可能已被另一轮同
+        // 步改写（跨进程交错时文件终态与 sidecar 终态分属两轮，正是要堵的洞）。
+        const wasManaged = sidecarPath === undefined
+          ? previousManaged
+          : readSidecar(sidecarPath).providers.map((id) => `_${id}`);
         let existing;
         try {
           existing = readPersonalConfig(path);
@@ -724,7 +738,7 @@ export function syncZcodePersonalConfig({ configPath, managedEntries, previousMa
         const { config, managed } = mergePersonalProviderConfig(
           existing,
           managedEntries,
-          previousManaged,
+          wasManaged,
           defaultModelSelection === undefined ? {} : { defaultModelSelection },
         );
         const gate = validatePersonalProviderConfig(config);
@@ -733,6 +747,12 @@ export function syncZcodePersonalConfig({ configPath, managedEntries, previousMa
         }
 
         const written = writePersonalConfigWithBackupUnlocked(path, config, existing ?? undefined);
+        // 同步成功才落账 sidecar：失败时保留上一轮记忆，下一轮退役清理才认得出
+        // 残留。文件内容未变（unchanged）也照常落账——sidecar 缺的可能正是这一
+        // 次（上一轮写完文件后崩在落账前）。
+        if (sidecarPath !== undefined) {
+          writeSidecar(sidecarPath, sidecarManaged ?? []);
+        }
         return { ...written, path, managed };
       },
       lockWaitMs === undefined ? {} : { waitMs: lockWaitMs },

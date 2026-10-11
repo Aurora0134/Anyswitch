@@ -56,7 +56,7 @@ const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder
 // 与生产 CLIENT_ENTRY_FORMS 同形的端点入口形态枚举（数据下发，徽标按它「/」连写）
 const ENTRY_FORMS = {
   claude: ["CLI", "Desktop"], codex: ["CLI", "Desktop"], opencode: ["CLI"], pi: ["CLI"],
-  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop", "Web"], zcode: ["Desktop"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
+  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop", "Web"], zcode: ["Desktop", "CLI"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
 };
 function environment() {
   return {
@@ -94,11 +94,17 @@ function environment() {
                   { kind: "cli", remoteId: "kimi", status: "found", path: "C:\\Apps\\kimi\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
                   { kind: "desktop", remoteId: "kimi-desktop", status: "found", path: "C:\\Apps\\kimi\\desktop", version: "1.0.4", versionSource: "app.asar/package.json", issue: null },
                 ]
-        : (id === "zcode" ? ["desktop"] : ["cli"]).map((kind) => ({
-          kind, remoteId: id,
-          status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
-          versionSource: "package-json", issue: null,
-        })),
+        : id === "zcode"
+          ? [
+            // 与生产同形：zcode 桌面主形态守 index 0，CLI 行 remoteId 为空（本机源码构建，无官方源）
+            { kind: "desktop", remoteId: "zcode", status: "found", path: "C:\\Apps\\zcode\\desktop", version: "2.0.0", versionSource: "package-json", issue: null },
+            { kind: "cli", remoteId: null, status: "found", path: "C:\\Apps\\zcode\\cli", version: "1.0.0", versionSource: "package-json", issue: null },
+          ]
+          : ["cli"].map((kind) => ({
+            kind, remoteId: id,
+            status: "found", path: `C:\\Apps\\${id}\\${kind}`, version: kind === "desktop" ? "2.0.0" : "1.0.0",
+            versionSource: "package-json", issue: null,
+          })),
     })),
   };
 }

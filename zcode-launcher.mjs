@@ -27,7 +27,7 @@ import {
 export { ZCODE_CLI_SLOT_DIRNAME, ZCODE_CLI_SIDECAR_FILENAME, zcodeCliSlotDir, zcodeCliSidecarPath } from "./zcode-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { syncZcodePersonalConfig, defaultCliModelSelection, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile } from "./merge-common.mjs";
 import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function zcodeConfigPath(base = process.env) {
@@ -80,7 +80,7 @@ export async function startOpenAIRelay(options = {}) {
   return { port, token: deps.token, close, reused };
 }
 
-export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null, cliSlot = {}) {
+export async function writeZcodeConfig(store, port, token, sidecarRoot, configPath = ZCODE_CONFIG_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null, cliSlot = {}, options = {}) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "zcode");
   // Last channel deleted: what the previous sync wrote into the client config
@@ -142,6 +142,13 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
   } catch (error) {
     cli = { ok: false, skipped: false, unchanged: true, reason: error.message };
   }
+  // cli.ok === false 不翻整体 ok 是有意设计（保留），但不留痕的话周期同步里
+  // CLI 槽位持续失败（锁占用、文件不可读）对外界完全不可见——给一条 warn，
+  // 日志通道由调用方经 options.log 注入（desktop 分支的失败靠返回值由调用方记，
+  // 这里没有现成通道）。
+  if (cli.ok === false) {
+    options.log?.warn?.(`warning: zcode CLI slot sync failed: ${cli.reason ?? "unknown error"}`);
+  }
   return { ...writeResult, personal, cli };
 }
 
@@ -181,6 +188,9 @@ export function loadZcodeCliBuiltinModelRules(cliEntry, io = { existsSync, readF
  * to the desktop config.json. 跳过不报错的两种情形：槽位目录不存在（CLI 从未
  * 启用）、CLI 未安装（resolveExecutable 找不到执行体）。同步失败（锁占用、文
  * 件不可读、校验不过）返回 { ok: false }，文件保持原样。
+ * sidecar（zcode-cli-sidecar.json）的读写不在这里做：previousManaged 的读取
+ * 与本轮托管集合的落账都随 syncZcodePersonalConfig 收进槽位目录锁，跨进程交
+ * 错时文件终态与 sidecar 终态始终同属一轮。
  *
  * options 是测试注入口：base（环境）、io（existsSync/readFileSync）、
  * resolveExecutable、builtinModelRules（跳过文件定位直接给规则）、lockWaitMs。
@@ -197,11 +207,11 @@ export function syncZcodeCliSlot({ sidecarRoot, managedEntries, managedIds, ...o
   if (typeof cliEntry !== "string" || cliEntry.length === 0) {
     return { ok: true, skipped: true, reason: "zcode CLI is not installed" };
   }
-  const sidecarPath = zcodeCliSidecarPath(sidecarRoot);
-  const previousManaged = readSidecarFile(sidecarPath).providers;
+  // 早退只看「有没有活可干」：退役清理的对象是槽位文件里的托管条目，文件不
+  // 存在就没有可清的（sidecar 残留不挡路——文件回归的那一轮会在锁内读到它并
+  // 顺手落账修正）。previousManaged 不再锁外读 sidecar。
   if (
     (managedIds?.length ?? 0) === 0 &&
-    previousManaged.length === 0 &&
     !io.existsSync(join(slotDir, PERSONAL_CONFIG_FILENAME))
   ) {
     return { ok: true, skipped: true, reason: "no Anyswitch providers with models" };
@@ -213,13 +223,12 @@ export function syncZcodeCliSlot({ sidecarRoot, managedEntries, managedIds, ...o
     // configPath 只需落在槽位目录内。
     configPath: join(slotDir, "config.json"),
     managedEntries,
-    previousManaged: previousManaged.map((id) => `_${id}`),
+    sidecarPath: zcodeCliSidecarPath(sidecarRoot),
+    sidecarManaged: managedIds ?? [],
     defaultModelSelection: defaultCliModelSelection(managedEntries, builtinModelRules) ?? undefined,
     ...(options.lockWaitMs === undefined ? {} : { lockWaitMs: options.lockWaitMs }),
   });
   if (!personal.ok) return { ok: false, skipped: false, unchanged: true, reason: personal.reason };
-  // 同步成功才更新 sidecar：失败时保留上一轮记忆，下一轮退役清理才认得出残留。
-  writeSidecarFile(sidecarPath, managedIds ?? []);
   return { ok: true, skipped: false, unchanged: personal.unchanged, backupPath: personal.backupPath, path: personal.path };
 }
 

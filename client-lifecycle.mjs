@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
 // npm 全局安装的客户端：本地检测（environment-service）读的就是这些包在 npm
-// 全局目录里的落点，所以“更新/安装”也走 npm，两个方向口径一致。zcode 是纯桌面
-// 应用，没有对应的 npm 包，在这里缺席即代表“面板不代管它的更新”；qoder 的 CLI
-// 执行体是原生二进制，更新走下面 NATIVE_CLIENTS 的自升级通道。
+// 全局目录里的落点，所以“更新/安装”也走 npm，两个方向口径一致。zcode 的桌面端是
+// 图形程序、CLI 是本机源码构建，都没有对应的 npm 包，在这里缺席即代表“面板不代管
+// 它的更新”；qoder 的 CLI 执行体是原生二进制，更新走下面 NATIVE_CLIENTS 的自升级通道。
 export const CLIENT_PACKAGES = Object.freeze({
   claude: "@anthropic-ai/claude-code",
   codex: "@openai/codex",

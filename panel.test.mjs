@@ -8388,7 +8388,7 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
       const root = mkTestDir("anyswitch-agent-route-root-");
       const { router, calls } = agentTerminalRouter({ root });
 
-      const unknown = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "zcode", cwd });
+      const unknown = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "no-such-agent", cwd });
       await router.handle(unknown.req, unknown.res);
       assert.equal(unknown.res.statusCode, 400);
       assert.match(unknown.json().error, /[\u4e00-\u9fff]/, "中文产品文案，不是机器码");
@@ -8499,7 +8499,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let activeTerminalPreviewId = null;
       let terminalXterm = null;
       let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
-      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"];
+      const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
       let terminalAddMenuSelection = "";
@@ -8526,7 +8526,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       { id: "claude", name: "Claude Code", installations: [{ status: "found", kind: "cli", path: "C:\\claude.exe" }] },
       { id: "codex", name: "Codex", installations: [{ status: "not_found", kind: "cli" }] },
       { id: "kimi", name: "Kimi Code", installations: [{ status: "found", kind: "cli", path: "C:\\kimi.cmd" }] },
-      { id: "zcode", name: "ZCode", installations: [{ status: "found", kind: "desktop" }] },
+      { id: "zcode", name: "ZCode", installations: [{ status: "found", kind: "cli", path: "C:\\zcode\\bin\\zcode.mjs" }, { status: "found", kind: "desktop" }] },
       { id: "qoder", name: "Qoder", installations: [{ status: "found", kind: "cli" }] },
     ],
   };
@@ -8534,7 +8534,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   it("已安装清单：只收白名单内 status=found 且 kind=cli 的端点", async () => {
     const { sandbox, els, log } = addMenuSandbox({ environment: ENVIRONMENT });
     const agents = await sandbox.load();
-    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi", "qoder"], "未安装/桌面 GUI/白名单外一律不进菜单");
+    assert.deepEqual(agents.map((a) => a.id), ["claude", "kimi", "zcode", "qoder"], "未安装（status≠found）不进菜单；zcode 桌面端是 GUI，但 CLI 形态经 launcher 进终端");
     assert.equal(log.environmentFetches, 1);
     await sandbox.load();
     assert.equal(log.environmentFetches, 1, "60s TTL 内不重复探测");
@@ -8544,7 +8544,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Claude Code"));
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Kimi Code"));
     assert.ok(els.terminalAddMenuList.innerHTML.includes("Qoder"), "qoder 已有 CLI 形态，进新建菜单");
-    assert.ok(!els.terminalAddMenuList.innerHTML.includes("ZCode"), "zcode 纯桌面 GUI，仍不进菜单");
+    assert.ok(els.terminalAddMenuList.innerHTML.includes("ZCode"), "zcode 桌面端是 GUI，但 CLI 形态经 launcher 进终端，进新建菜单");
     assert.equal(els.terminalAddMenuNote.hidden, true, "有可用 agent 时不显示提示");
   });
 

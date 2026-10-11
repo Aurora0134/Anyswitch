@@ -1205,3 +1205,144 @@ describe("防乒乓：客户端 canonical 重写后的同步", () => {
     }
   });
 });
+
+describe("syncZcodePersonalConfig 的 sidecar 锁内读写", () => {
+  function readDoc(dir) {
+    return JSON.parse(readFileSync(join(dir, PERSONAL_CONFIG_FILENAME), "utf8"));
+  }
+
+  // 一条不带 relay 指纹的「上一轮托管」规则：退役它只能靠 sidecar 记忆
+  // （wasManaged），指纹兜底（isAnyswitchRule）认不出它——sidecar 读取是否
+  // 真的进了锁，靠它来证明。
+  function seedGhostRule(dir) {
+    writeFileSync(
+      join(dir, PERSONAL_CONFIG_FILENAME),
+      JSON.stringify({
+        schemaVersion: 1,
+        config: {
+          providerConfigRules: {
+            providerRules: [
+              { providerId: "_gone-api", config: { group: "standard-personal", personalModelIds: ["m-ghost"], modelOrder: ["m-ghost"] } },
+            ],
+          },
+          modelConfigRules: { providerModelRules: [], manualProviderModelRules: [] },
+        },
+      }),
+    );
+  }
+
+  it("sidecarPath 传入时 previousManaged 锁内取自 sidecar，本轮托管集合随成功落账", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const sidecarPath = join(root, "zcode-cli-sidecar.json");
+      seedGhostRule(root);
+      writeFileSync(sidecarPath, JSON.stringify({ providers: ["gone-api"] }));
+
+      const fresh = injectedEntry({ providerId: "poke-api", models: { "m-alpha": {} } });
+      // previousManaged 参数故意不传（默认 []）：_gone-api 能退役，唯一的可能
+      // 是锁内读到了 sidecar。
+      const result = syncZcodePersonalConfig({
+        configPath,
+        managedEntries: { [fresh.prefixedId]: fresh.entry },
+        sidecarPath,
+        sidecarManaged: ["poke-api"],
+      });
+      assert.equal(result.ok, true, result.reason);
+
+      const doc = readDoc(root);
+      assert.deepEqual(
+        doc.config.providerConfigRules.providerRules.map((r) => r.providerId),
+        ["_poke-api"],
+        "sidecar 记着的上一轮托管条目随本轮退役",
+      );
+      assert.deepEqual(
+        JSON.parse(readFileSync(sidecarPath, "utf8")),
+        { providers: ["poke-api"] },
+        "本轮托管集合在同一个锁内落账",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("不传 sidecarPath 时不动 sidecar（桌面版槽位形态不变）", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const sidecarPath = join(root, "zcode-cli-sidecar.json");
+      seedGhostRule(root);
+      const sidecarBefore = JSON.stringify({ providers: ["gone-api"] });
+      writeFileSync(sidecarPath, sidecarBefore);
+
+      const fresh = injectedEntry({ providerId: "poke-api", models: { "m-alpha": {} } });
+      const result = syncZcodePersonalConfig({ configPath, managedEntries: { [fresh.prefixedId]: fresh.entry }, previousManaged: [] });
+      assert.equal(result.ok, true, result.reason);
+
+      // 对照组：sidecar 没参与时，无指纹的 _gone-api 只能当用户条目保留——
+      // 上面那个用例的退役因此只能是锁内 sidecar 读取的功劳。
+      assert.ok(
+        readDoc(root).config.providerConfigRules.providerRules.some((r) => r.providerId === "_gone-api"),
+      );
+      assert.equal(readFileSync(sidecarPath, "utf8"), sidecarBefore, "sidecar 一个字节都不动");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("坏掉的 sidecar 按空记忆 fail-open，同步成功后被修写成本轮托管集合", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const sidecarPath = join(root, "zcode-cli-sidecar.json");
+      writeFileSync(sidecarPath, "{ not json");
+
+      const fresh = injectedEntry({ providerId: "poke-api", models: { "m-alpha": {} } });
+      const result = syncZcodePersonalConfig({
+        configPath,
+        managedEntries: { [fresh.prefixedId]: fresh.entry },
+        sidecarPath,
+        sidecarManaged: ["poke-api"],
+      });
+      assert.equal(result.ok, true, result.reason, "sidecar 读坏不拖垮 config 本体");
+      assert.ok(readDoc(root).config.providerConfigRules.providerRules.some((r) => r.providerId === "_poke-api"));
+      assert.deepEqual(JSON.parse(readFileSync(sidecarPath, "utf8")), { providers: ["poke-api"] }, "坏 sidecar 被修写");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("目录锁被占时失败收场，文件与 sidecar 都保持原样", () => {
+    const root = tmpRoot();
+    try {
+      const configPath = join(root, "config.json");
+      const sidecarPath = join(root, "zcode-cli-sidecar.json");
+      const sidecarBefore = JSON.stringify({ providers: ["old-api"] });
+      writeFileSync(sidecarPath, sidecarBefore);
+
+      // 客户端正握着目录锁（live owner pid）——与 writePersonalConfigWithBackup
+      // 的锁占用测试同一摆法。
+      const personalPath = join(root, PERSONAL_CONFIG_FILENAME);
+      const lockPath = `${personalPath}.lock`;
+      mkdirSync(lockPath);
+      writeFileSync(
+        join(lockPath, "owner-4321-1-zcode.json"),
+        `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "zcode" })}\n`,
+      );
+
+      const fresh = injectedEntry({ providerId: "poke-api", models: { "m-alpha": {} } });
+      const refused = syncZcodePersonalConfig({
+        configPath,
+        managedEntries: { [fresh.prefixedId]: fresh.entry },
+        sidecarPath,
+        sidecarManaged: ["poke-api"],
+        lockWaitMs: 120,
+      });
+      assert.equal(refused.ok, false);
+      assert.equal(existsSync(personalPath), false, "锁占用时不写文件");
+      assert.equal(readFileSync(sidecarPath, "utf8"), sidecarBefore, "锁占用时不动 sidecar——本轮托管集合不落账");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

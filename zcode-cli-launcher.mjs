@@ -51,8 +51,7 @@ import {
   deriveAnyswitchChannel,
   zcodeCliSidecarPath,
 } from "./zcode-merge-config.mjs";
-import { readSidecar, writeSidecar } from "./merge-common.mjs";
-import { syncZcodePersonalConfig } from "./zcode-personal-config.mjs";
+import { syncZcodePersonalConfig, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
 import { acquireRelayOrNative, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 import { defaultZcodeCliExecutable, resolveZcodeCliExecutable } from "./agent-discovery.mjs";
 export { resolveZcodeCliExecutable };
@@ -160,28 +159,38 @@ export function buildZcodeCliNativeEnv({ base = {}, builtinConfigPath }) {
 // only the personal document reaches disk. The sidecar is shared with the
 // periodic sync (zcode-launcher.mjs syncZcodeCliSlot): it lives next to the
 // desktop sidecar as <sidecarRoot>\zcode-cli-sidecar.json, derived here from
-// the slot dir's parent; tests pass it explicitly.
+// the slot dir's parent; tests pass it explicitly. sidecar 的读（previousManaged
+// 的唯一来源）与写（本轮托管集合的落账）都随 syncZcodePersonalConfig 收进槽位
+// 目录锁——两个写入者（启动时同步与周期同步）跨进程交错时，文件终态与
+// sidecar 终态始终同属一轮。
 export async function writeZcodeCliConfig(store, port, token, slotRoot, sidecarPath = zcodeCliSidecarPath(dirname(slotRoot))) {
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "zcode");
   // Same early-exit contract as the desktop writeZcodeConfig: a machine with no
   // channels and no prior injection must not get files created on every launch.
-  const previousManaged = readSidecar(sidecarPath).providers;
-  if (Object.keys(managedProviders).length === 0 && !autoChannel && previousManaged.length === 0) {
+  // 「上一轮有没有注入」看槽位文件是否存在——退役清理的对象就在文件里；sidecar
+  // 不再锁外读（残留不挡路：文件回归的那一轮会在锁内读到它并顺手落账修正）。
+  if (
+    Object.keys(managedProviders).length === 0 &&
+    !autoChannel &&
+    !existsSync(join(slotRoot, PERSONAL_CONFIG_FILENAME))
+  ) {
     return { ok: true, unchanged: true, reason: "no Anyswitch providers with models" };
   }
   // catalog 传 null：推理强度 variants 不进入 provider_config.json 的规则
   // （personalRuleFromProviderEntry 只取 contextWindow），带上只是死重。
-  const { config, managed } = mergeZcodeConfig({ provider: {} }, managedProviders, port, token, previousManaged, autoChannel, null);
+  // 合并基座是空 config.json（槽位没有 config.json），previousManaged 对它没
+  // 有清理对象，传 []——退役清理全靠 provider_config.json 层的 sidecar 记忆。
+  const { config, managed } = mergeZcodeConfig({ provider: {} }, managedProviders, port, token, [], autoChannel, null);
   const personal = syncZcodePersonalConfig({
     // syncZcodePersonalConfig 取 dirname(configPath) 落 provider_config.json，
     // configPath 只需落在槽位目录内。
     configPath: join(slotRoot, "config.json"),
     managedEntries: Object.fromEntries(managed.map((id) => [`_${id}`, config.provider[`_${id}`]])),
-    previousManaged: previousManaged.map((id) => `_${id}`),
+    sidecarPath,
+    sidecarManaged: managed,
   });
   if (!personal.ok) return { ok: false, unchanged: true, reason: personal.reason };
-  writeSidecar(sidecarPath, managed);
   return { ok: true, unchanged: personal.unchanged, backupPath: personal.backupPath };
 }
 

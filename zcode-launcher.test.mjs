@@ -504,4 +504,41 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("cli.ok === false 不翻整体 ok，但向注入的 log 通道发一条 warn", async () => {
+    const dir = mkTestDir("zcode-cli-slot-");
+    try {
+      const slotDir = zcodeCliSlotDir(dir);
+      mkdirSync(slotDir);
+      const cliSlot = { ...plantCliTree(dir), lockWaitMs: 120 };
+
+      // CLI 正握着槽位目录锁（live owner pid）：cli 分支必败，桌面版照常。
+      const lockPath = `${join(slotDir, "provider_config.json")}.lock`;
+      mkdirSync(lockPath);
+      writeFileSync(
+        join(lockPath, "owner-4321-1-zcode.json"),
+        `${JSON.stringify({ pid: process.pid, createdAt: Date.now(), token: "zcode" })}\n`,
+      );
+
+      const warns = [];
+      const log = { warn: (line) => warns.push(line) };
+      const refused = await writeZcodeConfig(
+        twoChannelStore(), 47821, "tok", dir, join(dir, "config.json"), null, false, cliSlot, { log },
+      );
+      assert.equal(refused.ok, true, "CLI 槽位失败不拖垮桌面版的同步结论");
+      assert.equal(refused.cli.ok, false);
+      assert.equal(warns.length, 1, "cli 分支失败必须留痕");
+      assert.match(warns[0], /zcode CLI slot sync failed/);
+
+      // 锁释放后重跑：cli 分支成功，不再发 warn。
+      rmSync(lockPath, { recursive: true, force: true });
+      const synced = await writeZcodeConfig(
+        twoChannelStore(), 47821, "tok", dir, join(dir, "config.json"), null, false, cliSlot, { log },
+      );
+      assert.equal(synced.cli.ok, true, synced.cli.reason);
+      assert.equal(warns.length, 1, "cli 分支成功时不发 warn");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

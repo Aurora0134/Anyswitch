@@ -112,6 +112,7 @@ npm test
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode 参数]` |
 | Pi | OpenAI | `node pi-launcher.mjs [pi 参数]` |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode 参数]` |
+| ZCode CLI | OpenAI | `node zcode-cli-launcher.mjs [zcode 参数]` |
 | DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh 参数]` |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` |
@@ -188,7 +189,7 @@ npm test
 
 ## 终端页：刷新不再洗掉屏幕
 
-面板里内置虚拟终端，能直接拉起本机已装好的 8 个 CLI agent（ZCode 与 Codex 桌面端是图形程序，不在此列）。凭据只走会话环境变量，不写进任何终端配置文件。
+面板里内置虚拟终端，能直接拉起本机已装好的 9 个 CLI agent（ZCode 与 Codex 桌面端是图形程序，不在此列；ZCode 的 CLI 形态现在经启动器进虚拟终端）。凭据只走会话环境变量，不写进任何终端配置文件（ZCode CLI 例外：它不从环境变量收凭据，relay 令牌作为 Anyswitch 自有槽位配置里的密钥下发）。
 
 这一版的核心修复是回放。实测同一条真实会话：旧路径回放 470,208 字节，换来 **0 行**可回滚历史；新的「宿主渲染镜像、按行重发」用 65,131 字节换回 **1583 行**。整页刷新后，你仍停在终端页，仍停在原来的页签。
 
@@ -258,7 +259,7 @@ xcopy skills\anyswitch-preset "%USERPROFILE%\.kimi-code\skills\anyswitch-preset"
 - **没有安装器。** 0.6.5 以源码发行。升级有了面板内形态：关于页「检查更新 → 立即更新（下载）→ 应用更新」两步——下载只把 release tag 拉进本地仓库（不动当前运行），应用才换装工作树并重启面板与 relay（见「升级」一节）；首次安装与换机仍是源码部署。
 - **端口是固定的。** 47820 / 47821 / 47822 写死在代码里，面板里改不了。
 - **虚拟终端还是预览。** 它要单独装依赖，panel-host 重启会带走当时的终端进程。
-- **有三条真实路径只验到代码与测试层。** 8 个 CLI 的面板内启动、虚拟模型在九个客户端选择器里的逐一显示、关于页的真实安装按钮——都对着真实文件与官方发布格式核过，但没有替你在每台客户端上按完一遍。
+- **有三条真实路径只验到代码与测试层。** 9 个 CLI 的面板内启动、虚拟模型在九个客户端选择器里的逐一显示、关于页的真实安装按钮——都对着真实文件与官方发布格式核过，但没有替你在每台客户端上按完一遍。
 - **Claude 桌面端的菜单过滤是客户端自己的。** 我们能给发现目录、别名视图和严格路由，不能替它拆掉编译进去的品牌黑名单。
 
 0.6.5 是正式版，但它不是 1.0 的成品：上面那几条边界仍然成立，虚拟终端仍是预览功能。对「渠道散落在九个配置文件里」的人来说，这一版已经够用；要拿它上生产流水线之前，先照上面那几条边界对一遍。
@@ -304,7 +305,7 @@ Anyswitch/
 ├── panel-ui/                   # 面板页面、样式和脚本
 ├── launch.mjs                  # relay 生产装配与请求转发
 ├── launcher.mjs                # Claude Code 启动器
-├── *-launcher.mjs              # 其他八个 agent 的启动器
+├── *-launcher.mjs              # 其他 agent 的启动器，共 9 个（ZCode 桌面与 CLI 各一）
 ├── agent-sync.mjs              # 托管渠道同步到各 agent 配置
 ├── agent-metrics.mjs           # 进程、请求、实例和看板读数
 ├── session-scan.mjs            # 各 agent 的会话读取与适配
@@ -420,6 +421,7 @@ Four steps to your first request:
 | OpenCode | OpenAI | `node opencode-launcher.mjs [opencode args]` |
 | Pi | OpenAI | `node pi-launcher.mjs [pi args]` |
 | ZCode | OpenAI | `node zcode-launcher.mjs [zcode args]` |
+| ZCode CLI | OpenAI | `node zcode-cli-launcher.mjs [zcode args]` |
 | DeepSeek Harness | OpenAI | `node dsh-launcher.mjs [dsh args]` |
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` |
@@ -490,7 +492,7 @@ The last safety net sits on the provider itself: a `baseURL` plus several `fallb
 
 ### The terminal page: refresh no longer wipes your screen
 
-The panel embeds a virtual terminal that can launch the 8 installed CLI agents directly (ZCode and Codex Desktop are graphical apps and stay out). Credentials travel only through session environment variables — nothing is written into terminal config files.
+The panel embeds a virtual terminal that can launch the 9 installed CLI agents directly (ZCode and Codex Desktop are graphical apps and stay out; ZCode's CLI form now enters the terminal through its launcher). Credentials travel only through session environment variables — nothing is written into terminal config files (ZCode CLI excepted: it takes no credential from the environment; the relay token ships as the key in Anyswitch's own config slot).
 
 The core fix this release is replay. Measured on the same real session: the old path replayed 470,208 bytes into **0 lines** of scrollback; the new "host-side rendered mirror, replayed line by line" turns 65,131 bytes into **1583 lines**. After a full page refresh you are still on the terminal page, still on the same tab.
 
@@ -550,7 +552,7 @@ This is not implemented yet. It is written here so you know the direction — an
 - **No installer.** 0.6.5 ships as source. Upgrading has an in-panel form: the About page's "Check for updates → Update now (download) → Apply update" two-step flow — downloading only pulls the release tag into the local repository (the running install is untouched), and applying is what swaps the working tree and restarts the relay and panel host (see "Upgrading" below); first installs and machine moves are still source deployments.
 - **Ports are fixed.** 47820 / 47821 / 47822 are constants in the code and cannot be changed from the panel.
 - **The virtual terminal is still preview.** It needs its own dependencies, and a panel-host restart takes the running PTYs with it.
-- **Three real paths are verified only to code and test level.** Panel-launched sessions for the 8 CLIs, virtual models appearing in all nine clients' pickers, and the real install buttons on the About page — each checked against real files and official release formats, but not clicked through on every client for you.
+- **Three real paths are verified only to code and test level.** Panel-launched sessions for the 9 CLIs, virtual models appearing in all nine clients' pickers, and the real install buttons on the About page — each checked against real files and official release formats, but not clicked through on every client for you.
 - **Claude Desktop's menu filter belongs to the client.** We provide discovery catalogs, the alias view and strict routing; the brand blacklist compiled into their app is not ours to remove.
 
 0.6.5 is a stable release, but it is not a 1.0 product: the boundaries above still hold, and the virtual terminal is still a preview feature. If your pain is "channels scattered across nine config files", this release is already enough; before putting it on a production pipeline, walk the boundaries above once.
@@ -592,7 +594,7 @@ Anyswitch/
 ├── panel-ui/                   # panel pages, styles and scripts
 ├── launch.mjs                  # relay assembly and request forwarding
 ├── launcher.mjs                # Claude Code launcher
-├── *-launcher.mjs              # launchers for the other eight agents
+├── *-launcher.mjs              # launchers for the other agents — 9 in total (ZCode has both a desktop and a CLI launcher)
 ├── agent-sync.mjs              # syncs managed channels into agent configs
 ├── agent-metrics.mjs           # processes, requests, instances and board readings
 ├── session-scan.mjs            # session readers and adapters per agent

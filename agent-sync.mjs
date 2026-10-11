@@ -139,7 +139,7 @@ export async function syncAllAgentConfigs({
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
   try {
-    const zResult = await writeZcodeConfig(store, port, token, root, zcodeConfigPath(base));
+    const zResult = await writeZcodeConfig(store, port, token, root, zcodeConfigPath(base), undefined, null, {}, { log: logger });
     results.zcode = zResult;
     if (!zResult.ok) {
       logger?.warn?.(`zcode config.json not updated: ${zResult.reason ?? "unknown"}`);

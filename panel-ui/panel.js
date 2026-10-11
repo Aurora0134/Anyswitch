@@ -5665,7 +5665,7 @@ async function api(method, path, body) {
 
   // 「+」新建菜单：先选一个已安装的 CLI Agent（或空白终端），再填工作目录。
   // agent 清单取自环境检测（60s 缓存）；拉取失败只留空白终端，不挡住新建。
-  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder"];
+  const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
   let terminalAddMenuAgents = [];
   let terminalAddMenuAgentsAt = 0;
   let terminalAddMenuSelection = "";
