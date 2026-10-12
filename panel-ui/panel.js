@@ -8368,6 +8368,16 @@ async function api(method, path, body) {
     return last;
   }
 
+  // 全选（照 skills）：集合 = 过滤后全部可见行；焦点若不在新集合内，回退到集合
+  // 最后一员（与 reconcilePresetsSelection 同口径），详情卡随之换内容。
+  function selectAllVisiblePresets() {
+    presetsSelection.clear();
+    visiblePresets().forEach((p) => presetsSelection.add(p.id));
+    if (!presetsSelection.has(presetsFocusId)) presetsFocusId = presetsLastSelectionId();
+    renderPresetsList();
+    renderPresetDetail();
+  }
+
   // 注入计数口径：预设 enabled 且不在该端点 off 列表 = 计 1（总开关不影响计数）。
   // 详情卡「已注入」徽标更严格：还需总开关 enabled。
   function presetOffOn(preset, epId) {
@@ -8532,12 +8542,27 @@ async function api(method, path, body) {
       ]);
     });
     $("presetsList").addEventListener("scroll", hideSkillsContextMenu);
-    // Esc 收起右键菜单（skills 的全局 keydown 只在 skills/store 视图生效，这里补 presets）
+    // 键盘（照 skills/store 范式）：Esc 先收右键菜单、多选时清空选中；Ctrl/⌘+A
+    // 全选可见行。表单与确认弹窗都复用 skillsModal，弹窗开着时不劫持；输入框内
+    // 不劫持 Ctrl+A（过滤框要正常打字选词）。
     document.addEventListener("keydown", (e) => {
       if ($("presetsView").hidden) return;
-      if (e.key === "Escape" && $("skillsCtxMenu")) {
-        hideSkillsContextMenu();
+      if ($("skillsModal").classList.contains("show")) return;
+      if (e.key === "Escape") {
+        if ($("skillsCtxMenu")) {
+          hideSkillsContextMenu();
+          e.preventDefault();
+        } else if (presetsSelection.size) {
+          presetsSelection.clear();
+          presetsFocusId = null;
+          renderPresetsList();
+          renderPresetDetail();
+        }
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "a" || e.key === "A")) {
+        const tag = e.target && e.target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA") return;
         e.preventDefault();
+        selectAllVisiblePresets();
       }
     });
     // 全局设置卡：总开关（预设功能 enabled）

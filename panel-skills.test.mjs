@@ -679,6 +679,24 @@ describe("panel.html skills change diff highlighting", () => {
     assert.match(init, /presetsSelection\.clear\(\);\s*\n\s*presetsSelection\.add\(id\);\s*\n\s*presetsFocusId = id;/);
   });
 
+  it("presets keyboard completes the skills paradigm: Esc clears selection, Ctrl+A selects visible", () => {
+    const init = extractFn("initPresetsTab", "");
+    // 弹窗（表单与确认都复用 skillsModal）开着时不劫持键盘
+    assert.match(init, /if \(\$\("skillsModal"\)\.classList\.contains\("show"\)\) return;/);
+    // Esc：先收右键菜单；否则多选时清空集合与焦点（与 skills/store 同语义）
+    assert.match(init, /e\.key === "Escape"[\s\S]*?else if \(presetsSelection\.size\) \{\s*\n\s*presetsSelection\.clear\(\);\s*\n\s*presetsFocusId = null;/);
+    // Ctrl/⌘+A：输入框/文本域内不劫持，其余全选可见行
+    assert.match(init, /\(e\.ctrlKey \|\| e\.metaKey\) && \(e\.key === "a" \|\| e\.key === "A"\)[\s\S]*?tag === "INPUT" \|\| tag === "TEXTAREA"[\s\S]*?selectAllVisiblePresets\(\);/);
+  });
+
+  it("selectAllVisiblePresets rebuilds the set from the filtered list and re-focuses", () => {
+    const fn = extractFn("selectAllVisiblePresets", "");
+    // 集合 = 过滤后全部可见行；焦点不在新集合内时回退集合最后一员（与 reconcile 同口径）
+    assert.match(fn, /presetsSelection\.clear\(\);\s*\n\s*visiblePresets\(\)\.forEach\(\(p\) => presetsSelection\.add\(p\.id\)\);/);
+    assert.match(fn, /if \(!presetsSelection\.has\(presetsFocusId\)\) presetsFocusId = presetsLastSelectionId\(\);/);
+    assert.match(fn, /renderPresetsList\(\);\s*\n\s*renderPresetDetail\(\);/);
+  });
+
   it("confirmDeleteSelectedPresets lists, serially deletes, toasts, refreshes once", () => {
     const fn = extractFn("confirmDeleteSelectedPresets", "");
     assert.match(fn, /presets\.filter\(\(p\) => presetsSelection\.has\(p\.id\)\)/);
