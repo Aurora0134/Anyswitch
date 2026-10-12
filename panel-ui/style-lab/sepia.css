@@ -1,0 +1,480 @@
+/* ============================================================
+   sepia —— 暖纸（细线质感基座 + 暖调 UI 色）
+   白纸 / 墨底背景保持中性不变，暖意全部落在 UI 色上：
+   赭橙 accent 承担选中态/关键按钮/链接，并与绿 ok、琥珀 warn、
+   砖红 danger、靛蓝 pool 拉开色相差分，避免全局单一暖色；
+   1px 细线承担结构，阴影近乎取消，圆角收敛 2–4px。
+   ============================================================ */
+
+/* 1) 亮色 token 全集 */
+:root[data-style="sepia"] {
+  color-scheme: light;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 背景与文字：保持中性，不加暖 */
+  --bg: #ffffff;
+  --bg-page: #faf9f7;
+  --surface: #ffffff;
+  --surface-sunken: #f6f5f3;
+  --surface-hover: #f0efec;
+  --surface-glass: rgba(255, 255, 255, 0.94);
+
+  --text: #141414;
+  --text-2: #3d3d3a;
+  --text-3: #6b6b66;
+  --text-4: #9c9c96;
+
+  --border: #e4e2de;
+  --border-strong: #c9c6c0;
+  --divider: #edebe7;
+
+  /* 暖调 UI 色：赭橙 accent，与文字/语义色明确拉开 */
+  --accent: #9e4a1b;
+  --accent-soft: #f8ede3;
+  --accent-border: #deb696;
+
+  --ok: #2e7d46;
+  --ok-soft: #eff5ec;
+  --ok-border: #d0e1cf;
+
+  --warn: #97690e;
+  --warn-soft: #faf3e0;
+  --warn-border: #e8d5a8;
+
+  --danger: #b23a29;
+  --danger-soft: #faefeb;
+  --danger-border: #edcec4;
+
+  --pool: #3f5a9a;
+  --pool-soft: #e8ecf5;
+  --pool-border: #bfcbe4;
+
+  --spark-line: #9e4a1b;
+  --spark-fill: rgba(158, 74, 27, 0.08);
+  --danger-glow: rgba(178, 58, 41, 0.16);
+
+  --shadow-xs: 0 1px 0 rgba(20, 20, 20, 0.03);
+  --shadow-sm: 0 1px 2px rgba(20, 20, 20, 0.04);
+  --shadow-md: 0 4px 12px rgba(20, 20, 20, 0.06);
+  --shadow-lg: 0 12px 32px rgba(20, 20, 20, 0.10);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #aa5420 0%, #7d3510 100%);
+  --accent-glow: 0 1px 2px rgba(125, 53, 16, 0.20);
+
+  /* 拖拽重排：赭橙 accent，暖色柔光 + 更缓的柔和缓动 */
+  --store-drag-accent: var(--accent);
+  --store-drag-glow: 0 2px 10px color-mix(in srgb, var(--accent) 30%, transparent);
+  --store-drag-ease: cubic-bezier(0.25, 0.8, 0.4, 1);
+
+  /* 控制台与终端屏幕：亮色取暖纸面 */
+  --console-bg: #faf6ec;
+  --console-toolbar-bg: #f0e8d5;
+  --console-border: #e0d3b3;
+  --console-fg: #3d3424;
+  --console-muted: #8a7a5c;
+  --console-hover-bg: #e7dcc3;
+  --console-hover-fg: #2b2318;
+  --console-live: #3d8b62;
+  --console-info: #6b7f94;
+  --console-warn: #a3762b;
+  --console-error: #c05a44;
+
+  --terminal-bg: #faf6ec;
+  --terminal-fg: #3d3424;
+  --terminal-cursor: #78350f;
+  --terminal-selection: #e7d9b8;
+  --terminal-muted: #8a7a5c;
+}
+
+/* 2) 暗色 token 全集（显式 dark） */
+:root[data-style="sepia"][data-theme="dark"] {
+  color-scheme: dark;
+  --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* 背景与文字：保持中性，不加暖 */
+  --bg: #0c0c0b;
+  --bg-page: #090908;
+  --surface: #111110;
+  --surface-sunken: #0d0d0c;
+  --surface-hover: #1a1a19;
+  --surface-glass: rgba(12, 12, 11, 0.94);
+
+  --text: #f2f2ef;
+  --text-2: #cfcfc9;
+  --text-3: #8f8f89;
+  --text-4: #61615c;
+
+  --border: #262624;
+  --border-strong: #3a3a37;
+  --divider: #1c1c1a;
+
+  /* 暖调 UI 色：暖杏 accent，与文字/语义色明确拉开 */
+  --accent: #e59c5e;
+  --accent-soft: rgba(229, 156, 94, 0.12);
+  --accent-border: #7a5433;
+
+  --ok: #5cb584;
+  --ok-soft: rgba(92, 181, 132, 0.12);
+  --ok-border: #2a5238;
+
+  --warn: #d4a446;
+  --warn-soft: rgba(212, 164, 70, 0.12);
+  --warn-border: #6b501e;
+
+  --danger: #db6650;
+  --danger-soft: rgba(219, 102, 80, 0.14);
+  --danger-border: #6d3024;
+
+  --pool: #9db2e8;
+  --pool-soft: rgba(157,178,232,0.10);
+  --pool-border: #46536e;
+
+  --spark-line: #e59c5e;
+  --spark-fill: rgba(229, 156, 94, 0.10);
+  --danger-glow: rgba(219, 102, 80, 0.28);
+
+  --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.50);
+
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
+  --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+  /* 控制台与终端屏幕：暗色收为暖炭 */
+  --console-bg: #120d08;
+  --console-toolbar-bg: #181209;
+  --console-border: #241c12;
+  --console-fg: #d9cdb8;
+  --console-muted: #9c8e76;
+  --console-hover-bg: #241c12;
+  --console-hover-fg: #f2e9da;
+  --console-live: #5cb584;
+  --console-info: #8593a6;
+  --console-warn: #d4a446;
+  --console-error: #db6650;
+
+  --terminal-bg: #120d08;
+  --terminal-fg: #d9cdb8;
+  --terminal-cursor: #f2e9da;
+  --terminal-selection: #4a3a24;
+  --terminal-muted: #9c8e76;
+}
+
+/* 3) 暗色 token 全集（跟随系统）——内容与 2) 完全相同 */
+@media (prefers-color-scheme: dark) {
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --font-sans: "Helvetica Neue", Helvetica, Arial, "Noto Sans SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans", sans-serif;
+    --font-mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace;
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+    /* 背景与文字：保持中性，不加暖 */
+    --bg: #0c0c0b;
+    --bg-page: #090908;
+    --surface: #111110;
+    --surface-sunken: #0d0d0c;
+    --surface-hover: #1a1a19;
+    --surface-glass: rgba(12, 12, 11, 0.94);
+
+    --text: #f2f2ef;
+    --text-2: #cfcfc9;
+    --text-3: #8f8f89;
+    --text-4: #61615c;
+
+    --border: #262624;
+    --border-strong: #3a3a37;
+    --divider: #1c1c1a;
+
+    /* 暖调 UI 色：暖杏 accent，与文字/语义色明确拉开 */
+    --accent: #e59c5e;
+    --accent-soft: rgba(229, 156, 94, 0.12);
+    --accent-border: #7a5433;
+
+    --ok: #5cb584;
+    --ok-soft: rgba(92, 181, 132, 0.12);
+    --ok-border: #2a5238;
+
+    --warn: #d4a446;
+    --warn-soft: rgba(212, 164, 70, 0.12);
+    --warn-border: #6b501e;
+
+    --danger: #db6650;
+    --danger-soft: rgba(219, 102, 80, 0.14);
+    --danger-border: #6d3024;
+
+    --pool: #9db2e8;
+    --pool-soft: rgba(157,178,232,0.10);
+    --pool-border: #46536e;
+
+    --spark-line: #e59c5e;
+    --spark-fill: rgba(229, 156, 94, 0.10);
+    --danger-glow: rgba(219, 102, 80, 0.28);
+
+    --shadow-xs: 0 1px 0 rgba(0, 0, 0, 0.30);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.40);
+    --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.50);
+
+    --radius-sm: 2px;
+    --radius-md: 3px;
+    --radius-lg: 4px;
+    --accent-gradient: linear-gradient(135deg, #eda768 0%, #d98f4a 100%);
+    --accent-glow: 0 1px 2px rgba(0, 0, 0, 0.50);
+
+    /* 控制台与终端屏幕：暗色收为暖炭（与显式 dark 同值） */
+    --console-bg: #120d08;
+    --console-toolbar-bg: #181209;
+    --console-border: #241c12;
+    --console-fg: #d9cdb8;
+    --console-muted: #9c8e76;
+    --console-hover-bg: #241c12;
+    --console-hover-fg: #f2e9da;
+    --console-live: #5cb584;
+    --console-info: #8593a6;
+    --console-warn: #d4a446;
+    --console-error: #db6650;
+
+    --terminal-bg: #120d08;
+    --terminal-fg: #d9cdb8;
+    --terminal-cursor: #f2e9da;
+    --terminal-selection: #4a3a24;
+    --terminal-muted: #9c8e76;
+  }
+}
+
+/* ============================================================
+   皮肤覆盖规则（不触碰布局几何，只换皮肤）
+   ============================================================ */
+
+/* 顶部导航：去玻璃模糊，纯平纸面 + 1px 细线 */
+:root[data-style="sepia"] header.site-head {
+  background: var(--surface);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* 品牌图标：渐变收敛为赭橙实心块，方角 */
+:root[data-style="sepia"] .brand-icon {
+  background: var(--accent-gradient);
+  border-radius: 4px;
+  box-shadow: var(--accent-glow);
+}
+:root[data-style="sepia"] .brand-text h1 {
+  font-family: Georgia, "Times New Roman", "Songti SC", "SimSun", serif;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+/* 卡片：细线结构、阴影归零、方角 */
+:root[data-style="sepia"] .panel-card {
+  border-radius: 4px;
+  box-shadow: none;
+}
+:root[data-style="sepia"] .card-title {
+  letter-spacing: -0.02em;
+}
+
+/* 遥测四宫格、会话列表与骨架条：方角 + 编辑栏题字距 */
+:root[data-style="sepia"] .telemetry-card,
+:root[data-style="sepia"] .session-table-wrapper,
+:root[data-style="sepia"] .alert-box,
+:root[data-style="sepia"] .empty-hint,
+:root[data-style="sepia"] .sessions-skel {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .telemetry-label {
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+}
+:root[data-style="sepia"] .telemetry-num {
+  letter-spacing: -0.03em;
+}
+
+/* TTFT 指示灯：去光晕，只留色点 */
+:root[data-style="sepia"] .lamp-green,
+:root[data-style="sepia"] .lamp-yellow,
+:root[data-style="sepia"] .lamp-red {
+  box-shadow: none;
+}
+
+/* 徽章：小方角 + 排版字距；accent 徽章半透明赭橙，与 neutral 明确区分 */
+:root[data-style="sepia"] .badge {
+  border-radius: 2px;
+  letter-spacing: 0.04em;
+}
+:root[data-style="sepia"] .badge-accent {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* 按钮：方角、去投影、赭橙主按钮 */
+:root[data-style="sepia"] .btn {
+  border-radius: 3px;
+  box-shadow: none;
+  letter-spacing: 0.01em;
+}
+:root[data-style="sepia"] .btn-mini {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .icon-btn {
+  border-radius: 3px;
+  box-shadow: none;
+}
+
+/* toggle：选中为赭橙滑轨（token），仅收圆角无关，保持原样 */
+
+/* seg-control / view-tabs：方角分段 */
+:root[data-style="sepia"] .seg-control,
+:root[data-style="sepia"] .view-tabs {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .seg-btn,
+:root[data-style="sepia"] .view-tab {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .seg-btn[aria-checked="true"],
+:root[data-style="sepia"] .view-tab.active {
+  box-shadow: none;
+}
+
+/* toast / modal / 浮层：方角、细线、轻投影 */
+:root[data-style="sepia"] .toast {
+  border-radius: 3px;
+}
+:root[data-style="sepia"] .modal-card {
+  border-radius: 4px;
+}
+/* Modal 入场：160ms 淡入 + 轻缩放（仅 opacity/transform，不改几何） */
+@keyframes sepia-modal-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+:root[data-style="sepia"] .modal-overlay.show .modal-card {
+  animation: sepia-modal-in 160ms var(--ease-out);
+}
+:root[data-style="sepia"] .modal-number,
+:root[data-style="sepia"] .skills-path-input,
+:root[data-style="sepia"] .skills-repo-path,
+:root[data-style="sepia"] .skills-dup-warn,
+:root[data-style="sepia"] .skills-diff-list,
+:root[data-style="sepia"] .sd-file,
+:root[data-style="sepia"] .skills-body-view .md-code {
+  border-radius: 2px;
+}
+:root[data-style="sepia"] .skills-ctx-menu {
+  border-radius: 3px;
+}
+
+/* Skills 视图：分区小标题用宽字距制造编辑栏题感 */
+:root[data-style="sepia"] .skills-group-title {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+/* 可折叠分组标题保持 12.5px（双类提升特异性压过上面的 10px），宽字距风格保留 */
+:root[data-style="sepia"] .skills-group-title.skills-anomaly-fold {
+  font-size: 12.5px;
+}
+:root[data-style="sepia"] .skills-list-row.selected::before {
+  font-family: var(--font-mono);
+}
+:root[data-style="sepia"] .skills-anomaly-task.selected::before {
+  font-family: var(--font-mono);
+}
+
+/* Skills 视图：收藏钮点亮用赭橙反白填充（亮=橙底纸字，暗随 token 反转），不用金色 */
+:root[data-style="sepia"] .skills-fav-btn.on {
+  background: var(--accent); color: var(--bg); border-color: var(--accent);
+}
+:root[data-style="sepia"] .skills-fav-star { color: var(--text); }
+
+/* ---- 暗色专属修正（accent 反转为暖杏，硬性白字处需反色）---- */
+:root[data-style="sepia"][data-theme="dark"] .btn-primary {
+  color: #1e1509;
+}
+:root[data-style="sepia"][data-theme="dark"] .brand-icon {
+  color: #1e1509;
+}
+:root[data-style="sepia"][data-theme="dark"] .toggle input:checked + .slider::before {
+  background: #1e1509;
+  box-shadow: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .btn-primary {
+    color: #1e1509;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .brand-icon {
+    color: #1e1509;
+  }
+  :root[data-style="sepia"]:not([data-theme="light"]):not([data-theme="dark"]) .toggle input:checked + .slider::before {
+    background: #1e1509;
+    box-shadow: none;
+  }
+}
+
+/* Store 刷新状态小字：斜体铅字感，窄波扫过点亮赭橙 accent */
+:root[data-style="sepia"] .store-refresh-status { font-style: italic; letter-spacing: 0.02em; }
+:root[data-style="sepia"] .store-refresh-status .srs-ch { animation-name: srs-pulse-sepia; }
+@keyframes srs-pulse-sepia {
+  0%, 50%, 100% { color: var(--text-2); opacity: 0.55; }
+  25% { color: var(--accent); opacity: 1; }
+}
+
+/* 使用统计热力图：档位向纸底（--bg）混入而非 surface，暖纸上更柔不浮白；顶档同步降发光感（88% 压暗一档） */
+:root[data-style="sepia"] {
+  --heat-1: color-mix(in srgb, var(--accent) 26%, var(--bg));
+  --heat-2: color-mix(in srgb, var(--accent) 46%, var(--bg));
+  --heat-3: color-mix(in srgb, var(--accent) 68%, var(--bg));
+  --heat-4: color-mix(in srgb, var(--accent) 86%, var(--bg));
+}
+
+/* ---- 占用条（ctx-meter）与单预设长度徽标：圆角收敛 + 只留 1px 细线 + over 斜纹收细放慢。
+   纯皮肤：不碰几何，空态与 over 告警斜纹交还基座。 ---- */
+/* 条体：圆角收敛到该主题的 3px，去 base 的玻璃内阴影，只留 1px 细线 */
+:root[data-style="sepia"] .ctx-bar {
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+:root[data-style="sepia"] .ctx-bar .ctx-fill {
+  border-radius: 2px;
+  box-shadow: none;
+}
+/* 刻痕改用细线色，与主题「1px 线承担结构」同语法 */
+:root[data-style="sepia"] .ctx-bar::after {
+  background-image:
+    linear-gradient(90deg, transparent calc(30% - 0.5px), var(--border-strong) calc(30% - 0.5px) calc(30% + 0.5px), transparent calc(30% + 0.5px)),
+    linear-gradient(90deg, transparent calc(60% - 0.5px), var(--border-strong) calc(60% - 0.5px) calc(60% + 0.5px), transparent calc(60% + 0.5px));
+}
+:root[data-style="sepia"] .ctx-meter[data-tier="empty"] .ctx-bar::before { border-radius: 2px; }
+:root[data-style="sepia"] .ctx-bar .ctx-tick { background: var(--text-4); opacity: 0.9; }
+/* over 档：斜纹 tile 收细、相位流动放慢到暖纸的节奏（不改几何，只改渐变参数）。
+   条纹色必须是**常数**：--danger-soft 在暖纸亮色是近白、暗色是 danger 本身 @14%，
+   拿它当条纹色在暗色等于「同色盖同色」，动画照跑但零对比。固定暖白两模式都比底色浅。 */
+:root[data-style="sepia"] .ctx-meter[data-tier="over"] .ctx-fill {
+  background-image: linear-gradient(45deg,
+    rgba(253, 243, 234, 0.34) 25%, transparent 25%, transparent 50%,
+    rgba(253, 243, 234, 0.34) 50%, rgba(253, 243, 234, 0.34) 75%,
+    transparent 75%, transparent);
+  background-size: 10px 10px;
+  animation: ctxOverSepia 1.1s linear infinite;
+}
+@keyframes ctxOverSepia { 0% { background-position: 0 0; } 100% { background-position: 10px 0; } }
+:root[data-style="sepia"] .ctx-meter[data-tier="over"] .ctx-bar {
+  box-shadow: inset 0 0 0 1px var(--danger-border);
+}
+/* 读数：字重从 700 收到 600，暖纸靠细线不靠重墨 */
+:root[data-style="sepia"] .ctx-total { font-weight: 600; }
+/* 徽标：2px 方角 + 细线 */
+:root[data-style="sepia"] .ctx-preset-badge { border-radius: var(--radius-sm); }

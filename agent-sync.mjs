@@ -1,0 +1,373 @@
+// Agent config sync coordinator and store file watcher.
+//
+// When the Anyswitch global store (`%LOCALAPPDATA%\Anyswitch\store.json`) changes
+// (e.g. providers/models added, rotated, or deleted via CLI, webUI, or refresh),
+// this module automatically updates downstream coding agent configurations
+// (ZCode, DSH, Pi, etc.) so agents immediately pick up store mutations
+// without requiring manual relay restarts or agent launcher re-invocations.
+
+import { watch, existsSync } from "node:fs";
+import { dirname } from "node:path";
+import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
+import { writeZcodeConfig, zcodeConfigPath } from "./zcode-launcher.mjs";
+import { writeDshConfig, dshSettingsPath } from "./dsh-launcher.mjs";
+import { writePiModels, piModelsPath } from "./pi-launcher.mjs";
+import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
+import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
+import { writeCodexConfig, codexConfigPath } from "./codex-merge-config.mjs";
+import { writeOpencodeConfig, opencodeConfigPath } from "./opencode-launcher.mjs";
+import { writeGrokConfig, grokConfigPath } from "./grok-merge-config.mjs";
+
+// --- 同步结果的机器可读摘要 -----------------------------------------------
+// 同步子进程除了人看的日志，还在 stdout 上打一行定长前缀的 JSON 摘要，面板靠它
+// 区分「整次没做成」和「个别端点没写进去」：八个端点里挂掉一个，不该让同步按钮
+// 整颗报红。端点名与字段名固定，前端按名字取用。
+export const AGENT_ENDPOINTS = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
+export const SYNC_RESULT_PREFIX = "__ANYSWITCH_SYNC_RESULT__";
+
+// Codex 的模型目录每次同步都整份重写，而只改模型不动配置文本时 unchanged 为真，
+// 光看 unchanged 会把真正重写过目录的那一次漏掉。目录状态由 codex 写入器给出，
+// 取值固定五个：written / unchanged / skipped / user-pointer / removed，其中
+// written 就是「这次重写过」。字段缺失或状态不认识时安静跳过，不记这条日志。
+const CODEX_CATALOG_REWRITTEN = new Set(["written"]);
+
+export function codexCatalogLogMessage(catalog) {
+  if (!catalog || typeof catalog !== "object") return null;
+  if (!CODEX_CATALOG_REWRITTEN.has(catalog.state)) return null;
+  return Number.isFinite(catalog.entries)
+    ? `Codex 模型列表已更新，共 ${catalog.entries} 个模型`
+    : "Codex 模型列表已更新";
+}
+
+// 把 syncAllAgentConfigs 的结果压成面板要的形状。ok 为假（仓库数据读不出来）时
+// 没有逐端点结果可言，两个名单都留空，原因走 error。
+export function buildSyncSummary(result) {
+  const results = result?.results ?? {};
+  if (!result?.ok) return { ok: false, synced: [], failed: [] };
+  const synced = [];
+  const failed = [];
+  const known = new Set(AGENT_ENDPOINTS);
+  // 先按固定顺序走已知端点，再兜住将来新增的名字，保证名单顺序稳定。
+  for (const name of [...AGENT_ENDPOINTS, ...Object.keys(results).filter((n) => !known.has(n))]) {
+    const entry = results[name];
+    if (!entry) continue; // 本轮没跑到：既不算成功也不算失败
+    (entry.ok === true ? synced : failed).push(name);
+  }
+  const summary = { ok: true, synced, failed };
+  const catalog = results.codex?.catalog;
+  if (catalog && typeof catalog === "object") {
+    const picked = {};
+    if (typeof catalog.state === "string") picked.state = catalog.state;
+    if (Number.isFinite(catalog.entries)) picked.entries = catalog.entries;
+    if (typeof catalog.reason === "string") picked.reason = catalog.reason;
+    if (Object.keys(picked).length > 0) summary.codexCatalog = picked;
+  }
+  return summary;
+}
+
+export function formatSyncSummaryLine(summary) {
+  return `${SYNC_RESULT_PREFIX}${JSON.stringify(summary)}`;
+}
+
+// 从子进程 stdout 里捞那一行摘要。找不到、JSON 坏了、形状不对都返回 null：调用
+// 方退回「只看退出码」的老路径，绝不因为解析问题让同步按钮报错。
+export function parseSyncSummaryLine(text) {
+  if (typeof text !== "string") return null;
+  let payload = null;
+  for (const candidate of text.split(/\r?\n/)) {
+    const at = candidate.indexOf(SYNC_RESULT_PREFIX);
+    if (at === -1) continue;
+    payload = candidate.slice(at + SYNC_RESULT_PREFIX.length);
+    break;
+  }
+  if (payload === null) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const names = (value) => (Array.isArray(value) ? value.filter((v) => typeof v === "string") : []);
+  const summary = { ok: parsed.ok === true, synced: names(parsed.synced), failed: names(parsed.failed) };
+  if (parsed.codexCatalog && typeof parsed.codexCatalog === "object" && !Array.isArray(parsed.codexCatalog)) {
+    summary.codexCatalog = parsed.codexCatalog;
+  }
+  return summary;
+}
+
+/**
+ * Synchronize all supported coding agent configurations against the current store.
+ *
+ * @param {object} options
+ * @param {object} [options.store] - Parsed store (if omitted, loaded via loadStore)
+ * @param {number} options.port - Relay listening port (e.g. 47821)
+ * @param {string} options.token - Relay authentication token
+ * @param {string} options.root - Anyswitch root path (%LOCALAPPDATA%\Anyswitch)
+ * @param {object} [options.logger] - Logger instance
+ * @param {object} [options.base] - Process environment or base paths
+ * @returns {Promise<object>} Results of each agent sync
+ */
+export async function syncAllAgentConfigs({
+  store: maybeStore,
+  port,
+  token,
+  root,
+  logger = null,
+  base = process.env,
+}) {
+  let store = maybeStore;
+  if (!store) {
+    const loaded = loadStore(defaultStorePaths(root));
+    if (!loaded.ok) {
+      logger?.warn?.("syncAllAgentConfigs: store unreadable; skipping agent configs sync");
+      return { ok: false, reason: "store-unreadable" };
+    }
+    store = loaded.store;
+  }
+
+  const results = {
+    zcode: null,
+    dsh: null,
+    pi: null,
+    kimi: null,
+    qoder: null,
+    codex: null,
+    opencode: null,
+    grok: null,
+  };
+
+  // 1. ZCode config sync (~/.zcode/v2/config.json)
+  try {
+    const zResult = await writeZcodeConfig(store, port, token, root, zcodeConfigPath(base), undefined, null, {}, { log: logger });
+    results.zcode = zResult;
+    if (!zResult.ok) {
+      logger?.warn?.(`zcode config.json not updated: ${zResult.reason ?? "unknown"}`);
+    } else if (!zResult.unchanged) {
+      logger?.info?.("zcode config.json synced");
+    }
+  } catch (err) {
+    results.zcode = { ok: false, error: err.message };
+    logger?.error?.(`zcode config sync failed: ${err.message}`);
+  }
+
+  // 2. DSH profile patches (~/.dsh/profiles/<name>/cordis.patch.yml). 0.1.7
+  // retired the home-level settings.yaml; each existing profile reads its own.
+  try {
+    const dshResult = await writeDshConfig(store, port, token, root, dshSettingsPath(base));
+    results.dsh = dshResult;
+    if (!dshResult.ok) {
+      logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);
+    } else if (!dshResult.unchanged) {
+      logger?.info?.("dsh profile patches synced");
+    }
+  } catch (err) {
+    results.dsh = { ok: false, error: err.message };
+    logger?.warn?.(`dsh config sync skipped: ${err.message}`);
+  }
+
+  // 3. Pi models.json sync (~/.pi/agent/models.json)
+  try {
+    const piResult = await writePiModels(store, port, root, piModelsPath(base));
+    results.pi = piResult;
+    if (!piResult.ok) {
+      logger?.warn?.(`pi models.json not updated: ${piResult.reason ?? "unknown"}`);
+    } else if (!piResult.unchanged) {
+      logger?.info?.("pi models.json synced");
+    }
+  } catch (err) {
+    results.pi = { ok: false, error: err.message };
+    logger?.warn?.(`pi config sync skipped: ${err.message}`);
+  }
+
+  // 4. Kimi Code config.toml sync (~/.kimi-code/config.toml)
+  try {
+    const kimiResult = await writeKimiConfig(store, port, token, root, kimiConfigPath(base));
+    results.kimi = kimiResult;
+    if (!kimiResult.ok) {
+      logger?.warn?.(`kimi config.toml not updated: ${kimiResult.reason ?? "unknown"}`);
+    } else if (!kimiResult.unchanged) {
+      logger?.info?.("kimi config.toml synced");
+    }
+    // The per-model level list is written either way; this only reports that
+    // kimi's own global switch stayed out of Anyswitch's hands.
+    if (kimiResult.thinking === "absent") {
+      logger?.info?.("kimi 配置里没有全局思考开关，已跳过接管：模型档位照常可选，未选档时按 kimi 自己的默认走。");
+    } else if (kimiResult.thinking === "invalid") {
+      logger?.warn?.("kimi 全局思考开关的值无法识别，已跳过接管：请打开 kimi 设置确认该项后重新同步。");
+    }
+  } catch (err) {
+    results.kimi = { ok: false, error: err.message };
+    logger?.warn?.(`kimi config sync skipped: ${err.message}`);
+  }
+
+  // 5. Qoder settings.json sync (~/.qoder/settings.json)
+  try {
+    const qoderResult = await writeQoderConfig(store, port, token, root, qoderSettingsPath(base.USERPROFILE ?? ""));
+    results.qoder = qoderResult;
+    if (!qoderResult.ok) {
+      logger?.warn?.(`qoder settings.json not updated: ${qoderResult.reason ?? "unknown"}`);
+    } else if (!qoderResult.unchanged) {
+      logger?.info?.("qoder settings.json synced");
+    }
+  } catch (err) {
+    results.qoder = { ok: false, error: err.message };
+    logger?.warn?.(`qoder config sync skipped: ${err.message}`);
+  }
+
+  // 6. Codex config.toml sync (~/.codex/config.toml)
+  try {
+    const codexResult = await writeCodexConfig(store, port, token, root, codexConfigPath(base));
+    results.codex = codexResult;
+    if (!codexResult.ok) {
+      logger?.warn?.(`codex config.toml not updated: ${codexResult.reason ?? "unknown"}`);
+    } else if (!codexResult.unchanged) {
+      logger?.info?.("codex config.toml synced");
+    }
+    // 目录整份重写时单独记一条：只换模型不改配置文本的情况下 unchanged 为真，
+    // 上面的闸门会把这一次的目录更新整个吞掉。
+    const catalogLine = codexCatalogLogMessage(codexResult.catalog);
+    if (catalogLine) logger?.info?.(catalogLine);
+  } catch (err) {
+    results.codex = { ok: false, error: err.message };
+    logger?.warn?.(`codex config sync skipped: ${err.message}`);
+  }
+
+  // 7. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
+  try {
+    const ocResult = await writeOpencodeConfig(store, port, root, opencodeConfigPath(base));
+    results.opencode = ocResult;
+    if (!ocResult.ok) {
+      logger?.warn?.(`opencode.json not updated: ${ocResult.reason ?? "unknown"}`);
+    } else if (!ocResult.unchanged) {
+      logger?.info?.("opencode.json synced");
+    }
+  } catch (err) {
+    results.opencode = { ok: false, error: err.message };
+    logger?.warn?.(`opencode config sync skipped: ${err.message}`);
+  }
+
+  // 8. Grok Build config.toml sync (~/.grok/config.toml)
+  try {
+    const grokResult = await writeGrokConfig(store, port, token, root, grokConfigPath(base));
+    results.grok = grokResult;
+    if (!grokResult.ok) {
+      logger?.warn?.(`grok config.toml not updated: ${grokResult.reason ?? "unknown"}`);
+    } else if (!grokResult.unchanged) {
+      logger?.info?.("grok config.toml synced");
+    }
+  } catch (err) {
+    results.grok = { ok: false, error: err.message };
+    logger?.warn?.(`grok config sync skipped: ${err.message}`);
+  }
+
+  return { ok: true, results };
+}
+
+const DEFAULT_DEBOUNCE_MS = 250;
+
+/**
+ * Create a debounced file watcher for store.json that triggers agent sync on store changes.
+ *
+ * @param {object} options
+ * @param {string} options.storeFile - Path to store.json
+ * @param {Function} options.onStoreChange - Async callback when store.json changes
+ * @param {object} [options.logger] - Logger instance
+ * @param {number} [options.debounceMs] - Debounce delay in milliseconds
+ * @returns {object} { close: Function, trigger: Function }
+ */
+export function createStoreWatcher({
+  storeFile,
+  onStoreChange,
+  logger = null,
+  debounceMs = DEFAULT_DEBOUNCE_MS,
+}) {
+  let watcher = null;
+  let debounceTimer = null;
+  let closed = false;
+  let inFlight = false;
+  let queued = false;
+
+  async function handleChange() {
+    if (closed) return;
+    if (inFlight) {
+      queued = true;
+      return;
+    }
+    inFlight = true;
+    try {
+      do {
+        queued = false;
+        try {
+          await onStoreChange();
+        } catch (err) {
+          logger?.error?.(`store watcher change handler error: ${err.message}`);
+        }
+      } while (queued && !closed);
+    } finally {
+      inFlight = false;
+      if (queued && !closed) {
+        handleChange().catch(() => {});
+      }
+    }
+  }
+
+  function scheduleChange() {
+    if (closed) return;
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+    }
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      handleChange().catch(() => {});
+    }, debounceMs);
+    debounceTimer.unref?.();
+  }
+
+  function isStoreRelated(filename) {
+    if (!filename) return true;
+    const lower = String(filename).toLowerCase();
+    if (lower === "store.json" || lower.endsWith("store.json")) return true;
+    // atomicWriteFile writes store.json.<uuid>.tmp then renameSync onto store.json.
+    // On Windows the directory watcher often reports only the .tmp create/rename,
+    // never a filename of exactly "store.json". Treat those siblings as store writes.
+    if (lower.startsWith("store.json.") && (lower.endsWith(".tmp") || lower.includes(".tmp."))) return true;
+    if (lower.startsWith("store.json.") && lower.endsWith(".tmp")) return true;
+    return /\.tmp$/i.test(String(filename)) && /store\.json/i.test(String(filename));
+  }
+
+  const watchDir = dirname(storeFile);
+  if (existsSync(watchDir)) {
+    try {
+      watcher = watch(watchDir, { persistent: false }, (eventType, filename) => {
+        if (isStoreRelated(filename)) {
+          scheduleChange();
+        }
+      });
+      watcher.unref?.();
+    } catch (err) {
+      logger?.warn?.(`createStoreWatcher: could not watch directory ${watchDir}: ${err.message}`);
+    }
+  }
+
+  return {
+    close() {
+      closed = true;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      if (watcher) {
+        try {
+          watcher.close();
+        } catch {
+          /* ignore */
+        }
+        watcher = null;
+      }
+    },
+    trigger() {
+      return handleChange();
+    },
+  };
+}

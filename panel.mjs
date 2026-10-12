@@ -1,0 +1,3289 @@
+// Control-panel HTTP routes. Mounted on both:
+//   - panel-host.mjs (127.0.0.1:47820) — the desktop control plane; stays up
+//     when the relay is stopped. This is the ONLY place the panel page is
+//     served, and the only place that owns panel-host lifecycle.
+//   - relay-host.mjs (127.0.0.1:47821) — data plane. It mounts the same router
+//     for its API surface (per-launch relays POST session/report here), but its
+//     `/panel` document 302s to 47820: two live copies of the page on two ports
+//     would mean lifecycle buttons acting on whichever process happens to serve
+//     them, and a relay-restart request handled BY the relay is self-kill.
+//
+// Authentication: NONE. Loopback binding is the network boundary (non-127
+// peers already 403). Writes (start/stop/restart, settings, autostart,
+// session report) additionally require Origin/Referer on :47820 or
+// :47821 plus header X-AnySwitch-Panel: 1, so a random page on this machine
+// cannot POST those routes. Credentials are never echoed. The relay Bearer
+// token still guards /v1/* and /openai/* and is not pasted into the browser.
+
+import { readFileSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
+import { enableAutostart, disableAutostart, isAutostartEnabled, enableWatchdogAutostart, disableWatchdogAutostart, isWatchdogAutostartEnabled } from "./autostart.mjs";
+import { spawnWatchdog, stopWatchdog, probeWatchdog } from "./agent-watchdog.mjs";
+import { loadSettings, saveSettings, defaultSettingsPath, createLogLevelGate } from "./relay-settings.mjs";
+import { logLevelAllows } from "./logger.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { getRelayStatus, startRelay, stopRelay, restartRelay } from "./relay-process-manager.mjs";
+import { spawnAgentSync } from "./agent-sync-spawn.mjs";
+import { readSyncStatus, writeSyncStatus, syncStatusFromResult } from "./sync-status.mjs";
+import { createSkillsService, pickFile, pickFolder } from "./agent-skills.mjs";
+import { createDataBundleService } from "./data-bundle.mjs";
+import { createPromptsService } from "./agent-prompts.mjs";
+import { createPromptsInjector } from "./agent-prompts-inject.mjs";
+import { createStoreService } from "./store-service.mjs";
+import { createUsageJournal, dayKey } from "./usage-journal.mjs";
+import { attributeTerminalSessions, filterTerminalRequestRows } from "./terminal-attribution.mjs";
+import { AGENT_TERMINAL_TARGETS, AGENT_RELAY_PORT, buildAgentSessionLaunch } from "./agent-session-env.mjs";
+import { createUsageStats, clampStatDays, stripWirePrefix } from "./usage-stats.mjs";
+import { spawnPanelHostRestartHelper } from "./panel-host-restart-helper.mjs";
+import {
+  clientUpdateJournalDir,
+  clientUpdateStatus,
+  listClientUpdateRuns,
+  readClientUpdateRun,
+  reapDeadClientUpdateRuns,
+  runningClientUpdate,
+  spawnClientUpdateWorker,
+  writeClientUpdateRun,
+} from "./client-update-journal.mjs";
+import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
+import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns } from "./session-scan.mjs";
+import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
+
+const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
+const APP_INFO = Object.freeze({
+  version: APP_VERSION,
+  platform: process.platform,
+  nodeVersion: process.version,
+  prerelease: APP_VERSION.includes("-"),
+});
+
+const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
+const REPO_PANEL_CSS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css");
+const REPO_PANEL_JS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js");
+const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
+const REPO_XTERM_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "lib", "xterm.js");
+const REPO_XTERM_CSS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "css", "xterm.css");
+const REPO_XTERM_FIT_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
+const REPO_XTERM_UNICODE11_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-unicode11", "lib", "addon-unicode11.js");
+const REPO_XTERM_WEBGL_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-webgl", "lib", "addon-webgl.js");
+// The one place the panel page lives. relay-host's copy of this router sends
+// document requests here instead of serving a second, indistinguishable copy.
+const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
+// Panel self-restart timing: how long after the response has flushed we let the
+// socket settle before exiting, and the ceiling for the case where the flush
+// never completes because the client already hung up.
+const PANEL_HOST_EXIT_GRACE_MS = 150;
+const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
+
+// GET /api/settings decorates its response with watchdog drift visibility
+// (registry task present vs watchdog process answering). Both probes cost real
+// time — a PowerShell Get-ScheduledTask spawn plus an HTTP liveness probe —
+// and the panel page fetches /api/settings on every load to hydrate the 抗截断
+// toggle, so paying them per GET made that toggle wait on the probes.
+// The snapshot is stale-while-revalidate: once a probe round has settled,
+// GETs return instantly (stale values past the TTL) while one shared
+// background round refreshes. POST followAgent invalidates so the next GET
+// re-probes synchronously and never reports pre-toggle drift.
+const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
+
+// 请求日志路由（/panel/api/stats/logs）的枚举与钳制口径：range 档位 → 含当天
+// 往前推的天数（all = 90 天 retention 窗口）；status 档位同时是 errKind 枚举
+// 子集（ok 单独映射 ok=true）；pageSize 白名单。非法值一律回落默认。
+const LOG_RANGES = ["today", "7d", "30d", "all"];
+const LOG_RANGE_BACK_DAYS = { today: 0, "7d": 6, "30d": 29, all: 89 };
+const LOG_STATUSES = ["all", "ok", "http_429", "http_5xx", "http_4xx", "network", "timeout"];
+const LOG_PAGE_SIZES = [20, 50, 100];
+
+// All legitimate panel bodies are KB-scale JSON (settings, aliases, store
+// writes). Anything past 1MB is a malfunctioning or hostile client, so the
+// body reader cuts it off instead of buffering it. Same class shape as the
+// BodyTooLargeError in server.mjs / openai-server.mjs,
+// defined locally so the panel does not drag in the relay's dep chain.
+const MAX_BODY_BYTES = 1024 * 1024;
+
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super("request body too large");
+    this.name = "BodyTooLargeError";
+    this.statusCode = 413;
+  }
+}
+
+// Prompts tab facade: pairs the prompts data plane (agent-prompts.mjs) with
+// the injector (agent-prompts-inject.mjs). Every mutation is followed by a
+// full syncAll across all endpoints; per-endpoint failures land in the
+// `sync` snapshot served by getState and never fail the mutation itself.
+// `homeDir` is injectable so tests can keep all writes inside temp dirs.
+export function createPromptsPanelService({ base = process.env, homeDir } = {}) {
+  const data = createPromptsService({ base });
+  const injector = createPromptsInjector({ ...(homeDir ? { homeDir } : {}) });
+  let lastSync = {};
+  const mutateAndSync = (result) => {
+    lastSync = injector.syncAll((endpointId) => data.resolveForEndpoint(endpointId));
+    return result;
+  };
+  return {
+    getState() {
+      return {
+        ...data.getState(),
+        endpoints: injector.listEndpoints().map(({ id, label, hotReload, targetRel }) => ({ id, label, hotReload, targetRel })),
+        sync: lastSync,
+      };
+    },
+    setMaster: (enabled) => mutateAndSync(data.setMaster(enabled)),
+    createPreset: (fields) => mutateAndSync(data.createPreset(fields)),
+    updatePreset: (fields) => mutateAndSync(data.updatePreset(fields)),
+    deletePreset: (id) => mutateAndSync(data.deletePreset(id)),
+    setPresetEnabled: (args) => mutateAndSync(data.setPresetEnabled(args)),
+    reorderPresets: (order) => mutateAndSync(data.reorderPresets(order)),
+    setOverride: (args) => {
+      if (!injector.hasEndpoint(args?.endpointId)) {
+        const error = new Error(`未知端点: ${args?.endpointId}`);
+        error.statusCode = 400;
+        throw error;
+      }
+      return mutateAndSync(data.setOverride(args));
+    },
+  };
+}
+
+function sendJson(res, status, body) {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(text),
+  });
+  res.end(text);
+}
+
+// One in-flight probe round (registry + liveness, parallel) shared by every
+// waiter; consecutive rounds wait for the previous one to finish so refreshes
+// never pile up. Each round's resolved value becomes the new snapshot.
+function createWatchdogProbeRound(isWatchdogAutostartEnabledFn, probeWatchdogFn) {
+  const inFlight = { p: null };
+  return () => {
+    if (inFlight.p) return inFlight.p;
+    const round = (async () => {
+      try {
+        return await Promise.all([isWatchdogAutostartEnabledFn(), probeWatchdogFn()]);
+      } finally {
+        // Microtask delay so a waiter that stores the promise BEFORE the round
+        // settles still finds it (avoiding a synchronous restart loop between
+        // round N+1 and the settle microtask of round N).
+        await Promise.resolve();
+        inFlight.p = null;
+      }
+    })();
+    inFlight.p = round;
+    return round;
+  };
+}
+
+// Per-router state machine: { at, value } | null. Serves GETs instantly once
+// primed; fires (at most) one shared background round when the TTL lapses.
+// `watchdogSnapshotTtlMs` is injectable for tests; 0 = every GET revalidates.
+function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, ttlMs) {
+  const runProbeRound = createWatchdogProbeRound(isWatchdogAutostartEnabledFn, probeWatchdogFn);
+  let snap = null;
+
+  function refresh() {
+    const p = runProbeRound();
+    p.then(([autostart, running]) => {
+      snap = { at: Date.now(), value: { autostart, running } };
+    }).catch(() => {
+      // Probe round rejected (shouldn't — both probes are fail-soft) — keep
+      // serving the old snapshot.
+    });
+    return p;
+  }
+
+  return {
+    async get() {
+      if (snap) {
+        const expired = Date.now() - snap.at >= ttlMs;
+        if (!expired) return snap.value;
+        // SWR: hand back the stale value now; refresh once in the background.
+        // The rejection handler inside refresh keeps old values; this catch
+        // only stops the raw round from surfacing as unhandledRejection.
+        refresh().catch(() => {});
+        return snap.value;
+      }
+      // Cold path: wait for the settling prewarm round (or our own if none).
+      // Fail-soft mirrors the old inline probes: a rejected round (both real
+      // probes resolve instead; only mocked deps could throw) serves the
+      // legacy nulls and is NOT cached — the next GET re-probes.
+      try {
+        const [autostart, running] = await refresh();
+        return { autostart, running };
+      } catch {
+        return { autostart: null, running: null };
+      }
+    },
+    invalidate() { snap = null; },
+    // Kick the first probe round without waiting for it (panel-host calls
+    // this at startup); the settled value becomes the initial snapshot.
+    prewarm() { refresh().catch(() => {}); },
+  };
+}
+
+function loopbackHttpOrigin(origin) {
+  if (!origin || typeof origin !== "string") return null;
+  try {
+    const url = new URL(origin);
+    if (url.protocol !== "http:") return null;
+    if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost") return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+export function isTrustedPanelOrigin(origin, hostHeader) {
+  const url = loopbackHttpOrigin(origin);
+  if (!url) return false;
+  const host = typeof hostHeader === "string" ? hostHeader.toLowerCase() : "";
+  if (host) {
+    const hostUrl = loopbackHttpOrigin(`http://${host}`);
+    if (hostUrl && hostUrl.host === url.host) return true;
+  }
+  return url.port === "47820" || url.port === "47821";
+}
+
+export function isTrustedPanelMutation(req) {
+  // Dual-header read: resident processes spawned before the header rename
+  // still send x-apicred-panel until the next relay/panel restart.
+  const header = req?.headers?.["x-anyswitch-panel"] ?? req?.headers?.["x-apicred-panel"];
+  if (header !== "1") return false;
+  const host = req.headers.host;
+  const origin = req.headers.origin;
+  if (origin) return isTrustedPanelOrigin(origin, host);
+  const referer = req.headers.referer;
+  if (!referer) return false;
+  try {
+    const url = new URL(referer);
+    return isTrustedPanelOrigin(`${url.protocol}//${url.host}`, host);
+  } catch {
+    return false;
+  }
+}
+
+// Pull-mode telemetry: fetch the relay's authoritative live agent metrics from
+// its internal loopback endpoint (47821/api/internal/agents). Returns the agents
+// array, or null if the relay is down/unreachable so the caller can fall back.
+// Loopback-only and Bearer pi-relay-token guarded on the relay side.
+//
+// 「拉不到」有两种完全不同的含义，只有一种该让面板自己的收集器顶上：
+// - relay 没在听（停止、还没起、端口被占）：它确实不经任何流量，0 请求就是事实；
+// - relay 活着只是这一拍没答上（1500ms 预算撞上冷探针，本机实测冷探针一轮
+//   0.64–0.87s，承压时更久）：流量全在它那边，自家收集器交出的是一幅结构相同
+//   的假帧——端点显示运行中、请求数与四宫格全空。
+// 所以超时单独返回 `{ pullTimeout: true }`（不是数组，调用侧据此分路），注入的
+// 测试替身照旧返回数组或 null，两条既有分支都不受影响。
+async function defaultFetchRelayAgents(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/api/internal/agents", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.agents)) return data.agents;
+    return null;
+  } catch (err) {
+    // AbortSignal.timeout 抛的是 TimeoutError：连接已建立、只是没在预算内答完。
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      return { pullTimeout: true };
+    }
+    // Relay may be stopped, starting, or not yet listening.
+    return null;
+  }
+}
+
+async function defaultFetchRelayStability(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/api/internal/model-stability", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.models)) return data;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull the resident relay's route-chain runtime (which chain node each
+// endpoint's 自动路由 currently sits on + when it backed off). Returns the
+// { endpoints } payload, or null when the relay is unreachable so the caller
+// falls back to an empty map — unlike model-stability there is no local
+// collector equivalent in the panel process (no chain state ever lives here).
+async function defaultFetchRelayChainRuntime(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/api/internal/route-chain-runtime", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && typeof data.endpoints === "object" && data.endpoints !== null) return { endpoints: data.endpoints };
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Pull-mode terminal attribution: the relay's live agent client processes,
+// each with its ancestor chain (47821/api/internal/detected-processes), for
+// joining terminal-host sessions by shell pid. Returns the processes array,
+// or null on failure — the caller degrades to unannotated sessions rather
+// than erroring the whole session list.
+async function defaultFetchRelayDetectedProcesses(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/api/internal/detected-processes", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.processes)) return data.processes;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// Direct terminal-host session-list fetch (47823). Injectable so the router
+// is unit-testable without a live terminal-host; the real one resolves the
+// same pi-relay-token the proxy uses.
+async function defaultFetchTerminalSessionsList(root) {
+  let token = null;
+  try {
+    token = loadOrGenerateToken(root);
+  } catch {
+    return null;
+  }
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && Array.isArray(data.sessions)) return data.sessions;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// One-click CLI Agent launch: the assembled launch + env delta go straight to
+// terminal-host as a session-create body. Injectable like the list fetch so
+// the router is unit-testable without a live host; the real one authorises with
+// the same pi-relay-token the proxy uses. Returns { status, body }, or null
+// when the host is unreachable (the caller answers 503).
+async function defaultCreateTerminalSession(body, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(5000),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
+// Terminal-host lifecycle pull: the relay (47821) owns the host child and
+// reports its state at /terminal-host/status (same pi-relay-token guard as
+// /api/internal/*). Returns the parsed payload, or null when the relay is
+// unreachable so callers degrade instead of erroring.
+async function defaultFetchTerminalHostStatus(root, token) {
+  if (!token) return null;
+  try {
+    const response = await fetch("http://127.0.0.1:47821/terminal-host/status", {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (data && typeof data === "object") return data;
+    return null;
+  } catch {
+    // Relay may be stopped, starting, or not yet listening.
+    return null;
+  }
+}
+
+// start/stop against the same relay routes. The stop route waits for the child
+// to actually exit (plus the optional session sweep), so the action budget sits
+// well above the status pull's. Returns { status, body }, or null when the
+// relay is unreachable (the caller answers 503 relay_unavailable).
+async function defaultCallTerminalHostAction(action, body, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:47821/terminal-host/${action}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(15000),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
+// The relay answers with the state nested under `host`; the panel-facing
+// payload is flat. The state vocabulary itself (running / stopped /
+// stopped-manual / crashed) passes through verbatim — the panel page renders
+// it directly — and manualStop is derived when the relay only encodes it in
+// the state name.
+function normalizeTerminalHostStatus(data) {
+  const raw = data?.host && typeof data.host === "object" ? data.host : data;
+  const state = typeof raw?.state === "string" ? raw.state : "unknown";
+  return {
+    state,
+    pid: typeof raw?.pid === "number" ? raw.pid : null,
+    manualStop: raw?.manualStop === true || state === "stopped-manual",
+    lastExit: raw?.lastExit && typeof raw.lastExit === "object" ? raw.lastExit : null,
+  };
+}
+
+// Bridge the relay's logger (a separate process on 47821) into this panel
+// process's log bus. The 实时输出 window subscribes to the panel-host's own
+// logger, so after the panel/relay split relay-side entries (keep-alive
+// retries, stream faults) stopped appearing. This opens a long-lived SSE
+// subscription to the relay's /api/internal/logs (same pi-relay-token guard
+// as the agents pull) and re-publishes each entry through this logger's
+// subscriber fan-out. The relay being down is not an error: the bridge
+// retries on a timer and the panel keeps showing its own entries.
+//
+// MUST only be started by the standalone panel-host (47820). The relay-host
+// mounts the same router and streams its own logger natively — starting the
+// bridge there would subscribe the relay to its own log endpoint and
+// amplify every entry into an infinite loop.
+export function startRelayLogBridge(logger, relayRoot) {
+  let stopped = false;
+  let controller = null;
+  let retryTimer = null;
+
+  function scheduleRetry() {
+    if (stopped) return;
+    retryTimer = setTimeout(connect, 5000);
+  }
+
+  async function connect() {
+    if (stopped) return;
+    let token;
+    try {
+      token = loadOrGenerateToken(relayRoot);
+    } catch {
+      scheduleRetry();
+      return;
+    }
+    if (!token) {
+      scheduleRetry();
+      return;
+    }
+    controller = new AbortController();
+    try {
+      // live=1: entries already bridged into this bus must not re-arrive as
+      // duplicates whenever the relay restarts and this bridge reconnects.
+      const response = await fetch("http://127.0.0.1:47821/api/internal/logs?live=1", {
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        scheduleRetry();
+        return;
+      }
+      // Re-publish relay entries through this process's bus: log() writes to
+      // this sink AND fans out to the panel's SSE subscribers.
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          const line = frame.split("\n").find((l) => l.startsWith("data:"));
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line.slice(5).trim());
+            if (entry && entry.level && entry.message) {
+              // 级别只取字段。中继自 0.6.x 起不再把级别写进消息文本，但升级过程中
+              // 面板可能先重启、对面还是旧进程，旧格式的消息自带 "[level] " 前缀；
+              // 原样透传会让窗口里出现两个级别标签，所以这里剥掉一个前导级别标记。
+              const message = entry.message.replace(/^\[(info|warn|error)\]\s?/, "");
+              logger.log(entry.level, message);
+            }
+          } catch {
+            // Malformed frame: skip it, never kill the bridge.
+          }
+        }
+      }
+    } catch {
+      // Relay stopped mid-stream or fetch failed — fall through to retry.
+    }
+    scheduleRetry();
+  }
+
+  connect();
+  return () => {
+    stopped = true;
+    clearTimeout(retryTimer);
+    controller?.abort();
+  };
+}
+
+// Bridge the relay's agent-activity stream (47821 /api/internal/agents-activity,
+// same pi-relay-token guard as the agents pull) into this panel process. The
+// relay pushes absolute activeRequests states for (endpointId, instanceId)
+// pairs: a snapshot frame first, then activity frames only on 0↔N transitions,
+// with comment-line heartbeats in between. The bridge keeps a latest-state Map
+// so the browser-side /panel/api/agents-activity route can send a fresh client
+// the cached snapshot the moment it connects, then forwards frames verbatim;
+// relay heartbeat comment lines pass straight through to keep the panel→
+// browser SSE alive too. The relay being down is not an error: the bridge
+// retries with exponential backoff and the cache keeps the last known truth.
+//
+// Unlike the log bridge, subscribing the relay to its own stream would only be
+// wasteful, not self-amplifying (nothing re-enters the source bus) — still,
+// the bridge is created lazily on the first browser subscription, and the
+// panel page lives on panel-host only, so relay-host never starts one in
+// practice.
+export function startRelayActivityBridge(relayRoot) {
+  let stopped = false;
+  let controller = null;
+  let retryTimer = null;
+  let failures = 0;
+  const subscribers = new Set();
+  const latest = new Map();
+
+  const keyOf = (endpointId, instanceId) => `${endpointId} ${instanceId ?? ""}`;
+
+  // The session model every browser client aligns to on connect: one
+  // snapshot frame built from the latest per-key state.
+  function snapshotFrame() {
+    return { type: "snapshot", instances: [...latest.values()] };
+  }
+
+  function publish(block) {
+    for (const subscriber of subscribers) {
+      try {
+        subscriber(block);
+      } catch {
+        // A broken subscriber must never kill the bridge.
+      }
+    }
+  }
+
+  function absorbLine(line) {
+    if (line.startsWith(":")) {
+      publish(`${line}\n\n`);
+      return;
+    }
+    if (!line.startsWith("data:")) return;
+    let frame = null;
+    try {
+      frame = JSON.parse(line.slice(5).trim());
+    } catch {
+      // Malformed frame: skip it, never kill the bridge.
+      return;
+    }
+    if (frame?.type === "snapshot" && Array.isArray(frame.instances)) {
+      latest.clear();
+      for (const inst of frame.instances) {
+        if (!inst || typeof inst.endpointId !== "string") continue;
+        latest.set(keyOf(inst.endpointId, inst.instanceId ?? null), {
+          endpointId: inst.endpointId,
+          instanceId: inst.instanceId ?? null,
+          activeRequests: typeof inst.activeRequests === "number" ? inst.activeRequests : 0,
+          at: typeof inst.at === "number" ? inst.at : null,
+        });
+      }
+    } else if (frame?.type === "activity" && typeof frame.endpointId === "string") {
+      latest.set(keyOf(frame.endpointId, frame.instanceId ?? null), {
+        endpointId: frame.endpointId,
+        instanceId: frame.instanceId ?? null,
+        activeRequests: typeof frame.activeRequests === "number" ? frame.activeRequests : 0,
+        at: typeof frame.at === "number" ? frame.at : null,
+      });
+    } else {
+      return;
+    }
+    publish(`${line}\n\n`);
+  }
+
+  // 指数退避：1s 起翻倍，30s 封顶；一次成功握手即归零。
+  function scheduleRetry() {
+    if (stopped) return;
+    retryTimer = setTimeout(connect, Math.min(30_000, 1_000 * 2 ** failures));
+    failures += 1;
+  }
+
+  async function connect() {
+    if (stopped) return;
+    let token;
+    try {
+      token = loadOrGenerateToken(relayRoot);
+    } catch {
+      scheduleRetry();
+      return;
+    }
+    if (!token) {
+      scheduleRetry();
+      return;
+    }
+    controller = new AbortController();
+    try {
+      const response = await fetch("http://127.0.0.1:47821/api/internal/agents-activity", {
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal,
+      });
+      if (!response.ok || !response.body) {
+        scheduleRetry();
+        return;
+      }
+      failures = 0;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!stopped) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // Frames are single JSON lines; blank lines and the blank line that
+        // terminates each SSE block are skipped by absorbLine.
+        let sep;
+        while ((sep = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 1);
+          absorbLine(line.replace(/\r$/, ""));
+        }
+      }
+    } catch {
+      // Relay stopped mid-stream or fetch failed — fall through to retry.
+    }
+    scheduleRetry();
+  }
+
+  connect();
+  return {
+    subscribe(subscriber) {
+      subscribers.add(subscriber);
+      return () => subscribers.delete(subscriber);
+    },
+    snapshotFrame,
+    stop() {
+      stopped = true;
+      clearTimeout(retryTimer);
+      controller?.abort();
+    },
+  };
+}
+
+export function createPanelRouter({
+  storePaths,
+  logger,
+  metricsCollector,
+  base = process.env,
+  startTime = Date.now(),
+  appInfo = APP_INFO,
+  // Relay lifecycle is owned by relay-process-manager (a separate process on
+  // 47821). These default to the real supervisor but are injectable so the
+  // router is unit-testable without spawning processes or binding sockets.
+  //
+  // The agent-config sync spawner gets the same treatment: the reasoning-level
+  // setting governs what every endpoint's config is told, so saving it fires a
+  // sync. The default spawns a real child process that rewrites the user's own
+  // endpoint configs under ~/.zcode, ~/.pi, ~/.codex and friends — a unit test
+  // must never do that, so this is injectable like the relay controls.
+  spawnAgentSyncFn = spawnAgentSync,
+  getRelayStatusFn = (root) => getRelayStatus(root),
+  startRelayFn = (root) => startRelay(root),
+  stopRelayFn = (root) => stopRelay(root),
+  restartRelayFn = (root) => restartRelay(root),
+  // Which process owns this router copy: "panel-host" = the control plane on
+  // 47820 (serves the page, owns panel lifecycle), "relay-host" = the data
+  // plane on 47821 (API surface only; its /panel document redirects).
+  hostKind = "panel-host",
+  // Panel-host restart: fire the detached one-shot that waits for 47820 to be
+  // released and brings the replacement up. Both this and the self-exit are
+  // injectable so the router is unit-testable without spawning processes or
+  // the test runner killing itself.
+  spawnPanelHostRestartFn = spawnPanelHostRestartHelper,
+  exitPanelHostFn = (code) => process.exit(code),
+  // Watchdog coordination for followAgent: registry first (durable, survives
+  // reboots), then process control (effective this session). Injectable so
+  // the router is unit-testable without reg.exe or real watchdog processes.
+  enableWatchdogAutostartFn = enableWatchdogAutostart,
+  disableWatchdogAutostartFn = disableWatchdogAutostart,
+  isWatchdogAutostartEnabledFn = isWatchdogAutostartEnabled,
+  spawnWatchdogFn = spawnWatchdog,
+  stopWatchdogFn = stopWatchdog,
+  probeWatchdogFn = probeWatchdog,
+  // Pull-mode telemetry: where handleAgents fetches live metrics from. Kept
+  // injectable so tests don't need a real relay bound on 47821.
+   fetchRelayAgents = defaultFetchRelayAgents,
+   fetchRelayStability = defaultFetchRelayStability,
+   fetchRelayChainRuntime = defaultFetchRelayChainRuntime,
+   fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
+   fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
+   createTerminalSession = defaultCreateTerminalSession,
+   // Terminal-host lifecycle against the relay (47821 /terminal-host/*): the
+   // relay owns the host child, so status/start/stop all live there behind the
+   // same pi-relay-token guard as /api/internal/*. Injectable so tests never
+   // touch a live relay.
+   fetchTerminalHostStatus = defaultFetchTerminalHostStatus,
+   callTerminalHostAction = defaultCallTerminalHostAction,
+  // Agent-activity push bridge (startRelayActivityBridge): this process's
+  // subscription to the relay's agents-activity SSE plus its latest-state
+  // cache. Injectable so tests never touch 47821; `null` lazily builds the
+  // real bridge on the first browser subscription, so a panel-host nobody is
+  // watching does not hold a relay connection open.
+  agentsActivityBridge = null,
+  // Skills tab service (agent-skills.mjs). Injectable so the router is
+  // unit-testable without real home directories, junctions, or PowerShell.
+  // `null` lazily builds the real service on first skills request.
+  skillsService = null,
+  // 数据搬迁包服务（data-bundle.mjs）。可注入以便单测；`null` 时首次请求
+  // 按当前 base 惰性建真服务。两个原生选择框同样可注入，单测不起对话框进程。
+  dataBundleService = null,
+  pickFolderFn = pickFolder,
+  pickFileFn = pickFile,
+  // BYOK 渠道导入服务（byok-import.mjs 装配 byok-remove.mjs）。可注入以便单测；
+  // `null` 时首次请求按当前 relayRoot 惰性建真服务。真实模块经动态 import 装入
+  // （见路由块注释），所以注入假服务的测试永远不会加载真模块。
+  byokImportService = null,
+  // Prompts tab facade (createPromptsPanelService). Injectable for tests;
+  // `null` lazily builds the real facade on the first prompts request.
+  promptsService = null,
+  // Store tab service (store-service.mjs). Injectable so the router is
+  // unit-testable with a mock; `null` lazily builds the real service on the
+  // first store request, rooted at the same storePaths the router uses.
+  storeService = null,
+  // Usage-stats service (usage-stats.mjs) backing GET /panel/api/stats/state.
+  // Injectable for tests; `null` lazily builds the real one on first stats
+  // request over a journal rooted at <Anyswitch data root>/usage.
+  statsService = null,
+  // Watchdog probe snapshot TTL (panel.mjs). Injectable so tests can force
+  // revalidation; production default is WATCHDOG_SNAPSHOT_TTL_MS.
+  watchdogSnapshotTtlMs = WATCHDOG_SNAPSHOT_TTL_MS,
+  // Journal used for claude session-end rows (and shared with the lazily
+  // built statsService). Injectable so tests can capture appendSession
+  // without touching the real usage dir; `null` lazily creates one.
+  usageJournal = null,
+  // Sessions tab service (session-scan.mjs): scanAll() / loadMessages() /
+  // deleteSessions() over the nine agents' on-disk session stores.
+  // Injectable for tests; `null` lazily binds the real module's exports on
+  // the first sessions request.
+  sessionScanService = null,
+  environmentService = null,
+  releaseService = null,
+  // 客户端更新的脱离进程。注入给测试；`null` 用真实的脱离拉起。
+  // 安装不在面板进程里跑：面板退出会把还没脱离的子进程一起带走，全局目录留半截。
+  spawnClientUpdateWorkerFn = null,
+  clientUpdateJournalDir: clientUpdateDir = null,
+  // 自身更新的脱离进程与面板内换装监听器，同一注入纪律：单测不起真进程、不挂
+  // 真定时器，监听器的点火由测试手动泵（捕获 scheduleFn 的回调后自行调用）。
+  spawnSelfUpdateWorkerFn = null,
+  selfUpdateWatchScheduleFn = (fn, ms) => setInterval(fn, ms),
+  selfUpdateWatchCancelFn = (timer) => clearInterval(timer),
+  // 自动检测并下载更新的调度（首开一拍 + 周期拍），同一注入纪律。默认 null =
+  // 不布拍节：createPanelRouter 的默认 hostKind 就是 panel-host，单测里到处建
+  // 路由器，真实拍节只能由 panel-host.mjs 显式传入——否则测试进程里 60 秒后
+  // 会真的去查更新、真的拉起 worker。
+  selfUpdateAutoDownloadScheduleFn = null,
+ }) {
+  const settingsFile = defaultSettingsPath(base);
+  // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
+  // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
+  const logLevelGate = createLogLevelGate(settingsFile, base);
+  const relayRoot = storePaths?.root ?? defaultStorePaths().root;
+  // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
+  // answers instantly once a probe round has settled; POST followAgent invalidates.
+  const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
+
+  // Lookup chain: ANYSWITCH_PANEL_HTML env override → bundled panel-ui/panel.html.
+  // A missing file falls through to servePanelFile's readFileSync failure → 404.
+  function resolvePanelHtmlPath() {
+    if (process.env.ANYSWITCH_PANEL_HTML) return process.env.ANYSWITCH_PANEL_HTML;
+    return REPO_PANEL_HTML;
+  }
+
+  // The relay token lives under %LOCALAPPDATA%\Anyswitch (= relayRoot). Reading it
+  // here (NOT dirname(storePaths.v2Path), which is undefined after path
+  // flattening and silently throws TypeError) is the fix for the decoupled panel
+  // seeing empty metrics: the token is what authorises /api/internal/agents.
+  function relayPullToken() {
+    try {
+      return loadOrGenerateToken(relayRoot);
+    } catch {
+      return null;
+    }
+  }
+
+  function terminalPullToken() {
+    try {
+      return loadOrGenerateToken(relayRoot);
+    } catch {
+      return null;
+    }
+  }
+
+  async function proxyTerminal(req, res, targetPath, method = req.method, body = undefined) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    try {
+      const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}${targetPath}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${token}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+      const contentType = response.headers.get("content-type") || "application/json";
+      res.writeHead(response.status, { "content-type": contentType, "cache-control": "no-cache" });
+      if (!response.body) return res.end();
+      const reader = response.body.getReader();
+      req.on("close", () => reader.cancel().catch(() => {}));
+      while (true) {
+        const part = await reader.read();
+        if (part.done) break;
+        if (!res.write(Buffer.from(part.value))) {
+          await new Promise((resolve) => res.once("drain", resolve));
+        }
+      }
+      return res.end();
+    } catch (error) {
+      if (!res.headersSent) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable", detail: error.message });
+      res.end();
+    }
+  }
+
+  // ---- Terminal session attribution (virtual terminal) ----
+  // The session list stopped being a blind passthrough the moment sessions
+  // had to carry owner info: the list joins terminal-host snapshots (shell
+  // pid) with the relay's detected client processes (ancestor chains) into a
+  // per-session `agent` field. Relay outage degrades to plain shell sessions
+  // — never to a failed list.
+  const PULLED_DETECTED_STALE_MAX_MS = 5000;
+  let lastPulledDetected = null; // { at, processes }
+
+  async function pulledDetectedProcesses(token) {
+    const pulled = await fetchRelayDetectedProcesses(relayRoot, token);
+    if (pulled) {
+      lastPulledDetected = { at: Date.now(), processes: pulled };
+      return pulled;
+    }
+    if (lastPulledDetected && Date.now() - lastPulledDetected.at <= PULLED_DETECTED_STALE_MAX_MS) {
+      return lastPulledDetected.processes;
+    }
+    // Last resort, mirroring handleAgents' local-collector fallback: this
+    // process's own collector scans processes too (it owns no traffic, but
+    // the lineage table is traffic-independent).
+    if (metricsCollector?.getDetectedClientProcesses) {
+      try { return metricsCollector.getDetectedClientProcesses(); } catch { return null; }
+    }
+    return null;
+  }
+
+  // Fresh agents for the attribution join: live pull, then the same bounded
+  // staleness window handleAgents serves, else null (names and instance
+  // binding fall back inside attributeTerminalSessions).
+  async function pulledAgentsForJoin(token) {
+    const pulled = await fetchRelayAgents(relayRoot, token);
+    // 超时标记不是 agents 数组（见 defaultFetchRelayAgents），不能当成一份快照存进缓存。
+    if (Array.isArray(pulled)) {
+      lastPulledAgents = { at: Date.now(), agents: pulled };
+      return pulled;
+    }
+    if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+      return lastPulledAgents.agents;
+    }
+    return null;
+  }
+
+  async function handleTerminalSessionsList(res) {
+    const list = await fetchTerminalSessionsList(relayRoot);
+    if (list === null) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    // Output buffers belong to the SSE stream, not the polling list.
+    const sessions = list.map(({ buffer, ...rest }) => rest);
+    const detected = await pulledDetectedProcesses(terminalPullToken());
+    if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
+    const agents = await pulledAgentsForJoin(terminalPullToken());
+    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents) });
+  }
+
+  // 一键启动 CLI Agent：本路由只做组装与转发。launch（cmd /c 包装——归属链
+  // 的硬前提，见 agent-session-env.mjs）与 env（Anyswitch 凭证，只走环境变
+  // 量）在服务端拼好后交给 terminal-host 起 PTY；env 不落盘，也不经响应回
+  // 显。写 agent 配置文件、把密钥拼进行面的事一概不做。
+  async function handleTerminalAgentSessionCreate(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+    }
+    const agentId = typeof body?.agentId === "string" ? body.agentId.trim() : "";
+    if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, agentId)) {
+      return sendJson(res, 400, { ok: false, error: "请选择一个要启动的 CLI Agent" });
+    }
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
+    // bypassPermissions 开关现读现用：保存后下一次一键启动即生效。loadSettings
+    // 吞掉解析错误回退默认（关），读取失败不会挡住启动本身。
+    let claudeBypassPermissions = false;
+    try {
+      claudeBypassPermissions = loadSettings(settingsFile, base).settings.claudeBypassPermissions === true;
+    } catch {
+      claudeBypassPermissions = false;
+    }
+    let launch;
+    try {
+      launch = buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions });
+    } catch (error) {
+      return sendJson(res, 400, { ok: false, error: error.message });
+    }
+    let created = null;
+    try {
+      created = await createTerminalSession({
+        label: launch.label,
+        cwd: launch.cwd,
+        shell: "cmd",
+        cols: Math.max(2, Math.min(240, Number(body?.cols) || 120)),
+        rows: Math.max(1, Math.min(120, Number(body?.rows) || 34)),
+        launch: launch.launch,
+        env: launch.env,
+        agentId: launch.agentId,
+        agentName: launch.agentName,
+      }, { token });
+    } catch {
+      created = null;
+    }
+    if (!created) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
+    return sendJson(res, created.status || 201, created.body ?? {});
+  }
+
+  // Recent requests for one attributed terminal instance, read off today's
+  // usage journal (the only durable per-request ledger). filterTerminalRequest-
+  // Rows returns the matching tail newest-first; display shaping stays with
+  // the frontend.
+  function handleTerminalRequests(url, res) {
+    const agentId = url.searchParams.get("agentId") || "";
+    const instanceId = url.searchParams.get("instanceId") || "";
+    let rows = [];
+    try {
+      const today = dayKey(Date.now());
+      rows = usageJournalLazy().readRequests({ fromDay: today, toDay: today });
+    } catch (err) {
+      logger?.warn?.(`terminal requests journal read failed: ${err.message}`);
+      rows = [];
+    }
+    sendJson(res, 200, { ok: true, requests: filterTerminalRequestRows(rows, { agentId, instanceId }) });
+  }
+
+  // ---- Terminal host lifecycle (relay-owned child, panel drives it) ----
+  // /api/status 每秒一拍，host 状态随帧下发；若每拍都直取 relay 等于给它多开
+  // 一条轮询，所以轮询侧走短 TTL 缓存。终端页进页要拿现值判态（等不起上一帧），
+  // 专用端点永远直取并顺手刷新缓存；start/stop 落地后作废缓存，下一拍立即重取。
+  const TERMINAL_HOST_STATUS_TTL_MS = 1500;
+  let terminalHostStatusCache = null; // { at, value: object|null }
+
+  async function pullTerminalHostStatus() {
+    let value = null;
+    try {
+      value = await fetchTerminalHostStatus(relayRoot, relayPullToken());
+    } catch {
+      value = null; // 注入实现抛错与 relay 不可达同等待遇：轮询链不炸
+    }
+    terminalHostStatusCache = { at: Date.now(), value };
+    return value;
+  }
+
+  async function getTerminalHostStatusCached() {
+    if (terminalHostStatusCache && Date.now() - terminalHostStatusCache.at < TERMINAL_HOST_STATUS_TTL_MS) {
+      return terminalHostStatusCache.value;
+    }
+    return pullTerminalHostStatus();
+  }
+
+  async function handleTerminalHostStatus(res) {
+    const data = await pullTerminalHostStatus();
+    if (!data) return sendJson(res, 200, { ok: true, state: "unknown", pid: null, manualStop: false, lastExit: null });
+    sendJson(res, 200, { ok: true, ...normalizeTerminalHostStatus(data) });
+  }
+
+  async function handleTerminalHostStart(res) {
+    logger?.info("Terminal host start requested from panel control");
+    const result = await callTerminalHostAction("start", {}, { token: relayPullToken() });
+    if (!result) return sendJson(res, 503, { ok: false, error: "relay_unavailable" });
+    terminalHostStatusCache = null;
+    const payload = result.body;
+    if (payload?.ok === true) return sendJson(res, 200, { ok: true, state: normalizeTerminalHostStatus(payload).state });
+    return sendJson(res, result.status || 500, payload ?? { ok: false, error: "terminal_host_start_failed" });
+  }
+
+  async function handleTerminalHostStop(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+    }
+    logger?.info("Terminal host stop requested from panel control");
+    const result = await callTerminalHostAction("stop", body, { token: relayPullToken() });
+    if (!result) return sendJson(res, 503, { ok: false, error: "relay_unavailable" });
+    terminalHostStatusCache = null;
+    const payload = result.body;
+    if (payload?.ok === true) return sendJson(res, 200, { ok: true });
+    return sendJson(res, result.status || 500, payload ?? { ok: false, error: "terminal_host_stop_failed" });
+  }
+
+  // 导入是整份覆盖 settings.json，走不到设置路由那条副作用链上，而
+  // followAgent 恰好是唯一带持久副作用的开关：值与登录计划、自愈进程脱节时，
+  // 「包里关、本机开」会留下一个界面写着关、登录照旧自启、每 3 秒把 relay 拉
+  // 回来的常驻进程，没有任何路径会自愈它。导入落定后按刚写进盘的值把两者对齐
+  // 回来，顺序沿用设置路由：计划先、进程后。计划写失败就停在这里只出警告——
+  // 数据已经换过位置了，回滚比短暂不一致更糟。
+  async function reconcileFollowAgentAfterImport(desired) {
+    // warnings 是写给日志的；reasons 只放裸原因，界面上的成句文案归前端
+    // （panel.js）——服务层不参与用户可见措辞，否则一处话两个地方说。
+    const outcome = { desired, task: "unchanged", process: "unchanged", warnings: [], reasons: {} };
+    let touched = false;
+
+    let registered = false;
+    try {
+      registered = await isWatchdogAutostartEnabledFn();
+    } catch (err) {
+      outcome.task = "unknown";
+      outcome.reasons.task = err.message;
+      outcome.warnings.push(`登录计划状态读不出来：${err.message}`);
+      return outcome;
+    }
+    if (registered !== desired) {
+      const reg = desired ? await enableWatchdogAutostartFn() : await disableWatchdogAutostartFn();
+      if (!reg?.ok) {
+        outcome.task = "failed";
+        outcome.reasons.task = reg?.error ?? "写入失败";
+        outcome.warnings.push(`登录计划未同步（${outcome.reasons.task}），设置与下次登录后的实际行为暂不一致`);
+        return outcome;
+      }
+      outcome.task = desired ? "registered" : "unregistered";
+      touched = true;
+    }
+
+    let alive = false;
+    try {
+      alive = await probeWatchdogFn();
+    } catch (err) {
+      outcome.process = "unknown";
+      outcome.reasons.process = err.message;
+      outcome.warnings.push(`自愈进程状态读不出来：${err.message}`);
+      if (touched) watchdogSnapshot.invalidate();
+      return outcome;
+    }
+    if (alive !== desired) {
+      // spawnWatchdog / stopWatchdog 都不抛错：等不到就返回 ok:false（stop 还带
+      // reason）。只 catch 异常会把「没做成」报成「已对齐」。
+      try {
+        const moved = desired ? await spawnWatchdogFn() : await stopWatchdogFn();
+        if (moved?.ok === false) {
+          outcome.process = "failed";
+          outcome.reasons.process = moved.reason ?? "未达到预期状态";
+          outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${outcome.reasons.process}`);
+        } else {
+          outcome.process = desired ? "started" : "stopped";
+          touched = true;
+        }
+      } catch (err) {
+        outcome.process = "failed";
+        outcome.reasons.process = err.message;
+        outcome.warnings.push(`自愈进程未${desired ? "拉起" : "停止"}：${err.message}`);
+      }
+    }
+
+    // 计划或进程刚被改动：丢掉探测快照，下一次 GET /api/settings 重新探，
+    // 而不是把改动前的漂移读数继续端到界面上。
+    if (touched) watchdogSnapshot.invalidate();
+    return outcome;
+  }
+
+  // store.json mtime 微缓存。handleStatus 每秒只读 provider 计数，每请求
+  // 一次 statSync（元数据读，微秒级）按 mtimeMs:size 校验，不变即复用上次解析
+  // 结果。跨进程安全：relay 写 store 走 atomic rename，mtime 必变。
+  // 契约：缓存命中返回的是共享 parsed 引用——调用方只读、禁止原地修改。
+  // statSync 失败（store.json 缺失）落入 uncached 分支，绝不返回上次 ok:true
+  // 缓存（否则 storeOk 外显变化）；只缓存 stat 成功且 ok:true 的结果。
+  let storeLoadCache = null; // { path, mtimeMs, size, loaded }
+  function loadStoreCached() {
+    const storeFile = typeof storePaths?.storeFile === "string" ? storePaths.storeFile : null;
+    let st = null;
+    if (storeFile) {
+      try {
+        st = statSync(storeFile);
+      } catch {
+        st = null; // 缺失/不可读 → uncached，且不得命中旧缓存
+      }
+    }
+    if (st && storeLoadCache
+      && storeLoadCache.path === storeFile
+      && storeLoadCache.mtimeMs === st.mtimeMs
+      && storeLoadCache.size === st.size) {
+      return storeLoadCache.loaded;
+    }
+    const loaded = loadStore(storePaths);
+    if (st && loaded.ok) {
+      storeLoadCache = { path: storeFile, mtimeMs: st.mtimeMs, size: st.size, loaded };
+    }
+    return loaded;
+  }
+
+  async function handleStatus(res) {
+    // Provider count from the store — metadata only, never credentials.
+    let providerCount = 0;
+    let storeOk = false;
+    try {
+      const loaded = loadStoreCached();
+      if (loaded.ok) {
+        storeOk = true;
+        providerCount = Object.keys(loaded.store.providers ?? {}).length;
+      }
+    } catch {
+      // store-io is part of the same app dir; a failure here is "store unreadable",
+      // surfaced as storeOk:false rather than a crash.
+    }
+    // Relay lifecycle is owned by relay-process-manager (a separate process on
+    // 47821). The panel (this process, 47820) reports its own PID + the relay's
+    // live status so the UI can render running/stopped/starting + a start button.
+    let relay = { status: "stopped", pid: null, port: 47821 };
+    try {
+      relay = await getRelayStatusFn(relayRoot);
+    } catch (err) {
+      logger?.error(`relay status probe failed: ${err.message}`);
+    }
+    // 终端宿主状态随状态帧下发：真值在 relay（宿主是它的子进程），面板进程本地
+    // 没有等价物。走短 TTL 缓存避免秒级轮询翻倍 relay 压力；relay 不可达时报
+    // unknown，不拖垮状态帧本身。
+    let terminalHost = { state: "unknown", manualStop: false };
+    const hostStatus = await getTerminalHostStatusCached();
+    if (hostStatus) {
+      const normalized = normalizeTerminalHostStatus(hostStatus);
+      terminalHost = { state: normalized.state, manualStop: normalized.manualStop };
+    }
+    sendJson(res, 200, {
+      running: relay.status === "running",
+      panelPort: 47820,
+      pid: process.pid,
+      port: 47821,
+      startTime,
+      storeOk,
+      providers: providerCount,
+      relay,
+      terminalHost,
+    });
+  }
+
+  async function handleRelayStatus(res) {
+    try {
+      const relay = await getRelayStatusFn(relayRoot);
+      sendJson(res, 200, { ok: true, relay });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  async function handleRelayStart(res) {
+    logger?.info("Relay start requested from panel control");
+    try {
+      const result = await startRelayFn(relayRoot);
+      sendJson(res, result.ok ? 200 : 500, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  async function handleRelayStop(res) {
+    logger?.info("Relay stop requested from panel control");
+    try {
+      const result = await stopRelayFn(relayRoot);
+      sendJson(res, result.ok ? 200 : 500, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  async function handleRelayRestart(res) {
+    logger?.info("Relay restart requested from panel control");
+    try {
+      const result = await restartRelayFn(relayRoot);
+      sendJson(res, result.ok ? 200 : 500, result);
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  // Restart THIS process so the next page load runs the code on disk. Cannot
+  // be done in place: the replacement can only bind 47820 after we release it
+  // (listenLoopbackPanel returns {reused:true} without serving when the port is
+  // taken), and nothing else supervises panel-host — hence the detached helper
+  // that waits for the release and spawns the new host. Order matters: answer
+  // first, exit after the response has flushed, or the browser sees a dead
+  // connection with no way to tell "restarting" from "failed".
+  // 自杀换新共用的编排：拉起一次性 helper（等 47820 释放再拉起新 panel-host），
+  // 并武装兜底退出。退出时机交给调用方——HTTP 重启钩在响应 flush 上，自更新
+  // 监听器没有响应可等，进宽限即退。spawn 失败返回 null：调用方如实应答，不退出。
+  function startPanelHostReplacement({ onSpawnError } = {}) {
+    let scheduled = false;
+    let backstopTimer = null;
+    const scheduleExit = () => {
+      if (scheduled) return;
+      scheduled = true;
+      if (backstopTimer) clearTimeout(backstopTimer); // the flush landed; no need for the ceiling
+      setTimeout(() => exitPanelHostFn(0), PANEL_HOST_EXIT_GRACE_MS);
+    };
+    try {
+      spawnPanelHostRestartFn();
+    } catch (err) {
+      onSpawnError?.(err);
+      return null;
+    }
+    backstopTimer = setTimeout(scheduleExit, PANEL_HOST_EXIT_BACKSTOP_MS);
+    return scheduleExit;
+  }
+
+  async function handlePanelHostRestart(res) {
+    if (hostKind !== "panel-host") {
+      // The relay is not the control plane, and a lifecycle request it handled
+      // would be one process reaching across to kill another. relay-host's
+      // /panel redirects to 47820, so this is unreachable from the UI.
+      return sendJson(res, 409, {
+        ok: false,
+        error: "panel host restart must be requested from the control panel on 47820",
+      });
+    }
+    logger?.info("Panel host restart requested from panel control");
+    let spawnError = null;
+    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => { spawnError = err; } });
+    if (!scheduleExit) {
+      return sendJson(res, 500, { ok: false, error: spawnError?.message ?? "restart helper failed" });
+    }
+    res.once("finish", scheduleExit);
+    sendJson(res, 200, { ok: true, pid: process.pid });
+    // Backstop is armed inside startPanelHostReplacement: if the client is gone
+    // before the flush completes, "finish" never fires — and the frontend
+    // deliberately reads a dropped response as "restart started" (the exit can
+    // beat the flush), so it is sitting in its recovery poll waiting for a port
+    // we still owe it.
+  }
+
+  async function getEnvironmentService() {
+    if (!environmentService) {
+      const { createEnvironmentService } = await import("./environment-service.mjs");
+      environmentService ??= createEnvironmentService({ base });
+    }
+    return environmentService;
+  }
+
+  async function getReleaseService() {
+    if (!releaseService) {
+      const { createReleaseService } = await import("./release-service.mjs");
+      releaseService ??= createReleaseService({ currentVersion: appInfo.version });
+    }
+    return releaseService;
+  }
+
+  // 客户端更新（安装/升级）作业登记。锁按客户端分：npm 全局目录里一个包只有一份
+  // 落点，两个并发的同一个包安装会把对方的目录搬走再删（实测 5 次里 2 次把安装搬坏，
+  // npm 报 ENOTEMPTY、包清单与命令入口一起消失），所以同一个客户端同时只允许一个
+  // 任务，同客户端并发 409。不同客户端各装各的包、互不触碰对方的目录，可以并行——
+  // 关于页因此能同时开多个更新，而不是一次只放行一个。
+  // 安装跑在脱离面板的进程里，进度记在本机数据目录：关掉或重启面板不会杀掉正在
+  // 进行的安装，新面板读同一份记录继续报进度。进程已经不在、记录却还写着进行中
+  // 的，按中断收尾，否则这个客户端会被永久锁住。
+  const updateJournalDir = clientUpdateDir ?? clientUpdateJournalDir(relayRoot);
+  const spawnUpdateWorker = spawnClientUpdateWorkerFn ?? ((request) => spawnClientUpdateWorker(request));
+  // 自身更新的 worker 拉起：与客户端更新同一形态（脱离、丢管道、unref）。
+  const spawnSelfUpdate = spawnSelfUpdateWorkerFn ?? ((request) => spawnSelfUpdateWorker(request));
+
+  function refreshClientUpdates() {
+    reapDeadClientUpdateRuns(updateJournalDir, (pid) => {
+      try { process.kill(pid, 0); return true; } catch { return false; }
+    });
+  }
+
+  async function handleClientUpdate(req, res) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (err) {
+      return sendJson(res, err.statusCode ?? 400, { ok: false, error: "bad_request", message: err.message });
+    }
+    const id = typeof body?.id === "string" ? body.id : null;
+    const action = typeof body?.action === "string" ? body.action : null;
+    const { clientLifecycleKind, clientLifecycleActions } = await import("./client-lifecycle.mjs");
+    const kind = clientLifecycleKind(id);
+    if (!id || !kind) {
+      return sendJson(res, 404, { ok: false, error: "unknown_client", message: "未找到这个客户端" });
+    }
+    if (!clientLifecycleActions(id).includes(action)) {
+      return sendJson(res, 400, { ok: false, error: "unsupported_action", message: "不支持的操作" });
+    }
+    refreshClientUpdates();
+    const active = runningClientUpdate(updateJournalDir, id);
+    if (active) {
+      return sendJson(res, 409, {
+        ok: false,
+        error: "busy",
+        message: `已有客户端任务在进行中（${id}），请等待完成`,
+      });
+    }
+    const before = (await getEnvironmentService().then((service) => service.getState()))
+      .clients.find((client) => client.id === id);
+    // 原生自更新的客户端（Grok Build）要把官方最新版本钉进降级安装命令，
+    // 所以先读一次官方版本再动手；查不到就只跑它自身的升级命令，不拿 dist-tag 兜底。
+    // 查询渠道按被更新那条安装项的 remoteId 取：qoder 的客户端 id 挂在桌面端渠道上，
+    // CLI 形态的官方版本要走 installations[0] 的 "qoder-cli"。
+    const targetVersion = kind === "native"
+      ? await getReleaseService()
+        .then((service) => service.getClientLatest(before?.installations?.[0]?.remoteId ?? id))
+        .then((data) => (data?.state === "ok" ? data.version : null))
+        .catch(() => null)
+      : null;
+    const runId = randomUUID();
+    const run = {
+      runId,
+      clientId: id,
+      action,
+      state: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      result: null,
+      workerPid: null,
+      targetVersion,
+      commandPath: before?.installations?.[0]?.path ?? null,
+      beforeVersion: before?.installations?.[0]?.version ?? null,
+      // 逐形态 before 版本与 beforeVersion 是同一刻快照：worker 不再自己读。
+      beforeByForm: Object.fromEntries((before?.installations ?? []).map((i) => [i.kind, i.version ?? null])),
+    };
+    // 先落盘再拉起：进程抢在登记之前退出时，不能留下一个没有记录的安装。
+    writeClientUpdateRun(updateJournalDir, run);
+    let workerPid = null;
+    try {
+      workerPid = spawnUpdateWorker({ runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      writeClientUpdateRun(updateJournalDir, {
+        ...run,
+        state: "done",
+        finishedAt: new Date().toISOString(),
+        result: { outcome: "failed", message: "更新失败，请重新检测确认结果" },
+      });
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新失败，请重新检测确认结果" });
+    }
+    writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
+    return sendJson(res, 202, { ok: true, runId, clientId: id, action });
+  }
+
+  function handleClientUpdateStatus(res, runId) {
+    refreshClientUpdates();
+    const run = readClientUpdateRun(updateJournalDir, runId);
+    if (!run) {
+      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务，请重新检测确认结果" });
+    }
+    return sendJson(res, 200, clientUpdateStatus(run));
+  }
+
+  function handleClientUpdatesActive(res) {
+    refreshClientUpdates();
+    const runs = listClientUpdateRuns(updateJournalDir)
+      // 自身更新记录与客户端更新同住一个 journal 目录，但接回通道是它自己的
+      // /api/self-update/active——这里若把它放出去，关于页会把同一条任务接回两次，
+      // 结论提示也跟着弹两次。
+      .filter((run) => run.state === "running" && run.clientId !== SELF_UPDATE_CLIENT_ID)
+      .map((run) => clientUpdateStatus(run));
+    return sendJson(res, 200, { ok: true, runs });
+  }
+
+  // ── 自身更新（下载 → 应用 两步）──────────────────────────────────────
+  // 目标版本与「检查更新」同源：releaseService.getAppUpdate 给出的 release
+  // （tag + 版本，预览版/稳定版渠道判定都在那一层）。执行跑在脱离 worker 里
+  // （app-self-update.mjs），按记录里的 step 分两阶段：download 只把目标 tag
+  // 浅拉进本地仓库并核版本（不动工作树、不动进程），完成后记录停在
+  // 「已下载待应用」（phase=staged）；apply 由用户再点一次触发，做换装、装
+  // 依赖、重启 relay，最后等本进程经 startPanelHostReplacement 退场、新面板接管。
+  // journal 复用 client-updates 目录与记录形态：running 记录即单飞锁，worker
+  // 崩溃由既有惰性 reap 收割；多出来的 phase 字段是 worker → 监听器/页面的进度通道。
+  const SELF_UPDATE_WATCH_MS = 1000;
+  let selfUpdateWatchTimer = null;
+
+  function selfUpdateStatusPayload(run) {
+    return { ...clientUpdateStatus(run), phase: run.phase ?? null, step: run.step ?? "download", targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null };
+  }
+
+  // 最近一条「已下载待应用」的记录（finishedAt 最新的为准）。
+  function findStagedSelfUpdate() {
+    return listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done" && run.result?.outcome === "downloaded")
+      .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+  }
+
+  // 登记 + 拉起下载 worker。HTTP 面与自动下载调度共用；返回登记好的 run，
+  // 拉起失败时记录如实落 failed 并返回 null。
+  function registerSelfUpdateDownload(update) {
+    const runId = randomUUID();
+    const run = {
+      runId,
+      clientId: SELF_UPDATE_CLIENT_ID,
+      action: "update",
+      step: "download",
+      state: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      result: null,
+      workerPid: null,
+      targetVersion: update.release.version,
+      targetTag: update.release.tag,
+      beforeVersion: appInfo.version,
+      appDir: dirname(fileURLToPath(import.meta.url)),
+      repoUrl: APP_REPO_URL,
+      relayRoot,
+      phase: "staging",
+    };
+    // 先落盘再拉起：进程抢在登记之前退出时，不能留下一个没有记录的安装。
+    writeClientUpdateRun(updateJournalDir, run);
+    let workerPid = null;
+    try {
+      workerPid = spawnSelfUpdate({ runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      writeClientUpdateRun(updateJournalDir, {
+        ...run,
+        state: "done",
+        finishedAt: new Date().toISOString(),
+        result: { outcome: "failed", message: "更新未能启动，请稍后重试" },
+      });
+      return null;
+    }
+    writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
+    return run;
+  }
+
+  async function handleSelfUpdateStart(req, res) {
+    if (hostKind !== "panel-host") {
+      // 与 panel-host/restart 同一条红线：relay 副本只是 API 面，换装自杀必须
+      // 由 47820 的控制面自己做。
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    let update = null;
+    try {
+      update = await getReleaseService().then((service) => service.getAppUpdate({ force: true }));
+    } catch {
+      update = null;
+    }
+    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
+      return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
+    }
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const run = registerSelfUpdateDownload(update);
+    if (!run) {
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    return sendJson(res, 202, { ok: true, runId: run.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "download", targetVersion: run.targetVersion });
+  }
+
+  // 应用已下载的更新：同一条记录翻回 running、step=apply，worker 以同一 runId 再起。
+  // body.runId 钉住要应用的那条（防「点应用时下载刚换了新目标」的错位）。
+  async function handleSelfUpdateApply(req, res) {
+    if (hostKind !== "panel-host") {
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    const body = await readJsonBody(req);
+    const wantRunId = typeof body?.runId === "string" ? body.runId : null;
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const staged = findStagedSelfUpdate();
+    if (!staged || (wantRunId && staged.runId !== wantRunId)) {
+      return sendJson(res, 409, { ok: false, error: "no_staged", message: "没有已下载待应用的更新，请先检查更新" });
+    }
+    const next = {
+      ...staged,
+      step: "apply",
+      state: "running",
+      phase: "installing",
+      result: null,
+      finishedAt: null,
+      startedAt: new Date().toISOString(),
+      workerPid: null,
+    };
+    writeClientUpdateRun(updateJournalDir, next);
+    let workerPid = null;
+    try {
+      workerPid = spawnSelfUpdate({ runId: staged.runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      // 拉起失败：记录翻回「已下载待应用」，不吞掉这次已下载的成果。
+      writeClientUpdateRun(updateJournalDir, staged);
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    writeClientUpdateRun(updateJournalDir, { ...next, workerPid });
+    armSelfUpdateWatcher();
+    return sendJson(res, 202, { ok: true, runId: staged.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "apply", targetVersion: staged.targetVersion });
+  }
+
+  function handleSelfUpdateRunStatus(res, runId) {
+    refreshClientUpdates();
+    const run = readClientUpdateRun(updateJournalDir, runId);
+    if (!run || run.clientId !== SELF_UPDATE_CLIENT_ID) {
+      return sendJson(res, 404, { ok: false, error: "unknown_run", message: "没有找到这个更新任务" });
+    }
+    return sendJson(res, 200, selfUpdateStatusPayload(run));
+  }
+
+  function handleSelfUpdateActive(res) {
+    refreshClientUpdates();
+    const runs = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.state === "running" && run.clientId === SELF_UPDATE_CLIENT_ID)
+      .map((run) => selfUpdateStatusPayload(run));
+    const staged = findStagedSelfUpdate();
+    return sendJson(res, 200, { ok: true, runs, staged: staged ? selfUpdateStatusPayload(staged) : null });
+  }
+
+  // 最近一次自身更新结论：换装后的新页面靠它把最终结局（尤其 Relay 子句）补显
+  // 一次——旧页面在换装瞬间带走一切，结论不能只活在那最后一帧里。
+  function handleSelfUpdateLast(res) {
+    refreshClientUpdates();
+    const last = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done")
+      .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+    if (!last) return sendJson(res, 404, { ok: false, error: "no_runs" });
+    return sendJson(res, 200, selfUpdateStatusPayload(last));
+  }
+
+  // 「自动检测并下载更新」（设置项，默认开）：面板常驻期间按拍节检查，有更新且
+  // 没有在跑/待应用的任务就登记一次下载。只走 download 阶段，绝不自动应用。
+  async function maybeAutoDownloadSelfUpdate() {
+    if (hostKind !== "panel-host") return;
+    try {
+      if (loadSettings(settingsFile, base).settings.autoDownloadUpdates === false) return;
+    } catch {
+      return; // 设置读不出就不动：自动下载是便览功能，不为它冒险
+    }
+    let update = null;
+    try {
+      update = await getReleaseService().then((service) => service.getAppUpdate({ force: false }));
+    } catch {
+      return;
+    }
+    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) return;
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) return;
+    if (findStagedSelfUpdate()) return;
+    const run = registerSelfUpdateDownload(update);
+    logger?.info(run
+      ? `Self update auto-download registered: ${run.targetTag}`
+      : "Self update auto-download failed to spawn its worker");
+  }
+
+  // 换装监听器：worker 把阶段推到 ready-to-restart / waiting-panel 后，等的就是
+  // 这一枪——拉起 helper 并按宽限自退。本进程已是目标版本时绝不点火：换装后的
+  // 新面板接管时会扫到进行中的 run（worker 正在验证复活），点火等于自杀刚接班
+  // 的自己。定时器只在有进行中的自更新任务时存在。
+  function stopSelfUpdateWatcher() {
+    if (selfUpdateWatchTimer !== null) {
+      selfUpdateWatchCancelFn(selfUpdateWatchTimer);
+      selfUpdateWatchTimer = null;
+    }
+  }
+
+  function pumpSelfUpdateWatcher() {
+    if (hostKind !== "panel-host") return false;
+    let run = null;
+    try {
+      refreshClientUpdates();
+      run = runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID);
+    } catch {
+      run = null;
+    }
+    if (!run) {
+      stopSelfUpdateWatcher();
+      return false;
+    }
+    const atSwap = run.phase === "ready-to-restart" || run.phase === "waiting-panel";
+    if (!atSwap || appInfo.version === run.targetVersion) return false;
+    stopSelfUpdateWatcher();
+    logger?.info("Self update reached swap phase; scheduling panel host replacement");
+    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
+    if (scheduleExit) scheduleExit(); // 没有响应 flush 可等：进宽限即退
+    return true;
+  }
+
+  function armSelfUpdateWatcher() {
+    if (hostKind !== "panel-host" || selfUpdateWatchTimer !== null) return;
+    selfUpdateWatchTimer = selfUpdateWatchScheduleFn(pumpSelfUpdateWatcher, SELF_UPDATE_WATCH_MS);
+  }
+
+  // 面板启动时接管：上一个进程可能死在自更新进行中（手动重启、崩溃）。有进行中的
+  // 自更新任务就把监听器重新布上——worker 在换装阶段等的正是这一枪。
+  if (hostKind === "panel-host") {
+    try {
+      refreshClientUpdates();
+      if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) armSelfUpdateWatcher();
+    } catch { /* journal 尚不存在：无需接管 */ }
+    // 「自动检测并下载更新」的常驻拍节：首开一拍 + 每 6 小时。开关每拍现读设置。
+    // 只有显式传入调度器才布点——见注入项注释（单测到处建路由器，不能默认挂真定时器）。
+    selfUpdateAutoDownloadScheduleFn?.(() => maybeAutoDownloadSelfUpdate());
+  }
+
+  // Push the current store to every agent endpoint config (zcode, dsh, pi,
+  // kimi, qoder, codex, opencode, grok). Runs the standalone sync runner so the
+  // merge logic loads from disk — catalog-writer fixes apply here without a
+  // panel/relay restart.
+  async function handleAgentSync(res) {
+    logger?.info("agent endpoint sync requested from panel");
+    try {
+      const { parseSyncSummaryLine, SYNC_RESULT_PREFIX } = await import("./agent-sync.mjs");
+      // 同步进程把那行机器可读摘要混在 stdout 里回传：它是给前端解析用的，不该
+      // 出现在用户看的实时输出里，交给子进程前先把这行从日志里滤掉。
+      const uiLogger = logger
+        ? {
+            info: (message) => {
+              if (!String(message).includes(SYNC_RESULT_PREFIX)) logger.info?.(message);
+            },
+            warn: (message) => logger.warn?.(message),
+            error: (message) => logger.error?.(message),
+          }
+        : null;
+      const result = await spawnAgentSyncFn({ port: 47821, logger: uiLogger });
+      // 失败上屏的落盘点（source "manual"）：结果写进 sync-status.json，面板轮询
+      // 渲染「上次同步未成功」。运行日志关掉时日志行会被活闸门丢弃，这份文件是
+      // 失败最后剩下的可见面。落盘失败不影响本路由的响应。
+      try {
+        writeSyncStatus(relayRoot, syncStatusFromResult(result, "manual"));
+      } catch (err) {
+        logger?.warn?.(`sync status write failed: ${err.message}`);
+      }
+      // 同步进程在 stdout 上留了一行机器可读摘要。个别端点写不进去不再算整次
+      // 失败：其余端点已经同步好，按钮只把没写进去的端点报出来。仓库数据读不
+      // 出来或同步进程自己崩了，才是真的失败。
+      const summary = parseSyncSummaryLine(result.stdout);
+      const ok = summary ? summary.ok : result.ok;
+      sendJson(res, ok ? 200 : 500, {
+        ok,
+        failed: summary?.failed ?? [],
+        synced: summary?.synced ?? [],
+        codexCatalog: summary?.codexCatalog,
+        error: ok ? undefined : "同步没能完成，请稍后重试",
+      });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  // 最近一次同步的结果（sync-status.json，每次同步后落盘）。文件不存在或读不出
+  // ＝「无从报告」：按无异常返回 ok:true/at:null，前端据此不渲染任何提示——
+  // 这份文件不是错误证据，读不出来本身也不构成一次失败。
+  function handleSyncStatus(res) {
+    const status = readSyncStatus(relayRoot);
+    if (!status) return sendJson(res, 200, { ok: true, at: null, failed: [], synced: [] });
+    return sendJson(res, 200, status);
+  }
+
+  // Log ingest for per-launch Claude relays. Each Claude Code session runs its
+  // own relay process on an ephemeral port with no stderr file of its own;
+  // without this endpoint its keep-alive retries and stream faults are
+  // invisible in the panel's 实时输出. The entry re-enters this logger's bus
+  // (sink + SSE fan-out), so bridged viewers see it like any resident-relay
+  // entry. Strict level validation: a garbage level must 400, never log.
+  async function handleLogIngest(req, res) {
+    if (!logger) {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    try {
+      const body = await readJsonBody(req);
+      const level = body?.level;
+      const message = body?.message;
+      if (level !== "info" && level !== "warn" && level !== "error") {
+        sendJson(res, 400, { ok: false, error: "level must be info, warn or error" });
+        return;
+      }
+      if (typeof message !== "string" || message.length === 0 || message.length > 2000) {
+        sendJson(res, 400, { ok: false, error: "message must be a non-empty string of at most 2000 chars" });
+        return;
+      }
+      logger[level](message);
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+    }
+  }
+
+  // 真清空: wiping the in-memory history AND telling live viewers means a
+  // refresh can no longer resurrect cleared logs, and every open panel window
+  // empties together. On-disk log files are archival and stay untouched.
+  function handleLogClear(res) {
+    if (!logger?.clear) {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    try {
+      logger.clear();
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  function handleLogsSSE(res, req) {
+    // 记录关着时这条流永远不会有内容：直接 204 收尾，比挂一条只会干等的 SSE 诚实。
+    if (typeof logger.isEnabled === "function" && !logger.isEnabled()) {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    // 必须显式冲头。本端点在没有历史可重放时一个字节都不写，而浏览器要等响应头落地
+    // 才算建连成功：不冲头就会一直停在「正在重连」，直到下一条日志写入才恢复（点完
+    // 「清空」再刷新页面正是这个形状）。中继侧的同类端点早已这么做，这份漏了。
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
+    // 级别过滤只发生在这一个出口。写入侧照旧全量：日志文件与环形缓冲都不因用户选了
+    // 高级别而少一行，档案是排障时唯一的凭据。逐帧现读闸门，是为了让已经打开的其它
+    // 窗口不必重连就不再收到低于门槛的新行；它们屏幕上已经显示出去的旧行，随客户端
+    // 25 行上限自然滚掉。清空帧没有 level，判定一律放行——它不是日志。
+    const writeEntryFrame = (entry) => {
+      if (!logLevelAllows(entry.level, logLevelGate())) return;
+      res.write(`data: ${JSON.stringify(entry)}\n\n`);
+    };
+    // Replay history for late joiners, then stream live entries.
+    for (const entry of logger.getHistory()) {
+      writeEntryFrame(entry);
+    }
+    const unsubscribe = logger.subscribe((entry) => {
+      try {
+        writeEntryFrame(entry);
+      } catch {
+        // socket gone; unsubscribe will happen on close below
+      }
+    });
+    const cleanup = () => unsubscribe();
+    req.on("close", cleanup);
+    req.on("error", cleanup);
+  }
+
+  // 活跃真值浏览器出口。与日志流同型：GET 免 token（loopback 是网络边界，
+  // 只有写操作才过 CSRF 闸）。客户端建连即收到桥缓存的当前快照整帧对齐，其后
+  // 逐帧转发桥事件；relay 侧的注释心跳行由桥原样直通，保浏览器侧连接。
+  let agentsActivityBridgeInstance = agentsActivityBridge;
+  function getAgentsActivityBridge() {
+    if (!agentsActivityBridgeInstance) agentsActivityBridgeInstance = startRelayActivityBridge(storePaths.root);
+    return agentsActivityBridgeInstance;
+  }
+
+  function handleAgentsActivitySSE(res, req) {
+    const bridge = getAgentsActivityBridge();
+    res.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    res.write(`data: ${JSON.stringify(bridge.snapshotFrame())}\n\n`);
+    const unsubscribe = bridge.subscribe((block) => {
+      try {
+        res.write(block);
+      } catch {
+        // socket gone; unsubscribe will happen on close below
+      }
+    });
+    const cleanup = () => unsubscribe();
+    req.on("close", cleanup);
+    req.on("error", cleanup);
+  }
+
+  async function handleAutostartStatus(res) {
+    const enabled = await isAutostartEnabled();
+    sendJson(res, 200, { enabled });
+  }
+
+  async function handleAutostartEnable(res) {
+    const result = await enableAutostart();
+    sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.error ?? null });
+  }
+
+  async function handleAutostartDisable(res) {
+    const result = await disableAutostart();
+    sendJson(res, result.ok ? 200 : 500, { ok: result.ok, error: result.error ?? null });
+  }
+
+  // 状态检测的号池聚合：号池是单一统计单元，按 store 的 pools 把池行和
+  // 成员直连行（过渡期存量客户端仍指成员渠道）合并为每 (池, 模型) 一行，
+  // 尝试级口径——成功、失败尝试都计入。计数/延迟/缓存命中率按 total 加权
+  // 重建；ttftMs 同样按 total 加权，但 null（无样本）侧按 0 权重忽略，两侧
+  // 皆 null 时为 null；cells 逐桶合并（ok 由 n×rate 反推）。store 读不出或池已解除时
+  // 原样透传，非池渠道行不受影响。池 id 与成员 id 撞名无害：两条路径都
+  // 归并到同一池行。
+  function annotateStabilityModels(models) {
+    if (!Array.isArray(models)) return models;
+    let store;
+    try {
+      const loaded = loadStore(storePaths);
+      if (!loaded.ok) return models;
+      store = loaded.store;
+    } catch {
+      return models;
+    }
+    const pools = store.pools ?? {};
+    if (Object.keys(pools).length === 0) return models;
+    const poolNameById = new Map();
+    const memberToPool = new Map();
+    for (const [poolId, pool] of Object.entries(pools)) {
+      poolNameById.set(poolId, pool.displayName || poolId);
+      for (const memberId of pool.members ?? []) memberToPool.set(memberId, poolId);
+    }
+    // success-rate thresholds mirror model-stability.mjs so re-derived rows
+    // keep the same traffic-light semantics as relay-computed ones.
+    const statusOf = (rate) => (rate >= 85 ? "green" : rate >= 70 ? "yellow" : "red");
+    const rowTotal = (m) => Number(m?.total) || 0;
+    const plain = [];
+    const poolRows = new Map();
+    for (const m of models) {
+      const provider = typeof m?.provider === "string" ? m.provider : "";
+      if (!provider || typeof m?.model !== "string") {
+        plain.push(m);
+        continue;
+      }
+      const poolId = poolNameById.has(provider)
+        ? provider
+        : (memberToPool.get(provider) ?? null);
+      if (poolId === null) {
+        plain.push(m);
+        continue;
+      }
+      const key = `${poolId}\0${m.model}`;
+      const total = rowTotal(m);
+      const cells = Array.isArray(m.cells)
+        ? m.cells.map((c) => ({
+          n: Number(c?.n) || 0,
+          ok: ((Number(c?.n) || 0) * (Number(c?.rate) || 0)) / 100,
+        }))
+        : [];
+      let row = poolRows.get(key);
+      if (!row) {
+        row = {
+          model: m.model,
+          poolId,
+          poolName: poolNameById.get(poolId),
+          total: 0,
+          ok: 0,
+          latencyWeighted: 0,
+          cacheWeighted: 0,
+          ttftWeighted: 0,
+          ttftWeight: 0,
+          cells: [],
+        };
+        poolRows.set(key, row);
+      }
+      row.total += total;
+      row.ok += (total * (Number(m.successRate) || 0)) / 100;
+      row.latencyWeighted += (Number(m.latencyMs) || 0) * total;
+      row.cacheWeighted += (Number(m.cacheHit) || 0) * total;
+      // ttftMs 为 null 表示该侧无样本：按 0 权重忽略，不稀释有样本的一侧。
+      if (typeof m.ttftMs === "number" && Number.isFinite(m.ttftMs)) {
+        row.ttftWeighted += m.ttftMs * total;
+        row.ttftWeight += total;
+      }
+      while (row.cells.length < cells.length) row.cells.push({ n: 0, ok: 0 });
+      for (let i = 0; i < cells.length; i += 1) {
+        row.cells[i].n += cells[i].n;
+        row.cells[i].ok += cells[i].ok;
+      }
+    }
+    const merged = Array.from(poolRows.values(), (row) => {
+      const total = row.total;
+      const successRate = total > 0 ? (row.ok / total) * 100 : 0;
+      return {
+        model: row.model,
+        provider: row.poolId,
+        poolId: row.poolId,
+        poolName: row.poolName,
+        total,
+        successRate: total > 0 ? Number(successRate.toFixed(1)) : 0,
+        status: total > 0 ? statusOf(successRate) : "gray",
+        latencyMs: total > 0 ? Math.round(row.latencyWeighted / total) : 0,
+        cacheHit: total > 0 ? Number((row.cacheWeighted / total).toFixed(1)) : 0,
+        ttftMs: row.ttftWeight > 0 ? Math.round(row.ttftWeighted / row.ttftWeight) : null,
+        cells: row.cells.map((c) => {
+          const rate = c.n > 0 ? (c.ok / c.n) * 100 : 0;
+          return {
+            n: c.n,
+            rate: c.n > 0 ? Number(rate.toFixed(1)) : 0,
+            status: c.n > 0 ? statusOf(rate) : "idle",
+          };
+        }),
+      };
+    });
+    return [...plain, ...merged].sort((a, b) => rowTotal(b) - rowTotal(a));
+  }
+
+  async function handleModelStability(res) {
+    const token = relayPullToken();
+    const pulled = await fetchRelayStability(relayRoot, token);
+    if (pulled) {
+      return sendJson(res, 200, { ok: true, ...pulled, models: annotateStabilityModels(pulled.models) });
+    }
+    if (!metricsCollector?.getModelStability) {
+      sendJson(res, 200, { ok: true, window: "8h", buckets: 48, models: [] });
+      return;
+    }
+    try {
+      const snap = metricsCollector.getModelStability();
+      sendJson(res, 200, { ok: true, ...snap, models: annotateStabilityModels(snap.models) });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  // 监测页「当前落在第几跳/退避剩余重试时间」:proxy the resident relay's
+  // merged route-chain runtime. Relay down -> empty map (no local source:
+  // chain state only exists inside relay handler processes).
+  async function handleRouteChainRuntime(res) {
+    const token = relayPullToken();
+    const pulled = await fetchRelayChainRuntime(relayRoot, token);
+    if (pulled) {
+      return sendJson(res, 200, { ok: true, endpoints: pulled.endpoints });
+    }
+    sendJson(res, 200, { ok: true, endpoints: {} });
+  }
+
+  // Last authoritative relay snapshot: { at, agents }. A failed pull means
+  // either "relay unreachable" or "relay answered slower than the 1500ms pull
+  // budget", and only the first justifies the local collector — which owns no
+  // traffic at all. Serving the collector on a timeout yields a structurally
+  // identical blind frame (running, but 0 requests / no lastSeen / no
+  // sparkHistory), so bounded staleness beats a false zero.
+  const PULLED_AGENTS_STALE_MAX_MS = 5000;
+  let lastPulledAgents = null;
+
+  async function handleAgents(res) {
+    // PULL mode: when the panel runs as a separate process (panel-host, 47820),
+    // the authoritative live metrics live INSIDE the relay process (47821). So
+    // first try to fetch them cross-process via the relay's internal telemetry
+    // endpoint. On failure, serve the last pull while it is still young, and only
+    // then fall back to this process's own collector — which keeps the UI from
+    // erroring when the relay really is stopped and lets it recover the instant
+    // the relay is back. (A relay restart zeroes the relay's counters; the cache
+    // can then show a few seconds of pre-restart numbers, and the next successful
+    // pull overwrites it.)
+    //
+    // frame.ready 是看板「这一帧能不能当事实说」的唯一判据（2026-10-07 报障：从出现到
+    // 加载出数据那段中间态，卡面把「还没取到数」画成「什么都没跑」）。ready:false 只可能
+    // 出现在两种地方：relay 活着但这一拍没答上且手里没有可续的陈旧快照；以及这个进程压根
+    // 没有数据源。此时不发一份看起来像数据的空壳，看板自己盖加载态。
+    // 超时这一路明确不去叫自家收集器：它不经流量，交回来的是「运行中 + 全空读数」的假帧。
+    const token = relayPullToken();
+    const pulled = await fetchRelayAgents(relayRoot, token);
+    if (Array.isArray(pulled)) {
+      lastPulledAgents = { at: Date.now(), agents: pulled };
+      sendJson(res, 200, { ok: true, agents: pulled, frame: { ready: true, source: "relay" } });
+      return;
+    }
+    if (pulled && pulled.pullTimeout === true) {
+      if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+        sendJson(res, 200, {
+          ok: true, agents: lastPulledAgents.agents, frame: { ready: true, source: "relay-stale" },
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true, agents: [], frame: { ready: false, reason: "relay-timeout" },
+      });
+      return;
+    }
+    if (lastPulledAgents && Date.now() - lastPulledAgents.at <= PULLED_AGENTS_STALE_MAX_MS) {
+      sendJson(res, 200, {
+        ok: true, agents: lastPulledAgents.agents, frame: { ready: true, source: "relay-stale" },
+      });
+      return;
+    }
+    if (!metricsCollector) {
+      sendJson(res, 200, {
+        ok: true, agents: [], frame: { ready: false, reason: "no-source" },
+      });
+      return;
+    }
+    try {
+      const agents = await metricsCollector.getAgentsStatus();
+      sendJson(res, 200, {
+        ok: true, agents, frame: { ready: true, source: "panel-local" },
+      });
+    } catch (err) {
+      sendJson(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  function readJsonBody(req) {
+    return new Promise((resolve, reject) => {
+      let size = 0;
+      const chunks = [];
+      let tooLarge = false;
+      req.on("data", (c) => {
+        size += c.length;
+        if (size > MAX_BODY_BYTES) {
+          if (!tooLarge) {
+            tooLarge = true;
+            reject(new BodyTooLargeError());
+          }
+          // Keep draining (and zero) further chunks so the socket does not
+          // hang on unread request data; panel bodies can carry API keys.
+          if (Buffer.isBuffer(c)) c.fill(0);
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on("end", () => {
+        if (tooLarge) return;
+        try {
+          const str = Buffer.concat(chunks).toString("utf8");
+          resolve(str ? JSON.parse(str) : {});
+        } catch (e) {
+          reject(e);
+        }
+      });
+      req.on("error", reject);
+    });
+  }
+
+  // Shared usage journal: appends claude session-end rows here and doubles as
+  // the read source for the lazily built statsService. Same-dir appendFileSync
+  // 'a' appends are safe within this single process.
+  function usageJournalLazy() {
+    if (!usageJournal) usageJournal = createUsageJournal({ dir: join(relayRoot, "usage") });
+    return usageJournal;
+  }
+
+  // BYOK 导入服务惰性装配：storeRoot 用面板同一个数据根（store.json 所在），
+  // 端点本地配置扫 homeDir 下的各端点目录；removeFn 绑定删除器，备份落数据根
+  // backups/（与数据搬迁同一备份约定；面板是组合根，backupRoot 以这里为准，
+  // 服务自带的默认备份目录不生效）。两个真模块由并行工人交付，动态 import
+  // 让它们缺席或半成品时只拖垮这两条路由，不影响 panel.mjs 整体加载。
+  async function byokImportServiceLazy() {
+    if (!byokImportService) {
+      const [{ createByokImportService }, { removeImportedEntries }] = await Promise.all([
+        import("./byok-import.mjs"),
+        import("./byok-remove.mjs"),
+      ]);
+      byokImportService = createByokImportService({
+        storeRoot: relayRoot,
+        homeDir: homedir(),
+        env: base,
+        removeFn: (entries, opts = {}) =>
+          removeImportedEntries(entries, { ...opts, backupRoot: join(relayRoot, "backups") }),
+      });
+    }
+    return byokImportService;
+  }
+
+  // Session-end journaling. The per-launch reporter POSTs cumulative
+  // snapshots and a final { ended:true }; that final report is the session's
+  // durable end record for the usage stats (the requests journal only covers
+  // the resident relay paths, so there is no double counting). Dedupe key is
+  // PID + relay token: the token distinguishes a recycled PID's new session,
+  // and repeat ended reports for the same session journal exactly one row.
+  // agentId 取自上报体（老 reporter 不带 → 回落 claude，行为不变）。
+  const journaledSessions = new Set();
+  const sessionFirstSeen = new Map();
+  function journalSessionEnd(token, body) {
+    const pid = Number(body?.pid);
+    if (!Number.isFinite(pid) || pid <= 0) return;
+    const key = `${pid}:${token}`;
+    if (body.ended !== true) {
+      if (!sessionFirstSeen.has(key)) sessionFirstSeen.set(key, Date.now());
+      return;
+    }
+    if (journaledSessions.has(key)) return;
+    if (journaledSessions.size >= 4096) journaledSessions.clear(); // bound; ended fires once per session
+    journaledSessions.add(key);
+    const endTs = Date.now();
+    const startTs = sessionFirstSeen.get(key) ?? endTs;
+    sessionFirstSeen.delete(key);
+    const agentId = typeof body.agentId === "string" && body.agentId.trim() ? body.agentId.trim() : "claude";
+    usageJournalLazy().appendSession({
+      ts: endTs,
+      agentId,
+      event: "end",
+      startTs,
+      durationMs: Math.max(0, endTs - startTs),
+      prompt: Number(body.promptTokens) || 0,
+      completion: Number(body.completionTokens) || 0,
+      cached: Number(body.cachedTokens) || 0,
+    });
+  }
+
+  async function handleSessionReport(req, res) {
+    try {
+      const body = await readJsonBody(req);
+      const authHeader = req.headers["authorization"] || "";
+      const token = authHeader.replace(/^Bearer\s+/i, "");
+      if (token) {
+        journalSessionEnd(token, body);
+        metricsCollector?.reportSession(token, body);
+      }
+      sendJson(res, 200, { ok: true });
+    } catch (err) {
+      sendJson(res, err.statusCode ?? 400, { ok: false, error: err.message });
+    }
+  }
+
+  // panel.html/panel.css/panel.js 内存缓存 + ETag/304。每请求 statSync 校验
+  // mtimeMs:size，不变即复用内存 body；ETag 由 size+mtimeMs 派生；
+  // Cache-Control: no-cache 强制每次 revalidate，If-None-Match 命中回 304。
+  // 缓存键含 resolved 路径（测试会切 ANYSWITCH_PANEL_HTML env override，防串内容）。
+  // statSync 失败不命中/不写缓存，404 JSON 语义原样保留。
+  let panelHtmlCache = null; // { path, mtimeMs, size, body, etag }
+  function servePanelFile(res, req, htmlPath, contentType) {
+    let st = null;
+    try {
+      st = statSync(htmlPath);
+    } catch {
+      st = null; // 缺失/不可读 → 不命中不写缓存，走原 404 语义
+    }
+    let cached = panelHtmlCache;
+    if (!(st && cached && cached.path === htmlPath
+      && cached.mtimeMs === st.mtimeMs && cached.size === st.size)) {
+      cached = null;
+      let body;
+      try {
+        body = readFileSync(htmlPath, "utf8");
+      } catch {
+        res.writeHead(404, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "panel.html not found", path: htmlPath }));
+      }
+      if (!st) {
+        // statSync 失败但读到了内容（竞态）：不写缓存、不发 ETag，原样直出。
+        res.writeHead(200, { "content-type": contentType });
+        return res.end(body);
+      }
+      cached = { path: htmlPath, mtimeMs: st.mtimeMs, size: st.size, body, etag: `"${st.size}-${st.mtimeMs}"` };
+      panelHtmlCache = cached;
+    }
+    const revalidateHeaders = { etag: cached.etag, "cache-control": "no-cache" };
+    if (req?.headers?.["if-none-match"] === cached.etag) {
+      res.writeHead(304, revalidateHeaders);
+      return res.end();
+    }
+    res.writeHead(200, { "content-type": contentType, ...revalidateHeaders });
+    return res.end(cached.body);
+  }
+
+  async function handle(req, res) {
+    const url = new URL(req.url, "http://127.0.0.1");
+    const path = url.pathname;
+    const method = req.method;
+
+    if (method === "POST" && path.startsWith("/panel/api/") && !isTrustedPanelMutation(req)) {
+      return sendJson(res, 403, { ok: false, error: "csrf" });
+    }
+
+    // The panel page is served to any loopback peer. No login box. Writes are
+    // gated above; GETs stay tokenless. Only the control plane serves it: two
+    // byte-identical pages on two ports would put every lifecycle button at the
+    // mercy of whichever process happens to answer, and on 47821 that process is
+    // the relay — which cannot restart itself without dying mid-request.
+    if (path === "/panel" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      if (method === "HEAD") {
+        res.writeHead(200, { "content-length": 0 });
+        return res.end();
+      }
+      return servePanelFile(res, req, resolvePanelHtmlPath(), "text/html; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/panel.css" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_PANEL_CSS, "text/css; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/panel.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_PANEL_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm.css" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_CSS, "text/css; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm-fit.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_FIT_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm-unicode11.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_UNICODE11_JS, "text/javascript; charset=utf-8");
+    }
+    if (path === "/panel/assets/xterm-webgl.js" && (method === "GET" || method === "HEAD")) {
+      if (hostKind !== "panel-host") {
+        res.writeHead(302, { location: CONTROL_PLANE_PANEL_URL });
+        return res.end();
+      }
+      return servePanelFile(res, req, REPO_XTERM_WEBGL_JS, "text/javascript; charset=utf-8");
+    }
+
+    if (path === "/panel/assets/logo.png" && (method === "GET" || method === "HEAD")) {
+      let body;
+      try {
+        body = readFileSync(REPO_PANEL_LOGO);
+      } catch {
+        return sendJson(res, 404, { error: "logo.png not found" });
+      }
+      res.writeHead(200, {
+        "content-type": "image/png",
+        "content-length": body.length,
+        "cache-control": "no-cache",
+      });
+      return res.end(method === "HEAD" ? undefined : body);
+    }
+
+    if (path === "/panel/api/app-info" && method === "GET") return sendJson(res, 200, appInfo);
+    if (path === "/panel/api/updates" && method === "GET") {
+      try {
+        const service = await getReleaseService();
+        return sendJson(res, 200, await service.getAppUpdate({ force: url.searchParams.get("refresh") === "1" }));
+      } catch {
+        return sendJson(res, 200, { currentVersion: appInfo.version, state: "error", checkedAt: new Date().toISOString(), release: null, errorCode: "update_unavailable" });
+      }
+    }
+    if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
+      const id = path.slice("/panel/api/environment/latest/".length);
+      if (!["claude", "codex", "codex-desktop", "opencode", "pi", "kimi", "dsh", "dsh-desktop", "zcode", "qoder", "qoder-cli", "grok", "claude-desktop", "kimi-desktop"].includes(id)) {
+        return sendJson(res, 404, { error: "unknown_client", message: "未找到这个客户端" });
+      }
+      try {
+        const service = await getReleaseService();
+        const result = await service.getClientLatest(id, { force: url.searchParams.get("refresh") === "1" });
+        const localVersion = url.searchParams.get("localVersion");
+        let comparison = "unknown";
+        if (result.state === "ok" && localVersion && localVersion.length <= 128) {
+          const { compareVersions } = await import("./version-check.mjs");
+          const order = compareVersions(localVersion, result.version);
+          if (order !== null) comparison = order < 0 ? "update_available" : order > 0 ? "ahead" : "current";
+        }
+        return sendJson(res, 200, { ...result, comparison });
+      } catch {
+        return sendJson(res, 200, { state: "error", version: null, url: null, source: "", checkedAt: new Date().toISOString(), errorCode: "update_unavailable", comparison: "unknown" });
+      }
+    }
+    if (path === "/panel/api/environment/update" && method === "POST") return handleClientUpdate(req, res);
+    if (path === "/panel/api/environment/updates/active" && method === "GET") return handleClientUpdatesActive(res);
+    if (path.startsWith("/panel/api/environment/update/") && method === "GET") {
+      return handleClientUpdateStatus(res, path.slice("/panel/api/environment/update/".length));
+    }
+    if (path === "/panel/api/self-update" && method === "POST") return handleSelfUpdateStart(req, res);
+    if (path === "/panel/api/self-update/apply" && method === "POST") return handleSelfUpdateApply(req, res);
+    if (path === "/panel/api/self-update/active" && method === "GET") return handleSelfUpdateActive(res);
+    if (path === "/panel/api/self-update/last" && method === "GET") return handleSelfUpdateLast(res);
+    if (path.startsWith("/panel/api/self-update/") && method === "GET") return handleSelfUpdateRunStatus(res, path.slice("/panel/api/self-update/".length));
+    if (path === "/panel/api/environment" && method === "GET") {
+      try {
+        const service = await getEnvironmentService();
+        return sendJson(res, 200, await service.getState({ force: url.searchParams.get("refresh") === "1" }));
+      } catch {
+        return sendJson(res, 500, { error: "environment_unavailable", message: "暂时无法检测本地环境" });
+      }
+    }
+    if (path === "/panel/api/status" && method === "GET") return handleStatus(res);
+    if (path === "/panel/api/relay/status" && method === "GET") return handleRelayStatus(res);
+    if (path === "/panel/api/relay/start" && method === "POST") return handleRelayStart(res);
+    if (path === "/panel/api/relay/stop" && method === "POST") return handleRelayStop(res);
+    if (path === "/panel/api/relay/restart" && method === "POST") return handleRelayRestart(res);
+    if (path === "/panel/api/panel-host/restart" && method === "POST") return handlePanelHostRestart(res);
+    if (path === "/panel/api/sync-agents" && method === "POST") return handleAgentSync(res);
+    if (path === "/panel/api/sync-status" && method === "GET") return handleSyncStatus(res);
+    if (path === "/panel/api/agents" && method === "GET") return handleAgents(res);
+    if (path === "/panel/api/model-stability" && method === "GET") return handleModelStability(res);
+    if (path === "/panel/api/route-chain/runtime" && method === "GET") return handleRouteChainRuntime(res);
+    if (path === "/panel/api/session/report" && method === "POST") return handleSessionReport(req, res);
+    if (path === "/panel/api/terminal/default-cwd" && method === "GET") return proxyTerminal(req, res, "/terminal/default-cwd", "GET");
+    if (path === "/panel/api/terminal/host/status" && method === "GET") return handleTerminalHostStatus(res);
+    if (path === "/panel/api/terminal/host/start" && method === "POST") return handleTerminalHostStart(res);
+    if (path === "/panel/api/terminal/host/stop" && method === "POST") return handleTerminalHostStop(req, res);
+    if (path === "/panel/api/terminal/sessions" && method === "GET") return handleTerminalSessionsList(res);
+    if (path === "/panel/api/terminal/sessions" && method === "POST") {
+      try {
+        return proxyTerminal(req, res, "/terminal/sessions", "POST", await readJsonBody(req));
+      } catch (error) {
+        return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+      }
+    }
+    if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);
+    if (path.startsWith("/panel/api/terminal/sessions/")) {
+      const suffix = path.slice("/panel/api/terminal/sessions/".length);
+      if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
+      if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);
+      if (method === "POST") {
+        try {
+          return proxyTerminal(req, res, `/terminal/sessions/${suffix}`, "POST", await readJsonBody(req));
+        } catch (error) {
+          return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+        }
+      }
+    }
+    if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
+    if (path === "/panel/api/logs" && method === "GET") return handleLogsSSE(res, req);
+    if (path === "/panel/api/agents-activity" && method === "GET") return handleAgentsActivitySSE(res, req);
+    if (path === "/panel/api/logs/ingest" && method === "POST") return handleLogIngest(req, res);
+    if (path === "/panel/api/logs/clear" && method === "POST") return handleLogClear(res);
+    if (path === "/panel/api/autostart" && method === "GET") return handleAutostartStatus(res);
+    if (path === "/panel/api/autostart/enable" && method === "POST") return handleAutostartEnable(res);
+    if (path === "/panel/api/autostart/disable" && method === "POST") return handleAutostartDisable(res);
+
+    if (path === "/panel/api/settings" && method === "GET") {
+      try {
+        const loaded = loadSettings(settingsFile, base);
+        // Watchdog drift visibility: what the registry/process ACTUALLY do,
+        // next to what settings.json says. Served from a probe snapshot
+        // (stale-while-revalidate, see createWatchdogSnapshot) — both probes
+        // cost ~1s+ and this endpoint is fetched on every panel page load.
+        const watchdog = await watchdogSnapshot.get();
+        return sendJson(res, 200, {
+          ok: true,
+          settings: loaded.settings,
+          keepAlive: loaded.keepAlive,
+          sparkWindowPoints: loaded.sparkWindowPoints,
+          watchdog,
+        });
+      } catch (err) {
+        return sendJson(res, 500, { ok: false, error: err.message });
+      }
+    }
+
+    if (path === "/panel/api/settings" && method === "POST") {
+      try {
+        const body = await readJsonBody(req);
+        // followAgent is backed by the standalone watchdog: registry entry
+        // FIRST (durable across reboots) — if reg.exe fails, refuse to save so
+        // settings.json never claims a follow mode that will not survive a
+        // reboot. Only then persist and bring the process up/down for this
+        // session (best-effort; the registry entry is the durable path).
+        const togglesWatchdog = typeof body.followAgent === "boolean";
+        if (togglesWatchdog) {
+          const reg = body.followAgent ? await enableWatchdogAutostartFn() : await disableWatchdogAutostartFn();
+          if (!reg.ok) {
+            return sendJson(res, 500, { ok: false, error: `watchdog autostart: ${reg.error ?? "registry write failed"}` });
+          }
+        }
+        const updated = saveSettings(settingsFile, body, base);
+        if (metricsCollector && typeof metricsCollector.setSparkWindowPoints === "function") {
+          metricsCollector.setSparkWindowPoints(updated.sparkWindowPoints);
+        }
+        // 关掉运行日志时把已缓冲的内容一并丢掉。不丢的话，重新打开会先涌出一批关闭
+        // 之前的旧行，看着像「关掉没生效」；clear() 同时向所有打开的面板窗口广播清空
+        // 帧，所以这一下不只清当前这个页面。重新开启时窗口从新日志开始，符合预期。
+        if (body.loggingEnabled === false) {
+          try {
+            logger?.clear?.();
+          } catch (err) {
+            logger?.warn?.(`运行日志已关闭，但缓冲清空失败：${err.message}`);
+          }
+        }
+        // 注入推理强度 controls what every endpoint's config is told about
+        // levels, and those configs are only rewritten by a sync. Fire one so
+        // the toggle takes effect immediately instead of waiting for the next
+        // store change. Best-effort: the setting is already saved, and a failed
+        // sync just leaves the endpoints as they were until the next one.
+        if (typeof body.injectThinkingEffort === "boolean") {
+          try {
+            const syncResult = await spawnAgentSyncFn({ port: 47821, logger });
+            // 与启动/监视器两处同口径落盘（source "settings"），让这条路径的
+            // 失败同样能上屏；落盘失败不影响设置保存的既有行为。
+            try {
+              writeSyncStatus(relayRoot, syncStatusFromResult(syncResult, "settings"));
+            } catch (err) {
+              logger?.warn?.(`sync status write failed: ${err.message}`);
+            }
+          } catch (err) {
+            logger?.warn?.(`推理强度设置已保存，但端点重新同步失败：${err.message}`);
+          }
+        }
+        if (togglesWatchdog) {
+          try {
+            if (body.followAgent) await spawnWatchdogFn();
+            else await stopWatchdogFn();
+          } catch (err) {
+            logger?.warn?.(`watchdog process control failed: ${err.message}`);
+          }
+          // followAgent just toggled the registry task / watchdog process:
+          // drop the drift snapshot after the transition settles so the next
+          // GET re-probes instead of serving pre-toggle values until the TTL
+          // lapses.
+          watchdogSnapshot.invalidate();
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          settings: updated.settings,
+          keepAlive: updated.keepAlive,
+          sparkWindowPoints: updated.sparkWindowPoints,
+        });
+      } catch (err) {
+        return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+      }
+    }
+
+    // ── Store tab routes ───────────────────────────────────────────────
+    // Write-side store management (add/rotate/test/refresh/filter/delete).
+    // Business validation failures and CAS conflicts are 200s carrying
+    // { ok:false, error } ("cas-conflict" for a lost compare-and-swap race)
+    // so the UI can surface them inline; missing parameters are 400s.
+    // Plaintext keys never appear in any response.
+    if (path.startsWith("/panel/api/store/")) {
+      if (!storeService) {
+        storeService = createStoreService({ paths: defaultStorePaths(storePaths?.root) });
+      }
+      const svc = storeService;
+
+      if (path === "/panel/api/store/state" && method === "GET") {
+        try {
+          return sendJson(res, 200, await svc.getState());
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      // 看板轻量端点：只下发 routingChains + 名字映射，不带全量 store payload。
+      if (path === "/panel/api/store/board-state" && method === "GET") {
+        try {
+          return sendJson(res, 200, await svc.getBoardState());
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} must be a non-empty string`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+
+          if (path === "/panel/api/store/add") {
+            const result = await svc.addProvider({
+              id: requireString(body.id, "id"),
+              displayName: body.displayName,
+              baseURLs: requireString(body.baseURLs, "baseURLs"),
+              apiKey: requireString(body.apiKey, "apiKey"),
+              ...(Array.isArray(body.modelIds) ? { modelIds: body.modelIds } : {}),
+            });
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/rotate") {
+            const result = await svc.rotateProvider({
+              id: requireString(body.id, "id"),
+              ...(typeof body.apiKey === "string" ? { apiKey: body.apiKey } : {}),
+              ...(typeof body.baseURLs === "string" ? { baseURLs: body.baseURLs } : {}),
+            });
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/test") {
+            const result = await svc.testProvider(requireString(body.id, "id"));
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/refresh") {
+            const result = await svc.refreshProviders(
+              typeof body.id === "string" && body.id.trim() ? body.id.trim() : undefined,
+            );
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/filter") {
+            if (!Array.isArray(body.modelFilter)) {
+              return sendJson(res, 400, { ok: false, error: "modelFilter must be an array of model IDs" });
+            }
+            const result = await svc.saveFilter({
+              id: requireString(body.id, "id"),
+              modelFilter: body.modelFilter,
+            });
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/models/add") {
+            const providerId = requireString(body.providerId, "providerId");
+            if (!Array.isArray(body.modelIds)) {
+              return sendJson(res, 400, { ok: false, reason: "bad-request", message: "modelIds must be an array of model IDs" });
+            }
+            const result = await svc.addModels(providerId, body.modelIds);
+            if (!result.ok) {
+              const message =
+                result.reason === "model-exists"
+                  ? `模型已存在: ${(result.duplicates ?? []).join(", ")}`
+                  : result.reason === "unknown-provider"
+                    ? `Provider ${providerId} is not managed by Anyswitch`
+                    : (result.error ?? result.reason);
+              return sendJson(res, 400, { ok: false, reason: result.reason, message });
+            }
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/models/remove") {
+            const providerId = requireString(body.providerId, "providerId");
+            if (!Array.isArray(body.modelIds)) {
+              return sendJson(res, 400, { ok: false, reason: "bad-request", message: "modelIds must be an array of model IDs" });
+            }
+            const result = await svc.removeModels(providerId, body.modelIds);
+            if (!result.ok) {
+              const message =
+                result.reason === "model-not-found"
+                  ? `模型不存在: ${(result.missing ?? []).join(", ")}`
+                  : result.reason === "unknown-provider"
+                    ? `Provider ${providerId} is not managed by Anyswitch`
+                    : (result.error ?? result.reason);
+              return sendJson(res, 400, { ok: false, reason: result.reason, message });
+            }
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/pool/create") {
+            if (!Array.isArray(body.members)) {
+              return sendJson(res, 400, { ok: false, error: "members must be an array of provider ids" });
+            }
+            const result = await svc.createPool({
+              poolId: requireString(body.poolId, "poolId"),
+              displayName: requireString(body.displayName, "displayName"),
+              members: body.members,
+            });
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/pool/delete") {
+            const result = await svc.deletePool(requireString(body.poolId, "poolId"));
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/rename") {
+            const result = await svc.renameProvider(
+              requireString(body.id, "id"),
+              requireString(body.displayName, "displayName"),
+            );
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/pool/rename") {
+            const result = await svc.renamePool(
+              requireString(body.poolId, "poolId"),
+              requireString(body.displayName, "displayName"),
+            );
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/pool/members/update") {
+            if (!Array.isArray(body.members)) {
+              return sendJson(res, 400, { ok: false, error: "members must be an array of provider ids" });
+            }
+            const result = await svc.updatePoolMembers({
+              poolId: requireString(body.poolId, "poolId"),
+              members: body.members,
+            });
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/reorder") {
+            // 渠道拖拽重排：order 为 provider id 的排列，业务校验（排列完整性、
+            // 池成员连续成块）在 service 层。
+            if (!Array.isArray(body.order)) {
+              return sendJson(res, 400, { ok: false, error: "order must be an array of provider ids" });
+            }
+            const result = await svc.reorderProviders(body.order);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/route-chain/save") {
+            // Route layer checks shape only (endpointId string, chain array);
+            // per-element {node, model} validation lives in the service.
+            if (typeof body.endpointId !== "string" || !body.endpointId.trim()) {
+              return sendJson(res, 400, { ok: false, error: "endpointId must be a non-empty string" });
+            }
+            if (!Array.isArray(body.chain)) {
+              return sendJson(res, 400, { ok: false, error: "chain must be an array of { node, model } entries" });
+            }
+            const result = await svc.saveRouteChain(body.endpointId.trim(), body.chain);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/route-chain/enabled") {
+            // 自动路由 per-endpoint 启用开关：开关状态存 store.routingChains
+            // [endpointId].enabled，链路本身不动。
+            if (typeof body.endpointId !== "string" || !body.endpointId.trim()) {
+              return sendJson(res, 400, { ok: false, error: "endpointId must be a non-empty string" });
+            }
+            if (typeof body.enabled !== "boolean") {
+              return sendJson(res, 400, { ok: false, error: "enabled must be a boolean" });
+            }
+            const result = await svc.setRouteChainEnabled(body.endpointId.trim(), body.enabled);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/route-chain/delete") {
+            if (typeof body.endpointId !== "string" || !body.endpointId.trim()) {
+              return sendJson(res, 400, { ok: false, error: "endpointId must be a non-empty string" });
+            }
+            const result = await svc.deleteRouteChain(body.endpointId.trim());
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/virtual-model/save") {
+            // Route layer checks shape only (name string, chain array, optional
+            // previousName string); per-element {node, model} validation and
+            // the rename rules live in the service.
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            if (!Array.isArray(body.chain)) {
+              return sendJson(res, 400, { ok: false, error: "chain must be an array of { node, model } entries" });
+            }
+            if (body.previousName !== undefined
+              && (typeof body.previousName !== "string" || !body.previousName.trim())) {
+              return sendJson(res, 400, { ok: false, error: "previousName must be a non-empty string when present" });
+            }
+            const result = await svc.saveVirtualModel(
+              body.name.trim(),
+              body.chain,
+              body.previousName === undefined ? undefined : body.previousName.trim(),
+            );
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/virtual-model/enabled") {
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            if (typeof body.enabled !== "boolean") {
+              return sendJson(res, 400, { ok: false, error: "enabled must be a boolean" });
+            }
+            const result = await svc.setVirtualModelEnabled(body.name.trim(), body.enabled);
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/virtual-model/delete") {
+            if (typeof body.name !== "string" || !body.name.trim()) {
+              return sendJson(res, 400, { ok: false, error: "name must be a non-empty string" });
+            }
+            const result = await svc.deleteVirtualModel(body.name.trim());
+            return sendJson(res, 200, result);
+          }
+          if (path === "/panel/api/store/delete") {
+            const result = await svc.deleteProvider(requireString(body.id, "id"));
+            return sendJson(res, 200, result);
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── Usage stats routes ───────────────────────────────────────────
+    // Read-only aggregation over the on-disk usage journal; both the panel
+    // and the relay process read the same files, so no cross-process pull is
+    // needed. GETs carry no CSRF gate. days defaults to 7 and clamps onto
+    // the supported {1, 7} windows.
+    //
+    // 渠道显示名解析：journal 行按不可变的渠道/号池 id 分键，统计视图的
+    // id→displayName 映射在这里做（读取时解析，改名即时生效、删渠道回退裸
+    // id）。池 id 可复用成员渠道 id（wire 语义 pools-before-providers 同
+    // 款），同名时池的显示名赢。getBoardState 只带名字映射不带模型全量，
+    // 快照 15s TTL，读失败沿用旧表。
+    let statsChannelLabels = { at: 0, map: new Map() };
+    const refreshStatsChannelLabels = async () => {
+      if (Date.now() - statsChannelLabels.at < 15000) return;
+      try {
+        if (!storeService) {
+          storeService = createStoreService({ paths: defaultStorePaths(storePaths?.root) });
+        }
+        const board = await storeService.getBoardState();
+        // 先池后渠道、占用键不覆盖 —— 同名共存时池赢
+        const map = { ...board.providerNames, ...board.poolNames };
+        statsChannelLabels = { at: Date.now(), map: new Map(Object.entries(map)) };
+      } catch {
+        // store 不可读：保留旧映射（首次失败则全部回退裸 id），不阻塞统计
+        statsChannelLabels.at = Date.now();
+      }
+    };
+    if (path.startsWith("/panel/api/stats/")) {
+      if (!statsService) {
+        statsService = createUsageStats({
+          journal: usageJournalLazy(),
+          channelLabel: (id) => statsChannelLabels.map.get(id) ?? null,
+        });
+      }
+      await refreshStatsChannelLabels();
+      const svc = statsService;
+
+      // 请求日志（统计页「请求日志」子 tab）：journal 行级透传查询，不聚合。
+      // range=today|7d|30d|all 映射到本地自然日闭区间（all=90 天 retention 窗，
+      // 日历运算推起点防 DST）；status=ok→ok=true，其余失败档→errKind；
+      // agent/provider/model 原值直传（agent="__none__" 是「未知来源」哨兵，
+      // 由 journal 匹配 agentId 为 null 的行）；非法 range/status/sort/dir 一律
+      // 回落默认，pageSize 只认 {20,50,100}。GET 无 CSRF 门（与 stats 一致）。
+      if (path === "/panel/api/stats/logs" && method === "GET") {
+        try {
+          const sp = url.searchParams;
+          const rangeRaw = sp.get("range");
+          const range = LOG_RANGES.includes(rangeRaw) ? rangeRaw : "today";
+          const nowTs = Date.now();
+          const todayKey = dayKey(nowTs);
+          const [yy, mm, dd] = todayKey.split("-").map(Number);
+          const fromDay = dayKey(new Date(yy, mm - 1, dd - LOG_RANGE_BACK_DAYS[range]).getTime());
+          const statusRaw = sp.get("status");
+          const status = LOG_STATUSES.includes(statusRaw) ? statusRaw : "all";
+          const sortRaw = sp.get("sort");
+          const sortBy = sortRaw === "durationMs" ? "durationMs" : "ts";
+          const dirRaw = sp.get("dir");
+          const sortDir = dirRaw === "asc" ? "asc" : "desc";
+          let page = Number.parseInt(sp.get("page") ?? "", 10);
+          if (!Number.isFinite(page) || page < 1) page = 1;
+          const pageSizeRaw = Number.parseInt(sp.get("pageSize") ?? "", 10);
+          const pageSize = LOG_PAGE_SIZES.includes(pageSizeRaw) ? pageSizeRaw : 20;
+          const q = (name) => {
+            const v = sp.get(name);
+            return v === null || v === "" ? undefined : v;
+          };
+          const result = usageJournalLazy().readRequestsLog({
+            fromDay,
+            toDay: todayKey,
+            agentId: q("agent"),
+            providerId: q("provider"),
+            model: q("model"),
+            ok: status === "ok" ? true : undefined,
+            errKind: status !== "all" && status !== "ok" ? status : undefined,
+            sortBy,
+            sortDir,
+            page,
+            pageSize,
+          });
+          // 渠道显示名读取时解析（同 stats 契约：id→displayName，失败回落裸 id）；
+          // modelDisplay 剥 wire 前缀（stripWirePrefix 与聚合层同一实现）。
+          // journal 行是共享缓存对象，禁止原地改——映射出新对象。
+          const labelChannel = (id) => statsChannelLabels.map.get(id) ?? id;
+          const rows = result.rows.map((r) => ({
+            ...r,
+            providerLabel: labelChannel(r.providerId ?? ""),
+            modelDisplay: stripWirePrefix(r.model).model,
+          }));
+          const facets = {
+            // agents 的 label 就是 id 原值（null 保持 null，前端翻成「未知来源」）；
+            // providers/models 过滤 null/空串——无哨兵语义的维度里它们不可选。
+            agents: result.facets.agents.map((id) => ({ id, label: id })),
+            providers: result.facets.providers
+              .filter((id) => typeof id === "string" && id !== "")
+              .map((id) => ({ id, label: labelChannel(id) })),
+            models: result.facets.models
+              .filter((raw) => typeof raw === "string" && raw !== "")
+              .map((raw) => ({ raw, display: stripWirePrefix(raw).model })),
+          };
+          return sendJson(res, 200, {
+            ok: true,
+            generatedAt: nowTs,
+            range,
+            rows,
+            total: result.total,
+            page: result.page,
+            pageSize: result.pageSize,
+            facets,
+          });
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (path === "/panel/api/stats/state" && method === "GET") {
+        try {
+          const raw = url.searchParams.get("days");
+          // Missing ?days= keeps the 7-day default; everything else clamps
+          // onto the supported {1, 7} windows (shared clampStatDays).
+          const days = clampStatDays(raw === null ? NaN : raw);
+          return sendJson(res, 200, await svc.getState({ days }));
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── Sessions tab routes ────────────────────────────────────────────
+    // Stateless live scan of the nine agents' on-disk session stores
+    // (session-scan.mjs). A single adapter's failure degrades into
+    // endpointErrors (drives the UI banner) instead of failing the whole
+    // list. GETs carry no CSRF gate; POST delete is covered by the
+    // dual-header mutation gate above. Path traversal defense (canonicalize
+    // + per-adapter roots whitelist) lives inside session-scan's delete —
+    // the router only validates the request shape.
+    if (path.startsWith("/panel/api/sessions/")) {
+      if (!sessionScanService) {
+        sessionScanService = {
+          scanAll: sessionScanAll,
+          loadMessages: sessionLoadMessages,
+          deleteSessions: sessionDeleteSessions,
+        };
+      }
+      const svc = sessionScanService;
+
+      if (path === "/panel/api/sessions/list" && method === "GET") {
+        try {
+          // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，
+          // 单 adapter 失败降级进 endpointErrors，路由原样透传。
+          return sendJson(res, 200, await svc.scanAll());
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (path === "/panel/api/sessions/messages" && method === "GET") {
+        const endpoint = url.searchParams.get("endpoint");
+        const file = url.searchParams.get("path");
+        if (!endpoint || !file) {
+          return sendJson(res, 400, { ok: false, error: "endpoint and path query params are required" });
+        }
+        try {
+          const messages = await svc.loadMessages(endpoint, file);
+          // The directory (「对话目录」) rides along with the transcript: session-scan
+          // owns what counts as a round a human typed, so the panel draws turns
+          // instead of re-judging nine transcript formats in the browser.
+          return sendJson(res, 200, { ok: true, messages, turns: sessionBuildTurns(messages) });
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (path === "/panel/api/sessions/delete" && method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          if (!Array.isArray(body?.items) || body.items.length === 0
+            || body.items.some((it) => typeof it?.endpoint !== "string" || !it.endpoint
+              || typeof it?.file !== "string" || !it.file)) {
+            return sendJson(res, 400, { ok: false, error: "items must be a non-empty array of { endpoint, file }" });
+          }
+          const result = await svc.deleteSessions(body.items);
+          // 响应契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
+          return sendJson(res, 200, {
+            ok: result?.ok ?? [],
+            fail: result?.fail ?? [],
+          });
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+
+      return sendJson(res, 404, { ok: false, error: "not found" });
+    }
+
+    // ── Skills tab routes ──────────────────────────────────────────────
+    // Deployment state is derived live from the filesystem; only repoPath
+    // persists (skills.json). Conflict outcomes are 200s carrying
+    // { ok:false, conflict:true, diffs } so the UI can run its confirm flow;
+    // thrown errors become { ok:false, error }.
+    if (path.startsWith("/panel/api/skills/")) {
+      if (!skillsService) skillsService = createSkillsService({ base });
+      const svc = skillsService;
+
+      if (path === "/panel/api/skills/state" && method === "GET") {
+        try {
+          return sendJson(res, 200, { ok: true, ...svc.getState() });
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} 不能为空`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+
+          if (path === "/panel/api/skills/repo") {
+            const result = svc.setRepoPath(requireString(body.repoPath, "repoPath"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/repo/pick") {
+            const result = await svc.pickFolder();
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/repo/import") {
+            const result = await svc.importSkill(requireString(body.sourcePath, "sourcePath"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/repo/import-pick") {
+            const result = await svc.importPickedSkill();
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/repo/import-pick-zip") {
+            const result = await svc.importPickedZip();
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/repo/delete") {
+            const result = await svc.deleteRepoSkill(requireString(body.skillName, "skillName"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/deploy") {
+            const result = await svc.deploy({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+              force: body.force === true,
+            });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/skills/undeploy") {
+            const result = await svc.undeploy({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/merge-local") {
+            const result = await svc.mergeLocalSkill({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/skills/local/delete") {
+            const result = await svc.deleteLocalSkill({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/skills/resolve-conflict") {
+            const direction = requireString(body.direction, "direction");
+            if (direction !== "repo" && direction !== "local") {
+              return sendJson(res, 400, { ok: false, error: 'direction must be "repo" or "local"' });
+            }
+            const result = await svc.resolveConflictSkill({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+              direction,
+            });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/skills/diff") {
+            const result = await svc.diffLocalSkill({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: true, diffs: result.diffs || [] });
+          }
+          // 逐行左右对照（异常卡「查看差异」弹窗）。与上一条同校验、不同粒度：
+          // 这里连"没比"的文件（二进制 / 超限）也一并回清单，弹窗要说清哪些没比。
+          if (path === "/panel/api/skills/diff/content") {
+            const result = await svc.diffSkillContent({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              skillName: requireString(body.skillName, "skillName"),
+            });
+            return sendJson(res, 200, { ok: true, files: result.files || [] });
+          }
+          if (path === "/panel/api/skills/body") {
+            const result = await svc.readSkillBody(requireString(body.relPath, "relPath"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── Prompts tab routes ─────────────────────────────────────────────
+    // Every mutation POST persists via the data plane, then immediately
+    // re-syncs all nine endpoint instruction files. Sync failures land in
+    // the `sync` snapshot (GET state) and never fail the mutation itself;
+    // thrown validation errors become { ok:false, error }.
+    if (path.startsWith("/panel/api/prompts/")) {
+      if (!promptsService) promptsService = createPromptsPanelService({ base });
+      const svc = promptsService;
+
+      if (path === "/panel/api/prompts/state" && method === "GET") {
+        try {
+          return sendJson(res, 200, { ok: true, ...svc.getState() });
+        } catch (err) {
+          return sendJson(res, 500, { ok: false, error: err.message });
+        }
+      }
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} 不能为空`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+          const requireBoolean = (value, field) => {
+            if (typeof value !== "boolean") {
+              const error = new Error(`${field} 必须是布尔值`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value;
+          };
+          // tag is optional; content may be empty but must be a string.
+          const requireContent = (value) => {
+            if (typeof value !== "string") {
+              const error = new Error("content 必须是字符串");
+              error.statusCode = 400;
+              throw error;
+            }
+            return value;
+          };
+
+          if (path === "/panel/api/prompts/master") {
+            const result = svc.setMaster(requireBoolean(body.enabled, "enabled"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/create") {
+            const result = svc.createPreset({
+              title: requireString(body.title, "title"),
+              tag: body.tag ?? "",
+              content: requireContent(body.content),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/update") {
+            const result = svc.updatePreset({
+              id: requireString(body.id, "id"),
+              title: requireString(body.title, "title"),
+              tag: body.tag ?? "",
+              content: requireContent(body.content),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/delete") {
+            const result = svc.deletePreset(requireString(body.id, "id"));
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/reorder") {
+            // 预设拖拽重排：order 为预设 id 的完整排列，业务校验在数据层。
+            if (!Array.isArray(body.order)) {
+              const error = new Error("order 必须是预设 id 数组");
+              error.statusCode = 400;
+              throw error;
+            }
+            const result = svc.reorderPresets(body.order);
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/preset/enable") {
+            const result = svc.setPresetEnabled({
+              id: requireString(body.id, "id"),
+              enabled: requireBoolean(body.enabled, "enabled"),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+          if (path === "/panel/api/prompts/override") {
+            const result = svc.setOverride({
+              endpointId: requireString(body.endpointId, "endpointId"),
+              presetId: requireString(body.presetId, "presetId"),
+              off: requireBoolean(body.off, "off"),
+            });
+            return sendJson(res, 200, { ok: true, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── 数据搬迁（高级选项 tab 的导出 / 导入）──────────────────────────
+    // 导出与导入都只把「路径」过 API：文件本体由后端在磁盘上读写，所以包体积
+    // 与面板那条 1 MiB 请求体上限无关。导入分两步：preview 回摘要与一次性票据，
+    // apply 只认这张票据，路径不由界面传入。业务失败一律 200 + { ok:false, error }。
+    if (path.startsWith("/panel/api/data/")) {
+      if (!dataBundleService) dataBundleService = createDataBundleService({ base });
+      const svc = dataBundleService;
+
+      if (method === "POST") {
+        try {
+          const body = await readJsonBody(req);
+          const requireString = (value, field) => {
+            if (typeof value !== "string" || !value.trim()) {
+              const error = new Error(`${field} 不能为空`);
+              error.statusCode = 400;
+              throw error;
+            }
+            return value.trim();
+          };
+
+          if (path === "/panel/api/data/export-pick" || path === "/panel/api/data/import-pick") {
+            const exporting = path.endsWith("/export-pick");
+            const picked = exporting
+              ? await pickFolderFn({ base, title: "选择导出包的保存位置" })
+              : await pickFileFn({ base, title: "选择要导入的 anyswitch 导出包" });
+            if (picked.cancelled) return sendJson(res, 200, { ok: true, cancelled: true });
+            const result = exporting
+              ? await svc.exportBundle({ targetDir: picked.path })
+              : await svc.previewBundle(picked.path);
+            return sendJson(res, 200, { ok: result.ok !== false, pickedPath: picked.path, ...result });
+          }
+          if (path === "/panel/api/data/export") {
+            const result = await svc.exportBundle({ targetDir: requireString(body.targetDir, "targetDir") });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/data/import-preview") {
+            const result = await svc.previewBundle(requireString(body.zipPath, "zipPath"));
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/data/import-apply") {
+            const result = await svc.applyBundle({
+              token: requireString(body.token, "token"),
+              skillsMode: typeof body.skillsMode === "string" ? body.skillsMode : undefined,
+              skillsTarget: typeof body.skillsTarget === "string" ? body.skillsTarget.trim() : undefined,
+            });
+            // 只有真的换掉了 settings.json 才有对齐的必要；包里没带设置文件时
+            // 盘上还是原来那份，计划与进程本来就和它对应，别去动。
+            if (result.ok !== false && result.applied?.settings === true) {
+              result.watchdog = await reconcileFollowAgentAfterImport(result.applied.followAgent === true);
+              for (const w of result.watchdog.warnings) logger?.warn?.(`导入后 followAgent 对齐：${w}`);
+            }
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    // ── BYOK 渠道导入（扫端点本地手配渠道 → 勾选入库 → 默认删本地原始条目）──
+    // 与数据搬迁同一惯例：业务失败一律 200 + { ok:false, error }（ticket-expired、
+    // unknown-selection 都是可用信息，不是异常）；校验错抛 statusCode 按码落地。
+    // scan 无 body；响应形状由服务保证（entries 不含明文 key）。票据只活在内存，
+    // 面板宿主退出时经 dropByokImportTickets 丢掉。
+    if (path.startsWith("/panel/api/byok-import/")) {
+      if (method === "POST") {
+        try {
+          if (path === "/panel/api/byok-import/scan") {
+            const svc = await byokImportServiceLazy();
+            const result = await svc.scanLocalConfigs();
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+          if (path === "/panel/api/byok-import/apply") {
+            // readJsonBody 必须在第一个 await 之前挂上 data/end 监听：客户端的
+            // 请求体可能随微任务立刻到达，先 await 装配服务会永久丢 body。
+            const bodyPromise = readJsonBody(req);
+            const svc = await byokImportServiceLazy();
+            const body = await bodyPromise;
+            const requireString = (value, field) => {
+              if (typeof value !== "string" || !value.trim()) {
+                const error = new Error(`${field} 不能为空`);
+                error.statusCode = 400;
+                throw error;
+              }
+              return value.trim();
+            };
+            if (!Array.isArray(body.keys) || body.keys.some((k) => typeof k !== "string" || !k.trim())) {
+              const error = new Error("keys 必须是非空字符串数组");
+              error.statusCode = 400;
+              throw error;
+            }
+            if (typeof body.deleteLocal !== "boolean") {
+              const error = new Error("deleteLocal 必须是布尔值");
+              error.statusCode = 400;
+              throw error;
+            }
+            const result = await svc.applyImport({
+              ticket: requireString(body.ticket, "ticket"),
+              keys: body.keys.map((k) => k.trim()),
+              deleteLocal: body.deleteLocal,
+            });
+            return sendJson(res, 200, { ok: result.ok !== false, ...result });
+          }
+        } catch (err) {
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+        }
+      }
+    }
+
+    sendJson(res, 404, { error: "not found" });
+  }
+
+  return {
+    handle,
+    // Fire the first watchdog probe round early (panel-host calls this once at
+    // startup) so even the very first GET /api/settings is snapshot-served.
+    prewarmWatchdogProbes() {
+      watchdogSnapshot.prewarm();
+    },
+    // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
+    // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。
+    // BYOK 导入票据同样攥着明文 key 内存副本，随同一退出钩子丢掉（panel-host
+    // 只调 dropDataBundleTickets，所以这里一并带上；单独清理走下面的方法）。
+    dropDataBundleTickets() {
+      try {
+        dataBundleService?.dropAllTickets?.();
+      } catch (err) {
+        logger?.warn?.(`导入暂存清理失败：${err.message}`);
+      }
+      this.dropByokImportTickets();
+    },
+    // BYOK 导入票据清理：服务还没建起来时静默跳过（不能为了清理而把服务建起来），
+    // 清理失败也不能卡住退出路径。
+    dropByokImportTickets() {
+      try {
+        byokImportService?.dropTickets?.();
+      } catch (err) {
+        logger?.warn?.(`BYOK 导入票据清理失败：${err.message}`);
+      }
+    },
+  };
+}

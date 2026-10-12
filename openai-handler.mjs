@@ -1,0 +1,630 @@
+import { timingSafeEqual } from "node:crypto";
+import { parseOpenAIPath, PARSE_REASON } from "./openai-path.mjs";
+import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
+import { extractPresentedToken } from "./handler.mjs";
+import { validateStore } from "./store-schema.mjs";
+import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable } from "./pool-routing.mjs";
+import { AUTO_MODEL, resolveChain, resolveVirtualModelEntry, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
+import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
+import { buildChannelModelSlugCatalog } from "./channel-model-slug.mjs";
+
+export function openAIError(type, message) {
+  return { error: { type, message } };
+}
+
+function tokenMatches(presented, expected) {
+  if (typeof presented !== "string" || typeof expected !== "string") return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  try {
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } finally {
+    a.fill(0);
+    b.fill(0);
+  }
+}
+
+const PARSE_STATUS = {
+  [PARSE_REASON.NOT_OPENAI]: 404,
+  [PARSE_REASON.NOT_A_STRING]: 400,
+  [PARSE_REASON.NO_PROVIDER]: 400,
+  [PARSE_REASON.EMPTY_PROVIDER]: 400,
+  [PARSE_REASON.INVALID_PROVIDER]: 400,
+};
+
+// Some upstream gateways (observed: SenseNova) hard-400 any request whose
+// assistant history carries a tool_call with function.arguments === "" (or
+// missing/null); "{}" is accepted. Rewrite only that shape — every other
+// field and message passes through untouched, and the client's body object
+// is never mutated (a normalized copy is built only when something changed).
+function normalizeToolCallArguments(body) {
+  if (!Array.isArray(body.messages)) return body;
+  let touched = false;
+  const messages = body.messages.map((message) => {
+    if (message === null || typeof message !== "object" || message.role !== "assistant" || !Array.isArray(message.tool_calls)) {
+      return message;
+    }
+    let messageTouched = false;
+    const toolCalls = message.tool_calls.map((call) => {
+      const fn = call?.function;
+      if (fn === null || typeof fn !== "object") return call;
+      // Only the truly-empty shapes ("", null, undefined) are rewritten;
+      // non-string values (e.g. an object from a lenient client) pass through
+      // untouched — the relay does not re-encode what it was not asked to fix.
+      if (fn.arguments !== "" && fn.arguments !== null && fn.arguments !== undefined) return call;
+      messageTouched = true;
+      return { ...call, function: { ...fn, arguments: "{}" } };
+    });
+    if (!messageTouched) return message;
+    touched = true;
+    return { ...message, tool_calls: toolCalls };
+  });
+  return touched ? { ...body, messages } : body;
+}
+
+// Upstreams reject an assistant tool_call whose id or function name is empty
+// (observed: stepfun answers 400), and such an entry is unanswerable anyway:
+// no tool message can ever pair with an empty/missing id. A client that
+// replays a corrupted turn then hard-fails every later request of the
+// session, so drop the unusable calls together with the tool messages they
+// can never match, and drop an assistant message the cleanup leaves empty.
+function stripUnusableToolCalls(body) {
+  if (!Array.isArray(body.messages)) return body;
+  const survivingIds = new Set();
+  for (const message of body.messages) {
+    if (message === null || typeof message !== "object" || message.role !== "assistant") continue;
+    for (const call of message.tool_calls ?? []) {
+      if (hasUsableIdentity(call)) survivingIds.add(call.id);
+    }
+  }
+  let touched = false;
+  const messages = [];
+  for (const message of body.messages) {
+    if (message !== null && typeof message === "object" && message.role === "assistant" && Array.isArray(message.tool_calls)) {
+      const toolCalls = message.tool_calls.filter(hasUsableIdentity);
+      if (toolCalls.length !== message.tool_calls.length) touched = true;
+      const content = message.content;
+      const contentEmpty = content == null || content === "" || (Array.isArray(content) && content.length === 0);
+      if (toolCalls.length === 0 && contentEmpty) { touched = true; continue; }
+      messages.push(toolCalls.length === message.tool_calls.length ? message : { ...message, tool_calls: toolCalls });
+      continue;
+    }
+    if (message !== null && typeof message === "object" && message.role === "tool") {
+      const id = message.tool_call_id;
+      if (typeof id !== "string" || id.length === 0 || !survivingIds.has(id)) { touched = true; continue; }
+    }
+    messages.push(message);
+  }
+  return touched ? { ...body, messages } : body;
+}
+
+function hasUsableIdentity(call) {
+  return typeof call?.id === "string" && call.id.length > 0
+    && typeof call?.function?.name === "string" && call.function.name.length > 0;
+}
+
+export function createOpenAIHandler(deps) {
+  const {
+    token,
+    loadStore,
+    loadCredential,
+    upstreamFetch,
+    buildUpstreamURLs = (provider, path) => [provider.baseURL, ...(provider.fallbackURLs ?? [])]
+      .map((baseURL) => `${baseURL.replace(/\/+$/, "")}${path}`),
+    recordGeneration,
+    readGeneration,
+    logger = null,
+    effortInjector = null,
+    serviceHealth = null,
+  } = deps;
+
+  const efforts = effortInjector ?? defaultEffortInjector({ logger });
+
+  // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
+  // in the handler closure, so it is process memory and resets on restart.
+  const stickyTable = createStickyTable();
+
+  // Chain routing (自动路由): endpointId (the requesting agent's id) -> the
+  // chain node that answered last. Same closure lifetime as stickyTable.
+  // 降级锁定时经 logger 落一条退避日志（常驻模式下经日志桥流进面板「实时输出」）。
+  const chainState = createChainState({
+    onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
+  });
+
+  function authorize(headers) {
+    const presented = extractPresentedToken(headers);
+    if (presented === null) {
+      return { ok: false, status: 401, body: openAIError("authentication_error", "missing Authorization header") };
+    }
+    if (!tokenMatches(presented, token)) {
+      return { ok: false, status: 401, body: openAIError("authentication_error", "invalid relay token") };
+    }
+    return { ok: true };
+  }
+
+  function loadValidStore() {
+    const loaded = loadStore();
+    if (!loaded.ok) {
+      serviceHealth?.recordFailure("store");
+      return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store could not be read") };
+    }
+    const result = validateStore(loaded.store);
+    if (!result.valid) {
+      serviceHealth?.recordFailure("store");
+      return { ok: false, status: 502, body: openAIError("api_error", "the Anyswitch global store failed schema validation") };
+    }
+    return { ok: true, store: loaded.store };
+  }
+
+  function resolveProvider(store, providerId) {
+    const provider = store.providers?.[providerId];
+    if (provider === undefined) {
+      return { ok: false, status: 404, body: openAIError("not_found_error", `provider "${providerId}" is not in the Anyswitch store`) };
+    }
+    return { ok: true, provider };
+  }
+
+  // The catalog gate, scoped to the channels THIS request may reach, so editing
+  // an unrelated channel cannot invalidate a live session (see
+  // catalog-generation.mjs for what a channel's shape covers). A channel that
+  // appeared after discovery is not stale; a deleted one is the 404 path's
+  // business.
+  function generationCheck(store, providerIds) {
+    const stale = findStaleTargets(readGeneration(), store, providerIds);
+    if (stale.length === 0) return { ok: true };
+    const channels = stale.map((providerId) => `"${providerId}"`).join(", ");
+    return {
+      ok: false,
+      status: 409,
+      body: openAIError(
+        "invalid_request_error",
+        `the upstream endpoint of ${channels} changed since this client discovered its models; `
+        + "re-run model discovery (restart the endpoint, or pick the model again in /model) before retrying",
+      ),
+    };
+  }
+
+  function modelListResponse(provider) {
+    const data = Object.keys(provider.models ?? {}).map((modelId) => ({
+      id: modelId,
+      object: "model",
+    }));
+    return { object: "list", data };
+  }
+
+  async function handleModels(path, headers, agentId) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { status: auth.status, body: auth.body };
+
+    const parsed = parseOpenAIPath(path);
+    if (!parsed.ok) {
+      return { status: PARSE_STATUS[parsed.reason] ?? 400, body: openAIError("invalid_request_error", parsed.message) };
+    }
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
+
+    let response;
+    if (agentId === "codex") {
+      // codex 的模型选择器读静态目录（model_catalog_json），provider 是全局
+      // 单选——目录把渠道编码进 slug（<channelId>~<modelId>，见
+      // channel-model-slug.mjs），/models 与目录保持同一口径：全部可见渠道
+      // 的并集，与 URL 段无关（任一 provider 入口都可能被问到全部模型）。
+      response = {
+        object: "list",
+        data: buildChannelModelSlugCatalog(loaded.store).map((entry) => ({ id: entry.slug, object: "model" })),
+      };
+    } else {
+      // Pools resolve before providers: a pool id may reuse a member's id, and
+      // the pool wins the tie. A pool's model list is the union of its members'
+      // catalogs in pool order (first member wins duplicate ids).
+      const pool = resolvePool(loaded.store, parsed.providerId);
+      if (pool) {
+        response = modelListResponse({ models: poolModelsUnion(loaded.store, pool) });
+      } else {
+        const provider = resolveProvider(loaded.store, parsed.providerId);
+        if (!provider.ok) return { status: provider.status, body: provider.body };
+        response = modelListResponse(provider.provider);
+      }
+    }
+
+    // Chain routing (自动路由): an agent with a configured route chain may
+    // send model "auto", so advertise the virtual entry alongside the real
+    // models. Same shape as every other entry — clients that never send
+    // "auto" can ignore it.
+    if (agentId && resolveChain(loaded.store, agentId)) {
+      response.data.push({ id: AUTO_MODEL, object: "model" });
+    }
+
+    // 虚拟模型：不绑定端点，任何可识别的请求方都能看到（agentId 缺失也照列
+    // ——这正是与 auto 的区别）。裸 id 即模型名，拦截优先于一切 provider 解析。
+    for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
+      if (vm?.enabled === false) continue;
+      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      response.data.push({ id: vm.name, object: "model" });
+    }
+
+    // Bind this discovery result to the endpoint each channel resolves to.
+    recordGeneration(providerRoutingShapes(loaded.store));
+    return { status: 200, body: response };
+  }
+
+  async function handleChatCompletions(path, headers, body, options = {}) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { status: auth.status, body: auth.body };
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { status: 400, body: openAIError("invalid_request_error", "request body must be a JSON object") };
+    }
+    if (typeof body.model !== "string" || body.model.length === 0) {
+      return { status: 400, body: openAIError("invalid_request_error", "request body is missing a non-empty `model` field") };
+    }
+
+    const parsed = parseOpenAIPath(path);
+    if (!parsed.ok) {
+      return { status: PARSE_STATUS[parsed.reason] ?? 400, body: openAIError("invalid_request_error", parsed.message) };
+    }
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
+
+    const gate = generationCheck(loaded.store, [parsed.providerId]);
+    if (!gate.ok) return { status: gate.status, body: gate.body };
+
+    const provider = resolveProvider(loaded.store, parsed.providerId);
+    if (!provider.ok) return { status: provider.status, body: provider.body };
+
+    const modelId = body.model;
+    if (provider.provider.models?.[modelId] === undefined) {
+      return {
+        status: 404,
+        body: openAIError("not_found_error", `model "${modelId}" is not in provider "${parsed.providerId}"`),
+      };
+    }
+
+    return attemptChatCompletion(parsed.providerId, provider.provider, body, options);
+  }
+
+  // One upstream attempt against a single provider. Shared by the classic
+  // single-provider path and by each member call of a pool request.
+  async function attemptChatCompletion(providerId, provider, body, options = {}) {
+    // 凭据在请求时刻取；是否缓存由 credentialCacheEnabled 决定（见 launch.mjs）。
+    const credentialStartedAt = Date.now();
+    const credential = await loadCredential(providerId, provider);
+    if (!credential.ok) {
+      // 这一条日志是这类故障唯一的证据来源：客户端只看到一句笼统的 502，而
+      // 原因（文件缺失 / 助手没起来 / 助手超时 / 解密失败）只有中继知道。
+      serviceHealth?.recordFailure("credential");
+      logger?.error?.(
+        `credential load failed for provider "${providerId}" (${credential.reason}, ${Date.now() - credentialStartedAt}ms)`,
+      );
+      return { status: 502, body: openAIError("api_error", "the upstream credential for this provider could not be loaded") };
+    }
+
+    const urls = buildUpstreamURLs(provider, "/chat/completions");
+
+    const normalizedBody = normalizeToolCallArguments(stripUnusableToolCalls(body));
+    const withUsage = normalizedBody.stream === true
+      ? {
+          ...normalizedBody,
+          stream_options: {
+            ...(normalizedBody.stream_options && typeof normalizedBody.stream_options === "object" ? normalizedBody.stream_options : {}),
+            include_usage: true,
+          },
+        }
+      : normalizedBody;
+    // A client that named its own level wins; this only ever fills a gap. The
+    // store row rides along so a channel that states its own levels wins over
+    // the library, same rule as the config face.
+    const { body: outboundBody, injected } = efforts.inject({
+      providerId,
+      body: withUsage,
+      model: provider.models?.[withUsage.model],
+      provider,
+    });
+
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${credential.value}`,
+    };
+    const send = (payload) => upstreamFetch(
+      urls,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: options.signal,
+      },
+      { bufferResponse: body.stream !== true },
+    );
+
+    let upstream;
+    try {
+      upstream = await send(outboundBody);
+    } catch (err) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
+      return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+    }
+
+    // 请求真的到了上游：凭据读得出、网络出得去，中继自己的活干完了。上游之后回
+    // 429/5xx 是上游的问题，不改变「我还能服务」这个事实。
+    serviceHealth?.recordSuccess();
+
+    // A gateway that does not take the parameter at all gets the same request
+    // back off without it, once; the channel is then left alone for the rest of
+    // this process's life. Only a level WE added can be removed this way.
+    if (!upstream.ok && injected !== null) {
+      const detail = await readResponseText(upstream);
+      if (looksLikeEffortRejection(upstream.status, detail)) {
+        upstreamFetch.releaseResponse?.(upstream);
+        efforts.noteRejected(providerId);
+        try {
+          upstream = await send(efforts.withoutEffort(outboundBody));
+        } catch (err) {
+          if (options.signal?.aborted) {
+            throw err;
+          }
+          return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+        }
+      }
+    }
+
+    if (!upstream.ok) {
+      upstreamFetch.releaseResponse?.(upstream);
+      return {
+        status: upstream.status,
+        body: openAIError("api_error", `the upstream provider returned status ${upstream.status}`),
+      };
+    }
+
+    if (body.stream === true) {
+      // A stream can legitimately exceed the connection deadline; once headers
+      // establish a 2xx streaming response, transport owns its lifetime.
+      upstreamFetch.releaseResponse?.(upstream);
+      return { status: 200, stream: upstream.body };
+    }
+
+    let payload;
+    try {
+      payload = await upstream.json();
+    } catch {
+      return { status: 502, body: openAIError("api_error", "the upstream provider returned a malformed response") };
+    } finally {
+      upstreamFetch.releaseResponse?.(upstream);
+    }
+    return { status: 200, body: payload };
+  }
+
+  // Pool routing pre-flight. Returns:
+  //   null              — the URL segment does not name a pool; the caller
+  //                       falls through to the classic single-provider path
+  //                       (which re-runs auth/parse/store and reports errors)
+  //   { ok: false, ...} — terminal pre-flight error (auth, body, generation
+  //                       gate, or no member carries the model)
+  //   { ok: true, poolId, modelId, members, noteSuccess }
+  //                     — ordered per-member call plan, sticky member first
+  //
+  // The generation gate needs no pool special-casing: the catalog digest
+  // covers providers (including every member's endpoint) but not pool
+  // membership, so editing pool composition alone cannot false-trigger a 409.
+  async function planPoolChatCompletions(path, headers, body) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
+
+    const parsed = parseOpenAIPath(path);
+    if (!parsed.ok) return null;
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    const pool = resolvePool(loaded.store, parsed.providerId);
+    if (!pool) return null;
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false, status: 400, body: openAIError("invalid_request_error", "request body must be a JSON object") };
+    }
+    if (typeof body.model !== "string" || body.model.length === 0) {
+      return { ok: false, status: 400, body: openAIError("invalid_request_error", "request body is missing a non-empty `model` field") };
+    }
+
+    const modelId = body.model;
+    // A pool id is not a channel: gate over exactly the members this request
+    // could call. With no candidate member there is nothing that can be stale,
+    // so that case keeps its own 404 below.
+    const candidates = poolMembersWithModel(loaded.store, pool, modelId);
+    const gate = generationCheck(loaded.store, candidates.map((candidate) => candidate.memberId));
+    if (!gate.ok) return { ok: false, status: gate.status, body: gate.body };
+
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        status: 404,
+        body: openAIError("not_found_error", `model "${modelId}" is not in pool "${parsed.providerId}"`),
+      };
+    }
+
+    const ordered = stickyTable.order(parsed.providerId, modelId, candidates);
+    return {
+      ok: true,
+      poolId: parsed.providerId,
+      modelId,
+      members: ordered.map(({ memberId, provider }) => ({
+        memberId,
+        call: (options = {}) => attemptChatCompletion(memberId, provider, body, options),
+      })),
+      noteSuccess: (memberId) => stickyTable.noteSuccess(parsed.providerId, modelId, memberId),
+      // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
+      // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
+      // 一个成员在一次请求里至多失败一次（keep-alive 重试在成员内部吸收），无需去重。
+      noteFailure: (memberId) => stickyTable.noteFailure(parsed.providerId, modelId, memberId),
+    };
+  }
+
+  // Chain routing pre-flight (自动路由). Triggered by the virtual model
+  // AUTO_MODEL ("auto") — it names no real provider model, so it takes
+  // priority over pool resolution. Returns:
+  //   null              — model is not "auto", or the requesting agent has no
+  //                       route chain; the caller falls through to pool/classic
+  //                       routing (which reports auth/parse/store errors)
+  //   { ok: false, ...} — terminal pre-flight error (auth, generation gate,
+  //                       or no live chain node can serve the request)
+  //   { ok: true, agentId, members, noteSuccess }
+  //                     — flat ordered call plan across the whole chain
+  //
+  // members flattens the chain's attempt plan (chainState.plan already orders
+  // it: last successful node first, probing back to the head every
+  // RETRY_UPSTREAM_MS): a channel node contributes ONE callable, a pool node
+  // contributes its members' callables (sticky pool order, filtered by the
+  // node's bound model). Because a pool node's members sit adjacently in the
+  // flat list, the caller's per-member failover exhausts the pool before the
+  // chain backs off to the next node — a pool only counts as a failed node
+  // when fully exhausted. memberId is `nodeId` for channels and
+  // `nodeId/poolMemberId` for pool members (provider/pool ids never contain
+  // '/', so the split is unambiguous).
+  async function planChainChatCompletions(path, headers, body, agentId) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
+
+    // Not an object: classic routing reports the shape error.
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+
+    const parsed = parseOpenAIPath(path);
+    if (!parsed.ok) return null;
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    // 路由键与链的来源：auto 走请求方端点的链（必须可识别），虚拟模型名走
+    // 自己的链（端点无关，agentId 缺失也照走——名字本身就是全局路由键）。
+    // 链状态表也按路由键分格：auto 沿用端点 id，虚拟模型用名字（保存时
+    // schema 禁用端点 id 撞名，两格永不重叠）。
+    let chainEntry = null;
+    let routeKey = null;
+    let requested = null;
+    if (body.model === AUTO_MODEL) {
+      if (!agentId) return null;
+      chainEntry = resolveChain(loaded.store, agentId);
+      routeKey = agentId;
+      requested = AUTO_MODEL;
+    } else {
+      chainEntry = resolveVirtualModelEntry(loaded.store, body.model);
+      routeKey = chainEntry?.name ?? null;
+      requested = body.model;
+    }
+    if (!chainEntry || !Array.isArray(chainEntry.chain) || chainEntry.chain.length === 0) return null;
+
+    // Reachable channels, derived from the CONFIGURED chain without touching
+    // chainState: plan() re-anchors the backoff probe window, and a request
+    // refused here must not spend that probe. A node that no longer resolves
+    // contributes nothing — the existing 404 path owns it.
+    const reachable = [];
+    for (const entry of chainEntry.chain) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+      if (expanded.kind === "channel") reachable.push(expanded.providerId);
+      else reachable.push(...expanded.memberIds);
+    }
+    const gate = generationCheck(loaded.store, reachable);
+    if (!gate.ok) return { ok: false, status: gate.status, body: gate.body };
+
+    const plan = chainState.plan(loaded.store, routeKey, chainEntry.chain, Date.now());
+    const members = [];
+    const memberMeta = new Map(); // memberId -> { nodeId, model, poolMemberId? }
+    // 本请求已计失败的节点（node+model 复合键）：noteFailure 的去重集。
+    const failedNodes = new Set();
+    for (const entry of plan) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+      if (expanded.kind === "channel") {
+        const provider = loaded.store.providers[expanded.providerId];
+        const memberId = uniqueMemberId(memberMeta, expanded.providerId, entry.model);
+        members.push({
+          memberId,
+          memberNoun: "chain node",
+          call: (options = {}) => attemptChatCompletion(
+            expanded.providerId, provider, { ...body, model: entry.model }, options,
+          ),
+        });
+        memberMeta.set(memberId, { nodeId: expanded.providerId, model: entry.model });
+      } else {
+        const pool = resolvePool(loaded.store, expanded.poolId);
+        const candidates = poolMembersWithModel(loaded.store, pool, entry.model);
+        const ordered = stickyTable.order(expanded.poolId, entry.model, candidates);
+        for (const { memberId: poolMemberId, provider } of ordered) {
+          const flatId = uniqueMemberId(memberMeta, `${expanded.poolId}/${poolMemberId}`, entry.model);
+          members.push({
+            memberId: flatId,
+            memberNoun: "pool member",
+            call: (options = {}) => attemptChatCompletion(
+              poolMemberId, provider, { ...body, model: entry.model }, options,
+            ),
+          });
+          memberMeta.set(flatId, { nodeId: expanded.poolId, model: entry.model, poolMemberId });
+        }
+      }
+    }
+
+    if (members.length === 0) {
+      // 保留既有 auto 报错口径（点名请求方端点）；虚拟模型请求 agentId 可缺，
+      // 缺则省略尾巴。requested 已点名模型（auto 或虚拟模型名）。
+      const tail = agentId ? ` for "${agentId}"` : "";
+      return {
+        ok: false,
+        status: 404,
+        body: openAIError("not_found_error", `model "${requested}" has no available nodes in the chain${tail}`),
+      };
+    }
+
+    return {
+      ok: true,
+      agentId,
+      members,
+      // Node-level stats attribution for the tracker: memberId -> the chain
+      // node that serves it + the node's bound model (what the upstream is
+      // actually asked for). Unknown memberIds resolve to null and the
+      // tracker keeps its existing attribution.
+      attributeOf: (memberId) => {
+        const meta = memberMeta.get(memberId);
+        return meta ? { providerId: meta.nodeId, model: meta.model } : null;
+      },
+      noteSuccess: (memberId) => {
+        const meta = memberMeta.get(memberId);
+        const slash = memberId.indexOf("/");
+        const nodeId = meta?.nodeId ?? (slash === -1 ? memberId : memberId.slice(0, slash));
+        // meta 缺 model（memberId 不来自本次 plan）时回退链配置里该节点绑定的
+        // model；链里也没有（链已重编辑、节点不在链中）就跳过 noteChainSuccess——
+        // 以 undefined 写入链状态会拼出 "node\nundefined" 键，位置追踪静默失效。
+        const model = meta?.model ?? chainEntry.chain.find((entry) => entry?.node === nodeId)?.model;
+        if (!model) return;
+        noteChainSuccess(chainState, routeKey, nodeId, model, Date.now());
+        if (meta?.poolMemberId) {
+          stickyTable.noteSuccess(nodeId, meta.model, meta.poolMemberId);
+        }
+      },
+      // 一次请求级节点失败（成员切换真正越过该节点时由 server 侧回调）。
+      // per-request 去重：号池节点整池耗尽在同一次请求里只计一次失败——
+      // 连续失败计数是「请求数」口径，不是「成员数」口径。
+      noteFailure: (memberId) => {
+        const meta = memberMeta.get(memberId);
+        const slash = memberId.indexOf("/");
+        const nodeId = meta?.nodeId ?? (slash === -1 ? memberId : memberId.slice(0, slash));
+        const model = meta?.model ?? chainEntry.chain.find((entry) => entry?.node === nodeId)?.model;
+        if (!model) return;
+        // 池成员还要进池内粘性表的成员级计数（失败才降级，与链同一规则）；
+        // 成员一次请求至多 failover 一次，不需要 per-request 去重。
+        if (meta?.poolMemberId) {
+          stickyTable.noteFailure(nodeId, model, meta.poolMemberId);
+        }
+        const key = chainNodeKey(nodeId, model);
+        if (failedNodes.has(key)) return;
+        failedNodes.add(key);
+        noteChainFailure(chainState, routeKey, nodeId, model);
+      },
+    };
+  }
+
+  return { authorize, handleModels, handleChatCompletions, planPoolChatCompletions, planChainChatCompletions, chainState };
+}

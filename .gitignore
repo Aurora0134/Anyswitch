@@ -1,0 +1,8 @@
+*.tmp
+*.log
+node_modules/
+.cptest/
+logs/
+.env
+*.dpapi
+/thinking-efforts.db.json

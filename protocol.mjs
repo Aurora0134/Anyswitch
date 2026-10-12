@@ -1,0 +1,315 @@
+// Anthropic <-> OpenAI-compatible protocol translation.
+// Pure functions only. No IO, no network.
+//
+// The relay speaks Anthropic Messages API to Claude and OpenAI Chat Completions
+// to the upstream provider. Only an explicit allow-list of the fields Claude
+// Code actually emits is translated; anything else is dropped. New fields must
+// be added only when the client contract and relay behavior require them.
+//
+// The upstream model name is the bare <model-id>: never the wire ID, never
+// prefixed with the provider id.
+
+import { REASONING_FIELDS } from "./stream.mjs";
+import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
+
+// ---------- Anthropic request -> OpenAI request ----------
+
+// Anthropic content blocks -> OpenAI message content.
+// A single text block collapses to a plain string (what most providers expect);
+// mixed/multimodal content keeps the array form.
+function convertContentToOpenAI(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+
+  const parts = [];
+  for (const block of content) {
+    if (block === null || typeof block !== "object") continue;
+    if (block.type === "text") {
+      parts.push({ type: "text", text: block.text ?? "" });
+    } else if (block.type === "image") {
+      const source = block.source ?? {};
+      if (source.type === "base64") {
+        parts.push({
+          type: "image_url",
+          image_url: { url: `data:${source.media_type};base64,${source.data}` },
+        });
+      } else if (source.type === "url") {
+        parts.push({ type: "image_url", image_url: { url: source.url } });
+      }
+    }
+  }
+  if (parts.length === 1 && parts[0].type === "text") return parts[0].text;
+  return parts;
+}
+
+// Anthropic tool_use / tool_result blocks map onto OpenAI tool_calls and
+// role:"tool" messages. Returns the list of OpenAI messages for one Anthropic
+// message, because a single Anthropic message can fan out into several.
+function convertMessage(message) {
+  const role = message.role;
+  const content = message.content;
+
+  if (!Array.isArray(content)) {
+    return [{ role, content: convertContentToOpenAI(content) }];
+  }
+
+  const toolUses = content.filter((b) => b && b.type === "tool_use");
+  const toolResults = content.filter((b) => b && b.type === "tool_result");
+  const plain = content.filter((b) => b && b.type !== "tool_use" && b.type !== "tool_result");
+
+  const out = [];
+
+  // tool_result blocks become standalone role:"tool" messages and must precede
+  // any assistant content in the same turn.
+  for (const result of toolResults) {
+    out.push({
+      role: "tool",
+      tool_call_id: result.tool_use_id,
+      content:
+        typeof result.content === "string"
+          ? result.content
+          : JSON.stringify(result.content ?? ""),
+    });
+  }
+
+  if (toolUses.length > 0) {
+    const assistant = {
+      role: "assistant",
+      content: plain.length > 0 ? convertContentToOpenAI(plain) : null,
+      tool_calls: toolUses.map((use) => ({
+        id: use.id,
+        type: "function",
+        function: { name: use.name, arguments: JSON.stringify(use.input ?? {}) },
+      })),
+    };
+    out.push(assistant);
+  } else if (plain.length > 0) {
+    out.push({ role, content: convertContentToOpenAI(plain) });
+  }
+
+  return out;
+}
+
+// `system` in Anthropic is a top-level field; OpenAI wants a leading message.
+function convertSystem(system) {
+  if (system === undefined || system === null) return null;
+  if (typeof system === "string") {
+    return system.length > 0 ? { role: "system", content: system } : null;
+  }
+  if (Array.isArray(system)) {
+    const text = system
+      .filter((b) => b && b.type === "text")
+      .map((b) => b.text ?? "")
+      .join("\n");
+    return text.length > 0 ? { role: "system", content: text } : null;
+  }
+  return null;
+}
+
+function convertTools(tools) {
+  if (!Array.isArray(tools)) return undefined;
+  const converted = tools
+    .filter((t) => t && typeof t === "object" && typeof t.name === "string")
+    .map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description ?? "",
+        parameters: t.input_schema ?? { type: "object", properties: {} },
+      },
+    }));
+  return converted.length > 0 ? converted : undefined;
+}
+
+function convertToolChoice(toolChoice) {
+  if (toolChoice === null || typeof toolChoice !== "object") return undefined;
+  switch (toolChoice.type) {
+    case "auto":
+      return "auto";
+    case "any":
+      return "required";
+    case "tool":
+      return { type: "function", function: { name: toolChoice.name } };
+    case "none":
+      return "none";
+    default:
+      return undefined;
+  }
+}
+
+// Anthropic names thinking depth a few ways across versions (Claude Code sends
+// `output_config.effort` with the effort beta, older builds a top-level
+// `reasoning_effort`). The translator below carries none of them upstream
+// verbatim, so the injector is handed what the raw body actually said instead of
+// having to re-read it.
+const UNNAMED_EFFORT = Object.freeze({ stated: false, level: null });
+const EFFORT_SPELLINGS = (rawBody) => [
+  rawBody.reasoning_effort,
+  rawBody.effort,
+  rawBody.output_config?.effort,
+];
+
+/**
+ * What thinking depth the client asked for.
+ *
+ * `stated` means the client's answer is final and the relay must not fill in a
+ * level of its own; `level` is the depth to forward, or null when the client
+ * said "no thinking". A `thinking` block that names no depth — adaptive
+ * thinking, or a bare budget — only says "think", which is not a level choice,
+ * so it stays unnamed and the library default still applies.
+ */
+export function clientEffortFromAnthropic(rawBody) {
+  if (rawBody === null || typeof rawBody !== "object" || Array.isArray(rawBody)) return UNNAMED_EFFORT;
+  const spellings = EFFORT_SPELLINGS(rawBody);
+  const named = spellings.find((value) => typeof value === "string" && value.length > 0);
+  if (typeof named === "string") {
+    const lower = named.toLowerCase();
+    if (lower === "off" || lower === "none") return { stated: true, level: null };
+    return { stated: true, level: named };
+  }
+  if (spellings.some((value) => value === null)) return { stated: true, level: null };
+  if (rawBody.thinking?.type === "disabled") return { stated: true, level: null };
+  return UNNAMED_EFFORT;
+}
+
+// `modelId` is the bare upstream model id produced by unpackWireId.
+export function anthropicToOpenAI(body, modelId) {
+  const messages = [];
+  const system = convertSystem(body.system);
+  if (system) messages.push(system);
+
+  for (const message of body.messages ?? []) {
+    if (message === null || typeof message !== "object") continue;
+    messages.push(...convertMessage(message));
+  }
+
+  const request = { model: modelId, messages };
+
+  // max_tokens is required by Anthropic and optional upstream; pass it through.
+  if (typeof body.max_tokens === "number") request.max_tokens = body.max_tokens;
+  if (typeof body.temperature === "number") request.temperature = body.temperature;
+  if (typeof body.top_p === "number") request.top_p = body.top_p;
+  if (Array.isArray(body.stop_sequences) && body.stop_sequences.length > 0) {
+    request.stop = body.stop_sequences;
+  }
+  if (body.stream === true) {
+    request.stream = true;
+    // Usage delivery on a stream is voluntary unless asked: without this flag
+    // some channels report zero tokens and the stats page goes blind.
+    request.stream_options = { include_usage: true };
+  }
+
+  const tools = convertTools(body.tools);
+  if (tools) request.tools = tools;
+  const toolChoice = convertToolChoice(body.tool_choice);
+  if (toolChoice !== undefined) request.tool_choice = toolChoice;
+
+  return request;
+}
+
+// ---------- OpenAI response -> Anthropic response ----------
+
+const STOP_REASON = {
+  stop: "end_turn",
+  length: "max_tokens",
+  tool_calls: "tool_use",
+  function_call: "tool_use",
+  content_filter: "end_turn",
+};
+
+function parseToolArguments(raw) {
+  if (typeof raw !== "string" || raw.length === 0) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Preserve the unparsable payload instead of inventing an empty object, so
+    // a malformed upstream response is visible rather than silently normalised.
+    return { __unparsed_arguments: raw };
+  }
+}
+
+export function openAIToAnthropic(response, wireId) {
+  const choice = response?.choices?.[0] ?? {};
+  const message = choice.message ?? {};
+  const content = [];
+
+  // Reasoning surfaces as a thinking block ahead of the answer, same order the
+  // streaming translator emits it. The signature is what makes client-side
+  // narration filters keep the block (see thinking-signature.mjs).
+  for (const field of REASONING_FIELDS) {
+    const value = message[field];
+    if (typeof value === "string" && value.length > 0) {
+      content.push({ type: "thinking", thinking: value, signature: NARRATION_THINKING_SIGNATURE });
+      break;
+    }
+  }
+  if (typeof message.content === "string" && message.content.length > 0) {
+    content.push({ type: "text", text: message.content });
+  }
+  for (const call of message.tool_calls ?? []) {
+    if (call === null || typeof call !== "object") continue;
+    content.push({
+      type: "tool_use",
+      id: call.id,
+      name: call.function?.name ?? "",
+      input: parseToolArguments(call.function?.arguments),
+    });
+  }
+
+  const usage = response?.usage ?? {};
+  return {
+    id: response?.id ?? "msg_relay",
+    type: "message",
+    role: "assistant",
+    // Echo the wire ID Claude asked for, so the client sees the id it selected.
+    model: wireId,
+    content,
+    stop_reason: STOP_REASON[choice.finish_reason] ?? "end_turn",
+    stop_sequence: null,
+    usage: {
+      input_tokens: usage.prompt_tokens ?? 0,
+      output_tokens: usage.completion_tokens ?? 0,
+    },
+  };
+}
+
+// ---------- discovery ----------
+
+// GET /v1/models payload. Non-secret metadata only.
+//
+// `max_input_tokens` carries the context library's window so Claude clients
+// can derive their 1M variants: the desktop reads the field (>= 1e6 flags the
+// entry), and both clients append a "[1m]" variant id when that variant is
+// picked — which the engine itself maps to a 1M window. The companion row
+// ("<id>[1m]") is the same convention listed gateways are documented to use;
+// the desktop folds it into the base entry's 1M variant, the CLI lists it as
+// its own row.
+const ONE_MILLION_TOKENS = 1_000_000;
+
+export function buildModelsResponse(entries) {
+  const data = [];
+  for (const entry of entries) {
+    const row = {
+      type: "model",
+      id: entry.wireId,
+      display_name: entry.displayName,
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    const window = Number.isInteger(entry.contextWindow) && entry.contextWindow > 0 ? entry.contextWindow : null;
+    if (window !== null) {
+      row.max_input_tokens = window;
+      if (window >= ONE_MILLION_TOKENS) {
+        data.push(row);
+        data.push({ ...row, id: `${entry.wireId}[1m]`, display_name: `${entry.displayName} 1M` });
+        continue;
+      }
+    }
+    data.push(row);
+  }
+  return {
+    data,
+    has_more: false,
+    first_id: data.length > 0 ? data[0].id : null,
+    last_id: data.length > 0 ? data[data.length - 1].id : null,
+  };
+}

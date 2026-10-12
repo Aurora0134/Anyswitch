@@ -1,0 +1,881 @@
+// Relay request handler.
+// Transport-agnostic: takes a parsed request, returns a response description.
+// All IO (store read, credential decrypt, upstream fetch) is injected, so the
+// whole error surface is testable without touching real credentials or network.
+//
+// Fail-closed everywhere. Explicitly absent by design:
+//   - no default provider
+//   - no prefix fuzzy matching
+//   - no nearest-model fallback
+//   - no official Anthropic passthrough
+//   - no falling back to some other key when decryption fails
+//
+// ONE bounded exception to "no fuzzy matching / no official Anthropic
+// passthrough": the Claude Code 档位映射 (claude-tier-mapping.mjs). Claude owns
+// four model tiers of its own and names them on the wire — in sub-agent
+// dispatch, in side queries, in the official ids it resolves a tier to — and
+// this relay serves no Anthropic model, so those requests used to die at the
+// strict contract below. An operator-configured tier row may redirect exactly
+// such a name to a hosted model, and nothing else: only the Claude endpoint,
+// only after the strict rules have already refused the name, only names that are
+// unmistakably one of the four tiers, only tiers the operator actually filled
+// in. There is still no default target, no cross-tier degradation and no
+// takeover for any other endpoint.
+
+import { timingSafeEqual } from "node:crypto";
+import { unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
+import {
+  CLAUDE_TIER_AGENT_ID,
+  classifyTierEntryName,
+  parseClaudeTierMappings,
+  resolveTierEntry,
+} from "./claude-tier-mapping.mjs";
+import { providerRoutingShapes, findStaleTargets } from "./catalog-generation.mjs";
+import {
+  buildDesktopCatalogView,
+  resolveDesktopAlias,
+  passesDesktopPickerFilter,
+} from "./desktop-route-alias.mjs";
+import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
+import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
+import { validateStore } from "./store-schema.mjs";
+import { resolvePool, poolMembersWithModel, createStickyTable } from "./pool-routing.mjs";
+import {
+  AUTO_MODEL,
+  AUTO_MODEL_ANTHROPIC_ID,
+  resolveChain,
+  resolveVirtualModelEntry,
+  expandChainNode,
+  createChainState,
+  noteChainSuccess,
+  noteChainFailure,
+  logChainDemote,
+  chainNodeKey,
+  uniqueMemberId,
+} from "./chain-routing.mjs";
+
+// Anthropic-shaped error body. Never carries a key, ciphertext, token or raw
+// upstream response body (secret boundary).
+export function errorBody(type, message) {
+  return { type: "error", error: { type, message } };
+}
+
+const UNPACK_STATUS = {
+  [UNPACK_REASON.MISSING]: 400,
+  [UNPACK_REASON.NOT_A_STRING]: 400,
+  [UNPACK_REASON.NOT_WIRE_ID]: 400,
+  [UNPACK_REASON.NO_SEPARATOR]: 400,
+  [UNPACK_REASON.EMPTY_PROVIDER]: 400,
+  [UNPACK_REASON.EMPTY_MODEL]: 400,
+  [UNPACK_REASON.AMBIGUOUS_UNQUALIFIED]: 400,
+  [UNPACK_REASON.UNKNOWN_UNQUALIFIED]: 400,
+};
+
+// Only these refusals describe "a model name this relay could not look up".
+// The rest are structural (no model field, blank, non-string), where a 档位映射
+// hint would be noise. AMBIGUOUS_UNQUALIFIED is included deliberately: Claude's
+// own default-model names (`claude-opus-5-5`, …) are exactly names several
+// channels carry, and the operator's mapped model is the only honest
+// disambiguation for them. classifyTierEntryName still bounds the takeover to
+// unmistakable tier-entry names, so a non-Claude ambiguous name keeps the plain
+// "multiple relay providers" refusal.
+const TIER_ELIGIBLE_REASONS = new Set([
+  UNPACK_REASON.NOT_WIRE_ID,
+  UNPACK_REASON.UNKNOWN_UNQUALIFIED,
+  UNPACK_REASON.AMBIGUOUS_UNQUALIFIED,
+]);
+
+// The panel section's user-facing address, reused by every 档位映射 message so
+// the operator is always sent to the same place.
+const TIER_SETTINGS_LOCATION = "Anyswitch 设置 · 通用 · Claude Code";
+
+// A model name is client-controlled text. Anywhere it reaches a log line or an
+// error message it is flattened to one capped line: a relay log must not be a
+// surface where one request forges extra entries, and the message goes straight
+// into the client's terminal.
+function nameLabel(model) {
+  return String(model).replace(/[\r\n]+/g, " ").trim().slice(0, 160);
+}
+
+function tierRowName(tier) {
+  return tier.charAt(0).toUpperCase() + tier.slice(1);
+}
+
+// Constant-time token comparison. Length mismatch is reported without
+// short-circuiting on content. Both temporary copies are zeroed on every path so
+// no extra copy of the session token is left for the GC to reclaim lazily.
+export function tokenMatches(presented, expected) {
+  if (typeof presented !== "string" || typeof expected !== "string") return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  try {
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } finally {
+    a.fill(0);
+    b.fill(0);
+  }
+}
+
+// Claude sends ANTHROPIC_AUTH_TOKEN in `Authorization` as the
+// bare value (no Bearer scheme). Accept an optional `Bearer ` prefix too, since
+// stripping it cannot weaken the comparison.
+export function extractPresentedToken(headers) {
+  const raw = headers?.authorization ?? headers?.Authorization;
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  return raw.startsWith("Bearer ") ? raw.slice(7) : raw;
+}
+
+// deps:
+//   token          : string    - the relay's session token
+//   loadStore      : () => { ok, store?, errors? }
+//   loadCredential : (providerId, provider) => Promise<{ ok, value?, reason? }>
+//                    providerId is the already-validated id this request routed
+//                    to; it is passed explicitly so the implementation never has
+//                    to recover it from shared or cross-request state.
+//   buildUpstreamURLs : (provider, path) => string[]
+//   upstreamFetch  : (urls, init) => Promise<Response>
+//   recordGeneration / readGeneration : catalog generation binding
+//   getClaudeTierMapping : () => raw settings value of the 档位映射 section
+//                    (read per request so a panel save takes effect on the next
+//                    one without a restart, same contract as keep-alive config);
+//                    absent → the mechanism is off
+export function createHandler(deps) {
+  const {
+    token,
+    loadStore,
+    loadCredential,
+    upstreamFetch,
+    buildUpstreamURLs = (provider, path) => [provider.baseURL, ...(provider.fallbackURLs ?? [])]
+      .map((baseURL) => `${baseURL.replace(/\/+$/, "")}${path}`),
+    recordGeneration,
+    readGeneration,
+    logger = null,
+    effortInjector = null,
+    getClaudeTierMapping = null,
+    serviceHealth = null,
+  } = deps;
+
+  const efforts = effortInjector ?? defaultEffortInjector({ logger });
+
+  // Sticky pool routing: (poolId, modelId) -> last successful member. Lives
+  // in the handler closure, so it is process memory and resets on restart.
+  const stickyTable = createStickyTable();
+
+  // Chain routing (自动路由): endpointId -> last successful chain node. Same
+  // process-memory lifetime as the sticky table. 降级锁定时经 logger 落一条
+  // 退避日志（常驻模式下经日志桥流进面板「实时输出」）。
+  const chainState = createChainState({
+    onDemote: (ep, idx, nodes) => logChainDemote(logger, ep, idx, nodes),
+  });
+
+  // The 档位映射 exactly as configured right now. An absent getter means the
+  // mechanism is not wired at all (a relay frontend that never serves Claude, a
+  // unit test that does not care) → no tier is mapped → no takeover.
+  function currentTierMappings() {
+    return getClaudeTierMapping ? parseClaudeTierMappings(getClaudeTierMapping()) : {};
+  }
+
+  // What a refused Claude request should tell its client. Only a name that IS
+  // one of the four tiers earns a 档位映射 message; anything else keeps the
+  // strict contract's own wording untouched, because for those the existing
+  // "use the full model id from /v1/models" advice is the correct advice.
+  function tierRefusalMessage(model, reason) {
+    if (!TIER_ELIGIBLE_REASONS.has(reason)) return null;
+    const kind = classifyTierEntryName(model);
+    if (!kind.ok) return null;
+    const tier = tierRowName(kind.tier);
+    const mapping = currentTierMappings()[kind.tier];
+    if (mapping === undefined) {
+      return (
+        `model "${nameLabel(model)}" is Claude's ${tier} tier, which is not mapped to any `
+        + `Anyswitch model yet — set the ${tier} row in ${TIER_SETTINGS_LOCATION} to serve it`
+      );
+    }
+    return (
+      `model "${nameLabel(model)}" is Claude's ${tier} tier, but its mapping target `
+      + `"${nameLabel(mapping)}" is not a model this relay serves — fix the ${tier} row in `
+      + `${TIER_SETTINGS_LOCATION}`
+    );
+  }
+
+  // Token check happens before the body is parsed.
+  function authorize(headers) {
+    const presented = extractPresentedToken(headers);
+    if (presented === null) {
+      return { ok: false, status: 401, body: errorBody("authentication_error", "missing Authorization header") };
+    }
+    if (!tokenMatches(presented, token)) {
+      return { ok: false, status: 401, body: errorBody("authentication_error", "invalid relay token") };
+    }
+    return { ok: true };
+  }
+
+  function loadValidStore() {
+    const loaded = loadStore();
+    if (!loaded.ok) {
+      serviceHealth?.recordFailure("store");
+      return {
+        ok: false,
+        status: 502,
+        body: errorBody("api_error", "the Anyswitch global store could not be read"),
+      };
+    }
+    const result = validateStore(loaded.store);
+    if (!result.valid) {
+      serviceHealth?.recordFailure("store");
+      return {
+        ok: false,
+        status: 502,
+        body: errorBody("api_error", "the Anyswitch global store failed schema validation"),
+      };
+    }
+    return { ok: true, store: loaded.store };
+  }
+
+  // The catalog gate. `providerIds` are the channels THIS request may reach,
+  // and only those are re-checked against what discovery bound, so editing an
+  // unrelated channel cannot invalidate a live session (see
+  // catalog-generation.mjs for what a channel's shape covers). A channel that
+  // appeared after discovery is not stale — nothing the client learned about it
+  // has moved — and a channel that was deleted is the 404 path's business.
+  // Returns null when the request can be routed.
+  function staleCatalogResult(store, providerIds) {
+    const stale = findStaleTargets(readGeneration(), store, providerIds);
+    if (stale.length === 0) return null;
+    const channels = stale.map((providerId) => `"${providerId}"`).join(", ");
+    return {
+      status: 409,
+      body: errorBody(
+        "invalid_request_error",
+        `the upstream endpoint of ${channels} changed since this client discovered its models; `
+        + "re-run model discovery (restart the endpoint, or pick the model again in /model) before retrying",
+      ),
+    };
+  }
+
+  // agentId is optional: callers that can identify the requesting endpoint
+  // (per-launch relay: the launched agent; resident relay: UA detection) pass
+  // it so the catalog can offer the endpoint's route chain as the AUTO_MODEL
+  // virtual model. Unidentifiable callers get the plain wire catalog.
+  // The full model catalog one /v1/models response is built from: the wire
+  // catalog (with context windows), the requesting endpoint's "auto" virtual
+  // model, and every enabled virtual model. Shared by handleModels and the
+  // inbound alias resolution so both sides derive the SAME alias table.
+  // Throws on a wire ID collision — callers turn that into a 500.
+  function modelCatalogEntries(loaded, agentId) {
+    const entries = buildWireCatalog(loaded.store);
+
+    // 自动路由: an endpoint with a configured chain can ask for the virtual
+    // model "auto". It is deliberately not a wire id (no provider carries it)
+    // and is appended after collision checking, so it can never trip that check.
+    // The catalog advertises it under AUTO_MODEL_ANTHROPIC_ID: Claude Code's
+    // gateway discovery drops entries whose id fails /(claude|anthropic)/i,
+    // which the bare "auto" id always does (see chain-routing.mjs). 分组标签
+    // 统一 "Anyswitch"——auto 与虚拟模型同在 Anyswitch provider 列表下。
+    if (agentId !== undefined && (resolveChain(loaded.store, agentId)?.chain?.length ?? 0) > 0) {
+      entries.push({
+        wireId: AUTO_MODEL_ANTHROPIC_ID,
+        providerId: agentId,
+        modelId: AUTO_MODEL,
+        displayName: "[Anyswitch] auto",
+      });
+    }
+    // 虚拟模型：不绑定端点，任何调用方（含 agentId 未知者）的目录都照列。
+    // 目录 id 沿 auto 的同一造法 "anthropic/<名字>"——前缀段内无 '/' 永不与真
+    // wire id 相撞、必过 Claude Code 的 /(claude|anthropic)/i 过滤，且
+    // planChainMessages 在 unpackWireId 之前拦截它。
+    for (const vm of Array.isArray(loaded.store.virtualModels) ? loaded.store.virtualModels : []) {
+      if (vm?.enabled === false) continue;
+      if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+      entries.push({
+        wireId: `anthropic/${vm.name}`,
+        providerId: agentId ?? "anyswitch",
+        modelId: vm.name,
+        displayName: `[Anyswitch] ${vm.name}`,
+      });
+    }
+    return entries;
+  }
+
+  // Claude Desktop 的目录请求判据：3p profile 注入的 x-agent-id 头（CLI 不发
+  // 这个头——它的归属靠 UA 嗅探）叠加 UA 不是 claude-cli。两个条件都留着：
+  // 任何单独一条都可能漂移（将来 CLI 若开始发同名头，或桌面换 UA）。
+  function isDesktopCatalogRequest(headers) {
+    const explicit =
+      typeof headers?.["x-agent-id"] === "string" ? headers["x-agent-id"].trim().toLowerCase() : "";
+    const ua = (headers?.["user-agent"] || "").toLowerCase();
+    return explicit === "claude" && !ua.includes("claude-cli");
+  }
+
+  async function handleModels(headers, agentId) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { status: auth.status, body: auth.body };
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
+
+    let entries;
+    try {
+      entries = modelCatalogEntries(loaded, agentId);
+    } catch (error) {
+      // A wire ID collision fails the WHOLE catalog. No partial output.
+      return { status: 500, body: errorBody("api_error", error.message) };
+    }
+
+    // 桌面视图：Claude Desktop 的拾取器按官方 3p 品牌过滤只收长得像 Anthropic
+    // 模型的 id，过不了的黑名单条目换成确定性路由别名（显示名不变，请求回来
+    // 由 normalizeInboundModel 换回真实 wire id）。CLI 与其他端点拿原目录。
+    if (isDesktopCatalogRequest(headers)) {
+      const view = buildDesktopCatalogView(entries);
+      logger?.info?.(
+        `[desktop-catalog] 桌面视图目录 ${view.entries.length} 条（别名 ${view.aliases.size} 条，UA="${(headers["user-agent"] || "").slice(0, 80)}"）`,
+      );
+      entries = view.entries;
+    }
+
+    // Bind this discovery result to the endpoint each channel resolves to.
+    recordGeneration(providerRoutingShapes(loaded.store));
+    return { status: 200, body: buildModelsResponse(entries) };
+  }
+
+  // Inbound model normalization — the FIRST plan in the caller, ahead of the
+  // 档位映射 takeover, the pool and chain plans and the tracker opening the
+  // request. Rewrites `body.model` in place so pool fan-out, chain routing,
+  // the journal row, model stability and the response echo all carry the real
+  // destination, exactly like planTierEntryMessages does:
+  //   1. strip a trailing "[1m]" variant marker: both Claude clients append it
+  //      to the model id when the 1M-context variant is picked (the engine
+  //      derives its 1M window from the marker), and the real model is the
+  //      bare id;
+  //   2. resolve a desktop route alias back to the real wire id: the desktop
+  //      picker only lists Claude-shaped ids, so the catalog serves
+  //      blocklisted models under deterministic aliases.
+  // No-op for every model the strict rules already accept.
+  async function normalizeInboundModel(headers, body) {
+    const auth = authorize(headers);
+    if (!auth.ok) return null;
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+    if (typeof body.model !== "string" || body.model.length === 0) return null;
+
+    let model = body.model;
+    let changed = false;
+    if (model.endsWith("[1m]") && model.length > "[1m]".length) {
+      model = model.slice(0, -"[1m]".length);
+      changed = true;
+    }
+    // Only a single-segment "anthropic/<code>" can be an alias — real wire ids
+    // always carry a provider segment, so they skip the store load entirely.
+    if (model.startsWith("anthropic/") && !model.slice("anthropic/".length).includes("/")) {
+      const loaded = loadValidStore();
+      if (loaded.ok) {
+        let real = null;
+        try {
+          real = resolveDesktopAlias(model, modelCatalogEntries(loaded, undefined));
+        } catch {
+          real = null;
+        }
+        if (real !== null) {
+          model = real;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) return null;
+
+    // 改写保持静默，不落日志：这是桌面端每个请求都要走的内部步骤（拾取器
+    // 黑名单模型一律以别名下发），播报进面板实时输出只会逐请求刷屏；模型
+    // 的真实落点由统计与会话行呈现，无需在此重复一遍。
+    body.model = model;
+    return model;
+  }
+
+  // options.signal  — the client abort signal, forwarded to the upstream call.
+  // options.agentId — the endpoint this request belongs to. It is what decides
+  //   whether an unresolvable model name is reported and explained: only the
+  //   Claude path owns a 档位映射, so only there is "this name is Claude's Fable
+  //   tier and you have not mapped it" an answer the caller can act on.
+  async function handleMessages(headers, body, options = {}) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { status: auth.status, body: auth.body };
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { status: 400, body: errorBody("invalid_request_error", "request body must be a JSON object") };
+    }
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return { status: loaded.status, body: loaded.body };
+
+    const unpacked = unpackWireId(body.model, loaded.store);
+    if (!unpacked.ok) {
+      // A model name this relay cannot resolve is the one failure class the
+      // operator otherwise cannot see at all: the request never reaches a
+      // channel, so it lands in no usage row and no model-stability bucket.
+      // Reported on the Claude path only — other endpoints were never this
+      // mechanism's business and keep their existing silence.
+      const reportable = options.agentId === CLAUDE_TIER_AGENT_ID;
+      if (reportable) {
+        logger?.warn?.(
+          `档位映射未接管：模型名 "${nameLabel(body.model)}" 无法解析（${unpacked.reason}），本次请求按原样拒绝`,
+        );
+      }
+      return {
+        status: UNPACK_STATUS[unpacked.reason] ?? 400,
+        body: errorBody(
+          "invalid_request_error",
+          (reportable ? tierRefusalMessage(body.model, unpacked.reason) : null) ?? unpacked.message,
+        ),
+      };
+    }
+
+    // Scoped to this wire ID's own channel: a re-pointed provider is reported
+    // as stale before it can receive the session's traffic.
+    const stale = staleCatalogResult(loaded.store, [unpacked.providerId]);
+    if (stale !== null) return stale;
+
+    const provider = loaded.store.providers?.[unpacked.providerId];
+    if (provider === undefined) {
+      return {
+        status: 404,
+        body: errorBody("not_found_error", `provider "${unpacked.providerId}" is not in the Anyswitch store`),
+      };
+    }
+    if (provider.models?.[unpacked.modelId] === undefined) {
+      return {
+        status: 404,
+        body: errorBody(
+          "not_found_error",
+          `model "${unpacked.modelId}" is not in provider "${unpacked.providerId}"`,
+        ),
+      };
+    }
+
+    return attemptMessages(unpacked.providerId, provider, body, unpacked.modelId, options);
+  }
+
+  // One upstream attempt against a single provider. Shared by the classic
+  // single-provider path and by each member call of a pool request.
+  async function attemptMessages(providerId, provider, body, modelId, options = {}) {
+    // 凭据在请求时刻取；是否缓存由 credentialCacheEnabled 决定（见 launch.mjs）。
+    const credentialStartedAt = Date.now();
+    const credential = await loadCredential(providerId, provider);
+    if (!credential.ok) {
+      // 这一条日志是这类故障唯一的证据来源：客户端只看到一句笼统的 502，而
+      // 原因（文件缺失 / 助手没起来 / 助手超时 / 解密失败）只有中继知道。
+      serviceHealth?.recordFailure("credential");
+      logger?.error?.(
+        `credential load failed for provider "${providerId}" (${credential.reason}, ${Date.now() - credentialStartedAt}ms)`,
+      );
+      return {
+        status: 502,
+        body: errorBody("api_error", "the upstream credential for this provider could not be loaded"),
+      };
+    }
+
+    const upstreamRequest = anthropicToOpenAI(body, modelId);
+    const urls = buildUpstreamURLs(provider, "/chat/completions");
+    // Claude names its depth in the raw request and the translator has no
+    // OpenAI field to carry it in, so the level is read off the raw body and
+    // handed to the injector, which puts it on the wire in the spelling the
+    // upstream takes.
+    const { body: outboundRequest, injected } = efforts.inject({
+      providerId,
+      body: upstreamRequest,
+      clientEffort: clientEffortFromAnthropic(body),
+      // The store row rides along so a channel that states its own levels wins
+      // over the library, same rule as the config face.
+      model: provider.models?.[modelId],
+      provider,
+    });
+
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${credential.value}`,
+    };
+    const send = (payload) => upstreamFetch(
+      urls,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: options.signal,
+      },
+      { bufferResponse: payload.stream !== true },
+    );
+
+    let upstream;
+    try {
+      upstream = await send(outboundRequest);
+    } catch (err) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
+      // Message deliberately generic: an upstream transport error must not leak
+      // the URL, the credential or the raw error text.
+      return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
+    }
+
+    // 请求真的到了上游：凭据读得出、网络出得去，中继自己的活干完了。上游之后回
+    // 429/5xx 是上游的问题，不改变「我还能服务」这个事实。
+    serviceHealth?.recordSuccess();
+
+    if (!upstream.ok && injected !== null) {
+      const detail = await readResponseText(upstream);
+      if (looksLikeEffortRejection(upstream.status, detail)) {
+        upstreamFetch.releaseResponse?.(upstream);
+        efforts.noteRejected(providerId);
+        try {
+          upstream = await send(efforts.withoutEffort(outboundRequest));
+        } catch (err) {
+          if (options.signal?.aborted) {
+            throw err;
+          }
+          return { status: 502, body: errorBody("api_error", "the upstream provider could not be reached") };
+        }
+      }
+    }
+
+    if (!upstream.ok) {
+      upstreamFetch.releaseResponse?.(upstream);
+      // Pass the status class through, but not the raw upstream body.
+      return {
+        status: upstream.status,
+        body: errorBody("api_error", `the upstream provider returned status ${upstream.status}`),
+      };
+    }
+
+    if (upstreamRequest.stream === true) {
+      // A stream can legitimately exceed the connection deadline; once headers
+      // establish a 2xx streaming response, transport owns its lifetime.
+      upstreamFetch.releaseResponse?.(upstream);
+      return { status: 200, stream: upstream.body, wireId: body.model };
+    }
+
+    let payload;
+    try {
+      payload = await upstream.json();
+    } catch {
+      return { status: 502, body: errorBody("api_error", "the upstream provider returned a malformed response") };
+    } finally {
+      upstreamFetch.releaseResponse?.(upstream);
+    }
+    return { status: 200, body: openAIToAnthropic(payload, body.model) };
+  }
+
+  // 档位映射 (Claude Code tier entries) — the takeover pre-flight.
+  //
+  // Runs FIRST in the caller, before the pool and chain plans and before the
+  // request is opened on the tracker: it rewrites `body.model` from a Claude
+  // tier entry name to the operator's configured Anyswitch model, so pool
+  // fan-out, chain routing, the journal row, model stability and the model the
+  // response echoes all carry the DESTINATION and never the entry name. That is
+  // also why the rewrite is in place rather than returned: the same reason
+  // AUTO_MODEL normalizes itself here (see planChainMessages) — attribution
+  // reads `body.model` downstream.
+  //
+  // Returns the takeover record, or null whenever this request is not the
+  // mechanism's business: another endpoint, an unauthorized call (the paths
+  // below report that identically), a full wire ID, a name the strict rules
+  // resolve that is not Claude's tier vocabulary, a refusal that is not tier-
+  // eligible, or a tier the operator did not configure (its colliding bare
+  // name then keeps serving from the channel that carries it). A refusal it
+  // declines to act on still gets an explanatory 400 from handleMessages,
+  // which sees the same classification.
+  async function planTierEntryMessages(headers, body, agentId) {
+    if (agentId !== CLAUDE_TIER_AGENT_ID) return null;
+    const auth = authorize(headers);
+    if (!auth.ok) return null;
+    if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    const strict = unpackWireId(body.model, loaded.store);
+    // A full wire ID names its destination outright and is never steered.
+    if (strict.ok && strict.legacy !== true) return null;
+    if (!strict.ok && !TIER_ELIGIBLE_REASONS.has(strict.reason)) return null;
+    // Since 2.1.292 moved Claude Code's Opus picker to the concrete default id
+    // "claude-opus-5-5", a tier-entry name can collide with a real model one
+    // channel carries — the unqualified scan then resolves it (legacy hit) and
+    // the takeover used to stand down. It no longer does: a bare name that is
+    // unmistakably one of Claude's four tier entries belongs to the map even
+    // when the scan resolves it, because the operator's row — not an accident
+    // of naming — is what says where that tier runs. A resolvable bare name
+    // outside Claude's vocabulary keeps its strict hit untouched.
+    if (strict.ok && !classifyTierEntryName(body.model).ok) return null;
+
+    // Read the configuration only now: names this mechanism cannot steer — a
+    // full wire ID, a resolvable name outside Claude's tier vocabulary, a
+    // refusal without tier eligibility — all returned above, so the common
+    // path costs no settings read, exactly as it did before this existed.
+    const mappings = currentTierMappings();
+    if (Object.keys(mappings).length === 0) return null;
+
+    const takeover = resolveTierEntry({
+      model: body.model,
+      mappings,
+      // A destination that is not itself a resolvable model name is a broken
+      // row, not a channel outage: refuse here so the 400 can name the row
+      // instead of 404ing on a half-rewritten request.
+      targetResolves: (target) => unpackWireId(target, loaded.store).ok,
+    });
+    if (!takeover.ok) return null;
+
+    body.model = takeover.wireId;
+    logger?.info?.(
+      `档位映射接管：模型名 "${nameLabel(takeover.entry)}" 是 Claude 的 ${tierRowName(takeover.tier)} 档，`
+      + `本次请求改投 "${nameLabel(takeover.wireId)}"`,
+    );
+    return takeover;
+  }
+
+  // Pool routing pre-flight. Returns:
+  //   null              — body.model does not name a pool; the caller falls
+  //                       through to the classic single-provider path (which
+  //                       re-runs auth/unpack/store and reports errors)
+  //   { ok: false, ...} — terminal pre-flight error (auth, body, generation
+  //                       gate, or no member carries the model)
+  //   { ok: true, poolId, modelId, members, noteSuccess }
+  //                     — ordered per-member call plan, sticky member first
+  //
+  // The generation gate needs no pool special-casing: the catalog digest
+  // covers providers (including every member's endpoint) but not pool
+  // membership, so editing pool composition alone cannot false-trigger a 409.
+  async function planPoolMessages(headers, body) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false, status: 400, body: errorBody("invalid_request_error", "request body must be a JSON object") };
+    }
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    const unpacked = unpackWireId(body.model, loaded.store);
+    if (!unpacked.ok || unpacked.pool !== true) return null;
+
+    const pool = resolvePool(loaded.store, unpacked.poolId);
+    if (!pool) return null;
+
+    // Gate over exactly the members this request could call. With no candidate
+    // member there is no endpoint to be stale, so that case falls through to
+    // its own 404 below.
+    const candidates = poolMembersWithModel(loaded.store, pool, unpacked.modelId);
+    const stale = staleCatalogResult(loaded.store, candidates.map((candidate) => candidate.memberId));
+    if (stale !== null) return { ok: false, ...stale };
+
+    if (candidates.length === 0) {
+      return {
+        ok: false,
+        status: 404,
+        body: errorBody("not_found_error", `model "${unpacked.modelId}" is not in pool "${unpacked.poolId}"`),
+      };
+    }
+
+    const ordered = stickyTable.order(unpacked.poolId, unpacked.modelId, candidates);
+    return {
+      ok: true,
+      poolId: unpacked.poolId,
+      modelId: unpacked.modelId,
+      members: ordered.map(({ memberId, provider }) => ({
+        memberId,
+        call: (options = {}) => attemptMessages(memberId, provider, body, unpacked.modelId, options),
+      })),
+      noteSuccess: (memberId) => stickyTable.noteSuccess(unpacked.poolId, unpacked.modelId, memberId),
+      // 成员级请求失败计数（该成员本次请求彻底失败时由 server 侧回调，
+      // 末位成员同样计入）——号池粘性位降级门控（失败才降级）的计数来源。
+      // 一个成员在一次请求里至多失败一次，无需去重。
+      noteFailure: (memberId) => stickyTable.noteFailure(unpacked.poolId, unpacked.modelId, memberId),
+    };
+  }
+
+  // Chain routing pre-flight (自动路由). Same return contract as
+  // planPoolMessages:
+  //   null              — body.model is not the virtual model AUTO_MODEL (nor
+  //                       its anthropic catalog alias AUTO_MODEL_ANTHROPIC_ID),
+  //                       or the endpoint has no configured chain; the caller
+  //                       falls through to the pool/classic paths untouched
+  //   { ok: false, ...} — terminal pre-flight error (auth, body, generation
+  //                       gate, or no chain node can serve)
+  //   { ok: true, endpointId, members, noteSuccess }
+  //                     — flat, chainState.plan-ordered callable list: a
+  //                       channel node contributes ONE callable, a pool node
+  //                       contributes its sticky-ordered member callables
+  //
+  // AUTO_MODEL is a virtual model, not a wire id, so it MUST be intercepted
+  // before unpackWireId (which would reject it as an unknown unqualified
+  // model). memberId is `nodeId` for a channel node and `nodeId/poolMemberId`
+  // for a pool member (provider ids never contain '/'). Each member also
+  // carries the tracker key fields: providerId (channel id, or pool id for
+  // pool members — the pool member itself rides memberId) and model (the
+  // node's bound model, which is what the upstream is actually asked for).
+  async function planChainMessages(headers, body, agentId) {
+    const auth = authorize(headers);
+    if (!auth.ok) return { ok: false, status: auth.status, body: auth.body };
+
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      return { ok: false, status: 400, body: errorBody("invalid_request_error", "request body must be a JSON object") };
+    }
+
+    // Route selection (auto vs 虚拟模型): auto rides the requesting endpoint's
+    // chain (identifiable callers only); a virtual model name rides its own
+    // endpoint-agnostic chain. The chain state table keys off the route key —
+    // endpoint id for auto, the model name for a virtual model (save-time
+    // schema forbids endpoint ids as vm names, so the two key spaces never
+    // overlap). Both shapes expose .chain, so the expansion below is shared.
+
+    // Normalize the picker-facing alias back to the canonical virtual model:
+    // both call sites (per-launch relay, resident relay) read body.model for
+    // tracker attribution only AFTER this planner runs, so stats/journals keep
+    // the "auto" key no matter which id the client sent.
+    if (body.model === AUTO_MODEL_ANTHROPIC_ID) body.model = AUTO_MODEL;
+
+    const loaded = loadValidStore();
+    if (!loaded.ok) return null;
+
+    let chain = null;
+    let routeKey = null;
+    if (body.model === AUTO_MODEL) {
+      chain = resolveChain(loaded.store, agentId);
+      routeKey = agentId;
+    } else {
+      chain = resolveVirtualModelEntry(loaded.store, body.model);
+      routeKey = chain?.name ?? null;
+    }
+    if (!chain || chain.chain.length === 0) return null;
+
+    // 虚拟模型的目录别名 "anthropic/<名字>" 归一为裸名：与 auto 的别名归一同一
+    // 理由——下游归属读取 body.model，journal/统计保持裸名键。
+    if (body.model !== AUTO_MODEL && body.model.startsWith("anthropic/")) {
+      const bare = body.model.slice("anthropic/".length);
+      if (bare && !bare.includes("/") && resolveVirtualModelEntry(loaded.store, bare)) {
+        body.model = bare;
+      }
+    }
+
+    // Reachable channels, derived from the CONFIGURED chain without touching
+    // chainState: plan() re-anchors the backoff probe window, and a request
+    // refused here must not spend that probe. A node that no longer resolves
+    // contributes nothing — the existing 404 path owns it.
+    const reachable = [];
+    for (const entry of chain.chain) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+      if (expanded.kind === "channel") reachable.push(expanded.providerId);
+      else reachable.push(...expanded.memberIds);
+    }
+    const stale = staleCatalogResult(loaded.store, reachable);
+    if (stale !== null) return { ok: false, ...stale };
+
+    // plan already applies "current node first + retry from the head every
+    // RETRY_UPSTREAM_MS"; expand the entries in exactly the returned order.
+    const planned = chainState.plan(loaded.store, routeKey, chain.chain, Date.now());
+
+    const members = [];
+    const byMemberId = new Map();
+    // 本请求已计失败的节点（node+model 复合键）：noteFailure 的去重集。
+    const failedNodes = new Set();
+    for (const entry of planned) {
+      const expanded = expandChainNode(loaded.store, entry);
+      if (!expanded) continue;
+
+      if (expanded.kind === "channel") {
+        const provider = loaded.store.providers[expanded.providerId];
+        const memberId = uniqueMemberId(byMemberId, expanded.providerId, expanded.model);
+        byMemberId.set(memberId, { nodeId: expanded.providerId, model: expanded.model });
+        members.push({
+          memberId,
+          nodeId: expanded.providerId,
+          providerId: expanded.providerId,
+          model: expanded.model,
+          memberNoun: "chain node",
+          call: (options = {}) => attemptMessages(expanded.providerId, provider, body, expanded.model, options),
+        });
+        continue;
+      }
+
+      // Pool node: the pool's own sticky member routing runs inside the node;
+      // the node only counts as failed when every member is exhausted.
+      const candidates = expanded.memberIds.map((poolMemberId) => ({
+        memberId: poolMemberId,
+        provider: loaded.store.providers[poolMemberId],
+      }));
+      for (const { memberId: poolMemberId, provider } of stickyTable.order(expanded.poolId, expanded.model, candidates)) {
+        const memberId = uniqueMemberId(byMemberId, `${expanded.poolId}/${poolMemberId}`, expanded.model);
+        byMemberId.set(memberId, {
+          nodeId: expanded.poolId,
+          poolId: expanded.poolId,
+          poolMemberId,
+          model: expanded.model,
+        });
+        members.push({
+          memberId,
+          nodeId: expanded.poolId,
+          providerId: expanded.poolId,
+          model: expanded.model,
+          memberNoun: "pool member",
+          call: (options = {}) => attemptMessages(poolMemberId, provider, body, expanded.model, options),
+        });
+      }
+    }
+
+    if (members.length === 0) {
+      // auto 的报错点名端点；虚拟模型点名模型名（链不绑定端点，名字才是路由键）。
+      const subject = body.model === AUTO_MODEL ? agentId : body.model;
+      return {
+        ok: false,
+        status: 404,
+        body: errorBody("not_found_error", `no node in the route chain for "${subject}" can serve the request`),
+      };
+    }
+
+    return {
+      ok: true,
+      endpointId: agentId,
+      members,
+      // Node-level stats attribution for the tracker: memberId -> the chain
+      // node that serves it + the node's bound model. Unknown memberIds
+      // resolve to null and the tracker keeps its existing attribution.
+      attributeOf: (memberId) => {
+        const record = byMemberId.get(memberId);
+        return record ? { providerId: record.nodeId, model: record.model } : null;
+      },
+      // A member answered: stick the chain to its node, and when the member
+      // is a pool member also feed the pool's own sticky table.
+      noteSuccess: (memberId) => {
+        const record = byMemberId.get(memberId);
+        if (record === undefined) return;
+        noteChainSuccess(chainState, routeKey, record.nodeId, record.model, Date.now());
+        if (record.poolId !== undefined) {
+          stickyTable.noteSuccess(record.poolId, record.model, record.poolMemberId);
+        }
+      },
+      // 一次请求级节点失败（该节点本次请求彻底失败时由 server 侧回调，
+      // 链尾末位同样计入）；per-request 去重让号池整池耗尽只计一次（请求数口径）。
+      noteFailure: (memberId) => {
+        const record = byMemberId.get(memberId);
+        if (record === undefined) return;
+        // 池成员还要进池内粘性表的成员级计数（失败才降级，与链同一规则）；
+        // 成员一次请求至多 failover 一次，不需要 per-request 去重。
+        if (record.poolId !== undefined) {
+          stickyTable.noteFailure(record.poolId, record.model, record.poolMemberId);
+        }
+        const key = chainNodeKey(record.nodeId, record.model);
+        if (failedNodes.has(key)) return;
+        failedNodes.add(key);
+        noteChainFailure(chainState, routeKey, record.nodeId, record.model);
+      },
+    };
+  }
+
+  return {
+    authorize,
+    handleModels,
+    handleMessages,
+    normalizeInboundModel,
+    planTierEntryMessages,
+    planPoolMessages,
+    planChainMessages,
+    chainState,
+  };
+}

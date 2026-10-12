@@ -1,0 +1,260 @@
+import { compareVersions, parseVersion } from "./version-check.mjs";
+
+const npmSource = (name, repository, url) => ({
+  endpoint: `https://registry.npmjs.org/-/package/${encodeURIComponent(name)}/dist-tags`,
+  source: `npm:${name}:latest`,
+  url: url ?? `https://github.com/${repository}/releases`,
+  field: "latest",
+});
+
+export const CLIENTS = {
+  claude: npmSource("@anthropic-ai/claude-code", "anthropics/claude-code"),
+  // Codex 的本地检测读的是 npm 全局 `@openai/codex` 的包清单，更新动作装的也是这个包，
+  // 官方最新版本因此同查 npm dist-tag。查 GitHub Release 时两源各自发版就会出现
+  // 「提示有新版本、装完版本没变」，还要分摊 api.github.com 的匿名限额。
+  codex: npmSource("@openai/codex", "openai/codex"),
+  opencode: npmSource("opencode-ai", "anomalyco/opencode"),
+  pi: npmSource("@earendil-works/pi-coding-agent", "earendil-works/pi"),
+  kimi: npmSource("@moonshot-ai/kimi-code", "MoonshotAI/kimi-code"),
+  dsh: npmSource("@deepseek-ai/dsh", "deepseek-ai/deepseek-harness"),
+  // Grok Build 的执行体是原生二进制，但官方分发与它自身的 `grok update` 都以
+  // `@xai-official/grok` 的 npm dist-tag 为准，官方链接因此指 npm 包页而非仓库发布页。
+  grok: npmSource("@xai-official/grok", null, "https://www.npmjs.com/package/@xai-official/grok"),
+  "codex-desktop": {
+    endpoint: "https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json",
+    source: "codex-desktop:windows-store:latest", format: "codex-desktop",
+    url: "https://apps.microsoft.com/detail/9PLM9XGG6VKS",
+  },
+  // DSH 桌面端（官方 Electron 包）的发布源是它自己的更新通道文件，也就是这个
+  // 应用内置的 electron-updater 会去读的那一份（resources/app-update.yml 的
+  // provider/url/channel）——代更新按钮拿它与本地安装比对、再去同一个源取安装
+  // 包，两处口径因此完全一致。频道 nightly、平台 win-x64 固定为常量：它们与
+  // app-update.yml 是同一份事实，改了要跟着改。
+  "dsh-desktop": {
+    endpoint: "https://download.deepseek.com/dsh-desk/feeds/win-x64/nightly.yml",
+    source: "dsh-desktop:win-x64:nightly", format: "yaml",
+    url: "https://harness.deepseek.com",
+  },
+  // Kimi Code 桌面端（官方 Electron 包）与 DSH 桌面端同型：发布源就是它内置的
+  // electron-updater 去读的那份频道文件（resources/app-update.yml 的 provider/
+  // url/channel——generic + https://code.kimi.com/kimi-code/desktop/ + latest）。
+  // 频道 latest、win-x64 固定为常量：与 app-update.yml 是同一份事实，改了要跟着改。
+  // endpoint 钉 CDN 最终地址：code.kimi.com 会 302 到 cdn.kimi.com，而这里的
+  // 查询一律 redirect: "error"，不追跳转。
+  "kimi-desktop": {
+    endpoint: "https://cdn.kimi.com/kimi-code/desktop/latest.yml",
+    source: "kimi-desktop:win-x64:latest", format: "yaml",
+    url: "https://github.com/MoonshotAI/kimi-code-app",
+  },
+  // Claude 桌面端（官方 MSIX 包）没有可匿名访问的版本源：官方更新元数据端点
+  // （api.anthropic.com/api/desktop/win32/x64/msix/update，更新腿在用）按出口
+  // 网络放行、直连一律拒绝，而 Node fetch 不读系统代理。关于页要的只是官方
+  // 来源链接，版本比对本来就留给更新腿，因此这里是不带 endpoint 的静态条目：
+  // 查询恒成功、永远不带版本号。
+  "claude-desktop": {
+    source: "claude-desktop:win32-x64:msix", format: "static",
+    url: "https://claude.ai/download",
+  },
+  zcode: {
+    endpoint: "https://zcode.z.ai/api/v1/releases/electron/manifest?platform=windows-x86_64&channel=1",
+    source: "zcode:windows-x86_64:stable", format: "yaml", url: "https://zcode.z.ai/cn/changelog",
+    headers: { "X-Platform": "windows-x86_64", "X-Release-Channel": "stable" },
+  },
+  qoder: {
+    endpoint: "https://download.qoder.com.cn/qoder-app/releases/latest.yml",
+    source: "qoder:desktop:latest", format: "yaml", url: "https://qoder.com/changelog",
+  },
+  // Qoder CLI 是 Bun 单文件原生二进制（与 grok 同型）：官方最新以
+  // @qoder-ai/qodercli 的 npm dist-tag 为准，官方链接因此指 npm 包页而非发布页。
+  "qoder-cli": npmSource("@qoder-ai/qodercli", null, "https://www.npmjs.com/package/@qoder-ai/qodercli"),
+};
+
+function yamlVersion(text) {
+  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => /^version\s*:/.test(line));
+  if (lines.length !== 1) return null;
+  const match = /^version\s*:\s*(?:"([^"\\]*)"|'([^']*)'|([^\s#'"]+))\s*(?:#.*)?$/.exec(lines[0]);
+  return match ? match[1] ?? match[2] ?? match[3] : null;
+}
+
+class ReleaseError extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+function parseJson(text) {
+  try { return JSON.parse(text); }
+  catch { throw new ReleaseError("invalid_response"); }
+}
+
+function releaseUrl(value, repository, tag) {
+  try {
+    const url = new URL(value);
+    if (typeof value !== "string" || value !== url.href || url.origin !== "https://github.com"
+      || url.username || url.password || url.search || url.hash
+      || decodeURIComponent(url.pathname) !== `/${repository}/releases/tag/${tag}`) throw new Error();
+    return value;
+  } catch { throw new ReleaseError("unsafe_url"); }
+}
+
+const APP_RELEASES = "https://api.github.com/repos/Aurora0134/Anyswitch/releases";
+
+function nextPage(link, page) {
+  if (!link) return null;
+  const entries = link.split(",").map((part) => /^\s*<([^>]+)>\s*;\s*rel="([a-z ]+)"\s*$/.exec(part));
+  if (entries.some((entry) => !entry)) throw new ReleaseError("invalid_pagination");
+  const next = entries.filter((entry) => entry[2].split(" ").includes("next"));
+  if (!next.length) return null;
+  try {
+    const url = new URL(next[0][1]);
+    if (next.length !== 1 || url.href !== next[0][1] || url.origin + url.pathname !== APP_RELEASES
+      || url.username || url.password || url.hash || [...url.searchParams].length !== 2
+      || url.searchParams.get("per_page") !== "100" || url.searchParams.get("page") !== String(page + 1)) throw new Error();
+    return url.href;
+  } catch { throw new ReleaseError("invalid_pagination"); }
+}
+
+export function createReleaseService({ currentVersion, fetchFn = fetch, now = Date.now, cacheTtlMs = 10 * 60 * 1000, maxConcurrent = 4, timeoutMs = 8000, maxResponseBytes = 1024 * 1024 } = {}) {
+  const cache = new Map();
+  const pending = new Map();
+
+  function cached(key, force, operation) {
+    const inFlight = pending.get(key);
+    if (inFlight) return inFlight;
+    const saved = cache.get(key);
+    if (!force && saved && now() - saved.at < cacheTtlMs) return Promise.resolve(saved.value);
+    const request = operation().then(
+      (value) => {
+        if (pending.get(key) === request) pending.delete(key);
+        cache.set(key, { at: now(), value });
+        return value;
+      },
+      (error) => {
+        if (pending.get(key) === request) pending.delete(key);
+        throw error;
+      },
+    );
+    pending.set(key, request);
+    return request;
+  }
+
+  let active = 0;
+  const queue = [];
+
+  async function request(endpoint, options) {
+    if (active >= maxConcurrent) await new Promise((resolve) => queue.push(resolve));
+    active++;
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetchFn(endpoint, { ...options, signal: controller.signal });
+        const declared = Number(response.headers.get("content-length"));
+        if (Number.isFinite(declared) && declared > maxResponseBytes) throw new ReleaseError("response_too_large");
+        const text = await response.text();
+        if (controller.signal.aborted) throw new ReleaseError("timeout");
+        if (text.length > maxResponseBytes) throw new ReleaseError("response_too_large");
+        return { response, text };
+      } catch (error) {
+        if (controller.signal.aborted) throw new ReleaseError("timeout");
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+    } finally {
+      active--;
+      if (queue.length) queue.shift()();
+    }
+  }
+
+  async function queryClientLatest(id) {
+    const spec = CLIENTS[id];
+    // 静态条目没有版本端点可查，直接给出官方来源链接；state ok 让详情区照常
+    // 渲染链接行，version null 表示「此渠道不提供可比对的版本号」。
+    if (spec.format === "static") {
+      return {
+        state: "ok", version: null, url: spec.url, source: spec.source,
+        checkedAt: new Date(now()).toISOString(), errorCode: null,
+      };
+    }
+    try {
+      const { response, text } = await request(spec.endpoint, {
+        credentials: "omit", redirect: "error",
+        headers: { Accept: spec.format === "yaml" ? "text/yaml, text/plain" : "application/json", ...spec.headers },
+      });
+      if (!response.ok) {
+        const limited = response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
+        throw new ReleaseError(limited ? "rate_limited" : "http_error");
+      }
+      const data = spec.format === "yaml" ? null : parseJson(text);
+      if (spec.format === "codex-desktop" && (typeof data?.buildVersion !== "string"
+        || !/^\d+\.\d+\.\d+(?:\.0)?$/.test(data.buildVersion))) throw new ReleaseError("invalid_response");
+      const version = spec.format === "yaml" ? yamlVersion(text)
+        : spec.format === "codex-desktop" ? data.buildVersion.replace(/^(\d+\.\d+\.\d+)\.0$/, "$1")
+        : data?.[spec.field];
+      const parsed = parseVersion(version);
+      if (!parsed) throw new ReleaseError("invalid_response");
+      return {
+        state: "ok", version, url: spec.url, source: spec.source,
+        checkedAt: new Date(now()).toISOString(), errorCode: null,
+      };
+    } catch (error) {
+      return {
+        state: "error", version: null, url: null, source: spec.source,
+        checkedAt: new Date(now()).toISOString(), errorCode: error instanceof ReleaseError ? error.code : "network_error",
+      };
+    }
+  }
+  async function queryAppUpdate() {
+    const base = { currentVersion: currentVersion ?? null, checkedAt: new Date(now()).toISOString(), release: null, errorCode: null };
+    const current = parseVersion(currentVersion);
+    if (!current) return { ...base, state: "unknown_version" };
+    try {
+      let endpoint = `${APP_RELEASES}?per_page=100&page=1`;
+      let stable = null, preview = null;
+      let page = 0;
+      while (endpoint) {
+        page++;
+        const { response, text } = await request(endpoint, {
+          credentials: "omit", redirect: "error", headers: { Accept: "application/json" },
+        });
+        if (!response.ok) throw new ReleaseError(response.status === 429 ? "rate_limited" : "http_error");
+        const data = parseJson(text);
+        if (!Array.isArray(data)) throw new ReleaseError("invalid_response");
+        for (const item of data) {
+          if (!item || typeof item.draft !== "boolean" || typeof item.prerelease !== "boolean") throw new ReleaseError("invalid_response");
+          if (item.draft) continue;
+          const version = typeof item.tag_name === "string" ? item.tag_name.replace(/^v/, "") : null;
+          const parsed = parseVersion(version);
+          if (!parsed) throw new ReleaseError("invalid_response");
+          if (typeof item.published_at !== "string" || !Number.isFinite(Date.parse(item.published_at))) throw new ReleaseError("invalid_response");
+          const url = releaseUrl(item.html_url, "Aurora0134/Anyswitch", item.tag_name);
+          const candidate = { version, tag: item.tag_name, prerelease: item.prerelease || parsed.prerelease.length > 0, url, publishedAt: item.published_at };
+          if (candidate.prerelease) { if (!preview || compareVersions(version, preview.version) === 1) preview = candidate; }
+          else if (!stable || compareVersions(version, stable.version) === 1) stable = candidate;
+        }
+        endpoint = nextPage(response.headers.get("link"), page);
+      }
+      // 预览版身份两条渠道都看；稳定版身份优先正式渠道，正式渠道一个 Release 都没有时
+      // 回退到最新预览版——否则在只有预览版可升的时期，稳定版用户只会看到「暂无发布版本」。
+      const target = current.prerelease.length
+        ? ([stable, preview].filter(Boolean).sort((a, b) => compareVersions(b.version, a.version))[0] ?? null)
+        : stable ?? preview;
+      const order = target ? compareVersions(currentVersion, target.version) : null;
+      return { ...base, checkedAt: new Date(now()).toISOString(), release: target, state: !target ? "no_releases" : order < 0 ? "update_available" : order > 0 ? "ahead" : "current" };
+    } catch (error) {
+      return { ...base, checkedAt: new Date(now()).toISOString(), state: "error", errorCode: error instanceof ReleaseError ? error.code : "network_error" };
+    }
+  }
+  function getClientLatest(id, { force = false } = {}) {
+    if (typeof id !== "string" || !Object.hasOwn(CLIENTS, id)) return Promise.reject(new TypeError("Unsupported client id"));
+    return cached(`client:${id}`, force, () => queryClientLatest(id));
+  }
+
+  function getAppUpdate({ force = false } = {}) {
+    return cached("app", force, queryAppUpdate);
+  }
+
+  return { getClientLatest, getAppUpdate };
+}

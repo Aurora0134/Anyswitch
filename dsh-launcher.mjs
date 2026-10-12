@@ -1,0 +1,226 @@
+import { spawn } from "node:child_process";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { realpathSync, existsSync } from "node:fs";
+import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
+import { createProductionDeps } from "./launch.mjs";
+import { loadStore, storePaths } from "./store-io.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { createLogger } from "./logger.mjs";
+import { createPanelRouter } from "./panel.mjs";
+import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { createUsageJournal } from "./usage-journal.mjs";
+import { writeDshProfilePatches } from "./dsh-merge-config.mjs";
+import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
+import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+
+export function dshSettingsPath(base = process.env) {
+  return join(base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh"), "settings.yaml");
+}
+
+const DSH_SETTINGS_PATH = dshSettingsPath();
+
+export const RELAY_PORT = DEFAULT_RELAY_PORT;
+
+function relayDataRoot(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Anyswitch");
+}
+
+function createOpenAIProductionDeps(options = {}) {
+  const paths = options.paths ?? storePaths();
+  const claudeDeps = createProductionDeps({ paths });
+  const root = relayDataRoot(options.base ?? process.env);
+  const logger = options.logger ?? createLogger();
+  // Usage journal (same dir as the resident relay) so fallback-relay traffic
+  // still lands in the stats journal when the resident relay is down.
+  let usageJournal = null;
+  try {
+    usageJournal = createUsageJournal({ dir: join(root, "usage") });
+  } catch { usageJournal = null; }
+  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ journal: usageJournal });
+  return {
+    token: loadOrGenerateToken(root),
+    loadStore: claudeDeps.loadStore,
+    loadCredential: claudeDeps.loadCredential,
+    buildUpstreamURLs: claudeDeps.buildUpstreamURLs,
+    upstreamFetch: claudeDeps.upstreamFetch,
+    recordGeneration: claudeDeps.recordGeneration,
+    readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
+    panelRouter: createPanelRouter({ storePaths: paths, logger, metricsCollector }),
+    metricsCollector,
+    logger,
+  };
+}
+
+export async function startOpenAIRelay(options = {}) {
+  const deps = createOpenAIProductionDeps(options);
+  const probe = deps.loadStore();
+  if (!probe.ok) {
+    throw new Error("the Anyswitch global store is not usable; refusing to start the dsh relay");
+  }
+  const server = createOpenAIRelayServer(deps);
+  const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
+  return { port, token: deps.token, close, reused };
+}
+
+export function dshPackageRoot(base = process.env) {
+  return join(
+    base.APPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Roaming"),
+    "npm",
+    "node_modules",
+    "@deepseek-ai",
+    "dsh",
+  );
+}
+
+export async function writeDshConfig(store, port, token, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
+  // 0.1.7 reads each profile's cordis.patch.yml, not settings.yaml. The path
+  // argument stays so older callers keep compiling; the home is its parent.
+  const dshHome = dirname(settingsPath);
+  const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
+  const includeEfforts = effortsEnabled ?? effortSupplementEnabled(sidecarRoot);
+  return writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
+}
+
+import { resolveDshExecutable } from "./agent-discovery.mjs";
+export { resolveDshExecutable };
+
+export function buildDshLauncherEnv({ port, token, base = {} }) {
+  const env = { ...base };
+  env.ANYSWITCH_RELAY_TOKEN = token;
+  env.NO_PROXY = "127.0.0.1,localhost";
+  env.no_proxy = "127.0.0.1,localhost";
+  return env;
+}
+
+export async function runDshLauncher({
+  startRelay,
+  writeConfig,
+  spawnDsh,
+  log = () => {},
+  base = process.env,
+  dshArgs = [],
+  probeRelay: probeRelayFn = async () => false,
+}) {
+  // Two-level relay acquisition (probe resident → start per-launch), then a
+  // native fallback: when both levels fail, relay is null and dsh launches on
+  // its own configuration below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "dsh",
+    port: RELAY_PORT,
+    log,
+    probeRelay: probeRelayFn,
+    // The resident relay outlives this launch, so the reuse handle closes as a
+    // no-op; only a per-launch relay we started gets torn down.
+    residentRelay: async () => ({
+      port: RELAY_PORT,
+      token: loadOrGenerateToken(relayDataRoot(base)),
+      close: async () => {},
+      reused: true,
+    }),
+    startRelay,
+  });
+
+  try {
+    const loaded = loadStore();
+    if (!loaded.ok) {
+      log("warning: Anyswitch store could not be read; dsh settings not updated");
+    } else {
+      const sidecarRoot = relayDataRoot(base);
+      // Native mode syncs against the well-known port too, so the managed
+      // profiles revive with the resident relay. The credential must live in
+      // the profile itself — a surface that never ran this launcher (the
+      // official desktop app) reads it from there, never from an
+      // ANYSWITCH_RELAY_TOKEN this process may not even export. Native mode
+      // takes the shared token file (the same one a resident relay reads, so
+      // the profiles revive with it); a token that cannot be read only
+      // downgrades the sync, exactly as for the sibling launchers.
+      const token = relay
+        ? relay.token
+        : loadNativeSyncToken({ loadToken: loadOrGenerateToken, root: sidecarRoot, endpoint: "dsh", log });
+      const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, token, sidecarRoot);
+      if (!writeResult.ok) {
+        log(`warning: dsh profile patch not updated: ${writeResult.reason ?? "unknown error"}`);
+      } else if (!writeResult.unchanged) {
+        log("dsh profile patches updated");
+      }
+    }
+
+    // Relay mode injects ANYSWITCH_RELAY_TOKEN + NO_PROXY; native mode passes
+    // the environment through verbatim so dsh behaves exactly as if started
+    // without Anyswitch.
+    const env = relay
+      ? buildDshLauncherEnv({ port: relay.port, token: relay.token, base })
+      : buildNativeLauncherEnv({ base });
+    return await spawnDsh({ env, args: dshArgs });
+  } finally {
+    // A reused resident relay's close is a no-op; only a per-launch relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
+  }
+}
+
+function realSpawnDsh({ env, args }) {
+  return new Promise((resolve, reject) => {
+    const exe = resolveDshExecutable(env);
+    const isCmd = exe.toLowerCase().endsWith(".cmd");
+    const comspec = process.env.COMSPEC || "cmd.exe";
+
+    const child = isCmd
+      ? spawn(comspec, ["/d", "/c", exe, ...args], {
+          env,
+          stdio: "inherit",
+          shell: false,
+          windowsHide: false,
+        })
+      : spawn(exe, args, {
+          env,
+          stdio: "inherit",
+          shell: false,
+          windowsHide: false,
+        });
+
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const code = await runDshLauncher({
+    startRelay: () => startOpenAIRelay(),
+    writeConfig: (store, port, token, sidecarRoot) => writeDshConfig(store, port, token, sidecarRoot),
+    spawnDsh: realSpawnDsh,
+    log: (line) => process.stderr.write(`${line}\n`),
+    dshArgs: argv,
+    probeRelay: probeRelay,
+  });
+  return code;
+}
+
+function isEntryModule(argv1, metaUrl, realpath = realpathSync) {
+  if (typeof argv1 !== "string" || argv1.length === 0) return false;
+  const norm = (p) => {
+    try {
+      return realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  try {
+    return norm(fileURLToPath(metaUrl)) === norm(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryModule(process.argv[1], import.meta.url)) {
+  main().then(
+    (code) => process.exit(code),
+    (error) => {
+      process.stderr.write(`dsh launcher failed: ${error.message}\n`);
+      process.exit(1);
+    },
+  );
+}

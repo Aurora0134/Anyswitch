@@ -1,0 +1,481 @@
+// 收起态折线图渲染门控——行为回归测试。
+// 栏的「展开 ▾/收起 ▴」折叠只对四宫格切 hidden（CSS display:none），所以渲染
+// 路径必须同样感知折叠态，否则收起的栏每秒仍会对隐藏 SVG 写折线 d 属性
+// （生成中每实例 3 条 × 1s 的 JS 空转写）。本文件覆盖三个行为：
+// ① 收起态渲染实例行：零 updateSparkline 调用（buffer 照常累积，曲线连续性不受影响）；
+// ② 展开瞬间（折叠钮 → applyDetailFold）立即用已攒 buffer 补绘，不等下一轮 1s 轮询；
+// ③ 展开态渲染行为（tps/ttft/cache 三条，cache 锁 0-100 量程）。
+// 端点级旧机制（zcode/qoder）行为见文件尾 describe（DSH 已并入统一管线，其防尘测在 panel.test.mjs）。
+import test, { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const panelJs = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
+  "utf8",
+);
+
+function fakeElement() {
+  return {
+    className: "", dataset: {}, hidden: false,
+    _innerHTML: "",
+    set innerHTML(v) { this._innerHTML = v; },
+    get innerHTML() { return this._innerHTML; },
+    appendChild() {},
+  };
+}
+
+function makeEnv() {
+  const calls = { update: [], push: [], redraw: [], redrawEp: [] };
+  const created = [];
+  const env = {
+    calls,
+    created,
+    instanceSparkBuffers: {},
+    endpointStaleFlags: {},
+    redrawInstanceSparklines: (prefix) => { calls.redraw.push(prefix); },
+    redrawEndpointSparklines: (prefix) => { calls.redrawEp.push(prefix); },
+    isDetailOpen: () => false,
+    pushInstanceSpark: (prefix, iid, vals) => {
+      const key = prefix + ":" + iid;
+      const buf = env.instanceSparkBuffers[key] || (env.instanceSparkBuffers[key] = { tps: [], cache: [], ttft: [] });
+      if (typeof vals?.tps === "number") buf.tps.push({ t: 0, v: vals.tps });
+      if (typeof vals?.cacheHitRate === "number") buf.cache.push({ t: 0, v: vals.cacheHitRate });
+      if (typeof vals?.ttft === "number") buf.ttft.push({ t: 0, v: vals.ttft });
+      calls.push.push(key);
+    },
+    updateSparkline: (containerId, dataPoints, minVal, maxVal) => {
+      calls.update.push({ id: containerId, dataPoints, minVal, maxVal });
+    },
+    sparkValues: (buf) => (buf ? buf.map((p) => p.v) : []),
+    formatDurationSeconds: () => "0秒",
+    escapeHtml: (s) => String(s ?? ""),
+    formatTokens: () => "0",
+    // 与 panel.html 同口径：active 豁免，lastSeen 超 2min 为陈旧
+    isInstanceStale: (inst) => !inst || inst.status === "active"
+      ? false
+      : (typeof inst.lastSeen === "number" && (Date.now() - inst.lastSeen) > 2 * 60 * 1000),
+    formatRelativeAge: () => "3 小时前",
+    document: { createElement: () => { const el = fakeElement(); created.push(el); return el; } },
+  };
+  return env;
+}
+
+function makeRenderInstanceRows(env) {
+  const m = panelJs.match(/function renderInstanceRows\(\{[^}]*\}\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, "renderInstanceRows found in panel.html");
+  return new Function(
+    "isDetailOpen", "pushInstanceSpark", "updateSparkline", "sparkValues", "instanceSparkBuffers",
+    "formatDurationSeconds", "escapeHtml", "formatTokens", "isInstanceStale", "formatRelativeAge", "document",
+    `return (${m[0]});`,
+  )(
+    env.isDetailOpen, env.pushInstanceSpark, env.updateSparkline, env.sparkValues, env.instanceSparkBuffers,
+    env.formatDurationSeconds, env.escapeHtml, env.formatTokens, env.isInstanceStale, env.formatRelativeAge, env.document,
+  );
+}
+
+function makeApplyDetailFold(env, open) {
+  const m = panelJs.match(/function applyDetailFold\(prefix\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, "applyDetailFold found in panel.html");
+  const gridEl = fakeElement();
+  const btn = {
+    textContent: "",
+    setAttribute() {},
+    closest: () => ({ querySelectorAll: () => [gridEl] }),
+  };
+  const foldDoc = { querySelectorAll: () => [btn] };
+  const fn = new Function("isDetailOpen", "document", "redrawInstanceSparklines", `return (${m[0]});`)(
+    () => open, foldDoc, env.redrawInstanceSparklines,
+  );
+  return { fn, btn, gridEl };
+}
+
+const KIMI_INSTANCE = {
+  id: "inst-1", title: "kimi one", status: "active",
+  tps: 12.3, lastTtftMs: 420, cacheHitRate: 88.5,
+  tokens: {}, requests: 3, activeDurationMs: 65000,
+};
+
+describe("panel.html 实例栏收起态不画折线（buffer 照常累积）", () => {
+  it("收起态渲染实例行：零折线绘制调用，实例采样照常入 buffer", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => false;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [KIMI_INSTANCE] });
+    assert.equal(env.calls.update.length, 0, "收起时不得对隐藏 DOM 做任何折线绘制");
+    assert.deepEqual(env.calls.push, ["kimi:inst-1"], "buffer 累积不因收起而停（展开后曲线才连续）");
+  });
+
+  it("展开态渲染实例行：tps/ttft/cache 三条照常绘制，cache 锁 0-100 量程（修前行为保持）", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [KIMI_INSTANCE] });
+    const ids = env.calls.update.map((c) => c.id).sort();
+    assert.deepEqual(ids, [
+      "kimiInstSparkCache-inst-1", "kimiInstSparkTps-inst-1", "kimiInstSparkTtft-inst-1",
+    ]);
+    const cache = env.calls.update.find((c) => c.id === "kimiInstSparkCache-inst-1");
+    assert.equal(cache.minVal, 0);
+    assert.equal(cache.maxVal, 100);
+  });
+});
+
+describe("panel.html 展开瞬间补绘（不等下一轮 1s 轮询）", () => {
+  it("折叠钮展开（applyDetailFold open=true）立即触发本栏实例折线补绘", () => {
+    const env = makeEnv();
+    const fold = makeApplyDetailFold(env, true);
+    fold.fn("kimi");
+    assert.deepEqual(env.calls.redraw, ["kimi"], "展开瞬间补绘");
+    assert.equal(fold.gridEl.hidden, false, "四宫格同时恢复可见");
+    assert.equal(fold.btn.textContent, "收起 ▴", "钮文案切展开态");
+  });
+
+  it("收起方向的 applyDetailFold 不触发补绘", () => {
+    const env = makeEnv();
+    const fold = makeApplyDetailFold(env, false);
+    fold.fn("kimi");
+    assert.deepEqual(env.calls.redraw, []);
+    assert.equal(fold.gridEl.hidden, true);
+  });
+
+  it("redrawInstanceSparklines 用已攒 buffer 逐实例绘制三条折线，不串栏", () => {
+    const m = panelJs.match(/function redrawInstanceSparklines\(prefix\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "redrawInstanceSparklines found in panel.html");
+    const buffers = {
+      "kimi:a1": { tps: [{ t: 0, v: 10 }, { t: 0, v: 11 }], cache: [{ t: 0, v: 80 }], ttft: [{ t: 0, v: 0.4 }], sparkHistory: { ttft: [0.3, 0.42] } },
+      "kimi:a2": { tps: [{ t: 0, v: 5 }], cache: [], ttft: [] },
+      "pi:x": { tps: [{ t: 0, v: 1 }], cache: [{ t: 0, v: 2 }], ttft: [{ t: 0, v: 3 }] },
+    };
+    const calls = [];
+    const foldBtn = {};
+    const card = { querySelector: (sel) => (sel.includes("agent-detail-fold") ? foldBtn : null) };
+    const gridEls = ["a1", "a2"].map((iid) => ({ dataset: { instanceId: iid }, closest: () => card }));
+    gridEls.push({ dataset: { instanceId: "x" }, closest: () => ({ querySelector: () => null }) }); // 无本栏折叠钮的卡必须跳过
+    const foldDoc = { querySelectorAll: (sel) => (sel.startsWith(".instance-telemetry-grid") ? gridEls : []) };
+    const fn = new Function("document", "instanceSparkBuffers", "sparkValues", "updateSparkline", `return (${m[0]});`)(
+      foldDoc,
+      buffers,
+      (buf, hist) => (hist && hist.length ? hist.slice(-1) : (buf || []).map((p) => p.v)),
+      (id, dataPoints, minVal, maxVal) => calls.push({ id, dataPoints, minVal, maxVal }),
+    );
+    fn("kimi");
+    assert.deepEqual(calls.map((c) => c.id), [
+      "kimiInstSparkTps-a1", "kimiInstSparkCache-a1", "kimiInstSparkTtft-a1",
+      "kimiInstSparkTps-a2", "kimiInstSparkCache-a2", "kimiInstSparkTtft-a2",
+    ], "kimi 两实例各三条，pi 不串栏");
+    const ttft = calls.find((c) => c.id === "kimiInstSparkTtft-a1");
+    assert.deepEqual(ttft.dataPoints, [0.42], "ttft 补绘用 buffer 暂存的权威历史（与渲染时口径一致）");
+    const cache = calls.find((c) => c.id === "kimiInstSparkCache-a1");
+    assert.equal(cache.minVal, 0);
+    assert.equal(cache.maxVal, 100);
+  });
+});
+
+describe("panel.html 端点级旧机制（zcode/qoder）收起不绘制、展开补绘", () => {
+  function makeRedrawEndpoint(env) {
+    const m = panelJs.match(/function redrawEndpointSparklines\(prefix\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "redrawEndpointSparklines found in panel.html");
+    const km = panelJs.match(/const ENDPOINT_SPARK_KEYS = \{[\s\S]*?\n  \};/);
+    assert.ok(km, "ENDPOINT_SPARK_KEYS found in panel.html");
+    const keys = new Function(`return (${km[0].replace(/^const ENDPOINT_SPARK_KEYS = /, "").replace(/;$/, "")})`)();
+    const historyBuffers = {
+      ttft: [{ t: 0, v: 1.1 }, { t: 0, v: 1.2 }], tps: [{ t: 0, v: 30 }], cache: [{ t: 0, v: 90 }],
+      qoder_ttft: [], qoder_tps: [], qoder_cache: [],
+    };
+    const gridEls = { zcTelemetryGrid: { hidden: true }, qoderTelemetryGrid: { hidden: false } };
+    const fn = new Function("$", "historyBuffers", "sparkValues", "updateSparkline", "ENDPOINT_SPARK_KEYS", "endpointStaleFlags", `return (${m[0]});`)(
+      (id) => gridEls[id] || null,
+      historyBuffers,
+      (buf) => (buf || []).map((p) => p.v),
+      (id, dataPoints, minVal, maxVal) => env.calls.update.push({ id, dataPoints, minVal, maxVal }),
+      keys,
+      env.endpointStaleFlags,
+    );
+    return { fn, historyBuffers, gridEls };
+  }
+
+  it("四宫格隐藏（收起）时不绘制；可见时按端点级 buffer 画三条（cache 锁 0-100）", () => {
+    const env = makeEnv();
+    const { fn } = makeRedrawEndpoint(env);
+    fn("zc");
+    assert.equal(env.calls.update.length, 0, "收起态零绘制");
+    fn("qoder");
+    assert.deepEqual(env.calls.update.map((c) => c.id), ["qoderSparkTtft", "qoderSparkTps", "qoderSparkCache"], "可见栏照常绘制");
+    const zc = env.calls.update.filter((c) => c.id === "zcSparkTtft");
+    assert.equal(zc.length, 0, "zc 全程收起，不得出现 zc 折线调用");
+  });
+
+  it("renderZcode/renderQoder 不再裸调 updateSparkline，改走 redrawEndpointSparklines 门控", () => {
+    for (const fnName of ["renderZcode", "renderQoder"]) {
+      const m = panelJs.match(new RegExp("function " + fnName + "\\([a-z]+\\) \\{[\\s\\S]*?\\n  \\}"));
+      assert.ok(m, fnName + " found in panel.html");
+      assert.ok(!m[0].includes("updateSparkline("), fnName + " 不得裸调 updateSparkline（收起态会直写隐藏 DOM）");
+      const prefix = fnName === "renderZcode" ? "zc" : "qoder";
+      assert.ok(m[0].includes(`redrawEndpointSparklines("${prefix}")`), fnName + " 改走 redrawEndpointSparklines");
+    }
+  });
+
+  it("renderDsh 并入统一管线后，端点级补绘路径不得回潮", () => {
+    const m = panelJs.match(/function renderDsh\(d\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderDsh found in panel.js");
+    assert.ok(!m[0].includes("redrawEndpointSparklines("), "端点级补绘已随四宫格摘除");
+    assert.ok(!m[0].includes("updateSparkline("), "不得裸调 updateSparkline（行内折线经 renderInstanceRows）");
+  });
+
+  it("旧机制 setFold 展开（open=true）立即补绘端点级折线", () => {
+    const m = panelJs.match(/const setFold = \(open\) => \{[\s\S]*?\n    \};/);
+    assert.ok(m, "setFold found in panel.html");
+    const env = makeEnv();
+    const grid = { hidden: true, closest: () => null };
+    const brief = { hidden: false };
+    const foldBtn = { setAttribute() {}, textContent: "" };
+    const aggWrap = { hidden: true };
+    const arrow = m[0].replace(/^const setFold = /, "").replace(/;$/, "");
+    const fn = new Function(
+      "grid", "brief", "foldBtn", "prefix", "redrawEndpointSparklines", "aggWrap",
+      `return (${arrow});`,
+    )(grid, brief, foldBtn, "zc", env.redrawEndpointSparklines, aggWrap);
+    fn(true);
+    assert.deepEqual(env.calls.redrawEp, ["zc"], "展开瞬间补绘");
+    assert.equal(grid.hidden, false);
+    assert.equal(aggWrap.hidden, false, "展开态显示「全局汇总」行");
+    fn(false);
+    assert.deepEqual(env.calls.redrawEp, ["zc"], "收起方向不补绘");
+    assert.equal(aggWrap.hidden, true, "收起态隐藏「全局汇总」行（tokens/请求数由简要栏承载）");
+    assert.deepEqual(env.calls.redraw, [], "旧机制卡不再挂实例行，不拨实例折线");
+  });
+
+  it("陈旧端点（endpointStaleFlags 置位）可见也零绘制，恢复新鲜后照常", () => {
+    const env = makeEnv();
+    const { fn } = makeRedrawEndpoint(env);
+    env.endpointStaleFlags.qoder = true;
+    fn("qoder");
+    assert.equal(env.calls.update.length, 0, "陈旧端点不绘历史折线（四宫格可见也一样）");
+    env.endpointStaleFlags.qoder = false;
+    fn("qoder");
+    assert.equal(env.calls.update.length, 3, "恢复新鲜后照常绘制");
+  });
+});
+
+describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", () => {
+  // 数小时前的 last-N 窗口均值不再冒充实时数据：速率类三格置 —、折线停绘、
+  // 简要胶囊行换成相对时间；工时等累计量不受影响。
+  const STALE_INSTANCE = {
+    id: "inst-old", title: "kimi old", status: "idle",
+    tps: 12.3, lastTtftMs: 420, cacheHitRate: 88.5,
+    tokens: { prompt: 100, completion: 50, cached: 20 }, requests: 3,
+    activeDurationMs: 65000, lastSeen: Date.now() - 3 * 3600 * 1000,
+  };
+
+  it("展开态渲染陈旧行：零折线绘制 + data-stale=1 + 速率类置 — + 胶囊行标注相对时间", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [STALE_INSTANCE] });
+    assert.equal(env.calls.update.length, 0, "陈旧行不绘历史折线");
+    const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
+    const row = env.created.find((el) => el.className === "session-row");
+    assert.equal(grid.dataset.stale, "1", "grid carries data-stale flag");
+    assert.ok(row.innerHTML.includes('tag-stale">3 小时前<'), "tags line annotates bare relative age");
+    assert.ok(!grid.innerHTML.includes("最后活动"), "grid has no tail annotation");
+    assert.ok((grid.innerHTML.match(/inst-stale/g) || []).length === 3, "速率类三格压暗，工时卡不动");
+    assert.ok(!grid.innerHTML.includes("12.3"), "stale tps hidden");
+    assert.ok(grid.innerHTML.includes("0秒"), "工时累计量照常显示");
+  });
+
+  it("新鲜行不受影响：lastSeen 近 1 分钟内照常绘制三条折线", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [{ ...STALE_INSTANCE, lastSeen: Date.now() - 30 * 1000 }] });
+    assert.equal(env.calls.update.length, 3, "fresh row draws all three sparklines");
+    const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
+    assert.equal(grid.dataset.stale, "0");
+    assert.ok(grid.innerHTML.includes("12.3"), "fresh tps shown");
+  });
+
+  it("无 lastSeen 的行（旧 relay 快照）按新鲜处理，不出现陈旧标注", () => {
+    const env = makeEnv();
+    env.isDetailOpen = () => true;
+    const render = makeRenderInstanceRows(env);
+    const inst = { ...STALE_INSTANCE };
+    delete inst.lastSeen;
+    render({ prefix: "kimi", listEl: fakeElement(), instances: [inst] });
+    const grid = env.created.find((el) => el.className === "instance-telemetry-grid");
+    const row = env.created.find((el) => el.className === "session-row");
+    assert.equal(grid.dataset.stale, "0", "missing lastSeen never marked stale");
+    assert.ok(!row.innerHTML.includes("tag-stale"), "no stale bubble");
+  });
+});
+
+
+describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶）", () => {
+  const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{[\s\S]*?\n  \}/);
+  assert.ok(m, "claudeAggregateMetrics found in panel.html");
+  const claudeAggregateMetrics = new Function(`return (${m[0]});`)();
+
+  it("tokens/请求/工时累加，tps 求和，缓存按 prompt 加权，TTFT/lastSeen 取最近会话", () => {
+    const agg = claudeAggregateMetrics([
+      { tokens: { prompt: 100, completion: 50, cached: 80 }, requests: 2, tps: 10, activeDurationMs: 60000, lastSeen: 1000, lastTtftMs: 300, ttftColor: "green" },
+      { tokens: { prompt: 300, completion: 150, cached: 40 }, requests: 1, tps: 5.5, activeDurationMs: 30000, lastSeen: 2000, lastTtftMs: 900, ttftColor: "red" },
+    ]);
+    assert.deepEqual(agg.tokens, { prompt: 400, completion: 200, cached: 120 });
+    assert.equal(agg.totalRequests, 3);
+    assert.equal(agg.tps, 15.5);
+    assert.equal(agg.activeDurationMs, 90000);
+    assert.equal(agg.cacheHitRate, 30, "120/400 按 prompt 加权");
+    assert.equal(agg.lastTtftMs, 900, "TTFT 取 lastSeen 最近的会话");
+    assert.equal(agg.ttftColor, "red");
+    assert.equal(agg.lastSeen, 2000);
+  });
+
+  it("零会话：全部归零/null，不产生 NaN（零实例伪实例行用）", () => {
+    const agg = claudeAggregateMetrics([]);
+    assert.deepEqual(agg.tokens, { prompt: 0, completion: 0, cached: 0 });
+    assert.equal(agg.totalRequests, 0);
+    assert.equal(agg.tps, null);
+    assert.equal(agg.lastTtftMs, null);
+    assert.equal(agg.cacheHitRate, null);
+    assert.equal(agg.activeDurationMs, 0);
+    assert.equal(agg.lastSeen, null);
+  });
+
+  it("缺字段会话（旧 relay 快照）按零计，不炸", () => {
+    const agg = claudeAggregateMetrics([{ requests: 1 }]);
+    assert.equal(agg.totalRequests, 1);
+    assert.equal(agg.tps, null);
+    assert.equal(agg.cacheHitRate, null);
+    assert.equal(agg.lastSeen, null);
+  });
+});
+
+describe("panel.html 看板会话行命名「会话 #x」（按卡内行显示顺序 1 起）", () => {
+  // 实例/会话行不再直接显示会话标题（首条用户消息），改按本卡行序编号；
+  // 伪「全局汇总」行保持原标题、不参与编号。
+  const SESSION_A = { id: "a", title: "帮我修登录页样式", status: "active", tokens: {}, requests: 1 };
+  const SESSION_B = { id: "b", title: "重构路由模块", status: "idle", tokens: {}, requests: 2 };
+
+  function renderRowHtmls(instances, aggregateFallback) {
+    const env = makeEnv();
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "codex", listEl: fakeElement(), instances, aggregateFallback });
+    return env.created.filter((el) => el.className === "session-row").map((el) => el.innerHTML);
+  }
+
+  it("会话行按显示顺序编号 会话 #1/#2，原始会话标题不再上屏", () => {
+    const rows = renderRowHtmls([SESSION_A, SESSION_B]);
+    assert.equal(rows.length, 2);
+    assert.ok(rows[0].includes("会话 #1"), "首行编号 1");
+    assert.ok(rows[1].includes("会话 #2"), "次行编号 2");
+    assert.ok(!rows[0].includes("帮我修登录页样式") && !rows[1].includes("重构路由模块"), "原始会话标题不再上屏");
+  });
+
+  it("编号随行序走：实例顺序变化后首行仍是 会话 #1（不持久化编号）", () => {
+    const rows = renderRowHtmls([SESSION_B, SESSION_A]);
+    assert.ok(rows[0].includes("会话 #1") && rows[1].includes("会话 #2"), "重排后编号按新行序分配");
+  });
+
+  it("伪「全局汇总」行保持原标题，不参与编号", () => {
+    const rows = renderRowHtmls([], { tokens: {}, totalRequests: 0 });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].includes("全局汇总"), "汇总行标题保持「全局汇总」");
+    assert.ok(!rows[0].includes("会话 #"), "汇总行不编号");
+  });
+});
+
+describe("实例行面徽标（DSH：一行 = 一个进程，徽标 = 它的界面）", () => {
+  const TUI_ROW = { id: "dsh-4102", title: "dsh-4102", surface: "TUI", status: "idle", tokens: {}, requests: 1 };
+  const WEB_ROW = { id: "dsh-4200", title: "dsh-4200", surface: "Web", status: "active", tokens: {}, requests: 2 };
+
+  function renderRows(instances, opts = {}) {
+    const env = makeEnv();
+    const render = makeRenderInstanceRows(env);
+    render({ prefix: "dsh", listEl: fakeElement(), instances, ...opts });
+    return env.created.filter((el) => el.className === "session-row").map((el) => el.innerHTML);
+  }
+
+  it("showSurface 时按行贴面徽标，行号照旧", () => {
+    const rows = renderRows([TUI_ROW, WEB_ROW], { showSurface: true });
+    assert.ok(rows[0].includes("会话 #1") && rows[1].includes("会话 #2"), "编号不受徽标影响");
+    assert.ok(rows[0].includes('<span class="badge badge-neutral">TUI</span>'), "首行标出 TUI 面");
+    assert.ok(rows[1].includes('<span class="badge badge-neutral">Web</span>'), "次行标出 Web 面");
+    assert.ok(rows[0].indexOf("TUI") < rows[0].indexOf("待命"), "面徽标排在状态徽标之前");
+  });
+
+  it("读不出面就不贴（不猜），行号与其余字段照旧", () => {
+    const rows = renderRows([{ ...TUI_ROW, surface: undefined }], { showSurface: true });
+    assert.ok(!rows[0].includes("TUI"), "无面可分时行上不多东西");
+    assert.ok(rows[0].includes("会话 #1") && rows[0].includes("待命"));
+  });
+
+  it("其他栏默认不开：同一批实例数据渲染结果一字不差", () => {
+    const on = renderRows([TUI_ROW, WEB_ROW], { showSurface: true });
+    const off = renderRows([TUI_ROW, WEB_ROW]);
+    assert.notDeepEqual(off, on, "开关确实改变渲染");
+    assert.ok(!off[0].includes("badge-neutral\">TUI"), "默认不贴面徽标");
+  });
+
+  it("伪「全局汇总」行不贴面徽标", () => {
+    const rows = renderRows([], { showSurface: true, aggregateFallback: { tokens: {}, totalRequests: 0, surface: "TUI" } });
+    assert.equal(rows.length, 1);
+    assert.ok(rows[0].includes("全局汇总"));
+    assert.ok(!rows[0].includes(">TUI<"), "汇总行不属于任何一个面");
+  });
+});
+
+describe("端点卡头分面副行（Web ×1 · TUI ×2）", () => {
+  // 一个函数服务两张卡：prefix 决定写哪一个副行位（DSH 与 Kimi 同口径）。
+  function makeSummaryFn(nodes) {
+    const m = panelJs.match(/function renderSurfaceSummary\(prefix, surfaces\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "renderSurfaceSummary found in panel.js");
+    return new Function("$", `return (${m[0]});`)((id) => nodes[id] ?? null);
+  }
+
+  it("按面计数并用 · 连接，元素常显", () => {
+    const node = { hidden: true, textContent: "" };
+    makeSummaryFn({ dshSurfaceSummary: node })("dsh", [
+      { profile: "dsh-tui", label: "TUI", count: 2 },
+      { profile: "web", label: "Web", count: 1 },
+    ]);
+    assert.equal(node.textContent, "TUI ×2 · Web ×1");
+    assert.equal(node.hidden, false);
+  });
+
+  it("Kimi 卡走同一函数、只换前缀，面名照后端下发值", () => {
+    const nodes = {
+      dshSurfaceSummary: { hidden: false, textContent: "旧值" },
+      kimiSurfaceSummary: { hidden: true, textContent: "" },
+    };
+    makeSummaryFn(nodes)("kimi", [
+      { surface: "desktop", label: "Desktop", count: 1 },
+      { surface: "tui", label: "TUI", count: 1 },
+    ]);
+    assert.equal(nodes.kimiSurfaceSummary.textContent, "Desktop ×1 · TUI ×1");
+    assert.equal(nodes.kimiSurfaceSummary.hidden, false);
+    assert.equal(nodes.dshSurfaceSummary.textContent, "旧值", "不串到另一张卡的副行位");
+  });
+
+  it("读不出 profile 的那一档按后端给的字面显示名呈现", () => {
+    const node = { hidden: true, textContent: "" };
+    makeSummaryFn({ dshSurfaceSummary: node })("dsh", [{ profile: null, label: "未知", count: 3 }]);
+    assert.equal(node.textContent, "未知 ×3");
+  });
+
+  it("空数组 / 零计数 / 缺字段一律收起并清空文案，不留空胶囊", () => {
+    for (const surfaces of [[], null, undefined, [{ profile: "web", label: "Web", count: 0 }], [{ count: 0 }]]) {
+      const node = { hidden: false, textContent: "TUI ×2" };
+      makeSummaryFn({ dshSurfaceSummary: node })("dsh", surfaces);
+      assert.equal(node.hidden, true, `收起：${JSON.stringify(surfaces)}`);
+      assert.equal(node.textContent, "");
+    }
+  });
+
+  it("元素不在（其他视图/旧页面）时静默返回，不抛", () => {
+    const fn = makeSummaryFn({});
+    assert.doesNotThrow(() => fn("dsh", [{ profile: "web", label: "Web", count: 1 }]));
+    assert.doesNotThrow(() => fn("kimi", [{ surface: "web", label: "Web", count: 1 }]));
+  });
+});

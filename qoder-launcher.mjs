@@ -1,0 +1,259 @@
+// Qoder launcher — spawns the Qoder CLI through its qoder.cmd dispatcher with
+// the Anyswitch relay token in the child environment.
+//
+// Qoder's BYOK (custom provider) is configured via the settings.json
+// `providers` map. Before spawning, the launcher syncs the Anyswitch store
+// into that map so Qoder picks up the current providers/models without manual
+// configuration (see qoder-merge-config.mjs for the shape and its rationale).
+// The integration is:
+//   1. reuse the resident relay on 47821 when it is already serving (probe),
+//      otherwise start a per-launch OpenAI relay against the real v2 store;
+//      when BOTH fail, Qoder still launches on its own native configuration
+//      (no relay token injected) instead of the launch being refused;
+//   2. write the BYOK config into ~/.qoder/settings.json (via qoder-merge-config);
+//   3. spawn the qoder.cmd dispatcher (COMSPEC /d /c, like the other .cmd
+//      CLIs) with ANYSWITCH_RELAY_TOKEN injected via process-level env vars
+//      only — never written to disk;
+//   4. tear the per-launch relay down when Qoder exits, so nothing leaks.
+// Qoder-side endpoint overrides ride the QODER_BIG_MODEL_ENDPOINT /
+// QODER_OPENAPI_ENDPOINT env vars the CLI itself reads (inherited verbatim
+// from the caller's environment — the launcher never invents values for them).
+
+import { spawn } from "node:child_process";
+import { join, isAbsolute } from "node:path";
+import { fileURLToPath } from "node:url";
+import { realpathSync, existsSync } from "node:fs";
+import { createOpenAIRelayServer, listenLoopback, probeRelay, DEFAULT_RELAY_PORT } from "./openai-server.mjs";
+import { createProductionDeps } from "./launch.mjs";
+import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { createAgentMetricsCollector } from "./agent-metrics.mjs";
+import { createUsageJournal } from "./usage-journal.mjs";
+import { loadStore } from "./store-io.mjs";
+import { writeQoderConfig, qoderSettingsPath } from "./qoder-merge-config.mjs";
+import { refreshQoderModelCatalog, QODER_CDP_PORT } from "./qoder-cdp-refresh.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
+
+export const RELAY_PORT = DEFAULT_RELAY_PORT;
+
+function relayDataRoot(base = process.env) {
+  return join(base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Anyswitch");
+}
+
+function createOpenAIProductionDeps(options = {}) {
+  const claudeDeps = createProductionDeps(options);
+  // Fallback-relay metrics + usage journal (same dir as the resident relay):
+  // without these, traffic served while the resident relay is down would be
+  // missing from the panel and the stats journal entirely.
+  let usageJournal = null;
+  try {
+    usageJournal = createUsageJournal({ dir: join(relayDataRoot(options.base ?? process.env), "usage") });
+  } catch { usageJournal = null; }
+  const metricsCollector = options.metricsCollector ?? createAgentMetricsCollector({ journal: usageJournal });
+  return {
+    token: loadOrGenerateToken(relayDataRoot(options.base ?? process.env)),
+    loadStore: claudeDeps.loadStore,
+    loadCredential: claudeDeps.loadCredential,
+    buildUpstreamURLs: claudeDeps.buildUpstreamURLs,
+    upstreamFetch: claudeDeps.upstreamFetch,
+    recordGeneration: claudeDeps.recordGeneration,
+    readGeneration: claudeDeps.readGeneration,
+    effortInjector: claudeDeps.effortInjector,
+    metricsCollector,
+  };
+}
+
+export async function startOpenAIRelay(options = {}) {
+  const deps = createOpenAIProductionDeps(options);
+  const probe = deps.loadStore();
+  if (!probe.ok) {
+    throw new Error("the Anyswitch global store is not usable; refusing to start the qoder relay");
+  }
+  const server = createOpenAIRelayServer(deps);
+  const { port, reused, close } = await listenLoopback(server, RELAY_PORT);
+  return { port, token: deps.token, close, reused };
+}
+
+// Qoder's qoder.cmd dispatcher lives under ~/.qoder/entry and resolves the
+// CLI itself (QODER_CLI_BIN → `qodercli` on PATH → ~/.qoder/bin/qodercli/
+// qodercli.exe), so pointing the launcher at the dispatcher keeps that
+// resolution in one place. The direct CLI path is only the fallback for
+// entry-dir-less layouts.
+import { resolveQoderExecutable } from "./agent-discovery.mjs";
+export { resolveQoderExecutable };
+
+export function buildQoderLauncherEnv({ token, base = {} }) {
+  const env = { ...base };
+  env.ANYSWITCH_RELAY_TOKEN = token;
+  env.NO_PROXY = "127.0.0.1,localhost";
+  env.no_proxy = "127.0.0.1,localhost";
+  return env;
+}
+
+export async function runQoderLauncher({
+  startRelay,
+  spawnQoder,
+  // writeConfig / loadStore / loadToken / refreshCatalog are the only doors this
+  // function has to the user's machine (settings.json, the shared relay token
+  // file, Qoder's CDP port). They deliberately have no defaults: main() wires
+  // the real implementations and a test that forgets one crashes instead of
+  // silently writing through to the live paths.
+  writeConfig,
+  loadStore: loadStoreFn,
+  loadToken,
+  refreshCatalog,
+  log = () => {},
+  base = process.env,
+  qoderArgs = [],
+  probeRelay: probeRelayFn = async () => false,
+}) {
+  // Asserted up front because every call below sits inside a best-effort catch
+  // that would otherwise swallow a missing injection as a warning and still
+  // spawn Qoder.
+  for (const [name, dep] of Object.entries({
+    writeConfig,
+    loadStore: loadStoreFn,
+    loadToken,
+    refreshCatalog,
+  })) {
+    if (typeof dep !== "function") {
+      throw new TypeError(`runQoderLauncher requires ${name} to be a function`);
+    }
+  }
+
+  // Two-level relay acquisition (probe resident → start per-launch), then a
+  // native fallback: when both levels fail, relay is null and Qoder launches
+  // on its own configuration below instead of the launch being refused.
+  const relay = await acquireRelayOrNative({
+    endpoint: "qoder",
+    port: RELAY_PORT,
+    log,
+    probeRelay: probeRelayFn,
+    // The resident relay outlives this launch, so the reuse handle closes as a
+    // no-op; only a per-launch relay we started gets torn down.
+    residentRelay: async () => ({
+      port: RELAY_PORT,
+      token: loadToken(relayDataRoot(base)),
+      close: async () => {},
+      reused: true,
+    }),
+    startRelay,
+  });
+
+  try {
+    // Sync BYOK config into Qoder's settings.json before spawning so the
+    // customModels array reflects the current store. Errors are logged but
+    // never block the launch — Qoder can still start with stale or no BYOK.
+    try {
+      const loaded = loadStoreFn();
+      if (!loaded.ok) {
+        log("warning: Anyswitch store could not be read; qoder settings not updated");
+      } else {
+        // Native mode syncs against the well-known port too, so the managed
+        // providers revive with the resident relay; the token then comes from
+        // the shared token file, and an unreadable token only skips the sync.
+        const syncToken = relay ? relay.token : loadNativeSyncToken({ loadToken, root: relayDataRoot(base), endpoint: "qoder", log });
+        if (syncToken) {
+          const sidecarRoot = relayDataRoot(base);
+          const settingsPath = qoderSettingsPath(base.USERPROFILE ?? "");
+          const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, syncToken, sidecarRoot, settingsPath);
+          if (!writeResult.ok) {
+            log(`warning: qoder settings.json not updated: ${writeResult.reason ?? "unknown error"}`);
+          } else if (!writeResult.unchanged) {
+            log(`qoder settings.json updated (backup: ${writeResult.backupPath ?? "none"})`);
+          }
+        }
+      }
+    } catch (syncErr) {
+      log(`warning: qoder BYOK config sync failed: ${syncErr.message}`);
+    }
+
+    // Relay mode injects ANYSWITCH_RELAY_TOKEN + NO_PROXY; native mode passes
+    // the environment through verbatim so Qoder behaves exactly as if started
+    // without Anyswitch.
+    const env = relay
+      ? buildQoderLauncherEnv({ token: relay.token, base })
+      : buildNativeLauncherEnv({ base });
+    const exitCode = await spawnQoder({ env, args: qoderArgs, onSpawned: () => {
+      // Best-effort model-catalog warm-up: a cold start can leave the composer
+      // with an empty model list and the model button disabled. Nudge a reload
+      // once the renderer is up.
+      refreshCatalog({ port: QODER_CDP_PORT, log }).catch((error) => {
+        log(`qoder model catalog warm-up failed: ${error.message}`);
+      });
+    } });
+    return exitCode;
+  } finally {
+    // A reused resident relay's close is a no-op; only a per-launch relay dies
+    // here. Native mode (relay === null) has nothing to close.
+    await relay?.close();
+  }
+}
+
+export function realSpawnQoder({ env, args, onSpawned }) {
+  return new Promise((resolve, reject) => {
+    const exe = resolveQoderExecutable(env);
+    const isCmd = exe.toLowerCase().endsWith(".cmd");
+    const comspec = process.env.COMSPEC || "cmd.exe";
+    // Inject the CDP port so the launcher can warm up the model catalog after
+    // the renderer comes up. Qoder ignores the flag harmlessly when debugging
+    // is unavailable.
+    const cdpArg = `--remote-debugging-port=${QODER_CDP_PORT}`;
+    const fullArgs = [cdpArg, ...args];
+    const child = isCmd
+      ? spawn(comspec, ["/d", "/c", exe, ...fullArgs], {
+          env,
+          stdio: "inherit",
+          shell: false,
+          windowsHide: false,
+        })
+      : spawn(exe, fullArgs, {
+          env,
+          stdio: "inherit",
+          shell: false,
+          windowsHide: false,
+        });
+    child.on("spawn", () => {
+      try { onSpawned?.(); } catch { /* never block the launch */ }
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+}
+
+export async function main(argv = process.argv.slice(2)) {
+  const code = await runQoderLauncher({
+    startRelay: () => startOpenAIRelay(),
+    writeConfig: (store, port, token, sidecarRoot, settingsPath) =>
+      writeQoderConfig(store, port, token, sidecarRoot, settingsPath),
+    loadStore,
+    loadToken: (root) => loadOrGenerateToken(root),
+    refreshCatalog: (options) => refreshQoderModelCatalog(options),
+    spawnQoder: realSpawnQoder,
+    log: (line) => process.stderr.write(`${line}\n`),
+    qoderArgs: argv,
+    probeRelay: probeRelay,
+  });
+  return code;
+}
+
+function isEntryModule(argv1, metaUrl, realpath = realpathSync) {
+  if (typeof argv1 !== "string" || argv1.length === 0) return false;
+  const norm = (p) => {
+    try { return realpath(p); } catch { return p; }
+  };
+  try {
+    return norm(fileURLToPath(metaUrl)) === norm(argv1);
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryModule(process.argv[1], import.meta.url)) {
+  main().then(
+    (code) => process.exit(code),
+    (error) => {
+      process.stderr.write(`qoder launcher failed: ${error.message}\n`);
+      process.exit(1);
+    },
+  );
+}

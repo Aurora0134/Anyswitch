@@ -1,0 +1,36 @@
+{
+  "name": "anyswitch",
+  "version": "0.6.6",
+  "description": "Local AI credential relay for Windows: funnels OpenAI-compatible upstreams into a loopback relay with DPAPI-sealed API keys",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.15.0 <23 || >=23.8.0"
+  },
+  "os": [
+    "win32"
+  ],
+  "keywords": [
+    "relay",
+    "api-credentials",
+    "llm",
+    "openai-compatible",
+    "anthropic",
+    "dpapi",
+    "windows",
+    "localhost"
+  ],
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aurora0134/Anyswitch.git"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-webgl": "0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "node-pty": "^1.1.0"
+  }
+}

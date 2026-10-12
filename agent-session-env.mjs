@@ -1,0 +1,305 @@
+// One-click CLI Agent launch for the virtual terminal: turn "which agent + which
+// working directory" into a launch spec terminal-host can spawn directly, plus
+// the environment that carries Anyswitch credentials.
+//
+// Credentials ride environment variables ONLY: no agent config file is written,
+// no secret is concatenated into the command line, and the env never reaches
+// disk (terminal-host keeps it in memory for the session's lifetime). The one
+// exception is zcode: its terminal entry spawns zcode-cli-launcher.mjs and the
+// credential path lives entirely inside that launcher (the relay token lands as
+// the apiKey of the CLI slot's provider_config.json), so the terminal injects
+// no env for it at all.
+//
+// The env contract is imported from each launcher's exported build*Env, so the
+// panel and the launchers can never drift apart. Two pieces are copied locally
+// with their source cited (the launchers do not export them):
+//   - withStoreSmallFastDefault (launcher.mjs:309-330) — the store-derived
+//     small-fast (classifier) wire id for Claude;
+//   - the buildInstanceId scheme (each launcher), and only for the two clients
+//     that cannot do without it (see TERMINAL_INSTANCE_ID_FROM_SOCKET): the
+//     session's shell pid does not exist yet at assembly time, so the launcher
+//     pid in that scheme becomes a per-session random tag.
+
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG, isVerifiedDiscoveryVersion } from "./launcher.mjs";
+import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
+import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
+import { buildGrokLauncherEnv } from "./grok-launcher.mjs";
+import { buildPiLauncherEnv } from "./pi-launcher.mjs";
+import { buildDshLauncherEnv } from "./dsh-launcher.mjs";
+import { buildOpencodeLauncherEnv } from "./opencode-launcher.mjs";
+import { buildQoderLauncherEnv } from "./qoder-launcher.mjs";
+import {
+  resolveClaudeExecutable,
+  resolveCodexExecutable,
+  resolveKimiExecutable,
+  resolvePiExecutable,
+  resolveDshExecutable,
+  resolveOpencodeExecutable,
+  resolveGrokExecutable,
+  resolveQoderCliExecutable,
+  resolveZcodeCliExecutable,
+} from "./agent-discovery.mjs";
+
+// The resident relay on 47821 is the only credential route: the base URL is
+// always it (no per-launch relay is started for a terminal session).
+export const AGENT_RELAY_PORT = 47821;
+
+// Copied from launcher.mjs:53 — loopback must never leave the machine.
+const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
+
+// Instance-id scheme caps, same as agent-metrics.mjs:158 (INSTANCE_ID_MAX_LEN).
+const INSTANCE_ID_MAX_LEN = 64;
+
+// zcode 终端条目的拉起目标：同目录的 zcode-cli-launcher.mjs，绝对路径在模块
+// 加载时静态算出（随安装树整体移动，不吃任何环境变量）。
+const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
+
+// 允许进终端的 CLI Agent。zcode 桌面端是纯 GUI 程序，不属于终端页签；这里的
+// zcode 条目拉起的是 CLI 形态：经 zcode-cli-launcher.mjs 中转，因为 CLI 入口
+// 是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs；relay 复用、
+// 槽位同步与防物化 pin 全在 launcher 内部完成。qoder 已有独立 CLI 形态
+// （qodercli.exe，与环境检测同一执行体），同样收进白名单。
+// `name` 是显示名，与 environment-service.mjs CLIENTS 共用：页签、菜单与环境页
+// 读的是同一句。
+export const AGENT_TERMINAL_TARGETS = {
+  claude: { name: "Claude Code", kind: "cli", unset: ["ANTHROPIC_API_KEY"] },
+  codex: { name: "Codex", kind: "cli", unset: [] },
+  kimi: { name: "Kimi Code", kind: "cli", unset: ["ANTHROPIC_API_KEY"] },
+  pi: { name: "Pi", kind: "cli", unset: [] },
+  dsh: { name: "DeepSeek Harness", kind: "cli", unset: [], launchArgs: ["--profile", "dsh-tui"] },
+  opencode: { name: "OpenCode", kind: "cli", unset: [] },
+  grok: { name: "Grok Build", kind: "cli", unset: ["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"] },
+  qoder: { name: "Qoder", kind: "cli", unset: [] },
+  // launchArgs 即上面的 launcher 路径：zcode 的执行体解析结果是 node.exe
+  // （见 resolveZcodeTerminalExecutable），cmd /d /c node.exe <launcher> 成形。
+  zcode: { name: "ZCode", kind: "cli", unset: [], launchArgs: [ZCODE_CLI_LAUNCHER_PATH] },
+};
+
+function agentError(message, code, cause) {
+  return Object.assign(new Error(message), { code, ...(cause === undefined ? {} : { cause }) });
+}
+
+function requireTarget(agentId) {
+  const target = AGENT_TERMINAL_TARGETS[agentId];
+  if (!target) throw agentError("没有找到这个 CLI Agent，请重新选择", "unknown_agent");
+  return target;
+}
+
+// Copied verbatim from launcher.mjs:309-330 (not exported there): derive the
+// small-fast wire id from the local store's first provider/model when the user
+// has not set either override. Any failure leaves the base untouched and the
+// launcher's placeholder wire id applies.
+function withStoreSmallFastDefault(base) {
+  if (base.ANTHROPIC_SMALL_FAST_MODEL !== undefined || base.ANYSWITCH_SMALL_FAST_MODEL !== undefined) {
+    return base;
+  }
+  try {
+    const storePath = join(
+      base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
+      "Anyswitch",
+      "store.json",
+    );
+    const store = JSON.parse(readFileSync(storePath, "utf8"));
+    for (const [providerId, provider] of Object.entries(store.providers ?? {})) {
+      const modelId = Object.keys(provider?.models ?? {})[0];
+      if (modelId) {
+        return { ...base, ANYSWITCH_SMALL_FAST_MODEL: `anthropic/${providerId}/${modelId}` };
+      }
+    }
+  } catch {
+    // Store missing or unreadable — the relay start probe reports that itself.
+  }
+  return base;
+}
+
+// 终端一键启动不再自造实例标签的端点。这些客户端不带 x-agent-instance 时，
+// relay 用 netstat 反查连接属主合成规范的 "<agentId>-<pid>"（兜底白名单见
+// late-socket-instance.mjs），而那才是实例行唯一能对上进程扫描的身份：折叠
+// 只认数字尾巴（agent-metrics.mjs normalizeInstanceId），随机标签折不进去，
+// 于是同一次会话被拆成两行——进程扫描的占位行带着面徽标却是零计数，流量行
+// 带着全部计数却读不出面；终端页的监测区、最近请求与「生成中」灯按占位行的
+// id 取数，一并落在空的那行上。这三家的托管配置都写明「无该环境变量即省略
+// 该头」，所以省掉标签就等于用户在终端里自己敲这条命令的既有形态。
+// pi 不在列：models.json 的 x-agent-instance 落的是静态值（sync 写盘为
+// direct，launcher 拉起时改写成实例值、退出恢复——pi-merge-models.mjs），头照
+// 发——但 relay 侧把 pi 归进 socket override 集合（late-socket-instance.mjs），
+// 头值被忽略、身份以连接属主进程归一，随机标签不再拆出第二行。codex 不在列：它的实例身份正源是
+// prompt_cache_key 的会话 id（GUI 多会话复用一个引擎进程，进程粒度根本不成立），
+// 标签只是该源缺失时的防撞车兜底，且 codex 不出进程占位行、拆不出第二行。
+const TERMINAL_INSTANCE_ID_FROM_SOCKET = new Set(["kimi", "grok", "opencode"]);
+
+// Per-session instance id, same shape as each launcher's buildInstanceId
+// ("<cwd basename>-<launcher pid>"): the pid becomes a random per-session tag
+// because the shell pid does not exist yet at assembly time. Only reached for
+// the two clients above — everyone else ships no tag at all.
+function terminalInstanceId(cwd, endpoint) {
+  const base = basename(String(cwd || "")).replace(/[^A-Za-z0-9._:-]/g, "-");
+  const tag = randomUUID().replace(/-/g, "").slice(0, 8);
+  return `${base || endpoint}-t${tag}`.slice(0, INSTANCE_ID_MAX_LEN);
+}
+
+// 本会话要注入的实例标签：调用方显式给的算（测试与将来的显式身份用），否则
+// 按端点决定要不要现造一个随机标签，不要就返回 null——下游每个 build*Env 都
+// 把 null 读成「这条头不发」。
+function sessionInstanceId(agentId, cwd, instanceId) {
+  if (instanceId !== null) return instanceId;
+  return TERMINAL_INSTANCE_ID_FROM_SOCKET.has(agentId) ? null : terminalInstanceId(cwd, agentId);
+}
+
+// zcode 的终端形态是 launcher 拉起：真正要验证的是 CLI 入口（bin\zcode.mjs）
+// 存在，交给 cmd 的执行体则是 node.exe 本身（process.execPath 恒为绝对路径且
+// 存在，必过 resolveAgentExecutable 的检查）。agent-discovery 对默认构建路径
+// 自带 existsSync、对 ZCODE_CLI_EXECUTABLE 覆盖只验绝对路径，存在性在此一并
+// 补齐；入口解析不到返回 null，由 resolveAgentExecutable 转成 executable_missing
+// 的产品文案。
+function resolveZcodeTerminalExecutable(base) {
+  const entry = resolveZcodeCliExecutable(base);
+  if (typeof entry !== "string" || !existsSync(entry)) return null;
+  return process.execPath;
+}
+
+const EXECUTABLE_RESOLVERS = {
+  claude: resolveClaudeExecutable,
+  codex: resolveCodexExecutable,
+  kimi: resolveKimiExecutable,
+  pi: resolvePiExecutable,
+  dsh: resolveDshExecutable,
+  opencode: resolveOpencodeExecutable,
+  grok: resolveGrokExecutable,
+  qoder: resolveQoderCliExecutable,
+  zcode: resolveZcodeTerminalExecutable,
+};
+
+function resolveAgentExecutable(agentId, base) {
+  const missing = agentError("没有找到这个 CLI Agent 的程序，请先在环境检测里确认安装", "executable_missing");
+  try {
+    const executable = EXECUTABLE_RESOLVERS[agentId](base);
+    if (typeof executable !== "string" || !isAbsolute(executable) || !existsSync(executable)) {
+      throw missing;
+    }
+    return executable;
+  } catch (error) {
+    if (error === missing) throw error;
+    // Discovery threw (e.g. codex.exe not found): the raw message is operator
+    // text, so the user gets the product sentence and the cause stays attached.
+    throw agentError(missing.message, "executable_missing", error);
+  }
+}
+
+// The env DELTA for one agent: only the keys this launch injects, built by the
+// launcher's own build*Env with an empty base so nothing depends on the
+// terminal-host's inherited environment (zcode injects nothing at all — its
+// launcher owns the env, see buildTargetEnv). Keys listed in the target's `unset`
+// come back as null — terminal-host reads null as "delete this key from the
+// inherited environment", which is how upstream real keys (a stray
+// ANTHROPIC_API_KEY, XAI's pair) are kept out of the PTY.
+export function buildAgentSessionEnv({ agentId, port = AGENT_RELAY_PORT, token, base = {}, instanceId = null }) {
+  const target = requireTarget(agentId);
+  const instance = sessionInstanceId(agentId, base.cwd ?? process.cwd(), instanceId);
+  const env = buildTargetEnv(agentId, { port, token, base, instanceId: instance });
+  for (const key of target.unset) env[key] = null;
+  return env;
+}
+
+// The terminal flow has no process to probe `claude --version` (assembly happens
+// before any session exists), so the version is read statically from the
+// package.json that ships beside the resolved exe (npm-global layout:
+// <npm>/node_modules/@anthropic-ai/claude-code/bin/claude.exe). The verified
+// 2.1.x family (launcher.mjs) turns discovery on; an unreadable version or one
+// outside the family keeps it off — the same downgrade the per-launch shim
+// applies, now derived instead of hardcoded.
+function claudeDiscoveryEnabled(base) {
+  try {
+    const executable = resolveClaudeExecutable(base);
+    const pkg = JSON.parse(readFileSync(join(dirname(executable), "..", "package.json"), "utf8"));
+    return isVerifiedDiscoveryVersion(pkg?.version);
+  } catch {
+    return false;
+  }
+}
+
+function buildTargetEnv(agentId, { port, token, base, instanceId }) {
+  switch (agentId) {
+    case "claude": {
+      // discovery is version-gated from the installed package.json: within the
+      // verified family the gateway-discovery flag rides the env and the /model
+      // picker fills from the relay catalog; outside it (or unreadable) the
+      // flag stays off. An explicit ANTHROPIC_SMALL_FAST_MODEL in the
+      // environment wins and is NOT injected (the inherited value rides along
+      // untouched).
+      const env = buildLauncherEnv({ port, token, discovery: claudeDiscoveryEnabled(base), base: {} });
+      if (base.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
+        const derived = withStoreSmallFastDefault(base);
+        env.ANTHROPIC_SMALL_FAST_MODEL = derived.ANYSWITCH_SMALL_FAST_MODEL ?? env.ANTHROPIC_SMALL_FAST_MODEL;
+      } else {
+        delete env.ANTHROPIC_SMALL_FAST_MODEL;
+      }
+      return env;
+    }
+    case "kimi":
+      return buildKimiLauncherEnv({ port, token, base: {}, instanceId });
+    case "codex":
+      return buildCodexLauncherEnv({ instanceId, base: {} });
+    case "grok":
+      return buildGrokLauncherEnv({ instanceId, base: {} });
+    case "pi":
+      return buildPiLauncherEnv({ port, token, instanceId, base: {} });
+    case "dsh":
+      return buildDshLauncherEnv({ port, token, base: {} });
+    case "opencode":
+      return buildOpencodeLauncherEnv({ token, instanceId, base: {} });
+    case "qoder":
+      return buildQoderLauncherEnv({ token, base: {} });
+    case "zcode":
+      // env 全由 launcher 内部构造：凭证作为 apiKey 落在槽位
+      // provider_config.json，不骑环境变量，终端注入为零。
+      return {};
+    default:
+      throw requireTarget(agentId);
+  }
+}
+
+// bypassPermissions 附加参数只属于 claude：设置页开关打开时给 Claude Code 补
+// --dangerously-skip-permissions，其余端点不因这个开关多出任何参数。
+function claudeBypassArg(agentId, enabled) {
+  return agentId === "claude" && enabled === true ? [CLAUDE_BYPASS_PERMISSIONS_ARG] : [];
+}
+
+// Everything terminal-host needs to spawn the session: a cmd /c wrapper (see
+// the attribution note on `launch`), the injected env delta, and the non-secret
+// metadata the tab and the persisted snapshot display. Throws — never falls
+// back — when the working directory or the agent's executable is missing.
+export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT, token, base = process.env, instanceId = null, claudeBypassPermissions = false }) {
+  const target = requireTarget(agentId);
+  const directory = typeof cwd === "string" ? cwd.trim() : "";
+  if (!directory) throw agentError("请先填写工作目录", "invalid_cwd");
+  if (!existsSync(directory)) throw agentError("工作目录不存在，请检查后重试", "invalid_cwd");
+  const executable = resolveAgentExecutable(agentId, base);
+  const instance = sessionInstanceId(agentId, directory, instanceId);
+  return {
+    label: target.name,
+    shell: "cmd",
+    cwd: directory,
+    launch: {
+      // Attribution hard requirement: under ConPTY a directly-spawned agent's
+      // parent is conhost, which is NOT in agent-metrics' process scan list —
+      // monitoring, metrics and recent requests would all lose the session.
+      // Wrapping in `cmd /d /c <exe>` makes session.pid a cmd.exe (on the scan
+      // list), so the agent's ancestor chain reaches the session. The args
+      // carry the executable path only — never a credential.
+      // dsh 是唯一还要带参数的：它的 CLI 不接裸调用（bin.js 要求显式
+      // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
+      // claude 的 bypassPermissions 是设置页开关驱动的附加参数：开 = 跳过工具
+      // 权限确认（用户显式打开才带），关 = 一个参数都不加。
+      file: base.ComSpec || "cmd.exe",
+      args: ["/d", "/c", executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions))],
+    },
+    env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
+    agentId,
+    agentName: target.name,
+  };
+}
