@@ -447,15 +447,20 @@ async function stripPi(ctx) {
 }
 
 // dsh managed providers inside a profile's llm row: "_" prefixed id, relay
-// baseURL, endpoint header, token-by-env (dsh-merge-config.mjs
-// buildDshProviderEntry). All four together are the fingerprint — the merge
-// module documents that a user's own "_" provider must survive.
+// baseURL, endpoint header, and a relay credential — either the legacy
+// token-by-env reference or the token-by-header the writer now emits
+// (dsh-merge-config.mjs buildDshProviderEntry). Both shapes are accepted so an
+// uninstall still cleans a profile written before the credential moved into
+// the headers. Together they are the fingerprint — the merge module documents
+// that a user's own "_" provider must survive.
 function isDshManagedEntry(entry) {
-  return entry && typeof entry === "object" &&
-    entry.api === "openai-completions" &&
-    RELAY_OPENAI_BASE_URL.test(entry.baseURL ?? "") &&
-    entry.headers?.["x-agent-id"] === "dsh" &&
-    entry.apiKeyEnv === "ANYSWITCH_RELAY_TOKEN";
+  if (!entry || typeof entry !== "object") return false;
+  if (entry.api !== "openai-completions") return false;
+  if (!RELAY_OPENAI_BASE_URL.test(entry.baseURL ?? "")) return false;
+  if (entry.headers?.["x-agent-id"] !== "dsh") return false;
+  const authorization = entry.headers?.Authorization;
+  return entry.apiKeyEnv === "ANYSWITCH_RELAY_TOKEN" ||
+    (typeof authorization === "string" && authorization.startsWith("Bearer "));
 }
 
 function stripBom(text) {
@@ -508,7 +513,9 @@ async function isEmptyLlmOnlyPatch(patchPath) {
 async function stripDsh(ctx) {
   const dshHome = dirname(dshSettingsPath(ctx.env));
   const steps = [];
-  const runPublicSync = () => dshMerge.writeDshProfilePatches({}, STRIP_PORT, ctx.sidecarRoot, dshHome, null, false, null);
+  // The strip syncs an empty store, so no provider profile is built and the
+  // token never reaches the file; null keeps the (unused) credential honest.
+  const runPublicSync = () => dshMerge.writeDshProfilePatches({}, STRIP_PORT, null, ctx.sidecarRoot, dshHome, null, false, null);
   // The public writer splices an (empty) llm row into EVERY profile patch
   // path, including profiles that never had a patch file. Record pre-state
   // so those creations can be reclaimed at the end.

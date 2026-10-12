@@ -13,7 +13,7 @@ import { createUsageJournal } from "./usage-journal.mjs";
 import { writeDshProfilePatches } from "./dsh-merge-config.mjs";
 import { catalogForRoot, effortSupplementEnabled } from "./effort-catalog.mjs";
 import { loadPiAiReasoningIndex } from "./reasoning-fallback.mjs";
-import { acquireRelayOrNative, buildNativeLauncherEnv } from "./launcher-native-fallback.mjs";
+import { acquireRelayOrNative, buildNativeLauncherEnv, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
 
 export function dshSettingsPath(base = process.env) {
   return join(base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh"), "settings.yaml");
@@ -75,13 +75,13 @@ export function dshPackageRoot(base = process.env) {
   );
 }
 
-export async function writeDshConfig(store, port, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
+export async function writeDshConfig(store, port, token, sidecarRoot, settingsPath = DSH_SETTINGS_PATH, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
   // 0.1.7 reads each profile's cordis.patch.yml, not settings.yaml. The path
   // argument stays so older callers keep compiling; the home is its parent.
   const dshHome = dirname(settingsPath);
   const knowledge = loadPiAiReasoningIndex(dshPackageRoot());
   const includeEfforts = effortsEnabled ?? effortSupplementEnabled(sidecarRoot);
-  return writeDshProfilePatches(store, port, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
+  return writeDshProfilePatches(store, port, token, sidecarRoot, dshHome, catalog, includeEfforts, knowledge);
 }
 
 import { resolveDshExecutable } from "./agent-discovery.mjs";
@@ -129,9 +129,18 @@ export async function runDshLauncher({
       log("warning: Anyswitch store could not be read; dsh settings not updated");
     } else {
       const sidecarRoot = relayDataRoot(base);
-      // Native mode syncs against the well-known port too (dsh's writeConfig
-      // takes no token), so the managed profiles revive with the resident relay.
-      const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, sidecarRoot);
+      // Native mode syncs against the well-known port too, so the managed
+      // profiles revive with the resident relay. The credential must live in
+      // the profile itself — a surface that never ran this launcher (the
+      // official desktop app) reads it from there, never from an
+      // ANYSWITCH_RELAY_TOKEN this process may not even export. Native mode
+      // takes the shared token file (the same one a resident relay reads, so
+      // the profiles revive with it); a token that cannot be read only
+      // downgrades the sync, exactly as for the sibling launchers.
+      const token = relay
+        ? relay.token
+        : loadNativeSyncToken({ loadToken: loadOrGenerateToken, root: sidecarRoot, endpoint: "dsh", log });
+      const writeResult = await writeConfig(loaded.store, relay ? relay.port : RELAY_PORT, token, sidecarRoot);
       if (!writeResult.ok) {
         log(`warning: dsh profile patch not updated: ${writeResult.reason ?? "unknown error"}`);
       } else if (!writeResult.unchanged) {
@@ -181,7 +190,7 @@ function realSpawnDsh({ env, args }) {
 export async function main(argv = process.argv.slice(2)) {
   const code = await runDshLauncher({
     startRelay: () => startOpenAIRelay(),
-    writeConfig: (store, port, sidecarRoot) => writeDshConfig(store, port, sidecarRoot),
+    writeConfig: (store, port, token, sidecarRoot) => writeDshConfig(store, port, token, sidecarRoot),
     spawnDsh: realSpawnDsh,
     log: (line) => process.stderr.write(`${line}\n`),
     dshArgs: argv,

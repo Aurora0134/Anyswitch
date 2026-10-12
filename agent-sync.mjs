@@ -154,7 +154,7 @@ export async function syncAllAgentConfigs({
   // 2. DSH profile patches (~/.dsh/profiles/<name>/cordis.patch.yml). 0.1.7
   // retired the home-level settings.yaml; each existing profile reads its own.
   try {
-    const dshResult = await writeDshConfig(store, port, root, dshSettingsPath(base));
+    const dshResult = await writeDshConfig(store, port, token, root, dshSettingsPath(base));
     results.dsh = dshResult;
     if (!dshResult.ok) {
       logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);

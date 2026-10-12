@@ -417,7 +417,24 @@ test("pi: underscore-prefixed relay providers are stripped, user providers stay"
 // dsh
 // ─────────────────────────────────────────────────────────────
 
-const DSH_PATCH_SEED = [
+// The relay credential inside a managed dsh provider, in either shape the
+// writer has emitted: the legacy token-by-env reference, and the token-by-
+// header it now writes (dsh-merge-config.mjs buildDshProviderEntry). Uninstall
+// must recognize both — a profile predating the move still has to strip.
+const DSH_CREDENTIAL_LINES = {
+  legacy: [
+    "        apiKeyEnv: ANYSWITCH_RELAY_TOKEN",
+    "        headers:",
+    "          x-agent-id: dsh",
+  ],
+  header: [
+    "        headers:",
+    "          x-agent-id: dsh",
+    "          Authorization: 'Bearer relay-token'",
+  ],
+};
+
+const dshPatchSeed = (credential) => [
   "- id: llm-pi-ai",
   "  name: '@deepseek-ai/dsh-llm-pi-ai'",
   "  config:",
@@ -426,9 +443,7 @@ const DSH_PATCH_SEED = [
   "        displayName: chan1",
   "        api: openai-completions",
   "        baseURL: 'http://127.0.0.1:47821/openai/chan1/v1'",
-  "        apiKeyEnv: ANYSWITCH_RELAY_TOKEN",
-  "        headers:",
-  "          x-agent-id: dsh",
+  ...DSH_CREDENTIAL_LINES[credential],
   "        models: []",
   "      userp:",
   "        api: anthropic",
@@ -439,21 +454,22 @@ const DSH_PATCH_SEED = [
   "",
 ].join("\n");
 
-function seedDsh(home, sidecarRoot, { sidecar = true } = {}) {
+function seedDsh(home, sidecarRoot, { sidecar = true, credential = "legacy" } = {}) {
   const dshHome = join(home, ".dsh");
   const patchPath = join(dshHome, "profiles", "p1", "cordis.patch.yml");
   mkdirSync(dirname(patchPath), { recursive: true });
-  writeFileSync(patchPath, DSH_PATCH_SEED);
+  writeFileSync(patchPath, dshPatchSeed(credential));
   mkdirSync(join(dshHome, "profiles", "p2"), { recursive: true }); // no patch file
   if (sidecar) seedSidecar(sidecarRoot, "dsh-sidecar.json", ["chan1"]);
   return { dshHome, patchPath, p2PatchPath: join(dshHome, "profiles", "p2", "cordis.patch.yml") };
 }
 
 for (const withSidecar of [true, false]) {
-  test(`dsh: managed providers spliced out, other rows and profiles untouched (sidecar ${withSidecar ? "present" : "lost"})`, async () => {
-    const home = mkTestDir(`uninstall-dsh-${withSidecar}-`);
-    const { driver, sidecarRoot } = testDriver(home);
-    const { patchPath, p2PatchPath } = seedDsh(home, sidecarRoot, { sidecar: withSidecar });
+  for (const credential of ["legacy", "header"]) {
+    test(`dsh: managed providers spliced out, other rows and profiles untouched (sidecar ${withSidecar ? "present" : "lost"}, ${credential} credential)`, async () => {
+      const home = mkTestDir(`uninstall-dsh-${withSidecar}-${credential}-`);
+      const { driver, sidecarRoot } = testDriver(home);
+      const { patchPath, p2PatchPath } = seedDsh(home, sidecarRoot, { sidecar: withSidecar, credential });
 
     const result = await driver.uninstallEndpoint("dsh");
     assert.equal(result.ok, true, JSON.stringify(result.steps));
@@ -467,9 +483,10 @@ for (const withSidecar of [true, false]) {
     assert.ok(!existsSync(join(sidecarRoot, "dsh-sidecar.json")));
 
     const again = await driver.uninstallEndpoint("dsh");
-    assert.equal(again.ok, true);
-    assert.equal(stepsByName(again)["marker-sweep"].changed, false);
-  });
+      assert.equal(again.ok, true);
+      assert.equal(stepsByName(again)["marker-sweep"].changed, false);
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
