@@ -18,7 +18,10 @@ test("standalone discovery preserves all nine launcher installation choices", ()
   assert.equal(resolveCodexExecutable({ ...base, CODEX_EXECUTABLE: "C:\\custom\\codex.exe" }), "C:\\custom\\codex.exe");
   assert.equal(resolveOpencodeExecutable(base), join(base.APPDATA, "npm/node_modules/opencode-ai/node_modules/opencode-windows-x64/bin/opencode.exe"));
   assert.equal(resolvePiExecutable(base), join(base.APPDATA, "npm/pi.cmd"));
-  assert.equal(resolveKimiExecutable(base), join(base.APPDATA, "npm/kimi.cmd"));
+  // kimi 两种官方形态：npm 全局 shim 优先（面板更新按钮装的就是那个包），
+  // 没有 shim 才回退官方原生执行体（~/.kimi-code/bin/kimi.exe）。
+  assert.equal(resolveKimiExecutable(base, { existsSync: () => true }), join(base.APPDATA, "npm/kimi.cmd"));
+  assert.equal(resolveKimiExecutable(base, { existsSync: () => false }), join(base.USERPROFILE, ".kimi-code/bin/kimi.exe"));
   assert.equal(resolveDshExecutable(base, { existsSync: () => true }), join(base.APPDATA, "npm/dsh.cmd"));
   assert.equal(resolveZcodeExecutable(base), join(base.LOCALAPPDATA, "Programs/zcode/ZCode.exe"));
   assert.equal(resolveQoderExecutable(base, { existsSync: () => true }), join(base.USERPROFILE, ".qoder/entry/qoder.cmd"));

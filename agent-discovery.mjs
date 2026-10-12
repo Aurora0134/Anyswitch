@@ -94,8 +94,23 @@ export function resolvePiExecutable(base = process.env) {
   return absoluteOverride(base, "PI_EXECUTABLE") ?? join(roamingNpm(base), "pi.cmd");
 }
 
-export function resolveKimiExecutable(base = process.env) {
-  return base.KIMI_EXECUTABLE || join(roamingNpm(base), "kimi.cmd");
+// Kimi Code CLI 的官方原生安装落点：安装器与 CLI 自更新器写下的 SEA 可执行体。
+// 它是 Node 单文件产物，PE 版本资源写的是 Node.js 自身版本，读不出产品版本。
+export function resolveKimiNativeExecutable(base = process.env) {
+  return join(base.USERPROFILE ?? "", ".kimi-code", "bin", "kimi.exe");
+}
+
+// Kimi Code 的 CLI 有两种官方安装形态：npm 全局包（@moonshot-ai/kimi-code，
+// bin 是 dist/main.mjs，shim 由 npm 生成）与官方原生二进制（安装器落下的
+// ~/.kimi-code/bin/kimi.exe，shim 直指它）。npm shim 优先——面板的安装/更新
+// 按钮装的就是那个包；原生执行体是回退，只有原生形态的机器上
+// %APPDATA%\npm\kimi.cmd 可能并不存在。
+export function resolveKimiExecutable(base = process.env, io = { existsSync }) {
+  const override = base.KIMI_EXECUTABLE;
+  if (override) return override;
+  const shim = join(roamingNpm(base), "kimi.cmd");
+  if (io.existsSync(shim)) return shim;
+  return resolveKimiNativeExecutable(base);
 }
 
 export function resolveDshExecutable(base = process.env, io = { existsSync }) {
