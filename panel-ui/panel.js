@@ -9257,6 +9257,35 @@ async function api(method, path, body) {
     storeRefreshChain = p.catch(() => {});
     return p;
   }
+  // 新状态落库 + 选中/焦点/过滤基准 reconcile。两条取状态路径（整轮全量、逐渠道
+  // 上屏）共用，保证「选中行还在不在、详情看的是哪个渠道」在两处口径一致。
+  function applyStoreState(res) {
+    const firstLoad = storeState === null;
+    storeState = res;
+    if (firstLoad && !storeSelection.size) {
+      const first = storeRows()[0];
+      if (first) {
+        storeSelection.add(first.id);
+        storeFocusId = first.id;
+      }
+    }
+    // reconcile：剔除已消失的行；焦点不在集合内则回退到集合最后一员；
+    // 详情渠道因此变化时重置过滤勾选（与焦点切换同语义）
+    const validIds = new Set(storeRows().map((r) => r.id));
+    for (const id of [...storeSelection]) {
+      if (!validIds.has(id)) storeSelection.delete(id);
+    }
+    if (storeFocusId && !storeSelection.has(storeFocusId)) {
+      storeFocusId = storeLastSelectionId();
+    }
+    const pid = storeDetailProviderIdFor(storeFocusId, storePoolTab);
+    if (pid !== storeFilterProviderId) {
+      storeFilterChecked = null;
+      storeFilterDirty = false;
+      storeFilterProviderId = pid;
+    }
+  }
+
   async function doRefreshStoreState() {
     try {
       const [res, stab] = await Promise.all([
@@ -9264,33 +9293,30 @@ async function api(method, path, body) {
         api("GET", "/api/model-stability").catch(() => null), // 稳定性拉取失败不挡渠道配置加载
       ]);
       if (stab) storeAvailability = buildStoreAvailability(stab.models);
-      const firstLoad = storeState === null;
-      storeState = res;
-      if (firstLoad && !storeSelection.size) {
-        const first = storeRows()[0];
-        if (first) {
-          storeSelection.add(first.id);
-          storeFocusId = first.id;
-        }
-      }
-      // reconcile：剔除已消失的行；焦点不在集合内则回退到集合最后一员；
-      // 详情渠道因此变化时重置过滤勾选（与焦点切换同语义）
-      const validIds = new Set(storeRows().map((r) => r.id));
-      for (const id of [...storeSelection]) {
-        if (!validIds.has(id)) storeSelection.delete(id);
-      }
-      if (storeFocusId && !storeSelection.has(storeFocusId)) {
-        storeFocusId = storeLastSelectionId();
-      }
-      const pid = storeDetailProviderIdFor(storeFocusId, storePoolTab);
-      if (pid !== storeFilterProviderId) {
-        storeFilterChecked = null;
-        storeFilterDirty = false;
-        storeFilterProviderId = pid;
-      }
+      applyStoreState(res);
       renderStoreOverview();
       renderRouteChains();
       renderStoreList();
+      renderStoreDetail();
+    } catch (e) {
+      toast(panelError(e, "渠道配置加载失败"), true);
+    }
+  }
+
+  // 逐渠道刷完即时上屏：只取渠道状态，只重渲与模型缓存有关的两处（总览计数、
+  // 详情卡模型列表）。列表行只含显示名/凭据徽标/可用性与 TTFT、路由链与模型缓存
+  // 无关，都不重渲——省掉整列表重建和一次用不上的稳定性拉取。仍走同一条串行链，
+  // 免得与整轮全量重渲交错时旧响应盖新状态。
+  function refreshStoreModelsView() {
+    const p = storeRefreshChain.then(doRefreshStoreModelsView);
+    storeRefreshChain = p.catch(() => {});
+    return p;
+  }
+  async function doRefreshStoreModelsView() {
+    try {
+      const res = await api("GET", "/api/store/state");
+      applyStoreState(res);
+      renderStoreOverview();
       renderStoreDetail();
     } catch (e) {
       toast(panelError(e, "渠道配置加载失败"), true);
@@ -9617,19 +9643,51 @@ async function api(method, path, body) {
       [...storeFilterChecked].some((mid) => !base.has(mid));
   }
 
+  // 详情卡当前渲染的渠道（草稿归属判定用，见 captureStoreManualDraft）
+  let storeDetailRenderedId = null;
+  // 「手动添加」框是详情卡里唯一的裸 DOM 输入：逐渠道刷完即时上屏会反复重建这张卡，
+  // 草稿会在重建时被吞掉。渲染是同步的，同一 task 内先存后取不丢键击。草稿记所属
+  // 渠道，换渠道渲染时按原语义丢弃——不把 A 的草稿搬进 B 的框。
+  function captureStoreManualDraft() {
+    const el = $("storeManualAddInput");
+    if (!el || !el.value) return null;
+    return {
+      providerId: storeDetailRenderedId,
+      value: el.value,
+      start: el.selectionStart,
+      end: el.selectionEnd,
+      focused: document.activeElement === el,
+    };
+  }
+  function restoreStoreManualDraft(draft, renderedId) {
+    if (!draft || draft.providerId !== renderedId) return;
+    const el = $("storeManualAddInput");
+    if (!el) return;
+    el.value = draft.value;
+    if (draft.focused) {
+      el.focus();
+      try { el.setSelectionRange(draft.start, draft.end); } catch {}
+    }
+  }
+
   function renderStoreDetail() {
+    const draft = captureStoreManualDraft();
     const body = $("storeDetailBody");
     const row = storeFocusRow();
     $("storeDetailTitle").textContent = row && row.kind === "pool" ? "号池详情" : "渠道详情";
     if (!row) {
       body.innerHTML = `<div class="skills-list-desc" style="padding:8px 0;">选择左侧渠道查看详情</div>`;
+      storeDetailRenderedId = null;
       return;
     }
     if (row.kind === "pool") {
       renderPoolDetail(row);
-      return;
+    } else {
+      renderProviderDetail(row.p, body);
     }
-    renderProviderDetail(row.p, body);
+    const cur = storeDetailProvider();
+    storeDetailRenderedId = cur ? cur.id : null;
+    restoreStoreManualDraft(draft, storeDetailRenderedId);
   }
 
   // 池详情：摘要行 + 成员 tab；tab 下方即该成员渠道的完整详情
@@ -9699,6 +9757,9 @@ async function api(method, path, body) {
     // 新增待读：本帧若有待读新增则置顶+高光呈现，渲染末尾立即消耗（这一帧即「看过」），
     // 之后任何重渲染都放回原位、撤下高光。以 render 为权威消耗点，避免刷新后自动重渲染
     // 抢在用户点击前白消耗——那一帧本身就是合法的「看过」。
+    // 例外：本轮刷新在途（storeRefreshInFlight）时不消耗——逐渠道上屏会对同一张卡反复
+    // 渲染，若第一帧就消耗，焦点渠道的高光会被后面渠道的上屏重渲抹掉；消费留给收尾那次
+    // 全量重渲，可见语义与逐渠道上屏前一致。
     const newIds = storeNewIdsFor(p.id);
     const newSet = new Set(newIds);
     const highlight = newIds.length > 0;
@@ -9763,7 +9824,8 @@ async function api(method, path, body) {
     `;
     bindStoreDetail(p);
     // 本帧已把待读新增置顶+高光呈现给用户 → 立即消耗，下次渲染放回原位
-    if (highlight) consumeStoreNewModels(p.id);
+    // （本轮刷新在途时不消耗，见上方说明）
+    if (highlight && !storeRefreshInFlight) consumeStoreNewModels(p.id);
   }
 
   function bindStoreDetail(p) {
@@ -9968,6 +10030,10 @@ async function api(method, path, body) {
   const STORE_NEW_MODELS_KEY = "store-new-models";
   const STORE_NEW_MODELS_TTL_MS = 7 * 24 * 3600 * 1000; // 7 天未看自动老化，防永久残留
   let storeNewModels = null;      // 惰性从 localStorage 载入的待读表
+  // 本轮刷新在途标记：在途期间详情卡只渲染新增高光、不消费待读表——逐渠道上屏会对
+  // 同一张卡反复重渲，首帧就消费会让焦点渠道的高光被后续渠道的上屏抹掉。消费留给
+  // 收尾那次全量重渲（见 storeRefresh），可见语义与逐渠道上屏前一致。
+  let storeRefreshInFlight = false;
 
   function loadStoreNewModels() {
     if (storeNewModels) return storeNewModels;
@@ -10226,15 +10292,32 @@ async function api(method, path, body) {
 
   // 刷新：全部刷新/多选刷新按可见行分组——号池行整行一个单元（成员逐个刷，
   // 显示池名 + 聚合 diff，与号池详情「刷新模型」同语义），独立渠道各一单元；
-  // opts.wholeLabel（号池详情传入）= 单单元且循环中不更新 tail，只显示
-  // 「正在刷新.. 池名」。进行中：状态小字 = 窄波的「正在刷新..」前缀 + 单元
-  // 结果（结构化着色，只摆增减数字），结果保留显示到下一单元刷完，窄波效果
-  // 贯穿长时程刷新全程；全部完成后 = 整体高光「刷新完成」+ tail 保留最后一个
+  // 进行中：状态小字 = 窄波的「正在刷新..」前缀 + 单元结果（结构化着色，只摆增减
+  // 数字），窄波效果贯穿长时程刷新全程；整池单元（aggregate）刷期间小字逐成员摆
+  // 结果、收尾再落池聚合；全部完成后 = 整体高光「刷新完成」+ tail 保留最后一个
   // 单元结果，完成态不整行染红。
+  // 刷完一个展现一个：每个渠道的请求返回后立刻取其最新状态上屏（详情卡模型列表、
+  // 新增高光、号池并集/重复计数、总览模型计数），不等整轮跑完——后端本就是
+  // 一渠道一请求、发现完即落盘，取回来就是最新态。
   async function storeRefresh(ids, opts) {
     const all = !ids;
     const wholeLabel = (opts && opts.wholeLabel) || "";
     const btn = all ? $("storeRefreshAllBtn") : $("storeRefreshOneBtn");
+    // 渠道显示名（缺显示名退回渠道 id，与列表行 label 同口径）
+    const labelOf = (id) => {
+      const p = storeProviders().find((x) => x.id === id);
+      return (p && p.displayName) || id;
+    };
+    // 单渠道结果 → 小字分段 HTML：失败按 panelCopy 映射后红段（与单元收尾同口径）、
+    // updated 增绿减红、unchanged 中性；无报告又无错误 = 无结果
+    const chanResultHtml = (label, rep, err) => {
+      if (rep && rep.status === "failed") {
+        return `<span class="srs-neg">${escapeHtml(label)} 刷新失败：${escapeHtml(panelCopy(rep.reason || "unknown", "原因见面板日志"))}</span>`;
+      }
+      if (rep) return storeReportHtml(rep, label);
+      if (err) return `<span class="srs-neg">${escapeHtml(label)} 刷新失败：${escapeHtml(panelCopy(err, "原因见面板日志"))}</span>`;
+      return `${escapeHtml(label)} 无结果`;
+    };
     // 单元 = 列表里一行：{ ids: [渠道id...], label: 显示名, aggregate: 池聚合 }
     let units;
     if (wholeLabel) {
@@ -10263,6 +10346,9 @@ async function api(method, path, body) {
         setStoreRefreshStatus("无可刷新渠道", "ok");
         return;
       }
+      // 在途标记：期间详情卡只渲染新增高光、不消费待读表（逐渠道上屏会对同一张卡
+      // 反复重渲，首帧就消费会让焦点渠道的高光被后续渠道的上屏抹掉）
+      storeRefreshInFlight = true;
       for (let i = 0; i < units.length; i++) {
         const unit = units[i];
         const prog = multi ? ` · ${i + 1}/${units.length}` : "";
@@ -10273,9 +10359,11 @@ async function api(method, path, body) {
         let uAdded = 0, uPruned = 0, uFail = 0, uRep = null, uErr = "";
         const uAddedIds = [], uPrunedIds = [];
         for (const id of unit.ids) {
+          let rep = null;
+          let chanErr = "";
           try {
             const r = await api("POST", "/api/store/refresh", { id });
-            const rep = (r.reports || [])[0];
+            rep = (r.reports || [])[0] || null;
             if (rep) {
               if (rep.status === "failed") {
                 uFail++;
@@ -10294,6 +10382,14 @@ async function api(method, path, body) {
             // 批量刷新：单点失败只计入本单元，不中断后续渠道
             uFail++;
             uErr = panelError(e, "原因见面板日志");
+            chanErr = uErr;
+          }
+          // 刷完一个展现一个：本渠道最新状态取回来上屏（新增高光上一步已登记）
+          await refreshStoreModelsView();
+          // 整池单元：成员结果逐个摆上小字，池聚合留给本单元收尾，不让人对着池名干等
+          if (unit.aggregate) {
+            lastTail = `${chanResultHtml(labelOf(id), rep, chanErr)}${prog}`;
+            setStoreRefreshStatus("正在刷新..", "busy", lastTail);
           }
         }
         refreshDiffUnits.push({
@@ -10311,6 +10407,8 @@ async function api(method, path, body) {
         lastTail = `${resHtml}${prog}`;
         if (!wholeLabel) setStoreRefreshStatus("正在刷新..", "busy", lastTail);
       }
+      // 收尾：先撤在途标记，这次全量重渲负责消费本轮新增高光，并让列表行/路由链归位
+      storeRefreshInFlight = false;
       await refreshStoreState();
       // 本轮确有增减或失败时才挂「查看差异」小字；全零无变化不显示（没东西可看）
       const hasDiff = refreshDiffUnits.some((u) => u.failed || u.added.length > 0 || u.pruned.length > 0);
@@ -10326,6 +10424,8 @@ async function api(method, path, body) {
       if (totFailed) totParts.push(`${totFailed} 个失败`);
       notifyStoreRefreshAway(`刷新完成：${totParts.length ? totParts.join(" ") : "无变化"}`, false, hasDiff);
     } catch (e) {
+      // 中断也要撤在途标记，否则新增高光一直不消费（下一次渲染就补上消费）
+      storeRefreshInFlight = false;
       if (e.code === "cas-conflict") {
         setStoreRefreshStatus("渠道配置已被其他操作改动，正在刷新", "err");
         await refreshStoreState();
