@@ -373,6 +373,45 @@ test("Kimi CLI 的两种官方安装形态：npm 包读包清单，原生执行�
   assert.equal(notRunnable.issue, "not_runnable");
 });
 
+test("解不出的 shim 按「未找到」报：npmTarget 兜底只保留给 kimi", async (t) => {
+  // codex / pi / dsh 与 kimi 共用 npmTarget。损坏/残缺的 shim（既非 npm 生成式、
+  // 也解不出执行体）在这些客户端上维持旧语义——报未找到，而不是用「已安装 +
+  // 版本无法读取」掩盖入口缺失。
+  const f = fixture(t);
+  f.put(join(f.base.APPDATA, "npm/codex.cmd"), "");
+  const item = installation(await f.service().getState(), "codex", 0);
+  assert.equal(item.status, "not_found");
+  assert.equal(item.path, null);
+  assert.equal(item.issue, "entry_missing");
+});
+
+test("kimi 解不出的 shim 原样返回：已安装、版本读不出、不打探针", async (t) => {
+  const f = fixture(t);
+  const shim = f.put(join(f.base.APPDATA, "npm/kimi.cmd"), "not a parseable shim");
+  const probed = [];
+  const item = installation(await f.service({ probeVersion: async (path) => (probed.push(path), { missing: false, version: "9.9.9" }) }).getState(), "kimi", 0);
+  assert.equal(item.status, "found");
+  assert.equal(item.path, shim);
+  assert.equal(item.version, null);
+  assert.equal(item.issue, "version_unavailable");
+  assert.deepEqual(probed, [], "shim 不是执行体，--version 探针不得开火");
+});
+
+test("引 node.exe 的手写 shim 不把 Node 当成客户端执行体", async (t) => {
+  // 手写 shim 用 node.exe 拉脚本：node 不是客户端执行体，解析到它会误报安装
+  // 位置，kimi 的 --version 探针还会把 Node 自身版本当成客户端版本。
+  const f = fixture(t);
+  const shim = f.put(join(f.base.APPDATA, "npm/kimi.cmd"), `@echo off\r\n"%~dp0\\node.exe" "C:\\app\\main.mjs" %*\r\n`);
+  f.put(join(f.base.APPDATA, "npm/node.exe"));
+  const probed = [];
+  const item = installation(await f.service({ probeVersion: async (path) => (probed.push(path), { missing: false, version: "22.14.0" }) }).getState(), "kimi", 0);
+  assert.equal(item.status, "found");
+  assert.equal(item.path, shim, "解析到 shim 自身，不得解析到 node.exe");
+  assert.equal(item.version, null, "Node 自身版本不得被当作 Kimi 版本报出");
+  assert.equal(item.issue, "version_unavailable");
+  assert.deepEqual(probed, [], "探针不得打在 node.exe 上");
+});
+
 test("probeExecutableVersion parses the first SemVer and classifies spawn failures", async () => {
   const run = (error, stdout = "", stderr = "") => probeExecutableVersion("codex.exe", { exec: (_path, _args, _options, cb) => cb(error, stdout, stderr) });
   assert.deepEqual(await run(null, "codex-cli 0.155.0\n"), { missing: false, version: "0.155.0" });

@@ -108,8 +108,8 @@ const CLIENTS = [
 ];
 
 // 只有桌面形态的端点：本地那条记录就是桌面端，inspect 走 kind="desktop" 分支
-// （版本从 app.asar 读）。dsh / kimi / codex / qoder 是「CLI + 桌面端」两形态，
-// 不在此列。
+// （版本从 app.asar 读）。dsh / kimi / codex / qoder / claude 是「CLI + 桌面端」
+// 两形态，不在此列。
 const DESKTOP_CLIENTS = new Set(["zcode", "qoder"]);
 
 // 原生二进制、没有 npm 包清单可读的安装记录：本地版本只认执行体自报的
@@ -167,10 +167,11 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
 
   // npm 生成的 shim 解到它真正的入口，好让 packageVersion 顺着目录往上读
   // package.json；官方原生安装器写下的启动器（shim 直指原生执行体，既没有
-  // %dp0% 也没有 node_modules）解到那个执行体。两者都不成立时原样返回而不是
-  // null：shim 本身就是真实存在的执行体，判成「没找到」是假阴性——Kimi Code
-  // 的原生形态走的正是这条路径。
-  function npmTarget(path) {
+  // %dp0% 也没有 node_modules）解到那个执行体。两者都不成立时按客户端分流：
+  // kimi 原样返回 shim——shim 本身就是真实存在的执行体，判成「没找到」是
+  // 假阴性；codex / pi / dsh 维持旧语义返回 null——解不出的损坏/残缺 shim
+  // 按「未找到」报，别让「已安装」掩盖入口缺失。
+  function npmTarget(path, id) {
     if (![".cmd", ".ps1", ""].includes(extname(path).toLowerCase())) return path;
     const text = readText(path);
     const entry = text?.match(/(?:%dp0%|%~dp0|\$basedir)[\\/]+(node_modules[\\/][^"\r\n]+)["]/i);
@@ -178,9 +179,12 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     const direct = text?.match(/"([^"\r\n]*\.exe)"|((?:[A-Za-z]:)?[^\s"\r\n]*\.exe)/i);
     if (direct) {
       const expanded = expandShimPath(direct[1] ?? direct[2], dirname(path));
-      if (isAbsolute(expanded)) return resolve(expanded);
+      // 引 node.exe 执行脚本的 shim（npm 标准式以外的手写形态）不把 node.exe
+      // 当作客户端执行体：解到它会误报安装位置，kimi 的 --version 探针还会
+      // 把 Node 自身版本当成客户端版本。
+      if (isAbsolute(expanded) && basename(expanded).toLowerCase() !== "node.exe") return resolve(expanded);
     }
-    return path;
+    return id === "kimi" ? path : null;
   }
 
   // Qoder's updater installs every release into <installRoot>/.qoder-versions/<version>/
@@ -284,7 +288,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     try {
       let path = locate(base, resolverIo);
       if (!isFile(path)) return result;
-      if (["codex", "pi", "kimi", "dsh"].includes(id)) path = npmTarget(path);
+      if (["codex", "pi", "kimi", "dsh"].includes(id)) path = npmTarget(path, id);
       if (!path || !isFile(path)) return result;
       Object.assign(result, { status: "found", path, issue: "version_unavailable" });
       if (PROBE_VERSION_CLIENTS.has(id)) {
@@ -392,27 +396,6 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
     }
   }
-
-  // Kimi Code 的官方桌面端（Electron 包，安装器默认落点）。与 DSH 桌面端同型：
-  // 版本取归档里的产品版本（包名 kimi-code-app），执行体自身的 PE 资源写的是
-  // Electron 的版本、答不了「装的是哪个 Kimi Code」。
-  async function inspectKimiDesktop() {
-    const result = { kind: "desktop", remoteId: "kimi-desktop", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
-    try {
-      const path = resolveKimiDesktopExecutable(base);
-      if (!isFile(path)) return result;
-      const found = { ...result, status: "found", path, issue: "version_unavailable" };
-      const version = asarProductVersion("kimi-desktop", join(dirname(path), "resources", "app.asar"));
-      return version ? { ...found, version, versionSource: "app.asar/package.json", issue: null } : found;
-    } catch (error) {
-      if (missing(error) && result.status !== "found") return result;
-      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
-    }
-  }
-
-  // 一卡两形态（index 0 = CLI，index 1 = 官方桌面端）的端点 → 桌面端检测器。
-  // codex / qoder 的桌面形态另有自己的入口（商店 MSIX / IDE 目录），在 getState 里单列。
-  const desktopInspectors = { dsh: inspectDshDesktop, kimi: inspectKimiDesktop };
 
   let cache = null;
   async function getState({ force = false } = {}) {
