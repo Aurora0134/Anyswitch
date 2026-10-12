@@ -4596,6 +4596,30 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(outcome.includes("anyswitch:self-update-shown:"), "新页面直接显示结论时记入已读，/last 不重复补显");
   });
 
+  it("一键更新：一次确认覆盖下载+应用，下载完成自动接续应用，staged 路径保持原样", () => {
+    // 确认弹层合并为一次：正文承诺「自动下载并应用」，确认键是「立即更新」，
+    // 运行中 Agent 的中断警示从「应用」那次确认前移到这唯一的一次。
+    const startStart = panelJs.indexOf("async function startSelfUpdate()");
+    const start = panelJs.slice(startStart, panelJs.indexOf("async function applySelfUpdateRun", startStart));
+    assert.ok(start.length > 500, "未真正取到 startSelfUpdate 函数体，后续断言会全部落空");
+    assert.ok(start.includes('"立即更新"'), "一键更新的确认键");
+    assert.ok(start.includes('fetchOnce("/api/agents")'), "运行中 Agent 的中断警示前移到首次确认");
+    assert.ok(start.includes('trackSelfUpdate(started.runId, started.targetVersion, "staging", false, true)'),
+      "一键下载的 run 必须带 oneClick 标记");
+    assert.ok(!panelJs.includes("下载完成后由你选择何时应用"), "旧两步确认文案不得残留");
+    // 下载完成即接续应用：oneClick 分支先于 staged 停留态。
+    const outcomeStart = panelJs.indexOf("function renderSelfUpdateOutcome");
+    const downloaded = panelJs.slice(panelJs.indexOf('status?.outcome === "downloaded"', outcomeStart), panelJs.indexOf('status?.outcome === "updated"', outcomeStart));
+    assert.ok(downloaded.includes("if (oneClick) { void applySelfUpdateRun(status); return; }"),
+      "oneClick 下载完成必须自动接续应用");
+    assert.ok(downloaded.includes("renderSelfUpdateStaged()"), "非 oneClick（自动下载产物）仍落 staged 停留态");
+    // 应用入口共用：手动「应用更新」与自动接续走同一个函数、同一个端点。
+    const applyStart = panelJs.indexOf("async function applySelfUpdateRun");
+    const apply = panelJs.slice(applyStart, panelJs.indexOf("async function startSelfUpdateApply", applyStart));
+    assert.ok(apply.includes('request("POST", "/api/self-update/apply"'), "apply 仍走同一端点");
+    assert.ok(apply.includes('trackSelfUpdate(staged.runId, staged.targetVersion, "installing", true)'), "apply 以 isApply 模式接续轮询");
+  });
+
   it("开屏动画关到「关」时，看板重启的复播入口整层不出", () => {
     // 真跑：把 startupAnimationEnabled 与 playStartupSplash 两段源码原样取出来，
     // 配上假 localStorage 与记录了调用次数的假 window，比复述它的逻辑更接近页面行为。

@@ -2799,7 +2799,7 @@ async function api(method, path, body) {
       "ready-to-restart": () => "正在重启 Relay…",
       "waiting-panel": () => "正在重启面板，页面即将自动恢复…",
     };
-    let selfUpdateRun = null; // { runId, poll } 进行中的任务（下载或应用），全局单飞
+    let selfUpdateRun = null; // { runId, poll, oneClick } 进行中的任务（下载或应用），全局单飞；oneClick 为真时下载完成自动接续应用
     let selfUpdateStaged = null; // 已下载待应用的记录（active 查询的 staged 载荷）
     let selfUpdateLastOutcome = null; // 本次进页补显过的最终结论（防被检查更新盖掉）
     let selfUpdateAdopted = false; // enter() 时接回检查完成前，按钮先不出
@@ -2827,10 +2827,15 @@ async function api(method, path, body) {
     }
     function renderSelfUpdateOutcome(status) {
       const wasDownload = status?.outcome === "downloaded";
+      const oneClick = Boolean(selfUpdateRun?.oneClick);
       selfUpdateRun = null;
       if (!active) return;
       const statusEl = get("aboutUpdateStatus");
       if (wasDownload) {
+        // 一键更新：确认时已说清下载后自动应用，下载完成即接续应用，不落
+        // 「已下载待应用」停留态。页面中途离开（active 变假）则不接续，
+        // 更新停在已下载，下次进页按 staged 呈现。
+        if (oneClick) { void applySelfUpdateRun(status); return; }
         // 下载只是备好比特：版本号保持现状，按钮转「应用更新」。
         selfUpdateStaged = status;
         renderSelfUpdateStaged();
@@ -2896,9 +2901,9 @@ async function api(method, path, body) {
         void step();
       });
     }
-    function trackSelfUpdate(runId, targetVersion, firstPhase, isApply = false) {
+    function trackSelfUpdate(runId, targetVersion, firstPhase, isApply = false, oneClick = false) {
       selfUpdateStaged = null;
-      selfUpdateRun = { runId, poll: null };
+      selfUpdateRun = { runId, poll: null, oneClick };
       renderSelfUpdateProgress({ phase: firstPhase, targetVersion });
       void pollSelfUpdate(runId, isApply).then(renderSelfUpdateOutcome, () => {});
     }
@@ -2906,21 +2911,39 @@ async function api(method, path, body) {
       if (selfUpdateRun || !selfUpdateAdopted) return;
       const target = update?.release?.version || "";
       if (!target) return;
-      // 下载不动任何运行中的东西，确认只交代两步形态与文件覆盖。
+      // 一键更新：一次确认覆盖下载与应用两步。下载不动任何运行中的东西，应用才打断
+      // 服务——重启提示是底线，有在跑 Agent 时把中断警示叠加上去，两条都要让用户看到。
+      let warning = `将自动下载并应用新版本 ${target}：下载不影响当前使用，应用期间面板与 Relay 会自动重启，服务中断几秒钟。`;
+      try {
+        const data = await fetchOnce("/api/agents");
+        const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
+        if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
+      } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
       const confirmed = await confirmSelfUpdate(
         `更新 Anyswitch 到 ${target}`,
-        `将下载新版本 ${target}，下载不影响当前使用；下载完成后由你选择何时应用，应用前仍是当前版本。安装目录中的手动修改会被覆盖。`,
-        "下载",
+        `${warning}安装目录中的手动修改会被覆盖。确认现在更新？`,
+        "立即更新",
       );
       if (!confirmed) return;
       if (selfUpdateRun) return; // 确认期间可能已从 adopt 接回
       try {
         const started = await request("POST", "/api/self-update", {});
-        trackSelfUpdate(started.runId, started.targetVersion, "staging");
+        trackSelfUpdate(started.runId, started.targetVersion, "staging", false, true);
       } catch (error) {
         selfUpdateRun = null;
         notify(error?.code === "busy" ? "已有更新任务在进行中" : "更新未能启动，请稍后重试", true);
         renderUpdate();
+      }
+    }
+    // 应用阶段的公共入口：手动「应用更新」（startSelfUpdateApply 确认后）与一键更新
+    // 下载完成后的自动接续（renderSelfUpdateOutcome）都经这里发 apply 并接续轮询。
+    async function applySelfUpdateRun(staged) {
+      try {
+        await request("POST", "/api/self-update/apply", { runId: staged.runId });
+        trackSelfUpdate(staged.runId, staged.targetVersion, "installing", true);
+      } catch (error) {
+        notify(error?.code === "busy" ? "已有更新任务在进行中" : error?.code === "no_staged" ? "没有已下载待应用的更新，请先检查更新" : "更新未能启动，请稍后重试", true);
+        void adoptSelfUpdate();
       }
     }
     async function startSelfUpdateApply() {
@@ -2937,13 +2960,7 @@ async function api(method, path, body) {
       const confirmed = await confirmSelfUpdate(`应用更新 ${staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
       if (!confirmed) return;
       if (selfUpdateRun || selfUpdateStaged !== staged) return;
-      try {
-        await request("POST", "/api/self-update/apply", { runId: staged.runId });
-        trackSelfUpdate(staged.runId, staged.targetVersion, "installing", true);
-      } catch (error) {
-        notify(error?.code === "busy" ? "已有更新任务在进行中" : error?.code === "no_staged" ? "没有已下载待应用的更新，请先检查更新" : "更新未能启动，请稍后重试", true);
-        void adoptSelfUpdate();
-      }
+      await applySelfUpdateRun(staged);
     }
     // 换装后的新页面（或任何一次进页）补显最终结论：只补最近的、十五分钟内的、
     // 没补显过的那条；结论要能被「又有更新」盖掉，但不被「已是最新」盖掉。
