@@ -28,6 +28,17 @@ try {
   if (panelTheme === "light" || panelTheme === "dark") document.documentElement.setAttribute("data-theme", panelTheme);
 } catch (e) {}
 </script>
+<script>
+// 界面版本——绘制前恢复「UI版本」选择，避免刷新时先按旧版布局画一帧再换版。
+// 存档 localStorage「panel-ui-version」："v2"=新版（左侧导航栏布局）；缺失/其他值=
+// 旧版（旧版是 CSS 默认态，不写属性）。这是本机浏览器偏好，不过 /api/settings
+// （同主题/开屏动画）；设置→通用「显示」卡的分段钮写存档并即时改属性，这里只管首帧落位。
+try {
+  if (localStorage.getItem("panel-ui-version") === "v2") {
+    document.documentElement.setAttribute("data-ui-version", "v2");
+  }
+} catch (e) {}
+</script>
 <script id="panelStartupBootstrap">
 (function () {
   const root = document.documentElement;
@@ -417,6 +428,31 @@ if (window.panelStartupController) panelStartupPlay();
     </button>
   </div>
 </header>
+
+<!-- 新版界面（设置→通用「显示」卡「UI版本」选新版）的左侧导航栏：六个主 tab 竖排进栏，
+     栏底左亮暗钮、右设置钮（图标在左、文字在右）。旧版整栏 display:none，头行布局原样。
+     栏内 tab 的激活态与头行 tab 同源——都在 switchView 里同步；亮暗钮与头行同状态源
+     （initTheme 的 toggles 数组，同一套日/月图标逻辑）。 -->
+<aside class="rail" id="v2Rail" aria-label="主导航">
+  <nav class="rail-tabs" role="tablist" aria-label="视图切换">
+    <button class="rail-tab active" id="railTabBoard" role="tab" aria-selected="true">看板</button>
+    <button class="rail-tab" id="railTabSkills" role="tab" aria-selected="false">Skills</button>
+    <button class="rail-tab" id="railTabPresets" role="tab" aria-selected="false">预设</button>
+    <button class="rail-tab" id="railTabStore" role="tab" aria-selected="false">渠道</button>
+    <button class="rail-tab" id="railTabSessions" role="tab" aria-selected="false">会话</button>
+    <button class="rail-tab" id="railTabStats" role="tab" aria-selected="false">使用统计</button>
+  </nav>
+  <div class="rail-foot">
+    <button class="icon-btn" id="railThemeToggle" aria-label="切换亮暗主题" title="切换亮暗主题">
+      <svg id="railIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      <svg id="railIcoSun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><circle cx="12" cy="12" r="5"/><line x1="12" y1="12" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    </button>
+    <button class="rail-tab rail-settings" id="railSettingsBtn" aria-label="设置" title="设置">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06-.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06-.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>设置</span>
+    </button>
+  </div>
+</aside>
 
 <main class="layout-container">
 
@@ -1783,10 +1819,10 @@ if (window.panelStartupController) panelStartupPlay();
       <button class="view-tab" id="settingsTabAbout" role="tab" aria-selected="false" aria-controls="settingsPanelAbout" tabindex="-1">关于</button>
     </nav>
 
-    <!-- 「通用」：十项按语义分五张卡——「启动」「抗截断」「Claude Code」、实时输出「实时输出」带卡头（复用各
-         视图通用的 card-header/card-title 标准件），其余两项暂不归类、平卡放置；
-         控件 id、逐项独立保存/失败回滚语义不变。「开屏动画」是本机浏览器偏好，不占
-         /api/settings：它必须在绘制前就能被读到，等服务端存档就晚了（同主题/样式/终端字号） -->
+    <!-- 「通用」：按语义分六张卡——「启动」「显示」「抗截断」「Claude Code」「实时输出」带卡头（复用各
+         视图通用的 card-header/card-title 标准件），其余几项暂不归类、平卡放置；
+         控件 id、逐项独立保存/失败回滚语义不变。「开屏动画」「UI版本」是本机浏览器偏好，不占
+         /api/settings：开屏必须在绘制前就能被读到，等服务端存档就晚了（同主题/样式/终端字号） -->
     <div class="settings-panel" id="settingsPanelGeneral" role="tabpanel" aria-labelledby="settingsTabGeneral">
       <div class="panel-card">
         <div class="card-header">
@@ -1818,6 +1854,30 @@ if (window.panelStartupController) panelStartupPlay();
               <input type="checkbox" id="startupAnimationToggle">
               <span class="slider"></span>
             </label>
+          </div>
+        </div>
+      </div>
+
+      <!-- 「显示」卡：前端改版期的版本切换入口。「UI版本」是本机浏览器偏好（与开屏
+           动画同类：localStorage 存档、绘制前由 head 脚本读、不 POST），不同之处是
+           它即时生效——分段钮改写 <html> data-ui-version，页面 CSS 当帧换版。
+           选中态只由 aria-checked 表达，CSS 选中样式与 JS 回显都认这个属性。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/></svg>
+            显示
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">UI版本</div>
+            </div>
+            <div class="seg-switch" id="uiVersionSeg" role="radiogroup" aria-label="UI版本">
+              <button type="button" class="seg-switch-btn" data-ui-version-choice="classic" role="radio" aria-checked="true">旧版</button>
+              <button type="button" class="seg-switch-btn" data-ui-version-choice="v2" role="radio" aria-checked="false">新版</button>
+            </div>
           </div>
         </div>
       </div>

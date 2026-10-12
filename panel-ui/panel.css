@@ -327,6 +327,39 @@
     padding: 4px 10px; border-radius: var(--radius-sm, 6px); font-size: 12px;
     font-family: var(--font-mono); color: var(--text-2);
   }
+
+  /* ── 新版界面（设置→通用「显示」卡「UI版本」选新版）：主导航进左栏 ──
+     栏体默认整隐（旧版零影响）；新版下栏 fixed 定宽 216px 通高，头行/正文/页脚的
+     .layout-container 统一左让 216px（max-width 同步放宽同一数值，内容有效宽度与
+     旧版一致仍是 1392）。头行在新版只留品牌与状态条：主 tab、设置、亮暗钮都挪进栏；
+     设置页/终端页头行各自那颗亮暗钮同样让位给栏底那颗（同一状态源，见 initTheme）。
+     终端页全屏形态保留，只补栏宽左让（terminal-mode 原先把 padding 清零）。 */
+  .rail { display: none; }
+  :root[data-ui-version="v2"] .rail {
+    display: flex; flex-direction: column;
+    position: fixed; left: 0; top: 0; bottom: 0; width: 216px; z-index: 40;
+    padding: 16px 12px;
+    background: var(--surface); border-right: 1px solid var(--border);
+  }
+  .rail-tabs { display: flex; flex-direction: column; gap: 2px; }
+  .rail-tab {
+    appearance: none; border: 0; background: transparent; color: var(--text-2);
+    font: inherit; font-size: 13.5px; font-weight: 600; text-align: left;
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 12px; border-radius: var(--radius-md, 8px); cursor: pointer; white-space: nowrap;
+    transition: background 140ms var(--ease-out), color 140ms var(--ease-out);
+  }
+  .rail-tab:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-tab.active { background: var(--accent-soft); color: var(--accent); }
+  .rail-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .rail-foot .rail-settings { padding: 9px 10px; }
+
+  :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
+  :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding: 0 0 0 216px; }
+  :root[data-ui-version="v2"] #mainHeadInner .view-tabs,
+  :root[data-ui-version="v2"] #mainHeadInner .head-meta-strip .icon-btn { display: none; }
+  :root[data-ui-version="v2"] #settingsThemeToggle,
+  :root[data-ui-version="v2"] #terminalThemeToggle { display: none; }
   
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
@@ -841,7 +874,7 @@
   .settings-head-left { display: flex; align-items: center; gap: 12px; }
   .settings-head-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--text); }
   .settings-subtabs { margin-bottom: 16px; align-self: flex-start; }
-  /* 「通用」分组：十项按语义分五张卡（启动 / 抗截断 / Claude Code / 实时输出 / 未归类平卡），卡间距对齐
+  /* 「通用」分组：按语义分六张卡（启动 / 显示 / 抗截断 / Claude Code / 实时输出 / 未归类平卡），卡间距对齐
      侧栏列的 20px；设置行悬停整行淡底（--surface-hover 既有悬停 token，与主题列表
      项同手感），行块左右外扩 10px 让底色有呼吸感，文本与原位置对齐。 */
   #settingsPanelGeneral { display: flex; flex-direction: column; gap: 20px; }
@@ -850,6 +883,24 @@
     transition: background 120ms var(--ease-out);
   }
   #settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }
+  /* 「显示」卡 UI版本分段钮：沿用 view-tabs 的胶囊语言（sunken 底 + 选中枚浮起带薄影），
+     尺寸收小到设置行内档位。选中态只认 aria-checked——JS 回显与点击都写这个属性，
+     不另设类名，免得两处状态源漂移。 */
+  .seg-switch {
+    display: inline-grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 2px;
+    padding: 3px; align-items: center; box-sizing: border-box;
+    background: var(--surface-sunken); border: 1px solid var(--border);
+    border-radius: var(--radius-md, 8px);
+  }
+  .seg-switch-btn {
+    appearance: none; border: 0; background: transparent; color: var(--text-3);
+    font: inherit; font-size: 12.5px; font-weight: 650; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center;
+    padding: 6px 12px; border-radius: var(--radius-sm, 6px); cursor: pointer; white-space: nowrap;
+    transition: background 140ms var(--ease-out), color 140ms var(--ease-out), box-shadow 140ms var(--ease-out);
+  }
+  .seg-switch-btn:hover { color: var(--text); background: var(--surface-hover); }
+  .seg-switch-btn[aria-checked="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow-xs); }
   /* 「高级选项」的数据迁移：卡头右侧放动作、卡体第一行状态第二行明细，与「关于」的本地
      环境卡同一写法；状态色只改文字色、不加色块，取值抄 about-status 那一组。
      display 必须显式挂 #settingsPanelAdvanced：本页各子面板的 display 与行样式全按 id 写，

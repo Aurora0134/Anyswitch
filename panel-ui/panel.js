@@ -292,6 +292,13 @@ async function api(method, path, body) {
     try { return localStorage.getItem("panel-startup-animation") !== "0"; } catch { return true; }
   }
 
+  // 「UI版本」本机偏好：与开屏动画同一类存档（localStorage、绘制前由 head 脚本读、
+  // 不 POST、缺省旧版）。不同之处是它即时生效——设置页分段钮改写 <html> 的
+  // data-ui-version，看板 CSS 当帧换列；这里只管回显与写入。
+  function newUiEnabled() {
+    try { return localStorage.getItem("panel-ui-version") === "v2"; } catch { return false; }
+  }
+
   let startupViewReady = Promise.resolve();
   async function init() {
     initTheme();
@@ -3344,6 +3351,7 @@ async function api(method, path, body) {
     const keepAliveDesc = $("keepAliveDesc");
     const followAgentToggle = $("followAgentToggle");
     const startupAnimationToggle = $("startupAnimationToggle");
+    const uiVersionSeg = $("uiVersionSeg");
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
@@ -3437,10 +3445,14 @@ async function api(method, path, body) {
     // 设置入口：页头齿轮切入全页设置视图，退出回到进入前的视图
     const openBtn = $("settingsBtn");
     const exitBtn = $("settingsExitBtn");
-    if (openBtn) openBtn.onclick = () => {
+    const openSettings = () => {
       if (currentView !== "settings") settingsReturnView = currentView;
       switchView("settings");
     };
+    if (openBtn) openBtn.onclick = openSettings;
+    // 新版左栏右下角的设置入口与头行齿轮同一处理函数（返回视图记忆语义不变）
+    const railOpenBtn = $("railSettingsBtn");
+    if (railOpenBtn) railOpenBtn.onclick = openSettings;
     if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
     const terminalEntry = $("openTerminalPreviewBtn");
     if (terminalEntry) terminalEntry.onclick = () => openTerminalPreview();
@@ -3948,6 +3960,33 @@ async function api(method, path, body) {
           localStorage.setItem("panel-startup-animation", startupAnimationToggle.checked ? "1" : "0");
         } catch {}
       };
+    }
+
+    if (uiVersionSeg) {
+      // 本机浏览器偏好，点选即时写存档、不 POST（同开屏动画）；不同处是即时生效——
+      // 写存档的同时改写 <html> data-ui-version，看板 CSS 当帧换列，不必等刷新。
+      // 旧版是 CSS 默认态：选回旧版时摘属性、删存档，不留 "classic" 之类的冗余值。
+      // 无 toast：选中枚高亮当帧移动本身就是反馈（同设置页子 tab）。
+      const segBtns = Array.from(uiVersionSeg.querySelectorAll("[data-ui-version-choice]"));
+      const reflectUiVersion = () => {
+        const v2 = newUiEnabled();
+        for (const b of segBtns) {
+          b.setAttribute("aria-checked", String((b.dataset.uiVersionChoice === "v2") === v2));
+        }
+      };
+      for (const b of segBtns) {
+        b.onclick = () => {
+          const next = b.dataset.uiVersionChoice === "v2";
+          try {
+            if (next) localStorage.setItem("panel-ui-version", "v2");
+            else localStorage.removeItem("panel-ui-version");
+          } catch {}
+          if (next) document.documentElement.setAttribute("data-ui-version", "v2");
+          else document.documentElement.removeAttribute("data-ui-version");
+          reflectUiVersion();
+        };
+      }
+      reflectUiVersion();
     }
 
     if (injectEffortToggle) {
@@ -6532,12 +6571,13 @@ async function api(method, path, body) {
 
   // 主题切换
   function initTheme() {
-    // 主头行与设置头行各有一颗亮暗钮：同一状态源（data-theme + panel-theme），
-    // 同一套日/月图标逻辑，任一侧切换两侧同步刷新
+    // 主头行、设置头行、终端页、新版左栏各有一颗亮暗钮：同一状态源
+    // （data-theme + panel-theme），同一套日/月图标逻辑，任一侧切换各侧同步刷新
     const toggles = [
       { btn: $("themeToggle"), sun: $("icoSun"), moon: $("icoMoon") },
       { btn: $("settingsThemeToggle"), sun: $("settingsIcoSun"), moon: $("settingsIcoMoon") },
       { btn: $("terminalThemeToggle"), sun: $("terminalIcoSun"), moon: $("terminalIcoMoon") },
+      { btn: $("railThemeToggle"), sun: $("railIcoSun"), moon: $("railIcoMoon") },
     ].filter((t) => t.btn);
     function currentTheme() {
       const t = document.documentElement.getAttribute("data-theme");
@@ -6727,6 +6767,11 @@ async function api(method, path, body) {
   function initSkillsTab() {
     $("tabBoard").onclick = () => switchView("board");
     $("tabSkills").onclick = () => switchView("skills");
+    // 新版左栏 tab：与头行走同一条 switchView 路径；激活态镜像在 switchView 内同步
+    for (const [railId, view] of [["railTabBoard", "board"], ["railTabSkills", "skills"], ["railTabPresets", "presets"], ["railTabStore", "store"], ["railTabSessions", "sessions"], ["railTabStats", "stats"]]) {
+      const railTab = $(railId);
+      if (railTab) railTab.onclick = () => switchView(view);
+    }
     $("skillsPickRepoBtn").onclick = pickSkillsRepo;
     $("skillsImportBtn").onclick = () => importSkillViaPicker("skillsImportBtn", "/api/skills/repo/import-pick");
     $("skillsImportZipBtn").onclick = () => importSkillViaPicker("skillsImportZipBtn", "/api/skills/repo/import-pick-zip");
@@ -6945,6 +6990,14 @@ async function api(method, path, body) {
     // tablist 语义：aria-selected 与 active class 同步（屏幕阅读器按 tab 读选中态）
     for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
+    }
+    // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
+    // 与设置/终端进出——进设置/终端时六枚全熄，栏内没有那两个视图）。
+    for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabStore", store], ["railTabStats", stats], ["railTabSessions", sessions]]) {
+      const railTab = $(railId);
+      if (!railTab) continue;
+      railTab.classList.toggle("active", on);
+      railTab.setAttribute("aria-selected", on ? "true" : "false");
     }
     // 首帧落位属性在此交棒：panel.html 的 panelViewPrepaint 于绘制前把目标屏写在
     // <html> 上，显隐由 panel.css 的「首帧视图落位」段承担；上面那批 hidden 赋值

@@ -2801,17 +2801,19 @@ describe("panel.html 设置全页视图", () => {
     }
   });
 
-  it("「通用」子 tab 分五张卡：启动/抗截断/Claude Code 带图标卡头，其余未归类平卡；「实时输出」是第五张", () => {
+  it("「通用」子 tab 分六张卡：启动/显示/抗截断/Claude Code/实时输出 带图标卡头，其余未归类平卡", () => {
     const general = panelHtml.slice(
       panelHtml.indexOf('id="settingsPanelGeneral"'),
       panelHtml.indexOf('id="settingsPanelRoute"'),
     );
-    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5,
-      "通用面板恰五张 panel-card");
-    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 4,
-      "仅四张卡有 card-header（杂项卡保持无头）");
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 6,
+      "通用面板恰六张 panel-card");
+    assert.strictEqual((general.match(/<div class="card-header">/g) || []).length, 5,
+      "五张卡有 card-header（杂项卡保持无头）");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*启动\s*<\/h2>/.test(general),
       "「启动」卡带 stroke 图标卡头");
+    assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*显示\s*<\/h2>/.test(general),
+      "「显示」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*抗截断\s*<\/h2>/.test(general),
       "「抗截断」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*Claude Code\s*<\/h2>/.test(general),
@@ -4921,10 +4923,10 @@ describe("设置项「开屏动画」", () => {
       "新行落在「启动」卡内、「抗截断」卡之前");
     const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atStartup), atStartup + 200);
     assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
-    // 卡数与卡头数不变：设置项从九项变十项，只多一行、不多一张卡。
+    // 卡数口径随「界面」卡落地记为六张：开屏动画那行本身仍只占「启动」卡内一行。
     const general = panelHtml.slice(panelHtml.indexOf('id="settingsPanelGeneral"'), panelHtml.indexOf('id="settingsPanelRoute"'));
-    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 5, "通用仍是五张卡");
-    assert.ok(panelHtml.includes("「通用」：十项按语义分五张卡"), "卡上注释的项数跟着改到十项");
+    assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 6, "通用六张卡");
+    assert.ok(panelHtml.includes("「通用」：按语义分六张卡"), "卡上注释的卡数跟着改到六张");
   });
 
   it("说明文案就是用户拍板的那两句，不出现字段名也不替用户判断", () => {
@@ -4934,6 +4936,144 @@ describe("设置项「开屏动画」", () => {
     assert.doesNotMatch(desc[1], /[A-Za-z]+_[A-Za-z]+|[a-z]+[A-Z][A-Za-z]+|panel-startup-animation|localStorage/,
       "正文不出现标识符、字段名与承载面");
     assert.doesNotMatch(desc[1], /默认|建议|更快|更稳|代价/, "不写变更日志口吻、不替用户判断");
+  });
+});
+
+describe("设置项「UI版本」", () => {
+  // 与「开屏动画」同一取法：把 newUiEnabled 与 if (uiVersionSeg) {...} 两段源码
+  // 原样取出配假 localStorage/document/分段钮执行——回显、写档、属性改写是这个
+  // 设置项的全部行为，复述逻辑就等于没测。
+  function runUiVersionSeg(stored, clickChoice) {
+    const reader = (panelJs.match(/^ {2}function newUiEnabled\(\) \{[\s\S]*?\n {2}\}/m) || [])[0];
+    const wiring = (panelJs.match(/^ {4}if \(uiVersionSeg\) \{[\s\S]*?\n {4}\}/m) || [])[0];
+    assert.ok(reader && wiring, "未真正取到 newUiEnabled 与分段钮注入块，后续断言会全部落空");
+    const writes = [];
+    const store = {};
+    if (stored != null) store["panel-ui-version"] = stored;
+    const rootAttrs = {};
+    const mkBtn = (choice) => ({
+      dataset: { uiVersionChoice: choice },
+      attrs: {},
+      setAttribute(k, v) { this.attrs[k] = v; },
+      onclick: null,
+    });
+    const btns = [mkBtn("classic"), mkBtn("v2")];
+    vm.runInNewContext(`${reader};\n${wiring}`, {
+      uiVersionSeg: { querySelectorAll: () => btns },
+      localStorage: {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = v; writes.push(["set", k, v]); },
+        removeItem: (k) => { delete store[k]; writes.push(["remove", k]); },
+      },
+      document: { documentElement: {
+        setAttribute: (k, v) => { rootAttrs[k] = v; },
+        removeAttribute: (k) => { delete rootAttrs[k]; },
+      } },
+    });
+    const echo = btns.map((b) => b.attrs["aria-checked"]);
+    if (clickChoice != null) {
+      const btn = btns.find((b) => b.dataset.uiVersionChoice === clickChoice);
+      assert.equal(typeof btn.onclick, "function", `「${clickChoice}」钮接上了 onclick`);
+      btn.onclick();
+    }
+    return { echo, btns, writes, rootAttrs };
+  }
+
+  it("回显按存档：缺省旧版高亮、存档 v2 新版高亮", () => {
+    assert.deepEqual(runUiVersionSeg(null, null).echo, ["true", "false"], "缺省旧版——升级上来的安装界面不变");
+    assert.deepEqual(runUiVersionSeg("v2", null).echo, ["false", "true"]);
+  });
+
+  it("点选写档并当帧改写 <html> 属性，高亮跟着移动", () => {
+    const on = runUiVersionSeg(null, "v2");
+    assert.deepEqual(on.writes, [["set", "panel-ui-version", "v2"]], "选新版写 \"v2\"");
+    assert.equal(on.rootAttrs["data-ui-version"], "v2", "选新版立刻挂上属性，看板当帧换列");
+    assert.deepEqual(on.btns.map((b) => b.attrs["aria-checked"]), ["false", "true"], "高亮移到新版");
+    const off = runUiVersionSeg("v2", "classic");
+    assert.deepEqual(off.writes, [["remove", "panel-ui-version"]], "选回旧版删存档、不落冗余值");
+    assert.ok(!("data-ui-version" in off.rootAttrs), "选回旧版摘掉属性，回到 CSS 默认旧版");
+    assert.deepEqual(off.btns.map((b) => b.attrs["aria-checked"]), ["true", "false"], "高亮移回旧版");
+  });
+
+  it("本机偏好不占服务端设置：注入块里没有 POST、保存态与回滚，也没有 toast", () => {
+    // 与开屏动画同一承载面：首帧布局必须由 head 脚本同步读存档决定，等服务端就晚了。
+    // 不带 toast：选中枚高亮当帧移动本身就是反馈（同设置页子 tab）。
+    const wiring = (panelJs.match(/^ {4}if \(uiVersionSeg\) \{[\s\S]*?\n {4}\}/m) || [])[0];
+    assert.ok(wiring, "未取到分段钮注入块");
+    assert.doesNotMatch(wiring, /api\(|settingsSaving|settingsLoadGen|aria-busy|toast\(/,
+      "点选即时写本地存档，不进服务端保存链");
+  });
+
+  it("绘制前落位：head 脚本读同一条存档，旧版不写属性", () => {
+    const boot = panelHtml.slice(0, panelHtml.indexOf("</head>"));
+    assert.ok(boot.includes('localStorage.getItem("panel-ui-version") === "v2"'),
+      "head 预绘脚本读 panel-ui-version");
+    assert.ok(boot.includes('document.documentElement.setAttribute("data-ui-version", "v2")'),
+      "存档为 v2 时在绘制前挂上 data-ui-version，首帧不闪旧版");
+    assert.ok(!boot.includes('setAttribute("data-ui-version", "classic")'),
+      "旧版是 CSS 默认态，不落冗余属性值");
+  });
+
+  it("新版主导航进左栏：栏体默认整隐，新版定宽 fixed、右区统一让位", () => {
+    assert.ok(/\.rail \{ display: none; \}/.test(panelCss), "旧版整栏整隐");
+    assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[\s\S]*?position: fixed;[\s\S]*?width: 216px;[\s\S]*?\}/.test(panelCss),
+      "新版栏 fixed 定宽通高");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }'),
+      "右区让位且内容有效宽度与旧版一致");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding: 0 0 0 216px; }'),
+      "终端页保留全屏形态、只让栏宽");
+    assert.ok(/:root\[data-ui-version="v2"\] #mainHeadInner \.view-tabs,[\s\S]*?head-meta-strip \.icon-btn \{ display: none; \}/.test(panelCss),
+      "新版头行的主 tab 与设置/亮暗钮让位给栏");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] #settingsThemeToggle,'), "设置页亮暗钮让位");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] #terminalThemeToggle { display: none; }'), "终端页亮暗钮让位");
+  });
+
+  it("左栏结构：六枚 tab 竖排（中间四项去「管理」），栏底左亮暗、右设置（图标+文字）", () => {
+    const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
+    assert.ok(rail, "左栏在册");
+    const labels = [...rail[0].matchAll(/<button class="rail-tab(?: active)?" id="railTab\w+" role="tab" aria-selected="(?:true|false)">([^<]+)<\/button>/g)].map((m) => m[1]);
+    assert.deepEqual(labels, ["看板", "Skills", "预设", "渠道", "会话", "使用统计"], "六 tab 依次在册，中间四项不带「管理」");
+    // 头行 tab 旧名不动：旧版布局原样保留
+    for (const [id, label] of [["tabSkills", "Skills 管理"], ["tabPresets", "预设管理"], ["tabStore", "渠道管理"], ["tabSessions", "会话管理"]]) {
+      assert.ok(panelHtml.includes(`id="${id}" role="tab" aria-selected="false">${label}</button>`), `头行 ${label} 原样保留`);
+    }
+    const foot = (rail[0].match(/<div class="rail-foot">([\s\S]*?)<\/div>\s*<\/aside>/) || [])[1] || "";
+    assert.ok(foot.indexOf('id="railThemeToggle"') >= 0 && foot.indexOf('id="railThemeToggle"') < foot.indexOf('id="railSettingsBtn"'),
+      "栏底先亮暗（左）后设置（右）");
+    assert.ok(/id="railSettingsBtn"[\s\S]*?<svg[\s\S]*?<\/svg>\s*<span>设置<\/span>/.test(foot), "设置钮图标在左、文字在右");
+    assert.ok(foot.includes('id="railIcoMoon"') && foot.includes('id="railIcoSun"'), "亮暗钮日月图标在册");
+  });
+
+  it("左栏接线：tab 直调 switchView、设置与亮暗复用头行同一处理源", () => {
+    assert.ok(panelJs.includes('["railTabBoard", "board"]') && panelJs.includes('["railTabStats", "stats"]'),
+      "六枚栏 tab 接上 switchView");
+    assert.ok(panelJs.includes('railTab.classList.toggle("active", on)'), "switchView 内同步栏 tab 激活态");
+    assert.ok(panelJs.includes('railTab.setAttribute("aria-selected",'), "栏 tab aria-selected 同步");
+    assert.ok(panelJs.includes('{ btn: $("railThemeToggle"), sun: $("railIcoSun"), moon: $("railIcoMoon") }'),
+      "栏底亮暗钮进 initTheme 同一状态源");
+    const seg = panelJs.slice(panelJs.indexOf("const openSettings = () =>"), panelJs.indexOf("const openSettings = () =>") + 400);
+    assert.ok(seg.includes("if (openBtn) openBtn.onclick = openSettings;") && seg.includes("if (railOpenBtn) railOpenBtn.onclick = openSettings;"),
+      "栏内设置钮与头行齿轮同一处理函数");
+  });
+
+  it("行在「显示」卡内：radiogroup 两枚分段钮（旧版/新版），无行说明", () => {
+    const atCard = panelHtml.search(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*显示\s*<\/h2>/);
+    const atSeg = panelHtml.indexOf('id="uiVersionSeg"');
+    const atKeepAlive = panelHtml.indexOf('id="keepAliveToggle"');
+    assert.ok(atCard > 0 && atCard < atSeg && atSeg < atKeepAlive,
+      "分段钮落在「显示」卡内、「抗截断」卡之前");
+    const win = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atSeg), atSeg + 600);
+    assert.ok(win.includes('<div class="modal-item-title">UI版本</div>'), "行标题「UI版本」在册");
+    assert.ok(!win.includes("modal-item-desc"), "无行说明");
+    assert.ok(win.includes('role="radiogroup"'), "分段钮是 radiogroup");
+    const labels = [...win.matchAll(/role="radio" aria-checked="(?:true|false)">([^<]+)<\/button>/g)].map((m) => m[1]);
+    assert.deepEqual(labels, ["旧版", "新版"], "两枚按钮依次为旧版/新版");
+  });
+
+  it("分段钮样式：选中态只认 aria-checked，胶囊语言沿用 view-tabs token", () => {
+    assert.ok(panelCss.includes('.seg-switch-btn[aria-checked="true"]'), "选中态挂 aria-checked");
+    assert.ok(/\.seg-switch \{[\s\S]*?background: var\(--surface-sunken\)/.test(panelCss), "sunken 底胶囊");
+    assert.ok(!panelCss.includes(".seg-switch-btn.active"), "不另设 active 类，免得两处状态源漂移");
   });
 });
 

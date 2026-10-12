@@ -184,9 +184,9 @@ describe("panel.css · 档位行只管版式", () => {
     assert.match(css, /#claudeTierRows\[hidden\] \{ display: none; \}/);
   });
 
-  it("「通用」结构注释与五张卡的实际形态一致", () => {
-    // 项数随设置项增减：「开屏动画」加进「启动」卡是第十项，只多一行、不多一张卡。
-    assert.match(css, /「通用」分组：十项按语义分五张卡/);
-    assert.match(html, /「通用」：十项按语义分五张卡/);
+  it("「通用」结构注释与六张卡的实际形态一致", () => {
+    // 卡数随结构演进：「显示」卡随「UI版本」分段钮落地，是第六张。
+    assert.match(css, /「通用」分组：按语义分六张卡/);
+    assert.match(html, /「通用」：按语义分六张卡/);
   });
 });
