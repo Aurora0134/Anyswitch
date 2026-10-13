@@ -313,6 +313,7 @@ async function api(method, path, body) {
     // 与 initTerminalPreview 同款 typeof 守卫：panel-startup 测试把 init() 抽进桩环境
     // 真跑，桩里只提供固定名单上的函数。
     if (typeof initTerminalHostControls === "function") initTerminalHostControls();
+    if (typeof initRailDrawer === "function") initRailDrawer();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -6783,6 +6784,58 @@ async function api(method, path, body) {
     return last;
   }
 
+  // ── v2 窄档（<860px）导航抽屉 ─────────────────────────────────────────
+  // 栏形态三态由 CSS 媒体查询收权（纯 CSS 首帧）；这里只管抽屉的开合语义：汉堡钮
+  // 切换、遮罩点击/Esc/任何视图切换即关、焦点进出、resize 出窄档自动复位。开合状态
+  // = body.rail-drawer-open（默认关）；宽/中档栏体常驻，类名挂着也不影响布局。两处
+  // 文案（打开/收起导航）集中在下面两个常量，改文案只动这里与 HTML 初始属性。
+  const RAIL_DRAWER_OPEN_LABEL = "打开导航";
+  const RAIL_DRAWER_CLOSE_LABEL = "收起导航";
+  function syncRailDrawerBtn(open) {
+    const btn = $("railDrawerBtn");
+    if (!btn) return;
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.setAttribute("aria-label", open ? RAIL_DRAWER_CLOSE_LABEL : RAIL_DRAWER_OPEN_LABEL);
+    btn.title = open ? RAIL_DRAWER_CLOSE_LABEL : RAIL_DRAWER_OPEN_LABEL;
+  }
+  function railDrawerIsOpen() {
+    return document.body.classList.contains("rail-drawer-open");
+  }
+  function openRailDrawer() {
+    if (railDrawerIsOpen()) return;
+    document.body.classList.add("rail-drawer-open");
+    syncRailDrawerBtn(true);
+    // 焦点进抽屉：落到当前视图对应的高亮 tab 上，没有就第一枚
+    const rail = $("v2Rail");
+    const target = rail && (rail.querySelector(".rail-tab.active") || rail.querySelector(".rail-tab"));
+    if (target) target.focus();
+  }
+  function closeRailDrawer(returnFocus = true) {
+    // 未开时一律不动：宽/中档与旧版的视图切换都会路过这里，不能被误伤（含焦点）
+    if (!railDrawerIsOpen()) return;
+    document.body.classList.remove("rail-drawer-open");
+    syncRailDrawerBtn(false);
+    // 关时焦点归还汉堡钮；进设置/终端（头行整隐，汉堡钮不可见）与 resize 复位时不归还
+    if (returnFocus) {
+      const btn = $("railDrawerBtn");
+      if (btn) btn.focus();
+    }
+  }
+  function initRailDrawer() {
+    const btn = $("railDrawerBtn");
+    const mask = $("railDrawerMask");
+    if (!btn || !mask) return;
+    btn.onclick = () => { if (railDrawerIsOpen()) closeRailDrawer(true); else openRailDrawer(); };
+    mask.addEventListener("click", () => closeRailDrawer(true));
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeRailDrawer(true);
+    });
+    // resize 出窄档（≥860px 栏体转为常驻）抽屉态自动复位。不归还焦点：焦点若在栏内
+    // tab 上，栏已转为可见形态，留在原地即正确；汉堡钮此刻反而不可见。
+    const mq = window.matchMedia("(min-width: 860px)");
+    mq.addEventListener("change", () => { if (mq.matches) closeRailDrawer(false); });
+  }
+
   function initSkillsTab() {
     $("tabBoard").onclick = () => switchView("board");
     $("tabSkills").onclick = () => switchView("skills");
@@ -6791,6 +6844,10 @@ async function api(method, path, body) {
       const railTab = $(railId);
       if (railTab) railTab.onclick = () => switchView(view);
     }
+    // 「终端」tab 与看板「虚拟终端」入口卡同一条链（openTerminalPreview：记忆返回视图
+    // 与滚动位后进终端页），不另写一套
+    const railTerminalTab = $("railTabTerminal");
+    if (railTerminalTab) railTerminalTab.onclick = () => openTerminalPreview();
     $("skillsPickRepoBtn").onclick = pickSkillsRepo;
     $("skillsImportBtn").onclick = () => importSkillViaPicker("skillsImportBtn", "/api/skills/repo/import-pick");
     $("skillsImportZipBtn").onclick = () => importSkillViaPicker("skillsImportZipBtn", "/api/skills/repo/import-pick-zip");
@@ -7010,13 +7067,26 @@ async function api(method, path, body) {
     for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
+    // 窄档导航抽屉：任何视图切换（栏 tab / 入口卡 / 齿轮 / 恢复）都收起抽屉。
+    // 焦点归还汉堡钮；设置/终端的头行整隐、汉堡钮不可见，这两个视图不归还。
+    closeRailDrawer(name !== "settings" && name !== "terminal");
     // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
-    // 与设置/终端进出——进设置/终端时六枚全熄，栏内没有那两个视图）。
-    for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabSessions", sessions], ["railTabStore", store], ["railTabStats", stats]]) {
+    // 与设置/终端进出——进设置时六主 tab 全熄、栏底设置钮点亮；进终端时「终端」tab
+    // 亮，栏内第七枚就是它）。高亮即挂 aria-current="page"，熄灭即摘；轻页头页题与
+    // 点亮 tab 的文本同源（textContent 现取，不复制字符串）。
+    const v2PageTitle = $("v2PageTitle");
+    for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabSessions", sessions], ["railTabStore", store], ["railTabStats", stats], ["railTabTerminal", terminal]]) {
       const railTab = $(railId);
       if (!railTab) continue;
       railTab.classList.toggle("active", on);
       railTab.setAttribute("aria-selected", on ? "true" : "false");
+      if (on) railTab.setAttribute("aria-current", "page"); else railTab.removeAttribute("aria-current");
+      if (on && v2PageTitle) v2PageTitle.textContent = railTab.textContent.trim();
+    }
+    const railSettings = $("railSettingsBtn");
+    if (railSettings) {
+      railSettings.classList.toggle("active", settings);
+      if (settings) railSettings.setAttribute("aria-current", "page"); else railSettings.removeAttribute("aria-current");
     }
     // 首帧落位属性在此交棒：panel.html 的 panelViewPrepaint 于绘制前把目标屏写在
     // <html> 上，显隐由 panel.css 的「首帧视图落位」段承担；上面那批 hidden 赋值

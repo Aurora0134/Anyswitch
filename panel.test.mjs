@@ -3569,12 +3569,12 @@ describe("panel.html 设置全页视图", () => {
     ]) {
       assert.ok(probe.test(block), `终端页首帧整页形态缺一条：${probe.source}`);
     }
-    // v2 的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
-    // :root[data-ui-version="v2"] 上（特异性 0-3-0，压过上面那条的 0-2-3）——首帧拿到的是
-    // 240px 左让 + 1656 宽度上限，落定后（body.terminal-mode 那条）是 216 + 无上限，
-    // 整屏跳一次。两个标记同在 <html> 上，同链补一条按落定态重述（特异性 0-3-3 盖过两条）。
-    assert.ok(/html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{ max-width: none; padding-left: 216px; \}/.test(block),
-      "v2 终端页首帧左让与落定态同值（216px）、宽度上限同抹掉，首帧即落定态");
+    // v2 的终端首帧按栏态分档重述左让：窄档抽屉化后无栏宽可让（上面 v1 那条的
+    // padding:0 天然正确），中档让 72、宽档让 216——首帧即落定态，整屏不跳。
+    assert.ok(/@media \(min-width: 860px\) \{\s*html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{ padding-left: 72px; \}/.test(block),
+      "v2 终端页中档首帧左让 72px（图标栏），与落定态同值");
+    assert.ok(/@media \(min-width: 1200px\) \{\s*html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{ padding-left: 216px; \}/.test(block),
+      "v2 终端页宽档首帧左让 216px（全栏），与落定态同值");
     // 终端页的会话级静态种子（设计稿遗留）首帧一律不露
     const terminalSeedIs = (block.match(/:is\(([^)]*terminal-session-bar[^)]*)\)/) || [, ""])[1]
       .split(",").map((s) => s.trim().replace(/^[.#]/, "")).filter(Boolean);
@@ -5045,11 +5045,21 @@ describe("设置项「UI版本」", () => {
   it("新版主导航进左栏：栏体默认整隐，新版定宽 fixed、右区统一让位", () => {
     assert.ok(/\.rail \{ display: none; \}/.test(panelCss), "旧版整栏整隐");
     assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[\s\S]*?position: fixed;[\s\S]*?width: 216px;[\s\S]*?\}/.test(panelCss),
-      "新版栏 fixed 定宽通高");
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }'),
-      "右区让位且内容有效宽度与旧版一致");
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding: 0 0 0 216px; }'),
-      "终端页保留全屏形态、只让栏宽");
+      "新版栏 fixed 定宽通高（基座=窄档抽屉态，宽档同为 216px）");
+    // 右区让位按栏态分档：宽档（≥1200px）栏占 240、中档（860–1199px）图标栏占 96、
+    // 窄档抽屉化后内容全宽（v1 布局天然正确，不落 v2 覆盖）。
+    const wideLayoutRule = ':root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }';
+    const atWideLayout = panelCss.indexOf(wideLayoutRule);
+    assert.ok(atWideLayout > 0 && panelCss.indexOf(wideLayoutRule, atWideLayout + 1) < 0, "宽档让位规则全站只有一处");
+    assert.ok(panelCss.lastIndexOf("@media (min-width: 1200px) {", atWideLayout) > 0,
+      "宽档让位收在 min-width:1200 断点内，内容有效宽度与旧版一致仍是 1392");
+    const midLayoutRule = ':root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }';
+    const atMidLayout = panelCss.indexOf(midLayoutRule);
+    assert.ok(atMidLayout > 0 && panelCss.lastIndexOf("@media (min-width: 860px) {", atMidLayout) > 0,
+      "中档让位收在 min-width:860 断点内");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }')
+      && panelCss.includes(':root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }'),
+      "终端页保留全屏形态：分档规则重述 max-width:none（否则分档让位规则的 0-3-0 会压过 v1 terminal-mode 的 0-2-2），只让栏宽");
     assert.ok(/:root\[data-ui-version="v2"\] #mainHeadInner \.view-tabs,[\s\S]*?head-meta-strip \.icon-btn \{ display: none; \}/.test(panelCss),
       "新版头行的主 tab 与设置/亮暗钮让位给栏");
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] #settingsThemeToggle,'), "设置页亮暗钮让位");
@@ -5060,17 +5070,21 @@ describe("设置项「UI版本」", () => {
       "头行只剩状态条后右对齐，不贴栏沿");
   });
 
-  it("新版终端页首帧：预绘制链按落定态重述左让与宽度上限，首帧即落定态", () => {
+  it("新版终端页首帧：预绘制链按栏态分档重述左让，首帧即落定态", () => {
     // 首帧没有 body.terminal-mode 类，落定态那条（:root[v2] body.terminal-mode …）不命中；
-    // 不补这条的话首帧由 :root[v2] .layout-container 给出 240px 左让 + 1656 宽度上限，
-    // 与落定态不一致。两个标记同在 <html> 上，同链即可命中。
-    const pre = panelCss.match(/html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{([^}]*)\}/);
-    assert.ok(pre, "预绘制链有 v2 终端补充规则");
-    assert.ok(pre[1].includes("max-width: none;"), "首帧宽度上限与落定态一致（无上限）");
-    assert.ok(pre[1].includes("padding-left: 216px;"), "首帧左让与落定态一致（216px）");
+    // 窄档抽屉化后无栏宽可让（v1 预绘制的 padding:0 天然正确），中/宽档按栏宽分档重述。
+    // 两个标记同在 <html> 上，同链即可命中。
+    const mid = panelCss.match(/@media \(min-width: 860px\) \{\s*html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{([^}]*)\}/);
+    const wide = panelCss.match(/@media \(min-width: 1200px\) \{\s*html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{([^}]*)\}/);
+    assert.ok(mid, "预绘制链有中档（min-width:860）v2 终端补充规则");
+    assert.ok(mid[1].includes("padding-left: 72px;"), "中档首帧左让 72px（图标栏），与落定态一致");
+    assert.ok(wide, "预绘制链有宽档（min-width:1200）v2 终端补充规则");
+    assert.ok(wide[1].includes("padding-left: 216px;"), "宽档首帧左让 216px（全栏），与落定态一致");
+    assert.ok(!panelCss.includes('html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { max-width: none; padding-left: 216px; }'),
+      "旧的不分档 v2 终端预绘制规则已按栏态分档（否则窄档首帧多让 216px）");
   });
 
-  it("左栏版式：栏顶品牌、主 tab 贴栏底、最底一行左亮暗右设置（图标+文字）", () => {
+  it("左栏版式：栏顶品牌、七枚图标 tab 贴栏底、最底一行左亮暗右设置（图标+文字）", () => {
     const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
     assert.ok(rail, "左栏在册");
     const body = rail[0];
@@ -5081,8 +5095,25 @@ describe("设置项「UI版本」", () => {
     assert.ok(/\.rail-tabs \{ display: flex; flex-direction: column; gap: 2px; margin-top: auto; \}/.test(panelCss),
       "tab 组靠 margin-top:auto 贴栏底，上方留白");
     assert.ok(panelCss.includes('.rail-foot { margin-top: 12px;'), "底行不再吃 auto，紧跟 tab 组");
-    const labels = [...body.matchAll(/<button class="rail-tab(?: active)?" id="railTab\w+" role="tab" aria-selected="(?:true|false)">([^<]+)<\/button>/g)].map((m) => m[1]);
-    assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计"], "六 tab 依次在册，中间四项不带「管理」，模型管理在使用统计之上");
+    const tabs = [...body.matchAll(/<button class="rail-tab(?: active)?" id="(railTab\w+)" role="tab" aria-selected="(?:true|false)"([^>]*)>([\s\S]*?)<\/button>/g)];
+    assert.deepEqual(tabs.map((m) => m[1]),
+      ["railTabBoard", "railTabSkills", "railTabPresets", "railTabSessions", "railTabStore", "railTabStats", "railTabTerminal"],
+      "七 tab 依次在册（终端垫底），中间四项不带「管理」，模型管理在使用统计之上");
+    const labels = tabs.map((m) => (m[3].match(/<span class="rail-tab-label">([^<]+)<\/span>/) || [])[1]);
+    assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计", "终端"],
+      "标签文本全部为既有词汇，文字包 span 供图标栏整隐");
+    for (const [i, m] of tabs.entries()) {
+      const atSvg = m[3].indexOf("<svg");
+      const atLabel = m[3].indexOf('<span class="rail-tab-label">');
+      assert.ok(atSvg >= 0 && atSvg < atLabel, `${m[1]} 图标在文字前`);
+      assert.ok(m[3].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
+        `${m[1]} 图标与既有齿轮/日月同一 feather 风（24 视窗、空心描边、round caps）`);
+      // 悬停提示=标签文本；唯一例外是「终端」栏位用产品正式名「虚拟终端」（10-14 用户拍板：
+      // 栏位标签取短名「终端」，title 给正式名，与看板入口卡「虚拟终端」同名）
+      const wantTitle = m[1] === "railTabTerminal" ? "虚拟终端" : labels[i];
+      assert.ok(m[2].includes(`title="${wantTitle}"`), `${m[1]} 的 title=${wantTitle}（图标栏悬停提示）`);
+    }
+    assert.ok(tabs[0][2].includes('aria-current="page"'), "静态默认高亮的看板 tab 带 aria-current");
     // 头行 tab 旧名不动：旧版布局原样保留
     for (const [id, label] of [["tabSkills", "Skills 管理"], ["tabPresets", "预设管理"], ["tabStore", "渠道管理"], ["tabSessions", "会话管理"]]) {
       assert.ok(panelHtml.includes(`id="${id}" role="tab" aria-selected="false">${label}</button>`), `头行 ${label} 原样保留`);
@@ -5090,7 +5121,8 @@ describe("设置项「UI版本」", () => {
     const foot = (body.match(/<div class="rail-foot">([\s\S]*?)<\/div>\s*<\/aside>/) || [])[1] || "";
     assert.ok(foot.indexOf('id="railThemeToggle"') >= 0 && foot.indexOf('id="railThemeToggle"') < foot.indexOf('id="railSettingsBtn"'),
       "栏底先亮暗（左）后设置（右）");
-    assert.ok(/id="railSettingsBtn"[\s\S]*?<svg[\s\S]*?<\/svg>\s*<span>设置<\/span>/.test(foot), "设置钮图标在左、文字在右");
+    assert.ok(/id="railSettingsBtn"[\s\S]*?<svg[\s\S]*?<\/svg>\s*<span class="rail-tab-label">设置<\/span>/.test(foot),
+      "设置钮图标在左、文字在右（文字带 rail-tab-label，图标栏随标签一起收起）");
     assert.ok(foot.includes('id="railIcoMoon"') && foot.includes('id="railIcoSun"'), "亮暗钮日月图标在册");
   });
 
@@ -5110,16 +5142,39 @@ describe("设置项「UI版本」", () => {
       "头行徽标在先，栏顶徽标在后");
   });
 
-  it("左栏接线：tab 直调 switchView、设置与亮暗复用头行同一处理源", () => {
+  it("左栏接线：tab 直调 switchView、终端 tab 复用入口卡同一条链、设置与亮暗复用头行同一处理源", () => {
     assert.ok(panelJs.includes('["railTabBoard", "board"]') && panelJs.includes('["railTabStats", "stats"]'),
       "六枚栏 tab 接上 switchView");
     assert.ok(panelJs.includes('railTab.classList.toggle("active", on)'), "switchView 内同步栏 tab 激活态");
     assert.ok(panelJs.includes('railTab.setAttribute("aria-selected",'), "栏 tab aria-selected 同步");
+    // 「终端」tab：不进 switchView 直调循环，与看板「虚拟终端」入口卡同一条
+    // openTerminalPreview 链（记忆返回视图与滚动位），不另写一套
+    const termWire = panelJs.match(/\$\("railTabTerminal"\)[\s\S]{0,160}?onclick = \(\) => openTerminalPreview\(\)/);
+    assert.ok(termWire, "「终端」tab 点击复用 openTerminalPreview（与 #openTerminalPreviewBtn 同一函数）");
+    assert.ok(panelJs.includes('["railTabTerminal", terminal]'), "终端 tab 进 switchView 的高亮同步循环");
     assert.ok(panelJs.includes('{ btn: $("railThemeToggle"), sun: $("railIcoSun"), moon: $("railIcoMoon") }'),
       "栏底亮暗钮进 initTheme 同一状态源");
     const seg = panelJs.slice(panelJs.indexOf("const openSettings = () =>"), panelJs.indexOf("const openSettings = () =>") + 400);
     assert.ok(seg.includes("if (openBtn) openBtn.onclick = openSettings;") && seg.includes("if (railOpenBtn) railOpenBtn.onclick = openSettings;"),
       "栏内设置钮与头行齿轮同一处理函数");
+  });
+
+  it("左栏位置反馈：设置/终端进同一同步循环，高亮即挂 aria-current、熄灭即摘", () => {
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw, "switchView found in panel.js");
+    const body = sw[1];
+    assert.ok(body.includes('railTab.setAttribute("aria-current", "page")') && body.includes('railTab.removeAttribute("aria-current")'),
+      "栏 tab 的 active 态与 aria-current 同点同步");
+    assert.ok(body.includes('const railSettings = $("railSettingsBtn");')
+      && body.includes('railSettings.classList.toggle("active", settings)'),
+      "设置视图下栏底设置钮点亮（接进同步循环，不另立状态源）");
+    assert.ok(/railSettings\.setAttribute\("aria-current", "page"\)[\s\S]{0,80}?railSettings\.removeAttribute\("aria-current"\)/.test(body)
+      || body.includes('if (settings) railSettings.setAttribute("aria-current", "page"); else railSettings.removeAttribute("aria-current");'),
+      "设置钮的 aria-current 随设置视图进出");
+    // 轻页头页题：与左栏高亮同源——从点亮的栏 tab 现取 textContent，不复制字符串
+    assert.ok(body.includes("v2PageTitle.textContent = railTab.textContent.trim()"), "页题文本与点亮 tab 同源");
+    assert.ok(body.includes('closeRailDrawer(name !== "settings" && name !== "terminal")'),
+      "任何视图切换都收起窄档抽屉；设置/终端头行整隐、汉堡钮不可见，不归还焦点");
   });
 
   it("行在「显示」卡内：radiogroup 两枚分段钮（旧版/新版），无行说明", () => {
@@ -5140,6 +5195,143 @@ describe("设置项「UI版本」", () => {
     assert.ok(panelCss.includes('.seg-switch-btn[aria-checked="true"]'), "选中态挂 aria-checked");
     assert.ok(/\.seg-switch \{[\s\S]*?background: var\(--surface-sunken\)/.test(panelCss), "sunken 底胶囊");
     assert.ok(!panelCss.includes(".seg-switch-btn.active"), "不另设 active 类，免得两处状态源漂移");
+  });
+});
+
+describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + 窄档抽屉）", () => {
+  it("轻页头：v2 头行收成 48px——左侧当前页标题 h1、右侧只剩 relay 状态 pill；旧版像素级不动", () => {
+    const head = panelHtml.match(/<div class="layout-container head-inner" id="mainHeadInner">([\s\S]*?)<\/header>/)?.[1] || "";
+    assert.ok(head, "主头行在册");
+    const atTitle = head.indexOf('<h1 class="v2-page-title" id="v2PageTitle">看板</h1>');
+    assert.ok(atTitle > 0 && atTitle < head.indexOf('class="brand-group"'),
+      "页题 h1 在主头行最左；静态默认「看板」与静态高亮的看板 tab 同帧一致");
+    assert.ok(/\.v2-page-title \{ display: none; \}/.test(panelCss), "旧版页题整隐（v1 头行像素级不动）");
+    assert.ok(/:root\[data-ui-version="v2"\] \.v2-page-title \{[^}]*margin-right: auto;/.test(panelCss),
+      "v2 页题左置、状态区顶右（auto 外边距吸收自由空间）");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] .site-head .head-inner { height: 48px; }'),
+      "v2 头行 56→48px 轻页头（规则只挂 v2 作用域）");
+    assert.ok(panelCss.includes("height: 56px;"), "旧版头行 56px 原样");
+    assert.ok(/#mainHeadInner \.view-tabs,[\s\S]*?head-meta-strip \.icon-btn \{ display: none; \}/.test(panelCss),
+      "v2 头行状态区只留 relay 状态 pill——页级主操作不进页头（归位属后续逐页阶段）");
+  });
+
+  it("窄档抽屉：汉堡钮 DOM 与 ARIA 齐备、两处文案集中为常量、默认关首帧纯 CSS", () => {
+    const head = panelHtml.match(/id="mainHeadInner"[\s\S]*?<\/header>/)?.[0] || "";
+    const btn = head.match(/<button class="icon-btn rail-drawer-btn" id="railDrawerBtn"[^>]*>/)?.[0] || "";
+    assert.ok(btn, "汉堡钮在主头行");
+    assert.ok(btn.indexOf('aria-expanded="false"') > 0, "初始收起态（默认关）");
+    assert.ok(btn.includes('aria-controls="v2Rail"'), "aria-controls 指向左栏");
+    assert.ok(btn.includes('aria-label="打开导航"') && btn.includes('title="打开导航"'), "初始文案=打开导航");
+    assert.ok(panelJs.includes('const RAIL_DRAWER_OPEN_LABEL = "打开导航";')
+      && panelJs.includes('const RAIL_DRAWER_CLOSE_LABEL = "收起导航";'), "开/合两处文案集中为常量，改动只动这两行与 HTML 初始属性");
+    const sync = panelJs.match(/function syncRailDrawerBtn\(open\) \{[\s\S]*?\n  \}/)?.[0] || "";
+    assert.ok(sync.includes("RAIL_DRAWER_OPEN_LABEL") && sync.includes("RAIL_DRAWER_CLOSE_LABEL") && sync.includes('aria-expanded'),
+      "开合切换同一收口点改写 aria-expanded/aria-label/title");
+    // CSS 显隐链：旧版永隐（双类提优先级压过 .icon-btn 的 inline-flex）；v2 窄档可见；≥860px 收掉
+    assert.ok(panelCss.includes(".icon-btn.rail-drawer-btn { display: none; }"), "旧版汉堡钮永隐");
+    assert.ok(/:root\[data-ui-version="v2"\] \.rail-drawer-btn \{ display: inline-flex;/.test(panelCss), "v2 窄档可见");
+    const mid = panelCss.match(/@media \(min-width: 860px\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(/rail-drawer-btn,[\s\S]*?display: none;/.test(mid), "≥860px 汉堡钮收掉（栏体常驻，无抽屉语义）");
+    assert.ok(!panelHtml.includes("rail-drawer-open"), "开合类只由 JS 挂，HTML 静态默认关");
+  });
+
+  it("左栏三级降级：基座=窄档抽屉（屏外），min-width:860 图标栏、min-width:1200 全栏", () => {
+    const railBase = panelCss.match(/:root\[data-ui-version="v2"\] \.rail \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(railBase.includes("transform: translateX(-100%);"), "窄档默认抽屉收在视口外——刷新首帧不闪现开着的抽屉，纯 CSS 不依赖 JS 落定");
+    assert.ok(railBase.includes("transition: transform 240ms var(--ease-out);"), "滑入滑出走既有缓动 token");
+    assert.ok(railBase.includes("overflow-y: auto;"), "C2：矮窗口栏体自滚，贴底 tab 组与底行可达（margin-top:auto 贴底语义保持）");
+    assert.ok(/\.rail-brand \{[^}]*flex-shrink: 0;/.test(panelCss) && /\.rail-foot \{[^}]*flex-shrink: 0;/.test(panelCss),
+      "栏顶品牌与底行不收缩，矮窗下滚动而非压扁");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] body.rail-drawer-open .rail { transform: none; box-shadow: var(--shadow-lg); }'),
+      "开出滑入，浮层影复用既有 --shadow-lg");
+    const mid = panelCss.match(/@media \(min-width: 860px\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(mid.includes("width: 72px;") && mid.includes("transform: none;"), "中档 72px 图标栏落回视口");
+    assert.ok(mid.includes(':root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }'), "品牌文字收起");
+    assert.ok(mid.includes(':root[data-ui-version="v2"] .rail-tab-label { display: none; }'), "tab 标签与「设置」文字收起只留图标");
+    assert.ok(mid.includes(':root[data-ui-version="v2"] .rail-foot { flex-direction: column; }'), "底行两钮纵排");
+    const wide = panelCss.match(/@media \(min-width: 1200px\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(wide.includes("width: 216px;") && wide.includes(':root[data-ui-version="v2"] .rail-tab-label { display: inline; }')
+      && wide.includes(':root[data-ui-version="v2"] .rail-brand .brand-text { display: block; }')
+      && wide.includes(':root[data-ui-version="v2"] .rail-foot { flex-direction: row; }'),
+      "宽档 216px 全栏：中档的收起逐项撤销");
+  });
+
+  it("抽屉层级插在会话抽屉之上、弹窗之下（C3），遮罩默认透明不拦指针", () => {
+    const railBase = panelCss.match(/:root\[data-ui-version="v2"\] \.rail \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(railBase.includes("z-index: 120;"), "栏抽屉 120：压会话抽屉 110、让弹窗 300/toast 400");
+    const mask = panelCss.match(/:root\[data-ui-version="v2"\] \.rail-drawer-mask \{([^}]*)\}/)?.[1] || "";
+    assert.ok(mask.includes("z-index: 115;"), "栏遮罩 115：压会话遮罩 100 与会话抽屉 110");
+    assert.ok(mask.includes("position: fixed;") && mask.includes("opacity: 0;") && mask.includes("pointer-events: none;"),
+      "遮罩默认透明不拦指针");
+    assert.ok(mask.includes("background: rgba(15,23,42,.45);"), "遮罩色值抄会话抽屉既有配方，不造新色");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] body.rail-drawer-open .rail-drawer-mask { opacity: 1; pointer-events: auto; }'),
+      "开出时遮罩生效可点");
+    assert.ok(/\.rail-drawer-mask \{ display: none; \}/.test(panelCss), "旧版遮罩永隐");
+    assert.ok(panelCss.includes(".sessions-drawer-mask { position: fixed; inset: 0; z-index: 100;"), "会话遮罩 100 原样");
+    assert.ok(panelCss.includes("z-index: 110;"), "会话抽屉 110 原样");
+  });
+
+  it("抽屉开合：Esc/遮罩点击/视图切换即关，焦点进出有归还，resize 出窄档自动复位", () => {
+    const initBody = panelJs.match(/function initRailDrawer\(\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(initBody, "initRailDrawer 在册");
+    assert.ok(initBody.includes('$("railDrawerBtn")') && initBody.includes('$("railDrawerMask")'), "汉堡钮与遮罩接线在册");
+    assert.ok(initBody.includes('event.key === "Escape"'), "Esc 关抽屉");
+    assert.ok(initBody.includes('mask.addEventListener("click"'), "遮罩点击关抽屉");
+    assert.ok(initBody.includes('matchMedia("(min-width: 860px)")') && initBody.includes("closeRailDrawer(false)"),
+      "resize 出窄档自动复位（判定值与 CSS 断点同源 860；复位不归还焦点——栏已转为可见形态）");
+    const open = panelJs.match(/function openRailDrawer\(\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(open.includes('classList.add("rail-drawer-open")'), "开=body 挂类");
+    assert.ok(open.includes('querySelector(".rail-tab.active")') && open.includes(".focus()"), "开时焦点进抽屉（落到高亮 tab）");
+    const close = panelJs.match(/function closeRailDrawer\(returnFocus = true\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+    assert.ok(close.includes("if (!railDrawerIsOpen()) return;"), "未开时一律不动——宽/中档与旧版的视图切换不被误伤");
+    assert.ok(close.includes("btn.focus()"), "关时焦点归还汉堡钮");
+    assert.ok(/if \(typeof initRailDrawer === "function"\) initRailDrawer\(\);/.test(panelJs),
+      "init 接线走 typeof 守卫（panel-startup 桩环境按固定名单供函数）");
+  });
+
+  it("aurora 栏材质：玻璃配方抄既有 token，双属性选择器压得住位置更靠后的皮肤块", () => {
+    const m = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] \.rail \{([^}]*)\}/);
+    assert.ok(m, "aurora 栏规则在册（集中在 v2 段，不进皮肤内嵌块）");
+    assert.ok(m[1].includes("backdrop-filter: var(--glass-blur);") && m[1].includes("-webkit-backdrop-filter: var(--glass-blur);"),
+      "玻璃模糊取既有 --glass-blur（aurora 卡片玻璃同配方）");
+    assert.ok(!m[1].includes("background"), "半透底沿用基座 var(--surface)（aurora 下本就半透），不造新色值");
+    assert.ok(!panelCss.includes('[data-style="saas"] .rail') && !panelCss.includes('[data-style="sepia"] .rail'),
+      "saas/sepia 的 --surface 是实底，基座规则已够，不添");
+  });
+
+  it("布局断点按栏态校准：宽档 +240 / 中档 +96，窄档沿用 v1；只校准真挤压的布局断点", () => {
+    // 校准清单（v1 阈值 → v2 宽档/中档）：看板双栏 1080→1320/1176、统计上半区 1000→1240/1096、
+    // 会话详情+目录 1023→1263/1119（目录浮动钮显隐随同一条）、Skills 双栏/统计四宫格 960→仅中档
+    // 1056（宽档阈值 960+240=1200 恰为档界：v1 口径的塌缩内容宽在宽档本就够不到，宽档无需补）。
+    const expectBlock = (mq, rules) => {
+      const text = `${mq} {\n${rules.map((r) => `    ${r}`).join("\n")}\n  }`;
+      assert.ok(panelCss.includes(text), `校准块在册：${mq}`);
+    };
+    expectBlock("@media (min-width: 1200px) and (max-width: 1320px)",
+      [':root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }']);
+    expectBlock("@media (min-width: 860px) and (max-width: 1176px)",
+      [':root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }']);
+    expectBlock("@media (min-width: 860px) and (max-width: 1056px)",
+      [':root[data-ui-version="v2"] .skills-grid { grid-template-columns: 1fr; }',
+        ':root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }',
+        ':root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }']);
+    expectBlock("@media (min-width: 1200px) and (max-width: 1240px)",
+      [':root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }']);
+    expectBlock("@media (min-width: 860px) and (max-width: 1096px)",
+      [':root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }']);
+    expectBlock("@media (min-width: 1200px) and (max-width: 1263px)",
+      [':root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
+        ':root[data-ui-version="v2"] .toc-side { display: none; }',
+        ':root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }']);
+    expectBlock("@media (min-width: 860px) and (max-width: 1119px)",
+      [':root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
+        ':root[data-ui-version="v2"] .toc-side { display: none; }',
+        ':root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }']);
+    // 不动清单：瓦片类小网格（弹性吸收，塌晚仅瓦片略窄）与排版/紧凑类断点一律沿用 v1
+    for (const sel of [".telemetry-grid", ".instance-telemetry-grid", ".route-ep-grid", ".stats-rank-cols",
+      ".settings-theme-grid", ".about-client-main", ".terminal-workspace", ".terminal-head"]) {
+      assert.ok(!panelCss.includes(`:root[data-ui-version="v2"] ${sel}`), `${sel} 不做 v2 校准`);
+    }
   });
 });
 

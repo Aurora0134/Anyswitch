@@ -329,23 +329,31 @@
   }
 
   /* ── 新版界面（设置→通用「显示」卡「UI版本」选新版）：主导航进左栏 ──
-     栏体默认整隐（旧版零影响）；新版下栏 fixed 定宽 216px 通高，头行/正文/页脚的
-     .layout-container 统一左让 216px（max-width 同步放宽同一数值，内容有效宽度与
-     旧版一致仍是 1392）。栏内自上而下三段：栏顶品牌徽标、贴栏底的主 tab 组、最底
-     一行（左亮暗钮、右设置钮）。头行在新版只剩状态条：品牌与主 tab 都挪进栏，头行
-     那颗设置齿轮与亮暗钮同理；设置页/终端页头行各自那颗亮暗钮也让位给栏底那颗
-     （同一状态源，见 initTheme）。
-     终端页全屏形态保留，只补栏宽左让（terminal-mode 原先把 padding 清零）。 */
+     栏体默认整隐（旧版零影响）。新版下栏 fixed 通高，三态纯 CSS 断点驱动（首帧不依赖
+     JS 落定）：基座=窄档（<860px）抽屉态——栏体收在视口外，页头汉堡钮开合；中档
+     （860–1199px）收 72px 图标栏；宽档（≥1200px）216px 全栏，头行/正文/页脚的
+     .layout-container 统一左让（max-width 同步放宽同一数值，内容有效宽度与旧版一致
+     仍是 1392）。栏内自上而下三段：栏顶品牌徽标、贴栏底的主 tab 组、最底一行（左
+     亮暗钮、右设置钮）。头行在新版只剩状态条：品牌与主 tab 都挪进栏，头行那颗设置
+     齿轮与亮暗钮同理；设置页/终端页头行各自那颗亮暗钮也让位给栏底那颗（同一状态源，
+     见 initTheme）。
+     终端页全屏形态保留，只补栏宽左让（terminal-mode 原先把 padding 清零）。
+     z 梯队：栏抽屉 120 / 栏遮罩 115 插在会话抽屉（110）之上、弹窗（300）之下（C3）。 */
   .rail { display: none; }
   :root[data-ui-version="v2"] .rail {
     display: flex; flex-direction: column;
-    position: fixed; left: 0; top: 0; bottom: 0; width: 216px; z-index: 40;
+    position: fixed; left: 0; top: 0; bottom: 0; width: 216px; z-index: 120;
     padding: 16px 12px;
     background: var(--surface); border-right: 1px solid var(--border);
+    /* C2：视口高度不够时栏体自滚，贴底 tab 组与底行可达（margin-top:auto 语义保持） */
+    overflow-y: auto;
+    /* 窄档默认态：抽屉收在视口外（默认关，刷新首帧不闪现开着的抽屉） */
+    transform: translateX(-100%);
+    transition: transform 240ms var(--ease-out);
   }
   /* 栏顶品牌：与头行那份共用 .brand-icon / .brand-text（同一 logo、同一套皮肤变量），
      只是换了承载容器。 */
-  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 4px 6px 0; }
+  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 4px 6px 0; flex-shrink: 0; }
   /* 主 tab 组贴栏底：free space 全落在这条 auto 上边距里，栏顶到 tab 组之间留白 */
   .rail-tabs { display: flex; flex-direction: column; gap: 2px; margin-top: auto; }
   .rail-tab {
@@ -357,11 +365,9 @@
   }
   .rail-tab:hover { background: var(--surface-hover); color: var(--text); }
   .rail-tab.active { background: var(--accent-soft); color: var(--accent); }
-  .rail-foot { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .rail-foot { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; }
   .rail-foot .rail-settings { padding: 9px 10px; }
 
-  :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
-  :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding: 0 0 0 216px; }
   :root[data-ui-version="v2"] #mainHeadInner .view-tabs,
   :root[data-ui-version="v2"] #mainHeadInner .head-meta-strip .icon-btn { display: none; }
   /* 头行品牌让位给栏顶那一份（同一枚 logo 不留两处）；只剩状态条后改为右对齐，
@@ -370,6 +376,104 @@
   :root[data-ui-version="v2"] #mainHeadInner .brand-group { display: none; }
   :root[data-ui-version="v2"] #settingsThemeToggle,
   :root[data-ui-version="v2"] #terminalThemeToggle { display: none; }
+
+  /* ── 新版界面阶段 1：轻页头 + 左栏三级降级（宽 216 / 中 72 图标栏 / 窄抽屉） ──
+     轻页头：全局头行退场为 48px 薄条——左侧当前页标题（文本由 switchView 从点亮的栏
+     tab 同步，不另立文案源；设置视图的页题由既有设置头行的「设置」h1 承担），右侧
+     只剩 relay 状态 pill（页级主操作的归位在后续逐页阶段做）。 */
+  .v2-page-title { display: none; }
+  :root[data-ui-version="v2"] .v2-page-title {
+    display: block; margin: 0; margin-right: auto;
+    font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: -0.01em;
+  }
+  :root[data-ui-version="v2"] .site-head .head-inner { height: 48px; }
+
+  /* 窄档抽屉件：汉堡钮（icon-btn 同形制）与遮罩。旧版永隐（双类选择器提优先级，压过
+     下方 .icon-btn 的 inline-flex——本条位置在 .icon-btn 规则之前）；v2 窄档可见，
+     ≥860px 收掉。 */
+  .icon-btn.rail-drawer-btn { display: none; }
+  :root[data-ui-version="v2"] .rail-drawer-btn { display: inline-flex; margin-right: 8px; }
+  .rail-drawer-mask { display: none; }
+  :root[data-ui-version="v2"] .rail-drawer-mask {
+    display: block; position: fixed; inset: 0; z-index: 115;
+    background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms;
+  }
+  :root[data-ui-version="v2"] body.rail-drawer-open .rail-drawer-mask { opacity: 1; pointer-events: auto; }
+  /* 抽屉开着：栏体滑入。浮层影复用 --shadow-lg（与会话页抽屉同一浮层影），其余新增
+     表面一律无影。 */
+  :root[data-ui-version="v2"] body.rail-drawer-open .rail { transform: none; box-shadow: var(--shadow-lg); }
+
+  /* 中档（860–1199px）：72px 图标栏——品牌文字、tab 标签、底行「设置」文字收起只留
+     图标（标签文本同时写在各 tab 的 title 属性上作悬停提示）；底行两钮纵排。
+     栏体落回视口、层级回到 40（抽屉层级只属窄档）。 */
+  @media (min-width: 860px) {
+    :root[data-ui-version="v2"] .rail { width: 72px; padding: 16px 8px; transform: none; transition: none; z-index: 40; }
+    :root[data-ui-version="v2"] .rail-brand { justify-content: center; padding: 4px 0 0; }
+    :root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }
+    :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
+    :root[data-ui-version="v2"] .rail-tab-label { display: none; }
+    :root[data-ui-version="v2"] .rail-foot { flex-direction: column; }
+    :root[data-ui-version="v2"] .rail-foot .rail-settings { padding: 9px 0; }
+    :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }
+    :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
+    :root[data-ui-version="v2"] .rail-drawer-btn,
+    :root[data-ui-version="v2"] .rail-drawer-mask { display: none; }
+  }
+  /* 宽档（≥1200px）：216px 全栏，中档的收起逐项撤销（栏体落回视口继承中档规则）。 */
+  @media (min-width: 1200px) {
+    :root[data-ui-version="v2"] .rail { width: 216px; padding: 16px 12px; }
+    :root[data-ui-version="v2"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; }
+    :root[data-ui-version="v2"] .rail-brand .brand-text { display: block; }
+    :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: flex-start; padding: 9px 12px; }
+    :root[data-ui-version="v2"] .rail-tab-label { display: inline; }
+    :root[data-ui-version="v2"] .rail-foot { flex-direction: row; }
+    :root[data-ui-version="v2"] .rail-foot .rail-settings { padding: 9px 10px; }
+    :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
+    :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }
+  }
+
+  /* aurora 栏材质：栏基座是 var(--surface)（aurora 下本就半透），补玻璃模糊即与卡片
+     同一玻璃配方（--glass-blur 既有 token，不造新色值/新模糊量）。双属性选择器提优先
+     级——皮肤块同优先级且位置更靠后，不这样写会被盖。saas/sepia 的 --surface 是实底，
+     基座规则已够，不添。 */
+  :root[data-ui-version="v2"][data-style="aurora"] .rail {
+    backdrop-filter: var(--glass-blur);
+    -webkit-backdrop-filter: var(--glass-blur);
+  }
+
+  /* v2 布局断点校准：栏体占宽折算进塌缩阈值（宽档 +240 / 中档 +96，与栏+间距 240/96
+     同源；窄档抽屉化后内容全宽，v1 阈值天然正确不动）。只校准「塌晚了真挤压内容」的
+     布局模式断点：看板双栏 1080 / 统计上半区 1000 / 会话详情+目录 1023（目录浮动钮
+     显隐随同一条）/ Skills 双栏与统计四宫格 960。960 系的宽档阈值 960+240=1200 恰为
+     档界（v1 口径的塌缩内容宽在宽档本就够不到），只补中档。瓦片类小网格与排版/紧凑
+     类断点不动。 */
+  @media (min-width: 1200px) and (max-width: 1320px) {
+    :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
+  }
+  @media (min-width: 860px) and (max-width: 1176px) {
+    :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
+  }
+  @media (min-width: 860px) and (max-width: 1056px) {
+    :root[data-ui-version="v2"] .skills-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }
+  }
+  @media (min-width: 1200px) and (max-width: 1240px) {
+    :root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }
+  }
+  @media (min-width: 860px) and (max-width: 1096px) {
+    :root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }
+  }
+  @media (min-width: 1200px) and (max-width: 1263px) {
+    :root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    :root[data-ui-version="v2"] .toc-side { display: none; }
+    :root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }
+  }
+  @media (min-width: 860px) and (max-width: 1119px) {
+    :root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    :root[data-ui-version="v2"] .toc-side { display: none; }
+    :root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }
+  }
   
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
@@ -1055,7 +1159,7 @@
      同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
      栏自动着色。栏宽不占镜像里 main 的内容宽，自然宽在 JS 里按栏宽 216 补回。 */
   :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; }
-  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; }
+  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; transform: none; }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { flex: 1 1 auto; min-width: 0; }
 
   /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
@@ -4344,10 +4448,15 @@
   html[data-prepaint-view="terminal"] body > footer { display: none; }
   html[data-prepaint-view="terminal"] body main.layout-container { max-width: none; padding: 0; margin: 0; }
   /* 新版（v2）的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
-     :root[data-ui-version="v2"] 上（特异性 0-3-0，压过上面那条的 0-2-3）——首帧拿到的是
-     240px 左让 + 1656 宽度上限，落定后（body.terminal-mode 那条）是 216 + 无上限，整屏
-     跳一次。两个标记同在 <html> 上，同链按落定态重述（特异性 0-3-3 盖过上面两条）。 */
-  html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { max-width: none; padding-left: 216px; }
+     :root[data-ui-version="v2"] 上——首帧与落定态不一致会整屏跳一次。按栏态分档重述：
+     窄档抽屉化后无栏宽可让（上面 v1 那条的 padding:0 天然正确），中档让 72、宽档让 216。
+     两个标记同在 <html> 上，同链按落定态重述（特异性盖过上面两条）。 */
+  @media (min-width: 860px) {
+    html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 72px; }
+  }
+  @media (min-width: 1200px) {
+    html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 216px; }
+  }
   /* 监测区首帧就退场，工作区必须同帧收成单列：CSS Grid 的轨道按模板排，藏掉子项
      只会留下一条 340px 的背景缝——那一帧的空白列与随后 is-empty 收全宽的主区，
      等于让终端屏宽跳一次、PTY 跟着重排一次。取值抄 .terminal-workspace.is-empty。 */
