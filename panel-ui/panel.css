@@ -331,8 +331,10 @@
   /* ── 新版界面（设置→通用「显示」卡「UI版本」选新版）：主导航进左栏 ──
      栏体默认整隐（旧版零影响）；新版下栏 fixed 定宽 216px 通高，头行/正文/页脚的
      .layout-container 统一左让 216px（max-width 同步放宽同一数值，内容有效宽度与
-     旧版一致仍是 1392）。头行在新版只留品牌与状态条：主 tab、设置、亮暗钮都挪进栏；
-     设置页/终端页头行各自那颗亮暗钮同样让位给栏底那颗（同一状态源，见 initTheme）。
+     旧版一致仍是 1392）。栏内自上而下三段：栏顶品牌徽标、贴栏底的主 tab 组、最底
+     一行（左亮暗钮、右设置钮）。头行在新版只剩状态条：品牌与主 tab 都挪进栏，头行
+     那颗设置齿轮与亮暗钮同理；设置页/终端页头行各自那颗亮暗钮也让位给栏底那颗
+     （同一状态源，见 initTheme）。
      终端页全屏形态保留，只补栏宽左让（terminal-mode 原先把 padding 清零）。 */
   .rail { display: none; }
   :root[data-ui-version="v2"] .rail {
@@ -341,7 +343,11 @@
     padding: 16px 12px;
     background: var(--surface); border-right: 1px solid var(--border);
   }
-  .rail-tabs { display: flex; flex-direction: column; gap: 2px; }
+  /* 栏顶品牌：与头行那份共用 .brand-icon / .brand-text（同一 logo、同一套皮肤变量），
+     只是换了承载容器。 */
+  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 4px 6px 0; }
+  /* 主 tab 组贴栏底：free space 全落在这条 auto 上边距里，栏顶到 tab 组之间留白 */
+  .rail-tabs { display: flex; flex-direction: column; gap: 2px; margin-top: auto; }
   .rail-tab {
     appearance: none; border: 0; background: transparent; color: var(--text-2);
     font: inherit; font-size: 13.5px; font-weight: 600; text-align: left;
@@ -351,13 +357,17 @@
   }
   .rail-tab:hover { background: var(--surface-hover); color: var(--text); }
   .rail-tab.active { background: var(--accent-soft); color: var(--accent); }
-  .rail-foot { margin-top: auto; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .rail-foot { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .rail-foot .rail-settings { padding: 9px 10px; }
 
   :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
   :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding: 0 0 0 216px; }
   :root[data-ui-version="v2"] #mainHeadInner .view-tabs,
   :root[data-ui-version="v2"] #mainHeadInner .head-meta-strip .icon-btn { display: none; }
+  /* 头行品牌让位给栏顶那一份（同一枚 logo 不留两处）；只剩状态条后改为右对齐，
+     否则 space-between 会把单子元素顶到左边、贴着栏沿。 */
+  :root[data-ui-version="v2"] #mainHeadInner { justify-content: flex-end; }
+  :root[data-ui-version="v2"] #mainHeadInner .brand-group { display: none; }
   :root[data-ui-version="v2"] #settingsThemeToggle,
   :root[data-ui-version="v2"] #terminalThemeToggle { display: none; }
   

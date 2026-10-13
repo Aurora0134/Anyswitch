@@ -269,18 +269,22 @@ async function api(method, path, body) {
   // ═══════════════════════════════════════════════
   // 初始化与轮询
   // ═══════════════════════════════════════════════
-  // 左上品牌版本徽标：版本只有一处来源——package.json 经 /api/app-info 下发，
+  // 品牌版本徽标：版本只有一处来源——package.json 经 /api/app-info 下发，
   // 页面里不写死版本号（写死就得每次发版记得手改，漏改即显示过期版本）。
   // 取不到就保持隐藏：宁可没有徽标，也不显示占位符或可能过期的数字。
+  // 两处同源：头行品牌（旧版可见）与新版左栏栏顶品牌，一次取值写两个 id——新版下
+  // 头行品牌已让位给栏顶那一份，各写各的就得请求两次、还可能一处成功一处失败。
   async function initBrandVersion() {
-    const tag = $("brandVersion");
-    if (!tag) return;
+    const tags = [$("brandVersion"), $("railBrandVersion")].filter(Boolean);
+    if (!tags.length) return;
     try {
       const info = await api("GET", "/api/app-info");
       const version = info && typeof info.version === "string" ? info.version.trim() : "";
       if (!version) return;
-      tag.textContent = "v" + version;
-      tag.hidden = false;
+      for (const tag of tags) {
+        tag.textContent = "v" + version;
+        tag.hidden = false;
+      }
     } catch { /* 接口不可达（面板服务换新中）：不显示版本，不进控制台噪音 */ }
   }
 
@@ -6768,7 +6772,7 @@ async function api(method, path, body) {
     $("tabBoard").onclick = () => switchView("board");
     $("tabSkills").onclick = () => switchView("skills");
     // 新版左栏 tab：与头行走同一条 switchView 路径；激活态镜像在 switchView 内同步
-    for (const [railId, view] of [["railTabBoard", "board"], ["railTabSkills", "skills"], ["railTabPresets", "presets"], ["railTabStore", "store"], ["railTabSessions", "sessions"], ["railTabStats", "stats"]]) {
+    for (const [railId, view] of [["railTabBoard", "board"], ["railTabSkills", "skills"], ["railTabPresets", "presets"], ["railTabSessions", "sessions"], ["railTabStore", "store"], ["railTabStats", "stats"]]) {
       const railTab = $(railId);
       if (railTab) railTab.onclick = () => switchView(view);
     }
@@ -6993,7 +6997,7 @@ async function api(method, path, body) {
     }
     // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
     // 与设置/终端进出——进设置/终端时六枚全熄，栏内没有那两个视图）。
-    for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabStore", store], ["railTabStats", stats], ["railTabSessions", sessions]]) {
+    for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabSessions", sessions], ["railTabStore", store], ["railTabStats", stats]]) {
       const railTab = $(railId);
       if (!railTab) continue;
       railTab.classList.toggle("active", on);

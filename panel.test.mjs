@@ -5026,22 +5026,50 @@ describe("设置项「UI版本」", () => {
       "新版头行的主 tab 与设置/亮暗钮让位给栏");
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] #settingsThemeToggle,'), "设置页亮暗钮让位");
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] #terminalThemeToggle { display: none; }'), "终端页亮暗钮让位");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] #mainHeadInner .brand-group { display: none; }'),
+      "头行品牌让位给栏顶那一份，同一枚 logo 不留两处");
+    assert.ok(/:root\[data-ui-version="v2"\] #mainHeadInner \{ justify-content: flex-end; \}/.test(panelCss),
+      "头行只剩状态条后右对齐，不贴栏沿");
   });
 
-  it("左栏结构：六枚 tab 竖排（中间四项去「管理」），栏底左亮暗、右设置（图标+文字）", () => {
+  it("左栏版式：栏顶品牌、主 tab 贴栏底、最底一行左亮暗右设置（图标+文字）", () => {
     const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
     assert.ok(rail, "左栏在册");
-    const labels = [...rail[0].matchAll(/<button class="rail-tab(?: active)?" id="railTab\w+" role="tab" aria-selected="(?:true|false)">([^<]+)<\/button>/g)].map((m) => m[1]);
-    assert.deepEqual(labels, ["看板", "Skills", "预设", "渠道", "会话", "使用统计"], "六 tab 依次在册，中间四项不带「管理」");
+    const body = rail[0];
+    const atBrand = body.indexOf('class="rail-brand"');
+    const atTabs = body.indexOf('class="rail-tabs"');
+    const atFoot = body.indexOf('class="rail-foot"');
+    assert.ok(atBrand > 0 && atBrand < atTabs && atTabs < atFoot, "栏内自上而下：品牌 → tab 组 → 底行");
+    assert.ok(/\.rail-tabs \{ display: flex; flex-direction: column; gap: 2px; margin-top: auto; \}/.test(panelCss),
+      "tab 组靠 margin-top:auto 贴栏底，上方留白");
+    assert.ok(panelCss.includes('.rail-foot { margin-top: 12px;'), "底行不再吃 auto，紧跟 tab 组");
+    const labels = [...body.matchAll(/<button class="rail-tab(?: active)?" id="railTab\w+" role="tab" aria-selected="(?:true|false)">([^<]+)<\/button>/g)].map((m) => m[1]);
+    assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计"], "六 tab 依次在册，中间四项不带「管理」，模型管理在使用统计之上");
     // 头行 tab 旧名不动：旧版布局原样保留
     for (const [id, label] of [["tabSkills", "Skills 管理"], ["tabPresets", "预设管理"], ["tabStore", "渠道管理"], ["tabSessions", "会话管理"]]) {
       assert.ok(panelHtml.includes(`id="${id}" role="tab" aria-selected="false">${label}</button>`), `头行 ${label} 原样保留`);
     }
-    const foot = (rail[0].match(/<div class="rail-foot">([\s\S]*?)<\/div>\s*<\/aside>/) || [])[1] || "";
+    const foot = (body.match(/<div class="rail-foot">([\s\S]*?)<\/div>\s*<\/aside>/) || [])[1] || "";
     assert.ok(foot.indexOf('id="railThemeToggle"') >= 0 && foot.indexOf('id="railThemeToggle"') < foot.indexOf('id="railSettingsBtn"'),
       "栏底先亮暗（左）后设置（右）");
     assert.ok(/id="railSettingsBtn"[\s\S]*?<svg[\s\S]*?<\/svg>\s*<span>设置<\/span>/.test(foot), "设置钮图标在左、文字在右");
     assert.ok(foot.includes('id="railIcoMoon"') && foot.includes('id="railIcoSun"'), "亮暗钮日月图标在册");
+  });
+
+  it("左栏栏顶品牌：与头行同一枚 logo，版本徽标与头行同源同显隐口径", () => {
+    const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
+    const brand = rail.slice(rail.indexOf('<div class="rail-brand">'), rail.indexOf('</div>\n  <nav class="rail-tabs"'));
+    assert.ok(/<div class="brand-icon">[\s\S]*?<rect x="2" y="2" width="20" height="8"/.test(brand),
+      "栏顶用与头行同一枚 brand-icon logo");
+    assert.ok(brand.includes("<h1>Anyswitch</h1>"), "栏顶产品名在册");
+    const tag = brand.match(/<span class="version-tag"[^>]*><\/span>/);
+    assert.ok(tag, "栏顶版本徽标元素存在");
+    assert.ok(tag[0].includes('id="railBrandVersion"'), "栏顶徽标有可填的 id");
+    assert.ok(/\shidden(\s|>)/.test(tag[0]), "栏顶徽标初始隐藏：填不进版本时不留空胶囊");
+    const body = panelJs.match(/async function initBrandVersion\(\) \{[\s\S]*?\n  \}/)?.[0] || "";
+    assert.ok(body.includes('$("brandVersion"), $("railBrandVersion")'), "一次取值写两处徽标");
+    assert.ok(!body.includes("railBrandVersion") || body.indexOf('$("brandVersion")') < body.indexOf('$("railBrandVersion")'),
+      "头行徽标在先，栏顶徽标在后");
   });
 
   it("左栏接线：tab 直调 switchView、设置与亮暗复用头行同一处理源", () => {

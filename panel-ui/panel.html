@@ -429,17 +429,34 @@ if (window.panelStartupController) panelStartupPlay();
   </div>
 </header>
 
-<!-- 新版界面（设置→通用「显示」卡「UI版本」选新版）的左侧导航栏：六个主 tab 竖排进栏，
-     栏底左亮暗钮、右设置钮（图标在左、文字在右）。旧版整栏 display:none，头行布局原样。
+<!-- 新版界面（设置→通用「显示」卡「UI版本」选新版）的左侧导航栏：栏顶品牌徽标，
+     六个主 tab 竖排贴栏底，最底一行左亮暗钮、右设置钮（图标在左、文字在右）。
+     旧版整栏 display:none，头行布局原样。
+     头行品牌在新版让位给栏顶这一份（同一枚 logo，头行那份 CSS 隐去）；版本徽标同样
+     两处同源——initBrandVersion 一次取值写两个 id。
      栏内 tab 的激活态与头行 tab 同源——都在 switchView 里同步；亮暗钮与头行同状态源
      （initTheme 的 toggles 数组，同一套日/月图标逻辑）。 -->
 <aside class="rail" id="v2Rail" aria-label="主导航">
+  <div class="rail-brand">
+    <div class="brand-icon">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+        <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+        <line x1="6" y1="6" x2="6.01" y2="6"/>
+        <line x1="6" y1="18" x2="6.01" y2="18"/>
+      </svg>
+    </div>
+    <div class="brand-text">
+      <h1>Anyswitch</h1>
+      <span class="version-tag" id="railBrandVersion" hidden></span>
+    </div>
+  </div>
   <nav class="rail-tabs" role="tablist" aria-label="视图切换">
     <button class="rail-tab active" id="railTabBoard" role="tab" aria-selected="true">看板</button>
     <button class="rail-tab" id="railTabSkills" role="tab" aria-selected="false">Skills</button>
     <button class="rail-tab" id="railTabPresets" role="tab" aria-selected="false">预设</button>
-    <button class="rail-tab" id="railTabStore" role="tab" aria-selected="false">渠道</button>
     <button class="rail-tab" id="railTabSessions" role="tab" aria-selected="false">会话</button>
+    <button class="rail-tab" id="railTabStore" role="tab" aria-selected="false">模型管理</button>
     <button class="rail-tab" id="railTabStats" role="tab" aria-selected="false">使用统计</button>
   </nav>
   <div class="rail-foot">
