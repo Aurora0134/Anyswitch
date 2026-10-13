@@ -3095,6 +3095,28 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(subTab[1].includes("captureSettingsMirror()"), "进主题子页即抓看板快照");
   });
 
+  it("主题镜像按 UI 版本取导航形态：旧版克隆头行 tabs，新版克隆迷你左栏", () => {
+    // v2 的头行 tabs 已被 :root[data-ui-version="v2"] #mainHeadInner .view-tabs 隐去——
+    // 剥了 id 的克隆体移进镜像容器后不再命中那条规则，照样克隆就是给 v2 用户画出一条
+    // 界面上根本不存在的旧版胶囊导航。新版改克隆一份迷你左栏（皮肤 token 全局生效，
+    // 自动着色）；旧版行为原样保留。
+    const capture = panelJs.match(/function captureSettingsMirror\(\) \{([\s\S]*?)\n    \}/);
+    assert.ok(capture, "captureSettingsMirror found in panel.js");
+    const body = capture[1];
+    assert.ok(body.includes("newUiEnabled()"), "镜像按本机 UI 版本分路（复用 newUiEnabled，与分段钮同一状态源）");
+    assert.ok(body.includes('document.querySelector(".rail")'), "新版克隆左栏进镜像");
+    assert.ok(/\} else \{\s*const tabs = document\.querySelector\("#mainHeadInner nav\.view-tabs"\)/.test(body),
+      "头行 tabs 克隆只在旧版分支执行");
+    assert.ok(/\+ \(v2 \? 216 : 0\)/.test(body),
+      "镜像自然宽补回栏宽 216（与 :root[data-ui-version=\"v2\"] .rail 的 width 同源）");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: flex;/.test(panelCss),
+      "镜像画布在新版下横排：栏在左、看板在右");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{ position: static;/.test(panelCss),
+      "镜像内的栏剥 fixed 通高形态，随画布静态铺开");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ flex: 1 1 auto; min-width: 0; \}/.test(panelCss),
+      "看板镜像吃掉栏外全部宽度，不超宽也不缩水");
+  });
+
   it("主题存档恢复：内联脚本三项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
     assert.ok(panelHtml.includes('var PANEL_STYLES = ["saas", "aurora", "sepia"];'),
       "PANEL_STYLES 恰为 saas/aurora/sepia 三项");
@@ -3547,6 +3569,12 @@ describe("panel.html 设置全页视图", () => {
     ]) {
       assert.ok(probe.test(block), `终端页首帧整页形态缺一条：${probe.source}`);
     }
+    // v2 的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
+    // :root[data-ui-version="v2"] 上（特异性 0-3-0，压过上面那条的 0-2-3）——首帧拿到的是
+    // 240px 左让 + 1656 宽度上限，落定后（body.terminal-mode 那条）是 216 + 无上限，
+    // 整屏跳一次。两个标记同在 <html> 上，同链补一条按落定态重述（特异性 0-3-3 盖过两条）。
+    assert.ok(/html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{ max-width: none; padding-left: 216px; \}/.test(block),
+      "v2 终端页首帧左让与落定态同值（216px）、宽度上限同抹掉，首帧即落定态");
     // 终端页的会话级静态种子（设计稿遗留）首帧一律不露
     const terminalSeedIs = (block.match(/:is\(([^)]*terminal-session-bar[^)]*)\)/) || [, ""])[1]
       .split(",").map((s) => s.trim().replace(/^[.#]/, "")).filter(Boolean);
@@ -5030,6 +5058,16 @@ describe("设置项「UI版本」", () => {
       "头行品牌让位给栏顶那一份，同一枚 logo 不留两处");
     assert.ok(/:root\[data-ui-version="v2"\] #mainHeadInner \{ justify-content: flex-end; \}/.test(panelCss),
       "头行只剩状态条后右对齐，不贴栏沿");
+  });
+
+  it("新版终端页首帧：预绘制链按落定态重述左让与宽度上限，首帧即落定态", () => {
+    // 首帧没有 body.terminal-mode 类，落定态那条（:root[v2] body.terminal-mode …）不命中；
+    // 不补这条的话首帧由 :root[v2] .layout-container 给出 240px 左让 + 1656 宽度上限，
+    // 与落定态不一致。两个标记同在 <html> 上，同链即可命中。
+    const pre = panelCss.match(/html\[data-prepaint-view="terminal"\]\[data-ui-version="v2"\] body main\.layout-container \{([^}]*)\}/);
+    assert.ok(pre, "预绘制链有 v2 终端补充规则");
+    assert.ok(pre[1].includes("max-width: none;"), "首帧宽度上限与落定态一致（无上限）");
+    assert.ok(pre[1].includes("padding-left: 216px;"), "首帧左让与落定态一致（216px）");
   });
 
   it("左栏版式：栏顶品牌、主 tab 贴栏底、最底一行左亮暗右设置（图标+文字）", () => {
@@ -9643,6 +9681,24 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
       "非 pending 期骨架条不出（live 后不留残影）");
     assert.ok(/html\[data-board="pending"\] \.agent-cards-container \.agent-actions \{ visibility: hidden; \}/.test(panelCss),
       "徽标/折叠钮/实例计数是数据位，pending 期藏而不删，标题不换位");
+  });
+
+  it("pending 同帧盖住左列数据位：徽标与连接态藏而不删，监听地址值位立骨架", () => {
+    // 左列静态默认写的是「运行正常」「127.0.0.1:47821」「● 在线 / ● 实时传输」——
+    // 与右列「没取到不许画」同帧矛盾。徽标与状态行藏而不删（visibility，同
+    // .agent-actions 口径：占位不跳），监听地址的值位立一条复用 .sessions-skel 的骨架。
+    assert.ok(/html\[data-board="pending"\] #sbStateBadge,\s*html\[data-board="pending"\] #logConnBadge,\s*html\[data-board="pending"\] #logConn \{ visibility: hidden; \}/.test(panelCss),
+      "服务状态徽标 / 日志连接徽标 / 实时传输行在 pending 期藏而不删");
+    assert.ok(panelCss.includes('html[data-board="pending"] #sbHost { display: none; }'),
+      "监听地址的写死默认值 pending 期不出现");
+    assert.ok(/\.board-side-skel \{ display: none; \}/.test(panelCss),
+      "左列骨架非 pending 期不出（live 后不留残影）");
+    assert.ok(/html\[data-board="pending"\] \.board-side-skel \{ display: block;/.test(panelCss),
+      "pending 期值位立骨架");
+    const hostRow = panelHtml.match(/<div class="prop-row">\s*<span class="prop-name">监听地址<\/span>[\s\S]*?<\/div>/);
+    assert.ok(hostRow, "监听地址行在册");
+    assert.ok(hostRow[0].includes('id="sbHost">127.0.0.1:47821</span>'), "写死的静态默认值不动（文案不归这里改）");
+    assert.ok(/sessions-skel board-side-skel/.test(hostRow[0]), "骨架条复用 sessions-skel、与写死值同一行");
   });
 
   it("flip 只有一处，且只在可信帧后发生", () => {

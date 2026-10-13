@@ -617,6 +617,17 @@
   /* 卡头留品牌与端点名，但徽标、折叠钮、实例计数都是数据位：visibility 而非 display，
      加载完不会因为标题换行而整屏跳一次。 */
   html[data-board="pending"] .agent-cards-container .agent-actions { visibility: hidden; }
+  /* 左列同帧同口径：服务状态徽标 / 日志连接徽标 / 「● 实时传输」行的静态默认都是数据位
+     谎话（「运行正常」「● 在线」），与右列「没取到不许画」同帧矛盾。藏而不删（同上面
+     .agent-actions 的 visibility 口径：占位不跳）。 */
+  html[data-board="pending"] #sbStateBadge,
+  html[data-board="pending"] #logConnBadge,
+  html[data-board="pending"] #logConn { visibility: hidden; }
+  /* 监听地址的写死默认值（127.0.0.1:47821）同理：pending 期压掉，值位立一条骨架——
+     复用 .sessions-skel 的 shimmer，行高由同行的 .prop-name 撑着，flip 不跳。 */
+  html[data-board="pending"] #sbHost { display: none; }
+  .board-side-skel { display: none; }
+  html[data-board="pending"] .board-side-skel { display: block; width: 104px; height: 11px; }
 
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
@@ -1039,6 +1050,13 @@
   .settings-mirror-sizer { position: relative; overflow: hidden; }
   .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
+  /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏贴着看板左缘（captureSettingsMirror
+     只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
+     同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
+     栏自动着色。栏宽不占镜像里 main 的内容宽，自然宽在 JS 里按栏宽 216 补回。 */
+  :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; }
+  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; }
+  :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { flex: 1 1 auto; min-width: 0; }
 
   /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
      右侧状态面板使用普通面板 token，与看板遥测同源。 */
@@ -4325,6 +4343,11 @@
   html[data-prepaint-view="terminal"] body header.site-head { display: none; }
   html[data-prepaint-view="terminal"] body > footer { display: none; }
   html[data-prepaint-view="terminal"] body main.layout-container { max-width: none; padding: 0; margin: 0; }
+  /* 新版（v2）的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
+     :root[data-ui-version="v2"] 上（特异性 0-3-0，压过上面那条的 0-2-3）——首帧拿到的是
+     240px 左让 + 1656 宽度上限，落定后（body.terminal-mode 那条）是 216 + 无上限，整屏
+     跳一次。两个标记同在 <html> 上，同链按落定态重述（特异性 0-3-3 盖过上面两条）。 */
+  html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { max-width: none; padding-left: 216px; }
   /* 监测区首帧就退场，工作区必须同帧收成单列：CSS Grid 的轨道按模板排，藏掉子项
      只会留下一条 340px 的背景缝——那一帧的空白列与随后 is-empty 收全宽的主区，
      等于让终端屏宽跳一次、PTY 跟着重排一次。取值抄 .terminal-workspace.is-empty。 */

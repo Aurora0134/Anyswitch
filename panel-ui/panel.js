@@ -3505,7 +3505,7 @@ async function api(method, path, body) {
       if (which === "advanced") return dataBundle.enter();
       if (which === "about") return about.enter();
     }
-    // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（tab 条 + telemetry-view），剥 id
+    // 主题预览 = 真实看板镜像：克隆看板页当前 DOM（导航 + telemetry-view），剥 id
     // 防重复 id 被全局 $() 命中；看板本体的 hidden 只是被设置视图顶掉，须从克隆根上
     // 去掉，元素级 hidden（路由链卡/错误横幅等）是真实显隐态，保留。快照随进主题子页
     // 抓一次即冻结——预览看样式不看数据；主题/亮暗切换经全局 token 即时作用于镜像。
@@ -3521,23 +3521,38 @@ async function api(method, path, body) {
         for (const el of root.querySelectorAll("[id]")) el.removeAttribute("id");
       };
       scaleEl.textContent = "";
-      const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
-      if (tabs) {
-        const tabsClone = tabs.cloneNode(true);
-        stripIds(tabsClone);
-        const tabsWrap = document.createElement("div");
-        tabsWrap.className = "settings-mirror-tabs";
-        tabsWrap.appendChild(tabsClone);
-        scaleEl.appendChild(tabsWrap);
+      // 导航区按 UI 版本取真实形态：旧版是头行胶囊 tab 条；新版主导航在左栏，头行那条
+      // 已被 :root[data-ui-version="v2"] #mainHeadInner .view-tabs 隐去——剥了 id 的克隆体
+      // 不再命中那条规则，照样克隆就是给新版用户画出一条界面上不存在的旧版导航，改为
+      // 克隆一份迷你栏（fixed 通高形态由 :root[v2] .settings-mirror-scale .rail 剥成静态）。
+      const v2 = newUiEnabled();
+      if (v2) {
+        const rail = document.querySelector(".rail");
+        if (rail) {
+          const railClone = rail.cloneNode(true);
+          stripIds(railClone);
+          scaleEl.appendChild(railClone);
+        }
+      } else {
+        const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
+        if (tabs) {
+          const tabsClone = tabs.cloneNode(true);
+          stripIds(tabsClone);
+          const tabsWrap = document.createElement("div");
+          tabsWrap.className = "settings-mirror-tabs";
+          tabsWrap.appendChild(tabsClone);
+          scaleEl.appendChild(tabsWrap);
+        }
       }
       const boardClone = board.cloneNode(true);
       boardClone.removeAttribute("hidden");
       stripIds(boardClone);
       scaleEl.appendChild(boardClone);
-      // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；
+      // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
+      // 栏宽不占 main 内容宽，按 :root[v2] .rail 的定宽 216 补回。
       // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开供 viewport 内滚。
       const mainCs = getComputedStyle(main);
-      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight);
+      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (v2 ? 216 : 0);
       const availW = viewport.clientWidth;
       if (!naturalW || !availW) return;
       scaleEl.style.width = naturalW + "px";
