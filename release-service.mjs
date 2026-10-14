@@ -13,7 +13,7 @@ export const CLIENTS = {
   // 官方最新版本因此同查 npm dist-tag。查 GitHub Release 时两源各自发版就会出现
   // 「提示有新版本、装完版本没变」，还要分摊 api.github.com 的匿名限额。
   codex: npmSource("@openai/codex", "openai/codex"),
-  opencode: npmSource("opencode-ai", "anomalyco/opencode"),
+  opencode: npmSource("@opencode/cli", "anomalyco/opencode"),
   pi: npmSource("@earendil-works/pi-coding-agent", "earendil-works/pi"),
   kimi: npmSource("@moonshot-ai/kimi-code", "MoonshotAI/kimi-code"),
   dsh: npmSource("@deepseek-ai/dsh", "deepseek-ai/deepseek-harness"),

@@ -272,7 +272,7 @@ it("reads the Codex desktop version from the Windows Store update manifest", asy
 it("queries npm latest for each fixed CLI package, preserving preview channels", async () => {
   const fixtures = [
     ["claude", "@anthropic-ai/claude-code", "2.1.276", "https://github.com/anthropics/claude-code/releases"],
-    ["opencode", "opencode-ai", "1.18.31", "https://github.com/anomalyco/opencode/releases"],
+    ["opencode", "@opencode/cli", "2.0.29", "https://github.com/anomalyco/opencode/releases"],
     ["pi", "@earendil-works/pi-coding-agent", "0.85.1", "https://github.com/earendil-works/pi/releases"],
     ["kimi", "@moonshot-ai/kimi-code", "2.0.0", "https://github.com/MoonshotAI/kimi-code/releases"],
     ["dsh", "@deepseek-ai/dsh", "0.1.5-rc.2", "https://github.com/deepseek-ai/deepseek-harness/releases"],
