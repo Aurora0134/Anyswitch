@@ -3514,7 +3514,7 @@ describe("panel.html 设置全页视图", () => {
 
     // 容器自身的 display（class 规则 + id 规则，都没有即 block）
     const ownDisplay = (id) => {
-      const tag = (panelHtml.match(new RegExp(`<(?:section|div)[^>]*id="${id}"[^>]*>`)) || [])[0];
+      const tag = (panelHtml.match(new RegExp(`<(?:section|div|button|nav)[^>]*id="${id}"[^>]*>`)) || [])[0];
       assert.ok(tag, `${id} 在 panel.html 里有开标签`);
       const classes = ((tag.match(/class="([^"]+)"/) || [, ""])[1]).split(/\s+/).filter(Boolean);
       const found = new Set();
@@ -5176,6 +5176,78 @@ describe("设置项「UI版本」", () => {
     assert.ok(body.includes("v2PageTitle.textContent = railTab.textContent.trim()"), "页题文本与点亮 tab 同源");
     assert.ok(body.includes('closeRailDrawer(name !== "settings" && name !== "terminal")'),
       "任何视图切换都收起窄档抽屉；设置/终端头行整隐、汉堡钮不可见，不归还焦点");
+  });
+
+  it("设置子导航迁入左栏：设置态主 tab 组整组换目录、栏底齿轮换「返回」，首帧与运行时可交棒", () => {
+    const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
+    // 目录组就在主 tab 组与栏底行之间，静态 hidden（v1 整栏不出、v2 非设置态不出）
+    const dir = rail.match(/<nav class="rail-dir" id="railSettingsDir" role="tablist" aria-label="设置分类" hidden>([\s\S]*?)<\/nav>/);
+    assert.ok(dir, "设置目录组在册（rail-tabs 与 rail-foot 之间）");
+    assert.ok(rail.indexOf('class="rail-tabs"') < rail.indexOf('id="railSettingsDir"')
+      && rail.indexOf('id="railSettingsDir"') < rail.indexOf('class="rail-foot"'),
+      "目录组位置：主 tab 组之后、栏底行之前");
+    const items = [...dir[1].matchAll(/<button class="rail-tab" id="(railDir\w+)" role="tab" aria-selected="false" aria-controls="(settingsPanel\w+)" title="([^"]+)">([\s\S]*?)<\/button>/g)];
+    assert.deepEqual(items.map((m) => m[1]),
+      ["railDirGeneral", "railDirAdvanced", "railDirRoute", "railDirTheme", "railDirAbout"],
+      "目录五项依次在册");
+    assert.deepEqual(items.map((m) => m[3]), ["通用", "高级选项", "自动路由", "主题", "关于"],
+      "目录标签逐字复用子 tab 文本（无新文案）");
+    assert.deepEqual(items.map((m) => m[2]),
+      ["settingsPanelGeneral", "settingsPanelAdvanced", "settingsPanelRoute", "settingsPanelTheme", "settingsPanelAbout"],
+      "目录项 aria-controls 对齐五块子面板");
+    for (const m of items) {
+      assert.ok(m[4].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
+        `${m[1]} 图标与主 tab 同一 feather 风（24 视窗空心描边 round caps）`);
+      assert.ok(m[4].indexOf("<svg") < m[4].indexOf('<span class="rail-tab-label">'), `${m[1]} 图标在文字前`);
+      assert.ok(m[4].includes(`<span class="rail-tab-label">${m[3]}</span>`), `${m[1]} 标签=title（中档图标栏悬停提示同源）`);
+    }
+    // 栏底「返回」：紧跟齿轮、同一槽位形制（rail-settings 类），静态 hidden，
+    // 图标复用头行「←」箭头，文案仅此一处新词（已授权）
+    const foot = rail.match(/<div class="rail-foot">([\s\S]*?)<\/div>\s*<\/aside>/)[1];
+    const back = foot.match(/<button class="rail-tab rail-settings" id="railBackBtn" aria-label="返回" title="返回" hidden>([\s\S]*?)<\/button>/);
+    assert.ok(back, "栏底「返回」钮在册（静态 hidden）");
+    assert.ok(foot.indexOf('id="railSettingsBtn"') < foot.indexOf('id="railBackBtn"'), "「返回」紧跟齿轮（同一槽位）");
+    assert.ok(back[1].includes('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
+      "「返回」复用头行「←」箭头图标");
+    assert.ok(back[1].includes('<span class="rail-tab-label">返回</span>'), "宽档/抽屉态图标+文字，中档随标签收起只留图标");
+    // 换血 CSS：运行时 body.settings-mode 四条 + 首帧 prepaint 同值四条，只锚 #v2Rail
+    // （主题预览的栏克隆剥了 id，继续呈主 tab 组）；显示侧带 [hidden] 必须 !important
+    for (const scope of [':root[data-ui-version="v2"] body.settings-mode', 'html[data-prepaint-view="settings"][data-ui-version="v2"]']) {
+      assert.ok(panelCss.includes(`${scope} #v2Rail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
+      assert.ok(panelCss.includes(`${scope} #v2Rail #railSettingsDir[hidden] { display: flex !important; }`), `${scope} 放目录组（!important 压全局 [hidden] 兜底）`);
+      assert.ok(panelCss.includes(`${scope} #v2Rail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
+      assert.ok(panelCss.includes(`${scope} #v2Rail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
+    }
+    assert.ok(/\.rail-dir \{ display: flex; flex-direction: column; gap: 2px; margin-top: auto; \}/.test(panelCss),
+      "目录组自身形制与主 tab 组同（贴栏底生态位）；藏它的是 hidden 属性而非 display 规则");
+    // 让位只限栏常驻档位（≥860px）：窄档设置态头行无汉堡钮（阶段 1 在案），子 tab 条
+    // 与「←」在窄档保留，否则窄档设置页既没有子导航也没有出口
+    const mid = [...panelCss.matchAll(/@media \(min-width: 860px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes(".settings-subtabs"));
+    assert.ok(mid, "有 ≥860px 档位的让位规则块");
+    assert.ok(mid.includes(':root[data-ui-version="v2"] .settings-subtabs { display: none; }'), "≥860px 栏目录接班后原子 tab 条让位");
+    assert.ok(mid.includes(':root[data-ui-version="v2"] #settingsExitBtn { display: none; }'), "≥860px 栏底「返回」接班后头行「←」让位");
+    // JS：目录与原子 tab 同一状态源——键集逐格同、点击同入口、切换函数内双向同步
+    const subTabKeys = [...panelJs.matchAll(/^ {6}([a-z]+): \["settingsTab[A-Za-z]+", "settingsPanel[A-Za-z]+"\],$/gm)].map((m) => m[1]);
+    const dirKeys = [...panelJs.matchAll(/^ {6}([a-z]+): "railDir[A-Za-z]+",$/gm)].map((m) => m[1]);
+    assert.deepEqual(dirKeys, subTabKeys, "settingsDirItems 键集与 settingsSubTabs 逐格同（漏一格那一格目录项不同步）");
+    const activate = panelJs.match(/function activateSettingsSubTab\(which, animate\) \{([\s\S]*?)\n    \}/)[1];
+    assert.ok(activate.includes('const dirItem = $(settingsDirItems[name]);')
+      && activate.includes('dirItem.classList.toggle("active", on)')
+      && activate.includes('dirItem.setAttribute("aria-selected", String(on))')
+      && activate.includes('dirItem.setAttribute("aria-current", "page")'),
+      "切子 tab 时栏目录同帧跟随（active + aria-selected + aria-current 与主栏 tab 同套）");
+    const bind = panelJs.match(/function bindSettingsSubTabs\(\) \{([\s\S]*?)\n    \}/)[1];
+    assert.ok(bind.includes('if (dirItem) dirItem.onclick = () => activateSettingsSubTab(name, true);'),
+      "目录项点击与原子 tab 同一入口（activateSettingsSubTab 回同步两处高亮）");
+    // 返回钮与头行「←」同一处理函数（回跳目标一个状态源）
+    assert.ok(panelJs.includes("const exitSettings = () => switchView(settingsReturnView);")
+      && panelJs.includes("if (exitBtn) exitBtn.onclick = exitSettings;")
+      && panelJs.includes('if (railBackBtn) railBackBtn.onclick = exitSettings;'),
+      "头行「←」与栏底「返回」挂同一 exitSettings");
+    // 运行时标记：与 terminal-mode 同型的 body 类，switchView 挂/摘
+    assert.ok(panelJs.includes('document.body.classList.toggle("settings-mode", settings)'),
+      "switchView 挂/摘 body.settings-mode（首帧由 prepaint 四条承担，交棒不跳）");
   });
 
   it("行在「显示」卡内：radiogroup 两枚分段钮（旧版/新版），无行说明", () => {

@@ -3458,7 +3458,12 @@ async function api(method, path, body) {
     // 新版左栏右下角的设置入口与头行齿轮同一处理函数（返回视图记忆语义不变）
     const railOpenBtn = $("railSettingsBtn");
     if (railOpenBtn) railOpenBtn.onclick = openSettings;
-    if (exitBtn) exitBtn.onclick = () => switchView(settingsReturnView);
+    // 退出设置的回跳目标（进入前的视图）只有一个状态源：头行「←」与 v2 栏底「返回」
+    // 挂同一处理函数，不从两个入口各写一份。
+    const exitSettings = () => switchView(settingsReturnView);
+    if (exitBtn) exitBtn.onclick = exitSettings;
+    const railBackBtn = $("railBackBtn");
+    if (railBackBtn) railBackBtn.onclick = exitSettings;
     const terminalEntry = $("openTerminalPreviewBtn");
     if (terminalEntry) terminalEntry.onclick = () => openTerminalPreview();
 
@@ -3475,6 +3480,16 @@ async function api(method, path, body) {
       theme: ["settingsTabTheme", "settingsPanelTheme"],
       about: ["settingsTabAbout", "settingsPanelAbout"],
     };
+    // 左栏设置目录（v2 设置态整组替换主 tab 组）：键必须与 settingsSubTabs 逐格同，
+    // 值是栏内目录项 id。目录项与原子 tab 同走 activateSettingsSubTab——点击入口
+    // 两个、状态源一个，高亮/aria 在该函数循环里双向同步，不会两处漂移。
+    const settingsDirItems = {
+      general: "railDirGeneral",
+      advanced: "railDirAdvanced",
+      route: "railDirRoute",
+      theme: "railDirTheme",
+      about: "railDirAbout",
+    };
     function activateSettingsSubTab(which, animate) {
       const selected = settingsSubTabs[which];
       if (!selected || $(selected[0]).classList.contains("active")) return;
@@ -3487,6 +3502,15 @@ async function api(method, path, body) {
         $(tabId).setAttribute("aria-selected", String(on));
         $(tabId).tabIndex = on ? 0 : -1;
         $(panelId).hidden = !on;
+        // 栏内目录项同帧跟随（高亮类 + aria 与主栏 tab 同套：selected 之外点亮挂
+        // aria-current="page"）；子 tab 的 roving tabindex 只属于原子 tab 条，目录
+        // 项与主栏 tab 一样全员可聚焦。
+        const dirItem = $(settingsDirItems[name]);
+        if (dirItem) {
+          dirItem.classList.toggle("active", on);
+          dirItem.setAttribute("aria-selected", String(on));
+          if (on) dirItem.setAttribute("aria-current", "page"); else dirItem.removeAttribute("aria-current");
+        }
       }
       // 子 tab 存档 = 此刻真实显示的那一个：进设置时的「通用」重置也走这里，存档
       // 永远与用户看到的一致，刷新恢复不必再区分「用户点的」与「程序置的」。
@@ -3595,6 +3619,9 @@ async function api(method, path, body) {
         const [tabId, panelId] = settingsSubTabs[name];
         const tab = $(tabId);
         tab.onclick = () => activateSettingsSubTab(name, true);
+        // 栏内目录项点击与原子 tab 同一入口（activateSettingsSubTab 内部回同步两处高亮）
+        const dirItem = $(settingsDirItems[name]);
+        if (dirItem) dirItem.onclick = () => activateSettingsSubTab(name, true);
         $(panelId).setAttribute("role", "tabpanel");
         $(panelId).setAttribute("aria-labelledby", tabId);
         tab.onkeydown = (event) => {
@@ -7045,6 +7072,9 @@ async function api(method, path, body) {
     // 目录的窄屏入口（☰ 与弹层）挂在 </main> 之外，不随视图 hidden 一起消失；
     // 用同一个 body 类把它收进会话页，离开即不可见也不可达。
     document.body.classList.toggle("sessions-mode", sessions);
+    // 设置态栏换血标记：左栏主 tab 组换设置目录、栏底齿轮换「返回」（CSS 收权，与
+    // terminal-mode 同型；首帧由 data-prepaint-view="settings" 那四条同值规则承担）。
+    document.body.classList.toggle("settings-mode", settings);
     if (terminal) {
       // 进页才建流：xterm 只在可见容器里创建、按实测尺寸收全量回放，首帧即正确
       // 列宽（隐藏期建流会把回放按 12 列折行，见 fitTerminalXterm 的闸）。流在

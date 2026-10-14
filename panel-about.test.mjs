@@ -496,9 +496,10 @@ test("关于页头部提供产品图标与常驻 GitHub、发布说明入口", (
 test("settings has explicit third tab mapping and leaving About runs its lifecycle without taking a theme snapshot", () => {
   const h = harness();
   const tabs = source.match(/    const settingsSubTabs = \{[\s\S]*?\n    \};/);
+  const dirItems = source.match(/    const settingsDirItems = \{[\s\S]*?\n    \};/);
   const activate = source.match(/    function activateSettingsSubTab\(which, animate\) \{[\s\S]*?\n    \}/);
   const bind = source.match(/    function bindSettingsSubTabs\(\) \{[\s\S]*?\n    \}/);
-  assert.ok(tabs && activate && bind);
+  assert.ok(tabs && dirItems && activate && bind);
   let enters = 0, leaves = 0, mirrors = 0, pageScrollResets = 0, bundleEnters = 0, bundleLeaves = 0;
   const context = vm.createContext({
     $: h.get, about: { enter() { enters++; }, leave() { leaves++; } },
@@ -511,7 +512,7 @@ test("settings has explicit third tab mapping and leaving About runs its lifecyc
     // 本测试只验 About 生命周期，给一条已落地的 Promise 即可。
     refreshStoreState: () => Promise.resolve(), renderClaudeTierOptions() {},
   });
-  vm.runInContext(`${tabs[0]}\n${activate[0]}\n${bind[0]}\nbindSettingsSubTabs();`, context);
+  vm.runInContext(`${tabs[0]}\n${dirItems[0]}\n${activate[0]}\n${bind[0]}\nbindSettingsSubTabs();`, context);
   h.get("settingsTabAbout").click();
   assert.equal(h.get("settingsPanelAbout").hidden, false);
   assert.equal(h.get("settingsPanelTheme").hidden, true);
