@@ -3942,7 +3942,7 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
     const subResetIdx = body.indexOf("statsTrendPrev = null");
     assert.ok(subResetIdx !== -1 && subResetIdx < trendIdx, "subtab switch-back resets reveal flag before hot-render");
     // 接口落地重渲不打断在飞动画的兜底仍在：数据未变由同终点签名守卫整体跳过
-    assert.ok(panelJs.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg)"),
+    assert.ok(panelJs.includes("container._statsAnim.targetSig === renderStatsTrendSignature(cfg, statsChartWidth(container))"),
       "same-endpoint guard skips the fetch-landing re-render when data is unchanged");
   });
 
@@ -4028,20 +4028,21 @@ describe("panel.html stats tab 竞态守卫 / 动画收尾 / 图例持久化 / a
   });
 
   it("同终点守卫：morph 进行中同内容重渲跳过（seg 重击/轮询不重置动画时间轴）", () => {
-    // 渲染器顶层守卫：在飞动画存在时先比目标签名（labels+series key/color/dash+values），
+    // 渲染器顶层守卫：在飞动画存在时先比目标签名（画布宽+labels+series key/color/dash+values；
+    // 宽入签为阶段 3 改动——viewBox 宽随容器实测后，resize 重渲同数据不同宽，不入签会被误跳），
     // 一致 → 整体 return 不重启 rAF；不一致或 reveal → 照旧取消重建。
     const fn = panelJs.match(/function renderStatsLineChart\(container, cfg, anim\) \{([\s\S]*?)\n  \}/);
     assert.ok(fn, "renderStatsLineChart found in panel.js");
     const head = fn[1];
     // 守卫必须在取消在飞 rAF 之前（否则动画已被杀，跳过无意义）
-    const guardIdx = head.indexOf("renderStatsTrendSignature(cfg)");
+    const guardIdx = head.indexOf("renderStatsTrendSignature(cfg, statsChartWidth(container))");
     const cancelIdx = head.indexOf("cancelAnimationFrame(prevAnim.raf)");
     assert.ok(guardIdx !== -1, "same-target guard present in renderer head");
     assert.ok(cancelIdx !== -1 && guardIdx < cancelIdx,
       "guard runs before cancelling the in-flight rAF");
-    // 签名函数存在且覆盖轴与系列（值含在 series.values）
-    assert.ok(panelJs.includes("function renderStatsTrendSignature(cfg)"),
-      "signature helper defined");
+    // 签名函数存在且覆盖画布宽、轴与系列（值含在 series.values）
+    assert.ok(panelJs.includes("function renderStatsTrendSignature(cfg, w)"),
+      "signature helper defined (width included since stage 3)");
     // 守卫成立路径：直接 return，不重建 DOM（textContent 清空在守卫之后）
     const after = head.slice(guardIdx, guardIdx + 400);
     assert.ok(/return;/.test(after), "guard short-circuits with plain return");
@@ -5346,6 +5347,115 @@ describe("设置项「UI版本」", () => {
     assert.ok(panelCss.includes('.seg-switch-btn[aria-checked="true"]'), "选中态挂 aria-checked");
     assert.ok(/\.seg-switch \{[\s\S]*?background: var\(--surface-sunken\)/.test(panelCss), "sunken 底胶囊");
     assert.ok(!panelCss.includes(".seg-switch-btn.active"), "不另设 active 类，免得两处状态源漂移");
+  });
+});
+
+describe("新版 UI 阶段 3：统计页平铺（描边盒 + 表格纪律 + 四毛病修复 + 空态骨架）", () => {
+  const S3 = ':root[data-ui-version="v2"][data-style] #statsView';
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  it("统计区块成描边盒（同阶段 2 定稿材质）：透明底四边描边盒、hover 静态、28 节奏、标题 15/600，aurora 恢复玻璃卡", () => {
+    const card = panelCss.match(new RegExp(esc(S3) + " \\.panel-card \\{([^}]*)\\}"));
+    assert.ok(card, "统计页卡片规则在册（#statsView 整罩——统计页不进主题预览镜像）");
+    for (const pin of ["background: transparent;", "border: 1px solid var(--border);",
+      "border-radius: var(--radius-md);", "box-shadow: none;", "backdrop-filter: none;"]) {
+      assert.ok(card[1].includes(pin), `描边盒缺：${pin}`);
+    }
+    const hover = panelCss.match(new RegExp(esc(S3) + " \\.panel-card:hover \\{([^}]*)\\}"));
+    assert.ok(hover[1].includes("transform: none;") && hover[1].includes("box-shadow: none;") && hover[1].includes("border-color: var(--border);"),
+      "hover 不浮、不描边变化（描边盒是静态容器）");
+    for (const layer of ["#statsOverviewPane", "#statsView .stats-top-grid", "#statsView .stats-side", "#statsView .skills-grid.stats-quad"]) {
+      assert.ok(panelCss.includes(`${layer}`), `28px 节奏层在册：${layer}`);
+    }
+    assert.ok(panelCss.includes(`${S3} .card-title {\n    font-size: 15px; font-weight: 600; color: var(--text);\n  }`),
+      "区段标题 15px/600/正文色（与阶段 2 同档）");
+    assert.ok(panelCss.includes(`${S3} .card-body { padding: 12px 18px 16px; }`), "卡体 12/16 节奏");
+    assert.ok(panelCss.includes(`${S3} .card-header {\n    background: transparent; border-bottom: 0; padding: 16px 18px 0;\n  }`), "卡头去底线、顶距 16");
+    assert.ok(panelCss.includes(`${S3} .panel-card > .card-body:first-child {\n    padding-top: 16px;\n  }`), "无头平卡（请求日志卡）顶距同档 16");
+    // aurora 例外：恢复皮肤原生玻璃卡材质（配方逐项同阶段 2）
+    const aurora = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] #statsView \.panel-card \{([^}]*)\}/);
+    assert.ok(aurora, "aurora 玻璃卡恢复规则在册");
+    for (const pin of ["background: var(--surface);", "background-image: var(--card-hairline);",
+      "backdrop-filter: var(--glass-blur);", "border: 1px solid var(--border);",
+      "border-radius: var(--radius-lg);", "box-shadow: inset 0 1px 0 var(--hl-inset);"]) {
+      assert.ok(aurora[1].includes(pin), `aurora 玻璃卡缺：${pin}`);
+    }
+    // v1 零变化：统计卡基座无任何 v2 段外的改动（基座规则原样钉着）
+    assert.ok(/\.panel-card \{\n    background: var\(--surface\);\n    border: 1px solid var\(--border\);\n    border-radius: 14px;/.test(panelCss), "v1 卡基座原样");
+  });
+
+  it("统计子 tab 降权同手法：撤托盘 + 2px accent 下划线选中态", () => {
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .view-tabs.stats-subtabs {\n    background: transparent; border-color: transparent;\n  }'), "子 tab 撤托盘");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .stats-subtabs .view-tab.active {\n    background: transparent; border: 0; color: var(--text);\n    box-shadow: inset 0 -2px 0 var(--accent);\n  }'),
+      "选中态 2px accent 下划线（box-shadow inset 零位移，prepaint 减法相容）");
+  });
+
+  it("表格纪律：数字列右对齐 + 空值统一「—」", () => {
+    assert.ok(panelCss.includes(`${S3.replace("#statsView", "#statsEndpoints")} .stats-table :is(th, td):not(:first-child) { text-align: right; }`),
+      "端点会话表 2–5 列（全数字）右对齐");
+    for (const nth of ["5", "6"]) {
+      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style] .logs-table th:nth-child(${nth}),`), `日志表第 ${nth} 列表头右对齐在册`);
+      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style] .logs-table td:nth-child(${nth})`), `日志表第 ${nth} 列单元格右对齐在册`);
+    }
+    // 等宽数字基座本已钉在 .stats-table td（tabular-nums），原样不动即满足
+    assert.ok(/\.stats-table td \{[^}]*font-variant-numeric: tabular-nums;/.test(panelCss), "数字列 tabular-nums 基座原样");
+    // 空值「—」：statsFmtHours 补齐 null 口径（0 仍是 0h），其余格式化器本已如此
+    const fmt = panelJs.match(/function statsFmtHours\(ms\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(fmt.includes('if (ms == null) return "—";'), "工时格式化：null→「—」");
+    assert.ok(fmt.includes('if (!ms || ms <= 0) return "0h";'), "真实零值仍 0h");
+  });
+
+  it("既有毛病四修（全 v2-only，v1 基座逐字原样）", () => {
+    // a) 上下半区同档塌缩：quad 补中档 1057–1096 与宽档自动态 1200–1240 两段
+    const mid = [...panelCss.matchAll(/@media \(min-width: 1057px\) and \(max-width: 1096px\) \{([\s\S]*?)\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes(".skills-grid.stats-quad"));
+    assert.ok(mid && mid.includes("grid-template-columns: 1fr;") && mid.includes("height: auto;"),
+      "quad 中档 1057–1096 塌缩补齐（与 top-grid 同档）");
+    const wide = [...panelCss.matchAll(/@media \(min-width: 1200px\) and \(max-width: 1240px\) \{([\s\S]*?)\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes(".skills-grid.stats-quad"));
+    assert.ok(wide && wide.includes(':not([data-rail="collapsed"]) .skills-grid.stats-quad { grid-template-columns: 1fr; }'),
+      "quad 宽档自动态 1200–1240 塌缩补齐（collapsed 手动态摘出同 top-grid）");
+    // b) 热力图单列态封顶 340（侧栏设计宽），v1 基座 width:100% 原样
+    assert.ok(panelCss.includes(`${S3} .stats-heatmap svg { max-width: 340px; margin: 0 auto; }`), "热力图 svg 封顶居中");
+    assert.ok(panelCss.includes(".stats-heatmap svg { display: block; width: 100%; height: auto; }"), "v1 热力图基座原样");
+    // c) 环形图窄屏等比缩；折线图量宽走 JS
+    assert.ok(panelCss.includes(`${S3} .stats-usage-donut svg { max-width: 100%; height: auto; }`), "环形图 max-width:100%");
+    assert.ok(panelCss.includes(".stats-usage-donut svg { display: block; width: 248px; height: 248px; }"), "v1 环形图基座原样");
+    assert.ok(/function statsChartWidth\(container\) \{\n    const w = Math\.round\(container\.clientWidth\);\n    return w > 0 \? Math\.max\(280, w\) : 760;\n  \}/.test(panelJs),
+      "折线图画布宽=容器实测（藏态回落 760）");
+    assert.ok(!/const W = 760, H = cfg\.height/.test(panelJs), "写死 760 已除");
+    assert.ok(panelJs.includes("const W = statsChartWidth(container), H = cfg.height || 220;"), "viewBox 宽随容器");
+    assert.ok(panelJs.includes("renderStatsTrendSignature(cfg, statsChartWidth(container))")
+      && panelJs.includes("renderStatsTrendSignature(cfg, W)")
+      && /function renderStatsTrendSignature\(cfg, w\) \{\n    return JSON\.stringify\(\[\n      w,/.test(panelJs),
+      "画布宽入渲染签名（resize 重渲不被同终点守卫误跳）");
+    assert.ok(panelJs.includes("bindStatsChartResize()")
+      && /new ResizeObserver\(\(entries\) => \{[\s\S]*?statsTrendSnapOnce = true;[\s\S]*?renderStatsTrend\(\);[\s\S]*?renderStatsTtft\(\);/.test(panelJs)
+      && panelJs.includes("const anim = statsTrendSnapOnce ? null :"),
+      "ResizeObserver 防抖重渲在册（snap 标记瞬时落地不播动画，renderStatsTrend 签名不动）");
+    // d) 日志页固定高：v2 头行 48 → 88；v1 基座 96 原样
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] .stats-view.logs-fixed { height: calc(100vh - 88px); height: calc(100dvh - 88px); }'),
+      "v2 日志页固定高 88（48 头行 + 24 顶距 + 16 底余量）");
+    assert.ok(panelCss.includes(".stats-view.logs-fixed { height: calc(100vh - 96px); height: calc(100dvh - 96px); overflow: hidden; }"),
+      "v1 日志页固定高 96 原样");
+  });
+
+  it("空态与加载骨架的平铺化重设计：空态撤框纯排版、日志首载铺 shimmer 骨架行（v2 门控）", () => {
+    assert.ok(panelCss.includes(`${S3} .empty-hint {\n    background: transparent; border: 0; padding: 28px 24px;\n  }`),
+      "空态撤 sunken 底与虚线描边（排版而非虚线框）");
+    // v1 空态基座原样（虚线框不动）
+    assert.ok(/\.empty-hint \{\n    text-align: center; padding: 24px; color: var\(--text-3\); font-size: 12\.5px;\n    background: var\(--surface-sunken\); border-radius: var\(--radius-md, 8px\); border: 1px dashed var\(--border\);\n  \}/.test(panelCss),
+      "v1 空态基座原样");
+    assert.ok(panelCss.includes(`${S3} .logs-skel-row td { border-top: 0; padding: 11px 8px; }`), "骨架行间不画分隔线");
+    assert.ok(panelCss.includes(`${S3} .logs-skel-row:hover { background: transparent; }`), "骨架行 hover 不亮");
+    assert.ok(panelCss.includes(`${S3} .logs-skel-bar { height: 12px; }`), "骨架条行高在册（shimmer 复用 .sessions-skel）");
+    // JS：首载铺骨架（空表才铺、v2 门控、enterLogsPane 调用、复用 sessions-skel 类）
+    const skel = panelJs.match(/function renderLogsSkeleton\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(skel, "renderLogsSkeleton 在册");
+    assert.ok(skel[1].includes('if (!tbody || tbody.children.length) return;'), "只铺首次空表（轮询静默范式不动 DOM）");
+    assert.ok(skel[1].includes('document.documentElement.getAttribute("data-ui-version") !== "v2"),'.slice(0, -1)), "v2 门控（v1 行为原样）");
+    assert.ok(skel[1].includes('class="sessions-skel logs-skel-bar"'), "骨架条复用 .sessions-skel shimmer");
+    assert.ok(/function enterLogsPane\(\) \{\n    syncLogsSortHeaders\(\);\n    renderLogsSkeleton\(\);/.test(panelJs), "进日志子页即铺骨架");
   });
 });
 

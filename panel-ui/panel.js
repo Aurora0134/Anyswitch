@@ -12685,6 +12685,9 @@ async function api(method, path, body) {
   // 趋势图动画标记：null=下次渲染走 reveal 生长（进 tab 首张/空态恢复/切口径 seg）；
   // true=走 morph 形变，基线像素帧由渲染器从容器状态（_statsAnim/_statsCommit）自取
   let statsTrendPrev = null;
+  // resize 重渲的一次性 snap 标记（阶段 3）：置位后下一次 renderStatsTrend 不播动画
+  // 直落终态。用标记而非给 renderStatsTrend 加参——既有断言逐字钉着它的函数签名
+  let statsTrendSnapOnce = false;
   // 取数竞态守卫：单调递增的请求序号。快速切 days seg / 手动刷新 / 30s 轮询并发时，
   // 慢的旧响应后到会被丢弃，避免覆盖新选择的窗口数据。
   let statsReqSeq = 0;
@@ -12776,6 +12779,7 @@ async function api(method, path, body) {
     $("statsTabOverview").onclick = () => activateStatsSubTab("overview");
     $("statsTabLogs").onclick = () => activateStatsSubTab("logs");
     initLogsPane();
+    bindStatsChartResize();
     // F/G1 全量弹窗：榜区双击一卡一窗（空态无数据不開窗）；关闭走 ✕/按钮/遮罩/Esc
     const ttftBarsEl = $("statsTtftBars");
     if (ttftBarsEl && !ttftBarsEl._rankDbl) {
@@ -12798,6 +12802,40 @@ async function api(method, path, body) {
       document.addEventListener("keydown", (e) => {
         if (e.key === "Escape" && rankModal.classList.contains("show")) hideStatsRankModal();
       });
+    }
+  }
+
+  // 阶段 3：折线图画布宽=容器实测（renderStatsLineChart 内 statsChartWidth），容器宽度
+  // 变化（窗口缩放 / 栏收展 / 栅格塌折）需按新宽重渲，否则旧宽 viewBox 被 CSS 等比拉伸、
+  // 字号线宽失真。观察两个折线图容器，宽度实变才防抖重渲（观察注册即有一帧回调、纯高度
+  // 抖动均空转）；重渲瞬时落地（snap），不重播 reveal/morph。藏态量到 0 跳过——
+  // 可见时的下一帧回调或既有取数渲染会按新宽补画。
+  let statsChartResizeRO = null;
+  function bindStatsChartResize() {
+    if (statsChartResizeRO || typeof ResizeObserver !== "function") return;
+    const lastW = new Map();
+    let timer = null;
+    statsChartResizeRO = new ResizeObserver((entries) => {
+      let changed = false;
+      for (const en of entries) {
+        const w = Math.round(en.contentRect.width);
+        if (!w) continue; // 藏态（统计页未出）量到 0：不重渲
+        if (lastW.get(en.target.id) === w) continue;
+        lastW.set(en.target.id, w);
+        changed = true;
+      }
+      if (!changed) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if ($("statsView").hidden || statsSubTab !== "overview") return;
+        statsTrendSnapOnce = true;
+        try { renderStatsTrend(); } finally { statsTrendSnapOnce = false; }
+        renderStatsTtft();
+      }, 160);
+    });
+    for (const id of ["statsTrendChart", "statsTtftChart"]) {
+      const el = $(id);
+      if (el) statsChartResizeRO.observe(el);
     }
   }
 
@@ -12917,6 +12955,8 @@ async function api(method, path, body) {
     return ms >= 1000 ? (ms / 1000).toFixed(2) + "s" : Math.round(ms) + "ms";
   }
   function statsFmtHours(ms) {
+    // 空值统一「—」（方案内已定展示格式，同 pct/ttft/int 口径）；0 工时是真实零值，仍 0h
+    if (ms == null) return "—";
     if (!ms || ms <= 0) return "0h";
     const h = ms / 3600000;
     return (h >= 100 ? Math.round(h) : h.toFixed(1)) + "h";
@@ -13125,16 +13165,18 @@ async function api(method, path, body) {
     // 同终点守卫：morph 进行中若新内容与在飞动画的目标完全一致（seg 重击当前 tab、
     // 30s 轮询数据未变、手动刷新返回同值），整体跳过本次渲染——在飞动画按原时序播完，
     // 不重启时间轴（否则曲线顿住后以完整时长慢速重播剩余距离）。签名只看渲染输出
-    // （轴刻度 + 系列键/色/虚线/值），与数据来源无关。
+    // （轴刻度 + 系列键/色/虚线/值 + 画布宽），与数据来源无关。
     if (container._statsAnim && container._statsAnim.raf) {
-      if (container._statsAnim.targetSig === renderStatsTrendSignature(cfg)) return;
+      if (container._statsAnim.targetSig === renderStatsTrendSignature(cfg, statsChartWidth(container))) return;
     }
     // 基线优先级：在飞动画的中间像素帧 > 上次提交的像素帧
     const prevAnim = container._statsAnim || null;
     const baseline = (prevAnim && prevAnim.current) || container._statsCommit || null;
     if (prevAnim) { cancelAnimationFrame(prevAnim.raf); container._statsAnim = null; }
     container.textContent = "";
-    const W = 760, H = cfg.height || 220;
+    // 阶段 3：viewBox 宽按容器实测（1:1 映射像素，字号/线宽不随窗口缩放失真——与
+    // sparkline 同手法），取代写死的 760；容器藏态量到 0 时回落 760
+    const W = statsChartWidth(container), H = cfg.height || 220;
     const padL = 46, padR = 12, padT = 10, padB = 22;
     const iw = W - padL - padR, ih = H - padT - padB;
     const n = cfg.labels.length;
@@ -13209,13 +13251,19 @@ async function api(method, path, body) {
     svg.appendChild(seriesG);
 
   // ── 动画 ──
-  // 渲染输出签名：轴刻度 + 各系列 key/色/虚线/值。同终点守卫用它判断在飞动画
-  // 的目标是否与本次请求渲染的内容一致（与数据来源/调用方无关）。
-  function renderStatsTrendSignature(cfg) {
+  // 渲染输出签名：画布宽 + 轴刻度 + 各系列 key/色/虚线/值。同终点守卫用它判断在飞
+  // 动画的目标是否与本次请求渲染的内容一致（与数据来源/调用方无关）。宽入签：阶段 3
+  // 起 viewBox 宽随容器实测，resize 重渲（同数据不同宽）不被守卫误跳。
+  function renderStatsTrendSignature(cfg, w) {
     return JSON.stringify([
-      cfg.labels, cfg.min, cfg.max, cfg.height,
+      w, cfg.labels, cfg.min, cfg.max, cfg.height,
       cfg.series.map((s) => [s.key, s.color, s.dash || "", s.values]),
     ]);
+  }
+  // 折线图画布宽：容器实测（下限 280，藏态量到 0 回落 760——同阶段 3 前的固定宽）
+  function statsChartWidth(container) {
+    const w = Math.round(container.clientWidth);
+    return w > 0 ? Math.max(280, w) : 760;
   }
   const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // 提交/在飞状态一律记像素帧：Map<key, [{x,y}|null]>。记像素而非值，跨桶数/yMax
@@ -13227,7 +13275,7 @@ async function api(method, path, body) {
       container._statsCommit = commitPixels();
     };
     // 目标签名挂到动画状态上：同终点守卫据此识别"内容未变"的重渲
-    const animSig = renderStatsTrendSignature(cfg);
+    const animSig = renderStatsTrendSignature(cfg, W);
     // 弧长测量/上色工具（reveal 与 morph 的 dash 续接共用）：getTotalLength 需元素
     // 已挂 DOM，故都在首帧 rAF（渲染函数同步段已 appendChild）里惰性调用。
     const statsParseDash = (s) => s.split(/[,\s]+/).map((v) => parseFloat(v)).filter((v) => Number.isFinite(v));
@@ -13470,8 +13518,9 @@ async function api(method, path, body) {
     // 动画决策：无上一帧（进 tab 首张/空态恢复/切口径——scope seg 点击已重置标记）
     // → reveal 清屏左至右生长；此后一律 morph 平滑形变（图例显隐/轮询微调，以及
     // 桶数变化的 24h↔7日 切换——跨桶数由渲染器按索引比例映射做像素插值，
-    // 曲线被"拉伸揉捏"成新形状而非擦掉重画）
-    const anim = statsTrendPrev ? { type: "morph" } : { type: "reveal" };
+    // 曲线被"拉伸揉捏"成新形状而非擦掉重画）；statsTrendSnapOnce（resize 重渲）不播
+    // 动画直落终态
+    const anim = statsTrendSnapOnce ? null : statsTrendPrev ? { type: "morph" } : { type: "reveal" };
     renderStatsLineChart(chartEl, {
       labels: buckets.map((t) => statsFmtBucketLabel(t)),
       series: visible,
@@ -14074,8 +14123,21 @@ async function api(method, path, body) {
     });
   }
 
+  // 阶段 3：日志首次加载的骨架行——v2 平铺语义下加载态用 shimmer 底色块暗示行结构
+  // （不画框）。只铺首次空表（tbody 已有内容时 5s 轮询是同签名静默范式，不动 DOM）；
+  // v2-only 门控：v1 保持原行为（空表等首包）。
+  function renderLogsSkeleton() {
+    const tbody = $("logsTbody");
+    if (!tbody || tbody.children.length) return;
+    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return;
+    const widths = [95, 88, 97, 82, 93, 78, 90, 85];
+    tbody.innerHTML = widths.map((w) =>
+      `<tr class="logs-skel-row" aria-hidden="true"><td colspan="7"><div class="sessions-skel logs-skel-bar" style="width:${w}%"></div></td></tr>`).join("");
+  }
+
   function enterLogsPane() {
     syncLogsSortHeaders();
+    renderLogsSkeleton();
     const ready = loadLogs();
     if (!logsTimer) {
       logsTimer = setInterval(() => {
