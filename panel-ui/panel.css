@@ -474,6 +474,61 @@
     :root[data-ui-version="v2"] .toc-side { display: none; }
     :root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
+
+  /* ── 新版界面阶段 2：设置页平铺试点——「页面是平的，浮层才有影」 ──
+     只作用新版（v2），旧版零变化；只剥容器壳，控件（按钮/开关/下拉/输入）的可点击
+     指示一律保留。两块内容：
+     1) 设置卡片去壳：透明底、去边框/阴影/圆角/悬停描边，卡间距归零后相邻卡以一条
+        hairline 相连（.panel-card + .panel-card 只画上边线，draw each border once）；
+        卡头降格为区段小标题（小字号 muted 色、去卡头底线与多余留白，图标保留）。
+        作用域按四个有卡面板的 id 列举、不用 #settingsView 整罩——主题子页的看板
+        预览镜像是克隆的真实看板 DOM（内含 .panel-card），整罩会把镜像卡一并剥壳、
+        毁掉「预览=真实看板」的保真；主题子页自身无卡，天然不在列。
+     2) 子 tab 胶囊降权：.settings-subtabs 撤托盘（透明底、去边框），选中态改 2px
+        下划线指示条（var(--accent)）+ 文字加深，与左栏主导航的圆角块拉开层级；
+        只动 settings-subtabs，统计页等其他 .view-tabs 复用处不受影响。指示条用
+        box-shadow inset 画：零几何位移，且文件尾首帧 prepaint 减法（取值抄无作用域
+        .view-tab 基座）里的 box-shadow: none 对它同样成立——v1/v2 的未选中基座在
+        那四格取值上一致，减法规则与断言都无需改。
+     选择器一律 [data-ui-version="v2"][data-style] 双属性提级：三套皮肤在更靠后
+     位置覆写 .panel-card/.view-tab 系规则，单属性同优先级会被盖；data-style 由
+     panel.html 内联脚本在绘制前恒写入，通配 [data-style] 三皮肤通吃。aurora 例外
+     成立：去壳后内容直接坐在玻璃页面上（body 极光晕透出，左栏玻璃是阶段 1 参照），
+     不给去壳卡片补回任何框。 */
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
+    background: transparent; border: 0; border-radius: 0; box-shadow: none;
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card:hover {
+    transform: none; box-shadow: none;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) { gap: 0; }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card + .panel-card {
+    border-top: 1px solid var(--divider);
+  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-header {
+    background: transparent; border-bottom: 0; padding: 16px 18px 0;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-title {
+    font-size: 12px; font-weight: 600; color: var(--text-2);
+  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-body {
+    padding: 10px 18px 16px;
+  }
+  /* 无头平卡（通用 tab 第六张）：卡体即首子，顶距补回整档 */
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card > .card-body:first-child {
+    padding-top: 16px;
+  }
+  :root[data-ui-version="v2"][data-style] .view-tabs.settings-subtabs {
+    background: transparent; border-color: transparent;
+  }
+  :root[data-ui-version="v2"][data-style] .settings-subtabs .view-tab:hover {
+    background: transparent; color: var(--text);
+  }
+  :root[data-ui-version="v2"][data-style] .settings-subtabs .view-tab.active {
+    background: transparent; border: 0; color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
   
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
