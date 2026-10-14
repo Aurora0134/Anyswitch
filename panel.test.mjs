@@ -5571,14 +5571,16 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-foot { justify-content: center; }'), "收窄态栏底单钮居中");
     assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }'),
       "收窄态品牌行纵排（72px 栏宽放不下横向两枚 32px）");
-    // 版本徽标：仅 v2 栏顶去胶囊、纯文字挪到品牌字下方；v1 头行那颗原样
+    // 版本徽标：仅 v2 栏顶去胶囊、纯文字挪到品牌字下方，蓝色高光走 accent；v1 头行那颗原样
     assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }'),
       "品牌字改块级，徽标自然折到下一行");
     const tagRule = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style\] \.rail-brand \.version-tag \{([^}]*)\}/);
     assert.ok(tagRule, "v2 栏顶徽标规则在册");
-    assert.ok(tagRule[1].includes("background: transparent;") && tagRule[1].includes("border: 0;") && tagRule[1].includes("color: var(--text-3);"),
-      "去胶囊：去底/边，muted 纯文字（不造新色值）");
+    assert.ok(tagRule[1].includes("background: transparent;") && tagRule[1].includes("border: 0;") && tagRule[1].includes("color: var(--accent);"),
+      "去胶囊：去底/边纯文字，字色回 accent 蓝（不造新色值）");
     assert.ok(tagRule[1].includes("border-radius: 0;"), "三皮肤的 999px 胶囊圆角同被压掉");
+    assert.ok(tagRule[1].includes("font-size: 12.5px;") && tagRule[1].includes("display: inline-block;"),
+      "栏顶徽标字号回 12.5px（与头行同档）且 inline-block（顶距才真正生效）");
     assert.ok(/\.brand-text \.version-tag \{\s*font-size: 12\.5px/.test(panelCss), "v1/基座胶囊徽标原样不动");
   });
 });

@@ -633,13 +633,15 @@
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
   }
 
-  /* 栏顶版本徽标去胶囊（仅 v2 栏顶）：纯文字挪到品牌字下方——h1 改块级自然折行，
-     徽标去底/边/内距，小一档 muted。v1 头行那颗原样（作用域锁 .rail-brand，v1 栏
-     整隐双保险）。三皮肤的胶囊化（saas/aurora 的 999px 圆角）同被双属性提级压掉。 */
+  /* 栏顶版本徽标（仅 v2 栏顶）：纯文字挪品牌字下方，去胶囊只留字——去底/边，字色回
+     accent 蓝（11px muted 读不出这是一枚版本徽标）。字号回 12.5px 与头行那颗同档；
+     改 inline-block 让顶距真正生效（inline 上不撑行盒，1px 的 margin 一直是空挂）。
+     圆角仍写死 0：三皮肤的 999px 胶囊不回来。v1 头行那颗原样（作用域锁 .rail-brand，
+     v1 栏整隐双保险）。 */
   :root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }
   :root[data-ui-version="v2"][data-style] .rail-brand .version-tag {
-    margin: 1px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
-    font-size: 11px; letter-spacing: 0; color: var(--text-3);
+    display: inline-block; margin: 2px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
+    font-size: 12.5px; letter-spacing: 0; color: var(--accent);
   }
 
   /* ── 阶段 2 材质修正 ②：v2 明暗关系交换（cc-switch 参照：亮色 栏灰<内容白，暗色
