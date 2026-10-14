@@ -123,12 +123,12 @@ export function parseCredentialCacheEnabled(raw) {
 
 // 自动检测并下载更新：面板常驻期间按拍节查「检查更新」同源判定，有新版就只把
 // 比特下载进本地仓库（不动工作树、不动进程），应用永远由用户在关于页点
-// 「应用更新」触发。默认开——下载零中断零风险，省下的是用户等下载的那几分钟。
-// 只有显式写入 false 才关。
-export const DEFAULT_AUTO_DOWNLOAD_UPDATES = true;
+// 「应用更新」触发。默认关——后台下载是便览不是必需，必须由用户显式打开
+// （缺少或畸形值都保持关闭）。
+export const DEFAULT_AUTO_DOWNLOAD_UPDATES = false;
 
 export function parseAutoDownloadUpdates(raw) {
-  return raw === false ? false : DEFAULT_AUTO_DOWNLOAD_UPDATES;
+  return raw === true ? true : DEFAULT_AUTO_DOWNLOAD_UPDATES;
 }
 
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映

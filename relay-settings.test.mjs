@@ -25,6 +25,8 @@ import {
   parseCredentialCacheEnabled,
   DEFAULT_CREDENTIAL_CACHE_ENABLED,
   createCredentialCacheEnabledGate,
+  parseAutoDownloadUpdates,
+  DEFAULT_AUTO_DOWNLOAD_UPDATES,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
@@ -667,6 +669,34 @@ describe("claudeBypassPermissions", () => {
       assert.equal(loadSettings(path, {}).settings.claudeBypassPermissions, true);
       const back = saveSettings(path, { claudeBypassPermissions: false }, {});
       assert.equal(back.settings.claudeBypassPermissions, false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("autoDownloadUpdates", () => {
+  it("defaults to off: only an explicit true turns it on", () => {
+    assert.equal(DEFAULT_AUTO_DOWNLOAD_UPDATES, false);
+    assert.equal(parseAutoDownloadUpdates(undefined), false);
+    assert.equal(parseAutoDownloadUpdates("true"), false);
+    assert.equal(parseAutoDownloadUpdates(1), false);
+    assert.equal(parseAutoDownloadUpdates(false), false);
+    assert.equal(parseAutoDownloadUpdates(true), true);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-auto-download-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.autoDownloadUpdates, false, "an install predating the key keeps auto-download off");
+      const on = saveSettings(path, { autoDownloadUpdates: true }, {});
+      assert.equal(on.settings.autoDownloadUpdates, true);
+      assert.equal(loadSettings(path, {}).settings.autoDownloadUpdates, true);
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.autoDownloadUpdates, true, "改别的设置项不会把它挤掉");
+      const off = saveSettings(path, { autoDownloadUpdates: false }, {});
+      assert.equal(off.settings.autoDownloadUpdates, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

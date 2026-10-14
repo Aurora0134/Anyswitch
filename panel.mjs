@@ -1593,12 +1593,12 @@ export function createPanelRouter({
     return sendJson(res, 200, selfUpdateStatusPayload(last));
   }
 
-  // 「自动检测并下载更新」（设置项，默认开）：面板常驻期间按拍节检查，有更新且
+  // 「自动检测并下载更新」（设置项，默认关）：面板常驻期间按拍节检查，有更新且
   // 没有在跑/待应用的任务就登记一次下载。只走 download 阶段，绝不自动应用。
   async function maybeAutoDownloadSelfUpdate() {
     if (hostKind !== "panel-host") return;
     try {
-      if (loadSettings(settingsFile, base).settings.autoDownloadUpdates === false) return;
+      if (loadSettings(settingsFile, base).settings.autoDownloadUpdates !== true) return;
     } catch {
       return; // 设置读不出就不动：自动下载是便览功能，不为它冒险
     }

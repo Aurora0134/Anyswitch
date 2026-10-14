@@ -420,7 +420,7 @@ describe("自更新换装监听器", () => {
   });
 });
 
-describe("自动检测并下载更新（设置项默认开）", () => {
+describe("自动检测并下载更新（设置项默认关）", () => {
   // 拍节调度是注入的：捕获回调后手动泵。settings 经 base.LOCALAPPDATA 重定向到临时目录。
   function autoDownloadCapture() {
     const captured = { pump: null };
@@ -435,11 +435,12 @@ describe("自动检测并下载更新（设置项默认开）", () => {
     writeFileSync(join(baseDir, "Anyswitch", "settings.json"), JSON.stringify(settings));
   }
 
-  test("首开一拍：有更新就登记 download；设置关掉或已有待应用则不动作", async () => {
+  test("首开一拍（设置显式开启）：有更新就登记 download；已有在跑则不重复登记", async () => {
     const capture = autoDownloadCapture();
     const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
     const spawned = [];
     try {
+      withSettings(baseDir, { autoDownloadUpdates: true });
       await withPanel({
         base: { LOCALAPPDATA: baseDir },
         releaseService: selfUpdateReleaseService(),
@@ -456,6 +457,26 @@ describe("自动检测并下载更新（设置项默认开）", () => {
         // 已有在跑任务时再泵一拍：不重复登记。
         await capture.captured.pump();
         assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("默认关（设置里没有这个键）：一拍什么都不登记", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const spawned = [];
+    try {
+      withSettings(baseDir, {});
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...capture,
+      }, async () => {
+        await capture.captured.pump();
+        assert.equal(spawned.length, 0);
       });
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
@@ -487,6 +508,7 @@ describe("自动检测并下载更新（设置项默认开）", () => {
     const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
     const spawned = [];
     try {
+      withSettings(baseDir, { autoDownloadUpdates: true });
       await withPanel({
         base: { LOCALAPPDATA: baseDir },
         releaseService: selfUpdateReleaseService(),
