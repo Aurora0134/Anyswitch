@@ -5606,6 +5606,11 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     assert.ok(animBlock, "滑动规则在册且只作用 ≥860 的常驻栏体（窄档抽屉留它自己的 240ms transform）");
     assert.ok(animBlock.includes(':root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }'),
       "双属性提级吃台中档块的 transition: none，时长与缓动照 ccswitch v4");
+    // 内容让位必须与栏同缓动：栏 fixed/z-index 40/底色不透明，让位当帧到位而栏还在滑，
+    // 收起向栏压在已让开的文字上、展开向栏裁掉未缩小的行右端（终端 120ms 防抖才重排）
+    assert.ok(animBlock.includes(':root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }'),
+      "容器让位同开关、同时长同缓动，且 padding-left 与 max-width 两属性都在（只过渡一个，宽窗口内容宽反抖 144px）");
+    assert.equal(animBlock.match(/padding-left 200ms/g).length, 1, "容器过渡只此一条（与栏开关同块，不另开分路）");
     assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[^}]*overflow-y: auto; overflow-x: hidden;/.test(panelCss),
       "栏基座横轴显式收掉（单轴 auto 会让 overflow-x 算成 auto，动画途中蹦横条）");
     // ── 收起态两处细节：隐栏内滚条 + 图标放大一档；收起态两个来处各挂一条 ──
