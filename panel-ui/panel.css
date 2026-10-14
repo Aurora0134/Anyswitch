@@ -723,7 +723,113 @@
   :root[data-ui-version="v2"][data-style="sepia"] .terminal-view { background: var(--surface); }
   :root[data-ui-version="v2"][data-style="saas"] .settings-theme-preview,
   :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }
-  
+
+  /* ── 新版界面阶段 3：统计页平铺——同阶段 2 定稿手法（「页面是平的，浮层才有影」） ──
+     1) 统计区块成描边盒：透明底 + 四边 1px --border + --radius-md + 无影 + hover 全静态，
+        盒间距 28px 节奏（pane 列 / 上半区网格 / 侧栏列 / 四宫格行四层容器同档），卡头
+        16/0 + 卡体 12/16、无头平卡（请求日志卡）顶距同档 16，区段标题 15px/600/正文色
+        ——取值与阶段 2 设置页逐项同源。作用域锚 #statsView 整罩：主题预览镜像克隆的是
+        看板 DOM，统计页不在镜像范围内，无阶段 2 的误伤面。aurora 例外 = 恢复原生玻璃卡
+        （配方逐项抄阶段 2 aurora 块），只去投影、去 hover 浮。
+     2) 子 tab 降权同手法扩展到统计页：.stats-subtabs 撤托盘、选中态改 2px accent 下划
+        线（box-shadow inset 零几何位移；prepaint 对静态选中 tab 的减法 box-shadow:none
+        与它天然相容，同设置页）。
+     3) 表格纪律：数字列右对齐（端点会话表 2–5 列全数字；日志表 Tokens/用时第 5/6 列，
+        来源/渠道/模型三列居中基座不动），等宽数字基座本已钉在 .stats-table td
+        （tabular-nums）；空值统一「—」由 JS 侧 statsFmtHours 补齐（null→—，0 仍 0h，
+        其余格式化器本已如此）。分隔线既有写法已是相邻行共享单线（概览行/图例行
+        last-child 撤线、表体首行 td 无顶线），不重复描边，不动。
+     4) 既有毛病四修（全部 v2-only，v1 基座逐字原样）：
+        a) 上下半区断点不一致：上半区 stats-top-grid 塌缩档（v2 校准：中档 ≤1096、宽档
+           自动态 ≤1240）与下半区 stats-quad（中档 ≤1056、宽档阈值 960+240=1200 恰为
+           档界不命中）错档——补 quad 在 1057–1096 与 1200–1240 两段的塌缩，两半同档
+           同塌（栏手动态 expanded 块本已同罩两者，无需补）。
+        b) 热力图窄屏吹大约 3.2 倍：svg width:100% 在上半区塌成单列后随卡整宽放大
+           （1096/340≈3.2），格密度本是按 340 侧栏设计的。svg 封顶 max-width:340px
+           并居中——侧栏态内容宽 ~302 本就小于上限、填格行为原样，单列态不再吹大。
+        c) 图表固定宽度：环形图 svg 写死 248×248（viewBox 208）窄屏溢出——改
+           max-width:100% + height:auto 等比缩。折线图 viewBox 写死 760 的修法在 JS
+           侧（renderStatsLineChart 按容器实测量宽 + ResizeObserver 防抖重渲，见
+           panel.js 阶段 3 注记），CSS 管不了 viewBox。
+        d) 日志页高度硬编码：.stats-view.logs-fixed 的 calc(100dvh-96px) 按 v1 头行
+           56px 算死（56+顶距24+底余量16）；v2 头行已收 48（阶段 1），同口径常数应
+           为 88——v2 覆写一条，v1 基座原样。
+     5) 空态与加载骨架的平铺化重设计（全任务首例）：卡片成描边盒后空态不能再靠框遮
+        羞——#statsView 内 .empty-hint 撤 sunken 底与虚线描边，纯排版呈现（灰字居中
+        + 呼吸留白）；请求日志首次加载铺骨架行（JS 渲染、v2 门控，v1 行为原样），
+        骨架条复用 .sessions-skel 的 shimmer 底色块暗示行结构，不画任何框。 */
+  :root[data-ui-version="v2"][data-style] #statsView .panel-card {
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-md);
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  :root[data-ui-version="v2"][data-style] #statsView .panel-card:hover {
+    transform: none; box-shadow: none; border-color: var(--border);
+  }
+  :root[data-ui-version="v2"][data-style] #statsOverviewPane,
+  :root[data-ui-version="v2"][data-style] #statsView .stats-top-grid,
+  :root[data-ui-version="v2"][data-style] #statsView .stats-side,
+  :root[data-ui-version="v2"][data-style] #statsView .skills-grid.stats-quad { gap: 28px; }
+  :root[data-ui-version="v2"][data-style] #statsView .card-header {
+    background: transparent; border-bottom: 0; padding: 16px 18px 0;
+  }
+  :root[data-ui-version="v2"][data-style] #statsView .card-title {
+    font-size: 15px; font-weight: 600; color: var(--text);
+  }
+  :root[data-ui-version="v2"][data-style] #statsView .card-body { padding: 12px 18px 16px; }
+  /* 无头平卡（请求日志卡）：卡体即首子，顶距补回整档（与卡头顶距同档） */
+  :root[data-ui-version="v2"][data-style] #statsView .panel-card > .card-body:first-child {
+    padding-top: 16px;
+  }
+  /* aurora 例外：恢复皮肤原生玻璃卡（配方逐项抄阶段 2 aurora 块） */
+  :root[data-ui-version="v2"][data-style="aurora"] #statsView .panel-card {
+    background: var(--surface);
+    background-image: var(--card-hairline); background-position: top;
+    background-size: 100% 1px; background-repeat: no-repeat;
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    box-shadow: inset 0 1px 0 var(--hl-inset);
+  }
+  :root[data-ui-version="v2"][data-style] .view-tabs.stats-subtabs {
+    background: transparent; border-color: transparent;
+  }
+  :root[data-ui-version="v2"][data-style] .stats-subtabs .view-tab:hover {
+    background: transparent; color: var(--text);
+  }
+  :root[data-ui-version="v2"][data-style] .stats-subtabs .view-tab.active {
+    background: transparent; border: 0; color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+  /* 表格纪律：数字列右对齐（th 内的排序按钮是 inline-level，随 text-align 走） */
+  :root[data-ui-version="v2"][data-style] #statsEndpoints .stats-table :is(th, td):not(:first-child) { text-align: right; }
+  :root[data-ui-version="v2"][data-style] .logs-table th:nth-child(5),
+  :root[data-ui-version="v2"][data-style] .logs-table td:nth-child(5),
+  :root[data-ui-version="v2"][data-style] .logs-table th:nth-child(6),
+  :root[data-ui-version="v2"][data-style] .logs-table td:nth-child(6) { text-align: right; }
+  /* 4a) 上下半区同档塌缩：补 quad 在中档 1057–1096、宽档自动态 1200–1240 两段
+     （取值抄阶段 1 校准块的 quad 条目） */
+  @media (min-width: 1057px) and (max-width: 1096px) {
+    :root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }
+  }
+  @media (min-width: 1200px) and (max-width: 1240px) {
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .skills-grid.stats-quad { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .skills-grid.stats-quad .panel-card { height: auto; }
+  }
+  /* 4b) 热力图单列态封顶：340=侧栏卡设计宽（--stats-side-w 缺省值），居中防满幅悬空 */
+  :root[data-ui-version="v2"][data-style] #statsView .stats-heatmap svg { max-width: 340px; margin: 0 auto; }
+  /* 4c) 环形图窄屏等比缩（viewBox 208 恒定，CSS 只封顶不放大） */
+  :root[data-ui-version="v2"][data-style] #statsView .stats-usage-donut svg { max-width: 100%; height: auto; }
+  /* 4d) 日志页固定高：v2 头行 48 → 48+24+16=88（v1 基座 96 原样） */
+  :root[data-ui-version="v2"] .stats-view.logs-fixed { height: calc(100vh - 88px); height: calc(100dvh - 88px); }
+  /* 5) 空态排版化：撤框撤底，留白呼吸（文案不变）；日志骨架行：shimmer 底色块、
+     行间不画分隔线、hover 不亮 */
+  :root[data-ui-version="v2"][data-style] #statsView .empty-hint {
+    background: transparent; border: 0; padding: 28px 24px;
+  }
+  :root[data-ui-version="v2"][data-style] #statsView .logs-skel-row td { border-top: 0; padding: 11px 8px; }
+  :root[data-ui-version="v2"][data-style] #statsView .logs-skel-row:hover { background: transparent; }
+  :root[data-ui-version="v2"][data-style] #statsView .logs-skel-bar { height: 12px; }
+
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 32px; height: 32px; padding: 0;
