@@ -314,6 +314,7 @@ async function api(method, path, body) {
     // 真跑，桩里只提供固定名单上的函数。
     if (typeof initTerminalHostControls === "function") initTerminalHostControls();
     if (typeof initRailDrawer === "function") initRailDrawer();
+    if (typeof initRailCollapse === "function") initRailCollapse();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -6865,6 +6866,46 @@ async function api(method, path, body) {
     // tab 上，栏已转为可见形态，留在原地即正确；汉堡钮此刻反而不可见。
     const mq = window.matchMedia("(min-width: 860px)");
     mq.addEventListener("change", () => { if (mq.matches) closeRailDrawer(false); });
+  }
+
+  // 栏手动收/展（栏顶收起钮）：手动态优先于宽度自动档——<html> data-rail 是唯一
+  // 状态源（head 脚本绘制前从 localStorage「panel-rail-manual」读回，首帧即手动
+  // 态；CSS 全部挂这个属性），这里只管点击写档+写属性、图标与文案随有效栏态换向。
+  // 有效栏态 = 手动态 ?? 宽度自动档（≥1200 自动 216 全栏 / 860–1199 自动 72 图标栏）；
+  // 窄档（<860）抽屉生态不收此钮管（钮也不出）。文案常量制（同抽屉钮先例）。
+  const RAIL_COLLAPSE_LABEL = "收起侧栏";
+  const RAIL_EXPAND_LABEL = "展开侧栏";
+  function railEffectivelyCollapsed() {
+    const manual = document.documentElement.getAttribute("data-rail");
+    if (manual === "collapsed") return true;
+    if (manual === "expanded") return false;
+    return !window.matchMedia("(min-width: 1200px)").matches;
+  }
+  function syncRailCollapseBtn() {
+    const btn = $("railCollapseBtn");
+    if (!btn) return;
+    const collapsed = railEffectivelyCollapsed();
+    const label = collapsed ? RAIL_EXPAND_LABEL : RAIL_COLLAPSE_LABEL;
+    btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+    const icoCollapse = $("railIcoCollapse"), icoExpand = $("railIcoExpand");
+    if (icoCollapse) icoCollapse.hidden = collapsed;
+    if (icoExpand) icoExpand.hidden = !collapsed;
+  }
+  function initRailCollapse() {
+    const btn = $("railCollapseBtn");
+    if (!btn) return;
+    btn.onclick = () => {
+      const next = railEffectivelyCollapsed() ? "expanded" : "collapsed";
+      try { localStorage.setItem("panel-rail-manual", next); } catch {}
+      document.documentElement.setAttribute("data-rail", next);
+      syncRailCollapseBtn();
+    };
+    // 自动档下窗口跨过 1200 档界会改变有效栏态：图标与文案重同步（手动态下
+    // 有效态不随宽度变，重同步是幂等空转）
+    window.matchMedia("(min-width: 1200px)").addEventListener("change", syncRailCollapseBtn);
+    syncRailCollapseBtn();
   }
 
   function initSkillsTab() {

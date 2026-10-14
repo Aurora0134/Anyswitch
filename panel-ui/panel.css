@@ -446,9 +446,13 @@
      布局模式断点：看板双栏 1080 / 统计上半区 1000 / 会话详情+目录 1023（目录浮动钮
      显隐随同一条）/ Skills 双栏与统计四宫格 960。960 系的宽档阈值 960+240=1200 恰为
      档界（v1 口径的塌缩内容宽在宽档本就够不到），只补中档。瓦片类小网格与排版/紧凑
-     类断点不动。 */
+     类断点不动。
+     手动态修正（栏顶收起钮，data-rail="collapsed"）：宽档栏收 72 后内容只让 96，
+     ≥1200 时内容恒 ≥1104（盖过全部 v1 阈值 1080/1023/1000），三处宽档校准块收
+     :not([data-rail="collapsed"]) 限定、手动态下不命中；expanded 的反向修正（中档
+     栏展 216、内容让 240 全程真挤压）在阶段 2 段的手动态块里补一条全档塌缩。 */
   @media (min-width: 1200px) and (max-width: 1320px) {
-    :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
   @media (min-width: 860px) and (max-width: 1176px) {
     :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
@@ -459,15 +463,15 @@
     :root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }
   }
   @media (min-width: 1200px) and (max-width: 1240px) {
-    :root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .stats-top-grid { grid-template-columns: 1fr; }
   }
   @media (min-width: 860px) and (max-width: 1096px) {
     :root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }
   }
   @media (min-width: 1200px) and (max-width: 1263px) {
-    :root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
-    :root[data-ui-version="v2"] .toc-side { display: none; }
-    :root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .toc-side { display: none; }
+    :root[data-ui-version="v2"]:not([data-rail="collapsed"]) body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
   @media (min-width: 860px) and (max-width: 1119px) {
     :root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
@@ -553,6 +557,80 @@
   @media (min-width: 860px) {
     :root[data-ui-version="v2"] .settings-subtabs { display: none; }
     :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
+  }
+
+  /* ── 阶段 2 补：左栏手动收/展 + 收窄态栏底换钮 + 栏顶版本徽标纯文字 ──
+     栏顶收起钮（railCollapseBtn）给栏宽一个手动态：<html> data-rail="collapsed"|
+     "expanded"（localStorage「panel-rail-manual」，head 脚本绘制前读回，首帧即手动
+     态；缺省不写属性 = 宽度自动档）。手动态优先于自动档，但只覆盖栏常驻的 ≥860：
+     窄档（<860）是抽屉生态，收起钮不出、手动态不插手。实现上不做整档重述——
+     中档块（410 一带）没有上界、≥860 全程生效，宽档块（424 一带）在 ≥1200 逐项
+     撤销成 216：collapsed 只需在 ≥1200 把宽档的撤销再撤回去（取值逐项抄宽档块
+     撤销前的中档态）；expanded 只需在 860–1199 把中档的收起逐项撤销（取值抄宽档
+     块）。栏多宽内容让多少：collapsed 时三处宽档校准块已由 :not() 摘出（见阶段 1
+     校准段注释）；expanded 时中档内容让 240、v1 阈值全程真挤压，块内尾部补一条
+     860–1199 全档塌缩（四项布局取值与阶段 1 校准块逐项同源，目录浮动钮随同）。 */
+
+  /* 收起钮：基座整隐（v1 无栏、窄档抽屉生态不出——窄档本来就有汉堡钮），
+     ≥860 的 v2 才出；全栏形态下 margin-left:auto 把它顶到品牌行行尾。 */
+  .icon-btn.rail-collapse-btn { display: none; }
+  @media (min-width: 860px) {
+    :root[data-ui-version="v2"] .rail-collapse-btn { display: inline-flex; margin-left: auto; flex-shrink: 0; }
+  }
+
+  /* 手动态 collapsed：≥1200 把宽档撤销再撤回去（回 72 图标栏形态） */
+  @media (min-width: 1200px) {
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 16px 8px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand { justify-content: center; padding: 4px 0 0; flex-direction: column; align-items: center; gap: 8px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand .brand-text { display: none; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand .rail-collapse-btn { margin-left: 0; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-tab-label { display: none; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-foot { flex-direction: column; justify-content: center; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-foot .rail-settings { padding: 9px 0; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] #railThemeToggle { display: none; }
+  }
+  /* 手动态 expanded：860–1199 把中档收起逐项撤销成 216 全栏（栏底亮暗钮召回——
+     收窄态才隐藏它，全栏形态照旧在）；尾部是该态的中档全档塌缩校准 */
+  @media (min-width: 860px) and (max-width: 1199px) {
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 16px 12px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; flex-direction: row; gap: 12px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .brand-text { display: block; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .rail-collapse-btn { margin-left: auto; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-tabs .rail-tab { justify-content: flex-start; padding: 9px 12px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-tab-label { display: inline; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-foot { flex-direction: row; justify-content: space-between; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-foot .rail-settings { padding: 9px 10px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] #railThemeToggle { display: inline-flex; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .telemetry-layout-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .skills-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .skills-grid.stats-quad .panel-card { height: auto; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .stats-top-grid { grid-template-columns: 1fr; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
+    :root[data-ui-version="v2"][data-rail="expanded"] .toc-side { display: none; }
+    :root[data-ui-version="v2"][data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }
+  }
+  /* 收窄态（中档自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行纵排——72px
+     栏宽放不下横向的品牌徽标 + 32px 收起钮，上下排（宽档全栏栏底照旧：亮暗+设置）。 */
+  @media (min-width: 860px) and (max-width: 1199px) {
+    :root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }
+    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn { margin-left: 0; }
+    :root[data-ui-version="v2"] .rail-foot { justify-content: center; }
+    :root[data-ui-version="v2"] #railThemeToggle { display: none; }
+  }
+
+  /* 栏顶版本徽标去胶囊（仅 v2 栏顶）：纯文字挪到品牌字下方——h1 改块级自然折行，
+     徽标去底/边/内距，小一档 muted。v1 头行那颗原样（作用域锁 .rail-brand，v1 栏
+     整隐双保险）。三皮肤的胶囊化（saas/aurora 的 999px 圆角）同被双属性提级压掉。 */
+  :root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }
+  :root[data-ui-version="v2"][data-style] .rail-brand .version-tag {
+    margin: 1px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
+    font-size: 11px; letter-spacing: 0; color: var(--text-3);
   }
   
   .icon-btn {
@@ -4537,6 +4615,15 @@
   }
   @media (min-width: 1200px) {
     html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 216px; }
+  }
+  /* 手动态修正（栏顶收起钮，data-rail 同在 <html> 上、绘制前由 head 脚本写入）：
+     collapsed 时宽档栏收 72——上面 ≥1200 那条的 216 收回 72；expanded 时中档栏展
+     216——860–1199 那条的 72 改让 216。首帧即手动态，整屏不跳。 */
+  @media (min-width: 1200px) {
+    html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="collapsed"] body main.layout-container { padding-left: 72px; }
+  }
+  @media (min-width: 860px) and (max-width: 1199px) {
+    html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="expanded"] body main.layout-container { padding-left: 216px; }
   }
   /* 监测区首帧就退场，工作区必须同帧收成单列：CSS Grid 的轨道按模板排，藏掉子项
      只会留下一条 340px 的背景缝——那一帧的空白列与随后 is-empty 收全宽的主区，

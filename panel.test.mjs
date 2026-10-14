@@ -5376,12 +5376,14 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     // 校准清单（v1 阈值 → v2 宽档/中档）：看板双栏 1080→1320/1176、统计上半区 1000→1240/1096、
     // 会话详情+目录 1023→1263/1119（目录浮动钮显隐随同一条）、Skills 双栏/统计四宫格 960→仅中档
     // 1056（宽档阈值 960+240=1200 恰为档界：v1 口径的塌缩内容宽在宽档本就够不到，宽档无需补）。
+    // 手动态修正：collapsed（宽档栏收 72、内容只让 96）时宽档三块收 :not() 摘出——≥1200 内容
+    // 恒 ≥1104 盖过全部 v1 阈值；expanded（中档栏展 216）的中档全档塌缩块在下方另钉。
     const expectBlock = (mq, rules) => {
       const text = `${mq} {\n${rules.map((r) => `    ${r}`).join("\n")}\n  }`;
       assert.ok(panelCss.includes(text), `校准块在册：${mq}`);
     };
     expectBlock("@media (min-width: 1200px) and (max-width: 1320px)",
-      [':root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }']);
+      [':root[data-ui-version="v2"]:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }']);
     expectBlock("@media (min-width: 860px) and (max-width: 1176px)",
       [':root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }']);
     expectBlock("@media (min-width: 860px) and (max-width: 1056px)",
@@ -5389,13 +5391,13 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
         ':root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }',
         ':root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }']);
     expectBlock("@media (min-width: 1200px) and (max-width: 1240px)",
-      [':root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }']);
+      [':root[data-ui-version="v2"]:not([data-rail="collapsed"]) .stats-top-grid { grid-template-columns: 1fr; }']);
     expectBlock("@media (min-width: 860px) and (max-width: 1096px)",
       [':root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }']);
     expectBlock("@media (min-width: 1200px) and (max-width: 1263px)",
-      [':root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
-        ':root[data-ui-version="v2"] .toc-side { display: none; }',
-        ':root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }']);
+      [':root[data-ui-version="v2"]:not([data-rail="collapsed"]) .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
+        ':root[data-ui-version="v2"]:not([data-rail="collapsed"]) .toc-side { display: none; }',
+        ':root[data-ui-version="v2"]:not([data-rail="collapsed"]) body.sessions-mode .toc-fab.has-toc { display: flex; }']);
     expectBlock("@media (min-width: 860px) and (max-width: 1119px)",
       [':root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
         ':root[data-ui-version="v2"] .toc-side { display: none; }',
@@ -5405,6 +5407,97 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
       ".settings-theme-grid", ".about-client-main", ".terminal-workspace", ".terminal-head"]) {
       assert.ok(!panelCss.includes(`:root[data-ui-version="v2"] ${sel}`), `${sel} 不做 v2 校准`);
     }
+  });
+
+  it("左栏手动收/展：栏顶收起钮、手动态持久化绘制前读回、双态 CSS 镜像与校准跟手", () => {
+    // 结构：收起钮在栏顶品牌行内（品牌之后），icon-btn 形制、双图标随态换向、
+    // aria 齐（expanded/controls/label+title 同源文案）
+    const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
+    const brandRow = rail.slice(rail.indexOf('<div class="rail-brand">'), rail.indexOf('</div>\n  <nav class="rail-tabs"'));
+    const collapseBtn = brandRow.match(/<button class="icon-btn rail-collapse-btn" id="railCollapseBtn" aria-expanded="true" aria-controls="v2Rail" aria-label="收起侧栏" title="收起侧栏">([\s\S]*?)<\/button>/);
+    assert.ok(collapseBtn, "收起钮在栏顶品牌行内（品牌之后、行尾）");
+    assert.ok(collapseBtn[1].includes('id="railIcoCollapse"') && /<svg id="railIcoExpand"[^>]*\shidden>/.test(collapseBtn[1]),
+      "双图标在册：收起态图标默认在明、展开态图标默认藏（静态默认=宽档全栏）");
+    for (const m of collapseBtn[1].matchAll(/<svg[\s\S]*?<\/svg>/g)) {
+      assert.ok(m[0].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
+        "图标与既有一枚同源（feather 24 视窗空心描边 round caps）");
+    }
+    // 显隐：基座整隐（双类选择器，同 rail-drawer-btn 先例），≥860 的 v2 才出
+    assert.ok(/\.icon-btn\.rail-collapse-btn \{ display: none; \}/.test(panelCss), "收起钮基座整隐（v1/窄档不出）");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-collapse-btn { display: inline-flex; margin-left: auto; flex-shrink: 0; }'),
+      "≥860 的 v2 栏顶出收起钮、行尾就位");
+    // 持久化与首帧：head 脚本绘制前读 panel-rail-manual 写 <html> data-rail
+    const headBoot = panelHtml.slice(panelHtml.indexOf('localStorage.getItem("panel-ui-version")') - 200, panelHtml.indexOf('id="panelStartupBootstrap"'));
+    assert.ok(headBoot.includes('localStorage.getItem("panel-rail-manual")') && headBoot.includes('setAttribute("data-rail", railManual)'),
+      "手动态绘制前读回（同 UI版本 bootstrap 形态，首帧即手动态）");
+    assert.ok(headBoot.includes('railManual === "collapsed" || railManual === "expanded"'),
+      "只认在册两值，缺省/脏值=自动档（不写属性）");
+    // JS：点击按有效栏态翻向并写档+写属性；有效态 = 手动态 ?? 宽度档（1200 界）
+    assert.ok(panelJs.includes('const RAIL_COLLAPSE_LABEL = "收起侧栏";') && panelJs.includes('const RAIL_EXPAND_LABEL = "展开侧栏";'),
+      "文案常量制（授权仅此一处新词）");
+    const collapseBody = panelJs.match(/function initRailCollapse\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(collapseBody.includes('localStorage.setItem("panel-rail-manual", next)')
+      && collapseBody.includes('setAttribute("data-rail", next)'), "点击写档并当帧写属性（CSS 全挂 data-rail）");
+    assert.ok(collapseBody.includes('matchMedia("(min-width: 1200px)").addEventListener("change", syncRailCollapseBtn)'),
+      "自动档跨 1200 档界重同步图标与文案");
+    assert.ok(/if \(typeof initRailCollapse === "function"\) initRailCollapse\(\);/.test(panelJs), "init 接线走 typeof 守卫");
+    const effBody = panelJs.match(/function railEffectivelyCollapsed\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(effBody.indexOf('=== "collapsed"') < effBody.indexOf('matchMedia') && effBody.indexOf('=== "expanded"') < effBody.indexOf('matchMedia'),
+      "手动态优先于宽度自动档（先判属性再落 matchMedia）");
+    // CSS 双态镜像：collapsed 在 ≥1200 把宽档撤销再撤回去（回 72 形态），
+    // expanded 在 860–1199 把中档收起撤销成 216 全栏；栏多宽内容让多少
+    const collapsedBlock = [...panelCss.matchAll(/@media \(min-width: 1200px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes('[data-rail="collapsed"]'));
+    assert.ok(collapsedBlock, "collapsed 的 ≥1200 反撤销块在册");
+    for (const pin of [':root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 16px 8px; }',
+      '[data-rail="collapsed"] .rail-tab-label { display: none; }',
+      '[data-rail="collapsed"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }',
+      '[data-rail="collapsed"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }',
+      '[data-rail="collapsed"] #railThemeToggle { display: none; }']) {
+      assert.ok(collapsedBlock.includes(pin), `collapsed 块缺：${pin}`);
+    }
+    const expandedBlock = [...panelCss.matchAll(/@media \(min-width: 860px\) and \(max-width: 1199px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes('[data-rail="expanded"]'));
+    assert.ok(expandedBlock, "expanded 的中档撤销块在册");
+    for (const pin of [':root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 16px 12px; }',
+      '[data-rail="expanded"] .rail-tab-label { display: inline; }',
+      '[data-rail="expanded"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }',
+      '[data-rail="expanded"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }',
+      '[data-rail="expanded"] #railThemeToggle { display: inline-flex; }']) {
+      assert.ok(expandedBlock.includes(pin), `expanded 块缺：${pin}`);
+    }
+    // expanded 中档内容让 240、v1 阈值全程真挤压：四项布局全档塌缩同块在册
+    for (const pin of ['[data-rail="expanded"] .telemetry-layout-grid { grid-template-columns: 1fr; }',
+      '[data-rail="expanded"] .stats-top-grid { grid-template-columns: 1fr; }',
+      '[data-rail="expanded"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }',
+      '[data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }']) {
+      assert.ok(expandedBlock.includes(pin), `expanded 校准缺：${pin}`);
+    }
+    // 终端页首帧：手静态下同链两条分档左让按属性分支修正（首帧即手动态）
+    assert.ok(panelCss.includes('html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="collapsed"] body main.layout-container { padding-left: 72px; }'),
+      "终端首帧 collapsed 让 72");
+    assert.ok(panelCss.includes('html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="expanded"] body main.layout-container { padding-left: 216px; }'),
+      "终端首帧 expanded 让 216");
+  });
+
+  it("收窄态栏底换钮与版本徽标纯文字：中档自动档与手动 collapsed 同口径", () => {
+    // 收窄态栏底：亮暗钮隐（中档自动档 + 手动 collapsed 两条链），设置/返回钮照常；
+    // 单钮居中防歪；expanded/宽档全栏召回亮暗钮（栏底照旧：亮暗+设置）
+    const midAuto = [...panelCss.matchAll(/@media \(min-width: 860px\) and \(max-width: 1199px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes('#railThemeToggle { display: none; }') && !b.includes('[data-rail'));
+    assert.ok(midAuto, "中档自动档的栏底换钮块在册");
+    assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-foot { justify-content: center; }'), "收窄态栏底单钮居中");
+    assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }'),
+      "收窄态品牌行纵排（72px 栏宽放不下横向两枚 32px）");
+    // 版本徽标：仅 v2 栏顶去胶囊、纯文字挪到品牌字下方；v1 头行那颗原样
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }'),
+      "品牌字改块级，徽标自然折到下一行");
+    const tagRule = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style\] \.rail-brand \.version-tag \{([^}]*)\}/);
+    assert.ok(tagRule, "v2 栏顶徽标规则在册");
+    assert.ok(tagRule[1].includes("background: transparent;") && tagRule[1].includes("border: 0;") && tagRule[1].includes("color: var(--text-3);"),
+      "去胶囊：去底/边，muted 纯文字（不造新色值）");
+    assert.ok(tagRule[1].includes("border-radius: 0;"), "三皮肤的 999px 胶囊圆角同被压掉");
+    assert.ok(/\.brand-text \.version-tag \{\s*font-size: 12\.5px/.test(panelCss), "v1/基座胶囊徽标原样不动");
   });
 });
 

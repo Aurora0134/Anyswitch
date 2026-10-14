@@ -37,6 +37,14 @@ try {
   if (localStorage.getItem("panel-ui-version") === "v2") {
     document.documentElement.setAttribute("data-ui-version", "v2");
   }
+  // 左栏手动态——同一类本机偏好（localStorage「panel-rail-manual」：collapsed=
+  // 收 72 图标栏 / expanded=展 216 全栏 / 缺失=宽度自动档）。用户点过栏顶收起钮后
+  // 手动态优先于宽度自动档；绘制前读到 <html> data-rail，首帧就是手动态，不先画
+  // 自动档再跳。v1 没有栏，属性挂着也不被任何 v1 规则消费。
+  const railManual = localStorage.getItem("panel-rail-manual");
+  if (railManual === "collapsed" || railManual === "expanded") {
+    document.documentElement.setAttribute("data-rail", railManual);
+  }
 } catch (e) {}
 </script>
 <script id="panelStartupBootstrap">
@@ -459,6 +467,14 @@ if (window.panelStartupController) panelStartupPlay();
       <h1>Anyswitch</h1>
       <span class="version-tag" id="railBrandVersion" hidden></span>
     </div>
+    <!-- 栏收起钮：手动收/展 72 图标栏——宽档点击收 72、中档点击展 216（手动态优先于
+         宽度自动档，存档 panel-rail-manual，绘制前由 head 脚本读回 <html> data-rail，
+         首帧即手动态）；窄档（<860）是抽屉生态，此钮不出（窄档本来就有汉堡钮）。
+         图标与文案随有效栏态换向（initRailCollapse 同步）。旧版整栏不出，此钮同隐。 -->
+    <button class="icon-btn rail-collapse-btn" id="railCollapseBtn" aria-expanded="true" aria-controls="v2Rail" aria-label="收起侧栏" title="收起侧栏">
+      <svg id="railIcoCollapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
+      <svg id="railIcoExpand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
+    </button>
   </div>
   <nav class="rail-tabs" role="tablist" aria-label="视图切换">
     <button class="rail-tab active" id="railTabBoard" role="tab" aria-selected="true" aria-current="page" title="看板">
