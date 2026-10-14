@@ -8767,8 +8767,8 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
       assert.equal(forwarded.shell, "cmd");
       assert.equal(forwarded.cwd, cwd);
       assert.equal(forwarded.label, "Kimi Code");
-      assert.deepEqual(forwarded.launch.args.slice(0, 2), ["/d", "/c"], "cmd 包装：session.pid 落在扫描名单内");
-      assert.equal(forwarded.launch.args[2], process.env.KIMI_EXECUTABLE);
+      assert.deepEqual(forwarded.launch.args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"], "cmd 包装 + 前置 UTF-8 码页切换：session.pid 落在扫描名单内，agent 进程树共享 65001 伪控制台");
+      assert.equal(forwarded.launch.args[6], process.env.KIMI_EXECUTABLE);
       assert.equal(forwarded.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:47821", "base 恒为常驻 relay");
       assert.equal(forwarded.env.ANTHROPIC_AUTH_TOKEN, loadOrGenerateToken(root));
       assert.ok(forwarded.env.KIMI_CODE_CUSTOM_HEADERS.includes("x-agent-id: kimi"));

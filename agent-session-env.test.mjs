@@ -268,7 +268,7 @@ test("终端启动的实例身份：能按连接属主认出来的端点一律�
   }
 });
 
-test("launch 一律 cmd /d /c 包装：归属链的硬前提，参数无任何凭证", () => {
+test("launch 一律 cmd /d /c 包装并前置 UTF-8 码页切换：归属链的硬前提，参数无任何凭证", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
@@ -281,8 +281,12 @@ test("launch 一律 cmd /d /c 包装：归属链的硬前提，参数无任何�
       // ConPTY 下直接 spawn agent，父进程是 conhost（不在 agent-metrics 扫描
       // 名单），归属全丢；cmd 包装让 session.pid=cmd.exe 落在名单内。
       assert.equal(launch.launch.file, base.ComSpec, `${agentId} 经 cmd 启动`);
-      assert.deepEqual(launch.launch.args.slice(0, 2), ["/d", "/c"], `${agentId} 用 /d /c 防 cmd 自动运行脚本劫持`);
-      assert.ok(launch.launch.args[2].length > 0);
+      assert.deepEqual(
+        launch.launch.args.slice(0, 6),
+        ["/d", "/c", "chcp", "65001", ">nul", "&"],
+        `${agentId} 用 /d /c 防 cmd 自动运行脚本劫持，并在 cmd 内先切 UTF-8 码页再串接 agent`,
+      );
+      assert.ok(launch.launch.args[6].length > 0);
       // 凭证只走 env（由 build*Env 注入、terminal-host 只驻内存）；命令行参数
       // 与文件路径里不允许出现任何令牌。
       const commandLine = JSON.stringify({ file: launch.launch.file, args: launch.launch.args });
@@ -295,17 +299,41 @@ test("launch 一律 cmd /d /c 包装：归属链的硬前提，参数无任何�
   }
 });
 
+test("码页前置的六个 token 全部不含空格：带空格会被 node-pty 套引号，cmd 就不按原生语义解析了", () => {
+  // 乱码根因：ConPTY 伪控制台跟随系统 ANSI 码页（简中机 936/GBK），agent 的
+  // UTF-8 色块字节在 PTY 入口就被按 GBK 解码成中文乱码。修复是把整棵进程树
+  // 的伪控制台切到 65001；成立前提是 `chcp 65001 >nul &` 保持裸 token 形态
+  // 抵达 cmd（node-pty 只对含空格参数加引号），真实 terminal-host 抓包已验证
+  // 该形态乱码签名归零。任何人把这段合成单个字符串参数都会静默退回乱码。
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
+      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
+      const prefix = launch.launch.args.slice(0, 6);
+      assert.deepEqual(prefix, ["/d", "/c", "chcp", "65001", ">nul", "&"], `${agentId} 的码页前置必须是六个裸 token`);
+      for (const token of prefix) {
+        assert.ok(!token.includes(" "), `${agentId} 的前置参数 "${token}" 不得含空格`);
+      }
+      assert.ok(launch.launch.args[3] === "65001", `${agentId} 切的是 UTF-8 码页`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("dsh 一键启动带 --profile dsh-tui：裸 dsh 会被 bin.js 拒绝启动", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
     const dsh = buildAgentSessionLaunch({ agentId: "dsh", cwd: root, token: TOKEN, base });
-    assert.deepEqual(dsh.launch.args.slice(3), ["--profile", "dsh-tui"], "dsh 必须带 profile 参数（与 dsh-cli 快捷命令同一口径）");
+    assert.deepEqual(dsh.launch.args.slice(7), ["--profile", "dsh-tui"], "dsh 必须带 profile 参数（与 dsh-cli 快捷命令同一口径）");
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "dsh") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base });
-      // zcode 固定 4 段：/d /c + node.exe + launcher 路径（launcher 形态见专项测试）。
-      assert.equal(launch.launch.args.length, agentId === "zcode" ? 4 : 3, `${agentId} 维持零附加参数`);
+      // zcode 固定 8 段：/d /c chcp 65001 >nul & + node.exe + launcher 路径
+      //（launcher 形态见专项测试）。
+      assert.equal(launch.launch.args.length, agentId === "zcode" ? 8 : 7, `${agentId} 维持零附加参数`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -317,14 +345,14 @@ test("claude bypassPermissions 开关：开 = 追加 --dangerously-skip-permissi
   try {
     const base = fakeBase(root);
     const off = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base });
-    assert.equal(off.launch.args.length, 3, "开关关着（默认）不多出参数");
+    assert.equal(off.launch.args.length, 7, "开关关着（默认）不多出参数");
     const on = buildAgentSessionLaunch({ agentId: "claude", cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
-    assert.deepEqual(on.launch.args.slice(3), ["--dangerously-skip-permissions"]);
+    assert.deepEqual(on.launch.args.slice(7), ["--dangerously-skip-permissions"]);
     // 开关只属于 claude：其余端点不该因它多出任何参数。
     for (const agentId of Object.keys(AGENT_TERMINAL_TARGETS)) {
       if (agentId === "claude") continue;
       const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, claudeBypassPermissions: true });
-      assert.equal(launch.launch.args.length, agentId === "dsh" ? 5 : agentId === "zcode" ? 4 : 3, `${agentId} 不受 bypassPermissions 开关影响`);
+      assert.equal(launch.launch.args.length, agentId === "dsh" ? 9 : agentId === "zcode" ? 8 : 7, `${agentId} 不受 bypassPermissions 开关影响`);
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -336,10 +364,10 @@ test("可执行文件按 agent-discovery 解析，缺失即报错不静默", () 
   try {
     const base = fakeBase(root);
     const launch = buildAgentSessionLaunch({ agentId: "codex", cwd: root, token: TOKEN, base });
-    assert.equal(launch.launch.args[2], join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"));
+    assert.equal(launch.launch.args[6], join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"));
 
     const kimi = buildAgentSessionLaunch({ agentId: "kimi", cwd: root, token: TOKEN, base });
-    assert.equal(kimi.launch.args[2], base.KIMI_EXECUTABLE);
+    assert.equal(kimi.launch.args[6], base.KIMI_EXECUTABLE);
 
     const broken = { ...base, GROK_EXECUTABLE: join(root, "bin", "gone.exe") };
     assert.throws(() => buildAgentSessionLaunch({ agentId: "grok", cwd: root, token: TOKEN, base: broken }), (error) => {
@@ -364,7 +392,7 @@ test("zcode 一键启动是 launcher 形态：cmd /d /c node.exe <launcher>，en
     // CLI 入口是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs：
     // 执行体是 node.exe 本身（process.execPath），launcher 绝对路径作为参数。
     const launcherPath = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
-    assert.deepEqual(launch.launch.args, ["/d", "/c", process.execPath, launcherPath]);
+    assert.deepEqual(launch.launch.args, ["/d", "/c", "chcp", "65001", ">nul", "&", process.execPath, launcherPath]);
     // 凭证不骑环境变量：relay token 由 launcher 作为 apiKey 落进槽位
     // provider_config.json，终端注入为零。
     assert.deepEqual(launch.env, {});
@@ -406,7 +434,7 @@ test("终端一键启动 codex：npm 全局 shim 存在时用它，不再误报�
     mkdirSync(dirname(shim), { recursive: true });
     writeFileSync(shim, "");
     const launch = buildAgentSessionLaunch({ agentId: "codex", cwd: root, token: TOKEN, base });
-    assert.equal(launch.launch.args[2], shim, "npm 全局装的 codex 走 shim，与检测侧同源");
+    assert.equal(launch.launch.args[6], shim, "npm 全局装的 codex 走 shim，与检测侧同源");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

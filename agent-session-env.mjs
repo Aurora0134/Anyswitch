@@ -58,6 +58,16 @@ const INSTANCE_ID_MAX_LEN = 64;
 // 加载时静态算出（随安装树整体移动，不吃任何环境变量）。
 const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
 
+// cmd 包装的固定前缀。/d /c 防 AutoRun 劫持之后，先在 cmd 内部把伪控制台切到
+// UTF-8 再串接 agent：ConPTY 新建的伪控制台跟随系统 ANSI 码页（简中机上是
+// 936/GBK），而这些 CLI 把界面色块按 UTF-8 原始字节直接写控制台，conhost 拿
+// GBK 解码——乱码在 PTY 入口就已产生，面板、SSE 与屏幕镜像拿到的已是坏字符，
+// 无从修复。六个 token 全部不含空格，node-pty 拼命令行时不会给它们套引号，
+// cmd 按原生语义解析 `chcp 65001 >nul & <exe>`；该形态经真实 terminal-host
+// 抓包验证（乱码签名 6150→0，色块全部干净）。副作用与 Windows 系统级 UTF-8
+// 选项同口径：同一终端里只写 GBK 字节的老工具会反过来乱码。
+const UTF8_CODEPAGE_PREFIX = ["/d", "/c", "chcp", "65001", ">nul", "&"];
+
 // 允许进终端的 CLI Agent。zcode 桌面端是纯 GUI 程序，不属于终端页签；这里的
 // zcode 条目拉起的是 CLI 形态：经 zcode-cli-launcher.mjs 中转，因为 CLI 入口
 // 是 node 拉起的 bin\zcode.mjs，cmd /d /c 不能直接执行 .mjs；relay 复用、
@@ -290,13 +300,15 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // monitoring, metrics and recent requests would all lose the session.
       // Wrapping in `cmd /d /c <exe>` makes session.pid a cmd.exe (on the scan
       // list), so the agent's ancestor chain reaches the session. The args
-      // carry the executable path only — never a credential.
+      // carry the executable path only — never a credential. cmd 包装同时
+      // 前置代码页切换（见 UTF8_CODEPAGE_PREFIX），agent 与整个终端会话共享
+      // UTF-8 伪控制台。
       // dsh 是唯一还要带参数的：它的 CLI 不接裸调用（bin.js 要求显式
       // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
       // claude 的 bypassPermissions 是设置页开关驱动的附加参数：开 = 跳过工具
       // 权限确认（用户显式打开才带），关 = 一个参数都不加。
       file: base.ComSpec || "cmd.exe",
-      args: ["/d", "/c", executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions))],
+      args: [...UTF8_CODEPAGE_PREFIX, executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions))],
     },
     env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
     agentId,
