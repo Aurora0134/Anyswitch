@@ -4704,9 +4704,11 @@ async function api(method, path, body) {
   const terminalRequestExpanded = new Set();
 
   // 最近请求：usage journal 的结算行，与统计页请求日志同一份字段口径
-  // （metric 取 TTFT）。cached = 缓存命中的 token 数（明细行「缓存 N」的数据源，
-  // 0 不显示）。失败行额外保留 status/errMsg/durationMs，供「失败 · 429」式明细
-  // 与点击展开的错误详情使用；key 即大板 logsRowKey 同形，用于跨轮询记忆展开态。
+  // （metric 取 TTFT，metricColor 取看板同款语义色）。右栏两行由数据层直接
+  // 成形：成功行 io=输入/输出 tokens、cache=缓存命中（cached 为 0 不出灰字）；
+  // 失败行只留 fail=失败类型码，不出 token 行（对齐请求日志大板「失败 429」
+  // 徽标）。失败行额外保留 status/errMsg/durationMs，供点击展开的错误详情
+  // 使用；key 即大板 logsRowKey 同形，用于跨轮询记忆展开态。
   function terminalRequestsFromRows(rows) {
     if (!Array.isArray(rows)) return [];
     return rows.map((row) => {
@@ -4721,14 +4723,18 @@ async function api(method, path, body) {
         at = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
         rel = `${p(d.getHours())}:${p(d.getMinutes())}`;
       }
+      const prompt = Number(row?.prompt) || 0;
+      const completion = Number(row?.completion) || 0;
+      const cached = Number(row?.cached) || 0;
+      const num = (n) => n.toLocaleString("en-US");
       return {
         model: typeof row?.model === "string" && row.model ? row.model : "—",
         provider: typeof row?.providerId === "string" && row.providerId ? row.providerId : "—",
         metric: typeof row?.ttftMs === "number" && row.ttftMs > 0 ? `${(row.ttftMs / 1000).toFixed(2)}s` : "—",
-        detail: failed
-          ? `失败${statusText ? " · " + statusText : ""}`
-          : `完成 · ${(typeof row?.completion === "number" ? row.completion : 0).toLocaleString("en-US")} tokens`,
-        cached: Number(row?.cached) || 0,
+        metricColor: terminalTtftColor(row?.ttftMs),
+        io: failed ? "" : `${num(prompt)} / ${num(completion)}`,
+        cache: !failed && cached > 0 ? `缓存 ${num(cached)}` : "",
+        fail: failed ? `失败${statusText ? " · " + statusText : ""}` : "",
         state: failed ? "failed" : "ok",
         rel,
         key: `${row?.ts ?? ""}|${typeof row?.providerId === "string" ? row.providerId : ""}|${typeof row?.model === "string" ? row.model : ""}`,
@@ -4739,18 +4745,27 @@ async function api(method, path, body) {
     });
   }
 
-  // 最近请求行：左栏身份两行（上=模型名大字，下=绝对时间 HH:MM · 来源显示名小灰字），
-  // 右栏数据两行右对齐（上=TTFT、下=明细）。label 是来源显示名（routeNodeName 同
-  // 口径，未命中回落原始 id）。缓存 token 只在成功行追加；失败行明细带失败类型
-  // （对齐请求日志大板「失败 429」徽标），且可点击展开错误信息——展开态由调用方
-  // 以行键记忆，轮询重建不丢。
+  // 首字响应时间的语义色：分档与看板 TTFT 灯同源（阈值见 agent-metrics.mjs 的
+  // TTFT_THRESHOLDS / getTtftColor），panel.test.mjs 有逐边界同源钉死——只改
+  // 一边会让对拍测试转红。无样本（null/非数/≤0）置灰。
+  function terminalTtftColor(ttftMs) {
+    if (typeof ttftMs !== "number" || isNaN(ttftMs) || ttftMs <= 0) return "gray";
+    if (ttftMs < 5000) return "green";
+    if (ttftMs <= 15000) return "yellow";
+    return "red";
+  }
+
+  // 最近请求行四列：状态点 + 左栏身份两行（上=模型名大字，下=绝对时间 HH:MM ·
+  // 来源显示名小灰字）+ 中栏首字响应时间（看板同款红黄绿语义色，行内居中对齐）
+  // + 右栏数据两行右对齐（上=输入/输出 tokens 大字、下=缓存命中灰字）。label 是
+  // 来源显示名（routeNodeName 同口径，未命中回落原始 id）。失败行右栏只留失败
+  // 类型码（对齐请求日志大板「失败 429」徽标），不出 token 行，且可点击展开错误
+  // 信息——展开态由调用方以行键记忆，轮询重建不丢。
   function terminalRequestItemHtml(req, source) {
     const label = typeof source?.label === "string" && source.label ? source.label : req.provider;
     const failed = req.state === "failed";
-    const detail = failed
-      ? req.detail
-      : `${req.detail}${req.cached > 0 ? ` · 缓存 ${req.cached.toLocaleString("en-US")}` : ""}`;
     const sub = req.rel ? `${escapeHtml(req.rel)} · ${escapeHtml(label)}` : escapeHtml(label);
+    const metricColor = ["green", "yellow", "red", "gray"].includes(req.metricColor) ? req.metricColor : "gray";
     let expand = "";
     if (failed && source?.expanded) {
       const meta = [req.at ? `时间 ${req.at}` : "", req.duration ? `耗时 ${req.duration}` : ""].filter(Boolean).join(" · ");
@@ -4760,6 +4775,10 @@ async function api(method, path, body) {
         ${meta ? `<div class="terminal-request-expand-meta">${escapeHtml(meta)}</div>` : ""}
       </div>`;
     }
+    const data = failed
+      ? `<span class="terminal-request-detail is-failed">${escapeHtml(req.fail)}</span>`
+      : `<span class="terminal-request-io">${escapeHtml(req.io)}</span>${req.cache ? `
+            <span class="terminal-request-cache">${escapeHtml(req.cache)}</span>` : ""}`;
     return `
       <div class="terminal-request-item${failed ? " is-failed is-expandable" : ""}"${failed ? ` data-req-key="${escapeHtml(req.key)}"` : ""}>
         <i class="terminal-request-dot${failed ? " is-failed" : ""}"></i>
@@ -4767,9 +4786,9 @@ async function api(method, path, body) {
           <strong>${escapeHtml(req.model)}</strong>
           <span>${sub}</span>
         </div>
+        <span class="terminal-request-metric is-${metricColor}">${escapeHtml(req.metric)}</span>
         <div class="terminal-request-data">
-          <span class="terminal-request-metric">${escapeHtml(req.metric)}</span>
-          <span class="terminal-request-detail${failed ? " is-failed" : ""}">${escapeHtml(detail)}</span>
+          ${data}
         </div>
       </div>${expand}`;
   }

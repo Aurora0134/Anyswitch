@@ -9,6 +9,7 @@ import { createPanelRouter, startRelayActivityBridge } from "./panel.mjs";
 import { createLogger } from "./logger.mjs";
 import { createLoggingEnabledGate, saveSettings } from "./relay-settings.mjs";
 import { AGENT_TERMINAL_TARGETS } from "./agent-session-env.mjs";
+import { getTtftColor } from "./agent-metrics.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 
@@ -2913,7 +2914,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!listRule.includes("min-height"), "列表不设最小高度，不足 5 条不留空白");
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
     assert.ok(/\.terminal-request-item \{[^}]*flex: none/.test(panelCss), "行不可压——flex 子项默认 shrink 会压扁行高、视窗塞进 6+ 行");
-    assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内两栏垂直居中");
+    assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内各栏垂直居中（中栏 TTFT 随行居中）");
     // 四宫格：数值改细、折线放大到原生 56×22（与生成器同规格，viewBox 1:1 不再拉伸），
     // 格子改 grid——折线占右列、跨标签/数值两行垂直居中
     assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
@@ -2927,6 +2928,16 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-request-detail.is-failed { color: var(--danger); }"), "失败明细红字");
     assert.ok(panelCss.includes(".terminal-request-expand"), "失败行展开块样式齐备");
     assert.ok(/\.terminal-request-data \{[^}]*align-items: flex-end/.test(panelCss), "右栏两行右对齐");
+    // 版式改版：TTFT 挪中栏并上看板语义色，右栏改输入/输出 + 缓存灰字
+    assert.ok(/\.terminal-request-item \{[^}]*grid-template-columns: 8px minmax\(0, 1fr\) auto auto/.test(panelCss),
+      "行网格四列：状态点 / 身份 / 中栏 TTFT / 右栏数据");
+    assert.ok(panelCss.includes(".terminal-request-metric.is-green { color: var(--ok); }")
+      && panelCss.includes(".terminal-request-metric.is-yellow { color: var(--warn); }")
+      && panelCss.includes(".terminal-request-metric.is-red { color: var(--danger); }"),
+      "中栏 TTFT 红黄绿语义色与看板同档");
+    assert.ok(/\.terminal-request-metric \{[^}]*font: 600 13px/.test(panelCss), "中栏 TTFT 与模型名同档字号");
+    assert.ok(/\.terminal-request-io \{[^}]*font: 600 13px/.test(panelCss), "右栏上行输入/输出为 13px 大字");
+    assert.ok(/\.terminal-request-cache \{[^}]*color: var\(--text-3\)/.test(panelCss), "右栏下行缓存命中为灰字");
   });
 
   it("虚拟终端整页固定且隐藏全局页脚，终端身份按目录与检测到的 Agent 呈现", () => {
@@ -6790,25 +6801,27 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { route: [], routeCurrent: 0 }, "端点未配链整块隐藏");
   });
 
-  it("terminalRequestsFromRows 把 journal 行套成展示行：绝对时间 HH:MM、失败类型码、展开字段齐备", async () => {
+  it("terminalRequestsFromRows 把 journal 行套成展示行：输入/输出、缓存、失败类型码、语义色齐备", async () => {
     const out = await vmFn("terminalRequestsFromRows", [[
-      { model: "kimi-k3", providerId: "north-main", ttftMs: 1820, completion: 2418, cached: 1360000, ok: true },
+      { model: "kimi-k3", providerId: "north-main", ttftMs: 1820, prompt: 72560, completion: 486, cached: 1360000, ok: true },
       { model: "m2", providerId: "p2", ok: false },
-      { model: "m3", providerId: "p3", completion: 5, cached: undefined, ok: true },
-    ]]);
+      { model: "m3", providerId: "p3", prompt: 12, completion: 5, cached: undefined, ok: true },
+    ]], ["terminalTtftColor"]);
     assert.deepEqual(out, [
-      { model: "kimi-k3", provider: "north-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
-      { model: "m2", provider: "p2", metric: "—", detail: "失败", cached: 0, state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
-      { model: "m3", provider: "p3", metric: "—", detail: "完成 · 5 tokens", cached: 0, state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
+      { model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
+      { model: "m2", provider: "p2", metric: "—", metricColor: "gray", io: "", cache: "", fail: "失败", state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
+      { model: "m3", provider: "p3", metric: "—", metricColor: "gray", io: "12 / 5", cache: "", fail: "", state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
     ]);
 
     const ts = Date.now() - 125000;
     const withTs = await vmFn("terminalRequestsFromRows", [[
       { model: "m5", providerId: "p5", ok: false, status: 429, errMsg: "boom", ts, durationMs: 3400 },
-    ]]);
+    ]], ["terminalTtftColor"]);
     const d = new Date(ts);
     const p = (n) => String(n).padStart(2, "0");
-    assert.equal(withTs[0].detail, "失败 · 429", "失败明细带类型码（对齐大板徽标口径）");
+    assert.equal(withTs[0].fail, "失败 · 429", "失败明细带类型码（对齐大板徽标口径）");
+    assert.equal(withTs[0].io, "", "失败行不出输入/输出行");
+    assert.equal(withTs[0].cache, "", "失败行不出缓存行");
     assert.equal(withTs[0].rel, `${p(d.getHours())}:${p(d.getMinutes())}`, "副行时间改 24 小时制 HH:MM 绝对时间");
     assert.equal(withTs[0].duration, "3.4s", "总耗时保留给展开块");
     assert.equal(withTs[0].errMsg, "boom", "错误信息保留给展开块");
@@ -6817,41 +6830,51 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(!panelJs.includes("terminalRelTime"), "相对时间函数已退役");
   });
 
-  it("最近请求行模板：左栏身份两行 + 右栏数据两行，失败行带类型码且可就地展开", async () => {
+  it("terminalTtftColor 与看板 TTFT 灯同源（逐边界对齐 agent-metrics 分档）", async () => {
+    for (const ms of [null, undefined, 0, -5, NaN, 1, 4999, 5000, 5001, 9999, 15000, 15001, 60000]) {
+      assert.equal(await vmFn("terminalTtftColor", [ms]), getTtftColor(ms),
+        `首字响应 ${ms}ms 的语义色必须与看板 TTFT 灯同源（只改一边这里就红）`);
+    }
+  });
+
+  it("最近请求行模板：身份两行 + 中栏 TTFT 语义色 + 右栏输入/输出与缓存，失败行带类型码且可就地展开", async () => {
     const ok = await vmFn("terminalRequestItemHtml", [{
-      model: "kimi-k3", provider: "north-main", metric: "1.82s", detail: "完成 · 2,418 tokens", cached: 1360000, state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
+      model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(ok.includes("<strong>kimi-k3</strong>"), "左栏上行：模型名大字（不再挂来源色类）");
     assert.ok(ok.includes("<span>15:48 · 主力号池</span>"), "左栏下行：绝对时间 · 来源显示名");
-    assert.ok(ok.includes('class="terminal-request-metric">1.82s<'), "右栏上行：TTFT");
-    assert.ok(ok.includes('class="terminal-request-detail">完成 · 2,418 tokens · 缓存 1,360,000<'), "右栏下行：明细带缓存后缀");
+    assert.ok(ok.includes('class="terminal-request-metric is-green">1.82s<'), "中栏 TTFT 带看板语义色（绿）");
+    assert.ok(ok.includes('class="terminal-request-io">72,560 / 486<'), "右栏上行：输入/输出 tokens");
+    assert.ok(ok.includes('class="terminal-request-cache">缓存 1,360,000<'), "右栏下行：缓存命中灰字");
     assert.ok(!ok.includes("is-expandable") && !ok.includes("terminal-request-expand"), "成功行不可展开");
 
     const noLabel = await vmFn("terminalRequestItemHtml", [{
-      model: "m3", provider: "ghost-id", metric: "—", detail: "完成 · 5 tokens", cached: 42, state: "ok", rel: "", key: "k2", errMsg: "", at: "", duration: "",
+      model: "m3", provider: "ghost-id", metric: "—", metricColor: "gray", io: "5 / 0", cache: "", fail: "", state: "ok", rel: "", key: "k2", errMsg: "", at: "", duration: "",
     }, null], ["escapeHtml"]);
     assert.ok(noLabel.includes("<span>ghost-id</span>"), "显示名未解析时回落原始 id（无时间位不造分隔符）");
-    assert.ok(noLabel.includes("缓存 42"), "cached > 0 即有缓存后缀");
+    assert.ok(!noLabel.includes("terminal-request-cache"), "cached 为 0 不出缓存行");
+    assert.ok(noLabel.includes('class="terminal-request-metric is-gray">—<'), "无 TTFT 样本语义色置灰");
 
     const failed = await vmFn("terminalRequestItemHtml", [{
-      model: "m4", provider: "pool-a", metric: "—", detail: "失败 · 429", cached: 99, state: "failed",
+      model: "m4", provider: "pool-a", metric: "—", metricColor: "gray", io: "", cache: "", fail: "失败 · 429", state: "failed",
       rel: "12:03", key: "k3", errMsg: "upstream exploded", at: "12:03:04", duration: "3.4s",
     }, { label: "主力号池", expanded: true }], ["escapeHtml"]);
     assert.ok(failed.includes('class="terminal-request-item is-failed is-expandable"'), "失败行带可展开标记");
     assert.ok(failed.includes('data-req-key="k3"'), "行键落 data 属性供点击回查");
-    assert.ok(failed.includes('class="terminal-request-detail is-failed">失败 · 429<'), "失败明细红字带类型码");
+    assert.ok(failed.includes('class="terminal-request-detail is-failed">失败 · 429<'), "失败行右栏只留类型码红字");
+    assert.ok(!failed.includes("terminal-request-io") && !failed.includes("terminal-request-cache"), "失败行不出输入/输出与缓存行");
     assert.ok(failed.includes("upstream exploded"), "展开块含错误信息");
     assert.ok(failed.includes("时间 12:03:04 · 耗时 3.4s"), "展开块含时间与耗时元信息");
     assert.ok(!failed.includes("缓存"), "失败行不追加缓存后缀");
 
     const collapsedFail = await vmFn("terminalRequestItemHtml", [{
-      model: "m4", provider: "pool-a", metric: "—", detail: "失败", cached: 0, state: "failed",
+      model: "m4", provider: "pool-a", metric: "—", metricColor: "gray", io: "", cache: "", fail: "失败", state: "failed",
       rel: "12:03", key: "k4", errMsg: "x", at: "12:03:04", duration: "1.0s",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(collapsedFail.includes("is-expandable") && !collapsedFail.includes("terminal-request-expand"), "未展开的失败行只有行体");
 
     const escaped = await vmFn("terminalRequestItemHtml", [{
-      model: "<b>x</b>", provider: "p", metric: "—", detail: "完成 · 1 tokens", cached: 0, state: "ok", rel: "", key: "k5", errMsg: "", at: "", duration: "",
+      model: "<b>x</b>", provider: "p", metric: "—", metricColor: "gray", io: "1 / 0", cache: "", fail: "", state: "ok", rel: "", key: "k5", errMsg: "", at: "", duration: "",
     }, { label: "<i>y</i>" }], ["escapeHtml"]);
     assert.ok(escaped.includes("&lt;b&gt;x&lt;/b&gt;") && escaped.includes("&lt;i&gt;y&lt;/i&gt;"), "模型名与显示名都转义");
   });
