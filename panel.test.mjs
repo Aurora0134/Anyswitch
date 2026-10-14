@@ -5517,11 +5517,13 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     // JS：点击按有效栏态翻向并写档+写属性；有效态 = 手动态 ?? 宽度档（1200 界）
     assert.ok(panelJs.includes('const RAIL_COLLAPSE_LABEL = "收起侧栏";') && panelJs.includes('const RAIL_EXPAND_LABEL = "展开侧栏";'),
       "文案常量制（授权仅此一处新词）");
+    const toggleBody = panelJs.match(/function toggleRailManual\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(toggleBody.includes('localStorage.setItem("panel-rail-manual", next)')
+      && toggleBody.includes('setAttribute("data-rail", next)'), "点击写档并当帧写属性（CSS 全挂 data-rail）");
     const collapseBody = panelJs.match(/function initRailCollapse\(\) \{([\s\S]*?)\n  \}/)[1];
-    assert.ok(collapseBody.includes('localStorage.setItem("panel-rail-manual", next)')
-      && collapseBody.includes('setAttribute("data-rail", next)'), "点击写档并当帧写属性（CSS 全挂 data-rail）");
-    assert.ok(collapseBody.includes('matchMedia("(min-width: 1200px)").addEventListener("change", syncRailCollapseBtn)'),
-      "自动档跨 1200 档界重同步图标与文案");
+    assert.ok(collapseBody.includes('const wideMq = window.matchMedia("(min-width: 1200px)");')
+      && collapseBody.includes('wideMq.addEventListener("change"'),
+      "自动档跨 1200 档界重同步图标与文案（档界 mq 提为常量，同一监听兼作手动态出口）");
     assert.ok(/if \(typeof initRailCollapse === "function"\) initRailCollapse\(\);/.test(panelJs), "init 接线走 typeof 守卫");
     const effBody = panelJs.match(/function railEffectivelyCollapsed\(\) \{([\s\S]*?)\n  \}/)[1];
     assert.ok(effBody.indexOf('=== "collapsed"') < effBody.indexOf('matchMedia') && effBody.indexOf('=== "expanded"') < effBody.indexOf('matchMedia'),
@@ -5582,6 +5584,72 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     assert.ok(tagRule[1].includes("font-size: 12.5px;") && tagRule[1].includes("display: inline-block;"),
       "栏顶徽标字号回 12.5px（与头行同档）且 inline-block（顶距才真正生效）");
     assert.ok(/\.brand-text \.version-tag \{\s*font-size: 12\.5px/.test(panelCss), "v1/基座胶囊徽标原样不动");
+  });
+
+  it("左栏收展表现层：手动切换那一次栏自身宽度滑动、收起态滚条与图标、安静钮、快捷键豁免、宽档出口", () => {
+    // ── 动效手法（10-14 拍板）：只对栏自身做宽度过渡，盖板与 clip-path 双出局 ──
+    // 栏 fixed 定位、内容让位靠 padding，栏宽不参与内容重排，无需合成盖板；
+    // clip-path 只能减不能加（收起时边线被裁走）。开关只挂 <html> 临时属性。
+    const animBlock = [...panelCss.matchAll(/@media \(min-width: 860px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes("[data-rail-anim] .rail"));
+    assert.ok(animBlock, "滑动规则在册且只作用 ≥860 的常驻栏体（窄档抽屉留它自己的 240ms transform）");
+    assert.ok(animBlock.includes(':root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }'),
+      "双属性提级吃台中档块的 transition: none，时长与缓动照 ccswitch v4");
+    assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[^}]*overflow-y: auto; overflow-x: hidden;/.test(panelCss),
+      "栏基座横轴显式收掉（单轴 auto 会让 overflow-x 算成 auto，动画途中蹦横条）");
+    // ── 收起态两处细节：隐栏内滚条 + 图标放大一档；收起态两个来处各挂一条 ──
+    const midCollapsedBlock = [...panelCss.matchAll(/@media \(min-width: 860px\) and \(max-width: 1199px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes('.rail::-webkit-scrollbar'));
+    assert.ok(midCollapsedBlock, "中档收起态的细节块在册");
+    assert.ok(midCollapsedBlock.includes(':root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail::-webkit-scrollbar { width: 0; }')
+      && midCollapsedBlock.includes(':root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail .rail-tab svg { width: 17px; height: 17px; }'),
+      "中档用 :not(expanded) 让开手动全栏（无需反向召回），展开态滚条照旧在");
+    const wideCollapsedBlock = [...panelCss.matchAll(/@media \(min-width: 1200px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes('[data-rail="collapsed"] .rail::-webkit-scrollbar'));
+    assert.ok(wideCollapsedBlock, "宽档手动收起的同款细节块在册");
+    assert.ok(wideCollapsedBlock.includes('[data-rail="collapsed"] .rail .rail-tab svg { width: 17px; height: 17px; }'),
+      "宽档 collapsed 图标同放大（主 tab、设置目录、栏底两钮同批，收起钮不吃）");
+    // ── 安静钮：只改栏顶这一颗，脱离通用 .icon-btn 的描边+底+投影 ──
+    const quietBlock = [...panelCss.matchAll(/@media \(min-width: 860px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
+      .find((b) => b.includes(".rail-collapse-btn.icon-btn"));
+    assert.ok(quietBlock, "安静钮规则块在册");
+    const quietRule = quietBlock.match(/:root\[data-ui-version="v2"\] \.rail-brand \.rail-collapse-btn\.icon-btn \{([\s\S]*?)\}/);
+    assert.ok(quietRule, "安静钮作用域锁 .rail-brand（栏底亮暗与设置钮形制不动）");
+    for (const pin of ["width: 28px;", "height: 28px;", "border: 0;", "background: transparent;", "box-shadow: none;"]) {
+      assert.ok(quietRule[1].includes(pin), `安静钮缺：${pin}`);
+    }
+    assert.ok(/\.rail-collapse-btn\.icon-btn:hover \{[^}]*background: var\(--surface-hover\);/.test(quietBlock), "hover 才浮浅底");
+    assert.ok(/\.rail-collapse-btn\.icon-btn:active \{ transform: scale\(0\.96\); \}/.test(quietBlock), "按下微缩一档");
+    // ── JS：滑动开关只挂手动路径，自动档与 reduced-motion 一律不挂 ──
+    assert.ok(panelJs.includes('const RAIL_ANIM_ATTR = "data-rail-anim";'), "开关属性名常量制（与 CSS 同源）");
+    const slideBody = panelJs.match(/function requestRailSlide\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(slideBody.includes('prefers-reduced-motion: reduce') && slideBody.includes("return;"),
+      "reduced-motion 命中直接不挂开关");
+    assert.ok(slideBody.includes(`root.setAttribute(RAIL_ANIM_ATTR, "1")`) && slideBody.includes("root.removeAttribute(RAIL_ANIM_ATTR)"),
+      "开关写了必撤（定时器到点撤除，宽度没变化的场合也照样撤干净）");
+    const toggleBody = panelJs.match(/function toggleRailManual\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(toggleBody.indexOf("requestRailSlide()") < toggleBody.indexOf('setAttribute("data-rail", next)'),
+      "先挂开关再改栏宽（同一帧起算过渡）");
+    const syncBody = panelJs.match(/function syncRailCollapseBtn\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(syncBody.includes("syncRailTabTitles(collapsed)"),
+      "摘挂提示随有效栏态走（与钮的 aria、图标换向同一处收口）");
+    const titleBody = panelJs.match(/function syncRailTabTitles\(collapsed\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(titleBody.includes('tab.setAttribute("title", label.textContent.trim())') && titleBody.includes('tab.removeAttribute("title")'),
+      "收起态以标签文本回填 title、展开态摘掉（收起态标签不渲染，title 是唯一名字来源）");
+    const collapseBody = panelJs.match(/function initRailCollapse\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(collapseBody.includes("btn.onclick = () => toggleRailManual();"), "钮与快捷键走同一条链");
+    assert.ok(/if \(wideMq\.matches\) releaseRailManual\(\);\s*syncRailCollapseBtn\(\);/.test(collapseBody),
+      "跨进宽档解除手动态，两向都重同步图标与文案");
+    const releaseBody = panelJs.match(/function releaseRailManual\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(releaseBody.includes('root.removeAttribute("data-rail")') && releaseBody.includes('localStorage.removeItem("panel-rail-manual")'),
+      "手动态出口：属性与存档一并清（拖回宽档即回到跟随窗口）");
+    assert.ok(!releaseBody.includes("requestRailSlide"), "解除属自动态变化，不挂滑动开关");
+    for (const pin of ['event.key !== "\\\\"', '!document.documentElement.hasAttribute("data-ui-version")',
+      "event.isComposing || event.keyCode === 229", 'active.tagName === "INPUT"', 'active.tagName === "TEXTAREA"',
+      'active.tagName === "SELECT"', "active.isContentEditable", 'currentView === "terminal"',
+      'matchMedia("(min-width: 860px)")']) {
+      assert.ok(collapseBody.includes(pin), `快捷键豁免缺：${pin}`);
+    }
   });
 });
 

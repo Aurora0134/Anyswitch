@@ -345,8 +345,10 @@
     position: fixed; left: 0; top: 0; bottom: 0; width: 216px; z-index: 120;
     padding: 16px 12px;
     background: var(--surface); border-right: 1px solid var(--border);
-    /* C2：视口高度不够时栏体自滚，贴底 tab 组与底行可达（margin-top:auto 语义保持） */
-    overflow-y: auto;
+    /* C2：视口高度不够时栏体自滚，贴底 tab 组与底行可达（margin-top:auto 语义保持）。
+       横轴显式收掉：只写 overflow-y 单轴时 overflow-x 会被计算成 auto，手动收展的宽度
+       动画途中栏内容暂比栏宽，会蹦出一条 10px 横向滚条。 */
+    overflow-y: auto; overflow-x: hidden;
     /* 窄档默认态：抽屉收在视口外（默认关，刷新首帧不闪现开着的抽屉） */
     transform: translateX(-100%);
     transition: transform 240ms var(--ease-out);
@@ -631,6 +633,59 @@
     :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn { margin-left: 0; }
     :root[data-ui-version="v2"] .rail-foot { justify-content: center; }
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
+  }
+
+  /* ── 阶段 2 左栏收展表现层：手动态切换那一次的边缘滑动 ──
+     手法＝只对栏自身做宽度过渡，时长与缓动照 ccswitch v4（200ms / cubic-bezier
+     (.2,0,0,1)）。它的合成盖板与先前的 clip-path 方案都已出局：盖板要绕的是「栏宽参与
+     内容重排、每帧主线程重排掉帧」，而我们的栏 fixed 定位、内容让位靠 padding（见基座
+     与两处校准块），栏宽根本不参与内容重排，代价不存在；clip-path 又只能减不能加——
+     收起时栏盒已缩到 72，需要把栏底色画到 72–216 这段盒外去盖住已左移的内容，且
+     border-right 会被裁走，动画全程没有边线。宽度动画两方向都对、那条 1px 右边线
+     自带，连点打断时 CSS 过渡从当前计算值续接（不跳变），盖板里的实时读边逻辑白拿。
+     只有手动切换滑：<html> data-rail-anim 是 panel.js 挂的临时开关（动画收尾撤除），
+     拖窗口跨 1200 档界的自动变化、以及 prefers-reduced-motion 都不挂开关，栏体照旧
+     到位。开关只作用 ≥860 的常驻栏体——窄档抽屉有自己的 240ms transform 滑入（基座
+     规则），不被这条接管。双属性选择器提级：中档块（≥860 的 transition: none）同
+     优先级且位置更靠后，不这样写会被盖。 */
+  @media (min-width: 860px) {
+    :root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }
+  }
+
+  /* 收起态（72 图标栏）两处细节，同样照 ccswitch 补：
+     ① 隐栏内滚条——全局 ::-webkit-scrollbar 是 10px，72px 栏被啃掉七分之一还顺带把
+        居中的图标推歪（栏体 overflow-y 恒 auto，矮窗口才真滚，滚轮与键盘照常可达）；
+        展开态不隐，矮窗口时那条滚条是「栏还能滚」的线索。
+     ② 栏内图标放大一档 15→17px（ccswitch 是 18→20，同一比例约 +13%）——文字没了，
+        图标独自承担识别。主 tab 组、设置目录、栏底两钮同批（都是 .rail .rail-tab svg），
+        栏顶收起钮不吃（它另有 28px 安静钮形制，见下）。
+     收起态在 CSS 里有两个来处，各挂一条、互不遮蔽：中档（860–1199）是自动档默认形态，
+     用 :not([data-rail="expanded"]) 把手动展开的那一档整体让开（无需再写反向召回）；
+     宽档只有手动态 collapsed 才是图标栏。 :not() 提级到与手动态块同档，稳吃基座规则。 */
+  @media (min-width: 860px) and (max-width: 1199px) {
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail::-webkit-scrollbar { width: 0; }
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail .rail-tab svg { width: 17px; height: 17px; }
+  }
+  @media (min-width: 1200px) {
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail::-webkit-scrollbar { width: 0; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail .rail-tab svg { width: 17px; height: 17px; }
+  }
+
+  /* 收起钮改「安静钮」（照 ccswitch 的 Sidebar 顶条钮）：脱离通用 .icon-btn 的
+     描边＋底＋投影三件套——栏顶那一行本就有品牌徽标与版本字，再嵌一枚带边框的小方块
+     偏重。28×28 无底无框、靠 hover 才浮浅底、按下微缩一档。只改这一颗：栏底亮暗钮与
+     设置/返回钮的描边与底是它们独立成行时的可见性线索，不动。 */
+  @media (min-width: 860px) {
+    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn {
+      width: 28px; height: 28px; padding: 0;
+      border: 0; background: transparent; box-shadow: none;
+      color: var(--text-2);
+      transition: background 140ms var(--ease-out), color 140ms var(--ease-out), transform 120ms var(--ease-out);
+    }
+    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:hover {
+      background: var(--surface-hover); color: var(--text);
+    }
+    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:active { transform: scale(0.96); }
   }
 
   /* 栏顶版本徽标（仅 v2 栏顶）：纯文字挪品牌字下方，去胶囊只留字——去底/边，字色回

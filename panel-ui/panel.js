@@ -6885,18 +6885,50 @@ async function api(method, path, body) {
     mq.addEventListener("change", () => { if (mq.matches) closeRailDrawer(false); });
   }
 
-  // 栏手动收/展（栏顶收起钮）：手动态优先于宽度自动档——<html> data-rail 是唯一
-  // 状态源（head 脚本绘制前从 localStorage「panel-rail-manual」读回，首帧即手动
-  // 态；CSS 全部挂这个属性），这里只管点击写档+写属性、图标与文案随有效栏态换向。
+  // 栏手动收/展（栏顶收起钮 + Ctrl/Cmd+\）：手动态优先于宽度自动档——<html> data-rail
+  // 是唯一状态源（head 脚本绘制前从 localStorage「panel-rail-manual」读回，首帧即手动
+  // 态；CSS 全部挂这个属性），这里只管点击写档+写属性、图标与文案随有效栏态换向、切换
+  // 那一次挂上滑动开关。
   // 有效栏态 = 手动态 ?? 宽度自动档（≥1200 自动 216 全栏 / 860–1199 自动 72 图标栏）；
-  // 窄档（<860）抽屉生态不收此钮管（钮也不出）。文案常量制（同抽屉钮先例）。
+  // 窄档（<860）抽屉生态不收此钮管（钮也不出，快捷键一并让位）。文案常量制（同抽屉钮先例）。
   const RAIL_COLLAPSE_LABEL = "收起侧栏";
   const RAIL_EXPAND_LABEL = "展开侧栏";
+  // 手动切换的边缘滑动：CSS 那条 width 过渡只挂在 <html> data-rail-anim 上（见 panel.css
+  // 阶段 2 收展段），开关在这里写、到点撤。撤除余量 20ms 是让过渡跑完再断；宽度本就没
+  // 变化的场合（同宽来回切）等不到过渡也无妨，定时器照样撤。自动档跨档与
+  // prefers-reduced-motion 一律不挂开关——拖窗口不是用户在「看收展手法」，不该跟着滑。
+  const RAIL_ANIM_ATTR = "data-rail-anim";
+  const RAIL_ANIM_MS = 220;
+  let railAnimTimer = null;
+  function requestRailSlide() {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const root = document.documentElement;
+    root.setAttribute(RAIL_ANIM_ATTR, "1");
+    if (railAnimTimer) clearTimeout(railAnimTimer);
+    railAnimTimer = setTimeout(() => {
+      railAnimTimer = null;
+      root.removeAttribute(RAIL_ANIM_ATTR);
+    }, RAIL_ANIM_MS);
+  }
   function railEffectivelyCollapsed() {
     const manual = document.documentElement.getAttribute("data-rail");
     if (manual === "collapsed") return true;
     if (manual === "expanded") return false;
     return !window.matchMedia("(min-width: 1200px)").matches;
+  }
+  // 展开态不挂重复提示：各 tab 的 title 与可见标签逐字相同，鼠标扫过一排等于把同一句
+  // 话念七遍。ccswitch 是靠自家 tooltip 组件做「文字可见即不提示」，原生 title 没法条件
+  // 抑制，这里按有效栏态摘挂——收起态标签不渲染，title 是唯一的名字来源，必须留。
+  // 只动运行期属性，HTML 里写死的初值不删（v1 整栏不出，摘挂对它不可见）。
+  function syncRailTabTitles(collapsed) {
+    const rail = $("v2Rail");
+    if (!rail) return;
+    for (const tab of rail.querySelectorAll(".rail-tab")) {
+      const label = tab.querySelector(".rail-tab-label");
+      if (!label) continue;
+      if (collapsed) tab.setAttribute("title", label.textContent.trim());
+      else tab.removeAttribute("title");
+    }
   }
   function syncRailCollapseBtn() {
     const btn = $("railCollapseBtn");
@@ -6909,19 +6941,51 @@ async function api(method, path, body) {
     const icoCollapse = $("railIcoCollapse"), icoExpand = $("railIcoExpand");
     if (icoCollapse) icoCollapse.hidden = collapsed;
     if (icoExpand) icoExpand.hidden = !collapsed;
+    syncRailTabTitles(collapsed);
+  }
+  // 手动态的出口：窗口拖回宽档即解除，栏回到「跟随窗口宽度」。手动态原本永久压制自动档
+  // 且没有回退口（ccswitch 同款毛病），而拖窗口多半只是用户换个地方看东西，不该替他
+  // 把栏态钉死。解除属自动态变化，不挂滑动开关；重同步由调用方收尾。
+  function releaseRailManual() {
+    const root = document.documentElement;
+    if (!root.hasAttribute("data-rail")) return false;
+    root.removeAttribute("data-rail");
+    try { localStorage.removeItem("panel-rail-manual"); } catch {}
+    return true;
+  }
+  function toggleRailManual() {
+    const next = railEffectivelyCollapsed() ? "expanded" : "collapsed";
+    requestRailSlide();
+    try { localStorage.setItem("panel-rail-manual", next); } catch {}
+    document.documentElement.setAttribute("data-rail", next);
+    syncRailCollapseBtn();
   }
   function initRailCollapse() {
     const btn = $("railCollapseBtn");
     if (!btn) return;
-    btn.onclick = () => {
-      const next = railEffectivelyCollapsed() ? "expanded" : "collapsed";
-      try { localStorage.setItem("panel-rail-manual", next); } catch {}
-      document.documentElement.setAttribute("data-rail", next);
-      syncRailCollapseBtn();
-    };
+    btn.onclick = () => toggleRailManual();
     // 自动档下窗口跨过 1200 档界会改变有效栏态：图标与文案重同步（手动态下
-    // 有效态不随宽度变，重同步是幂等空转）
-    window.matchMedia("(min-width: 1200px)").addEventListener("change", syncRailCollapseBtn);
+    // 有效态不随宽度变，重同步是幂等空转）；跨进宽档顺带解除手动态（出口）。
+    const wideMq = window.matchMedia("(min-width: 1200px)");
+    wideMq.addEventListener("change", () => {
+      if (wideMq.matches) releaseRailManual();
+      syncRailCollapseBtn();
+    });
+    // Ctrl/Cmd+\ 与收起钮同一条链。四处豁免：旧版（v2 属性不在册时整栏不出、收起钮
+    // display:none 本也点不到，快捷键是这条链唯一能凭空触达的入口）、IME 组字态（最终
+    // 字节未定，见终端转发闸门先例）、输入控件与可编辑区（全站有搜索框、路径框、编号
+    // 框）、终端视图（内核把 Ctrl 组合原样转发给 PTY，不能被界面快捷键抢走）。
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "\\" || !(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+      if (!document.documentElement.hasAttribute("data-ui-version")) return;
+      if (event.isComposing || event.keyCode === 229) return;
+      const active = document.activeElement;
+      if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable)) return;
+      if (currentView === "terminal") return;
+      if (!window.matchMedia("(min-width: 860px)").matches) return;
+      event.preventDefault();
+      toggleRailManual();
+    });
     syncRailCollapseBtn();
   }
 
