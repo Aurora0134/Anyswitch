@@ -46,28 +46,38 @@ test("npm wrappers report the selected product package version, including prerel
   });
 });
 
+// opencode 的执行体位置由宿主包清单的 optionalDependencies 说了算（解析器侧），
+// 版本则由被选中的那个平台包自己的清单提供。fixture 按 npm 真实落盘写两层。
+function installOpencodePlatform(f, hostName, platformName) {
+  const host = join(f.base.APPDATA, "npm/node_modules", ...hostName.split("/"));
+  const root = join(host, "node_modules", ...platformName.split("/"));
+  f.put(join(host, "package.json"), JSON.stringify({
+    name: hostName, version: "9.9.9", bin: { opencode: "./bin/opencode.exe" },
+    optionalDependencies: { [platformName]: "9.9.9" },
+  }));
+  const entry = f.put(join(root, "bin/opencode.exe"));
+  return { root, entry };
+}
+
 test("OpenCode uses its selected platform package instead of the embedded Bun version", async (t) => {
   const f = fixture(t);
-  const root = join(f.base.APPDATA, "npm/node_modules/opencode-ai/node_modules/opencode-windows-x64");
-  f.put(join(root, "bin/opencode.exe"));
+  const { root, entry } = installOpencodePlatform(f, "opencode-ai", "opencode-windows-x64");
   f.put(join(root, "package.json"), JSON.stringify({ name: "opencode-windows-x64", version: "1.18.31" }));
   const service = f.service({ readVersionResource: async () => ({ ProductName: "Bun", ProductVersion: "1.3.14" }) });
   assert.equal(installation(await service.getState(), "opencode").version, "1.18.31");
   fs.unlinkSync(join(root, "package.json"));
   const item = installation(await service.getState({ force: true }), "opencode");
   assert.equal(item.status, "found");
+  assert.equal(item.path, entry);
   assert.equal(item.version, null);
   assert.equal(item.issue, "version_unavailable");
 });
 
 test("OpenCode detects the baseline platform package this machine actually carries", async (t) => {
   // 上游按 CPU 档位把平台依赖拆成 x64 与 x64-baseline 两个可选包，机器上落盘
-  // 哪一个都可能（本机 2026-10-11 重装起只有 baseline，1.19.0 实测可运行）。
-  // 检测必须认实际装了的那个：packageVersion 的包名正则本就接受 -baseline，
-  // 缺的只是解析器认得这条路。修好后关于页「本地」列与新建终端菜单同时恢复。
+  // 哪一个都可能（本机 2026-10-11 重装起只有 baseline）。检测必须认实际装的那个。
   const f = fixture(t);
-  const root = join(f.base.APPDATA, "npm/node_modules/opencode-ai/node_modules/opencode-windows-x64-baseline");
-  const entry = f.put(join(root, "bin/opencode.exe"));
+  const { root, entry } = installOpencodePlatform(f, "opencode-ai", "opencode-windows-x64-baseline");
   f.put(join(root, "package.json"), JSON.stringify({ name: "opencode-windows-x64-baseline", version: "1.19.0" }));
   const item = installation(await f.service().getState(), "opencode");
   assert.equal(item.status, "found");
@@ -75,6 +85,35 @@ test("OpenCode detects the baseline platform package this machine actually carri
   assert.equal(item.version, "1.19.0");
   assert.equal(item.versionSource, "package.json");
   assert.equal(item.issue, null);
+});
+
+test("OpenCode detects the 2.x scoped package after upstream renamed it", async (t) => {
+  // 本机 2026-10-14 13:18 起官方包整组改名：opencode-ai → @opencode/cli，平台包
+  // opencode-windows-x64 → @opencode/cli-windows-x64。这一改把只认旧名的一版修复
+  // 打回「本地 未找到 + 新建终端菜单缺项」，所以新布局要钉在用例里。
+  // 平台包目录名是 scope 去掉后的 `cli-windows-x64`，版本身份认的是「清单名去
+  // scope 等于所在目录名」，不再逐个列举上游的包名。
+  const f = fixture(t);
+  const { root, entry } = installOpencodePlatform(f, "@opencode/cli", "@opencode/cli-windows-x64");
+  f.put(join(root, "package.json"), JSON.stringify({ name: "@opencode/cli-windows-x64", version: "2.0.28" }));
+  const item = installation(await f.service().getState(), "opencode");
+  assert.equal(item.status, "found");
+  assert.equal(item.path, entry);
+  assert.equal(item.version, "2.0.28");
+  assert.equal(item.versionSource, "package.json");
+  assert.equal(item.issue, null);
+});
+
+test("OpenCode 不接受平台目录旁对不上号的包清单版本", async (t) => {
+  // 身份防线：所在目录名必须就是那份清单的名字（去 scope 后），否则是别人家的目录。
+  const f = fixture(t);
+  const { root, entry } = installOpencodePlatform(f, "@opencode/cli", "@opencode/cli-windows-x64");
+  f.put(join(root, "package.json"), JSON.stringify({ name: "somebody-elses-package", version: "7.0.0" }));
+  const item = installation(await f.service().getState(), "opencode");
+  assert.equal(item.status, "found");
+  assert.equal(item.path, entry);
+  assert.equal(item.version, null);
+  assert.equal(item.issue, "version_unavailable");
 });
 
 test("Claude normalizes its own PE version and exposes disagreement with its selected package", async (t) => {

@@ -69,18 +69,19 @@ describe("resolveOpencodeExecutable", () => {
   const base = { APPDATA: "C:\\AppData\\Roaming", USERPROFILE: "C:\\Users\\tester" };
 
   it("defaults to the real opencode binary inside the platform optional dependency", () => {
-    // The top-level opencode-ai\bin\opencode.exe is a placeholder batch when
-    // npm blocks the postinstall copy — never resolve to it.
+    // The package's own bin (what %APPDATA%\npm\opencode.cmd points at) is a
+    // placeholder batch whenever npm blocks the postinstall copy — never
+    // resolve to it. Default is the selected platform package instead.
     assert.equal(
       resolveOpencodeExecutable(base),
-      "C:\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe",
+      "C:\\AppData\\Roaming\\npm\\node_modules\\@opencode\\cli\\node_modules\\@opencode\\cli-windows-x64\\bin\\opencode.exe",
     );
   });
 
   it("falls back to USERPROFILE when APPDATA is unset", () => {
     assert.equal(
       resolveOpencodeExecutable({ USERPROFILE: "C:\\Users\\tester" }),
-      "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe",
+      "C:\\Users\\tester\\AppData\\Roaming\\npm\\node_modules\\@opencode\\cli\\node_modules\\@opencode\\cli-windows-x64\\bin\\opencode.exe",
     );
   });
 
@@ -94,7 +95,7 @@ describe("resolveOpencodeExecutable", () => {
   it("ignores an empty override and keeps the default", () => {
     assert.equal(
       resolveOpencodeExecutable({ ...base, OPENCODE_EXECUTABLE: "" }),
-      "C:\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe",
+      "C:\\AppData\\Roaming\\npm\\node_modules\\@opencode\\cli\\node_modules\\@opencode\\cli-windows-x64\\bin\\opencode.exe",
     );
   });
 
@@ -144,7 +145,7 @@ describe("runOpencodeLauncher", () => {
     assert.deepEqual(spawn.args, [
       "/d",
       "/c",
-      "C:\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\node_modules\\opencode-windows-x64\\bin\\opencode.exe",
+      "C:\\AppData\\Roaming\\npm\\node_modules\\@opencode\\cli\\node_modules\\@opencode\\cli-windows-x64\\bin\\opencode.exe",
       "--model",
       "x",
     ]);

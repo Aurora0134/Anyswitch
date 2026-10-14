@@ -12,7 +12,7 @@ import { compareVersions, parseVersion } from "./version-check.mjs";
 export const CLIENT_PACKAGES = Object.freeze({
   claude: "@anthropic-ai/claude-code",
   codex: "@openai/codex",
-  opencode: "opencode-ai",
+  opencode: "@opencode/cli",
   pi: "@earendil-works/pi-coding-agent",
   kimi: "@moonshot-ai/kimi-code",
   dsh: "@deepseek-ai/dsh",

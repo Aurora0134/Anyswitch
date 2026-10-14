@@ -2560,7 +2560,7 @@ async function api(method, path, body) {
     const products = {
       claude: ["anthropics/claude-code", "@anthropic-ai/claude-code"],
       codex: ["openai/codex", "@openai/codex"],
-      opencode: ["anomalyco/opencode", "opencode-ai"],
+      opencode: ["anomalyco/opencode", "@opencode/cli"],
       pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
       kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
       dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],

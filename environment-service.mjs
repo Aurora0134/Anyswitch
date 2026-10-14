@@ -266,8 +266,14 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       const text = readText(join(root, "package.json"));
       if (!text) return null;
       const pkg = JSON.parse(text);
-      return /^opencode-windows-(?:x64|arm64)(?:-baseline)?$/.test(pkg.name)
-        && resolve(root, "bin/opencode.exe").toLowerCase() === resolve(path).toLowerCase()
+      // 平台变体包不声明 bin，走不了下面「bin 指向该执行体」的通用分支。身份防线因此
+      // 只看两件事：清单名去掉 scope 就是它所在的目录名、且确实是 opencode 家的包，
+      // 执行体就在那个目录的 bin 下。上游把 opencode-windows-* 改名 @opencode/cli-windows-*
+      // 不再影响读版本，别人家的目录仍然进不来。
+      const name = typeof pkg.name === "string" ? pkg.name.toLowerCase() : "";
+      return name.split("/").pop() === basename(root).toLowerCase()
+        && name.includes("opencode")
+        && dirname(resolve(path)).toLowerCase() === resolve(root, "bin").toLowerCase()
         && typeof pkg.version === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
     }
     const names = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh" };
