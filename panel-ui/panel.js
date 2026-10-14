@@ -3527,12 +3527,16 @@ async function api(method, path, body) {
       // 不再命中那条规则，照样克隆就是给新版用户画出一条界面上不存在的旧版导航，改为
       // 克隆一份迷你栏（fixed 通高形态由 :root[v2] .settings-mirror-scale .rail 剥成静态）。
       const v2 = newUiEnabled();
+      let mirrorRailW = 0;
       if (v2) {
         const rail = document.querySelector(".rail");
         if (rail) {
           const railClone = rail.cloneNode(true);
           stripIds(railClone);
           scaleEl.appendChild(railClone);
+          // 栏宽按克隆实渲取值（宽档 216、中档随媒体查询收 72），栏与内容区间的
+          // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
+          mirrorRailW = railClone.offsetWidth;
         }
       } else {
         const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
@@ -3550,10 +3554,10 @@ async function api(method, path, body) {
       stripIds(boardClone);
       scaleEl.appendChild(boardClone);
       // 看板被切走时量不到自身宽度：镜像自然宽以 main 内容宽为准（两者同宽）；新版的
-      // 栏宽不占 main 内容宽，按 :root[v2] .rail 的定宽 216 补回。
+      // 栏宽与 24px 栏间隔不占 main 内容宽，按克隆实渲宽 + 24 补回。
       // 缩放比 = 预览可视宽 / 自然宽，sizer 按缩放后尺寸撑开供 viewport 内滚。
       const mainCs = getComputedStyle(main);
-      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (v2 ? 216 : 0);
+      const naturalW = main.clientWidth - parseFloat(mainCs.paddingLeft) - parseFloat(mainCs.paddingRight) + (mirrorRailW ? mirrorRailW + 24 : 0);
       const availW = viewport.clientWidth;
       if (!naturalW || !availW) return;
       scaleEl.style.width = naturalW + "px";

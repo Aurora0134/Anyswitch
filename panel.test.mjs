@@ -3107,10 +3107,11 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(body.includes('document.querySelector(".rail")'), "新版克隆左栏进镜像");
     assert.ok(/\} else \{\s*const tabs = document\.querySelector\("#mainHeadInner nav\.view-tabs"\)/.test(body),
       "头行 tabs 克隆只在旧版分支执行");
-    assert.ok(/\+ \(v2 \? 216 : 0\)/.test(body),
-      "镜像自然宽补回栏宽 216（与 :root[data-ui-version=\"v2\"] .rail 的 width 同源）");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: flex;/.test(panelCss),
-      "镜像画布在新版下横排：栏在左、看板在右");
+    assert.ok(/\+ \(mirrorRailW \? mirrorRailW \+ 24 : 0\)/.test(body),
+      "镜像自然宽补回栏克隆实渲宽 + 24px 栏间隔（宽档 216+24、中档随媒体查询 72+24，与布局左让同源）");
+    assert.ok(/railClone\.offsetWidth/.test(body), "栏宽按克隆实渲取值，不硬编码档宽");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: flex; align-items: stretch; gap: 24px; \}/.test(panelCss),
+      "镜像画布在新版下横排：栏在左、看板在右，栏与内容区间照真实布局留 24px 间隔");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{ position: static;/.test(panelCss),
       "镜像内的栏剥 fixed 通高形态，随画布静态铺开");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ flex: 1 1 auto; min-width: 0; \}/.test(panelCss),
@@ -5100,7 +5101,7 @@ describe("设置项「UI版本」", () => {
       ["railTabBoard", "railTabSkills", "railTabPresets", "railTabSessions", "railTabStore", "railTabStats", "railTabTerminal"],
       "七 tab 依次在册（终端垫底），中间四项不带「管理」，模型管理在使用统计之上");
     const labels = tabs.map((m) => (m[3].match(/<span class="rail-tab-label">([^<]+)<\/span>/) || [])[1]);
-    assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计", "终端"],
+    assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计", "虚拟终端"],
       "标签文本全部为既有词汇，文字包 span 供图标栏整隐");
     for (const [i, m] of tabs.entries()) {
       const atSvg = m[3].indexOf("<svg");
@@ -5108,9 +5109,9 @@ describe("设置项「UI版本」", () => {
       assert.ok(atSvg >= 0 && atSvg < atLabel, `${m[1]} 图标在文字前`);
       assert.ok(m[3].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
         `${m[1]} 图标与既有齿轮/日月同一 feather 风（24 视窗、空心描边、round caps）`);
-      // 悬停提示=标签文本；唯一例外是「终端」栏位用产品正式名「虚拟终端」（10-14 用户拍板：
-      // 栏位标签取短名「终端」，title 给正式名，与看板入口卡「虚拟终端」同名）
-      const wantTitle = m[1] === "railTabTerminal" ? "虚拟终端" : labels[i];
+      // 悬停提示=标签文本（10-14 用户拍板：栏位标签即用产品正式名「虚拟终端」，
+      // 与看板入口卡同名，title 与标签一致）
+      const wantTitle = labels[i];
       assert.ok(m[2].includes(`title="${wantTitle}"`), `${m[1]} 的 title=${wantTitle}（图标栏悬停提示）`);
     }
     assert.ok(tabs[0][2].includes('aria-current="page"'), "静态默认高亮的看板 tab 带 aria-current");

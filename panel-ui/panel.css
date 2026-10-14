@@ -1154,11 +1154,12 @@
   .settings-mirror-sizer { position: relative; overflow: hidden; }
   .settings-mirror-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
   .settings-mirror-tabs { display: flex; justify-content: center; padding: 10px 0 4px; }
-  /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏贴着看板左缘（captureSettingsMirror
+  /* v2 的镜像：主导航在左栏，镜像改克隆一份迷你栏与看板镜像横排（captureSettingsMirror
      只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
      同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
-     栏自动着色。栏宽不占镜像里 main 的内容宽，自然宽在 JS 里按栏宽 216 补回。 */
-  :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; }
+     栏自动着色。栏与内容区间的 24px 间隔照真实布局以 gap 呈现；栏宽与间隔不占镜像里
+     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、中档 72+24）。 */
+  :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; gap: 24px; }
   :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; transform: none; }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { flex: 1 1 auto; min-width: 0; }
 
