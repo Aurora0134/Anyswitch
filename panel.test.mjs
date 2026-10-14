@@ -5178,6 +5178,60 @@ describe("设置项「UI版本」", () => {
       "任何视图切换都收起窄档抽屉；设置/终端头行整隐、汉堡钮不可见，不归还焦点");
   });
 
+  it("设置页区块成描边盒（材质修正）：透明底四边描边盒 + aurora 恢复玻璃卡，hairline 撤场", () => {
+    const scope = ':root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced)';
+    const card = panelCss.match(new RegExp(scope.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + " \\.panel-card \\{([^}]*)\\}"));
+    assert.ok(card, "设置页卡片规则在册（四面板 id 列举作用域，不整罩）");
+    for (const pin of ["background: transparent;", "border: 1px solid var(--border);",
+      "border-radius: var(--radius-md);", "box-shadow: none;", "backdrop-filter: none;"]) {
+      assert.ok(card[1].includes(pin), `描边盒缺：${pin}`);
+    }
+    assert.ok(!card[1].includes("border-radius: 0"), "不再是去壳的方角透明片");
+    const hover = panelCss.match(new RegExp(scope.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + " \\.panel-card:hover \\{([^}]*)\\}"));
+    assert.ok(hover[1].includes("transform: none;") && hover[1].includes("box-shadow: none;") && hover[1].includes("border-color: var(--border);"),
+      "hover 不浮、不描边变化（描边盒是静态容器）");
+    assert.ok(panelCss.includes(`${scope} { gap: 28px; }`), "盒间距 28px 节奏");
+    assert.ok(!new RegExp(scope.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + " \\.panel-card \\+ \\.panel-card").test(panelCss),
+      "卡间 hairline 单线已撤（描边盒自带边界）");
+    assert.ok(panelCss.includes(`${scope} .card-title {\n    font-size: 15px; font-weight: 600; color: var(--text);\n  }`),
+      "区段标题 15px/600/正文色（grill 定稿）");
+    assert.ok(panelCss.includes(`${scope} .card-body {\n    padding: 12px 18px 16px;\n  }`), "标题到内容 12px、盒内 16 节奏");
+    assert.ok(panelCss.includes(`${scope} .card-header {\n    background: transparent; border-bottom: 0; padding: 16px 18px 0;\n  }`), "卡头去底线、顶距 16");
+    // aurora 例外：恢复皮肤原生玻璃卡材质（去影去 hover 浮），不是透明描边盒
+    const aurora = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style="aurora"\] :is\(#settingsPanelGeneral[^)]*\) \.panel-card \{([^}]*)\}/);
+    assert.ok(aurora, "aurora 玻璃卡恢复规则在册");
+    for (const pin of ["background: var(--surface);", "background-image: var(--card-hairline);",
+      "backdrop-filter: var(--glass-blur);", "border: 1px solid var(--border);",
+      "border-radius: var(--radius-lg);", "box-shadow: inset 0 1px 0 var(--hl-inset);"]) {
+      assert.ok(aurora[1].includes(pin), `aurora 玻璃卡缺：${pin}`);
+    }
+    assert.ok(!aurora[1].includes("--shadow-sm") && !aurora[1].includes("--shadow-md"), "aurora 只留 inset 顶部高光、去投影");
+  });
+
+  it("v2 明暗关系交换：saas/sepia 内容区与栏底 token 对调，aurora 摘出，v1 原样", () => {
+    for (const skin of ["saas", "sepia"]) {
+      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style="${skin}"] body`),
+        `${skin} 内容区底换 --surface`);
+      assert.ok(panelCss.includes(`:root[data-ui-version="v2"][data-style="${skin}"] .rail`),
+        `${skin} 栏底换 --bg-page`);
+    }
+    assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] body,[\s\S]*?body \{ background: var\(--surface\); \}/.test(panelCss),
+      "内容区底 = --surface（亮：白；暗：抬亮一档）");
+    assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] \.rail,[\s\S]*?\.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
+      "栏底 = --bg-page（亮：灰；暗：再压暗）");
+    assert.ok(panelCss.includes('.terminal-view,\n  :root[data-ui-version="v2"][data-style="sepia"] .terminal-view { background: var(--surface); }'),
+      "terminal-view 同步换（切页不跳变）");
+    assert.ok(panelCss.includes('.settings-theme-preview,\n  :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }'),
+      "主题预览镜像视口同步换（镜像演示新明暗关系）");
+    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] body'),
+      "aurora 摘出对调（--surface 是半透玻璃料，对调毁玻璃页身层次；页面底即其「面」）");
+    // aurora 栏不添底色规则：其栏玻璃规则（backdrop-filter 那条）不含 background，
+    // 由阶段 1「aurora 栏材质」断言原样钉着
+    // v1 零变化：基座 body/rail 底色原样
+    assert.ok(/\n  body \{\n    margin: 0; background: var\(--bg-page\);/.test(panelCss), "基座 body 底色原样");
+    assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[\s\S]*?background: var\(--surface\);/.test(panelCss), "v2 栏基座底色规则原样（对调由双属性覆写承担）");
+  });
+
   it("设置子导航迁入左栏：设置态主 tab 组整组换目录、栏底齿轮换「返回」，首帧与运行时可交棒", () => {
     const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
     // 目录组就在主 tab 组与栏底行之间，静态 hidden（v1 整栏不出、v2 非设置态不出）
@@ -5368,8 +5422,12 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏三级降级 + �
     assert.ok(m[1].includes("backdrop-filter: var(--glass-blur);") && m[1].includes("-webkit-backdrop-filter: var(--glass-blur);"),
       "玻璃模糊取既有 --glass-blur（aurora 卡片玻璃同配方）");
     assert.ok(!m[1].includes("background"), "半透底沿用基座 var(--surface)（aurora 下本就半透），不造新色值");
-    assert.ok(!panelCss.includes('[data-style="saas"] .rail') && !panelCss.includes('[data-style="sepia"] .rail'),
-      "saas/sepia 的 --surface 是实底，基座规则已够，不添");
+    // 阶段 2 材质修正后，saas/sepia 栏各多一条 v2 底色对调规则（栏底换 --bg-page）——
+    // 那是明暗交换、不是玻璃材质；本例仍钉「saas/sepia 栏的规则只有对调这一条」
+    const swapRail = [...panelCss.matchAll(/\[data-style="(?:saas|sepia)"\] \.rail[ ,]/g)];
+    assert.ok(swapRail.length === 2, "saas/sepia 栏仅底色对调一处（合并选择器各占一格）");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style="sepia"] .rail { background: var(--bg-page); }'),
+      "saas/sepia 栏底对调为 --bg-page；玻璃材质仍只有 aurora");
   });
 
   it("布局断点按栏态校准：宽档 +240 / 中档 +96，窄档沿用 v1；只校准真挤压的布局断点", () => {

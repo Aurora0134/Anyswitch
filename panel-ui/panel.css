@@ -482,13 +482,14 @@
   /* ── 新版界面阶段 2：设置页平铺试点——「页面是平的，浮层才有影」 ──
      只作用新版（v2），旧版零变化；只剥容器壳，控件（按钮/开关/下拉/输入）的可点击
      指示一律保留。四块内容（1/2 为试点初版，3/4 与分隔感补强为验收修整）：
-     1) 设置卡片去壳：透明底、去边框/阴影/圆角/悬停描边，卡间距归零后相邻卡以一条
-        hairline 相连（.panel-card + .panel-card 只画上边线，draw each border once；
-        验收后线色从 --divider 提到 --border 一级，三皮肤×亮暗肉眼可见不抢戏）；
-        卡头降格为区段小标题（13px 正文色、去卡头底线，图标保留），区块间距按
-        28px 节奏（线两侧各 28，卡头 28/0 与卡体 10/28 组合，无头平卡顶距同档）。
+     1) 设置区块成描边盒（材质修正定稿，取代初版去壳）：透明底（坐页面背景）+ 四边
+        1px 描边（--border）+ 圆角随皮肤语言（--radius-md：saas 恰 10px 档、sepia
+        方角 3px）、无影、hover 不浮也不描边变化；盒间距 28px、盒内卡头 16/0 +
+        卡体 12/16（标题到内容 12px），无头平卡顶距同档 16。卡头标题 15px/600/正文色。
+        aurora 例外 = 恢复其皮肤原生卡片材质（玻璃透底 + 模糊 + 顶部 hairline + 描边，
+        圆角取其原生 --radius-lg），只去投影、去 hover 浮——aurora 的「平」就是玻璃卡。
         作用域按四个有卡面板的 id 列举、不用 #settingsView 整罩——主题子页的看板
-        预览镜像是克隆的真实看板 DOM（内含 .panel-card），整罩会把镜像卡一并剥壳、
+        预览镜像是克隆的真实看板 DOM（内含 .panel-card），整罩会把镜像卡一并套新壳、
         毁掉「预览=真实看板」的保真；主题子页自身无卡，天然不在列。
      2) 子 tab 胶囊降权：.settings-subtabs 撤托盘（透明底、去边框），选中态改 2px
         下划线指示条（var(--accent)）+ 文字加深，与左栏主导航的圆角块拉开层级；
@@ -510,32 +511,40 @@
      选择器一律 [data-ui-version="v2"][data-style] 双属性提级：三套皮肤在更靠后
      位置覆写 .panel-card/.view-tab 系规则，单属性同优先级会被盖；data-style 由
      panel.html 内联脚本在绘制前恒写入，通配 [data-style] 三皮肤通吃（栏内换血与
-     档位让位规则无皮肤对手，按结构选择器写）。aurora 例外成立：去壳后内容直接
-     坐在玻璃页面上（body 极光晕透出，左栏玻璃是阶段 1 参照），不给去壳卡片补回
-     任何框。 */
+     档位让位规则无皮肤对手，按结构选择器写）。aurora 例外：卡片恢复原生玻璃材质
+     （见 1) 末），页面底色方向不动（极光晕玻璃页身是它的「面」，明暗对调摘出
+     aurora，见本段末的底色对调块）。 */
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
-    background: transparent; border: 0; border-radius: 0; box-shadow: none;
-    backdrop-filter: none; -webkit-backdrop-filter: none;
+    background: transparent; border: 1px solid var(--border); border-radius: var(--radius-md);
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
   }
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card:hover {
-    transform: none; box-shadow: none;
+    transform: none; box-shadow: none; border-color: var(--border);
   }
-  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) { gap: 0; }
-  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card + .panel-card {
-    border-top: 1px solid var(--border);
-  }
+  :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) { gap: 28px; }
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-header {
-    background: transparent; border-bottom: 0; padding: 28px 18px 0;
+    background: transparent; border-bottom: 0; padding: 16px 18px 0;
   }
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-title {
-    font-size: 13px; font-weight: 600; color: var(--text);
+    font-size: 15px; font-weight: 600; color: var(--text);
   }
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .card-body {
-    padding: 10px 18px 28px;
+    padding: 12px 18px 16px;
   }
   /* 无头平卡（通用 tab 第六张）：卡体即首子，顶距补回整档（与卡头顶距同档） */
   :root[data-ui-version="v2"][data-style] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card > .card-body:first-child {
-    padding-top: 28px;
+    padding-top: 16px;
+  }
+  /* aurora 例外：恢复皮肤原生玻璃卡（玻璃透底 + 模糊 + 顶部 hairline + 描边 + 原生
+     大圆角），只去投影（hover 不浮由上面通用 :hover 规则同罩）。取值逐项抄 aurora
+     皮肤块的 .panel-card 基座（皮肤段 3600 一带），box-shadow 只留 inset 顶部高光。 */
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#settingsPanelGeneral, #settingsPanelRoute, #settingsPanelAbout, #settingsPanelAdvanced) .panel-card {
+    background: var(--surface);
+    background-image: var(--card-hairline); background-position: top;
+    background-size: 100% 1px; background-repeat: no-repeat;
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    box-shadow: inset 0 1px 0 var(--hl-inset);
   }
   :root[data-ui-version="v2"][data-style] .view-tabs.settings-subtabs {
     background: transparent; border-color: transparent;
@@ -632,6 +641,22 @@
     margin: 1px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
     font-size: 11px; letter-spacing: 0; color: var(--text-3);
   }
+
+  /* ── 阶段 2 材质修正 ②：v2 明暗关系交换（cc-switch 参照：亮色 栏灰<内容白，暗色
+     内容抬亮一档、栏再压暗）。对调 = 既有 token 互换位：内容区底 body 用 --surface、
+     栏底用 --bg-page——亮暗同一条规则（token 随亮暗自动换值），v1 零变化。terminal-
+     view 与主题预览镜像视口同步换（切页不跳变；镜像演示的是新明暗关系，不换就是在
+     预览里画旧版式）。只作用 saas/sepia：aurora 摘出——它的 --surface 是半透玻璃料，
+     body 换它会让极光晕透底洗白、栏换实底会毁掉玻璃层次；aurora 的页面底即其「面」，
+     方向不动（它的设置在 1) 里恢复玻璃卡）。 */
+  :root[data-ui-version="v2"][data-style="saas"] body,
+  :root[data-ui-version="v2"][data-style="sepia"] body { background: var(--surface); }
+  :root[data-ui-version="v2"][data-style="saas"] .rail,
+  :root[data-ui-version="v2"][data-style="sepia"] .rail { background: var(--bg-page); }
+  :root[data-ui-version="v2"][data-style="saas"] .terminal-view,
+  :root[data-ui-version="v2"][data-style="sepia"] .terminal-view { background: var(--surface); }
+  :root[data-ui-version="v2"][data-style="saas"] .settings-theme-preview,
+  :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }
   
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
