@@ -60,6 +60,23 @@ test("OpenCode uses its selected platform package instead of the embedded Bun ve
   assert.equal(item.issue, "version_unavailable");
 });
 
+test("OpenCode detects the baseline platform package this machine actually carries", async (t) => {
+  // 上游按 CPU 档位把平台依赖拆成 x64 与 x64-baseline 两个可选包，机器上落盘
+  // 哪一个都可能（本机 2026-10-11 重装起只有 baseline，1.19.0 实测可运行）。
+  // 检测必须认实际装了的那个：packageVersion 的包名正则本就接受 -baseline，
+  // 缺的只是解析器认得这条路。修好后关于页「本地」列与新建终端菜单同时恢复。
+  const f = fixture(t);
+  const root = join(f.base.APPDATA, "npm/node_modules/opencode-ai/node_modules/opencode-windows-x64-baseline");
+  const entry = f.put(join(root, "bin/opencode.exe"));
+  f.put(join(root, "package.json"), JSON.stringify({ name: "opencode-windows-x64-baseline", version: "1.19.0" }));
+  const item = installation(await f.service().getState(), "opencode");
+  assert.equal(item.status, "found");
+  assert.equal(item.path, entry);
+  assert.equal(item.version, "1.19.0");
+  assert.equal(item.versionSource, "package.json");
+  assert.equal(item.issue, null);
+});
+
 test("Claude normalizes its own PE version and exposes disagreement with its selected package", async (t) => {
   const f = fixture(t);
   npmInstall(f, "claude", "@anthropic-ai/claude-code", "2.1.274", "bin/claude.exe");

@@ -75,7 +75,7 @@ export function resolveCodexExecutable(base = process.env, io = { readdirSync, e
   return candidates[0];
 }
 
-export function resolveOpencodeExecutable(base = process.env) {
+export function resolveOpencodeExecutable(base = process.env, io = { existsSync }) {
   const override = base.OPENCODE_EXECUTABLE;
   if (override) return absoluteOverride(base, "OPENCODE_EXECUTABLE");
   // Default to the real opencode binary bundled inside the platform optional
@@ -84,10 +84,20 @@ export function resolveOpencodeExecutable(base = process.env) {
   // opencode-ai\bin\opencode.exe: that top-level path is a 479-byte
   // placeholder batch whenever npm's allow-scripts policy blocks the
   // postinstall copy (observed with npm 12 on 2026-09-14/15), which Windows
-  // then refuses to execute ("与你运行的 Windows 版本不兼容"). The embedded
-  // path depends on upstream's "optional dependency per platform" layout —
-  // if upstream repackages, OPENCODE_EXECUTABLE is the escape hatch.
-  return join(roamingNpm(base), "node_modules", "opencode-ai", "node_modules", "opencode-windows-x64", "bin", "opencode.exe");
+  // then refuses to execute ("与你运行的 Windows 版本不兼容"). Upstream ships
+  // one optional dependency per platform AND per CPU tier, and npm lays down
+  // whichever single one fits the machine (this one carries x64-baseline since
+  // 2026-10-11), so probe the variants in upstream's own preference order
+  // instead of assuming the plain x64 layout. If upstream repackages again,
+  // OPENCODE_EXECUTABLE remains the escape hatch.
+  const root = join(roamingNpm(base), "node_modules", "opencode-ai", "node_modules");
+  for (const variant of ["opencode-windows-x64", "opencode-windows-x64-baseline", "opencode-windows-arm64"]) {
+    const candidate = join(root, variant, "bin", "opencode.exe");
+    if (io.existsSync(candidate)) return candidate;
+  }
+  // Nothing installed: keep the historical default so "not installed" reports
+  // the same path as before.
+  return join(root, "opencode-windows-x64", "bin", "opencode.exe");
 }
 
 export function resolvePiExecutable(base = process.env) {

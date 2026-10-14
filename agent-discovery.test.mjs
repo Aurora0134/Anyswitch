@@ -64,6 +64,44 @@ test("codex 两种安装形态都没有时如实抛错，两个位置都写进�
   }
 });
 
+test("opencode 解析认实际安装的平台变体：只装 baseline 的机器到 baseline 执行体", () => {
+  // 上游把平台依赖按 CPU 档位拆成 x64 / x64-baseline / arm64 三个可选包，npm
+  // 按机器实际落盘其中一个（本机自 2026-10-11 起只有 baseline，二进制实测
+  // 可运行）。写死非 baseline 的 x64 一条路，baseline 布局的机器就会在环境
+  // 检测与终端一键启动两侧同报未找到——新建菜单缺项与关于页「本地 未找到」
+  // 都是这一个病因。
+  const dir = mkTestDir("opencode-pick-");
+  try {
+    const roaming = join(dir, "roaming");
+    const baseline = join(roaming, "npm", "node_modules", "opencode-ai", "node_modules", "opencode-windows-x64-baseline", "bin", "opencode.exe");
+    mkdirSync(dirname(baseline), { recursive: true });
+    writeFileSync(baseline, "MZ");
+    assert.equal(
+      resolveOpencodeExecutable({ APPDATA: roaming }),
+      baseline,
+      "只装了 baseline 就解析到 baseline 执行体",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("opencode 两个平台变体都在时优先非 baseline，与上游 postinstall 的 AVX2 偏好一致", () => {
+  const dir = mkTestDir("opencode-both-");
+  try {
+    const nm = join(dir, "roaming", "npm", "node_modules", "opencode-ai", "node_modules");
+    const x64 = join(nm, "opencode-windows-x64", "bin", "opencode.exe");
+    mkdirSync(dirname(x64), { recursive: true });
+    writeFileSync(x64, "MZ");
+    const baseline = join(nm, "opencode-windows-x64-baseline", "bin", "opencode.exe");
+    mkdirSync(dirname(baseline), { recursive: true });
+    writeFileSync(baseline, "MZ");
+    assert.equal(resolveOpencodeExecutable({ APPDATA: join(dir, "roaming") }), x64, "两变体并存维持既有优先序");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("GROK_EXECUTABLE refuses shims that could recurse into the launcher", () => {
   const base = { USERPROFILE: "C:\\Users\\fixture" };
   assert.equal(resolveGrokExecutable(base), "C:\\Users\\fixture\\.grok\\bin\\grok.exe");
