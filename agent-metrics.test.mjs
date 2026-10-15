@@ -1271,6 +1271,85 @@ describe("createAgentMetricsCollector", () => {
     assert.ok(procs.qoderPids.has(7002));
   });
 
+  // 2026-10-15 修复面：qoder CLI（qodercli.exe，终端一键启动的执行体）此前
+  // 不在认领桶也不在探测 WHERE——CLI 进程对检测面全盲，虚拟终端的 Qoder
+  // 会话永远归属不上；实例身份面（socket 兜底白名单 + instanceBuckets）
+  // 同批收编。live 取证形状：cmd 壳 19560 → 主 CLI 10284 → MCP 内部子进程 7332。
+  describe("qoder CLI (qodercli.exe) process + instance surfaces", () => {
+    const PS_QODER_CLI_SCAN = [
+      String.raw`10284,19560,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe`,
+      String.raw`7332,10284,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe --internal-sites-mcp C:\Users\tester\.qoder\plugins\cache\qoder-sites`,
+      String.raw`19560,23828,cmd.exe,C:\Windows\system32\cmd.exe`,
+    ].join("\r\n") + "\r\n";
+
+    it("claims the CLI main process and filters the --internal-sites-mcp helper", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_QODER_CLI_SCAN), nowFn: () => 10000 });
+      const procs = await collector.scanProcesses();
+      assert.equal(procs.qoder, 1, "主 CLI 计数 1；内部 sites-mcp 子进程与 Electron helper 同等滤掉");
+      assert.ok(procs.qoderPids.has(10284));
+      assert.ok(!procs.qoderPids.has(7332), "MCP 子进程不进家族集（占位行/检测面不受其干扰）");
+      assert.equal(procs.ppidByPid.get(7332), 10284, "其父指针照常进谱系表");
+    });
+
+    it("feeds the terminal attribution with the main CLI, ancestor chain up to the shell", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_QODER_CLI_SCAN), nowFn: () => 10000 });
+      await collector.scanProcesses();
+      const feed = collector.getDetectedClientProcesses();
+      const qoderEntries = feed.filter((proc) => proc.agentId === "qoder");
+      assert.equal(qoderEntries.length, 1);
+      assert.deepEqual(qoderEntries[0], { agentId: "qoder", pid: 10284, ancestors: [19560, 23828] });
+    });
+
+    it("materializes a qoder-<pid> instance row from a socket-fallback-shaped request", async () => {
+      let t = 1000;
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_QODER_CLI_SCAN), nowFn: () => t });
+      const r = collector.startRequest({
+        agentId: "qoder", providerId: "north-main", model: "glm-5.3",
+        instanceId: "qoder-10284", path: "openai", stream: true,
+      });
+      t = 2200; r.recordFirstChunk();
+      t = 3200; r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 50 } });
+      const qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+      assert.equal(qoder.metrics.totalRequests, 1, "聚合口径不变");
+      const row = qoder.instances.find((i) => i.id === "qoder-10284");
+      assert.ok(row, "socket 兜底形状的实例号物化出实例行（终端 join 的绑定目标）");
+      assert.equal(row.requests, 1);
+    });
+
+    it("evicts the qoder instance row once the CLI process exits", async () => {
+      let t = 3000;
+      let cliAlive = true;
+      const execFn = (cmd, opts, cb) => cb(null, cliAlive ? PS_QODER_CLI_SCAN : "");
+      const collector = testCollector({ execFn, nowFn: () => t });
+      const r = collector.startRequest({ agentId: "qoder", instanceId: "qoder-10284", model: "m1", path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      let qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+      assert.deepEqual(qoder.instances.map((i) => i.id), ["qoder-10284"]);
+      cliAlive = false;
+      t += 3000;
+      await collector.getAgentsStatus();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+      assert.deepEqual(qoder.instances, [], "CLI 进程退出，行随对账收走");
+    });
+
+    it("serves the codex session metas through the terminal-join getter (15s cache)", async () => {
+      const metas = [
+        { id: "01a13b08-118c-78c3-b6aa-11762eb023bf", project: "C:\\Users\\tester\\dev", lastActive: 2000, originator: "codex-tui" },
+        { id: "01a13635-fb5d-7202-81ad-54b6fc421a88", project: "C:\\Users\\tester\\other", lastActive: 1000, originator: "codex_work_desktop" },
+      ];
+      let calls = 0;
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        codexSessionLookup: async () => { calls += 1; return metas; },
+      });
+      assert.deepEqual(await collector.getCodexSessionsForTerminalJoin(), metas);
+      await collector.getCodexSessionsForTerminalJoin();
+      assert.equal(calls, 1, "缓存窗口内不重扫");
+    });
+  });
+
   it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;

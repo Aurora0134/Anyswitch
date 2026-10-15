@@ -6695,12 +6695,18 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
 // 虚拟终端归属接线：panel 路由层把 shell pid ↔ 祖先链 join 进会话列表，
 // 最近请求走当日 usage journal；前端把归属后的实例行套看板口径渲染。
 describe("虚拟终端归属接线（terminal sessions list + recent requests）", () => {
-  function terminalRouter({ sessions, detected, agents, journalRows } = {}) {
+  function terminalRouter({ sessions, detected, codexSessions, agents, journalRows } = {}) {
     return createPanelRouter({
       storePaths: { root: "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => agents ?? null,
-      fetchRelayDetectedProcesses: async () => detected ?? null,
+      // 数组形态 = 只喂进程面（旧用例默认）；codex 桥接数据走 codexSessions 键，
+      // 与真实端点的 { processes, codexSessions } 负载同形。
+      fetchRelayDetectedProcesses: async () => {
+        if (detected === null || detected === undefined) return null;
+        if (Array.isArray(detected)) return { processes: detected, codexSessions: codexSessions ?? [] };
+        return detected;
+      },
       fetchTerminalSessionsList: async () => sessions ?? null,
       usageJournal: {
         appendRequest() {}, appendSession() {},
@@ -6728,6 +6734,70 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(body.sessions.length, 1);
     assert.deepEqual(body.sessions[0].agent, { endpointId: "kimi", name: "Kimi Code", pid: 4321, instanceId: "kimi-4321" });
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
+  });
+
+  it("codex 会话桥接：pid 形绑不上时按 cwd 绑 codex-sess 实例行", async () => {
+    const router = terminalRouter({
+      sessions: [{ id: "t1", label: "Codex 终端", cwd: "D:\\dev\\bridge", shell: "cmd", pid: 8888 }],
+      detected: [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+      codexSessions: [
+        { id: "codex-sess-older", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" },
+        { id: "codex-sess-latest", cwd: "D:/dev/bridge/", lastActive: 2000, originator: "codex-tui" },
+        { id: "codex-sess-elsewhere", cwd: "E:\\other", lastActive: 3000, originator: "codex-tui" },
+        { id: "codex-sess-desktop", cwd: "D:\\dev\\bridge", lastActive: 4000, originator: "codex_work_desktop" },
+      ],
+      agents: [{ id: "codex", name: "Codex", instances: [
+        { id: "codex-sess-older" }, { id: "codex-sess-latest" },
+        { id: "codex-sess-elsewhere" }, { id: "codex-sess-desktop" },
+      ] }],
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    const agent = json().sessions[0].agent;
+    assert.equal(agent.endpointId, "codex");
+    assert.equal(agent.pid, 6100);
+    assert.equal(agent.instanceId, "codex-sess-latest",
+      "同 cwd 取最近活跃；桌面来源被排除，别的目录不参与");
+  });
+
+  it("codex 会话桥接：实例行不在 agents 负载里就不绑（与 pid 路同判）", async () => {
+    const router = terminalRouter({
+      sessions: [{ id: "t1", cwd: "D:\\dev", shell: "cmd", pid: 8888 }],
+      detected: [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+      codexSessions: [{ id: "codex-sess-x", cwd: "D:\\dev", lastActive: 1000, originator: "codex-tui" }],
+      agents: [{ id: "codex", name: "Codex", instances: [] }],
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(json().sessions[0].agent.instanceId, null, "行不存在不编造绑定");
+  });
+
+  it("codex 会话桥接：旧 relay 不喂 codexSessions 时照旧不绑", async () => {
+    const router = terminalRouter({
+      sessions: [{ id: "t1", cwd: "D:\\dev", shell: "cmd", pid: 8888 }],
+      detected: [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+      agents: [{ id: "codex", name: "Codex", instances: [{ id: "codex-sess-x" }] }],
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(json().sessions[0].agent.instanceId, null, "无桥接数据时不猜会话身份");
+  });
+
+  it("qoder 归属：qodercli 进程检测 + qoder-<pid> 实例行即绑（socket 兜底路径的下游）", async () => {
+    const router = terminalRouter({
+      sessions: [{ id: "t1", label: "Qoder", cwd: "D:\\dev", shell: "cmd", pid: 19560 }],
+      detected: [
+        { agentId: "qoder", pid: 10284, ancestors: [19560] },
+        { agentId: "qoder", pid: 7332, ancestors: [10284, 19560] }, // MCP 子进程：更远，让位主 CLI
+      ],
+      agents: [{ id: "qoder", name: "Qoder", instances: [{ id: "qoder-10284" }] }],
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(json().sessions[0].agent,
+      { endpointId: "qoder", name: "Qoder", pid: 10284, instanceId: "qoder-10284" });
   });
 
   it("检测喂给中断（relay 挂）时列表照常返回纯外壳会话", async () => {

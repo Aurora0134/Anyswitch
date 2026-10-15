@@ -450,8 +450,8 @@ function isPathUnder(file, root) {
   return f === r || f.startsWith(r + sep) || f.startsWith(r + "/") || f.startsWith(r + "\\");
 }
 
-function makeMeta({ endpoint, id, title = null, summary = null, project = null, file = null, createdAt = null, lastActive = null }) {
-  const meta = { endpoint, id, title, summary, project, file, createdAt, lastActive, resumeCommand: "" };
+function makeMeta({ endpoint, id, title = null, summary = null, project = null, originator = null, file = null, createdAt = null, lastActive = null }) {
+  const meta = { endpoint, id, title, summary, project, originator, file, createdAt, lastActive, resumeCommand: "" };
   meta.resumeCommand = resumeCommandFor(endpoint, meta);
   return meta;
 }
@@ -1356,6 +1356,7 @@ function createCodexAdapter(roots) {
     let project = null;
     let createdAt = null;
     let firstUserMessage = null;
+    let originator = null;
 
     for (const line of head) {
       let value;
@@ -1369,6 +1370,14 @@ function createCodexAdapter(roots) {
         if (sessionId === null && typeof payload.id === "string" && payload.id !== "") sessionId = payload.id;
         if (project === null && typeof payload.cwd === "string" && payload.cwd !== "") project = payload.cwd;
         if (createdAt === null) createdAt = parseTimestampMs(payload.timestamp) ?? parseTimestampMs(value.timestamp);
+        // Client-surface tag the CLI writes into every rollout's session_meta
+        // (observed values: codex-tui for CLI/VS Code surfaces,
+        // codex_work_desktop for the desktop GUI). The terminal join uses it
+        // to keep desktop sessions from stealing a cwd match from a terminal
+        // CLI session; other adapters have no equivalent and pass null.
+        if (originator === null && typeof payload.originator === "string" && payload.originator !== "") {
+          originator = payload.originator;
+        }
       }
       if (firstUserMessage === null) {
         const message = codexMessage(value);
@@ -1416,6 +1425,7 @@ function createCodexAdapter(roots) {
         (project !== null ? pathBasename(project) : null),
       summary: summary !== null ? truncateText(summary, SUMMARY_MAX_CHARS) || null : null,
       project,
+      originator,
       file: path,
       createdAt,
       lastActive: lastActive ?? createdAt,
