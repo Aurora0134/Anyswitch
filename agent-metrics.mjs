@@ -847,9 +847,13 @@ function createEmptyProcessScan() {
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
 // 取证 1.37937.1.0），镜像落在 C:\Program Files\WindowsApps\Claude_<版本>_…\
 // 下——同一形态约 5 个进程，逐 PID 成行会把一个桌面端拆成一排幽灵分身。
-// 桌面托管引擎按 <根>\claude-code\<semver>\claude.exe 落位，根只认
+// 桌面托管引擎按 <根>\claude-code\<semver>\…\claude.exe 落位，semver 与 exe
+// 之间至多垫一层目录：旧布局零层（真机取证 Claude-3p\claude-code\2.1.246\
+// claude.exe），Desktop ≥2.37337 起垫一层构建哈希目录（真机取证 2.1.295\
+// d2e29494ec83\claude.exe，连盘上残留的旧版目录也被重组为该形态），更深的
+// 嵌套不在白名单形状内。根只认
 // %LOCALAPPDATA%\Claude-3p、%LOCALAPPDATA%\Claude、%USERPROFILE%\.claude
-// 三个（真机取证 Claude-3p\claude-code\2.1.246\claude.exe），且锚定用户目录
+// 三个，且锚定用户目录
 // 布局：Claude-3p / Claude 必须在 …\Users\<用户>\AppData\Local\ 之下，.claude
 // 必须在 …\Users\<用户>\ 正下——任意其他深度下同名的 claude 目录（用户手工
 // 维护的同形副本，如 D:\tools\claude\claude-code\<semver>\claude.exe）不折。
@@ -858,7 +862,7 @@ function createEmptyProcessScan() {
 // "desktop"；无命令行或路径不在白名单一律返回 null——调用侧对 null 保持
 // 旧行为：宁可漏折，不可误折。
 const CLAUDE_DESKTOP_SHELL_PATH_RE = /[\\/]windowsapps[\\/]claude_\d/;
-const CLAUDE_DESKTOP_ENGINE_PATH_RE = /[\\/]users[\\/][^\\/]+[\\/](?:appdata[\\/]local[\\/]claude(?:-3p)?|\.claude)[\\/]claude-code[\\/]\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?[\\/]claude\.exe(?:[\s"']|$)/;
+const CLAUDE_DESKTOP_ENGINE_PATH_RE = /[\\/]users[\\/][^\\/]+[\\/](?:appdata[\\/]local[\\/]claude(?:-3p)?|\.claude)[\\/]claude-code[\\/]\d+\.\d+\.\d+(?:[-+][0-9a-z.]+)?(?:[\\/][^\\/]+)?[\\/]claude\.exe(?:[\s"']|$)/;
 
 export function claudeDesktopForm(commandLine) {
   if (typeof commandLine !== "string" || commandLine.length === 0) return null;
