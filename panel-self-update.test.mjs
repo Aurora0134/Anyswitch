@@ -524,3 +524,344 @@ describe("自动检测并下载更新（设置项默认关）", () => {
     }
   });
 });
+
+// ── 陈旧 staged 的有效性判定（本地领先远端时不再呈现、不再可应用）──────────
+describe("staged 有效性判定", () => {
+  test("稳定轨目标 ≤ 当前版本：active 不再给出 staged，记录被标记 stale，apply 拒绝", async () => {
+    const spawned = [];
+    await withPanel({
+      appInfo: { version: "0.7.0", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+    }, async (get, post, ctx) => {
+      // 目标 0.7.0 == 当前 0.7.0：下载后本地经别的途径已经到过它，横幅与按钮都该消失。
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.staged, null, "陈旧 staged 不再呈现");
+      const apply = await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(apply.status, 409);
+      assert.equal(apply.body.error, "no_staged");
+      assert.equal(spawned.length, 0);
+      const marked = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      assert.equal(marked.stale, true, "记录被标记 stale，之后不再被捞起");
+      assert.equal(marked.result.outcome, "downloaded", "结论保持原样（/last 补显通道不受影响）");
+      assert.equal((await get("/panel/api/self-update/active")).body.staged, null);
+    });
+  });
+
+  test("稳定轨目标高于当前版本：staged 照常给出（正常停留态不受影响）", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun());
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.staged?.runId, RUN_ID);
+      assert.equal(readClientUpdateRun(ctx.journalDir, RUN_ID).stale, undefined);
+    });
+  });
+
+  test("先行轨目标已是本地 HEAD：staged 失效并标记 stale", async () => {
+    const SHA = "fedcba0987654321fedcba0987654321fedcba09";
+    await withPanel({
+      readLocalHeadFn: async () => ({ sha: SHA, short: "fedcba0" }),
+    }, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedRun({
+        track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null,
+        result: { outcome: "downloaded", message: "已下载 fedcba0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.6.7" },
+      }));
+      const active = (await get("/panel/api/self-update/active")).body;
+      assert.equal(active.staged, null, "目标提交已在本地：不呈现");
+      assert.equal(readClientUpdateRun(ctx.journalDir, RUN_ID).staleReason, "already_at_target");
+    });
+  });
+});
+
+// ── 先行轨道：检查、登记、回退计划与逆更新 ────────────────────────────
+describe("先行轨道（bleedingEdgeMode）", () => {
+  const LOCAL_SHA = "0123456789abcdef0123456789abcdef01234567";
+  const MAIN_SHA = "fedcba0987654321fedcba0987654321fedcba09";
+  const identityFns = {
+    readLocalHeadFn: async () => ({ sha: LOCAL_SHA, short: "0123456" }),
+    readRemoteRefsFn: async () => ({
+      mainSha: MAIN_SHA,
+      tags: new Map([
+        ["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"],
+        ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+      ]),
+    }),
+  };
+
+  function bleedingSettings(baseDir) {
+    mkdirSync(join(baseDir, "Anyswitch"), { recursive: true });
+    writeFileSync(join(baseDir, "Anyswitch", "settings.json"), JSON.stringify({ bleedingEdgeMode: true }));
+  }
+
+  test("检查更新走提交比对：/api/updates 给出先行轨状态与双方身份", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    try {
+      bleedingSettings(baseDir);
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("current"),
+        ...identityFns,
+      }, async (get, post) => {
+        const result = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(result.track, "bleeding");
+        assert.equal(result.identity, true);
+        assert.equal(result.state, "update_available", "本地 HEAD ≠ 远端 main：有先行更新");
+        assert.equal(result.remoteSha, MAIN_SHA);
+        assert.equal(result.remoteCommit, "fedcba0");
+        assert.equal(result.currentCommit, "0123456");
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("本地已跟上 main：state=current；远端不可达：state=error（不新增报错形态）", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    try {
+      bleedingSettings(baseDir);
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("current"),
+        readLocalHeadFn: identityFns.readLocalHeadFn,
+        readRemoteRefsFn: async () => ({ mainSha: LOCAL_SHA, tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
+      }, async (get) => {
+        assert.equal((await get("/panel/api/updates?refresh=1")).body.state, "current");
+      });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("current"),
+        readLocalHeadFn: identityFns.readLocalHeadFn,
+        readRemoteRefsFn: async () => null,
+      }, async (get) => {
+        const body = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(body.state, "error");
+        assert.equal(body.track, "bleeding");
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("无本地 git 身份（镜像安装未引导）：按稳定轨口径回答（identity=false）", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    try {
+      bleedingSettings(baseDir);
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("update_available"),
+        readLocalHeadFn: async () => null,
+      }, async (get) => {
+        const body = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(body.track, "bleeding");
+        assert.equal(body.identity, false);
+        assert.equal(body.state, "update_available", "版本号比较照常给出结论");
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("POST /api/self-update（先行轨）：按 remoteSha 登记 bleeding run，无 tag/版本", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    const spawned = [];
+    try {
+      bleedingSettings(baseDir);
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("current"),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...identityFns,
+      }, async (get, post, ctx) => {
+        const result = await post("/panel/api/self-update", {});
+        assert.equal(result.status, 202);
+        assert.equal(result.body.step, "download");
+        assert.equal(result.body.targetSha, MAIN_SHA);
+        assert.equal(result.body.targetVersion, null);
+        const run = readClientUpdateRun(ctx.journalDir, result.body.runId);
+        assert.equal(run.track, "bleeding");
+        assert.equal(run.targetSha, MAIN_SHA);
+        assert.equal(run.targetTag, null);
+        assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("GET /api/self-update/bleeding-plan：HEAD 不在 tag 上 → 回退到本地版本之下最近的 tag", async () => {
+    await withPanel({
+      appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      ...identityFns,
+    }, async (get) => {
+      const plan = (await get("/panel/api/self-update/bleeding-plan")).body;
+      assert.equal(plan.ok, true);
+      assert.equal(plan.onStableNode, false);
+      assert.equal(plan.baseTag, "v0.6.6");
+      assert.equal(plan.baseVersion, "0.6.6");
+    });
+  });
+
+  test("HEAD 恰在远端 tag 上：onStableNode=true（就地关闭）；远端不可达：ok=false", async () => {
+    await withPanel({
+      ...identityFns,
+      readRemoteRefsFn: async () => ({ mainSha: MAIN_SHA, tags: new Map([["v0.6.6", LOCAL_SHA], ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]]) }),
+    }, async (get) => {
+      const plan = (await get("/panel/api/self-update/bleeding-plan")).body;
+      assert.equal(plan.ok, true);
+      assert.equal(plan.onStableNode, true);
+      assert.equal(plan.baseVersion, "0.6.6");
+    });
+    await withPanel({
+      ...identityFns,
+      readRemoteRefsFn: async () => null,
+    }, async (get) => {
+      assert.equal((await get("/panel/api/self-update/bleeding-plan")).body.ok, false);
+    });
+  });
+
+  test("POST /api/self-update/rollback：登记 step=apply 的 rollback run 并布换装监听器", async () => {
+    const spawned = [];
+    const watch = { scheduled: 0 };
+    await withPanel({
+      ...identityFns,
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
+      selfUpdateWatchScheduleFn: (fn) => { watch.scheduled += 1; return 42; },
+      selfUpdateWatchCancelFn: () => {},
+    }, async (get, post, ctx) => {
+      const result = await post("/panel/api/self-update/rollback", {});
+      assert.equal(result.status, 202);
+      assert.equal(result.body.step, "apply");
+      assert.equal(result.body.track, "rollback");
+      assert.equal(result.body.targetVersion, "0.6.6");
+      const run = readClientUpdateRun(ctx.journalDir, result.body.runId);
+      assert.equal(run.track, "rollback");
+      assert.equal(run.targetTag, "v0.6.6");
+      assert.equal(run.phase, "installing");
+      assert.equal(spawned.length, 1);
+      assert.equal(watch.scheduled, 1, "回退同样要布换装监听器");
+    });
+  });
+
+  test("rollback：远端不可达：409，不登记不拉起", async () => {
+    const spawned = [];
+    await withPanel({
+      ...identityFns,
+      readRemoteRefsFn: async () => null,
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+    }, async (get, post) => {
+      const result = await post("/panel/api/self-update/rollback", {});
+      assert.equal(result.status, 409);
+      assert.equal(result.body.error, "no_rollback");
+      assert.equal(spawned.length, 0);
+    });
+  });
+
+  test("先行换装监听器：本地身份未对上→点火；已是目标提交→不自杀刚接班的自己", async () => {
+    const SHA = "fedcba0987654321fedcba0987654321fedcba09";
+    const stagedBleeding = () => stagedRun({
+      track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null,
+      result: { outcome: "downloaded", message: "已下载 fedcba0，应用后生效", beforeVersion: "0.6.1-preview", latestVersion: "0.6.7" },
+    });
+    // 与「自更新换装监听器」describe 里的 watchCapture 同形（那是它的局部函数）。
+    const watchCaptureLocal = () => {
+      const watch = { pumps: [], canceled: 0, restarts: 0, exits: [] };
+      return {
+        watch,
+        selfUpdateWatchScheduleFn: (fn) => { watch.pumps.push(fn); return 42; },
+        selfUpdateWatchCancelFn: () => { watch.canceled += 1; },
+        spawnPanelHostRestartFn: () => { watch.restarts += 1; return 99; },
+        exitPanelHostFn: (code) => { watch.exits.push(code); },
+      };
+    };
+    // 场景一（点火）：本地 HEAD 不是目标提交 → 异步续体确认后拉起换装。
+    const fired = watchCaptureLocal();
+    await withPanel({
+      readLocalHeadFn: async () => ({ sha: "0123456789abcdef0123456789abcdef01234567", short: "0123456" }),
+      ...fired,
+    }, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, stagedBleeding());
+      await post("/panel/api/self-update/apply", { runId: RUN_ID });
+      assert.equal(fired.watch.pumps.length, 1, "apply 布上换装监听器");
+      const running = readClientUpdateRun(ctx.journalDir, RUN_ID);
+      writeClientUpdateRun(ctx.journalDir, { ...running, phase: "waiting-panel" });
+      fired.watch.pumps[0]();
+      await sleep(50);
+      assert.equal(fired.watch.restarts, 1, "身份未对上：拉起换装");
+      assert.equal(fired.watch.canceled, 1);
+    });
+    // 场景二（不点火）：本地已换装到目标提交（新面板接班）——绝不点火自杀。
+    // 用启动接管形态模拟：路由创建前 journal 里就有进行中的先行 apply run。
+    const quiet = watchCaptureLocal();
+    const journalDir = mkdtempSync(join(tmpdir(), "anys-bleeding-pump-"));
+    try {
+      writeClientUpdateRun(journalDir, {
+        runId: RUN_ID, clientId: "anyswitch", action: "update", step: "apply", state: "running",
+        startedAt: "2026-10-09T00:00:00.000Z", finishedAt: null, result: null, workerPid: process.pid,
+        track: "bleeding", targetSha: SHA, targetVersion: "0.6.7", targetTag: null, phase: "waiting-panel",
+      });
+      await withPanel({
+        clientUpdateJournalDir: journalDir,
+        readLocalHeadFn: async () => ({ sha: SHA, short: "fedcba0" }),
+        ...quiet,
+      }, async (get, post) => {
+        assert.equal(quiet.watch.pumps.length, 1, "启动接管：进行中的 run 会布上监听器");
+        quiet.watch.pumps[0]();
+        await sleep(50);
+        assert.equal(quiet.watch.restarts, 0, "已是目标提交：不点火");
+        assert.equal(quiet.watch.canceled, 0);
+      });
+    } finally {
+      rmSync(journalDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 稳定轨的不一致判定（ahead / 安装游离）───────────────────────────────
+describe("稳定轨不一致判定（drift）", () => {
+  test("版本一致但 HEAD 不在 tag 上：state=current 且 drift.offTag=true", async () => {
+    const identity = {
+      readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
+      readRemoteRefsFn: async () => ({ mainSha: "fedcba0987654321fedcba0987654321fedcba09", tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
+    };
+    // 与真实 release-service 同形：current 态也带 release（版本一致才有 current）。
+    await withPanel({
+      appInfo: { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false },
+      releaseService: { getAppUpdate: async () => ({
+        currentVersion: "0.6.6", state: "current", checkedAt: "2026-10-15T00:00:00.000Z",
+        release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" },
+        errorCode: null,
+      }) },
+      ...identity,
+    }, async (get) => {
+      const body = (await get("/panel/api/updates?refresh=1")).body;
+      assert.equal(body.state, "current");
+      assert.equal(body.track, "stable");
+      assert.equal(body.drift.ahead, false);
+      assert.equal(body.drift.offTag, true);
+      assert.equal(body.drift.remoteVersion, "0.6.6");
+    });
+  });
+
+  test("有可用更新时不判 drift；无 git 身份只判 ahead（跳过 HEAD 维度）", async () => {
+    await withPanel({
+      appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
+      releaseService: selfUpdateReleaseService("update_available"),
+      readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
+      readRemoteRefsFn: async () => ({ mainSha: "x", tags: new Map() }),
+    }, async (get) => {
+      const body = (await get("/panel/api/updates?refresh=1")).body;
+      assert.equal(body.drift, null, "update_available 不叠加不一致提示");
+    });
+    await withPanel({
+      appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
+      releaseService: selfUpdateReleaseService("ahead"),
+      readLocalHeadFn: async () => null,
+    }, async (get) => {
+      const body = (await get("/panel/api/updates?refresh=1")).body;
+      assert.equal(body.state, "ahead");
+      assert.equal(body.drift.ahead, true);
+      assert.equal(body.drift.offTag, null, "无本地身份时跳过 HEAD 维度");
+      assert.equal(body.drift.localCommit, null);
+    });
+  });
+});

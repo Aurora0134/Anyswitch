@@ -2239,7 +2239,10 @@ if (window.panelStartupController) panelStartupPlay();
             <img class="about-app-icon" src="/panel/assets/logo.png" alt="">
             <h2 class="card-title">Anyswitch</h2>
             <span class="about-app-version" id="aboutAppVersion">读取版本中…</span>
+            <!-- 预览版徽标（正式版号带预发布段）与先行版徽标（先行轨道）互斥：
+                 版本号带提交标识时会被误判成预发布，先行徽标必须独占呈现位。 -->
             <span class="about-preview" id="aboutPreviewBadge" hidden>预览版</span>
+            <span class="about-preview about-bleeding-badge" id="aboutBleedingBadge" hidden>先行版</span>
           </div>
           <div class="about-head-actions">
             <a class="about-link" href="https://github.com/Aurora0134/Anyswitch" target="_blank" rel="noopener noreferrer">GitHub</a>
@@ -2254,6 +2257,13 @@ if (window.panelStartupController) panelStartupPlay();
           <!-- 自更新就绪（update_available）时出现：确认后由后台 worker 拉取 tag、
                换装工作树，再经面板内监听器自动换装重启（见 panel.js 自更新段）。 -->
           <button type="button" class="btn btn-mini" id="aboutSelfUpdate" hidden>立即更新</button>
+          <!-- 本地与官方发布不一致（版本领先或安装不在发布节点上）：持续状态，
+               独占一行；「不再显示」按当前不一致状态静默，状态变化后重新出现。
+               有可用更新时不出现——更新通道自己会说话。 -->
+          <div class="about-drift-row" id="aboutDriftRow" hidden>
+            <span class="about-drift" id="aboutDriftNotice"></span>
+            <a class="about-link" id="aboutDriftDismiss" href="#" hidden>不再显示</a>
+          </div>
         </div>
       </div>
       <div class="panel-card">
@@ -2277,10 +2287,35 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
     </div>
 
-    <!-- 「高级选项」：数据迁移两张卡。版式沿用本页既有卡的写法——卡头右侧放动作按钮
-         （与「关于」的本地环境卡同构），卡体第一行是 role=status 的状态行、第二行是
-         次要明细，需要控件的行用 .modal-item；状态色调走 data-tone，与 about-status 同规则。 -->
+    <!-- 「高级选项」：先行版更新通道 + 数据迁移两张卡。版式沿用本页既有卡的写法——
+         卡头右侧放动作按钮（与「关于」的本地环境卡同构），卡体第一行是 role=status
+         的状态行、第二行是次要明细，需要控件的行用 .modal-item；状态色调走
+         data-tone，与 about-status 同规则。 -->
     <div class="settings-panel" id="settingsPanelAdvanced" hidden role="tabpanel" aria-labelledby="settingsTabAdvanced">
+      <!-- 先行版开关：开=只切检测通道（换装仍由关于页的两步更新完成）；关=确认后
+           先回退到最近的稳定版本再回到正式更新。开关行说明只摆两态事实，回退的
+           执行细节（重启中断、覆盖手改）由关闭时的二次确认弹层交代。 -->
+      <div class="panel-card">
+        <div class="card-header">
+          <h2 class="card-title">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            更新通道
+          </h2>
+        </div>
+        <div class="card-body">
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">先行版</div>
+              <div class="modal-item-desc">关闭时，更新只提供官方正式发布的版本；开启后，检查更新跟随上游最新提交，安装的版本号会带提交标识并显示「先行版」标记。从先行版关闭时，会先回退到离当前最近的稳定版本。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="bleedingEdgeToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+
       <div class="panel-card">
         <div class="card-header">
           <h2 class="card-title">

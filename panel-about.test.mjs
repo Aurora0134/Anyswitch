@@ -143,9 +143,17 @@ function harness(respond = () => latest(), options = {}) {
   const flushJobs = () => { const pending = jobs.splice(0); for (const fn of pending) fn(); };
   const match = source.match(/  function createAboutController\([\s\S]*?\n  \}/);
   assert.ok(match, "testable About controller exists in panel.js");
-  const factory = vm.runInNewContext(`(${match[0]})`, { URL, URLSearchParams, setTimeout, clearTimeout });
+  // localStorage 存档（逐 harness 独立的 mock）：vm 沙箱里没有全局 localStorage，
+  // 不一致提示行的「不再显示」按状态指纹读写它，测试据此断言静默与复现。
+  const storage = new Map();
+  const localStorage = {
+    getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+    setItem: (key, value) => { storage.set(String(key), String(value)); },
+    removeItem: (key) => { storage.delete(String(key)); },
+  };
+  const factory = vm.runInNewContext(`(${match[0]})`, { URL, URLSearchParams, setTimeout, clearTimeout, localStorage });
   const controller = factory({ request, doc, notify: options.notify ?? ((message, isErr) => { toasts.push({ message, isErr }); }), schedule, cancelSchedule });
-  return { nodes, doc, calls, mutations, toasts, flushJobs, controller, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
+  return { nodes, doc, calls, mutations, toasts, flushJobs, controller, storage, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
 }
 
 function normal(path) {
@@ -217,15 +225,30 @@ test("update check runs once on entry and the button forces a fresh check; all s
   assert.match(h.get("aboutUpdateStatus").textContent, /发现新预览版 0\.5\.0-preview\.2/);
   assert.equal(h.get("aboutReleaseLink").href, "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.5.0-preview.2");
   assert.equal(h.get("aboutReleaseLink").hidden, false);
-  for (const [state, copy] of [["current", /当前已是最新/], ["ahead", /当前版本领先/], ["no_releases", /暂无发布/], ["unknown_version", /无法比较/], ["error", /暂时无法检查/]]) {
+  for (const [state, copy] of [["current", /当前已是最新/], ["no_releases", /暂无发布/], ["unknown_version", /无法比较/], ["error", /暂时无法检查/]]) {
     update = deferred();
     const checkingAgain = h.get("aboutCheckUpdates").click();
-    update.resolve({ state, checkedAt: "2026-09-18T09:01:00Z", release: null });
+    update.resolve({ state, checkedAt: "2026-09-18T09:01:00Z", release: null, track: "stable", drift: null });
     await checkingAgain;
     assert.match(h.get("aboutUpdateStatus").textContent, copy);
     assert.equal(h.get("aboutCheckUpdates").disabled, false);
     assert.equal(h.get("aboutReleaseLink").hidden, true);
+    assert.equal(h.get("aboutDriftRow").hidden, true, "非不一致状态不出提示行");
   }
+  // ahead 属「本地与官方发布不一致」家族：状态行只交代检查过（已检查更新），
+  // 事实在下方的不一致提示行；「不再显示」在行尾。
+  update = deferred();
+  const checkingAhead = h.get("aboutCheckUpdates").click();
+  update.resolve({
+    state: "ahead", checkedAt: "2026-09-18T09:01:00Z",
+    release: { version: "0.5.0", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.5.0" },
+    track: "stable", drift: { ahead: true, offTag: false, localVersion: "0.5.1", remoteVersion: "0.5.0", localCommit: null },
+  });
+  await checkingAhead;
+  assert.match(h.get("aboutUpdateStatus").textContent, /已检查更新/);
+  assert.equal(h.get("aboutDriftRow").hidden, false);
+  assert.match(h.get("aboutDriftNotice").textContent, /当前版本 0\.5\.1 领先于官方最新 0\.5\.0/);
+  assert.equal(h.get("aboutDriftDismiss").hidden, false);
   update = deferred();
   const failed = h.get("aboutCheckUpdates").click();
   update.reject(new Error("offline"));
@@ -851,4 +874,87 @@ test("关于页新增的更新入口与确认弹层都在 DOM 里，弹层按钮
   assert.match(html, /id="clientUpdateModalConfirm">仍要更新<\/button>/);
   assert.match(html, /id="clientUpdateModalCancel">取消<\/button>/);
   assert.doesNotMatch(html, /npm i -g|npm install --global/, "界面不展示实现层命令");
+});
+
+// ── 先行轨道与「本地 vs 官方发布」不一致提示 ──────────────────────────
+test("先行轨：版本号带提交标识、先行版徽标独占、状态行按提交比对答话", async () => {
+  const h = harness((path) => {
+    if (path === "/api/app-info") return { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false, commit: "0123456" };
+    if (path === "/api/settings") return { ok: true, settings: { bleedingEdgeMode: true } };
+    if (path.startsWith("/api/updates")) return { track: "bleeding", identity: true, state: "current", currentVersion: "0.6.6", currentCommit: "0123456", remoteCommit: "0123456", checkedAt: "2026-10-15T00:00:00Z", release: null, errorCode: null };
+    return normal(path);
+  });
+  await h.controller.enter();
+  await tick(); await tick(); await tick();
+  assert.equal(h.get("aboutAppVersion").textContent, "0.6.6-0123456", "版本号＝包版本-短哈希");
+  assert.equal(h.get("aboutBleedingBadge").hidden, false);
+  assert.equal(h.get("aboutPreviewBadge").hidden, true, "先行时预览徽标让位（防提交标识被误判成预发布）");
+  assert.match(h.get("aboutUpdateStatus").textContent, /已是先行版最新/);
+  assert.equal(h.get("aboutDriftRow").hidden, true, "先行是常态，不出不一致提示");
+});
+
+test("先行轨：上游有新提交 → 状态行给出提交标识，「立即更新」可用；检查失败用现有文案", async () => {
+  const h = harness((path) => {
+    if (path === "/api/settings") return { ok: true, settings: { bleedingEdgeMode: true } };
+    if (path.startsWith("/api/updates")) return { track: "bleeding", identity: true, state: "update_available", currentVersion: "0.6.6", currentCommit: "0123456", remoteCommit: "fedcba0", remoteSha: "fedcba0987654321fedcba0987654321fedcba09", checkedAt: "2026-10-15T00:00:00Z", release: null, errorCode: null };
+    return normal(path);
+  });
+  await h.controller.enter();
+  await tick(); await tick(); await tick();
+  assert.match(h.get("aboutUpdateStatus").textContent, /发现先行新提交 fedcba0/);
+  assert.equal(h.get("aboutSelfUpdate").hidden, false);
+});
+
+test("不一致提示行：三种形态的文案、「不再显示」按状态指纹静默、新状态复现", async () => {
+  let answer = { state: "current", checkedAt: "2026-10-15T00:00:00Z", release: { version: "0.6.6", tag: "v0.6.6", prerelease: false, url: "https://github.com/Aurora0134/Anyswitch/releases/tag/v0.6.6" }, errorCode: null, track: "stable",
+    drift: { ahead: false, offTag: true, localVersion: "0.6.6", remoteVersion: "0.6.6", localCommit: "0123456" } };
+  const h = harness((path) => {
+    if (path === "/api/settings") return { ok: true, settings: {} };
+    if (path.startsWith("/api/updates")) return answer;
+    return normal(path);
+  });
+  await h.controller.enter();
+  await tick(); await tick(); await tick();
+  // 仅游离：状态行中性，事实在提示行。
+  assert.match(h.get("aboutUpdateStatus").textContent, /已检查更新/);
+  assert.equal(h.get("aboutDriftRow").hidden, false);
+  assert.match(h.get("aboutDriftNotice").textContent, /当前安装不是官方发布的版本，官方最新为 0\.6\.6/);
+  assert.equal(h.get("aboutDriftDismiss").hidden, false);
+  // 「不再显示」：同状态静默（提示行整行收起），状态行保持中性。
+  h.get("aboutDriftDismiss").click();
+  assert.equal(h.get("aboutDriftRow").hidden, true);
+  assert.match(h.get("aboutUpdateStatus").textContent, /已检查更新/);
+  // 同状态再次进页：仍然静默。
+  h.controller.leave();
+  await h.controller.enter();
+  await tick(); await tick(); await tick();
+  assert.equal(h.get("aboutDriftRow").hidden, true);
+  // 新状态（远端身份变化）：提示行复现，文案换 ahead+游离合并形态。
+  answer = { ...answer, checkedAt: "2026-10-15T01:00:00Z", drift: { ahead: true, offTag: true, localVersion: "0.6.7", remoteVersion: "0.6.6", localCommit: "1234567" } };
+  await h.controller.checkUpdates(true);
+  await tick(); await tick();
+  assert.equal(h.get("aboutDriftRow").hidden, false);
+  assert.match(h.get("aboutDriftNotice").textContent, /当前安装不是官方发布的版本（0\.6\.7-1234567），官方最新为 0\.6\.6/);
+});
+
+test("先行与不一致的定稿文案逐字落盘（对稿结论）", () => {
+  // 高级选项页「更新通道」卡：开关行说明。
+  assert.ok(html.includes("关闭时，更新只提供官方正式发布的版本；开启后，检查更新跟随上游最新提交，安装的版本号会带提交标识并显示「先行版」标记。从先行版关闭时，会先回退到离当前最近的稳定版本。"), "开关行说明");
+  assert.ok(html.includes('id="bleedingEdgeToggle"'));
+  assert.ok(html.includes(">先行版</span>"), "先行版徽标");
+  assert.ok(html.includes(">不再显示</a>"), "不再显示动作");
+  // 开启确认 / 关闭确认（带回退）/ 关闭确认（已在稳定节点）。
+  assert.ok(source.includes("开启后只切换更新来源，当前已安装的版本不变；之后检查更新会显示上游最新提交，是否更新到它由你在关于页决定。先行版本包含尚未正式发布的改动。确认开启？"), "开启确认");
+  assert.ok(source.includes("已开启先行版") && source.includes("已关闭先行版"), "开/关 toast");
+  assert.ok(source.includes("关闭前会把 Anyswitch 回退到离当前最近的稳定版本（"), "回退确认前半");
+  assert.ok(source.includes("回退期间面板与 Relay 会自动重启，服务中断几秒钟；安装目录中的手动修改会被覆盖。关闭后，更新只提供官方正式发布的版本。"), "回退确认后半");
+  assert.ok(source.includes("当前已在稳定版本（"), "就地关闭确认");
+  assert.ok(source.includes("确认回退并关闭？"), "回退确认按钮");
+  // 关于页先行轨状态行。
+  assert.ok(source.includes("已是先行版最新") && source.includes("发现先行新提交"), "先行状态行");
+  // 不一致提示行三形态。
+  assert.ok(source.includes("当前安装不是官方发布的版本（"), "ahead+游离合并");
+  assert.ok(source.includes("领先于官方最新"), "仅 ahead");
+  assert.ok(source.includes("当前安装不是官方发布的版本，官方最新为"), "仅游离");
+  assert.ok(source.includes("已检查更新"), "不一致家族的状态行中性文案");
 });

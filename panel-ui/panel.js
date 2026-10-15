@@ -2557,6 +2557,7 @@ async function api(method, path, body) {
     const rows = new Map();
     let active = false, environmentGen = 0, updateGen = 0;
     let appInfo = null, local = null, localAt = 0, update = null, updateAt = 0;
+    let bleedingMode = false; // 先行轨道开关（进页从设置现读；渲染层只读它）
     let environmentTask = null, updateTask = null, localFailed = false;
     const products = {
       claude: ["anthropics/claude-code", "@anthropic-ai/claude-code"],
@@ -2831,7 +2832,9 @@ async function api(method, path, body) {
     function renderSelfUpdateStaged() {
       if (!active || !selfUpdateStaged) return;
       const statusEl = get("aboutUpdateStatus");
-      statusEl.textContent = `已下载 ${selfUpdateStaged.targetVersion || ""}，应用后生效`;
+      // 横幅文案以任务自报的结论为准（先行轨的落点是提交标识，稳定轨是版本号）；
+      // 结论缺失时按记录里的目标兜底拼同一句式。
+      statusEl.textContent = selfUpdateStaged.message || `已下载 ${selfUpdateStaged.targetVersion || ""}，应用后生效`;
       statusEl.dataset.tone = "";
       get("aboutUpdateTime").textContent = "";
       const btn = get("aboutSelfUpdate");
@@ -2922,7 +2925,10 @@ async function api(method, path, body) {
     }
     async function startSelfUpdate() {
       if (selfUpdateRun || !selfUpdateAdopted) return;
-      const target = update?.release?.version || "";
+      // 目标标识按轨道取：先行轨是远端 main 的提交标识，稳定轨是 release 版本号。
+      // 确认与进度文案用同一份；服务端登记时自会以它自己的强制检查为准。
+      const bleedingTrack = update?.track === "bleeding" && update.identity !== false;
+      const target = bleedingTrack ? (update?.remoteCommit || "") : (update?.release?.version || "");
       if (!target) return;
       // 一键更新：一次确认覆盖下载与应用两步。下载不动任何运行中的东西，应用才打断
       // 服务——重启提示是底线，有在跑 Agent 时把中断警示叠加上去，两条都要让用户看到。
@@ -2941,7 +2947,7 @@ async function api(method, path, body) {
       if (selfUpdateRun) return; // 确认期间可能已从 adopt 接回
       try {
         const started = await request("POST", "/api/self-update", {});
-        trackSelfUpdate(started.runId, started.targetVersion, "staging", false, true);
+        trackSelfUpdate(started.runId, started.targetVersion || target, "staging", false, true);
       } catch (error) {
         selfUpdateRun = null;
         notify(error?.code === "busy" ? "已有更新任务在进行中" : "更新未能启动，请稍后重试", true);
@@ -2970,7 +2976,7 @@ async function api(method, path, body) {
         const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
         if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
       } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
-      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
+      const confirmed = await confirmSelfUpdate(`应用更新 ${staged.track === "bleeding" ? String(staged.targetSha ?? "").slice(0, 7) : staged.targetVersion || ""}`, `${warning}确认现在应用？`, "立即应用");
       if (!confirmed) return;
       if (selfUpdateRun || selfUpdateStaged !== staged) return;
       await applySelfUpdateRun(staged);
@@ -3013,12 +3019,48 @@ async function api(method, path, body) {
       if (active) renderUpdate(Boolean(updateTask));
     }
     function renderApp() {
-      get("aboutAppVersion").textContent = appInfo?.version || "版本暂时无法读取";
-      get("aboutPreviewBadge").hidden = !appInfo?.prerelease;
+      // 先行轨道的版本号带提交标识（app-info 自报的 HEAD 短哈希；无本地 git 身份
+      // 时无后缀、只显徽标）。先行徽标与预览徽标互斥：带提交标识的版本号会被
+      // 误判成预发布，先行时预览徽标必须让位。
+      const commit = typeof appInfo?.commit === "string" ? appInfo.commit : "";
+      get("aboutAppVersion").textContent = bleedingMode && commit ? `${appInfo?.version || ""}-${commit}` : (appInfo?.version || "版本暂时无法读取");
+      get("aboutPreviewBadge").hidden = bleedingMode || !appInfo?.prerelease;
+      get("aboutBleedingBadge").hidden = !bleedingMode;
       const system = local || appInfo;
       if (system) get("aboutSystem").textContent = `${({ win32: "Windows", darwin: "macOS", linux: "Linux" })[system.platform] || "当前系统"} · Node ${system.nodeVersion || "版本未知"}`;
     }
+    // 不一致提示行的状态指纹：同一「本地身份＋远端身份」组合只提示一次，点过
+    // 「不再显示」后同状态静默；本地或远端任一变化即新状态、重新出现。
+    function driftFingerprint(drift) {
+      return `${drift.localCommit || drift.localVersion || ""}:${drift.remoteVersion || ""}`;
+    }
+    // 不一致提示行：持续状态（条件在它就长期在），静态摆在状态行下方独占一行，
+    // 与「检查时间」同级小字。先行轨道不判游离——先行即常态。
+    function renderDriftRow() {
+      const row = get("aboutDriftRow");
+      const notice = get("aboutDriftNotice");
+      const dismiss = get("aboutDriftDismiss");
+      const drift = update?.track === "stable" ? update?.drift : null;
+      if (!drift) {
+        row.hidden = true;
+        notice.textContent = "";
+        dismiss.hidden = true;
+        return;
+      }
+      const localLabel = drift.localCommit ? `${drift.localVersion}-${drift.localCommit}` : `${drift.localVersion}`;
+      notice.textContent = drift.ahead && drift.offTag
+        ? `当前安装不是官方发布的版本（${localLabel}），官方最新为 ${drift.remoteVersion || "未知"}`
+        : drift.ahead
+          ? `当前版本 ${drift.localVersion} 领先于官方最新 ${drift.remoteVersion || "未知"}`
+          : `当前安装不是官方发布的版本，官方最新为 ${drift.remoteVersion || "未知"}`;
+      let muted = false;
+      try { muted = localStorage.getItem(`anyswitch:drift-shown:${driftFingerprint(drift)}`) === "1"; } catch { muted = false; }
+      row.hidden = muted;
+      dismiss.hidden = muted;
+    }
     function renderUpdate(checking = false) {
+      // 不一致提示行只看检查结果，与横幅/进度谁占状态行无关，先画再让位。
+      renderDriftRow();
       // 自更新进行中：状态行归进度渲染所有，检查结果不插话（完成态由收尾渲染）。
       const selfBtn = get("aboutSelfUpdate");
       if (selfUpdateRun) {
@@ -3035,13 +3077,24 @@ async function api(method, path, body) {
       // 刚进页补显的最终结论：只能被「又有更新」盖掉，不被「已是最新」盖掉。
       const keepOutcome = selfUpdateLastOutcome && !checking && update?.state !== "update_available";
       const state = update?.state;
-      const releaseVersion = update?.release?.version || "";
-      const copy = {
-        update_available: update?.release?.prerelease ? `发现新预览版 ${releaseVersion}` : `发现新版本 ${releaseVersion}`,
-        current: "当前已是最新", ahead: "当前版本领先于已发布版本", no_releases: "暂无发布版本",
+      const drift = update?.track === "stable" ? update?.drift : null;
+      const status = get("aboutUpdateStatus");
+      // 先行轨按提交身份答话；无 git 身份的先行（镜像安装未引导）回退版本号比较，
+      // 与稳定轨同一套文案。
+      const bleedingTrack = update?.track === "bleeding" && update.identity !== false;
+      const copy = bleedingTrack ? {
+        current: "已是先行版最新",
+        update_available: `发现先行新提交 ${update?.remoteCommit || ""}`,
+        error: "暂时无法检查，请重试",
+      } : {
+        update_available: update?.release?.prerelease ? `发现新预览版 ${update?.release?.version || ""}` : `发现新版本 ${update?.release?.version || ""}`,
+        // 不一致家族（ahead / 安装游离）：状态行只交代检查发生过，事实在不一致
+        // 提示行上；点过「不再显示」后状态行也回落到这句。
+        current: drift ? "已检查更新" : "当前已是最新",
+        ahead: "已检查更新",
+        no_releases: "暂无发布版本",
         error: "暂时无法检查，请重试", unknown_version: "当前版本无法比较",
       };
-      const status = get("aboutUpdateStatus");
       if (!keepOutcome) {
         status.textContent = checking ? "正在检查更新…" : copy[state] || "尚未检查更新";
         status.dataset.tone = !checking && state === "error" ? "danger" : !checking && state === "current" ? "ok" : "";
@@ -3051,7 +3104,8 @@ async function api(method, path, body) {
       const href = !checking && safeLink(update?.release?.url, "app");
       link.hidden = !href;
       if (href) link.href = href; else link.removeAttribute("href");
-      // 一键自更新：只在确认有新版本且接回检查完成时出现（检查出错/暂无发布不出现）。
+      // 一键自更新：只在确认有新版本（两条轨道各自的 update_available）且接回
+      // 检查完成时出现（检查出错/暂无发布不出现）。
       selfBtn.textContent = "立即更新";
       selfBtn.hidden = checking || !selfUpdateAdopted || state !== "update_available";
     }
@@ -3317,10 +3371,20 @@ async function api(method, path, body) {
         updateBatchButton();
       }, () => {});
     }
+    // 先行轨道开关是运行时设置：进页现读一次（版本号后缀与徽标只由它驱动），
+    // 高级页切换后回到关于页会重新进页、重新读取，不另挂监听。
+    async function refreshBleedingMode() {
+      try {
+        const data = await fetchOnce("/api/settings");
+        bleedingMode = data?.settings?.bleedingEdgeMode === true;
+      } catch { return; }
+      if (active) renderApp();
+    }
     function enter() {
       if (active) return environmentTask || Promise.resolve();
       active = true;
       if (appInfo) renderApp();
+      void refreshBleedingMode();
       renderUpdate();
       renderLocal();
       updateBatchButton();
@@ -3359,11 +3423,22 @@ async function api(method, path, body) {
     get("aboutSelfUpdate").onclick = () => { void (selfUpdateStaged ? startSelfUpdateApply() : startSelfUpdate()); };
     get("aboutEnvironmentRefresh").onclick = () => loadEnvironment(true);
     get("aboutUpdateAll").onclick = () => startUpdateAll();
+    // 「不再显示」：压掉的是当前这个不一致状态（按状态指纹），状态变化后新状态
+    // 会重新出现——不是永久关闭。
+    get("aboutDriftDismiss").onclick = (event) => {
+      event?.preventDefault?.();
+      const drift = update?.track === "stable" ? update?.drift : null;
+      if (!drift) return;
+      try { localStorage.setItem(`anyswitch:drift-shown:${driftFingerprint(drift)}`, "1"); } catch { /* 存档不可写：保持提示，不吞状态 */ }
+      renderDriftRow();
+    };
     get("clientUpdateModalCancel").onclick = () => closeLifecycleModal(false);
     get("clientUpdateModalClose").onclick = () => closeLifecycleModal(false);
     get("clientUpdateModalConfirm").onclick = () => closeLifecycleModal(true);
     get("clientUpdateModal").onclick = (event) => { if (event?.target === get("clientUpdateModal")) closeLifecycleModal(false); };
-    return { enter, leave, checkUpdates, refresh: () => loadEnvironment(true) };
+    // confirmSelfUpdate 同时暴露给设置视图：先行版开关的双确认复用同一只弹层
+    // （单例+排队语义不变）。弹层开着时遮罩盖住页面，切走即按取消作答，安全。
+    return { enter, leave, checkUpdates, refresh: () => loadEnvironment(true), confirmSelfUpdate };
   }
 
   // 设置全页视图与各项开关
@@ -3378,6 +3453,7 @@ async function api(method, path, body) {
     const injectEffortToggle = $("injectEffortToggle");
     const credentialCacheToggle = $("credentialCacheToggle");
     const autoDownloadUpdatesToggle = $("autoDownloadUpdatesToggle");
+    const bleedingEdgeToggle = $("bleedingEdgeToggle");
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
@@ -3399,7 +3475,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -3694,6 +3770,10 @@ async function api(method, path, body) {
         }
         if (!settingsSaving.autoDownloadUpdates && autoDownloadUpdatesToggle && d.settings && typeof d.settings.autoDownloadUpdates === "boolean") {
           autoDownloadUpdatesToggle.checked = d.settings.autoDownloadUpdates;
+        }
+        // 先行版开关：保存中（含确认弹层挂着的那段时间）不被轮询回灌盖回。
+        if (!settingsSaving.bleedingEdge && bleedingEdgeToggle && d.settings && typeof d.settings.bleedingEdgeMode === "boolean") {
+          bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
         }
         // 运行日志开关：回灌时把左侧那张实时输出卡的显隐一并跟上，免得设置页与看板
         // 各说各话。
@@ -4148,6 +4228,70 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.autoDownloadUpdates = false;
           autoDownloadUpdatesToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // ── 先行版（更新通道）：开=确认后只切检测通道（换装仍走关于页的两步更新）；
+    // 关=按回退计划确认——已在稳定节点上直接关，否则先换装回「本地之下的最近
+    // 稳定版本」再关。回退的进度与终态结论都在关于页呈现（换装本来就要换掉本
+    // 进程），确认通过后直接切过去接看；定不出回退计划（网络）时如实回弹开关。
+    if (bleedingEdgeToggle) {
+      bleedingEdgeToggle.onchange = async () => {
+        if (settingsSaving.bleedingEdge) {
+          bleedingEdgeToggle.checked = !bleedingEdgeToggle.checked;
+          return;
+        }
+        const next = bleedingEdgeToggle.checked;
+        settingsSaving.bleedingEdge = true;
+        settingsLoadGen += 1;
+        bleedingEdgeToggle.setAttribute("aria-busy", "true");
+        const revert = () => { bleedingEdgeToggle.checked = !next; };
+        try {
+          if (next) {
+            const confirmed = await about.confirmSelfUpdate(
+              "开启先行版",
+              "开启后只切换更新来源，当前已安装的版本不变；之后检查更新会显示上游最新提交，是否更新到它由你在关于页决定。先行版本包含尚未正式发布的改动。确认开启？",
+              "开启先行版",
+            );
+            if (!confirmed) { revert(); return; }
+            const d = await api("POST", "/api/settings", { bleedingEdgeMode: true });
+            if (!d.ok) { revert(); toast("设置保存失败", true); return; }
+            if (typeof d.settings?.bleedingEdgeMode === "boolean") bleedingEdgeToggle.checked = d.settings.bleedingEdgeMode;
+            toast("已开启先行版");
+            return;
+          }
+          let plan = null;
+          try { plan = await api("GET", "/api/self-update/bleeding-plan"); } catch { plan = null; }
+          if (!plan?.ok) { revert(); toast("暂时无法检查，请重试", true); return; }
+          let confirmed, rollback = false;
+          if (plan.onStableNode) {
+            const body = plan.baseVersion
+              ? `当前已在稳定版本（${plan.baseVersion}）上，关闭后更新只提供官方正式发布的版本。确认关闭？`
+              : "关闭后更新只提供官方正式发布的版本。确认关闭？";
+            confirmed = await about.confirmSelfUpdate("关闭先行版", body, "关闭先行版");
+          } else {
+            let warning = `关闭前会把 Anyswitch 回退到离当前最近的稳定版本（${plan.baseVersion}）：回退期间面板与 Relay 会自动重启，服务中断几秒钟；安装目录中的手动修改会被覆盖。关闭后，更新只提供官方正式发布的版本。`;
+            try {
+              const data = await api("GET", "/api/agents");
+              const running = (data?.agents ?? []).filter((agent) => agent?.id && agent.status === "running");
+              if (running.length) warning += `当前有正在运行的 Agent（${running.map((agent) => agent.name || agent.id).join("、")}），其进行中的请求会被中断。`;
+            } catch { /* agents 读取失败不阻塞确认，交给更新流程自身的报错兜底 */ }
+            confirmed = await about.confirmSelfUpdate("关闭先行版", `${warning}确认回退并关闭？`, "回退并关闭");
+            rollback = true;
+          }
+          if (!confirmed) { revert(); return; }
+          const d = await api("POST", "/api/settings", { bleedingEdgeMode: false });
+          if (!d.ok) { revert(); toast("设置保存失败", true); return; }
+          bleedingEdgeToggle.checked = false;
+          if (!rollback) { toast("已关闭先行版"); return; }
+          // 回退换装即刻开跑：切到关于页接看进度（换装完成时本页随面板换新）。
+          // 起不来（busy 等）也切过去——那边的状态行会如实给出正在进行的任务。
+          try { await api("POST", "/api/self-update/rollback", {}); } catch { /* 状态由关于页如实呈现 */ }
+          activateSettingsSubTab("about");
+        } finally {
+          settingsSaving.bleedingEdge = false;
+          bleedingEdgeToggle.removeAttribute("aria-busy");
         }
       };
     }

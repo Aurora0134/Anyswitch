@@ -1443,7 +1443,12 @@
   .about-head-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
   .about-app-version { font: 12px var(--font-mono); color: var(--text-2); overflow-wrap: anywhere; }
   .about-preview { font-size: 11px; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: var(--radius-sm, 6px); padding: 2px 6px; }
+  /* 先行版徽标与版本号拉开一点距离（预览版徽标保持原间距不动） */
+  .about-bleeding-badge { margin-left: 4px; }
   .about-update-body { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+  /* 不一致提示行：独占一行的持续状态（与「检查时间」同级的小字），非一次性回执 */
+  .about-drift-row { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .about-drift { font-size: 11px; color: var(--text-3); line-height: 1.6; }
   .about-status { font-size: 12px; color: var(--text-2); line-height: 1.6; }
   .about-meta { font-size: 11px; color: var(--text-3); line-height: 1.6; }
   .about-status[data-tone="ok"], .about-result[data-tone="ok"] { color: var(--ok); }
