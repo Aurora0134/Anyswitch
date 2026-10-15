@@ -710,6 +710,24 @@
   :root[data-ui-version="v2"][data-style="saas"] .settings-theme-preview,
   :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }
 
+  /* 主题预览镜像的头行克隆：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
+     镜像原先只克隆栏+看板，板内顶栏整条缺失（「预览板内顶栏被吞」）。克隆体剥了 id，
+     v2 收编头行的三条 id 锚规则（#mainHeadInner 下隐品牌组/旧 tab 条/头行按钮、右对齐）
+     全部脱钩，这里按镜像作用域顶班补同语义；layout-container 的栏让位（padding-left
+     96/240 及 collapsed/expanded 媒体档同链规则）在镜像里无意义，剥成 0——头行内容盒
+     与看板内容左缘对齐（真实布局 240=栏216+间隔24，镜像里栏与间隔由网格列承担），
+     padding-right 保留基座 24 与看板右缘同口径。双属性提级：稳压 collapsed/expanded
+     媒体块里同链的 .layout-container 让位规则（5 类级 > 4 类级）。 */
+  :root[data-ui-version="v2"][data-style] .settings-mirror-scale > .site-head { grid-column: 2; min-width: 0; }
+  :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner {
+    max-width: none; padding-left: 0; justify-content: flex-end;
+  }
+  :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner .brand-group,
+  :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner .view-tabs,
+  :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner .head-meta-strip .icon-btn {
+    display: none;
+  }
+
   /* ── 新版界面阶段 3：统计页平铺——同阶段 2 定稿手法（「页面是平的，浮层才有影」） ──
      1) 统计区块成描边盒：透明底 + 四边 1px --border + --radius-md + 无影 + hover 全静态，
         盒间距 28px 节奏（pane 列 / 上半区网格 / 侧栏列 / 四宫格行四层容器同档），卡头
@@ -1513,10 +1531,12 @@
      只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
      同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
      栏自动着色。栏与内容区间的 24px 间隔照真实布局以 gap 呈现；栏宽与间隔不占镜像里
-     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、窄栏 72+24）。 */
-  :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; gap: 24px; }
-  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; }
-  :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { flex: 1 1 auto; min-width: 0; }
+     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、窄栏 72+24）。
+     头行进镜像后画布改两列网格：栏跨头行/看板两行通高，右列上头行下看板；行距 24
+     照真实布局 main 的 padding-top（头行底边到看板顶卡的间距）。 */
+  :root[data-ui-version="v2"] .settings-mirror-scale { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 24px; row-gap: 24px; }
+  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; grid-row: 1 / span 2; }
+  :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { grid-column: 2; min-width: 0; }
 
   /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
      右侧状态面板使用普通面板 token，与看板遥测同源。 */
