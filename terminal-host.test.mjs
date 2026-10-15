@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED } from "./terminal-host.mjs";
@@ -13,11 +13,16 @@ class FakePty {
     this.rows = 24;
     this.dataListener = null;
     this.exitListener = null;
+    this.resizeCalls = [];
   }
   onData(fn) { this.dataListener = fn; }
   onExit(fn) { this.exitListener = fn; }
   write(data) { this.dataListener?.(`echo:${data}`); }
-  resize(cols, rows) { this.cols = cols; this.rows = rows; }
+  resize(cols, rows) {
+    this.resizeCalls.push([cols, rows]);
+    this.cols = cols;
+    this.rows = rows;
+  }
   kill() { this.exitListener?.({ exitCode: 0 }); }
 }
 
@@ -47,6 +52,50 @@ async function listen(host) {
     host.server.listen(0, "127.0.0.1", resolve);
   });
   return host.server.address().port;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// SSE 帧采集器：后台持续读流、按 "\n\n" 切帧、解析 event:/data: 两行、追加进
+// frames，直到连接结束或被 abort 打断。合帧用例要数「一个窗口内出了几帧」，
+// 任何一次被半途弃置的读取都会吞掉后续数据让帧数失真，所以这里从不停读：
+// 断言在任意时刻看 frames 快照即可。等特定帧用 waitForSseFrame 轮询（带
+// 上限防挂死）。
+function startSseCollector(response) {
+  const frames = [];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const settled = (async () => {
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        buffer += decoder.decode(value, { stream: true });
+        let index;
+        while ((index = buffer.indexOf("\n\n")) >= 0) {
+          const raw = buffer.slice(0, index);
+          buffer = buffer.slice(index + 2);
+          const eventLine = raw.split("\n").find((line) => line.startsWith("event: "));
+          if (!eventLine) continue; // 心跳注释帧（": keep-alive"）没有 event 行
+          const dataLine = raw.split("\n").find((line) => line.startsWith("data: "));
+          frames.push({ event: eventLine.slice(7), data: dataLine?.slice(6) });
+        }
+      }
+    } catch {
+      /* abort 打断了流——采集到此为止 */
+    }
+  })();
+  return { frames, settled };
+}
+
+async function waitForSseFrame(collector, eventName, { timeoutMs = 300 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (!collector.frames.some((frame) => frame.event === eventName)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(5);
+  }
+  return true;
 }
 
 test("terminal host owns persistent session metadata and PTY controls", async () => {
@@ -167,6 +216,9 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     assert.equal(listed.sessions[0].buffer, undefined, "窗口属 SSE 流，不上百秒一轮的轮询列表");
 
     await waitPersist();
+    // persistNow 异步化后，防抖拍到点 ≠ 写已落定：显式等链尾兜底（没脏时它是
+    // 纯空跳，脏还在就直接冲），下面两次读盘不再跟在途写赛跑。
+    await host.persistNow();
     const onDisk = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
     const diskBytes = Buffer.byteLength(onDisk.sessions[0].buffer.join(""));
     assert.ok(diskBytes <= 128 * KB, `落盘尾部 ${diskBytes} 字节，超 128KB 预算`);
@@ -200,6 +252,7 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     // 落盘尾部同样「最新一块无条件留」：单块超 128KB 预算也得存下去，
     // 否则宿主再重启一次，恢复回来的就是一块白屏而不是那张画满的屏。
     await waitPersist();
+    await restoredHost.persistNow();
     const diskAgain = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
     assert.equal(diskAgain.sessions[0].buffer.length, 1, "超预算的单块照样落盘");
     assert.ok(diskAgain.sessions[0].buffer[0].includes(marker(900)), "落的就是最新那块");
@@ -430,6 +483,294 @@ test("宿主换新进程后由盘上尾部重建镜像，回放仍出画面不�
   } finally {
     controller.abort();
     if (restored) await restored.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 性能改造钉子。三处病灶各自的回归防线：同尺寸 resize 短路（①）、SSE data 帧
+// 合帧（②）、脏位门控与异步原子写（③④）。观察手段说明：
+//   - 「写没写盘」用 mtimeMs 判：内容比对分不出「重写了同样的内容」和「没写」，
+//     NTFS 的 100ns 时间戳分得出；断言前 sleep 25ms 只为跨过时钟粒度，不是在
+//     等异步写落定——落定一律走 await host.persistNow()（等链尾，没脏时空跳）。
+//   - 「帧数/帧序」用 SSE 帧读取器数：窗口值由测试注入，让每个断言都不依赖
+//     真实时钟的运气（合帧用小窗口，exit/阈值冲刷用大到永不到点的窗口）。
+
+// ① 前端 fit 后无条件补发 resize：同尺寸请求不得再走 ConPTY 重排与整份落盘。
+test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-samesize-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "同尺寸", cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    const pty = calls[0].pty;
+    assert.deepEqual(pty.resizeCalls, [], "起点：创建后的 FakePty 未被重排过");
+
+    const before = statSync(host.statePath);
+    await sleep(25); // 只为跨过 mtime 粒度，让「没写」可判
+
+    const same = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 100, rows: 30 }),
+    });
+    assert.equal(same.status, 200);
+    assert.deepEqual(await same.json(), { ok: true, cols: 100, rows: 30 }, "短路响应与全路径同形");
+    await host.persistNow(); // 没脏即空跳；有脏即冲净——两种结果都算落定
+    assert.deepEqual(pty.resizeCalls, [], "同尺寸 resize 不调 pty.resize（ConPTY 重排是多开卡顿源之一）");
+    const after = statSync(host.statePath);
+    assert.equal(after.mtimeMs, before.mtimeMs, "同尺寸 resize 不重写状态文件（含 128KB 级全量落盘）");
+
+    // 对照组：尺寸真变了，全路径照旧——重排发生、盘上尺寸更新。
+    const changed = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 120, rows: 40 }),
+    }).then((r) => r.json());
+    assert.deepEqual(changed, { ok: true, cols: 120, rows: 40 });
+    assert.deepEqual(pty.resizeCalls, [[120, 40]], "尺寸不同时 pty.resize 照常调用");
+    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
+    assert.equal(persisted.sessions[0].cols, 120, "实际变化的 resize 照常落盘");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ②-a 合帧本体：同一窗口内的多块输出合并成一个 data 帧（拼接语义不变），且
+// 多连接共享同一会话时各自独立合帧；下一批输出进入下一个窗口，节律持续。
+test("② SSE data 帧合帧：一个窗口多块合一帧、多连接各自独立", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-coalesce-"));
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+    sseCoalesceWindowMs: 4,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const controllers = [];
+  const collectors = [];
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "合帧", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+
+    for (let i = 0; i < 2; i += 1) {
+      const controller = new AbortController();
+      controllers.push(controller);
+      const response = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
+        headers: { authorization: `Bearer ${host.token}` }, signal: controller.signal,
+      });
+      assert.equal(response.status, 200);
+      collectors.push(startSseCollector(response));
+    }
+
+    // 同一个 tick 连写五块：正确行为是攒进缓冲、窗口到点合成一帧。
+    for (const piece of ["块一", "块二", "块三", "块四", "块五"]) pty.dataListener(piece);
+    await sleep(60); // 窗口 4ms 的十倍以上，定时器必然已到点
+    for (const [index, collector] of collectors.entries()) {
+      const data = collector.frames.filter((frame) => frame.event === "data");
+      assert.equal(data.length, 1, `连接 ${index}：五块输出只出一个 data 帧（逐块一帧是回归）`);
+      assert.equal(collector.frames[0].event, "snapshot", "snapshot 帧仍在最前，不被合帧器吞并");
+      assert.equal(JSON.parse(data[0].data), "块一块二块三块四块五", `连接 ${index}：合并帧的拼接语义不变`);
+    }
+
+    // 第二批进入下一个窗口：合帧是持续节律，不是只有第一帧。
+    pty.dataListener("块六");
+    pty.dataListener("块七");
+    await sleep(60);
+    for (const [index, collector] of collectors.entries()) {
+      const data = collector.frames.filter((frame) => frame.event === "data");
+      assert.equal(data.length, 2, `连接 ${index}：第二批同样只出一帧`);
+      assert.equal(JSON.parse(data[1].data), "块六块七", `连接 ${index}：第二批内容正确`);
+    }
+  } finally {
+    for (const controller of controllers) controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ②-b exit 顺序：窗口拉大到永不到点，pending 只能靠 exit 的前置冲净出来——
+// 最后一屏排在退出帧之前，帧序不能倒。整段在同一个 tick 内完成，零时钟依赖。
+test("② SSE exit 先冲净 pending 再发 exit 帧：最后一屏不丢、帧序不倒", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-exitorder-"));
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+    sseCoalesceWindowMs: 5000,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const controller = new AbortController();
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "退出顺序", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    const response = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
+      headers: { authorization: `Bearer ${host.token}` }, signal: controller.signal,
+    });
+    const collector = startSseCollector(response);
+
+    pty.dataListener("最后一块");
+    pty.kill(); // 同一 tick：pending 还在缓冲里，只有 exit 的冲净能把它送出去
+    assert.ok(
+      await waitForSseFrame(collector, "exit", { timeoutMs: 300 }),
+      "exit 帧必须及时出现（窗口永不到点也等得到，否则就是 exit 前没冲净）",
+    );
+    assert.deepEqual(collector.frames.map((frame) => frame.event), ["snapshot", "data", "exit"], "帧序：快照 → 数据 → 退出");
+    assert.equal(JSON.parse(collector.frames[1].data), "最后一块", "exit 前先冲净 pending：最后一屏不丢");
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ②-c 阈值冲刷：窗口大到永不到点，能在时限内收到的 data 帧只能来自 32KB 阈值
+// 的立即冲刷。两块恰好 32KB（不「超」不冲），第三块压过线即冲——顺带钉住边界
+// 是「超」不是「达到」。
+test("② SSE 待发缓冲超 32KB 立即冲刷：不等窗口定时器", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-flushtail-"));
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+    sseCoalesceWindowMs: 60000,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const controller = new AbortController();
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "阈值冲刷", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    const response = await fetch(url(`/terminal/sessions/${created.id}/stream`), {
+      headers: { authorization: `Bearer ${host.token}` }, signal: controller.signal,
+    });
+    const collector = startSseCollector(response);
+
+    const half = "x".repeat(16 * 1024);
+    pty.dataListener(half); // 累计 16KB：入缓冲，只有定时器（永不到点）
+    pty.dataListener(half); // 累计 32KB：恰好等于，仍未「超」
+    pty.dataListener("尾"); // 压过 32KB：立即冲
+    assert.ok(
+      await waitForSseFrame(collector, "data", { timeoutMs: 250 }),
+      "阈值冲刷不等窗口定时器（60s 窗口下 250ms 内必须见到帧）",
+    );
+    await sleep(30); // 收尾观察：阈值冲刷之后不该再跟着冒出第二帧
+    const data = collector.frames.filter((frame) => frame.event === "data");
+    assert.equal(data.length, 1, "阈值冲刷合并成一帧（拆两帧=把「达到」当成了「超」）");
+    assert.equal(JSON.parse(data[0].data), half + half + "尾", "冲出去的是全部三块拼接");
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ③ 脏位门控：内存没变过，persistNow 整笔跳过（连 stringify 都不做）——
+// 「写盘与否」用 mtime 判，落定用 await persistNow() 判，不写 sleep 等待。
+test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-dirty-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "脏位", cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+
+    // 创建路由已等过落盘；此后内存再无变化，两次显式 persistNow 都必须是空跳。
+    const settled = statSync(host.statePath).mtimeMs;
+    await sleep(25); // 跨过 mtime 粒度，让「没写」可判
+    await host.persistNow();
+    await host.persistNow();
+    assert.equal(statSync(host.statePath).mtimeMs, settled, "无变化时 persistNow 不写盘");
+
+    // 一条「走完整路径但无实际变化」的 mutate：杀掉 PTY 后发同尺寸 resize——
+    // 旧实现这里照样整份重写；脏位门控下 persistNow 是纯空跳。
+    calls[0].pty.kill(); // onExit 置脏并触发一笔写，路由会等它落定
+    await fetch(url(`/terminal/sessions/${created.id}/resize`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ cols: 100, rows: 30 }),
+    }).then((r) => r.json());
+    const afterExit = statSync(host.statePath).mtimeMs;
+    await sleep(25);
+    await host.persistNow();
+    assert.equal(statSync(host.statePath).mtimeMs, afterExit, "PTY 已退出的同尺寸 resize（无实际变化）不写盘");
+
+    // 对照组：emit 一块输出 → 置脏 → 真写盘，盘上带得上这块。
+    calls[0].pty.dataListener("新输出");
+    await host.persistNow();
+    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
+    assert.ok(persisted.sessions[0].buffer.some((chunk) => chunk.includes("新输出")), "置脏后的变更落盘");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ④ 异步原子写的可观察性质：写进行中的任意时刻，状态文件都是完整可解析的 JSON
+// （读者要么看到旧版全文、要么看到新版全文，永不看到半份）。大块输出拖长
+// writeFile(临时文件) 阶段，并发读者与写真正在时间上叠起来。
+test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-atomic-"));
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "原子", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+
+    const big = "x".repeat(96 * 1024);
+    const reads = [];
+    let stopReading = false;
+    const reader = (async () => {
+      while (!stopReading) {
+        reads.push(readFileSync(host.statePath, "utf8"));
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })();
+    for (let round = 0; round < 4; round += 1) {
+      pty.dataListener(big);
+      await host.persistNow();
+    }
+    stopReading = true;
+    await reader;
+
+    assert.ok(reads.length > 8, `并发读得真跑起来（实得 ${reads.length} 次，否则没叠上写）`);
+    for (const [index, text] of reads.entries()) {
+      let parsed = null;
+      assert.doesNotThrow(() => { parsed = JSON.parse(text); }, `第 ${index} 次读必须是完整 JSON`);
+      assert.ok(Array.isArray(parsed.sessions), `第 ${index} 次读必须是完整状态结构`);
+    }
+    // 终态也完整：最后一轮的大块按落盘尾部预算留在盘上。
+    const final = JSON.parse(readFileSync(host.statePath, "utf8"));
+    assert.ok(final.sessions[0].buffer.length >= 1, "终态快照内容完好");
+  } finally {
+    await host.close();
     rmSync(root, { recursive: true, force: true });
   }
 });

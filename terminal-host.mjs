@@ -6,7 +6,8 @@
 
 import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -46,6 +47,10 @@ const TERMINAL_BUFFER_MAX_CHUNKS = 4000;
 // budgeted tighter than the live one: enough to repaint after a host restart
 // without turning every debounce tick into a half-megabyte write.
 const TERMINAL_BUFFER_PERSIST_MAX_BYTES = 128 * 1024;
+// SSE data 帧合帧的冲刷阈值：单连接待发缓冲累计超过这个字节数立即冲，不等窗口
+// 定时器。窗口是给「TUI 把一帧拆成好几个小块」省帧数用的，不是给一次粘贴一大
+// 屏白添延迟用的——大块输出攒在缓冲里只会推迟它到达浏览器的时间。
+const SSE_PENDING_FLUSH_BYTES = 32 * 1024;
 
 function json(res, status, body) {
   const text = JSON.stringify(body);
@@ -247,32 +252,121 @@ function snapshot(session) {
   };
 }
 
-export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule = pty, spawnFn = spawn, logger = console } = {}) {
+// ---------------------------------------------------------------------------
+// 状态文件的异步原子替换。
+//
+// 仓库现成的 atomic-write.mjs 是同步纪律：writeFileSync + renameSync，rename 撞上
+// 杀软/索引器还要用 Atomics.wait 同步睡眠重试——搬过来等于把「全量重写阻塞事件
+// 循环」的病灶原样搬了个家。这里用 fs.promises 复刻同一套语义：兄弟临时文件 +
+// 原子 rename、EPERM/EACCES 有界退避重试、失败清残留且绝不留半份目标文件；差别
+// 只有睡眠换成不占事件循环的定时等待。重试参数与 atomic-write.mjs 保持一致。
+const STATE_RENAME_RETRY_ATTEMPTS = 3;
+const STATE_RENAME_RETRY_BASE_MS = 25;
+
+const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function renameWithRetry(temp, target) {
+  let lastError;
+  for (let attempt = 0; attempt <= STATE_RENAME_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      await rename(temp, target);
+      return;
+    } catch (error) {
+      // 与 atomic-write.mjs 同判：只有 Windows 杀软/索引器短暂掐住目标文件造成的
+      // EPERM/EACCES 值得重试，其余错误立即上抛。
+      if (error?.code !== "EPERM" && error?.code !== "EACCES") throw error;
+      lastError = error;
+      if (attempt < STATE_RENAME_RETRY_ATTEMPTS) await waitMs(STATE_RENAME_RETRY_BASE_MS * 2 ** attempt);
+    }
+  }
+  throw lastError;
+}
+
+async function atomicWriteStateFile(target, content) {
+  const temp = `${target}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temp, content, "utf8");
+    await renameWithRetry(temp, target);
+  } catch (error) {
+    try {
+      await rm(temp, { force: true });
+    } catch {
+      // 尽力清理残留的临时文件；上抛的仍是原始错误。
+    }
+    throw error;
+  }
+}
+
+export function createTerminalHost({
+  root,
+  port = TERMINAL_HOST_PORT,
+  ptyModule = pty,
+  spawnFn = spawn,
+  logger = console,
+  // SSE data 帧合帧窗口，毫秒：默认 16ms（约一帧渲染周期，肉眼无感又足以跨过
+  // TUI 拆块输出的间隔）。测试可注入小值或 0；用 ?? 而非 || 默认值，0 是合法
+  // 值（下一个宏任务即冲刷）。
+  sseCoalesceWindowMs = 16,
+} = {}) {
   const dataRoot = root || join(process.env.LOCALAPPDATA || process.cwd(), "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
   const statePath = join(dataRoot, TERMINAL_STATE_FILE);
   const sessions = new Map();
   const token = loadOrGenerateToken(dataRoot);
   let persistTimer = null;
+  const coalesceWindowMs = Math.max(0, sseCoalesceWindowMs);
+  // 脏位与写链。脏位回答「内存态相对盘上那份变没变」；写链保证落盘写一笔接
+  // 一笔串行、绝不交错。两者合起来把 persistNow 变成一个「有变化才做、做完
+  // 一定写完整」的后台作业，事件循环全程不被同步写盘卡住。
+  let stateDirty = false;
+  let persistChain = Promise.resolve();
 
+  function markStateDirty() {
+    stateDirty = true;
+  }
+
+  // 立即落盘（相对 250ms 防抖而言）。改异步后调用方分两类：路由与 close() 拿返
+  // 回值 await（响应/关停语义等价于旧的同步写完）；onExit 这类回调路径发后不
+  // 管——链上写失败会被捕获、记日志并保持脏位，下一拍自然重试，不会以未处理
+  // rejection 的形式炸掉宿主。
   function persistNow() {
-    mkdirSync(dataRoot, { recursive: true });
-    const state = [...sessions.values()].map((session) => ({
-      id: session.id,
-      label: session.label,
-      cwd: session.cwd,
-      shell: session.shell,
-      pid: session.pid,
-      createdAt: session.createdAt,
-      lastActiveAt: session.lastActiveAt,
-      cols: session.cols,
-      rows: session.rows,
-      buffer: persistedBufferTail(session.buffer),
-      status: session.pty ? "running" : "exited",
-      exitCode: session.exitCode,
-      ...agentMetadata(session),
-    }));
-    writeFileSync(statePath, JSON.stringify({ version: 1, sessions: state }, null, 2), "utf8");
+    // 脏位门控：上一笔成功落盘后内存没再变过的每个防抖拍（空闲会话的轮询、心
+    // 跳、无变化 resize 都会走到这里）连 JSON.stringify 都不做，直接原样返回当
+    // 前链。返回值恒为「含在途写」的链尾——跳过时它就是已落定的旧链，close()
+    // 与 SIGINT/SIGTERM 路径 await 它就是等完最后一笔。
+    if (!stateDirty) return persistChain;
+    // 入队即清脏、写败再置回，且状态文本在链内执行时才取快照：落盘期间发生的
+    // 变更要么赶在本笔快照之前被一并收编，要么在本笔写完之后仍处于置脏状态、
+    // 由下一拍补写——两条路都不丢变更。若改成「写成功后才清脏」，写进行中置的
+    // 脏就会被成功一笔顺手抹掉，那正是丢变更的写法。
+    stateDirty = false;
+    persistChain = persistChain.then(async () => {
+      try {
+        await mkdir(dataRoot, { recursive: true });
+        const state = [...sessions.values()].map((session) => ({
+          id: session.id,
+          label: session.label,
+          cwd: session.cwd,
+          shell: session.shell,
+          pid: session.pid,
+          createdAt: session.createdAt,
+          lastActiveAt: session.lastActiveAt,
+          cols: session.cols,
+          rows: session.rows,
+          buffer: persistedBufferTail(session.buffer),
+          status: session.pty ? "running" : "exited",
+          exitCode: session.exitCode,
+          ...agentMetadata(session),
+        }));
+        await atomicWriteStateFile(statePath, JSON.stringify({ version: 1, sessions: state }, null, 2));
+      } catch (error) {
+        // 写失败保持脏位：下一拍重试。状态文件是内存态的可恢复快照而非事务日志，
+        // 一次写失败不值得打断输出转发或把路由打成 500。
+        stateDirty = true;
+        logger.warn?.(`[terminal-host] state persist failed: ${error.message}`);
+      }
+    });
+    return persistChain;
   }
 
   function schedulePersist() {
@@ -327,6 +421,9 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     trimReplayBuffer(session, TERMINAL_BUFFER_MAX_BYTES, TERMINAL_BUFFER_MAX_CHUNKS);
     feedMirror(session, text);
     session.lastActiveAt = Date.now();
+    // 每个输出块都改写持久化状态（buffer 尾部与 lastActiveAt）：先置脏，250ms
+    // 防抖到点的 persistNow 才是真的要写，而不是被脏位门控空跳掉。
+    markStateDirty();
     for (const listener of session.listeners) listener(String(chunk));
     schedulePersist();
   }
@@ -339,9 +436,14 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
       session.exitCode = exitCode;
       session.pty = null;
       session.lastActiveAt = Date.now();
+      // 退出改写的是落盘快照里的 exitCode/状态/lastActiveAt 三样：置脏后再触发
+      // 立即写，退出码不能只活在内存里（宿主随后被杀时盘上还是 running）。
+      markStateDirty();
       persistNow();
       for (const listener of session.listeners) listener(null);
     });
+    // spawn 落定了 pid 与运行状态（新建与 restart 共用这条路径）：置脏。
+    markStateDirty();
     persistNow();
   }
 
@@ -401,14 +503,58 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     // split between PTY writes is still recognized.
     const replay = rendered || stripTerminalReplyProbes(session.buffer.join(""));
     if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
+    // data 帧合帧器，每个 SSE 连接独立一份：多连接共享同一会话，各攒各的缓冲、
+    // 各冲各的定时器。PTY 输出在小时间尺度上是一串碎块（TUI 常把一帧拆成好几
+    // 次 onData），逐块一帧等于把 N 次网络往返和 N 次 term.write 强加给一次重
+    // 绘——这就是多开卡顿时 SSE 侧的病灶。攒进待发缓冲、窗口定时器到点合并成
+    // 一个 data 帧转发；客户端本来就是 JSON.parse 后 term.write，拼接语义不变。
+    // 边界：超 SSE_PENDING_FLUSH_BYTES 立即冲（大输出不陪窗口攒延迟）；exit 先
+    // 冲净 pending 再发退出帧（最后一屏必须排在退出之前，帧序不能倒）；连接断
+    // 开清定时器弃缓冲（人已走，送无可送）。回放帧、snapshot 帧、心跳注释帧都
+    // 不经过这里——挂监听前的回放是既有直发路径，帧序保持不变。
+    let pendingChunks = [];
+    let pendingBytes = 0;
+    let flushTimer = null;
+    const writeDataFrame = (text) => res.write(`event: data\ndata: ${JSON.stringify(text)}\n\n`);
+    const flushPending = () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (pendingChunks.length === 0) return;
+      const merged = pendingChunks.join("");
+      pendingChunks = [];
+      pendingBytes = 0;
+      writeDataFrame(merged);
+    };
     const listener = (chunk) => {
-      if (chunk === null) res.write("event: exit\ndata: {}\n\n");
-      else res.write(`event: data\ndata: ${JSON.stringify(chunk)}\n\n`);
+      if (chunk === null) {
+        flushPending();
+        res.write("event: exit\ndata: {}\n\n");
+        return;
+      }
+      const text = String(chunk);
+      pendingChunks.push(text);
+      pendingBytes += chunkBytes(text);
+      if (pendingBytes > SSE_PENDING_FLUSH_BYTES) {
+        flushPending();
+        return;
+      }
+      if (!flushTimer) {
+        flushTimer = setTimeout(flushPending, coalesceWindowMs);
+        flushTimer.unref?.();
+      }
     };
     session.listeners.add(listener);
     const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15000);
     const close = () => {
       clearInterval(heartbeat);
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      pendingChunks = [];
+      pendingBytes = 0;
       session.listeners.delete(listener);
     };
     res.on("close", close);
@@ -461,7 +607,13 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
           listeners: new Set(),
         };
         sessions.set(session.id, session);
+        // 会话入表即改写持久化状态：先置脏。即便随后的 spawn 失败，这个「存在
+        // 过」的会话也该在关停冲刷时落上盘——与旧同步写的可观察行为一致。
+        markStateDirty();
         spawnSession(session);
+        // 旧实现 attach 里的同步写盘发生在 201 响应之前；异步化后路由等这笔写
+        // 落定再答，响应到达即会话已在盘上（宿主紧跟着崩溃也不丢这条记录）。
+        await persistNow();
         return json(res, 201, snapshot(session));
       }
       // 清空全部会话（relay 关停宿主前的清场）：杀掉存活 PTY、通知流端退出、
@@ -480,7 +632,11 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
           sessions.delete(session.id);
           cleared += 1;
         }
-        persistNow();
+        // 清场是删除级变化：置脏后这笔写必须真的把空表落上盘，并在响应前等它
+        // 写完——relay 的 stop({clearSessions}) 收到 200 就杀宿主子进程，盘上
+        // 残留旧会话会让下次启动凭空复活一排已关的页签。
+        markStateDirty();
+        await persistNow();
         return json(res, 200, { ok: true, cleared });
       }
       const match = url.pathname.match(/^\/terminal\/sessions\/([^/]+)(?:\/(input|resize|stream|restart|close))?$/);
@@ -503,6 +659,16 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         const body = await readBody(req);
         const cols = Math.max(2, Math.min(240, Number(body.cols) || session.cols));
         const rows = Math.max(1, Math.min(120, Number(body.rows) || session.rows));
+        // 前端 fit 完成后无条件补发 resize（xterm 的 proposeDimensions 不去重），
+        // 多开几个页签后这里每小时要吃几百次「尺寸其实没变」的请求，旧实现每一
+        // 次都白走一遍 ConPTY 重排加整份状态文件重写。钳制后与当前尺寸一致且
+        // PTY 还活着，就地短路：不重排、不动镜像、不落盘，回一个与全路径同形
+        // 的 200。PTY 已退出的会话没有重排可省，照走完整路径（含 persistNow，
+        // 由脏位门控决定是否真写）。
+        if (session.pty && cols === session.cols && rows === session.rows) {
+          return json(res, 200, { ok: true, cols, rows });
+        }
+        const sizeChanged = cols !== session.cols || rows !== session.rows;
         session.cols = cols;
         session.rows = rows;
         try {
@@ -512,7 +678,10 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
           logger.warn?.(`[terminal-host] screen mirror resize skipped (${session.id}): ${error.message}`);
         }
         session.pty?.resize(cols, rows);
-        persistNow();
+        // 有实际变化的 resize 才置脏：已退出会话收到的同尺寸 resize 走完整路径
+        // 但没有任何状态变化，这笔 persistNow 在脏位门控下是纯空跳。
+        if (sizeChanged) markStateDirty();
+        await persistNow();
         return json(res, 200, { ok: true, cols, rows });
       }
       if (action === "restart" && req.method === "POST") {
@@ -531,12 +700,17 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
         // belongs to the process that just died.
         session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
         spawnSession(session);
+        // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
+        await persistNow();
         return json(res, 200, snapshot(session));
       }
       if (action === "close" && req.method === "POST") {
         session.pty?.kill();
         sessions.delete(session.id);
-        persistNow();
+        // 会话从内存表移除是删除级变化：置脏后等这笔写落定再答——响应到达时
+        // 盘上已经没有这个会话（与旧同步写的外部时序契约一致）。
+        markStateDirty();
+        await persistNow();
         return json(res, 200, { ok: true });
       }
       return json(res, 405, { error: "method_not_allowed" });
@@ -552,14 +726,26 @@ export function createTerminalHost({ root, port = TERMINAL_HOST_PORT, ptyModule 
     token,
     statePath,
     sessions,
+    // 异步化后「已落盘」不再随路由响应自动成立（onExit 这类回调路径是发后不管
+    // 的），把这个等链入口暴露出来给测试做确定性等待：await 它即等完链上全部
+    // 在途写（没脏时是纯空跳）。
+    persistNow,
     close: async () => {
       if (persistTimer) {
         clearTimeout(persistTimer);
         persistTimer = null;
       }
-      persistNow();
+      // 关停冲刷：SIGINT/SIGTERM 的处理器在 close() 返回后立刻 process.exit(0)，
+      // 不等完在途写，最后一批输出或清场结果就会被 exit 截胡成盘上的旧状态。
+      // 但监听必须在没有 await 间隔的情况下立即停：undici 这类客户端在被断开的
+      // 连接死后几毫秒内会补开一条空闲连接，监听先停，补连就被直接拒绝；若先
+      // 等落盘再关监听，那条没有请求挂靠的连接会被 server.close() 当成在场
+      // 连接等满一个客户端 keep-alive 周期（实测约 4 秒）。
+      const flush = persistNow();
       for (const session of sessions.values()) session.listeners.clear();
-      await new Promise((resolve) => server.close(resolve));
+      const closed = new Promise((resolve) => server.close(resolve));
+      await flush;
+      await closed;
     },
   };
 }
