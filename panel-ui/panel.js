@@ -5349,6 +5349,56 @@ async function api(method, path, body) {
   // 盒上沿贴标签字墨迹上沿、下沿贴数值字基线），viewBox 1:1 映射像素，线宽/round 端点不失真
   const TERMINAL_SPARK_SIZE = { w: 56, h: 33 };
 
+  // 跳顶回归护栏（跟随底部焊死）：xterm 的 Viewport 把 .xterm-viewport 的 scroll
+  // 事件翻译成缓冲区行号（_handleScroll：newRow = scrollTop/行高，与 ydisp 的差值
+  // 直接写进缓冲区）。渲染尺寸同步存在瞬时塌缩窗口（实测：建流回放+输出洪峰期间，
+  // 滚动区高度被瞬刻算成一屏大小——scrollTop 从底部 40095 被浏览器钳到 345），
+  // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
+  // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
+  // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
+  // 滚动操作时，视口被打离底部即拉回。用户主动离底的各条通路都先记意图——滚轮/
+  // 拖滚动条/触摸/选择拖动，以及键盘翻页（xterm 把 Shift+PageUp/PageDown 译为
+  // scrollLines，见下方 keydown 监听）——意图窗口内的离底事件退出跟随态，停在
+  // 历史上绝不拉回；滚回底部自动恢复跟随。
+  const TERMINAL_SCROLL_INTENT_MS = 250;
+  function installTerminalFollowBottomGuard(term) {
+    const root = term.element;
+    const viewport = root?.querySelector(".xterm-viewport");
+    if (!root || !viewport) return;
+    let followBottom = true;
+    let lastScrollIntentAt = 0;
+    const noteIntent = () => { lastScrollIntentAt = Date.now(); };
+    root.addEventListener("wheel", noteIntent, { capture: true, passive: true });
+    root.addEventListener("touchstart", noteIntent, { capture: true, passive: true });
+    root.addEventListener("pointerdown", noteIntent, { capture: true, passive: true });
+    // 按住拖动（滚动条拖拽、选择拖动触发 xterm 自己的滚动）持续刷新意图窗口
+    root.addEventListener("pointermove", (event) => { if (event.buttons) noteIntent(); }, { capture: true, passive: true });
+    // 键盘翻页同样是用户滚动：xterm 原生把 Shift+PageUp/PageDown 译为
+    // scrollLines(±(rows-1))（common/input/Keyboard.ts，Home/End 无滚动映射）——
+    // 这条路径不产生 wheel/pointer 意图，不补会把从底部翻页的用户误判成抖动拉回。
+    root.addEventListener("keydown", (event) => {
+      if (event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")) noteIntent();
+    }, { capture: true, passive: true });
+    // 挂在 xterm 自己的 scroll 监听之后（它绑在 open() 里，本护栏在 open 之后装），
+    // 读到的 ydisp 已是它翻译过的值：落底事件恢复跟随；跟随态下无意图的离底事件
+    // 即钳制抖动，拉回底部。
+    viewport.addEventListener("scroll", () => {
+      const buffer = term.buffer.active;
+      if (buffer.viewportY >= buffer.baseY - 1) {
+        // 落底即回到「真值在底部」状态：跟随恢复，历史意图一并作废——其后的
+        // 无意图离底只能是抖动，不可能是上一次用户滚动的余波。
+        followBottom = true;
+        lastScrollIntentAt = 0;
+        return;
+      }
+      if (Date.now() - lastScrollIntentAt <= TERMINAL_SCROLL_INTENT_MS) {
+        followBottom = false;
+        return;
+      }
+      if (followBottom) term.scrollToBottom();
+    });
+  }
+
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
     if (!host || terminalXterm || !window.Terminal) return terminalXterm;
@@ -5400,6 +5450,7 @@ async function api(method, path, body) {
       terminalXterm.unicode.activeVersion = "11";
     }
     terminalXterm.open(host);
+    installTerminalFollowBottomGuard(terminalXterm);
     if (window.WebglAddon?.WebglAddon) {
       try {
         terminalWebglAddon = new window.WebglAddon.WebglAddon();
