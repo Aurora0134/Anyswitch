@@ -50,9 +50,15 @@ import {
   writeClientUpdateRun,
 } from "./client-update-journal.mjs";
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
+import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault } from "./app-git-identity.mjs";
+import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 
+// 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
+// APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
+// 路径常量止，只圈版本声明，不圈路径常量。
+const APP_DIR = dirname(fileURLToPath(import.meta.url));
 const APP_VERSION = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 const APP_INFO = Object.freeze({
   version: APP_VERSION,
@@ -61,15 +67,15 @@ const APP_INFO = Object.freeze({
   prerelease: APP_VERSION.includes("-"),
 });
 
-const REPO_PANEL_HTML = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.html");
-const REPO_PANEL_CSS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.css");
-const REPO_PANEL_JS = join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js");
-const REPO_PANEL_LOGO = join(dirname(fileURLToPath(import.meta.url)), "docs", "assets", "logo.png");
-const REPO_XTERM_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "lib", "xterm.js");
-const REPO_XTERM_CSS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "xterm", "css", "xterm.css");
-const REPO_XTERM_FIT_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
-const REPO_XTERM_UNICODE11_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-unicode11", "lib", "addon-unicode11.js");
-const REPO_XTERM_WEBGL_JS = join(dirname(fileURLToPath(import.meta.url)), "node_modules", "@xterm", "addon-webgl", "lib", "addon-webgl.js");
+const REPO_PANEL_HTML = join(APP_DIR, "panel-ui", "panel.html");
+const REPO_PANEL_CSS = join(APP_DIR, "panel-ui", "panel.css");
+const REPO_PANEL_JS = join(APP_DIR, "panel-ui", "panel.js");
+const REPO_PANEL_LOGO = join(APP_DIR, "docs", "assets", "logo.png");
+const REPO_XTERM_JS = join(APP_DIR, "node_modules", "@xterm", "xterm", "lib", "xterm.js");
+const REPO_XTERM_CSS = join(APP_DIR, "node_modules", "@xterm", "xterm", "css", "xterm.css");
+const REPO_XTERM_FIT_JS = join(APP_DIR, "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
+const REPO_XTERM_UNICODE11_JS = join(APP_DIR, "node_modules", "@xterm", "addon-unicode11", "lib", "unicode11.js");
+const REPO_XTERM_WEBGL_JS = join(APP_DIR, "node_modules", "@xterm", "addon-webgl", "lib", "addon-webgl.js");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
 const CONTROL_PLANE_PANEL_URL = "http://127.0.0.1:47820/panel";
@@ -821,6 +827,13 @@ export function createPanelRouter({
   // 路由器，真实拍节只能由 panel-host.mjs 显式传入——否则测试进程里 60 秒后
   // 会真的去查更新、真的拉起 worker。
   selfUpdateAutoDownloadScheduleFn = null,
+  // git 身份查询（app-git-identity.mjs）：本地 rev-parse / 远端 ls-remote，先行
+  // 轨道与「本地安装 vs 官方发布」一致性判定共用。注入给单测——真 git 在测试里
+  // 既慢又不稳定；默认走真模块。
+  readLocalHeadFn = readLocalHeadDefault,
+  readRemoteRefsFn = readRemoteRefsDefault,
+  // 远端身份短缓存 TTL：进页自动检查吃缓存，refresh=1 的强制检查绕过。
+  remoteIdentityTtlMs = 60_000,
  }) {
   const settingsFile = defaultSettingsPath(base);
   // 实时输出级别过滤的活读闸门：面板一开就是几小时甚至几天，用户在设置页改了级别，
@@ -1337,6 +1350,86 @@ export function createPanelRouter({
     return releaseService;
   }
 
+  // ── git 身份（先行轨道与不一致判定的地基）──────────────────────────────
+  // 本地 HEAD：工作树身份在本进程生命周期内不变（换装必重启面板），一次查询终身
+  // 复用。镜像安装可能没有 .git——如实 null，调用方按无身份降级。
+  let localHeadPromise = null;
+  function getLocalHead() {
+    localHeadPromise ??= Promise.resolve()
+      .then(() => readLocalHeadFn({ appDir: APP_DIR }))
+      .catch(() => null);
+    return localHeadPromise;
+  }
+  async function getAppCommit() {
+    const head = await getLocalHead();
+    return head?.short ?? null;
+  }
+  // 远端身份（main HEAD + 全部 v-tag 的 SHA）：ls-remote 一次往返。短缓存让进页
+  // 自动检查不吃满速网络，强制检查（refresh=1 / 登记更新 / 回退计划）绕过。
+  // 失败或超时如实 null——各调用方降级，不新增报错形态。
+  let remoteIdentityCache = { at: 0, value: null };
+  async function getRemoteIdentity(force) {
+    if (!force && remoteIdentityCache.value && Date.now() - remoteIdentityCache.at < remoteIdentityTtlMs) {
+      return remoteIdentityCache.value;
+    }
+    const value = await Promise.resolve()
+      .then(() => readRemoteRefsFn({ repoUrl: APP_REPO_URL }))
+      .catch(() => null);
+    remoteIdentityCache = { at: Date.now(), value };
+    return value;
+  }
+
+  // 检查更新的轨道组装（HTTP 面与自动下载、自更新登记共用的唯一口径）：
+  // release-service 只答正式发布（稳定轨）；先行轨与不一致判定在这里叠 git 身份。
+  // 先行轨无 git 身份（镜像安装未引导）时按稳定轨口径回答，行为与未开启时一致。
+  async function getAppUpdateState(force) {
+    let bleeding = false;
+    try { bleeding = loadSettings(settingsFile, base).settings.bleedingEdgeMode === true; } catch { bleeding = false; }
+    if (bleeding) {
+      const local = await getLocalHead();
+      if (!local) {
+        const stable = await getReleaseService().then((service) => service.getAppUpdate({ force }));
+        return { ...stable, track: "bleeding", identity: false };
+      }
+      const remote = await getRemoteIdentity(force);
+      const base = {
+        track: "bleeding", identity: true,
+        currentVersion: appInfo.version, currentCommit: local.short,
+        remoteCommit: remote ? remote.mainSha.slice(0, 7) : null,
+        checkedAt: new Date().toISOString(),
+      };
+      if (!remote) return { ...base, state: "error", release: null, errorCode: null };
+      return local.sha === remote.mainSha
+        ? { ...base, state: "current", release: null, errorCode: null }
+        : { ...base, state: "update_available", remoteSha: remote.mainSha, release: null, errorCode: null };
+    }
+    const result = await getReleaseService().then((service) => service.getAppUpdate({ force }));
+    const drift = await buildStableDrift(result, force);
+    return { ...result, track: "stable", drift };
+  }
+
+  // 不一致家族（先行轨关闭时）：本地版本高于官方最新（ahead），或本地 HEAD 不在
+  // 官方发布节点上（off-tag）。有可用更新时不判——更新通道自己会说；无 git 身份
+  // 时跳过 HEAD 维度，ahead 仍可判（纯版本号比较）。
+  async function buildStableDrift(result, force) {
+    if (result.state !== "current" && result.state !== "ahead") return null;
+    const ahead = result.state === "ahead";
+    const local = await getLocalHead();
+    let offTag = null;
+    if (local) {
+      const remote = await getRemoteIdentity(force);
+      if (remote) offTag = ![...remote.tags.values()].includes(local.sha);
+    }
+    if (!ahead && !offTag) return null;
+    return {
+      ahead,
+      offTag,
+      localVersion: appInfo.version,
+      remoteVersion: result.release?.version ?? null,
+      localCommit: local?.short ?? null,
+    };
+  }
+
   // 客户端更新（安装/升级）作业登记。锁按客户端分：npm 全局目录里一个包只有一份
   // 落点，两个并发的同一个包安装会把对方的目录搬走再删（实测 5 次里 2 次把安装搬坏，
   // npm 报 ENOTEMPTY、包清单与命令入口一起消失），所以同一个客户端同时只允许一个
@@ -1464,19 +1557,42 @@ export function createPanelRouter({
   let selfUpdateWatchTimer = null;
 
   function selfUpdateStatusPayload(run) {
-    return { ...clientUpdateStatus(run), phase: run.phase ?? null, step: run.step ?? "download", targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null };
+    return { ...clientUpdateStatus(run), phase: run.phase ?? null, step: run.step ?? "download", track: run.track ?? "stable", targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null, targetSha: run.targetSha ?? null };
   }
 
-  // 最近一条「已下载待应用」的记录（finishedAt 最新的为准）。
-  function findStagedSelfUpdate() {
-    return listClientUpdateRuns(updateJournalDir)
-      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done" && run.result?.outcome === "downloaded")
+  // 最近一条「已下载待应用」的记录（finishedAt 最新的为准）。有效性现场判定：
+  // 目标不比当前身份更新的记录视为过期——稳定/回退轨目标版本 ≤ 当前版本（下载后
+  // 本地经别的途径已经到过或超过它），先行轨目标提交已是本地 HEAD。过期当场写上
+  // stale 标记，之后不再捞起：横幅与「应用更新」按钮随之消失，应用端点因找不到
+  // staged 而拒绝——陈旧记录从此没有机会把工作树换回旧版（本地领先远端时的降级）。
+  async function findStagedSelfUpdate() {
+    const staged = listClientUpdateRuns(updateJournalDir)
+      .filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID && run.state === "done" && run.result?.outcome === "downloaded" && run.stale !== true)
       .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+    if (!staged) return null;
+    const reason = await stagedRunStaleReason(staged);
+    if (!reason) return staged;
+    writeClientUpdateRun(updateJournalDir, { ...staged, stale: true, staleReason: reason, staleAt: new Date().toISOString() });
+    return null;
+  }
+  async function stagedRunStaleReason(run) {
+    if (run.track === "bleeding") {
+      const targetSha = typeof run.targetSha === "string" ? run.targetSha : "";
+      if (!/^[0-9a-f]{7,40}$/i.test(targetSha)) return "malformed_target";
+      const local = await getLocalHead();
+      return local && local.sha === targetSha ? "already_at_target" : null;
+    }
+    const target = run.targetVersion;
+    if (typeof target !== "string") return "no_target_version";
+    const order = compareVersionsDefault(appInfo.version, target);
+    return order !== null && order >= 0 ? "target_not_newer" : null;
   }
 
-  // 登记 + 拉起下载 worker。HTTP 面与自动下载调度共用；返回登记好的 run，
-  // 拉起失败时记录如实落 failed 并返回 null。
-  function registerSelfUpdateDownload(update) {
+  // 登记 + 拉起下载 worker。轨道与目标身份一起登记：稳定轨带 release 的
+  // version/tag；先行轨只带 targetSha（版本号要等下载后从 FETCH_HEAD 读出、由
+  // worker 回填）。HTTP 面与自动下载调度共用；返回登记好的 run，拉起失败时记录
+  // 如实落 failed 并返回 null。
+  function registerSelfUpdateDownload({ track = "stable", targetVersion = null, targetTag = null, targetSha = null }) {
     const runId = randomUUID();
     const run = {
       runId,
@@ -1488,10 +1604,12 @@ export function createPanelRouter({
       finishedAt: null,
       result: null,
       workerPid: null,
-      targetVersion: update.release.version,
-      targetTag: update.release.tag,
+      track,
+      targetVersion,
+      targetTag,
+      targetSha,
       beforeVersion: appInfo.version,
-      appDir: dirname(fileURLToPath(import.meta.url)),
+      appDir: APP_DIR,
       repoUrl: APP_REPO_URL,
       relayRoot,
       phase: "staging",
@@ -1525,9 +1643,25 @@ export function createPanelRouter({
     }
     let update = null;
     try {
-      update = await getReleaseService().then((service) => service.getAppUpdate({ force: true }));
+      update = await getAppUpdateState(true);
     } catch {
       update = null;
+    }
+    // 先行轨按提交身份登记（remoteSha 来自强制检查，秒级新鲜）；稳定轨照旧按
+    // release 的 version/tag。两轨共用单飞锁与「已下载待应用」停留态。
+    if (update?.track === "bleeding" && update.identity !== false) {
+      if (update.state !== "update_available" || !update.remoteSha) {
+        return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
+      }
+      refreshClientUpdates();
+      if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+        return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+      }
+      const run = registerSelfUpdateDownload({ track: "bleeding", targetSha: update.remoteSha });
+      if (!run) {
+        return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+      }
+      return sendJson(res, 202, { ok: true, runId: run.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "download", targetVersion: run.targetVersion, targetSha: run.targetSha });
     }
     if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
       return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
@@ -1536,7 +1670,7 @@ export function createPanelRouter({
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
       return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
     }
-    const run = registerSelfUpdateDownload(update);
+    const run = registerSelfUpdateDownload({ targetVersion: update.release.version, targetTag: update.release.tag });
     if (!run) {
       return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
     }
@@ -1555,7 +1689,7 @@ export function createPanelRouter({
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
       return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
     }
-    const staged = findStagedSelfUpdate();
+    const staged = await findStagedSelfUpdate();
     if (!staged || (wantRunId && staged.runId !== wantRunId)) {
       return sendJson(res, 409, { ok: false, error: "no_staged", message: "没有已下载待应用的更新，请先检查更新" });
     }
@@ -1595,12 +1729,12 @@ export function createPanelRouter({
     return sendJson(res, 200, selfUpdateStatusPayload(run));
   }
 
-  function handleSelfUpdateActive(res) {
+  async function handleSelfUpdateActive(res) {
     refreshClientUpdates();
     const runs = listClientUpdateRuns(updateJournalDir)
       .filter((run) => run.state === "running" && run.clientId === SELF_UPDATE_CLIENT_ID)
       .map((run) => selfUpdateStatusPayload(run));
-    const staged = findStagedSelfUpdate();
+    const staged = await findStagedSelfUpdate();
     return sendJson(res, 200, { ok: true, runs, staged: staged ? selfUpdateStatusPayload(staged) : null });
   }
 
@@ -1615,6 +1749,117 @@ export function createPanelRouter({
     return sendJson(res, 200, selfUpdateStatusPayload(last));
   }
 
+  // ── 关闭先行版的回退计划与逆更新 ──────────────────────────────────────
+  // 目标语义＝「本地之下的最近稳定 tag」：
+  //   1) 本地 HEAD 恰在某个远端 v-tag 上（先行期间远端把它发布了）→ 就地关闭，
+  //      无需换装；
+  //   2) 否则取版本号不高于本地版本的最新的 v-tag——浅拉仓库没有祖先链可查，
+  //      版本号是「脚下最近」的判定；一个候选都没有则取最新 tag（本地比所有
+  //      tag 都旧，回退即升到稳定轨道前端）；
+  //   3) 远端一个 v-tag 都没有 → 无法判定，返回 null，调用方按「暂时无法检查」
+  //      如实呈现。
+  // 无本地 git 身份（镜像安装未引导）无从回退：按 1 处理，关闭后版本级检查接管。
+  async function resolveBleedingClosePlan() {
+    const local = await getLocalHead();
+    if (!local) return { onStableNode: true, baseTag: null, baseVersion: null };
+    const remote = await getRemoteIdentity(true);
+    if (!remote) return null;
+    const tagVersion = (tag) => tag.replace(/^v/, "");
+    const tags = [...remote.tags.keys()].filter((tag) => parseVersionDefault(tagVersion(tag)) !== null);
+    if (!tags.length) return null;
+    const newest = (candidates) => [...candidates].sort((a, b) => compareVersionsDefault(tagVersion(b), tagVersion(a)))[0];
+    const onTag = [...remote.tags.entries()]
+      .filter(([, sha]) => sha === local.sha)
+      .map(([tag]) => tag)
+      .filter((tag) => parseVersionDefault(tagVersion(tag)) !== null);
+    if (onTag.length) {
+      const baseTag = newest(onTag);
+      return { onStableNode: true, baseTag, baseVersion: tagVersion(baseTag) };
+    }
+    const under = tags.filter((tag) => {
+      const order = compareVersionsDefault(appInfo.version, tagVersion(tag));
+      return order !== null && order >= 0;
+    });
+    const baseTag = newest(under.length ? under : tags);
+    return { onStableNode: false, baseTag, baseVersion: tagVersion(baseTag) };
+  }
+
+  // 逆更新登记：直接落一条 step=apply 的 rollback run（没有下载阶段——tag 的
+  // 比特由 worker 的幂等补拉完成），换装、依赖、重启、验证、回滚点全部走既有
+  // apply 骨架，终态文案按回退口径（「已回到稳定版 X」）。
+  function registerSelfUpdateRollback({ targetTag, targetVersion }) {
+    const runId = randomUUID();
+    const run = {
+      runId,
+      clientId: SELF_UPDATE_CLIENT_ID,
+      action: "update",
+      step: "apply",
+      state: "running",
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      result: null,
+      workerPid: null,
+      track: "rollback",
+      targetVersion,
+      targetTag,
+      targetSha: null,
+      beforeVersion: appInfo.version,
+      appDir: APP_DIR,
+      repoUrl: APP_REPO_URL,
+      relayRoot,
+      phase: "installing",
+    };
+    writeClientUpdateRun(updateJournalDir, run);
+    let workerPid = null;
+    try {
+      workerPid = spawnSelfUpdate({ runId, journalDir: updateJournalDir });
+    } catch {
+      workerPid = null;
+    }
+    if (!Number.isInteger(workerPid) || workerPid <= 0) {
+      writeClientUpdateRun(updateJournalDir, {
+        ...run,
+        state: "done",
+        finishedAt: new Date().toISOString(),
+        result: { outcome: "failed", message: "更新未能启动，请稍后重试" },
+      });
+      return null;
+    }
+    writeClientUpdateRun(updateJournalDir, { ...run, workerPid });
+    return run;
+  }
+
+  // GET /panel/api/self-update/bleeding-plan：关闭前的回退计划——前端据它决定
+  // 确认弹层是「直接关闭」还是「回退并关闭」形态。
+  async function handleBleedingPlan(res) {
+    const plan = await resolveBleedingClosePlan();
+    if (!plan) return sendJson(res, 200, { ok: false });
+    return sendJson(res, 200, { ok: true, ...plan });
+  }
+
+  // POST /panel/api/self-update/rollback：换装回稳定节点。计划现场重解——确认弹
+  // 层里的版本号来自 GET，若远端在确认间隙变化，以执行时重解为准（终态文案会
+  // 如实给出实际版本）。
+  async function handleSelfUpdateRollback(res) {
+    if (hostKind !== "panel-host") {
+      return sendJson(res, 409, { ok: false, error: "self update must be requested from the control panel on 47820" });
+    }
+    refreshClientUpdates();
+    if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
+      return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
+    }
+    const plan = await resolveBleedingClosePlan();
+    if (!plan || plan.onStableNode || !plan.baseTag) {
+      return sendJson(res, 409, { ok: false, error: "no_rollback", message: "没有需要回退的更新" });
+    }
+    const run = registerSelfUpdateRollback({ targetTag: plan.baseTag, targetVersion: plan.baseVersion });
+    if (!run) {
+      return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
+    }
+    armSelfUpdateWatcher();
+    return sendJson(res, 202, { ok: true, runId: run.runId, clientId: SELF_UPDATE_CLIENT_ID, action: "update", step: "apply", track: "rollback", targetVersion: run.targetVersion });
+  }
+
   // 「自动检测并下载更新」（设置项，默认关）：面板常驻期间按拍节检查，有更新且
   // 没有在跑/待应用的任务就登记一次下载。只走 download 阶段，绝不自动应用。
   async function maybeAutoDownloadSelfUpdate() {
@@ -1626,22 +1871,36 @@ export function createPanelRouter({
     }
     let update = null;
     try {
-      update = await getReleaseService().then((service) => service.getAppUpdate({ force: false }));
+      update = await getAppUpdateState(false);
     } catch {
       return;
     }
-    if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) return;
+    if (update?.track === "bleeding" && update.identity !== false) {
+      if (update.state !== "update_available" || !update.remoteSha) return;
+    } else if (update?.state !== "update_available" || !update.release?.tag || !update.release?.version) {
+      return;
+    }
     refreshClientUpdates();
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) return;
-    if (findStagedSelfUpdate()) return;
-    const run = registerSelfUpdateDownload(update);
+    if (await findStagedSelfUpdate()) return;
+    const run = update.track === "bleeding"
+      ? registerSelfUpdateDownload({ track: "bleeding", targetSha: update.remoteSha })
+      : registerSelfUpdateDownload({ targetVersion: update.release.version, targetTag: update.release.tag });
     logger?.info(run
-      ? `Self update auto-download registered: ${run.targetTag}`
+      ? `Self update auto-download registered: ${run.targetTag ?? run.targetSha}`
       : "Self update auto-download failed to spawn its worker");
   }
 
+  function firePanelSwap() {
+    stopSelfUpdateWatcher();
+    logger?.info("Self update reached swap phase; scheduling panel host replacement");
+    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
+    if (scheduleExit) scheduleExit(); // 没有响应 flush 可等：进宽限即退
+    return true;
+  }
+
   // 换装监听器：worker 把阶段推到 ready-to-restart / waiting-panel 后，等的就是
-  // 这一枪——拉起 helper 并按宽限自退。本进程已是目标版本时绝不点火：换装后的
+  // 这一枪——拉起 helper 并按宽限自退。本进程已是目标身份时绝不点火：换装后的
   // 新面板接管时会扫到进行中的 run（worker 正在验证复活），点火等于自杀刚接班
   // 的自己。定时器只在有进行中的自更新任务时存在。
   function stopSelfUpdateWatcher() {
@@ -1665,12 +1924,32 @@ export function createPanelRouter({
       return false;
     }
     const atSwap = run.phase === "ready-to-restart" || run.phase === "waiting-panel";
-    if (!atSwap || appInfo.version === run.targetVersion) return false;
-    stopSelfUpdateWatcher();
-    logger?.info("Self update reached swap phase; scheduling panel host replacement");
-    const scheduleExit = startPanelHostReplacement({ onSpawnError: (err) => logger?.error(`Self update restart helper failed: ${err?.message}`) });
-    if (scheduleExit) scheduleExit(); // 没有响应 flush 可等：进宽限即退
-    return true;
+    if (!atSwap) return false;
+    // 先行轨的目标身份是提交 SHA，本地身份数据在异步查询后面：交给同拍的异步
+    // 续体判定，泵本身保持同步（稳定/回退轨走版本号，零额外往返）。
+    if (run.track === "bleeding") {
+      void maybeFireBleedingPanelSwap(run);
+      return false;
+    }
+    if (appInfo.version === run.targetVersion) return false;
+    return firePanelSwap();
+  }
+
+  async function maybeFireBleedingPanelSwap(run) {
+    const shortTarget = typeof run.targetSha === "string" ? run.targetSha.slice(0, 7) : null;
+    const commit = await getAppCommit();
+    if (commit && commit === shortTarget) return; // 已是目标提交：不自杀刚接班的自己
+    // 异步窗口里任务可能已收场或翻面：重读再决定，别拿过期快照点火。
+    let current = null;
+    try {
+      refreshClientUpdates();
+      current = runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID);
+    } catch {
+      current = null;
+    }
+    if (!current || current.runId !== run.runId) return;
+    if (current.phase !== "ready-to-restart" && current.phase !== "waiting-panel") return;
+    firePanelSwap();
   }
 
   function armSelfUpdateWatcher() {
@@ -2326,13 +2605,17 @@ export function createPanelRouter({
       return res.end(method === "HEAD" ? undefined : body);
     }
 
-    if (path === "/panel/api/app-info" && method === "GET") return sendJson(res, 200, appInfo);
+    if (path === "/panel/api/app-info" && method === "GET") {
+      // commit＝本地 HEAD 短哈希（进程生命周期内不变，一次查询终身复用）。先行
+      // 版的版本号后缀与 worker 的复活验证都认它；无 git 身份时不带这个键。
+      const commit = await getAppCommit();
+      return sendJson(res, 200, commit ? { ...appInfo, commit } : appInfo);
+    }
     if (path === "/panel/api/updates" && method === "GET") {
       try {
-        const service = await getReleaseService();
-        return sendJson(res, 200, await service.getAppUpdate({ force: url.searchParams.get("refresh") === "1" }));
+        return sendJson(res, 200, await getAppUpdateState(url.searchParams.get("refresh") === "1"));
       } catch {
-        return sendJson(res, 200, { currentVersion: appInfo.version, state: "error", checkedAt: new Date().toISOString(), release: null, errorCode: "update_unavailable" });
+        return sendJson(res, 200, { currentVersion: appInfo.version, state: "error", checkedAt: new Date().toISOString(), release: null, errorCode: "update_unavailable", track: "stable", drift: null });
       }
     }
     if (path.startsWith("/panel/api/environment/latest/") && method === "GET") {
@@ -2362,6 +2645,8 @@ export function createPanelRouter({
     }
     if (path === "/panel/api/self-update" && method === "POST") return handleSelfUpdateStart(req, res);
     if (path === "/panel/api/self-update/apply" && method === "POST") return handleSelfUpdateApply(req, res);
+    if (path === "/panel/api/self-update/bleeding-plan" && method === "GET") return handleBleedingPlan(res);
+    if (path === "/panel/api/self-update/rollback" && method === "POST") return handleSelfUpdateRollback(res);
     if (path === "/panel/api/self-update/active" && method === "GET") return handleSelfUpdateActive(res);
     if (path === "/panel/api/self-update/last" && method === "GET") return handleSelfUpdateLast(res);
     if (path.startsWith("/panel/api/self-update/") && method === "GET") return handleSelfUpdateRunStatus(res, path.slice("/panel/api/self-update/".length));

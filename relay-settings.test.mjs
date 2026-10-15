@@ -27,6 +27,8 @@ import {
   createCredentialCacheEnabledGate,
   parseAutoDownloadUpdates,
   DEFAULT_AUTO_DOWNLOAD_UPDATES,
+  parseBleedingEdgeMode,
+  DEFAULT_BLEEDING_EDGE_MODE,
   loadSettings,
   saveSettings,
 } from "./relay-settings.mjs";
@@ -819,6 +821,34 @@ describe("credentialCacheEnabled", () => {
       assert.equal(gate(), false, "落盘后立刻读到关");
       saveSettings(path, { credentialCacheEnabled: true }, {});
       assert.equal(gate(), true, "再打开同样立刻生效");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bleedingEdgeMode", () => {
+  it("defaults to off: only an explicit true turns it on", () => {
+    assert.equal(DEFAULT_BLEEDING_EDGE_MODE, false);
+    assert.equal(parseBleedingEdgeMode(undefined), false);
+    assert.equal(parseBleedingEdgeMode("true"), false);
+    assert.equal(parseBleedingEdgeMode(1), false);
+    assert.equal(parseBleedingEdgeMode(false), false);
+    assert.equal(parseBleedingEdgeMode(true), true);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-bleeding-edge-");
+    const path = join(tmp, "settings.json");
+    try {
+      assert.equal(loadSettings(path, {}).settings.bleedingEdgeMode, false, "先于该键存在的安装保持关闭");
+      const on = saveSettings(path, { bleedingEdgeMode: true }, {});
+      assert.equal(on.settings.bleedingEdgeMode, true);
+      assert.equal(loadSettings(path, {}).settings.bleedingEdgeMode, true);
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.bleedingEdgeMode, true, "改别的设置项不会把它挤掉");
+      const off = saveSettings(path, { bleedingEdgeMode: false }, {});
+      assert.equal(off.settings.bleedingEdgeMode, false);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

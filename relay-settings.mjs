@@ -131,6 +131,15 @@ export function parseAutoDownloadUpdates(raw) {
   return raw === true ? true : DEFAULT_AUTO_DOWNLOAD_UPDATES;
 }
 
+// 先行版轨道开关：关闭（默认）＝更新只认正式发布；开启后检查更新按上游提交粒度
+// 走，身份判定与任务登记都在 panel.mjs（需要 git），这里只管布尔本身。畸形值
+// 保持关闭——切轨是显式动作，不能被脏数据顶开。
+export const DEFAULT_BLEEDING_EDGE_MODE = false;
+
+export function parseBleedingEdgeMode(raw) {
+  return raw === true ? true : DEFAULT_BLEEDING_EDGE_MODE;
+}
+
 // Claude Code 档位接管总开关：关掉后四档映射暂停生效（loadSettings 返回空映
 // 射，中继每请求现读，两条 relay 路径同时覆盖），但已填写的行保留不清，重新
 // 开开关即恢复。默认开——升级上来的安装必须与旧行为逐字节一致。
@@ -267,6 +276,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const terminalRestoreSessions = parseTerminalRestoreSessions(raw.terminalRestoreSessions);
   const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
   const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
+  const bleedingEdgeMode = parseBleedingEdgeMode(raw.bleedingEdgeMode);
   const claudeTierMappingsEnabled = parseClaudeTierMappingsEnabled(raw.claudeTierMappingsEnabled);
   // 总开关关着时四档映射整体不生效：这里返回空映射，handler 与 launch 两条
   // 读取路径都经过 loadSettings，无需各自判断开关。
@@ -287,6 +297,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       terminalRestoreSessions,
       credentialCacheEnabled,
       autoDownloadUpdates,
+      bleedingEdgeMode,
       claudeTierMappingsEnabled,
       claudeTierMappings,
     },
@@ -300,6 +311,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     terminalRestoreSessions,
     credentialCacheEnabled,
     autoDownloadUpdates,
+    bleedingEdgeMode,
     claudeTierMappingsEnabled,
     claudeTierMappings,
   };
@@ -401,6 +413,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "autoDownloadUpdates")) {
     updated.autoDownloadUpdates = parseAutoDownloadUpdates(patch.autoDownloadUpdates);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "bleedingEdgeMode")) {
+    updated.bleedingEdgeMode = parseBleedingEdgeMode(patch.bleedingEdgeMode);
   }
 
   // 总开关与四档行各自独立落盘：关开关只暂停生效，行里的值原样保留，重新开启

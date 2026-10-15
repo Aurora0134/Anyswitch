@@ -459,6 +459,149 @@ describe("runSelfUpdate · apply 阶段", () => {
   });
 });
 
+describe("runSelfUpdate · 先行轨（bleeding）", () => {
+  const TARGET_SHA = "fedcba0987654321fedcba0987654321fedcba09";
+
+  test("下载：按引用拉 main、SHA 核对通过后停在 staged，版本号回填 journal", async () => {
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "FETCH_HEAD")(args)) return { stdout: `${TARGET_SHA}\n` };
+      if (gitShowPackage(args)) return { stdout: JSON.stringify({ version: "0.6.7" }) };
+      return { stdout: "" };
+    });
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", targetSha: TARGET_SHA, targetVersion: null, targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "downloaded");
+      assert.match(result.message, /已下载 fedcba0，应用后生效/);
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "main")(call.args)), "先行轨按引用拉 main，不按 tag 也不按 SHA");
+      assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "下载不碰工作树");
+      assert.equal(events.relayRestarts, 0);
+      // 版本号下载后才得知，回填进 journal 供应用阶段与终态文案使用
+      const done = readJournal(journalDir);
+      assert.equal(done.state, "done");
+      assert.equal(done.phase, "staged");
+      assert.equal(done.targetVersion, "0.6.7");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("下载：FETCH_HEAD 与目标不一致（上游又前进）即中止，不落 staged", async () => {
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "FETCH_HEAD")(args)) return { stdout: "1111111111111111111111111111111111111111\n" };
+      return { stdout: "" };
+    });
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", targetSha: TARGET_SHA, targetVersion: null, targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载的代码版本（1111111）与目标（fedcba0）不一致/);
+      const done = readJournal(journalDir);
+      assert.equal(done.state, "done");
+      assert.equal(done.result.outcome, "failed", "失败收场不落「已下载待应用」");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("应用：换装后按 HEAD SHA 复核、复活验证比 commit，结论带提交标识", async () => {
+    const probe = scriptedProbe([{ version: "0.6.6", commit: "abc1234" }, null, { version: "0.6.7", commit: "fedcba0" }]);
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "HEAD")(args)) return { stdout: `${TARGET_SHA}\n` };
+      return { stdout: "" };
+    });
+    const { deps, journalDir, cleanup } = baseDeps({
+      io: fakeIo({ version: "0.6.7" }),
+      spawnFn: git.spawnFn,
+      probePanelFn: probe.probePanelFn,
+    });
+    writeJournal(journalDir, runningRun({ track: "bleeding", step: "apply", phase: "installing", targetSha: TARGET_SHA, targetVersion: "0.6.7", targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已更新到 0\.6\.7-fedcba0/);
+      assert.equal(result.afterVersion, "0.6.7-fedcba0");
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "main")(call.args)), "应用幂等补拉的还是 main");
+      assert.ok(git.calls.some(npmCall), "先行轨同样要装依赖");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("应用：换装后的 HEAD 与目标不一致：还原工作树后失败收场", async () => {
+    const { probePanelFn, probe } = scriptedProbe([{ version: "0.6.6", commit: "abc1234" }]);
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "HEAD")(args)) return { stdout: "1111111111111111111111111111111111111111\n" };
+      return { stdout: "" };
+    });
+    const { deps, events, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", step: "apply", phase: "installing", targetSha: TARGET_SHA, targetVersion: "0.6.7", targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /下载的代码版本（1111111）与目标（fedcba0）不一致/);
+      assert.ok(git.calls.some((call) => args0("checkout", "--detach", "--force", "1111111111111111111111111111111111111111")(call.args)), "还原回滚点");
+      assert.equal(events.relayRestarts, 0);
+      assert.equal(probe.calls, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("目标形态无效（缺 targetSha）：直接失败，一个 git 命令都不发", async () => {
+    const git = fakeSpawn(() => ({ stdout: "" }));
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn });
+    writeJournal(journalDir, runningRun({ track: "bleeding", targetSha: null, targetVersion: null, targetTag: null }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /更新目标无效/);
+      assert.equal(git.calls.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("runSelfUpdate · 回退轨（rollback）", () => {
+  test("登记即 apply：fetch 目标 tag、换装核版本、复活比版本，结论「已回到稳定版」", async () => {
+    const probe = scriptedProbe([{ version: "0.6.7-abc1234" }, null, { version: "0.6.6" }]);
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" }), "0.6.6"));
+    const { deps, events, journalDir, cleanup } = baseDeps({
+      io: fakeIo({ version: "0.6.6" }),
+      spawnFn: git.spawnFn,
+      probePanelFn: probe.probePanelFn,
+    });
+    writeJournal(journalDir, runningRun({ track: "rollback", step: "apply", phase: "installing", targetVersion: "0.6.6", targetTag: "v0.6.6" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已回到稳定版 0\.6\.6/);
+      assert.equal(result.afterVersion, "0.6.6");
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.6.6")(call.args)), "回退按 tag 补拉（幂等）");
+      assert.equal(events.relayRestarts, 1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("旧记录没有 track 字段：一律按稳定轨走（journal 兼容）", async () => {
+    const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, { version: "0.7.0" }]);
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
+    const { deps, journalDir, cleanup } = baseDeps({ spawnFn: git.spawnFn, probePanelFn: probe.probePanelFn });
+    writeJournal(journalDir, runningRun({ step: "apply", phase: "installing" }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已更新到 0\.7\.0/);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("runSelfUpdate · 通用闸门", () => {
   test("journal 记录不属于自更新或不在 running 态：直接返回 null，一个进程都不动", async () => {
     const { deps, events, journalDir, cleanup } = baseDeps();

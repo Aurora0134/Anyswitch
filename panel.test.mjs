@@ -4647,8 +4647,8 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(start.length > 500, "未真正取到 startSelfUpdate 函数体，后续断言会全部落空");
     assert.ok(start.includes('"立即更新"'), "一键更新的确认键");
     assert.ok(start.includes('fetchOnce("/api/agents")'), "运行中 Agent 的中断警示前移到首次确认");
-    assert.ok(start.includes('trackSelfUpdate(started.runId, started.targetVersion, "staging", false, true)'),
-      "一键下载的 run 必须带 oneClick 标记");
+    assert.ok(start.includes('trackSelfUpdate(started.runId, started.targetVersion || target, "staging", false, true)'),
+      "一键下载的 run 必须带 oneClick 标记（先行轨的服务端登记没有版本号，用确认时的目标标识兜底）");
     assert.ok(!panelJs.includes("下载完成后由你选择何时应用"), "旧两步确认文案不得残留");
     // 下载完成即接续应用：oneClick 分支先于 staged 停留态。
     const outcomeStart = panelJs.indexOf("function renderSelfUpdateOutcome");

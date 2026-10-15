@@ -9,6 +9,13 @@
 // 工作树），然后停 watchdog、重启 relay、等 panel-host 经 restart-helper 自杀
 // 换新并验证复活；新面板未接管以回滚点退回旧版并重装依赖。
 //
+// 三条轨道共用同一副骨架，只差目标身份与核验键（journal 记 track 字段）：
+//   stable  —— 正式 release tag，核验 package.json 版本；
+//   bleeding —— 上游 main 的单个提交（targetSha），核验提交 SHA，版本号下载后
+//              才从 FETCH_HEAD 读出、回写 journal 供应用阶段与终态文案使用；
+//   rollback —— 关闭先行版触发的逆更新，目标是「本地之下的最近稳定 tag」，执行
+//              与 stable 完全同型（fetch tag → 换装 → 核版本），只是终态文案不同。
+//
 // 工作树归更新器全权管理：checkout 一律 --force（收敛手动同步留下的漂移），
 // logs/node_modules 等运行时文件在 .gitignore 里不受影响。
 import { execFile as execFileDefault, spawn as spawnDefault } from "node:child_process";
@@ -37,6 +44,8 @@ const MAX_OUTPUT_CHARS = 2000;
 // 目标 tag 只接受 release-service 的发布形态（v<semver>）：tag 来自 journal 记录，
 // 进 git 参数前钉住形态，杜绝任何以 `-` 开头被当成选项解析的余地。
 const TARGET_TAG_PATTERN = /^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
+// 先行轨的目标是上游 main 的单个提交：SHA 同样来自 journal 记录，钉住形态。
+const TARGET_SHA_PATTERN = /^[0-9a-f]{7,40}$/i;
 // npm 显式指回官方源：用户 npm 配置的 registry 可能停在同步落后的镜像上
 // （client-lifecycle 对 grok 已确立同一先例）。
 const NPM_REGISTRY = "https://registry.npmjs.org";
@@ -74,6 +83,8 @@ async function runGit({ args, cwd, spawnFn, env, timeoutMs = GIT_TIMEOUT_MS, raw
 }
 
 // 面板复活探测：app-info 是最轻的带版本端点。null = 没人应答（端口安静）。
+// commit 是新面板自报的 HEAD 短哈希——先行轨的复活验证只认它（先行期版本号
+// 可以原地不动，唯 SHA 唯一）。
 async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
   try {
     const controller = new AbortController();
@@ -82,7 +93,7 @@ async function probePanelAppInfo(port = 47820, fetchFn = fetch) {
       const response = await fetchFn(`http://127.0.0.1:${port}/panel/api/app-info`, { signal: controller.signal });
       if (!response.ok) return null;
       const data = await response.json();
-      return { version: typeof data?.version === "string" ? data.version : null };
+      return { version: typeof data?.version === "string" ? data.version : null, commit: typeof data?.commit === "string" ? data.commit : null };
     } finally {
       clearTimeout(timer);
     }
@@ -161,11 +172,21 @@ export async function runSelfUpdate({
   const step = run.step === "apply" ? "apply" : "download";
   writeClientUpdateRun(journalDir, { ...run, workerPid: process.pid });
   const appDir = run.appDir ?? null;
+  // 轨道与目标身份：track 缺席的旧记录一律按 stable 走（与既有 journal 兼容）。
+  const track = run.track === "bleeding" || run.track === "rollback" ? run.track : "stable";
   const targetVersion = run.targetVersion ?? null;
   const targetTag = run.targetTag ?? null;
+  const targetSha = track === "bleeding" ? String(run.targetSha ?? "") : null;
+  const shortSha = targetSha ? targetSha.slice(0, 7) : null;
   const repoUrl = run.repoUrl ?? APP_REPO_URL;
   const relayRoot = run.relayRoot ?? storePaths().root;
   const beforeVersion = run.beforeVersion ?? null;
+
+  // 面板复活的身份验证按轨道走：stable/rollback 比版本号（tag 的承诺），
+  // bleeding 比 HEAD 短哈希（app-info 自报的 commit 字段）。
+  const identityMatches = (identity) => track === "bleeding"
+    ? identity?.commit === shortSha
+    : identity?.version === targetVersion;
 
   // 阶段推进：journal 是 worker 与面板（监听器）、页面（轮询）之间唯一的进度通道。
   const setPhase = (phase) => {
@@ -183,10 +204,13 @@ export async function runSelfUpdate({
       ? `${stepName}用时过长被中止，请检查网络后重试`
       : `${stepName}失败，请稍后重试`;
 
-  if (!appDir || !targetVersion || !targetTag) {
+  if (track === "bleeding") {
+    if (!appDir || !TARGET_SHA_PATTERN.test(targetSha)) {
+      return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
+    }
+  } else if (!appDir || !targetVersion || !targetTag) {
     return finish({ outcome: "failed", message: "更新信息不完整，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
-  }
-  if (!TARGET_TAG_PATTERN.test(targetTag)) {
+  } else if (!TARGET_TAG_PATTERN.test(targetTag)) {
     return finish({ outcome: "failed", message: "更新目标无效，请重新检查更新后重试", beforeVersion, latestVersion: targetVersion });
   }
 
@@ -206,7 +230,9 @@ export async function runSelfUpdate({
     return null;
   };
 
-  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", "tag", targetTag], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
+  // 先行轨按引用拉 main——按 SHA fetch 是服务端可选能力，不依赖它；main 在检查
+  // 之后又前进的窗口由下载后的 SHA 核验兜住，不一致即中止、如实报告。
+  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", ...(track === "bleeding" ? ["main"] : ["tag", targetTag])], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
 
   if (step === "download") {
     // ── 下载：只把比特拉进本地仓库，工作树与进程一个都不动 ──
@@ -214,7 +240,28 @@ export async function runSelfUpdate({
     const readyError = await ensureGitReady();
     if (readyError) return finish({ outcome: "failed", message: readyError, beforeVersion, latestVersion: targetVersion });
     const fetched = await fetchTarget();
-    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    if (!fetched.ok) return finish({ outcome: "failed", message: gitFailure(`下载 ${track === "bleeding" ? shortSha : targetTag}`, fetched), detail: fetched.output || undefined, beforeVersion, latestVersion: targetVersion });
+    if (track === "bleeding") {
+      // 先行轨的核验键是提交 SHA：FETCH_HEAD 与检查时的目标不一致（上游又前进
+      // 了）即止步。版本号此刻才从 FETCH_HEAD 读出并回写 journal——应用阶段的
+      // 终态文案、关于页的补显都用这一份。
+      const head = await runGit({ args: ["rev-parse", "FETCH_HEAD"], cwd: appDir, spawnFn, env, raw: true });
+      const fetchedSha = head.ok ? head.output.split(/\r?\n/)[0]?.trim() ?? "" : "";
+      if (!TARGET_SHA_PATTERN.test(fetchedSha) || fetchedSha !== targetSha) {
+        return finish({ outcome: "failed", message: `下载的代码版本（${fetchedSha.slice(0, 7) || "未知"}）与目标（${shortSha}）不一致，已中止更新`, beforeVersion, latestVersion: null });
+      }
+      const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
+      let fetchedVersion = null;
+      try { fetchedVersion = JSON.parse(shown.output).version ?? null; } catch { fetchedVersion = null; }
+      if (!shown.ok || !fetchedVersion) {
+        return finish({ outcome: "failed", message: `下载的代码版本（未知）与目标（${shortSha}）不一致，已中止更新`, beforeVersion, latestVersion: null });
+      }
+      const currentRun = readClientUpdateRun(journalDir, runId) ?? run;
+      writeClientUpdateRun(journalDir, { ...currentRun, targetVersion: fetchedVersion });
+      // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
+      setPhase("staged");
+      return finish({ outcome: "downloaded", message: `已下载 ${shortSha}，应用后生效`, beforeVersion, latestVersion: fetchedVersion });
+    }
     // 不脱裤查验：直接读 tag 里的 package.json，版本不符在此止步——磁盘上什么都没动。
     const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
     let tagVersion = null;
@@ -255,10 +302,25 @@ export async function runSelfUpdate({
     // 就地换装。force 是所有权声明：手动同步留下的漂移在这里被收敛成目标版本。
     const checkedOut = await runGit({ args: ["checkout", "--detach", "--force", "FETCH_HEAD"], cwd: appDir, spawnFn, env });
     if (!checkedOut.ok) return finish({ outcome: "failed", message: gitFailure("应用新版本", checkedOut), detail: checkedOut.output || undefined, beforeVersion, latestVersion: targetVersion });
-    // 落盘的版本必须与目标一致，否则还原工作树后止步——面板与 relay 都还没动过。
+    // 落盘的身份必须与目标一致，否则还原工作树后止步——面板与 relay 都还没动过。
+    // 先行轨比 HEAD 的 SHA（版本号先行期可能不动）；稳定/回退轨比 package.json
+    // 版本。treeVersion 两种轨道都读：先行轨的终态文案要拿它拼版本号后缀。
     let treeVersion = null;
     try { treeVersion = JSON.parse(io.readFileSync(join(appDir, "package.json"), "utf8")).version ?? null; } catch { treeVersion = null; }
-    if (treeVersion !== targetVersion) {
+    if (track === "bleeding") {
+      const head = await runGit({ args: ["rev-parse", "HEAD"], cwd: appDir, spawnFn, env, raw: true });
+      const treeSha = head.ok ? head.output.split(/\r?\n/)[0]?.trim() ?? "" : "";
+      if (treeSha !== targetSha) {
+        const restored = await restoreTree();
+        return finish({
+          outcome: "failed",
+          message: `下载的代码版本（${treeSha.slice(0, 7) || "未知"}）与目标（${shortSha}）不一致，已中止更新${restored ? "，文件已还原到更新前状态" : ""}`,
+          beforeVersion,
+          afterVersion: restored ? beforeVersion : null,
+          latestVersion: targetVersion,
+        });
+      }
+    } else if (treeVersion !== targetVersion) {
       const restored = await restoreTree();
       return finish({
         outcome: "failed",
@@ -312,7 +374,7 @@ export async function runSelfUpdate({
     const downDeadline = nowMs() + panelDownTimeoutMs;
     while (nowMs() < downDeadline) {
       const identity = await probePanelFn(panelPort);
-      if (identity === null || identity?.version === targetVersion) { downSeen = true; break; }
+      if (identity === null || identityMatches(identity)) { downSeen = true; break; }
       await delay(pollMs);
     }
     if (!downSeen) {
@@ -331,12 +393,15 @@ export async function runSelfUpdate({
     const upDeadline = nowMs() + panelUpTimeoutMs;
     while (nowMs() < upDeadline) {
       const identity = await probePanelFn(panelPort);
-      if (identity?.version === targetVersion) { revived = identity; break; }
+      if (identityMatches(identity)) { revived = identity; break; }
       await delay(pollMs);
     }
     if (revived) {
       await restoreWatchdog();
-      return finish({ outcome: "updated", message: `已更新到 ${targetVersion}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: targetVersion, latestVersion: targetVersion });
+      // 终态文案按轨道：先行版带提交标识；回退轨明说「回到稳定版」；稳定轨原样。
+      const afterLabel = track === "bleeding" ? (treeVersion ? `${treeVersion}-${shortSha}` : shortSha) : targetVersion;
+      const verb = track === "rollback" ? "已回到稳定版" : "已更新到";
+      return finish({ outcome: "updated", message: `${verb} ${afterLabel}${relayClause ? `；${relayClause}` : ""}`, beforeVersion, afterVersion: afterLabel, latestVersion: targetVersion });
     }
     // 新面板没有接管：有恢复点就退回旧版并重装依赖（旧代码配旧依赖才算恢复
     // 完整），再把面板与 relay 拉起；没有恢复点就把面板尽力拉起并如实报告。

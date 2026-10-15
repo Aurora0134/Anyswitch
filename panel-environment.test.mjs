@@ -90,10 +90,21 @@ async function withPanel(options, run) {
 
 test("关于页在不启动客户端或服务的情况下返回当前面板版本", async () => {
   const appInfo = { version: "0.5.0-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true };
-  await withPanel({ appInfo }, async (get) => {
+  // readLocalHeadFn 注成「无本地 git 身份」：app-info 的 commit 键因此不出现，
+  // 载荷与注入的 appInfo 逐字节一致（有身份时的形态由专门用例钉）。
+  await withPanel({ appInfo, readLocalHeadFn: async () => null }, async (get) => {
     const result = await get("/panel/api/app-info");
     assert.equal(result.status, 200);
     assert.deepEqual(result.body, appInfo);
+  });
+});
+
+test("app-info 在本地有 git 身份时附带 HEAD 短哈希，无身份时不带键", async () => {
+  const appInfo = { version: "0.6.6", platform: "win32", nodeVersion: "v24.18.0", prerelease: false };
+  await withPanel({ appInfo, readLocalHeadFn: async () => ({ sha: "0123456789abcdef0123456789abcdef01234567", short: "0123456" }) }, async (get) => {
+    const result = await get("/panel/api/app-info");
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, { ...appInfo, commit: "0123456" });
   });
 });
 
