@@ -5153,11 +5153,19 @@ describe("设置项「UI版本」", () => {
     assert.deepEqual(labels, ["看板", "Skills", "预设", "会话", "模型管理", "使用统计", "虚拟终端"],
       "标签文本全部为既有词汇，文字包 span 供图标栏整隐");
     for (const [i, m] of tabs.entries()) {
-      const atSvg = m[3].indexOf("<svg");
       const atLabel = m[3].indexOf('<span class="rail-tab-label">');
-      assert.ok(atSvg >= 0 && atSvg < atLabel, `${m[1]} 图标在文字前`);
-      assert.ok(m[3].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
-        `${m[1]} 图标与既有齿轮/日月同一 feather 风（24 视窗、空心描边、round caps）`);
+      // 预设/会话两枚图标原样搬自阶段 6 原型（用户从那三份原型里唯独看中这两个）：
+      // 原型用的不是 feather SVG 而是 Unicode 字形 ❑/☰，故这两枚按原型形制为裸字形，
+      // 其余五枚仍为既有 feather 风 SVG（24 视窗、空心描边、round caps）。
+      const glyph = { railTabPresets: "❑", railTabSessions: "☰" }[m[1]];
+      if (glyph) {
+        assert.ok(m[3].indexOf(glyph) >= 0 && m[3].indexOf(glyph) < atLabel, `${m[1]} 图标为原型字形 ${glyph}、在文字前`);
+      } else {
+        const atSvg = m[3].indexOf("<svg");
+        assert.ok(atSvg >= 0 && atSvg < atLabel, `${m[1]} 图标在文字前`);
+        assert.ok(m[3].includes('viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"'),
+          `${m[1]} 图标与既有齿轮/日月同一 feather 风（24 视窗、空心描边、round caps）`);
+      }
       // 悬停提示=标签文本（10-14 用户拍板：栏位标签即用产品正式名「虚拟终端」，
       // 与看板入口卡同名，title 与标签一致）
       const wantTitle = labels[i];
