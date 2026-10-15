@@ -329,29 +329,25 @@
   }
 
   /* ── 新版界面（设置→通用「显示」卡「UI版本」选新版）：主导航进左栏 ──
-     栏体默认整隐（旧版零影响）。新版下栏 fixed 通高，三态纯 CSS 断点驱动（首帧不依赖
-     JS 落定）：基座=窄档（<860px）抽屉态——栏体收在视口外，页头汉堡钮开合；中档
-     （860–1199px）收 72px 图标栏；宽档（≥1200px）216px 全栏，头行/正文/页脚的
-     .layout-container 统一左让（max-width 同步放宽同一数值，内容有效宽度与旧版一致
-     仍是 1392）。栏内自上而下三段：栏顶品牌徽标、贴栏底的主 tab 组、最底一行（左
-     亮暗钮、右设置钮）。头行在新版只剩状态条：品牌与主 tab 都挪进栏，头行那颗设置
-     齿轮与亮暗钮同理；设置页/终端页头行各自那颗亮暗钮也让位给栏底那颗（同一状态源，
-     见 initTheme）。
+     栏体默认整隐（旧版零影响）。新版下栏 fixed 通高，两态纯 CSS 断点驱动（首帧不依赖
+     JS 落定）：基座=窄栏（<1200px）72px 图标栏——栏体常驻视口内，任何窗口宽度都不
+     消失；宽档（≥1200px）216px 全栏，头行/正文/页脚的 .layout-container 统一左让
+     （max-width 同步放宽同一数值，内容有效宽度与旧版一致仍是 1392）。栏内自上而下
+     三段：栏顶品牌徽标、贴栏底的主 tab 组、最底一行（左亮暗钮、右设置钮）。头行在
+     新版只剩状态条：品牌与主 tab 都挪进栏，头行那颗设置齿轮与亮暗钮同理；设置页/
+     终端页头行各自那颗亮暗钮也让位给栏底那颗（同一状态源，见 initTheme）。
      终端页全屏形态保留，只补栏宽左让（terminal-mode 原先把 padding 清零）。
-     z 梯队：栏抽屉 120 / 栏遮罩 115 插在会话抽屉（110）之上、弹窗（300）之下（C3）。 */
+     层级 40：常驻栏不与会话抽屉（110）/弹窗（300）争浮层。 */
   .rail { display: none; }
   :root[data-ui-version="v2"] .rail {
     display: flex; flex-direction: column;
-    position: fixed; left: 0; top: 0; bottom: 0; width: 216px; z-index: 120;
-    padding: 16px 12px;
+    position: fixed; left: 0; top: 0; bottom: 0; width: 72px; z-index: 40;
+    padding: 16px 8px;
     background: var(--surface); border-right: 1px solid var(--border);
     /* C2：视口高度不够时栏体自滚，贴底 tab 组与底行可达（margin-top:auto 语义保持）。
        横轴显式收掉：只写 overflow-y 单轴时 overflow-x 会被计算成 auto，手动收展的宽度
        动画途中栏内容暂比栏宽，会蹦出一条 10px 横向滚条。 */
     overflow-y: auto; overflow-x: hidden;
-    /* 窄档默认态：抽屉收在视口外（默认关，刷新首帧不闪现开着的抽屉） */
-    transform: translateX(-100%);
-    transition: transform 240ms var(--ease-out);
   }
   /* 栏顶品牌：与头行那份共用 .brand-icon / .brand-text（同一 logo、同一套皮肤变量），
      只是换了承载容器。 */
@@ -379,7 +375,7 @@
   :root[data-ui-version="v2"] #settingsThemeToggle,
   :root[data-ui-version="v2"] #terminalThemeToggle { display: none; }
 
-  /* ── 新版界面阶段 1：轻页头 + 左栏三级降级（宽 216 / 中 72 图标栏 / 窄抽屉） ──
+  /* ── 新版界面阶段 1：轻页头 + 左栏两级降级（≥1200 宽 216 / <1200 图标栏 72） ──
      轻页头：全局头行退场为 48px 薄条——左侧当前页标题（文本由 switchView 从点亮的栏
      tab 同步，不另立文案源；设置视图的页题由既有设置头行的「设置」h1 承担），右侧
      只剩 relay 状态 pill（页级主操作的归位在后续逐页阶段做）。 */
@@ -390,38 +386,24 @@
   }
   :root[data-ui-version="v2"] .site-head .head-inner { height: 48px; }
 
-  /* 窄档抽屉件：汉堡钮（icon-btn 同形制）与遮罩。旧版永隐（双类选择器提优先级，压过
-     下方 .icon-btn 的 inline-flex——本条位置在 .icon-btn 规则之前）；v2 窄档可见，
-     ≥860px 收掉。 */
-  .icon-btn.rail-drawer-btn { display: none; }
-  :root[data-ui-version="v2"] .rail-drawer-btn { display: inline-flex; margin-right: 8px; }
-  .rail-drawer-mask { display: none; }
-  :root[data-ui-version="v2"] .rail-drawer-mask {
-    display: block; position: fixed; inset: 0; z-index: 115;
-    background: rgba(15,23,42,.45); opacity: 0; pointer-events: none; transition: opacity 200ms;
-  }
-  :root[data-ui-version="v2"] body.rail-drawer-open .rail-drawer-mask { opacity: 1; pointer-events: auto; }
-  /* 抽屉开着：栏体滑入。浮层影复用 --shadow-lg（与会话页抽屉同一浮层影），其余新增
-     表面一律无影。 */
-  :root[data-ui-version="v2"] body.rail-drawer-open .rail { transform: none; box-shadow: var(--shadow-lg); }
+  /* 终端页左上角「返回看板」钮让位给栏内「看板」tab：栏在任何窗口宽度都常驻，同一条
+     回看板链不留两处入口；紧随其后的分隔竖线一并收，否则标题前空剩一道栏。v1 无栏，
+     markup 原样保留（旧版终端页仍靠它回看板）。 */
+  :root[data-ui-version="v2"] .terminal-return-btn,
+  :root[data-ui-version="v2"] .terminal-head-divider { display: none; }
 
-  /* 中档（860–1199px）：72px 图标栏——品牌文字、tab 标签、底行「设置」文字收起只留
-     图标（标签文本同时写在各 tab 的 title 属性上作悬停提示）；底行两钮纵排。
-     栏体落回视口、层级回到 40（抽屉层级只属窄档）。 */
-  @media (min-width: 860px) {
-    :root[data-ui-version="v2"] .rail { width: 72px; padding: 16px 8px; transform: none; transition: none; z-index: 40; }
-    :root[data-ui-version="v2"] .rail-brand { justify-content: center; padding: 4px 0 0; }
-    :root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }
-    :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
-    :root[data-ui-version="v2"] .rail-tab-label { display: none; }
-    :root[data-ui-version="v2"] .rail-foot { flex-direction: column; }
-    :root[data-ui-version="v2"] .rail-foot .rail-settings { padding: 9px 0; }
-    :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }
-    :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
-    :root[data-ui-version="v2"] .rail-drawer-btn,
-    :root[data-ui-version="v2"] .rail-drawer-mask { display: none; }
-  }
-  /* 宽档（≥1200px）：216px 全栏，中档的收起逐项撤销（栏体落回视口继承中档规则）。 */
+  /* 窄栏（<1200px）基座形态：品牌文字、tab 标签、底行「设置」文字收起只留图标（标签
+     文本同时写在各 tab 的 title 属性上作悬停提示）；底行两钮纵排。栏常驻视口，任何
+     窗口宽度都不消失；宽档块在 ≥1200 逐项撤销。 */
+  :root[data-ui-version="v2"] .rail-brand { justify-content: center; padding: 4px 0 0; }
+  :root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }
+  :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
+  :root[data-ui-version="v2"] .rail-tab-label { display: none; }
+  :root[data-ui-version="v2"] .rail-foot { flex-direction: column; }
+  :root[data-ui-version="v2"] .rail-foot .rail-settings { padding: 9px 0; }
+  :root[data-ui-version="v2"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }
+  :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
+  /* 宽档（≥1200px）：216px 全栏，窄栏的收起逐项撤销。 */
   @media (min-width: 1200px) {
     :root[data-ui-version="v2"] .rail { width: 216px; padding: 16px 12px; }
     :root[data-ui-version="v2"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; }
@@ -443,23 +425,23 @@
     -webkit-backdrop-filter: var(--glass-blur);
   }
 
-  /* v2 布局断点校准：栏体占宽折算进塌缩阈值（宽档 +240 / 中档 +96，与栏+间距 240/96
-     同源；窄档抽屉化后内容全宽，v1 阈值天然正确不动）。只校准「塌晚了真挤压内容」的
-     布局模式断点：看板双栏 1080 / 统计上半区 1000 / 会话详情+目录 1023（目录浮动钮
-     显隐随同一条）/ Skills 双栏与统计四宫格 960。960 系的宽档阈值 960+240=1200 恰为
-     档界（v1 口径的塌缩内容宽在宽档本就够不到），只补中档。瓦片类小网格与排版/紧凑
-     类断点不动。
+  /* v2 布局断点校准：栏体占宽折算进塌缩阈值（宽档 +240 / 窄栏 +96，与栏+间距 240/96
+     同源；栏在任何宽度常驻，窄栏块无下界、一路塌到最窄窗口）。只校准「塌晚了真挤压
+     内容」的布局模式断点：看板双栏 1080 / 统计上半区 1000 / 会话详情+目录 1023（目录
+     浮动钮显隐随同一条）/ Skills 双栏与统计四宫格 960。960 系的宽档阈值 960+240=1200
+     恰为档界（v1 口径的塌缩内容宽在宽档本就够不到），只补窄栏。瓦片类小网格与排版/
+     紧凑类断点不动。
      手动态修正（栏顶收起钮，data-rail="collapsed"）：宽档栏收 72 后内容只让 96，
      ≥1200 时内容恒 ≥1104（盖过全部 v1 阈值 1080/1023/1000），三处宽档校准块收
-     :not([data-rail="collapsed"]) 限定、手动态下不命中；expanded 的反向修正（中档
+     :not([data-rail="collapsed"]) 限定、手动态下不命中；expanded 的反向修正（窄栏
      栏展 216、内容让 240 全程真挤压）在阶段 2 段的手动态块里补一条全档塌缩。 */
   @media (min-width: 1200px) and (max-width: 1320px) {
     :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
-  @media (min-width: 860px) and (max-width: 1176px) {
+  @media (max-width: 1176px) {
     :root[data-ui-version="v2"] .telemetry-layout-grid { grid-template-columns: 1fr; }
   }
-  @media (min-width: 860px) and (max-width: 1056px) {
+  @media (max-width: 1056px) {
     :root[data-ui-version="v2"] .skills-grid { grid-template-columns: 1fr; }
     :root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
     :root[data-ui-version="v2"] .skills-grid.stats-quad .panel-card { height: auto; }
@@ -467,7 +449,7 @@
   @media (min-width: 1200px) and (max-width: 1240px) {
     :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .stats-top-grid { grid-template-columns: 1fr; }
   }
-  @media (min-width: 860px) and (max-width: 1096px) {
+  @media (max-width: 1096px) {
     :root[data-ui-version="v2"] .stats-top-grid { grid-template-columns: 1fr; }
   }
   @media (min-width: 1200px) and (max-width: 1263px) {
@@ -475,7 +457,7 @@
     :root[data-ui-version="v2"]:not([data-rail="collapsed"]) .toc-side { display: none; }
     :root[data-ui-version="v2"]:not([data-rail="collapsed"]) body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
-  @media (min-width: 860px) and (max-width: 1119px) {
+  @media (max-width: 1119px) {
     :root[data-ui-version="v2"] .sessions-detail-wrap { grid-template-columns: minmax(0, 1fr); }
     :root[data-ui-version="v2"] .toc-side { display: none; }
     :root[data-ui-version="v2"] body.sessions-mode .toc-fab.has-toc { display: flex; }
@@ -506,10 +488,8 @@
         首帧链的既有形制）。换血规则一律锚 #v2Rail——主题预览镜像里的栏克隆剥了
         id，继续呈主 tab 组（镜像是看板预览，栏必须保持看板形态）。.rail-dir 基座
         在此声明 display:flex（自身形制），藏它的是 hidden 属性而非 display 规则。
-     4) 让位只限栏常驻的档位（≥860px）：栏体抽屉化的窄档（<860）设置态头行没有
-        汉堡钮（阶段 1 在案），若全档隐藏子 tab 条与头行「←」，窄档设置页既没有
-        子导航也没有出口——故窄档保留下划线子 tab 条与「←」，≥860 才由栏目录与
-        栏底「返回」接班。
+     4) 让位全档成立：栏在任何窗口宽度都常驻，子 tab 条与头行「←」的让位没有档位
+        例外——设置态的子导航与出口由栏目录和栏底「返回」全档接管。
      选择器一律 [data-ui-version="v2"][data-style] 双属性提级：三套皮肤在更靠后
      位置覆写 .panel-card/.view-tab 系规则，单属性同优先级会被盖；data-style 由
      panel.html 内联脚本在绘制前恒写入，通配 [data-style] 三皮肤通吃（栏内换血与
@@ -564,30 +544,25 @@
   :root[data-ui-version="v2"] body.settings-mode #v2Rail #railSettingsBtn { display: none; }
   :root[data-ui-version="v2"] body.settings-mode #v2Rail #railBackBtn[hidden] { display: flex !important; }
   .rail-dir { display: flex; flex-direction: column; gap: 2px; margin-top: auto; }
-  /* 让位只限栏常驻档位（≥860px）；窄档保留下划线子 tab 条与头行「←」（见段首 4)） */
-  @media (min-width: 860px) {
-    :root[data-ui-version="v2"] .settings-subtabs { display: none; }
-    :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
-  }
+  /* 让位全档成立（栏常驻，无档位例外，见段首 4)） */
+  :root[data-ui-version="v2"] .settings-subtabs { display: none; }
+  :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
 
   /* ── 阶段 2 补：左栏手动收/展 + 收窄态栏底换钮 + 栏顶版本徽标纯文字 ──
      栏顶收起钮（railCollapseBtn）给栏宽一个手动态：<html> data-rail="collapsed"|
      "expanded"（localStorage「panel-rail-manual」，head 脚本绘制前读回，首帧即手动
-     态；缺省不写属性 = 宽度自动档）。手动态优先于自动档，但只覆盖栏常驻的 ≥860：
-     窄档（<860）是抽屉生态，收起钮不出、手动态不插手。实现上不做整档重述——
-     中档块（410 一带）没有上界、≥860 全程生效，宽档块（424 一带）在 ≥1200 逐项
-     撤销成 216：collapsed 只需在 ≥1200 把宽档的撤销再撤回去（取值逐项抄宽档块
-     撤销前的中档态）；expanded 只需在 860–1199 把中档的收起逐项撤销（取值抄宽档
-     块）。栏多宽内容让多少：collapsed 时三处宽档校准块已由 :not() 摘出（见阶段 1
-     校准段注释）；expanded 时中档内容让 240、v1 阈值全程真挤压，块内尾部补一条
-     860–1199 全档塌缩（四项布局取值与阶段 1 校准块逐项同源，目录浮动钮随同）。 */
+     态；缺省不写属性 = 宽度自动档）。手动态优先于自动档：实现上不做整档重述——
+     窄栏基座（阶段 1 段）没有上界、<1200 全程生效，宽档块在 ≥1200 逐项撤销成
+     216：collapsed 只需在 ≥1200 把宽档的撤销再撤回去（取值逐项抄宽档块撤销前的
+     窄栏态）；expanded 只需在 <1200 把窄栏的收起逐项撤销（取值抄宽档块）。栏多宽
+     内容让多少：collapsed 时三处宽档校准块已由 :not() 摘出（见阶段 1 校准段注释）；
+     expanded 时窄栏内容让 240、v1 阈值全程真挤压，块内尾部补一条 <1200 全档塌缩
+     （四项布局取值与阶段 1 校准块逐项同源，目录浮动钮随同）。 */
 
-  /* 收起钮：基座整隐（v1 无栏、窄档抽屉生态不出——窄档本来就有汉堡钮），
-     ≥860 的 v2 才出；全栏形态下 margin-left:auto 把它顶到品牌行行尾。 */
+  /* 收起钮：基座整隐（v1 无栏），v2 全宽都出；全栏形态下 margin-left:auto 把它
+     顶到品牌行行尾。 */
   .icon-btn.rail-collapse-btn { display: none; }
-  @media (min-width: 860px) {
-    :root[data-ui-version="v2"] .rail-collapse-btn { display: inline-flex; margin-left: auto; flex-shrink: 0; }
-  }
+  :root[data-ui-version="v2"] .rail-collapse-btn { display: inline-flex; margin-left: auto; flex-shrink: 0; }
 
   /* 手动态 collapsed：≥1200 把宽档撤销再撤回去（回 72 图标栏形态） */
   @media (min-width: 1200px) {
@@ -603,9 +578,9 @@
     :root[data-ui-version="v2"][data-rail="collapsed"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
     :root[data-ui-version="v2"][data-rail="collapsed"] #railThemeToggle { display: none; }
   }
-  /* 手动态 expanded：860–1199 把中档收起逐项撤销成 216 全栏（栏底亮暗钮召回——
-     收窄态才隐藏它，全栏形态照旧在）；尾部是该态的中档全档塌缩校准 */
-  @media (min-width: 860px) and (max-width: 1199px) {
+  /* 手动态 expanded：<1200 把窄栏收起逐项撤销成 216 全栏（栏底亮暗钮召回——
+     收窄态才隐藏它，全栏形态照旧在）；尾部是该态的窄栏全档塌缩校准 */
+  @media (max-width: 1199px) {
     :root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 16px 12px; }
     :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; flex-direction: row; gap: 12px; }
     :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .brand-text { display: block; }
@@ -626,9 +601,9 @@
     :root[data-ui-version="v2"][data-rail="expanded"] .toc-side { display: none; }
     :root[data-ui-version="v2"][data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
-  /* 收窄态（中档自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行纵排——72px
+  /* 收窄态（<1200 自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行纵排——72px
      栏宽放不下横向的品牌徽标 + 32px 收起钮，上下排（宽档全栏栏底照旧：亮暗+设置）。 */
-  @media (min-width: 860px) and (max-width: 1199px) {
+  @media (max-width: 1199px) {
     :root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }
     :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn { margin-left: 0; }
     :root[data-ui-version="v2"] .rail-foot { justify-content: center; }
@@ -645,21 +620,18 @@
      自带，连点打断时 CSS 过渡从当前计算值续接（不跳变），盖板里的实时读边逻辑白拿。
      只有手动切换滑：<html> data-rail-anim 是 panel.js 挂的临时开关（动画收尾撤除），
      拖窗口跨 1200 档界的自动变化、以及 prefers-reduced-motion 都不挂开关，栏体照旧
-     到位。开关只作用 ≥860 的常驻栏体——窄档抽屉有自己的 240ms transform 滑入（基座
-     规则），不被这条接管。双属性选择器提级：中档块（≥860 的 transition: none）同
-     优先级且位置更靠后，不这样写会被盖。 */
-  @media (min-width: 860px) {
-    :root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }
-    /* 内容让位必须跟着栏一起走：栏是 fixed、z-index 40、底色不透明，让位若当帧到位而
-       栏还在滑，收起向栏就压在已经让开的文字上、展开向栏把还没缩小的行右端裁掉，滑完
-       120ms 终端才按新宽度重排——这两段错位合起来就是「抽搐一下」。
-       两个属性都得进来：让位规则同时改 padding-left 与 max-width（非终端档
-       calc(1440px + 72px) ↔ +216px），只过渡 padding-left 的话宽窗口（视口 >1656px）
-       内容有效宽会先挤窄 144px 再回弹，反而多抖一次。终端档 max-width 是 none，与长度
-       不可插值，自动瞬变，无副作用。终端的重排仍走原链路（宿主 ResizeObserver → 120ms
-       防抖 → fit），动画结束后重排一次与普通改窗口大小等价，不是缺陷。 */
-    :root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }
-  }
+     到位。栏已无基座 transition（两档都是常驻态、不再有抽屉滑入），这条只叠在
+     手动收展那一次上。 */
+  :root[data-ui-version="v2"][data-rail-anim] .rail { transition: width 200ms cubic-bezier(0.2, 0, 0, 1); }
+  /* 内容让位必须跟着栏一起走：栏是 fixed、z-index 40、底色不透明，让位若当帧到位而
+     栏还在滑，收起向栏就压在已经让开的文字上、展开向栏把还没缩小的行右端裁掉，滑完
+     120ms 终端才按新宽度重排——这两段错位合起来就是「抽搐一下」。
+     两个属性都得进来：让位规则同时改 padding-left 与 max-width（非终端档
+     calc(1440px + 72px) ↔ +216px），只过渡 padding-left 的话宽窗口（视口 >1656px）
+     内容有效宽会先挤窄 144px 再回弹，反而多抖一次。终端档 max-width 是 none，与长度
+     不可插值，自动瞬变，无副作用。终端的重排仍走原链路（宿主 ResizeObserver → 120ms
+     防抖 → fit），动画结束后重排一次与普通改窗口大小等价，不是缺陷。 */
+  :root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }
 
   /* 收起态（72 图标栏）两处细节，同样照 ccswitch 补：
      ① 隐栏内滚条——全局 ::-webkit-scrollbar 是 10px，72px 栏被啃掉七分之一还顺带把
@@ -668,10 +640,10 @@
      ② 栏内图标放大一档 15→17px（ccswitch 是 18→20，同一比例约 +13%）——文字没了，
         图标独自承担识别。主 tab 组、设置目录、栏底两钮同批（都是 .rail .rail-tab svg），
         栏顶收起钮不吃（它另有 28px 安静钮形制，见下）。
-     收起态在 CSS 里有两个来处，各挂一条、互不遮蔽：中档（860–1199）是自动档默认形态，
+     收起态在 CSS 里有两个来处，各挂一条、互不遮蔽：窄栏（<1200）是自动档默认形态，
      用 :not([data-rail="expanded"]) 把手动展开的那一档整体让开（无需再写反向召回）；
      宽档只有手动态 collapsed 才是图标栏。 :not() 提级到与手动态块同档，稳吃基座规则。 */
-  @media (min-width: 860px) and (max-width: 1199px) {
+  @media (max-width: 1199px) {
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail::-webkit-scrollbar { width: 0; }
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail .rail-tab svg { width: 17px; height: 17px; }
   }
@@ -684,18 +656,16 @@
      描边＋底＋投影三件套——栏顶那一行本就有品牌徽标与版本字，再嵌一枚带边框的小方块
      偏重。28×28 无底无框、靠 hover 才浮浅底、按下微缩一档。只改这一颗：栏底亮暗钮与
      设置/返回钮的描边与底是它们独立成行时的可见性线索，不动。 */
-  @media (min-width: 860px) {
-    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn {
-      width: 28px; height: 28px; padding: 0;
-      border: 0; background: transparent; box-shadow: none;
-      color: var(--text-2);
-      transition: background 140ms var(--ease-out), color 140ms var(--ease-out), transform 120ms var(--ease-out);
-    }
-    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:hover {
-      background: var(--surface-hover); color: var(--text);
-    }
-    :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:active { transform: scale(0.96); }
+  :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn {
+    width: 28px; height: 28px; padding: 0;
+    border: 0; background: transparent; box-shadow: none;
+    color: var(--text-2);
+    transition: background 140ms var(--ease-out), color 140ms var(--ease-out), transform 120ms var(--ease-out);
   }
+  :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:hover {
+    background: var(--surface-hover); color: var(--text);
+  }
+  :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:active { transform: scale(0.96); }
 
   /* 栏顶版本徽标（仅 v2 栏顶）：纯文字挪品牌字下方，去胶囊只留字——去底/边，字色回
      accent 蓝（11px muted 读不出这是一枚版本徽标）。字号回 12.5px 与头行那颗同档；
@@ -740,8 +710,8 @@
         其余格式化器本已如此）。分隔线既有写法已是相邻行共享单线（概览行/图例行
         last-child 撤线、表体首行 td 无顶线），不重复描边，不动。
      4) 既有毛病四修（全部 v2-only，v1 基座逐字原样）：
-        a) 上下半区断点不一致：上半区 stats-top-grid 塌缩档（v2 校准：中档 ≤1096、宽档
-           自动态 ≤1240）与下半区 stats-quad（中档 ≤1056、宽档阈值 960+240=1200 恰为
+        a) 上下半区断点不一致：上半区 stats-top-grid 塌缩档（v2 校准：窄档 ≤1096、宽档
+           自动态 ≤1240）与下半区 stats-quad（窄档 ≤1056、宽档阈值 960+240=1200 恰为
            档界不命中）错档——补 quad 在 1057–1096 与 1200–1240 两段的塌缩，两半同档
            同塌（栏手动态 expanded 块本已同罩两者，无需补）。
         b) 热力图窄屏吹大约 3.2 倍：svg width:100% 在上半区塌成单列后随卡整宽放大
@@ -805,7 +775,7 @@
   :root[data-ui-version="v2"][data-style] .logs-table td:nth-child(5),
   :root[data-ui-version="v2"][data-style] .logs-table th:nth-child(6),
   :root[data-ui-version="v2"][data-style] .logs-table td:nth-child(6) { text-align: right; }
-  /* 4a) 上下半区同档塌缩：补 quad 在中档 1057–1096、宽档自动态 1200–1240 两段
+  /* 4a) 上下半区同档塌缩：补 quad 在窄档 1057–1096、宽档自动态 1200–1240 两段
      （取值抄阶段 1 校准块的 quad 条目） */
   @media (min-width: 1057px) and (max-width: 1096px) {
     :root[data-ui-version="v2"] .skills-grid.stats-quad { grid-template-columns: 1fr; }
@@ -1513,9 +1483,9 @@
      只在 v2 下才放栏克隆进来）。真栏是 fixed 通高，进镜像后剥成静态、与看板镜像横排
      同高（stretch），栏内 tab 组仍靠自身的 margin-top:auto 贴底；皮肤 token 全局生效，
      栏自动着色。栏与内容区间的 24px 间隔照真实布局以 gap 呈现；栏宽与间隔不占镜像里
-     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、中档 72+24）。 */
+     main 的内容宽，自然宽在 JS 里按克隆实渲宽 + 24 补回（宽档 216+24、窄栏 72+24）。 */
   :root[data-ui-version="v2"] .settings-mirror-scale { display: flex; align-items: stretch; gap: 24px; }
-  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; transform: none; }
+  :root[data-ui-version="v2"] .settings-mirror-scale .rail { position: static; }
   :root[data-ui-version="v2"] .settings-mirror-scale > .telemetry-view { flex: 1 1 auto; min-width: 0; }
 
   /* 虚拟终端页：终端页脱离控制台卡片布局，保留真实终端的深色输出区，
@@ -4813,21 +4783,19 @@
   html[data-prepaint-view="terminal"] body main.layout-container { max-width: none; padding: 0; margin: 0; }
   /* 新版（v2）的终端首帧：上面那条把 padding/max-width 抹成旧版口径，而 v2 的左让挂在
      :root[data-ui-version="v2"] 上——首帧与落定态不一致会整屏跳一次。按栏态分档重述：
-     窄档抽屉化后无栏宽可让（上面 v1 那条的 padding:0 天然正确），中档让 72、宽档让 216。
-     两个标记同在 <html> 上，同链按落定态重述（特异性盖过上面两条）。 */
-  @media (min-width: 860px) {
-    html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 72px; }
-  }
+     栏常驻，窄栏让 72、宽档让 216。两个标记同在 <html> 上，同链按落定态重述
+     （特异性盖过上面两条）。 */
+  html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 72px; }
   @media (min-width: 1200px) {
     html[data-prepaint-view="terminal"][data-ui-version="v2"] body main.layout-container { padding-left: 216px; }
   }
   /* 手动态修正（栏顶收起钮，data-rail 同在 <html> 上、绘制前由 head 脚本写入）：
-     collapsed 时宽档栏收 72——上面 ≥1200 那条的 216 收回 72；expanded 时中档栏展
-     216——860–1199 那条的 72 改让 216。首帧即手动态，整屏不跳。 */
+     collapsed 时宽档栏收 72——上面 ≥1200 那条的 216 收回 72；expanded 时窄栏栏展
+     216——<1200 那条的 72 改让 216。首帧即手动态，整屏不跳。 */
   @media (min-width: 1200px) {
     html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="collapsed"] body main.layout-container { padding-left: 72px; }
   }
-  @media (min-width: 860px) and (max-width: 1199px) {
+  @media (max-width: 1199px) {
     html[data-prepaint-view="terminal"][data-ui-version="v2"][data-rail="expanded"] body main.layout-container { padding-left: 216px; }
   }
   /* 监测区首帧就退场，工作区必须同帧收成单列：CSS Grid 的轨道按模板排，藏掉子项

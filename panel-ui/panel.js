@@ -313,7 +313,6 @@ async function api(method, path, body) {
     // 与 initTerminalPreview 同款 typeof 守卫：panel-startup 测试把 init() 抽进桩环境
     // 真跑，桩里只提供固定名单上的函数。
     if (typeof initTerminalHostControls === "function") initTerminalHostControls();
-    if (typeof initRailDrawer === "function") initRailDrawer();
     if (typeof initRailCollapse === "function") initRailCollapse();
     initRelayControls();
     initSkillsTab();
@@ -3576,7 +3575,7 @@ async function api(method, path, body) {
           const railClone = rail.cloneNode(true);
           stripIds(railClone);
           scaleEl.appendChild(railClone);
-          // 栏宽按克隆实渲取值（宽档 216、中档随媒体查询收 72），栏与内容区间的
+          // 栏宽按克隆实渲取值（宽档 216、窄栏随媒体查询收 72），栏与内容区间的
           // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
           mirrorRailW = railClone.offsetWidth;
         }
@@ -6852,64 +6851,12 @@ async function api(method, path, body) {
     return last;
   }
 
-  // ── v2 窄档（<860px）导航抽屉 ─────────────────────────────────────────
-  // 栏形态三态由 CSS 媒体查询收权（纯 CSS 首帧）；这里只管抽屉的开合语义：汉堡钮
-  // 切换、遮罩点击/Esc/任何视图切换即关、焦点进出、resize 出窄档自动复位。开合状态
-  // = body.rail-drawer-open（默认关）；宽/中档栏体常驻，类名挂着也不影响布局。两处
-  // 文案（打开/收起导航）集中在下面两个常量，改文案只动这里与 HTML 初始属性。
-  const RAIL_DRAWER_OPEN_LABEL = "打开导航";
-  const RAIL_DRAWER_CLOSE_LABEL = "收起导航";
-  function syncRailDrawerBtn(open) {
-    const btn = $("railDrawerBtn");
-    if (!btn) return;
-    btn.setAttribute("aria-expanded", open ? "true" : "false");
-    btn.setAttribute("aria-label", open ? RAIL_DRAWER_CLOSE_LABEL : RAIL_DRAWER_OPEN_LABEL);
-    btn.title = open ? RAIL_DRAWER_CLOSE_LABEL : RAIL_DRAWER_OPEN_LABEL;
-  }
-  function railDrawerIsOpen() {
-    return document.body.classList.contains("rail-drawer-open");
-  }
-  function openRailDrawer() {
-    if (railDrawerIsOpen()) return;
-    document.body.classList.add("rail-drawer-open");
-    syncRailDrawerBtn(true);
-    // 焦点进抽屉：落到当前视图对应的高亮 tab 上，没有就第一枚
-    const rail = $("v2Rail");
-    const target = rail && (rail.querySelector(".rail-tab.active") || rail.querySelector(".rail-tab"));
-    if (target) target.focus();
-  }
-  function closeRailDrawer(returnFocus = true) {
-    // 未开时一律不动：宽/中档与旧版的视图切换都会路过这里，不能被误伤（含焦点）
-    if (!railDrawerIsOpen()) return;
-    document.body.classList.remove("rail-drawer-open");
-    syncRailDrawerBtn(false);
-    // 关时焦点归还汉堡钮；进设置/终端（头行整隐，汉堡钮不可见）与 resize 复位时不归还
-    if (returnFocus) {
-      const btn = $("railDrawerBtn");
-      if (btn) btn.focus();
-    }
-  }
-  function initRailDrawer() {
-    const btn = $("railDrawerBtn");
-    const mask = $("railDrawerMask");
-    if (!btn || !mask) return;
-    btn.onclick = () => { if (railDrawerIsOpen()) closeRailDrawer(true); else openRailDrawer(); };
-    mask.addEventListener("click", () => closeRailDrawer(true));
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeRailDrawer(true);
-    });
-    // resize 出窄档（≥860px 栏体转为常驻）抽屉态自动复位。不归还焦点：焦点若在栏内
-    // tab 上，栏已转为可见形态，留在原地即正确；汉堡钮此刻反而不可见。
-    const mq = window.matchMedia("(min-width: 860px)");
-    mq.addEventListener("change", () => { if (mq.matches) closeRailDrawer(false); });
-  }
-
-  // 栏手动收/展（栏顶收起钮 + Ctrl/Cmd+\）：手动态优先于宽度自动档——<html> data-rail
-  // 是唯一状态源（head 脚本绘制前从 localStorage「panel-rail-manual」读回，首帧即手动
-  // 态；CSS 全部挂这个属性），这里只管点击写档+写属性、图标与文案随有效栏态换向、切换
-  // 那一次挂上滑动开关。
-  // 有效栏态 = 手动态 ?? 宽度自动档（≥1200 自动 216 全栏 / 860–1199 自动 72 图标栏）；
-  // 窄档（<860）抽屉生态不收此钮管（钮也不出，快捷键一并让位）。文案常量制（同抽屉钮先例）。
+  // ── 栏手动收/展（栏顶收起钮 + Ctrl/Cmd+\）────────────────────────────
+  // 手动态优先于宽度自动档——<html> data-rail 是唯一状态源（head 脚本绘制前从
+  // localStorage「panel-rail-manual」读回，首帧即手动态；CSS 全部挂这个属性），这里只
+  // 管点击写档+写属性、图标与文案随有效栏态换向、切换那一次挂上滑动开关。
+  // 有效栏态 = 手动态 ?? 宽度自动档（≥1200 自动 216 全栏 / 其余宽度自动 72 图标栏）；
+  // 栏在任何宽度常驻、无抽屉形态，收起钮与快捷键全档在管。文案常量制。
   const RAIL_COLLAPSE_LABEL = "收起侧栏";
   const RAIL_EXPAND_LABEL = "展开侧栏";
   // 手动切换的边缘滑动：CSS 那条 width 过渡只挂在 <html> data-rail-anim 上（见 panel.css
@@ -7001,7 +6948,6 @@ async function api(method, path, body) {
       const active = document.activeElement;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable)) return;
       if (currentView === "terminal") return;
-      if (!window.matchMedia("(min-width: 860px)").matches) return;
       event.preventDefault();
       toggleRailManual();
     });
@@ -7242,9 +7188,6 @@ async function api(method, path, body) {
     for (const [id, on] of [["tabBoard", board], ["tabSkills", name === "skills"], ["tabPresets", presets], ["tabStore", store], ["tabStats", stats], ["tabSessions", sessions]]) {
       $(id).setAttribute("aria-selected", on ? "true" : "false");
     }
-    // 窄档导航抽屉：任何视图切换（栏 tab / 入口卡 / 齿轮 / 恢复）都收起抽屉。
-    // 焦点归还汉堡钮；设置/终端的头行整隐、汉堡钮不可见，这两个视图不归还。
-    closeRailDrawer(name !== "settings" && name !== "terminal");
     // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
     // 与设置/终端进出——进设置时六主 tab 全熄、栏底设置钮点亮；进终端时「终端」tab
     // 亮，栏内第七枚就是它）。高亮即挂 aria-current="page"，熄灭即摘；轻页头页题与

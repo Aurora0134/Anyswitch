@@ -381,12 +381,9 @@ if (window.panelStartupController) panelStartupPlay();
 
 <header class="site-head">
   <div class="layout-container head-inner" id="mainHeadInner">
-    <!-- 新版（v2）轻页头两件：窄档（<860px）汉堡钮开左栏抽屉；当前页标题（文本由
-         switchView 从点亮的栏 tab 现取 textContent 同步，静态默认「看板」与静态高亮
-         的看板 tab 同帧一致）。旧版与 v2 中/宽档下均不可见（CSS 收权），v1 头行不动。 -->
-    <button class="icon-btn rail-drawer-btn" id="railDrawerBtn" aria-expanded="false" aria-controls="v2Rail" aria-label="打开导航" title="打开导航">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-    </button>
+    <!-- 新版（v2）轻页头一件：当前页标题（文本由 switchView 从点亮的栏 tab 现取
+         textContent 同步，静态默认「看板」与静态高亮的看板 tab 同帧一致）。栏在任何
+         窗口宽度都常驻（两档：≥1200 全栏 216 / 其余图标栏 72），导航不需要抽屉入口。 -->
     <h1 class="v2-page-title" id="v2PageTitle">看板</h1>
     <div class="brand-group">
       <div class="brand-icon">
@@ -447,8 +444,8 @@ if (window.panelStartupController) panelStartupPlay();
 <!-- 新版界面（设置→通用「显示」卡「UI版本」选新版）的左侧导航栏：栏顶品牌徽标，
      七枚主 tab（含终端，图标在左、文字在右）竖排贴栏底，最底一行左亮暗钮、右设置钮。
      旧版整栏 display:none，头行布局原样。
-     三级降级：≥1200px 全栏 216px；860–1199px 收 72px 图标栏（文字标签整隐、title 作
-     悬停提示）；<860px 收进抽屉——栏体默认屏外，页头汉堡钮开合，遮罩/Esc/选中即关。
+     两级降级：≥1200px 全栏 216px；其余宽度收 72px 图标栏（文字标签整隐、title 作
+     悬停提示）——栏在任何窗口宽度都常驻，绝不整栏消失。
      头行品牌在新版让位给栏顶这一份（同一枚 logo，头行那份 CSS 隐去）；版本徽标同样
      两处同源——initBrandVersion 一次取值写两个 id。
      栏内 tab 的激活态与头行 tab 同源——都在 switchView 里同步；亮暗钮与头行同状态源
@@ -467,10 +464,10 @@ if (window.panelStartupController) panelStartupPlay();
       <h1>Anyswitch</h1>
       <span class="version-tag" id="railBrandVersion" hidden></span>
     </div>
-    <!-- 栏收起钮：手动收/展 72 图标栏——宽档点击收 72、中档点击展 216（手动态优先于
+    <!-- 栏收起钮：手动收/展 72 图标栏——宽档点击收 72、窄档点击展 216（手动态优先于
          宽度自动档，存档 panel-rail-manual，绘制前由 head 脚本读回 <html> data-rail，
-         首帧即手动态）；窄档（<860）是抽屉生态，此钮不出（窄档本来就有汉堡钮）。
-         图标与文案随有效栏态换向（initRailCollapse 同步）。旧版整栏不出，此钮同隐。 -->
+         首帧即手动态）。图标与文案随有效栏态换向（initRailCollapse 同步）。旧版整栏
+         不出，此钮同隐。 -->
     <button class="icon-btn rail-collapse-btn" id="railCollapseBtn" aria-expanded="true" aria-controls="v2Rail" aria-label="收起侧栏" title="收起侧栏">
       <svg id="railIcoCollapse" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="11 17 6 12 11 7"/><polyline points="18 17 13 12 18 7"/></svg>
       <svg id="railIcoExpand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" hidden><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>
@@ -512,7 +509,7 @@ if (window.panelStartupController) panelStartupPlay();
        activateSettingsSubTab，高亮/aria-selected/aria-current 由该函数内同步（同一
        状态源，双向一致）。静态 hidden：v1 整栏不出、v2 非设置态不出；显隐由
        body.settings-mode（运行时）与 data-prepaint-view="settings"（首帧）两条
-       !important 规则收权，中档图标栏的标签收起由 .rail-tab-label 既有规则自动覆盖。 -->
+       !important 规则收权，窄栏（<1200）图标栏的标签收起由 .rail-tab-label 既有规则自动覆盖。 -->
   <nav class="rail-dir" id="railSettingsDir" role="tablist" aria-label="设置分类" hidden>
     <button class="rail-tab" id="railDirGeneral" role="tab" aria-selected="false" aria-controls="settingsPanelGeneral" title="通用">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
@@ -553,8 +550,6 @@ if (window.panelStartupController) panelStartupPlay();
     </button>
   </div>
 </aside>
-<!-- v2 窄档抽屉遮罩：点开栏抽屉时盖内容区（点击即关）。旧版与 v2 中/宽档永隐。 -->
-<div class="rail-drawer-mask" id="railDrawerMask"></div>
 
 <main class="layout-container">
 
