@@ -325,10 +325,14 @@ export function createTerminalHost({
     stateDirty = true;
   }
 
-  // 立即落盘（相对 250ms 防抖而言）。改异步后调用方分两类：路由与 close() 拿返
-  // 回值 await（响应/关停语义等价于旧的同步写完）；onExit 这类回调路径发后不
-  // 管——链上写失败会被捕获、记日志并保持脏位，下一拍自然重试，不会以未处理
-  // rejection 的形式炸掉宿主。
+  // 立即落盘（相对 250ms 防抖而言）。改异步后调用方分三类：删除级路由
+  // （close、clear-all）经 persistNowOrThrow 拿结果、写失败上抛 500（旧同步写
+  // 失败就是路由 500，这条防线喂着 relay 的清场链路，见 persistNowOrThrow 的
+  // 注释）；close() 与 create/restart/resize 路由只等完成（拿 200 后没有谁拿
+  // 它去杀宿主，软失败保脏位等下一拍重试更好）；onExit 这类回调路径发后不
+  // 管——链上写失败会被捕获、记日志并保持脏位，不会以未处理 rejection 的形式
+  // 炸掉宿主。返回的 promise 恒 resolve：值是「等到链尾时最后一笔写是否成
+  // 功」的布尔，跳过路径继承上一笔的结果。
   function persistNow() {
     // 脏位门控：上一笔成功落盘后内存没再变过的每个防抖拍（空闲会话的轮询、心
     // 跳、无变化 resize 都会走到这里）连 JSON.stringify 都不做，直接原样返回当
@@ -341,6 +345,7 @@ export function createTerminalHost({
     // 脏就会被成功一笔顺手抹掉，那正是丢变更的写法。
     stateDirty = false;
     persistChain = persistChain.then(async () => {
+      let persisted = false;
       try {
         await mkdir(dataRoot, { recursive: true });
         const state = [...sessions.values()].map((session) => ({
@@ -359,14 +364,28 @@ export function createTerminalHost({
           ...agentMetadata(session),
         }));
         await atomicWriteStateFile(statePath, JSON.stringify({ version: 1, sessions: state }, null, 2));
+        persisted = true;
       } catch (error) {
         // 写失败保持脏位：下一拍重试。状态文件是内存态的可恢复快照而非事务日志，
-        // 一次写失败不值得打断输出转发或把路由打成 500。
+        // 一次写失败不值得打断输出转发或把没有清场后果的路由打成 500——需要
+        // 失败冒头的调用方走 persistNowOrThrow。
         stateDirty = true;
         logger.warn?.(`[terminal-host] state persist failed: ${error.message}`);
       }
+      return persisted;
     });
     return persistChain;
+  }
+
+  // 删除级路由的落盘等待：失败必须以 500 拒答，不能答一个「盘上其实没清」的
+  // 200。relay 的 stop({clearSessions}) 收到 200 就杀宿主子进程（它对非 2xx 才
+  // 走 clearFailed → 宿主停稳后删除状态文件的兜底，见 relay-host.mjs 的
+  // requestClearAllSessions），面板关页签同理拿 200 当凭据——写失败藏在 200
+  // 里，已关的页签就会在下次宿主重启时从盘上复活。这恢复了旧同步写的防线：
+  // writeFileSync 当年在这里抛出去，路由答的本来就是 500。
+  async function persistNowOrThrow() {
+    const persisted = await persistNow();
+    if (!persisted) throw Object.assign(new Error("state_persist_failed"), { statusCode: 500 });
   }
 
   function schedulePersist() {
@@ -634,9 +653,10 @@ export function createTerminalHost({
         }
         // 清场是删除级变化：置脏后这笔写必须真的把空表落上盘，并在响应前等它
         // 写完——relay 的 stop({clearSessions}) 收到 200 就杀宿主子进程，盘上
-        // 残留旧会话会让下次启动凭空复活一排已关的页签。
+        // 残留旧会话会让下次启动凭空复活一排已关的页签。写失败走 500 拒答，
+        // relay 才会转进「宿主停稳后删除状态文件」的兜底。
         markStateDirty();
-        await persistNow();
+        await persistNowOrThrow();
         return json(res, 200, { ok: true, cleared });
       }
       const match = url.pathname.match(/^\/terminal\/sessions\/([^/]+)(?:\/(input|resize|stream|restart|close))?$/);
@@ -708,9 +728,11 @@ export function createTerminalHost({
         session.pty?.kill();
         sessions.delete(session.id);
         // 会话从内存表移除是删除级变化：置脏后等这笔写落定再答——响应到达时
-        // 盘上已经没有这个会话（与旧同步写的外部时序契约一致）。
+        // 盘上已经没有这个会话（与旧同步写的外部时序契约一致）。写失败走 500
+        // 拒答：面板拿 200 当「盘上已清」的凭据，假 200 会让已关页签在宿主下
+        // 次重启时从盘上复活。
         markStateDirty();
-        await persistNow();
+        await persistNowOrThrow();
         return json(res, 200, { ok: true });
       }
       return json(res, 405, { error: "method_not_allowed" });

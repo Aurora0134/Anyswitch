@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED } from "./terminal-host.mjs";
+import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
@@ -769,6 +769,45 @@ test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件"
     // 终态也完整：最后一轮的大块按落盘尾部预算留在盘上。
     const final = JSON.parse(readFileSync(host.statePath, "utf8"));
     assert.ok(final.sessions[0].buffer.length >= 1, "终态快照内容完好");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑤ 评审修正钉（写失败语义）：删除级路由（close、clear-all）「响应前等落盘」
+// 的契约在写失败时必须以 500 拒答，不能答一个盘上其实没清的假 200——relay 的
+// stop({clearSessions}) 只对非 2xx 转进 clearFailed → 宿主停稳后删除状态文件
+// 的兜底（requestClearAllSessions 见 relay-host.mjs），面板关页签同理拿 200 当
+// 凭据；假 200 直通杀宿主，已关页签就在下次重启时从盘上复活。旧同步写失败在
+// 这里本来就是路由 500，这条防线不许被异步化顺手抹掉。构造必败：把状态文件
+// 路径占成一个目录，rename 落不上去，每笔写都失败（EPERM 走有界退避后上抛）。
+test("⑤ 写盘失败时 close/clear-all 回 500 拒答，不答假 200", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-persistfail-"));
+  mkdirSync(join(root, TERMINAL_STATE_FILE)); // 占位目录：restore() 读它抛错按无状态处理
+  const { ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const post = (path, body) => fetch(url(path), {
+    method: "POST", headers: headers(host), body: JSON.stringify(body ?? {}),
+  });
+  try {
+    // 非删除级路由刻意软失败：会话在内存里照常可用，脏位保着、每个防抖拍重试，
+    // 没有谁拿它们的 200 去杀宿主——这与 close/clear-all 的硬失败是两份不同的
+    // 契约，钉在一起防止以后被「顺手统一」。
+    const created = await post("/terminal/sessions", { label: "写失败", cwd: root, shell: "powershell" });
+    assert.equal(created.status, 201, "create 对写盘失败软失败：会话照常建立");
+    assert.equal(host.sessions.size, 1);
+    const createdBody = await created.json();
+
+    const closeResponse = await post(`/terminal/sessions/${createdBody.id}/close`);
+    assert.equal(closeResponse.status, 500, "close 写盘失败必须 500，不答假 200");
+    assert.deepEqual(await closeResponse.json(), { error: "state_persist_failed" });
+
+    const clearResponse = await post("/terminal/sessions/clear-all");
+    assert.equal(clearResponse.status, 500, "clear-all 写盘失败必须 500，不答假 200");
+    assert.deepEqual(await clearResponse.json(), { error: "state_persist_failed" });
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
