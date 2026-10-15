@@ -2886,7 +2886,7 @@ describe("panel.html 设置全页视图", () => {
     }
     const metricsBlock = panelHtml.slice(panelHtml.indexOf('id="terminalMetricsSection"'), panelHtml.indexOf('id="terminalRequestList"'));
     assert.ok(!metricsBlock.includes("telemetry-card"), "监测区为直排网格，不套卡片盒");
-    assert.ok(metricsBlock.includes('terminal-metric-spark" id="terminalSparkTtft"'), "折线图保留并在格子右侧居中");
+    assert.ok(metricsBlock.includes('terminal-metric-spark" id="terminalSparkTtft"'), "折线图保留并占格子右列");
     assert.ok(!panelHtml.includes('id="terminalSessionTokens"'), "tokens 行已移出侧栏");
     const footbar = panelHtml.slice(panelHtml.indexOf('class="terminal-footbar"'), panelHtml.indexOf('id="terminalInspector"'));
     assert.ok(footbar.includes('id="terminalFootStats"') && footbar.includes('id="terminalFootRequests"') && footbar.includes('id="terminalFootTokens"'), "底栏右侧承载请求数与 tokens");
@@ -2904,7 +2904,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
 
-  it("最近请求 5 行视窗 + 四宫格数值改细 + 折线垂直居中", () => {
+  it("最近请求 5 行视窗 + 四宫格数值改细 + 折线纵向占满两行", () => {
     // 视窗：行高 40px、间距 6px，max-height = 5×40+4×6 = 224px，刚好 5 行；
     // 不足 5 条自然变矮（flex 列高由内容决定，无 min-height 撑高）。
     const listRule = panelCss.match(/\.terminal-request-list \{([^}]*)\}/)[1];
@@ -2915,14 +2915,20 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
     assert.ok(/\.terminal-request-item \{[^}]*flex: none/.test(panelCss), "行不可压——flex 子项默认 shrink 会压扁行高、视窗塞进 6+ 行");
     assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内各栏垂直居中（中栏 TTFT 随行居中）");
-    // 四宫格：数值改细、折线放大到原生 56×22（与生成器同规格，viewBox 1:1 不再拉伸），
-    // 格子改 grid——折线占右列、跨标签/数值两行垂直居中
+    // 四宫格：数值改细、折线拉高到原生 56×46（与生成器同规格，viewBox 1:1 不再拉伸），
+    // 格子改 grid——折线占右列、跨标签/数值两行并纵向占满（上沿贴标签行、下沿贴数值行）；
+    // 两行行高显式钉死 18+4+24=46 与折线等高，对齐不依赖字体度量
     assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
-    assert.ok(panelCss.includes("width: 56px; height: 22px;"), "折线原生 56×22");
-    assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; }"), "折线 SVG 块级化");
+    assert.ok(panelCss.includes("width: 56px; height: 46px;"), "折线原生 56×46（纵向占满两行）");
+    assert.ok(/\.terminal-metric-label \{[^}]*line-height: 18px/.test(panelCss), "标签行行高钉死 18px");
+    assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px\/24px/.test(panelCss), "数值行行高钉死 24px");
+    assert.ok(/\.terminal-metric \{[^}]*row-gap: 4px/.test(panelCss), "行距 4px——18+4+24=46 与折线等高");
+    assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; width: 100%; height: 100%; }"), "折线 SVG 块级化并填满盒子");
     assert.ok(panelCss.includes(".terminal-metric-row { display: contents; }"), "数值行拆盒并入格子 grid");
-    assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行居中");
+    assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行");
+    assert.ok(/\.terminal-metric-spark \{[^}]*align-self: start/.test(panelCss), "折线顶对齐——上沿贴标签行上沿");
     assert.ok(panelJs.includes("TERMINAL_SPARK_SIZE"), "侧栏折线尺寸随调用方传入生成器");
+    assert.ok(panelJs.includes("{ w: 56, h: 46 }"), "生成器规格与 CSS 盒等大（viewBox 1:1 不拉伸）");
     // 来源语义改纯文本（副行「绝对时间 · 来源名」）：无图例的紫/青色编码退役
     assert.ok(!panelCss.includes("is-pool") && !panelCss.includes("--chan"), "来源色类与 --chan 已退役");
     assert.ok(panelCss.includes(".terminal-request-detail.is-failed { color: var(--danger); }"), "失败明细红字");
@@ -7391,7 +7397,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 
   it("排印收口：末端分隔线收边、字阶并档 11/12、数值行同轴、TTFT 灯色图例悬停浮出", () => {
     assert.ok(panelCss.includes(".terminal-inspector-section:last-child { border-bottom: none; }"), "末端区块不再悬空分隔线");
-    assert.ok(panelCss.includes(".terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; }"), "标签字阶并入 12px");
+    assert.ok(panelCss.includes(".terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; line-height: 18px; }"), "标签字阶并入 12px（行高钉死 18px 供折线对齐）");
     assert.ok(panelCss.includes(".terminal-metric-unit { color: var(--text-3); font-size: 11px; }"), "单位字阶并入 11px");
     assert.ok(/\.terminal-live-status span:not\(\.terminal-live-icon\) \{[^}]*font-size: 12px/.test(panelCss), "实况行副行并入 12px");
     assert.ok(/\.terminal-metric strong \{[^}]*align-items: center/.test(panelCss), "数值行统一居中轴（灯与单位同轴）");
