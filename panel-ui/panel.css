@@ -392,6 +392,11 @@
   :root[data-ui-version="v2"] .terminal-return-btn,
   :root[data-ui-version="v2"] .terminal-head-divider { display: none; }
 
+  /* 看板左栏「虚拟终端」入口卡（仅新版）整隐：栏内「虚拟终端」tab 与这张卡同走一条
+     openTerminalPreview 链，入口重复；v1 无栏，这张卡是进终端的唯一门，markup 原样
+     保留——徽标与按钮的 JS 挂接照常（元素仍在 DOM），无死代码。 */
+  :root[data-ui-version="v2"][data-style] .terminal-entry-card { display: none; }
+
   /* 窄栏（<1200px）基座形态：品牌文字、tab 标签、底行「设置」文字收起只留图标（标签
      文本同时写在各 tab 的 title 属性上作悬停提示）；底行两钮纵排。栏常驻视口，任何
      窗口宽度都不消失；宽档块在 ≥1200 逐项撤销。 */

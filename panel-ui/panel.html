@@ -592,7 +592,9 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
 
         <!-- 虚拟终端入口：左栏是「控制」那一列，服务状态管 relay 起停，这张管进本机终端。
-             卡体纵向排——说明在上、按钮占满整行；320px 的窄栏里横向两栏会把说明压成一竖条。 -->
+             卡体纵向排——说明在上、按钮占满整行；320px 的窄栏里横向两栏会把说明压成一竖条。
+             v2 下整张卡由 CSS 整隐（栏内「虚拟终端」tab 与按钮同走 openTerminalPreview，入口
+             重复）；v1 无栏，这张卡是进终端的唯一门，原样呈现。 -->
         <div class="panel-card terminal-entry-card">
           <div class="card-header">
             <h2 class="card-title">
