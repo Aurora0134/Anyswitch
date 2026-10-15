@@ -96,9 +96,11 @@ function explicitInstanceId(headers) {
 // （SOCKET_OVERRIDE_AGENT_IDS，见 late-socket-instance.mjs）之外，
 // x-agent-instance 头仍是唯一正源且优先；只有头缺失（或非法
 // 被静默丢弃）时，才对多实例端点（白名单在 late-socket-instance.mjs，与
-// agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh/claude）
-// 用 netstat 快照反查 keep-alive 连接对端进程，
-// 合成 "<agentId>-<pid>"。override 端点（pi）相反：头存在仅为满足托管配置的
+// agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh/
+// qoder/claude）用 netstat 快照反查 keep-alive 连接对端进程，
+// 合成 "<agentId>-<pid>"。qoder 的头通道天生不存在——它的 provider 配置
+// 写不进自定义请求头——socket 兜底是它唯一的实例身份。override 端点（pi）
+// 相反：头存在仅为满足托管配置的
 // 占位符（models.json 缺变量启动即抛错），值是折不进进程身份的随机标签——
 // 头照发但不采用，身份一律以连接属主进程归一，socket 未解析时按无身份处理、
 // 走迟到绑定。zcode 保持聚合一桶，一律不兜底。
@@ -523,6 +525,15 @@ export function createOpenAIRelayServer(deps) {
     // panel can attribute a virtual-terminal session (whose shell pid rides
     // the terminal-host snapshot) to the agent running inside it. Same guard
     // rail as /api/internal/agents: loopback + pi-relay-token.
+    // codexSessions rides along because codex's instance identity is
+    // session-granular (codex-sess-<id> rows — process granularity does not
+    // hold for it, see the note above codexSessionInstanceId): the panel's
+    // pid-shaped join can never bind codex, so it bridges through these
+    // session metas (row-id-shaped here with the same shaper the request
+    // path uses, cwd + lastActive + originator for surface filtering). Served
+    // from the collector's 15s codex-session cache — never a fresh scan per
+    // poll. Absent getter or scan failure yields an empty list; the bridge
+    // then degrades to unbound codex sessions (the pre-fix behavior).
     if (path === "/api/internal/detected-processes" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
@@ -536,7 +547,24 @@ export function createOpenAIRelayServer(deps) {
       }
       try {
         const processes = deps.metricsCollector.getDetectedClientProcesses();
-        sendJson(res, 200, { ok: true, processes });
+        let codexSessions = [];
+        if (typeof deps.metricsCollector.getCodexSessionsForTerminalJoin === "function") {
+          const metas = await deps.metricsCollector.getCodexSessionsForTerminalJoin();
+          codexSessions = (Array.isArray(metas) ? metas : [])
+            .map((meta) => {
+              if (!meta || typeof meta.id !== "string") return null;
+              const rowId = codexSessionInstanceId({ prompt_cache_key: meta.id });
+              if (rowId === null || typeof meta.project !== "string" || meta.project === "") return null;
+              return {
+                id: rowId,
+                cwd: meta.project,
+                lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
+                originator: typeof meta.originator === "string" ? meta.originator : null,
+              };
+            })
+            .filter(Boolean);
+        }
+        sendJson(res, 200, { ok: true, processes, codexSessions });
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get detected client processes: ${err.message}`));
       }

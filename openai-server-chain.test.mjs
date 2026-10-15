@@ -1114,6 +1114,34 @@ describe("terminal attribution feed endpoint (/api/internal/detected-processes)"
       const body = await res.json();
       assert.equal(body.ok, true);
       assert.deepEqual(body.processes, feed);
+      assert.deepEqual(body.codexSessions, [], "无 getter 的旧 collector 形状回落空桥接表");
+    });
+  });
+
+  it("shapes codex session metas into row ids with the request-path shaper", async () => {
+    const feed = [{ agentId: "kimi", pid: 4321, ancestors: [8888] }];
+    const metas = [
+      // Row-id shaping must mirror codexSessionInstanceId: the raw session id
+      // gains the codex-sess- prefix; entries without a project are dropped.
+      { id: "01a13b08-118c-78c3-b6aa-11762eb023bf", project: "C:\\dev\\bridge", lastActive: 2000, originator: "codex-tui" },
+      { id: "noiddir", project: null, lastActive: 3000, originator: "codex-tui" },
+      { id: "junk", project: "C:\\dev", lastActive: "not-a-number", originator: 123 },
+    ];
+    const { upstreamFetch } = memberRouter({});
+    const deps = createMockDeps({ upstreamFetch, getKeepAliveConfig: NO_RETRY });
+    deps.metricsCollector = {
+      getDetectedClientProcesses: () => feed,
+      getCodexSessionsForTerminalJoin: async () => metas,
+    };
+    await withServer(deps, async (port) => {
+      const res = await getProcesses(port);
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.processes, feed);
+      assert.deepEqual(body.codexSessions, [
+        { id: "codex-sess-01a13b08-118c-78c3-b6aa-11762eb023bf", cwd: "C:\\dev\\bridge", lastActive: 2000, originator: "codex-tui" },
+        { id: "codex-sess-junk", cwd: "C:\\dev", lastActive: null, originator: null },
+      ], "缺 cwd 的丢弃；非法 lastActive/originator 落 null 而不是报错");
     });
   });
 

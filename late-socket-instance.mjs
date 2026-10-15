@@ -6,6 +6,13 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // process holding its own keep-alive connection to the loopback relay, and it
 // sends no instance header of its own — the terminal user launches `dsh`/`dst`,
 // not an Anyswitch launcher. zcode stays aggregate-only.
+// qoder joins from the client side for the same reason: its provider config
+// (settings.json openai-compatible connections) cannot carry custom request
+// headers, so the CLI's keep-alive connection is its only instance identity —
+// without the fallback the virtual terminal's Qoder sessions never bind an
+// instance row (2026-10-15 forensics; the terminal one-click launch ships no
+// tag either, so the synthesized qoder-<pid> is the row the process scan and
+// the terminal join both key on). This set mirrors agent-metrics' instanceBuckets.
 //
 // claude joins because its desktop app never crosses our launcher: the app
 // points its gateway at the resident relay itself (no per-launch relay, hence no
@@ -14,7 +21,7 @@ import { sanitizeInstanceId } from "./agent-metrics.mjs";
 // Code still arrive on their own per-launch relay and keep their reporter rows;
 // a request whose owner cannot be resolved stays on the aggregate bucket, and
 // the card falls back to the process scan for liveness (unchanged behavior).
-const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "claude"]);
+const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "codex", "grok", "qoder", "claude"]);
 
 // pi 的 x-agent-instance 头值对折进程身份没有贡献：models.json 落静态值
 //（sync 写盘为 direct；launcher 拉起时改写成 <cwd>-<pid> 实例值、退出恢复——

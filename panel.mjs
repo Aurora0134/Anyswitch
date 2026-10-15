@@ -343,9 +343,13 @@ async function defaultFetchRelayChainRuntime(root, token) {
 
 // Pull-mode terminal attribution: the relay's live agent client processes,
 // each with its ancestor chain (47821/api/internal/detected-processes), for
-// joining terminal-host sessions by shell pid. Returns the processes array,
-// or null on failure — the caller degrades to unannotated sessions rather
-// than erroring the whole session list.
+// joining terminal-host sessions by shell pid — plus the relay's codex session
+// metas (row-id-shaped codex-sess ids with cwd/lastActive/originator), the
+// bridge data for codex's session-granular instance identity. Returns
+// { processes, codexSessions }, or null on failure — the caller degrades to
+// unannotated sessions rather than erroring the whole session list. An old
+// relay without the codexSessions field yields an empty list (the bridge
+// then simply never binds codex, same as before).
 async function defaultFetchRelayDetectedProcesses(root, token) {
   if (!token) return null;
   try {
@@ -355,7 +359,10 @@ async function defaultFetchRelayDetectedProcesses(root, token) {
     });
     if (!response.ok) return null;
     const data = await response.json();
-    if (data && Array.isArray(data.processes)) return data.processes;
+    if (data && Array.isArray(data.processes)) {
+      const codexSessions = Array.isArray(data.codexSessions) ? data.codexSessions : [];
+      return { processes: data.processes, codexSessions };
+    }
     return null;
   } catch {
     return null;
@@ -889,22 +896,35 @@ export function createPanelRouter({
   // per-session `agent` field. Relay outage degrades to plain shell sessions
   // — never to a failed list.
   const PULLED_DETECTED_STALE_MAX_MS = 5000;
-  let lastPulledDetected = null; // { at, processes }
+  let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions }
 
   async function pulledDetectedProcesses(token) {
     const pulled = await fetchRelayDetectedProcesses(relayRoot, token);
     if (pulled) {
-      lastPulledDetected = { at: Date.now(), processes: pulled };
+      lastPulledDetected = { at: Date.now(), feed: pulled };
       return pulled;
     }
     if (lastPulledDetected && Date.now() - lastPulledDetected.at <= PULLED_DETECTED_STALE_MAX_MS) {
-      return lastPulledDetected.processes;
+      return lastPulledDetected.feed;
     }
     // Last resort, mirroring handleAgents' local-collector fallback: this
     // process's own collector scans processes too (it owns no traffic, but
-    // the lineage table is traffic-independent).
+    // the lineage table is traffic-independent), and its codex-session cache
+    // can feed the session bridge the same way. A collector without the
+    // codex getter (older shape) degrades to an empty codex list.
     if (metricsCollector?.getDetectedClientProcesses) {
-      try { return metricsCollector.getDetectedClientProcesses(); } catch { return null; }
+      try {
+        const processes = metricsCollector.getDetectedClientProcesses();
+        if (processes === null || processes === undefined) return null;
+        let codexSessions = [];
+        if (typeof metricsCollector.getCodexSessionsForTerminalJoin === "function") {
+          try { codexSessions = await metricsCollector.getCodexSessionsForTerminalJoin(); }
+          catch { codexSessions = []; }
+        }
+        return { processes, codexSessions: Array.isArray(codexSessions) ? codexSessions : [] };
+      } catch {
+        return null;
+      }
     }
     return null;
   }
@@ -930,10 +950,12 @@ export function createPanelRouter({
     if (list === null) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     // Output buffers belong to the SSE stream, not the polling list.
     const sessions = list.map(({ buffer, ...rest }) => rest);
-    const detected = await pulledDetectedProcesses(terminalPullToken());
+    const feed = await pulledDetectedProcesses(terminalPullToken());
+    const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
     const agents = await pulledAgentsForJoin(terminalPullToken());
-    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents) });
+    const codexSessions = feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [];
+    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, codexSessions) });
   }
 
   // 一键启动 CLI Agent：本路由只做组装与转发。launch（cmd /c 包装——归属链

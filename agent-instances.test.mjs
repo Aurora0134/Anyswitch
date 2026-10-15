@@ -143,7 +143,7 @@ describe("per-instance aggregate tracking", () => {
   it("exposes instances for every scoped endpoint and none for the aggregate-only ones", async () => {
     let t = 1000;
     const collector = testCollector({ nowFn: () => t });
-    for (const agentId of ["kimi", "opencode", "pi", "dsh"]) {
+    for (const agentId of ["kimi", "opencode", "pi", "dsh", "qoder"]) {
       // Non-pid-form id: the silent exec mock reports zero processes, and a
       // "<agentId>-<digits>" id would be (correctly) reconciled away as a
       // dead-pid instance — that path is covered in agent-metrics.test.mjs.
@@ -158,20 +158,21 @@ describe("per-instance aggregate tracking", () => {
     c.recordEnd({ status: 200, usage: {} });
 
     const status = await collector.getAgentsStatus();
-    for (const agentId of ["kimi", "opencode", "pi", "dsh"]) {
+    for (const agentId of ["kimi", "opencode", "pi", "dsh", "qoder"]) {
       const agent = status.find((a) => a.id === agentId);
       assert.deepEqual(agent.instances.map((i) => i.id), [`${agentId}-one`], `${agentId} instance`);
     }
     // dsh became instance-capable with the DSH-TUI integration (一行 = 一个 DSH
-    // 进程); zcode/qoder keep the aggregate-only shape. claude 也在这一组里，
+    // 进程); qoder became instance-capable with the terminal-sidebar fix
+    // (2026-10-15: qodercli.exe 的实例身份只能来自 socket 反查——它的 provider
+    // 配置写不进自定义请求头，聚合-only 等于虚拟终端 Qoder 会话永远绑不上实例
+    // 行)。zcode keeps the aggregate-only shape. claude 也在这一组里，
     // 但理由不同：它有一个 instanceBuckets.claude 承载常驻中继的流量，却**不**
     // 下发 instances 数组——claude 卡是 per-session 报表，那些桶计数由
     // getActiveClaudeSessions 按 PID 并进会话行（见 agent-instances.test.mjs 的
     // 「常驻中继流量按连接属主进程落会话行」一组测试）。
-    for (const agentId of ["zcode", "qoder"]) {
-      const agent = status.find((a) => a.id === agentId);
-      assert.equal("instances" in agent, false, `${agentId} must stay aggregate-only`);
-    }
+    const zcodeAgent = status.find((a) => a.id === "zcode");
+    assert.equal("instances" in zcodeAgent, false, "zcode must stay aggregate-only");
     const claude = status.find((a) => a.id === "claude");
     assert.ok(Array.isArray(claude.instances), "claude exposes the unified instance contract");
   });

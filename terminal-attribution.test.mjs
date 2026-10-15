@@ -87,6 +87,95 @@ describe("attributeTerminalSessions", () => {
     assert.deepEqual(out[0].agent, { endpointId: "codex", name: "Codex", pid: 6100, instanceId: null });
   });
 
+  describe("codex session bridge (session-granular instance ids)", () => {
+    const codexAgents = (rows) => [{ id: "codex", name: "Codex", instances: rows.map((id) => ({ id })) }];
+    const cwdSession = { ...baseSession, cwd: "D:\\dev\\bridge" };
+
+    it("binds the latest same-cwd codex-sess row when the pid shape misses", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        codexAgents(["codex-sess-old", "codex-sess-new", "codex-sess-other"]),
+        [
+          { id: "codex-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" },
+          { id: "codex-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: "codex-tui" },
+          { id: "codex-sess-other", cwd: "E:\\elsewhere", lastActive: 3000, originator: "codex-tui" },
+        ],
+      );
+      assert.equal(out[0].agent.instanceId, "codex-sess-new",
+        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+    });
+
+    it("excludes desktop-originated sessions from the bridge", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        codexAgents(["codex-sess-tui", "codex-sess-desktop"]),
+        [
+          { id: "codex-sess-tui", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" },
+          { id: "codex-sess-desktop", cwd: "D:\\dev\\bridge", lastActive: 9000, originator: "codex_work_desktop" },
+        ],
+      );
+      assert.equal(out[0].agent.instanceId, "codex-sess-tui",
+        "桌面 GUI 会话更近也不能抢走终端会话的绑定");
+    });
+
+    it("bridge only binds rows present in the agents payload", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        codexAgents([]),
+        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+      );
+      assert.equal(out[0].agent.instanceId, null, "行不存在不绑，与 pid 路同一判据");
+    });
+
+    it("cwd mismatch or missing cwd stays unbound", () => {
+      for (const session of [{ ...baseSession, cwd: "E:\\elsewhere" }, { ...baseSession }]) {
+        const out = attributeTerminalSessions(
+          [session],
+          [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+          codexAgents(["codex-sess-x"]),
+          [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+        );
+        assert.equal(out[0].agent.instanceId, null);
+      }
+    });
+
+    it("pid-shaped row wins over the bridge when it exists", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        codexAgents(["codex-6100", "codex-sess-x"]),
+        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+      );
+      assert.equal(out[0].agent.instanceId, "codex-6100", "进程形状仍是第一优先");
+    });
+
+    it("non-codex endpoints never consult the bridge feed", () => {
+      const out = attributeTerminalSessions(
+        [{ ...baseSession, cwd: "D:\\dev\\bridge" }],
+        [{ agentId: "kimi", pid: 4321, ancestors: [8888] }],
+        [{ id: "kimi", name: "Kimi Code", instances: [] }],
+        [{ id: "codex-sess-x", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" }],
+      );
+      assert.equal(out[0].agent.instanceId, null);
+    });
+
+    it("ties on lastActive resolve deterministically by id", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        codexAgents(["codex-sess-a", "codex-sess-b"]),
+        [
+          { id: "codex-sess-b", cwd: "D:\\dev\\bridge", lastActive: 500, originator: "codex-tui" },
+          { id: "codex-sess-a", cwd: "D:\\dev\\bridge", lastActive: 500, originator: "codex-tui" },
+        ],
+      );
+      assert.equal(out[0].agent.instanceId, "codex-sess-a");
+    });
+  });
+
   it("falls back when the agents payload is absent (relay restart窗口)", () => {
     const out = attributeTerminalSessions(
       [baseSession],

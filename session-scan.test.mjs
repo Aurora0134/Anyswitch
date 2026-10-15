@@ -955,6 +955,7 @@ test("codex: scans rollout envelopes, titles from session_index, loads messages"
   assert.equal(sessions[0].title, "桌面线程名");
   assert.equal(sessions[0].summary, "codex 回答");
   assert.equal(sessions[0].project, "C:\\work\\codexproj");
+  assert.equal(sessions[0].originator, "codex_cli", "session_meta 的客户端面标记随 meta 带出（终端 join 分面用）");
   assert.equal(sessions[0].createdAt, Date.parse("2026-09-01T10:00:00.000Z"));
   assert.equal(sessions[0].lastActive, Date.parse("2026-09-01T10:00:08.000Z"));
   assert.equal(sessions[0].resumeCommand, `codex resume ${id}`);

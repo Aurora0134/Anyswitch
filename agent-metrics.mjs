@@ -385,6 +385,11 @@ function extractParentPid(line) {
 // nowhere else.
 const AGENT_IMAGE_BUCKETS = [
   ["qoder.exe", "qoder"],
+  // Qoder CLI 的官方形态是 Bun 单文件 qodercli.exe（resolveQoderCliExecutable，
+  // 终端一键启动用的就是它）：不收进认领表的话 CLI 进程永远不进 detected feed，
+  // 虚拟终端的 Qoder 会话归属不到端点（2026-10-15 取证）。它自带的
+  // `--internal-sites-mcp` 内部子进程同镜像名，计数在 qoder 桶分支里滤掉。
+  ["qodercli.exe", "qoder"],
   ["codex.exe", "codex"],
   ["codex-code-mode-host.exe", "codex"],
   ["codex-command-runner.exe", "codex"],
@@ -899,9 +904,14 @@ function parseTasklistCsv(stdout) {
 
     if (bucket === "qoder") {
       // Qoder IDE is an Electron app: filter --type= helper children like
-      // zcode so only main processes count as the endpoint process.
-      if (commandLine?.includes("--type=")) {
-        // Electron helper child process, skip
+      // zcode so only main processes count as the endpoint process. The CLI's
+      // qodercli.exe runs under the same bucket: its `--internal-sites-mcp`
+      // child is an internal helper the main CLI spawns (observed live: same
+      // image, no relay connection of its own) and is skipped the same way —
+      // the lineage table still sees its parent pointer (every row feeds
+      // ppidByPid), and the main CLI is what joins terminal sessions.
+      if (commandLine?.includes("--type=") || commandLine?.includes("--internal-sites-mcp")) {
+        // helper child process, skip
       } else {
         result.qoder += 1;
         if (pid) result.qoderPids.add(pid);
@@ -1957,7 +1967,7 @@ const PS_REPL_COMMAND =
 // terminal session to an agent client (shell pid → client pid) walks the
 // lineage table through the shell row. They too feed only the lineage table.
 const PS_PROCESS_SCAN_QUERY =
-  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='DeepSeek Harness.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
+  "Get-CimInstance Win32_Process -Filter \"name='node.exe' or name='claude.exe' or name='ZCode.exe' or name='dsh.exe' or name='pi.exe' or name='opencode.exe' or name='Qoder.exe' or name='qodercli.exe' or name='codex.exe' or name='codex-code-mode-host.exe' or name='codex-command-runner.exe' or name='ChatGPT.exe' or name='grok.exe' or name='Kimi Code.exe' or name='DeepSeek Harness.exe' or name='cmd.exe' or name='powershell.exe' or name='pwsh.exe'\" | ForEach-Object { \"$($_.ProcessId),$($_.ParentProcessId),$($_.Name),$($_.CommandLine)\" }";
 
 const livePsProbeChildren = new Set();
 let psProbeExitHookInstalled = false;
@@ -2521,6 +2531,20 @@ export function createAgentMetricsCollector(options = {}) {
     return byId;
   }
 
+  // Terminal-join feed for codex's session-granular instance identity. The
+  // pid-shaped join in terminal-attribution can never bind codex (its rows are
+  // codex-sess-<id>, and the GUI deliberately shares one engine process across
+  // sessions — process granularity does not hold), so the panel bridge matches
+  // terminal sessions to codex sessions by cwd. This getter serves the same
+  // 15s cache the codex card titles use; the exposure layer (openai-server's
+  // detected-processes handler) shapes raw session ids into the row-id form
+  // with codexSessionInstanceId so the join never re-derives it. A scan
+  // failure yields an empty list — the bridge degrades to unbound sessions.
+  async function getCodexSessionsForTerminalJoin() {
+    const byId = await loadCodexSessionInfo();
+    return [...byId.values()];
+  }
+
   // Aggregate metrics state
   const zcodeState = createAggregateState(sparkWindowPoints);
   const dshState = createAggregateState(sparkWindowPoints);
@@ -2531,7 +2555,7 @@ export function createAgentMetricsCollector(options = {}) {
   const claudeState = createAggregateState(sparkWindowPoints);
   const codexState = createAggregateState(sparkWindowPoints);
   const grokState = createAggregateState(sparkWindowPoints);
-  const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, claude: claudeState };
+  const bucketAggregateState = { dsh: dshState, kimi: kimiState, opencode: opencodeState, pi: piState, codex: codexState, grok: grokState, qoder: qoderState, claude: claudeState };
 
   // 桌面稳定行的账目代际与生死结算（折叠路径与读取家务共用，所以挂工厂层，
   // 能同时够到 cachedProcessCounts / nowFn / 聚合桶）。语义细节见各函数注释。
@@ -2636,10 +2660,14 @@ export function createAgentMetricsCollector(options = {}) {
   const unattributedState = createAggregateState(sparkWindowPoints);
 
   // Per-instance buckets for the multi-instance endpoints (kimi / opencode /
-  // pi / codex / grok / dsh / claude): instanceId -> { state, firstSeen }. Only
-  // requests carrying a valid instanceId land here, and they ALSO land in the
-  // endpoint aggregate above, so the existing cards are unchanged. zcode/qoder
-  // stay aggregate-only by design.
+  // pi / codex / grok / dsh / qoder / claude): instanceId -> { state, firstSeen }.
+  // Only requests carrying a valid instanceId land here, and they ALSO land in the
+  // endpoint aggregate above, so the existing cards are unchanged. zcode stays
+  // aggregate-only by design. qoder joined the multi-instance set 2026-10-15:
+  // its provider config cannot carry custom request headers, so the netstat
+  // socket reverse lookup (SOCKET_FALLBACK_AGENT_IDS in late-socket-instance,
+  // same list as this map) is the only instance identity its CLI has — without
+  // it the virtual terminal's Qoder sessions can never bind an instance row.
   // dsh joins on the same socket-reverse-lookup mechanism the other CLI
   // endpoints use: every DSH surface (web UI, TUI, any custom profile) talks to
   // the loopback relay over its own keep-alive connection, so one row per
@@ -2656,7 +2684,7 @@ export function createAgentMetricsCollector(options = {}) {
   // the late-attach mechanism and the PID housekeeping all work unmodified —
   // the desktop app points its gateway straight at the resident relay, so it
   // has no session reporter and the socket reverse lookup is its only identity.
-  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), claude: new Map() };
+  const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map() };
 
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
@@ -4013,6 +4041,8 @@ export function createAgentMetricsCollector(options = {}) {
       surfaces: summarizeKimiSurfaces(procCounts),
     };
 
+    // Qoder Agent Status（汇总卡 + 实例桶；qodercli.exe 每终端一进程，kimi/grok
+    // 同款多实例语义，实例号由 socket 反查合成 qoder-<pid>）
     const qoderAgent = buildAggregateAgentStatus({
       id: "qoder",
       name: "Qoder",
@@ -4020,6 +4050,7 @@ export function createAgentMetricsCollector(options = {}) {
       processCount: procCounts.qoder || 0,
       tpsWindow: recentSampleWindow,
       nowFn,
+      instances: instanceSnapshots("qoder"),
     });
 
     // Codex Agent Status（汇总卡 + 实例桶；实例按会话一行 codex-sess-<会话 id>，
@@ -4080,6 +4111,9 @@ export function createAgentMetricsCollector(options = {}) {
     // Terminal-session attribution: live agent client pids + ancestor chains
     // from the cached scan (see the function's note above).
     getDetectedClientProcesses,
+    // Codex session metas (raw ids) for the terminal join's session-granular
+    // bridge — shaped into row-id form by the exposure layer.
+    getCodexSessionsForTerminalJoin,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
     // accounting exactly when a restart is about to need it.
