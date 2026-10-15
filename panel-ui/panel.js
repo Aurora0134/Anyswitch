@@ -4905,7 +4905,7 @@ async function api(method, path, body) {
         provider: typeof row?.providerId === "string" && row.providerId ? row.providerId : "—",
         metric: typeof row?.ttftMs === "number" && row.ttftMs > 0 ? `${(row.ttftMs / 1000).toFixed(2)}s` : "—",
         metricColor: terminalTtftColor(row?.ttftMs),
-        io: failed ? "" : `${num(prompt)}/${num(completion)}`,
+        io: failed ? "" : `${num(prompt)} / ${num(completion)}`,
         cache: !failed && cached > 0 ? `缓存 ${num(cached)}` : "",
         fail: failed ? `失败${statusText ? " · " + statusText : ""}` : "",
         state: failed ? "failed" : "ok",
@@ -4931,7 +4931,7 @@ async function api(method, path, body) {
   // 最近请求行三段：左=状态点+身份两行（lead 内 flex 横排；上=模型名大字，下=绝对时间
   // HH:MM · 来源显示名小灰字，溢出省略号）+ 中栏首字响应时间（看板同款红黄绿语义色，
   // 左右两列等宽吃余量，中列被对称夹住落整行几何中点）+ 右栏数据两行右对齐贴行右缘
-  // （上=输入/输出 tokens 12px 收档字、斜杠无空格紧凑排印，下=缓存命中灰字）。label 是
+  // （上=输入/输出 tokens 12px 收档字、斜杠两侧带空隙，下=缓存命中灰字）。label 是
   // 来源显示名（routeNodeName 同口径，未命中回落原始 id）。失败行右栏只留失败
   // 类型码（对齐请求日志大板「失败 429」徽标），不出 token 行，且可点击展开错误
   // 信息——展开态由调用方以行键记忆，轮询重建不丢。

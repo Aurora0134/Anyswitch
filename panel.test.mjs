@@ -7095,9 +7095,9 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { model: "m3", providerId: "p3", prompt: 12, completion: 5, cached: undefined, ok: true },
     ]], ["terminalTtftColor"]);
     assert.deepEqual(out, [
-      { model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560/486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
+      { model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
       { model: "m2", provider: "p2", metric: "—", metricColor: "gray", io: "", cache: "", fail: "失败", state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
-      { model: "m3", provider: "p3", metric: "—", metricColor: "gray", io: "12/5", cache: "", fail: "", state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
+      { model: "m3", provider: "p3", metric: "—", metricColor: "gray", io: "12 / 5", cache: "", fail: "", state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
     ]);
 
     const ts = Date.now() - 125000;
@@ -7126,12 +7126,12 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 
   it("最近请求行模板：身份两行 + 中栏 TTFT 语义色 + 右栏输入/输出与缓存，失败行带类型码且可就地展开", async () => {
     const ok = await vmFn("terminalRequestItemHtml", [{
-      model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560/486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
+      model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(ok.includes("<strong>kimi-k3</strong>"), "左栏上行：模型名大字（不再挂来源色类）");
     assert.ok(ok.includes("<span>15:48 · 主力号池</span>"), "左栏下行：绝对时间 · 来源显示名");
     assert.ok(ok.includes('class="terminal-request-metric is-green">1.82s<'), "中栏 TTFT 带看板语义色（绿）");
-    assert.ok(ok.includes('class="terminal-request-io">72,560/486<'), "右栏上行：输入/输出 tokens，斜杠无空格紧凑排印");
+    assert.ok(ok.includes('class="terminal-request-io">72,560 / 486<'), "右栏上行：输入/输出 tokens，斜杠带空隙排印");
     assert.ok(ok.includes('class="terminal-request-cache">缓存 1,360,000<'), "右栏下行：缓存命中灰字");
     assert.ok(!ok.includes("is-expandable") && !ok.includes("terminal-request-expand"), "成功行不可展开");
 
