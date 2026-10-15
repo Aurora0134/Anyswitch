@@ -6706,11 +6706,13 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => agents ?? null,
       // 数组形态 = 只喂进程面（旧用例默认）；codex 桥接数据走 codexSessions 键，
-      // 与真实端点的 { processes, codexSessions } 负载同形。
+      // 与真实端点的 { processes, codexSessions } 负载同形；函数形态 = 逐请求
+      // 可变的 feed（缓存回退用例要在同一路由上先喂好轮、再喂可疑轮）。
       fetchRelayDetectedProcesses: async () => {
-        if (detected === null || detected === undefined) return null;
-        if (Array.isArray(detected)) return { processes: detected, codexSessions: codexSessions ?? [] };
-        return detected;
+        const feed = typeof detected === "function" ? detected() : detected;
+        if (feed === null || feed === undefined) return null;
+        if (Array.isArray(feed)) return { processes: feed, codexSessions: codexSessions ?? [] };
+        return feed;
       },
       fetchTerminalSessionsList: async () => sessions ?? null,
       usageJournal: {
@@ -6848,6 +6850,102 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
       "最近请求端点必须调 journal 的真实公开方法 readRequests");
     assert.ok(!panelMjs.includes('.read("requests"'),
       "journal 没有 read 方法，旧写法只会抛 TypeError 被空 catch 吞成恒空列表");
+  });
+
+  // ── 空谱系可疑轮回退（relay 探针单次超时落 tasklist 兜底轮：谱系表为空但
+  // relay 有应答。空谱系被当事实会让全部 agent 终端丢归属一轮，前端侧栏塌缩
+  // 回弹即「抽搐」）──
+  it("谱系盲可疑轮：窗口内有上一份好 feed 就回退（含 codex 桥接面），且不覆盖缓存", async () => {
+    let feed = {
+      processes: [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+      codexSessions: [{ id: "codex-sess-x", cwd: "D:\\dev", lastActive: 2000, originator: "codex-tui" }],
+    };
+    const router = terminalRouter({
+      sessions: [{ id: "t1", label: "Codex 终端", cwd: "D:\\dev", shell: "cmd", pid: 8888 }],
+      detected: () => feed,
+      agents: [{ id: "codex", name: "Codex", instances: [{ id: "codex-sess-x" }] }],
+    });
+    const first = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().sessions[0].agent.instanceId, "codex-sess-x",
+      "好轮先落缓存：pid 谱系与 codex 桥接面都在");
+
+    // relay 有应答但谱系盲：ancestors 全空（tasklist 兜底轮形状）
+    feed = { processes: [{ agentId: "codex", pid: 6100, ancestors: [] }], codexSessions: [] };
+    const second = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(second.req, second.res);
+    assert.equal(second.json().sessions[0].agent.instanceId, "codex-sess-x",
+      "可疑轮回退 10 秒内的好缓存：processes 谱系与 codexSessions 随整个 feed 一起回退，归属不丢一轮");
+
+    // 可疑轮不得覆盖缓存：随后 relay 不可达，走 5 秒陈旧路径端出的仍是那份好 feed
+    feed = null;
+    const third = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(third.req, third.res);
+    assert.equal(third.json().sessions[0].agent.instanceId, "codex-sess-x",
+      "缓存仍是好 feed——可疑轮没把空谱系写进去");
+  });
+
+  it("谱系盲可疑轮：无缓存或窗口（10 秒）外照实透传，没有 agent 在跑的机器语义保持", async () => {
+    // 无缓存：首轮 relay 就答空谱系（机器上本来就没有 agent 在跑）
+    const fresh = terminalRouter({
+      sessions: [{ id: "t1", pid: 8888 }],
+      detected: { processes: [], codexSessions: [] },
+    });
+    const first = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await fresh.handle(first.req, first.res);
+    assert.equal(first.res.statusCode, 200);
+    assert.equal(first.json().sessions[0].agent, undefined, "没有好缓存可回退时空谱系照实透传");
+
+    // 窗口外：好 feed 落缓存后时间推进到 10 秒之外，再来的可疑轮不再回退
+    let feed = {
+      processes: [{ agentId: "kimi", pid: 4321, ancestors: [8888] }],
+      codexSessions: [],
+    };
+    const router = terminalRouter({
+      sessions: [{ id: "t1", pid: 8888 }],
+      detected: () => feed,
+      agents: [{ id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] }],
+    });
+    const good = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(good.req, good.res);
+    assert.equal(good.json().sessions[0].agent.instanceId, "kimi-4321", "好轮先落缓存");
+
+    const realNow = Date.now;
+    const cachedAt = Date.now();
+    Date.now = () => cachedAt + 10001; // 缓存年龄 10 秒 + 1ms：可疑回退窗口外
+    try {
+      feed = { processes: [{ agentId: "kimi", pid: 4321, ancestors: [] }], codexSessions: [] };
+      const late = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(late.req, late.res);
+      assert.equal(late.json().sessions[0].agent, undefined,
+        "窗口外的可疑 feed 照实透传，不拿过期好缓存顶");
+    } finally {
+      Date.now = realNow;
+    }
+  });
+
+  it("检测缓存只由好轮更新：可疑轮不落缓存，好轮一落、relay 断了还能顶 5 秒", async () => {
+    let feed = { processes: [{ agentId: "kimi", pid: 4321, ancestors: [] }], codexSessions: [] };
+    const router = terminalRouter({
+      sessions: [{ id: "t1", pid: 8888 }],
+      detected: () => feed,
+      agents: [{ id: "kimi", name: "Kimi Code", instances: [{ id: "kimi-4321" }] }],
+    });
+    const suspect = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(suspect.req, suspect.res);
+    assert.equal(suspect.json().sessions[0].agent, undefined, "无缓存时可疑 feed 透传给请求方");
+
+    feed = { processes: [{ agentId: "kimi", pid: 4321, ancestors: [8888] }], codexSessions: [] };
+    const good = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(good.req, good.res);
+    assert.equal(good.json().sessions[0].agent.instanceId, "kimi-4321", "好轮当轮就生效");
+
+    // 好轮真的写进了缓存：relay 随后不可达，拉取失败路径还能端出这份好 feed
+    feed = null;
+    const after = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(after.json().sessions[0].agent.instanceId, "kimi-4321",
+      "好轮把缓存立起来了（可疑轮那一下没写，否则这里只剩空谱系）");
   });
 });
 

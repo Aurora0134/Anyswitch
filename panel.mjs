@@ -909,11 +909,34 @@ export function createPanelRouter({
   // per-session `agent` field. Relay outage degrades to plain shell sessions
   // — never to a failed list.
   const PULLED_DETECTED_STALE_MAX_MS = 5000;
+  // 谱系盲可疑轮的回退窗口：relay 有应答但 ancestors 全空（探针单次超时落
+  // tasklist 兜底轮）时允许回退到的上一份好 feed 的最大年龄。比拉取失败路
+  // 径宽——兜底轮之后要等下一整轮探针扫描好谱系才回来。
+  const PULLED_DETECTED_SUSPECT_STALE_MAX_MS = 10000;
   let lastPulledDetected = null; // { at, feed } where feed = { processes, codexSessions }
+
+  // 谱系盲判定：processes 为空数组，或非空但每行 ancestors 都是空数组——
+  // tasklist 兜底轮的 feed 形状（谱系表为空但 relay 有应答）。空 ancestors
+  // 意味着 shell pid join 断了，可进程面还在：直接当事实会让全部 agent 终端
+  // 丢归属一轮（前端侧栏塌缩回弹的「抽搐」源头）。
+  function isLineageBlindFeed(feed) {
+    const processes = Array.isArray(feed?.processes) ? feed.processes : [];
+    if (processes.length === 0) return true;
+    return processes.every((row) => !Array.isArray(row?.ancestors) || row.ancestors.length === 0);
+  }
 
   async function pulledDetectedProcesses(token) {
     const pulled = await fetchRelayDetectedProcesses(relayRoot, token);
     if (pulled) {
+      if (isLineageBlindFeed(pulled)) {
+        // 可疑轮：窗口内有上一份好 feed 就回退那份——只有好轮写缓存，所以
+        // 缓存在册的一定是好 feed，可疑轮绝不覆盖它。窗口外或没有缓存才透
+        // 传：没有 agent 在跑的机器 relay 本来就答空 processes，现状语义保持。
+        if (lastPulledDetected && Date.now() - lastPulledDetected.at <= PULLED_DETECTED_SUSPECT_STALE_MAX_MS) {
+          return lastPulledDetected.feed;
+        }
+        return pulled;
+      }
       lastPulledDetected = { at: Date.now(), feed: pulled };
       return pulled;
     }
