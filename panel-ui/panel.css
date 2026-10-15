@@ -1799,17 +1799,16 @@
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
   .terminal-section-head { color: var(--text-3); font-size: 12px; }
   /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；
-     折线占格子右列、跨标签/数值两行并纵向占满：上沿贴标签行上沿、下沿贴数值行下沿。
-     两行行高显式钉死（18+4+24=46），折线原生 56×46 与生成器同规格不拉伸 */
+     折线占格子右列、跨标签/数值两行垂直居中，原生 56×22 与生成器同规格不拉伸 */
   .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
   .terminal-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; min-width: 0; position: relative; }
   .terminal-metric-row { display: contents; }
-  .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; line-height: 18px; }
-  .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: start; width: 56px; height: 46px; }
-  /* 折线 SVG 置块级并填满盒子：消掉 inline 基线间隙 */
-  .terminal-metric-spark svg { display: block; width: 100%; height: 100%; }
+  .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; }
+  .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 56px; height: 22px; }
+  /* 折线 SVG 置块级：消掉 inline 基线间隙 */
+  .terminal-metric-spark svg { display: block; }
   /* 数值行统一一条居中轴：数字、单位、TTFT 灯全按中线对齐，不再 baseline/居中混用 */
-  .terminal-metric strong { grid-column: 1; display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--text); font: 500 16px/24px var(--font-mono); font-variant-numeric: tabular-nums; }
+  .terminal-metric strong { grid-column: 1; display: flex; align-items: center; gap: 4px; min-width: 0; color: var(--text); font: 500 16px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-metric-unit { color: var(--text-3); font-size: 11px; }
   /* TTFT 灯色图例：复用 stats-tooltip 组件，悬停 TTFT 格子浮出口径说明；
      格子是定位祖先，浮层落格子下方（上方贴着栏顶会被裁） */
