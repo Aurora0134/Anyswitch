@@ -2929,14 +2929,15 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-request-expand"), "失败行展开块样式齐备");
     assert.ok(/\.terminal-request-data \{[^}]*align-items: flex-end/.test(panelCss), "右栏两行右对齐");
     // 版式改版：TTFT 挪中栏并上看板语义色，右栏改输入/输出 + 缓存灰字
-    assert.ok(/\.terminal-request-item \{[^}]*grid-template-columns: 8px minmax\(0, 1fr\) auto auto/.test(panelCss),
-      "行网格四列：状态点 / 身份 / 中栏 TTFT / 右栏数据");
+    assert.ok(/\.terminal-request-item \{[^}]*grid-template-columns: 8px minmax\(0, 140px\) minmax\(0, 1fr\) auto/.test(panelCss),
+      "行网格四列：状态点 / 身份（封顶 140px 收窄）/ 中栏 TTFT（1fr 吃余量）/ 右栏数据");
+    assert.ok(/\.terminal-request-metric \{[^}]*justify-self: center/.test(panelCss), "中栏 TTFT 列内居中——模型列收窄后落行中段");
     assert.ok(panelCss.includes(".terminal-request-metric.is-green { color: var(--ok); }")
       && panelCss.includes(".terminal-request-metric.is-yellow { color: var(--warn); }")
       && panelCss.includes(".terminal-request-metric.is-red { color: var(--danger); }"),
       "中栏 TTFT 红黄绿语义色与看板同档");
     assert.ok(/\.terminal-request-metric \{[^}]*font: 600 13px/.test(panelCss), "中栏 TTFT 与模型名同档字号");
-    assert.ok(/\.terminal-request-io \{[^}]*font: 600 13px/.test(panelCss), "右栏上行输入/输出为 13px 大字");
+    assert.ok(/\.terminal-request-io \{[^}]*font: 600 12px/.test(panelCss), "右栏上行输入/输出收 12px 小字贴右（比中栏 TTFT 收一档）");
     assert.ok(/\.terminal-request-cache \{[^}]*color: var\(--text-3\)/.test(panelCss), "右栏下行缓存命中为灰字");
   });
 
@@ -5512,7 +5513,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-tab-label { display: none; }'), "tab 标签与「设置」文字收起只留图标（基座）");
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-foot { flex-direction: column; }'), "底行两钮纵排（基座）");
     const wide = [...panelCss.matchAll(/@media \(min-width: 1200px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
-      .find((b) => b.includes(':root[data-ui-version="v2"] .rail { width: 216px; padding: 16px 12px; }'));
+      .find((b) => b.includes(':root[data-ui-version="v2"] .rail { width: 216px; padding: 8px 12px 16px; }'));
     assert.ok(wide, "宽档 216px 全栏块在册：窄栏的收起逐项撤销");
     assert.ok(wide.includes(':root[data-ui-version="v2"] .rail-tab-label { display: inline; }')
       && wide.includes(':root[data-ui-version="v2"] .rail-brand .brand-text { display: block; }')
@@ -5622,7 +5623,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     const collapsedBlock = [...panelCss.matchAll(/@media \(min-width: 1200px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
       .find((b) => b.includes('[data-rail="collapsed"]'));
     assert.ok(collapsedBlock, "collapsed 的 ≥1200 反撤销块在册");
-    for (const pin of [':root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 16px 8px; }',
+    for (const pin of [':root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 8px 8px 16px; }',
       '[data-rail="collapsed"] .rail-tab-label { display: none; }',
       '[data-rail="collapsed"] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }',
       '[data-rail="collapsed"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }',
@@ -5632,7 +5633,7 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     const expandedBlock = [...panelCss.matchAll(/@media \(max-width: 1199px\) \{[\s\S]*?\n  \}/g)].map((m) => m[0])
       .find((b) => b.includes('[data-rail="expanded"]'));
     assert.ok(expandedBlock, "expanded 的窄栏撤销块在册");
-    for (const pin of [':root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 16px 12px; }',
+    for (const pin of [':root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 8px 12px 16px; }',
       '[data-rail="expanded"] .rail-tab-label { display: inline; }',
       '[data-rail="expanded"] .layout-container { max-width: calc(1440px + 216px); padding-left: 240px; }',
       '[data-rail="expanded"] body.terminal-mode main.layout-container { max-width: none; padding-left: 216px; }',
@@ -5660,18 +5661,19 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
       .find((b) => b.includes('#railThemeToggle { display: none; }') && !b.includes('[data-rail'));
     assert.ok(midAuto, "窄栏自动档的栏底换钮块在册");
     assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-foot { justify-content: center; }'), "收窄态栏底单钮居中");
-    assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }'),
-      "收窄态品牌行纵排（72px 栏宽放不下横向两枚 32px）");
+    assert.ok(midAuto.includes(':root[data-ui-version="v2"] .rail-brand { gap: 4px; }'),
+      "收窄态品牌行横排收紧（图标/收起钮各收 24px 后 52 ≤ 栏内容 56，整行收进 48px 头行高度带）");
     // 版本徽标：仅 v2 栏顶去胶囊、纯文字挪到品牌字下方，蓝色高光走 accent；v1 头行那颗原样
-    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }'),
-      "品牌字改块级，徽标自然折到下一行");
+    const h1Rule = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style\] \.rail-brand \.brand-text h1 \{([^}]*)\}/);
+    assert.ok(h1Rule && h1Rule[1].includes("display: block;") && h1Rule[1].includes("font-size: 14px;") && h1Rule[1].includes("line-height: 1.2;"),
+      "品牌字改块级并收 14px/1.2——徽标自然折到下一行，两行块收进头行高度带");
     const tagRule = panelCss.match(/:root\[data-ui-version="v2"\]\[data-style\] \.rail-brand \.version-tag \{([^}]*)\}/);
     assert.ok(tagRule, "v2 栏顶徽标规则在册");
     assert.ok(tagRule[1].includes("background: transparent;") && tagRule[1].includes("border: 0;") && tagRule[1].includes("color: var(--accent);"),
       "去胶囊：去底/边纯文字，字色回 accent 蓝（不造新色值）");
     assert.ok(tagRule[1].includes("border-radius: 0;"), "三皮肤的 999px 胶囊圆角同被压掉");
-    assert.ok(tagRule[1].includes("font-size: 12.5px;") && tagRule[1].includes("display: inline-block;"),
-      "栏顶徽标字号回 12.5px（与头行同档）且 inline-block（顶距才真正生效）");
+    assert.ok(tagRule[1].includes("font-size: 11px;") && tagRule[1].includes("line-height: 1.2;") && tagRule[1].includes("display: inline-block;"),
+      "栏顶徽标收 11px/1.2（与品牌字两行一起压进 48px 高度带）且 inline-block（顶距才真正生效）");
     assert.ok(/\.brand-text \.version-tag \{\s*font-size: 12\.5px/.test(panelCss), "v1/基座胶囊徽标原样不动");
   });
 

@@ -4899,8 +4899,9 @@ async function api(method, path, body) {
   }
 
   // 最近请求行四列：状态点 + 左栏身份两行（上=模型名大字，下=绝对时间 HH:MM ·
-  // 来源显示名小灰字）+ 中栏首字响应时间（看板同款红黄绿语义色，行内居中对齐）
-  // + 右栏数据两行右对齐（上=输入/输出 tokens 大字、下=缓存命中灰字）。label 是
+  // 来源显示名小灰字；列封顶 140px 收窄，溢出省略号）+ 中栏首字响应时间（看板同款
+  // 红黄绿语义色，列吃余量、列内居中落行中段）+ 右栏数据两行右对齐贴行右缘（上=
+  // 输入/输出 tokens 12px 收档字、下=缓存命中灰字）。label 是
   // 来源显示名（routeNodeName 同口径，未命中回落原始 id）。失败行右栏只留失败
   // 类型码（对齐请求日志大板「失败 429」徽标），不出 token 行，且可点击展开错误
   // 信息——展开态由调用方以行键记忆，轮询重建不丢。
@@ -12977,21 +12978,24 @@ async function api(method, path, body) {
 
   // 阶段 3：折线图画布宽=容器实测（renderStatsLineChart 内 statsChartWidth），容器宽度
   // 变化（窗口缩放 / 栏收展 / 栅格塌折）需按新宽重渲，否则旧宽 viewBox 被 CSS 等比拉伸、
-  // 字号线宽失真。观察两个折线图容器，宽度实变才防抖重渲（观察注册即有一帧回调、纯高度
-  // 抖动均空转）；重渲瞬时落地（snap），不重播 reveal/morph。藏态量到 0 跳过——
-  // 可见时的下一帧回调或既有取数渲染会按新宽补画。
+  // 字号线宽失真。观察两个折线图容器，尺寸实变才防抖重渲（观察注册即有一帧回调）；
+  // 趋势卡高度一并入键——v2 卡体随左列等高拉伸（flex:1），纯高度变化（左列概览/热力图
+  // 数据落地长高等）同样要按新高度重渲填满；TTFT 小图高由宽定，只钉宽，高度入键会空转。
+  // 重渲瞬时落地（snap），不重播 reveal/morph。藏态量到 0 跳过——
+  // 可见时的下一帧回调或既有取数渲染会按新尺寸补画。
   let statsChartResizeRO = null;
   function bindStatsChartResize() {
     if (statsChartResizeRO || typeof ResizeObserver !== "function") return;
-    const lastW = new Map();
+    const lastSize = new Map();
     let timer = null;
     statsChartResizeRO = new ResizeObserver((entries) => {
       let changed = false;
       for (const en of entries) {
         const w = Math.round(en.contentRect.width);
         if (!w) continue; // 藏态（统计页未出）量到 0：不重渲
-        if (lastW.get(en.target.id) === w) continue;
-        lastW.set(en.target.id, w);
+        const key = en.target.id === "statsTrendChart" ? `${w}x${Math.round(en.contentRect.height)}` : w;
+        if (lastSize.get(en.target.id) === key) continue;
+        lastSize.set(en.target.id, key);
         changed = true;
       }
       if (!changed) return;
@@ -13435,6 +13439,14 @@ async function api(method, path, body) {
     const w = Math.round(container.clientWidth);
     return w > 0 ? Math.max(280, w) : 760;
   }
+  // 趋势图画布高：v2 趋势卡被上半区网格拉伸到与左列等高、图容器 flex:1 有真实
+  // 高度，实测填入让图拉高填满卡片（藏态量到 0 回落 undefined→220 基线）；v1 卡
+  // 高由内容定（测高会自我循环），不测——v1 行为与此前一致。
+  function statsTrendChartHeight(el) {
+    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return undefined;
+    const h = Math.round(el.clientHeight);
+    return h > 0 ? Math.max(160, h) : undefined;
+  }
   const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // 提交/在飞状态一律记像素帧：Map<key, [{x,y}|null]>。记像素而非值，跨桶数/yMax
     // 变化时旧帧位置就是曲线上次真实的视觉位置，morph 直接对其插值即可平滑滑动。
@@ -13696,6 +13708,7 @@ async function api(method, path, body) {
       series: visible,
       fmt: (v) => formatTokensCn(Math.round(v)),
       ariaLabel: "Token 趋势图",
+      height: statsTrendChartHeight(chartEl),
     }, anim);
     statsTrendPrev = true;
     legendEl.textContent = "";

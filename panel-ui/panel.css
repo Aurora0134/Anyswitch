@@ -342,7 +342,7 @@
   :root[data-ui-version="v2"] .rail {
     display: flex; flex-direction: column;
     position: fixed; left: 0; top: 0; bottom: 0; width: 72px; z-index: 40;
-    padding: 16px 8px;
+    padding: 8px 8px 16px;
     background: var(--surface); border-right: 1px solid var(--border);
     /* C2：视口高度不够时栏体自滚，贴底 tab 组与底行可达（margin-top:auto 语义保持）。
        横轴显式收掉：只写 overflow-y 单轴时 overflow-x 会被计算成 auto，手动收展的宽度
@@ -351,7 +351,7 @@
   }
   /* 栏顶品牌：与头行那份共用 .brand-icon / .brand-text（同一 logo、同一套皮肤变量），
      只是换了承载容器。 */
-  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 4px 6px 0; flex-shrink: 0; }
+  .rail-brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; flex-shrink: 0; }
   /* 主 tab 组贴栏底：free space 全落在这条 auto 上边距里，栏顶到 tab 组之间留白 */
   .rail-tabs { display: flex; flex-direction: column; gap: 2px; margin-top: auto; }
   .rail-tab {
@@ -395,7 +395,7 @@
   /* 窄栏（<1200px）基座形态：品牌文字、tab 标签、底行「设置」文字收起只留图标（标签
      文本同时写在各 tab 的 title 属性上作悬停提示）；底行两钮纵排。栏常驻视口，任何
      窗口宽度都不消失；宽档块在 ≥1200 逐项撤销。 */
-  :root[data-ui-version="v2"] .rail-brand { justify-content: center; padding: 4px 0 0; }
+  :root[data-ui-version="v2"] .rail-brand { justify-content: center; padding: 0; }
   :root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }
   :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
   :root[data-ui-version="v2"] .rail-tab-label { display: none; }
@@ -405,8 +405,8 @@
   :root[data-ui-version="v2"] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
   /* 宽档（≥1200px）：216px 全栏，窄栏的收起逐项撤销。 */
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"] .rail { width: 216px; padding: 16px 12px; }
-    :root[data-ui-version="v2"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; }
+    :root[data-ui-version="v2"] .rail { width: 216px; padding: 8px 12px 16px; }
+    :root[data-ui-version="v2"] .rail-brand { justify-content: flex-start; padding: 0 6px; }
     :root[data-ui-version="v2"] .rail-brand .brand-text { display: block; }
     :root[data-ui-version="v2"] .rail-tabs .rail-tab { justify-content: flex-start; padding: 9px 12px; }
     :root[data-ui-version="v2"] .rail-tab-label { display: inline; }
@@ -566,8 +566,8 @@
 
   /* 手动态 collapsed：≥1200 把宽档撤销再撤回去（回 72 图标栏形态） */
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 16px 8px; }
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand { justify-content: center; padding: 4px 0 0; flex-direction: column; align-items: center; gap: 8px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail { width: 72px; padding: 8px 8px 16px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand { justify-content: center; padding: 0; gap: 4px; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand .brand-text { display: none; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-brand .rail-collapse-btn { margin-left: 0; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-tabs .rail-tab { justify-content: center; padding: 9px 0; }
@@ -581,8 +581,8 @@
   /* 手动态 expanded：<1200 把窄栏收起逐项撤销成 216 全栏（栏底亮暗钮召回——
      收窄态才隐藏它，全栏形态照旧在）；尾部是该态的窄栏全档塌缩校准 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 16px 12px; }
-    :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand { justify-content: flex-start; padding: 4px 6px 0; flex-direction: row; gap: 12px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail { width: 216px; padding: 8px 12px 16px; }
+    :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand { justify-content: flex-start; padding: 0 6px; flex-direction: row; gap: 12px; }
     :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .brand-text { display: block; }
     :root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .rail-collapse-btn { margin-left: auto; }
     :root[data-ui-version="v2"][data-rail="expanded"] .rail-tabs .rail-tab { justify-content: flex-start; padding: 9px 12px; }
@@ -601,10 +601,12 @@
     :root[data-ui-version="v2"][data-rail="expanded"] .toc-side { display: none; }
     :root[data-ui-version="v2"][data-rail="expanded"] body.sessions-mode .toc-fab.has-toc { display: flex; }
   }
-  /* 收窄态（<1200 自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行纵排——72px
-     栏宽放不下横向的品牌徽标 + 32px 收起钮，上下排（宽档全栏栏底照旧：亮暗+设置）。 */
+  /* 收窄态（<1200 自动档）同口径：栏底亮暗钮隐、单钮居中防歪；品牌行保持横排但
+     收紧——图标与收起钮各收 24px（见下方收窄两态尺寸块），24+4+24=52 ≤ 栏内容宽 56，
+     整行连同 8px 栏顶距收进 48px 头行高度带，不越头行底边的左延长线（宽档全栏栏底
+     照旧：亮暗+设置）。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"] .rail-brand { flex-direction: column; align-items: center; gap: 8px; }
+    :root[data-ui-version="v2"] .rail-brand { gap: 4px; }
     :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn { margin-left: 0; }
     :root[data-ui-version="v2"] .rail-foot { justify-content: center; }
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
@@ -667,15 +669,29 @@
   }
   :root[data-ui-version="v2"] .rail-brand .rail-collapse-btn.icon-btn:active { transform: scale(0.96); }
 
-  /* 栏顶版本徽标（仅 v2 栏顶）：纯文字挪品牌字下方，去胶囊只留字——去底/边，字色回
-     accent 蓝（11px muted 读不出这是一枚版本徽标）。字号回 12.5px 与头行那颗同档；
-     改 inline-block 让顶距真正生效（inline 上不撑行盒，1px 的 margin 一直是空挂）。
-     圆角仍写死 0：三皮肤的 999px 胶囊不回来。v1 头行那颗原样（作用域锁 .rail-brand，
-     v1 栏整隐双保险）。 */
-  :root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; }
+  /* 栏顶品牌块收进 48px 头行高度带（不越头行底边的左延长线）：品牌字 15→14、
+     徽标 12.5→11、两行线距 1.2、行间 1px——文字块约 31px，与 32px 图标取整行
+     ≤32px，加 8px 栏顶距整体落在 40px 内。徽标维持纯文字形态：去胶囊只留字，
+     字色 accent 蓝；inline-block 让顶距真正生效，圆角写死 0 压掉三皮肤的 999px
+     胶囊。v1 头行那颗原样（作用域锁 .rail-brand，v1 栏整隐双保险）。 */
+  :root[data-ui-version="v2"][data-style] .rail-brand .brand-text h1 { display: block; font-size: 14px; line-height: 1.2; }
   :root[data-ui-version="v2"][data-style] .rail-brand .version-tag {
-    display: inline-block; margin: 2px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
-    font-size: 12.5px; letter-spacing: 0; color: var(--accent);
+    display: inline-block; margin: 1px 0 0; padding: 0; background: transparent; border: 0; border-radius: 0;
+    font-size: 11px; line-height: 1.2; letter-spacing: 0; color: var(--accent);
+  }
+
+  /* 收窄两态（<1200 自动档非手动展开 + ≥1200 手动 collapsed）品牌行尺寸：图标与
+     收起钮各收 24px——24+4+24=52 ≤ 栏内容宽 56，横排成立，品牌块整高 24px 不越线。
+     双属性提级（皮肤块同优先级且位置靠后，单属性会被盖）；图标内 SVG 同步缩。 */
+  @media (max-width: 1199px) {
+    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon { width: 24px; height: 24px; }
+    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon svg { width: 14px; height: 14px; }
+    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .rail-collapse-btn.icon-btn { width: 24px; height: 24px; }
+  }
+  @media (min-width: 1200px) {
+    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon { width: 24px; height: 24px; }
+    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon svg { width: 14px; height: 14px; }
+    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .rail-collapse-btn.icon-btn { width: 24px; height: 24px; }
   }
 
   /* ── 阶段 2 材质修正 ②：v2 明暗关系交换（cc-switch 参照：亮色 栏灰<内容白，暗色
@@ -750,6 +766,15 @@
   :root[data-ui-version="v2"][data-style] #statsView .panel-card > .card-body:first-child {
     padding-top: 16px;
   }
+  /* C 趋势卡：网格把卡拉伸到与左列（概览+热力图）等高，而 SVG 高恒 220（viewBox
+     高固定 × width:100%/height:auto），下半截曾整段悬空——卡改纵向 flex，卡体/
+     图容器接力 flex:1，图高由 JS 实测容器填入（statsTrendChartHeight，v2 门控）。
+     图容器 min-height 220 兜底单列塌缩态（此时卡高回到内容定，与 v1 一致）；
+     overflow 收掉卡片收缩途中旧高 SVG 的瞬帧溢出。专用类而非通用 .card-body：
+     哨兵测试禁给通用 .card-body 写 display（同 .stats-quad-body 先例）。 */
+  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-card { display: flex; flex-direction: column; }
+  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-body .stats-chart { flex: 1; min-height: 220px; overflow: hidden; }
   /* aurora 例外：恢复皮肤原生玻璃卡（配方逐项抄阶段 2 aurora 块） */
   :root[data-ui-version="v2"][data-style="aurora"] #statsView .panel-card {
     background: var(--surface);
@@ -1782,7 +1807,8 @@
     display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 224px;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; min-width: 0; height: 40px; flex: none; }
+  /* 四列分工：点 / 身份（封顶 140px 收窄，溢出省略号）/ TTFT（1fr 吃余量、列内居中落行中段）/ 数据（贴右） */
+  .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 140px) minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; height: 40px; flex: none; }
   .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
   .terminal-request-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
@@ -1790,15 +1816,15 @@
   .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-request-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
   /* 中栏首字响应时间：与看板 TTFT 灯同一套红黄绿语义色（分档同源，无样本置灰）；
-     等宽数字对齐，多行长度不跳 */
-  .terminal-request-metric { color: var(--text-3); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+     等宽数字对齐，多行长度不跳；justify-self 居中——列吃余量后数字落行中段 */
+  .terminal-request-metric { justify-self: center; color: var(--text-3); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .terminal-request-metric.is-green { color: var(--ok); }
   .terminal-request-metric.is-yellow { color: var(--warn); }
   .terminal-request-metric.is-red { color: var(--danger); }
-  /* 右栏两行右对齐：上=输入/输出 tokens 大字，下=缓存命中灰字（cached 为 0 不出）；
-     失败行只留失败类型码红字，单行随栏居中 */
+  /* 右栏两行右对齐：上=输入/输出 tokens（12px，比模型名/TTFT 收一档，贴行右缘），
+     下=缓存命中灰字（cached 为 0 不出）；失败行只留失败类型码红字，单行随栏居中 */
   .terminal-request-data { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px; min-width: 0; white-space: nowrap; }
-  .terminal-request-io { color: var(--text); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .terminal-request-io { color: var(--text); font: 600 12px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .terminal-request-cache { color: var(--text-3); font-size: 11px; white-space: nowrap; }
   .terminal-request-detail { color: var(--text-3); font-size: 11px; white-space: nowrap; }
   .terminal-request-detail.is-failed { color: var(--danger); }
