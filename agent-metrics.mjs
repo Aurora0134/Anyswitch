@@ -927,8 +927,19 @@ function parseTasklistCsv(stdout) {
       // marks the endpoint active — the active-session engine is the
       // codex.exe app-server child the GUI spawns per session, and activity
       // itself is relay-traffic driven.
+      // The managed app-server daemon is a different beast: spawned under
+      // ~/.codex/packages/app-server-daemon on first use, then resident
+      // forever (`codex.exe app-server ... --managed-daemon`, plus its
+      // `codex.exe daemon pid-update-loop` sibling). It owns no session, so
+      // counting it pins a permanent standby card while no Codex client is
+      // actually running — skip it entirely. Per-session app-servers spawned
+      // by the GUI carry neither marker and still count. Plain-tasklist rows
+      // carry no command line and cannot be told apart on that fallback
+      // round; they count, same accepted limit as the other endpoints.
       if ((image === "chatgpt.exe" || image === "codex.exe") && commandLine?.includes("--type=")) {
         // Electron helper child process, skip
+      } else if (image === "codex.exe" && (commandLine?.includes("--managed-daemon") || commandLine?.includes("pid-update-loop"))) {
+        // resident managed daemon, not a session: skip
       } else {
         result.codex += 1;
         if (pid) result.codexPids.add(pid);

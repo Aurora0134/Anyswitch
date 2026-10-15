@@ -1420,6 +1420,52 @@ describe("createAgentMetricsCollector", () => {
     assert.equal(codex.sessions[0].status, "idle", "idle GUI is 待命, never 活跃");
   });
 
+  it("ignores the resident managed app-server daemon: no count, no standby card", async () => {
+    // The managed daemon (spawned under ~/.codex/packages/app-server-daemon on
+    // first use, then resident forever) owns no session: a machine with only
+    // these two codex.exe processes must read as codex not running at all.
+    const mockExec = (cmd, opts, cb) => {
+      const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+        "LAPTOP,C:\\Users\\tester\\.codex\\packages\\app-server-daemon\\releases\\0.162.1-x86_64-pc-windows-msvc\\bin\\codex.exe app-server --listen unix:// --analytics-default-enabled --managed-daemon,codex.exe,7101\r\n" +
+        "LAPTOP,C:\\Users\\tester\\.codex\\packages\\app-server-daemon\\releases\\0.162.1-x86_64-pc-windows-msvc\\bin\\codex.exe daemon pid-update-loop,codex.exe,7102\r\n";
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 10000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.codex, 0, "daemon rows never count toward the card");
+    assert.equal(procs.codexPids.size, 0);
+    assert.equal(procs.codexEnginePids.size, 0, "daemon never feeds the engine pid set");
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.processCount, 0);
+    assert.equal(codex.status, "stopped", "daemon alone must not read as running");
+    assert.deepEqual(codex.instances, [], "daemon spawns no instance rows");
+  });
+
+  it("counts real Codex usage while a resident managed daemon is alive", async () => {
+    // Daemon + GUI main + per-session app-server engine: only the latter two
+    // count, and the engine pid set holds the session engine alone.
+    const mockExec = (cmd, opts, cb) => {
+      const csv = "Node,CommandLine,Name,ProcessId\r\n" +
+        "LAPTOP,C:\\Users\\tester\\.codex\\packages\\app-server-daemon\\releases\\0.162.1-x86_64-pc-windows-msvc\\bin\\codex.exe app-server --listen unix:// --managed-daemon,codex.exe,7101\r\n" +
+        "LAPTOP,C:\\Users\\tester\\.codex\\packages\\app-server-daemon\\releases\\0.162.1-x86_64-pc-windows-msvc\\bin\\codex.exe daemon pid-update-loop,codex.exe,7102\r\n" +
+        "LAPTOP,C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.908.4834.0_x64__2p2nqsd0jr76e\\ChatGPT.exe,ChatGPT.exe,6200\r\n" +
+        "LAPTOP,C:\\Users\\tester\\AppData\\Local\\OpenAI\\Codex\\bin\\7ac07f4ce733f89a\\codex.exe app-server,codex.exe,6100\r\n";
+      cb(null, csv);
+    };
+    const collector = testCollector({ execFn: mockExec, nowFn: () => 3000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.codex, 2, "GUI main + session engine count; daemon rows excluded");
+    assert.ok(procs.codexEnginePids.has(6100));
+    assert.ok(!procs.codexEnginePids.has(7101), "daemon never enters the engine pid set");
+
+    const codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.equal(codex.processCount, 2);
+    assert.equal(codex.status, "running");
+  });
+
   it("sniffs codex_cli_rs / codex-tui user agents into the codex bucket", async () => {
     const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, ""), nowFn: () => 1000 });
     for (const userAgent of ["codex_cli_rs/0.153.4 (Windows 11; x86_64)", "codex-tui/0.153.4"]) {
