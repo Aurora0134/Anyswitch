@@ -13522,14 +13522,6 @@ async function api(method, path, body) {
     const w = Math.round(container.clientWidth);
     return w > 0 ? Math.max(280, w) : 760;
   }
-  // 趋势图画布高：v2 趋势卡被上半区网格拉伸到与左列等高、图容器 flex:1 有真实
-  // 高度，实测填入让图拉高填满卡片（藏态量到 0 回落 undefined→220 基线）；v1 卡
-  // 高由内容定（测高会自我循环），不测——v1 行为与此前一致。
-  function statsTrendChartHeight(el) {
-    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return undefined;
-    const h = Math.round(el.clientHeight);
-    return h > 0 ? Math.max(160, h) : undefined;
-  }
   const reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     // 提交/在飞状态一律记像素帧：Map<key, [{x,y}|null]>。记像素而非值，跨桶数/yMax
     // 变化时旧帧位置就是曲线上次真实的视觉位置，morph 直接对其插值即可平滑滑动。
@@ -13735,6 +13727,17 @@ async function api(method, path, body) {
       dots.forEach((d) => { d.style.display = "none"; });
       tip.style.display = "none";
     });
+  }
+
+  // 趋势图画布高：v2 趋势卡被上半区网格拉伸到与左列等高、图容器 flex:1 有真实
+  // 高度，实测填入让图拉高填满卡片（藏态量到 0 回落 undefined→220 基线）；v1 卡
+  // 高由内容定（测高会自我循环），不测——v1 行为与此前一致。外层作用域声明：
+  // 调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
+  // 直接 ReferenceError、整图中止渲染（POLISH02 事故根因）。
+  function statsTrendChartHeight(el) {
+    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return undefined;
+    const h = Math.round(el.clientHeight);
+    return h > 0 ? Math.max(160, h) : undefined;
   }
 
   // ── C：Token 趋势（口径由 seg 驱动；时间范围变化时整表重新拉取） ──

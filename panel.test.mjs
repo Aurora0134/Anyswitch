@@ -5449,6 +5449,27 @@ describe("新版 UI 阶段 3：统计页平铺（描边盒 + 表格纪律 + 四�
       "v1 日志页固定高 96 原样");
   });
 
+  it("POLISH02 回归：statsTrendChartHeight 必须是外层作用域声明（嵌套进渲染器则调用处 ReferenceError、趋势图整图空白）", () => {
+    // 批次 1 事故实录：该函数被写成 renderStatsLineChart 体内的嵌套声明，而调用点
+    // height: statsTrendChartHeight(chartEl) 在 renderStatsTrend——外层作用域没有
+    // 这个名字，每次渲染入口即抛 ReferenceError，容器清空后整图空白（连坐标轴都不出）。
+    const fnIdx = panelJs.indexOf("function statsTrendChartHeight(el) {");
+    assert.ok(fnIdx > 0, "statsTrendChartHeight 在册");
+    assert.ok(panelJs.includes("height: statsTrendChartHeight(chartEl)"), "实测高入 cfg 的调用点在册");
+    const chartStart = panelJs.indexOf("function renderStatsLineChart(container, cfg, anim) {");
+    assert.ok(chartStart > 0 && fnIdx > chartStart, "声明在渲染器之后");
+    // 括号配平走查找渲染器的函数体闭合点（体内字符串/模板字面量的花括号均成对，
+    // 不干扰配平）：声明点必须在闭合点之后——在体内即嵌套
+    let depth = 0, end = -1;
+    for (let i = chartStart; i < panelJs.length; i++) {
+      const ch = panelJs[i];
+      if (ch === "{") depth++;
+      else if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+    }
+    assert.ok(end > chartStart, "renderStatsLineChart 括号配平可行走");
+    assert.ok(fnIdx > end, "statsTrendChartHeight 在 renderStatsLineChart 体外（外层作用域）");
+  });
+
   it("空态与加载骨架的平铺化重设计：空态撤框纯排版、日志首载铺 shimmer 骨架行（v2 门控）", () => {
     assert.ok(panelCss.includes(`${S3} .empty-hint {\n    background: transparent; border: 0; padding: 28px 24px;\n  }`),
       "空态撤 sunken 底与虚线描边（排版而非虚线框）");
