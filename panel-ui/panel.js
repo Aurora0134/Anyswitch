@@ -3655,6 +3655,24 @@ async function api(method, path, body) {
           // 24px 间隔由镜像 CSS 的 gap 呈现，自然宽一并补回。
           mirrorRailW = railClone.offsetWidth;
         }
+        // 头行一并进镜像：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
+        // 只克隆栏+看板时预览的板内顶栏整条缺失。只克隆 #mainHeadInner（设置头行与
+        // 主头行同在 header.site-head 内，整克隆会把设置头行也带进来），外套新建的
+        // header.site-head 壳——皮肤玻璃底/底边线与 v2 的 48px 高都锚在 .site-head
+        // 祖先链上。剥 id 后 v2 收编头行的 id 锚规则（隐品牌组/旧 tab 条/头行按钮、
+        // 右对齐、栏让位）全部脱钩，由镜像作用域规则顶班（panel.css v2 集中段）；
+        // 剥 hidden——设置态真身主头行带 hidden 属性（switchView 互斥切换），不剥
+        // 克隆体整行不可见。
+        const mainHead = document.querySelector("#mainHeadInner");
+        if (mainHead) {
+          const headClone = mainHead.cloneNode(true);
+          stripIds(headClone);
+          headClone.removeAttribute("hidden");
+          const headWrap = document.createElement("header");
+          headWrap.className = "site-head";
+          headWrap.appendChild(headClone);
+          scaleEl.appendChild(headWrap);
+        }
       } else {
         const tabs = document.querySelector("#mainHeadInner nav.view-tabs");
         if (tabs) {

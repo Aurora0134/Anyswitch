@@ -3122,12 +3122,22 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/\+ \(mirrorRailW \? mirrorRailW \+ 24 : 0\)/.test(body),
       "镜像自然宽补回栏克隆实渲宽 + 24px 栏间隔（宽档 216+24、窄栏随媒体查询 72+24，与布局左让同源）");
     assert.ok(/railClone\.offsetWidth/.test(body), "栏宽按克隆实渲取值，不硬编码档宽");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: flex; align-items: stretch; gap: 24px; \}/.test(panelCss),
-      "镜像画布在新版下横排：栏在左、看板在右，栏与内容区间照真实布局留 24px 间隔");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \{ display: grid; grid-template-columns: auto minmax\(0, 1fr\); column-gap: 24px; row-gap: 24px; \}/.test(panelCss),
+      "镜像画布在新版下两列网格：栏跨头行/看板两行通高，栏与内容区间照真实布局留 24px 间隔，行距 24 照 main padding-top");
     assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale \.rail \{ position: static;/.test(panelCss),
       "镜像内的栏剥 fixed 通高形态，随画布静态铺开");
-    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ flex: 1 1 auto; min-width: 0; \}/.test(panelCss),
-      "看板镜像吃掉栏外全部宽度，不超宽也不缩水");
+    assert.ok(/:root\[data-ui-version="v2"\] \.settings-mirror-scale > \.telemetry-view \{ grid-column: 2; min-width: 0; \}/.test(panelCss),
+      "看板镜像落右列第二行、吃掉栏外全部宽度，不超宽也不缩水");
+    assert.ok(body.includes('document.querySelector("#mainHeadInner")'),
+      "新版头行一并克隆进镜像（板内顶栏不再整条缺失）");
+    assert.ok(/headClone\.removeAttribute\("hidden"\)/.test(body),
+      "设置态真身主头行带 hidden 属性，克隆体必须剥掉否则整行不可见");
+    assert.ok(/headWrap\.className = "site-head"/.test(body),
+      "头行克隆外套 site-head 壳（皮肤玻璃底/底边线与 48px 高都锚 .site-head 祖先链）");
+    assert.ok(/:root\[data-ui-version="v2"\]\[data-style\] \.settings-mirror-scale \.head-inner \.brand-group,\s*:root\[data-ui-version="v2"\]\[data-style\] \.settings-mirror-scale \.head-inner \.view-tabs,/.test(panelCss),
+      "镜像头行克隆顶班 v2 id 锚收编规则：品牌组与旧 tab 条在克隆体里整隐");
+    assert.ok(/:root\[data-ui-version="v2"\]\[data-style\] \.settings-mirror-scale \.head-inner \{\s*max-width: none; padding-left: 0; justify-content: flex-end;/.test(panelCss),
+      "镜像头行剥栏让位（padding-left 0）、保持右对齐，与看板内容左缘对齐");
   });
 
   it("主题存档恢复：内联脚本三项在册、非法存档回落覆写，且无 removeAttribute(data-style) 分支", () => {
