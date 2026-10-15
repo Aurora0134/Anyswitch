@@ -5774,9 +5774,11 @@ async function api(method, path, body) {
       terminalRequestListRenderedHtml = requestListHtml;
       $("terminalRequestList").innerHTML = requestListHtml;
     }
-    // 底栏失败语义色：最近请求里带失败行，「N 次请求」pill 转 danger（数据即
-    // 轮询面的 per-request ok 标志，与列表红点同源）。
-    $("terminalFootRequests").classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"));
+    // 底栏失败语义色：只跟随最近一条请求的结果——requests[0] 即最新（服务端
+    // 从 journal 尾部倒序取回），最近一条失败「N 次请求」pill 转 danger，
+    // 最近一条正常即恢复常色；历史失败行留在列表里不再把字串粘红（与列表
+    // 红点同源，数据即轮询面的 per-request ok 标志）。
+    $("terminalFootRequests").classList.toggle("is-failed", session.requests[0]?.state === "failed");
   }
 
   // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，

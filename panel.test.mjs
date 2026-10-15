@@ -7409,7 +7409,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 });
 
 // 底栏（E）：tokens 截断串悬停显全从原生 title 升级 styled tooltip（统计页
-// 同款）；近有失败请求时「N 次请求」字串转 danger 字色，与列表红点同源。
+// 同款）；最近一条请求失败时「N 次请求」字串转 danger 字色，与列表红点同源。
 // 字式化修订：请求数/缓存命中都去徽标壳改纯文字（与 tokens 字串同构），请求数
 // 不再绑跳转；缓存字串挪出状态 pill 容器，做左段独立元素。
 describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数字串）", () => {
@@ -7423,11 +7423,68 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
     assert.ok(panelCss.includes(".terminal-foot-tokens-wrap:hover .terminal-foot-tip"), "悬停浮出");
   });
 
-  it("失败语义色：最近请求带失败行时「N 次请求」字串转 danger 字色", () => {
+  it("失败语义色：仅最近一条请求失败时「N 次请求」字串转 danger 字色，最近一条正常即恢复常色", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(render.includes('classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"))'),
-      "字串随最近请求失败行转 danger（与列表红点同源同拍）");
+    assert.ok(render.includes('classList.toggle("is-failed", session.requests[0]?.state === "failed")'),
+      "字串只跟随最近一条请求的结果（requests[0] 即最新），历史失败行不粘红");
+    assert.ok(!render.includes('session.requests.some((r) => r.state === "failed")'),
+      "窗口内任意失败即红的旧口径已退役（红过一次就一直红的病根）");
     assert.ok(panelCss.includes(".terminal-foot-requests.is-failed { color: var(--danger); }"), "失败语义降格为纯字色，不带边框与底色");
+  });
+
+  it("vm 真跑失败字色状态机：红→正常序列后字串恢复常色，历史失败行不粘红", () => {
+    const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "renderTerminalSessionData found in panel.js");
+    const streakSrc = panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;\n  const terminalHollowStreak = new Map\(\);/)?.[0];
+    assert.ok(streakSrc, "空壳塌缩防抖的阈值与计数表可从 panel.js 取到");
+    const state = { session: null };
+    const sandbox = new Function("state", `
+      const elCache = {};
+      const el = (id) => elCache[id] ??= {
+        textContent: "", innerHTML: "", title: "", hidden: false, style: {}, className: "",
+        classes: new Set(),
+        classList: {
+          add: (c) => elCache[id].classes.add(c),
+          remove: (c) => elCache[id].classes.delete(c),
+          contains: (c) => elCache[id].classes.has(c),
+          toggle: (c, on) => { if (on === undefined) on = !elCache[id].classes.has(c); if (on) elCache[id].classes.add(c); else elCache[id].classes.delete(c); return on; },
+        },
+        setAttribute() {},
+        getAttribute: () => null,
+      };
+      const $ = (id) => el(id);
+      let activeTerminalPreviewId = "s1";
+      const terminalSessionFor = () => state.session;
+      const terminalRequestExpanded = new Set();
+      let terminalInspectorHollowCollapsed = false;
+      const terminalInspectorUserPinned = new Set();
+      ${streakSrc}
+      let terminalRequestListRenderedHtml = "";
+      function scheduleTerminalFit() {}
+      function updateSparkline() {}
+      function routeNodeName(x) { return x; }
+      function terminalServingLabel() { return ""; }
+      function terminalRequestItemHtml() { return ""; }
+      ${src}
+      return { render: renderTerminalSessionData, el };
+    `)(state);
+    const { render, el } = sandbox;
+    const failed = { state: "failed", key: "k-fail" };
+    const ok = { state: "ok", key: "k-ok" };
+    // requests[0] 即最新一条（服务端从 journal 尾部倒序取回，见
+    // terminal-attribution.mjs filterTerminalRequestRows）
+    state.session = { id: "s1", label: "外壳", cwd: "C:\\", branch: "", shell: { name: "PowerShell" }, status: "idle", metrics: null, requests: [ok, failed], agent: { endpointId: "kimi", name: "Kimi", pid: 1, instanceId: "kimi-1" } };
+    render();
+    assert.strictEqual(el("terminalFootRequests").classes.has("is-failed"), false, "最新一条正常、历史有失败行：不红（旧 any-failed 口径在此即粘红）");
+    state.session.requests = [failed, ok];
+    render();
+    assert.ok(el("terminalFootRequests").classes.has("is-failed"), "最新一条失败：转 danger");
+    state.session.requests = [ok, failed];
+    render();
+    assert.strictEqual(el("terminalFootRequests").classes.has("is-failed"), false, "红→正常序列后恢复常色");
+    state.session.requests = [];
+    render();
+    assert.strictEqual(el("terminalFootRequests").classes.has("is-failed"), false, "零请求不红");
   });
 
   it("缓存命中字串：左段独立元素，无指标或零请求时隐藏", () => {
