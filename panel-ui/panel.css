@@ -635,6 +635,16 @@
      防抖 → fit），动画结束后重排一次与普通改窗口大小等价，不是缺陷。 */
   :root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }
 
+  /* 终端屏横向溢出永远只裁不滚：屏宽由宿主 ResizeObserver→120ms 防抖→fit 链路管理，
+     任何宽度变化（栏收展、inspector 收放、拖窗口）都有一个「容器已变、xterm 仍按旧宽
+     渲染」的窗口期——overflow:auto 会在这窗口期瞬时顶出一条横向滚动条吃掉 10px 高度
+     （逐帧实测宿主 671→661→671），可视区底行被裁再回弹，即收展时终端内容「上下抽搐
+     一下」的纵向分量。滚动条在此从来不是功能（fit 必然追平，追不上的场合终端本身已
+     不可用），纯是要抖一下的伪影。clip 不建滚动容器，overflow-y:auto 不受影响。
+     曾只挂 [data-rail-anim] 那 220ms：实测滚动条改在开关撤除（动画收尾）与防抖 fit
+     落点之间的空窗冒出来，窗口期覆盖不住，故改为常驻。 */
+  :root[data-ui-version="v2"] body.terminal-mode .terminal-screen { overflow-x: clip; }
+
   /* 收起态（72 图标栏）两处细节，同样照 ccswitch 补：
      ① 隐栏内滚条——全局 ::-webkit-scrollbar 是 10px，72px 栏被啃掉七分之一还顺带把
         居中的图标推歪（栏体 overflow-y 恒 auto，矮窗口才真滚，滚轮与键盘照常可达）；
@@ -680,17 +690,16 @@
     font-size: 11px; line-height: 1.2; letter-spacing: 0; color: var(--accent);
   }
 
-  /* 收窄两态（<1200 自动档非手动展开 + ≥1200 手动 collapsed）品牌行尺寸：图标与
-     收起钮各收 24px——24+4+24=52 ≤ 栏内容宽 56，横排成立，品牌块整高 24px 不越线。
-     双属性提级（皮肤块同优先级且位置靠后，单属性会被盖）；图标内 SVG 同步缩。 */
+  /* 收窄两态（<1200 自动档非手动展开 + ≥1200 手动 collapsed）品牌行：蓝标徽标整颗
+     摘下——收起态左上角只留收展钮一颗，品牌行不再摆品牌元素（品牌字两态本就不渲染）。
+     24px 徽标尺寸档随之作废，收起钮仍收 24px 并靠 .rail-brand 的居中落位。
+     双属性提级（皮肤块同优先级且位置靠后，单属性会被盖）。展开态徽标原样不动。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon { width: 24px; height: 24px; }
-    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon svg { width: 14px; height: 14px; }
+    :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon { display: none; }
     :root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .rail-collapse-btn.icon-btn { width: 24px; height: 24px; }
   }
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon { width: 24px; height: 24px; }
-    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon svg { width: 14px; height: 14px; }
+    :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon { display: none; }
     :root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .rail-collapse-btn.icon-btn { width: 24px; height: 24px; }
   }
 
