@@ -1827,25 +1827,31 @@
     display: flex; flex-direction: column; gap: 6px; overflow-y: auto; max-height: 224px;
     scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent;
   }
-  /* 四列分工：点 / 身份（封顶 140px 收窄，溢出省略号）/ TTFT（1fr 吃余量、列内居中落行中段）/ 数据（贴右） */
-  .terminal-request-item { display: grid; grid-template-columns: 8px minmax(0, 140px) minmax(0, 1fr) auto; align-items: center; gap: 8px; min-width: 0; height: 40px; flex: none; }
-  .terminal-request-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  /* 三段分副：左=状态点+身份（lead 内 flex 横排，溢出省略号）、中=TTFT、右=数据贴右。
+     左右两列 minmax(0,1fr) 等宽吃余量——中列 auto 被两等宽列对称夹住，TTFT 无条件
+     落整行几何中点，与身份/数据内容长度无关（旧四列网格左侧固定占 164px，恒偏右） */
+  .terminal-request-item { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; height: 40px; flex: none; }
+  .terminal-request-lead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .terminal-request-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
   .terminal-request-dot.is-failed { background: var(--danger); }
   .terminal-request-main { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
   /* 左栏两行：上=模型名大字，下=「绝对时间 · 来源显示名」小灰字；溢出均省略号截断 */
   .terminal-request-main strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; }
   .terminal-request-main span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-3); font-size: 11px; }
   /* 中栏首字响应时间：与看板 TTFT 灯同一套红黄绿语义色（分档同源，无样本置灰）；
-     等宽数字对齐，多行长度不跳；justify-self 居中——列吃余量后数字落行中段 */
+     等宽数字对齐，多行长度不跳；justify-self 居中——中列被左右两等宽列对称夹住，
+     列内居中即整行几何中点 */
   .terminal-request-metric { justify-self: center; color: var(--text-3); font: 600 13px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .terminal-request-metric.is-green { color: var(--ok); }
   .terminal-request-metric.is-yellow { color: var(--warn); }
   .terminal-request-metric.is-red { color: var(--danger); }
-  /* 右栏两行右对齐：上=输入/输出 tokens（12px，比模型名/TTFT 收一档，贴行右缘），
-     下=缓存命中灰字（cached 为 0 不出）；失败行只留失败类型码红字，单行随栏居中 */
-  .terminal-request-data { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px; min-width: 0; white-space: nowrap; }
-  .terminal-request-io { color: var(--text); font: 600 12px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .terminal-request-cache { color: var(--text-3); font-size: 11px; white-space: nowrap; }
+  /* 右栏两行右对齐：上=输入/输出 tokens（12px，比模型名/TTFT 收一档，斜杠无空格紧凑
+     排印、贴行右缘），下=缓存命中灰字（cached 为 0 不出）；失败行只留失败类型码红字，
+     单行随栏居中。justify-self:end——右列是 1fr 余量列，内容须显式贴右缘；
+     max-width:100% + 两行省略号兜底：极端 token 位数在窄栏宁可截断也不压中栏 TTFT */
+  .terminal-request-data { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; justify-self: end; gap: 1px; min-width: 0; max-width: 100%; white-space: nowrap; }
+  .terminal-request-io { max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--text); font: 600 12px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .terminal-request-cache { max-width: 100%; overflow: hidden; text-overflow: ellipsis; color: var(--text-3); font-size: 11px; white-space: nowrap; }
   .terminal-request-detail { color: var(--text-3); font-size: 11px; white-space: nowrap; }
   .terminal-request-detail.is-failed { color: var(--danger); }
   /* 失败行可点击展开错误详情（行内 hover 提示可点，与大板行展开同语义） */

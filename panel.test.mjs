@@ -2929,9 +2929,11 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelCss.includes(".terminal-request-expand"), "失败行展开块样式齐备");
     assert.ok(/\.terminal-request-data \{[^}]*align-items: flex-end/.test(panelCss), "右栏两行右对齐");
     // 版式改版：TTFT 挪中栏并上看板语义色，右栏改输入/输出 + 缓存灰字
-    assert.ok(/\.terminal-request-item \{[^}]*grid-template-columns: 8px minmax\(0, 140px\) minmax\(0, 1fr\) auto/.test(panelCss),
-      "行网格四列：状态点 / 身份（封顶 140px 收窄）/ 中栏 TTFT（1fr 吃余量）/ 右栏数据");
-    assert.ok(/\.terminal-request-metric \{[^}]*justify-self: center/.test(panelCss), "中栏 TTFT 列内居中——模型列收窄后落行中段");
+    assert.ok(/\.terminal-request-item \{[^}]*grid-template-columns: minmax\(0, 1fr\) auto minmax\(0, 1fr\)/.test(panelCss),
+      "行网格三段：左身份 / 中栏 TTFT / 右数据——左右两列等宽吃余量，中列被对称夹住即整行几何中点");
+    assert.ok(/\.terminal-request-lead \{[^}]*display: flex/.test(panelCss), "状态点与身份栏包进 lead 横排容器（同属左列）");
+    assert.ok(/\.terminal-request-data \{[^}]*justify-self: end/.test(panelCss), "右列是 1fr 余量列，数据栏显式贴行右缘");
+    assert.ok(/\.terminal-request-metric \{[^}]*justify-self: center/.test(panelCss), "中栏 TTFT 列内居中——配合等宽左右列落整行几何中点");
     assert.ok(panelCss.includes(".terminal-request-metric.is-green { color: var(--ok); }")
       && panelCss.includes(".terminal-request-metric.is-yellow { color: var(--warn); }")
       && panelCss.includes(".terminal-request-metric.is-red { color: var(--danger); }"),
@@ -7093,9 +7095,9 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
       { model: "m3", providerId: "p3", prompt: 12, completion: 5, cached: undefined, ok: true },
     ]], ["terminalTtftColor"]);
     assert.deepEqual(out, [
-      { model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
+      { model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560/486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "", key: "|north-main|kimi-k3", errMsg: "", at: "", duration: "" },
       { model: "m2", provider: "p2", metric: "—", metricColor: "gray", io: "", cache: "", fail: "失败", state: "failed", rel: "", key: "|p2|m2", errMsg: "", at: "", duration: "" },
-      { model: "m3", provider: "p3", metric: "—", metricColor: "gray", io: "12 / 5", cache: "", fail: "", state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
+      { model: "m3", provider: "p3", metric: "—", metricColor: "gray", io: "12/5", cache: "", fail: "", state: "ok", rel: "", key: "|p3|m3", errMsg: "", at: "", duration: "" },
     ]);
 
     const ts = Date.now() - 125000;
@@ -7124,12 +7126,12 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
 
   it("最近请求行模板：身份两行 + 中栏 TTFT 语义色 + 右栏输入/输出与缓存，失败行带类型码且可就地展开", async () => {
     const ok = await vmFn("terminalRequestItemHtml", [{
-      model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560 / 486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
+      model: "kimi-k3", provider: "north-main", metric: "1.82s", metricColor: "green", io: "72,560/486", cache: "缓存 1,360,000", fail: "", state: "ok", rel: "15:48", key: "k1", errMsg: "", at: "", duration: "",
     }, { label: "主力号池" }], ["escapeHtml"]);
     assert.ok(ok.includes("<strong>kimi-k3</strong>"), "左栏上行：模型名大字（不再挂来源色类）");
     assert.ok(ok.includes("<span>15:48 · 主力号池</span>"), "左栏下行：绝对时间 · 来源显示名");
     assert.ok(ok.includes('class="terminal-request-metric is-green">1.82s<'), "中栏 TTFT 带看板语义色（绿）");
-    assert.ok(ok.includes('class="terminal-request-io">72,560 / 486<'), "右栏上行：输入/输出 tokens");
+    assert.ok(ok.includes('class="terminal-request-io">72,560/486<'), "右栏上行：输入/输出 tokens，斜杠无空格紧凑排印");
     assert.ok(ok.includes('class="terminal-request-cache">缓存 1,360,000<'), "右栏下行：缓存命中灰字");
     assert.ok(!ok.includes("is-expandable") && !ok.includes("terminal-request-expand"), "成功行不可展开");
 
