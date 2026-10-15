@@ -1790,12 +1790,16 @@
   .terminal-live-status span:not(.terminal-live-icon) { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
   .terminal-section-head { color: var(--text-3); font-size: 12px; }
   /* 右栏监测区：小灰标签独占一行 + 数值折线行的直排 2×2，不套卡片盒；
-     折线占格子右列、跨标签/数值两行垂直居中，原生 56×22 与生成器同规格不拉伸 */
+     折线占格子右列、跨标签/数值两行，纵向做两排字的精确陪衬：盒上沿贴标签字墨迹
+     上沿（12px 字在 ≈18.6px 自然行盒内的墨迹顶偏移 4.5px）、盒下沿贴数值字基线
+     （16px 等宽数字无下伸，基线即墨迹下沿），盒高 33px 与生成器同规格不拉伸。
+     几何经真面板 CDP 像素扫描实测：盒沿与两排字墨迹沿偏差 ≤0.5px（打回的 46px 方案
+     贴的是行盒沿，超出字墨迹沿顶 2px/底 7px，故视觉「拉过头」） */
   .terminal-metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 12px; }
   .terminal-metric { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto auto; column-gap: 8px; row-gap: 4px; align-items: center; min-width: 0; position: relative; }
   .terminal-metric-row { display: contents; }
   .terminal-metric-label { grid-column: 1; color: var(--text-3); font-size: 12px; }
-  .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: center; width: 56px; height: 22px; }
+  .terminal-metric-spark { grid-column: 2; grid-row: 1 / span 2; align-self: start; margin-top: 4.5px; width: 56px; height: 33px; }
   /* 折线 SVG 置块级：消掉 inline 基线间隙 */
   .terminal-metric-spark svg { display: block; }
   /* 数值行统一一条居中轴：数字、单位、TTFT 灯全按中线对齐，不再 baseline/居中混用 */

@@ -150,7 +150,7 @@ async function api(method, path, body) {
     const container = $(containerId);
     if (!container) return;
     // 盒子尺寸随调用方传入并与 CSS 盒等大：viewBox 1:1 映射像素，线宽/圆角不失真
-    // （看板 68×26 与终端侧栏 56×22 是两个原生规格，不再互相拉伸）。
+    // （看板 68×26 与终端侧栏 56×33 是两个原生规格，不再互相拉伸）。
     const w = Number(size?.w) > 0 ? size.w : 68;
     const h = Number(size?.h) > 0 ? size.h : 26;
     // B3 路径级 diff：已有正常态 SVG（area+line 两个 path 子节点）时只改 d，
@@ -5345,9 +5345,9 @@ async function api(method, path, body) {
     if (terminalXterm) terminalXterm.options.theme = terminalXtermTheme();
   }
 
-  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×22），
-  // viewBox 1:1 映射像素，线宽/round 端点不失真
-  const TERMINAL_SPARK_SIZE = { w: 56, h: 22 };
+  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×33，
+  // 盒上沿贴标签字墨迹上沿、下沿贴数值字基线），viewBox 1:1 映射像素，线宽/round 端点不失真
+  const TERMINAL_SPARK_SIZE = { w: 56, h: 33 };
 
   function ensureTerminalXterm() {
     const host = $("terminalXtermHost");
