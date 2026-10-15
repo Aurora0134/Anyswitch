@@ -3320,7 +3320,7 @@ describe("panel.html 设置全页视图", () => {
       return src;
     };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions"].map(srcOf).join("\n");
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"].map(srcOf).join("\n");
     // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       let activeTerminalPreviewId = initialId;
@@ -3331,6 +3331,9 @@ describe("panel.html 设置全页视图", () => {
         removeItem: (k) => { delete store[k]; },
       };
       let terminalDefaultCwd = "";
+      // 空壳防抖计数表（rebuild 重建后清掉已消失会话的计数）：桩环境给空表即可
+      const terminalHollowStreak = new Map();
+      const terminalPreviewSessions = {};
       ${bodies}
       rebuildTerminalBackendSessions(items);
       return { active: activeTerminalPreviewId, ids: Object.keys(terminalBackendSessions) };
@@ -7144,9 +7147,12 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
     assert.ok(toggleBody.includes("scheduleTerminalFit()"), "手动收放保留尺寸适配");
   });
 
-  it("vm 真跑空壳收拢状态机：细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
+  it("vm 真跑空壳收拢状态机：防抖计数、细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
     const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "renderTerminalSessionData found in panel.js");
+    // 防抖阈值与计数表从源码取样，测试不另抄一份数字：阈值改了这里就红，不靠人记得改。
+    const streakSrc = panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;\n  const terminalHollowStreak = new Map\(\);/)?.[0];
+    assert.ok(streakSrc, "空壳塌缩防抖的阈值与计数表可从 panel.js 取到");
     const state = { session: null, fits: 0 };
     const sandbox = new Function("state", `
       const elCache = {};
@@ -7168,6 +7174,8 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
       const terminalRequestExpanded = new Set();
       let terminalInspectorHollowCollapsed = false;
       const terminalInspectorUserPinned = new Set();
+      ${streakSrc}
+      let terminalRequestListRenderedHtml = "";
       function scheduleTerminalFit() { state.fits += 1; }
       function updateSparkline() {}
       function routeNodeName(x) { return x; }
@@ -7180,43 +7188,62 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
         pin: (id) => terminalInspectorUserPinned.add(id),
         unpin: (id) => terminalInspectorUserPinned.delete(id),
         pinned: (id) => terminalInspectorUserPinned.has(id),
+        streak: (id) => terminalHollowStreak.get(id) || 0,
       };
     `)(state);
-    const { render, el, pin, unpin, pinned } = sandbox;
+    const { render, el, pin, unpin, pinned, streak } = sandbox;
 
-    // ① 无归属 → 自动收拢细条、退出 is-empty、触发一次重排；稳态不再重排
+    // ① 无归属闪断不再当拍塌缩：第 1、2 拍保持原形态，连续第 3 拍才收拢成细条
     state.session = { id: "s1", label: "外壳", cwd: "C:\\", branch: "", shell: { name: "PowerShell" }, status: "idle", metrics: null, requests: [], agent: null };
+    render();
     render();
     const inspector = el("terminalInspector");
     const workspace = el("terminalWorkspace");
-    assert.ok(inspector.classes.has("is-collapsed"), "无归属 → 自动收拢成细条");
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "空壳第 1、2 拍不收拢——归属闪断一帧不再是塌缩证据");
     assert.strictEqual(workspace.classes.has("is-empty"), false, "空壳不走零会话单列机制");
-    assert.ok(state.fits >= 1, "收拢改变终端列宽 → 触发重排");
-    const fitsAfterFirst = state.fits;
+    assert.equal(streak("s1"), 2, "计数按拍累加");
     render();
-    assert.strictEqual(state.fits, fitsAfterFirst, "稳态轮询同形态不重复触发重排");
+    assert.ok(inspector.classes.has("is-collapsed"), "连续第 3 拍仍空壳 → 自动收拢成细条");
+    assert.ok(state.fits >= 1, "收拢改变终端列宽 → 触发重排");
+    const fitsAfterCollapse = state.fits;
+    render();
+    assert.strictEqual(state.fits, fitsAfterCollapse, "稳态轮询同形态不重复触发重排");
 
-    // ② 用户拉回（等价开关点击的 DOM 效果 + 锁存写入）→ 下一拍不得打回
+    // ② 用户拉回（等价开关点击的 DOM 效果 + 锁存写入）→ 后续空壳拍不得打回
     inspector.classes.delete("is-collapsed");
     workspace.classes.delete("is-inspector-collapsed");
     pin("s1");
     render();
-    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "用户拉回后轮询不再收拢（锁定生效）");
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "用户拉回后轮询不再收拢（锁定生效，计数照加也不塌）");
+    assert.ok(streak("s1") > 3, "钉住期间计数照常累加，只是不触发塌缩");
 
-    // ③ 归属恢复：维持展开、清锁定；用户随后手动收拢 → 轮询不得替用户展开
+    // ③ 归属恢复：维持展开、清锁定、清计数；用户随后手动收拢 → 轮询不得替用户展开
     state.session.agent = { endpointId: "dsh", name: "DeepSeek Harness", pid: 1, instanceId: "dsh-1" };
     render();
     assert.strictEqual(inspector.classes.has("is-collapsed"), false, "归属恢复维持展开");
     assert.strictEqual(pinned("s1"), false, "归属恢复清用户锁定");
+    assert.equal(streak("s1"), 0, "归属恢复当拍清零防抖计数");
     inspector.classes.add("is-collapsed");
     workspace.classes.add("is-inspector-collapsed");
     render();
     assert.strictEqual(inspector.classes.has("is-collapsed"), true, "用户手动收拢被尊重（归属态不自动展开）");
 
-    // ④ 归属再掉 → 自动收拢回细条
+    // 归属态下再拉回（不进锁定集合）：给 ④ 一个展开起点
+    inspector.classes.delete("is-collapsed");
+    workspace.classes.delete("is-inspector-collapsed");
+    render();
+
+    // ④ 归属再掉：防抖从头数起，连续第 3 拍才收拢回细条；恢复后只展开系统收拢的那次
     state.session.agent = null;
     render();
-    assert.strictEqual(inspector.classes.has("is-collapsed"), true, "归属再掉自动收拢回细条");
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "再掉归属的第 1、2 拍保持展开（防抖重新数起）");
+    render();
+    assert.ok(inspector.classes.has("is-collapsed"), "连续第 3 拍自动收拢回细条");
+    state.session.agent = { endpointId: "dsh", name: "DeepSeek Harness", pid: 1, instanceId: "dsh-1" };
+    render();
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "系统收拢的那次随归属恢复自动展开");
     unpin("s1");
   });
 
@@ -8516,6 +8543,193 @@ describe("终端重画按钮（挤宽度让 agent 重画 + 重建客户端画面
     assert.deepEqual(calls.posted, []);
   });
 });
+// 终端渲染行为性能三钉（纯机械行为改造，用户可见文案与 DOM 结构不动）：
+// ①空壳塌缩防抖——归属轮询在归属丢失/恢复的边界会闪一帧空 agent，原逻辑当拍
+// 即把侧栏收拢 340↔48px、下一拍又展开，宽度跳变逼终端区整屏重排（用户看到的
+// 「抽搐」）；改为同一会话连续 3 拍都空壳才自动塌缩，归属恢复当拍清零。②fit
+// 同尺寸跳过——fit 后尺寸与 PTY 侧已知值一致时跳过 resize POST（TUI 收到同值
+// resize 也要整屏重排一次）。③两处每拍重建的 innerHTML（页签栏 / 请求行）改
+// 整串指纹比对，相同即跳过赋值（DOM 零写）。结构用源码钉，行为在桩环境真跑。
+describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 指纹门控）", () => {
+  const extractFn = (name) => {
+    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  };
+
+  it("塌缩防抖结构：按会话 id 连续计数、阈值 3，归属恢复/会话关闭清零；锁存语义原样", () => {
+    const render = extractFn("renderTerminalSessionData");
+    assert.ok(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;/.test(panelJs), "阈值常量钉在 3（闪断一帧不算塌缩证据）");
+    assert.ok(/const terminalHollowStreak = new Map\(\);/.test(panelJs), "计数表按会话 id 存模块级 Map");
+    assert.ok(render.includes("terminalHollowStreak.get(session.id)"), "空壳拍读连续计数");
+    assert.ok(render.includes("terminalHollowStreak.set(session.id, streak)"), "空壳拍累加计数");
+    assert.ok(render.includes("streak >= TERMINAL_HOLLOW_COLLAPSE_STREAK"), "计数到阈值才走自动塌缩分支（阈值前保持当前形态）");
+    assert.ok(render.includes("terminalHollowStreak.delete(session.id)"), "归属恢复当拍清零计数");
+    // 两条既有锁存语义原样：防抖只改塌缩触发时机
+    assert.ok(render.includes("terminalInspectorUserPinned.has(session.id)"), "用户钉住判定先于阈值（拉回后轮询不收拢）");
+    assert.ok(render.includes("terminalInspectorHollowCollapsed = true"), "系统收拢标记仍只在自动塌缩分支落");
+    // 会话关闭清零的三个入口：本地关标签 / 轮询重建（别处关掉）/ 关停清场
+    const init = extractFn("initTerminalPreview");
+    const closeAt = init.indexOf('event.target.closest(".terminal-tab-close")');
+    assert.ok(closeAt > 0, "关标签分支可取样");
+    const closeBranch = init.slice(closeAt, init.indexOf("remaining.length === 0"));
+    assert.ok(closeBranch.includes("terminalHollowStreak.delete(id)"), "关标签同步清该会话计数");
+    assert.ok(extractFn("rebuildTerminalBackendSessions").includes("pruneTerminalHollowStreak()"),
+      "轮询整表换血后清掉已消失会话的计数");
+    assert.ok(extractFn("clearTerminalLocalSessions").includes("pruneTerminalHollowStreak()"),
+      "关停清场同样清计数（后端会话全数失效）");
+    assert.ok(extractFn("pruneTerminalHollowStreak").includes("!terminalBackendSessions[id] && !terminalPreviewSessions[id]"),
+      "只清两张会话表都不认的 id（切页签、换窗口不清）");
+  });
+
+  it("fit 同尺寸跳过：与 PTY 侧已知尺寸一致时不 POST，拿不到/不完整/不一致照旧（保守）", () => {
+    const fit = extractFn("fitTerminalXterm");
+    assert.ok(fit.includes("terminalFitAddon?.fit();"), "fit 本身照跑（客户端重排不靠 POST 陪跑）");
+    assert.ok(fit.includes("session.backendState"), "以会话的 PTY 侧已知尺寸为比对基准");
+    assert.ok(fit.includes("postTerminalResize(session, terminalXterm.cols, terminalXterm.rows)"),
+      "比对不过照旧 POST（保守：宁可多一次对齐，不漏一次）");
+    // 挤一列再恢复的重画链不经这道闸：直接调 postTerminalResize，链上尺寸本就不同
+    const redraw = panelJs.match(/const TERMINAL_REDRAW_NUDGE_MS = \d+;\n  function redrawTerminalScreen\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(redraw?.includes("postTerminalResize(session, cols - 1, rows)"), "重画挤宽度链不经 fit 闸");
+
+    // 桩环境真跑四种形态：backendState 缺失 / 完整且一致 / 不一致 / 不完整
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize"].map(extractFn).join("\n");
+    const fitFloorSrc = panelJs.match(/const TERMINAL_FIT_MIN_HOST_WIDTH_PX = \d+;[\s\S]{0,80}?const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = \d+;/)?.[0];
+    assert.ok(fitFloorSrc, "窗口级尺寸闸下限可从 panel.js 取到（测试不抄数字）");
+    const state = { posts: [], measured: { cols: 119, rows: 26 }, session: { id: "s1", backend: true, backendState: null } };
+    const makeFit = () => new Function("state", `
+      const API_BASE = "http://panel.test";
+      let terminalXterm = { cols: 0, rows: 0 };
+      let terminalFitAddon = {
+        fit() { terminalXterm.cols = state.measured.cols; terminalXterm.rows = state.measured.rows; },
+      };
+      let terminalImeHold = null;
+      let terminalImeFitPending = false;
+      let activeTerminalPreviewId = "s1";
+      const view = { hidden: false };
+      const host = { clientWidth: 1200, clientHeight: 600 };
+      const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
+      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function terminalSessionFor(id) { return state.session; }
+      ${fitFloorSrc}
+      ${bodies}
+      return fitTerminalXterm;
+    `)(state);
+    const resizePosts = () => state.posts.filter((p) => p.method === "POST" && p.url.includes("/resize"));
+    const fitFn = makeFit();
+
+    fitFn();
+    assert.equal(resizePosts().length, 1, "backendState 拿不到时照旧 POST（保守）");
+
+    state.session.backendState = { cols: 119, rows: 26 };
+    fitFn();
+    assert.equal(resizePosts().length, 1, "fit 后尺寸与 PTY 侧一致 → 跳过这次 POST");
+
+    state.measured = { cols: 96, rows: 30 };
+    fitFn();
+    assert.equal(resizePosts().length, 2, "实测变了 → 照常 POST");
+    assert.deepEqual(resizePosts()[1].body, { cols: 96, rows: 30 }, "POST 的是 fit 后的新尺寸");
+
+    state.session.backendState = { cols: 96 };
+    fitFn();
+    assert.equal(resizePosts().length, 3, "backendState 不完整（缺 rows）照旧 POST");
+  });
+
+  it("innerHTML 指纹门控：整串相同即零写，active 态/内容/展开态变化照常写入", () => {
+    // 结构钉：两处渲染各带一份指纹缓存；三处直写清空的退场路径同步重置指纹
+    assert.ok(extractFn("renderTerminalPreviewTabs").includes("terminalTabsRenderedHtml"), "页签栏渲染带指纹缓存");
+    assert.ok(extractFn("renderTerminalSessionData").includes("terminalRequestListRenderedHtml"), "请求行渲染带指纹缓存");
+    for (const name of ["renderTerminalPendingState", "renderTerminalUnavailableState", "clearTerminalLocalSessions"]) {
+      assert.ok(extractFn(name).includes('terminalTabsRenderedHtml = "";'),
+        `${name} 直写清空同步重置指纹（保住「指纹 = DOM 现值」不变式）`);
+    }
+
+    // 桩环境真跑页签栏：同内容第二拍零写；active 态与内容变化照常写入
+    const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const tabsWrites = [];
+    const tabsEl = { set innerHTML(v) { tabsWrites.push(v); } };
+    const sessions = {
+      t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
+    };
+    const tabsApi = new Function("$", "escapeHtml", "sessions", `
+      let activeTerminalPreviewId = "t1";
+      let terminalTabsRenderedHtml = "";
+      function terminalSessionMap() { return sessions; }
+      ${extractFn("renderTerminalPreviewTabs")}
+      return { render: renderTerminalPreviewTabs, setActive: (id) => { activeTerminalPreviewId = id; } };
+    `)((id) => (id === "terminalTabs" ? tabsEl : null), escapeHtml, sessions);
+    tabsApi.render();
+    tabsApi.render();
+    assert.equal(tabsWrites.length, 1, "稳态第二拍跳过赋值（DOM 零写）");
+    sessions.t1.status = "working";
+    tabsApi.render();
+    assert.equal(tabsWrites.length, 2, "内容（工作/空闲态）变化照常写入");
+    tabsApi.setActive("t2");
+    tabsApi.render();
+    assert.equal(tabsWrites.length, 3, "active 态在串里，切活动标签即指纹变化");
+    sessions.t1.status = "idle";
+    tabsApi.setActive("t1");
+    tabsApi.render();
+    assert.equal(tabsWrites.length, 4, "串回到旧值也照常写入（指纹只认「与上次相同」）");
+
+    // 桩环境真跑请求行：同请求列表零写；展开态（在串里）变化照常写入
+    const state = { session: null, requestWrites: [] };
+    const requestList = {
+      html: "",
+      set innerHTML(v) { state.requestWrites.push(v); this.html = v; },
+      get innerHTML() { return this.html; },
+    };
+    const dataApi = new Function("state", "requestList", `
+      const elCache = {};
+      const el = (id) => elCache[id] ??= {
+        textContent: "", title: "", hidden: false, style: {}, className: "",
+        classes: new Set(),
+        classList: {
+          add: (c) => elCache[id].classes.add(c),
+          remove: (c) => elCache[id].classes.delete(c),
+          contains: (c) => elCache[id].classes.has(c),
+          toggle: (c, on) => { if (on === undefined) on = !elCache[id].classes.has(c); if (on) elCache[id].classes.add(c); else elCache[id].classes.delete(c); return on; },
+        },
+        setAttribute() {},
+        getAttribute: () => null,
+      };
+      const $ = (id) => (id === "terminalRequestList" ? requestList : el(id));
+      let activeTerminalPreviewId = "s1";
+      const terminalSessionFor = () => state.session;
+      const terminalRequestExpanded = new Set();
+      let terminalInspectorHollowCollapsed = false;
+      const terminalInspectorUserPinned = new Set();
+      const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
+      const terminalHollowStreak = new Map();
+      let terminalRequestListRenderedHtml = "";
+      function scheduleTerminalFit() {}
+      function updateSparkline() {}
+      function routeNodeName(x) { return x; }
+      function terminalServingLabel() { return ""; }
+      function terminalRequestItemHtml(req, opts) { return \`<div>\${req.key}\${opts.expanded ? "+e" : ""}</div>\`; }
+      ${extractFn("renderTerminalSessionData")}
+      return {
+        render: renderTerminalSessionData,
+        expand: (key) => terminalRequestExpanded.add(key),
+      };
+    `)(state, requestList);
+    state.session = {
+      id: "s1", label: "L", cwd: "C:\\", branch: "", shell: { name: "PowerShell" },
+      status: "idle", metrics: null, agent: { endpointId: "k", name: "K", pid: 1, instanceId: "k-1" },
+      requests: [{ key: "r1", provider: "p", state: "ok" }],
+    };
+    dataApi.render();
+    dataApi.render();
+    assert.equal(state.requestWrites.length, 1, "同请求列表第二拍跳过赋值（DOM 零写）");
+    dataApi.expand("r1");
+    dataApi.render();
+    assert.equal(state.requestWrites.length, 2, "展开态在串里，展开变化照常写入");
+    assert.ok(state.requestWrites[1].includes("r1+e"), "第二笔带展开态内容");
+    dataApi.render();
+    assert.equal(state.requestWrites.length, 2, "展开态稳态后回到零写");
+  });
+});
+
 // 活跃真值推送：panel 侧长驻订阅 relay 的 /api/internal/agents-activity，缓存
 // (endpointId, instanceId) 最新在途状态；浏览器经 /panel/api/agents-activity 建连
 // 先拿缓存快照、其后收转发事件；前端把帧按真值键落到终端标签圆点与实况行。
@@ -9020,6 +9234,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const $ = (id) => els[id] ?? null;
       const document = { querySelector: (sel) => els[sel] ?? null };
       let terminalBackendReady = false;
+      // 页签栏指纹缓存：空态直写清空的退场路径会重置它（见 panel.js 指纹缓存注释）
+      let terminalTabsRenderedHtml = "";
       // 默认按「首连已定性」起沙盒：既有降级三态测的是失败之后的画面；
       // 首连在飞那一态由 setSettled(false) 单独摆出来。
       let terminalFirstConnectSettled = true;
@@ -9558,6 +9774,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       const fn = new Function("$", "escapeHtml", "sessions", "activeTerminalPreviewId", `
+        let terminalTabsRenderedHtml = "";
         function terminalSessionMap() { return sessions; }
         ${src}
         return renderTerminalPreviewTabs;

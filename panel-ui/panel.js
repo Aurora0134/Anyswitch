@@ -4571,6 +4571,16 @@ async function api(method, path, body) {
   // 1s 轮询与用户意图拉锯）。
   let terminalInspectorHollowCollapsed = false;
   const terminalInspectorUserPinned = new Set();
+  // 空壳塌缩防抖：归属轮询在「归属丢失/恢复」的边界上会闪一帧空 agent——面板按
+  // 进程祖先链认领会话，检测面一拍缺席（agent 进程起落、relay 短暂没喂检测数据）
+  // 这一拍整批会话就变空壳。原逻辑当拍即收拢、下一拍归属回来又展开，340↔48px 的
+  // 宽度跳变每下都逼终端区整屏重排，用户看到的就是侧栏「抽搐」。改为同一会话连续
+  // 3 拍渲染都空壳才认「真丢了归属」：计数按会话 id 存这张模块级 Map，归属恢复当
+  // 拍清零；会话关闭（关标签 / 关停清场 / 轮询重建后消失）走 pruneTerminalHollow-
+  // Streak 一并清，不让陈旧计数串到同 id 的下一代会话。防抖只改塌缩触发时机，
+  // 上面两条锁存规则（用户钉住 / 系统收拢标记）原样。
+  const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
+  const terminalHollowStreak = new Map();
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -5088,8 +5098,18 @@ async function api(method, path, body) {
     grok: (a) => renderGrok(a),
   };
 
+  // 空壳防抖计数表的会话关闭清零：只清「两张会话表都不认」的 id——轮询重建是整表
+  // 换血，别处关掉的会话从此不再出现在后端表；预览表同查是为了保住尚未就绪期的
+  // 预览稿计数。还在任一表里的会话计数不动（切页签、换窗口不算关闭）。
+  function pruneTerminalHollowStreak() {
+    for (const id of terminalHollowStreak.keys()) {
+      if (!terminalBackendSessions[id] && !terminalPreviewSessions[id]) terminalHollowStreak.delete(id);
+    }
+  }
+
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
+    pruneTerminalHollowStreak();
     if (!terminalBackendSessions[activeTerminalPreviewId]) {
       // 刷新后「看着哪个标签」从存档回读：整页加载把内存里的活动 id 打回预览稿遗留的
       // 初值，直接取会话表第一个键等于永远落回最早创建的那个终端——多标签时这就是
@@ -5189,6 +5209,15 @@ async function api(method, path, body) {
     terminalFitAddon?.fit();
     const session = terminalSessionFor(activeTerminalPreviewId);
     if (!session?.backend || !terminalXterm) return;
+    // fit 后尺寸与 PTY 侧已知尺寸完全一致就跳过这次 POST：PTY 收到 resize（哪怕
+    // 同值）也会让承载的 TUI 整屏重排一次，1s 轮询的兜底 fit、inspector 收放、字
+    // 号微调等入口在尺寸实际没变时重复 POST 同值，就是用户看到的「终端没动却抽
+    // 一下」。fit 本身照跑（客户端按新测量重排不需要 PTY 陪跑）。backendState 拿
+    // 不到或不完整时照旧 POST——宁可多一次重排，不漏一次对齐（保守）。
+    const backendSize = session.backendState;
+    if (backendSize
+      && Number.isFinite(backendSize.cols) && Number.isFinite(backendSize.rows)
+      && backendSize.cols === terminalXterm.cols && backendSize.rows === terminalXterm.rows) return;
     postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
   }
 
@@ -5516,11 +5545,21 @@ async function api(method, path, body) {
     return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
   }
 
+  // 两处每拍重建的 innerHTML 指纹（页签栏 / 请求行列表）：存「上次实际写进 DOM 的
+  // 整串」。1s 轮询稳态下这两块内容大多没变，逐拍赋值 innerHTML 是纯浪费的 DOM
+  // 解析与整子树替换（主线程固定开销）；渲染函数改为先拼完整串、与指纹逐字比对，
+  // 相同即跳过赋值（DOM 零写）。active 态、请求行展开态都已在串里，比对天然覆盖，
+  // 不需要单独失效逻辑。页签栏另有三处直写 innerHTML="" 的退场路径（首连在飞 /
+  // 降级 / 关停清场），直写处必须同步重置指纹，保住「指纹 = DOM 现值」这条不变式
+  // ——否则退场后的下一次同串渲染会被误跳过，页签栏留在空态。
+  let terminalTabsRenderedHtml = "";
+  let terminalRequestListRenderedHtml = "";
+
   function renderTerminalPreviewTabs() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
     const sessions = terminalSessionMap();
-    tabs.innerHTML = Object.entries(sessions).map(([id, session]) => {
+    const html = Object.entries(sessions).map(([id, session]) => {
       // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
       // 其后才是归属注入的 agent.name，最后回落外壳名。
       const tabAgent = session.agentName || (session.agent ? session.agent.name : session.shell.name);
@@ -5534,6 +5573,10 @@ async function api(method, path, body) {
       </button>
     `;
     }).join("");
+    // 指纹门控（缓存声明处的注释）：整串与上次相同即跳过赋值。
+    if (html === terminalTabsRenderedHtml) return;
+    terminalTabsRenderedHtml = html;
+    tabs.innerHTML = html;
   }
 
   // ---- 归属数据轮询（虚拟终端接真实 Agent 流量） ----
@@ -5616,15 +5659,23 @@ async function api(method, path, body) {
       const wasCollapsed = inspector.classList.contains("is-collapsed");
       let collapsed = wasCollapsed;
       if (hollow) {
+        // 防抖计数（缓存声明见 TERMINAL_HOLLOW_COLLAPSE_STREAK）：未到阈值的空壳拍
+        // 不动当前形态——归属闪断一帧就收拢再展开的抽搐从这里断根。
+        const streak = (terminalHollowStreak.get(session.id) || 0) + 1;
+        terminalHollowStreak.set(session.id, streak);
         if (terminalInspectorUserPinned.has(session.id)) {
           // 用户在此会话空壳态拉回过：保持展开，换页签回来也不缩回
           collapsed = false;
           terminalInspectorHollowCollapsed = false;
-        } else {
+        } else if (streak >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
+          // 连续 3 拍都空壳才认「真丢了归属」，系统收拢标记也只在此时落
           collapsed = true;
           terminalInspectorHollowCollapsed = true;
         }
+        // 计数未到阈值且未被钉住：保持当前形态，等归属数据落定
       } else {
+        // 归属恢复当拍清零防抖计数：下一次闪断从 0 重新数起
+        terminalHollowStreak.delete(session.id);
         terminalInspectorUserPinned.delete(session.id);
         if (terminalInspectorHollowCollapsed) {
           // 归属恢复只展开「系统收拢」的那次；用户自己收起的不动
@@ -5683,10 +5734,16 @@ async function api(method, path, body) {
     $("terminalRequestCount").textContent = String(session.requests.length);
     // 来源显示名走 routeNodeName 口径（未命中回落原始 id）；失败行展开态按行键
     // 跨轮询保留（与请求日志大板 logsExpanded 同模式）。
-    $("terminalRequestList").innerHTML = session.requests.map((req) => terminalRequestItemHtml(req, {
+    // 请求行同款指纹门控（缓存声明处的注释）：整串与上次写入相同即跳过赋值，
+    // 展开态本就在串里，比对天然覆盖。
+    const requestListHtml = session.requests.map((req) => terminalRequestItemHtml(req, {
       label: routeNodeName(req.provider),
       expanded: terminalRequestExpanded.has(req.key),
     })).join("");
+    if (requestListHtml !== terminalRequestListRenderedHtml) {
+      terminalRequestListRenderedHtml = requestListHtml;
+      $("terminalRequestList").innerHTML = requestListHtml;
+    }
     // 底栏失败语义色：最近请求里带失败行，「N 次请求」pill 转 danger（数据即
     // 轮询面的 per-request ok 标志，与列表红点同源）。
     $("terminalFootRequests").classList.toggle("is-failed", session.requests.some((r) => r.state === "failed"));
@@ -5736,7 +5793,11 @@ async function api(method, path, body) {
     const footStats = $("terminalFootStats");
     if (footStats) footStats.hidden = true;
     const tabs = $("terminalTabs");
-    if (tabs) tabs.innerHTML = "";
+    if (tabs) {
+      tabs.innerHTML = "";
+      // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
+      terminalTabsRenderedHtml = "";
+    }
     setTerminalSessionChromeVisible(false);
     syncTerminalAddBtn();
   }
@@ -5775,7 +5836,11 @@ async function api(method, path, body) {
     // PID 23140、Codex CLI 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
     // 会话级那几条与零会话共用同一套退场动作（含工作区收成单列，不留空 column）。
     const tabs = $("terminalTabs");
-    if (tabs) tabs.innerHTML = "";
+    if (tabs) {
+      tabs.innerHTML = "";
+      // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
+      terminalTabsRenderedHtml = "";
+    }
     setTerminalSessionChromeVisible(false);
   }
 
@@ -5879,7 +5944,13 @@ async function api(method, path, body) {
     activeTerminalPreviewId = null;
     rememberTerminalSessionId(null);
     const tabs = $("terminalTabs");
-    if (tabs) tabs.innerHTML = "";
+    if (tabs) {
+      tabs.innerHTML = "";
+      // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
+      terminalTabsRenderedHtml = "";
+    }
+    // 关停清场 = 后端会话全数失效：空壳防抖计数一并清（预览稿会话不动）
+    pruneTerminalHollowStreak();
   }
 
   // 「已停止」状态页：与「未运行」同一覆盖层、同一套退场动作，文案与动作钮随即改写。
@@ -6336,6 +6407,8 @@ async function api(method, path, body) {
           api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
           delete terminalBackendSessions[id];
         } else delete terminalPreviewSessions[id];
+        // 关标签即会话关闭：空壳防抖计数同步清零，不留陈旧计数
+        terminalHollowStreak.delete(id);
         const remaining = Object.keys(terminalSessionMap());
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
         rememberTerminalSessionId(activeTerminalPreviewId);
