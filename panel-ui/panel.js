@@ -4575,10 +4575,12 @@ async function api(method, path, body) {
   // 进程祖先链认领会话，检测面一拍缺席（agent 进程起落、relay 短暂没喂检测数据）
   // 这一拍整批会话就变空壳。原逻辑当拍即收拢、下一拍归属回来又展开，340↔48px 的
   // 宽度跳变每下都逼终端区整屏重排，用户看到的就是侧栏「抽搐」。改为同一会话连续
-  // 3 拍渲染都空壳才认「真丢了归属」：计数按会话 id 存这张模块级 Map，归属恢复当
-  // 拍清零；会话关闭（关标签 / 关停清场 / 轮询重建后消失）走 pruneTerminalHollow-
-  // Streak 一并清，不让陈旧计数串到同 id 的下一代会话。防抖只改塌缩触发时机，
-  // 上面两条锁存规则（用户钉住 / 系统收拢标记）原样。
+  // 3 拍归属观测都空壳才认「真丢了归属」：计数按会话 id 存这张模块级 Map，只在归
+  // 属数据拍（rebuildTerminalBackendSessions 重建，见其注释）推进——SSE 活跃帧、
+  // 页签切换等触发的重渲不推进，否则多开时他端活跃亚秒内凑满 3 拍，防抖窗口名存
+  // 实亡；归属恢复的观测拍清零。会话关闭（关标签 / 关停清场 / 轮询重建后消失）走
+  // pruneTerminalHollowStreak 一并清，不让陈旧计数串到同 id 的下一代会话。防抖只
+  // 改塌缩触发时机，上面两条锁存规则（用户钉住 / 系统收拢标记）原样。
   const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
   const terminalHollowStreak = new Map();
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
@@ -5110,6 +5112,15 @@ async function api(method, path, body) {
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     pruneTerminalHollowStreak();
+    // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接与自动补建）都是一轮
+    // 新的归属观测——空壳会话计数 +1、有归属会话清零。计数必须跟着数据拍走而非
+    // 跟着渲染走：SSE 活跃真值流命中任一会话就会整渲当前会话（renderTerminal-
+    // SessionData），那些渲染不带新归属数据，若计数随渲染递增，多开时他端一活跃，
+    // 3 拍在亚秒内凑满，防抖窗口名存实亡。
+    for (const session of Object.values(terminalBackendSessions)) {
+      if (session.agent) terminalHollowStreak.delete(session.id);
+      else terminalHollowStreak.set(session.id, (terminalHollowStreak.get(session.id) || 0) + 1);
+    }
     if (!terminalBackendSessions[activeTerminalPreviewId]) {
       // 刷新后「看着哪个标签」从存档回读：整页加载把内存里的活动 id 打回预览稿遗留的
       // 初值，直接取会话表第一个键等于永远落回最早创建的那个终端——多标签时这就是
@@ -5659,22 +5670,21 @@ async function api(method, path, body) {
       const wasCollapsed = inspector.classList.contains("is-collapsed");
       let collapsed = wasCollapsed;
       if (hollow) {
-        // 防抖计数（缓存声明见 TERMINAL_HOLLOW_COLLAPSE_STREAK）：未到阈值的空壳拍
-        // 不动当前形态——归属闪断一帧就收拢再展开的抽搐从这里断根。
-        const streak = (terminalHollowStreak.get(session.id) || 0) + 1;
-        terminalHollowStreak.set(session.id, streak);
+        // 防抖计数由归属数据拍维护（rebuildTerminalBackendSessions 重建时推进，见
+        // 其注释），渲染只读阈值：未到阈值的空壳拍不动当前形态——归属闪断一帧就
+        // 收拢再展开的抽搐从这里断根。渲染自身不递增计数。
         if (terminalInspectorUserPinned.has(session.id)) {
           // 用户在此会话空壳态拉回过：保持展开，换页签回来也不缩回
           collapsed = false;
           terminalInspectorHollowCollapsed = false;
-        } else if (streak >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
-          // 连续 3 拍都空壳才认「真丢了归属」，系统收拢标记也只在此时落
+        } else if ((terminalHollowStreak.get(session.id) || 0) >= TERMINAL_HOLLOW_COLLAPSE_STREAK) {
+          // 连续 3 拍归属观测都空壳才认「真丢了归属」，系统收拢标记也只在此时落
           collapsed = true;
           terminalInspectorHollowCollapsed = true;
         }
         // 计数未到阈值且未被钉住：保持当前形态，等归属数据落定
       } else {
-        // 归属恢复当拍清零防抖计数：下一次闪断从 0 重新数起
+        // 归属恢复清零防抖计数：rebuild 观测到归属的拍已清，此处兜底保证恢复当拍生效
         terminalHollowStreak.delete(session.id);
         terminalInspectorUserPinned.delete(session.id);
         if (terminalInspectorHollowCollapsed) {

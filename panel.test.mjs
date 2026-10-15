@@ -7245,7 +7245,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
     assert.ok(toggleBody.includes("scheduleTerminalFit()"), "手动收放保留尺寸适配");
   });
 
-  it("vm 真跑空壳收拢状态机：防抖计数、细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
+  it("vm 真跑空壳收拢状态机：防抖按归属拍计数、细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
     const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "renderTerminalSessionData found in panel.js");
     // 防抖阈值与计数表从源码取样，测试不另抄一份数字：阈值改了这里就红，不靠人记得改。
@@ -7287,41 +7287,49 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
         unpin: (id) => terminalInspectorUserPinned.delete(id),
         pinned: (id) => terminalInspectorUserPinned.has(id),
         streak: (id) => terminalHollowStreak.get(id) || 0,
+        // 模拟归属数据拍（rebuildTerminalBackendSessions 观测）落下的计数
+        beat: (id, n) => terminalHollowStreak.set(id, n),
       };
     `)(state);
-    const { render, el, pin, unpin, pinned, streak } = sandbox;
+    const { render, el, pin, unpin, pinned, streak, beat } = sandbox;
 
-    // ① 无归属闪断不再当拍塌缩：第 1、2 拍保持原形态，连续第 3 拍才收拢成细条
+    // ① 空壳拍未到阈值：SSE 活动帧再密也不收拢，计数不被渲染推进（评审修正的回归钉）
     state.session = { id: "s1", label: "外壳", cwd: "C:\\", branch: "", shell: { name: "PowerShell" }, status: "idle", metrics: null, requests: [], agent: null };
+    beat("s1", 1);
+    render();
     render();
     render();
     const inspector = el("terminalInspector");
     const workspace = el("terminalWorkspace");
-    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "空壳第 1、2 拍不收拢——归属闪断一帧不再是塌缩证据");
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "一拍空壳 + 任意多次重渲都不收拢");
     assert.strictEqual(workspace.classes.has("is-empty"), false, "空壳不走零会话单列机制");
-    assert.equal(streak("s1"), 2, "计数按拍累加");
+    assert.equal(streak("s1"), 1, "渲染不递增计数——SSE 活动帧整渲不带新归属数据，计数跟数据拍走");
+    beat("s1", 2);
     render();
-    assert.ok(inspector.classes.has("is-collapsed"), "连续第 3 拍仍空壳 → 自动收拢成细条");
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "连续两拍空壳仍不收拢");
+    beat("s1", 3);
+    render();
+    assert.ok(inspector.classes.has("is-collapsed"), "连续第三拍归属观测空壳 → 自动收拢成细条");
     assert.ok(state.fits >= 1, "收拢改变终端列宽 → 触发重排");
     const fitsAfterCollapse = state.fits;
     render();
     assert.strictEqual(state.fits, fitsAfterCollapse, "稳态轮询同形态不重复触发重排");
+    assert.equal(streak("s1"), 3, "稳态渲染同样不推进计数");
 
-    // ② 用户拉回（等价开关点击的 DOM 效果 + 锁存写入）→ 后续空壳拍不得打回
+    // ② 用户拉回（等价开关点击的 DOM 效果 + 锁存写入）→ 后续空壳拍渲染不得打回
     inspector.classes.delete("is-collapsed");
     workspace.classes.delete("is-inspector-collapsed");
     pin("s1");
     render();
     render();
-    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "用户拉回后轮询不再收拢（锁定生效，计数照加也不塌）");
-    assert.ok(streak("s1") > 3, "钉住期间计数照常累加，只是不触发塌缩");
+    assert.strictEqual(inspector.classes.has("is-collapsed"), false, "用户拉回后渲染不再收拢（钉住优先，计数在阈值也不塌）");
 
-    // ③ 归属恢复：维持展开、清锁定、清计数；用户随后手动收拢 → 轮询不得替用户展开
+    // ③ 归属恢复：维持展开、清锁定、清计数；用户随后手动收拢 → 渲染不得替用户展开
     state.session.agent = { endpointId: "dsh", name: "DeepSeek Harness", pid: 1, instanceId: "dsh-1" };
     render();
     assert.strictEqual(inspector.classes.has("is-collapsed"), false, "归属恢复维持展开");
     assert.strictEqual(pinned("s1"), false, "归属恢复清用户锁定");
-    assert.equal(streak("s1"), 0, "归属恢复当拍清零防抖计数");
+    assert.equal(streak("s1"), 0, "归属恢复渲染兜底清零防抖计数");
     inspector.classes.add("is-collapsed");
     workspace.classes.add("is-inspector-collapsed");
     render();
@@ -7334,9 +7342,12 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 
     // ④ 归属再掉：防抖从头数起，连续第 3 拍才收拢回细条；恢复后只展开系统收拢的那次
     state.session.agent = null;
+    beat("s1", 1);
     render();
+    beat("s1", 2);
     render();
     assert.strictEqual(inspector.classes.has("is-collapsed"), false, "再掉归属的第 1、2 拍保持展开（防抖重新数起）");
+    beat("s1", 3);
     render();
     assert.ok(inspector.classes.has("is-collapsed"), "连续第 3 拍自动收拢回细条");
     state.session.agent = { endpointId: "dsh", name: "DeepSeek Harness", pid: 1, instanceId: "dsh-1" };
@@ -8655,14 +8666,19 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     return src;
   };
 
-  it("塌缩防抖结构：按会话 id 连续计数、阈值 3，归属恢复/会话关闭清零；锁存语义原样", () => {
+  it("塌缩防抖结构：按会话 id 连拍计数、阈值 3、计数跟归属数据拍走，归属恢复/会话关闭清零；锁存语义原样", () => {
     const render = extractFn("renderTerminalSessionData");
     assert.ok(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;/.test(panelJs), "阈值常量钉在 3（闪断一帧不算塌缩证据）");
     assert.ok(/const terminalHollowStreak = new Map\(\);/.test(panelJs), "计数表按会话 id 存模块级 Map");
-    assert.ok(render.includes("terminalHollowStreak.get(session.id)"), "空壳拍读连续计数");
-    assert.ok(render.includes("terminalHollowStreak.set(session.id, streak)"), "空壳拍累加计数");
-    assert.ok(render.includes("streak >= TERMINAL_HOLLOW_COLLAPSE_STREAK"), "计数到阈值才走自动塌缩分支（阈值前保持当前形态）");
-    assert.ok(render.includes("terminalHollowStreak.delete(session.id)"), "归属恢复当拍清零计数");
+    // 计数在归属数据拍（会话表重建）推进、渲染只读阈值：SSE 活动帧整渲不推进
+    //（评审修正——原实现计数随渲染递增，多开时他端活跃亚秒凑满 3 拍，防抖窗口名存实亡）
+    const rebuild = extractFn("rebuildTerminalBackendSessions");
+    assert.ok(rebuild.includes("terminalHollowStreak.set(session.id"), "表重建（1s 轮询 / 连接）时空壳会话计数 +1");
+    assert.ok(rebuild.includes("if (session.agent) terminalHollowStreak.delete(session.id)"), "归属观测拍清零计数（闪断不累积）");
+    assert.ok(render.includes("terminalHollowStreak.get(session.id)"), "渲染读连续计数判阈值");
+    assert.ok(!render.includes("terminalHollowStreak.set"), "渲染不递增计数——SSE 活动帧整渲不带新归属数据，计数跟数据拍走不跟渲染走");
+    assert.ok(render.includes(">= TERMINAL_HOLLOW_COLLAPSE_STREAK"), "计数到阈值才走自动塌缩分支（阈值前保持当前形态）");
+    assert.ok(render.includes("terminalHollowStreak.delete(session.id)"), "归属恢复渲染兜底清零计数");
     // 两条既有锁存语义原样：防抖只改塌缩触发时机
     assert.ok(render.includes("terminalInspectorUserPinned.has(session.id)"), "用户钉住判定先于阈值（拉回后轮询不收拢）");
     assert.ok(render.includes("terminalInspectorHollowCollapsed = true"), "系统收拢标记仍只在自动塌缩分支落");
@@ -8672,12 +8688,46 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     assert.ok(closeAt > 0, "关标签分支可取样");
     const closeBranch = init.slice(closeAt, init.indexOf("remaining.length === 0"));
     assert.ok(closeBranch.includes("terminalHollowStreak.delete(id)"), "关标签同步清该会话计数");
-    assert.ok(extractFn("rebuildTerminalBackendSessions").includes("pruneTerminalHollowStreak()"),
-      "轮询整表换血后清掉已消失会话的计数");
+    assert.ok(rebuild.includes("pruneTerminalHollowStreak()"), "轮询整表换血后清掉已消失会话的计数");
     assert.ok(extractFn("clearTerminalLocalSessions").includes("pruneTerminalHollowStreak()"),
       "关停清场同样清计数（后端会话全数失效）");
     assert.ok(extractFn("pruneTerminalHollowStreak").includes("!terminalBackendSessions[id] && !terminalPreviewSessions[id]"),
       "只清两张会话表都不认的 id（切页签、换窗口不清）");
+
+    // 桩环境真跑拍计数：计数跟归属观测走——闪断清零、连续空壳累积、会话消失即清
+    const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"].map(extractFn).join("\n");
+    const store = {};
+    const counter = new Function("store", `
+      let activeTerminalPreviewId = "t1";
+      let terminalBackendSessions = {};
+      let terminalDefaultCwd = "C:\\\\";
+      const terminalHollowStreak = new Map();
+      const terminalPreviewSessions = {};
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = v; },
+        removeItem: (k) => { delete store[k]; },
+      };
+      ${bodies}
+      return {
+        beat: (items) => rebuildTerminalBackendSessions(items),
+        streak: (id) => terminalHollowStreak.get(id) || 0,
+      };
+    `)(store);
+    const attributed = [{ id: "t1", shell: "powershell", agent: { endpointId: "k", name: "K", pid: 1, instanceId: "k-1" } }];
+    const hollow = [{ id: "t1", shell: "powershell" }];
+    counter.beat(hollow);
+    assert.equal(counter.streak("t1"), 1, "空壳观测拍 +1");
+    counter.beat(attributed);
+    assert.equal(counter.streak("t1"), 0, "归属恢复的观测拍清零（闪断不累积）");
+    counter.beat(hollow);
+    counter.beat(hollow);
+    assert.equal(counter.streak("t1"), 2, "连续两拍空壳计 2（未到阈值）");
+    counter.beat(hollow);
+    assert.equal(counter.streak("t1"), 3, "连续第三拍计 3（到阈值）");
+    counter.beat([]);
+    assert.equal(counter.streak("t1"), 0, "会话从表中消失（别处关掉）即清计数");
   });
 
   it("fit 同尺寸跳过：与 PTY 侧已知尺寸一致时不 POST，拿不到/不完整/不一致照旧（保守）", () => {
