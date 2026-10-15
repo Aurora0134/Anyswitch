@@ -843,6 +843,88 @@
   :root[data-ui-version="v2"][data-style] #statsView .logs-skel-row:hover { background: transparent; }
   :root[data-ui-version="v2"][data-style] #statsView .logs-skel-bar { height: 12px; }
 
+  /* ── 新版界面阶段 4（STAGE4）：Skills + 预设页平铺——去壳分节，「页面是平的」 ──
+     与阶段 2/3 的描边盒定稿不同，本阶段两页彻底去壳：卡片退为透明分节（去底、去边、
+     去影、去圆角、收 backdrop-filter，hover 不浮不变色），相邻分节间只画一道上边线
+     var(--divider)（兄弟选择器 + 单边线，每条线只画一次；线两侧各 24px 呼吸），卡头
+     降格 12px/600/--text-2 区段小标题，头体 padding 全收（内容贴分节左缘，平铺到底）。
+     作用域锚 #skillsView/#presetsView 双 id 并列——#storeView 复用同一套 .skills-* 类
+     但属后续阶段地盘，整罩 .skills-view 类会误伤它。两页同一条规则组 ⇒ 两页头行节奏
+     （高度/间距/字级）同源即拉齐。左右列横向间距提到 28（v2 节奏），列内分节 24+线+24。
+     aurora 例外 = 恢复皮肤原生玻璃卡（配方逐项抄阶段 2/3 aurora 块），只去投影、去
+     hover 浮；玻璃卡自带盒，hairline 分节线与其配对的顶距在 aurora 下撤销，盒间距走
+     28 节奏（与阶段 2/3 盒页一致），盒内头体 padding 回阶段 2/3 盒内档（16/0 + 12/16）。
+     选择器一律 [data-ui-version="v2"][data-style] 双属性提级：三套皮肤在更靠后位置
+     覆写 .panel-card/.card-header/.card-title 与选中行，单属性同优先级会被盖。 */
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .panel-card {
+    background: transparent; border: 0; border-radius: 0;
+    box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .panel-card:hover {
+    transform: none; box-shadow: none; border-color: var(--divider);
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-grid { gap: 28px; }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-col { gap: 24px; }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-col > .panel-card + .panel-card {
+    border-top: 1px solid var(--divider); padding-top: 24px;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .card-header {
+    background: transparent; border-bottom: 0; padding: 0 0 12px;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .card-title {
+    font-size: 12px; font-weight: 600; color: var(--text-2);
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .card-body { padding: 0; }
+  /* aurora 例外：恢复皮肤原生玻璃卡（逐项抄阶段 2/3 aurora 块），只去投影；hover 不浮
+     由上面通用 :hover 规则同罩，此处只把 hover 描边色按盒体口径收回 --border */
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .panel-card {
+    background: var(--surface);
+    background-image: var(--card-hairline); background-position: top;
+    background-size: 100% 1px; background-repeat: no-repeat;
+    backdrop-filter: var(--glass-blur); -webkit-backdrop-filter: var(--glass-blur);
+    border: 1px solid var(--border); border-radius: var(--radius-lg);
+    box-shadow: inset 0 1px 0 var(--hl-inset);
+  }
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .panel-card:hover {
+    border-color: var(--border);
+  }
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .skills-col { gap: 28px; }
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .skills-col > .panel-card + .panel-card {
+    border-top: 0; padding-top: 0;
+  }
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .card-header {
+    padding: 16px 18px 0;
+  }
+  :root[data-ui-version="v2"][data-style="aurora"] :is(#skillsView, #presetsView) .card-body {
+    padding: 12px 18px 16px;
+  }
+  /* 盒中盒清理：仓库路径盒与虚线空态框退化为纯文本行（撤底撤框，留白呼吸；文案不变）。
+     空态口径与阶段 3 统计页同档（28/24）；路径行保留等宽字体与次级色，只撤盒。控件
+     （过滤输入框 .skills-path-input 等）不去壳，不在此列。 */
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-repo-path {
+    background: transparent; border: 0; padding: 0;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .empty-hint {
+    background: transparent; border: 0; padding: 28px 24px;
+  }
+  /* 选中行零位移：v1 选中态 padding-left 10→26 给 ✓ 让位，且 padding 无过渡瞬时跳变
+     （选中/取消那一下整行右移 16px）。v2 收掉让位与对勾，选中态由渐变高光 + 左侧
+     accent 强调条承担（二者本就不占几何）。异常卡待处理任务行同病（0→22），同法修。
+     皮肤段对 .skills-list-row.selected 有后位覆写（saas/aurora 渐变、sepia ✓ 字体），
+     双属性提级 + id 作用域压得住；sepia 的 ::before 字体规则因 content:none 落空，无碍。 */
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-list-row.selected {
+    padding-left: 10px;
+  }
+  :root[data-ui-version="v2"][data-style] :is(#skillsView, #presetsView) .skills-list-row.selected::before {
+    content: none;
+  }
+  :root[data-ui-version="v2"][data-style] #skillsView .skills-anomaly-task.selected {
+    padding-left: 0;
+  }
+  :root[data-ui-version="v2"][data-style] #skillsView .skills-anomaly-task.selected::before {
+    content: none;
+  }
+
   .icon-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 32px; height: 32px; padding: 0;
