@@ -8118,11 +8118,9 @@ async function api(method, path, body) {
     const body = $("skillsDetailBody");
     const skills = (skillsState && skillsState.skills) || [];
     const skill = skills.find((s) => s.relPath === skillsFocusKey) || null;
-    // v1 无选中时整卡收起；v2 平铺详情卡常显——空态引导文案（empty-hint）即空态本体，
-    // 取消全部选中后右列留在原位引导，而不是整列塌掉（阶段 4）
+    // 无选中时整卡收起；下方 empty-hint 仅作结构兜底（正常不可见）
     const card = body.closest(".panel-card");
-    const v2Flat = document.documentElement.getAttribute("data-ui-version") === "v2";
-    if (card) card.hidden = !skill && !v2Flat;
+    if (card) card.hidden = !skill;
     if (!skill) {
       body.innerHTML = '<div class="empty-hint">从左侧列表选择一个 skill，查看详情并管理端点部署</div>';
       return;
@@ -9461,10 +9459,9 @@ async function api(method, path, body) {
     const body = $("presetsDetailBody");
     const presets = (presetsState && presetsState.presets) || [];
     const preset = presets.find((p) => p.id === presetsFocusId) || null;
-    // v1 无选中时整卡收起；v2 平铺详情卡常显（与 skills 详情卡同手法，阶段 4）
+    // 无选中时整卡收起；empty-hint 仅作结构兜底（与 skills 详情卡同手法）
     const card = body.closest(".panel-card");
-    const v2Flat = document.documentElement.getAttribute("data-ui-version") === "v2";
-    if (card) card.hidden = !preset && !v2Flat;
+    if (card) card.hidden = !preset;
     if (!preset) {
       body.innerHTML = '<div class="empty-hint">从左侧列表选择一个预设，查看详情并管理端点注入</div>';
       return;
