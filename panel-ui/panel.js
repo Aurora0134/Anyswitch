@@ -13084,8 +13084,7 @@ async function api(method, path, body) {
   // 阶段 3：折线图画布宽=容器实测（renderStatsLineChart 内 statsChartWidth），容器宽度
   // 变化（窗口缩放 / 栏收展 / 栅格塌折）需按新宽重渲，否则旧宽 viewBox 被 CSS 等比拉伸、
   // 字号线宽失真。观察两个折线图容器，尺寸实变才防抖重渲（观察注册即有一帧回调）；
-  // 趋势卡高度一并入键——v2 卡体随左列等高拉伸（flex:1），纯高度变化（左列概览/热力图
-  // 数据落地长高等）同样要按新高度重渲填满；TTFT 小图高由宽定，只钉宽，高度入键会空转。
+  // 趋势图高由宽按 760:220 派生（statsTrendChartHeight），宽变即高变，宽度单键即够。
   // 重渲瞬时落地（snap），不重播 reveal/morph。藏态量到 0 跳过——
   // 可见时的下一帧回调或既有取数渲染会按新尺寸补画。
   let statsChartResizeRO = null;
@@ -13098,9 +13097,8 @@ async function api(method, path, body) {
       for (const en of entries) {
         const w = Math.round(en.contentRect.width);
         if (!w) continue; // 藏态（统计页未出）量到 0：不重渲
-        const key = en.target.id === "statsTrendChart" ? `${w}x${Math.round(en.contentRect.height)}` : w;
-        if (lastSize.get(en.target.id) === key) continue;
-        lastSize.set(en.target.id, key);
+        if (lastSize.get(en.target.id) === w) continue;
+        lastSize.set(en.target.id, w);
         changed = true;
       }
       if (!changed) return;
@@ -13751,15 +13749,17 @@ async function api(method, path, body) {
     });
   }
 
-  // 趋势图画布高：v2 趋势卡被上半区网格拉伸到与左列等高、图容器 flex:1 有真实
-  // 高度，实测填入让图拉高填满卡片（藏态量到 0 回落 undefined→220 基线）；v1 卡
-  // 高由内容定（测高会自我循环），不测——v1 行为与此前一致。外层作用域声明：
-  // 调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
+  // 趋势图画布高：恢复阶段3前的宽高联动——设计比例 760:220（彼时 viewBox 760×220
+  // 经 CSS width:100%/height:auto 随卡宽等比缩放，宽窗口下图自然填满被网格拉伸的
+  // 卡体）。阶段3把 viewBox 宽改按容器实测（1:1 像素、字号线宽不缩放）后高度被钉死
+  // 220，联动断裂、卡下半截悬空（v1/v2 同发）；此处按同比例由宽派生高，与
+  // statsChartWidth 同下限同藏态回落（undefined→220 基线），v1/v2 同效。外层作用域
+  // 声明：调用点在 renderStatsTrend（renderStatsLineChart 之外），嵌套声明会让调用处
   // 直接 ReferenceError、整图中止渲染（POLISH02 事故根因）。
   function statsTrendChartHeight(el) {
-    if (document.documentElement.getAttribute("data-ui-version") !== "v2") return undefined;
-    const h = Math.round(el.clientHeight);
-    return h > 0 ? Math.max(160, h) : undefined;
+    const w = Math.round(el.clientWidth);
+    if (!w) return undefined;
+    return Math.max(160, Math.round((220 * Math.max(280, w)) / 760));
   }
 
   // ── C：Token 趋势（口径由 seg 驱动；时间范围变化时整表重新拉取） ──

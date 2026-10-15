@@ -784,15 +784,6 @@
   :root[data-ui-version="v2"][data-style] #statsView .panel-card > .card-body:first-child {
     padding-top: 16px;
   }
-  /* C 趋势卡：网格把卡拉伸到与左列（概览+热力图）等高，而 SVG 高恒 220（viewBox
-     高固定 × width:100%/height:auto），下半截曾整段悬空——卡改纵向 flex，卡体/
-     图容器接力 flex:1，图高由 JS 实测容器填入（statsTrendChartHeight，v2 门控）。
-     图容器 min-height 220 兜底单列塌缩态（此时卡高回到内容定，与 v1 一致）；
-     overflow 收掉卡片收缩途中旧高 SVG 的瞬帧溢出。专用类而非通用 .card-body：
-     哨兵测试禁给通用 .card-body 写 display（同 .stats-quad-body 先例）。 */
-  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-card { display: flex; flex-direction: column; }
-  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
-  :root[data-ui-version="v2"][data-style] #statsView .stats-trend-body .stats-chart { flex: 1; min-height: 220px; overflow: hidden; }
   /* aurora 例外：恢复皮肤原生玻璃卡（配方逐项抄阶段 2 aurora 块） */
   :root[data-ui-version="v2"][data-style="aurora"] #statsView .panel-card {
     background: var(--surface);
