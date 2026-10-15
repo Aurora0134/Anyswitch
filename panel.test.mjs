@@ -5000,15 +5000,16 @@ describe("设置项「开屏动画」", () => {
       "逐控件即时写本地存档，不进服务端保存链");
   });
 
-  it("行在「启动」卡内、排在「跟随 Coding Agent 启动」之后，沿用同一套 .toggle 控件", () => {
-    const atFollow = panelHtml.indexOf('id="followAgentToggle"');
+  it("行在「显示」卡内、排在「UI版本」之后，沿用同一套 .toggle 控件", () => {
+    const atSeg = panelHtml.indexOf('id="uiVersionSeg"');
     const atStartup = panelHtml.indexOf('id="startupAnimationToggle"');
+    const atSpark = panelHtml.indexOf('id="sparkWindowInput"');
     const atKeepAlive = panelHtml.indexOf('id="keepAliveToggle"');
-    assert.ok(atFollow > 0 && atFollow < atStartup && atStartup < atKeepAlive,
-      "新行落在「启动」卡内、「抗截断」卡之前");
+    assert.ok(atSeg > 0 && atSeg < atStartup && atStartup < atSpark && atSpark < atKeepAlive,
+      "新行落在「显示」卡内、「抗截断」卡之前，卡内顺序 UI版本 → 开屏动画 → 折线视窗节点数");
     const row = panelHtml.slice(panelHtml.lastIndexOf('<div class="modal-item">', atStartup), atStartup + 200);
     assert.ok(row.includes('<label class="toggle">'), "沿用设置页既有开关控件");
-    // 卡数口径随「界面」卡落地记为六张：开屏动画那行本身仍只占「启动」卡内一行。
+    // 卡数口径不变：开屏动画与折线视窗节点数两行只是搬进「显示」卡，通用仍是六张卡。
     const general = panelHtml.slice(panelHtml.indexOf('id="settingsPanelGeneral"'), panelHtml.indexOf('id="settingsPanelRoute"'));
     assert.strictEqual((general.match(/<div class="panel-card">/g) || []).length, 6, "通用六张卡");
     assert.ok(panelHtml.includes("「通用」：按语义分六张卡"), "卡上注释的卡数跟着改到六张");

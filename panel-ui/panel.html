@@ -80,7 +80,7 @@ try {
   try { history.replaceState(history.state, "", url.href); } catch {}
   const navigation = performance.getEntriesByType("navigation")[0];
   if (navigation && navigation.type !== "navigate") return;
-  // 「开屏动画」设置（设置 → 通用 → 启动卡）：拨到「关」时整层都不出现——不是把脉冲
+  // 「开屏动画」设置（设置 → 通用 → 显示卡）：拨到「关」时整层都不出现——不是把脉冲
   // 掐掉留一张定格图，而是首帧直接就是看板页。必须在绘制前读这条存档：主脚本是
   // defer 外链，等它跑起来首绘已经过去；HTML 由后端按静态文件直出，也没有注入位。
   // 读不到存档（禁用本地存储 / 桩环境）一律按「开」处理，与主题存档同一兜底口径。
@@ -1938,25 +1938,12 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="slider"></span>
             </label>
           </div>
-          <!-- 开屏动画：存档在 localStorage 的 panel-startup-animation（"1"/"0"，缺省视为开），
-               由 head 里的 panelStartupBootstrap 在绘制前读，主脚本只在两处跟随——设置页
-               回显这颗开关、看板「重启」的复播入口问它。不 POST、不进 settingsSaving。 -->
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">开屏动画</div>
-              <div class="modal-item-desc">关闭时不展示开屏动画；开启时，打开面板与看板重启后展示开屏动画。</div>
-            </div>
-            <label class="toggle">
-              <input type="checkbox" id="startupAnimationToggle">
-              <span class="slider"></span>
-            </label>
-          </div>
         </div>
       </div>
 
-      <!-- 「显示」卡：前端改版期的版本切换入口。「UI版本」是本机浏览器偏好（与开屏
-           动画同类：localStorage 存档、绘制前由 head 脚本读、不 POST），不同之处是
-           它即时生效——分段钮改写 <html> data-ui-version，页面 CSS 当帧换版。
+      <!-- 「显示」卡：界面呈现相关的设置——UI版本、开屏动画、折线视窗节点数。「UI版本」
+           与「开屏动画」是本机浏览器偏好（localStorage 存档、绘制前由 head 脚本读、不 POST），
+           UI版本的不同之处是即时生效——分段钮改写 <html> data-ui-version，页面 CSS 当帧换版。
            选中态只由 aria-checked 表达，CSS 选中样式与 JS 回显都认这个属性。 -->
       <div class="panel-card">
         <div class="card-header">
@@ -1974,6 +1961,26 @@ if (window.panelStartupController) panelStartupPlay();
               <button type="button" class="seg-switch-btn" data-ui-version-choice="classic" role="radio" aria-checked="true">旧版</button>
               <button type="button" class="seg-switch-btn" data-ui-version-choice="v2" role="radio" aria-checked="false">新版</button>
             </div>
+          </div>
+          <!-- 开屏动画：存档在 localStorage 的 panel-startup-animation（"1"/"0"，缺省视为开），
+               由 head 里的 panelStartupBootstrap 在绘制前读，主脚本只在两处跟随——设置页
+               回显这颗开关、看板「重启」的复播入口问它。不 POST、不进 settingsSaving。 -->
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">开屏动画</div>
+              <div class="modal-item-desc">关闭时不展示开屏动画；开启时，打开面板与看板重启后展示开屏动画。</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="startupAnimationToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">折线视窗节点数</div>
+              <div class="modal-item-desc">按请求时序保留最近 N 个数据点，不按时间过期。范围 2–128，默认 16。</div>
+            </div>
+            <input class="modal-number" type="number" id="sparkWindowInput" min="2" max="128" step="1" value="16">
           </div>
         </div>
       </div>
@@ -2046,13 +2053,6 @@ if (window.panelStartupController) panelStartupPlay();
               <input type="checkbox" id="autoDownloadUpdatesToggle">
               <span class="slider"></span>
             </label>
-          </div>
-          <div class="modal-item">
-            <div>
-              <div class="modal-item-title">折线视窗节点数</div>
-              <div class="modal-item-desc">按请求时序保留最近 N 个数据点，不按时间过期。范围 2–128，默认 16。</div>
-            </div>
-            <input class="modal-number" type="number" id="sparkWindowInput" min="2" max="128" step="1" value="16">
           </div>
         </div>
       </div>
