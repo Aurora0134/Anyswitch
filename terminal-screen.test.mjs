@@ -86,6 +86,47 @@ test("备用屏（vim/htop 类）不污染历史，退出后主屏复原", () =>
   assert.deepEqual(mirror.screenLines(), before.split("|"), "退出备用屏必须复原主屏");
 });
 
+test("备屏会话的回放：历史在前、1049h 切换、帧画备屏，续写不污染滚动区", () => {
+  // 回归钉：回放若把备屏帧画进普通缓冲区，客户端留在普通屏而应用仍在备屏——
+  // 其后应用的滚动输出全积进客户端滚动区（实测：重建后每波输出 scrollHeight
+  // 稳定 +9000px 不复原，用户侧形态=「同一个内容向下渲染很多行」）。
+  const mirror = createScreenMirror({ cols: 40, rows: 8 });
+  for (let i = 1; i <= 20; i += 1) mirror.write(`历史行 ${i}\r\n`);
+  mirror.write("\u001b[?1049h");
+  for (let i = 1; i <= 12; i += 1) mirror.write(`备屏行 ${i}\r\n`);
+  const altScreen = mirror.screenLines();
+
+  const replay = mirror.toReplay();
+  const iSwitch = replay.indexOf("\u001b[?1049h");
+  assert.ok(iSwitch > -1, "备屏会话的回放必须带 1049h 把客户端切进备屏");
+  assert.ok(replay.lastIndexOf("历史行") < iSwitch, "历史必须在 1049h 之前画进普通屏");
+  assert.ok(replay.indexOf("备屏行") > iSwitch, "备屏帧必须在 1049h 之后画");
+
+  const again = repaint(replay, 40, 8);
+  assert.equal(again.info().inAlt, true, "回放后客户端必须在备屏");
+  assert.deepEqual(again.screenLines(), altScreen, "回放必须还原同一张备屏画面");
+
+  // 污染钉：回放后续写（等价应用活字节）在备屏里滚动，不得积进滚动区
+  const histAtReplay = again.info().historyLines;
+  again.write("备屏续写 1\r\n备屏续写 2\r\n备屏续写 3\r\n");
+  assert.equal(again.info().historyLines, histAtReplay, "备屏里的滚动输出不得进滚动区");
+
+  // 退出复原：备屏帧消失，普通屏的历史尾部可见（1049 的保存/恢复语义）
+  again.write("\u001b[?1049l");
+  const restored = again.screenLines().join("\n");
+  assert.ok(!restored.includes("备屏行"), "退备屏后不得残留备屏帧");
+  assert.ok(restored.includes("历史行"), "退备屏后应看到普通屏的历史尾部");
+});
+
+test("非备屏会话的回放逐字节不变（回归金样，防误伤普通路径）", () => {
+  // 金样由改动前实现生成（12x3、两行内容）：非备屏路径的格式任何变化都应显式过审。
+  const mirror = createScreenMirror({ cols: 12, rows: 3 });
+  mirror.write("AB\r\nCD");
+  const golden = "\u001b[0m\u001b[2J\u001b[H\r\n\r\n\u001b[1;1H\u001b[2K\u001b[0mAB\u001b[2;1H\u001b[2K\u001b[0mCD\u001b[3;1H\u001b[2K\u001b[0m\u001b[2;3H\u001b[?25h";
+  assert.equal(mirror.toReplay(), golden, "非备屏回放必须逐字节保持原样");
+  assert.ok(!mirror.toReplay().includes("1049"), "非备屏会话的回放不得含 1049");
+});
+
 test("SGR 与宽字符：颜色随回放保留，中日韩字不切碎行", () => {
   const mirror = createScreenMirror({ cols: 20, rows: 4 });
   mirror.write("\u001b[1;38;2;255;0;0m红色粗体\u001b[0m 普通\r\n");

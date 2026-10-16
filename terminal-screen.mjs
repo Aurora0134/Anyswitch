@@ -483,13 +483,19 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // Self-contained repaint of "history that scrolled away, then the current screen
   // pinned at the bottom". Written into a fresh terminal it reproduces what the user
   // was looking at, including a scrollable scrollback, with no reliance on where a
-  // byte window happened to start.
+  // byte window happened to start. Alt-screen sessions diverge after the history:
+  // the client is switched into the alternate screen first (1049h) and the frame is
+  // painted there — painting it into the normal buffer instead would strand the
+  // client in the wrong buffer while the application keeps writing with alt-screen
+  // semantics, and every scrolled line the app emits afterwards piles into the
+  // client's scrollback (实测：重建后每波输出 scrollHeight 稳定 +9000px 不复原).
   function toReplay() {
     const parts = ["\u001b[0m\u001b[2J\u001b[H"];
     let bytes = 8;
     // 画面前先回放记录过的应用态模式（鼠标族 / 括号粘贴 / convertEol 开关），让客户端
-    // 与应用的当前状态对齐。明确不发 1049 备屏与 2026 同步：1049 会把回放切进备用屏，
-    // 丢掉刻意保留的滚屏历史；2026 是同帧批处理标记，回放只有单帧画面，发了没有意义。
+    // 与应用的当前状态对齐。2026 同步标记不发：它是同帧批处理标记，回放只有单帧画面，
+    // 发了没有意义。1049 备屏只对「当下就在备屏」的会话发（见下面的 inAlt 分支）——
+    // 不在备屏的会话发 1049 会把回放切进备用屏，丢掉刻意保留的滚屏历史。
     for (const p of REPLAYED_MODES) {
       if (!(p in appModes)) continue;
       const seq = `\u001b[?${p}${appModes[p] ? "h" : "l"}`;
@@ -504,15 +510,22 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       keep.unshift(history[k]);
     }
     for (const line of keep) parts.push(`${line}\u001b[0m\r\n`);
-    // Push the tail of the history off the bottom edge before painting: after `keep`
-    // lines the client still has up to rows-1 of them sitting on screen, and the
-    // absolute paint below would overwrite them out of existence. Scrolling them in
-    // first is what makes "client scrollback = exactly the rows that scrolled away"
-    // hold, which is the whole point of the replay. rows-1 and not rows: the last
-    // history line already left one blank row under the cursor, and a filler past
-    // that pushes a blank line into the scrollback (the round-trip test caught the
-    // off-by-one as 256 lines where 255 existed).
-    for (let r = 0; r < height - 1; r += 1) parts.push("\r\n");
+    if (inAlt) {
+      // 备屏会话：历史画进普通屏即止，不垫 LF 推开——帧画在备屏，普通屏维持历史
+      // 尾部原样，应用退备屏时客户端恢复的就是这张（与 1049 的保存/恢复语义对齐）。
+      parts.push("\u001b[?1049h");
+      bytes += 8;
+    } else {
+      // Push the tail of the history off the bottom edge before painting: after `keep`
+      // lines the client still has up to rows-1 of them sitting on screen, and the
+      // absolute paint below would overwrite them out of existence. Scrolling them in
+      // first is what makes "client scrollback = exactly the rows that scrolled away"
+      // hold, which is the whole point of the replay. rows-1 and not rows: the last
+      // history line already left one blank row under the cursor, and a filler past
+      // that pushes a blank line into the scrollback (the round-trip test caught the
+      // off-by-one as 256 lines where 255 existed).
+      for (let r = 0; r < height - 1; r += 1) parts.push("\r\n");
+    }
     // Every row is written explicitly, blanks included: the history above already
     // dirtied these lines, so a shorter repaint must erase before it writes —
     // otherwise the tail of a history row bleeds through the frame (caught by the
