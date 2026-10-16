@@ -1350,6 +1350,48 @@ describe("createAgentMetricsCollector", () => {
     });
   });
 
+  describe("opencode CLI: the `serve --service` child is not a session", () => {
+    // Live shape observed 2026-10-16: the interactive opencode.exe spawns
+    // `opencode.exe serve --service` (an internal local service that never
+    // issues LLM traffic). Counting it by image name alone put a second,
+    // permanently-idle 待命 card on the board for every real session.
+    // 5-column WMIC shape (Node,CommandLine,Name,ParentProcessId,ProcessId),
+    // same fixture family as the dsh/kimi describes below.
+    const wmicOc = (...rows) => `Node,CommandLine,Name,ParentProcessId,ProcessId\r\n${rows.join("\r\n")}\r\n`;
+    const OC_BIN = String.raw`C:\Users\tester\AppData\Roaming\npm\node_modules\@opencode\cli\node_modules\@opencode\cli-windows-x64\bin\opencode.exe`;
+    const ocLauncherRow = `LAPTOP,C:\\WINDOWS\\system32\\cmd.exe /d /c chcp 65001 >nul & ${OC_BIN},cmd.exe,18580,18868`;
+    const ocMainRow = `LAPTOP,${OC_BIN},opencode.exe,18868,14788`;
+    const ocServeRow = `LAPTOP,${OC_BIN} serve --service,opencode.exe,14788,19852`;
+    const PS_OPENCODE_SCAN = wmicOc(ocLauncherRow, ocMainRow, ocServeRow);
+
+    it("counts the interactive process only; the serve child joins the family set", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN), nowFn: () => 10000 });
+      const procs = await collector.scanProcesses();
+      assert.equal(procs.opencode, 1, "serve --service 子进程不计会话");
+      assert.ok(procs.opencodePids.has(14788));
+      assert.ok(procs.opencodePids.has(19852), "子进程仍进家族集（存活判定要用）");
+      assert.ok(procs.opencodeEnginePids.has(14788));
+      assert.ok(!procs.opencodeEnginePids.has(19852), "子进程不进引擎集（占位行/检测面不受其干扰）");
+      assert.equal(procs.ppidByPid.get(19852), 14788, "父子链照常进谱系表");
+    });
+
+    it("attributes the terminal session to the interactive process, not the serve child", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN), nowFn: () => 10000 });
+      await collector.scanProcesses();
+      const feed = collector.getDetectedClientProcesses();
+      const entries = feed.filter((proc) => proc.agentId === "opencode");
+      assert.equal(entries.length, 1, "serve 子进程不进 detected feed");
+      assert.deepEqual(entries[0], { agentId: "opencode", pid: 14788, ancestors: [18868, 18580] });
+    });
+
+    it("spawns one placeholder row for one live session, never a serve row", async () => {
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN), nowFn: () => 10000 });
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.equal(opencode.processCount, 1);
+      assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"]);
+    });
+  });
+
   it("routes Codex traffic by x-agent-id and counts the codex.exe engine family", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;

@@ -841,7 +841,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -989,8 +989,32 @@ function parseTasklistCsv(stdout) {
         }
       }
     } else if (bucket === "opencode") {
-      result.opencode += 1;
+      // The interactive opencode.exe spawns a same-image child running
+      // `opencode.exe serve --service` — an internal local service that never
+      // issues LLM traffic (observed live 2026-10-16: one session, two
+      // opencode.exe processes, the child idle forever). Counting it by image
+      // name alone put a second, permanently-standby instance card on the
+      // board. With a command line the helper is skipped exactly like qoder's
+      // `--internal-sites-mcp` child — except that it still joins the family
+      // set (parent/child start and stop within seconds of each other, so
+      // family-scoped liveness never flickers), while counting, detected feed
+      // and placeholder rows follow the interactive process only. Plain
+      // tasklist rows carry no command line and keep the accept-by-name
+      // behavior (last fallback).
+      if (commandLine === null || !commandLine.includes("serve")) {
+        result.opencode += 1;
+      }
+      // Family set (lineage / pid liveness) takes every same-image process,
+      // helper child included: the interactive process can in principle exit
+      // while its serve child lingers, and family-scoped row liveness must
+      // not flash the card away mid-teardown.
       if (pid) result.opencodePids.add(pid);
+      // Card status / placeholder rows / detected feed follow the interactive
+      // processes only — the engine-subset mechanism already used by
+      // codex/dsh/kimi.
+      if (pid && (commandLine === null || !commandLine.includes("serve"))) {
+        result.opencodeEnginePids.add(pid);
+      }
     } else if (bucket === "dsh") {
       // dsh.exe is the harness's own executable (the pip packaging ships
       // Scripts\dsh.exe), so the image name alone already makes it a session
@@ -3612,7 +3636,18 @@ export function createAgentMetricsCollector(options = {}) {
       // none of which own a session. Card status/process count keeps the
       // bucket's own scope (codex = whole family, dsh = engines only); only
       // instance liveness narrows to the set that can hold traffic.
-      const livePids = procCounts[`${bucket}EnginePids`] ?? procCounts[`${bucket}Pids`] ?? new Set();
+      // opencode is the exception that widens back to the family set: its
+      // `serve --service` helper child is family but never an engine, and the
+      // interactive process can in principle exit while the child lingers —
+      // evicting the row off the engine set would flash the card away
+      // mid-teardown.
+      const livePids = bucket === "opencode"
+        ? (procCounts.opencodePids ?? new Set())
+        : (procCounts[`${bucket}EnginePids`] ?? procCounts[`${bucket}Pids`] ?? new Set());
+      // 占位行的面比存活判定窄：起行只认「能扛流量的进程」——opencode 的
+      // serve 子进程在家族集里兜底存活判定，但它永不发请求，不能起占位行。
+      const placeholderPids = procCounts[`${bucket}EnginePids`]
+        ?? procCounts[`${bucket}Pids`] ?? new Set();
       const pidIdRe = new RegExp(`^${bucket}-(\\d+)$`);
       for (const [instId, entry] of instMap) {
         const pidMatch = instId.match(pidIdRe);
@@ -3724,7 +3759,7 @@ export function createAgentMetricsCollector(options = {}) {
       // are session-scoped (traffic-born), so its processes — the shared GUI
       // engine included — never spawn placeholder rows.
       if (bucket !== "codex") {
-        for (const pid of livePids) {
+        for (const pid of placeholderPids) {
           // 桌面宿主（dsh 宿主引擎 / kimi 桌面主进程）的占位行挂稳定 id：起进
           // 程即可见的那一行，就是请求将要落的那一行——换代换 pid 不换行。其
           // 余引擎照旧逐 pid 占位。
