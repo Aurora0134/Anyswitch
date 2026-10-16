@@ -2380,23 +2380,16 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </header>
 
-      <div class="terminal-workspace" id="terminalWorkspace">
+      <!-- 终端区静态直出「首连在飞」骨架：真实页签/会话栏/监测区都要等首次
+           /api/terminal/sessions 落地后由 JS 渲染，主脚本又是 defer 外链——静态
+           稿若携带设计稿样例数据，刷新落回终端页的第一帧到首连接口返回之间就会
+           以假乱真。骨架与 renderTerminalPendingState 落定后的 DOM 同构（页签
+           空置、会话栏/底栏左段/监测区按 JS 同款开关隐藏、工作区收单列），就绪
+           后由既有恢复通路展开。 -->
+      <div class="terminal-workspace is-empty" id="terminalWorkspace">
         <section class="terminal-main-pane">
           <div class="terminal-tabs-bar">
-            <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话">
-              <button type="button" class="terminal-tab active" role="tab" aria-selected="true" data-terminal-tab="checkout">
-                <span class="terminal-tab-shell">PS</span>
-                <span class="terminal-tab-copy"><strong>payment-service</strong><small>Codex CLI</small></span>
-                <span class="terminal-tab-state is-working" title="正在运行"></span>
-                <span class="terminal-tab-close" aria-hidden="true">×</span>
-              </button>
-              <button type="button" class="terminal-tab" role="tab" aria-selected="false" data-terminal-tab="portal">
-                <span class="terminal-tab-shell terminal-tab-shell-cmd">&gt;_</span>
-                <span class="terminal-tab-copy"><strong>portal</strong><small>Claude Code</small></span>
-                <span class="terminal-tab-state is-idle" title="空闲"></span>
-                <span class="terminal-tab-close" aria-hidden="true">×</span>
-              </button>
-            </div>
+            <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话"></div>
             <button type="button" class="icon-btn terminal-add-btn" id="terminalAddBtn" title="新建终端" aria-label="新建终端">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
             </button>
@@ -2415,14 +2408,14 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
 
-          <div class="terminal-session-bar">
+          <div class="terminal-session-bar" style="display:none">
             <div class="terminal-session-context">
-              <span class="terminal-session-name" id="terminalSessionName">payment-service</span>
-              <span class="terminal-session-path" id="terminalSessionPath">D:\\dev\\payment-service</span>
-              <span class="terminal-session-branch" id="terminalSessionBranch">main</span>
+              <span class="terminal-session-name" id="terminalSessionName"></span>
+              <span class="terminal-session-path" id="terminalSessionPath"></span>
+              <span class="terminal-session-branch" id="terminalSessionBranch"></span>
             </div>
             <div class="terminal-session-actions">
-              <span class="terminal-shell-label" id="terminalShellLabel">PowerShell</span>
+              <span class="terminal-shell-label" id="terminalShellLabel"></span>
               <span class="terminal-font-size">
                 <button type="button" class="terminal-quiet-btn terminal-font-btn" title="缩小终端字号" aria-label="缩小终端字号" id="terminalFontDecBtn">−</button>
                 <span class="terminal-font-value" id="terminalFontSizeValue">13</span>
@@ -2447,40 +2440,40 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
           </div>
           <div class="terminal-footbar">
-            <span class="terminal-foot-status">
+            <span class="terminal-foot-status" style="display:none">
               <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
             </span>
-            <span id="terminalFootCache" class="terminal-foot-cache" hidden>缓存 78%</span>
+            <span id="terminalFootCache" class="terminal-foot-cache" hidden></span>
             <span class="terminal-foot-spacer"></span>
-            <span class="terminal-foot-stats" id="terminalFootStats">
-              <span class="terminal-foot-requests" id="terminalFootRequests">14 次请求</span>
+            <span class="terminal-foot-stats" id="terminalFootStats" hidden>
+              <span class="terminal-foot-requests" id="terminalFootRequests"></span>
               <span class="terminal-foot-tokens-wrap">
-                <span class="terminal-foot-tokens" id="terminalFootTokens">Prompt: 128,460 · Completion: 31,204 · Cached: 96,080</span>
+                <span class="terminal-foot-tokens" id="terminalFootTokens"></span>
                 <span class="stats-tooltip terminal-foot-tip" id="terminalFootTokensTip" role="tooltip"></span>
               </span>
             </span>
           </div>
         </section>
 
-        <aside class="terminal-inspector" id="terminalInspector" aria-label="终端状态">
+        <aside class="terminal-inspector" id="terminalInspector" aria-label="终端状态" style="display:none">
           <div class="terminal-inspector-head">
             <div>
               <span class="terminal-inspector-eyebrow-row">
                 <span class="terminal-eyebrow">当前终端</span>
               </span>
-              <h2 id="terminalInspectorTitle">payment-service</h2>
+              <h2 id="terminalInspectorTitle"></h2>
             </div>
             <button type="button" class="icon-btn terminal-inspector-toggle" id="terminalInspectorToggle" title="收起状态面板" aria-label="收起状态面板" aria-expanded="true">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
             </button>
           </div>
           <div class="terminal-inspector-body" id="terminalInspectorBody">
-            <div class="terminal-live-status is-working" id="terminalLiveStatus">
+            <div class="terminal-live-status" id="terminalLiveStatus">
               <span class="terminal-live-icon"><i></i></span>
-              <div><strong id="terminalLiveTitle">生成中</strong><span id="terminalLiveDetail">1 个请求进行中</span></div>
+              <div><strong id="terminalLiveTitle"></strong><span id="terminalLiveDetail"></span></div>
             </div>
 
-            <div class="terminal-inspector-section terminal-metrics-section" id="terminalMetricsSection">
+            <div class="terminal-inspector-section terminal-metrics-section" id="terminalMetricsSection" hidden>
               <div class="terminal-metric-grid">
                 <div class="terminal-metric terminal-metric-ttft">
                   <span class="terminal-metric-label">首字响应时间</span>
@@ -2520,7 +2513,7 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
 
             <div class="terminal-inspector-section">
-              <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-count" id="terminalRequestCount">3</span></div>
+              <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-count" id="terminalRequestCount"></span></div>
               <div class="terminal-request-list" id="terminalRequestList"></div>
             </div>
           </div>

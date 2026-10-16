@@ -6473,11 +6473,14 @@ async function api(method, path, body) {
     restoreTerminalFontSize();
     // 不再先渲 mock：降级态只给真空态（renderTerminalUnavailableState），就绪
     // 与否由连接通路的成功/失败分支落定——失败分支会重落空态，不再静默。
+    // 首连发出前先同步落一次 pending 态：静态 HTML 已按骨架直出，这一道是缓存
+    // 错位保险——浏览器拿到旧缓存 HTML（自更新窗口）时，脚本运行一刻也会收走
+    // 设计稿种子，首连飞行期画面不依赖任何网络时序。
+    renderTerminalPendingState();
     syncTerminalAddBtn();
     fetchTerminalDefaultCwd();
     connectTerminalBackend();
     loadInstalledTerminalAgents(); // 启动即预热新建菜单的启动方式列表，点「+」即弹不等探测
-    if (terminalBackendReady) renderTerminalPreviewSession();
     if (!terminalPollTimer) {
       // 初值按"当下"起步：常驻隐藏的环境里这不是转折，兜底拍不该把终端页拆成空白。
       terminalVisibilityWasHidden = document.hidden;

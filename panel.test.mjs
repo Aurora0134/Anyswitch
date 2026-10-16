@@ -2933,7 +2933,9 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes('id="terminalSessionTokens"'), "tokens 行已移出侧栏");
     const footbar = panelHtml.slice(panelHtml.indexOf('class="terminal-footbar"'), panelHtml.indexOf('id="terminalInspector"'));
     assert.ok(footbar.includes('id="terminalFootStats"') && footbar.includes('id="terminalFootRequests"') && footbar.includes('id="terminalFootTokens"'), "底栏右侧承载请求数与 tokens");
-    assert.ok(footbar.includes("Prompt:") && footbar.includes("Cached:"), "底栏 tokens 与看板同口径");
+    // tokens 字串的看板同口径只存在于 JS 构造源：静态稿改 pending 骨架后底栏不再携带样例值
+    assert.ok(panelJs.includes("tokens: `Prompt: ${fmt(tokens.prompt)} · Completion: ${fmt(tokens.completion)} · Cached: ${fmt(tokens.cached)}`"),
+      "底栏 tokens 与看板同口径");
     assert.ok(!footbar.includes("可输入"), "底栏移除纯装饰占位");
     assert.ok(panelJs.includes("个请求进行中"), "实况行报告在途请求数事实");
     assert.ok(panelJs.includes("当前没有进行中的请求"), "空闲实况只报告无在途请求");
@@ -8154,6 +8156,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function fetchTerminalDefaultCwd() {}
       function connectTerminalBackend() {}
       function renderTerminalPreviewSession() {}
+      function renderTerminalPendingState() {}
       function syncTerminalActivityStream() {}
       function pollTerminalSessions() {}
       function nudgeTerminalFontSize() {}
@@ -9713,6 +9716,31 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     const catchBranch = connect.slice(connect.indexOf(".catch("));
     assert.ok(catchBranch.includes("terminalBackendReady = false"), "失败分支置回未就绪");
     assert.ok(catchBranch.includes("renderTerminalUnavailableState();"), "失败分支必调空态渲染");
+  });
+
+  it("源钉死：终端区静态直出 pending 骨架，设计稿假页签从 HTML 退场", () => {
+    // 修的是「就绪但零会话」态的常驻假页签：renderTerminalPreviewTabs 的指纹初值是
+    // 空串，零会话渲染结果也是空串，两者相等即跳过 innerHTML 赋值——静态 HTML 若
+    // 携带种子页签，DOM 与指纹从第一帧起就不一致，任何渲染通路都清不掉它们。静态
+    // 稿改成空骨架后「指纹 = DOM 现值」从首帧成立；init 的 pending 先落是缓存错位
+    // 保险（旧缓存 HTML 带种子时，脚本运行一刻清场并重置指纹）。
+    const init = extractFn("initTerminalPreview");
+    const pendingAt = init.indexOf("renderTerminalPendingState();");
+    const connectAt = init.indexOf("connectTerminalBackend();");
+    assert.ok(pendingAt > -1 && pendingAt < connectAt, "首连发出前先同步落 pending 态");
+    assert.ok(!init.includes("if (terminalBackendReady) renderTerminalPreviewSession();"),
+      "初始化尾部的恒假就绪渲染退役（就绪只可能由连接通路落定）");
+    for (const ghost of ["payment-service", "portal"]) {
+      assert.ok(!panelHtml.includes(ghost), `设计稿假数据「${ghost}」不再出现在静态 HTML`);
+    }
+    assert.ok(panelHtml.includes('class="terminal-workspace is-empty"'), "工作区静态即收单列");
+    assert.ok(panelHtml.includes('class="terminal-session-bar" style="display:none"'),
+      "会话栏静态隐藏（与 setTerminalSessionChromeVisible 同一开关）");
+    assert.ok(panelHtml.includes('id="terminalInspector" aria-label="终端状态" style="display:none"'), "监测区静态隐藏");
+    assert.ok(panelHtml.includes('id="terminalFootStats" hidden'), "底栏统计静态隐藏");
+    assert.ok(panelHtml.includes('id="terminalMetricsSection" hidden'), "指标区静态隐藏");
+    assert.ok(panelHtml.includes('<div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话"></div>'),
+      "页签栏静态无页签按钮（真实页签一律由会话清单渲染）");
   });
 
   it("源钉死：「+」在降级下禁用，openTerminalPreview 含降级重试分支", () => {
