@@ -723,6 +723,11 @@
   :root[data-ui-version="v2"][data-style="sepia"] .terminal-view { background: var(--surface); }
   :root[data-ui-version="v2"][data-style="saas"] .settings-theme-preview,
   :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }
+  /* 镜像内层画布同换底：本块对调时只同步了预览外壳，视口（镜像克隆真正的承托面）
+     漏同步仍坐 --bg-page，预览与真实看板内容区底色不一致——补齐同值。aurora 照旧
+     摘出（它未参与对调，预览与真实一致）。 */
+  :root[data-ui-version="v2"][data-style="saas"] .settings-mirror-viewport,
+  :root[data-ui-version="v2"][data-style="sepia"] .settings-mirror-viewport { background: var(--surface); }
 
   /* 主题预览镜像的头行克隆：v2 真实看板顶部有 48px 头行（左页题、右 relay 状态条），
      镜像原先只克隆栏+看板，板内顶栏整条缺失（「预览板内顶栏被吞」）。克隆体剥了 id，
@@ -740,6 +745,16 @@
   :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner .view-tabs,
   :root[data-ui-version="v2"][data-style] .settings-mirror-scale .head-inner .head-meta-strip .icon-btn {
     display: none;
+  }
+
+  /* ── 遥测四宫格扁平化（v2，照 sepia 的平样板）：saas 皮肤段的微渐变底 + 顶部内高光是
+     v1 的立体语言，与 v2「页面是平的，浮层才有影」相悖——收为平涂 --surface-sunken
+     （与基座、sepia 同值）、撤内高光。圆角与字距属皮肤语言不动；aurora 按拍板保持
+     现状（玻璃微渐变原样，此处不加 aurora 规则）；v1 零变化（皮肤基座段原样，此处
+     仅 v2 双属性覆写）。镜像克隆同吃这条（类选择器），预览与真实一并转平。 */
+  :root[data-ui-version="v2"][data-style="saas"] .telemetry-card {
+    background: var(--surface-sunken);
+    box-shadow: none;
   }
 
   /* ── 新版界面阶段 3：统计页平铺——同阶段 2 定稿手法（「页面是平的，浮层才有影」） ──

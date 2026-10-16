@@ -5369,6 +5369,8 @@ describe("设置项「UI版本」", () => {
       "terminal-view 同步换（切页不跳变）");
     assert.ok(panelCss.includes('.settings-theme-preview,\n  :root[data-ui-version="v2"][data-style="sepia"] .settings-theme-preview { background: var(--surface); }'),
       "主题预览镜像视口同步换（镜像演示新明暗关系）");
+    assert.ok(panelCss.includes('.settings-mirror-viewport,\n  :root[data-ui-version="v2"][data-style="sepia"] .settings-mirror-viewport { background: var(--surface); }'),
+      "镜像内层画布同步换底（对调时漏同步的一处，补齐后预览承托面与真实内容区同值）");
     assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] body'),
       "aurora 摘出对调（--surface 是半透玻璃料，对调毁玻璃页身层次；页面底即其「面」）");
     // aurora 栏不添底色规则：其栏玻璃规则（backdrop-filter 那条）不含 background，
@@ -5376,6 +5378,18 @@ describe("设置项「UI版本」", () => {
     // v1 零变化：基座 body/rail 底色原样
     assert.ok(/\n  body \{\n    margin: 0; background: var\(--bg-page\);/.test(panelCss), "基座 body 底色原样");
     assert.ok(/:root\[data-ui-version="v2"\] \.rail \{[\s\S]*?background: var\(--surface\);/.test(panelCss), "v2 栏基座底色规则原样（对调由双属性覆写承担）");
+  });
+
+  it("v2 遥测四宫格扁平化：saas 收为平涂撤打光（照 sepia），aurora 与 v1 原样", () => {
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-style="saas"] .telemetry-card {\n    background: var(--surface-sunken);\n    box-shadow: none;\n  }'),
+      "saas 四宫格 v2 平涂 --surface-sunken + 撤内高光");
+    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] .telemetry-card'),
+      "aurora 四宫格保持现状（无 v2 覆写）");
+    assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="sepia"] .telemetry-card'),
+      "sepia 本就是平样板（无需覆写）");
+    // v1 零变化：saas 皮肤段的渐变底 + 顶部内高光原样在册（v2 靠双属性提级覆写）
+    assert.ok(panelCss.includes(':root[data-style="saas"] .telemetry-card {\n  border-radius: var(--radius-md);\n  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-sunken) 100%);\n  box-shadow: inset 0 1px 0 var(--hl-inset);\n}'),
+      "saas 皮肤段四宫格打光规则原样（v1 观感不动）");
   });
 
   it("设置子导航迁入左栏：设置态主 tab 组整组换目录、栏底齿轮换「返回」，首帧与运行时可交棒", () => {
