@@ -713,7 +713,7 @@ function absorbAggregateState(target, source, keep) {
 // Claude client-form labels are derived from process classification. They are
 // independent from the transport used to attribute metrics: Desktop uses the
 // resident relay, while CLI normally uses a per-launch reporter.
-const CLAUDE_SURFACE_LABELS = { cli: "CLI", desktop: "Desktop" };
+const CLAUDE_SURFACE_LABELS = { cli: "TUI", desktop: "Desktop" };
 
 export function claudeSurfaceLabel(surface) {
   if (typeof surface !== "string" || !(surface in CLAUDE_SURFACE_LABELS)) return null;
@@ -739,7 +739,7 @@ export function summarizeClaudeSurfaces(procCounts) {
   const rows = [];
   if (desktopPids.size > 0) rows.push({ surface: "desktop", label: "Desktop", count: 1 });
   const cliCount = [...claudePids].filter((pid) => surfaceByPid.get(pid) === "cli").length;
-  if (cliCount > 0) rows.push({ surface: "cli", label: "CLI", count: cliCount });
+  if (cliCount > 0) rows.push({ surface: "cli", label: "TUI", count: cliCount });
   return rows;
 }
 

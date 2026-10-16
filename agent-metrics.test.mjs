@@ -5166,7 +5166,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
 
   it("exposes the Desktop badge token only for the desktop form", () => {
     assert.equal(claudeSurfaceLabel("desktop"), "Desktop");
-    assert.equal(claudeSurfaceLabel("cli"), "CLI");
+    assert.equal(claudeSurfaceLabel("cli"), "TUI");
     assert.equal(claudeSurfaceLabel(null), null);
   });
 
@@ -5211,7 +5211,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 2, "CLI sessions stay one row per pid");
     assert.deepEqual(card.sessions.map((s) => s.id), ["claude-24956", "claude-24957"]);
-    assert.ok(card.sessions.every((s) => s.surface === "CLI"), "CLI rows carry the client-form badge");
+    assert.ok(card.sessions.every((s) => s.surface === "TUI"), "CLI rows carry the client-form badge");
   });
 
   it("falls back to per-pid rows when the scan carries no command line (tasklist)", async () => {
@@ -5236,7 +5236,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     assert.deepEqual(card.sessions.map((s) => s.id), ["claude-desktop", "claude-24956"],
       "folded row takes the first desktop member's slot");
     assert.equal(card.sessions[0].surface, "Desktop");
-    assert.equal(card.sessions[1].surface, "CLI");
+    assert.equal(card.sessions[1].surface, "TUI");
   });
 
   it("aggregates counters and keeps the freshest telemetry across folded members", async () => {
@@ -5306,7 +5306,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
       card.surfaces,
       [
         { surface: "desktop", label: "Desktop", count: 1 },
-        { surface: "cli", label: "CLI", count: 1 },
+        { surface: "cli", label: "TUI", count: 1 },
       ],
       "并排的 CLI 行不占形态位：这一格只回答「桌面端开着没有」",
     );
@@ -5319,7 +5319,7 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
 
     const card = claude(await collector.getAgentsStatus());
-    assert.deepEqual(card.surfaces, [{ surface: "cli", label: "CLI", count: 1 }], "CLI 形态由进程扫描直接提供");
+    assert.deepEqual(card.surfaces, [{ surface: "cli", label: "TUI", count: 1 }], "CLI 形态由进程扫描直接提供");
   });
 
   it("drops the folded row once every desktop process is gone", async () => {
@@ -6432,7 +6432,7 @@ describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例�
     await settleRound(collector);
     let cc = await claudeCard(collector);
     assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop"], "健康轮：桌面端折叠成一行");
-    assert.equal(cc.surfaces.find((s) => s.label === "CLI"), undefined, "健康轮一个 CLI 客户端也没有");
+    assert.equal(cc.surfaces.find((s) => s.label === "TUI"), undefined, "健康轮一个 CLI 客户端也没有");
 
     // 探针这一轮不答 → 回落 tasklist：四个进程号全在，命令行一条都没有。
     psAnswer = "";
@@ -6524,7 +6524,7 @@ describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例�
     const cc = await claudeCard(collector);
     assert.deepEqual(cc.instances.map((i) => i.id), ["claude-desktop", `claude-${ENGINE_A}`],
       "真 CLI 从桌面行里分出去");
-    assert.equal(cc.instances[1].surface, "CLI", "分型由本轮命令行决定");
+    assert.equal(cc.instances[1].surface, "TUI", "分型由本轮命令行决定");
   });
 
   it("终端里经 node 起的 claude 仍标明 CLI 形态", async () => {
@@ -6535,8 +6535,8 @@ describe("进程扫描降级轮沿用上一轮可信分型，不造幽灵实例�
 
     const cc = await claudeCard(collector);
     assert.deepEqual(cc.instances.map((i) => i.id), ["claude-4321"]);
-    assert.equal(cc.instances[0].surface, "CLI", "读得出命令行且不在桌面形状里＝CLI");
-    assert.deepEqual(cc.surfaces, [{ surface: "cli", label: "CLI", count: 1 }]);
+    assert.equal(cc.instances[0].surface, "TUI", "读得出命令行且不在桌面形状里＝CLI");
+    assert.deepEqual(cc.surfaces, [{ surface: "cli", label: "TUI", count: 1 }]);
   });
 
   it("沿用有时限：降级持续过窗口后不再猜形态，可信轮回来即恢复折叠", async () => {

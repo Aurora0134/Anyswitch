@@ -977,7 +977,7 @@ describe("claude 常驻中继流量按连接属主进程落会话行", () => {
       t += 3000;
       const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
       assert.deepEqual(card.sessions.map((s) => s.id), ["claude-4321"], "CLI 行保持逐 PID 身份");
-      assert.equal(card.sessions[0].surface, "CLI", "CLI 行标明客户端形态");
+      assert.equal(card.sessions[0].surface, "TUI", "CLI 行标明客户端形态");
       assert.equal(card.instances[0].clientForm, "cli");
       assert.equal(card.instances[0].transport, "resident");
       assert.equal(card.instances[0].identitySource, "socket-pid");
