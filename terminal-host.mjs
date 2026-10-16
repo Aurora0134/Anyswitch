@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import * as pty from "node-pty";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
@@ -265,6 +265,19 @@ const STATE_RENAME_RETRY_BASE_MS = 25;
 
 const waitMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// 默认树杀实现：taskkill /T /F 整棵树连根拔。宿主拥有会话时就拥有「这棵树
+// 该在哪天死」的决定权，关伪控制台只是给守规矩的进程一个优雅退出的机会，
+// 解耦进程必须由宿主亲手终结。杀失败（进程刚好自己退了、权限不够）只记日志
+// 不抛——关闭路径的语义是「尽力终结」，一个杀不动的进程不值得把 close 打成 500。
+function defaultKillTree(pid) {
+  return new Promise((resolve) => {
+    execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, (error) => {
+      if (error) console.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
+      resolve();
+    });
+  });
+}
+
 async function renameWithRetry(temp, target) {
   let lastError;
   for (let attempt = 0; attempt <= STATE_RENAME_RETRY_ATTEMPTS; attempt += 1) {
@@ -307,6 +320,16 @@ export function createTerminalHost({
   // TUI 拆块输出的间隔）。测试可注入小值或 0；用 ?? 而非 || 默认值，0 是合法
   // 值（下一个宏任务即冲刷）。
   sseCoalesceWindowMs = 16,
+  // 关闭路径的进程树终结（2026-10-16 幽灵 kimi 病灶的修法）。pty.kill 在
+  // ConPTY DLL 模式下只销毁输入句柄＋关伪控制台，与控制台生命周期解耦的进程
+  // （kimi 的 node 主进程）不会随它退——会话记录删了进程还活着，看板卡永远
+  // 失去关闭入口。宿主是会话的拥有者，「进程死没死」不能外包给 node-pty 的
+  // 内部行为：树杀直接对登记的 shell pid 动手，父子链不随控制台解耦而断。
+  // 测试注入记录桩，不动真进程。
+  killTreeFn = defaultKillTree,
+  // 树杀前的误杀闸：pid 可被系统复用，「宁漏勿错」。复活判据复用 relay 的
+  // 死活探针（原生 kill(0) + tasklist 交叉验证），测试注入布尔桩控制死活。
+  isAliveFn = (pid) => probePidLiveness(pid) === "alive",
 } = {}) {
   const dataRoot = root || join(process.env.LOCALAPPDATA || process.cwd(), "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
@@ -410,6 +433,18 @@ export function createTerminalHost({
           bufferBytes: buffer.reduce((total, chunk) => total + chunkBytes(String(chunk)), 0),
           screen: createScreenMirror({ cols: item.cols || 120, rows: item.rows || 34 }),
         };
+        // 上一代宿主留下的泄漏清扫：带一键启动标记的会话，其登记的 shell pid
+        // 若还活着，就是「会话记录删了/宿主换了代、控制台解耦的 agent 没跟着
+        // 退」的幽灵实证（2026-10-16 幽灵 kimi：会话早已不在任何面板，node 主
+        // 进程 8756 挂着跑了 65 分钟）。杀树是恢复时的唯一兜底——本代的三条
+        // 关闭路径已堵住复发，这里收的是历史遗留与宿主崩溃两类漏网。纯外壳
+        // 会话（无 agentId）的面不同：控制台死亡时 shell 必随之死，不存在
+        // 泄漏面，不碰。pid 已死的也不碰（pid 复用，宁漏勿错）。
+        if (item.agentId && Number.isInteger(item.pid) && item.pid > 0 && isAliveFn(item.pid)) {
+          killTreeFn(item.pid).catch((error) => {
+            logger.warn?.(`[terminal-host] restore sweep pid=${item.pid} failed: ${error.message}`);
+          });
+        }
         // Rebuild the rendered picture from the durable tail. The tail is trimmed,
         // so a restored session repaints approximately — no worse than replaying
         // those same bytes raw, and it gets exact again on the next output chunk.
@@ -464,6 +499,22 @@ export function createTerminalHost({
     // spawn 落定了 pid 与运行状态（新建与 restart 共用这条路径）：置脏。
     markStateDirty();
     persistNow();
+  }
+
+  // 终结一个会话的进程树：先 pty.kill 关伪控制台（守规矩的进程拿
+  // CTRL_CLOSE 优雅退出），再对登记的 shell pid 树杀（控制台解耦的进程由这
+  // 一步终结）。闸是「会话登记的 shell 还在」——pty 置空（onExit 已跑）或
+  // pid 已死的会话不碰：pid 可被系统复用，那棵树已不归本会话管，宁漏勿错。
+  async function terminateSessionTree(session) {
+    if (!session?.pty || !Number.isInteger(session.pid) || session.pid <= 0) return;
+    try {
+      session.pty.kill();
+    } catch {
+      /* 已经死了的 pty 杀第二次不拦后面的树杀 */
+    }
+    const shellPid = session.pid;
+    if (!isAliveFn(shellPid)) return;
+    await killTreeFn(shellPid);
   }
 
   function spawnSession(session) {
@@ -641,11 +692,9 @@ export function createTerminalHost({
       if (url.pathname === "/terminal/sessions/clear-all" && req.method === "POST") {
         let cleared = 0;
         for (const session of [...sessions.values()]) {
-          try {
-            session.pty?.kill();
-          } catch {
-            /* already gone */
-          }
+          // 清场同样走树杀：relay 收到 200 就杀宿主子进程，任何一个会话的控制台
+          // 解耦进程漏网，relay 重启后它就成了一代新幽灵。
+          await terminateSessionTree(session);
           for (const listener of session.listeners) listener(null);
           session.listeners.clear();
           sessions.delete(session.id);
@@ -712,7 +761,9 @@ export function createTerminalHost({
         if (body?.env !== undefined && body.env !== null) {
           session.env = mergeInjectedEnv(session.env ?? {}, normalizeInjectedEnv(body.env) ?? {});
         }
-        if (session.pty) session.pty.kill();
+        // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
+        // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
+        await terminateSessionTree(session);
         session.exitCode = null;
         session.buffer = [];
         session.bufferBytes = 0;
@@ -725,7 +776,7 @@ export function createTerminalHost({
         return json(res, 200, snapshot(session));
       }
       if (action === "close" && req.method === "POST") {
-        session.pty?.kill();
+        await terminateSessionTree(session);
         sessions.delete(session.id);
         // 会话从内存表移除是删除级变化：置脏后等这笔写落定再答——响应到达时
         // 盘上已经没有这个会话（与旧同步写的外部时序契约一致）。写失败走 500

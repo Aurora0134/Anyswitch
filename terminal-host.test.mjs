@@ -1328,3 +1328,210 @@ test("installTerminalHostFaultHandlers never throws on an unwritable log path", 
     handle.dispose();
   }
 });
+
+
+// ---------------------------------------------------------------------------
+// 关闭路径的进程树终结。病灶（2026-10-16 幽灵 kimi 实证）：close 只调
+// pty.kill()，而 ConPTY 的 DLL 模式 kill 只销毁输入句柄＋关伪控制台——kimi 的
+// node 主进程与控制台生命周期解耦，会话记录删了、页签没了，进程还挂在看板
+// 卡上永「待命」，用户找不到任何关它的入口。修法是宿主收回「进程死没死」的
+// 所有权：close / clear-all / restart 统一走「pty.kill 关控制台 → 对登记的
+// shell pid 树杀」，树杀不依赖 node-pty 内部行为（父子链不随控制台解耦而断）。
+// 测试注入 killTreeFn（记录 pid 列表，不动真进程）与 isAliveFn（控制 pid 死活）。
+
+test("close 路由在 pty.kill 之后对会话 shell 树杀，会话照常删除", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-"));
+  const { ptyModule } = capturingPtyModule();
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "树杀", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    const shellPid = created.pid;
+    const res = await fetch(url(`/terminal/sessions/${created.id}/close`), {
+      method: "POST", headers: headers(host),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(killed, [shellPid], "close 必须对登记的 shell pid 补树杀");
+    assert.equal(host.sessions.has(created.id), false, "会话照常从表里删除");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("shell 已先退（pty=null）的会话 close 不做树杀——pid 可能已复用，宁漏勿错", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-skip-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "先退", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    calls[0].pty.kill();
+    const res = await fetch(url(`/terminal/sessions/${created.id}/close`), {
+      method: "POST", headers: headers(host),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(killed, [], "pty 已置空的会话不许碰它留下的 pid");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart 在新 spawn 前对旧 shell 树杀，控制台解耦的旧 agent 不双开", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-restart-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "重启", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    const oldPid = created.pid;
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host), body: "{}",
+    }).then((r) => r.json());
+    assert.deepEqual(killed, [oldPid], "restart 前必须先终结旧 shell 的树");
+    assert.equal(calls.length, 2, "restart 照旧重 spawn");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("clear-all 对每个存活会话树杀，清场后不留控制台解耦的进程", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-clear-"));
+  const { ptyModule } = capturingPtyModule();
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0, ptyModule, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    for (const label of ["甲", "乙"]) {
+      await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label, cwd: root, shell: "cmd" }),
+      }).then((r) => r.json());
+    }
+    const res = await fetch(url("/terminal/sessions/clear-all"), {
+      method: "POST", headers: headers(host),
+    }).then((r) => r.json());
+    assert.equal(res.cleared, 2);
+    assert.deepEqual(killed, [4321, 4321], "两个会话的 shell 各吃一次树杀（FakePty pid 相同）");
+    assert.equal(host.sessions.size, 0, "会话表清空");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时一键启动会话的进程还活着→杀树后按已退出恢复（幽灵根治）", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-reap-"));
+  const ghostShellPid = 19596;
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "ghost-session-1", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: ghostShellPid, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null,
+      agentId: "kimi", agentName: "Kimi Code",
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: (pid) => pid === ghostShellPid,
+  });
+  try {
+    assert.deepEqual(killed, [ghostShellPid], "恢复即对上代泄漏的 shell 树杀");
+    const session = host.sessions.get("ghost-session-1");
+    assert.equal(session.pty, null, "恢复的会话保持已退出态，不自动复活");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时进程已死（pid 可能已被复用）→ 不树杀，纯按已退出恢复", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-dead-"));
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "dead-session", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: 99999, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null, agentId: "kimi", agentName: "Kimi Code",
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => false,
+  });
+  try {
+    assert.deepEqual(killed, [], "死 pid 不许碰");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("纯外壳会话（无 agentId）即使 pid 活着也不树杀——泄漏面只属一键启动会话", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-plain-"));
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "plain-shell", label: "终端", cwd: root, shell: "powershell",
+      pid: 4321, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null,
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+  });
+  try {
+    assert.deepEqual(killed, [], "纯外壳不在清扫面内");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
