@@ -4903,6 +4903,76 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
     assert.ok(panelJs.includes('$("storeDiffMask").classList.contains("show")) closeStoreDiffModal()'),
       "Esc 关闭（判 show 态）");
   });
+
+  // 逐渠道刷完即时上屏：后端本就是一渠道一请求、发现完即落盘，前端此前把唯一一次
+  // 重渲压在整轮循环之外，行/详情卡要等全部渠道跑完才更新。
+  it("逐渠道刷完即时上屏：内层循环里取最新状态重渲，不攒到整轮结束", () => {
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const innerStart = fn.indexOf("for (const id of unit.ids)");
+    assert.ok(innerStart >= 0, "逐渠道内层循环存在");
+    const inner = fn.slice(innerStart, fn.indexOf("refreshDiffUnits.push({", innerStart));
+    assert.ok(inner.includes("await refreshStoreModelsView()"), "每个渠道刷完立刻上屏");
+    assert.ok(inner.indexOf("markStoreNewModels(") < inner.indexOf("await refreshStoreModelsView()"),
+      "先登记待读新增再上屏，高亮才带得出来");
+    assert.ok(fn.includes("await refreshStoreState()"), "收尾仍走整轮全量重渲（列表行/路由链归位）");
+    const viewStart = panelJs.indexOf("function refreshStoreModelsView()");
+    assert.ok(viewStart >= 0, "轻量上屏函数存在");
+    const view = panelJs.slice(viewStart, panelJs.indexOf("// 渠道配置读不出来时的四种情形", viewStart));
+    assert.ok(view.includes('api("GET", "/api/store/state")'), "上屏只取渠道状态");
+    assert.ok(view.includes("renderStoreOverview()") && view.includes("renderStoreDetail()"),
+      "只重渲总览计数与详情卡模型列表");
+    assert.ok(!view.includes("renderStoreList()") && !view.includes("renderRouteChains()"),
+      "列表行与路由链与模型缓存无关，不重渲");
+    assert.ok(view.includes("storeRefreshChain.then("), "并入同一条串行链，旧响应不盖新状态");
+    assert.ok(panelJs.includes("function applyStoreState("), "状态落库/reconcile 抽出共用");
+    assert.equal((panelJs.match(/applyStoreState\(res\);/g) || []).length, 2, "两条取状态路径共用 reconcile");
+  });
+
+  it("本轮在途不消费新增高光，收尾全量重渲才消费", () => {
+    const detailStart = panelJs.indexOf("function renderProviderDetail(");
+    const detail = panelJs.slice(detailStart, panelJs.indexOf("function bindStoreDetail(", detailStart));
+    assert.ok(detail.includes("if (highlight && !storeRefreshInFlight) consumeStoreNewModels(p.id)"),
+      "在途期间只渲染不消费（逐渠道上屏反复重渲不会抹掉焦点渠道的高光）");
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const onAt = fn.indexOf("storeRefreshInFlight = true");
+    const offAt = fn.indexOf("storeRefreshInFlight = false");
+    const finalAt = fn.indexOf("await refreshStoreState()");
+    assert.ok(onAt >= 0 && onAt < offAt, "整轮开始置在途标记");
+    assert.ok(offAt >= 0 && offAt < finalAt, "撤标记在收尾重渲之前，收尾那次才消费");
+    assert.equal((fn.match(/storeRefreshInFlight = false/g) || []).length, 2, "收尾与中断各撤一次");
+  });
+
+  it("号池刷新小字保持池粒度：刷期间不逐成员替换，池聚合落单元收尾", () => {
+    const fnStart = panelJs.indexOf("async function storeRefresh(");
+    const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
+    const innerStart = fn.indexOf("for (const id of unit.ids)");
+    const inner = fn.slice(innerStart, fn.indexOf("refreshDiffUnits.push({", innerStart));
+    assert.ok(inner.includes("await refreshStoreModelsView()"), "逐渠道上屏保留（行为逐成员，文案不逐成员）");
+    assert.ok(!inner.includes("setStoreRefreshStatus"), "刷期间不逐成员替换小字");
+    assert.ok(!inner.includes("lastTail"), "内层循环不更新 tail，池名持续到单元收尾");
+    assert.ok(!panelJs.includes("chanResultHtml"), "逐成员结果渲染助手已撤，无死代码残留");
+    assert.ok(fn.includes("? `${escapeHtml(unit.label)} ${storeAggregateHtml(uAdded, uPruned, uFail)}`"),
+      "单元收尾仍落池聚合，完成态 tail 用池口径");
+    assert.ok(fn.includes('if (!wholeLabel) setStoreRefreshStatus("正在刷新..", "busy", lastTail)'),
+      "号池详情路径单元收尾同样不覆盖，完成态才落池结果");
+  });
+
+  it("「手动添加」草稿跨重渲保留，换渠道丢弃", () => {
+    const start = panelJs.indexOf("function captureStoreManualDraft(");
+    assert.ok(start >= 0, "草稿存取函数存在");
+    const cap = panelJs.slice(start, panelJs.indexOf("function renderStoreDetail()", start));
+    assert.ok(cap.includes("storeDetailRenderedId"), "草稿记所属渠道");
+    assert.ok(cap.includes("el.selectionStart") && cap.includes("document.activeElement === el"),
+      "连光标与焦点一起存");
+    const detailStart = panelJs.indexOf("function renderStoreDetail()");
+    const detail = panelJs.slice(detailStart, panelJs.indexOf("function renderPoolDetail(", detailStart));
+    assert.ok(detail.indexOf("captureStoreManualDraft()") < detail.indexOf("renderPoolDetail(row)"),
+      "渲染前先存草稿（池详情会先重建外层容器）");
+    assert.ok(detail.includes("restoreStoreManualDraft(draft, storeDetailRenderedId)"), "渲染后按渠道恢复");
+    assert.ok(panelJs.includes("if (!draft || draft.providerId !== renderedId) return;"), "换渠道不搬草稿");
+  });
 });
 
 describe("设置项「注入推理强度」", () => {
