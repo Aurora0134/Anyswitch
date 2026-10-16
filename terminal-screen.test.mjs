@@ -145,6 +145,50 @@ test("回放不得沿空行级联背景色（OpenCode 整屏污染形态）", ()
   }
 });
 
+test("扩展色按赋值语义替换旧色：回放不得把历史颜色累积成超长 SGR", () => {
+  // dsh 状态栏一帧连设 7 种前景色且中途不复位。镜像若把每条设色当叠加，回放会把
+  // 整串颜色拼进一条 SGR（35 参数）——超过 xterm 的 32 参数上限后被截，末尾
+  // 38;2 缺 RGB 按零补齐解析成纯黑（2026-10-17 dsh 切回「近白灰字变黑」取证）。
+  const mirror = createScreenMirror({ cols: 30, rows: 4 });
+  const colors = ["10;20;30", "20;30;40", "30;40;50", "40;50;60", "50;60;70", "60;70;80", "170;178;194"];
+  for (const c of colors) mirror.write(`\u001b[38;2;${c}m`);
+  mirror.write("X");
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("38;2;170;178;194m"), "回放必须保留最后一次设置的颜色");
+  assert.ok(!replay.includes("38;2;10;20;30"), "被替换的旧颜色不得残留在回放里");
+  for (const m of replay.matchAll(/\u001b\[[0-9;]*m/g)) {
+    assert.ok(m[0].split(";").length - 1 <= 32, `单条 SGR 参数不得超过 xterm 的 32 上限：${m[0].slice(0, 60)}…`);
+  }
+});
+
+test("背景扩展色同样替换：旧背景不得顶掉新背景", () => {
+  const mirror = createScreenMirror({ cols: 20, rows: 2 });
+  mirror.write("\u001b[48;2;9;9;9m\u001b[48;2;170;178;194m ");
+  assert.equal(mirror.screenAttrs()[0][0].bg, "48;2;170;178;194", "新背景必须生效（不得被旧背景顶掉）");
+  assert.ok(mirror.toReplay().includes("48;2;170;178;194"), "回放必须带新背景");
+});
+
+test("扩展色与基础色互相替换：同槽只留一个颜色 token", () => {
+  const toExtended = createScreenMirror({ cols: 20, rows: 2 });
+  toExtended.write("\u001b[41m\u001b[48;2;9;9;9m ");
+  assert.equal(toExtended.screenAttrs()[0][0].bg, "48;2;9;9;9", "扩展背景到达要摘掉基础背景");
+
+  const toBasic = createScreenMirror({ cols: 20, rows: 2 });
+  toBasic.write("\u001b[48;2;7;7;7m\u001b[41m ");
+  assert.equal(toBasic.screenAttrs()[0][0].bg, "41", "基础背景到达要摘掉扩展背景");
+});
+
+test("CSI s/u 保存恢复后再设色：恢复色不得残留在新色的 SGR 里", () => {
+  const mirror = createScreenMirror({ cols: 20, rows: 2 });
+  mirror.write("\u001b[38;2;10;20;30m\u001b[s");
+  mirror.write("\u001b[38;2;60;70;80mX");
+  mirror.write("\u001b[u");
+  mirror.write("Y");
+  mirror.write("\u001b[38;2;70;80;90mZ");
+  const replay = mirror.toReplay();
+  assert.ok(!replay.includes("38;2;10;20;30;38;2;70;80;90"), "恢复后再设色不得把恢复色拼进同一条 SGR");
+});
+
 test("非备屏会话的回放逐字节不变（回归金样，防误伤普通路径）", () => {
   // 金样由改动前实现生成（12x3、两行内容）：非备屏路径的格式任何变化都应显式过审。
   // 2026-10-16 过审变更：每行序列化结尾追加 \u001b[0m 复位——否则下一行 EL 的 BCE
