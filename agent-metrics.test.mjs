@@ -5148,10 +5148,18 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     assert.equal(claudeDesktopForm(SHELL), "desktop");
     assert.equal(claudeDesktopForm(`${SHELL} --type=renderer`), "desktop");
     assert.equal(claudeDesktopForm(`"${SHELL}"`), "desktop");
-    // 桌面托管引擎的三个根（3p 真机取证 claude-code\2.1.246\claude.exe）
+    // 桌面托管引擎的三个根（3p 真机旧布局取证 claude-code\2.1.246\claude.exe）
     assert.equal(claudeDesktopForm(ENGINE_3P), "desktop");
     assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
     assert.equal(claudeDesktopForm("C:\\Users\\u\\.claude\\claude-code\\2.1.246\\claude.exe"), "desktop");
+    // 新布局（Desktop 2.37337.1.0 / 引擎 2.1.295 真机取证）：semver 与 exe 之间
+    // 垫一层构建哈希目录（claude-code\2.1.295\d2e29494ec83\claude.exe），三个根同
+    // 规则；真实引擎命令行拖着一大串 --flag 尾巴，照样命中
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.295\\d2e29494ec83\\claude.exe"), "desktop");
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude\\claude-code\\2.1.295\\4b49b5f1c422\\claude.exe"), "desktop");
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\.claude\\claude-code\\2.1.295\\d2e29494ec83\\claude.exe --output-format stream-json"), "desktop");
+    // 至多垫一层：更深的嵌套不在白名单形状内，退回逐 PID 旧行
+    assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.295\\d2e29494ec83\\nested\\claude.exe"), null);
     // npm 全局 CLI：claude-code 的下一段是 bin 而非 semver —— 不折
     assert.equal(claudeDesktopForm("C:\\Users\\u\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"), null);
     // 引擎根锚定用户目录布局：%LOCALAPPDATA%\claude 根照样折
@@ -5199,6 +5207,32 @@ describe("claude desktop form folding (MSIX shell + managed engine → one claud
     const card = claude(await collector.getAgentsStatus());
     assert.equal(card.sessionsCount, 1, "two engine processes are one desktop session row");
     assert.equal(card.sessions[0].id, "claude-desktop");
+  });
+
+  it("folds the hash-directory engine layout (Desktop ≥2.37337) into the desktop row, traffic included", async () => {
+    // 2026-10-30 报障：新版 Desktop（本机 2.37337.1.0 / 引擎 2.1.295）把引擎落盘改为
+    // <根>\claude-code\<semver>\<12 位构建哈希>\claude.exe，旧白名单要求 semver 段后
+    // 紧跟 exe，分型落空 → 真正发请求的引擎进程被正证标成 CLI 单独成行，桌面行只剩
+    // 壳、零请求——「一个 Desktop 两张卡、流量全走 CLI 卡」。本例钉住修复后的整链：
+    // 壳 + 新布局引擎折成一张桌面行，引擎的流量计入该行。
+    const ENGINE_HASH = "C:\\Users\\u\\AppData\\Local\\Claude-3p\\claude-code\\2.1.295\\d2e29494ec83\\claude.exe";
+    const csv = wmic([
+      `LAPTOP,${SHELL},Claude.exe,6200`,
+      `LAPTOP,${SHELL} --type=renderer,Claude.exe,6201`,
+      `LAPTOP,${ENGINE_HASH} --output-format stream-json --verbose,claude.exe,6100`,
+    ]);
+    const collector = testCollector({ execFn: (cmd, opts, cb) => cb(null, csv), nowFn: () => 10000 });
+
+    collector.reportSession("token_engine", { pid: 6100, requests: 83, activeRequests: 2 });
+
+    const card = claude(await collector.getAgentsStatus());
+    assert.equal(card.sessionsCount, 1, "壳 + 新布局引擎 = 一张桌面行，不再多出 CLI 行");
+    assert.equal(card.sessions[0].id, "claude-desktop");
+    assert.equal(card.sessions[0].surface, "Desktop");
+    assert.equal(card.sessions[0].requests, 83, "引擎进程的流量折进桌面行");
+    assert.equal(card.sessions[0].status, "active", "在飞请求随折叠行一起呈现");
+    assert.deepEqual(card.surfaces, [{ surface: "desktop", label: "Desktop", count: 1 }],
+      "副行不再报出 CLI 档");
   });
 
   it("keeps npm-CLI claude.exe rows per-pid — old behavior verbatim", async () => {
