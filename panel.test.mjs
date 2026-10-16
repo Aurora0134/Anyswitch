@@ -3124,6 +3124,32 @@ describe("panel.html 设置全页视图", () => {
     assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
   });
 
+  it("亮暗钮日/月 SVG 按主题摘挂 hidden attribute（SVG 无 hidden IDL 反射，.hidden= 只写 expando）", () => {
+    // 4 处亮暗钮（主头行/设置头行/终端页/v2 栏底）同一状态源：initTheme 的 syncBtns 一处收口。
+    // hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上 .hidden = 只写 expando 不落 attribute，
+    // UA 的 [hidden] 规则永不生效，图标永远停在 HTML 初态（与栏收展钮同款病、同款修法）。
+    const theme = panelJs.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(theme, "initTheme found in panel.js");
+    assert.ok(theme[1].includes('t.sun.toggleAttribute("hidden", !dark)'), "暗态摘太阳走 attribute");
+    assert.ok(theme[1].includes('t.moon.toggleAttribute("hidden", dark)'), "暗态挂月亮走 attribute");
+    assert.ok(!/t\.(sun|moon)\.hidden =/.test(theme[1]),
+      "亮暗钮 SVG 的 .hidden = 写法已清除（对 SVG 只写 expando、不落 attribute，图标永不翻转）");
+    // HTML 初态与默认主题一致：默认 auto 跟随系统（暗）——暗态图标 = 太阳可见、月亮 hidden，
+    // 主脚本是 defer 外链，首帧只能画静态初态，初态错了首帧必闪错图标
+    for (const [sun, moon] of [["icoSun", "icoMoon"], ["settingsIcoSun", "settingsIcoMoon"], ["terminalIcoSun", "terminalIcoMoon"], ["railIcoSun", "railIcoMoon"]]) {
+      assert.ok(new RegExp(`<svg id="${moon}"[^>]* hidden>`).test(panelHtml), `${moon} 初态带 hidden`);
+      assert.ok(!new RegExp(`<svg id="${sun}"[^>]* hidden>`).test(panelHtml), `${sun} 初态不带 hidden`);
+    }
+    // 托底规则覆盖面：8 颗 SVG 全在 .icon-btn 内（UA 的 [hidden] 规则打不赢 .icon-btn svg 的 display:block，
+    // 必须显式 !important 兜底——选择器若被收窄出 .icon-btn 之外，这 8 颗即失托底）
+    for (const btn of ["themeToggle", "settingsThemeToggle", "terminalThemeToggle", "railThemeToggle"]) {
+      const tag = panelHtml.match(new RegExp(`<button[^>]*id="${btn}"[^>]*>`));
+      assert.ok(tag && /class="icon-btn[ "]/.test(tag[0]), `${btn} 是 .icon-btn，被 svg[hidden] 兜底规则罩住`);
+    }
+    assert.ok(panelCss.includes(".icon-btn svg[hidden] { display: none !important; }"),
+      "svg[hidden] 显式兜底规则在册（罩 4 处按钮 8 颗 SVG）");
+  });
+
   it("「主题」子 tab：左栏三项点选即生效，右栏预览为真实看板镜像", () => {
     const picker = panelHtml.match(/<div class="settings-theme-list" id="stylePicker"[^>]*>([\s\S]*?)<\/div>/);
     assert.ok(picker, "主题列表沿用 stylePicker 锚点");
