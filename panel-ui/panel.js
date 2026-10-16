@@ -9321,11 +9321,15 @@ async function api(method, path, body) {
     if (pct <= 1.00) return "high";
     return "over";
   }
-  // 用「全部预设」正文总长给卡片头占用条上色/出数（与过滤集无关）
+  // 用「至少在 1 个端点注入中」的预设正文总长给卡片头占用条上色/出数（与过滤集无关）：
+  // 被停用、或在全部端点都解除注入的预设不计入。判定复用列表行 n/epTotal 的 presetCountedOn 口径。
   function paintCtxMeter(presets) {
     const meter = $("ctxMeter");
     if (!meter) return;
-    const total = (presets || []).reduce((s, p) => s + presetCharCount(p), 0);
+    const endpoints = (presetsState && presetsState.endpoints) || [];
+    const total = (presets || [])
+      .filter((p) => endpoints.some((ep) => presetCountedOn(p, ep.id)))
+      .reduce((s, p) => s + presetCharCount(p), 0);
     const pct = total / CTX_BUDGET;
     const tier = ctxTierOf(pct);
     meter.setAttribute("data-tier", tier);
@@ -9335,7 +9339,7 @@ async function api(method, path, body) {
     if (totalEl) totalEl.textContent = formatChars(total);
     if (pctEl) pctEl.textContent = Math.round(pct * 100) + "%";
     if (bar) bar.setAttribute("title",
-      `预设注入正文合计 ${total.toLocaleString()} 字，占上下文预算 ${CTX_BUDGET.toLocaleString()} 字的 ${Math.round(pct * 100)}%（${CTX_TIER_NAME[tier]}）`);
+      `注入中的预设正文合计 ${total.toLocaleString()} 字，约为建议上限 ${CTX_BUDGET.toLocaleString()} 字的 ${Math.round(pct * 100)}%；超出仍可正常注入（${CTX_TIER_NAME[tier]}）`);
   }
 
   function renderPresetsList() {

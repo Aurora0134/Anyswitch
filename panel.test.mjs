@@ -4507,7 +4507,7 @@ describe("panel.html 预设管理 tab", () => {
     assert.ok(body.includes("data-preset="), "rows carry the preset id key");
     assert.ok(body.includes("ctx-preset-badge"), "per-preset length badge rendered");
     assert.ok(body.includes("presetBadgeClass"), "length badge tier coloring (green/yellow/red) wired");
-    assert.ok(body.includes("paintCtxMeter(presets)"), "header occupancy meter painted from full preset set");
+    assert.ok(body.includes("paintCtxMeter(presets)"), "header occupancy meter painted from injected presets");
   });
 
   it("detail card renders per-endpoint rows with toggle, status badge and sync-error warning", () => {
