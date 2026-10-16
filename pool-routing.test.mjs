@@ -238,4 +238,35 @@ describe("sticky table", () => {
     assert.equal(table.get("pool", "model"), "prov-a");
     assert.equal(table.consecutive("prov-a", "model"), 0);
   });
+
+  it("a manual member reorder drops the sticky entry (重排即生效)", () => {
+    const table = createStickyTable();
+    // 粘性位钉在原池头 prov-a（历史成功）。
+    table.order("pool", "model", candidates);
+    table.noteSuccess("pool", "model", "prov-a");
+    assert.equal(table.get("pool", "model"), "prov-a");
+    // 用户在面板重排（同一成员集合、新顺序）：粘性位失效，请求回到新池序。
+    const reordered = [candidates[1], candidates[0], candidates[2]];
+    const ordered = table.order("pool", "model", reordered);
+    assert.deepEqual(ordered.map((c) => c.memberId), ["prov-b", "prov-a", "prov-c"]);
+    assert.equal(table.get("pool", "model"), undefined, "reorder must invalidate the sticky entry");
+    // 新池头应答后按新基线重新粘住。
+    table.noteSuccess("pool", "model", "prov-b");
+    assert.equal(table.get("pool", "model"), "prov-b");
+    assert.deepEqual(
+      table.order("pool", "model", reordered).map((c) => c.memberId),
+      ["prov-b", "prov-a", "prov-c"],
+    );
+  });
+
+  it("a candidate-set change is not a reorder: sticky survives if its member stays (集合变化走懒失效)", () => {
+    const table = createStickyTable();
+    table.order("pool", "model", candidates);
+    table.noteSuccess("pool", "model", "prov-a");
+    // 目录漂移使 prov-b 掉出候选（集合变化而非重排）：粘性位 prov-a 保留。
+    const drifted = [candidates[0], candidates[2]];
+    const ordered = table.order("pool", "model", drifted);
+    assert.deepEqual(ordered.map((c) => c.memberId), ["prov-a", "prov-c"]);
+    assert.equal(table.get("pool", "model"), "prov-a");
+  });
 });

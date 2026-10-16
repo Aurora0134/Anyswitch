@@ -11,7 +11,10 @@
 //     and puts it first — but the sticky point only moves past a member that
 //     is FAILING (see POOL_DEMOTE_AFTER_FAILURES below): a single transient
 //     fault fails that one request over without demoting the front member,
-//     mirroring the chain demotion gate (失败才降级，黄灯不降);
+//     mirroring the chain demotion gate (失败才降级，黄灯不降). A manual
+//     reorder of the pool's members (panel write, same members in a new
+//     order) outranks the sticky point: the entry is dropped and routing
+//     follows the new pool order (重排即生效——粘性防抖只盖抖动，不盖用户);
 //   - entries whose member left the candidate set are dropped lazily (member
 //     removed from the pool, model gone, pool deleted);
 //   - channel-level faults (5xx, transport errors surfaced as 502, 429,
@@ -98,10 +101,26 @@ export function createStickyTable() {
   return {
     // Order candidates sticky-first. A sticky entry whose member is no longer
     // a candidate (removed from the pool, lost the model) is dropped lazily
-    // here and the plain pool order is used.
+    // here and the plain pool order is used. A candidate sequence that holds
+    // the SAME members in a DIFFERENT order is a manual reorder of the pool
+    // (panel write): user intent outranks the sticky point, so the entry is
+    // dropped and routing follows the new pool order — the next success
+    // re-sticks under the new baseline. A sequence change that also changes
+    // the member set is catalog drift, not a reorder: the sticky entry stays
+    // (and is lazily dropped only if its own member left the candidates).
     order(poolId, modelId, candidates) {
       const k = key(poolId, modelId);
-      orders.set(k, candidates.map((candidate) => candidate.memberId));
+      const memberIds = candidates.map((candidate) => candidate.memberId);
+      const previous = orders.get(k);
+      if (
+        previous !== undefined &&
+        previous.length === memberIds.length &&
+        memberIds.every((id) => previous.includes(id)) &&
+        previous.some((id, index) => id !== memberIds[index])
+      ) {
+        table.delete(k);
+      }
+      orders.set(k, memberIds);
       const stickyMember = table.get(k);
       if (stickyMember === undefined) return candidates;
       const index = candidates.findIndex((candidate) => candidate.memberId === stickyMember);
