@@ -3124,21 +3124,37 @@ describe("panel.html 设置全页视图", () => {
     assert.equal(svgInner("settingsIcoSun"), svgInner("icoSun"), "太阳图标 path 逐字一致");
   });
 
+  it("4 处亮暗钮日/月图标 path 全部逐字一致（终端页那颗曾抄反最后一条光芒）", () => {
+    // 一致性锁原本只罩主头行↔设置头行两处；终端页与 v2 栏底不在锁内，terminalIcoSun
+    // 的末条光芒 x/y 对调抄反（斜率反向、戳向圆心）多时无人发现。4 处同图，锁全量。
+    function svgInner(id) {
+      const m = panelHtml.match(new RegExp(`<svg id="${id}"[^>]*>([\\s\\S]*?)</svg>`));
+      assert.ok(m, id + " svg found");
+      return m[1];
+    }
+    for (const prefix of ["settings", "terminal", "rail"]) {
+      assert.equal(svgInner(`${prefix}IcoSun`), svgInner("icoSun"), `${prefix}IcoSun 与 icoSun 逐字一致`);
+      assert.equal(svgInner(`${prefix}IcoMoon`), svgInner("icoMoon"), `${prefix}IcoMoon 与 icoMoon 逐字一致`);
+    }
+  });
+
   it("亮暗钮日/月 SVG 按主题摘挂 hidden attribute（SVG 无 hidden IDL 反射，.hidden= 只写 expando）", () => {
     // 4 处亮暗钮（主头行/设置头行/终端页/v2 栏底）同一状态源：initTheme 的 syncBtns 一处收口。
     // hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上 .hidden = 只写 expando 不落 attribute，
     // UA 的 [hidden] 规则永不生效，图标永远停在 HTML 初态（与栏收展钮同款病、同款修法）。
     const theme = panelJs.match(/function initTheme\(\) \{([\s\S]*?)\n  \}/);
     assert.ok(theme, "initTheme found in panel.js");
-    assert.ok(theme[1].includes('t.sun.toggleAttribute("hidden", !dark)'), "暗态摘太阳走 attribute");
-    assert.ok(theme[1].includes('t.moon.toggleAttribute("hidden", dark)'), "暗态挂月亮走 attribute");
+    assert.ok(theme[1].includes('t.sun.toggleAttribute("hidden", dark)'), "暗态摘太阳走 attribute");
+    assert.ok(theme[1].includes('t.moon.toggleAttribute("hidden", !dark)'), "暗态挂月亮走 attribute");
     assert.ok(!/t\.(sun|moon)\.hidden =/.test(theme[1]),
       "亮暗钮 SVG 的 .hidden = 写法已清除（对 SVG 只写 expando、不落 attribute，图标永不翻转）");
-    // HTML 初态与默认主题一致：默认 auto 跟随系统（暗）——暗态图标 = 太阳可见、月亮 hidden，
-    // 主脚本是 defer 外链，首帧只能画静态初态，初态错了首帧必闪错图标
+    // 图标画当前态、文案讲点击后去哪（PANEL-COPY-SPEC）：暗态挂月亮、亮态挂太阳，
+    // aria/title 的「切换到亮/暗色模式」是目标态动作。默认 auto 跟随系统（暗）——暗态
+    // 图标 = 月亮可见、太阳 hidden；主脚本是 defer 外链，首帧只能画静态初态，初态错了
+    // 首帧必闪错图标
     for (const [sun, moon] of [["icoSun", "icoMoon"], ["settingsIcoSun", "settingsIcoMoon"], ["terminalIcoSun", "terminalIcoMoon"], ["railIcoSun", "railIcoMoon"]]) {
-      assert.ok(new RegExp(`<svg id="${moon}"[^>]* hidden>`).test(panelHtml), `${moon} 初态带 hidden`);
-      assert.ok(!new RegExp(`<svg id="${sun}"[^>]* hidden>`).test(panelHtml), `${sun} 初态不带 hidden`);
+      assert.ok(new RegExp(`<svg id="${sun}"[^>]* hidden>`).test(panelHtml), `${sun} 初态带 hidden`);
+      assert.ok(!new RegExp(`<svg id="${moon}"[^>]* hidden>`).test(panelHtml), `${moon} 初态不带 hidden`);
     }
     // 托底规则覆盖面：8 颗 SVG 全在 .icon-btn 内（UA 的 [hidden] 规则打不赢 .icon-btn svg 的 display:block，
     // 必须显式 !important 兜底——选择器若被收窄出 .icon-btn 之外，这 8 颗即失托底）
@@ -8477,7 +8493,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
   });
 
   it("接线结构：新会话初始行列取实测尺寸、inspector 收放补 fit（TUI 溢我方修复）", () => {
-    assert.equal((panelJs.match(/\.\.\.terminalCreateSize\(\)/g) || []).length, 3, "三处会话创建点全部改用实测尺寸");
+    assert.equal((panelJs.match(/\.\.\.terminalCreateSize\(\)/g) || []).length, 2, "两处用户创建点（「+」菜单/一键启动）全部改用实测尺寸（首连自动补建已退役）");
     assert.ok(!panelJs.includes('shell: "powershell", cols: 120'), "创建入参不再硬编码列宽");
     const create = panelJs.match(/function terminalCreateSize\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(create, "terminalCreateSize found in panel.js");
@@ -9590,8 +9606,8 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
 // 降级路径收口：terminal-host 不可达（面板路由 503 terminal_host_unavailable / fetch
 // 直接失败）时，终端页不再把 mock 假会话（假指标/假路由/假请求/假横幅）端给用户，
 // 改给真空态——xterm 区盖空态覆盖层、监测区沿用 hidden 通路、「+」禁用；
-// 重试走空态「重新连接」与进页自动重试。判定键是就绪位本身，不是会话数（零会话会
-// 被 fetch 的自动补建兜住）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
+// 重试走空态「重新连接」与进页自动重试。判定键是就绪位本身，不是会话数（零会话是
+// 就绪下的合法空态，不是降级）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
 describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）", () => {
   function extractFn(name) {
     const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -9837,6 +9853,34 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(state.polled, 1, "成功链路补拍归属轮询");
     assert.equal(state.synced, 1, "成功链路同步活跃真值流");
     assert.deepEqual(state.connected, { id: "t1", backend: true }, "成功链路建流进真会话");
+  });
+
+  it("vm 真跑首连零会话：不自动 POST 新建，就绪位照常落定", async () => {
+    // 真跑源码里的 fetchTerminalSessions（降级沙箱把它桩掉，这里换成抽源码）：零会话
+    // 只 GET 一次后落就绪位，新建只属于用户动作。此前这里会自动 POST 一个空白终端
+    // ——页面加载必经首连，任何页刷新都在零页签时凭空蹦空白页签＋静默起 powershell。
+    const src = panelJs.match(/async function fetchTerminalSessions\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "fetchTerminalSessions found in panel.js");
+    const calls = [];
+    const rebuilt = [];
+    const vm = new Function("api", "rebuildTerminalBackendSessions", "rememberTerminalSessionId", "terminalCwdInitial", "terminalCreateSize", `
+      let terminalBackendReady = false;
+      let activeTerminalPreviewId = null;
+      ${src}
+      return { run: () => fetchTerminalSessions().then(() => terminalBackendReady) };
+    `);
+    const remembered = [];
+    const harness = vm(
+      async (method, path, body) => { calls.push({ method, path, body }); return { sessions: [] }; },
+      (items) => { rebuilt.push(items); },
+      (id) => { remembered.push(id ?? null); },
+      () => "cwd",
+      () => ({ cols: 120, rows: 34 })
+    );
+    const ready = await harness.run();
+    assert.equal(ready, true, "会话列表落地后就绪位照常置位");
+    assert.deepEqual(calls.map((c) => c.method), ["GET"], "零会话只 GET 一次，不自动补建 POST");
+    assert.deepEqual(rebuilt, [[]], "空会话表照常进 rebuild（活动 id 回退归 rebuild 自担）");
   });
 
   it("首连在飞那一帧不落降级空态：静态种子退场、覆盖层不盖，定性失败才落空态", async () => {
@@ -10273,8 +10317,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     // 也绝不落到软件安装目录。前端不再持有写死常量，HTML 输入框不写死 value。
     assert.ok(!panelJs.includes("AppData\\\\Local\\\\Anyswitch\\\\app"), "前端不再写死安装目录作默认");
     assert.ok(!panelHtml.includes("AppData\\Local\\Anyswitch\\app"), "目录输入框不再写死默认值");
-    const fetchCreate = panelJs.match(/if \(!activeTerminalPreviewId\) \{[\s\S]*?\n    \}/)?.[0];
-    assert.ok(fetchCreate?.includes("cwd: terminalCwdInitial()"), "首载自动补建用终端目录解析");
+    const fetchSrc = panelJs.match(/async function fetchTerminalSessions\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(fetchSrc && !fetchSrc.includes('api("POST", "/api/terminal/sessions"'),
+      "首载零会话不自动补建：新建只留用户动作，零页签刷新恢复落空态");
     const confirmSrc = extractFn("confirmTerminalAddMenu");
     assert.ok(confirmSrc.includes("|| terminalCwdInitial()"), "菜单未填目录时回落终端目录解析");
     assert.ok(confirmSrc.includes("rememberTerminalCwd(cwd)"), "确认即记住本次目录");

@@ -5132,7 +5132,7 @@ async function api(method, path, body) {
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     pruneTerminalHollowStreak();
-    // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接与自动补建）都是一轮
+    // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接）都是一轮
     // 新的归属观测——空壳会话计数 +1、有归属会话清零。计数必须跟着数据拍走而非
     // 跟着渲染走：SSE 活跃真值流命中任一会话就会整渲当前会话（renderTerminal-
     // SessionData），那些渲染不带新归属数据，若计数随渲染递增，多开时他端一活跃，
@@ -5166,16 +5166,14 @@ async function api(method, path, body) {
     return { cols: 120, rows: 34 };
   }
 
+  // 零会话不自动补建：新终端只属于用户动作（「+」菜单 / 一键启动 agent），连接与
+  // 刷新恢复在零会话一律落空态。此处曾自动 POST 一个空白终端——页面加载必经这趟
+  // 首连，任何页刷新都会在零页签时蹦出空白页签并静默起一个 powershell（预览期
+  // 「至少留一标签」遗规在连接路径的残部，勿复活）。
   async function fetchTerminalSessions() {
     const data = await api("GET", "/api/terminal/sessions");
     rebuildTerminalBackendSessions(data.sessions);
     terminalBackendReady = true;
-    if (!activeTerminalPreviewId) {
-      const created = await api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd: terminalCwdInitial(), shell: "powershell", ...terminalCreateSize() });
-      rebuildTerminalBackendSessions([...(data.sessions || []), created]);
-      activeTerminalPreviewId = created.id;
-      rememberTerminalSessionId(created.id);
-    }
   }
 
   // 流的生命周期即 xterm 的生命周期，旧连接的一切随关闭一并销毁。此前复用
@@ -5941,7 +5939,7 @@ async function api(method, path, body) {
   // 分支与徽标只认归一后的词。
   let terminalHostState = "unknown";
   // 起停在飞标志：一轮起停未落地前按住页头起停钮（轮询每拍重算可用态，不压住会重复
-  // 触发），同时挡住「重新运行」迁移里的自动补连（它会与启动通路的连接抢出双建会话）。
+  // 触发），同时挡住「重新运行」迁移里的自动补连（它会与启动通路的连接重复发起）。
   let terminalHostOpInFlight = false;
 
   function normalizeTerminalHostState(raw) {
@@ -6001,7 +5999,7 @@ async function api(method, path, body) {
       if (currentView === "terminal") renderTerminalStoppedState();
     } else if (reconnect && state === "running" && prev !== "unknown" && currentView === "terminal" && !terminalBackendReady && !terminalHostOpInFlight) {
       // 停在终端页期间宿主重新运行（别处拉起）：本地未就绪就补连一次。prev 为
-      // "unknown" 的帧排除掉——那是面板初载，初装连接已在飞，再补一次会双建会话。
+      // "unknown" 的帧排除掉——那是面板初载，初装连接已在飞，再补一次即重复连接。
       connectTerminalBackend();
     }
     // exited：页签保留不动（停在最后一帧），只转徽标（syncTerminalHostControls 已做），
@@ -6355,8 +6353,8 @@ async function api(method, path, body) {
   // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
   // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
   function renderTerminalPreviewSession({ revive = true } = {}) {
-    // 降级闸：判定键是就绪位本身，不是会话数——零会话会被 fetch 的自动补建
-    // 兜住；backend 中途死掉的轮询不动就绪位，仍保上一帧。
+    // 降级闸：判定键是就绪位本身，不是会话数——零会话是就绪下的合法空态（走下方
+    // 零会话分支），不能当降级处理；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
       // 首连还在飞：这一帧什么都不知道，既不冒充降级也不冒充零会话，只把静态
       // 种子收走（见 renderTerminalPendingState）。定性失败才落降级空态。
@@ -6654,7 +6652,7 @@ async function api(method, path, body) {
       hostState = "unknown";
     }
     // reconnect:false——running 的补连由下面分支自己发，不经 applyTerminalHostState
-    // 的迁移分支，两处同发会在零会话时抢出双建会话。
+    // 的迁移分支，两处同发即重复连接。
     applyTerminalHostState(hostState, { reconnect: false });
     if (hostState === "running") {
       // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
@@ -6979,8 +6977,10 @@ async function api(method, path, body) {
         // 日/月是 SVG 元素：hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上没有——
         // `.hidden =` 只写 expando 不落 attribute，UA 的 [hidden] 规则永不生效，图标永远
         // 停在 HTML 初态。必须落 attribute（与 syncRailCollapseBtn 的收展图标同一修法）。
-        if (t.sun) t.sun.toggleAttribute("hidden", !dark);
-        if (t.moon) t.moon.toggleAttribute("hidden", dark);
+        // 图标画当前态（暗态挂月亮、亮态挂太阳），aria/title 的「切换到…模式」是目标态
+        // 动作（PANEL-COPY-SPEC：状态用图形，动作归文案）。
+        if (t.sun) t.sun.toggleAttribute("hidden", dark);
+        if (t.moon) t.moon.toggleAttribute("hidden", !dark);
         t.btn.setAttribute("aria-label", label); t.btn.title = label;
       }
     }
