@@ -205,6 +205,32 @@ export function findDescendantClientPid(ancestorPid, clientPids, ppidByPid) {
   return null;
 }
 
+// opencode serve 子进程的上折（resolveInstanceId 的第三条折叠路径）。opencode 2.x
+// 的交互主进程拉起 `opencode.exe serve --service`，持有到 relay 的 keep-alive 连接
+// 并发出全部 LLM 流量（live 2026-10-16：netstat 属主、journal 实例号、实例行三处
+// 全是子进程 pid）——socket 兜底合成的 "opencode-<serve pid>" 必须上折到交互主
+// 进程：终端 join 绑的是交互进程（离 shell 最近），占位行/检测面也只认它，两套
+// 形状靠这一折合流。与 codex 的下折（GUI 壳是引擎的父、从壳 pid 折到引擎）互为
+// 镜像。门只对扫描明确分类出的 serve 子进程开（精确集合，不做模糊认领），父链
+// 走不通（主进程已退、子进程滞留）返回 null，原始号维持原样、行走家族存活判定。
+function opencodeServeAncestorPid(tailPid, agentId, clientPids, procSnapshot) {
+  if (agentId !== "opencode") return null;
+  const servePids = procSnapshot?.opencodeServePids;
+  const ppidByPid = procSnapshot?.ppidByPid;
+  if (!(servePids instanceof Set) || !servePids.has(tailPid)) return null;
+  if (!(clientPids instanceof Set) || !(ppidByPid instanceof Map)) return null;
+  let current = tailPid;
+  const seen = new Set([current]);
+  for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth += 1) {
+    const parent = ppidByPid.get(current);
+    if (parent === undefined || seen.has(parent)) return null;
+    if (clientPids.has(parent)) return parent;
+    seen.add(parent);
+    current = parent;
+  }
+  return null;
+}
+
 // Normalize a (already well-formed or not) instance id against a process-scan
 // snapshot-ish ({ [`${agentId}Pids`]: Set, ppidByPid: Map }, both optional; an
 // endpoint that tracks an engine subset folds against `${agentId}EnginePids`
@@ -233,6 +259,9 @@ function resolveInstanceId(agentId, rawId, procSnapshot = null) {
   let clientPid = clientPids instanceof Set && clientPids.has(tailPid) ? tailPid : null;
   if (clientPid === null) {
     clientPid = findDescendantClientPid(tailPid, clientPids, procSnapshot?.ppidByPid);
+  }
+  if (clientPid === null) {
+    clientPid = opencodeServeAncestorPid(tailPid, agentId, clientPids, procSnapshot);
   }
   if (clientPid === null) return { id, label: null, clientPid: null };
   // DSH 桌面宿主与 kimi 桌面主进程折稳定行：canonical 尾解析到桌面 App 的
@@ -841,7 +870,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -994,17 +1023,19 @@ function parseTasklistCsv(stdout) {
       }
     } else if (bucket === "opencode") {
       // The interactive opencode.exe spawns a same-image child running
-      // `opencode.exe serve --service` — an internal local service that never
-      // issues LLM traffic (observed live 2026-10-16: one session, two
-      // opencode.exe processes, the child idle forever). Counting it by image
-      // name alone put a second, permanently-standby instance card on the
-      // board. With a command line the helper is skipped exactly like qoder's
-      // `--internal-sites-mcp` child — except that it still joins the family
-      // set (parent/child start and stop within seconds of each other, so
-      // family-scoped liveness never flickers), while counting, detected feed
-      // and placeholder rows follow the interactive process only. Plain
-      // tasklist rows carry no command line and keep the accept-by-name
-      // behavior (last fallback).
+      // `opencode.exe serve --service`. Live forensics 2026-10-16 (netstat +
+      // journal + agents payload) settled the division of labor: the serve
+      // child is the process that holds the relay keep-alive connection and
+      // issues ALL LLM traffic, while the interactive process owns the
+      // terminal-side surfaces (session count, placeholder row, detected
+      // feed, terminal join). Counting the child by image name alone put a
+      // second instance card on the board; leaving its traffic on its own pid
+      // instead put that traffic on a row nothing ever binds. The child stays
+      // family (lineage / row liveness) and its socket-synthesized instance
+      // id folds up to the interactive parent in resolveInstanceId, so the
+      // account lands on the one row every consumer keys on. Plain tasklist
+      // rows carry no command line and keep the accept-by-name behavior
+      // (last fallback) — unclassifiable there, so no fold either.
       if (commandLine === null || !commandLine.includes("serve")) {
         result.opencode += 1;
       }
@@ -1018,6 +1049,12 @@ function parseTasklistCsv(stdout) {
       // codex/dsh/kimi.
       if (pid && (commandLine === null || !commandLine.includes("serve"))) {
         result.opencodeEnginePids.add(pid);
+      }
+      // The serve subset is the instance-id fold's gate (resolveInstanceId):
+      // only a pid the scan positively classified as a serve child folds up,
+      // never a fuzzy ancestor walk.
+      if (pid && commandLine !== null && commandLine.includes("serve")) {
+        result.opencodeServePids.add(pid);
       }
     } else if (bucket === "dsh") {
       // dsh.exe is the harness's own executable (the pip packaging ships
@@ -3670,9 +3707,12 @@ export function createAgentMetricsCollector(options = {}) {
         // dsh 与 kimi 的 pid 形行也在列：冷缓存窗口里桌面宿主/主进程的请求
         // 没折进稳定行（归一化当时读不到宿主集合），落在原始 "dsh-<pid>" /
         // "kimi-<pid>" 上；缓存跟上后这里折回各自的 DSH/KIMI_DESKTOP_INSTANCE_ID。
+        // opencode 的 pid 形行同列：serve 子进程刚起、扫描还没把它分类进 serve 集
+        // 时，请求落在原始 "opencode-<serve pid>" 上；缓存跟上后折回交互主进程
+        // 行（归一化的上折，目标行就是 pid 形占位行）。
         // 对 TUI/web 的 pid 行，归一化是恒等映射，重折叠空转。
         if (countsTrusted && !isCodexSessionRow
-          && (pidMatch === null || bucket === "dsh" || bucket === "kimi")) {
+          && (pidMatch === null || bucket === "dsh" || bucket === "kimi" || bucket === "opencode")) {
           const refold = resolveInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
             const target = instMap.get(refold.id);
