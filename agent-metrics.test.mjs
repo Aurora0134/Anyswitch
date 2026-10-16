@@ -1372,6 +1372,8 @@ describe("createAgentMetricsCollector", () => {
       assert.ok(procs.opencodePids.has(19852), "子进程仍进家族集（存活判定要用）");
       assert.ok(procs.opencodeEnginePids.has(14788));
       assert.ok(!procs.opencodeEnginePids.has(19852), "子进程不进引擎集（占位行/检测面不受其干扰）");
+      assert.ok(procs.opencodeServePids.has(19852), "子进程标记进 serve 集（实例号上折的判据）");
+      assert.ok(!procs.opencodeServePids.has(14788));
       assert.equal(procs.ppidByPid.get(19852), 14788, "父子链照常进谱系表");
     });
 
@@ -1389,6 +1391,52 @@ describe("createAgentMetricsCollector", () => {
       const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
       assert.equal(opencode.processCount, 1);
       assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"]);
+    });
+
+    it("folds a socket-synthesized serve-child instance id onto the interactive row at ingest", async () => {
+      // Live shape 2026-10-16: the serve child holds the relay keep-alive
+      // connection, so the netstat reverse lookup synthesizes `opencode-19852`
+      // (the child's pid). Ingest must fold it up to the interactive process —
+      // that is the row the terminal join binds and the only id the journal,
+      // the instance buckets and the activity frames may carry.
+      let t = 3000;
+      const journal = { lines: [], appendRequest: (entry) => journal.lines.push(entry) };
+      const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN), nowFn: () => t, journal });
+      // t=3000 越过扫描缓存窗（TTL 2500ms，lastProcessScanTime 从 0 起），
+      // scanProcesses 才会真跑一轮并落地——请求路径只同步读缓存、从不触发扫描。
+      await collector.scanProcesses();
+      const r = collector.startRequest({
+        agentId: "opencode", providerId: "north-main", model: "glm-5.3",
+        instanceId: "opencode-19852", path: "openai", stream: true,
+      });
+      t = 4200; r.recordFirstChunk();
+      t = 5200; r.recordEnd({ status: 200, usage: { prompt_tokens: 100, completion_tokens: 50 } });
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.equal(opencode.metrics.totalRequests, 1, "聚合口径不变");
+      assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"], "账落在交互主进程行（终端 join 的绑定目标）");
+      assert.equal(opencode.instances[0].requests, 1);
+      assert.equal(journal.lines.length, 1, "journal 单请求单行");
+      assert.equal(journal.lines[0].instanceId, "opencode-14788", "journal 行带折后的实例号（右栏最近请求的过滤键）");
+    });
+
+    it("refolds a request that landed before the scan classified the serve child onto the interactive row", async () => {
+      // 请求路径只读扫描缓存、从不触发扫描：serve 子进程刚起、扫描还没看到它
+      // 时，请求先落在子进程号的原始行上；缓存跟上后的下一轮读重折叠归位，
+      // 计数随行保留——与 dsh/kimi 冷缓存收敛同一条机制。
+      let t = 3000;
+      let serveUp = false;
+      const execFn = (cmd, opts, cb) => cb(null, serveUp ? PS_OPENCODE_SCAN : wmicOc(ocLauncherRow, ocMainRow));
+      const collector = testCollector({ execFn, nowFn: () => t });
+      const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-19852", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 30, completion_tokens: 12 } });
+
+      serveUp = true;
+      t += 3000;
+      await collector.scanProcesses();
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"], "冷缓存落下的子进程号行折回交互主进程行");
+      assert.equal(opencode.instances[0].requests, 1);
+      assert.equal(opencode.instances[0].tokens.prompt, 30);
     });
   });
 
@@ -5538,6 +5586,37 @@ describe("normalizeInstanceId", () => {
     assert.deepEqual(normalizeInstanceId("codex", "codex-6200", codexSnapshot), { id: "codex-6100", label: null });
     assert.deepEqual(normalizeInstanceId("codex", "codex-9999", codexSnapshot), { id: "codex-9999", label: null },
       "a pid outside the engine set with no lineage link stays a custom id");
+  });
+
+  it("folds an opencode serve-child pid up to the interactive engine pid", () => {
+    // Live shape 2026-10-16: the interactive opencode.exe (14788) spawns
+    // `opencode.exe serve --service` (19852) which owns the relay keep-alive
+    // connection — the socket fallback synthesizes the child's pid. The fold
+    // walks the parent chain UP to the engine pid, mirroring how the codex
+    // fold walks DOWN from a GUI pid: both land on the row engine-scoped
+    // housekeeping keeps alive and the terminal join binds.
+    const ocSnapshot = {
+      opencodePids: new Set([14788, 19852]),
+      opencodeEnginePids: new Set([14788]),
+      opencodeServePids: new Set([19852]),
+      ppidByPid: new Map([[19852, 14788], [14788, 18868]]),
+    };
+    assert.deepEqual(normalizeInstanceId("opencode", "opencode-19852", ocSnapshot), { id: "opencode-14788", label: null });
+    assert.deepEqual(normalizeInstanceId("opencode", "opencode-14788", ocSnapshot), { id: "opencode-14788", label: null });
+    assert.deepEqual(normalizeInstanceId("opencode", "opencode-9999", ocSnapshot), { id: "opencode-9999", label: null },
+      "a pid outside the family with no serve classification stays unchanged");
+  });
+
+  it("keeps an opencode serve-child id unchanged when no engine ancestor is reachable", () => {
+    // TUI 退出而 serve 子进程滞留：父链离开扫描表，上折没有目标——原始号
+    // 维持原样，行走家族集存活判定，家族全灭自然收走（宁可漏折，不可误折）。
+    const ocSnapshot = {
+      opencodePids: new Set([19852]),
+      opencodeEnginePids: new Set(),
+      opencodeServePids: new Set([19852]),
+      ppidByPid: new Map([[19852, 999999]]),
+    };
+    assert.deepEqual(normalizeInstanceId("opencode", "opencode-19852", ocSnapshot), { id: "opencode-19852", label: null });
   });
 });
 
