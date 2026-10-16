@@ -6913,6 +6913,54 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
     assert.ok(/display:\s*flex/.test(rule[1]),
       "容器改出 flex/grid 之外就得同步换掉首帧接管机制");
   });
+
+  // ── 未安装 Agent 卡的运行时显隐（panelHiddenAgentsPrepaint 的接棒方） ──
+  // 首版把 hidden 布尔写反（null→全藏、已装→藏、未装→显），全装机器看板卡
+  // 全数消失且取数救不回——这里把三路方向钉死，源码级防再犯。
+  const visibilityFn = (panelJs.match(
+    /function applyAgentCardVisibility\(ids\) \{[\s\S]*?\n  \}/,
+  ) || [])[0];
+  function visibilitySandbox() {
+    const cards = ["zcode", "claude", "kimi", "grok"].map((id) => ({
+      id,
+      hidden: null,
+      getAttribute: (k) => (k === "data-agent-id" ? id : null),
+    }));
+    const removedAttrs = [];
+    const container = {
+      querySelectorAll: (sel) => (sel === ".panel-card[data-agent-id]" ? cards : []),
+    };
+    const document = {
+      querySelector: (sel) => (sel === ".agent-cards-container" ? container : null),
+      documentElement: { removeAttribute: (k) => { removedAttrs.push(k); } },
+    };
+    assert.ok(visibilityFn, "panel.js must contain applyAgentCardVisibility");
+    const apply = new Function("document", `${visibilityFn}\nreturn applyAgentCardVisibility;`)(document);
+    return { apply, cards, removedAttrs };
+  }
+
+  it("⑨ 可见性方向：null 全显示（fail-open），未安装才隐藏，已装全显示", () => {
+    const { apply, cards, removedAttrs } = visibilitySandbox();
+    apply(null);
+    assert.deepEqual(cards.map((c) => c.hidden), [false, false, false, false],
+      "ids=null（检测未知/失败）必须全显示，此处写反即全卡消失");
+    apply(new Set(["zcode", "kimi"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, true, false, true],
+      "只有不在册的 Agent 卡才隐藏；已装被藏 = 布尔又写反了");
+    apply(new Set(["zcode", "claude", "kimi", "grok"]));
+    assert.deepEqual(cards.map((c) => c.hidden), [false, false, false, false],
+      "全在册全显示");
+  });
+
+  it("⑩ 运行时接管无条件摘首帧属性：null 路径不摘会留下过期 CSS 压卡", () => {
+    const { apply, cards, removedAttrs } = visibilitySandbox();
+    apply(null);
+    apply(new Set(["zcode"]));
+    assert.deepEqual(removedAttrs.filter((k) => k === "data-prepaint-hidden-agents").length, 2,
+      "每次接管（含 fail-open 全显示）都要摘属性");
+    assert.equal(cards.find((c) => c.id === "zcode").hidden, false);
+    assert.equal(cards.find((c) => c.id === "grok").hidden, true);
+  });
 });
 
 // 虚拟终端归属接线：panel 路由层把 shell pid ↔ 祖先链 join 进会话列表，

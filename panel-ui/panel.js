@@ -642,11 +642,17 @@ async function api(method, path, body) {
     const container = document.querySelector(".agent-cards-container");
     if (!container) return;
     for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
-      card.hidden = ids === null || ids.has(card.getAttribute("data-agent-id"));
+      // hidden=true 才是隐藏：只有「ids 非 null 且不在册」才藏；ids 为 null
+      // （检测未知/失败）按 fail-open 全显示。首版把布尔写反（null→全藏、
+      // 已装→藏、未装→显），全装机器看板卡全数消失且取数救不回——此行为
+      // 测试所钉，勿再翻回。
+      card.hidden = ids !== null && !ids.has(card.getAttribute("data-agent-id"));
     }
-    // 交棒给运行时：DOM hidden 接管后摘首帧属性，prepaint 样式层随之失效
-    // （与 panelCardOrderPrepaint 的交棒同款手法）
-    if (ids !== null) document.documentElement.removeAttribute("data-prepaint-hidden-agents");
+    // 运行时接管即摘首帧属性，prepaint CSS 层整体失效（与 panelCardOrderPrepaint
+    // 的交棒同款手法）。无条件摘：null（fail-open 全显示）时若不摘，过期快照
+    // 画的 CSS 层会压住本该显示的卡——首帧属性只在「首绘到本脚本执行之间」
+    // 有意义，此后运行时是唯一真值源。
+    document.documentElement.removeAttribute("data-prepaint-hidden-agents");
   }
   // 可见集变化时由 initSettingsView 注册重建入口：buildKeepAliveEndpoints 嵌在
   // 它的闭包里，IIFE 层不能直引（跨作用域 ReferenceError），走回调解耦。
