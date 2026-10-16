@@ -74,7 +74,7 @@ const REPO_PANEL_LOGO = join(APP_DIR, "docs", "assets", "logo.png");
 const REPO_XTERM_JS = join(APP_DIR, "node_modules", "@xterm", "xterm", "lib", "xterm.js");
 const REPO_XTERM_CSS = join(APP_DIR, "node_modules", "@xterm", "xterm", "css", "xterm.css");
 const REPO_XTERM_FIT_JS = join(APP_DIR, "node_modules", "@xterm", "addon-fit", "lib", "addon-fit.js");
-const REPO_XTERM_UNICODE11_JS = join(APP_DIR, "node_modules", "@xterm", "addon-unicode11", "lib", "unicode11.js");
+const REPO_XTERM_UNICODE11_JS = join(APP_DIR, "node_modules", "@xterm", "addon-unicode11", "lib", "addon-unicode11.js");
 const REPO_XTERM_WEBGL_JS = join(APP_DIR, "node_modules", "@xterm", "addon-webgl", "lib", "addon-webgl.js");
 // The one place the panel page lives. relay-host's copy of this router sends
 // document requests here instead of serving a second, indistinguishable copy.
