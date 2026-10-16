@@ -1,7 +1,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1873,6 +1873,42 @@ describe("panel router logo asset", () => {
       assert.ok(chunks.every((chunk) => Buffer.isBuffer(chunk)), "PNG must not be decoded as text");
       assert.deepEqual(Buffer.concat(chunks), expected);
     }
+  });
+});
+
+describe("panel router xterm unicode11 asset", () => {
+  // 文件名漂移回归钉：@xterm/addon-unicode11 打包后 lib/ 实物为 addon-unicode11.js
+  // （UMD，全局 window.Unicode11Addon.Unicode11Addon，与 panel.js 实例化处一致），
+  // 并非按包名推断的 unicode11.js。环境装了依赖（装机/开发机）就必须真 200；
+  // 包在而文件名再漂移时 readFileSync 抛错转红，不允许静默跳过。
+  const addonPkgDir = new URL("./node_modules/@xterm/addon-unicode11/", import.meta.url);
+  const addonFile = new URL("./node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js", import.meta.url);
+  const addonInstalled = existsSync(addonPkgDir);
+
+  it("GET /panel/assets/xterm-unicode11.js serves the packaged UMD bundle, including query params", { skip: !addonInstalled }, async () => {
+    const expected = readFileSync(addonFile, "utf8");
+    const router = routerWith();
+    for (const path of ["/panel/assets/xterm-unicode11.js", "/panel/assets/xterm-unicode11.js?startup=1&v=2"]) {
+      const { req, res } = fakeReqRes(path, "GET", null, { host: "127.0.0.1:47820" });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
+      assert.equal(res.headers["cache-control"], "no-cache");
+      assert.ok(res.headers.etag, "响应带 ETag（size-mtimeMs 派生）");
+      assert.equal(res.headers.location, undefined);
+      assert.equal(res.body, expected);
+      assert.ok(res.body.includes("Unicode11Addon"), "UMD 包导出全局 Unicode11Addon（panel.js 以 window.Unicode11Addon.Unicode11Addon 实例化）");
+    }
+  });
+
+  it("HEAD /panel/assets/xterm-unicode11.js returns JavaScript headers without redirect", { skip: !addonInstalled }, async () => {
+    const router = routerWith();
+    const { req, res } = fakeReqRes("/panel/assets/xterm-unicode11.js", "HEAD", null, { host: "127.0.0.1:47820" });
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/javascript; charset=utf-8");
+    assert.equal(res.headers["cache-control"], "no-cache");
+    assert.equal(res.headers.location, undefined);
   });
 });
 
