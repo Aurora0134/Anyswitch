@@ -7556,7 +7556,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -7759,6 +7759,131 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const restarts = state.posts.filter((p) => p.url.includes("/restart"));
     assert.equal(restarts.length, 1, "点页签等主动通路照旧一次点击一个新壳");
     assert.equal(restarts[0].url, "/api/terminal/sessions/sess-x/restart", "复活打在该会话上");
+  });
+});
+
+// 跳顶回归钉（跟随底部护栏）：渲染尺寸同步的瞬时塌缩会让浏览器把 .xterm-viewport
+// 的 scrollTop 钳回原位并派发无标记 scroll 事件，xterm 把它当用户滚动写进 ydisp，
+// 视口自此脱离底部卡死在接近顶端（实测：建流回放+输出洪峰窗口内 scrollTop 从底部
+// 40095 被钳到 345 且不自行恢复）。护栏语义：跟随态下无意图的离底事件拉回底部；
+// 用户主动滚动（滚轮/触摸/按住拖动/键盘 Shift+PageUp·PageDown 翻页）经意图窗口
+// 退出跟随态，停在历史绝不拉回；滚回底部恢复跟随。函数体抽进桩环境真跑，逐项钉死。
+describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
+  function guardSandbox() {
+    const src = panelJs.match(/function installTerminalFollowBottomGuard\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "installTerminalFollowBottomGuard found in panel.js");
+    const intentSrc = panelJs.match(/const TERMINAL_SCROLL_INTENT_MS = \d+;/)?.[0];
+    assert.ok(intentSrc, "意图窗口常量可从 panel.js 取到（测试不抄数字）");
+    const state = { now: 100000, scrollToBottomCount: 0 };
+    const sandbox = new Function("state", `
+      ${intentSrc}
+      const Date = { now: () => state.now };
+      function makeEl() {
+        const handlers = {};
+        return {
+          handlers,
+          addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+          fire(type, event = {}) { for (const fn of handlers[type] || []) fn(event); },
+        };
+      }
+      ${src}
+      return { installTerminalFollowBottomGuard, makeEl };
+    `)(state);
+    const viewport = sandbox.makeEl();
+    const root = sandbox.makeEl();
+    root.querySelector = (sel) => (sel === ".xterm-viewport" ? viewport : null);
+    const buffer = { viewportY: 500, baseY: 500 };
+    const term = {
+      element: root,
+      buffer: { active: buffer },
+      scrollToBottom() { state.scrollToBottomCount += 1; buffer.viewportY = buffer.baseY; },
+    };
+    sandbox.installTerminalFollowBottomGuard(term);
+    return { state, root, viewport, buffer };
+  }
+
+  it("钳制抖动：跟随态下无意图的离底 scroll 事件被拉回底部", () => {
+    const { state, viewport, buffer } = guardSandbox();
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "落底事件不触发拉回");
+    buffer.viewportY = 20; // 抖动把 ydisp 从底部打到接近顶端
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 1, "无意图离底 = 钳制抖动，拉回底部");
+    assert.equal(buffer.viewportY, buffer.baseY, "视口回到底部");
+  });
+
+  it("用户上翻停在历史绝不拉回：意图窗口内离底退出跟随，之后无意图离底也不动", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "用户上翻不拉回");
+    buffer.viewportY = 20; // 用户停车后抖动再打一次
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "非跟随态下离底事件一概不动");
+  });
+
+  it("按住拖动持续刷新意图窗口：滚动条拖拽/选择拖动全程不拉回", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    root.fire("pointerdown", { buttons: 1 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "按下即意图，不拉回");
+    state.now += 1000000; // 窗口早过——但拖动进行中
+    root.fire("pointermove", { buttons: 1 });
+    buffer.viewportY = 200;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "按住拖动刷新窗口，仍不拉回");
+    state.now += 1000000; // 松手后窗口过去：视口停在历史，后续抖动不动它
+    buffer.viewportY = 20;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "用户停在历史的现场受保护");
+  });
+
+  it("滚回底部恢复跟随：其后的钳制抖动重新被拉回", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll"); // 退出跟随
+    buffer.viewportY = buffer.baseY; // 用户滚回底部
+    viewport.fire("scroll");
+    buffer.viewportY = 20; // 抖动再来
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 1, "恢复跟随后抖动再次被拉回");
+  });
+
+  it("键盘翻页是用户滚动：Shift+PageUp 离底不拉回（xterm 译为 scrollLines 的键只此两枚）", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    root.fire("keydown", { key: "PageUp", shiftKey: true });
+    buffer.viewportY = 300;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "Shift+PageUp 翻页不被误判为抖动");
+    root.fire("keydown", { key: "PageDown", shiftKey: true });
+    buffer.viewportY = 400;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 0, "Shift+PageDown 同样记意图");
+  });
+
+  it("键盘翻页映射精度：裸 PageUp、Shift+Home 不记意图（xterm 对它们无滚动翻译）", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    root.fire("keydown", { key: "PageUp", shiftKey: false });
+    root.fire("keydown", { key: "Home", shiftKey: true });
+    buffer.viewportY = 20; // 抖动来犯
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 1, "无滚动映射的键不占用意图窗口，抖动照拉");
+  });
+
+  it("接线：open 之后安装护栏；实例缺 element/viewport 时安全返回", () => {
+    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure, "ensureTerminalXterm found in panel.js");
+    const openAt = ensure.indexOf("terminalXterm.open(host)");
+    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(terminalXterm)");
+    assert.ok(openAt > 0 && guardAt > openAt, "护栏装在 open 之后（xterm 自己的 scroll 监听先行绑定）");
+    const src = panelJs.match(/function installTerminalFollowBottomGuard\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    const fn = new Function(`${src}\nreturn installTerminalFollowBottomGuard;`)();
+    fn({ element: null }); // 桩实例无 element：早期返回，不炸
+    const rootless = { element: { querySelector: () => null } };
+    fn(rootless); // 无 .xterm-viewport：同样安全返回
   });
 });
 
@@ -8023,7 +8148,7 @@ describe("虚拟终端 resize 防抖", () => {
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
