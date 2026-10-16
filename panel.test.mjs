@@ -4771,18 +4771,19 @@ describe("panel.html 渠道刷新「查看差异」弹窗", () => {
     assert.equal((fn.match(/storeRefreshInFlight = false/g) || []).length, 2, "收尾与中断各撤一次");
   });
 
-  it("整池单元刷期间小字逐成员摆结果，池聚合留给单元收尾", () => {
+  it("号池刷新小字保持池粒度：刷期间不逐成员替换，池聚合落单元收尾", () => {
     const fnStart = panelJs.indexOf("async function storeRefresh(");
     const fn = panelJs.slice(fnStart, panelJs.indexOf("// ── 新增渠道 modal", fnStart));
     const innerStart = fn.indexOf("for (const id of unit.ids)");
     const inner = fn.slice(innerStart, fn.indexOf("refreshDiffUnits.push({", innerStart));
-    assert.ok(inner.includes("if (unit.aggregate)"), "整池单元逐成员更新 tail");
-    assert.ok(inner.includes("chanResultHtml(labelOf(id), rep, chanErr)"), "逐成员用渠道显示名与单渠道结果口径");
-    assert.ok(fn.includes('panelCopy(rep.reason || "unknown", "原因见面板日志")'),
-      "逐成员失败与单元收尾同口径（映射后再上屏，不裸摆上游原文）");
-    assert.ok(inner.includes('setStoreRefreshStatus("正在刷新..", "busy", lastTail)'), "逐成员结果上小字");
+    assert.ok(inner.includes("await refreshStoreModelsView()"), "逐渠道上屏保留（行为逐成员，文案不逐成员）");
+    assert.ok(!inner.includes("setStoreRefreshStatus"), "刷期间不逐成员替换小字");
+    assert.ok(!inner.includes("lastTail"), "内层循环不更新 tail，池名持续到单元收尾");
+    assert.ok(!panelJs.includes("chanResultHtml"), "逐成员结果渲染助手已撤，无死代码残留");
     assert.ok(fn.includes("? `${escapeHtml(unit.label)} ${storeAggregateHtml(uAdded, uPruned, uFail)}`"),
       "单元收尾仍落池聚合，完成态 tail 用池口径");
+    assert.ok(fn.includes('if (!wholeLabel) setStoreRefreshStatus("正在刷新..", "busy", lastTail)'),
+      "号池详情路径单元收尾同样不覆盖，完成态才落池结果");
   });
 
   it("「手动添加」草稿跨重渲保留，换渠道丢弃", () => {

@@ -10293,31 +10293,17 @@ async function api(method, path, body) {
   // 刷新：全部刷新/多选刷新按可见行分组——号池行整行一个单元（成员逐个刷，
   // 显示池名 + 聚合 diff，与号池详情「刷新模型」同语义），独立渠道各一单元；
   // 进行中：状态小字 = 窄波的「正在刷新..」前缀 + 单元结果（结构化着色，只摆增减
-  // 数字），窄波效果贯穿长时程刷新全程；整池单元（aggregate）刷期间小字逐成员摆
-  // 结果、收尾再落池聚合；全部完成后 = 整体高光「刷新完成」+ tail 保留最后一个
-  // 单元结果，完成态不整行染红。
+  // 数字），窄波效果贯穿长时程刷新全程；整池单元（aggregate）刷期间小字保持池粒度
+  // （不逐成员替换，池名持续到本单元收尾），池聚合结果落单元收尾；全部完成后 =
+  // 整体高光「刷新完成」+ tail 保留最后一个单元结果，完成态不整行染红。
   // 刷完一个展现一个：每个渠道的请求返回后立刻取其最新状态上屏（详情卡模型列表、
   // 新增高光、号池并集/重复计数、总览模型计数），不等整轮跑完——后端本就是
-  // 一渠道一请求、发现完即落盘，取回来就是最新态。
+  // 一渠道一请求、发现完即落盘，取回来就是最新态；逐渠道上屏只走数据面，状态
+  // 小字不随之逐成员替换。
   async function storeRefresh(ids, opts) {
     const all = !ids;
     const wholeLabel = (opts && opts.wholeLabel) || "";
     const btn = all ? $("storeRefreshAllBtn") : $("storeRefreshOneBtn");
-    // 渠道显示名（缺显示名退回渠道 id，与列表行 label 同口径）
-    const labelOf = (id) => {
-      const p = storeProviders().find((x) => x.id === id);
-      return (p && p.displayName) || id;
-    };
-    // 单渠道结果 → 小字分段 HTML：失败按 panelCopy 映射后红段（与单元收尾同口径）、
-    // updated 增绿减红、unchanged 中性；无报告又无错误 = 无结果
-    const chanResultHtml = (label, rep, err) => {
-      if (rep && rep.status === "failed") {
-        return `<span class="srs-neg">${escapeHtml(label)} 刷新失败：${escapeHtml(panelCopy(rep.reason || "unknown", "原因见面板日志"))}</span>`;
-      }
-      if (rep) return storeReportHtml(rep, label);
-      if (err) return `<span class="srs-neg">${escapeHtml(label)} 刷新失败：${escapeHtml(panelCopy(err, "原因见面板日志"))}</span>`;
-      return `${escapeHtml(label)} 无结果`;
-    };
     // 单元 = 列表里一行：{ ids: [渠道id...], label: 显示名, aggregate: 池聚合 }
     let units;
     if (wholeLabel) {
@@ -10359,11 +10345,9 @@ async function api(method, path, body) {
         let uAdded = 0, uPruned = 0, uFail = 0, uRep = null, uErr = "";
         const uAddedIds = [], uPrunedIds = [];
         for (const id of unit.ids) {
-          let rep = null;
-          let chanErr = "";
           try {
             const r = await api("POST", "/api/store/refresh", { id });
-            rep = (r.reports || [])[0] || null;
+            const rep = (r.reports || [])[0];
             if (rep) {
               if (rep.status === "failed") {
                 uFail++;
@@ -10382,15 +10366,10 @@ async function api(method, path, body) {
             // 批量刷新：单点失败只计入本单元，不中断后续渠道
             uFail++;
             uErr = panelError(e, "原因见面板日志");
-            chanErr = uErr;
           }
-          // 刷完一个展现一个：本渠道最新状态取回来上屏（新增高光上一步已登记）
+          // 刷完一个展现一个：本渠道最新状态取回来上屏（新增高光上一步已登记）；
+          // 状态小字不逐成员替换——整池单元进行中保持池名，结果落单元收尾
           await refreshStoreModelsView();
-          // 整池单元：成员结果逐个摆上小字，池聚合留给本单元收尾，不让人对着池名干等
-          if (unit.aggregate) {
-            lastTail = `${chanResultHtml(labelOf(id), rep, chanErr)}${prog}`;
-            setStoreRefreshStatus("正在刷新..", "busy", lastTail);
-          }
         }
         refreshDiffUnits.push({
           label: unit.label,
