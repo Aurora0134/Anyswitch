@@ -150,7 +150,7 @@ async function api(method, path, body) {
     const container = $(containerId);
     if (!container) return;
     // 盒子尺寸随调用方传入并与 CSS 盒等大：viewBox 1:1 映射像素，线宽/圆角不失真
-    // （看板 68×26 与终端侧栏 56×33 是两个原生规格，不再互相拉伸）。
+    // （看板 68×26 与终端侧栏 56×21.41 是两个原生规格，不再互相拉伸）。
     const w = Number(size?.w) > 0 ? size.w : 68;
     const h = Number(size?.h) > 0 ? size.h : 26;
     // B3 路径级 diff：已有正常态 SVG（area+line 两个 path 子节点）时只改 d，
@@ -5343,9 +5343,10 @@ async function api(method, path, body) {
     if (terminalXterm) terminalXterm.options.theme = terminalXtermTheme();
   }
 
-  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×33，
-  // 盒上沿贴标签字墨迹上沿、下沿贴数值字基线），viewBox 1:1 映射像素，线宽/round 端点不失真
-  const TERMINAL_SPARK_SIZE = { w: 56, h: 33 };
+  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×21.41——
+  // 长宽比与看板折线 68:26 对齐：宽不动、高下收，盒上沿原位、下沿向上收），
+  // viewBox 1:1 映射像素，线宽/round 端点不失真
+  const TERMINAL_SPARK_SIZE = { w: 56, h: 21.41 };
 
   // 跳顶回归护栏（跟随底部焊死）：xterm 的 Viewport 把 .xterm-viewport 的 scroll
   // 事件翻译成缓冲区行号（_handleScroll：newRow = scrollTop/行高，与 ydisp 的差值
@@ -5643,10 +5644,18 @@ async function api(method, path, body) {
       // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
       // 其后才是归属注入的 agent.name，最后回落外壳名。
       const tabAgent = session.agentName || (session.agent ? session.agent.name : session.shell.name);
+      const shellBadge = `<span class="terminal-tab-shell${session.shell.name === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell.name === "PowerShell" ? "PS" : ">_"}</span>`;
+      // 页签左图标：身份已知（实时归属的 endpointId，或一键启动快照自带的 agentId）
+      // 改挂看板品牌头像槽位——串里只留槽，头像在 innerHTML 后克隆填入（与常驻保活
+      // 图标、路由瓦片同一来源同一手法）；槽位默认内容就是外壳徽标，品牌 id 不在
+      // 看板时克隆落空、徽标原样兜底。id 过白名单字符：它同时进 HTML 属性与 CSS 选择器。
+      const rawBrandId = session.agent?.endpointId || session.agentId || "";
+      const brandId = /^[\w-]+$/.test(rawBrandId) ? rawBrandId : "";
+      const tabIcon = brandId ? `<span class="terminal-tab-brand" data-terminal-brand="${brandId}">${shellBadge}</span>` : shellBadge;
       return `
       <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
         aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
-        <span class="terminal-tab-shell${session.shell.name === "PowerShell" ? "" : " terminal-tab-shell-cmd"}">${session.shell.name === "PowerShell" ? "PS" : ">_"}</span>
+        ${tabIcon}
         <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(tabAgent)}</small></span>
         <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
         <span class="terminal-tab-close" aria-hidden="true">×</span>
@@ -5657,6 +5666,16 @@ async function api(method, path, body) {
     if (html === terminalTabsRenderedHtml) return;
     terminalTabsRenderedHtml = html;
     tabs.innerHTML = html;
+    // 品牌头像后填：克隆看板 .agent-avatar 整体（各家底衬/描边/圆角都是内联样式，
+    // 只取字形会糊）。品牌 id 已编进指纹串，身份变化必然触发重渲染+重填，不会
+    // 滞留旧身份。typeof 双闸门：单测桩环境没有 document/querySelectorAll，跳过
+    // 后填不影响串断言。
+    if (typeof document !== "undefined" && typeof tabs.querySelectorAll === "function") {
+      for (const slot of tabs.querySelectorAll("[data-terminal-brand]")) {
+        const avatar = document.querySelector(`.agent-cards-container .panel-card[data-agent-id="${slot.getAttribute("data-terminal-brand")}"] .agent-avatar`);
+        if (avatar) slot.replaceChildren(avatar.cloneNode(true));
+      }
+    }
   }
 
   // ---- 归属数据轮询（虚拟终端接真实 Agent 流量） ----

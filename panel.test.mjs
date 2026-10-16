@@ -2958,17 +2958,18 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
     assert.ok(/\.terminal-request-item \{[^}]*flex: none/.test(panelCss), "行不可压——flex 子项默认 shrink 会压扁行高、视窗塞进 6+ 行");
     assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内各栏垂直居中（中栏 TTFT 随行居中）");
-    // 四宫格：数值改细、折线原生 56×33（与生成器同规格，viewBox 1:1 不再拉伸），
-    // 格子改 grid——折线占右列、跨标签/数值两行，纵向上沿贴标签字墨迹上沿、
-    // 下沿贴数值字基线（align-self:start + margin-top:4.5px；行盒自然高不钉死，
-    // 两排字布局零改动；打回的 46px 方案贴行盒沿超出字墨迹沿，已被实测否决）
+    // 四宫格：数值改细、折线原生 56×21.41（与生成器同规格，viewBox 1:1 不再拉伸），
+    // 格子改 grid——折线占右列、跨标签/数值两行，纵向上沿贴标签字墨迹上沿
+    // （align-self:start + margin-top:4.5px；行盒自然高不钉死，两排字布局零改动；
+    // 打回的 46px 方案贴行盒沿超出字墨迹沿，已被实测否决）。折线长宽比与看板
+    // 68:26 对齐：宽 56 不动、高下收，盒上沿原位、下沿向上收。
     assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
-    assert.ok(panelCss.includes("width: 56px; height: 33px;"), "折线原生 56×33（贴两排字墨迹沿）");
+    assert.ok(panelCss.includes("width: 56px; height: 21.41px;"), "折线原生 56×21.41（长宽比同看板 68:26，下沿上收）");
     assert.ok(/\.terminal-metric-spark \{[^}]*align-self: start; margin-top: 4\.5px/.test(panelCss), "折线盒上沿贴标签字墨迹上沿");
     assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; }"), "折线 SVG 块级化");
     assert.ok(panelCss.includes(".terminal-metric-row { display: contents; }"), "数值行拆盒并入格子 grid");
     assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行");
-    assert.ok(panelJs.includes("{ w: 56, h: 33 }"), "终端侧栏折线生成规格 56×33 与 CSS 盒等大");
+    assert.ok(panelJs.includes("{ w: 56, h: 21.41 }"), "终端侧栏折线生成规格 56×21.41 与 CSS 盒等大");
     assert.ok(panelJs.includes("TERMINAL_SPARK_SIZE"), "侧栏折线尺寸随调用方传入生成器");
     // 来源语义改纯文本（副行「绝对时间 · 来源名」）：无图例的紫/青色编码退役
     assert.ok(!panelCss.includes("is-pool") && !panelCss.includes("--chan"), "来源色类与 --chan 已退役");
@@ -10283,6 +10284,54 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
     });
     assert.ok(shellTab.includes("<small>PowerShell</small>"), "都没有时回落外壳名");
+
+    // 页签左图标：身份已知（归属 endpointId / 快照 agentId）挂品牌槽位，纯外壳维持徽标
+    const brandTab = runTabs({
+      t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: { name: "Claude Code", endpointId: "claude" }, status: "idle" },
+    });
+    assert.ok(brandTab.includes('class="terminal-tab-brand" data-terminal-brand="claude"'), "归属会话左图标改品牌槽位");
+    assert.ok(brandTab.includes('data-terminal-brand="claude"><span class="terminal-tab-shell"'), "槽位默认内容留外壳徽标兜底");
+    const launchedTab = runTabs({
+      t1: { label: "Kimi Code", shell: { name: "命令提示符" }, agentId: "kimi", agentName: "Kimi Code", agent: null, status: "idle" },
+    });
+    assert.ok(launchedTab.includes('data-terminal-brand="kimi"'), "一键启动快照 agentId 同样挂品牌槽位");
+    assert.ok(!shellTab.includes("data-terminal-brand"), "纯外壳会话维持外壳徽标，不出品牌槽位");
+    const weirdTab = runTabs({
+      t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: { name: "x", endpointId: 'bad"id' }, status: "idle" },
+    });
+    assert.ok(!weirdTab.includes("data-terminal-brand"), "非常规字符的品牌 id 被白名单拦下，回落外壳徽标");
+
+    // 品牌头像克隆后填：有 document 时槽位内容被看板 .agent-avatar 克隆整体替换
+    const avatarClone = { marker: "avatar-clone" };
+    const slotStub = {
+      filled: null,
+      getAttribute: (name) => (name === "data-terminal-brand" ? "claude" : null),
+      replaceChildren(node) { this.filled = node; },
+    };
+    const tabsStub = {
+      innerHTML: "",
+      querySelectorAll: (sel) => (sel === "[data-terminal-brand]" ? [slotStub] : []),
+    };
+    const docStub = {
+      queried: "",
+      querySelector(sel) { this.queried = sel; return { cloneNode: () => avatarClone }; },
+    };
+    globalThis.document = docStub;
+    try {
+      new Function("$", "escapeHtml", "sessions", `
+        let terminalTabsRenderedHtml = "";
+        let activeTerminalPreviewId = "t1";
+        function terminalSessionMap() { return sessions; }
+        ${extractFn("renderTerminalPreviewTabs")}
+        return renderTerminalPreviewTabs;
+      `)((id) => (id === "terminalTabs" ? tabsStub : null), escapeHtml, {
+        t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: { name: "Claude Code", endpointId: "claude" }, status: "idle" },
+      })();
+    } finally {
+      delete globalThis.document;
+    }
+    assert.ok(docStub.queried.includes('.panel-card[data-agent-id="claude"] .agent-avatar'), "克隆来源是看板卡头像");
+    assert.equal(slotStub.filled, avatarClone, "头像克隆整体替换槽位默认徽标");
   });
 
   it("监测区 agent 徽标整体退役：身份标注由页签副行承担，节点/JS/CSS 无残留", () => {
