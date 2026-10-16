@@ -118,11 +118,40 @@ test("备屏会话的回放：历史在前、1049h 切换、帧画备屏，续�
   assert.ok(restored.includes("历史行"), "退备屏后应看到普通屏的历史尾部");
 });
 
+test("回放不得把上一行的背景色漏给下一行（BCE 擦除污染）", () => {
+  // Claude Code 的用户消息是灰底行、其后是普通行。回放逐行「先整行擦除再写内容」，
+  // xterm 的擦除带 BCE 语义（用当前背景色填擦除区）：若上一行序列化结尾不复位 SGR，
+  // 下一行的擦除就被残留的灰底填满——用户侧形态=「带灰底的会话行向下多绘制了半行」。
+  const mirror = createScreenMirror({ cols: 24, rows: 4 });
+  mirror.write("\u001b[0m\u001b[48;2;55;55;55m ❯ user message\u001b[0m\r\n");
+  mirror.write("plain reply line\r\n");
+  assert.equal(mirror.screenAttrs()[1].every((cell) => cell.bg === ""), true,
+    "前置：镜像里灰底行下面的普通行本身无背景");
+  const again = repaint(mirror.toReplay(), 24, 4);
+  assert.equal(again.screenAttrs()[1].every((cell) => cell.bg === ""), true,
+    "回放后的普通行不得被上一行的背景色染色");
+  assert.ok(again.screenAttrs()[0].some((cell) => cell.bg !== ""), "灰底行自身的背景必须保留");
+});
+
+test("回放不得沿空行级联背景色（OpenCode 整屏污染形态）", () => {
+  // OpenCode 每帧逐格带背景色；回放里空行只发「整行擦除」不发内容，而擦除指令
+  // 不改变 SGR——行尾不复位时一个带色行能把其后所有空行染成同一底色（实测整屏 38/39 行）。
+  const mirror = createScreenMirror({ cols: 16, rows: 4 });
+  mirror.write("\u001b[48;5;238m header bar \u001b[0m\r\n");
+  assert.equal(mirror.screenAttrs()[1].every((cell) => cell.bg === ""), true, "前置：其后是空行");
+  const again = repaint(mirror.toReplay(), 16, 4);
+  for (let r = 1; r < 4; r += 1) {
+    assert.equal(again.screenAttrs()[r].every((cell) => cell.bg === ""), true, `空行 ${r} 不得被级联染色`);
+  }
+});
+
 test("非备屏会话的回放逐字节不变（回归金样，防误伤普通路径）", () => {
   // 金样由改动前实现生成（12x3、两行内容）：非备屏路径的格式任何变化都应显式过审。
+  // 2026-10-16 过审变更：每行序列化结尾追加 \u001b[0m 复位——否则下一行 EL 的 BCE
+  // 擦除吃上一行残留背景色（见上方两条泄漏回归测试）。
   const mirror = createScreenMirror({ cols: 12, rows: 3 });
   mirror.write("AB\r\nCD");
-  const golden = "\u001b[0m\u001b[2J\u001b[H\r\n\r\n\u001b[1;1H\u001b[2K\u001b[0mAB\u001b[2;1H\u001b[2K\u001b[0mCD\u001b[3;1H\u001b[2K\u001b[0m\u001b[2;3H\u001b[?25h";
+  const golden = "\u001b[0m\u001b[2J\u001b[H\r\n\r\n\u001b[1;1H\u001b[2K\u001b[0mAB\u001b[0m\u001b[2;1H\u001b[2K\u001b[0mCD\u001b[0m\u001b[3;1H\u001b[2K\u001b[0m\u001b[0m\u001b[2;3H\u001b[?25h";
   assert.equal(mirror.toReplay(), golden, "非备屏回放必须逐字节保持原样");
   assert.ok(!mirror.toReplay().includes("1049"), "非备屏会话的回放不得含 1049");
 });

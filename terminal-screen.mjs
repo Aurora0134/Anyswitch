@@ -530,12 +530,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // dirtied these lines, so a shorter repaint must erase before it writes —
     // otherwise the tail of a history row bleeds through the frame (caught by the
     // round-trip test: '帧 119 第 0 行 zzz…' came back with 'yyy' stuck on the end).
+    // 每行结尾必须复位 SGR：serializeRow 的 run 只在开头设色、行尾不清，而下一行的
+    // EL 擦除带 BCE 语义（用当前背景色填擦除区）——不复位就会把上一行的底色漏给
+    // 下一行，且 EL 不改 SGR，空行会把泄漏级联到屏底（OpenCode 全屏染色、Claude
+    // 消息行下多一条灰即此形态）。
     for (let r = 0; r < grid.length; r += 1) {
       const serialized = isBlankRow(grid[r]) ? "" : serializeRow(grid[r]);
       const size = serialized.length + 16;
       if (bytes + size > TERMINAL_REPLAY_MAX_BYTES) break;
       bytes += size;
-      parts.push(`\u001b[${r + 1};1H\u001b[2K${serialized}`);
+      parts.push(`\u001b[${r + 1};1H\u001b[2K${serialized}\u001b[0m`);
     }
     parts.push("\u001b[0m");
     parts.push(`\u001b[${row + 1};${col + 1}H`);
