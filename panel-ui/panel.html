@@ -147,6 +147,7 @@ try {
 })();
 </script>
 <style id="panelCardOrderPrepaintCss"></style>
+<style id="panelHiddenAgentsPrepaintCss"></style>
 <script id="panelCardOrderPrepaint">
 (function () {
   // 看板端点卡的首帧卡序落位——与上面「首帧视图落位」同一形状的病、同一种解法。
@@ -181,6 +182,39 @@ try {
   }
   css.textContent = text;
   document.documentElement.setAttribute("data-prepaint-card-order", raw);
+})();
+</script>
+<script id="panelHiddenAgentsPrepaint">
+(function () {
+  // 看板未安装 Agent 卡的首帧隐藏。「机器上没装的 Agent 不上屏」只有主脚本取回
+  // /api/environment 才算得出来（panel.js loadInstalledAgentIds），主脚本 defer，
+  // 首绘必然早于取数；不预画的话每次刷新都会先闪出全部 9 张卡再收掉没装的。
+  // 与上面 panelCardOrderPrepaint 同一形状的病、同一种解法：绘制前脚本读上次
+  // 快照把那一帧直接画对，主脚本 applyAgentCardVisibility 挂 [hidden] 接棒后
+  // 摘掉 <html> 属性，这层样式整体失效。
+  // 快照只存「已安装」清单：非字符串数组、空集、含未登记 id 一律不画——
+  // 宁可闪一次，也不把在装的卡藏掉（fail-open，与运行时同口径）。
+  const AGENT_IDS = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
+  let raw = null;
+  try { raw = localStorage.getItem("anyswitch.installed-agents"); } catch (e) { return; }
+  if (typeof raw !== "string" || !raw) return;
+  let ids = null;
+  try { ids = JSON.parse(raw); } catch (e) { return; }
+  if (!Array.isArray(ids) || !ids.length) return;
+  for (let i = 0; i < ids.length; i++) {
+    if (typeof ids[i] !== "string" || AGENT_IDS.indexOf(ids[i]) < 0 || ids.indexOf(ids[i]) !== i) return;
+  }
+  const hidden = AGENT_IDS.filter((id) => ids.indexOf(id) < 0);
+  if (!hidden.length) return;
+  const css = document.getElementById("panelHiddenAgentsPrepaintCss");
+  if (!css) return;
+  let text = "";
+  for (const id of hidden) {
+    text += "html[data-prepaint-hidden-agents] .agent-cards-container>.panel-card"
+      + '[data-agent-id="' + id + '"]{display:none}';
+  }
+  css.textContent = text;
+  document.documentElement.setAttribute("data-prepaint-hidden-agents", "1");
 })();
 </script>
 </head>
@@ -1376,7 +1410,7 @@ if (window.panelStartupController) panelStartupPlay();
               <button class="btn" id="skillsPickRepoBtn" title="打开文件夹选择框，选择 skills 主仓库目录">选择主仓库</button>
               <button class="btn" id="skillsImportBtn" title="打开文件夹选择框选 skill 本体目录（需包含 SKILL.md），确认有效后导入主仓库">导入 skill 目录</button>
               <button class="btn" id="skillsImportZipBtn" title="打开文件选择框选 skill 的 .zip 压缩包，解压校验后以目录形式导入主仓库">导入 skill（zip）</button>
-              <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与端点状态，发现磁盘上的变动">刷新</button>
+              <button class="btn" id="skillsRefreshBtn" title="重新读取仓库与 Agent 状态，发现磁盘上的变动">刷新</button>
             </div>
           </div>
         </div>
@@ -1411,13 +1445,13 @@ if (window.panelStartupController) panelStartupPlay();
           <div class="card-body" id="skillsDetailBody"></div>
         </div>
 
-        <!-- 卡片 D：端点条目与异常（跨端点全局聚合）。整卡默认收起：body 直接
+        <!-- 卡片 D：Agent 条目与异常（跨 Agent 全局聚合）。整卡默认收起：body 直接
              带 hidden，等 JS 之前也不会闪一下展开态；展开与否记 localStorage -->
         <div class="panel-card folded" id="skillsAnomalyCard">
           <div class="card-header">
             <h2 class="card-title">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></svg>
-              端点条目与异常
+              Agent 条目与异常
             </h2>
             <span class="skills-anomaly-head-tools">
               <span class="badge badge-neutral" id="skillsAnomalyBadge" hidden></span>
@@ -1449,7 +1483,7 @@ if (window.panelStartupController) panelStartupPlay();
               <span class="skills-skill-name">启用预设注入</span>
               <label class="toggle"><input type="checkbox" id="presetsMasterToggle"><span class="slider"></span></label>
             </div>
-            <div class="skills-detail-relpath">开启后面板变更即写入各端点全局指令文件</div>
+            <div class="skills-detail-relpath">开启后面板变更即写入各 Agent 的全局指令文件</div>
           </div>
         </div>
 
@@ -1470,7 +1504,7 @@ if (window.panelStartupController) panelStartupPlay();
           </div>
           <div class="card-body">
             <div class="skills-btn-row">
-              <button class="btn" id="presetsAddBtn" title="新建预设：预注入到各端点全局指令文件的 prompt">新增预设</button>
+              <button class="btn" id="presetsAddBtn" title="新建预设：预注入到各 Agent 的全局指令文件的 prompt">新增预设</button>
               <button class="btn" id="presetsRefreshBtn">刷新</button>
             </div>
             <div class="skills-filter-row" style="margin-top:10px;">
@@ -1482,7 +1516,7 @@ if (window.panelStartupController) panelStartupPlay();
       </div>
 
       <div class="skills-col">
-        <!-- 卡片 C：选中预设的详情（编辑/删除 + 逐端点注入开关） -->
+        <!-- 卡片 C：选中预设的详情（编辑/删除 + 逐 Agent 注入开关） -->
         <div class="panel-card">
           <div class="card-header">
             <h2 class="card-title">
@@ -1814,7 +1848,7 @@ if (window.panelStartupController) panelStartupPlay();
             <button class="icon-btn" id="sessCollapseAllBtn" title="全部收起" style="width:28px;height:28px;font-size:12px;">⤒</button>
           </div>
           <div class="sessions-lt-row">
-            <select class="sessions-sel" id="sessEndpointFilter"><option value="">全部端点</option></select>
+            <select class="sessions-sel" id="sessEndpointFilter"><option value="">全部 Agent</option></select>
           </div>
           <div class="sessions-search-box">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -1857,7 +1891,7 @@ if (window.panelStartupController) panelStartupPlay();
           <div id="sessDetailBody" hidden>
             <div class="sess-head">
               <div class="sh-top">
-                <span class="badge" id="sessDEpBadge">端点</span>
+                <span class="badge" id="sessDEpBadge">Agent</span>
                 <span class="sh-time" id="sessDTime"></span>
               </div>
               <h2 id="sessDTitle"></h2>
@@ -2001,7 +2035,7 @@ if (window.panelStartupController) panelStartupPlay();
               <div class="modal-item-desc" id="keepAliveDesc">整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。</div>
             </div>
             <div class="keepalive-controls">
-              <div class="keepalive-eps" id="keepAliveEndpoints" role="group" aria-label="各端点抗截断"></div>
+              <div class="keepalive-eps" id="keepAliveEndpoints" role="group" aria-label="各 Agent 抗截断"></div>
               <label class="toggle">
                 <input type="checkbox" id="keepAliveToggle">
                 <span class="slider"></span>

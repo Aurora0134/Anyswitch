@@ -3091,7 +3091,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(applyUi[1].includes('keepAliveEndpointsWrap.hidden = m === "off"'),
       "总开关 off 时收起整排端点图标");
     assert.ok(panelJs.includes("已启用 ✓，点击停用"), "tooltip 带 ✓ 状态词");
-    assert.ok(panelJs.includes("各端点偏好保留，重新开启后生效"), "关态文案说明偏好保留");
+    assert.ok(panelJs.includes("各 Agent 偏好保留，重新开启后生效"), "关态文案说明偏好保留（端点口径已改 Agent）");
     assert.ok(!panelJs.includes("master-off") && !panelJs.includes("ep-off"),
       "JS 不再驱动 master-off / ep-off");
   });

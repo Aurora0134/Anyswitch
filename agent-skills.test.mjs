@@ -1225,6 +1225,82 @@ describe("createSkillsService", () => {
   });
 });
 
+describe("createSkillsService 端点可见性（未安装的 Agent 不进清单、不落盘）", () => {
+  it("getState 只报可见端点；deploy 拒绝被隐藏端点（400 + 机读码）且不建目录", async () => {
+    const { dir, cleanup } = tempRoot();
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+    try {
+      const svc = createSkillsService({
+        homeDir: home,
+        base,
+        recycleDirFn: mockRecycle([]),
+        isEndpointVisible: (id) => id === "claude",
+      });
+      svc.setRepoPath(repo);
+      const state = svc.getState();
+      assert.deepEqual(state.endpoints.map((e) => e.id), ["claude"]);
+
+      await assert.rejects(
+        svc.deploy({ endpointId: "kimi", skillName: "skill-a" }),
+        (err) => {
+          assert.match(err.message, /未安装/);
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "endpoint_not_installed");
+          return true;
+        },
+      );
+      // 拒绝的同时不能给未安装的 Agent 凭空造 skills 目录
+      assert.equal(existsSync(join(home, ".kimi-code", "skills")), false);
+
+      // 可见端点照常部署（含首用自建目录）
+      const r = await svc.deploy({ endpointId: "claude", skillName: "skill-a" });
+      assert.equal(r.ok, true);
+      assert.equal(existsSync(join(home, ".claude", "skills")), true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("undeploy 与删除仓库 skill 对隐藏端点保持放行（清理职责必须够得着卸载残留）", async () => {
+    const { dir, cleanup } = tempRoot();
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    const repo = join(dir, "repo");
+    writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+    const calls = [];
+    try {
+      // 先用全可见服务部署出 kimi 链接，模拟「装过又卸载」的残留
+      const setup = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle(calls) });
+      setup.setRepoPath(repo);
+      await setup.deploy({ endpointId: "kimi", skillName: "skill-a" });
+
+      const svc = createSkillsService({
+        homeDir: home,
+        base,
+        recycleDirFn: mockRecycle(calls),
+        isEndpointVisible: (id) => id !== "kimi",
+      });
+      svc.setRepoPath(repo);
+      // getState 不再报 kimi
+      assert.equal(svc.getState().endpoints.some((e) => e.id === "kimi"), false);
+      // undeploy 仍可移除 kimi 上的残留链接（可见性不拦清理路径）
+      await svc.undeploy({ endpointId: "kimi", skillName: "skill-a" });
+
+      // 删除仓库 skill 时对全部端点清链接（含被隐藏的 kimi）
+      await setup.deploy({ endpointId: "kimi", skillName: "skill-a" });
+      const d = await svc.deleteRepoSkill("skill-a");
+      assert.deepEqual(d.unlinked, ["kimi"]);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("createSkillsService.importPickedSkill", () => {
   it("gates on a configured repo, imports a valid pick, refuses non-skills", async () => {
     const { dir, cleanup } = tempRoot();

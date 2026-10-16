@@ -1123,6 +1123,10 @@
 
   /* Agent 遥测网格布局 */
   .agent-cards-container { display: flex; flex-direction: column; gap: 20px; }
+  /* 未安装的 Agent 卡整体不上屏：主脚本 applyAgentCardVisibility 挂 [hidden]；
+     显式写死 display 防任何卡片形态规则把它顶回可见（首帧由 panel.html 的
+     panelHiddenAgentsPrepaint CSS 层负责，运行时归这条）。 */
+  .agent-cards-container > .panel-card[hidden] { display: none; }
   .agent-top-bar {
     display: flex; align-items: center; justify-content: space-between;
     margin-bottom: 14px; flex-wrap: wrap; gap: 10px;

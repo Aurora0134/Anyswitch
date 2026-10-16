@@ -1254,8 +1254,22 @@ export function createSkillsService({
   base = process.env,
   spawnFn = spawn,
   recycleDirFn = (p) => recycleDir(p, { spawnFn }),
+  // 端点可见性谓词（panel.mjs 注入，缺省恒 true 供测试与旧调用方）：
+  // 「该 Agent 装在本机」由环境检测判定。仅收口两处——getState 的端点清单
+  // 不再含未安装的 Agent（界面与批量部署的分母随之天然收口），deploy 拒绝
+  // 未安装的 Agent（它是唯一会给不存在的 Agent 凭空建目录的写入口）。
+  // undeploy / 删除 / 收编 / 冲突处理一律不加这道闸：它们只作用于磁盘上
+  // 已存在的状态，且承担清理职责（Agent 卸载后的残留链接必须仍可移除）。
+  isEndpointVisible = () => true,
 } = {}) {
   const deps = { homeDir, recycleDirFn };
+
+  function notInstalledEndpointError() {
+    const error = new Error("该 Agent 未安装，无法部署");
+    error.statusCode = 400;
+    error.code = "endpoint_not_installed";
+    return error;
+  }
 
   function configuredRepo() {
     return loadSkillsConfig({ base }).repoPath;
@@ -1288,7 +1302,10 @@ export function createSkillsService({
         // 空仓库是合法状态（确认后可设、也可被删空），"无效"只留给目录真消失
         repoValid: repoExists,
         skills,
-        endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir }),
+        // 只报已安装 Agent 的端点：目录是否存在不再进 UI 口径（装好但从未
+        // 部署过的 Agent 首次部署时自建目录），「装没装」由 isEndpointVisible 判定
+        endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir })
+          .filter((ep) => isEndpointVisible(ep.id)),
         candidates: [
           ...(base.ANYSWITCH_SKILLS_REPO ? [base.ANYSWITCH_SKILLS_REPO] : []),
           ...REPO_CANDIDATES.map((parts) => join(homeDir, ...parts)),
@@ -1358,6 +1375,7 @@ export function createSkillsService({
     },
 
     async deploy({ endpointId, skillName, force }) {
+      if (!isEndpointVisible(endpointId)) throw notInstalledEndpointError();
       const repoPath = requireExistingRepo();
       return deploy({ endpointId, skillName, repoPath, force: Boolean(force) }, deps);
     },

@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPanelRouter } from "./panel.mjs";
+import { createPanelRouter, deriveVisibleEndpointIds } from "./panel.mjs";
 import { executeClientUpdate } from "./client-update-journal.mjs";
 import { compareVersions } from "./version-check.mjs";
 
@@ -604,4 +604,26 @@ test("未知运行编号返回 404，页面可据此走重新检测自愈", asyn
     assert.equal(missing.status, 404);
     assert.equal(missing.body.error, "unknown_run");
   });
+});
+
+test("deriveVisibleEndpointIds：任一形态非 not_found 即在，全部未找到才不在，异常清单回落 null", () => {
+  const clients = (spec) => spec.map(([id, statuses]) => ({
+    id,
+    installations: statuses.map((status) => ({ status })),
+  }));
+  // found（任一形态）→ 可见；error（检测出错）→ 按可见（fail-open）
+  assert.deepEqual(deriveVisibleEndpointIds(clients([
+    ["claude", ["found", "not_found"]],
+    ["kimi", ["not_found", "error"]],
+    ["grok", ["not_found"]],
+  ])), new Set(["claude", "kimi"]));
+  // 全部形态都未找到 → 不在
+  assert.equal(deriveVisibleEndpointIds(clients([["grok", ["not_found"]]])).has("grok"), false);
+  // 空形态列表（数据残缺）→ 不可见判定不成立？——形态缺失等同全部未找到
+  assert.equal(deriveVisibleEndpointIds(clients([["pi", []]])).has("pi"), false);
+  // 清单缺失 / 非数组 / 空 → null（检测异常形态，调用方不过滤）
+  assert.equal(deriveVisibleEndpointIds(null), null);
+  assert.equal(deriveVisibleEndpointIds(undefined), null);
+  assert.equal(deriveVisibleEndpointIds([]), null);
+  assert.equal(deriveVisibleEndpointIds("junk"), null);
 });

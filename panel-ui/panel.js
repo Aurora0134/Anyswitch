@@ -550,6 +550,7 @@ async function api(method, path, body) {
   // 那一刻交棒回 DOM 顺序（见下方 reorderAgentCards 末段）。
   const AGENT_CARD_ORDER = ["zcode", "claude", "dsh", "pi", "kimi", "opencode", "qoder", "codex", "grok"];
   const STANDBY_SINK_MS = 5000;
+
   // 每卡历史最大活动锚点：claude 会话整行退出后 payload 锚点会消失（relay
   // 重启同理归零），记住见过的最大值让待命计时连续、不因锚点回退而提前下沉。
   const cardActivityAnchor = {};
@@ -613,6 +614,84 @@ async function api(method, path, body) {
     try { localStorage.setItem("agent-card-order", key); } catch {}
     container.append(...cards);
   }
+
+  // ── 已安装 Agent 可见性（各展示面共用的唯一口径）──────────────────────
+  // 「Agent 装在本机」由环境检测判定（与关于页、终端「+」菜单同一真值源）：
+  // 任一形态（CLI/桌面）检测到即算在，全部形态都未找到才算不在，任一形态检测
+  // 出错按在（fail-open——宁可多显示，也不能把真实存在的 Agent 藏掉）。
+  // 看板卡、设置-抗截断端点钮、设置-自动路由瓦片、会话筛选都从这里取数；
+  // skills / presets 两页的端点清单由服务端按同一判定过滤下发，不在这里管。
+  // 快照写一份进 localStorage，供 panel.html 的 panelHiddenAgentsPrepaint
+  // 在首绘前把未安装的看板卡直接画没（否则每次刷新都先闪 9 张再收）。
+  const INSTALLED_AGENTS_LS_KEY = "anyswitch.installed-agents";
+  let installedAgentIds = readInstalledAgentsSnapshot(); // null = 未知 → 全部可见
+  let installedAgentIdsAt = 0;
+  function readInstalledAgentsSnapshot() {
+    try {
+      const raw = localStorage.getItem(INSTALLED_AGENTS_LS_KEY);
+      if (typeof raw !== "string" || !raw) return null;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length && parsed.every((x) => typeof x === "string")
+        ? new Set(parsed) : null;
+    } catch { return null; }
+  }
+  function writeInstalledAgentsSnapshot(ids) {
+    try { localStorage.setItem(INSTALLED_AGENTS_LS_KEY, JSON.stringify([...ids])); } catch {}
+  }
+  function applyAgentCardVisibility(ids) {
+    const container = document.querySelector(".agent-cards-container");
+    if (!container) return;
+    for (const card of container.querySelectorAll(".panel-card[data-agent-id]")) {
+      card.hidden = ids === null || ids.has(card.getAttribute("data-agent-id"));
+    }
+    // 交棒给运行时：DOM hidden 接管后摘首帧属性，prepaint 样式层随之失效
+    // （与 panelCardOrderPrepaint 的交棒同款手法）
+    if (ids !== null) document.documentElement.removeAttribute("data-prepaint-hidden-agents");
+  }
+  // 可见集变化时由 initSettingsView 注册重建入口：buildKeepAliveEndpoints 嵌在
+  // 它的闭包里，IIFE 层不能直引（跨作用域 ReferenceError），走回调解耦。
+  let rebuildKeepAliveButtons = null;
+  // 取数成功且可见集变化时，把依赖它的三处静态 UI 重算一遍。变化才重算：
+  // 刷新轮询每次都全量重画会打断展开中的下拉/悬停。
+  function applyInstalledAgentIds(ids) {
+    const prev = installedAgentIds;
+    installedAgentIds = ids;
+    installedAgentIdsAt = Date.now();
+    if (ids === null) return;
+    const same = prev instanceof Set && ids.size === prev.size && [...ids].every((id) => prev.has(id));
+    if (same) return;
+    writeInstalledAgentsSnapshot(ids);
+    applyAgentCardVisibility(ids);
+    if (rebuildKeepAliveButtons) rebuildKeepAliveButtons(); // 设置-抗截断端点钮（幂等重建）
+    renderRouteChains();                // 设置-自动路由瓦片墙
+    sessEpOptionsKey = "";              // 会话筛选下拉按新可见集重算
+    refreshSessEndpointOptions();
+  }
+  function loadInstalledAgentIds() {
+    if (installedAgentIdsAt && Date.now() - installedAgentIdsAt < 60000 && installedAgentIds) {
+      return Promise.resolve(installedAgentIds);
+    }
+    return api("GET", "/api/environment")
+      .then((state) => {
+        const clients = Array.isArray(state.clients) ? state.clients : [];
+        // 客户端清单为空是检测异常形态，不是「什么都没装」：按未知处理
+        if (!clients.length) return null;
+        const ids = new Set();
+        for (const client of clients) {
+          const installations = Array.isArray(client.installations) ? client.installations : [];
+          if (installations.some((item) => item && item.status !== "not_found")) ids.add(client.id);
+        }
+        applyInstalledAgentIds(ids);
+        return ids;
+      })
+      .catch(() => null); // 失败不进缓存：期间沿用快照，下次取数再试
+  }
+  // 首帧先用上次快照隐藏（panel.html 的 prepaint 已把 CSS 画好，这里同步挂
+  // [hidden] 接棒），再取一次环境检测对齐真值。放在 reorderAgentCards 之后：
+  // panel.test.mjs 的卡序沙箱从 AGENT_CARD_ORDER 切到本函数结尾，中间这段
+  // 属于它，可见性 helper 不得插进那个切片。
+  applyAgentCardVisibility(installedAgentIds);
+  loadInstalledAgentIds();
 
   // ── B1 卡片渲染指纹：数据没变就整卡跳过，不碰 DOM ──
   // 指纹 = routeChainsVer/msModelsCacheVer/routeRuntimeVer/sparkWindowPoints
@@ -3472,7 +3551,7 @@ async function api(method, path, body) {
       return Math.min(MAX_KEEPALIVE_RETRIES, parsed);
     }
     const KEEP_ALIVE_COPY = {
-      off: { title: "抗截断", desc: "不做防截断处理，输出即时；各端点偏好保留，重新开启后生效。", toast: "已停用抗截断" },
+      off: { title: "抗截断", desc: "不做防截断处理，输出即时；各 Agent 偏好保留，重新开启后生效。", toast: "已停用抗截断" },
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
@@ -3520,9 +3599,13 @@ async function api(method, path, body) {
     // .keepalive-ep-icon 等比缩放统一尺寸；品牌色经 --ep-color 指到 --ep-* token，
     // 启用态底衬/描边由它派生。点击监听直接挂在按钮上。
     function buildKeepAliveEndpoints() {
-      if (!keepAliveEndpointsWrap || keepAliveEndpointsWrap.childElementCount > 0) return;
+      if (!keepAliveEndpointsWrap) return;
+      // 幂等重建：首次与 installedAgentIds 刷新后都会走这里（applyInstalledAgentIds），
+      // 未安装的 Agent 不再出钮。null（检测未知/失败）按全部可见（fail-open）。
+      keepAliveEndpointsWrap.innerHTML = "";
       const board = document.querySelector(".agent-cards-container");
       for (const agentId of AGENT_CARD_ORDER) {
+        if (installedAgentIds && !installedAgentIds.has(agentId)) continue;
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "keepalive-ep";
@@ -3539,8 +3622,12 @@ async function api(method, path, body) {
         btn.addEventListener("click", () => persistKeepAliveEndpoint(agentId));
         keepAliveEndpointsWrap.appendChild(btn);
       }
+      applyKeepAliveEndpointsUi(); // 重建即回填 aria-pressed/提示（存档回显路径之外也成立）
     }
     buildKeepAliveEndpoints();
+    // 可见集变化时（环境检测落地）由 IIFE 层回调触达重建：buildKeepAliveEndpoints
+    // 是本函数的内部函数，外层不直引（见 applyInstalledAgentIds 侧注释）。
+    rebuildKeepAliveButtons = () => { buildKeepAliveEndpoints(); };
 
     // 设置入口：页头齿轮切入全页设置视图，退出回到进入前的视图
     const openBtn = $("settingsBtn");
@@ -7891,7 +7978,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "切换主仓库",
       bodyHtml: `将把 Skills 主仓库切换到 <b>${escapeHtml(path)}</b>。` +
-        "当前仓库的收藏会保留，切回即恢复；已部署到各端点的 skill 目录不会移动。",
+        "当前仓库的收藏会保留，切回即恢复；已部署到各 Agent 的 skill 目录不会移动。",
       confirmText: "切换",
       onConfirm: apply,
     });
@@ -7999,8 +8086,10 @@ async function api(method, path, body) {
       return;
     }
     const endpoints = skillsState.endpoints || [];
-    // 分母只计已启用端点（目录存在的）；未启用端点不可部署，计入会稀释口径。
-    const enabledEps = endpoints.filter((ep) => ep.dirExists);
+    // 分母 = 服务端返回的全部端点（已按「装在本机」过滤）。目录是否存在不进
+    // 口径：装好但从未部署过的 Agent 首次部署时会自建目录，「未部署」就是它的
+    // 准确状态。
+    const enabledEps = endpoints;
     const epLabelById = new Map(endpoints.map((ep) => [ep.id, ep.label]));
     // 仓库内可能有多个同名目录的 skill（如 vendor 副本）；dirName 是部署匹配的键，
     // 重名时部署状态会互相沾染，需要在列表里标出来。
@@ -8011,7 +8100,7 @@ async function api(method, path, body) {
       const epCount = !enabledEps.length
         ? ""
         : `<span class="skills-ep-count${eps.length >= enabledEps.length ? " full" : eps.length ? " some" : ""}" title="${escapeHtml(
-            `已部署 ${eps.length}/${enabledEps.length} 个端点`
+            `已部署 ${eps.length}/${enabledEps.length} 个 Agent`
             + (eps.length ? `：${eps.map((id) => epLabelById.get(id) || id).join("、")}` : "")
           )}">${eps.length}/${enabledEps.length}</span>`;
       const dupBadge = dirNameCounts.get(s.dirName) > 1
@@ -8190,13 +8279,13 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "删除仓库 Skill",
       danger: true,
-      bodyHtml: `将把 <b>${escapeHtml(skill.dirName)}</b> 从主仓库移入回收站，并清除所有端点上指向它的链接。端点上的真实目录不受影响。`,
+      bodyHtml: `将把 <b>${escapeHtml(skill.dirName)}</b> 从主仓库移入回收站，并清除所有 Agent 上指向它的链接。Agent 上的真实目录不受影响。`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let removed = [];
         try {
           const d = await api("POST", "/api/skills/repo/delete", { skillName: skill.dirName });
-          toast(d.unlinked && d.unlinked.length ? `已删除，并清除 ${d.unlinked.length} 处端点链接` : "已删除");
+          toast(d.unlinked && d.unlinked.length ? `已删除，并清除 ${d.unlinked.length} 处 Agent 链接` : "已删除");
           removed = [skill.relPath];
         } catch (e) {
           toast(panelError(e, "删除失败"), true);
@@ -8215,18 +8304,19 @@ async function api(method, path, body) {
     const card = body.closest(".panel-card");
     if (card) card.hidden = !skill;
     if (!skill) {
-      body.innerHTML = '<div class="empty-hint">从左侧列表选择一个 skill，查看详情并管理端点部署</div>';
+      body.innerHTML = '<div class="empty-hint">从左侧列表选择一个 skill，查看详情并管理 Agent 部署</div>';
       return;
     }
     const endpoints = (skillsState && skillsState.endpoints) || [];
     const rows = endpoints.map((ep) => {
       const junctions = (ep.entries || []).filter((e) => e.kind === "junction");
       const deployed = junctions.some((e) => !e.broken && e.repoSkill === skill.dirName);
-      const stateBadge = !ep.dirExists
-        ? '<span class="badge badge-neutral">未启用</span>'
-        : deployed
-          ? '<span class="badge badge-ok">已部署</span>'
-          : '<span class="badge badge-neutral">未部署</span>';
+      // 只有两种状态：已部署 / 未部署。目录还不存在的（Agent 装好但从未部署过）
+      // 首次部署会自建目录，就是「未部署」；未安装的 Agent 由服务端从清单里滤掉，
+      // 不再出现在这里。
+      const stateBadge = deployed
+        ? '<span class="badge badge-ok">已部署</span>'
+        : '<span class="badge badge-neutral">未部署</span>';
       return `<div class="skills-skill-row">
         <span class="skills-skill-name">${escapeHtml(ep.label)} ${stateBadge}</span>
         <label class="toggle"><input type="checkbox" data-deploy="${escapeHtml(ep.id)}"${deployed ? " checked" : ""}><span class="slider"></span></label>
@@ -8250,7 +8340,7 @@ async function api(method, path, body) {
       <div class="skills-detail-desc">${escapeHtml(skill.description || "（无描述）")}</div>
       ${dupWarn}
       <div class="skills-group-title skills-group-title-row" style="margin-top:0; padding-top:0; border-top:none;">
-        <span>部署到端点</span>
+        <span>部署到 Agent</span>
         <span class="skills-batch-actions">
           <button class="btn btn-mini btn-accent" id="skillsDeployAllBtn">全部部署</button>
           <button class="btn btn-mini btn-warn" id="skillsUndeployAllBtn">全部解除</button>
@@ -8270,15 +8360,16 @@ async function api(method, path, body) {
     $("skillsUndeployAllBtn").onclick = (e) => setAllDeployments(skill, false, e.target);
   }
 
-  // 部署/解除的共用核心：对 skills × 各自目标端点串行调单点接口。
-  // 未启用端点跳过、已是目标状态跳过；部署遇本地冲突不强制、计数跳过
-  // 留给用户逐条处理（与单点 toggle 的冲突语义一致）。返回计数由调用方包装 toast。
+  // 部署/解除的共用核心：对 skills × 各自目标 Agent 串行调单点接口。
+  // 端点清单由服务端按「装在本机」过滤（未安装的 Agent 不在列），这里不再看
+  // 目录是否存在——装好但没部署过的 Agent 首次部署会自建目录。已是目标状态
+  // 跳过；部署遇本地冲突不强制、计数跳过留给用户逐条处理（与单点 toggle 的
+  // 冲突语义一致）。返回计数由调用方包装 toast。
   async function runDeployBatch(skills, on) {
     let okCount = 0, conflictCount = 0, failCount = 0, targetCount = 0;
     for (const skill of skills) {
       const endpoints = (skillsState && skillsState.endpoints) || [];
       const targets = endpoints.filter((ep) => {
-        if (!ep.dirExists) return false;
         const junctions = (ep.entries || []).filter((e) => e.kind === "junction");
         const deployed = junctions.some((e) => !e.broken && e.repoSkill === skill.dirName);
         return on ? !deployed : deployed;
@@ -8298,14 +8389,14 @@ async function api(method, path, body) {
     return { okCount, conflictCount, failCount, targetCount };
   }
 
-  // 一键全开/关：单 skill × 所有端点，复用 runDeployBatch。
+  // 一键全开/关：单 skill × 所有已安装的 Agent，复用 runDeployBatch。
   async function setAllDeployments(skill, on, btn) {
     if (btn) btn.disabled = true;
     const { okCount, conflictCount, failCount, targetCount } = await runDeployBatch([skill], on);
     if (!targetCount) {
-      toast(on ? "已启用的端点都已部署" : "没有已部署的端点");
+      toast(on ? "已安装的 Agent 都已部署" : "没有已部署的 Agent");
     } else {
-      const parts = [on ? `已部署到 ${okCount} 个端点` : `已解除 ${okCount} 个端点`];
+      const parts = [on ? `已部署到 ${okCount} 个 Agent` : `已解除 ${okCount} 个 Agent`];
       if (conflictCount) parts.push(`${conflictCount} 个因本地冲突跳过`);
       if (failCount) parts.push(`${failCount} 个失败`);
       toast(parts.join("，"), failCount > 0);
@@ -8340,7 +8431,7 @@ async function api(method, path, body) {
     if (mode === "multi") {
       title = `已选 ${skillsSelection.size} 项`;
       items.push(
-        { label: "部署选中项到所有端点", fn: () => batchSetDeployments(true) },
+        { label: "部署选中项到所有 Agent", fn: () => batchSetDeployments(true) },
         { label: "解除选中项的所有部署", fn: () => batchSetDeployments(false) },
         { label: "全选", fn: selectAllVisibleSkills },
         { label: "取消选择", fn: () => { skillsSelection.clear(); skillsFocusKey = null; renderSkillsList(); renderSkillDetail(); } },
@@ -8352,8 +8443,8 @@ async function api(method, path, body) {
     } else if (mode === "single" && skill) {
       items.push(
         { label: "查阅 skill 正文", fn: () => viewSkillBody(skill.relPath) },
-        { label: "部署到所有端点", fn: () => setAllDeployments(skill, true, null) },
-        { label: "从所有端点解除", fn: () => setAllDeployments(skill, false, null) },
+        { label: "部署到所有 Agent", fn: () => setAllDeployments(skill, true, null) },
+        { label: "从所有 Agent 解除", fn: () => setAllDeployments(skill, false, null) },
         { label: "全选", fn: selectAllVisibleSkills },
         // 同上：前面的项索引不要变；收藏项按当前行收藏态二选一，「删除 skill」固定在最末尾
         skillsFavorites.has(skill.relPath)
@@ -8402,8 +8493,8 @@ async function api(method, path, body) {
       title: isMatching ? `批量转为主仓库托管（${items.length} 项）` : `批量导入主仓库（${items.length} 项）`,
       danger: false,
       bodyHtml: (isMatching
-        ? "以下端点目录与主仓库内容一致，不复制文件：端点上的真实目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。"
-        : "以下端点目录将逐项复制到主仓库（.git 除外），随后端点上的真实目录移入回收站（可恢复），原位改为链接。")
+        ? "以下 Agent 目录与主仓库内容一致，不复制文件：Agent 上的真实目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。"
+        : "以下 Agent 目录将逐项复制到主仓库（.git 除外），随后 Agent 上的真实目录移入回收站（可恢复），原位改为链接。")
         + `<div style="margin-top:8px;">${listHtml}</div>`,
       confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
@@ -8433,7 +8524,7 @@ async function api(method, path, body) {
     });
   }
 
-  // 删除端点本地实体目录（回收站语义，禁止硬删，走 /api/skills/local/delete）。
+  // 删除 Agent 本地实体目录（回收站语义，禁止硬删，走 /api/skills/local/delete）。
   // unique 组是该 skill 唯一副本，提示仅从回收站可恢复；matching 组仓库仍有副本。
   function confirmDeleteAnomalyItems(items) {
     if (!items.length) return;
@@ -8446,11 +8537,11 @@ async function api(method, path, body) {
         ? "这是该 skill 唯一副本，删除后仅从回收站可恢复。"
         : `其中 ${uniqCount} 项是该 skill 唯一副本，删除后仅从回收站可恢复。`);
     }
-    if (uniqCount < items.length) notes.push("一致可迁移项主仓库仍有副本，删除端点目录不影响仓库内容。");
+    if (uniqCount < items.length) notes.push("一致可迁移项主仓库仍有副本，删除 Agent 目录不影响仓库内容。");
     showSkillsModal({
-      title: items.length === 1 ? "删除端点本地目录" : `删除选中的 ${items.length} 个端点目录`,
+      title: items.length === 1 ? "删除 Agent 本地目录" : `删除选中的 ${items.length} 个 Agent 目录`,
       danger: true,
-      bodyHtml: `将把以下端点上的实体目录移入回收站：<div style="margin-top:8px;">${listHtml}</div><div style="margin-top:8px; color:var(--danger);">${notes.join("<br>")}</div>`,
+      bodyHtml: `将把以下 Agent 上的实体目录移入回收站：<div style="margin-top:8px;">${listHtml}</div><div style="margin-top:8px; color:var(--danger);">${notes.join("<br>")}</div>`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let okCount = 0, failCount = 0;
@@ -8466,7 +8557,7 @@ async function api(method, path, body) {
         // 失败必须显式报错：数量之外给出首个失败原因
         toast(failCount
           ? `删除完成：成功 ${okCount}、失败 ${failCount}。首个失败原因：${firstError}`
-          : `已删除 ${okCount} 个端点目录`, failCount > 0);
+          : `已删除 ${okCount} 个 Agent 目录`, failCount > 0);
         anomalyChecked.matching.clear();
         anomalyChecked.unique.clear();
         // 乐观更新：回收站删除每条约 1-3s，先把成功项从本地 state 移除并立即
@@ -8612,7 +8703,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: `删除选中的 ${deletable.length} 个 Skill`,
       danger: true,
-      bodyHtml: `将把以下 skill 从主仓库移入回收站，并清除所有端点上指向它们的链接。端点上的真实目录不受影响。<div style="margin-top:8px;">${listHtml}</div>${skippedNote}`,
+      bodyHtml: `将把以下 skill 从主仓库移入回收站，并清除所有 Agent 上指向它们的链接。Agent 上的真实目录不受影响。<div style="margin-top:8px;">${listHtml}</div>${skippedNote}`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let failCount = 0;
@@ -8632,7 +8723,7 @@ async function api(method, path, body) {
     });
   }
 
-  // ── 卡片 D：端点条目与异常（跨端点全局聚合，右列下） ──
+  // ── 卡片 D：Agent 条目与异常（跨 Agent 全局聚合，右列下） ──
   function renderSkillsAnomalies() {
     const body = $("skillsAnomalyBody");
     const badge = $("skillsAnomalyBadge");
@@ -8655,7 +8746,7 @@ async function api(method, path, body) {
     badge.textContent = `${total} 项`;
     badge.className = "badge " + (broken.length + diverged.length ? "badge-warn" : "badge-neutral");
     if (!total) {
-      body.innerHTML = '<div class="empty-hint">没有异常或端点条目</div>';
+      body.innerHTML = '<div class="empty-hint">没有异常或 Agent 条目</div>';
       return;
     }
 
@@ -8734,12 +8825,12 @@ async function api(method, path, body) {
     }
     if (diverged.length) {
       sections.push(
-        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>分叉冲突（端点与仓库同名但内容不同）</div>` +
+        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>分叉冲突（Agent 与仓库同名但内容不同）</div>` +
         diverged.map(({ ep, entry }) => rowHtml(ep, entry,
           '<span class="badge badge-danger">分叉冲突</span>',
           `<button class="btn btn-mini" data-diff="${key(ep, entry)}">查看差异</button>` +
-          `<button class="btn btn-mini" data-resolve-repo="${key(ep, entry)}">以主仓库覆盖端点</button>` +
-          `<button class="btn btn-danger btn-mini" data-resolve-local="${key(ep, entry)}">以端点覆盖主仓库</button>`)).join(""),
+          `<button class="btn btn-mini" data-resolve-repo="${key(ep, entry)}">以主仓库覆盖 Agent</button>` +
+          `<button class="btn btn-danger btn-mini" data-resolve-local="${key(ep, entry)}">以 Agent 覆盖主仓库</button>`)).join(""),
       );
     }
     if (matching.length) {
@@ -8759,7 +8850,7 @@ async function api(method, path, body) {
       btn.onclick = () => removeBrokenJunction(...btn.getAttribute("data-remove-broken").split(SEP));
     });
     body.querySelectorAll("button[data-diff]").forEach((btn) => {
-      // 弹窗右栏要写端点的显示名（ZCode / Kimi Code…），不写 claude 那种内部 id
+      // 弹窗右栏要写 Agent 的显示名（ZCode / Kimi Code…），不写 claude 那种内部 id
       btn.onclick = () => {
         const [endpointId, skillName] = btn.getAttribute("data-diff").split(SEP);
         const label = (skillsState.endpoints || []).find((e) => e.id === endpointId)?.label;
@@ -8834,7 +8925,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "移除失效链接",
       danger: true,
-      bodyHtml: `将移除端点 <b>${escapeHtml(endpointId)}</b> 上指向 <b>${escapeHtml(skillName)}</b> 的失效链接（只删链接，不影响任何真实目录）。`,
+      bodyHtml: `将移除 Agent <b>${escapeHtml(endpointId)}</b> 上指向 <b>${escapeHtml(skillName)}</b> 的失效链接（只删链接，不影响任何真实目录）。`,
       confirmText: "移除",
       onConfirm: async () => {
         try {
@@ -8856,13 +8947,13 @@ async function api(method, path, body) {
   // 「查看差异」两栏对照弹窗的正文，一个自包含函数（只依赖 escapeHtml）：
   // panel-skills.test.mjs 会把它从主脚本里抠出来直接执行，用后端真实形状的
   // payload 验两侧行号与着色类——光看源码结构的断言看不见这一层。
-  // 左＝主仓库、右＝该端点。二进制 / 超限这些"没比"的文件同样进清单并写明原因，
+  // 左＝主仓库、右＝该 Agent。二进制 / 超限这些"没比"的文件同样进清单并写明原因，
   // 否则用户看到的是一份悄悄缩水过的差异。
   function skillDiffHtml(endpointId, skillName, files, epLabel) {
     const STATE_LABEL = {
       different: "内容不同",
       "only-repo": "仅仓库有",
-      "only-endpoint": "仅端点有",
+      "only-endpoint": "仅 Agent 有",
       "eol-only": "只有换行符不同",
       binary: "未比对：二进制文件",
       oversize: "未比对：文件过大",
@@ -8917,7 +9008,7 @@ async function api(method, path, body) {
     }
   }
 
-  // 分叉冲突的两个显式方向；两个方向的终态都是端点目录变 junction 指向主仓库。
+  // 分叉冲突的两个显式方向；两个方向的终态都是 Agent 侧目录变 junction 指向主仓库。
   async function resolveConflict(endpointId, skillName, direction) {
     const isRepo = direction === "repo";
     let diffs = [];
@@ -8925,16 +9016,16 @@ async function api(method, path, body) {
       diffs = await fetchLocalDiffs(endpointId, skillName);
     } catch { /* 差异取不到也允许继续，确认框少一份清单而已 */ }
     showSkillsModal({
-      title: isRepo ? "以主仓库覆盖端点" : "以端点覆盖主仓库",
+      title: isRepo ? "以主仓库覆盖 Agent" : "以 Agent 覆盖主仓库",
       danger: true,
       bodyHtml: isRepo
-        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的真实目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为链接指向主仓库版本。${diffListHtml(diffs)}`
-        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以端点 <b>${escapeHtml(endpointId)}</b> 的内容覆盖；其他端点指向该 skill 的链接会自动跟到新内容。${diffListHtml(diffs)}`,
-      confirmText: isRepo ? "覆盖端点" : "覆盖主仓库",
+        ? `Agent <b>${escapeHtml(endpointId)}</b> 上的真实目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为链接指向主仓库版本。${diffListHtml(diffs)}`
+        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以 Agent <b>${escapeHtml(endpointId)}</b> 上的内容覆盖；其他 Agent 指向该 skill 的链接会自动跟到新内容。${diffListHtml(diffs)}`,
+      confirmText: isRepo ? "覆盖 Agent" : "覆盖主仓库",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/resolve-conflict", { endpointId, skillName, direction });
-          toast(isRepo ? "已以主仓库版本覆盖端点" : "已以端点版本覆盖主仓库（旧版在回收站）");
+          toast(isRepo ? "已以主仓库版本覆盖 Agent" : "已以 Agent 版本覆盖主仓库（旧版在回收站）");
         } catch (e) {
           toast(panelError(e, "覆盖失败"), true);
         }
@@ -8973,7 +9064,7 @@ async function api(method, path, body) {
   }
 
   function diffKindLabel(kind) {
-    return kind === "only-a" ? "仅仓库有" : kind === "only-b" ? "仅端点有" : "内容不同";
+    return kind === "only-a" ? "仅仓库有" : kind === "only-b" ? "仅 Agent 有" : "内容不同";
   }
 
   function diffListHtml(diffs) {
@@ -8985,9 +9076,9 @@ async function api(method, path, body) {
 
   function showDeployConflict(endpointId, skillName, diffs) {
     showSkillsModal({
-      title: "端点目录与仓库不一致",
+      title: "Agent 目录与仓库不一致",
       danger: true,
-      bodyHtml: `端点 <b>${escapeHtml(endpointId)}</b> 上已存在同名的真实目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该目录移入回收站，并改为链接指向仓库版本。${diffListHtml(diffs)}`,
+      bodyHtml: `Agent <b>${escapeHtml(endpointId)}</b> 上已存在同名的真实目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该目录移入回收站，并改为链接指向仓库版本。${diffListHtml(diffs)}`,
       confirmText: "替换为仓库版本",
       onConfirm: async () => {
         try {
@@ -9011,8 +9102,8 @@ async function api(method, path, body) {
       title: isMatching ? "转为主仓库托管" : "导入主仓库",
       danger: false,
       bodyHtml: isMatching
-        ? `端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：端点上的真实目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。`
-        : `将把端点 <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后端点上的真实目录移入回收站（可恢复），原位改为链接，此后其他端点也可部署该 skill。`,
+        ? `Agent <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：Agent 上的真实目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。`
+        : `将把 Agent <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后 Agent 上的真实目录移入回收站（可恢复），原位改为链接，此后其他 Agent 也可部署该 skill。`,
       confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
         // null = 请求失败；[] = 走通了但没有新行（转托管复用仓库既有副本）
@@ -9024,7 +9115,7 @@ async function api(method, path, body) {
             showSkillsModal({
               title: "仓库已有同名 skill",
               danger: false,
-              bodyHtml: `仓库中的 <b>${escapeHtml(skillName)}</b> 与端点上的版本内容不同，未做任何改动。请用「分叉冲突」分区的两个方向按钮处理。${diffListHtml(d.diffs || [])}`,
+              bodyHtml: `仓库中的 <b>${escapeHtml(skillName)}</b> 与 Agent 上的版本内容不同，未做任何改动。请用「分叉冲突」分区的两个方向按钮处理。${diffListHtml(d.diffs || [])}`,
               confirmText: "知道了",
               onConfirm: null,
             });
@@ -9387,7 +9478,7 @@ async function api(method, path, body) {
         : 0;
       const epCount = !epTotal
         ? ""
-        : `<span class="skills-ep-count${n >= epTotal ? " full" : n ? " some" : ""}" title="注入 ${n}/${epTotal} 个端点">${n}/${epTotal}</span>`;
+        : `<span class="skills-ep-count${n >= epTotal ? " full" : n ? " some" : ""}" title="注入 ${n}/${epTotal} 个 Agent">${n}/${epTotal}</span>`;
       const chars = presetCharCount(p);
       const lenBadge = `<span class="badge ctx-preset-badge ${presetBadgeClass(chars)}" title="正文 ${chars} 字">${formatCharsCompact(chars)}</span>`;
       const tagBadge = p.tag ? `<span class="badge badge-neutral">${escapeHtml(p.tag)}</span>` : "";
@@ -9560,7 +9651,7 @@ async function api(method, path, body) {
     const card = body.closest(".panel-card");
     if (card) card.hidden = !preset;
     if (!preset) {
-      body.innerHTML = '<div class="empty-hint">从左侧列表选择一个预设，查看详情并管理端点注入</div>';
+      body.innerHTML = '<div class="empty-hint">从左侧列表选择一个预设，查看详情并管理 Agent 注入</div>';
       return;
     }
     const endpoints = (presetsState && presetsState.endpoints) || [];
@@ -9599,7 +9690,7 @@ async function api(method, path, body) {
       <div class="skills-detail-relpath">${tagBadge}${enabledBadge} 更新于 ${escapeHtml(fmtPresetTime(preset.updatedAt))}</div>
       <div class="skills-detail-desc" style="white-space:pre-wrap;">${escapeHtml(preset.content || "（无内容）")}</div>
       <div class="skills-group-title skills-group-title-row" style="margin-top:0; padding-top:0; border-top:none;">
-        <span>注入到端点</span>
+        <span>注入到 Agent</span>
         <span class="skills-batch-actions">
           <button class="btn btn-mini btn-accent" id="presetsInjectAllBtn">全部注入</button>
           <button class="btn btn-mini btn-warn" id="presetsUninjectAllBtn">全部解除</button>
@@ -9630,7 +9721,8 @@ async function api(method, path, body) {
     await refreshPresetsState();
   }
 
-  // 全部注入/全部解除：对 9 端点串行走 override，已是目标状态的端点跳过
+  // 全部注入/全部解除：对清单里的 Agent（服务端已按「装在本机」过滤）串行走
+  // override，已是目标状态的跳过
   async function setAllPresetInjects(preset, on, btn) {
     if (btn) btn.disabled = true;
     const endpoints = (presetsState && presetsState.endpoints) || [];
@@ -9643,7 +9735,7 @@ async function api(method, path, body) {
           changed++;
         } catch { failed++; }
       }
-      toast(failed ? `完成 ${changed} 个端点，失败 ${failed} 个` : (on ? "已全部注入" : "已全部解除"), failed > 0);
+      toast(failed ? `完成 ${changed} 个 Agent，失败 ${failed} 个` : (on ? "已全部注入" : "已全部解除"), failed > 0);
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -9664,7 +9756,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "删除预设",
       danger: true,
-      bodyHtml: `将删除预设 <b>${escapeHtml(preset.title)}</b>，并从所有端点全局指令文件中移除其注入内容。`,
+      bodyHtml: `将删除预设 <b>${escapeHtml(preset.title)}</b>，并从所有 Agent 的全局指令文件中移除其注入内容。`,
       confirmText: "删除",
       onConfirm: async () => {
         try {
@@ -9688,7 +9780,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: `删除选中的 ${selected.length} 个预设`,
       danger: true,
-      bodyHtml: `将删除以下预设，并从所有端点全局指令文件中移除其注入内容。<div style="margin-top:8px;">${listHtml}</div>`,
+      bodyHtml: `将删除以下预设，并从所有 Agent 的全局指令文件中移除其注入内容。<div style="margin-top:8px;">${listHtml}</div>`,
       confirmText: "删除",
       onConfirm: async () => {
         let failCount = 0;
@@ -9721,7 +9813,7 @@ async function api(method, path, body) {
         <input class="store-form-input" id="presetFormTitle" value="${escapeHtml(v.title)}" placeholder="如 代码风格约定"></div>
       <div class="store-form-row"><label class="store-form-label">Tag（可选，列表徽标展示）</label>
         <input class="store-form-input" id="presetFormTag" value="${escapeHtml(v.tag)}" placeholder="如 style"></div>
-      <div class="store-form-row"><label class="store-form-label">正文（预注入到各端点全局指令文件）</label>
+      <div class="store-form-row"><label class="store-form-label">正文（预注入到各 Agent 的全局指令文件）</label>
         <textarea class="store-form-textarea" id="presetFormContent" style="min-height:160px;">${escapeHtml(v.content)}</textarea></div>
       <div class="store-form-error" id="presetFormError"${errorMsg ? "" : " hidden"}>${escapeHtml(errorMsg || "")}</div>`;
     showSkillsModal({
@@ -12316,13 +12408,19 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 设置「自动路由」tab：九端点瓦片墙（每端点一枚瓦片，三列网格） ──
+  // ── 设置「自动路由」tab：Agent 瓦片墙（每个已安装的 Agent 一枚瓦片，三列网格）──
+  // 未安装的 Agent 不出瓦片（其链配置在服务端原样保留，装回来即恢复显示与生效，
+  // 与瓦片上「停用=链配置保留」同一哲学）；installedAgentIds 为 null（检测未知/
+  // 失败）时全部照画（fail-open）。
   function renderRouteChains() {
     const grid = $("routeChainGrid");
     if (!grid) return;
     const byEp = new Map(storeRoutingChains().map((c) => [c.endpointId, c]));
+    const visibleEndpoints = ROUTE_CHAIN_ENDPOINTS.filter(
+      (ep) => installedAgentIds === null || installedAgentIds.has(ep),
+    );
     let configured = 0;
-    grid.innerHTML = ROUTE_CHAIN_ENDPOINTS.map((ep) => {
+    grid.innerHTML = visibleEndpoints.map((ep) => {
       const entry = byEp.get(ep);
       const chain = (entry && Array.isArray(entry.chain)) ? entry.chain : [];
       const label = routeChainEndpointLabel(ep);
@@ -12334,7 +12432,7 @@ async function api(method, path, body) {
         return `<div class="route-ep-tile" data-agent-id="${ep}">
           <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-avatar" data-route-avatar="${ep}"></span><span class="route-ep-name">${escapeHtml(label)}</span></div><span class="badge ${enabled ? "badge-accent" : "badge-neutral"}">${enabled ? `${chain.length} 节点` : "已停用"}</span></div>
           <div class="route-ep-tile-actions">
-            <label class="toggle" title="启用自动路由：开 = 该端点暴露虚拟模型 auto 并按链退避；关 = 链配置保留但 auto 不暴露"><input type="checkbox" data-route-enabled="${ep}"${enabled ? " checked" : ""}><span class="slider"></span></label>
+            <label class="toggle" title="启用自动路由：开 = 该 Agent 暴露虚拟模型 auto 并按链退避；关 = 链配置保留但 auto 不暴露"><input type="checkbox" data-route-enabled="${ep}"${enabled ? " checked" : ""}><span class="slider"></span></label>
             <button class="btn" data-route-edit="${ep}">编辑</button>
             <button class="btn btn-danger" data-route-del-chain="${ep}">删除</button>
           </div>
@@ -12387,7 +12485,7 @@ async function api(method, path, body) {
       return `<div class="route-ep-tile" data-virtual-model="${escapeHtml(v.name)}">
         <div class="route-ep-tile-top"><div class="route-ep-id"><span class="route-ep-name" style="font-family:var(--font-mono);">${escapeHtml(v.name)}</span></div><span class="badge ${enabled ? "badge-accent" : "badge-neutral"}">${enabled ? `${chain.length} 节点` : "已停用"}</span></div>
         <div class="route-ep-tile-actions">
-          <label class="toggle" title="启用虚拟模型：开 = 该模型出现在各端点 Anyswitch 分组下并按链路由；关 = 链配置保留但模型不再出现"><input type="checkbox" data-vm-enabled="${escapeHtml(v.name)}"${enabled ? " checked" : ""}><span class="slider"></span></label>
+          <label class="toggle" title="启用虚拟模型：开 = 该模型出现在各 Agent 的 Anyswitch 分组下并按链路由；关 = 链配置保留但模型不再出现"><input type="checkbox" data-vm-enabled="${escapeHtml(v.name)}"${enabled ? " checked" : ""}><span class="slider"></span></label>
           <button class="btn" data-vm-edit="${escapeHtml(v.name)}">编辑</button>
           <button class="btn btn-danger" data-vm-del="${escapeHtml(v.name)}">删除</button>
         </div>
@@ -12422,7 +12520,7 @@ async function api(method, path, body) {
       danger: true,
       confirmText: "确认删除",
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
-        删除后模型 <b>${escapeHtml(name)}</b> 将从各端点的 Anyswitch 分组中移除，请求它的调用会失败；渠道与号池本身不受影响。</div>`,
+        删除后模型 <b>${escapeHtml(name)}</b> 将从各 Agent 的 Anyswitch 分组中移除，请求它的调用会失败；渠道与号池本身不受影响。</div>`,
       onConfirm: async () => {
         await storeAction("/api/store/virtual-model/delete", { name }, `已删除虚拟模型：${name}`);
       },
@@ -12436,7 +12534,7 @@ async function api(method, path, body) {
       danger: true,
       confirmText: "确认删除",
       bodyHtml: `<div style="font-size:12.5px; line-height:1.7;">
-        删除后端点 <b>${escapeHtml(label)}</b> 请求模型 <b>auto</b> 将不再走链式路由（回退到常规渠道解析）；渠道与号池本身不受影响。</div>`,
+        删除后 Agent <b>${escapeHtml(label)}</b> 请求模型 <b>auto</b> 将不再走链式路由（回退到常规渠道解析）；渠道与号池本身不受影响。</div>`,
       onConfirm: async () => {
         await storeAction("/api/store/route-chain/delete", { endpointId }, `已删除路由链：${label}`);
       },
@@ -14950,6 +15048,34 @@ async function api(method, path, body) {
     color: SESS_ENDPOINT_COLORS[id] || "var(--text-4)",
   }));
   const SESS_EP = Object.fromEntries(SESSIONS_ENDPOINTS.map((e) => [e.id, e]));
+  // 端点筛选下拉的可见项：已安装的 Agent ∪ 当前会话数据里实际出现的端点——
+  // 后者保证历史会话（Agent 已卸载但会话文件还在磁盘上）仍可单独筛到。
+  // installedAgentIds 为 null（检测未知/失败）时全部按可见（fail-open）。
+  // 选项集合没变就不动 DOM：renderSessList 每次渲染都会调，无守卫会打断
+  // 展开中的下拉。
+  let sessEpOptionsKey = "";
+  function refreshSessEndpointOptions() {
+    const sel = $("sessEndpointFilter");
+    if (!sel) return;
+    const inData = new Set();
+    for (const s of sessState.sessions || []) if (s && s.endpoint) inData.add(s.endpoint);
+    const ids = SESSIONS_ENDPOINTS
+      .filter((ep) => installedAgentIds === null || installedAgentIds.has(ep.id) || inData.has(ep.id))
+      .map((ep) => ep.id);
+    const key = ids.join(",");
+    if (key === sessEpOptionsKey) return;
+    sessEpOptionsKey = key;
+    const current = sel.value;
+    sel.innerHTML = '<option value="">全部 Agent</option>' + ids.map((id) => {
+      const ep = SESS_EP[id];
+      return `<option value="${esc(id)}">${esc(ep ? ep.name : id)}</option>`;
+    }).join("");
+    // 当前选中项仍在集合里就保住选择；不在（union 口径下基本不会发生）回落「全部」
+    if (current && !ids.includes(current)) {
+      sel.value = "";
+      sessState.endpoint = "";
+    } else sel.value = current;
+  }
   const sessEpName = (id) => (SESS_EP[id] || {}).name || STATS_ENDPOINT_LABELS[id] || id || "未知端点";
   const sessEpColor = (id) => (SESS_EP[id] || {}).color || "var(--text-4)";
   // 需要描边环的端点：pi 的白与 zcode 的黑（见 --ep-ring 说明）
@@ -15046,6 +15172,7 @@ async function api(method, path, body) {
     const scrollEl = $("sessScroll");
     if (!scrollEl) return;
     hideSessContextMenu(); // 列表重渲染后旧菜单的目标行可能已消失，直接收起
+    refreshSessEndpointOptions(); // 会话数据/可见集变化时同步筛选下拉（自带集合守卫）
     const list = sessFiltered();
     $("sessListCount").textContent = list.length;
     $("sessTotalBadge").textContent = sessState.sessions.length + " 个会话";
@@ -15062,7 +15189,7 @@ async function api(method, path, body) {
     }
     // 空态 / 搜索无结果
     if (sessState.sessions.length === 0) {
-      scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🗂️</div>还没有可浏览的会话<br><span style="font-size:11.5px;">在任意端点里开始一段对话后，会出现在这里。</span></div>`;
+      scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🗂️</div>还没有可浏览的会话<br><span style="font-size:11.5px;">在任意 Agent 里开始一段对话后，会出现在这里。</span></div>`;
       return;
     }
     if (list.length === 0) {
@@ -15200,7 +15327,7 @@ async function api(method, path, body) {
     if (!host) return;
     const errs = sessState.endpointErrors || [];
     host.innerHTML = errs.map((e) =>
-      `<div class="sessions-err-banner"><span>⚠</span><span>${esc(sessEpName(e.endpoint))} 端点的会话目录未配置或不可读，该端点的历史会话暂不可浏览。</span><button class="eb-close" data-eb="${esc(e.endpoint)}" title="关闭提示">×</button></div>`
+      `<div class="sessions-err-banner"><span>⚠</span><span>${esc(sessEpName(e.endpoint))} 的会话目录未配置或不可读，其历史会话暂不可浏览。</span><button class="eb-close" data-eb="${esc(e.endpoint)}" title="关闭提示">×</button></div>`
     ).join("");
     host.querySelectorAll(".eb-close").forEach((b) =>
       b.addEventListener("click", () => b.closest(".sessions-err-banner").remove()));
@@ -15249,7 +15376,7 @@ async function api(method, path, body) {
 
     // 恢复命令预览条：resumeCommand 由后端随 SessionMeta 下发，前端只复制，为空置灰
     const cmd = s.resumeCommand || "";
-    $("sessResumeCmd").textContent = cmd || "该端点暂不支持恢复命令";
+    $("sessResumeCmd").textContent = cmd || "该 Agent 暂不支持恢复命令";
     $("sessCopyCmdBtn").disabled = !cmd;
     $("sessResumeBtn").disabled = !cmd;
 
@@ -15610,14 +15737,9 @@ async function api(method, path, body) {
       renderSessList();
     });
 
-    // 端点筛选下拉
+    // 端点筛选下拉：选项由 refreshSessEndpointOptions 按可见集维护（首建也走它）
     const sel = $("sessEndpointFilter");
-    for (const ep of SESSIONS_ENDPOINTS) {
-      const opt = document.createElement("option");
-      opt.value = ep.id;
-      opt.textContent = ep.name;
-      sel.appendChild(opt);
-    }
+    refreshSessEndpointOptions();
     sel.addEventListener("change", () => { sessState.endpoint = sel.value; renderSessList(); });
 
     // 搜索框：输入即搜；Esc 清空；/ 聚焦

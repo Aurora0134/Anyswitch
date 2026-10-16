@@ -119,24 +119,47 @@ export class BodyTooLargeError extends Error {
   }
 }
 
+// 「Agent 装在本机」的判定规则（环境检测 clients → 可见 id 集）：
+// 任一安装形态（CLI/桌面）status 非 not_found（found 或 error）即算在——检测
+// 出错按在（fail-open，宁可多显示也不藏掉真实存在的 Agent）；全部形态都
+// not_found 才算不在。清单缺失/为空/null 返回 null = 检测异常形态，调用方
+// 一律按「不过滤」处理。前端 panel.js loadInstalledAgentIds 用同一规则手抄
+// 一份（前端无模块通道），改判定时两处同步。
+export function deriveVisibleEndpointIds(clients) {
+  if (!Array.isArray(clients) || !clients.length) return null;
+  const visible = new Set();
+  for (const client of clients) {
+    const installations = Array.isArray(client.installations) ? client.installations : [];
+    if (installations.some((item) => item && item.status !== "not_found")) visible.add(client.id);
+  }
+  return visible;
+}
+
 // Prompts tab facade: pairs the prompts data plane (agent-prompts.mjs) with
 // the injector (agent-prompts-inject.mjs). Every mutation is followed by a
 // full syncAll across all endpoints; per-endpoint failures land in the
 // `sync` snapshot served by getState and never fail the mutation itself.
 // `homeDir` is injectable so tests can keep all writes inside temp dirs.
-export function createPromptsPanelService({ base = process.env, homeDir } = {}) {
+// `isEndpointVisible`（panel.mjs 注入，缺省恒 true 供测试）按「装在本机」
+// 收口：getState 的端点清单不含未安装的 Agent；syncAll 对未安装的 Agent 按
+// 空预设集处理——既有移除语义会把残留的托管块摘掉（文件只剩块时连文件一起
+// 删），等于顺带清理「装过又卸载」留下的注入，也不会给新机器造文件。
+export function createPromptsPanelService({ base = process.env, homeDir, isEndpointVisible = () => true } = {}) {
   const data = createPromptsService({ base });
   const injector = createPromptsInjector({ ...(homeDir ? { homeDir } : {}) });
   let lastSync = {};
   const mutateAndSync = (result) => {
-    lastSync = injector.syncAll((endpointId) => data.resolveForEndpoint(endpointId));
+    lastSync = injector.syncAll((endpointId) =>
+      (isEndpointVisible(endpointId) ? data.resolveForEndpoint(endpointId) : []));
     return result;
   };
   return {
     getState() {
       return {
         ...data.getState(),
-        endpoints: injector.listEndpoints().map(({ id, label, hotReload, targetRel }) => ({ id, label, hotReload, targetRel })),
+        endpoints: injector.listEndpoints()
+          .filter((ep) => isEndpointVisible(ep.id))
+          .map(({ id, label, hotReload, targetRel }) => ({ id, label, hotReload, targetRel })),
         sync: lastSync,
       };
     },
@@ -149,6 +172,11 @@ export function createPromptsPanelService({ base = process.env, homeDir } = {}) 
     setOverride: (args) => {
       if (!injector.hasEndpoint(args?.endpointId)) {
         const error = new Error(`未知端点: ${args?.endpointId}`);
+        error.statusCode = 400;
+        throw error;
+      }
+      if (!isEndpointVisible(args?.endpointId)) {
+        const error = new Error("该 Agent 未安装，无法配置注入");
         error.statusCode = 400;
         throw error;
       }
@@ -1363,6 +1391,41 @@ export function createPanelRouter({
       environmentService ??= createEnvironmentService({ base });
     }
     return environmentService;
+  }
+
+  // ── Agent 可见性（环境检测为唯一真值源）──────────────────────────────
+  // 「端点装在本机」沿用关于页同一份检测：任一形态（CLI/桌面）检测到即算在，
+  // 全部形态都未找到才算不在；任一形态检测出错按在（fail-open——宁可多显示，
+  // 也不能把真实存在的 Agent 藏掉）。快照喂给 skills / prompts 两个会向 Agent
+  // 家目录写盘的面（服务创建时闭包注入，始终读最新快照）。检测整体不可用或
+  // 客户端清单为空（检测异常形态）时快照为 null：不过滤，一切按可见。
+  let endpointVisibility = null;
+  let endpointVisibilityRefresh = null; // in-flight 去重：并发请求共享同一次检测
+  let endpointVisibilityTimer = null;
+  async function refreshEndpointVisibility() {
+    if (endpointVisibilityRefresh) return endpointVisibilityRefresh;
+    endpointVisibilityRefresh = (async () => {
+      try {
+        const service = await getEnvironmentService();
+        const state = await service.getState();
+        endpointVisibility = deriveVisibleEndpointIds(state.clients);
+      } catch {
+        endpointVisibility = null;
+      } finally {
+        endpointVisibilityRefresh = null;
+      }
+    })();
+    return endpointVisibilityRefresh;
+  }
+  const isEndpointVisible = (endpointId) =>
+    endpointVisibility === null || endpointVisibility.has(endpointId);
+  // 定时刷新让进程长驻期间新装/新卸的 Agent 一分钟内反映到面板；unref 掉，
+  // 定时器不单独拖住进程退出。只在第一个真实（非注入）skills/prompts 服务
+  // 创建时启动，注入 mock 服务的测试永远不会碰到真检测。
+  function ensureEndpointVisibilityFreshness() {
+    if (endpointVisibilityTimer) return;
+    endpointVisibilityTimer = setInterval(() => { refreshEndpointVisibility(); }, 60_000);
+    endpointVisibilityTimer.unref?.();
   }
 
   async function getReleaseService() {
@@ -3259,7 +3322,14 @@ export function createPanelRouter({
     // { ok:false, conflict:true, diffs } so the UI can run its confirm flow;
     // thrown errors become { ok:false, error }.
     if (path.startsWith("/panel/api/skills/")) {
-      if (!skillsService) skillsService = createSkillsService({ base });
+      if (!skillsService) {
+        // 首个真实请求先等一次可见性快照：界面要拿到按已安装过滤的端点清单
+        // 才能渲染部署行（检测进程内 60s TTL，只在冷缓存这一次付费）；之后由
+        // 定时刷新保持新鲜，后续请求不再等待。
+        await refreshEndpointVisibility();
+        ensureEndpointVisibilityFreshness();
+        skillsService = createSkillsService({ base, isEndpointVisible });
+      }
       const svc = skillsService;
 
       if (path === "/panel/api/skills/state" && method === "GET") {
@@ -3382,7 +3452,13 @@ export function createPanelRouter({
     // the `sync` snapshot (GET state) and never fail the mutation itself;
     // thrown validation errors become { ok:false, error }.
     if (path.startsWith("/panel/api/prompts/")) {
-      if (!promptsService) promptsService = createPromptsPanelService({ base });
+      if (!promptsService) {
+        // 与 skills 同款：先等一次可见性快照再建服务，注入行/全部注入的分母
+        // 天然只剩已安装的 Agent；syncAll 对未安装的按空预设集清理（见 facade）。
+        await refreshEndpointVisibility();
+        ensureEndpointVisibilityFreshness();
+        promptsService = createPromptsPanelService({ base, isEndpointVisible });
+      }
       const svc = promptsService;
 
       if (path === "/panel/api/prompts/state" && method === "GET") {

@@ -369,4 +369,41 @@ describe("createPromptsPanelService facade", () => {
       (err) => err.statusCode === 400,
     );
   });
+
+  it("隐藏端点：清单不出、不再写入、残留托管块被摘除（卸载清理语义）", () => {
+    const { facade, homeDir, base } = makeFacade();
+    // 先用全可见门面注入一轮，模拟「装过又卸载」留下的残留
+    facade.createPreset({ title: "A", content: "正文" });
+    facade.setMaster(true);
+    assert.match(
+      readFileSync(join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md"), "utf8"),
+      /正文/,
+      "grok block injected while visible",
+    );
+
+    const hidden = createPromptsPanelService({ base, homeDir, isEndpointVisible: (id) => id !== "grok" });
+    // 状态清单不含被隐藏端点
+    const state = hidden.getState();
+    assert.equal(state.endpoints.some((e) => e.id === "grok"), false);
+    assert.equal(state.endpoints.length, 8);
+    // 任意 mutation 触发的 syncAll 对隐藏端点按空预设集处理：托管块被移除，
+    // 文件只剩块时连文件一起删——不给未安装的 Agent 留注入内容
+    hidden.createPreset({ title: "B", content: "加一条" });
+    assert.equal(
+      existsSync(join(homeDir, ".grok", "rules", "anyswitch-managed-prompts.md")),
+      false,
+      "hidden endpoint's leftover block is removed",
+    );
+    // 可见端点照常注入（两条预设都在）
+    const claudeText = readFileSync(join(homeDir, ".claude", "CLAUDE.md"), "utf8");
+    assert.match(claudeText, /正文/);
+    assert.match(claudeText, /加一条/);
+
+    // 对隐藏端点配置注入被拒（400 + 产品语义文案）
+    const presetId = hidden.getState().presets[0].id;
+    assert.throws(
+      () => hidden.setOverride({ endpointId: "grok", presetId, off: true }),
+      (err) => err.statusCode === 400 && /未安装/.test(err.message),
+    );
+  });
 });

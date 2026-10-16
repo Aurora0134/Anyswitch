@@ -528,7 +528,7 @@ describe("panel.html skills change diff highlighting", () => {
   it("card D uses the neutral scan glyph, not a warning triangle", () => {
     // 告警三角在全页只出现在卡 D 标题；换成中性的取景框后不得残留
     assert.doesNotMatch(panelHtml, /M10\.29 3\.86L1\.82 18/);
-    const head = panelHtml.match(/<h2 class="card-title">([\s\S]*?)端点条目与异常\s*<\/h2>/);
+    const head = panelHtml.match(/<h2 class="card-title">([\s\S]*?)Agent 条目与异常\s*<\/h2>/);
     assert.ok(head, "卡 D 标题必须存在");
     assert.match(head[1], /<path d="M3 7V5a2 2 0 0 1 2-2h2"\/>/);
     assert.match(head[1], /<path d="M17 3h2a2 2 0 0 1 2 2v2"\/>/);
