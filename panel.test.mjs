@@ -11018,3 +11018,45 @@ describe("看板加载态：首帧不撒谎，可信首帧才开口", () => {
       "骨架族（看板加载态 + 会话页）统一收进 sepia 的方角口径");
   });
 });
+
+describe("panel v2 栏收展：终端纵向抖动 + 收展钮图标反转 + 收起态摘蓝标（RAILANIM）", () => {
+  it("v2 终端屏横向溢出常驻只裁不滚（上下抽搐的滚动条分量）", () => {
+    assert.ok(
+      panelCss.includes(':root[data-ui-version="v2"] body.terminal-mode .terminal-screen { overflow-x: clip; }'),
+      "容器已变、xterm 仍按旧宽渲染的窗口期不再瞬时顶出横向滚动条吃掉终端高度",
+    );
+    assert.ok(
+      !panelCss.includes('[data-rail-anim] body.terminal-mode .terminal-screen'),
+      "不挂收展动画开关：开关撤除与防抖 fit 落点之间的空窗盖不住（实测 289–426ms 仍闪滚动条）",
+    );
+  });
+
+  it("收展钮两颗 SVG 图标按栏态摘挂 hidden attribute（SVG 无 hidden IDL 反射）", () => {
+    assert.ok(panelJs.includes('icoCollapse.toggleAttribute("hidden", collapsed)'),
+      "收起态摘「收起」图标要走 attribute");
+    assert.ok(panelJs.includes('icoExpand.toggleAttribute("hidden", !collapsed)'),
+      "展开态摘「展开」图标要走 attribute");
+    assert.ok(!/ico(Collapse|Expand)\.hidden =/.test(panelJs),
+      "SVG 图标的 .hidden = 写法已清除（对 SVG 只写 expando、不落 attribute，图标永不切换）");
+    assert.ok(/<svg id="railIcoExpand"[^>]* hidden>/.test(panelHtml),
+      "HTML 初态：「展开」图标带 hidden attribute（默认展开态只露「收起」图标）");
+    assert.ok(!/<svg id="railIcoCollapse"[^>]* hidden>/.test(panelHtml),
+      "HTML 初态：「收起」图标不带 hidden");
+  });
+
+  it("收起态（72 图标栏）两个来处都摘下蓝标徽标，左上角只留收展钮", () => {
+    assert.ok(
+      panelCss.includes(':root[data-ui-version="v2"][data-style]:not([data-rail="expanded"]) .rail-brand .brand-icon { display: none; }'),
+      "<1200 自动收窄态摘徽标",
+    );
+    assert.ok(
+      panelCss.includes(':root[data-ui-version="v2"][data-style][data-rail="collapsed"] .rail-brand .brand-icon { display: none; }'),
+      "≥1200 手动 collapsed 态摘徽标",
+    );
+    assert.ok(!panelCss.includes('.rail-brand .brand-icon svg { width: 14px; height: 14px; }'),
+      "徽标整颗摘下后，收起态徽标内 SVG 的 14px 尺寸档同步作废");
+    // 展开态品牌区保持现状：216 全栏徽标基座规则不动
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-rail="expanded"] .rail-brand .brand-text { display: block; }'),
+      "手动 expanded 档品牌字照旧渲染");
+  });
+});

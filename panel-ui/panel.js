@@ -7206,8 +7206,11 @@ async function api(method, path, body) {
     btn.setAttribute("aria-label", label);
     btn.title = label;
     const icoCollapse = $("railIcoCollapse"), icoExpand = $("railIcoExpand");
-    if (icoCollapse) icoCollapse.hidden = collapsed;
-    if (icoExpand) icoExpand.hidden = !collapsed;
+    // 这两颗是 SVG 元素：hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上没有——
+    // `.hidden =` 只写出一个普通自有属性，attribute 不动，两颗图标永远不切换（收起态
+    // 实测仍是「收起」图标）。必须落 attribute，UA 的 [hidden] 规则才会摘挂显示。
+    if (icoCollapse) icoCollapse.toggleAttribute("hidden", collapsed);
+    if (icoExpand) icoExpand.toggleAttribute("hidden", !collapsed);
     syncRailTabTitles(collapsed);
   }
   // 手动态的出口：窗口拖回宽档即解除，栏回到「跟随窗口宽度」。手动态原本永久压制自动档
