@@ -1264,8 +1264,9 @@ export function createSkillsService({
   // 写/扫主仓库类操作共用守卫：未配置与目录已消失（被移动/删除）都拒绝。
   // 后者防的是导入/收编在旧路径原位静默重建目录（cpSync 会递归建父目录），
   // 把本地实体目录送进回收站——仓库疑似搬走时等于在旧位置造出分叉副本。
-  // 只要求目录存在、不要求仍含 skill：面板把仓库删空是合法状态（删除不查空，
-  // 重设才拒收空目录），此时收编/导入必须照常工作，否则用户陷入死局。
+  // 只要求目录存在、不要求仍含 skill：空仓库是合法状态（面板可把仓库删空，
+  // 重设时空目录经确认也放行，见 setRepoPath 的 allowEmpty），
+  // 此时收编/导入必须照常工作，否则用户陷入死局。
   function requireExistingRepo() {
     const repoPath = configuredRepo();
     if (!repoPath) throw new Error("尚未设置主仓库");
@@ -1284,7 +1285,8 @@ export function createSkillsService({
       return {
         repoPath,
         repoConfigured: Boolean(repoPath),
-        repoValid: repoExists && skills.length > 0,
+        // 空仓库是合法状态（确认后可设、也可被删空），"无效"只留给目录真消失
+        repoValid: repoExists,
         skills,
         endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir }),
         candidates: [
@@ -1294,16 +1296,23 @@ export function createSkillsService({
       };
     },
 
-    /** Validate and persist a new master repo path. */
-    setRepoPath(repoPath) {
+    /**
+     * Validate and persist a new master repo path.
+     * 空目录（没有任何含 SKILL.md 的子目录）默认拒收——防手滑选错目录；
+     * 调用方显式传 allowEmpty（面板经用户确认后）则放行，返回 skillCount 0。
+     */
+    setRepoPath(repoPath, { allowEmpty = false } = {}) {
       if (typeof repoPath !== "string" || !repoPath.trim()) {
         throw new Error("repoPath 不能为空");
       }
       const resolved = resolve(repoPath.trim());
       if (!existsSync(resolved)) throw new Error(`路径不存在: ${resolved}`);
       const skills = scanRepo(resolved);
-      if (skills.length === 0) {
-        throw new Error(`该目录下没有找到任何 skill（含 SKILL.md 的目录）: ${resolved}`);
+      if (skills.length === 0 && !allowEmpty) {
+        const err = new Error(`该目录下没有找到任何 skill（含 SKILL.md 的目录）: ${resolved}`);
+        err.statusCode = 409;
+        err.code = "skills_repo_empty";
+        throw err;
       }
       saveSkillsConfig({ repoPath: resolved }, { base });
       return { repoPath: resolved, skillCount: skills.length };

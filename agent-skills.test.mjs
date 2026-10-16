@@ -1170,7 +1170,13 @@ describe("createSkillsService", () => {
       assert.deepEqual(state.skills, []);
       assert.equal(state.endpoints.length, 9);
       assert.throws(() => svc.setRepoPath(join(dir, "ghost")), /不存在/);
-      assert.throws(() => svc.setRepoPath(home), /没有找到任何 skill/);
+      // 空目录默认仍拒收，且带机读码供面板走「确认后放行」分支
+      assert.throws(() => svc.setRepoPath(home), (err) => {
+        assert.match(err.message, /没有找到任何 skill/);
+        assert.equal(err.code, "skills_repo_empty");
+        assert.equal(err.statusCode, 409);
+        return true;
+      });
       await assert.rejects(svc.deploy({ endpointId: "kimi", skillName: "skill-a" }), /尚未设置主仓库/);
 
       // configure, then deploy through the service
@@ -1188,6 +1194,31 @@ describe("createSkillsService", () => {
       await svc.undeploy({ endpointId: "kimi", skillName: "skill-a" });
       state = svc.getState();
       assert.equal(state.endpoints.find((e) => e.id === "kimi").entries.length, 0);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("accepts an empty directory as master repo when allowEmpty is confirmed", () => {
+    const { dir, cleanup } = tempRoot();
+    const home = join(dir, "home");
+    const empty = join(dir, "empty-repo");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(empty, { recursive: true });
+    const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+    try {
+      const svc = createSkillsService({
+        homeDir: home,
+        base,
+        recycleDirFn: mockRecycle([]),
+      });
+      const set = svc.setRepoPath(empty, { allowEmpty: true });
+      assert.equal(set.skillCount, 0);
+      // 空仓库是合法状态：已配置、路径有效、零 skill，导入照常可用
+      const state = svc.getState();
+      assert.equal(state.repoConfigured, true);
+      assert.equal(state.repoValid, true);
+      assert.deepEqual(state.skills, []);
     } finally {
       cleanup();
     }
@@ -1382,7 +1413,7 @@ describe("createSkillsService invalid-repo guard", () => {
       const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
       const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
       svc.setRepoPath(repo);
-      // 面板把仓库删空是合法状态：删除不查空，重设才拒收空目录——
+      // 面板把仓库删空是合法状态：删除不查空，重设空目录经确认也放行——
       // 守卫必须只要求目录存在，否则空仓库后用户陷入既不能收编也不能重设的死局
       await svc.deleteRepoSkill("skill-a");
       assert.equal(existsSync(join(repo, "skill-a")), false);

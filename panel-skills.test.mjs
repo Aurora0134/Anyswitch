@@ -107,6 +107,33 @@ describe("panel router skills routes", () => {
     assert.equal(bad.json().ok, false);
   });
 
+  it("POST /panel/api/skills/repo forwards allowEmpty and surfaces err.code for the empty-repo signal", async () => {
+    let gotOpts = null;
+    const router = skillsRouter(mockService({
+      setRepoPath: (p, opts) => { gotOpts = opts; return { repoPath: p, skillCount: 0 }; },
+    }));
+    const ok = fakeReqRes("/panel/api/skills/repo", "POST", { repoPath: "C:/empty", allowEmpty: true });
+    await router.handle(ok.req, ok.res);
+    assert.equal(ok.res.statusCode, 200);
+    assert.deepEqual(gotOpts, { allowEmpty: true });
+
+    // 不带 allowEmpty 时服务端抛 skills_repo_empty：状态码与机读码都要透给前端
+    const refusing = skillsRouter(mockService({
+      setRepoPath: () => {
+        const err = new Error("该目录下没有找到任何 skill（含 SKILL.md 的目录）: C:/empty");
+        err.statusCode = 409;
+        err.code = "skills_repo_empty";
+        throw err;
+      },
+    }));
+    const rejected = fakeReqRes("/panel/api/skills/repo", "POST", { repoPath: "C:/empty" });
+    await refusing.handle(rejected.req, rejected.res);
+    assert.equal(rejected.res.statusCode, 409);
+    assert.equal(rejected.json().ok, false);
+    assert.equal(rejected.json().code, "skills_repo_empty");
+    assert.match(rejected.json().error, /没有找到任何 skill/);
+  });
+
   it("POST /panel/api/skills/repo/pick returns the picker outcome verbatim", async () => {
     const router = skillsRouter(mockService({ pickFolder: async () => ({ cancelled: false, path: "D:\\skills" }) }));
     const { req, res, json } = fakeReqRes("/panel/api/skills/repo/pick", "POST", {});
@@ -1025,5 +1052,39 @@ describe("skills anomaly card fold and side-by-side diff modal", () => {
     assert.match(panelCss, /\.sd-row\.sd-del \.sd-b, \.sd-row\.sd-ins \.sd-a \{ background: var\(--surface-sunken\); \}/);
     // 颜色只走 token，5 套主题与亮暗才不用各写一遍
     assert.doesNotMatch(panelCss, /\.sd-(row|file|gap|no|tx)[^{]*\{[^}]*(#[0-9a-f]{3,8}|rgba?\()/i);
+  });
+});
+
+// ── 空目录设为主仓库：确认后放行 ──
+// 外部反馈：新人没有任何 skill 时连主仓库都设不上。后端改为带 skills_repo_empty
+// 机读码的 409，前端收到后弹确认框、确认后带 allowEmpty 重试；空仓库上屏为
+// 中性「0 个 skill」而非红色「路径无效」。这些契约用源码扫描钉住。
+describe("skills master repo empty-directory confirm flow", () => {
+  const read = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "panel-ui", name), "utf8");
+  const panelJs = read("panel.js");
+
+  it("api() 把服务端机读码挂上 err.serverCode，供调用方分支", () => {
+    assert.match(panelJs, /if \(typeof data\.code === "string"\) err\.serverCode = data\.code;/);
+  });
+
+  it("setSkillsRepo 收到 skills_repo_empty 先弹确认框，确认后带 allowEmpty 重试", () => {
+    const m = panelJs.match(/function setSkillsRepo\(path\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "panel.js must contain function setSkillsRepo");
+    const fn = m[0];
+    assert.match(fn, /e\.serverCode === "skills_repo_empty"/);
+    assert.match(fn, /showSkillsModal\(\{[\s\S]*?用作空主仓库？/);
+    assert.match(fn, /onConfirm: \(\) => apply\(true\)/);
+    // 防手滑的闸仍在：第一道请求不得默认带 allowEmpty
+    assert.match(fn, /\.\.\.\(allowEmpty \? \{ allowEmpty: true \} : \{\}\)/);
+    assert.match(fn, /if \(!allowEmpty && e\.serverCode/);
+  });
+
+  it("空仓库徽标是中性「0 个 skill」，红色「路径无效」只留给目录真消失", () => {
+    const m = panelJs.match(/function renderSkillsRepo\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "panel.js must contain function renderSkillsRepo");
+    const fn = m[0];
+    assert.match(fn, /badge-neutral"\);\s*\n\s*badge\.textContent = count \+ " 个 skill"/);
+    assert.match(fn, /（目录不存在或已被移走）/);
+    assert.doesNotMatch(fn, /不存在或不含任何 skill/);
   });
 });

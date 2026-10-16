@@ -3283,7 +3283,9 @@ export function createPanelRouter({
           };
 
           if (path === "/panel/api/skills/repo") {
-            const result = svc.setRepoPath(requireString(body.repoPath, "repoPath"));
+            const result = svc.setRepoPath(requireString(body.repoPath, "repoPath"), {
+              allowEmpty: body.allowEmpty === true,
+            });
             return sendJson(res, 200, { ok: true, ...result });
           }
           if (path === "/panel/api/skills/repo/pick") {
@@ -3368,7 +3370,8 @@ export function createPanelRouter({
             return sendJson(res, 200, { ok: true, ...result });
           }
         } catch (err) {
-          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message });
+          // err.code 是服务端给的机读信号（如 skills_repo_empty），随响应透出供前端分支
+          return sendJson(res, err.statusCode ?? 500, { ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) });
         }
       }
     }

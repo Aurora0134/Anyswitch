@@ -109,6 +109,8 @@ async function api(method, path, body) {
       const detail = String(data.error || data.message || data.reason || "");
       const err = new Error(`HTTP ${res.status}${detail ? "：" + detail : ""}`);
       err.code = detail;
+      // 服务端随错误附带的机读信号（如 skills_repo_empty），供调用方分支处理
+      if (typeof data.code === "string") err.serverCode = data.code;
       throw err;
     }
     return data;
@@ -7810,10 +7812,11 @@ async function api(method, path, body) {
     } else if (!skillsState.repoValid) {
       badge.className = "badge badge-danger";
       badge.textContent = "路径无效";
-      pathEl.textContent = skillsState.repoPath + "（不存在或不含任何 skill）";
+      pathEl.textContent = skillsState.repoPath + "（目录不存在或已被移走）";
     } else {
-      badge.className = "badge badge-ok";
-      badge.textContent = (skillsState.skills || []).length + " 个 skill";
+      const count = (skillsState.skills || []).length;
+      badge.className = "badge " + (count ? "badge-ok" : "badge-neutral");
+      badge.textContent = count + " 个 skill";
       pathEl.textContent = skillsState.repoPath;
     }
     // 仓库计数变化时闪一下（只读不消费；最后渲染的 renderSkillsList 负责消费）
@@ -7861,11 +7864,22 @@ async function api(method, path, body) {
   // 那是用户本来就要走完的流程。
   function setSkillsRepo(path) {
     const switching = Boolean(skillsState && skillsState.repoConfigured && skillsState.repoPath !== path);
-    const apply = async () => {
+    const apply = async (allowEmpty = false) => {
       try {
-        const d = await api("POST", "/api/skills/repo", { repoPath: path });
+        const d = await api("POST", "/api/skills/repo", { repoPath: path, ...(allowEmpty ? { allowEmpty: true } : {}) });
         toast(`主仓库已设置（${d.skillCount} 个 skill）`);
       } catch (e) {
+        // 空目录不直接拒死：经用户确认后带 allowEmpty 重试，防手滑的闸仍在第一道口子上
+        if (!allowEmpty && e.serverCode === "skills_repo_empty") {
+          showSkillsModal({
+            title: "用作空主仓库？",
+            bodyHtml: `<b>${escapeHtml(path)}</b> 里还没有任何 skill。` +
+              "可以把它作为空的主仓库使用，之后用「导入 skill…」往里添加；如果是选错了目录，请取消后重新选择。",
+            confirmText: "仍要使用",
+            onConfirm: () => apply(true),
+          });
+          return;
+        }
         toast(panelError(e, "设置主仓库失败"), true);
       }
       refreshSkillsState();
