@@ -5392,8 +5392,14 @@ describe("设置项「UI版本」", () => {
     assert.ok(/railSettings\.setAttribute\("aria-current", "page"\)[\s\S]{0,80}?railSettings\.removeAttribute\("aria-current"\)/.test(body)
       || body.includes('if (settings) railSettings.setAttribute("aria-current", "page"); else railSettings.removeAttribute("aria-current");'),
       "设置钮的 aria-current 随设置视图进出");
-    // 轻页头页题：与左栏高亮同源——从点亮的栏 tab 现取 textContent，不复制字符串
-    assert.ok(body.includes("v2PageTitle.textContent = railTab.textContent.trim()"), "页题文本与点亮 tab 同源");
+    // 轻页头页题：与左栏高亮同源——从点亮的栏 tab 现取标签文字，不复制字符串。
+    // 取的是 .rail-tab-label 而非 tab 整段 textContent：预设/会话两枚栏图标是裸
+    // Unicode 字形（❑/☰）而非 svg，svg 无文本内容、整段取不会带出图标，裸字形
+    // 会——整段取就把字形混进页面左上角页题（2026-10-17 报障）。
+    assert.ok(body.includes('const railLabel = railTab.querySelector(".rail-tab-label")'),
+      "页题取标签 span，不取 tab 整段文本（裸字形图标不带进页题）");
+    assert.ok(body.includes('v2PageTitle.textContent = (railLabel || railTab).textContent.trim()'),
+      "页题文本与点亮 tab 的标签同源");
   });
 
   it("设置页区块成描边盒（材质修正）：透明底四边描边盒 + aurora 恢复玻璃卡，hairline 撤场", () => {

@@ -7522,7 +7522,10 @@ async function api(method, path, body) {
     // 新版左栏 tab 的镜像态：与头行 tab 同一状态源、同一收口点（含 restoreView 恢复
     // 与设置/终端进出——进设置时六主 tab 全熄、栏底设置钮点亮；进终端时「终端」tab
     // 亮，栏内第七枚就是它）。高亮即挂 aria-current="page"，熄灭即摘；轻页头页题与
-    // 点亮 tab 的文本同源（textContent 现取，不复制字符串）。
+    // 点亮 tab 的标签同源（现取 .rail-tab-label 的文字，不复制字符串）。取标签而非
+    // tab 整段 textContent：预设/会话两枚栏图标是裸 Unicode 字形（❑/☰）而非 svg，
+    // svg 无文本内容、整段取不会带出图标，裸字形会——整段取就把「❑ 」「☰ 」混进
+    // 页面左上角页题，那处只该是纯标题文字。
     const v2PageTitle = $("v2PageTitle");
     for (const [railId, on] of [["railTabBoard", board], ["railTabSkills", name === "skills"], ["railTabPresets", presets], ["railTabSessions", sessions], ["railTabStore", store], ["railTabStats", stats], ["railTabTerminal", terminal]]) {
       const railTab = $(railId);
@@ -7530,7 +7533,8 @@ async function api(method, path, body) {
       railTab.classList.toggle("active", on);
       railTab.setAttribute("aria-selected", on ? "true" : "false");
       if (on) railTab.setAttribute("aria-current", "page"); else railTab.removeAttribute("aria-current");
-      if (on && v2PageTitle) v2PageTitle.textContent = railTab.textContent.trim();
+      const railLabel = railTab.querySelector(".rail-tab-label");
+      if (on && v2PageTitle) v2PageTitle.textContent = (railLabel || railTab).textContent.trim();
     }
     const railSettings = $("railSettingsBtn");
     if (railSettings) {
