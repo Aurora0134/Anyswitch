@@ -6976,8 +6976,11 @@ async function api(method, path, body) {
       const dark = currentTheme() === "dark";
       const label = dark ? "切换到亮色模式" : "切换到暗色模式";
       for (const t of toggles) {
-        if (t.sun) t.sun.hidden = !dark;
-        if (t.moon) t.moon.hidden = dark;
+        // 日/月是 SVG 元素：hidden 是 HTMLElement 的 IDL 反射属性，SVGElement 上没有——
+        // `.hidden =` 只写 expando 不落 attribute，UA 的 [hidden] 规则永不生效，图标永远
+        // 停在 HTML 初态。必须落 attribute（与 syncRailCollapseBtn 的收展图标同一修法）。
+        if (t.sun) t.sun.toggleAttribute("hidden", !dark);
+        if (t.moon) t.moon.toggleAttribute("hidden", dark);
         t.btn.setAttribute("aria-label", label); t.btn.title = label;
       }
     }
