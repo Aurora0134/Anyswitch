@@ -2877,6 +2877,13 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelJs.includes('terminalReturnView = currentView;'), "返回目标取进来时所在的视图（看板）");
     assert.ok(!panelJs.includes("terminalReturnSettingsSubTab"), "返回终端页不再改写设置页的子 tab 存档");
     assert.ok(panelJs.includes("function openTerminalPreview()") && panelJs.includes("function closeTerminalPreview()"), "终端预览有进入/返回逻辑");
+    // v2 撤除入口卡：栏内「虚拟终端」tab 与这张卡同走一条 openTerminalPreview 链，入口重复；
+    // v1 无栏，卡是唯一入口——markup 原样保留（上面逐条在册），只由 v2 门控的 CSS 整隐。
+    const entryHideRule = ':root[data-ui-version="v2"][data-style] .terminal-entry-card { display: none; }';
+    assert.ok(panelCss.includes(entryHideRule), "v2 下看板虚拟终端入口卡整隐（侧栏已有同链入口）");
+    assert.strictEqual(panelCss.split(entryHideRule).length - 1, 1, "入口卡隐藏规则只此一处");
+    assert.ok(!/(^|})\s*\.terminal-entry-card \{ display: none;/.test(panelCss),
+      "无未门控的裸隐藏规则，v1 原样呈现");
   });
 
   it("虚拟终端预览的监测区复用看板遥测口径，普通终端无监测块", () => {
