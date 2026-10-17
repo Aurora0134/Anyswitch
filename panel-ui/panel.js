@@ -4661,8 +4661,15 @@ async function api(method, path, body) {
   function createTerminalColumn(hostElementId) {
     return {
       hostElementId,
-      // 本列活跃页签的会话 id。页级入口（页签条/会话栏/inspector/归属恢复）本期读
-      // 的都是列 0 的活跃会话（见 terminalActiveSessionId）。
+      // 列内元素 id 后缀：列 0 为空串（静态标记的基名 id 原样，单列 DOM 与现状
+      // 逐点一致），第 N 列为 "-cN"。列内一切元素（页签条/会话栏/终端屏/底栏…）
+      // 都按 基名+后缀 定址（见 terminalColumnElementId）。
+      elementIdSuffix: "",
+      // 本列页签条的 innerHTML 指纹（门控口径见 renderTerminalColumnTabs，与单列
+      // 时代同一条不变式「指纹 = DOM 现值」，按列各持一份）。
+      tabsRenderedHtml: "",
+      // 本列活跃页签的会话 id。页级入口（页签条/会话栏/inspector/归属恢复）读
+      // 的是焦点列的活跃会话（见 terminalActiveSessionId）。
       activeSessionId: null,
       xterm: null,
       fitAddon: null,
@@ -4690,21 +4697,298 @@ async function api(method, path, body) {
   // 列 0 活跃会话的初值 "checkout" 是预览稿种子的首会话键（后端就绪前渲染预览稿
   // 用）；rebuildTerminalBackendSessions 回读存档后改写为真实会话 id。
   terminalColumns[0].activeSessionId = "checkout";
-  // 焦点列：键盘输入只进焦点列的活跃会话。本期恒为列 0；M4「点列即焦点列」改这里。
+  // 焦点列索引：键盘输入只进焦点列的活跃会话，「+」新建/重画同样作用于焦点列。
+  // 点列任意处即焦点列（setTerminalFocusedColumn）；单列时恒为 0，行为与现状一致。
+  let terminalFocusedColumnIndex = 0;
   function terminalFocusedColumn() {
-    return terminalColumns[0] || null;
+    return terminalColumns[terminalFocusedColumnIndex] || terminalColumns[0] || null;
   }
-  // 页级入口的活跃会话读写收口：本期唯一列是列 0；多列后各列页签条各持指针，
-  // 页级入口改跟焦点列。
+  function setTerminalFocusedColumn(column) {
+    const index = terminalColumns.indexOf(column);
+    if (index < 0) return;
+    terminalFocusedColumnIndex = index;
+    syncTerminalColumnsLayout();
+  }
+  // 页级入口的活跃会话读写收口：读写的都是焦点列的活跃指针——页签条/会话栏/
+  // inspector/底栏这些页级面板上「当前会话」的语义就是焦点列的活跃会话。
   function terminalActiveSessionId() {
-    return terminalColumns[0]?.activeSessionId ?? null;
+    return terminalFocusedColumn()?.activeSessionId ?? null;
   }
   function setTerminalActiveSessionId(id) {
-    if (terminalColumns[0]) terminalColumns[0].activeSessionId = id;
+    const column = terminalFocusedColumn();
+    if (column) column.activeSessionId = id;
   }
   // 焦点回守收口：一切「动作后把焦点还给终端」的入口都走这里，按焦点列定投。
   function focusTerminalXterm() {
     terminalFocusedColumn()?.xterm?.focus();
+  }
+  // 列数上限：设计定稿 1~3 列，超限的加列请求拒绝（落点不接受，无新文案）。
+  const TERMINAL_MAX_COLUMNS = 3;
+  // 会话归属列：sessionId → 列索引。会话对象每拍归属轮询重建（见
+  // rebuildTerminalBackendSessions），归属不能挂在对象上，独立成表；未登记的
+  // 会话默认落列 0（单列口径：全部会话都在列 0，与现状一致）。
+  const terminalSessionColumnIndexes = new Map();
+
+  function terminalSessionColumnIndex(sessionId) {
+    return terminalSessionColumnIndexes.get(sessionId) ?? 0;
+  }
+
+  function assignTerminalSessionToColumn(sessionId, column) {
+    const index = terminalColumns.indexOf(column);
+    if (index >= 0) terminalSessionColumnIndexes.set(sessionId, index);
+  }
+
+  // 本列的会话条目（[id, session]），顺序与全局会话图一致：单列时即全量原序。
+  function terminalColumnSessionEntries(column) {
+    const index = terminalColumns.indexOf(column);
+    return Object.entries(terminalSessionMap())
+      .filter(([id]) => terminalSessionColumnIndex(id) === index);
+  }
+
+  // 列内元素 id：列 0 用基名（静态标记原样），第 N 列加 "-cN" 后缀。
+  function terminalColumnSuffixForIndex(index) {
+    return index === 0 ? "" : `-c${index}`;
+  }
+  function terminalColumnElementId(column, base) {
+    return `${base}${column?.elementIdSuffix || ""}`;
+  }
+
+  // 列布局同步：≥2 列时工作区挂 is-multicol（等分吃掉 inspector 让出的宽度，
+  // inspector 整栏隐藏，见 CSS），焦点列挂 is-focused（纯视觉标识，零文案）；
+  // 单列时两类都不挂——DOM 与视觉与单列现状逐点一致。
+  function syncTerminalColumnsLayout() {
+    const workspace = $("terminalWorkspace");
+    const multicol = terminalColumns.length > 1;
+    workspace?.classList?.toggle("is-multicol", multicol);
+    const panes = typeof workspace?.querySelectorAll === "function"
+      ? workspace.querySelectorAll(".terminal-main-pane")
+      : [];
+    panes.forEach((pane, i) => pane.classList.toggle("is-focused", multicol && i === terminalFocusedColumnIndex));
+  }
+
+  // 列的主区元素：列 0 是静态标记里那份（恒在），新增列是 JS 克隆的 pane。
+  // 按列序定位（pane 在 workspace 里的顺序恒等于 terminalColumns 的顺序）。
+  function terminalColumnPane(column) {
+    const workspace = $("terminalWorkspace");
+    if (!workspace || typeof workspace.querySelectorAll !== "function") return null;
+    return workspace.querySelectorAll(".terminal-main-pane")[terminalColumns.indexOf(column)] ?? null;
+  }
+
+  // 新列 DOM：克隆列 0 的主区（页签条/会话栏/终端屏/底栏完整单元），全部 id
+  // 加本列后缀，清掉克隆带过来的动态内容（页签/会话文案/开着的菜单），收展
+  // 与字号读数按当前全局态落位。
+  function buildTerminalColumnPane(column) {
+    const workspace = $("terminalWorkspace");
+    const source = typeof workspace?.querySelector === "function" ? workspace.querySelector(".terminal-main-pane") : null;
+    if (!source || typeof source.cloneNode !== "function") return null;
+    const pane = source.cloneNode(true);
+    const suffix = column.elementIdSuffix;
+    for (const el of [pane, ...pane.querySelectorAll("[id]")]) {
+      if (el.id) el.id = `${el.id}${suffix}`;
+    }
+    for (const el of pane.querySelectorAll("[for]")) {
+      const forId = el.getAttribute("for");
+      if (forId) el.setAttribute("for", `${forId}${suffix}`);
+    }
+    const tabs = pane.querySelector(".terminal-tabs");
+    if (tabs) tabs.innerHTML = "";
+    // xterm 宿主必须清空：列 0 有活终端时克隆会把整份 xterm DOM 深拷进新列，
+    // 而 xterm.open 是纯 appendChild 不清宿主——两份 height:100% 的 .xterm 并存，
+    // 幽灵终端会把活终端顶出 overflow:auto 的屏（M4-r1 B1）。
+    pane.querySelector(".terminal-xterm-host")?.replaceChildren();
+    for (const sel of [".terminal-session-name", ".terminal-session-path", ".terminal-session-branch", ".terminal-shell-label"]) {
+      const el = pane.querySelector(sel);
+      if (el) el.textContent = "";
+    }
+    const menu = pane.querySelector(".terminal-add-menu");
+    if (menu) menu.hidden = true;
+    const fontValue = pane.querySelector(".terminal-font-value");
+    if (fontValue) fontValue.textContent = String(terminalFontSize);
+    const tabsBar = pane.querySelector(".terminal-tabs-bar");
+    if (tabsBar) tabsBar.classList.toggle("is-hidden", terminalTabsHidden);
+    return pane;
+  }
+
+  // 列索引即 id 后缀来源：增删列后顺次重排（升序处理，目标后缀恒为已让出的
+  // 空位，不会撞名），保证列 0 恒用基名 id——单列时 DOM 与 master 逐点一致这条
+  // 硬约束在任意增删序列后都成立。
+  function syncTerminalColumnIdentities() {
+    for (let i = 0; i < terminalColumns.length; i++) {
+      const column = terminalColumns[i];
+      const suffix = terminalColumnSuffixForIndex(i);
+      if (column.elementIdSuffix === suffix) continue;
+      const oldSuffix = column.elementIdSuffix;
+      const pane = terminalColumnPane(column);
+      if (pane && oldSuffix) {
+        for (const el of [pane, ...pane.querySelectorAll("[id]")]) {
+          if (el.id && el.id.endsWith(oldSuffix)) el.id = el.id.slice(0, el.id.length - oldSuffix.length) + suffix;
+        }
+        for (const el of pane.querySelectorAll("[for]")) {
+          const forId = el.getAttribute("for");
+          if (forId && forId.endsWith(oldSuffix)) el.setAttribute("for", forId.slice(0, forId.length - oldSuffix.length) + suffix);
+        }
+      }
+      column.elementIdSuffix = suffix;
+      column.hostElementId = `terminalXtermHost${suffix}`;
+    }
+  }
+
+  // ── 列管理内部 API（本期无用户入口，M5 拖拽落点调这组） ──
+
+  // 加列：在 at（缺省末尾）插入新列，可携初始会话归属。超上限拒绝返回 null。
+  function addTerminalColumn({ at, sessionIds = [] } = {}) {
+    if (terminalColumns.length >= TERMINAL_MAX_COLUMNS) return null;
+    const index = at == null ? terminalColumns.length : Math.max(0, Math.min(at, terminalColumns.length));
+    const column = createTerminalColumn(`terminalXtermHost${terminalColumnSuffixForIndex(index)}`);
+    column.elementIdSuffix = terminalColumnSuffixForIndex(index);
+    terminalColumns.splice(index, 0, column);
+    // 让位：其后列的归属索引整体 +1；焦点索引随动
+    for (const [sid, ci] of terminalSessionColumnIndexes) {
+      if (ci >= index) terminalSessionColumnIndexes.set(sid, ci + 1);
+    }
+    if (terminalFocusedColumnIndex >= index && terminalColumns.length > 1) terminalFocusedColumnIndex += 1;
+    // 先建 pane 插到目标位再重排：重排按列序定位 pane，新列 pane 必须在位
+    const pane = buildTerminalColumnPane(column);
+    const workspace = $("terminalWorkspace");
+    if (pane && workspace && typeof workspace.insertBefore === "function") {
+      const ref = workspace.querySelectorAll(".terminal-main-pane")[index] || $("terminalInspector") || null;
+      workspace.insertBefore(pane, ref);
+      wireTerminalColumnControls(column);
+    }
+    syncTerminalColumnIdentities();
+    for (const sid of sessionIds) assignTerminalSessionToColumn(sid, column);
+    if (sessionIds.length && !column.activeSessionId) column.activeSessionId = sessionIds[sessionIds.length - 1];
+    syncTerminalAddBtn();
+    syncTerminalColumnsLayout();
+    renderTerminalPreviewTabs();
+    renderTerminalSessionData();
+    persistTerminalColumns();
+    scheduleTerminalFit();
+    return column;
+  }
+
+  // 收列：拆流、摘 pane、会话并回相邻列（左邻优先，列 0 被收时并回新列 0），
+  // 剩余列重排等分。只剩一列时拒绝（终端页恒至少一列）。
+  function removeTerminalColumn(column) {
+    const index = terminalColumns.indexOf(column);
+    if (index < 0 || terminalColumns.length <= 1) return false;
+    closeTerminalStream(column);
+    const pane = terminalColumnPane(column);
+    if (pane && typeof pane.remove === "function") pane.remove();
+    terminalColumns.splice(index, 1);
+    const mergeIndex = index > 0 ? index - 1 : 0;
+    for (const [sid, ci] of terminalSessionColumnIndexes) {
+      if (ci === index) terminalSessionColumnIndexes.set(sid, mergeIndex);
+      else if (ci > index) terminalSessionColumnIndexes.set(sid, ci - 1);
+    }
+    if (terminalFocusedColumnIndex === index) terminalFocusedColumnIndex = mergeIndex;
+    else if (terminalFocusedColumnIndex > index) terminalFocusedColumnIndex -= 1;
+    syncTerminalColumnIdentities();
+    syncTerminalColumnsLayout();
+    renderTerminalPreviewTabs();
+    renderTerminalSessionData();
+    persistTerminalColumns();
+    scheduleTerminalFit();
+    return true;
+  }
+
+  // 列空自动收：任何一列的会话走光（最后会话被拖走/关闭/在别处关光）即收掉，
+  // 剩余列重排等分；至少留一列。全空时收成单列（与零会话空态同形）。
+  function collapseEmptyTerminalColumns() {
+    while (terminalColumns.length > 1) {
+      const emptyIndex = terminalColumns.findIndex((column) => terminalColumnSessionEntries(column).length === 0);
+      if (emptyIndex < 0) break;
+      removeTerminalColumn(terminalColumns[emptyIndex]);
+    }
+  }
+
+  // 会话移入目标列（M5 拖到某列页签条的落点走这里）：归附目标列，源列空了
+  // 自动收。makeActive 缺省 true——拖过去的会话成为目标列活跃页签。
+  function moveTerminalSessionToColumn(sessionId, targetColumn, { makeActive = true } = {}) {
+    const session = terminalSessionFor(sessionId);
+    if (!session || !terminalColumns.includes(targetColumn)) return false;
+    assignTerminalSessionToColumn(sessionId, targetColumn);
+    if (makeActive) targetColumn.activeSessionId = sessionId;
+    collapseEmptyTerminalColumns();
+    syncTerminalColumnsLayout();
+    renderTerminalPreviewTabs();
+    renderTerminalSessionData();
+    persistTerminalColumns();
+    return true;
+  }
+
+  // 新增列的控件接线：与列 0 在 initTerminalPreview 里的接线同语义、全部按列定投。
+  // 点列任意处即焦点列（pane 捕获阶段指针事件先行，列内控件动作随点随换列）。
+  function wireTerminalColumnControls(column) {
+    const pane = terminalColumnPane(column);
+    if (!pane || typeof pane.addEventListener !== "function") return;
+    pane.addEventListener("pointerdown", () => setTerminalFocusedColumn(column), true);
+    const sfx = column.elementIdSuffix;
+    const tabsEl = $(`terminalTabs${sfx}`);
+    if (tabsEl) tabsEl.addEventListener("click", (event) => handleTerminalTabsClick(column, event));
+    const addBtn = $(`terminalAddBtn${sfx}`);
+    if (addBtn) addBtn.onclick = () => {
+      setTerminalFocusedColumn(column);
+      if (terminalBackendReady) {
+        const menu = $(`terminalAddMenu${sfx}`);
+        if (menu && !menu.hidden) {
+          closeTerminalAddMenu();
+          return;
+        }
+        openTerminalAddMenu();
+        return;
+      }
+      const id = `preview-${Object.keys(terminalPreviewSessions).length + 1}`;
+      terminalPreviewSessions[id] = {
+        label: "新终端", cwd: "D:\\dev", branch: "",
+        shell: { name: "PowerShell", pid: 24100 + Object.keys(terminalPreviewSessions).length * 37 }, agent: null,
+        status: "idle", metrics: null,
+        requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
+      };
+      setTerminalActiveSessionId(id);
+      renderTerminalPreviewSession();
+    };
+    const menuCancel = $(`terminalAddMenuCancel${sfx}`);
+    if (menuCancel) menuCancel.onclick = () => closeTerminalAddMenu();
+    const menuConfirm = $(`terminalAddMenuConfirm${sfx}`);
+    if (menuConfirm) menuConfirm.onclick = () => confirmTerminalAddMenu();
+    const menuList = $(`terminalAddMenuList${sfx}`);
+    if (menuList) menuList.addEventListener("click", (event) => {
+      const item = event.target.closest("[data-terminal-add-agent]");
+      if (item) selectTerminalAddAgent(item.getAttribute("data-terminal-add-agent") || "");
+    });
+    const menuCwd = $(`terminalAddMenuCwd${sfx}`);
+    if (menuCwd) menuCwd.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        confirmTerminalAddMenu();
+      }
+    });
+    const redrawBtn = $(`terminalRedrawBtn${sfx}`);
+    if (redrawBtn) redrawBtn.onclick = () => {
+      setTerminalFocusedColumn(column);
+      redrawTerminalScreen();
+      focusTerminalXterm();
+    };
+    const fontDecBtn = $(`terminalFontDecBtn${sfx}`);
+    if (fontDecBtn) fontDecBtn.onclick = () => { setTerminalFocusedColumn(column); nudgeTerminalFontSize(-1); focusTerminalXterm(); };
+    const fontIncBtn = $(`terminalFontIncBtn${sfx}`);
+    if (fontIncBtn) fontIncBtn.onclick = () => { setTerminalFocusedColumn(column); nudgeTerminalFontSize(1); focusTerminalXterm(); };
+    const screen = $(`terminalScreen${sfx}`);
+    if (screen) {
+      screen.addEventListener("wheel", (event) => {
+        if (!event.ctrlKey) return;
+        event.preventDefault();
+        nudgeTerminalFontSize(event.deltaY < 0 ? 1 : -1);
+      }, { passive: false });
+      // 点终端屏（含 xterm 四周留白）也聚焦：留白区的点击不会触发 xterm 自身的聚焦
+      screen.addEventListener("mousedown", () => {
+        setTerminalFocusedColumn(column);
+        focusTerminalXterm();
+      });
+    }
+    const retryBtn = $(`terminalRetryBtn${sfx}`);
+    if (retryBtn) retryBtn.onclick = () => dispatchTerminalUnavailableAction();
   }
   let terminalBackendSessions = {};
   // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
@@ -4754,6 +5038,24 @@ async function api(method, path, body) {
     } catch {}
   }
 
+  // 列布局存档：列数 + 各列会话归属 + 各列活跃页签 + 焦点列索引。预览稿假 id
+  // 不进存档（与 rememberTerminalSessionId 同一纪律）；刷新恢复时已消失的会话
+  // 跳过、空列不落（见 rebuildTerminalBackendSessions 的恢复段）。任何结构性
+  // 变化（增删列/移会话/切签/关签）后落一次。
+  const TERMINAL_COLUMNS_KEY = "panel-terminal-columns";
+  function persistTerminalColumns() {
+    try {
+      const columns = terminalColumns.map((column) => ({
+        sessions: terminalColumnSessionEntries(column)
+          .map(([id]) => id)
+          .filter((id) => !id.startsWith("preview-")),
+        active: typeof column.activeSessionId === "string" && !column.activeSessionId.startsWith("preview-")
+          ? column.activeSessionId : null,
+      }));
+      localStorage.setItem(TERMINAL_COLUMNS_KEY, JSON.stringify({ columns, focused: terminalFocusedColumnIndex }));
+    } catch {}
+  }
+
   // 归属数据轮询：1s 一拍（与看板同节奏），窗口隐藏 / 不在终端页时不取数；
   // 在飞守卫保证失败帧不会叠加（api 失败时保留上一帧画面）。
   let terminalPollTimer = null;
@@ -4774,8 +5076,11 @@ async function api(method, path, body) {
 
   function applyTerminalFontSize(size, { persist = true } = {}) {
     terminalFontSize = clampTerminalFontSize(size);
-    const readout = $("terminalFontSizeValue");
-    if (readout) readout.textContent = String(terminalFontSize);
+    // 读数按列各有一份（每列会话栏各带一组字号控件），逐列同步
+    for (const column of terminalColumns) {
+      const readout = $(terminalColumnElementId(column, "terminalFontSizeValue"));
+      if (readout) readout.textContent = String(terminalFontSize);
+    }
     // 字号是全局单值：逐列套用到各列自己的 xterm，并各列独立 fit（各量各的宿主）。
     for (const column of terminalColumns) {
       if (column.xterm) {
@@ -5281,6 +5586,17 @@ async function api(method, path, body) {
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     pruneTerminalHollowStreak();
+    // 归属表对账：已消失会话的归属登记清掉（会话表整表换血，旧 id 可能已不在）
+    for (const sid of [...terminalSessionColumnIndexes.keys()]) {
+      if (!terminalBackendSessions[sid]) terminalSessionColumnIndexes.delete(sid);
+    }
+    // 刷新恢复列布局：只在首张会话表落地时跑一次（布局是结构态，不能跟 1s 轮询拍走）。
+    // 已消失会话跳过、空列不落；不建流——建的只是列对象与归属，流的补挂走既有
+    // 被动通路（switchView/可见性转折，revive:false 纪律不破）。
+    if (!terminalColumnLayoutRestored) {
+      terminalColumnLayoutRestored = true;
+      restoreTerminalColumnLayout();
+    }
     // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接）都是一轮
     // 新的归属观测——空壳会话计数 +1、有归属会话清零。计数必须跟着数据拍走而非
     // 跟着渲染走：SSE 活跃真值流命中任一会话就会整渲当前会话（renderTerminal-
@@ -5301,6 +5617,45 @@ async function api(method, path, body) {
         : (Object.keys(terminalBackendSessions)[0] || null));
       rememberTerminalSessionId(terminalActiveSessionId());
     }
+    // 各列活跃指针合法化：不在本列会话集里就让位本列第一个（别窗关签/收列后的兜底）
+    for (const column of terminalColumns) {
+      const own = terminalColumnSessionEntries(column);
+      if (column.activeSessionId && own.some(([id]) => id === column.activeSessionId)) continue;
+      column.activeSessionId = own[0]?.[0] ?? null;
+    }
+    // 别窗把某列的会话关光：列空自动收（至少留一列）
+    collapseEmptyTerminalColumns();
+  }
+
+  // 列布局恢复只跑一次的门：整页加载后首张会话表落地时落位（见 rebuild）。
+  let terminalColumnLayoutRestored = false;
+
+  // 刷新恢复列布局：列数 + 各列归属 + 各列活跃页签 + 焦点列从存档回读。
+  // 已消失的会话跳过（不复活——revive:false 是建流通路的纪律，本函数不建流）；
+  // 存档里全灭的列不落；列数超上限截断。恢复后落一次盘（存档与现值对齐）。
+  function restoreTerminalColumnLayout() {
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(TERMINAL_COLUMNS_KEY) || "null"); } catch {}
+    if (!stored || !Array.isArray(stored.columns)) return;
+    const kept = stored.columns.slice(0, TERMINAL_MAX_COLUMNS)
+      .map((c) => ({
+        sessions: (Array.isArray(c?.sessions) ? c.sessions : []).filter((id) => terminalBackendSessions[id]),
+        active: typeof c?.active === "string" ? c.active : null,
+      }))
+      .filter((c, i) => i === 0 || c.sessions.length > 0);
+    while (terminalColumns.length < kept.length) addTerminalColumn();
+    kept.forEach((c, i) => {
+      for (const id of c.sessions) terminalSessionColumnIndexes.set(id, i);
+      const column = terminalColumns[i];
+      if (!column) return;
+      if (c.active && c.sessions.includes(c.active)) column.activeSessionId = c.active;
+      else if (c.sessions.length) column.activeSessionId = c.sessions[c.sessions.length - 1];
+    });
+    if (Number.isInteger(stored.focused) && stored.focused >= 0 && stored.focused < terminalColumns.length) {
+      terminalFocusedColumnIndex = stored.focused;
+    }
+    syncTerminalColumnsLayout();
+    persistTerminalColumns();
   }
 
   // 新会话的初始行列数取当前实测值：PTY 若以固定猜测值（120×34）起步，而
@@ -5811,7 +6166,10 @@ async function api(method, path, body) {
   let terminalTabsHidden = false;
   function applyTerminalTabsHidden(hidden) {
     terminalTabsHidden = !!hidden;
-    $("terminalTabsBar")?.classList.toggle("is-hidden", terminalTabsHidden);
+    // 页签条每列各有一排，收展逐列落同一态
+    for (const column of terminalColumns) {
+      $(terminalColumnElementId(column, "terminalTabsBar"))?.classList.toggle("is-hidden", terminalTabsHidden);
+    }
     const button = $("terminalTabsToggleBtn");
     if (!button) return;
     const label = terminalTabsHidden ? "展示页签" : "隐藏页签";
@@ -5829,22 +6187,27 @@ async function api(method, path, body) {
     return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
   }
 
-  // 两处每拍重建的 innerHTML 指纹（页签栏 / 请求行列表）：存「上次实际写进 DOM 的
+  // 两处每拍重建的 innerHTML 指纹（各列页签栏 / 请求行列表）：存「上次实际写进 DOM 的
   // 整串」。1s 轮询稳态下这两块内容大多没变，逐拍赋值 innerHTML 是纯浪费的 DOM
   // 解析与整子树替换（主线程固定开销）；渲染函数改为先拼完整串、与指纹逐字比对，
   // 相同即跳过赋值（DOM 零写）。active 态、请求行展开态都已在串里，比对天然覆盖，
   // 不需要单独失效逻辑。页签栏另有三处直写 innerHTML="" 的退场路径（首连在飞 /
   // 降级 / 关停清场），直写处必须同步重置指纹，保住「指纹 = DOM 现值」这条不变式
   // ——否则退场后的下一次同串渲染会被误跳过，页签栏留在空态。
-  let terminalTabsRenderedHtml = "";
+  // 多列语义：页签指纹按列各持一份（column.tabsRenderedHtml），清场路径逐列重置。
   let terminalRequestListRenderedHtml = "";
 
-  function renderTerminalPreviewTabs() {
-    const tabs = $("terminalTabs");
+  // 页签条按列渲染：每列只渲归属本列的会话（归属表 terminalSessionColumnIndexes，
+  // 未登记默认列 0），高亮本列活跃页签。单列 = 列 0 = 全部会话原序，与现状逐点一致。
+  function renderTerminalColumnTabs(column) {
+    const tabs = $(terminalColumnElementId(column, "terminalTabs"));
     if (!tabs) return;
     const sessions = terminalSessionMap();
-    const activeId = terminalActiveSessionId();
-    const html = Object.entries(sessions).map(([id, session]) => {
+    const activeId = column.activeSessionId;
+    const columnIndex = terminalColumns.indexOf(column);
+    const html = Object.entries(sessions)
+      .filter(([id]) => terminalSessionColumnIndex(id) === columnIndex)
+      .map(([id, session]) => {
       // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
       // 其后才是归属注入的 agent.name，最后回落外壳名。
       const tabAgent = session.agentName || (session.agent ? session.agent.name : session.shell.name);
@@ -5866,9 +6229,9 @@ async function api(method, path, body) {
       </button>
     `;
     }).join("");
-    // 指纹门控（缓存声明处的注释）：整串与上次相同即跳过赋值。
-    if (html === terminalTabsRenderedHtml) return;
-    terminalTabsRenderedHtml = html;
+    // 指纹门控（缓存声明处的注释）：整串与上次相同即跳过赋值；指纹按列各持一份。
+    if (html === column.tabsRenderedHtml) return;
+    column.tabsRenderedHtml = html;
     tabs.innerHTML = html;
     // 品牌头像后填：克隆看板 .agent-avatar 整体（各家底衬/描边/圆角都是内联样式，
     // 只取字形会糊）。品牌 id 已编进指纹串，身份变化必然触发重渲染+重填，不会
@@ -5880,6 +6243,11 @@ async function api(method, path, body) {
         if (avatar) slot.replaceChildren(avatar.cloneNode(true));
       }
     }
+  }
+
+  // 页级页签渲染入口：逐列渲染各自的页签条（单列即列 0 一栏，与现状一致）。
+  function renderTerminalPreviewTabs() {
+    for (const column of terminalColumns) renderTerminalColumnTabs(column);
   }
 
   // ---- 归属数据轮询（虚拟终端接真实 Agent 流量） ----
@@ -5942,13 +6310,37 @@ async function api(method, path, body) {
     }
   }
 
+  // 列内会话外饰（会话栏 + 底栏统计）按列渲染：各列读本列自己的活跃会话。
+  // 单列 = 列 0 = 基名 id，写入的值与现状逐点一致。
+  function renderTerminalColumnSessionChrome(column) {
+    const session = terminalSessionFor(column.activeSessionId);
+    if (!session) return;
+    $(terminalColumnElementId(column, "terminalSessionName")).textContent = session.label;
+    $(terminalColumnElementId(column, "terminalSessionPath")).textContent = session.cwd;
+    $(terminalColumnElementId(column, "terminalSessionBranch")).textContent = session.branch || "未设置分支";
+    $(terminalColumnElementId(column, "terminalShellLabel")).textContent = session.shell.name;
+    const metrics = session.metrics || null;
+    $(terminalColumnElementId(column, "terminalFootStats")).hidden = !metrics;
+    $(terminalColumnElementId(column, "terminalFootCache")).hidden = !metrics || metrics.requestCount === 0;
+    if (metrics) {
+      $(terminalColumnElementId(column, "terminalFootRequests")).textContent = `${metrics.requestCount} 次请求`;
+      $(terminalColumnElementId(column, "terminalFootCache")).textContent = `缓存 ${metrics.cache}%`;
+      $(terminalColumnElementId(column, "terminalFootTokens")).textContent = metrics.tokens;
+      $(terminalColumnElementId(column, "terminalFootTokensTip")).textContent = metrics.tokens;
+    }
+    // 底栏失败语义色：只跟随最近一条请求的结果——requests[0] 即最新（服务端
+    // 从 journal 尾部倒序取回），最近一条失败「N 次请求」pill 转 danger，
+    // 最近一条正常即恢复常色；历史失败行留在列表里不再把字串粘红（与列表
+    // 红点同源，数据即轮询面的 per-request ok 标志）。
+    $(terminalColumnElementId(column, "terminalFootRequests")).classList.toggle("is-failed", session.requests[0]?.state === "failed");
+  }
+
   function renderTerminalSessionData() {
+    // 会话栏/底栏逐列渲各列自己的活跃会话；inspector 是页级面板，读焦点列活跃会话
+    //（多列时 inspector 整栏隐藏，这里的内容照算不碍事，回单列即正确）。
+    for (const column of terminalColumns) renderTerminalColumnSessionChrome(column);
     const session = terminalSessionFor(terminalActiveSessionId());
     if (!session) return;
-    $("terminalSessionName").textContent = session.label;
-    $("terminalSessionPath").textContent = session.cwd;
-    $("terminalSessionBranch").textContent = session.branch || "未设置分支";
-    $("terminalShellLabel").textContent = session.shell.name;
     $("terminalInspectorTitle").textContent = session.label;
     // 空壳侧栏：无归属会话没有 Agent 监测数据可展示——不再整列 display:none
     //（收放开关在列内，藏列即藏唯一拉回入口，刷新落到无归属页签后侧栏就无痕
@@ -6016,8 +6408,6 @@ async function api(method, path, body) {
     $("terminalLiveStatus").classList.toggle("is-idle", session.status !== "working");
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
-    $("terminalFootStats").hidden = !metrics;
-    $("terminalFootCache").hidden = !metrics || metrics.requestCount === 0;
     if (metrics) {
       $("terminalTtftVal").textContent = metrics.ttft;
       $("terminalTtftLamp").className = `lamp lamp-${metrics.ttftLamp}`;
@@ -6025,10 +6415,6 @@ async function api(method, path, body) {
       $("terminalCacheVal").textContent = metrics.cache;
       $("terminalWorkTimeVal").textContent = metrics.workTime;
       $("terminalWorkTimeUnit").textContent = metrics.workTimeUnit;
-      $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
-      $("terminalFootCache").textContent = `缓存 ${metrics.cache}%`;
-      $("terminalFootTokens").textContent = metrics.tokens;
-      $("terminalFootTokensTip").textContent = metrics.tokens;
       updateSparkline("terminalSparkTtft", metrics.sparkTtft, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkTps", metrics.sparkTps, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkCache", metrics.sparkCache, undefined, undefined, TERMINAL_SPARK_SIZE);
@@ -6046,11 +6432,6 @@ async function api(method, path, body) {
       terminalRequestListRenderedHtml = requestListHtml;
       $("terminalRequestList").innerHTML = requestListHtml;
     }
-    // 底栏失败语义色：只跟随最近一条请求的结果——requests[0] 即最新（服务端
-    // 从 journal 尾部倒序取回），最近一条失败「N 次请求」pill 转 danger，
-    // 最近一条正常即恢复常色；历史失败行留在列表里不再把字串粘红（与列表
-    // 红点同源，数据即轮询面的 per-request ok 标志）。
-    $("terminalFootRequests").classList.toggle("is-failed", session.requests[0]?.state === "failed");
   }
 
   // 会话级静态种子的退场动作，零会话空态与首连在飞两态共用：没有当前会话时，
@@ -6059,10 +6440,13 @@ async function api(method, path, body) {
   // 空背景被切成半幅。
   function setTerminalSessionChromeVisible(visible) {
     const mode = visible ? "" : "none";
-    const sessionBar = document.querySelector(".terminal-session-bar");
-    if (sessionBar) sessionBar.style.display = mode;
-    const footStatus = document.querySelector(".terminal-foot-status");
-    if (footStatus) footStatus.style.display = mode;
+    // 会话栏与底栏左段每列各有一份（多列各退各的），inspector 仍页级唯一
+    for (const column of terminalColumns) {
+      const sessionBar = $(terminalColumnElementId(column, "terminalSessionBar"));
+      if (sessionBar) sessionBar.style.display = mode;
+      const footStatus = $(terminalColumnElementId(column, "terminalFootStatus"));
+      if (footStatus) footStatus.style.display = mode;
+    }
     const inspector = $("terminalInspector");
     if (inspector) inspector.style.display = mode;
     const workspace = $("terminalWorkspace");
@@ -6096,11 +6480,12 @@ async function api(method, path, body) {
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
     if (footStats) footStats.hidden = true;
-    const tabs = $("terminalTabs");
-    if (tabs) {
-      tabs.innerHTML = "";
-      // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
-      terminalTabsRenderedHtml = "";
+    // 页签栏逐列直写清空（多列各清各的），同步重置各列指纹
+    //（保住「指纹 = DOM 现值」，见指纹缓存声明注释）。
+    for (const column of terminalColumns) {
+      const columnTabs = $(terminalColumnElementId(column, "terminalTabs"));
+      if (columnTabs) columnTabs.innerHTML = "";
+      column.tabsRenderedHtml = "";
     }
     setTerminalSessionChromeVisible(false);
     syncTerminalAddBtn();
@@ -6127,23 +6512,25 @@ async function api(method, path, body) {
       retryBtn.onclick = () => dispatchTerminalUnavailableAction();
     }
     if (overlay) overlay.hidden = false;
-    // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
+    // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用（逐列）。
     const empty = $("terminalEmpty");
     if (empty) empty.hidden = true;
     const metricsSection = $("terminalMetricsSection");
     if (metricsSection) metricsSection.hidden = true;
     const footStats = $("terminalFootStats");
     if (footStats) footStats.hidden = true;
-    const addBtn = $("terminalAddBtn");
-    if (addBtn) addBtn.disabled = true;
+    for (const column of terminalColumns) {
+      const addBtn = $(terminalColumnElementId(column, "terminalAddBtn"));
+      if (addBtn) addBtn.disabled = true;
+    }
     // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏/假监测区（payment-service/portal、
     // PID 23140、Codex CLI 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
     // 会话级那几条与零会话共用同一套退场动作（含工作区收成单列，不留空 column）。
-    const tabs = $("terminalTabs");
-    if (tabs) {
-      tabs.innerHTML = "";
-      // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
-      terminalTabsRenderedHtml = "";
+    // 页签栏逐列直写清空，同步重置各列指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）。
+    for (const column of terminalColumns) {
+      const columnTabs = $(terminalColumnElementId(column, "terminalTabs"));
+      if (columnTabs) columnTabs.innerHTML = "";
+      column.tabsRenderedHtml = "";
     }
     setTerminalSessionChromeVisible(false);
   }
@@ -6163,10 +6550,12 @@ async function api(method, path, body) {
     });
   }
 
-  // 新建键与就绪位同拍：降级态禁用（「+」不再产假会话），就绪态放开。
+  // 新建键与就绪位同拍：降级态禁用（「+」不再产假会话），就绪态放开。每列各有一枚，逐列同步。
   function syncTerminalAddBtn() {
-    const addBtn = $("terminalAddBtn");
-    if (addBtn) addBtn.disabled = !terminalBackendReady;
+    for (const column of terminalColumns) {
+      const addBtn = $(terminalColumnElementId(column, "terminalAddBtn"));
+      if (addBtn) addBtn.disabled = !terminalBackendReady;
+    }
   }
 
   // ── 终端宿主（terminal-host）生命周期 ──
@@ -6260,13 +6649,16 @@ async function api(method, path, body) {
     closeAllTerminalStreams();
     terminalBackendReady = false;
     terminalBackendSessions = {};
-    setTerminalActiveSessionId(null);
+    // 活跃指针按列清零（setTerminalActiveSessionId 只写焦点列，清场要逐列清）。
+    // 归属表（terminalSessionColumnIndexes）不清：宿主带 restore 重启后原会话
+    // 原 id 回来，rebuild 按表归位，列布局不打散；清场后的列空自收归 rebuild 管。
+    for (const column of terminalColumns) column.activeSessionId = null;
     rememberTerminalSessionId(null);
-    const tabs = $("terminalTabs");
-    if (tabs) {
-      tabs.innerHTML = "";
+    for (const column of terminalColumns) {
+      const tabs = $(terminalColumnElementId(column, "terminalTabs"));
+      if (tabs) tabs.innerHTML = "";
       // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
-      terminalTabsRenderedHtml = "";
+      column.tabsRenderedHtml = "";
     }
     // 关停清场 = 后端会话全数失效：空壳防抖计数一并清（预览稿会话不动）
     pruneTerminalHollowStreak();
@@ -6449,8 +6841,11 @@ async function api(method, path, body) {
   let terminalAddMenuSelection = "";
 
   function closeTerminalAddMenu() {
-    const menu = $("terminalAddMenu");
-    if (menu) menu.hidden = true;
+    // 同时至多一个菜单开着，但关闭逐列全收（多列时各列页签条各带一份菜单）
+    for (const column of terminalColumns) {
+      const menu = $(terminalColumnElementId(column, "terminalAddMenu"));
+      if (menu) menu.hidden = true;
+    }
   }
 
   function loadInstalledTerminalAgents() {
@@ -6475,7 +6870,8 @@ async function api(method, path, body) {
   }
 
   function renderTerminalAddMenuList(agents) {
-    const list = $("terminalAddMenuList");
+    // 菜单是逐列克隆的：渲染落在焦点列那份（开菜单的列即焦点列）
+    const list = $(terminalColumnElementId(terminalFocusedColumn(), "terminalAddMenuList"));
     if (!list) return;
     const items = [{ id: "", name: "空白终端" }, ...(Array.isArray(agents) ? agents : [])];
     list.innerHTML = items.map((agent) => `
@@ -6485,7 +6881,7 @@ async function api(method, path, body) {
         <span class="terminal-add-menu-name">${escapeHtml(agent.name)}</span>
       </button>
     `).join("");
-    const note = $("terminalAddMenuNote");
+    const note = $(terminalColumnElementId(terminalFocusedColumn(), "terminalAddMenuNote"));
     if (note) {
       if (Array.isArray(agents) && agents.length > 0) {
         note.hidden = true;
@@ -6502,8 +6898,10 @@ async function api(method, path, body) {
   // 左缘），始终紧邻加号、不出血。顶缘贴加号底缘，页签栏高度变化也不漂。
   // 定位祖先是 .terminal-tabs-bar（position: relative）。
   function positionTerminalAddMenu() {
-    const menu = $("terminalAddMenu");
-    const btn = $("terminalAddBtn");
+    // 菜单逐列各有一份：定位的是焦点列（开菜单的列）那份
+    const column = terminalFocusedColumn();
+    const menu = $(terminalColumnElementId(column, "terminalAddMenu"));
+    const btn = $(terminalColumnElementId(column, "terminalAddBtn"));
     if (!menu || !btn || typeof menu.closest !== "function" || typeof btn.getBoundingClientRect !== "function") return;
     const bar = menu.closest(".terminal-tabs-bar");
     if (!bar || typeof bar.getBoundingClientRect !== "function") return;
@@ -6519,19 +6917,23 @@ async function api(method, path, body) {
     menu.style.top = `${Math.max(0, btnRect.bottom - barRect.top + 6)}px`;
   }
 
-  function openTerminalAddMenu() {
-    const menu = $("terminalAddMenu");
+  // 开菜单的列即目标列：先把该列置为焦点列（「+」新建进焦点列），同时只开一个菜单。
+  function openTerminalAddMenu(column = terminalFocusedColumn()) {
+    if (!column) return;
+    setTerminalFocusedColumn(column);
+    const menu = $(terminalColumnElementId(column, "terminalAddMenu"));
     if (!menu) return;
+    closeTerminalAddMenu();
     menu.hidden = false;
     positionTerminalAddMenu();
-    const cwdInput = $("terminalAddMenuCwd");
+    const cwdInput = $(terminalColumnElementId(column, "terminalAddMenuCwd"));
     if (cwdInput) cwdInput.value = terminalCwdInitial();
     loadInstalledTerminalAgents().then((agents) => renderTerminalAddMenuList(agents));
   }
 
   function selectTerminalAddAgent(agentId) {
     terminalAddMenuSelection = agentId;
-    const list = $("terminalAddMenuList");
+    const list = $(terminalColumnElementId(terminalFocusedColumn(), "terminalAddMenuList"));
     if (!list) return;
     for (const item of list.querySelectorAll("[data-terminal-add-agent]")) {
       const selected = item.getAttribute("data-terminal-add-agent") === agentId;
@@ -6541,19 +6943,24 @@ async function api(method, path, body) {
   }
 
   // 一键启动：凭证只走环境变量注入（服务端组装），这里只递 agentId 与工作目录。
+  // 新会话落焦点列（「+」新建进焦点列）。
   function createAgentTerminal({ agentId, cwd }) {
     return api("POST", "/api/terminal/agent-sessions", { agentId, cwd, ...terminalCreateSize() })
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
+        const column = terminalFocusedColumn();
+        if (column) assignTerminalSessionToColumn(created.id, column);
         setTerminalActiveSessionId(created.id);
         rememberTerminalSessionId(created.id);
+        persistTerminalColumns();
         renderTerminalPreviewSession();
       })
       .catch((error) => toast(panelError(error, "无法启动这个终端"), true));
   }
 
   function confirmTerminalAddMenu() {
-    const cwdInput = $("terminalAddMenuCwd");
+    const column = terminalFocusedColumn();
+    const cwdInput = $(terminalColumnElementId(column, "terminalAddMenuCwd"));
     const cwd = (cwdInput && cwdInput.value ? cwdInput.value : "").trim() || terminalCwdInitial();
     rememberTerminalCwd(cwd);
     closeTerminalAddMenu();
@@ -6561,8 +6968,10 @@ async function api(method, path, body) {
       api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
+          if (column) assignTerminalSessionToColumn(created.id, column);
           setTerminalActiveSessionId(created.id);
           rememberTerminalSessionId(created.id);
+          persistTerminalColumns();
           renderTerminalPreviewSession();
         })
         .catch((error) => toast(panelError(error, "无法新建终端"), true));
@@ -6613,13 +7022,26 @@ async function api(method, path, body) {
       return;
     }
     clearTerminalEmptyState();
-    const sessionBar = document.querySelector(".terminal-session-bar");
-    if (sessionBar) sessionBar.style.display = "";
-    const footStatus = document.querySelector(".terminal-foot-status");
-    if (footStatus) footStatus.style.display = "";
+    // 会话栏/底栏左段逐列恢复可见（多列各有一份；与 setTerminalSessionChromeVisible 同一开关）
+    for (const column of terminalColumns) {
+      const sessionBar = $(terminalColumnElementId(column, "terminalSessionBar"));
+      if (sessionBar) sessionBar.style.display = "";
+      const footStatus = $(terminalColumnElementId(column, "terminalFootStatus"));
+      if (footStatus) footStatus.style.display = "";
+    }
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
     connectTerminalStream(terminalFocusedColumn(), session, { revive });
+    // 多列补挂：其余列只在「本列流缺失或定投漂移」时重建——后台切回/刷新恢复时
+    // 各列各按镜像重建（revive 口径透传，被动通路 revive:false 不破）；在看的列
+    // 不动——切页签只重建焦点列，不把别列的流一起拆掉。
+    for (const column of terminalColumns) {
+      if (column === terminalFocusedColumn()) continue;
+      const colSession = terminalSessionFor(column.activeSessionId);
+      if (!colSession) continue;
+      if (column.eventSource && column.boundSessionId === colSession.id) continue;
+      connectTerminalStream(column, colSession, { revive });
+    }
     if (currentView === "terminal") scheduleTerminalFit();
   }
 
@@ -6683,6 +7105,53 @@ async function api(method, path, body) {
     }
   }
 
+  // 页签点击（切签 / 关签）按列处理：点列内页签即把该列置为焦点列（「点列任意处
+  // 即焦点列」的一环），其后「当前会话」语义都落在该列。列 0 的接线在
+  // initTerminalPreview，新增列的接线在 wireTerminalColumnControls，共用本函数。
+  function handleTerminalTabsClick(column, event) {
+    const tab = event.target.closest("[data-terminal-tab]");
+    if (!tab) return;
+    const id = tab.dataset.terminalTab;
+    if (!terminalSessionFor(id)) return;
+    setTerminalFocusedColumn(column);
+    if (event.target.closest(".terminal-tab-close")) {
+      const session = terminalSessionFor(id);
+      if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
+      if (session.backend) {
+        api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
+        delete terminalBackendSessions[id];
+      } else delete terminalPreviewSessions[id];
+      // 关标签即会话关闭：空壳防抖计数与归属登记同步清零，不留陈旧
+      terminalHollowStreak.delete(id);
+      terminalSessionColumnIndexes.delete(id);
+      const remaining = Object.keys(terminalSessionMap());
+      // 本列活跃被关：让位给本列剩余第一个（不抢别列的会话顶位）
+      if (column.activeSessionId === id) {
+        column.activeSessionId = terminalColumnSessionEntries(column)[0]?.[0] ?? null;
+      }
+      rememberTerminalSessionId(terminalActiveSessionId());
+      persistTerminalColumns();
+      if (remaining.length === 0) {
+        // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
+        // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
+        // 的空页。留在页内落空态（空背景 + 文字提示），「+」留在原处直接新建。
+        closeAllTerminalStreams();
+        collapseEmptyTerminalColumns();
+        renderTerminalPreviewTabs();
+        renderTerminalEmptyState();
+        return;
+      }
+      // 本列被关空即自动收掉（剩余列重排等分）；不空则原位保留
+      collapseEmptyTerminalColumns();
+      renderTerminalPreviewSession();
+      return;
+    }
+    column.activeSessionId = id;
+    rememberTerminalSessionId(id);
+    persistTerminalColumns();
+    renderTerminalPreviewSession();
+  }
+
   function initTerminalPreview() {
     const tabs = $("terminalTabs");
     if (!tabs) return;
@@ -6690,8 +7159,9 @@ async function api(method, path, body) {
     // 挂在 ensureTerminalXterm 会随每次重建重复注册。fit 入口本身对空实例空操作。
     window.addEventListener("resize", debounceTerminalFit);
     // 新建菜单开着的状态下改窗口大小：加号随页签栏移动，菜单跟着重挂，不脱节。
+    // 多列时跟着焦点列（开菜单的列）那枚加号走。
     window.addEventListener("resize", () => {
-      const menu = $("terminalAddMenu");
+      const menu = $(terminalColumnElementId(terminalFocusedColumn(), "terminalAddMenu"));
       if (menu && !menu.hidden) positionTerminalAddMenu();
     });
     restoreTerminalFontSize();
@@ -6724,39 +7194,10 @@ async function api(method, path, body) {
       }, 1000);
     }
     syncTerminalActivityStream();
-    tabs.addEventListener("click", (event) => {
-      const tab = event.target.closest("[data-terminal-tab]");
-      if (!tab) return;
-      const id = tab.dataset.terminalTab;
-      if (!terminalSessionFor(id)) return;
-      if (event.target.closest(".terminal-tab-close")) {
-        const session = terminalSessionFor(id);
-        if (session.status === "working" && !window.confirm("当前终端仍在运行，关闭后将中断任务。确定继续吗？")) return;
-        if (session.backend) {
-          api("POST", `/api/terminal/sessions/${encodeURIComponent(id)}/close`).catch(() => {});
-          delete terminalBackendSessions[id];
-        } else delete terminalPreviewSessions[id];
-        // 关标签即会话关闭：空壳防抖计数同步清零，不留陈旧计数
-        terminalHollowStreak.delete(id);
-        const remaining = Object.keys(terminalSessionMap());
-        if (terminalActiveSessionId() === id) setTerminalActiveSessionId(remaining[0] || null);
-        rememberTerminalSessionId(terminalActiveSessionId());
-        if (remaining.length === 0) {
-          // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
-          // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
-          // 的空页。留在页内落空态（空背景 + 文字提示），「+」留在原处直接新建。
-          closeAllTerminalStreams();
-          renderTerminalPreviewTabs();
-          renderTerminalEmptyState();
-          return;
-        }
-        renderTerminalPreviewSession();
-        return;
-      }
-      setTerminalActiveSessionId(id);
-      rememberTerminalSessionId(id);
-      renderTerminalPreviewSession();
-    });
+    tabs.addEventListener("click", (event) => handleTerminalTabsClick(terminalColumns[0], event));
+    // 点列任意处即焦点列：pane 捕获阶段先行，列 0 的控件（页签/「+」/字号/重画）
+    // 与新增列共用同一语义（新增列的接线见 wireTerminalColumnControls）。
+    terminalColumnPane(terminalColumns[0])?.addEventListener?.("pointerdown", () => setTerminalFocusedColumn(terminalColumns[0]), true);
     $("terminalReturnBtn").onclick = () => closeTerminalPreview();
     $("terminalInspectorToggle").onclick = () => {
       const inspector = $("terminalInspector");
@@ -6787,11 +7228,12 @@ async function api(method, path, body) {
       focusTerminalXterm();
     };
     $("terminalRedrawBtn").onclick = () => {
+      setTerminalFocusedColumn(terminalColumns[0]);
       redrawTerminalScreen();
       focusTerminalXterm();
     };
-    $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); focusTerminalXterm(); };
-    $("terminalFontIncBtn").onclick = () => { nudgeTerminalFontSize(1); focusTerminalXterm(); };
+    $("terminalFontDecBtn").onclick = () => { setTerminalFocusedColumn(terminalColumns[0]); nudgeTerminalFontSize(-1); focusTerminalXterm(); };
+    $("terminalFontIncBtn").onclick = () => { setTerminalFocusedColumn(terminalColumns[0]); nudgeTerminalFontSize(1); focusTerminalXterm(); };
     // 最近请求：失败行点击就地展开/收起错误详情（与请求日志大板行展开同模式）；
     // 列表每拍轮询重建，展开态由 terminalRequestExpanded 行键集合承载。
     $("terminalRequestList")?.addEventListener("click", (e) => {
@@ -6809,8 +7251,11 @@ async function api(method, path, body) {
       nudgeTerminalFontSize(event.deltaY < 0 ? 1 : -1);
     }, { passive: false });
     // 点终端屏（含 xterm 四周留白）也聚焦：留白区的点击不会触发 xterm 自身的
-    // 聚焦，其后的键入会静默落空。
-    $("terminalScreen").addEventListener("mousedown", () => focusTerminalXterm());
+    // 聚焦，其后的键入会静默落空。多列时先定点本列为焦点列。
+    $("terminalScreen").addEventListener("mousedown", () => {
+      setTerminalFocusedColumn(terminalColumns[0]);
+      focusTerminalXterm();
+    });
     document.addEventListener("keydown", (event) => {
       if (currentView !== "terminal") return;
       const delta = isTerminalFontZoomKey(event);
@@ -6850,6 +7295,8 @@ async function api(method, path, body) {
     }, true);
     $("terminalRetryBtn").onclick = () => dispatchTerminalUnavailableAction();
     $("terminalAddBtn").onclick = () => {
+      // 点本列「+」即本列成为焦点列（键盘触发没有 pointerdown 先行，显式置焦）
+      setTerminalFocusedColumn(terminalColumns[0]);
       if (terminalBackendReady) {
         const menu = $("terminalAddMenu");
         if (menu && !menu.hidden) {
@@ -6881,12 +7328,11 @@ async function api(method, path, body) {
         confirmTerminalAddMenu();
       }
     });
-    // 点菜单外面或按 Esc 收起；点「+」自身不收起（交给 onclick 的切换）。
+    // 点菜单外面或按 Esc 收起；点「+」或菜单内部不收起。多列时菜单逐列各有一份，
+    // 统一按类名判定（点在任一列的菜单/加号上都算内部），收起逐列全收。
     document.addEventListener("pointerdown", (event) => {
-      const menu = $("terminalAddMenu");
-      if (!menu || menu.hidden) return;
-      if (menu.contains(event.target)) return;
-      if (event.target && typeof event.target.closest === "function" && event.target.closest("#terminalAddBtn")) return;
+      if (event.target && typeof event.target.closest === "function"
+        && event.target.closest(".terminal-add-menu, .terminal-add-btn")) return;
       closeTerminalAddMenu();
     });
     document.addEventListener("keydown", (event) => {
@@ -7735,7 +8181,8 @@ async function api(method, path, body) {
       // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
       // 最后一屏，要新壳仍然点页签。
       const terminalColumn = terminalFocusedColumn();
-      if (!terminalColumn?.xterm) renderTerminalPreviewSession({ revive: false });
+      // 任一列缺实例都要补挂（多列各列独立拆建）；都在看则只把焦点还给焦点列。
+      if (terminalColumns.some((column) => !column.xterm)) renderTerminalPreviewSession({ revive: false });
       else terminalColumn.xterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
