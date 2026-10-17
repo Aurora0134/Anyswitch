@@ -6009,13 +6009,13 @@ async function api(method, path, body) {
     const descEl = $("terminalUnavailableDesc");
     if (descEl) {
       descEl.hidden = false;
-      descEl.textContent = "终端服务随 relay 一同启动，relay 运行后即可使用。";
+      descEl.textContent = "终端服务当前未在运行，点击下方按钮即可启动。";
     }
     const retryBtn = $("terminalRetryBtn");
     if (retryBtn) {
       retryBtn.hidden = false;
-      retryBtn.textContent = "重新连接";
-      retryBtn.onclick = () => connectTerminalBackend();
+      retryBtn.textContent = "启动服务";
+      retryBtn.onclick = () => dispatchTerminalUnavailableAction();
     }
     if (overlay) overlay.hidden = false;
     // 降级空态优先于零会话空态：服务不在时没有什么可新建的，「+」一并禁用。
@@ -6037,6 +6037,21 @@ async function api(method, path, body) {
       terminalTabsRenderedHtml = "";
     }
     setTerminalSessionChromeVisible(false);
+  }
+
+  // 「未运行」空态动作钮分派：先现取宿主状态（host/status 路由在 relay 不可达时回
+  // state:"unknown" 而非报错）——running 说明 host 活着只是面板没连上，重连即可；
+  // stopped / exited 走启动通路；unknown 是 relay 没起，启动 relay 归侧栏按钮，
+  // 本钮只给可执行提示。
+  function dispatchTerminalUnavailableAction() {
+    return api("GET", "/api/terminal/host/status").then((d) => {
+      const state = normalizeTerminalHostState(d && typeof d.state === "string" ? d.state : "");
+      if (state === "running") connectTerminalBackend();
+      else if (state === "stopped" || state === "exited") startTerminalHost();
+      else toast("Relay 未在运行，请先在左侧栏点「▶ 启动」", true);
+    }).catch(() => {
+      toast("Relay 未在运行，请先在左侧栏点「▶ 启动」", true);
+    });
   }
 
   // 新建键与就绪位同拍：降级态禁用（「+」不再产假会话），就绪态放开。
@@ -6200,7 +6215,7 @@ async function api(method, path, body) {
   }
 
   // 异常退出与非手动未运行的自动拉起（只在进页时发生，无开关）：拉起期间盖住
-  // 画区，失败落「未运行」空态，空态「重新连接」可再试。
+  // 画区，失败落带启动动作的「已停止」页（状态不可知才落「未运行」页）。
   async function autoStartTerminalHost() {
     if (terminalHostOpInFlight) return;
     terminalHostOpInFlight = true;
@@ -6211,7 +6226,8 @@ async function api(method, path, body) {
       await connectTerminalBackend();
     } catch {
       terminalBackendReady = false;
-      renderTerminalUnavailableState();
+      if (terminalHostState === "stopped" || terminalHostState === "exited") renderTerminalStoppedState();
+      else renderTerminalUnavailableState();
     } finally {
       terminalHostOpInFlight = false;
       syncTerminalHostControls();
@@ -6447,8 +6463,8 @@ async function api(method, path, body) {
   }
 
   // 连接 terminal-host 的成功链路：就绪后重渲会话、立即补拍归属轮询、同步活跃
-  // 真值流；失败即置回未就绪并落空态。初装、空态「重新连接」、进页自动重试共用
-  // 同一通路，三处复用防止再漏改。
+  // 真值流；失败即置回未就绪并按宿主现态落对应空态。初装、空态动作钮 running
+  // 分派、进页自动重试共用同一通路，三处复用防止再漏改。
   function connectTerminalBackend() {
     return fetchTerminalSessions().then(() => {
       terminalFirstConnectSettled = true;
@@ -6460,7 +6476,9 @@ async function api(method, path, body) {
       terminalFirstConnectSettled = true;
       terminalBackendReady = false;
       console.warn("[terminal] backend unavailable:", error);
-      renderTerminalUnavailableState();
+      // 兜底页按宿主现态分派：宿主已停时落「已停止」页（带启动动作），不拿「未运行」页顶掉
+      if (terminalHostState === "stopped") renderTerminalStoppedState();
+      else renderTerminalUnavailableState();
     });
   }
 
@@ -6707,7 +6725,7 @@ async function api(method, path, body) {
       terminalXterm?.focus();
       api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     }, true);
-    $("terminalRetryBtn").onclick = () => connectTerminalBackend();
+    $("terminalRetryBtn").onclick = () => dispatchTerminalUnavailableAction();
     $("terminalAddBtn").onclick = () => {
       if (terminalBackendReady) {
         const menu = $("terminalAddMenu");
@@ -6772,7 +6790,7 @@ async function api(method, path, body) {
     // 的迁移分支，两处同发即重复连接。
     applyTerminalHostState(hostState, { reconnect: false });
     if (hostState === "running") {
-      // 降级重试：terminal-host 不在时进页自动再连一次，与空态「重新连接」同通路。
+      // 降级重试：terminal-host 不在时进页自动再连一次，与空态动作钮 running 分派同通路。
       if (!terminalBackendReady) connectTerminalBackend();
     } else if (hostState === "stopped" && manualStop) {
       // 手动关停后回归：本地缓存已失效，清空后落「已停止」页
