@@ -4781,8 +4781,10 @@ async function api(method, path, body) {
   // keypress 两条都要认——内核在 keydown 之后还会吃 keypress，Shift+Enter 的那一条
   // （charCode 13）会被折叠成普通 "\r" 补发，真机上的表现是「先换行、紧接着发送」；
   // Ctrl+Enter 的 keypress 不折叠，所以只有 Shift 侧漏。内核求值 Enter 只保留 Alt，
-  // Ctrl/Shift 被忽略；而 opencode 与 Claude Code 在拿不到 kitty 键盘协议的终端里，
-  // 换行绑定可直接靠 ctrl+j（LF 字节）触发——拦下这类键改定投 "\n" 即它们的换行语义。
+  // Ctrl/Shift 被忽略。拦下这类键改定投换行字节，字节内容按会话端点分派（见
+  // terminalNewlineData）：opencode 与 Claude Code 这类读原始字节流的 Node TUI 在
+  // 拿不到 kitty 键盘协议的终端里，换行绑定可直接靠 ctrl+j（LF 字节）触发；codex
+  // 这类读 Windows 控制台键事件的 TUI 则改发 ESC CR 命中其 alt(Enter) 换行绑定。
   // 拦截与投递分家：这条键任何时候都不许回到内核求值，组字态则只拦不发（见下）。
   function terminalNewlineEnterKey(event) {
     if (!event || (event.type !== "keydown" && event.type !== "keypress")) return false;
@@ -4799,6 +4801,20 @@ async function api(method, path, body) {
   function terminalNewlineDeliveryBlocked(event) {
     if (!event) return false;
     return !!(event.isComposing || event.keyCode === 229 || event.defaultPrevented);
+  }
+
+  // 换行字节按会话端点分派。读原始字节流的 Node TUI（opencode/Claude Code 等）拿
+  // 单字节 LF（ctrl+j 换行语义）；codex 是 Rust/crossterm TUI，从 Windows 控制台读
+  // 键事件，ConPTY 会把 LF 转译成无修饰符的普通 Enter 键事件被当成提交——对 codex
+  // 改发 ESC CR（Alt+Enter 经典编码），ConPTY 产出 Enter+ALT 键事件，命中 codex
+  // 默认 keymap 的 alt(Enter) 换行绑定。绝不能对其它端点发 ESC CR：读原始字节的
+  // TUI 会把它解析成「Esc 再回车」两个字节而误提交。端点识别两条叠加：一键启动的
+  // 会话看 terminal-host 快照携带的 agentId；纯 shell 里手动启动的看归属轮询注入的
+  // agent.endpointId。两条都识别不上（含归属轮询落地前的那一拍）维持 LF——换行
+  // 不生效但不误提交。
+  function terminalNewlineData(session) {
+    const endpointId = session?.agentId || session?.agent?.endpointId || null;
+    return endpointId === "codex" ? "\x1b\r" : "\n";
   }
 
   // 新终端的默认工作目录跟随当前用户主目录，由终端宿主接口给出（谁的机器就是
@@ -5525,11 +5541,12 @@ async function api(method, path, body) {
       // 修饰 Enter 接管为换行：见 terminalNewlineEnterKey 的语义注释。return
       // false 把键从 xterm 内核求值中摘出（keydown 会被折叠成 "\r" 触发提交，
       // keypress 同样会补折叠一次），换行字节只在 keydown 那一次走与键入定投同一条
-      // input POST 通路发单字节 "\n"；组字态与已被兜底转发处理过的那一条按
-      // terminalNewlineDeliveryBlocked 只拦不发，无定投会话（预览态）同样只拦不发。
+      // input POST 通路，字节内容按会话端点分派（terminalNewlineData）；组字态与
+      // 已被兜底转发处理过的那一条按 terminalNewlineDeliveryBlocked 只拦不发，无
+      // 定投会话（预览态）同样只拦不发。
       if (terminalNewlineEnterKey(event)) {
         if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && terminalBoundSessionId !== null) {
-          api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalBoundSessionId)}/input`, { data: "\n" }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+          api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalBoundSessionId)}/input`, { data: terminalNewlineData(terminalSessionFor(terminalBoundSessionId)) }).catch((error) => console.warn("[terminal] input delivery failed:", error));
         }
         return false;
       }
@@ -6725,7 +6742,7 @@ async function api(method, path, body) {
       const newlineEnter = terminalNewlineEnterKey(event);
       if (!newlineEnter && (event.ctrlKey || event.metaKey || event.altKey)) return;
       let data = null;
-      if (newlineEnter) data = "\n";
+      if (newlineEnter) data = terminalNewlineData(terminalSessionFor(activeTerminalPreviewId));
       else if (event.key && event.key.length === 1) data = event.key;
       else if (event.key === "Enter") data = "\r";
       else if (event.key === "Backspace") data = "\x7f";

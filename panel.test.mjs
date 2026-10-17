@@ -7783,13 +7783,13 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
-    const state = { posts: [], eventSources: [], terms: [] };
+    const state = { posts: [], eventSources: [], terms: [], sessions: {} };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
       let terminalEventSource = null;
@@ -7803,6 +7803,9 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       let terminalImeFitPending = false;
       let terminalImeAnchorTextarea = null;
       const terminalFontSize = 13;
+      const terminalBackendReady = true;
+      const terminalBackendSessions = state.sessions;
+      const terminalPreviewSessions = {};
       const host = {};
       const $ = (id) => (id === "terminalXtermHost" ? host : null);
       // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
@@ -7847,7 +7850,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     `)(state);
     return { sandbox, state };
   }
-  const backendSession = (id) => ({ id, label: id, backend: true, shell: {}, output: [] });
+  const backendSession = (id, extra = {}) => ({ id, label: id, backend: true, shell: {}, output: [], ...extra });
   const inputUrls = (state) => state.posts.filter((p) => p.method === "POST" && p.url.includes("/input")).map((p) => p.url);
 
   it("键入只进该 xterm 绑定的会话；A 切 B 后旧实例销毁、B 键入不落 A，会话 C 也不沾边", () => {
@@ -7920,6 +7923,43 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const termB = sandbox.xterm();
     assert.equal(termB.keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true }), false);
     assert.deepEqual(inputUrls(state).slice(2), ["/api/terminal/sessions/sess-b/input"], "换行定投随建连会话走：A 切 B 后落 B，不落旧会话");
+  });
+
+  it("换行字节按会话端点分派：codex 发 ESC CR（Alt+Enter 编码），其余端点与识别不上的会话维持单字节 LF", () => {
+    const { sandbox, state } = streamSandbox();
+    const inputDataFor = (id) => state.posts
+      .filter((p) => p.method === "POST" && p.url.includes("/input") && p.url.includes(id))
+      .map((p) => p.body.data);
+
+    // 一键启动的 codex 会话：terminal-host 快照直接携带 agentId
+    const codexSession = backendSession("sess-codex", { agentId: "codex", agentName: "Codex CLI" });
+    state.sessions[codexSession.id] = codexSession;
+    sandbox.connect(codexSession);
+    assert.equal(sandbox.xterm().keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true }), false);
+    assert.equal(sandbox.xterm().keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true }), false);
+    assert.deepEqual(inputDataFor("sess-codex"), ["\x1b\r", "\x1b\r"],
+      "codex 会话发 ESC CR：ConPTY 转译成 Enter+ALT 键事件，命中 codex 的 alt(Enter) 换行绑定；LF 则会被转译成无修饰符的普通 Enter 被当成提交");
+
+    // 纯 shell 里手动启动的 codex：agentId 为空，靠归属轮询注入的 agent.endpointId 识别
+    const manualCodex = backendSession("sess-manual", { agent: { name: "Codex CLI", endpointId: "codex", instanceId: "codex-24512", pid: 24512 } });
+    state.sessions[manualCodex.id] = manualCodex;
+    sandbox.connect(manualCodex);
+    sandbox.xterm().keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true });
+    assert.deepEqual(inputDataFor("sess-manual"), ["\x1b\r"], "归属检测判 codex 同样发 ESC CR");
+
+    // 读原始字节流的 Node TUI 维持 LF：ESC CR 对它们是「Esc 再回车」两个字节，会被误提交
+    const claudeSession = backendSession("sess-claude", { agentId: "claude", agentName: "Claude Code" });
+    state.sessions[claudeSession.id] = claudeSession;
+    sandbox.connect(claudeSession);
+    sandbox.xterm().keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true });
+    assert.deepEqual(inputDataFor("sess-claude"), ["\n"], "Claude Code/opencode 这类 Node TUI 维持单字节 LF，绝不分派 ESC CR");
+
+    // 识别不上的会话（无 agentId、无归属）维持 LF：换行不生效但不误提交
+    const plainShell = backendSession("sess-shell");
+    state.sessions[plainShell.id] = plainShell;
+    sandbox.connect(plainShell);
+    sandbox.xterm().keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true });
+    assert.deepEqual(inputDataFor("sess-shell"), ["\n"], "识别不上维持 LF（归属轮询落地前的 codex 也走这一支）");
   });
 
   it("兜底转发处理过的修饰 Enter 不重复投字节，但仍拦下内核补折叠", () => {
@@ -8177,6 +8217,8 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
     assert.ok(src, "initTerminalPreview found in panel.js");
     const newlineGate = panelJs.match(/function terminalNewlineEnterKey\(event\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(newlineGate, "terminalNewlineEnterKey found in panel.js");
+    const newlineData = panelJs.match(/function terminalNewlineData\(session\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(newlineData, "terminalNewlineData found in panel.js");
     const state = { posts: [], documentListeners: [], focusCount: 0 };
     const sandbox = new Function("state", `
       let currentView = "terminal";
@@ -8186,7 +8228,12 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       let terminalXterm = null;
       const terminalBackendSessions = {};
       const terminalPreviewSessions = {};
-      const sessions = { "sess-a": { id: "sess-a", backend: true }, "sess-b": { id: "sess-b", backend: true } };
+      const sessions = {
+        "sess-a": { id: "sess-a", backend: true },
+        "sess-b": { id: "sess-b", backend: true },
+        "sess-codex": { id: "sess-codex", backend: true, agentId: "codex", agentName: "Codex CLI" },
+        "sess-manual": { id: "sess-manual", backend: true, agent: { name: "Codex CLI", endpointId: "codex", instanceId: "codex-24512", pid: 24512 } },
+      };
       const document = {
         hidden: false,
         activeElement: null,
@@ -8234,6 +8281,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function setInterval(cb) { return 1; }
       const window = { addEventListener() {}, confirm: () => true };
       ${newlineGate}
+      ${newlineData}
       ${src}
       terminalXterm = { focus() { state.focusCount += 1; } };
       initTerminalPreview();
@@ -8286,6 +8334,23 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
     fire({ key: "Enter" });
     fire({ key: "c", ctrlKey: true });
     assert.deepEqual(inputPosts().slice(2).map((p) => p.body.data), ["\r"], "裸 Enter 照旧 CR 提交，其余 Ctrl 组合键不劫持");
+  });
+
+  it("兜底转发的修饰 Enter 同样按端点分派：codex 会话发 ESC CR，识别不上的维持 LF", () => {
+    const { sandbox, fire, inputPosts } = keydownSandbox();
+    sandbox.document.activeElement = { tagName: "BODY", classList: { contains: () => false } };
+    fire({ key: "Enter", shiftKey: true });
+    sandbox.setActive("sess-codex");
+    fire({ key: "Enter", ctrlKey: true });
+    sandbox.setActive("sess-manual");
+    fire({ key: "Enter", shiftKey: true });
+    assert.deepEqual(inputPosts().map((p) => p.url), [
+      "/api/terminal/sessions/sess-a/input",
+      "/api/terminal/sessions/sess-codex/input",
+      "/api/terminal/sessions/sess-manual/input",
+    ], "三字节各自定投到触发时的活动会话");
+    assert.deepEqual(inputPosts().map((p) => p.body.data), ["\n", "\x1b\r", "\x1b\r"],
+      "无归属的 sess-a 维持 LF；agentId 携带与归属检测判 codex 的两条都发 ESC CR");
   });
 
   it("焦点在其它输入控件（INPUT/TEXTAREA）或 xterm 自持输入框时不劫持", () => {
