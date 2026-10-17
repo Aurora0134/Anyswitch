@@ -1652,25 +1652,6 @@
   /* 关闭叉放大一号并垫出命中区：负外边距抵消内边距，字形位置与行内布局不动。 */
   .terminal-tab-close { flex: none; margin: -3px -5px; padding: 3px 5px; color: var(--text-4); font-size: 18px; line-height: 1; opacity: .5; }
   .terminal-tab:hover .terminal-tab-close, .terminal-tab.active .terminal-tab-close { opacity: 1; }
-  /* ── 页签拖拽分列（M5）：全部纯视觉、零文案。预览/幻影用 fixed 定位挂 body，
-     不给 .terminal-workspace 加定位上下文（单列 DOM 与视觉与现状逐点一致）。
-     过渡动画由全局 reduced-motion 杀开关兜成即时，JS 侧另有
-     terminalTabDragReducedMotion 跳过两帧展开。 */
-  /* 跟随幻影：源页签克隆体，随指针走、不吃事件 */
-  .terminal-tab-drag-ghost { position: fixed; left: 0; top: 0; z-index: 300; pointer-events: none; opacity: .92; }
-  .terminal-tab-drag-ghost .terminal-tab { width: 100%; height: 100%; box-shadow: var(--shadow-lg); cursor: grabbing; }
-  /* 禁投（已达 3 列上限还悬在开新列落点上）：幻影转 danger 描边 */
-  .terminal-tab-drag-ghost.is-forbidden .terminal-tab { border-color: var(--danger-border); box-shadow: 0 0 0 2px var(--danger-glow); cursor: not-allowed; }
-  /* 源页签留位降透明（拖拽中被轮询重渲渲回常色也无碍，幻影仍跟随） */
-  .terminal-tab.is-drag-source { opacity: .45; }
-  /* 落点占位预览（开新列）：落点处展开，宽度动画到等分预览宽 */
-  .terminal-tab-drop-preview {
-    position: fixed; z-index: 290; pointer-events: none;
-    background: var(--accent-soft); border: 1px dashed var(--accent-border); border-radius: var(--radius-md, 8px);
-    transition: left 180ms var(--ease-out), width 180ms var(--ease-out);
-  }
-  /* 落点预览（移入既有列）：目标列页签条描边 */
-  .terminal-tabs-bar.is-drop-target { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-soft); }
   .terminal-add-btn { flex: none; width: 30px; height: 30px; margin-top: 4px; }
   .terminal-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
   /* 「+」新建菜单：选一个已安装的 CLI Agent（或空白终端）+ 工作目录。
