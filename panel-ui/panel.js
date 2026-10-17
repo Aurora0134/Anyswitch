@@ -4792,6 +4792,10 @@ async function api(method, path, body) {
     }
     const tabs = pane.querySelector(".terminal-tabs");
     if (tabs) tabs.innerHTML = "";
+    // xterm 宿主必须清空：列 0 有活终端时克隆会把整份 xterm DOM 深拷进新列，
+    // 而 xterm.open 是纯 appendChild 不清宿主——两份 height:100% 的 .xterm 并存，
+    // 幽灵终端会把活终端顶出 overflow:auto 的屏（M4-r1 B1）。
+    pane.querySelector(".terminal-xterm-host")?.replaceChildren();
     for (const sel of [".terminal-session-name", ".terminal-session-path", ".terminal-session-branch", ".terminal-shell-label"]) {
       const el = pane.querySelector(sel);
       if (el) el.textContent = "";

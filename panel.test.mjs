@@ -8498,6 +8498,10 @@ describe("终端多列布局与列管理（M4）", () => {
             el.parent = null;
           }
         },
+        replaceChildren(...nodes) {
+          for (const c of [...el.children]) c.remove();
+          for (const n of nodes) el.appendChild(n);
+        },
         cloneNode(deep) {
           const copy = fakeEl(el.tagName, [...el.classes]);
           copy.id = el.id; copy.attrs = { ...el.attrs }; copy.hidden = el.hidden;
@@ -8540,6 +8544,8 @@ describe("终端多列布局与列管理（M4）", () => {
     const sessionName = sessionBar.appendChild(fakeEl("span", ["terminal-session-name"])); sessionName.id = "terminalSessionName"; sessionName.textContent = "旧会话名";
     const screen = pane0.appendChild(fakeEl("div", ["terminal-screen"])); screen.id = "terminalScreen";
     const host = screen.appendChild(fakeEl("div", ["terminal-xterm-host"])); host.id = "terminalXtermHost";
+    // 列 0 有活终端：宿主里躺着整份 xterm DOM（M4-r1 B1 的回归现场）
+    host.appendChild(fakeEl("div", ["xterm"]));
     const fontValue = pane0.appendChild(fakeEl("span", ["terminal-font-value"])); fontValue.id = "terminalFontSizeValue"; fontValue.textContent = "13";
     const workspace = fakeEl("div"); workspace.id = "terminalWorkspace";
     workspace.appendChild(pane0);
@@ -8608,6 +8614,8 @@ describe("终端多列布局与列管理（M4）", () => {
     assert.equal(newPane.querySelector("#terminalTabs-c1").innerHTML, "", "克隆带过来的页签清空");
     assert.equal(newPane.querySelector("#terminalSessionName-c1").textContent, "", "会话文案清空");
     assert.equal(newPane.querySelector("#terminalAddMenu-c1").hidden, true, "克隆带过来的菜单收起");
+    assert.equal(newPane.querySelector(".terminal-xterm-host").children.length, 0,
+      "xterm 宿主清空：活终端的 xterm DOM 不得克隆进新列（xterm.open 纯 append，幽灵终端会把活终端顶出屏）");
     assert.equal(newPane.querySelector("[for]").getAttribute("for"), "terminalAddMenuCwd-c1", "label for 同步换后缀");
     assert.ok(workspace.children[0].querySelector("#terminalXtermHost"), "列 0 基名 id 原样");
 
