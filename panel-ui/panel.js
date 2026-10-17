@@ -4688,6 +4688,10 @@ async function api(method, path, body) {
       // 组字事件的列绑定形态：监听挂/摘按引用配对，闭包把列固进回调。
       imeArmHandler: null,
       imeReleaseHandler: null,
+      // 底部自动对齐（installTerminalBottomAlign）：最近一次用户上滚意图时间戳与
+      // 已排队的裁剪帧。状态挂列对象保多列语义——动作只作用本列的外层滚动盒。
+      bottomAlignIntentAt: 0,
+      bottomAlignTrimFrame: null,
     };
   }
   const terminalColumns = [createTerminalColumn("terminalXtermHost")];
@@ -5568,6 +5572,52 @@ async function api(method, path, body) {
     });
   }
 
+  // 底部自动对齐（设置 terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm
+  // 渲染层旧高度溢出宿主盒、被外层 .terminal-screen 的 overflow:auto 接住，形成底部可
+  // 滚入的空白带（CDP 取证：收窗期实测 263–353px 可滚余量，寿命跟随错配期而非瞬态；
+  // 内层 .xterm-viewport 全程贴底恒等，空白不在 buffer 层）。开启后用户上滚翻看历史
+  // （wheel 上滚 / Shift+PageUp，与跳顶护栏同一 term root capture 事件面，不在
+  // .terminal-screen 上另挂 wheel）即把外层 scrollTop 收 0 吃掉带子；外层滚动事件流内
+  // 带意图时效窗同做收带（滚动事件无标记，裸信会把布局抖动误判成用户意图）。动作只写
+  // 外层 scrollTop，绝不写 .xterm-viewport、绝不调 scrollToBottom/scrollToLines（内层
+  // 滚动权属 xterm 内核与护栏）。外层自然停靠位即 0（有效底部语义：带收掉后滚动链终点
+  // = 内容底），「再滚回底部恰好对齐」自动成立。
+  const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = 4;
+  function installTerminalBottomAlign(column, term) {
+    const root = term.element;
+    if (!root) return;
+    const screen = $(terminalColumnElementId(column, "terminalScreen"));
+    if (!screen) return;
+    const trimOuterBand = () => {
+      column.bottomAlignTrimFrame = null;
+      if (!terminalBottomAlignEnabled()) return;
+      if (column.imeHold) return;             // 组字期不动几何
+      if ($("terminalView")?.hidden) return;  // 隐藏期不量不动
+      const gap = screen.scrollHeight - screen.clientHeight;
+      if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX) return;  // 无带/行高取整残余不动
+      if (screen.scrollTop <= 0) return;                     // 幂等闸：已在停靠位零写
+      screen.dataset.bottomAlignTrim = String(gap);          // 调试属性（取证用）
+      screen.scrollTop = 0;
+    };
+    const scheduleTrim = () => {
+      if (column.bottomAlignTrimFrame !== null) return;
+      column.bottomAlignTrimFrame = requestAnimationFrame(trimOuterBand);
+    };
+    const noteUpIntent = () => {
+      column.bottomAlignIntentAt = Date.now();
+      scheduleTrim();
+    };
+    root.addEventListener("wheel", (event) => { if (event.deltaY < 0) noteUpIntent(); }, { capture: true, passive: true });
+    root.addEventListener("keydown", (event) => {
+      if (event.shiftKey && event.key === "PageUp") noteUpIntent();
+    }, { capture: true, passive: true });
+    // 滚动事件流内逐步收：带内滚动（滚轮到底后链入外层）在意图时效窗内即收——
+    // 任何滚速下带子随滚动逐拍消失，视口内容不跳。
+    screen.addEventListener("scroll", () => {
+      if (Date.now() - column.bottomAlignIntentAt <= TERMINAL_SCROLL_INTENT_MS) scheduleTrim();
+    }, { passive: true });
+  }
+
   function ensureTerminalXterm(column) {
     const host = $(column.hostElementId);
     if (!host || column.xterm || !window.Terminal) return column.xterm;
@@ -5621,6 +5671,7 @@ async function api(method, path, body) {
     }
     term.open(host);
     installTerminalFollowBottomGuard(term);
+    installTerminalBottomAlign(column, term);
     if (window.WebglAddon?.WebglAddon) {
       try {
         column.webglAddon = new window.WebglAddon.WebglAddon();
