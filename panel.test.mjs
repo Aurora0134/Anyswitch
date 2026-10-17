@@ -8842,6 +8842,230 @@ describe("终端多列布局与列管理（M4）", () => {
   });
 });
 
+// 页签拖拽分列（M5）：多列的用户入口。pointer-based 拖拽——页签条是 innerHTML
+// 指纹门控重渲，拖拽中 1s 轮询的状态点变化即可重写页签 DOM，HTML5 DnD 会话会随
+// 被拖元素销毁而崩；pointer 方案的移动/抬起监听挂 window，与页签 DOM 生命周期
+// 解耦（选型验证结论同此，见 mission 进展笔记）。落点语义（用户拍板）：拖到某列
+// 页签条→会话移入该列；拖到列间缝隙/左右边缘→该位置插新列；拖回本列→无操作；
+// 3 列上限时开新列落点禁投（纯视觉、零文案）。状态机与落点执行抽真码进桩环境
+// 真跑；幻影/预览的动画观感留用户目检。
+describe("终端页签拖拽分列（M5）", () => {
+  function extractM5(name) {
+    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
+
+  it("选型与接线：pointer-based（页签不挂 HTML5 DnD），位移门常量就位，列 0 与新增列都接线", () => {
+    const render = extractM5("renderTerminalColumnTabs");
+    assert.ok(!render.includes("draggable"), "页签不挂 draggable——不走 HTML5 DnD（拖拽中指纹重渲销毁被拖元素即杀会话）");
+    assert.ok(!render.includes("dragstart"), "页签渲染不出现 dragstart");
+    assert.ok(/const TERMINAL_TAB_DRAG_THRESHOLD_PX = \d+;/.test(panelJs), "点击/拖拽位移门常量就位");
+    assert.ok(/const TERMINAL_TAB_DROP_EDGE_PX = \d+;/.test(panelJs), "缝隙/边缘命中带宽常量就位");
+    const wire = extractM5("wireTerminalTabDrag");
+    assert.ok(wire.includes('"pointerdown"'), "拖拽从页签条 pointerdown 起步");
+    assert.ok(wire.includes(".terminal-tab-close"), "× 关闭钮不起步拖拽");
+    assert.ok(wire.includes("Escape"), "Esc 中止拖拽");
+    const colWire = extractM5("wireTerminalColumnControls");
+    assert.ok(colWire.includes("wireTerminalTabDrag(column)"), "新增列接线含拖拽");
+    const init = extractM5("initTerminalPreview");
+    assert.ok(init.includes("wireTerminalTabDrag(terminalColumns[0])"), "列 0 接线含拖拽");
+    const click = extractM5("handleTerminalTabsClick");
+    assert.ok(click.includes("terminalTabDragSuppressClick"), "拖拽落地后的尾随 click 被吞（不是切签意图）");
+    const end = extractM5("endTerminalTabDrag");
+    assert.ok(end.includes("terminalTabDragSuppressClick = true"), "拖拽落地立吞 click 旗");
+  });
+
+  it("落点判定状态机：页签条→移入/本列 noop，缝隙与左右边缘→插新列，列体与界外→无落点", () => {
+    const EDGE = Number(panelJs.match(/const TERMINAL_TAB_DROP_EDGE_PX = (\d+);/)?.[1]);
+    assert.ok(EDGE > 0, "命中带宽可从 panel.js 取到（测试不抄数字）");
+    const classify = new Function(`
+      const TERMINAL_TAB_DROP_EDGE_PX = ${EDGE};
+      ${extractM5("classifyTerminalTabDrop")}
+      return classifyTerminalTabDrop;
+    `)();
+    // 两列：列 0 [100,500]、列 1 [501,900]，页签条在各列顶部 [0,54]
+    const panes = [
+      { left: 100, right: 500, top: 0, bottom: 600, tabsBar: { left: 100, right: 500, top: 0, bottom: 54 } },
+      { left: 501, right: 900, top: 0, bottom: 600, tabsBar: { left: 501, right: 900, top: 0, bottom: 54 } },
+    ];
+    assert.deepEqual(classify(700, 20, panes, 0), { kind: "move-into", columnIndex: 1 }, "拖到列 1 页签条 → 移入列 1");
+    assert.deepEqual(classify(300, 20, panes, 0), { kind: "noop" }, "拖回本列页签条 → 无操作");
+    assert.deepEqual(classify(501, 300, panes, 0), { kind: "new-column", at: 1 }, "列间缝隙 → 在该位插新列");
+    assert.deepEqual(classify(100, 300, panes, 0), { kind: "new-column", at: 0 }, "左边缘 → 在最前插新列");
+    assert.deepEqual(classify(900, 300, panes, 0), { kind: "new-column", at: 2 }, "右边缘 → 在末尾插新列");
+    assert.deepEqual(classify(300, 300, panes, 0), null, "列体（非页签条非边缘带）→ 无落点");
+    assert.deepEqual(classify(300, 700, panes, 0), null, "纵越界 → 无落点");
+    assert.deepEqual(classify(900 + EDGE + 5, 300, panes, 0), null, "横越出边缘带 → 无落点");
+    // 页签条优先于边缘带：点落在列 0 页签条且 x 在左边缘带内 → 仍按页签条语义
+    assert.deepEqual(classify(104, 20, panes, 1), { kind: "move-into", columnIndex: 0 }, "页签条命中优先于边缘带");
+    // 单列：右边缘即分列入口；拖回本列页签条无操作
+    const single = [panes[0]];
+    assert.deepEqual(classify(500, 300, single, 0), { kind: "new-column", at: 1 }, "单列右边缘 → 分成两列");
+    assert.deepEqual(classify(300, 20, single, 0), { kind: "noop" }, "单列拖回本列页签条 → 无操作");
+  });
+
+  // 落点执行沙箱：M4 列管理链 + commitTerminalTabDrop，无 DOM（$ 全 null 走跳过分支）
+  function m5DropApi({ sessions = {} } = {}) {
+    const chain = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
+      "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
+      "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
+      "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
+      "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn",
+      "commitTerminalTabDrop"].map(extractM5).join("\n");
+    const store = {};
+    const api = new Function("sessions", "store", `
+      const $ = () => null;
+      const terminalFontSize = 13;
+      const terminalTabsHidden = false;
+      const terminalSessionColumnIndexes = new Map();
+      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
+      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      terminalColumns[0].activeSessionId = "s1";
+      let terminalFocusedColumnIndex = 0;
+      const terminalPreviewSessions = {};
+      let terminalBackendReady = true;
+      let terminalBackendSessions = sessions;
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      function terminalSessionMap() { return terminalBackendSessions; }
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalSessionData() {}
+      function syncTerminalAddBtn() {}
+      function scheduleTerminalFit() {}
+      function wireTerminalColumnControls() {}
+      ${chain}
+      return { terminalColumns, commitTerminalTabDrop, addTerminalColumn, terminalSessionColumnIndex };
+    `)(sessions, store);
+    return { api, store };
+  }
+
+  it("落点执行：插新列 / 移入既有列 / 本列与无落点不动 / 超限禁投 / 源列空自动收", () => {
+    // 插新列：单列两会话，拖 s2 到右边缘 → 两列，s2 归新列且为活跃
+    {
+      const { api, store } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" } } });
+      api.commitTerminalTabDrop("s2", { kind: "new-column", at: 1, forbidden: false });
+      assert.equal(api.terminalColumns.length, 2, "落点插入新列");
+      assert.equal(api.terminalSessionColumnIndex("s2"), 1, "拖入会话归新列");
+      assert.equal(api.terminalColumns[1].activeSessionId, "s2", "拖入即新列活跃页签");
+      assert.equal(JSON.parse(store["panel-terminal-columns"]).columns.length, 2, "布局落盘");
+    }
+    // 移入既有列：不开新列；源列还有剩 → 不收
+    {
+      const { api } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" } } });
+      const colB = api.addTerminalColumn({ sessionIds: ["s3"] });
+      api.commitTerminalTabDrop("s2", { kind: "move-into", column: colB });
+      assert.equal(api.terminalColumns.length, 2, "移入既有列不开新列");
+      assert.equal(api.terminalSessionColumnIndex("s2"), 1, "s2 移入列 1");
+      assert.equal(colB.activeSessionId, "s2", "拖入即目标列活跃");
+      assert.equal(api.terminalSessionColumnIndex("s1"), 0, "源列剩余会话不动");
+    }
+    // 源列最后会话被拖走 → 源列自动收
+    {
+      const { api } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" } } });
+      api.addTerminalColumn({ sessionIds: ["s2"] });
+      api.commitTerminalTabDrop("s2", { kind: "move-into", column: api.terminalColumns[0] });
+      assert.equal(api.terminalColumns.length, 1, "列内最后会话被拖走 → 列自动收掉");
+      assert.equal(api.terminalSessionColumnIndex("s2"), 0, "s2 归剩余列");
+    }
+    // 本列 / 无落点：结构不动
+    {
+      const { api } = m5DropApi({ sessions: { s1: { id: "s1" } } });
+      api.commitTerminalTabDrop("s1", { kind: "noop" });
+      api.commitTerminalTabDrop("s1", null);
+      assert.equal(api.terminalColumns.length, 1, "本列与无落点都不动列结构");
+      assert.equal(api.terminalSessionColumnIndex("s1"), 0, "会话归属不动");
+    }
+    // 超限禁投：3 列时开新列落点（禁投标记或临场撞上限）都不动结构
+    {
+      const { api } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" }, s4: { id: "s4" } } });
+      api.addTerminalColumn({ sessionIds: ["s2"] });
+      api.addTerminalColumn({ sessionIds: ["s3"] });
+      assert.equal(api.terminalColumns.length, 3, "铺满 3 列");
+      api.commitTerminalTabDrop("s1", { kind: "new-column", at: 1, forbidden: true });
+      assert.equal(api.terminalColumns.length, 3, "禁投落点不动结构");
+      api.commitTerminalTabDrop("s1", { kind: "new-column", at: 1, forbidden: false });
+      assert.equal(api.terminalColumns.length, 3, "临场撞上限（addTerminalColumn 返 null）同样不动结构");
+      assert.equal(api.terminalSessionColumnIndex("s1"), 0, "会话归属不动");
+    }
+  });
+
+  it("位移门与点击兼容：未过门不启动（点击/×/横滚不误伤），过门只激活一次；尾随 click 吞一次即清", () => {
+    const THRESHOLD = Number(panelJs.match(/const TERMINAL_TAB_DRAG_THRESHOLD_PX = (\d+);/)?.[1]);
+    assert.ok(THRESHOLD > 0, "位移门常量可从 panel.js 取到（测试不抄数字）");
+    const state = { activations: 0, previews: 0, ghosts: 0, targets: 0 };
+    const sandbox = new Function("state", "THRESHOLD", `
+      const TERMINAL_TAB_DRAG_THRESHOLD_PX = THRESHOLD;
+      let terminalTabDrag = {
+        sessionId: "s1", sourceIndex: 0, pointerId: 7,
+        startX: 100, startY: 100, active: false, target: null,
+      };
+      function activateTerminalTabDrag(drag) { state.activations += 1; drag.active = true; }
+      function terminalTabDropTargetAt() { state.targets += 1; return null; }
+      function syncTerminalTabDropPreview() { state.previews += 1; }
+      function moveTerminalTabDragGhost() { state.ghosts += 1; }
+      ${extractM5("onTerminalTabDragMove")}
+      return { move: onTerminalTabDragMove };
+    `)(state, THRESHOLD);
+    sandbox.move({ pointerId: 9, clientX: 400, clientY: 400 });
+    assert.equal(state.activations, 0, "别的指针的 move 不启动拖拽");
+    sandbox.move({ pointerId: 7, clientX: 102, clientY: 101 });
+    assert.equal(state.activations, 0, "位移未过门不启动（点击原地不动）");
+    assert.equal(state.targets, 0, "未启动不算落点");
+    assert.equal(state.previews, 0, "未启动不出预览");
+    sandbox.move({ pointerId: 7, clientX: 100 + THRESHOLD + 1, clientY: 100 });
+    assert.equal(state.activations, 1, "位移过门启动拖拽");
+    assert.equal(state.previews, 1, "启动即算一次落点预览");
+    sandbox.move({ pointerId: 7, clientX: 300, clientY: 300 });
+    assert.equal(state.activations, 1, "已启动不重复激活");
+
+    // 尾随 click：吞一次且清旗，之后正常切签
+    const clicks = [];
+    const clickSandbox = new Function("clicks", `
+      let terminalTabDragSuppressClick = true;
+      function terminalSessionFor(id) { return { id }; }
+      function setTerminalFocusedColumn() {}
+      function rememberTerminalSessionId() {}
+      function persistTerminalColumns() {}
+      function renderTerminalPreviewSession() { clicks.push("render"); }
+      ${extractM5("handleTerminalTabsClick")}
+      return { handle: handleTerminalTabsClick, flag: () => terminalTabDragSuppressClick };
+    `)(clicks);
+    const column = { activeSessionId: "old" };
+    const event = { target: { closest: (sel) => (sel === "[data-terminal-tab]" ? { dataset: { terminalTab: "s9" } } : null) } };
+    clickSandbox.handle(column, event);
+    assert.equal(column.activeSessionId, "old", "拖拽落地的尾随 click 被吞：不切签");
+    assert.equal(clickSandbox.flag(), false, "吞完清旗（click 万一没派发也不蚀下一次）");
+    clickSandbox.handle(column, event);
+    assert.equal(column.activeSessionId, "s9", "下一次正常点击照常切签");
+  });
+
+  it("预览与降级：幻影/占位预览/禁投/移入描边样式就位；reduced-motion 跳过展开过渡", () => {
+    const activate = extractM5("activateTerminalTabDrag");
+    assert.ok(activate.includes("terminal-tab-drag-ghost"), "拖拽启动建跟随幻影");
+    assert.ok(activate.includes("is-drag-source"), "源页签半透明留位");
+    const preview = extractM5("syncTerminalTabDropPreview");
+    assert.ok(preview.includes("terminal-tab-drop-preview"), "开新列落点建占位预览");
+    assert.ok(preview.includes("is-drop-target"), "移入既有列落点描边目标页签条");
+    assert.ok(preview.includes("is-forbidden"), "超限禁投反馈（纯视觉、零文案）");
+    assert.ok(preview.includes("terminalTabDragReducedMotion()"), "reduced-motion 时跳过两帧展开过渡、直落终态");
+    const motion = extractM5("terminalTabDragReducedMotion");
+    assert.ok(motion.includes("prefers-reduced-motion: reduce"), "降级读系统 reduced-motion 偏好");
+    assert.ok(/\.terminal-tab-drop-preview \{[^}]*transition:[^}]*width/.test(panelCss), "占位预览带宽度过渡动画");
+    assert.ok(panelCss.includes(".terminal-tabs-bar.is-drop-target"), "移入落点描边样式就位");
+    assert.ok(panelCss.includes(".terminal-tab-drag-ghost"), "幻影样式就位");
+    assert.ok(panelCss.includes(".terminal-tab-drag-ghost.is-forbidden"), "禁投样式就位");
+    assert.ok(panelCss.includes(".terminal-tab.is-drag-source"), "源页签留位样式就位");
+    assert.ok(panelCss.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"),
+      "全局 reduced-motion 杀开关原样（预览过渡被兜成即时）");
+  });
+});
+
 // 跳顶回归钉（跟随底部护栏）：渲染尺寸同步的瞬时塌缩会让浏览器把 .xterm-viewport
 // 的 scrollTop 钳回原位并派发无标记 scroll 事件，xterm 把它当用户滚动写进 ydisp，
 // 视口自此脱离底部卡死在接近顶端（实测：建流回放+输出洪峰窗口内 scrollTop 从底部
