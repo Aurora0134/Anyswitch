@@ -5273,9 +5273,13 @@ async function api(method, path, body) {
     if (target.kind === "new-column" && !target.forbidden) {
       const column = addTerminalColumn({ at: target.at });
       if (column) {
-        moveTerminalSessionToColumn(sessionId, column);
-        setTerminalFocusedColumn(column);
-        settleTerminalColumnsAfterDrop();
+        if (moveTerminalSessionToColumn(sessionId, column)) {
+          setTerminalFocusedColumn(column);
+          settleTerminalColumnsAfterDrop();
+        } else {
+          // 会话在拖拽途中消失：新列空转——当拍收掉，否则焦点落空列，整渲会闪整页空态
+          collapseEmptyTerminalColumns();
+        }
       }
     }
   }

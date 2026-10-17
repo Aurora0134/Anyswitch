@@ -9001,6 +9001,13 @@ describe("终端页签拖拽分列（M5）", () => {
       assert.equal(api.terminalColumns.length, 1, "本列与无落点都不动列结构");
       assert.equal(api.terminalSessionColumnIndex("s1"), 0, "会话归属不动");
     }
+    // 会话在拖拽途中消失（别处关掉/进程退出）：开新列落点收掉空转的新列，不留脏列
+    {
+      const { api, store } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" } } });
+      api.commitTerminalTabDrop("s-gone", { kind: "new-column", at: 1, forbidden: false });
+      assert.equal(api.terminalColumns.length, 1, "落点会话已消失：空转新列当拍收掉（否则焦点列空指针会闪整页空态）");
+      assert.equal(JSON.parse(store["panel-terminal-columns"]).columns.length, 1, "存档不留空列");
+    }
     // 超限禁投：3 列时开新列落点（禁投标记或临场撞上限）都不动结构
     {
       const { api } = m5DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" }, s4: { id: "s4" } } });
