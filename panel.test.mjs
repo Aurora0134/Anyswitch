@@ -9871,7 +9871,8 @@ describe("看板活跃真值应用（boardActivityApplyFrame）", () => {
 // 降级路径收口：terminal-host 不可达（面板路由 503 terminal_host_unavailable / fetch
 // 直接失败）时，终端页不再把 mock 假会话（假指标/假路由/假请求/假横幅）端给用户，
 // 改给真空态——xterm 区盖空态覆盖层、监测区沿用 hidden 通路、「+」禁用；
-// 重试走空态「重新连接」与进页自动重试。判定键是就绪位本身，不是会话数（零会话是
+// 重试走空态动作钮（按宿主现态分派：running 重连 / stopped·exited 拉起 / unknown 提示
+// 侧栏）与进页自动重试。判定键是就绪位本身，不是会话数（零会话是
 // 就绪下的合法空态，不是降级）；backend 中途死掉的轮询不动就绪位，仍保上一帧。
 describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）", () => {
   function extractFn(name) {
@@ -9893,6 +9894,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     const catchBranch = connect.slice(connect.indexOf(".catch("));
     assert.ok(catchBranch.includes("terminalBackendReady = false"), "失败分支置回未就绪");
     assert.ok(catchBranch.includes("renderTerminalUnavailableState();"), "失败分支必调空态渲染");
+    assert.ok(catchBranch.includes("renderTerminalStoppedState();"), "失败分支按宿主现态分派：已停落「已停止」页，不拿「未运行」页顶掉");
   });
 
   it("源钉死：终端区静态直出 pending 骨架，设计稿假页签从 HTML 退场", () => {
@@ -9927,8 +9929,14 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.ok(unavailable.includes("addBtn.disabled = true"), "落空态即禁用「+」，不再产假会话");
     const open = extractFn("openTerminalPreview");
     assert.ok(open.includes("if (!terminalBackendReady) connectTerminalBackend();"), "进页未就绪自动重试一次");
-    assert.ok(panelJs.includes('$("terminalRetryBtn").onclick = () => connectTerminalBackend();'),
-      "空态「重新连接」重跑 fetch 成功链路");
+    assert.ok(panelJs.includes('$("terminalRetryBtn").onclick = () => dispatchTerminalUnavailableAction();'),
+      "空态动作钮静态绑定走宿主现态分派，不再无脑重跑 fetch");
+    assert.ok(unavailable.includes("dispatchTerminalUnavailableAction()"), "空态渲染写入同一分派");
+    assert.ok(unavailable.includes('retryBtn.textContent = "启动服务"'), "空态动作钮文案为「启动服务」");
+    assert.ok(unavailable.includes("终端服务当前未在运行，点击下方按钮即可启动。"), "空态说明指向动作钮");
+    const autoStart = extractFn("autoStartTerminalHost");
+    assert.ok(autoStart.includes("renderTerminalStoppedState();"),
+      "自动拉起失败落带「启动服务」动作的「已停止」页，不留死按钮页");
     const render = extractFn("renderTerminalPreviewSession");
     assert.ok(render.includes("terminalBackendReady === false"), "降级闸判定键是就绪位，不是会话数");
     assert.ok(render.includes("if (!terminalFirstConnectSettled) renderTerminalPendingState();"),
@@ -9948,8 +9956,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.ok(screen.indexOf('id="terminalUnavailable"') > screen.indexOf('id="terminalXtermHost"'),
       "覆盖层在 xterm 宿主之后，同容器内天然压在上层");
     assert.ok(screen.includes("终端服务未运行"), "空态标题就位");
-    assert.ok(screen.includes("终端服务随 relay 一同启动，relay 运行后即可使用。"), "空态说明就位");
-    assert.ok(screen.includes('id="terminalRetryBtn"') && screen.includes("重新连接"), "空态重试按钮就位");
+    assert.ok(screen.includes("终端服务当前未在运行，点击下方按钮即可启动。"), "空态说明就位");
+    assert.ok(screen.includes('id="terminalRetryBtn"') && screen.includes("启动服务"), "空态动作钮就位");
     assert.ok(panelHtml.includes('id="terminalEmpty" hidden'), "零会话空态覆盖层默认 hidden");
     assert.ok(screen.includes("当前没有终端"), "零会话空态标题就位");
     assert.ok(screen.includes("点上方「+」新建一个终端，就能在这里运行 CLI Agent。"), "零会话空态说明就位");
@@ -9963,10 +9971,13 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
   function unavailableSandbox() {
     const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "renderTerminalEmptyState",
       "clearTerminalEmptyState", "setTerminalSessionChromeVisible", "renderTerminalPendingState",
-      "syncTerminalAddBtn", "connectTerminalBackend"]
+      "syncTerminalAddBtn", "connectTerminalBackend", "renderTerminalStoppedState"]
       .map(extractFn).join("\n");
     const els = {
       terminalUnavailable: { hidden: true },
+      terminalUnavailableTitle: { textContent: "" },
+      terminalUnavailableDesc: { hidden: false, textContent: "" },
+      terminalRetryBtn: { hidden: false, textContent: "", onclick: null },
       terminalEmpty: { hidden: true },
       terminalMetricsSection: { hidden: false },
       terminalFootStats: { hidden: false },
@@ -9990,6 +10001,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       // 默认按「首连已定性」起沙盒：既有降级三态测的是失败之后的画面；
       // 首连在飞那一态由 setSettled(false) 单独摆出来。
       let terminalFirstConnectSettled = true;
+      // 失败兜底按宿主现态分派落页（connectTerminalBackend catch 读它）
+      let terminalHostState = "unknown";
       const activeTerminalPreviewId = "t1";
       const currentView = "terminal";
       const console = { warn: () => {} };
@@ -10016,6 +10029,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
         ready: () => terminalBackendReady,
         setSettled: (v) => { terminalFirstConnectSettled = v; },
         settled: () => terminalFirstConnectSettled,
+        setHostState: (v) => { terminalHostState = v; },
       };
     `)(els, state);
     return { sandbox, els, state };
@@ -10196,6 +10210,102 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(sandbox.ready(), false, "失败仍是未就绪");
     assert.equal(els.terminalUnavailable.hidden, false, "定性失败落降级空态");
     assert.equal(els.terminalEmpty.hidden, true, "降级空态优先于零会话空态");
+  });
+
+  it("vm 真跑空态动作钮分派：running 重连 / stopped·exited 拉起 / unknown 提示侧栏", async () => {
+    // 「未运行」页动作钮不再无脑 connectTerminalBackend：先现取宿主状态再分派。
+    // unknown 含 relay 不可达（host/status 路由回 200 state:"unknown"）与请求本身失败。
+    const dispatch = extractFn("dispatchTerminalUnavailableAction");
+    const norm = extractFn("normalizeTerminalHostState");
+    async function runCase(apiImpl) {
+      const state = { connected: 0, started: 0, toasts: [] };
+      const run = new Function("state", "api", `
+        function connectTerminalBackend() { state.connected += 1; }
+        function startTerminalHost() { state.started += 1; }
+        function toast(msg) { state.toasts.push(msg); }
+        ${norm}
+        ${dispatch}
+        return dispatchTerminalUnavailableAction();
+      `)(state, apiImpl);
+      await run;
+      return state;
+    }
+    const running = await runCase(async () => ({ state: "running" }));
+    assert.equal(running.connected, 1, "running → 重连后端");
+    assert.equal(running.started, 0, "running 不重复拉起");
+    assert.equal(running.toasts.length, 0, "running 无提示");
+    const stopped = await runCase(async () => ({ state: "stopped" }));
+    assert.equal(stopped.started, 1, "stopped → 走启动通路");
+    assert.equal(stopped.connected, 0, "stopped 不空连");
+    const exited = await runCase(async () => ({ state: "crashed" }));
+    assert.equal(exited.started, 1, "exited（relay 细分词 crashed 归一）→ 走启动通路");
+    const unknown = await runCase(async () => ({ state: "unknown" }));
+    assert.equal(unknown.connected + unknown.started, 0, "unknown 不动手（启动 relay 归侧栏）");
+    assert.equal(unknown.toasts.length, 1, "unknown 给出可执行提示");
+    assert.ok(unknown.toasts[0].includes("Relay 未在运行") && unknown.toasts[0].includes("左侧栏"),
+      "提示指向侧栏 relay 启动钮");
+    const unreachable = await runCase(async () => { throw new Error("network"); });
+    assert.equal(unreachable.toasts.length, 1, "状态请求本身失败同按 unknown 提示");
+    assert.equal(unreachable.connected + unreachable.started, 0, "请求失败不动手");
+  });
+
+  it("vm 真跑连接失败兜底：宿主已停落「已停止」页，unknown 才落「未运行」页", async () => {
+    const { sandbox, els } = unavailableSandbox();
+    sandbox.setHostState("stopped");
+    await sandbox.connect();
+    assert.equal(els.terminalUnavailableTitle.textContent, "终端服务已停止", "已停落「已停止」页，不被「未运行」页顶掉");
+    assert.equal(els.terminalRetryBtn.textContent, "启动终端服务", "兜底页带启动动作");
+    sandbox.setHostState("unknown");
+    await sandbox.connect();
+    assert.equal(els.terminalUnavailableTitle.textContent, "终端服务未运行", "unknown 落「未运行」页");
+    assert.equal(els.terminalRetryBtn.textContent, "启动服务", "「未运行」页动作钮文案");
+    assert.equal(els.terminalUnavailableDesc.textContent, "终端服务当前未在运行，点击下方按钮即可启动。", "「未运行」页说明指向动作钮");
+  });
+
+  it("vm 真跑自动拉起失败兜底：落带启动动作的页，不留死按钮页", async () => {
+    const bodies = ["autoStartTerminalHost", "normalizeTerminalHostState", "renderTerminalUnavailableState",
+      "renderTerminalStoppedState", "setTerminalSessionChromeVisible"].map(extractFn).join("\n");
+    const els = {
+      terminalUnavailable: { hidden: true },
+      terminalUnavailableTitle: { textContent: "" },
+      terminalUnavailableDesc: { hidden: false, textContent: "" },
+      terminalRetryBtn: { hidden: false, textContent: "", onclick: null },
+      terminalEmpty: { hidden: true },
+      terminalMetricsSection: { hidden: false },
+      terminalFootStats: { hidden: false },
+      terminalAddBtn: { disabled: false },
+      terminalTabs: { innerHTML: "" },
+      terminalWorkspace: { classList: { add: () => {}, remove: () => {}, contains: () => false, toggle: () => {} } },
+    };
+    async function runCase(hostState) {
+      const vm = new Function("els", "hostState", `
+        const $ = (id) => els[id] ?? null;
+        const document = { querySelector: () => null };
+        let terminalHostOpInFlight = false;
+        let terminalBackendReady = false;
+        let terminalHostState = hostState;
+        let terminalTabsRenderedHtml = "";
+        async function api() { throw new Error("start failed"); }
+        function renderTerminalStartingState() {}
+        function applyTerminalHostState() {}
+        function connectTerminalBackend() {}
+        function syncTerminalHostControls() {}
+        ${bodies}
+        return autoStartTerminalHost().then(() => ({
+          title: els.terminalUnavailableTitle.textContent,
+          btn: els.terminalRetryBtn.textContent,
+          ready: terminalBackendReady,
+        }));
+      `);
+      return vm(els, hostState);
+    }
+    const exited = await runCase("exited");
+    assert.equal(exited.title, "终端服务已停止", "异常退出拉起失败落「已停止」页");
+    assert.equal(exited.btn, "启动终端服务", "兜底页动作钮可再启动");
+    assert.equal(exited.ready, false, "失败置回未就绪");
+    const unknown = await runCase("unknown");
+    assert.equal(unknown.title, "终端服务未运行", "状态不可知仍落「未运行」页");
+    assert.equal(unknown.btn, "启动服务", "「未运行」页动作钮走分派");
   });
 });
 
