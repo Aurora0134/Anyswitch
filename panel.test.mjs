@@ -8876,11 +8876,14 @@ describe("终端页签拖拽分列（M5）", () => {
     assert.ok(end.includes("terminalTabDragSuppressClick = true"), "拖拽落地立吞 click 旗");
   });
 
-  it("落点判定状态机：页签条→移入/本列 noop，缝隙与左右边缘→插新列，列体与界外→无落点", () => {
+  it("落点判定状态机：页签条→移入/本列 noop，缝隙/边缘带与列体左右边区→插新列，inspector 尾区→最右插新列，列体中央与界外→无落点", () => {
     const EDGE = Number(panelJs.match(/const TERMINAL_TAB_DROP_EDGE_PX = (\d+);/)?.[1]);
     assert.ok(EDGE > 0, "命中带宽可从 panel.js 取到（测试不抄数字）");
+    const SIDE = Number(panelJs.match(/const TERMINAL_TAB_DROP_SIDE_PX = (\d+);/)?.[1]);
+    assert.ok(SIDE > EDGE, "列体边区宽度可从 panel.js 取到，且大于边缘带（M6 报障 2①②）");
     const classify = new Function(`
       const TERMINAL_TAB_DROP_EDGE_PX = ${EDGE};
+      const TERMINAL_TAB_DROP_SIDE_PX = ${SIDE};
       ${extractM5("classifyTerminalTabDrop")}
       return classifyTerminalTabDrop;
     `)();
@@ -8894,9 +8897,18 @@ describe("终端页签拖拽分列（M5）", () => {
     assert.deepEqual(classify(501, 300, panes, 0), { kind: "new-column", at: 1 }, "列间缝隙 → 在该位插新列");
     assert.deepEqual(classify(100, 300, panes, 0), { kind: "new-column", at: 0 }, "左边缘 → 在最前插新列");
     assert.deepEqual(classify(900, 300, panes, 0), { kind: "new-column", at: 2 }, "右边缘 → 在末尾插新列");
-    assert.deepEqual(classify(300, 300, panes, 0), null, "列体（非页签条非边缘带）→ 无落点");
+    // M6 报障 2①：列体左右边区（各 SIDE 宽）也算开新列落点——用户「拖到右半区」的直觉落进这里
+    assert.deepEqual(classify(150, 300, panes, 0), { kind: "new-column", at: 0 }, "列 0 左边区 → 在其前插新列");
+    assert.deepEqual(classify(450, 300, panes, 0), { kind: "new-column", at: 1 }, "列 0 右边区 → 在其后插新列");
+    assert.deepEqual(classify(560, 300, panes, 0), { kind: "new-column", at: 1 }, "列 1 左边区 → 在其前插新列");
+    assert.deepEqual(classify(850, 300, panes, 0), { kind: "new-column", at: 2 }, "列 1 右边区 → 在其后插新列");
+    assert.deepEqual(classify(300, 300, panes, 0), null, "列体中央（两边区之间）→ 无落点");
     assert.deepEqual(classify(300, 700, panes, 0), null, "纵越界 → 无落点");
     assert.deepEqual(classify(900 + EDGE + 5, 300, panes, 0), null, "横越出边缘带 → 无落点");
+    // M6 报障 2①尾区：单列时 inspector 占着的那块映射为最右开新列；无尾区（多列态 inspector 隐藏）则界外无落点
+    const tail = { left: 905, right: 1340 };
+    assert.deepEqual(classify(1100, 300, panes, 0, tail), { kind: "new-column", at: 2 }, "inspector 尾区 → 最右插新列");
+    assert.deepEqual(classify(1100, 300, panes, 0), null, "无尾区时同一坐标 → 无落点");
     // 页签条优先于边缘带：点落在列 0 页签条且 x 在左边缘带内 → 仍按页签条语义
     assert.deepEqual(classify(104, 20, panes, 1), { kind: "move-into", columnIndex: 0 }, "页签条命中优先于边缘带");
     // 单列：右边缘即分列入口；拖回本列页签条无操作
@@ -8905,14 +8917,14 @@ describe("终端页签拖拽分列（M5）", () => {
     assert.deepEqual(classify(300, 20, single, 0), { kind: "noop" }, "单列拖回本列页签条 → 无操作");
   });
 
-  // 落点执行沙箱：M4 列管理链 + commitTerminalTabDrop，无 DOM（$ 全 null 走跳过分支）
+  // 落点执行沙箱：M4 列管理链 + commitTerminalTabDrop + 落点收口，无 DOM（$ 全 null 走跳过分支）
   function m5DropApi({ sessions = {} } = {}) {
     const chain = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
       "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
       "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
       "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
       "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn",
-      "commitTerminalTabDrop"].map(extractM5).join("\n");
+      "commitTerminalTabDrop", "settleTerminalColumnsAfterDrop"].map(extractM5).join("\n");
     const store = {};
     const api = new Function("sessions", "store", `
       const $ = () => null;
@@ -8936,6 +8948,7 @@ describe("终端页签拖拽分列（M5）", () => {
       function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
       function renderTerminalPreviewTabs() {}
       function renderTerminalSessionData() {}
+      function renderTerminalPreviewSession() {}
       function syncTerminalAddBtn() {}
       function scheduleTerminalFit() {}
       function wireTerminalColumnControls() {}
@@ -9066,6 +9079,202 @@ describe("终端页签拖拽分列（M5）", () => {
     assert.ok(panelCss.includes(".terminal-tab.is-drag-source"), "源页签留位样式就位");
     assert.ok(panelCss.includes("@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }"),
       "全局 reduced-motion 杀开关原样（预览过渡被兜成即时）");
+  });
+});
+
+// 拖拽分列修复（M6）：目检三报障——①幻影激活瞬移（Y 轴丢抓取偏移+固定下沉）；
+// ②落点难触发/闪烁（命中面过小 + 拖拽中 inspector 自动收展搬移几何）；③落点后
+// 会话画面留左列、新列空白（落点提交链不整渲，屏幕流停留在旧定投）。行为钉全部
+// 抽真码进桩环境真跑；几何手感留用户目检。
+describe("终端拖拽分列修复（M6）", () => {
+  function extractM6(name) {
+    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
+
+  it("报障 1 幻影定位：activation 同记纵向抓取偏移、双轴跟随，幻影左上角与页签逐点对齐", () => {
+    const activate = extractM6("activateTerminalTabDrag");
+    assert.ok(activate.includes("grabOffsetY"), "activation 同记纵向抓取偏移（M5 只记了 X 轴）");
+    const moveGhost = extractM6("moveTerminalTabDragGhost");
+    assert.ok(!moveGhost.includes("+ 14"), "幻影不再固定下沉 14px（瞬移根源）");
+    assert.ok(moveGhost.includes("event.clientY -"), "Y 轴按抓取偏移跟随");
+    // 行为真跑：页签 rect (12,88) 178×45，按在页签内 (+60,+19)，幻影应落在页签左上角
+    const tabRect = { left: 12, top: 88, width: 178, height: 45, right: 190, bottom: 133 };
+    const ghost = { className: "", style: {}, children: [], classList: { add() {}, toggle() {} }, appendChild(c) { this.children.push(c); } };
+    const tab = {
+      classList: { add() {}, remove() {} },
+      getBoundingClientRect: () => tabRect,
+      cloneNode: () => ({ tag: "clone" }),
+    };
+    const document = { createElement: () => ghost, body: { appendChild() {} } };
+    const sandbox = new Function("document", `
+      ${extractM6("activateTerminalTabDrag")}
+      ${extractM6("moveTerminalTabDragGhost")}
+      return { activateTerminalTabDrag, moveTerminalTabDragGhost };
+    `)(document);
+    const drag = { active: false, tabElement: tab, grabOffsetX: 0, grabOffsetY: 0, ghost: null };
+    sandbox.activateTerminalTabDrag(drag, { clientX: 72, clientY: 107 });
+    assert.equal(drag.grabOffsetX, 60, "横向抓取偏移 = 按压点 - 页签左");
+    assert.equal(drag.grabOffsetY, 19, "纵向抓取偏移 = 按压点 - 页签顶");
+    assert.equal(drag.ghost.style.transform, "translate(12px, 88px)", "幻影与源页签逐点对齐，激活零瞬移");
+    sandbox.moveTerminalTabDragGhost(drag, { clientX: 172, clientY: 207 });
+    assert.equal(drag.ghost.style.transform, "translate(112px, 188px)", "拖动全程保持抓取点（页签左上 = 指针 - 抓取偏移）");
+  });
+
+  it("报障 2③ 冻结闸：拖拽进行中 inspector 自动收展不改写几何，拖拽外照收", () => {
+    const render = extractM6("renderTerminalSessionData");
+    assert.ok(render.includes("terminalTabDrag"), "自动收展块挂拖拽冻结闸");
+    // 行为：空壳会话连拍≥阈值、未钉住——无拖拽：收拢落类；拖拽中：几何不动
+    const mkEl = () => {
+      const classes = new Set();
+      return {
+        classes, style: {}, hidden: false, textContent: "", innerHTML: "",
+        classList: {
+          add: (c) => classes.add(c), remove: (c) => classes.delete(c),
+          contains: (c) => classes.has(c),
+          toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); },
+        },
+        setAttribute() {},
+      };
+    };
+    const mk = (dragging) => {
+      const els = {
+        terminalInspectorTitle: mkEl(), terminalInspector: mkEl(), terminalWorkspace: mkEl(),
+        terminalInspectorToggle: mkEl(), terminalLiveTitle: mkEl(), terminalLiveDetail: mkEl(),
+        terminalLiveStatus: mkEl(), terminalMetricsSection: mkEl(), terminalRequestCount: mkEl(),
+        terminalRequestList: mkEl(),
+      };
+      const runner = new Function("els", `
+        let terminalTabDrag = ${dragging ? "{ active: true }" : "null"};
+        const terminalColumns = [{ elementIdSuffix: "", activeSessionId: "s1" }];
+        let terminalFocusedColumnIndex = 0;
+        const terminalInspectorUserPinned = new Set();
+        const terminalHollowStreak = new Map([["s1", 99]]);
+        let terminalInspectorHollowCollapsed = false;
+        let terminalRequestListRenderedHtml = "";
+        const terminalRequestExpanded = new Set();
+        ${panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;/)?.[0]}
+        ${panelJs.match(/const TERMINAL_SPARK_SIZE = \d+;/)?.[0]}
+        const $ = (id) => els[id] ?? null;
+        function terminalSessionFor() { return { id: "s1", label: "S1", agent: null, status: "idle", metrics: null, requests: [], route: [], routeCurrent: 0 }; }
+        function renderTerminalColumnSessionChrome() {}
+        function terminalServingLabel() { return ""; }
+        function terminalRequestItemHtml() { return ""; }
+        function routeNodeName(p) { return p; }
+        function updateSparkline() {}
+        function scheduleTerminalFit() {}
+        ${extractM6("terminalFocusedColumn")}
+        ${extractM6("terminalActiveSessionId")}
+        ${extractM6("renderTerminalSessionData")}
+        return { render: renderTerminalSessionData, streak: () => terminalHollowStreak.get("s1") };
+      `)(els);
+      return { runner, els };
+    };
+    const idle = mk(false);
+    idle.runner.render();
+    assert.ok(idle.els.terminalInspector.classes.has("is-collapsed"), "无拖拽：空壳连拍到阈值自动收拢（既有语义不动）");
+    assert.ok(idle.els.terminalWorkspace.classes.has("is-inspector-collapsed"), "无拖拽：工作区收拢类同步落");
+    const dragging = mk(true);
+    dragging.runner.render();
+    assert.ok(!dragging.els.terminalInspector.classes.has("is-collapsed"), "拖拽中：收拢几何不改写（命中带不被搬移）");
+    assert.ok(!dragging.els.terminalWorkspace.classes.has("is-inspector-collapsed"), "拖拽中：工作区几何不改写");
+  });
+
+  // 报障 3 回归钉沙箱：全链真跑（列管理 + 落点提交 + 落点收口 + 真 renderTerminalPreviewSession
+  // + 记录型 connectTerminalStream），钉「commit 后各列建流的会话 == 各列合法化后的活跃会话」。
+  function m6DropApi({ sessions = {} } = {}) {
+    const chain = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
+      "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
+      "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
+      "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
+      "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn",
+      "terminalActiveSessionId", "setTerminalActiveSessionId",
+      "commitTerminalTabDrop", "settleTerminalColumnsAfterDrop", "renderTerminalPreviewSession"].map(extractM6).join("\n");
+    const store = {};
+    const calls = { connect: [] };
+    const api = new Function("sessions", "store", "calls", `
+      const $ = () => null;
+      const terminalFontSize = 13;
+      const terminalTabsHidden = false;
+      const terminalSessionColumnIndexes = new Map();
+      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
+      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      terminalColumns[0].activeSessionId = "s1";
+      let terminalFocusedColumnIndex = 0;
+      const terminalPreviewSessions = {};
+      let terminalBackendReady = true;
+      let terminalBackendSessions = sessions;
+      const currentView = "terminal";
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      function terminalSessionMap() { return terminalBackendSessions; }
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalSessionData() {}
+      function renderTerminalEmptyState() {}
+      function clearTerminalEmptyState() {}
+      function syncTerminalAddBtn() {}
+      function scheduleTerminalFit() {}
+      function wireTerminalColumnControls() {}
+      // 记录型桩：建流即记录并按真语义落定投标记（补挂判定依赖这两个字段）
+      function connectTerminalStream(column, session, opts) {
+        calls.connect.push([terminalColumns.indexOf(column), session?.id, opts?.revive]);
+        column.eventSource = {}; column.boundSessionId = session?.id ?? null; column.xterm = {};
+      }
+      ${chain}
+      return { terminalColumns, commitTerminalTabDrop, renderTerminalPreviewSession,
+        terminalSessionColumnIndex, terminalFocusedColumn, calls };
+    `)(sessions, store, calls);
+    return { api, store, calls };
+  }
+
+  it("报障 3 落点整渲收口：commit 后各列建流各归各（先合法化再整渲，不靠轮询拍兜底）", () => {
+    // 结构钉：提交链挂收口，且收口里合法化先于整渲、整渲后补一次落盘
+    const commit = extractM6("commitTerminalTabDrop");
+    assert.ok(commit.includes("settleTerminalColumnsAfterDrop"), "落点提交成功路径挂屏幕流收口");
+    const settle = extractM6("settleTerminalColumnsAfterDrop");
+    assert.ok(settle.indexOf("terminalColumnSessionEntries") < settle.indexOf("renderTerminalPreviewSession()"),
+      "合法化各列活跃先于整渲（探针实证：反序会让源列补挂判定跳过、左列卡死旧会话）");
+    assert.ok(settle.includes("persistTerminalColumns"), "收口补落盘（合法化与焦点切换晚于 add/move 内部的落盘）");
+
+    // 主流程（报障现场）：单列 s1(活跃,在播)/s2，拖 s1 到右侧开新列
+    {
+      const { api, store, calls } = m6DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" } } });
+      api.renderTerminalPreviewSession(); // 用户在看的稳态：列 0 建流 s1
+      assert.equal(api.terminalColumns[0].boundSessionId, "s1", "前置：左列在播 s1");
+      calls.connect.length = 0;
+      api.commitTerminalTabDrop("s1", { kind: "new-column", at: 1, forbidden: false });
+      assert.equal(api.terminalColumns.length, 2, "落点插入新列");
+      const byColumn = Object.fromEntries(calls.connect.map(([ci, sid]) => [ci, sid]));
+      assert.deepEqual(byColumn, { 0: "s2", 1: "s1" },
+        "各列建流的会话 == 各列合法化后的活跃会话：新列建 s1，源列重建为 s2（不再卡 s1）");
+      assert.equal(api.terminalColumns[0].boundSessionId, "s2", "源列定投漂移当拍重建，不再续播被拖会话");
+      assert.equal(api.terminalColumns[1].boundSessionId, "s1", "新列当拍建流被拖会话（右列不再空白）");
+      assert.ok(calls.connect.every(([, , revive]) => revive === true), "落点是用户主动动作：revive 口径同点页签");
+      const stored = JSON.parse(store["panel-terminal-columns"]);
+      assert.equal(stored.columns[0].active, "s2", "存档活跃已合法化（不落「活跃不属本列」的脏态）");
+      assert.equal(stored.focused, 1, "焦点列落盘在目标列");
+    }
+    // move-into 落点同一缺口同一修法：目标列建流被拖会话，源列重建为合法化后的活跃
+    {
+      const { api, calls } = m6DropApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" } } });
+      api.renderTerminalPreviewSession(); // 列 0 在播 s1
+      const colB = api.terminalColumns[api.terminalColumns.length - 1]; // 占位防误用（下面真加列）
+      void colB;
+      calls.connect.length = 0;
+      // 先开好列 1（s3 在列 1），再把 s1 从列 0 移入列 1
+      api.commitTerminalTabDrop("s3", { kind: "new-column", at: 1, forbidden: false });
+      calls.connect.length = 0;
+      api.commitTerminalTabDrop("s1", { kind: "move-into", column: api.terminalColumns[1] });
+      const byColumn = Object.fromEntries(calls.connect.map(([ci, sid]) => [ci, sid]));
+      assert.deepEqual(byColumn, { 0: "s2", 1: "s1" }, "move-into 同样当拍整渲：目标列建被拖会话、源列重建");
+      assert.equal(api.terminalColumns[0].boundSessionId, "s2", "源列不再续播 s1");
+    }
   });
 });
 
