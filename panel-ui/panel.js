@@ -5717,6 +5717,31 @@ async function api(method, path, body) {
       if (currentView === "terminal") fitTerminalXterm();
     }));
   }
+
+  // 页签条收展（页头「隐藏页签/展示页签」钮）：整排收起会话页签给终端屏让高。
+  // 收放只走 scheduleTerminalFit——与 inspector 收放同一先例：它改变终端区高度
+  // 却不经 window resize；fit 仍在 fitTerminalXterm 体内过既有全部闸门（视图闸 /
+  // 窗口级尺寸闸 / 组字挂起 / 同尺寸不 POST），本功能不另起 resize 通路。
+  // apply 只落 DOM 与文案不触发 fit：初始化恢复时终端流未建，进页既有通路按
+  // 含本态的布局量准；隐藏态本身不改变「宿主量不量得到可信尺寸」的判定。
+  const TERMINAL_TABS_HIDDEN_KEY = "panel-terminal-tabs-hidden";
+  let terminalTabsHidden = false;
+  function applyTerminalTabsHidden(hidden) {
+    terminalTabsHidden = !!hidden;
+    $("terminalTabsBar")?.classList.toggle("is-hidden", terminalTabsHidden);
+    const button = $("terminalTabsToggleBtn");
+    if (!button) return;
+    const label = terminalTabsHidden ? "展示页签" : "隐藏页签";
+    button.textContent = label;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.setAttribute("aria-expanded", String(!terminalTabsHidden));
+  }
+  function setTerminalTabsHidden(hidden) {
+    applyTerminalTabsHidden(hidden);
+    try { localStorage.setItem(TERMINAL_TABS_HIDDEN_KEY, terminalTabsHidden ? "1" : "0"); } catch {}
+    scheduleTerminalFit();
+  }
   function terminalPreviewLineHtml([kind, text]) {
     return `<div class="terminal-line${kind ? ` ${kind}` : ""}">${escapeHtml(text)}</div>`;
   }
@@ -6646,6 +6671,14 @@ async function api(method, path, body) {
       // 不补一次 fit，xterm 列数与可见区错位、PTY 停在旧列宽，TUI 按旧列宽排版
       // 时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。
       scheduleTerminalFit();
+    };
+    // 页签条收展偏好恢复：只落 DOM/文案（apply 不触发 fit，终端流未建，进页时
+    // scheduleTerminalFit 会按含本态的布局量准）；点击翻转走 setTerminalTabsHidden
+    //（持久化 + 补一次尺寸适配）。
+    try { applyTerminalTabsHidden(localStorage.getItem(TERMINAL_TABS_HIDDEN_KEY) === "1"); } catch { applyTerminalTabsHidden(false); }
+    $("terminalTabsToggleBtn").onclick = () => {
+      setTerminalTabsHidden(!terminalTabsHidden);
+      terminalXterm?.focus();
     };
     $("terminalRedrawBtn").onclick = () => {
       redrawTerminalScreen();

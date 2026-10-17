@@ -8225,6 +8225,12 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function confirmTerminalAddMenu() {}
       function selectTerminalAddAgent() {}
       function loadInstalledTerminalAgents() {}
+      // 页签条收展接线走真实现（applyTerminalTabsHidden/setTerminalTabsHidden 在源码内），
+      // 桩只补它们触到的外部面：localStorage 与 scheduleTerminalFit。
+      const localStorage = { getItem: () => null, setItem: () => {} };
+      function scheduleTerminalFit() {}
+      function setTerminalTabsHidden() {}
+      function applyTerminalTabsHidden() {}
       function setInterval(cb) { return 1; }
       const window = { addEventListener() {}, confirm: () => true };
       ${newlineGate}
@@ -8364,6 +8370,123 @@ describe("虚拟终端 resize 防抖", () => {
       "建流先同步 fit 再开 SSE——首帧回放不再按 xterm 出厂默认列宽（80）折行");
     const schedule = panelJs.match(/function scheduleTerminalFit\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(schedule.includes("fitTerminalXterm()"), "终端页显示路径仍直接 fit");
+  });
+});
+
+// 页签条收展：终端页头「隐藏页签/展示页签」钮整排收起会话页签给终端屏让高。
+// 收放改变终端容器高度 → 必然牵动 fit/resize，安全性全部押在既有闸门复用上：
+// 收展只调 scheduleTerminalFit（inspector 收放同一先例），视图闸 / 窗口级尺寸闸 /
+// 同尺寸不 POST 闸在 fitTerminalXterm 体内原样生效，本功能不另起任何 resize 通路。
+describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮）", () => {
+  it("markup 与样式契约：页题右侧按钮两态文案、页签条整排可收起", () => {
+    const btnTag = panelHtml.match(/<button[^>]*id="terminalTabsToggleBtn"[\s\S]*?<\/button>/)?.[0];
+    assert.ok(btnTag, "页头带 terminalTabsToggleBtn 按钮");
+    assert.ok(btnTag.includes(">隐藏页签<"), "默认态文案「隐藏页签」");
+    assert.ok(btnTag.includes('title="隐藏页签"') && btnTag.includes('aria-label="隐藏页签"'),
+      "悬停与读屏口径与按钮文案同词");
+    const titleAt = panelHtml.indexOf('class="terminal-page-title"');
+    const btnAt = panelHtml.indexOf('id="terminalTabsToggleBtn"');
+    const headRightAt = panelHtml.indexOf('class="terminal-head-right"');
+    assert.ok(titleAt > 0 && btnAt > titleAt && btnAt < headRightAt,
+      "按钮落在页题右侧、页头右段之前");
+    assert.ok(!panelHtml.includes("展示页签"), "「展示页签」只由 JS 翻转，静态稿不出现");
+    const barTag = panelHtml.match(/<div class="terminal-tabs-bar"[^>]*>/)?.[0];
+    assert.ok(barTag?.includes('id="terminalTabsBar"'), "页签条带 id 供 JS 收展");
+    const hideRule = panelCss.match(/\.terminal-tabs-bar\.is-hidden\s*\{[^}]*\}/)?.[0];
+    assert.ok(hideRule?.includes("display: none"), "is-hidden 整排收走页签条");
+    assert.ok(/\.terminal-tabs-toggle-btn\s*\{[^}]*margin-left/.test(panelCss),
+      "按钮与页题之间拉开距离的样式在位");
+  });
+
+  it("resize 安全契约：收展只走 scheduleTerminalFit，不另起 fit/POST 通路", () => {
+    const setSrc = panelJs.match(/function setTerminalTabsHidden\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(setSrc, "setTerminalTabsHidden found in panel.js");
+    assert.ok(setSrc.includes("scheduleTerminalFit()"),
+      "收放后补一次尺寸适配（±页签条高度不经 window resize，同 inspector 收放先例）");
+    for (const banned of ["fitTerminalXterm", "postTerminalResize", "terminalFitAddon", "api("]) {
+      assert.ok(!setSrc.includes(banned), `收展逻辑不得直触 ${banned}——闸门只在 fitTerminalXterm 体内`);
+    }
+    const applySrc = panelJs.match(/function applyTerminalTabsHidden\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(applySrc, "applyTerminalTabsHidden found in panel.js");
+    assert.ok(!applySrc.includes("scheduleTerminalFit"),
+      "落态函数不触发 fit——初始化恢复时终端流未建，进页既有通路自会量准");
+    const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(init.includes('$("terminalTabsToggleBtn").onclick'), "按钮接线在 initTerminalPreview");
+    assert.ok(init.includes("localStorage.getItem(TERMINAL_TABS_HIDDEN_KEY)"),
+      "刷新恢复读持久化偏好");
+  });
+
+  it("vm 真跑收展状态机：隐藏/恢复两态翻转、持久化、恢复态不触发 fit", () => {
+    const keySrc = panelJs.match(/const TERMINAL_TABS_HIDDEN_KEY = "[^"]+";/)?.[0];
+    const applySrc = panelJs.match(/function applyTerminalTabsHidden\([\s\S]*?\n  \}/)?.[0];
+    const setSrc = panelJs.match(/function setTerminalTabsHidden\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(keySrc && applySrc && setSrc, "状态机三段可从 panel.js 取到");
+    const build = () => {
+      const state = { fits: 0, store: {} };
+      const sandbox = new Function("state", `
+        const elCache = {};
+        const el = (id) => elCache[id] ??= {
+          textContent: "", title: "", attrs: {},
+          classes: new Set(),
+          classList: {
+            toggle: (c, on) => { if (on === undefined) on = !elCache[id].classes.has(c); if (on) elCache[id].classes.add(c); else elCache[id].classes.delete(c); return on; },
+          },
+          setAttribute(k, v) { this.attrs[k] = v; },
+        };
+        const $ = (id) => el(id);
+        const localStorage = {
+          getItem: (k) => (k in state.store ? state.store[k] : null),
+          setItem: (k, v) => { state.store[k] = String(v); },
+        };
+        let terminalTabsHidden = false;
+        ${keySrc}
+        function scheduleTerminalFit() { state.fits += 1; }
+        ${applySrc}
+        ${setSrc}
+        return {
+          applyTerminalTabsHidden, setTerminalTabsHidden, el,
+          hidden: () => terminalTabsHidden,
+          restore: () => applyTerminalTabsHidden(localStorage.getItem(TERMINAL_TABS_HIDDEN_KEY) === "1"),
+        };
+      `)(state);
+      return { ...sandbox, state };
+    };
+
+    // ① 无存档：默认展开，落态不触发 fit、不写存档
+    const fresh = build();
+    fresh.restore();
+    assert.strictEqual(fresh.el("terminalTabsBar").classes.has("is-hidden"), false, "默认页签条展开");
+    assert.strictEqual(fresh.el("terminalTabsToggleBtn").textContent, "隐藏页签", "默认文案「隐藏页签」");
+    assert.equal(fresh.state.fits, 0, "初始化落态不触发 fit");
+    assert.deepEqual(fresh.state.store, {}, "落态不写存档");
+
+    // ② 隐藏：整排收起 + 文案翻转 + 存档 "1" + 恰好一次 fit
+    fresh.setTerminalTabsHidden(true);
+    assert.strictEqual(fresh.hidden(), true);
+    assert.strictEqual(fresh.el("terminalTabsBar").classes.has("is-hidden"), true, "页签条整排收起");
+    const btn = fresh.el("terminalTabsToggleBtn");
+    assert.strictEqual(btn.textContent, "展示页签", "隐藏后文案翻「展示页签」");
+    assert.strictEqual(btn.title, "展示页签");
+    assert.strictEqual(btn.attrs["aria-label"], "展示页签");
+    assert.strictEqual(btn.attrs["aria-expanded"], "false", "aria-expanded 随收展同步");
+    assert.equal(fresh.state.store["panel-terminal-tabs-hidden"], "1", "隐藏态持久化");
+    assert.equal(fresh.state.fits, 1, "高度变化恰好补一次 fit");
+
+    // ③ 恢复：对称翻转 + 存档 "0" + 再补一次 fit
+    fresh.setTerminalTabsHidden(false);
+    assert.strictEqual(fresh.el("terminalTabsBar").classes.has("is-hidden"), false, "页签条恢复");
+    assert.strictEqual(fresh.el("terminalTabsToggleBtn").textContent, "隐藏页签");
+    assert.strictEqual(fresh.el("terminalTabsToggleBtn").attrs["aria-expanded"], "true");
+    assert.equal(fresh.state.store["panel-terminal-tabs-hidden"], "0");
+    assert.equal(fresh.state.fits, 2, "恢复同样恰好补一次 fit");
+
+    // ④ 刷新恢复隐藏态：存档 "1" → 落 is-hidden 与翻转文案，不触发 fit（终端流未建）
+    const restored = build();
+    restored.state.store["panel-terminal-tabs-hidden"] = "1";
+    restored.restore();
+    assert.strictEqual(restored.el("terminalTabsBar").classes.has("is-hidden"), true, "刷新后隐藏态保持");
+    assert.strictEqual(restored.el("terminalTabsToggleBtn").textContent, "展示页签");
+    assert.equal(restored.state.fits, 0, "恢复落态不触发 fit——进页时 scheduleTerminalFit 按含本态的布局量准");
   });
 });
 

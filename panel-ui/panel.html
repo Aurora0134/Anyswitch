@@ -2397,6 +2397,9 @@ if (window.panelStartupController) panelStartupPlay();
               <span>项目工作区</span>
             </div>
           </div>
+          <!-- 页签条收展：藏起整排会话页签给终端屏让高，两态文案由 JS 翻转，
+               静态稿只携带默认态「隐藏页签」。 -->
+          <button type="button" class="btn btn-mini terminal-tabs-toggle-btn" id="terminalTabsToggleBtn" title="隐藏页签" aria-label="隐藏页签">隐藏页签</button>
         </div>
         <div class="terminal-head-right">
           <span class="badge" id="terminalHostHeadBadge"><span class="badge-text">状态未知</span></span>
@@ -2422,7 +2425,7 @@ if (window.panelStartupController) panelStartupPlay();
            后由既有恢复通路展开。 -->
       <div class="terminal-workspace is-empty" id="terminalWorkspace">
         <section class="terminal-main-pane">
-          <div class="terminal-tabs-bar">
+          <div class="terminal-tabs-bar" id="terminalTabsBar">
             <div class="terminal-tabs" id="terminalTabs" role="tablist" aria-label="终端会话"></div>
             <button type="button" class="icon-btn terminal-add-btn" id="terminalAddBtn" title="新建终端" aria-label="新建终端">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>

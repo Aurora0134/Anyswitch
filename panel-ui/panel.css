@@ -1597,6 +1597,8 @@
   .terminal-page-title strong { font-size: 14px; color: var(--text); line-height: 1.15; }
   .terminal-page-title span:not(.terminal-page-title-mark) { font-size: 10.5px; color: var(--text-3); }
   .terminal-head-icon { width: 30px; height: 30px; }
+  /* 页签条收展钮：与页题拉开一点距离（在 head-left 既有 gap 之上再加），窄屏同样保留 */
+  .terminal-tabs-toggle-btn { margin-left: 10px; white-space: nowrap; }
   .terminal-workspace {
     flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 340px;
     gap: 1px; background: var(--border);
@@ -1611,6 +1613,8 @@
     display: flex; align-items: stretch; gap: 8px; min-height: 54px; padding: 8px 12px 0;
     background: var(--surface-sunken); border-bottom: 1px solid var(--border);
   }
+  /* 页头「隐藏页签」钮收走整排页签条：主区是纵向 flex，本条退场后终端屏自然上扩 */
+  .terminal-tabs-bar.is-hidden { display: none; }
   .terminal-tabs { display: flex; align-items: stretch; gap: 4px; min-width: 0; overflow-x: auto; }
   .terminal-tab {
     appearance: none; display: flex; align-items: center; gap: 8px; min-width: 178px; max-width: 235px;
