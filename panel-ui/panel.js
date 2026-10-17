@@ -4653,30 +4653,65 @@ async function api(method, path, body) {
       ],
     },
   };
-  let activeTerminalPreviewId = "checkout";
+  // 终端列：终端屏按列组织，每列持有自己的全套终端状态——xterm 实例、fit/webgl
+  // addon、SSE 字节流、宿主尺寸观察、键入定投会话 id、IME 组字锚点、本列活跃会话。
+  // 本期仍是单列：列数组恒为 [列 0]，列 0 绑唯一宿主 #terminalXtermHost，一切行为
+  // 与单列逐点一致。列对象与宿主元素解耦（只记宿主 id，建流时才取元素），M4 加列
+  // 即新增列对象配新宿主，本层语义不动。
+  function createTerminalColumn(hostElementId) {
+    return {
+      hostElementId,
+      // 本列活跃页签的会话 id。页级入口（页签条/会话栏/inspector/归属恢复）本期读
+      // 的都是列 0 的活跃会话（见 terminalActiveSessionId）。
+      activeSessionId: null,
+      xterm: null,
+      fitAddon: null,
+      webglAddon: null,
+      eventSource: null,
+      // 宿主尺寸观察：inspector 收放、字号变化等任何改变终端区宽度的动作都不经
+      // window resize，只挂窗口监听会漏掉——直接观察本列宿主元素，变动走同一防抖入口。
+      hostResizeObserver: null,
+      inputDisposable: null,
+      // 定投会话 id：connectTerminalStream 建连时固化、closeTerminalStream 清空，值与
+      // onData 闭包内的定投局部量同。附着在 xterm 实例上的键位处理器不再随连接重建
+      // 闭包，改经此量读到与 onData 一致的定投目标，同样不读活动会话。
+      boundSessionId: null,
+      // 输入法锚点：组字期间钉住隐藏输入框。空闲为 null；组字中为 { textarea, compositionView }。
+      imeHold: null,
+      imeHoldFrame: null,
+      imeFitPending: false,
+      imeAnchorTextarea: null,
+      // 组字事件的列绑定形态：监听挂/摘按引用配对，闭包把列固进回调。
+      imeArmHandler: null,
+      imeReleaseHandler: null,
+    };
+  }
+  const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+  // 列 0 活跃会话的初值 "checkout" 是预览稿种子的首会话键（后端就绪前渲染预览稿
+  // 用）；rebuildTerminalBackendSessions 回读存档后改写为真实会话 id。
+  terminalColumns[0].activeSessionId = "checkout";
+  // 焦点列：键盘输入只进焦点列的活跃会话。本期恒为列 0；M4「点列即焦点列」改这里。
+  function terminalFocusedColumn() {
+    return terminalColumns[0] || null;
+  }
+  // 页级入口的活跃会话读写收口：本期唯一列是列 0；多列后各列页签条各持指针，
+  // 页级入口改跟焦点列。
+  function terminalActiveSessionId() {
+    return terminalColumns[0]?.activeSessionId ?? null;
+  }
+  function setTerminalActiveSessionId(id) {
+    if (terminalColumns[0]) terminalColumns[0].activeSessionId = id;
+  }
+  // 焦点回守收口：一切「动作后把焦点还给终端」的入口都走这里，按焦点列定投。
+  function focusTerminalXterm() {
+    terminalFocusedColumn()?.xterm?.focus();
+  }
   let terminalBackendSessions = {};
-  let terminalEventSource = null;
   // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
   let terminalVisibilityWasHidden = false;
   // 活跃真值流：panel 转发的 relay 工作/空闲绝对态 SSE。轮询（1s）仍是校准
   // 与指标数据源；这个流只负责把工作/空闲与在途请求数即时落到标签与实况行。
   let terminalActivitySource = null;
-  let terminalXterm = null;
-  let terminalFitAddon = null;
-  let terminalWebglAddon = null;
-  // 宿主尺寸观察：inspector 收放、字号变化等任何改变终端区宽度的动作都不经
-  // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
-  let terminalHostResizeObserver = null;
-  let terminalInputDisposable = null;
-  // 定投会话 id：connectTerminalStream 建连时固化、closeTerminalStream 清空，值与
-  // onData 闭包内的定投局部量同。附着在 xterm 实例上的键位处理器不再随连接重建
-  // 闭包，改经此量读到与 onData 一致的定投目标，同样不读活动会话。
-  let terminalBoundSessionId = null;
-  // 输入法锚点：组字期间钉住隐藏输入框。空闲为 null；组字中为 { textarea, left, top, width, height, lineHeight }。
-  let terminalImeHold = null;
-  let terminalImeHoldFrame = null;
-  let terminalImeFitPending = false;
-  let terminalImeAnchorTextarea = null;
   let terminalBackendReady = false;
   // 空壳侧栏锁存（renderTerminalSessionData 的收拢状态机）：系统收拢标记记
   // 「当前 is-collapsed 是空壳自动收的」，归属恢复时只展开这一次；用户锁定集合
@@ -4741,9 +4776,12 @@ async function api(method, path, body) {
     terminalFontSize = clampTerminalFontSize(size);
     const readout = $("terminalFontSizeValue");
     if (readout) readout.textContent = String(terminalFontSize);
-    if (terminalXterm) {
-      terminalXterm.options.fontSize = terminalFontSize;
-      fitTerminalXterm();
+    // 字号是全局单值：逐列套用到各列自己的 xterm，并各列独立 fit（各量各的宿主）。
+    for (const column of terminalColumns) {
+      if (column.xterm) {
+        column.xterm.options.fontSize = terminalFontSize;
+        fitTerminalXterm(column);
+      }
     }
     if (persist) try { localStorage.setItem("panel-terminal-font-size", String(terminalFontSize)); } catch {}
   }
@@ -5252,27 +5290,28 @@ async function api(method, path, body) {
       if (session.agent) terminalHollowStreak.delete(session.id);
       else terminalHollowStreak.set(session.id, (terminalHollowStreak.get(session.id) || 0) + 1);
     }
-    if (!terminalBackendSessions[activeTerminalPreviewId]) {
+    if (!terminalBackendSessions[terminalActiveSessionId()]) {
       // 刷新后「看着哪个标签」从存档回读：整页加载把内存里的活动 id 打回预览稿遗留的
       // 初值，直接取会话表第一个键等于永远落回最早创建的那个终端——多标签时这就是
       // 「历史丢了」。认不到（别的窗口关了它、宿主换过）才回落第一个，并把落定的
       // id 写回存档，不留着失效值让下一次恢复再踩。
       const remembered = storedTerminalSessionId();
-      activeTerminalPreviewId = (remembered && terminalBackendSessions[remembered])
+      setTerminalActiveSessionId((remembered && terminalBackendSessions[remembered])
         ? remembered
-        : (Object.keys(terminalBackendSessions)[0] || null);
-      rememberTerminalSessionId(activeTerminalPreviewId);
+        : (Object.keys(terminalBackendSessions)[0] || null));
+      rememberTerminalSessionId(terminalActiveSessionId());
     }
   }
 
   // 新会话的初始行列数取当前实测值：PTY 若以固定猜测值（120×34）起步，而
   // 可见区其实是别的尺寸，SSE 首帧回放与 TUI 首帧排版就会按错宽度折行——xterm
-  // 加大列宽不重排已折行内容，首帧画错就一直错。已有 xterm 实例时直接取它的
-  // 实测 cols/rows；尚未创建（首装载入路径）才回落兜底值，随后的建流前 fit
+  // 加大列宽不重排已折行内容，首帧画错就一直错。焦点列已有 xterm 实例时直接取
+  // 它的实测 cols/rows；尚未创建（首装载入路径）才回落兜底值，随后的建流前 fit
   // 会立刻把真实尺寸补正。
   function terminalCreateSize() {
-    if (terminalXterm && Number.isFinite(terminalXterm.cols) && Number.isFinite(terminalXterm.rows)) {
-      return { cols: terminalXterm.cols, rows: terminalXterm.rows };
+    const column = terminalFocusedColumn();
+    if (column?.xterm && Number.isFinite(column.xterm.cols) && Number.isFinite(column.xterm.rows)) {
+      return { cols: column.xterm.cols, rows: column.xterm.rows };
     }
     return { cols: 120, rows: 34 };
   }
@@ -5292,27 +5331,35 @@ async function api(method, path, body) {
   // 的字节（大回放跨越多个事件循环切片，setTimeout 续跑不可取消）会在之后解析
   // 时触发当前监听器，把旧会话的 DA/CPR 自动应答 POST 进新会话的 PTY。逐连接
   // 重建 xterm 后，旧积压只能打进监听器表已随之清空的旧实例，彻底落空。
-  function closeTerminalStream() {
-    terminalEventSource?.close();
-    terminalEventSource = null;
-    terminalInputDisposable?.dispose();
-    terminalInputDisposable = null;
-    terminalBoundSessionId = null;
-    terminalXterm?.dispose();
-    terminalXterm = null;
-    terminalFitAddon = null;
-    terminalWebglAddon = null;
-    terminalHostResizeObserver?.disconnect();
-    terminalHostResizeObserver = null;
-    if (terminalImeAnchorTextarea) {
-      terminalImeAnchorTextarea.removeEventListener("compositionstart", armTerminalImeAnchor);
-      terminalImeAnchorTextarea.removeEventListener("compositionend", releaseTerminalImeAnchor);
-      terminalImeAnchorTextarea = null;
+  // 多列语义：关闭只动参数列自己的全套状态，不碰其它列。
+  function closeTerminalStream(column) {
+    column.eventSource?.close();
+    column.eventSource = null;
+    column.inputDisposable?.dispose();
+    column.inputDisposable = null;
+    column.boundSessionId = null;
+    column.xterm?.dispose();
+    column.xterm = null;
+    column.fitAddon = null;
+    column.webglAddon = null;
+    column.hostResizeObserver?.disconnect();
+    column.hostResizeObserver = null;
+    if (column.imeAnchorTextarea) {
+      column.imeAnchorTextarea.removeEventListener("compositionstart", column.imeArmHandler);
+      column.imeAnchorTextarea.removeEventListener("compositionend", column.imeReleaseHandler);
+      column.imeAnchorTextarea = null;
+      column.imeArmHandler = null;
+      column.imeReleaseHandler = null;
     }
-    terminalImeHold = null;
-    terminalImeFitPending = false;
-    if (terminalImeHoldFrame !== null) cancelAnimationFrame(terminalImeHoldFrame);
-    terminalImeHoldFrame = null;
+    column.imeHold = null;
+    column.imeFitPending = false;
+    if (column.imeHoldFrame !== null) cancelAnimationFrame(column.imeHoldFrame);
+    column.imeHoldFrame = null;
+  }
+
+  // 整页清场入口（关停清场 / 零会话）：关闭所有列的流与实例。
+  function closeAllTerminalStreams() {
+    for (const column of terminalColumns) closeTerminalStream(column);
   }
 
   // 窗口级尺寸闸的下限：按 13px 字号一格约 7.8×17px 取整，80×34 约合 10 列 2 行。
@@ -5321,14 +5368,14 @@ async function api(method, path, body) {
   const TERMINAL_FIT_MIN_HOST_WIDTH_PX = 80;
   const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = 34;
 
-  function terminalHostMeasurable() {
-    const host = $("terminalXtermHost");
+  function terminalHostMeasurable(column) {
+    const host = $(column.hostElementId);
     return !!host
       && host.clientWidth >= TERMINAL_FIT_MIN_HOST_WIDTH_PX
       && host.clientHeight >= TERMINAL_FIT_MIN_HOST_HEIGHT_PX;
   }
 
-  function fitTerminalXterm() {
+  function fitTerminalXterm(column) {
     // 终端页隐藏期不测量：FitAddon 从 display:none 的宿主只能量到百分比兜底值
     // （实测把 xterm 压成 12×6），按这个宽度折行的回放会把整行提示符碎成几段，
     // 而 xterm 加大列宽时不重排已折行内容——首帧画错就一直错。窗口 resize 的
@@ -5338,17 +5385,20 @@ async function api(method, path, body) {
     // FitAddon 会把 xterm 收成 2 列 1 行（实测），这个尺寸还会被 POST 进 PTY——承载
     // 的 TUI 当场按 2 列重排成碎条，而宿主尺寸回来后 xterm 不会自己回弹（实测停在
     // 2×1）。量不到可信尺寸就既不 fit 也不 POST；窗口恢复时 ResizeObserver 与
-    // window resize 会再叫一次此入口，无需在这里补测。
-    if (!terminalHostMeasurable()) return;
+    // window resize 会再叫一次此入口，无需在这里补测。多列语义：量的是本列自己
+    // 的宿主——别的列被折叠到 0×0 不挡本列，本列塌陷也不误伤其它列。
+    if (!terminalHostMeasurable(column)) return;
     // 组字期间不重排：锚点钉在组字开始的格子上，终端一变宽它会跟着整块挪走。
     // 记下，组字结束后补一次。
-    if (terminalImeHold) {
-      terminalImeFitPending = true;
+    if (column.imeHold) {
+      column.imeFitPending = true;
       return;
     }
-    terminalFitAddon?.fit();
-    const session = terminalSessionFor(activeTerminalPreviewId);
-    if (!session?.backend || !terminalXterm) return;
+    column.fitAddon?.fit();
+    // fit 后 POST 的目标是本列定投的会话（建连时固化），不读页级活跃指针：
+    // 多列同屏时每列各 POST 各的会话。
+    const session = column.boundSessionId ? terminalSessionFor(column.boundSessionId) : null;
+    if (!session?.backend || !column.xterm) return;
     // fit 后尺寸与 PTY 侧已知尺寸完全一致就跳过这次 POST：PTY 收到 resize（哪怕
     // 同值）也会让承载的 TUI 整屏重排一次，1s 轮询的兜底 fit、inspector 收放、字
     // 号微调等入口在尺寸实际没变时重复 POST 同值，就是用户看到的「终端没动却抽
@@ -5357,15 +5407,15 @@ async function api(method, path, body) {
     const backendSize = session.backendState;
     if (backendSize
       && Number.isFinite(backendSize.cols) && Number.isFinite(backendSize.rows)
-      && backendSize.cols === terminalXterm.cols && backendSize.rows === terminalXterm.rows) return;
-    postTerminalResize(session, terminalXterm.cols, terminalXterm.rows);
+      && backendSize.cols === column.xterm.cols && backendSize.rows === column.xterm.rows) return;
+    postTerminalResize(column, session, column.xterm.cols, column.xterm.rows);
   }
 
   // resize POST 失败不再静默吞掉——PTY 停在旧列宽而 xterm 已按新宽度渲染，TUI 按
   // 旧列宽排版时右侧会溢出到可见区外（kimi 输入框满行甩行即此形态）。失败短重试
-  // 一次；安排与执行前各校验一次 xterm 仍停在同一个尺寸——用户继续 resize 产生的
+  // 一次；安排与执行前各校验一次本列 xterm 仍停在同一个尺寸——用户继续 resize 产生的
   // 更新测量优先，旧重试不回溯；两次都失败才告警（会话可能已关闭，属预期末路）。
-  function postTerminalResize(session, cols, rows, attempt = 0) {
+  function postTerminalResize(column, session, cols, rows, attempt = 0) {
     api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/resize`, { cols, rows })
       .then((result) => {
         if (result && Number.isFinite(result.cols) && Number.isFinite(result.rows)) {
@@ -5373,10 +5423,10 @@ async function api(method, path, body) {
         }
       })
       .catch((error) => {
-        const stillCurrent = () => terminalXterm && terminalXterm.cols === cols && terminalXterm.rows === rows;
+        const stillCurrent = () => column.xterm && column.xterm.cols === cols && column.xterm.rows === rows;
         if (!stillCurrent()) return; // 已有更新的测量接管，旧失败不回溯也不告警
         if (attempt === 0) {
-          setTimeout(() => { if (stillCurrent()) postTerminalResize(session, cols, rows, 1); }, 250);
+          setTimeout(() => { if (stillCurrent()) postTerminalResize(column, session, cols, rows, 1); }, 250);
           return;
         }
         console.warn("[terminal] resize failed:", error);
@@ -5394,21 +5444,23 @@ async function api(method, path, body) {
   // 那样它不会重画，这一下就白点了。
   const TERMINAL_REDRAW_NUDGE_MS = 150;
   function redrawTerminalScreen() {
-    const session = terminalSessionFor(activeTerminalPreviewId);
-    const term = terminalXterm;
+    // 重画作用于焦点列（本期唯一列）：会话取本列活跃页签，实例校验也盯本列。
+    const column = terminalFocusedColumn();
+    const session = column ? terminalSessionFor(column.activeSessionId) : null;
+    const term = column?.xterm ?? null;
     if (!term || !session) return;
     if (!session.backend || term.cols <= 2) {
       // 预览会话没有 PTY 可挤，只能重建客户端画面
-      connectTerminalStream(session);
+      connectTerminalStream(column, session);
       return;
     }
     const cols = term.cols;
     const rows = term.rows;
     term.resize(cols - 1, rows);
-    postTerminalResize(session, cols - 1, rows);
+    postTerminalResize(column, session, cols - 1, rows);
     setTimeout(() => {
-      if (terminalXterm !== term) return;
-      connectTerminalStream(session);
+      if (column.xterm !== term) return;
+      connectTerminalStream(column, session);
     }, TERMINAL_REDRAW_NUDGE_MS);
   }
 
@@ -5421,7 +5473,8 @@ async function api(method, path, body) {
     if (terminalResizeDebounceTimer !== null) clearTimeout(terminalResizeDebounceTimer);
     terminalResizeDebounceTimer = setTimeout(() => {
       terminalResizeDebounceTimer = null;
-      fitTerminalXterm();
+      // 窗口 resize 波及所有列：逐列 fit，各列自己的闸门与定投照常生效。
+      for (const column of terminalColumns) fitTerminalXterm(column);
     }, delayMs);
   }
 
@@ -5449,9 +5502,11 @@ async function api(method, path, body) {
     if (cs.colorScheme !== "dark") Object.assign(theme, TERMINAL_ANSI_LIGHT);
     return theme;
   }
-  // 主题/皮肤/系统亮暗变化后重刷在跑的 xterm；不在跑（未建流）则等下次创建时自然取新值
+  // 主题/皮肤/系统亮暗变化后重刷在跑的各列 xterm；不在跑（未建流）则等下次创建时自然取新值
   function applyTerminalXtermTheme() {
-    if (terminalXterm) terminalXterm.options.theme = terminalXtermTheme();
+    for (const column of terminalColumns) {
+      if (column.xterm) column.xterm.options.theme = terminalXtermTheme();
+    }
   }
 
   // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×21.41——
@@ -5509,13 +5564,13 @@ async function api(method, path, body) {
     });
   }
 
-  function ensureTerminalXterm() {
-    const host = $("terminalXtermHost");
-    if (!host || terminalXterm || !window.Terminal) return terminalXterm;
+  function ensureTerminalXterm(column) {
+    const host = $(column.hostElementId);
+    if (!host || column.xterm || !window.Terminal) return column.xterm;
     // 隐藏期不创建：open 进 display:none 的宿主后，任何 fit 量到的都是兜底尺寸，
     // xterm 一出厂就是错的列宽（见 fitTerminalXterm 的闸）；建流前的同步 fit 同样
     // 经该闸拦下。
-    if ($("terminalView")?.hidden) return terminalXterm;
+    if ($("terminalView")?.hidden) return column.xterm;
     const term = new window.Terminal({
       allowProposedApi: true,
       convertEol: true,
@@ -5525,7 +5580,7 @@ async function api(method, path, body) {
       scrollback: 5000,
       theme: terminalXtermTheme(),
     });
-    terminalXterm = term;
+    column.xterm = term;
     // 剪贴板键位收口：xterm 内核对裸 Ctrl+V 会改发不可见控制字节并阻止浏览器
     // 粘贴（剪贴板内容永远进不了 PTY），对裸 Ctrl+C 恒发中断且同样阻止复制。
     // 自定义键位处理器先于 xterm 求值，返回 false 即把该键整体交还浏览器：
@@ -5543,55 +5598,55 @@ async function api(method, path, body) {
       // keypress 同样会补折叠一次），换行字节只在 keydown 那一次走与键入定投同一条
       // input POST 通路，字节内容按会话端点分派（terminalNewlineData）；组字态与
       // 已被兜底转发处理过的那一条按 terminalNewlineDeliveryBlocked 只拦不发，无
-      // 定投会话（预览态）同样只拦不发。
+      // 定投会话（预览态）同样只拦不发。定投目标读本列固化的会话 id，不读活动会话。
       if (terminalNewlineEnterKey(event)) {
-        if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && terminalBoundSessionId !== null) {
-          api("POST", `/api/terminal/sessions/${encodeURIComponent(terminalBoundSessionId)}/input`, { data: terminalNewlineData(terminalSessionFor(terminalBoundSessionId)) }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+        if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && column.boundSessionId !== null) {
+          api("POST", `/api/terminal/sessions/${encodeURIComponent(column.boundSessionId)}/input`, { data: terminalNewlineData(terminalSessionFor(column.boundSessionId)) }).catch((error) => console.warn("[terminal] input delivery failed:", error));
         }
         return false;
       }
       return true;
     });
     if (window.FitAddon?.FitAddon) {
-      terminalFitAddon = new window.FitAddon.FitAddon();
-      terminalXterm.loadAddon(terminalFitAddon);
+      column.fitAddon = new window.FitAddon.FitAddon();
+      column.xterm.loadAddon(column.fitAddon);
     }
     if (window.Unicode11Addon?.Unicode11Addon) {
-      terminalXterm.loadAddon(new window.Unicode11Addon.Unicode11Addon());
-      terminalXterm.unicode.activeVersion = "11";
+      column.xterm.loadAddon(new window.Unicode11Addon.Unicode11Addon());
+      column.xterm.unicode.activeVersion = "11";
     }
-    terminalXterm.open(host);
-    installTerminalFollowBottomGuard(terminalXterm);
+    term.open(host);
+    installTerminalFollowBottomGuard(term);
     if (window.WebglAddon?.WebglAddon) {
       try {
-        terminalWebglAddon = new window.WebglAddon.WebglAddon();
-        terminalWebglAddon.onContextLoss(() => {
-          terminalWebglAddon?.dispose();
-          terminalWebglAddon = null;
+        column.webglAddon = new window.WebglAddon.WebglAddon();
+        column.webglAddon.onContextLoss(() => {
+          column.webglAddon?.dispose();
+          column.webglAddon = null;
         });
-        terminalXterm.loadAddon(terminalWebglAddon);
+        column.xterm.loadAddon(column.webglAddon);
       } catch (error) {
-        terminalWebglAddon = null;
+        column.webglAddon = null;
         console.warn("[terminal] WebGL renderer unavailable, using DOM renderer:", error);
       }
     }
-    installTerminalImeAnchor(terminalXterm);
+    installTerminalImeAnchor(column, term);
     // 宿主尺寸观察：inspector 收放（约 ±292px）、字号变化等任何改变终端区宽度
-    // 的动作都不触发 window resize，只挂窗口监听会漏掉——直接观察宿主元素，
+    // 的动作都不触发 window resize，只挂窗口监听会漏掉——直接观察本列宿主元素，
     // 变动走与窗口 resize 同一条防抖入口。首次回调是 observe 的即时机，跳过
     // （建流前的同步 fit 已量准，避免同尺寸重复 POST）。
     if (typeof ResizeObserver === "function") {
       let hostObserverPrimed = false;
-      terminalHostResizeObserver = new ResizeObserver(() => {
+      column.hostResizeObserver = new ResizeObserver(() => {
         if (!hostObserverPrimed) {
           hostObserverPrimed = true;
           return;
         }
         debounceTerminalFit();
       });
-      terminalHostResizeObserver.observe(host);
+      column.hostResizeObserver.observe(host);
     }
-    return terminalXterm;
+    return column.xterm;
   }
 
   // 输入法只认焦点输入框。xterm 的隐藏框平时停在屏幕外，组字时再按光标拉回；
@@ -5610,12 +5665,12 @@ async function api(method, path, body) {
       && Number.isFinite(height) && height > 0;
   }
 
-  function armTerminalImeAnchor() {
-    terminalImeHoldFrame = null;
-    const textarea = terminalImeAnchorTextarea;
-    if (!textarea || terminalImeHold) return;
+  function armTerminalImeAnchor(column) {
+    column.imeHoldFrame = null;
+    const textarea = column.imeAnchorTextarea;
+    if (!textarea || column.imeHold) return;
     if (!terminalImeAnchorReady(textarea)) {
-      terminalImeHoldFrame = requestAnimationFrame(armTerminalImeAnchor);
+      column.imeHoldFrame = requestAnimationFrame(() => armTerminalImeAnchor(column));
       return;
     }
     textarea.style.setProperty("--ime-hold-left", textarea.style.left);
@@ -5630,17 +5685,17 @@ async function api(method, path, body) {
       compositionView.style.setProperty("--ime-hold-top", textarea.style.top);
       compositionView.classList.add("ime-hold");
     }
-    terminalImeHold = { textarea, compositionView };
+    column.imeHold = { textarea, compositionView };
   }
 
-  function releaseTerminalImeAnchor() {
-    const pendingFit = terminalImeFitPending;
-    const hold = terminalImeHold;
-    terminalImeHold = null;
-    terminalImeFitPending = false;
-    if (terminalImeHoldFrame !== null) {
-      cancelAnimationFrame(terminalImeHoldFrame);
-      terminalImeHoldFrame = null;
+  function releaseTerminalImeAnchor(column) {
+    const pendingFit = column.imeFitPending;
+    const hold = column.imeHold;
+    column.imeHold = null;
+    column.imeFitPending = false;
+    if (column.imeHoldFrame !== null) {
+      cancelAnimationFrame(column.imeHoldFrame);
+      column.imeHoldFrame = null;
     }
     if (hold) {
       hold.textarea.classList.remove("ime-hold");
@@ -5654,15 +5709,18 @@ async function api(method, path, body) {
         hold.compositionView.style.removeProperty("--ime-hold-top");
       }
     }
-    if (pendingFit) fitTerminalXterm();
+    if (pendingFit) fitTerminalXterm(column);
   }
 
-  function installTerminalImeAnchor(term) {
+  function installTerminalImeAnchor(column, term) {
     const textarea = term?.element?.querySelector(".xterm-helper-textarea");
     if (!textarea) return;
-    terminalImeAnchorTextarea = textarea;
-    textarea.addEventListener("compositionstart", armTerminalImeAnchor);
-    textarea.addEventListener("compositionend", releaseTerminalImeAnchor);
+    column.imeAnchorTextarea = textarea;
+    // 监听回调把列固进闭包，关流时按引用成对摘除（见 closeTerminalStream）。
+    column.imeArmHandler = () => armTerminalImeAnchor(column);
+    column.imeReleaseHandler = () => releaseTerminalImeAnchor(column);
+    textarea.addEventListener("compositionstart", column.imeArmHandler);
+    textarea.addEventListener("compositionend", column.imeReleaseHandler);
   }
 
   // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
@@ -5677,29 +5735,30 @@ async function api(method, path, body) {
     session.shell.pid = state.pid || "—";
   }
 
-  async function connectTerminalStream(session, { revive = true } = {}) {
+  async function connectTerminalStream(column, session, { revive = true } = {}) {
     // 隐藏期不建流：流连着 xterm 实例，隐藏期建流等于把首帧回放任进错误列宽里
     // 折行（见 fitTerminalXterm 的闸）。闸放在 closeTerminalStream 之前——离开
     // 终端页后活着的那条流，不能被隐藏期的重渲染路径（fetch 完成、轮询）关掉。
     if ($("terminalView")?.hidden) return;
-    closeTerminalStream();
-    const term = ensureTerminalXterm();
+    closeTerminalStream(column);
+    const term = ensureTerminalXterm(column);
     if (!term) return;
+    // 应答定投：该列的 xterm 实例只服务本次连接的会话，键入与 TUI 查询的自动应答
+    // 一律发往建连时固化的会话 id，不读页级活动会话——切换后旧会话迟到的字节
+    // 与其回调不可能经此实例打进别的 PTY。预览会话无后端，定投为空，键入直接
+    // 落空（与旧行为一致）。定投先于建流前 fit 固化：fit 的 resize POST 也走
+    // 本列定投的会话（见 fitTerminalXterm）。
+    const boundSessionId = session?.backend ? session.id : null;
+    column.boundSessionId = boundSessionId;
     // 建流前先同步 fit：SSE 首帧回放与 rAF 谁先到达是竞速，回放若按 xterm 出厂
     // 默认列宽（80）落进缓冲区，之后加大列宽不会重排已折行内容——先量准列宽、
     // 把真实尺寸 POST 进 PTY，再开流收首帧。
-    fitTerminalXterm();
+    fitTerminalXterm(column);
     term.reset();
     // 建流即焦点回守：进页、切签、新建、降级重试都经此处，终端的隐藏输入框
     // 重新拿到焦点，其后的键入与 Ctrl+C/V 才不会静默落空。
     term.focus();
-    // 应答定投：该 xterm 实例只服务本次连接的会话，键入与 TUI 查询的自动应答
-    // 一律发往建连时固化的会话 id，不读当前活动会话——切换后旧会话迟到的字节
-    // 与其回调不可能经此实例打进别的 PTY。预览会话无后端，定投为空，键入直接
-    // 落空（与旧行为一致）。
-    const boundSessionId = session?.backend ? session.id : null;
-    terminalBoundSessionId = boundSessionId;
-    terminalInputDisposable = term.onData((data) => {
+    column.inputDisposable = term.onData((data) => {
       if (boundSessionId === null) return;
       api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     });
@@ -5718,22 +5777,23 @@ async function api(method, path, body) {
         if (revived) session.backendState = revived;
       } catch (error) { console.warn(`[terminal] session revive failed (${session.id}):`, error); }
     }
-    terminalEventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
-    terminalEventSource.addEventListener("snapshot", (event) => {
+    column.eventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
+    column.eventSource.addEventListener("snapshot", (event) => {
       try {
         absorbTerminalSnapshot(term, session, JSON.parse(event.data));
       } catch {}
     });
-    terminalEventSource.addEventListener("data", (event) => {
+    column.eventSource.addEventListener("data", (event) => {
       try { term.write(JSON.parse(event.data)); } catch {}
     });
-    terminalEventSource.onerror = () => {
+    column.eventSource.onerror = () => {
     };
   }
 
   function scheduleTerminalFit() {
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (currentView === "terminal") fitTerminalXterm();
+      // 终端区几何变化波及所有列：逐列 fit，各列自己的闸门与定投照常生效。
+      if (currentView === "terminal") for (const column of terminalColumns) fitTerminalXterm(column);
     }));
   }
 
@@ -5779,6 +5839,7 @@ async function api(method, path, body) {
     const tabs = $("terminalTabs");
     if (!tabs) return;
     const sessions = terminalSessionMap();
+    const activeId = terminalActiveSessionId();
     const html = Object.entries(sessions).map(([id, session]) => {
       // 标签副行：一键启动的会话优先显示 agent 名（快照自带，不等归属轮询），
       // 其后才是归属注入的 agent.name，最后回落外壳名。
@@ -5792,8 +5853,8 @@ async function api(method, path, body) {
       const brandId = /^[\w-]+$/.test(rawBrandId) ? rawBrandId : "";
       const tabIcon = brandId ? `<span class="terminal-tab-brand" data-terminal-brand="${brandId}">${shellBadge}</span>` : shellBadge;
       return `
-      <button type="button" class="terminal-tab${id === activeTerminalPreviewId ? " active" : ""}" role="tab"
-        aria-selected="${id === activeTerminalPreviewId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
+      <button type="button" class="terminal-tab${id === activeId ? " active" : ""}" role="tab"
+        aria-selected="${id === activeId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
         ${tabIcon}
         <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(tabAgent)}</small></span>
         <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
@@ -5841,7 +5902,7 @@ async function api(method, path, body) {
   }
 
   async function refreshActiveTerminalRequests() {
-    const session = terminalSessionFor(activeTerminalPreviewId);
+    const session = terminalSessionFor(terminalActiveSessionId());
     if (!session?.backend || !session.agent?.instanceId) {
       if (session?.backend) session.requests = [];
       return;
@@ -5878,7 +5939,7 @@ async function api(method, path, body) {
   }
 
   function renderTerminalSessionData() {
-    const session = terminalSessionFor(activeTerminalPreviewId);
+    const session = terminalSessionFor(terminalActiveSessionId());
     if (!session) return;
     $("terminalSessionName").textContent = session.label;
     $("terminalSessionPath").textContent = session.cwd;
@@ -6192,10 +6253,10 @@ async function api(method, path, body) {
   // 关停后清空本地会话状态：页签、流、活动 id 一并走，下次启动从服务端清单重建。
   // 页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时它读的是预览稿种子会话。
   function clearTerminalLocalSessions() {
-    closeTerminalStream();
+    closeAllTerminalStreams();
     terminalBackendReady = false;
     terminalBackendSessions = {};
-    activeTerminalPreviewId = null;
+    setTerminalActiveSessionId(null);
     rememberTerminalSessionId(null);
     const tabs = $("terminalTabs");
     if (tabs) {
@@ -6480,7 +6541,7 @@ async function api(method, path, body) {
     return api("POST", "/api/terminal/agent-sessions", { agentId, cwd, ...terminalCreateSize() })
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
-        activeTerminalPreviewId = created.id;
+        setTerminalActiveSessionId(created.id);
         rememberTerminalSessionId(created.id);
         renderTerminalPreviewSession();
       })
@@ -6496,7 +6557,7 @@ async function api(method, path, body) {
       api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", ...terminalCreateSize() })
         .then((created) => {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
-          activeTerminalPreviewId = created.id;
+          setTerminalActiveSessionId(created.id);
           rememberTerminalSessionId(created.id);
           renderTerminalPreviewSession();
         })
@@ -6540,7 +6601,7 @@ async function api(method, path, body) {
     }
     const unavailable = $("terminalUnavailable");
     if (unavailable) unavailable.hidden = true;
-    const session = terminalSessionFor(activeTerminalPreviewId);
+    const session = terminalSessionFor(terminalActiveSessionId());
     if (!session) {
       // 零会话：关掉最后一个标签后，或退出再回归时本就是零会话——留在终端页
       // 落空态（空背景 + 文字提示），不退出、也不挂静态占位数据。
@@ -6554,7 +6615,7 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
-    connectTerminalStream(session, { revive });
+    connectTerminalStream(terminalFocusedColumn(), session, { revive });
     if (currentView === "terminal") scheduleTerminalFit();
   }
 
@@ -6571,7 +6632,11 @@ async function api(method, path, body) {
   // 顺带一并清掉的还有：错列宽折行、组字锚点悬挂、以及连接已死却无人重建的死角。
   function syncTerminalDataStream() {
     if (!document.hidden) return;
-    if (terminalEventSource || terminalXterm) closeTerminalStream();
+    // 多列语义：隐藏拆流拆全部列——每列各拆各的流、各毁各的实例，切回各列
+    // 各按镜像重建（见 switchView / renderTerminalPreviewSession 的补挂通路）。
+    for (const column of terminalColumns) {
+      if (column.eventSource || column.xterm) closeTerminalStream(column);
+    }
   }
 
   // 活跃真值流的活性门控与轮询完全一致：terminal-backend 就绪、窗口可见、
@@ -6670,13 +6735,13 @@ async function api(method, path, body) {
         // 关标签即会话关闭：空壳防抖计数同步清零，不留陈旧计数
         terminalHollowStreak.delete(id);
         const remaining = Object.keys(terminalSessionMap());
-        if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
-        rememberTerminalSessionId(activeTerminalPreviewId);
+        if (terminalActiveSessionId() === id) setTerminalActiveSessionId(remaining[0] || null);
+        rememberTerminalSessionId(terminalActiveSessionId());
         if (remaining.length === 0) {
           // 预览期的「至少保留一个终端标签」遗规已随真实 PTY 失效：最后一个
           // 标签照常可关，但关掉后不退出终端页——退出再回归只会挂一个没有会话
           // 的空页。留在页内落空态（空背景 + 文字提示），「+」留在原处直接新建。
-          closeTerminalStream();
+          closeAllTerminalStreams();
           renderTerminalPreviewTabs();
           renderTerminalEmptyState();
           return;
@@ -6684,7 +6749,7 @@ async function api(method, path, body) {
         renderTerminalPreviewSession();
         return;
       }
-      activeTerminalPreviewId = id;
+      setTerminalActiveSessionId(id);
       rememberTerminalSessionId(id);
       renderTerminalPreviewSession();
     });
@@ -6701,7 +6766,7 @@ async function api(method, path, body) {
       // 手动收放即接管：清系统收拢标记；空壳态拉回再按会话锁存，1s 轮询的
       // 空壳自动收拢不再与之打架（归属恢复时锁存一并出集合，回默认形态）。
       terminalInspectorHollowCollapsed = false;
-      const session = terminalSessionFor(activeTerminalPreviewId);
+      const session = terminalSessionFor(terminalActiveSessionId());
       if (session && !collapsed && !session.agent) terminalInspectorUserPinned.add(session.id);
       else if (session) terminalInspectorUserPinned.delete(session.id);
       // inspector 收放直接改变终端区宽度（约 292px）却不触发 window resize：
@@ -6715,14 +6780,14 @@ async function api(method, path, body) {
     try { applyTerminalTabsHidden(localStorage.getItem(TERMINAL_TABS_HIDDEN_KEY) === "1"); } catch { applyTerminalTabsHidden(false); }
     $("terminalTabsToggleBtn").onclick = () => {
       setTerminalTabsHidden(!terminalTabsHidden);
-      terminalXterm?.focus();
+      focusTerminalXterm();
     };
     $("terminalRedrawBtn").onclick = () => {
       redrawTerminalScreen();
-      terminalXterm?.focus();
+      focusTerminalXterm();
     };
-    $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); terminalXterm?.focus(); };
-    $("terminalFontIncBtn").onclick = () => { nudgeTerminalFontSize(1); terminalXterm?.focus(); };
+    $("terminalFontDecBtn").onclick = () => { nudgeTerminalFontSize(-1); focusTerminalXterm(); };
+    $("terminalFontIncBtn").onclick = () => { nudgeTerminalFontSize(1); focusTerminalXterm(); };
     // 最近请求：失败行点击就地展开/收起错误详情（与请求日志大板行展开同模式）；
     // 列表每拍轮询重建，展开态由 terminalRequestExpanded 行键集合承载。
     $("terminalRequestList")?.addEventListener("click", (e) => {
@@ -6741,7 +6806,7 @@ async function api(method, path, body) {
     }, { passive: false });
     // 点终端屏（含 xterm 四周留白）也聚焦：留白区的点击不会触发 xterm 自身的
     // 聚焦，其后的键入会静默落空。
-    $("terminalScreen").addEventListener("mousedown", () => terminalXterm?.focus());
+    $("terminalScreen").addEventListener("mousedown", () => focusTerminalXterm());
     document.addEventListener("keydown", (event) => {
       if (currentView !== "terminal") return;
       const delta = isTerminalFontZoomKey(event);
@@ -6750,8 +6815,8 @@ async function api(method, path, body) {
       nudgeTerminalFontSize(delta);
     });
     // 键盘兜底转发：xterm 靠隐藏输入框收键，首开未就绪/未聚焦的窗口里按键落到
-    // 页面主体直接丢失。捕获阶段把可打印键与回车/退格转投当前活动会话；方向键、
-    // F 键、Tab 等不劫持，宁缺毋错。这里读活动会话是刻意的：兜底只在焦点不在
+    // 页面主体直接丢失。捕获阶段把可打印键与回车/退格转投焦点列的活跃会话；方向键、
+    // F 键、Tab 等不劫持，宁缺毋错。这里读焦点列活跃会话是刻意的：兜底只在焦点不在
     // xterm 时触发，不存在 onData 定投机制所防的跨会话误投问题。
     document.addEventListener("keydown", (event) => {
       if (currentView !== "terminal") return;
@@ -6761,8 +6826,10 @@ async function api(method, path, body) {
       // "\r" 就等于替用户按下提交；Ctrl/Meta/Alt 的放行只针对其余键。
       const newlineEnter = terminalNewlineEnterKey(event);
       if (!newlineEnter && (event.ctrlKey || event.metaKey || event.altKey)) return;
+      const column = terminalFocusedColumn();
+      if (!column) return;
       let data = null;
-      if (newlineEnter) data = terminalNewlineData(terminalSessionFor(activeTerminalPreviewId));
+      if (newlineEnter) data = terminalNewlineData(terminalSessionFor(column.activeSessionId));
       else if (event.key && event.key.length === 1) data = event.key;
       else if (event.key === "Enter") data = "\r";
       else if (event.key === "Backspace") data = "\x7f";
@@ -6771,10 +6838,10 @@ async function api(method, path, body) {
       const active = document.activeElement;
       if (active?.classList?.contains("xterm-helper-textarea")) return;
       if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
-      const session = terminalSessionFor(activeTerminalPreviewId);
+      const session = terminalSessionFor(column.activeSessionId);
       if (!session?.backend) return;
       event.preventDefault();
-      terminalXterm?.focus();
+      column.xterm?.focus();
       api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     }, true);
     $("terminalRetryBtn").onclick = () => dispatchTerminalUnavailableAction();
@@ -6795,7 +6862,7 @@ async function api(method, path, body) {
         status: "idle", metrics: null,
         requests: [], output: [["dim", "Windows PowerShell"], ["", ""], ["prompt-line", "PS D:\\dev> "], ["dim", "等待输入…"]],
       };
-      activeTerminalPreviewId = id;
+      setTerminalActiveSessionId(id);
       renderTerminalPreviewSession();
     };
     $("terminalAddMenuCancel").onclick = () => closeTerminalAddMenu();
@@ -7663,8 +7730,9 @@ async function api(method, path, body) {
       // 例外是挂过后台：那条流连同实例已被可见性闸拆掉，这里就是它的重挂点。补挂
       // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
       // 最后一屏，要新壳仍然点页签。
-      if (!terminalXterm) renderTerminalPreviewSession({ revive: false });
-      else terminalXterm.focus();
+      const terminalColumn = terminalFocusedColumn();
+      if (!terminalColumn?.xterm) renderTerminalPreviewSession({ revive: false });
+      else terminalColumn.xterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
       loadInstalledTerminalAgents(); // 进页补热：60s TTL 内近零成本，过期才真实探测

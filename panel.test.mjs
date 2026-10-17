@@ -2907,7 +2907,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(panelJs.includes("allowProposedApi: true"), "xterm 构造开启 allowProposedApi（unicode 附件属提案 API，不开则 loadAddon 抛错）");
     assert.ok(panelMjs.includes("/panel/assets/xterm-unicode11.js") && panelMjs.includes("addon-unicode11"), "panel-host 路由服务 unicode11 资产");
     assert.ok(panelMjs.includes("/panel/assets/xterm-webgl.js") && panelMjs.includes("addon-webgl"), "panel-host 路由服务 WebGL 资产");
-    assert.ok(panelJs.includes("terminalWebglAddon.onContextLoss") && panelJs.includes("WebGL renderer unavailable"), "WebGL 渲染不可用时回退 DOM 渲染");
+    assert.ok(panelJs.includes("webglAddon.onContextLoss") && panelJs.includes("WebGL renderer unavailable"), "WebGL 渲染不可用时回退 DOM 渲染");
     assert.ok(panelJs.includes('fontFamily: \'ui-monospace, "Cascadia Mono"'), "终端使用稳定的等宽字体栈测量尺寸");
     assert.ok(panelJs.includes("function scheduleTerminalFit()"), "终端显示后重新调度一次尺寸适配");
     assert.ok(panelJs.includes('terminalReturnView = currentView;'), "返回目标取进来时所在的视图（看板）");
@@ -3424,10 +3424,12 @@ describe("panel.html 设置全页视图", () => {
       return src;
     };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"].map(srcOf).join("\n");
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
+      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId"].map(srcOf).join("\n");
     // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
-      let activeTerminalPreviewId = initialId;
+      const terminalColumns = [{ activeSessionId: initialId }];
       let terminalBackendSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
@@ -3440,7 +3442,7 @@ describe("panel.html 设置全页视图", () => {
       const terminalPreviewSessions = {};
       ${bodies}
       rebuildTerminalBackendSessions(items);
-      return { active: activeTerminalPreviewId, ids: Object.keys(terminalBackendSessions) };
+      return { active: terminalActiveSessionId(), ids: Object.keys(terminalBackendSessions) };
     `)(store, items, initialId);
     const three = [{ id: "t-old" }, { id: "t-mid" }, { id: "t-new" }];
 
@@ -7422,13 +7424,13 @@ describe("虚拟终端归属前端（adapter + 映射口径）", () => {
     assert.ok(panelJs.includes("function renderTerminalSessionData()"), "数据层渲染独立成函数");
     const renderBody = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
     assert.ok(renderBody.includes("renderTerminalSessionData();"), "结构层渲染复用数据层");
-    assert.ok(renderBody.includes("connectTerminalStream(session, { revive });"), "SSE 只在结构层重连，且把复活口径透传下去");
+    assert.ok(renderBody.includes("connectTerminalStream(terminalFocusedColumn(), session, { revive });"), "SSE 只在结构层重连，且把复活口径透传下去（建流落在焦点列）");
     assert.ok(!panelJs.includes("预览至少保留一个终端标签"), "「至少保留一个终端标签」预览遗规已移除");
     assert.ok(!panelJs.includes("ids.length <= 1"), "关闭守卫不再按数量拦截");
     assert.ok(panelJs.includes("remaining.length === 0"), "最后一个标签照常可关");
     const zeroBranch = panelJs.match(/if \(remaining\.length === 0\) \{[\s\S]*?\n        \}/)?.[0];
     assert.ok(zeroBranch, "零会话分支可取样");
-    assert.ok(zeroBranch.includes("closeTerminalStream()"), "零会话分支先收流");
+    assert.ok(zeroBranch.includes("closeAllTerminalStreams()"), "零会话分支先收流（全部列）");
     assert.ok(zeroBranch.includes("renderTerminalPreviewTabs()"), "零会话分支重渲页签，关掉的标签即时退场");
     assert.ok(zeroBranch.includes("renderTerminalEmptyState()"), "关完最后一个标签留在页内落空态，不退出终端页");
     assert.ok(!zeroBranch.includes("closeTerminalPreview"), "零会话不再退出终端页（退出再回归只会挂一个没有会话的空页）");
@@ -7539,7 +7541,7 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
         getAttribute: () => null,
       };
       const $ = (id) => el(id);
-      let activeTerminalPreviewId = "s1";
+      function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
       let terminalInspectorHollowCollapsed = false;
@@ -7686,7 +7688,7 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
         getAttribute: () => null,
       };
       const $ = (id) => el(id);
-      let activeTerminalPreviewId = "s1";
+      function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
       let terminalInspectorHollowCollapsed = false;
@@ -7766,7 +7768,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   });
 
   it("接线：snapshot 帧走 reset 入口，data 帧与 onerror 不 reset", () => {
-    const body = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    const body = panelJs.match(/function connectTerminalStream\(column, session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(body, "connectTerminalStream found in panel.js");
     assert.ok(body.includes("absorbTerminalSnapshot(term, session, JSON.parse(event.data))"), "snapshot 帧路由到 reset 入口");
     const dataHandler = body.match(/addEventListener\("data"[\s\S]*?\n    \}\);/)?.[0];
@@ -7783,7 +7785,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard"]
+    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -7792,16 +7794,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const state = { posts: [], eventSources: [], terms: [], sessions: {} };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
-      let terminalEventSource = null;
-      let terminalXterm = null;
-      let terminalFitAddon = null;
-      let terminalHostResizeObserver = null;
-      let terminalInputDisposable = null;
-      let terminalBoundSessionId = null;
-      let terminalImeHold = null;
-      let terminalImeHoldFrame = null;
-      let terminalImeFitPending = false;
-      let terminalImeAnchorTextarea = null;
+      // M3 列架构：单值群迁入列对象——沙箱声明列数组（单列 = 列 0），
+      // 访问器经列字段读回，断言面与旧单例口径一致。
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -7842,10 +7836,12 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       }
       const EventSource = FakeEventSource;
       ${bodies}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
       return {
-        connect: connectTerminalStream, close: closeTerminalStream,
-        xterm: () => terminalXterm, source: () => terminalEventSource,
-        fitAddon: () => terminalFitAddon, input: () => terminalInputDisposable,
+        connect: (session, opts) => connectTerminalStream(terminalColumns[0], session, opts),
+        close: () => closeTerminalStream(terminalColumns[0]),
+        xterm: () => terminalColumns[0].xterm, source: () => terminalColumns[0].eventSource,
+        fitAddon: () => terminalColumns[0].fitAddon, input: () => terminalColumns[0].inputDisposable,
       };
     `)(state);
     return { sandbox, state };
@@ -7996,22 +7992,23 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   });
 
   it("接线结构：onData 移出 ensure、定投不读活动会话、清理路径销毁实例、resize 监听只绑一次", () => {
-    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure, "ensureTerminalXterm found in panel.js");
     assert.ok(!ensure.includes("onData"), "ensure 不再注册 onData");
     assert.ok(!ensure.includes("activeTerminalPreviewId"), "ensure 不读活动会话");
+    assert.ok(!ensure.includes("terminalActiveSessionId"), "ensure 也不经收口读活跃指针（M3 列架构）");
     assert.ok(!ensure.includes('addEventListener("resize"'), "resize 监听移出 ensure（防逐连接重复注册）");
-    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(column, session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect, "connectTerminalStream found in panel.js");
     assert.ok(connect.includes("session?.backend ? session.id : null"), "建连时固化会话 id");
     assert.ok(connect.includes("term.onData("), "onData 挂在每连接专属实例上");
     assert.ok(connect.includes("encodeURIComponent(boundSessionId)"), "input POST 走固化的会话 id");
     assert.ok(!connect.includes("activeTerminalPreviewId"), "connect 全链路不再读活动会话");
-    const close = panelJs.match(/function closeTerminalStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const close = panelJs.match(/function closeTerminalStream\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(close, "closeTerminalStream found in panel.js");
-    assert.ok(close.includes("terminalInputDisposable?.dispose()"), "清理路径先拆 onData 监听器");
-    assert.ok(close.includes("terminalXterm?.dispose()"), "清理路径销毁 xterm 实例");
-    assert.ok(close.includes("terminalFitAddon = null"), "fitAddon 引用随实例释放");
+    assert.ok(close.includes("column.inputDisposable?.dispose()"), "清理路径先拆 onData 监听器");
+    assert.ok(close.includes("column.xterm?.dispose()"), "清理路径销毁 xterm 实例");
+    assert.ok(close.includes("column.fitAddon = null"), "fitAddon 引用随实例释放");
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听收编到初始化一次性绑定");
   });
@@ -8026,6 +8023,212 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const restarts = state.posts.filter((p) => p.url.includes("/restart"));
     assert.equal(restarts.length, 1, "点页签等主动通路照旧一次点击一个新壳");
     assert.equal(restarts[0].url, "/api/terminal/sessions/sess-x/restart", "复活打在该会话上");
+  });
+});
+
+// 终端列架构地基（M3 纯重构）：终端单例群迁入列对象——每列持有自己的 xterm /
+// fit·webgl addon / SSE 流 / ResizeObserver / 键入定投 id / IME 组字态 / 活跃会话
+// 指针；列与宿主元素解耦（只记宿主 id，建流时才取元素）。本期列数组恒为单列
+//（列 0 绑 #terminalXtermHost），行为与单列逐点一致；下面在桩环境构造两列，
+// 把多列纪律钉死在架构层：onData 与应答定投本列会话不串话、fit 各量各的宿主
+// 各 POST 各的会话、隐藏拆流拆全部列、关闭一列不伤另一列。
+describe("终端列架构（按列索引隔离）", () => {
+  function twoColumnSandbox() {
+    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme",
+      "connectTerminalStream", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize",
+      "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
+      "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
+      "installTerminalFollowBottomGuard", "terminalImeAnchorReady", "armTerminalImeAnchor",
+      "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const fitFloorSrc = panelJs.match(/const TERMINAL_FIT_MIN_HOST_WIDTH_PX = \d+;[\s\S]{0,80}?const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = \d+;/)?.[0];
+    assert.ok(fitFloorSrc, "窗口级尺寸闸的下限可从 panel.js 取到（测试不抄数字）");
+    const state = { posts: [], eventSources: [], terms: [], sessions: {}, windowHidden: false };
+    const sandbox = new Function("state", `
+      const API_BASE = "http://panel.test";
+      const terminalFontSize = 13;
+      const terminalBackendReady = true;
+      const terminalBackendSessions = state.sessions;
+      const terminalPreviewSessions = {};
+      const view = { hidden: false };
+      const hosts = {
+        hostA: { clientWidth: 1200, clientHeight: 600, measured: { cols: 150, rows: 40 } },
+        hostB: { clientWidth: 800, clientHeight: 400, measured: { cols: 100, rows: 26 } },
+      };
+      const $ = (id) => (id === "terminalView" ? view : hosts[id] ?? null);
+      const document = { documentElement: {}, get hidden() { return state.windowHidden; } };
+      const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
+      const console = { warn: () => {} };
+      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function requestAnimationFrame(cb) { cb(); return 0; }
+      function cancelAnimationFrame() {}
+      class FakeFitAddon {
+        fit() {
+          const m = this.term?.openedHost?.measured;
+          if (!m) return;
+          this.term.cols = m.cols;
+          this.term.rows = m.rows;
+        }
+      }
+      const window = { FitAddon: { FitAddon: FakeFitAddon } };
+      window.Terminal = class {
+        constructor(options) { this.options = options; this.cols = 80; this.rows = 24; this.disposed = false; this._disposables = new Set(); state.terms.push(this); }
+        loadAddon(addon) { addon.term = this; }
+        open(hostEl) { this.openedHost = hostEl; }
+        onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
+        fire(data) { this._fire?.(data); }
+        write() {}
+        reset() {}
+        dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+        attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
+        focus() {}
+        hasSelection() { return false; }
+      };
+      class FakeEventSource {
+        constructor(url) { this.url = url; this.closed = false; state.eventSources.push(this); }
+        addEventListener() {}
+        set onerror(fn) {}
+        close() { this.closed = true; }
+      }
+      const EventSource = FakeEventSource;
+      class FakeResizeObserver {
+        constructor(cb) { this.cb = cb; this.observed = []; this.disconnected = false; }
+        observe(el) { this.observed.push(el); }
+        disconnect() { this.disconnected = true; }
+      }
+      const ResizeObserver = FakeResizeObserver;
+      ${fitFloorSrc}
+      ${bodies}
+      const terminalColumns = [createTerminalColumn("hostA"), createTerminalColumn("hostB")];
+      return {
+        columns: terminalColumns,
+        hosts,
+        connect: (column, session, opts) => connectTerminalStream(column, session, opts),
+        close: (column) => closeTerminalStream(column),
+        fit: (column) => fitTerminalXterm(column),
+        sync: () => syncTerminalDataStream(),
+      };
+    `)(state);
+    return { sandbox, state };
+  }
+  const colBackendSession = (id) => ({ id, label: id, backend: true, shell: {}, output: [], backendState: null });
+  const colPostsTo = (state, kind) => state.posts.filter((p) => p.url.includes(`/${kind}`));
+  const wireColSessions = (state, ...ids) => {
+    for (const id of ids) state.sessions[id] = colBackendSession(id);
+    return ids.map((id) => state.sessions[id]);
+  };
+
+  it("结构：列数组初始即单列、列 0 绑唯一宿主 #terminalXtermHost，单值群全部入列", () => {
+    assert.ok(panelJs.includes('const terminalColumns = [createTerminalColumn("terminalXtermHost")]'),
+      "列数组初始即列 0，绑现有唯一宿主");
+    const factory = panelJs.match(/function createTerminalColumn\(hostElementId\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(factory, "createTerminalColumn found in panel.js");
+    for (const field of ["activeSessionId", "xterm", "fitAddon", "webglAddon", "eventSource",
+      "hostResizeObserver", "inputDisposable", "boundSessionId", "imeHold", "imeHoldFrame",
+      "imeFitPending", "imeAnchorTextarea"]) {
+      assert.ok(factory.includes(field), `列对象持有 ${field}`);
+    }
+    // 旧模块级单值群不得残留（全部迁入列对象）
+    for (const legacy of ["let terminalXterm", "let terminalFitAddon", "let terminalWebglAddon",
+      "let terminalEventSource", "let terminalHostResizeObserver", "let terminalInputDisposable",
+      "let terminalBoundSessionId", "let terminalImeHold", "let terminalImeAnchorTextarea",
+      "let activeTerminalPreviewId"]) {
+      assert.ok(!panelJs.includes(legacy), `模块级单值「${legacy}」已迁入列对象`);
+    }
+  });
+
+  it("两列各连各的会话：onData 键入与修饰 Enter 应答都定投本列会话，互不串话", async () => {
+    const { sandbox, state } = twoColumnSandbox();
+    const [colA, colB] = sandbox.columns;
+    const [sessA, sessB] = wireColSessions(state, "sess-a", "sess-b");
+    await sandbox.connect(colA, sessA);
+    await sandbox.connect(colB, sessB);
+    assert.equal(colA.eventSource.url, "http://panel.test/api/terminal/sessions/sess-a/stream", "列 A 的流定投 sess-a");
+    assert.equal(colB.eventSource.url, "http://panel.test/api/terminal/sessions/sess-b/stream", "列 B 的流定投 sess-b");
+    colA.xterm.fire("ls\r");
+    colB.xterm.fire("pwd\r");
+    assert.deepEqual(colPostsTo(state, "input").map((p) => [p.url, p.body.data]), [
+      ["/api/terminal/sessions/sess-a/input", "ls\r"],
+      ["/api/terminal/sessions/sess-b/input", "pwd\r"],
+    ], "两列键入各进各的会话");
+    colA.xterm.keyEventHandler({ type: "keydown", key: "Enter", ctrlKey: true });
+    colB.xterm.keyEventHandler({ type: "keydown", key: "Enter", shiftKey: true });
+    const inputs = colPostsTo(state, "input");
+    assert.equal(inputs[2].url, "/api/terminal/sessions/sess-a/input", "列 A 的修饰 Enter 应答定投 sess-a");
+    assert.equal(inputs[3].url, "/api/terminal/sessions/sess-b/input", "列 B 的修饰 Enter 应答定投 sess-b");
+  });
+
+  it("fit 各量各的宿主、各 POST 各的会话；一列尺寸变化只重 POST 本列", async () => {
+    const { sandbox, state } = twoColumnSandbox();
+    const [colA, colB] = sandbox.columns;
+    const [sessA, sessB] = wireColSessions(state, "sess-a", "sess-b");
+    await sandbox.connect(colA, sessA);
+    await sandbox.connect(colB, sessB);
+    const resize = () => colPostsTo(state, "resize");
+    assert.deepEqual(resize().map((p) => [p.url, p.body]), [
+      ["/api/terminal/sessions/sess-a/resize", { cols: 150, rows: 40 }],
+      ["/api/terminal/sessions/sess-b/resize", { cols: 100, rows: 26 }],
+    ], "建流首帧各按本列宿主实测尺寸 POST 本列会话");
+    sandbox.hosts.hostA.measured = { cols: 170, rows: 40 };
+    sandbox.fit(colA);
+    const posts = resize();
+    assert.equal(posts.length, 3, "列 A 宿主变宽：只有列 A 重 POST");
+    assert.equal(posts[2].url, "/api/terminal/sessions/sess-a/resize");
+    assert.deepEqual(posts[2].body, { cols: 170, rows: 40 }, "POST 的是列 A 自己的新实测尺寸");
+  });
+
+  it("隐藏拆流拆全部列：每条流都断、每个实例都销毁；可见时两列都不误拆", async () => {
+    const { sandbox, state } = twoColumnSandbox();
+    const [colA, colB] = sandbox.columns;
+    const [sessA, sessB] = wireColSessions(state, "sess-a", "sess-b");
+    await sandbox.connect(colA, sessA);
+    await sandbox.connect(colB, sessB);
+    const [srcA, srcB] = state.eventSources;
+    const [termA, termB] = state.terms;
+    state.windowHidden = true;
+    sandbox.sync();
+    assert.equal(srcA.closed, true, "列 A 的流断开");
+    assert.equal(srcB.closed, true, "列 B 的流断开");
+    assert.equal(termA.disposed, true, "列 A 的 xterm 销毁");
+    assert.equal(termB.disposed, true, "列 B 的 xterm 销毁");
+    assert.equal(colA.eventSource, null);
+    assert.equal(colA.xterm, null);
+    assert.equal(colB.eventSource, null);
+    assert.equal(colB.xterm, null);
+
+    const visible = twoColumnSandbox();
+    const [vcA, vcB] = visible.sandbox.columns;
+    const [vsA, vsB] = wireColSessions(visible.state, "sess-a", "sess-b");
+    await visible.sandbox.connect(vcA, vsA);
+    await visible.sandbox.connect(vcB, vsB);
+    visible.sandbox.sync();
+    assert.equal(visible.state.eventSources[0].closed, false, "窗口可见：列 A 的流保持");
+    assert.equal(visible.state.eventSources[1].closed, false, "窗口可见：列 B 的流保持");
+  });
+
+  it("关闭一列不伤另一列：A 的流/实例/定投清空后 B 照常收发", async () => {
+    const { sandbox, state } = twoColumnSandbox();
+    const [colA, colB] = sandbox.columns;
+    const [sessA, sessB] = wireColSessions(state, "sess-a", "sess-b");
+    await sandbox.connect(colA, sessA);
+    await sandbox.connect(colB, sessB);
+    const termA = colA.xterm;
+    const termB = colB.xterm;
+    sandbox.close(colA);
+    assert.equal(termA.disposed, true, "列 A 实例销毁");
+    assert.equal(colA.eventSource, null, "列 A 流引用清空");
+    assert.equal(colA.boundSessionId, null, "列 A 定投清空");
+    assert.equal(colB.xterm, termB, "列 B 实例原样");
+    assert.equal(colB.boundSessionId, "sess-b", "列 B 定投不动");
+    termA.fire("\x1b[?1;2c"); // 列 A 旧实例的迟到应答：监听器表已随实例清空
+    termB.fire("still-here");
+    assert.deepEqual(colPostsTo(state, "input").map((p) => [p.url, p.body.data]),
+      [["/api/terminal/sessions/sess-b/input", "still-here"]],
+      "列 A 关闭后键入无出口，列 B 照投 sess-b");
   });
 });
 
@@ -8141,10 +8344,10 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
   });
 
   it("接线：open 之后安装护栏；实例缺 element/viewport 时安全返回", () => {
-    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure, "ensureTerminalXterm found in panel.js");
-    const openAt = ensure.indexOf("terminalXterm.open(host)");
-    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(terminalXterm)");
+    const openAt = ensure.indexOf("term.open(host)");
+    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(term)");
     assert.ok(openAt > 0 && guardAt > openAt, "护栏装在 open 之后（xterm 自己的 scroll 监听先行绑定）");
     const src = panelJs.match(/function installTerminalFollowBottomGuard\(term\) \{[\s\S]*?\n  \}/)?.[0];
     const fn = new Function(`${src}\nreturn installTerminalFollowBottomGuard;`)();
@@ -8222,10 +8425,11 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
     const state = { posts: [], documentListeners: [], focusCount: 0 };
     const sandbox = new Function("state", `
       let currentView = "terminal";
-      let activeTerminalPreviewId = "sess-a";
       let terminalBackendReady = true;
       let terminalPollTimer = null;
-      let terminalXterm = null;
+      // M3 列架构：活跃指针与 xterm 实例都迁入列对象；兜底转发读焦点列（本期恒为列 0）。
+      const terminalColumns = [{ hostElementId: "terminalXtermHost", activeSessionId: "sess-a", xterm: null }];
+      function terminalFocusedColumn() { return terminalColumns[0]; }
       const terminalBackendSessions = {};
       const terminalPreviewSessions = {};
       const sessions = {
@@ -8283,11 +8487,11 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       ${newlineGate}
       ${newlineData}
       ${src}
-      terminalXterm = { focus() { state.focusCount += 1; } };
+      terminalColumns[0].xterm = { focus() { state.focusCount += 1; } };
       initTerminalPreview();
       return {
         document,
-        setActive: (v) => { activeTerminalPreviewId = v; },
+        setActive: (v) => { terminalColumns[0].activeSessionId = v; },
         setView: (v) => { currentView = v; },
       };
     `)(state);
@@ -8397,6 +8601,8 @@ describe("虚拟终端 resize 防抖", () => {
     const fn = new Function("state", "setTimeout", "clearTimeout", `
       let terminalResizeDebounceTimer = null;
       const TERMINAL_RESIZE_DEBOUNCE_MS = 120;
+      // M3 列架构：防抖静默期后逐列 fit；沙箱摆单列（列 0），与现行单列行为一致。
+      const terminalColumns = [{}];
       function fitTerminalXterm() { state.fits += 1; }
       ${src}
       return debounceTerminalFit;
@@ -8427,14 +8633,14 @@ describe("虚拟终端 resize 防抖", () => {
 
   it("接线：resize 监听挂防抖入口；建流先同步 fit 再开流（回放到达前列宽已量准）", () => {
     assert.ok(panelJs.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听走防抖");
-    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(column, session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect, "connectTerminalStream found in panel.js");
-    const fitAt = connect.indexOf("fitTerminalXterm();");
-    const streamAt = connect.indexOf("terminalEventSource = new EventSource");
+    const fitAt = connect.indexOf("fitTerminalXterm(column)");
+    const streamAt = connect.indexOf("column.eventSource = new EventSource");
     assert.ok(fitAt > 0 && streamAt > 0 && fitAt < streamAt,
       "建流先同步 fit 再开 SSE——首帧回放不再按 xterm 出厂默认列宽（80）折行");
     const schedule = panelJs.match(/function scheduleTerminalFit\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(schedule.includes("fitTerminalXterm()"), "终端页显示路径仍直接 fit");
+    assert.ok(schedule.includes("fitTerminalXterm(column)"), "终端页显示路径仍直接 fit（逐列）");
   });
 });
 
@@ -8564,7 +8770,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
+    const bodies = ["createTerminalColumn", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -8584,17 +8790,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const host = {};
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
-      let terminalEventSource = null;
-      let terminalXterm = null;
-      let terminalFitAddon = null;
-      let terminalHostResizeObserver = null;
-      let terminalInputDisposable = null;
-      let terminalBoundSessionId = null;
-      let terminalImeHold = null;
-      let terminalImeHoldFrame = null;
-      let terminalImeFitPending = false;
-      let terminalImeAnchorTextarea = null;
-      let activeTerminalPreviewId = "sess-a";
+      // M3 列架构：单值群迁入列对象——沙箱摆单列（列 0 绑唯一宿主），访问器读列字段。
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
       const host = { clientWidth: 1200, clientHeight: 600 };
@@ -8616,17 +8812,18 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       function requestAnimationFrame(cb) { cb(); }
       class FakeFitAddon {
         fit() {
-          if (!terminalXterm) return;
+          const term = this.term;
+          if (!term) return;
           // 复刻真实测量：视图隐藏时 getComputedStyle 只能给出百分比兜底值
           const m = view.hidden ? state.hiddenFallback : state.measured;
-          terminalXterm.cols = m.cols;
-          terminalXterm.rows = m.rows;
+          term.cols = m.cols;
+          term.rows = m.rows;
         }
       }
       const window = { FitAddon: { FitAddon: FakeFitAddon } };
       window.Terminal = class {
         constructor(options) { this.options = options; this.cols = 80; this.rows = 24; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); this.focusCount = 0; this.keyEventHandler = null; this.selection = false; state.terms.push(this); }
-        loadAddon() {}
+        loadAddon(addon) { addon.term = this; }
         open(hostEl) { this.openedHost = hostEl; }
         onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
         fire(data) { this._fire?.(data); }
@@ -8665,12 +8862,15 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       function releaseTerminalImeAnchor() {}
       function installTerminalImeAnchor() {}
       ${bodies}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
       return {
-        connect: connectTerminalStream, close: closeTerminalStream,
-        fit: fitTerminalXterm, debounce: debounceTerminalFit,
+        connect: (session, opts) => connectTerminalStream(terminalColumns[0], session, opts),
+        close: () => closeTerminalStream(terminalColumns[0]),
+        fit: () => fitTerminalXterm(terminalColumns[0]),
+        debounce: debounceTerminalFit,
         sync: syncTerminalDataStream,
         flushTimers: () => { for (const { cb } of pendingTimers.splice(0)) cb(); },
-        xterm: () => terminalXterm, source: () => terminalEventSource,
+        xterm: () => terminalColumns[0].xterm, source: () => terminalColumns[0].eventSource,
         host: () => host,
         setViewHidden: (v) => { view.hidden = v; },
         setWindowHidden: (v) => { state.windowHidden = v; },
@@ -8827,12 +9027,13 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     assert.ok(!panelJs.includes('shell: "powershell", cols: 120'), "创建入参不再硬编码列宽");
     const create = panelJs.match(/function terminalCreateSize\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(create, "terminalCreateSize found in panel.js");
-    assert.ok(create.includes("terminalXterm.cols"), "有 xterm 实例时取其实测 cols/rows");
-    const withXterm = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)({ cols: 96, rows: 30 });
+    assert.ok(create.includes("column.xterm.cols"), "有 xterm 实例时取其实测 cols/rows（焦点列，M3 列架构）");
+    const runCreate = new Function("column", `${create}\nfunction terminalFocusedColumn() { return column; }\nreturn terminalCreateSize;`);
+    const withXterm = runCreate({ xterm: { cols: 96, rows: 30 } });
     assert.deepEqual(withXterm(), { cols: 96, rows: 30 });
-    const fallback = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)(null);
+    const fallback = runCreate({ xterm: null });
     assert.deepEqual(fallback(), { cols: 120, rows: 34 }, "首装载入尚无实例才回落兜底值");
-    const junk = new Function("terminalXterm", `${create}\nreturn terminalCreateSize;`)({ cols: "x", rows: null });
+    const junk = runCreate({ xterm: { cols: "x", rows: null } });
     assert.deepEqual(junk(), { cols: 120, rows: 34 }, "实例尺寸异常时回落兜底");
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init, "initTerminalPreview found in panel.js");
@@ -8940,17 +9141,15 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
     const frames = [];
     let frameSeq = 0;
     const api = new Function("textarea", "term", `
-      let terminalImeHold = null;
-      let terminalImeHoldFrame = null;
-      let terminalImeFitPending = false;
-      let terminalImeAnchorTextarea = null;
+      // M3 列架构：IME 组字态按列隔离，锚点状态全在列对象上。
+      const column = { imeHold: null, imeHoldFrame: null, imeFitPending: false, imeAnchorTextarea: null, imeArmHandler: null, imeReleaseHandler: null };
       const frames = [];
       let frameSeq = 0;
       function requestAnimationFrame(cb) { const id = ++frameSeq; frames.push({ id, cb }); return id; }
       function cancelAnimationFrame(id) { const i = frames.findIndex((f) => f.id === id); if (i >= 0) frames.splice(i, 1); }
       ${bodies}
       return {
-        install: () => installTerminalImeAnchor(term),
+        install: () => installTerminalImeAnchor(column, term),
         flushFrame: () => { const frame = frames.shift(); if (frame) frame.cb(); },
         queuedFrames: () => frames.length,
       };
@@ -9009,20 +9208,22 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
   });
 
   it("组字期间尺寸变化先不缩放，组字结束后补一次", () => {
-    const fitSrc = panelJs.match(/function fitTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
-    const measurableSrc = panelJs.match(/function terminalHostMeasurable\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const fitSrc = panelJs.match(/function fitTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
+    const measurableSrc = panelJs.match(/function terminalHostMeasurable\(column\) \{[\s\S]*?\n  \}/)?.[0];
     const fitFloorSrc = panelJs.match(/const TERMINAL_FIT_MIN_HOST_WIDTH_PX = \d+;[\s\S]{0,80}?const TERMINAL_FIT_MIN_HOST_HEIGHT_PX = \d+;/)?.[0];
-    const releaseSrc = panelJs.match(/function releaseTerminalImeAnchor\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const releaseSrc = panelJs.match(/function releaseTerminalImeAnchor\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(fitSrc && releaseSrc && measurableSrc && fitFloorSrc);
     const state = { fits: 0 };
     const holdTextarea = { classList: imeClassListStub(), style: imeStyleStub() };
     const api = new Function("state", "holdTextarea", `
-      let terminalImeHold = null;
-      let terminalImeHoldFrame = null;
-      let terminalImeFitPending = false;
-      const terminalFitAddon = { fit() { state.fits += 1; } };
-      const terminalXterm = { cols: 80, rows: 24 };
-      const activeTerminalPreviewId = "sess-a";
+      // M3 列架构：组字挂起与补 fit 都是列内状态。
+      const column = {
+        hostElementId: "terminalXtermHost",
+        xterm: { cols: 80, rows: 24 },
+        fitAddon: { fit() { state.fits += 1; } },
+        boundSessionId: "sess-a",
+        imeHold: null, imeHoldFrame: null, imeFitPending: false,
+      };
       const $ = (id) => (id === "terminalXtermHost" ? { clientWidth: 1200, clientHeight: 600 } : { hidden: false });
       function terminalSessionFor() { return null; }
       function postTerminalResize() {}
@@ -9032,9 +9233,9 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
       ${fitSrc}
       ${releaseSrc}
       return {
-        fit: fitTerminalXterm,
-        hold: () => { terminalImeHold = { textarea: holdTextarea }; },
-        release: releaseTerminalImeAnchor,
+        fit: () => fitTerminalXterm(column),
+        hold: () => { column.imeHold = { textarea: holdTextarea }; },
+        release: () => releaseTerminalImeAnchor(column),
       };
     `)(state, holdTextarea);
     api.fit();
@@ -9102,13 +9303,14 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     const state = { readout: { textContent: "13" }, fits: [], xterm: withXterm ? { options: { fontSize: 13 } } : null };
     const api = new Function("store", "state", `
       let terminalFontSize = 13;
-      let terminalXterm = state.xterm;
+      // M3 列架构：字号仍是全局单值，套用与重 fit 按列循环；沙箱摆单列（列 0）。
+      const terminalColumns = [{ xterm: state.xterm }];
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
         setItem: (k, v) => { store[k] = String(v); },
       };
       const $ = (id) => (id === "terminalFontSizeValue" ? state.readout : null);
-      function fitTerminalXterm() { state.fits.push(terminalXterm.options.fontSize); }
+      function fitTerminalXterm(column) { state.fits.push(column.xterm.options.fontSize); }
       ${bodies}
       return {
         nudge: nudgeTerminalFontSize,
@@ -9224,14 +9426,14 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
   });
 
   it("接线结构：剪贴板键位交还浏览器、焦点四路回守、死焦点调用已清除", () => {
-    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure?.includes("term.attachCustomKeyEventHandler("), "每个 xterm 实例挂自定义键位处理器");
     assert.ok(ensure?.includes('if (intent === "paste") return false;'), "裸 Ctrl+V 整体交还浏览器（原生粘贴 → xterm paste 通路 → PTY）");
     assert.ok(ensure?.includes('if (intent === "copy" && term.hasSelection()) return false;'), "裸 Ctrl+C 有选中才交还复制，无选中交回 xterm 发中断");
-    const connect = panelJs.match(/function connectTerminalStream\(session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    const connect = panelJs.match(/function connectTerminalStream\(column, session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(connect?.includes("term.focus()"), "建流（进页/切签/新建/降级重试）后焦点回守");
-    assert.ok(panelJs.includes("terminalXterm?.focus()"), "字号 ± 与终端屏点击后焦点回守");
-    assert.ok(panelJs.includes("else terminalXterm.focus();"), "重进终端页（实例尚存）也回焦");
+    assert.ok(panelJs.includes("focusTerminalXterm()"), "字号 ± 与终端屏点击后焦点回守（焦点列收口，M3 列架构）");
+    assert.ok(panelJs.includes("else terminalColumn.xterm.focus();"), "重进终端页（实例尚存）也回焦");
     assert.ok(!panelJs.includes("terminalCommandInput"), "聚焦不存在输入框的死调用已清除");
   });
 
@@ -9240,10 +9442,10 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
     assert.ok(actions.includes('id="terminalFontDecBtn"'), "− 按钮在重画按钮左侧");
     assert.ok(actions.includes('id="terminalFontSizeValue"'), "字号读数在重画按钮左侧");
     assert.ok(actions.includes('id="terminalFontIncBtn"'), "+ 按钮在重画按钮左侧");
-    const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure?.includes("fontSize: terminalFontSize"), "新建 xterm 实例使用记住的字号");
     const apply = panelJs.match(/function applyTerminalFontSize\(size[\s\S]*?\n  \}/)?.[0];
-    assert.ok(apply?.includes("fitTerminalXterm()"), "字号变更后重新 fit，底栏行列随 resize 联动");
+    assert.ok(apply?.includes("fitTerminalXterm(column)"), "字号变更后逐列重新 fit，底栏行列随 resize 联动");
     assert.ok(panelJs.includes('if (currentView !== "terminal") return;'), "快捷键路径只在终端页激活态生效");
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init?.includes("restoreTerminalFontSize()"), "终端页初始化即恢复记忆字号");
@@ -9265,17 +9467,18 @@ describe("终端重画按钮（挤宽度让 agent 重画 + 重建客户端画面
   function sandbox(term, session) {
     const calls = { posted: [], rebuilt: 0, timers: [] };
     const api = new Function("term", "session", "calls", `
-      let terminalXterm = term;
-      const activeTerminalPreviewId = "s1";
+      // M3 列架构：重画作用于焦点列，会话取本列活跃页签、实例校验盯本列。
+      const column = { xterm: term, activeSessionId: "s1" };
+      function terminalFocusedColumn() { return column; }
       function terminalSessionFor() { return session; }
-      function postTerminalResize(s, cols, rows) { calls.posted.push([cols, rows]); }
+      function postTerminalResize(c, s, cols, rows) { calls.posted.push([cols, rows]); }
       function connectTerminalStream() { calls.rebuilt += 1; }
       function setTimeout(fn, ms) { calls.timers.push({ fn, ms }); return calls.timers.length; }
       ${redrawSource()}
       return {
         redraw: redrawTerminalScreen,
         flushTimers: () => { for (const t of calls.timers.splice(0)) t.fn(); },
-        swapTerm: (next) => { terminalXterm = next; },
+        swapTerm: (next) => { column.xterm = next; },
       };
     `)(term, session, calls);
     return { api, calls };
@@ -9376,10 +9579,12 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
 
     // 桩环境真跑拍计数：计数跟归属观测走——闪断清零、连续空壳累积、会话消失即清
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"].map(extractFn).join("\n");
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
+      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId"].map(extractFn).join("\n");
     const store = {};
     const counter = new Function("store", `
-      let activeTerminalPreviewId = "t1";
+      const terminalColumns = [{ activeSessionId: "t1" }];
       let terminalBackendSessions = {};
       let terminalDefaultCwd = "C:\\\\";
       const terminalHollowStreak = new Map();
@@ -9412,13 +9617,13 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
 
   it("fit 同尺寸跳过：与 PTY 侧已知尺寸一致时不 POST，拿不到/不完整/不一致照旧（保守）", () => {
     const fit = extractFn("fitTerminalXterm");
-    assert.ok(fit.includes("terminalFitAddon?.fit();"), "fit 本身照跑（客户端重排不靠 POST 陪跑）");
+    assert.ok(fit.includes("column.fitAddon?.fit();"), "fit 本身照跑（客户端重排不靠 POST 陪跑）");
     assert.ok(fit.includes("session.backendState"), "以会话的 PTY 侧已知尺寸为比对基准");
-    assert.ok(fit.includes("postTerminalResize(session, terminalXterm.cols, terminalXterm.rows)"),
+    assert.ok(fit.includes("postTerminalResize(column, session, column.xterm.cols, column.xterm.rows)"),
       "比对不过照旧 POST（保守：宁可多一次对齐，不漏一次）");
     // 挤一列再恢复的重画链不经这道闸：直接调 postTerminalResize，链上尺寸本就不同
     const redraw = panelJs.match(/const TERMINAL_REDRAW_NUDGE_MS = \d+;\n  function redrawTerminalScreen\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(redraw?.includes("postTerminalResize(session, cols - 1, rows)"), "重画挤宽度链不经 fit 闸");
+    assert.ok(redraw?.includes("postTerminalResize(column, session, cols - 1, rows)"), "重画挤宽度链不经 fit 闸");
 
     // 桩环境真跑四种形态：backendState 缺失 / 完整且一致 / 不一致 / 不完整
     const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize"].map(extractFn).join("\n");
@@ -9427,13 +9632,16 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const state = { posts: [], measured: { cols: 119, rows: 26 }, session: { id: "s1", backend: true, backendState: null } };
     const makeFit = () => new Function("state", `
       const API_BASE = "http://panel.test";
-      let terminalXterm = { cols: 0, rows: 0 };
-      let terminalFitAddon = {
-        fit() { terminalXterm.cols = state.measured.cols; terminalXterm.rows = state.measured.rows; },
+      // M3 列架构：fit 按列量本列宿主、POST 本列定投会话。
+      const column = {
+        hostElementId: "terminalXtermHost",
+        xterm: { cols: 0, rows: 0 },
+        fitAddon: {
+          fit() { column.xterm.cols = state.measured.cols; column.xterm.rows = state.measured.rows; },
+        },
+        boundSessionId: "s1",
+        imeHold: null, imeFitPending: false,
       };
-      let terminalImeHold = null;
-      let terminalImeFitPending = false;
-      let activeTerminalPreviewId = "s1";
       const view = { hidden: false };
       const host = { clientWidth: 1200, clientHeight: 600 };
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
@@ -9441,7 +9649,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       function terminalSessionFor(id) { return state.session; }
       ${fitFloorSrc}
       ${bodies}
-      return fitTerminalXterm;
+      return () => fitTerminalXterm(column);
     `)(state);
     const resizePosts = () => state.posts.filter((p) => p.method === "POST" && p.url.includes("/resize"));
     const fitFn = makeFit();
@@ -9480,11 +9688,12 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
     };
     const tabsApi = new Function("$", "escapeHtml", "sessions", `
-      let activeTerminalPreviewId = "t1";
+      const terminalColumns = [{ activeSessionId: "t1" }];
+      function terminalActiveSessionId() { return terminalColumns[0].activeSessionId; }
       let terminalTabsRenderedHtml = "";
       function terminalSessionMap() { return sessions; }
       ${extractFn("renderTerminalPreviewTabs")}
-      return { render: renderTerminalPreviewTabs, setActive: (id) => { activeTerminalPreviewId = id; } };
+      return { render: renderTerminalPreviewTabs, setActive: (id) => { terminalColumns[0].activeSessionId = id; } };
     `)((id) => (id === "terminalTabs" ? tabsEl : null), escapeHtml, sessions);
     tabsApi.render();
     tabsApi.render();
@@ -9522,7 +9731,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
         getAttribute: () => null,
       };
       const $ = (id) => (id === "terminalRequestList" ? requestList : el(id));
-      let activeTerminalPreviewId = "s1";
+      function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
       let terminalInspectorHollowCollapsed = false;
@@ -10105,7 +10314,10 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       let terminalFirstConnectSettled = true;
       // 失败兜底按宿主现态分派落页（connectTerminalBackend catch 读它）
       let terminalHostState = "unknown";
-      const activeTerminalPreviewId = "t1";
+      // M3 列架构：活跃指针在列 0 上；渲染读它、建流落焦点列。
+      const terminalColumns = [{ activeSessionId: "t1" }];
+      function terminalActiveSessionId() { return terminalColumns[0]?.activeSessionId ?? null; }
+      function terminalFocusedColumn() { return terminalColumns[0] || null; }
       const currentView = "terminal";
       const console = { warn: () => {} };
       async function fetchTerminalSessions() {
@@ -10116,7 +10328,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       function terminalSessionFor() { return state.session; }
       function renderTerminalSessionData() { state.renderedData += 1; }
       function renderTerminalPreviewTabs() { state.renderedTabs += 1; }
-      function connectTerminalStream(session) { state.connected = session; }
+      function connectTerminalStream(column, session) { state.connected = session; }
       function scheduleTerminalFit() {}
       function pollTerminalSessions() { state.polled += 1; }
       function syncTerminalActivityStream() { state.synced += 1; }
@@ -10271,7 +10483,6 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     const rebuilt = [];
     const vm = new Function("api", "rebuildTerminalBackendSessions", "rememberTerminalSessionId", "terminalCwdInitial", "terminalCreateSize", `
       let terminalBackendReady = false;
-      let activeTerminalPreviewId = null;
       ${src}
       return { run: () => fetchTerminalSessions().then(() => terminalBackendReady) };
     `);
@@ -10561,6 +10772,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize",
       // 新终端置活跃要写存档；沙盒的 localStorage 用内存桩真跑，不碰真存档。
       "rememberTerminalSessionId",
+      // 活跃指针/焦点列收口（M3 列架构）：新建落在焦点列，置活跃写列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
       // 目录解析三件套：confirm 记目录、open 预填，都靠它们取默认值与持久化。
       "rememberTerminalCwd", "loadTerminalCwd", "terminalCwdInitial"]
       .map(extractFn).join("\n");
@@ -10595,8 +10808,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     };
     const sandbox = new Function("$", "api", "toast", "panelError", "terminalBackendSession",
       "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", "localStorage", `
-      let activeTerminalPreviewId = null;
-      let terminalXterm = null;
+      // M3 列架构：活跃指针与 xterm 实例在列对象上（列 0）。
+      const terminalColumns = [{ activeSessionId: null, xterm: null }];
       let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
       const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
       let terminalAddMenuAgents = [];
@@ -10609,7 +10822,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         open: openTerminalAddMenu,
         select: selectTerminalAddAgent,
         confirm: confirmTerminalAddMenu,
-        activeId: () => activeTerminalPreviewId,
+        activeId: () => terminalActiveSessionId(),
         sessions: terminalBackendSessions,
       };
     `)((id) => els[id] ?? null, api,
@@ -10706,8 +10919,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       : Promise.resolve({}));
     const fn = new Function("api", "toast", "panelError", "terminalBackendSession",
       "terminalBackendSessions", "renderTerminalPreviewSession", `
-      let activeTerminalPreviewId = null;
-      let terminalXterm = null;
+      const terminalColumns = [{ activeSessionId: null, xterm: null }];
+      function terminalFocusedColumn() { return terminalColumns[0]; }
+      function setTerminalActiveSessionId(id) { terminalColumns[0].activeSessionId = id; }
       ${extractFn("terminalCreateSize")}
       ${extractFn("createAgentTerminal")}
       return { createAgentTerminal, sessions: terminalBackendSessions };
@@ -10764,12 +10978,13 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
-      const fn = new Function("$", "escapeHtml", "sessions", "activeTerminalPreviewId", `
+      const fn = new Function("$", "escapeHtml", "sessions", `
         let terminalTabsRenderedHtml = "";
+        function terminalActiveSessionId() { return "t1"; }
         function terminalSessionMap() { return sessions; }
         ${src}
         return renderTerminalPreviewTabs;
-      `)((id) => (id === "terminalTabs" ? tabs : null), escapeHtml, sessions, "t1");
+      `)((id) => (id === "terminalTabs" ? tabs : null), escapeHtml, sessions);
       fn();
       return tabs.innerHTML;
     };
@@ -10821,7 +11036,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     try {
       new Function("$", "escapeHtml", "sessions", `
         let terminalTabsRenderedHtml = "";
-        let activeTerminalPreviewId = "t1";
+        function terminalActiveSessionId() { return "t1"; }
         function terminalSessionMap() { return sessions; }
         ${extractFn("renderTerminalPreviewTabs")}
         return renderTerminalPreviewTabs;
