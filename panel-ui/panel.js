@@ -5594,9 +5594,11 @@ async function api(method, path, body) {
     return terminalXterm;
   }
 
-  // 输入法只认焦点输入框。xterm 的隐藏框平时停在屏幕外，组字时再按光标拉回，
-  // 但光标闪烁、回显和拼音变长会在组字未结束时继续改它，候选框就跟着抽、跟着飞。
-  // 组字开始后只钉一次落在画面内的位置，结束前逐帧拉回；结束后再放开。
+  // 输入法只认焦点输入框。xterm 的隐藏框平时停在屏幕外，组字时再按光标拉回；
+  // 组字未结束时内核每次渲染都把它改写到实时光标格（含一条 setTimeout 帧间递归），
+  // 高频输出下候选框被拽着跳。组字开始落位后把位置写成 CSS 自定义属性并挂
+  // ime-hold 类——样式表 !important 让内核的内联改写视觉失效，不逐帧抢写；
+  // 结束前不动，结束后摘类清属性放开。
   function terminalImeAnchorReady(textarea) {
     const left = Number.parseFloat(textarea.style.left);
     const top = Number.parseFloat(textarea.style.top);
@@ -5608,23 +5610,6 @@ async function api(method, path, body) {
       && Number.isFinite(height) && height > 0;
   }
 
-  function syncTerminalImeAnchor() {
-    terminalImeHoldFrame = null;
-    const hold = terminalImeHold;
-    if (!hold) return;
-    const { textarea } = hold;
-    if (!textarea.isConnected) {
-      releaseTerminalImeAnchor();
-      return;
-    }
-    textarea.style.left = hold.left;
-    textarea.style.top = hold.top;
-    textarea.style.width = hold.width;
-    textarea.style.height = hold.height;
-    textarea.style.lineHeight = hold.lineHeight;
-    terminalImeHoldFrame = requestAnimationFrame(syncTerminalImeAnchor);
-  }
-
   function armTerminalImeAnchor() {
     terminalImeHoldFrame = null;
     const textarea = terminalImeAnchorTextarea;
@@ -5633,24 +5618,41 @@ async function api(method, path, body) {
       terminalImeHoldFrame = requestAnimationFrame(armTerminalImeAnchor);
       return;
     }
-    terminalImeHold = {
-      textarea,
-      left: textarea.style.left,
-      top: textarea.style.top,
-      width: textarea.style.width,
-      height: textarea.style.height,
-      lineHeight: textarea.style.lineHeight,
-    };
-    terminalImeHoldFrame = requestAnimationFrame(syncTerminalImeAnchor);
+    textarea.style.setProperty("--ime-hold-left", textarea.style.left);
+    textarea.style.setProperty("--ime-hold-top", textarea.style.top);
+    textarea.style.setProperty("--ime-hold-height", textarea.style.height);
+    textarea.style.setProperty("--ime-hold-lineheight", textarea.style.lineHeight);
+    textarea.classList.add("ime-hold");
+    // 可见的组字预览块与输入框同被内核逐帧改写到活光标格，用同一组钉住值冻结。
+    const compositionView = textarea.parentElement?.querySelector(".composition-view") ?? null;
+    if (compositionView) {
+      compositionView.style.setProperty("--ime-hold-left", textarea.style.left);
+      compositionView.style.setProperty("--ime-hold-top", textarea.style.top);
+      compositionView.classList.add("ime-hold");
+    }
+    terminalImeHold = { textarea, compositionView };
   }
 
   function releaseTerminalImeAnchor() {
     const pendingFit = terminalImeFitPending;
+    const hold = terminalImeHold;
     terminalImeHold = null;
     terminalImeFitPending = false;
     if (terminalImeHoldFrame !== null) {
       cancelAnimationFrame(terminalImeHoldFrame);
       terminalImeHoldFrame = null;
+    }
+    if (hold) {
+      hold.textarea.classList.remove("ime-hold");
+      hold.textarea.style.removeProperty("--ime-hold-left");
+      hold.textarea.style.removeProperty("--ime-hold-top");
+      hold.textarea.style.removeProperty("--ime-hold-height");
+      hold.textarea.style.removeProperty("--ime-hold-lineheight");
+      if (hold.compositionView) {
+        hold.compositionView.classList.remove("ime-hold");
+        hold.compositionView.style.removeProperty("--ime-hold-left");
+        hold.compositionView.style.removeProperty("--ime-hold-top");
+      }
     }
     if (pendingFit) fitTerminalXterm();
   }
