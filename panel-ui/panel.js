@@ -3874,6 +3874,10 @@ async function api(method, path, body) {
         if (!terminalRestoreSaving && d.settings && typeof d.settings.terminalRestoreSessions === "boolean") {
           terminalRestoreSessions = d.settings.terminalRestoreSessions;
         }
+        // 「底部自动对齐」：同 restore 开关的回填纪律，保存中的那次切换不被回灌盖回。
+        if (!terminalBottomAlignSaving && d.settings && typeof d.settings.terminalBottomAutoAlign === "boolean") {
+          terminalBottomAutoAlign = d.settings.terminalBottomAutoAlign;
+        }
         if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
           injectEffortToggle.checked = d.settings.injectThinkingEffort;
         }
@@ -6254,6 +6258,16 @@ async function api(method, path, body) {
     return terminalRestoreSessions;
   }
 
+  // 「底部自动对齐」开关：settings.json 键 terminalBottomAutoAlign，缺省视为关（opt-in）。
+  // 面板加载时随 loadSettingsState 从 GET /api/settings 回填；读不到一律视为关。
+  let terminalBottomAutoAlign = false;
+  // 保存中守卫：一次切换未落库前再切换先翻回，也挡住设置回灌盖掉刚选的值。
+  let terminalBottomAlignSaving = false;
+
+  function terminalBottomAlignEnabled() {
+    return terminalBottomAutoAlign;
+  }
+
   // 关停后清空本地会话状态：页签、流、活动 id 一并走，下次启动从服务端清单重建。
   // 页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时它读的是预览稿种子会话。
   function clearTerminalLocalSessions() {
@@ -6397,10 +6411,12 @@ async function api(method, path, body) {
     };
     const settingsModal = $("terminalSettingsModal");
     const restoreToggle = $("terminalRestoreToggle");
+    const bottomAlignToggle = $("terminalBottomAlignToggle");
     const closeTerminalSettings = () => { if (settingsModal) settingsModal.classList.remove("show"); };
     const settingsGear = $("terminalSettingsBtn");
     if (settingsGear) settingsGear.onclick = () => {
       if (restoreToggle) restoreToggle.checked = terminalRestoreEnabled();
+      if (bottomAlignToggle) bottomAlignToggle.checked = terminalBottomAlignEnabled();
       if (settingsModal) settingsModal.classList.add("show");
     };
     const closeBtn = $("terminalSettingsCloseBtn");
@@ -6437,6 +6453,37 @@ async function api(method, path, body) {
       } finally {
         terminalRestoreSaving = false;
         restoreToggle.removeAttribute("aria-busy");
+      }
+    };
+    if (bottomAlignToggle) bottomAlignToggle.onchange = async () => {
+      if (terminalBottomAlignSaving) {
+        bottomAlignToggle.checked = !bottomAlignToggle.checked;
+        return;
+      }
+      const next = bottomAlignToggle.checked;
+      terminalBottomAlignSaving = true;
+      terminalBottomAutoAlign = next;
+      bottomAlignToggle.setAttribute("aria-busy", "true");
+      try {
+        const d = await api("POST", "/api/settings", { terminalBottomAutoAlign: next });
+        if (!d.ok) {
+          terminalBottomAutoAlign = !next;
+          bottomAlignToggle.checked = !next;
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.terminalBottomAutoAlign;
+          if (typeof saved === "boolean") {
+            terminalBottomAutoAlign = saved;
+            bottomAlignToggle.checked = saved;
+          }
+        }
+      } catch (e) {
+        terminalBottomAutoAlign = !next;
+        bottomAlignToggle.checked = !next;
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        terminalBottomAlignSaving = false;
+        bottomAlignToggle.removeAttribute("aria-busy");
       }
     };
   }

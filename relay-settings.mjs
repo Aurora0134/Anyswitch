@@ -109,6 +109,15 @@ export function parseTerminalRestoreSessions(raw) {
   return raw === false ? false : DEFAULT_TERMINAL_RESTORE_SESSIONS;
 }
 
+// 终端底部自动对齐开关：开启后向上翻看历史时自动裁掉终端画面下方多出的空白。
+// 默认关——新行为先 opt-in，缺失、畸形、旧版本没有这个键一律视为关，只有显式
+// 写入 true 才启用。
+export const DEFAULT_TERMINAL_BOTTOM_AUTO_ALIGN = false;
+
+export function parseTerminalBottomAutoAlign(raw) {
+  return raw === true ? true : DEFAULT_TERMINAL_BOTTOM_AUTO_ALIGN;
+}
+
 // 上游密钥缓存开关：开启后解密出的密钥在本进程内保留，后续请求不再每次重新
 // 读取；关掉时立即丢弃已保留的明文。默认开——每请求一次的密钥读取是链路上最
 // 脆的一环（要起一个外部进程，实测约 0.4s，且它在 2026-10-05 那次连续 70 分钟
@@ -274,6 +283,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
   const terminalHostManualStop = parseTerminalHostManualStop(raw.terminalHostManualStop);
   const terminalRestoreSessions = parseTerminalRestoreSessions(raw.terminalRestoreSessions);
+  const terminalBottomAutoAlign = parseTerminalBottomAutoAlign(raw.terminalBottomAutoAlign);
   const credentialCacheEnabled = parseCredentialCacheEnabled(raw.credentialCacheEnabled);
   const autoDownloadUpdates = parseAutoDownloadUpdates(raw.autoDownloadUpdates);
   const bleedingEdgeMode = parseBleedingEdgeMode(raw.bleedingEdgeMode);
@@ -295,6 +305,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       claudeBypassPermissions,
       terminalHostManualStop,
       terminalRestoreSessions,
+      terminalBottomAutoAlign,
       credentialCacheEnabled,
       autoDownloadUpdates,
       bleedingEdgeMode,
@@ -309,6 +320,7 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     claudeBypassPermissions,
     terminalHostManualStop,
     terminalRestoreSessions,
+    terminalBottomAutoAlign,
     credentialCacheEnabled,
     autoDownloadUpdates,
     bleedingEdgeMode,
@@ -405,6 +417,10 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 
   if (Object.prototype.hasOwnProperty.call(patch, "terminalRestoreSessions")) {
     updated.terminalRestoreSessions = parseTerminalRestoreSessions(patch.terminalRestoreSessions);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "terminalBottomAutoAlign")) {
+    updated.terminalBottomAutoAlign = parseTerminalBottomAutoAlign(patch.terminalBottomAutoAlign);
   }
 
   if (Object.prototype.hasOwnProperty.call(patch, "credentialCacheEnabled")) {
