@@ -5790,11 +5790,15 @@ async function api(method, path, body) {
     };
   }
 
+  // 同拍同步执行：五个调用方（页签条收展 / inspector 收放 / 空壳塌缩 / 会话
+  // 切换 / 进终端页）都在同一任务里刚改完布局再调它，同步 fit 经强制重排当场
+  // 量到新几何，容器与画布的变化落进同一帧。旧双 rAF 把适配推迟两帧、又依赖
+  // rAF 排队，主线程被会话输出占住时排到一百多毫秒后，其间画布停在旧尺寸，
+  // 收展瞬间画布与宿主错开整条页签高度——收起露 65px 空白条、展开溢出裁切
+  // 37px（2026-10-17 逐帧实测），这就是页签收展「抽搐」的主体来源。
   function scheduleTerminalFit() {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      // 终端区几何变化波及所有列：逐列 fit，各列自己的闸门与定投照常生效。
-      if (currentView === "terminal") for (const column of terminalColumns) fitTerminalXterm(column);
-    }));
+    // 终端区几何变化波及所有列：逐列 fit，各列自己的闸门与定投照常生效。
+    if (currentView === "terminal") for (const column of terminalColumns) fitTerminalXterm(column);
   }
 
   // 页签条收展（页头「隐藏页签/展示页签」钮）：整排收起会话页签给终端屏让高。
