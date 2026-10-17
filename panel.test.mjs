@@ -2942,9 +2942,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelJs.includes("正在等待模型继续输出") && !panelHtml.includes("正在等待模型继续输出"), "伪意图文案已移除");
     assert.ok(panelJs.includes('updateSparkline("terminalSparkTtft"'), "TTFT 折线复用看板渲染");
     assert.ok(panelJs.includes("metricsSection.hidden = !metrics"), "普通终端无监测数据时整块隐藏");
-    assert.ok(panelJs.includes('terminalColumnElementId(column, "terminalFootStats")'),
-      "底栏统计按列定址（M4 各列底栏各一份）");
-    assert.ok(panelJs.includes(".hidden = !metrics;"), "普通终端无底栏统计");
+    assert.ok(panelJs.includes('$("terminalFootStats").hidden = !metrics'), "普通终端无底栏统计");
     assert.ok(/\.terminal-footbar \{[^}]*font: 11px var\(--font-mono\)/.test(panelCss), "底栏字号提到 11px 保证可见");
     assert.ok(panelCss.includes(".terminal-foot-status > span") && footbar.includes('class="terminal-foot-status"'), "底栏状态区胶囊化提升存在感");
     assert.ok(panelCss.includes(".terminal-foot-stats[hidden] { display: none; }"), "底栏统计隐藏显式兜底");
@@ -3427,20 +3425,11 @@ describe("panel.html 设置全页视图", () => {
     };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
-      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到焦点列（M4）。
-      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
-      // M4 多列：rebuild 新增归属表对账/各列活跃合法化/列空自收；布局恢复门在沙箱里关着
-      "terminalSessionColumnIndex", "terminalColumnSessionEntries"].map(srcOf).join("\n");
+      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId"].map(srcOf).join("\n");
     // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       const terminalColumns = [{ activeSessionId: initialId }];
-      let terminalFocusedColumnIndex = 0;
-      // M4：归属表/恢复门/列空自收的桩——布局恢复不归本断言面
-      const terminalSessionColumnIndexes = new Map();
-      let terminalColumnLayoutRestored = true;
-      function restoreTerminalColumnLayout() {}
-      function collapseEmptyTerminalColumns() {}
-      function terminalSessionMap() { return terminalBackendSessions; }
       let terminalBackendSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
@@ -7533,11 +7522,6 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
   it("vm 真跑空壳收拢状态机：防抖按归属拍计数、细条收放、拉回锁定、归属恢复只展开系统收拢那次", () => {
     const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "renderTerminalSessionData found in panel.js");
-    // M4：会话栏/底栏外饰拆成按列函数，数据层逐列调用——沙箱一并抽取，列桩摆单列（列 0）
-    const chromeSrc = panelJs.match(/function renderTerminalColumnSessionChrome\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(chromeSrc, "renderTerminalColumnSessionChrome found in panel.js");
-    const colIdSrc = panelJs.match(/function terminalColumnElementId\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(colIdSrc, "terminalColumnElementId found in panel.js");
     // 防抖阈值与计数表从源码取样，测试不另抄一份数字：阈值改了这里就红，不靠人记得改。
     const streakSrc = panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;\n  const terminalHollowStreak = new Map\(\);/)?.[0];
     assert.ok(streakSrc, "空壳塌缩防抖的阈值与计数表可从 panel.js 取到");
@@ -7557,7 +7541,6 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
         getAttribute: () => null,
       };
       const $ = (id) => el(id);
-      const terminalColumns = [{ activeSessionId: "s1", elementIdSuffix: "" }];
       function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
@@ -7570,8 +7553,6 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
       function routeNodeName(x) { return x; }
       function terminalServingLabel() { return ""; }
       function terminalRequestItemHtml() { return ""; }
-      ${colIdSrc}
-      ${chromeSrc}
       ${src}
       return {
         render: renderTerminalSessionData,
@@ -7668,11 +7649,9 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 // 不再绑跳转；缓存字串挪出状态 pill 容器，做左段独立元素。
 describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数字串）", () => {
   it("tokens 悬停显全：原生 title 退役，styled tooltip 向上浮出且不被截断串裁剪", () => {
-    // 底栏随 M4 迁入按列外饰函数（各列底栏各一份，基名+后缀定址）
-    const render = panelJs.match(/function renderTerminalColumnSessionChrome\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(render, "renderTerminalColumnSessionChrome found in panel.js");
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(!render.includes("terminalFootTokens\").title"), "原生 title 赋值已退役");
-    assert.ok(render.includes('terminalColumnElementId(column, "terminalFootTokensTip")') && render.includes(".textContent = metrics.tokens"), "浮层文本随轮询同拍更新（按列定址）");
+    assert.ok(render.includes('$("terminalFootTokensTip").textContent = metrics.tokens'), "浮层文本随轮询同拍更新");
     assert.ok(panelHtml.includes('class="stats-tooltip terminal-foot-tip" id="terminalFootTokensTip"'), "浮层复用 stats-tooltip 组件");
     assert.ok(panelHtml.includes("terminal-foot-tokens-wrap"), "截断串外加定位壳（浮层不进 overflow:hidden 内）");
     assert.ok(/\.terminal-foot-tip \{[^}]*bottom: calc\(100% \+ 8px\)[^}]*right: 0/.test(panelCss), "底栏贴屏幕底，浮层向上且右对齐不出窗");
@@ -7680,8 +7659,7 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
   });
 
   it("失败语义色：仅最近一条请求失败时「N 次请求」字串转 danger 字色，最近一条正常即恢复常色", () => {
-    // 底栏随 M4 迁入按列外饰函数
-    const render = panelJs.match(/function renderTerminalColumnSessionChrome\([\s\S]*?\n  \}/)?.[0];
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(render.includes('classList.toggle("is-failed", session.requests[0]?.state === "failed")'),
       "字串只跟随最近一条请求的结果（requests[0] 即最新），历史失败行不粘红");
     assert.ok(!render.includes('session.requests.some((r) => r.state === "failed")'),
@@ -7692,11 +7670,6 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
   it("vm 真跑失败字色状态机：红→正常序列后字串恢复常色，历史失败行不粘红", () => {
     const src = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "renderTerminalSessionData found in panel.js");
-    // M4：会话栏/底栏外饰拆成按列函数，数据层逐列调用——沙箱一并抽取，列桩摆单列（列 0）
-    const chromeSrc = panelJs.match(/function renderTerminalColumnSessionChrome\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(chromeSrc, "renderTerminalColumnSessionChrome found in panel.js");
-    const colIdSrc = panelJs.match(/function terminalColumnElementId\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(colIdSrc, "terminalColumnElementId found in panel.js");
     const streakSrc = panelJs.match(/const TERMINAL_HOLLOW_COLLAPSE_STREAK = \d+;\n  const terminalHollowStreak = new Map\(\);/)?.[0];
     assert.ok(streakSrc, "空壳塌缩防抖的阈值与计数表可从 panel.js 取到");
     const state = { session: null };
@@ -7715,7 +7688,6 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
         getAttribute: () => null,
       };
       const $ = (id) => el(id);
-      const terminalColumns = [{ activeSessionId: "s1", elementIdSuffix: "" }];
       function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
@@ -7728,8 +7700,6 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
       function routeNodeName(x) { return x; }
       function terminalServingLabel() { return ""; }
       function terminalRequestItemHtml() { return ""; }
-      ${colIdSrc}
-      ${chromeSrc}
       ${src}
       return { render: renderTerminalSessionData, el };
     `)(state);
@@ -7757,11 +7727,9 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
     assert.ok(panelHtml.includes('</span>\n            <span id="terminalFootCache"'), "字串挪出状态 pill 容器，做左段独立元素（间距走底栏框架档）");
     assert.ok(!panelHtml.includes("terminalFootPid") && !panelHtml.includes("terminalFootSize"), "PID/UTF-8/尺寸徽标已撤除");
     assert.ok(!panelJs.includes("updateTerminalFootSize"), "底栏尺寸写入随徽标清退");
-    // 底栏随 M4 迁入按列外饰函数（各列底栏各一份，基名+后缀定址）
-    const render = panelJs.match(/function renderTerminalColumnSessionChrome\([\s\S]*?\n  \}/)?.[0];
-    assert.ok(render.includes('terminalColumnElementId(column, "terminalFootCache")'), "缓存元素按列定址");
-    assert.ok(render.includes(".hidden = !metrics || metrics.requestCount === 0"), "无指标或零请求时隐藏");
-    assert.ok(render.includes(".textContent = `缓存 ${metrics.cache}%`"), "文案随轮询同拍更新");
+    const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(render.includes('$("terminalFootCache").hidden = !metrics || metrics.requestCount === 0'), "无指标或零请求时隐藏");
+    assert.ok(render.includes('$("terminalFootCache").textContent = `缓存 ${metrics.cache}%`'), "文案随轮询同拍更新");
     const cacheRule = panelCss.match(/\.terminal-foot-cache \{([^}]*)\}/)?.[1];
     assert.ok(cacheRule && !/border|background|padding/.test(cacheRule), "无徽标壳，纯文字与 tokens 字串同构");
     assert.ok(panelCss.includes(".terminal-foot-cache[hidden]"), "隐藏显式兜底");
@@ -8264,584 +8232,6 @@ describe("终端列架构（按列索引隔离）", () => {
   });
 });
 
-// 多列布局与列管理（M4）：列落到 DOM 与布局——列容器 DOM、焦点列、会话归属、
-// 列空自收、localStorage 持久化。本期无用户入口（拖拽分列在 M5），列增删走内部
-// API；硬约束是单列时 DOM 结构与视觉与 master 逐点一致。
-describe("终端多列布局与列管理（M4）", () => {
-  function extractM4(name) {
-    const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-    assert.ok(src, `${name} found in panel.js`);
-    return src;
-  }
-
-  it("结构：列对象持 id 后缀与按列页签指纹；焦点列收口读焦点列索引；归属表与上限就位", () => {
-    const factory = extractM4("createTerminalColumn");
-    assert.ok(factory.includes("elementIdSuffix"), "列对象持元素 id 后缀（列 0 为空串，基名 id 不动）");
-    assert.ok(factory.includes("tabsRenderedHtml"), "页签 innerHTML 指纹按列各持一份");
-    const focused = extractM4("terminalFocusedColumn");
-    assert.ok(focused.includes("terminalFocusedColumnIndex"), "焦点列收口读焦点列索引，不再恒返列 0");
-    const activeGet = extractM4("terminalActiveSessionId");
-    assert.ok(activeGet.includes("terminalFocusedColumn()"), "页级活跃读点落到焦点列");
-    const activeSet = extractM4("setTerminalActiveSessionId");
-    assert.ok(activeSet.includes("terminalFocusedColumn()"), "页级活跃写点落到焦点列");
-    assert.ok(panelJs.includes("const terminalSessionColumnIndexes = new Map()"),
-      "会话→列归属表独立成表（会话对象每拍轮询重建，归属不能挂对象上）");
-    assert.ok(panelJs.includes("const TERMINAL_MAX_COLUMNS = 3"), "列数上限 3（设计定稿 1~3 列）");
-  });
-
-  it("焦点列切换：页级活跃指针跟焦点列走，写只进焦点列", () => {
-    const sandbox = new Function(`
-      function syncTerminalColumnsLayout() {}
-      ${extractM4("createTerminalColumn")}
-      const terminalColumns = [createTerminalColumn("h0"), createTerminalColumn("h1")];
-      let terminalFocusedColumnIndex = 0;
-      ${extractM4("terminalFocusedColumn")}
-      ${extractM4("setTerminalFocusedColumn")}
-      ${extractM4("terminalActiveSessionId")}
-      ${extractM4("setTerminalActiveSessionId")}
-      return { terminalColumns, terminalFocusedColumn, setTerminalFocusedColumn,
-        terminalActiveSessionId, setTerminalActiveSessionId };
-    `)();
-    sandbox.terminalColumns[0].activeSessionId = "sess-a";
-    sandbox.terminalColumns[1].activeSessionId = "sess-b";
-    assert.equal(sandbox.terminalActiveSessionId(), "sess-a", "默认焦点列 0");
-    sandbox.setTerminalFocusedColumn(sandbox.terminalColumns[1]);
-    assert.equal(sandbox.terminalFocusedColumn(), sandbox.terminalColumns[1], "焦点列收口指向列 1");
-    assert.equal(sandbox.terminalActiveSessionId(), "sess-b", "页级活跃读点跟焦点列");
-    sandbox.setTerminalActiveSessionId("sess-c");
-    assert.equal(sandbox.terminalColumns[1].activeSessionId, "sess-c", "写只进焦点列");
-    assert.equal(sandbox.terminalColumns[0].activeSessionId, "sess-a", "非焦点列不动");
-  });
-
-  it("会话归属：指派/查询/条目过滤；未登记的会话默认落列 0（单列口径不变）", () => {
-    const sandbox = new Function(`
-      ${extractM4("terminalSessionColumnIndex")}
-      ${extractM4("assignTerminalSessionToColumn")}
-      ${extractM4("terminalColumnSessionEntries")}
-      const terminalSessionColumnIndexes = new Map();
-      const terminalColumns = [{ elementIdSuffix: "" }, { elementIdSuffix: "-c1" }];
-      const sessions = {
-        s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" },
-      };
-      function terminalSessionMap() { return sessions; }
-      return { terminalSessionColumnIndex, assignTerminalSessionToColumn,
-        terminalColumnSessionEntries, terminalSessionColumnIndexes, terminalColumns };
-    `)();
-    assert.equal(sandbox.terminalSessionColumnIndex("s1"), 0, "未登记默认列 0");
-    sandbox.assignTerminalSessionToColumn("s3", sandbox.terminalColumns[1]);
-    assert.equal(sandbox.terminalSessionColumnIndex("s3"), 1, "指派后归列 1");
-    assert.deepEqual(sandbox.terminalColumnSessionEntries(sandbox.terminalColumns[0]).map(([id]) => id),
-      ["s1", "s2"], "列 0 条目 = 未登记会话，顺序同全局会话图");
-    assert.deepEqual(sandbox.terminalColumnSessionEntries(sandbox.terminalColumns[1]).map(([id]) => id),
-      ["s3"], "列 1 只含指派进来的会话");
-  });
-
-  it("列内元素 id：列 0 用基名，第 N 列加 -cN 后缀", () => {
-    const fn = new Function(`
-      ${extractM4("terminalColumnElementId")}
-      ${extractM4("terminalColumnSuffixForIndex")}
-      return { terminalColumnElementId, terminalColumnSuffixForIndex };
-    `)();
-    assert.equal(fn.terminalColumnSuffixForIndex(0), "", "列 0 空后缀（静态基名 id 原样）");
-    assert.equal(fn.terminalColumnSuffixForIndex(2), "-c2", "列 2 后缀 -c2");
-    assert.equal(fn.terminalColumnElementId({ elementIdSuffix: "" }, "terminalTabs"), "terminalTabs");
-    assert.equal(fn.terminalColumnElementId({ elementIdSuffix: "-c1" }, "terminalTabs"), "terminalTabs-c1");
-    assert.equal(fn.terminalColumnElementId({}, "terminalTabs"), "terminalTabs", "缺后缀字段的列桩回落基名");
-  });
-
-  it("结构：页签渲染拆出按列函数，renderTerminalPreviewTabs 保持逐列包装；清场重置各列指纹", () => {
-    const wrapper = extractM4("renderTerminalPreviewTabs");
-    assert.ok(wrapper.includes("renderTerminalColumnTabs(column)"), "页级入口逐列渲染");
-    const colRender = extractM4("renderTerminalColumnTabs");
-    assert.ok(colRender.includes("terminalSessionColumnIndex(id)"), "按归属表过滤本列会话");
-    assert.ok(colRender.includes("column.tabsRenderedHtml"), "innerHTML 指纹按列各持一份");
-    assert.ok(!panelJs.includes("let terminalTabsRenderedHtml"), "模块级单值指纹已迁入列对象");
-    // 三处直写清空的退场路径：逐列清空 + 逐列重置指纹（保住「指纹 = DOM 现值」不变式）
-    for (const name of ["renderTerminalPendingState", "renderTerminalUnavailableState", "clearTerminalLocalSessions"]) {
-      assert.ok(extractM4(name).includes('column.tabsRenderedHtml = "";'),
-        `${name} 直写清空同步重置各列指纹`);
-    }
-  });
-
-  it("页签按列渲染：各列只渲归属本列的会话、高亮各列活跃、指纹按列独立", () => {
-    const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const writes = { terminalTabs: [], "terminalTabs-c1": [] };
-    const tabEls = {
-      terminalTabs: { set innerHTML(v) { writes.terminalTabs.push(v); } },
-      "terminalTabs-c1": { set innerHTML(v) { writes["terminalTabs-c1"].push(v); } },
-    };
-    const mk = (id) => ({ id, label: id, shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" });
-    const sessions = { s1: mk("s1"), s2: mk("s2"), s3: mk("s3") };
-    const sandbox = new Function("$", "escapeHtml", "sessions", `
-      ${extractM4("terminalSessionColumnIndex")}
-      ${extractM4("terminalColumnElementId")}
-      ${extractM4("renderTerminalColumnTabs")}
-      ${extractM4("renderTerminalPreviewTabs")}
-      const terminalSessionColumnIndexes = new Map([["s2", 1]]);
-      const terminalColumns = [
-        { elementIdSuffix: "", tabsRenderedHtml: "", activeSessionId: "s1" },
-        { elementIdSuffix: "-c1", tabsRenderedHtml: "", activeSessionId: "s2" },
-      ];
-      function terminalSessionMap() { return sessions; }
-      return { render: renderTerminalPreviewTabs, terminalColumns };
-    `)((id) => tabEls[id] ?? null, escapeHtml, sessions);
-    // 全局会话图三个会话：s2 归属列 1，s1/s3 未登记落列 0
-    sandbox.render();
-    assert.equal(writes.terminalTabs.length, 1, "列 0 页签条写入一次");
-    assert.equal(writes["terminalTabs-c1"].length, 1, "列 1 页签条写入一次");
-    assert.ok(writes.terminalTabs[0].includes('data-terminal-tab="s1"'), "列 0 含 s1");
-    assert.ok(writes.terminalTabs[0].includes('data-terminal-tab="s3"'), "列 0 含未登记的 s3（默认列 0）");
-    assert.ok(!writes.terminalTabs[0].includes('data-terminal-tab="s2"'), "列 0 不含归属列 1 的 s2");
-    assert.ok(writes["terminalTabs-c1"][0].includes('data-terminal-tab="s2"'), "列 1 只含 s2");
-    assert.ok(!writes["terminalTabs-c1"][0].includes('data-terminal-tab="s1"'), "列 1 不含列 0 的会话");
-    assert.ok(writes.terminalTabs[0].includes('data-terminal-tab="s1"') &&
-      /class="terminal-tab active"[^>]*data-terminal-tab="s1"|data-terminal-tab="s1"[^>]*class="terminal-tab active"/.test(writes.terminalTabs[0].replace(/\n\s*/g, " ")),
-      "列 0 高亮本列活跃 s1");
-    // 指纹按列独立：稳态重渲两列都零写；只动列 1 活跃则只列 1 重写
-    sandbox.render();
-    assert.equal(writes.terminalTabs.length, 1, "稳态重渲列 0 零写");
-    assert.equal(writes["terminalTabs-c1"].length, 1, "稳态重渲列 1 零写");
-    sandbox.terminalColumns[1].activeSessionId = "s2-changed";
-    sandbox.render();
-    assert.equal(writes.terminalTabs.length, 1, "列 1 指纹变化不波及列 0");
-    assert.equal(writes["terminalTabs-c1"].length, 2, "列 1 活跃变化照常重写");
-  });
-
-  it("结构：会话栏/底栏按列拆出 chrome 函数；静态标记补列定址 id；新建键/页签条收展逐列循环", () => {
-    assert.ok(panelHtml.includes('class="terminal-session-bar" style="display:none" id="terminalSessionBar"'),
-      "会话栏补定址 id（既有属性原样、id 追加在后）");
-    assert.ok(panelHtml.includes('class="terminal-foot-status" style="display:none" id="terminalFootStatus"'),
-      "底栏左段补定址 id");
-    const data = extractM4("renderTerminalSessionData");
-    assert.ok(data.includes("renderTerminalColumnSessionChrome(column)"), "数据层逐列渲会话栏/底栏");
-    assert.ok(data.includes("terminalActiveSessionId()"), "inspector 仍读页级（焦点列）活跃会话");
-    const sync = extractM4("syncTerminalAddBtn");
-    assert.ok(sync.includes('terminalColumnElementId(column, "terminalAddBtn")'), "新建键禁用位逐列同步");
-    const tabsHidden = extractM4("applyTerminalTabsHidden");
-    assert.ok(tabsHidden.includes('terminalColumnElementId(column, "terminalTabsBar")'), "页签条收展逐列落态");
-  });
-
-  it("会话栏/底栏按列渲染：各列显示各列活跃会话的名/路径/壳与底栏指标", () => {
-    const els = {};
-    const el = (id) => els[id] ??= {
-      textContent: "", hidden: false,
-      classes: new Set(),
-      classList: { toggle: (c, on) => { if (on) els[id].classes.add(c); else els[id].classes.delete(c); } },
-    };
-    const sandbox = new Function("$", "sessions", `
-      ${extractM4("terminalColumnElementId")}
-      ${extractM4("renderTerminalColumnSessionChrome")}
-      const terminalColumns = [
-        { elementIdSuffix: "", activeSessionId: "s1" },
-        { elementIdSuffix: "-c1", activeSessionId: "s2" },
-      ];
-      function terminalSessionFor(id) { return sessions[id] || null; }
-      return { chrome: renderTerminalColumnSessionChrome, terminalColumns };
-    `)((id) => el(id), {
-      s1: { id: "s1", label: "列零会话", cwd: "C:\\a", branch: "", shell: { name: "PowerShell" },
-        status: "idle", agent: null, metrics: null, requests: [], route: [], routeCurrent: 0 },
-      s2: { id: "s2", label: "列一会话", cwd: "C:\\b", branch: "dev", shell: { name: "命令提示符" },
-        status: "working", agent: null, requests: [{ state: "ok", key: "k" }],
-        metrics: { requestCount: 3, cache: 40, tokens: "1.2k", ttft: 0.5, tps: 20, workTime: 5, workTimeUnit: "秒" },
-        route: [], routeCurrent: 0 },
-    });
-    for (const column of sandbox.terminalColumns) sandbox.chrome(column);
-    assert.equal(el("terminalSessionName").textContent, "列零会话", "列 0 会话栏显示本列活跃会话");
-    assert.equal(el("terminalSessionName-c1").textContent, "列一会话", "列 1 会话栏显示本列活跃会话");
-    assert.equal(el("terminalSessionBranch-c1").textContent, "dev", "列 1 分支随本列会话");
-    assert.equal(el("terminalShellLabel-c1").textContent, "命令提示符", "列 1 外壳标签随本列会话");
-    assert.equal(el("terminalFootStats").hidden, true, "列 0 会话无指标 → 本列底栏统计隐藏");
-    assert.equal(el("terminalFootStats-c1").hidden, false, "列 1 会话有指标 → 本列底栏统计显示");
-    assert.equal(el("terminalFootRequests-c1").textContent, "3 次请求", "列 1 请求数随本列会话");
-  });
-
-  it("CSS：等分/inspector 整栏隐藏/焦点标识全部限定 is-multicol；单列规则原样", () => {
-    assert.ok(/\.terminal-workspace\.is-multicol \{[^}]*grid-auto-flow: column[^}]*grid-auto-columns: minmax\(0, 1fr\)/.test(panelCss),
-      "≥2 列改 auto-flow 等分列轨道");
-    assert.ok(panelCss.includes(".terminal-workspace.is-multicol .terminal-inspector { display: none; }"),
-      "≥2 列 inspector 整栏隐藏、宽度全给列");
-    assert.ok(/\.terminal-workspace\.is-multicol \.terminal-main-pane\.is-focused \{[^}]*box-shadow/.test(panelCss),
-      "焦点列标识为纯视觉描边（零文案）");
-    // 单列既有规则一行不动
-    assert.ok(panelCss.includes(".terminal-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr) 48px; }"),
-      "单列 inspector 收拢规则原样");
-    assert.ok(panelCss.includes(".terminal-workspace.is-empty { grid-template-columns: minmax(0, 1fr); }"),
-      "单列零会话收全宽规则原样");
-    assert.ok(!panelHtml.includes("is-multicol"), "静态标记不带多列类（多列态全由 JS 挂摘）");
-    assert.equal(panelHtml.split('class="terminal-main-pane"').length - 1, 1,
-      "静态标记只含列 0 一份主区——单列 DOM 与现状逐点一致，多列由 JS 克隆");
-  });
-
-  // 列管理 fake-DOM 真跑：加列/收列/列空自收/归并重排/上限/持久化
-  it("列管理：加列克隆完整单元、收列并回左邻且 id 重排、列空自收、上限 3、布局落盘", () => {
-    // 迷你 DOM 桩：支持本功能用到的全部操作面（克隆/id 改写/classList/插入/摘除）
-    function fakeEl(tag = "div", classes = []) {
-      const el = {
-        tagName: tag, id: "", children: [], parent: null,
-        attrs: {}, style: {}, hidden: false, innerHTML: "", textContent: "",
-        classes: new Set(classes),
-        classList: null,
-        setAttribute(k, v) { el.attrs[k] = String(v); },
-        getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
-        appendChild(child) { child.remove(); child.parent = el; el.children.push(child); return child; },
-        insertBefore(child, ref) {
-          child.remove();
-          child.parent = el;
-          const i = ref ? el.children.indexOf(ref) : -1;
-          if (i < 0) el.children.push(child); else el.children.splice(i, 0, child);
-          return child;
-        },
-        remove() {
-          if (el.parent) {
-            const i = el.parent.children.indexOf(el);
-            if (i >= 0) el.parent.children.splice(i, 1);
-            el.parent = null;
-          }
-        },
-        replaceChildren(...nodes) {
-          for (const c of [...el.children]) c.remove();
-          for (const n of nodes) el.appendChild(n);
-        },
-        cloneNode(deep) {
-          const copy = fakeEl(el.tagName, [...el.classes]);
-          copy.id = el.id; copy.attrs = { ...el.attrs }; copy.hidden = el.hidden;
-          copy.innerHTML = el.innerHTML; copy.textContent = el.textContent; copy.style = { ...el.style };
-          if (deep) for (const c of el.children) copy.appendChild(c.cloneNode(true));
-          return copy;
-        },
-        matches(sel) {
-          if (sel.startsWith(".")) return el.classes.has(sel.slice(1));
-          if (sel.startsWith("#")) return el.id === sel.slice(1);
-          if (sel === "[id]") return !!el.id;
-          if (sel === "[for]") return "for" in el.attrs;
-          return false;
-        },
-        querySelector(sel) { return el.querySelectorAll(sel)[0] ?? null; },
-        querySelectorAll(sel) {
-          const out = [];
-          const walk = (node) => { for (const c of node.children) { if (c.matches(sel)) out.push(c); walk(c); } };
-          walk(el);
-          return out;
-        },
-        addEventListener() {},
-      };
-      el.classList = {
-        add: (...cs) => cs.forEach((c) => el.classes.add(c)),
-        remove: (...cs) => cs.forEach((c) => el.classes.delete(c)),
-        contains: (c) => el.classes.has(c),
-        toggle: (c, on) => { if (on === undefined) on = !el.classes.has(c); if (on) el.classes.add(c); else el.classes.delete(c); return on; },
-      };
-      return el;
-    }
-    // 列 0 静态主区的镜像（只摆本功能触碰的节点）
-    const pane0 = fakeEl("section", ["terminal-main-pane"]);
-    const tabsBar = pane0.appendChild(fakeEl("div", ["terminal-tabs-bar"])); tabsBar.id = "terminalTabsBar";
-    const tabs0 = tabsBar.appendChild(fakeEl("div", ["terminal-tabs"])); tabs0.id = "terminalTabs"; tabs0.innerHTML = "<button>残</button>";
-    const addBtn = tabsBar.appendChild(fakeEl("button", ["terminal-add-btn"])); addBtn.id = "terminalAddBtn";
-    const menu = tabsBar.appendChild(fakeEl("div", ["terminal-add-menu"])); menu.id = "terminalAddMenu"; menu.hidden = false;
-    const cwdLabel = menu.appendChild(fakeEl("label")); cwdLabel.setAttribute("for", "terminalAddMenuCwd");
-    const sessionBar = pane0.appendChild(fakeEl("div", ["terminal-session-bar"])); sessionBar.id = "terminalSessionBar";
-    const sessionName = sessionBar.appendChild(fakeEl("span", ["terminal-session-name"])); sessionName.id = "terminalSessionName"; sessionName.textContent = "旧会话名";
-    const screen = pane0.appendChild(fakeEl("div", ["terminal-screen"])); screen.id = "terminalScreen";
-    const host = screen.appendChild(fakeEl("div", ["terminal-xterm-host"])); host.id = "terminalXtermHost";
-    // 列 0 有活终端：宿主里躺着整份 xterm DOM（M4-r1 B1 的回归现场）
-    host.appendChild(fakeEl("div", ["xterm"]));
-    const fontValue = pane0.appendChild(fakeEl("span", ["terminal-font-value"])); fontValue.id = "terminalFontSizeValue"; fontValue.textContent = "13";
-    const workspace = fakeEl("div"); workspace.id = "terminalWorkspace";
-    workspace.appendChild(pane0);
-    const inspector = fakeEl("aside", ["terminal-inspector"]); inspector.id = "terminalInspector";
-    workspace.appendChild(inspector);
-
-    const bodies = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
-      "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
-      "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
-      "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
-      "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn"]
-      .map((name) => {
-        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
-        assert.ok(src, `${name} found in panel.js`);
-        return src;
-      }).join("\n");
-    const store = {};
-    const state = { renders: 0, wires: 0, fits: 0 };
-    const sessions = {
-      s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" }, s4: { id: "s4" },
-    };
-    const api = new Function("workspace", "inspector", "sessions", "store", "state", `
-      const $ = (id) => (id === "terminalWorkspace" ? workspace : id === "terminalInspector" ? inspector : null);
-      const terminalFontSize = 13;
-      const terminalTabsHidden = false;
-      const terminalSessionColumnIndexes = new Map();
-      // 上限与存档键常量从源码取样，测试不抄字面量
-      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
-      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
-      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
-      let terminalFocusedColumnIndex = 0;
-      let terminalBackendReady = true;
-      const terminalPreviewSessions = {};
-      const localStorage = {
-        getItem: (k) => (k in store ? store[k] : null),
-        setItem: (k, v) => { store[k] = String(v); },
-        removeItem: (k) => { delete store[k]; },
-      };
-      function terminalSessionMap() { return sessions; }
-      function terminalSessionFor(id) { return sessions[id] || null; }
-      function renderTerminalPreviewTabs() { state.renders += 1; }
-      function renderTerminalSessionData() {}
-      function syncTerminalAddBtn() {}
-      function scheduleTerminalFit() { state.fits += 1; }
-      function wireTerminalColumnControls() { state.wires += 1; }
-      ${bodies}
-      return { terminalColumns, addTerminalColumn, removeTerminalColumn, collapseEmptyTerminalColumns,
-        moveTerminalSessionToColumn, terminalSessionColumnIndex, terminalFocusedColumn,
-        setTerminalFocusedColumn, terminalSessionColumnIndexes,
-        paneOf: (column) => terminalColumnPane(column) };
-    `)(workspace, inspector, sessions, store, state);
-
-    // 加列：克隆完整单元、id 加后缀、动态内容清场、布局类与焦点类落位
-    const col1 = api.addTerminalColumn();
-    assert.ok(col1, "加列成功");
-    assert.equal(api.terminalColumns.length, 2);
-    assert.equal(col1.hostElementId, "terminalXtermHost-c1", "新列宿主 id 带后缀");
-    assert.equal(state.wires, 1, "新列控件接线一次");
-    assert.equal(workspace.children.length, 3, "pane 插进工作区（两 pane + inspector）");
-    assert.equal(workspace.children[1].classes.has("terminal-main-pane"), true, "新 pane 是主区克隆");
-    assert.ok(workspace.classes.has("is-multicol"), "≥2 列工作区挂 is-multicol");
-    assert.ok(workspace.children[0].classes.has("is-focused"), "焦点列 0 挂标识");
-    const newPane = workspace.children[1];
-    assert.ok(newPane.querySelector("#terminalXtermHost-c1"), "克隆内 id 全部加 -c1 后缀");
-    assert.ok(!newPane.querySelector("#terminalXtermHost"), "克隆内不留基名 id");
-    assert.equal(newPane.querySelector("#terminalTabs-c1").innerHTML, "", "克隆带过来的页签清空");
-    assert.equal(newPane.querySelector("#terminalSessionName-c1").textContent, "", "会话文案清空");
-    assert.equal(newPane.querySelector("#terminalAddMenu-c1").hidden, true, "克隆带过来的菜单收起");
-    assert.equal(newPane.querySelector(".terminal-xterm-host").children.length, 0,
-      "xterm 宿主清空：活终端的 xterm DOM 不得克隆进新列（xterm.open 纯 append，幽灵终端会把活终端顶出屏）");
-    assert.equal(newPane.querySelector("[for]").getAttribute("for"), "terminalAddMenuCwd-c1", "label for 同步换后缀");
-    assert.ok(workspace.children[0].querySelector("#terminalXtermHost"), "列 0 基名 id 原样");
-
-    // 会话归列 + 焦点切换
-    api.terminalColumns[0].activeSessionId = "s1";
-    api.moveTerminalSessionToColumn("s2", col1);
-    assert.equal(api.terminalSessionColumnIndex("s2"), 1, "s2 归列 1");
-    assert.equal(col1.activeSessionId, "s2", "拖入即目标列活跃");
-
-    // 再加一列到中间：其后列 id 顺次重排，归属索引让位
-    api.moveTerminalSessionToColumn("s3", col1);
-    const colMid = api.addTerminalColumn({ at: 1 });
-    assert.equal(api.terminalColumns.length, 3);
-    assert.equal(api.terminalSessionColumnIndex("s2"), 2, "原列 1 的归属让位到索引 2");
-    assert.equal(colMid.elementIdSuffix, "-c1", "中插列拿 -c1");
-    assert.equal(api.terminalColumns[2].elementIdSuffix, "-c2", "原列 1 重排为 -c2");
-    assert.ok(api.paneOf(api.terminalColumns[2]).querySelector("#terminalXtermHost-c2"), "重排后 pane 内 id 同步改名");
-    assert.ok(!api.paneOf(api.terminalColumns[2]).querySelector("#terminalXtermHost-c1"), "旧后缀不残留");
-
-    // 上限：3 列后再加拒绝
-    assert.equal(api.addTerminalColumn(), null, "第 4 列拒绝（设计定稿上限 3）");
-    assert.equal(api.terminalColumns.length, 3);
-
-    // 收中间列：会话并回左邻、DOM 摘除、id 顺次重排、焦点重映射
-    api.setTerminalFocusedColumn(api.terminalColumns[2]);
-    const merged = api.removeTerminalColumn(api.terminalColumns[1]);
-    assert.equal(merged, true);
-    assert.equal(api.terminalColumns.length, 2);
-    assert.equal(api.terminalSessionColumnIndex("s2"), 1, "被收列之后列的归属顺次 -1");
-    assert.equal(api.terminalFocusedColumn(), api.terminalColumns[1], "焦点列索引随收列重映射");
-    assert.equal(api.terminalColumns[1].elementIdSuffix, "-c1", "剩余列重排后缀");
-    assert.ok(api.paneOf(api.terminalColumns[1]).querySelector("#terminalXtermHost-c1"), "pane id 随重排改名");
-    assert.equal(workspace.children.length, 3, "被收列 pane 摘除（余两 pane + inspector）");
-
-    // 列空自收：把列 1 的会话全部挪回列 0，列 1 自动收掉
-    api.moveTerminalSessionToColumn("s2", api.terminalColumns[0]);
-    api.moveTerminalSessionToColumn("s3", api.terminalColumns[0]);
-    assert.equal(api.terminalColumns.length, 1, "列空自动收");
-    assert.ok(!workspace.classes.has("is-multicol"), "回单列摘多列类");
-    assert.equal(api.terminalColumns[0].elementIdSuffix, "", "回单列后列 0 恒基名 id");
-    assert.ok(api.paneOf(api.terminalColumns[0]).querySelector("#terminalXtermHost"), "列 0 pane 基名 id 原样");
-
-    // 持久化落盘：列数 + 归属 + 各列活跃 + 焦点
-    const stored = JSON.parse(store["panel-terminal-columns"]);
-    assert.equal(stored.columns.length, 1, "回单列后存档一列");
-    assert.deepEqual(stored.columns[0].sessions, ["s1", "s2", "s3", "s4"], "各列会话归并入存档（未登记的 s4 按默认列 0 一并入档）");
-    assert.equal(stored.columns[0].active, "s3", "各列活跃页签入存档");
-    assert.equal(stored.focused, 0, "焦点列入存档");
-
-    // 只剩一列时拒绝再收
-    assert.equal(api.removeTerminalColumn(api.terminalColumns[0]), false, "终端页恒至少一列");
-  });
-
-  // 列函数链（列管理 + 恢复）的公共抽取清单：E/F 的沙箱不摆 DOM（$ 全 null 时
-  // 各函数走「无 DOM 跳过」分支，列对象与归属语义照样真跑）。
-  const M4_CHAIN_FNS = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
-    "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
-    "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
-    "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
-    "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn",
-    "restoreTerminalColumnLayout"];
-  function m4ChainSrc(...extra) {
-    return [...M4_CHAIN_FNS, ...extra].map(extractM4).join("\n");
-  }
-  function m4DomFreeApi({ sessions = {}, store = {} } = {}) {
-    const state = { renders: 0, wires: 0, fits: 0 };
-    const api = new Function("sessions", "store", "state", `
-      const $ = () => null;
-      const terminalFontSize = 13;
-      const terminalTabsHidden = false;
-      const terminalSessionColumnIndexes = new Map();
-      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
-      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
-      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
-      terminalColumns[0].activeSessionId = "checkout";
-      let terminalFocusedColumnIndex = 0;
-      const terminalPreviewSessions = {};
-      let terminalBackendReady = true;
-      let terminalBackendSessions = sessions;
-      const localStorage = {
-        getItem: (k) => (k in store ? store[k] : null),
-        setItem: (k, v) => { store[k] = String(v); },
-        removeItem: (k) => { delete store[k]; },
-      };
-      function terminalSessionMap() { return terminalBackendSessions; }
-      function terminalSessionFor(id) { return terminalSessionMap()[id] || null; }
-      function renderTerminalPreviewTabs() { state.renders += 1; }
-      function renderTerminalSessionData() {}
-      function syncTerminalAddBtn() {}
-      function scheduleTerminalFit() { state.fits += 1; }
-      function wireTerminalColumnControls() { state.wires += 1; }
-      ${m4ChainSrc()}
-      return { terminalColumns, restoreTerminalColumnLayout, addTerminalColumn, removeTerminalColumn,
-        collapseEmptyTerminalColumns, moveTerminalSessionToColumn, terminalSessionColumnIndex,
-        terminalFocusedColumn, setTerminalFocusedColumn, terminalSessionColumnIndexes };
-    `)(sessions, store, state);
-    return { api, state, store };
-  }
-
-  it("持久化恢复：列数/归属/各列活跃/焦点从存档回读；已消失会话跳过、空列不落、恢复不建流", () => {
-    const { api, store } = m4DomFreeApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" } } });
-    store["panel-terminal-columns"] = JSON.stringify({
-      columns: [
-        { sessions: ["s1", "s-gone"], active: "s1" },
-        { sessions: ["s2", "s3"], active: "s3" },
-        { sessions: ["s-gone2"], active: "s-gone2" },
-      ],
-      focused: 1,
-    });
-    // connectTerminalStream 在沙箱里不存在：恢复若建流直接 ReferenceError 转红
-    api.restoreTerminalColumnLayout();
-    assert.equal(api.terminalColumns.length, 2, "全灭列不落（已消失会话跳过，空列不收进布局）");
-    assert.equal(api.terminalSessionColumnIndex("s1"), 0);
-    assert.equal(api.terminalSessionColumnIndex("s2"), 1);
-    assert.equal(api.terminalSessionColumnIndex("s3"), 1);
-    assert.equal(api.terminalSessionColumnIndex("s-gone"), 0, "消失会话不进归属表（默认列 0 只是未登记口径）");
-    assert.equal(api.terminalColumns[0].activeSessionId, "s1", "列 0 活跃恢复");
-    assert.equal(api.terminalColumns[1].activeSessionId, "s3", "列 1 活跃恢复");
-    assert.equal(api.terminalFocusedColumn(), api.terminalColumns[1], "焦点列恢复");
-    // 存档与现值对齐：恢复后落盘的布局只剩存活的会话与列
-    const rewritten = JSON.parse(store["panel-terminal-columns"]);
-    assert.equal(rewritten.columns.length, 2);
-    assert.deepEqual(rewritten.columns[0].sessions, ["s1"], "消失会话从存档清掉");
-  });
-
-  it("rebuild 对账：布局恢复只在首拍跑一次；归属表清消失会话；别窗关空的列自动收", () => {
-    const store = {};
-    const runner = new Function("store", `
-      const $ = () => null;
-      const terminalFontSize = 13;
-      const terminalTabsHidden = false;
-      const terminalSessionColumnIndexes = new Map();
-      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
-      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
-      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
-      terminalColumns[0].activeSessionId = "checkout";
-      let terminalFocusedColumnIndex = 0;
-      const terminalPreviewSessions = {};
-      let terminalBackendReady = true;
-      let terminalBackendSessions = {};
-      const terminalHollowStreak = new Map();
-      let terminalColumnLayoutRestored = false;
-      let terminalDefaultCwd = "";
-      const localStorage = {
-        getItem: (k) => (k in store ? store[k] : null),
-        setItem: (k, v) => { store[k] = String(v); },
-        removeItem: (k) => { delete store[k]; },
-      };
-      function terminalSessionMap() { return terminalBackendSessions; }
-      function terminalSessionFor(id) { return terminalSessionMap()[id] || null; }
-      function renderTerminalPreviewTabs() {}
-      function renderTerminalSessionData() {}
-      function syncTerminalAddBtn() {}
-      function scheduleTerminalFit() {}
-      function wireTerminalColumnControls() {}
-      ${m4ChainSrc("terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
-        "storedTerminalSessionId", "rememberTerminalSessionId", "terminalActiveSessionId", "setTerminalActiveSessionId")}
-      return { beat: (items) => rebuildTerminalBackendSessions(items), terminalColumns,
-        terminalSessionColumnIndexes, terminalFocusedColumn: () => terminalFocusedColumn(),
-        terminalSessionColumnIndex,
-        map: terminalSessionColumnIndexes };
-    `)(store);
-    store["panel-terminal-columns"] = JSON.stringify({
-      columns: [{ sessions: ["s1"], active: "s1" }, { sessions: ["s2"], active: "s2" }],
-      focused: 1,
-    });
-    runner.beat([{ id: "s1", shell: "powershell" }, { id: "s2", shell: "powershell" }]);
-    assert.equal(runner.terminalColumns.length, 2, "首拍落地即恢复两列");
-    assert.equal(runner.terminalSessionColumnIndex("s2"), 1, "归属按存档恢复");
-    assert.equal(runner.terminalColumns[1].activeSessionId, "s2", "列 1 活跃恢复");
-    // 一次性：改写存档后再拍不重放布局（布局是结构态，不跟轮询拍走）
-    store["panel-terminal-columns"] = JSON.stringify({
-      columns: [{ sessions: ["s1"], active: "s1" }, { sessions: ["s2"], active: "s2" }, { sessions: ["s3"], active: "s3" }],
-      focused: 2,
-    });
-    runner.beat([{ id: "s1", shell: "powershell" }, { id: "s2", shell: "powershell" }, { id: "s3", shell: "powershell" }]);
-    assert.equal(runner.terminalColumns.length, 2, "第二拍不重放存档（恢复只跑一次）");
-    assert.equal(runner.terminalSessionColumnIndex("s3"), 0, "新会话未登记默认落列 0");
-    // 别窗把列 1 的会话关光：归属登记清掉、列空自收
-    runner.beat([{ id: "s1", shell: "powershell" }]);
-    assert.equal(runner.map.has("s2"), false, "消失会话的归属登记清掉");
-    assert.equal(runner.terminalColumns.length, 1, "别窗关空的列自动收");
-    assert.equal(runner.terminalColumns[0].activeSessionId, "s1", "剩余列活跃合法化");
-  });
-
-  it("多列补挂：焦点列照旧重建，其余列流缺失/定投漂移才补挂，在看列不动，revive 透传", () => {
-    const els = {};
-    const el = (id) => els[id] ??= { hidden: false, style: {}, classList: { toggle() {} } };
-    const calls = [];
-    const sandbox = new Function("$", "sessions", "calls", `
-      let terminalBackendReady = true;
-      let terminalFirstConnectSettled = true;
-      const currentView = "terminal";
-      const terminalColumns = [
-        { elementIdSuffix: "", activeSessionId: "s1", eventSource: null, boundSessionId: null },
-        { elementIdSuffix: "-c1", activeSessionId: "s2", eventSource: {}, boundSessionId: "s2" },
-        { elementIdSuffix: "-c2", activeSessionId: "s3", eventSource: null, boundSessionId: null },
-      ];
-      let terminalFocusedColumnIndex = 0;
-      function terminalSessionFor(id) { return sessions[id] || null; }
-      function renderTerminalSessionData() {}
-      function renderTerminalPreviewTabs() {}
-      function renderTerminalEmptyState() {}
-      function clearTerminalEmptyState() {}
-      function scheduleTerminalFit() {}
-      function connectTerminalStream(column, session, opts) { calls.push([column.elementIdSuffix || "c0", session?.id, opts?.revive]); }
-      ${extractM4("terminalColumnElementId")}
-      ${extractM4("terminalFocusedColumn")}
-      ${extractM4("terminalActiveSessionId")}
-      ${extractM4("renderTerminalPreviewSession")}
-      return { render: renderTerminalPreviewSession, terminalColumns };
-    `)((id) => el(id), {
-      s1: { id: "s1", backend: true }, s2: { id: "s2", backend: true }, s3: { id: "s3", backend: true },
-    }, calls);
-    sandbox.render({ revive: false });
-    assert.deepEqual(calls, [["c0", "s1", false], ["-c2", "s3", false]],
-      "焦点列（切签语义）照旧重建；流缺失的列 2 补挂；在看的列 1（流活且定投未漂移）不动；revive:false 透传");
-    // 定投漂移（列在看别的会话）：也补挂
-    calls.length = 0;
-    sandbox.terminalColumns[1].activeSessionId = "s1";
-    sandbox.render();
-    assert.deepEqual(calls, [["c0", "s1", true], ["-c1", "s1", true], ["-c2", "s3", true]],
-      "列 1 定投漂移（bound ≠ 本列活跃）即重建；revive 缺省 true 透传");
-  });
-});
-
 // 跳顶回归钉（跟随底部护栏）：渲染尺寸同步的瞬时塌缩会让浏览器把 .xterm-viewport
 // 的 scrollTop 钳回原位并派发无标记 scroll 事件，xterm 把它当用户滚动写进 ydisp，
 // 视口自此脱离底部卡死在接近顶端（实测：建流回放+输出洪峰窗口内 scrollTop 从底部
@@ -9066,8 +8456,6 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function terminalSessionFor(id) { return sessions[id] || null; }
       function debounceTerminalFit() {}
       function positionTerminalAddMenu() {}
-      // M4 多列：init 给列 0 的 pane 挂焦点接线；桩环境无 DOM，落 null 即跳过
-      function terminalColumnPane() { return null; }
       function restoreTerminalFontSize() {}
       function syncTerminalAddBtn() {}
       function fetchTerminalDefaultCwd() {}
@@ -9322,9 +8710,6 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
           setItem: (k, v) => { state.store[k] = String(v); },
         };
         let terminalTabsHidden = false;
-        // M4 多列：页签条收展逐列落态，列桩摆单列（列 0 基名 id）
-        const terminalColumns = [{ elementIdSuffix: "" }];
-        ${panelJs.match(/function terminalColumnElementId\([\s\S]*?\n  \}/)?.[0]}
         ${keySrc}
         function scheduleTerminalFit() { state.fits += 1; }
         ${applySrc}
@@ -9909,9 +9294,7 @@ describe("终端字号调节（钳制 + 记忆 + 快捷键）", () => {
   // 按文件先例抽出函数体放进桩环境真跑。
   function fontSizeSandbox(store = {}, withXterm = true) {
     const bodies = ["clampTerminalFontSize", "terminalFontSizeFromStored",
-      "applyTerminalFontSize", "nudgeTerminalFontSize", "restoreTerminalFontSize",
-      // M4 多列：读数逐列同步，按 基名+后缀 定址
-      "terminalColumnElementId"]
+      "applyTerminalFontSize", "nudgeTerminalFontSize", "restoreTerminalFontSize"]
       .map((fnName) => {
         const src = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${fnName} found in panel.js`);
@@ -10183,11 +9566,10 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     assert.ok(render.includes("terminalInspectorUserPinned.has(session.id)"), "用户钉住判定先于阈值（拉回后轮询不收拢）");
     assert.ok(render.includes("terminalInspectorHollowCollapsed = true"), "系统收拢标记仍只在自动塌缩分支落");
     // 会话关闭清零的三个入口：本地关标签 / 轮询重建（别处关掉）/ 关停清场
-    // M4：页签点击处理抽成按列共享函数（列 0 在 init 委托，新列在 wireTerminalColumnControls）
-    const tabHandler = extractFn("handleTerminalTabsClick");
-    const closeAt = tabHandler.indexOf('event.target.closest(".terminal-tab-close")');
+    const init = extractFn("initTerminalPreview");
+    const closeAt = init.indexOf('event.target.closest(".terminal-tab-close")');
     assert.ok(closeAt > 0, "关标签分支可取样");
-    const closeBranch = tabHandler.slice(closeAt, tabHandler.indexOf("remaining.length === 0"));
+    const closeBranch = init.slice(closeAt, init.indexOf("remaining.length === 0"));
     assert.ok(closeBranch.includes("terminalHollowStreak.delete(id)"), "关标签同步清该会话计数");
     assert.ok(rebuild.includes("pruneTerminalHollowStreak()"), "轮询整表换血后清掉已消失会话的计数");
     assert.ok(extractFn("clearTerminalLocalSessions").includes("pruneTerminalHollowStreak()"),
@@ -10198,19 +9580,11 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     // 桩环境真跑拍计数：计数跟归属观测走——闪断清零、连续空壳累积、会话消失即清
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
-      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到焦点列（M4）。
-      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
-      // M4 多列：rebuild 新增归属表对账/各列活跃合法化/列空自收；布局恢复门在沙箱里关着
-      "terminalSessionColumnIndex", "terminalColumnSessionEntries"].map(extractFn).join("\n");
+      // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId"].map(extractFn).join("\n");
     const store = {};
     const counter = new Function("store", `
       const terminalColumns = [{ activeSessionId: "t1" }];
-      let terminalFocusedColumnIndex = 0;
-      const terminalSessionColumnIndexes = new Map();
-      let terminalColumnLayoutRestored = true;
-      function restoreTerminalColumnLayout() {}
-      function collapseEmptyTerminalColumns() {}
-      function terminalSessionMap() { return terminalBackendSessions; }
       let terminalBackendSessions = {};
       let terminalDefaultCwd = "C:\\\\";
       const terminalHollowStreak = new Map();
@@ -10298,13 +9672,12 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
   });
 
   it("innerHTML 指纹门控：整串相同即零写，active 态/内容/展开态变化照常写入", () => {
-    // 结构钉：两处渲染各带一份指纹缓存（页签指纹 M4 起按列各持一份，存在列对象上）；
-    // 三处直写清空的退场路径同步重置指纹
-    assert.ok(extractFn("renderTerminalColumnTabs").includes("column.tabsRenderedHtml"), "页签栏渲染带指纹缓存（按列）");
+    // 结构钉：两处渲染各带一份指纹缓存；三处直写清空的退场路径同步重置指纹
+    assert.ok(extractFn("renderTerminalPreviewTabs").includes("terminalTabsRenderedHtml"), "页签栏渲染带指纹缓存");
     assert.ok(extractFn("renderTerminalSessionData").includes("terminalRequestListRenderedHtml"), "请求行渲染带指纹缓存");
     for (const name of ["renderTerminalPendingState", "renderTerminalUnavailableState", "clearTerminalLocalSessions"]) {
-      assert.ok(extractFn(name).includes('column.tabsRenderedHtml = "";'),
-        `${name} 直写清空同步重置各列指纹（保住「指纹 = DOM 现值」不变式）`);
+      assert.ok(extractFn(name).includes('terminalTabsRenderedHtml = "";'),
+        `${name} 直写清空同步重置指纹（保住「指纹 = DOM 现值」不变式）`);
     }
 
     // 桩环境真跑页签栏：同内容第二拍零写；active 态与内容变化照常写入
@@ -10315,12 +9688,10 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
     };
     const tabsApi = new Function("$", "escapeHtml", "sessions", `
-      const terminalColumns = [{ activeSessionId: "t1", elementIdSuffix: "", tabsRenderedHtml: "" }];
-      const terminalSessionColumnIndexes = new Map();
+      const terminalColumns = [{ activeSessionId: "t1" }];
+      function terminalActiveSessionId() { return terminalColumns[0].activeSessionId; }
+      let terminalTabsRenderedHtml = "";
       function terminalSessionMap() { return sessions; }
-      ${extractFn("terminalSessionColumnIndex")}
-      ${extractFn("terminalColumnElementId")}
-      ${extractFn("renderTerminalColumnTabs")}
       ${extractFn("renderTerminalPreviewTabs")}
       return { render: renderTerminalPreviewTabs, setActive: (id) => { terminalColumns[0].activeSessionId = id; } };
     `)((id) => (id === "terminalTabs" ? tabsEl : null), escapeHtml, sessions);
@@ -10360,7 +9731,6 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
         getAttribute: () => null,
       };
       const $ = (id) => (id === "terminalRequestList" ? requestList : el(id));
-      const terminalColumns = [{ activeSessionId: "s1", elementIdSuffix: "" }];
       function terminalActiveSessionId() { return "s1"; }
       const terminalSessionFor = () => state.session;
       const terminalRequestExpanded = new Set();
@@ -10374,8 +9744,6 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       function routeNodeName(x) { return x; }
       function terminalServingLabel() { return ""; }
       function terminalRequestItemHtml(req, opts) { return \`<div>\${req.key}\${opts.expanded ? "+e" : ""}</div>\`; }
-      ${extractFn("terminalColumnElementId")}
-      ${extractFn("renderTerminalColumnSessionChrome")}
       ${extractFn("renderTerminalSessionData")}
       return {
         render: renderTerminalSessionData,
@@ -10886,11 +10254,11 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       "降级闸先看首连定性位：未定性落 pending，不落「服务未运行」");
     assert.ok(render.includes("renderTerminalUnavailableState();"), "降级时渲染通路整体改落空态");
     assert.ok(render.includes("renderTerminalEmptyState();"), "零会话（含回归）落空态，不再静默 return 挂占位数据");
-    assert.ok(unavailable.includes('columnTabs.innerHTML = ""'), "落空态即清空静态假页签（逐列清场）");
+    assert.ok(unavailable.includes('tabs.innerHTML = ""'), "落空态即清空静态假页签");
     assert.ok(unavailable.includes("setTerminalSessionChromeVisible(false)"),
       "假会话栏/假底栏/假监测区与零会话共用同一套退场，不留空 column");
     assert.ok(unavailable.includes("terminalEmpty"), "降级空态优先：零会话覆盖层一并收起");
-    assert.ok(render.includes('terminalColumnElementId(column, "terminalFootStatus")'), "就绪路径逐列恢复底栏左段（M4 按列定址）");
+    assert.ok(render.includes('querySelector(".terminal-foot-status")'), "就绪路径恢复底栏左段");
   });
 
   it("HTML/CSS：空态节点存在于 xterm 区内且默认隐藏", () => {
@@ -10914,9 +10282,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
   function unavailableSandbox() {
     const bodies = ["renderTerminalPreviewSession", "renderTerminalUnavailableState", "renderTerminalEmptyState",
       "clearTerminalEmptyState", "setTerminalSessionChromeVisible", "renderTerminalPendingState",
-      "syncTerminalAddBtn", "connectTerminalBackend", "renderTerminalStoppedState",
-      // M4 多列：清场/退场路径逐列循环，按 基名+后缀 定址列内元素
-      "terminalColumnElementId"]
+      "syncTerminalAddBtn", "connectTerminalBackend", "renderTerminalStoppedState"]
       .map(extractFn).join("\n");
     const els = {
       terminalUnavailable: { hidden: true },
@@ -10930,13 +10296,9 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       terminalInspector: { style: {} },
       terminalTabs: { innerHTML: "<button>payment-service</button>" },
       terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
-      // M4：会话栏/底栏左段改为按列 id 定址（列 0 基名）；旧类名键别名到同一桩，
-      // 既有断言读旧键即读同一对象。
-      terminalSessionBar: { style: {} },
-      terminalFootStatus: { style: {} },
+      ".terminal-session-bar": { style: {} },
+      ".terminal-foot-status": { style: {} },
     };
-    els[".terminal-session-bar"] = els.terminalSessionBar;
-    els[".terminal-foot-status"] = els.terminalFootStatus;
     const state = {
       backendUp: false, session: null,
       fetches: 0, polled: 0, synced: 0, renderedData: 0, renderedTabs: 0, connected: null,
@@ -10945,14 +10307,15 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const $ = (id) => els[id] ?? null;
       const document = { querySelector: (sel) => els[sel] ?? null };
       let terminalBackendReady = false;
+      // 页签栏指纹缓存：空态直写清空的退场路径会重置它（见 panel.js 指纹缓存注释）
+      let terminalTabsRenderedHtml = "";
       // 默认按「首连已定性」起沙盒：既有降级三态测的是失败之后的画面；
       // 首连在飞那一态由 setSettled(false) 单独摆出来。
       let terminalFirstConnectSettled = true;
       // 失败兜底按宿主现态分派落页（connectTerminalBackend catch 读它）
       let terminalHostState = "unknown";
-      // 列架构：活跃指针在列对象上；渲染读焦点列、建流落焦点列。列 0 基名 id（空后缀），
-      // 页签指纹按列各持一份（M4）。
-      const terminalColumns = [{ activeSessionId: "t1", elementIdSuffix: "", tabsRenderedHtml: "" }];
+      // M3 列架构：活跃指针在列 0 上；渲染读它、建流落焦点列。
+      const terminalColumns = [{ activeSessionId: "t1" }];
       function terminalActiveSessionId() { return terminalColumns[0]?.activeSessionId ?? null; }
       function terminalFocusedColumn() { return terminalColumns[0] || null; }
       const currentView = "terminal";
@@ -11056,17 +10419,12 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     // function 起匹配会丢掉它，函数体里的 await 会直接语法错误）。
     const pollSrc = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
     assert.ok(pollSrc, "pollTerminalSessions found in panel.js");
-    const bodies = [pollSrc, extractFn("renderTerminalEmptyState"), extractFn("setTerminalSessionChromeVisible"),
-      extractFn("terminalColumnElementId")].join("\n");
+    const bodies = [pollSrc, extractFn("renderTerminalEmptyState"), extractFn("setTerminalSessionChromeVisible")].join("\n");
     const els = {
       terminalEmpty: { hidden: true },
       terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
       terminalTabs: { innerHTML: "" },
-      terminalSessionBar: { style: {} },
-      terminalFootStatus: { style: {} },
     };
-    els[".terminal-session-bar"] = els.terminalSessionBar;
-    els[".terminal-foot-status"] = els.terminalFootStatus;
     const state = { data: 0, enriched: 0, requested: 0, renderedData: 0, renderedTabs: 0 };
     const sandbox = new Function("els", "state", `
       const $ = (id) => els[id] ?? null;
@@ -11074,8 +10432,6 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       const terminalBackendReady = true;
       let terminalPollInFlight = false;
       const terminalBackendSessions = {};
-      // M4 多列：退场动作为逐列循环，列桩摆单列（列 0 基名 id）
-      const terminalColumns = [{ activeSessionId: null, elementIdSuffix: "", tabsRenderedHtml: "" }];
       async function api() { state.data += 1; return { sessions: [] }; }
       function rebuildTerminalBackendSessions() {}
       async function refreshRouteRuntimeCache() {}
@@ -11221,9 +10577,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
 
   it("vm 真跑自动拉起失败兜底：落带启动动作的页，不留死按钮页", async () => {
     const bodies = ["autoStartTerminalHost", "normalizeTerminalHostState", "renderTerminalUnavailableState",
-      "renderTerminalStoppedState", "setTerminalSessionChromeVisible",
-      // M4 多列：清场/退场路径逐列循环，按 基名+后缀 定址列内元素
-      "terminalColumnElementId"].map(extractFn).join("\n");
+      "renderTerminalStoppedState", "setTerminalSessionChromeVisible"].map(extractFn).join("\n");
     const els = {
       terminalUnavailable: { hidden: true },
       terminalUnavailableTitle: { textContent: "" },
@@ -11243,8 +10597,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
         let terminalHostOpInFlight = false;
         let terminalBackendReady = false;
         let terminalHostState = hostState;
-        // M4 多列：退场路径逐列循环（列 0 基名 id、指纹按列各持一份）
-        const terminalColumns = [{ activeSessionId: null, elementIdSuffix: "", tabsRenderedHtml: "" }];
+        let terminalTabsRenderedHtml = "";
         async function api() { throw new Error("start failed"); }
         function renderTerminalStartingState() {}
         function applyTerminalHostState() {}
@@ -11419,10 +10772,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       "positionTerminalAddMenu", "openTerminalAddMenu", "selectTerminalAddAgent", "createAgentTerminal", "confirmTerminalAddMenu", "terminalCreateSize",
       // 新终端置活跃要写存档；沙盒的 localStorage 用内存桩真跑，不碰真存档。
       "rememberTerminalSessionId",
-      // 活跃指针/焦点列收口（M3 列架构）：新建落在焦点列，置活跃写焦点列（M4）。
-      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn", "setTerminalFocusedColumn",
-      // M4 多列：菜单/新建按列定址与归属登记；布局存档在沙箱里 stub 掉（不归本断言面）
-      "terminalColumnElementId", "assignTerminalSessionToColumn", "syncTerminalColumnsLayout",
+      // 活跃指针/焦点列收口（M3 列架构）：新建落在焦点列，置活跃写列 0。
+      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
       // 目录解析三件套：confirm 记目录、open 预填，都靠它们取默认值与持久化。
       "rememberTerminalCwd", "loadTerminalCwd", "terminalCwdInitial"]
       .map(extractFn).join("\n");
@@ -11457,12 +10808,8 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     };
     const sandbox = new Function("$", "api", "toast", "panelError", "terminalBackendSession",
       "terminalBackendSessions", "renderTerminalPreviewSession", "escapeHtml", "localStorage", `
-      // M3 列架构：活跃指针与 xterm 实例在列对象上；M4 起页级收口读焦点列（单列恒为列 0）。
+      // M3 列架构：活跃指针与 xterm 实例在列对象上（列 0）。
       const terminalColumns = [{ activeSessionId: null, xterm: null }];
-      let terminalFocusedColumnIndex = 0;
-      // M4：会话→列归属表；布局存档 stub 掉（不归本断言面）
-      const terminalSessionColumnIndexes = new Map();
-      function persistTerminalColumns() {}
       let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
       const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
       let terminalAddMenuAgents = [];
@@ -11627,17 +10974,13 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.equal(plain.agentId, null, "纯外壳会话不带 agent 身份");
     assert.equal(plain.agentName, null);
 
-    const src = [
-      // M4 多列：页签渲染拆出按列函数（列 0 基名 id、归属未登记默认列 0、指纹按列）
-      "terminalSessionColumnIndex", "terminalColumnElementId",
-      "renderTerminalColumnTabs", "renderTerminalPreviewTabs",
-    ].map(extractFn).join("\n");
+    const src = extractFn("renderTerminalPreviewTabs");
     const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     const runTabs = (sessions) => {
       const tabs = { innerHTML: "" };
       const fn = new Function("$", "escapeHtml", "sessions", `
-        const terminalColumns = [{ activeSessionId: "t1", elementIdSuffix: "", tabsRenderedHtml: "" }];
-        const terminalSessionColumnIndexes = new Map();
+        let terminalTabsRenderedHtml = "";
+        function terminalActiveSessionId() { return "t1"; }
         function terminalSessionMap() { return sessions; }
         ${src}
         return renderTerminalPreviewTabs;
@@ -11692,10 +11035,10 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     globalThis.document = docStub;
     try {
       new Function("$", "escapeHtml", "sessions", `
-        const terminalColumns = [{ activeSessionId: "t1", elementIdSuffix: "", tabsRenderedHtml: "" }];
-        const terminalSessionColumnIndexes = new Map();
+        let terminalTabsRenderedHtml = "";
+        function terminalActiveSessionId() { return "t1"; }
         function terminalSessionMap() { return sessions; }
-        ${src}
+        ${extractFn("renderTerminalPreviewTabs")}
         return renderTerminalPreviewTabs;
       `)((id) => (id === "terminalTabs" ? tabsStub : null), escapeHtml, {
         t1: { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: { name: "Claude Code", endpointId: "claude" }, status: "idle" },
@@ -11711,7 +11054,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     assert.ok(!panelHtml.includes("terminalAgentBadge"), "HTML 无徽标节点");
     assert.ok(!panelJs.includes("terminalAgentBadge"), "JS 无徽标引用残留（写入或类名切换漏删都会让徽标诈尸）");
     assert.ok(!panelCss.includes("terminal-agent-badge"), "CSS 徽标样式一并退役");
-    assert.ok(extractFn("renderTerminalColumnTabs").includes("session.agentName || (session.agent ? session.agent.name : session.shell.name)"),
+    assert.ok(extractFn("renderTerminalPreviewTabs").includes("session.agentName || (session.agent ? session.agent.name : session.shell.name)"),
       "页签副行仍是唯一 agent 身份位：agentName 优先、实时归属次之、外壳名兜底");
   });
 
