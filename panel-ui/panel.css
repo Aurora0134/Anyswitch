@@ -1608,6 +1608,14 @@
   .terminal-workspace.is-empty { grid-template-columns: minmax(0, 1fr); }
   .terminal-main-pane, .terminal-inspector { min-width: 0; min-height: 0; background: var(--surface); }
   .terminal-main-pane { display: flex; flex-direction: column; min-height: 0; }
+  /* 多列布局（M4，本期无用户入口）：≥2 列时工作区挂 is-multicol——列轨道改
+     auto-flow 等分，inspector 整栏隐藏、宽度全给列；回单列即摘类恢复既有规则。
+     焦点列挂 is-focused 纯视觉标识（内阴影描边，不占布局、零文案）。全部规则
+     限定在 is-multicol 下，单列 DOM 与视觉与现状逐点一致。 */
+  .terminal-workspace.is-multicol { grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
+  .terminal-workspace.is-multicol .terminal-inspector { display: none; }
+  .terminal-workspace.is-multicol .terminal-main-pane { box-shadow: inset 0 0 0 1px transparent; transition: box-shadow 160ms var(--ease-out); }
+  .terminal-workspace.is-multicol .terminal-main-pane.is-focused { box-shadow: inset 0 0 0 2px var(--accent); }
   .terminal-tabs-bar {
     position: relative;
     display: flex; align-items: stretch; gap: 8px; min-height: 54px; padding: 8px 12px 0;
@@ -1932,6 +1940,9 @@
     #terminalHostHeadBadge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
     .terminal-workspace { display: flex; flex-direction: column; }
     .terminal-main-pane { min-height: calc(100vh - 52px); }
+    /* 窄屏多列：保持横向并排挤不下就横向滚动，每列保底可用宽度（不压成碎条） */
+    .terminal-workspace.is-multicol { flex-direction: row; overflow-x: auto; }
+    .terminal-workspace.is-multicol .terminal-main-pane { flex: 1 0 min(480px, 85vw); }
     .terminal-inspector { max-height: 330px; border-top: 1px solid var(--border); }
     .terminal-inspector.is-collapsed { width: auto; max-height: 49px; }
     .terminal-inspector.is-collapsed .terminal-inspector-head { justify-content: space-between; padding: 10px 14px; }
