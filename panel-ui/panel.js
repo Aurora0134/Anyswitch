@@ -5072,7 +5072,8 @@ async function api(method, path, body) {
     const tabs = $(terminalColumnElementId(column, "terminalTabs"));
     if (!tabs || typeof tabs.addEventListener !== "function") return;
     tabs.addEventListener("pointerdown", (event) => {
-      if (terminalTabDrag) return;
+      // 旧会话还挂着（pointerup 丢在窗外等原因）即按中止回收，不挡住新的按压
+      if (terminalTabDrag) endTerminalTabDrag(false);
       if (typeof event.target?.closest !== "function") return;
       const tab = event.target.closest("[data-terminal-tab]");
       if (!tab || event.target.closest(".terminal-tab-close")) return;
@@ -5098,11 +5099,14 @@ async function api(method, path, body) {
       drag.onUp = (upEvent) => endTerminalTabDrag(true, upEvent);
       drag.onCancel = () => endTerminalTabDrag(false);
       drag.onKeydown = (keyEvent) => { if (keyEvent.key === "Escape") endTerminalTabDrag(false); };
+      // 窗口失焦（切窗/切虚拟桌面）可能吞掉 pointerup：按中止回收，不留挂起的拖拽
+      drag.onBlur = () => endTerminalTabDrag(false);
       terminalTabDrag = drag;
       window.addEventListener("pointermove", drag.onMove);
       window.addEventListener("pointerup", drag.onUp);
       window.addEventListener("pointercancel", drag.onCancel);
       window.addEventListener("keydown", drag.onKeydown, true);
+      window.addEventListener("blur", drag.onBlur);
       // 拦住原生的文本选择/拖拽，让位给我们的幻影跟随；click 照常派发
       event.preventDefault?.();
     });
@@ -5216,15 +5220,21 @@ async function api(method, path, body) {
   // 落点执行：开新列=同一同步块内加列+移入（不会被轮询的列空自收夹掉），
   // addTerminalColumn 返 null = 已达 3 列上限——禁投，无文案（设计定稿）；
   // 移入既有列走 M4 口径（源列空了自动收）；本列/无落点什么都不做。
+  // 成功落点把焦点交给目标列：拖过去就是为了看它，键盘输入/「+」新建随焦点走。
   function commitTerminalTabDrop(sessionId, target) {
     if (!target || target.kind === "noop") return;
     if (target.kind === "move-into") {
-      if (target.column) moveTerminalSessionToColumn(sessionId, target.column);
+      if (target.column && moveTerminalSessionToColumn(sessionId, target.column)) {
+        setTerminalFocusedColumn(target.column);
+      }
       return;
     }
     if (target.kind === "new-column" && !target.forbidden) {
       const column = addTerminalColumn({ at: target.at });
-      if (column) moveTerminalSessionToColumn(sessionId, column);
+      if (column) {
+        moveTerminalSessionToColumn(sessionId, column);
+        setTerminalFocusedColumn(column);
+      }
     }
   }
 
@@ -5237,6 +5247,7 @@ async function api(method, path, body) {
       window.removeEventListener("pointerup", drag.onUp);
       window.removeEventListener("pointercancel", drag.onCancel);
       window.removeEventListener("keydown", drag.onKeydown, true);
+      window.removeEventListener("blur", drag.onBlur);
     }
     if (!drag.active) return;
     drag.tabElement?.classList?.remove("is-drag-source");

@@ -8940,7 +8940,8 @@ describe("终端页签拖拽分列（M5）", () => {
       function scheduleTerminalFit() {}
       function wireTerminalColumnControls() {}
       ${chain}
-      return { terminalColumns, commitTerminalTabDrop, addTerminalColumn, terminalSessionColumnIndex };
+      return { terminalColumns, commitTerminalTabDrop, addTerminalColumn, terminalSessionColumnIndex,
+        terminalFocusedColumn };
     `)(sessions, store);
     return { api, store };
   }
@@ -8954,6 +8955,7 @@ describe("终端页签拖拽分列（M5）", () => {
       assert.equal(api.terminalSessionColumnIndex("s2"), 1, "拖入会话归新列");
       assert.equal(api.terminalColumns[1].activeSessionId, "s2", "拖入即新列活跃页签");
       assert.equal(JSON.parse(store["panel-terminal-columns"]).columns.length, 2, "布局落盘");
+      assert.equal(api.terminalFocusedColumn(), api.terminalColumns[1], "落点成功焦点跟到目标列（拖过去就是为了看它）");
     }
     // 移入既有列：不开新列；源列还有剩 → 不收
     {
@@ -8964,6 +8966,7 @@ describe("终端页签拖拽分列（M5）", () => {
       assert.equal(api.terminalSessionColumnIndex("s2"), 1, "s2 移入列 1");
       assert.equal(colB.activeSessionId, "s2", "拖入即目标列活跃");
       assert.equal(api.terminalSessionColumnIndex("s1"), 0, "源列剩余会话不动");
+      assert.equal(api.terminalFocusedColumn(), colB, "移入落点焦点跟到目标列");
     }
     // 源列最后会话被拖走 → 源列自动收
     {
