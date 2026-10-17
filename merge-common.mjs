@@ -32,20 +32,25 @@ export function writeSidecar(path, providerIds) {
   );
 }
 
-// The managed-id key of the virtual auto-routing channel. Merge modules
-// prefix managed ids with "_", so it surfaces to endpoints as "_auto".
+// The managed-id key of the virtual auto-routing channel. Most merge modules
+// prefix managed ids with "_" (so it surfaces as "_auto"); Kimi and pi are the
+// exceptions — their model pickers label a channel by its provider id and have
+// no display-name field, so those two writers put the visible channel name
+// (ANYSWITCH_CHANNEL_NAME) in the id slot instead.
 export const AUTO_CHANNEL_KEY = "auto";
 // The Anyswitch pseudo-channel's endpoint-facing provider label（provider
 // 显示名）：虚拟模型与 auto 都装在这个分组下（原「自动路由」改名，auto 一并
-// 归组）。
+// 归组）。zcode/dsh/opencode/qoder/codex 写进 provider 显示名字段；Kimi/pi 直接
+// 用它当 provider id；codex/grok 再把渠道名拼进模型显示名。
 export const ANYSWITCH_CHANNEL_NAME = "Anyswitch";
 
 // Derive the virtual auto-routing pseudo-channel for one endpoint, or null
 // when the endpoint has no usable route chain. The shape mirrors the pool
 // pseudo-providers from pool-providers.mjs so the merge modules can append it
 // to their provider map and let the ordinary entry builders emit it:
-//   - channelName    — the endpoint-facing provider label (provider 显示名
-//                      「自动路由」，仅 zcode/pi/dsh 等支持渠道显示名的格式使用）;
+//   - channelName    — the endpoint-facing provider label (渠道名). 支持渠道显示
+//                      名字段的格式直接写它；Kimi/pi 拿它当 provider id；codex/grok
+//                      把它拼进模型显示名；
 //   - baseUrlSegment — the URL segment the builders place in
 //                      /openai/<segment>/v1. For a real channel this is its
 //                      own id; for the auto channel it is the chain HEAD node
@@ -54,11 +59,10 @@ export const ANYSWITCH_CHANNEL_NAME = "Anyswitch";
 //                      provider/model check, so the segment never routes a
 //                      concrete model itself;
 //   - models         — exactly one entry: the virtual model "auto"，模型显示名
-//                      也是 "auto"（端点软件里模型名显示 auto、provider 名显示
-//                      「自动路由」，二者不再共用同一个标注）。
+//                      也是 "auto"（端点的渠道名单独呈现为 Anyswitch）。
 export function deriveAutoRouteChannel(store, endpointId) {
   const entry = store?.routingChains?.[endpointId];
-  // per-endpoint 启用开关：关 = 链配置保留，但 _auto 伪渠道不再同步进 agent 配置
+  // per-endpoint 启用开关：关 = 链配置保留，但伪渠道不再同步进 agent 配置
   // （下一轮 merge 的 managed 块自然不再含它，与删链同一条清理路径）。
   if (entry?.enabled === false) return null;
   const chain = entry?.chain;

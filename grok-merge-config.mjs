@@ -168,9 +168,10 @@ export function buildGrokManagedToml(managedProviders, port, token, effort = nul
       const modelLabel =
         typeof model?.displayName === "string" && model.displayName.length > 0 ? model.displayName : modelId;
       // 渠道名进显示名：grok 的选择器每行只读 name，跨渠道同名模型不带渠道名
-      // 就是无法区分的重复行（codex 目录 display_name 同款理由）。auto 伪渠道
-      // 与 codex 一致保持裸名 "auto"——它是链路由触发词，不是真模型。
-      const displayName = providerId === AUTO_CHANNEL_KEY ? modelLabel : `${modelLabel} · ${channelLabel}`;
+      // 就是无法区分的重复行（codex 目录 display_name 同款理由）。Anyswitch
+      // 伪渠道的 auto 是链路由触发词、但不是渠道名——它的行同样带
+      // 「 · Anyswitch」，与真渠道的呈现口径一致。
+      const displayName = `${modelLabel} · ${channelLabel}`;
       // Same chain as the kimi/dsh writers (context-fallback.mjs): the store's
       // discovered contextWindow wins; without it the keyword tier table
       // answers, and an unmatched id lands on the 1M default. grok's own

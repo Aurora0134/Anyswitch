@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -42,8 +42,17 @@ function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+// The on-disk provider key of a channel. Pi's model picker renders the
+// provider id verbatim as each row's "[provider]" badge
+// (pi-coding-agent dist/modes/interactive/components/model-selector.js), so the
+// Anyswitch pseudo-channel's key IS the channel name users see — it carries no
+// "_" prefix. Real channels keep the managed-id prefix.
+export function piProviderId(providerId) {
+  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : `_${providerId}`;
+}
+
 export function buildPiProviderEntry(providerId, provider, port, catalog = null, token = null) {
-  const prefixedId = `_${providerId}`;
+  const prefixedId = piProviderId(providerId);
   // Pseudo-channels (auto routing) name a different relay URL segment than
   // their own id; real channels never set baseUrlSegment.
   const segment = provider.baseUrlSegment ?? providerId;
@@ -101,15 +110,23 @@ export function mergeModelsJson(existing, managedProviders, port, previousManage
   const currentManaged = [];
   // Append the virtual auto-routing channel outside the entry-builder system:
   // it flows through the same cleanup/inject loops as any real channel, so
-  // deleting the endpoint's chain makes the next sync drop `_auto` via the
-  // ordinary previousManaged path.
+  // deleting the endpoint's chain makes the next sync drop the Anyswitch
+  // pseudo-channel via the ordinary previousManaged path.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
 
   for (const prevId of previousManaged) {
-    const prefixed = `_${prevId}`;
-    if (!providers[prevId] && merged.providers[prefixed] !== undefined) {
-      delete merged.providers[prefixed];
+    const diskKey = piProviderId(prevId);
+    if (!providers[prevId] && merged.providers[diskKey] !== undefined) {
+      delete merged.providers[diskKey];
     }
+  }
+  // Migration: before the pseudo channel was identified by its display name it
+  // lived under the managed id "_auto". Drop that managed leftover so the
+  // picker never shows both groups. A user-written "_auto" without the
+  // x-agent-id pi fingerprint is left alone (there is no sidecar record for it).
+  const legacyAutoKey = `_${AUTO_CHANNEL_KEY}`;
+  if (merged.providers[legacyAutoKey] !== undefined && isManagedEntry(legacyAutoKey, merged.providers[legacyAutoKey])) {
+    delete merged.providers[legacyAutoKey];
   }
 
   for (const [providerId, provider] of Object.entries(providers)) {
@@ -171,10 +188,12 @@ export function writeModelsJsonWithBackup(filePath, data) {
 }
 
 // A managed entry is recognized by the double marker mergeModelsJson writes:
-// a "_" prefixed key plus the static x-agent-id header. Requiring both keeps
-// the launch-time retag away from any user-defined provider.
+// a managed key ("_" prefixed for real channels, the channel display name for
+// the Anyswitch pseudo-channel) plus the static x-agent-id header. Requiring
+// both keeps the launch-time retag away from any user-defined provider.
 function isManagedEntry(key, provider) {
-  return key.startsWith("_") && provider?.headers?.["x-agent-id"] === "pi";
+  return (key === ANYSWITCH_CHANNEL_NAME || key.startsWith("_")) &&
+    provider?.headers?.["x-agent-id"] === "pi";
 }
 
 // Transient per-launch rewrite: same on-disk shape as the sync writer, but no

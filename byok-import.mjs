@@ -6,7 +6,7 @@
 //
 // Read side: every endpoint reuses its existing merge module's parser and
 // ownership rules — managed entries (sidecar名单、保留前缀、TOML 注释标记块、
-// zcode/opencode 的 relay URL 指纹） are never listed, so an import can never
+// relay URL 指纹） are never listed, so an import can never
 // adopt (and a deleteLocal can never touch) an Anyswitch-managed entry.
 //
 // Write side: the add transaction mirrors store-service.mjs's addProvider
@@ -264,6 +264,10 @@ function scanKimi(homeDir, sidecarIds) {
     if (id.startsWith("_") || sidecarIds.has(id)) continue;
     const baseURL = table.keys.base_url;
     if (typeof baseURL !== "string" || baseURL.length === 0) continue;
+    // The Anyswitch pseudo-channel's provider id IS the visible channel name
+    // (kimi renders provider ids verbatim), so it carries no "_" prefix — the
+    // relay URL fingerprint is what identifies it as managed state.
+    if (RELAY_OPENAI_PATH.test(baseURL)) continue;
     candidates.push({
       sourceId: id,
       sourcePath: configPath,
@@ -377,6 +381,9 @@ function scanPi(homeDir, sidecarIds) {
     if (id.startsWith("_") || sidecarIds.has(id)) continue;
     const baseURL = provider.baseUrl;
     if (typeof baseURL !== "string" || baseURL.length === 0) continue;
+    // Same reason as scanKimi: the Anyswitch pseudo-channel's pin is the relay
+    // URL fingerprint, not a "_" prefix.
+    if (RELAY_OPENAI_PATH.test(baseURL)) continue;
     const apiKey = provider.apiKey;
     let keySource = { kind: "none" };
     if (typeof apiKey === "string" && apiKey.length > 0) {

@@ -147,6 +147,16 @@ type = "openai"
 base_url = "https://stray.example.com/v1"
 api_key = "s"
 
+# Kimi 自写回配置后掉标记的伪渠道：provider id 就是渠道显示名，别名仍是 _auto/ 前缀
+[providers."Anyswitch"]
+type = "openai"
+base_url = "http://127.0.0.1:47820/openai/auto/v1"
+api_key = "relay-token"
+
+[models."_auto/auto"]
+provider = "Anyswitch"
+model = "auto"
+
 [providers.mykimi]
 type = "openai"
 base_url = "https://kimi.example.com/v1"
@@ -252,13 +262,28 @@ test("pi: _-prefix and sidecar excluded, ${VAR} reference resolution", async () 
       sc: { baseUrl: "https://sc.example.com/v1", apiKey: "k", models: [{ id: "x" }] },
       envmiss: { baseUrl: "https://em.example.com/v1", apiKey: "${PI_MISSING_KEY}", models: [{ id: "p1" }] },
       lit: { baseUrl: "https://lit.example.com/v1", apiKey: "pi-secret", models: [{ id: "p2", name: "P Two" }] },
+      // 伪渠道的 provider key 就是可见渠道名（没有 _ 前缀）：靠 relay URL 指纹识别。
+      Anyswitch: {
+        name: "Anyswitch",
+        baseUrl: "http://127.0.0.1:47820/openai/auto/v1",
+        apiKey: "relay-token",
+        api: "openai-completions",
+        models: [{ id: "auto" }],
+      },
+      "Anyswitch-corp": {
+        baseUrl: "https://corp.example.com/v1",
+        apiKey: "corp-secret",
+        api: "openai-completions",
+        models: [{ id: "corp-model" }],
+      },
     },
   });
   const service = makeService(fixture);
   const scan = await service.scanLocalConfigs();
-  assert.deepEqual(agentKeys(scan, "pi").sort(), ["pi::envmiss", "pi::lit"]);
+  assert.deepEqual(agentKeys(scan, "pi").sort(), ["pi::Anyswitch-corp", "pi::envmiss", "pi::lit"]);
   assert.equal(findEntry(scan, "pi", "envmiss").status, "unresolved-key");
   assert.equal(findEntry(scan, "pi", "lit").status, "ok");
+  assert.equal(findEntry(scan, "pi", "Anyswitch-corp").status, "ok");
 });
 
 test("dsh: sidecar-only ownership (even _-prefixed user entries listed), profile dedup", async () => {

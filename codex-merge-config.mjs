@@ -144,9 +144,11 @@ export function loadCodexCatalogTemplate() {
 // Flatten the endpoint-visible channels into the catalog's entry list: one
 // entry per (channel, model) pair, keyed by the channel-qualified slug so a
 // model id offered by several channels shows up once per channel instead of
-// collapsing onto the first. The auto pseudo-channel's virtual model stays a
-// bare slug: "auto" is the chain-routing trigger word (body.model === "auto"
-// walks the chain), not a real model, so it never takes the channel prefix.
+// collapsing onto the first. The auto pseudo-channel's entries keep their bare
+// slug: "auto" is the chain-routing trigger word (body.model === "auto" walks
+// the chain) and virtual models are the request names, so neither takes the
+// channel prefix. Their display names still carry the Anyswitch channel label,
+// exactly like every real channel's rows.
 export function collectCodexCatalogModels(providers) {
   const models = new Map();
   for (const [providerId, provider] of Object.entries(providers ?? {})) {
@@ -156,7 +158,7 @@ export function collectCodexCatalogModels(providers) {
       // needs both (provider-level reasoningVariants sits on the provider,
       // per-model levels on the model).
       if (providerId === AUTO_CHANNEL_KEY) {
-        models.set(modelId, { modelId, model: model ?? {}, provider, channelLabel: null });
+        models.set(modelId, { modelId, model: model ?? {}, provider, channelLabel });
         continue;
       }
       models.set(packChannelModelSlug(providerId, modelId), { modelId, model: model ?? {}, provider, channelLabel });

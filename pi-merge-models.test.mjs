@@ -16,6 +16,7 @@ import {
   UnparseableModelsError,
   deriveAutoRouteChannel,
   DIRECT_INSTANCE_ID,
+  piProviderId,
   tagManagedProvidersForLaunch,
   restoreManagedProvidersAfterLaunch,
 } from "./pi-merge-models.mjs";
@@ -388,7 +389,7 @@ describe("pool channels", () => {
   });
 });
 
-describe("auto routing channel (_auto)", () => {
+describe("auto routing channel (Anyswitch)", () => {
   const CHAIN_STORE = {
     ...STORE,
     routingChains: {
@@ -401,7 +402,7 @@ describe("auto routing channel (_auto)", () => {
     },
   };
 
-  it("injects the _auto channel when the endpoint has a route chain", () => {
+  it("keys the pseudo-channel by its display name so the picker badge reads [Anyswitch]", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "pi");
     const { config, managed } = mergeModelsJson(
       { providers: {} },
@@ -412,19 +413,21 @@ describe("auto routing channel (_auto)", () => {
       null,
       RELAY_TOKEN,
     );
-    const entry = config.providers._auto;
-    assert.ok(entry, "_auto channel must be injected");
+    // pi 的模型选择器每行只渲染 [provider id]，所以伪渠道的 key 必须是可见渠道名。
+    const entry = config.providers.Anyswitch;
+    assert.ok(entry, "Anyswitch pseudo-channel must be injected");
+    assert.equal(config.providers._auto, undefined, "the old _auto key must not be written");
     assert.equal(entry.name, "Anyswitch");
     // The base URL points at the chain HEAD node, not at a literal "auto" segment.
     assert.equal(entry.baseUrl, "http://127.0.0.1:47821/openai/poke-api/v1");
     assert.equal(entry.api, "openai-completions");
     assert.deepEqual(entry.headers, { "x-agent-id": "pi", "x-agent-instance": "direct" });
     assert.deepEqual(entry.models.map((m) => m.id), ["auto"]);
-    assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
+    assert.ok(managed.includes("auto"), "sidecar tracks the pseudo-channel as managed");
     assert.equal(validatePiModelsConfig(config).valid, true);
   });
 
-  it("does not inject _auto when the endpoint has no route chain", () => {
+  it("does not inject the pseudo-channel when the endpoint has no route chain", () => {
     const { config, managed } = mergeModelsJson(
       { providers: {} },
       extractManagedProviders(STORE),
@@ -432,11 +435,12 @@ describe("auto routing channel (_auto)", () => {
       [],
       deriveAutoRouteChannel(STORE, "pi"),
     );
+    assert.equal(config.providers.Anyswitch, undefined);
     assert.equal(config.providers._auto, undefined);
     assert.ok(!managed.includes("auto"));
   });
 
-  it("cleans up _auto on the re-sync after the chain is deleted", () => {
+  it("cleans up the pseudo-channel on the re-sync after the chain is deleted", () => {
     const first = mergeModelsJson(
       { providers: {} },
       extractManagedProviders(CHAIN_STORE),
@@ -444,7 +448,7 @@ describe("auto routing channel (_auto)", () => {
       [],
       deriveAutoRouteChannel(CHAIN_STORE, "pi"),
     );
-    assert.ok(first.config.providers._auto);
+    assert.ok(first.config.providers.Anyswitch);
     const second = mergeModelsJson(
       first.config,
       extractManagedProviders(STORE),
@@ -452,9 +456,66 @@ describe("auto routing channel (_auto)", () => {
       first.managed,
       deriveAutoRouteChannel(STORE, "pi"),
     );
-    assert.equal(second.config.providers._auto, undefined, "stale _auto removed once the chain is gone");
+    assert.equal(second.config.providers.Anyswitch, undefined, "stale pseudo-channel removed once the chain is gone");
     assert.ok(second.config.providers["_poke-api"], "real channels survive the cleanup");
     assert.ok(!second.managed.includes("auto"));
+  });
+
+  it("drops the legacy _auto managed entry on the first sync after the rename", () => {
+    const legacy = {
+      providers: {
+        _auto: {
+          name: "Anyswitch",
+          baseUrl: "http://127.0.0.1:47821/openai/poke-api/v1",
+          apiKey: "old-token",
+          api: "openai-completions",
+          headers: { "x-agent-id": "pi", "x-agent-instance": "direct" },
+          models: [{ id: "auto" }],
+        },
+      },
+    };
+    const { config } = mergeModelsJson(
+      legacy,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      ["auto"],
+      deriveAutoRouteChannel(CHAIN_STORE, "pi"),
+      null,
+      RELAY_TOKEN,
+    );
+    assert.equal(config.providers._auto, undefined, "legacy _auto entry removed");
+    assert.ok(config.providers.Anyswitch, "the renamed pseudo-channel is written");
+  });
+
+  it("leaves a user-written _auto provider without the pi fingerprint alone", () => {
+    const mine = {
+      providers: {
+        _auto: {
+          name: "my own",
+          baseUrl: "https://mine.example/v1",
+          apiKey: "sk-mine",
+          models: [{ id: "m1" }],
+        },
+      },
+    };
+    const { config } = mergeModelsJson(
+      mine,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      ["auto"],
+      deriveAutoRouteChannel(CHAIN_STORE, "pi"),
+      null,
+      RELAY_TOKEN,
+    );
+    assert.equal(config.providers._auto.name, "my own", "a user provider is never excised");
+    assert.ok(config.providers.Anyswitch);
+  });
+});
+
+describe("pi provider id mapping", () => {
+  it("maps the pseudo-channel to the display name and real channels to the managed prefix", () => {
+    assert.equal(piProviderId("auto"), "Anyswitch");
+    assert.equal(piProviderId("poke-api"), "_poke-api");
   });
 });
 describe("static on-disk auth values (direct-launch decoupling)", () => {
@@ -541,6 +602,47 @@ describe("launch-time instance retag", () => {
     assert.equal(written.providers._poke.apiKey, "launch-token");
     assert.equal(written.providers._poke.headers["x-agent-instance"], "proj-123");
     assert.equal(written.providers["user-own"].apiKey, "sk-user", "foreign provider untouched");
+  });
+
+  it("retags the Anyswitch pseudo-channel key, which has no managed prefix", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    const config = managedConfig();
+    config.providers.Anyswitch = {
+      name: "Anyswitch",
+      baseUrl: "http://127.0.0.1:47821/openai/poke/v1",
+      apiKey: "stable-token",
+      api: "openai-completions",
+      headers: { "x-agent-id": "pi", "x-agent-instance": DIRECT_INSTANCE_ID },
+      models: [{ id: "auto" }],
+    };
+    writeFileSync(filePath, JSON.stringify(config, null, 2) + "\n", "utf8");
+    const result = tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(result.tagged.sort(), ["Anyswitch", "_poke"]);
+    assert.equal(readModelsJson(filePath).providers.Anyswitch.headers["x-agent-instance"], "proj-123");
+    const restore = restoreManagedProvidersAfterLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(restore.restored.sort(), ["Anyswitch", "_poke"]);
+    assert.equal(readModelsJson(filePath).providers.Anyswitch.headers["x-agent-instance"], DIRECT_INSTANCE_ID);
+  });
+
+  it("never retags a user provider that happens to be named Anyswitch", () => {
+    const dir = mkTestDir("pi-retag-");
+    const filePath = join(dir, "models.json");
+    const config = {
+      providers: {
+        Anyswitch: {
+          name: "my own",
+          baseUrl: "https://mine.example/v1",
+          apiKey: "sk-mine",
+          headers: { "x-agent-id": "custom" },
+          models: [{ id: "m1" }],
+        },
+      },
+    };
+    writeFileSync(filePath, JSON.stringify(config, null, 2) + "\n", "utf8");
+    const result = tagManagedProvidersForLaunch(filePath, { token: "launch-token", instanceId: "proj-123" });
+    assert.deepEqual(result, { ok: true, tagged: [] });
+    assert.equal(readModelsJson(filePath).providers.Anyswitch.apiKey, "sk-mine");
   });
 
   it("restores the static instance value after the launch", () => {

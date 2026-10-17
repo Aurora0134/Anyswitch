@@ -53,6 +53,7 @@ import { MANAGED_BEGIN as KIMI_MANAGED_BEGIN, MANAGED_END as KIMI_MANAGED_END } 
 import { MANAGED_BEGIN as CODEX_MANAGED_BEGIN, MANAGED_END as CODEX_MANAGED_END } from "./codex-merge-config.mjs";
 import { MANAGED_BEGIN as GROK_MANAGED_BEGIN, MANAGED_END as GROK_MANAGED_END } from "./grok-merge-config.mjs";
 import { getYamlModule, dshYamlSchema, DSH_LLM_ENTRY_ID } from "./dsh-merge-config.mjs";
+import { ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
 
 // Per-entry failure carrier. `code` is the stable machine-readable prefix of
 // the `failed[].error` string the API contract propagates.
@@ -102,11 +103,22 @@ const MANAGED_ID_PREFIXES = {
   grok: ["anyswitch-"],
 };
 
+// Managed ids that are not prefix-shaped: the Anyswitch pseudo-channel's
+// provider id is its visible channel name (kimi/pi render provider ids
+// verbatim), so it must be matched exactly or a forged ticket could delete it.
+const MANAGED_ID_EXACT = {
+  kimi: [ANYSWITCH_CHANNEL_NAME],
+  pi: [ANYSWITCH_CHANNEL_NAME],
+};
+
 function assertNotManagedId(entry) {
   for (const prefix of MANAGED_ID_PREFIXES[entry.agentId] ?? []) {
     if (entry.sourceId.startsWith(prefix)) {
       throw new RemovalError("managed-entry", `id "${entry.sourceId}" carries the managed prefix "${prefix}"`);
     }
+  }
+  if ((MANAGED_ID_EXACT[entry.agentId] ?? []).includes(entry.sourceId)) {
+    throw new RemovalError("managed-entry", `id "${entry.sourceId}" is an Anyswitch-managed channel name`);
   }
 }
 
