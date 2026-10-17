@@ -9312,6 +9312,8 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function confirmTerminalAddMenu() {}
       function selectTerminalAddAgent() {}
       function loadInstalledTerminalAgents() {}
+      // M5 页签拖拽：init 给列 0 的页签条挂拖拽接线；桩环境无 DOM 事件面，补空桩
+      function wireTerminalTabDrag() {}
       // 页签条收展接线走真实现（applyTerminalTabsHidden/setTerminalTabsHidden 在源码内），
       // 桩只补它们触到的外部面：localStorage 与 scheduleTerminalFit。
       const localStorage = { getItem: () => null, setItem: () => {} };

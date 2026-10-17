@@ -4989,6 +4989,270 @@ async function api(method, path, body) {
     }
     const retryBtn = $(`terminalRetryBtn${sfx}`);
     if (retryBtn) retryBtn.onclick = () => dispatchTerminalUnavailableAction();
+    wireTerminalTabDrag(column);
+  }
+
+  // ── 页签拖拽分列（M5）──
+  // 选型 pointer-based：页签条是 innerHTML 指纹门控重渲（renderTerminalColumnTabs），
+  // 拖拽中 1s 轮询的状态点变化即可重写页签 DOM——HTML5 DnD 会话会随被拖元素销毁
+  // 而崩；pointer 方案把移动/抬起监听挂 window，与页签 DOM 生命周期解耦，重渲不
+  // 伤拖拽。跟随幻影是自建节点（克隆源页签），不在被重渲的页签条里。
+  const TERMINAL_TAB_DRAG_THRESHOLD_PX = 6;
+  const TERMINAL_TAB_DROP_EDGE_PX = 14;
+  // 进行中的拖拽会话；null = 空闲。形状见 wireTerminalTabDrag 的构造处。
+  let terminalTabDrag = null;
+  // 拖拽落地后尾随的那一次 click 是按压尾声不是切签意图——吞掉一次即清
+  //（endTerminalTabDrag 立旗，另有 setTimeout 兜底：落点后页签 DOM 随列结构重写，
+  // click 可能根本不派发，不能让陈旗蚀掉下一次正常点击）。
+  let terminalTabDragSuppressClick = false;
+
+  // 落点判定状态机（纯函数，几何事实进、落点意图出，测试直接跑这条）：
+  // panes = [{ left, right, top, bottom, tabsBar: { left, right, top, bottom } | null }]
+  // 命中优先级：某列页签条（→移入该列，本列→无操作）> 缝隙/左右边缘带（→插新列）
+  // > 无落点。返回 { kind: "move-into", columnIndex } | { kind: "new-column", at }
+  // | { kind: "noop" } | null。
+  function classifyTerminalTabDrop(x, y, panes, sourceIndex) {
+    if (!panes.length) return null;
+    const first = panes[0];
+    const last = panes[panes.length - 1];
+    if (y < first.top || y > first.bottom) return null;
+    if (x < first.left - TERMINAL_TAB_DROP_EDGE_PX || x > last.right + TERMINAL_TAB_DROP_EDGE_PX) return null;
+    for (let i = 0; i < panes.length; i++) {
+      const bar = panes[i].tabsBar;
+      if (bar && x >= bar.left && x <= bar.right && y >= bar.top && y <= bar.bottom) {
+        return i === sourceIndex ? { kind: "noop" } : { kind: "move-into", columnIndex: i };
+      }
+    }
+    for (let i = 0; i <= panes.length; i++) {
+      const boundary = i === 0 ? first.left : i === panes.length ? last.right : panes[i].left;
+      if (Math.abs(x - boundary) <= TERMINAL_TAB_DROP_EDGE_PX) return { kind: "new-column", at: i };
+    }
+    return null;
+  }
+
+  // 状态机的 DOM 壳：取各列 pane/页签条的实时矩形过判定，补上列对象与超限禁投
+  // 标记。矩形每拍现取不缓存——拖拽中轮询重渲不改几何，但窗口resize/列增删可能改。
+  function terminalTabDropTargetAt(x, y, drag) {
+    const workspace = $("terminalWorkspace");
+    if (!workspace || typeof workspace.getBoundingClientRect !== "function") return null;
+    const paneEls = typeof workspace.querySelectorAll === "function"
+      ? Array.from(workspace.querySelectorAll(".terminal-main-pane"))
+      : [];
+    if (!paneEls.length) return null;
+    const panes = paneEls.map((pane) => {
+      const rect = pane.getBoundingClientRect();
+      const bar = typeof pane.querySelector === "function" ? pane.querySelector(".terminal-tabs-bar") : null;
+      const barRect = bar && typeof bar.getBoundingClientRect === "function" ? bar.getBoundingClientRect() : null;
+      return {
+        left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom,
+        tabsBar: barRect ? { left: barRect.left, right: barRect.right, top: barRect.top, bottom: barRect.bottom } : null,
+      };
+    });
+    const hit = classifyTerminalTabDrop(x, y, panes, drag.sourceIndex);
+    if (!hit || hit.kind === "noop") return hit;
+    if (hit.kind === "new-column") return { ...hit, forbidden: terminalColumns.length >= TERMINAL_MAX_COLUMNS };
+    return { ...hit, column: terminalColumns[hit.columnIndex] };
+  }
+
+  // 落点预览的动画降级：reduced-motion 用户跳过两帧展开直落终态（全局
+  // transition 杀开关同向兜底，JS 侧再省一次过渡帧）。
+  function terminalTabDragReducedMotion() {
+    try {
+      return typeof window !== "undefined" && typeof window.matchMedia === "function"
+        && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    } catch {
+      return false;
+    }
+  }
+
+  // 页签条 pointerdown 起步拖拽候选（列 0 在 initTerminalPreview 接线，新增列在
+  // wireTerminalColumnControls 接线）。× 关闭钮与非主键不起步；位移门之前的
+  // move 什么都不做，点击/横向滚动不受影响。
+  function wireTerminalTabDrag(column) {
+    const tabs = $(terminalColumnElementId(column, "terminalTabs"));
+    if (!tabs || typeof tabs.addEventListener !== "function") return;
+    tabs.addEventListener("pointerdown", (event) => {
+      if (terminalTabDrag) return;
+      if (typeof event.target?.closest !== "function") return;
+      const tab = event.target.closest("[data-terminal-tab]");
+      if (!tab || event.target.closest(".terminal-tab-close")) return;
+      if (event.button != null && event.button !== 0) return;
+      const sessionId = typeof tab.getAttribute === "function" ? tab.getAttribute("data-terminal-tab") : null;
+      if (!sessionId || typeof window === "undefined" || typeof window.addEventListener !== "function") return;
+      const drag = {
+        sessionId,
+        sourceIndex: terminalColumns.indexOf(column),
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        tabElement: tab,
+        active: false,
+        ghost: null,
+        grabOffsetX: 0,
+        previewEl: null,
+        previewBar: null,
+        previewSignature: "",
+        target: null,
+      };
+      drag.onMove = (moveEvent) => onTerminalTabDragMove(moveEvent);
+      drag.onUp = (upEvent) => endTerminalTabDrag(true, upEvent);
+      drag.onCancel = () => endTerminalTabDrag(false);
+      drag.onKeydown = (keyEvent) => { if (keyEvent.key === "Escape") endTerminalTabDrag(false); };
+      terminalTabDrag = drag;
+      window.addEventListener("pointermove", drag.onMove);
+      window.addEventListener("pointerup", drag.onUp);
+      window.addEventListener("pointercancel", drag.onCancel);
+      window.addEventListener("keydown", drag.onKeydown, true);
+      // 拦住原生的文本选择/拖拽，让位给我们的幻影跟随；click 照常派发
+      event.preventDefault?.();
+    });
+  }
+
+  function onTerminalTabDragMove(event) {
+    const drag = terminalTabDrag;
+    if (!drag || (event.pointerId != null && event.pointerId !== drag.pointerId)) return;
+    if (!drag.active) {
+      // 位移门：点击与拖拽的分界——未过门不启动，页签点击/× 关闭/条内横滚不误伤
+      if (Math.abs(event.clientX - drag.startX) < TERMINAL_TAB_DRAG_THRESHOLD_PX
+        && Math.abs(event.clientY - drag.startY) < TERMINAL_TAB_DRAG_THRESHOLD_PX) return;
+      activateTerminalTabDrag(drag, event);
+    }
+    drag.target = terminalTabDropTargetAt(event.clientX, event.clientY, drag);
+    syncTerminalTabDropPreview(drag);
+    moveTerminalTabDragGhost(drag, event);
+  }
+
+  // 拖拽启动：源页签半透明留位（poll 重渲会把它渲回常色，幻影仍跟随，无碍），
+  // 跟随幻影 = 源页签克隆体挂 body，fixed 定位不吃事件。
+  function activateTerminalTabDrag(drag, event) {
+    drag.active = true;
+    drag.tabElement?.classList?.add("is-drag-source");
+    if (typeof document === "undefined" || typeof document.createElement !== "function" || !document.body) return;
+    const tab = drag.tabElement;
+    if (!tab || typeof tab.cloneNode !== "function") return;
+    const rect = typeof tab.getBoundingClientRect === "function" ? tab.getBoundingClientRect() : null;
+    const ghost = document.createElement("div");
+    ghost.className = "terminal-tab-drag-ghost";
+    ghost.appendChild(tab.cloneNode(true));
+    if (rect) {
+      ghost.style.width = `${rect.width}px`;
+      ghost.style.height = `${rect.height}px`;
+      drag.grabOffsetX = event.clientX - rect.left;
+    }
+    document.body.appendChild(ghost);
+    drag.ghost = ghost;
+    moveTerminalTabDragGhost(drag, event);
+  }
+
+  function moveTerminalTabDragGhost(drag, event) {
+    if (!drag.ghost) return;
+    const x = event.clientX - (drag.grabOffsetX || 0);
+    drag.ghost.style.transform = `translate(${x}px, ${event.clientY + 14}px)`;
+  }
+
+  // 落点预览：目标签名不变不重复写 DOM。开新列=落点处展开的占位条（fixed 定位
+  // 覆盖在将来列的位置，宽度从 0 展开到等分预览宽；reduced-motion 直落终态）；
+  // 移入既有列=目标列页签条描边；超限禁投=幻影转禁止态（纯视觉、零文案）。
+  function syncTerminalTabDropPreview(drag) {
+    const target = drag.target;
+    drag.ghost?.classList?.toggle("is-forbidden", !!target && target.kind === "new-column" && !!target.forbidden);
+    const signature = target ? `${target.kind}:${target.at ?? target.columnIndex}:${!!target.forbidden}` : "";
+    if (signature === drag.previewSignature) return;
+    drag.previewSignature = signature;
+    clearTerminalTabDropPreview(drag);
+    if (!target || target.kind === "noop") return;
+    if (target.kind === "move-into") {
+      const pane = target.column ? terminalColumnPane(target.column) : null;
+      const bar = pane && typeof pane.querySelector === "function" ? pane.querySelector(".terminal-tabs-bar") : null;
+      if (bar?.classList) {
+        bar.classList.add("is-drop-target");
+        drag.previewBar = bar;
+      }
+      return;
+    }
+    if (target.kind !== "new-column" || target.forbidden) return;
+    const workspace = $("terminalWorkspace");
+    if (!workspace || typeof document === "undefined" || typeof document.createElement !== "function") return;
+    const paneEls = typeof workspace.querySelectorAll === "function"
+      ? Array.from(workspace.querySelectorAll(".terminal-main-pane"))
+      : [];
+    if (!paneEls.length || typeof paneEls[0].getBoundingClientRect !== "function") return;
+    const rects = paneEls.map((pane) => pane.getBoundingClientRect());
+    const futureWidth = (rects[rects.length - 1].right - rects[0].left) / (paneEls.length + 1);
+    const boundary = target.at === 0 ? rects[0].left
+      : target.at >= paneEls.length ? rects[rects.length - 1].right
+        : rects[target.at].left;
+    const finalLeft = target.at >= paneEls.length ? boundary - futureWidth : boundary;
+    const preview = document.createElement("div");
+    preview.className = "terminal-tab-drop-preview";
+    preview.style.top = `${rects[0].top}px`;
+    preview.style.height = `${rects[0].bottom - rects[0].top}px`;
+    if (terminalTabDragReducedMotion() || typeof requestAnimationFrame !== "function") {
+      preview.style.left = `${finalLeft}px`;
+      preview.style.width = `${futureWidth}px`;
+    } else {
+      preview.style.left = `${boundary}px`;
+      preview.style.width = "0px";
+      requestAnimationFrame(() => {
+        preview.style.left = `${finalLeft}px`;
+        preview.style.width = `${futureWidth}px`;
+      });
+    }
+    document.body.appendChild(preview);
+    drag.previewEl = preview;
+  }
+
+  function clearTerminalTabDropPreview(drag) {
+    if (drag.previewEl) {
+      drag.previewEl.remove?.();
+      drag.previewEl = null;
+    }
+    if (drag.previewBar) {
+      drag.previewBar.classList?.remove("is-drop-target");
+      drag.previewBar = null;
+    }
+  }
+
+  // 落点执行：开新列=同一同步块内加列+移入（不会被轮询的列空自收夹掉），
+  // addTerminalColumn 返 null = 已达 3 列上限——禁投，无文案（设计定稿）；
+  // 移入既有列走 M4 口径（源列空了自动收）；本列/无落点什么都不做。
+  function commitTerminalTabDrop(sessionId, target) {
+    if (!target || target.kind === "noop") return;
+    if (target.kind === "move-into") {
+      if (target.column) moveTerminalSessionToColumn(sessionId, target.column);
+      return;
+    }
+    if (target.kind === "new-column" && !target.forbidden) {
+      const column = addTerminalColumn({ at: target.at });
+      if (column) moveTerminalSessionToColumn(sessionId, column);
+    }
+  }
+
+  function endTerminalTabDrag(commit, event) {
+    const drag = terminalTabDrag;
+    if (!drag) return;
+    terminalTabDrag = null;
+    if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+      window.removeEventListener("pointermove", drag.onMove);
+      window.removeEventListener("pointerup", drag.onUp);
+      window.removeEventListener("pointercancel", drag.onCancel);
+      window.removeEventListener("keydown", drag.onKeydown, true);
+    }
+    if (!drag.active) return;
+    drag.tabElement?.classList?.remove("is-drag-source");
+    clearTerminalTabDropPreview(drag);
+    if (drag.ghost) {
+      drag.ghost.remove?.();
+      drag.ghost = null;
+    }
+    if (!commit) return;
+    terminalTabDragSuppressClick = true;
+    setTimeout(() => { terminalTabDragSuppressClick = false; }, 0);
+    // 落点以松手位置的实时判定为准（取不到坐标时回落最近一次的悬停判定）
+    const target = event && typeof event.clientX === "number"
+      ? terminalTabDropTargetAt(event.clientX, event.clientY, drag)
+      : drag.target;
+    commitTerminalTabDrop(drag.sessionId, target);
   }
   let terminalBackendSessions = {};
   // 上一次看到的窗口可见性，只为"漏掉的转折"服务（见轮询兜底拍与 syncTerminalDataStream）。
@@ -7109,6 +7373,11 @@ async function api(method, path, body) {
   // 即焦点列」的一环），其后「当前会话」语义都落在该列。列 0 的接线在
   // initTerminalPreview，新增列的接线在 wireTerminalColumnControls，共用本函数。
   function handleTerminalTabsClick(column, event) {
+    // 拖拽分列落地后的尾随 click 不是切签意图（M5）：吞掉一次并清旗。
+    if (terminalTabDragSuppressClick) {
+      terminalTabDragSuppressClick = false;
+      return;
+    }
     const tab = event.target.closest("[data-terminal-tab]");
     if (!tab) return;
     const id = tab.dataset.terminalTab;
@@ -7195,6 +7464,8 @@ async function api(method, path, body) {
     }
     syncTerminalActivityStream();
     tabs.addEventListener("click", (event) => handleTerminalTabsClick(terminalColumns[0], event));
+    // 页签拖拽分列接线（M5）：列 0 在这里，新增列在 wireTerminalColumnControls。
+    wireTerminalTabDrag(terminalColumns[0]);
     // 点列任意处即焦点列：pane 捕获阶段先行，列 0 的控件（页签/「+」/字号/重画）
     // 与新增列共用同一语义（新增列的接线见 wireTerminalColumnControls）。
     terminalColumnPane(terminalColumns[0])?.addEventListener?.("pointerdown", () => setTerminalFocusedColumn(terminalColumns[0]), true);
