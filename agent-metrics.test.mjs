@@ -3924,6 +3924,9 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     "C:\\Users\\tester\\.dsh\\profiles\\dsh-tui\\node_modules\\@deepseek-harness-tui\\dsh-tui\\bin\\dsh-tui.js",
   ];
   const nodeRow = (pid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${pid}`;
+  // 5 列形态（带 ParentProcessId）：dsh 0.2.0 的委托宿主判定只认父进程列——
+  // 宿主与引擎的命令行逐字相同，4 列形态下两者无从分辨。
+  const nodeRow5 = (pid, ppid, commandLine) => `LAPTOP,"C:\\Program Files\\nodejs\\node.exe" ${commandLine},node.exe,${ppid},${pid}`;
   const launcherRow = (pid, idx) => nodeRow(pid, `"${TUI_LAUNCHERS[idx]}"`);
   const harnessRow = (pid, args) => nodeRow(pid, `"${DSH_BIN}" ${args}`);
   // The official desktop package: image `DeepSeek Harness.exe`. The shell row
@@ -3955,6 +3958,77 @@ describe("DSH surfaces: harness process vs TUI launcher shell", () => {
     assert.deepEqual(surfacesOf(dsh), { TUI: 1 });
     assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-4102"], "只有引擎进程出行");
     assert.equal(dsh.instances[0].surface, "TUI");
+  });
+
+  it("folds the 0.2.0 command-line-identical delegation host into its engine child", async () => {
+    // dsh 0.2.0 起 `dsh --profile <name>` 的宿主把引擎作为子进程再拉起一遍，
+    // 命令行与宿主逐字相同（面板一键启动 75056a6 落的就是这条形态）。命令行
+    // 谓词分不出两者，父进程列能：宿主折出引擎集后，卡上 1 进程、副行 TUI ×1、
+    // 占位行只有引擎子进程一条，终端归属面也只报子进程——「绑最近引擎」从此
+    // 绑到真正持流量的那一行，而不是 0 请求的宿主（2026-10-17 幽灵行根因）。
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      nodeRow5(5100, 99, `"${DSH_BIN}" --profile dsh-tui`),
+      nodeRow5(5101, 5100, `"${DSH_BIN}" --profile dsh-tui`),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.dsh, 1, "委托宿主不算会话进程");
+    assert.equal(procs.dshPids.has(5100), true, "宿主留在家族集保活性");
+    assert.equal(procs.dshEnginePids.has(5100), false, "宿主折出引擎集");
+    assert.equal(procs.dshEnginePids.has(5101), true);
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { TUI: 1 });
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-5101"], "只有引擎子进程出行");
+    assert.equal(dsh.instances[0].surface, "TUI");
+
+    const dshFeed = collector.getDetectedClientProcesses().filter((p) => p.agentId === "dsh");
+    assert.deepEqual(dshFeed, [{ agentId: "dsh", pid: 5101, ancestors: [5100, 99] }],
+      "终端归属面只报引擎子进程");
+  });
+
+  it("collapses a delegation chain of any depth and carries the host's profile down", async () => {
+    // 三层链一次折到底；子进程命令行读不出 profile 时（引擎经 env 转发而非
+    // 重传旗标），由宿主读出的传下去——徽标与副行都读子进程。
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      nodeRow5(5200, 99, `"${DSH_BIN}" --profile dsh-tui`),
+      nodeRow5(5201, 5200, `"${DSH_BIN}" --profile dsh-tui`),
+      nodeRow5(5202, 5201, `"${DSH_BIN}"`),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.dsh, 1, "三层链折到最深一个");
+    assert.deepEqual([...procs.dshEnginePids], [5202]);
+    assert.equal(procs.dshProfileByPid.get(5202), "dsh-tui", "宿主的 profile 传给读不出的子进程");
+    assert.equal(procs.dshProfileByPid.has(5200), false, "宿主的映射随宿主折出");
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.equal(dsh.processCount, 1);
+    assert.deepEqual(surfacesOf(dsh), { TUI: 1 });
+    assert.deepEqual(dsh.instances.map((i) => i.id), ["dsh-5202"]);
+  });
+
+  it("keeps the desktop host out of the fold: its stable row is anchored on the host pid", async () => {
+    // 桌面宿主行的身份按设计锚在宿主 pid 上（resolveInstanceId 折 DSH_DESKTOP_
+    // INSTANCE_ID），即便它也是某个引擎进程的父进程也不折——豁免判据用
+    // dshDesktopHostPids 集合，与 CLI 自建同名 profile 无关。
+    const execFn = (cmd, opts, cb) => cb(null, wmic5(
+      desktopShellRow5(5300, 99),
+      desktopHostRow5(5301, 5300),
+      nodeRow5(5302, 5301, `"${DSH_BIN}" --profile desktop`),
+    ));
+    const collector = testCollector({ execFn, nowFn: () => 3000 });
+
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.dshDesktopHostPids.has(5301), true, "桌面宿主不被折出");
+    assert.equal(procs.dshEnginePids.has(5301), true);
+
+    const dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.instances.map((i) => i.id).sort(), ["dsh-5302", "dsh-desktop"],
+      "宿主持稳定行，引擎子进程照常逐 pid");
   });
 
   it("labels every profile its own name and adds up to the process count", async () => {

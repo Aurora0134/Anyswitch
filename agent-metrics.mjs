@@ -657,6 +657,42 @@ export function summarizeDshSurfaces(procCounts) {
   );
 }
 
+// dsh 0.2.0 的 profile 委托把引擎作为子进程再拉起一遍，命令行与宿主完全相同
+// （同一个全局 `dsh\lib\bin.js --profile <name>`），上面的谓词从此分不出宿主与
+// 引擎。进程树分得出：引擎集里「自己是另一个引擎进程的父进程」的那个就是委托
+// 宿主。扫描落地前把宿主折出引擎集（留在 dshPids 家族集保活性），等价于旧形态
+// 里 `bin/dsh-tui.js` 壳排除所给的语义。桌面宿主豁免：桌面稳定行的身份按设计
+// 锚在宿主 pid 上（见 resolveInstanceId 的桌面折稳定行）。
+function foldDshDelegatingHosts(counts) {
+  const engine = counts.dshEnginePids;
+  if (!(engine instanceof Set) || engine.size < 2) return;
+  const ppid = counts.ppidByPid;
+  if (!(ppid instanceof Map) || ppid.size === 0) return;
+  const desktopHosts = counts.dshDesktopHostPids instanceof Set ? counts.dshDesktopHostPids : null;
+  const profiles = counts.dshProfileByPid instanceof Map ? counts.dshProfileByPid : null;
+  // 一遍收敛：收集阶段读的是删除前的集合，任意深度的委托链一次全折掉，
+  // 只留最深那个（真正持有连接、承载会话的进程）。
+  const hosts = [];
+  for (const pid of engine) {
+    if (desktopHosts !== null && desktopHosts.has(pid)) continue;
+    for (const other of engine) {
+      if (other !== pid && ppid.get(other) === pid) { hosts.push(pid); break; }
+    }
+  }
+  for (const pid of hosts) {
+    // 子进程读不出自己的 profile 时，把宿主读出的传下去——徽标与副行都读子进程。
+    const profile = profiles?.get(pid) ?? null;
+    if (profile !== null && profiles !== null) {
+      for (const other of engine) {
+        if (other !== pid && ppid.get(other) === pid && !profiles.has(other)) profiles.set(other, profile);
+      }
+    }
+    engine.delete(pid);
+    profiles?.delete(pid);
+    counts.dsh = Math.max(0, (counts.dsh ?? 0) - 1);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Kimi Code 的分面（步 1/2 of bridge/anyswitch/kimi-desktop-integration-plan.md）。
 //
@@ -2472,6 +2508,9 @@ export function createAgentMetricsCollector(options = {}) {
         // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
         // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
         counts.countsAuthoritative = true;
+        // 折叠在落地前：同步纯计算不占探针预算，首读与 lastTrustedScan 拿到的
+        // 都是折过的形态（降级轮的形态延续也就自带折叠结果）。
+        foldDshDelegatingHosts(counts);
         // 先落地，再跑本轮的附加工作。读路径的判据是「本轮进程事实到手」，不是
         // 「这条子进程今天所有事都办完」：可选复查曾排在 land 之前，于是一条慢复查
         // 会把已经拿到手的数据一起扣住（本机实测：扫描 20ms 答完、整轮 3032ms 才
@@ -2502,6 +2541,9 @@ export function createAgentMetricsCollector(options = {}) {
             // 任何进程号可挂）。放在 kimi 注册表提级之前：注册表能把沿用下来的
             // 终端那一档照样提成 web。
             if (counts.countsAuthoritative === false) carryTrustedForm(counts);
+            // 降级轮里形态延续带下来的 ppid 表若仍在，折叠照样成立；读不到
+            // 父子表的轮次它在函数头部就空转（引擎集只剩镜像行时同样空转）。
+            foldDshDelegatingHosts(counts);
             await attachKimiSurfaces(counts);
             land(counts);
           } else {
