@@ -1727,6 +1727,21 @@
     background: transparent;
     caret-color: transparent;
   }
+  /* 组字期间冻结隐藏输入框的位置：xterm 内核每次渲染都会把 left/top/height/
+     line-height 改写到实时光标格（内联样式，频率随输出密度上升），输入法候选框
+     被拽着在「组字起点」与「活光标」之间交替上屏。样式表 !important 恒胜内联
+     非 important 写，类挂上期间内核的位置改写全部视觉失效。宽度故意不钉：让内核
+     随拼音变长扩宽，caret 始终在框内。组字预览块与输入框同被内核改写，一并钉住。 */
+  .terminal-xterm-host .xterm-helper-textarea.ime-hold {
+    left: var(--ime-hold-left) !important;
+    top: var(--ime-hold-top) !important;
+    height: var(--ime-hold-height) !important;
+    line-height: var(--ime-hold-lineheight) !important;
+  }
+  .terminal-xterm-host .xterm .composition-view.ime-hold {
+    left: var(--ime-hold-left) !important;
+    top: var(--ime-hold-top) !important;
+  }
   /* xterm 自带的组字预览块：默认黑底白字（上游写死，与主题无关），落在光标格上就是
      一块把左边字符压掉一块的深色方块。底色改全透明——方块彻底消失，压字问题消失，
      底下的 TUI 画面（含左边字符）原样透出；字色跟随终端前景 token，组字预览重新可见，

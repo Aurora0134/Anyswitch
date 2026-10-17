@@ -8832,24 +8832,44 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
   });
 });
 
-// 输入法候选框抽搐：组字期间隐藏输入框被光标重绘、回显和尺寸自适应反复搬走。
-// 组字开始后锚点钉在落位时的位置；还停在屏幕外时不钉；组字结束才放开。
-// 尺寸自适应在组字期间先记下，结束后再补一次。
+// 输入法候选框抽搐：组字期间 xterm 内核每次渲染都把隐藏输入框改写到实时光标格，
+// 与面板自己的逐帧拉回互抢，帧序随输出密度摆动。治本：锚点落位后写成 CSS 自定义
+// 属性并挂 ime-hold 类，样式表 !important 让内核的内联改写视觉失效，不再逐帧抢写。
+// 还停在屏幕外时不钉；组字结束摘类清属性。尺寸自适应在组字期间先记下，结束后补一次。
 describe("虚拟终端组字期间输入法锚点不动", () => {
+  function imeStyleStub() {
+    return {
+      left: "", top: "", width: "", height: "", lineHeight: "",
+      props: {},
+      setCalls: [],
+      setProperty(k, v) { this.setCalls.push(k); this.props[k] = v; },
+      removeProperty(k) { delete this.props[k]; },
+    };
+  }
+  function imeClassListStub() {
+    const set = new Set();
+    return {
+      add(c) { set.add(c); },
+      remove(c) { set.delete(c); },
+      contains(c) { return set.has(c); },
+    };
+  }
   function imeAnchorSandbox() {
-    const bodies = ["terminalImeAnchorReady", "syncTerminalImeAnchor", "armTerminalImeAnchor", "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
+    const bodies = ["terminalImeAnchorReady", "armTerminalImeAnchor", "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
         return src;
       }).join("\n");
+    const compositionView = { classList: imeClassListStub(), style: imeStyleStub() };
     const textarea = {
       isConnected: true,
-      style: { left: "", top: "", width: "", height: "", lineHeight: "" },
-      dataset: {},
+      style: imeStyleStub(),
+      classList: imeClassListStub(),
       listeners: {},
       addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); },
       dispatch(type) { for (const fn of this.listeners[type] || []) fn(); },
+      parentElement: { querySelector: (sel) => (sel === ".composition-view" ? compositionView : null) },
     };
     const term = { element: { querySelector: (sel) => (sel === ".xterm-helper-textarea" ? textarea : null) } };
     const frames = [];
@@ -8870,55 +8890,57 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
         queuedFrames: () => frames.length,
       };
     `)(textarea, term);
-    return { api, textarea, term, frames };
+    return { api, textarea, compositionView, term, frames };
   }
 
-  it("组字期间锚点停在落位处，屏幕外的停靠位不钉，结束后才跟着光标走", () => {
-    const { api, textarea } = imeAnchorSandbox();
+  it("组字期间锚点由样式表冻结：落位后挂类写自定义属性，不再逐帧改写，结束摘类清属性", () => {
+    const { api, textarea, compositionView } = imeAnchorSandbox();
     api.install();
     textarea.style.left = "-9999em";
     textarea.style.top = "0px";
     textarea.style.width = "0px";
     textarea.style.height = "0px";
     textarea.dispatch("compositionstart");
+    assert.ok(!textarea.classList.contains("ime-hold"), "还停在屏幕外：不钉");
+    assert.equal(textarea.style.setCalls.length, 0, "未落位不写自定义属性");
+    assert.equal(api.queuedFrames(), 1, "未落位留一帧重试");
     api.flushFrame();
+    assert.ok(!textarea.classList.contains("ime-hold"), "重试时仍未落位：继续不钉");
     textarea.style.left = "48px";
     textarea.style.top = "64px";
     textarea.style.width = "16px";
     textarea.style.height = "18px";
     textarea.style.lineHeight = "18px";
     api.flushFrame();
+    assert.ok(textarea.classList.contains("ime-hold"), "落位后挂上冻结类");
+    assert.equal(textarea.style.props["--ime-hold-left"], "48px");
+    assert.equal(textarea.style.props["--ime-hold-top"], "64px");
+    assert.equal(textarea.style.props["--ime-hold-height"], "18px");
+    assert.equal(textarea.style.props["--ime-hold-lineheight"], "18px");
+    assert.equal(textarea.style.props["--ime-hold-width"], undefined, "宽度不钉：留给内核随拼音扩宽");
+    const writes = (k) => textarea.style.setCalls.filter((c) => c === k).length;
+    assert.equal(writes("--ime-hold-left"), 1, "每个自定义属性只写一次");
+    assert.equal(writes("--ime-hold-top"), 1);
+    assert.equal(writes("--ime-hold-height"), 1);
+    assert.equal(writes("--ime-hold-lineheight"), 1);
+    assert.ok(compositionView.classList.contains("ime-hold"), "组字预览块一并冻结");
+    assert.equal(compositionView.style.props["--ime-hold-left"], "48px");
+    assert.equal(compositionView.style.props["--ime-hold-top"], "64px");
+    assert.equal(api.queuedFrames(), 0, "冻结靠样式表，不再注册逐帧 rAF");
     textarea.style.left = "900px";
     textarea.style.top = "2px";
-    textarea.style.width = "320px";
     textarea.style.height = "40px";
     textarea.style.lineHeight = "40px";
     api.flushFrame();
-    assert.equal(textarea.style.left, "48px", "重绘把锚点甩走后，下一帧拉回组字落位");
-    assert.equal(textarea.style.top, "64px");
-    assert.equal(textarea.style.width, "16px", "拼音变长不再把锚点撑宽");
-    assert.equal(textarea.style.height, "18px");
-    assert.equal(textarea.style.lineHeight, "18px");
-    textarea.style.left = "-9999em";
-    api.flushFrame();
-    assert.equal(textarea.style.left, "48px", "光标闪烁不会把锚点送回屏幕外");
+    assert.equal(textarea.style.props["--ime-hold-left"], "48px", "内核改写内联位置不影响钉住值");
+    assert.equal(writes("--ime-hold-left"), 1, "高频输出下也不重写自定义属性");
+    assert.equal(api.queuedFrames(), 0, "高频输出下不再逐帧拉回");
     textarea.dispatch("compositionend");
-    textarea.style.left = "80px";
-    textarea.style.top = "96px";
-    api.flushFrame();
-    assert.equal(textarea.style.left, "80px", "组字结束后锚点回到光标，不再被旧位置拽回");
-    assert.equal(textarea.style.top, "96px");
-    assert.equal(api.queuedFrames(), 0, "组字结束后不再逐帧改锚点");
-    textarea.style.left = "80px";
-    textarea.style.top = "96px";
-    textarea.style.width = "16px";
-    textarea.style.height = "18px";
-    textarea.style.lineHeight = "18px";
-    textarea.dispatch("compositionstart");
-    api.flushFrame();
-    textarea.style.left = "10px";
-    api.flushFrame();
-    assert.equal(textarea.style.left, "80px", "下一次组字钉在新的光标上");
+    assert.ok(!textarea.classList.contains("ime-hold"), "结束摘类");
+    assert.ok(!compositionView.classList.contains("ime-hold"), "预览块同步摘类");
+    assert.deepEqual(textarea.style.props, {}, "自定义属性清空");
+    assert.deepEqual(compositionView.style.props, {}, "预览块自定义属性清空");
+    assert.equal(api.queuedFrames(), 0, "结束后没有任何排帧");
   });
 
   it("组字期间尺寸变化先不缩放，组字结束后补一次", () => {
@@ -8928,7 +8950,8 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
     const releaseSrc = panelJs.match(/function releaseTerminalImeAnchor\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(fitSrc && releaseSrc && measurableSrc && fitFloorSrc);
     const state = { fits: 0 };
-    const api = new Function("state", `
+    const holdTextarea = { classList: imeClassListStub(), style: imeStyleStub() };
+    const api = new Function("state", "holdTextarea", `
       let terminalImeHold = null;
       let terminalImeHoldFrame = null;
       let terminalImeFitPending = false;
@@ -8945,10 +8968,10 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
       ${releaseSrc}
       return {
         fit: fitTerminalXterm,
-        hold: () => { terminalImeHold = { textarea: {} }; },
+        hold: () => { terminalImeHold = { textarea: holdTextarea }; },
         release: releaseTerminalImeAnchor,
       };
-    `)(state);
+    `)(state, holdTextarea);
     api.fit();
     assert.equal(state.fits, 1, "平时缩放照常");
     api.hold();
@@ -8959,6 +8982,20 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
     assert.equal(state.fits, 2, "组字结束后把记下的缩放补一次");
     api.fit();
     assert.equal(state.fits, 3, "放开后缩放恢复即时");
+  });
+
+  it("冻结规则挂在样式表：left/top/height/line-height 全部 !important，宽度故意不钉", () => {
+    const rule = panelCss.match(/\.terminal-xterm-host \.xterm-helper-textarea\.ime-hold\s*\{[^}]*\}/)?.[0];
+    assert.ok(rule, "ime-hold 规则存在");
+    assert.match(rule, /left:\s*var\(--ime-hold-left\)\s*!important/, "left 钉住且压过内联写");
+    assert.match(rule, /top:\s*var\(--ime-hold-top\)\s*!important/, "top 钉住且压过内联写");
+    assert.match(rule, /height:\s*var\(--ime-hold-height\)\s*!important/, "height 钉住且压过内联写");
+    assert.match(rule, /line-height:\s*var\(--ime-hold-lineheight\)\s*!important/, "line-height 钉住且压过内联写");
+    assert.ok(!/(?<![-\w])width\s*:/.test(rule), "宽度不钉：caret 随拼音变长始终在框内");
+    const viewRule = panelCss.match(/\.terminal-xterm-host \.xterm \.composition-view\.ime-hold\s*\{[^}]*\}/)?.[0];
+    assert.ok(viewRule, "组字预览块的冻结规则存在");
+    assert.match(viewRule, /left:\s*var\(--ime-hold-left\)\s*!important/);
+    assert.match(viewRule, /top:\s*var\(--ime-hold-top\)\s*!important/);
   });
 
   it("隐藏输入框仍留在画面上：字和光标看不见，框本身不透明", () => {
