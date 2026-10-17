@@ -7827,6 +7827,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       function armTerminalImeAnchor() {}
       function releaseTerminalImeAnchor() {}
       function installTerminalImeAnchor() {}
+      // 底部自动对齐：本沙箱不验其行为（行为钉见「虚拟终端底部自动对齐」组），补空桩接线
+      function installTerminalBottomAlign() {}
       class FakeFitAddon {}
       const window = { Terminal: null, FitAddon: { FitAddon: FakeFitAddon } };
       window.Terminal = class {
@@ -8080,6 +8082,8 @@ describe("终端列架构（按列索引隔离）", () => {
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function requestAnimationFrame(cb) { cb(); return 0; }
       function cancelAnimationFrame() {}
+      // 底部自动对齐：本沙箱不验其行为（行为钉见「虚拟终端底部自动对齐」组），补空桩接线
+      function installTerminalBottomAlign() {}
       class FakeFitAddon {
         fit() {
           const m = this.term?.openedHost?.measured;
@@ -8368,6 +8372,259 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     fn({ element: null }); // 桩实例无 element：早期返回，不炸
     const rootless = { element: { querySelector: () => null } };
     fn(rootless); // 无 .xterm-viewport：同样安全返回
+  });
+});
+
+// 底部自动对齐（terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm 渲染层
+// 旧高度溢出宿主盒、被外层 .terminal-screen 的 overflow:auto 接住，形成底部可滚入的
+// 空白带。开启后用户上滚意图（wheel deltaY<0 / Shift+PageUp，与跳顶护栏同一 root
+// capture 事件面）触发把外层 scrollTop 收 0；动作面只写外层 scrollTop，绝不写
+// .xterm-viewport、绝不调 scrollToBottom/scrollToLines。函数体抽进桩环境真跑。
+describe("虚拟终端底部自动对齐", () => {
+  const ALIGN_DESC = "关闭时，终端画面下方多出的空白区域保持原样；开启后，向上翻看历史时自动裁掉底部多出的空白，再滚回底部即恰好对齐。";
+
+  function alignSrc(name, pattern) {
+    const src = panelJs.match(pattern)?.[0];
+    assert.ok(src, `${name} found in panel.js`);
+    return src;
+  }
+
+  it("骨架：终端设置小窗含新开关条目，标题与定稿 desc 字面量在册，位列恢复开关之后", () => {
+    const modal = panelHtml.slice(panelHtml.indexOf('id="terminalSettingsModal"'));
+    assert.ok(modal.includes('id="terminalBottomAlignToggle"'), "开关 toggle 在册");
+    assert.ok(modal.includes('<div class="modal-item-title">底部自动对齐</div>'), "标题「底部自动对齐」在册");
+    assert.ok(modal.includes(`<div class="modal-item-desc">${ALIGN_DESC}</div>`), "desc 定稿字面量逐字在册");
+    assert.ok(
+      modal.indexOf('id="terminalRestoreToggle"') < modal.indexOf('id="terminalBottomAlignToggle"'),
+      "新条目位列「从上次中断的地方继续」之后（同一个小窗内并列追加）");
+  });
+
+  function alignSandbox() {
+    const fnSrc = alignSrc("installTerminalBottomAlign", /function installTerminalBottomAlign\(column, term\) \{[\s\S]*?\n  \}/);
+    const intentSrc = alignSrc("TERMINAL_SCROLL_INTENT_MS", /const TERMINAL_SCROLL_INTENT_MS = \d+;/);
+    const bandSrc = alignSrc("TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX", /const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = \d+;/);
+    const colIdSrc = alignSrc("terminalColumnElementId", /function terminalColumnElementId\(column, base\) \{[\s\S]*?\n  \}/);
+    const state = { now: 100000, alignOn: true, viewHidden: false, rafQueue: [] };
+    const sandbox = new Function("state", `
+      ${intentSrc}
+      ${bandSrc}
+      const Date = { now: () => state.now };
+      function requestAnimationFrame(cb) { state.rafQueue.push(cb); return state.rafQueue.length; }
+      function makeEl() {
+        const handlers = {};
+        return {
+          handlers,
+          dataset: {},
+          addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+          fire(type, event = {}) { for (const fn of handlers[type] || []) fn(event); },
+        };
+      }
+      const els = {};
+      function $(id) { return els[id] || null; }
+      ${colIdSrc}
+      function terminalBottomAlignEnabled() { return state.alignOn; }
+      ${fnSrc}
+      return { installTerminalBottomAlign, makeEl, els };
+    `)(state);
+    const root = sandbox.makeEl();
+    const screen = sandbox.makeEl();
+    screen.scrollHeight = 900;
+    screen.clientHeight = 600;
+    let scrollTopValue = 120; // 带已被滚入（滚轮到底后链入外层）
+    const writes = [];
+    Object.defineProperty(screen, "scrollTop", {
+      get() { return scrollTopValue; },
+      set(v) { writes.push(v); scrollTopValue = v; },
+    });
+    sandbox.els.terminalScreen = screen;
+    sandbox.els.terminalView = { get hidden() { return state.viewHidden; } };
+    const term = {
+      element: root,
+      scrollToBottom() { state.scrollToBottomCount = (state.scrollToBottomCount || 0) + 1; },
+      scrollToLines() { state.scrollToLinesCount = (state.scrollToLinesCount || 0) + 1; },
+    };
+    const column = { elementIdSuffix: "", imeHold: null, bottomAlignIntentAt: 0, bottomAlignTrimFrame: null };
+    sandbox.installTerminalBottomAlign(column, term);
+    const flush = () => { for (const cb of state.rafQueue.splice(0)) cb(); };
+    return { state, root, screen, term, column, writes, flush };
+  }
+
+  it("开关关：上滚意图不动作，外层 scrollTop 原样", () => {
+    const { state, root, screen, writes, flush } = alignSandbox();
+    state.alignOn = false;
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.equal(writes.length, 0, "开关关时零写");
+    assert.equal(screen.scrollTop, 120, "外层 scrollTop 不动");
+  });
+
+  it("开关开：上滚意图把外层 scrollTop 收 0，且绝不碰内层 viewport 通路", () => {
+    const { state, root, screen, writes, flush } = alignSandbox();
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.deepEqual(writes, [0], "外层 scrollTop 收 0 恰好一笔");
+    assert.equal(screen.scrollTop, 0, "带被吃掉，回到自然停靠位");
+    assert.equal(screen.dataset.bottomAlignTrim, "300", "调试属性记下被吃的带高");
+    assert.equal(state.scrollToBottomCount, undefined, "不调 scrollToBottom");
+    assert.equal(state.scrollToLinesCount, undefined, "不调 scrollToLines");
+  });
+
+  it("无空带不动：scrollHeight==clientHeight 时上滚零写；行高取整残余（<阈值）同样不动", () => {
+    const tight = alignSandbox();
+    tight.screen.scrollHeight = 600; // 与 clientHeight 齐平：无带
+    tight.root.fire("wheel", { deltaY: -120 });
+    tight.flush();
+    assert.equal(tight.writes.length, 0, "无空带零写");
+    const residual = alignSandbox();
+    residual.screen.scrollHeight = 603; // 行高取整残余 3px，低于阈值
+    residual.root.fire("wheel", { deltaY: -120 });
+    residual.flush();
+    assert.equal(residual.writes.length, 0, "行高取整残余不构成带，零写");
+  });
+
+  it("组字期挂起：imeHold 期间上滚不量不动", () => {
+    const { root, column, writes, flush } = alignSandbox();
+    column.imeHold = { textarea: {} };
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.equal(writes.length, 0, "组字期零写");
+  });
+
+  it("隐藏期不量不动：终端页 hidden 时上滚零写", () => {
+    const { state, root, writes, flush } = alignSandbox();
+    state.viewHidden = true;
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.equal(writes.length, 0, "隐藏期零写");
+  });
+
+  it("幂等闸：已在停靠位再触发零写", () => {
+    const { root, writes, flush } = alignSandbox();
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    root.fire("wheel", { deltaY: -120 });
+    flush();
+    assert.deepEqual(writes, [0], "重复触发只写一笔，已归 0 不再写");
+  });
+
+  it("意图映射精度：Shift+PageUp 收带；裸 PageUp、Shift+Home、wheel 下滚都不触发", () => {
+    const up = alignSandbox();
+    up.root.fire("keydown", { key: "PageUp", shiftKey: true });
+    up.flush();
+    assert.deepEqual(up.writes, [0], "Shift+PageUp 翻历史触发收带");
+    for (const [type, event] of [
+      ["keydown", { key: "PageUp", shiftKey: false }],
+      ["keydown", { key: "Home", shiftKey: true }],
+      ["wheel", { deltaY: 120 }],
+    ]) {
+      const sandbox = alignSandbox();
+      sandbox.root.fire(type, event);
+      sandbox.flush();
+      assert.equal(sandbox.writes.length, 0, `${type} ${JSON.stringify(event)} 不占上滚意图`);
+    }
+  });
+
+  it("滚动事件流内逐步收：无标记 scroll 裸信不动作，意图时效窗内才收", () => {
+    const { state, root, screen, writes, flush } = alignSandbox();
+    screen.fire("scroll");
+    flush();
+    assert.equal(writes.length, 0, "无意图的 scroll 事件（布局钳制派生）不动作");
+    root.fire("wheel", { deltaY: -120 });
+    flush(); // 吃掉意图自带的帧，带收 0
+    assert.deepEqual(writes, [0]);
+    state.now += 100000; // 意图窗口早过
+    screen.scrollHeight = 900; // 带又长出来（尺寸错配期延续）
+    screen.fire("scroll");
+    flush();
+    assert.equal(writes.length, 1, "时效窗外再无动作——意图判定必须配窗，不裸信");
+  });
+
+  it("装配与共存：open 之后护栏先行、本功能随后；状态挂列对象", () => {
+    const ensure = alignSrc("ensureTerminalXterm", /function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/);
+    const openAt = ensure.indexOf("term.open(host)");
+    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(term)");
+    const alignAt = ensure.indexOf("installTerminalBottomAlign(column, term)");
+    assert.ok(openAt > 0 && guardAt > openAt, "护栏装在 open 之后（既有次序不动）");
+    assert.ok(alignAt > guardAt, "本功能装在护栏之后——两 install 同位邻接，事件面同源");
+    const factory = alignSrc("createTerminalColumn", /function createTerminalColumn\(hostElementId\) \{[\s\S]*?\n  \}/);
+    assert.ok(factory.includes("bottomAlignIntentAt"), "上滚意图时间戳挂列对象（多列语义）");
+    assert.ok(factory.includes("bottomAlignTrimFrame"), "裁剪帧句柄挂列对象（多列语义）");
+  });
+
+  async function hostControlsSandbox() {
+    const src = alignSrc("initTerminalHostControls", /function initTerminalHostControls\(\) \{[\s\S]*?\n  \}/);
+    const state = { posts: [], toasts: [], postResult: { ok: true, settings: {} }, postThrow: null };
+    const makeToggle = () => ({
+      checked: false,
+      attrs: {},
+      setAttribute(k, v) { this.attrs[k] = v; },
+      removeAttribute(k) { delete this.attrs[k]; },
+    });
+    const els = {
+      terminalHostToggleBtn: {},
+      terminalSettingsModal: { classList: { add() {}, remove() {} } },
+      terminalRestoreToggle: makeToggle(),
+      terminalBottomAlignToggle: makeToggle(),
+      terminalSettingsBtn: {},
+      terminalSettingsCloseBtn: {},
+    };
+    const sandbox = new Function("state", "els", `
+      function $(id) { return els[id] || null; }
+      let terminalHostState = "running";
+      function syncTerminalHostControls() {}
+      function requestStopTerminalHost() {}
+      function startTerminalHost() {}
+      let terminalRestoreSessions = true;
+      let terminalRestoreSaving = false;
+      function terminalRestoreEnabled() { return terminalRestoreSessions; }
+      let terminalBottomAutoAlign = false;
+      let terminalBottomAlignSaving = false;
+      function terminalBottomAlignEnabled() { return terminalBottomAutoAlign; }
+      async function api(method, url, body) {
+        state.posts.push({ method, url, body });
+        if (state.postThrow) throw state.postThrow;
+        return state.postResult;
+      }
+      function toast(msg) { state.toasts.push(msg); }
+      function panelError(err, fallback) { return fallback; }
+      ${src}
+      return { initTerminalHostControls, get align() { return terminalBottomAutoAlign; } };
+    `)(state, els);
+    sandbox.initTerminalHostControls();
+    return { state, els, sandbox };
+  }
+
+  it("装配：开窗回显当前值；onchange 乐观置值 + POST /api/settings 带 terminalBottomAutoAlign 键", async () => {
+    const { state, els, sandbox } = await hostControlsSandbox();
+    const toggle = els.terminalBottomAlignToggle;
+    els.terminalSettingsBtn.onclick();
+    assert.equal(toggle.checked, false, "缺省关，开窗回显关位");
+    toggle.checked = true;
+    await toggle.onchange();
+    assert.deepEqual(state.posts, [{ method: "POST", url: "/api/settings", body: { terminalBottomAutoAlign: true } }],
+      "onchange 即改即存，POST 带新键");
+    assert.equal(sandbox.align, true, "运行时缓存乐观置值");
+    els.terminalSettingsBtn.onclick();
+    assert.equal(toggle.checked, true, "再开窗回显已开启");
+  });
+
+  it("装配：保存失败回滚 checked 与缓存并 toast；请求异常同样回滚", async () => {
+    const failed = await hostControlsSandbox();
+    failed.state.postResult = { ok: false };
+    const toggleA = failed.els.terminalBottomAlignToggle;
+    toggleA.checked = true;
+    await toggleA.onchange();
+    assert.equal(toggleA.checked, false, "失败回滚 checked");
+    assert.equal(failed.sandbox.align, false, "失败回滚运行时缓存");
+    assert.ok(failed.state.toasts.includes("设置保存失败"), "失败有 toast");
+    const thrown = await hostControlsSandbox();
+    thrown.state.postThrow = new Error("network down");
+    const toggleB = thrown.els.terminalBottomAlignToggle;
+    toggleB.checked = true;
+    await toggleB.onchange();
+    assert.equal(toggleB.checked, false, "异常回滚 checked");
+    assert.equal(thrown.sandbox.align, false, "异常回滚运行时缓存");
+    assert.ok(thrown.state.toasts.includes("请求失败"), "异常走 panelError 兜底文案");
   });
 });
 
@@ -8824,6 +9081,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       };
       function terminalSessionFor(id) { return state.session; }
       function requestAnimationFrame(cb) { cb(); }
+      // 底部自动对齐：本沙箱不验其行为（行为钉见「虚拟终端底部自动对齐」组），补空桩接线
+      function installTerminalBottomAlign() {}
       class FakeFitAddon {
         fit() {
           const term = this.term;

@@ -21,6 +21,8 @@ import {
   DEFAULT_TERMINAL_HOST_MANUAL_STOP,
   parseTerminalRestoreSessions,
   DEFAULT_TERMINAL_RESTORE_SESSIONS,
+  parseTerminalBottomAutoAlign,
+  DEFAULT_TERMINAL_BOTTOM_AUTO_ALIGN,
   parseClaudeTierMappingsEnabled,
   parseCredentialCacheEnabled,
   DEFAULT_CREDENTIAL_CACHE_ENABLED,
@@ -772,6 +774,45 @@ describe("terminalRestoreSessions", () => {
 
       const malformed = saveSettings(path, { terminalRestoreSessions: "no" }, {});
       assert.equal(malformed.settings.terminalRestoreSessions, true, "stored value stays canonical");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("terminalBottomAutoAlign", () => {
+  it("stays off unless explicitly switched on", () => {
+    assert.equal(DEFAULT_TERMINAL_BOTTOM_AUTO_ALIGN, false);
+    assert.equal(parseTerminalBottomAutoAlign(undefined), false);
+    assert.equal(parseTerminalBottomAutoAlign(false), false);
+    assert.equal(parseTerminalBottomAutoAlign(true), true);
+    assert.equal(parseTerminalBottomAutoAlign("true"), false, "a stray string is not a user's on switch");
+    assert.equal(parseTerminalBottomAutoAlign(1), false);
+  });
+
+  it("round-trips through saveSettings and survives unrelated patches", () => {
+    const tmp = mkTestDir("anyswitch-bottom-auto-align-");
+    const path = join(tmp, "settings.json");
+    try {
+      writeFileSync(path, JSON.stringify({ terminalHostManualStop: true, sparkWindowPoints: 24 }));
+      assert.equal(loadSettings(path, {}).settings.terminalBottomAutoAlign, false, "an install predating the key keeps the blank band as-is");
+
+      const on = saveSettings(path, { terminalBottomAutoAlign: true }, {});
+      assert.equal(on.settings.terminalBottomAutoAlign, true);
+      assert.equal(loadSettings(path, {}).settings.terminalBottomAutoAlign, true);
+      assert.equal(JSON.parse(readFileSync(path, "utf8")).terminalBottomAutoAlign, true, "落盘的值就是开启");
+      assert.equal(on.settings.terminalHostManualStop, true, "邻键不受影响");
+      assert.equal(on.settings.sparkWindowPoints, 24);
+
+      const other = saveSettings(path, { sparkWindowPoints: 30 }, {});
+      assert.equal(other.settings.terminalBottomAutoAlign, true, "改别的设置项不会把这个开关挤掉");
+
+      const back = saveSettings(path, { terminalBottomAutoAlign: false }, {});
+      assert.equal(back.settings.terminalBottomAutoAlign, false);
+      assert.equal(loadSettings(path, {}).settings.terminalBottomAutoAlign, false);
+
+      const malformed = saveSettings(path, { terminalBottomAutoAlign: "yes" }, {});
+      assert.equal(malformed.settings.terminalBottomAutoAlign, false, "stored value stays canonical");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
