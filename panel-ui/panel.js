@@ -5582,6 +5582,17 @@ async function api(method, path, body) {
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     pruneTerminalHollowStreak();
+    // 归属表对账：已消失会话的归属登记清掉（会话表整表换血，旧 id 可能已不在）
+    for (const sid of [...terminalSessionColumnIndexes.keys()]) {
+      if (!terminalBackendSessions[sid]) terminalSessionColumnIndexes.delete(sid);
+    }
+    // 刷新恢复列布局：只在首张会话表落地时跑一次（布局是结构态，不能跟 1s 轮询拍走）。
+    // 已消失会话跳过、空列不落；不建流——建的只是列对象与归属，流的补挂走既有
+    // 被动通路（switchView/可见性转折，revive:false 纪律不破）。
+    if (!terminalColumnLayoutRestored) {
+      terminalColumnLayoutRestored = true;
+      restoreTerminalColumnLayout();
+    }
     // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接）都是一轮
     // 新的归属观测——空壳会话计数 +1、有归属会话清零。计数必须跟着数据拍走而非
     // 跟着渲染走：SSE 活跃真值流命中任一会话就会整渲当前会话（renderTerminal-
@@ -5602,6 +5613,45 @@ async function api(method, path, body) {
         : (Object.keys(terminalBackendSessions)[0] || null));
       rememberTerminalSessionId(terminalActiveSessionId());
     }
+    // 各列活跃指针合法化：不在本列会话集里就让位本列第一个（别窗关签/收列后的兜底）
+    for (const column of terminalColumns) {
+      const own = terminalColumnSessionEntries(column);
+      if (column.activeSessionId && own.some(([id]) => id === column.activeSessionId)) continue;
+      column.activeSessionId = own[0]?.[0] ?? null;
+    }
+    // 别窗把某列的会话关光：列空自动收（至少留一列）
+    collapseEmptyTerminalColumns();
+  }
+
+  // 列布局恢复只跑一次的门：整页加载后首张会话表落地时落位（见 rebuild）。
+  let terminalColumnLayoutRestored = false;
+
+  // 刷新恢复列布局：列数 + 各列归属 + 各列活跃页签 + 焦点列从存档回读。
+  // 已消失的会话跳过（不复活——revive:false 是建流通路的纪律，本函数不建流）；
+  // 存档里全灭的列不落；列数超上限截断。恢复后落一次盘（存档与现值对齐）。
+  function restoreTerminalColumnLayout() {
+    let stored = null;
+    try { stored = JSON.parse(localStorage.getItem(TERMINAL_COLUMNS_KEY) || "null"); } catch {}
+    if (!stored || !Array.isArray(stored.columns)) return;
+    const kept = stored.columns.slice(0, TERMINAL_MAX_COLUMNS)
+      .map((c) => ({
+        sessions: (Array.isArray(c?.sessions) ? c.sessions : []).filter((id) => terminalBackendSessions[id]),
+        active: typeof c?.active === "string" ? c.active : null,
+      }))
+      .filter((c, i) => i === 0 || c.sessions.length > 0);
+    while (terminalColumns.length < kept.length) addTerminalColumn();
+    kept.forEach((c, i) => {
+      for (const id of c.sessions) terminalSessionColumnIndexes.set(id, i);
+      const column = terminalColumns[i];
+      if (!column) return;
+      if (c.active && c.sessions.includes(c.active)) column.activeSessionId = c.active;
+      else if (c.sessions.length) column.activeSessionId = c.sessions[c.sessions.length - 1];
+    });
+    if (Number.isInteger(stored.focused) && stored.focused >= 0 && stored.focused < terminalColumns.length) {
+      terminalFocusedColumnIndex = stored.focused;
+    }
+    syncTerminalColumnsLayout();
+    persistTerminalColumns();
   }
 
   // 新会话的初始行列数取当前实测值：PTY 若以固定猜测值（120×34）起步，而
@@ -6978,6 +7028,16 @@ async function api(method, path, body) {
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
     connectTerminalStream(terminalFocusedColumn(), session, { revive });
+    // 多列补挂：其余列只在「本列流缺失或定投漂移」时重建——后台切回/刷新恢复时
+    // 各列各按镜像重建（revive 口径透传，被动通路 revive:false 不破）；在看的列
+    // 不动——切页签只重建焦点列，不把别列的流一起拆掉。
+    for (const column of terminalColumns) {
+      if (column === terminalFocusedColumn()) continue;
+      const colSession = terminalSessionFor(column.activeSessionId);
+      if (!colSession) continue;
+      if (column.eventSource && column.boundSessionId === colSession.id) continue;
+      connectTerminalStream(column, colSession, { revive });
+    }
     if (currentView === "terminal") scheduleTerminalFit();
   }
 
@@ -8117,7 +8177,8 @@ async function api(method, path, body) {
       // 属被动重挂、不是用户挑了这条会话，所以按 revive:false 走——进程已退只回放
       // 最后一屏，要新壳仍然点页签。
       const terminalColumn = terminalFocusedColumn();
-      if (!terminalColumn?.xterm) renderTerminalPreviewSession({ revive: false });
+      // 任一列缺实例都要补挂（多列各列独立拆建）；都在看则只把焦点还给焦点列。
+      if (terminalColumns.some((column) => !column.xterm)) renderTerminalPreviewSession({ revive: false });
       else terminalColumn.xterm.focus();
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();

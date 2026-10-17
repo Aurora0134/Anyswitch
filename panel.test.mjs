@@ -3428,11 +3428,19 @@ describe("panel.html 设置全页视图", () => {
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
       // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到焦点列（M4）。
-      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn"].map(srcOf).join("\n");
+      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
+      // M4 多列：rebuild 新增归属表对账/各列活跃合法化/列空自收；布局恢复门在沙箱里关着
+      "terminalSessionColumnIndex", "terminalColumnSessionEntries"].map(srcOf).join("\n");
     // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       const terminalColumns = [{ activeSessionId: initialId }];
       let terminalFocusedColumnIndex = 0;
+      // M4：归属表/恢复门/列空自收的桩——布局恢复不归本断言面
+      const terminalSessionColumnIndexes = new Map();
+      let terminalColumnLayoutRestored = true;
+      function restoreTerminalColumnLayout() {}
+      function collapseEmptyTerminalColumns() {}
+      function terminalSessionMap() { return terminalBackendSessions; }
       let terminalBackendSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
@@ -8652,6 +8660,178 @@ describe("终端多列布局与列管理（M4）", () => {
     // 只剩一列时拒绝再收
     assert.equal(api.removeTerminalColumn(api.terminalColumns[0]), false, "终端页恒至少一列");
   });
+
+  // 列函数链（列管理 + 恢复）的公共抽取清单：E/F 的沙箱不摆 DOM（$ 全 null 时
+  // 各函数走「无 DOM 跳过」分支，列对象与归属语义照样真跑）。
+  const M4_CHAIN_FNS = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
+    "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
+    "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
+    "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
+    "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn",
+    "restoreTerminalColumnLayout"];
+  function m4ChainSrc(...extra) {
+    return [...M4_CHAIN_FNS, ...extra].map(extractM4).join("\n");
+  }
+  function m4DomFreeApi({ sessions = {}, store = {} } = {}) {
+    const state = { renders: 0, wires: 0, fits: 0 };
+    const api = new Function("sessions", "store", "state", `
+      const $ = () => null;
+      const terminalFontSize = 13;
+      const terminalTabsHidden = false;
+      const terminalSessionColumnIndexes = new Map();
+      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
+      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      terminalColumns[0].activeSessionId = "checkout";
+      let terminalFocusedColumnIndex = 0;
+      const terminalPreviewSessions = {};
+      let terminalBackendReady = true;
+      let terminalBackendSessions = sessions;
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      function terminalSessionMap() { return terminalBackendSessions; }
+      function terminalSessionFor(id) { return terminalSessionMap()[id] || null; }
+      function renderTerminalPreviewTabs() { state.renders += 1; }
+      function renderTerminalSessionData() {}
+      function syncTerminalAddBtn() {}
+      function scheduleTerminalFit() { state.fits += 1; }
+      function wireTerminalColumnControls() { state.wires += 1; }
+      ${m4ChainSrc()}
+      return { terminalColumns, restoreTerminalColumnLayout, addTerminalColumn, removeTerminalColumn,
+        collapseEmptyTerminalColumns, moveTerminalSessionToColumn, terminalSessionColumnIndex,
+        terminalFocusedColumn, setTerminalFocusedColumn, terminalSessionColumnIndexes };
+    `)(sessions, store, state);
+    return { api, state, store };
+  }
+
+  it("持久化恢复：列数/归属/各列活跃/焦点从存档回读；已消失会话跳过、空列不落、恢复不建流", () => {
+    const { api, store } = m4DomFreeApi({ sessions: { s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" } } });
+    store["panel-terminal-columns"] = JSON.stringify({
+      columns: [
+        { sessions: ["s1", "s-gone"], active: "s1" },
+        { sessions: ["s2", "s3"], active: "s3" },
+        { sessions: ["s-gone2"], active: "s-gone2" },
+      ],
+      focused: 1,
+    });
+    // connectTerminalStream 在沙箱里不存在：恢复若建流直接 ReferenceError 转红
+    api.restoreTerminalColumnLayout();
+    assert.equal(api.terminalColumns.length, 2, "全灭列不落（已消失会话跳过，空列不收进布局）");
+    assert.equal(api.terminalSessionColumnIndex("s1"), 0);
+    assert.equal(api.terminalSessionColumnIndex("s2"), 1);
+    assert.equal(api.terminalSessionColumnIndex("s3"), 1);
+    assert.equal(api.terminalSessionColumnIndex("s-gone"), 0, "消失会话不进归属表（默认列 0 只是未登记口径）");
+    assert.equal(api.terminalColumns[0].activeSessionId, "s1", "列 0 活跃恢复");
+    assert.equal(api.terminalColumns[1].activeSessionId, "s3", "列 1 活跃恢复");
+    assert.equal(api.terminalFocusedColumn(), api.terminalColumns[1], "焦点列恢复");
+    // 存档与现值对齐：恢复后落盘的布局只剩存活的会话与列
+    const rewritten = JSON.parse(store["panel-terminal-columns"]);
+    assert.equal(rewritten.columns.length, 2);
+    assert.deepEqual(rewritten.columns[0].sessions, ["s1"], "消失会话从存档清掉");
+  });
+
+  it("rebuild 对账：布局恢复只在首拍跑一次；归属表清消失会话；别窗关空的列自动收", () => {
+    const store = {};
+    const runner = new Function("store", `
+      const $ = () => null;
+      const terminalFontSize = 13;
+      const terminalTabsHidden = false;
+      const terminalSessionColumnIndexes = new Map();
+      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
+      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      terminalColumns[0].activeSessionId = "checkout";
+      let terminalFocusedColumnIndex = 0;
+      const terminalPreviewSessions = {};
+      let terminalBackendReady = true;
+      let terminalBackendSessions = {};
+      const terminalHollowStreak = new Map();
+      let terminalColumnLayoutRestored = false;
+      let terminalDefaultCwd = "";
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      function terminalSessionMap() { return terminalBackendSessions; }
+      function terminalSessionFor(id) { return terminalSessionMap()[id] || null; }
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalSessionData() {}
+      function syncTerminalAddBtn() {}
+      function scheduleTerminalFit() {}
+      function wireTerminalColumnControls() {}
+      ${m4ChainSrc("terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
+        "storedTerminalSessionId", "rememberTerminalSessionId", "terminalActiveSessionId", "setTerminalActiveSessionId")}
+      return { beat: (items) => rebuildTerminalBackendSessions(items), terminalColumns,
+        terminalSessionColumnIndexes, terminalFocusedColumn: () => terminalFocusedColumn(),
+        terminalSessionColumnIndex,
+        map: terminalSessionColumnIndexes };
+    `)(store);
+    store["panel-terminal-columns"] = JSON.stringify({
+      columns: [{ sessions: ["s1"], active: "s1" }, { sessions: ["s2"], active: "s2" }],
+      focused: 1,
+    });
+    runner.beat([{ id: "s1", shell: "powershell" }, { id: "s2", shell: "powershell" }]);
+    assert.equal(runner.terminalColumns.length, 2, "首拍落地即恢复两列");
+    assert.equal(runner.terminalSessionColumnIndex("s2"), 1, "归属按存档恢复");
+    assert.equal(runner.terminalColumns[1].activeSessionId, "s2", "列 1 活跃恢复");
+    // 一次性：改写存档后再拍不重放布局（布局是结构态，不跟轮询拍走）
+    store["panel-terminal-columns"] = JSON.stringify({
+      columns: [{ sessions: ["s1"], active: "s1" }, { sessions: ["s2"], active: "s2" }, { sessions: ["s3"], active: "s3" }],
+      focused: 2,
+    });
+    runner.beat([{ id: "s1", shell: "powershell" }, { id: "s2", shell: "powershell" }, { id: "s3", shell: "powershell" }]);
+    assert.equal(runner.terminalColumns.length, 2, "第二拍不重放存档（恢复只跑一次）");
+    assert.equal(runner.terminalSessionColumnIndex("s3"), 0, "新会话未登记默认落列 0");
+    // 别窗把列 1 的会话关光：归属登记清掉、列空自收
+    runner.beat([{ id: "s1", shell: "powershell" }]);
+    assert.equal(runner.map.has("s2"), false, "消失会话的归属登记清掉");
+    assert.equal(runner.terminalColumns.length, 1, "别窗关空的列自动收");
+    assert.equal(runner.terminalColumns[0].activeSessionId, "s1", "剩余列活跃合法化");
+  });
+
+  it("多列补挂：焦点列照旧重建，其余列流缺失/定投漂移才补挂，在看列不动，revive 透传", () => {
+    const els = {};
+    const el = (id) => els[id] ??= { hidden: false, style: {}, classList: { toggle() {} } };
+    const calls = [];
+    const sandbox = new Function("$", "sessions", "calls", `
+      let terminalBackendReady = true;
+      let terminalFirstConnectSettled = true;
+      const currentView = "terminal";
+      const terminalColumns = [
+        { elementIdSuffix: "", activeSessionId: "s1", eventSource: null, boundSessionId: null },
+        { elementIdSuffix: "-c1", activeSessionId: "s2", eventSource: {}, boundSessionId: "s2" },
+        { elementIdSuffix: "-c2", activeSessionId: "s3", eventSource: null, boundSessionId: null },
+      ];
+      let terminalFocusedColumnIndex = 0;
+      function terminalSessionFor(id) { return sessions[id] || null; }
+      function renderTerminalSessionData() {}
+      function renderTerminalPreviewTabs() {}
+      function renderTerminalEmptyState() {}
+      function clearTerminalEmptyState() {}
+      function scheduleTerminalFit() {}
+      function connectTerminalStream(column, session, opts) { calls.push([column.elementIdSuffix || "c0", session?.id, opts?.revive]); }
+      ${extractM4("terminalColumnElementId")}
+      ${extractM4("terminalFocusedColumn")}
+      ${extractM4("terminalActiveSessionId")}
+      ${extractM4("renderTerminalPreviewSession")}
+      return { render: renderTerminalPreviewSession, terminalColumns };
+    `)((id) => el(id), {
+      s1: { id: "s1", backend: true }, s2: { id: "s2", backend: true }, s3: { id: "s3", backend: true },
+    }, calls);
+    sandbox.render({ revive: false });
+    assert.deepEqual(calls, [["c0", "s1", false], ["-c2", "s3", false]],
+      "焦点列（切签语义）照旧重建；流缺失的列 2 补挂；在看的列 1（流活且定投未漂移）不动；revive:false 透传");
+    // 定投漂移（列在看别的会话）：也补挂
+    calls.length = 0;
+    sandbox.terminalColumns[1].activeSessionId = "s1";
+    sandbox.render();
+    assert.deepEqual(calls, [["c0", "s1", true], ["-c1", "s1", true], ["-c2", "s3", true]],
+      "列 1 定投漂移（bound ≠ 本列活跃）即重建；revive 缺省 true 透传");
+  });
 });
 
 // 跳顶回归钉（跟随底部护栏）：渲染尺寸同步的瞬时塌缩会让浏览器把 .xterm-viewport
@@ -10011,11 +10191,18 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
       "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak",
       // 活跃指针已迁入列对象（M3 列架构地基）：页级读写经这两个收口函数落到焦点列（M4）。
-      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn"].map(extractFn).join("\n");
+      "terminalActiveSessionId", "setTerminalActiveSessionId", "terminalFocusedColumn",
+      // M4 多列：rebuild 新增归属表对账/各列活跃合法化/列空自收；布局恢复门在沙箱里关着
+      "terminalSessionColumnIndex", "terminalColumnSessionEntries"].map(extractFn).join("\n");
     const store = {};
     const counter = new Function("store", `
       const terminalColumns = [{ activeSessionId: "t1" }];
       let terminalFocusedColumnIndex = 0;
+      const terminalSessionColumnIndexes = new Map();
+      let terminalColumnLayoutRestored = true;
+      function restoreTerminalColumnLayout() {}
+      function collapseEmptyTerminalColumns() {}
+      function terminalSessionMap() { return terminalBackendSessions; }
       let terminalBackendSessions = {};
       let terminalDefaultCwd = "C:\\\\";
       const terminalHollowStreak = new Map();
