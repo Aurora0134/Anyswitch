@@ -4343,6 +4343,16 @@
 :root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="mid"]  .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 12px color-mix(in srgb, var(--accent) 42%, transparent); }
 :root[data-style="aurora"][data-theme="dark"] .ctx-meter[data-tier="high"] .ctx-fill { box-shadow: inset 0 1px 0 var(--brand-hl), 0 0 14px color-mix(in srgb, var(--warn) 44%, transparent); }
 
+/* ---- 终端画布上的浮层：「+」新建终端菜单。
+   终端画布是满屏高对比字形，而 aurora 的 --surface 是半透玻璃（亮 0.72 / 暗 0.62），
+   本菜单又不带 backdrop-filter——底下的字会整片透上来，菜单像没底。
+   改用主题不透明的页面底色 --bg 作底：它与「半透底压在终端画布上的合成色」几乎
+   同值（暗色差 3/5/7、亮色差 6/5/2），观感不变，但不再透字。
+   注：本条依赖 --bg 为实色（aurora 亮暗两套均为实色）。 ---- */
+:root[data-style="aurora"] .terminal-add-menu {
+  background: var(--bg);
+}
+
   /* ===== style-lab: sepia ===== */
 /* ============================================================
    sepia —— 暖纸（细线质感基座 + 暖调 UI 色）
