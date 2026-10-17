@@ -8446,6 +8446,212 @@ describe("终端多列布局与列管理（M4）", () => {
     assert.equal(el("terminalFootStats-c1").hidden, false, "列 1 会话有指标 → 本列底栏统计显示");
     assert.equal(el("terminalFootRequests-c1").textContent, "3 次请求", "列 1 请求数随本列会话");
   });
+
+  it("CSS：等分/inspector 整栏隐藏/焦点标识全部限定 is-multicol；单列规则原样", () => {
+    assert.ok(/\.terminal-workspace\.is-multicol \{[^}]*grid-auto-flow: column[^}]*grid-auto-columns: minmax\(0, 1fr\)/.test(panelCss),
+      "≥2 列改 auto-flow 等分列轨道");
+    assert.ok(panelCss.includes(".terminal-workspace.is-multicol .terminal-inspector { display: none; }"),
+      "≥2 列 inspector 整栏隐藏、宽度全给列");
+    assert.ok(/\.terminal-workspace\.is-multicol \.terminal-main-pane\.is-focused \{[^}]*box-shadow/.test(panelCss),
+      "焦点列标识为纯视觉描边（零文案）");
+    // 单列既有规则一行不动
+    assert.ok(panelCss.includes(".terminal-workspace.is-inspector-collapsed { grid-template-columns: minmax(0, 1fr) 48px; }"),
+      "单列 inspector 收拢规则原样");
+    assert.ok(panelCss.includes(".terminal-workspace.is-empty { grid-template-columns: minmax(0, 1fr); }"),
+      "单列零会话收全宽规则原样");
+    assert.ok(!panelHtml.includes("is-multicol"), "静态标记不带多列类（多列态全由 JS 挂摘）");
+    assert.equal(panelHtml.split('class="terminal-main-pane"').length - 1, 1,
+      "静态标记只含列 0 一份主区——单列 DOM 与现状逐点一致，多列由 JS 克隆");
+  });
+
+  // 列管理 fake-DOM 真跑：加列/收列/列空自收/归并重排/上限/持久化
+  it("列管理：加列克隆完整单元、收列并回左邻且 id 重排、列空自收、上限 3、布局落盘", () => {
+    // 迷你 DOM 桩：支持本功能用到的全部操作面（克隆/id 改写/classList/插入/摘除）
+    function fakeEl(tag = "div", classes = []) {
+      const el = {
+        tagName: tag, id: "", children: [], parent: null,
+        attrs: {}, style: {}, hidden: false, innerHTML: "", textContent: "",
+        classes: new Set(classes),
+        classList: null,
+        setAttribute(k, v) { el.attrs[k] = String(v); },
+        getAttribute(k) { return k in el.attrs ? el.attrs[k] : null; },
+        appendChild(child) { child.remove(); child.parent = el; el.children.push(child); return child; },
+        insertBefore(child, ref) {
+          child.remove();
+          child.parent = el;
+          const i = ref ? el.children.indexOf(ref) : -1;
+          if (i < 0) el.children.push(child); else el.children.splice(i, 0, child);
+          return child;
+        },
+        remove() {
+          if (el.parent) {
+            const i = el.parent.children.indexOf(el);
+            if (i >= 0) el.parent.children.splice(i, 1);
+            el.parent = null;
+          }
+        },
+        cloneNode(deep) {
+          const copy = fakeEl(el.tagName, [...el.classes]);
+          copy.id = el.id; copy.attrs = { ...el.attrs }; copy.hidden = el.hidden;
+          copy.innerHTML = el.innerHTML; copy.textContent = el.textContent; copy.style = { ...el.style };
+          if (deep) for (const c of el.children) copy.appendChild(c.cloneNode(true));
+          return copy;
+        },
+        matches(sel) {
+          if (sel.startsWith(".")) return el.classes.has(sel.slice(1));
+          if (sel.startsWith("#")) return el.id === sel.slice(1);
+          if (sel === "[id]") return !!el.id;
+          if (sel === "[for]") return "for" in el.attrs;
+          return false;
+        },
+        querySelector(sel) { return el.querySelectorAll(sel)[0] ?? null; },
+        querySelectorAll(sel) {
+          const out = [];
+          const walk = (node) => { for (const c of node.children) { if (c.matches(sel)) out.push(c); walk(c); } };
+          walk(el);
+          return out;
+        },
+        addEventListener() {},
+      };
+      el.classList = {
+        add: (...cs) => cs.forEach((c) => el.classes.add(c)),
+        remove: (...cs) => cs.forEach((c) => el.classes.delete(c)),
+        contains: (c) => el.classes.has(c),
+        toggle: (c, on) => { if (on === undefined) on = !el.classes.has(c); if (on) el.classes.add(c); else el.classes.delete(c); return on; },
+      };
+      return el;
+    }
+    // 列 0 静态主区的镜像（只摆本功能触碰的节点）
+    const pane0 = fakeEl("section", ["terminal-main-pane"]);
+    const tabsBar = pane0.appendChild(fakeEl("div", ["terminal-tabs-bar"])); tabsBar.id = "terminalTabsBar";
+    const tabs0 = tabsBar.appendChild(fakeEl("div", ["terminal-tabs"])); tabs0.id = "terminalTabs"; tabs0.innerHTML = "<button>残</button>";
+    const addBtn = tabsBar.appendChild(fakeEl("button", ["terminal-add-btn"])); addBtn.id = "terminalAddBtn";
+    const menu = tabsBar.appendChild(fakeEl("div", ["terminal-add-menu"])); menu.id = "terminalAddMenu"; menu.hidden = false;
+    const cwdLabel = menu.appendChild(fakeEl("label")); cwdLabel.setAttribute("for", "terminalAddMenuCwd");
+    const sessionBar = pane0.appendChild(fakeEl("div", ["terminal-session-bar"])); sessionBar.id = "terminalSessionBar";
+    const sessionName = sessionBar.appendChild(fakeEl("span", ["terminal-session-name"])); sessionName.id = "terminalSessionName"; sessionName.textContent = "旧会话名";
+    const screen = pane0.appendChild(fakeEl("div", ["terminal-screen"])); screen.id = "terminalScreen";
+    const host = screen.appendChild(fakeEl("div", ["terminal-xterm-host"])); host.id = "terminalXtermHost";
+    const fontValue = pane0.appendChild(fakeEl("span", ["terminal-font-value"])); fontValue.id = "terminalFontSizeValue"; fontValue.textContent = "13";
+    const workspace = fakeEl("div"); workspace.id = "terminalWorkspace";
+    workspace.appendChild(pane0);
+    const inspector = fakeEl("aside", ["terminal-inspector"]); inspector.id = "terminalInspector";
+    workspace.appendChild(inspector);
+
+    const bodies = ["createTerminalColumn", "terminalColumnSuffixForIndex", "terminalColumnElementId",
+      "terminalColumnPane", "syncTerminalColumnIdentities", "buildTerminalColumnPane", "syncTerminalColumnsLayout",
+      "addTerminalColumn", "removeTerminalColumn", "collapseEmptyTerminalColumns", "moveTerminalSessionToColumn",
+      "assignTerminalSessionToColumn", "terminalSessionColumnIndex", "terminalColumnSessionEntries",
+      "closeTerminalStream", "persistTerminalColumns", "terminalFocusedColumn", "setTerminalFocusedColumn"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const store = {};
+    const state = { renders: 0, wires: 0, fits: 0 };
+    const sessions = {
+      s1: { id: "s1" }, s2: { id: "s2" }, s3: { id: "s3" }, s4: { id: "s4" },
+    };
+    const api = new Function("workspace", "inspector", "sessions", "store", "state", `
+      const $ = (id) => (id === "terminalWorkspace" ? workspace : id === "terminalInspector" ? inspector : null);
+      const terminalFontSize = 13;
+      const terminalTabsHidden = false;
+      const terminalSessionColumnIndexes = new Map();
+      // 上限与存档键常量从源码取样，测试不抄字面量
+      ${panelJs.match(/const TERMINAL_MAX_COLUMNS = \d+;/)?.[0]}
+      ${panelJs.match(/const TERMINAL_COLUMNS_KEY = "[^"]+";/)?.[0]}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      let terminalFocusedColumnIndex = 0;
+      let terminalBackendReady = true;
+      const terminalPreviewSessions = {};
+      const localStorage = {
+        getItem: (k) => (k in store ? store[k] : null),
+        setItem: (k, v) => { store[k] = String(v); },
+        removeItem: (k) => { delete store[k]; },
+      };
+      function terminalSessionMap() { return sessions; }
+      function terminalSessionFor(id) { return sessions[id] || null; }
+      function renderTerminalPreviewTabs() { state.renders += 1; }
+      function renderTerminalSessionData() {}
+      function syncTerminalAddBtn() {}
+      function scheduleTerminalFit() { state.fits += 1; }
+      function wireTerminalColumnControls() { state.wires += 1; }
+      ${bodies}
+      return { terminalColumns, addTerminalColumn, removeTerminalColumn, collapseEmptyTerminalColumns,
+        moveTerminalSessionToColumn, terminalSessionColumnIndex, terminalFocusedColumn,
+        setTerminalFocusedColumn, terminalSessionColumnIndexes,
+        paneOf: (column) => terminalColumnPane(column) };
+    `)(workspace, inspector, sessions, store, state);
+
+    // 加列：克隆完整单元、id 加后缀、动态内容清场、布局类与焦点类落位
+    const col1 = api.addTerminalColumn();
+    assert.ok(col1, "加列成功");
+    assert.equal(api.terminalColumns.length, 2);
+    assert.equal(col1.hostElementId, "terminalXtermHost-c1", "新列宿主 id 带后缀");
+    assert.equal(state.wires, 1, "新列控件接线一次");
+    assert.equal(workspace.children.length, 3, "pane 插进工作区（两 pane + inspector）");
+    assert.equal(workspace.children[1].classes.has("terminal-main-pane"), true, "新 pane 是主区克隆");
+    assert.ok(workspace.classes.has("is-multicol"), "≥2 列工作区挂 is-multicol");
+    assert.ok(workspace.children[0].classes.has("is-focused"), "焦点列 0 挂标识");
+    const newPane = workspace.children[1];
+    assert.ok(newPane.querySelector("#terminalXtermHost-c1"), "克隆内 id 全部加 -c1 后缀");
+    assert.ok(!newPane.querySelector("#terminalXtermHost"), "克隆内不留基名 id");
+    assert.equal(newPane.querySelector("#terminalTabs-c1").innerHTML, "", "克隆带过来的页签清空");
+    assert.equal(newPane.querySelector("#terminalSessionName-c1").textContent, "", "会话文案清空");
+    assert.equal(newPane.querySelector("#terminalAddMenu-c1").hidden, true, "克隆带过来的菜单收起");
+    assert.equal(newPane.querySelector("[for]").getAttribute("for"), "terminalAddMenuCwd-c1", "label for 同步换后缀");
+    assert.ok(workspace.children[0].querySelector("#terminalXtermHost"), "列 0 基名 id 原样");
+
+    // 会话归列 + 焦点切换
+    api.terminalColumns[0].activeSessionId = "s1";
+    api.moveTerminalSessionToColumn("s2", col1);
+    assert.equal(api.terminalSessionColumnIndex("s2"), 1, "s2 归列 1");
+    assert.equal(col1.activeSessionId, "s2", "拖入即目标列活跃");
+
+    // 再加一列到中间：其后列 id 顺次重排，归属索引让位
+    api.moveTerminalSessionToColumn("s3", col1);
+    const colMid = api.addTerminalColumn({ at: 1 });
+    assert.equal(api.terminalColumns.length, 3);
+    assert.equal(api.terminalSessionColumnIndex("s2"), 2, "原列 1 的归属让位到索引 2");
+    assert.equal(colMid.elementIdSuffix, "-c1", "中插列拿 -c1");
+    assert.equal(api.terminalColumns[2].elementIdSuffix, "-c2", "原列 1 重排为 -c2");
+    assert.ok(api.paneOf(api.terminalColumns[2]).querySelector("#terminalXtermHost-c2"), "重排后 pane 内 id 同步改名");
+    assert.ok(!api.paneOf(api.terminalColumns[2]).querySelector("#terminalXtermHost-c1"), "旧后缀不残留");
+
+    // 上限：3 列后再加拒绝
+    assert.equal(api.addTerminalColumn(), null, "第 4 列拒绝（设计定稿上限 3）");
+    assert.equal(api.terminalColumns.length, 3);
+
+    // 收中间列：会话并回左邻、DOM 摘除、id 顺次重排、焦点重映射
+    api.setTerminalFocusedColumn(api.terminalColumns[2]);
+    const merged = api.removeTerminalColumn(api.terminalColumns[1]);
+    assert.equal(merged, true);
+    assert.equal(api.terminalColumns.length, 2);
+    assert.equal(api.terminalSessionColumnIndex("s2"), 1, "被收列之后列的归属顺次 -1");
+    assert.equal(api.terminalFocusedColumn(), api.terminalColumns[1], "焦点列索引随收列重映射");
+    assert.equal(api.terminalColumns[1].elementIdSuffix, "-c1", "剩余列重排后缀");
+    assert.ok(api.paneOf(api.terminalColumns[1]).querySelector("#terminalXtermHost-c1"), "pane id 随重排改名");
+    assert.equal(workspace.children.length, 3, "被收列 pane 摘除（余两 pane + inspector）");
+
+    // 列空自收：把列 1 的会话全部挪回列 0，列 1 自动收掉
+    api.moveTerminalSessionToColumn("s2", api.terminalColumns[0]);
+    api.moveTerminalSessionToColumn("s3", api.terminalColumns[0]);
+    assert.equal(api.terminalColumns.length, 1, "列空自动收");
+    assert.ok(!workspace.classes.has("is-multicol"), "回单列摘多列类");
+    assert.equal(api.terminalColumns[0].elementIdSuffix, "", "回单列后列 0 恒基名 id");
+    assert.ok(api.paneOf(api.terminalColumns[0]).querySelector("#terminalXtermHost"), "列 0 pane 基名 id 原样");
+
+    // 持久化落盘：列数 + 归属 + 各列活跃 + 焦点
+    const stored = JSON.parse(store["panel-terminal-columns"]);
+    assert.equal(stored.columns.length, 1, "回单列后存档一列");
+    assert.deepEqual(stored.columns[0].sessions, ["s1", "s2", "s3", "s4"], "各列会话归并入存档（未登记的 s4 按默认列 0 一并入档）");
+    assert.equal(stored.columns[0].active, "s3", "各列活跃页签入存档");
+    assert.equal(stored.focused, 0, "焦点列入存档");
+
+    // 只剩一列时拒绝再收
+    assert.equal(api.removeTerminalColumn(api.terminalColumns[0]), false, "终端页恒至少一列");
+  });
 });
 
 // 跳顶回归钉（跟随底部护栏）：渲染尺寸同步的瞬时塌缩会让浏览器把 .xterm-viewport
