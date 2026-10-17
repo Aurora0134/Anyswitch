@@ -248,10 +248,23 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       if (p === 38 || p === 48) {
         // 38;5;n / 38;2;r;g;b — carry the whole colour run as one attribute token.
         const kind = params[i + 1];
-        if (kind === 5) { sgr.push(`${p};5;${params[i + 2] ?? 0}`); i += 2; continue; }
-        if (kind === 2) { sgr.push(`${p};2;${params[i + 2] ?? 0};${params[i + 3] ?? 0};${params[i + 4] ?? 0}`); i += 4; continue; }
+        let token = null;
+        if (kind === 5) { token = `${p};5;${params[i + 2] ?? 0}`; i += 2; }
+        else if (kind === 2) { token = `${p};2;${params[i + 2] ?? 0};${params[i + 3] ?? 0};${params[i + 4] ?? 0}`; i += 4; }
+        if (token) {
+          // 颜色是赋值不是叠加：push 前摘掉同槽旧 token（扩展或基础形态都算）。
+          // 残留叠加会把回放序列化撑成一条超长 SGR，超过 xterm 的 32 参数上限后
+          // 被截，末尾 38;2 缺 RGB 按零补齐解析成纯黑——dsh 状态栏一帧连设 7 色、
+          // 切回后「近白灰字变纯黑」即此形态（2026-10-17 取证）。
+          sgr = p === 38
+            ? sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("38;") && !(n >= 30 && n <= 37) && !(n >= 90 && n <= 97); })
+            : sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("48;") && !(n >= 40 && n <= 47) && !(n >= 100 && n <= 107); });
+          sgr.push(token);
+        }
         continue;
       }
+      if ((p >= 30 && p <= 37) || (p >= 90 && p <= 97)) sgr = sgr.filter((c) => !String(c).startsWith("38;"));
+      else if ((p >= 40 && p <= 47) || (p >= 100 && p <= 107)) sgr = sgr.filter((c) => !String(c).startsWith("48;"));
       if (!sgr.includes(p)) sgr.push(p);
     }
   }
@@ -348,7 +361,14 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       }
       case "m": if (!priv) applySgr(raw); break;
       case "s": saved = { row, col, attrs: attrsString() }; break;
-      case "u": row = saved.row; col = saved.col; sgr = saved.attrs === "" ? [] : saved.attrs.split(";"); break;
+      case "u":
+        row = saved.row;
+        col = saved.col;
+        // 恢复串经 applySgr 重放：直接 split 会把 38;2;… 劈成裸数字碎片，
+        // 破坏 applySgr 里「同槽颜色 token 是原子、新色到达先摘旧色」的替换不变量。
+        sgr = [];
+        applySgr(saved.attrs);
+        break;
       case "h": setMode(raw, "h", true); break;
       case "l": setMode(raw, "l", false); break;
       default: break; // DSR/DA/window ops/scroll-area save/restore …: consumed
