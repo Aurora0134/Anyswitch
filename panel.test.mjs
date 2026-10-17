@@ -7565,6 +7565,8 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
       const terminalInspectorUserPinned = new Set();
       ${streakSrc}
       let terminalRequestListRenderedHtml = "";
+      // M6：renderTerminalSessionData 新增 inspector 收展冻结闸（读 terminalTabDrag），桩补空态
+      let terminalTabDrag = null;
       function scheduleTerminalFit() { state.fits += 1; }
       function updateSparkline() {}
       function routeNodeName(x) { return x; }
@@ -7723,6 +7725,8 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
       const terminalInspectorUserPinned = new Set();
       ${streakSrc}
       let terminalRequestListRenderedHtml = "";
+      // M6：renderTerminalSessionData 新增 inspector 收展冻结闸（读 terminalTabDrag），桩补空态
+      let terminalTabDrag = null;
       function scheduleTerminalFit() {}
       function updateSparkline() {}
       function routeNodeName(x) { return x; }
@@ -10807,6 +10811,8 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
       const terminalHollowStreak = new Map();
       let terminalRequestListRenderedHtml = "";
+      // M6：renderTerminalSessionData 新增 inspector 收展冻结闸（读 terminalTabDrag），桩补空态
+      let terminalTabDrag = null;
       function scheduleTerminalFit() {}
       function updateSparkline() {}
       function routeNodeName(x) { return x; }
