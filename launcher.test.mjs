@@ -9,6 +9,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   runLauncher,
   buildLauncherEnv,
@@ -22,6 +25,8 @@ import {
   realGetClaudeVersion,
   withClaudeBypassPermissions,
   CLAUDE_BYPASS_PERMISSIONS_ARG,
+  withSmallFastModelDefault,
+  normalizeSmallFastWireId,
 } from "./launcher.mjs";
 
 // A fake relay handle that records whether it was closed.
@@ -136,6 +141,148 @@ test("buildLauncherEnv strips an inherited ANTHROPIC_API_KEY so the relay token 
   });
   assert.equal(env.ANTHROPIC_API_KEY, undefined);
 });
+
+// --- classifier (small-fast) model derivation ------------------------------
+//
+// withSmallFastModelDefault fills ANYSWITCH_SMALL_FAST_MODEL before
+// buildLauncherEnv runs: settings.json's claudeSmallFastModel first, then the
+// store's first channel, so the env precedence chain stays
+// ANTHROPIC_SMALL_FAST_MODEL > ANYSWITCH_SMALL_FAST_MODEL > placeholder.
+
+function smallFastRoot() {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-smallfast-"));
+  return { root, data: join(root, "Anyswitch") };
+}
+
+function writeJson(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(value));
+}
+
+const SMALL_FAST_STORE = { providers: { "north-main": { models: { "kimi-k3": {} } } } };
+
+test("normalizeSmallFastWireId：两段式补 anthropic/ 前缀，三段式原样，不可解析返回 null", () => {
+  assert.equal(normalizeSmallFastWireId("sta1n-default/glm-5.3-flash"), "anthropic/sta1n-default/glm-5.3-flash");
+  assert.equal(
+    normalizeSmallFastWireId(" anthropic/a6api-pool/glm-5.3 "),
+    "anthropic/a6api-pool/glm-5.3",
+    "已带前缀的完整 wire id 原样通过（首尾空白剥掉）",
+  );
+  assert.equal(
+    normalizeSmallFastWireId("provider/model/with/slashes"),
+    "anthropic/provider/model/with/slashes",
+    "模型段可含 '/'",
+  );
+  assert.equal(normalizeSmallFastWireId("anthropic//model"), null, "空 provider 段拒绝");
+  assert.equal(normalizeSmallFastWireId("anthropic/provider/"), null, "空 model 段拒绝");
+  assert.equal(normalizeSmallFastWireId("bare-model"), null, "无分隔符拒绝");
+  assert.equal(normalizeSmallFastWireId("/leading"), null, "空 provider 段拒绝");
+  assert.equal(normalizeSmallFastWireId("trailing/"), null, "空 model 段拒绝");
+  assert.equal(normalizeSmallFastWireId(""), null);
+  assert.equal(normalizeSmallFastWireId(null), null);
+  assert.equal(normalizeSmallFastWireId(42), null);
+});
+
+test("withSmallFastModelDefault：任一 env 覆盖在场时 base 原样返回，不做任何推导", () => {
+  const anthropicBase = { ANTHROPIC_SMALL_FAST_MODEL: "anthropic/mine/small" };
+  assert.equal(withSmallFastModelDefault(anthropicBase, { log: () => {} }), anthropicBase);
+  const anyswitchBase = { ANYSWITCH_SMALL_FAST_MODEL: "anthropic/mine/small" };
+  assert.equal(withSmallFastModelDefault(anyswitchBase, { log: () => {} }), anyswitchBase);
+});
+
+test("withSmallFastModelDefault：settings 键压过 store 派生（两段式自动归一）", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "settings.json"), { claudeSmallFastModel: "sta1n-default/[Cloud]GLM-5.3-Flash" });
+    writeJson(join(data, "store.json"), SMALL_FAST_STORE);
+    const derived = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: () => {} });
+    assert.equal(derived.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/sta1n-default/[Cloud]GLM-5.3-Flash");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：已带前缀的三段式 settings 值原样生效", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "settings.json"), { claudeSmallFastModel: "anthropic/a6api-pool/glm-5.3" });
+    writeJson(join(data, "store.json"), SMALL_FAST_STORE);
+    const derived = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: () => {} });
+    assert.equal(derived.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/a6api-pool/glm-5.3");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：settings 无该键时回落 store 首渠道首模型", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "settings.json"), { keepAlive: { enabled: false } });
+    writeJson(join(data, "store.json"), SMALL_FAST_STORE);
+    const derived = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: () => {} });
+    assert.equal(derived.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：settings 值不可解析时回落 store 并恰好落一条 warn", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "settings.json"), { claudeSmallFastModel: "not-a-model-id" });
+    writeJson(join(data, "store.json"), SMALL_FAST_STORE);
+    const logs = [];
+    const derived = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: (line) => logs.push(line) });
+    assert.equal(derived.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3", "回退 store 推导");
+    assert.equal(logs.length, 1, "一条 warn，不刷屏");
+    assert.match(logs[0], /claudeSmallFastModel/);
+    assert.match(logs[0], /not-a-model-id/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：settings 文件缺失或不可读时静默回落 store（无 warn）", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "store.json"), SMALL_FAST_STORE);
+    const logs = [];
+    const derived = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: (line) => logs.push(line) });
+    assert.equal(derived.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3");
+    assert.equal(logs.length, 0, "文件级失败不是键级失败，不落 warn");
+
+    writeFileSync(join(data, "settings.json"), "{corrupt json");
+    const unreadable = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: (line) => logs.push(line) });
+    assert.equal(unreadable.ANYSWITCH_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3", "损坏的 settings.json 按读不到处理");
+    assert.equal(logs.length, 0, "loadSettings 吞解析错，本层不得再叫");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：settings 与 store 都给不出值时 base 原样返回（占位兜底）", () => {
+  const { root } = smallFastRoot();
+  try {
+    const base = { LOCALAPPDATA: root };
+    assert.equal(withSmallFastModelDefault(base, { log: () => {} }), base);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("withSmallFastModelDefault：推导结果喂进 buildLauncherEnv 后占位被顶掉", () => {
+  const { root, data } = smallFastRoot();
+  try {
+    writeJson(join(data, "settings.json"), { claudeSmallFastModel: "sta1n-default/[Cloud]GLM-5.3-Flash" });
+    const base = withSmallFastModelDefault({ LOCALAPPDATA: root }, { log: () => {} });
+    const env = buildLauncherEnv({ port: 1, token: "t", discovery: true, base });
+    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/sta1n-default/[Cloud]GLM-5.3-Flash");
+    assert.notEqual(env.ANTHROPIC_SMALL_FAST_MODEL, DEFAULT_SMALL_FAST_MODEL_WIRE_ID);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 test("happy path: version matches, discovery enabled, token injected, relay closed after exit", async () => {
   const { deps, state, spawned } = baseDeps();

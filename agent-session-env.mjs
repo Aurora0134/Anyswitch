@@ -11,10 +11,10 @@
 // no env for it at all.
 //
 // The env contract is imported from each launcher's exported build*Env, so the
-// panel and the launchers can never drift apart. Two pieces are copied locally
-// with their source cited (the launchers do not export them):
-//   - withStoreSmallFastDefault (launcher.mjs:309-330) — the store-derived
-//     small-fast (classifier) wire id for Claude;
+// panel and the launchers can never drift apart (the classifier model's
+// settings/store derivation is shared the same way —
+// launcher.mjs#withSmallFastModelDefault). One piece is still copied locally
+// with its source cited (the launchers do not export it):
 //   - the buildInstanceId scheme (each launcher), and only for the two clients
 //     that cannot do without it (see TERMINAL_INSTANCE_ID_FROM_SOCKET): the
 //     session's shell pid does not exist yet at assembly time, so the launcher
@@ -24,7 +24,12 @@ import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { buildLauncherEnv, CLAUDE_BYPASS_PERMISSIONS_ARG, isVerifiedDiscoveryVersion } from "./launcher.mjs";
+import {
+  buildLauncherEnv,
+  CLAUDE_BYPASS_PERMISSIONS_ARG,
+  isVerifiedDiscoveryVersion,
+  withSmallFastModelDefault,
+} from "./launcher.mjs";
 import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
 import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
 import { buildGrokLauncherEnv } from "./grok-launcher.mjs";
@@ -97,33 +102,6 @@ function requireTarget(agentId) {
   const target = AGENT_TERMINAL_TARGETS[agentId];
   if (!target) throw agentError("没有找到这个 CLI Agent，请重新选择", "unknown_agent");
   return target;
-}
-
-// Copied verbatim from launcher.mjs:309-330 (not exported there): derive the
-// small-fast wire id from the local store's first provider/model when the user
-// has not set either override. Any failure leaves the base untouched and the
-// launcher's placeholder wire id applies.
-function withStoreSmallFastDefault(base) {
-  if (base.ANTHROPIC_SMALL_FAST_MODEL !== undefined || base.ANYSWITCH_SMALL_FAST_MODEL !== undefined) {
-    return base;
-  }
-  try {
-    const storePath = join(
-      base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-      "Anyswitch",
-      "store.json",
-    );
-    const store = JSON.parse(readFileSync(storePath, "utf8"));
-    for (const [providerId, provider] of Object.entries(store.providers ?? {})) {
-      const modelId = Object.keys(provider?.models ?? {})[0];
-      if (modelId) {
-        return { ...base, ANYSWITCH_SMALL_FAST_MODEL: `anthropic/${providerId}/${modelId}` };
-      }
-    }
-  } catch {
-    // Store missing or unreadable — the relay start probe reports that itself.
-  }
-  return base;
 }
 
 // 终端一键启动不再自造实例标签的端点。这些客户端不带 x-agent-instance 时，
@@ -240,10 +218,12 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       // picker fills from the relay catalog; outside it (or unreadable) the
       // flag stays off. An explicit ANTHROPIC_SMALL_FAST_MODEL in the
       // environment wins and is NOT injected (the inherited value rides along
-      // untouched).
+      // untouched); otherwise the classifier model comes from the same shared
+      // derivation as the per-launch shim: settings.json's claudeSmallFastModel,
+      // else the store's first channel.
       const env = buildLauncherEnv({ port, token, discovery: claudeDiscoveryEnabled(base), base: {} });
       if (base.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-        const derived = withStoreSmallFastDefault(base);
+        const derived = withSmallFastModelDefault(base);
         env.ANTHROPIC_SMALL_FAST_MODEL = derived.ANYSWITCH_SMALL_FAST_MODEL ?? env.ANTHROPIC_SMALL_FAST_MODEL;
       } else {
         delete env.ANTHROPIC_SMALL_FAST_MODEL;

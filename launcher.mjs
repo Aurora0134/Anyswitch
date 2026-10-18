@@ -33,7 +33,8 @@ import { dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync, readFileSync } from "node:fs";
 import { startProductionRelay } from "./launch.mjs";
-import { loadSettings, defaultSettingsPath } from "./relay-settings.mjs";
+import { loadSettings, defaultSettingsPath, relayDataRoot } from "./relay-settings.mjs";
+import { unpackWireId, WIRE_PREFIX } from "./wire-id.mjs";
 
 // The Claude MINOR family whose gateway-discovery filter behaviour is verified
 // (first proven on 2.1.220). Discovery is enabled for any patch release in
@@ -73,8 +74,9 @@ export function withClaudeBypassPermissions(args, enabled) {
 // Fallback wire ID (anthropic/<provider>/<model>) for Claude Code's small-fast
 // model family: the auto-mode permission classifier, the background classifier
 // and other quick side-queries. This placeholder should never reach a real
-// session: the real wiring (main) derives a concrete wire ID from the first
-// provider in the local store, and ANYSWITCH_SMALL_FAST_MODEL /
+// session: the real wiring (main / the panel terminal) derives a concrete wire
+// ID from settings.json's claudeSmallFastModel or the first provider in the
+// local store, and ANYSWITCH_SMALL_FAST_MODEL /
 // ANTHROPIC_SMALL_FAST_MODEL override it entirely. If it ever does take
 // effect, set ANYSWITCH_SMALL_FAST_MODEL to a small, stable model.
 //
@@ -109,7 +111,9 @@ export function buildLauncherEnv({ port, token, discovery, base = {} }) {
   // Pin the classifier (small-fast) model to a stable wire ID so permission
   // checks never ride on an unstable main model. Precedence:
   //   1. an explicitly inherited ANTHROPIC_SMALL_FAST_MODEL (user override),
-  //   2. ANYSWITCH_SMALL_FAST_MODEL (per-launch override via this shim),
+  //   2. ANYSWITCH_SMALL_FAST_MODEL (filled by the caller's derivation —
+  //      settings.json's claudeSmallFastModel, else the store's first channel;
+  //      see withSmallFastModelDefault),
   //   3. DEFAULT_SMALL_FAST_MODEL_WIRE_ID.
   if (env.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
     env.ANTHROPIC_SMALL_FAST_MODEL = base.ANYSWITCH_SMALL_FAST_MODEL ?? DEFAULT_SMALL_FAST_MODEL_WIRE_ID;
@@ -341,20 +345,56 @@ function createForwardingLogger(fetchFn = fetch) {
   return { info: forward("info"), warn: forward("warn"), error: forward("error") };
 }
 
+// Normalize a settings-supplied classifier (small-fast) model value into a
+// full wire ID: "<provider>/<model>" gains the anthropic/ prefix (the value
+// shape historically written by the settings file), an already-qualified
+// "anthropic/<provider>/<model>" passes through, and anything without a
+// separable provider/model pair is rejected so the caller can fall back.
+// Same structural rules as unpackWireId: provider segment non-empty and free
+// of '/', model segment non-empty (a model id may itself contain '/').
+export function normalizeSmallFastWireId(raw) {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (value.length === 0) return null;
+  if (value.startsWith(WIRE_PREFIX)) {
+    return unpackWireId(value).ok ? value : null;
+  }
+  const cut = value.indexOf("/");
+  if (cut <= 0 || cut === value.length - 1) return null;
+  return WIRE_PREFIX + value;
+}
+
 // When neither ANTHROPIC_SMALL_FAST_MODEL nor ANYSWITCH_SMALL_FAST_MODEL is
-// configured, derive the classifier (small-fast) wire ID from the local store:
-// the first model of the first provider. Best-effort — on any failure the
-// environment is left untouched and DEFAULT_SMALL_FAST_MODEL_WIRE_ID applies.
-function withStoreSmallFastDefault(base) {
+// configured, pick the classifier (small-fast) wire ID: the settings.json
+// claudeSmallFastModel key first, then the first model of the local store's
+// first provider. Shared by the per-launch shim (main) and the panel terminal
+// path (agent-session-env.mjs). Best-effort — on any failure the environment
+// is left untouched and DEFAULT_SMALL_FAST_MODEL_WIRE_ID applies. An
+// unparseable settings value falls through to the store derivation with one
+// warn line, so a stale key never silently pins the classifier to a dead
+// target.
+export function withSmallFastModelDefault(base, { log = (line) => console.warn(`[launcher] ${line}`) } = {}) {
   if (base.ANTHROPIC_SMALL_FAST_MODEL !== undefined || base.ANYSWITCH_SMALL_FAST_MODEL !== undefined) {
     return base;
   }
   try {
-    const storePath = join(
-      base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"),
-      "Anyswitch",
-      "store.json",
-    );
+    const { settings } = loadSettings(join(relayDataRoot(base), "settings.json"), base);
+    const configured = normalizeSmallFastWireId(settings.claudeSmallFastModel);
+    if (configured) {
+      return { ...base, ANYSWITCH_SMALL_FAST_MODEL: configured };
+    }
+    if (settings.claudeSmallFastModel !== undefined) {
+      log(
+        `settings.json claudeSmallFastModel "${settings.claudeSmallFastModel}" is not a usable model id ` +
+          `(expected "<provider>/<model>" or "anthropic/<provider>/<model>"); ` +
+          `the classifier model falls back to the first channel's first model.`,
+      );
+    }
+  } catch {
+    // Settings unreadable — the store derivation below still applies.
+  }
+  try {
+    const storePath = join(relayDataRoot(base), "store.json");
     const store = JSON.parse(readFileSync(storePath, "utf8"));
     for (const [providerId, provider] of Object.entries(store.providers ?? {})) {
       const modelId = Object.keys(provider?.models ?? {})[0];
@@ -383,12 +423,15 @@ export async function main(argv = process.argv.slice(2)) {
   } catch {
     bypass = false;
   }
+  const base = withSmallFastModelDefault(process.env, {
+    log: (line) => process.stderr.write(`${line}\n`),
+  });
   const code = await runLauncher({
     startRelay: () => startProductionRelay({ logger: createForwardingLogger() }),
     getClaudeVersion: realGetClaudeVersion,
     spawnClaude: realSpawnClaude,
     log: (line) => process.stderr.write(`${line}\n`),
-    base: withStoreSmallFastDefault(process.env),
+    base,
     claudeArgs: withClaudeBypassPermissions(argv, bypass),
   });
   return code;
