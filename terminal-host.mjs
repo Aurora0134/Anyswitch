@@ -482,6 +482,20 @@ export function createTerminalHost({
     schedulePersist();
   }
 
+  // 重开衔接卫生（回滚归页签的另一半）：旧进程死在备屏时，新进程的输出会被画
+  // 进备屏、等应用退屏时整段丢掉——先弹回主画面；光标停在半行时补一个换行，
+  // 防新进程首行拼进旧行尾。合成字节走 emit 单咽喉：镜像、在线 SSE 客户端、
+  // 盘上回放三方同拍一致（入了 journal，宿主重启的 restore 重喂复现同一衔接）。
+  function restartHygiene(session) {
+    try {
+      if (session.screen.info().inAlt) emit(session, "\u001b[?1049l");
+      if (session.screen.info().col !== 0) emit(session, "\r\n");
+    } catch (error) {
+      // 卫生失败不拦重开：镜像解析面坏了时照常 respawn（feedMirror 同款容错）。
+      logger.warn?.(`[terminal-host] restart hygiene skipped (${session.id}): ${error.message}`);
+    }
+  }
+
   function attach(session, child) {
     session.pty = child;
     session.pid = child.pid ?? session.pid;
@@ -765,11 +779,12 @@ export function createTerminalHost({
         // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
         await terminateSessionTree(session);
         session.exitCode = null;
-        session.buffer = [];
-        session.bufferBytes = 0;
-        // A respawn is a blank screen for the application too: the mirror's history
-        // belongs to the process that just died.
-        session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+        // 回滚历史归页签（2026-10-18 拍板：重启/清回滚不丢史）：重开只是换进程，
+        // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
+        // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
+        // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。
+        if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+        else restartHygiene(session);
         spawnSession(session);
         // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
         await persistNow();

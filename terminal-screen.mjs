@@ -216,9 +216,9 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   function eraseDisplay(mode) {
     if (mode === 3) {
-      // ESC[3J 只清滚动区，当前画面原样保留。
-      history = [];
-      historyTotal = 0;
+      // 3J 降级为 no-op（2026-10-18 拍板：回滚历史归页签）：应用清滚动区的请求
+      // 不清镜像 history——客户端 xterm 对备屏 3J 本就免疫，镜像保史后重挂回放
+      // 不再丢史。派发处已拦 mode 3，这里兜底防直调回退成整屏清除。
       return;
     }
     const fill = bgString();
@@ -318,7 +318,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       case "G": case "`": col = arg(0, 1) - 1; break;
       case "d": row = arg(0, 1) - 1; break;
       case "H": case "f": row = arg(0, 1) - 1; col = arg(1, 1) - 1; break;
-      case "J": eraseDisplay(priv ? 0 : (nums[0] || 0)); break;
+      case "J": {
+        // 3J/?3J 一律 no-op（回滚历史归页签）：xterm 5.5 的 eraseInDisplay case 3
+        // 只裁活动缓冲超出屏行的头部、备屏恒等于屏行数——kimi 备屏里发 3J 客户端
+        // 天然免疫，镜像曾在这里无条件清 history（「当场没感觉、重挂才丢」的病灶）；
+        // ?3J 旧路径误派 erase-below（擦掉光标下半屏）一并收口。
+        const mode = nums[0] || 0;
+        if (mode === 3) break;
+        eraseDisplay(priv ? 0 : mode);
+        break;
+      }
       case "K": eraseLine(nums[0] || 0); break;
       // IL 插入行：光标行及以下整体下移 n 行，底部多出滚动区外的行丢弃。
       case "L": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } break;

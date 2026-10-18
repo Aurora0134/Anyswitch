@@ -331,13 +331,14 @@ test("NUL/STX 填充与 FF：填充字节不占列，FF 之后的内容落到下
   assert.deepEqual(repaint(mirror.toReplay(), 12, 4).screenLines(), lines, "回放必须还原同一张画面");
 });
 
-test("ESC[3J 只清滚动区、IL 只移位、ECH 擦除填充", () => {
+test("ESC[3J 不清滚动区（历史归页签）、IL 只移位、ECH 擦除填充", () => {
   const m1 = createScreenMirror({ cols: 20, rows: 4 });
   for (let i = 1; i <= 8; i += 1) m1.write(`行 ${i}\r\n`);
   assert.ok(m1.info().historyLines > 0, "前置：已有滚动历史");
   const before = m1.screenLines();
+  const historyBefore = m1.info().historyLines;
   m1.write("\u001b[3J");
-  assert.equal(m1.info().historyLines, 0, "3J 必须清空滚动区");
+  assert.equal(m1.info().historyLines, historyBefore, "3J 不得清空滚动区（回滚历史归页签所有）");
   assert.deepEqual(m1.screenLines(), before, "3J 不得改动当前画面");
 
   const m2 = createScreenMirror({ cols: 10, rows: 5 });
@@ -352,4 +353,37 @@ test("ESC[3J 只清滚动区、IL 只移位、ECH 擦除填充", () => {
   m3.write("ABCDE");
   m3.write("\u001b[1;2H\u001b[2X");
   assert.equal(m3.screenLines()[0], "A  DE", "ECH 擦除填充而不是左移删除");
+});
+
+test("3J/?3J 降级为 no-op：历史归页签，清滚动区请求后重挂不丢史", () => {
+  // 2026-10-18 拍板：重启/清回滚不丢史。客户端 xterm 5.5 的 eraseInDisplay
+  // case 3 只裁活动缓冲超出屏行的头部——备屏恒等于屏行数，kimi 备屏里发 3J
+  // 客户端天然免疫；镜像曾无条件清 history（「当场没感觉、重挂才丢」的病灶
+  // 全在镜像侧），?3J 还被误派 erase-below 擦掉光标下半屏。两者一律 no-op。
+  const mirror = createScreenMirror({ cols: 24, rows: 6 });
+  for (let i = 1; i <= 12; i += 1) mirror.write(`历史行 ${i}\r\n`);
+  const historyBefore = mirror.info().historyLines;
+  const screenBefore = mirror.screenLines();
+
+  mirror.write("\u001b[2;3H\u001b[?3J");
+  assert.deepEqual(mirror.screenLines(), screenBefore, "?3J 不得擦掉光标以下的画面（旧误派 erase-below 的腐蚀形态）");
+  assert.equal(mirror.info().historyLines, historyBefore, "?3J 不得清滚动区");
+
+  mirror.write("\u001b[3J");
+  assert.deepEqual(mirror.screenLines(), screenBefore, "3J 不得改动画面");
+  assert.equal(mirror.info().historyLines, historyBefore, "3J 不得清滚动区");
+
+  // 备屏形态（kimi / 指令表整屏重绘）：主屏历史同样不动
+  mirror.write("\u001b[?1049h");
+  for (let i = 1; i <= 4; i += 1) mirror.write(`备屏行 ${i}\r\n`);
+  mirror.write("\u001b[2J\u001b[H\u001b[3J");
+  assert.equal(mirror.info().historyLines, historyBefore, "备屏里的 3J 同样不得清滚动区");
+  mirror.write("\u001b[?1049l");
+  const restored = mirror.screenLines().join("|");
+  assert.ok(!restored.includes("备屏行"), "弹回主屏不残留备屏内容");
+  assert.ok(restored.includes("历史行"), "弹回主屏应看到历史尾部");
+
+  // 核心断言：清滚动区请求之后再重挂，回放必须仍带着完整历史
+  const again = repaint(mirror.toReplay(), 24, 6);
+  assert.equal(again.info().historyLines, mirror.info().historyLines, "回放必须逐行还原保住的历史（重挂不丢史）");
 });

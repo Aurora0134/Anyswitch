@@ -5880,8 +5880,8 @@ async function api(method, path, body) {
     // 从上次中断继续回来的会话进程已死（快照 status: exited）：点开页签先在原
     // cwd/壳上重启它再建流——一次点击就是新壳，否则键入只会落进 409。
     // revive:false 是被动重挂（切回前台、回终端页补挂），不等于用户挑了这条会话：
-    // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开一个空壳（宿主的重开路由
-    // 自己写着"重开对应用就是一张空白屏"，且挂流并不要求进程还在）。
+    // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开（挂流并不要求进程还在；
+    // revive 走的重开路由保史——历史归页签，新进程续写在旧画面下方）。
     if (revive && session.backendState?.status === "exited") {
       try {
         const revived = await api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`);
