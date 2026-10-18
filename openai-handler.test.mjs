@@ -682,3 +682,220 @@ describe("outbound history tool-call sanitization", () => {
     ]);
   });
 });
+
+// ---------- 图片降级（M13：纯文本模型预判 + 报错兜底，openai 直传/汇合路径） ----------
+
+const IMAGE_URL_PART = { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } };
+const EMPTY_EFFORT_CATALOG = { models: new Map() };
+
+function imageChatBody(model, { imageOnly = false } = {}) {
+  const content = imageOnly
+    ? [IMAGE_URL_PART]
+    : [{ type: "text", text: "look at this" }, IMAGE_URL_PART];
+  return { model, messages: [{ role: "user", content }] };
+}
+
+function imageGuardStore() {
+  const store = makeStore();
+  store.providers["poke-api"].models = {
+    "claude-opus-5": { displayName: "Claude Opus 5" },
+    "glm-5.3": { displayName: "GLM 5.3" },
+    "declared-text": { displayName: "Declared Text", inputModalities: ["text"] },
+    "declared-vision": { displayName: "Declared Vision", inputModalities: ["text", "image"] },
+    "mystery-model": { displayName: "Mystery" },
+  };
+  return store;
+}
+
+function refusal(status, message) {
+  return new Response(JSON.stringify({ error: { message } }), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+const TEXT_ONLY_REFUSAL = () =>
+  refusal(400, "Model only support text input Request id: 021783");
+
+describe("openai handler 图片降级", () => {
+  function makeImageGuardHandler(responses, { gates = {}, store = imageGuardStore() } = {}) {
+    const sent = [];
+    const lines = [];
+    let index = 0;
+    let generation = null;
+    const handler = createOpenAIHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store }),
+      loadCredential: () => ({ ok: true, value: "sk-test" }),
+      upstreamFetch: async (_urls, init) => {
+        sent.push(JSON.parse(init.body));
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        return next;
+      },
+      recordGeneration: (value) => { generation = value; },
+      readGeneration: () => generation,
+      logger: { info: (line) => lines.push(line) },
+      effortInjector: createEffortInjector({ catalog: EMPTY_EFFORT_CATALOG }),
+      ...gates,
+    });
+    return { handler, sent, lines };
+  }
+
+  const ask = (handler, body) => handler.handleChatCompletions(
+    "/openai/poke-api/v1/chat/completions",
+    { authorization: `Bearer ${TOKEN}` },
+    body,
+  );
+
+  it("预判：store 声明纯文本时 send 前剥图（不受预判子开关控制）", async () => {
+    const { handler, sent, lines } = makeImageGuardHandler([success()], {
+      gates: { imageHeuristicGate: () => false },
+    });
+    const result = await ask(handler, imageChatBody("declared-text"));
+    assert.equal(result.status, 200);
+    assert.equal(sent.length, 1);
+    assert.deepEqual(sent[0].messages[0].content, [
+      { type: "text", text: "look at this" },
+      { type: "text", text: "[Unsupported Image]" },
+    ]);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /图片降级（预判）/);
+    assert.match(lines[0], /"declared-text"/);
+    assert.match(lines[0], /1 张图片/);
+  });
+
+  it("预判：内置名单命中，单图 content 折叠为字符串形态", async () => {
+    const { handler, sent } = makeImageGuardHandler([success()], {
+      gates: { imageHeuristicGate: () => true },
+    });
+    const result = await ask(handler, imageChatBody("glm-5.3", { imageOnly: true }));
+    assert.equal(result.status, 200);
+    assert.equal(sent[0].messages[0].content, "[Unsupported Image]");
+    assert.equal(sent[0].model, "glm-5.3");
+  });
+
+  it("预判：子开关关着时名单不预判，图原样上行", async () => {
+    const { handler, sent, lines } = makeImageGuardHandler([success()], {
+      gates: { imageHeuristicGate: () => false },
+    });
+    const result = await ask(handler, imageChatBody("glm-5.3"));
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent[0].messages[0].content[1], IMAGE_URL_PART);
+    assert.equal(lines.length, 0);
+  });
+
+  it("预判：声明支持图片时，名单命中也被声明推翻", async () => {
+    const { handler, sent } = makeImageGuardHandler([success()], {
+      gates: { imageHeuristicGate: () => true },
+    });
+    const result = await ask(handler, imageChatBody("declared-vision"));
+    assert.equal(result.status, 200);
+    assert.deepEqual(sent[0].messages[0].content[1], IMAGE_URL_PART);
+  });
+
+  it("兜底：漏判后上游报「只支持文本」，剥图重试一次并成功", async () => {
+    const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL(), success()], {
+      gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+    });
+    const result = await ask(handler, imageChatBody("mystery-model"));
+    assert.equal(result.status, 200, "客户端看到的是重试结果");
+    assert.equal(sent.length, 2);
+    assert.deepEqual(sent[0].messages[0].content[1], IMAGE_URL_PART);
+    assert.deepEqual(sent[1].messages[0].content, [
+      { type: "text", text: "look at this" },
+      { type: "text", text: "[Unsupported Image]" },
+    ]);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /图片降级（兜底）/);
+    assert.match(lines[0], /"mystery-model"/);
+  });
+
+  it("兜底：总开关关着时不重试，错误原样透传", async () => {
+    const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL()], {
+      gates: { imageHeuristicGate: () => false, imageFallbackGate: () => false },
+    });
+    const result = await ask(handler, imageChatBody("mystery-model"));
+    assert.equal(result.status, 400);
+    assert.equal(sent.length, 1);
+    assert.equal(lines.length, 0);
+  });
+
+  it("兜底：措辞不是模态判决时不重试（单次发送）", async () => {
+    const { handler, sent, lines } = makeImageGuardHandler([refusal(400, "Invalid API key")], {
+      gates: { imageFallbackGate: () => true },
+    });
+    const result = await ask(handler, imageChatBody("mystery-model"));
+    assert.equal(result.status, 400);
+    assert.equal(sent.length, 1);
+    assert.equal(lines.length, 0);
+  });
+
+  it("兜底：重试仍失败时按重试结果透传，不再三发", async () => {
+    const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL(), TEXT_ONLY_REFUSAL()], {
+      gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+    });
+    const result = await ask(handler, imageChatBody("mystery-model"));
+    assert.equal(result.status, 400);
+    assert.equal(sent.length, 2, "图片兜底只重试一次");
+  });
+
+  it("兜底：请求不带图时模态报错不触发重试", async () => {
+    const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL()], {
+      gates: { imageFallbackGate: () => true },
+    });
+    const result = await ask(handler, { model: "mystery-model", messages: [{ role: "user", content: "hi" }] });
+    assert.equal(result.status, 400);
+    assert.equal(sent.length, 1);
+  });
+
+  it("组合：effort 拒绝重试在前，图片兜底的基体不带刚被拒的 effort 字段", async () => {
+    const catalog = {
+      models: new Map([
+        ["mystery-model", { kind: "reasoning", levels: ["high", "max"], default: "high", wire: {}, thinkingFormat: null }],
+      ]),
+    };
+    const sent = [];
+    let index = 0;
+    let generation = null;
+    const handler = createOpenAIHandler({
+      token: TOKEN,
+      loadStore: () => ({ ok: true, store: imageGuardStore() }),
+      loadCredential: () => ({ ok: true, value: "sk-test" }),
+      upstreamFetch: async (_urls, init) => {
+        sent.push(JSON.parse(init.body));
+        const responses = [
+          refusal(400, "Unsupported parameter: 'reasoning_effort'"),
+          TEXT_ONLY_REFUSAL(),
+          success(),
+        ];
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        return next;
+      },
+      recordGeneration: (value) => { generation = value; },
+      readGeneration: () => generation,
+      effortInjector: createEffortInjector({ catalog }),
+      imageHeuristicGate: () => false,
+      imageFallbackGate: () => true,
+    });
+    const result = await handler.handleChatCompletions(
+      "/openai/poke-api/v1/chat/completions",
+      { authorization: `Bearer ${TOKEN}` },
+      imageChatBody("mystery-model"),
+    );
+    assert.equal(result.status, 200);
+    assert.equal(sent.length, 3);
+    assert.equal(sent[0].reasoning_effort, "high");
+    assert.equal(sent[0].messages[0].content[1].type, "image_url");
+    // effort 重试：去字段、图仍在。
+    assert.equal("reasoning_effort" in sent[1], false);
+    assert.equal(sent[1].messages[0].content[1].type, "image_url");
+    // 图片兜底：基体是去 effort 的请求——不再把被拒的字段放回线上。
+    assert.equal("reasoning_effort" in sent[2], false);
+    assert.deepEqual(sent[2].messages[0].content, [
+      { type: "text", text: "look at this" },
+      { type: "text", text: "[Unsupported Image]" },
+    ]);
+  });
+});

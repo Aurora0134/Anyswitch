@@ -7,6 +7,9 @@ import { resolvePool, poolMembersWithModel, poolModelsUnion, createStickyTable }
 import { AUTO_MODEL, resolveChain, resolveVirtualModelEntry, expandChainNode, createChainState, noteChainSuccess, noteChainFailure, logChainDemote, chainNodeKey, uniqueMemberId } from "./chain-routing.mjs";
 import { defaultEffortInjector, looksLikeEffortRejection, readResponseText } from "./effort-injection.mjs";
 import { buildChannelModelSlugCatalog } from "./channel-model-slug.mjs";
+import { requestModelIsTextOnly, looksLikeTextOnlyRejection } from "./text-models.mjs";
+import { requestHasImages, stripImages, noteImageFallback } from "./media-strip.mjs";
+import { imageFallbackEnabled, imageHeuristicEnabled } from "./relay-settings.mjs";
 
 export function openAIError(type, message) {
   return { error: { type, message } };
@@ -117,6 +120,10 @@ export function createOpenAIHandler(deps) {
     logger = null,
     effortInjector = null,
     serviceHealth = null,
+    // 图片降级两门：thunk 形式每请求现读（与 effort 开关的即改即生效契约
+    // 一致）；未注入时走 relay-settings 的磁盘现读默认，测试注入定值。
+    imageFallbackGate = imageFallbackEnabled,
+    imageHeuristicGate = imageHeuristicEnabled,
   } = deps;
 
   const efforts = effortInjector ?? defaultEffortInjector({ logger });
@@ -317,12 +324,29 @@ export function createOpenAIHandler(deps) {
     // A client that named its own level wins; this only ever fills a gap. The
     // store row rides along so a channel that states its own levels wins over
     // the library, same rule as the config face.
-    const { body: outboundBody, injected } = efforts.inject({
+    const { body: injectedBody, injected } = efforts.inject({
       providerId,
       body: withUsage,
       model: provider.models?.[withUsage.model],
       provider,
     });
+
+    // 图片降级预判：store 模态声明（不受开关控制）或内置名单命中（受预判子
+    // 开关控制）时，send 前把图替换为占位标记——带图请求发给纯文本模型本来
+    // 是整单 400、对话中断，占位后模型至少能答。此路径覆盖 openai 直传与
+    // responses 翻译体（tool 输出图的占位归 responses-translate，不重叠）。
+    const modelId = withUsage.model;
+    let outboundBody = injectedBody;
+    if (
+      requestHasImages(outboundBody)
+      && requestModelIsTextOnly(provider.models?.[modelId], modelId, imageHeuristicGate())
+    ) {
+      const { body: stripped, count } = stripImages(outboundBody);
+      if (count > 0) {
+        outboundBody = stripped;
+        noteImageFallback({ providerId, modelId, count, via: "predict", logger });
+      }
+    }
 
     const headers = {
       "content-type": "application/json",
@@ -356,18 +380,48 @@ export function createOpenAIHandler(deps) {
     // A gateway that does not take the parameter at all gets the same request
     // back off without it, once; the channel is then left alone for the rest of
     // this process's life. Only a level WE added can be removed this way.
+    let firstRejectionDetail = null;
+    if (!upstream.ok && (injected !== null || (requestHasImages(outboundBody) && imageFallbackGate()))) {
+      firstRejectionDetail = await readResponseText(upstream);
+    }
+
+    let effortRetried = false;
     if (!upstream.ok && injected !== null) {
-      const detail = await readResponseText(upstream);
-      if (looksLikeEffortRejection(upstream.status, detail)) {
+      if (looksLikeEffortRejection(upstream.status, firstRejectionDetail ?? "")) {
         upstreamFetch.releaseResponse?.(upstream);
         efforts.noteRejected(providerId);
         try {
           upstream = await send(efforts.withoutEffort(outboundBody));
+          effortRetried = true;
         } catch (err) {
           if (options.signal?.aborted) {
             throw err;
           }
           return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+        }
+      }
+    }
+
+    // 图片降级兜底：漏判（模型纯文本但声明与名单都没说中）时，上游 4xx 的措辞
+    // 自证「只支持文本」，把图替换为占位标记重试一次，仍失败才按原错误透传。
+    // 顺序先 effort 后图片、各至多一次；重试基体取产出本次拒绝的请求——effort
+    // 重试已发生时用去 effort 体，不把刚被拒的参数再放回线上。
+    if (!upstream.ok && requestHasImages(outboundBody) && imageFallbackGate()) {
+      const detail = effortRetried ? await readResponseText(upstream) : (firstRejectionDetail ?? "");
+      if (looksLikeTextOnlyRejection(upstream.status, detail)) {
+        const base = effortRetried ? efforts.withoutEffort(outboundBody) : outboundBody;
+        const { body: stripped, count } = stripImages(base);
+        if (count > 0) {
+          upstreamFetch.releaseResponse?.(upstream);
+          noteImageFallback({ providerId, modelId, count, via: "fallback", logger });
+          try {
+            upstream = await send(stripped);
+          } catch (err) {
+            if (options.signal?.aborted) {
+              throw err;
+            }
+            return { status: 502, body: openAIError("api_error", "the upstream provider could not be reached") };
+          }
         }
       }
     }

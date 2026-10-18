@@ -76,6 +76,26 @@ export function parseMidSystemRewrite(raw) {
   return raw === false ? false : DEFAULT_MID_SYSTEM_REWRITE;
 }
 
+// 图片降级（图片占位替换）总开关：带图请求撞上「只支持文本」类上游报错时，
+// 把图替换为占位标记后重试一次，对话不因一张图整轮报废。它只管这条报错兜底
+// 路径的启停——store 模态声明判定不受它管（声明是运营者输入的事实，不是猜
+// 测）。默认开：缺失、畸形、旧版本没有这个键，一律视为开；只有显式写入
+// false 才停用兜底。无面板入口（用户终裁静默生效），键留作将来浮出的钩子。
+export const DEFAULT_IMAGE_FALLBACK = true;
+
+export function parseImageFallback(raw) {
+  return raw === false ? false : DEFAULT_IMAGE_FALLBACK;
+}
+
+// 纯文本模型预判子开关：内置确认名单命中时，send 前就把图替换为占位标记
+// （名单精确匹配 fail-open，误判面收敛在名单条目内；关闭后声明判定与报错
+// 兜底保留）。默认开，同上：只有显式写入 false 才关。
+export const DEFAULT_IMAGE_HEURISTIC = true;
+
+export function parseImageHeuristic(raw) {
+  return raw === false ? false : DEFAULT_IMAGE_HEURISTIC;
+}
+
 // 运行日志总开关。默认开——日志是排障时唯一的凭据，升级上来的安装必须与旧行为
 // 一致，不能因为多出一个开关就默认把记录关掉。只有显式写入 false 才关（缺失、
 // 畸形、旧版本没有这个键，全部保持开）。
@@ -292,6 +312,8 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
   const sparkWindowPoints = parseSparkWindowPoints(raw.sparkWindowPoints);
   const injectThinkingEffort = parseInjectThinkingEffort(raw.injectThinkingEffort);
   const midSystemRewrite = parseMidSystemRewrite(raw.midSystemRewrite);
+  const imageFallback = parseImageFallback(raw.imageFallback);
+  const imageHeuristic = parseImageHeuristic(raw.imageHeuristic);
   const loggingEnabled = parseLoggingEnabled(raw.loggingEnabled);
   const logLevel = parseLogLevel(raw.logLevel);
   const claudeBypassPermissions = parseClaudeBypassPermissions(raw.claudeBypassPermissions);
@@ -315,6 +337,8 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
       sparkWindowPoints,
       injectThinkingEffort,
       midSystemRewrite,
+      imageFallback,
+      imageHeuristic,
       loggingEnabled,
       logLevel,
       claudeBypassPermissions,
@@ -331,6 +355,8 @@ export function loadSettings(settingsPath = defaultSettingsPath(), env = process
     sparkWindowPoints,
     injectThinkingEffort,
     midSystemRewrite,
+    imageFallback,
+    imageHeuristic,
     loggingEnabled,
     logLevel,
     claudeBypassPermissions,
@@ -419,6 +445,14 @@ export function saveSettings(settingsPath, patch, env = process.env) {
     updated.midSystemRewrite = parseMidSystemRewrite(patch.midSystemRewrite);
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, "imageFallback")) {
+    updated.imageFallback = parseImageFallback(patch.imageFallback);
+  }
+
+  if (Object.prototype.hasOwnProperty.call(patch, "imageHeuristic")) {
+    updated.imageHeuristic = parseImageHeuristic(patch.imageHeuristic);
+  }
+
   if (Object.prototype.hasOwnProperty.call(patch, "loggingEnabled")) {
     updated.loggingEnabled = parseLoggingEnabled(patch.loggingEnabled);
   }
@@ -490,6 +524,17 @@ export function saveSettings(settingsPath, patch, env = process.env) {
 // 即生效。protocol.mjs 的翻译门控在调用方未显式钉死开关值时走这里。
 export function midSystemRewriteEnabled(base = process.env) {
   return loadSettings(defaultSettingsPath(base), base).midSystemRewrite;
+}
+
+// 图片降级两键的运行时读取：每次调用现读磁盘（与 midSystemRewriteEnabled
+// 同一契约），将来浮出成面板开关时保存即生效、无需重启 relay。请求路径只
+// 在 body 带图时才走到这两个门，无图请求零额外读盘。
+export function imageFallbackEnabled(base = process.env) {
+  return loadSettings(defaultSettingsPath(base), base).imageFallback;
+}
+
+export function imageHeuristicEnabled(base = process.env) {
+  return loadSettings(defaultSettingsPath(base), base).imageHeuristic;
 }
 
 // One live read of a single setting, for long-lived processes that must honour a
