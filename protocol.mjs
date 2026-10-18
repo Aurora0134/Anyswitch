@@ -1,5 +1,7 @@
 // Anthropic <-> OpenAI-compatible protocol translation.
-// Pure functions only. No IO, no network.
+// Pure functions only. No IO, no network — one exception: anthropicToOpenAI
+// resolves its mid-system rewrite gate from settings.json when the caller does
+// not pin the flag (see the gate comment there).
 //
 // The relay speaks Anthropic Messages API to Claude and OpenAI Chat Completions
 // to the upstream provider. Only an explicit allow-list of the fields Claude
@@ -11,6 +13,7 @@
 
 import { REASONING_FIELDS } from "./stream.mjs";
 import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
+import { midSystemRewriteEnabled } from "./relay-settings.mjs";
 
 // ---------- Anthropic request -> OpenAI request ----------
 
@@ -45,8 +48,10 @@ function convertContentToOpenAI(content) {
 // Anthropic tool_use / tool_result blocks map onto OpenAI tool_calls and
 // role:"tool" messages. Returns the list of OpenAI messages for one Anthropic
 // message, because a single Anthropic message can fan out into several.
-function convertMessage(message) {
-  const role = message.role;
+function convertMessage(message, midSystemRewrite = false) {
+  // Mid-conversation system becomes user under the midSystemRewrite gate; the
+  // content conversion below is shared verbatim with every other role.
+  const role = message.role === "system" && midSystemRewrite ? "user" : message.role;
   const content = message.content;
 
   if (!Array.isArray(content)) {
@@ -173,14 +178,31 @@ export function clientEffortFromAnthropic(rawBody) {
 }
 
 // `modelId` is the bare upstream model id produced by unpackWireId.
-export function anthropicToOpenAI(body, modelId) {
+//
+// `options.midSystemRewrite` pins the mid-conversation system rewrite (true =
+// rewrite to user, false = translate the system role as-is). Unpinned, the
+// persisted 会话缓存优化 switch is read per call, so a panel save applies on
+// the next request without a relay restart (same contract as
+// effort-injection.mjs's settingsEffortInjectionEnabled).
+export function anthropicToOpenAI(body, modelId, options = {}) {
   const messages = [];
   const system = convertSystem(body.system);
   if (system) messages.push(system);
 
+  // Mid-conversation system messages (role:"system" inside `messages`) are what
+  // Claude Code appends every turn (<total_tokens> markers, environment
+  // updates). Some upstreams hoist them into the prompt's stable head region,
+  // pinning the prefix-cache breakpoint there (M11: 3% cache hit in
+  // production); rewritten to user the sequence stays purely appended and the
+  // cache holds (99.7% measured). Only the role changes — never merged, split
+  // or dropped — and the top-level system above, the prompt's real head, is
+  // untouched by the gate.
+  const midSystemRewrite =
+    typeof options.midSystemRewrite === "boolean" ? options.midSystemRewrite : midSystemRewriteEnabled();
+
   for (const message of body.messages ?? []) {
     if (message === null || typeof message !== "object") continue;
-    messages.push(...convertMessage(message));
+    messages.push(...convertMessage(message, midSystemRewrite));
   }
 
   const request = { model: modelId, messages };

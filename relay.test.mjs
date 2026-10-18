@@ -3,6 +3,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
@@ -10,6 +12,7 @@ import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 import { createServiceHealth } from "./service-health.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -311,6 +314,194 @@ test("anthropic path retries once without the field when the channel refuses it"
   assert.equal("reasoning_effort" in sent[1], false);
 });
 
+// ---------- 图片降级（M13：纯文本模型预判 + 报错兜底） ----------
+
+const EMPTY_EFFORT_CATALOG = { models: new Map() };
+
+const TEXT_ONLY_REFUSAL = {
+  ok: false,
+  status: 400,
+  text: async () => '{"error":{"message":"Model only support text input Request id: 0217"}}',
+};
+
+function imageMessageBody(model, { imageOnly = false } = {}) {
+  const content = imageOnly
+    ? [{ type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } }]
+    : [
+        { type: "text", text: "look at this" },
+        { type: "image", source: { type: "base64", media_type: "image/png", data: "QUJD" } },
+      ];
+  return { model, max_tokens: 16, messages: [{ role: "user", content }] };
+}
+
+function imageGuardStore() {
+  const store = syntheticStore();
+  store.providers["poke-api"].models = {
+    "claude-opus-5": { displayName: "Claude Opus 5" },
+    "glm-5.3": { displayName: "GLM 5.3" },
+    "declared-text": { displayName: "Declared Text", inputModalities: ["text"] },
+    "declared-vision": { displayName: "Declared Vision", inputModalities: ["text", "image"] },
+    "mystery-model": { displayName: "Mystery" },
+  };
+  return store;
+}
+
+function makeImageGuardHandler(responses, { gates = {}, store = imageGuardStore(), effortCatalog = EMPTY_EFFORT_CATALOG } = {}) {
+  const sent = [];
+  const lines = [];
+  let index = 0;
+  const handler = createHandler({
+    ...makeDeps({
+      store,
+      upstreamFetch: async (urls, init) => {
+        sent.push(JSON.parse(init.body));
+        const next = responses[Math.min(index, responses.length - 1)];
+        index += 1;
+        return next;
+      },
+    }),
+    logger: { info: (line) => lines.push(line) },
+    effortInjector: createEffortInjector({ catalog: effortCatalog }),
+    ...gates,
+  });
+  return { handler, sent, lines };
+}
+
+test("预判：store 声明纯文本时，send 前把图替换为占位标记（不受预判子开关控制）", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/declared-text"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /图片降级（预判）/);
+  assert.match(lines[0], /"declared-text"/);
+  assert.match(lines[0], /1 张图片/);
+});
+
+test("预判：内置名单命中时剥图，且单图 content 折叠为字符串形态", async () => {
+  const { handler, sent } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/glm-5.3", { imageOnly: true }));
+  assert.equal(out.status, 200);
+  assert.equal(sent[0].messages[0].content, "[Unsupported Image]");
+  // body 里的原图块没有被原地改动。
+  assert.equal(sent.length, 1);
+});
+
+test("预判：子开关关着时名单不再预判（fail-open，图原样上行）", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/glm-5.3"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+  assert.equal(lines.length, 0);
+});
+
+test("预判：声明支持图片时，名单命中也被声明推翻", async () => {
+  const { handler, sent } = makeImageGuardHandler([okResponse], {
+    gates: { imageHeuristicGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/declared-vision"));
+  assert.equal(out.status, 200);
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+});
+
+test("兜底：漏判后上游报「只支持文本」，剥图重试一次并成功", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL, okResponse], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 200, "客户端看到的是重试结果");
+  assert.equal(sent.length, 2);
+  // 第一次带图原样上行（漏判），第二次已替换为占位标记。
+  assert.deepEqual(sent[0].messages[0].content[1], {
+    type: "image_url",
+    image_url: { url: "data:image/png;base64,QUJD" },
+  });
+  assert.deepEqual(sent[1].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /图片降级（兜底）/);
+  assert.match(lines[0], /"mystery-model"/);
+});
+
+test("兜底：总开关关着时不重试，错误原样透传", async () => {
+  const { handler, sent, lines } = makeImageGuardHandler([TEXT_ONLY_REFUSAL], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => false },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+  assert.equal(lines.length, 0);
+});
+
+test("兜底：措辞不是模态判决时不重试（错误透传，单次发送）", async () => {
+  const apiKeyError = { ok: false, status: 400, text: async () => '{"error":{"message":"Invalid API key"}}' };
+  const { handler, sent, lines } = makeImageGuardHandler([apiKeyError], {
+    gates: { imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+  assert.equal(lines.length, 0);
+});
+
+test("兜底：重试仍失败时按重试结果透传，不再三发", async () => {
+  const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL, TEXT_ONLY_REFUSAL], {
+    gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 2, "图片兜底只重试一次");
+});
+
+test("兜底：请求不带图时模态报错不触发重试", async () => {
+  const { handler, sent } = makeImageGuardHandler([TEXT_ONLY_REFUSAL], {
+    gates: { imageFallbackGate: () => true },
+  });
+  const out = await handler.handleMessages(AUTH, messageBody("anthropic/poke-api/mystery-model"));
+  assert.equal(out.status, 400);
+  assert.equal(sent.length, 1);
+});
+
+test("组合：effort 拒绝重试在前，图片兜底的基体不带刚被拒的 effort 字段", async () => {
+  const effortRefusal = { ok: false, status: 400, text: async () => 'Unsupported parameter: "reasoning_effort"' };
+  const { handler, sent } = makeImageGuardHandler(
+    [effortRefusal, TEXT_ONLY_REFUSAL, okResponse],
+    { gates: { imageHeuristicGate: () => false, imageFallbackGate: () => true }, effortCatalog: EFFORT_CATALOG },
+  );
+  const out = await handler.handleMessages(AUTH, imageMessageBody("anthropic/poke-api/claude-opus-5"));
+  assert.equal(out.status, 200);
+  assert.equal(sent.length, 3);
+  assert.equal(sent[0].reasoning_effort, "high");
+  assert.deepEqual(sent[0].messages[0].content[1].type, "image_url");
+  // effort 重试：去字段、图仍在。
+  assert.equal("reasoning_effort" in sent[1], false);
+  assert.equal(sent[1].messages[0].content[1].type, "image_url");
+  // 图片兜底：基体是去 effort 的请求——不再把被拒的字段放回线上。
+  assert.equal("reasoning_effort" in sent[2], false);
+  assert.deepEqual(sent[2].messages[0].content, [
+    { type: "text", text: "look at this" },
+    { type: "text", text: "[Unsupported Image]" },
+  ]);
+});
+
 test("clientEffortFromAnthropic reads every way Claude names a depth", () => {
   assert.deepEqual(clientEffortFromAnthropic({ output_config: { effort: "xhigh" } }), { stated: true, level: "xhigh" });
   assert.deepEqual(clientEffortFromAnthropic({ reasoning_effort: "high" }), { stated: true, level: "high" });
@@ -391,6 +582,134 @@ test("anthropicToOpenAI drops Claude Code's fixed reasoning_effort", () => {
     "m",
   );
   assert.ok(!("reasoning_effort" in out));
+});
+
+// ---------- mid-conversation system rewrite（会话缓存优化） ----------
+
+test("anthropicToOpenAI rewrites mid-conversation system to user under the gate, head system untouched", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+        { role: "assistant", content: "hello" },
+        { role: "system", content: "# Environment update\nfresh" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // The top-level system (convertSystem product) stays the leading system
+  // message, verbatim — the gate never touches the prompt's real head.
+  assert.equal(out.messages[0].role, "system");
+  assert.equal(out.messages[0].content, "head rules");
+  // Every mid-conversation system becomes user one-for-one: no message is
+  // merged, split or dropped, and the content is carried through verbatim.
+  assert.deepEqual(out.messages.slice(1), [
+    { role: "user", content: "hi" },
+    { role: "user", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+    { role: "assistant", content: "hello" },
+    { role: "user", content: "# Environment update\nfresh" },
+  ]);
+});
+
+test("anthropicToOpenAI keeps mid-conversation system as system when the gate is off", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "marker" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "system", content: "head rules" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "marker" },
+  ]);
+});
+
+test("mid-system rewrite is role-only: block-array and string content convert exactly as a user message's would", () => {
+  const blockForm = [{ type: "text", text: "env update" }];
+  const rewritten = anthropicToOpenAI(
+    { messages: [{ role: "system", content: blockForm }, { role: "system", content: "plain" }] },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // Control run with the roles already user and the gate off: identical
+  // content must produce identical messages — the gate swaps only the role.
+  const control = anthropicToOpenAI(
+    { messages: [{ role: "user", content: blockForm }, { role: "user", content: "plain" }] },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(rewritten.messages, control.messages);
+  assert.equal(rewritten.messages.length, 2);
+});
+
+test("consecutive mid-system messages rewrite one-for-one without merging", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "system", content: "first" },
+        { role: "system", content: "second" },
+        { role: "system", content: "third" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "user", content: "first" },
+    { role: "user", content: "second" },
+    { role: "user", content: "third" },
+  ]);
+});
+
+test("mid-system rewrite is idempotent: translating the same body twice yields identical messages", () => {
+  const body = {
+    system: "head",
+    messages: [
+      { role: "user", content: "q" },
+      { role: "system", content: "marker" },
+      { role: "assistant", content: "a" },
+      { role: "system", content: [{ type: "text", text: "blocks" }] },
+    ],
+  };
+  const first = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  const second = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  assert.deepEqual(first.messages, second.messages);
+  // head system + 4 源消息：改写只换 role，一条不多、一条不少。
+  assert.equal(first.messages.length, 5);
+});
+
+test("unpinned gate falls back to settings: absent key rewrites, a written false stops it", () => {
+  const tmp = mkTestDir("anyswitch-midsys-fallback-");
+  const settingsPath = join(tmp, "Anyswitch", "settings.json");
+  mkdirSync(join(tmp, "Anyswitch"), { recursive: true });
+  const prevLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = tmp;
+  try {
+    // 无 settings 文件：默认开（生产现状——键不存在，优化直接生效）。
+    const on = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(on.messages[0].role, "user");
+    assert.equal(on.messages[0].content, "marker");
+    // 面板写入 false 后下一请求即关闭，无需重启。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: false }));
+    const off = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(off.messages[0].role, "system");
+    // 写回 true（或删键）恢复改写。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: true }));
+    const back = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(back.messages[0].role, "user");
+  } finally {
+    if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = prevLocalAppData;
+  }
 });
 
 test("openAIToAnthropic echoes the wire ID and maps stop reasons", () => {

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, rmSync, writeFileSync, utimesSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync, utimesSync, statSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   DEFAULT_KEEPALIVE_CONFIG,
@@ -10,6 +10,15 @@ import {
   parseSparkWindowPoints,
   parseInjectThinkingEffort,
   DEFAULT_INJECT_THINKING_EFFORT,
+  parseMidSystemRewrite,
+  DEFAULT_MID_SYSTEM_REWRITE,
+  midSystemRewriteEnabled,
+  parseImageFallback,
+  DEFAULT_IMAGE_FALLBACK,
+  parseImageHeuristic,
+  DEFAULT_IMAGE_HEURISTIC,
+  imageFallbackEnabled,
+  imageHeuristicEnabled,
   DEFAULT_LOGGING_ENABLED,
   parseLoggingEnabled,
   createLoggingEnabledGate,
@@ -673,6 +682,116 @@ describe("claudeBypassPermissions", () => {
       assert.equal(loadSettings(path, {}).settings.claudeBypassPermissions, true);
       const back = saveSettings(path, { claudeBypassPermissions: false }, {});
       assert.equal(back.settings.claudeBypassPermissions, false);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("midSystemRewrite", () => {
+  it("defaults to on: only an explicit false turns it off", () => {
+    assert.equal(DEFAULT_MID_SYSTEM_REWRITE, true);
+    assert.equal(parseMidSystemRewrite(undefined), true);
+    assert.equal(parseMidSystemRewrite("false"), true);
+    assert.equal(parseMidSystemRewrite(0), true);
+    assert.equal(parseMidSystemRewrite(null), true);
+    assert.equal(parseMidSystemRewrite(true), true);
+    assert.equal(parseMidSystemRewrite(false), false);
+  });
+
+  it("persists across saves and rides the settings payload the panel reads", () => {
+    const tmp = mkTestDir("anyswitch-midsys-");
+    const path = join(tmp, "settings.json");
+    try {
+      const fresh = loadSettings(path, {});
+      assert.equal(fresh.settings.midSystemRewrite, true);
+      const off = saveSettings(path, { midSystemRewrite: false }, {});
+      assert.equal(off.settings.midSystemRewrite, false);
+      assert.equal(loadSettings(path, {}).settings.midSystemRewrite, false);
+      const back = saveSettings(path, { midSystemRewrite: true }, {});
+      assert.equal(back.settings.midSystemRewrite, true);
+      // 畸形值经 saveSettings 归一后不落盘（读路径同一口径，都视为开）。
+      const junk = saveSettings(path, { midSystemRewrite: "no" }, {});
+      assert.equal(junk.settings.midSystemRewrite, true);
+      assert.equal(loadSettings(path, {}).settings.midSystemRewrite, true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("midSystemRewriteEnabled reads live from disk: a written false applies without a restart", () => {
+    const tmp = mkTestDir("anyswitch-midsys-live-");
+    const root = join(tmp, "Anyswitch");
+    mkdirSync(root, { recursive: true });
+    const base = { LOCALAPPDATA: tmp, USERPROFILE: join(tmp, "user") };
+    try {
+      // 无文件、无键：默认开（升级上来的安装路径）。
+      assert.equal(midSystemRewriteEnabled(base), true);
+      writeFileSync(join(root, "settings.json"), JSON.stringify({ midSystemRewrite: false }));
+      assert.equal(midSystemRewriteEnabled(base), false);
+      writeFileSync(join(root, "settings.json"), JSON.stringify({}));
+      assert.equal(midSystemRewriteEnabled(base), true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("imageFallback / imageHeuristic (图片降级两键)", () => {
+  it("both default to on: only an explicit false turns either off", () => {
+    assert.equal(DEFAULT_IMAGE_FALLBACK, true);
+    assert.equal(DEFAULT_IMAGE_HEURISTIC, true);
+    for (const parse of [parseImageFallback, parseImageHeuristic]) {
+      assert.equal(parse(undefined), true);
+      assert.equal(parse("false"), true);
+      assert.equal(parse(0), true);
+      assert.equal(parse(null), true);
+      assert.equal(parse(true), true);
+      assert.equal(parse(false), false);
+    }
+  });
+
+  it("persist across saves and ride the settings payload", () => {
+    const tmp = mkTestDir("anyswitch-imgfb-");
+    const path = join(tmp, "settings.json");
+    try {
+      const fresh = loadSettings(path, {});
+      assert.equal(fresh.settings.imageFallback, true);
+      assert.equal(fresh.settings.imageHeuristic, true);
+      const off = saveSettings(path, { imageFallback: false, imageHeuristic: false }, {});
+      assert.equal(off.settings.imageFallback, false);
+      assert.equal(off.settings.imageHeuristic, false);
+      assert.equal(loadSettings(path, {}).settings.imageFallback, false);
+      assert.equal(loadSettings(path, {}).settings.imageHeuristic, false);
+      const back = saveSettings(path, { imageFallback: true, imageHeuristic: true }, {});
+      assert.equal(back.settings.imageFallback, true);
+      assert.equal(back.settings.imageHeuristic, true);
+      // 畸形值经 saveSettings 归一后不落盘（读路径同一口径，都视为开）。
+      const junk = saveSettings(path, { imageFallback: "no", imageHeuristic: "no" }, {});
+      assert.equal(junk.settings.imageFallback, true);
+      assert.equal(junk.settings.imageHeuristic, true);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("both live readers read from disk: a written false applies without a restart", () => {
+    const tmp = mkTestDir("anyswitch-imgfb-live-");
+    const root = join(tmp, "Anyswitch");
+    mkdirSync(root, { recursive: true });
+    const base = { LOCALAPPDATA: tmp, USERPROFILE: join(tmp, "user") };
+    try {
+      assert.equal(imageFallbackEnabled(base), true);
+      assert.equal(imageHeuristicEnabled(base), true);
+      writeFileSync(join(root, "settings.json"), JSON.stringify({ imageFallback: false }));
+      assert.equal(imageFallbackEnabled(base), false);
+      assert.equal(imageHeuristicEnabled(base), true, "两键互不牵连");
+      writeFileSync(join(root, "settings.json"), JSON.stringify({ imageHeuristic: false }));
+      assert.equal(imageFallbackEnabled(base), true);
+      assert.equal(imageHeuristicEnabled(base), false);
+      writeFileSync(join(root, "settings.json"), JSON.stringify({}));
+      assert.equal(imageFallbackEnabled(base), true);
+      assert.equal(imageHeuristicEnabled(base), true);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
