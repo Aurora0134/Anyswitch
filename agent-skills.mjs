@@ -45,7 +45,15 @@ export const ENDPOINT_DEFS = Object.freeze([
   { id: "qoder", label: "Qoder", relSkillsDir: [".qoder", "skills"] },
   { id: "codex", label: "Codex", relSkillsDir: [".codex", "skills"] },
   { id: "grok", label: "Grok Build", relSkillsDir: [".grok", "skills"] },
+  // 全局端点：跨 Agent 约定俗成的通用技能目录（ZCode 等客户端直接读取
+  // ~/.agents/skills）。它不是任何 Agent，不参与环境检测的「装没装」——
+  // 可见性与部署资格对它恒放行（见 createSkillsService 的 endpointUsable）。
+  // 用户选它做主仓库同样合法（REPO_CANDIDATES 本就推荐）：届时该端点按
+  // 同径退让规则撤下（见 getState / assertEndpointOutsideRepo）。
+  { id: "agents", label: "全局", relSkillsDir: [".agents", "skills"] },
 ]);
+
+const GLOBAL_ENDPOINT_ID = "agents";
 
 // Repo-path candidates the panel offers as one-click choices.
 // The ANYSWITCH_SKILLS_REPO environment variable (absolute path) is offered
@@ -255,6 +263,19 @@ function normalizePath(p) {
   let out = String(p);
   if (out.startsWith("\\\\?\\")) out = out.slice(4);
   return resolve(out).toLowerCase();
+}
+
+// 目录重叠判定：相等，或一方是另一方的祖先（共享一段磁盘）都算。主仓库与
+// 端点技能目录重叠时，端点里的「本地技能」与仓库本体是同一段路径——部署/
+// 收编/冲突收口的既有分支会把本体送进回收站再挂自指 junction，必须整类
+// 退让或拒绝。路径比较复用 normalizePath（解析 + 小写），\\?\ 前缀与大小写
+// 差异都吃掉；后缀加路径分隔符防 C:\foo 误配 C:\foo-bar。
+function pathsOverlap(a, b) {
+  if (!a || !b) return false;
+  const pa = normalizePath(a);
+  const pb = normalizePath(b);
+  if (pa === pb) return true;
+  return pa.startsWith(pb + "\\") || pb.startsWith(pa + "\\");
 }
 
 function isJunction(absPath) {
@@ -790,6 +811,19 @@ function assertPlainSkillDirName(skillName) {
   }
 }
 
+// 自指守卫：端点技能目录与主仓库重叠（相等或互为祖先）时，端点里的「本地
+// 技能」和仓库本体是同一段磁盘——下方三个操作的既有分支（一致即回收换
+// junction / 收编搬本体）会把本体送进回收站再挂一条指向自己的链接。UI 侧
+// 同径退让后正常流程已无此入口，这里拦过期面板与直接 API 调用。
+function assertEndpointOutsideRepo(endpoint, repoPath, message) {
+  if (repoPath && pathsOverlap(endpoint.skillsDir, repoPath)) {
+    const error = new Error(message);
+    error.statusCode = 400;
+    error.code = "endpoint_overlaps_repo";
+    throw error;
+  }
+}
+
 /**
  * Deploy a repo skill into an endpoint as a junction.
  * - Creates the endpoint skills directory on first use (kimi/dsh).
@@ -807,6 +841,7 @@ export async function deploy(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
+  assertEndpointOutsideRepo(endpoint, repoPath, "主仓库就在该目录中，技能已在里面，无需部署");
   const skill = findRepoSkill(repoPath, skillName);
   if (!skill) throw new Error(`repo 中不存在 skill: ${skillName}`);
 
@@ -1013,6 +1048,7 @@ export async function mergeLocalSkill(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
+  assertEndpointOutsideRepo(endpoint, repoPath, "该 skill 就在主仓库里，无需收编");
   assertPlainSkillDirName(skillName);
   const localPath = join(endpoint.skillsDir, skillName);
   if (!existsSync(localPath) || isJunction(localPath)) {
@@ -1085,6 +1121,7 @@ export async function resolveConflictSkill(
   const endpoint = findEndpoint(endpointId, homeDir);
   if (!endpoint) throw new Error(`unknown endpoint: ${endpointId}`);
   if (!endpoint.enabled) throw new Error(`endpoint "${endpointId}" 兼容性未验证，暂未启用`);
+  assertEndpointOutsideRepo(endpoint, repoPath, "该 skill 就在主仓库里，无需收编");
   if (direction !== "repo" && direction !== "local") {
     throw new Error(`direction 必须是 "repo" 或 "local": ${direction}`);
   }
@@ -1264,6 +1301,12 @@ export function createSkillsService({
 } = {}) {
   const deps = { homeDir, recycleDirFn };
 
+  // 全局端点不是 Agent：环境检测永远看不见它，可见性判定对它恒放行
+  // （在场依据是 ~/.agents/skills 目录本身，与任何客户端装没装无关）。
+  function endpointUsable(endpointId) {
+    return endpointId === GLOBAL_ENDPOINT_ID || isEndpointVisible(endpointId);
+  }
+
   function notInstalledEndpointError() {
     const error = new Error("该 Agent 未安装，无法部署");
     error.statusCode = 400;
@@ -1303,9 +1346,14 @@ export function createSkillsService({
         repoValid: repoExists,
         skills,
         // 只报已安装 Agent 的端点：目录是否存在不再进 UI 口径（装好但从未
-        // 部署过的 Agent 首次部署时自建目录），「装没装」由 isEndpointVisible 判定
+        // 部署过的 Agent 首次部署时自建目录），「装没装」由 isEndpointVisible 判定；
+        // 全局端点豁免（它不是 Agent）。同径退让：技能目录与主仓库重叠的端点
+        // 撤下（按配置路径判定，目录暂不存在同样退让）——该目录以主仓库身份
+        // 在场，技能全部在仓库列表，重叠端点上的本地/部署状态只会是同一段
+        // 磁盘的幻影（收编比一致、异常卡可一键删到本体），不撤会误导与误删。
         endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir })
-          .filter((ep) => isEndpointVisible(ep.id)),
+          .filter((ep) => !pathsOverlap(ep.skillsDir, repoPath))
+          .filter((ep) => endpointUsable(ep.id)),
         candidates: [
           ...(base.ANYSWITCH_SKILLS_REPO ? [base.ANYSWITCH_SKILLS_REPO] : []),
           ...REPO_CANDIDATES.map((parts) => join(homeDir, ...parts)),
@@ -1375,7 +1423,7 @@ export function createSkillsService({
     },
 
     async deploy({ endpointId, skillName, force }) {
-      if (!isEndpointVisible(endpointId)) throw notInstalledEndpointError();
+      if (!endpointUsable(endpointId)) throw notInstalledEndpointError();
       const repoPath = requireExistingRepo();
       return deploy({ endpointId, skillName, repoPath, force: Boolean(force) }, deps);
     },

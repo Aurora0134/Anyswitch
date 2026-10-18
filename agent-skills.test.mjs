@@ -1168,7 +1168,7 @@ describe("createSkillsService", () => {
       assert.equal(state.repoConfigured, false);
       assert.equal(state.repoValid, false);
       assert.deepEqual(state.skills, []);
-      assert.equal(state.endpoints.length, 9);
+      assert.equal(state.endpoints.length, 10);
       assert.throws(() => svc.setRepoPath(join(dir, "ghost")), /不存在/);
       // 空目录默认仍拒收，且带机读码供面板走「确认后放行」分支
       assert.throws(() => svc.setRepoPath(home), (err) => {
@@ -1242,7 +1242,8 @@ describe("createSkillsService 端点可见性（未安装的 Agent 不进清单�
       });
       svc.setRepoPath(repo);
       const state = svc.getState();
-      assert.deepEqual(state.endpoints.map((e) => e.id), ["claude"]);
+      // 全局端点不是 Agent，不参与「装没装」过滤：即便检测一个都看不见它也在册
+      assert.deepEqual(state.endpoints.map((e) => e.id), ["claude", "agents"]);
 
       await assert.rejects(
         svc.deploy({ endpointId: "kimi", skillName: "skill-a" }),
@@ -1534,7 +1535,7 @@ describe("createSkillsService invalid-repo guard", () => {
 });
 
 describe("endpoint registry", () => {
-  it("maps all nine endpoints under the given home", () => {
+  it("maps all ten endpoints (nine agents + 全局) under the given home", () => {
     const endpoints = listEndpoints("C:\\fakehome");
     const byId = Object.fromEntries(endpoints.map((e) => [e.id, e]));
     assert.equal(byId.claude.skillsDir, join("C:\\fakehome", ".claude", "skills"));
@@ -1547,7 +1548,10 @@ describe("endpoint registry", () => {
     assert.equal(byId.codex.skillsDir, join("C:\\fakehome", ".codex", "skills"));
     // grok reads Claude-compatible SKILL.md packages from ~/.grok/skills/.
     assert.equal(byId.grok.skillsDir, join("C:\\fakehome", ".grok", "skills"));
-    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok"]) {
+    // 全局端点：跨 Agent 约定俗成的通用技能目录，title 写「全局」
+    assert.equal(byId.agents.skillsDir, join("C:\\fakehome", ".agents", "skills"));
+    assert.equal(byId.agents.label, "全局");
+    for (const id of ["claude", "zcode", "opencode", "pi", "kimi", "dsh", "qoder", "codex", "grok", "agents"]) {
       assert.equal(byId[id].enabled, true, `${id} enabled`);
     }
   });
@@ -1827,6 +1831,190 @@ describe("ensureFolderPickerHelper", () => {
       const { base } = pickerFixture(dir);
       const { spawnFn } = fakeSpawn(() => ({ code: 1, stderr: "error CS0000" }));
       await assert.rejects(ensureFolderPickerHelper({ spawnFn, base }), /CS0000/);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────
+// 全局端点（~/.agents/skills）：纳入识别 + 主仓库同径/重叠退让 + 写路径自指守卫
+// ─────────────────────────────────────────────────────────────
+
+describe("全局端点识别", () => {
+  it("scanEndpoints 把全局目录当普通端点扫：本地技能照常入册", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "worktree-merge"), { name: "worktree-merge" });
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+
+      const eps = scanEndpoints(repo, { homeDir: home });
+      const g = eps.find((e) => e.id === "agents");
+      assert.ok(g, "global endpoint present");
+      assert.equal(g.dirExists, true);
+      assert.deepEqual(g.entries.map((x) => x.name), ["worktree-merge"]);
+      assert.equal(g.entries[0].kind, "local");
+      assert.equal(g.entries[0].matchesRepo, null, "仓库无同名 → 本地独有");
+
+      // 无仓库配置时全局端点同样在册：在场依据是目录本身，不依赖仓库
+      assert.ok(scanEndpoints(null, { homeDir: home }).some((e) => e.id === "agents"));
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("常规形态照常：仓库在别处时向全局端点部署/解除不受「装没装」影响", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      mkdirSync(home, { recursive: true });
+      const repo = join(dir, "repo");
+      writeSkill(join(repo, "skill-a"), { name: "skill-a" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+      const svc = createSkillsService({
+        homeDir: home,
+        base,
+        recycleDirFn: mockRecycle([]),
+        isEndpointVisible: (id) => id === "claude",
+      });
+      svc.setRepoPath(repo);
+      // 豁免：全局端点不在环境检测里，也不能被「未安装」挡在部署外
+      assert.deepEqual(svc.getState().endpoints.map((e) => e.id), ["claude", "agents"]);
+      const r = await svc.deploy({ endpointId: "agents", skillName: "skill-a" });
+      assert.equal(r.ok, true);
+      const linkPath = join(home, ".agents", "skills", "skill-a");
+      assert.equal(lstatSync(linkPath).isSymbolicLink(), true, "junction landed in the global dir");
+      const u = await svc.undeploy({ endpointId: "agents", skillName: "skill-a" });
+      assert.equal(u.ok, true);
+      assert.equal(existsSync(linkPath), false);
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("全局端点同径退让（主仓库与识别目录重叠）", () => {
+  it("主仓库就是全局目录时：全局端点整卡撤下，技能以主仓库身份全量在场", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "worktree-merge"), { name: "worktree-merge" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+      const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      svc.setRepoPath(globalDir);
+      const state = svc.getState();
+      assert.equal(state.endpoints.some((e) => e.id === "agents"), false, "同径端点退让");
+      assert.deepEqual(state.skills.map((s) => s.name), ["worktree-merge"], "技能全部在主仓库列表");
+      assert.ok(state.endpoints.some((e) => e.id === "claude"), "其余端点不受影响");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("重叠含嵌套形态：仓库是全局目录的父或子时同样撤下", () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "worktree-merge"), { name: "worktree-merge" });
+      const base = { LOCALAPPDATA: join(dir, "local"), USERPROFILE: join(dir, "user") };
+
+      // 父形态：repo = home（全局目录的祖先）——异常卡的「一致可删除」会指到本体，必须撤
+      const svcParent = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      svcParent.setRepoPath(home);
+      assert.equal(svcParent.getState().endpoints.some((e) => e.id === "agents"), false, "父形态退让");
+
+      // 子形态：repo = 全局目录里的子目录——部署链接会落到仓库路径上，同样撤
+      writeSkill(join(globalDir, "sub", "skill-b"), { name: "skill-b" });
+      const svcChild = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
+      svcChild.setRepoPath(join(globalDir, "sub"));
+      assert.equal(svcChild.getState().endpoints.some((e) => e.id === "agents"), false, "子形态退让");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
+describe("写路径自指守卫（端点目录与主仓库重叠时拒绝，不动盘）", () => {
+  it("deploy 拒绝把主仓库本体当部署目标（400 + 机读码）", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "skill-a"), { name: "skill-a" });
+      const calls = [];
+
+      await assert.rejects(
+        deploy({ endpointId: "agents", skillName: "skill-a", repoPath: globalDir }, { homeDir: home, recycleDirFn: mockRecycle(calls) }),
+        (err) => {
+          assert.match(err.message, /无需部署/);
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "endpoint_overlaps_repo");
+          return true;
+        },
+      );
+      // 嵌套形态（仓库是端点目录的祖先）同样拒绝
+      await assert.rejects(
+        deploy({ endpointId: "agents", skillName: "skill-a", repoPath: home }, { homeDir: home, recycleDirFn: mockRecycle(calls) }),
+        (err) => err.code === "endpoint_overlaps_repo",
+      );
+      assert.equal(calls.length, 0, "回收站零调用");
+      assert.ok(existsSync(join(globalDir, "skill-a", "SKILL.md")), "本体原位未动");
+      assert.equal(lstatSync(join(globalDir, "skill-a")).isSymbolicLink(), false, "没被换成自指 junction");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("mergeLocalSkill 拒绝收编主仓库本体（400 + 机读码）", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "skill-a"), { name: "skill-a" });
+      const calls = [];
+
+      await assert.rejects(
+        mergeLocalSkill({ endpointId: "agents", skillName: "skill-a", repoPath: globalDir }, { homeDir: home, recycleDirFn: mockRecycle(calls) }),
+        (err) => {
+          assert.match(err.message, /无需收编/);
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "endpoint_overlaps_repo");
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0, "回收站零调用");
+      assert.equal(lstatSync(join(globalDir, "skill-a")).isSymbolicLink(), false, "本体未被换成指向自己的链接");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("resolveConflictSkill 拒绝在主仓库本体上收口（400 + 机读码）", async () => {
+    const { dir, cleanup } = tempRoot();
+    try {
+      const home = join(dir, "home");
+      const globalDir = join(home, ".agents", "skills");
+      writeSkill(join(globalDir, "skill-a"), { name: "skill-a" });
+      const calls = [];
+
+      await assert.rejects(
+        resolveConflictSkill(
+          { endpointId: "agents", skillName: "skill-a", repoPath: globalDir, direction: "repo" },
+          { homeDir: home, recycleDirFn: mockRecycle(calls) },
+        ),
+        (err) => {
+          assert.match(err.message, /无需收编/);
+          assert.equal(err.statusCode, 400);
+          assert.equal(err.code, "endpoint_overlaps_repo");
+          return true;
+        },
+      );
+      assert.equal(calls.length, 0, "回收站零调用");
     } finally {
       cleanup();
     }

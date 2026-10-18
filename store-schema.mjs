@@ -294,7 +294,9 @@ function validatePools(store, errors) {
 // no frontend, routing or launcher implementation, but dropping them here would
 // make an existing store.json that still carries routingChains.agy /
 // routingChains.reasonix fail validation and keep the panel from loading. Do
-// not drop them while any store may still hold those keys.
+// not drop them while any store may still hold those keys. The skills-only
+// "agents" (全局 ~/.agents/skills) endpoint is deliberately NOT listed here:
+// it has no relay/launcher presence, only the skills scanner sees it.
 export const ROUTING_ENDPOINT_IDS = Object.freeze([
   "claude",
   "zcode",
