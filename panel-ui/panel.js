@@ -5534,7 +5534,30 @@ async function api(method, path, body) {
   // scrollLines，见下方 keydown 监听）——意图窗口内的离底事件退出跟随态，停在
   // 历史上绝不拉回；滚回底部自动恢复跟随。
   const TERMINAL_SCROLL_INTENT_MS = 250;
-  function installTerminalFollowBottomGuard(term) {
+  // 渲染折回的 settled 防抖：写流（回放/输出洪峰）中途的内容底是中间帧，当帧折
+  // 会折错位——等最后一拍渲染过后再动视口。回放洪峰期间逐帧渲染不断重置防抖，
+  // 折回只在流真正歇下来后发生。
+  const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = 120;
+  // 有效底部（「底部自动对齐」开启时护栏采信）：TUI 整屏清除（ESC[2J+光标归零，典型=
+  // Kimi 收起 / 指令表）后把矮框架从屏幕顶重画，尾部屏幕行无人写入——这块空白带在
+  // xterm 缓冲层，外层收带（installTerminalBottomAlign 只写外层 scrollTop）结构性
+  // 够不着（2026-10-18 实测：30 行屏 17 行空白，外层 gap 却是 0）。有效底部把尾屏
+  // 最后一个含文本行当内容底：视口锚在它上面，空白折到折叠线下、上方回滚补位（真实
+  // 终端观感：历史在上、活内容贴底）。整屏全空（清屏后未重画 / 3J 后无回滚）回退
+  // 真尾——空屏之下没有可对齐的内容，硬拉只会露旧画面。判空只看文本不看背景色：
+  // 带背景无字的装饰条会被判空折起，现网 TUI 底栏都带字，此边界可接受。
+  function terminalEffectiveBottomBase(term) {
+    const buffer = term.buffer.active;
+    const baseY = buffer.baseY;
+    let lastPainted = -1;
+    for (let y = buffer.length - 1; y >= baseY; y -= 1) {
+      const line = buffer.getLine(y);
+      if (line && line.translateToString(true).length > 0) { lastPainted = y; break; }
+    }
+    if (lastPainted < 0) return baseY;
+    return Math.min(baseY, Math.max(0, lastPainted - (term.rows - 1)));
+  }
+  function installTerminalFollowBottomGuard(column, term) {
     const root = term.element;
     const viewport = root?.querySelector(".xterm-viewport");
     if (!root || !viewport) return;
@@ -5552,12 +5575,17 @@ async function api(method, path, body) {
     root.addEventListener("keydown", (event) => {
       if (event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")) noteIntent();
     }, { capture: true, passive: true });
+    // 底部基准：开关关=缓冲真尾（与历史行为逐位一致）；开关开=有效底部（内容底，
+    // 见 terminalEffectiveBottomBase）。「在底部」随之迁到内容底——内容底与真尾之间
+    // 的空白带也算在底（跟随态），由下方渲染钩子折回，不与护栏拉回路径打架。
+    const bottomBase = () => (terminalBottomAlignEnabled() ? terminalEffectiveBottomBase(term) : term.buffer.active.baseY);
     // 挂在 xterm 自己的 scroll 监听之后（它绑在 open() 里，本护栏在 open 之后装），
     // 读到的 ydisp 已是它翻译过的值：落底事件恢复跟随；跟随态下无意图的离底事件
     // 即钳制抖动，拉回底部。
     viewport.addEventListener("scroll", () => {
       const buffer = term.buffer.active;
-      if (buffer.viewportY >= buffer.baseY - 1) {
+      const bottom = bottomBase();
+      if (buffer.viewportY >= bottom - 1) {
         // 落底即回到「真值在底部」状态：跟随恢复，历史意图一并作废——其后的
         // 无意图离底只能是抖动，不可能是上一次用户滚动的余波。
         followBottom = true;
@@ -5568,7 +5596,33 @@ async function api(method, path, body) {
         followBottom = false;
         return;
       }
-      if (followBottom) term.scrollToBottom();
+      if (followBottom) {
+        if (bottom < buffer.baseY) term.scrollToLine(bottom);
+        else term.scrollToBottom();
+      }
+    });
+    // 渲染折回（缓冲层空白带的静默通路）：整屏清除+顶部重画不产生任何滚动事件，
+    // 空白带无声出现——跟随态下等渲染静默一拍（settled 防抖）把视口锚回内容底
+    // （/ 指令表收起后一拍即收）。意图窗口内不动视口：用户正在滚动时折回会与手
+    // 势逐拍打架（抖动零容忍）；非跟随态不动：停在历史上绝不拉回（护栏旧语义）。
+    // 双向折：跟随态视口停在内容底上方（如整屏清除后回放的顶部落点——跟随被写
+    // 流顶住，无滚动事件可醒护栏）同样锚回——跟随态的合法位置只有内容底一档。
+    let foldTimer = null;
+    term.onRender?.(() => {
+      if (foldTimer !== null) clearTimeout(foldTimer);
+      foldTimer = setTimeout(() => {
+        foldTimer = null;
+        if (!terminalBottomAlignEnabled()) return;
+        if (column.imeHold) return;
+        if ($("terminalView")?.hidden) return;
+        if (!followBottom) return;
+        if (Date.now() - lastScrollIntentAt <= TERMINAL_SCROLL_INTENT_MS) return;
+        if (!term.element?.isConnected) return;
+        const buffer = term.buffer.active;
+        const bottom = terminalEffectiveBottomBase(term);
+        if (bottom >= buffer.baseY) return;
+        if (buffer.viewportY !== bottom) term.scrollToLine(bottom);
+      }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
     });
   }
 
@@ -5579,9 +5633,9 @@ async function api(method, path, body) {
   // （wheel 上滚 / Shift+PageUp，与跳顶护栏同一 term root capture 事件面，不在
   // .terminal-screen 上另挂 wheel）即把外层 scrollTop 收 0 吃掉带子；外层滚动事件流内
   // 带意图时效窗同做收带（滚动事件无标记，裸信会把布局抖动误判成用户意图）。动作只写
-  // 外层 scrollTop，绝不写 .xterm-viewport、绝不调 scrollToBottom/scrollToLines（内层
-  // 滚动权属 xterm 内核与护栏）。外层自然停靠位即 0（有效底部语义：带收掉后滚动链终点
-  // = 内容底），「再滚回底部恰好对齐」自动成立。
+  // 外层 scrollTop，不写 .xterm-viewport、不调 scrollToBottom/scrollToLines——缓冲层
+  // 的空白带（/ 指令表收起形态）由护栏的有效底部半边折回，两条通路各管一层。外层
+  // 自然停靠位即 0（带收掉后滚动链终点 = 内容底），「再滚回底部恰好对齐」自动成立。
   const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = 4;
   function installTerminalBottomAlign(column, term) {
     const root = term.element;
@@ -5672,7 +5726,7 @@ async function api(method, path, body) {
       column.xterm.unicode.activeVersion = "11";
     }
     term.open(host);
-    installTerminalFollowBottomGuard(term);
+    installTerminalFollowBottomGuard(column, term);
     installTerminalBottomAlign(column, term);
     if (window.WebglAddon?.WebglAddon) {
       try {

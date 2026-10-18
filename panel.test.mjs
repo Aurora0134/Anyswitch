@@ -8255,17 +8255,46 @@ describe("终端列架构（按列索引隔离）", () => {
 // 视口自此脱离底部卡死在接近顶端（实测：建流回放+输出洪峰窗口内 scrollTop 从底部
 // 40095 被钳到 345 且不自行恢复）。护栏语义：跟随态下无意图的离底事件拉回底部；
 // 用户主动滚动（滚轮/触摸/按住拖动/键盘 Shift+PageUp·PageDown 翻页）经意图窗口
-// 退出跟随态，停在历史绝不拉回；滚回底部恢复跟随。函数体抽进桩环境真跑，逐项钉死。
+// 退出跟随态，停在历史绝不拉回；滚回底部恢复跟随。「底部自动对齐」开启时护栏的
+// 「底」从缓冲真尾迁到有效底部（尾屏最后一个含文本行=内容底）：落底判定、钳制
+// 拉回、渲染折回三处同口径，并补「整屏清除+顶部重画不产生滚动事件」的静默通路
+// （/ 指令表收起留下的缓冲层空白带）。开关关=与旧行为逐位一致。函数体抽进桩环境
+// 真跑，逐项钉死。
 describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
   function guardSandbox() {
-    const src = panelJs.match(/function installTerminalFollowBottomGuard\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    const src = panelJs.match(/function installTerminalFollowBottomGuard\(column, term\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(src, "installTerminalFollowBottomGuard found in panel.js");
     const intentSrc = panelJs.match(/const TERMINAL_SCROLL_INTENT_MS = \d+;/)?.[0];
     assert.ok(intentSrc, "意图窗口常量可从 panel.js 取到（测试不抄数字）");
-    const state = { now: 100000, scrollToBottomCount: 0 };
+    const settleSrc = panelJs.match(/const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = \d+;/)?.[0];
+    assert.ok(settleSrc, "折回防抖常量可从 panel.js 取到（测试不抄数字）");
+    const state = {
+      now: 100000, scrollToBottomCount: 0, scrollToLineCalls: [], renderCbs: [],
+      alignOn: false, effBase: null, settleMs: Number(settleSrc.match(/\d+/)[0]),
+    };
     const sandbox = new Function("state", `
       ${intentSrc}
+      ${settleSrc}
       const Date = { now: () => state.now };
+      // 有效底部依赖桩：开关态与内容底行由 state 驱动（行为钉见「有效底部」各用例）
+      function terminalBottomAlignEnabled() { return state.alignOn; }
+      function terminalEffectiveBottomBase(term) { return state.effBase === null ? term.buffer.active.baseY : state.effBase; }
+      const view = { hidden: false };
+      function $(id) { return id === "terminalView" ? view : null; }
+      // settled 防抖的定时器桩：到点任务由 flushTimers 按 state.now 驱动
+      const timers = new Map();
+      let timerSeq = 0;
+      function setTimeout(fn, ms) { timerSeq += 1; timers.set(timerSeq, { at: state.now + ms, fn }); return timerSeq; }
+      function clearTimeout(id) { if (id !== null && id !== undefined) timers.delete(id); }
+      function flushTimers() {
+        for (;;) {
+          let due = null;
+          for (const [id, t] of timers) if (t.at <= state.now) { due = [id, t]; break; }
+          if (!due) break;
+          timers.delete(due[0]);
+          due[1].fn();
+        }
+      }
       function makeEl() {
         const handlers = {};
         return {
@@ -8275,19 +8304,24 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
         };
       }
       ${src}
-      return { installTerminalFollowBottomGuard, makeEl };
+      return { installTerminalFollowBottomGuard, makeEl, flushTimers };
     `)(state);
+    state.flushTimers = sandbox.flushTimers;
     const viewport = sandbox.makeEl();
     const root = sandbox.makeEl();
     root.querySelector = (sel) => (sel === ".xterm-viewport" ? viewport : null);
+    root.isConnected = true; // 防抖回调的销毁守卫按 isConnected 判活
     const buffer = { viewportY: 500, baseY: 500 };
+    const column = { imeHold: null };
     const term = {
       element: root,
       buffer: { active: buffer },
       scrollToBottom() { state.scrollToBottomCount += 1; buffer.viewportY = buffer.baseY; },
+      scrollToLine(line) { state.scrollToLineCalls.push(line); buffer.viewportY = line; },
+      onRender(cb) { state.renderCbs.push(cb); },
     };
-    sandbox.installTerminalFollowBottomGuard(term);
-    return { state, root, viewport, buffer };
+    sandbox.installTerminalFollowBottomGuard(column, term);
+    return { state, root, viewport, buffer, column, term };
   }
 
   it("钳制抖动：跟随态下无意图的离底 scroll 事件被拉回底部", () => {
@@ -8365,21 +8399,171 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure, "ensureTerminalXterm found in panel.js");
     const openAt = ensure.indexOf("term.open(host)");
-    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(term)");
+    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(column, term)");
     assert.ok(openAt > 0 && guardAt > openAt, "护栏装在 open 之后（xterm 自己的 scroll 监听先行绑定）");
-    const src = panelJs.match(/function installTerminalFollowBottomGuard\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    const src = panelJs.match(/function installTerminalFollowBottomGuard\(column, term\) \{[\s\S]*?\n  \}/)?.[0];
     const fn = new Function(`${src}\nreturn installTerminalFollowBottomGuard;`)();
-    fn({ element: null }); // 桩实例无 element：早期返回，不炸
+    fn({}, { element: null }); // 桩实例无 element：早期返回，不炸
     const rootless = { element: { querySelector: () => null } };
-    fn(rootless); // 无 .xterm-viewport：同样安全返回
+    fn({}, rootless); // 无 .xterm-viewport：同样安全返回
+  });
+
+  it("有效底部·计算：尾屏最后一个含文本行钉在视口末行；全空屏/无空白/短缓冲回退真尾", () => {
+    const src = panelJs.match(/function terminalEffectiveBottomBase\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(src, "terminalEffectiveBottomBase found in panel.js");
+    const fn = new Function(`${src}\nreturn terminalEffectiveBottomBase;`)();
+    const makeTerm = (rows, screen, scrollback) => {
+      const lines = [];
+      for (let i = 0; i < scrollback; i += 1) lines.push(`scrollback ${i}`);
+      lines.push(...screen);
+      const baseY = Math.max(0, lines.length - rows);
+      return {
+        rows,
+        buffer: {
+          active: {
+            length: lines.length,
+            baseY,
+            getLine: (y) => (y >= 0 && y < lines.length ? { translateToString: () => lines[y] } : undefined),
+          },
+        },
+      };
+    };
+    // 34 行回滚 + 30 行屏（0..12 有内容、13..29 空白）：内容底=34+12，视口顶=46-29=17
+    const blankTail = Array.from({ length: 30 }, (_, i) => (i <= 12 ? `row ${i}` : ""));
+    assert.equal(fn(makeTerm(30, blankTail, 34)), 17, "17 行空白折到折叠线下，上方回滚补位");
+    assert.equal(fn(makeTerm(30, Array.from({ length: 30 }, (_, i) => `row ${i}`), 34)), 34, "无空白=真尾");
+    assert.equal(fn(makeTerm(30, Array.from({ length: 30 }, () => ""), 34)), 34, "整屏全空回退真尾：空屏之下没有可对齐内容");
+    assert.equal(fn(makeTerm(30, blankTail.slice(0, 13), 0)), 0, "短缓冲（3J 后无回滚可补）钳到 0=真尾");
+  });
+
+  it("有效底部·钳制拉回：跟随态被打离内容底时拉回内容底而非真尾", () => {
+    const { state, viewport, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483; // 真尾 500，内容底之上 17 行空白带
+    buffer.viewportY = 20;
+    viewport.fire("scroll");
+    assert.deepEqual(state.scrollToLineCalls, [483], "拉回内容底（scrollToLine）");
+    assert.equal(buffer.viewportY, 483, "视口落在内容底");
+    assert.equal(state.scrollToBottomCount, 0, "不再拉真尾");
+  });
+
+  it("有效底部·落底判定迁移：滚到内容底即恢复跟随（未到真尾）", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll"); // 退出跟随
+    buffer.viewportY = 483; // 用户滚回内容底（真尾之上 17 行）
+    viewport.fire("scroll");
+    buffer.viewportY = 20; // 抖动再来
+    viewport.fire("scroll");
+    assert.deepEqual(state.scrollToLineCalls, [483], "恢复跟随后抖动拉回内容底");
+  });
+
+  it("有效底部·静默通路：整屏清除+顶部重画不产生滚动事件，渲染静默一拍后折回内容底", () => {
+    const { state, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    buffer.viewportY = 500; // 用户跟随中停在真尾，TUI 收起 / 指令表：清屏+顶部重画
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [483], "渲染静默一拍后折回内容底");
+    assert.equal(buffer.viewportY, 483, "空白带折到折叠线下");
+  });
+
+  it("有效底部·中途帧不折：写流（回放/洪峰）期间防抖被逐帧重置，流歇下来才折", () => {
+    const { state, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    buffer.viewportY = 500;
+    for (let round = 0; round < 3; round += 1) {
+      for (const cb of state.renderCbs) cb();      // 洪峰逐帧渲染
+      state.now += state.settleMs - 10;            // 未到静默窗
+      state.flushTimers();
+      assert.deepEqual(state.scrollToLineCalls, [], `第 ${round} 拍中途不折`);
+    }
+    for (const cb of state.renderCbs) cb();        // 最后一帧
+    state.now += state.settleMs + 10;              // 流歇了
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [483], "流歇一拍后折回");
+  });
+
+  it("有效底部·双向折：跟随态视口停在内容底上方（回放落点被写流顶住）同样锚回", () => {
+    const { state, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    buffer.viewportY = 0; // 回放落点停在历史顶，跟随态无滚动事件可醒护栏
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [483], "跟随态唯一合法位置是内容底");
+    assert.equal(buffer.viewportY, 483, "视口从顶部锚回内容底");
+  });
+
+  it("有效底部·手势保护：意图窗口内的折回被跳过，手势停后下一拍渲染才折", () => {
+    const { state, root, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: 120 });
+    buffer.viewportY = 500;
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10; // 防抖到点，但意图窗口（250ms）未过
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [], "手势期间零动作");
+    for (const cb of state.renderCbs) cb(); // 手势停后的下一拍渲染
+    state.now += 400;                       // 意图窗口早过
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [483], "静止后折回");
+  });
+
+  it("有效底部·历史保护：非跟随态（用户在历史上）渲染绝不拽回", () => {
+    const { state, root, viewport, buffer } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll"); // 退出跟随
+    state.now += 100000;
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [], "停在历史上绝不拉回（护栏旧语义不动）");
+  });
+
+  it("有效底部·组字冻结：imeHold 期间渲染不折回", () => {
+    const { state, buffer, column } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    column.imeHold = { textarea: {} };
+    buffer.viewportY = 500;
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [], "组字期零动作");
+  });
+
+  it("有效底部·开关关=逐位旧版：渲染零动作、钳制拉回走 scrollToBottom 真尾", () => {
+    const { state, viewport, buffer } = guardSandbox();
+    for (const cb of state.renderCbs) cb();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [], "渲染零动作");
+    assert.equal(state.scrollToBottomCount, 0, "渲染不触发拉回");
+    buffer.viewportY = 20;
+    viewport.fire("scroll");
+    assert.equal(state.scrollToBottomCount, 1, "钳制拉回仍走 scrollToBottom");
+    assert.deepEqual(state.scrollToLineCalls, [], "零 scrollToLine");
   });
 });
 
-// 底部自动对齐（terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm 渲染层
+// 底部自动对齐（terminalBottomAutoAlign，缺省关）外层半边：窗口收放等尺寸错配期，xterm 渲染层
 // 旧高度溢出宿主盒、被外层 .terminal-screen 的 overflow:auto 接住，形成底部可滚入的
 // 空白带。开启后用户上滚意图（wheel deltaY<0 / Shift+PageUp，与跳顶护栏同一 root
-// capture 事件面）触发把外层 scrollTop 收 0；动作面只写外层 scrollTop，绝不写
-// .xterm-viewport、绝不调 scrollToBottom/scrollToLines。函数体抽进桩环境真跑。
+// capture 事件面）触发把外层 scrollTop 收 0；本函数动作面只写外层 scrollTop，不写
+// .xterm-viewport、不调 scrollToBottom/scrollToLines。缓冲层半边（/ 指令表收起留下
+// 的缓冲空白带）在护栏的有效底部，见「跟随底部护栏」组。函数体抽进桩环境真跑。
 describe("虚拟终端底部自动对齐", () => {
   const ALIGN_DESC = "关闭时，终端画面下方多出的空白区域保持原样；开启后，向上翻看历史时自动裁掉底部多出的空白，再滚回底部即恰好对齐。";
 
@@ -8555,7 +8739,7 @@ describe("虚拟终端底部自动对齐", () => {
   it("装配与共存：open 之后护栏先行、本功能随后；状态挂列对象", () => {
     const ensure = alignSrc("ensureTerminalXterm", /function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/);
     const openAt = ensure.indexOf("term.open(host)");
-    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(term)");
+    const guardAt = ensure.indexOf("installTerminalFollowBottomGuard(column, term)");
     const alignAt = ensure.indexOf("installTerminalBottomAlign(column, term)");
     assert.ok(openAt > 0 && guardAt > openAt, "护栏装在 open 之后（既有次序不动）");
     assert.ok(alignAt > guardAt, "本功能装在护栏之后——两 install 同位邻接，事件面同源");
