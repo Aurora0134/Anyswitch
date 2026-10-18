@@ -2484,7 +2484,6 @@ if (window.panelStartupController) panelStartupPlay();
             <span class="terminal-foot-status" style="display:none">
               <span><i class="terminal-foot-dot is-green"></i>本地终端</span>
             </span>
-            <span id="terminalFootCache" class="terminal-foot-cache" hidden></span>
             <span class="terminal-foot-spacer"></span>
             <span class="terminal-foot-stats" id="terminalFootStats" hidden>
               <span class="terminal-foot-requests" id="terminalFootRequests"></span>
@@ -2554,7 +2553,7 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
 
             <div class="terminal-inspector-section">
-              <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-count" id="terminalRequestCount"></span></div>
+              <div class="terminal-section-head"><span>最近请求</span><span class="terminal-section-note" id="terminalRequestCount" hidden></span></div>
               <div class="terminal-request-list" id="terminalRequestList"></div>
             </div>
           </div>

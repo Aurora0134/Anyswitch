@@ -7657,8 +7657,8 @@ describe("虚拟终端实况行归属（实例身份 / 路由后备 / 空壳收�
 
 // 底栏（E）：tokens 截断串悬停显全从原生 title 升级 styled tooltip（统计页
 // 同款）；最近一条请求失败时「N 次请求」字串转 danger 字色，与列表红点同源。
-// 字式化修订：请求数/缓存命中都去徽标壳改纯文字（与 tokens 字串同构），请求数
-// 不再绑跳转；缓存字串挪出状态 pill 容器，做左段独立元素。
+// 字式化修订：请求数去徽标壳改纯文字（与 tokens 字串同构），不再绑跳转；
+// 缓存命中率字串从底栏左段退役，改挂「最近请求」标题行右侧（无徽标壳）。
 describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数字串）", () => {
   it("tokens 悬停显全：原生 title 退役，styled tooltip 向上浮出且不被截断串裁剪", () => {
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
@@ -7734,17 +7734,23 @@ describe("虚拟终端底栏（悬停显全 / 失败字色 / 缓存与请求数�
     assert.strictEqual(el("terminalFootRequests").classes.has("is-failed"), false, "零请求不红");
   });
 
-  it("缓存命中字串：左段独立元素，无指标或零请求时隐藏", () => {
-    assert.ok(panelHtml.includes('id="terminalFootCache"'), "底栏左段有缓存命中字串");
-    assert.ok(panelHtml.includes('</span>\n            <span id="terminalFootCache"'), "字串挪出状态 pill 容器，做左段独立元素（间距走底栏框架档）");
-    assert.ok(!panelHtml.includes("terminalFootPid") && !panelHtml.includes("terminalFootSize"), "PID/UTF-8/尺寸徽标已撤除");
-    assert.ok(!panelJs.includes("updateTerminalFootSize"), "底栏尺寸写入随徽标清退");
+  it("缓存命中率字串：挂「最近请求」标题行右侧，无指标或零请求时隐藏", () => {
+    assert.ok(panelHtml.includes('<span class="terminal-section-note" id="terminalRequestCount" hidden>'),
+      "标题行右侧是纯文字元素（无徽标壳），初始隐藏");
+    assert.ok(!panelHtml.includes('id="terminalFootCache"'), "底栏左段的缓存字串元素已退役");
+    assert.ok(!panelCss.includes(".terminal-foot-cache"), "底栏缓存字串样式随元素清退");
+    assert.ok(!panelCss.includes(".terminal-section-count"), "请求数徽标壳样式已退役");
+    assert.ok(!panelHtml.includes("terminalFootPid") && !panelHtml.includes("terminalFootSize"), "PID/UTF-8/尺寸徽标不得回流");
+    assert.ok(!panelJs.includes("updateTerminalFootSize"), "底栏尺寸写入不得回流");
     const render = panelJs.match(/function renderTerminalSessionData\(\) \{[\s\S]*?\n  \}/)?.[0];
-    assert.ok(render.includes('$("terminalFootCache").hidden = !metrics || metrics.requestCount === 0'), "无指标或零请求时隐藏");
-    assert.ok(render.includes('$("terminalFootCache").textContent = `缓存 ${metrics.cache}%`'), "文案随轮询同拍更新");
-    const cacheRule = panelCss.match(/\.terminal-foot-cache \{([^}]*)\}/)?.[1];
-    assert.ok(cacheRule && !/border|background|padding/.test(cacheRule), "无徽标壳，纯文字与 tokens 字串同构");
-    assert.ok(panelCss.includes(".terminal-foot-cache[hidden]"), "隐藏显式兜底");
+    assert.ok(render.includes('$("terminalRequestCount").hidden = !metrics || metrics.requestCount === 0'),
+      "无指标或零请求时隐藏（与原缓存字串同口径）");
+    assert.ok(render.includes('$("terminalRequestCount").textContent = metrics ? `缓存命中 ${metrics.cache}%` : ""'),
+      "文案随轮询同拍更新，值与监测区四宫格同源");
+    assert.ok(!render.includes("String(session.requests.length)"), "标题行不再显示请求数");
+    const noteRule = panelCss.match(/\.terminal-section-note \{([^}]*)\}/)?.[1];
+    assert.ok(noteRule && !/border|background|padding/.test(noteRule), "无徽标壳，纯文字与标题行同构");
+    assert.ok(panelCss.includes(".terminal-section-note[hidden]"), "隐藏显式兜底");
   });
 
   it("请求数字串：无壳无跳转，与 tokens 字串同构", () => {

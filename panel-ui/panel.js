@@ -6127,7 +6127,6 @@ async function api(method, path, body) {
     const metricsSection = $("terminalMetricsSection");
     metricsSection.hidden = !metrics;
     $("terminalFootStats").hidden = !metrics;
-    $("terminalFootCache").hidden = !metrics || metrics.requestCount === 0;
     if (metrics) {
       $("terminalTtftVal").textContent = metrics.ttft;
       $("terminalTtftLamp").className = `lamp lamp-${metrics.ttftLamp}`;
@@ -6136,14 +6135,16 @@ async function api(method, path, body) {
       $("terminalWorkTimeVal").textContent = metrics.workTime;
       $("terminalWorkTimeUnit").textContent = metrics.workTimeUnit;
       $("terminalFootRequests").textContent = `${metrics.requestCount} 次请求`;
-      $("terminalFootCache").textContent = `缓存 ${metrics.cache}%`;
       $("terminalFootTokens").textContent = metrics.tokens;
       $("terminalFootTokensTip").textContent = metrics.tokens;
       updateSparkline("terminalSparkTtft", metrics.sparkTtft, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkTps", metrics.sparkTps, undefined, undefined, TERMINAL_SPARK_SIZE);
       updateSparkline("terminalSparkCache", metrics.sparkCache, undefined, undefined, TERMINAL_SPARK_SIZE);
     }
-    $("terminalRequestCount").textContent = String(session.requests.length);
+    // 「最近请求」标题行右侧的缓存命中率：与监测区四宫格同源（metrics.cache，
+    // prompt 加权口径），无指标或零请求时隐藏——普通终端没有命中率可说。
+    $("terminalRequestCount").hidden = !metrics || metrics.requestCount === 0;
+    $("terminalRequestCount").textContent = metrics ? `缓存命中 ${metrics.cache}%` : "";
     // 来源显示名走 routeNodeName 口径（未命中回落原始 id）；失败行展开态按行键
     // 跨轮询保留（与请求日志大板 logsExpanded 同模式）。
     // 请求行同款指纹门控（缓存声明处的注释）：整串与上次写入相同即跳过赋值，
