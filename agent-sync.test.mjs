@@ -372,16 +372,19 @@ describe("agent-sync auto routing channel", () => {
     assert.equal(zcode.provider._auto.options.baseURL, "http://127.0.0.1:47821/openai/alpha/v1");
     assert.deepEqual(Object.keys(zcode.provider._auto.models), ["auto"]);
 
-    // kimi has a chain headed by beta: alias _auto/auto maps to literal model auto.
+    // kimi has a chain headed by beta: the pseudo-channel's provider id is its
+    // display name, model aliases keep the historical _auto/ prefix.
     const kimiText = readFileSync(join(tmpRoot, ".kimi-code", "config.toml"), "utf8");
-    assert.match(kimiText, /\[providers\."_auto"\]/);
+    assert.match(kimiText, /\[providers\."Anyswitch"\]/);
+    assert.doesNotMatch(kimiText, /\[providers\."_auto"\]/);
     assert.match(kimiText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/beta\/v1"/);
     assert.match(kimiText, /\[models\."_auto\/auto"\]/);
+    assert.match(kimiText, /provider = "Anyswitch"/);
     assert.match(kimiText, /model = "auto"/);
 
-    // pi has NO chain: no _auto channel.
+    // pi has NO chain: no pseudo-channel.
     const pi = JSON.parse(readFileSync(join(tmpRoot, ".pi", "agent", "models.json"), "utf8"));
-    assert.equal(pi.providers._auto, undefined, "pi without a chain gets no _auto channel");
+    assert.equal(pi.providers.Anyswitch, undefined, "pi without a chain gets no pseudo-channel");
     assert.ok(pi.providers._alpha);
 
     // qoder has NO chain: no auto connection in providers.
@@ -397,23 +400,25 @@ describe("agent-sync auto routing channel", () => {
     assert.deepEqual(Object.keys(opencode.provider.auto.models), ["auto"]);
 
     // grok has a chain headed by beta: the auto entry is the virtual "auto"
-    // model on the head's URL segment, keyed with the managed prefix.
+    // model on the head's URL segment, keyed with the managed prefix; its name
+    // carries the Anyswitch channel label.
     const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
     assert.match(grokText, /\[model\."anyswitch-auto"\]/);
     assert.match(grokText, /model = "auto"/);
-    assert.match(grokText, /name = "auto"/);
+    assert.match(grokText, /name = "auto · Anyswitch"/);
     assert.match(grokText, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/beta\/v1"/);
 
-    // Delete the chains and re-sync: _auto disappears everywhere.
+    // Delete the chains and re-sync: the pseudo-channel disappears everywhere.
     const second = await syncAllAgentConfigs(syncOpts(chainStore(false)));
     assert.equal(second.ok, true);
 
     const zcode2 = JSON.parse(readFileSync(join(tmpRoot, ".zcode", "v2", "config.json"), "utf8"));
-    assert.equal(zcode2.provider._auto, undefined, "zcode _auto cleaned up after chain deletion");
+    assert.equal(zcode2.provider._auto, undefined, "zcode pseudo-channel cleaned up after chain deletion");
     assert.ok(zcode2.provider._alpha, "real channels survive the cleanup");
 
     const kimiText2 = readFileSync(join(tmpRoot, ".kimi-code", "config.toml"), "utf8");
-    assert.doesNotMatch(kimiText2, /_auto/, "kimi _auto cleaned up after chain deletion");
+    assert.doesNotMatch(kimiText2, /_auto/, "kimi pseudo-channel cleaned up after chain deletion");
+    assert.doesNotMatch(kimiText2, /\[providers\."Anyswitch"\]/);
     assert.match(kimiText2, /\[providers\."_alpha"\]/);
 
     const opencode2 = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
@@ -423,6 +428,104 @@ describe("agent-sync auto routing channel", () => {
     const grokText2 = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
     assert.doesNotMatch(grokText2, /anyswitch-auto/, "grok auto cleaned up after chain deletion");
     assert.match(grokText2, /\[model\."anyswitch-beta~model-2"\]/, "real grok channels survive the cleanup");
+  });
+});
+
+describe("agent-sync Anyswitch 渠道名（九端点回归闸）", () => {
+  let tmpRoot;
+
+  beforeEach(() => {
+    tmpRoot = mkTestDir("agent-sync-channel-name-test-");
+  });
+
+  afterEach(() => {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  // 每个端点都配一条链、且存在一个虚拟模型：伪渠道（auto + 虚拟模型）会进全部
+  // 八个配置文件型端点。回归闸只认「用户在模型选择器里能看到的渠道文字」。
+  function fullStore() {
+    const endpoints = ["zcode", "dsh", "pi", "kimi", "qoder", "codex", "opencode", "grok"];
+    const store = {
+      version: 2,
+      providers: {
+        alpha: {
+          displayName: "Alpha",
+          baseURL: "https://alpha.invalid/v1",
+          protocol: "openai-compatible",
+          credentialFile: "alpha.dpapi",
+          models: {
+            "model-1": { displayName: "Model 1", contextWindow: 4096 },
+            "model-2": { displayName: "Model 2", contextWindow: 8192 },
+          },
+        },
+      },
+      routingChains: Object.fromEntries(
+        endpoints.map((id) => [id, { chain: [{ node: "alpha", model: "model-1" }] }]),
+      ),
+      virtualModels: [{ name: "vm-a", chain: [{ node: "alpha", model: "model-1" }] }],
+    };
+    return store;
+  }
+
+  it("八个配置文件型端点的伪渠道都显示为 Anyswitch", async () => {
+    mkdirSync(join(tmpRoot, ".dsh", "profiles", "desktop"), { recursive: true });
+    const res = await syncAllAgentConfigs({
+      store: fullStore(),
+      port: 47821,
+      token: "test-token",
+      root: tmpRoot,
+      base: { USERPROFILE: tmpRoot, LOCALAPPDATA: tmpRoot, APPDATA: tmpRoot },
+    });
+    assert.equal(res.ok, true);
+
+    // ZCode 桌面：分组显示名（name）。
+    const zcode = JSON.parse(readFileSync(join(tmpRoot, ".zcode", "v2", "config.json"), "utf8"));
+    assert.equal(zcode.provider._auto.name, "Anyswitch");
+    assert.deepEqual(Object.keys(zcode.provider._auto.models), ["auto", "vm-a"]);
+
+    // DSH：profile patch 的 displayName。
+    const dshPatch = readFileSync(join(tmpRoot, ".dsh", "profiles", "desktop", "cordis.patch.yml"), "utf8");
+    assert.match(dshPatch, /_auto:\n\s+displayName: Anyswitch/);
+
+    // pi：模型选择器每行渲染 [provider id]，伪渠道的 key 就是 Anyswitch。
+    const pi = JSON.parse(readFileSync(join(tmpRoot, ".pi", "agent", "models.json"), "utf8"));
+    assert.ok(pi.providers.Anyswitch, "pi 的伪渠道 key 是 Anyswitch");
+    assert.equal(pi.providers.Anyswitch.name, "Anyswitch");
+    assert.deepEqual(pi.providers.Anyswitch.models.map((m) => m.id), ["auto", "vm-a"]);
+    assert.equal(pi.providers._auto, undefined);
+
+    // Kimi：模型选择器 tab 读 provider id，模型行读 provider 字段。
+    const kimiText = readFileSync(join(tmpRoot, ".kimi-code", "config.toml"), "utf8");
+    assert.match(kimiText, /\[providers\."Anyswitch"\]/);
+    assert.match(kimiText, /\[models\."_auto\/auto"\]/);
+    assert.match(kimiText, /\[models\."_auto\/vm-a"\]/);
+    assert.match(kimiText, /provider = "Anyswitch"/);
+
+    // Qoder：连接 displayName 与每行模型名后缀。
+    const qoder = JSON.parse(readFileSync(join(tmpRoot, ".qoder", "settings.json"), "utf8"));
+    const qoderAuto = qoder.providers?.[managedConnectionId("auto")];
+    assert.ok(qoderAuto, "qoder 伪渠道连接存在");
+    assert.equal(qoderAuto.displayName, "Anyswitch");
+    assert.deepEqual(qoderAuto.models.map((m) => m.displayName), ["auto · Anyswitch", "vm-a · Anyswitch"]);
+
+    // Codex：目录 display_name（选择器每行只读它）。
+    const codexCatalog = JSON.parse(
+      readFileSync(join(tmpRoot, ".codex", "model-catalogs", "anyswitch-models.json"), "utf8"),
+    );
+    const codexBySlug = new Map(codexCatalog.models.map((m) => [m.slug, m.display_name]));
+    assert.equal(codexBySlug.get("auto"), "auto · Anyswitch");
+    assert.equal(codexBySlug.get("vm-a"), "vm-a · Anyswitch");
+
+    // OpenCode：provider name。
+    const opencode = JSON.parse(readFileSync(join(tmpRoot, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.equal(opencode.provider.auto.name, "Anyswitch");
+    assert.deepEqual(Object.keys(opencode.provider.auto.models), ["auto", "vm-a"]);
+
+    // Grok：每行模型 name。
+    const grokText = readFileSync(join(tmpRoot, ".grok", "config.toml"), "utf8");
+    assert.match(grokText, /\[model\."anyswitch-auto"\]\nmodel = "auto"[\s\S]*?name = "auto · Anyswitch"/);
+    assert.match(grokText, /\[model\."anyswitch-auto~vm-a"\]\nmodel = "vm-a"[\s\S]*?name = "vm-a · Anyswitch"/);
   });
 });
 

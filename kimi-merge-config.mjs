@@ -1,7 +1,7 @@
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
-import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY } from "./merge-common.mjs";
+import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
 // Shared endpoint-aware derivation of the virtual auto-routing channel
 // (merge-common.mjs) — re-exported so the launcher/tests import one module.
 export { deriveAutoRouteChannel, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -50,6 +50,19 @@ export function prefixedProviderId(providerId) {
   return `_${providerId}`;
 }
 
+// The on-disk provider id of a channel. Kimi renders the provider id verbatim
+// as the model picker's provider tab label and as every row's "(provider)"
+// suffix (kimi-code dist model-selector.ts providerDisplayName), so the
+// Anyswitch pseudo-channel's id IS the channel name users see — it carries no
+// "_" prefix. Real channels keep the managed-id prefix.
+export function kimiProviderId(providerId) {
+  return providerId === AUTO_CHANNEL_KEY ? ANYSWITCH_CHANNEL_NAME : prefixedProviderId(providerId);
+}
+
+// Model-alias keys keep the historical "_auto/<model>" prefix for the
+// pseudo-channel: aliases are never rendered (the picker shows the model's
+// display name), and the user's default_model plus old session records still
+// reference "_auto/..." — renaming them would strand every stored reference.
 export function kimiModelAlias(providerId, modelId) {
   return `${prefixedProviderId(providerId)}/${modelId}`;
 }
@@ -59,7 +72,7 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
   const managed = [];
 
   for (const [providerId, provider] of Object.entries(managedProviders)) {
-    const pid = prefixedProviderId(providerId);
+    const pid = kimiProviderId(providerId);
     // Pseudo-channels (auto routing) name a different relay URL segment than
     // their own id; real channels never set baseUrlSegment.
     const segment = provider.baseUrlSegment ?? providerId;
@@ -127,8 +140,11 @@ export function buildKimiManagedToml(managedProviders, port, token, effort = nul
 // second copy of the same tables and produce duplicate TOML declarations
 // ("Cannot declare ('providers', '_x') twice"), which Kimi rejects wholesale —
 // config load fails and no models are visible. The `_` prefix is reserved for
-// Anyswitch-generated ids, so any table under [providers._...] or [models."_..."]
-// outside the managed block is a stale leftover from such a rewrite and must go.
+// Anyswitch-generated ids, and the Anyswitch pseudo-channel's provider id is
+// literally the channel's display name ("Anyswitch" — Kimi renders provider ids
+// verbatim), so any table under [providers._...], [providers."Anyswitch"] or
+// [models."_..."] outside the managed block is a stale leftover from such a
+// rewrite and must go.
 export function stripPrefixedTables(text) {
   if (!text) return text ?? "";
   const lines = text.split(/\r?\n/);
@@ -137,8 +153,11 @@ export function stripPrefixedTables(text) {
   for (const line of lines) {
     const header = line.match(/^\s*\[([^\]]*)\]/);
     if (header) {
-      const name = header[1];
-      inPrefixedTable = /^providers\."?_/.test(name) || /^models\."?_/.test(name);
+      const name = header[1].trim();
+      inPrefixedTable =
+        /^providers\."?_/.test(name) ||
+        /^models\."?_/.test(name) ||
+        /^providers\.(?:"Anyswitch"|Anyswitch)$/.test(name);
       if (inPrefixedTable) continue;
     }
     if (!inPrefixedTable) out.push(line);
@@ -171,7 +190,8 @@ export function mergeKimiConfigToml(existingText, managedProviders, port, token,
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
-  // next sync's block simply no longer contains `_auto`.
+  // next sync's block simply no longer contains the Anyswitch pseudo-channel
+  // provider (nor its `_auto/...` model aliases).
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
   const { text: managedText, managed } = buildKimiManagedToml(providers, port, token, effort);
   let merged = preserved ? `${preserved.replace(/\s+$/, "")}\n\n${managedText}` : managedText;

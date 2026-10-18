@@ -44,6 +44,7 @@ import { createShimManager, SHIM_SPECS } from "./shim-manager.mjs";
 
 import { writeKimiConfig, kimiConfigPath } from "./kimi-launcher.mjs";
 import * as kimiMerge from "./kimi-merge-config.mjs";
+import { ANYSWITCH_CHANNEL_NAME } from "./merge-common.mjs";
 import * as grokMerge from "./grok-merge-config.mjs";
 import * as codexMerge from "./codex-merge-config.mjs";
 import * as qoderMerge from "./qoder-merge-config.mjs";
@@ -149,7 +150,10 @@ async function stripKimi(ctx) {
     hasResidue: (text) =>
       text.includes(kimiMerge.MANAGED_BEGIN) ||
       text.includes(KIMI_LEGACY_MANAGED_BEGIN) ||
-      /^\s*\[(providers|models)\."?_/.test(text),
+      /^\s*\[(providers|models)\."?_/m.test(text) ||
+      // The Anyswitch pseudo-channel's provider id is its display name, so it
+      // is the one managed table the "_" prefix cannot catch.
+      /^\s*\[providers\.(?:"Anyswitch"|Anyswitch)\]/m.test(text),
     strip: (text) => kimiMerge.stripPrefixedTables(kimiMerge.stripManagedBlock(text)),
     writeWithBackup: kimiMerge.writeKimiConfigTomlWithBackup,
   }));
@@ -435,7 +439,8 @@ async function stripPi(ctx) {
       const providers = config?.providers;
       if (!providers || typeof providers !== "object" || Array.isArray(providers)) return [];
       const removed = Object.keys(providers).filter((id) =>
-        id.startsWith("_") && RELAY_OPENAI_BASE_URL.test(providers[id]?.baseUrl ?? ""));
+        (id === ANYSWITCH_CHANNEL_NAME || id.startsWith("_")) &&
+        RELAY_OPENAI_BASE_URL.test(providers[id]?.baseUrl ?? ""));
       for (const id of removed) delete providers[id];
       return removed;
     },

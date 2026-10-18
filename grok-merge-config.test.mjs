@@ -189,8 +189,9 @@ describe("grok-merge-config", () => {
     assert.match(text, /\[model\."anyswitch-auto"\]/);
     const autoBlock = text.match(/\[model\."anyswitch-auto"\][^[]*/)[0];
     assert.match(autoBlock, /model = "auto"/);
-    // grok 侧与 codex 的裸 slug "auto" 对应：目录键带 managed 前缀、显示名裸 auto。
-    assert.match(autoBlock, /name = "auto"/);
+    // grok 侧与 codex 的裸 slug "auto" 对应：目录键带 managed 前缀、显示名带渠道名
+    // （grok 选择器每行只读 name，渠道信息只能进显示名）。
+    assert.match(autoBlock, /name = "auto · Anyswitch"/);
     assert.match(autoBlock, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
     assert.ok(managed.includes("auto"), "sidecar tracks the auto channel as managed");
     assert.equal(managedModelKey("auto", "auto"), AUTO_MODEL_KEY);
@@ -226,14 +227,16 @@ describe("grok catalog key packing", () => {
   it("auto 触发词独占裸键，Anyswitch 渠道其余模型各占限定键（不再塌键跳过）", () => {
     // 渠道 id 叫 auto 时（虚拟模型分组）：裸触发词 "auto" 落 AUTO_MODEL_KEY，
     // 旗下虚拟模型按渠道限定 slug 各占一键——塌到同一键会被去重门整条跳过，
-    // 虚拟模型从 grok 目录里消失。
+    // 虚拟模型从 grok 目录里消失。两条显示名都带渠道名。
     const { text, managed, modelKeys, skipped } = buildGrokManagedToml(
-      { auto: { models: { auto: {}, "m-2": {} } } },
+      { auto: { channelName: "Anyswitch", models: { auto: {}, "m-2": {} } } },
       47821,
       "tok",
     );
     assert.deepEqual(modelKeys, [AUTO_MODEL_KEY, "anyswitch-auto~m-2"]);
     assert.deepEqual(text.match(/^\[model\..*\]$/gm) ?? [], ['[model."anyswitch-auto"]', '[model."anyswitch-auto~m-2"]']);
+    assert.match(text, /name = "auto · Anyswitch"/);
+    assert.match(text, /name = "m-2 · Anyswitch"/);
     assert.deepEqual(managed, ["auto"], "the channel itself stays managed");
     assert.deepEqual(skipped, [], "虚拟模型不再被当作重复键跳过");
   });

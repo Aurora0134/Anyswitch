@@ -6,11 +6,14 @@ import {
   buildKimiManagedToml,
   mergeKimiConfigToml,
   stripManagedBlock,
+  stripPrefixedTables,
   writeKimiConfigTomlWithBackup,
   extractManagedProviders,
   readSidecar,
   writeSidecar,
   sidecarPath,
+  kimiProviderId,
+  kimiModelAlias,
   MANAGED_BEGIN,
   MANAGED_END,
   deriveAutoRouteChannel,
@@ -252,7 +255,7 @@ describe("kimi sidecar", () => {
   });
 });
 
-describe("auto routing channel (_auto)", () => {
+describe("auto routing channel (Anyswitch)", () => {
   const CHAIN_STORE = {
     ...STORE,
     routingChains: {
@@ -260,25 +263,30 @@ describe("auto routing channel (_auto)", () => {
     },
   };
 
-  it("injects the _auto provider whose alias maps to the literal wire id auto", () => {
+  it("provider id 用渠道显示名 Anyswitch，模型别名沿用 _auto/ 前缀", () => {
     const auto = deriveAutoRouteChannel(CHAIN_STORE, "kimi");
     const { text, managed } = mergeKimiConfigToml("", extractManagedProviders(CHAIN_STORE), 47821, "tok", auto);
-    assert.match(text, /\[providers\."_auto"\]/);
+    // Kimi 的模型选择器把 provider id 原样当渠道名显示，所以伪渠道的 id 必须是
+    // 「Anyswitch」而不是 _auto。
+    assert.match(text, /\[providers\."Anyswitch"\]/);
+    assert.doesNotMatch(text, /\[providers\."_auto"\]/);
     assert.match(text, /base_url = "http:\/\/127\.0\.0\.1:47821\/openai\/poke-api\/v1"/);
+    // 别名键保持 _auto/ 前缀：default_model 与历史会话里的引用都是这个形状，
+    // 别名从不参与显示，改它只会让存量引用失效。
     assert.match(text, /\[models\."_auto\/auto"\]/);
     // _auto 走链式路由，链查询按 x-agent-id 定位端点链——身份头由 launcher 的
     // KIMI_CODE_CUSTOM_HEADERS env 注入，config.toml 不再携带（config 的
     // customHeaders 会覆盖 env 同名头）。
-    const autoBlock = text.match(/\[providers\."_auto"\][^[]*/)[0];
+    const autoBlock = text.match(/\[providers\."Anyswitch"\][^[]*/)[0];
     assert.doesNotMatch(autoBlock, /custom_headers/);
     // The model field is the literal "auto" — the relay intercepts it before
     // unpackWireId, so no anthropic/<provider>/<model> wire id is needed.
-    assert.match(text, /provider = "_auto"/);
+    assert.match(text, /provider = "Anyswitch"/);
     assert.match(text, /model = "auto"/);
-    assert.ok(managed.includes("auto"), "sidecar tracks the _auto channel as managed");
+    assert.ok(managed.includes("auto"), "sidecar tracks the pseudo-channel as managed");
   });
 
-  it("does not inject _auto when the endpoint has no route chain", () => {
+  it("does not inject the Anyswitch pseudo-channel when the endpoint has no route chain", () => {
     const { text, managed } = mergeKimiConfigToml(
       "",
       extractManagedProviders(STORE),
@@ -287,10 +295,11 @@ describe("auto routing channel (_auto)", () => {
       deriveAutoRouteChannel(STORE, "kimi"),
     );
     assert.doesNotMatch(text, /_auto/);
+    assert.doesNotMatch(text, /\[providers\."Anyswitch"\]/);
     assert.ok(!managed.includes("auto"));
   });
 
-  it("drops _auto from the managed block on the re-sync after the chain is deleted", () => {
+  it("drops the pseudo-channel from the managed block on the re-sync after the chain is deleted", () => {
     const first = mergeKimiConfigToml(
       "",
       extractManagedProviders(CHAIN_STORE),
@@ -298,7 +307,7 @@ describe("auto routing channel (_auto)", () => {
       "tok",
       deriveAutoRouteChannel(CHAIN_STORE, "kimi"),
     );
-    assert.match(first.text, /\[providers\."_auto"\]/);
+    assert.match(first.text, /\[providers\."Anyswitch"\]/);
     const second = mergeKimiConfigToml(
       first.text,
       extractManagedProviders(STORE),
@@ -306,9 +315,93 @@ describe("auto routing channel (_auto)", () => {
       "tok",
       deriveAutoRouteChannel(STORE, "kimi"),
     );
-    assert.doesNotMatch(second.text, /_auto/, "stale _auto removed once the chain is gone");
+    assert.doesNotMatch(second.text, /_auto/, "stale _auto aliases removed once the chain is gone");
+    assert.doesNotMatch(second.text, /\[providers\."Anyswitch"\]/, "stale pseudo-channel provider removed");
     assert.match(second.text, /\[providers\."_poke-api"\]/, "real channels survive the cleanup");
     assert.ok(!second.managed.includes("auto"));
+  });
+
+  it("migrates from the previous _auto provider table on the first sync", () => {
+    const previous = [
+      MANAGED_BEGIN,
+      '[providers."_auto"]',
+      'type = "openai"',
+      'base_url = "http://127.0.0.1:47821/openai/poke-api/v1"',
+      'api_key = "old"',
+      "",
+      '[models."_auto/auto"]',
+      'provider = "_auto"',
+      'model = "auto"',
+      MANAGED_END,
+      "",
+    ].join("\n");
+    const { text } = mergeKimiConfigToml(
+      previous,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(CHAIN_STORE, "kimi"),
+    );
+    assert.doesNotMatch(text, /\[providers\."_auto"\]/);
+    assert.match(text, /\[providers\."Anyswitch"\]/);
+    assert.match(text, /provider = "Anyswitch"/);
+  });
+
+  it("keeps the user's default_model reference to the _auto/ alias untouched", () => {
+    const existing = 'default_model = "_auto/kimi-k3-mix"\n';
+    const { text } = mergeKimiConfigToml(
+      existing,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(CHAIN_STORE, "kimi"),
+    );
+    assert.match(text, /^default_model = "_auto\/kimi-k3-mix"$/m);
+  });
+
+  it("strips an unmarked Anyswitch provider table left by a Kimi self-rewrite", () => {
+    // Kimi 的 re-serializer 只保留 providers/models 条目、丢注释，所以伪渠道的
+    // provider 表会以无标记形态残留；不剥掉就会与下一轮 managed block 重复声明。
+    const rewritten = [
+      'default_model = "_auto/kimi-k3-mix"',
+      "",
+      '[providers."Anyswitch"]',
+      'type = "openai"',
+      'base_url = "http://127.0.0.1:47821/openai/poke-api/v1"',
+      'api_key = "old"',
+      "",
+      '[models."_auto/auto"]',
+      'provider = "Anyswitch"',
+      'model = "auto"',
+      "",
+      '[providers.user-own]',
+      'type = "openai"',
+      'base_url = "https://mine.example/v1"',
+      "",
+    ].join("\n");
+    const stripped = stripPrefixedTables(rewritten);
+    assert.doesNotMatch(stripped, /Anyswitch/);
+    assert.doesNotMatch(stripped, /\[models\."_auto/);
+    assert.match(stripped, /\[providers\.user-own\]/, "user-owned tables survive the self-heal");
+    const { text } = mergeKimiConfigToml(
+      rewritten,
+      extractManagedProviders(CHAIN_STORE),
+      47821,
+      "tok",
+      deriveAutoRouteChannel(CHAIN_STORE, "kimi"),
+    );
+    assert.equal((text.match(/\[providers\."Anyswitch"\]/g) ?? []).length, 1);
+    assert.match(text, /^default_model = "_auto\/kimi-k3-mix"$/m);
+  });
+});
+
+describe("kimi provider id mapping", () => {
+  it("maps the pseudo-channel to its display name and keeps real channels under the managed prefix", () => {
+    assert.equal(kimiProviderId("auto"), "Anyswitch");
+    assert.equal(kimiProviderId("poke-api"), "_poke-api");
+    // aliases keep the historical prefix regardless of the provider-id mapping
+    assert.equal(kimiModelAlias("auto", "auto"), "_auto/auto");
+    assert.equal(kimiModelAlias("poke-api", "m-1"), "_poke-api/m-1");
   });
 });
 

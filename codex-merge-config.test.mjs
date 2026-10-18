@@ -439,6 +439,27 @@ describe("codex model catalog (model_catalog_json)", () => {
     assert.equal(buildCodexModelCatalog(new Map(), CATALOG_TEMPLATE), null, "empty model set builds no catalog");
   });
 
+  it("shows the Anyswitch channel name on the pseudo-channel rows while keeping request slugs bare", () => {
+    const providers = {
+      auto: {
+        channelName: "Anyswitch",
+        baseUrlSegment: "poke-api",
+        models: { auto: { displayName: "auto" }, "vm-a": { displayName: "vm-a" } },
+      },
+    };
+    const collected = collectCodexCatalogModels(providers);
+    assert.deepEqual([...collected.keys()], ["auto", "vm-a"], "请求 slug 仍是裸模型名");
+    const catalog = buildCodexModelCatalog(collected, CATALOG_TEMPLATE);
+    assert.deepEqual(
+      catalog.models.map((m) => [m.slug, m.display_name]),
+      [
+        ["auto", "auto · Anyswitch"],
+        ["vm-a", "vm-a · Anyswitch"],
+      ],
+      "display_name 带渠道名，模型选择器里能看出属于 Anyswitch",
+    );
+  });
+
   it("routes codex catalog entries without metadata through the shared context tier map", () => {
     const providers = {
       alpha: {
@@ -478,6 +499,11 @@ describe("codex model catalog (model_catalog_json)", () => {
     const catalogPath = join(dir, ".codex", "model-catalogs", "anyswitch-models.json");
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
     assert.deepEqual(catalog.models.map((m) => m.slug).sort(), ["auto", "poke-api~gpt-6-astra"]);
+    assert.equal(
+      catalog.models.find((m) => m.slug === "auto").display_name,
+      "auto · Anyswitch",
+      "伪渠道的目录行同样带渠道名（codex 选择器只读 display_name）",
+    );
     assert.equal(catalog.models.length, result.catalog.entries, "entries counts the entries in the file");
 
     // A second sync is stable: one pointer, unchanged config, same catalog bytes.

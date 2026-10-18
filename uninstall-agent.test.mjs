@@ -151,6 +151,43 @@ test("kimi: sidecar-lost residue is removed by the marker sweep", async () => {
   assert.equal(readFileSync(configPath, "utf8"), 'model = "user-model"\n');
 });
 
+test("kimi: sidecar-lost residue carrying the Anyswitch pseudo-channel is swept", async () => {
+  const home = mkTestDir("uninstall-kimi-anyswitch-");
+  const { driver } = testDriver(home);
+  const configPath = join(home, ".kimi-code", "config.toml");
+  mkdirSync(dirname(configPath), { recursive: true });
+  // Kimi 自写回配置后掉标记的伪渠道：provider id 就是渠道显示名（不在 "_" 前缀
+  // 管理面内），模型别名保持 _auto/ 前缀。
+  writeFileSync(
+    configPath,
+    [
+      'default_model = "user-model"',
+      "",
+      '[providers."Anyswitch"]',
+      'type = "openai"',
+      `base_url = "http://127.0.0.1:${FIXTURE_PORT}/openai/auto/v1"`,
+      'api_key = "tok"',
+      "",
+      '[models."_auto/auto"]',
+      'provider = "Anyswitch"',
+      'model = "auto"',
+      "",
+      "[providers.user-own]",
+      'type = "openai"',
+      'base_url = "https://mine.example/v1"',
+      "",
+    ].join("\n"),
+  );
+
+  const result = await driver.uninstallEndpoint("kimi");
+  assert.equal(result.ok, true);
+  const text = readFileSync(configPath, "utf8");
+  assert.doesNotMatch(text, /Anyswitch/);
+  assert.doesNotMatch(text, /_auto/);
+  assert.match(text, /\[providers\.user-own\]/, "用户自建渠道保留");
+  assert.match(text, /default_model = "user-model"/, "用户的默认模型引用保留");
+});
+
 test("kimi: a config holding only the managed block is deleted", async () => {
   const home = mkTestDir("uninstall-kimi-only-");
   const { driver, sidecarRoot } = testDriver(home);
@@ -411,6 +448,36 @@ test("pi: underscore-prefixed relay providers are stripped, user providers stay"
   const config = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.deepEqual(Object.keys(config.providers).sort(), ["_mine", "userp"]);
   assert.ok(!existsSync(join(sidecarRoot, "pi-sidecar.json")));
+});
+
+test("pi: sidecar-lost Anyswitch pseudo-channel is stripped by the relay fingerprint", async () => {
+  const home = mkTestDir("uninstall-pi-anyswitch-");
+  const { driver } = testDriver(home);
+  const modelsPath = join(home, ".pi", "agent", "models.json");
+  writeJson(modelsPath, {
+    providers: {
+      // 伪渠道 key 是渠道显示名，没有 "_" 前缀；托管身份只剩 x-agent-id 头与 relay URL。
+      Anyswitch: {
+        name: "Anyswitch",
+        baseUrl: `http://127.0.0.1:${FIXTURE_PORT}/openai/auto/v1`,
+        apiKey: "tok",
+        api: "openai-completions",
+        headers: { "x-agent-id": "pi", "x-agent-instance": "direct" },
+        models: [{ id: "auto" }],
+      },
+      // 用户自己刚好以 Anyswitch 开头但指向别处的渠道必须留下。
+      "Anyswitch-corp": {
+        baseUrl: "https://mine.example/v1",
+        api: "openai-completions",
+        models: [{ id: "m1" }],
+      },
+    },
+  });
+
+  const result = await driver.uninstallEndpoint("pi");
+  assert.equal(result.ok, true);
+  const config = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(Object.keys(config.providers), ["Anyswitch-corp"]);
 });
 
 // ─────────────────────────────────────────────────────────────

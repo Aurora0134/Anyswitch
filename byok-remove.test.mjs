@@ -192,6 +192,56 @@ test("zcode: 托管前缀 id 与 relay 指纹条目一律拒删", async () => {
   assert.equal(readFileSync(personalPath, "utf8"), personalBefore);
 });
 
+test("kimi/pi: 伪渠道的 Anyswitch 显示名 id 同样是托管条目，拒删", async () => {
+  const { dir, backupRoot } = setup();
+  const kimiPath = writeFixture(
+    dir,
+    "kimi/config.toml",
+    [
+      '[providers."Anyswitch"]',
+      'type = "openai"',
+      'base_url = "http://127.0.0.1:47820/openai/auto/v1"',
+      'api_key = "tok"',
+      "",
+    ].join("\n"),
+  );
+  const piPath = writeFixture(
+    dir,
+    "pi/models.json",
+    JSON.stringify(
+      {
+        providers: {
+          Anyswitch: {
+            name: "Anyswitch",
+            baseUrl: "http://127.0.0.1:47820/openai/auto/v1",
+            apiKey: "tok",
+            api: "openai-completions",
+            models: [{ id: "auto" }],
+          },
+        },
+      },
+      null,
+      2,
+    ) + "\n",
+  );
+  const kimiBefore = readFileSync(kimiPath, "utf8");
+  const piBefore = readFileSync(piPath, "utf8");
+
+  const result = await removeImportedEntries(
+    [
+      entryOf("kimi", kimiPath, "Anyswitch", "http://127.0.0.1:47820/openai/auto/v1"),
+      entryOf("pi", piPath, "Anyswitch", "http://127.0.0.1:47820/openai/auto/v1"),
+    ],
+    { backupRoot, now: NOW },
+  );
+
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.failed.length, 2);
+  assert.ok(result.failed.every((f) => f.error.startsWith("managed-entry")), JSON.stringify(result.failed));
+  assert.equal(readFileSync(kimiPath, "utf8"), kimiBefore, "kimi 托管伪渠道逐字节不动");
+  assert.equal(readFileSync(piPath, "utf8"), piBefore, "pi 托管伪渠道逐字节不动");
+});
+
 test("zcode: provider_config.json 缺失时只删 config.json", async () => {
   const { dir, backupRoot } = setup();
   const { configPath, personalPath } = zcodeFixtures(dir);
