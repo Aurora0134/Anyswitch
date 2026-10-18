@@ -2854,10 +2854,24 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*抗截断\s*<\/h2>/.test(general),
       "「抗截断」卡带 stroke 图标卡头");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*Claude Code\s*<\/h2>/.test(general),
-      "「Claude Code」卡带 stroke 图标卡头（档位映射四行都在卡内）");
+      "「Claude Code」卡带品牌图标卡头（档位映射四行都在卡内）");
     assert.ok(/<h2 class="card-title">[\s\S]*?<svg[\s\S]*?<\/svg>\s*实时输出\s*<\/h2>/.test(general),
       "「实时输出」卡带 stroke 图标卡头");
     assert.ok(general.includes('id="loggingEnabledToggle"'), "运行日志开关在卡内");
+    // 卡头图标 = 厂商品牌字形，字形不另抄一份：从看板那张卡的 .agent-avatar 里取，两边必须是
+    // 同一 path（改一边漏另一边就红）。官方只发品牌橙那一版，而卡头要跟同行文字同色，故 fill
+    // 必须走 currentColor——亮主题即黑、暗主题随字色翻白；硬写品牌橙会跟「五张卡头同一视觉
+    // 语言」打架，硬写 #000 则在暗主题里整块看不见。
+    const ccCard = general.slice(
+      general.lastIndexOf('<div class="panel-card">', general.indexOf('id="claudeBypassPermissionsToggle"')),
+    );
+    const ccIcon = (ccCard.match(/<h2 class="card-title">[\s\S]*?<\/svg>/) || [""])[0];
+    const brandGlyph = (panelHtml.match(/data-agent-id="claude"[\s\S]*?<path fill="#D97757" d="([^"]+)"/) || [])[1];
+    assert.ok(brandGlyph, "看板头像的品牌字形在册（卡头字形以它为唯一真源）");
+    assert.ok(ccIcon.includes(`d="${brandGlyph}"`), "设置页卡头用的就是这枚品牌字形");
+    assert.ok(/fill="currentColor"/.test(ccIcon), "品牌字形按 currentColor 单色呈现，随主题字色");
+    assert.doesNotMatch(ccIcon, /#D97757/, "卡头不带品牌橙");
+    assert.doesNotMatch(ccIcon, /fill="#0{3}"/, "也不硬写纯黑（暗主题会看不见）");
     assert.ok(panelCss.includes("#settingsPanelGeneral .modal-item:hover { background: var(--surface-hover); }"),
       "设置行悬停整行淡底（--surface-hover）");
   });
