@@ -47,16 +47,6 @@
 // because the provider is a single global selector — pinned every call to
 // whichever channel the selector happened to point at. The relay strips the
 // prefix at its entry and routes by it, so picking a model picks the channel.
-//
-// Features gate: the desktop GUI's cross-session memory pipeline fires its
-// own background model calls (hardcoded model, separate session ids), which
-// surface on the panel as phantom session rows and unexpected 404 banners.
-// `[features] memories = false` is the hard gate. The KEY is managed state —
-// forced to false on every sync, restored when hand-deleted — but the TABLE
-// is not: TOML rejects duplicate table declarations, so a config that
-// already carries its own [features] table absorbs the key instead (other
-// keys untouched), and only a config without one gets the table inside the
-// managed block.
 
 import { readFileSync, existsSync, copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -291,10 +281,8 @@ function insertTopLevelKey(text, keyLine) {
 // (wire_api="responses"); base_url is a plain string concat target with no
 // auto "/v1" suffix, so the full prefix is written out. Pseudo-channels (auto
 // routing) name a different relay URL segment than their own id; real channels
-// never set baseUrlSegment. includeFeaturesGate is false once the merge has
-// absorbed the memories key into a user [features] table (see
-// mergeMemoriesGate) — the managed block then must not re-declare it.
-export function buildCodexManagedToml(managedProviders, port, token, includeFeaturesGate = true) {
+// never set baseUrlSegment.
+export function buildCodexManagedToml(managedProviders, port, token) {
   const lines = [MANAGED_BEGIN, "# OpenAI Responses API channels routed through the local Anyswitch relay.", ""];
   const managed = [];
 
@@ -314,14 +302,6 @@ export function buildCodexManagedToml(managedProviders, port, token, includeFeat
     managed.push(providerId);
   }
 
-  // Hard gate on the desktop GUI's background memory pipeline. Declared only
-  // when the user config carries no [features] table of its own — TOML table
-  // names must be unique across the whole file.
-  if (includeFeaturesGate) {
-    lines.push("[features]");
-    lines.push(MEMORIES_GATE_LINE);
-    lines.push("");
-  }
   lines.push(MANAGED_END);
   return { text: lines.join("\n") + "\n", managed };
 }
@@ -379,48 +359,6 @@ function dropLegacyKeys(text) {
     out.push(line);
   }
   return out.join("\n");
-}
-
-// --- [features] memories gate ---
-
-const FEATURES_HEADER_RE = /^\s*\[features\]\s*(?:#.*)?$/;
-// The forced value keeps the user's own spacing and trailing comment (the
-// protectModelProvider convention): only the boolean itself is managed.
-const MEMORIES_KEY_RE = /^(\s*memories\s*=\s*)(\S+)(\s*(?:#.*)?)$/;
-const MEMORIES_GATE_LINE = "memories = false";
-
-// Force the managed key inside a user-owned [features] table, run on the
-// preserved text before the fresh block is built: an existing same-name key
-// is overridden (managed semantics — memories = true is pressed back to
-// false), a hand-deleted key is restored, every other key stays verbatim.
-// Reports whether a table was found so mergeCodexConfigToml knows whether
-// the managed block may declare [features] itself — a duplicate table
-// declaration would invalidate the whole config.
-function mergeMemoriesGate(text) {
-  const lines = text.split(/\r?\n/);
-  let inFeatures = false;
-  let headerIndex = -1;
-  let keyIndex = -1;
-  for (let index = 0; index < lines.length; index += 1) {
-    if (/^\s*\[/.test(lines[index])) {
-      // Only the first [features] table is absorbed; a second declaration is
-      // already the user's own duplicate-table breakage, not ours to heal.
-      inFeatures = headerIndex === -1 && FEATURES_HEADER_RE.test(lines[index]);
-      if (inFeatures) headerIndex = index;
-      continue;
-    }
-    if (inFeatures && keyIndex === -1 && MEMORIES_KEY_RE.test(lines[index])) keyIndex = index;
-  }
-  if (headerIndex === -1) return { text, hasFeaturesTable: false };
-  if (keyIndex === -1) {
-    // Directly under the header: the key must land in the parent table even
-    // when [features.*] sub-tables follow.
-    lines.splice(headerIndex + 1, 0, MEMORIES_GATE_LINE);
-  } else {
-    const kv = lines[keyIndex].match(MEMORIES_KEY_RE);
-    if (kv[2] !== "false") lines[keyIndex] = `${kv[1]}false${kv[3]}`;
-  }
-  return { text: lines.join("\n"), hasFeaturesTable: true };
 }
 
 // Selector protection, run on the fully merged text (so current managed tables
@@ -484,22 +422,17 @@ export function protectModelKey(text, catalogModels, catalogPointer) {
 
 export function mergeCodexConfigToml(existingText, managedProviders, port, token, autoChannel = null, catalogTemplate = null, effortCatalog = null) {
   const preserved = dropLegacyKeys(stripManagedTables(stripManagedBlock(existingText ?? "")));
-  // The memories gate is decided on the preserved text (after the old managed
-  // block and stale tables are gone): a surviving user [features] table
-  // absorbs the managed key and the fresh block stays silent on [features];
-  // with no table anywhere the block declares it.
-  const gate = mergeMemoriesGate(preserved);
   // The managed block is regenerated wholesale on every merge, so appending
   // the virtual auto-routing channel here is also its whole cleanup story:
   // once the endpoint's chain is deleted, autoChannel derives as null and the
   // next sync's block simply no longer contains `anyswitch-auto`.
   const providers = autoChannel ? { ...managedProviders, [AUTO_CHANNEL_KEY]: autoChannel } : managedProviders;
-  const { text: managedText, managed } = buildCodexManagedToml(providers, port, token, !gate.hasFeaturesTable);
+  const { text: managedText, managed } = buildCodexManagedToml(providers, port, token);
   // The catalog pointer is regenerated from the same channel view as the
   // provider tables. A null catalogTemplate (asset unreadable) keeps the
   // feature off: our stale pointer is stripped and no fresh one is written.
   const catalogModels = catalogTemplate ? collectCodexCatalogModels(providers) : new Map();
-  const pointer = extractCatalogPointer(gate.text);
+  const pointer = extractCatalogPointer(preserved);
   let head = pointer.text;
   let catalogPointer = "none";
   if (pointer.userPointer !== null) {
@@ -511,7 +444,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   const trimmedHead = head.replace(/\s+$/, "");
   const merged = trimmedHead ? `${trimmedHead}\n\n${managedText}` : managedText;
   const protectedText = protectModelKey(protectModelProvider(merged, managed), catalogModels, catalogPointer);
-  return { text: protectedText, managed, catalogModels, catalogPointer, effortCatalog, memoriesGate: gate.hasFeaturesTable ? "absorbed" : "managed-block" };
+  return { text: protectedText, managed, catalogModels, catalogPointer, effortCatalog };
 }
 
 export function readCodexConfigToml(filePath) {
