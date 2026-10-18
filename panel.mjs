@@ -2761,6 +2761,15 @@ export function createPanelRouter({
     if (path === "/panel/api/terminal/host/start" && method === "POST") return handleTerminalHostStart(res);
     if (path === "/panel/api/terminal/host/stop" && method === "POST") return handleTerminalHostStop(req, res);
     if (path === "/panel/api/terminal/sessions" && method === "GET") return handleTerminalSessionsList(res);
+    // 终端亮暗上报（match terminal 契约）：面板是亮暗的事实源，直通宿主存值
+    // 并扇出 997。与 sessions POST 同款读体+错误回包形制。
+    if (path === "/panel/api/terminal/theme" && method === "POST") {
+      try {
+        return proxyTerminal(req, res, "/terminal/theme", "POST", await readJsonBody(req));
+      } catch (error) {
+        return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+      }
+    }
     if (path === "/panel/api/terminal/sessions" && method === "POST") {
       try {
         return proxyTerminal(req, res, "/terminal/sessions", "POST", await readJsonBody(req));

@@ -186,6 +186,44 @@ export function stripTerminalReplyProbes(text) {
   return String(text).replace(REPLY_PROBE_PATTERN, "");
 }
 
+// ---- Terminal color-scheme change notifications (mode 2031 / report 997) ----
+// TUIs that follow the terminal's dark/light scheme (kimi-code's "Auto (match
+// terminal)" et al.) interrogate the terminal with CSI ?996n and subscribe to
+// change notifications with DECSET 2031, then repaint when a CSI ?997;1n
+// (dark) / ;2n (light) report lands. xterm.js 5.x implements none of the
+// three, so the browser renderer cannot honor the contract — and the probes
+// only reach it while a session column is attached anyway. The host sees
+// every byte a PTY writes regardless of attachment, so it answers 996n and
+// tracks 2031 here, and /terminal/theme fans the 997 report out to
+// subscribed sessions when the panel flips its theme.
+const THEME_QUERY = "\x1b[?996n";
+const THEME_NOTIFY_ON = "\x1b[?2031h";
+const THEME_NOTIFY_OFF = "\x1b[?2031l";
+const themeReport = (dark) => `\x1b[?997;${dark ? 1 : 2}n`;
+
+// Stream-safe probe detector: probes are 7-8 bytes and can straddle PTY
+// chunks, so each tracker keeps an equally sized tail and only fires for
+// matches completed by the newly pushed text — a probe fully inside the tail
+// already fired on its own push, a probe straddling the boundary fires exactly
+// once here. Plain drawing bytes never match.
+export function createThemeProbeTracker() {
+  const pattern = /\x1b\[\?996n|\x1b\[\?2031[hl]/g;
+  let tail = "";
+  return {
+    push(text) {
+      const hay = tail + text;
+      pattern.lastIndex = 0;
+      const probes = [];
+      let match;
+      while ((match = pattern.exec(hay)) !== null) {
+        if (match.index + match[0].length > tail.length) probes.push(match[0]);
+      }
+      tail = hay.length > 8 ? hay.slice(-8) : hay;
+      return probes;
+    },
+  };
+}
+
 // Byte accounting for the replay ring is in UTF-8 bytes — the unit the budget is
 // stated in and the unit the state file costs on disk.
 function chunkBytes(chunk) {
@@ -338,6 +376,10 @@ export function createTerminalHost({
   const token = loadOrGenerateToken(dataRoot);
   let persistTimer = null;
   const coalesceWindowMs = Math.max(0, sseCoalesceWindowMs);
+  // 终端当前亮暗，按 996n 应答与 997 扇出用。面板 POST /terminal/theme 上报
+  // 生效值；宿主重启后回落暗色（xterm 内核默认同向），面板首连/重连会补报
+  // 一次把真值追平。
+  let terminalThemeDark = true;
   // 脏位与写链。脏位回答「内存态相对盘上那份变没变」；写链保证落盘写一笔接
   // 一笔串行、绝不交错。两者合起来把 persistNow 变成一个「有变化才做、做完
   // 一定写完整」的后台作业，事件循环全程不被同步写盘卡住。
@@ -468,6 +510,25 @@ export function createTerminalHost({
     }
   }
 
+  // 主题契约的输出侧半边：996n 即问即答（按当前上报的亮暗），2031h/l 记/清
+  // 该会话的通知开关。只看活流（emit 只被 child.onData 走到），回放与镜像
+  // 喂送不经过这里——旧历史里的探针不该在宿主恢复后重放应答。
+  function handleThemeProbes(session, text) {
+    if (!session.themeProbeTracker) session.themeProbeTracker = createThemeProbeTracker();
+    for (const probe of session.themeProbeTracker.push(text)) {
+      if (probe === THEME_QUERY) writePty(session, themeReport(terminalThemeDark));
+      else session.themeNotify = probe === THEME_NOTIFY_ON;
+    }
+  }
+
+  function writePty(session, data) {
+    try {
+      session.pty?.write(data);
+    } catch {
+      /* pty 死在半途：读的人已经没了，这份报告无处可送 */
+    }
+  }
+
   function emit(session, chunk) {
     const text = String(chunk);
     session.buffer.push(text);
@@ -479,6 +540,7 @@ export function createTerminalHost({
     // 防抖到点的 persistNow 才是真的要写，而不是被脏位门控空跳掉。
     markStateDirty();
     for (const listener of session.listeners) listener(String(chunk));
+    handleThemeProbes(session, text);
     schedulePersist();
   }
 
@@ -518,6 +580,11 @@ export function createTerminalHost({
   }
 
   function spawnSession(session) {
+    // 进程换代即订阅作废：2031 是进程内行为，新进程（新 shell 或新 agent 实例）
+    // 尚未订阅；旧进程留下的探针尾巴也可能与新输出拼出幽灵探针，一并清零。
+    // 新 agent 起来后自会重发 2031h 重新订阅。
+    session.themeNotify = false;
+    session.themeProbeTracker = null;
     // An agent launch replaces the shell spec entirely (the cmd /c wrapper is
     // already in the launch args); a plain shell session behaves exactly as
     // before. The env delta is merged over this process's environment with
@@ -685,6 +752,21 @@ export function createTerminalHost({
         // 落定再答，响应到达即会话已在盘上（宿主紧跟着崩溃也不丢这条记录）。
         await persistNow();
         return json(res, 201, snapshot(session));
+      }
+      // 面板亮暗上报：存下生效值（996n 应答用），变化即向所有开了 2031 上报的
+      // 活会话扇出 997 报告。同值重报幂等不扇出——宿主重启后的首报若与默认值
+      // 同向，本就没有 armed 会话需要通知。
+      if (url.pathname === "/terminal/theme" && req.method === "POST") {
+        const body = await readBody(req);
+        if (body.dark !== true && body.dark !== false) return json(res, 400, { error: "invalid_theme" });
+        if (body.dark !== terminalThemeDark) {
+          terminalThemeDark = body.dark;
+          const report = themeReport(terminalThemeDark);
+          for (const session of sessions.values()) {
+            if (session.themeNotify) writePty(session, report);
+          }
+        }
+        return json(res, 200, { ok: true, dark: terminalThemeDark });
       }
       // 清空全部会话（relay 关停宿主前的清场）：杀掉存活 PTY、通知流端退出、
       // 内存表与落盘文件一起归零。必须在下面的按 id 匹配之前，否则 "clear-all"
