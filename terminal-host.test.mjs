@@ -1194,6 +1194,158 @@ test("restart 接受可选 env 合并后再 spawn，响应不回显", async () =
   }
 });
 
+test("restart 保史：镜像与字节窗原地保留，新进程续写在旧画面下方", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "保史", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    for (let i = 1; i <= 8; i += 1) calls[0].pty.dataListener?.(`行 ${i}\r\n`);
+    const session = host.sessions.get(created.id);
+    const historyBefore = session.screen.info().historyLines;
+    const bufferBefore = session.buffer.length;
+    assert.ok(historyBefore > 0, "前置：已有滚动历史");
+    assert.ok(bufferBefore >= 8, "前置：字节窗已有输出块");
+
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+    });
+    assert.equal(restarted.status, 200);
+    assert.equal(calls.length, 2, "restart 重新 spawn");
+    assert.equal((await restarted.json()).status, "running", "重开后回到 running");
+
+    assert.equal(session.screen.info().historyLines, historyBefore, "重开不得清镜像滚动区（历史归页签，2026-10-18 拍板）");
+    assert.ok(session.buffer.length >= bufferBefore, "重开不得清字节窗（宿主重启恢复的原料）");
+    assert.ok(session.screen.screenLines().join("|").includes("行 8"), "旧画面内容保留");
+
+    // 续写：新进程输出接在旧画面下方，滚动把旧屏行推入历史
+    calls[1].pty.dataListener?.("新进程行 1\r\n");
+    assert.equal(session.screen.info().historyLines, historyBefore + 1, "续写滚动进历史（旧画面下移一行）");
+    assert.ok(session.screen.screenLines().join("|").includes("新进程行 1"), "新进程输出落在画面上");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart 衔接卫生：死在备屏先弹回主画面、光标半行补换行，合成字节入 journal", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "衔接", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    // 主屏光标停半行后死进备屏（kimi 崩溃/TUI 退出形态）
+    calls[0].pty.dataListener?.("主屏半行");
+    calls[0].pty.dataListener?.("\u001b[?1049h");
+    calls[0].pty.dataListener?.("备屏帧 A\r\n");
+    const session = host.sessions.get(created.id);
+    assert.equal(session.screen.info().inAlt, true, "前置：死在备屏");
+    assert.equal(session.screen.info().col, 0, "前置：备屏内光标在行首（半行状态在主屏的保存位上）");
+
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+    });
+    assert.equal(restarted.status, 200);
+
+    const info = session.screen.info();
+    assert.equal(info.inAlt, false, "重开前必须弹回主画面——否则新进程输出画进备屏、退屏时整段丢");
+    assert.equal(info.col, 0, "弹回后光标在行首（主屏半行已被补换行送走）");
+    const screen = session.screen.screenLines().join("|");
+    assert.ok(screen.includes("主屏半行"), "弹回后主屏内容在");
+    assert.ok(!screen.includes("备屏帧"), "弹回后不得残留备屏帧");
+    // 合成字节走 emit 单咽喉：进字节窗，在线客户端与宿主重启恢复同拍复现同一衔接
+    assert.ok(session.buffer.some((chunk) => chunk.includes("\u001b[?1049l")), "弹屏字节入 journal");
+    assert.ok(session.buffer.some((chunk) => chunk.includes("\r\n")), "补行字节入 journal");
+
+    // 续写从行首整行起笔，不拼进旧行尾
+    calls[1].pty.dataListener?.("新壳起笔");
+    assert.equal(session.screen.screenLines()[1], "新壳起笔", "新进程首行整行落笔（不拼接）");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart 幂等：连续重开不重复注水、历史只增不减", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "幂等", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    for (let i = 1; i <= 8; i += 1) calls[0].pty.dataListener?.(`行 ${i}\r\n`);
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) });
+    const session = host.sessions.get(created.id);
+    const historyFirst = session.screen.info().historyLines;
+    const bufferFirst = session.buffer.length;
+    assert.ok(historyFirst > 0, "前置：第一次重开已保史");
+
+    // 第二次重开：其间无新输出，光标已在行首且不在备屏——不得再注入合成字节
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) });
+    assert.equal(calls.length, 3, "第二次照常重 spawn");
+    assert.equal(session.screen.info().historyLines, historyFirst, "无新输出时历史不动");
+    assert.equal(session.buffer.length, bufferFirst, "已在行首且非备屏时不注水（幂等）");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("宿主重启后 revive 保史：恢复的镜像不被重开路由抹掉（重启劫回归钉）", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
+  const first = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule: first.ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  let hostClosed = false;
+  let secondHost = null;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "重启劫", cwd: root, shell: "powershell", cols: 20, rows: 4 }),
+    }).then((r) => r.json());
+    for (let i = 1; i <= 8; i += 1) first.calls[0].pty.dataListener?.(`历史源 ${i}\r\n`);
+    await host.persistNow();
+    await host.close();
+    hostClosed = true;
+
+    // 宿主重启：restore 从盘上尾窗重喂镜像——这就是面板 attach 自动 revive 的起点
+    const second = capturingPtyModule();
+    secondHost = createTerminalHost({ root, port: 0, ptyModule: second.ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+    const port2 = await listen(secondHost);
+    const url2 = (path) => `http://127.0.0.1:${port2}${path}`;
+    const restored = secondHost.sessions.get(created.id);
+    assert.equal(restored.pty, null, "恢复的会话不自动复活");
+    assert.ok(restored.screen.info().historyLines > 0, "前置：恢复即已带历史");
+
+    const revived = await fetch(url2(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(secondHost) });
+    assert.equal(revived.status, 200);
+    assert.ok(restored.screen.info().historyLines > 0, "revive 不得把恢复的镜像抹成空屏（历史归页签）");
+    assert.ok(restored.screen.screenLines().join("|").includes("历史源"), "恢复的旧画面保留");
+    // 续写接在恢复画面下方
+    second.calls[0].pty.dataListener?.("revive 续写\r\n");
+    assert.ok(restored.screen.screenLines().join("|").includes("revive 续写"), "revive 后新输出落在画面上");
+  } finally {
+    if (!hostClosed) await host.close().catch(() => {});
+    if (secondHost) await secondHost.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("launch/env 输入校验：畸形一律 400，cwd 缺失不静默回落", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
   const { calls, ptyModule } = capturingPtyModule();
