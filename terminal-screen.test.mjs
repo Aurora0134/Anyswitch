@@ -387,3 +387,77 @@ test("3J/?3J 降级为 no-op：历史归页签，清滚动区请求后重挂不�
   const again = repaint(mirror.toReplay(), 24, 6);
   assert.equal(again.info().historyLines, mirror.info().historyLines, "回放必须逐行还原保住的历史（重挂不丢史）");
 });
+
+test("SGR 58 下划线色按赋值语义替换：回放只留最后一组，旧色不残留", () => {
+  // 2026-10-18 复发取证：applySgr 只认 38/48，58 落进兜底逐条入列，重复设置时
+  // 旧 RGB 三元组全部残留。回放成 `58;2;171;178;194;40;90;30`，客户端把尾巴
+  // 当成独立指令执行 = 黑底黑字（dsh 切回黑字即此形态）。
+  const mirror = createScreenMirror({ cols: 24, rows: 3 });
+  mirror.write("\u001b[58;2;171;178;194m\u001b[58;2;40;90;30m下划线");
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("58;2;40;90;30"), "回放必须带最后一次设置的下划线色");
+  assert.ok(!replay.includes("171;178;194"), "被替换的旧下划线色不得残留");
+  const again = repaint(replay, 24, 3);
+  assert.equal(again.screenAttrs()[0].slice(0, 6).every((cell) => cell.bg === ""), true,
+    "下划线色不是底色：回放后不得凭空出现背景");
+});
+
+test("58;5;n 与 58;2 同槽：后到的整组替换前一组", () => {
+  const mirror = createScreenMirror({ cols: 20, rows: 2 });
+  mirror.write("\u001b[58;5;40m\u001b[58;2;171;178;194mX");
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("58;2;171;178;194"), "回放必须带新下划线色");
+  assert.ok(!replay.includes("58;5;40"), "被替换的 256 色下划线色不得残留");
+  assert.equal(repaint(replay, 20, 2).screenAttrs()[0][0].bg, "", "下划线色不得被当成背景");
+});
+
+test("59 摘除下划线色槽，39/49 不误摘", () => {
+  const off = createScreenMirror({ cols: 20, rows: 2 });
+  off.write("\u001b[58;2;171;178;194m\u001b[59mZ");
+  assert.ok(!off.toReplay().includes("58"), "59 之后回放不得再带 58 槽");
+
+  const kept = createScreenMirror({ cols: 20, rows: 2 });
+  kept.write("\u001b[58;2;171;178;194m\u001b[39m\u001b[49mX");
+  assert.ok(kept.toReplay().includes("58;2;171;178;194"),
+    "39/49 只复位前景/背景，不得误摘下划线色");
+});
+
+test("冒号子参数 4:3 不得拼成 43：无黄底、前置前景色不丢", () => {
+  // 旧收集器只收 [\d;]，冒号被丢弃后 `4:3` 拼成 `43` = 黄底（opencode 2.0.32
+  // 二进制里 4:3 命中 8 处）。冒号必须留着交给 applySgr 按族处置。
+  const mirror = createScreenMirror({ cols: 24, rows: 2 });
+  mirror.write("\u001b[38;2;171;178;194m灰\u001b[4:3m卷曲");
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("4:3"), "回放必须原样保留卷曲下划线样式");
+  assert.ok(!/\u001b\[[0-9;]*\b43m/.test(replay), "不得出现 43（黄底）");
+  const again = repaint(replay, 24, 2);
+  assert.equal(again.screenAttrs()[0].slice(0, 6).every((cell) => cell.bg === ""), true,
+    "卷曲下划线段不得凭空多出背景");
+  assert.ok(replay.includes("38;2;171;178;194"), "前置真彩色前景必须保留");
+});
+
+test("冒号 58:2::r:g:b 归入 58 槽，不污染其它属性", () => {
+  const mirror = createScreenMirror({ cols: 24, rows: 2 });
+  mirror.write("\u001b[1;38;2;171;178;194m\u001b[58:2::40:90:30mX");
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("58:2::40:90:30"), "冒号形态的下划线色整组入槽");
+  assert.ok(replay.includes("38;2;171;178;194"), "前景色不得被冒号 token 清掉");
+  assert.ok(/[;[]1(;|m)/.test(replay), "粗体不得被冒号 token 误复位");
+  assert.equal(repaint(replay, 24, 2).screenAttrs()[0][0].bg, "", "冒号下划线色不得变成背景");
+
+  // 未知冒号族安全忽略：7:3 不得被当成 7（反显），也不得拆成 7/3 入列
+  const unknown = createScreenMirror({ cols: 20, rows: 2 });
+  unknown.write("\u001b[7:3mZ");
+  assert.ok(!/\u001b\[[0-9;]*\b7m/.test(unknown.toReplay()), "未知冒号族不得变形为反显");
+  assert.equal(unknown.screenAttrs()[0][0].bg, "", "未知冒号族不得影响背景判定");
+});
+
+test("含冒号 token 不得触发 NaN→0 全复位", () => {
+  // 旧实现 Number("4:3")||0 = 0，等于把整条 SGR 当清屏复位：已设的颜色/粗体全丢。
+  const mirror = createScreenMirror({ cols: 20, rows: 2 });
+  mirror.write("\u001b[1;31;4:3mX");
+  const replay = mirror.toReplay();
+  assert.ok(/\b31\b/.test(replay), "冒号 token 之后的 31 必须生效且不被清零");
+  assert.ok(/[;[]1(;|m)/.test(replay), "冒号 token 不得把粗体一并复位");
+  assert.ok(replay.includes("4:3"), "冒号样式本身要保留");
+});

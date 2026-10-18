@@ -233,33 +233,76 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
   }
 
+  // 冒号子参数（ITU T.416 风格）单独成族：4:x 是下划线样式、58:x 是下划线颜色。
+  // 其余冒号族（含 38:/48: 的冒号形态）一律安全忽略——不入列，也不许被拆成数字码：
+  // 旧实现把冒号当垃圾丢掉再把数字拼起来（\e[4:3m → 43），回放里凭空多出一条黄底
+  // （2026-10-18 取证，opencode 2.0.32 的 4:3 序列触发）。
+  function applySgrColon(token) {
+    const parts = token.split(":");
+    const family = Number(parts[0]);
+    if ((parts[1] ?? "") === "") return; // 裸族名（"4:" / "58:"）语义不明，按未知忽略
+    if (family === 4) {
+      // 4 与 4:x 同一槽，样式是赋值：后到的替换先到的，24/0 摘整槽。
+      sgr = sgr.filter((c) => c !== 4 && !String(c).startsWith("4:"));
+      sgr.push(token);
+    } else if (family === 58) {
+      // 下划线色与 38/48 同款赋值语义：push 前摘掉整个 58 槽（分号/冒号两种形态）。
+      sgr = sgr.filter((c) => !String(c).startsWith("58;") && !String(c).startsWith("58:"));
+      sgr.push(token);
+    }
+  }
+
   function applySgr(raw) {
-    const params = (raw === "" ? "0" : raw).split(";").map((x) => (x === "" ? 0 : Number(x) || 0));
-    for (let i = 0; i < params.length; i += 1) {
-      const p = params[i];
+    const tokens = (raw === "" ? "0" : raw).split(";");
+    // 颜色 run 的子参数是位置语义：缺失或非数字按 0 补齐（与旧实现一致）。
+    const sub = (index) => {
+      const token = tokens[index];
+      if (token === undefined || token === "") return 0;
+      const n = Number(token);
+      return Number.isFinite(n) ? n : 0;
+    };
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      // 含冒号的 token 先分派给子参数解析，绝不能落到下面的 Number 归一：
+      // 旧实现 Number("4:3")||0 = 0，等于把整条 SGR 当全复位执行。
+      if (token.includes(":")) { applySgrColon(token); continue; }
+      const p = token === "" ? 0 : Number(token);
+      // 非数字 token 跳过而不是归零：0 是「清空全部属性」，误归一等于清屏。
+      if (!Number.isFinite(p)) continue;
       if (p === 0) { sgr = []; continue; }
       if (p === 39) { sgr = sgr.filter((c) => !(c === 39 || (c >= 30 && c <= 37) || (c >= 90 && c <= 97) || /^38;/.test(String(c)))); continue; }
       if (p === 49) { sgr = sgr.filter((c) => !(c === 49 || (c >= 40 && c <= 47) || (c >= 100 && c <= 107) || /^48;/.test(String(c)))); continue; }
+      if (p === 59) { sgr = sgr.filter((c) => !String(c).startsWith("58;") && !String(c).startsWith("58:")); continue; }
       if (p === 22) { sgr = sgr.filter((c) => c !== 1 && c !== 2 && c !== 21); continue; }
       if (p === 23) { sgr = sgr.filter((c) => c !== 3); continue; }
-      if (p === 24) { sgr = sgr.filter((c) => c !== 4); continue; }
+      if (p === 24) { sgr = sgr.filter((c) => c !== 4 && !String(c).startsWith("4:")); continue; }
       if (p === 25) { sgr = sgr.filter((c) => c !== 5 && c !== 6); continue; }
       if (p === 27) { sgr = sgr.filter((c) => c !== 7); continue; }
-      if (p === 38 || p === 48) {
+      if (p === 4) {
+        // 4 与 4:x 同槽：后到的覆盖先到的（24/0 摘整槽），避免 4:3;4 越积越长。
+        sgr = sgr.filter((c) => c !== 4 && !String(c).startsWith("4:"));
+        sgr.push(4);
+        continue;
+      }
+      if (p === 38 || p === 48 || p === 58) {
         // 38;5;n / 38;2;r;g;b — carry the whole colour run as one attribute token.
-        const kind = params[i + 1];
-        let token = null;
-        if (kind === 5) { token = `${p};5;${params[i + 2] ?? 0}`; i += 2; }
-        else if (kind === 2) { token = `${p};2;${params[i + 2] ?? 0};${params[i + 3] ?? 0};${params[i + 4] ?? 0}`; i += 4; }
-        if (token) {
+        // 58（下划线色）走同一套：子参数散着入列会让回放序列被客户端当成独立指令
+        // （58;2;171;178;194;40;90;30 的尾巴 = 黑底 + 黑字，2026-10-18 取证）。
+        const kind = sub(i + 1);
+        let next = null;
+        if (kind === 5) { next = `${p};5;${sub(i + 2)}`; i += 2; }
+        else if (kind === 2) { next = `${p};2;${sub(i + 2)};${sub(i + 3)};${sub(i + 4)}`; i += 4; }
+        if (next) {
           // 颜色是赋值不是叠加：push 前摘掉同槽旧 token（扩展或基础形态都算）。
           // 残留叠加会把回放序列化撑成一条超长 SGR，超过 xterm 的 32 参数上限后
           // 被截，末尾 38;2 缺 RGB 按零补齐解析成纯黑——dsh 状态栏一帧连设 7 色、
           // 切回后「近白灰字变纯黑」即此形态（2026-10-17 取证）。
           sgr = p === 38
             ? sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("38;") && !(n >= 30 && n <= 37) && !(n >= 90 && n <= 97); })
-            : sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("48;") && !(n >= 40 && n <= 47) && !(n >= 100 && n <= 107); });
-          sgr.push(token);
+            : p === 48
+              ? sgr.filter((c) => { const n = Number(c); return !String(c).startsWith("48;") && !(n >= 40 && n <= 47) && !(n >= 100 && n <= 107); })
+              : sgr.filter((c) => !String(c).startsWith("58;") && !String(c).startsWith("58:"));
+          sgr.push(next);
         }
         continue;
       }
@@ -396,7 +439,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       if (i < input.length && /^[?>=!]/.test(input[i])) { priv = input[i]; i += 1; }
       let params = "";
       while (i < input.length && !/[@-~]/.test(input[i])) {
-        if (/[\d;]/.test(input[i])) params += input[i];
+        // 冒号是参数的一部分（4:3 / 58:2::r:g:b 的子参数分隔符）：留着交给 applySgr
+        // 按族处置。旧实现只收数字和分号，冒号一丢，两侧数字就拼成一个新码
+        // （\e[4:3m → 43 黄底）。
+        if (/[\d;:]/.test(input[i])) params += input[i];
         i += 1;
       }
       const final = input[i];
@@ -591,12 +637,33 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     },
     // Same grid, one cell at a time, so a repaint can be checked for colour and
     // not just for text. Background is whatever background SGR the cell carries.
+    // 38/48/58 的扩展色子参数必须整组跳过：58;2;40;90;30 里的 40 是下划线色的
+    // 绿色分量，不是背景（下划线色不是底色）。
     screenAttrs() {
       return grid.map((line) => line.chars.map((ch, index) => {
-        const attr = line.attrs[index] ?? "";
-        const bg = attr.split(";").includes("7")
-          ? "7"
-          : (attr.match(/(?:^|;)((?:4[0-7]|10[0-7]|48|49)(?::[^;]*|;(?:5;\d+|2;\d+;\d+;\d+))?)/)?.[1] ?? "");
+        const tokens = String(line.attrs[index] ?? "").split(";");
+        let bg = "";
+        for (let i = 0; i < tokens.length; i += 1) {
+          const token = tokens[i];
+          if (token === "7") { bg = "7"; break; }
+          if (token.includes(":")) continue;
+          const n = Number(token);
+          if (!Number.isFinite(n)) continue;
+          if (n === 38 || n === 58) {
+            const kind = Number(tokens[i + 1]);
+            if (kind === 5) i += 2;
+            else if (kind === 2) i += 4;
+            continue;
+          }
+          if (n === 48) {
+            const kind = Number(tokens[i + 1]);
+            if (kind === 5) bg = `48;5;${tokens[i + 2] ?? 0}`;
+            else if (kind === 2) bg = `48;2;${tokens[i + 2] ?? 0};${tokens[i + 3] ?? 0};${tokens[i + 4] ?? 0}`;
+            else bg = "48";
+            break;
+          }
+          if (n === 49 || (n >= 40 && n <= 47) || (n >= 100 && n <= 107)) { bg = token; break; }
+        }
         return { ch: ch === null || ch === undefined ? " " : ch, bg };
       }));
     },
