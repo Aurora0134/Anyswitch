@@ -152,7 +152,7 @@ async function api(method, path, body) {
     const container = $(containerId);
     if (!container) return;
     // 盒子尺寸随调用方传入并与 CSS 盒等大：viewBox 1:1 映射像素，线宽/圆角不失真
-    // （看板 68×26 与终端侧栏 56×21.41 是两个原生规格，不再互相拉伸）。
+    // （看板 68×26 与终端侧栏 56×22 是两个原生规格，不再互相拉伸）。
     const w = Number(size?.w) > 0 ? size.w : 68;
     const h = Number(size?.h) > 0 ? size.h : 26;
     // B3 路径级 diff：已有正常态 SVG（area+line 两个 path 子节点）时只改 d，
@@ -5517,10 +5517,9 @@ async function api(method, path, body) {
     }
   }
 
-  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×21.41——
-  // 长宽比与看板折线 68:26 对齐：宽不动、高下收，盒上沿原位、下沿向上收），
-  // viewBox 1:1 映射像素，线宽/round 端点不失真
-  const TERMINAL_SPARK_SIZE = { w: 56, h: 21.41 };
+  // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×22，
+  // 0.6.6 发布版尺寸），viewBox 1:1 映射像素，线宽/round 端点不失真
+  const TERMINAL_SPARK_SIZE = { w: 56, h: 22 };
 
   // 跳顶回归护栏（跟随底部焊死）：xterm 的 Viewport 把 .xterm-viewport 的 scroll
   // 事件翻译成缓冲区行号（_handleScroll：newRow = scrollTop/行高，与 ydisp 的差值
