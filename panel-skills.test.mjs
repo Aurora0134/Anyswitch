@@ -1088,3 +1088,212 @@ describe("skills master repo empty-directory confirm flow", () => {
     assert.doesNotMatch(fn, /不存在或不含任何 skill/);
   });
 });
+
+// ── 技能来源措辞：全局目录不是 Agent ──
+// 识别面把全局目录（~/.agents/skills，内部 id "agents"）也扫进来，但它「不是任何
+// Agent」：状态里单列在 globalEndpoint。所以弹窗/回执一律经共用措辞函数取名——Agent
+// 用状态里的显示名（Claude Code…），全局目录写全「全局目录 + ~ 路径」。旧实现把内部
+// id 直接拼进「Agent <b>…</b>」，全局条目会读成「Agent agents」。这里把措辞函数与各
+// 弹窗函数从 panel.js 抠出来真跑，钉住两侧文案。
+describe("skills source wording: the global directory is not an Agent", () => {
+  const read = (name) => readFileSync(join(dirname(fileURLToPath(import.meta.url)), "panel-ui", name), "utf8");
+  const panelJs = read("panel.js");
+
+  function extractFn(name, params) {
+    const m = panelJs.match(
+      new RegExp(`(?:async )?function ${name}\\(${params.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\) \\{[\\s\\S]*?\\n  \\}`)
+    );
+    assert.ok(m, `panel.js must contain function ${name}`);
+    return m[0];
+  }
+  const escapeHtml = (s) => String(s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  // 形状照 /api/skills/state 的真实下发：candidates 里带 .agents 段，shortHomePath 才缩得出 ~
+  const STATE = {
+    repoPath: "C:/repo/skills",
+    candidates: [{ path: "C:\\Users\\me\\.agents\\skills", exists: true }],
+    endpoints: [
+      { id: "claude", label: "Claude Code", entries: [] },
+      { id: "zcode", label: "ZCode", entries: [] },
+    ],
+    globalEndpoint: { id: "agents", label: "全局", skillsDir: "C:\\Users\\me\\.agents\\skills", entries: [] },
+  };
+
+  const HELPERS = [
+    ["shortHomePath", "p"],
+    ["skillsGlobalEndpoint", ""],
+    ["skillsSourceIsGlobal", "endpointId"],
+    ["skillsSourceName", "endpointId"],
+    ["skillsSourcePhrase", "endpointId"],
+  ];
+  const helperSrc = HELPERS.map(([n, p]) => extractFn(n, p)).join("\n");
+
+  // 措辞函数 + 目标函数拼进同一作用域真跑一遍；bindings 是页面里那些依赖的替身
+  function run(name, params, bindings) {
+    const keys = Object.keys(bindings);
+    const src = `${helperSrc}\n${extractFn(name, params)}`;
+    return new Function(...keys, `${src}\n return ${name};`)(...keys.map((k) => bindings[k]));
+  }
+
+  it("Agent 说显示名，全局目录说「全局目录 + ~ 路径」；查不到名才退回内部 id", () => {
+    const box = new Function(
+      "skillsState", "escapeHtml",
+      `${helperSrc}\n return { shortHomePath, skillsSourceIsGlobal, skillsSourceName, skillsSourcePhrase };`,
+    )(STATE, escapeHtml);
+    assert.equal(box.shortHomePath(STATE.globalEndpoint.skillsDir), "~/.agents/skills");
+    assert.equal(box.skillsSourceIsGlobal("agents"), true);
+    assert.equal(box.skillsSourceIsGlobal("claude"), false);
+    assert.equal(box.skillsSourceName("agents"), "全局目录");
+    assert.equal(box.skillsSourceName("claude"), "Claude Code");
+    assert.equal(box.skillsSourceName("pi"), "pi", "查不到显示名时退回内部 id");
+    assert.equal(box.skillsSourcePhrase("agents"), "全局目录 <b>~/.agents/skills</b> 中");
+    assert.equal(box.skillsSourcePhrase("claude"), "Agent <b>Claude Code</b> 上");
+
+    // 主仓库与全局目录同径时后端整段撤下 globalEndpoint（退让），此时不得再判成全局
+    const noGlobal = { ...STATE, globalEndpoint: null };
+    const bare = new Function(
+      "skillsState", "escapeHtml",
+      `${helperSrc}\n return { skillsSourceIsGlobal, skillsSourceName };`,
+    )(noGlobal, escapeHtml);
+    assert.equal(bare.skillsSourceIsGlobal("agents"), false);
+    assert.equal(bare.skillsSourceName("agents"), "agents", "退让态查不到显示名，退回 id（该路径 UI 不可达）");
+  });
+
+  it("导入/转托管、失效链接、覆盖确认与替换部署：全局条目全句写路径，不出现「Agent agents」", async () => {
+    let modal = null;
+    let toastMsg = "";
+    const bindings = (over = {}) => ({
+      skillsState: STATE,
+      escapeHtml,
+      showSkillsModal: (cfg) => { modal = cfg; },
+      api: async () => ({ ok: true }),
+      toast: (m) => { toastMsg = m; },
+      refreshSkillsState: async () => {},
+      revealSkillsInsert: async () => {},
+      panelError: (e, d) => d,
+      diffListHtml: () => "",
+      fetchLocalDiffs: async () => [],
+      showDeployConflict: async () => {},
+      ...over,
+    });
+
+    const mergeLocal = run("mergeLocal", "endpointId, skillName, kind", bindings());
+    mergeLocal("agents", "my-skill", "unique");
+    assert.equal(modal.title, "导入主仓库");
+    assert.equal(
+      modal.bodyHtml,
+      "将把 全局目录 <b>~/.agents/skills</b> 中的目录 <b>my-skill</b> 复制到主仓库（.git 除外）；"
+      + "随后该目录移入回收站（可恢复），原位改为链接指向主仓库副本，此后可部署到任意 Agent。",
+    );
+    mergeLocal("agents", "my-skill", "matching");
+    assert.equal(
+      modal.bodyHtml,
+      "全局目录 <b>~/.agents/skills</b> 中的目录 <b>my-skill</b> 与主仓库内容一致，不会复制文件："
+      + "该目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。",
+    );
+    mergeLocal("claude", "my-skill", "matching");
+    assert.equal(
+      modal.bodyHtml,
+      "Agent <b>Claude Code</b> 上的目录 <b>my-skill</b> 与主仓库内容一致，不会复制文件："
+      + "该目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。",
+    );
+
+    // 兜底弹窗（前端已按分类分流，正常走不到）：来源照写实
+    const mergeConflict = run("mergeLocal", "endpointId, skillName, kind",
+      bindings({ api: async () => ({ conflict: true, diffs: [] }) }));
+    mergeConflict("agents", "my-skill", "unique");
+    await modal.onConfirm();
+    assert.equal(modal.title, "仓库已有同名 skill");
+    assert.equal(
+      modal.bodyHtml,
+      "仓库中的 <b>my-skill</b> 与 全局目录 <b>~/.agents/skills</b> 中的版本内容不同，未做任何改动。"
+      + "请用「分叉冲突」分区的两个方向按钮处理。",
+    );
+
+    const removeBroken = run("removeBrokenJunction", "endpointId, skillName", bindings());
+    removeBroken("agents", "my-skill");
+    assert.equal(modal.title, "移除失效链接");
+    assert.equal(
+      modal.bodyHtml,
+      "将移除 全局目录 <b>~/.agents/skills</b> 中指向 <b>my-skill</b> 的失效链接（只删链接，不影响任何真实目录）。",
+    );
+    removeBroken("claude", "my-skill");
+    assert.equal(
+      modal.bodyHtml,
+      "将移除 Agent <b>Claude Code</b> 上指向 <b>my-skill</b> 的失效链接（只删链接，不影响任何真实目录）。",
+    );
+
+    const resolveConflict = run("resolveConflict", "endpointId, skillName, direction", bindings());
+    await resolveConflict("agents", "my-skill", "repo");
+    assert.equal(modal.title, "以主仓库覆盖全局目录");
+    assert.equal(modal.confirmText, "覆盖全局目录");
+    assert.equal(
+      modal.bodyHtml,
+      "全局目录 <b>~/.agents/skills</b> 中的真实目录 <b>my-skill</b> 将移入回收站，并改为链接指向主仓库版本。",
+    );
+    await modal.onConfirm();
+    assert.equal(toastMsg, "已以主仓库版本覆盖 全局目录");
+    await resolveConflict("agents", "my-skill", "local");
+    assert.equal(modal.title, "以全局目录覆盖主仓库");
+    assert.equal(modal.confirmText, "覆盖主仓库");
+    assert.equal(
+      modal.bodyHtml,
+      "主仓库中的 <b>my-skill</b> 旧版本将先移入回收站（可恢复），再以 全局目录 <b>~/.agents/skills</b> 中的内容覆盖；"
+      + "各端点上指向该 skill 的链接会自动跟到新内容。",
+    );
+    await modal.onConfirm();
+    assert.equal(toastMsg, "已用全局目录中的版本覆盖主仓库（旧版在回收站）");
+    await resolveConflict("claude", "my-skill", "repo");
+    assert.equal(modal.title, "以主仓库覆盖 Agent");
+    assert.equal(modal.confirmText, "覆盖 Agent");
+    assert.equal(
+      modal.bodyHtml,
+      "Agent <b>Claude Code</b> 上的真实目录 <b>my-skill</b> 将移入回收站，并改为链接指向主仓库版本。",
+    );
+    await modal.onConfirm();
+    assert.equal(toastMsg, "已以主仓库版本覆盖 Claude Code");
+    await resolveConflict("claude", "my-skill", "local");
+    await modal.onConfirm();
+    assert.equal(toastMsg, "已用 Claude Code 上的版本覆盖主仓库（旧版在回收站）");
+
+    const showDeployConflict = run("showDeployConflict", "endpointId, skillName, diffs", bindings());
+    showDeployConflict("claude", "my-skill", []);
+    assert.equal(modal.title, "Agent 目录与仓库不一致");
+    assert.equal(
+      modal.bodyHtml,
+      "Agent <b>Claude Code</b> 上已存在同名的真实目录 <b>my-skill</b>，内容与仓库不同。"
+      + "确认替换会将该目录移入回收站，并改为链接指向仓库版本。",
+    );
+    await modal.onConfirm();
+    assert.equal(toastMsg, "已替换并部署到 Claude Code");
+
+    const toggleDeploy = run("toggleDeploy", "endpointId, skillName, on, input", bindings());
+    await toggleDeploy("claude", "my-skill", true, null);
+    assert.equal(toastMsg, "已部署到 Claude Code");
+  });
+
+  it("批量/删除/分组标题改来源中性；旧模板「Agent + 内部 id」在整份脚本里绝迹", () => {
+    const batch = extractFn("confirmBatchMergeLocal", "items, kind");
+    assert.match(batch, /以下目录将逐项复制到主仓库（\.git 除外）；随后原目录移入回收站（可恢复），原位改为链接指向主仓库副本。/);
+    assert.match(batch, /以下目录与主仓库内容一致，不复制文件：原目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。/);
+    assert.doesNotMatch(batch, /Agent 目录|Agent 上的真实目录/);
+
+    const del = extractFn("confirmDeleteAnomalyItems", "items");
+    assert.match(del, /items\.length === 1 \? "删除本地目录" : `删除选中的 \$\{items\.length\} 个本地目录`/);
+    assert.match(del, /将把以下真实目录移入回收站：/);
+    assert.match(del, /删除本地目录不影响仓库内容/);
+    assert.match(del, /已删除 \$\{okCount\} 个本地目录/);
+    assert.doesNotMatch(del, /Agent 目录|Agent 本地目录|Agent 上的实体目录/);
+
+    const anomalies = extractFn("renderSkillsAnomalies", "");
+    assert.match(anomalies, /分叉冲突（与仓库同名但内容不同）/);
+    assert.doesNotMatch(anomalies, /Agent 与仓库同名/);
+    assert.match(anomalies, /以主仓库覆盖\$\{skillsSourceIsGlobal\(ep\.id\) \? "全局目录" : " Agent"\}/);
+    assert.match(anomalies, /以\$\{skillsSourceIsGlobal\(ep\.id\) \? "全局目录" : " Agent"\}覆盖主仓库/);
+
+    // 其它出口的来源措辞也经共用函数，不再直拼内部 id
+    assert.match(extractFn("toggleDeploy", "endpointId, skillName, on, input"), /已部署到 \$\{skillsSourceName\(endpointId\)\}/);
+    assert.doesNotMatch(panelJs, /Agent <b>\$\{escapeHtml\(endpointId\)\}<\/b>/);
+  });
+});

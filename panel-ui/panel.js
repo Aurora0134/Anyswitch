@@ -8272,6 +8272,34 @@ async function api(method, path, body) {
     return p;
   }
 
+  // ── 弹窗/回执里指代「来源」的共用措辞 ─────────────────────────────
+  // 识别面把全局目录（~/.agents/skills）也扫进来，但它「不是任何 Agent」：状态里
+  // 单列在 globalEndpoint（部署名单 endpoints 不含它）。所以一律经这里取名——
+  // Agent 用显示名（Claude Code…，取名池与「查看差异」同源），全局目录写全
+  // 「全局目录 + ~ 路径」；查不到显示名才退回内部 id（状态未就绪的极端路径）。
+  function skillsGlobalEndpoint() {
+    return (skillsState && skillsState.globalEndpoint) || null;
+  }
+  function skillsSourceIsGlobal(endpointId) {
+    const globalEp = skillsGlobalEndpoint();
+    return Boolean(globalEp && endpointId === globalEp.id);
+  }
+  function skillsSourceName(endpointId) {
+    if (skillsSourceIsGlobal(endpointId)) return "全局目录";
+    const globalEp = skillsGlobalEndpoint();
+    const pool = [...((skillsState && skillsState.endpoints) || []), ...(globalEp ? [globalEp] : [])];
+    return pool.find((e) => e.id === endpointId)?.label || endpointId;
+  }
+  // 正文短语：Agent →「Agent <b>Claude Code</b> 上」；全局目录 →「全局目录 <b>~/.agents/skills</b> 中」。
+  // 方位词收进短语，句子直接接「的目录 / 的内容 / 指向…」，两类来源共用一套句式。
+  function skillsSourcePhrase(endpointId) {
+    const globalEp = skillsGlobalEndpoint();
+    if (globalEp && endpointId === globalEp.id) {
+      return `全局目录 <b>${escapeHtml(shortHomePath(globalEp.skillsDir))}</b> 中`;
+    }
+    return `Agent <b>${escapeHtml(skillsSourceName(endpointId))}</b> 上`;
+  }
+
   // 已有主仓库且换到不同路径时先过确认弹窗：候选按钮是一键直切，没有这道闸，
   // 误点一下主仓库就换了。首次设置（含尚未设置、路径失效后的重设）不设闸，
   // 那是用户本来就要走完的流程。
@@ -8816,8 +8844,8 @@ async function api(method, path, body) {
       title: isMatching ? `批量转为主仓库托管（${items.length} 项）` : `批量导入主仓库（${items.length} 项）`,
       danger: false,
       bodyHtml: (isMatching
-        ? "以下 Agent 目录与主仓库内容一致，不复制文件：Agent 上的真实目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。"
-        : "以下 Agent 目录将逐项复制到主仓库（.git 除外），随后 Agent 上的真实目录移入回收站（可恢复），原位改为链接。")
+        ? "以下目录与主仓库内容一致，不复制文件：原目录将移入回收站（可恢复），原位改为指向主仓库副本的链接。"
+        : "以下目录将逐项复制到主仓库（.git 除外）；随后原目录移入回收站（可恢复），原位改为链接指向主仓库副本。")
         + `<div style="margin-top:8px;">${listHtml}</div>`,
       confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
@@ -8860,11 +8888,11 @@ async function api(method, path, body) {
         ? "这是该 skill 唯一副本，删除后仅从回收站可恢复。"
         : `其中 ${uniqCount} 项是该 skill 唯一副本，删除后仅从回收站可恢复。`);
     }
-    if (uniqCount < items.length) notes.push("一致可迁移项主仓库仍有副本，删除 Agent 目录不影响仓库内容。");
+    if (uniqCount < items.length) notes.push("一致可迁移项主仓库仍有副本，删除本地目录不影响仓库内容。");
     showSkillsModal({
-      title: items.length === 1 ? "删除 Agent 本地目录" : `删除选中的 ${items.length} 个 Agent 目录`,
+      title: items.length === 1 ? "删除本地目录" : `删除选中的 ${items.length} 个本地目录`,
       danger: true,
-      bodyHtml: `将把以下 Agent 上的实体目录移入回收站：<div style="margin-top:8px;">${listHtml}</div><div style="margin-top:8px; color:var(--danger);">${notes.join("<br>")}</div>`,
+      bodyHtml: `将把以下真实目录移入回收站：<div style="margin-top:8px;">${listHtml}</div><div style="margin-top:8px; color:var(--danger);">${notes.join("<br>")}</div>`,
       confirmText: "移入回收站",
       onConfirm: async () => {
         let okCount = 0, failCount = 0;
@@ -8880,7 +8908,7 @@ async function api(method, path, body) {
         // 失败必须显式报错：数量之外给出首个失败原因
         toast(failCount
           ? `删除完成：成功 ${okCount}、失败 ${failCount}。首个失败原因：${firstError}`
-          : `已删除 ${okCount} 个 Agent 目录`, failCount > 0);
+          : `已删除 ${okCount} 个本地目录`, failCount > 0);
         anomalyChecked.matching.clear();
         anomalyChecked.unique.clear();
         // 乐观更新：回收站删除每条约 1-3s，先把成功项从本地 state 移除并立即
@@ -9157,12 +9185,12 @@ async function api(method, path, body) {
     }
     if (diverged.length) {
       sections.push(
-        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>分叉冲突（Agent 与仓库同名但内容不同）</div>` +
+        `<div class="skills-group-title"${sections.length ? "" : firstStyle}>分叉冲突（与仓库同名但内容不同）</div>` +
         diverged.map(({ ep, entry }) => rowHtml(ep, entry,
           '<span class="badge badge-danger">分叉冲突</span>',
           `<button class="btn btn-mini" data-diff="${key(ep, entry)}">查看差异</button>` +
-          `<button class="btn btn-mini" data-resolve-repo="${key(ep, entry)}">以主仓库覆盖 Agent</button>` +
-          `<button class="btn btn-danger btn-mini" data-resolve-local="${key(ep, entry)}">以 Agent 覆盖主仓库</button>`)).join(""),
+          `<button class="btn btn-mini" data-resolve-repo="${key(ep, entry)}">以主仓库覆盖${skillsSourceIsGlobal(ep.id) ? "全局目录" : " Agent"}</button>` +
+          `<button class="btn btn-danger btn-mini" data-resolve-local="${key(ep, entry)}">以${skillsSourceIsGlobal(ep.id) ? "全局目录" : " Agent"}覆盖主仓库</button>`)).join(""),
       );
     }
     if (matching.length) {
@@ -9262,7 +9290,7 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "移除失效链接",
       danger: true,
-      bodyHtml: `将移除 Agent <b>${escapeHtml(endpointId)}</b> 上指向 <b>${escapeHtml(skillName)}</b> 的失效链接（只删链接，不影响任何真实目录）。`,
+      bodyHtml: `将移除 ${skillsSourcePhrase(endpointId)}指向 <b>${escapeHtml(skillName)}</b> 的失效链接（只删链接，不影响任何真实目录）。`,
       confirmText: "移除",
       onConfirm: async () => {
         try {
@@ -9348,21 +9376,29 @@ async function api(method, path, body) {
   // 分叉冲突的两个显式方向；两个方向的终态都是 Agent 侧目录变 junction 指向主仓库。
   async function resolveConflict(endpointId, skillName, direction) {
     const isRepo = direction === "repo";
+    const globalSrc = skillsSourceIsGlobal(endpointId);
+    const src = skillsSourcePhrase(endpointId);
     let diffs = [];
     try {
       diffs = await fetchLocalDiffs(endpointId, skillName);
     } catch { /* 差异取不到也允许继续，确认框少一份清单而已 */ }
     showSkillsModal({
-      title: isRepo ? "以主仓库覆盖 Agent" : "以 Agent 覆盖主仓库",
+      title: isRepo
+        ? (globalSrc ? "以主仓库覆盖全局目录" : "以主仓库覆盖 Agent")
+        : (globalSrc ? "以全局目录覆盖主仓库" : "以 Agent 覆盖主仓库"),
       danger: true,
       bodyHtml: isRepo
-        ? `Agent <b>${escapeHtml(endpointId)}</b> 上的真实目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为链接指向主仓库版本。${diffListHtml(diffs)}`
-        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以 Agent <b>${escapeHtml(endpointId)}</b> 上的内容覆盖；其他 Agent 指向该 skill 的链接会自动跟到新内容。${diffListHtml(diffs)}`,
-      confirmText: isRepo ? "覆盖 Agent" : "覆盖主仓库",
+        ? `${src}的真实目录 <b>${escapeHtml(skillName)}</b> 将移入回收站，并改为链接指向主仓库版本。${diffListHtml(diffs)}`
+        : `主仓库中的 <b>${escapeHtml(skillName)}</b> 旧版本将先移入回收站（可恢复），再以 ${src}的内容覆盖；各端点上指向该 skill 的链接会自动跟到新内容。${diffListHtml(diffs)}`,
+      confirmText: isRepo ? (globalSrc ? "覆盖全局目录" : "覆盖 Agent") : "覆盖主仓库",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/resolve-conflict", { endpointId, skillName, direction });
-          toast(isRepo ? "已以主仓库版本覆盖 Agent" : "已以 Agent 版本覆盖主仓库（旧版在回收站）");
+          toast(isRepo
+            ? `已以主仓库版本覆盖 ${skillsSourceName(endpointId)}`
+            : globalSrc
+              ? "已用全局目录中的版本覆盖主仓库（旧版在回收站）"
+              : `已用 ${skillsSourceName(endpointId)} 上的版本覆盖主仓库（旧版在回收站）`);
         } catch (e) {
           toast(panelError(e, "覆盖失败"), true);
         }
@@ -9385,7 +9421,7 @@ async function api(method, path, body) {
           showDeployConflict(endpointId, skillName, d.diffs || []);
           return; // 不刷新：等待用户在 modal 中决定
         }
-        toast(`已部署到 ${endpointId}`);
+        toast(`已部署到 ${skillsSourceName(endpointId)}`);
       } else {
         await api("POST", "/api/skills/undeploy", { endpointId, skillName });
         toast("已解除部署");
@@ -9415,12 +9451,12 @@ async function api(method, path, body) {
     showSkillsModal({
       title: "Agent 目录与仓库不一致",
       danger: true,
-      bodyHtml: `Agent <b>${escapeHtml(endpointId)}</b> 上已存在同名的真实目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该目录移入回收站，并改为链接指向仓库版本。${diffListHtml(diffs)}`,
+      bodyHtml: `${skillsSourcePhrase(endpointId)}已存在同名的真实目录 <b>${escapeHtml(skillName)}</b>，内容与仓库不同。确认替换会将该目录移入回收站，并改为链接指向仓库版本。${diffListHtml(diffs)}`,
       confirmText: "替换为仓库版本",
       onConfirm: async () => {
         try {
           await api("POST", "/api/skills/deploy", { endpointId, skillName, force: true });
-          toast(`已替换并部署到 ${endpointId}`);
+          toast(`已替换并部署到 ${skillsSourceName(endpointId)}`);
         } catch (e) {
           toast(panelError(e, "替换失败"), true);
         }
@@ -9435,12 +9471,13 @@ async function api(method, path, body) {
   // resolve-conflict，正常走不到这里；后端 conflict 响应仍留兜底弹窗。
   function mergeLocal(endpointId, skillName, kind) {
     const isMatching = kind === "matching";
+    const src = skillsSourcePhrase(endpointId);
     showSkillsModal({
       title: isMatching ? "转为主仓库托管" : "导入主仓库",
       danger: false,
       bodyHtml: isMatching
-        ? `Agent <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：Agent 上的真实目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。`
-        : `将把 Agent <b>${escapeHtml(endpointId)}</b> 上的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外），随后 Agent 上的真实目录移入回收站（可恢复），原位改为链接，此后其他 Agent 也可部署该 skill。`,
+        ? `${src}的目录 <b>${escapeHtml(skillName)}</b> 与主仓库内容一致，不会复制文件：该目录将移入回收站（可恢复），原位改为链接指向主仓库副本，此后以主仓库为唯一来源。`
+        : `将把 ${src}的目录 <b>${escapeHtml(skillName)}</b> 复制到主仓库（.git 除外）；随后该目录移入回收站（可恢复），原位改为链接指向主仓库副本，此后可部署到任意 Agent。`,
       confirmText: isMatching ? "转为托管" : "导入",
       onConfirm: async () => {
         // null = 请求失败；[] = 走通了但没有新行（转托管复用仓库既有副本）
@@ -9452,7 +9489,7 @@ async function api(method, path, body) {
             showSkillsModal({
               title: "仓库已有同名 skill",
               danger: false,
-              bodyHtml: `仓库中的 <b>${escapeHtml(skillName)}</b> 与 Agent 上的版本内容不同，未做任何改动。请用「分叉冲突」分区的两个方向按钮处理。${diffListHtml(d.diffs || [])}`,
+              bodyHtml: `仓库中的 <b>${escapeHtml(skillName)}</b> 与 ${src}的版本内容不同，未做任何改动。请用「分叉冲突」分区的两个方向按钮处理。${diffListHtml(d.diffs || [])}`,
               confirmText: "知道了",
               onConfirm: null,
             });
