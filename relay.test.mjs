@@ -3,6 +3,8 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { packWireId, unpackWireId, buildWireCatalog, UNPACK_REASON } from "./wire-id.mjs";
 import { anthropicToOpenAI, openAIToAnthropic, buildModelsResponse, clientEffortFromAnthropic } from "./protocol.mjs";
@@ -10,6 +12,7 @@ import { NARRATION_THINKING_SIGNATURE } from "./thinking-signature.mjs";
 import { createEffortInjector } from "./effort-injection.mjs";
 import { createHandler, extractPresentedToken } from "./handler.mjs";
 import { createServiceHealth } from "./service-health.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 const TOKEN = "test-token-0123456789abcdef";
 
@@ -391,6 +394,134 @@ test("anthropicToOpenAI drops Claude Code's fixed reasoning_effort", () => {
     "m",
   );
   assert.ok(!("reasoning_effort" in out));
+});
+
+// ---------- mid-conversation system rewrite（会话缓存优化） ----------
+
+test("anthropicToOpenAI rewrites mid-conversation system to user under the gate, head system untouched", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+        { role: "assistant", content: "hello" },
+        { role: "system", content: "# Environment update\nfresh" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // The top-level system (convertSystem product) stays the leading system
+  // message, verbatim — the gate never touches the prompt's real head.
+  assert.equal(out.messages[0].role, "system");
+  assert.equal(out.messages[0].content, "head rules");
+  // Every mid-conversation system becomes user one-for-one: no message is
+  // merged, split or dropped, and the content is carried through verbatim.
+  assert.deepEqual(out.messages.slice(1), [
+    { role: "user", content: "hi" },
+    { role: "user", content: "<total_tokens>Infinite tokens left</total_tokens>" },
+    { role: "assistant", content: "hello" },
+    { role: "user", content: "# Environment update\nfresh" },
+  ]);
+});
+
+test("anthropicToOpenAI keeps mid-conversation system as system when the gate is off", () => {
+  const out = anthropicToOpenAI(
+    {
+      system: "head rules",
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "system", content: "marker" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "system", content: "head rules" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "marker" },
+  ]);
+});
+
+test("mid-system rewrite is role-only: block-array and string content convert exactly as a user message's would", () => {
+  const blockForm = [{ type: "text", text: "env update" }];
+  const rewritten = anthropicToOpenAI(
+    { messages: [{ role: "system", content: blockForm }, { role: "system", content: "plain" }] },
+    "m",
+    { midSystemRewrite: true },
+  );
+  // Control run with the roles already user and the gate off: identical
+  // content must produce identical messages — the gate swaps only the role.
+  const control = anthropicToOpenAI(
+    { messages: [{ role: "user", content: blockForm }, { role: "user", content: "plain" }] },
+    "m",
+    { midSystemRewrite: false },
+  );
+  assert.deepEqual(rewritten.messages, control.messages);
+  assert.equal(rewritten.messages.length, 2);
+});
+
+test("consecutive mid-system messages rewrite one-for-one without merging", () => {
+  const out = anthropicToOpenAI(
+    {
+      messages: [
+        { role: "system", content: "first" },
+        { role: "system", content: "second" },
+        { role: "system", content: "third" },
+      ],
+    },
+    "m",
+    { midSystemRewrite: true },
+  );
+  assert.deepEqual(out.messages, [
+    { role: "user", content: "first" },
+    { role: "user", content: "second" },
+    { role: "user", content: "third" },
+  ]);
+});
+
+test("mid-system rewrite is idempotent: translating the same body twice yields identical messages", () => {
+  const body = {
+    system: "head",
+    messages: [
+      { role: "user", content: "q" },
+      { role: "system", content: "marker" },
+      { role: "assistant", content: "a" },
+      { role: "system", content: [{ type: "text", text: "blocks" }] },
+    ],
+  };
+  const first = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  const second = anthropicToOpenAI(body, "m", { midSystemRewrite: true });
+  assert.deepEqual(first.messages, second.messages);
+  // head system + 4 源消息：改写只换 role，一条不多、一条不少。
+  assert.equal(first.messages.length, 5);
+});
+
+test("unpinned gate falls back to settings: absent key rewrites, a written false stops it", () => {
+  const tmp = mkTestDir("anyswitch-midsys-fallback-");
+  const settingsPath = join(tmp, "Anyswitch", "settings.json");
+  mkdirSync(join(tmp, "Anyswitch"), { recursive: true });
+  const prevLocalAppData = process.env.LOCALAPPDATA;
+  process.env.LOCALAPPDATA = tmp;
+  try {
+    // 无 settings 文件：默认开（生产现状——键不存在，优化直接生效）。
+    const on = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(on.messages[0].role, "user");
+    assert.equal(on.messages[0].content, "marker");
+    // 面板写入 false 后下一请求即关闭，无需重启。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: false }));
+    const off = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(off.messages[0].role, "system");
+    // 写回 true（或删键）恢复改写。
+    writeFileSync(settingsPath, JSON.stringify({ midSystemRewrite: true }));
+    const back = anthropicToOpenAI({ messages: [{ role: "system", content: "marker" }] }, "m");
+    assert.equal(back.messages[0].role, "user");
+  } finally {
+    if (prevLocalAppData === undefined) delete process.env.LOCALAPPDATA;
+    else process.env.LOCALAPPDATA = prevLocalAppData;
+  }
 });
 
 test("openAIToAnthropic echoes the wire ID and maps stop reasons", () => {

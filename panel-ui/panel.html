@@ -2093,8 +2093,10 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
       </div>
 
-      <!-- Claude Code 卡：一个启动开关 + 一组档位接管。bypassPermissions 开 =
-           一键启动 Claude Code 时跳过工具权限确认；「接管默认模型」是四档映射的
+      <!-- Claude Code 卡：一个启动开关 + 一个会话缓存开关 + 一组档位接管。bypassPermissions 开 =
+           一键启动 Claude Code 时跳过工具权限确认；「会话缓存优化」（midSystemRewrite，
+           默认开）把对话中途的 system 提示改写成普通消息发送，保住渠道的前缀缓存；
+           「接管默认模型」是四档映射的
            总开关，关时收起下方四行、映射暂停生效但已填的值保留。四行是下拉选择
            （select），值 = anyswitch 托管模型的完整模型名（anthropic/渠道/模型），
            首项「不接管」= 该档位不接管；卡面只显示「[渠道名] 模型显示名」，wire
@@ -2121,6 +2123,16 @@ if (window.panelStartupController) panelStartupPlay();
             </div>
             <label class="toggle">
               <input type="checkbox" id="claudeBypassPermissionsToggle">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="modal-item">
+            <div>
+              <div class="modal-item-title">会话缓存优化</div>
+              <div class="modal-item-desc">将对话中途的系统提示转为普通消息发送，避免部分渠道缓存失效导致长会话重复计费</div>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="midSystemRewriteToggle">
               <span class="slider"></span>
             </label>
           </div>

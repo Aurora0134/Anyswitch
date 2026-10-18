@@ -44,20 +44,31 @@ describe("panel.html · Claude Code 档位映射卡", () => {
     assert.match(tierCard, /<\/svg>\s*\n\s*Claude Code\s*\n\s*<\/h2>/);
   });
 
-  it("卡内是两个开关 + 收起容器里的四行：启动开关与接管总开关各自唯一", () => {
+  it("卡内是三个开关 + 收起容器里的四行：启动开关、会话缓存开关与接管总开关各自唯一", () => {
     assert.equal((html.match(/id="claudeBypassPermissionsToggle"/g) ?? []).length, 1, "bypassPermissions 开关 id 必须恰好出现一次");
+    assert.equal((html.match(/id="midSystemRewriteToggle"/g) ?? []).length, 1, "会话缓存优化开关 id 必须恰好出现一次");
     assert.equal((html.match(/id="claudeTierEnabledToggle"/g) ?? []).length, 1, "接管总开关 id 必须恰好出现一次");
-    for (const id of ["claudeBypassPermissionsToggle", "claudeTierEnabledToggle"]) {
+    for (const id of ["claudeBypassPermissionsToggle", "midSystemRewriteToggle", "claudeTierEnabledToggle"]) {
       assert.match(tierCard, new RegExp(`<input type="checkbox" id="${id}">`));
     }
     assert.match(tierCard, /<div class="settings-tier-rows" id="claudeTierRows">/);
   });
 
-  it("两个开关的文案是用户拍板过的原句", () => {
+  it("两个既有开关的文案是用户拍板过的原句", () => {
     assert.match(tierCard, /<div class="modal-item-title">以 bypassPermissions 启动<\/div>/);
     assert.match(tierCard, /<div class="modal-item-desc">从 Anyswitch 启动 Claude Code 时跳过工具权限确认，Agent 可自主执行命令、修改文件。有误操作风险，请仅在可信环境开启。<\/div>/);
     assert.match(tierCard, /<div class="modal-item-title">接管默认模型<\/div>/);
     assert.match(tierCard, /<div class="modal-item-desc">开启后，Sonnet \/ Opus \/ Fable \/ Haiku 四个默认档位按下方指定模型应答；关闭后暂停接管，下方配置收起，已填写的映射保留。<\/div>/);
+  });
+
+  it("会话缓存优化开关是 [CC] 卡第二项：bypass 行之后、接管默认模型之前，文案逐字使用批准原句", () => {
+    const iBypass = tierCard.indexOf('id="claudeBypassPermissionsToggle"');
+    const iCache = tierCard.indexOf('id="midSystemRewriteToggle"');
+    const iTier = tierCard.indexOf('id="claudeTierEnabledToggle"');
+    assert.ok(iBypass >= 0 && iCache > iBypass && iTier > iCache, "开关顺序：bypass → 会话缓存优化 → 接管默认模型");
+    // 文案是用户逐字批准的（版 A），一个字不得增删改。
+    assert.match(tierCard, /<div class="modal-item-title">会话缓存优化<\/div>/);
+    assert.match(tierCard, /<div class="modal-item-desc">将对话中途的系统提示转为普通消息发送，避免部分渠道缓存失效导致长会话重复计费<\/div>/);
   });
 
   it("四行按 Sonnet / Opus / Fable / Haiku 排列，控件 id 各自唯一", () => {
@@ -129,8 +140,20 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.match(js, /api\("POST", "\/api\/settings", \{ claudeBypassPermissions: next \}\)/);
     assert.match(js, /claudeTierEnabledToggle\.onchange = async \(\) => \{/);
     assert.match(js, /api\("POST", "\/api\/settings", \{ claudeTierMappingsEnabled: next \}\)/);
-    // 两个开关都在 settingsSaving 里占位，保存期间挡住轮询回灌。
-    assert.match(js, /settingsSaving = \{[^}]*claudeBypassPermissions: false, claudeTierEnabled: false/);
+    // 开关都在 settingsSaving 里占位，保存期间挡住轮询回灌。
+    assert.match(js, /settingsSaving = \{[^}]*claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false/);
+  });
+
+  it("会话缓存优化开关：即改即存、失败回滚、轮询回灌全走既有模式", () => {
+    assert.match(js, /midSystemRewriteToggle\.onchange = async \(\) => \{/);
+    assert.match(js, /api\("POST", "\/api\/settings", \{ midSystemRewrite: next \}\)/);
+    // 失败/异常都回滚到原值，成功以服务端归一值为最终真相。
+    const handler = sliceBetween(js, "if (midSystemRewriteToggle) {\n      midSystemRewriteToggle.onchange", "\n    }\n\n    // 接管默认模型总开关", "会话缓存优化 onchange");
+    assert.match(handler, /midSystemRewriteToggle\.checked = !next;/);
+    assert.match(handler, /const saved = d\.settings\?\.midSystemRewrite;/);
+    assert.match(handler, /toast\("设置保存失败", true\)/);
+    // 轮询回灌：不在保存中的窗口里按服务端值刷复选框。
+    assert.match(js, /if \(!settingsSaving\.midSystemRewrite && midSystemRewriteToggle && d\.settings && typeof d\.settings\.midSystemRewrite === "boolean"\) \{\n\s*midSystemRewriteToggle\.checked = d\.settings\.midSystemRewrite;\n\s*\}/);
   });
 
   it("总开关关闭即收起四行，回灌与切换都走 applyClaudeTierUi", () => {

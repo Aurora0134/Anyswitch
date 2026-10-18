@@ -3543,6 +3543,7 @@ async function api(method, path, body) {
     const loggingEnabledToggle = $("loggingEnabledToggle");
     const logLevelSelect = $("logLevelSelect");
     const claudeBypassPermissionsToggle = $("claudeBypassPermissionsToggle");
+    const midSystemRewriteToggle = $("midSystemRewriteToggle");
     const claudeTierEnabledToggle = $("claudeTierEnabledToggle");
     const sparkWindowInput = $("sparkWindowInput");
     const keepAliveRetriesInput = $("keepAliveRetriesInput");
@@ -3561,7 +3562,7 @@ async function api(method, path, body) {
       enhanced: { title: "抗截断", desc: "整段验证后一次性交付，截断或上游故障会静默重试；代价是回合内看不到逐字输出、失败重试会整段重跑。", toast: "已启用抗截断" },
     };
     let settingsLoadGen = 0;
-    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false };
+    const settingsSaving = { keepAlive: false, followAgent: false, injectEffort: false, spark: false, keepAliveRetries: false, keepAliveEndpoints: false, claudeBypassPermissions: false, midSystemRewrite: false, claudeTierEnabled: false, loggingEnabled: false, logLevel: false, credentialCache: false, autoDownloadUpdates: false, bleedingEdge: false };
     // 端点图标开关：从未切换过的端点不在 keepAliveEndpoints 里，按「跟随总开关」
     // 显示为启用——与服务端 resolveKeepAliveEnabled 的缺省口径一致，因此首次打开
     // 总开关时天然是全端点亮起，无需初始化写入。
@@ -3905,6 +3906,9 @@ async function api(method, path, body) {
         }
         if (!settingsSaving.claudeBypassPermissions && claudeBypassPermissionsToggle && d.settings && typeof d.settings.claudeBypassPermissions === "boolean") {
           claudeBypassPermissionsToggle.checked = d.settings.claudeBypassPermissions;
+        }
+        if (!settingsSaving.midSystemRewrite && midSystemRewriteToggle && d.settings && typeof d.settings.midSystemRewrite === "boolean") {
+          midSystemRewriteToggle.checked = d.settings.midSystemRewrite;
         }
         if (!settingsSaving.spark) {
           const fromApi = d.sparkWindowPoints ?? d.settings?.sparkWindowPoints;
@@ -4504,6 +4508,38 @@ async function api(method, path, body) {
         } finally {
           settingsSaving.claudeBypassPermissions = false;
           claudeBypassPermissionsToggle.removeAttribute("aria-busy");
+        }
+      };
+    }
+
+    // 会话缓存优化：改写的是发往上游的消息形态，已在跑的请求不受影响；relay 每
+    // 请求现读该设置，保存后下一请求即切换，无需重启任何常驻进程。
+    if (midSystemRewriteToggle) {
+      midSystemRewriteToggle.onchange = async () => {
+        if (settingsSaving.midSystemRewrite) {
+          midSystemRewriteToggle.checked = !midSystemRewriteToggle.checked;
+          return;
+        }
+        const next = midSystemRewriteToggle.checked;
+        settingsSaving.midSystemRewrite = true;
+        settingsLoadGen += 1;
+        midSystemRewriteToggle.setAttribute("aria-busy", "true");
+        try {
+          const d = await api("POST", "/api/settings", { midSystemRewrite: next });
+          if (!d.ok) {
+            midSystemRewriteToggle.checked = !next;
+            toast("设置保存失败", true);
+          } else {
+            const saved = d.settings?.midSystemRewrite;
+            if (typeof saved === "boolean") midSystemRewriteToggle.checked = saved;
+            toast(next ? "已开启会话缓存优化" : "已关闭会话缓存优化");
+          }
+        } catch (e) {
+          midSystemRewriteToggle.checked = !next;
+          toast(panelError(e, "请求失败"), true);
+        } finally {
+          settingsSaving.midSystemRewrite = false;
+          midSystemRewriteToggle.removeAttribute("aria-busy");
         }
       };
     }
