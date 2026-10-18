@@ -1339,21 +1339,26 @@ export function createSkillsService({
       const repoPath = configuredRepo();
       const repoExists = Boolean(repoPath) && existsSync(repoPath);
       const skills = repoExists ? scanRepo(repoPath) : [];
+      // 同径退让：技能目录与主仓库重叠的端点撤下（按配置路径判定，目录暂不
+      // 存在同样退让）——该目录以主仓库身份在场，技能全部在仓库列表，重叠端
+      // 点上的本地/部署状态只会是同一段磁盘的幻影（收编比一致、异常卡可一
+      // 键删到本体），不撤会误导与误删。
+      const scanned = scanEndpoints(repoExists ? repoPath : null, { homeDir })
+        .filter((ep) => !pathsOverlap(ep.skillsDir, repoPath));
       return {
         repoPath,
         repoConfigured: Boolean(repoPath),
         // 空仓库是合法状态（确认后可设、也可被删空），"无效"只留给目录真消失
         repoValid: repoExists,
         skills,
-        // 只报已安装 Agent 的端点：目录是否存在不再进 UI 口径（装好但从未
-        // 部署过的 Agent 首次部署时自建目录），「装没装」由 isEndpointVisible 判定；
-        // 全局端点豁免（它不是 Agent）。同径退让：技能目录与主仓库重叠的端点
-        // 撤下（按配置路径判定，目录暂不存在同样退让）——该目录以主仓库身份
-        // 在场，技能全部在仓库列表，重叠端点上的本地/部署状态只会是同一段
-        // 磁盘的幻影（收编比一致、异常卡可一键删到本体），不撤会误导与误删。
-        endpoints: scanEndpoints(repoExists ? repoPath : null, { homeDir })
-          .filter((ep) => !pathsOverlap(ep.skillsDir, repoPath))
-          .filter((ep) => endpointUsable(ep.id)),
+        // endpoints＝纯 Agent 清单（「装没装」由 isEndpointVisible 判定，目录是
+        // 否存在不进 UI 口径）。全局目录不在其中：部署开关行、全部部署/解除、
+        // 部署计数分母都吃这份名单，全局目录不是部署目标、不该以 Agent 行出现
+        // ——它的识别价值单列在 globalEndpoint（异常卡/比对标题的数据源）。
+        endpoints: scanned.filter((ep) => ep.id !== GLOBAL_ENDPOINT_ID && endpointUsable(ep.id)),
+        // 全局目录单列：恒在场（不是 Agent，不参与「装没装」），同径退让时为
+        // null。API 层的部署/解除对它照常可用（UI 不提供入口，不加新闸）。
+        globalEndpoint: scanned.find((ep) => ep.id === GLOBAL_ENDPOINT_ID) ?? null,
         candidates: [
           ...(base.ANYSWITCH_SKILLS_REPO ? [base.ANYSWITCH_SKILLS_REPO] : []),
           ...REPO_CANDIDATES.map((parts) => join(homeDir, ...parts)),

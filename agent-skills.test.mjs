@@ -1168,7 +1168,10 @@ describe("createSkillsService", () => {
       assert.equal(state.repoConfigured, false);
       assert.equal(state.repoValid, false);
       assert.deepEqual(state.skills, []);
-      assert.equal(state.endpoints.length, 10);
+      // endpoints＝纯 Agent 清单；全局目录单列在 globalEndpoint（不当部署目标）
+      assert.equal(state.endpoints.length, 9);
+      assert.equal(state.globalEndpoint.id, "agents");
+      assert.equal(state.globalEndpoint.dirExists, false);
       assert.throws(() => svc.setRepoPath(join(dir, "ghost")), /不存在/);
       // 空目录默认仍拒收，且带机读码供面板走「确认后放行」分支
       assert.throws(() => svc.setRepoPath(home), (err) => {
@@ -1242,8 +1245,10 @@ describe("createSkillsService 端点可见性（未安装的 Agent 不进清单�
       });
       svc.setRepoPath(repo);
       const state = svc.getState();
-      // 全局端点不是 Agent，不参与「装没装」过滤：即便检测一个都看不见它也在册
-      assert.deepEqual(state.endpoints.map((e) => e.id), ["claude", "agents"]);
+      // endpoints＝纯 Agent 清单（「装没装」过滤后）；全局端点不是 Agent，不进
+      // 这份部署名单，也不参与过滤——它单列在 globalEndpoint，恒在场
+      assert.deepEqual(state.endpoints.map((e) => e.id), ["claude"]);
+      assert.equal(state.globalEndpoint.id, "agents");
 
       await assert.rejects(
         svc.deploy({ endpointId: "kimi", skillName: "skill-a" }),
@@ -1881,12 +1886,17 @@ describe("全局端点识别", () => {
         isEndpointVisible: (id) => id === "claude",
       });
       svc.setRepoPath(repo);
-      // 豁免：全局端点不在环境检测里，也不能被「未安装」挡在部署外
-      assert.deepEqual(svc.getState().endpoints.map((e) => e.id), ["claude", "agents"]);
+      // 豁免：全局端点不在环境检测里，也不能被「未安装」挡在部署外（API 层
+      // 保留能力，界面不再提供开关——endpoints 名单恒为纯 Agent）
+      assert.deepEqual(svc.getState().endpoints.map((e) => e.id), ["claude"]);
+      assert.equal(svc.getState().globalEndpoint.id, "agents");
       const r = await svc.deploy({ endpointId: "agents", skillName: "skill-a" });
       assert.equal(r.ok, true);
       const linkPath = join(home, ".agents", "skills", "skill-a");
       assert.equal(lstatSync(linkPath).isSymbolicLink(), true, "junction landed in the global dir");
+      // 识别面数据照常来自 globalEndpoint：junction 条目可见（失效链接清理依赖此口径）
+      const deployedState = svc.getState();
+      assert.ok(deployedState.globalEndpoint.entries.some((e) => e.kind === "junction" && e.repoSkill === "skill-a"));
       const u = await svc.undeploy({ endpointId: "agents", skillName: "skill-a" });
       assert.equal(u.ok, true);
       assert.equal(existsSync(linkPath), false);
@@ -1907,7 +1917,8 @@ describe("全局端点同径退让（主仓库与识别目录重叠）", () => {
       const svc = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
       svc.setRepoPath(globalDir);
       const state = svc.getState();
-      assert.equal(state.endpoints.some((e) => e.id === "agents"), false, "同径端点退让");
+      assert.equal(state.globalEndpoint, null, "同径退让：globalEndpoint 撤下");
+      assert.equal(state.endpoints.some((e) => e.id === "agents"), false, "Agent 名单本就不含全局");
       assert.deepEqual(state.skills.map((s) => s.name), ["worktree-merge"], "技能全部在主仓库列表");
       assert.ok(state.endpoints.some((e) => e.id === "claude"), "其余端点不受影响");
     } finally {
@@ -1926,13 +1937,13 @@ describe("全局端点同径退让（主仓库与识别目录重叠）", () => {
       // 父形态：repo = home（全局目录的祖先）——异常卡的「一致可删除」会指到本体，必须撤
       const svcParent = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
       svcParent.setRepoPath(home);
-      assert.equal(svcParent.getState().endpoints.some((e) => e.id === "agents"), false, "父形态退让");
+      assert.equal(svcParent.getState().globalEndpoint, null, "父形态退让");
 
       // 子形态：repo = 全局目录里的子目录——部署链接会落到仓库路径上，同样撤
       writeSkill(join(globalDir, "sub", "skill-b"), { name: "skill-b" });
       const svcChild = createSkillsService({ homeDir: home, base, recycleDirFn: mockRecycle([]) });
       svcChild.setRepoPath(join(globalDir, "sub"));
-      assert.equal(svcChild.getState().endpoints.some((e) => e.id === "agents"), false, "子形态退让");
+      assert.equal(svcChild.getState().globalEndpoint, null, "子形态退让");
     } finally {
       cleanup();
     }

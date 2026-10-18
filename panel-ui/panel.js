@@ -8887,7 +8887,11 @@ async function api(method, path, body) {
         // 重渲染让列表即时反映，随后 refreshSkillsState 与服务端真实状态对齐
         if (okItems.length && skillsState && skillsState.endpoints) {
           const removed = new Set(okItems.map((it) => `${it.ep.id}\x01${it.entry.name}`));
-          for (const ep of skillsState.endpoints) {
+          const epTargets = [
+            ...skillsState.endpoints,
+            ...(skillsState.globalEndpoint ? [skillsState.globalEndpoint] : []),
+          ];
+          for (const ep of epTargets) {
             ep.entries = (ep.entries || []).filter((entry) => !removed.has(`${ep.id}\x01${entry.name}`));
           }
           renderSkillsAnomalies();
@@ -9050,7 +9054,12 @@ async function api(method, path, body) {
   function renderSkillsAnomalies() {
     const body = $("skillsAnomalyBody");
     const badge = $("skillsAnomalyBadge");
-    const endpoints = (skillsState && skillsState.endpoints) || [];
+    // Agent 端点之外并入全局目录（globalEndpoint 单列字段）：这里的职责是
+    // 识别与治理各目录里的本地技能/失效链接，全局目录属于这一面——它不进
+    // 部署名单（endpoints），只进这里。
+    const agentEps = (skillsState && skillsState.endpoints) || [];
+    const globalEp = skillsState && skillsState.globalEndpoint;
+    const endpoints = globalEp ? [globalEp, ...agentEps] : agentEps;
     const broken = [];   // 失效链接（指向主仓库的链接已断）
     const diverged = []; // 分叉冲突（matchesRepo === false）
     const matching = []; // 一致可迁移（matchesRepo === true）
@@ -9173,10 +9182,15 @@ async function api(method, path, body) {
       btn.onclick = () => removeBrokenJunction(...btn.getAttribute("data-remove-broken").split(SEP));
     });
     body.querySelectorAll("button[data-diff]").forEach((btn) => {
-      // 弹窗右栏要写 Agent 的显示名（ZCode / Kimi Code…），不写 claude 那种内部 id
+      // 弹窗右栏要写目录的显示名（ZCode / Kimi Code…），不写 claude 那种内部 id；
+      // 全局目录不在 endpoints 名单里，查名时把 globalEndpoint 一并纳入
       btn.onclick = () => {
         const [endpointId, skillName] = btn.getAttribute("data-diff").split(SEP);
-        const label = (skillsState.endpoints || []).find((e) => e.id === endpointId)?.label;
+        const pool = [
+          ...(skillsState.endpoints || []),
+          ...(skillsState.globalEndpoint ? [skillsState.globalEndpoint] : []),
+        ];
+        const label = pool.find((e) => e.id === endpointId)?.label;
         showLocalDiff(endpointId, skillName, label);
       };
     });
