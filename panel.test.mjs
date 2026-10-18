@@ -10776,6 +10776,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     const state = {
       backendUp: false, session: null,
       fetches: 0, polled: 0, synced: 0, renderedData: 0, renderedTabs: 0, connected: null,
+      themeReports: 0,
     };
     const sandbox = new Function("els", "state", `
       const $ = (id) => els[id] ?? null;
@@ -10806,6 +10807,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       function scheduleTerminalFit() {}
       function pollTerminalSessions() { state.polled += 1; }
       function syncTerminalActivityStream() { state.synced += 1; }
+      function reportTerminalThemeToBackend(force) { state.themeReports += 1; state.themeForce = !!force; }
       ${bodies}
       return {
         render: renderTerminalPreviewSession,
@@ -10934,6 +10936,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(state.polled, 0, "失败不补拍轮询");
     assert.equal(state.synced, 0, "失败不同步活跃流");
     assert.equal(state.connected, null, "失败不建流");
+    assert.equal(state.themeReports, 0, "失败链路不补报亮暗");
 
     state.backendUp = true;
     state.session = { id: "t1", backend: true };
@@ -10945,6 +10948,8 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(state.polled, 1, "成功链路补拍归属轮询");
     assert.equal(state.synced, 1, "成功链路同步活跃真值流");
     assert.deepEqual(state.connected, { id: "t1", backend: true }, "成功链路建流进真会话");
+    assert.equal(state.themeReports, 1, "成功链路强制补报一次亮暗");
+    assert.equal(state.themeForce, true, "补报走强制口径（宿主可能重启遗忘）");
   });
 
   it("vm 真跑首连零会话：不自动 POST 新建，就绪位照常落定", async () => {

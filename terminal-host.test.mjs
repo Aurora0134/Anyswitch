@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTerminalHost, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
+import { createTerminalHost, createThemeProbeTracker, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
@@ -14,10 +14,11 @@ class FakePty {
     this.dataListener = null;
     this.exitListener = null;
     this.resizeCalls = [];
+    this.writeLog = [];
   }
   onData(fn) { this.dataListener = fn; }
   onExit(fn) { this.exitListener = fn; }
-  write(data) { this.dataListener?.(`echo:${data}`); }
+  write(data) { this.writeLog.push(data); this.dataListener?.(`echo:${data}`); }
   resize(cols, rows) {
     this.resizeCalls.push([cols, rows]);
     this.cols = cols;
@@ -1530,6 +1531,91 @@ test("纯外壳会话（无 agentId）即使 pid 活着也不树杀——泄漏�
   });
   try {
     assert.deepEqual(killed, [], "纯外壳不在清扫面内");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("主题探针追踪器：整段/跨块各触发一次、纯输出不误报", () => {
+  const tracker = createThemeProbeTracker();
+  assert.deepEqual(tracker.push("\x1b[?996n"), ["\x1b[?996n"], "整段查询即触发");
+  assert.deepEqual(tracker.push("x"), [], "尾部已完整触发过，不重复报");
+  const split = createThemeProbeTracker();
+  assert.deepEqual(split.push("\x1b[?9"), [], "前半段悬而不报");
+  assert.deepEqual(split.push("96n"), ["\x1b[?996n"], "跨块拼齐触发一次");
+  assert.deepEqual(split.push("y"), [], "拼齐之后不再报");
+  const splitNotify = createThemeProbeTracker();
+  assert.deepEqual(splitNotify.push("\x1b[?2"), []);
+  assert.deepEqual(splitNotify.push("031h"), ["\x1b[?2031h"], "2031 开关同样跨块可拼");
+  const noise = createThemeProbeTracker();
+  assert.deepEqual(noise.push("hello\x1b[c\x1b]11;?\x07world\x1b[?997;1n"), [], "DA1/OSC11 查询与 997 报告都不是探针");
+  assert.deepEqual(noise.push("\x1b[?5n\x1b[6n"), [], "DSR 私参族不误报");
+});
+
+test("终端主题契约：996n 即答、2031 开关订阅、亮暗变化扇出 997 且同值幂等", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-theme-`);
+  const spawned = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => { const pty = new FakePty(); spawned.push(pty); return pty; } },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const create = async (label) => (await fetch(url("/terminal/sessions"), {
+    method: "POST", headers: headers(host), body: JSON.stringify({ label, cwd: root, shell: "powershell" }),
+  })).json();
+  const setTheme = async (dark) => {
+    const response = await fetch(url("/terminal/theme"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ dark }),
+    });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    await create("订阅者");
+    await create("旁听者");
+    const [subscriber, bystander] = spawned;
+
+    // 未上报过主题时按暗色默认应答 996n
+    subscriber.dataListener("\x1b[?996n");
+    assert.deepEqual(subscriber.writeLog, ["\x1b[?997;1n"], "996n 按默认暗色即答");
+
+    // 旁听者没开 2031，亮暗翻转不该收到任何字节
+    subscriber.dataListener("\x1b[?2031h");
+    let flipped = await setTheme(false);
+    assert.equal(flipped.status, 200);
+    assert.deepEqual(flipped.body, { ok: true, dark: false });
+    assert.deepEqual(subscriber.writeLog, ["\x1b[?997;1n", "\x1b[?997;2n"], "订阅者收到亮色 997 扇出");
+    assert.deepEqual(bystander.writeLog, [], "未订阅会话零扇出");
+
+    // 同值重报幂等：不追加报告
+    await setTheme(false);
+    assert.equal(subscriber.writeLog.length, 2, "同值重报不扇出");
+
+    // 翻回暗色再次扇出；随后 2031l 退订，此后翻转静默
+    await setTheme(true);
+    assert.deepEqual(subscriber.writeLog.slice(-1), ["\x1b[?997;1n"], "翻回暗色扇出 1 号报告");
+    subscriber.dataListener("\x1b[?2031l");
+    await setTheme(false);
+    assert.equal(subscriber.writeLog.length, 3, "退订后不再扇出");
+
+    // 996n 应答跟随已上报值：当前亮色答 2
+    bystander.dataListener("\x1b[?996n");
+    assert.deepEqual(bystander.writeLog, ["\x1b[?997;2n"], "996n 应答随上报的亮暗走");
+
+    // 非法报文 400
+    const invalid = await fetch(url("/terminal/theme"), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ dark: "yes" }),
+    });
+    assert.equal(invalid.status, 400);
+
+    // 跨块 996n（拆成两段 PTY 输出）也只应答一次
+    const splitSession = await create("跨块");
+    const splitPty = spawned[2];
+    splitPty.dataListener("\x1b[?9");
+    splitPty.dataListener("96n");
+    assert.deepEqual(splitPty.writeLog, ["\x1b[?997;2n"], "跨块查询拼齐即答，一次不多");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });

@@ -5510,11 +5510,25 @@ async function api(method, path, body) {
     if (cs.colorScheme !== "dark") Object.assign(theme, TERMINAL_ANSI_LIGHT);
     return theme;
   }
+  // 终端亮暗上报（match terminal 契约的面板半边）：虚拟终端里的 agent（如
+  // kimi 的 Auto (match terminal)）靠宿主的 997 报告感知亮暗变化，而亮暗的
+  // 事实源在面板——setTheme/系统亮暗/皮肤重刷都会走到这里，值变了才上报，
+  // 失败视同未上报等下次重试。颜色深浅本身不变、只换肤时深浅值不变即静默。
+  let terminalThemeReported = null;
+  function reportTerminalThemeToBackend(force = false) {
+    const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
+    if (!force && terminalThemeReported === dark) return;
+    terminalThemeReported = dark;
+    api("POST", "/api/terminal/theme", { dark }).catch(() => {
+      terminalThemeReported = null;
+    });
+  }
   // 主题/皮肤/系统亮暗变化后重刷在跑的各列 xterm；不在跑（未建流）则等下次创建时自然取新值
   function applyTerminalXtermTheme() {
     for (const column of terminalColumns) {
       if (column.xterm) column.xterm.options.theme = terminalXtermTheme();
     }
+    reportTerminalThemeToBackend();
   }
 
   // 终端侧栏折线的原生规格：与 .terminal-metric-spark 的 CSS 盒等大（56×22，
@@ -6735,6 +6749,9 @@ async function api(method, path, body) {
       renderTerminalPreviewSession();
       pollTerminalSessions();
       syncTerminalActivityStream();
+      // 首连/重连补报一次亮暗：宿主重启会忘掉上报值（回落暗色默认），此处
+      // 强制重发把真值追平——刚被 fetch 证明可用，上报不会空转。
+      reportTerminalThemeToBackend(true);
     }).catch((error) => {
       terminalFirstConnectSettled = true;
       terminalBackendReady = false;
