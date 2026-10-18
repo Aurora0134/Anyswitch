@@ -65,7 +65,7 @@ What the panel shows directly: Dashboard (relay status, live route chains, recen
 
 Screenshots live in [`docs/screenshots/`](docs/screenshots/) — clone the repo and open them directly to verify the pages.
 
-<sub>Screenshots come from the panel running this same code; the version badge the panel read at startup is still 0.6.6 from before the bump.</sub>
+<sub>Screenshots come from the panel running this same code; channel names, usage figures, and the skills list are masked demo data.</sub>
 
 ---
 

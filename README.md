@@ -65,7 +65,7 @@ Claude Code / Codex / 其他 agent
 
 截图在 [`docs/screenshots/`](docs/screenshots/)，克隆后可直接打开核对页面形态。
 
-<sub>截图摄于本机同一份代码的面板；面板启动时读到的版本徽标还是升号前的 0.6.6。</sub>
+<sub>截图摄于本机同一份代码的面板；渠道名、用量数字、Skills 清单等均为脱敏演示数据。</sub>
 
 ---
 
