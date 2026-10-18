@@ -8403,7 +8403,6 @@ describe("虚拟终端底部自动对齐", () => {
     const fnSrc = alignSrc("installTerminalBottomAlign", /function installTerminalBottomAlign\(column, term\) \{[\s\S]*?\n  \}/);
     const intentSrc = alignSrc("TERMINAL_SCROLL_INTENT_MS", /const TERMINAL_SCROLL_INTENT_MS = \d+;/);
     const bandSrc = alignSrc("TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX", /const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = \d+;/);
-    const colIdSrc = alignSrc("terminalColumnElementId", /function terminalColumnElementId\(column, base\) \{[\s\S]*?\n  \}/);
     const state = { now: 100000, alignOn: true, viewHidden: false, rafQueue: [] };
     const sandbox = new Function("state", `
       ${intentSrc}
@@ -8421,7 +8420,6 @@ describe("虚拟终端底部自动对齐", () => {
       }
       const els = {};
       function $(id) { return els[id] || null; }
-      ${colIdSrc}
       function terminalBottomAlignEnabled() { return state.alignOn; }
       ${fnSrc}
       return { installTerminalBottomAlign, makeEl, els };
@@ -8443,7 +8441,7 @@ describe("虚拟终端底部自动对齐", () => {
       scrollToBottom() { state.scrollToBottomCount = (state.scrollToBottomCount || 0) + 1; },
       scrollToLines() { state.scrollToLinesCount = (state.scrollToLinesCount || 0) + 1; },
     };
-    const column = { elementIdSuffix: "", imeHold: null, bottomAlignIntentAt: 0, bottomAlignTrimFrame: null };
+    const column = { imeHold: null, bottomAlignIntentAt: 0, bottomAlignTrimFrame: null };
     sandbox.installTerminalBottomAlign(column, term);
     const flush = () => { for (const cb of state.rafQueue.splice(0)) cb(); };
     return { state, root, screen, term, column, writes, flush };

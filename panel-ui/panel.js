@@ -5586,7 +5586,9 @@ async function api(method, path, body) {
   function installTerminalBottomAlign(column, term) {
     const root = term.element;
     if (!root) return;
-    const screen = $(terminalColumnElementId(column, "terminalScreen"));
+    // 单列地形：多列撤出后列内元素 id 后缀机制不在，外层滚动盒即静态基名 id；
+    // 多列回炉时这里须改回按列定址（状态仍挂列对象，动作语义不变）。
+    const screen = $("terminalScreen");
     if (!screen) return;
     const trimOuterBand = () => {
       column.bottomAlignTrimFrame = null;
