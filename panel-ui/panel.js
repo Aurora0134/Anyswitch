@@ -3874,6 +3874,10 @@ async function api(method, path, body) {
         if (!terminalRestoreSaving && d.settings && typeof d.settings.terminalRestoreSessions === "boolean") {
           terminalRestoreSessions = d.settings.terminalRestoreSessions;
         }
+        // 「底部自动对齐」：同 restore 开关的回填纪律，保存中的那次切换不被回灌盖回。
+        if (!terminalBottomAlignSaving && d.settings && typeof d.settings.terminalBottomAutoAlign === "boolean") {
+          terminalBottomAutoAlign = d.settings.terminalBottomAutoAlign;
+        }
         if (!settingsSaving.injectEffort && injectEffortToggle && d.settings && typeof d.settings.injectThinkingEffort === "boolean") {
           injectEffortToggle.checked = d.settings.injectThinkingEffort;
         }
@@ -4684,6 +4688,10 @@ async function api(method, path, body) {
       // 组字事件的列绑定形态：监听挂/摘按引用配对，闭包把列固进回调。
       imeArmHandler: null,
       imeReleaseHandler: null,
+      // 底部自动对齐（installTerminalBottomAlign）：最近一次用户上滚意图时间戳与
+      // 已排队的裁剪帧。状态挂列对象保多列语义——动作只作用本列的外层滚动盒。
+      bottomAlignIntentAt: 0,
+      bottomAlignTrimFrame: null,
     };
   }
   const terminalColumns = [createTerminalColumn("terminalXtermHost")];
@@ -5564,6 +5572,54 @@ async function api(method, path, body) {
     });
   }
 
+  // 底部自动对齐（设置 terminalBottomAutoAlign，缺省关）：窗口收放等尺寸错配期，xterm
+  // 渲染层旧高度溢出宿主盒、被外层 .terminal-screen 的 overflow:auto 接住，形成底部可
+  // 滚入的空白带（CDP 取证：收窗期实测 263–353px 可滚余量，寿命跟随错配期而非瞬态；
+  // 内层 .xterm-viewport 全程贴底恒等，空白不在 buffer 层）。开启后用户上滚翻看历史
+  // （wheel 上滚 / Shift+PageUp，与跳顶护栏同一 term root capture 事件面，不在
+  // .terminal-screen 上另挂 wheel）即把外层 scrollTop 收 0 吃掉带子；外层滚动事件流内
+  // 带意图时效窗同做收带（滚动事件无标记，裸信会把布局抖动误判成用户意图）。动作只写
+  // 外层 scrollTop，绝不写 .xterm-viewport、绝不调 scrollToBottom/scrollToLines（内层
+  // 滚动权属 xterm 内核与护栏）。外层自然停靠位即 0（有效底部语义：带收掉后滚动链终点
+  // = 内容底），「再滚回底部恰好对齐」自动成立。
+  const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = 4;
+  function installTerminalBottomAlign(column, term) {
+    const root = term.element;
+    if (!root) return;
+    // 单列地形：多列撤出后列内元素 id 后缀机制不在，外层滚动盒即静态基名 id；
+    // 多列回炉时这里须改回按列定址（状态仍挂列对象，动作语义不变）。
+    const screen = $("terminalScreen");
+    if (!screen) return;
+    const trimOuterBand = () => {
+      column.bottomAlignTrimFrame = null;
+      if (!terminalBottomAlignEnabled()) return;
+      if (column.imeHold) return;             // 组字期不动几何
+      if ($("terminalView")?.hidden) return;  // 隐藏期不量不动
+      const gap = screen.scrollHeight - screen.clientHeight;
+      if (gap <= TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX) return;  // 无带/行高取整残余不动
+      if (screen.scrollTop <= 0) return;                     // 幂等闸：已在停靠位零写
+      screen.dataset.bottomAlignTrim = String(gap);          // 调试属性（取证用）
+      screen.scrollTop = 0;
+    };
+    const scheduleTrim = () => {
+      if (column.bottomAlignTrimFrame !== null) return;
+      column.bottomAlignTrimFrame = requestAnimationFrame(trimOuterBand);
+    };
+    const noteUpIntent = () => {
+      column.bottomAlignIntentAt = Date.now();
+      scheduleTrim();
+    };
+    root.addEventListener("wheel", (event) => { if (event.deltaY < 0) noteUpIntent(); }, { capture: true, passive: true });
+    root.addEventListener("keydown", (event) => {
+      if (event.shiftKey && event.key === "PageUp") noteUpIntent();
+    }, { capture: true, passive: true });
+    // 滚动事件流内逐步收：带内滚动（滚轮到底后链入外层）在意图时效窗内即收——
+    // 任何滚速下带子随滚动逐拍消失，视口内容不跳。
+    screen.addEventListener("scroll", () => {
+      if (Date.now() - column.bottomAlignIntentAt <= TERMINAL_SCROLL_INTENT_MS) scheduleTrim();
+    }, { passive: true });
+  }
+
   function ensureTerminalXterm(column) {
     const host = $(column.hostElementId);
     if (!host || column.xterm || !window.Terminal) return column.xterm;
@@ -5617,6 +5673,7 @@ async function api(method, path, body) {
     }
     term.open(host);
     installTerminalFollowBottomGuard(term);
+    installTerminalBottomAlign(column, term);
     if (window.WebglAddon?.WebglAddon) {
       try {
         column.webglAddon = new window.WebglAddon.WebglAddon();
@@ -6254,6 +6311,16 @@ async function api(method, path, body) {
     return terminalRestoreSessions;
   }
 
+  // 「底部自动对齐」开关：settings.json 键 terminalBottomAutoAlign，缺省视为关（opt-in）。
+  // 面板加载时随 loadSettingsState 从 GET /api/settings 回填；读不到一律视为关。
+  let terminalBottomAutoAlign = false;
+  // 保存中守卫：一次切换未落库前再切换先翻回，也挡住设置回灌盖掉刚选的值。
+  let terminalBottomAlignSaving = false;
+
+  function terminalBottomAlignEnabled() {
+    return terminalBottomAutoAlign;
+  }
+
   // 关停后清空本地会话状态：页签、流、活动 id 一并走，下次启动从服务端清单重建。
   // 页签栏直接清空，不走 renderTerminalPreviewTabs——未就绪时它读的是预览稿种子会话。
   function clearTerminalLocalSessions() {
@@ -6397,10 +6464,12 @@ async function api(method, path, body) {
     };
     const settingsModal = $("terminalSettingsModal");
     const restoreToggle = $("terminalRestoreToggle");
+    const bottomAlignToggle = $("terminalBottomAlignToggle");
     const closeTerminalSettings = () => { if (settingsModal) settingsModal.classList.remove("show"); };
     const settingsGear = $("terminalSettingsBtn");
     if (settingsGear) settingsGear.onclick = () => {
       if (restoreToggle) restoreToggle.checked = terminalRestoreEnabled();
+      if (bottomAlignToggle) bottomAlignToggle.checked = terminalBottomAlignEnabled();
       if (settingsModal) settingsModal.classList.add("show");
     };
     const closeBtn = $("terminalSettingsCloseBtn");
@@ -6437,6 +6506,37 @@ async function api(method, path, body) {
       } finally {
         terminalRestoreSaving = false;
         restoreToggle.removeAttribute("aria-busy");
+      }
+    };
+    if (bottomAlignToggle) bottomAlignToggle.onchange = async () => {
+      if (terminalBottomAlignSaving) {
+        bottomAlignToggle.checked = !bottomAlignToggle.checked;
+        return;
+      }
+      const next = bottomAlignToggle.checked;
+      terminalBottomAlignSaving = true;
+      terminalBottomAutoAlign = next;
+      bottomAlignToggle.setAttribute("aria-busy", "true");
+      try {
+        const d = await api("POST", "/api/settings", { terminalBottomAutoAlign: next });
+        if (!d.ok) {
+          terminalBottomAutoAlign = !next;
+          bottomAlignToggle.checked = !next;
+          toast("设置保存失败", true);
+        } else {
+          const saved = d.settings?.terminalBottomAutoAlign;
+          if (typeof saved === "boolean") {
+            terminalBottomAutoAlign = saved;
+            bottomAlignToggle.checked = saved;
+          }
+        }
+      } catch (e) {
+        terminalBottomAutoAlign = !next;
+        bottomAlignToggle.checked = !next;
+        toast(panelError(e, "请求失败"), true);
+      } finally {
+        terminalBottomAlignSaving = false;
+        bottomAlignToggle.removeAttribute("aria-busy");
       }
     };
   }
