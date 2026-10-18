@@ -8539,6 +8539,21 @@ describe("虚拟终端底部自动对齐", () => {
     assert.equal(writes.length, 1, "时效窗外再无动作——意图判定必须配窗，不裸信");
   });
 
+  it("布局型静态残留空带：带非滚动成因（/ 指令表收起后下方残留），无 scroll 事件史，上滚意图即收；无意图则静态保留", () => {
+    const { state, root, screen, writes, flush } = alignSandbox();
+    // 沙箱出厂即 scrollHeight>clientHeight 且 scrollTop>0：带是布局变化静态留下的，
+    // 全程不派发任何 scroll 事件——不模拟「滚进去」的过程，与窗口收放成因无关。
+    flush();
+    assert.equal(writes.length, 0, "功能不自愈：无用户意图，静态残留带原样保留");
+    state.now += 100000; // 静置再久也不动
+    flush();
+    assert.equal(screen.scrollTop, 120, "残留带静态存在，不被后台机制裁掉");
+    root.fire("wheel", { deltaY: -120 }); // 用户上滚翻看历史
+    flush();
+    assert.deepEqual(writes, [0], "上滚意图触发收带：成因无关，静态残留带同样被吃");
+    assert.equal(screen.scrollTop, 0, "外层回到自然停靠位");
+  });
+
   it("装配与共存：open 之后护栏先行、本功能随后；状态挂列对象", () => {
     const ensure = alignSrc("ensureTerminalXterm", /function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/);
     const openAt = ensure.indexOf("term.open(host)");
