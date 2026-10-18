@@ -2963,7 +2963,7 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(!panelHtml.includes("terminal-context-grid"), "与顶栏重复的工作目录/运行时间块已移除");
   });
 
-  it("最近请求 5 行视窗 + 四宫格数值改细 + 折线纵向贴两排字", () => {
+  it("最近请求 5 行视窗 + 四宫格数值改细 + 折线回 0.6.6 位置并右缘内收", () => {
     // 视窗：行高 40px、间距 6px，max-height = 5×40+4×6 = 224px，刚好 5 行；
     // 不足 5 条自然变矮（flex 列高由内容决定，无 min-height 撑高）。
     const listRule = panelCss.match(/\.terminal-request-list \{([^}]*)\}/)[1];
@@ -2974,18 +2974,16 @@ describe("panel.html 设置全页视图", () => {
     assert.ok(/\.terminal-request-item \{[^}]*height: 40px/.test(panelCss), "请求行高固定 40px");
     assert.ok(/\.terminal-request-item \{[^}]*flex: none/.test(panelCss), "行不可压——flex 子项默认 shrink 会压扁行高、视窗塞进 6+ 行");
     assert.ok(/\.terminal-request-item \{[^}]*align-items: center/.test(panelCss), "行内各栏垂直居中（中栏 TTFT 随行居中）");
-    // 四宫格：数值改细、折线原生 56×21.41（与生成器同规格，viewBox 1:1 不再拉伸），
-    // 格子改 grid——折线占右列、跨标签/数值两行，纵向上沿贴标签字墨迹上沿
-    // （align-self:start + margin-top:4.5px；行盒自然高不钉死，两排字布局零改动；
-    // 打回的 46px 方案贴行盒沿超出字墨迹沿，已被实测否决）。折线长宽比与看板
-    // 68:26 对齐：宽 56 不动、高下收，盒上沿原位、下沿向上收。
+    // 四宫格：数值改细、折线回到 0.6.6 发布版的 56×22 垂直居中位，再从格子右缘
+    // 内收 4px；格子仍为 grid——折线占右列、跨标签/数值两行，两排字左对齐位不动。
     assert.ok(/\.terminal-metric strong \{[^}]*font: 500 16px/.test(panelCss), "白色粗字改细（700→500）");
-    assert.ok(panelCss.includes("width: 56px; height: 21.41px;"), "折线原生 56×21.41（长宽比同看板 68:26，下沿上收）");
-    assert.ok(/\.terminal-metric-spark \{[^}]*align-self: start; margin-top: 4\.5px/.test(panelCss), "折线盒上沿贴标签字墨迹上沿");
+    assert.ok(panelCss.includes("width: 56px; height: 22px;"), "折线回到 0.6.6 原生 56×22");
+    assert.ok(/\.terminal-metric-spark \{[^}]*align-self: center/.test(panelCss), "折线垂直居中（0.6.6 位置）");
+    assert.ok(/\.terminal-metric-spark \{[^}]*transform: translateX\(-4px\)/.test(panelCss), "折线自原右缘左移 4px，且不改动两排字的占位宽度");
     assert.ok(panelCss.includes(".terminal-metric-spark svg { display: block; }"), "折线 SVG 块级化");
     assert.ok(panelCss.includes(".terminal-metric-row { display: contents; }"), "数值行拆盒并入格子 grid");
     assert.ok(/\.terminal-metric-spark \{[^}]*grid-row: 1 \/ span 2/.test(panelCss), "折线跨标签/数值两行");
-    assert.ok(panelJs.includes("{ w: 56, h: 21.41 }"), "终端侧栏折线生成规格 56×21.41 与 CSS 盒等大");
+    assert.ok(panelJs.includes("{ w: 56, h: 22 }"), "终端侧栏折线生成规格 56×22 与 CSS 盒等大");
     assert.ok(panelJs.includes("TERMINAL_SPARK_SIZE"), "侧栏折线尺寸随调用方传入生成器");
     // 来源语义改纯文本（副行「绝对时间 · 来源名」）：无图例的紫/青色编码退役
     assert.ok(!panelCss.includes("is-pool") && !panelCss.includes("--chan"), "来源色类与 --chan 已退役");
