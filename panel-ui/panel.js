@@ -4998,12 +4998,7 @@ async function api(method, path, body) {
   // 而崩；pointer 方案把移动/抬起监听挂 window，与页签 DOM 生命周期解耦，重渲不
   // 伤拖拽。跟随幻影是自建节点（克隆源页签），不在被重渲的页签条里。
   const TERMINAL_TAB_DRAG_THRESHOLD_PX = 6;
-  // 缝隙/边缘命中带 + 列体左右边区（M6 报障 2①②：14px 细带实测只有两条约 20-30px
-  // 竖带可触发，列体 99% 面积无落点）。边区取值 112：单列 pane 约 1000px 时左右
-  // 各一条易中的落点带，中央留 null 区避免整个列体都是落点；窄列两边区相接时
-  // 左边区优先（插到该列之前）。
-  const TERMINAL_TAB_DROP_EDGE_PX = 28;
-  const TERMINAL_TAB_DROP_SIDE_PX = 112;
+  const TERMINAL_TAB_DROP_EDGE_PX = 14;
   // 进行中的拖拽会话；null = 空闲。形状见 wireTerminalTabDrag 的构造处。
   let terminalTabDrag = null;
   // 拖拽落地后尾随的那一次 click 是按压尾声不是切签意图——吞掉一次即清
@@ -5013,32 +5008,25 @@ async function api(method, path, body) {
 
   // 落点判定状态机（纯函数，几何事实进、落点意图出，测试直接跑这条）：
   // panes = [{ left, right, top, bottom, tabsBar: { left, right, top, bottom } | null }]
-  // tailRegion = 列区之后的空间（单列态 inspector 占着的那块，多列态 inspector 隐藏
-  // 传 null）。命中优先级：某列页签条（→移入该列，本列→无操作）> 列体左右边区与
-  // 缝隙/边缘带（→该位置插新列）> 尾区（→最右插新列）> 无落点。
-  // 返回 { kind: "move-into", columnIndex } | { kind: "new-column", at }
+  // 命中优先级：某列页签条（→移入该列，本列→无操作）> 缝隙/左右边缘带（→插新列）
+  // > 无落点。返回 { kind: "move-into", columnIndex } | { kind: "new-column", at }
   // | { kind: "noop" } | null。
-  function classifyTerminalTabDrop(x, y, panes, sourceIndex, tailRegion = null) {
+  function classifyTerminalTabDrop(x, y, panes, sourceIndex) {
     if (!panes.length) return null;
     const first = panes[0];
+    const last = panes[panes.length - 1];
     if (y < first.top || y > first.bottom) return null;
+    if (x < first.left - TERMINAL_TAB_DROP_EDGE_PX || x > last.right + TERMINAL_TAB_DROP_EDGE_PX) return null;
     for (let i = 0; i < panes.length; i++) {
       const bar = panes[i].tabsBar;
       if (bar && x >= bar.left && x <= bar.right && y >= bar.top && y <= bar.bottom) {
         return i === sourceIndex ? { kind: "noop" } : { kind: "move-into", columnIndex: i };
       }
     }
-    // 列体左右边区（各 SIDE 宽）吞掉缝隙/边缘带：同一位移给出同一落点索引
-    for (let i = 0; i < panes.length; i++) {
-      const p = panes[i];
-      if (x >= p.left - TERMINAL_TAB_DROP_EDGE_PX && x <= Math.min(p.left + TERMINAL_TAB_DROP_SIDE_PX, p.right)) {
-        return { kind: "new-column", at: i };
-      }
-      if (x >= Math.max(p.right - TERMINAL_TAB_DROP_SIDE_PX, p.left) && x <= p.right + TERMINAL_TAB_DROP_EDGE_PX) {
-        return { kind: "new-column", at: i + 1 };
-      }
+    for (let i = 0; i <= panes.length; i++) {
+      const boundary = i === 0 ? first.left : i === panes.length ? last.right : panes[i].left;
+      if (Math.abs(x - boundary) <= TERMINAL_TAB_DROP_EDGE_PX) return { kind: "new-column", at: i };
     }
-    if (tailRegion && x >= tailRegion.left && x <= tailRegion.right) return { kind: "new-column", at: panes.length };
     return null;
   }
 
@@ -5060,14 +5048,7 @@ async function api(method, path, body) {
         tabsBar: barRect ? { left: barRect.left, right: barRect.right, top: barRect.top, bottom: barRect.bottom } : null,
       };
     });
-    const hit = classifyTerminalTabDrop(x, y, panes, drag.sourceIndex, (() => {
-      // 尾区 = 列区之后 inspector 占着的空间（单列态可见；多列态它 display:none、
-      // 矩形退化，不算尾区）——拖到 inspector 上 = 想往最右分列（M6 报障 2①）。
-      const inspector = $("terminalInspector");
-      if (!inspector || typeof inspector.getBoundingClientRect !== "function") return null;
-      const rect = inspector.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 ? { left: rect.left, right: rect.right } : null;
-    })());
+    const hit = classifyTerminalTabDrop(x, y, panes, drag.sourceIndex);
     if (!hit || hit.kind === "noop") return hit;
     if (hit.kind === "new-column") return { ...hit, forbidden: terminalColumns.length >= TERMINAL_MAX_COLUMNS };
     return { ...hit, column: terminalColumns[hit.columnIndex] };
@@ -5109,7 +5090,6 @@ async function api(method, path, body) {
         active: false,
         ghost: null,
         grabOffsetX: 0,
-        grabOffsetY: 0,
         previewEl: null,
         previewBar: null,
         previewSignature: "",
@@ -5161,9 +5141,7 @@ async function api(method, path, body) {
     if (rect) {
       ghost.style.width = `${rect.width}px`;
       ghost.style.height = `${rect.height}px`;
-      // 双轴抓取偏移（M6 报障 1：M5 只记 X 轴且 Y 固定下沉 14px，幻影激活即错位 33px）
       drag.grabOffsetX = event.clientX - rect.left;
-      drag.grabOffsetY = event.clientY - rect.top;
     }
     document.body.appendChild(ghost);
     drag.ghost = ghost;
@@ -5173,8 +5151,7 @@ async function api(method, path, body) {
   function moveTerminalTabDragGhost(drag, event) {
     if (!drag.ghost) return;
     const x = event.clientX - (drag.grabOffsetX || 0);
-    const y = event.clientY - (drag.grabOffsetY || 0);
-    drag.ghost.style.transform = `translate(${x}px, ${y}px)`;
+    drag.ghost.style.transform = `translate(${x}px, ${event.clientY + 14}px)`;
   }
 
   // 落点预览：目标签名不变不重复写 DOM。开新列=落点处展开的占位条（fixed 定位
@@ -5240,23 +5217,6 @@ async function api(method, path, body) {
     }
   }
 
-  // 落点提交后的屏幕流收口（M6 报障 3）：列管理 API 只渲页签/会话栏/底栏，屏幕流
-  // 归调用方整渲——M5 落点链漏了这道，源列 xterm 定投停留在被拖会话上继续活播、
-  // 新列无流空白。先就地合法化各列活跃指针（与 rebuildTerminalBackendSessions
-  // 同口径：活跃不在本列会话集里就让位本列第一个）——不先合法化就整渲，源列
-  // 「旧定投 == 未合法化的旧活跃」会让补挂判定跳过，左列永远卡在被拖会话上
-  //（探针实证）；再整渲各列：源列 bound≠active 触发重建、新列当拍建流。最后补
-  // 一次落盘：合法化与焦点切换都晚于 add/move 内部的落盘，把干净态对齐进存档。
-  function settleTerminalColumnsAfterDrop() {
-    for (const column of terminalColumns) {
-      const own = terminalColumnSessionEntries(column);
-      if (column.activeSessionId && own.some(([id]) => id === column.activeSessionId)) continue;
-      column.activeSessionId = own[0]?.[0] ?? null;
-    }
-    renderTerminalPreviewSession();
-    persistTerminalColumns();
-  }
-
   // 落点执行：开新列=同一同步块内加列+移入（不会被轮询的列空自收夹掉），
   // addTerminalColumn 返 null = 已达 3 列上限——禁投，无文案（设计定稿）；
   // 移入既有列走 M4 口径（源列空了自动收）；本列/无落点什么都不做。
@@ -5266,20 +5226,14 @@ async function api(method, path, body) {
     if (target.kind === "move-into") {
       if (target.column && moveTerminalSessionToColumn(sessionId, target.column)) {
         setTerminalFocusedColumn(target.column);
-        settleTerminalColumnsAfterDrop();
       }
       return;
     }
     if (target.kind === "new-column" && !target.forbidden) {
       const column = addTerminalColumn({ at: target.at });
       if (column) {
-        if (moveTerminalSessionToColumn(sessionId, column)) {
-          setTerminalFocusedColumn(column);
-          settleTerminalColumnsAfterDrop();
-        } else {
-          // 会话在拖拽途中消失：新列空转——当拍收掉，否则焦点落空列，整渲会闪整页空态
-          collapseEmptyTerminalColumns();
-        }
+        moveTerminalSessionToColumn(sessionId, column);
+        setTerminalFocusedColumn(column);
       }
     }
   }
@@ -6698,28 +6652,23 @@ async function api(method, path, body) {
         }
         terminalInspectorHollowCollapsed = false;
       }
-      // 拖拽分列进行中冻结 inspector 自动收展的几何改写（M6 报障 2③）：收放会
-      // 搬移 pane 矩形，把落点命中带从指针下挪走（预览「闪烁」的实测根因）。只冻
-      // 收展类与伴随的 fit，计数/内容/钉住簿记照跑；拖拽结束后下一拍轮询自然补涨。
-      if (!terminalTabDrag) {
-        inspector.classList.toggle("is-collapsed", collapsed);
-        workspace.classList.toggle("is-inspector-collapsed", collapsed);
-        if (wasCollapsed !== collapsed) {
-          // 细条形态随归属自动切换，开关的悬停/读屏口径必须同拍跟上，否则收拢
-          // 态的按钮还挂着「收起状态面板」，悬停说反话。
-          const button = $("terminalInspectorToggle");
-          if (button) {
-            button.setAttribute("aria-expanded", String(!collapsed));
-            button.title = collapsed ? "展开状态面板" : "收起状态面板";
-            button.setAttribute("aria-label", button.title);
-          }
+      inspector.classList.toggle("is-collapsed", collapsed);
+      workspace.classList.toggle("is-inspector-collapsed", collapsed);
+      if (wasCollapsed !== collapsed) {
+        // 细条形态随归属自动切换，开关的悬停/读屏口径必须同拍跟上，否则收拢
+        // 态的按钮还挂着「收起状态面板」，悬停说反话。
+        const button = $("terminalInspectorToggle");
+        if (button) {
+          button.setAttribute("aria-expanded", String(!collapsed));
+          button.title = collapsed ? "展开状态面板" : "收起状态面板";
+          button.setAttribute("aria-label", button.title);
         }
-        // 可见性归本函数管的只剩「从退场态回来」：poll 直达不经 clearTerminalEmpty-
-        // State，is-empty 单列只属零会话/未连接两态的退场机制，在此摘掉。
-        inspector.style.display = "";
-        workspace.classList.remove("is-empty");
-        if (wasEmpty || wasCollapsed !== collapsed) scheduleTerminalFit();
       }
+      // 可见性归本函数管的只剩「从退场态回来」：poll 直达不经 clearTerminalEmpty-
+      // State，is-empty 单列只属零会话/未连接两态的退场机制，在此摘掉。
+      inspector.style.display = "";
+      workspace.classList.remove("is-empty");
+      if (wasEmpty || wasCollapsed !== collapsed) scheduleTerminalFit();
     }
     // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
     // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
