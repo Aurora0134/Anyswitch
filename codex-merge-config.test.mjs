@@ -228,43 +228,28 @@ describe("model key protection (channel-qualified slugs)", () => {
   });
 });
 
-describe("[features] memories gate", () => {
-  it("declares the gate inside the managed block when the user has no [features] table", () => {
-    const { text, memoriesGate } = mergeCodexConfigToml("", extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(memoriesGate, "managed-block");
-    assert.match(text, /\[features\]\nmemories = false/);
-    // The declaration sits between the markers, after the provider tables.
-    assert.ok(text.indexOf("[features]") > text.indexOf(MANAGED_BEGIN));
-    assert.ok(text.indexOf("[features]") < text.indexOf(MANAGED_END));
+describe("[features] memories: user-owned key", () => {
+  it("writes no [features] table at all when the user's config carries none", () => {
+    const { text } = mergeCodexConfigToml("", extractManagedProviders(STORE), 47821, "tok");
+    assert.doesNotMatch(text, /\[features\]/);
+    assert.doesNotMatch(text, /^memories/m);
   });
 
-  it("appends the key to a user's [features] table and keeps the block silent on [features]", () => {
-    const existing = ["[features]", 'notify = true', ""].join("\n");
-    const { text, memoriesGate } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(memoriesGate, "absorbed");
-    assert.match(text, /\[features\]\nmemories = false\nnotify = true/);
-    // Exactly one [features] declaration across the whole file — a duplicate
-    // table would break TOML parsing.
-    assert.equal(text.split("[features]").length - 1, 1);
+  it("keeps a user-written memories = true verbatim, comment included", () => {
+    const existing = ["[features]", "memories = true # 我开的", 'notify = true', ""].join("\n");
+    const { text } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
+    assert.match(text, /^memories = true # 我开的$/m);
+    assert.equal(text.split("memories").length - 1, 1, "no duplicate key");
     const block = text.slice(text.indexOf(MANAGED_BEGIN));
     assert.doesNotMatch(block, /\[features\]/);
   });
 
-  it("presses a user-written memories = true back to false, keeping the comment", () => {
-    const existing = ["[features]", "memories = true # 我开的", 'notify = true', ""].join("\n");
-    const { text, memoriesGate } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(memoriesGate, "absorbed");
-    assert.match(text, /^memories = false # 我开的$/m);
-    assert.equal(text.split("memories").length - 1, 1, "no duplicate key");
-  });
-
-  it("restores the key when the user hand-deleted it", () => {
-    const once = mergeCodexConfigToml("[features]\n", extractManagedProviders(STORE), 47821, "tok");
-    const userDeleted = once.text.replace(/^memories = false\n/m, "");
-    const twice = mergeCodexConfigToml(userDeleted, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(twice.memoriesGate, "absorbed");
-    assert.match(twice.text, /\[features\]\nmemories = false/);
-    assert.equal(twice.text.split("[features]").length - 1, 1);
+  it("keeps a hand-deleted key deleted instead of restoring it", () => {
+    const userDeleted = ["[features]", 'notify = true', ""].join("\n");
+    const once = mergeCodexConfigToml(userDeleted, extractManagedProviders(STORE), 47821, "tok");
+    assert.doesNotMatch(once.text, /^memories/m, "deleted key stays deleted");
+    const twice = mergeCodexConfigToml(once.text, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(twice.text, once.text);
   });
 
   it("never touches the other keys in the user's table, including sub-tables", () => {
@@ -277,30 +262,29 @@ describe("[features] memories gate", () => {
       "",
     ].join("\n");
     const { text } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
-    // The gate lands before the sub-table header, inside the parent table.
-    assert.ok(text.indexOf("memories = false") < text.indexOf("[features.experimental]"));
-    assert.match(text, /\[features\.experimental\]\nenabled = true/);
-    assert.equal(text.split("[features]").length - 1, 1);
+    assert.match(text, /\[features\]\nnotify = true\n\n\[features\.experimental\]\nenabled = true/);
+    assert.equal(text.split("[features]").length - 1, 1, "parent and sub-table both survive, no duplicates");
   });
 
-  it("is idempotent on both paths and keeps foreign sections untouched", () => {
+  it("is idempotent and keeps foreign sections untouched", () => {
     const foreign = ['model = "gpt-6-astra"', "", "[desktop]", 'theme = "dark"', ""].join("\n");
-    const onceBlock = mergeCodexConfigToml(foreign, extractManagedProviders(STORE), 47821, "tok");
-    const twiceBlock = mergeCodexConfigToml(onceBlock.text, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(twiceBlock.text, onceBlock.text);
+    const once = mergeCodexConfigToml(foreign, extractManagedProviders(STORE), 47821, "tok");
+    const twice = mergeCodexConfigToml(once.text, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(twice.text, once.text);
+    assert.match(once.text, /\[desktop\]\ntheme = "dark"/);
+    assert.doesNotMatch(once.text, /\[features\]/);
 
     const userTable = ["[features]", 'notify = true', ""].join("\n");
-    const onceAbsorbed = mergeCodexConfigToml(userTable, extractManagedProviders(STORE), 47821, "tok");
-    const twiceAbsorbed = mergeCodexConfigToml(onceAbsorbed.text, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(twiceAbsorbed.text, onceAbsorbed.text);
-
-    assert.match(twiceAbsorbed.text, /\[features\]\nmemories = false\nnotify = true/);
-    assert.match(onceBlock.text, /\[desktop\]\ntheme = "dark"/);
+    const onceUser = mergeCodexConfigToml(userTable, extractManagedProviders(STORE), 47821, "tok");
+    const twiceUser = mergeCodexConfigToml(onceUser.text, extractManagedProviders(STORE), 47821, "tok");
+    assert.equal(twiceUser.text, onceUser.text);
+    assert.match(twiceUser.text, /\[features\]\nnotify = true/);
   });
 
-  it("survives a desktop-app rewrite that dropped the markers (orphan [features] is absorbed, not duplicated)", () => {
-    // Same disease as the provider-table strip: a markerless leftover of our
-    // own managed [features] must not cause a second declaration.
+  it("survives a desktop-app rewrite that dropped the markers (orphan [features] passes through, not duplicated)", () => {
+    // A markerless [features] leftover — e.g. a pre-removal managed gate the
+    // desktop rewrite stranded outside the markers — is ordinary user content
+    // now: exactly one declaration, value untouched.
     const rewritten = [
       "[features]",
       "memories = false",
@@ -313,7 +297,35 @@ describe("[features] memories gate", () => {
     assert.equal(text.split("[features]").length - 1, 1);
     assert.match(text, /\[features\]\nmemories = false/);
     const second = mergeCodexConfigToml(text, extractManagedProviders(STORE), 47821, "tok");
-    assert.equal(second.text, text, "stable once absorbed");
+    assert.equal(second.text, text, "stable across re-merges");
+  });
+
+  it("drops the gate a previous sync's managed block declared", () => {
+    // The managed block is regenerated wholesale on every merge, so a config
+    // written while the gate still existed loses it on the first sync after
+    // the removal — without the user's own [features] table being touched.
+    const oldManaged = [
+      "[features]",
+      "memories = true",
+      "",
+      MANAGED_BEGIN,
+      "# OpenAI Responses API channels routed through the local Anyswitch relay.",
+      "",
+      '[model_providers."anyswitch-poke-api"]',
+      'name = "Poke API"',
+      'base_url = "http://127.0.0.1:47821/openai/poke-api/v1"',
+      'wire_api = "responses"',
+      "",
+      "[features]",
+      "memories = false",
+      "",
+      MANAGED_END,
+      "",
+    ].join("\n");
+    const { text } = mergeCodexConfigToml(oldManaged, extractManagedProviders(STORE), 47821, "tok");
+    assert.match(text, /\[features\]\nmemories = true/, "the user's own value is preserved");
+    assert.equal(text.split("[features]").length - 1, 1, "the managed block's declaration is gone");
+    assert.equal(text.split("memories").length - 1, 1, "no gate key left in the block");
   });
 });
 
