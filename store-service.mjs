@@ -175,6 +175,58 @@ function pruneRouteChainNodes(store, shouldGo) {
   return pruned;
 }
 
+// 入池迁移（absorb-migration）：把路由链与虚拟模型链上指向 `poolId` 成员的
+// 节点改写为指向池本身。号池语义（pool-providers.mjs）规定成员在渠道清单面
+// 被吸收、绝不单独露面；链是同一语义下的第三张消费面——不迁移的话，入池前
+// 配好的链会永远直连成员渠道，静默绕过池扇出（改组号池想给的成员容灾从未
+// 生效，面板还照旧显示成员渠道名）。node+model 是链的去重键：改写后与既有
+// 池节点撞车时弃掉撞车的那一项（两条语义相同，留一条即可），链至少剩一跳，
+// 不会剪空。成员移出池不在此反向改（成员恢复独立可解析，链指它语义仍成立）。
+// 返回 [{ endpointId | virtualModel, migrated }]，只列真正改写过的链，
+// migrated = 被改写的节点数（含撞车被弃的那条——引用同样并进了池）。
+function migrateChainNodesToPool(store, poolId, memberIds) {
+  const memberSet = new Set(memberIds);
+  memberSet.delete(poolId);
+  if (memberSet.size === 0) return [];
+  const migrated = [];
+  const rewrite = (chain) => {
+    let count = 0;
+    const seen = new Set();
+    const next = [];
+    for (const item of chain) {
+      const rewritten = memberSet.has(item?.node);
+      if (rewritten) count++;
+      const node = rewritten ? poolId : item?.node;
+      const key = `${node}\n${item?.model}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      next.push(rewritten ? { node: poolId, model: item.model } : item);
+    }
+    return count === 0 ? null : { next, count };
+  };
+  const chains = store.routingChains;
+  if (chains && typeof chains === "object") {
+    for (const [endpointId, entry] of Object.entries(chains)) {
+      if (!entry || !Array.isArray(entry.chain)) continue;
+      const result = rewrite(entry.chain);
+      if (!result) continue;
+      entry.chain = result.next;
+      migrated.push({ endpointId, migrated: result.count });
+    }
+  }
+  const vms = store.virtualModels;
+  if (Array.isArray(vms)) {
+    for (const vm of vms) {
+      if (!vm || typeof vm !== "object" || !Array.isArray(vm.chain)) continue;
+      const result = rewrite(vm.chain);
+      if (!result) continue;
+      vm.chain = result.next;
+      migrated.push({ virtualModel: vm.name, migrated: result.count });
+    }
+  }
+  return migrated;
+}
+
 // 链条目逐项校验（saveRouteChain / saveVirtualModel 共用）：返回错误文案或
 // null，逐条短路——第一条错即返回。与 store-schema 一致按 node+model 复合键
 // 去重：同节点不同模型可多次入链。
@@ -395,7 +447,8 @@ export function createStoreService({
     if (poolId === undefined) return { ok: true, prunedChains: [] };
     const nextStore = structuredClone(loaded.store);
     const members = nextStore.pools[poolId].members.filter((memberId) => memberId !== providerId);
-    if (members.length >= 2) {
+    const dissolved = members.length < 2;
+    if (!dissolved) {
       nextStore.pools[poolId].members = members;
     } else {
       delete nextStore.pools[poolId];
@@ -403,8 +456,12 @@ export function createStoreService({
     }
     // The profile's provider is gone — either this very member or the pool
     // entry that absorbed it — so a chain entry naming it may be dead now.
-    // Prune before the write, same rule as the delete transaction.
-    const prunedChains = pruneRouteChainNodes(nextStore, (nodeId) => !chainNodeExists(nextStore, nodeId));
+    // Prune before the write, same rule as the delete transaction; a pool
+    // dissolved here takes its named nodes with it too (same rule as
+    // deletePool — the node is removed, never silently re-resolved to a
+    // same-id member channel).
+    const prunedChains = pruneRouteChainNodes(nextStore, (nodeId) =>
+      (dissolved && nodeId === poolId) || !chainNodeExists(nextStore, nodeId));
     const written = write(nextStore, { expectedHash: loaded.hash });
     if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
     return { ok: true, prunedChains };
@@ -961,9 +1018,12 @@ export function createStoreService({
       }
       const nextStore = structuredClone(loaded.store);
       nextStore.pools = { ...pools, [poolId]: { displayName: displayName.trim(), members: [...members] } };
+      // 入池迁移（同一笔 CAS 写入）：链上仍指成员渠道的节点改指本池——成员在
+      // 渠道清单面被吸收的语义对链同样成立，否则链直连成员、绕过池扇出。
+      const migratedChains = migrateChainNodesToPool(nextStore, poolId, members);
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
-      return { ok: true, poolId };
+      return { ok: true, poolId, migratedChains };
     },
 
     /**
@@ -1007,9 +1067,12 @@ export function createStoreService({
       }
       const nextStore = structuredClone(loaded.store);
       nextStore.pools[poolId].members = [...members];
+      // 入池迁移同口径：终选成员的直接引用一并并到池（新加入如此，迁移上线前
+      // 遗留的成员引用也顺势自愈）；移出成员不反向改（独立可解析，语义仍成立）。
+      const migratedChains = migrateChainNodesToPool(nextStore, poolId, members);
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
-      return { ok: true, poolId };
+      return { ok: true, poolId, migratedChains };
     },
 
     /**
@@ -1031,10 +1094,14 @@ export function createStoreService({
       const nextStore = structuredClone(loaded.store);
       delete nextStore.pools[poolId];
       if (Object.keys(nextStore.pools).length === 0) delete nextStore.pools;
-      // A chain may name the pool itself; once dissolved it only survives if
-      // one of its (now independent) members carries the same id. Prune the
-      // rest before the write, same rule as the delete transaction.
-      const prunedChains = pruneRouteChainNodes(nextStore, (nodeId) => !chainNodeExists(nextStore, nodeId));
+      // 解散除节点：链上指名本池的节点一律剪掉，不留悬空、也不静默改义——池 id
+      // 恰与某成员 id 同名时（成员仍存活可解析），旧逻辑会让该节点原地改指这条
+      // 单渠道（池扇出悄悄变成单跳）；按用户定稿改为直接移除，用户想留哪条渠道
+      // 由重配链显式表达。
+      const prunedChains = pruneRouteChainNodes(
+        nextStore,
+        (nodeId) => nodeId === poolId || !chainNodeExists(nextStore, nodeId),
+      );
       const written = write(nextStore, { expectedHash: loaded.hash });
       if (!written.ok) return { ok: false, error: storeWriteError(written, "store write failed") };
       return { ok: true, poolId, prunedChains };

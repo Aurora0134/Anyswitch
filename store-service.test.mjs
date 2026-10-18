@@ -723,7 +723,7 @@ describe("store-service deleteProvider", () => {
       assert.deepEqual(stored.routingChains.claude.chain, [{ node: "prov-c", model: "m4" }]);
     });
 
-    it("dissolving a pool prunes a chain naming it, unless a remaining member shadows the id", async () => {
+    it("dissolving a pool prunes a chain naming it; a same-id member does not keep the node alive", async () => {
       const paths = makeRoot();
       seedStore(paths, {
         "prov-a": richEntry("prov-a", ["m1", "m2"]),
@@ -740,8 +740,9 @@ describe("store-service deleteProvider", () => {
       const stored = readStore(paths).store;
       assert.deepEqual(stored.routingChains.kimi.chain, [{ node: "prov-c", model: "m4" }]);
 
-      // A pool whose id is reused by one of its members: after the dissolve
-      // that provider still resolves the id, so the chain entry stays.
+      // A pool whose id is reused by one of its members: the node is removed
+      // outright (用户 10-18 定稿：解散除节点，不留悬空)——the surviving
+      // same-id member must not silently re-resolve the hop to one channel.
       const paths2 = makeRoot();
       seedStore(paths2, {
         "prov-a": richEntry("prov-a", ["m1"]),
@@ -753,7 +754,8 @@ describe("store-service deleteProvider", () => {
       const svc2 = makeService(paths2);
       const result2 = await svc2.deletePool("prov-a");
       assert.equal(result2.ok, true, result2.error);
-      assert.deepEqual(readStore(paths2).store.routingChains.claude.chain, [{ node: "prov-a", model: "m1" }]);
+      assert.deepEqual(result2.prunedChains, [{ endpointId: "claude", remaining: 0 }]);
+      assert.equal(Object.hasOwn(readStore(paths2).store, "routingChains"), false, "链剪空后整键消失");
     });
 
     it("a journal left pending by the old behavior heals on getState", async () => {
@@ -777,6 +779,139 @@ describe("store-service deleteProvider", () => {
       assert.equal(Object.hasOwn(stored, "routingChains"), false);
       assert.equal(existsSync(join(paths.credentialsDir, "prov-a.dpapi")), false);
     });
+  });
+});
+
+describe("store-service 入池迁移与解散除节点 (absorb-migration)", () => {
+  // 用户 10-18 定稿：号池的成员吸收语义对路由链同样成立——组建/改组号池的同一
+  // 笔写入里，链上指成员渠道的节点改指池（否则链永远直连成员、静默绕过池扇出，
+  // 改组给的成员容灾不生效）；解散号池时指名池的节点一律除掉（池 id 撞成员 id
+  // 也除），不留悬空、不静默改指同名单渠道。
+
+  it("createPool 把链与虚拟模型链上指成员的节点改写为池 id，migratedChains 回报", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1", "m2"]),
+      "prov-b": richEntry("prov-b", ["m2"]),
+      "prov-c": richEntry("prov-c", ["m4"]),
+    }, {
+      routingChains: {
+        kimi: { chain: [{ node: "prov-a", model: "m1" }, { node: "prov-c", model: "m4" }] },
+        dsh: { chain: [{ node: "prov-a", model: "m1" }, { node: "prov-a", model: "m2" }] },
+      },
+      virtualModels: [{ name: "mix-a", chain: [{ node: "prov-b", model: "m2" }, { node: "prov-c", model: "m4" }] }],
+    });
+    const svc = makeService(paths);
+
+    const result = await svc.createPool({ poolId: "pool-x", displayName: "号池", members: ["prov-a", "prov-b"] });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.migratedChains, [
+      { endpointId: "kimi", migrated: 1 },
+      { endpointId: "dsh", migrated: 2 },
+      { virtualModel: "mix-a", migrated: 1 },
+    ]);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.routingChains.kimi.chain, [{ node: "pool-x", model: "m1" }, { node: "prov-c", model: "m4" }]);
+    assert.deepEqual(stored.routingChains.dsh.chain, [{ node: "pool-x", model: "m1" }, { node: "pool-x", model: "m2" }]);
+    assert.deepEqual(stored.virtualModels[0].chain, [{ node: "pool-x", model: "m2" }, { node: "prov-c", model: "m4" }]);
+  });
+
+  it("createPool 去重：两个成员同模型入链改写后撞 node+model 键，弃掉撞车项、链不剪空", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1"]),
+      "prov-b": richEntry("prov-b", ["m2"]),
+      "prov-c": richEntry("prov-c", ["m3"]),
+    }, {
+      routingChains: { claude: { chain: [{ node: "prov-a", model: "m1" }, { node: "prov-b", model: "m1" }, { node: "prov-c", model: "m3" }] } },
+    });
+    const svc = makeService(paths);
+
+    const result = await svc.createPool({ poolId: "pool-x", displayName: "号池", members: ["prov-a", "prov-b"] });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.migratedChains, [{ endpointId: "claude", migrated: 2 }]);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.routingChains.claude.chain, [{ node: "pool-x", model: "m1" }, { node: "prov-c", model: "m3" }]);
+  });
+
+  it("createPool 池 id 复用成员 id：同 id 成员本就按池解析不改写，其余成员照常改写", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1", "m2"]),
+      "prov-b": richEntry("prov-b", ["m2"]),
+    }, {
+      routingChains: { claude: { chain: [{ node: "prov-a", model: "m1" }, { node: "prov-b", model: "m2" }] } },
+    });
+    const svc = makeService(paths);
+
+    const result = await svc.createPool({ poolId: "prov-a", displayName: "收编池", members: ["prov-a", "prov-b"] });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.migratedChains, [{ endpointId: "claude", migrated: 1 }]);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.routingChains.claude.chain, [{ node: "prov-a", model: "m1" }, { node: "prov-a", model: "m2" }]);
+  });
+
+  it("updatePoolMembers 按终选成员迁移（遗留的成员直连引用自愈），移出成员不反向改", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1"]),
+      "prov-b": richEntry("prov-b", ["m2", "m4"]),
+      "prov-c": richEntry("prov-c", ["m3"]),
+    }, {
+      pools: { "pool-x": { displayName: "号池", members: ["prov-a", "prov-b"] } },
+      routingChains: { kimi: { chain: [{ node: "prov-a", model: "m1" }, { node: "pool-x", model: "m2" }, { node: "prov-b", model: "m4" }] } },
+    });
+    const svc = makeService(paths);
+
+    // prov-a 移出、prov-c 加入；prov-b 留守但其链上直连引用是遗留形态
+    const result = await svc.updatePoolMembers({ poolId: "pool-x", members: ["prov-b", "prov-c"] });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.migratedChains, [{ endpointId: "kimi", migrated: 1 }]);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.pools["pool-x"].members, ["prov-b", "prov-c"]);
+    assert.deepEqual(stored.routingChains.kimi.chain, [{ node: "prov-a", model: "m1" }, { node: "pool-x", model: "m2" }, { node: "pool-x", model: "m4" }]);
+  });
+
+  it("updatePoolMembers 成员不变（纯重排）时迁移为空集", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1"]),
+      "prov-b": richEntry("prov-b", ["m2"]),
+    }, {
+      pools: { "pool-x": { displayName: "号池", members: ["prov-a", "prov-b"] } },
+      routingChains: { kimi: { chain: [{ node: "pool-x", model: "m1" }] } },
+    });
+    const svc = makeService(paths);
+
+    const result = await svc.updatePoolMembers({ poolId: "pool-x", members: ["prov-b", "prov-a"] });
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.migratedChains, []);
+    const stored = readStore(paths).store;
+    assert.deepEqual(stored.pools["pool-x"].members, ["prov-b", "prov-a"]);
+    assert.deepEqual(stored.routingChains.kimi.chain, [{ node: "pool-x", model: "m1" }]);
+  });
+
+  it("删成员自动解散：指名池的节点一并除掉，池 id 撞存活成员 id 同口径", async () => {
+    const paths = makeRoot();
+    seedStore(paths, {
+      "prov-a": richEntry("prov-a", ["m1"]),
+      "prov-b": richEntry("prov-b", ["m2"]),
+    }, {
+      pools: { "prov-a": { displayName: "同名池", members: ["prov-a", "prov-b"] } },
+      routingChains: { claude: { chain: [{ node: "prov-a", model: "m1" }] } },
+    });
+    writeCredential(paths, "prov-b");
+    const svc = makeService(paths);
+
+    // 删 prov-b → 池只剩 prov-a → 自动解散；节点 "prov-a" 按解散规则除掉，
+    // 不因存活成员 prov-a 同名而改指单渠道
+    const result = await svc.deleteProvider("prov-b");
+    assert.equal(result.ok, true, result.error);
+    assert.deepEqual(result.prunedChains, [{ endpointId: "claude", remaining: 0 }]);
+    const stored = readStore(paths).store;
+    assert.equal(Object.hasOwn(stored, "pools"), false, "池随末位成员删除解散");
+    assert.equal(Object.hasOwn(stored, "routingChains"), false, "链剪空后整键消失");
+    assert.equal(Object.hasOwn(stored.providers, "prov-a"), true, "同名存活成员保留");
   });
 });
 

@@ -6574,6 +6574,17 @@ describe("panel.html 删除渠道/号池携路由链剪除", () => {
     assert.ok(body.includes("（剩 ${item.remaining} 个节点）"), "正数口径");
     assert.ok(!body.includes("[object"), "不得出现对象拼接");
   });
+
+  it("入池迁移回报：组池/加池/重排成功提示接 migratedChains 后缀句，剪除与去重标签兼容虚拟模型", () => {
+    // 用户 10-18 定稿（入池迁移 + 解散除节点）：后缀句已报批，这里钉住批准版本。
+    assert.ok(panelJs.includes("function routeChainMigratedNote"), "迁移后缀生成器存在");
+    assert.ok(panelJs.includes("已把自动路由中指向成员渠道的节点改为该号池："), "迁移后缀句");
+    assert.ok(panelJs.includes("item.endpointId ?? item.virtualModel"), "剪除/迁移/去重三处都按虚拟模型名兜底");
+    assert.ok(panelJs.includes("routeChainMigratedNote(r.migratedChains)"), "组池成功提示接迁移回报");
+    const buildStart = panelJs.indexOf("function confirmPoolBuild");
+    const buildBody = panelJs.slice(buildStart, panelJs.indexOf("\n  }", buildStart));
+    assert.ok(buildBody.includes("const r = await api("), "组池结果先落变量再拼后缀");
+  });
 });
 
 describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {

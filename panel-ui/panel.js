@@ -12433,9 +12433,9 @@ async function api(method, path, body) {
     btn.disabled = true;
     btn.textContent = isCreate ? "组建中…" : poolBuildMode === "add" ? "加入中…" : "保存中…";
     try {
-      await api("POST", apiPath, payload);
+      const r = await api("POST", apiPath, payload);
       $("poolBuildModal").classList.remove("show");
-      toast(okMsg);
+      toast(okMsg + routeChainMigratedNote(r.migratedChains));
       storeSelection = new Set([poolId]);
       storeFilterChecked = null;
       storeFilterDirty = false;
@@ -12467,15 +12467,26 @@ async function api(method, path, body) {
   const routeChainEndpointLabel = (id) => STATS_ENDPOINT_LABELS[id] || id;
 
   // 删除渠道 / 解散号池会顺势剪掉指向它们的路由链节点（服务端在同一笔写入里完成），
-  // 删除结果带回 prunedChains: [{endpointId, remaining}]。删除成功提示据此附一句
-  // 「已从自动路由移除对应节点」；remaining = 0（整条链被剪空）时不带括号，只报端点名。
+  // 删除结果带回 prunedChains: [{endpointId, remaining}] / [{virtualModel, remaining}]
+  // （虚拟模型链同口径修剪）。删除成功提示据此附一句「已从自动路由移除对应节点」；
+  // remaining = 0（整条链被剪空）时不带括号，只报端点名或虚拟模型名。
   function routeChainPrunedNote(prunedChains) {
     if (!Array.isArray(prunedChains) || !prunedChains.length) return "";
-    const labels = prunedChains.map((item) =>
-      item.remaining > 0
-        ? `${routeChainEndpointLabel(item.endpointId)}（剩 ${item.remaining} 个节点）`
-        : routeChainEndpointLabel(item.endpointId));
+    const labels = prunedChains.map((item) => {
+      const name = routeChainEndpointLabel(item.endpointId ?? item.virtualModel);
+      return item.remaining > 0 ? `${name}（剩 ${item.remaining} 个节点）` : name;
+    });
     return `；已从自动路由移除对应节点：${labels.join("、")}`;
+  }
+
+  // 入池迁移回报（组建/改组号池的结果带 migratedChains）：与剪除回报同一句式、
+  // 同一命名口径（端点显示名 / 虚拟模型名），migrated = 该链改写到号池的节点数。
+  // 文案已按 PANEL-COPY-SPEC 流程报批。
+  function routeChainMigratedNote(migratedChains) {
+    if (!Array.isArray(migratedChains) || !migratedChains.length) return "";
+    const labels = migratedChains.map((item) =>
+      `${routeChainEndpointLabel(item.endpointId ?? item.virtualModel)}（${item.migrated} 处）`);
+    return `；已把自动路由中指向成员渠道的节点改为该号池：${labels.join("、")}`;
   }
 
   // 哪些端点的自动路由链引用了给定节点（渠道/号池 id）。删除前预告与删除确认
@@ -12487,15 +12498,17 @@ async function api(method, path, body) {
       .map((c) => routeChainEndpointLabel(c.endpointId));
   }
 
-  // 批量删除会把多次删除结果的 prunedChains 汇总；同一端点可能被剪多次
-  // （成员逐个删），取各次里剩余最少的一条作为最终跳数。
+  // 批量删除会把多次删除结果的 prunedChains 汇总；同一端点（或同一虚拟模型）
+  // 可能被剪多次（成员逐个删），取各次里剩余最少的一条作为最终跳数。
   function dedupePrunedChains(items) {
-    const byEndpoint = new Map();
+    const byKey = new Map();
     for (const item of items || []) {
-      const prev = byEndpoint.get(item.endpointId);
-      if (prev === undefined || item.remaining < prev) byEndpoint.set(item.endpointId, item.remaining);
+      if (!item) continue;
+      const key = item.endpointId ?? item.virtualModel;
+      const prev = byKey.get(key);
+      if (prev === undefined || item.remaining < prev.remaining) byKey.set(key, item);
     }
-    return [...byEndpoint].map(([endpointId, remaining]) => ({ endpointId, remaining }));
+    return [...byKey.values()];
   }
 
   // 编辑器目标：{kind:"endpoint", id} = 端点自动路由链；{kind:"virtual", id} = 虚拟模型。
