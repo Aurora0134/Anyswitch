@@ -83,6 +83,15 @@ const panelJs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "panel-ui", "panel.js"),
   "utf8",
 );
+// 回放突发合并器的阈值常量：沙箱按函数名切源码，常量不在其中，单独取出注入——
+// 测试不抄数字，改阈值时行为钉跟着变。
+const terminalBurstConsts = ["TERMINAL_BURST_ENTER_BYTES", "TERMINAL_BURST_QUIET_MS", "TERMINAL_BURST_MAX_HOLD_MS", "TERMINAL_BURST_MAX_BYTES"]
+  .map((name) => {
+    const found = panelJs.match(new RegExp(`const ${name} = [^;]+;`))?.[0];
+    assert.ok(found, `${name} 可从 panel.js 取到`);
+    return found;
+  })
+  .join("\n");
 const panelMjs = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "panel.mjs"),
   "utf8",
@@ -7830,7 +7839,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
     const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme",
       "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
-      "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput"]
+      "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
+      "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -7839,6 +7849,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
     const state = { posts: [], eventSources: [], terms: [], sessions: {}, timers: new Map(), timerSeq: 0 };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
+      ${terminalBurstConsts}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -7986,6 +7997,194 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
   });
 });
 
+// 回放突发合并（2026-10-19）：[CC] resume 把整段历史一次性重放出来，宿主按 32KB
+// 阈值把它拆成多帧，客户端收一帧写一帧 → xterm 每帧画一次、视口跟一次，用户看到
+// 「从对话头部出现、随后飞速滚到底」。合并器把一段突发攒成一次写入，落屏只发生
+// 一次。这组用例用可控时钟真跑函数体，把判据、窗口、上限与各强制落屏点钉死。
+// 与同步合帧的层次（burst 在外、合帧在内）由本组单测 + 合帧组共同钉住：单测环境
+// column.streamWrite 为空走直写回退，接线断言另钉真实管线的排队路径。
+describe("终端回放突发合并（大段历史一次落屏）", () => {
+  // 可控时钟：setTimeout 只登记，advance 按到期顺序执行。合并器的三个窗口
+  // （静默 / 硬上限 / 2MB）都靠它推进，测试不 sleep。
+  function makeClock() {
+    let now = 0;
+    let seq = 0;
+    const timers = new Map();
+    return {
+      setTimeout(fn, delay) {
+        const id = ++seq;
+        timers.set(id, { fn, at: now + Math.max(0, Number(delay) || 0), id });
+        return id;
+      },
+      clearTimeout(id) { timers.delete(id); },
+      advance(ms) {
+        const target = now + ms;
+        for (;;) {
+          const due = [...timers.values()].filter((t) => t.at <= target).sort((a, b) => a.at - b.at || a.id - b.id);
+          if (due.length === 0) break;
+          const next = due[0];
+          timers.delete(next.id);
+          now = next.at;
+          next.fn();
+        }
+        now = target;
+      },
+      pending() { return timers.size; },
+    };
+  }
+
+  // 只取合并器本体 + 列对象工厂：这组用例验的是「攒/落」的判据，不牵扯流与渲染。
+  function burstSandbox() {
+    const bodies = ["createTerminalColumn", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const clock = makeClock();
+    const writes = [];
+    const sandbox = new Function("clock", "writes", `
+      ${terminalBurstConsts}
+      const setTimeout = clock.setTimeout;
+      const clearTimeout = clock.clearTimeout;
+      ${bodies}
+      const column = createTerminalColumn("host");
+      const term = { write: (text) => writes.push(text) };
+      return {
+        column, term,
+        push: (text) => queueTerminalChunk(column, term, text),
+        flush: () => flushTerminalBurst(column),
+        discard: () => discardTerminalBurst(column),
+        thresholds: {
+          enter: TERMINAL_BURST_ENTER_BYTES,
+          quiet: TERMINAL_BURST_QUIET_MS,
+          cap: TERMINAL_BURST_MAX_HOLD_MS,
+          maxBytes: TERMINAL_BURST_MAX_BYTES,
+        },
+      };
+    `)(clock, writes);
+    return { sandbox, clock, writes };
+  }
+
+  const big = (bytes, fill = "x") => fill.repeat(bytes);
+
+  it("小帧直通：实时输出的碎块不进突发，逐块立即落屏（手感不变）", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    for (const piece of ["\u001b[2K", "思考中", "…", "\r\n"]) sandbox.push(piece);
+    assert.deepEqual(writes, ["\u001b[2K", "思考中", "…", "\r\n"], "小帧逐块直写，不等窗口");
+    assert.equal(sandbox.column.writeBurst, null, "小帧不起突发");
+    assert.equal(clock.pending(), 0, "小帧不留定时器");
+  });
+
+  it("大帧起突发、后续帧并入：整段历史只写一次，且写入内容是原样拼接", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    const first = big(64 * 1024, "a");
+    const second = big(64 * 1024, "b");
+    const third = big(32 * 1024, "c");
+    sandbox.push(first);
+    assert.deepEqual(writes, [], "突发内不立即落屏（这就是「逐帧飞滚」的病灶）");
+    sandbox.push(second);
+    sandbox.push(third);
+    assert.deepEqual(writes, [], "突发持续期间仍不落屏");
+    clock.advance(sandbox.thresholds.quiet);
+    assert.deepEqual(writes, [first + second + third], "静默窗口到点一次写入，内容原样拼接");
+    assert.equal(sandbox.column.writeBurst, null, "落屏后突发清空");
+    assert.equal(clock.pending(), 0, "两个定时器都撤掉");
+  });
+
+  it("静默窗口被后续帧续命：突发内的帧间隔小于窗口时不会提前落屏", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    sandbox.push(big(20 * 1024, "a"));
+    clock.advance(sandbox.thresholds.quiet - 1);
+    sandbox.push(big(20 * 1024, "b"));
+    assert.deepEqual(writes, [], "续命后仍攒着");
+    clock.advance(sandbox.thresholds.quiet - 1);
+    assert.deepEqual(writes, [], "每次新帧都重置静默计时");
+    clock.advance(1);
+    assert.equal(writes.length, 1, "最后一帧之后静默满窗口才落屏");
+  });
+
+  it("硬上限：持续洪峰不会无限期不画，到点强制落屏", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    sandbox.push(big(20 * 1024, "a"));
+    // 每半个静默窗口来一帧，模拟持续输出：静默窗口永远到不了，只有硬上限能救。
+    // 落屏后立刻停手——后续小帧会直通，那是另一条已单独钉过的通路。
+    const step = Math.max(1, Math.floor(sandbox.thresholds.quiet / 2));
+    let elapsed = 0;
+    while (elapsed < sandbox.thresholds.cap + step && writes.length === 0) {
+      clock.advance(step);
+      elapsed += step;
+      if (writes.length > 0) break;
+      sandbox.push(big(1024, "b"));
+    }
+    assert.equal(writes.length, 1, "硬上限到点落屏一次");
+    assert.ok(writes[0].length > 20 * 1024, "落屏内容是攒下来的全部字节");
+  });
+
+  it("字节上限：累计触顶立即落屏，不等窗口（再大就不是一次重放而是长任务）", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    const chunk = big(1024 * 1024, "a");
+    sandbox.push(chunk);
+    assert.deepEqual(writes, [], "第一个 1MB 还没触顶");
+    sandbox.push(chunk);
+    assert.equal(writes.length, 1, "第二个 1MB 压到 2MB 上限：立即落屏");
+    assert.equal(writes[0].length, 2 * 1024 * 1024, "落屏内容是两块之和");
+    assert.equal(sandbox.column.writeBurst, null, "触顶后突发清空");
+    assert.equal(clock.pending(), 0, "触顶落屏不留定时器");
+  });
+
+  it("用户键入强制落屏：攒着的历史不能排在输入回显后面", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    sandbox.push(big(64 * 1024, "h"));
+    assert.deepEqual(writes, [], "历史还攒着");
+    sandbox.flush();
+    assert.equal(writes.length, 1, "flush 立即落屏");
+    assert.equal(clock.pending(), 0, "落屏后定时器撤净");
+    sandbox.flush();
+    assert.equal(writes.length, 1, "无突发时 flush 是空操作");
+  });
+
+  it("丢弃：换连接/关流时攒着的字节不落屏，定时器一并撤掉", () => {
+    const { sandbox, writes, clock } = burstSandbox();
+    sandbox.push(big(64 * 1024, "h"));
+    sandbox.discard();
+    assert.deepEqual(writes, [], "丢弃不写屏（新连接会整屏重发，写了就是双份）");
+    assert.equal(sandbox.column.writeBurst, null, "突发清空");
+    assert.equal(clock.pending(), 0, "定时器撤净");
+    clock.advance(sandbox.thresholds.cap * 2);
+    assert.deepEqual(writes, [], "被丢弃的字节不会在之后偷偷落屏");
+  });
+
+  it("接线：data 帧走合并器、建连首帧直写、键入与换行都先落屏、关流丢弃", () => {
+    const connect = panelJs.match(/async function connectTerminalStream\(column, session,[^)]*\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(connect, "connectTerminalStream found in panel.js");
+    assert.ok(/column\.eventSource\.addEventListener\("data"[\s\S]*?queueTerminalChunk\(column, term, text\)/.test(connect),
+      "data 帧交给合并器，不再直接 term.write");
+    assert.ok(/column\.replayFramePending\) \{[\s\S]*?term\.write\(text\)[\s\S]*?queueTerminalChunk/.test(connect),
+      "建连后宿主的自足整屏重绘直写，不进合并窗口");
+    const inputHandler = connect.match(/column\.inputDisposable = term\.onData\([\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(inputHandler && /flushTerminalBurst\(column\)/.test(inputHandler), "键入前先落屏攒着的历史");
+    const ensure = panelJs.match(/function ensureTerminalXterm\(column\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(ensure, "ensureTerminalXterm found in panel.js");
+    const keyHandler = ensure.match(/attachCustomKeyEventHandler\([\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(keyHandler && /flushTerminalBurst\(column\)/.test(keyHandler), "修饰 Enter 换行同样先落屏");
+    const close = panelJs.match(/function closeTerminalStream\(column\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(close && /discardTerminalBurst\(column\)/.test(close), "关流丢弃未落屏突发（定时器不能在 dispose 后碰旧实例）");
+    const snapshot = panelJs.match(/function absorbTerminalSnapshot\([\s\S]*?\n  \}/)?.[0];
+    assert.ok(snapshot && /discardTerminalBurst\(column\)/.test(snapshot), "新连接的 snapshot 丢弃上一条连接的残留");
+    assert.ok(snapshot && /column\.replayFramePending = true/.test(snapshot), "snapshot 之后标记首帧直写");
+  });
+
+  it("阈值口径：进入门槛远大于实时碎块、上限远小于「一次重放」的合理体量", () => {
+    const { sandbox } = burstSandbox();
+    const t = sandbox.thresholds;
+    assert.ok(t.enter >= 8 * 1024 && t.enter <= 64 * 1024, `进入门槛 ${t.enter} 应在实时碎块与回放块之间`);
+    assert.ok(t.quiet > 0 && t.quiet <= 200, `静默窗口 ${t.quiet}ms 应短于用户可感知的停顿`);
+    assert.ok(t.cap > t.quiet && t.cap <= 1000, `硬上限 ${t.cap}ms 应有界且长于静默窗口`);
+    assert.ok(t.maxBytes >= 1024 * 1024, `字节上限 ${t.maxBytes} 应容得下一次完整重放`);
+  });
+});
+
 // 应答定投（C 案）：每连接独占一个 xterm 实例，onData 闭包绑定建连时固化的
 // 会话 id，不再读 activeTerminalPreviewId；旧连接关闭时实例随流销毁，WriteBuffer
 // 里排队未解析的旧字节（大回放跨事件循环切片、续跑定时器不可取消）解析时只能
@@ -7993,7 +8192,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput"]
+    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -8002,6 +8201,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     const state = { posts: [], eventSources: [], terms: [], sessions: {} };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
+      ${terminalBurstConsts}
       // M3 列架构：单值群迁入列对象——沙箱声明列数组（单列 = 列 0），
       // 访问器经列字段读回，断言面与旧单例口径一致。
       const terminalFontSize = 13;
@@ -8310,7 +8510,8 @@ describe("终端列架构（按列索引隔离）", () => {
       "connectTerminalStream", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize",
       "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
-      "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "terminalImeAnchorReady", "armTerminalImeAnchor",
+      "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst",
+      "terminalImeAnchorReady", "armTerminalImeAnchor",
       "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -8322,6 +8523,7 @@ describe("终端列架构（按列索引隔离）", () => {
     const state = { posts: [], eventSources: [], terms: [], sessions: {}, windowHidden: false };
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
+      ${terminalBurstConsts}
       const terminalFontSize = 13;
       const terminalBackendReady = true;
       const terminalBackendSessions = state.sessions;
@@ -9599,7 +9801,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["createTerminalColumn", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput"]
+    const bodies = ["createTerminalColumn", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -9619,6 +9821,7 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
     const host = {};
     const sandbox = new Function("state", `
       const API_BASE = "http://panel.test";
+      ${terminalBurstConsts}
       // M3 列架构：单值群迁入列对象——沙箱摆单列（列 0 绑唯一宿主），访问器读列字段。
       const terminalFontSize = 13;
       const view = { hidden: ${JSON.stringify(viewHidden)} };
