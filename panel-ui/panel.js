@@ -4778,6 +4778,13 @@ async function api(method, path, body) {
       replayRestoring: false,
       replayRestoreArm: null,
       replayRestoreCancel: null,
+      // 回放突发合并（见 queueTerminalChunk）：进行中的突发 { term, chunks, bytes,
+      // quietTimer, capTimer }，空闲为 null。状态挂列对象保多列语义——每列各攒
+      // 各的、各落各的屏。
+      writeBurst: null,
+      // 建连后「宿主的自足整屏重绘」那一帧还没到：它由 stream() 单帧发出，不需要
+      // 合并，直接写；收到即清。
+      replayFramePending: false,
     };
   }
   const terminalColumns = [createTerminalColumn("terminalXtermHost")];
@@ -5454,6 +5461,10 @@ async function api(method, path, body) {
     column.replayRestoreCancel = null;
     column.replayRestoreArm = null;
     column.replayRestoring = false;
+    // 未落屏的突发随实例销毁：攒着的字节写进已 dispose 的实例没有意义，定时器
+    // 更要在销毁前撤掉。
+    discardTerminalBurst(column);
+    column.replayFramePending = false;
   }
 
   // 整页清场入口（关停清场 / 零会话）：关闭所有列的流与实例。
@@ -5889,6 +5900,8 @@ async function api(method, path, body) {
       // 定投会话（预览态）同样只拦不发。定投目标读本列固化的会话 id，不读活动会话。
       if (terminalNewlineEnterKey(event)) {
         if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && column.boundSessionId !== null) {
+          // 与键入同一条口径：换行也是用户动作，攒着的历史先落屏。
+          flushTerminalBurst(column);
           api("POST", `/api/terminal/sessions/${encodeURIComponent(column.boundSessionId)}/input`, { data: terminalNewlineData(terminalSessionFor(column.boundSessionId)) }).catch((error) => console.warn("[terminal] input delivery failed:", error));
         }
         return false;
@@ -6012,6 +6025,75 @@ async function api(method, path, body) {
     textarea.addEventListener("compositionend", column.imeReleaseHandler);
   }
 
+  // 回放突发合并器：一段「一次性重放的历史」必须以一次写入落屏。
+  //
+  // 病灶（2026-10-19 实测）：[CC] resume 会把整段历史一次性重放出来（实测 271KB /
+  // 14 块 / 13ms 吐完）。宿主侧的 SSE 合帧器有一条「待发超 32KB 立即冲刷」的规则，
+  // 于是每块 60KB 上下的历史各自成一帧；客户端收到一帧写一帧、xterm 写一次画一次、
+  // 视口跟一次——真实面板逐帧实测视口 309→669→1002→1424→1718→2028→2816→3039，
+  // 就是用户看到的「从对话头部出现、随后飞速滚到底」。同一段字节攒成一次写只落
+  // 两帧且一次到底，两者的差别只在这里。
+  //
+  // 判据与边界：单帧 ≥16KB 才进入突发模式（正常流式输出是几十到几百字节的碎块，
+  // 零延迟直通，手感不变）。突发内继续累积，三种情况落屏——静默 80ms（合并后帧间
+  // 间隔塌缩到毫秒级，这个窗口只用来兜住主线程抖动）、从突发开始算 700ms（持续
+  // 洪峰不能无限期不画）、累计 2MB（再大就不是「一次重放」而是长任务，先落屏）。
+  //
+  // 为什么在客户端而不是服务端：服务端不知道渲染节奏。把服务端合帧窗口从 16ms 拉到
+  // 50ms 实测只能把 7 帧降到 2 帧、仍然会跳，而且拖慢所有实时输出。
+  //
+  // 落屏不自己调 scrollToBottom：跟随底只有一个写者（installTerminalFollowBottomGuard
+  // 的 onWriteParsed 锚定），这里再加一个就是两个写者打架。
+  const TERMINAL_BURST_ENTER_BYTES = 16 * 1024;
+  const TERMINAL_BURST_QUIET_MS = 80;
+  const TERMINAL_BURST_MAX_HOLD_MS = 700;
+  const TERMINAL_BURST_MAX_BYTES = 2 * 1024 * 1024;
+
+  function flushTerminalBurst(column) {
+    const burst = column.writeBurst;
+    if (!burst) return;
+    column.writeBurst = null;
+    if (burst.quietTimer !== null) clearTimeout(burst.quietTimer);
+    if (burst.capTimer !== null) clearTimeout(burst.capTimer);
+    burst.term.write(burst.chunks.join(""));
+  }
+
+  function discardTerminalBurst(column) {
+    const burst = column.writeBurst;
+    if (!burst) return;
+    column.writeBurst = null;
+    if (burst.quietTimer !== null) clearTimeout(burst.quietTimer);
+    if (burst.capTimer !== null) clearTimeout(burst.capTimer);
+  }
+
+  // 收帧入口：小帧直通，大帧起突发、后续帧并进同一次落屏。
+  function queueTerminalChunk(column, term, text) {
+    if (!text) return;
+    const burst = column.writeBurst;
+    if (burst) {
+      burst.chunks.push(text);
+      burst.bytes += text.length;
+      if (burst.quietTimer !== null) clearTimeout(burst.quietTimer);
+      if (burst.bytes >= TERMINAL_BURST_MAX_BYTES) {
+        flushTerminalBurst(column);
+        return;
+      }
+      burst.quietTimer = setTimeout(() => flushTerminalBurst(column), TERMINAL_BURST_QUIET_MS);
+      return;
+    }
+    if (text.length < TERMINAL_BURST_ENTER_BYTES) {
+      term.write(text);
+      return;
+    }
+    column.writeBurst = {
+      term,
+      chunks: [text],
+      bytes: text.length,
+      quietTimer: setTimeout(() => flushTerminalBurst(column), TERMINAL_BURST_QUIET_MS),
+      capTimer: setTimeout(() => flushTerminalBurst(column), TERMINAL_BURST_MAX_HOLD_MS),
+    };
+  }
+
   // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
   // 的连接——包括 SSE 断线后浏览器自动发起的重连——都先发一个 snapshot 帧、
   // 再把全量缓冲以 data 帧从头回放到当前。所以处理 snapshot 之前必须把屏幕
@@ -6019,6 +6101,9 @@ async function api(method, path, body) {
   // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
   // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
   function absorbTerminalSnapshot(term, session, state, column = null) {
+    // 攒着未落屏的突发属于上一条连接：新连接的整屏重绘会把同样的内容重发一遍，
+    // 落屏反而画成双份，直接丢弃。
+    if (column) discardTerminalBurst(column);
     term.reset();
     // reset() 后的回放是整段重写：闩到写入静默，期间的滚动与逐块写入都不参与
     // 跟随判定（见 installTerminalFollowBottomGuard）。护栏未装上（无宿主/无
@@ -6027,6 +6112,10 @@ async function api(method, path, body) {
       column.replayRestoring = true;
       column.replayRestoreArm();
     }
+    // 紧随 snapshot 的第一帧是宿主的自足整屏重绘（stream() 只发一帧 replay，镜像
+    // 与原始字节两条路径都是单帧），它本身就是一次完整落屏——走合并器只会平白多
+    // 等一个静默窗口。标记出来让 data 监听直写。
+    if (column) column.replayFramePending = true;
     session.backendState = state;
     session.shell.pid = state.pid || "—";
   }
@@ -6061,6 +6150,8 @@ async function api(method, path, body) {
     // 重新拿到焦点，其后的键入与 Ctrl+C/V 才不会静默落空。
     term.focus();
     column.inputDisposable = term.onData((data) => {
+      // 用户开始键入即落屏：攒着的历史不能排在输入回显后面。
+      flushTerminalBurst(column);
       if (boundSessionId === null) return;
       api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
     });
@@ -6086,7 +6177,17 @@ async function api(method, path, body) {
       } catch {}
     });
     column.eventSource.addEventListener("data", (event) => {
-      try { term.write(JSON.parse(event.data)); } catch {}
+      try {
+        const text = JSON.parse(event.data);
+        // 建连后的第一帧是自足整屏重绘（见 absorbTerminalSnapshot），直写；
+        // 其后的帧走合并器——大段历史一次落屏，逐块写就是「飞速滚到底」。
+        if (column.replayFramePending) {
+          column.replayFramePending = false;
+          term.write(text);
+          return;
+        }
+        queueTerminalChunk(column, term, text);
+      } catch {}
     });
     column.eventSource.onerror = () => {
     };
