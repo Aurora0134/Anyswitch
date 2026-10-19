@@ -31,6 +31,14 @@
 // break forwarding. Reflow on resize is deliberately not modelled: a resize makes
 // the application repaint its own frame, so only historical rows keep their old
 // wrap, which is what a real terminal's scrollback shows too.
+//
+// 分块边界：PTY 的 onData 会在任意字节处切开输出，转义序列也不例外。解析器因此把
+// 未终结的序列暂留到下一块（上限 TERMINAL_ESCAPE_HOLD_MAX），而不是丢掉 ESC 头把
+// 参数当文字画进屏幕。暂留期间该序列之后的字节还没解析，画面会短暂落后于字节流；
+// 序列终结（或超过暂留上限被丢弃）后立刻追上。转发不受影响——镜像始终只是一名
+// 乘客，最坏情况是这一段没画上，绝不是输出停止转发。
+// 解析本身可以按时间预算切片（writeSliced/drain）：预算用尽就停在字符边界，
+// 剩余字节留在待解析缓冲里等下一轮，画面随后补齐。
 
 export const TERMINAL_HISTORY_LINES = 5000; // matches the panel's xterm scrollback
 export const TERMINAL_HISTORY_MAX_BYTES = 1024 * 1024;
@@ -225,12 +233,18 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
   }
 
+  // 换行同时取消折行待定：xterm 5.5 用「列号 === cols」当待折行哨兵，lineFeed 里
+  // 的 `x >= cols && x--` 把哨兵换成真实列号，等价于清掉它。我们照这个真值建模，
+  // 否则满行后一次换行会让下一个字符先多折一行。
   function lineFeed() {
+    pendingWrap = false;
     if (row === bottom) scrollRegionUp(1);
     else row = Math.min(height - 1, row + 1);
   }
 
+  // 同理：xterm 的 reverseIndex 先 _restrictCursor()（夹掉哨兵）再移行。
   function reverseIndex() {
+    pendingWrap = false;
     if (row === top) scrollRegionDown(1);
     else row = Math.max(0, row - 1);
   }
@@ -384,6 +398,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   function setAlt(on) {
     if (on === inAlt) return;
+    // 切屏必然重定光标（进备屏归零、退备屏恢复保存位置），折行待定随之作废。
+    pendingWrap = false;
     if (on) {
       altSaved = { grid, row, col, top, bottom, inAlt };
       grid = Array.from({ length: height }, () => blankRow(width));
@@ -400,17 +416,22 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // 单参数快路径：绝大多数序列形如 ESC[<数字><final>，逐条 split+map 建数组再取
     // 第 0 项是纯开销（一段回放两万七千条序列）。带 ";" 或 ":" 的仍走通用路径，
     // 语义完全一致——通用路径对单 token 的结果就是下面这个值。
-    let nums = null;
-    let only = 0;
     const simple = raw.indexOf(";") < 0 && raw.indexOf(":") < 0;
-    if (simple) only = raw === "" ? 0 : Number(raw) || 0;
-    const numsOf = () => (nums ??= raw.split(";").map((x) => (x === "" ? 0 : Number(x) || 0)));
+    const single = raw === "" ? 0 : Number(raw) || 0;
+    let params = null;
+    const param = (index) => {
+      if (simple) return index === 0 ? single : undefined;
+      params ??= raw.split(";").map((x) => (x === "" ? 0 : Number(x) || 0));
+      return params[index];
+    };
+    // arg 是「缺省或 0 一律取默认值」的取参口径，光标移动族全用它。
     const arg = (index, dflt) => {
-      const value = simple ? (index === 0 ? only : undefined) : numsOf()[index];
+      const value = param(index);
       return value === undefined || Number.isNaN(value) || value === 0 ? dflt : value;
     };
     // 光标被移动就取消折行待定（真实终端语义）：否则移动后写的第一个字符会先触发
     // 一次不该有的折行。夹光标（clampCursor）不再负责这件事，见那里的注释。
+    // 覆盖 A/B/C/D/E/F/G/`/d/H/f（移动）、r（设滚动区并把光标放回区顶）、u（恢复光标）。
     if ("ABCDEFG`dHfru".includes(final)) pendingWrap = false;
     switch (final) {
       case "A": row = Math.max(0, row - arg(0, 1)); break;
@@ -427,12 +448,12 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         // 只裁活动缓冲超出屏行的头部、备屏恒等于屏行数——kimi 备屏里发 3J 客户端
         // 天然免疫，镜像曾在这里无条件清 history（「当场没感觉、重挂才丢」的病灶）；
         // ?3J 旧路径误派 erase-below（擦掉光标下半屏）一并收口。
-        const mode = simple ? only : (numsOf()[0] || 0);
+        const mode = param(0) || 0;
         if (mode === 3) break;
         eraseDisplay(priv ? 0 : mode);
         break;
       }
-      case "K": eraseLine(simple ? only : (numsOf()[0] || 0)); break;
+      case "K": eraseLine(param(0) || 0); break;
       // IL 插入行：光标行及以下整体下移 n 行，底部多出滚动区外的行丢弃。
       case "L": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = bottom; r > row; r -= 1) grid[r] = grid[r - 1]; grid[row] = blankRow(width); } break;
       case "M": for (let k = arg(0, 1); k > 0; k -= 1) { for (let r = row; r < bottom; r += 1) grid[r] = grid[r + 1]; grid[bottom] = blankRow(width); } break;
@@ -465,7 +486,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       case "T": scrollRegionDown(arg(0, 1)); break;
       case "r": {
         const nextTop = arg(0, 1) - 1;
-        const second = simple ? undefined : numsOf()[1];
+        const second = param(1);
         const nextBottom = (second === undefined || second === 0 ? height : second) - 1;
         top = Math.max(0, Math.min(height - 1, nextTop));
         bottom = Math.max(top, Math.min(height - 1, nextBottom));
@@ -553,13 +574,17 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       return INCOMPLETE;
     }
     if (next === 0x37) { saved = { row, col, attrs: attrsString() }; return start + 2; } // ESC 7
-    if (next === 0x38) { row = saved.row; col = saved.col; return start + 2; } // ESC 8
+    // ESC 8 恢复光标、ESC E 归零再换行、ESC c 整屏复位：三者都重新定光标，
+    // 折行待定随之作废（否则恢复位置后写的第一个字符会先多折一行）。
+    if (next === 0x38) { row = saved.row; col = saved.col; pendingWrap = false; return start + 2; } // ESC 8
+    // ESC D（IND）与 ESC M（RI）只移行不移列，与 LF 同口径：折行待定保留。
     if (next === 0x44) { lineFeed(); return start + 2; } // ESC D
-    if (next === 0x45) { col = 0; lineFeed(); return start + 2; } // ESC E
+    if (next === 0x45) { col = 0; pendingWrap = false; lineFeed(); return start + 2; } // ESC E
     if (next === 0x4d) { reverseIndex(); return start + 2; } // ESC M
     if (next === 0x63) { // ESC c
       grid = Array.from({ length: height }, () => blankRow(width));
       row = 0; col = 0; top = 0; bottom = height - 1;
+      pendingWrap = false;
       setSgr([]);
       return start + 2;
     }
@@ -579,11 +604,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   function parseInto(input, start, deadlineMs) {
     const len = input.length;
     let i = start;
-    let ticks = 0;
+    // 按「已消费字符数」采样，不是按循环次数：ASCII 批写一次能吞掉整行、OSC 扫描
+    // 一次能吞掉整段，按循环次数计数会让预算在长 run 上完全失效。
+    let nextCheck = start + BUDGET_QUANTUM;
     while (i < len) {
-      if (deadlineMs > 0 && ++ticks >= BUDGET_QUANTUM) {
-        ticks = 0;
+      if (deadlineMs > 0 && i >= nextCheck) {
         if (nowMs() >= deadlineMs) return { index: i, done: false, incomplete: false };
+        nextCheck = i + BUDGET_QUANTUM;
       }
       const code = input.charCodeAt(i);
       if (code === 0x1b) {
@@ -598,7 +625,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
         // convertEol 打开时列一并归零。镜像少认一个换行，画面就比屏幕高一行，
         // 回放出去的整屏会整体错位——自带背景、成片刷新的 TUI 字节流里这些控制
         // 字符很常见，它们正是「切页签回来画面坏掉」的形态。
-        if (convertEol) { col = 0; pendingWrap = false; }
+        if (convertEol) col = 0;
         lineFeed();
         i += 1;
         continue;
@@ -712,6 +739,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     pending = "";
     pendingOffset = 0;
     carry = "";
+    // 丢弃是出错路径：回放缓存可能对应着已经不再可信的状态，一并作废。
+    replayCache = null;
   }
 
   function serializeRow(line) {

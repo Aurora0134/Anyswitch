@@ -490,7 +490,9 @@ export function createTerminalHost({
         // Rebuild the rendered picture from the durable tail. The tail is trimmed,
         // so a restored session repaints approximately — no worse than replaying
         // those same bytes raw, and it gets exact again on the next output chunk.
-        for (const chunk of buffer) feedMirror(session, String(chunk));
+        // 恢复走同步 write 而不是切片：盘上每会话上限 128KB、实测 2.8ms，属于启动
+        // 一次性成本，没必要为它引入跨轮次的续排状态（恢复完就立刻要能被 attach）。
+        for (const chunk of buffer) feedMirrorSync(session, String(chunk));
         sessions.set(item.id, session);
       }
     } catch {
@@ -514,11 +516,25 @@ export function createTerminalHost({
       const result = session.screen.writeSliced(text, MIRROR_SLICE_MS);
       if (!result.done) scheduleMirrorDrain(session);
     } catch (error) {
-      // 解析中途抛错时偏移量可能已经和字节流脱节，后续每一块都会画错位；丢掉待解析
-      // 缓冲回到干净状态，代价只是这一段没画上（与"跳过该块"的既有契约一致）。
-      try { session.screen?.discardPending(); } catch { /* 镜像已不可用，下面只记日志 */ }
-      logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
+      skipMirrorChunk(session, error);
     }
+  }
+
+  // 同步喂送：恢复路径专用（见 restore 里的注释）。与 feedMirror 共用同一容错。
+  function feedMirrorSync(session, text) {
+    try {
+      if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      session.screen.write(text);
+    } catch (error) {
+      skipMirrorChunk(session, error);
+    }
+  }
+
+  // 解析中途抛错时偏移量可能已经和字节流脱节，后续每一块都会画错位；丢掉待解析
+  // 缓冲回到干净状态，代价只是这一段没画上（与"跳过该块"的既有契约一致）。
+  function skipMirrorChunk(session, error) {
+    try { session.screen?.discardPending(); } catch { /* 镜像已不可用，下面只记日志 */ }
+    logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
   }
 
   function scheduleMirrorDrain(session) {
@@ -530,8 +546,7 @@ export function createTerminalHost({
         if (!session.screen) return;
         if (!session.screen.drain(MIRROR_SLICE_MS).done) scheduleMirrorDrain(session);
       } catch (error) {
-        try { session.screen?.discardPending(); } catch { /* 同上 */ }
-        logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
+        skipMirrorChunk(session, error);
       }
     });
   }

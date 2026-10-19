@@ -555,25 +555,35 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
   }
 
   test("随机切块 × 随机预算，与整块 write 完全一致", () => {
-    const text = corpus();
+    // 语料重复到足够长：预算每 256 个字符才采样一次时钟，语料太短时每个块都会在
+    // 第一次采样前就解析完，fuzz 就退化成「同步 write 的等价性测试」。
+    const text = corpus().repeat(12);
     const reference = createScreenMirror({ cols: 40, rows: 12, historyLines: 200 });
     reference.write(text);
     const expectedReplay = reference.toReplay();
     const expectedLines = reference.screenLines();
     const expectedHistory = reference.historyLines();
 
+    // 覆盖率自检：必须真的走到「预算用尽、中途停下」这条路径，否则偏移错误抓不到。
+    let stalls = 0;
+    let carried = 0;
     for (let round = 0; round < 12; round += 1) {
       const rand = makeRandom(0x5eed + round);
       const mirror = createScreenMirror({ cols: 40, rows: 12, historyLines: 200 });
       let offset = 0;
       while (offset < text.length) {
-        const size = 1 + Math.floor(rand() * 40);
+        // 块大小跨两个数量级：小到 1 字符（切在转义序列中间），大到数千字符。
+        // 大块是必须的——预算每 256 字符才采样一次时钟，只有够长的块才可能中途停下。
+        const size = rand() < 0.25 ? 1 + Math.floor(rand() * 4) : 256 + Math.floor(rand() * 2000);
         const chunk = text.slice(offset, offset + size);
         offset += size;
-        // 预算 0 表示不限：这条路径就是同步排空，用来混进「不切片」的喂法。
-        const budget = rand() < 0.2 ? 0 : 0.5 + rand() * 2;
-        mirror.writeSliced(chunk, budget);
+        // 预算从极小到不限：0 表示同步排空，极小值强制中途停下。
+        const roll = rand();
+        const budget = roll < 0.15 ? 0 : roll < 0.5 ? 0.001 : roll < 0.75 ? 0.5 : 4;
+        const first = mirror.writeSliced(chunk, budget);
+        if (!first.done) stalls += 1;
         while (!mirror.drain(budget).done) { /* 模拟 setImmediate 续排 */ }
+        if (mirror.info().pendingChars > 0) carried += 1;
       }
       mirror.flush();
       assert.equal(mirror.toReplay(), expectedReplay, `第 ${round} 轮回放必须与整块一致`);
@@ -581,6 +591,8 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
       assert.deepEqual(mirror.historyLines(), expectedHistory, `第 ${round} 轮历史必须一致`);
       assert.equal(mirror.info().pendingChars, 0, `第 ${round} 轮结束后不得残留待接续字节`);
     }
+    assert.ok(stalls > 20, `fuzz 必须真的走到中途停下（实际 ${stalls} 次）`);
+    assert.ok(carried > 0, `fuzz 必须覆盖未终结序列暂留（实际 ${carried} 次）`);
   });
 
   test("单片耗时不超过预算 + 一个采样量子", () => {
@@ -592,9 +604,9 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
     const first = mirror.writeSliced(heavy, budget);
     const elapsed = performance.now() - started;
     assert.equal(first.done, false, "64KB 换行密集块必须在预算内停下，不能一口气排完");
-    // 预算是软的：每 256 字符才看一次时钟，所以最多超出一个量子的解析时间。
-    // 阈值按「预算 + 一个量子」量级给，留足机器抖动余量（旧实现单块 592ms）。
-    assert.ok(elapsed < budget + 40, `单片耗时 ${elapsed.toFixed(1)}ms 必须落在预算量级内`);
+    // 门槛是单次同步块 ≤ 8ms（spec 验收表）。预算是软的：每 256 个字符才看一次
+    // 时钟，所以最多超出一个量子的解析时间；8ms 对 4ms 预算留了整整一个量子。
+    assert.ok(elapsed < 8, `单片耗时 ${elapsed.toFixed(1)}ms 必须 ≤ 8ms 门槛`);
     while (!mirror.drain(budget).done) { /* 排完 */ }
     assert.equal(mirror.info().pendingChars, 0, "排空后不得残留字节");
   });
@@ -647,5 +659,47 @@ describe("回放缓存", () => {
     // 只入队不排空（预算 0.0001 极可能停在半路），toReplay 仍须看到完整内容。
     mirror.writeSliced("\r\nBBB", 0.0001);
     assert.ok(mirror.toReplay().includes("BBB"), "回放必须先排空待解析字节");
+  });
+});
+
+// ---- 折行待定的取消时机 ----
+// clampCursor 不再清 pendingWrap（它只在解析轮次末尾夹光标，块边界正好落在满行时
+// 清掉会让下一个字符覆盖行尾那一格）。取消折行待定改由「光标被移动」负责，这里把
+// 每条路径逐一对齐 xterm 5.5 的真值：它用 x === cols 当哨兵，所有移动类操作都会
+// _restrictCursor() 把哨兵夹掉，lineFeed 里的 x-- 同理。
+describe("满行后光标被移动，折行待定必须取消", () => {
+  const cols = 10;
+  const cases = [
+    // [说明, 前置, 操作, 期望 B 落在第几行第几列]
+    ["ESC 8 恢复光标", "A".repeat(cols), "\u001b8", 1, 1],
+    ["CSI u 恢复光标", "A".repeat(cols), "\u001b[u", 1, 1],
+    ["1049h 进备屏", "A".repeat(cols), "\u001b[?1049h", 1, 1],
+    ["ESC c 整屏复位", "A".repeat(cols), "\u001bc", 1, 1],
+    ["CUP 定位", "A".repeat(cols), "\u001b[3;1H", 3, 1],
+    ["ESC E 归零换行", "A".repeat(cols), "\u001bE", 2, 1],
+    ["裸 LF", "A".repeat(cols), "\n", 2, 1],
+    ["未满行时 ESC 8 仍回原位", "AAA", "\u001b8", 1, 1],
+  ];
+  for (const [name, setup, op, wantRow, wantCol] of cases) {
+    test(name, () => {
+      const mirror = createScreenMirror({ cols, rows: 6 });
+      mirror.write(setup);
+      mirror.write(op);
+      mirror.write("B");
+      const lines = mirror.screenLines();
+      const row = lines.findIndex((line) => line.includes("B")) + 1;
+      const col = row > 0 ? lines[row - 1].indexOf("B") + 1 : -1;
+      assert.equal(row, wantRow, `${name}：B 应在第 ${wantRow} 行`);
+      assert.equal(col, wantCol, `${name}：B 应在第 ${wantCol} 列`);
+    });
+  }
+
+  test("满行后不移动光标，下一个字符仍要折行", () => {
+    const mirror = createScreenMirror({ cols, rows: 6 });
+    mirror.write("A".repeat(cols));
+    mirror.write("B");
+    const lines = mirror.screenLines();
+    assert.equal(lines[0], "A".repeat(cols), "第一行必须保持满行");
+    assert.equal(lines[1], "B", "B 必须折到第二行");
   });
 });
