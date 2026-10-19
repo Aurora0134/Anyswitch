@@ -7820,6 +7820,172 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
   });
 });
 
+// 同步输出合帧（`\e[?2026h` … `\e[?2026l`）：Kimi 等 TUI 用这对标记声明「整屏原子
+// 提交」，而宿主 SSE 的 32KB 冲刷会把一次整屏重绘拆成两帧送达。先到的半帧只有清屏
+// 与半屏内容（帧首 2J/3J 已把视口打到顶部），后到的半帧才补齐内容底——视口于是按
+// 重绘节奏在头尾之间来回跳（真机实测 8 次/秒）。客户端在标记之间攒字节、闭合时一次
+// 写入，中间态永不落屏。函数体抽进桩环境真跑，定时器可驱动。
+describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
+  function syncSandbox() {
+    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme",
+      "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
+      "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
+      "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput"]
+      .map((name) => {
+        const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
+        assert.ok(src, `${name} found in panel.js`);
+        return src;
+      }).join("\n");
+    const state = { posts: [], eventSources: [], terms: [], sessions: {}, timers: new Map(), timerSeq: 0 };
+    const sandbox = new Function("state", `
+      const API_BASE = "http://panel.test";
+      const terminalFontSize = 13;
+      const terminalBackendReady = true;
+      const terminalBackendSessions = state.sessions;
+      const terminalPreviewSessions = {};
+      const host = {};
+      const $ = (id) => (id === "terminalXtermHost" ? host : null);
+      const document = { documentElement: {} };
+      const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
+      const terminalReviveInflight = new Map();
+      const api = () => Promise.resolve({});
+      function fitTerminalXterm() {}
+      function requestAnimationFrame(cb) { cb(); }
+      function cancelAnimationFrame() {}
+      function terminalImeAnchorReady() { return false; }
+      function armTerminalImeAnchor() {}
+      function releaseTerminalImeAnchor() {}
+      function installTerminalImeAnchor() {}
+      function installTerminalBottomAlign() {}
+      // 合帧的兜底定时器：可驱动，不依赖真实时钟
+      function setTimeout(fn, ms) { state.timerSeq += 1; state.timers.set(state.timerSeq, { at: ms, fn }); return state.timerSeq; }
+      function clearTimeout(id) { if (id !== null && id !== undefined) state.timers.delete(id); }
+      class FakeFitAddon {}
+      const window = { Terminal: null, FitAddon: { FitAddon: FakeFitAddon } };
+      window.Terminal = class {
+        constructor(options) { this.options = options; this.disposed = false; this.writes = []; this.resetCount = 0; this._disposables = new Set(); state.terms.push(this); }
+        loadAddon() {}
+        open(hostEl) { this.hostEl = hostEl; }
+        onData(fn) { const d = { dispose: () => { this._disposables.delete(d); } }; this._disposables.add(d); this._fire = (data) => { if (this._disposables.has(d)) fn(data); }; return d; }
+        fire(data) { this._fire?.(data); }
+        write(text) { this.writes.push(text); }
+        reset() { this.resetCount += 1; }
+        dispose() { this.disposed = true; this._disposables.clear(); this._fire = null; }
+        attachCustomKeyEventHandler(fn) { this.keyEventHandler = fn; }
+        focus() { this.focusCount = (this.focusCount || 0) + 1; }
+        hasSelection() { return false; }
+      };
+      class FakeEventSource {
+        constructor(url) { this.url = url; this.closed = false; this.handlers = {}; state.eventSources.push(this); }
+        addEventListener(type, fn) { (this.handlers[type] ||= []).push(fn); }
+        set onerror(fn) {}
+        close() { this.closed = true; }
+        emit(type, payload) { for (const fn of this.handlers[type] || []) fn({ data: JSON.stringify(payload) }); }
+      }
+      const EventSource = FakeEventSource;
+      ${bodies}
+      const terminalColumns = [createTerminalColumn("terminalXtermHost")];
+      return {
+        connect: (session, opts) => connectTerminalStream(terminalColumns[0], session, opts),
+        close: () => closeTerminalStream(terminalColumns[0]),
+        column: () => terminalColumns[0],
+        xterm: () => terminalColumns[0].xterm,
+        source: () => terminalColumns[0].eventSource,
+        runTimers: () => { for (const [id, t] of [...state.timers]) { state.timers.delete(id); t.fn(); } },
+        pendingTimers: () => state.timers.size,
+      };
+    `)(state);
+    return { sandbox, state };
+  }
+  const session = (id) => ({ id, label: id, backend: true, shell: {}, output: [] });
+  const OPEN = "\u001b[?2026h";
+  const CLOSE = "\u001b[?2026l";
+
+  it("被拆成两帧的整屏重绘合成一次写入——清屏后的中间态从不落屏", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    const head = `${OPEN}\u001b[2J\u001b[H\u001b[3J╭─ 头部 ─╮\r\n│ 半屏内容 │`;
+    const tail = `\r\n╰─ 尾部 ─╯${CLOSE}`;
+    src.emit("data", head);
+    assert.deepEqual(term.writes, [], "块未闭合：一个字节都不落屏（清屏+半屏的中间态不可见）");
+    src.emit("data", tail);
+    assert.deepEqual(term.writes, [head + tail], "闭合时整块一次写入，视口只解析/渲染一遍");
+    assert.equal(sandbox.pendingTimers(), 0, "闭合后兜底定时器已撤销");
+  });
+
+  it("无标记的增量输出逐帧直通，零延迟不攒", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    src.emit("data", "正在思考");
+    src.emit("data", "…\r\n");
+    assert.deepEqual(term.writes, ["正在思考", "…\r\n"], "逐帧落屏，与旧行为一致");
+    assert.equal(sandbox.pendingTimers(), 0, "直通不排任何定时器");
+  });
+
+  it("同一帧内自带开闭：整段一次写入，不挂起", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    const block = `${OPEN}\u001b[2J\u001b[H全屏${CLOSE}`;
+    src.emit("data", `前缀${block}后缀`);
+    assert.deepEqual(term.writes, ["前缀", block, "后缀"], "块前的字节当拍直通，块整段一次写，块后的字节继续直通");
+  });
+
+  it("标记被劈在两帧之间：尾部前缀扣住，下一帧拼回后仍识别为块", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    src.emit("data", `正文\u001b[?20`);
+    assert.deepEqual(term.writes, ["正文"], "非标记正文照常落屏，半截标记扣住不写");
+    src.emit("data", `26h全屏${CLOSE}`);
+    assert.deepEqual(term.writes, ["正文", `${OPEN}全屏${CLOSE}`], "拼回后识别为块并整块写入");
+  });
+
+  it("闭合标记迟到时按上限兜底冲刷，画面不被永久锁死", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    src.emit("data", `${OPEN}\u001b[2J半屏`);
+    assert.deepEqual(term.writes, [], "块内挂起");
+    sandbox.runTimers();
+    assert.deepEqual(term.writes, [`${OPEN}\u001b[2J半屏`], "超时兜底冲刷，已到的字节不丢");
+  });
+
+  it("snapshot 作废挂起块：上一段画面的半帧不得写进重连后的新屏", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    const src = sandbox.source();
+    src.emit("data", `${OPEN}\u001b[2J旧半帧`);
+    const resetsBefore = term.resetCount;
+    src.emit("snapshot", { pid: 1 });
+    assert.equal(term.resetCount, resetsBefore + 1, "snapshot 先 reset");
+    sandbox.runTimers();
+    assert.deepEqual(term.writes, [], "挂起块随 snapshot 丢弃，不会补写到新屏");
+    src.emit("data", `${OPEN}新整屏${CLOSE}`);
+    assert.deepEqual(term.writes, [`${OPEN}新整屏${CLOSE}`], "重连后的块照常合帧");
+  });
+
+  it("关流撤销兜底定时器并丢弃未闭合字节：dispose 之后不再碰实例", () => {
+    const { sandbox } = syncSandbox();
+    sandbox.connect(session("sess-a"));
+    const term = sandbox.xterm();
+    sandbox.source().emit("data", `${OPEN}\u001b[2J半帧`);
+    sandbox.close();
+    assert.equal(term.disposed, true, "实例已销毁");
+    assert.equal(sandbox.pendingTimers(), 0, "兜底定时器随关流撤销");
+    sandbox.runTimers();
+    assert.deepEqual(term.writes, [], "销毁后没有任何迟到写入");
+  });
+});
+
 // 应答定投（C 案）：每连接独占一个 xterm 实例，onData 闭包绑定建连时固化的
 // 会话 id，不再读 activeTerminalPreviewId；旧连接关闭时实例随流销毁，WriteBuffer
 // 里排队未解析的旧字节（大回放跨事件循环切片、续跑定时器不可取消）解析时只能

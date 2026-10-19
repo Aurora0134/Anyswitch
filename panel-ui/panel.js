@@ -4778,6 +4778,9 @@ async function api(method, path, body) {
       replayRestoring: false,
       replayRestoreArm: null,
       replayRestoreCancel: null,
+      // 同步输出合帧（见 connectTerminalStream）：撤掉未闭合块的兜底定时器并丢弃
+      // 其字节。连接重建时指向新连接的闭包，关流时由 closeTerminalStream 调一次。
+      streamSyncCancel: null,
     };
   }
   const terminalColumns = [createTerminalColumn("terminalXtermHost")];
@@ -5454,6 +5457,9 @@ async function api(method, path, body) {
     column.replayRestoreCancel = null;
     column.replayRestoreArm = null;
     column.replayRestoring = false;
+    // 同步输出合帧的挂起块同理：撤销兜底定时器并丢弃未闭合的字节。
+    column.streamSyncCancel?.();
+    column.streamSyncCancel = null;
   }
 
   // 整页清场入口（关停清场 / 零会话）：关闭所有列的流与实例。
@@ -6126,14 +6132,96 @@ async function api(method, path, body) {
     if (revive && session.backendState?.status === "exited") {
       await reviveTerminalSession(session);
     }
+    // 同步输出合帧（`\e[?2026h` … `\e[?2026l`）：Kimi 等 TUI 用这对标记声明「这一整屏
+    // 要原子提交」。宿主 SSE 的 32KB 冲刷会把一次整屏重绘拆成两帧送达，先到的那半帧
+    // 只有清屏和半屏内容——帧首的 2J/3J 已把视口打到顶部——后到的半帧才补齐内容底，
+    // 视口于是按重绘节奏在头尾之间来回跳（实测 8 次/秒）。这里在标记之间攒住字节、
+    // 闭合时一次写入：一次 write 只解析一遍、只渲染一次，中间态永远不落到屏上。
+    // 不带标记的输出（增量刷新的 agent）零延迟直通，行为不变。标记被劈在两帧之间时
+    // 扣住尾部前缀，下一帧拼回再判；标记迟迟不闭合按上限兜底冲刷，不把画面锁死。
+    const TERMINAL_SYNC_OPEN = "\u001b[?2026h";
+    const TERMINAL_SYNC_CLOSE = "\u001b[?2026l";
+    const TERMINAL_SYNC_HOLD_MAX_MS = 400;
+    const TERMINAL_SYNC_HOLD_MAX_BYTES = 2 * 1024 * 1024;
+    let syncHolding = false;
+    let syncBlock = "";
+    let syncCarry = "";
+    let syncTimer = null;
+    const flushSyncBlock = () => {
+      if (syncTimer !== null) {
+        clearTimeout(syncTimer);
+        syncTimer = null;
+      }
+      if (!syncHolding) return;
+      const block = syncBlock;
+      syncHolding = false;
+      syncBlock = "";
+      if (block) term.write(block);
+    };
+    const armSyncTimer = () => {
+      if (syncTimer !== null) return;
+      syncTimer = setTimeout(() => { syncTimer = null; flushSyncBlock(); }, TERMINAL_SYNC_HOLD_MAX_MS);
+    };
+    // 尾部是标记前缀的长度：只有真正劈开的标记才扣住，其余字节照常当拍落屏。
+    const syncMarkerPrefixLength = (text, marker) => {
+      for (let n = Math.min(marker.length - 1, text.length); n >= 2; n -= 1) {
+        if (text.endsWith(marker.slice(0, n))) return n;
+      }
+      return 0;
+    };
+    const writeStreamChunk = (chunkText) => {
+      let text = syncCarry + chunkText;
+      syncCarry = "";
+      while (text) {
+        if (syncHolding) {
+          const closeAt = text.indexOf(TERMINAL_SYNC_CLOSE);
+          if (closeAt < 0) {
+            const keep = syncMarkerPrefixLength(text, TERMINAL_SYNC_CLOSE);
+            syncBlock += keep > 0 ? text.slice(0, text.length - keep) : text;
+            syncCarry = keep > 0 ? text.slice(text.length - keep) : "";
+            if (syncBlock.length > TERMINAL_SYNC_HOLD_MAX_BYTES) flushSyncBlock();
+            return;
+          }
+          syncBlock += text.slice(0, closeAt + TERMINAL_SYNC_CLOSE.length);
+          text = text.slice(closeAt + TERMINAL_SYNC_CLOSE.length);
+          flushSyncBlock();
+          continue;
+        }
+        const openAt = text.indexOf(TERMINAL_SYNC_OPEN);
+        if (openAt < 0) {
+          const keep = syncMarkerPrefixLength(text, TERMINAL_SYNC_OPEN);
+          const body = keep > 0 ? text.slice(0, text.length - keep) : text;
+          if (body) term.write(body);
+          syncCarry = keep > 0 ? text.slice(text.length - keep) : "";
+          return;
+        }
+        if (openAt > 0) term.write(text.slice(0, openAt));
+        text = text.slice(openAt);
+        syncHolding = true;
+        syncBlock = "";
+        armSyncTimer();
+        // 不 return：开标记所在的那一段可能在同一帧里就闭合了。
+      }
+    };
+    // 流关闭 / 重连 snapshot 时未闭合的块一律作废：它属于上一段画面，不能写进新屏。
+    column.streamSyncCancel = () => {
+      if (syncTimer !== null) {
+        clearTimeout(syncTimer);
+        syncTimer = null;
+      }
+      syncHolding = false;
+      syncBlock = "";
+      syncCarry = "";
+    };
     column.eventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     column.eventSource.addEventListener("snapshot", (event) => {
+      column.streamSyncCancel?.();
       try {
         absorbTerminalSnapshot(term, session, JSON.parse(event.data), column);
       } catch {}
     });
     column.eventSource.addEventListener("data", (event) => {
-      try { term.write(JSON.parse(event.data)); } catch {}
+      try { writeStreamChunk(JSON.parse(event.data)); } catch {}
     });
     column.eventSource.onerror = () => {
     };
