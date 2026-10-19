@@ -8,14 +8,14 @@ import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, appendFileSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile, spawn } from "node:child_process";
 import * as pty from "node-pty";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 import { TERMINAL_PARENT_PID_ENV } from "./terminal-process-manager.mjs";
-import { probePidLiveness } from "./relay-process-manager.mjs";
+import { probePidLiveness, getProcessCommandLineAsync } from "./relay-process-manager.mjs";
 import { formatLogStamp } from "./logger.mjs";
 
 export const TERMINAL_HOST_PORT = 47823;
@@ -93,6 +93,29 @@ function shellSpec(shell) {
     args: ["-NoLogo", "-NoProfile"],
     name: "PowerShell",
   };
+}
+
+// 恢复时的幽灵清扫闸：pid 可被系统复用，「活着」不等于「还是本会话那一代进程」。
+// 只认命令行里出现本会话的启动执行体（launch 的可执行文件，没有 launch 时用
+// shell 的执行体）。查不到命令行（进程刚好退了、权限不够）一律判「不是本会话」——
+// 宁漏勿错：漏杀一个孤儿只是多一个进程，错杀别人的进程不可挽回。
+function sessionCommandTokens(session) {
+  const spec = session.launch ?? shellSpec(session.shell);
+  const tokens = [spec.file, ...(spec.args ?? [])]
+    .filter((token) => typeof token === "string" && token.length > 3)
+    .filter((token) => /\.exe$/i.test(token.trim().replace(/^"|"$/g, "")) || /[\\/]/.test(token))
+    .map((token) => basename(token.trim().replace(/^"|"$/g, "")).toLowerCase());
+  return [...new Set(tokens)];
+}
+
+function commandLineOwnsSession(commandLine, session) {
+  if (typeof commandLine !== "string" || commandLine.trim() === "") return false;
+  const tokens = sessionCommandTokens(session);
+  if (tokens.length === 0) return false;
+  const haystack = commandLine.toLowerCase();
+  // 全部命中才算本会话：agent 会话的清单里既有 cmd.exe 包装也有 agent 执行体，
+  // 只认 cmd.exe 的话，pid 被复用给任何一条无关的 cmd 都会被误杀。
+  return tokens.every((token) => haystack.includes(token));
 }
 
 // One-click CLI Agent launches arrive as an optional `launch` (what to spawn —
@@ -368,6 +391,9 @@ export function createTerminalHost({
   // 树杀前的误杀闸：pid 可被系统复用，「宁漏勿错」。复活判据复用 relay 的
   // 死活探针（原生 kill(0) + tasklist 交叉验证），测试注入布尔桩控制死活。
   isAliveFn = (pid) => probePidLiveness(pid) === "alive",
+  // 恢复清扫的身份校验：只有命令行对得上本会话启动执行体的 pid 才允许树杀。
+  // 查询失败（null）按「对不上」处理，测试注入固定字符串。
+  getCommandLineFn = (pid) => getProcessCommandLineAsync(pid),
 } = {}) {
   const dataRoot = root || join(process.env.LOCALAPPDATA || process.cwd(), "Anyswitch");
   mkdirSync(dataRoot, { recursive: true });
@@ -462,7 +488,12 @@ export function createTerminalHost({
     persistTimer.unref?.();
   }
 
+  // 恢复清扫在后台跑，句柄挂在返回值上给测试做确定性等待：命令行查询要拉起
+  // PowerShell（几百毫秒），不能在 restore 的同步循环里做——宿主启动会因此卡住。
+  let restoreSweep = Promise.resolve();
+
   function restore() {
+    const sweeps = [];
     try {
       const raw = JSON.parse(readFileSync(statePath, "utf8"));
       for (const item of Array.isArray(raw?.sessions) ? raw.sessions : []) {
@@ -470,6 +501,12 @@ export function createTerminalHost({
         const session = {
           ...item,
           pty: null,
+          // 进程代际：每次 spawn 换一个记号，onExit/onData 只认自己那一代。
+          // 盘上恢复的会话没有活进程，代际从 0 起。
+          ptyGeneration: 0,
+          // 本代宿主见过并可能还活着的 shell pid（含已被 onExit 摘掉的代）。
+          // 树杀按这份清单走：session.pty 为空不代表上一代进程已经死了。
+          livePids: new Set(),
           listeners: new Set(),
           buffer,
           bufferBytes: buffer.reduce((total, chunk) => total + chunkBytes(String(chunk)), 0),
@@ -481,11 +518,10 @@ export function createTerminalHost({
         // 进程 8756 挂着跑了 65 分钟）。杀树是恢复时的唯一兜底——本代的三条
         // 关闭路径已堵住复发，这里收的是历史遗留与宿主崩溃两类漏网。纯外壳
         // 会话（无 agentId）的面不同：控制台死亡时 shell 必随之死，不存在
-        // 泄漏面，不碰。pid 已死的也不碰（pid 复用，宁漏勿错）。
+        // 泄漏面，不碰。pid 已死的也不碰（pid 复用，宁漏勿错）；pid 活着但
+        // 命令行对不上本会话启动执行体的同样不碰——那是系统把号发给了别人。
         if (item.agentId && Number.isInteger(item.pid) && item.pid > 0 && isAliveFn(item.pid)) {
-          killTreeFn(item.pid).catch((error) => {
-            logger.warn?.(`[terminal-host] restore sweep pid=${item.pid} failed: ${error.message}`);
-          });
+          sweeps.push(verifyAndSweep(session, item.pid));
         }
         // Rebuild the rendered picture from the durable tail. The tail is trimmed,
         // so a restored session repaints approximately — no worse than replaying
@@ -495,6 +531,26 @@ export function createTerminalHost({
       }
     } catch {
       // First start or a partially written state file: start empty.
+    }
+    if (sweeps.length > 0) restoreSweep = Promise.all(sweeps);
+  }
+
+  // 恢复清扫的异步身份校验：命令行查询要拉起 PowerShell（几百毫秒），不能在
+  // restore 的同步循环里做——宿主启动会因此卡住。查不到（null）按「不是本会话」
+  // 处理，绝不动手。
+  async function verifyAndSweep(session, pid) {
+    let commandLine = null;
+    try {
+      commandLine = await getCommandLineFn(pid);
+    } catch {
+      commandLine = null;
+    }
+    if (!commandLineOwnsSession(commandLine, session)) return;
+    if (!isAliveFn(pid)) return;
+    try {
+      await killTreeFn(pid);
+    } catch (error) {
+      logger.warn?.(`[terminal-host] restore sweep pid=${pid} failed: ${error.message}`);
     }
   }
 
@@ -558,11 +614,33 @@ export function createTerminalHost({
     }
   }
 
+  // 进程代际护栏：重启会在旧进程的退出通知到达之前就 spawn 新一代（ConPTY 的
+  // exit 通知要晚几十到几百毫秒）。没有代际判断时，旧进程迟到的 onExit 会把
+  // session.pty 置空、把状态翻成 exited——新一代进程明明活着却被判死，面板
+  // 于是再复活一次，一轮轮空转并留下没人认领的孤儿。回调只认自己那一代：
+  // 不是当前代就只记一笔，不碰会话状态、不通知流端。
   function attach(session, child) {
+    const generation = (session.ptyGeneration ?? 0) + 1;
+    session.ptyGeneration = generation;
     session.pty = child;
     session.pid = child.pid ?? session.pid;
-    child.onData((data) => emit(session, data));
+    if (Number.isInteger(session.pid) && session.pid > 0) {
+      if (!session.livePids) session.livePids = new Set();
+      session.livePids.add(session.pid);
+    }
+    const isCurrent = () => session.ptyGeneration === generation;
+    child.onData((data) => {
+      if (!isCurrent()) return;
+      emit(session, data);
+    });
     child.onExit(({ exitCode }) => {
+      // 这一代进程已经结束：无论是不是当前代，都把它从待杀清单里摘掉——死 pid
+      // 会被系统复用，留在清单里就等于把号发给别人的进程当成本会话的树。
+      if (Number.isInteger(child.pid)) session.livePids?.delete(child.pid);
+      if (!isCurrent()) {
+        logger.warn?.(`[terminal-host] stale exit ignored (pid=${child.pid}, generation=${generation}, current=${session.ptyGeneration})`);
+        return;
+      }
       session.exitCode = exitCode;
       session.pty = null;
       session.lastActiveAt = Date.now();
@@ -578,19 +656,70 @@ export function createTerminalHost({
   }
 
   // 终结一个会话的进程树：先 pty.kill 关伪控制台（守规矩的进程拿
-  // CTRL_CLOSE 优雅退出），再对登记的 shell pid 树杀（控制台解耦的进程由这
-  // 一步终结）。闸是「会话登记的 shell 还在」——pty 置空（onExit 已跑）或
-  // pid 已死的会话不碰：pid 可被系统复用，那棵树已不归本会话管，宁漏勿错。
+  // CTRL_CLOSE 优雅退出），再对**本代宿主 spawn 过、且还没见到退出通知**的
+  // 每一代 shell pid 树杀（控制台解耦的进程由这一步终结）。清单而不是
+  // session.pid：迟到退出或上一代解耦进程都可能还挂着，只看当前句柄正是孤儿
+  // 泄漏的来源；反过来也不碰清单外的 pid——pid 可被系统复用，宁漏勿错。
   async function terminateSessionTree(session) {
-    if (!session?.pty || !Number.isInteger(session.pid) || session.pid <= 0) return;
+    if (!session) return;
+    // 候选清单必须在 kill 之前取：pty.kill() 会同步触发这一代的 onExit，
+    // 而 onExit 会把 pid 从清单里摘掉——先 kill 再读清单等于什么都没杀。
+    // 树杀要收的正是「控制台已经关了、解耦的 agent 还活着」这类进程，
+    // 它们不会随 pty 一起死，所以这一代的 pid 无论如何都要过一遍树杀。
+    const candidates = [...(session.livePids ?? [])];
     try {
-      session.pty.kill();
+      session.pty?.kill();
     } catch {
       /* 已经死了的 pty 杀第二次不拦后面的树杀 */
     }
-    const shellPid = session.pid;
-    if (!isAliveFn(shellPid)) return;
-    await killTreeFn(shellPid);
+    for (const pid of candidates) {
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      if (!isAliveFn(pid)) {
+        session.livePids?.delete(pid);
+        continue;
+      }
+      try {
+        await killTreeFn(pid);
+        session.livePids?.delete(pid);
+      } catch (error) {
+        // 杀失败保留登记：下一轮重启/关闭还要再试一次，丢了登记就等于放弃
+        // 那棵树（pid 可被复用，之后想杀也不敢动手了）。
+        logger.warn?.(`[terminal-host] tree kill pid=${pid} failed: ${error.message}`);
+      }
+    }
+  }
+
+  // 重开一个会话的进程。并发重启（面板轮询 + 用户点击同时打进来）必须合并成
+  // 一次 spawn：两次 terminate+spawn 交错时，后一次的树杀会落在前一次刚起来的
+  // 新进程上，最终留下的进程与响应里的 pid 对不上，多出来的那个成了孤儿。
+  // 同会话的重启请求串成一条：在飞时直接返回同一份结果快照。
+  function restartSession(session, { envDelta = null, launch = null, cwd = null } = {}) {
+    if (session.restartInFlight) return session.restartInFlight;
+    const run = (async () => {
+      if (envDelta) session.env = mergeInjectedEnv(session.env ?? {}, envDelta);
+      // 启动参数可按当前安装与设置追平（可执行文件升级、权限开关变更、工作目录
+      // 漂移）。只认调用方校验过的值，缺失则沿用会话原值。
+      if (launch) session.launch = launch;
+      if (cwd) session.cwd = cwd;
+      // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
+      // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
+      await terminateSessionTree(session);
+      session.exitCode = null;
+      // 回滚历史归页签（2026-10-18 拍板：重启/清回滚不丢史）：重开只是换进程，
+      // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
+      // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
+      // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。
+      if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      else restartHygiene(session);
+      spawnSession(session);
+      // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
+      await persistNow();
+      return snapshot(session);
+    })();
+    session.restartInFlight = run.finally(() => {
+      session.restartInFlight = null;
+    });
+    return session.restartInFlight;
   }
 
   function spawnSession(session) {
@@ -755,6 +884,8 @@ export function createTerminalHost({
           bufferBytes: 0,
           screen: createScreenMirror({ cols: Math.max(2, Math.min(240, Number(body.cols) || 120)), rows: Math.max(1, Math.min(120, Number(body.rows) || 34)) }),
           pty: null,
+          ptyGeneration: 0,
+          livePids: new Set(),
           listeners: new Set(),
         };
         sessions.set(session.id, session);
@@ -854,23 +985,14 @@ export function createTerminalHost({
         // (e.g. a relay restart) merges them in before the respawn. Merged,
         // never echoed — the response snapshot carries no env.
         const body = await readBody(req);
-        if (body?.env !== undefined && body.env !== null) {
-          session.env = mergeInjectedEnv(session.env ?? {}, normalizeInjectedEnv(body.env) ?? {});
-        }
-        // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
-        // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
-        await terminateSessionTree(session);
-        session.exitCode = null;
-        // 回滚历史归页签（2026-10-18 拍板：重启/清回滚不丢史）：重开只是换进程，
-        // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
-        // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
-        // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。
-        if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
-        else restartHygiene(session);
-        spawnSession(session);
-        // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
-        await persistNow();
-        return json(res, 200, snapshot(session));
+        const envDelta = body?.env !== undefined && body.env !== null ? normalizeInjectedEnv(body.env) : null;
+        // 复活通路会带上按当前安装重新组装的 launch 与 cwd：可执行文件升级、
+        // 权限开关变更、工作目录漂移都在重开时追平。缺省则沿用会话原值。
+        const launch = body?.launch !== undefined && body.launch !== null ? normalizeLaunch(body.launch) : null;
+        const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : null;
+        if (cwd !== null && !existsSync(cwd)) return json(res, 400, { error: "invalid_cwd" });
+        const restarted = await restartSession(session, { envDelta, launch, cwd });
+        return json(res, 200, restarted);
       }
       if (action === "close" && req.method === "POST") {
         await terminateSessionTree(session);
@@ -896,6 +1018,9 @@ export function createTerminalHost({
     token,
     statePath,
     sessions,
+    // 恢复清扫的等入口：清扫要查命令行（异步、几百毫秒），restore 本身不等它。
+    // 测试 await 它即可确定清扫已落定；生产路径没人等，跑完即止。
+    get restoreSweep() { return restoreSweep; },
     // 异步化后「已落盘」不再随路由响应自动成立（onExit 这类回调路径是发后不管
     // 的），把这个等链入口暴露出来给测试做确定性等待：await 它即等完链上全部
     // 在途写（没脏时是纯空跳）。

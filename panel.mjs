@@ -448,6 +448,43 @@ async function defaultCreateTerminalSession(body, { token } = {}) {
   }
 }
 
+// 复活一条已退出的会话：先读它的身份（agentId/cwd），再按当前安装与设置重新
+// 组装 launch 与 env，最后交给宿主重开。env 从不落盘，所以凭据只能在这里重建；
+// 宿主自己重启一个 agent 会话时拿不到这些值，起来的就是 agent 的原生实例。
+// 读的是列表路由而不是单条：单条会连回放窗一起送过来（可达数百 KB），复活只
+// 需要身份三件套，而列表本来就不带 buffer。
+async function defaultFetchTerminalSession(id, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json().catch(() => null);
+    const list = Array.isArray(payload?.sessions) ? payload.sessions : [];
+    return list.find((item) => item && item.id === id) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function defaultRestartTerminalSession(id, body, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions/${encodeURIComponent(id)}/restart`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: AbortSignal.timeout(10000),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
 // /api/internal/*). Returns the parsed payload, or null when the relay is
@@ -791,6 +828,8 @@ export function createPanelRouter({
    fetchRelayDetectedProcesses = defaultFetchRelayDetectedProcesses,
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
    createTerminalSession = defaultCreateTerminalSession,
+   fetchTerminalSessionFn = defaultFetchTerminalSession,
+   restartTerminalSessionFn = defaultRestartTerminalSession,
    // Terminal-host lifecycle against the relay (47821 /terminal-host/*): the
    // relay owns the host child, so status/start/stop all live there behind the
    // same pi-relay-token guard as /api/internal/*. Injectable so tests never
@@ -1071,6 +1110,48 @@ export function createPanelRouter({
     }
     if (!created) return sendJson(res, 503, { ok: false, error: "终端服务不在运行，请稍后重试" });
     return sendJson(res, created.status || 201, created.body ?? {});
+  }
+
+  // 复活一条已退出的终端会话。与创建路由的分工：创建要 agentId 与工作目录，
+  // 复活只用会话自己的身份（agentId + cwd）重新组装启动参数——凭据从不落盘，
+  // 这是唯一能让它重新拿到 relay 地址与 token 的通路。纯外壳会话没有可重建的
+  // 东西，直接转发重开。
+  async function handleTerminalSessionRevive(req, res, id) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    const session = await fetchTerminalSessionFn(id, { token });
+    if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
+    let body = {};
+    if (session.agentId) {
+      if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, session.agentId)) {
+        return sendJson(res, 400, { ok: false, error: "unknown_agent" });
+      }
+      let claudeBypassPermissions = false;
+      try {
+        claudeBypassPermissions = loadSettings(settingsFile, base).settings.claudeBypassPermissions === true;
+      } catch {
+        claudeBypassPermissions = false;
+      }
+      let launch;
+      try {
+        launch = buildAgentSessionLaunch({
+          agentId: session.agentId,
+          cwd: session.cwd,
+          port: AGENT_RELAY_PORT,
+          token,
+          base,
+          claudeBypassPermissions,
+        });
+      } catch (error) {
+        return sendJson(res, 400, { ok: false, error: error.message });
+      }
+      // launch 与 cwd 一并带上：可执行文件升级、权限开关变更、工作目录漂移
+      // 都在重开时追平。env 只走请求体，不经响应回显。
+      body = { launch: launch.launch, cwd: launch.cwd, env: launch.env };
+    }
+    const restarted = await restartTerminalSessionFn(id, body, { token });
+    if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    return sendJson(res, restarted.status || 200, restarted.body ?? {});
   }
 
   // Recent requests for one attributed terminal instance, read off today's
@@ -2780,6 +2861,15 @@ export function createPanelRouter({
     if (path === "/panel/api/terminal/agent-sessions" && method === "POST") return handleTerminalAgentSessionCreate(req, res);
     if (path.startsWith("/panel/api/terminal/sessions/")) {
       const suffix = path.slice("/panel/api/terminal/sessions/".length);
+      const reviveMatch = suffix.match(/^([a-f0-9-]{8,64})\/revive$/i);
+      if (reviveMatch && method === "POST") {
+        try {
+          await readJsonBody(req);
+        } catch (error) {
+          return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+        }
+        return handleTerminalSessionRevive(req, res, reviveMatch[1]);
+      }
       if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
       if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);
       if (method === "POST") {

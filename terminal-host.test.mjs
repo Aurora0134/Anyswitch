@@ -1233,6 +1233,76 @@ test("restart 保史：镜像与字节窗原地保留，新进程续写在旧画
   }
 });
 
+test("迟到退出不判死新一代：旧进程的 onExit 晚到时只记一笔，状态保持 running", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-stale-exit-"));
+  let pidSeq = 6100;
+  const spawned = [];
+  class DeferredExitPty extends FakePty {
+    constructor() { super(); this.pid = pidSeq += 1; this.exitFired = false; }
+    kill() { /* 退出通知由用例手动迟到送达 */ }
+    fireExit(code = 0) { if (this.exitFired) return; this.exitFired = true; this.exitListener?.({ exitCode: code }); }
+  }
+  const host = createTerminalHost({
+    root, port: 0, logger: { warn() {} },
+    ptyModule: { spawn: () => { const p = new DeferredExitPty(); spawned.push(p); return p; } },
+    killTreeFn: async () => {},
+    isAliveFn: () => false,
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "迟到退出", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    const oldPty = spawned[0];
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+    }).then((r) => r.json());
+    assert.equal(restarted.status, "running", "前置：重启后新进程在跑");
+    assert.notEqual(spawned[1], oldPty, "前置：确实换了新一代进程");
+
+    oldPty.fireExit(1);
+    const after = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) }).then((r) => r.json());
+    assert.equal(after.status, "running", "旧进程迟到的退出不得把新一代判死");
+    assert.equal(host.sessions.get(created.id).pty, spawned[1], "当前句柄仍是新一代");
+
+    // 新一代自己退出时照常落已退出态。
+    spawned[1].fireExit(0);
+    const exited = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) }).then((r) => r.json());
+    assert.equal(exited.status, "exited", "本代退出照常生效");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("并发 restart 合并成一次 spawn：两个请求拿到同一份快照", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-restart-merge-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "并发", cwd: root, shell: "cmd" }),
+    }).then((r) => r.json());
+    assert.equal(calls.length, 1, "前置：建会话 spawn 一次");
+
+    const [a, b] = await Promise.all([
+      fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) }).then((r) => r.json()),
+      fetch(url(`/terminal/sessions/${created.id}/restart`), { method: "POST", headers: headers(host) }).then((r) => r.json()),
+    ]);
+    assert.equal(calls.length, 2, "两个并发重启只允许一次重新 spawn");
+    assert.equal(a.pid, b.pid, "两个响应指向同一个新进程");
+    assert.equal(a.status, "running");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart 衔接卫生：死在备屏先弹回主画面、光标半行补换行，合成字节入 journal", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-keep-history-`);
   const { calls, ptyModule } = capturingPtyModule();
@@ -1626,11 +1696,133 @@ test("恢复时一键启动会话的进程还活着→杀树后按已退出恢�
     ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
     killTreeFn: async (pid) => { killed.push(pid); },
     isAliveFn: (pid) => pid === ghostShellPid,
+    // 命令行对得上本会话的启动执行体，才允许清扫动手。
+    getCommandLineFn: async () => "C:\\Windows\\System32\\cmd.exe /d /c kimi.exe",
   });
   try {
+    await host.restoreSweep;
     assert.deepEqual(killed, [ghostShellPid], "恢复即对上代泄漏的 shell 树杀");
     const session = host.sessions.get("ghost-session-1");
     assert.equal(session.pty, null, "恢复的会话保持已退出态，不自动复活");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时命令行只有 cmd 包装、没有 agent 执行体（pid 被复用给无关 cmd）→ 不树杀", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-wrapper-"));
+  const reusedPid = 19599;
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "wrapper-only", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: reusedPid, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null, agentId: "kimi", agentName: "Kimi Code",
+      launch: { file: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/c", "chcp", "65001", ">nul", "&", "C:\\tools\\kimi.exe"] },
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+    // 只对得上 cmd.exe，对不上 agent 执行体：这不是本会话那棵树。
+    getCommandLineFn: async () => "C:\\Windows\\System32\\cmd.exe /c something-else",
+  });
+  try {
+    await host.restoreSweep;
+    assert.deepEqual(killed, [], "只命中包装壳不算身份吻合");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时命令行同时含包装壳与 agent 执行体→认定本会话并树杀", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-full-"));
+  const ghostPid = 19600;
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "full-match", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: ghostPid, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null, agentId: "kimi", agentName: "Kimi Code",
+      launch: { file: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/c", "chcp", "65001", ">nul", "&", "C:\\tools\\kimi.exe"] },
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+    getCommandLineFn: async () => "C:\\Windows\\System32\\cmd.exe /d /c chcp 65001 >nul & C:\\tools\\kimi.exe",
+  });
+  try {
+    await host.restoreSweep;
+    assert.deepEqual(killed, [ghostPid], "包装壳与执行体都在，才认本会话");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时 pid 活着但命令行对不上（pid 被复用）→ 不树杀", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-reuse-"));
+  const reusedPid = 19597;
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "reused-session", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: reusedPid, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null,
+      agentId: "kimi", agentName: "Kimi Code",
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+    getCommandLineFn: async () => "C:\\Windows\\System32\\notepad.exe",
+  });
+  try {
+    await host.restoreSweep;
+    assert.deepEqual(killed, [], "命令行不属于本会话的 pid 不许碰");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("恢复时命令行查不到（查询失败）→ 不树杀", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-treekill-nocmd-"));
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(join(root, "terminal-sessions.json"), JSON.stringify({
+    version: 1,
+    sessions: [{
+      id: "unknown-cmd", label: "Kimi Code", cwd: root, shell: "cmd",
+      pid: 19598, createdAt: 1, lastActiveAt: 1, cols: 120, rows: 34,
+      buffer: [], status: "exited", exitCode: null, agentId: "kimi", agentName: "Kimi Code",
+    }],
+  }, null, 2));
+  const killed = [];
+  const host = createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} },
+    killTreeFn: async (pid) => { killed.push(pid); },
+    isAliveFn: () => true,
+    getCommandLineFn: async () => null,
+  });
+  try {
+    await host.restoreSweep;
+    assert.deepEqual(killed, [], "查不到身份就按「不是本会话」处理");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });

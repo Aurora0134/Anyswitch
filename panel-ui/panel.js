@@ -5889,7 +5889,7 @@ async function api(method, path, body) {
       // 定投会话（预览态）同样只拦不发。定投目标读本列固化的会话 id，不读活动会话。
       if (terminalNewlineEnterKey(event)) {
         if (event.type === "keydown" && !terminalNewlineDeliveryBlocked(event) && column.boundSessionId !== null) {
-          api("POST", `/api/terminal/sessions/${encodeURIComponent(column.boundSessionId)}/input`, { data: terminalNewlineData(terminalSessionFor(column.boundSessionId)) }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+          sendTerminalInput(column.boundSessionId, terminalNewlineData(terminalSessionFor(column.boundSessionId)));
         }
         return false;
       }
@@ -6012,6 +6012,54 @@ async function api(method, path, body) {
     textarea.addEventListener("compositionend", column.imeReleaseHandler);
   }
 
+  // 复活一条已退出的会话：走服务端 /revive，由它按当前安装与设置重新组装
+  // 启动参数与凭据（env 从不落盘，宿主自己重启拿不到这些值，起来的就是
+  // agent 的原生实例）。同一会话的并发复活合并成一次——输入触发的复活与
+  // 页签点击可能同时发生，重复打只会多起一个进程。
+  const terminalReviveInflight = new Map();
+  function reviveTerminalSession(session) {
+    if (!session?.backend) return Promise.resolve(null);
+    const existing = terminalReviveInflight.get(session.id);
+    if (existing) return existing;
+    const run = api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/revive`)
+      .then((revived) => {
+        if (revived) session.backendState = revived;
+        return revived;
+      })
+      .catch((error) => {
+        console.warn(`[terminal] session revive failed (${session.id}):`, error);
+        return null;
+      })
+      .finally(() => terminalReviveInflight.delete(session.id));
+    terminalReviveInflight.set(session.id, run);
+    return run;
+  }
+
+  // 键入的唯一出口。进程已退（服务端 409 session_exited）时不把这次输入丢掉：
+  // 标记该会话已结束、复活一次、再把这次输入补发过去——用户不该为一次重开
+  // 再敲一遍。复活失败则放弃这次输入，由调用方保持沉默（终端上没有新增提示）。
+  function sendTerminalInput(sessionId, data) {
+    if (sessionId === null || sessionId === undefined) return Promise.resolve(false);
+    const path = `/api/terminal/sessions/${encodeURIComponent(sessionId)}/input`;
+    const session = terminalSessionFor(sessionId);
+    return api("POST", path, { data })
+      .then(() => true)
+      .catch((error) => {
+        if (error?.code !== "session_exited") {
+          console.warn("[terminal] input delivery failed:", error);
+          return false;
+        }
+        if (session?.backendState) session.backendState = { ...session.backendState, status: "exited" };
+        return reviveTerminalSession(session).then((revived) => {
+          if (!revived) return false;
+          return api("POST", path, { data }).then(() => true).catch((retryError) => {
+            console.warn("[terminal] input delivery failed after revive:", retryError);
+            return false;
+          });
+        });
+      });
+  }
+
   // 终端流是一次性回放重放流：后端（terminal-host.mjs stream()）对每次建立
   // 的连接——包括 SSE 断线后浏览器自动发起的重连——都先发一个 snapshot 帧、
   // 再把全量缓冲以 data 帧从头回放到当前。所以处理 snapshot 之前必须把屏幕
@@ -6062,7 +6110,7 @@ async function api(method, path, body) {
     term.focus();
     column.inputDisposable = term.onData((data) => {
       if (boundSessionId === null) return;
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(boundSessionId)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+      sendTerminalInput(boundSessionId, data);
     });
     if (!session?.backend) {
       for (const [, text] of session?.output || []) term.write(`${text}\r\n`);
@@ -6073,11 +6121,10 @@ async function api(method, path, body) {
     // revive:false 是被动重挂（切回前台、回终端页补挂），不等于用户挑了这条会话：
     // 进程已退就只回放宿主镜像里的最后一屏，绝不替用户重开（挂流并不要求进程还在；
     // revive 走的重开路由保史——历史归页签，新进程续写在旧画面下方）。
+    // 复活走 /revive 而不是裸 restart：agent 会话的凭据只在内存里，裸 restart 起来
+    // 的是没有 relay 地址与 token 的原生实例（也就是一次空白新对话）。
     if (revive && session.backendState?.status === "exited") {
-      try {
-        const revived = await api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`);
-        if (revived) session.backendState = revived;
-      } catch (error) { console.warn(`[terminal] session revive failed (${session.id}):`, error); }
+      await reviveTerminalSession(session);
     }
     column.eventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     column.eventSource.addEventListener("snapshot", (event) => {
@@ -6924,7 +6971,10 @@ async function api(method, path, body) {
     return fetchTerminalSessions().then(() => {
       terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
-      renderTerminalPreviewSession();
+      // 首连是被动挂载：进程已退只回放最后一屏，不替用户重开。页面加载时
+      // 静默起一个新 agent 会让「历史还在」的会话看起来一切正常，实际已经
+      // 换成一个空白新对话；要新壳由用户点页签或点重开决定。
+      renderTerminalPreviewSession({ revive: false });
       pollTerminalSessions();
       syncTerminalActivityStream();
       // 首连/重连补报一次亮暗：宿主重启会忘掉上报值（回落暗色默认），此处
@@ -7195,7 +7245,7 @@ async function api(method, path, body) {
       if (!session?.backend) return;
       event.preventDefault();
       column.xterm?.focus();
-      api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => console.warn("[terminal] input delivery failed:", error));
+      sendTerminalInput(session.id, data);
     }, true);
     $("terminalRetryBtn").onclick = () => dispatchTerminalUnavailableAction();
     $("terminalAddBtn").onclick = () => {

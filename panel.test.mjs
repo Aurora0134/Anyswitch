@@ -7827,7 +7827,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard"]
+    const bodies = ["createTerminalColumn", "closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -7847,7 +7847,12 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       // xterm 主题读 --terminal-* token：沙箱无样式表，桩回空串走暗色兜底（等价旧行为）
       const document = { documentElement: {} };
       const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
-      const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      const terminalReviveInflight = new Map();
+      const api = (method, url, body) => {
+        state.posts.push({ method, url, body });
+        if (state.apiImpl) return state.apiImpl(method, url, body);
+        return Promise.resolve({});
+      };
       function fitTerminalXterm() {}
       function requestAnimationFrame(cb) { cb(); }
       function cancelAnimationFrame() {}
@@ -8046,7 +8051,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.ok(connect, "connectTerminalStream found in panel.js");
     assert.ok(connect.includes("session?.backend ? session.id : null"), "建连时固化会话 id");
     assert.ok(connect.includes("term.onData("), "onData 挂在每连接专属实例上");
-    assert.ok(connect.includes("encodeURIComponent(boundSessionId)"), "input POST 走固化的会话 id");
+    assert.ok(connect.includes("sendTerminalInput(boundSessionId, data)"), "键入走唯一出口并带上固化的会话 id");
     assert.ok(!connect.includes("activeTerminalPreviewId"), "connect 全链路不再读活动会话");
     const close = panelJs.match(/function closeTerminalStream\(column\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(close, "closeTerminalStream found in panel.js");
@@ -8057,16 +8062,73 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
     assert.ok(init.includes('window.addEventListener("resize", debounceTerminalFit)'), "resize 监听收编到初始化一次性绑定");
   });
 
-  it("被动重挂不复活：exited 会话照挂流回放最后一屏，restart 仍只由主动通路发出", async () => {
-    const { sandbox, state } = streamSandbox();
+  it("被动重挂不复活：exited 会话照挂流回放最后一屏，restart 仍只由主动通路发出", async () => {    const { sandbox, state } = streamSandbox();
     const exitedSession = () => ({ id: "sess-x", backend: true, shell: {}, output: [], backendState: { status: "exited" } });
     await sandbox.connect(exitedSession(), { revive: false });
     assert.deepEqual(state.posts, [], "切回前台/回页补挂这类被动重挂绝不发 restart");
     assert.equal(state.eventSources.length, 1, "仍然挂流：画面来自宿主镜像的最后一屏（挂流不要求进程还在）");
     await sandbox.connect(exitedSession(), { revive: true });
-    const restarts = state.posts.filter((p) => p.url.includes("/restart"));
-    assert.equal(restarts.length, 1, "点页签等主动通路照旧一次点击一个新壳");
-    assert.equal(restarts[0].url, "/api/terminal/sessions/sess-x/restart", "复活打在该会话上");
+    const revives = state.posts.filter((p) => p.url.includes("/revive"));
+    assert.equal(revives.length, 1, "点页签等主动通路照旧一次点击一个新壳");
+    assert.equal(revives[0].url, "/api/terminal/sessions/sess-x/revive", "复活走重组装凭据的路由");
+  });
+
+  it("输入落进 409：复活一次并把这次输入补发过去，不静默吞字", async () => {
+    const { sandbox, state } = streamSandbox();
+    let inputAttempts = 0;
+    state.apiImpl = (method, url) => {
+      if (url.includes("/revive")) return Promise.resolve({ id: "sess-d", status: "running", pid: 99 });
+      if (url.includes("/input")) {
+        inputAttempts += 1;
+        if (inputAttempts === 1) return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.resolve({});
+    };
+    const session = backendSession("sess-d", { backendState: { status: "exited" } });
+    state.sessions["sess-d"] = session;
+    sandbox.connect(session, { revive: false });
+    const term = sandbox.xterm();
+    term.fire("hi");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const urls = state.posts.map((p) => p.url);
+    assert.ok(urls.some((u) => u.includes("/sess-d/revive")), "409 触发一次复活");
+    assert.equal(inputAttempts, 2, "复活后把这次输入补发一次");
+    assert.equal(session.backendState.status, "running", "会话状态随复活结果更新");
+  });
+
+  it("并发 409 只复活一次：两键同时落空不各起一个进程", async () => {
+    const { sandbox, state } = streamSandbox();
+    let inputAttempts = 0;
+    let reviveCalls = 0;
+    state.apiImpl = (method, url) => {
+      if (url.includes("/revive")) { reviveCalls += 1; return Promise.resolve({ id: "sess-e", status: "running", pid: 100 }); }
+      if (url.includes("/input")) {
+        inputAttempts += 1;
+        if (inputAttempts <= 2) return Promise.reject(Object.assign(new Error("HTTP 409：session_exited"), { code: "session_exited" }));
+        return Promise.resolve({ ok: true });
+      }
+      return Promise.resolve({});
+    };
+    const session = backendSession("sess-e", { backendState: { status: "exited" } });
+    state.sessions["sess-e"] = session;
+    sandbox.connect(session, { revive: false });
+    const term = sandbox.xterm();
+    term.fire("a");
+    term.fire("b");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(reviveCalls, 1, "同一会话的并发复活合并成一次");
+  });
+
+  it("非 409 的投递失败不触发复活", async () => {
+    const { sandbox, state } = streamSandbox();
+    state.apiImpl = () => Promise.reject(Object.assign(new Error("HTTP 503：terminal_host_unavailable"), { code: "terminal_host_unavailable" }));
+    const session = backendSession("sess-f", { backendState: { status: "running" } });
+    state.sessions["sess-f"] = session;
+    sandbox.connect(session, { revive: false });
+    sandbox.xterm().fire("x");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(!state.posts.some((p) => p.url.includes("/revive")), "宿主不可达不该被当成进程已退");
   });
 });
 
@@ -8082,7 +8144,7 @@ describe("终端列架构（按列索引隔离）", () => {
       "connectTerminalStream", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize",
       "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
-      "installTerminalFollowBottomGuard", "terminalImeAnchorReady", "armTerminalImeAnchor",
+      "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "terminalImeAnchorReady", "armTerminalImeAnchor",
       "releaseTerminalImeAnchor", "installTerminalImeAnchor"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
@@ -8107,6 +8169,7 @@ describe("终端列架构（按列索引隔离）", () => {
       const document = { documentElement: {}, get hidden() { return state.windowHidden; } };
       const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const console = { warn: () => {} };
+      const terminalReviveInflight = new Map();
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function requestAnimationFrame(cb) { cb(); return 0; }
       function cancelAnimationFrame() {}
@@ -9048,7 +9111,11 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
         };
         return elements[id];
       };
+      const terminalReviveInflight = new Map();
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
+      function sendTerminalInput(sessionId, data) {
+        return api("POST", "/api/terminal/sessions/" + sessionId + "/input", { data });
+      }
       function terminalSessionFor(id) { return sessions[id] || null; }
       function debounceTerminalFit() {}
       function positionTerminalAddMenu() {}
@@ -9366,7 +9433,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["createTerminalColumn", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard"]
+    const bodies = ["createTerminalColumn", "fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -10243,6 +10310,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       const view = { hidden: false };
       const host = { clientWidth: 1200, clientHeight: 600 };
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
+      const terminalReviveInflight = new Map();
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function terminalSessionFor(id) { return state.session; }
       ${fitFloorSrc}
@@ -10797,7 +10865,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.ok(!init.includes("fetchTerminalSessions().then"), "初装连接走共用通路，不再内联 fetch+then");
     const connect = extractFn("connectTerminalBackend");
     assert.ok(connect.includes("fetchTerminalSessions()"), "连接通路以 fetch 会话列表为就绪判定");
-    assert.ok(connect.includes("renderTerminalPreviewSession();"), "成功链路重渲会话（三件套之一）");
+    assert.ok(connect.includes("renderTerminalPreviewSession({ revive: false })"), "成功链路重渲会话（被动挂载不复活）");
     assert.ok(connect.includes("pollTerminalSessions();"), "成功链路立即补拍归属轮询（三件套之二）");
     assert.ok(connect.includes("syncTerminalActivityStream();"), "成功链路同步活跃真值流（三件套之三）");
     const catchBranch = connect.slice(connect.indexOf(".catch("));
@@ -11346,6 +11414,101 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
       "默认实现用与代理相同的 pi-relay-token Bearer 头");
     assert.ok(panelMjs.includes("return sendJson(res, created.status || 201, created.body ?? {});"),
       "响应只透传 terminal-host 快照，面板不自行拼装——env 无从回显");
+  });
+});
+
+// 复活路由：进程已退的 agent 会话重开时必须重新拿到 relay 地址与 token。
+// env 从不落盘（terminal-host.mjs 的注释与落盘字段都明写），宿主自己 restart
+// 一个 agent 会话只能拉起 agent 的原生实例——那正是「历史看着还在、一刷新变
+// 空白新对话」的来源。这条路由是唯一正确的复活通路。
+describe("终端会话复活（revive 路由重组装凭据）", () => {
+  function reviveRouter({ session, root, restartSession, fetchSession } = {}) {
+    const restarts = [];
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchTerminalSessionFn: fetchSession ?? (async (id) => ({ ...session, id })),
+      restartTerminalSessionFn: restartSession ?? (async (id, body, options) => {
+        restarts.push({ id, body, options });
+        return { status: 200, body: { id, status: "running", pid: 4242 } };
+      }),
+    });
+    return { router, restarts };
+  }
+
+  function withFakeKimiExecutable(fn) {
+    const root = mkTestDir("anyswitch-revive-");
+    const exe = join(root, "kimi.cmd");
+    writeFileSync(exe, "");
+    const saved = process.env.KIMI_EXECUTABLE;
+    process.env.KIMI_EXECUTABLE = exe;
+    return fn(root).finally(() => {
+      if (saved === undefined) delete process.env.KIMI_EXECUTABLE;
+      else process.env.KIMI_EXECUTABLE = saved;
+    });
+  }
+
+  it("agent 会话：按当前安装重新组装 launch/env 再交给宿主重开", async () => {
+    await withFakeKimiExecutable(async (cwd) => {
+      const root = mkTestDir("anyswitch-revive-root-");
+      const { router, restarts } = reviveRouter({
+        root,
+        session: { id: "5e551234", agentId: "kimi", cwd, shell: "cmd" },
+      });
+      const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/5e551234/revive", "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(json().status, "running");
+      assert.equal(restarts.length, 1, "只转发一次重开");
+      const forwarded = restarts[0];
+      assert.equal(forwarded.id, "5e551234");
+      assert.equal(forwarded.body.cwd, cwd, "工作目录随会话走");
+      assert.deepEqual(forwarded.body.launch.args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"], "cmd 包装与码页前缀照旧");
+      assert.equal(forwarded.body.launch.args[6], process.env.KIMI_EXECUTABLE);
+      assert.equal(forwarded.body.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:47821", "凭据在复活时重建");
+      assert.equal(forwarded.body.env.ANTHROPIC_AUTH_TOKEN, loadOrGenerateToken(root));
+      assert.ok(!JSON.stringify(json()).includes(loadOrGenerateToken(root)), "响应不回显令牌");
+    });
+  });
+
+  it("纯外壳会话：没有可重建的凭据，直接转发重开", async () => {
+    const root = mkTestDir("anyswitch-revive-shell-");
+    const { router, restarts } = reviveRouter({
+      root,
+      session: { id: "5e55a11c", cwd: root, shell: "powershell" },
+    });
+    const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55a11c/revive", "POST", {});
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(restarts[0].body, {}, "外壳会话不带 launch/env");
+  });
+
+  it("会话不存在返回 404，宿主不可达返回 503", async () => {
+    const root = mkTestDir("anyswitch-revive-missing-");
+    const missing = reviveRouter({ root, fetchSession: async () => null });
+    const miss = fakeReqRes("/panel/api/terminal/sessions/deadbeef/revive", "POST", {});
+    await missing.router.handle(miss.req, miss.res);
+    assert.equal(miss.res.statusCode, 404);
+    assert.equal(missing.restarts.length, 0);
+
+    const down = reviveRouter({
+      root,
+      session: { id: "5e55c001", cwd: root, shell: "powershell" },
+      restartSession: async () => null,
+    });
+    const off = fakeReqRes("/panel/api/terminal/sessions/5e55c001/revive", "POST", {});
+    await down.router.handle(off.req, off.res);
+    assert.equal(off.res.statusCode, 503);
+  });
+
+  it("源码钉死：复活路由只走 /revive，前端不再裸打 restart", () => {
+    assert.ok(panelMjs.includes("/revive$/i"), "revive 在按 id 的路由块里单独匹配");
+    assert.ok(panelMjs.includes("handleTerminalSessionRevive(req, res, reviveMatch[1])"), "路由转发到复活处理");
+    assert.ok(panelJs.includes('api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/revive`)'),
+      "前端复活走新路由");
+    assert.ok(!panelJs.includes('api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`)'),
+      "裸 restart 复活已退役：它起来的是没有凭据的原生实例");
   });
 });
 
