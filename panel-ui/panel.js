@@ -3350,7 +3350,7 @@ async function api(method, path, body) {
       }
       lines.appendChild(line);
       // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
-      // 终端插件的来源行不带「官方」——它是社区包，链接指 npm 包页。
+      // 终端插件的来源行说「上游来源」而不是「官方来源」——它是社区包，链接指 npm 包页。
       for (const installation of client.installations) {
         const kind = installation.kind === "desktop" ? "桌面" : installation.kind === "tui" ? "终端插件" : "CLI";
         detail(`${kind} 路径`, installation.path || "未找到");
@@ -3358,9 +3358,9 @@ async function api(method, path, body) {
         const href = safeLink(remoteOf(installation)?.url, installation.remoteId);
         if (href) {
           const target = element("dd", "");
-          const link = element("a", "about-link", installation.kind === "tui" ? "查看最新版本" : "查看官方版本");
+          const link = element("a", "about-link", installation.kind === "tui" ? "查看上游版本" : "查看官方版本");
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
-          target.appendChild(link); list.append(element("dt", "", installation.kind === "tui" ? `${kind} 来源` : `${kind} 官方来源`), target);
+          target.appendChild(link); list.append(element("dt", "", installation.kind === "tui" ? `${kind} 上游来源` : `${kind} 官方来源`), target);
         }
         const remote = remoteOf(installation);
         if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));

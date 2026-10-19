@@ -435,15 +435,15 @@ test("DSH 双组件并段：CLI 段摆终端插件版本、最新格前缀「最
   assert.doesNotMatch(text, /官方最新/);
   assert.match(text, /有新版本/, "结论跟终端插件的比对走");
   assert.ok(h.calls.includes("/api/environment/latest/dsh-tui?localVersion=0.15.0"), "插件按自己的远端 id 查最新");
-  // 详情区：插件四行 + 链接文案「查看最新版本」，本体四行保持原样。
+  // 详情区：插件四行（第三行是「上游来源」）+ 链接文案「查看上游版本」，本体四行保持原样。
   assert.match(row.textContent, /终端插件 路径C:\\Apps\\dsh\\tui\\bin\\dsh-tui\.js/);
   assert.match(row.textContent, /终端插件 版本来源安装包资料/);
-  assert.match(row.textContent, /终端插件 来源/);
+  assert.match(row.textContent, /终端插件 上游来源/);
   assert.match(row.textContent, /终端插件 查询时间/);
   assert.match(row.textContent, /CLI 路径C:\\Apps\\dsh\\cli/);
   assert.match(row.textContent, /CLI 官方来源/);
   const links = descendants(row, (node) => node.tagName === "a");
-  assert.deepEqual(links.map((node) => node.textContent), ["查看官方版本", "查看最新版本"], "插件链接文案单独一句，本体仍是「查看官方版本」");
+  assert.deepEqual(links.map((node) => node.textContent), ["查看官方版本", "查看上游版本"], "插件链接文案单独一句，本体仍是「查看官方版本」");
   assert.ok(links.some((node) => node.href === "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"));
 });
 
