@@ -1837,7 +1837,7 @@ test("排空中途 attach：回放包含全部已喂字节，且与整块解析�
     const payload = "line one\r\nline two\r\nline three\r\n" + "x".repeat(64 * 1024);
     pty.dataListener(payload);
 
-    // 此刻镜像很可能还在续排：直接建流，回放必须先排空再生成。
+    // 此刻镜像很可能还在续排：直接建流，回放必须等积压排完再生成。
     const response = await fetch(`http://127.0.0.1:${port}/terminal/sessions/${created.id}/stream`, {
       headers: { authorization: `Bearer ${host.token}` },
       signal: controller.signal,
@@ -1865,6 +1865,72 @@ test("排空中途 attach：回放包含全部已喂字节，且与整块解析�
     const reference = createScreenMirror({ cols: session.screen.info().cols, rows: session.screen.info().rows });
     reference.write(payload);
     assert.equal(replay, reference.toReplay(), "中途 attach 的回放必须与整块解析一致");
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- 建连不得同步排空镜像积压 ----
+// 复审发现：如果 info() 顺手排空积压，那么每次建连（stream 判断要不要发回放）
+// 都会把整批积压同步做掉——一次 resume 之后是几十毫秒，正是本次要消除的卡顿。
+// 现在建连改成按预算分轮排空，回放帧晚几轮到达。
+test("建连遇到镜像积压时不同步排空：回放分轮到达且内容完整", async () => {
+  const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-attach-`);
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const controller = new AbortController();
+  try {
+    const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "积压建连", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    const session = host.sessions.get(created.id);
+
+    // 制造一段明显超出单轮预算的积压（换行密集是最坏形态）。
+    // 行数控制在 5000 行历史上限以内：超出的话开头标记会被历史裁剪吃掉，那属于
+    // 既有的回放预算语义，不是本用例要验的东西。
+    const payload = "HEAD-MARKER\r\n" + "line\r\n".repeat(2000) + "TAIL-MARKER\r\n";
+    pty.dataListener(payload);
+    assert.ok(session.screen.info().pendingChars > 0, "前置条件：镜像必须还有积压");
+
+    const started = performance.now();
+    const response = await fetch(`http://127.0.0.1:${port}/terminal/sessions/${created.id}/stream`, {
+      headers: { authorization: `Bearer ${host.token}` },
+      signal: controller.signal,
+    });
+    const attachSync = performance.now() - started;
+    assert.equal(response.status, 200);
+    // 建连（含 snapshot 帧）不得把积压同步解析完；门槛按「一个预算量级」给。
+    assert.ok(attachSync < 40, `建连同步耗时 ${attachSync.toFixed(1)}ms 必须落在预算量级内`);
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let received = "";
+    const replayStart = () => received.indexOf("event: data\ndata: ");
+    while (replayStart() < 0 || received.indexOf("\n\n", replayStart()) < 0) {
+      const { done, value } = await reader.read();
+      assert.ok(!done, "stream ended before the replay frame");
+      received += decoder.decode(value, { stream: true });
+    }
+    const from = replayStart() + "event: data\ndata: ".length;
+    const replay = JSON.parse(received.slice(from, received.indexOf("\n\n", from)));
+    // 分轮排空之后回放必须仍然覆盖整段积压，且与整块解析逐字节一致。
+    assert.ok(replay.includes("HEAD-MARKER"), "回放必须包含积压开头的标记");
+    assert.ok(replay.includes("TAIL-MARKER"), "回放必须包含积压末尾的标记");
+    assert.equal(session.screen.info().pendingChars, 0, "回放发出前积压必须排空");
+    const info = session.screen.info();
+    const reference = createScreenMirror({ cols: info.cols, rows: info.rows });
+    reference.write(payload);
+    assert.equal(replay, reference.toReplay(), "分轮排空后的回放必须与整块解析一致");
   } finally {
     controller.abort();
     await host.close();
