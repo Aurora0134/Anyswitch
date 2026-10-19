@@ -1,6 +1,6 @@
-import test from "node:test";
+import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { createScreenMirror, terminalCharWidth } from "./terminal-screen.mjs";
+import { createScreenMirror, terminalCharWidth, TERMINAL_ESCAPE_HOLD_MAX } from "./terminal-screen.mjs";
 
 // 把镜像吐出的回放再喂给一个干净的镜像（就是浏览器 xterm 的等价物），
 // 用来断言「回放自足」：不依赖任何前序状态就能得到同一张画面。
@@ -460,4 +460,192 @@ test("含冒号 token 不得触发 NaN→0 全复位", () => {
   assert.ok(/\b31\b/.test(replay), "冒号 token 之后的 31 必须生效且不被清零");
   assert.ok(/[;[]1(;|m)/.test(replay), "冒号 token 不得把粗体一并复位");
   assert.ok(replay.includes("4:3"), "冒号样式本身要保留");
+});
+
+// ---- 跨块解析（真实 PTY 的 onData 边界会劈开转义序列）----
+// 镜像原先对每块独立解析：转义序列被块边界劈开时丢掉 ESC 头、把参数当普通文字
+// 画进屏幕。真实 resume 抓包的 22 个块边界里有 3 个正好劈在序列中间，屏幕上就
+// 多出一行 "session[79Gwiah" 之类的乱码。下面每条都拿「整块喂」当唯一真值。
+describe("跨块转义序列：分块喂与整块喂必须画出同一张画面", () => {
+  const cases = [
+    ["SGR 在参数中间劈开", ["\u001b[31mRED"], ["\u001b[3", "1mRED"]],
+    ["ESC 与 [ 之间劈开", ["\u001b[31mRED"], ["\u001b", "[31mRED"]],
+    ["CSI 末尾字符前劈开", ["\u001b[2JX"], ["\u001b[2", "JX"]],
+    ["OSC 用 BEL 结束且分块", ["\u001b]0;title\u0007ok"], ["\u001b]0;ti", "tle\u0007ok"]],
+    ["OSC 用 ST 结束且分块", ["\u001b]0;t\u001b\\ok"], ["\u001b]0;t\u001b", "\\ok"]],
+    ["DCS 分块", ["\u001bPqdata\u001b\\ok"], ["\u001bPqda", "ta\u001b\\ok"]],
+    ["ESC 7 保存光标后分块", ["\u001b7AB\u001b8C"], ["\u001b", "7AB\u001b8C"]],
+    ["ESC ( 字符集指定分块", ["\u001b(BAB"], ["\u001b(", "BAB"]],
+    ["代理对劈开（对照，本就该一致）", ["😀Z"], ["\ud83d", "\ude00Z"]],
+  ];
+  for (const [name, whole, split] of cases) {
+    test(name, () => {
+      const a = createScreenMirror({ cols: 40, rows: 6, historyLines: 100 });
+      for (const chunk of whole) a.write(chunk);
+      const b = createScreenMirror({ cols: 40, rows: 6, historyLines: 100 });
+      for (const chunk of split) b.write(chunk);
+      assert.equal(b.toReplay(), a.toReplay(), "分块与整块的回放必须逐字节相同");
+      assert.deepEqual(b.screenLines(), a.screenLines(), "画面也必须相同");
+      assert.equal(b.info().pendingChars, 0, "喂完最后一块后不得残留待接续字节");
+    });
+  }
+
+  test("劈开的 SGR 不得把参数当文字画进屏幕", () => {
+    const mirror = createScreenMirror({ cols: 40, rows: 4 });
+    mirror.write("\u001b[3");
+    mirror.write("1mRED");
+    assert.equal(mirror.screenLines()[0], "RED", "屏幕上只应有 RED，不得出现 1m 前缀");
+    assert.equal(mirror.screenAttrs()[0][0].bg, "", "31 是前景色，不得被当成背景");
+  });
+
+  test("未终结的 OSC 暂留而不是吃掉后半段", () => {
+    const mirror = createScreenMirror({ cols: 40, rows: 4 });
+    mirror.write("\u001b]0;very long tit");
+    assert.ok(mirror.info().pendingChars > 0, "未终结的 OSC 必须留在待接续缓冲里");
+    mirror.write("le\u0007VISIBLE");
+    assert.equal(mirror.screenLines()[0], "VISIBLE", "OSC 结束后其后的文字要正常落屏");
+    assert.equal(mirror.info().pendingChars, 0, "序列终结后待接续缓冲必须清空");
+  });
+
+  test("超长未终结序列不无限占缓冲：超过上限按旧行为丢弃", () => {
+    const mirror = createScreenMirror({ cols: 20, rows: 4 });
+    mirror.write("\u001b]0;" + "x".repeat(TERMINAL_ESCAPE_HOLD_MAX + 10));
+    assert.equal(mirror.info().pendingChars, 0, "超过暂留上限必须丢弃而不是一直攒着");
+    mirror.write("AFTER");
+    assert.equal(mirror.screenLines()[0], "AFTER", "丢弃后后续输出照常落屏");
+  });
+});
+
+// ---- 有预算切片：把一次大块解析拆到多个事件循环轮次 ----
+describe("有预算切片解析：与整块解析逐字节等价，且单片不超预算", () => {
+  // 确定性伪随机：用例必须可复现，失败时能照同一序列重跑。
+  function makeRandom(seed) {
+    let s = seed >>> 0;
+    return () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 0x100000000;
+    };
+  }
+
+  // 覆盖面：换行/回车/制表/退格、SGR 全套、光标定位、擦除、滚动、备屏、OSC/DCS、
+  // 宽字符与组合字符——切块点落在其中任何位置都必须等价。
+  function corpus() {
+    return [
+      "\u001b[2J\u001b[H",
+      "\u001b[38;2;12;34;56mhello\u001b[0m world\r\n",
+      "\u001b[48;5;240m  bar  \u001b[49m\r\n",
+      "\u001b[1;4;7mbold underline inverse\u001b[0m\r\n",
+      "\u001b[3;5Hpositioned\u001b[6;1H",
+      "\u001b[2K\u001b[1K\u001b[0K",
+      "\u001b[3L\u001b[2M\u001b[2P\u001b[3@\u001b[4X",
+      "\u001b[2S\u001b[1T",
+      "\u001b[5;20r\u001b[10;1Hscrolled",
+      "\u001b]0;title\u0007",
+      "\u001bPq#0\u001b\\",
+      "中文宽字符与組合字元 e\u0301\r\n",
+      "\u001b[?1049halt screen\u001b[?1049l",
+      "\u001b[?20lno convert eol\nback\r\n",
+      "\tTABBED\b\bX\r\n",
+      "\u001b[4:3mcolon underline\u001b[24m\r\n",
+      "\u001b[58;2;1;2;3munderline color\u001b[59m\r\n",
+      "\u001b7saved\u001b8restored\r\n",
+      "\u001b[sCSI saved\u001b[uCSI restored\r\n",
+      "plain ascii line that is long enough to wrap around the 40 column edge",
+    ].join("");
+  }
+
+  test("随机切块 × 随机预算，与整块 write 完全一致", () => {
+    const text = corpus();
+    const reference = createScreenMirror({ cols: 40, rows: 12, historyLines: 200 });
+    reference.write(text);
+    const expectedReplay = reference.toReplay();
+    const expectedLines = reference.screenLines();
+    const expectedHistory = reference.historyLines();
+
+    for (let round = 0; round < 12; round += 1) {
+      const rand = makeRandom(0x5eed + round);
+      const mirror = createScreenMirror({ cols: 40, rows: 12, historyLines: 200 });
+      let offset = 0;
+      while (offset < text.length) {
+        const size = 1 + Math.floor(rand() * 40);
+        const chunk = text.slice(offset, offset + size);
+        offset += size;
+        // 预算 0 表示不限：这条路径就是同步排空，用来混进「不切片」的喂法。
+        const budget = rand() < 0.2 ? 0 : 0.5 + rand() * 2;
+        mirror.writeSliced(chunk, budget);
+        while (!mirror.drain(budget).done) { /* 模拟 setImmediate 续排 */ }
+      }
+      mirror.flush();
+      assert.equal(mirror.toReplay(), expectedReplay, `第 ${round} 轮回放必须与整块一致`);
+      assert.deepEqual(mirror.screenLines(), expectedLines, `第 ${round} 轮画面必须一致`);
+      assert.deepEqual(mirror.historyLines(), expectedHistory, `第 ${round} 轮历史必须一致`);
+      assert.equal(mirror.info().pendingChars, 0, `第 ${round} 轮结束后不得残留待接续字节`);
+    }
+  });
+
+  test("单片耗时不超过预算 + 一个采样量子", () => {
+    // 64KB 换行密集块是镜像最坏的输入形态（每字符都触发一次滚动与历史序列化）。
+    const heavy = "\n".repeat(64 * 1024);
+    const mirror = createScreenMirror({ cols: 80, rows: 24 });
+    const budget = 4;
+    const started = performance.now();
+    const first = mirror.writeSliced(heavy, budget);
+    const elapsed = performance.now() - started;
+    assert.equal(first.done, false, "64KB 换行密集块必须在预算内停下，不能一口气排完");
+    // 预算是软的：每 256 字符才看一次时钟，所以最多超出一个量子的解析时间。
+    // 阈值按「预算 + 一个量子」量级给，留足机器抖动余量（旧实现单块 592ms）。
+    assert.ok(elapsed < budget + 40, `单片耗时 ${elapsed.toFixed(1)}ms 必须落在预算量级内`);
+    while (!mirror.drain(budget).done) { /* 排完 */ }
+    assert.equal(mirror.info().pendingChars, 0, "排空后不得残留字节");
+  });
+
+  test("flush 与 info 先把待解析字节排空再回答", () => {
+    const mirror = createScreenMirror({ cols: 40, rows: 8 });
+    mirror.writeSliced("A".repeat(80) + "\r\nB", 0.0001);
+    // 预算极小，第一轮很可能没排完；不论排没排完，info 都必须给出排空后的结果。
+    const info = mirror.info();
+    assert.equal(info.pendingChars, 0, "info 前必须排空");
+    assert.equal(mirror.screenLines()[2], "B", "排空后 B 必须已经落到第三行");
+  });
+
+  test("discardPending 丢弃待解析字节，后续输出仍从干净状态继续", () => {
+    const mirror = createScreenMirror({ cols: 40, rows: 4 });
+    mirror.writeSliced("X".repeat(4096), 0.0001);
+    mirror.discardPending();
+    assert.equal(mirror.info().pendingChars, 0, "丢弃后不得残留");
+    mirror.write("CLEAN");
+    assert.ok(mirror.screenLines().join("").includes("CLEAN"), "丢弃后新输出要正常落屏");
+  });
+});
+
+// ---- 回放缓存：重复 attach 不再重算，任何推进都失效 ----
+describe("回放缓存", () => {
+  test("重复调用返回同一结果，且解析推进或 resize 后失效", () => {
+    const mirror = createScreenMirror({ cols: 20, rows: 4 });
+    mirror.write("first");
+    const a = mirror.toReplay();
+    const b = mirror.toReplay();
+    assert.equal(a, b, "同一状态下的重复回放必须完全相同");
+
+    mirror.write("\r\nsecond");
+    const c = mirror.toReplay();
+    assert.notEqual(c, a, "新字节到达后回放必须重新生成");
+    assert.ok(c.includes("second"), "新回放必须包含新内容");
+
+    const d = mirror.toReplay();
+    assert.equal(d, c, "缓存命中时仍要与新状态一致");
+
+    mirror.resize(30, 6);
+    const e = mirror.toReplay();
+    assert.notEqual(e, d, "resize 后回放必须失效重算");
+  });
+
+  test("缓存不得把待解析字节当成已落屏", () => {
+    const mirror = createScreenMirror({ cols: 40, rows: 4 });
+    mirror.write("AAA");
+    assert.ok(mirror.toReplay().includes("AAA"));
+    // 只入队不排空（预算 0.0001 极可能停在半路），toReplay 仍须看到完整内容。
+    mirror.writeSliced("\r\nBBB", 0.0001);
+    assert.ok(mirror.toReplay().includes("BBB"), "回放必须先排空待解析字节");
+  });
 });

@@ -501,13 +501,39 @@ export function createTerminalHost({
   // The mirror renders what a client replays on connect. It is deliberately a
   // one-way passenger: a parser bug or a sequence we do not model must degrade to
   // "that chunk was not rendered", never to "output stopped forwarding".
+  //
+  // 有预算的切片解析：这个进程的事件循环同时跑着所有会话的 PTY 读回调、SSE 投递
+  // 与输入 POST。一次 resume 会来六七个 60KB 的块，整块同步解析要 40–110ms，期间
+  // 别的页签收不到帧、输入回显变慢（实测同进程另一会话帧间隔 16ms → 68ms）。
+  // 所以每轮只给镜像 4ms，剩下的用 setImmediate 续排——emit 的监听器扇出因此最多
+  // 被推迟 4ms，而不是整块解析时间。待解析字节由镜像自己持有，顺序天然保序。
+  const MIRROR_SLICE_MS = 4;
   function feedMirror(session, text) {
     try {
       if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
-      session.screen.write(text);
+      const result = session.screen.writeSliced(text, MIRROR_SLICE_MS);
+      if (!result.done) scheduleMirrorDrain(session);
     } catch (error) {
+      // 解析中途抛错时偏移量可能已经和字节流脱节，后续每一块都会画错位；丢掉待解析
+      // 缓冲回到干净状态，代价只是这一段没画上（与"跳过该块"的既有契约一致）。
+      try { session.screen?.discardPending(); } catch { /* 镜像已不可用，下面只记日志 */ }
       logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
     }
+  }
+
+  function scheduleMirrorDrain(session) {
+    if (session.mirrorDrainScheduled) return;
+    session.mirrorDrainScheduled = true;
+    setImmediate(() => {
+      session.mirrorDrainScheduled = false;
+      try {
+        if (!session.screen) return;
+        if (!session.screen.drain(MIRROR_SLICE_MS).done) scheduleMirrorDrain(session);
+      } catch (error) {
+        try { session.screen?.discardPending(); } catch { /* 同上 */ }
+        logger.warn?.(`[terminal-host] screen mirror skipped (${session.id}): ${error.message}`);
+      }
+    });
   }
 
   // 主题契约的输出侧半边：996n 即问即答（按当前上报的亮暗），2031h/l 记/清

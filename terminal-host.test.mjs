@@ -1773,3 +1773,101 @@ test("终端主题契约：996n 即答、2031 开关订阅、亮暗变化扇出 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---- 镜像解析切片：一次大块输出不得把事件循环按整块时长卡住 ----
+// 这个进程的事件循环同时承载所有会话的 PTY 回调、SSE 投递与输入 POST。一次 resume
+// 会来六七个 60KB 的块，整块同步解析要 40–110ms，期间别的页签收不到帧。切片后
+// emit 的同步部分只占一个预算，剩下的用 setImmediate 续排。
+test("大块输出经 emit 的同步耗时受限，续排后镜像仍完整", async () => {
+  const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-slice-`);
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  try {
+    const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "切片", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    const session = host.sessions.get(created.id);
+
+    // 换行密集是镜像最坏的形态：每个字符都触发一次滚动与历史行序列化。
+    const heavy = "\n".repeat(64 * 1024);
+    const started = performance.now();
+    pty.dataListener(heavy);
+    const syncElapsed = performance.now() - started;
+    // 旧实现整块同步解析这一块要数百毫秒；切片后同步部分只剩一个预算。
+    assert.ok(syncElapsed < 60, `emit 的同步部分 ${syncElapsed.toFixed(1)}ms 必须落在预算量级内`);
+
+    // 续排走 setImmediate：让出事件循环直到镜像排空。
+    for (let i = 0; i < 500 && session.mirrorDrainScheduled; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(session.screen.info().pendingChars, 0, "续排结束后不得残留待解析字节");
+    assert.ok(session.screen.info().historyLines > 0, "续排后历史必须已经生成");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("排空中途 attach：回放包含全部已喂字节，且与整块解析结果一致", async () => {
+  const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-slice2-`);
+  let pty = null;
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => (pty = new FakePty()) },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const controller = new AbortController();
+  try {
+    const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "中途 attach", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    const session = host.sessions.get(created.id);
+    const payload = "line one\r\nline two\r\nline three\r\n" + "x".repeat(64 * 1024);
+    pty.dataListener(payload);
+
+    // 此刻镜像很可能还在续排：直接建流，回放必须先排空再生成。
+    const response = await fetch(`http://127.0.0.1:${port}/terminal/sessions/${created.id}/stream`, {
+      headers: { authorization: `Bearer ${host.token}` },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let received = "";
+    // 等到一个完整的 data 帧（结尾 \n\n）再解析：回放本身有几十 KB，只等
+    // "event: data" 前缀会读到半个 JSON。
+    const replayStart = () => received.indexOf("event: data\ndata: ");
+    while (replayStart() < 0 || received.indexOf("\n\n", replayStart()) < 0) {
+      const { done, value } = await reader.read();
+      assert.ok(!done, "stream ended before the replay frame");
+      received += decoder.decode(value, { stream: true });
+    }
+    const from = replayStart() + "event: data\ndata: ".length;
+    const replay = JSON.parse(received.slice(from, received.indexOf("\n\n", from)));
+    assert.ok(replay.includes("line three"), "回放必须包含已喂入的完整内容");
+    // 回放是逐行重绘的，连续 200 个 x 会被行边界切断；按总出现次数核对块尾内容。
+    const xCount = (replay.match(/x/g) || []).length;
+    assert.ok(xCount > 2000, `回放必须包含块尾的大量内容（实际 ${xCount} 个 x）`);
+
+    // 与同一段字节整块解析的结果对照：切片不得改变画面。
+    const reference = createScreenMirror({ cols: session.screen.info().cols, rows: session.screen.info().rows });
+    reference.write(payload);
+    assert.equal(replay, reference.toReplay(), "中途 attach 的回放必须与整块解析一致");
+  } finally {
+    controller.abort();
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
