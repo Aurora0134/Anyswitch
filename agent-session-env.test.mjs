@@ -15,10 +15,9 @@ const TOKEN = "relay-session-token-abc123";
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost";
 
 // A machine-like environment: every agent's executable resolves to a real file
-// under one temp root (agent-discovery's overrides all accept absolute paths),
-// ComSpec points at a fake cmd.exe, and no store.json / settings.json exists
-// unless a test writes one.
-function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeSmallFastSetting = undefined, claudePackageVersion = undefined } = {}) {
+// under one temp root (agent-discovery's overrides all accept absolute paths)
+// and ComSpec points at a fake cmd.exe.
+function fakeBase(root, { claudePackageVersion = undefined } = {}) {
   const exe = (name) => {
     const path = join(root, "bin", name);
     mkdirSync(join(root, "bin"), { recursive: true });
@@ -43,7 +42,6 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeS
     // （resolveQoderCliExecutable 不收覆盖变量），fakeBase 直接摆出这份目录。
     LOCALAPPDATA: join(root, "local"),
     USERPROFILE: join(root, "user"),
-    ...(claudeSmallFast === undefined ? {} : { ANTHROPIC_SMALL_FAST_MODEL: claudeSmallFast }),
   };
   // claude 版本文件就在 exe 的上一级（npm-global 布局
   // <npm>/node_modules/@anthropic-ai/claude-code/bin/claude.exe 旁的
@@ -55,17 +53,6 @@ function fakeBase(root, { withStore = null, claudeSmallFast = undefined, claudeS
   writeFileSync(join(base.LOCALAPPDATA, "OpenAI", "Codex", "bin", "hash-1", "codex.exe"), "");
   mkdirSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli"), { recursive: true });
   writeFileSync(join(base.USERPROFILE, ".qoder", "bin", "qodercli", "qodercli.exe"), "");
-  if (withStore) {
-    mkdirSync(join(base.LOCALAPPDATA, "Anyswitch"), { recursive: true });
-    writeFileSync(join(base.LOCALAPPDATA, "Anyswitch", "store.json"), JSON.stringify(withStore));
-  }
-  if (claudeSmallFastSetting !== undefined) {
-    mkdirSync(join(base.LOCALAPPDATA, "Anyswitch"), { recursive: true });
-    writeFileSync(
-      join(base.LOCALAPPDATA, "Anyswitch", "settings.json"),
-      JSON.stringify({ claudeSmallFastModel: claudeSmallFastSetting }),
-    );
-  }
   return base;
 }
 
@@ -86,7 +73,7 @@ test("claude 注入三件套 + NO_PROXY，上游真键标删，discovery 不注�
     const env = buildAgentSessionEnv({ agentId: "claude", token: TOKEN, base: fakeBase(root) });
     assert.deepEqual(Object.keys(env).sort(), [
       "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-      "ANTHROPIC_SMALL_FAST_MODEL", "NO_PROXY", "no_proxy",
+      "NO_PROXY", "no_proxy",
     ]);
     assert.equal(env.ANTHROPIC_BASE_URL, `http://127.0.0.1:${AGENT_RELAY_PORT}`);
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, TOKEN);
@@ -98,7 +85,6 @@ test("claude 注入三件套 + NO_PROXY，上游真键标删，discovery 不注�
       false,
       "fake 布局没有 claude 的 package.json，版本读不到，discovery 保持关闭",
     );
-    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/your-provider/your-small-fast-model", "无 store 时落 launcher 占位 wire id");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -129,64 +115,6 @@ test("claude discovery 版本门：装的是已验证 2.1.x 族才注入发现�
       agentId: "claude", token: TOKEN, base: fakeBase(root, { claudePackageVersion: null }),
     });
     assert.equal("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" in malformed, false, "version 非字符串按未验证处理");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("claude 分类器模型：store 派生优先，用户显式覆盖时不注入", () => {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
-  try {
-    const store = { providers: { "north-main": { models: { "kimi-k3": {} } } } };
-    const derived = buildAgentSessionEnv({ agentId: "claude", token: TOKEN, base: fakeBase(root, { withStore: store }) });
-    assert.equal(derived.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3", "store 第一个 provider 的第一个模型");
-
-    const overridden = buildAgentSessionEnv({
-      agentId: "claude", token: TOKEN,
-      base: fakeBase(root, { withStore: store, claudeSmallFast: "anthropic/mine/small" }),
-    });
-    assert.equal("ANTHROPIC_SMALL_FAST_MODEL" in overridden, false, "用户显式覆盖优先：不注入，继承值生效");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("claude 分类器模型：settings.claudeSmallFastModel 压过 store 派生，两段式自动归一", () => {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
-  try {
-    const store = { providers: { "north-main": { models: { "kimi-k3": {} } } } };
-    const env = buildAgentSessionEnv({
-      agentId: "claude", token: TOKEN,
-      base: fakeBase(root, { withStore: store, claudeSmallFastSetting: "sta1n-default/[Cloud]GLM-5.3-Flash" }),
-    });
-    assert.equal(
-      env.ANTHROPIC_SMALL_FAST_MODEL,
-      "anthropic/sta1n-default/[Cloud]GLM-5.3-Flash",
-      "settings 键归一成完整 wire id 后注入，store 首模型让位",
-    );
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("claude 分类器模型：settings 值不可解析时回落 store 并恰好一条 warn", () => {
-  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
-  try {
-    const store = { providers: { "north-main": { models: { "kimi-k3": {} } } } };
-    const warnings = [];
-    const originalWarn = console.warn;
-    console.warn = (line) => warnings.push(line);
-    try {
-      const env = buildAgentSessionEnv({
-        agentId: "claude", token: TOKEN,
-        base: fakeBase(root, { withStore: store, claudeSmallFastSetting: "not-a-model-id" }),
-      });
-      assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, "anthropic/north-main/kimi-k3", "不可解析回退 store 首模型");
-    } finally {
-      console.warn = originalWarn;
-    }
-    assert.equal(warnings.length, 1, "与既有模块级 warn 同款：一条，不刷屏");
-    assert.match(warnings[0], /claudeSmallFastModel/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
