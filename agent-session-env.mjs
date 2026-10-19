@@ -11,10 +11,8 @@
 // no env for it at all.
 //
 // The env contract is imported from each launcher's exported build*Env, so the
-// panel and the launchers can never drift apart (the classifier model's
-// settings/store derivation is shared the same way —
-// launcher.mjs#withSmallFastModelDefault). One piece is still copied locally
-// with its source cited (the launchers do not export it):
+// panel and the launchers can never drift apart. One piece is still copied
+// locally with its source cited (the launchers do not export it):
 //   - the buildInstanceId scheme (each launcher), and only for the two clients
 //     that cannot do without it (see TERMINAL_INSTANCE_ID_FROM_SOCKET): the
 //     session's shell pid does not exist yet at assembly time, so the launcher
@@ -28,7 +26,6 @@ import {
   buildLauncherEnv,
   CLAUDE_BYPASS_PERMISSIONS_ARG,
   isVerifiedDiscoveryVersion,
-  withSmallFastModelDefault,
 } from "./launcher.mjs";
 import { buildKimiLauncherEnv } from "./kimi-launcher.mjs";
 import { buildCodexLauncherEnv } from "./codex-launcher.mjs";
@@ -216,19 +213,8 @@ function buildTargetEnv(agentId, { port, token, base, instanceId }) {
       // discovery is version-gated from the installed package.json: within the
       // verified family the gateway-discovery flag rides the env and the /model
       // picker fills from the relay catalog; outside it (or unreadable) the
-      // flag stays off. An explicit ANTHROPIC_SMALL_FAST_MODEL in the
-      // environment wins and is NOT injected (the inherited value rides along
-      // untouched); otherwise the classifier model comes from the same shared
-      // derivation as the per-launch shim: settings.json's claudeSmallFastModel,
-      // else the store's first channel.
-      const env = buildLauncherEnv({ port, token, discovery: claudeDiscoveryEnabled(base), base: {} });
-      if (base.ANTHROPIC_SMALL_FAST_MODEL === undefined) {
-        const derived = withSmallFastModelDefault(base);
-        env.ANTHROPIC_SMALL_FAST_MODEL = derived.ANYSWITCH_SMALL_FAST_MODEL ?? env.ANTHROPIC_SMALL_FAST_MODEL;
-      } else {
-        delete env.ANTHROPIC_SMALL_FAST_MODEL;
-      }
-      return env;
+      // flag stays off.
+      return buildLauncherEnv({ port, token, discovery: claudeDiscoveryEnabled(base), base: {} });
     }
     case "kimi":
       return buildKimiLauncherEnv({ port, token, base: {}, instanceId });
