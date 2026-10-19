@@ -2651,8 +2651,9 @@ async function api(method, path, body) {
       opencode: ["anomalyco/opencode", "@opencode/cli"],
       pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
       kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
-      dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],
-      // dsh 的终端插件是社区包，官方来源只有 npm 包页（与服务端 release-service 同源）。
+      // dsh 的 CLI 入口是社区插件（npm @deepseek-harness-tui/dsh-tui），它的上游来源
+      // 只有 npm 包页（与服务端 release-service 同源）。本体 harness 在关于页不单列
+      // 来源，因此这里没有 dsh 条目。
       "dsh-tui": ["", "@deepseek-harness-tui/dsh-tui"],
       // 原生二进制没有公开仓库发布页，官方来源只有 npm 包页（与服务端 release-service 同源）。
       grok: ["", "@xai-official/grok"],
@@ -3250,7 +3251,7 @@ async function api(method, path, body) {
       const formTag = (installation) => (installation.kind === "desktop" ? "Desktop" : "CLI");
       // dsh 的终端形态由两个组件构成：本体 harness（installations[0]）与界面插件
       // dsh-tui（kind "tui"）。主行 CLI 段跟着插件走——本体没有 CLI 入口产品，
-      // 它的官方版本只留在详情区；插件未装时该段不占位（not_found 惯例）。
+      // 详情区也不单列它；插件未装时该段不占位（not_found 惯例）。
       const tuiInstallation = client.id === "dsh"
         ? client.installations.find((installation) => installation.kind === "tui") ?? null
         : null;
@@ -3350,9 +3351,15 @@ async function api(method, path, body) {
       }
       lines.appendChild(line);
       // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
-      // 终端插件的来源行说「上游来源」而不是「官方来源」——它是社区包，链接指 npm 包页。
-      for (const installation of client.installations) {
-        const kind = installation.kind === "desktop" ? "桌面" : installation.kind === "tui" ? "终端插件" : "CLI";
+      // dsh 的 CLI 入口是社区插件（kind "tui"）：它按 CLI 组呈现，来源行说「上游来源」、
+      // 链接指 npm 包页，后面补一句说明。本体 harness 不单列——官方没有 CLI 入口产品，
+      // 它的存在由那句说明交代；桌面组仍按原样跟在 CLI 组之后。
+      const detailed = client.id === "dsh"
+        ? [...client.installations.filter((installation) => installation.kind === "tui"),
+          ...client.installations.filter((installation) => installation.kind === "desktop")]
+        : client.installations;
+      for (const installation of detailed) {
+        const kind = installation.kind === "desktop" ? "桌面" : "CLI";
         detail(`${kind} 路径`, installation.path || "未找到");
         detail(`${kind} 版本来源`, sourceText(installation.versionSource));
         const href = safeLink(remoteOf(installation)?.url, installation.remoteId);
@@ -3360,10 +3367,11 @@ async function api(method, path, body) {
           const target = element("dd", "");
           const link = element("a", "about-link", installation.kind === "tui" ? "查看上游版本" : "查看官方版本");
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
-          target.appendChild(link); list.append(element("dt", "", installation.kind === "tui" ? `${kind} 上游来源` : `${kind} 官方来源`), target);
+          target.appendChild(link); list.append(element("dt", "", `${kind} ${installation.kind === "tui" ? "上游来源" : "官方来源"}`), target);
         }
         const remote = remoteOf(installation);
         if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));
+        if (installation.kind === "tui") detail("CLI 说明", "由社区插件提供，内核为官方版本");
       }
       if (local?.checkedAt) detail("检测时间", timeText(local.checkedAt));
       details.appendChild(list);
