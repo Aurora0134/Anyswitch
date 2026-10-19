@@ -4772,6 +4772,12 @@ async function api(method, path, body) {
       // 已排队的裁剪帧。状态挂列对象保多列语义——动作只作用本列的外层滚动盒。
       bottomAlignIntentAt: 0,
       bottomAlignTrimFrame: null,
+      // 回放闩（见 installTerminalFollowBottomGuard）：reset() 后与回放写入期间的
+      // 滚动不是用户滚动，闩住时护栏零动作。arm 排静默清闩定时器，cancel 在实例
+      // 销毁时撤销它。
+      replayRestoring: false,
+      replayRestoreArm: null,
+      replayRestoreCancel: null,
     };
   }
   const terminalColumns = [createTerminalColumn("terminalXtermHost")];
@@ -5443,6 +5449,11 @@ async function api(method, path, body) {
     column.imeFitPending = false;
     if (column.imeHoldFrame !== null) cancelAnimationFrame(column.imeHoldFrame);
     column.imeHoldFrame = null;
+    // 回放闩随实例销毁：撤销静默清闩定时器，别让它在 dispose 之后再碰实例。
+    column.replayRestoreCancel?.();
+    column.replayRestoreCancel = null;
+    column.replayRestoreArm = null;
+    column.replayRestoring = false;
   }
 
   // 整页清场入口（关停清场 / 零会话）：关闭所有列的流与实例。
@@ -5627,9 +5638,9 @@ async function api(method, path, body) {
   // scrollLines，见下方 keydown 监听）——意图窗口内的离底事件退出跟随态，停在
   // 历史上绝不拉回；滚回底部自动恢复跟随。
   const TERMINAL_SCROLL_INTENT_MS = 250;
-  // 渲染折回的 settled 防抖：写流（回放/输出洪峰）中途的内容底是中间帧，当帧折
-  // 会折错位——等最后一拍渲染过后再动视口。回放洪峰期间逐帧渲染不断重置防抖，
-  // 折回只在流真正歇下来后发生。
+  // 收缩折回的 settled 防抖：内容底变小（2J/矮帧/清屏）时，中途的内容底是中间
+  // 帧，当帧折会折错位——等写入静默一拍再动视口。内容增长不走这条，写解析当拍
+  // 同步锚定。
   const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = 120;
   // 有效底部（「底部自动对齐」开启时护栏采信）：TUI 整屏清除（ESC[2J+光标归零，典型=
   // Kimi 收起 / 指令表）后把矮框架从屏幕顶重画，尾部屏幕行无人写入——这块空白带在
@@ -5670,13 +5681,107 @@ async function api(method, path, body) {
     }, { capture: true, passive: true });
     // 底部基准：开关关=缓冲真尾（与历史行为逐位一致）；开关开=有效底部（内容底，
     // 见 terminalEffectiveBottomBase）。「在底部」随之迁到内容底——内容底与真尾之间
-    // 的空白带也算在底（跟随态），由下方渲染钩子折回，不与护栏拉回路径打架。
+    // 的空白带也算在底（跟随态）。
     const bottomBase = () => (terminalBottomAlignEnabled() ? terminalEffectiveBottomBase(term) : term.buffer.active.baseY);
+    // 内容底基准：判定内容在增长还是收缩。写解析事件同值重复到来不产生动作。
+    let baselineBottom = null;
+    let settleTimer = null;
+    let intentRetryTimer = null;
+    let replayTimer = null;
+    const clearSettle = () => {
+      if (settleTimer === null) return;
+      clearTimeout(settleTimer);
+      settleTimer = null;
+    };
+    // 视口唯一写者：增长锚定、收缩折回、尺寸变化后的重锚都汇到这里，过同一组闸。
+    // 意图窗内不动作但补排到窗口结束——直接 return 会让这次折回永远丢失。
+    const anchorToBottom = () => {
+      if (column.replayRestoring) return;
+      if (!terminalBottomAlignEnabled()) return;
+      if (!followBottom) return;
+      if (term.buffer.active.type === "alternate") return; // 备屏无滚动历史，baseY=0，不参与
+      if (column.imeHold) return;
+      if ($("terminalView")?.hidden) return;
+      if (!term.element?.isConnected) return;
+      const intentLeft = TERMINAL_SCROLL_INTENT_MS - (Date.now() - lastScrollIntentAt);
+      if (intentLeft > 0) {
+        if (intentRetryTimer === null) {
+          intentRetryTimer = setTimeout(() => { intentRetryTimer = null; anchorToBottom(); }, intentLeft + 1);
+        }
+        return;
+      }
+      const buffer = term.buffer.active;
+      const bottom = terminalEffectiveBottomBase(term);
+      if (bottom >= buffer.baseY) return; // 没有空白带：跟随态视口本就在真尾，不写
+      if (buffer.viewportY !== bottom) term.scrollToLine(bottom);
+    };
+    // 内容变化：增长（输入回显、流式输出把内容底往下推）当拍同步锚定；收缩
+    // （2J/矮帧/清屏把内容底往上收）等写入静默一拍再折。
+    const onContentChange = () => {
+      const bottom = bottomBase();
+      if (baselineBottom === null || bottom > baselineBottom) {
+        baselineBottom = bottom;
+        clearSettle();
+        anchorToBottom();
+        return;
+      }
+      if (bottom < baselineBottom) {
+        baselineBottom = bottom;
+        clearSettle();
+        settleTimer = setTimeout(() => { settleTimer = null; anchorToBottom(); }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
+        return;
+      }
+      // 等值写入：内容底没动但写流还在继续，静默窗顺延——折回只发生在写入真正
+      // 歇下来之后。
+      if (settleTimer !== null) {
+        clearTimeout(settleTimer);
+        settleTimer = setTimeout(() => { settleTimer = null; anchorToBottom(); }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
+      }
+    };
+    // 回放闩：reset() 把 ydisp/ybase 归零会派发一次「离底」滚动，回放期间逐块
+    // 写入也不是用户滚动——闩住期间护栏零动作。回放每来一块重置静默定时器，
+    // 静默一拍后清闩并锚一次，整段落点精确在内容底；没有回放数据时同一定时器
+    // 兜底清闩，不会永久闩住。
+    column.replayRestoreArm = () => {
+      if (replayTimer !== null) clearTimeout(replayTimer);
+      clearSettle();
+      replayTimer = setTimeout(() => {
+        replayTimer = null;
+        column.replayRestoring = false;
+        // 实例已销毁（关流/切列）就不再碰它的缓冲：闩清掉即可。
+        if (!term.element?.isConnected) return;
+        followBottom = true;
+        baselineBottom = bottomBase();
+        anchorToBottom();
+      }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
+    };
+    column.replayRestoreCancel = () => {
+      if (replayTimer !== null) clearTimeout(replayTimer);
+      replayTimer = null;
+      if (intentRetryTimer !== null) clearTimeout(intentRetryTimer);
+      intentRetryTimer = null;
+      clearSettle();
+    };
+    // 写解析是内容变化的唯一来源：增长同步锚定，收缩走静默防抖。
+    term.onWriteParsed?.(() => {
+      if (column.replayRestoring) {
+        column.replayRestoreArm?.();
+        return;
+      }
+      onContentChange();
+    });
+    // 尺寸变化后行数变了，内容底的换算基准随之变：重新取基准并锚一次。
+    term.onResize?.(() => {
+      baselineBottom = bottomBase();
+      anchorToBottom();
+    });
     // 挂在 xterm 自己的 scroll 监听之后（它绑在 open() 里，本护栏在 open 之后装），
     // 读到的 ydisp 已是它翻译过的值：落底事件恢复跟随；跟随态下无意图的离底事件
-    // 即钳制抖动，拉回底部。
+    // 即钳制抖动，拉回内容底（无空白带时拉回真尾）；非跟随态保持不动。
     viewport.addEventListener("scroll", () => {
+      if (column.replayRestoring) return;
       const buffer = term.buffer.active;
+      if (buffer.type === "alternate") return;
       const bottom = bottomBase();
       if (buffer.viewportY >= bottom - 1) {
         // 落底即回到「真值在底部」状态：跟随恢复，历史意图一并作废——其后的
@@ -5689,33 +5794,9 @@ async function api(method, path, body) {
         followBottom = false;
         return;
       }
-      if (followBottom) {
-        if (bottom < buffer.baseY) term.scrollToLine(bottom);
-        else term.scrollToBottom();
-      }
-    });
-    // 渲染折回（缓冲层空白带的静默通路）：整屏清除+顶部重画不产生任何滚动事件，
-    // 空白带无声出现——跟随态下等渲染静默一拍（settled 防抖）把视口锚回内容底
-    // （/ 指令表收起后一拍即收）。意图窗口内不动视口：用户正在滚动时折回会与手
-    // 势逐拍打架（抖动零容忍）；非跟随态不动：停在历史上绝不拉回（护栏旧语义）。
-    // 双向折：跟随态视口停在内容底上方（如整屏清除后回放的顶部落点——跟随被写
-    // 流顶住，无滚动事件可醒护栏）同样锚回——跟随态的合法位置只有内容底一档。
-    let foldTimer = null;
-    term.onRender?.(() => {
-      if (foldTimer !== null) clearTimeout(foldTimer);
-      foldTimer = setTimeout(() => {
-        foldTimer = null;
-        if (!terminalBottomAlignEnabled()) return;
-        if (column.imeHold) return;
-        if ($("terminalView")?.hidden) return;
-        if (!followBottom) return;
-        if (Date.now() - lastScrollIntentAt <= TERMINAL_SCROLL_INTENT_MS) return;
-        if (!term.element?.isConnected) return;
-        const buffer = term.buffer.active;
-        const bottom = terminalEffectiveBottomBase(term);
-        if (bottom >= buffer.baseY) return;
-        if (buffer.viewportY !== bottom) term.scrollToLine(bottom);
-      }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
+      if (!followBottom) return;
+      if (bottom < buffer.baseY) term.scrollToLine(bottom);
+      else term.scrollToBottom();
     });
   }
 
@@ -5778,6 +5859,10 @@ async function api(method, path, body) {
       allowProposedApi: true,
       convertEol: true,
       cursorBlink: true,
+      // 输入不再把视口写回真尾：跟随态的合法停靠位是内容底（见
+      // terminalEffectiveBottomBase），两者冲突时每次按键都会把视口下跳一条
+      // 空白带再被护栏折回。用户上翻后打字也停在历史，这是确认过的行为变化。
+      scrollOnUserInput: false,
       fontFamily: 'ui-monospace, "Cascadia Mono", "Cascadia Code", SFMono-Regular, Consolas, "Liberation Mono", Menlo, "Noto Sans SC", monospace',
       fontSize: terminalFontSize,
       scrollback: 5000,
@@ -5933,8 +6018,15 @@ async function api(method, path, body) {
   // 清空，否则重连后旧内容与新回放的缓冲叠加成双份。稳态连接只在建连时收一
   // 次 snapshot、心跳是注释帧，不会因此误清屏。reset-on-snapshot 也是浏览器
   // 侧唯一可靠的重连信号（onerror 之后浏览器自动重连，前端没有钩子）。
-  function absorbTerminalSnapshot(term, session, state) {
+  function absorbTerminalSnapshot(term, session, state, column = null) {
     term.reset();
+    // reset() 后的回放是整段重写：闩到写入静默，期间的滚动与逐块写入都不参与
+    // 跟随判定（见 installTerminalFollowBottomGuard）。护栏未装上（无宿主/无
+    // viewport）时不置闩，避免闩住后无人清理。
+    if (column?.replayRestoreArm) {
+      column.replayRestoring = true;
+      column.replayRestoreArm();
+    }
     session.backendState = state;
     session.shell.pid = state.pid || "—";
   }
@@ -5959,6 +6051,12 @@ async function api(method, path, body) {
     // 把真实尺寸 POST 进 PTY，再开流收首帧。
     fitTerminalXterm(column);
     term.reset();
+    // 回放闩：reset() 把 ydisp/ybase 归零，回放逐块写入也会改写视口——两者都
+    // 不是用户滚动，闩住到写入静默后再锚定（见 installTerminalFollowBottomGuard）。
+    if (column.replayRestoreArm) {
+      column.replayRestoring = true;
+      column.replayRestoreArm();
+    }
     // 建流即焦点回守：进页、切签、新建、降级重试都经此处，终端的隐藏输入框
     // 重新拿到焦点，其后的键入与 Ctrl+C/V 才不会静默落空。
     term.focus();
@@ -5984,7 +6082,7 @@ async function api(method, path, body) {
     column.eventSource = new EventSource(`${API_BASE}/api/terminal/sessions/${encodeURIComponent(session.id)}/stream`);
     column.eventSource.addEventListener("snapshot", (event) => {
       try {
-        absorbTerminalSnapshot(term, session, JSON.parse(event.data));
+        absorbTerminalSnapshot(term, session, JSON.parse(event.data), column);
       } catch {}
     });
     column.eventSource.addEventListener("data", (event) => {
