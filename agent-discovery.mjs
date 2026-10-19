@@ -218,6 +218,23 @@ export function resolveDshExecutable(base = process.env, io = { existsSync }) {
   return io.existsSync(cmdPath) ? cmdPath : join(roamingNpm(base), "dsh");
 }
 
+// dsh-tui 是社区界面插件（@deepseek-harness-tui/dsh-tui），装进某个 dsh
+// profile 的 node_modules，入口是包里的 bin/dsh-tui.js（清单 bin 同时声明
+// dsh-tui 与 dst 两个名字，指向同一个文件）。本机实际使用的就是名为
+// dsh-tui 的 profile，关于页也只描述用户真正进的那个终端界面，因此固定读
+// 这一个 profile，不遍历全部 profile。找不到返回 null（与 zcode CLI 同款的
+// 优雅 not-found），报「未找到」还是跳过由调用方决定。
+export function resolveDshTuiExecutable(base = process.env, io = { existsSync }) {
+  const override = absoluteOverride(base, "DSH_TUI_EXECUTABLE");
+  if (override !== null) return override;
+  const dshHome = base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh");
+  const candidate = join(
+    dshHome, "profiles", "dsh-tui", "node_modules",
+    "@deepseek-harness-tui", "dsh-tui", "bin", "dsh-tui.js",
+  );
+  return io.existsSync(candidate) ? candidate : null;
+}
+
 export function resolveZcodeExecutable(base = process.env) {
   return absoluteOverride(base, "ZCODE_EXECUTABLE") ?? join(
     base.LOCALAPPDATA ?? join(base.USERPROFILE ?? "", "AppData", "Local"), "Programs", "zcode", "ZCode.exe",

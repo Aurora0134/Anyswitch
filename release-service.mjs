@@ -17,6 +17,11 @@ export const CLIENTS = {
   pi: npmSource("@earendil-works/pi-coding-agent", "earendil-works/pi"),
   kimi: npmSource("@moonshot-ai/kimi-code", "MoonshotAI/kimi-code"),
   dsh: npmSource("@deepseek-ai/dsh", "deepseek-ai/deepseek-harness"),
+  // dsh 终端形态的界面插件（社区包，装进 dsh profile）。它是用户实际进的终端
+  // 界面，关于页主行的 CLI 段与结论句都跟着它走，所以官方最新以它的 npm
+  // dist-tag 为准；社区包没有对应的官方发布页，链接因此指 npm 包页（grok /
+  // qoder-cli 先例）。
+  "dsh-tui": npmSource("@deepseek-harness-tui/dsh-tui", null, "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"),
   // Grok Build 的执行体是原生二进制，但官方分发与它自身的 `grok update` 都以
   // `@xai-official/grok` 的 npm dist-tag 为准，官方链接因此指 npm 包页而非仓库发布页。
   grok: npmSource("@xai-official/grok", null, "https://www.npmjs.com/package/@xai-official/grok"),

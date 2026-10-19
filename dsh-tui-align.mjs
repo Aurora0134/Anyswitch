@@ -8,13 +8,184 @@
 // 全程注入 spawn/io：本模块不直接碰进程与磁盘，测试用替身驱动。
 
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 import { resolveNpmCli } from "./client-lifecycle.mjs";
 import { resolveDshExecutable } from "./agent-discovery.mjs";
 
 export const DSH_TUI_PACKAGE = "@deepseek-harness-tui/dsh-tui";
+
+// ── profile 的 pnpm-workspace.yaml 预置 ──────────────────────────────────
+// dsh 的 plugin 通道把安装转给 profile 目录里的 pnpm；pnpm ≥11 的三道闸会把
+// 插件安装整次判死，而上游 dsh-tui 的 /update 在跑 pnpm 之前会先把三件事写进
+// profile 的 pnpm-workspace.yaml（update.js 的 ensureProfileAllowBuilds /
+// ensureProfileReleaseAgeExclude / ensureProfileSharpPlatformFilter）。面板代跑
+// 对齐时同样要预置，否则「从没在 TUI 里更新过」的 profile 会失败在闸门前：
+//   1. allowBuilds：链上只有 postinstall 的依赖默认被 pnpm 拦下，整次安装报
+//      ERR_PNPM_IGNORED_BUILDS；
+//   2. minimumReleaseAgeExclude：pnpm ≥11 默认拒绝 24h 内发布的版本，而发版
+//      当天对齐到的正是那个版本；
+//   3. ignoredOptionalDependencies：sharp 的平台原生包会按 lockfile 全平台下载
+//      （上游维护组实测约 90MB），只留当前平台的那几包。
+// 三条都按上游同一套纪律写：best-effort、幂等、不覆盖用户已有决定、失败不抛。
+const PROFILE_ALLOW_BUILDS = Object.freeze({
+  "@google/genai": false,
+  esbuild: false,
+  koffi: false,
+  protobufjs: false,
+});
+
+// sharp 的平台矩阵（上游 0.35.3 的实测表）。只列「别的平台」，当前平台的包
+// 永远不忽略——漏一个后缀只是少省一点下载量，错杀当前平台会让 sharp 起不来。
+const SHARP_WRAPPER_SUFFIXES = Object.freeze([
+  "darwin-arm64", "darwin-x64", "freebsd-wasm32", "linux-arm", "linux-arm64",
+  "linux-ppc64", "linux-riscv64", "linux-s390x", "linux-x64",
+  "linuxmusl-arm64", "linuxmusl-x64",
+  "win32-arm64", "win32-ia32", "win32-x64",
+]);
+const SHARP_LIBVIPS_SUFFIXES = Object.freeze([
+  "darwin-arm64", "darwin-x64", "linux-arm", "linux-arm64",
+  "linux-ppc64", "linux-riscv64", "linux-s390x", "linux-x64",
+  "linuxmusl-arm64", "linuxmusl-x64",
+]);
+
+export function sharpCurrentSuffix(platform, cpu, libc) {
+  if (platform === "freebsd") return "freebsd-wasm32";
+  const os = platform === "linux" && libc === "musl" ? "linuxmusl" : platform;
+  return `${os}-${cpu}`;
+}
+
+// 除当前平台外的全部 @img 包名。wasm32 与 webcontainers-wasm32 不忽略：它们
+// 没有 os 约束，是回退架构上唯一能用的形态。
+export function ignoredSharpOptionalPatterns(platform, cpu, libc) {
+  const current = sharpCurrentSuffix(platform, cpu, libc);
+  return [
+    ...SHARP_WRAPPER_SUFFIXES.filter((suffix) => suffix !== current).map((suffix) => `@img/sharp-${suffix}`),
+    ...SHARP_LIBVIPS_SUFFIXES.filter((suffix) => suffix !== current).map((suffix) => `@img/sharp-libvips-${suffix}`),
+  ];
+}
+
+// YAML 顶层块的通用重写：找到 `key:` 起始行，收集块内的条目行（缩进即块内），
+// 交给 rewriter 决定新的条目行。文件缺失按空文档处理；读不出/写不进一律返回
+// undefined，让调用方照旧跑 pnpm、由 pnpm 自己的诊断兜底。
+function rewriteWorkspaceBlock(io, yamlPath, key, rewriter) {
+  try {
+    if (!io.existsSync(dirname(yamlPath))) return undefined;
+    let text = "";
+    try { text = io.readFileSync(yamlPath, "utf8"); } catch { /* 缺文件：从空文档开始 */ }
+    const lines = text === "" ? [] : text.split(/\r?\n/u);
+    let blockStart = -1;
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line !== "" && line === line.trimStart() && line.startsWith(`${key}:`)) { blockStart = index; break; }
+    }
+    const blockEnd = (() => {
+      if (blockStart === -1) return -1;
+      let end = blockStart + 1;
+      for (let index = blockStart + 1; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (line === "" || line === line.trimStart()) break;
+        end = index + 1;
+      }
+      return end;
+    })();
+    const existing = blockStart === -1 ? [] : lines.slice(blockStart + 1, blockEnd);
+    const next = rewriter(existing);
+    if (next === null) return undefined;
+    const same = existing.length === next.length && existing.every((line, index) => line === next[index]);
+    if (same) return { changed: false };
+    if (blockStart !== -1) lines.splice(blockStart + 1, blockEnd - blockStart - 1, ...next);
+    else {
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      lines.push(`${key}:`, ...next);
+    }
+    io.writeFileSync(yamlPath, `${lines.join("\n")}\n`);
+    return { changed: true };
+  } catch {
+    return undefined;
+  }
+}
+
+// 1) allowBuilds：只补缺失的键，用户写过的（含显式 true）一律保留。
+export function ensureWorkspaceAllowBuilds(io, yamlPath) {
+  return rewriteWorkspaceBlock(io, yamlPath, "allowBuilds", (existing) => {
+    const present = new Set();
+    for (const line of existing) {
+      const match = /^\s+('?)(.+?)\1:\s/u.exec(line);
+      if (match) present.add(match[2]);
+    }
+    const added = Object.keys(PROFILE_ALLOW_BUILDS).filter((key) => !present.has(key));
+    if (added.length === 0) return existing;
+    return [...existing, ...added.map((key) => `  ${key.includes("@") || key.includes("/") ? `'${key}'` : key}: false`)];
+  });
+}
+
+// 2) minimumReleaseAgeExclude：只维护本包自己的条目（目标版在前、旧条目丢弃
+// 不累积），别人的条目逐字保留。11.7.x 只认每包的第一条，所以目标版必须在前。
+export function ensureWorkspaceReleaseAgeExclude(io, yamlPath, targetVersion, alsoExempt) {
+  const keep = [`${DSH_TUI_PACKAGE}@${targetVersion}`];
+  if (alsoExempt && alsoExempt !== targetVersion) keep.push(`${DSH_TUI_PACKAGE}@${alsoExempt}`);
+  return rewriteWorkspaceBlock(io, yamlPath, "minimumReleaseAgeExclude", (existing) => {
+    const itemOf = (line) => line.trim().replace(/^-\s*/u, "").replace(/^'(.*)'$/u, "$1");
+    const foreign = existing.filter((line) => !itemOf(line).startsWith(`${DSH_TUI_PACKAGE}@`));
+    // 本包条目按 keep 顺序重排（目标版在前），旧目标不留档——不累积。
+    return [...foreign, ...keep.map((item) => `  - '${item}'`)];
+  });
+}
+
+// 3) sharp 平台过滤：每次重算（这是跑更新那台机器的事实），本模块表里的条目
+// 按包名替换，其余条目（用户自己的、上游以后新增的）逐字保留。
+const SHARP_MANAGED_PATTERNS = new Set([
+  ...SHARP_WRAPPER_SUFFIXES.map((suffix) => `@img/sharp-${suffix}`),
+  ...SHARP_LIBVIPS_SUFFIXES.map((suffix) => `@img/sharp-libvips-${suffix}`),
+]);
+
+export function ensureWorkspaceSharpFilter(io, yamlPath, { platform, cpu, libc }) {
+  const patterns = ignoredSharpOptionalPatterns(platform, cpu, libc);
+  return rewriteWorkspaceBlock(io, yamlPath, "ignoredOptionalDependencies", (existing) => {
+    const nameOf = (line) => {
+      const body = line.trim().replace(/^-\s*/u, "");
+      const bare = body.replace(/^'(.*)'$/u, "$1").replace(/^"(.*)"$/u, "$1");
+      const commentAt = bare.search(/\s#/u);
+      const name = (commentAt === -1 ? bare : bare.slice(0, commentAt)).trim();
+      return name === "" ? undefined : name;
+    };
+    const foreign = existing.filter((line) => {
+      const name = nameOf(line);
+      return name === undefined || !SHARP_MANAGED_PATTERNS.has(name);
+    });
+    return [...foreign, ...patterns.map((pattern) => `  - '${pattern}'`)];
+  });
+}
+
+// 对齐动手前把三件事写进 profile 的 pnpm-workspace.yaml。任一条失败都不阻断
+// 对齐：pnpm 自己的诊断仍是用户看得见的兜底。
+export function seedProfileWorkspace({ io, profileDir, targetVersion, installedVersion, platform = process.platform, cpu = process.arch, libc = "glibc" }) {
+  const yamlPath = join(profileDir, "pnpm-workspace.yaml");
+  const allowBuilds = ensureWorkspaceAllowBuilds(io, yamlPath);
+  const releaseAge = targetVersion ? ensureWorkspaceReleaseAgeExclude(io, yamlPath, targetVersion, installedVersion) : undefined;
+  const sharp = ensureWorkspaceSharpFilter(io, yamlPath, { platform, cpu, libc });
+  return { allowBuilds, releaseAge, sharp };
+}
+
+// dsh-tui 每次启动把 pid 写进 ~/.dsh-tui/last-run.json，退出时刷新同一份记录。
+// 记录里的 pid 还活着 = 有一个 TUI 会话在跑：此时 pnpm 换包在 Windows 上换不掉
+// 正在使用的文件，硬换只会留下半个安装（与桌面腿「在跑不装」同一口径）。
+// 读不出、格式不对、进程已退出都按「没在跑」处理——漏判只是回到旧行为，误判
+// 会让插件永远更新不了。
+export function dshTuiSessionRunning({ base = process.env, io = { readFileSync }, alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } } } = {}) {
+  // 家目录读不出来就没有可查的记录：按「没在跑」处理，绝不拿相对路径去碰当前
+  // 工作目录里的同名文件（测试替身常常不带 USERPROFILE）。
+  const home = base.USERPROFILE ?? base.HOME;
+  if (!home) return false;
+  try {
+    const record = JSON.parse(io.readFileSync(join(home, ".dsh-tui", "last-run.json"), "utf8"));
+    return Number.isInteger(record?.pid) && record.pid > 0 && alive(record.pid);
+  } catch {
+    return false;
+  }
+}
 
 // peer 区间里随 dsh 本体版本走的只有 @deepseek-ai/dsh* 一族；cordis/schemastery
 // 有自己的版本线，不参与对齐判定。
@@ -206,16 +377,21 @@ export async function alignDshTuiPlugins({
   dshVersion,
   spawn = execFile,
   execPath = process.execPath,
-  io = { existsSync, readFileSync, readdirSync },
+  io = { existsSync, readFileSync, readdirSync, writeFileSync },
   base = process.env,
   timeoutMs = 10 * 60 * 1000,
   maxOutputChars = 2000,
+  sessionRunning = () => dshTuiSessionRunning({ base }),
 } = {}) {
   try {
     if (!parseVersion(String(dshVersion ?? ""))) return { state: "unknown", profiles: [] };
     const dshHome = base.DSH_HOME ?? join(base.USERPROFILE ?? "", ".dsh");
     const profiles = findDshTuiProfiles({ dshHome, io });
     if (profiles.length === 0) return { state: "none", profiles: [] };
+    // 有 TUI 会话在跑就不动 profile：Windows 下正在使用的包文件换不掉，硬换
+    // 只会留下半个安装。状态落 failed，复用「自动更新未完成，可稍后手工更新」
+    // 那句既有结果句，不新增文案。
+    if (sessionRunning()) return { state: "failed", profiles: [], output: "" };
     const npmCli = resolveNpmCli({ execPath, io });
     if (!npmCli) return { state: "failed", profiles: [], output: "" };
     const dshExe = resolveDshExecutable(base);
@@ -237,6 +413,14 @@ export async function alignDshTuiPlugins({
         results.push({ profile: entry.profile, state: "current", from: entry.installedVersion, to: entry.installedVersion, output: "" });
         continue;
       }
+      // pnpm ≥11 的三道闸先预置，再跑安装：allowBuilds、发版当天要用的
+      // release-age 豁免、sharp 平台过滤（见文件顶部的三条说明）。
+      seedProfileWorkspace({
+        io,
+        profileDir: entry.dir,
+        targetVersion: decision.target,
+        installedVersion: entry.installedVersion,
+      });
       const install = await runPluginAdd({
         profile: entry.profile,
         version: decision.target,

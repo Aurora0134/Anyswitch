@@ -56,19 +56,20 @@ const ids = ["claude", "codex", "opencode", "pi", "kimi", "dsh", "zcode", "qoder
 // 与生产 CLIENT_ENTRY_FORMS 同形的端点入口形态枚举（数据下发，徽标按它「/」连写）
 const ENTRY_FORMS = {
   claude: ["CLI", "Desktop"], codex: ["CLI", "Desktop"], opencode: ["CLI"], pi: ["CLI"],
-  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop", "Web"], zcode: ["Desktop", "CLI"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
+  kimi: ["CLI", "Desktop", "Web"], dsh: ["CLI", "Desktop"], zcode: ["Desktop", "CLI"], qoder: ["CLI", "Desktop"], grok: ["CLI"],
 };
 function environment() {
   return {
     platform: "win32", nodeVersion: "v24.13.0", checkedAt: "2026-09-18T08:00:00Z",
     clients: ids.map((id) => ({
       id, name: id, entryForms: ENTRY_FORMS[id],
-      // 与生产同形：qoder / codex / dsh / claude / kimi 一张卡两条安装记录。qoder index 0
+      // 与生产同形：qoder / codex / dsh / claude / kimi 一张卡两条以上安装记录。qoder index 0
       // 是 qodercli.exe 原生 CLI、remoteId qoder-cli，index 1 是桌面 IDE、remoteId qoder；
       // codex index 0 是 npm CLI、index 1 是 Store 桌面端、remoteId codex-desktop；dsh
-      // index 0 是 npm 全局 CLI、index 1 是官方桌面端、remoteId dsh-desktop；claude 与
-      // kimi 同 dsh 顺序，桌面端各走 claude-desktop / kimi-desktop 远端。九个客户端都有
-      // 官方版本源，逐安装记录发起查询，主行只呈现每端点一行。
+      // index 0 是 npm 全局 CLI（本体 harness）、index 1 是官方桌面端、remoteId
+      // dsh-desktop、index 2 是终端插件 dsh-tui（remoteId dsh-tui）；claude 与
+      // kimi 同 dsh 前两条顺序，桌面端各走 claude-desktop / kimi-desktop 远端。
+      // 九个客户端都有官方版本源，逐安装记录发起查询，主行只呈现每端点一行。
       installations: id === "qoder"
         ? [
           { kind: "cli", remoteId: "qoder-cli", status: "found", path: "C:\\Apps\\qoder\\qodercli.exe", version: "1.0.0", versionSource: "cli --version", issue: null },
@@ -83,6 +84,8 @@ function environment() {
             ? [
               { kind: "cli", remoteId: "dsh", status: "found", path: "C:\\Apps\\dsh\\cli", version: "1.0.0", versionSource: "package.json", issue: null },
               { kind: "desktop", remoteId: "dsh-desktop", status: "found", path: "C:\\Apps\\dsh\\desktop", version: "3.0.0", versionSource: "app.asar/package.json", issue: null },
+              // 终端插件：用户实际进的终端界面，主行 CLI 段跟着它走
+              { kind: "tui", remoteId: "dsh-tui", status: "found", path: "C:\\Apps\\dsh\\tui\\bin\\dsh-tui.js", version: "0.15.0", versionSource: "package.json", issue: null },
             ]
             : id === "claude"
               ? [
@@ -270,7 +273,7 @@ test("local failure can retry from button; refresh passes explicit bypass to loc
   failed = false;
   await h.get("aboutEnvironmentRefresh").click();
   assert.ok(h.calls.includes("/api/environment?refresh=1"));
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 14, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh / claude / kimi 各两条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 15, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条）");
   assert.ok(h.calls.filter((path) => path.includes("/latest/")).every((path) => new URL(path, "http://local").searchParams.get("refresh") === "1"));
 });
 
@@ -345,7 +348,7 @@ test("leaving ignores late local and update responses; returning reuses pending 
   await tick(); await tick();
   assert.equal(h.get("aboutClients").children.length, 9);
   assert.match(h.get("aboutUpdateStatus").textContent, /当前已是最新/);
-  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 14, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / dsh / claude / kimi 各两条渠道）");
+  assert.equal(h.calls.filter((path) => path.includes("/latest/")).length, 15, "九个客户端都有官方版本源，各安装记录各查一次（qoder / codex / claude / kimi 各两条渠道，dsh 三条）");
 });
 
 test("refresh and navigation isolate late remote comparisons and preserve visible cached values", async () => {
@@ -402,6 +405,102 @@ test("DSH 官方来源链接放行真实仓库 deepseek-harness", async () => {
   const links = descendants(h.row("dsh"), (node) => node.tagName === "a");
   assert.equal(links.length, 1);
   assert.equal(links[0].href, "https://github.com/deepseek-ai/deepseek-harness/releases");
+});
+
+test("DSH 双组件并段：CLI 段摆终端插件版本、最新格前缀「最新」、结论跟插件比对", async () => {
+  // 用户拍板的形态模型：CLI 与 TUI 是同一个终端形态，由本体 harness 与界面插件
+  // dsh-tui 两个组件构成。主行的 CLI 段摆插件版本（用户实际进的终端界面），
+  // harness 本体的官方版本只留详情区；dsh 行的前缀从「官方最新」改成「最新」。
+  const h = harness((path) => {
+    if (path.includes("/latest/dsh-tui")) {
+      return { ...latest("0.16.1", "update_available"), url: "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui" };
+    }
+    if (path.includes("/latest/dsh-desktop")) {
+      return { ...latest("0.2.1-rc.2", "current"), url: "https://harness.deepseek.com" };
+    }
+    if (path.includes("/latest/dsh")) {
+      return { ...latest("0.1.7-rc.2", "current"), url: "https://github.com/deepseek-ai/deepseek-harness/releases" };
+    }
+    return normal(path);
+  });
+  await h.controller.enter();
+  const row = h.row("dsh");
+  const lines = descendants(row, (node) => node.className === "about-version-line");
+  assert.equal(lines.length, 1, "dsh 仍是每端点一行");
+  const text = lines[0].textContent;
+  assert.equal(descendants(lines[0], (node) => node.className === "about-kind")[0].textContent, "CLI/Desktop", "徽标不再带 Web");
+  assert.match(text, /本地 CLI 0\.15\.0 · Desktop 3\.0\.0/, "CLI 段是插件版本、Desktop 段是桌面端版本");
+  assert.doesNotMatch(text, /1\.0\.0/, "本体 harness 的版本不上主行");
+  assert.match(text, /最新 CLI 0\.16\.1 · Desktop 0\.2\.1-rc\.2/, "前缀只说「最新」，不带「官方」");
+  assert.doesNotMatch(text, /官方最新/);
+  assert.match(text, /有新版本/, "结论跟终端插件的比对走");
+  assert.ok(h.calls.includes("/api/environment/latest/dsh-tui?localVersion=0.15.0"), "插件按自己的远端 id 查最新");
+  // 详情区：插件四行 + 链接文案「查看最新版本」，本体四行保持原样。
+  assert.match(row.textContent, /终端插件 路径C:\\Apps\\dsh\\tui\\bin\\dsh-tui\.js/);
+  assert.match(row.textContent, /终端插件 版本来源安装包资料/);
+  assert.match(row.textContent, /终端插件 来源/);
+  assert.match(row.textContent, /终端插件 查询时间/);
+  assert.match(row.textContent, /CLI 路径C:\\Apps\\dsh\\cli/);
+  assert.match(row.textContent, /CLI 官方来源/);
+  const links = descendants(row, (node) => node.tagName === "a");
+  assert.deepEqual(links.map((node) => node.textContent), ["查看官方版本", "查看最新版本"], "插件链接文案单独一句，本体仍是「查看官方版本」");
+  assert.ok(links.some((node) => node.href === "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"));
+});
+
+test("DSH 结论句：插件与最新一致时说「与最新版本一致」，其它端点仍是「与官方最新版本一致」", async () => {
+  const h = harness((path) => {
+    if (path.includes("/latest/dsh-tui")) return { ...latest("0.15.0", "current"), url: "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui" };
+    if (path.includes("/latest/claude")) return latest("1.0.0", "current");
+    if (path.includes("/latest/dsh")) return latest("1.0.0", "current");
+    return normal(path);
+  });
+  await h.controller.enter();
+  const dshLine = descendants(h.row("dsh"), (node) => node.className === "about-version-line")[0].textContent;
+  assert.match(dshLine, /与最新版本一致/);
+  assert.doesNotMatch(dshLine, /与官方最新版本一致/);
+  const claudeLine = descendants(h.row("claude"), (node) => node.className === "about-version-line")[0].textContent;
+  assert.match(claudeLine, /与官方最新版本一致/, "其它端点的文案不动");
+});
+
+test("DSH 终端插件未装：主行 CLI 段不占位，插件那条不报状态词", async () => {
+  const local = environment();
+  const dsh = local.clients.find((client) => client.id === "dsh");
+  dsh.installations[2] = { ...dsh.installations[2], status: "not_found", version: null, path: null, issue: "entry_missing" };
+  const h = harness((path) => (path === "/api/environment" ? local : normal(path)));
+  await h.controller.enter();
+  const line = descendants(h.row("dsh"), (node) => node.className === "about-version-line")[0];
+  assert.match(line.textContent, /本地 Desktop 3\.0\.0/, "插件没装时只剩桌面段");
+  assert.doesNotMatch(line.textContent, /未找到/, "not_found 不占位，与既有惯例一致");
+  assert.doesNotMatch(line.textContent, /CLI 0\.15\.0/);
+  assert.match(h.row("dsh").textContent, /终端插件 路径未找到/, "详情区仍如实报未找到");
+});
+
+test("DSH 只有终端插件过期时端点级按钮也要出现", async () => {
+  const h = harness((path) => {
+    if (path.includes("/latest/dsh-tui")) return { ...latest("0.16.1", "update_available"), url: "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui" };
+    if (path.includes("/latest/dsh-desktop")) return latest("3.0.0", "current");
+    if (path.includes("/latest/dsh")) return latest("1.0.0", "current");
+    return normal(path);
+  });
+  await h.controller.enter();
+  const line = descendants(h.row("dsh"), (node) => node.className === "about-version-line")[0];
+  const actions = descendants(line, (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "端点级一颗");
+  assert.equal(actions[0].textContent, "更新");
+  assert.match(h.get("aboutUpdateAll").textContent, /全部更新/, "批量入口照常计数");
+});
+
+test("DSH 终端插件未装且本体未装时不代装插件", async () => {
+  const local = environment();
+  const dsh = local.clients.find((client) => client.id === "dsh");
+  dsh.installations[0] = { ...dsh.installations[0], status: "not_found", version: null, path: null, issue: "entry_missing" };
+  dsh.installations[2] = { ...dsh.installations[2], status: "not_found", version: null, path: null, issue: "entry_missing" };
+  const h = harness((path) => (path === "/api/environment" ? local : normal(path)));
+  await h.controller.enter();
+  const line = descendants(h.row("dsh"), (node) => node.className === "about-version-line")[0];
+  const actions = descendants(line, (node) => node.tagName === "button" && node.className.includes("about-client-action"));
+  assert.equal(actions.length, 1, "安装按钮仍由本体那条决定");
+  assert.equal(actions[0].textContent, "安装");
 });
 
 test("Codex 双形态归并为一行：徽标 CLI/Desktop、本地与官方格双版本并排带形态小注、端点级一个更新按钮", async () => {
