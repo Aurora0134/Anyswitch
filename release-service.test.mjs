@@ -276,6 +276,8 @@ it("queries npm latest for each fixed CLI package, preserving preview channels",
     ["pi", "@earendil-works/pi-coding-agent", "0.85.1", "https://github.com/earendil-works/pi/releases"],
     ["kimi", "@moonshot-ai/kimi-code", "2.0.0", "https://github.com/MoonshotAI/kimi-code/releases"],
     ["dsh", "@deepseek-ai/dsh", "0.1.5-rc.2", "https://github.com/deepseek-ai/deepseek-harness/releases"],
+    // dsh 的终端插件是社区包，官方分发只在 npm，官方链接因此指 npm 包页。
+    ["dsh-tui", "@deepseek-harness-tui/dsh-tui", "0.16.1", "https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"],
     // Qoder CLI 与 Grok Build 同型（原生二进制、官方分发走 npm），官方链接指 npm 包页。
     ["qoder-cli", "@qoder-ai/qodercli", "1.1.64", "https://www.npmjs.com/package/@qoder-ai/qodercli"],
   ];

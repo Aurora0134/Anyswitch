@@ -295,14 +295,23 @@ test("claude 官渠腿成功句带元数据版本，检测不到桌面版本也�
   }
 });
 
-function dshHarness(dir, { lifecycleResult, align, afterVersion = "0.1.7-rc.2", clientId = "dsh" }) {
+function dshHarness(dir, { lifecycleResult, align, afterVersion = "0.1.7-rc.2", clientId = "dsh", installations } = {}) {
   return executeClientUpdate({
     runId: running().runId,
     journalDir: dir,
     runLifecycle: async () => lifecycleResult ?? { ok: true, output: "" },
     environment: {
       async getState() {
-        return { clients: [{ id: clientId, installations: [{ version: afterVersion, path: "C:/fixture/dsh", issue: null }] }] };
+        return {
+          clients: [{
+            id: clientId,
+            installations: installations ?? [
+              { kind: "cli", version: afterVersion, path: "C:/fixture/dsh", issue: null },
+              { kind: "desktop", version: "0.2.1-rc.2", path: "C:/fixture/dsh-desktop", issue: null },
+              { kind: "tui", version: "0.15.0", path: "C:/fixture/dsh-tui", issue: null },
+            ],
+          }],
+        };
       },
     },
     releases: { async getClientLatest() { return { state: "ok", version: afterVersion }; } },
@@ -372,6 +381,60 @@ test("插件对齐其余状态各归其句，无对齐对象时保持沉默", as
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("两腿 dsh 收尾也触发插件对齐：判据是 CLI 腿成功，版本取 CLI 那条安装记录", async () => {
+  // 回归钉：旧守卫 `!Array.isArray(command.legs)` 对两腿 dsh 恒假，对齐是死代码；
+  // 而测试替身当时没有 legs 字段，所以一直没暴露。这里按生产形态给两条腿。
+  const dir = scratch();
+  try {
+    writeClientUpdateRun(dir, running({ clientId: "dsh", beforeVersion: "0.1.5-rc.2", beforeByForm: { cli: "0.1.5-rc.2", desktop: "0.2.1-rc.2" } }));
+    const seen = [];
+    const result = await dshHarness(dir, {
+      lifecycleResult: { ok: true, legs: [{ form: "cli", ok: true }, { form: "desktop", ok: true }], output: "" },
+      align: async (options) => {
+        seen.push(options);
+        return { state: "updated", profiles: [{ profile: "dsh-tui", state: "updated", from: "0.15.0", to: "0.16.1" }] };
+      },
+    });
+    assert.equal(seen.length, 1, "两腿 dsh 同样要对齐 profile 插件");
+    assert.equal(seen[0].dshVersion, "0.1.7-rc.2", "取 kind=cli 那条（本体 harness），不取插件版本也不靠 index 猜");
+    assert.match(result.message, /终端插件 dsh-tui 已一并更新到 0\.16\.1/);
+    assert.equal(result.legs.length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("两腿 dsh：桌面腿失败不挡插件对齐，CLI 腿失败才不动 profile", async () => {
+  const desktopFailed = scratch();
+  try {
+    writeClientUpdateRun(desktopFailed, running({ clientId: "dsh", beforeByForm: { cli: "0.1.5-rc.2", desktop: "0.2.1-rc.2" } }));
+    let calls = 0;
+    const align = async () => { calls++; return { state: "current", profiles: [] }; };
+    const result = await dshHarness(desktopFailed, {
+      lifecycleResult: { ok: false, legs: [{ form: "cli", ok: true }, { form: "desktop", ok: false }], output: "" },
+      align,
+    });
+    assert.equal(result.outcome, "failed", "顶层结果如实记桌面腿失败");
+    assert.equal(calls, 1, "插件只跟本体版本走，桌面腿失败不影响对齐");
+  } finally {
+    rmSync(desktopFailed, { recursive: true, force: true });
+  }
+
+  const cliFailed = scratch();
+  try {
+    writeClientUpdateRun(cliFailed, running({ clientId: "dsh" }));
+    let calls = 0;
+    const align = async () => { calls++; return { state: "none", profiles: [] }; };
+    await dshHarness(cliFailed, {
+      lifecycleResult: { ok: false, legs: [{ form: "cli", ok: false }, { form: "desktop", ok: true }], output: "" },
+      align,
+    });
+    assert.equal(calls, 0, "本体没更新成功时不动 profile");
+  } finally {
+    rmSync(cliFailed, { recursive: true, force: true });
   }
 });
 

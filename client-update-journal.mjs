@@ -155,6 +155,10 @@ export async function executeClientUpdate({
     const after = (await environment.getState({ force: true })).clients.find((client) => client.id === run.clientId);
     const installation = after?.installations?.[0] ?? null;
     const afterVersion = installation?.version ?? null;
+    // 插件对齐用的 dsh 本体版本只认 npm CLI 那条安装记录（kind "cli"）。dsh 的
+    // 安装记录里 index 0 是本体 harness、index 2 是终端插件 dsh-tui，两条版本线
+    // 不同源；按 index 取会把插件版本当成本体版本去判 peer 适配。
+    const dshCliVersion = (after?.installations ?? []).find((item) => item.kind === "cli")?.version ?? null;
     // 官方版本查询渠道跟被更新那条安装项的 remoteId 走：qoder 的客户端 id 是桌面端
     // 渠道，CLI 更新要比对的是 installations[0] 的 "qoder-cli"。
     const latest = await releases.getClientLatest(installation?.remoteId ?? run.clientId, { force: true });
@@ -234,10 +238,16 @@ export async function executeClientUpdate({
     // dsh 联动：本体更新流程收尾时对齐 dsh-tui profile 插件（每次点更新都查——
     // 面板外的升级留下的插件失配同样借此自愈；2026-09-28 的 dsh-cli 事故即此
     // 形态）。对齐只往结果上附加信息，永不翻转 CLI 腿本身的成败。
-    if (run.clientId === "dsh" && command.ok && !Array.isArray(command.legs)) {
+    //
+    // 触发条件是「CLI 腿成功」，不是「单腿返回」：两腿 dsh 的 command 带 legs[]，
+    // 旧守卫 `!Array.isArray(command.legs)` 对它恒假，对齐从来没跑过（死代码）。
+    // 桌面腿失败不影响插件对齐——插件只跟 dsh 本体版本走。
+    const cliLeg = Array.isArray(command.legs) ? command.legs.find((leg) => leg.form === "cli") : null;
+    const cliLegOk = Array.isArray(command.legs) ? Boolean(cliLeg?.ok) : Boolean(command.ok);
+    if (run.clientId === "dsh" && cliLegOk) {
       let align;
       try {
-        align = await alignDshTui({ dshVersion: afterVersion });
+        align = await alignDshTui({ dshVersion: dshCliVersion });
       } catch {
         align = { state: "failed", profiles: [] };
       }

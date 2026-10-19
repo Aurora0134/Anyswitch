@@ -546,8 +546,9 @@ test("an empty installation reports all nine clients, with six dual-installation
   assert.deepEqual(state.clients.at(-2).installations.map((i) => [i.kind, i.remoteId]), [["cli", "qoder-cli"], ["desktop", "qoder"]]);
   // DSH 官方桌面端上线后同样是两条安装记录：index 0 是 npm 全局 CLI（更新按钮装的
   // 就是这个包），index 1 是官方桌面端（官方发布文件渠道，remoteId dsh-desktop）。
+  // 终端形态的第二个组件 dsh-tui 追加为 index 2，前两条的顺序与语义不动。
   const dsh = state.clients.find((c) => c.id === "dsh");
-  assert.deepEqual(dsh.installations.map((i) => [i.kind, i.remoteId]), [["cli", "dsh"], ["desktop", "dsh-desktop"]]);
+  assert.deepEqual(dsh.installations.map((i) => [i.kind, i.remoteId]), [["cli", "dsh"], ["desktop", "dsh-desktop"], ["tui", "dsh-tui"]]);
   // Claude 与 Kimi 各补一条官方桌面端副记录：index 0 仍是面板代管更新的 npm CLI，
   // index 1 的官方来源各自走 claude-desktop / kimi-desktop 远端。
   const claude = state.clients.find((c) => c.id === "claude");
@@ -561,7 +562,7 @@ test("an empty installation reports all nine clients, with six dual-installation
   for (const client of state.clients) {
     assert.equal(typeof client.name, "string");
     assert.equal(client.entryForms, CLIENT_ENTRY_FORMS[client.id], "每个 client 携带注册表里同一份冻结形态枚举");
-    assert.equal(client.installations.length, ["codex", "qoder", "dsh", "claude", "kimi", "zcode"].includes(client.id) ? 2 : 1);
+    assert.equal(client.installations.length, client.id === "dsh" ? 3 : ["codex", "qoder", "claude", "kimi", "zcode"].includes(client.id) ? 2 : 1);
     for (const item of client.installations) {
       assert.deepEqual(Object.keys(item).sort(), ["issue", "kind", "path", "remoteId", "status", "version", "versionSource"]);
       assert.equal(item.status, "not_found");
@@ -573,6 +574,56 @@ test("an empty installation reports all nine clients, with six dual-installation
   }
 });
 
+test("dsh 终端插件 dsh-tui：从 profile 落点读实装版本，未装如实 not_found", async (t) => {
+  // 插件装在 ~/.dsh/profiles/dsh-tui/node_modules/@deepseek-harness-tui/dsh-tui，
+  // 入口是包里的 bin/dsh-tui.js（清单 bin 同时声明 dsh-tui 与 dst）。关于页主行
+  // 的 CLI 段摆的就是它，所以检测必须认这个落点、读包清单而不是猜。
+  const f = fixture(t);
+  const profileRoot = join(f.base.USERPROFILE, ".dsh", "profiles", "dsh-tui");
+  const packageRoot = join(profileRoot, "node_modules", "@deepseek-harness-tui", "dsh-tui");
+  f.put(join(packageRoot, "package.json"), JSON.stringify({
+    name: "@deepseek-harness-tui/dsh-tui", version: "0.15.0", bin: { "dsh-tui": "./bin/dsh-tui.js", dst: "./bin/dsh-tui.js" },
+  }));
+  const entry = f.put(join(packageRoot, "bin", "dsh-tui.js"), "export {};");
+  const found = installation(await f.service().getState(), "dsh", 2);
+  assert.equal(found.kind, "tui");
+  assert.equal(found.remoteId, "dsh-tui");
+  assert.equal(found.status, "found");
+  assert.equal(found.path, entry);
+  assert.equal(found.version, "0.15.0");
+  assert.equal(found.versionSource, "package.json");
+  assert.equal(found.issue, null);
+
+  // 清单名对不上号的目录不报版本（与其它 npm 客户端同一条身份防线）。
+  f.put(join(packageRoot, "package.json"), JSON.stringify({ name: "somebody-elses-package", version: "9.9.9", bin: { "dsh-tui": "./bin/dsh-tui.js" } }));
+  const foreign = installation(await f.service().getState({ force: true }), "dsh", 2);
+  assert.equal(foreign.status, "found");
+  assert.equal(foreign.version, null);
+  assert.equal(foreign.issue, "version_unavailable");
+
+  // 插件未装：该条如实 not_found（主行 CLI 段不占位），前两条主记录不受影响。
+  fs.rmSync(join(profileRoot, "node_modules"), { recursive: true, force: true });
+  const missing = await f.service().getState({ force: true });
+  const absent = installation(missing, "dsh", 2);
+  assert.equal(absent.status, "not_found");
+  assert.equal(absent.path, null);
+  assert.equal(absent.issue, "entry_missing");
+  assert.deepEqual(missing.clients.find((client) => client.id === "dsh").installations.map((item) => item.kind), ["cli", "desktop", "tui"],
+    "插件未装也不改变主记录的顺序");
+});
+
+test("dsh 终端插件读 DSH_HOME 指定的家目录", async (t) => {
+  const f = fixture(t);
+  const home = join(f.root, "dsh-home");
+  const packageRoot = join(home, "profiles", "dsh-tui", "node_modules", "@deepseek-harness-tui", "dsh-tui");
+  f.put(join(packageRoot, "package.json"), JSON.stringify({ name: "@deepseek-harness-tui/dsh-tui", version: "0.16.1", bin: { "dsh-tui": "./bin/dsh-tui.js" } }));
+  f.put(join(packageRoot, "bin", "dsh-tui.js"), "export {};");
+  const service = createEnvironmentService({ base: { ...f.base, DSH_HOME: home }, readVersionResource: async () => null, readAppxPackage: async () => null });
+  const item = installation(await service.getState(), "dsh", 2);
+  assert.equal(item.status, "found");
+  assert.equal(item.version, "0.16.1");
+});
+
 test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", async (t) => {
   assert.ok(Object.isFrozen(CLIENT_ENTRY_FORMS));
   for (const forms of Object.values(CLIENT_ENTRY_FORMS)) assert.ok(Object.isFrozen(forms), "形态数组同样冻结");
@@ -581,7 +632,7 @@ test("CLIENT_ENTRY_FORMS is frozen and mirrors the client registry one to one", 
     codex: ["CLI", "Desktop"],
     qoder: ["CLI", "Desktop"],
     claude: ["CLI", "Desktop"],
-    dsh: ["CLI", "Desktop", "Web"],
+    dsh: ["CLI", "Desktop"],
     pi: ["CLI"],
     opencode: ["CLI"],
     grok: ["CLI"],

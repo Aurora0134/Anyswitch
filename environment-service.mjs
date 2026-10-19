@@ -5,7 +5,7 @@ import {
   resolveClaudeExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
-  resolveZcodeCliExecutable, defaultZcodeCliExecutable,
+  resolveZcodeCliExecutable, defaultZcodeCliExecutable, resolveDshTuiExecutable,
 } from "./agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
@@ -130,9 +130,11 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   codex: Object.freeze(["CLI", "Desktop"]),
   qoder: Object.freeze(["CLI", "Desktop"]),
   claude: Object.freeze(["CLI", "Desktop"]),
-  // 官方桌面端上线后 DSH 与 kimi 同形：一个端点 id、一份家目录之上有终端、
-  // 浏览器与桌面三个界面。
-  dsh: Object.freeze(["CLI", "Desktop", "Web"]),
+  // 官方桌面端上线后 DSH 与 kimi 同形：一个端点 id、一份家目录之上有终端与
+  // 桌面两个界面。官方 Desktop 捆绑 Web（desktop-runtime.json 实证三件同包），
+  // Web 是附带入口，不单列——终端形态本身由本体 harness 与界面插件 dsh-tui
+  // 两个组件构成，但那是同一种形态的两个部分，不是两个入口。
+  dsh: Object.freeze(["CLI", "Desktop"]),
   pi: Object.freeze(["CLI"]),
   opencode: Object.freeze(["CLI"]),
   grok: Object.freeze(["CLI"]),
@@ -276,7 +278,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
         && dirname(resolve(path)).toLowerCase() === resolve(root, "bin").toLowerCase()
         && typeof pkg.version === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pkg.version) ? pkg.version : null;
     }
-    const names = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh" };
+    const names = { claude: "@anthropic-ai/claude-code", codex: "@openai/codex", pi: "@earendil-works/pi-coding-agent", kimi: "@moonshot-ai/kimi-code", dsh: "@deepseek-ai/dsh", "dsh-tui": "@deepseek-harness-tui/dsh-tui" };
     if (!names[id]) return null;
     let dir = dirname(path);
     for (let depth = 0; depth < 6; depth++, dir = dirname(dir)) {
@@ -438,6 +440,25 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
+  // DSH 终端形态的第二个组件：界面插件 dsh-tui（community 包，装在
+  // ~/.dsh/profiles/dsh-tui 下）。它和本体 harness 是同一个终端形态的两半，
+  // 因此挂在 dsh 端点下作为第三条安装记录（kind "tui"），不另开端点。插件
+  // 未装时如实 not_found，不占主行位置；版本从包清单读，与 npm CLI 同口径。
+  // remoteId 是 "dsh-tui"：关于页拿它查 npm dist-tags，面板白名单同步登记。
+  async function inspectDshTui() {
+    const result = { kind: "tui", remoteId: "dsh-tui", status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
+    try {
+      const path = resolveDshTuiExecutable(base, resolverIo);
+      if (!path || !isFile(path)) return result;
+      const found = { ...result, status: "found", path, issue: "version_unavailable" };
+      const version = packageVersion("dsh-tui", path);
+      return version ? { ...found, version, versionSource: "package.json", issue: null } : found;
+    } catch (error) {
+      if (missing(error) && result.status !== "found") return result;
+      return { ...result, status: "error", issue: ["EACCES", "EPERM"].includes(error.code) ? "access_denied" : "discovery_failed" };
+    }
+  }
+
   let cache = null;
   async function getState({ force = false } = {}) {
     const at = now();
@@ -447,12 +468,18 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       // Microsoft Store 桌面端；qoder 的 0 是原生 CLI、1 是桌面 IDE；claude 与 dsh
       // 的 0 是 npm 全局 CLI（更新按钮装的就是这个包）、1 是官方桌面端；kimi 的
       // 1 是官方桌面应用；zcode 的 0 是桌面主形态、1 是本机源码构建的 CLI。
-      // 顺序即「动作位认哪一条」的约定。
+      // 顺序即「动作位认哪一条」的约定；dsh 另有 index 2 的终端插件，只在展示与
+      // 版本比对上使用，不参与「动作位认哪一条」。
       const desktopInstallations = {
         codex: inspectCodexDesktop,
         dsh: inspectDshDesktop,
         claude: inspectClaudeDesktop,
         kimi: () => inspect("kimi-desktop", "desktop", resolveKimiDesktopExecutable),
+      };
+      // 主记录与桌面记录之外的附加安装项（同一端点的同一形态里的第二个组件）。
+      // 只追加在后，不改变 index 0/1 的既有语义。
+      const extraInstallations = {
+        dsh: inspectDshTui,
       };
       const installations = await Promise.all(id === "qoder"
         ? [inspect("qoder-cli", "cli", resolveQoderCliExecutable), inspect(id, "desktop", resolver)]
@@ -461,7 +488,10 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
           // 的主形态：desktop 守 index 0 是有意为之，CLI 记录只追加在后。
           ? [inspect(id, "desktop", resolver), inspectZcodeCli()]
           : [inspect(id, DESKTOP_CLIENTS.has(id) ? "desktop" : "cli", resolver),
-            ...(desktopInstallations[id] ? [desktopInstallations[id]()] : [])]);
+            ...(desktopInstallations[id] ? [desktopInstallations[id]()] : []),
+            // 同一形态的附加组件：dsh 的终端插件 dsh-tui 追加在两条主记录之后，
+            // 前两条（harness CLI、桌面端）的顺序与语义都不动。
+            ...(extraInstallations[id] ? [extraInstallations[id]()] : [])]);
       return { id, name, entryForms: CLIENT_ENTRY_FORMS[id], installations };
     }));
     const state = { checkedAt: new Date(at).toISOString(), platform: process.platform, nodeVersion: process.version, clients };

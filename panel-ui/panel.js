@@ -2652,6 +2652,8 @@ async function api(method, path, body) {
       pi: ["earendil-works/pi", "@earendil-works/pi-coding-agent"],
       kimi: ["MoonshotAI/kimi-code", "@moonshot-ai/kimi-code"],
       dsh: ["deepseek-ai/deepseek-harness", "@deepseek-ai/dsh"],
+      // dsh 的终端插件是社区包，官方来源只有 npm 包页（与服务端 release-service 同源）。
+      "dsh-tui": ["", "@deepseek-harness-tui/dsh-tui"],
       // 原生二进制没有公开仓库发布页，官方来源只有 npm 包页（与服务端 release-service 同源）。
       grok: ["", "@xai-official/grok"],
       "qoder-cli": ["", "@qoder-ai/qodercli"],
@@ -2727,13 +2729,15 @@ async function api(method, path, body) {
     let lifecycleModalResolve = null;
     const lifecycleModalQueue = []; // 弹层是单例，同时到来的确认请求排队逐个弹
     // 该安装项当前能做什么：可更新 > 未安装可装；桌面应用、状态不明与不给装包的客户端不给动作。
+    // kind "tui" 是 dsh 的终端插件：它跟着端点级更新一起走（对齐流程），因此放行
+    // 更新分支；安装分支仍只认 CLI——插件未装不代装，首装形态不由这里决定。
     function installationAction(client, installation) {
-      if (!installation || installation.kind !== "cli") return null;
+      if (!installation || (installation.kind !== "cli" && installation.kind !== "tui")) return null;
       const remote = remoteCache.get(cacheKey(installation))?.data;
       if (remote?.state === "ok" && remote.version && validLocal(installation) && remote.comparison === "update_available") {
         return { kind: "update", version: remote.version };
       }
-      if (installation.status === "not_found" && installableClients.has(client.id)) return { kind: "install" };
+      if (installation.kind === "cli" && installation.status === "not_found" && installableClients.has(client.id)) return { kind: "install" };
       return null;
     }
     function clientName(id) { return local?.clients.find((client) => client.id === id)?.name || id; }
@@ -3232,7 +3236,7 @@ async function api(method, path, body) {
       details.appendChild(element("summary", "", "路径与版本来源"));
       const list = element("dl", "");
       function detail(label, value) { list.append(element("dt", "", label), element("dd", "", value)); }
-      // 主行归并为每端点一行：徽标｜本地版本｜官方最新｜结论｜动作位。
+      // 主行归并为每端点一行：徽标｜本地版本｜最新｜结论｜动作位。
       // 徽标是端点入口形态枚举（服务端 entryForms 数据下发），「/」连写。
       const primary = client.installations[0] ?? null;
       const forms = Array.isArray(client.entryForms) && client.entryForms.length
@@ -3244,17 +3248,31 @@ async function api(method, path, body) {
         return remote?.state === "ok" && remote.version ? remote : null;
       };
       const formTag = (installation) => (installation.kind === "desktop" ? "Desktop" : "CLI");
+      // dsh 的终端形态由两个组件构成：本体 harness（installations[0]）与界面插件
+      // dsh-tui（kind "tui"）。主行 CLI 段跟着插件走——本体没有 CLI 入口产品，
+      // 它的官方版本只留在详情区；插件未装时该段不占位（not_found 惯例）。
+      const tuiInstallation = client.id === "dsh"
+        ? client.installations.find((installation) => installation.kind === "tui") ?? null
+        : null;
+      const displayPrimary = tuiInstallation ?? primary;
       const localStatus = (installation) => installation.status === "not_found" ? "未找到"
         : installation.status !== "found" ? "检测失败"
         : installation.issue === "not_runnable" ? "已安装但无法运行"
         : !validLocal(installation) ? "版本无法读取" : "已发现";
       const line = element("div", "about-version-line");
       line.appendChild(element("span", "about-kind", forms.join("/")));
-      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex / dsh / kimi 例外：
-      // 两形态的版本都摆，带形态小注并排；某形态没装（not_found）不占位，装着却
-      // 读不出版本时状态词占它的位。
+      // 本地版本格：只摆主更新形态（installations[0]）的版本。codex / kimi 例外：
+      // 两形态的版本都摆，带形态小注并排；dsh 摆终端插件（CLI 段）与桌面端，
+      // 顺序固定 CLI 在前。某形态没装（not_found）不占位，装着却读不出版本时
+      // 状态词占它的位。
       const localParts = [];
-      if (client.id === "codex" || client.id === "dsh" || client.id === "kimi") {
+      if (tuiInstallation) {
+        const shown = [tuiInstallation, ...client.installations.filter((installation) => installation.kind === "desktop")];
+        for (const installation of shown) {
+          if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
+          else if (installation.status !== "not_found") localParts.push(localStatus(installation));
+        }
+      } else if (client.id === "codex" || client.id === "kimi") {
         for (const installation of client.installations) {
           if (installation.status === "found" && installation.version) localParts.push(`${formTag(installation)} ${installation.version}`);
           else if (installation.status !== "not_found") localParts.push(localStatus(installation));
@@ -3262,15 +3280,27 @@ async function api(method, path, body) {
       } else if (primary && primary.status === "found" && primary.version) {
         localParts.push(primary.version);
       }
-      const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : primary ? localStatus(primary) : "未找到"}`);
-      if (primary && (primary.status === "error" || primary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
+      const localSpan = element("span", "about-version", `本地 ${localParts.length ? localParts.join(" · ") : displayPrimary ? localStatus(displayPrimary) : "未找到"}`);
+      if (displayPrimary && (displayPrimary.status === "error" || displayPrimary.issue === "not_runnable")) localSpan.dataset.tone = "danger";
       line.appendChild(localSpan);
-      // 官方最新格：主更新形态那条渠道的版本。codex / dsh / kimi 的桌面渠道官方版本
-      // 查得到就同口径并排，查不到不占位；没有官方版本源的端点直述「自带更新」。
-      const primaryRemote = goodRemote(primary);
-      const perFormRemotes = client.id === "codex" || client.id === "dsh" || client.id === "kimi";
+      // 最新格：主更新形态那条渠道的版本。codex / kimi 的桌面渠道官方版本查得到就
+      // 同口径并排，查不到不占位；dsh 的 CLI 段取终端插件、Desktop 段取桌面端；
+      // 没有官方版本源的端点直述「自带更新」。
+      const primaryRemote = goodRemote(displayPrimary);
       let remoteText = "自带更新";
-      if (primary?.remoteId) {
+      if (tuiInstallation) {
+        const remoteParts = [];
+        const tuiRemote = goodRemote(tuiInstallation);
+        if (tuiRemote) remoteParts.push(`CLI ${tuiRemote.version}`);
+        else if (tuiInstallation.status !== "not_found") remoteParts.push(loading ? "查询中…" : "查询失败");
+        for (const installation of client.installations) {
+          if (installation.kind !== "desktop") continue;
+          const remote = goodRemote(installation);
+          if (remote) remoteParts.push(`Desktop ${remote.version}`);
+        }
+        remoteText = remoteParts.length ? remoteParts.join(" · ") : "自带更新";
+      } else if (primary?.remoteId) {
+        const perFormRemotes = client.id === "codex" || client.id === "kimi";
         const remoteParts = [];
         if (primaryRemote) remoteParts.push(perFormRemotes ? `${formTag(primary)} ${primaryRemote.version}` : primaryRemote.version);
         else remoteParts.push(loading ? "查询中…" : "查询失败");
@@ -3282,11 +3312,13 @@ async function api(method, path, body) {
         }
         remoteText = remoteParts.join(" · ");
       }
-      line.appendChild(element("span", "about-version", `官方最新 ${remoteText}`));
+      // dsh 行前缀不带「官方」：CLI 段是社区插件，它的版本源不是官方发布渠道。
+      line.appendChild(element("span", "about-version", `${tuiInstallation ? "最新" : "官方最新"} ${remoteText}`));
       // 结论与动作位都看主更新形态：一次点按由服务端按端点串行跑全腿（CLI 腿 +
-      // 桌面腿），前端不拼逐形态消息。
-      const comparison = primaryRemote && validLocal(primary) ? primaryRemote.comparison : "unknown";
-      const compared = { update_available: "有新版本", current: "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
+      // 桌面腿），前端不拼逐形态消息。dsh 的结论跟着终端插件比对，harness 的
+      // 比对只留详情区。
+      const comparison = primaryRemote && validLocal(displayPrimary) ? primaryRemote.comparison : "unknown";
+      const compared = { update_available: "有新版本", current: tuiInstallation ? "与最新版本一致" : "与官方最新版本一致", ahead: "本地版本较新" }[comparison];
       // 结果列只说比对结论：没有结论时不重复「本地」列已经显示过的状态词
       const resultText = compared || (primaryRemote ? "无法比较版本" : "");
       if (resultText) {
@@ -3294,11 +3326,14 @@ async function api(method, path, body) {
         result.dataset.tone = comparison === "update_available" ? "warn" : comparison === "current" ? "ok" : "";
         line.appendChild(result);
       }
-      if (loading && remoteOf(primary)) line.appendChild(element("span", "about-meta", "查询中…"));
+      if (loading && remoteOf(displayPrimary)) line.appendChild(element("span", "about-meta", "查询中…"));
       // 动作位端点级一颗：本端点任务在跑 > 可更新/可安装；锁按客户端分，别人在跑不影响本行。
+      // 可更新按任一安装项判定——dsh 只有终端插件过期时按钮也要出现。
       if (primary && updatableClients.has(client.id)) {
         let intent = null;
-        const act = installationAction(client, primary);
+        const act = client.installations
+          .map((installation) => installationAction(client, installation))
+          .find((action) => action?.kind === "update") ?? installationAction(client, primary);
         const ownRun = lifecycleRuns.get(client.id);
         if (act) {
           intent = ownRun
@@ -3314,17 +3349,18 @@ async function api(method, path, body) {
         }
       }
       lines.appendChild(line);
-      // 详情区逐形态补行：路径、版本来源、官方来源、查询时间，一条安装记录一组。
+      // 详情区逐安装项补行：路径、版本来源、来源、查询时间，一条安装记录一组。
+      // 终端插件的来源行说「上游来源」而不是「官方来源」——它是社区包，链接指 npm 包页。
       for (const installation of client.installations) {
-        const kind = installation.kind === "desktop" ? "桌面" : "CLI";
+        const kind = installation.kind === "desktop" ? "桌面" : installation.kind === "tui" ? "终端插件" : "CLI";
         detail(`${kind} 路径`, installation.path || "未找到");
         detail(`${kind} 版本来源`, sourceText(installation.versionSource));
         const href = safeLink(remoteOf(installation)?.url, installation.remoteId);
         if (href) {
           const target = element("dd", "");
-          const link = element("a", "about-link", "查看官方版本");
+          const link = element("a", "about-link", installation.kind === "tui" ? "查看上游版本" : "查看官方版本");
           link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer";
-          target.appendChild(link); list.append(element("dt", "", `${kind} 官方来源`), target);
+          target.appendChild(link); list.append(element("dt", "", installation.kind === "tui" ? `${kind} 上游来源` : `${kind} 官方来源`), target);
         }
         const remote = remoteOf(installation);
         if (remote?.checkedAt) detail(`${kind} 查询时间`, timeText(remote.checkedAt));
