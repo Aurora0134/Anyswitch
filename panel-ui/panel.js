@@ -7206,6 +7206,10 @@ async function api(method, path, body) {
   // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
   // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
   function renderTerminalPreviewSession({ revive = true } = {}) {
+    // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
+    // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
+    // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境。
+    if (typeof renderTerminalRail === "function") renderTerminalRail();
     // 降级闸：判定键是就绪位本身，不是会话数——零会话是就绪下的合法空态（走下方
     // 零会话分支），不能当降级处理；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
@@ -7231,9 +7235,6 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
-    // 左栏终端会话栏同拍：切页签 / 新建 / 关闭 / 归属恢复都经本函数，栏体不必另设
-    // 触发点。typeof 闸护单测桩环境（桩里不装栏体）。
-    if (typeof renderTerminalRail === "function") renderTerminalRail();
     connectTerminalStream(session, { revive });
     if (currentView === "terminal") scheduleTerminalFit();
   }

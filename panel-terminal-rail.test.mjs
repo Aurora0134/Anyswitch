@@ -373,6 +373,8 @@ describe("终端视图左栏换血（M4）", () => {
       const render = extractFn("renderTerminalPreviewSession");
       assert.ok(render.includes("if (typeof renderTerminalRail === \"function\") renderTerminalRail();"),
         "会话渲染即同步栏体（切页签/新建/关闭/归属恢复都经这里）");
+      assert.ok(render.indexOf("renderTerminalRail();") < render.indexOf("if (terminalBackendReady === false)"),
+        "栏体渲染在就绪三态闸之前：降级/零会话时左栏照常可用（新建自带就绪闸）");
       const poll = panelJs.match(/async function pollTerminalSessions\([\s\S]*?\n  \}/)?.[0];
       assert.ok(poll.includes("if (typeof renderTerminalRail === \"function\") renderTerminalRail();"),
         "1s 归属轮询同拍同步（归属变化要立刻反映到身份行与打开的终端）");
