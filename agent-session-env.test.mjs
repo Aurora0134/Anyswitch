@@ -9,6 +9,7 @@ import {
   AGENT_RELAY_PORT,
   buildAgentSessionEnv,
   buildAgentSessionLaunch,
+  buildAgentResumeArgs,
 } from "./agent-session-env.mjs";
 
 const TOKEN = "relay-session-token-abc123";
@@ -437,6 +438,303 @@ test("未知 agentId 与缺失/不存在的工作目录都报错，不静默回�
       return true;
     });
     assert.throws(() => buildAgentSessionLaunch({ agentId: "kimi", cwd: undefined, token: TOKEN, base }), { code: "invalid_cwd" });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 续接历史会话：服务端只收会话身份（endpoint/id/file），命令按 session-scan
+// 的 RESUME_COMMAND 模板重建——客户端给什么命令原文都不接。
+const RESUME_SESSION_ID = "3f2b8c1e-9a44-4d0b-8f6e-1c2d3e4f5a6b";
+const RESUME_FILE = "C:\\Users\\someone\\.pi\\sessions\\3f2b8c1e.jsonl";
+
+// 每个端点的续接参数（模板去掉命令名之后的部分）。
+const RESUME_ARGS_BY_ENDPOINT = {
+  claude: ["--resume", RESUME_SESSION_ID],
+  kimi: ["--session", RESUME_SESSION_ID],
+  pi: ["--session", RESUME_FILE],
+  opencode: ["--session", RESUME_SESSION_ID],
+  codex: ["resume", RESUME_SESSION_ID],
+  grok: ["--resume", RESUME_SESSION_ID],
+};
+
+test("续接：六个端点按模板重建参数，exe/env/label 与普通启动同源", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    for (const [endpoint, expected] of Object.entries(RESUME_ARGS_BY_ENDPOINT)) {
+      // 实例标签按会话现造随机值，比对 env 时固定住它，只验「续接不改 env」。
+      const plain = buildAgentSessionLaunch({ agentId: endpoint, cwd: root, token: TOKEN, base, instanceId: "pinned" });
+      const resumed = buildAgentSessionLaunch({
+        agentId: endpoint,
+        cwd: root,
+        token: TOKEN,
+        base,
+        instanceId: "pinned",
+        resume: { endpoint, id: RESUME_SESSION_ID, file: RESUME_FILE },
+      });
+      assert.deepEqual(
+        resumed.launch.args.slice(0, 7),
+        plain.launch.args.slice(0, 7),
+        `${endpoint} 的码页前置与执行体不变（归属链与 UTF-8 伪控制台硬前提）`,
+      );
+      assert.deepEqual(resumed.launch.args.slice(7), expected, `${endpoint} 的续接参数来自 RESUME_COMMAND 模板`);
+      assert.equal(resumed.launch.file, plain.launch.file, `${endpoint} 仍经 cmd 包装`);
+      assert.deepEqual(resumed.env, plain.env, `${endpoint} 的凭证注入与普通启动逐位一致`);
+      assert.equal(resumed.label, plain.label, `${endpoint} 的页签名仍是 agent 显示名`);
+      assert.equal(resumed.cwd, plain.cwd);
+      assert.equal(resumed.agentId, endpoint);
+      // 续接身份（会话 id / 存档路径）不是凭证，但也绝不夹带令牌。
+      assert.ok(!JSON.stringify(resumed.launch.args).includes(TOKEN), `${endpoint} 命令行不含 relay 令牌`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：只有模板表内的端点支持，dsh/zcode/qoder 报 resume-unsupported", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    for (const endpoint of ["dsh", "zcode", "qoder"]) {
+      assert.throws(
+        () => buildAgentSessionLaunch({
+          agentId: endpoint,
+          cwd: root,
+          token: TOKEN,
+          base,
+          resume: { endpoint, id: RESUME_SESSION_ID },
+        }),
+        (error) => {
+          assert.equal(error.code, "resume-unsupported", `${endpoint} 不在续接白名单`);
+          assert.match(error.message, /[\u4e00-\u9fff]/, `${endpoint} 报产品文案而不是机器码`);
+          return true;
+        },
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：非法 endpoint 与身份字段一律拒绝，不猜不回落", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const build = (resume) => () => buildAgentSessionLaunch({ agentId: "kimi", cwd: root, token: TOKEN, base, resume });
+
+    // endpoint 缺失/空串/非字符串 → resume-invalid（身份不全）；非表内键 →
+    // resume-unsupported（端点不支持续接）。
+    for (const resume of [{ id: RESUME_SESSION_ID }, { endpoint: "", id: RESUME_SESSION_ID },
+      { endpoint: "  ", id: RESUME_SESSION_ID }, { endpoint: 42, id: RESUME_SESSION_ID }]) {
+      assert.throws(build(resume), { code: "resume-invalid" }, `endpoint=${JSON.stringify(resume.endpoint)} 判身份不全`);
+    }
+    assert.throws(build({ endpoint: "no-such-agent", id: RESUME_SESSION_ID }), { code: "resume-unsupported" });
+    // 原型链上的键不能当模板用。
+    assert.throws(build({ endpoint: "constructor", id: RESUME_SESSION_ID }), { code: "resume-unsupported" });
+
+    // 载荷形态/身份字段不合法 → resume-invalid。
+    assert.throws(build("kimi"), { code: "resume-invalid" }, "resume 不是对象");
+    assert.throws(build([]), { code: "resume-invalid" });
+    assert.throws(build({ endpoint: "kimi" }), { code: "resume-invalid" }, "缺 id");
+    assert.throws(build({ endpoint: "kimi", id: "   " }), { code: "resume-invalid" }, "id 全空白");
+    assert.throws(build({ endpoint: "kimi", id: 123 }), { code: "resume-invalid" }, "id 非字符串");
+    assert.throws(build({ endpoint: "pi", id: RESUME_SESSION_ID }), { code: "resume-invalid" }, "pi 缺存档路径");
+    // 续接身份与要启动的 agent 不一致：不能拿 A 的模板拼 B 的命令。
+    assert.throws(build({ endpoint: "claude", id: RESUME_SESSION_ID }), { code: "resume-invalid" });
+
+    // cmd 元字符进不了命令行（这些身份值会被 cmd 当命令分隔符/重定向解释）。
+    for (const id of ["a&calc", "a|b", "a>b", "a^b", 'a"b', "a%PATH%b", "a b", "a\r\nb"]) {
+      assert.throws(build({ endpoint: "kimi", id }), { code: "resume-invalid" }, `id ${JSON.stringify(id)} 被拒`);
+    }
+    for (const file of ['C:\\a"b.jsonl', "C:\\a&b.jsonl", "C:\\a%b.jsonl", "C:\\a|b.jsonl"]) {
+      assert.throws(
+        build({ endpoint: "pi", id: RESUME_SESSION_ID, file }),
+        { code: "resume-invalid" },
+        `pi 存档路径 ${JSON.stringify(file)} 被拒`,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：存档路径必须是绝对路径，相对路径判 resume-invalid", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);    const build = (file) => () => buildAgentSessionLaunch({
+      agentId: "pi", cwd: root, token: TOKEN, base,
+      resume: { endpoint: "pi", id: RESUME_SESSION_ID, file },
+    });
+    // 续接命令在终端的工作目录里执行：相对路径会指向另一个文件（或干脆不存在），
+    // 续接就成了「另起一条对话」。只认绝对路径，解析交给 agent 自己。
+    for (const file of ["sessions\\abc.jsonl", "./x", "../x.jsonl", "x.jsonl", "C:abc.jsonl"]) {
+      assert.throws(build(file), { code: "resume-invalid" }, `相对路径 ${JSON.stringify(file)} 被拒`);
+    }
+    // 绝对路径（含盘符、UNC）照常通过。
+    for (const file of [RESUME_FILE, "\\\\server\\share\\s.jsonl", "/posix/abs.jsonl"]) {
+      assert.deepEqual(
+        buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file }).args,
+        ["--session", file],
+        `绝对路径 ${JSON.stringify(file)} 通过`,
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：身份值有长度上限，与 terminal-host 的 argv 上限同口径", () => {
+  // terminal-host 对单个 launch 参数的上限是 MAX_LAUNCH_ARG_BYTES（4096，
+  // 按 .length 计）。超限值若放过去，会在宿主那一层被拦成裸 invalid_launch，
+  // 用户看到的是「启动失败」而不是「会话信息不完整」——契约在这里就得挡住。
+  const LIMIT = 4096;
+  const atLimit = "a".repeat(LIMIT);
+  const overLimit = "a".repeat(LIMIT + 1);
+
+  assert.deepEqual(
+    buildAgentResumeArgs({ endpoint: "kimi", id: atLimit }).args,
+    ["--session", atLimit],
+    "上限整好 4096 字符的 id 通过",
+  );
+  assert.throws(
+    () => buildAgentResumeArgs({ endpoint: "kimi", id: overLimit }),
+    { code: "resume-invalid" },
+    "超一个字符的 id 判 resume-invalid",
+  );
+
+  // pi 的存档路径同样有上限（它整体是一个 argv）。
+  const fileAtLimit = `C:\\${"a".repeat(LIMIT - 3)}`;
+  assert.equal(fileAtLimit.length, LIMIT);
+  assert.deepEqual(
+    buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file: fileAtLimit }).args,
+    ["--session", fileAtLimit],
+    "上限整好 4096 字符的存档路径通过",
+  );
+  assert.throws(
+    () => buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file: `${fileAtLimit}a` }),
+    { code: "resume-invalid" },
+    "超一个字符的存档路径判 resume-invalid",
+  );
+
+  // 超限的 id 即使载荷其余部分合法也挡住，不会漏到 launch 组装。
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    assert.throws(
+      () => buildAgentSessionLaunch({
+        agentId: "kimi", cwd: root, token: TOKEN, base: fakeBase(root),
+        resume: { endpoint: "kimi", id: overLimit },
+      }),
+      { code: "resume-invalid" },
+      "启动组装同样拦住超限身份",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：带空格的存档路径整体作为一个参数交给 node-pty，不被拆成两段", () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    const file = "C:\\Users\\John Doe\\.pi\\sessions\\3f2b8c1e.jsonl";
+    const launch = buildAgentSessionLaunch({
+      agentId: "pi",
+      cwd: root,
+      token: TOKEN,
+      base,
+      resume: { endpoint: "pi", id: RESUME_SESSION_ID, file },
+    });
+    assert.deepEqual(launch.launch.args.slice(7), ["--session", file], "含空格的路径保持单参数（node-pty 会加引号）");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("续接：纯函数可桩测，返回模板端点与重建出的参数", () => {
+  for (const [endpoint, expected] of Object.entries(RESUME_ARGS_BY_ENDPOINT)) {
+    assert.deepEqual(
+      buildAgentResumeArgs({ endpoint, id: RESUME_SESSION_ID, file: RESUME_FILE }),
+      { endpoint, args: expected },
+      `${endpoint} 的组装是纯函数，不起进程、不读盘`,
+    );
+  }
+});
+
+test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结字面量）", () => {
+  // 冻结快照：改造前每个端点的 argv 尾部、页签名与注入的 env 键集都写死在这里。
+  // 无 resume 的调用必须原样产出这些值——多一个 token、少一个键都算回归。
+  const FROZEN = {
+    claude: { label: "Claude Code", tail: [], envKeys: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "NO_PROXY", "no_proxy"] },
+    codex: { label: "Codex", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "NO_PROXY", "no_proxy"] },
+    kimi: { label: "Kimi Code", tail: [], envKeys: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "KIMI_CODE_CUSTOM_HEADERS", "NO_PROXY", "no_proxy"] },
+    pi: { label: "Pi", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
+    dsh: { label: "DeepSeek Harness", tail: ["--profile", "dsh-tui"], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
+    opencode: { label: "OpenCode", tail: [], envKeys: ["ANYSWITCH_AGENT_INSTANCE", "ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
+    grok: { label: "Grok Build", tail: [], envKeys: ["ANYSWITCH_INSTANCE_ID", "GROK_CODE_XAI_API_KEY", "NO_PROXY", "XAI_API_KEY", "no_proxy"] },
+    qoder: { label: "Qoder", tail: [], envKeys: ["ANYSWITCH_RELAY_TOKEN", "NO_PROXY", "no_proxy"] },
+    zcode: { label: "ZCode", tail: [], envKeys: [] },
+  };
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    assert.deepEqual(Object.keys(FROZEN), Object.keys(AGENT_TERMINAL_TARGETS), "冻结表覆盖全部端点");
+    for (const [agentId, frozen] of Object.entries(FROZEN)) {
+      const launch = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, instanceId: "pinned" });
+      // 执行体按端点各自的解析结果落位：zcode 是 node.exe + launcher 路径。
+      const executable = agentId === "zcode" ? process.execPath : launch.launch.args[6];
+      const expected = ["/d", "/c", "chcp", "65001", ">nul", "&", executable, ...frozen.tail];
+      if (agentId === "zcode") expected.push(launch.launch.args[7]);
+      assert.deepEqual(launch.launch.args, expected, `${agentId} 的 argv 与改造前逐位一致`);
+      assert.equal(launch.label, frozen.label, `${agentId} 的页签名不变`);
+      assert.equal(launch.shell, "cmd");
+      assert.equal(launch.cwd, root);
+      assert.equal(launch.agentId, agentId);
+      assert.deepEqual(Object.keys(launch.env).sort(), frozen.envKeys, `${agentId} 注入的 env 键集不变`);
+
+      // resume=undefined / null 与「字段缺席」等价。
+      for (const resume of [undefined, null]) {
+        const same = buildAgentSessionLaunch({ agentId, cwd: root, token: TOKEN, base, instanceId: "pinned", resume });
+        assert.deepEqual(same.launch.args, launch.launch.args, `${agentId} 在 resume=${resume} 时参数不变`);
+        assert.deepEqual(same.env, launch.env, `${agentId} 在 resume=${resume} 时 env 不变`);
+        assert.equal(same.label, launch.label);
+        assert.equal(same.cwd, launch.cwd);
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// 错误归类：身份「有问题」与「这家 CLI 不支持」是两件事，机器码要能区分，
+// 前端才能给出不同的下一步（重开会话 vs 换一个 agent）。
+test("续接错误归类：载荷/身份问题 resume-invalid，端点不支持续接 resume-unsupported", () => {
+  assert.throws(() => buildAgentResumeArgs({ endpoint: "dsh", id: RESUME_SESSION_ID }), (error) => {
+    assert.equal(error.code, "resume-unsupported", "dsh 不在模板表：端点不支持续接");
+    return true;
+  });
+  assert.throws(() => buildAgentResumeArgs({ endpoint: "no-such-agent", id: RESUME_SESSION_ID }), { code: "resume-unsupported" });
+  // endpoint 字段本身残缺（不是「合法端点但不支持」）：归到载荷问题。
+  for (const resume of [{ id: RESUME_SESSION_ID }, { endpoint: "", id: RESUME_SESSION_ID }, { endpoint: null, id: RESUME_SESSION_ID }]) {
+    assert.throws(() => buildAgentResumeArgs(resume), { code: "resume-invalid" }, `endpoint=${JSON.stringify(resume.endpoint)} 是载荷问题`);
+  }
+
+  // agentId 与 resume.endpoint 不一致：两个端点各自都合法，错的是这条请求
+  // 把 A 的对话配给了 B 的执行体——归载荷问题，文案点明「不属于这个 Agent」。
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
+  try {
+    const base = fakeBase(root);
+    assert.throws(
+      () => buildAgentSessionLaunch({
+        agentId: "kimi", cwd: root, token: TOKEN, base,
+        resume: { endpoint: "claude", id: RESUME_SESSION_ID },
+      }),
+      (error) => {
+        assert.equal(error.code, "resume-invalid");
+        assert.match(error.message, /不属于这个 Agent/, "文案说清是配对错误，不是「不支持续接」");
+        return true;
+      },
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
