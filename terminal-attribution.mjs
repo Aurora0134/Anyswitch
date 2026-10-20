@@ -6,6 +6,12 @@
 // Ownership is process-and-instance only (virtual-terminal-preview-notes.md
 // 「会话归属模型」): nothing here parses terminal output text.
 
+// Endpoints whose instance rows are session-granular (see sessionRowInstanceIdFor).
+const SESSION_ROW_AGENT_IDS = Object.freeze(["codex", "opencode"]);
+// Of those, the endpoints whose session row beats a pid-shaped row when both
+// exist (see the priority note in attributeTerminalSessions).
+const SESSION_ROW_FIRST_AGENT_IDS = new Set(["opencode"]);
+
 // Windows-path key for cwd matching: lowercase, one separator, no trailing
 // slash. A terminal session's cwd and a codex rollout's project cwd name the
 // same directory with different separator/case spellings.
@@ -14,27 +20,29 @@ function cwdKey(value) {
   return normalized === "" ? null : normalized;
 }
 
-// Codex bridge: codex's instance rows are session-granular codex-sess-<id>
-// (GUI sessions deliberately share one engine process, so "<agentId>-<pid>"
-// rows cannot exist for it — the join's canonical shape never binds codex).
-// The relay's codexSessions feed (row-id-shaped ids with cwd/lastActive/
-// originator, from the on-disk session scan) bridges the gap: a codex
-// terminal session binds the most-recently-active codex session whose cwd
-// matches the session's. Desktop-originated sessions are excluded (their
-// originator carries "desktop") so a GUI session in the same directory cannot
-// steal the binding. The residual ambiguity is two concurrent CLI sessions in
-// one cwd — both bind the latest-active one, the other waits until it becomes
-// the most recent; the endpoint-level card aggregates both regardless.
-// Only rows that exist in the agents payload bind, mirroring the pid path.
-function codexSessionInstanceIdFor(cwd, codexSessions, instanceRow) {
+// Session-row bridge: codex and opencode mint session-granular instance rows
+// (<agent>-sess-<session id>) because the process behind their traffic is
+// shared across sessions — codex's GUI engine, opencode's resident
+// `serve --service` — so the join's canonical "<agentId>-<pid>" shape can never
+// bind them. The relay's per-endpoint session feeds (row-id-shaped ids with
+// cwd/lastActive/originator, from the on-disk session scan) bridge the gap: a
+// terminal session binds the most-recently-active session of that endpoint
+// whose cwd matches the session's. Desktop-originated sessions are excluded
+// (their originator carries "desktop") so a GUI session in the same directory
+// cannot steal the binding. The residual ambiguity is two concurrent CLI
+// sessions in one cwd — both bind the latest-active one, the other waits until
+// it becomes the most recent; the endpoint-level card aggregates both
+// regardless. Only rows that exist in the agents payload bind, mirroring the
+// pid path.
+function sessionRowInstanceIdFor(cwd, feed, instanceRow) {
   const key = cwdKey(cwd);
   if (key === null) return null;
   let best = null;
-  for (const meta of codexSessions) {
+  for (const meta of feed) {
     if (!meta || typeof meta.id !== "string") continue;
     if (cwdKey(meta.cwd) !== key) continue;
     if (String(meta.originator ?? "").toLowerCase().includes("desktop")) continue;
-    if (!instanceRow.has(`codex:${meta.id}`)) continue;
+    if (!instanceRow.has(`${meta.agentId}:${meta.id}`)) continue;
     const lastActive = typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : 0;
     if (best === null || lastActive > best.lastActive || (lastActive === best.lastActive && meta.id < best.id)) {
       best = { id: meta.id, lastActive };
@@ -49,19 +57,19 @@ function codexSessionInstanceIdFor(cwd, codexSessions, instanceRow) {
 //   agents:   [{ id, name, instances?: [{ id, ... }], sessions?: [{ id, ... }] }]
 //             (display names + the pid-tailed rows that decide instanceId
 //             binding; Claude publishes both `instances` and legacy `sessions`)
-//   codexSessions: [{ id, cwd, lastActive, originator }] | null (relay feed;
-//             the codex bridge above; absent/empty on old relays)
+//   sessionFeeds: { codex?: [...], opencode?: [...] } | null (relay feed;
+//             the session-row bridges above; absent/empty on old relays)
 // Returns a NEW array; each attributed session gains
 //   agent: { endpointId, name, pid, instanceId | null }
 // instanceId binds only when a matching row exists in the agents payload's
 // instances or sessions: the pid-shaped "<agentId>-<pid>" row for every
-// endpoint but codex, and — for codex only, after the pid shape misses — the
-// bridged codex-sess-<id> row (see codexSessionInstanceIdFor). Codex ships no
-// placeholder rows, so a freshly detected codex client attributes with
-// instanceId null until its first request materializes one. Sessions whose
-// shell pid matches no ancestor chain, and all sessions when `detected` is
-// null/empty, pass through unannotated.
-export function attributeTerminalSessions(sessions, detected, agents, codexSessions = null) {
+// endpoint but the session-row ones, and — for codex and opencode only, after
+// the pid shape misses — the bridged <agent>-sess-<id> row (see
+// sessionRowInstanceIdFor). Neither ships placeholder rows, so a freshly
+// detected client attributes with instanceId null until its first request
+// materializes one. Sessions whose shell pid matches no ancestor chain, and all
+// sessions when `detected` is null/empty, pass through unannotated.
+export function attributeTerminalSessions(sessions, detected, agents, sessionFeeds = null) {
   if (!Array.isArray(sessions)) return [];
   if (!Array.isArray(detected) || detected.length === 0) return sessions.slice();
   // shell pid -> candidate clients, tagged with their hop distance from the
@@ -94,7 +102,11 @@ export function attributeTerminalSessions(sessions, detected, agents, codexSessi
       }
     }
   }
-  const codexFeed = Array.isArray(codexSessions) ? codexSessions : [];
+  const feeds = {};
+  for (const agentId of SESSION_ROW_AGENT_IDS) {
+    const feed = Array.isArray(sessionFeeds?.[agentId]) ? sessionFeeds[agentId] : [];
+    feeds[agentId] = feed.map((meta) => (meta && typeof meta === "object" ? { ...meta, agentId } : meta));
+  }
   return sessions.map((session) => {
     if (!session || !Number.isFinite(session.pid)) return session;
     const candidates = byAncestor.get(session.pid);
@@ -102,10 +114,20 @@ export function attributeTerminalSessions(sessions, detected, agents, codexSessi
     candidates.sort((a, b) => a.distance - b.distance);
     const best = candidates[0];
     const canonicalId = `${best.agentId}-${best.pid}`;
-    let instanceId = instanceRow.has(`${best.agentId}:${canonicalId}`) ? canonicalId : null;
-    if (instanceId === null && best.agentId === "codex" && codexFeed.length > 0) {
-      instanceId = codexSessionInstanceIdFor(session.cwd, codexFeed, instanceRow);
-    }
+    const pidRowId = instanceRow.has(`${best.agentId}:${canonicalId}`) ? canonicalId : null;
+    const feed = feeds[best.agentId];
+    const bridgedId = feed !== undefined && feed.length > 0
+      ? sessionRowInstanceIdFor(session.cwd, feed, instanceRow)
+      : null;
+    // Which shape wins when both exist depends on what a pid row means there.
+    // codex: a codex-<pid> row only ever comes from launcher-tagged traffic, so
+    // it names the session that actually ran in that process — keep it first.
+    // opencode: its pid row is the resident service's placeholder (the process
+    // that started opencode, which never carries the conversation's requests),
+    // so the bridged session row is strictly the more accurate answer.
+    const instanceId = SESSION_ROW_FIRST_AGENT_IDS.has(best.agentId)
+      ? (bridgedId ?? pidRowId)
+      : (pidRowId ?? bridgedId);
     return {
       ...session,
       agent: {

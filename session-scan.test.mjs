@@ -1266,6 +1266,83 @@ function makeSessionDb(dir, fileName = "db.sqlite", turnParts = FIXTURE_TURN) {
   return dbPath;
 }
 
+// opencode 2.x store: sessions in session_v2, messages in session_message. The
+// 1.x tables are created too (the upgrade leaves them in place) so a test can
+// seed rows only the old table carries.
+function makeOpencodeV2Db(dir, fileName = "opencode.db") {
+  const dbPath = join(dir, fileName);
+  const db = new DatabaseSync(dbPath);
+  db.exec(`
+    CREATE TABLE session (
+      id text primary key, directory text, title text,
+      time_created integer not null, time_updated integer not null
+    );
+    CREATE TABLE message (
+      id text primary key, session_id text not null,
+      time_created integer not null, time_updated integer not null, data text not null
+    );
+    CREATE TABLE part (
+      id text primary key, message_id text not null, session_id text not null,
+      time_created integer not null, time_updated integer not null, data text not null
+    );
+    CREATE TABLE session_v2 (
+      id text primary key, directory text not null, title text,
+      time_created integer not null, time_updated integer not null
+    );
+    CREATE TABLE session_message (
+      id text primary key, session_id text not null, type text not null,
+      seq integer not null, time_created integer not null, data text not null
+    );
+  `);
+  const insertV2 = db.prepare("INSERT INTO session_v2 VALUES (?, ?, ?, ?, ?)");
+  // Migrated row: present in BOTH stores under the same id (the real upgrade
+  // copies 1.x sessions into session_v2 rather than moving them).
+  insertV2.run("ses_both", "C:\\work\\v2proj", "升级前就有的会话", 1788000000000, 1788000005000);
+  db.prepare("INSERT INTO session VALUES (?, ?, ?, ?, ?)").run(
+    "ses_both",
+    "C:\\work\\v2proj",
+    "升级前就有的会话",
+    1788000000000,
+    1788000005000,
+  );
+  // 2.x-only session with no title of its own.
+  insertV2.run("ses_v2new", "C:\\work\\v2proj", null, 1788000010000, 1788000090000);
+  // 1.x-only session (upgrade never copied it).
+  db.prepare("INSERT INTO session VALUES (?, ?, ?, ?, ?)").run(
+    "sess_legacy_only",
+    "C:\\work\\oldproj",
+    "只在旧表里的会话",
+    1788000000000,
+    1788000001000,
+  );
+  const insertMessage = db.prepare("INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?)");
+  insertMessage.run("sm_1", "ses_v2new", "user", 1, 1788000010000,
+    JSON.stringify({ time: { created: 1788000010000 }, text: "二点零里的问题" }));
+  insertMessage.run("sm_2", "ses_v2new", "assistant", 2, 1788000011000,
+    JSON.stringify({
+      time: { created: 1788000011000 },
+      content: [
+        { type: "reasoning", text: "先看代码" },
+        { type: "text", text: "二点零里的回答" },
+        { type: "tool", name: "shell", state: { status: "completed", content: [{ type: "text", text: "文件清单" }] } },
+      ],
+    }));
+  // Engine bookkeeping rows: never part of the transcript.
+  insertMessage.run("sm_3", "ses_v2new", "synthetic", 3, 1788000012000,
+    JSON.stringify({ time: { created: 1788000012000 }, text: "<system-reminder>\nPlan mode\n</system-reminder>" }));
+  insertMessage.run("sm_4", "ses_v2new", "model-switched", 4, 1788000013000,
+    JSON.stringify({ time: { created: 1788000013000 }, model: { id: "m" } }));
+  insertMessage.run("sm_5", "ses_v2new", "assistant", 5, 1788000014000,
+    JSON.stringify({
+      time: { created: 1788000014000 },
+      content: [
+        { type: "tool", name: "shell", state: { status: "error", error: { type: "tool.execution", message: "读取失败" } } },
+      ],
+    }));
+  db.close();
+  return dbPath;
+}
+
 test("zcode: scans the session table read-only and loads messages", async () => {
   const root = makeTmp();
   mkdirSync(join(root, "cli", "db"), { recursive: true });
@@ -1318,6 +1395,61 @@ test("opencode: scans its own db and builds a verified resume command", async ()
     "文件清单",
     "读取失败",
   ]);
+});
+
+test("opencode 2.x: reads session_v2 + session_message and still lists 1.x-only rows", async () => {
+  const root = makeTmp();
+  const dbPath = makeOpencodeV2Db(root);
+  const scanner = testScanner({ opencode: [root] });
+  const { sessions } = await scanner.scanAll();
+  // 2.x sessions first (newest activity wins), the migrated row appears once,
+  // and the row only the old table carries is not lost.
+  assert.deepEqual(
+    sessions.map((s) => s.id),
+    ["ses_v2new", "ses_both", "sess_legacy_only"],
+  );
+  const v2 = sessions.find((s) => s.id === "ses_v2new");
+  assert.equal(v2.project, "C:\\work\\v2proj");
+  assert.equal(v2.createdAt, 1788000010000);
+  assert.equal(v2.lastActive, 1788000090000);
+  assert.equal(v2.resumeCommand, "opencode --session ses_v2new");
+  assert.equal(sessions.find((s) => s.id === "ses_both").title, "升级前就有的会话");
+
+  const messages = await scanner.loadMessages("opencode", v2.file);
+  // Turn shape matches the 1.x loader: the user turn, the assistant turn with
+  // its tool calls, then each finished call's output as its own tool message.
+  // Engine bookkeeping rows (synthetic envelopes, model switches) stay out.
+  assert.deepEqual(
+    messages.map((m) => [m.role, m.content]),
+    [
+      ["user", "二点零里的问题"],
+      ["assistant", "先看代码\n二点零里的回答\n[Tool: shell]"],
+      ["tool", "文件清单"],
+      ["assistant", "[Tool: shell]"],
+      ["tool", "读取失败"],
+    ],
+  );
+
+  // Deleting has to clear the new store and its message rows (cascades need
+  // foreign keys on, which is not the SQLite default).
+  const del = await scanner.deleteSessions([{ endpoint: "opencode", file: v2.file }]);
+  assert.equal(del.ok.length, 1);
+  const check = new DatabaseSync(`file:${dbPath.replace(/\\/g, "/")}?mode=ro`);
+  assert.equal(check.prepare("SELECT count(*) n FROM session_v2 WHERE id = 'ses_v2new'").get().n, 0);
+  assert.equal(check.prepare("SELECT count(*) n FROM session_message WHERE session_id = 'ses_v2new'").get().n, 0);
+  assert.equal(check.prepare("SELECT count(*) n FROM session_v2").get().n, 1, "only the target row is gone");
+  check.close();
+});
+
+test("opencode 1.x install: no session_v2 table still scans and loads", async () => {
+  const root = makeTmp();
+  makeSessionDb(root, "opencode.db");
+  const scanner = testScanner({ opencode: [root] });
+  const { sessions } = await scanner.scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].id, "sess_db1");
+  const messages = await scanner.loadMessages("opencode", sessions[0].file);
+  assert.equal(messages[1].content, "数据库里的回答\n[Tool: Bash]\n[Tool: Read]\n[Tool: Grep]");
 });
 
 test("sqlite tool blocks without a usable name fall back to [Tool: unknown]", async () => {

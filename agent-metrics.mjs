@@ -246,6 +246,9 @@ function opencodeServeAncestorPid(tailPid, agentId, clientPids, procSnapshot) {
 function resolveInstanceId(agentId, rawId, procSnapshot = null) {
   const id = sanitizeInstanceId(rawId);
   if (id === null || typeof agentId !== "string" || agentId.length === 0) return null;
+  // 会话粒度行（codex-sess- / opencode-sess-）声明不了属主 pid：id 里的数字
+  // 尾巴是会话 id 的一部分而不是进程号，归一对它们是恒等映射。
+  if (isSessionRowId(id)) return { id, label: null, clientPid: null };
   const tail = id.match(/-(\d+)$/);
   if (tail === null) return { id, label: null, clientPid: null };
   const tailPid = Number(tail[1]);
@@ -325,6 +328,21 @@ function codexSessionRowTitle(instId, sessionById) {
   return `Codex 会话 ${sessionId.slice(0, 8)}`;
 }
 
+// Same rule for opencode session rows, minus the placeholder: an opencode
+// session always carries a working directory (session_v2.directory is NOT
+// NULL), and a row that still finds nothing shows its raw id like every other
+// unmatched instance row instead of inventing a label.
+function opencodeSessionRowTitle(instId, sessionById) {
+  const sessionId = instId.slice(OPENCODE_SESSION_ID_PREFIX.length);
+  const meta = sessionById?.get(sessionId) ?? null;
+  if (typeof meta?.title === "string" && meta.title.trim() !== "") return meta.title;
+  if (typeof meta?.project === "string" && meta.project !== "") {
+    const base = meta.project.split(/[\\/]/).filter(Boolean).pop();
+    if (base) return base;
+  }
+  return instId;
+}
+
 // How long an idle instance stays listed after its last request. Only custom
 // ids rely on this TTL: an id of the strict "<agentId>-<pid>" form (socket-
 // fallback synthesized, launcher-injected and then folded by
@@ -352,6 +370,31 @@ const INSTANCE_IDLE_TTL_MS = 10 * 60 * 1000;
 // lingering the way the old process rows did.
 export const CODEX_SESSION_ID_PREFIX = "codex-sess-";
 const CODEX_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
+
+// opencode session rows (ids "opencode-sess-<opencode session id>", derived
+// from the x-opencode-session request header — see opencodeSessionInstanceId in
+// openai-server.mjs). Same no-owning-PID situation as codex: one resident
+// `serve --service` process carries every TUI's traffic, so a pid-shaped row
+// cannot name the session that sent a request. Same lifetime rule too (family
+// gone, or idle TTL), and the same 5 minutes — a closed TUI has nothing left
+// that could hold its row open.
+export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
+const OPENCODE_SESSION_IDLE_TTL_MS = CODEX_SESSION_IDLE_TTL_MS;
+
+// Session-granular row ids, keyed by the endpoint that mints them. Both declare
+// no owning PID: liveness is the endpoint's process family plus an idle TTL.
+const SESSION_ROW_PREFIXES = Object.freeze({
+  codex: CODEX_SESSION_ID_PREFIX,
+  opencode: OPENCODE_SESSION_ID_PREFIX,
+});
+const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
+  codex: CODEX_SESSION_IDLE_TTL_MS,
+  opencode: OPENCODE_SESSION_IDLE_TTL_MS,
+});
+
+function isSessionRowId(id) {
+  return id.startsWith(CODEX_SESSION_ID_PREFIX) || id.startsWith(OPENCODE_SESSION_ID_PREFIX);
+}
 
 export function getTtftColor(ttftMs) {
   if (typeof ttftMs !== "number" || isNaN(ttftMs) || ttftMs <= 0) return "gray";
@@ -2618,26 +2661,30 @@ export function createAgentMetricsCollector(options = {}) {
     return cachedProcessCounts;
   }
 
-  // Session-title lookup for codex session rows. The default walks
-  // ~/.codex/sessions/**.jsonl through session-scan's codex adapter — far too
-  // heavy for the panel's 1s poll, so the result is cached and the import is
-  // lazy (launchers and the watchdog import this module too; they never list
-  // codex session rows and must not pay session-scan's sqlite/zlib imports
-  // for nothing). Tests inject codexSessionLookup instead.
-  const codexSessionLookup = options.codexSessionLookup ?? null;
-  const CODEX_SESSION_LOOKUP_TTL_MS = 15000;
-  let codexSessionInfoCache = null; // { at, byId } | null
+  // Session-metadata lookup for session-granular rows (codex-sess- /
+  // opencode-sess-): row titles and the terminal join both read it. The default
+  // walks the endpoint's own store through session-scan's adapter — far too
+  // heavy for the panel's 1s poll, so the result is cached per endpoint and the
+  // import is lazy (launchers and the watchdog import this module too; they
+  // never list session rows and must not pay session-scan's sqlite/zlib imports
+  // for nothing). Tests inject codexSessionLookup / opencodeSessionLookup.
+  const sessionLookups = {
+    codex: options.codexSessionLookup ?? null,
+    opencode: options.opencodeSessionLookup ?? null,
+  };
+  const SESSION_LOOKUP_TTL_MS = 15000;
+  const sessionInfoCache = new Map(); // agentId -> { at, byId }
 
-  async function loadCodexSessionInfo() {
+  async function loadSessionInfo(agentId) {
     const now = nowFn();
-    if (codexSessionInfoCache !== null && now - codexSessionInfoCache.at < CODEX_SESSION_LOOKUP_TTL_MS) {
-      return codexSessionInfoCache.byId;
-    }
+    const cached = sessionInfoCache.get(agentId);
+    if (cached !== undefined && now - cached.at < SESSION_LOOKUP_TTL_MS) return cached.byId;
+    const injected = sessionLookups[agentId] ?? null;
     let sessions = [];
     try {
-      sessions = codexSessionLookup !== null
-        ? await codexSessionLookup()
-        : await (await import("./session-scan.mjs")).defaultScanner.adapters.get("codex").scan();
+      sessions = injected !== null
+        ? await injected()
+        : await (await import("./session-scan.mjs")).defaultScanner.adapters.get(agentId).scan();
     } catch {
       sessions = []; // a scan failure must never break the status read
     }
@@ -2645,22 +2692,25 @@ export function createAgentMetricsCollector(options = {}) {
     for (const meta of Array.isArray(sessions) ? sessions : []) {
       if (meta && typeof meta.id === "string") byId.set(meta.id, meta);
     }
-    codexSessionInfoCache = { at: now, byId };
+    sessionInfoCache.set(agentId, { at: now, byId });
     return byId;
   }
 
-  // Terminal-join feed for codex's session-granular instance identity. The
-  // pid-shaped join in terminal-attribution can never bind codex (its rows are
-  // codex-sess-<id>, and the GUI deliberately shares one engine process across
+  // Terminal-join feed for the session-granular instance identities. The
+  // pid-shaped join in terminal-attribution can never bind them (their rows are
+  // <agent>-sess-<id>, and the process behind the traffic is shared across
   // sessions — process granularity does not hold), so the panel bridge matches
-  // terminal sessions to codex sessions by cwd. This getter serves the same
-  // 15s cache the codex card titles use; the exposure layer (openai-server's
-  // detected-processes handler) shapes raw session ids into the row-id form
-  // with codexSessionInstanceId so the join never re-derives it. A scan
-  // failure yields an empty list — the bridge degrades to unbound sessions.
+  // terminal sessions to scanned sessions by cwd. These getters serve the same
+  // 15s cache the row titles use; the exposure layer (openai-server's
+  // detected-processes handler) shapes raw session ids into the row-id form so
+  // the join never re-derives it. A scan failure yields an empty list — the
+  // bridge degrades to unbound sessions.
   async function getCodexSessionsForTerminalJoin() {
-    const byId = await loadCodexSessionInfo();
-    return [...byId.values()];
+    return [...(await loadSessionInfo("codex")).values()];
+  }
+
+  async function getOpencodeSessionsForTerminalJoin() {
+    return [...(await loadSessionInfo("opencode")).values()];
   }
 
   // Aggregate metrics state
@@ -3701,9 +3751,9 @@ export function createAgentMetricsCollector(options = {}) {
     // (launcher-injected "<cwd>-<launcher pid>" rows that never folded): the
     // tail pid is no client of the endpoint, so it reconciles against every
     // process the scan saw, and a dead pid drops the leftover row now.
-    // codex session rows ("codex-sess-<session id>") declare no PID at all:
-    // they clear the moment the whole codex process family exits, or after
-    // CODEX_SESSION_IDLE_TTL_MS without traffic — whichever comes first.
+    // Session-granular rows (codex-sess- / opencode-sess-) declare no PID at
+    // all: they clear the moment the whole endpoint's process family exits, or
+    // after their idle TTL without traffic — whichever comes first.
     // DSH 的桌面稳定行（DSH_DESKTOP_INSTANCE_ID）与 kimi 的桌面稳定行
     // （KIMI_DESKTOP_INSTANCE_ID）也是无属主 pid 一档，但生死判据是「面的
     // 进程家族还在」而非空闲时长：宿主在（DSH 壳也在）行就在，家族全灭即
@@ -3734,7 +3784,8 @@ export function createAgentMetricsCollector(options = {}) {
       const pidIdRe = new RegExp(`^${bucket}-(\\d+)$`);
       for (const [instId, entry] of instMap) {
         const pidMatch = instId.match(pidIdRe);
-        const isCodexSessionRow = bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX);
+        const sessionRowPrefix = SESSION_ROW_PREFIXES[bucket] ?? null;
+        const isSessionRow = sessionRowPrefix !== null && instId.startsWith(sessionRowPrefix);
         // 冷缓存收敛：启动器注入的 "<cwd>-<launcher pid>" 在扫描缓存没赶上
         // 会话启动（或看板关闭期间缓存不刷新——请求路径只同步读缓存、从
         // 不触发扫描）时折不进规范形，落成自定义 id 行；缓存跟上后后续请
@@ -3753,7 +3804,7 @@ export function createAgentMetricsCollector(options = {}) {
         // 时，请求落在原始 "opencode-<serve pid>" 上；缓存跟上后折回交互主进程
         // 行（归一化的上折，目标行就是 pid 形占位行）。
         // 对 TUI/web 的 pid 行，归一化是恒等映射，重折叠空转。
-        if (countsTrusted && !isCodexSessionRow
+        if (countsTrusted && !isSessionRow
           && (pidMatch === null || bucket === "dsh" || bucket === "kimi" || bucket === "opencode")) {
           const refold = resolveInstanceId(bucket, instId, procCounts);
           if (refold !== null && refold.id !== instId) {
@@ -3798,7 +3849,7 @@ export function createAgentMetricsCollector(options = {}) {
             const seenPids = procCounts.seenPids;
             evict = seenPids instanceof Set && !seenPids.has(Number(pidMatch[1]));
           }
-        } else if (countsTrusted && isCodexSessionRow) {
+        } else if (countsTrusted && isSessionRow) {
           evict = count === 0;
         } else if (countsTrusted && bucket === "codex") {
           const tail = instId.match(/-(\d+)$/);
@@ -3826,9 +3877,9 @@ export function createAgentMetricsCollector(options = {}) {
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
         if (pidMatch === null && instId !== DSH_DESKTOP_INSTANCE_ID && instId !== KIMI_DESKTOP_INSTANCE_ID) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
-          const idleTtlMs = isCodexSessionRow ? CODEX_SESSION_IDLE_TTL_MS : INSTANCE_IDLE_TTL_MS;
+          const idleTtlMs = isSessionRow ? SESSION_ROW_IDLE_TTL_MS[bucket] : INSTANCE_IDLE_TTL_MS;
           // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
-          // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
+          // （启动器注入的临时 id 等）；会话行用自己的 5 分钟档。稳定
           // 桌面行的生死走上面的进程家族判据，与空闲时长无关。
           if (entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
@@ -3841,10 +3892,13 @@ export function createAgentMetricsCollector(options = {}) {
       // Mirrors the claude placeholder sessions in getActiveClaudeSessions:
       // a real request with the same "<agentId>-<pid>" id takes the entry
       // over in startRequest, and once the process dies the reconciliation
-      // above evicts it on the next read. codex is the exception: its rows
-      // are session-scoped (traffic-born), so its processes — the shared GUI
-      // engine included — never spawn placeholder rows.
-      if (bucket !== "codex") {
+      // above evicts it on the next read. codex and opencode are the
+      // exceptions: their rows are session-scoped (traffic-born), so their
+      // processes — codex's shared GUI engine, opencode's resident
+      // `serve --service` — never spawn placeholder rows. A placeholder there
+      // would sit beside the session row with a permanent 0 请求, and the
+      // terminal panel (which reads its row by id) would show the empty one.
+      if (bucket !== "codex" && bucket !== "opencode") {
         for (const pid of placeholderPids) {
           // 桌面宿主（dsh 宿主引擎 / kimi 桌面主进程）的占位行挂稳定 id：起进
           // 程即可见的那一行，就是请求将要落的那一行——换代换 pid 不换行。其
@@ -3868,14 +3922,17 @@ export function createAgentMetricsCollector(options = {}) {
       }
     }
 
-    // codex session rows get user-readable titles from the on-disk session
-    // scan (session-scan's codex adapter over ~/.codex/sessions/**.jsonl).
-    // Worth the walk only when a session row is actually listed.
-    let codexSessionById = null;
-    for (const instId of instanceBuckets.codex.keys()) {
-      if (instId.startsWith(CODEX_SESSION_ID_PREFIX)) {
-        codexSessionById = await loadCodexSessionInfo();
-        break;
+    // Session-granular rows get user-readable titles from the endpoint's own
+    // session scan (codex rollouts / opencode's db). Worth the walk only when
+    // such a row is actually listed.
+    const sessionRowTitles = { codex: null, opencode: null };
+    for (const agentId of Object.keys(sessionRowTitles)) {
+      const prefix = SESSION_ROW_PREFIXES[agentId];
+      for (const instId of instanceBuckets[agentId].keys()) {
+        if (instId.startsWith(prefix)) {
+          sessionRowTitles[agentId] = await loadSessionInfo(agentId);
+          break;
+        }
       }
     }
 
@@ -3946,8 +4003,10 @@ export function createAgentMetricsCollector(options = {}) {
             // cwd), falling back to "Codex 会话 <短id>" when nothing associates.
             title: entry.label
               ?? (bucket === "codex" && instId.startsWith(CODEX_SESSION_ID_PREFIX)
-                ? codexSessionRowTitle(instId, codexSessionById)
-                : instId),
+                ? codexSessionRowTitle(instId, sessionRowTitles.codex)
+                : bucket === "opencode" && instId.startsWith(OPENCODE_SESSION_ID_PREFIX)
+                  ? opencodeSessionRowTitle(instId, sessionRowTitles.opencode)
+                  : instId),
             // DSH and Kimi rows carry the surface they belong to, which the row
             // number cannot express: a web server, a TUI terminal and the
             // desktop app are all one endpoint id. Other buckets never set it.
@@ -4243,9 +4302,11 @@ export function createAgentMetricsCollector(options = {}) {
     // Terminal-session attribution: live agent client pids + ancestor chains
     // from the cached scan (see the function's note above).
     getDetectedClientProcesses,
-    // Codex session metas (raw ids) for the terminal join's session-granular
-    // bridge — shaped into row-id form by the exposure layer.
+    // Session metas (raw ids) for the terminal join's session-granular bridge,
+    // one getter per endpoint that mints session rows — shaped into row-id form
+    // by the exposure layer.
     getCodexSessionsForTerminalJoin,
+    getOpencodeSessionsForTerminalJoin,
     // Final flush for process-exit paths (graceful shutdown and the crash
     // handler): the 30s debounce alone would drop the last segment of
     // accounting exactly when a restart is about to need it.

@@ -1386,11 +1386,15 @@ describe("createAgentMetricsCollector", () => {
       assert.deepEqual(entries[0], { agentId: "opencode", pid: 14788, ancestors: [18868, 18580] });
     });
 
-    it("spawns one placeholder row for one live session, never a serve row", async () => {
+    it("spawns no placeholder row from the process alone; rows are session-born", async () => {
+      // opencode 2.x 的实例行按会话起（会话头决定），进程本身不产出占位行——
+      // 与 codex 同一口径：常驻 serve 进程不属于任何一个会话，给它占一行只会
+      // 在会话行旁边多出一条恒 0 请求的空行。
       const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN), nowFn: () => 10000 });
       const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
-      assert.equal(opencode.processCount, 1);
-      assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"]);
+      assert.equal(opencode.processCount, 1, "进程照常计数，卡片状态仍是 running");
+      assert.equal(opencode.status, "running");
+      assert.deepEqual(opencode.instances, [], "无流量即无会话行");
     });
 
     it("folds a socket-synthesized serve-child instance id onto the interactive row at ingest", async () => {
@@ -1437,6 +1441,84 @@ describe("createAgentMetricsCollector", () => {
       assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-14788"], "冷缓存落下的子进程号行折回交互主进程行");
       assert.equal(opencode.instances[0].requests, 1);
       assert.equal(opencode.instances[0].tokens.prompt, 30);
+    });
+
+    it("lists session rows alongside the process row, titled from the session scan", async () => {
+      // 2.x 的请求带着会话头（opencode-sess-<会话 id>），行是按会话起的；
+      // 进程行依旧在（serve 父进程活着）。标题取扫描到的会话标题，没有就用
+      // 目录名。
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN),
+        nowFn: () => t,
+        opencodeSessionLookup: async () => [
+          { id: "ses_one", project: "C:\\work\\alpha", title: "修复登录框", lastActive: 5000 },
+          { id: "ses_two", project: "C:\\work\\beta", title: null, lastActive: 5000 },
+        ],
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({
+        agentId: "opencode", providerId: "north-main", model: "glm-5.3",
+        instanceId: "opencode-sess-ses_one", path: "openai", stream: true,
+      });
+      t = 4200; r.recordFirstChunk();
+      t = 5200; r.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 4 } });
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      const byId = new Map(opencode.instances.map((i) => [i.id, i]));
+      assert.deepEqual([...byId.keys()], ["opencode-sess-ses_one"], "只有会话行，没有进程占位行");
+      assert.equal(byId.get("opencode-sess-ses_one").title, "修复登录框", "标题取会话扫描结果");
+      assert.equal(byId.get("opencode-sess-ses_one").requests, 1);
+    });
+
+    it("titles a session row by its directory basename when the session has no title", async () => {
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN),
+        nowFn: () => t,
+        opencodeSessionLookup: async () => [{ id: "ses_two", project: "C:\\work\\beta", title: null, lastActive: 5000 }],
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-sess-ses_two", model: "m1", stream: true, path: "openai" });
+      t = 4200; r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      const row = opencode.instances.find((i) => i.id === "opencode-sess-ses_two");
+      assert.equal(row.title, "beta");
+    });
+
+    it("keeps a session row alive while the opencode family runs, then drops it on idle TTL", async () => {
+      // 会话行声明不了属主 pid：家族在就活，家族灭即收；无进程计数时由
+      // 5 分钟空闲 TTL 兜底（与 codex 会话行同一档）。
+      let t = 3000;
+      let alive = true;
+      const execFn = (c, o, cb) => cb(null, alive ? PS_OPENCODE_SCAN : wmicOc());
+      const collector = testCollector({ execFn, nowFn: () => t, opencodeSessionLookup: async () => [] });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-sess-ses_x", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      let opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.ok(opencode.instances.some((i) => i.id === "opencode-sess-ses_x"));
+
+      // 家族全灭：下一轮读直接收行，不等 TTL。
+      alive = false;
+      t += 3000;
+      // Reads never block on a rescan: first call serves stale + kicks the round.
+      await collector.getAgentsStatus();
+      await new Promise((r) => setTimeout(r, 20));
+      opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.deepEqual(opencode.instances, [], "进程家族灭了，会话行当轮收走");
+    });
+
+    it("serves the opencode session metas through the terminal-join getter", async () => {
+      const metas = [{ id: "ses_join", project: "C:\\work\\alpha", lastActive: 2000 }];
+      let calls = 0;
+      const collector = testCollector({
+        execFn: () => {},
+        nowFn: () => 10000,
+        opencodeSessionLookup: async () => { calls += 1; return metas; },
+      });
+      assert.deepEqual(await collector.getOpencodeSessionsForTerminalJoin(), metas);
+      await collector.getOpencodeSessionsForTerminalJoin();
+      assert.equal(calls, 1, "缓存窗口内不重扫");
     });
   });
 

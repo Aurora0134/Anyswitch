@@ -313,6 +313,84 @@ describe("openai relay transport", () => {
     }
   });
 
+  // opencode 会话身份：2.x 把所有 TUI 的请求交给一个常驻 `serve --service`
+  // 代发，该服务是全局单例，从第一个拉起它的启动器继承 x-agent-instance，
+  // 之后永不更新——按头归属会把新会话的流量全记到早已退出的那次启动上。
+  // 身份优先级：x-opencode-session（会话 id）> 连接属主进程；头值不采用。
+  describe("opencode instance identity (session header, not the frozen env tag)", () => {
+    async function instanceMetaForChat(headers = {}) {
+      let startedMeta = null;
+      const fakeCollector = {
+        startRequest: (meta) => {
+          startedMeta = meta;
+          return { recordFirstChunk: () => {}, recordEnd: () => {} };
+        },
+      };
+      const server = createOpenAIRelayServer({
+        ...deps(chatSseStream(HEALTHY_CHAT_SSE)),
+        metricsCollector: fakeCollector,
+      });
+      const { port, close } = await listenLoopback(server, 0);
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/openai/poke-api/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            authorization: TOKEN,
+            "content-type": "application/json",
+            "x-agent-id": "opencode",
+            ...headers,
+          },
+          body: JSON.stringify({
+            model: "claude-opus-5",
+            stream: true,
+            messages: [{ role: "user", content: "hello" }],
+          }),
+        });
+        assert.equal(res.status, 200);
+        await res.text();
+        assert.ok(startedMeta, "metricsCollector.startRequest was called");
+        return startedMeta;
+      } finally {
+        await close();
+      }
+    }
+
+    it("derives the row id from the x-opencode-session header", async () => {
+      const meta = await instanceMetaForChat({ "x-opencode-session": "ses_ea6a8ca43ffernu8SA9nmQVzQa" });
+      assert.equal(meta.agentId, "opencode");
+      assert.equal(meta.instanceId, "opencode-sess-ses_ea6a8ca43ffernu8SA9nmQVzQa");
+    });
+
+    it("splits two concurrent sessions in one directory into two rows", async () => {
+      // 同一个常驻服务的两条 keep-alive 连接属于同一个 pid，进程粒度只能给一行；
+      // 会话头才能把它们拆开。
+      const a = await instanceMetaForChat({ "x-opencode-session": "ses_aaa" });
+      const b = await instanceMetaForChat({ "x-opencode-session": "ses_bbb" });
+      assert.equal(a.instanceId, "opencode-sess-ses_aaa");
+      assert.equal(b.instanceId, "opencode-sess-ses_bbb");
+    });
+
+    it("never adopts the inherited x-agent-instance tag over the session header", async () => {
+      const meta = await instanceMetaForChat({
+        "x-agent-instance": "anys-oc-probe-12760",
+        "x-opencode-session": "ses_real",
+      });
+      assert.equal(meta.instanceId, "opencode-sess-ses_real");
+    });
+
+    it("drops the tag when no session header rides along", async () => {
+      // 无会话头（后台/内部请求或更早的版本）：服务继承来的标签已经过期，
+      // 不能当身份用；socket 未解析时就按无身份处理。
+      const meta = await instanceMetaForChat({ "x-agent-instance": "anys-oc-probe-12760" });
+      assert.equal(meta.instanceId, null);
+    });
+
+    it("falls back to the x-opencode-session-id spelling", async () => {
+      const meta = await instanceMetaForChat({ "x-opencode-session-id": "ses_alt" });
+      assert.equal(meta.instanceId, "opencode-sess-ses_alt");
+    });
+  });
+
   it("serves unidentified requests without attributing them to any endpoint", async () => {
     // 无身份头、无 URL 前缀、UA 不可识别的请求：照常服务，但归属记 null——
     // 不落任何端点桶、不进统计页端点维度（「未知来源不显示」），兜底时打一条
