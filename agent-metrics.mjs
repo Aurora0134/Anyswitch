@@ -394,6 +394,14 @@ const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   opencode: null,
 });
 
+// How many consecutive trusted scan rounds must report the endpoint's family as
+// absent before its session rows are evicted. One round is not a verdict: the
+// process probe can be truncated under its time budget, and a family that is
+// restarting shows up as zero for exactly one round — evicting then drops rows
+// that are still in use (terminal row binding falls back to null). Two rounds
+// is still immediate in human terms (the scan window is a couple of seconds).
+const SESSION_ROW_FAMILY_MISS_ROUNDS = 2;
+
 function isSessionRowId(id) {
   return id.startsWith(CODEX_SESSION_ID_PREFIX) || id.startsWith(OPENCODE_SESSION_ID_PREFIX);
 }
@@ -2856,6 +2864,17 @@ export function createAgentMetricsCollector(options = {}) {
   // has no session reporter and the socket reverse lookup is its only identity.
   const instanceBuckets = { dsh: new Map(), kimi: new Map(), opencode: new Map(), pi: new Map(), codex: new Map(), grok: new Map(), qoder: new Map(), claude: new Map() };
 
+  // Consecutive trusted scan rounds in which a session row's endpoint family was
+  // absent, keyed "<bucket>:<instId>". A session row names a conversation, not
+  // a process, so its only liveness source is the endpoint's process family —
+  // and a single round can miss a live family (probe output truncated under its
+  // time budget, a process starting/restarting inside the round). Evicting on
+  // the first such round wipes rows that are still in use: the terminal panel's
+  // row binding drops to null and the card looks like the session never
+  // existed. Two consecutive trusted zero rounds is the verdict; any round that
+  // sees the family clears the streak.
+  const sessionRowFamilyMisses = new Map();
+
   // Cross-restart snapshot wiring (see the METRICS_SNAPSHOT_* constants). The
   // relay process wires persistRoot in, so it owns the file; the panel and
   // watchdog collectors (no persistRoot) skip every step and behave exactly
@@ -3852,7 +3871,14 @@ export function createAgentMetricsCollector(options = {}) {
             evict = seenPids instanceof Set && !seenPids.has(Number(pidMatch[1]));
           }
         } else if (countsTrusted && isSessionRow) {
-          evict = count === 0;
+          const missKey = `${bucket}:${instId}`;
+          if (count === 0) {
+            const misses = (sessionRowFamilyMisses.get(missKey) ?? 0) + 1;
+            sessionRowFamilyMisses.set(missKey, misses);
+            evict = misses >= SESSION_ROW_FAMILY_MISS_ROUNDS;
+          } else {
+            sessionRowFamilyMisses.delete(missKey);
+          }
         } else if (countsTrusted && bucket === "codex") {
           const tail = instId.match(/-(\d+)$/);
           evict = tail !== null && scanPidLiveness(Number(tail[1]), procCounts) === false;
@@ -3872,6 +3898,7 @@ export function createAgentMetricsCollector(options = {}) {
           // the instance's own counters vanish with the entry.
           settleLeakedInstanceRequests(bucket, entry.state, now);
           instMap.delete(instId);
+          sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
           continue;
         }
         // 同上：结算依据是「这个端点本轮没有进程」，不完整轮答不出这件事。
@@ -3891,6 +3918,7 @@ export function createAgentMetricsCollector(options = {}) {
           // 桌面行的生死走上面的进程家族判据，与空闲时长无关。
           if (idleTtlMs !== null && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
+            sessionRowFamilyMisses.delete(`${bucket}:${instId}`);
           }
         }
       }

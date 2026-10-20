@@ -1485,9 +1485,10 @@ describe("createAgentMetricsCollector", () => {
       assert.equal(row.title, "beta");
     });
 
-    it("keeps a session row alive while the opencode family runs, then drops it on idle TTL", async () => {
-      // 会话行声明不了属主 pid：家族在就活，家族灭即收；无进程计数时由
-      // 5 分钟空闲 TTL 兜底（与 codex 会话行同一档）。
+    it("drops a session row after two consecutive trusted rounds see no family", async () => {
+      // 会话行声明不了属主 pid，生死只能看端点的进程家族；而单轮「家族不在」
+      // 不是判决——探针可能被时间预算截断，正在重启的家族也会有一轮空白。
+      // 连续两轮都看不到才收行。
       let t = 3000;
       let alive = true;
       const execFn = (c, o, cb) => cb(null, alive ? PS_OPENCODE_SCAN : wmicOc());
@@ -1495,17 +1496,41 @@ describe("createAgentMetricsCollector", () => {
       await collector.scanProcesses();
       const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-sess-ses_x", model: "m1", stream: true, path: "openai" });
       r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
-      let opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
-      assert.ok(opencode.instances.some((i) => i.id === "opencode-sess-ses_x"));
+      const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "opencode").instances.map((i) => i.id);
+      assert.deepEqual(await read(), ["opencode-sess-ses_x"]);
 
-      // 家族全灭：下一轮读直接收行，不等 TTL。
+      // 家族全灭。第一轮读：行仍在（单轮不判死）。
       alive = false;
       t += 3000;
-      // Reads never block on a rescan: first call serves stale + kicks the round.
-      await collector.getAgentsStatus();
-      await new Promise((r) => setTimeout(r, 20));
-      opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
-      assert.deepEqual(opencode.instances, [], "进程家族灭了，会话行当轮收走");
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(await read(), ["opencode-sess-ses_x"], "单轮空白不收行");
+      // 第二轮仍是空白：判决成立，行收走。
+      assert.deepEqual(await read(), [], "连续两轮看不到家族，会话行收走");
+    });
+
+    it("keeps a session row when the family blinks out for a single round", async () => {
+      // 现场形态：TUI 重启期间进程扫描恰好落在一个空窗里，下一轮又回来了。
+      let t = 3000;
+      let alive = true;
+      const execFn = (c, o, cb) => cb(null, alive ? PS_OPENCODE_SCAN : wmicOc());
+      const collector = testCollector({ execFn, nowFn: () => t, opencodeSessionLookup: async () => [] });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-sess-ses_blink", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      const read = async () => (await collector.getAgentsStatus()).find((a) => a.id === "opencode").instances.map((i) => i.id);
+
+      alive = false;
+      t += 3000;
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(await read(), ["opencode-sess-ses_blink"], "空窗那一轮不收行");
+
+      alive = true;
+      t += 3000;
+      await collector.scanProcesses();
+      await new Promise((r) => setTimeout(r, 30));
+      assert.deepEqual(await read(), ["opencode-sess-ses_blink"], "家族回来后连续计数清零，行不受影响");
     });
 
     it("keeps an idle opencode session row while its TUI is still open", async () => {
@@ -1989,16 +2014,18 @@ describe("createAgentMetricsCollector", () => {
     let codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
     assert.equal(codex.instances.length, 1);
 
-    // GUI app and every CLI exited: the session row clears on the next read
-    // even though it is seconds old — no process is left that could belong
-    // to the session.
+    // GUI app and every CLI exited: the session row clears once two consecutive
+    // trusted rounds confirm it — a single empty round is not a verdict (the
+    // probe can be truncated, a family can be mid-restart).
     familyAlive = false;
     t += 3000;
     // Reads never block on a rescan: first call serves stale + kicks the round.
     await collector.getAgentsStatus();
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 30));
     codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
-    assert.deepEqual(codex.instances, [], "procCounts.codex === 0 clears session rows immediately");
+    assert.equal(codex.instances.length, 1, "单轮空白不收行");
+    codex = (await collector.getAgentsStatus()).find((a) => a.id === "codex");
+    assert.deepEqual(codex.instances, [], "连续两轮无家族即收行");
     assert.equal(codex.status, "stopped");
   });
 
