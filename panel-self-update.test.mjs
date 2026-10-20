@@ -580,7 +580,7 @@ describe("先行轨道（bleedingEdgeMode）", () => {
   const identityFns = {
     readLocalHeadFn: async () => ({ sha: LOCAL_SHA, short: "0123456" }),
     readRemoteRefsFn: async () => ({
-      mainSha: MAIN_SHA,
+      headSha: MAIN_SHA,
       tags: new Map([
         ["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"],
         ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
@@ -605,7 +605,7 @@ describe("先行轨道（bleedingEdgeMode）", () => {
         const result = (await get("/panel/api/updates?refresh=1")).body;
         assert.equal(result.track, "bleeding");
         assert.equal(result.identity, true);
-        assert.equal(result.state, "update_available", "本地 HEAD ≠ 远端 main：有先行更新");
+        assert.equal(result.state, "update_available", "本地 HEAD ≠ 远端最新提交：有先行更新");
         assert.equal(result.remoteSha, MAIN_SHA);
         assert.equal(result.remoteCommit, "fedcba0");
         assert.equal(result.currentCommit, "0123456");
@@ -615,7 +615,7 @@ describe("先行轨道（bleedingEdgeMode）", () => {
     }
   });
 
-  test("本地已跟上 main：state=current；远端不可达：state=error（不新增报错形态）", async () => {
+  test("本地已跟上远端最新提交：state=current；远端不可达：state=error（不新增报错形态）", async () => {
     const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
     try {
       bleedingSettings(baseDir);
@@ -623,7 +623,7 @@ describe("先行轨道（bleedingEdgeMode）", () => {
         base: { LOCALAPPDATA: baseDir },
         releaseService: selfUpdateReleaseService("current"),
         readLocalHeadFn: identityFns.readLocalHeadFn,
-        readRemoteRefsFn: async () => ({ mainSha: LOCAL_SHA, tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
+        readRemoteRefsFn: async () => ({ headSha: LOCAL_SHA, tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
       }, async (get) => {
         assert.equal((await get("/panel/api/updates?refresh=1")).body.state, "current");
       });
@@ -704,7 +704,7 @@ describe("先行轨道（bleedingEdgeMode）", () => {
   test("HEAD 恰在远端 tag 上：onStableNode=true（就地关闭）；远端不可达：ok=false", async () => {
     await withPanel({
       ...identityFns,
-      readRemoteRefsFn: async () => ({ mainSha: MAIN_SHA, tags: new Map([["v0.6.6", LOCAL_SHA], ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]]) }),
+      readRemoteRefsFn: async () => ({ headSha: MAIN_SHA, tags: new Map([["v0.6.6", LOCAL_SHA], ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]]) }),
     }, async (get) => {
       const plan = (await get("/panel/api/self-update/bleeding-plan")).body;
       assert.equal(plan.ok, true);
@@ -821,7 +821,7 @@ describe("稳定轨不一致判定（drift）", () => {
   test("版本一致但 HEAD 不在 tag 上：state=current 且 drift.offTag=true", async () => {
     const identity = {
       readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
-      readRemoteRefsFn: async () => ({ mainSha: "fedcba0987654321fedcba0987654321fedcba09", tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
+      readRemoteRefsFn: async () => ({ headSha: "fedcba0987654321fedcba0987654321fedcba09", tags: new Map([["v0.6.6", "cccccccccccccccccccccccccccccccccccccccc"]]) }),
     };
     // 与真实 release-service 同形：current 态也带 release（版本一致才有 current）。
     await withPanel({
@@ -847,7 +847,7 @@ describe("稳定轨不一致判定（drift）", () => {
       appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
       releaseService: selfUpdateReleaseService("update_available"),
       readLocalHeadFn: async () => ({ sha: "dddddddddddddddddddddddddddddddddddddddd", short: "ddddddd" }),
-      readRemoteRefsFn: async () => ({ mainSha: "x", tags: new Map() }),
+      readRemoteRefsFn: async () => ({ headSha: "x", tags: new Map() }),
     }, async (get) => {
       const body = (await get("/panel/api/updates?refresh=1")).body;
       assert.equal(body.drift, null, "update_available 不叠加不一致提示");

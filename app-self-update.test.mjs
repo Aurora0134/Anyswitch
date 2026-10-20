@@ -474,7 +474,7 @@ describe("runSelfUpdate · 先行轨（bleeding）", () => {
       const result = await runSelfUpdate({ ...deps });
       assert.equal(result.outcome, "downloaded");
       assert.match(result.message, /已下载 fedcba0，应用后生效/);
-      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "main")(call.args)), "先行轨按引用拉 main，不按 tag 也不按 SHA");
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "HEAD")(call.args)), "先行轨按引用拉远端默认分支 HEAD，不按 tag 也不按 SHA");
       assert.equal(git.calls.some((call) => args0("checkout")(call.args)), false, "下载不碰工作树");
       assert.equal(events.relayRestarts, 0);
       // 版本号下载后才得知，回填进 journal 供应用阶段与终态文案使用
@@ -523,7 +523,7 @@ describe("runSelfUpdate · 先行轨（bleeding）", () => {
       assert.equal(result.outcome, "updated");
       assert.match(result.message, /已更新到 0\.6\.7-fedcba0/);
       assert.equal(result.afterVersion, "0.6.7-fedcba0");
-      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "main")(call.args)), "应用幂等补拉的还是 main");
+      assert.ok(git.calls.some((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "HEAD")(call.args)), "应用幂等补拉的还是 HEAD");
       assert.ok(git.calls.some(npmCall), "先行轨同样要装依赖");
     } finally {
       cleanup();

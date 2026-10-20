@@ -48,7 +48,7 @@ test("readLocalHead：PATH 上没有 git 时换标准安装位，两处都没有
 });
 
 const LS_REMOTE_OUTPUT = [
-  "0123456789abcdef0123456789abcdef01234567\trefs/heads/main",
+  "0123456789abcdef0123456789abcdef01234567\tHEAD",
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.6.5",
   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\trefs/tags/v0.6.5^{}",
   "cccccccccccccccccccccccccccccccccccccccc\trefs/tags/v0.6.6",
@@ -56,18 +56,27 @@ const LS_REMOTE_OUTPUT = [
   "",
 ].join("\n");
 
-test("readRemoteRefs：一次往返解析 main 与 v-tag；附注 tag 的 peeled 行指向提交本体，优先采信", async () => {
-  const git = fakeSpawn(({ args }) => (args0("ls-remote", REPO_URL, "refs/heads/main", "refs/tags/v*")(args) ? { stdout: LS_REMOTE_OUTPUT } : { stdout: "" }));
+test("readRemoteRefs：一次往返解析默认分支 HEAD 与 v-tag；附注 tag 的 peeled 行指向提交本体，优先采信", async () => {
+  const git = fakeSpawn(({ args }) => (args0("ls-remote", REPO_URL, "HEAD", "refs/tags/v*")(args) ? { stdout: LS_REMOTE_OUTPUT } : { stdout: "" }));
   const remote = await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: git.spawnFn, env: {} });
-  assert.equal(remote.mainSha, "0123456789abcdef0123456789abcdef01234567");
+  assert.equal(remote.headSha, "0123456789abcdef0123456789abcdef01234567");
   assert.equal(remote.tags.get("v0.6.5"), "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "附注 tag 取 peeled 的提交 SHA");
   assert.equal(remote.tags.get("v0.6.6"), "cccccccccccccccccccccccccccccccccccccccc", "轻量 tag 的 plain 行本身就是提交 SHA");
   assert.equal(remote.tags.size, 2, "非 v-tag 的 ref 不进 tag 表");
 });
 
-test("readRemoteRefs：没有 refs/heads/main、命令失败、无 repoUrl 都返回 null", async () => {
-  const noMain = fakeSpawn(({ args }) => (args0("ls-remote")(args) ? { stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.6.6\n" } : { stdout: "" }));
-  assert.equal(await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: noMain.spawnFn, env: {} }), null, "远端没有 main 分支名");
+test("readRemoteRefs：远端默认分支叫 master 也能解析（回归：曾写死 main）", async () => {
+  // 只给 HEAD 与 tag，不给任何 refs/heads/*：解析结果必须与分支名无关。
+  const git = fakeSpawn(({ args }) => (args0("ls-remote")(args) ? { stdout: LS_REMOTE_OUTPUT } : { stdout: "" }));
+  const remote = await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: git.spawnFn, env: {} });
+  assert.equal(remote?.headSha, "0123456789abcdef0123456789abcdef01234567", "不依赖 refs/heads/main 存在");
+  assert.deepEqual(git.calls.at(-1).args.slice(0, 2), ["ls-remote", REPO_URL]);
+  assert.equal(git.calls.at(-1).args.includes("refs/heads/main"), false, "查询里不再出现任何写死的分支名");
+});
+
+test("readRemoteRefs：没有 HEAD、命令失败、无 repoUrl 都返回 null", async () => {
+  const noHead = fakeSpawn(({ args }) => (args0("ls-remote")(args) ? { stdout: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/tags/v0.6.6\n" } : { stdout: "" }));
+  assert.equal(await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: noHead.spawnFn, env: {} }), null, "远端空仓（无 HEAD）");
   const failing = fakeSpawn(({ args }) => (args0("ls-remote")(args) ? { error: new Error("network down") } : {}));
   assert.equal(await readRemoteRefs({ repoUrl: REPO_URL, spawnFn: failing.spawnFn, env: {} }), null);
   const unused = fakeSpawn(() => ({ error: MISSING }));

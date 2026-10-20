@@ -1,7 +1,7 @@
 // 只读的 git 身份查询：先行轨道与「本地安装 vs 官方发布」一致性判定共用。
 // 两条腿都是轻量只读——rev-parse 只碰本地仓库（镜像安装可能没有 .git，如实返回
-// null，调用方按无身份降级）；ls-remote 不需要本地仓库，一次往返同时拿 main HEAD
-// 与全部 v-tag 的提交 SHA，检查更新因此不占 GitHub API 限额、也不要求先 fetch。
+// null，调用方按无身份降级）；ls-remote 不需要本地仓库，一次往返同时拿默认分支
+// HEAD 与全部 v-tag 的提交 SHA，检查更新因此不占 GitHub API 限额、也不要求先 fetch。
 import { execFile } from "node:child_process";
 import { join } from "node:path";
 
@@ -39,27 +39,29 @@ export async function readLocalHead({ appDir, spawnFn = execFile, env = process.
   return SHA.test(sha) ? { sha, short: sha.slice(0, 7) } : null;
 }
 
-// 远端身份：main HEAD 与 v-tag → 提交 SHA 的映射。附注 tag 会有两行——tag 对象
-// 自身与 peeled 的 ^{} 行；peeled 行指向提交本体，优先采信，plain 行只在没有
+// 远端身份：默认分支 HEAD 与 v-tag → 提交 SHA 的映射。附注 tag 会有两行——tag
+// 对象自身与 peeled 的 ^{} 行；peeled 行指向提交本体，优先采信，plain 行只在没有
 // peeled 行时兜底（轻量 tag 只有 plain 行，其值本来就是提交 SHA）。
-// main 缺失（远端没有这个分支名）或 ls-remote 失败/超时都返回 null。
+// 主干按 HEAD 问，不按分支名问：默认分支叫什么由上游决定，写死任何一个名字都会
+// 在上游改名或换默认分支时静默查空。
+// HEAD 缺失（远端空仓）或 ls-remote 失败/超时都返回 null。
 export async function readRemoteRefs({ repoUrl, spawnFn = execFile, env = process.env }) {
   if (typeof repoUrl !== "string" || !repoUrl) return null;
-  const r = await runGit({ args: ["ls-remote", repoUrl, "refs/heads/main", "refs/tags/v*"], spawnFn, env });
+  const r = await runGit({ args: ["ls-remote", repoUrl, "HEAD", "refs/tags/v*"], spawnFn, env });
   if (!r.ok) return null;
-  let mainSha = null;
+  let headSha = null;
   const tags = new Map();
   for (const rawLine of r.output.split(/\r?\n/)) {
     const match = /^([0-9a-f]{40})\t(\S+)$/.exec(rawLine.trim());
     if (!match) continue;
     const [, sha, ref] = match;
-    if (ref === "refs/heads/main") {
-      mainSha = sha;
+    if (ref === "HEAD") {
+      headSha = sha;
     } else if (ref.startsWith("refs/tags/v")) {
       const name = ref.slice("refs/tags/".length);
       if (name.endsWith("^{}")) tags.set(name.slice(0, -3), sha);
       else if (!tags.has(name)) tags.set(name, sha);
     }
   }
-  return mainSha ? { mainSha, tags } : null;
+  return headSha ? { headSha, tags } : null;
 }

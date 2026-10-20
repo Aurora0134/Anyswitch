@@ -11,8 +11,8 @@
 //
 // 三条轨道共用同一副骨架，只差目标身份与核验键（journal 记 track 字段）：
 //   stable  —— 正式 release tag，核验 package.json 版本；
-//   bleeding —— 上游 main 的单个提交（targetSha），核验提交 SHA，版本号下载后
-//              才从 FETCH_HEAD 读出、回写 journal 供应用阶段与终态文案使用；
+//   bleeding —— 上游默认分支 HEAD 的单个提交（targetSha），核验提交 SHA，版本号
+//              下载后才从 FETCH_HEAD 读出、回写 journal 供应用阶段与终态文案使用；
 //   rollback —— 关闭先行版触发的逆更新，目标是「本地之下的最近稳定 tag」，执行
 //              与 stable 完全同型（fetch tag → 换装 → 核版本），只是终态文案不同。
 //
@@ -230,9 +230,10 @@ export async function runSelfUpdate({
     return null;
   };
 
-  // 先行轨按引用拉 main——按 SHA fetch 是服务端可选能力，不依赖它；main 在检查
-  // 之后又前进的窗口由下载后的 SHA 核验兜住，不一致即中止、如实报告。
-  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", ...(track === "bleeding" ? ["main"] : ["tag", targetTag])], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
+  // 先行轨按引用拉远端默认分支（origin HEAD）——按 SHA fetch 是服务端可选能力，
+  // 不依赖它；不写死分支名，检查与下载问的是同一个引用。HEAD 在检查之后又前进
+  // 的窗口由下载后的 SHA 核验兜住，不一致即中止、如实报告。
+  const fetchTarget = () => runGit({ args: ["fetch", "--depth", "1", "--no-tags", "origin", ...(track === "bleeding" ? ["HEAD"] : ["tag", targetTag])], cwd: appDir, spawnFn, env, timeoutMs: gitTimeoutMs });
 
   if (step === "download") {
     // ── 下载：只把比特拉进本地仓库，工作树与进程一个都不动 ──

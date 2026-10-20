@@ -1531,7 +1531,7 @@ export function createPanelRouter({
     const head = await getLocalHead();
     return head?.short ?? null;
   }
-  // 远端身份（main HEAD + 全部 v-tag 的 SHA）：ls-remote 一次往返。短缓存让进页
+  // 远端身份（默认分支 HEAD + 全部 v-tag 的 SHA）：ls-remote 一次往返。短缓存让进页
   // 自动检查不吃满速网络，强制检查（refresh=1 / 登记更新 / 回退计划）绕过。
   // 失败或超时如实 null——各调用方降级，不新增报错形态。
   let remoteIdentityCache = { at: 0, value: null };
@@ -1562,13 +1562,13 @@ export function createPanelRouter({
       const base = {
         track: "bleeding", identity: true,
         currentVersion: appInfo.version, currentCommit: local.short,
-        remoteCommit: remote ? remote.mainSha.slice(0, 7) : null,
+        remoteCommit: remote ? remote.headSha.slice(0, 7) : null,
         checkedAt: new Date().toISOString(),
       };
       if (!remote) return { ...base, state: "error", release: null, errorCode: null };
-      return local.sha === remote.mainSha
+      return local.sha === remote.headSha
         ? { ...base, state: "current", release: null, errorCode: null }
-        : { ...base, state: "update_available", remoteSha: remote.mainSha, release: null, errorCode: null };
+        : { ...base, state: "update_available", remoteSha: remote.headSha, release: null, errorCode: null };
     }
     const result = await getReleaseService().then((service) => service.getAppUpdate({ force }));
     const drift = await buildStableDrift(result, force);

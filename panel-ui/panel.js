@@ -3016,7 +3016,7 @@ async function api(method, path, body) {
     }
     async function startSelfUpdate() {
       if (selfUpdateRun || !selfUpdateAdopted) return;
-      // 目标标识按轨道取：先行轨是远端 main 的提交标识，稳定轨是 release 版本号。
+      // 目标标识按轨道取：先行轨是远端最新提交的标识，稳定轨是 release 版本号。
       // 确认与进度文案用同一份；服务端登记时自会以它自己的强制检查为准。
       const bleedingTrack = update?.track === "bleeding" && update.identity !== false;
       const target = bleedingTrack ? (update?.remoteCommit || "") : (update?.release?.version || "");
