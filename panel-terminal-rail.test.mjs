@@ -463,6 +463,80 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(runFlip({ before: new Map() }), [], "首次挂载直接落位（不做整列表淡入）");
     });
 
+    it("活跃终端所在组自动展开：等列表落地后才做一次，用户手动收起不被轮询顶回来", () => {
+      const build = (history, activeSession, collapsed, autoKey) => {
+        const list = { html: "", writes: 0 };
+        Object.defineProperty(list, "innerHTML", {
+          get: () => list.html,
+          set: (v) => { list.writes += 1; list.html = v; },
+        });
+        const state = { collapsed: new Set(collapsed), autoKey, scrolled: [] };
+        const fn = new Function("list", "state", "history", "activeSession", `
+          let terminalRailRendered = { open: null, history: null };
+          let terminalRailAutoExpandedFor = state.autoKey;
+          let terminalRailScrolledFor = "";
+          let terminalRailFlipMode = "instant";
+          const terminalRailCollapsedGroups = state.collapsed;
+          const terminalRailWatermarks = new Map();
+          const TERMINAL_RAIL_WATERMARK = 5;
+          const TERMINAL_RAIL_ICON_CHEVRON = "";
+          const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
+          const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
+          const terminalRailHistory = history;
+          const activeTerminalPreviewId = "t1";
+          function $(id) { return id === "railTermHistoryList" ? list : null; }
+          function terminalSessionFor(id) { return id === "t1" ? activeSession : null; }
+          function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+          function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+          function sessRelTime() { return "刚刚"; }
+          function esc(v) { return String(v); }
+          function escapeHtml(v) { return String(v || ""); }
+          function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
+          function terminalRailRowTops() { return null; }
+          function playTerminalRailFlip() {}
+          ${extractFn("terminalRailGroupSessions")}
+          ${extractFn("terminalRailWatermarkView")}
+          ${extractFn("terminalRailNextWatermark")}
+          ${extractFn("terminalRailMoreLabel")}
+          ${extractFn("terminalRailSameDir")}
+          ${extractFn("terminalRailGroupForDir")}
+          ${extractFn("terminalRailHistoryRowHtml")}
+          ${extractFn("renderTerminalRailHistory")}
+          return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
+        `)(list, state, history, activeSession);
+        return { fn, list, state };
+      };
+
+      const activeSession = { id: "t1", cwd: "C:\\dev\\alpha" };
+      const collapsed = ["C:\\dev\\alpha"];
+      // 首帧：历史还没拉回来（sessions 空），不许把「已自动展开」认下来
+      const early = build({ endpoint: "kimi", sessions: [] }, activeSession, collapsed, "");
+      early.fn.render("kimi");
+      assert.equal(early.state.collapsed.has("C:\\dev\\alpha"), true, "数据没落地时不动组态（这一刻组表本来就是空的）");
+      assert.equal(early.state.scrolled.length, 0, "也不滚");
+
+      // 落地后同一次渲染：展开活跃所在组并滚到可见
+      const landed = build(
+        { endpoint: "kimi", sessions: [
+          { id: "s1", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
+          { id: "s2", project: "C:\\dev\\beta", title: "接入渠道", lastActive: 200 },
+        ] },
+        activeSession, collapsed, "",
+      );
+      landed.fn.render("kimi");
+      assert.equal(landed.state.collapsed.has("C:\\dev\\alpha"), false, "活跃终端所在组自动展开");
+      assert.deepEqual(landed.state.scrolled, ["C:\\dev\\alpha"], "并滚到可见");
+
+      // 已展开过一次之后：用户手动收起，后续轮询渲染不许把它顶回来
+      const after = build(
+        { endpoint: "kimi", sessions: [{ id: "s1", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 }] },
+        activeSession, ["C:\\dev\\alpha"], "kimi\u0000t1",
+      );
+      after.fn.render("kimi");
+      assert.equal(after.state.collapsed.has("C:\\dev\\alpha"), true, "同一活跃终端不再自动展开（尊重用户手动收起）");
+      assert.equal(after.state.scrolled.length, 0, "也不重复滚");
+    });
+
     it("水位线与刷新把 flip 模式置回 instant；组展开才置 flip", () => {
       assert.ok(extractFn("toggleTerminalRailWatermark").includes('terminalRailFlipMode = "instant"'), "水位线点击 = resetKey");
       assert.ok(extractFn("toggleTerminalRailGroup").includes('terminalRailFlipMode = "flip"'), "组展开/收起走 FLIP");

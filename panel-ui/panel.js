@@ -8308,14 +8308,17 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
-    const sessions = agentId && terminalRailHistory.endpoint === agentId ? terminalRailHistory.sessions : [];
+    const loaded = !agentId || terminalRailHistory.endpoint === agentId;
+    const sessions = loaded ? terminalRailHistory.sessions : [];
     const groups = terminalRailGroupSessions(sessions);
-    // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次。
+    // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
+    // 等这个 agent 的列表真落地——首帧渲染时历史还没拉回来（组表为空），那时就认下
+    // 「已自动展开」会让这次展开永远不发生。
     const activeSession = terminalSessionFor(activeTerminalPreviewId);
     const activeGroup = activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "";
     const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}`;
     let scrollKey = "";
-    if (autoKey !== terminalRailAutoExpandedFor) {
+    if (loaded && autoKey !== terminalRailAutoExpandedFor) {
       terminalRailAutoExpandedFor = autoKey;
       if (activeGroup) terminalRailCollapsedGroups.delete(activeGroup);
       scrollKey = activeGroup;
