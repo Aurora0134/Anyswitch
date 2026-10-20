@@ -1261,9 +1261,16 @@ export function createPanelRouter({
     }
     let launch;
     try {
-      launch = buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions });
+      // resume 可选：带它时同一次组装多收一项会话身份（endpoint/id/file），
+      // 命令行由服务端按模板重建；不带时走原调用，行为逐位不变。
+      launch = body?.resume === undefined || body?.resume === null
+        ? buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions })
+        : buildAgentSessionLaunch({ agentId, cwd: body?.cwd, port: AGENT_RELAY_PORT, token, base, claudeBypassPermissions, resume: body.resume });
     } catch (error) {
-      return sendJson(res, 400, { ok: false, error: error.message });
+      // 续接相关的失败回机器可判的 code（前端据此提示「这个 Agent 不支持续接」
+      // 还是「会话信息不全」），其余组装错误维持原有响应形状。
+      const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
+      return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }
     let created = null;
     try {

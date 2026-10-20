@@ -58,7 +58,7 @@ const SUMMARY_MAX_CHARS = 160;
 //   opencode --session <id>  (-s, --session)
 //   codex resume <id>        ([SESSION_ID], UUID or session name)
 //   grok --resume <id>       (-r, --resume <ID_OR_TITLE>; user-guide/17-sessions.md)
-const RESUME_COMMAND = Object.freeze({
+export const RESUME_COMMAND = Object.freeze({
   claude: (meta) => `claude --resume ${meta.id}`,
   kimi: (meta) => `kimi --session ${meta.id}`,
   pi: (meta) => `pi --session ${meta.file}`,
@@ -67,7 +67,7 @@ const RESUME_COMMAND = Object.freeze({
   grok: (meta) => `grok --resume ${meta.id}`,
 });
 
-function resumeCommandFor(endpoint, meta) {
+export function resumeCommandFor(endpoint, meta) {
   const build = RESUME_COMMAND[endpoint];
   return build ? build(meta) : "";
 }

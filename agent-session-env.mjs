@@ -45,6 +45,7 @@ import {
   resolveQoderCliExecutable,
   resolveZcodeCliExecutable,
 } from "./agent-discovery.mjs";
+import { RESUME_COMMAND } from "./session-scan.mjs";
 
 // The resident relay on 47821 is the only credential route: the base URL is
 // always it (no per-launch relay is started for a terminal session).
@@ -245,17 +246,91 @@ function claudeBypassArg(agentId, enabled) {
   return agentId === "claude" && enabled === true ? [CLAUDE_BYPASS_PERMISSIONS_ARG] : [];
 }
 
+// ---------------------------------------------------------------------------
+// 续接历史会话：把「哪一条对话」换成续接参数
+// ---------------------------------------------------------------------------
+//
+// 请求里只带会话身份（endpoint / id / file），命令行一律由 session-scan 的
+// RESUME_COMMAND 模板重建——客户端发来的命令原文、参数、launch 一概不接。
+// 模板同时是「这家 CLI 支持续接吗」的唯一判据：不在表内的端点（dsh / zcode /
+// qoder）报 resume-unsupported，前端据此直接提示，而不是起一个空对话。
+//
+// 身份值会原样落进 cmd 命令行（node-pty 只给含空格的参数套引号），而引号挡不
+// 住 %VAR% 展开，也承不住引号内的转义：& | < > ^ " % 与控制字符一律判非法。
+// 会话 id 额外不许含空白——它是单个 token；存档路径（pi）可以含空格，整体作为
+// 一个参数交给 node-pty，由它加引号。
+const RESUME_FIELDS = new Set(["endpoint", "id", "file"]);
+const RESUME_ID_UNSAFE = /[\s"&|<>^%]/;
+const RESUME_FILE_UNSAFE = /["&|<>^%]/;
+const RESUME_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+// 模板里 id / file 的占位符：先按占位符把模板切成 argv，再把身份值换进去，
+// 这样含空格的存档路径不会被拆成两个参数，也不需要第二张参数表与模板并行维护。
+const RESUME_ID_SENTINEL = "\u0000id\u0000";
+const RESUME_FILE_SENTINEL = "\u0000file\u0000";
+
+function resumeInvalid(cause) {
+  return agentError("这个会话的信息不完整，请重新打开对话", "resume-invalid", cause);
+}
+
+// Pure: request shape → { endpoint, args }. No process spawn, no disk read, so
+// the whole template contract is testable with a stub.
+export function buildAgentResumeArgs(resume) {
+  if (resume === null || typeof resume !== "object" || Array.isArray(resume)) throw resumeInvalid();
+  for (const key of Object.keys(resume)) {
+    if (!RESUME_FIELDS.has(key)) throw resumeInvalid();
+  }
+  const endpoint = typeof resume.endpoint === "string" ? resume.endpoint.trim() : "";
+  // 身份不全（缺 endpoint / 空串 / 非字符串）与「端点不支持续接」是两回事：
+  // 前者是请求有问题，后者是这家 CLI 压根没有续接参数。
+  if (!endpoint) throw resumeInvalid();
+  // 原型链上的键（constructor / toString …）不是模板，必须用自有属性判。
+  const template = Object.prototype.hasOwnProperty.call(RESUME_COMMAND, endpoint) ? RESUME_COMMAND[endpoint] : null;
+  if (typeof template !== "function") {
+    throw agentError("这个 Agent 还不支持续接历史会话，请新开一个会话", "resume-unsupported");
+  }
+  const id = typeof resume.id === "string" ? resume.id.trim() : "";
+  if (!id || RESUME_ID_UNSAFE.test(id) || RESUME_CONTROL_CHARS.test(id)) throw resumeInvalid();
+  let file = "";
+  if (resume.file !== undefined && resume.file !== null) {
+    if (typeof resume.file !== "string") throw resumeInvalid();
+    file = resume.file.trim();
+    if (!file || !isAbsolute(file) || RESUME_FILE_UNSAFE.test(file) || RESUME_CONTROL_CHARS.test(file)) {
+      throw resumeInvalid();
+    }
+  }
+  const tokens = String(template({ id: RESUME_ID_SENTINEL, file: RESUME_FILE_SENTINEL })).trim().split(/\s+/);
+  // 模板首 token 是命令名：执行体已由 agentId 解析成绝对路径（归属链与安装位
+  // 都不该由一条历史记录决定），这里只取它后面的参数。
+  const [, ...args] = tokens;
+  const rebuilt = args.map((token) => {
+    // 模板要 file 而请求没给（pi 的存档路径）：身份不全，不猜。
+    if (token.includes(RESUME_FILE_SENTINEL) && !file) throw resumeInvalid();
+    return token.replaceAll(RESUME_ID_SENTINEL, id).replaceAll(RESUME_FILE_SENTINEL, file);
+  });
+  if (rebuilt.length === 0) throw resumeInvalid();
+  return { endpoint, args: rebuilt };
+}
+
 // Everything terminal-host needs to spawn the session: a cmd /c wrapper (see
 // the attribution note on `launch`), the injected env delta, and the non-secret
 // metadata the tab and the persisted snapshot display. Throws — never falls
 // back — when the working directory or the agent's executable is missing.
-export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT, token, base = process.env, instanceId = null, claudeBypassPermissions = false }) {
+export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT, token, base = process.env, instanceId = null, claudeBypassPermissions = false, resume = null }) {
   const target = requireTarget(agentId);
   const directory = typeof cwd === "string" ? cwd.trim() : "";
   if (!directory) throw agentError("请先填写工作目录", "invalid_cwd");
   if (!existsSync(directory)) throw agentError("工作目录不存在，请检查后重试", "invalid_cwd");
   const executable = resolveAgentExecutable(agentId, base);
   const instance = sessionInstanceId(agentId, directory, instanceId);
+  // 续接参数的校验先于启动本身：判不了身份就不起终端，而不是起一个空对话。
+  // 续接的 endpoint 必须与要启动的 agent 一致——否则会拿 A 的执行体拼 B 的
+  // 参数（例如 kimi 加 --resume），那是一条谁都不认识的命令。
+  let resumeArgs = [];
+  if (resume !== null && resume !== undefined) {
+    const rebuilt = buildAgentResumeArgs(resume);
+    if (rebuilt.endpoint !== agentId) throw resumeInvalid();
+    resumeArgs = rebuilt.args;
+  }
   return {
     label: target.name,
     shell: "cmd",
@@ -273,8 +348,10 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // --profile），终端形态固定为 dsh-tui，与 dsh-cli 快捷命令同一口径。
       // claude 的 bypassPermissions 是设置页开关驱动的附加参数：开 = 跳过工具
       // 权限确认（用户显式打开才带），关 = 一个参数都不加。
+      // 续接参数排在最后：执行体与端点自带的固定参数不变，只是这条命令接着
+      // 走历史对话（模板见 session-scan.mjs 的 RESUME_COMMAND）。
       file: base.ComSpec || "cmd.exe",
-      args: [...UTF8_CODEPAGE_PREFIX, executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions))],
+      args: [...UTF8_CODEPAGE_PREFIX, executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions)), ...resumeArgs],
     },
     env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
     agentId,
