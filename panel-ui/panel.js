@@ -6475,8 +6475,12 @@ async function api(method, path, body) {
       await refreshActiveTerminalRequests();
       renderTerminalPreviewTabs();
       // 归属轮询同拍同步终端会话栏：身份行与「打开的终端」都读归属，慢一拍就会
-      // 「页签已显示 agent、左栏还写着终端」。
-      if (typeof renderTerminalRail === "function") renderTerminalRail();
+      // 「页签已显示 agent、左栏还写着终端」。异常不打断本轮轮询的其余收尾。
+      try {
+        if (typeof renderTerminalRail === "function") renderTerminalRail();
+      } catch (error) {
+        console.warn("[terminal] rail render failed:", error);
+      }
       if (Object.keys(terminalBackendSessions).length === 0) {
         // 会话在别处被关光（另一个面板窗口、服务端重建后的空列表）：与关最后
         // 一个标签同路落空态，不挂上一会话的残留数据。
@@ -6719,7 +6723,15 @@ async function api(method, path, body) {
     if (addBtn) addBtn.disabled = !terminalBackendReady;
     // 左栏「新建终端」与页签栏加号同一就绪闸：禁用位与就绪位同拍（栏体顺带重渲，
     // 归属/会话表的每一次变化都经这里落到左栏）。
-    if (typeof renderTerminalRail === "function") renderTerminalRail();
+    // 必须 try 包住：本函数在 connectTerminalBackend 的成功链里，栏体渲染一旦抛错
+    // 就会被 Promise 链吞成「连接失败」——就绪位翻回 false 并落「终端服务未运行」，
+    // 之后每次补连都栽在同一处，页面恒停在停态（刷新落回终端视图正是这条路径）。
+    // 栏体是旁挂渲染，它的异常不该决定连接成败。
+    try {
+      if (typeof renderTerminalRail === "function") renderTerminalRail();
+    } catch (error) {
+      console.warn("[terminal] rail render failed:", error);
+    }
   }
 
   // ── 终端宿主（terminal-host）生命周期 ──
@@ -7211,8 +7223,13 @@ async function api(method, path, body) {
   function renderTerminalPreviewSession({ revive = true } = {}) {
     // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
     // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
-    // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境。
-    if (typeof renderTerminalRail === "function") renderTerminalRail();
+    // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境；try 护连接
+    // 成败——本函数在 connectTerminalBackend 的成功链里，栏体异常不许翻成连接失败。
+    try {
+      if (typeof renderTerminalRail === "function") renderTerminalRail();
+    } catch (error) {
+      console.warn("[terminal] rail render failed:", error);
+    }
     // 降级闸：判定键是就绪位本身，不是会话数——零会话是就绪下的合法空态（走下方
     // 零会话分支），不能当降级处理；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
@@ -7508,11 +7525,11 @@ async function api(method, path, body) {
     });
   }
 
-  async function openTerminalPreview() {
-    terminalReturnView = currentView;
-    terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
-    switchView("terminal");
-    // 进页判定现取宿主状态，不用 1s 轮询的上一帧：轮询帧可能停在进页前的旧态。
+  // 进终端页的宿主状态分派：现取宿主状态再按四态落位，返回归一后的状态。
+  // 点击进入（openTerminalPreview）与刷新落回（restoreView）共用这一条——两条路
+  // 若各写一份，就会出现「点击能补连、刷新卡在停态」这种只有一条路被修到的分叉。
+  // 现取而非用 1s 轮询的上一帧：轮询帧可能停在进页前的旧态。
+  async function dispatchTerminalEntry() {
     let hostState = terminalHostState;
     // manualStop 缺省视为 true（手动）：读不到时维持停止态空态，不擅自拉起。
     let manualStop = true;
@@ -7523,25 +7540,40 @@ async function api(method, path, body) {
     } catch {
       hostState = "unknown";
     }
-    // reconnect:false——running 的补连由下面分支自己发，不经 applyTerminalHostState
+    // reconnect:false——running 的补连由调用方发，不经 applyTerminalHostState
     // 的迁移分支，两处同发即重复连接。
     applyTerminalHostState(hostState, { reconnect: false });
-    if (hostState === "running") {
-      // 降级重试：terminal-host 不在时进页自动再连一次，与空态动作钮 running 分派同通路。
-      if (!terminalBackendReady) connectTerminalBackend();
-    } else if (hostState === "stopped" && manualStop) {
+    if (hostState === "stopped" && manualStop) {
       // 手动关停后回归：本地缓存已失效，清空后落「已停止」页
       clearTerminalLocalSessions();
       renderTerminalStoppedState();
     } else if (hostState === "stopped" || hostState === "exited") {
       // 异常退出或非手动原因的未运行：进页自动拉起一次（无开关），拉起期间盖「启动中」
       autoStartTerminalHost();
-    } else {
+    } else if (hostState !== "running") {
       // unknown：宿主状态不可知（面板初载或 relay 不可达）——落既有不可用空态
       terminalBackendReady = false;
       terminalFirstConnectSettled = true;
       renderTerminalUnavailableState();
     }
+    return hostState;
+  }
+
+  // 进终端页的补连口径（点击进入与刷新落回共用）：宿主在跑而本地未就绪就重连一次。
+  // 这正是刷新恢复原先缺的那一步——恢复那条只做 switchView，首连失败过的页刷新回来
+  // 就恒停在「终端服务未运行」停态（1s 状态轮询的补连分支把初载的 unknown→running
+  // 排除在外，指望不上它兜底）。
+  function resumeTerminalBackendAfterEntry(hostState) {
+    if (hostState === "running" && !terminalBackendReady) connectTerminalBackend();
+  }
+
+  async function openTerminalPreview() {
+    terminalReturnView = currentView;
+    terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+    switchView("terminal");
+    // 降级重试：terminal-host 不在时进页自动再连一次，与空态动作钮 running 分派同通路。
+    if (!terminalBackendReady) connectTerminalBackend();
+    resumeTerminalBackendAfterEntry(await dispatchTerminalEntry());
   }
 
   function closeTerminalPreview() {
@@ -8164,11 +8196,23 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M3.5 20l2.4-7h14.2l-2.4 7z"/></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_CLOSED = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
 
+  // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
+  // （payment-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
+  // 未就绪一律当空——「打开的终端」如实空缺、身份行走通用终端标识；历史会话段是
+  // 真实磁盘数据，不经过这里，照常渲染。
+  function terminalRailSessionMap() {
+    return terminalBackendReady ? terminalBackendSessions : {};
+  }
+
+  function terminalRailActiveSession() {
+    return terminalRailSessionMap()[activeTerminalPreviewId] || null;
+  }
+
   // 会话的 agent 身份：与页签左图标同一取值口径（实时归属 endpointId 优先，一键启动
   // 快照的 agentId 次之）。白名单字符过滤——这个 id 同时进 HTML 属性与克隆头像的
   // 选择器。空串 = 纯外壳终端（无 agent）。缺省参数读活跃终端：栏体跟随的 agent 就是它。
   function terminalRailAgentId(session) {
-    const target = session === undefined ? terminalSessionFor(activeTerminalPreviewId) : session;
+    const target = session === undefined ? terminalRailActiveSession() : session;
     if (!target) return "";
     const raw = (target.agent && target.agent.endpointId) || target.agentId || "";
     return /^[\w-]+$/.test(raw) ? raw : "";
@@ -8179,9 +8223,10 @@ async function api(method, path, body) {
   }
 
   // 「打开的终端」= 该 agent 的活跃终端；无 agent 聚焦时列无归属的空白终端们。
+  // 只读后端真值表（见 terminalRailSessionMap）：未就绪时为空，不列预览种子。
   function terminalRailOpenSessions(agentId) {
     const out = [];
-    for (const session of Object.values(terminalSessionMap())) {
+    for (const session of Object.values(terminalRailSessionMap())) {
       if (session && terminalRailAgentId(session) === agentId) out.push(session);
     }
     return out;
@@ -8260,7 +8305,8 @@ async function api(method, path, body) {
     const nameEl = $("railTermAgentName");
     const slot = $("railTermAgentAvatar");
     if (!nameEl || !slot) return;
-    const session = terminalSessionFor(activeTerminalPreviewId);
+    // 同样只认后端真值：未就绪时活跃终端读不到，身份行走通用终端标识（不冒充种子里的 agent）。
+    const session = terminalRailActiveSession();
     // 无 agent 时显通用终端标识：优先活跃终端的外壳名（PowerShell / 命令提示符，会话
     // 数据自带），连终端都没有才落产品里既有的「本地终端」——身份行不留空白，也不
     // 另造新词。
@@ -8320,7 +8366,8 @@ async function api(method, path, body) {
     // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
     // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
     // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
-    const activeSession = terminalSessionFor(activeTerminalPreviewId);
+    // 同上：活跃终端只读后端真值，未就绪时不拿预览种子的 cwd 去展开组。
+    const activeSession = terminalRailActiveSession();
     const activeGroup = activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "";
     const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}`;
     let scrollKey = "";
@@ -8985,6 +9032,15 @@ async function api(method, path, body) {
       settingsReturnView = currentView;
       suppressViewEnter = true;
       switchView("terminal");
+      // 刷新落回终端页要走与点击进入同一条宿主状态分派：点击那条会现取
+      // /api/terminal/host/status 并在宿主 running 时补连，恢复这条原先只做
+      // switchView——首连失败过的页刷新回来就恒停在「终端服务未运行」停态，再也
+      // 回不到就绪（1s 状态轮询的补连分支把初载的 unknown→running 排除在外）。
+      // 不 await：恢复落位不该等一次网络往返，补连本身是异步的。typeof 闸护
+      // restoreView 的桩环境（那份桩只关心落位目标，不装网络侧分派）。
+      if (typeof dispatchTerminalEntry === "function") {
+        dispatchTerminalEntry().then(resumeTerminalBackendAfterEntry);
+      }
     } else if (settingsOpen) {
       // 上面那条链落好的就是进设置前的主视图（没命中则为看板），直接拿来当返回目标；
       // 子 tab 存档交给 enterSettingsView 消费。置位口径同主视图恢复：落位不播动画。
