@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPanelRouter, startRelayActivityBridge } from "./panel.mjs";
+import { TERMINAL_CONVERSATION_BINDINGS_FILE } from "./terminal-conversation-bindings.mjs";
 import { createLogger } from "./logger.mjs";
 import { createLoggingEnabledGate, saveSettings } from "./relay-settings.mjs";
 import { AGENT_TERMINAL_TARGETS } from "./agent-session-env.mjs";
@@ -7004,9 +7005,9 @@ describe("看板端点卡首帧卡序接管（普通刷新不再先画基准序�
 // 虚拟终端归属接线：panel 路由层把 shell pid ↔ 祖先链 join 进会话列表，
 // 最近请求走当日 usage journal；前端把归属后的实例行套看板口径渲染。
 describe("虚拟终端归属接线（terminal sessions list + recent requests）", () => {
-  function terminalRouter({ sessions, detected, codexSessions, agents, journalRows } = {}) {
+  function terminalRouter({ sessions, detected, codexSessions, agents, journalRows, root, scanAgentConversations } = {}) {
     return createPanelRouter({
-      storePaths: { root: "C:/fake/anyswitch" },
+      storePaths: { root: root ?? "C:/fake/anyswitch" },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => agents ?? null,
       // 数组形态 = 只喂进程面（旧用例默认）；codex 桥接数据走 codexSessions 键，
@@ -7019,6 +7020,8 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
         return feed;
       },
       fetchTerminalSessionsList: async () => sessions ?? null,
+      // 绑定捕获的对话存档扫描：默认空表，不碰真 home 下的 agent 存档。
+      scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
       usageJournal: {
         appendRequest() {}, appendSession() {},
         readRequests: () => journalRows ?? [],
@@ -11830,11 +11833,31 @@ describe("一键启动 CLI Agent（terminal agent-sessions 路由）", () => {
 // env 从不落盘（terminal-host.mjs 的注释与落盘字段都明写），宿主自己 restart
 // 一个 agent 会话只能拉起 agent 的原生实例——那正是「历史看着还在、一刷新变
 // 空白新对话」的来源。这条路由是唯一正确的复活通路。
+// 终端会话 ↔ 对话存档绑定文件的读写替身：真实 createBindingStore 落在
+// storePaths.root 下，测试直接写/读这个文件来预置与验收。
+function writeTerminalBindings(root, bindings) {
+  writeFileSync(join(root, TERMINAL_CONVERSATION_BINDINGS_FILE), JSON.stringify({ version: 1, bindings }));
+}
+
+function readTerminalBindings(root) {
+  const file = join(root, TERMINAL_CONVERSATION_BINDINGS_FILE);
+  if (!existsSync(file)) return null;
+  return JSON.parse(readFileSync(file, "utf8")).bindings;
+}
+
+// fire-and-forget 旁路（绑定捕获、自愈重扫）的确定性强排：微任务链 + 注入的
+// 即时扫描都在几跳内落定，给足五拍。
+async function flushAsyncSideEffects() {
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
 describe("终端会话复活（revive 路由重组装凭据）", () => {
-  function reviveRouter({ session, root, restartSession, fetchSession } = {}) {
+  function reviveRouter({ session, root, restartSession, fetchSession, scanAgentConversations, scheduleRefresh, base } = {}) {
     const restarts = [];
+    const scheduled = [];
     const router = createPanelRouter({
       storePaths: { root },
+      base: base ?? process.env,
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchTerminalSessionFn: fetchSession ?? (async (id) => ({ ...session, id })),
@@ -11842,8 +11865,12 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
         restarts.push({ id, body, options });
         return { status: 200, body: { id, status: "running", pid: 4242 } };
       }),
+      // resume 接线的对话存档扫描：默认空表（=判不出、维持现状），不碰真存档。
+      scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
+      // 复活后的自愈换绑拍节：默认只收不点，测试要验刷新就手动泵。
+      bindingRefreshScheduleFn: scheduleRefresh ?? ((fn) => { scheduled.push(fn); }),
     });
-    return { router, restarts };
+    return { router, restarts, scheduled };
   }
 
   function withFakeKimiExecutable(fn) {
@@ -11918,6 +11945,276 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       "前端复活走新路由");
     assert.ok(!panelJs.includes('api("POST", `/api/terminal/sessions/${encodeURIComponent(session.id)}/restart`)'),
       "裸 restart 复活已退役：它起来的是没有凭据的原生实例");
+  });
+
+  // ---- resume 接线：复活带回原对话（绑定优先，兜底扫描，判不出不接） ----
+
+  it("有绑定：按绑定对话追加 resume 参数，并布一拍复活后自愈重扫", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-bind-root-");
+      const cwd = mkTestDir("anyswitch-revive-bind-cwd-");
+      writeTerminalBindings(root, {
+        "5e55b001": { agentId: "kimi", cwd, conversationId: "conv-42", file: null, boundAt: 1, source: "bound" },
+      });
+      const { router, restarts, scheduled } = reviveRouter({
+        root,
+        session: { id: "5e55b001", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 8000 },
+        scanAgentConversations: async () => [
+          { endpoint: "kimi", id: "conv-42", project: cwd, file: "F:\\kimi\\conv-42", createdAt: null, lastActive: 9000 },
+        ],
+      });
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b001/revive", "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(restarts.length, 1);
+      assert.deepEqual(restarts[0].body.launch.args.slice(-2), ["--session", "conv-42"], "kimi 按 --session <id> 续会");
+      assert.equal(scheduled.length, 1, "复活带了 resume 才布自愈重扫");
+      // 绑定里的 file 被扫描现值刷新（续写原存档的 agent 上这是同值确认）。
+      assert.equal(readTerminalBindings(root)["5e55b001"].file, "F:\\kimi\\conv-42");
+    });
+  });
+
+  it("复活后自愈重扫：复活时刻之后唯一活跃的新存档换绑进库", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-fork-root-");
+      const cwd = mkTestDir("anyswitch-revive-fork-cwd-");
+      writeTerminalBindings(root, {
+        "5e55b002": { agentId: "kimi", cwd, conversationId: "conv-old", file: null, boundAt: 1, source: "bound" },
+      });
+      let scanCalls = 0;
+      const { router, scheduled } = reviveRouter({
+        root,
+        session: { id: "5e55b002", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 8000 },
+        scanAgentConversations: async () => {
+          scanCalls += 1;
+          if (scanCalls === 1) {
+            return [{ endpoint: "kimi", id: "conv-old", project: cwd, createdAt: null, lastActive: 9000 }];
+          }
+          // resume 另起了新对话存档：复活时刻之后唯一活跃的是它。
+          return [
+            { endpoint: "kimi", id: "conv-old", project: cwd, createdAt: null, lastActive: 9000 },
+            { endpoint: "kimi", id: "conv-new", project: cwd, createdAt: null, lastActive: Date.now() + 60_000 },
+          ];
+        },
+      });
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b002/revive", "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(scheduled.length, 1);
+      scheduled[0]();
+      await flushAsyncSideEffects();
+      assert.equal(readTerminalBindings(root)["5e55b002"].conversationId, "conv-new", "新存档换绑，下次复活接新对话");
+    });
+  });
+
+  it("绑定存档已消失：落兜底扫描，挑生命周期重叠最佳者", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-stale-root-");
+      const cwd = mkTestDir("anyswitch-revive-stale-cwd-");
+      writeTerminalBindings(root, {
+        "5e55b003": { agentId: "kimi", cwd, conversationId: "conv-dead", file: null, boundAt: 1, source: "bound" },
+      });
+      const { router, restarts } = reviveRouter({
+        root,
+        session: { id: "5e55b003", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
+        scanAgentConversations: async () => [
+          { endpoint: "kimi", id: "conv-live", project: cwd, createdAt: 1500, lastActive: 4500 },
+        ],
+      });
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b003/revive", "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(restarts[0].body.launch.args.slice(-2), ["--session", "conv-live"]);
+      const bindings = readTerminalBindings(root);
+      assert.equal(bindings["5e55b003"].conversationId, "conv-live", "失效绑定被兜底结果替换");
+      assert.equal(bindings["5e55b003"].source, "scanned");
+    });
+  });
+
+  it("无绑定兜底命中：resume 参数带上，绑定落盘（绑定存储读写贯通）", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-fallback-root-");
+      const cwd = mkTestDir("anyswitch-revive-fallback-cwd-");
+      const { router, restarts } = reviveRouter({
+        root,
+        session: { id: "5e55b004", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
+        scanAgentConversations: async () => [
+          { endpoint: "kimi", id: "too-early", project: cwd, createdAt: 100, lastActive: 900 },
+          { endpoint: "kimi", id: "picked", project: cwd, createdAt: 1500, lastActive: 4500 },
+          { endpoint: "kimi", id: "too-late", project: cwd, createdAt: 6000, lastActive: 7000 },
+          { endpoint: "kimi", id: "elsewhere", project: "C:\\other", createdAt: 1500, lastActive: 4800 },
+        ],
+      });
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b004/revive", "POST", {});
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(restarts[0].body.launch.args.slice(-2), ["--session", "picked"], "窗口重叠里取最新活跃");
+      const bindings = readTerminalBindings(root);
+      assert.equal(bindings["5e55b004"].conversationId, "picked");
+      assert.equal(bindings["5e55b004"].agentId, "kimi");
+      assert.equal(bindings["5e55b004"].source, "scanned");
+    });
+  });
+
+  it("兜底判不出（重叠并列 / 扫描空表）：维持现状空白复活，绑定不落盘", async () => {
+    await withFakeKimiExecutable(async () => {
+      const root = mkTestDir("anyswitch-revive-tie-root-");
+      const cwd = mkTestDir("anyswitch-revive-tie-cwd-");
+      const tied = reviveRouter({
+        root,
+        session: { id: "5e55b005", agentId: "kimi", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
+        scanAgentConversations: async () => [
+          { endpoint: "kimi", id: "conv-a", project: cwd, createdAt: 1500, lastActive: 4500 },
+          { endpoint: "kimi", id: "conv-b", project: cwd, createdAt: 1600, lastActive: 4500 },
+        ],
+      });
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b005/revive", "POST", {});
+      await tied.router.handle(req, res);
+      assert.equal(res.statusCode, 200, "判不出不挡复活本身");
+      const args = tied.restarts[0].body.launch.args;
+      assert.equal(args.length, 7, "没有 resume 参数，args 保持 cmd 包装原形");
+      assert.equal(args[6], process.env.KIMI_EXECUTABLE);
+      assert.equal(readTerminalBindings(root), null, "判不出不落绑定");
+      assert.equal(tied.scheduled.length, 0, "没带 resume 就不布自愈重扫");
+    });
+  });
+
+  it("不支持续会的 agent（qoder）：原样复活，不扫描不写绑定", async () => {
+    const home = mkTestDir("anyswitch-revive-qoder-home-");
+    const exe = join(home, ".qoder", "bin", "qodercli", "qodercli.exe");
+    mkdirSync(dirname(exe), { recursive: true });
+    writeFileSync(exe, "");
+    const root = mkTestDir("anyswitch-revive-qoder-root-");
+    const cwd = mkTestDir("anyswitch-revive-qoder-cwd-");
+    let scanCalls = 0;
+    const { router, restarts, scheduled } = reviveRouter({
+      root,
+      base: { ...process.env, USERPROFILE: home },
+      session: { id: "5e55b006", agentId: "qoder", cwd, shell: "cmd", createdAt: 1000, lastActiveAt: 5000 },
+      scanAgentConversations: async () => {
+        scanCalls += 1;
+        return [{ endpoint: "qoder", id: "q-1", project: cwd, createdAt: 1500, lastActive: 4500 }];
+      },
+    });
+    const { req, res } = fakeReqRes("/panel/api/terminal/sessions/5e55b006/revive", "POST", {});
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    const args = restarts[0].body.launch.args;
+    assert.deepEqual(args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"]);
+    assert.equal(args[6], exe, "launch 保持原组装");
+    assert.equal(args.length, 7, "qoder 没有可定向的续会参数，一个都不加");
+    assert.equal(scanCalls, 0, "不在覆盖名单就不起扫描");
+    assert.equal(scheduled.length, 0);
+    assert.equal(readTerminalBindings(root), null);
+  });
+});
+
+// 列表路由旁的绑定捕获：未绑定且 running 的可续会 agent 会话异步扫描绑定，
+// 按会话防抖；孤儿绑定顺手清。全部 fire-and-forget，列表主流程不受阻。
+describe("终端会话绑定捕获（列表路由异步扫描）", () => {
+  function listRouter({ root, sessions, scanAgentConversations }) {
+    return createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => sessions,
+      scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
+    });
+  }
+
+  it("running 且未绑定的 agent 会话扫到即绑（source=bound），孤儿绑定清掉", async () => {
+    const root = mkTestDir("anyswitch-capture-root-");
+    const cwd = mkTestDir("anyswitch-capture-cwd-");
+    writeTerminalBindings(root, {
+      "gone-session": { agentId: "kimi", cwd, conversationId: "c-orphan", file: null, boundAt: 1, source: "bound" },
+    });
+    const now = Date.now();
+    const router = listRouter({
+      root,
+      sessions: [
+        { id: "t9", label: "kimi", cwd, shell: "cmd", pid: 123, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      scanAgentConversations: async () => [
+        { endpoint: "kimi", id: "conv-9", project: cwd, createdAt: now - 30_000, lastActive: now },
+      ],
+    });
+    const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    await flushAsyncSideEffects();
+    const bindings = readTerminalBindings(root);
+    assert.equal(bindings["t9"].conversationId, "conv-9");
+    assert.equal(bindings["t9"].source, "bound");
+    assert.equal(bindings["gone-session"], undefined, "会话已消失的绑定被清");
+  });
+
+  it("按会话防抖：5s 内重复列表不重复扫描；已绑定/非 running/不支持 agent 不起扫描", async () => {
+    const root = mkTestDir("anyswitch-capture-debounce-root-");
+    const cwd = mkTestDir("anyswitch-capture-debounce-cwd-");
+    writeTerminalBindings(root, {
+      "t-bound": { agentId: "kimi", cwd, conversationId: "conv-x", file: null, boundAt: 1, source: "bound" },
+    });
+    const now = Date.now();
+    let kimiScans = 0;
+    const router = listRouter({
+      root,
+      sessions: [
+        { id: "t-bound", label: "k", cwd, shell: "cmd", pid: 1, status: "running", agentId: "kimi", createdAt: now - 60_000 },
+        { id: "t-exited", label: "k2", cwd, shell: "cmd", pid: 2, status: "exited", agentId: "kimi", createdAt: now - 60_000 },
+        { id: "t-qoder", label: "q", cwd, shell: "cmd", pid: 3, status: "running", agentId: "qoder", createdAt: now - 60_000 },
+        { id: "t-shell", label: "s", cwd, shell: "cmd", pid: 4, status: "running", createdAt: now - 60_000 },
+      ],
+      scanAgentConversations: async () => {
+        kimiScans += 1;
+        return [];
+      },
+    });
+    for (let round = 0; round < 3; round += 1) {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+    }
+    await flushAsyncSideEffects();
+    assert.equal(kimiScans, 0, "已绑定、已退出、不支持、纯外壳四类都不扫");
+    // 换一个未绑定的 running kimi 会话进来：第一轮列表只扫一次，防抖窗口内
+    // 的后续列表不重复扫。
+    const router2 = listRouter({
+      root,
+      sessions: [
+        { id: "t-new", label: "k3", cwd, shell: "cmd", pid: 5, status: "running", agentId: "kimi", createdAt: now - 60_000 },
+      ],
+      scanAgentConversations: async () => {
+        kimiScans += 1;
+        return [];
+      },
+    });
+    for (let round = 0; round < 3; round += 1) {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router2.handle(req, res);
+    }
+    await flushAsyncSideEffects();
+    assert.equal(kimiScans, 1, "同一未绑定会话在防抖窗内只扫一拍");
+  });
+
+  it("扫描判不出（并列）则不绑定，下轮列表还可再试", async () => {
+    const root = mkTestDir("anyswitch-capture-tie-root-");
+    const cwd = mkTestDir("anyswitch-capture-tie-cwd-");
+    const now = Date.now();
+    const router = listRouter({
+      root,
+      sessions: [
+        { id: "t-tie", label: "k", cwd, shell: "cmd", pid: 9, status: "running", agentId: "kimi", createdAt: now - 60_000 },
+      ],
+      scanAgentConversations: async () => [
+        { endpoint: "kimi", id: "conv-a", project: cwd, createdAt: now - 1000, lastActive: now },
+        { endpoint: "kimi", id: "conv-b", project: cwd, createdAt: now - 900, lastActive: now },
+      ],
+    });
+    const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    await router.handle(req, res);
+    await flushAsyncSideEffects();
+    assert.equal(readTerminalBindings(root), null, "判不出就宁缺毋滥");
   });
 });
 
