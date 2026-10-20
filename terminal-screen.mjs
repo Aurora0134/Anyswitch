@@ -23,10 +23,11 @@
 // Scope, on purpose: the sequence set that terminal output actually produces here
 // (CR/LF/VT/FF/BS/TAB, CUU/CUD/CUF/CUB/CNL/CPL/CHA/VPA/CUP, ED/EL/IL/DL/DCH/ICH/ECH,
 // SU/SD, DECSTBM, SGR incl. 256/truecolor, DECSC/DECRC, cursor visibility, alt screen
-// 1049/1047/47, autowrap 7, IRM 4, convertEol 20) plus OSC and DCS strings consumed
-// whole. The C0 line-feed family must match the client's emulator exactly: a lost
-// line feed drifts the whole mirror one row above the real screen, and the client
-// only sees it when it rebuilds from a replay.
+// 1049/1047/47, autowrap 7, IRM 4, convertEol 20) plus OSC and DCS strings (consumed
+// whole, or held across chunks when the terminator has not arrived yet). The C0
+// line-feed family must match the client's emulator exactly: a lost line feed drifts
+// the whole mirror one row above the real screen, and the client only sees it when it
+// rebuilds from a replay.
 // Unknown sequences are consumed and ignored — the mirror must never be able to
 // break forwarding. Reflow on resize is deliberately not modelled: a resize makes
 // the application repaint its own frame, so only historical rows keep their old
@@ -217,19 +218,31 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   // Scroll the region up by n (content moves toward the top); a whole-screen
   // scroll on the main screen sends the departing line into history.
+  // 滚出屏顶的那一行整行复用成新的底行（先序列化进 history，再就地清空），
+  // 不重新分配两个数组。换行密集的输出（一段 resume、一次 `type` 大文件）会连续
+  // 滚动几十万次，每次两次 181 元数组分配是这条路径上最大的一笔开销。
   function scrollRegionUp(n) {
     for (let k = 0; k < n; k += 1) {
       const whole = top === 0 && bottom === height - 1;
-      if (whole && !inAlt) pushHistory(serializeRow(grid[top]));
+      const departed = grid[top];
+      if (whole && !inAlt) pushHistory(serializeRow(departed));
       for (let r = top; r < bottom; r += 1) grid[r] = grid[r + 1];
-      grid[bottom] = blankRow(width);
+      // 复用的行必须真的清空：它可能带着上一屏的字符与属性（背景色尤其不能留，
+      // 否则新行会继承旧底色，回放里凭空多出一条色带）。
+      departed.chars.fill(null);
+      departed.attrs.fill("");
+      grid[bottom] = departed;
     }
   }
 
   function scrollRegionDown(n) {
     for (let k = 0; k < n; k += 1) {
+      const departed = grid[bottom];
       for (let r = bottom; r > top; r -= 1) grid[r] = grid[r - 1];
-      grid[top] = blankRow(width);
+      // 与 scrollRegionUp 同理：滚出屏底的行复用成新的顶行。
+      departed.chars.fill(null);
+      departed.attrs.fill("");
+      grid[top] = departed;
     }
   }
 
@@ -276,6 +289,13 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     const from = mode === 1 ? 0 : mode === 2 ? 0 : col;
     const to = mode === 0 ? width - 1 : mode === 1 ? col : width - 1;
     const fill = bgString();
+    // 整行擦除走原生 fill：TUI 几乎每行都以 ESC[2K 开头，逐格赋值在 181 列终端上
+    // 是每行 181 次 JS 写，一段回放就是上百万次。区间擦除仍走循环。
+    if (from === 0 && to >= width - 1) {
+      line.chars.fill(null);
+      line.attrs.fill(fill);
+      return;
+    }
     for (let c = from; c <= to; c += 1) { line.chars[c] = null; line.attrs[c] = fill; }
   }
 
@@ -429,10 +449,12 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       const value = param(index);
       return value === undefined || Number.isNaN(value) || value === 0 ? dflt : value;
     };
-    // 光标被移动就取消折行待定（真实终端语义）：否则移动后写的第一个字符会先触发
-    // 一次不该有的折行。夹光标（clampCursor）不再负责这件事，见那里的注释。
-    // 覆盖 A/B/C/D/E/F/G/`/d/H/f（移动）、r（设滚动区并把光标放回区顶）、u（恢复光标）。
-    if ("ABCDEFG`dHfru".includes(final)) pendingWrap = false;
+    // 光标被移动或编辑格位的序列取消折行待定（真实终端语义）：xterm 5.5 用
+    // 「x === cols」当哨兵，A–H/f/G/`/d/r/u 与 P/@/X/L/M 各自走 _restrictCursor()
+    // 把哨兵夹成 cols-1，哨兵随之消失；不取消的话，移动后写的第一个字符会先多折
+    // 一行。J/K（擦除）在 xterm 里以 cols 为上限夹，哨兵保留，故不在此列；m/s/h/l
+    // 不动光标，同样保留。夹光标（clampCursor）不负责这件事，见那里的注释。
+    if ("ABCDEFG`dHfruP@XLM".includes(final)) pendingWrap = false;
     switch (final) {
       case "A": row = Math.max(0, row - arg(0, 1)); break;
       case "B": row = Math.min(height - 1, row + arg(0, 1)); break;
@@ -598,6 +620,17 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
 
   const nowMs = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
 
+  // 折行待定在这里落地：上一格写满一行且自动换行开着，就先折到下一行行首。
+  // 批写与逐字符两条路径共用（lineFeed 自己会清 pendingWrap，无需再清）。
+  function wrapIfPending() {
+    if (autoWrap && pendingWrap) { col = 0; lineFeed(); }
+  }
+
+  // 一段可打印字符写完后的收尾：写满一行就挂上折行待定，否则光标停在行尾。
+  function settleRunEnd() {
+    if (col >= width) { pendingWrap = autoWrap; col = width - 1; }
+  }
+
   // 解析核心：从 start 起消费到 deadlineMs（0 = 不设预算）。
   // 返回 { index, done, incomplete }：index 是下一个未消费字符的位置；done=false
   // 表示预算用尽、还有字节没解析；incomplete=true 表示尾部是一个没结束的转义序列。
@@ -637,7 +670,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       // （一段回放要过十六万次），而普通文本几乎全是这种字符。插入模式下不能批写
       // （每格都要右移），落回逐字符路径。
       if (code <= 0x7e && !insertMode) {
-        if (autoWrap && pendingWrap) { col = 0; lineFeed(); pendingWrap = false; }
+        wrapIfPending();
         const line = grid[row];
         const attr = attrsString();
         let j = i;
@@ -650,12 +683,12 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
           j += 1;
         }
         i = j;
-        if (col >= width) { pendingWrap = autoWrap; col = width - 1; }
+        settleRunEnd();
         continue;
       }
       const w = terminalCharWidth(input[i]);
       if (w === 0) { appendToPrevious(col, input[i]); i += 1; continue; }
-      if (autoWrap && pendingWrap) { col = 0; lineFeed(); pendingWrap = false; }
+      wrapIfPending();
       putCell(col, input[i], w);
       if (col + w >= width) {
         pendingWrap = autoWrap;
@@ -906,10 +939,11 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       return history.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+$/, ""));
     },
     info() {
-      // 与 toReplay 同一条口径：查询前先把待解析字节排空，否则切片停在半路时
-      // consumedBytes / 光标位置会落后于已喂入的字节流。
-      flush();
-      return { cols: width, rows: height, row, col, historyLines: history.length, historyBytes: historyTotal, consumedBytes, inAlt, cursorVisible, pendingChars: carry.length };
+      // 刻意不排空待解析字节：info() 在每次建连（stream 判断要不要发回放）与
+      // restartHygiene 里都会调，而排空一整批积压是几十毫秒的同步工作——那正是
+      // 本次改动要消除的卡顿形态。consumedBytes 在入队时就已累加，因此这里读到的
+      // 值天然对应当前字节流；需要「解析后的画面状态」的调用方自己先 flush()。
+      return { cols: width, rows: height, row, col, historyLines: history.length, historyBytes: historyTotal, consumedBytes, inAlt, cursorVisible, pendingChars: carry.length + Math.max(0, pending.length - pendingOffset) };
     },
   };
 }

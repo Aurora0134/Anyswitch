@@ -526,8 +526,10 @@ export function createTerminalHost({
         // Rebuild the rendered picture from the durable tail. The tail is trimmed,
         // so a restored session repaints approximately — no worse than replaying
         // those same bytes raw, and it gets exact again on the next output chunk.
-        // 恢复走同步 write 而不是切片：盘上每会话上限 128KB、实测 2.8ms，属于启动
-        // 一次性成本，没必要为它引入跨轮次的续排状态（恢复完就立刻要能被 attach）。
+        // 恢复走同步 write 而不是切片：这是一次性启动成本（盘上每会话上限 128KB，
+        // 实测 10–14ms；512KB 的极端尾巴 29–52ms），而恢复完就要立刻能被 attach，
+        // 引入跨轮次续排状态只会让建连路径更难推理。同步 write 与切片共用同一
+        // 解析内核，跨块转义暂留一并生效。
         for (const chunk of buffer) feedMirrorSync(session, String(chunk));
         sessions.set(item.id, session);
       }
@@ -647,6 +649,10 @@ export function createTerminalHost({
   // 盘上回放三方同拍一致（入了 journal，宿主重启的 restore 重喂复现同一衔接）。
   function restartHygiene(session) {
     try {
+      // 这里读的是「镜像当前画面」的 inAlt / col，必须先排空切片留下的积压，
+      // 否则会按落后若干毫秒的状态补衔接字节。重开是一次性动作，同步排空的
+      // 代价可以接受（info() 本身刻意不排空，见 terminal-screen.mjs）。
+      session.screen.flush();
       if (session.screen.info().inAlt) emit(session, "\u001b[?1049l");
       if (session.screen.info().col !== 0) emit(session, "\r\n");
     } catch (error) {
@@ -802,37 +808,16 @@ export function createTerminalHost({
     return value === `Bearer ${token}`;
   }
 
-  function stream(session, res) {
-    res.writeHead(200, {
-      "content-type": "text/event-stream; charset=utf-8",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-    });
-    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
-    // Replay comes from the rendered mirror: an absolutely positioned repaint plus
-    // the rows that scrolled away, so it is correct regardless of where the raw
-    // window's head fell and it restores a scrollable scrollback. The raw byte path
-    // stays as the fallback for a session whose mirror was skipped (a parser fault,
-    // a state file written before the mirror existed) — degraded, never dead.
-    let rendered = "";
-    try {
-      rendered = session.screen && session.screen.info().consumedBytes > 0 ? session.screen.toReplay() : "";
-    } catch (error) {
-      logger.warn?.(`[terminal-host] rendered replay unavailable (${session.id}): ${error.message}`);
-    }
-    // Live chunks pass through verbatim; the raw replay is probe-stripped so a query
-    // split between PTY writes is still recognized.
-    const replay = rendered || stripTerminalReplyProbes(session.buffer.join(""));
-    if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
-    // data 帧合帧器，每个 SSE 连接独立一份：多连接共享同一会话，各攒各的缓冲、
-    // 各冲各的定时器。PTY 输出在小时间尺度上是一串碎块（TUI 常把一帧拆成好几
-    // 次 onData），逐块一帧等于把 N 次网络往返和 N 次 term.write 强加给一次重
-    // 绘——这就是多开卡顿时 SSE 侧的病灶。攒进待发缓冲、窗口定时器到点合并成
-    // 一个 data 帧转发；客户端本来就是 JSON.parse 后 term.write，拼接语义不变。
-    // 边界：超 SSE_PENDING_FLUSH_BYTES 立即冲（大输出不陪窗口攒延迟）；exit 先
-    // 冲净 pending 再发退出帧（最后一屏必须排在退出之前，帧序不能倒）；连接断
-    // 开清定时器弃缓冲（人已走，送无可送）。回放帧、snapshot 帧、心跳注释帧都
-    // 不经过这里——挂监听前的回放是既有直发路径，帧序保持不变。
+  // data 帧合帧器，每个 SSE 连接独立一份：多连接共享同一会话，各攒各的缓冲、
+  // 各冲各的定时器。PTY 输出在小时间尺度上是一串碎块（TUI 常把一帧拆成好几
+  // 次 onData），逐块一帧等于把 N 次网络往返和 N 次 term.write 强加给一次重
+  // 绘——这就是多开卡顿时 SSE 侧的病灶。攒进待发缓冲、窗口定时器到点合并成
+  // 一个 data 帧转发；客户端本来就是 JSON.parse 后 term.write，拼接语义不变。
+  // 边界：超 SSE_PENDING_FLUSH_BYTES 立即冲（大输出不陪窗口攒延迟）；exit 先
+  // 冲净 pending 再发退出帧（最后一屏必须排在退出之前，帧序不能倒）；连接断
+  // 开清定时器弃缓冲（人已走，送无可送）。回放帧、snapshot 帧、心跳注释帧都
+  // 不经过这里——回放是挂监听前的直发路径，帧序保持不变。
+  function attachStream(session, res) {
     let pendingChunks = [];
     let pendingBytes = 0;
     let flushTimer = null;
@@ -868,7 +853,7 @@ export function createTerminalHost({
     };
     session.listeners.add(listener);
     const heartbeat = setInterval(() => res.write(": keep-alive\n\n"), 15000);
-    const close = () => {
+    res.on("close", () => {
       clearInterval(heartbeat);
       if (flushTimer) {
         clearTimeout(flushTimer);
@@ -877,8 +862,57 @@ export function createTerminalHost({
       pendingChunks = [];
       pendingBytes = 0;
       session.listeners.delete(listener);
+    });
+  }
+
+  function stream(session, res) {
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+    });
+    res.write(`event: snapshot\ndata: ${JSON.stringify(snapshot(session))}\n\n`);
+    // Replay comes from the rendered mirror: an absolutely positioned repaint plus
+    // the rows that scrolled away, so it is correct regardless of where the raw
+    // window's head fell and it restores a scrollable scrollback. The raw byte path
+    // stays as the fallback for a session whose mirror was skipped (a parser fault,
+    // a state file written before the mirror existed) — degraded, never dead.
+    //
+    // 镜像可能还有没解析完的积压（切片解析在续排）。这里不能一口气同步排空：一次
+    // resume 之后的积压排空要几十毫秒，而建连本来就不该把事件循环按住——那正是
+    // 本次改动要消除的卡顿形态。改成按预算分几轮排空再发回放帧：客户端先拿到
+    // snapshot，回放帧晚几轮到达，语义不变（帧序仍是 snapshot → 回放 → 实时）。
+    // 监听器在回放发出后才挂上，因此这期间到达的实时块只进 buffer 与镜像，不会
+    // 既被回放覆盖又被单独转发一遍。
+    const emitReplay = () => {
+      let rendered = "";
+      try {
+        rendered = session.screen && session.screen.info().consumedBytes > 0 ? session.screen.toReplay() : "";
+      } catch (error) {
+        logger.warn?.(`[terminal-host] rendered replay unavailable (${session.id}): ${error.message}`);
+      }
+      // Live chunks pass through verbatim; the raw replay is probe-stripped so a query
+      // split between PTY writes is still recognized.
+      const replay = rendered || stripTerminalReplyProbes(session.buffer.join(""));
+      if (replay) res.write(`event: data\ndata: ${JSON.stringify(replay)}\n\n`);
+      attachStream(session, res);
     };
-    res.on("close", close);
+    if (session.screen && session.screen.info().pendingChars > 0) {
+      const pump = () => {
+        if (res.writableEnded) return; // 人已走：别再为这条连接排空镜像
+        let done = true;
+        try {
+          done = session.screen.drain(MIRROR_SLICE_MS).done;
+        } catch (error) {
+          skipMirrorChunk(session, error);
+        }
+        if (done) emitReplay();
+        else setImmediate(pump);
+      };
+      setImmediate(pump);
+      return;
+    }
+    emitReplay();
   }
 
   restore();
