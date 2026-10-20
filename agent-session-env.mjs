@@ -263,6 +263,12 @@ const RESUME_FIELDS = new Set(["endpoint", "id", "file"]);
 const RESUME_ID_UNSAFE = /[\s"&|<>^%]/;
 const RESUME_FILE_UNSAFE = /["&|<>^%]/;
 const RESUME_CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+// 单个续接身份值的上限，与 terminal-host 的 MAX_LAUNCH_ARG_BYTES 同口径
+// （terminal-host.mjs：`arg.length > MAX_LAUNCH_ARG_BYTES` 即判 invalid_launch）。
+// 超过它的值放过去，会在宿主那一层被拦成裸 invalid_launch——用户看到「启动
+// 失败」，而真正的毛病是这条会话信息有问题，契约要在这一层就把它归到
+// resume-invalid。
+const RESUME_ARG_MAX_LENGTH = 4096;
 // 模板里 id / file 的占位符：先按占位符把模板切成 argv，再把身份值换进去，
 // 这样含空格的存档路径不会被拆成两个参数，也不需要第二张参数表与模板并行维护。
 const RESUME_ID_SENTINEL = "\u0000id\u0000";
@@ -289,12 +295,14 @@ export function buildAgentResumeArgs(resume) {
     throw agentError("这个 Agent 还不支持续接历史会话，请新开一个会话", "resume-unsupported");
   }
   const id = typeof resume.id === "string" ? resume.id.trim() : "";
-  if (!id || RESUME_ID_UNSAFE.test(id) || RESUME_CONTROL_CHARS.test(id)) throw resumeInvalid();
+  if (!id || id.length > RESUME_ARG_MAX_LENGTH || RESUME_ID_UNSAFE.test(id) || RESUME_CONTROL_CHARS.test(id)) {
+    throw resumeInvalid();
+  }
   let file = "";
   if (resume.file !== undefined && resume.file !== null) {
     if (typeof resume.file !== "string") throw resumeInvalid();
     file = resume.file.trim();
-    if (!file || !isAbsolute(file) || RESUME_FILE_UNSAFE.test(file) || RESUME_CONTROL_CHARS.test(file)) {
+    if (!file || file.length > RESUME_ARG_MAX_LENGTH || !isAbsolute(file) || RESUME_FILE_UNSAFE.test(file) || RESUME_CONTROL_CHARS.test(file)) {
       throw resumeInvalid();
     }
   }
@@ -322,13 +330,16 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
   if (!existsSync(directory)) throw agentError("工作目录不存在，请检查后重试", "invalid_cwd");
   const executable = resolveAgentExecutable(agentId, base);
   const instance = sessionInstanceId(agentId, directory, instanceId);
-  // 续接参数的校验先于启动本身：判不了身份就不起终端，而不是起一个空对话。
+  // 续接参数在 cwd 与执行体都确认可用之后才校验：这两项是每次启动的硬前提，
+  // 报错优先级保持不变（工作目录错就报工作目录，不因续接字段把既有错误盖掉）。
   // 续接的 endpoint 必须与要启动的 agent 一致——否则会拿 A 的执行体拼 B 的
   // 参数（例如 kimi 加 --resume），那是一条谁都不认识的命令。
   let resumeArgs = [];
   if (resume !== null && resume !== undefined) {
     const rebuilt = buildAgentResumeArgs(resume);
-    if (rebuilt.endpoint !== agentId) throw resumeInvalid();
+    if (rebuilt.endpoint !== agentId) {
+      throw agentError("要续接的对话不属于这个 Agent，请重新打开对话", "resume-invalid");
+    }
     resumeArgs = rebuilt.args;
   }
   return {

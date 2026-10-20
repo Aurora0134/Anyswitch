@@ -67,7 +67,7 @@ export const RESUME_COMMAND = Object.freeze({
   grok: (meta) => `grok --resume ${meta.id}`,
 });
 
-export function resumeCommandFor(endpoint, meta) {
+function resumeCommandFor(endpoint, meta) {
   const build = RESUME_COMMAND[endpoint];
   return build ? build(meta) : "";
 }

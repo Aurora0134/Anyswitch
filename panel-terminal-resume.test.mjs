@@ -175,20 +175,27 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
 
   it("resume 载荷不合法返回 400 resume-invalid，不转发", async () => {
     await withFakeAgents(async (cwd) => {
+      // 每条用例都写明要启动的 agentId：配对必须对得上，否则会被「身份与 agent
+      // 不一致」那条先拦下，测不到本条真正想验的规则。
       const cases = [
-        ["resume 不是对象", "kimi"],
-        ["缺 endpoint", { id: SESSION_ID }],
-        ["缺 id", { endpoint: "kimi" }],
-        ["id 全空白", { endpoint: "kimi", id: "  " }],
-        ["pi 缺存档路径", { endpoint: "pi", id: SESSION_ID }],
-        ["身份与要启动的 agent 不一致", { endpoint: "claude", id: SESSION_ID }],
-        ["cmd 元字符", { endpoint: "kimi", id: "a&calc" }],
-        ["客户端夹带命令原文", { endpoint: "kimi", id: SESSION_ID, command: "calc.exe" }],
+        ["resume 不是对象", "kimi", "kimi"],
+        ["缺 endpoint", "kimi", { id: SESSION_ID }],
+        ["缺 id", "kimi", { endpoint: "kimi" }],
+        ["id 全空白", "kimi", { endpoint: "kimi", id: "  " }],
+        ["pi 缺存档路径", "pi", { endpoint: "pi", id: SESSION_ID }],
+        ["身份与要启动的 agent 不一致", "kimi", { endpoint: "claude", id: SESSION_ID }],
+        ["cmd 元字符", "kimi", { endpoint: "kimi", id: "a&calc" }],
+        ["相对路径存档", "pi", { endpoint: "pi", id: SESSION_ID, file: "sessions\\abc.jsonl" }],
+        // 超长身份必须在面板这一层就判非法：放过去会被 terminal-host 的
+        // MAX_LAUNCH_ARG_BYTES 拦成裸 invalid_launch，逃出 resume-* 契约。
+        ["超长 id", "kimi", { endpoint: "kimi", id: "a".repeat(4097) }],
+        ["超长存档路径", "pi", { endpoint: "pi", id: SESSION_ID, file: `C:\\${"a".repeat(4095)}` }],
+        ["客户端夹带命令原文", "kimi", { endpoint: "kimi", id: SESSION_ID, command: "calc.exe" }],
       ];
-      for (const [label, resume] of cases) {
+      for (const [label, agentId, resume] of cases) {
         const root = mkTestDir("anyswitch-resume-route-root-");
         const { router, calls } = resumeRouter({ root });
-        const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd, resume });
+        const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId, cwd, resume });
         await router.handle(req, res);
         assert.equal(res.statusCode, 400, `${label} 判非法`);
         assert.equal(json().ok, false, `${label} 带 ok:false`);
