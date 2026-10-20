@@ -606,7 +606,9 @@
   .rail-term-icon-btn:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
   .rail-term-open, .rail-term-history { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
-  .rail-term-history-scroll { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 16px; }
+  /* 底距 = 遮罩高度：末行底边正好落在渐隐的上沿，整行完整可读（小于遮罩高度会让
+     末行压在渐变里、越靠底越淡）。 */
+  .rail-term-history-scroll { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 24px; }
   .rail-term-history-scroll::-webkit-scrollbar { width: 5px; }
   .rail-term-history-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
   .rail-term-history-scroll::-webkit-scrollbar-track { background: transparent; }
@@ -650,12 +652,20 @@
     min-height: 26px; padding: 0 8px 0 30px; border-radius: var(--radius-md);
   }
   .rail-term-more:hover { color: var(--text-2); }
-  /* 底部 24px 渐隐：静态遮罩，不吃点击、无过渡，终点取栏底色 token。挂在段上（不在
-     滚动容器里），所以它不随内容滚动——与 dsh 的 .fade 同一手法；滚动区留 16px 底距，
-     末行不被它吃掉。 */
+  /* 栏底色取值源：渐隐遮罩的终点必须与栏底色是同一个值，任何皮肤都成立。栏底在基座
+     是 --surface，saas/sepia 于「阶段 2 材质修正 ②」对调成 --bg-page（亮色栏灰<内容
+     白、暗色栏再压暗），aurora 不参与对调、仍是 --surface 玻璃料——两条皮肤分支与那
+     处对调逐项同源。变量挂在栏本体（#v2Rail）上，栏内后代继承同一值；主题预览的栏
+     克隆剥了 id、也不出终端会话栏，天然不中。 */
+  :root[data-ui-version="v2"] #v2Rail { --rail-bg: var(--surface); }
+  :root[data-ui-version="v2"][data-style="saas"] #v2Rail,
+  :root[data-ui-version="v2"][data-style="sepia"] #v2Rail { --rail-bg: var(--bg-page); }
+  /* 底部 24px 渐隐：静态遮罩，不吃点击、无过渡。终点取 --rail-bg（= 栏底色本身），
+     换皮肤不会变成一条更亮的实色带。挂在段上（不在滚动容器里），所以它不随内容滚动
+     ——与 dsh 的 .fade 同一手法。 */
   .rail-term-fade {
     position: absolute; bottom: 0; left: 0; right: 0; height: 24px;
-    background: linear-gradient(to bottom, transparent, var(--surface));
+    background: linear-gradient(to bottom, transparent, var(--rail-bg, var(--surface)));
     pointer-events: none;
   }
   @media (prefers-reduced-motion: reduce) {

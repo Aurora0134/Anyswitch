@@ -7150,7 +7150,10 @@ async function api(method, path, body) {
         renderTerminalPreviewSession();
       })
       .catch((error) => {
-        if (error && (error.code === "resume-unsupported" || error.serverCode === "resume-unsupported")) {
+        // 续接类失败（M3 契约的 resume-unsupported，以及同族的 resume-invalid 等）
+        // 一律落批准句：后端原文是给开发者看的短码/细节，不能上屏。
+        const code = error && (error.serverCode || error.code);
+        if (typeof code === "string" && code.startsWith("resume-")) {
           toast("这个 Agent 的会话暂时不能在终端里续接", true);
           return;
         }
@@ -8309,19 +8312,21 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
-    const loaded = !agentId || terminalRailHistory.endpoint === agentId;
+    // 「落地」= 这个 agent 的列表已成功取回。抓取失败也写着同一个 endpoint，但那份
+    // 空表不是事实——按失败态消费掉自动展开，用户之后手动刷新成功就再也不会展开。
+    const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
     const sessions = loaded ? terminalRailHistory.sessions : [];
     const groups = terminalRailGroupSessions(sessions);
     // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
-    // 等这个 agent 的列表真落地——首帧渲染时历史还没拉回来（组表为空），那时就认下
-    // 「已自动展开」会让这次展开永远不发生。
+    // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
+    // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
     const activeSession = terminalSessionFor(activeTerminalPreviewId);
     const activeGroup = activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "";
     const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}`;
     let scrollKey = "";
-    if (loaded && autoKey !== terminalRailAutoExpandedFor) {
+    if (activeGroup && autoKey !== terminalRailAutoExpandedFor) {
       terminalRailAutoExpandedFor = autoKey;
-      if (activeGroup) terminalRailCollapsedGroups.delete(activeGroup);
+      terminalRailCollapsedGroups.delete(activeGroup);
       scrollKey = activeGroup;
     }
     const parts = [];

@@ -68,7 +68,12 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(body.includes(">历史会话<"), "段头「历史会话」");
       assert.ok(/id="railTermHistoryRefresh"[^>]*title="刷新会话列表"[^>]*aria-label="刷新会话列表"/.test(body),
         "刷新图标 title/aria-label「刷新会话列表」");
-      assert.ok(!/id="railTermNewBtn"[^>]*>新建终端<\/button>/.test(body) || true, "无额外文案");
+      // 栏内可见文案只许是批准清单里的那几句：把 HTML 文本节点全取出来逐个比对，
+      // 新造词一进来就红（不是只看某一条正则不命中）。
+      const textNodes = [...body.matchAll(/>([^<>]+)</g)].map((m) => m[1].trim()).filter(Boolean);
+      const APPROVED = new Set(["终端会话", "本地终端", "新建终端", "打开的终端", "历史会话", "刷新会话列表"]);
+      assert.deepEqual(textNodes.filter((t) => !APPROVED.has(t)), [], "栏体静态文案全部在批准清单内");
+      assert.ok(textNodes.includes("新建终端"), "新建按钮的可见文案在清单里");
     });
 
     it("身份行头像槽留通用终端字形兜底，品牌头像由看板克隆后填", () => {
@@ -113,8 +118,27 @@ describe("终端视图左栏换血（M4）", () => {
     it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留头像与新建图标", () => {
       const fade = cssRule(".rail-term-fade {");
       assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
-      assert.ok(fade.includes("linear-gradient(to bottom, transparent, var(--surface))"), "渐隐终点取栏底色 token，不造新色值");
+      // 终点必须与栏底色同一个取值源：栏底在 saas/sepia 被对调成 --bg-page，写死
+      // --surface 会在那两套皮肤下变成一条更亮的实色带。断言钉的是「同一来源」而不是
+      // 某个具体 token 名，改取值源时测试跟着改、不会替错的实现背书。
+      assert.ok(fade.includes("var(--rail-bg"), "渐隐终点取 --rail-bg（栏底色取值源），不写死某个 token");
+      assert.ok(!/linear-gradient\(to bottom, transparent, var\(--(surface|bg-page)\)\)/.test(fade),
+        "不直接写 --surface / --bg-page（皮肤一换就错）");
+      assert.ok(panelCss.includes(":root[data-ui-version=\"v2\"] #v2Rail { --rail-bg: var(--surface); }"),
+        "基座：栏底色 = --surface");
+      // --rail-bg 与「材质修正 ②」那条栏底对调逐项同源：基座 --surface，
+      // saas/sepia 合并选择器里一起换成 --bg-page，aurora 不参与（沿用基座）。
+      assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] #v2Rail,\s*\n\s*:root\[data-ui-version="v2"\]\[data-style="sepia"\] #v2Rail \{ --rail-bg: var\(--bg-page\); \}/.test(panelCss),
+        "saas/sepia：--rail-bg 跟随栏底对调成 --bg-page");
+      // 栏底那条对调规则（合并选择器一格）确实把 saas/sepia 的 .rail 换成 --bg-page
+      assert.ok(/:root\[data-ui-version="v2"\]\[data-style="saas"\] \.rail,\s*\n\s*:root\[data-ui-version="v2"\]\[data-style="sepia"\] \.rail \{ background: var\(--bg-page\); \}/.test(panelCss),
+        "saas/sepia 的 .rail 底色确为 --bg-page（--rail-bg 与之同值，渐隐终点才对得上）");
+      assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] #v2Rail { --rail-bg'),
+        "aurora 不参与对调，沿用基座 --surface（玻璃料）");
       assert.ok(fade.includes("pointer-events: none"), "遮罩不吃点击");
+      // 滚区底距 = 遮罩高度：末行底边落在渐隐上沿，整行可读
+      const scroll = cssRule(".rail-term-history-scroll {");
+      assert.ok(scroll.includes("padding-bottom: 24px"), "滚动区底距对齐遮罩高度（16px 会让末行压在渐变里）");
       assert.ok(panelCss.includes(".rail-term-history-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
       assert.ok(/:is\(\.rail-term-agent-name, \.rail-term-new-label, \.rail-term-section\) \{ display: none; \}/.test(panelCss),
@@ -329,27 +353,123 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "文案逐字取批准清单");
       assert.equal(log.toasts[0].isErr, true, "按错误提示上屏");
       assert.equal(log.renders, 0, "不重渲");
-      assert.ok(!extractFn("terminalRailResumeSession").includes("clipboard"), "不做复制命令（用户拍板）");    });
+      assert.ok(!extractFn("terminalRailResumeSession").includes("clipboard"), "不做复制命令（用户拍板）");
+    });
 
-    it("M3 回 400 resume-unsupported：同一句提示，不登记会话", async () => {
-      const err = Object.assign(new Error("HTTP 400：resume-unsupported"), { code: "resume-unsupported" });
-      const { sandbox, log } = runResume(RESUMABLE, async () => { throw err; });
-      await sandbox.run();
+    it("续接类短码（resume-unsupported / resume-invalid）一律落批准句，不暴露后端原文", async () => {
+      // 真实形状：api() 把服务端 data.error 落 err.code、data.code 落 err.serverCode，
+      // 两者都可能是短码；这里按它实际抛出的样子造错（不是随手塞一个 code 字段）。
+      const serverError = (status, error, code) => {
+        const detail = String(error || "");
+        const err = new Error(`HTTP ${status}${detail ? "：" + detail : ""}`);
+        err.code = detail;
+        if (typeof code === "string") err.serverCode = code;
+        return err;
+      };
+      for (const code of ["resume-unsupported", "resume-invalid"]) {
+        const { sandbox, log } = runResume(RESUMABLE, async () => {
+          throw serverError(400, code, code);
+        });
+        await sandbox.run();
+        await flush();
+        assert.equal(log.toasts.length, 1, `${code}：只提示一次`);
+        assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", `${code}：落批准句，原文不上屏`);
+        assert.ok(!log.toasts[0].msg.includes("resume-"), `${code}：短码不外泄`);
+        assert.deepEqual(Object.keys(sandbox.sessions), [], `${code}：不登记会话`);
+        assert.equal(sandbox.activeId(), null, `${code}：活跃指针不动`);
+      }
+      // 只有 error 字段是短码、serverCode 缺席（老宿主/转发丢字段）同样拦住
+      const bare = runResume(RESUMABLE, async () => { throw serverError(400, "resume-invalid"); });
+      await bare.sandbox.run();
       await flush();
-      assert.equal(log.toasts.length, 1, "服务端判不可续接时同句提示");
-      assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "与前端预判同一句，不暴露短码");
-      assert.deepEqual(Object.keys(sandbox.sessions), [], "失败不登记会话");
-      assert.equal(sandbox.activeId(), null, "活跃指针不动");
+      assert.equal(bare.log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "只有 error 字段也认");
     });
 
     it("其它失败落既有兜底文案，不吞错", async () => {
       const { sandbox, log } = runResume(RESUMABLE, async () => {
-        throw Object.assign(new Error("HTTP 500"), { code: "spawn_failed" });
+        // 非续接类失败：api() 的真实形状（detail 落 code、机读信号落 serverCode）
+        const err = new Error("HTTP 500：spawn_failed");
+        err.code = "spawn_failed";
+        throw err;
       });
       await sandbox.run();
       await flush();
       assert.equal(log.toasts.length, 1);
       assert.equal(log.toasts[0].msg, "无法启动这个终端", "非续接类失败走终端创建的既有兜底");
+    });
+  });
+
+  describe("打开的终端行交互（vm 真跑）", () => {
+    const runRail = ({ sessions, activeId = "t1", tabs = null }) => {
+      const log = { renders: 0, remembered: [] };
+      const els = { terminalTabs: tabs };
+      const sandbox = new Function("sessions", "activeId", "log", "els", `
+        const terminalBackendSessions = sessions;
+        let activeTerminalPreviewId = activeId;
+        function $(id) { return els[id] ?? null; }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        function rememberTerminalSessionId(id) { log.remembered.push(id); }
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        ${extractFn("terminalRailActivateSession")}
+        ${extractFn("terminalRailCloseSession")}
+        return {
+          activate: terminalRailActivateSession,
+          close: terminalRailCloseSession,
+          activeId: () => activeTerminalPreviewId,
+        };
+      `)(sessions, activeId, log, els);
+      return { sandbox, log };
+    };
+
+    it("点击行切换活跃终端：置活跃、写存档、重渲一次", () => {
+      const { sandbox, log } = runRail({
+        sessions: { t1: { id: "t1" }, t2: { id: "t2" } },
+      });
+      sandbox.activate("t2");
+      assert.equal(sandbox.activeId(), "t2", "活跃指针切到点中的终端");
+      assert.deepEqual(log.remembered, ["t2"], "存档同步写回（刷新恢复才认得这条）");
+      assert.equal(log.renders, 1, "重渲一次（会话屏与页签、左栏同拍）");
+    });
+
+    it("点当前活跃终端 / 不存在的 id / 空 id：一律不动手，不重渲", () => {
+      const { sandbox, log } = runRail({ sessions: { t1: { id: "t1" } } });
+      sandbox.activate("t1");
+      sandbox.activate("ghost");
+      sandbox.activate("");
+      sandbox.activate(null);
+      assert.equal(sandbox.activeId(), "t1", "活跃指针原样");
+      assert.deepEqual(log.remembered, [], "不写存档");
+      assert.equal(log.renders, 0, "不重渲");
+    });
+
+    it("关闭叉走页签同一条处理：点到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
+      const clicked = [];
+      const makeTab = (id, closeEl) => ({
+        getAttribute: (name) => (name === "data-terminal-tab" ? id : null),
+        querySelector: (sel) => (sel === ".terminal-tab-close" ? closeEl : null),
+      });
+      const other = { click: () => clicked.push("other") };
+      const target = { click: () => clicked.push("t2") };
+      const tabs = { querySelectorAll: () => [makeTab("t1", other), makeTab("t2", target)] };
+      const { sandbox, log } = runRail({ sessions: { t1: {}, t2: {} }, tabs });
+      sandbox.close("t2");
+      assert.deepEqual(clicked, ["t2"], "只点目标页签的关闭叉（运行中确认/POST/空态计数全由那一处承担）");
+      assert.equal(log.renders, 0, "关闭逻辑不在本函数里重写——不自己删会话、不自己重渲");
+    });
+
+    it("页签条缺席或找不到对应页签：静默返回，不炸", () => {
+      const absent = runRail({ sessions: { t1: {} }, tabs: null });
+      absent.sandbox.close("t1");
+      assert.equal(absent.log.renders, 0, "页签条不存在时不动手");
+
+      const clicked = [];
+      const tabs = { querySelectorAll: () => [{
+        getAttribute: () => "t1",
+        querySelector: () => ({ click: () => clicked.push("t1") }),
+      }] };
+      const missing = runRail({ sessions: { t1: {}, t2: {} }, tabs });
+      missing.sandbox.close("t9");
+      assert.deepEqual(clicked, [], "id 对不上时什么都不点");
     });
   });
 
@@ -537,6 +657,72 @@ describe("终端视图左栏换血（M4）", () => {
       after.fn.render("kimi");
       assert.equal(after.state.collapsed.has("C:\\dev\\alpha"), true, "同一活跃终端不再自动展开（尊重用户手动收起）");
       assert.equal(after.state.scrolled.length, 0, "也不重复滚");
+    });
+
+    it("抓取失败不算「落地」：失败态不消费自动展开，手动刷新成功后才展开", () => {
+      // 同一个沙盒里连跑两帧：先失败、再刷新成功。失败帧若把 autoKey 消费掉，
+      // 刷新成功那一帧就再也不会自动展开——这正是要钉住的回归。
+      const list = { html: "", writes: 0 };
+      Object.defineProperty(list, "innerHTML", {
+        get: () => list.html,
+        set: (v) => { list.writes += 1; list.html = v; },
+      });
+      const state = { collapsed: new Set(["C:\\dev\\alpha"]), scrolled: [] };
+      const sandbox = new Function("list", "state", "activeSession", `
+        let terminalRailRendered = { open: null, history: null };
+        let terminalRailAutoExpandedFor = "";
+        let terminalRailScrolledFor = "";
+        let terminalRailFlipMode = "instant";
+        const terminalRailCollapsedGroups = state.collapsed;
+        const terminalRailWatermarks = new Map();
+        const TERMINAL_RAIL_WATERMARK = 5;
+        const TERMINAL_RAIL_ICON_CHEVRON = "";
+        const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
+        const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
+        let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+        const activeTerminalPreviewId = "t1";
+        function $(id) { return id === "railTermHistoryList" ? list : null; }
+        function terminalSessionFor(id) { return id === "t1" ? activeSession : null; }
+        function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+        function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+        function sessRelTime() { return "刚刚"; }
+        function esc(v) { return String(v); }
+        function escapeHtml(v) { return String(v || ""); }
+        function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
+        function terminalRailRowTops() { return null; }
+        function playTerminalRailFlip() {}
+        ${extractFn("terminalRailGroupSessions")}
+        ${extractFn("terminalRailWatermarkView")}
+        ${extractFn("terminalRailNextWatermark")}
+        ${extractFn("terminalRailMoreLabel")}
+        ${extractFn("terminalRailSameDir")}
+        ${extractFn("terminalRailGroupForDir")}
+        ${extractFn("terminalRailHistoryRowHtml")}
+        ${extractFn("renderTerminalRailHistory")}
+        return {
+          render: renderTerminalRailHistory,
+          collapsed: terminalRailCollapsedGroups,
+          setHistory: (h) => { terminalRailHistory = h; },
+          autoExpandedFor: () => terminalRailAutoExpandedFor,
+        };
+      `)(list, state, { id: "t1", cwd: "C:\\dev\\alpha" });
+
+      // 第一帧：抓取失败。endpoint 已写成 kimi（与成功态同形），但带 error。
+      sandbox.setHistory({ endpoint: "kimi", sessions: [], fetchedAt: 1, error: new Error("terminal_host_unavailable") });
+      sandbox.render("kimi");
+      assert.equal(sandbox.autoExpandedFor(), "", "失败态不消费 autoKey（失败那份空表不是事实）");
+      assert.equal(state.collapsed.has("C:\\dev\\alpha"), true, "失败态不动组态");
+
+      // 第二帧：用户手动刷新成功，列表落地 → 活跃组照常自动展开并滚到可见。
+      sandbox.setHistory({
+        endpoint: "kimi",
+        sessions: [{ id: "s1", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 }],
+        fetchedAt: 2, error: null,
+      });
+      sandbox.render("kimi");
+      assert.equal(sandbox.autoExpandedFor(), "kimi\u0000t1", "成功落地才认下「已自动展开」");
+      assert.equal(state.collapsed.has("C:\\dev\\alpha"), false, "活跃组自动展开");
+      assert.deepEqual(state.scrolled, ["C:\\dev\\alpha"], "并滚到可见");
     });
 
     it("水位线与刷新把 flip 模式置回 instant；组展开才置 flip", () => {
