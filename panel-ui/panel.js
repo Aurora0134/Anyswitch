@@ -7195,8 +7195,18 @@ async function api(method, path, body) {
   // 连接 terminal-host 的成功链路：就绪后重渲会话、立即补拍归属轮询、同步活跃
   // 真值流；失败即置回未就绪并按宿主现态落对应空态。初装、空态动作钮 running
   // 分派、进页自动重试共用同一通路，三处复用防止再漏改。
+  // 单飞：进页时「上一帧宿主态已知在跑就先补连」与「现取状态后按 running 补连」
+  // 会并发落到这里，而成功链各跑一次 renderTerminalPreviewSession/connectTerminalStream
+  // （xterm 重建两遍），后发失败还会把就绪位翻回 false——正是要消除的停态。进行中
+  // 直接返回同一条 Promise，四条调用路径（点击/刷新恢复/归属轮询/启动）一并去重。
+  // 缓存只在落定时清（成功失败都清），所以失败后可重试、稳态下后续调用照常发起。
+  // 状态挂在函数自身上而非模块级 let：connectTerminalBackend 会被单测按函数体抽进
+  // 桩环境真跑，那些桩不会声明模块级变量——挂函数属性则零依赖成立（也不污染
+  // 那些桩的词法作用域）。
   function connectTerminalBackend() {
-    return fetchTerminalSessions().then(() => {
+    const self = connectTerminalBackend;
+    if (self.inFlight) return self.inFlight;
+    self.inFlight = fetchTerminalSessions().then(() => {
       terminalFirstConnectSettled = true;
       syncTerminalAddBtn();
       // 首连是被动挂载：进程已退只回放最后一屏，不替用户重开。页面加载时
@@ -7215,7 +7225,11 @@ async function api(method, path, body) {
       // 兜底页按宿主现态分派：宿主已停时落「已停止」页（带启动动作），不拿「未运行」页顶掉
       if (terminalHostState === "stopped") renderTerminalStoppedState();
       else renderTerminalUnavailableState();
+    }).finally(() => {
+      // 落定即放行：成功后可再连（重连/降级重试），失败后也可重试。
+      self.inFlight = null;
     });
+    return self.inFlight;
   }
 
   // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
@@ -7571,8 +7585,13 @@ async function api(method, path, body) {
     terminalReturnView = currentView;
     terminalReturnScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
     switchView("terminal");
-    // 降级重试：terminal-host 不在时进页自动再连一次，与空态动作钮 running 分派同通路。
-    if (!terminalBackendReady) connectTerminalBackend();
+    // 降级重试：宿主在跑而本地未就绪时进页自动再连一次。判据取上一帧宿主态（1s
+    // 轮询维护）——权威判定在下面的分派里，它现取真值再补一次；两处并发由
+    // connectTerminalBackend 的单飞合并成一条请求。宿主已停/不可知时不发这一发
+    // （那是注定失败的拉取，拉起与空态由分派处理）。
+    if (terminalHostState === "running") {
+      if (!terminalBackendReady) connectTerminalBackend();
+    }
     resumeTerminalBackendAfterEntry(await dispatchTerminalEntry());
   }
 
@@ -9039,7 +9058,7 @@ async function api(method, path, body) {
       // 不 await：恢复落位不该等一次网络往返，补连本身是异步的。typeof 闸护
       // restoreView 的桩环境（那份桩只关心落位目标，不装网络侧分派）。
       if (typeof dispatchTerminalEntry === "function") {
-        dispatchTerminalEntry().then(resumeTerminalBackendAfterEntry);
+        dispatchTerminalEntry().then(resumeTerminalBackendAfterEntry).catch(() => {});
       }
     } else if (settingsOpen) {
       // 上面那条链落好的就是进设置前的主视图（没命中则为看板），直接拿来当返回目标；

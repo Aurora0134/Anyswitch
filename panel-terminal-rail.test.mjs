@@ -734,6 +734,151 @@ describe("终端视图左栏换血（M4）", () => {
     });
   });
 
+  describe("进终端页的补连：单飞去重（复审必修 1）", () => {
+    // 基线遗留行「进页未就绪先补连」与共享分派叠用：running 时同一进页会连两次。
+    // connectTerminalBackend 没有 in-flight 去重，两次成功链各跑一次
+    // renderTerminalPreviewSession/connectTerminalStream（xterm 重建两遍），后发失败
+    // 还会把就绪位翻回 false——正是要消除的停态。这里按行为断言，不看字符串。
+    const runOpen = (hostState, { ready = false } = {}) => {
+      const log = { fetches: 0, renders: 0, applied: [], switched: [], stopped: false, autoStart: 0, pending: [] };
+      const sandbox = new Function("hostState", "ready", "log", `
+        let terminalBackendReady = ready;
+        let terminalFirstConnectSettled = false;
+        let terminalHostState = "unknown";
+        let currentView = "board";
+        let terminalReturnView = "board";
+        let terminalReturnScrollTop = 0;
+        const window = { scrollY: 0 };
+        const document = { documentElement: { scrollTop: 0 } };
+        function $(id) { return null; }
+        function api(method, path) {
+          if (path === "/api/terminal/host/status") return Promise.resolve({ state: hostState, manualStop: false });
+          return Promise.resolve({});
+        }
+        function switchView(name) { currentView = name; log.switched.push(name); }
+        function applyTerminalHostState(state) { terminalHostState = state; log.applied.push(state); }
+        function normalizeTerminalHostState(raw) {
+          if (raw === "running") return "running";
+          if (raw === "stopped" || raw === "stopped-manual") return "stopped";
+          if (raw === "exited" || raw === "crashed") return "exited";
+          return "unknown";
+        }
+        function clearTerminalLocalSessions() {}
+        function renderTerminalStoppedState() { log.stopped = true; }
+        function renderTerminalUnavailableState() { log.unavailable = true; }
+        function autoStartTerminalHost() { log.autoStart += 1; }
+        // 连接请求挂起：真实网络有往返时延，双连正是发生在这段窗口里
+        // （进页先补连 → 分派拿到宿主状态时第一发还没回来 → 又补一次）。
+        function fetchTerminalSessions() {
+          log.fetches += 1;
+          return new Promise((resolve) => {
+            log.pending.push(() => { terminalBackendReady = true; resolve(); });
+          });
+        }
+        function syncTerminalAddBtn() {}
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        function pollTerminalSessions() {}
+        function syncTerminalActivityStream() {}
+        function reportTerminalThemeToBackend() {}
+        ${extractFn("connectTerminalBackend")}
+        ${extractFn("dispatchTerminalEntry")}
+        ${extractFn("resumeTerminalBackendAfterEntry")}
+        ${extractFn("openTerminalPreview")}
+        return { open: openTerminalPreview, ready: () => terminalBackendReady };
+      `)(hostState, ready, log);
+      return { sandbox, log };
+    };
+
+    it("running + 未就绪：真正发出的连接请求恰为 1（不双连、xterm 不重建两遍）", async () => {
+      const { sandbox, log } = runOpen("running");
+      await sandbox.open();                       // 进页：先补连（挂起），再分派
+      assert.equal(log.fetches, 1, "分派那一步不该再发第二发（第一发还在飞）");
+      for (const settle of log.pending) settle(); // 连接返回
+      await flush();
+      await flush();
+      assert.equal(log.fetches, 1, "整次进页只发一次连接请求（单飞去重）");
+      assert.equal(log.renders, 1, "成功链只跑一次会话渲染（xterm 不会重建两遍）");
+      assert.equal(sandbox.ready(), true, "就绪位落定");
+    });
+
+    it("running + 已就绪：一次都不连", async () => {
+      const { sandbox, log } = runOpen("running", { ready: true });
+      await sandbox.open();
+      assert.equal(log.fetches, 0, "已就绪不空连");
+    });
+
+    it("stopped / exited：不发明知必败的拉取，改走拉起", async () => {
+      for (const state of ["stopped", "exited"]) {
+        const { sandbox, log } = runOpen(state);
+        await sandbox.open();
+        assert.equal(log.fetches, 0, `${state} 时不发注定失败的连接请求`);
+        assert.equal(log.autoStart, 1, `${state} 时拉起宿主`);
+      }
+    });
+
+    it("unknown：不连，落不可用空态", async () => {
+      const { sandbox, log } = runOpen("unknown");
+      await sandbox.open();
+      assert.equal(log.fetches, 0, "状态不可知时不连");
+      assert.equal(log.unavailable, true, "落既有不可用空态");
+    });
+  });
+
+  describe("connectTerminalBackend 单飞（复审必修 1 的根因修法）", () => {
+    const runConnect = () => {
+      const log = { fetches: 0, renders: 0, settled: 0 };
+      const sandbox = new Function("log", `
+        let terminalBackendReady = false;
+        let terminalFirstConnectSettled = false;
+        let terminalHostState = "running";
+        function fetchTerminalSessions() {
+          log.fetches += 1;
+          return log.failNext
+            ? Promise.reject(new Error("boom"))
+            : Promise.resolve().then(() => { terminalBackendReady = true; });
+        }
+        function syncTerminalAddBtn() {}
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        function pollTerminalSessions() {}
+        function syncTerminalActivityStream() {}
+        function reportTerminalThemeToBackend() {}
+        function renderTerminalStoppedState() {}
+        function renderTerminalUnavailableState() { log.unavailable = true; }
+        ${extractFn("connectTerminalBackend")}
+        return { connect: connectTerminalBackend, ready: () => terminalBackendReady };
+      `)(log);
+      return { sandbox, log };
+    };
+
+    it("进行中并发调用：只发一次请求，两处拿到同一条 Promise", async () => {
+      const { sandbox, log } = runConnect();
+      const a = sandbox.connect();
+      const b = sandbox.connect();
+      assert.equal(a, b, "进行中返回同一条 Promise（单飞）");
+      await Promise.all([a, b]);
+      assert.equal(log.fetches, 1, "只发一次连接请求");
+      assert.equal(log.renders, 1, "成功链只跑一次");
+    });
+
+    it("失败后缓存必须清掉：下一次调用能重新发起（不是永久卡死）", async () => {
+      const { sandbox, log } = runConnect();
+      log.failNext = true;
+      await sandbox.connect();
+      assert.equal(log.fetches, 1, "第一次失败");
+      log.failNext = false;
+      await sandbox.connect();
+      assert.equal(log.fetches, 2, "失败后可以重试（缓存已清）");
+      assert.equal(sandbox.ready(), true, "重试成功即就绪");
+    });
+
+    it("成功后缓存也要清掉：稳态下后续调用照常发起", async () => {
+      const { sandbox, log } = runConnect();
+      await sandbox.connect();
+      await sandbox.connect();
+      assert.equal(log.fetches, 2, "成功后不缓存结果（下次仍可重连）");
+    });
+  });
+
   describe("渲染挂点与刷新纪律（源码钉死）", () => {
     it("历史会话只在进终端视图拉一次：switchView 挂 enterTerminalRail，轮询不碰会话列表", () => {
       const sw = extractFn("switchView");
