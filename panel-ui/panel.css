@@ -571,10 +571,21 @@
      token（--surface / --surface-hover / --accent-soft / --text-3…），不造新色值。 */
   #railTerminalDir {
     /* 换血时整栏接管：不吃 .rail-dir 的贴底 margin-top:auto（id 选择器提级，压过
-       后文那条基座规则），改为从栏顶往下铺满，历史会话段自己滚。 */
-    margin-top: 12px; flex: 1 1 auto; min-height: 0; gap: 0;
+       后文那条基座规则），改为从栏顶往下铺满，历史会话段自己滚。
+       min-height 用 auto（默认的自动最小尺寸）而不是 0：栏体是一列 flex，写成 0 会
+       允许「身份行 + 新建 + 打开的终端」这些定高内容被压到内容高度以下——行不缩
+       （min-height:30px），容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口
+       实测：容器 18px 装两个 30px 行，段头落进行高亮里）。保持 auto 后，空间不够时
+       先压历史会话段（它是唯一 flex:1 1 auto 且 min-height:0 的那段），仍不够则由
+       栏体自己滚（.rail 本来就有 overflow-y:auto），任何内容都不重叠。 */
+    margin-top: 12px; flex: 1 1 auto; gap: 0;
   }
-  .rail-term-agent { display: flex; align-items: center; gap: 10px; padding: 0 6px 12px; min-width: 0; }
+  /* 栏体分段的 flex 纪律（矮窗口不重叠的前提，见 #railTerminalDir 注释）：
+     身份行、新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
+     只有历史会话段吃剩余空间（flex:1 1 auto + min-height:0），不够时它先缩、再交给
+     栏体滚动。默认的 flex:0 1 auto 会让这些定高块参与收缩，而它们的行有 min-height、
+     容器没有，行就会溢出容器画到下一段上。 */
+  .rail-term-agent { display: flex; align-items: center; gap: 10px; padding: 0 6px 12px; min-width: 0; flex: none; }
   .rail-term-agent-avatar {
     flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
     border-radius: var(--radius-sm); color: var(--text-2); line-height: 0;
@@ -590,13 +601,13 @@
     appearance: none; border: 1px solid var(--border); background: var(--surface-sunken); color: var(--text);
     font: inherit; font-size: 13.5px; font-weight: 600; text-align: left;
     display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin: 0 2px 12px;
-    border-radius: var(--radius-md); cursor: pointer; white-space: nowrap;
+    border-radius: var(--radius-md); cursor: pointer; white-space: nowrap; flex: none;
   }
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
-  .rail-term-section { display: flex; flex-direction: column; min-height: 0; margin-bottom: 10px; }
+  .rail-term-section { display: flex; flex-direction: column; flex: none; margin-bottom: 10px; }
   .rail-term-section-history { position: relative; flex: 1 1 auto; min-height: 0; margin-bottom: 0; }
-  .rail-term-section-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 6px; }
+  .rail-term-section-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 6px; flex: none; }
   .rail-term-section-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-3); }
   .rail-term-icon-btn {
     appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
@@ -605,7 +616,9 @@
   }
   .rail-term-icon-btn:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
-  .rail-term-open, .rail-term-history { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
+  /* 两个列表容器都是内容高度的定高块（不参与收缩）；历史列表在滚动容器内，溢出由
+     滚动容器裁切，不越段。 */
+  .rail-term-open, .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
   /* 底距 = 遮罩高度：末行底边正好落在渐隐的上沿，整行完整可读（小于遮罩高度会让
      末行压在渐变里、越靠底越淡）。 */
   .rail-term-history-scroll { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 24px; }

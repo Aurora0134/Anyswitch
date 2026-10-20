@@ -115,6 +115,33 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rm, "prefers-reduced-motion 下箭头过渡关掉");
     });
 
+    it("矮窗口不重叠：定高块 flex:none，只有历史会话段吃剩余空间并自己滚", () => {
+      // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
+      // min-height、容器没有 → 行溢出容器画到下一段头上（「打开的终端」行压在
+      // 「历史会话」段头里）。布局几何在桩框架里量不出来（要真渲染才有 rect），
+      // 所以这里钉住让几何成立的结构契约；几何本身由无头 Chrome harness 验。
+      const dir = cssRule("#railTerminalDir {");
+      // 只比对声明（注释里也会出现「min-height:0」这类说明文字）
+      const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
+      assert.ok(!/min-height:\s*0/.test(decls(dir)), "栏体不吃 min-height:0（否则定高内容可被压到内容高度以下）");
+      for (const [selector, why] of [
+        [".rail-term-agent {", "身份行"],
+        [".rail-term-new {", "新建终端钮"],
+        [".rail-term-section {", "段容器"],
+        [".rail-term-section-head {", "段头"],
+        [".rail-term-open, .rail-term-history {", "两个列表容器"],
+      ]) {
+        assert.ok(cssRule(selector).includes("flex: none"), `${why} 是定高块，必须 flex:none（不参与收缩）`);
+      }
+      const hist = cssRule(".rail-term-section-history {");
+      assert.ok(hist.includes("flex: 1 1 auto") && hist.includes("min-height: 0"),
+        "历史会话段是唯一吃剩余空间的那段（空间不够时它先缩）");
+      assert.ok(cssRule(".rail-term-history-scroll {").includes("overflow-y: auto"),
+        "历史列表在自己的滚动容器里滚，溢出由它裁切、不越段");
+      // 列表容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
+      assert.ok(!/\.rail-term-open[^{]*\{[^}]*overflow/.test(panelCss), "「打开的终端」列表不靠 overflow 裁切");
+    });
+
     it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留头像与新建图标", () => {
       const fade = cssRule(".rail-term-fade {");
       assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
