@@ -8340,11 +8340,13 @@ async function api(method, path, body) {
       parts.push(`</div>`);
     }
     const html = parts.join("");
-    const before = terminalRailRowTops(list);
+    // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐行
+    // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的行）。
+    const before = terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null;
     if (html !== terminalRailRendered.history) {
       terminalRailRendered.history = html;
       list.innerHTML = html;
-      playTerminalRailFlip(list, before);
+      if (before) playTerminalRailFlip(list, before);
     }
     terminalRailFlipMode = "instant";
     if (scrollKey && terminalRailScrolledFor !== autoKey) {

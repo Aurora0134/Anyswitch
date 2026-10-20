@@ -469,6 +469,8 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(extractFn("refreshTerminalRailHistory").includes('terminalRailFlipMode = "instant"'), "刷新直接落位");
       assert.ok(extractFn("renderTerminalRailHistory").includes('terminalRailFlipMode = "instant"'),
         "一帧用完即复位，下一次更新默认瞬时");
+      assert.ok(extractFn("renderTerminalRailHistory").includes('terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null'),
+        "旧位置只在真要播 FLIP 时才量（1s 轮询每拍都渲染，无条件量行等于每秒一次强制布局）");
       assert.ok(extractFn("initTerminalRail").includes("terminalRailMotionArmed = true"), "首次指针/键盘输入才武装动画");
     });
   });
