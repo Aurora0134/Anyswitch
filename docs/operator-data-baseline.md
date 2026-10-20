@@ -21,4 +21,4 @@
 
 ## 泄露核查判据
 
-拿 `store.json` 的全部 provider id，以及上文的私有前缀词表，对基线全文做匹配：除模型家族名 `sensenova`（商汤公开型号名，出现在"sensenova u1 / 1.5 判为非文本"这类规则文字里，与渠道重名属巧合）之外，应零命中。
+拿 `store.json` 的全部 provider id，以及上文的私有前缀词表，对基线全文做匹配：除两个模型家族名——`sensenova`（商汤公开型号名，出现在"sensenova u1 / 1.5 判为非文本"这类规则文字里）与 `minimax`（出现在 `minimax-m2.7` / `minimax-m3` / `minimax-m3.1-flash` 这些模型键名里）——与渠道 id 重名属巧合，其余应零命中。

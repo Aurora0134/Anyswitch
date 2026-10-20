@@ -1,7 +1,7 @@
 {
   "version": 1,
   "generatedAt": "2026-09-12T05:14:45.365Z",
-  "updated": "2026-10-07T03:49:51.304Z",
+  "updated": "2026-10-20T16:34:51.179Z",
   "levelsOrder": [
     "off",
     "light",
@@ -75,6 +75,10 @@
       {
         "id": "step-5-preview-native",
         "what": "step-5-preview 按官方文档三档 low/medium/high"
+      },
+      {
+        "id": "minimax-m3.1-flash-native",
+        "what": "MiniMax-M3.1-Flash 用原生五档 low/medium/high/xhigh/max（默认 max）"
       }
     ],
     "updateNotes": [
@@ -84,6 +88,14 @@
         "what": "补查后改用各模型原生分档：step-5-preview low/medium/high；deepseek-flash 与 deepseek-v4.1-flash low/high/max；qwen3.8 max·flash low/medium/xhigh（默认 xhigh）",
         "evidence": "StepFun 官方模型页与推理模型接入页；DeepSeek 官方思考模式页与 V4.1 Flash 公告页；阿里云百炼 OpenAI 兼容页与思考模式页；pi-ai 目录 deepseek.json / qwen-token-plan*.json",
         "ruleChange": "build.mjs 新增 step-5-preview-native / deepseek-v4.1-native / qwen3.8-max-flash-native 三条 set 型规则；deepseek-xhigh 的 test 排除 V4.1 两枚官方名；撤掉 2026-09-12 的 qwen3.8-flash-max-xhigh-max（证据显示 high/max 都折到 xhigh）",
+        "notApplied": "wire 与 thinkingFormat 未写入（DSH compat 方言轴，本次未授权）"
+      },
+      {
+        "at": "2026-10-21",
+        "scope": "minimax-m3.1-flash",
+        "what": "补查 MiniMax 官方文档后改用原生分档：五档 low/medium/high/xhigh/max，默认 max；思考强制开启，thinking:{type:disabled} 或 effort:none 返回 400",
+        "evidence": "MiniMax 开放平台模型调用文档（platform.minimax.cn/docs/guides/text-generation）与对话补全 API 参考；上下文窗口 1,000,000 与 effort 枚举同源",
+        "ruleChange": "新增 minimax-m3.1-flash-native 规则，覆盖此前 minimax 家族由 pi-ai 目录推得的 minimal/low/medium/high/max（默认 high）；minimax-m3 与 minimax-m2.7 两行不动",
         "notApplied": "wire 与 thinkingFormat 未写入（DSH compat 方言轴，本次未授权）"
       }
     ]
@@ -1776,6 +1788,31 @@
       "confidence": "high",
       "kind": "reasoning",
       "userEdited": false
+    },
+    "minimax-m3.1-flash": {
+      "levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": "max",
+      "source": "operator-rule",
+      "confidence": "high",
+      "kind": "reasoning",
+      "userEdited": false,
+      "preOperator": {
+        "levels": [
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "kind": "reasoning"
+      },
+      "rule": "MiniMax-M3.1-Flash 按官方文档五档 low/medium/high/xhigh/max，默认 max，不支持关闭思考"
     },
     "muse-glimmer-30b": {
       "levels": [
