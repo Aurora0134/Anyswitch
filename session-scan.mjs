@@ -1660,6 +1660,13 @@ function openSqliteReadOnly(path) {
   return new DatabaseSync(uri);
 }
 
+// Which tables a store actually carries. Clients add and retire tables across
+// versions (opencode 2.x moved sessions and messages into new ones), and an
+// older install has no trace of them — probing beats assuming.
+function sqliteTableExists(db, name) {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+}
+
 // Shared row shape for zcode/opencode `session` tables (same columns on both):
 // id / title / directory / time_created / time_updated (ms since epoch).
 function scanSessionTable({ endpoint, dbPath }) {
@@ -1691,60 +1698,116 @@ function scanSessionTable({ endpoint, dbPath }) {
 // while it is still running (real rows: 22099 / 451 / 19). The result is
 // emitted as its own "tool"-role message, the shape every other adapter
 // already produces; without it these two endpoints showed calls with no
-// output at all.
+// output at all. opencode 2.x keeps the same idea in a newer envelope: a
+// completed call carries state.content (content blocks) instead of
+// state.output, and a failed one carries state.error as {type, message}
+// instead of a bare string.
 function toolResultText(item) {
   if (!item || typeof item !== "object" || item.type !== "tool") return null;
   const state = item.state;
   if (!state || typeof state !== "object") return null;
-  const text = state.status === "error" ? state.error : state.output;
-  if (typeof text !== "string" || text.trim() === "") return null;
-  return text;
+  if (state.status === "error") {
+    const message = typeof state.error === "string" ? state.error : state.error?.message;
+    return typeof message === "string" && message.trim() !== "" ? message : null;
+  }
+  if (typeof state.output === "string" && state.output.trim() !== "") return state.output;
+  if (Array.isArray(state.content)) {
+    const text = extractText(state.content);
+    if (text.trim() !== "") return text;
+  }
+  return null;
 }
 
-// Shared message loader for zcode/opencode: message.data holds {role,...},
-// part.data holds content blocks ({type:"text",text} etc.).
+// Shared message loader for zcode/opencode 1.x stores: message.data holds
+// {role,...}, part.data holds content blocks ({type:"text",text} etc.).
+function loadSqliteMessagesFrom(db, sessionId) {
+  const messages = db
+    .prepare("SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC")
+    .all(sessionId);
+  const partStmt = db.prepare(
+    "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC",
+  );
+  const out = [];
+  for (const message of messages) {
+    let data;
+    try {
+      data = JSON.parse(message.data);
+    } catch {
+      continue;
+    }
+    const role = typeof data.role === "string" ? data.role : "unknown";
+    const ts = typeof message.time_created === "number" ? message.time_created : null;
+    const parts = partStmt.all(message.id);
+    const parsed = parts.map((part) => {
+      try {
+        return JSON.parse(part.data);
+      } catch {
+        return null;
+      }
+    });
+    const content = parsed
+      .map(extractTextFromItem)
+      .filter((t) => t !== null && t.trim() !== "")
+      .join("\n");
+    if (content.trim() !== "") out.push({ role, content, ts });
+    // Tool results follow the turn that called them, in part order.
+    for (const item of parsed) {
+      const output = toolResultText(item);
+      if (output !== null) out.push({ role: "tool", content: output, ts });
+    }
+  }
+  return out;
+}
+
 function loadSqliteMessages(dbPath, sessionId) {
   const db = openSqliteReadOnly(dbPath);
   try {
-    const messages = db
-      .prepare("SELECT id, data, time_created FROM message WHERE session_id = ? ORDER BY time_created ASC")
-      .all(sessionId);
-    const partStmt = db.prepare(
-      "SELECT data FROM part WHERE message_id = ? ORDER BY time_created ASC",
-    );
-    const out = [];
-    for (const message of messages) {
-      let data;
-      try {
-        data = JSON.parse(message.data);
-      } catch {
-        continue;
-      }
-      const role = typeof data.role === "string" ? data.role : "unknown";
-      const ts = typeof message.time_created === "number" ? message.time_created : null;
-      const parts = partStmt.all(message.id);
-      const parsed = parts.map((part) => {
-        try {
-          return JSON.parse(part.data);
-        } catch {
-          return null;
-        }
-      });
-      const content = parsed
-        .map(extractTextFromItem)
-        .filter((t) => t !== null && t.trim() !== "")
-        .join("\n");
-      if (content.trim() !== "") out.push({ role, content, ts });
-      // Tool results follow the turn that called them, in part order.
-      for (const item of parsed) {
-        const output = toolResultText(item);
-        if (output !== null) out.push({ role: "tool", content: output, ts });
-      }
-    }
-    return out;
+    return loadSqliteMessagesFrom(db, sessionId);
   } finally {
     db.close();
   }
+}
+
+// opencode 2.x transcript: one row per message in `session_message`, `type` is
+// the role and `data` the payload (user → {text}; assistant → {content:
+// [blocks]}). The remaining types are the engine's own bookkeeping — system
+// notices, synthetic envelopes, compaction summaries, idle/model/agent switch
+// markers — which 1.x never stored as messages at all; they stay out of the
+// transcript for the same reason every other adapter drops its equivalents.
+const OPENCODE_V2_ROLES = Object.freeze({ user: "user", assistant: "assistant" });
+
+function loadOpencodeV2Messages(db, sessionId) {
+  const rows = db
+    .prepare("SELECT type, data, time_created FROM session_message WHERE session_id = ? ORDER BY seq ASC")
+    .all(sessionId);
+  const out = [];
+  for (const row of rows) {
+    const role = OPENCODE_V2_ROLES[row.type];
+    if (role === undefined) continue;
+    let data;
+    try {
+      data = JSON.parse(row.data);
+    } catch {
+      continue;
+    }
+    const ts = typeof data?.time?.created === "number"
+      ? data.time.created
+      : (typeof row.time_created === "number" ? row.time_created : null);
+    const blocks = Array.isArray(data?.content) ? data.content : [];
+    const content = role === "user"
+      ? (typeof data?.text === "string" ? data.text : "")
+      : blocks
+        .map(extractTextFromItem)
+        .filter((t) => t !== null && t.trim() !== "")
+        .join("\n");
+    if (content.trim() !== "") out.push({ role, content, ts });
+    // Same shape as 1.x: tool results follow the turn that called them.
+    for (const item of blocks) {
+      const output = toolResultText(item);
+      if (output !== null) out.push({ role: "tool", content: output, ts });
+    }
+  }
+  return out;
 }
 
 // Delete one session row; WAL stores accept writes from a ro-URI? No — mode=ro
@@ -1787,19 +1850,95 @@ function createZcodeAdapter(roots) {
   };
 }
 
+// opencode 2.x moved the session store: sessions live in `session_v2`, messages
+// in `session_message`. The 1.x `session` / `message` / `part` tables stay in
+// the same db and the upgrade copies old rows forward (51 legacy sessions on
+// this machine appear in both, same ids), so `session_v2` is the superset —
+// read it first, then append whatever only the old table still has. A 1.x
+// install (no v2 table) or a half-migrated db then reads correctly either way,
+// and nothing is listed twice.
+const OPENCODE_SESSION_COLUMNS = "id, title, directory, time_created, time_updated";
+
+function scanOpencodeSessions(dbPath) {
+  const db = openSqliteReadOnly(dbPath);
+  try {
+    const rows = [];
+    const seen = new Set();
+    for (const table of ["session_v2", "session"]) {
+      if (!sqliteTableExists(db, table)) continue;
+      for (const row of db.prepare(`SELECT ${OPENCODE_SESSION_COLUMNS} FROM ${table}`).all()) {
+        const id = String(row.id);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        rows.push(row);
+      }
+    }
+    rows.sort((a, b) => (b.time_updated ?? 0) - (a.time_updated ?? 0));
+    return rows.map((row) =>
+      makeMeta({
+        endpoint: "opencode",
+        id: String(row.id),
+        title: typeof row.title === "string" && row.title.trim() !== "" ? truncateText(row.title, TITLE_MAX_CHARS) : null,
+        project: typeof row.directory === "string" ? row.directory : null,
+        file: `sqlite:${dbPath}#${row.id}`,
+        createdAt: typeof row.time_created === "number" ? row.time_created : null,
+        lastActive: typeof row.time_updated === "number" ? row.time_updated : null,
+      }),
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function loadOpencodeMessages(dbPath, sessionId) {
+  const db = openSqliteReadOnly(dbPath);
+  try {
+    if (sqliteTableExists(db, "session_message")) {
+      const messages = loadOpencodeV2Messages(db, sessionId);
+      // A session whose messages never made it into the new table (upgrade
+      // interrupted mid-copy) still has its 1.x transcript; only fall back
+      // when the new store is empty for this id.
+      if (messages.length > 0) return messages;
+    }
+    return loadSqliteMessagesFrom(db, sessionId);
+  } finally {
+    db.close();
+  }
+}
+
+// Deletion has to clear both stores: the row the panel listed and the message
+// rows hanging off it. Cascade deletes only fire with foreign keys enabled (the
+// SQLite default is off), so the pragma is set explicitly and the message table
+// is cleared by hand — the transcript must not outlive the session it belongs
+// to even if a future schema drops the cascade.
+function deleteOpencodeSession(dbPath, sessionId) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("PRAGMA foreign_keys = ON");
+    if (sqliteTableExists(db, "session_message")) {
+      db.prepare("DELETE FROM session_message WHERE session_id = ?").run(sessionId);
+    }
+    if (sqliteTableExists(db, "session_v2")) db.prepare("DELETE FROM session_v2 WHERE id = ?").run(sessionId);
+    if (sqliteTableExists(db, "session")) db.prepare("DELETE FROM session WHERE id = ?").run(sessionId);
+  } finally {
+    db.close();
+  }
+  return true;
+}
+
 function createOpencodeAdapter(roots) {
   const dbPath = () => join(roots[0], "opencode.db");
   return {
     id: "opencode",
     roots: () => roots,
     async scan() {
-      return scanSessionTable({ endpoint: "opencode", dbPath: dbPath() });
+      return scanOpencodeSessions(dbPath());
     },
     async loadMessages(file) {
-      return loadSqliteMessages(dbPath(), parseSqliteLocator(file, dbPath()));
+      return loadOpencodeMessages(dbPath(), parseSqliteLocator(file, dbPath()));
     },
     async delete(file) {
-      return deleteSqliteSession(dbPath(), parseSqliteLocator(file, dbPath()));
+      return deleteOpencodeSession(dbPath(), parseSqliteLocator(file, dbPath()));
     },
   };
 }

@@ -8,7 +8,7 @@ import { validateStore } from "./store-schema.mjs";
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
 import { isChainFailoverStatus, buildChainRuntime } from "./chain-routing.mjs";
 import { sanitizeInstanceId, INSTANCE_ID_MAX_LEN } from "./agent-metrics.mjs";
-import { instanceIdFromSocket, bindLateSocketInstance, SOCKET_OVERRIDE_AGENT_IDS } from "./late-socket-instance.mjs";
+import { instanceIdFromSocket, bindLateSocketInstance, SOCKET_OVERRIDE_AGENT_IDS, UNTRUSTED_INSTANCE_HEADER_AGENT_IDS } from "./late-socket-instance.mjs";
 import { wireIdToStatModel, wireIdToTargetId } from "./wire-id.mjs";
 import { unpackChannelModelSlug, CHANNEL_MODEL_SEPARATOR } from "./channel-model-slug.mjs";
 
@@ -93,17 +93,19 @@ function explicitInstanceId(headers) {
 }
 
 // Socket→PID 兜底实例标签（机制见 instance-socket-owner.mjs）。override 集合
-// （SOCKET_OVERRIDE_AGENT_IDS，见 late-socket-instance.mjs）之外，
-// x-agent-instance 头仍是唯一正源且优先；只有头缺失（或非法
-// 被静默丢弃）时，才对多实例端点（白名单在 late-socket-instance.mjs，与
-// agent-metrics 的 instanceBuckets 口径一致：kimi/opencode/pi/codex/grok/dsh/
-// qoder/claude）用 netstat 快照反查 keep-alive 连接对端进程，
-// 合成 "<agentId>-<pid>"。qoder 的头通道天生不存在——它的 provider 配置
-// 写不进自定义请求头——socket 兜底是它唯一的实例身份。override 端点（pi）
-// 相反：头存在仅为满足托管配置的
-// 占位符（models.json 缺变量启动即抛错），值是折不进进程身份的随机标签——
-// 头照发但不采用，身份一律以连接属主进程归一，socket 未解析时按无身份处理、
-// 走迟到绑定。zcode 保持聚合一桶，一律不兜底。
+// （SOCKET_OVERRIDE_AGENT_IDS）与头值不可信集合（UNTRUSTED_INSTANCE_HEADER_AGENT_IDS，
+// 均在 late-socket-instance.mjs）之外，x-agent-instance 头仍是唯一正源且优先；
+// 只有头缺失（或非法被静默丢弃）时，才对多实例端点（白名单在
+// late-socket-instance.mjs，与 agent-metrics 的 instanceBuckets 口径一致：
+// kimi/opencode/pi/codex/grok/dsh/qoder/claude）用 netstat 快照反查 keep-alive
+// 连接对端进程，合成 "<agentId>-<pid>"。qoder 的头通道天生不存在——它的 provider
+// 配置写不进自定义请求头——socket 兜底是它唯一的实例身份。override 端点（pi）
+// 相反：头存在仅为满足托管配置的占位符（models.json 缺变量启动即抛错），值是折
+// 不进进程身份的随机标签——头照发但不采用，身份一律以连接属主进程归一，socket
+// 未解析时按无身份处理、走迟到绑定。opencode 属于同一档但另加会话头：它 2.x 起
+// 用一个常驻服务代发所有终端的请求，环境标签被首个启动器冻住，所以会话头
+// （opencode-sess-<会话 id>）才是正源，头值同样不采用。zcode 保持聚合一桶，一律
+// 不兜底。
 // claude 在列是因为它的桌面端不经过本机启动器：桌面端把网关直接指向常驻中继
 // （没有每会话上报器），反查属主进程是它唯一的身份来源；经启动器起的 Claude
 // Code 仍走自己的 per-launch 中继、仍有上报器行，两条路径互斥不重复计数。
@@ -114,10 +116,20 @@ function explicitInstanceId(headers) {
 // "<cwd基名>-<launcher pid>" 折入规范的 "<agentId>-<客户端 pid>"；socket 兜底
 // 本已规范，归一对它是恒等映射。
 function instanceIdForRequest(req, agentId, deps) {
-  if (SOCKET_OVERRIDE_AGENT_IDS.has(agentId ?? "")) return instanceIdFromSocket(req, agentId, deps);
-  const explicit = explicitInstanceId(req.headers);
-  if (explicit !== null) return explicit;
-  return instanceIdFromSocket(req, agentId, deps);
+  const id = agentId ?? "";
+  // 会话头优先于一切：opencode 的实例身份只能是会话粒度（见
+  // opencodeSessionInstanceId）。
+  if (id === "opencode") {
+    const sessionId = opencodeSessionInstanceId(req.headers);
+    if (sessionId !== null) return sessionId;
+  }
+  // override 端点（pi）与头值不可信的端点（opencode 的环境标签被共用服务冻住，
+  // 见上）跳过「头值」这一档，身份一律由连接属主进程归一。
+  if (!SOCKET_OVERRIDE_AGENT_IDS.has(id) && !UNTRUSTED_INSTANCE_HEADER_AGENT_IDS.has(id)) {
+    const explicit = explicitInstanceId(req.headers);
+    if (explicit !== null) return explicit;
+  }
+  return instanceIdFromSocket(req, id, deps);
 }
 
 // codex 会话粒度的实例身份正源。codex 核心客户端（GUI app-server 与 CLI 共用）
@@ -129,13 +141,52 @@ function instanceIdForRequest(req, agentId, deps) {
 // "codex-sess-" 前缀留位后截断，终审仍过 sanitizeInstanceId；洗不出有效字符或
 // 不是字符串时返回 null，归属回落到头/兜底，与今天完全一致。
 const CODEX_SESSION_PREFIX = "codex-sess-";
-function codexSessionInstanceId(body) {
-  const raw = body?.prompt_cache_key;
+// 会话 id → 会话行 id 的共用清洗：白名单字符集外的字符折成 "-"，给前缀留位后
+// 截断，终审仍过 sanitizeInstanceId（洗不出有效字符返回 null）。
+function sessionRowId(prefix, raw) {
   if (typeof raw !== "string") return null;
   const cleaned = raw.trim().replace(/[^A-Za-z0-9._:-]+/g, "-");
   if (cleaned.length === 0) return null;
-  const value = cleaned.slice(0, INSTANCE_ID_MAX_LEN - CODEX_SESSION_PREFIX.length);
-  return sanitizeInstanceId(CODEX_SESSION_PREFIX + value);
+  const value = cleaned.slice(0, INSTANCE_ID_MAX_LEN - prefix.length);
+  return sanitizeInstanceId(prefix + value);
+}
+
+function codexSessionInstanceId(body) {
+  return sessionRowId(CODEX_SESSION_PREFIX, body?.prompt_cache_key);
+}
+
+// opencode 会话粒度的实例身份正源。opencode 2.x 把所有 TUI 的模型请求交给一个
+// 常驻的 `serve --service` 子进程代发，而那个服务是全局单例：它从「第一个拉起
+// 它的启动器」继承环境变量，之后无论用户在哪个终端里开会话，标签都是那一个。
+// 进程粒度对它因此不成立（一条 TUI 一个进程号，但请求根本不经它的连接）。
+// 会话头是可靠的：2.1.1 实测每个 chat 请求都带 x-opencode-session，值即会话
+// id（另有两个同值旁路头，取第一个可用的）。
+const OPENCODE_SESSION_PREFIX = "opencode-sess-";
+const OPENCODE_SESSION_HEADERS = ["x-opencode-session", "x-opencode-session-id", "x-session-affinity"];
+function opencodeSessionInstanceId(headers) {
+  for (const name of OPENCODE_SESSION_HEADERS) {
+    const id = sessionRowId(OPENCODE_SESSION_PREFIX, headers?.[name]);
+    if (id !== null) return id;
+  }
+  return null;
+}
+
+// 会话扫描结果 → 终端归属桥的 feed 行：与请求路径同一套行 id 形状（join 两端
+// 必须同源，否则永远对不上），project 必须可读才能按 cwd 匹配。
+function sessionJoinRows(metas, toRowId) {
+  return (Array.isArray(metas) ? metas : [])
+    .map((meta) => {
+      if (!meta || typeof meta.id !== "string") return null;
+      const rowId = toRowId(meta.id);
+      if (rowId === null || typeof meta.project !== "string" || meta.project === "") return null;
+      return {
+        id: rowId,
+        cwd: meta.project,
+        lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
+        originator: typeof meta.originator === "string" ? meta.originator : null,
+      };
+    })
+    .filter(Boolean);
 }
 
 // codex 后台/内部请求判定（记忆流水线、guardian 审批、缓存预热、GUI 线程
@@ -531,9 +582,13 @@ export function createOpenAIRelayServer(deps) {
     // pid-shaped join can never bind codex, so it bridges through these
     // session metas (row-id-shaped here with the same shaper the request
     // path uses, cwd + lastActive + originator for surface filtering). Served
-    // from the collector's 15s codex-session cache — never a fresh scan per
-    // poll. Absent getter or scan failure yields an empty list; the bridge
-    // then degrades to unbound codex sessions (the pre-fix behavior).
+    // from the collector's 15s per-endpoint session cache — never a fresh scan
+    // per poll. Absent getter or scan failure yields an empty list; the bridge
+    // then degrades to unbound sessions of that endpoint.
+    // opencodeSessions is the same bridge for opencode, whose rows are
+    // opencode-sess-<session id> for the identical reason (one resident
+    // `serve --service` carries every TUI's traffic, so no pid-shaped row can
+    // name the session that sent a request).
     if (path === "/api/internal/detected-processes" && req.method === "GET") {
       const authHeader = req.headers["authorization"];
       const token = authHeader?.replace(/^Bearer\s+/i, "");
@@ -549,22 +604,19 @@ export function createOpenAIRelayServer(deps) {
         const processes = deps.metricsCollector.getDetectedClientProcesses();
         let codexSessions = [];
         if (typeof deps.metricsCollector.getCodexSessionsForTerminalJoin === "function") {
-          const metas = await deps.metricsCollector.getCodexSessionsForTerminalJoin();
-          codexSessions = (Array.isArray(metas) ? metas : [])
-            .map((meta) => {
-              if (!meta || typeof meta.id !== "string") return null;
-              const rowId = codexSessionInstanceId({ prompt_cache_key: meta.id });
-              if (rowId === null || typeof meta.project !== "string" || meta.project === "") return null;
-              return {
-                id: rowId,
-                cwd: meta.project,
-                lastActive: typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : null,
-                originator: typeof meta.originator === "string" ? meta.originator : null,
-              };
-            })
-            .filter(Boolean);
+          codexSessions = sessionJoinRows(
+            await deps.metricsCollector.getCodexSessionsForTerminalJoin(),
+            (id) => sessionRowId(CODEX_SESSION_PREFIX, id),
+          );
         }
-        sendJson(res, 200, { ok: true, processes, codexSessions });
+        let opencodeSessions = [];
+        if (typeof deps.metricsCollector.getOpencodeSessionsForTerminalJoin === "function") {
+          opencodeSessions = sessionJoinRows(
+            await deps.metricsCollector.getOpencodeSessionsForTerminalJoin(),
+            (id) => sessionRowId(OPENCODE_SESSION_PREFIX, id),
+          );
+        }
+        sendJson(res, 200, { ok: true, processes, codexSessions, opencodeSessions });
       } catch (err) {
         sendJson(res, 500, openAIError("api_error", `failed to get detected client processes: ${err.message}`));
       }

@@ -387,13 +387,14 @@ async function defaultFetchRelayChainRuntime(root, token) {
 
 // Pull-mode terminal attribution: the relay's live agent client processes,
 // each with its ancestor chain (47821/api/internal/detected-processes), for
-// joining terminal-host sessions by shell pid — plus the relay's codex session
-// metas (row-id-shaped codex-sess ids with cwd/lastActive/originator), the
-// bridge data for codex's session-granular instance identity. Returns
-// { processes, codexSessions }, or null on failure — the caller degrades to
-// unannotated sessions rather than erroring the whole session list. An old
-// relay without the codexSessions field yields an empty list (the bridge
-// then simply never binds codex, same as before).
+// joining terminal-host sessions by shell pid — plus each session-granular
+// endpoint's session metas (row-id-shaped ids with cwd/lastActive/originator):
+// codex-sess-* and opencode-sess-* are the bridge data for those two endpoints,
+// whose instance rows name a conversation rather than a process. Returns
+// { processes, codexSessions, opencodeSessions }, or null on failure — the
+// caller degrades to unannotated sessions rather than erroring the whole
+// session list. An old relay without a given field yields an empty list (that
+// bridge then simply never binds, same as before).
 async function defaultFetchRelayDetectedProcesses(root, token) {
   if (!token) return null;
   try {
@@ -404,8 +405,11 @@ async function defaultFetchRelayDetectedProcesses(root, token) {
     if (!response.ok) return null;
     const data = await response.json();
     if (data && Array.isArray(data.processes)) {
-      const codexSessions = Array.isArray(data.codexSessions) ? data.codexSessions : [];
-      return { processes: data.processes, codexSessions };
+      return {
+        processes: data.processes,
+        codexSessions: Array.isArray(data.codexSessions) ? data.codexSessions : [],
+        opencodeSessions: Array.isArray(data.opencodeSessions) ? data.opencodeSessions : [],
+      };
     }
     return null;
   } catch {
@@ -1047,19 +1051,27 @@ export function createPanelRouter({
     }
     // Last resort, mirroring handleAgents' local-collector fallback: this
     // process's own collector scans processes too (it owns no traffic, but
-    // the lineage table is traffic-independent), and its codex-session cache
-    // can feed the session bridge the same way. A collector without the
-    // codex getter (older shape) degrades to an empty codex list.
+    // the lineage table is traffic-independent), and its per-endpoint session
+    // caches can feed the session bridges the same way. A collector without
+    // those getters (older shape) degrades to empty lists.
     if (metricsCollector?.getDetectedClientProcesses) {
       try {
         const processes = metricsCollector.getDetectedClientProcesses();
         if (processes === null || processes === undefined) return null;
-        let codexSessions = [];
-        if (typeof metricsCollector.getCodexSessionsForTerminalJoin === "function") {
-          try { codexSessions = await metricsCollector.getCodexSessionsForTerminalJoin(); }
-          catch { codexSessions = []; }
-        }
-        return { processes, codexSessions: Array.isArray(codexSessions) ? codexSessions : [] };
+        const pull = async (name) => {
+          if (typeof metricsCollector[name] !== "function") return [];
+          try {
+            const metas = await metricsCollector[name]();
+            return Array.isArray(metas) ? metas : [];
+          } catch {
+            return [];
+          }
+        };
+        return {
+          processes,
+          codexSessions: await pull("getCodexSessionsForTerminalJoin"),
+          opencodeSessions: await pull("getOpencodeSessionsForTerminalJoin"),
+        };
       } catch {
         return null;
       }
@@ -1096,8 +1108,11 @@ export function createPanelRouter({
     const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
     const agents = await pulledAgentsForJoin(terminalPullToken());
-    const codexSessions = feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [];
-    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, codexSessions) });
+    const sessionFeeds = {
+      codex: feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [],
+      opencode: feed && Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
+    };
+    sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, sessionFeeds) });
   }
 
   // ---- 终端会话 ↔ agent 对话存档绑定（复活带回原对话） ----

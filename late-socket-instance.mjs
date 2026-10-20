@@ -29,6 +29,15 @@ const SOCKET_FALLBACK_AGENT_IDS = new Set(["dsh", "kimi", "opencode", "pi", "cod
 // 程为唯一来源；socket 未解析时按无身份处理，走 bindLateSocketInstance 迟到绑定。
 export const SOCKET_OVERRIDE_AGENT_IDS = new Set(["pi"]);
 
+// 头值不可信（但仍走 socket 兜底）的端点。opencode 2.x 把所有 TUI 的模型请求
+// 交给一个常驻的 `serve --service` 子进程代发，那个服务是全局单例：它从第一个
+// 拉起它的启动器继承 ANYSWITCH_AGENT_INSTANCE，之后无论用户在哪个终端开对话，
+// 请求带的都是那一个标签——按头归属会把每一条新会话的流量全记到早已退出的
+// 那次启动上（现场：终端行恒 0，流量全落在一条陈旧标签行）。它的正源是会话头
+// （x-opencode-session → opencode-sess-<会话 id>，见 openai-server.mjs 的
+// opencodeSessionInstanceId）；会话头缺失时才退回连接属主进程。
+export const UNTRUSTED_INSTANCE_HEADER_AGENT_IDS = new Set(["opencode"]);
+
 export function instanceIdFromSocket(req, agentId, deps) {
   if (!deps.socketOwner || !SOCKET_FALLBACK_AGENT_IDS.has(agentId ?? "")) return null;
   const pid = deps.socketOwner.lookup({ localPort: req.socket.localPort, remotePort: req.socket.remotePort });

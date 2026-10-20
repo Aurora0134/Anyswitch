@@ -96,11 +96,11 @@ describe("attributeTerminalSessions", () => {
         [cwdSession],
         [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
         codexAgents(["codex-sess-old", "codex-sess-new", "codex-sess-other"]),
-        [
+        { codex: [
           { id: "codex-sess-old", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" },
           { id: "codex-sess-new", cwd: "d:/dev/bridge/", lastActive: 2000, originator: "codex-tui" },
           { id: "codex-sess-other", cwd: "E:\\elsewhere", lastActive: 3000, originator: "codex-tui" },
-        ],
+        ] },
       );
       assert.equal(out[0].agent.instanceId, "codex-sess-new",
         "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
@@ -111,10 +111,10 @@ describe("attributeTerminalSessions", () => {
         [cwdSession],
         [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
         codexAgents(["codex-sess-tui", "codex-sess-desktop"]),
-        [
+        { codex: [
           { id: "codex-sess-tui", cwd: "D:\\dev\\bridge", lastActive: 1000, originator: "codex-tui" },
           { id: "codex-sess-desktop", cwd: "D:\\dev\\bridge", lastActive: 9000, originator: "codex_work_desktop" },
-        ],
+        ] },
       );
       assert.equal(out[0].agent.instanceId, "codex-sess-tui",
         "桌面 GUI 会话更近也不能抢走终端会话的绑定");
@@ -167,12 +167,79 @@ describe("attributeTerminalSessions", () => {
         [cwdSession],
         [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
         codexAgents(["codex-sess-a", "codex-sess-b"]),
-        [
+        { codex: [
           { id: "codex-sess-b", cwd: "D:\\dev\\bridge", lastActive: 500, originator: "codex-tui" },
           { id: "codex-sess-a", cwd: "D:\\dev\\bridge", lastActive: 500, originator: "codex-tui" },
-        ],
+        ] },
       );
       assert.equal(out[0].agent.instanceId, "codex-sess-a");
+    });
+  });
+
+  describe("opencode session bridge (session-granular instance ids)", () => {
+    const ocAgents = (rows) => [{ id: "opencode", name: "OpenCode", instances: rows.map((id) => ({ id })) }];
+    const cwdSession = { ...baseSession, cwd: "C:\\Users\\t\\proj" };
+    // opencode 2.x: every TUI's traffic leaves through one resident
+    // `serve --service` process, so the shell's ancestor chain never reaches a
+    // row that could name the conversation. The session feed is the bridge.
+    const detected = [{ agentId: "opencode", pid: 2960, ancestors: [8888] }];
+
+    it("binds the latest same-cwd opencode-sess row when the pid shape misses", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-sess-old", "opencode-sess-new", "opencode-sess-other"]),
+        { opencode: [
+          { id: "opencode-sess-old", cwd: "C:\\Users\\t\\proj", lastActive: 1000 },
+          { id: "opencode-sess-new", cwd: "c:/users/t/proj/", lastActive: 2000 },
+          { id: "opencode-sess-other", cwd: "E:\\elsewhere", lastActive: 3000 },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-new",
+        "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+    });
+
+    it("prefers the bridged session row over the resident-service pid row", () => {
+      // opencode 的 pid 行是常驻服务的占位/杂流归属，会话的请求永远不落在它
+      // 上；终端右栏按 instanceId 取数，绑到 pid 行就是一条恒 0 的空行。
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-2960", "opencode-sess-real"]),
+        { opencode: [{ id: "opencode-sess-real", cwd: "C:\\Users\\t\\proj", lastActive: 1000 }] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-real");
+      assert.equal(out[0].agent.pid, 2960, "进程归属本身不变");
+    });
+
+    it("an opencode feed never binds a codex terminal (feeds are per endpoint)", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "codex", pid: 6100, ancestors: [8888] }],
+        [{ id: "codex", name: "Codex", instances: [{ id: "codex-sess-x" }] }],
+        { opencode: [{ id: "codex-sess-x", cwd: "C:\\Users\\t\\proj", lastActive: 1000 }] },
+      );
+      assert.equal(out[0].agent.instanceId, null, "feed 只在自家端点的行集里挑");
+    });
+
+    it("opencode rows that are not in the agents payload stay unbound", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents([]),
+        { opencode: [{ id: "opencode-sess-x", cwd: "C:\\Users\\t\\proj", lastActive: 1000 }] },
+      );
+      assert.equal(out[0].agent.instanceId, null);
+    });
+
+    it("old relays without the feed still attribute the process, just unbound", () => {
+      const out = attributeTerminalSessions([cwdSession], detected, ocAgents(["opencode-2960"]));
+      assert.deepEqual(out[0].agent, {
+        endpointId: "opencode",
+        name: "OpenCode",
+        pid: 2960,
+        instanceId: "opencode-2960",
+      });
     });
   });
 
