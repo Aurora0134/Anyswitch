@@ -2087,11 +2087,14 @@ test("建连遇到镜像积压时不同步排空：回放分轮到达且内容�
     }).then((response) => response.json());
     const session = host.sessions.get(created.id);
 
-    // 制造一段明显超出单轮预算的积压（换行密集是最坏形态）。
+    // 制造一段确定存在的积压。不能靠「4ms 预算解析不完」来间接制造——机器快时
+    // 十几 KB 一次就排完了，前置条件会随机不成立（本用例最初就这么 flaky）。
+    // 这里先喂一小段建立镜像，再用极小预算入队，保证 pendingChars > 0。
     // 行数控制在 5000 行历史上限以内：超出的话开头标记会被历史裁剪吃掉，那属于
     // 既有的回放预算语义，不是本用例要验的东西。
+    pty.dataListener("warm\r\n");
     const payload = "HEAD-MARKER\r\n" + "line\r\n".repeat(2000) + "TAIL-MARKER\r\n";
-    pty.dataListener(payload);
+    session.screen.writeSliced(payload, 0.001);
     assert.ok(session.screen.info().pendingChars > 0, "前置条件：镜像必须还有积压");
 
     const started = performance.now();
@@ -2121,6 +2124,8 @@ test("建连遇到镜像积压时不同步排空：回放分轮到达且内容�
     assert.equal(session.screen.info().pendingChars, 0, "回放发出前积压必须排空");
     const info = session.screen.info();
     const reference = createScreenMirror({ cols: info.cols, rows: info.rows });
+    // 参照实现必须喂同一串字节（含建立镜像时的 warm 行），否则画面天然不同。
+    reference.write("warm\r\n");
     reference.write(payload);
     assert.equal(replay, reference.toReplay(), "分轮排空后的回放必须与整块解析一致");
   } finally {
