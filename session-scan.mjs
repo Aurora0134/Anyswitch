@@ -5,9 +5,17 @@
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
-// scan() returns SessionMeta[] with a 9-field contract:
-//   endpoint / id / title / summary / project / file / createdAt / lastActive /
-//   resumeCommand
+// scan() returns SessionMeta[] with a 10-field contract:
+//   endpoint / id / title / summary / project / cwd / file / createdAt /
+//   lastActive / resumeCommand
+// `cwd` is the absolute working directory the conversation was held in — the
+// one field a resume needs to start in the right place (claude & friends keep
+// their archives per project directory, so `--resume <id>` in the wrong
+// directory finds nothing). It is additive: every adapter fills it from the
+// most authoritative source it has (the transcript's own cwd field, the index
+// row, the sqlite directory column) and falls back to "" when it cannot be
+// established — never to a guess. `project` keeps its existing meaning and
+// value; `cwd` is the same path when known, "" otherwise.
 // loadMessages(file) returns { role, content, ts }[] (or a degraded note for
 // endpoints without a real transcript). delete(file) removes the session after
 // a canonicalize + roots() whitelist check (path-traversal guard).
@@ -450,8 +458,13 @@ function isPathUnder(file, root) {
   return f === r || f.startsWith(r + sep) || f.startsWith(r + "/") || f.startsWith(r + "\\");
 }
 
-function makeMeta({ endpoint, id, title = null, summary = null, project = null, originator = null, file = null, createdAt = null, lastActive = null }) {
-  const meta = { endpoint, id, title, summary, project, originator, file, createdAt, lastActive, resumeCommand: "" };
+function makeMeta({ endpoint, id, title = null, summary = null, project = null, cwd = null, originator = null, file = null, createdAt = null, lastActive = null }) {
+  // cwd 是「续接要在哪个目录起」的唯一依据（additive 字段）：调用方给的权威值优先，
+  // 没给就取 project（两者历来同源同值），都没有落空串——绝不猜。
+  const resolvedCwd = typeof cwd === "string" && cwd.trim() !== ""
+    ? cwd
+    : (typeof project === "string" && project.trim() !== "" ? project : "");
+  const meta = { endpoint, id, title, summary, project, cwd: resolvedCwd, originator, file, createdAt, lastActive, resumeCommand: "" };
   meta.resumeCommand = resumeCommandFor(endpoint, meta);
   return meta;
 }
@@ -504,6 +517,25 @@ function createClaudeAdapter(roots) {
         }
       }
       if (sessionId !== null && project !== null && createdAt !== null && firstUserMessage !== null) break;
+    }
+
+    // 续接要在会话自己的项目目录里起，所以 cwd 必须尽量拿到：head 30 行里没有
+    // `cwd` 时再看 tail（claude 每行都写 cwd，只是极长的模式/快照前导可能把它挤出
+    // 头窗）。两处都没有就落空串——不猜、不从 munged 目录名反推（连字符无法与路径
+    // 分隔符区分）。
+    if (project === null) {
+      for (let i = tail.length - 1; i >= 0; i--) {
+        let value;
+        try {
+          value = JSON.parse(tail[i]);
+        } catch {
+          continue;
+        }
+        if (typeof value.cwd === "string" && value.cwd.trim() !== "") {
+          project = value.cwd;
+          break;
+        }
+      }
     }
 
     let lastActive = null;

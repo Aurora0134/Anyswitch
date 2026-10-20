@@ -1530,3 +1530,67 @@ test("loadMessages rejects files outside the endpoint roots", async () => {
   writeFileSync(foreign, claudeLine({}) + "\n", "utf8");
   await assert.rejects(() => claudeScanner(root).loadMessages("claude", foreign), /outside endpoint roots/);
 });
+
+// --- SessionMeta.cwd（续接要在会话自己的项目目录里起） -----------------------
+
+test("cwd: 与 project 同源同值（claude 取自 jsonl 行内 cwd）", async () => {
+  const root = makeTmp();
+  writeClaudeSession(root, "C--work-myproj", "sess-cwd-1.jsonl", [claudeLine({})]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].project, "C:\\work\\myproj");
+  assert.equal(sessions[0].cwd, "C:\\work\\myproj", "cwd 与会话所属项目目录一致");
+});
+
+test("cwd: head 窗里没有 cwd 时从 tail 补——别让长前导把它挤出取证窗", async () => {
+  const root = makeTmp();
+  const lines = [];
+  // 首行就是真实提问（在 head 窗内，会话不会被过滤），但这一行不带 cwd；
+  // 后面 40 行模式/快照噪声把带 cwd 的那一行挤出 head 30 行，只留在 tail 里。
+  lines.push(JSON.stringify({
+    type: "user",
+    message: { role: "user", content: "真实提问" },
+    timestamp: "2026-09-01T10:00:00.000Z",
+    sessionId: "sess-cwd-tail",
+  }));
+  for (let i = 0; i < 40; i++) {
+    lines.push(JSON.stringify({ type: "file-history-snapshot", snapshot: { n: i }, timestamp: "2026-09-01T09:00:00.000Z" }));
+  }
+  lines.push(JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: "回答" },
+    timestamp: "2026-09-01T10:01:00.000Z",
+    cwd: "C:\\Users\\86183\\Desktop\\agent-home",
+  }));
+  writeClaudeSession(root, "C--Users-86183-Desktop-agent-home", "sess-cwd-tail.jsonl", lines);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].cwd, "C:\\Users\\86183\\Desktop\\agent-home",
+    "头窗没有就从尾窗取——否则续接会落在错目录");
+});
+
+test("cwd: 拿不到就空串，绝不猜（不从 munged 目录名反推）", async () => {
+  const root = makeTmp();
+  // 全篇没有 cwd 字段
+  writeClaudeSession(root, "C--work-unknown", "sess-cwd-none.jsonl", [
+    JSON.stringify({ type: "user", message: { role: "user", content: "没有 cwd 的会话" }, timestamp: "2026-09-01T10:00:00.000Z", sessionId: "sess-cwd-none" }),
+  ]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].project, null, "project 语义不变");
+  assert.equal(sessions[0].cwd, "", "cwd 落空串（不是目录名猜测、不是 null）");
+});
+
+test("cwd: 每个 adapter 的 SessionMeta 都带这个字段（契约不靠个别 adapter 自觉）", async () => {
+  const root = makeTmp();
+  writeClaudeSession(root, "C--work-myproj", "sess-contract.jsonl", [claudeLine({})]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  assert.ok(sessions.length > 0);
+  for (const session of sessions) {
+    assert.equal(typeof session.cwd, "string", `${session.endpoint} 的 cwd 是字符串（缺失时为 ""）`);
+  }
+  // 字段是 additive：既有九个一个不少
+  for (const key of ["endpoint", "id", "title", "summary", "project", "file", "createdAt", "lastActive", "resumeCommand"]) {
+    assert.ok(key in sessions[0], `既有字段 ${key} 原样在册`);
+  }
+});

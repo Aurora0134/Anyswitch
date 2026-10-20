@@ -319,7 +319,7 @@ describe("终端视图左栏换血（M4）", () => {
 
   describe("历史会话点击：续接两分支（vm 真跑）", () => {
     const runResume = (session, apiImpl) => {
-      const log = { posts: [], toasts: [], renders: 0, active: null };
+      const log = { posts: [], toasts: [], renders: 0, active: null, rememberedCwd: [] };
       const sandbox = new Function("session", "log", "apiImpl", `
         const terminalBackendSessions = {};
         let activeTerminalPreviewId = null;
@@ -328,7 +328,7 @@ describe("终端视图左栏换血（M4）", () => {
         function panelError(err, fallback) { return fallback; }
         function terminalBackendSession(item) { return { ...item }; }
         function rememberTerminalSessionId(id) { log.active = id; }
-        function rememberTerminalCwd() {}
+        function rememberTerminalCwd(cwd) { log.rememberedCwd.push(cwd); }
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
@@ -381,6 +381,39 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(log.toasts[0].isErr, true, "按错误提示上屏");
       assert.equal(log.renders, 0, "不重渲");
       assert.ok(!extractFn("terminalRailResumeSession").includes("clipboard"), "不做复制命令（用户拍板）");
+    });
+
+    it("续接必须落在会话所属项目目录：cwd 取 project，绝不回落到「记住上次」", async () => {
+      // 真机缺陷：claude 的会话存档按项目目录分，在错目录下 --resume 找不到那条会话，
+      // 还会触发不该有的目录信任提示。这里把「记住上次」设成一个**不同的**目录，
+      // 只要实现有任何回落，POST 里的 cwd 就会露出来。
+      const { sandbox, log } = runResume(
+        { ...RESUMABLE, project: "C:\\Users\\86183\\Desktop\\agent-home" },
+        async () => ({ id: "t-9", label: "Claude Code", agentId: "claude", shell: "cmd", cwd: "C:\\Users\\86183\\Desktop\\agent-home" }),
+      );
+      await sandbox.run();
+      const post = log.posts.find((p) => p.path === "/api/terminal/agent-sessions");
+      assert.ok(post, "发起续接请求");
+      assert.equal(post.body.cwd, "C:\\Users\\86183\\Desktop\\agent-home", "cwd = 会话 project");
+      assert.notEqual(post.body.cwd, "C:\\Users\\86183\\fixture", "不是「记住上次」的那个目录");
+      assert.equal(post.body.resume.id, "s-1", "resume 身份照旧");
+    });
+
+    it("取不到可靠项目路径：不发起续接，只提示（不错目录启动）", async () => {
+      for (const project of [null, "", "   ", undefined, 123, {}]) {
+        const { sandbox, log } = runResume(
+          { ...RESUMABLE, project },
+          async () => { throw new Error("不该发请求"); },
+        );
+        await sandbox.run();
+        assert.deepEqual(log.posts, [], `project=${JSON.stringify(project)} 时不 POST（否则就是错目录续接）`);
+        assert.equal(log.toasts.length, 1, `project=${JSON.stringify(project)} 给一句提示`);
+        assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "文案逐字取批准清单（不新造）");
+        assert.equal(log.toasts[0].isErr, true, "按错误提示上屏");
+        assert.equal(sandbox.activeId(), null, "不置活跃、不登记会话");
+        assert.deepEqual(Object.keys(sandbox.sessions), [], "不登记会话");
+        assert.deepEqual(log.rememberedCwd, [], "不把空/无效目录写进「记住上次」");
+      }
     });
 
     it("续接类短码（resume-unsupported / resume-invalid）一律落批准句，不暴露后端原文", async () => {
