@@ -739,12 +739,16 @@ describe("终端视图左栏换血（M4）", () => {
     // connectTerminalBackend 没有 in-flight 去重，两次成功链各跑一次
     // renderTerminalPreviewSession/connectTerminalStream（xterm 重建两遍），后发失败
     // 还会把就绪位翻回 false——正是要消除的停态。这里按行为断言，不看字符串。
-    const runOpen = (hostState, { ready = false } = {}) => {
+    // runOpen 的 known 形参 = 进页那一刻「上一帧宿主态」（1s 轮询维护的那个值），
+    // 它决定 openTerminalPreview 的预连守卫是否放行。默认 "unknown"（面板初载的
+    // 真实形态）；测「双连」那条必须传 "running"——否则预连从不触发，唯一一发
+    // 来自分派路径，断言「恰 1 发」就是同义反复，去掉单飞也照样绿（判别力为零）。
+    const runOpen = (hostState, { ready = false, known = "unknown" } = {}) => {
       const log = { fetches: 0, renders: 0, applied: [], switched: [], stopped: false, autoStart: 0, pending: [] };
-      const sandbox = new Function("hostState", "ready", "log", `
+      const sandbox = new Function("hostState", "ready", "known", "log", `
         let terminalBackendReady = ready;
         let terminalFirstConnectSettled = false;
-        let terminalHostState = "unknown";
+        let terminalHostState = known;
         let currentView = "board";
         let terminalReturnView = "board";
         let terminalReturnScrollTop = 0;
@@ -785,13 +789,16 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("resumeTerminalBackendAfterEntry")}
         ${extractFn("openTerminalPreview")}
         return { open: openTerminalPreview, ready: () => terminalBackendReady };
-      `)(hostState, ready, log);
+      `)(hostState, ready, known, log);
       return { sandbox, log };
     };
 
     it("running + 未就绪：真正发出的连接请求恰为 1（不双连、xterm 不重建两遍）", async () => {
-      const { sandbox, log } = runOpen("running");
+      // known:"running" 是关键——预连守卫（terminalHostState === "running"）必须放行，
+      // 否则这条测不到双连（同义反复）。断言预连确实发出：挂起队列里恰有一发在飞。
+      const { sandbox, log } = runOpen("running", { known: "running" });
       await sandbox.open();                       // 进页：先补连（挂起），再分派
+      assert.equal(log.pending.length, 1, "预连确实发出（一发生效的请求在飞）");
       assert.equal(log.fetches, 1, "分派那一步不该再发第二发（第一发还在飞）");
       for (const settle of log.pending) settle(); // 连接返回
       await flush();
