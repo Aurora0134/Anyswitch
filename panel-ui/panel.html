@@ -564,6 +564,39 @@ if (window.panelStartupController) panelStartupPlay();
       <span class="rail-tab-label">关于</span>
     </button>
   </nav>
+  <!-- 终端会话栏：进终端视图时整组换上（与设置目录同一换血形制——换内容而非追加），
+       退出终端即还原。栏体自上而下：当前 agent 身份行（严格跟随活跃终端，不跨 agent
+       浏览）→「新建终端」→「打开的终端」→「历史会话」。身份行头像槽默认是通用终端
+       字形，有 agent 时由 JS 克隆看板头像填入（与页签左图标同一手法）。两个列表的
+       行一律脚本渲染（HTML 不写死假数据）。静态 hidden：v1 整栏不出、v2 非终端态不出；
+       显隐由 body.terminal-mode（运行时）与 data-prepaint-view="terminal"（首帧）两条
+       !important 规则收权。 -->
+  <nav class="rail-dir rail-terminal-dir" id="railTerminalDir" aria-label="终端会话" hidden>
+    <div class="rail-term-agent">
+      <span class="rail-term-agent-avatar" id="railTermAgentAvatar" aria-hidden="true"><span class="rail-term-agent-glyph"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span></span>
+      <span class="rail-term-agent-name" id="railTermAgentName">本地终端</span>
+    </div>
+    <button type="button" class="rail-term-new" id="railTermNewBtn" title="新建终端" aria-label="新建终端">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      <span class="rail-term-new-label">新建终端</span>
+    </button>
+    <div class="rail-term-section">
+      <div class="rail-term-section-head"><span class="rail-term-section-title">打开的终端</span></div>
+      <div class="rail-term-open" id="railTermOpenList"></div>
+    </div>
+    <div class="rail-term-section rail-term-section-history">
+      <div class="rail-term-section-head">
+        <span class="rail-term-section-title">历史会话</span>
+        <button type="button" class="rail-term-icon-btn" id="railTermHistoryRefresh" title="刷新会话列表" aria-label="刷新会话列表">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
+      </div>
+      <div class="rail-term-history-scroll">
+        <div class="rail-term-history" id="railTermHistoryList"></div>
+      </div>
+      <span class="rail-term-fade" aria-hidden="true"></span>
+    </div>
+  </nav>
   <div class="rail-foot">
     <button class="icon-btn" id="railThemeToggle" aria-label="切换亮暗主题" title="切换亮暗主题">
       <svg id="railIcoMoon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>

@@ -316,6 +316,7 @@ async function api(method, path, body) {
     // 真跑，桩里只提供固定名单上的函数。
     if (typeof initTerminalHostControls === "function") initTerminalHostControls();
     if (typeof initRailCollapse === "function") initRailCollapse();
+    if (typeof initTerminalRail === "function") initTerminalRail();
     initRelayControls();
     initSkillsTab();
     initPresetsTab();
@@ -3692,7 +3693,8 @@ async function api(method, path, body) {
     const railOpenBtn = $("railSettingsBtn");
     if (railOpenBtn) railOpenBtn.onclick = openSettings;
     // 退出设置的回跳目标（进入前的视图）只有一个状态源：头行「←」与 v2 栏底「返回」
-    // 挂同一处理函数，不从两个入口各写一份。
+    // 挂同一处理函数，不从两个入口各写一份。终端态下同一颗钮由 initTerminalRail 接管
+    // （两态互斥，见那边的注释）。
     const exitSettings = () => switchView(settingsReturnView);
     if (exitBtn) exitBtn.onclick = exitSettings;
     const railBackBtn = $("railBackBtn");
@@ -6472,6 +6474,9 @@ async function api(method, path, body) {
       enrichTerminalSessions(agentsData?.agents ?? null);
       await refreshActiveTerminalRequests();
       renderTerminalPreviewTabs();
+      // 归属轮询同拍同步终端会话栏：身份行与「打开的终端」都读归属，慢一拍就会
+      // 「页签已显示 agent、左栏还写着终端」。
+      if (typeof renderTerminalRail === "function") renderTerminalRail();
       if (Object.keys(terminalBackendSessions).length === 0) {
         // 会话在别处被关光（另一个面板窗口、服务端重建后的空列表）：与关最后
         // 一个标签同路落空态，不挂上一会话的残留数据。
@@ -6712,6 +6717,9 @@ async function api(method, path, body) {
   function syncTerminalAddBtn() {
     const addBtn = $("terminalAddBtn");
     if (addBtn) addBtn.disabled = !terminalBackendReady;
+    // 左栏「新建终端」与页签栏加号同一就绪闸：禁用位与就绪位同拍（栏体顺带重渲，
+    // 归属/会话表的每一次变化都经这里落到左栏）。
+    if (typeof renderTerminalRail === "function") renderTerminalRail();
   }
 
   // ── 终端宿主（terminal-host）生命周期 ──
@@ -7129,15 +7137,28 @@ async function api(method, path, body) {
   }
 
   // 一键启动：凭证只走环境变量注入（服务端组装），这里只递 agentId 与工作目录。
-  function createAgentTerminal({ agentId, cwd }) {
-    return api("POST", "/api/terminal/agent-sessions", { agentId, cwd, ...terminalCreateSize() })
+  // resume 可选（M3 契约）：历史会话续接把 { endpoint, id, file } 原样带上，服务端判
+  // 不可续接时回 400 resume-unsupported——前端落同一句提示，不暴露短码。
+  function createAgentTerminal({ agentId, cwd, resume }) {
+    const body = { agentId, cwd, ...terminalCreateSize() };
+    if (resume) body.resume = resume;
+    return api("POST", "/api/terminal/agent-sessions", body)
       .then((created) => {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
         activeTerminalPreviewId = created.id;
         rememberTerminalSessionId(created.id);
         renderTerminalPreviewSession();
       })
-      .catch((error) => toast(panelError(error, "无法启动这个终端"), true));
+      .catch((error) => {
+        // 续接类失败（M3 契约的 resume-unsupported，以及同族的 resume-invalid 等）
+        // 一律落批准句：后端原文是给开发者看的短码/细节，不能上屏。
+        const code = error && (error.serverCode || error.code);
+        if (typeof code === "string" && code.startsWith("resume-")) {
+          toast("这个 Agent 的会话暂时不能在终端里续接", true);
+          return;
+        }
+        toast(panelError(error, "无法启动这个终端"), true);
+      });
   }
 
   function confirmTerminalAddMenu() {
@@ -7188,6 +7209,10 @@ async function api(method, path, body) {
   // revive:false —— 被动重挂（切回前台、回终端页补挂）专用口径：进程已退的会话只
   // 回放最后一屏，不替用户重开空壳。点页签、新建、降级重试等主动通路照旧走默认。
   function renderTerminalPreviewSession({ revive = true } = {}) {
+    // 左栏终端会话栏先渲：它与终端屏的就绪三态无关（降级/零会话时栏体照常可用——
+    // 「新建终端」自带就绪闸，历史会话按当前 agent 取）。切页签 / 新建 / 关闭 /
+    // 归属恢复都经本函数，栏体不必另设触发点。typeof 闸护单测桩环境。
+    if (typeof renderTerminalRail === "function") renderTerminalRail();
     // 降级闸：判定键是就绪位本身，不是会话数——零会话是就绪下的合法空态（走下方
     // 零会话分支），不能当降级处理；backend 中途死掉的轮询不动就绪位，仍保上一帧。
     if (terminalBackendReady === false) {
@@ -8108,6 +8133,461 @@ async function api(method, path, body) {
     syncRailCollapseBtn();
   }
 
+  /* ============================================================
+     终端会话栏（M4）：终端视图下的左栏换血内容
+     ============================================================ */
+  // 栏体自上而下：当前 agent 身份行 → 新建终端 → 打开的终端 → 历史会话。身份严格
+  // 跟随活跃终端的 agent，不做跨 agent 浏览；无 agent 时显通用终端标识。观感按 dsh
+  // 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作按钮一律 0ms
+  // 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位移有运动。
+  const TERMINAL_RAIL_WATERMARK = 5;
+  const terminalRailCollapsedGroups = new Set();
+  const terminalRailWatermarks = new Map();
+  // 历史会话缓存：{ endpoint, sessions, fetchedAt, error }。只装当前 agent 那一份——
+  // 换 agent 即整份作废重拉，不做多端点缓存（用户拍板「跟随」而非「浏览」）。
+  let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+  // 两块列表的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
+  let terminalRailRendered = { open: null, history: null };
+  let terminalRailFetchInFlight = false;
+  // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
+  // flipMode 一帧用完即复位，只有组展开/收起会置 "flip"。
+  let terminalRailMotionArmed = false;
+  let terminalRailFlipMode = "instant";
+  // 活跃终端所在组的自动展开与滚入只做一次：换活跃终端才重做，用户手动收起不被
+  // 下一次归属轮询顶回来。
+  let terminalRailAutoExpandedFor = "";
+  let terminalRailScrolledFor = "";
+  // 身份行头像槽的通用终端字形（克隆头像后要能换回来，装配时固化一份引用）。
+  let terminalRailAgentGlyph = null;
+
+  const TERMINAL_RAIL_ICON_CHEVRON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
+  const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M3.5 20l2.4-7h14.2l-2.4 7z"/></svg>';
+  const TERMINAL_RAIL_ICON_FOLDER_CLOSED = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+
+  // 会话的 agent 身份：与页签左图标同一取值口径（实时归属 endpointId 优先，一键启动
+  // 快照的 agentId 次之）。白名单字符过滤——这个 id 同时进 HTML 属性与克隆头像的
+  // 选择器。空串 = 纯外壳终端（无 agent）。缺省参数读活跃终端：栏体跟随的 agent 就是它。
+  function terminalRailAgentId(session) {
+    const target = session === undefined ? terminalSessionFor(activeTerminalPreviewId) : session;
+    if (!target) return "";
+    const raw = (target.agent && target.agent.endpointId) || target.agentId || "";
+    return /^[\w-]+$/.test(raw) ? raw : "";
+  }
+
+  function terminalRailAgentLabel(agentId) {
+    return agentId ? (STATS_ENDPOINT_LABELS[agentId] || agentId) : "";
+  }
+
+  // 「打开的终端」= 该 agent 的活跃终端；无 agent 聚焦时列无归属的空白终端们。
+  function terminalRailOpenSessions(agentId) {
+    const out = [];
+    for (const session of Object.values(terminalSessionMap())) {
+      if (session && terminalRailAgentId(session) === agentId) out.push(session);
+    }
+    return out;
+  }
+
+  // 历史会话分组：按 project 归组（组头取目录短名），无 project 归「未分组」并沉底；
+  // 组序与组内序都按最近活跃倒序。纯函数。
+  function terminalRailGroupSessions(sessions) {
+    const groups = new Map();
+    for (const session of Array.isArray(sessions) ? sessions : []) {
+      if (!session) continue;
+      const key = typeof session.project === "string" ? session.project : "";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(session);
+    }
+    const out = [];
+    for (const [key, rows] of groups) {
+      rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      out.push({ key, label: key ? sessDirName(key) : "未分组", rows, latest: rows[0].lastActive || 0 });
+    }
+    out.sort((a, b) => {
+      if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
+      return (b.latest - a.latest) || String(a.label).localeCompare(String(b.label));
+    });
+    return out;
+  }
+
+  // 水位线（dsh 实测口径）：每组先露 5 条，点一次 +5，剩余不足一档即一次全展开；
+  // 全展开后再点是「收起」（回基线）。水位只活在内存，不持久化。
+  function terminalRailWatermarkView(total, watermark) {
+    const limit = Math.max(TERMINAL_RAIL_WATERMARK, Number(watermark) || 0);
+    const visible = Math.min(total, limit);
+    return { visible, hidden: Math.max(0, total - visible), expanded: visible >= total };
+  }
+
+  function terminalRailNextWatermark(total, watermark) {
+    const current = Math.max(TERMINAL_RAIL_WATERMARK, Number(watermark) || 0);
+    if (current >= total) return TERMINAL_RAIL_WATERMARK;
+    const next = current + TERMINAL_RAIL_WATERMARK;
+    return next >= total ? total : next;
+  }
+
+  function terminalRailMoreLabel(view) {
+    return view.expanded ? "收起" : `展开其余 ${view.hidden} 个会话`;
+  }
+
+  function terminalRailSameDir(a, b) {
+    const norm = (value) => String(value || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    const left = norm(a);
+    return left !== "" && left === norm(b);
+  }
+
+  function terminalRailGroupForDir(groups, cwd) {
+    for (const group of groups) {
+      if (group.key && terminalRailSameDir(cwd, group.key)) return group.key;
+    }
+    return "";
+  }
+
+  // ---- 渲染 ----
+  function renderTerminalRail() {
+    if (currentView !== "terminal") return; // 栏只在终端视图露出，别处不白跑渲染
+    const dir = $("railTerminalDir");
+    if (!dir) return;
+    const agentId = terminalRailAgentId();
+    const newBtn = $("railTermNewBtn");
+    // 就绪闸与页签栏加号同拍：未就绪时新建不可点（禁用位由 syncTerminalAddBtn 同拍刷新）。
+    if (newBtn) newBtn.disabled = !terminalBackendReady;
+    renderTerminalRailAgent(agentId);
+    renderTerminalRailOpenList(agentId);
+    renderTerminalRailHistory(agentId);
+    syncTerminalRailHistory(agentId);
+  }
+
+  function renderTerminalRailAgent(agentId) {
+    const nameEl = $("railTermAgentName");
+    const slot = $("railTermAgentAvatar");
+    if (!nameEl || !slot) return;
+    const session = terminalSessionFor(activeTerminalPreviewId);
+    // 无 agent 时显通用终端标识：优先活跃终端的外壳名（PowerShell / 命令提示符，会话
+    // 数据自带），连终端都没有才落产品里既有的「本地终端」——身份行不留空白，也不
+    // 另造新词。
+    const label = agentId
+      ? terminalRailAgentLabel(agentId)
+      : (session && session.shell ? session.shell.name : "本地终端");
+    if (nameEl.textContent !== label) nameEl.textContent = label;
+    if (slot.getAttribute("data-rail-term-brand") === agentId) return;
+    slot.setAttribute("data-rail-term-brand", agentId);
+    // 头像克隆（与页签左图标同一手法）：看板 .agent-avatar 整体克隆，各家底衬/描边/
+    // 圆角随克隆走；品牌不在看板或没有 agent 时留通用终端字形。typeof 双闸护桩环境。
+    let avatar = null;
+    if (agentId && typeof document !== "undefined" && typeof document.querySelector === "function") {
+      avatar = document.querySelector(`.agent-cards-container .panel-card[data-agent-id="${agentId}"] .agent-avatar`);
+    }
+    if (typeof slot.replaceChildren !== "function") return;
+    if (avatar) slot.replaceChildren(avatar.cloneNode(true));
+    else if (terminalRailAgentGlyph) slot.replaceChildren(terminalRailAgentGlyph);
+  }
+
+  function renderTerminalRailOpenList(agentId) {
+    const list = $("railTermOpenList");
+    if (!list) return;
+    const activeId = activeTerminalPreviewId;
+    const html = terminalRailOpenSessions(agentId).map((session) => {
+      const working = session.status === "working";
+      return `
+      <button type="button" class="rail-term-row rail-term-row-open${session.id === activeId ? " is-active" : ""}" data-rail-term-session="${esc(session.id)}" title="${esc(session.label)}">
+        <span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>
+        <span class="rail-term-row-title">${escapeHtml(session.label)}</span>
+        <span class="rail-term-row-close" data-rail-term-close="${esc(session.id)}" aria-hidden="true">×</span>
+      </button>`;
+    }).join("");
+    if (html === terminalRailRendered.open) return;
+    terminalRailRendered.open = html;
+    list.innerHTML = html;
+  }
+
+  function terminalRailHistoryRowHtml(session) {
+    const title = sessTitle(session);
+    const time = session.lastActive ? sessRelTime(session.lastActive) : "";
+    return `
+      <button type="button" class="rail-term-row rail-term-row-history" data-rail-term-resume="${esc(session.id)}" title="${esc(title)}">
+        <span class="rail-term-row-title">${escapeHtml(title)}</span>
+        <span class="rail-term-row-time">${escapeHtml(time)}</span>
+      </button>`;
+  }
+
+  function renderTerminalRailHistory(agentId) {
+    const list = $("railTermHistoryList");
+    if (!list) return;
+    // 「落地」= 这个 agent 的列表已成功取回。抓取失败也写着同一个 endpoint，但那份
+    // 空表不是事实——按失败态消费掉自动展开，用户之后手动刷新成功就再也不会展开。
+    const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
+    const sessions = loaded ? terminalRailHistory.sessions : [];
+    const groups = terminalRailGroupSessions(sessions);
+    // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
+    // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
+    // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
+    const activeSession = terminalSessionFor(activeTerminalPreviewId);
+    const activeGroup = activeSession ? terminalRailGroupForDir(groups, activeSession.cwd) : "";
+    const autoKey = `${agentId}\u0000${activeSession ? activeSession.id : ""}`;
+    let scrollKey = "";
+    if (activeGroup && autoKey !== terminalRailAutoExpandedFor) {
+      terminalRailAutoExpandedFor = autoKey;
+      terminalRailCollapsedGroups.delete(activeGroup);
+      scrollKey = activeGroup;
+    }
+    const parts = [];
+    for (const group of groups) {
+      const collapsed = terminalRailCollapsedGroups.has(group.key);
+      parts.push(`
+      <div class="rail-term-group${collapsed ? "" : " is-open"}">
+        <button type="button" class="rail-term-group-head" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
+          <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
+          <span class="rail-term-group-icon">${collapsed ? TERMINAL_RAIL_ICON_FOLDER_CLOSED : TERMINAL_RAIL_ICON_FOLDER_OPEN}</span>
+          <span class="rail-term-group-name">${escapeHtml(group.label)}</span>
+        </button>`);
+      if (!collapsed) {
+        const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
+        for (const row of group.rows.slice(0, view.visible)) parts.push(terminalRailHistoryRowHtml(row));
+        if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
+          parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
+        }
+      }
+      parts.push(`</div>`);
+    }
+    const html = parts.join("");
+    // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐行
+    // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的行）。
+    const before = terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null;
+    if (html !== terminalRailRendered.history) {
+      terminalRailRendered.history = html;
+      list.innerHTML = html;
+      if (before) playTerminalRailFlip(list, before);
+    }
+    terminalRailFlipMode = "instant";
+    if (scrollKey && terminalRailScrolledFor !== autoKey) {
+      terminalRailScrolledFor = autoKey;
+      terminalRailScrollGroupIntoView(scrollKey);
+    }
+  }
+
+  function terminalRailRowTops(list) {
+    const tops = new Map();
+    if (!list || typeof list.querySelectorAll !== "function") return tops;
+    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
+      const key = row.getAttribute("data-rail-term-resume");
+      if (!key || typeof row.getBoundingClientRect !== "function") continue;
+      tops.set(key, row.getBoundingClientRect().top);
+    }
+    return tops;
+  }
+
+  function terminalRailScrollGroupIntoView(key) {
+    const list = $("railTermHistoryList");
+    if (!list || typeof list.querySelectorAll !== "function") return;
+    for (const head of list.querySelectorAll("[data-rail-term-group]")) {
+      if (head.getAttribute("data-rail-term-group") !== key) continue;
+      if (typeof head.scrollIntoView === "function") head.scrollIntoView({ block: "nearest" });
+      return;
+    }
+  }
+
+  // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新行 100ms ease-out）。
+  // 只有组展开/收起会置 flip；水位线增减、刷新、换 agent 是 resetKey，直接落位；
+  // 首次输入前、首次挂载（没有旧位置可比）、prefers-reduced-motion 都不动。
+  function playTerminalRailFlip(list, before) {
+    if (!before || before.size === 0) return;
+    if (terminalRailFlipMode !== "flip") return;
+    if (!terminalRailMotionArmed) return;
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    if (!list || typeof list.querySelectorAll !== "function") return;
+    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
+      if (typeof row.animate !== "function" || typeof row.getBoundingClientRect !== "function") continue;
+      const key = row.getAttribute("data-rail-term-resume");
+      const previous = before.get(key);
+      if (previous === undefined) {
+        row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, easing: "ease-out" });
+        continue;
+      }
+      const delta = previous - row.getBoundingClientRect().top;
+      if (!delta) continue;
+      row.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 200, easing: "ease-out" });
+    }
+  }
+
+  // ---- 数据 ----
+  // 历史会话只在进终端视图时拉一次（全量扫盘实测 6.7s、无缓存——禁挂轮询）；身份
+  // 换人时补拉一次；段头刷新图标是唯一的手动重取入口。
+  function syncTerminalRailHistory(agentId) {
+    if (agentId === terminalRailHistory.endpoint) return;
+    if (!agentId) {
+      terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+      terminalRailFlipMode = "instant";
+      renderTerminalRailHistory("");
+      return;
+    }
+    refreshTerminalRailHistory({ endpoint: agentId });
+  }
+
+  async function refreshTerminalRailHistory({ endpoint = terminalRailAgentId(), manual = false } = {}) {
+    if (!endpoint || terminalRailFetchInFlight) return;
+    terminalRailFetchInFlight = true;
+    // 在飞期间就把 endpoint 认下来：全量扫盘一次实测 6.7s，这段时间里每次归属轮询都会
+    // 走到 syncTerminalRailHistory——不认的话它每一拍都判「身份还没拉过」，同一份列表
+    // 被反复排队重取。认下后组列表暂时为空，落地即替换。
+    terminalRailHistory = { endpoint, sessions: [], fetchedAt: 0, error: null };
+    const refreshBtn = $("railTermHistoryRefresh");
+    if (refreshBtn) refreshBtn.disabled = true;
+    try {
+      const data = await api("GET", "/api/sessions/list");
+      const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
+      terminalRailHistory = { endpoint, sessions: rows, fetchedAt: Date.now(), error: null };
+    } catch (error) {
+      terminalRailHistory = { endpoint, sessions: [], fetchedAt: Date.now(), error };
+      if (manual) toast(panelError(error, "会话列表加载失败"), true);
+    } finally {
+      terminalRailFetchInFlight = false;
+      if (refreshBtn) refreshBtn.disabled = false;
+      terminalRailFlipMode = "instant";
+      renderTerminalRail();
+    }
+  }
+
+  // ---- 交互 ----
+  function terminalRailActivateSession(id) {
+    if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
+    activeTerminalPreviewId = id;
+    rememberTerminalSessionId(id);
+    renderTerminalPreviewSession();
+  }
+
+  // 关闭走页签同一条处理：找到页签条里那颗 × 真点一下——运行中确认、POST、空壳计数、
+  // 活跃 id 回落全部由那一处承担，不复制第二份。
+  function terminalRailCloseSession(id) {
+    const tabs = $("terminalTabs");
+    if (!tabs || typeof tabs.querySelectorAll !== "function") return;
+    for (const tab of tabs.querySelectorAll("[data-terminal-tab]")) {
+      if (tab.getAttribute("data-terminal-tab") !== id) continue;
+      const closeEl = typeof tab.querySelector === "function" ? tab.querySelector(".terminal-tab-close") : null;
+      if (closeEl && typeof closeEl.click === "function") closeEl.click();
+      return;
+    }
+  }
+
+  // 新建终端：一键对当前 agent 建终端（cwd 沿用既有「记住上次」），无 agent 时建空白
+  // 终端；就绪闸与页签栏加号同拍。有 agent 走一键启动同一通路（createAgentTerminal），
+  // 空白终端的入参与「+」菜单同一形状（实测尺寸由 terminalCreateSize 给）。
+  function terminalRailCreateTerminal() {
+    if (!terminalBackendReady) return;
+    const cwd = terminalCwdInitial();
+    rememberTerminalCwd(cwd);
+    const agentId = terminalRailAgentId();
+    if (agentId) {
+      createAgentTerminal({ agentId, cwd });
+      return;
+    }
+    const size = terminalCreateSize();
+    return api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", cols: size.cols, rows: size.rows })
+      .then((created) => {
+        terminalBackendSessions[created.id] = terminalBackendSession(created);
+        activeTerminalPreviewId = created.id;
+        rememberTerminalSessionId(created.id);
+        renderTerminalPreviewSession();
+      })
+      .catch((error) => toast(panelError(error, "无法新建终端"), true));
+  }
+
+  // 历史会话点击两分支：resumeCommand 非空 → 按 M3 契约带 resume 建会话（与一键启动
+  // 同一条创建通路，续接失败的提示也由它统一落）；为空 → 只提示，不做复制命令。
+  function terminalRailResumeSession(session) {
+    if (!session) return;
+    if (!session.resumeCommand) {
+      toast("这个 Agent 的会话暂时不能在终端里续接", true);
+      return;
+    }
+    const resume = { endpoint: session.endpoint, id: session.id };
+    if (typeof session.file === "string" && session.file) resume.file = session.file;
+    const cwd = session.project || terminalCwdInitial();
+    rememberTerminalCwd(cwd);
+    return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+  }
+
+  function terminalRailResumeHistoryRow(id) {
+    const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+    if (session) terminalRailResumeSession(session);
+  }
+
+  function toggleTerminalRailGroup(key) {
+    if (terminalRailCollapsedGroups.has(key)) terminalRailCollapsedGroups.delete(key);
+    else terminalRailCollapsedGroups.add(key);
+    terminalRailFlipMode = "flip";
+    renderTerminalRailHistory(terminalRailAgentId());
+  }
+
+  function toggleTerminalRailWatermark(key) {
+    const group = terminalRailGroupSessions(terminalRailHistory.sessions).find((row) => row.key === key);
+    if (!group) return;
+    const next = terminalRailNextWatermark(group.rows.length, terminalRailWatermarks.get(key));
+    if (next === TERMINAL_RAIL_WATERMARK) terminalRailWatermarks.delete(key);
+    else terminalRailWatermarks.set(key, next);
+    terminalRailFlipMode = "instant"; // 水位线增减是 resetKey：瞬时跳变（dsh 实测）
+    renderTerminalRailHistory(terminalRailAgentId());
+  }
+
+  // 进终端视图：历史会话在这里重取一次，视图内的其他渲染都不触发扫盘。水位线随列表
+  // 卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态留在内存里
+  // 跨进出保持（用户手动收起的组不该每次进来都弹开）。
+  function enterTerminalRail() {
+    terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+    terminalRailRendered = { open: null, history: null };
+    terminalRailWatermarks.clear();
+    terminalRailAutoExpandedFor = "";
+    terminalRailScrolledFor = "";
+    terminalRailFlipMode = "instant";
+    renderTerminalRail();
+  }
+
+  function initTerminalRail() {
+    const dir = $("railTerminalDir");
+    if (!dir) return;
+    const slot = $("railTermAgentAvatar");
+    terminalRailAgentGlyph = slot && typeof slot.querySelector === "function" ? slot.querySelector(".rail-term-agent-glyph") : null;
+    // 首次指针/键盘输入才武装 FLIP：进页那一帧直接落位，用户还没动手时不放整列表淡入。
+    const armMotion = () => { terminalRailMotionArmed = true; };
+    dir.addEventListener("pointerdown", armMotion, { once: true });
+    dir.addEventListener("keydown", armMotion, { once: true });
+    // 一处委托：关闭叉 / 切换终端 / 历史行续接 / 组折叠 / 水位线。关闭叉先判，否则
+    // 会被行点击抢走。
+    dir.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      const close = target.closest("[data-rail-term-close]");
+      if (close) {
+        terminalRailCloseSession(close.getAttribute("data-rail-term-close"));
+        return;
+      }
+      const sessionRow = target.closest("[data-rail-term-session]");
+      if (sessionRow) {
+        terminalRailActivateSession(sessionRow.getAttribute("data-rail-term-session"));
+        return;
+      }
+      const resumeRow = target.closest("[data-rail-term-resume]");
+      if (resumeRow) {
+        terminalRailResumeHistoryRow(resumeRow.getAttribute("data-rail-term-resume"));
+        return;
+      }
+      const groupHead = target.closest("[data-rail-term-group]");
+      if (groupHead) {
+        toggleTerminalRailGroup(groupHead.getAttribute("data-rail-term-group"));
+        return;
+      }
+      const more = target.closest("[data-rail-term-more]");
+      if (more) toggleTerminalRailWatermark(more.getAttribute("data-rail-term-more"));
+    });
+    $("railTermNewBtn").onclick = () => terminalRailCreateTerminal();
+    $("railTermHistoryRefresh").onclick = () => refreshTerminalRailHistory({ manual: true });
+    // 栏底「返回」一颗钮两态共用（设置态与终端态互斥）：终端态回进入终端前的视图，
+    // 设置态仍由 initSettingsView 绑的 exitSettings 承担。
+    const back = $("railBackBtn");
+    if (back) {
+      back.onclick = () => (document.body.classList.contains("terminal-mode") ? closeTerminalPreview() : switchView(settingsReturnView));
+    }
+  }
+
   function initSkillsTab() {
     $("tabBoard").onclick = () => switchView("board");
     $("tabSkills").onclick = () => switchView("skills");
@@ -8328,6 +8808,9 @@ async function api(method, path, body) {
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
       loadInstalledTerminalAgents(); // 进页补热：60s TTL 内近零成本，过期才真实探测
+      // 终端会话栏：进页即渲一帧，历史会话在这里重取一次（全量扫盘 6.7s 无缓存，
+      // 只跟视图进入与身份变化走，绝不挂轮询）。
+      enterTerminalRail();
     }
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
     $("mainHeadInner").hidden = settings || terminal;
