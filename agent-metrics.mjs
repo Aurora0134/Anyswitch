@@ -375,21 +375,23 @@ const CODEX_SESSION_IDLE_TTL_MS = 5 * 60 * 1000;
 // from the x-opencode-session request header — see opencodeSessionInstanceId in
 // openai-server.mjs). Same no-owning-PID situation as codex: one resident
 // `serve --service` process carries every TUI's traffic, so a pid-shaped row
-// cannot name the session that sent a request. Same lifetime rule too (family
-// gone, or idle TTL), and the same 5 minutes — a closed TUI has nothing left
-// that could hold its row open.
+// cannot name the session that sent a request. Lifetime differs on purpose: an
+// opencode session row lives exactly as long as the interactive family does
+// (see the housekeeping note — a TUI that is merely idle still has its
+// conversation on screen, while codex's GUI never exits and therefore needs a
+// TTL).
 export const OPENCODE_SESSION_ID_PREFIX = "opencode-sess-";
-const OPENCODE_SESSION_IDLE_TTL_MS = CODEX_SESSION_IDLE_TTL_MS;
 
 // Session-granular row ids, keyed by the endpoint that mints them. Both declare
-// no owning PID: liveness is the endpoint's process family plus an idle TTL.
+// no owning PID: liveness is the endpoint's process family (plus, for codex
+// only, an idle TTL).
 const SESSION_ROW_PREFIXES = Object.freeze({
   codex: CODEX_SESSION_ID_PREFIX,
   opencode: OPENCODE_SESSION_ID_PREFIX,
 });
 const SESSION_ROW_IDLE_TTL_MS = Object.freeze({
   codex: CODEX_SESSION_IDLE_TTL_MS,
-  opencode: OPENCODE_SESSION_IDLE_TTL_MS,
+  opencode: null,
 });
 
 function isSessionRowId(id) {
@@ -3877,11 +3879,17 @@ export function createAgentMetricsCollector(options = {}) {
         pruneStaleAggregateFaults(entry.state, nowFn, faultIdleTtlMs);
         if (pidMatch === null && instId !== DSH_DESKTOP_INSTANCE_ID && instId !== KIMI_DESKTOP_INSTANCE_ID) {
           const lastSeen = entry.state.lastRequestAt ?? entry.firstSeen;
+          // opencode 的会话行不设空闲档：它的「家族」就是用户开着的那些 TUI，
+          // TUI 一关家族即灭、行当轮收走；反过来一条开着的 TUI 只是没在打字，
+          // 它的对话仍在屏幕上——按空闲时长收行会让终端右栏与看板在静置几分钟
+          // 后突然认不出这条会话（现场：复活回去的对话静置 5 分钟，行消失、
+          // 绑定回落 null）。codex 相反：它的 GUI 是常驻进程，家族长期不灭，
+          // 只能靠空闲档收行，否则每次开机以来的会话行都会挂着。
           const idleTtlMs = isSessionRow ? SESSION_ROW_IDLE_TTL_MS[bucket] : INSTANCE_IDLE_TTL_MS;
           // 空闲 TTL 只管剩下这档「声明不了属主、判不了进程生死」的自定义行
-          // （启动器注入的临时 id 等）；会话行用自己的 5 分钟档。稳定
+          // （启动器注入的临时 id 等）；codex 会话行用自己的 5 分钟档。稳定
           // 桌面行的生死走上面的进程家族判据，与空闲时长无关。
-          if (entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
+          if (idleTtlMs !== null && entry.state.activeRequests === 0 && now - lastSeen > idleTtlMs) {
             instMap.delete(instId);
           }
         }

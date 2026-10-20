@@ -1508,6 +1508,25 @@ describe("createAgentMetricsCollector", () => {
       assert.deepEqual(opencode.instances, [], "进程家族灭了，会话行当轮收走");
     });
 
+    it("keeps an idle opencode session row while its TUI is still open", async () => {
+      // 一条开着的 TUI 只是没在打字，它的对话还在屏幕上。若照 codex 的 5 分钟
+      // 空闲档收行，终端右栏与看板会静置几分钟后突然认不出这条会话。
+      let t = 3000;
+      const collector = testCollector({
+        execFn: (c, o, cb) => cb(null, PS_OPENCODE_SCAN),
+        nowFn: () => t,
+        opencodeSessionLookup: async () => [],
+      });
+      await collector.scanProcesses();
+      const r = collector.startRequest({ agentId: "opencode", instanceId: "opencode-sess-ses_idle", model: "m1", stream: true, path: "openai" });
+      r.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+      // 跳过两小时（远超 codex 的 5 分钟档），TUI 一直开着。
+      t += 2 * 60 * 60 * 1000;
+      await collector.scanProcesses();
+      const opencode = (await collector.getAgentsStatus()).find((a) => a.id === "opencode");
+      assert.deepEqual(opencode.instances.map((i) => i.id), ["opencode-sess-ses_idle"]);
+    });
+
     it("serves the opencode session metas through the terminal-join getter", async () => {
       const metas = [{ id: "ses_join", project: "C:\\work\\alpha", lastActive: 2000 }];
       let calls = 0;
