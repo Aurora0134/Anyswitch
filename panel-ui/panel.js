@@ -4115,16 +4115,32 @@ async function api(method, path, body) {
       }
     }
 
-    // 下拉选项 = 中继此刻真的认得的模型全集 + 首项「不接管」：与「自动路由」同源
-    // 的 storeRows()（号池按合并行出、成员行不重复出现），成员并集即该池的可见
-    // 目录；值就是中继的完整模型名，卡面上只见「[渠道名] 模型显示名」——
-    // anthropic/ 前缀只是骗过 Claude Code 目录过滤的线上身份，不进任何用户可读
-    // 文本（统计页剥前缀是同一口径）。渠道增删后重进「通用」即随 store state
-    // 一起刷新。已存的值不在候选集时（渠道已删/模型下架）补一项「已失效」如实
-    // 显示——与链编辑器「已保存但目录里消失的模型补入选项」同一口径。
+    // 下拉选项 = 中继此刻真的认得的模型全集 + 首项「不接管」：先是 Anyswitch
+    // 自建的虚拟模型（它们不在渠道目录里，却是中继真认得的模型），其后是与
+    // 「自动路由」同源的 storeRows()（号池按合并行出、成员行不重复出现），成员
+    // 并集即该池的可见目录；值就是中继的完整模型名，卡面上只见「[渠道名] 模型
+    // 显示名」与「[Anyswitch] 虚拟模型名」——anthropic/ 前缀只是骗过 Claude Code
+    // 目录过滤的线上身份，不进任何用户可读文本（统计页剥前缀是同一口径）。渠道
+    // 增删后重进「通用」即随 store state 一起刷新。已存的值不在候选集时（渠道已删/
+    // 模型下架/虚拟模型已删或已停用）补一项「已失效」如实显示——与链编辑器「已保存
+    // 但目录里消失的模型补入选项」同一口径。
     function renderClaudeTierOptions() {
       const seen = new Set();
       const base = [`<option value="">不接管</option>`];
+      // 虚拟模型（Anyswitch 自建的命名路由链）：目录 id 与 auto 同造法
+      // 「anthropic/<名字>」——前缀段内无 '/'，永不与真 wire id 相撞，中继按它
+      // 自己的链路由。准入口径与中继同源：启用中且链非空——停用或空链的模型不在
+      // 中继目录里，选中它必然失败。
+      for (const vm of storeVirtualModels()) {
+        const name = vm && typeof vm.name === "string" ? vm.name : "";
+        if (!name) continue;
+        if (vm.enabled === false) continue;
+        if (!Array.isArray(vm.chain) || vm.chain.length === 0) continue;
+        const wireId = `anthropic/${name}`;
+        if (seen.has(wireId)) continue;
+        seen.add(wireId);
+        base.push(`<option value="${esc(wireId)}">${esc(`[Anyswitch] ${name}`)}</option>`);
+      }
       for (const row of storeRows()) {
         const label = row.kind === "pool" ? (row.displayName || row.id) : ((row.p && row.p.displayName) || row.id);
         const models = {};

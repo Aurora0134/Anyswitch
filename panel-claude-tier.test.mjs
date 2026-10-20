@@ -187,6 +187,23 @@ describe("panel.js · 逐行即改即存与回滚", () => {
     assert.match(render, /\n\s*applyClaudeTierUi\(\);\n\s*\}/);
   });
 
+  it("下拉选项先列 Anyswitch 自建的虚拟模型：启用中且链非空才列，值是目录 id、文本不带 wire 前缀", () => {
+    const render = sliceBetween(js, "function renderClaudeTierOptions()", "\n    async function persistClaudeTier(", "renderClaudeTierOptions");
+    // 候选取自 store state 的虚拟模型列表——它们不在渠道目录里，却是中继真认得的模型。
+    assert.match(render, /for \(const vm of storeVirtualModels\(\)\)/);
+    // 准入口径与中继同源：停用、链为空的模型不在中继目录里，选中必然失败。
+    assert.match(render, /if \(vm\.enabled === false\) continue;/);
+    assert.match(render, /if \(!Array\.isArray\(vm\.chain\) \|\| vm\.chain\.length === 0\) continue;/);
+    // 值 = 虚拟模型的目录 id（与 auto 同造法，单段，永不与真 wire id 相撞）；
+    // 文本 = 「[Anyswitch] 名字」，与中继目录里虚拟模型那一行逐字一致。
+    assert.match(render, /const wireId = `anthropic\/\$\{name\}`;/);
+    assert.match(render, /base\.push\(`<option value="\$\{esc\(wireId\)\}">\$\{esc\(`\[Anyswitch\] \$\{name\}`\)\}<\/option>`\);/);
+    // 排在渠道模型之前（首项「不接管」之后）。
+    const vmAt = render.indexOf("for (const vm of storeVirtualModels())");
+    const rowAt = render.indexOf("for (const row of storeRows())");
+    assert.ok(vmAt >= 0 && rowAt > vmAt, "虚拟模型选项必须排在渠道模型之前");
+  });
+
   it("进「通用」子页刷新 store 并在落地后重生成选项，拉取失败保留旧选项", () => {
     const tab = sliceBetween(js, "// 「通用」的档位映射下拉同样以 store state 为源", "\n      if (which === \"about\")", "子页钩子");
     assert.match(tab, /if \(which === "general"\) refreshStoreState\(\)\.then\(renderClaudeTierOptions, \(\) => \{\}\);/);

@@ -44,9 +44,12 @@
 
 export const CLAUDE_TIERS = Object.freeze(["sonnet", "opus", "fable", "haiku"]);
 
-// settings.json key holding the map. Values are wire IDs exactly as the panel
-// picker produces them ("anthropic/<channel>/<model>"); the key is absent until
-// the operator configures a tier, which keeps a fresh install behaviour-identical.
+// settings.json key holding the map. Values are model ids exactly as the panel
+// picker produces them: a wire id ("anthropic/<channel>/<model>") for a channel
+// or pool model, or a virtual model's catalog id ("anthropic/<name>", the same
+// single-segment shape auto uses) for one of Anyswitch's own named route
+// chains; the key is absent until the operator configures a tier, which keeps
+// a fresh install behaviour-identical.
 export const CLAUDE_TIER_MAPPING_SETTINGS_KEY = "claudeTierMappings";
 
 // The only endpoint identity allowed to consult the map. Per-launch relays carry

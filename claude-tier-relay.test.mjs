@@ -326,11 +326,11 @@ describe("endpoint gating: only the Claude relay consults the mapping", () => {
 
 // ---------- loopback: what the frontends actually order and attribute ----------
 
-function relayDeps({ agentId, mappings = DEFAULT_MAPPINGS, upstreamFetch, metricsCollector }) {
+function relayDeps({ agentId, mappings = DEFAULT_MAPPINGS, upstreamFetch, metricsCollector, store = syntheticStore() }) {
   return {
     token: TOKEN,
     agentId,
-    loadStore: () => ({ ok: true, store: syntheticStore() }),
+    loadStore: () => ({ ok: true, store }),
     loadCredential: async () => ({ ok: true, value: "TEST_SECRET" }),
     upstreamFetch,
     recordGeneration: () => {},
@@ -352,6 +352,15 @@ function recordingUpstream(calls) {
       { status: 200, headers: { "content-type": "application/json" } },
     );
   };
+}
+
+// 虚拟模型：Anyswitch 自建的命名路由链，不绑定端点。目录 id 与 auto 同造法
+// 「anthropic/<名字>」（前缀段内无 '/'，永不与真 wire id 相撞），中继按它自己
+// 的链路由。档位接管可以直接改投它。
+function storeWithVirtualModel(name, chain, extra = {}) {
+  const store = syntheticStore();
+  store.virtualModels = [{ name, chain, ...extra }];
+  return store;
 }
 
 async function post(port, model, headers = {}) {
@@ -395,6 +404,56 @@ describe("per-launch relay", () => {
       assert.equal(calls[0].host, "host-a", "the pool's first member serves it");
     } finally {
       await close();
+    }
+  });
+
+  it("档位改投虚拟模型：走该虚拟模型自己的链，上游拿到链节点绑定的模型", async () => {
+    // 档位行指向 Anyswitch 自建的虚拟模型：接管把模型名改写成它的目录 id，
+    // 链规划随即接手（目录别名归一为裸名后按该链路由），上游只见到节点绑定的
+    // 模型——虚拟模型名本身永远不出网。
+    const calls = [];
+    const server = createRelayServer(
+      relayDeps({
+        agentId: "claude",
+        store: storeWithVirtualModel("my-vm", [{ node: "host-a", model: "kimi-k3" }]),
+        mappings: { sonnet: "anthropic/my-vm" },
+        upstreamFetch: recordingUpstream(calls),
+      }),
+    );
+    const { port, close } = await listenPerLaunch(server);
+    try {
+      const res = await post(port, "sonnet");
+      assert.equal(res.status, 200);
+      assert.equal(calls[0].model, "kimi-k3", "上游拿到的是链节点绑定的模型，不是虚拟模型名");
+      assert.equal(calls[0].host, "host-a", "由虚拟模型链的第一个节点应答");
+    } finally {
+      await close();
+    }
+  });
+
+  it("目标虚拟模型被停用或不存在时仍是坏行：400 指向那一行，不静默改投别处", async () => {
+    for (const [label, store] of [
+      ["已停用", storeWithVirtualModel("my-vm", [{ node: "host-a", model: "kimi-k3" }], { enabled: false })],
+      ["不存在", syntheticStore()],
+    ]) {
+      const calls = [];
+      const server = createRelayServer(
+        relayDeps({
+          agentId: "claude",
+          store,
+          mappings: { sonnet: "anthropic/my-vm" },
+          upstreamFetch: recordingUpstream(calls),
+        }),
+      );
+      const { port, close } = await listenPerLaunch(server);
+      try {
+        const res = await post(port, "sonnet");
+        assert.equal(res.status, 400, `${label}的虚拟模型必须被拒`);
+        assert.equal(calls.length, 0, `${label}的虚拟模型不得触达上游`);
+        assert.match((await res.json()).error.message, /mapping target/);
+      } finally {
+        await close();
+      }
     }
   });
 

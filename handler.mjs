@@ -673,7 +673,19 @@ export function createHandler(deps) {
       // A destination that is not itself a resolvable model name is a broken
       // row, not a channel outage: refuse here so the 400 can name the row
       // instead of 404ing on a half-rewritten request.
-      targetResolves: (target) => unpackWireId(target, loaded.store).ok,
+      //
+      // Two destination kinds count as resolvable. A real wire id names a
+      // channel or pool model and is served by the strict path — it always
+      // wins. A virtual model is Anyswitch's own named route chain: its
+      // catalog id is the single-segment "anthropic/<name>" (the same shape
+      // auto uses, so it can never collide with a real wire id), and it is
+      // served by the chain plan, which normalises that alias back to the bare
+      // name and walks the chain. resolveVirtualModelEntry admits only an
+      // entry that is in the store, enabled and carries a non-empty chain — a
+      // deleted or disabled virtual model stays a broken row, refused here
+      // rather than silently routed somewhere else.
+      targetResolves: (target) => unpackWireId(target, loaded.store).ok
+        || resolveVirtualModelEntry(loaded.store, target) !== null,
     });
     if (!takeover.ok) return null;
 

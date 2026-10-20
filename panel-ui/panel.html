@@ -2099,9 +2099,11 @@ if (window.panelStartupController) panelStartupPlay();
            「接管默认模型」是四档映射的
            总开关，关时收起下方四行、映射暂停生效但已填的值保留。四行是下拉选择
            （select），值 = anyswitch 托管模型的完整模型名（anthropic/渠道/模型），
-           首项「不接管」= 该档位不接管；卡面只显示「[渠道名] 模型显示名」，wire
+           首项「不接管」= 该档位不接管；卡面只显示「[渠道名] 模型显示名」与
+           「[Anyswitch] 虚拟模型名」，wire
            前缀不进用户可读文本。选项由 panel.js 从 store
-           state 生成（与「自动路由」同源，号池取成员并集）。控件沿用 modal-item /
+           state 生成：先是 Anyswitch 自建的虚拟模型（启用中且链非空），其后是
+           渠道与号池模型（与「自动路由」同源，号池取成员并集）。控件沿用 modal-item /
            modal-number 既有类，新增类只管宽度与文字对齐、不带任何颜色取值，因此
            三套主题与亮暗无需特化。 -->
       <div class="panel-card">
