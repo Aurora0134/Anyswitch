@@ -4764,6 +4764,8 @@ async function api(method, path, body) {
   let terminalImeHoldFrame = null;
   let terminalImeFitPending = false;
   let terminalImeAnchorTextarea = null;
+  // 组字锚点的折叠补正要读实例缓冲（见 armTerminalImeAnchor）：装配时固化，关流清空。
+  let terminalImeAnchorTerm = null;
   // 组字事件的挂/摘按引用配对（IME 锚点三件套装配时固化）。
   let terminalImeArmHandler = null;
   let terminalImeReleaseHandler = null;
@@ -5421,6 +5423,7 @@ async function api(method, path, body) {
       terminalImeAnchorTextarea.removeEventListener("compositionstart", terminalImeArmHandler);
       terminalImeAnchorTextarea.removeEventListener("compositionend", terminalImeReleaseHandler);
       terminalImeAnchorTextarea = null;
+      terminalImeAnchorTerm = null;
       terminalImeArmHandler = null;
       terminalImeReleaseHandler = null;
     }
@@ -5617,23 +5620,24 @@ async function api(method, path, body) {
   // 钳制派发的 scroll 事件不带任何标记，xterm 拿它当「用户滚动」写进 ydisp；此后
   // ydisp≠ybase，新输出不再带动视口，画面卡死在接近顶端的位置不自行恢复。
   // 护栏恢复 xterm 的跟随语义（视口在底部就跟着输出走）：跟随态下、最近没有用户
-  // 滚动操作时，视口被打离底部即拉回。用户主动离底的各条通路都先记意图——滚轮/
+  // 语义对齐 Claude Desktop（实证规格 .pocketower/findings/m1-claude-bottom-align-spec.md，
+  // 2026-10-20 用户拍板）：空区出现时不自动折回——视口原地不动，空白带留在屏上；用户
+  // 上滚翻看历史时「地板」随滚动逐拍收紧（trim 只缩不扩），空区被吃掉而视口不跳；滚回
+  // 地板即恢复跟随，落点恰好是修剪后的内容底。用户主动离底的各条通路都先记意图——滚轮/
   // 拖滚动条/触摸/选择拖动，以及键盘翻页（xterm 把 Shift+PageUp/PageDown 译为
   // scrollLines，见下方 keydown 监听）——意图窗口内的离底事件退出跟随态，停在
-  // 历史上绝不拉回；滚回底部自动恢复跟随。
+  // 历史上绝不拉回（含回放清闩：读历史时回放结束不拽底）。
   const TERMINAL_SCROLL_INTENT_MS = 250;
-  // 收缩折回的 settled 防抖：内容底变小（2J/矮帧/清屏）时，中途的内容底是中间
-  // 帧，当帧折会折错位——等写入静默一拍再动视口。内容增长不走这条，写解析当拍
-  // 同步锚定。
+  // 回放闩的静默窗：reset()/回放洪峰的写入不是用户滚动，静默一拍后才清闩并锚定。
   const TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS = 120;
   // 有效底部（「底部自动对齐」开启时护栏采信）：TUI 整屏清除（ESC[2J+光标归零，典型=
   // Kimi 收起 / 指令表）后把矮框架从屏幕顶重画，尾部屏幕行无人写入——这块空白带在
   // xterm 缓冲层，外层收带（installTerminalBottomAlign 只写外层 scrollTop）结构性
   // 够不着（2026-10-18 实测：30 行屏 17 行空白，外层 gap 却是 0）。有效底部把尾屏
-  // 最后一个含文本行当内容底：视口锚在它上面，空白折到折叠线下、上方回滚补位（真实
+  // 最后一个含文本行当内容底：地板最多收到这里（空白全部吃掉、上方回滚补位，真实
   // 终端观感：历史在上、活内容贴底）。整屏全空（清屏后未重画 / 3J 后无回滚）回退
   // 真尾——空屏之下没有可对齐的内容，硬拉只会露旧画面。判空只看文本不看背景色：
-  // 带背景无字的装饰条会被判空折起，现网 TUI 底栏都带字，此边界可接受。
+  // 带背景无字的装饰条会被判空，现网 TUI 底栏都带字，此边界可接受。
   function terminalEffectiveBottomBase(term) {
     const buffer = term.buffer.active;
     const baseY = buffer.baseY;
@@ -5663,22 +5667,26 @@ async function api(method, path, body) {
     root.addEventListener("keydown", (event) => {
       if (event.shiftKey && (event.key === "PageUp" || event.key === "PageDown")) noteIntent();
     }, { capture: true, passive: true });
-    // 底部基准：开关关=缓冲真尾（与历史行为逐位一致）；开关开=有效底部（内容底，
-    // 见 terminalEffectiveBottomBase）。「在底部」随之迁到内容底——内容底与真尾之间
-    // 的空白带也算在底（跟随态）。
-    const bottomBase = () => (terminalBottomAlignEnabled() ? terminalEffectiveBottomBase(term) : term.buffer.active.baseY);
-    // 内容底基准：判定内容在增长还是收缩。写解析事件同值重复到来不产生动作。
-    let baselineBottom = null;
-    let settleTimer = null;
+    // 地板（CD 的 hold/trim 在缓冲层的等价物）：跟随态的停泊行，恒夹在 [内容底, 真尾]。
+    // 初始=真尾（空白带完全可见）。trim 见下方 scroll 监听；内容增长时地板随内容底
+    // 同幅平移（屏上可视空白恒定，/ 菜单类向下延伸的绘制始终可见）；收缩不动地板。
+    let floor = term.buffer.active.baseY;
+    let lastEffBottom = null;
+    const trackFloor = () => {
+      const buffer = term.buffer.active;
+      if (!terminalBottomAlignEnabled()) { floor = buffer.baseY; lastEffBottom = null; return; }
+      const eff = terminalEffectiveBottomBase(term);
+      if (lastEffBottom !== null && eff > lastEffBottom) floor += eff - lastEffBottom;
+      lastEffBottom = eff;
+      if (floor > buffer.baseY) floor = buffer.baseY;
+      if (floor < eff) floor = eff; // 内容长过地板=地板被顶起（CD 的 settle 语义）
+    };
+    // 底部基准：开关关=缓冲真尾（与历史行为逐位一致）；开关开=地板。
+    const bottomBase = () => (terminalBottomAlignEnabled() ? floor : term.buffer.active.baseY);
     let intentRetryTimer = null;
     let replayTimer = null;
-    const clearSettle = () => {
-      if (settleTimer === null) return;
-      clearTimeout(settleTimer);
-      settleTimer = null;
-    };
-    // 视口唯一写者：增长锚定、收缩折回、尺寸变化后的重锚都汇到这里，过同一组闸。
-    // 意图窗内不动作但补排到窗口结束——直接 return 会让这次折回永远丢失。
+    // 视口唯一写者：增长跟随、尺寸变化重锚、回放落点都汇到这里，过同一组闸。
+    // 意图窗内不动作但补排到窗口结束——直接 return 会让这次跟随永远丢失。
     const anchorToBottom = () => {
       if (terminalReplayRestoring) return;
       if (!terminalBottomAlignEnabled()) return;
@@ -5694,48 +5702,41 @@ async function api(method, path, body) {
         }
         return;
       }
-      const buffer = term.buffer.active;
-      const bottom = terminalEffectiveBottomBase(term);
-      if (bottom >= buffer.baseY) return; // 没有空白带：跟随态视口本就在真尾，不写
-      if (buffer.viewportY !== bottom) term.scrollToLine(bottom);
+      trackFloor();
+      // 跟随由护栏全权负责（折回动作会把 xterm 原生跟随的上滚标志置位，原生跟随从此
+      // 不纠偏）：地板在哪就停哪，无带时=真尾。不能再以「无带即视口在真尾」提前
+      // 返回——那是 / 菜单沉底的直接成因（2026-10-20 定案）。
+      if (term.buffer.active.viewportY !== floor) term.scrollToLine(floor);
     };
-    // 内容变化：增长（输入回显、流式输出把内容底往下推）当拍同步锚定；收缩
-    // （2J/矮帧/清屏把内容底往上收）等写入静默一拍再折。
-    const onContentChange = () => {
-      const bottom = bottomBase();
-      if (baselineBottom === null || bottom > baselineBottom) {
-        baselineBottom = bottom;
-        clearSettle();
-        anchorToBottom();
+    // 写解析是内容变化的唯一来源：地板重算后锚定。收缩零动作是地板语义的自然结果。
+    term.onWriteParsed?.(() => {
+      if (terminalReplayRestoring) {
+        terminalReplayRestoreArm?.();
         return;
       }
-      if (bottom < baselineBottom) {
-        baselineBottom = bottom;
-        clearSettle();
-        settleTimer = setTimeout(() => { settleTimer = null; anchorToBottom(); }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
-        return;
-      }
-      // 等值写入：内容底没动但写流还在继续，静默窗顺延——折回只发生在写入真正
-      // 歇下来之后。
-      if (settleTimer !== null) {
-        clearTimeout(settleTimer);
-        settleTimer = setTimeout(() => { settleTimer = null; anchorToBottom(); }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
-      }
-    };
+      anchorToBottom();
+    });
+    // 尺寸变化后行数变了，内容底与地板的换算基准随之变：重算后锚一次。
+    term.onResize?.(() => {
+      trackFloor();
+      anchorToBottom();
+    });
     // 回放闩：reset() 把 ydisp/ybase 归零会派发一次「离底」滚动，回放期间逐块
     // 写入也不是用户滚动——闩住期间护栏零动作。回放每来一块重置静默定时器，
-    // 静默一拍后清闩并锚一次，整段落点精确在内容底；没有回放数据时同一定时器
-    // 兜底清闩，不会永久闩住。
+    // 静默一拍后清闩并锚一次；没有回放数据时同一定时器兜底清闩，不会永久闩住。
+    // 清闩只恢复「进入回放前本来就在跟随」的会话：用户在读历史时回放结束绝不
+    // 拽底（CD：处理白区时视窗自己不动）。
+    let armedFollow = true;
     terminalReplayRestoreArm = () => {
+      if (replayTimer === null) armedFollow = followBottom; // 一次回放只取首拍的跟随态
       if (replayTimer !== null) clearTimeout(replayTimer);
-      clearSettle();
       replayTimer = setTimeout(() => {
         replayTimer = null;
         terminalReplayRestoring = false;
         // 实例已销毁（关流/切列）就不再碰它的缓冲：闩清掉即可。
         if (!term.element?.isConnected) return;
-        followBottom = true;
-        baselineBottom = bottomBase();
+        followBottom = armedFollow;
+        trackFloor();
         anchorToBottom();
       }, TERMINAL_EFFECTIVE_BOTTOM_SETTLE_MS);
     };
@@ -5744,38 +5745,30 @@ async function api(method, path, body) {
       replayTimer = null;
       if (intentRetryTimer !== null) clearTimeout(intentRetryTimer);
       intentRetryTimer = null;
-      clearSettle();
     };
-    // 写解析是内容变化的唯一来源：增长同步锚定，收缩走静默防抖。
-    term.onWriteParsed?.(() => {
-      if (terminalReplayRestoring) {
-        terminalReplayRestoreArm?.();
-        return;
-      }
-      onContentChange();
-    });
-    // 尺寸变化后行数变了，内容底的换算基准随之变：重新取基准并锚一次。
-    term.onResize?.(() => {
-      baselineBottom = bottomBase();
-      anchorToBottom();
-    });
     // 挂在 xterm 自己的 scroll 监听之后（它绑在 open() 里，本护栏在 open 之后装），
-    // 读到的 ydisp 已是它翻译过的值：落底事件恢复跟随；跟随态下无意图的离底事件
-    // 即钳制抖动，拉回内容底（无空白带时拉回真尾）；非跟随态保持不动。
+    // 读到的 ydisp 已是它翻译过的值：落到地板即恢复跟随（历史意图一并作废——其后
+    // 的无意图离底只能是抖动）；有意图的上滚退出跟随并把地板收到经过的最低点
+    // （trim，只缩不扩；地板不越过内容底——深滚进历史不削内容）；跟随态下无意图
+    // 的离底事件即钳制抖动，拉回地板（无带时=真尾）。
     viewport.addEventListener("scroll", () => {
       if (terminalReplayRestoring) return;
       const buffer = term.buffer.active;
       if (buffer.type === "alternate") return;
+      trackFloor();
       const bottom = bottomBase();
       if (buffer.viewportY >= bottom - 1) {
-        // 落底即回到「真值在底部」状态：跟随恢复，历史意图一并作废——其后的
-        // 无意图离底只能是抖动，不可能是上一次用户滚动的余波。
         followBottom = true;
         lastScrollIntentAt = 0;
         return;
       }
       if (Date.now() - lastScrollIntentAt <= TERMINAL_SCROLL_INTENT_MS) {
         followBottom = false;
+        if (terminalBottomAlignEnabled() && buffer.viewportY < floor) {
+          floor = buffer.viewportY;
+          const eff = terminalEffectiveBottomBase(term);
+          if (floor < eff) floor = eff;
+        }
         return;
       }
       if (!followBottom) return;
@@ -5792,7 +5785,8 @@ async function api(method, path, body) {
   // .terminal-screen 上另挂 wheel）即把外层 scrollTop 收 0 吃掉带子；外层滚动事件流内
   // 带意图时效窗同做收带（滚动事件无标记，裸信会把布局抖动误判成用户意图）。动作只写
   // 外层 scrollTop，不写 .xterm-viewport、不调 scrollToBottom/scrollToLines——缓冲层
-  // 的空白带（/ 指令表收起形态）由护栏的有效底部半边折回，两条通路各管一层。外层
+  // 的空白带（/ 指令表收起形态）由护栏的地板承接：不自动折回，随用户上滚逐拍吃掉，
+  // 两条通路各管一层。外层
   // 自然停靠位即 0（带收掉后滚动链终点 = 内容底），「再滚回底部恰好对齐」自动成立。
   const TERMINAL_BOTTOM_ALIGN_BAND_MIN_PX = 4;
   function installTerminalBottomAlign(term) {
@@ -5947,8 +5941,22 @@ async function api(method, path, body) {
       terminalImeHoldFrame = requestAnimationFrame(() => armTerminalImeAnchor());
       return;
     }
+    // 折叠补正（2026-10-20 定案）：xterm 的组字定位按「光标屏内行 × 行高」算，缺
+    // viewportY 偏移（CompositionHelper.updateCompositionElements）——底部自动对齐
+    // 把视口锚到真尾之上时，组字窗与隐藏输入框恒偏高「折起行数」行。按公开缓冲读数
+    // 把 (baseY − viewportY) × cellHeight 补回；光标不在视口内（翻历史中的组字）不
+    // 冻结，交回 xterm 原生行为，也不排重试帧空转。
+    const buffer = terminalImeAnchorTerm?.buffer.active;
+    const cellHeight = Number.parseFloat(textarea.style.lineHeight) || Number.parseFloat(textarea.style.height);
+    if (!buffer || !Number.isFinite(cellHeight)) {
+      terminalImeHoldFrame = requestAnimationFrame(() => armTerminalImeAnchor());
+      return;
+    }
+    const cursorViewportRow = buffer.baseY + buffer.cursorY - buffer.viewportY;
+    if (cursorViewportRow < 0 || cursorViewportRow >= terminalImeAnchorTerm.rows) return;
+    const correctedTop = `${Number.parseFloat(textarea.style.top) + (buffer.baseY - buffer.viewportY) * cellHeight}px`;
     textarea.style.setProperty("--ime-hold-left", textarea.style.left);
-    textarea.style.setProperty("--ime-hold-top", textarea.style.top);
+    textarea.style.setProperty("--ime-hold-top", correctedTop);
     textarea.style.setProperty("--ime-hold-height", textarea.style.height);
     textarea.style.setProperty("--ime-hold-lineheight", textarea.style.lineHeight);
     textarea.classList.add("ime-hold");
@@ -5956,7 +5964,7 @@ async function api(method, path, body) {
     const compositionView = textarea.parentElement?.querySelector(".composition-view") ?? null;
     if (compositionView) {
       compositionView.style.setProperty("--ime-hold-left", textarea.style.left);
-      compositionView.style.setProperty("--ime-hold-top", textarea.style.top);
+      compositionView.style.setProperty("--ime-hold-top", correctedTop);
       compositionView.classList.add("ime-hold");
     }
     terminalImeHold = { textarea, compositionView };
@@ -5990,6 +5998,7 @@ async function api(method, path, body) {
     const textarea = term?.element?.querySelector(".xterm-helper-textarea");
     if (!textarea) return;
     terminalImeAnchorTextarea = textarea;
+    terminalImeAnchorTerm = term;
     // 监听回调按引用成对摘除（见 closeTerminalStream）。
     terminalImeArmHandler = () => armTerminalImeAnchor();
     terminalImeReleaseHandler = () => releaseTerminalImeAnchor();

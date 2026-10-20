@@ -8745,95 +8745,136 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     assert.equal(fn(makeTerm(30, blankTail.slice(0, 13), 0)), 0, "短缓冲（3J 后无回滚可补）钳到 0=真尾");
   });
 
-  it("有效底部·钳制拉回：跟随态被打离内容底时拉回内容底而非真尾", () => {
-    const { state, viewport, buffer } = guardSandbox();
+  // 地板（Claude Desktop hold/trim 的缓冲层等价）：跟随态停泊行 ∈ [内容底, 真尾]。
+  // 初始=真尾（空白带完全可见、零自动折回）；用户上滚经过的最低点把地板收到那里
+  // （trim 只缩不扩）；内容增长地板同幅平移（屏上空白恒定）；收缩不动地板。
+  it("有效底部·上滚吃掉空白带：收缩零动作，上滚逐拍收紧地板，滚回地板即恢复跟随", () => {
+    const { state, root, viewport, buffer, write } = guardSandbox();
     state.alignOn = true;
-    state.effBase = 483; // 真尾 500，内容底之上 17 行空白带
-    buffer.viewportY = 20;
+    state.effBase = 500;
+    buffer.viewportY = 500;
+    write(); // 取基准：无带，零写
+    assert.deepEqual(state.scrollToLineCalls, [], "无空白带不做无谓 scrollToLine");
+    state.effBase = 483; // 2J + 顶部重画：内容底收缩，17 行空白带出现
+    write();
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.deepEqual(state.scrollToLineCalls, [], "收缩后不自动折回（CD 语义：空区留给用户上滚吃掉）");
+    assert.equal(buffer.viewportY, 500, "视口原地不动");
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 490; // 用户上滚第一拍：地板收到 490
     viewport.fire("scroll");
-    assert.deepEqual(state.scrollToLineCalls, [483], "拉回内容底（scrollToLine）");
-    assert.equal(buffer.viewportY, 483, "视口落在内容底");
-    assert.equal(state.scrollToBottomCount, 0, "不再拉真尾");
+    buffer.viewportY = 483; // 再上滚：地板收到内容底
+    viewport.fire("scroll");
+    buffer.viewportY = 482; // 滚回地板上一行=落底，恢复跟随
+    viewport.fire("scroll");
+    write();
+    assert.deepEqual(state.scrollToLineCalls, [483], "跟随后停泊在地板（空区已吃掉）");
+    assert.equal(buffer.viewportY, 483, "落点恰好是修剪后的内容底");
+    assert.equal(state.scrollToBottomCount, 0, "全程不回真尾");
   });
 
-  it("有效底部·落底判定迁移：滚到内容底即恢复跟随（未到真尾）", () => {
+  it("有效底部·收缩后洪峰多拍仍零动作", () => {
+    const { state, write } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 500;
+    write();
+    state.effBase = 483;
+    for (let round = 0; round < 3; round += 1) {
+      write();
+      state.now += state.settleMs + 10;
+      state.flushTimers();
+      assert.deepEqual(state.scrollToLineCalls, [], `第 ${round} 拍不折`);
+    }
+  });
+
+  it("有效底部·trim 只缩不扩：深滚进历史地板不越过内容底，下滚不回扩", () => {
+    const { state, root, viewport, buffer, write } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 100; // Shift+PageUp 式深滚：地板钳到内容底 483，不跟到 100
+    viewport.fire("scroll");
+    buffer.viewportY = 482; // 落回地板上一行即恢复跟随（滚不到 483 以下才 repin）
+    viewport.fire("scroll");
+    write();
+    assert.deepEqual(state.scrollToLineCalls, [483], "地板被内容底托住，不被深滚削穿");
+    assert.equal(buffer.viewportY, 483);
+  });
+
+  it("有效底部·钳制拉回：修剪后跟随态被无意图抖动打离地板时拉回地板", () => {
     const { state, root, viewport, buffer } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
     root.fire("wheel", { deltaY: -120 });
-    buffer.viewportY = 300;
-    viewport.fire("scroll"); // 退出跟随
-    buffer.viewportY = 483; // 用户滚回内容底（真尾之上 17 行）
+    buffer.viewportY = 483;
+    viewport.fire("scroll"); // trim 到 483、退出跟随
+    buffer.viewportY = 482;
+    viewport.fire("scroll"); // 落回地板恢复跟随
+    state.now += 100000; // 意图窗早过
+    buffer.viewportY = 20; // 钳制抖动
     viewport.fire("scroll");
-    buffer.viewportY = 20; // 抖动再来
-    viewport.fire("scroll");
-    assert.deepEqual(state.scrollToLineCalls, [483], "恢复跟随后抖动拉回内容底");
+    assert.deepEqual(state.scrollToLineCalls, [483], "拉回地板而非真尾");
+    assert.equal(buffer.viewportY, 483);
+    assert.equal(state.scrollToBottomCount, 0, "不走 scrollToBottom");
   });
 
-  it("有效底部·增长同步锚定：内容底变大当拍落位，不等静默窗", () => {
-    const { state, write, buffer } = guardSandbox();
+  it("有效底部·增长锚定：修剪后内容底下行，地板同幅平移当拍跟随（可视空白恒定）", () => {
+    const { state, root, viewport, buffer, write } = guardSandbox();
     state.alignOn = true;
-    state.effBase = 483; // 真尾 500，内容底之上 17 行空白带
-    buffer.viewportY = 500; // 输入回显把视口带到真尾
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 483;
+    viewport.fire("scroll");
+    buffer.viewportY = 482;
+    viewport.fire("scroll"); // 恢复跟随
+    state.effBase = 490; // 内容底下行 7 行
     write();
-    assert.deepEqual(state.scrollToLineCalls, [483], "写解析当拍即锚，不排定时器");
-    assert.equal(buffer.viewportY, 483, "视口落在内容底");
-    assert.equal(state.scrollToBottomCount, 0, "不走真尾");
+    assert.deepEqual(state.scrollToLineCalls, [490], "地板 483+7 当拍落位，不等任何静默窗");
+    assert.equal(buffer.viewportY, 490);
   });
 
-  it("有效底部·双向折：跟随态视口停在内容底上方（回放落点被写流顶住）增长时同样锚回", () => {
+  it("有效底部·菜单回归：折叠态下内容向下延伸穿屏，视口跟到真尾、菜单尾部可见", () => {
+    const { state, root, viewport, buffer, write } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    buffer.viewportY = 500;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 483;
+    viewport.fire("scroll"); // trim 到 483
+    buffer.viewportY = 482;
+    viewport.fire("scroll"); // 恢复跟随
+    state.effBase = 491; // / 菜单第一段：内容底下行 8 行（缓冲真尾未动）
+    write();
+    assert.deepEqual(state.scrollToLineCalls, [491], "内容底下行视口跟随，菜单始终可见");
+    buffer.baseY = 508; // 菜单穿屏：缓冲滚动，真尾与内容底同到 508
+    state.effBase = 508;
+    write();
+    assert.deepEqual(state.scrollToLineCalls, [491, 508], "地板随内容顶到真尾");
+    assert.equal(buffer.viewportY, 508, "视口落真尾=菜单底可见（旧码此处零写入、菜单落在屏下）");
+  });
+
+  it("有效底部·回放落点：停在历史顶时写流把视口锚到真尾（地板未修剪，空区保留）", () => {
     const { state, write, buffer } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
     buffer.viewportY = 0; // 回放落点停在历史顶，跟随态无滚动事件可醒护栏
     write();
-    assert.deepEqual(state.scrollToLineCalls, [483], "跟随态唯一合法位置是内容底");
-    assert.equal(buffer.viewportY, 483, "视口从顶部锚回内容底");
+    assert.deepEqual(state.scrollToLineCalls, [500], "地板=真尾：锚到真尾，空白带不自动折");
+    assert.equal(buffer.viewportY, 500);
   });
 
-  it("有效底部·收缩静默折回：内容底变小等写入静默一拍，中途帧不折", () => {
-    const { state, write, buffer } = guardSandbox();
-    state.alignOn = true;
-    state.effBase = 500; // 初始内容底=真尾（无空白带）
-    buffer.viewportY = 500;
-    write(); // 取基准：无带，零写
-    assert.deepEqual(state.scrollToLineCalls, [], "无空白带不做无谓 scrollToLine");
-    state.effBase = 483; // 2J + 顶部重画：内容底收缩
-    buffer.viewportY = 500;
-    write();
-    assert.deepEqual(state.scrollToLineCalls, [], "收缩当拍不折（中间帧）");
-    state.now += state.settleMs - 10;
-    state.flushTimers();
-    assert.deepEqual(state.scrollToLineCalls, [], "静默窗未到不折");
-    state.now += 20;
-    state.flushTimers();
-    assert.deepEqual(state.scrollToLineCalls, [483], "静默一拍后折回内容底");
-    assert.equal(buffer.viewportY, 483, "空白带折到折叠线下");
-  });
-
-  it("有效底部·收缩期间连续写入重置静默窗：洪峰中途不折", () => {
-    const { state, write } = guardSandbox();
-    state.alignOn = true;
-    state.effBase = 500;
-    write(); // 基准
-    state.effBase = 483;
-    for (let round = 0; round < 3; round += 1) {
-      write();
-      state.now += state.settleMs - 10;
-      state.flushTimers();
-      assert.deepEqual(state.scrollToLineCalls, [], `第 ${round} 拍中途不折`);
-    }
-    state.now += 20;
-    state.flushTimers();
-    assert.deepEqual(state.scrollToLineCalls, [483], "流歇一拍后折回");
-  });
-
-  it("有效底部·意图窗零动作且不丢帧：窗内写解析不折，窗过补排一次折回", () => {
-    const { state, root, write, buffer } = guardSandbox();
+  it("有效底部·意图窗零动作且不丢帧：修剪态增长在窗内不锚，窗过补锚一次", () => {
+    const { state, root, viewport, buffer, write } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
-    root.fire("wheel", { deltaY: 120 });
-    buffer.viewportY = 500;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 483;
+    viewport.fire("scroll");
+    buffer.viewportY = 482;
+    viewport.fire("scroll"); // 恢复跟随
+    root.fire("wheel", { deltaY: 120 }); // 手势进行中（只记意图，无位移）
+    state.effBase = 490;
     write();
     assert.deepEqual(state.scrollToLineCalls, [], "手势期间零动作");
     state.now += 100; // 仍在 250ms 意图窗内
@@ -8841,18 +8882,22 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     assert.deepEqual(state.scrollToLineCalls, [], "意图窗内补排不提前动作");
     state.now += 400; // 窗过，补排到点
     state.flushTimers();
-    assert.deepEqual(state.scrollToLineCalls, [483], "补排保证折回不被丢掉");
-    assert.equal(buffer.viewportY, 483, "静止后落到内容底");
+    assert.deepEqual(state.scrollToLineCalls, [490], "补排保证跟随不被丢掉");
+    assert.equal(buffer.viewportY, 490);
   });
 
-  it("有效底部·尺寸变化：onResize 后重取基准并锚一次", () => {
-    const { state, resize, buffer } = guardSandbox();
+  it("有效底部·尺寸变化：onResize 后按地板重锚", () => {
+    const { state, root, viewport, buffer, resize } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
-    buffer.viewportY = 500;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 483;
+    viewport.fire("scroll");
+    buffer.viewportY = 482;
+    viewport.fire("scroll");
     resize();
-    assert.deepEqual(state.scrollToLineCalls, [483], "行数变化后按新基准重锚");
-    assert.equal(buffer.viewportY, 483, "视口落在内容底");
+    assert.deepEqual(state.scrollToLineCalls, [483], "行数变化后按地板重锚");
+    assert.equal(buffer.viewportY, 483);
   });
 
   it("有效底部·历史保护：非跟随态（用户在历史上）内容变化绝不拽回", () => {
@@ -8861,7 +8906,7 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     state.effBase = 483;
     root.fire("wheel", { deltaY: -120 });
     buffer.viewportY = 300;
-    viewport.fire("scroll"); // 退出跟随
+    viewport.fire("scroll"); // 退出跟随（地板同时被内容底托在 483）
     state.now += 100000;
     write();
     state.now += state.settleMs + 10;
@@ -8869,12 +8914,17 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     assert.deepEqual(state.scrollToLineCalls, [], "停在历史上绝不拉回（护栏旧语义不动）");
   });
 
-  it("有效底部·组字冻结：imeHold 期间内容变化不折回", () => {
-    const { state, buffer, column, write } = guardSandbox();
+  it("有效底部·组字冻结：imeHold 期间内容变化不锚动", () => {
+    const { state, root, viewport, buffer, column, write } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 483;
+    viewport.fire("scroll");
+    buffer.viewportY = 482;
+    viewport.fire("scroll");
     column.imeHold = { textarea: {} };
-    buffer.viewportY = 500;
+    state.effBase = 490;
     write();
     state.now += state.settleMs + 10;
     state.flushTimers();
@@ -8896,7 +8946,7 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     assert.equal(state.scrollToBottomCount, 0, "备屏滚动事件不拉回");
   });
 
-  it("回放闩：reset 后的滚动不改跟随态，回放静默后落内容底", () => {
+  it("回放闩：reset 后的滚动不改跟随态，回放静默后落真尾（地板未修剪）", () => {
     const { state, viewport, buffer, column, write } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
@@ -8904,7 +8954,7 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     column.replayRestoreArm();
     buffer.viewportY = 0; // reset() 把 ydisp/ybase 归零后的离底滚动
     viewport.fire("scroll");
-    assert.deepEqual(state.scrollToLineCalls, [], "闩内滚动不触发折回");
+    assert.deepEqual(state.scrollToLineCalls, [], "闩内滚动不触发动作");
     write(); // 回放数据逐块写入：重置静默窗
     assert.deepEqual(state.scrollToLineCalls, [], "回放期间不逐块锚定");
     state.now += state.settleMs - 10;
@@ -8913,24 +8963,25 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     state.now += 20;
     state.flushTimers();
     assert.equal(column.replayRestoring, false, "静默一拍后清闩");
-    assert.deepEqual(state.scrollToLineCalls, [483], "回放结束精确落在内容底");
-    assert.equal(buffer.viewportY, 483, "视口在内容底");
+    assert.deepEqual(state.scrollToLineCalls, [500], "回放结束落在真尾（空区不自动折，留待上滚吃掉）");
+    assert.equal(buffer.viewportY, 500, "视口在真尾");
     buffer.viewportY = 20; // 闩清后无意图离底仍是抖动
     viewport.fire("scroll");
-    assert.deepEqual(state.scrollToLineCalls, [483, 483], "跟随态已恢复，抖动照拉");
+    assert.equal(state.scrollToBottomCount, 1, "跟随态已恢复，抖动照拉回真尾（地板=真尾）");
   });
 
   it("回放闩兜底：无回放数据时清闩定时器同样到期，不永久闩住", () => {
     const { state, column, buffer } = guardSandbox();
     state.alignOn = true;
     state.effBase = 483;
+    buffer.viewportY = 0; // reset 归零后的位置——否则视口本就在地板，锚定是零写
     column.replayRestoring = true;
     column.replayRestoreArm();
     state.now += state.settleMs + 10;
     state.flushTimers();
     assert.equal(column.replayRestoring, false, "无写入也清闩");
-    assert.deepEqual(state.scrollToLineCalls, [483], "清闩时锚一次");
-    assert.equal(buffer.viewportY, 483, "视口在内容底");
+    assert.deepEqual(state.scrollToLineCalls, [500], "清闩时锚一次到真尾");
+    assert.equal(buffer.viewportY, 500, "视口在真尾");
   });
 
   it("回放闩随实例销毁撤销：close 后定时器不再碰旧实例", () => {
@@ -8941,6 +8992,28 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     state.now += state.settleMs + 10;
     state.flushTimers();
     assert.equal(column.replayRestoring, true, "撤销后定时器不再执行（由 closeTerminalStream 置回 false）");
+  });
+
+  it("回放闩·历史保护：用户在读历史时回放结束不拽底、不恢复跟随（CD：视窗自己不动）", () => {
+    const { state, root, viewport, buffer, column, write } = guardSandbox();
+    state.alignOn = true;
+    state.effBase = 483;
+    root.fire("wheel", { deltaY: -120 });
+    buffer.viewportY = 300;
+    viewport.fire("scroll"); // 用户停在历史上，退出跟随
+    state.now += 1000; // 越过意图窗——否则旧码的拽底会被补排窗口遮蔽（钉子必须判别）
+    column.replayRestoring = true;
+    column.replayRestoreArm();
+    write(); // 回放数据写入：重置静默窗
+    state.now += state.settleMs + 10;
+    state.flushTimers();
+    assert.equal(column.replayRestoring, false, "静默后照常清闩");
+    assert.deepEqual(state.scrollToLineCalls, [], "读历史时清闩零动作");
+    assert.equal(state.scrollToBottomCount, 0, "不走真尾");
+    assert.equal(buffer.viewportY, 300, "视窗原地不动");
+    buffer.viewportY = 20; // 其后的无意图离底事件按非跟随态处理：不动
+    viewport.fire("scroll");
+    assert.deepEqual(state.scrollToLineCalls, [], "跟随态未被强置");
   });
 
   it("有效底部·开关关=逐位旧版：写解析零动作、钳制拉回走 scrollToBottom 真尾", () => {
@@ -8960,6 +9033,101 @@ describe("虚拟终端跟随底部护栏（跳顶回归钉）", () => {
     const ensure = panelJs.match(/function ensureTerminalXterm\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(ensure, "ensureTerminalXterm found in panel.js");
     assert.ok(/new window\.Terminal\(\{[\s\S]*?scrollOnUserInput: false/.test(ensure), "Terminal 选项显式关闭输入自动滚底");
+  });
+});
+
+// 输入法锚点的折叠补正（2026-10-20 定案）：xterm 的组字定位按「光标屏内行 × 行高」算，
+// 不含 viewportY 偏移——底部自动对齐把视口锚到真尾之上后，组字窗恒偏高「折起的空白带
+// 行数」行；光标出视口时 xterm 整块跳过更新（锚点留在旧位置）。修法：冻结时按公开缓冲
+// 读数把 (baseY − viewportY) × cellHeight 补回；光标不在视口内（翻历史）不冻结。
+describe("虚拟终端输入法锚点·折叠补正", () => {
+  function imeSandbox() {
+    const armSrc = panelJs.match(/function armTerminalImeAnchor\(\) \{[\s\S]*?\n  \}/)?.[0];
+    const readySrc = panelJs.match(/function terminalImeAnchorReady\(textarea\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(armSrc, "armTerminalImeAnchor found in panel.js");
+    assert.ok(readySrc, "terminalImeAnchorReady found in panel.js");
+    const state = { frames: [], sets: [], classes: [] };
+    const sandbox = new Function("state", `
+      let terminalImeHold = null;
+      let terminalImeHoldFrame = null;
+      let terminalImeAnchorTextarea = null;
+      let terminalImeAnchorTerm = null;
+      function requestAnimationFrame(fn) { state.frames.push(fn); return state.frames.length; }
+      function cancelAnimationFrame(id) { state.frames[id - 1] = null; }
+      ${readySrc}
+      ${armSrc}
+      return {
+        armTerminalImeAnchor,
+        setTextarea(v) { terminalImeAnchorTextarea = v; },
+        setTerm(v) { terminalImeAnchorTerm = v; },
+        getHold() { return terminalImeHold; },
+      };
+    `)(state);
+    const makePart = (name) => ({
+      style: {
+        left: "10px", top: "40px", width: "20px", height: "19px", lineHeight: "19px",
+        setProperty(k, v) { state.sets.push(`${name}:${k}=${v}`); },
+        removeProperty() {},
+      },
+      classList: { add(c) { state.classes.push(`${name}:${c}`); }, remove() {} },
+    });
+    const compositionView = makePart("view");
+    const textarea = makePart("textarea");
+    textarea.parentElement = { querySelector: (sel) => (sel === ".composition-view" ? compositionView : null) };
+    const makeTerm = (baseY, viewportY, cursorY, rows = 30) => ({
+      rows,
+      buffer: { active: { baseY, viewportY, cursorY } },
+    });
+    return { state, sandbox, textarea, compositionView, makeTerm };
+  }
+
+  it("折叠态：冻结的 top 按 (baseY−viewportY)×cellHeight 补正，textarea 与组字窗同值", () => {
+    const { state, sandbox, textarea, makeTerm } = imeSandbox();
+    sandbox.setTextarea(textarea);
+    sandbox.setTerm(makeTerm(500, 483, 2)); // 折起 17 行空白带
+    sandbox.armTerminalImeAnchor();
+    assert.ok(state.sets.includes("textarea:--ime-hold-top=363px"), "textarea 冻结 top=40+17×19=363px");
+    assert.ok(state.sets.includes("view:--ime-hold-top=363px"), "组字窗同值冻结");
+    assert.ok(state.classes.includes("textarea:ime-hold") && state.classes.includes("view:ime-hold"), "双件同钉");
+    assert.ok(sandbox.getHold(), "组字持钉态就位");
+  });
+
+  it("无折叠：偏移为 0，冻结值与 xterm 计算值一致（与既有行为逐位一致）", () => {
+    const { state, sandbox, textarea, makeTerm } = imeSandbox();
+    sandbox.setTextarea(textarea);
+    sandbox.setTerm(makeTerm(500, 500, 2));
+    sandbox.armTerminalImeAnchor();
+    assert.ok(state.sets.includes("textarea:--ime-hold-top=40px"), "零偏移原值冻结");
+    assert.ok(sandbox.getHold(), "正常持钉");
+  });
+
+  it("光标出视口（翻历史）不冻结：不钉、不重排", () => {
+    const { state, sandbox, textarea, makeTerm } = imeSandbox();
+    sandbox.setTextarea(textarea);
+    sandbox.setTerm(makeTerm(500, 100, 2)); // 光标在视口下 372 行
+    sandbox.armTerminalImeAnchor();
+    assert.equal(sandbox.getHold(), null, "光标出视口不持钉");
+    assert.equal(state.classes.length, 0, "不加冻结类");
+    assert.equal(state.frames.length, 0, "不排重试帧（避免组字全程空转 rAF）");
+  });
+
+  it("几何未就绪：照既有语义排到下一帧重试", () => {
+    const { state, sandbox, textarea, makeTerm } = imeSandbox();
+    textarea.style.top = "";
+    sandbox.setTextarea(textarea);
+    sandbox.setTerm(makeTerm(500, 483, 2));
+    sandbox.armTerminalImeAnchor();
+    assert.equal(sandbox.getHold(), null, "未就绪不持钉");
+    assert.equal(state.frames.length, 1, "重排一帧");
+  });
+
+  it("接线：installTerminalImeAnchor 固化 term 引用，closeTerminalStream 清空", () => {
+    const installSrc = panelJs.match(/function installTerminalImeAnchor\(term\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(installSrc, "installTerminalImeAnchor found in panel.js");
+    assert.ok(installSrc.includes("terminalImeAnchorTerm = term"), "装配时固化 term（补正要读缓冲）");
+    const closeSrc = panelJs.match(/function closeTerminalStream\(\) \{[\s\S]*?\n  \}/)?.[0];
+    assert.ok(closeSrc, "closeTerminalStream found in panel.js");
+    assert.ok(closeSrc.includes("terminalImeAnchorTerm = null"), "关流清空 term 引用，不碰旧实例");
   });
 });
 
@@ -10040,7 +10208,12 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
       dispatch(type) { for (const fn of this.listeners[type] || []) fn(); },
       parentElement: { querySelector: (sel) => (sel === ".composition-view" ? compositionView : null) },
     };
-    const term = { element: { querySelector: (sel) => (sel === ".xterm-helper-textarea" ? textarea : null) } };
+    const term = {
+      element: { querySelector: (sel) => (sel === ".xterm-helper-textarea" ? textarea : null) },
+      rows: 30,
+      // 无折叠桩：baseY=viewportY 偏移恒 0，折叠补正对本组既有断言透明
+      buffer: { active: { baseY: 500, viewportY: 500, cursorY: 2 } },
+    };
     const frames = [];
     let frameSeq = 0;
     const api = new Function("textarea", "term", `
@@ -10049,6 +10222,7 @@ describe("虚拟终端组字期间输入法锚点不动", () => {
       let terminalImeHoldFrame = null;
       let terminalImeFitPending = false;
       let terminalImeAnchorTextarea = null;
+      let terminalImeAnchorTerm = null;
       let terminalImeArmHandler = null;
       let terminalImeReleaseHandler = null;
       const frames = [];
