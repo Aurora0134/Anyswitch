@@ -32,9 +32,13 @@
 
 import {
   appendFileSync,
+  closeSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -207,6 +211,87 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
     return entries;
   }
 
+  // ── 增量读（统计页日汇总用） ──
+  // 一天一个文件、写完不再改动，是这套日志的写入形状。上层（usage-rollup）
+  // 按天折叠一次就够：此处提供两件它需要的东西——哪几天有文件、某个文件从
+  // 指定字节位置往后新增了哪些完整行。
+  //
+  // 列出某类日志的日文件与签名（大小/mtime）。上层拿它判断哪天要重算；
+  // 目录不存在按「没有日志」返回空表，与 read() 同语义。
+  function listDayFiles(kind) {
+    let names;
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const name of names) {
+      const match = FILE_RE.exec(name);
+      if (!match || match[1] !== kind) continue;
+      let st;
+      try {
+        st = statSync(join(dir, name));
+      } catch {
+        continue; // 文件在 readdir 与 stat 之间被清理掉
+      }
+      out.push({ day: match[2], size: st.size, mtimeMs: st.mtimeMs });
+    }
+    out.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+    return out;
+  }
+
+  // 从 offset 起读一个新文件新增的完整行。offset 必须落在行首——上层只把它
+  // 推进到「最后一个换行符之后」，所以多字节字符不会从中间劈开。
+  // 返回 { offset, size, mtimeMs, rows, reset }：
+  //   rows  = 自 offset 起新增的完整行（末尾没有换行符的半行不消费，留给下次）
+  //   reset = true 表示文件比 offset 短（被替换或截短），该天的聚合作废重来
+  // 文件不存在 → null（上层按「这天没了」处理）。
+  function readDayTail(kind, day, offset = 0) {
+    const path = fileFor(kind, day);
+    let fd;
+    try {
+      fd = openSync(path, "r");
+    } catch {
+      return null;
+    }
+    try {
+      const st = fstatSync(fd);
+      const from = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0;
+      if (st.size < from) {
+        return { offset: 0, size: st.size, mtimeMs: st.mtimeMs, rows: [], reset: true };
+      }
+      if (st.size === from) {
+        return { offset: from, size: st.size, mtimeMs: st.mtimeMs, rows: [], reset: false };
+      }
+      const len = st.size - from;
+      const buf = Buffer.allocUnsafe(len);
+      const read = readSync(fd, buf, 0, len, from);
+      const slice = buf.subarray(0, read);
+      const nl = slice.lastIndexOf(0x0a);
+      if (nl < 0) {
+        // 只有半行（别人正写到一半）：一个字节都不推进，等下次
+        return { offset: from, size: st.size, mtimeMs: st.mtimeMs, rows: [], reset: false };
+      }
+      const rows = [];
+      for (const line of slice.subarray(0, nl + 1).toString("utf8").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          rows.push(JSON.parse(line));
+        } catch {
+          // 损坏/截断行跳过，与 read() 同一兜底
+        }
+      }
+      return { offset: from + nl + 1, size: st.size, mtimeMs: st.mtimeMs, rows, reset: false };
+    } catch {
+      return null;
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+
   cleanup(); // retention sweep at create time
 
   // 请求日志查询面（统计页「请求日志」子 tab 的数据源）：在 requests 流上做
@@ -310,6 +395,8 @@ export function createUsageJournal({ dir, retentionDays = 90, now = () => Date.n
     readRequests: (range) => read("requests", range),
     readSessions: (range) => read("sessions", range),
     readRequestsLog,
+    listDayFiles,
+    readDayTail,
     cleanup,
   };
 }

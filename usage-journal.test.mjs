@@ -400,3 +400,90 @@ test("readRequestsLog facets come from the time-range-only row set (filters neve
   assert.deepEqual(narrowed.facets.models, ["m9"], "only the time range shrinks facets");
   assert.deepEqual(narrowed.facets.agents, ["dsh"]);
 });
+
+// ── 增量读（统计页日汇总的数据面：哪几天有文件 + 某个文件新增了哪些完整行） ──
+
+test("listDayFiles reports one kind's day files, oldest first, with sizes", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  let current = t0;
+  const journal = createUsageJournal({ dir, now: () => current });
+  journal.appendRequest({ ts: t0 });
+  journal.appendSession({ ts: t0, agentId: "claude", event: "end" });
+  current = t0 + DAY_MS;
+  journal.appendRequest({ ts: current });
+
+  const requests = journal.listDayFiles("requests");
+  assert.deepEqual(requests.map((f) => f.day), [dayKey(t0), dayKey(current)]);
+  for (const f of requests) {
+    assert.ok(f.size > 0, "size is reported so callers can skip unchanged files");
+    assert.equal(typeof f.mtimeMs, "number");
+  }
+  assert.deepEqual(journal.listDayFiles("sessions").map((f) => f.day), [dayKey(t0)]);
+  assert.deepEqual(journal.listDayFiles("no-such-kind"), []);
+});
+
+test("readDayTail returns only what was appended after the offset", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  const journal = createUsageJournal({ dir, now: () => t0 });
+  const day = dayKey(t0);
+
+  journal.appendRequest({ ts: t0, prompt: 1 });
+  const first = journal.readDayTail("requests", day, 0);
+  assert.equal(first.reset, false);
+  assert.deepEqual(first.rows.map((r) => r.prompt), [1]);
+  assert.equal(first.offset, first.size);
+
+  const idle = journal.readDayTail("requests", day, first.offset);
+  assert.deepEqual(idle.rows, [], "no new bytes, no rows");
+  assert.equal(idle.offset, first.offset);
+
+  // 带多字节字符的行也按「整行」返回：offset 永远落在换行符之后，不会劈开 UTF-8
+  journal.appendRequest({ ts: t0 + 1, prompt: 2, errMsg: "上游超时：连接被重置" });
+  const next = journal.readDayTail("requests", day, first.offset);
+  assert.deepEqual(next.rows.map((r) => r.prompt), [2]);
+  assert.equal(next.rows[0].errMsg, "上游超时：连接被重置");
+  assert.ok(next.offset > first.offset);
+  assert.equal(next.offset, next.size);
+});
+
+test("readDayTail leaves a half-written line unconsumed until it is completed", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  const journal = createUsageJournal({ dir, now: () => t0 });
+  const day = dayKey(t0);
+  const path = join(dir, `requests-${day}.jsonl`);
+  journal.appendRequest({ ts: t0, prompt: 1 });
+
+  appendFileSync(path, '{"ts":2,"prompt":');
+  const half = journal.readDayTail("requests", day, 0);
+  assert.deepEqual(half.rows.map((r) => r.prompt), [1], "complete lines still parse");
+  assert.ok(half.offset < half.size, "the half line is not consumed");
+
+  appendFileSync(path, "7}\n");
+  const done = journal.readDayTail("requests", day, half.offset);
+  assert.deepEqual(done.rows.map((r) => r.prompt), [7], "completing it yields exactly one row");
+  assert.equal(done.offset, done.size);
+});
+
+test("readDayTail flags a shrunken file as a reset and a missing file as null", () => {
+  const dir = tempDir();
+  const t0 = Date.parse("2026-08-28T10:00:00");
+  const journal = createUsageJournal({ dir, now: () => t0 });
+  const day = dayKey(t0);
+  const path = join(dir, `requests-${day}.jsonl`);
+  journal.appendRequest({ ts: t0, prompt: 1 });
+  journal.appendRequest({ ts: t0 + 1, prompt: 2 });
+  const full = journal.readDayTail("requests", day, 0);
+  assert.equal(full.rows.length, 2);
+  assert.equal(full.offset, full.size);
+
+  writeFileSync(path, `${JSON.stringify({ ts: t0, prompt: 9 })}\n`);
+  const reset = journal.readDayTail("requests", day, full.offset);
+  assert.equal(reset.reset, true, "the caller must rebuild that day from scratch");
+  assert.equal(reset.offset, 0);
+
+  rmSync(path);
+  assert.equal(journal.readDayTail("requests", day, 0), null);
+});

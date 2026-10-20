@@ -682,45 +682,86 @@ describe("usage (single-node token totals for the donut card)", () => {
   });
 });
 
-describe("segmented journal reads", () => {
-  // getState must not pull the full 90-day journal for every call: the heatmap
-  // reads its fixed 90-day range on its own, and everything else reads only
-  // the day range covering [min(axis.start, usage 1h/8h axes),
-  // max(axis.end, usage 7d end)) — the donut's independent usage windows
-  // always span 7 days, so the read range covers them even when days=1.
-  function spyJournal() {
-    const calls = { requests: [], sessions: [] };
+describe("daily rollup cache (incremental journal reads)", () => {
+  // getState 每次都要拼出 90 天热力图 + 窗口指标，但 journal 是一天一个文件、
+  // 写完不再改动。装配层因此只允许「每天折叠一次，文件变了读新增的尾巴」，
+  // 不得整段重读。这里用真实 journal 的计数包装钉住三件事：冷启一天一读 →
+  // 热调零读 → 追加只读当天尾巴。
+  function countedJournal(dir) {
+    const real = createUsageJournal({ dir });
+    const calls = { tail: [], range: [] };
     return {
       calls,
       journal: {
-        readRequests: (range) => { calls.requests.push(range); return []; },
-        readSessions: (range) => { calls.sessions.push(range); return []; },
+        ...real,
+        readDayTail: (kind, day, offset) => {
+          calls.tail.push({ kind, day, offset });
+          return real.readDayTail(kind, day, offset);
+        },
+        readRequests: (range) => {
+          calls.range.push({ kind: "requests", ...range });
+          return real.readRequests(range);
+        },
+        readSessions: (range) => {
+          calls.range.push({ kind: "sessions", ...range });
+          return real.readSessions(range);
+        },
       },
     };
   }
 
-  it("days=1 reads the 90d heatmap range plus the 24h+7d window range", () => {
-    const { calls, journal } = spyJournal();
+  it("cold call folds every existing day file once; warm call reads nothing", () => {
+    const dir = mkTestDir("usage-stats-rollup-");
+    for (const offset of [2, 1, 0]) {
+      const j = createUsageJournal({ dir, now: () => tsOn(offset, 12) });
+      j.appendRequest(req({ ts: tsOn(offset, 10) }));
+    }
+    const { calls, journal } = countedJournal(dir);
     const stats = createUsageStats({ journal, now: () => NOW });
-    stats.getState({ days: 1 });
-    assert.deepEqual(calls.requests, [
-      { fromDay: dayKey(tsOn(89)), toDay: TODAY }, // heatmap: fixed 90 days
-      { fromDay: "2026-08-23", toDay: TODAY },     // window + today + usage windows (7d)
-    ]);
-    // sessions stay scoped to the trends window: only those metrics
-    // consume session rows, the usage windows read requests only.
-    assert.deepEqual(calls.sessions, [{ fromDay: "2026-08-29", toDay: TODAY }]);
+    const first = stats.getState({ days: 7 });
+    assert.deepEqual(calls.range, [], "no whole-range journal reads");
+    assert.deepEqual(
+      calls.tail.map((c) => [c.kind, c.day, c.offset]),
+      [2, 1, 0].map((offset) => ["requests", dayKey(tsOn(offset)), 0]),
+    );
+    assert.equal(first.overview.requests, 1);
+    calls.tail.length = 0;
+    const second = stats.getState({ days: 7 });
+    assert.deepEqual(calls.tail, [], "unchanged files are never re-read");
+    assert.deepEqual(second, first);
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  it("days=7 reads the 90d heatmap range plus only the 7d window range", () => {
-    const { calls, journal } = spyJournal();
+  it("appending to today's file re-reads only its tail", () => {
+    const dir = mkTestDir("usage-stats-tail-");
+    const writer = createUsageJournal({ dir, now: () => tsOn(0, 12) });
+    writer.appendRequest(req({ ts: tsOn(0, 10) }));
+    const { calls, journal } = countedJournal(dir);
     const stats = createUsageStats({ journal, now: () => NOW });
-    stats.getState({ days: 7 });
-    assert.deepEqual(calls.requests, [
-      { fromDay: dayKey(tsOn(89)), toDay: TODAY },
-      { fromDay: "2026-08-23", toDay: TODAY },
-    ]);
-    assert.deepEqual(calls.sessions, [{ fromDay: "2026-08-23", toDay: TODAY }]);
+    const before = stats.getState({ days: 1 });
+    writer.appendRequest(req({ ts: tsOn(0, 11), prompt: 7, completion: 3 }));
+    calls.tail.length = 0;
+    const after = stats.getState({ days: 1 });
+    assert.deepEqual(calls.tail.map((c) => [c.kind, c.day]), [["requests", dayKey(tsOn(0))]]);
+    assert.ok(calls.tail[0].offset > 0, "tail read resumes where the last fold stopped");
+    assert.equal(after.overview.requests, before.overview.requests + 1);
+    assert.equal(after.overview.prompt, before.overview.prompt + 7);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a journal without the incremental surface still answers (whole-range fallback)", () => {
+    const ranges = [];
+    const journal = {
+      readRequests: (range) => {
+        ranges.push(range);
+        return [req({ ts: tsOn(0, 10) })];
+      },
+      readSessions: () => [],
+    };
+    const stats = createUsageStats({ journal, now: () => NOW });
+    const s = stats.getState({ days: 1 });
+    assert.equal(s.overview.requests, 1);
+    assert.deepEqual(ranges, [{ fromDay: dayKey(tsOn(89)), toDay: TODAY }]);
   });
 
   it("window-filtered metrics ignore rows outside the read window, heatmap keeps them", () => {
@@ -803,3 +844,20 @@ describe("channel display-name resolution (channelLabel)", () => {
     cleanup();
   });
 });
+
+  it("days older than the hourly-detail window still feed the heatmap, and no window metric", () => {
+    const { stats, writeRequests, cleanup } = makeHarness();
+    // 10 天前的一天：小时级明细会被压成当日总量（DETAIL_DAYS = 9），
+    // 但 90 天热力图必须仍有这一天。
+    writeRequests(10, [req({ ts: tsOn(10, 10), prompt: 50, completion: 50 })]);
+    writeRequests(0, [req({ ts: tsOn(0, 10), prompt: 1, completion: 1 })]);
+    const s = stats.getState({ days: 7 });
+    assert.equal(s.heatmap[79].tokens, 100, "pruned hourly detail keeps the daily total");
+    assert.equal(s.heatmap[79].requests, 1);
+    const trendPrompt = s.trends.channel.series
+      .flatMap((ser) => ser.prompt)
+      .reduce((a, b) => a + b, 0);
+    assert.equal(trendPrompt, 1, "the 7d window never reaches back that far");
+    assert.equal(s.endpoints[0].requests, 1);
+    cleanup();
+  });

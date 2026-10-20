@@ -1,6 +1,6 @@
 # 使用统计页现行规格
 
-> 本文件是「使用统计」tab（panel-ui/panel.js statsView + usage-stats.mjs + usage-journal.mjs）的**单一现行规格**。
+> 本文件是「使用统计」tab（panel-ui/panel.js statsView + usage-stats.mjs + usage-rollup.mjs + usage-journal.mjs）的**单一现行规格**。
 > 维护约定：**改统计页行为的提交必须同笔更新本文件对应条目**。本文件只留「现在是什么」，变更过程由提交历史承载。
 > 条目格式：红线约束强制挂「锚点（文件/常量/函数/测试名）」；无锚点的条目视为草稿。
 > 行号会漂移，定位以常量名/函数名/测试名为准。
@@ -8,7 +8,7 @@
 ## 1. 数据口径（每卡的来源 / 时间窗 / 单位）
 
 数据源：usage journal（`%LOCALAPPDATA%\Anyswitch\usage\`，requests/sessions-YYYY-MM-DD.jsonl，按日滚动，90 天自清理）。
-聚合：usage-stats.mjs `createUsageStats().getState(days)`，每次调用重读 journal（无聚合缓存）；读取已分段——热力图口径单独读 90 天，其余口径只读所选窗口。
+聚合：usage-stats.mjs `createUsageStats().getState(days)` **只合并窗口内的日汇总**，不逐行扫日志。日汇总由 usage-rollup.mjs 维护：每个日文件折叠一次（按本地小时分桶的渠道/端点/型号 token 与请求数、TTFT 样本、TPS 分子分母、端点活动点与忙区间、当日总量），文件签名（大小/mtime）不变直接复用、变了只读新增尾巴（journal `listDayFiles` / `readDayTail`，半行不消费）；只有最近 9 天保留小时级明细，更早的只留当日总量（热力图口径）。窗口边界全部落在本地整点，所以按小时合并不丢精度。
 接口：`GET /panel/api/stats/state?days=1|7`（panel.mjs，days 经 clampStatDays 单点钳制；usage 块恒同时返回 24h+7d 双窗口，见 R-04）；请求日志子 tab：`GET /panel/api/stats/logs`（行级透传，口径见 R-23）。
 
 | 卡 | 口径 |
@@ -41,7 +41,7 @@ R-03 与 R-10 已作废，编号不再复用，其余编号保持稳定。
 - 钉住：usage-stats.test.mjs `__other__` 合并用例
 
 ### R-04 今日概览=自然日、热力图=90 天，均不随 days seg
-days seg 只作用于趋势/TTFT/TPS/工时表。**模型用量环有独立的 24h/7 日 seg**（`statsPrefs.usageDays`），不随全局 days seg；后端 `getState` 每次响应同时下发 `usage["1"]`/`usage["7"]` 双窗口（分段读范围放宽到覆盖 7d 用量窗），前端切换只本地重渲。
+days seg 只作用于趋势/TTFT/TPS/工时表。**模型用量环有独立的 24h/7 日 seg**（`statsPrefs.usageDays`），不随全局 days seg；后端 `getState` 每次响应同时下发 `usage["1"]`/`usage["7"]` 双窗口（两个窗口都由同一份日汇总合并，不额外读日志），前端切换只本地重渲。
 - 锚点：usage-stats.mjs overview（today 过滤）/ heatmap（dayAxis 90）/ `usageFor`（双窗口 usage）
 - 钉住：usage-stats.test.mjs「ships both windows independently」+ segmented reads 范围用例
 
@@ -85,11 +85,11 @@ style-lab/*.css 是源文件，改动必须同步嵌入 panel.css 对应横幅�
 
 ### R-14 TPS 仅统计流式请求
 非流式成功以全时长代理 ttftMs → 生成段≈0 → 被 TPS_MIN_GEN_SEC 过滤。UI 已按 R-12 标注。
-- 锚点：usage-stats.mjs `TPS_MIN_GEN_SEC`（约 :56）+ 过滤逻辑；agent-metrics.mjs 非流式 ttft 代理（约 :824/:2078）
+- 锚点：usage-rollup.mjs `TPS_MIN_GEN_SEC`（约 :31，折叠时逐行过滤）+ usage-stats.mjs TPS 合并出口；agent-metrics.mjs 非流式 ttft 代理（约 :824/:2078）
 
 ### R-15 claude request/session 行防双计（窗口级）
 窗口内某 agentId 已有 request 行，则其 session-end 行 tokens 不再合并（全有或全无）。跨 per-launch journaling 上线边界的混合窗口会整段丢掉老 session tokens（断崖），属已知边界，见 §4.3。
-- 锚点：usage-stats.mjs coveredAgents（约 :534）
+- 锚点：usage-stats.mjs coveredAgents（约 :422）
 - 钉住：usage-stats.test.mjs merge/防双计两用例
 
 ### R-16 渠道名读取时解析（键=不可变 id，label=displayName）
@@ -171,7 +171,9 @@ TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字�
 | 排名序号复用 .ms-rank/.top（仅第 1 名 accent 色） | panel.js `statsRankEl`（复用看板状态检测卡类） | panel.test.mjs（R-27） |
 | 双卡等高 + 占位行（空态例外） | panel.css `.skills-grid.stats-quad` 等高块 + `.stats-bar-placeholder` | panel.test.mjs（R-28） |
 | 全量弹窗 720px / 内容区 52vh 内部滚动 | panel.js `openStatsRankModal` + panel.css `.stats-rank-modal-overlay` | panel.test.mjs（R-28） |
-| TPS 生成段下限 0.2s | usage-stats.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
+| TPS 生成段下限 0.2s | usage-rollup.mjs `TPS_MIN_GEN_SEC` | usage-stats.test.mjs |
+| 日汇总明细保留 9 天（更早只留当日总量） | usage-rollup.mjs `DETAIL_DAYS` | — |
+| 增量读的游标只落在行首（半行不消费、文件变短即重来） | usage-journal.mjs `readDayTail` / `listDayFiles` | usage-journal.test.mjs「readDayTail …」四条 |
 | TPS 出榜样本下限 10（不足整行不显示） | usage-stats.mjs `TPS_MIN_SAMPLES` | usage-stats.test.mjs「drops TPS rows with < 10 samples」 |
 | TTFT 出榜样本下限 10（不足整行不显示，与 TPS 同机制） | usage-stats.mjs `TTFT_MIN_SAMPLES` | usage-stats.test.mjs「drops TTFT rows with < 10 samples」 |
 | 趋势动画时长/缓动 1500ms 'ease'（reveal 弧长生长与 morph 像素插值共用） | panel.js `STATS_MORPH_MS` / `STATS_MORPH_EASE` | — |
@@ -195,3 +197,5 @@ TTFT 卡内榜按模型 `avg` **升序**（越快越前），并列按 key 字�
 11. **多进程写同一 journal 目录**（relay/panel/各 launcher）：跨进程 append 可能读到半行（JSON.parse 容错兜底），cleanup 无锁（已容错）。
 12. **一次性 relay 捎带通道的残余边界**（R-20）：常驻 relay 不可达期间，batch 暂存 reporter 内存（500 条上限，溢出丢最旧），恢复后按事件时间补落桶；reporter 进程被强杀则未上报部分丢失（与 §4.1 崩溃丢失同类）。Flow Rail 的 per-launch 链状态随会话行清除（ended 60s 后）消失，回到常驻自有状态。kimi 的 batch 被 reportSession 的 claude-only 闸门丢弃——kimi 实际流量走常驻 relay，其一次性 relay 是空转旁路，无实际影响。
 13. **请求日志页码位移**：5s 轮询下新行到达会把深页内容整体后移（OFFSET 分页固有，ccswitch 同款）；已按「当前页超界一次性钳回末页」兜底空页，不防位移本身。行展开态以 `ts|providerId|model` 为键，同毫秒同渠道同模型的两行会串展开态（本地量级下近似不发生，已接受）。
+14. **面板进程重启后首次统计请求要重建**：日汇总常驻内存（不落盘），进程起来后第一次 `getState` 要把 90 天日志折一遍（本机 70 MB / 28 万行量级约 1–1.5 秒），之后每次调用只付窗口合并的几十毫秒。热态调用不受影响；若哪天嫌这次冷建慢，落盘成 sidecar 是另一笔改动（需带格式版本与清理）。
+15. **日汇总只保留 9 天小时级明细**（`DETAIL_DAYS`）：更早的日文件只留当日总量。当前 days 仅 1|7，窗口最远 8 个日历日，余量 1 天；若将来放开更长的窗口，必须同步调大该常量，否则长窗口的趋势/TTFT 会只剩热力图口径的当日总量、明细缺失。
