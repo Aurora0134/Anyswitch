@@ -52,8 +52,18 @@ import {
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
 import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault } from "./app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
-import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns } from "./session-scan.mjs";
+import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
+import {
+  RESUMABLE_AGENTS,
+  TERMINAL_CONVERSATION_BINDINGS_FILE,
+  bindingFromMeta,
+  createBindingStore,
+  pickConversationMeta,
+  pickRefreshedMeta,
+  resumeArgsFor,
+  sameCwd,
+} from "./terminal-conversation-bindings.mjs";
 
 // 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
 // APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
@@ -485,6 +495,19 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
   }
 }
 
+// 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
+// 要读九家存档，列表轮询路径用不起）。扫描失败降级为空表——匹配层拿到空表
+// 自然判不出，按「宁可不接」回落。
+async function defaultScanAgentConversations(agentId) {
+  const adapter = sessionScanner.adapters.get(agentId);
+  if (!adapter) return [];
+  try {
+    return await adapter.scan();
+  } catch {
+    return [];
+  }
+}
+
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
 // /api/internal/*). Returns the parsed payload, or null when the relay is
@@ -830,6 +853,18 @@ export function createPanelRouter({
    createTerminalSession = defaultCreateTerminalSession,
    fetchTerminalSessionFn = defaultFetchTerminalSession,
    restartTerminalSessionFn = defaultRestartTerminalSession,
+   // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
+   // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
+   // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
+   terminalBindingStore = null,
+   scanAgentConversationsFn = defaultScanAgentConversations,
+   bindingCaptureDebounceMs = 5000,
+   bindingRefreshDelayMs = 10_000,
+   bindingRefreshScheduleFn = (fn, ms) => {
+     const timer = setTimeout(fn, ms);
+     timer.unref?.();
+     return timer;
+   },
    // Terminal-host lifecycle against the relay (47821 /terminal-host/*): the
    // relay owns the host child, so status/start/stop all live there behind the
    // same pi-relay-token guard as /api/internal/*. Injectable so tests never
@@ -1053,12 +1088,135 @@ export function createPanelRouter({
     if (list === null) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     // Output buffers belong to the SSE stream, not the polling list.
     const sessions = list.map(({ buffer, ...rest }) => rest);
+    // 绑定捕获只在控制面进程跑：relay 侧也挂着同一套路由器，绑定库只认
+    // panel-host 一个写入方（页面本来就只由 47820 服务，relay 实际收不到
+    // 这个轮询，这里把「实际」钉成「制度」）。
+    if (hostKind === "panel-host") captureTerminalConversationBindings(sessions);
     const feed = await pulledDetectedProcesses(terminalPullToken());
     const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
     const agents = await pulledAgentsForJoin(terminalPullToken());
     const codexSessions = feed && Array.isArray(feed.codexSessions) ? feed.codexSessions : [];
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, codexSessions) });
+  }
+
+  // ---- 终端会话 ↔ agent 对话存档绑定（复活带回原对话） ----
+  // 存储在 relayRoot（%LOCALAPPDATA%\Anyswitch）下，与 terminal-sessions.json
+  // 同目录；匹配纪律全在 terminal-conversation-bindings.mjs，这里只做调度。
+  function terminalBindings() {
+    if (!terminalBindingStore) {
+      terminalBindingStore = createBindingStore({ file: join(relayRoot, TERMINAL_CONVERSATION_BINDINGS_FILE) });
+    }
+    return terminalBindingStore;
+  }
+
+  // 捕获防抖：同一会话两次扫描尝试的最小间隔。记的是「尝试」而非「成功」——
+  // 扫描慢/空表同样占一拍，1s 轮询的列表路由才不会每拍都重扫一遍盘。
+  const bindingCaptureLastAttempt = new Map(); // sessionId → ms
+
+  // 列表路由的异步旁路：给「未绑定且 running 的可续会 agent 会话」补绑定，
+  // 顺手清掉会话已消失的孤儿绑定。绝不阻塞、绝不让列表请求失败——全部
+  // fire-and-forget，扫描 promise 自己吞错。
+  function captureTerminalConversationBindings(sessions) {
+    let store;
+    let keepIds;
+    try {
+      store = terminalBindings();
+      keepIds = new Set(sessions.map((session) => session?.id).filter(Boolean));
+      store.prune(keepIds);
+    } catch {
+      return; // 绑定库读写失败不影响列表主流程
+    }
+    // 防抖表同步收：会话消失后它的防抖条目没有存在意义。
+    for (const sessionId of [...bindingCaptureLastAttempt.keys()]) {
+      if (!keepIds.has(sessionId)) bindingCaptureLastAttempt.delete(sessionId);
+    }
+    const now = Date.now();
+    for (const session of sessions) {
+      if (!session || typeof session.id !== "string" || session.id === "") continue;
+      if (session.status !== "running" || !RESUMABLE_AGENTS.has(session.agentId)) continue;
+      if (store.get(session.id)) continue;
+      const lastAttempt = bindingCaptureLastAttempt.get(session.id) ?? 0;
+      if (now - lastAttempt < bindingCaptureDebounceMs) continue;
+      bindingCaptureLastAttempt.set(session.id, now);
+      Promise.resolve()
+        .then(() => scanAgentConversationsFn(session.agentId))
+        .then((metas) => {
+          // 跑着的会话生命周期窗口开口到今天：createdAt 之后新建/活跃的同
+          // agent 同 cwd 存档里取最佳重叠者。
+          const picked = pickConversationMeta(metas, {
+            agentId: session.agentId,
+            cwd: session.cwd,
+            createdAt: session.createdAt ?? null,
+            lastActiveAt: null,
+          });
+          // 扫描期间可能已被兜底路径绑上：已有绑定不覆盖。
+          if (picked && !store.get(session.id)) {
+            store.set(session.id, bindingFromMeta(picked, { agentId: session.agentId, cwd: session.cwd }, "bound"));
+          }
+        })
+        .catch(() => {});
+    }
+  }
+
+  // 复活要追加的 resume 参数。三级判定：绑定在且存档还在 → 按绑定；绑定没有
+  // 或已失效 → 生命周期重叠兜底扫描；还判不出 → null（维持现状空白复活）。
+  // 扫描本身失败时：有绑定按绑定用（它先前是对的，扫描失败多半是暂时的），
+  // 没绑定就是不接。
+  async function resolveResumeArgsForRevive(session) {
+    if (!RESUMABLE_AGENTS.has(session.agentId)) return null;
+    const store = terminalBindings();
+    const identity = { agentId: session.agentId, cwd: session.cwd };
+    let metas = null;
+    try {
+      metas = await scanAgentConversationsFn(session.agentId);
+    } catch {
+      metas = null;
+    }
+    const existing = store.get(session.id);
+    if (existing) {
+      const staleIdentity = existing.agentId !== session.agentId || !sameCwd(existing.cwd, session.cwd);
+      if (!staleIdentity) {
+        if (metas === null) return resumeArgsFor(session.agentId, existing);
+        const found = metas.find((meta) => meta && meta.id === existing.conversationId);
+        if (found) {
+          const refreshed = { ...existing, file: typeof found.file === "string" && found.file !== "" ? found.file : existing.file };
+          if (refreshed.file !== existing.file) store.set(session.id, refreshed);
+          return resumeArgsFor(session.agentId, refreshed);
+        }
+        // 绑定的存档已从盘上消失：绑定失效，落兜底。
+      }
+      store.delete(session.id);
+    }
+    if (metas === null) return null;
+    const picked = pickConversationMeta(metas, {
+      ...identity,
+      createdAt: session.createdAt ?? null,
+      lastActiveAt: session.lastActiveAt ?? null,
+    });
+    if (!picked) return null;
+    const binding = store.set(session.id, bindingFromMeta(picked, identity, "scanned"));
+    return resumeArgsFor(session.agentId, binding);
+  }
+
+  // 复活成功后的自愈换绑：有的 agent resume 会另起新对话存档（绑定里的旧 id
+  // 从此不再前进）。延迟一拍重扫，复活时刻之后「唯一活跃」的存档若是新 id
+  // 就换绑；零条（还没落笔）或多条（同目录另有对话）都维持原绑定。
+  function scheduleBindingRefresh(session, sinceMs) {
+    bindingRefreshScheduleFn(() => {
+      Promise.resolve()
+        .then(() => scanAgentConversationsFn(session.agentId))
+        .then((metas) => {
+          const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs });
+          if (!picked) return;
+          const store = terminalBindings();
+          const current = store.get(session.id);
+          if (current && current.conversationId !== picked.id) {
+            store.set(session.id, bindingFromMeta(picked, { agentId: session.agentId, cwd: session.cwd }, current.source));
+          }
+        })
+        .catch(() => {});
+    }, bindingRefreshDelayMs);
   }
 
   // 一键启动 CLI Agent：本路由只做组装与转发。launch（cmd /c 包装——归属链
@@ -1122,6 +1280,7 @@ export function createPanelRouter({
     const session = await fetchTerminalSessionFn(id, { token });
     if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
     let body = {};
+    let resumeArgs = null;
     if (session.agentId) {
       if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, session.agentId)) {
         return sendJson(res, 400, { ok: false, error: "unknown_agent" });
@@ -1147,10 +1306,22 @@ export function createPanelRouter({
       }
       // launch 与 cwd 一并带上：可执行文件升级、权限开关变更、工作目录漂移
       // 都在重开时追平。env 只走请求体，不经响应回显。
-      body = { launch: launch.launch, cwd: launch.cwd, env: launch.env };
+      // resume 接线：绑定/兜底扫描判得出原对话就追加续会参数，判不出维持
+      // 空白复活——接线失败绝不挡复活本身（catch 回落 null）。只在控制面
+      // 进程接（绑定库单写入方，同列表捕获的门）。
+      resumeArgs = hostKind === "panel-host" ? await resolveResumeArgsForRevive(session).catch(() => null) : null;
+      body = {
+        launch: resumeArgs ? { ...launch.launch, args: [...launch.launch.args, ...resumeArgs] } : launch.launch,
+        cwd: launch.cwd,
+        env: launch.env,
+      };
     }
+    const reviveStartedAt = Date.now();
     const restarted = await restartTerminalSessionFn(id, body, { token });
     if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    // 有的 agent resume 会另起新对话存档：复活落稳后延迟重扫，唯一活跃的新
+    // 存档换绑进绑定库；判不出就维持原绑定。
+    if (resumeArgs) scheduleBindingRefresh(session, reviveStartedAt);
     return sendJson(res, restarted.status || 200, restarted.body ?? {});
   }
 
