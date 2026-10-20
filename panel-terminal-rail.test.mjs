@@ -115,6 +115,33 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rm, "prefers-reduced-motion 下箭头过渡关掉");
     });
 
+    it("矮窗口不重叠：定高块 flex:none，只有历史会话段吃剩余空间并自己滚", () => {
+      // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
+      // min-height、容器没有 → 行溢出容器画到下一段头上（「打开的终端」行压在
+      // 「历史会话」段头里）。布局几何在桩框架里量不出来（要真渲染才有 rect），
+      // 所以这里钉住让几何成立的结构契约；几何本身由无头 Chrome harness 验。
+      const dir = cssRule("#railTerminalDir {");
+      // 只比对声明（注释里也会出现「min-height:0」这类说明文字）
+      const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
+      assert.ok(!/min-height:\s*0/.test(decls(dir)), "栏体不吃 min-height:0（否则定高内容可被压到内容高度以下）");
+      for (const [selector, why] of [
+        [".rail-term-agent {", "身份行"],
+        [".rail-term-new {", "新建终端钮"],
+        [".rail-term-section {", "段容器"],
+        [".rail-term-section-head {", "段头"],
+        [".rail-term-open, .rail-term-history {", "两个列表容器"],
+      ]) {
+        assert.ok(cssRule(selector).includes("flex: none"), `${why} 是定高块，必须 flex:none（不参与收缩）`);
+      }
+      const hist = cssRule(".rail-term-section-history {");
+      assert.ok(hist.includes("flex: 1 1 auto") && hist.includes("min-height: 0"),
+        "历史会话段是唯一吃剩余空间的那段（空间不够时它先缩）");
+      assert.ok(cssRule(".rail-term-history-scroll {").includes("overflow-y: auto"),
+        "历史列表在自己的滚动容器里滚，溢出由它裁切、不越段");
+      // 列表容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
+      assert.ok(!/\.rail-term-open[^{]*\{[^}]*overflow/.test(panelCss), "「打开的终端」列表不靠 overflow 裁切");
+    });
+
     it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留头像与新建图标", () => {
       const fade = cssRule(".rail-term-fade {");
       assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
@@ -292,7 +319,7 @@ describe("终端视图左栏换血（M4）", () => {
 
   describe("历史会话点击：续接两分支（vm 真跑）", () => {
     const runResume = (session, apiImpl) => {
-      const log = { posts: [], toasts: [], renders: 0, active: null };
+      const log = { posts: [], toasts: [], renders: 0, active: null, rememberedCwd: [] };
       const sandbox = new Function("session", "log", "apiImpl", `
         const terminalBackendSessions = {};
         let activeTerminalPreviewId = null;
@@ -301,7 +328,7 @@ describe("终端视图左栏换血（M4）", () => {
         function panelError(err, fallback) { return fallback; }
         function terminalBackendSession(item) { return { ...item }; }
         function rememberTerminalSessionId(id) { log.active = id; }
-        function rememberTerminalCwd() {}
+        function rememberTerminalCwd(cwd) { log.rememberedCwd.push(cwd); }
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
@@ -354,6 +381,39 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(log.toasts[0].isErr, true, "按错误提示上屏");
       assert.equal(log.renders, 0, "不重渲");
       assert.ok(!extractFn("terminalRailResumeSession").includes("clipboard"), "不做复制命令（用户拍板）");
+    });
+
+    it("续接必须落在会话所属项目目录：cwd 取 project，绝不回落到「记住上次」", async () => {
+      // 真机缺陷：claude 的会话存档按项目目录分，在错目录下 --resume 找不到那条会话，
+      // 还会触发不该有的目录信任提示。这里把「记住上次」设成一个**不同的**目录，
+      // 只要实现有任何回落，POST 里的 cwd 就会露出来。
+      const { sandbox, log } = runResume(
+        { ...RESUMABLE, project: "C:\\Users\\86183\\Desktop\\agent-home" },
+        async () => ({ id: "t-9", label: "Claude Code", agentId: "claude", shell: "cmd", cwd: "C:\\Users\\86183\\Desktop\\agent-home" }),
+      );
+      await sandbox.run();
+      const post = log.posts.find((p) => p.path === "/api/terminal/agent-sessions");
+      assert.ok(post, "发起续接请求");
+      assert.equal(post.body.cwd, "C:\\Users\\86183\\Desktop\\agent-home", "cwd = 会话 project");
+      assert.notEqual(post.body.cwd, "C:\\Users\\86183\\fixture", "不是「记住上次」的那个目录");
+      assert.equal(post.body.resume.id, "s-1", "resume 身份照旧");
+    });
+
+    it("取不到可靠项目路径：不发起续接，只提示（不错目录启动）", async () => {
+      for (const project of [null, "", "   ", undefined, 123, {}]) {
+        const { sandbox, log } = runResume(
+          { ...RESUMABLE, project },
+          async () => { throw new Error("不该发请求"); },
+        );
+        await sandbox.run();
+        assert.deepEqual(log.posts, [], `project=${JSON.stringify(project)} 时不 POST（否则就是错目录续接）`);
+        assert.equal(log.toasts.length, 1, `project=${JSON.stringify(project)} 给一句提示`);
+        assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "文案逐字取批准清单（不新造）");
+        assert.equal(log.toasts[0].isErr, true, "按错误提示上屏");
+        assert.equal(sandbox.activeId(), null, "不置活跃、不登记会话");
+        assert.deepEqual(Object.keys(sandbox.sessions), [], "不登记会话");
+        assert.deepEqual(log.rememberedCwd, [], "不把空/无效目录写进「记住上次」");
+      }
     });
 
     it("续接类短码（resume-unsupported / resume-invalid）一律落批准句，不暴露后端原文", async () => {

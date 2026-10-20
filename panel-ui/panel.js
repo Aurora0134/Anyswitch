@@ -8493,16 +8493,24 @@ async function api(method, path, body) {
 
   // 历史会话点击两分支：resumeCommand 非空 → 按 M3 契约带 resume 建会话（与一键启动
   // 同一条创建通路，续接失败的提示也由它统一落）；为空 → 只提示，不做复制命令。
+  // 续接的 cwd 必须用会话自己的 project：claude 这类 agent 的存档按项目目录分，
+  // 在别的目录下 --resume 找不到那条会话，还会触发不该有的目录信任提示。所以
+  // project 拿不到（空/非字符串）时不发起请求——「记住上次」只属于全新终端。
+  // 提示沿用批准清单里那句：缺路径与不可续接对用户是同一件事（现在没法接着这个
+  // 会话），不为它新造文案。
   function terminalRailResumeSession(session) {
     if (!session) return;
     if (!session.resumeCommand) {
       toast("这个 Agent 的会话暂时不能在终端里续接", true);
       return;
     }
+    const cwd = typeof session.project === "string" ? session.project.trim() : "";
+    if (!cwd) {
+      toast("这个 Agent 的会话暂时不能在终端里续接", true);
+      return;
+    }
     const resume = { endpoint: session.endpoint, id: session.id };
     if (typeof session.file === "string" && session.file) resume.file = session.file;
-    const cwd = session.project || terminalCwdInitial();
-    rememberTerminalCwd(cwd);
     return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
   }
 
