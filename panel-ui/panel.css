@@ -646,6 +646,32 @@
   .rail-term-row-result:hover .rail-term-row-dir { display: none; }
   .rail-term-search-status { padding: 8px; font-size: 12px; color: var(--text-3); }
   .rail-term-search-note { padding: 8px; font-size: 12px; color: var(--text-3); }
+  /* ── 视图选项菜单（M8 T7b，m6c §B2） ──
+     右对齐锚定（JS 算 left）、min-width 200、padding 4、dense 30px 项、分组标签
+     11px tertiary、✓ 居项最右（margin-left:auto，选中才显、不换文字色不铺底）、
+     点选即关（JS）。打开/关闭无动画（0ms 挂载/卸载）。 */
+  .rail-term-view-menu { min-width: 180px; }
+  .rail-term-view-label {
+    padding: 6px 8px 2px; font-size: 11px; color: var(--text-3);
+  }
+  .rail-term-view-item { min-height: 30px; padding: 4px 8px; font-size: 12.5px; }
+  .rail-term-view-text { flex: 1; min-width: 0; }
+  .rail-term-view-check { flex: none; display: none; align-items: center; margin-left: auto; color: var(--accent); line-height: 0; }
+  .rail-term-view-item.is-selected .rail-term-view-check { display: inline-flex; }
+  /* 「仅显示已归档」空态（m6c §A1）：图标 + 两句 + 查看其他会话动作 */
+  .rail-term-empty {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 32px 12px; color: var(--text-3); font-size: 12.5px;
+  }
+  .rail-term-empty-icon { color: var(--text-4); line-height: 0; }
+  .rail-term-empty-action {
+    appearance: none; border: 0; background: transparent; color: var(--accent);
+    font: inherit; font-size: 12.5px; cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm);
+  }
+  .rail-term-empty-action:hover { background: var(--surface-hover); }
+  /* 会话行拖拽（M8 T7b）：被拖行半透明（0ms 硬切，无过渡——栏内运动纪律） */
+  .rail-term-row-history[draggable="true"] { cursor: grab; }
+  .rail-term-row-history.is-dragging { opacity: 0.5; }
   .rail-term-icon-btn {
     appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
     width: 22px; height: 22px; padding: 0; border-radius: var(--radius-sm); flex: none;

@@ -8247,6 +8247,8 @@ async function api(method, path, body) {
   // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
   const TERMINAL_RAIL_ICON_ELLIPSIS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
   const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底（m6c §B2）
+  const TERMINAL_RAIL_ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
   // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
   // （payment-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
@@ -8521,6 +8523,220 @@ async function api(method, path, body) {
     }
   }
 
+  // ── 视图选项（M8 T7b，照搬 m6c §B 全集） ──
+  // 三组互斥单选：分组方式（按工作区/按工作区树/单列表）、排序方式（最近更新/
+  // 手动排序）、筛选会话（隐藏已归档/全部会话/仅显示已归档）。偏好落 localStorage
+  // 一个键（dsh 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）；
+  // 手序按 agent 键存（手动排序的唯一来源＝会话行拖拽；组行不拖——我们的组是目录
+  // 派生、无清单可持久化）。菜单右对齐锚定、dense 30px、✓ 居项最右、点选即关。
+  const TERMINAL_RAIL_VIEW_GROUPS = [
+    {
+      label: "分组方式", field: "groupBy",
+      items: [
+        { value: "workspace", label: "按工作区" },
+        { value: "workspace-tree", label: "按工作区树" },
+        { value: "flat", label: "单列表" },
+      ],
+    },
+    {
+      label: "排序方式", field: "orderBy",
+      items: [
+        { value: "updated", label: "最近更新" },
+        { value: "manual", label: "手动排序" },
+      ],
+    },
+    {
+      label: "筛选会话", field: "archivedFilter",
+      items: [
+        { value: "default", label: "隐藏已归档" },
+        { value: "show", label: "全部会话（显示已归档）" },
+        { value: "only", label: "仅显示已归档" },
+      ],
+    },
+  ];
+
+  function loadTerminalRailViewPrefs() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(TERMINAL_RAIL_VIEW_KEY) || "null");
+      if (!raw || typeof raw !== "object") return;
+      const pick = (field, allowed) => {
+        if (allowed.includes(raw[field])) terminalRailViewPrefs[field] = raw[field];
+      };
+      pick("groupBy", ["workspace", "workspace-tree", "flat"]);
+      pick("orderBy", ["updated", "manual"]);
+      pick("archivedFilter", ["default", "show", "only"]);
+      if (raw.sessionOrder && typeof raw.sessionOrder === "object" && !Array.isArray(raw.sessionOrder)) {
+        terminalRailViewPrefs.sessionOrder = raw.sessionOrder;
+      }
+    } catch { /* 读不懂/被禁用：用默认值 */ }
+  }
+
+  function saveTerminalRailViewPrefs() {
+    try {
+      localStorage.setItem(TERMINAL_RAIL_VIEW_KEY, JSON.stringify(terminalRailViewPrefs));
+    } catch { /* 隐私模式等：偏好不持久化，本次会话内仍生效 */ }
+  }
+
+  // 目录祖先判定：b 在 a 底下（a 是 b 的祖先目录）。归一化口径同 terminalRailSameDir。
+  function terminalRailIsAncestorDir(a, b) {
+    const norm = (value) => String(value || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    const na = norm(a), nb = norm(b);
+    return na !== "" && nb.startsWith(na + "\\");
+  }
+
+  // 按工作区树：组按目录祖先关系嵌套（m6c §B3 的 owningParentFolder：逐级找最近
+  // 已注册祖先）。给每组打 depth；祖先组自动展开（切进树模式时一次性解除折叠，
+  // 之后尊重用户手动收起——与 dsh 的 expandedGroups 含全部 ancestorKeys 同效果）。
+  function terminalRailNestGroups(groups) {
+    const keys = groups.map((group) => group.key).filter(Boolean);
+    for (const group of groups) {
+      if (!group.key) { group.depth = 0; continue; }
+      let parent = "";
+      for (const other of keys) {
+        if (other === group.key) continue;
+        if (!terminalRailIsAncestorDir(other, group.key)) continue;
+        if (parent === "" || other.length > parent.length) parent = other;
+      }
+      group.depth = parent === "" ? 0 : (groups.find((row) => row.key === parent).depth || 0) + 1;
+    }
+    // 祖先在前、子孙随后（同层内保持原派生序）
+    const out = [];
+    const placed = new Set();
+    const emit = (key) => {
+      for (const group of groups) {
+        if (placed.has(group)) continue;
+        if (group.key && key !== "" && !terminalRailIsAncestorDir(key, group.key) && group.key !== key) continue;
+        if (group.key === "" && key !== "") continue;
+        placed.add(group);
+        out.push(group);
+        if (group.key) emit(group.key);
+      }
+    };
+    for (const group of groups) {
+      if (!group.key || group.depth !== 0) continue;
+      if (placed.has(group)) continue;
+      placed.add(group);
+      out.push(group);
+      emit(group.key);
+    }
+    for (const group of groups) if (!placed.has(group)) { placed.add(group); out.push(group); }
+    return out;
+  }
+
+  // 手动排序渲染：组内行按 sessionOrder[agentId] 的名次排，榜上无名回落到最近活跃。
+  function terminalRailApplyManualOrder(groups) {
+    const order = terminalRailViewPrefs.sessionOrder[terminalRailAgentId()];
+    if (!Array.isArray(order)) return groups;
+    const rank = new Map(order.map((id, index) => [id, index]));
+    for (const group of groups) {
+      group.rows.sort((a, b) => {
+        const ra = rank.has(a.id) ? rank.get(a.id) : Number.MAX_SAFE_INTEGER;
+        const rb = rank.has(b.id) ? rank.get(b.id) : Number.MAX_SAFE_INTEGER;
+        return (ra - rb) || (b.lastActive || 0) - (a.lastActive || 0);
+      });
+    }
+    return groups;
+  }
+
+  // 切入手动排序：把当前派生序（渲染序）快照进该 agent 的手序（dsh setOrderBy 的
+  // initialOrders 同语义——切换瞬间视觉序不变）。
+  function terminalRailSnapshotManualOrder() {
+    const agentId = terminalRailAgentId();
+    if (!agentId) return;
+    const ids = [];
+    for (const group of terminalRailLastGroups) {
+      for (const row of group.rows) if (!ids.includes(row.id)) ids.push(row.id);
+    }
+    terminalRailViewPrefs.sessionOrder[agentId] = ids;
+    saveTerminalRailViewPrefs();
+  }
+
+  // 拖拽落点：把 fromId 移到 toId 之前（dsh workspaces.insertBefore 同语义）。
+  // 先快照（从 updated 拖进来时）再改写，切回 updated 会清空该 agent 手序。
+  function terminalRailMoveInManualOrder(agentId, fromId, toId) {
+    if (!agentId || !fromId || fromId === toId) return;
+    if (terminalRailViewPrefs.orderBy !== "manual") {
+      terminalRailSnapshotManualOrder();
+      terminalRailViewPrefs.orderBy = "manual";
+    }
+    const order = Array.isArray(terminalRailViewPrefs.sessionOrder[agentId])
+      ? terminalRailViewPrefs.sessionOrder[agentId].slice()
+      : [];
+    const from = order.indexOf(fromId);
+    if (from >= 0) order.splice(from, 1);
+    const to = toId ? order.indexOf(toId) : -1;
+    if (to >= 0) order.splice(to, 0, fromId);
+    else order.push(fromId);
+    terminalRailViewPrefs.sessionOrder[agentId] = order;
+    saveTerminalRailViewPrefs();
+  }
+
+  // 视图选项菜单：栏内单例（同组头 ⋯ 菜单形制），右对齐锚定、点选即关。
+  let terminalRailViewMenuEl = null;
+
+  function closeTerminalRailViewMenu() {
+    if (terminalRailViewMenuEl && typeof terminalRailViewMenuEl.remove === "function") terminalRailViewMenuEl.remove();
+    terminalRailViewMenuEl = null;
+  }
+
+  function openTerminalRailViewMenu() {
+    const dir = $("railTerminalDir");
+    const btn = $("railTermViewOptionsBtn");
+    if (!dir || !btn) return;
+    closeTerminalRailViewMenu();
+    closeTerminalRailGroupMenu();
+    closeTerminalRailHoverCard();
+    const menu = document.createElement("div");
+    menu.className = "rail-term-menu rail-term-view-menu";
+    for (const group of TERMINAL_RAIL_VIEW_GROUPS) {
+      const label = document.createElement("div");
+      label.className = "rail-term-view-label";
+      label.textContent = group.label;
+      menu.append(label);
+      for (const item of group.items) {
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = "rail-term-menu-item rail-term-view-item";
+        if (terminalRailViewPrefs[group.field] === item.value) el.classList.add("is-selected");
+        el.setAttribute("data-rail-term-view", `${group.field}:${item.value}`);
+        const text = document.createElement("span");
+        text.className = "rail-term-view-text";
+        text.textContent = item.label;
+        const check = document.createElement("span");
+        check.className = "rail-term-view-check";
+        check.innerHTML = TERMINAL_RAIL_ICON_CHECK;
+        el.append(text, check);
+        menu.append(el);
+      }
+    }
+    dir.append(menu);
+    const dirRect = dir.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
+    menu.style.top = `${Math.max(0, btnRect.bottom - dirRect.top + 4)}px`;
+    menu.style.left = `${Math.max(0, btnRect.right - dirRect.left - menu.offsetWidth)}px`;
+    terminalRailViewMenuEl = menu;
+  }
+
+  // 点选：写偏好 → 落盘 → 连带动作（切 manual 快照/切 updated 清序/树模式解折叠）
+  // → 重渲 → 关菜单。
+  function applyTerminalRailViewChoice(field, value) {
+    if (!TERMINAL_RAIL_VIEW_GROUPS.some((group) => group.field === field)) return;
+    if (terminalRailViewPrefs[field] === value) { closeTerminalRailViewMenu(); return; }
+    if (field === "orderBy" && value === "manual") terminalRailSnapshotManualOrder();
+    if (field === "orderBy" && value === "updated") delete terminalRailViewPrefs.sessionOrder[terminalRailAgentId()];
+    if (field === "groupBy" && value === "workspace-tree") {
+      // 树模式：祖先组自动展开（一次性；之后尊重用户手动收起）
+      for (const group of terminalRailLastGroups) {
+        if (group.key && group.depth > 0) terminalRailCollapsedGroups.delete(group.key);
+      }
+    }
+    terminalRailViewPrefs[field] = value;
+    saveTerminalRailViewPrefs();
+    terminalRailFlipMode = "instant"; // 视图切换是 resetKey：瞬时跳变（dsh 同口径）
+    renderTerminalRailHistory(terminalRailAgentId());
+    closeTerminalRailViewMenu();
+  }
+
   // ---- 渲染 ----
   function renderTerminalRail() {
     if (currentView !== "terminal") return; // 栏只在终端视图露出，别处不白跑渲染
@@ -8571,8 +8787,11 @@ async function api(method, path, body) {
     const action = archived
       ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
       : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
+    // 会话行可拖（M8 T7b：手序的唯一来源）；归档行不可拖（m6c：draggable＝非空白且
+    // 非归档行）。组行不拖——组是目录派生、无清单可持久化。
+    const draggable = archived ? "" : ` draggable="true"`;
     return `
-      <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""} title="${esc(title)}">
+      <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""}${draggable} title="${esc(title)}">
         ${dot}
         <span class="rail-term-row-title">${escapeHtml(title)}</span>
         ${dirMeta}
@@ -8615,6 +8834,19 @@ async function api(method, path, body) {
     if (terminalRailViewPrefs.archivedFilter === "only") {
       groups = groups.filter((group) => group.key === "" || group.rows.length > 0);
     }
+    // 分组方式三态（M8 T7b）：单列表＝无组平铺（key 空串的伪组，不渲组头）；
+    // 按工作区树＝目录祖先嵌套＋缩进；按工作区＝平铺目录组（默认）。
+    const flat = terminalRailViewPrefs.groupBy === "flat";
+    if (flat) {
+      const rows = [];
+      for (const group of groups) rows.push(...group.rows);
+      rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      groups = [{ key: "", label: "会话", rows, latest: rows.length ? rows[0].lastActive || 0 : 0, flat: true }];
+    } else if (terminalRailViewPrefs.groupBy === "workspace-tree") {
+      groups = terminalRailNestGroups(groups);
+    }
+    // 手动排序：组内行按手序排（榜上无名回落到最近活跃）
+    if (terminalRailViewPrefs.orderBy === "manual") terminalRailApplyManualOrder(groups);
     // 全新终端兜底行（M8 T1）：按 cwd 找所属组，没有就为它建组（目录被用户移除过
     // 的除外——那种目录的会话都进「未分组」，兜底行同命运）。
     const pending = terminalRailPendingNewTerminals();
@@ -8622,7 +8854,7 @@ async function api(method, path, body) {
       const removed = terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, entry.cwd));
       let group = groups.find((row) => row.key && terminalRailSameDir(row.key, entry.cwd));
       if (!group && !removed) {
-        group = { key: entry.cwd, label: sessDirName(entry.cwd), rows: [], latest: entry.createdAt };
+        group = { key: entry.cwd, label: sessDirName(entry.cwd), rows: [], latest: entry.createdAt, depth: 0 };
         groups.push(group);
         groups.sort((a, b) => {
           if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
@@ -8656,22 +8888,35 @@ async function api(method, path, body) {
       scrollKey = activeGroup;
     }
     const parts = [];
+    // 「仅显示已归档」且一条归档都没有：空态（m6c §A1）——24px 归档图标 + 两句，
+    // 「查看其他会话」点了切回「隐藏已归档」。
+    if (terminalRailViewPrefs.archivedFilter === "only" && sessions.length === 0) {
+      parts.push(`
+      <div class="rail-term-empty">
+        <span class="rail-term-empty-icon">${TERMINAL_RAIL_ICON_ARCHIVE}</span>
+        <span class="rail-term-empty-text">暂无已归档会话</span>
+        <button type="button" class="rail-term-empty-action" data-rail-term-view-reset="1">查看其他会话</button>
+      </div>`);
+    }
     for (const group of groups) {
       const collapsed = terminalRailCollapsedGroups.has(group.key);
       // 组头三件（M7 S3 / M8 T7）：非 hover 是文件夹图标（开/关两枚），hover 同槽位
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
       // 没有目录身份，这些都不给（dsh 同口径）。组头本身仍是整行可点的折叠开关。
+      // 树模式缩进 8+depth×12px（m6c §B3）；单列表模式不渲组头。
       const current = group.key !== "" && group.key === activeGroup;
+      const indent = group.depth ? ` style="padding-inline-start: ${8 + group.depth * 12}px"` : "";
       const headActions = group.key
         ? `<span class="rail-term-group-actions">
           <span class="rail-term-group-btn" data-rail-term-group-new="${esc(group.key)}" title="在此目录新建终端" aria-label="在此目录新建终端">${TERMINAL_RAIL_ICON_PLUS}</span>
-          <span class="rail-term-group-btn" data-rail-term-group-menu="${esc(group.key)}" aria-hidden="true">${TERMINAL_RAIL_ICON_ELLIPSIS}</span>
+          <span class="rail-term-group-btn" data-rail-term-group-menu="${esc(group.key)}" aria-label="分组操作">${TERMINAL_RAIL_ICON_ELLIPSIS}</span>
         </span>`
         : "";
-      parts.push(`
+      if (!group.flat) {
+        parts.push(`
       <div class="rail-term-group${collapsed ? "" : " is-open"}">
-        <div class="rail-term-group-head">
+        <div class="rail-term-group-head"${indent}>
           <button type="button" class="rail-term-group-toggle" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
             <span class="rail-term-group-slot">
               <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
@@ -8681,18 +8926,26 @@ async function api(method, path, body) {
           </button>
           ${headActions}
         </div>`);
+      }
       if (!collapsed) {
-        // 兜底行固定组顶（不看 lastActive）；水位线只数真实历史行
+        // 兜底行固定组顶（不看 lastActive）；水位线只数真实历史行（单列表模式不设
+        // 水位——dsh 平铺同样一次露全）
         for (const entry of group.pending || []) parts.push(terminalRailPendingRowHtml(entry, activeTerminalPreviewId));
-        const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
-        for (const row of group.rows.slice(0, view.visible)) {
-          parts.push(terminalRailRowHtml(row, group.live.get(row.id) || null, activeTerminalPreviewId));
-        }
-        if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
-          parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
+        if (group.flat) {
+          for (const row of group.rows) {
+            parts.push(terminalRailRowHtml(row, group.live.get(row.id) || null, activeTerminalPreviewId));
+          }
+        } else {
+          const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
+          for (const row of group.rows.slice(0, view.visible)) {
+            parts.push(terminalRailRowHtml(row, group.live.get(row.id) || null, activeTerminalPreviewId));
+          }
+          if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
+            parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
+          }
         }
       }
-      parts.push(`</div>`);
+      if (!group.flat) parts.push(`</div>`);
     }
     // 「已移除的分组（N）」折叠区（M7 S2）：段尾，仅 N>0 时出现。行给目录短名，
     // title 给完整路径（盘上留的就是用户点选时的原始拼写），行内「恢复」钮。
@@ -9239,6 +9492,7 @@ async function api(method, path, body) {
   function initTerminalRail() {
     const dir = $("railTerminalDir");
     if (!dir) return;
+    loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
     initTerminalRailScrollbarQuiet();
     // 首次指针/键盘输入才武装 FLIP：进页那一帧直接落位，用户还没动手时不放整列表淡入。
     const armMotion = () => { terminalRailMotionArmed = true; };
@@ -9287,6 +9541,19 @@ async function api(method, path, body) {
       const removedToggle = target.closest("[data-rail-term-removed-toggle]");
       if (removedToggle) {
         toggleTerminalRailRemoved();
+        return;
+      }
+      // 视图选项点选（M8 T7b）：写偏好＋连带动作＋关菜单
+      const viewItem = target.closest("[data-rail-term-view]");
+      if (viewItem) {
+        const [field, value] = (viewItem.getAttribute("data-rail-term-view") || "").split(":");
+        applyTerminalRailViewChoice(field, value);
+        return;
+      }
+      // 「仅显示已归档」空态动作：切回「隐藏已归档」
+      const viewReset = target.closest("[data-rail-term-view-reset]");
+      if (viewReset) {
+        applyTerminalRailViewChoice("archivedFilter", "default");
         return;
       }
       const sessionRow = target.closest("[data-rail-term-session]");
@@ -9352,6 +9619,50 @@ async function api(method, path, body) {
         closeTerminalRailSearch();
       });
     }
+    // 视图选项钮（M8 T7b）：菜单开关
+    const viewBtn = $("railTermViewOptionsBtn");
+    if (viewBtn) {
+      viewBtn.addEventListener("click", (event) => {
+        if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+        if (terminalRailViewMenuEl) closeTerminalRailViewMenu();
+        else openTerminalRailViewMenu();
+      });
+    }
+    // 会话行拖拽（M8 T7b，手序的唯一来源）：draggable 只在非归档行上；同列表内
+    // 移动（dsh 只允许同父级兄弟，我们的组/平铺都是一个父）。落点＝目标行之前。
+    let railDragId = "";
+    dir.addEventListener("dragstart", (event) => {
+      const row = event.target && typeof event.target.closest === "function"
+        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+        : null;
+      if (!row) return;
+      railDragId = row.getAttribute("data-rail-term-resume") || "";
+      if (event.dataTransfer && typeof event.dataTransfer.setData === "function") {
+        event.dataTransfer.setData("text/plain", railDragId);
+      }
+      if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
+    });
+    dir.addEventListener("dragover", (event) => {
+      const row = event.target && typeof event.target.closest === "function"
+        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+        : null;
+      if (!row || !railDragId) return;
+      event.preventDefault(); // 允许落在非归档行上
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    });
+    dir.addEventListener("drop", (event) => {
+      const row = event.target && typeof event.target.closest === "function"
+        ? event.target.closest('[data-rail-term-resume][draggable="true"]')
+        : null;
+      if (!row || !railDragId) return;
+      event.preventDefault();
+      const toId = row.getAttribute("data-rail-term-resume") || "";
+      terminalRailMoveInManualOrder(terminalRailAgentId(), railDragId, toId);
+      railDragId = "";
+      terminalRailFlipMode = "instant"; // 拖拽落位是 resetKey：瞬时跳变
+      renderTerminalRailHistory(terminalRailAgentId());
+    });
+    dir.addEventListener("dragend", () => { railDragId = ""; });
     // 栏底「返回」一颗钮两态共用（设置态与终端态互斥）：终端态回进入终端前的视图，
     // 设置态仍由 initSettingsView 绑的 exitSettings 承担。
     const back = $("railBackBtn");
@@ -9394,6 +9705,15 @@ async function api(method, path, body) {
           }
         }
       }
+      // 视图选项菜单兜底：点菜单外即关（点选分支在委托里已关）
+      if (terminalRailViewMenuEl) {
+        const target = event.target;
+        if (!terminalRailViewMenuEl.contains(target)) {
+          if (!(target && typeof target.closest === "function" && target.closest("#railTermViewOptionsBtn"))) {
+            closeTerminalRailViewMenu();
+          }
+        }
+      }
       // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开，m6c §A6）
       if (terminalRailSearch.open) {
         const head = $("railTermSectionHead");
@@ -9406,6 +9726,7 @@ async function api(method, path, body) {
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
         closeTerminalRailGroupMenu();
+        closeTerminalRailViewMenu();
         if (terminalRailSearch.open) closeTerminalRailSearch();
       }
     });
