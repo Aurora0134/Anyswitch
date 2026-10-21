@@ -54,6 +54,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalRailPrefs = prefs;
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     let terminalRailRemovedCollapsed = removedCollapsed;
+    const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
     const TERMINAL_RAIL_ICON_CHEVRON = "";
@@ -1181,5 +1182,106 @@ describe("M8 T5 live 行悬停动作与归档钮并存", () => {
       assert.ok(rule.includes("display: none"), `${sel} 静息不占位`);
       assert.ok(!/transition/.test(rule), `${sel} 无过渡（0ms 硬切）`);
     }
+  });
+});
+
+describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
+  describe("HTML 与 CSS", () => {
+    it("段头三钮位：搜索槽（钮＋输入框＋清空钮）在册，刷新在位，文案逐字", () => {
+      const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/)[0];
+      const head = dir.slice(dir.indexOf('id="railTermSectionHead"'), dir.indexOf('class="rail-term-scroll"'));
+      assert.ok(head.includes('id="railTermSearchBtn"'), "搜索钮在册");
+      assert.ok(head.includes('id="railTermSearchInput"'), "搜索输入框在册");
+      assert.ok(head.includes('id="railTermSearchClear"'), "清空钮在册");
+      assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字（m6c §A2）");
+      assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字（m6c §A2）");
+      assert.ok(head.includes('id="railTermHistoryRefresh"'), "刷新钮在位（dsh 该位的「选工作区」用户不加）");
+      // 位序：标题 → 搜索 → （视图选项 T7b）→ 刷新
+      assert.ok(head.indexOf('id="railTermSectionTitle"') < head.indexOf('id="railTermSearchBtn"')
+        && head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermHistoryRefresh"'), "位序：标题 → 搜索 → 刷新");
+      // 搜索钮无标签（批准清单里没有它的词）——同 ⋯ 钮形制
+      assert.ok(/id="railTermSearchBtn"[^>]*aria-hidden="true"/.test(head), "搜索钮按装饰图标形制（标签待清单补录）");
+    });
+
+    it("行内展开观感：标题/钮带让位、搜索槽展开，0.18s（栏内第二条过渡，仅此机制）", () => {
+      assert.ok(/\.rail-term-section-head\.is-searching \.rail-term-section-title,/.test(panelCss), "展开态标题让位（合并选择器，max-width:0 + opacity:0）");
+      assert.ok(/\.rail-term-section-head\.is-searching \.rail-term-head-actions \{/.test(panelCss), "展开态右侧钮带让位");
+      assert.ok(/\.rail-term-search \{[\s\S]*?max-width: 28px/.test(panelCss), "收起态搜索槽 28px");
+      assert.ok(/\.rail-term-section-head\.is-searching \.rail-term-search \{[\s\S]*?max-width: 100%/.test(panelCss), "展开态搜索槽 100%");
+      const searchRule = cssRule(".rail-term-search {");
+      assert.ok(/transition:[^;]*\.18s/.test(searchRule), "搜索槽过渡 .18s（m6c §A1）");
+      // 栏内运动纪律：行/钮/组头容器不因搜索加过渡
+      assert.ok(!cssRule(".rail-term-row {").includes("transition"), "行本体仍 0ms 硬切");
+    });
+  });
+
+  describe("匹配与结果（vm 真跑）", () => {
+    const SESSIONS = [
+      { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
+      { id: "s-2", endpoint: "kimi", project: "C:\\dev\\beta", title: "Alpha 接入渠道", lastActive: 300 },
+      { id: "s-3", endpoint: "kimi", project: null, title: "排查掉线", lastActive: 200 },
+    ];
+    const run = (query, sessions = SESSIONS) => {
+      const fn = new Function("sessions", "query", `
+        ${extractFn("sessDirName")}
+        function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+        ${extractFn("terminalRailSearchMatches")}
+        return terminalRailSearchMatches;
+      `)(sessions, query);
+      return fn(query, sessions);
+    };
+
+    it("范围＝会话标题＋目录短名，大小写不敏感子串（dsh 出厂口径，无全文）", () => {
+      assert.deepEqual(run("重构").map((s) => s.id), ["s-1"], "标题命中");
+      // alpha：s-2 标题含 Alpha，s-1 目录短名就是 alpha——两条都命中，按最近活跃倒序
+      assert.deepEqual(run("alpha").map((s) => s.id), ["s-2", "s-1"], "标题/目录短名双路命中且大小写不敏感");
+      assert.deepEqual(run("ALPHA").map((s) => s.id), ["s-2", "s-1"], "查询侧也大小写不敏感");
+      assert.deepEqual(run("beta").map((s) => s.id), ["s-2"], "目录短名（非完整路径）命中");
+      assert.deepEqual(run("dev").map((s) => s.id), [], "完整路径片段不命中（只匹配短名）");
+      assert.deepEqual(run("").map((s) => s.id), [], "空查询无结果");
+      assert.deepEqual(run("   ").map((s) => s.id), [], "纯空白查询无结果");
+    });
+
+    it("结果按最近活跃倒序；上限 20 条＋截断提示", () => {
+      assert.deepEqual(run("a").map((s) => s.id).sort(), ["s-1", "s-2"], "宽查询命中两条（标题/短名都含 a 的）");
+      const many = Array.from({ length: 25 }, (_, i) => ({ id: `m-${i}`, endpoint: "kimi", project: "C:\\dev\\x", title: `命中 ${i}`, lastActive: i }));
+      const hits = run("命中", many);
+      assert.equal(hits.length, 25, "匹配函数本身不截");
+      // 截断在渲染层（TERMINAL_RAIL_SEARCH_LIMIT = 20）
+      assert.ok(panelJs.includes("TERMINAL_RAIL_SEARCH_LIMIT = 20"), "上限 20（m6c §A4，Host 侧同值）");
+    });
+  });
+
+  describe("搜索交互状态机（源码钉死）", () => {
+    const src = () => panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+
+    it("防抖 250ms；搜索中态「正在搜索会话历史…」role=status", () => {
+      assert.ok(src().includes("TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250"), "防抖 250ms（m6c §A2）");
+      assert.ok(src().includes("正在搜索会话历史…"), "搜索中文案逐字");
+      assert.ok(src().includes('role="status"'), "role=status（无障碍）");
+    });
+
+    it("退出手势：Esc／清空钮／点开结果行＝清空＋收起；外点仅空查询收起；再点搜索钮不退出", () => {
+      const s = src();
+      assert.ok(/event\.key === "Escape"/.test(s), "Esc 清空+收起");
+      assert.ok(s.includes("railTermSearchClear"), "清空钮在册");
+      assert.ok(s.includes("退出后列表滚动回顶") || s.includes("scrollTop = 0"), "退出后滚动回顶（m6c §A6）");
+      // 外点仅空查询收起：收起条件带 query 判空
+      assert.ok(/terminalRailSearch\.query/.test(s), "外点收起判 query 空（有查询只失焦）");
+    });
+
+    it("结果行＝T2 同一套（live 聚焦/去重/续接）；归档行进结果且点击落提示句", () => {
+      const s = src();
+      assert.ok(s.includes("terminalRailResumeSession"), "结果行走续接两分支（去重内置）");
+      assert.ok(s.includes('data-rail-term-live'), "结果行带 live 属性（聚焦分支）");
+      assert.ok(s.includes("这条会话已归档，取消归档后才能续接"), "归档行点击落批准句（m6b 已取原文）");
+      assert.ok(s.includes("rail-term-row-result"), "结果行有专属类（平铺无组头）");
+    });
+
+    it("无匹配「无匹配会话」；>20 出截断句（逐字）", () => {
+      const s = src();
+      assert.ok(s.includes("无匹配会话"), "无匹配文案逐字");
+      assert.ok(s.includes("仅显示前 20 条结果，请缩小搜索范围。"), "截断文案逐字");
+    });
   });
 });

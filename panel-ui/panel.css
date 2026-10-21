@@ -599,10 +599,53 @@
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
   /* M8 T1 起段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none，
-     滚的只有里面的树）。T7 的搜索/视图选项钮也挂在这行（观感参数见 T7 段）。 */
+     滚的只有里面的树）。T7 的搜索/视图选项钮也挂在这行（观感参数见 m6c §B5）。 */
   .rail-term-section-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 6px; flex: none; }
   .rail-term-section-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-3); }
   .rail-term-head-actions { flex: none; display: flex; align-items: center; gap: 4px; }
+  /* ── 段头搜索（M8 T7a，m6c §A） ──
+     行内展开不是浮层：搜索槽从 28px 原地展开到 100%，标题与右侧钮带同时序收缩
+     让位（.18s——栏内第二条过渡，只此机制有；行/钮照旧 0ms 硬切）。 */
+  .rail-term-search {
+    flex: none; max-width: 28px; height: 28px; display: flex; align-items: center; gap: 4px;
+    padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius-sm);
+    transition: max-width .18s var(--ease-out), padding .18s var(--ease-out), border-color .18s var(--ease-out);
+    overflow: hidden; min-width: 0;
+  }
+  .rail-term-section-head.is-searching .rail-term-search {
+    max-width: 100%; flex: 1 1 auto; border-color: var(--border); background: var(--surface-sunken);
+  }
+  .rail-term-section-head.is-searching .rail-term-section-title,
+  .rail-term-section-head.is-searching .rail-term-head-actions {
+    max-width: 0; opacity: 0; visibility: hidden; overflow: hidden; pointer-events: none;
+    transition: max-width .18s var(--ease-out), opacity .12s var(--ease-out), visibility 0s .18s;
+  }
+  .rail-term-section-title, .rail-term-head-actions { transition: max-width .18s var(--ease-out), opacity .12s var(--ease-out); }
+  .rail-term-search-btn {
+    appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+    width: 22px; height: 22px; padding: 0; border-radius: var(--radius-sm); flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .rail-term-search-btn:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-term-search-input {
+    flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: var(--text);
+    font: inherit; font-size: 12.5px; outline: none; opacity: 0; width: 0;
+    transition: opacity .12s var(--ease-out);
+  }
+  .rail-term-section-head.is-searching .rail-term-search-input { opacity: 1; width: auto; }
+  .rail-term-search-clear {
+    appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+    width: 20px; height: 20px; padding: 0; border-radius: var(--radius-sm); flex: none;
+    display: none; align-items: center; justify-content: center;
+  }
+  .rail-term-section-head.is-searching .rail-term-search-clear { display: inline-flex; }
+  .rail-term-search-clear:hover { background: var(--surface-hover); color: var(--text); }
+  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮，m6c §A4） */
+  .rail-term-row-result { min-height: 34px; }
+  .rail-term-row-dir { flex: none; font-size: 11px; color: var(--text-4); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail-term-row-result:hover .rail-term-row-dir { display: none; }
+  .rail-term-search-status { padding: 8px; font-size: 12px; color: var(--text-3); }
+  .rail-term-search-note { padding: 8px; font-size: 12px; color: var(--text-3); }
   .rail-term-icon-btn {
     appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
     width: 22px; height: 22px; padding: 0; border-radius: var(--radius-sm); flex: none;

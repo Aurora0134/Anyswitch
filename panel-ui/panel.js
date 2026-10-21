@@ -8418,6 +8418,109 @@ async function api(method, path, body) {
     return out;
   }
 
+  // ── 段头搜索（M8 T7a，照搬 m6c §A 裁剪后） ──
+  // 行内展开不是浮层：点搜索钮＝展开＋自动聚焦；已展开再点不退出（非 toggle，只
+  // 重新聚焦）。退出手势：Esc／清空钮／点开结果行＝清空＋收起；点搜索区外**仅当
+  // 查询为空**才收起（有查询只失焦）。退出后列表滚动回顶、分组展开态保留。
+  // 范围＝会话标题＋目录短名的大小写不敏感子串——dsh 出厂配置把 Host 内容搜索整个
+  // 关了（m6c §A3 重大发现），侧栏实际就只有这个口径；照搬的就是它，不做全文。
+  // 防抖 250ms（窗口内出「正在搜索会话历史…」骨架位）。不挂任何键盘加速入口
+  // （显式不做清单既有口径）。
+  const TERMINAL_RAIL_SEARCH_DEBOUNCE_MS = 250;
+  const TERMINAL_RAIL_SEARCH_LIMIT = 20;
+  let terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+
+  function terminalRailSearchMatches(query, sessions) {
+    const q = String(query || "").trim().toLowerCase();
+    if (!q) return [];
+    return (Array.isArray(sessions) ? sessions : []).filter((session) => {
+      if (!session) return false;
+      const title = sessTitle(session).toLowerCase();
+      const dir = typeof session.project === "string" ? sessDirName(session.project).toLowerCase() : "";
+      return title.includes(q) || dir.includes(q);
+    }).sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+  }
+
+  function openTerminalRailSearch() {
+    const head = $("railTermSectionHead");
+    const input = $("railTermSearchInput");
+    if (head && head.classList) head.classList.add("is-searching");
+    if (input) {
+      input.tabIndex = 0;
+      if (typeof input.focus === "function") input.focus();
+    }
+    terminalRailSearch.open = true;
+    renderTerminalRailHistory(terminalRailAgentId());
+  }
+
+  function closeTerminalRailSearch() {
+    const head = $("railTermSectionHead");
+    const input = $("railTermSearchInput");
+    if (terminalRailSearch.timer) { clearTimeout(terminalRailSearch.timer); terminalRailSearch.timer = null; }
+    if (head && head.classList) head.classList.remove("is-searching");
+    if (input) {
+      input.tabIndex = -1;
+      input.value = "";
+      if (typeof input.blur === "function") input.blur();
+    }
+    terminalRailSearch.open = false;
+    terminalRailSearch.query = "";
+    terminalRailSearch.searching = false;
+    // 退出后列表滚动回顶（m6c §A6：滚动位不保留；分组展开态在 collapsedGroups 里，
+    // 与搜索无关，天然保留）
+    const scroll = document.querySelector(".rail-term-scroll");
+    if (scroll) scroll.scrollTop = 0;
+    renderTerminalRailHistory(terminalRailAgentId());
+  }
+
+  // 搜索ing态输入：空查询当场回树；非空立即出「正在搜索会话历史…」，250ms 后落结果。
+  function onTerminalRailSearchInput() {
+    const input = $("railTermSearchInput");
+    terminalRailSearch.query = input ? input.value : "";
+    if (terminalRailSearch.timer) { clearTimeout(terminalRailSearch.timer); terminalRailSearch.timer = null; }
+    if (!terminalRailSearch.query.trim()) {
+      terminalRailSearch.searching = false;
+      renderTerminalRailHistory(terminalRailAgentId());
+      return;
+    }
+    terminalRailSearch.searching = true;
+    renderTerminalRailHistory(terminalRailAgentId());
+    terminalRailSearch.timer = setTimeout(() => {
+      terminalRailSearch.timer = null;
+      terminalRailSearch.searching = false;
+      renderTerminalRailHistory(terminalRailAgentId());
+    }, TERMINAL_RAIL_SEARCH_DEBOUNCE_MS);
+  }
+
+  // 搜索结果＝替换式平铺列表（无组头）：行＝标题＋目录短名，无命中高亮；live/归档
+  // 行的形态与树里同一套（terminalRailRowHtml 的 result 变体）。归档会话也进结果
+  // （跟随归档筛选，m6c §A3）——灰字、点击落「这条会话已归档，取消归档后才能续接」、
+  // hover 出「取消归档」钮（m6b §A2 第三恢复入口）。
+  function renderTerminalRailSearchResults(list) {
+    const hits = terminalRailSearchMatches(terminalRailSearch.query, terminalRailVisibleSessions());
+    const shown = hits.slice(0, TERMINAL_RAIL_SEARCH_LIMIT);
+    const parts = [];
+    if (terminalRailSearch.searching) {
+      parts.push(`<div class="rail-term-search-status" role="status">正在搜索会话历史…</div>`);
+    } else if (shown.length === 0) {
+      parts.push(`<div class="rail-term-search-status">无匹配会话</div>`);
+    } else {
+      for (const session of shown) {
+        const live = terminalRailFindOpenSession(session.endpoint, session.id);
+        parts.push(terminalRailRowHtml(session, live, activeTerminalPreviewId, { result: true }));
+      }
+      if (hits.length > TERMINAL_RAIL_SEARCH_LIMIT) {
+        // 截断句逐字（文案清单）；条数与上限同值，写字面量不改写文案
+        parts.push(`<div class="rail-term-search-note">仅显示前 20 条结果，请缩小搜索范围。</div>`);
+      }
+    }
+    const html = parts.join("");
+    if (html !== terminalRailRendered.history) {
+      terminalRailRendered.history = html;
+      list.innerHTML = html;
+    }
+  }
+
   // ---- 渲染 ----
   function renderTerminalRail() {
     if (currentView !== "terminal") return; // 栏只在终端视图露出，别处不白跑渲染
@@ -8445,12 +8548,14 @@ async function api(method, path, body) {
   // 树行 HTML（M8 T1/T2/T5）：live 行带状态点 + 关闭叉 + 归档钮；非 live 行只带
   // 归档钮；归档行（筛选 show 态内联）灰字 + 取消归档钮。live 属性带终端 id——
   // 点击委托据此分支（聚焦终端 vs 走续接两分支）。
-  function terminalRailRowHtml(session, live, activeId) {
+  function terminalRailRowHtml(session, live, activeId, opts) {
     const title = sessTitle(session);
     const time = session.lastActive ? terminalRailRelTime(session.lastActive) : "";
     const archived = terminalRailIsArchived(session);
     const working = !!live && live.status === "working";
+    const result = !!(opts && opts.result);
     const cls = ["rail-term-row", "rail-term-row-history"];
+    if (result) cls.push("rail-term-row-result");
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
     if (live && live.id === activeId) cls.push("is-active");
@@ -8460,6 +8565,9 @@ async function api(method, path, body) {
     const closeBtn = live
       ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
       : "";
+    const dirMeta = result && typeof session.project === "string" && session.project
+      ? `<span class="rail-term-row-dir">${escapeHtml(sessDirName(session.project))}</span>`
+      : "";
     const action = archived
       ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
       : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
@@ -8467,6 +8575,7 @@ async function api(method, path, body) {
       <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""} title="${esc(title)}">
         ${dot}
         <span class="rail-term-row-title">${escapeHtml(title)}</span>
+        ${dirMeta}
         <span class="rail-term-row-time">${escapeHtml(time)}</span>
         ${closeBtn}
         ${action}
@@ -8490,6 +8599,11 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
+    // 搜索态：结果平铺列表整块替换树（m6c §A4），树渲染全旁路
+    if (terminalRailSearch.open && terminalRailSearch.query.trim()) {
+      renderTerminalRailSearchResults(list);
+      return;
+    }
     // 「落地」= 这个 agent 的列表已成功取回。抓取失败也写着同一个 endpoint，但那份
     // 空表不是事实——按失败态消费掉自动展开，用户之后手动刷新成功就再也不会展开。
     const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
@@ -9071,6 +9185,8 @@ async function api(method, path, body) {
     terminalRailAutoExpandedFor = "";
     terminalRailScrolledFor = "";
     terminalRailFlipMode = "instant";
+    // 进视图＝ fresh  entry：搜索态重置（展开态/查询都不跨进出保留）
+    closeTerminalRailSearch();
     loadTerminalRailPrefs();
     renderTerminalRail();
   }
@@ -9184,9 +9300,11 @@ async function api(method, path, body) {
         const liveId = resumeRow.getAttribute("data-rail-term-live");
         if (liveId) {
           terminalRailActivateSession(liveId);
+          if (terminalRailSearch.open) closeTerminalRailSearch(); // 点开结果行＝清空＋收起
           return;
         }
         terminalRailResumeHistoryRow(resumeRow.getAttribute("data-rail-term-resume"));
+        if (terminalRailSearch.open) closeTerminalRailSearch();
         return;
       }
       const unarchive = target.closest("[data-rail-term-unarchive]");
@@ -9207,6 +9325,33 @@ async function api(method, path, body) {
     });
     $("railTermNewBtn").onclick = () => terminalRailCreateTerminal();
     $("railTermHistoryRefresh").onclick = () => refreshTerminalRailHistory({ manual: true });
+    // 段头搜索（M8 T7a）：钮＝展开/重新聚焦（非 toggle）；输入＝防抖 250ms；清空钮
+    // 与 Esc＝清空＋收起。外点收起逻辑挂在下面的 document 委托里（仅空查询）。
+    const searchBtn = $("railTermSearchBtn");
+    const searchInput = $("railTermSearchInput");
+    const searchClear = $("railTermSearchClear");
+    if (searchBtn) {
+      searchBtn.addEventListener("click", (event) => {
+        if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+        if (terminalRailSearch.open) {
+          if (searchInput && typeof searchInput.focus === "function") searchInput.focus();
+          return; // 已展开再点＝重新聚焦，不退出（m6c 实测#32）
+        }
+        openTerminalRailSearch();
+      });
+    }
+    if (searchInput) {
+      searchInput.addEventListener("input", onTerminalRailSearchInput);
+      searchInput.addEventListener("keydown", (event) => {
+        if (event && event.key === "Escape") closeTerminalRailSearch();
+      });
+    }
+    if (searchClear) {
+      searchClear.addEventListener("click", (event) => {
+        if (event && typeof event.stopPropagation === "function") event.stopPropagation();
+        closeTerminalRailSearch();
+      });
+    }
     // 栏底「返回」一颗钮两态共用（设置态与终端态互斥）：终端态回进入终端前的视图，
     // 设置态仍由 initSettingsView 绑的 exitSettings 承担。
     const back = $("railBackBtn");
@@ -9241,14 +9386,28 @@ async function api(method, path, body) {
     // 组头 ⋯ 菜单的兜底收场：点菜单外（委托分支已判的 ⋯ 钮与菜单项除外）与 Esc。
     // document 级监听在委托之后触发（冒泡从内到外），分工不冲突。
     document.addEventListener("click", (event) => {
-      if (!terminalRailMenuEl) return;
-      const target = event.target;
-      if (terminalRailMenuEl.contains(target)) return;
-      if (target && typeof target.closest === "function" && target.closest("[data-rail-term-group-menu]")) return;
-      closeTerminalRailGroupMenu();
+      if (terminalRailMenuEl) {
+        const target = event.target;
+        if (!terminalRailMenuEl.contains(target)) {
+          if (!(target && typeof target.closest === "function" && target.closest("[data-rail-term-group-menu]"))) {
+            closeTerminalRailGroupMenu();
+          }
+        }
+      }
+      // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开，m6c §A6）
+      if (terminalRailSearch.open) {
+        const head = $("railTermSectionHead");
+        const target = event.target;
+        if (!head || !head.contains(target)) {
+          if (!terminalRailSearch.query.trim()) closeTerminalRailSearch();
+        }
+      }
     });
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") closeTerminalRailGroupMenu();
+      if (event.key === "Escape") {
+        closeTerminalRailGroupMenu();
+        if (terminalRailSearch.open) closeTerminalRailSearch();
+      }
     });
   }
 
