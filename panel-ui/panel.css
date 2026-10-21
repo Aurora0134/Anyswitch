@@ -654,16 +654,19 @@
   .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
   /* 图标同槽互换（M7 S3，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），hover
      时同槽位换成箭头——两个图标同在定宽槽里 display 硬切，不产生宽度跳动；槽宽
-     14px 与两枚文件夹图标同宽。箭头展开旋转 .15s（栏内唯一行内过渡）。 */
+     14px 与两枚文件夹图标同宽。箭头展开旋转 .15s（栏内唯一行内过渡）。互换规则
+     只作用于组头（.rail-term-group-head 之内的箭头默认隐）——「已移除的分组」
+     标题那枚箭头是常驻指示，不吃这套互换。 */
   .rail-term-group-slot { flex: none; width: 14px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   .rail-term-group-arrow {
-    flex: none; display: none; align-items: center; line-height: 0;
+    flex: none; display: inline-flex; align-items: center; line-height: 0;
     transition: transform .15s cubic-bezier(.4,0,.2,1);
   }
   .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
   .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
-  .rail-term-group-head:hover .rail-term-group-icon { display: none; }
+  .rail-term-group-head .rail-term-group-arrow { display: none; }
   .rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }
+  .rail-term-group-head:hover .rail-term-group-icon { display: none; }
   .rail-term-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   /* 组头动作钮（⋯ / ⊕）：hover 才出现，0ms 硬切，与行内关闭叉/归档钮同形制 */
   .rail-term-group-actions { flex: none; display: flex; align-items: center; gap: 2px; }
@@ -690,6 +693,19 @@
   .rail-term-menu-item:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-menu-item.is-danger { color: var(--danger); }
   .rail-term-menu-item.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
+  /* ── 组头 hover 卡（M7 S3，dsh B4） ──
+     800ms 延迟后出现；三行＝目录短名／完整路径／「N 个会话」；整卡可点（复制完整
+     路径 + 「已复制」）。挂 body 下 position:fixed（dsh 同款 portal——栏体
+     overflow-x:hidden 会切掉贴右缘展开的卡），z-index 与右键菜单同档。 */
+  .rail-term-hover-card {
+    position: fixed; z-index: 1200; width: 220px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 2px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
+  }
+  .rail-term-hover-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .rail-term-hover-path { font-size: 12px; color: var(--text-3); word-break: break-all; }
+  .rail-term-hover-count { font-size: 12px; color: var(--text-3); }
   /* 「已移除的分组（N）」折叠区：段尾，默认收起；行给目录短名 + 行内「恢复」 */
   .rail-term-removed { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
   .rail-term-removed.is-open .rail-term-group-arrow { transform: rotate(90deg); }

@@ -56,6 +56,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const TERMINAL_RAIL_ICON_CHEVRON = "";
     const TERMINAL_RAIL_ICON_ARCHIVE = "";
     const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+    const TERMINAL_RAIL_ICON_PLUS = "";
     const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
     const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
     let terminalRailHistory = history;
@@ -551,10 +552,141 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.ok(cssRule(".rail-term-menu {").length > 0, "⋯ 菜单容器样式在册（可扩：M8 加项只加 DOM）");
       const danger = panelCss.match(/\.rail-term-menu-item\.is-danger \{([^}]*)\}/);
       assert.ok(danger, "danger 项样式在册");
-      assert.ok(/color:\s*var\(--danger|color:\s*var\(--red|color:\s*#/.test(danger[1]) || danger[1].includes("color:"),
-        "danger 项是红色系（既有语义 token）");
+      assert.ok(danger[1].includes("var(--danger)"), "danger 项取既有危险色 token");
       assert.ok(panelCss.includes(".rail-term-removed-row"), "恢复区行样式在册");
       assert.ok(!/\.rail-term-menu[^{]*\{[^}]*transition/.test(panelCss), "菜单无过渡（0ms 硬切）");
+    });
+  });
+});
+
+describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
+  describe("⊕ 在此目录新建终端（vm 真跑）", () => {
+    const runCreate = ({ collapsed = [], agentId = "kimi", ready = true, apiImpl } = {}) => {
+      const log = { posts: [], renders: 0, collapsed: new Set(collapsed) };
+      const fn = new Function("log", "apiImpl", "agentId", "ready", `
+        let terminalBackendReady = ready;
+        let terminalRailFlipMode = "instant";
+        const terminalRailCollapsedGroups = log.collapsed;
+        function createAgentTerminal(opts) { log.posts.push(opts); return apiImpl(opts); }
+        function renderTerminalRailHistory() { log.renders += 1; }
+        function terminalRailAgentId() { return agentId; }
+        ${extractFn("terminalRailCreateTerminalInDir")}
+        return terminalRailCreateTerminalInDir;
+      `)(log, apiImpl ?? (() => Promise.resolve()), agentId, ready);
+      return { fn, log };
+    };
+
+    it("点击＝先展开该组（若收起）＋以该组目录为 cwd 给当前 agent 建终端", async () => {
+      const { fn, log } = runCreate({ collapsed: ["C:\\dev\\alpha"] });
+      fn("C:\\dev\\alpha");
+      assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组先展开");
+      assert.deepEqual(log.posts, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }],
+        "走 createAgentTerminal 同一通路，cwd＝组目录");
+      await flush();
+    });
+
+    it("已展开的组不重复展开；未就绪（就绪闸）不建", () => {
+      const opened = runCreate({ collapsed: [] });
+      opened.fn("C:\\dev\\alpha");
+      assert.equal(opened.log.collapsed.size, 0, "已展开不动组态");
+      assert.equal(opened.log.renders, 0, "不重渲");
+      const notReady = runCreate({ ready: false });
+      notReady.fn("C:\\dev\\alpha");
+      assert.deepEqual(notReady.log.posts, [], "未就绪不建（与页签栏加号同拍的就绪闸）");
+    });
+
+    it("源码钉死：不写无 agent 分支——历史段只在有 agent 聚焦时有内容，⊕ 天然有 agentId", () => {
+      const fn = extractFn("terminalRailCreateTerminalInDir");
+      assert.ok(fn.includes("createAgentTerminal({ agentId: terminalRailAgentId(), cwd: key })"), "同一创建通路");
+      assert.ok(!fn.includes('agentId: ""'), "没有为无 agent 兜底的代码路径");
+      // 理由写在函数上方的注释里（栏体代码段内）
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(block.includes("历史会话段只在有 agent 聚焦时"), "注释说明为何无需无 agent 分支");
+    });
+
+    it("委托与文案：⊕ 钮挂组键，title/aria-label 逐字「在此目录新建终端」", () => {
+      const render = extractFn("renderTerminalRailHistory");
+      assert.ok(render.includes('data-rail-term-group-new="${esc(group.key)}"'), "⊕ 挂组键");
+      assert.ok(render.includes('title="在此目录新建终端"'), "title 逐字");
+      assert.ok(render.includes('aria-label="在此目录新建终端"'), "无障碍名同词");
+      const init = extractFn("initTerminalRail");
+      const clickAt = init.indexOf('dir.addEventListener("click"');
+      const block = init.slice(clickAt, init.indexOf("});", clickAt));
+      assert.ok(block.indexOf("data-rail-term-group-new") < block.indexOf('data-rail-term-group"'),
+        "⊕ 抢在组折叠之前判（点⊕ 变成折叠就错了）");
+    });
+  });
+
+  describe("hover 卡（源码 + CSS）", () => {
+    it("800ms 延迟、三行内容、整卡复制路径 + 「已复制」", () => {
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(src.includes("TERMINAL_RAIL_HOVER_DELAY_MS = 800"), "延迟 800ms（dsh 同值）");
+      assert.ok(src.includes("个会话"), "第三行「N 个会话」");
+      assert.ok(src.includes('sessCopyText(key, "已复制")'), "整卡点击复制完整路径，反馈「已复制」（复用既有手法）");
+      assert.ok(src.includes("pointerover") && src.includes("pointerout"), "指针进出驱动显隐");
+    });
+
+    it("⋯ 菜单打开期间抑制 hover 卡（dsh 的 disabled: menuOpen 同口径）", () => {
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(/if \(!head \|\| !key \|\| terminalRailMenuKey\) return/.test(src),
+        "菜单开着不排卡");
+      assert.ok(src.includes("closeTerminalRailHoverCard()") && src.includes("openTerminalRailGroupMenu"),
+        "开菜单即收卡（菜单后开的情形）");
+    });
+
+    it("CSS：hover 卡三行样式在册，fixed + 高 z-index（portal 同款）", () => {
+      const card = cssRule(".rail-term-hover-card {");
+      assert.ok(card.includes("position: fixed"), "挂 body 下 fixed（栏体 overflow 会切卡）");
+      assert.ok(card.includes("z-index: 1200"), "与右键菜单同档");
+      assert.ok(panelCss.includes(".rail-term-hover-name"), "第一行：目录短名");
+      assert.ok(panelCss.includes(".rail-term-hover-path"), "第二行：完整路径");
+      assert.ok(panelCss.includes(".rail-term-hover-count"), "第三行：N 个会话");
+    });
+  });
+
+  describe("图标同槽互换（CSS 钉死）", () => {
+    it("非 hover 文件夹、hover 箭头同槽互换；箭头 .15s 是栏内唯一行内过渡", () => {
+      assert.ok(cssRule(".rail-term-group-slot {").includes("width: 14px"), "定宽槽 14px（与文件夹同宽）");
+      assert.ok(panelCss.includes(".rail-term-group-head .rail-term-group-arrow { display: none; }"),
+        "组头内箭头默认隐（非 hover 看文件夹）");
+      assert.ok(panelCss.includes(".rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }"),
+        "hover 换上箭头（0ms 硬切）");
+      assert.ok(panelCss.includes(".rail-term-group-head:hover .rail-term-group-icon { display: none; }"),
+        "hover 收文件夹（同槽位互换）");
+      const arrow = cssRule(".rail-term-group-arrow {");
+      assert.ok(arrow.includes("transition: transform .15s cubic-bezier(.4,0,.2,1)"), ".15s 旋转保留");
+      assert.ok(panelCss.includes(".rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }"),
+        "展开态旋转 90°");
+      assert.ok(/\.rail-term-removed\.is-open \.rail-term-group-arrow \{ transform: rotate\(90deg\); \}/.test(panelCss),
+        "移除区展开态同款旋转");
+      assert.ok(!cssRule(".rail-term-group-head {").includes("transition"), "组头容器无过渡");
+      assert.ok(!cssRule(".rail-term-group-btn {").includes("transition"), "动作钮无过渡（0ms 硬切）");
+      assert.ok(!cssRule(".rail-term-group-toggle {").includes("transition"), "折叠开关无过渡（hover 底色 0ms 硬切）");
+    });
+
+    it("整行点击折叠/展开不变：toggle 钮仍是整行宽的开关", () => {
+      const render = extractFn("renderTerminalRailHistory");
+      assert.ok(render.includes('class="rail-term-group-toggle"'), "折叠开关是组头内的整行按钮");
+      assert.ok(render.includes("rail-term-group-actions"), "动作钮是开关的兄弟（不吃它的点击）");
+      const toggle = cssRule(".rail-term-group-toggle {");
+      assert.ok(toggle.includes("flex: 1 1 auto"), "开关吃满剩余宽度（整行可点）");
+    });
+  });
+
+  describe("S3 豁免与菜单容器", () => {
+    it("「未分组」组：无 ⊕、无 ⋯、无 hover 卡（dsh 同口径）", () => {
+      const render = extractFn("renderTerminalRailHistory");
+      const actionsAt = render.indexOf("const headActions");
+      assert.ok(actionsAt > 0, "动作钮渲染可取样");
+      const block = render.slice(actionsAt, render.indexOf("parts.push(`", actionsAt));
+      assert.ok(block.includes("group.key"), "动作钮的渲染条件含组键判定");
+      assert.ok(block.includes(': ""'), "无组键（未分组）时动作区为空串");
+    });
+
+    it("⋯ 菜单容器可扩：单一挂点 + 项是可增的 DOM（M8 加项不开第二套浮层）", () => {
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(src.includes("function openTerminalRailGroupMenu(key)"), "单一开菜单挂点");
+      assert.ok(/menu\.append\(item\)/.test(src), "菜单项是 append 进去的（可扩）");
     });
   });
 });

@@ -8218,6 +8218,9 @@ async function api(method, path, body) {
   // 「已移除的分组（N）」折叠区默认收起（N 就在标题里，展开只为逐条恢复）；
   // 折叠态活在内存里，不持久化（与水位线同口径）。
   let terminalRailRemovedCollapsed = true;
+  // 最近一帧渲染出来的组表（过滤/改组后的终态）：hover 卡的「N 个会话」按它取数，
+  // 不重新扫 DOM。
+  let terminalRailLastGroups = [];
 
   const TERMINAL_RAIL_ICON_CHEVRON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M3.5 20l2.4-7h14.2l-2.4 7z"/></svg>';
@@ -8415,6 +8418,7 @@ async function api(method, path, body) {
     // 先归档过滤（visible）再分组，最后把被移除目录的会话改组进「未分组」——
     // 顺序即语义：过滤 → 目录身份 → 移除摘牌。
     const groups = terminalRailRegroupRemoved(terminalRailGroupSessions(sessions));
+    terminalRailLastGroups = groups;
     // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
     // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
     // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
@@ -8433,10 +8437,11 @@ async function api(method, path, body) {
       const collapsed = terminalRailCollapsedGroups.has(group.key);
       // 组头三件（M7 S3）：非 hover 是文件夹图标（开/关两枚），hover 同槽位换成
       // 箭头（0ms 硬切，CSS 管）；右侧 hover 出 ⋯（菜单，现仅「移除分组」）与 ⊕
-      // （在此目录新建终端，S3 落）。「未分组」组没有目录身份，这些都不给（dsh 同
-      // 口径）。组头本身仍是整行可点的折叠开关——动作钮是它的兄弟span，不吃它的点击。
+      // （在此目录新建终端）。「未分组」组没有目录身份，这些都不给（dsh 同口径）。
+      // 组头本身仍是整行可点的折叠开关——动作钮是它的兄弟span，不吃它的点击。
       const headActions = group.key
         ? `<span class="rail-term-group-actions">
+          <span class="rail-term-group-btn" data-rail-term-group-new="${esc(group.key)}" title="在此目录新建终端" aria-label="在此目录新建终端">${TERMINAL_RAIL_ICON_PLUS}</span>
           <span class="rail-term-group-btn" data-rail-term-group-menu="${esc(group.key)}" aria-hidden="true">${TERMINAL_RAIL_ICON_ELLIPSIS}</span>
         </span>`
         : "";
@@ -8710,6 +8715,88 @@ async function api(method, path, body) {
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
+  // ⊕ 新建（dsh B1 的 onCreate）：先展开该组（若收起），再以该组目录为 cwd 走
+  // createAgentTerminal 同一通路给当前 agent 建终端。历史会话段只在有 agent 聚焦时
+  // 才有内容——组头天然带着 agentId（terminalRailAgentId），不写无 agent 分支：
+  // 没有 agent 时列表为空、组头不存在，⊕ 根本不会露面。就绪闸与页签栏加号同拍。
+  function terminalRailCreateTerminalInDir(key) {
+    if (!terminalBackendReady || !key) return;
+    if (terminalRailCollapsedGroups.has(key)) {
+      terminalRailCollapsedGroups.delete(key);
+      terminalRailFlipMode = "flip";
+      renderTerminalRailHistory(terminalRailAgentId());
+    }
+    createAgentTerminal({ agentId: terminalRailAgentId(), cwd: key });
+  }
+
+  // ── 组头 hover 卡（M7 S3，dsh B4） ──
+  // 800ms 延迟（dsh 同值）；三行＝目录短名／完整路径／「N 个会话」；整卡可点，
+  // 点击复制完整路径并短暂显示「已复制」（复用既有 sessCopyText 复制反馈手法）。
+  // 挂 body 下 position:fixed（dsh 同款 portal——栏体 overflow-x:hidden 会切掉贴
+  // 右缘展开的卡）。⋯ 菜单打开期间抑制（dsh 的 disabled: menuOpen 同口径）。
+  const TERMINAL_RAIL_HOVER_DELAY_MS = 800;
+  let terminalRailHoverTimer = null;
+  let terminalRailHoverEl = null;
+  let terminalRailHoverHead = null;
+
+  function closeTerminalRailHoverCard() {
+    if (terminalRailHoverTimer) { clearTimeout(terminalRailHoverTimer); terminalRailHoverTimer = null; }
+    if (terminalRailHoverEl && typeof terminalRailHoverEl.remove === "function") terminalRailHoverEl.remove();
+    terminalRailHoverEl = null;
+    terminalRailHoverHead = null;
+  }
+
+  // 组键从 toggle 钮上读（不拼选择器：组键是 Windows 路径）。空键 = 未分组，
+  // 不出卡（dsh 同口径：未分组组没有 hover 卡）。
+  function terminalRailHeadKey(head) {
+    if (!head || typeof head.querySelector !== "function") return "";
+    const toggle = head.querySelector("[data-rail-term-group]");
+    return toggle ? toggle.getAttribute("data-rail-term-group") || "" : "";
+  }
+
+  function scheduleTerminalRailHoverCard(head, key) {
+    closeTerminalRailHoverCard();
+    // 菜单开着不排卡：菜单自己就是悬停出来的浮层，两张卡叠着是噪声
+    if (!head || !key || terminalRailMenuKey) return;
+    terminalRailHoverHead = head;
+    terminalRailHoverTimer = setTimeout(() => {
+      terminalRailHoverTimer = null;
+      showTerminalRailHoverCard(head, key);
+    }, TERMINAL_RAIL_HOVER_DELAY_MS);
+  }
+
+  function showTerminalRailHoverCard(head, key) {
+    if (!head || typeof head.getBoundingClientRect !== "function") return;
+    const group = terminalRailLastGroups.find((row) => row.key && terminalRailSameDir(row.key, key));
+    const count = group ? group.rows.length : 0;
+    const card = document.createElement("div");
+    card.className = "rail-term-hover-card";
+    const name = document.createElement("div");
+    name.className = "rail-term-hover-name";
+    name.textContent = sessDirName(key);
+    const path = document.createElement("div");
+    path.className = "rail-term-hover-path";
+    path.textContent = key;
+    const countLine = document.createElement("div");
+    countLine.className = "rail-term-hover-count";
+    countLine.textContent = `${count} 个会话`;
+    card.append(name, path, countLine);
+    // 整卡可点：复制完整路径，「已复制」的短暂反馈由 sessCopyText 的 toast 承担
+    card.onclick = () => sessCopyText(key, "已复制");
+    document.body.append(card);
+    const rect = head.getBoundingClientRect();
+    const width = card.offsetWidth || 220;
+    card.style.top = `${Math.max(8, rect.bottom + 4)}px`;
+    card.style.left = `${Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))}px`;
+    terminalRailHoverEl = card;
+    // 指针从组头直接挪进卡里：卡接着活（不然刚出现就没了，根本点不到）
+    card.addEventListener("pointerout", (event) => {
+      const to = event.relatedTarget;
+      if (to && typeof to.closest === "function" && to.closest(".rail-term-group-head")) return;
+      closeTerminalRailHoverCard();
+    });
+  }
+
   // ── 组头 ⋯ 菜单（M7 S2/S3） ──
   // 栏内单例：同一时刻只开一个，换目标即换主。容器做成可扩的——M8 往段头「视图
   // 选项」加项时若还要组级菜单，只在这里 append，不开第二套浮层。挂在栏体下而
@@ -8740,6 +8827,7 @@ async function api(method, path, body) {
     const head = terminalRailGroupHeadEl(key);
     if (!head) { closeTerminalRailGroupMenu(); return; }
     closeTerminalRailGroupMenu();
+    closeTerminalRailHoverCard(); // 菜单后开：悬停卡让位（dsh 的 menuOpen 抑制同口径）
     terminalRailMenuKey = key;
     const menu = document.createElement("div");
     menu.className = "rail-term-menu";
@@ -8867,10 +8955,11 @@ async function api(method, path, body) {
     const armMotion = () => { terminalRailMotionArmed = true; };
     dir.addEventListener("pointerdown", armMotion, { once: true });
     dir.addEventListener("keydown", armMotion, { once: true });
-    // 一处委托：关闭叉 / 切换终端 / 历史行归档 / 组头菜单 / 移除分组 / 恢复分组 /
-    // 历史行续接 / 组折叠 / 水位线。关闭叉与归档钮先判，否则会被行点击抢走；组头
-    // ⋯ 与菜单项、恢复钮都要抢在「历史行续接」与「组折叠」之前——它们同在那一片
-    // 区域里，判序错了点⋯ 就会折叠组、点恢复就会续接会话。
+    // 一处委托：关闭叉 / 切换终端 / 历史行归档 / 组头菜单 / 组头新建 / 移除分组 /
+    // 恢复分组 / 历史行续接 / 组折叠 / 水位线。关闭叉与归档钮先判，否则会被行点击
+    // 抢走；组头 ⋯、⊕ 与菜单项、恢复钮都要抢在「历史行续接」与「组折叠」之前——
+    // 它们同在那一片区域里，判序错了点⋯ 就会折叠组、点⊕ 就会折叠组、点恢复就会
+    // 续接会话。
     dir.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
@@ -8887,6 +8976,11 @@ async function api(method, path, body) {
       const menuBtn = target.closest("[data-rail-term-group-menu]");
       if (menuBtn) {
         toggleTerminalRailGroupMenu(menuBtn.getAttribute("data-rail-term-group-menu"));
+        return;
+      }
+      const newBtn = target.closest("[data-rail-term-group-new]");
+      if (newBtn) {
+        terminalRailCreateTerminalInDir(newBtn.getAttribute("data-rail-term-group-new"));
         return;
       }
       const removeItem = target.closest("[data-rail-term-remove-group]");
@@ -8930,6 +9024,31 @@ async function api(method, path, body) {
     if (back) {
       back.onclick = () => (document.body.classList.contains("terminal-mode") ? closeTerminalPreview() : switchView(settingsReturnView));
     }
+    // 组头 hover 卡：指针进组头排 800ms 卡，出组头（且没进卡里）收卡。同一组头内
+    // 的子元素掠过连发 pointerover，用 terminalRailHoverHead 去重（不重新排计时）。
+    dir.addEventListener("pointerover", (event) => {
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      const head = target.closest(".rail-term-group-head");
+      if (!head) return;
+      if (terminalRailHoverHead === head) return;
+      terminalRailHoverHead = head;
+      scheduleTerminalRailHoverCard(head, terminalRailHeadKey(head));
+    });
+    dir.addEventListener("pointerout", (event) => {
+      const target = event.target;
+      if (!target || typeof target.closest !== "function") return;
+      const head = target.closest(".rail-term-group-head");
+      if (!head) return;
+      const to = event.relatedTarget;
+      // 还在同一组头内（含挪进卡里——卡有自己的 pointerout 收场）：不动
+      if (to && typeof to.closest === "function") {
+        if (to.closest(".rail-term-group-head") === head) return;
+        if (terminalRailHoverEl && terminalRailHoverEl.contains(to)) return;
+      }
+      terminalRailHoverHead = null;
+      closeTerminalRailHoverCard();
+    });
     // 组头 ⋯ 菜单的兜底收场：点菜单外（委托分支已判的 ⋯ 钮与菜单项除外）与 Esc。
     // document 级监听在委托之后触发（冒泡从内到外），分工不冲突。
     document.addEventListener("click", (event) => {
