@@ -5755,7 +5755,10 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     assert.ok(railBase.includes("width: 72px;"), "窄栏 72px 图标栏是基座形态——栏常驻视口内，任何窗口宽度都不整栏消失");
     assert.ok(!railBase.includes("transform") && !railBase.includes("transition"), "无抽屉滑入机关（transform/transition 均不在册）");
     assert.ok(railBase.includes("overflow-y: auto;"), "C2：矮窗口栏体自滚，贴底 tab 组与底行可达（margin-top:auto 贴底语义保持）");
-    assert.ok(/\.rail-brand \{[^}]*flex-shrink: 0;/.test(panelCss) && /\.rail-foot \{[^}]*flex-shrink: 0;/.test(panelCss),
+    // S4 起底行显式钉 flex:none（= flex:0 0 auto，含 shrink:0）；早期拼写
+    // flex-shrink:0 语义等价，两种都认——钉的是「不收缩」这个事实。
+    assert.ok(/\.rail-brand \{[^}]*flex-shrink: 0;/.test(panelCss)
+      && /\.rail-foot \{[^}]*(flex-shrink: 0|flex: none)/.test(panelCss),
       "栏顶品牌与底行不收缩，矮窗下滚动而非压扁");
     // 窄栏基座：品牌文字、tab 标签、底行「设置」文字收起只留图标（规则无媒体查询）
     assert.ok(panelCss.includes(':root[data-ui-version="v2"] .rail-brand .brand-text { display: none; }'), "品牌文字收起（基座）");

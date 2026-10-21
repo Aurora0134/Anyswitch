@@ -1346,6 +1346,14 @@ export function createPanelRouter({
         env: launch.env,
         agentId: launch.agentId,
         agentName: launch.agentName,
+        // 续接身份随创建一并记进宿主会话记录（M7 S5 去重聚焦的数据源）：只递
+        // endpoint + 会话 id 两个非密字段。能走到这儿 resume 已过
+        // buildAgentResumeArgs 校验（端点匹配、id/file 形状合法），宿主还会按
+        // 自己的形状再验一遍；file 不递——去重不需要路径。
+        ...(body?.resume && typeof body.resume === "object"
+          && typeof body.resume.endpoint === "string" && typeof body.resume.id === "string"
+          ? { resume: { endpoint: body.resume.endpoint, id: body.resume.id } }
+          : {}),
       }, { token });
     } catch {
       created = null;

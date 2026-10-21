@@ -12,6 +12,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const panelHtml = readFileSync(join(here, "panel-ui", "panel.html"), "utf8");
 const panelCss = readFileSync(join(here, "panel-ui", "panel.css"), "utf8");
 const panelJs = readFileSync(join(here, "panel-ui", "panel.js"), "utf8");
+const panelMjs = readFileSync(join(here, "panel.mjs"), "utf8");
 
 const railHtml = () => {
   const m = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/);
@@ -773,6 +774,130 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
       // 钉底靠的是 .rail 自身的 flex 列 + 底栏 flex:none，两个态共用，不为终端态另起炉灶
       assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏两个态共用同一 flex:none");
       assert.ok(!panelCss.includes("body.terminal-mode .rail-foot { position"), "终端态不给底栏加定位（不破坏共用骨架）");
+    });
+  });
+});
+
+describe("S5 去重聚焦（finding 3，用户选甲）", () => {
+  describe("历史会话点击两分支（vm 真跑）", () => {
+    const runResume = (sessions, activeId, apiImpl) => {
+      const log = { posts: [], toasts: [], renders: 0, remembered: [] };
+      const fn = new Function("sessions", "activeId", "log", "apiImpl", `
+        let terminalBackendReady = true;
+        const terminalBackendSessions = sessions;
+        let activeTerminalPreviewId = activeId;
+        function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
+        function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
+        function panelError(err, fallback) { return fallback; }
+        function terminalBackendSession(item) { return { ...item }; }
+        function rememberTerminalSessionId(id) { log.remembered.push(id); }
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        function terminalCreateSize() { return { cols: 120, rows: 34 }; }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailFindOpenSession")}
+        ${extractFn("terminalRailActivateSession")}
+        ${extractFn("createAgentTerminal")}
+        ${extractFn("terminalRailResumeSession")}
+        return {
+          resume: terminalRailResumeSession,
+          activeId: () => activeTerminalPreviewId,
+        };
+      `)(sessions, activeId, log, apiImpl);
+      return { fn, log };
+    };
+
+    const HISTORY_ROW = {
+      endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
+      file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
+    };
+    const OPEN_WITH_RESUME = {
+      "t-9": { id: "t-9", label: "Kimi Code", agent: { endpointId: "kimi" }, status: "idle", resume: { endpoint: "kimi", id: "s-1" } },
+    };
+    const OPEN_OTHER = {
+      "t-8": { id: "t-8", label: "Kimi Code", agent: { endpointId: "kimi" }, status: "idle", resume: { endpoint: "kimi", id: "s-2" } },
+      "t-7": { id: "t-7", label: "Kimi Code", agent: { endpointId: "kimi" }, status: "idle", resume: null },
+    };
+
+    it("已开着同 endpoint＋同会话 id 的终端：聚焦它，不重复建", async () => {
+      const { fn, log } = runResume(OPEN_WITH_RESUME, "t-0", async () => { throw new Error("不该发请求"); });
+      fn.resume(HISTORY_ROW);
+      assert.equal(fn.activeId(), "t-9", "活跃指针落到已开着的终端（聚焦同路）");
+      assert.deepEqual(log.posts, [], "不发创建请求");
+      assert.deepEqual(log.remembered, ["t-9"], "存档同步写回（刷新恢复认得）");
+      assert.equal(log.renders, 1, "重渲一次");
+      assert.equal(log.toasts.length, 0, "不提示");
+    });
+
+    it("打开中的终端是别的会话/全新终端：照旧带 resume 新建", async () => {
+      const { fn, log } = runResume(OPEN_OTHER, "t-0", async () => ({
+        id: "t-new", label: "Kimi Code", agentId: "kimi", shell: "cmd", cwd: "C:\\dev\\alpha",
+      }));
+      fn.resume(HISTORY_ROW);
+      await flush();
+      assert.deepEqual(log.posts, [{
+        method: "POST",
+        path: "/api/terminal/agent-sessions",
+        body: {
+          agentId: "kimi",
+          cwd: "C:\\dev\\alpha",
+          resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" },
+          cols: 120,
+          rows: 34,
+        },
+      }], "没有可聚焦的终端才走续接新建（M3 契约原样）");
+      assert.equal(fn.activeId(), "t-new", "新终端置活跃");
+    });
+
+    it("去重键＝endpoint＋会话 id：同 id 不同端点的终端不误聚焦", async () => {
+      const sessions = {
+        "t-c": { id: "t-c", agent: { endpointId: "claude" }, status: "idle", resume: { endpoint: "claude", id: "s-1" } },
+      };
+      const { fn, log } = runResume(sessions, "t-0", async () => ({ id: "t-new", agentId: "kimi" }));
+      fn.resume(HISTORY_ROW); // kimi 的 s-1
+      await flush();
+      assert.equal(log.posts.length, 1, "claude 的同 id 终端不挡 kimi 的续接");
+      assert.equal(fn.activeId(), "t-new", "照旧新建");
+    });
+
+    it("零终端/终端都无 resume 记录：照旧新建（全新终端聊出的会话不在去重范围）", () => {
+      const none = runResume({}, "t-0", async () => ({ id: "t-new", agentId: "kimi" }));
+      none.fn.resume(HISTORY_ROW);
+      assert.equal(none.log.posts.length, 1, "零终端照旧新建");
+      const fresh = runResume({ "t-f": { id: "t-f", agent: { endpointId: "kimi" }, status: "idle" } }, "t-0", async () => ({ id: "t-new", agentId: "kimi" }));
+      fresh.fn.resume(HISTORY_ROW);
+      assert.equal(fresh.log.posts.length, 1, "无 resume 记录的全新终端不参与去重");
+    });
+
+    it("覆盖率写进注释：只对续接创建的终端保证识别，不勉强扩", () => {
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(block.includes("覆盖率只保「续接创建的终端」"), "覆盖率口径注释在册");
+      assert.ok(block.includes("不在去重范围"), "未覆盖面的边界也写进注释");
+    });
+
+    it("源码钉死：去重判定在续接之前，聚焦走 terminalRailActivateSession 同路", () => {
+      const fn = extractFn("terminalRailResumeSession");
+      assert.ok(fn.indexOf("terminalRailFindOpenSession") < fn.indexOf("createAgentTerminal"),
+        "先查已开着的终端，再走新建");
+      assert.ok(fn.includes("terminalRailActivateSession(open.id)"), "聚焦复用同一通路（置活跃+存档+重渲）");
+      const find = extractFn("terminalRailFindOpenSession");
+      assert.ok(find.includes("session.resume.endpoint === endpoint") && find.includes("session.resume.id === id"),
+        "两键比对：endpoint + 会话 id");
+    });
+  });
+
+  describe("后端契约（源码钉死，真跑在 terminal-host/panel 测试）", () => {
+    it("宿主侧：创建带 resume 记进会话记录并随列表下发（terminal-host.test.mjs 真跑）", () => {
+      const host = readFileSync(join(here, "terminal-host.mjs"), "utf8");
+      assert.ok(host.includes("normalizeResume"), "宿主有 resume 归一化（自己的形状轻验）");
+      assert.ok(/invalid_resume/.test(host), "坏 resume 回机器可判错码");
+      assert.ok(/\.\.\.\(session\.resume \? \{ resume: session\.resume \} : \{\}\)/.test(host),
+        "快照带 resume（随列表下发）");
+    });
+
+    it("面板侧：校验过的 resume 身份随创建转发（panel-terminal-resume.test.mjs 真跑）", () => {
+      assert.ok(panelMjs.includes("resume: { endpoint: body.resume.endpoint, id: body.resume.id }"),
+        "只递 endpoint + id 两个非密字段");
     });
   });
 });

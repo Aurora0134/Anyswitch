@@ -358,6 +358,7 @@ describe("终端视图左栏换血（M4）", () => {
     const runResume = (session, apiImpl) => {
       const log = { posts: [], toasts: [], renders: 0, active: null, rememberedCwd: [] };
       const sandbox = new Function("session", "log", "apiImpl", `
+        let terminalBackendReady = true;
         const terminalBackendSessions = {};
         let activeTerminalPreviewId = null;
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
@@ -369,6 +370,8 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("createAgentTerminal")}
         ${extractFn("terminalRailResumeSession")}
         return {

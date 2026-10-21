@@ -5001,6 +5001,13 @@ async function api(method, path, body) {
       // 归属轮询落地前标签就能显示是哪个 agent。
       agentId: typeof item.agentId === "string" ? item.agentId : null,
       agentName: typeof item.agentName === "string" ? item.agentName : null,
+      // 续接身份（M7 S5）：这条终端是替哪条会话续接建的（宿主记录、随列表下发）。
+      // 历史会话点击时先查它——同 endpoint＋同会话 id 的终端已开着就直接聚焦，
+      // 不重复建。全新终端（无 resume 记录）不参与去重。
+      resume: item.resume && typeof item.resume === "object"
+        && typeof item.resume.endpoint === "string" && typeof item.resume.id === "string"
+        ? { endpoint: item.resume.endpoint, id: item.resume.id }
+        : null,
       status: item.status === "running" ? "idle" : "idle",
       metrics: null,
       route: [],
@@ -8640,6 +8647,17 @@ async function api(method, path, body) {
   // 会话），不为它新造文案。
   function terminalRailResumeSession(session) {
     if (!session) return;
+    // 去重聚焦（M7 S5，用户选甲）：先查打开中的终端有没有同 endpoint＋同会话 id
+    // 的——有就直接聚焦（terminalRailActivateSession 同路：置活跃、写存档、重渲），
+    // 不再带 resume 新建。点已续接开的会话不该再开一条一模一样的新终端。
+    // 覆盖率只保「续接创建的终端」：全新终端里聊出来的会话，宿主没记过它的对话
+    // id（面板的绑定库在后端，没往前端曝），不在去重范围——要扩得先给绑定库开
+    // 口子，那是另一条 mission 的事，不勉强。
+    const open = terminalRailFindOpenSession(session.endpoint, session.id);
+    if (open) {
+      terminalRailActivateSession(open.id);
+      return;
+    }
     if (!session.resumeCommand) {
       toast("这个 Agent 的会话暂时不能在终端里续接", true);
       return;
@@ -8657,6 +8675,17 @@ async function api(method, path, body) {
   function terminalRailResumeHistoryRow(id) {
     const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
     if (session) terminalRailResumeSession(session);
+  }
+
+  // 打开中的终端里找「替这条会话续接建的那个」：resume 身份两键（endpoint＋会话
+  // id）都对上才算。同会话 id 在不同端点的存档里是不同对话，单键会误聚焦。
+  function terminalRailFindOpenSession(endpoint, id) {
+    if (!endpoint || !id) return null;
+    for (const session of Object.values(terminalRailSessionMap())) {
+      if (!session || !session.resume) continue;
+      if (session.resume.endpoint === endpoint && session.resume.id === id) return session;
+    }
+    return null;
   }
 
   // 归档（dsh §1.4 / m6b §A）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
