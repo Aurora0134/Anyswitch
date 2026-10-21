@@ -562,7 +562,7 @@
   :root[data-ui-version="v2"] .settings-subtabs { display: none; }
   :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
 
-  /* ── 终端会话栏（M4 + M7）：终端视图下的左栏换血内容 ─────────────────────────
+  /* ── 终端会话栏（M4 + M7 + M8）：终端视图下的左栏换血内容 ─────────────────────────
      进终端视图（body.terminal-mode）时，栏内主 tab 组整组换成这份随 agent 的会话
      栏（与设置目录同一换血形制：换内容而非追加），栏底齿轮换「返回」——点返回 =
      回进入终端前的视图（terminalReturnView，与设置态那颗钮同一槽位、两态互斥）。
@@ -598,19 +598,91 @@
   }
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
-  .rail-term-section { display: flex; flex-direction: column; flex: none; margin-bottom: 10px; }
-  .rail-term-section-history { margin-bottom: 0; }
-  .rail-term-section-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 6px; flex: none; }
-  .rail-term-section-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-3); }
+  /* M8 T1 起段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none，
+     滚的只有里面的树）。T7 的搜索/视图选项钮也挂在这行——行观感参数照抄 m6c §B5
+     实测全集：36px 高、gap 4px、radius-md、padding-left 4px；标题 14px/20/400
+     tertiary、max-width 45%；图标钮 28×28。 */
+  .rail-term-section-head { display: flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 4px 6px; flex: none; border-radius: var(--radius-md); }
+  .rail-term-section-title { flex: 1; min-width: 0; max-width: 45%; font-size: 14px; line-height: 20px; font-weight: 400; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail-term-head-actions { flex: none; display: flex; align-items: center; gap: 4px; }
+  /* ── 段头搜索（M8 T7a，m6c §A） ──
+     行内展开不是浮层：搜索槽从 28px 原地展开到 100%，标题与右侧钮带同时序收缩
+     让位（.18s——栏内第二条过渡，只此机制有；行/钮照旧 0ms 硬切）。 */
+  .rail-term-search {
+    flex: none; max-width: 28px; height: 28px; display: flex; align-items: center; gap: 4px;
+    padding: 0 7px; border: 1px solid transparent; border-radius: var(--radius-sm);
+    transition: max-width .18s var(--ease-out), padding .18s var(--ease-out), border-color .18s var(--ease-out);
+    overflow: hidden; min-width: 0;
+  }
+  .rail-term-section-head.is-searching .rail-term-search {
+    max-width: 100%; flex: 1 1 auto; height: 30px; border-color: var(--border); background: var(--surface-sunken);
+  }
+  .rail-term-section-head.is-searching .rail-term-section-title,
+  .rail-term-section-head.is-searching .rail-term-head-actions {
+    max-width: 0; opacity: 0; visibility: hidden; overflow: hidden; pointer-events: none;
+    transition: max-width .18s var(--ease-out), opacity .12s var(--ease-out), visibility 0s .18s;
+  }
+  .rail-term-section-title, .rail-term-head-actions { transition: max-width .18s var(--ease-out), opacity .12s var(--ease-out); }
+  .rail-term-search-btn {
+    appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+    width: 28px; height: 28px; padding: 0; border-radius: var(--radius-sm); flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .rail-term-search-btn:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-term-search-input {
+    flex: 1 1 auto; min-width: 0; border: 0; background: transparent; color: var(--text);
+    font: inherit; font-size: 12.5px; outline: none; opacity: 0; width: 0;
+    transition: opacity .12s var(--ease-out);
+  }
+  .rail-term-section-head.is-searching .rail-term-search-input { opacity: 1; width: auto; }
+  .rail-term-search-clear {
+    appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
+    width: 20px; height: 20px; padding: 0; border-radius: var(--radius-sm); flex: none;
+    display: none; align-items: center; justify-content: center;
+  }
+  .rail-term-section-head.is-searching .rail-term-search-clear { display: inline-flex; }
+  .rail-term-search-clear:hover { background: var(--surface-hover); color: var(--text); }
+  /* 搜索结果平铺行：标题＋目录短名（无组头、无高亮，m6c §A4） */
+  .rail-term-row-result { min-height: 34px; }
+  .rail-term-row-dir { flex: none; font-size: 11px; color: var(--text-4); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rail-term-row-result:hover .rail-term-row-dir { display: none; }
+  .rail-term-search-status { padding: 8px; font-size: 12px; color: var(--text-3); }
+  .rail-term-search-note { padding: 8px; font-size: 12px; color: var(--text-3); }
+  /* ── 视图选项菜单（M8 T7b，m6c §B2） ──
+     右对齐锚定（JS 算 left）、min-width 200、padding 4、dense 30px 项、分组标签
+     11px tertiary、✓ 居项最右（margin-left:auto，选中才显、不换文字色不铺底）、
+     点选即关（JS）。打开/关闭无动画（0ms 挂载/卸载）。 */
+  .rail-term-view-menu { min-width: 200px; }
+  .rail-term-view-label {
+    padding: 6px 8px 2px; font-size: 11px; color: var(--text-3);
+  }
+  .rail-term-view-item { min-height: 30px; padding: 4px 8px; font-size: 12.5px; }
+  .rail-term-view-text { flex: 1; min-width: 0; }
+  .rail-term-view-check { flex: none; display: none; align-items: center; margin-left: auto; color: var(--accent); line-height: 0; }
+  .rail-term-view-item.is-selected .rail-term-view-check { display: inline-flex; }
+  /* 「仅显示已归档」空态（m6c §A1）：图标 + 两句 + 查看其他会话动作 */
+  .rail-term-empty {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 32px 12px; color: var(--text-3); font-size: 12.5px;
+  }
+  .rail-term-empty-icon { color: var(--text-4); line-height: 0; }
+  .rail-term-empty-action {
+    appearance: none; border: 0; background: transparent; color: var(--accent);
+    font: inherit; font-size: 12.5px; cursor: pointer; padding: 4px 8px; border-radius: var(--radius-sm);
+  }
+  .rail-term-empty-action:hover { background: var(--surface-hover); }
+  /* 会话行拖拽（M8 T7b）：被拖行半透明（0ms 硬切，无过渡——栏内运动纪律） */
+  .rail-term-row-history[draggable="true"] { cursor: grab; }
+  .rail-term-row-history.is-dragging { opacity: 0.5; }
   .rail-term-icon-btn {
     appearance: none; border: 0; background: transparent; color: var(--text-3); cursor: pointer;
-    width: 22px; height: 22px; padding: 0; border-radius: var(--radius-sm); flex: none;
+    width: 28px; height: 28px; padding: 0; border-radius: var(--radius-sm); flex: none;
     display: inline-flex; align-items: center; justify-content: center;
   }
   .rail-term-icon-btn:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
-  /* 两个列表容器都是内容高度的定高块（不参与收缩）；溢出由中段滚动层裁切，不越段。 */
-  .rail-term-open, .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
+  /* 树容器是内容高度的定高块（不参与收缩）；溢出由中段滚动层裁切，不越段。 */
+  .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
   /* ── 中段唯一滚动层（M7 S4，dsh §3.1/§3.3） ──
      两个段都在里面滚（dsh 的 .list 同口径）：flex:1 + min-height:0 吃剩余空间，
      空间不够时它先缩——定高块（新建钮/段头/行）都不参与收缩，「行压段头」的旧缺陷
@@ -642,14 +714,21 @@
   .rail-term-row.is-active { background: var(--accent-soft); color: var(--accent); }
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }
-  /* 关闭叉：只在有动作的「打开的终端」行 hover 时出现，纯 display 硬切（无淡入、无
-     位移、无宽度过渡）。历史会话行的动作是归档（M7 S1），同样只在该行 hover 时
-     出现——时间同槽位让位（dsh 只在 rowActions 出现时才把时间让位，同款取舍）。 */
+  /* 关闭叉（M8 T5）：只在 live 行 hover 时出现（走 terminalRailCloseSession 同一条
+     路），纯 display 硬切（无淡入、无位移、无宽度过渡）。行的归档钮同样只在该行
+     hover 时出现——时间同槽位让位（dsh 只在 rowActions 出现时才把时间让位）。 */
   .rail-term-row-close { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
-  .rail-term-row-open:hover .rail-term-row-close { display: inline-flex; }
+  .rail-term-row.is-live:hover .rail-term-row-close { display: inline-flex; }
   .rail-term-row-archive { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
   .rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }
   .rail-term-row-history:hover .rail-term-row-time { display: none; }
+  /* live 行的取消归档钮（M8 T7a）：归档行在「全部会话」筛选下内联显示，hover 出 */
+  .rail-term-row-unarchive { flex: none; display: none; padding: 0 2px; color: var(--text-3); cursor: pointer; }
+  .rail-term-row-history.is-archived:hover .rail-term-row-unarchive { display: inline-flex; }
+  .rail-term-row-history.is-archived:hover .rail-term-row-archive { display: none; }
+  .rail-term-row-history.is-archived { color: var(--text-4); }
+  .rail-term-row-history.is-archived .rail-term-row-title,
+  .rail-term-row-history.is-archived .rail-term-row-time { color: var(--text-4); }
   /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡。
      M7 S3 起组头是「容器」：里面整行是可点的折叠开关（toggle 钮），右侧 hover
      才出动作钮（⋯ 菜单，M8 可能扩项）。容器本身不接点击——折叠走 toggle 钮，
@@ -679,6 +758,9 @@
   }
   .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
   .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
+  /* M8 T4：含当前聚焦会话的组，文件夹图标取主题 accent（用户修正：不写死 dsh 的蓝，
+     sepia 主题出橙等——亮暗/sepia/各皮肤各自生效）。 */
+  .rail-term-group-icon.is-current { color: var(--accent); }
   .rail-term-group-head .rail-term-group-arrow { display: none; }
   .rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }
   .rail-term-group-head:hover .rail-term-group-icon { display: none; }
@@ -835,11 +917,11 @@
      手动展开，宽档只有 collapsed 才是图标栏。规则放在收窄两态块之后，与既有栏态块
      同序。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section, .rail-term-fade) { display: none; }
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll, .rail-term-fade) { display: none; }
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section, .rail-term-fade) { display: none; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section-head, .rail-term-scroll, .rail-term-fade) { display: none; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
 
