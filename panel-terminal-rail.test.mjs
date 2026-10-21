@@ -190,8 +190,11 @@ describe("终端视图左栏换血（M4）", () => {
   describe("跟随语义（vm 真跑）", () => {
     const runAgentId = (session) => {
       const fn = new Function("session", `
+        let terminalBackendReady = true;
+        const terminalBackendSessions = session ? { t1: session } : {};
         const activeTerminalPreviewId = "t1";
-        function terminalSessionFor(id) { return id === "t1" ? session : null; }
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailActiveSession")}
         ${extractFn("terminalRailAgentId")}
         return terminalRailAgentId;
       `)(session);
@@ -213,8 +216,11 @@ describe("终端视图左栏换血（M4）", () => {
     it("「打开的终端」只列同一 agent 的会话；无 agent 聚焦时列空白终端", () => {
       const run = (sessions, agentId) => {
         const fn = new Function("sessions", "agentId", `
+          let terminalBackendReady = true;
+          const terminalBackendSessions = sessions;
           const activeTerminalPreviewId = "t1";
-          function terminalSessionMap() { return sessions; }
+          ${extractFn("terminalRailSessionMap")}
+          ${extractFn("terminalRailActiveSession")}
           ${extractFn("terminalRailAgentId")}
           ${extractFn("terminalRailOpenSessions")}
           return terminalRailOpenSessions;
@@ -285,10 +291,13 @@ describe("终端视图左栏换血（M4）", () => {
           set: (v) => { list.writes += 1; list.html = v; },
         });
         const fn = new Function("sessions", "agentId", "list", "esc", "escapeHtml", `
+          let terminalBackendReady = true;
+          const terminalBackendSessions = sessions;
           const activeTerminalPreviewId = "t1";
           const terminalRailRendered = { agent: null, open: null, history: null };
           function $(id) { return id === "railTermOpenList" ? list : null; }
-          function terminalSessionMap() { return sessions; }
+          ${extractFn("terminalRailSessionMap")}
+          ${extractFn("terminalRailActiveSession")}
           ${extractFn("terminalRailAgentId")}
           ${extractFn("terminalRailOpenSessions")}
           ${extractFn("renderTerminalRailOpenList")}
@@ -533,6 +542,350 @@ describe("终端视图左栏换血（M4）", () => {
     });
   });
 
+  describe("未就绪不泄漏设计稿预览种子（缺陷 B）", () => {
+    const run = (ready, backendSessions, previewSessions, activeId = "t1") => {
+      const fn = new Function("ready", "backendSessions", "previewSessions", "activeId", `
+        let terminalBackendReady = ready;
+        const terminalBackendSessions = backendSessions;
+        const terminalPreviewSessions = previewSessions;
+        const activeTerminalPreviewId = activeId;
+        function terminalSessionMap() { return terminalBackendReady ? terminalBackendSessions : terminalPreviewSessions; }
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailActiveSession")}
+        ${extractFn("terminalRailAgentId")}
+        ${extractFn("terminalRailOpenSessions")}
+        return { agentId: terminalRailAgentId, open: terminalRailOpenSessions };
+      `)(ready, backendSessions, previewSessions, activeId);
+      return fn;
+    };
+
+    // 设计稿遗留的预览种子：未就绪时 terminalSessionMap 会回落这张表
+    const PREVIEW = {
+      checkout: { id: "checkout", label: "payment-service", shell: { name: "PowerShell" }, agent: null, status: "idle" },
+      "preview-1": { id: "preview-1", label: "新终端", shell: { name: "PowerShell" }, agent: null, status: "idle" },
+    };
+    const BACKEND = {
+      t1: { id: "t1", label: "Claude Code", shell: { name: "命令提示符" }, agent: { endpointId: "claude" }, status: "idle" },
+    };
+
+    it("未就绪：「打开的终端」一个都不列——预览种子不许冒充真实终端", () => {
+      const fn = run(false, BACKEND, PREVIEW, "checkout");
+      assert.deepEqual(fn.open("").map((s) => s.id), [], "未就绪时列表为空，不把 payment-service 等种子当真实终端");
+      const fn2 = run(false, BACKEND, PREVIEW, "preview-1");
+      assert.deepEqual(fn2.open("").map((s) => s.id), [], "预览稿的新终端 id 同样不列");
+    });
+
+    it("未就绪：身份行取不到 agent，落通用终端态（不冒充某个 agent）", () => {
+      const fn = run(false, BACKEND, PREVIEW, "checkout");
+      assert.equal(fn.agentId(), "", "未就绪时身份为空 → 身份行走通用终端标识");
+      const withAgentSeed = { ...PREVIEW, checkout: { ...PREVIEW.checkout, agent: { endpointId: "kimi" } } };
+      const fn2 = run(false, BACKEND, withAgentSeed, "checkout");
+      assert.equal(fn2.agentId(), "", "就算种子自带 agent 身份也不采信（那不是真实终端）");
+    });
+
+    it("就绪后照常列真实终端、身份行跟随真实归属", () => {
+      const fn = run(true, BACKEND, PREVIEW, "t1");
+      assert.deepEqual(fn.open("claude").map((s) => s.id), ["t1"], "就绪时只列真实后端会话");
+      assert.equal(fn.agentId(), "claude", "身份取真实会话的归属");
+    });
+
+    it("源码钉死：栏体两个入口都不读预览种子表", () => {
+      const src = extractFn("terminalRailOpenSessions") + extractFn("terminalRailAgentId");
+      assert.ok(!src.includes("terminalSessionMap"), "栏体不再经 terminalSessionMap 回落预览种子");
+      const map = extractFn("terminalRailSessionMap");
+      assert.ok(map.includes("terminalBackendReady"), "先看就绪位：未就绪一律空");
+      assert.ok(!map.includes("terminalPreviewSessions"), "就绪位的假分支不回落到预览种子表");
+      assert.ok(extractFn("terminalRailAgentId").includes("terminalRailActiveSession"), "身份行同样只认后端真值");
+      assert.ok(extractFn("renderTerminalRailAgent").includes("terminalRailActiveSession"), "渲染身份行不直读 terminalSessionFor");
+      assert.ok(extractFn("renderTerminalRailHistory").includes("terminalRailActiveSession"), "历史段找活跃组同样不读种子");
+    });
+  });
+
+  describe("刷新落回终端视图与点击进入同一条补连链（缺陷 A）", () => {
+    const run = (hostState, { ready = false, view = "terminal", manualStop = false } = {}) => {
+      const log = { connected: 0, applied: [], switched: [] };
+      const fn = new Function("hostState", "ready", "view", "manualStop", "log", `
+        let terminalBackendReady = ready;
+        let terminalHostState = "unknown";
+        let terminalFirstConnectSettled = true;
+        let currentView = view;
+        let terminalHostOpInFlight = false;
+        function api(method, path) {
+          if (path === "/api/terminal/host/status") return Promise.resolve({ state: hostState, manualStop });
+          return Promise.resolve({});
+        }
+        function switchView(name) { currentView = name; log.switched.push(name); }
+        function applyTerminalHostState(state, opts) { terminalHostState = state; log.applied.push(state); }
+        function connectTerminalBackend() { log.connected += 1; }
+        function clearTerminalLocalSessions() {}
+        function renderTerminalStoppedState() { log.stopped = true; }
+        function renderTerminalUnavailableState() { log.unavailable = true; }
+        function autoStartTerminalHost() { log.autoStart = (log.autoStart || 0) + 1; }
+        function normalizeTerminalHostState(raw) {
+          if (raw === "running") return "running";
+          if (raw === "stopped" || raw === "stopped-manual") return "stopped";
+          if (raw === "exited" || raw === "crashed") return "exited";
+          return "unknown";
+        }
+        ${extractFn("dispatchTerminalEntry")}
+        ${extractFn("resumeTerminalBackendAfterEntry")}
+        return {
+          run: () => dispatchTerminalEntry().then(resumeTerminalBackendAfterEntry),
+          ready: () => terminalBackendReady,
+          view: () => currentView,
+        };
+      `)(hostState, ready, view, manualStop, log);
+      return { fn, log };
+    };
+
+    it("宿主在跑且本地未就绪：补连一次（与点击进入同一条分派）", async () => {
+      const { fn, log } = run("running");
+      await fn.run();
+      assert.deepEqual(log.applied, ["running"], "先按现取的真值落宿主状态");
+      assert.equal(log.connected, 1, "未就绪即补连——这正是刷新恢复缺的那一步");
+    });
+
+    it("宿主在跑且已就绪：不重复连接", async () => {
+      const { fn, log } = run("running", { ready: true });
+      await fn.run();
+      assert.equal(log.connected, 0, "已就绪不空连");
+    });
+
+    it("宿主已停（手动）：清缓存落停止态，不补连", async () => {
+      const { fn, log } = run("stopped", { manualStop: true });
+      await fn.run();
+      assert.equal(log.connected, 0, "停着不补连");
+      assert.ok(!log.autoStart, "手动关停不擅自拉起");
+      assert.equal(log.stopped, true, "落「已停止」页");
+    });
+
+    it("宿主异常退出：拉起一次", async () => {
+      const { fn, log } = run("exited");
+      await fn.run();
+      assert.equal(log.autoStart, 1, "非手动原因的未运行自动拉起");
+      assert.equal(log.connected, 0, "拉起期间不补连");
+    });
+
+    it("宿主状态不可知：落不可用空态", async () => {
+      const { fn, log } = run("unknown");
+      await fn.run();
+      assert.equal(log.unavailable, true, "读不到就落既有不可用空态");
+    });
+
+    it("源码钉死：restoreView 的终端分支走同一条分派，不再裸 switchView", () => {
+      const restore = extractFn("restoreView");
+      const at = restore.indexOf("if (terminalOpen)");
+      assert.ok(at > 0, "终端恢复分支可取样");
+      const branch = restore.slice(at, restore.indexOf("} else if (settingsOpen)", at));
+      assert.ok(branch.includes("dispatchTerminalEntry()"), "刷新落回终端视图与点击进入共用同一条宿主状态分派");
+      const open = extractFn("openTerminalPreview");
+      assert.ok(open.includes("dispatchTerminalEntry()"), "点击进入同样走这条分派（单一实现）");
+      assert.ok(!open.includes('api("GET", "/api/terminal/host/status")'), "现取宿主状态已收进分派函数，点击路径不另写一份");
+    });
+  });
+
+  describe("栏体渲染不得把连接成功翻成失败（缺陷 A 的结构性根因）", () => {
+    const runConnect = (railThrows) => {
+      const log = { ready: false, warns: [], unavailable: 0, rendered: 0 };
+      const fn = new Function("railThrows", "log", `
+        let terminalBackendReady = false;
+        let terminalFirstConnectSettled = false;
+        let terminalHostState = "running";
+        function $(id) { return { disabled: false }; }
+        function fetchTerminalSessions() { terminalBackendReady = true; return Promise.resolve(); }
+        function renderTerminalPreviewSession() { log.rendered += 1; }
+        function pollTerminalSessions() {}
+        function syncTerminalActivityStream() {}
+        function reportTerminalThemeToBackend() {}
+        function renderTerminalStoppedState() {}
+        function renderTerminalUnavailableState() { log.unavailable += 1; }
+        function renderTerminalRail() { if (railThrows) throw new Error("rail boom"); }
+        const console = { warn: (...a) => log.warns.push(a.join(" ")) };
+        ${extractFn("syncTerminalAddBtn")}
+        ${extractFn("connectTerminalBackend")}
+        return { connect: connectTerminalBackend, ready: () => terminalBackendReady, settled: () => terminalFirstConnectSettled };
+      `)(railThrows, log);
+      return { fn, log };
+    };
+
+    it("栏体渲染抛错：连接仍算成功、就绪位仍落定，不落「终端服务未运行」", async () => {
+      const { fn, log } = runConnect(true);
+      await fn.connect();
+      assert.equal(fn.ready(), true, "连接本身成功——栏体是旁挂渲染，不许把成功翻成失败");
+      assert.equal(fn.settled(), true, "首连定性位照常落定");
+      assert.equal(log.unavailable, 0, "不落降级空态");
+      assert.equal(log.rendered, 1, "会话渲染照常发生");
+    });
+
+    it("栏体渲染正常：行为不变（成功链三件套各一拍）", async () => {
+      const { fn, log } = runConnect(false);
+      await fn.connect();
+      assert.equal(fn.ready(), true, "就绪");
+      assert.equal(log.rendered, 1, "渲染一次");
+      assert.equal(log.warns.length, 0, "无告警");
+    });
+
+    it("源码钉死：栏体渲染在连接链里是旁挂调用，异常不外溢", () => {
+      const sync = extractFn("syncTerminalAddBtn");
+      assert.ok(sync.includes("try"), "栏体渲染包在 try 里——它读 DOM/会话表，任何异常都不该决定连接成败");
+      const connect = extractFn("connectTerminalBackend");
+      assert.ok(!/^\s*renderTerminalRail\(\);$/m.test(connect.split(".then(")[1] || ""),
+        "连接成功链里不裸调栏体渲染");
+    });
+  });
+
+  describe("进终端页的补连：单飞去重（复审必修 1）", () => {
+    // 基线遗留行「进页未就绪先补连」与共享分派叠用：running 时同一进页会连两次。
+    // connectTerminalBackend 没有 in-flight 去重，两次成功链各跑一次
+    // renderTerminalPreviewSession/connectTerminalStream（xterm 重建两遍），后发失败
+    // 还会把就绪位翻回 false——正是要消除的停态。这里按行为断言，不看字符串。
+    // runOpen 的 known 形参 = 进页那一刻「上一帧宿主态」（1s 轮询维护的那个值），
+    // 它决定 openTerminalPreview 的预连守卫是否放行。默认 "unknown"（面板初载的
+    // 真实形态）；测「双连」那条必须传 "running"——否则预连从不触发，唯一一发
+    // 来自分派路径，断言「恰 1 发」就是同义反复，去掉单飞也照样绿（判别力为零）。
+    const runOpen = (hostState, { ready = false, known = "unknown" } = {}) => {
+      const log = { fetches: 0, renders: 0, applied: [], switched: [], stopped: false, autoStart: 0, pending: [] };
+      const sandbox = new Function("hostState", "ready", "known", "log", `
+        let terminalBackendReady = ready;
+        let terminalFirstConnectSettled = false;
+        let terminalHostState = known;
+        let currentView = "board";
+        let terminalReturnView = "board";
+        let terminalReturnScrollTop = 0;
+        const window = { scrollY: 0 };
+        const document = { documentElement: { scrollTop: 0 } };
+        function $(id) { return null; }
+        function api(method, path) {
+          if (path === "/api/terminal/host/status") return Promise.resolve({ state: hostState, manualStop: false });
+          return Promise.resolve({});
+        }
+        function switchView(name) { currentView = name; log.switched.push(name); }
+        function applyTerminalHostState(state) { terminalHostState = state; log.applied.push(state); }
+        function normalizeTerminalHostState(raw) {
+          if (raw === "running") return "running";
+          if (raw === "stopped" || raw === "stopped-manual") return "stopped";
+          if (raw === "exited" || raw === "crashed") return "exited";
+          return "unknown";
+        }
+        function clearTerminalLocalSessions() {}
+        function renderTerminalStoppedState() { log.stopped = true; }
+        function renderTerminalUnavailableState() { log.unavailable = true; }
+        function autoStartTerminalHost() { log.autoStart += 1; }
+        // 连接请求挂起：真实网络有往返时延，双连正是发生在这段窗口里
+        // （进页先补连 → 分派拿到宿主状态时第一发还没回来 → 又补一次）。
+        function fetchTerminalSessions() {
+          log.fetches += 1;
+          return new Promise((resolve) => {
+            log.pending.push(() => { terminalBackendReady = true; resolve(); });
+          });
+        }
+        function syncTerminalAddBtn() {}
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        function pollTerminalSessions() {}
+        function syncTerminalActivityStream() {}
+        function reportTerminalThemeToBackend() {}
+        ${extractFn("connectTerminalBackend")}
+        ${extractFn("dispatchTerminalEntry")}
+        ${extractFn("resumeTerminalBackendAfterEntry")}
+        ${extractFn("openTerminalPreview")}
+        return { open: openTerminalPreview, ready: () => terminalBackendReady };
+      `)(hostState, ready, known, log);
+      return { sandbox, log };
+    };
+
+    it("running + 未就绪：真正发出的连接请求恰为 1（不双连、xterm 不重建两遍）", async () => {
+      // known:"running" 是关键——预连守卫（terminalHostState === "running"）必须放行，
+      // 否则这条测不到双连（同义反复）。断言预连确实发出：挂起队列里恰有一发在飞。
+      const { sandbox, log } = runOpen("running", { known: "running" });
+      await sandbox.open();                       // 进页：先补连（挂起），再分派
+      assert.equal(log.pending.length, 1, "预连确实发出（一发生效的请求在飞）");
+      assert.equal(log.fetches, 1, "分派那一步不该再发第二发（第一发还在飞）");
+      for (const settle of log.pending) settle(); // 连接返回
+      await flush();
+      await flush();
+      assert.equal(log.fetches, 1, "整次进页只发一次连接请求（单飞去重）");
+      assert.equal(log.renders, 1, "成功链只跑一次会话渲染（xterm 不会重建两遍）");
+      assert.equal(sandbox.ready(), true, "就绪位落定");
+    });
+
+    it("running + 已就绪：一次都不连", async () => {
+      const { sandbox, log } = runOpen("running", { ready: true });
+      await sandbox.open();
+      assert.equal(log.fetches, 0, "已就绪不空连");
+    });
+
+    it("stopped / exited：不发明知必败的拉取，改走拉起", async () => {
+      for (const state of ["stopped", "exited"]) {
+        const { sandbox, log } = runOpen(state);
+        await sandbox.open();
+        assert.equal(log.fetches, 0, `${state} 时不发注定失败的连接请求`);
+        assert.equal(log.autoStart, 1, `${state} 时拉起宿主`);
+      }
+    });
+
+    it("unknown：不连，落不可用空态", async () => {
+      const { sandbox, log } = runOpen("unknown");
+      await sandbox.open();
+      assert.equal(log.fetches, 0, "状态不可知时不连");
+      assert.equal(log.unavailable, true, "落既有不可用空态");
+    });
+  });
+
+  describe("connectTerminalBackend 单飞（复审必修 1 的根因修法）", () => {
+    const runConnect = () => {
+      const log = { fetches: 0, renders: 0, settled: 0 };
+      const sandbox = new Function("log", `
+        let terminalBackendReady = false;
+        let terminalFirstConnectSettled = false;
+        let terminalHostState = "running";
+        function fetchTerminalSessions() {
+          log.fetches += 1;
+          return log.failNext
+            ? Promise.reject(new Error("boom"))
+            : Promise.resolve().then(() => { terminalBackendReady = true; });
+        }
+        function syncTerminalAddBtn() {}
+        function renderTerminalPreviewSession() { log.renders += 1; }
+        function pollTerminalSessions() {}
+        function syncTerminalActivityStream() {}
+        function reportTerminalThemeToBackend() {}
+        function renderTerminalStoppedState() {}
+        function renderTerminalUnavailableState() { log.unavailable = true; }
+        ${extractFn("connectTerminalBackend")}
+        return { connect: connectTerminalBackend, ready: () => terminalBackendReady };
+      `)(log);
+      return { sandbox, log };
+    };
+
+    it("进行中并发调用：只发一次请求，两处拿到同一条 Promise", async () => {
+      const { sandbox, log } = runConnect();
+      const a = sandbox.connect();
+      const b = sandbox.connect();
+      assert.equal(a, b, "进行中返回同一条 Promise（单飞）");
+      await Promise.all([a, b]);
+      assert.equal(log.fetches, 1, "只发一次连接请求");
+      assert.equal(log.renders, 1, "成功链只跑一次");
+    });
+
+    it("失败后缓存必须清掉：下一次调用能重新发起（不是永久卡死）", async () => {
+      const { sandbox, log } = runConnect();
+      log.failNext = true;
+      await sandbox.connect();
+      assert.equal(log.fetches, 1, "第一次失败");
+      log.failNext = false;
+      await sandbox.connect();
+      assert.equal(log.fetches, 2, "失败后可以重试（缓存已清）");
+      assert.equal(sandbox.ready(), true, "重试成功即就绪");
+    });
+
+    it("成功后缓存也要清掉：稳态下后续调用照常发起", async () => {
+      const { sandbox, log } = runConnect();
+      await sandbox.connect();
+      await sandbox.connect();
+      assert.equal(log.fetches, 2, "成功后不缓存结果（下次仍可重连）");
+    });
+  });
+
   describe("渲染挂点与刷新纪律（源码钉死）", () => {
     it("历史会话只在进终端视图拉一次：switchView 挂 enterTerminalRail，轮询不碰会话列表", () => {
       const sw = extractFn("switchView");
@@ -667,7 +1020,10 @@ describe("终端视图左栏换血（M4）", () => {
           const terminalRailHistory = history;
           const activeTerminalPreviewId = "t1";
           function $(id) { return id === "railTermHistoryList" ? list : null; }
-          function terminalSessionFor(id) { return id === "t1" ? activeSession : null; }
+          let terminalBackendReady = true;
+          const terminalBackendSessions = { t1: activeSession };
+          ${extractFn("terminalRailSessionMap")}
+          ${extractFn("terminalRailActiveSession")}
           function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
           function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
           function sessRelTime() { return "刚刚"; }
@@ -742,7 +1098,10 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
         const activeTerminalPreviewId = "t1";
         function $(id) { return id === "railTermHistoryList" ? list : null; }
-        function terminalSessionFor(id) { return id === "t1" ? activeSession : null; }
+        let terminalBackendReady = true;
+        const terminalBackendSessions = { t1: activeSession };
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailActiveSession")}
         function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
         function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
         function sessRelTime() { return "刚刚"; }
