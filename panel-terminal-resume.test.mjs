@@ -263,4 +263,30 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
     );
     assert.ok(panelMjs.includes("resume-unsupported"), "不支持续接的端点有独立错误码");
   });
+
+  // M7 S5：续接创建的终端要把「替哪条会话续接的」记进宿主会话记录（前端历史会话
+  // 点击先查它做去重聚焦）。面板负责把校验过的 resume 身份随创建转发——只递
+  // endpoint + 会话 id 两个非密字段。
+  it("resume 身份随创建转发给 terminal-host：只递 endpoint + id，不进 file/命令原文", async () => {
+    await withFakeAgents(async (cwd) => {
+      const root = mkTestDir("anyswitch-resume-forward-root-");
+      const { router, calls } = resumeRouter({ root });
+      const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
+        agentId: "kimi",
+        cwd,
+        resume: { endpoint: "kimi", id: SESSION_ID, file: PI_FILE },
+      });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 201);
+      assert.equal(calls.length, 1, "走注入的 createTerminalSession");
+      assert.deepEqual(calls[0].body.resume, { endpoint: "kimi", id: SESSION_ID },
+        "转发 resume:{endpoint,id}（file 不转发——去重不需要路径）");
+      // 无 resume 的普通创建不递这个字段（M3 契约逐位不变）
+      const plain = resumeRouter({ root: mkTestDir("anyswitch-resume-plain-root-") });
+      const plainCall = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", { agentId: "kimi", cwd });
+      await plain.router.handle(plainCall.req, plainCall.res);
+      assert.equal(plainCall.res.statusCode, 201);
+      assert.ok(!("resume" in plain.calls[0].body), "普通创建不递 resume");
+    });
+  });
 });

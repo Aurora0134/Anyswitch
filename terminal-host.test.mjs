@@ -2134,3 +2134,92 @@ test("建连遇到镜像积压时不同步排空：回放分轮到达且内容�
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// M7 S5：续接创建的终端把「替哪条会话续接的」记进会话记录，随列表下发——
+// 面板历史会话点击先查它做去重聚焦（同 endpoint＋同会话 id 的终端已开着就聚焦，
+// 不重复建）。terminal-host 存活期内有效，页面刷新不丢（随状态文件持久化）。
+test("续接身份落会话记录：创建带 resume、快照与落盘都带，重启原样读回", async () => {
+  const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-test-`);
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => new FakePty() },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "Kimi Code", cwd: root, shell: "cmd", agentId: "kimi",
+        resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\x\\.kimi\\sessions\\s-1.jsonl" },
+      }),
+    }).then((response) => response.json());
+    // 只记 endpoint + 会话 id 两个非密字段（file 是路径，去重不需要，不进记录）
+    assert.deepEqual(created.resume, { endpoint: "kimi", id: "s-1" }, "创建响应带续接身份");
+
+    const listed = await fetch(url("/terminal/sessions"), { headers: headers(host) }).then((response) => response.json());
+    assert.deepEqual(listed.sessions[0].resume, { endpoint: "kimi", id: "s-1" }, "列表路由随会话下发");
+
+    // 落盘：状态文件里带着（宿主重启/页面刷新后面板重拉列表还能认）
+    await host.close();
+    const persisted = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
+    assert.deepEqual(persisted.sessions[0].resume, { endpoint: "kimi", id: "s-1" }, "状态文件带续接身份");
+    const restored = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} } });
+    const restoredPort = await listen(restored);
+    const relisted = await fetch(`http://127.0.0.1:${restoredPort}/terminal/sessions`, { headers: headers(restored) }).then((response) => response.json());
+    assert.deepEqual(relisted.sessions[0].resume, { endpoint: "kimi", id: "s-1" }, "重启原样读回");
+    await restored.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("无 resume 的普通创建不新增字段；坏 resume 一律 400 不建会话", async () => {
+  const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-test-`);
+  const host = createTerminalHost({
+    root,
+    port: 0,
+    ptyModule: { spawn: () => new FakePty() },
+    logger: { warn() {} },
+  });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const plain = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "新终端", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    assert.ok(!("resume" in plain), "普通创建的响应不新增 resume 字段（M3 契约逐位不变）");
+
+    // resume:null/undefined 按 M3 契约＝无续接（普通创建），不是非法
+    for (const extra of [{ resume: null }, { resume: undefined }, {}]) {
+      const none = await fetch(url("/terminal/sessions"), {
+        method: "POST",
+        headers: headers(host),
+        body: JSON.stringify({ label: "y", cwd: root, ...extra }),
+      });
+      assert.equal(none.status, 201, `resume=${JSON.stringify(extra)} 按普通创建`);
+    }
+
+    for (const bad of ["kimi", 42, [], {}, { endpoint: "kimi" }, { id: "s-1" }, { endpoint: "", id: "s-1" }, { endpoint: "kimi", id: "  " }, { endpoint: "kimi", id: 7 }]) {
+      const response = await fetch(url("/terminal/sessions"), {
+        method: "POST",
+        headers: headers(host),
+        body: JSON.stringify({ label: "x", cwd: root, resume: bad }),
+      });
+      assert.equal(response.status, 400, `resume=${JSON.stringify(bad)} 判非法`);
+      assert.equal((await response.json()).error, "invalid_resume", "回机器可判的错码");
+    }
+    const listed = await fetch(url("/terminal/sessions"), { headers: headers(host) }).then((response) => response.json());
+    // 普通创建 1 条 + resume 缺省三形（null/undefined/不带）3 条；坏 resume 一条不进
+    assert.equal(listed.sessions.length, 4, "坏 resume 一条会话都不建（只留普通创建那几条）");
+    assert.ok(listed.sessions.every((session) => !("resume" in session)), "普通创建的会话记录也不带 resume 键");
+    await host.close(); // 不收服务器句柄会挂住事件循环，node --test 永不退出
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

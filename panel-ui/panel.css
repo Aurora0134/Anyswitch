@@ -363,7 +363,9 @@
   }
   .rail-tab:hover { background: var(--surface-hover); color: var(--text); }
   .rail-tab.active { background: var(--accent-soft); color: var(--accent); }
-  .rail-foot { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-shrink: 0; }
+  /* 栏底行：亮暗 + 设置/返回。flex:none（S4 显式钉死：钉底靠 flex 不靠定位，
+     两个态共用这一份——设置态与终端态谁都不许把它压掉）。 */
+  .rail-foot { margin-top: 12px; display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: none; }
   .rail-foot .rail-settings { padding: 9px 10px; }
 
   :root[data-ui-version="v2"] #mainHeadInner .view-tabs,
@@ -560,7 +562,7 @@
   :root[data-ui-version="v2"] .settings-subtabs { display: none; }
   :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
 
-  /* ── 终端会话栏（M4）：终端视图下的左栏换血内容 ─────────────────────────
+  /* ── 终端会话栏（M4 + M7）：终端视图下的左栏换血内容 ─────────────────────────
      进终端视图（body.terminal-mode）时，栏内主 tab 组整组换成这份随 agent 的会话
      栏（与设置目录同一换血形制：换内容而非追加），栏底齿轮换「返回」——点返回 =
      回进入终端前的视图（terminalReturnView，与设置态那颗钮同一槽位、两态互斥）。
@@ -573,29 +575,20 @@
     /* 换血时整栏接管：不吃 .rail-dir 的贴底 margin-top:auto（id 选择器提级，压过
        后文那条基座规则），改为从栏顶往下铺满，历史会话段自己滚。
        min-height 用 auto（默认的自动最小尺寸）而不是 0：栏体是一列 flex，写成 0 会
-       允许「身份行 + 新建 + 打开的终端」这些定高内容被压到内容高度以下——行不缩
-       （min-height:30px），容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口
-       实测：容器 18px 装两个 30px 行，段头落进行高亮里）。保持 auto 后，空间不够时
-       先压历史会话段（它是唯一 flex:1 1 auto 且 min-height:0 的那段），仍不够则由
-       栏体自己滚（.rail 本来就有 overflow-y:auto），任何内容都不重叠。 */
-    margin-top: 12px; flex: 1 1 auto; gap: 0;
+       允许「新建终端」这些定高内容被压到内容高度以下——行不缩（min-height:30px），
+       容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口实测：容器 18px 装两个
+       30px 行，段头落进行高亮里）。保持 auto 后，空间不够时先压历史会话段（它是唯一
+       flex:1 1 auto 且 min-height:0 的那段），仍不够则由栏体自己滚（.rail 本来就有
+       overflow-y:auto），任何内容都不重叠。
+       position:relative：组头 ⋯ 菜单与 hover 卡挂在栏体下绝对定位（JS 装配），
+       它们是栏内浮层，不吃 portal。 */
+    margin-top: 12px; flex: 1 1 auto; gap: 0; position: relative;
   }
   /* 栏体分段的 flex 纪律（矮窗口不重叠的前提，见 #railTerminalDir 注释）：
-     身份行、新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
-     只有历史会话段吃剩余空间（flex:1 1 auto + min-height:0），不够时它先缩、再交给
+     新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
+     只有中段滚动层吃剩余空间（flex:1 1 auto + min-height:0），不够时它先缩、再交给
      栏体滚动。默认的 flex:0 1 auto 会让这些定高块参与收缩，而它们的行有 min-height、
      容器没有，行就会溢出容器画到下一段上。 */
-  .rail-term-agent { display: flex; align-items: center; gap: 10px; padding: 0 6px 12px; min-width: 0; flex: none; }
-  .rail-term-agent-avatar {
-    flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
-    border-radius: var(--radius-sm); color: var(--text-2); line-height: 0;
-  }
-  /* 克隆头像归一化：看板 .agent-avatar 是 32px 方砖，缩到身份行的 24px 槽位 */
-  .rail-term-agent-avatar .agent-avatar { flex: none; transform: scale(0.75); transform-origin: center; }
-  .rail-term-agent-name {
-    min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
   /* 新建终端：与页签栏「+」同一动词、同一就绪闸（禁用位由 JS 同拍刷） */
   .rail-term-new {
     appearance: none; border: 1px solid var(--border); background: var(--surface-sunken); color: var(--text);
@@ -606,7 +599,7 @@
   .rail-term-new:hover { background: var(--surface-hover); }
   .rail-term-new:disabled { opacity: 0.5; cursor: default; }
   .rail-term-section { display: flex; flex-direction: column; flex: none; margin-bottom: 10px; }
-  .rail-term-section-history { position: relative; flex: 1 1 auto; min-height: 0; margin-bottom: 0; }
+  .rail-term-section-history { margin-bottom: 0; }
   .rail-term-section-head { display: flex; align-items: center; gap: 6px; padding: 0 6px 6px; flex: none; }
   .rail-term-section-title { flex: 1; min-width: 0; font-size: 12px; font-weight: 600; color: var(--text-3); }
   .rail-term-icon-btn {
@@ -616,15 +609,28 @@
   }
   .rail-term-icon-btn:hover { background: var(--surface-hover); color: var(--text); }
   .rail-term-icon-btn:disabled { opacity: 0.5; cursor: default; }
-  /* 两个列表容器都是内容高度的定高块（不参与收缩）；历史列表在滚动容器内，溢出由
-     滚动容器裁切，不越段。 */
+  /* 两个列表容器都是内容高度的定高块（不参与收缩）；溢出由中段滚动层裁切，不越段。 */
   .rail-term-open, .rail-term-history { display: flex; flex-direction: column; gap: 2px; flex: none; }
-  /* 底距 = 遮罩高度：末行底边正好落在渐隐的上沿，整行完整可读（小于遮罩高度会让
-     末行压在渐变里、越靠底越淡）。 */
-  .rail-term-history-scroll { position: relative; display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 24px; }
-  .rail-term-history-scroll::-webkit-scrollbar { width: 5px; }
-  .rail-term-history-scroll::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 999px; }
-  .rail-term-history-scroll::-webkit-scrollbar-track { background: transparent; }
+  /* ── 中段唯一滚动层（M7 S4，dsh §3.1/§3.3） ──
+     两个段都在里面滚（dsh 的 .list 同口径）：flex:1 + min-height:0 吃剩余空间，
+     空间不够时它先缩——定高块（新建钮/段头/行）都不参与收缩，「行压段头」的旧缺陷
+     （e160790 修过的）才不会复现。scrollbar-gutter:stable 预留滚动条槽位，有无
+     滚动条布局都不跳。padding-bottom:16px 列表底部留白（dsh 同值）。 */
+  .rail-term-scroll {
+    position: relative; display: flex; flex-direction: column;
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    scrollbar-gutter: stable; padding-bottom: 16px;
+  }
+  /* 滚动条（dsh §3.5）：5px、圆角 thumb、track 透明。指针感知的自动隐退挂在 JS
+     （pointerenter/leave + 2s 滞留）：thumb 颜色走变量，隐退＝变量替换成 transparent
+     ——瞬时消失，无淡出（写了 transition 就错）。标准属性一并写（Firefox 不认
+     ::-webkit-scrollbar，退化到 scrollbar-width/color 同款变量）。 */
+  .rail-term-scroll { scrollbar-width: thin; scrollbar-color: var(--rail-term-scrollbar-thumb, var(--border-strong)) transparent; }
+  .rail-term-scroll::-webkit-scrollbar { width: 5px; }
+  .rail-term-scroll::-webkit-scrollbar-thumb { background: var(--rail-term-scrollbar-thumb, var(--border-strong)); border-radius: 999px; }
+  .rail-term-scroll::-webkit-scrollbar-track { background: transparent; }
+  /* 离开列 2s 后的隐退态：变量一换即透明（无过渡） */
+  #railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }
   /* 行：hover/选中 0ms 硬切——规则里不写 transition（写了就错，dsh 实测同款） */
   .rail-term-row {
     appearance: none; border: 0; background: transparent; color: var(--text-2);
@@ -637,27 +643,100 @@
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }
   /* 关闭叉：只在有动作的「打开的终端」行 hover 时出现，纯 display 硬切（无淡入、无
-     位移、无宽度过渡）。历史会话行没有动作，时间始终可见（dsh 只在 rowActions 出现时
-     才把时间让位）。 */
+     位移、无宽度过渡）。历史会话行的动作是归档（M7 S1），同样只在该行 hover 时
+     出现——时间同槽位让位（dsh 只在 rowActions 出现时才把时间让位，同款取舍）。 */
   .rail-term-row-close { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
   .rail-term-row-open:hover .rail-term-row-close { display: inline-flex; }
-  /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡 */
+  .rail-term-row-archive { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
+  .rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }
+  .rail-term-row-history:hover .rail-term-row-time { display: none; }
+  /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡。
+     M7 S3 起组头是「容器」：里面整行是可点的折叠开关（toggle 钮），右侧 hover
+     才出动作钮（⋯ 菜单，M8 可能扩项）。容器本身不接点击——折叠走 toggle 钮，
+     动作钮是兄弟 span，互不吃对方的点击。 */
   .rail-term-group { display: flex; flex-direction: column; gap: 2px; }
   .rail-term-group + .rail-term-group { margin-top: 6px; }
   .rail-term-group-head {
-    appearance: none; border: 0; background: transparent; color: var(--text-3);
-    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
-    display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px;
+    display: flex; align-items: center; gap: 4px; min-height: 26px;
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
-  .rail-term-group-head:hover { background: var(--surface-hover); color: var(--text-2); }
+  .rail-term-group-toggle {
+    appearance: none; border: 0; background: transparent; color: var(--text-3);
+    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0;
+    min-height: 26px; padding: 0 8px; border-radius: var(--radius-md);
+  }
+  .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
+  /* 图标同槽互换（M7 S3，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），hover
+     时同槽位换成箭头——两个图标同在定宽槽里 display 硬切，不产生宽度跳动；槽宽
+     14px 与两枚文件夹图标同宽。箭头展开旋转 .15s（栏内唯一行内过渡）。互换规则
+     只作用于组头（.rail-term-group-head 之内的箭头默认隐）——「已移除的分组」
+     标题那枚箭头是常驻指示，不吃这套互换。 */
+  .rail-term-group-slot { flex: none; width: 14px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   .rail-term-group-arrow {
     flex: none; display: inline-flex; align-items: center; line-height: 0;
     transition: transform .15s cubic-bezier(.4,0,.2,1);
   }
   .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
   .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
+  .rail-term-group-head .rail-term-group-arrow { display: none; }
+  .rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }
+  .rail-term-group-head:hover .rail-term-group-icon { display: none; }
   .rail-term-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* 组头动作钮（⋯ / ⊕）：hover 才出现，0ms 硬切，与行内关闭叉/归档钮同形制 */
+  .rail-term-group-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+  .rail-term-group-btn {
+    flex: none; display: none; padding: 2px; color: var(--text-3); cursor: pointer;
+    border-radius: var(--radius-sm); line-height: 0;
+  }
+  .rail-term-group-head:hover .rail-term-group-btn { display: inline-flex; }
+  .rail-term-group-btn:hover { background: var(--surface-hover); color: var(--text); }
+  /* ── 组头 ⋯ 菜单（M7 S2/S3） ──
+     栏内单例（JS 保证同一时刻只开一个），挂在栏体下绝对定位。容器可扩：M8 加项
+     只加 DOM。现仅「移除分组」一项（红色 danger）。 */
+  .rail-term-menu {
+    position: absolute; z-index: 5; min-width: 120px; padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md); box-shadow: var(--shadow-lg); font-size: 12.5px;
+  }
+  .rail-term-menu-item {
+    appearance: none; border: 0; background: transparent; color: var(--text-2);
+    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+    min-height: 28px; padding: 0 8px; border-radius: var(--radius-sm);
+  }
+  .rail-term-menu-item:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-term-menu-item.is-danger { color: var(--danger); }
+  .rail-term-menu-item.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
+  /* ── 组头 hover 卡（M7 S3，dsh B4） ──
+     800ms 延迟后出现；三行＝目录短名／完整路径／「N 个会话」；整卡可点（复制完整
+     路径 + 「已复制」）。挂 body 下 position:fixed（dsh 同款 portal——栏体
+     overflow-x:hidden 会切掉贴右缘展开的卡），z-index 与右键菜单同档。 */
+  .rail-term-hover-card {
+    position: fixed; z-index: 1200; width: 220px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 2px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
+  }
+  .rail-term-hover-name { font-size: 13px; font-weight: 600; color: var(--text); }
+  .rail-term-hover-path { font-size: 12px; color: var(--text-3); word-break: break-all; }
+  .rail-term-hover-count { font-size: 12px; color: var(--text-3); }
+  /* 「已移除的分组（N）」折叠区：段尾，默认收起；行给目录短名 + 行内「恢复」 */
+  .rail-term-removed { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+  .rail-term-removed.is-open .rail-term-group-arrow { transform: rotate(90deg); }
+  .rail-term-removed-head {
+    appearance: none; border: 0; background: transparent; color: var(--text-3);
+    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px;
+    border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
+  }
+  .rail-term-removed-head:hover { background: var(--surface-hover); color: var(--text-2); }
+  .rail-term-removed-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .rail-term-removed-row { color: var(--text-3); }
+  .rail-term-row-restore {
+    flex: none; display: none; padding: 0 2px; color: var(--accent); cursor: pointer; font-size: 12.5px;
+  }
+  .rail-term-removed-row:hover .rail-term-row-restore { display: inline-flex; }
   /* 水位线按钮：hover 只换文字色、背景不动，无过渡 */
   .rail-term-more {
     appearance: none; border: 0; background: transparent; color: var(--text-3);
@@ -674,10 +753,11 @@
   :root[data-ui-version="v2"][data-style="saas"] #v2Rail,
   :root[data-ui-version="v2"][data-style="sepia"] #v2Rail { --rail-bg: var(--bg-page); }
   /* 底部 24px 渐隐：静态遮罩，不吃点击、无过渡。终点取 --rail-bg（= 栏底色本身），
-     换皮肤不会变成一条更亮的实色带。挂在段上（不在滚动容器里），所以它不随内容滚动
-     ——与 dsh 的 .fade 同一手法。 */
+     换皮肤不会变成一条更亮的实色带。S4 起挂在栏体上（不在滚动层里）——它不随内容
+     滚动，贴的是滚动层底边（dsh 的 .fade 同一手法：挂 position:relative 的父级）。
+     right 让出滚动条槽位（5px 滚条 + 1px 余量）：遮罩不该盖到 thumb 上。 */
   .rail-term-fade {
-    position: absolute; bottom: 0; left: 0; right: 0; height: 24px;
+    position: absolute; bottom: 0; left: 0; right: 6px; height: 24px;
     background: linear-gradient(to bottom, transparent, var(--rail-bg, var(--surface)));
     pointer-events: none;
   }
@@ -749,18 +829,17 @@
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
   }
 
-  /* 终端会话栏的折叠态（72px 图标栏）：只留身份行头像与新建图标钮，两个列表段整段
-     不出（dsh 折叠同款取舍）。两个来处各挂一条，与上面收窄两态同一套条件：
-     窄栏自动档用 :not([data-rail="expanded"]) 让开手动展开，宽档只有 collapsed 才是
-     图标栏。规则放在收窄两态块之后，与既有栏态块同序。 */
+  /* 终端会话栏的折叠态（72px 图标栏）：只留新建图标钮，两个列表段与底部渐隐整段
+     不出（dsh 折叠同款取舍——遮罩在空列表上是一条无意义的渐变带）。两个来处各挂
+     一条，与上面收窄两态同一套条件：窄栏自动档用 :not([data-rail="expanded"]) 让开
+     手动展开，宽档只有 collapsed 才是图标栏。规则放在收窄两态块之后，与既有栏态块
+     同序。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-agent-name, .rail-term-new-label, .rail-term-section) { display: none; }
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-agent { justify-content: center; padding: 0 0 12px; }
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section, .rail-term-fade) { display: none; }
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-agent-name, .rail-term-new-label, .rail-term-section) { display: none; }
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-agent { justify-content: center; padding: 0 0 12px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section, .rail-term-fade) { display: none; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
 

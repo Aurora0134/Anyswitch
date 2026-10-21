@@ -45,16 +45,30 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rail.indexOf('class="rail-tabs"') < rail.indexOf('id="railTerminalDir"')
         && rail.indexOf('id="railTerminalDir"') < rail.indexOf('class="rail-foot"'),
         "位置：主 tab 组之后、栏底行之前（换血时整组顶上主 tab 组）");
-      for (const id of ["railTermAgentAvatar", "railTermAgentName", "railTermNewBtn",
+      for (const id of ["railTermNewBtn",
         "railTermOpenList", "railTermHistoryRefresh", "railTermHistoryList"]) {
         assert.ok(dir[1].includes(`id="${id}"`), `骨架节点 ${id} 就位`);
       }
-      // 身份行在上、新建其次、两个段自上而下（用户拍板的栏体顺序）
+      // 顶区只剩「新建终端」、两个段自上而下（身份行已按用户要求拆除，见下条）
       const body = dir[1];
-      assert.ok(body.indexOf('id="railTermAgentAvatar"') < body.indexOf('id="railTermNewBtn"')
-        && body.indexOf('id="railTermNewBtn"') < body.indexOf("打开的终端")
+      assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf("打开的终端")
         && body.indexOf("打开的终端") < body.indexOf("历史会话"),
-        "栏体自上而下：身份行 → 新建终端 → 打开的终端 → 历史会话");
+        "栏体自上而下：新建终端 → 打开的终端 → 历史会话");
+    });
+
+    it("身份行整块拆除：头像槽、名称、通用字形与相关 id 一律不在册", () => {
+      // 用户 2026-10-21 拍板：agent 头像＋名称与 anys 产品图标贴在一起抢视野，顶区
+      // 只留「新建终端」。栏体仍跟随聚焦终端的 agent 取两段数据，只是不再显示身份。
+      const rail = railHtml();
+      for (const id of ["railTermAgentAvatar", "railTermAgentName"]) {
+        assert.ok(!rail.includes(`id="${id}"`), `身份行节点 ${id} 已清净`);
+      }
+      assert.ok(!panelHtml.includes("rail-term-agent-glyph"), "通用终端字形槽一并清净");
+      assert.ok(!panelCss.includes(".rail-term-agent"), "身份行样式一并清净");
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      for (const symbol of ["renderTerminalRailAgent", "terminalRailAgentGlyph", "terminalRailAgentLabel"]) {
+        assert.ok(!railBlock.includes(symbol), `身份行函数 ${symbol} 已清净`);
+      }
     });
 
     it("文案只用已批准的清单：新建终端 / 打开的终端 / 历史会话 / 刷新会话列表", () => {
@@ -71,17 +85,9 @@ describe("终端视图左栏换血（M4）", () => {
       // 栏内可见文案只许是批准清单里的那几句：把 HTML 文本节点全取出来逐个比对，
       // 新造词一进来就红（不是只看某一条正则不命中）。
       const textNodes = [...body.matchAll(/>([^<>]+)</g)].map((m) => m[1].trim()).filter(Boolean);
-      const APPROVED = new Set(["终端会话", "本地终端", "新建终端", "打开的终端", "历史会话", "刷新会话列表"]);
+      const APPROVED = new Set(["终端会话", "新建终端", "打开的终端", "历史会话", "刷新会话列表"]);
       assert.deepEqual(textNodes.filter((t) => !APPROVED.has(t)), [], "栏体静态文案全部在批准清单内");
       assert.ok(textNodes.includes("新建终端"), "新建按钮的可见文案在清单里");
-    });
-
-    it("身份行头像槽留通用终端字形兜底，品牌头像由看板克隆后填", () => {
-      const rail = railHtml();
-      const slot = rail.match(/<span class="rail-term-agent-avatar" id="railTermAgentAvatar"[^>]*>([\s\S]*?)<\/span>\s*<span class="rail-term-agent-name"/);
-      assert.ok(slot, "头像槽在册");
-      assert.ok(slot[1].includes("rail-term-agent-glyph"), "槽位默认内容是通用终端字形（无 agent 时不留空槽）");
-      assert.ok(slot[1].includes("<svg"), "通用字形是既有 feather 风 svg");
     });
   });
 
@@ -115,7 +121,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rm, "prefers-reduced-motion 下箭头过渡关掉");
     });
 
-    it("矮窗口不重叠：定高块 flex:none，只有历史会话段吃剩余空间并自己滚", () => {
+    it("矮窗口不重叠：定高块 flex:none，只有中段滚动层吃剩余空间并自己滚", () => {
       // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
       // min-height、容器没有 → 行溢出容器画到下一段头上（「打开的终端」行压在
       // 「历史会话」段头里）。布局几何在桩框架里量不出来（要真渲染才有 rect），
@@ -125,7 +131,6 @@ describe("终端视图左栏换血（M4）", () => {
       const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
       assert.ok(!/min-height:\s*0/.test(decls(dir)), "栏体不吃 min-height:0（否则定高内容可被压到内容高度以下）");
       for (const [selector, why] of [
-        [".rail-term-agent {", "身份行"],
         [".rail-term-new {", "新建终端钮"],
         [".rail-term-section {", "段容器"],
         [".rail-term-section-head {", "段头"],
@@ -133,16 +138,38 @@ describe("终端视图左栏换血（M4）", () => {
       ]) {
         assert.ok(cssRule(selector).includes("flex: none"), `${why} 是定高块，必须 flex:none（不参与收缩）`);
       }
-      const hist = cssRule(".rail-term-section-history {");
-      assert.ok(hist.includes("flex: 1 1 auto") && hist.includes("min-height: 0"),
-        "历史会话段是唯一吃剩余空间的那段（空间不够时它先缩）");
-      assert.ok(cssRule(".rail-term-history-scroll {").includes("overflow-y: auto"),
-        "历史列表在自己的滚动容器里滚，溢出由它裁切、不越段");
+      // S4 起滚动收进唯一中段滚动层（两个段都在里面滚），历史段自己不再是弹性层
+      const scroll = cssRule(".rail-term-scroll {");
+      assert.ok(scroll.includes("flex: 1 1 auto") && scroll.includes("min-height: 0"),
+        "中段滚动层是唯一吃剩余空间的那层（空间不够时它先缩）");
+      assert.ok(scroll.includes("overflow-y: auto"), "滚动发生在中段滚动层，溢出由它裁切、不越段");
+      assert.ok(scroll.includes("scrollbar-gutter: stable"), "预留滚动条槽位：有无滚动条布局不跳");
+      assert.ok(scroll.includes("padding-bottom: 16px"), "列表底部留白 16px（dsh 同值）");
       // 列表容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
       assert.ok(!/\.rail-term-open[^{]*\{[^}]*overflow/.test(panelCss), "「打开的终端」列表不靠 overflow 裁切");
     });
 
-    it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留头像与新建图标", () => {
+    it("钉底三层：顶区/中段滚动层/底栏各司其职，不用 sticky/fixed", () => {
+      // S4（m6 §3）：dsh 的钉底不是 sticky/fixed，是 flex:1+min-height:0 的唯一
+      // 可伸缩层 + flex:none 的兄弟节点。栏体与设置态共用骨架，底栏一颗钮两态共用。
+      // （hover 卡是挂 body 的 portal 浮层，dsh 同款 position:fixed，不属钉底机制，
+      // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
+      assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏（亮暗/返回）不参与伸缩");
+      const pinRules = [".rail-term-scroll {", ".rail-foot {", ".rail-term-fade {"]
+        .map((sel) => cssRule(sel)).join("");
+      assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底三件不碰 sticky/fixed（钉底靠 flex）");
+      // 滚动条指针感知隐退（dsh §3.5）：变量替换、无淡出
+      assert.ok(panelCss.includes("#railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }"),
+        "离开 2s 后 thumb 变量替换成透明（瞬时消失，无过渡）");
+      const thumb = panelCss.match(/\.rail-term-scroll::-webkit-scrollbar-thumb \{([^}]*)\}/);
+      assert.ok(thumb && thumb[1].includes("var(--rail-term-scrollbar-thumb"), "thumb 取可被 quiet 替换的变量");
+      assert.ok(thumb && thumb[1].includes("border-radius: 999px"), "thumb 圆角");
+      assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
+      const track = panelCss.match(/\.rail-term-scroll::-webkit-scrollbar-track \{([^}]*)\}/);
+      assert.ok(track && track[1].includes("transparent"), "track 透明");
+    });
+
+    it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留新建图标钮", () => {
       const fade = cssRule(".rail-term-fade {");
       assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
       // 终点必须与栏底色同一个取值源：栏底在 saas/sepia 被对调成 --bg-page，写死
@@ -163,13 +190,14 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] #v2Rail { --rail-bg'),
         "aurora 不参与对调，沿用基座 --surface（玻璃料）");
       assert.ok(fade.includes("pointer-events: none"), "遮罩不吃点击");
-      // 滚区底距 = 遮罩高度：末行底边落在渐隐上沿，整行可读
-      const scroll = cssRule(".rail-term-history-scroll {");
-      assert.ok(scroll.includes("padding-bottom: 24px"), "滚动区底距对齐遮罩高度（16px 会让末行压在渐变里）");
-      assert.ok(panelCss.includes(".rail-term-history-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
+      // S4：遮罩挂栏体（不在滚动层里，不随内容滚），贴滚动层底、right 让出滚动条
+      assert.ok(fade.includes("position: absolute"), "绝对定位贴滚动层底");
+      assert.ok(fade.includes("bottom: 0"), "贴底");
+      assert.ok(/right:\s*[5-9]px/.test(fade), "right 让出滚动条宽度（5px 滚条 + 余量）");
+      assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
-      assert.ok(/:is\(\.rail-term-agent-name, \.rail-term-new-label, \.rail-term-section\) \{ display: none; \}/.test(panelCss),
-        "折叠态列表整段不出（dsh 折叠同款取舍）");
+      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section, \.rail-term-fade\) \{ display: none; \}/.test(panelCss),
+        "折叠态列表整段不出，渐隐也不出（dsh 折叠同款取舍）");
       assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
       assert.ok(/:root\[data-ui-version="v2"\]\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
@@ -177,7 +205,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("样式全走语义 token：不新增色值", () => {
-      const start = panelCss.indexOf("/* ── 终端会话栏（M4）");
+      const start = panelCss.indexOf("/* ── 终端会话栏（M4 + M7）");
       assert.ok(start > 0, "终端会话栏样式段在册");
       const block = panelCss.slice(start, panelCss.indexOf("── 阶段 2 补", start));
       assert.ok(block.length > 0, "样式段可取样");
@@ -330,6 +358,7 @@ describe("终端视图左栏换血（M4）", () => {
     const runResume = (session, apiImpl) => {
       const log = { posts: [], toasts: [], renders: 0, active: null, rememberedCwd: [] };
       const sandbox = new Function("session", "log", "apiImpl", `
+        let terminalBackendReady = true;
         const terminalBackendSessions = {};
         let activeTerminalPreviewId = null;
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
@@ -341,6 +370,8 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
+        ${extractFn("terminalRailSessionMap")}
+        ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("createAgentTerminal")}
         ${extractFn("terminalRailResumeSession")}
         return {
@@ -575,9 +606,11 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(fn2.open("").map((s) => s.id), [], "预览稿的新终端 id 同样不列");
     });
 
-    it("未就绪：身份行取不到 agent，落通用终端态（不冒充某个 agent）", () => {
+    it("未就绪：两段的 agent 来源取不到真值，不冒充种子里的 agent", () => {
+      // 身份行拆除后栏体不再显示 agent，但「打开的终端」「历史会话」仍严格跟随
+      // 聚焦终端的 agent——未就绪时同样不许采信预览种子自带的身份。
       const fn = run(false, BACKEND, PREVIEW, "checkout");
-      assert.equal(fn.agentId(), "", "未就绪时身份为空 → 身份行走通用终端标识");
+      assert.equal(fn.agentId(), "", "未就绪时 agent 来源为空");
       const withAgentSeed = { ...PREVIEW, checkout: { ...PREVIEW.checkout, agent: { endpointId: "kimi" } } };
       const fn2 = run(false, BACKEND, withAgentSeed, "checkout");
       assert.equal(fn2.agentId(), "", "就算种子自带 agent 身份也不采信（那不是真实终端）");
@@ -595,8 +628,7 @@ describe("终端视图左栏换血（M4）", () => {
       const map = extractFn("terminalRailSessionMap");
       assert.ok(map.includes("terminalBackendReady"), "先看就绪位：未就绪一律空");
       assert.ok(!map.includes("terminalPreviewSessions"), "就绪位的假分支不回落到预览种子表");
-      assert.ok(extractFn("terminalRailAgentId").includes("terminalRailActiveSession"), "身份行同样只认后端真值");
-      assert.ok(extractFn("renderTerminalRailAgent").includes("terminalRailActiveSession"), "渲染身份行不直读 terminalSessionFor");
+      assert.ok(extractFn("terminalRailAgentId").includes("terminalRailActiveSession"), "两段数据的 agent 来源同样只认后端真值");
       assert.ok(extractFn("renderTerminalRailHistory").includes("terminalRailActiveSession"), "历史段找活跃组同样不读种子");
     });
   });
@@ -940,7 +972,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("明确不做：搜索、置顶、拖拽排序、管理菜单、快捷键、跑马灯、未读角标", () => {
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4）"), panelJs.indexOf("function initSkillsTab"));
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(railBlock.length > 1000, "栏体代码段可取样");
       for (const forbidden of ["draggable", "marquee", "contextmenu", "快捷键"]) {
         assert.ok(!railBlock.includes(forbidden), `不做清单项「${forbidden}」不在栏体代码里`);
@@ -1013,8 +1045,12 @@ describe("终端视图左栏换血（M4）", () => {
           let terminalRailFlipMode = "instant";
           const terminalRailCollapsedGroups = state.collapsed;
           const terminalRailWatermarks = new Map();
+          const terminalRailPrefs = { archived: [], removedGroups: [] };
           const TERMINAL_RAIL_WATERMARK = 5;
           const TERMINAL_RAIL_ICON_CHEVRON = "";
+          const TERMINAL_RAIL_ICON_ARCHIVE = "";
+          const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+          const TERMINAL_RAIL_ICON_PLUS = "";
           const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
           const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
           const terminalRailHistory = history;
@@ -1038,6 +1074,9 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailMoreLabel")}
           ${extractFn("terminalRailSameDir")}
           ${extractFn("terminalRailGroupForDir")}
+          ${extractFn("terminalRailRegroupRemoved")}
+          ${extractFn("terminalRailArchivedKey")}
+          ${extractFn("terminalRailVisibleSessions")}
           ${extractFn("terminalRailHistoryRowHtml")}
           ${extractFn("renderTerminalRailHistory")}
           return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
@@ -1091,8 +1130,12 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailFlipMode = "instant";
         const terminalRailCollapsedGroups = state.collapsed;
         const terminalRailWatermarks = new Map();
+        const terminalRailPrefs = { archived: [], removedGroups: [] };
         const TERMINAL_RAIL_WATERMARK = 5;
         const TERMINAL_RAIL_ICON_CHEVRON = "";
+        const TERMINAL_RAIL_ICON_ARCHIVE = "";
+        const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+        const TERMINAL_RAIL_ICON_PLUS = "";
         const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
         const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
         let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
@@ -1116,6 +1159,9 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailMoreLabel")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailGroupForDir")}
+        ${extractFn("terminalRailRegroupRemoved")}
+        ${extractFn("terminalRailArchivedKey")}
+        ${extractFn("terminalRailVisibleSessions")}
         ${extractFn("terminalRailHistoryRowHtml")}
         ${extractFn("renderTerminalRailHistory")}
         return {

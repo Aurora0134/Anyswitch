@@ -288,6 +288,10 @@ function agentMetadata(session) {
     ...(session.agentId ? { agentId: session.agentId } : {}),
     ...(session.agentName ? { agentName: session.agentName } : {}),
     ...(session.launch ? { launch: session.launch } : {}),
+    // 续接身份（M7 S5）：这条终端是替哪条会话续接建的。只记 endpoint + 会话 id
+    // 两个非密字段（file 是路径，去重聚焦用不到，不进记录）。面板历史会话点击时
+    // 先查它——同 endpoint＋同会话 id 的终端已开着就直接聚焦，不重复建。
+    ...(session.resume ? { resume: session.resume } : {}),
   };
 }
 
@@ -369,6 +373,19 @@ async function atomicWriteStateFile(target, content) {
     }
     throw error;
   }
+}
+
+// 续接身份的宿主侧归一化：{ endpoint, id } 两个非空串，长度封顶（与面板
+// buildAgentResumeArgs 同一基调——两端独立校验，坏数据进不了会话记录）。缺省/
+// null = 普通创建（不带这个字段）；形状不对一律 400 invalid_resume，不建会话。
+// file 之类多余字段直接忽略：宿主只认去重需要的两个键。
+function normalizeResume(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) return { error: "invalid_resume" };
+  const endpoint = typeof raw.endpoint === "string" ? raw.endpoint.trim() : "";
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  if (!endpoint || !id || endpoint.length > 64 || id.length > 256) return { error: "invalid_resume" };
+  return { resume: { endpoint, id } };
 }
 
 export function createTerminalHost({
@@ -936,6 +953,10 @@ export function createTerminalHost({
         const body = await readBody(req);
         const launch = normalizeLaunch(body.launch);
         const env = normalizeInjectedEnv(body.env);
+        // 续接身份（M7 S5）：先校验再建——坏形状连会话都不建（面板那边已按模板
+        // 校验过一遍，这里是宿主自己的独立一道闸）。
+        const resumeInput = normalizeResume(body.resume);
+        if (resumeInput && resumeInput.error) return json(res, 400, { error: resumeInput.error });
         // An agent launch must not fall back to a silent default directory: a
         // wrong cwd would start the agent somewhere the user never chose.
         const cwd = typeof body.cwd === "string" ? body.cwd.trim() : "";
@@ -962,6 +983,8 @@ export function createTerminalHost({
           ptyGeneration: 0,
           livePids: new Set(),
           listeners: new Set(),
+          // 续接身份随会话记录一起进内存/落盘（见 normalizeResume）
+          ...(resumeInput && resumeInput.resume ? { resume: resumeInput.resume } : {}),
         };
         sessions.set(session.id, session);
         // 会话入表即改写持久化状态：先置脏。即便随后的 spawn 失败，这个「存在
