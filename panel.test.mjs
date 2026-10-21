@@ -4368,7 +4368,7 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
   it("renderClaude 接线：会话求和聚合 + 零实例伪实例行 + 折叠门控与其他栏一致", () => {
     const m = panelJs.match(/function renderClaude\(c\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "renderClaude found in panel.js");
-    assert.ok(m[1].includes("const agg = claudeAggregateMetrics(sessions);"), "claude 无聚合桶，由各会话行求和派生");
+    assert.ok(m[1].includes("const agg = claudeAggregateMetrics(sessions, c.retiredMetrics);"), "claude 无聚合桶，由各会话行 + 退役账求和派生");
     assert.ok(m[1].includes("aggregateFallback: buildAggregateFallback(agg, c, isGenerating)"),
       "零实例时用聚合量渲染「全局汇总」伪实例行，收起态不为空");
     assert.ok(m[1].includes('applyDetailFold("cc")'), "渲染后应用折叠态");
@@ -4398,7 +4398,7 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
     assert.ok(m[0].includes('renderSurfaceSummary("cc", [])'), "停止态显式清副行（CSS 不藏徽标，脏值会挂到下一轮）");
   });
 
-  it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT", () => {    const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{([\s\S]*?)\n  \}/);
+  it("claudeAggregateMetrics 求和口径：累加项、prompt 加权缓存、最近会话 TTFT、退役账并表", () => {    const m = panelJs.match(/function claudeAggregateMetrics\(sessions, retired\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "claudeAggregateMetrics exists in panel.js");
     assert.ok(m[1].includes("tokens.prompt += tk.prompt || 0;"), "tokens 累加");
     assert.ok(m[1].includes("totalRequests += s.requests || 0;"), "请求数累加");
@@ -4406,6 +4406,10 @@ describe("panel.html claude 全局汇总行（与其他多实例栏同范式）"
     assert.ok(m[1].includes("if (typeof s.tps === \"number\" && s.tps > 0) tpsSum += s.tps;"), "tps 为各会话之和");
     assert.ok(m[1].includes("tokens.cached / tokens.prompt"), "缓存命中率按 prompt 加权");
     assert.ok(m[1].includes("(seen || 0) >= ttftSeen"), "TTFT 取最近有活动的会话");
+    assert.ok(m[1].includes("totalRequests += ledger.requests || 0;"), "退役账请求数并入汇总");
+    assert.ok(m[1].includes("tokens.prompt += ledger.promptTokens || 0;"), "退役账 tokens 并入汇总");
+    assert.ok(m[1].includes("durationMs += ledger.activeDurationMs || 0;"), "退役账工时并入汇总");
+    assert.ok(m[1].includes("seen >= ttftSeen"), "退役账 TTFT 与活行取最近");
   });
 
   it("看板 claude 头像方砖：亮色品牌橙描边 + 淡橙打底，暗色两段回退深棕砖", () => {

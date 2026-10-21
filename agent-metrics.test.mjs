@@ -460,15 +460,15 @@ describe("createAgentMetricsCollector", () => {
     let kimi = status.find((a) => a.id === "kimi");
     assert.equal(kimi.errorActive, true, "fault stays latched within the safety margin");
 
-    // Past the margin with the endpoint closed: the fault lifecycle ends now,
-    // not at the idle fault TTL.
+    // Past the margin with the endpoint closed: the whole run account is
+    // zeroed (run-scoped zeroing), so the banner folds together with the
+    // history that used to outlive the endpoint.
     mockTime = 6000;
     status = await collector.getAgentsStatus();
     kimi = status.find((a) => a.id === "kimi");
     assert.equal(kimi.errorActive, false, "latched fault is settled once the endpoint is gone");
     assert.equal(kimi.activeErrors.length, 0);
-    assert.ok(kimi.lastError, "error history is retained for the record");
-    assert.equal(kimi.lastError.status, 400);
+    assert.equal(kimi.lastError, null, "fault history is part of the run account: zeroed with it");
   });
 
   it("keeps the fault latched while the endpoint process is still running", async () => {
@@ -537,7 +537,10 @@ describe("createAgentMetricsCollector", () => {
   it("an abandoned model's fault expires after the idle TTL; lastError history remains", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => cb(null, "");
+    // zcode 进程活着：本例验证的是故障空闲 TTL，不是 run 清零——零进程夹具
+    // 会让 run zeroing 先把整账连同故障史收走，TTL 路径根本走不到。
+    const mockExec = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\ZCode.exe,zcode.exe,12345\r\n");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     // Model A errors and is then abandoned; the user switches to model B.
@@ -594,7 +597,9 @@ describe("createAgentMetricsCollector", () => {
   it("a keyless fault (no provider/model meta) also expires after the idle TTL", async () => {
     let mockTime = 1000;
     const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => cb(null, "");
+    // 同上：zcode 进程活着，隔离故障 TTL 路径，别让 run zeroing 抢答。
+    const mockExec = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\ZCode.exe,zcode.exe,12345\r\n");
     const collector = testCollector({ execFn: mockExec, nowFn });
 
     const req = collector.startRequest({ agentId: "zcode",});
@@ -3533,9 +3538,12 @@ describe("createSessionReporter", () => {
   it("实例行折线按「折线视窗」设置收点：建行时取当前设置，设置改宽后已在列的行跟着变宽", async () => {
     // 折线视窗是「折线画几个请求」，不是端点的私产：同一份历史在端点卡和
     // 实例行上必须同宽，否则把视窗从默认 16 调大只在端点级看得出变化。
+    // kimi 进程保持存活：本例每步隔 60s，零进程夹具会触发 run zeroing 把
+    // 样本窗连同账一起清掉，视窗宽度就无从验证。
     let mockTime = 1000;
     const nowFn = () => mockTime;
-    const mockExec = (cmd, opts, cb) => cb(null, "");
+    const mockExec = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\\\kimi\\\\node_modules\\\\@moonshot-ai\\\\kimi-code\\\\dist\\\\main.mjs,node.exe,12345\r\n");
     let diskWindow = 20;
     const collector = testCollector({
       execFn: mockExec,
@@ -6336,7 +6344,8 @@ describe("metrics snapshot persistence across collector recreations", () => {
       const kimiGone = (await gone.getAgentsStatus()).find((a) => a.id === "kimi");
       assert.deepEqual(kimiGone.instances.map((i) => i.id), [],
         "a dead pid evicts the restored row on the first read");
-      assert.equal(kimiGone.metrics.totalRequests, 1, "endpoint accounting is unaffected by instance liveness");
+      // 家族全灭（可信零轮）→ run 判决重开：还原的 kimi 账整体归零。
+      assert.equal(kimiGone.metrics.totalRequests, 0, "family gone = run over: restored endpoint accounting is zeroed");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6351,7 +6360,7 @@ describe("metrics snapshot persistence across collector recreations", () => {
       assert.equal(kimi.metrics.totalRequests, 0);
       assert.equal(collector.persistMetricsSnapshot(), true);
       const written = JSON.parse(readFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), "utf8"));
-      assert.equal(written.version, 1);
+      assert.equal(written.version, 2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6365,6 +6374,130 @@ describe("metrics snapshot persistence across collector recreations", () => {
       req.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
       assert.equal(collector.persistMetricsSnapshot(), false);
       assert.deepEqual(readdirSync(dir), [], "no persistRoot means nothing is ever written");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("run verdict: relay restart with the family alive continues the account, dead pids reopen it", async () => {
+    // 运行锚判决：快照里的家族 pid 集在 relay 重启后决定续账 or 重开。
+    // 第一段：kimi 4321 在跑、有账、锚落盘。第二段 A：同一进程还在 → 续账；
+    // 第二段 B：进程全灭 → 还原账归零。
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      const mk = (exec) => testCollector({ execFn: exec, nowFn: () => t, persistRoot: dir });
+      const first = mk(chainExec);
+      await first.scanProcesses();
+      const req = first.startRequest({ agentId: "kimi", instanceId: "kimi-4321", model: "kimi-k3" });
+      t += 1000;
+      req.recordEnd({ status: 200, usage: { prompt_tokens: 400, completion_tokens: 40 } });
+      assert.equal(first.persistMetricsSnapshot(), true);
+
+      // A：家族照旧在跑（同一扫描输出）——续账。
+      t += 5000;
+      const continued = mk(chainExec);
+      const kimiA = (await continued.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimiA.metrics.totalRequests, 1, "family alive across the restart = same run, account continues");
+      assert.equal(kimiA.metrics.tokens.prompt, 400);
+
+      // B：relay 又重启了一次，这次停机期间进程全灭——还原账归零（重开）。
+      t += 5000;
+      const reopened = mk(emptyScanExec);
+      const kimiB = (await reopened.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimiB.metrics.totalRequests, 0, "family gone during the restart = old run over, account reopened at zero");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a v1 snapshot (pre run-anchor shape) is discarded, not restored", async () => {
+    const dir = snapshotDir();
+    try {
+      // 手写一份 v1 形状的旧快照：账目字段齐全，但 version = 1。
+      writeFileSync(join(dir, METRICS_SNAPSHOT_FILENAME), JSON.stringify({
+        version: 1,
+        savedAt: 10_000,
+        endpoints: {
+          kimi: { totalRequests: 7, totalPromptTokens: 700, totalCompletionTokens: 70 },
+        },
+        instances: {},
+      }), "utf8");
+      const collector = testCollector({ execFn: chainExec, nowFn: () => 10_000, persistRoot: dir });
+      const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+      assert.equal(kimi.metrics.totalRequests, 0, "old-shape sidecar must not leak into the v2 account");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("claude partial exit folds retired sessions into the aggregate ledger", async () => {
+    // 退役账：一个会话行退出（pid 消失 + 过展示窗）后其累计并入端点级累加器，
+    // 聚合 = 活行 + 退役账；另一个会话行还活着 → 卡片聚合保持两段之和。
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      let claudeA = true; // pid 4400 在跑
+      const execFn = (cmd, opts, cb) => cb(null, claudeA
+        ? "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,4400\r\nLAPTOP,C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,4401\r\n"
+        : "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,4401\r\n");
+      const collector = testCollector({ execFn, nowFn: () => t, persistRoot: dir });
+      await collector.scanProcesses();
+
+      collector.reportSession("token_a", { pid: 4400, requests: 5, activeRequests: 0, promptTokens: 500, completionTokens: 50 });
+      collector.reportSession("token_b", { pid: 4401, requests: 3, activeRequests: 0, promptTokens: 300, completionTokens: 30 });
+
+      let card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.equal(card.sessions.length, 2, "two live sessions");
+
+      // pid 4400 退出：行挂 ended；过 ENDED_DISPLAY_MS 后清除并吸收进退役账。
+      // t 跳 61s 过了扫描缓存窗（2.5s）：跳时后的第一读吃旧扫描（两 pid 都在）
+      // 并踢新轮，第二读吃到新扫描把行挂 ended，第三读过展示窗清除并吸收。
+      claudeA = false;
+      t += 1000;
+      await collector.getAgentsStatus();
+      await new Promise((r) => setTimeout(r, 20));
+      t += 61_000; // ENDED_DISPLAY_MS 60s
+      await collector.getAgentsStatus(); // 旧扫描（stale）
+      await collector.getAgentsStatus(); // 新扫描：行挂 ended
+      card = (await collector.getAgentsStatus()).find((a) => a.id === "claude"); // 过窗清除 + 吸收
+      assert.equal(card.sessions.length, 1, "the exited session row is purged past its display window");
+      const ledger = card.retiredMetrics;
+      assert.equal(ledger.requests, 5, "the retired row's requests folded into the endpoint ledger");
+      assert.equal(ledger.promptTokens, 500);
+      assert.equal(ledger.completionTokens, 50);
+      // 活行 + 退役账：面板侧 claudeAggregateMetrics 的并表口径由这组字段喂出。
+      assert.equal(card.sessions[0].requests + ledger.requests, 8, "aggregate = live rows + retired ledger");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("claude full family exit zeroes the whole card account, ledger included", async () => {
+    const dir = snapshotDir();
+    try {
+      let t = 10_000;
+      let alive = true;
+      const execFn = (cmd, opts, cb) => cb(null, alive
+        ? "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe,claude.exe,4400\r\n"
+        : "Node,CommandLine,Name,ProcessId\r\n");
+      const collector = testCollector({ execFn, nowFn: () => t, persistRoot: dir });
+      await collector.scanProcesses();
+
+      collector.reportSession("token_a", { pid: 4400, requests: 5, activeRequests: 0, promptTokens: 500, completionTokens: 50 });
+
+      // 家族全灭过宽限：会话行与退役账同批清零，聚合归零——不先吸收再清（那
+      // 会把刚归零的聚合又用退役账填回来）。
+      alive = false;
+      t += 1000;
+      await collector.getAgentsStatus(); // 首读吃旧缓存并踢新一轮
+      await new Promise((r) => setTimeout(r, 20)); // 家族全灭的扫描落地
+      t += 4000; // 过 3s 宽限
+      await collector.getAgentsStatus(); // 这一读做 run 清零（会话行随账清）
+      const card = (await collector.getAgentsStatus()).find((a) => a.id === "claude");
+      assert.equal(card.retiredMetrics.requests, 0, "ledger is zeroed with the endpoint account");
+      assert.equal(card.retiredMetrics.promptTokens, 0);
+      assert.equal(card.status, "stopped");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -7010,7 +7143,7 @@ describe("已工作时间随端点关闭清零", () => {
     assert.equal(zcode.status, "stopped");
     assert.equal(zcode.metrics.activeDurationMs, 0, "端点关闭过宽限，已工作时间清零");
     assert.equal(zcode.sessions[0].activeDurationMs, 0, "全局汇总行同步清零");
-    assert.equal(zcode.metrics.totalRequests, 1, "请求数是终身累计量，不随工时清零");
+    assert.equal(zcode.metrics.totalRequests, 0, "进程全灭过宽限，本次运行的请求数一并清零");
 
     // 重开（新 pid）：从 0 起，不接旧值。
     scan = zcodeScan(20604);
@@ -7021,7 +7154,7 @@ describe("已工作时间随端点关闭清零", () => {
     r2.recordEnd({ status: 200, usage: { prompt_tokens: 10, completion_tokens: 5 } }); // 500ms
     zcode = await zcodeCard(collector);
     assert.equal(zcode.metrics.activeDurationMs, 500, "重开后从 0 重新累计");
-    assert.equal(zcode.metrics.totalRequests, 2, "请求数继续累计");
+    assert.equal(zcode.metrics.totalRequests, 1, "新运行从 0 计数，不接旧账");
   });
 
   it("3s 宽限期内不清零，过宽限才清", async () => {
