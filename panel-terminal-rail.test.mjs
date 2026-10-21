@@ -45,16 +45,30 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rail.indexOf('class="rail-tabs"') < rail.indexOf('id="railTerminalDir"')
         && rail.indexOf('id="railTerminalDir"') < rail.indexOf('class="rail-foot"'),
         "位置：主 tab 组之后、栏底行之前（换血时整组顶上主 tab 组）");
-      for (const id of ["railTermAgentAvatar", "railTermAgentName", "railTermNewBtn",
+      for (const id of ["railTermNewBtn",
         "railTermOpenList", "railTermHistoryRefresh", "railTermHistoryList"]) {
         assert.ok(dir[1].includes(`id="${id}"`), `骨架节点 ${id} 就位`);
       }
-      // 身份行在上、新建其次、两个段自上而下（用户拍板的栏体顺序）
+      // 顶区只剩「新建终端」、两个段自上而下（身份行已按用户要求拆除，见下条）
       const body = dir[1];
-      assert.ok(body.indexOf('id="railTermAgentAvatar"') < body.indexOf('id="railTermNewBtn"')
-        && body.indexOf('id="railTermNewBtn"') < body.indexOf("打开的终端")
+      assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf("打开的终端")
         && body.indexOf("打开的终端") < body.indexOf("历史会话"),
-        "栏体自上而下：身份行 → 新建终端 → 打开的终端 → 历史会话");
+        "栏体自上而下：新建终端 → 打开的终端 → 历史会话");
+    });
+
+    it("身份行整块拆除：头像槽、名称、通用字形与相关 id 一律不在册", () => {
+      // 用户 2026-10-21 拍板：agent 头像＋名称与 anys 产品图标贴在一起抢视野，顶区
+      // 只留「新建终端」。栏体仍跟随聚焦终端的 agent 取两段数据，只是不再显示身份。
+      const rail = railHtml();
+      for (const id of ["railTermAgentAvatar", "railTermAgentName"]) {
+        assert.ok(!rail.includes(`id="${id}"`), `身份行节点 ${id} 已清净`);
+      }
+      assert.ok(!panelHtml.includes("rail-term-agent-glyph"), "通用终端字形槽一并清净");
+      assert.ok(!panelCss.includes(".rail-term-agent"), "身份行样式一并清净");
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4）"), panelJs.indexOf("function initSkillsTab"));
+      for (const symbol of ["renderTerminalRailAgent", "terminalRailAgentGlyph", "terminalRailAgentLabel"]) {
+        assert.ok(!railBlock.includes(symbol), `身份行函数 ${symbol} 已清净`);
+      }
     });
 
     it("文案只用已批准的清单：新建终端 / 打开的终端 / 历史会话 / 刷新会话列表", () => {
@@ -71,17 +85,9 @@ describe("终端视图左栏换血（M4）", () => {
       // 栏内可见文案只许是批准清单里的那几句：把 HTML 文本节点全取出来逐个比对，
       // 新造词一进来就红（不是只看某一条正则不命中）。
       const textNodes = [...body.matchAll(/>([^<>]+)</g)].map((m) => m[1].trim()).filter(Boolean);
-      const APPROVED = new Set(["终端会话", "本地终端", "新建终端", "打开的终端", "历史会话", "刷新会话列表"]);
+      const APPROVED = new Set(["终端会话", "新建终端", "打开的终端", "历史会话", "刷新会话列表"]);
       assert.deepEqual(textNodes.filter((t) => !APPROVED.has(t)), [], "栏体静态文案全部在批准清单内");
       assert.ok(textNodes.includes("新建终端"), "新建按钮的可见文案在清单里");
-    });
-
-    it("身份行头像槽留通用终端字形兜底，品牌头像由看板克隆后填", () => {
-      const rail = railHtml();
-      const slot = rail.match(/<span class="rail-term-agent-avatar" id="railTermAgentAvatar"[^>]*>([\s\S]*?)<\/span>\s*<span class="rail-term-agent-name"/);
-      assert.ok(slot, "头像槽在册");
-      assert.ok(slot[1].includes("rail-term-agent-glyph"), "槽位默认内容是通用终端字形（无 agent 时不留空槽）");
-      assert.ok(slot[1].includes("<svg"), "通用字形是既有 feather 风 svg");
     });
   });
 
@@ -125,7 +131,6 @@ describe("终端视图左栏换血（M4）", () => {
       const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
       assert.ok(!/min-height:\s*0/.test(decls(dir)), "栏体不吃 min-height:0（否则定高内容可被压到内容高度以下）");
       for (const [selector, why] of [
-        [".rail-term-agent {", "身份行"],
         [".rail-term-new {", "新建终端钮"],
         [".rail-term-section {", "段容器"],
         [".rail-term-section-head {", "段头"],
@@ -168,7 +173,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(scroll.includes("padding-bottom: 24px"), "滚动区底距对齐遮罩高度（16px 会让末行压在渐变里）");
       assert.ok(panelCss.includes(".rail-term-history-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
-      assert.ok(/:is\(\.rail-term-agent-name, \.rail-term-new-label, \.rail-term-section\) \{ display: none; \}/.test(panelCss),
+      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section\) \{ display: none; \}/.test(panelCss),
         "折叠态列表整段不出（dsh 折叠同款取舍）");
       assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
@@ -177,7 +182,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("样式全走语义 token：不新增色值", () => {
-      const start = panelCss.indexOf("/* ── 终端会话栏（M4）");
+      const start = panelCss.indexOf("/* ── 终端会话栏（M4 + M7）");
       assert.ok(start > 0, "终端会话栏样式段在册");
       const block = panelCss.slice(start, panelCss.indexOf("── 阶段 2 补", start));
       assert.ok(block.length > 0, "样式段可取样");
@@ -575,9 +580,11 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(fn2.open("").map((s) => s.id), [], "预览稿的新终端 id 同样不列");
     });
 
-    it("未就绪：身份行取不到 agent，落通用终端态（不冒充某个 agent）", () => {
+    it("未就绪：两段的 agent 来源取不到真值，不冒充种子里的 agent", () => {
+      // 身份行拆除后栏体不再显示 agent，但「打开的终端」「历史会话」仍严格跟随
+      // 聚焦终端的 agent——未就绪时同样不许采信预览种子自带的身份。
       const fn = run(false, BACKEND, PREVIEW, "checkout");
-      assert.equal(fn.agentId(), "", "未就绪时身份为空 → 身份行走通用终端标识");
+      assert.equal(fn.agentId(), "", "未就绪时 agent 来源为空");
       const withAgentSeed = { ...PREVIEW, checkout: { ...PREVIEW.checkout, agent: { endpointId: "kimi" } } };
       const fn2 = run(false, BACKEND, withAgentSeed, "checkout");
       assert.equal(fn2.agentId(), "", "就算种子自带 agent 身份也不采信（那不是真实终端）");
@@ -595,8 +602,7 @@ describe("终端视图左栏换血（M4）", () => {
       const map = extractFn("terminalRailSessionMap");
       assert.ok(map.includes("terminalBackendReady"), "先看就绪位：未就绪一律空");
       assert.ok(!map.includes("terminalPreviewSessions"), "就绪位的假分支不回落到预览种子表");
-      assert.ok(extractFn("terminalRailAgentId").includes("terminalRailActiveSession"), "身份行同样只认后端真值");
-      assert.ok(extractFn("renderTerminalRailAgent").includes("terminalRailActiveSession"), "渲染身份行不直读 terminalSessionFor");
+      assert.ok(extractFn("terminalRailAgentId").includes("terminalRailActiveSession"), "两段数据的 agent 来源同样只认后端真值");
       assert.ok(extractFn("renderTerminalRailHistory").includes("terminalRailActiveSession"), "历史段找活跃组同样不读种子");
     });
   });
@@ -940,7 +946,7 @@ describe("终端视图左栏换血（M4）", () => {
     });
 
     it("明确不做：搜索、置顶、拖拽排序、管理菜单、快捷键、跑马灯、未读角标", () => {
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4）"), panelJs.indexOf("function initSkillsTab"));
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(railBlock.length > 1000, "栏体代码段可取样");
       for (const forbidden of ["draggable", "marquee", "contextmenu", "快捷键"]) {
         assert.ok(!railBlock.includes(forbidden), `不做清单项「${forbidden}」不在栏体代码里`);
@@ -1013,8 +1019,11 @@ describe("终端视图左栏换血（M4）", () => {
           let terminalRailFlipMode = "instant";
           const terminalRailCollapsedGroups = state.collapsed;
           const terminalRailWatermarks = new Map();
+          const terminalRailPrefs = { archived: [], removedGroups: [] };
           const TERMINAL_RAIL_WATERMARK = 5;
           const TERMINAL_RAIL_ICON_CHEVRON = "";
+          const TERMINAL_RAIL_ICON_ARCHIVE = "";
+          const TERMINAL_RAIL_ICON_ELLIPSIS = "";
           const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
           const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
           const terminalRailHistory = history;
@@ -1038,6 +1047,9 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailMoreLabel")}
           ${extractFn("terminalRailSameDir")}
           ${extractFn("terminalRailGroupForDir")}
+          ${extractFn("terminalRailRegroupRemoved")}
+          ${extractFn("terminalRailArchivedKey")}
+          ${extractFn("terminalRailVisibleSessions")}
           ${extractFn("terminalRailHistoryRowHtml")}
           ${extractFn("renderTerminalRailHistory")}
           return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
@@ -1091,8 +1103,11 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailFlipMode = "instant";
         const terminalRailCollapsedGroups = state.collapsed;
         const terminalRailWatermarks = new Map();
+        const terminalRailPrefs = { archived: [], removedGroups: [] };
         const TERMINAL_RAIL_WATERMARK = 5;
         const TERMINAL_RAIL_ICON_CHEVRON = "";
+        const TERMINAL_RAIL_ICON_ARCHIVE = "";
+        const TERMINAL_RAIL_ICON_ELLIPSIS = "";
         const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
         const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
         let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
@@ -1116,6 +1131,9 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailMoreLabel")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailGroupForDir")}
+        ${extractFn("terminalRailRegroupRemoved")}
+        ${extractFn("terminalRailArchivedKey")}
+        ${extractFn("terminalRailVisibleSessions")}
         ${extractFn("terminalRailHistoryRowHtml")}
         ${extractFn("renderTerminalRailHistory")}
         return {

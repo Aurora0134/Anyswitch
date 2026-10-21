@@ -560,7 +560,7 @@
   :root[data-ui-version="v2"] .settings-subtabs { display: none; }
   :root[data-ui-version="v2"] #settingsExitBtn { display: none; }
 
-  /* ── 终端会话栏（M4）：终端视图下的左栏换血内容 ─────────────────────────
+  /* ── 终端会话栏（M4 + M7）：终端视图下的左栏换血内容 ─────────────────────────
      进终端视图（body.terminal-mode）时，栏内主 tab 组整组换成这份随 agent 的会话
      栏（与设置目录同一换血形制：换内容而非追加），栏底齿轮换「返回」——点返回 =
      回进入终端前的视图（terminalReturnView，与设置态那颗钮同一槽位、两态互斥）。
@@ -573,29 +573,20 @@
     /* 换血时整栏接管：不吃 .rail-dir 的贴底 margin-top:auto（id 选择器提级，压过
        后文那条基座规则），改为从栏顶往下铺满，历史会话段自己滚。
        min-height 用 auto（默认的自动最小尺寸）而不是 0：栏体是一列 flex，写成 0 会
-       允许「身份行 + 新建 + 打开的终端」这些定高内容被压到内容高度以下——行不缩
-       （min-height:30px），容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口
-       实测：容器 18px 装两个 30px 行，段头落进行高亮里）。保持 auto 后，空间不够时
-       先压历史会话段（它是唯一 flex:1 1 auto 且 min-height:0 的那段），仍不够则由
-       栏体自己滚（.rail 本来就有 overflow-y:auto），任何内容都不重叠。 */
-    margin-top: 12px; flex: 1 1 auto; gap: 0;
+       允许「新建终端」这些定高内容被压到内容高度以下——行不缩（min-height:30px），
+       容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口实测：容器 18px 装两个
+       30px 行，段头落进行高亮里）。保持 auto 后，空间不够时先压历史会话段（它是唯一
+       flex:1 1 auto 且 min-height:0 的那段），仍不够则由栏体自己滚（.rail 本来就有
+       overflow-y:auto），任何内容都不重叠。
+       position:relative：组头 ⋯ 菜单与 hover 卡挂在栏体下绝对定位（JS 装配），
+       它们是栏内浮层，不吃 portal。 */
+    margin-top: 12px; flex: 1 1 auto; gap: 0; position: relative;
   }
   /* 栏体分段的 flex 纪律（矮窗口不重叠的前提，见 #railTerminalDir 注释）：
-     身份行、新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
+     新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
      只有历史会话段吃剩余空间（flex:1 1 auto + min-height:0），不够时它先缩、再交给
      栏体滚动。默认的 flex:0 1 auto 会让这些定高块参与收缩，而它们的行有 min-height、
      容器没有，行就会溢出容器画到下一段上。 */
-  .rail-term-agent { display: flex; align-items: center; gap: 10px; padding: 0 6px 12px; min-width: 0; flex: none; }
-  .rail-term-agent-avatar {
-    flex: none; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center;
-    border-radius: var(--radius-sm); color: var(--text-2); line-height: 0;
-  }
-  /* 克隆头像归一化：看板 .agent-avatar 是 32px 方砖，缩到身份行的 24px 槽位 */
-  .rail-term-agent-avatar .agent-avatar { flex: none; transform: scale(0.75); transform-origin: center; }
-  .rail-term-agent-name {
-    min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--text);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
   /* 新建终端：与页签栏「+」同一动词、同一就绪闸（禁用位由 JS 同拍刷） */
   .rail-term-new {
     appearance: none; border: 1px solid var(--border); background: var(--surface-sunken); color: var(--text);
@@ -637,27 +628,84 @@
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }
   /* 关闭叉：只在有动作的「打开的终端」行 hover 时出现，纯 display 硬切（无淡入、无
-     位移、无宽度过渡）。历史会话行没有动作，时间始终可见（dsh 只在 rowActions 出现时
-     才把时间让位）。 */
+     位移、无宽度过渡）。历史会话行的动作是归档（M7 S1），同样只在该行 hover 时
+     出现——时间同槽位让位（dsh 只在 rowActions 出现时才把时间让位，同款取舍）。 */
   .rail-term-row-close { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
   .rail-term-row-open:hover .rail-term-row-close { display: inline-flex; }
-  /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡 */
+  .rail-term-row-archive { flex: none; display: none; padding: 0 2px; color: var(--text-3); }
+  .rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }
+  .rail-term-row-history:hover .rail-term-row-time { display: none; }
+  /* 组头：文件夹图标随组态开/关（0ms 硬切），箭头是栏内唯一一条 CSS 过渡。
+     M7 S3 起组头是「容器」：里面整行是可点的折叠开关（toggle 钮），右侧 hover
+     才出动作钮（⋯ 菜单，M8 可能扩项）。容器本身不接点击——折叠走 toggle 钮，
+     动作钮是兄弟 span，互不吃对方的点击。 */
   .rail-term-group { display: flex; flex-direction: column; gap: 2px; }
   .rail-term-group + .rail-term-group { margin-top: 6px; }
   .rail-term-group-head {
+    display: flex; align-items: center; gap: 4px; min-height: 26px;
+    border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
+  }
+  .rail-term-group-toggle {
+    appearance: none; border: 0; background: transparent; color: var(--text-3);
+    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+    display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0;
+    min-height: 26px; padding: 0 8px; border-radius: var(--radius-md);
+  }
+  .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
+  /* 图标同槽互换（M7 S3，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），hover
+     时同槽位换成箭头——两个图标同在定宽槽里 display 硬切，不产生宽度跳动；槽宽
+     14px 与两枚文件夹图标同宽。箭头展开旋转 .15s（栏内唯一行内过渡）。 */
+  .rail-term-group-slot { flex: none; width: 14px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  .rail-term-group-arrow {
+    flex: none; display: none; align-items: center; line-height: 0;
+    transition: transform .15s cubic-bezier(.4,0,.2,1);
+  }
+  .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
+  .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
+  .rail-term-group-head:hover .rail-term-group-icon { display: none; }
+  .rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }
+  .rail-term-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* 组头动作钮（⋯ / ⊕）：hover 才出现，0ms 硬切，与行内关闭叉/归档钮同形制 */
+  .rail-term-group-actions { flex: none; display: flex; align-items: center; gap: 2px; }
+  .rail-term-group-btn {
+    flex: none; display: none; padding: 2px; color: var(--text-3); cursor: pointer;
+    border-radius: var(--radius-sm); line-height: 0;
+  }
+  .rail-term-group-head:hover .rail-term-group-btn { display: inline-flex; }
+  .rail-term-group-btn:hover { background: var(--surface-hover); color: var(--text); }
+  /* ── 组头 ⋯ 菜单（M7 S2/S3） ──
+     栏内单例（JS 保证同一时刻只开一个），挂在栏体下绝对定位。容器可扩：M8 加项
+     只加 DOM。现仅「移除分组」一项（红色 danger）。 */
+  .rail-term-menu {
+    position: absolute; z-index: 5; min-width: 120px; padding: 4px;
+    display: flex; flex-direction: column; gap: 2px;
+    background: var(--surface); border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md); box-shadow: var(--shadow-lg); font-size: 12.5px;
+  }
+  .rail-term-menu-item {
+    appearance: none; border: 0; background: transparent; color: var(--text-2);
+    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
+    min-height: 28px; padding: 0 8px; border-radius: var(--radius-sm);
+  }
+  .rail-term-menu-item:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-term-menu-item.is-danger { color: var(--danger); }
+  .rail-term-menu-item.is-danger:hover { background: var(--danger-soft); color: var(--danger); }
+  /* 「已移除的分组（N）」折叠区：段尾，默认收起；行给目录短名 + 行内「恢复」 */
+  .rail-term-removed { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
+  .rail-term-removed.is-open .rail-term-group-arrow { transform: rotate(90deg); }
+  .rail-term-removed-head {
     appearance: none; border: 0; background: transparent; color: var(--text-3);
     font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
     display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px;
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
-  .rail-term-group-head:hover { background: var(--surface-hover); color: var(--text-2); }
-  .rail-term-group-arrow {
-    flex: none; display: inline-flex; align-items: center; line-height: 0;
-    transition: transform .15s cubic-bezier(.4,0,.2,1);
+  .rail-term-removed-head:hover { background: var(--surface-hover); color: var(--text-2); }
+  .rail-term-removed-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .rail-term-removed-row { color: var(--text-3); }
+  .rail-term-row-restore {
+    flex: none; display: none; padding: 0 2px; color: var(--accent); cursor: pointer; font-size: 12.5px;
   }
-  .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
-  .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
-  .rail-term-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .rail-term-removed-row:hover .rail-term-row-restore { display: inline-flex; }
   /* 水位线按钮：hover 只换文字色、背景不动，无过渡 */
   .rail-term-more {
     appearance: none; border: 0; background: transparent; color: var(--text-3);
@@ -749,18 +797,16 @@
     :root[data-ui-version="v2"] #railThemeToggle { display: none; }
   }
 
-  /* 终端会话栏的折叠态（72px 图标栏）：只留身份行头像与新建图标钮，两个列表段整段
+  /* 终端会话栏的折叠态（72px 图标栏）：只留新建图标钮，两个列表段整段
      不出（dsh 折叠同款取舍）。两个来处各挂一条，与上面收窄两态同一套条件：
      窄栏自动档用 :not([data-rail="expanded"]) 让开手动展开，宽档只有 collapsed 才是
      图标栏。规则放在收窄两态块之后，与既有栏态块同序。 */
   @media (max-width: 1199px) {
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-agent-name, .rail-term-new-label, .rail-term-section) { display: none; }
-    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-agent { justify-content: center; padding: 0 0 12px; }
+    :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section) { display: none; }
     :root[data-ui-version="v2"]:not([data-rail="expanded"]) .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
   @media (min-width: 1200px) {
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-agent-name, .rail-term-new-label, .rail-term-section) { display: none; }
-    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-agent { justify-content: center; padding: 0 0 12px; }
+    :root[data-ui-version="v2"][data-rail="collapsed"] .rail-terminal-dir :is(.rail-term-new-label, .rail-term-section) { display: none; }
     :root[data-ui-version="v2"][data-rail="collapsed"] .rail-term-new { justify-content: center; padding: 9px 0; margin: 0; }
   }
 

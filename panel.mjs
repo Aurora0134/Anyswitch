@@ -64,6 +64,7 @@ import {
   resumeArgsFor,
   sameCwd,
 } from "./terminal-conversation-bindings.mjs";
+import { createRailStore, TERMINAL_RAIL_STORE_FILE } from "./terminal-rail-store.mjs";
 
 // 面板自身的安装目录：git 身份查询（HEAD）与自更新登记都锚在这里。放在
 // APP_VERSION 之前——panel-environment 的 VM 切片从版本声明起、到面板 HTML
@@ -862,6 +863,9 @@ export function createPanelRouter({
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
    terminalBindingStore = null,
    scanAgentConversationsFn = defaultScanAgentConversations,
+   // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
+   // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
+   terminalRailStore = null,
    bindingCaptureDebounceMs = 5000,
    bindingRefreshDelayMs = 10_000,
    bindingRefreshScheduleFn = (fn, ms) => {
@@ -1123,6 +1127,64 @@ export function createPanelRouter({
       terminalBindingStore = createBindingStore({ file: join(relayRoot, TERMINAL_CONVERSATION_BINDINGS_FILE) });
     }
     return terminalBindingStore;
+  }
+
+  // ---- 终端会话栏视图状态（M7：归档 / 分组移除） ----
+  // 与绑定库同一条惰性装配：存储在 relayRoot 下，读写失败不影响面板主流程——
+  // 归档与分组移除是视图状态，丢了最坏回到「没归档过」，不该把列表路由带崩。
+  function terminalRailPrefs() {
+    if (!terminalRailStore) {
+      terminalRailStore = createRailStore({ file: join(relayRoot, TERMINAL_RAIL_STORE_FILE) });
+    }
+    return terminalRailStore;
+  }
+
+  // 视图状态全量快照。进终端会话栏时拉一次，之后每个动作的响应里也带最新快照，
+  // 前端不必为了刷新状态再补一发 GET。
+  function handleTerminalRailPrefs(res) {
+    const { archived, removedGroups } = terminalRailPrefs().list();
+    sendJson(res, 200, { ok: true, archived, removedGroups });
+  }
+
+  // 归档动作的入参校验：endpoint 与 id 都必须是实言实的非空串。store 自己也会
+  // 清洗，这里提前拒是为了回 400 让前端知道「这条没存上」。
+  function railArchiveBody(body) {
+    const endpoint = typeof body?.endpoint === "string" ? body.endpoint.trim() : "";
+    const id = typeof body?.id === "string" ? body.id.trim() : "";
+    if (!endpoint || !id) return null;
+    return { endpoint, id };
+  }
+
+  async function handleTerminalRailArchive(req, res, action) {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (error) {
+      return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+    }
+    try {
+      if (action === "archive" || action === "unarchive") {
+        const entry = railArchiveBody(body);
+        if (!entry) return sendJson(res, 400, { ok: false, error: "会话身份不完整" });
+        const store = terminalRailPrefs();
+        if (action === "archive") store.archive(entry.endpoint, entry.id);
+        else store.unarchive(entry.endpoint, entry.id);
+        const snap = store.list();
+        return sendJson(res, 200, { ok: true, archived: snap.archived });
+      }
+      const dir = typeof body?.dir === "string" ? body.dir.trim() : "";
+      if (!dir) return sendJson(res, 400, { ok: false, error: "目录不能为空" });
+      const store = terminalRailPrefs();
+      if (action === "remove-group") store.removeGroup(dir);
+      else store.restoreGroup(dir);
+      const snap = store.list();
+      return sendJson(res, 200, { ok: true, removedGroups: snap.removedGroups });
+    } catch (error) {
+      // 落盘失败如实回 500：视图状态没存上，前端要能知道（否则本地显示已归档、
+      // 刷新回来还在，比报错更难理解）。
+      logger?.warn?.(`terminal rail prefs persist failed: ${error?.message}`);
+      return sendJson(res, 500, { ok: false, error: "视图状态保存失败，请重试" });
+    }
   }
 
   // 捕获防抖：同一会话两次扫描尝试的最小间隔。记的是「尝试」而非「成功」——
@@ -3074,6 +3136,14 @@ export function createPanelRouter({
       }
     }
     if (path === "/panel/api/terminal/requests" && method === "GET") return handleTerminalRequests(url, res);
+    // 终端会话栏视图状态（M7）：归档清单与已移除分组目录清单。GET 全量 + 四个
+    // 动作 POST，落点与绑定库同目录（见 terminalRailPrefs）。
+    if (path === "/panel/api/terminal/rail/prefs" && method === "GET") return handleTerminalRailPrefs(res);
+    for (const action of ["archive", "unarchive", "remove-group", "restore-group"]) {
+      if (path === `/panel/api/terminal/rail/${action}` && method === "POST") {
+        return handleTerminalRailArchive(req, res, action);
+      }
+    }
     if (path === "/panel/api/logs" && method === "GET") return handleLogsSSE(res, req);
     if (path === "/panel/api/agents-activity" && method === "GET") return handleAgentsActivitySSE(res, req);
     if (path === "/panel/api/logs/ingest" && method === "POST") return handleLogIngest(req, res);

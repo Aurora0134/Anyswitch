@@ -6474,8 +6474,8 @@ async function api(method, path, body) {
       enrichTerminalSessions(agentsData?.agents ?? null);
       await refreshActiveTerminalRequests();
       renderTerminalPreviewTabs();
-      // 归属轮询同拍同步终端会话栏：身份行与「打开的终端」都读归属，慢一拍就会
-      // 「页签已显示 agent、左栏还写着终端」。异常不打断本轮轮询的其余收尾。
+      // 归属轮询同拍同步终端会话栏：「打开的终端」读归属，慢一拍就会「页签已显示
+      // agent、左栏还列着空槽」。异常不打断本轮轮询的其余收尾。
       try {
         if (typeof renderTerminalRail === "function") renderTerminalRail();
       } catch (error) {
@@ -8185,18 +8185,25 @@ async function api(method, path, body) {
   }
 
   /* ============================================================
-     终端会话栏（M4）：终端视图下的左栏换血内容
+     终端会话栏（M4 + M7）：终端视图下的左栏换血内容
      ============================================================ */
-  // 栏体自上而下：当前 agent 身份行 → 新建终端 → 打开的终端 → 历史会话。身份严格
-  // 跟随活跃终端的 agent，不做跨 agent 浏览；无 agent 时显通用终端标识。观感按 dsh
-  // 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作按钮一律 0ms
-  // 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位移有运动。
+  // 栏体自上而下：新建终端 → 打开的终端 → 历史会话。原左上角的 agent 身份行
+  // （头像＋名称）已按用户 2026-10-21 拍板拆除——与 anys 产品图标贴在一起抢视野；
+  // 两段数据仍严格跟随活跃终端的 agent，不做跨 agent 浏览，只是不再显示身份。
+  // 观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
+  // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
+  // 移有运动。
   const TERMINAL_RAIL_WATERMARK = 5;
   const terminalRailCollapsedGroups = new Set();
   const terminalRailWatermarks = new Map();
   // 历史会话缓存：{ endpoint, sessions, fetchedAt, error }。只装当前 agent 那一份——
   // 换 agent 即整份作废重拉，不做多端点缓存（用户拍板「跟随」而非「浏览」）。
   let terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+  // 视图状态（M7）：归档清单 + 已移除分组目录清单。进终端视图时从面板后端拉一次
+  // （GET /api/terminal/rail/prefs），之后的动作本地先生效、POST 落盘。落在面板侧，
+  // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（dsh 同口径：归档
+  // 是 workspace domain 的持久化集合，不是宿主能力）。
+  let terminalRailPrefs = { archived: [], removedGroups: [] };
   // 两块列表的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
   let terminalRailRendered = { open: null, history: null };
   let terminalRailFetchInFlight = false;
@@ -8208,17 +8215,24 @@ async function api(method, path, body) {
   // 下一次归属轮询顶回来。
   let terminalRailAutoExpandedFor = "";
   let terminalRailScrolledFor = "";
-  // 身份行头像槽的通用终端字形（克隆头像后要能换回来，装配时固化一份引用）。
-  let terminalRailAgentGlyph = null;
+  // 「已移除的分组（N）」折叠区默认收起（N 就在标题里，展开只为逐条恢复）；
+  // 折叠态活在内存里，不持久化（与水位线同口径）。
+  let terminalRailRemovedCollapsed = true;
 
   const TERMINAL_RAIL_ICON_CHEVRON = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M3.5 20l2.4-7h14.2l-2.4 7z"/></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_CLOSED = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+  const TERMINAL_RAIL_ICON_ARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
+  // 组头 ⋯ 钮与 ⊕ 钮（feather more-horizontal / plus）：16px 槽，与行内归档/关闭叉
+  // 同一描边风。⋯ 不设 title/aria-label——批准文案清单里没有它的标签，按栏内关闭
+  // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
+  const TERMINAL_RAIL_ICON_ELLIPSIS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg>';
+  const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
 
   // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
   // （payment-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
-  // 未就绪一律当空——「打开的终端」如实空缺、身份行走通用终端标识；历史会话段是
-  // 真实磁盘数据，不经过这里，照常渲染。
+  // 未就绪一律当空——「打开的终端」如实空缺；历史会话段是真实磁盘数据，不经过这里，
+  // 照常渲染。
   function terminalRailSessionMap() {
     return terminalBackendReady ? terminalBackendSessions : {};
   }
@@ -8235,10 +8249,6 @@ async function api(method, path, body) {
     if (!target) return "";
     const raw = (target.agent && target.agent.endpointId) || target.agentId || "";
     return /^[\w-]+$/.test(raw) ? raw : "";
-  }
-
-  function terminalRailAgentLabel(agentId) {
-    return agentId ? (STATS_ENDPOINT_LABELS[agentId] || agentId) : "";
   }
 
   // 「打开的终端」= 该 agent 的活跃终端；无 agent 聚焦时列无归属的空白终端们。
@@ -8305,6 +8315,53 @@ async function api(method, path, body) {
     return "";
   }
 
+  // 分组移除（dsh §2.4 / m6 §2）：只从视图里摘掉目录身份——被移除目录的会话落
+  // 「未分组」，会话记录与磁盘文件夹都不动。全局生效（不分 agent，dsh 工作区清单
+  // 同为全局）。归一化比较口径同 store（terminalRailSameDir）：前端拿 project 路径、
+  // 后端存用户点选时的原始拼写，必须是同一把尺。未分组组没有目录身份，天然不被
+  // 移除（循环里 key 为空的组直接跳过）。
+  function terminalRailRegroupRemoved(groups) {
+    if (!terminalRailPrefs.removedGroups.length) return groups;
+    for (const group of groups) {
+      if (!group.key) continue;
+      if (!terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, group.key))) continue;
+      let ungrouped = groups.find((row) => row.key === "");
+      if (!ungrouped) {
+        ungrouped = { key: "", label: "未分组", rows: [], latest: 0 };
+        groups.push(ungrouped);
+      }
+      ungrouped.rows.push(...group.rows);
+      group.rows = [];
+    }
+    const ungrouped = groups.find((row) => row.key === "");
+    if (ungrouped) {
+      // 迁进来的行按最近活跃重排（恢复分组时同样按最近活跃归组，不记原索引——
+      // dsh 的 sessionIds 槽位在我们这儿没有对应物，派生分组本就该按活跃序）
+      ungrouped.rows.sort((a, b) => (b.lastActive || 0) - (a.lastActive || 0));
+      ungrouped.latest = ungrouped.rows.length ? ungrouped.rows[0].lastActive || 0 : 0;
+    }
+    return groups.filter((group) => group.key === "" || group.rows.length > 0);
+  }
+
+  // 归档键＝endpoint＋session id：同一会话 id 在不同 agent 端点的存档里是不同
+  // 对话，单键会误伤（与后端 terminal-rail-store 同一把尺）。
+  function terminalRailArchivedKey(session) {
+    const endpoint = session && typeof session.endpoint === "string" ? session.endpoint : "";
+    const id = session && typeof session.id === "string" ? session.id : "";
+    return endpoint && id ? `${endpoint}\u0000${id}` : "";
+  }
+
+  // 归档＝视图过滤（dsh §1.4）：底层列表一个字节都不动，过滤放在分组之前——
+  // 组内序、水位线、「展开其余 N」计数自然都按过滤后的行算（m6b §A6 实测口径：
+  // 归档即计数减一，取消即加一）。
+  function terminalRailVisibleSessions() {
+    const archived = new Set((terminalRailPrefs.archived || []).map((entry) => `${entry.endpoint}\u0000${entry.id}`));
+    return terminalRailHistory.sessions.filter((session) => {
+      const key = terminalRailArchivedKey(session);
+      return !key || !archived.has(key);
+    });
+  }
+
   // ---- 渲染 ----
   function renderTerminalRail() {
     if (currentView !== "terminal") return; // 栏只在终端视图露出，别处不白跑渲染
@@ -8314,36 +8371,9 @@ async function api(method, path, body) {
     const newBtn = $("railTermNewBtn");
     // 就绪闸与页签栏加号同拍：未就绪时新建不可点（禁用位由 syncTerminalAddBtn 同拍刷新）。
     if (newBtn) newBtn.disabled = !terminalBackendReady;
-    renderTerminalRailAgent(agentId);
     renderTerminalRailOpenList(agentId);
     renderTerminalRailHistory(agentId);
     syncTerminalRailHistory(agentId);
-  }
-
-  function renderTerminalRailAgent(agentId) {
-    const nameEl = $("railTermAgentName");
-    const slot = $("railTermAgentAvatar");
-    if (!nameEl || !slot) return;
-    // 同样只认后端真值：未就绪时活跃终端读不到，身份行走通用终端标识（不冒充种子里的 agent）。
-    const session = terminalRailActiveSession();
-    // 无 agent 时显通用终端标识：优先活跃终端的外壳名（PowerShell / 命令提示符，会话
-    // 数据自带），连终端都没有才落产品里既有的「本地终端」——身份行不留空白，也不
-    // 另造新词。
-    const label = agentId
-      ? terminalRailAgentLabel(agentId)
-      : (session && session.shell ? session.shell.name : "本地终端");
-    if (nameEl.textContent !== label) nameEl.textContent = label;
-    if (slot.getAttribute("data-rail-term-brand") === agentId) return;
-    slot.setAttribute("data-rail-term-brand", agentId);
-    // 头像克隆（与页签左图标同一手法）：看板 .agent-avatar 整体克隆，各家底衬/描边/
-    // 圆角随克隆走；品牌不在看板或没有 agent 时留通用终端字形。typeof 双闸护桩环境。
-    let avatar = null;
-    if (agentId && typeof document !== "undefined" && typeof document.querySelector === "function") {
-      avatar = document.querySelector(`.agent-cards-container .panel-card[data-agent-id="${agentId}"] .agent-avatar`);
-    }
-    if (typeof slot.replaceChildren !== "function") return;
-    if (avatar) slot.replaceChildren(avatar.cloneNode(true));
-    else if (terminalRailAgentGlyph) slot.replaceChildren(terminalRailAgentGlyph);
   }
 
   function renderTerminalRailOpenList(agentId) {
@@ -8371,6 +8401,7 @@ async function api(method, path, body) {
       <button type="button" class="rail-term-row rail-term-row-history" data-rail-term-resume="${esc(session.id)}" title="${esc(title)}">
         <span class="rail-term-row-title">${escapeHtml(title)}</span>
         <span class="rail-term-row-time">${escapeHtml(time)}</span>
+        <span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>
       </button>`;
   }
 
@@ -8380,8 +8411,10 @@ async function api(method, path, body) {
     // 「落地」= 这个 agent 的列表已成功取回。抓取失败也写着同一个 endpoint，但那份
     // 空表不是事实——按失败态消费掉自动展开，用户之后手动刷新成功就再也不会展开。
     const loaded = !agentId || (terminalRailHistory.endpoint === agentId && !terminalRailHistory.error);
-    const sessions = loaded ? terminalRailHistory.sessions : [];
-    const groups = terminalRailGroupSessions(sessions);
+    const sessions = loaded ? terminalRailVisibleSessions() : [];
+    // 先归档过滤（visible）再分组，最后把被移除目录的会话改组进「未分组」——
+    // 顺序即语义：过滤 → 目录身份 → 移除摘牌。
+    const groups = terminalRailRegroupRemoved(terminalRailGroupSessions(sessions));
     // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
     // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
     // 拉回来（组表为空），那时就认下「已自动展开」会让这次展开永远不发生。
@@ -8398,18 +8431,54 @@ async function api(method, path, body) {
     const parts = [];
     for (const group of groups) {
       const collapsed = terminalRailCollapsedGroups.has(group.key);
+      // 组头三件（M7 S3）：非 hover 是文件夹图标（开/关两枚），hover 同槽位换成
+      // 箭头（0ms 硬切，CSS 管）；右侧 hover 出 ⋯（菜单，现仅「移除分组」）与 ⊕
+      // （在此目录新建终端，S3 落）。「未分组」组没有目录身份，这些都不给（dsh 同
+      // 口径）。组头本身仍是整行可点的折叠开关——动作钮是它的兄弟span，不吃它的点击。
+      const headActions = group.key
+        ? `<span class="rail-term-group-actions">
+          <span class="rail-term-group-btn" data-rail-term-group-menu="${esc(group.key)}" aria-hidden="true">${TERMINAL_RAIL_ICON_ELLIPSIS}</span>
+        </span>`
+        : "";
       parts.push(`
       <div class="rail-term-group${collapsed ? "" : " is-open"}">
-        <button type="button" class="rail-term-group-head" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
-          <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
-          <span class="rail-term-group-icon">${collapsed ? TERMINAL_RAIL_ICON_FOLDER_CLOSED : TERMINAL_RAIL_ICON_FOLDER_OPEN}</span>
-          <span class="rail-term-group-name">${escapeHtml(group.label)}</span>
-        </button>`);
+        <div class="rail-term-group-head">
+          <button type="button" class="rail-term-group-toggle" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
+            <span class="rail-term-group-slot">
+              <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
+              <span class="rail-term-group-icon">${collapsed ? TERMINAL_RAIL_ICON_FOLDER_CLOSED : TERMINAL_RAIL_ICON_FOLDER_OPEN}</span>
+            </span>
+            <span class="rail-term-group-name">${escapeHtml(group.label)}</span>
+          </button>
+          ${headActions}
+        </div>`);
       if (!collapsed) {
         const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
         for (const row of group.rows.slice(0, view.visible)) parts.push(terminalRailHistoryRowHtml(row));
         if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
           parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
+        }
+      }
+      parts.push(`</div>`);
+    }
+    // 「已移除的分组（N）」折叠区（M7 S2）：段尾，仅 N>0 时出现。行给目录短名，
+    // title 给完整路径（盘上留的就是用户点选时的原始拼写），行内「恢复」钮。
+    // 恢复入口的另一个（toast 撤销那类是归档的）——分组移除只能在这里恢复。
+    if (terminalRailPrefs.removedGroups.length > 0) {
+      const removedCollapsed = terminalRailRemovedCollapsed;
+      parts.push(`
+      <div class="rail-term-removed${removedCollapsed ? "" : " is-open"}">
+        <button type="button" class="rail-term-removed-head" data-rail-term-removed-toggle="1" aria-expanded="${removedCollapsed ? "false" : "true"}">
+          <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
+          <span class="rail-term-removed-name">已移除的分组（${terminalRailPrefs.removedGroups.length}）</span>
+        </button>`);
+      if (!removedCollapsed) {
+        for (const dir of terminalRailPrefs.removedGroups) {
+          parts.push(`
+        <div class="rail-term-row rail-term-removed-row" title="${esc(dir)}">
+          <span class="rail-term-row-title">${escapeHtml(sessDirName(dir))}</span>
+          <span class="rail-term-row-restore" data-rail-term-restore-group="${esc(dir)}">恢复</span>
+        </div>`);
         }
       }
       parts.push(`</div>`);
@@ -8585,10 +8654,167 @@ async function api(method, path, body) {
     if (session) terminalRailResumeSession(session);
   }
 
+  // 归档（dsh §1.4 / m6b §A）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
+  // 平静会话单击即归档，无确认、无动画（resetKey 瞬时消失，不播 FLIP）。本地先
+  // 生效再落盘——POST 是本机回环，等它往返再动列表会出现「点了没反应」的半个
+  // 节拍；落盘失败回退本地态并提示，不假装成功（刷新回来还在，比假成功更难理解）。
+  // 归档与续接无关：不可续接的会话照样可归档；打开中的终端在另一段，不受影响。
+  // 撤销 toast 是 M7 里唯一的恢复路径——行内取消归档钮与归档视图筛选取舍入 M8
+  // 段头「视图选项」（m6b §A2 的三个入口里，我们只先做 toast 这一个）。
+  function terminalRailArchiveSession(id) {
+    const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+    if (!session) return;
+    const entry = { endpoint: session.endpoint, id: session.id };
+    const key = terminalRailArchivedKey(session);
+    if (!key) return;
+    if (terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key)) return;
+    terminalRailPrefs.archived.push(entry);
+    terminalRailFlipMode = "instant";
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/archive", entry)
+      .then(() => {
+        // 6s 撤销窗（dsh holdMs 同值）：tone 走成功（不传 isErr），撤销＝取消归档。
+        toast("会话已归档。", false, {
+          durationMs: 6000,
+          action: { label: "撤销", onClick: () => terminalRailUnarchiveSession(entry.endpoint, entry.id) },
+        });
+      })
+      .catch((error) => {
+        terminalRailPrefs.archived = terminalRailPrefs.archived.filter((row) => terminalRailArchivedKey(row) !== key);
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "归档没能保存，请重试"), true);
+      });
+  }
+
+  // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按最近活跃
+  // 的排序天然还原（dsh 的 sessionIds 槽位保留是同一种思路）。无 toast（m6b §A6
+  // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。
+  function terminalRailUnarchiveSession(endpoint, id) {
+    const key = `${endpoint}\u0000${id}`;
+    if (!terminalRailPrefs.archived.some((row) => `${row.endpoint}\u0000${row.id}` === key)) return;
+    terminalRailPrefs.archived = terminalRailPrefs.archived.filter((row) => `${row.endpoint}\u0000${row.id}` !== key);
+    terminalRailFlipMode = "instant";
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/unarchive", { endpoint, id })
+      .catch((error) => {
+        terminalRailPrefs.archived.push({ endpoint, id });
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "取消归档没能保存，请重试"), true);
+      });
+  }
+
   function toggleTerminalRailGroup(key) {
     if (terminalRailCollapsedGroups.has(key)) terminalRailCollapsedGroups.delete(key);
     else terminalRailCollapsedGroups.add(key);
     terminalRailFlipMode = "flip";
+    renderTerminalRailHistory(terminalRailAgentId());
+  }
+
+  // ── 组头 ⋯ 菜单（M7 S2/S3） ──
+  // 栏内单例：同一时刻只开一个，换目标即换主。容器做成可扩的——M8 往段头「视图
+  // 选项」加项时若还要组级菜单，只在这里 append，不开第二套浮层。挂在栏体下而
+  // 不在列表里：列表整体 innerHTML 重渲（1s 轮询每拍都可能），挂进去会被抹掉。
+  let terminalRailMenuKey = "";
+  let terminalRailMenuEl = null;
+
+  function closeTerminalRailGroupMenu() {
+    if (terminalRailMenuEl && typeof terminalRailMenuEl.remove === "function") terminalRailMenuEl.remove();
+    terminalRailMenuEl = null;
+    terminalRailMenuKey = "";
+  }
+
+  // 组头元素查找：按 data 属性逐个比（组键是 Windows 路径，直接拼选择器会被反
+  // 斜杠/引号咬，不干）。
+  function terminalRailGroupHeadEl(key) {
+    const list = $("railTermHistoryList");
+    if (!list || typeof list.querySelectorAll !== "function") return null;
+    for (const head of list.querySelectorAll("[data-rail-term-group]")) {
+      if (head.getAttribute("data-rail-term-group") === key) return head;
+    }
+    return null;
+  }
+
+  function openTerminalRailGroupMenu(key) {
+    const dir = $("railTerminalDir");
+    if (!dir || !key) { closeTerminalRailGroupMenu(); return; }
+    const head = terminalRailGroupHeadEl(key);
+    if (!head) { closeTerminalRailGroupMenu(); return; }
+    closeTerminalRailGroupMenu();
+    terminalRailMenuKey = key;
+    const menu = document.createElement("div");
+    menu.className = "rail-term-menu";
+    const item = document.createElement("button");
+    item.type = "button";
+    item.className = "rail-term-menu-item is-danger";
+    item.setAttribute("data-rail-term-remove-group", key);
+    item.textContent = "移除分组";
+    menu.append(item);
+    dir.append(menu);
+    // 定位贴组头：右缘与组头右缘对齐、顶缘贴组头底边。换算到栏体坐标——菜单的
+    // 包含块就是栏体（#railTerminalDir，position:relative），中间隔着的滚动层不
+    // 进偏移计算。栏体滚动会带偏菜单，挂个一次性 capture scroll 监听跟着关。
+    const dirRect = dir.getBoundingClientRect();
+    const headRect = head.getBoundingClientRect();
+    menu.style.top = `${Math.max(0, headRect.bottom - dirRect.top + 4)}px`;
+    menu.style.left = `${Math.max(0, headRect.right - dirRect.left - menu.offsetWidth)}px`;
+    dir.addEventListener("scroll", closeTerminalRailGroupMenu, { capture: true, once: true });
+    terminalRailMenuEl = menu;
+  }
+
+  function toggleTerminalRailGroupMenu(key) {
+    if (terminalRailMenuKey === key) closeTerminalRailGroupMenu();
+    else openTerminalRailGroupMenu(key);
+  }
+
+  // 分组移除（dsh §2 / m6 §2）：红色确认弹窗（复用共用确认件），只从清单移除，
+  // 磁盘文件夹与会话记录不动，会话落「未分组」。
+  function terminalRailRemoveGroup(key) {
+    showSkillsModal({
+      title: "移除分组",
+      bodyHtml: `把“${escapeHtml(sessDirName(key))}”从会话栏移除。文件夹和会话记录都会保留，里面的会话会显示在“未分组”下。`,
+      confirmText: "移除分组",
+      danger: true,
+      onConfirm: () => terminalRailCommitRemoveGroup(key),
+    });
+  }
+
+  // 确认后执行：本地先生效再落盘（与归档同一拍节——POST 是本机回环，等它往返
+  // 再动列表会出现「点了没反应」的半个节拍）；失败回退并提示。已经移除过的目录
+  // 幂等跳过（用户连点两次菜单不该发两次请求）。
+  function terminalRailCommitRemoveGroup(key) {
+    if (terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, key))) return;
+    terminalRailPrefs.removedGroups.push(key);
+    closeTerminalRailGroupMenu();
+    terminalRailFlipMode = "instant"; // 移除是 resetKey：瞬时重排，不播 FLIP
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/remove-group", { dir: key })
+      .catch((error) => {
+        terminalRailPrefs.removedGroups = terminalRailPrefs.removedGroups.filter((dir) => !terminalRailSameDir(dir, key));
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "分组移除没能保存，请重试"), true);
+      });
+  }
+
+  // 恢复：出清单即重新归组（按最近活跃，不记原索引——派生分组本就如此）。POST
+  // 带盘上的原始拼写（恢复区行给出的那条），store 按归一化键匹配。
+  function terminalRailRestoreGroup(dir) {
+    const entry = terminalRailPrefs.removedGroups.find((row) => terminalRailSameDir(row, dir));
+    if (!entry) return;
+    terminalRailPrefs.removedGroups = terminalRailPrefs.removedGroups.filter((row) => !terminalRailSameDir(row, dir));
+    closeTerminalRailGroupMenu();
+    terminalRailFlipMode = "instant";
+    renderTerminalRailHistory(terminalRailAgentId());
+    api("POST", "/api/terminal/rail/restore-group", { dir: entry })
+      .catch((error) => {
+        terminalRailPrefs.removedGroups.push(entry);
+        renderTerminalRailHistory(terminalRailAgentId());
+        toast(panelError(error, "分组恢复没能保存，请重试"), true);
+      });
+  }
+
+  function toggleTerminalRailRemoved() {
+    terminalRailRemovedCollapsed = !terminalRailRemovedCollapsed;
+    terminalRailFlipMode = "instant";
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
@@ -8604,7 +8830,8 @@ async function api(method, path, body) {
 
   // 进终端视图：历史会话在这里重取一次，视图内的其他渲染都不触发扫盘。水位线随列表
   // 卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态留在内存里
-  // 跨进出保持（用户手动收起的组不该每次进来都弹开）。
+  // 跨进出保持（用户手动收起的组不该每次进来都弹开）。视图状态（归档/已移除分组）
+  // 同样在这里拉一次——落盘在面板侧，与 terminal-host 就绪与否无关。
   function enterTerminalRail() {
     terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
     terminalRailRendered = { open: null, history: null };
@@ -8612,26 +8839,69 @@ async function api(method, path, body) {
     terminalRailAutoExpandedFor = "";
     terminalRailScrolledFor = "";
     terminalRailFlipMode = "instant";
+    loadTerminalRailPrefs();
     renderTerminalRail();
+  }
+
+  // 视图状态全量拉取（GET /panel/api/terminal/rail/prefs）。失败按空表处理：最坏
+  // 回到「没归档过/没移除过」，不挡栏体渲染；随后动作若也落盘失败，走动作自己的
+  // 错误提示。落地后补渲一帧——过滤要等这份清单真回来才生效。
+  function loadTerminalRailPrefs() {
+    return api("GET", "/api/terminal/rail/prefs")
+      .then((data) => {
+        terminalRailPrefs = {
+          archived: Array.isArray(data && data.archived) ? data.archived : [],
+          removedGroups: Array.isArray(data && data.removedGroups) ? data.removedGroups : [],
+        };
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (currentView === "terminal") renderTerminalRailHistory(terminalRailAgentId());
+      });
   }
 
   function initTerminalRail() {
     const dir = $("railTerminalDir");
     if (!dir) return;
-    const slot = $("railTermAgentAvatar");
-    terminalRailAgentGlyph = slot && typeof slot.querySelector === "function" ? slot.querySelector(".rail-term-agent-glyph") : null;
     // 首次指针/键盘输入才武装 FLIP：进页那一帧直接落位，用户还没动手时不放整列表淡入。
     const armMotion = () => { terminalRailMotionArmed = true; };
     dir.addEventListener("pointerdown", armMotion, { once: true });
     dir.addEventListener("keydown", armMotion, { once: true });
-    // 一处委托：关闭叉 / 切换终端 / 历史行续接 / 组折叠 / 水位线。关闭叉先判，否则
-    // 会被行点击抢走。
+    // 一处委托：关闭叉 / 切换终端 / 历史行归档 / 组头菜单 / 移除分组 / 恢复分组 /
+    // 历史行续接 / 组折叠 / 水位线。关闭叉与归档钮先判，否则会被行点击抢走；组头
+    // ⋯ 与菜单项、恢复钮都要抢在「历史行续接」与「组折叠」之前——它们同在那一片
+    // 区域里，判序错了点⋯ 就会折叠组、点恢复就会续接会话。
     dir.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
       const close = target.closest("[data-rail-term-close]");
       if (close) {
         terminalRailCloseSession(close.getAttribute("data-rail-term-close"));
+        return;
+      }
+      const archive = target.closest("[data-rail-term-archive]");
+      if (archive) {
+        terminalRailArchiveSession(archive.getAttribute("data-rail-term-archive"));
+        return;
+      }
+      const menuBtn = target.closest("[data-rail-term-group-menu]");
+      if (menuBtn) {
+        toggleTerminalRailGroupMenu(menuBtn.getAttribute("data-rail-term-group-menu"));
+        return;
+      }
+      const removeItem = target.closest("[data-rail-term-remove-group]");
+      if (removeItem) {
+        terminalRailCommitRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
+        return;
+      }
+      const restore = target.closest("[data-rail-term-restore-group]");
+      if (restore) {
+        terminalRailRestoreGroup(restore.getAttribute("data-rail-term-restore-group"));
+        return;
+      }
+      const removedToggle = target.closest("[data-rail-term-removed-toggle]");
+      if (removedToggle) {
+        toggleTerminalRailRemoved();
         return;
       }
       const sessionRow = target.closest("[data-rail-term-session]");
@@ -8660,6 +8930,18 @@ async function api(method, path, body) {
     if (back) {
       back.onclick = () => (document.body.classList.contains("terminal-mode") ? closeTerminalPreview() : switchView(settingsReturnView));
     }
+    // 组头 ⋯ 菜单的兜底收场：点菜单外（委托分支已判的 ⋯ 钮与菜单项除外）与 Esc。
+    // document 级监听在委托之后触发（冒泡从内到外），分工不冲突。
+    document.addEventListener("click", (event) => {
+      if (!terminalRailMenuEl) return;
+      const target = event.target;
+      if (terminalRailMenuEl.contains(target)) return;
+      if (target && typeof target.closest === "function" && target.closest("[data-rail-term-group-menu]")) return;
+      closeTerminalRailGroupMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeTerminalRailGroupMenu();
+    });
   }
 
   function initSkillsTab() {
