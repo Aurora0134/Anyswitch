@@ -65,7 +65,7 @@ describe("终端视图左栏换血（M4）", () => {
       }
       assert.ok(!panelHtml.includes("rail-term-agent-glyph"), "通用终端字形槽一并清净");
       assert.ok(!panelCss.includes(".rail-term-agent"), "身份行样式一并清净");
-      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4）"), panelJs.indexOf("function initSkillsTab"));
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
       for (const symbol of ["renderTerminalRailAgent", "terminalRailAgentGlyph", "terminalRailAgentLabel"]) {
         assert.ok(!railBlock.includes(symbol), `身份行函数 ${symbol} 已清净`);
       }

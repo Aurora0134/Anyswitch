@@ -8716,7 +8716,7 @@ async function api(method, path, body) {
       .catch((error) => {
         terminalRailPrefs.archived = terminalRailPrefs.archived.filter((row) => terminalRailArchivedKey(row) !== key);
         renderTerminalRailHistory(terminalRailAgentId());
-        toast(panelError(error, "归档没能保存，请重试"), true);
+        toast(panelError(error, "归档未能保存，请重试"), true);
       });
   }
 
@@ -8733,7 +8733,7 @@ async function api(method, path, body) {
       .catch((error) => {
         terminalRailPrefs.archived.push({ endpoint, id });
         renderTerminalRailHistory(terminalRailAgentId());
-        toast(panelError(error, "取消归档没能保存，请重试"), true);
+        toast(panelError(error, "取消归档未能保存，请重试"), true);
       });
   }
 
@@ -8908,7 +8908,7 @@ async function api(method, path, body) {
       .catch((error) => {
         terminalRailPrefs.removedGroups = terminalRailPrefs.removedGroups.filter((dir) => !terminalRailSameDir(dir, key));
         renderTerminalRailHistory(terminalRailAgentId());
-        toast(panelError(error, "分组移除没能保存，请重试"), true);
+        toast(panelError(error, "分组移除未能保存，请重试"), true);
       });
   }
 
@@ -8925,7 +8925,7 @@ async function api(method, path, body) {
       .catch((error) => {
         terminalRailPrefs.removedGroups.push(entry);
         renderTerminalRailHistory(terminalRailAgentId());
-        toast(panelError(error, "分组恢复没能保存，请重试"), true);
+        toast(panelError(error, "分组恢复未能保存，请重试"), true);
       });
   }
 
@@ -9043,7 +9043,9 @@ async function api(method, path, body) {
       }
       const removeItem = target.closest("[data-rail-term-remove-group]");
       if (removeItem) {
-        terminalRailCommitRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
+        // 移除分组必须走带确认弹窗的入口：直接调 commit 版会把红色确认弹窗整个
+        // 绕过——点一下就真移除，没有任何二次确认（复审必修 1 钉住这条链）。
+        terminalRailRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
         return;
       }
       const restore = target.closest("[data-rail-term-restore-group]");

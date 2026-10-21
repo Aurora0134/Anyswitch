@@ -326,6 +326,10 @@ describe("S1 会话归档（finding 1a）", () => {
       for (const forbidden of ['title="取消归档"', 'aria-label="取消归档"', 'toast("取消归档', 'toast("已取消归档']) {
         assert.ok(!body.includes(forbidden), `上屏文案无「${forbidden}」`);
       }
+      // 失败兜底两句逐字（用户 2026-10-21 措辞修正：没能→未能）
+      assert.ok(body.includes('"归档未能保存，请重试"'), "归档失败兜底逐字");
+      assert.ok(body.includes('"取消归档未能保存，请重试"'), "取消归档失败兜底逐字");
+      assert.ok(!body.includes("没能保存"), "旧措辞「没能保存」清零");
     });
   });
 });
@@ -526,6 +530,15 @@ describe("S2 分组移除（finding 1b）", () => {
       const block = init.slice(clickAt, init.indexOf("});", clickAt));
       assert.ok(block.indexOf("data-rail-term-restore-group") < block.indexOf("data-rail-term-resume"),
         "恢复钮在行续接之前判");
+      // 移除分组必须走带确认弹窗的入口（复审必修 1）：委托直接调 commit 版会把
+      // 红色确认弹窗整个绕过——点一下就真移除，没有任何二次确认。
+      const removeBranch = block.slice(block.indexOf("data-rail-term-remove-group"), block.indexOf("data-rail-term-restore-group"));
+      assert.ok(removeBranch.includes("terminalRailRemoveGroup("),
+        "菜单项委托调 terminalRailRemoveGroup（开弹窗），不是 commit 版");
+      assert.ok(!removeBranch.includes("terminalRailCommitRemoveGroup("),
+        "委托不许直接调 commit 版（那等于绕过确认弹窗）");
+      // 弹窗版是生产可达的：init 委托里必须出现它的调用（死代码检测）
+      assert.ok(block.includes("terminalRailRemoveGroup("), "terminalRailRemoveGroup 有生产调用点（不是死代码）");
     });
   });
 
@@ -538,6 +551,10 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.ok(body.includes('confirmText: "移除分组"'), "确认钮逐字");
       assert.ok(body.includes(">恢复<"), "恢复钮逐字");
       assert.ok(body.includes("已移除的分组（"), "折叠区标题形制逐字");
+      // 失败兜底两句逐字（用户 2026-10-21 措辞修正：没能→未能）
+      assert.ok(body.includes('"分组移除未能保存，请重试"'), "移除失败兜底逐字");
+      assert.ok(body.includes('"分组恢复未能保存，请重试"'), "恢复失败兜底逐字");
+      assert.ok(!body.includes("没能保存"), "旧措辞「没能保存」清零");
     });
 
     it("「未分组」组不提供移除：组头不给 ⋯（S3 同款豁免）", () => {
