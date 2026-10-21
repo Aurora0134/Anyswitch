@@ -8192,11 +8192,13 @@ async function api(method, path, body) {
   }
 
   /* ============================================================
-     终端会话栏（M4 + M7）：终端视图下的左栏换血内容
+     终端会话栏（M4 + M7 + M8）：终端视图下的左栏换血内容
      ============================================================ */
-  // 栏体自上而下：新建终端 → 打开的终端 → 历史会话。原左上角的 agent 身份行
-  // （头像＋名称）已按用户 2026-10-21 拍板拆除——与 anys 产品图标贴在一起抢视野；
-  // 两段数据仍严格跟随活跃终端的 agent，不做跨 agent 浏览，只是不再显示身份。
+  // 栏体自上而下（M8 T1 两段合并）：「新建终端」钮 →「工作区」段头（T7 三钮）→
+  // 目录分组树 → 栏底。「打开的终端」段已整段拆除——live 不再单列，而是树里行的
+  // 属性：一条会话行有开着终端替它续接（resume 两键映射，M7-S5）即是 live，带状态
+  // 点/选中态/关闭叉。全新终端在会话文件落盘前按 cwd 在组顶插「新会话」兜底行
+  // （渲染时从后端真值表现推导，不另记状态）。原左上角 agent 身份行已拆（M7-S0）。
   // 观感按 dsh 左栏实测（unpack/sidebar-motion-spec.md）：行 hover/选中、行内动作
   // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
   // 移有运动。
@@ -8211,8 +8213,13 @@ async function api(method, path, body) {
   // 与 terminal-host 就绪与否无关——降级/未就绪时归档照样可用（dsh 同口径：归档
   // 是 workspace domain 的持久化集合，不是宿主能力）。
   let terminalRailPrefs = { archived: [], removedGroups: [] };
-  // 两块列表的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
-  let terminalRailRendered = { open: null, history: null };
+  // 视图偏好（M8 T7b）：分组方式 / 排序方式 / 归档筛选三组，落 localStorage（dsh
+  // 的 dsh.workspace.view.v5 同层——纯视图偏好，不进面板后端）。手序按 agent 键存
+  // （手动排序的唯一来源）。默认值即 dsh 出厂默认。
+  const TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view";
+  let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+  // 树的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
+  let terminalRailRendered = { history: null };
   let terminalRailFetchInFlight = false;
   // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
   // flipMode 一帧用完即复位，只有组展开/收起会置 "flip"。
@@ -8233,6 +8240,8 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_FOLDER_OPEN = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v2"/><path d="M3.5 20l2.4-7h14.2l-2.4 7z"/></svg>';
   const TERMINAL_RAIL_ICON_FOLDER_CLOSED = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
   const TERMINAL_RAIL_ICON_ARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>';
+  // 取消归档钮（M8 T7a，归档行的第三恢复入口）：归档盒 + 向上的箭头（出盒即还原）
+  const TERMINAL_RAIL_ICON_UNARCHIVE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/><polyline points="12 11 12 7"/><polyline points="9 10 12 7 15 10"/></svg>';
   // 组头 ⋯ 钮与 ⊕ 钮（feather more-horizontal / plus）：16px 槽，与行内归档/关闭叉
   // 同一描边风。⋯ 不设 title/aria-label——批准文案清单里没有它的标签，按栏内关闭
   // 叉的既有形制（aria-hidden 装饰图标）处理，标签文案留待清单补录。
@@ -8261,14 +8270,21 @@ async function api(method, path, body) {
     return /^[\w-]+$/.test(raw) ? raw : "";
   }
 
-  // 「打开的终端」= 该 agent 的活跃终端；无 agent 聚焦时列无归属的空白终端们。
-  // 只读后端真值表（见 terminalRailSessionMap）：未就绪时为空，不列预览种子。
-  function terminalRailOpenSessions(agentId) {
-    const out = [];
-    for (const session of Object.values(terminalRailSessionMap())) {
-      if (session && terminalRailAgentId(session) === agentId) out.push(session);
-    }
-    return out;
+  // 栏内局部时间格式（M8 T3，dsh 式无前缀）：刚刚 / N分钟 / N小时 / 昨天 / N天 /
+  // M月D日（跨年 YYYY年M月D日）。**栏内局部实现**——会话页共用的 sessRelTime 带
+  // 「前」缀且被别的视图用着，不动它。
+  function terminalRailRelTime(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 0) return "刚刚"; // 时钟回拨防御
+    if (diff < SESS_MIN) return "刚刚";
+    if (diff < SESS_HOUR) return Math.floor(diff / SESS_MIN) + "分钟";
+    if (diff < 24 * SESS_HOUR) return Math.floor(diff / SESS_HOUR) + "小时";
+    const d = new Date(ts), now = new Date();
+    const yest = new Date(now); yest.setDate(now.getDate() - 1);
+    if (d.toDateString() === yest.toDateString()) return "昨天";
+    if (diff < 7 * SESS_DAY) return Math.floor(diff / SESS_DAY) + "天";
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return sameYear ? `${d.getMonth() + 1}月${d.getDate()}日` : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
   }
 
   // 历史会话分组：按 project 归组（组头取目录短名），无 project 归「未分组」并沉底；
@@ -8361,15 +8377,45 @@ async function api(method, path, body) {
     return endpoint && id ? `${endpoint}\u0000${id}` : "";
   }
 
+  function terminalRailIsArchived(session) {
+    const key = terminalRailArchivedKey(session);
+    return !!key && terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key);
+  }
+
   // 归档＝视图过滤（dsh §1.4）：底层列表一个字节都不动，过滤放在分组之前——
   // 组内序、水位线、「展开其余 N」计数自然都按过滤后的行算（m6b §A6 实测口径：
-  // 归档即计数减一，取消即加一）。
+  // 归档即计数减一，取消即加一）。M8 T7b 起筛选三态：default 隐藏 / show 内联灰显 /
+  // only 只留归档（无归档的组整组丢弃，见渲染层的组过滤）。
   function terminalRailVisibleSessions() {
-    const archived = new Set((terminalRailPrefs.archived || []).map((entry) => `${entry.endpoint}\u0000${entry.id}`));
-    return terminalRailHistory.sessions.filter((session) => {
-      const key = terminalRailArchivedKey(session);
-      return !key || !archived.has(key);
-    });
+    const all = terminalRailHistory.sessions;
+    if (terminalRailViewPrefs.archivedFilter === "only") return all.filter(terminalRailIsArchived);
+    if (terminalRailViewPrefs.archivedFilter === "show") return all;
+    return all.filter((session) => !terminalRailIsArchived(session));
+  }
+
+  // ── 全新终端兜底行（M8 T1）──
+  // 新建终端后会话文件可能还没生成（agent 未发消息、列表里没有这条历史）——此时在
+  // 它 cwd 所属组的组顶插一条 live 行，标签「新会话」、无时间；会话文件出现后自然
+  // 被真行接替（dsh 的「新会话」行正是这个形态）。**渲染时从后端真值表现推导**，
+  // 不另记 pending 状态：终端关了（不在会话表里）行即消失，同目录出现建终端之后
+  // 活跃的会话即算被接替。判据＝该终端带 agent、无 resume 记录（续接创建的真行
+  // 已在列表里，不需要兜底）、同目录没有比它更晚活跃的会话。
+  function terminalRailPendingNewTerminals() {
+    const agentId = terminalRailAgentId();
+    if (!agentId) return [];
+    const out = [];
+    for (const session of Object.values(terminalRailSessionMap())) {
+      if (terminalRailAgentId(session) !== agentId) continue;
+      if (session.resume) continue;
+      const createdAt = session.backendState && Number.isFinite(session.backendState.createdAt)
+        ? session.backendState.createdAt
+        : Date.now();
+      const taken = terminalRailHistory.sessions.some((row) =>
+        terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= createdAt);
+      if (taken) continue;
+      out.push({ id: session.id, cwd: session.cwd, createdAt });
+    }
+    return out;
   }
 
   // ---- 渲染 ----
@@ -8380,38 +8426,64 @@ async function api(method, path, body) {
     const agentId = terminalRailAgentId();
     const newBtn = $("railTermNewBtn");
     // 就绪闸与页签栏加号同拍：未就绪时新建不可点（禁用位由 syncTerminalAddBtn 同拍刷新）。
-    if (newBtn) newBtn.disabled = !terminalBackendReady;
-    renderTerminalRailOpenList(agentId);
+    if (newBtn) {
+      newBtn.disabled = !terminalBackendReady;
+      // 文案随聚焦分态（M8 T3，用户 2026-10-21 指示）：有 agent 聚焦时起的是该
+      // agent 的会话，叫「新建会话」；无 agent 聚焦时起空白终端，叫「新建终端」。
+      // 行为不变，仅文案；aria/title 同步换。标签在子 span 里（钮上还有图标），
+      // 不能直接写 textContent。
+      const label = agentId ? "新建会话" : "新建终端";
+      const labelEl = typeof newBtn.querySelector === "function" ? newBtn.querySelector(".rail-term-new-label") : null;
+      if (labelEl && labelEl.textContent !== label) labelEl.textContent = label;
+      if (newBtn.title !== label) newBtn.title = label;
+      if (typeof newBtn.setAttribute === "function") newBtn.setAttribute("aria-label", label);
+    }
     renderTerminalRailHistory(agentId);
     syncTerminalRailHistory(agentId);
   }
 
-  function renderTerminalRailOpenList(agentId) {
-    const list = $("railTermOpenList");
-    if (!list) return;
-    const activeId = activeTerminalPreviewId;
-    const html = terminalRailOpenSessions(agentId).map((session) => {
-      const working = session.status === "working";
-      return `
-      <button type="button" class="rail-term-row rail-term-row-open${session.id === activeId ? " is-active" : ""}" data-rail-term-session="${esc(session.id)}" title="${esc(session.label)}">
-        <span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>
-        <span class="rail-term-row-title">${escapeHtml(session.label)}</span>
-        <span class="rail-term-row-close" data-rail-term-close="${esc(session.id)}" aria-hidden="true">×</span>
-      </button>`;
-    }).join("");
-    if (html === terminalRailRendered.open) return;
-    terminalRailRendered.open = html;
-    list.innerHTML = html;
-  }
-
-  function terminalRailHistoryRowHtml(session) {
+  // 树行 HTML（M8 T1/T2/T5）：live 行带状态点 + 关闭叉 + 归档钮；非 live 行只带
+  // 归档钮；归档行（筛选 show 态内联）灰字 + 取消归档钮。live 属性带终端 id——
+  // 点击委托据此分支（聚焦终端 vs 走续接两分支）。
+  function terminalRailRowHtml(session, live, activeId) {
     const title = sessTitle(session);
-    const time = session.lastActive ? sessRelTime(session.lastActive) : "";
+    const time = session.lastActive ? terminalRailRelTime(session.lastActive) : "";
+    const archived = terminalRailIsArchived(session);
+    const working = !!live && live.status === "working";
+    const cls = ["rail-term-row", "rail-term-row-history"];
+    if (live) cls.push("is-live");
+    if (archived) cls.push("is-archived");
+    if (live && live.id === activeId) cls.push("is-active");
+    const dot = live
+      ? `<span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>`
+      : "";
+    const closeBtn = live
+      ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
+      : "";
+    const action = archived
+      ? `<span class="rail-term-row-unarchive" data-rail-term-unarchive="${esc(session.id)}" title="取消归档" aria-label="取消归档">${TERMINAL_RAIL_ICON_UNARCHIVE}</span>`
+      : `<span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>`;
     return `
-      <button type="button" class="rail-term-row rail-term-row-history" data-rail-term-resume="${esc(session.id)}" title="${esc(title)}">
+      <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""} title="${esc(title)}">
+        ${dot}
         <span class="rail-term-row-title">${escapeHtml(title)}</span>
         <span class="rail-term-row-time">${escapeHtml(time)}</span>
-        <span class="rail-term-row-archive" data-rail-term-archive="${esc(session.id)}" title="归档会话" aria-label="归档会话">${TERMINAL_RAIL_ICON_ARCHIVE}</span>
+        ${closeBtn}
+        ${action}
+      </button>`;
+  }
+
+  // 「新会话」兜底行（M8 T1）：组顶 live 行，无时间、无归档钮（还没有会话身份可
+  // 归档），点击走聚焦、hover 出关闭叉。
+  function terminalRailPendingRowHtml(entry, activeId) {
+    const session = terminalRailSessionMap()[entry.id];
+    const working = !!session && session.status === "working";
+    const active = entry.id === activeId;
+    return `
+      <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
+        <span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>
+        <span class="rail-term-row-title">新会话</span>
+        <span class="rail-term-row-close" data-rail-term-close="${esc(entry.id)}" aria-hidden="true">×</span>
       </button>`;
   }
 
@@ -8424,7 +8496,37 @@ async function api(method, path, body) {
     const sessions = loaded ? terminalRailVisibleSessions() : [];
     // 先归档过滤（visible）再分组，最后把被移除目录的会话改组进「未分组」——
     // 顺序即语义：过滤 → 目录身份 → 移除摘牌。
-    const groups = terminalRailRegroupRemoved(terminalRailGroupSessions(sessions));
+    let groups = terminalRailRegroupRemoved(terminalRailGroupSessions(sessions));
+    // 「仅显示已归档」：无归档会话的组整组丢弃（dsh groupByWorkspace 同口径）
+    if (terminalRailViewPrefs.archivedFilter === "only") {
+      groups = groups.filter((group) => group.key === "" || group.rows.length > 0);
+    }
+    // 全新终端兜底行（M8 T1）：按 cwd 找所属组，没有就为它建组（目录被用户移除过
+    // 的除外——那种目录的会话都进「未分组」，兜底行同命运）。
+    const pending = terminalRailPendingNewTerminals();
+    for (const entry of pending) {
+      const removed = terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, entry.cwd));
+      let group = groups.find((row) => row.key && terminalRailSameDir(row.key, entry.cwd));
+      if (!group && !removed) {
+        group = { key: entry.cwd, label: sessDirName(entry.cwd), rows: [], latest: entry.createdAt };
+        groups.push(group);
+        groups.sort((a, b) => {
+          if ((a.key === "") !== (b.key === "")) return a.key === "" ? 1 : -1;
+          return (b.latest - a.latest) || String(a.label).localeCompare(String(b.label));
+        });
+      }
+      if (!group) continue;
+      if (!group.pending) group.pending = [];
+      group.pending.push(entry);
+    }
+    // live 映射：行 → 开着终端（resume 两键，M7-S5）。selected 由渲染时的活跃终端定。
+    for (const group of groups) {
+      if (!group.live) group.live = new Map();
+      for (const row of group.rows) {
+        const live = terminalRailFindOpenSession(row.endpoint, row.id);
+        if (live) group.live.set(row.id, live);
+      }
+    }
     terminalRailLastGroups = groups;
     // 活跃终端所在组自动展开并滚到可见：只在「活跃终端换了」这一刻做一次，而且必须
     // 等这个 agent 的列表真落地、且真的找到了活跃终端所在组——首帧渲染时历史还没
@@ -8442,10 +8544,11 @@ async function api(method, path, body) {
     const parts = [];
     for (const group of groups) {
       const collapsed = terminalRailCollapsedGroups.has(group.key);
-      // 组头三件（M7 S3）：非 hover 是文件夹图标（开/关两枚），hover 同槽位换成
-      // 箭头（0ms 硬切，CSS 管）；右侧 hover 出 ⋯（菜单，现仅「移除分组」）与 ⊕
-      // （在此目录新建终端）。「未分组」组没有目录身份，这些都不给（dsh 同口径）。
-      // 组头本身仍是整行可点的折叠开关——动作钮是它的兄弟span，不吃它的点击。
+      // 组头三件（M7 S3 / M8 T7）：非 hover 是文件夹图标（开/关两枚），hover 同槽位
+      // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
+      // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
+      // 没有目录身份，这些都不给（dsh 同口径）。组头本身仍是整行可点的折叠开关。
+      const current = group.key !== "" && group.key === activeGroup;
       const headActions = group.key
         ? `<span class="rail-term-group-actions">
           <span class="rail-term-group-btn" data-rail-term-group-new="${esc(group.key)}" title="在此目录新建终端" aria-label="在此目录新建终端">${TERMINAL_RAIL_ICON_PLUS}</span>
@@ -8458,15 +8561,19 @@ async function api(method, path, body) {
           <button type="button" class="rail-term-group-toggle" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
             <span class="rail-term-group-slot">
               <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
-              <span class="rail-term-group-icon">${collapsed ? TERMINAL_RAIL_ICON_FOLDER_CLOSED : TERMINAL_RAIL_ICON_FOLDER_OPEN}</span>
+              <span class="rail-term-group-icon${current ? " is-current" : ""}">${collapsed ? TERMINAL_RAIL_ICON_FOLDER_CLOSED : TERMINAL_RAIL_ICON_FOLDER_OPEN}</span>
             </span>
             <span class="rail-term-group-name">${escapeHtml(group.label)}</span>
           </button>
           ${headActions}
         </div>`);
       if (!collapsed) {
+        // 兜底行固定组顶（不看 lastActive）；水位线只数真实历史行
+        for (const entry of group.pending || []) parts.push(terminalRailPendingRowHtml(entry, activeTerminalPreviewId));
         const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
-        for (const row of group.rows.slice(0, view.visible)) parts.push(terminalRailHistoryRowHtml(row));
+        for (const row of group.rows.slice(0, view.visible)) {
+          parts.push(terminalRailRowHtml(row, group.live.get(row.id) || null, activeTerminalPreviewId));
+        }
         if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
           parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
         }
@@ -8658,6 +8765,13 @@ async function api(method, path, body) {
       terminalRailActivateSession(open.id);
       return;
     }
+    // 归档会话点不开（M8 T7a，dsh notifyArchivedNotOpenable 同口径）：恢复链是
+    // 行内取消归档钮 + toast 撤销，续接要先取消归档。live 终端已开着的走上面聚焦，
+    // 到这儿的就是没开着终端的归档行。
+    if (terminalRailIsArchived(session)) {
+      toast("这条会话已归档，取消归档后才能续接", true);
+      return;
+    }
     if (!session.resumeCommand) {
       toast("这个 Agent 的会话暂时不能在终端里续接", true);
       return;
@@ -8797,7 +8911,8 @@ async function api(method, path, body) {
   function showTerminalRailHoverCard(head, key) {
     if (!head || typeof head.getBoundingClientRect !== "function") return;
     const group = terminalRailLastGroups.find((row) => row.key && terminalRailSameDir(row.key, key));
-    const count = group ? group.rows.length : 0;
+    // 计数＝组里看得见的行数（真实历史行 + 兜底「新会话」行）
+    const count = group ? group.rows.length + ((group.pending && group.pending.length) || 0) : 0;
     const card = document.createElement("div");
     card.className = "rail-term-hover-card";
     const name = document.createElement("div");
@@ -8951,7 +9066,7 @@ async function api(method, path, body) {
   // 同样在这里拉一次——落盘在面板侧，与 terminal-host 就绪与否无关。
   function enterTerminalRail() {
     terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
-    terminalRailRendered = { open: null, history: null };
+    terminalRailRendered = { history: null };
     terminalRailWatermarks.clear();
     terminalRailAutoExpandedFor = "";
     terminalRailScrolledFor = "";
@@ -9065,7 +9180,21 @@ async function api(method, path, body) {
       }
       const resumeRow = target.closest("[data-rail-term-resume]");
       if (resumeRow) {
+        // live 行点击＝聚焦其终端（M8 T2）；非 live 行才走去重/续接两分支
+        const liveId = resumeRow.getAttribute("data-rail-term-live");
+        if (liveId) {
+          terminalRailActivateSession(liveId);
+          return;
+        }
         terminalRailResumeHistoryRow(resumeRow.getAttribute("data-rail-term-resume"));
+        return;
+      }
+      const unarchive = target.closest("[data-rail-term-unarchive]");
+      if (unarchive) {
+        // 归档行的取消归档钮（M8 T7a，m6b §A2 第三入口）：无 toast（m6b §A6 口径）
+        const id = unarchive.getAttribute("data-rail-term-unarchive");
+        const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+        if (session) terminalRailUnarchiveSession(session.endpoint, session.id);
         return;
       }
       const groupHead = target.closest("[data-rail-term-group]");

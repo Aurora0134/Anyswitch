@@ -45,34 +45,42 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
   });
   const state = { collapsed: new Set(collapsed), scrolled: [] };
   const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedCollapsed", `
-    let terminalRailRendered = { open: null, history: null };
+    let terminalRailRendered = { history: null };
     let terminalRailAutoExpandedFor = "";
     let terminalRailScrolledFor = "";
     let terminalRailFlipMode = "instant";
     const terminalRailCollapsedGroups = state.collapsed;
     const terminalRailWatermarks = new Map();
     const terminalRailPrefs = prefs;
+    const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
     let terminalRailRemovedCollapsed = removedCollapsed;
+    let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
     const TERMINAL_RAIL_ICON_CHEVRON = "";
     const TERMINAL_RAIL_ICON_ARCHIVE = "";
+    const TERMINAL_RAIL_ICON_UNARCHIVE = "";
     const TERMINAL_RAIL_ICON_ELLIPSIS = "";
     const TERMINAL_RAIL_ICON_PLUS = "";
     const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
     const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
     let terminalRailHistory = history;
-    const activeTerminalPreviewId = activeSession ? "t1" : null;
+    const activeTerminalPreviewId = activeSession ? activeSession.id : null;
     function $(id) { return id === "railTermHistoryList" ? list : null; }
     let terminalBackendReady = true;
-    const terminalBackendSessions = activeSession ? { t1: activeSession } : {};
+    const terminalBackendSessions = activeSession ? { [activeSession.id]: activeSession } : {};
     ${extractFn("terminalRailSessionMap")}
     ${extractFn("terminalRailActiveSession")}
     ${extractFn("terminalRailAgentId")}
     ${extractFn("sessDirName")}
     function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
-    function sessRelTime() { return "刚刚"; }
+    function sessRelTime() { return "3 分钟前"; }
+    function terminalRailRelTime() { return "3 分钟前"; }
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
+    function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
+    function terminalRailRowTops() { return null; }
+    function playTerminalRailFlip() {}
+    ${extractFn("terminalRailFindOpenSession")}
     ${extractFn("terminalRailGroupSessions")}
     ${extractFn("terminalRailWatermarkView")}
     ${extractFn("terminalRailNextWatermark")}
@@ -80,28 +88,34 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailSameDir")}
     ${extractFn("terminalRailGroupForDir")}
     ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailIsArchived")}
     ${extractFn("terminalRailVisibleSessions")}
     ${extractFn("terminalRailRegroupRemoved")}
-    ${extractFn("terminalRailHistoryRowHtml")}
+    ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
     return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
   `)(list, state, history, activeSession, prefs, removedCollapsed);
   return { fn, list, state };
 }
 
-// 历史行渲染沙盒：只取行 HTML 生成函数本身
+// 历史行渲染沙盒：只取行 HTML 生成函数本身（第二参 live = 开着终端或 null）
 function rowHtmlSandbox(prefs) {
-  const fn = new Function("session", "prefs", `
+  const fn = new Function("session", "live", "activeId", "prefs", `
     const terminalRailPrefs = prefs;
     const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
+    const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
     function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
-    function sessRelTime() { return "刚刚"; }
+    function sessRelTime() { return "3 分钟前"; }
+    function terminalRailRelTime() { return "3 分钟前"; }
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
     ${extractFn("terminalRailArchivedKey")}
-    ${extractFn("terminalRailHistoryRowHtml")}
-    return terminalRailHistoryRowHtml;
-  `)(null, prefs);
+    ${extractFn("terminalRailIsArchived")}
+    ${extractFn("terminalRailRowHtml")}
+    return terminalRailRowHtml;
+  `)(null, null, "t1", prefs);
   return fn;
 }
 
@@ -159,7 +173,7 @@ describe("S1 会话归档（finding 1a）", () => {
 
     it("归档键＝endpoint＋session id：同 id 不同端点互不打扰", () => {
       const fn = rowHtmlSandbox({ archived: [], removedGroups: [] });
-      assert.ok(fn({ id: "s-1", endpoint: "kimi", title: "t" }).includes('data-rail-term-archive="s-1"'),
+      assert.ok(fn({ id: "s-1", endpoint: "kimi", title: "t" }, null, "t1").includes('data-rail-term-archive="s-1"'),
         "行内归档钮带会话 id");
       const sandbox = renderSandbox({
         history: {
@@ -179,9 +193,11 @@ describe("S1 会话归档（finding 1a）", () => {
     });
 
     it("归档行渲染即带「归档」钮：title 逐字「归档会话」，hover 才出现", () => {
-      const html = rowHtmlSandbox({ archived: [], removedGroups: [] })({
-        id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100,
-      });
+      const html = rowHtmlSandbox({ archived: [], removedGroups: [] })(
+        { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 },
+        null,
+        "t1",
+      );
       assert.ok(html.includes('data-rail-term-archive="s-1"'), "归档钮挂会话 id");
       assert.ok(html.includes('title="归档会话"'), "title 逐字取文案清单");
       assert.ok(html.includes('aria-label="归档会话"'), "无障碍名同词");
@@ -315,15 +331,17 @@ describe("S1 会话归档（finding 1a）", () => {
     });
 
     it("文案清单逐字：归档会话 / 会话已归档。/ 撤销，不新造", () => {
-      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       for (const copy of ["归档会话", "会话已归档。", "撤销"]) {
         assert.ok(body.includes(copy), `栏体文案「${copy}」在册`);
       }
       // M7 不供行内取消归档钮（恢复入口在 M8 视图选项，toast 撤销是唯一恢复路径）：
       // 上屏文案里不许出现「取消归档」——注释里提它不碍事，用户看得见的字不许有。
+      // ⚠ M8 T7a 起划线句作废：归档行在「全部会话」筛选下内联显示，hover 出「取消
+      // 归档」钮（m6b §A2 第三恢复入口，恢复链由此补齐）；toast 动作仍是「撤销」。
       const railStatic = panelHtml.slice(panelHtml.indexOf('id="railTerminalDir"'), panelHtml.indexOf('class="rail-foot"'));
       assert.ok(!railStatic.includes("取消归档"), "栏体静态文案无「取消归档」");
-      for (const forbidden of ['title="取消归档"', 'aria-label="取消归档"', 'toast("取消归档', 'toast("已取消归档']) {
+      for (const forbidden of ['toast("取消归档', 'toast("已取消归档']) {
         assert.ok(!body.includes(forbidden), `上屏文案无「${forbidden}」`);
       }
       // 失败兜底两句逐字（用户 2026-10-21 措辞修正：没能→未能）
@@ -544,7 +562,7 @@ describe("S2 分组移除（finding 1b）", () => {
 
   describe("S2 静态与文案", () => {
     it("确认弹窗文案逐字（含弯引号），不新造一字", () => {
-      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(body.includes("把“"), "正文起手逐字");
       assert.ok(body.includes("”从会话栏移除。文件夹和会话记录都会保留，里面的会话会显示在“未分组”下。"), "正文余下逐字");
       assert.ok(body.includes('title: "移除分组"'), "弹窗标题逐字");
@@ -618,7 +636,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       assert.ok(fn.includes("createAgentTerminal({ agentId: terminalRailAgentId(), cwd: key })"), "同一创建通路");
       assert.ok(!fn.includes('agentId: ""'), "没有为无 agent 兜底的代码路径");
       // 理由写在函数上方的注释里（栏体代码段内）
-      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(block.includes("历史会话段只在有 agent 聚焦时"), "注释说明为何无需无 agent 分支");
     });
 
@@ -637,7 +655,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
 
   describe("hover 卡（源码 + CSS）", () => {
     it("800ms 延迟、三行内容、整卡复制路径 + 「已复制」", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("TERMINAL_RAIL_HOVER_DELAY_MS = 800"), "延迟 800ms（dsh 同值）");
       assert.ok(src.includes("个会话"), "第三行「N 个会话」");
       assert.ok(src.includes('sessCopyText(key, "已复制")'), "整卡点击复制完整路径，反馈「已复制」（复用既有手法）");
@@ -645,7 +663,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
 
     it("⋯ 菜单打开期间抑制 hover 卡（dsh 的 disabled: menuOpen 同口径）", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(/if \(!head \|\| !key \|\| terminalRailMenuKey\) return/.test(src),
         "菜单开着不排卡");
       assert.ok(src.includes("closeTerminalRailHoverCard()") && src.includes("openTerminalRailGroupMenu"),
@@ -702,7 +720,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
 
     it("⋯ 菜单容器可扩：单一挂点 + 项是可增的 DOM（M8 加项不开第二套浮层）", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("function openTerminalRailGroupMenu(key)"), "单一开菜单挂点");
       assert.ok(/menu\.append\(item\)/.test(src), "菜单项是 append 进去的（可扩）");
     });
@@ -711,20 +729,23 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
 
 describe("S4 底栏钉住（finding 2，m6 §3）", () => {
   describe("三层结构（HTML 钉死）", () => {
-    it("栏体三层：顶区新建终端 / 中段唯一滚动层（两段都在内）/ 底栏亮暗返回", () => {
+    it("栏体三层：顶区新建终端 / 段头（滚动层外）/ 中段唯一滚动层（树）/ 底栏亮暗返回", () => {
       const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/);
       assert.ok(dir, "终端会话栏在册");
       const body = dir[0];
       // 顶区：新建终端钮在最上，且不在滚动层里
-      assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf('class="rail-term-scroll"'),
-        "新建终端（顶区）在滚动层之前");
-      // 中段：唯一滚动层包住两个段
+      assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf('id="railTermSectionHead"'),
+        "新建终端（顶区）在段头之前");
+      // 段头是滚动层外的定高块（dsh：sectionHeader 在 regionArea 里 flex:none）
+      assert.ok(body.indexOf('id="railTermSectionHead"') < body.indexOf('class="rail-term-scroll"'),
+        "段头在滚动层之前（不随树滚）");
+      // 中段：唯一滚动层里只有一棵工作区树（M8 T1 两段合并）
       const scroll = body.match(/<div class="rail-term-scroll">([\s\S]*?)<\/div>\s*<span class="rail-term-fade"/);
       assert.ok(scroll, "中段滚动层在册，且遮罩挂在它外面（不随内容滚）");
-      assert.ok(scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段在滚动层内");
-      assert.ok(scroll[1].includes('id="railTermHistoryList"'), "「历史会话」段在滚动层内");
+      assert.ok(scroll[1].includes('id="railTermHistoryList"'), "工作区树在滚动层内（live 行内联其中）");
+      assert.ok(!scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段已拆（M8 T1）");
       // 滚动层里不再套内层滚动容器（唯一滚动层）
-      assert.ok(!body.includes("rail-term-history-scroll"), "拆掉历史段自己的内层滚动容器（滚动只发生在中段）");
+      assert.ok(!body.includes("rail-term-history-scroll"), "无内层滚动容器（滚动只发生在中段）");
       // 底栏：亮暗/返回在栏体下，是 .rail 的flex 子项（本 nav 之外）
       const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
       assert.ok(rail.indexOf('id="railTerminalDir"') < rail.indexOf('class="rail-foot"'),
@@ -735,7 +756,7 @@ describe("S4 底栏钉住（finding 2，m6 §3）", () => {
 
   describe("滚动条指针感知隐退（JS 钉死）", () => {
     it("指针在列内可见、离开 2s 隐退：变量替换瞬时消失，无淡出", () => {
-      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(src.includes("TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000"), "滞留 2s（dsh 同值）");
       assert.ok(src.includes("pointerenter"), "进列即显");
       assert.ok(src.includes("pointerleave"), "出列即排隐退");
@@ -811,6 +832,9 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        const terminalRailPrefs = { archived: [], removedGroups: [] };
+        ${extractFn("terminalRailArchivedKey")}
+        ${extractFn("terminalRailIsArchived")}
         ${extractFn("terminalRailSessionMap")}
         ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("terminalRailActivateSession")}
@@ -887,7 +911,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
     });
 
     it("覆盖率写进注释：只对续接创建的终端保证识别，不勉强扩", () => {
-      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
       assert.ok(block.includes("覆盖率只保「续接创建的终端」"), "覆盖率口径注释在册");
       assert.ok(block.includes("不在去重范围"), "未覆盖面的边界也写进注释");
     });
@@ -916,5 +940,246 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
       assert.ok(panelMjs.includes("resume: { endpoint: body.resume.endpoint, id: body.resume.id }"),
         "只递 endpoint + id 两个非密字段");
     });
+  });
+});
+
+describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树", () => {
+  const LIVE = { id: "t-1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-1" } };
+
+  it("live 行内联进所属目录组，与普通行同按 lastActive 倒序（live 不插队）", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [
+          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
+          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastActive: 200 },
+          { id: "s-3", endpoint: "kimi", project: "C:\\dev\\beta", title: "排查掉线", lastActive: 300 },
+        ],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: LIVE,
+    });
+    sandbox.fn.render("kimi");
+    const order = [...sandbox.list.html.matchAll(/data-rail-term-resume="([^"]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(order, ["s-3", "s-2", "s-1"], "组间按最近活跃、组内同按最近活跃（live 的 s-1 虽开着也不提前）");
+    assert.ok(sandbox.list.html.includes("is-live"), "s-1 行带 live 标记");
+    assert.equal((sandbox.list.html.match(/is-live/g) || []).length, 1, "只有 resume 两键对得上的那条是 live");
+  });
+
+  it("全新终端兜底：cwd 组顶插「新会话」行，无时间、无归档钮", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastActive: 200 }],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-9", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(sandbox.list.html.includes(">新会话<"), "兜底行标签「新会话」（T3 文案）");
+    assert.ok(sandbox.list.html.includes('data-rail-term-session="t-9"'), "兜底行点击走聚焦（终端 id）");
+    const at = sandbox.list.html.indexOf('data-rail-term-session="t-9"');
+    const row = sandbox.list.html.slice(sandbox.list.html.lastIndexOf("<button", at), sandbox.list.html.indexOf("</button>", at));
+    assert.ok(row.includes("is-live"), "兜底行是 live 行");
+    assert.ok(!row.includes("rail-term-row-time"), "兜底行无时间");
+    assert.ok(!row.includes("data-rail-term-archive"), "兜底行无归档钮（无会话身份可归档）");
+    assert.ok(row.includes('data-rail-term-close="t-9"'), "兜底行带关闭叉");
+    // 组顶：兜底行排在 lastActive 200 的 s-2 之前（不看 lastActive，固定组顶）
+    const order = [...sandbox.list.html.matchAll(/data-rail-term-(?:resume|session)="([^"]+)"/g)].map((m) => m[1]);
+    assert.equal(order[0], "t-9", "兜底行在组顶");
+  });
+
+  it("兜底行的目录没有历史会话时，为它新建组（组头三件齐全）", () => {
+    const sandbox = renderSandbox({
+      history: { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null },
+      activeSession: { id: "t-9", cwd: "C:\\dev\\gamma", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(sandbox.list.html.includes(">gamma<"), "新目录成组（短名）");
+    assert.ok(sandbox.list.html.includes(">新会话<"), "组里是兜底行");
+    assert.ok(sandbox.list.html.includes('data-rail-term-group-new="C:\\dev\\gamma"'), "新组同样有 ⊕（组头三件不限历史组）");
+  });
+
+  it("兜底接替：刷新后同目录出现更新的会话，兜底行退场（真行接替）", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-new", endpoint: "kimi", project: "C:\\dev\\alpha", title: "真行", lastActive: 900 }],
+        fetchedAt: 2,
+        error: null,
+      },
+      activeSession: { id: "t-9", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(!sandbox.list.html.includes(">新会话<"), "同目录已有更新的会话 → 兜底行退场");
+    assert.ok(sandbox.list.html.includes(">真行<"), "真行在册");
+  });
+
+  it("终端关了兜底行即消失；无 agent 聚焦时工作区段无内容（T6）", () => {
+    const noAgent = renderSandbox({
+      history: { endpoint: "", sessions: [], fetchedAt: 0, error: null },
+      activeSession: null,
+    });
+    noAgent.fn.render("");
+    assert.equal(noAgent.list.html, "", "无 agent：树空（空白纯外壳终端不进栏，只从页签到达）");
+    const closed = renderSandbox({
+      history: { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null },
+      activeSession: null,
+    });
+    closed.fn.render("kimi");
+    assert.ok(!closed.list.html.includes(">新会话<"), "终端已关：兜底行不再渲染");
+  });
+});
+
+describe("M8 T2 选中态跟随聚焦", () => {
+  it("选中只属于聚焦终端对应的 live 行", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [
+          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "甲", lastActive: 100 },
+          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "乙", lastActive: 200 },
+        ],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s-1" } },
+    });
+    sandbox.fn.render("kimi");
+    // 取整颗 button（class 在 data 属性之前，从 data 处往后切不到 class）
+    const rowOf = (id) => {
+      const at = sandbox.list.html.indexOf(`data-rail-term-resume="${id}"`);
+      return sandbox.list.html.slice(sandbox.list.html.lastIndexOf("<button", at), sandbox.list.html.indexOf("</button>", at));
+    };
+    assert.ok(rowOf("s-1").includes("is-active"), "聚焦终端对应的行是选中态");
+    assert.ok(!rowOf("s-2").includes("is-active"), "另一条 live 行不占选中");
+  });
+
+  it("live 行点击走聚焦、非 live 行点击走去重/续接（T2 行点击两分支）", () => {
+    const init = extractFn("initTerminalRail");
+    const clickAt = init.indexOf('dir.addEventListener("click"');
+    const block = init.slice(clickAt, init.indexOf("});", clickAt));
+    const resumeBranch = block.slice(block.indexOf("data-rail-term-resume"), block.indexOf('data-rail-term-group"'));
+    assert.ok(resumeBranch.includes("data-rail-term-live"), "行分支先看 live 属性");
+    assert.ok(resumeBranch.includes("terminalRailActivateSession"), "live 行 → 聚焦其终端");
+    assert.ok(resumeBranch.includes("terminalRailResumeHistoryRow"), "非 live 行 → 去重聚焦或带 resume 新开（M7 甲链路原样）");
+    const rowFn = new Function("session", "live", "activeId", `
+      const TERMINAL_RAIL_ICON_ARCHIVE = "";
+      const TERMINAL_RAIL_ICON_UNARCHIVE = "";
+      function sessTitle(s) { return s.title; }
+      function sessRelTime() { return "1 分钟"; }
+      function terminalRailRelTime() { return "1 分钟"; }
+      function terminalRailIsArchived() { return false; }
+      function esc(v) { return String(v); }
+      function escapeHtml(v) { return String(v || ""); }
+      ${extractFn("terminalRailRowHtml")}
+      return terminalRailRowHtml;
+    `)();
+    const html = rowFn({ id: "s-1", endpoint: "kimi", title: "t", lastActive: 1 }, { id: "t-7", status: "idle" }, "t-1");
+    assert.ok(html.includes('data-rail-term-live="t-7"'), "live 行带终端 id（委托据此分支）");
+  });
+});
+
+describe("M8 T3 文案与时间格式", () => {
+  it("栏内局部时间格式：dsh 式无前缀（不动会话页共用的 sessRelTime）", () => {
+    const fn = new Function(`
+      const SESS_MIN = 60 * 1000, SESS_HOUR = 60 * SESS_MIN, SESS_DAY = 24 * SESS_HOUR;
+      ${extractFn("terminalRailRelTime")}
+      return terminalRailRelTime;
+    `)();
+    const now = Date.now();
+    const at = (ms) => now - ms;
+    assert.equal(fn(at(30 * 1000)), "刚刚", "半分钟内 = 刚刚");
+    assert.equal(fn(at(-5000)), "刚刚", "时钟回拨防御");
+    assert.equal(fn(at(5 * 60 * 1000)), "5分钟", "分钟无「前」缀");
+    assert.equal(fn(at(3 * 60 * 60 * 1000)), "3小时", "小时无「前」缀");
+    assert.equal(fn(at(3 * 24 * 60 * 60 * 1000)), "3天", "天无「前」缀");
+    const yesterday = new Date(now - 24 * 60 * 60 * 1000);
+    if (yesterday.getDate() !== new Date(now).getDate()) {
+      assert.equal(fn(yesterday.getTime()), "昨天", "昨天");
+    }
+    // 跨年走 YYYY年M月D日，年内走 M月D日（与 sessRelTime 的日期形制同源，只去前缀）
+    const far = new Date(now - 400 * 24 * 60 * 60 * 1000);
+    const expectFar = far.getFullYear() === new Date(now).getFullYear()
+      ? `${far.getMonth() + 1}月${far.getDate()}日`
+      : `${far.getFullYear()}年${far.getMonth() + 1}月${far.getDate()}日`;
+    assert.equal(fn(far.getTime()), expectFar, "远古日期形制");
+    // 栏内局部实现钉死：不许去改共用的 sessRelTime
+    const sess = extractFn("sessRelTime");
+    assert.ok(sess.includes("分钟前"), "会话页共用函数原样（带「前」缀）");
+  });
+
+  it("新建钮文案随聚焦分态：有 agent「新建会话」/ 无 agent「新建终端」，aria/title 同步", () => {
+    const run = (agentId) => {
+      const labelEl = { textContent: "" };
+      const btn = {
+        title: "", disabled: false,
+        querySelector: (sel) => (sel === ".rail-term-new-label" ? labelEl : null),
+        setAttribute: (k, v) => { btn[k] = v; },
+      };
+      const fn = new Function("agentId", "btn", `
+        let currentView = "terminal";
+        let terminalBackendReady = true;
+        function $(id) { return id === "railTermNewBtn" ? btn : (id === "railTerminalDir" ? {} : null); }
+        function renderTerminalRailHistory() {}
+        function syncTerminalRailHistory() {}
+        function terminalRailAgentId() { return agentId; }
+        ${extractFn("renderTerminalRail")}
+        return renderTerminalRail;
+      `)(agentId, btn);
+      fn();
+      return { btn, labelEl };
+    };
+    const withAgent = run("kimi");
+    assert.equal(withAgent.labelEl.textContent, "新建会话", "有 agent 聚焦：起的是该 agent 的会话");
+    assert.equal(withAgent.btn.title, "新建会话", "title 同步换");
+    assert.equal(withAgent.btn["aria-label"], "新建会话", "aria-label 同步换");
+    const blank = run("");
+    assert.equal(blank.labelEl.textContent, "新建终端", "无 agent 聚焦：起空白终端");
+    assert.equal(blank.btn.title, "新建终端", "title 同步换");
+    assert.equal(blank.btn["aria-label"], "新建终端", "aria-label 同步换");
+  });
+});
+
+describe("M8 T4 组文件夹图标含当前会话时变主题色", () => {
+  it("聚焦终端所在组的文件夹图标带 is-current，取主题 accent 变量（不写死蓝）", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [
+          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "甲", lastActive: 100 },
+          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\beta", title: "乙", lastActive: 200 },
+        ],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-1", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle" },
+    });
+    sandbox.fn.render("kimi");
+    const alphaHead = sandbox.list.html.slice(sandbox.list.html.indexOf('data-rail-term-group="C:\\dev\\alpha"'));
+    const betaHead = sandbox.list.html.slice(sandbox.list.html.indexOf('data-rail-term-group="C:\\dev\\beta"'));
+    assert.ok(alphaHead.slice(0, 600).includes("rail-term-group-icon is-current"), "聚焦终端所在组：图标带 is-current");
+    assert.ok(!betaHead.slice(0, 600).includes("is-current"), "别的组不带");
+    // 用户修正：dsh 的蓝是它的品牌色，我们取主题 accent（sepia 出橙等）
+    const rule = panelCss.match(/\.rail-term-group-icon\.is-current \{([^}]*)\}/);
+    assert.ok(rule, "is-current 样式在册");
+    assert.ok(rule[1].includes("var(--accent)"), "取 --accent 主题变量（亮暗/sepia 各自生效）");
+    assert.ok(!/#[0-9a-f]{3,8}/i.test(rule[1]), "不写死任何蓝色值");
+  });
+});
+
+describe("M8 T5 live 行悬停动作与归档钮并存", () => {
+  it("live 行 ×＋归档并存；非 live 行只有归档；全部 0ms 硬切", () => {
+    assert.ok(panelCss.includes(".rail-term-row.is-live:hover .rail-term-row-close { display: inline-flex; }"),
+      "live 行 hover 出关闭叉（走 terminalRailCloseSession 同一条路）");
+    assert.ok(panelCss.includes(".rail-term-row-history:hover .rail-term-row-archive { display: inline-flex; }"),
+      "行 hover 出归档钮（live 与非 live 都有）");
+    for (const sel of [".rail-term-row-close {", ".rail-term-row-archive {"]) {
+      const rule = cssRule(sel);
+      assert.ok(rule.includes("display: none"), `${sel} 静息不占位`);
+      assert.ok(!/transition/.test(rule), `${sel} 无过渡（0ms 硬切）`);
+    }
   });
 });
