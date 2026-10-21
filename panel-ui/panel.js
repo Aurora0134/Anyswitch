@@ -9516,6 +9516,16 @@ async function api(method, path, body) {
         terminalRailArchiveSession(archive.getAttribute("data-rail-term-archive"));
         return;
       }
+      // 取消归档钮（M8 T7a，m6b §A2 第三恢复入口）：必须排在行点击（resume）分支
+      // 之前——钮是行按钮的子元素，排在后面会被行点击整个抢走（断链：点了没反应）。
+      // 无 toast（m6b §A6：取消归档成功路径从不 notify）。
+      const unarchive = target.closest("[data-rail-term-unarchive]");
+      if (unarchive) {
+        const id = unarchive.getAttribute("data-rail-term-unarchive");
+        const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
+        if (session) terminalRailUnarchiveSession(session.endpoint, session.id);
+        return;
+      }
       const menuBtn = target.closest("[data-rail-term-group-menu]");
       if (menuBtn) {
         toggleTerminalRailGroupMenu(menuBtn.getAttribute("data-rail-term-group-menu"));
@@ -9572,14 +9582,6 @@ async function api(method, path, body) {
         }
         terminalRailResumeHistoryRow(resumeRow.getAttribute("data-rail-term-resume"));
         if (terminalRailSearch.open) closeTerminalRailSearch();
-        return;
-      }
-      const unarchive = target.closest("[data-rail-term-unarchive]");
-      if (unarchive) {
-        // 归档行的取消归档钮（M8 T7a，m6b §A2 第三入口）：无 toast（m6b §A6 口径）
-        const id = unarchive.getAttribute("data-rail-term-unarchive");
-        const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
-        if (session) terminalRailUnarchiveSession(session.endpoint, session.id);
         return;
       }
       const groupHead = target.closest("[data-rail-term-group]");

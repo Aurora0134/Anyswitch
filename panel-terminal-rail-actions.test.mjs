@@ -336,10 +336,10 @@ describe("S1 会话归档（finding 1a）", () => {
       for (const copy of ["归档会话", "会话已归档。", "撤销"]) {
         assert.ok(body.includes(copy), `栏体文案「${copy}」在册`);
       }
-      // M7 不供行内取消归档钮（恢复入口在 M8 视图选项，toast 撤销是唯一恢复路径）：
-      // 上屏文案里不许出现「取消归档」——注释里提它不碍事，用户看得见的字不许有。
-      // ⚠ M8 T7a 起划线句作废：归档行在「全部会话」筛选下内联显示，hover 出「取消
-      // 归档」钮（m6b §A2 第三恢复入口，恢复链由此补齐）；toast 动作仍是「撤销」。
+      // 取消归档钮的文案口径（M8 T7a 起）：归档行在「全部会话（显示已归档）」筛选下
+      // 内联显示，hover 出「取消归档」钮（m6b §A2 第三恢复入口，恢复链由此补齐），
+      // 与 toast 的「撤销」动作并存；上屏文案里「取消归档」只作为该钮的 title/aria，
+      // 不进任何 toast 句子。
       const railStatic = panelHtml.slice(panelHtml.indexOf('id="railTerminalDir"'), panelHtml.indexOf('class="rail-foot"'));
       assert.ok(!railStatic.includes("取消归档"), "栏体静态文案无「取消归档」");
       for (const forbidden of ['toast("取消归档', 'toast("已取消归档']) {
@@ -1486,5 +1486,144 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         assert.ok(s.includes(label), `菜单分组标签「${label}」在册`);
       }
     });
+  });
+});
+
+describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
+  const initBlock = () => {
+    const init = extractFn("initTerminalRail");
+    const clickAt = init.indexOf('dir.addEventListener("click"');
+    return init.slice(clickAt, init.indexOf("});", clickAt));
+  };
+
+  it("委托判序：unarchive 分支先于 resumeRow 分支，且分支体内调 terminalRailUnarchiveSession", () => {
+    // 回归根因：取消归档钮是行按钮（data-rail-term-resume）的子元素，若 unarchive
+    // 分支排在 resume 分支之后，点击永远先命中 resume——取消归档被行点击抢走。
+    const block = initBlock();
+    assert.ok(block.indexOf("data-rail-term-unarchive") < block.indexOf('data-rail-term-resume"'),
+      "unarchive 分支必须排在 resumeRow 分支之前（子元素命中最近的祖先分支）");
+    const unarchiveBranch = block.slice(block.indexOf("data-rail-term-unarchive"), block.indexOf("data-rail-term-group-menu"));
+    assert.ok(unarchiveBranch.includes("terminalRailUnarchiveSession("),
+      "分支体内调 terminalRailUnarchiveSession（不是 toast、不是 resume）");
+    assert.ok(!unarchiveBranch.includes("terminalRailResumeHistoryRow"),
+      "unarchive 分支不许捎带续接逻辑");
+  });
+
+  it("真实点击行为：点归档行的取消归档钮＝取消归档、不落提示 toast、不续接", () => {
+    // 断链能存在，是因为此前没有任何「点击 data-rail-term-unarchive」的用例——
+    // 这里用真委托跑一次点击（stub DOM），把行为钉死。
+    const log = { unarchive: [], toasts: [], resume: [], activate: [] };
+    const listeners = {};
+    const dirStub = { addEventListener: (type, fn) => { listeners[type] = fn; } };
+    const btnStub = () => ({ onclick: null, addEventListener: () => {}, disabled: false });
+    const els = {
+      railTerminalDir: dirStub,
+      railTermNewBtn: btnStub(), railTermHistoryRefresh: btnStub(),
+      railTermSearchBtn: btnStub(), railTermSearchInput: btnStub(), railTermSearchClear: btnStub(),
+      railTermViewOptionsBtn: btnStub(), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+    };
+    const fn = new Function("els", "listeners", "log", `
+      const terminalRailMenuEl = null;
+      const terminalRailViewMenuEl = null;
+      const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+      const terminalRailHoverEl = null;
+      const terminalRailHoverHead = null;
+      let terminalRailMotionArmed = false;
+      let terminalRailHistory = { endpoint: "kimi", sessions: [{ id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "甲", lastActive: 100 }], fetchedAt: 1, error: null };
+      function $(id) { return els[id] ?? null; }
+      const document = { addEventListener: () => {} };
+      function initTerminalRailScrollbarQuiet() {}
+      function loadTerminalRailViewPrefs() {}
+      function closeTerminalRailGroupMenu() {}
+      function closeTerminalRailViewMenu() {}
+      function closeTerminalRailSearch() {}
+      function closeTerminalRailHoverCard() {}
+      function openTerminalRailSearch() {}
+      function openTerminalRailViewMenu() {}
+      function onTerminalRailSearchInput() {}
+      function scheduleTerminalRailHoverCard() {}
+      function terminalRailHeadKey() { return ""; }
+      function terminalRailCloseSession() {}
+      function terminalRailArchiveSession() {}
+      function toggleTerminalRailGroupMenu() {}
+      function terminalRailCreateTerminalInDir() {}
+      function terminalRailRemoveGroup() {}
+      function terminalRailRestoreGroup() {}
+      function toggleTerminalRailRemoved() {}
+      function applyTerminalRailViewChoice() {}
+      function terminalRailActivateSession(id) { log.activate.push(id); }
+      function terminalRailResumeHistoryRow(id) { log.resume.push(id); }
+      function terminalRailUnarchiveSession(endpoint, id) { log.unarchive.push({ endpoint, id }); }
+      function toggleTerminalRailGroup() {}
+      function toggleTerminalRailWatermark() {}
+      function terminalRailCreateTerminal() {}
+      function refreshTerminalRailHistory() {}
+      function terminalRailMoveInManualOrder() {}
+      function renderTerminalRailHistory() {}
+      function toast(msg) { log.toasts.push(msg); }
+      ${extractFn("initTerminalRail")}
+      return initTerminalRail;
+    `)(els, listeners, log);
+    fn();
+    const click = listeners.click;
+    assert.equal(typeof click, "function", "栏体 click 委托已挂");
+    // 点「取消归档」钮：它是行按钮（data-rail-term-resume）的子元素——closest 对
+    // 行选择器会返回行（DOM 祖先链），对钮选择器返回钮。断链代码正是因此先命中
+    // resume 分支。
+    const rowEl = { getAttribute: (name) => (name === "data-rail-term-resume" ? "s-1" : null) };
+    const unarchiveBtn = { getAttribute: () => "s-1" };
+    click({ target: { closest: (sel) => (sel === "[data-rail-term-unarchive]" ? unarchiveBtn : (sel === "[data-rail-term-resume]" ? rowEl : null)) } });
+    assert.deepEqual(log.unarchive, [{ endpoint: "kimi", id: "s-1" }], "执行取消归档（endpoint 从历史行解析）");
+    assert.deepEqual(log.toasts, [], "无 toast（m6b §A6：取消归档成功路径不 notify）");
+    assert.deepEqual(log.resume, [], "不续接（不被行点击抢走）");
+    assert.deepEqual(log.activate, [], "不聚焦");
+    // 对照组：点普通历史行（无 unarchive 钮）照旧走续接两分支
+    click({ target: { closest: (sel) => (sel === "[data-rail-term-resume]" ? rowEl : null) } });
+    assert.deepEqual(log.resume, ["s-1"], "普通行点击仍走续接（判序修复没误伤）");
+  });
+});
+
+describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
+  const decls = (selector) => {
+    const at = panelCss.indexOf(selector);
+    assert.ok(at >= 0, `规则 ${selector} 在册`);
+    return panelCss.slice(at, panelCss.indexOf("}", at)).replace(/\/\*[\s\S]*?\*\//g, "");
+  };
+
+  it("段头行：36px 高、gap 4px、radius-md、padding-left 4px", () => {
+    const head = decls(".rail-term-section-head {");
+    assert.ok(/min-height:\s*36px/.test(head), "段头行高 36px（m6c §B5）");
+    assert.ok(/gap:\s*4px/.test(head), "gap 4px");
+    assert.ok(/border-radius:\s*var\(--radius-md\)/.test(head), "radius-md 12px");
+    assert.ok(/padding:\s*0\s*4px/.test(head) || /padding-left:\s*4px/.test(head), "padding-left 4px");
+    // 钉底纪律不回归：段头仍是滚动层外的定高块
+    assert.ok(head.includes("flex: none"), "段头 flex:none（M7-S4 钉底三层不变）");
+  });
+
+  it("标题：14px/20/400 tertiary、max-width 45%", () => {
+    const title = decls(".rail-term-section-title {");
+    assert.ok(/font-size:\s*14px/.test(title), "标题 14px");
+    assert.ok(/line-height:\s*20px/.test(title), "行高 20px");
+    assert.ok(/font-weight:\s*400/.test(title), "字重 400（dsh 同：不加粗）");
+    assert.ok(/color:\s*var\(--text-3\)/.test(title), "tertiary 色（语义 token）");
+    assert.ok(/max-width:\s*45%/.test(title), "max-width 45%");
+  });
+
+  it("图标钮 28×28；视图选项菜单 min-width 200px", () => {
+    for (const sel of [".rail-term-icon-btn {", ".rail-term-search-btn {"]) {
+      const rule = decls(sel);
+      assert.ok(/width:\s*28px/.test(rule) && /height:\s*28px/.test(rule), `${sel} 28×28（m6c §B5）`);
+    }
+    const menu = decls(".rail-term-view-menu {");
+    assert.ok(/min-width:\s*200px/.test(menu), "视图选项菜单 min-width 200px（dsh 实测值）");
+  });
+
+  it("搜索槽展开态高度 28→30px（dsh 口径，height 不进过渡列表＝瞬时）", () => {
+    const collapsed = decls(".rail-term-search {");
+    assert.ok(/height:\s*28px/.test(collapsed), "收起态 28px");
+    const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
+    assert.ok(/height:\s*30px/.test(expanded), "展开态 30px");
+    // 过渡列表里不许出现 height（m6c §A1：28→30 瞬时跳）
+    assert.ok(!/transition:[^;]*height/.test(collapsed), "height 不在过渡列表（瞬时跳变）");
   });
 });
