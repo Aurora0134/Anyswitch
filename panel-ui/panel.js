@@ -8948,9 +8948,38 @@ async function api(method, path, body) {
       });
   }
 
+  // 滚动条指针感知的自动隐退（dsh §3.5）：指针在列内 thumb 可见，离开 2s 后隐退
+  // ——变量替换瞬时消失，无淡出（写了 transition 就错）。挂栏体（#v2Rail）而不是
+  // 滚动层：整列都算「在列内」，指针挪到底栏那排钮时 thumb 照旧可见。初态即隐退：
+  // 进终端视图时指针多半不在列内，不先隐就会常亮一条thumb。
+  const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000;
+  let terminalRailQuietTimer = null;
+  function setTerminalRailQuiet(quiet) {
+    const dir = $("railTerminalDir");
+    if (dir && typeof dir.toggleAttribute === "function") dir.toggleAttribute("data-quiet", !!quiet);
+  }
+
+  function initTerminalRailScrollbarQuiet() {
+    const rail = $("v2Rail");
+    if (!rail || typeof rail.addEventListener !== "function") return;
+    setTerminalRailQuiet(true);
+    rail.addEventListener("pointerenter", () => {
+      if (terminalRailQuietTimer) { clearTimeout(terminalRailQuietTimer); terminalRailQuietTimer = null; }
+      setTerminalRailQuiet(false);
+    });
+    rail.addEventListener("pointerleave", () => {
+      if (terminalRailQuietTimer) clearTimeout(terminalRailQuietTimer);
+      terminalRailQuietTimer = setTimeout(() => {
+        terminalRailQuietTimer = null;
+        setTerminalRailQuiet(true);
+      }, TERMINAL_RAIL_SCROLLBAR_LINGER_MS);
+    });
+  }
+
   function initTerminalRail() {
     const dir = $("railTerminalDir");
     if (!dir) return;
+    initTerminalRailScrollbarQuiet();
     // 首次指针/键盘输入才武装 FLIP：进页那一帧直接落位，用户还没动手时不放整列表淡入。
     const armMotion = () => { terminalRailMotionArmed = true; };
     dir.addEventListener("pointerdown", armMotion, { once: true });

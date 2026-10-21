@@ -121,7 +121,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(rm, "prefers-reduced-motion 下箭头过渡关掉");
     });
 
-    it("矮窗口不重叠：定高块 flex:none，只有历史会话段吃剩余空间并自己滚", () => {
+    it("矮窗口不重叠：定高块 flex:none，只有中段滚动层吃剩余空间并自己滚", () => {
       // 真机缺陷：栏体是列 flex，定高块默认 flex:0 1 auto 会参与收缩，而它们的行有
       // min-height、容器没有 → 行溢出容器画到下一段头上（「打开的终端」行压在
       // 「历史会话」段头里）。布局几何在桩框架里量不出来（要真渲染才有 rect），
@@ -138,16 +138,38 @@ describe("终端视图左栏换血（M4）", () => {
       ]) {
         assert.ok(cssRule(selector).includes("flex: none"), `${why} 是定高块，必须 flex:none（不参与收缩）`);
       }
-      const hist = cssRule(".rail-term-section-history {");
-      assert.ok(hist.includes("flex: 1 1 auto") && hist.includes("min-height: 0"),
-        "历史会话段是唯一吃剩余空间的那段（空间不够时它先缩）");
-      assert.ok(cssRule(".rail-term-history-scroll {").includes("overflow-y: auto"),
-        "历史列表在自己的滚动容器里滚，溢出由它裁切、不越段");
+      // S4 起滚动收进唯一中段滚动层（两个段都在里面滚），历史段自己不再是弹性层
+      const scroll = cssRule(".rail-term-scroll {");
+      assert.ok(scroll.includes("flex: 1 1 auto") && scroll.includes("min-height: 0"),
+        "中段滚动层是唯一吃剩余空间的那层（空间不够时它先缩）");
+      assert.ok(scroll.includes("overflow-y: auto"), "滚动发生在中段滚动层，溢出由它裁切、不越段");
+      assert.ok(scroll.includes("scrollbar-gutter: stable"), "预留滚动条槽位：有无滚动条布局不跳");
+      assert.ok(scroll.includes("padding-bottom: 16px"), "列表底部留白 16px（dsh 同值）");
       // 列表容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
       assert.ok(!/\.rail-term-open[^{]*\{[^}]*overflow/.test(panelCss), "「打开的终端」列表不靠 overflow 裁切");
     });
 
-    it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留头像与新建图标", () => {
+    it("钉底三层：顶区/中段滚动层/底栏各司其职，不用 sticky/fixed", () => {
+      // S4（m6 §3）：dsh 的钉底不是 sticky/fixed，是 flex:1+min-height:0 的唯一
+      // 可伸缩层 + flex:none 的兄弟节点。栏体与设置态共用骨架，底栏一颗钮两态共用。
+      // （hover 卡是挂 body 的 portal 浮层，dsh 同款 position:fixed，不属钉底机制，
+      // 钉底三件——滚动层/底栏/遮罩——的规则里不许出现 sticky/fixed。）
+      assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏（亮暗/返回）不参与伸缩");
+      const pinRules = [".rail-term-scroll {", ".rail-foot {", ".rail-term-fade {"]
+        .map((sel) => cssRule(sel)).join("");
+      assert.ok(!/position:\s*(sticky|fixed)/.test(pinRules), "钉底三件不碰 sticky/fixed（钉底靠 flex）");
+      // 滚动条指针感知隐退（dsh §3.5）：变量替换、无淡出
+      assert.ok(panelCss.includes("#railTerminalDir[data-quiet] { --rail-term-scrollbar-thumb: transparent; }"),
+        "离开 2s 后 thumb 变量替换成透明（瞬时消失，无过渡）");
+      const thumb = panelCss.match(/\.rail-term-scroll::-webkit-scrollbar-thumb \{([^}]*)\}/);
+      assert.ok(thumb && thumb[1].includes("var(--rail-term-scrollbar-thumb"), "thumb 取可被 quiet 替换的变量");
+      assert.ok(thumb && thumb[1].includes("border-radius: 999px"), "thumb 圆角");
+      assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
+      const track = panelCss.match(/\.rail-term-scroll::-webkit-scrollbar-track \{([^}]*)\}/);
+      assert.ok(track && track[1].includes("transparent"), "track 透明");
+    });
+
+    it("列表底部 24px 渐隐遮罩、滚条 5px、折叠态只留新建图标钮", () => {
       const fade = cssRule(".rail-term-fade {");
       assert.ok(fade.includes("height: 24px"), "底部渐隐 24px");
       // 终点必须与栏底色同一个取值源：栏底在 saas/sepia 被对调成 --bg-page，写死
@@ -168,13 +190,14 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(!panelCss.includes(':root[data-ui-version="v2"][data-style="aurora"] #v2Rail { --rail-bg'),
         "aurora 不参与对调，沿用基座 --surface（玻璃料）");
       assert.ok(fade.includes("pointer-events: none"), "遮罩不吃点击");
-      // 滚区底距 = 遮罩高度：末行底边落在渐隐上沿，整行可读
-      const scroll = cssRule(".rail-term-history-scroll {");
-      assert.ok(scroll.includes("padding-bottom: 24px"), "滚动区底距对齐遮罩高度（16px 会让末行压在渐变里）");
-      assert.ok(panelCss.includes(".rail-term-history-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
+      // S4：遮罩挂栏体（不在滚动层里，不随内容滚），贴滚动层底、right 让出滚动条
+      assert.ok(fade.includes("position: absolute"), "绝对定位贴滚动层底");
+      assert.ok(fade.includes("bottom: 0"), "贴底");
+      assert.ok(/right:\s*[5-9]px/.test(fade), "right 让出滚动条宽度（5px 滚条 + 余量）");
+      assert.ok(panelCss.includes(".rail-term-scroll::-webkit-scrollbar { width: 5px; }"), "滚条 5px");
       // 折叠态（72px 图标栏）两个来处：窄栏自动档与手动态 collapsed
-      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section\) \{ display: none; \}/.test(panelCss),
-        "折叠态列表整段不出（dsh 折叠同款取舍）");
+      assert.ok(/:is\(\.rail-term-new-label, \.rail-term-section, \.rail-term-fade\) \{ display: none; \}/.test(panelCss),
+        "折叠态列表整段不出，渐隐也不出（dsh 折叠同款取舍）");
       assert.ok(/:root\[data-ui-version="v2"\]:not\(\[data-rail="expanded"\]\) \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),
         "窄栏（<1200 自动档）新建按钮收成图标钮");
       assert.ok(/:root\[data-ui-version="v2"\]\[data-rail="collapsed"\] \.rail-term-new \{ justify-content: center; padding: 9px 0; margin: 0; \}/.test(panelCss),

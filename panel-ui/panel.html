@@ -565,7 +565,9 @@ if (window.panelStartupController) panelStartupPlay();
     </button>
   </nav>
   <!-- 终端会话栏：进终端视图时整组换上（与设置目录同一换血形制——换内容而非追加），
-       退出终端即还原。栏体自上而下：「新建终端」→「打开的终端」→「历史会话」。
+       退出终端即还原。栏体三层 flex（M7 S4，dsh §3）：顶区「新建终端」flex:none；
+       中段唯一滚动层 flex:1;min-height:0;overflow-y:auto（「打开的终端」＋「历史
+       会话」两段都在里面滚）；栏底（亮暗/返回）flex:none 钉底——不用 sticky/fixed。
        原栏体左上角的 agent 身份行（头像＋名称）已按用户要求拆除——与 anys 产品图标
        贴在一起抢视野；栏体仍严格跟随聚焦终端的 agent 取两段数据，只是不再显示身份。
        两个列表的行一律脚本渲染（HTML 不写死假数据）。静态 hidden：v1 整栏不出、v2 非
@@ -576,22 +578,22 @@ if (window.panelStartupController) panelStartupPlay();
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       <span class="rail-term-new-label">新建终端</span>
     </button>
-    <div class="rail-term-section">
-      <div class="rail-term-section-head"><span class="rail-term-section-title">打开的终端</span></div>
-      <div class="rail-term-open" id="railTermOpenList"></div>
-    </div>
-    <div class="rail-term-section rail-term-section-history">
-      <div class="rail-term-section-head">
-        <span class="rail-term-section-title">历史会话</span>
-        <button type="button" class="rail-term-icon-btn" id="railTermHistoryRefresh" title="刷新会话列表" aria-label="刷新会话列表">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        </button>
+    <div class="rail-term-scroll">
+      <div class="rail-term-section">
+        <div class="rail-term-section-head"><span class="rail-term-section-title">打开的终端</span></div>
+        <div class="rail-term-open" id="railTermOpenList"></div>
       </div>
-      <div class="rail-term-history-scroll">
+      <div class="rail-term-section rail-term-section-history">
+        <div class="rail-term-section-head">
+          <span class="rail-term-section-title">历史会话</span>
+          <button type="button" class="rail-term-icon-btn" id="railTermHistoryRefresh" title="刷新会话列表" aria-label="刷新会话列表">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+          </button>
+        </div>
         <div class="rail-term-history" id="railTermHistoryList"></div>
       </div>
-      <span class="rail-term-fade" aria-hidden="true"></span>
     </div>
+    <span class="rail-term-fade" aria-hidden="true"></span>
   </nav>
   <div class="rail-foot">
     <button class="icon-btn" id="railThemeToggle" aria-label="切换亮暗主题" title="切换亮暗主题">

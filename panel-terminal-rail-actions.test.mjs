@@ -690,3 +690,89 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
   });
 });
+
+describe("S4 底栏钉住（finding 2，m6 §3）", () => {
+  describe("三层结构（HTML 钉死）", () => {
+    it("栏体三层：顶区新建终端 / 中段唯一滚动层（两段都在内）/ 底栏亮暗返回", () => {
+      const dir = panelHtml.match(/<nav class="rail-dir rail-terminal-dir" id="railTerminalDir"[\s\S]*?<\/nav>/);
+      assert.ok(dir, "终端会话栏在册");
+      const body = dir[0];
+      // 顶区：新建终端钮在最上，且不在滚动层里
+      assert.ok(body.indexOf('id="railTermNewBtn"') < body.indexOf('class="rail-term-scroll"'),
+        "新建终端（顶区）在滚动层之前");
+      // 中段：唯一滚动层包住两个段
+      const scroll = body.match(/<div class="rail-term-scroll">([\s\S]*?)<\/div>\s*<span class="rail-term-fade"/);
+      assert.ok(scroll, "中段滚动层在册，且遮罩挂在它外面（不随内容滚）");
+      assert.ok(scroll[1].includes('id="railTermOpenList"'), "「打开的终端」段在滚动层内");
+      assert.ok(scroll[1].includes('id="railTermHistoryList"'), "「历史会话」段在滚动层内");
+      // 滚动层里不再套内层滚动容器（唯一滚动层）
+      assert.ok(!body.includes("rail-term-history-scroll"), "拆掉历史段自己的内层滚动容器（滚动只发生在中段）");
+      // 底栏：亮暗/返回在栏体下，是 .rail 的flex 子项（本 nav 之外）
+      const rail = panelHtml.match(/<aside class="rail" id="v2Rail"[\s\S]*?<\/aside>/)[0];
+      assert.ok(rail.indexOf('id="railTerminalDir"') < rail.indexOf('class="rail-foot"'),
+        "栏底行在终端会话栏之后（同一 flex 列的最后一项）");
+      assert.ok(rail.includes('id="railThemeToggle"') && rail.includes('id="railBackBtn"'), "底栏＝亮暗 + 返回");
+    });
+  });
+
+  describe("滚动条指针感知隐退（JS 钉死）", () => {
+    it("指针在列内可见、离开 2s 隐退：变量替换瞬时消失，无淡出", () => {
+      const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7）"), panelJs.indexOf("function initSkillsTab"));
+      assert.ok(src.includes("TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000"), "滞留 2s（dsh 同值）");
+      assert.ok(src.includes("pointerenter"), "进列即显");
+      assert.ok(src.includes("pointerleave"), "出列即排隐退");
+      assert.ok(src.includes("setTerminalRailQuiet(true)"), "初态隐退（thumb 随指针进列才出现）");
+      assert.ok(src.includes('toggleAttribute("data-quiet"'), "隐退=属性开关（CSS 变量替换）");
+      // 隐退不允许带过渡：变量替换必须瞬时（dsh 同口径）。剥掉注释再查——注释里
+      // 出现「transition」二字是在立规矩，不是违规。
+      const css = panelCss.replace(/\/\*[\s\S]*?\*\//g, "");
+      const ruleBody = (sel) => {
+        const at = css.indexOf(sel);
+        assert.ok(at >= 0, `规则 ${sel} 在册`);
+        return css.slice(at, css.indexOf("}", at));
+      };
+      assert.ok(!/transition/.test(ruleBody(".rail-term-scroll::-webkit-scrollbar-thumb {")), "thumb 规则无过渡（变量替换瞬时）");
+      assert.ok(!/#railTerminalDir\[data-quiet\][^}]*transition/.test(css), "隐退态无过渡");
+      assert.ok(!/transition/.test(ruleBody(".rail-term-scroll {")), "滚动层本体无过渡");
+    });
+
+    it("vm 真跑：进列清隐退、出列 2s 后才隐", async () => {
+      const log = { attrs: [], timers: [] };
+      const fn = new Function("log", `
+        const els = { railTerminalDir: { attr: "", toggleAttribute(name, force) { this.attr = force ? name : ""; log.attrs.push(this.attr); } }, v2Rail: { listeners: {}, addEventListener(type, fn) { this.listeners[type] = fn; } } };
+        const $ = (id) => els[id];
+        let terminalRailQuietTimer = null;
+        function setTerminalRailQuiet(quiet) {
+          const dir = $("railTerminalDir");
+          if (dir) dir.toggleAttribute("data-quiet", !!quiet);
+        }
+        const TERMINAL_RAIL_SCROLLBAR_LINGER_MS = 2000;
+        ${extractFn("initTerminalRailScrollbarQuiet")}
+        initTerminalRailScrollbarQuiet();
+        return { enter: () => els.v2Rail.listeners.pointerenter(), leave: () => els.v2Rail.listeners.pointerleave() };
+      `)(log);
+      assert.deepEqual(log.attrs, ["data-quiet"], "初态隐退（thumb 随指针进列才出现）");
+      fn.leave();
+      await new Promise((r) => setTimeout(r, 2100));
+      assert.deepEqual(log.attrs.slice(-1), ["data-quiet"], "离开 2s 后隐退");
+      fn.enter();
+      assert.deepEqual(log.attrs.slice(-1), [""], "进列即恢复可见");
+    });
+  });
+
+  describe("设置态不碰坏（共用骨架）", () => {
+    it("设置态换血四条与栏底共用件原样，钉底改造只动终端会话栏内部", () => {
+      for (const scope of [
+        ':root[data-ui-version="v2"] body.settings-mode',
+        ':root[data-ui-version="v2"] body.terminal-mode',
+      ]) {
+        assert.ok(panelCss.includes(`${scope} #v2Rail .rail-tabs { display: none; }`), `${scope} 收主 tab 组`);
+        assert.ok(panelCss.includes(`${scope} #v2Rail #railSettingsBtn { display: none; }`), `${scope} 收栏底齿轮`);
+        assert.ok(panelCss.includes(`${scope} #v2Rail #railBackBtn[hidden] { display: flex !important; }`), `${scope} 放「返回」`);
+      }
+      // 钉底靠的是 .rail 自身的 flex 列 + 底栏 flex:none，两个态共用，不为终端态另起炉灶
+      assert.ok(cssRule(".rail-foot {").includes("flex: none"), "底栏两个态共用同一 flex:none");
+      assert.ok(!panelCss.includes("body.terminal-mode .rail-foot { position"), "终端态不给底栏加定位（不破坏共用骨架）");
+    });
+  });
+});
