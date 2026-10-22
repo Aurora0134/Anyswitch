@@ -1296,6 +1296,77 @@ export function createPanelRouter({
     }, bindingRefreshDelayMs);
   }
 
+  // 内切切换（M12-A）：把一条已开着的终端就地换成目标会话——宿主同记录内
+  // terminate 旧进程树→spawn 目标会话→身份换绑，页签不新增。与复活路由的分工：
+  // 复活用会话自己的身份重组装；内切用请求体给的目标会话身份（endpoint/id/file）
+  // 重组装，cwd 用目标会话的项目目录（claude 这类按项目分存档，目录错了 --resume
+  // 找不到会话）。working 判定与在飞闸在面板侧（panel.js terminalRailSwitchOrCreate），
+  // 本路由只接「已决定内切」的请求。
+  async function handleTerminalSessionSwitch(req, res, id, body) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    const session = await fetchTerminalSessionFn(id, { token });
+    if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
+    const resume = body?.resume;
+    const endpoint = typeof resume?.endpoint === "string" ? resume.endpoint.trim() : "";
+    const conversationId = typeof resume?.id === "string" ? resume.id.trim() : "";
+    if (!endpoint || !conversationId || endpoint.length > 64 || conversationId.length > 256) {
+      return sendJson(res, 400, { ok: false, code: "resume_invalid", error: "会话信息不全，无法切换" });
+    }
+    if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
+      return sendJson(res, 400, { ok: false, code: "unknown_agent", error: "这个 Agent 不存在" });
+    }
+    const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : "";
+    if (!cwd) {
+      return sendJson(res, 400, { ok: false, code: "resume_invalid", error: "会话信息不全，无法切换" });
+    }
+    let claudeBypassPermissions = false;
+    try {
+      claudeBypassPermissions = loadSettings(settingsFile, base).settings.claudeBypassPermissions === true;
+    } catch {
+      /* 读取失败不挡切换本身：权限开关按默认（关）组装 */
+    }
+    let launch;
+    try {
+      launch = buildAgentSessionLaunch({
+        agentId: endpoint,
+        cwd,
+        port: AGENT_RELAY_PORT,
+        token,
+        base,
+        claudeBypassPermissions,
+        resume: {
+          endpoint,
+          id: conversationId,
+          ...(typeof resume.file === "string" && resume.file.trim() ? { file: resume.file.trim() } : {}),
+        },
+      });
+    } catch (error) {
+      // 续接相关失败回机器可判的 code（不支持续接/信息不全），其余维持原有形状。
+      const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
+      return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
+    }
+    const switchStartedAt = Date.now();
+    const restarted = await restartTerminalSessionFn(id, {
+      launch: launch.launch,
+      cwd: launch.cwd,
+      env: launch.env,
+      // 身份同步三件＋resume：宿主 restart 路由写进会话记录（M12-A），去重聚焦、
+      // 页签与栏行展示都读它们；env 只走请求体，不经响应回显。
+      resume: { endpoint, id: conversationId },
+      label: launch.label,
+      agentId: launch.agentId,
+      agentName: launch.agentName,
+    }, { token });
+    if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
+    // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
+    // 身份（endpoint＋目标 cwd），不是宿主记录里的旧归属——空白壳那一栏根本没有
+    // 旧身份可言（复活路由传 session 是因它复活的正是会话自己的归属）。
+    scheduleBindingRefresh({ id: session.id, agentId: endpoint, cwd: launch.cwd }, switchStartedAt);
+    return sendJson(res, restarted.status || 200, restarted.body ?? {});
+  }
+
   // 一键启动 CLI Agent：本路由只做组装与转发。launch（cmd /c 包装——归属链
   // 的硬前提，见 agent-session-env.mjs）与 env（Anyswitch 凭证，只走环境变
   // 量）在服务端拼好后交给 terminal-host 起 PTY；env 不落盘，也不经响应回
@@ -3132,6 +3203,18 @@ export function createPanelRouter({
           return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
         }
         return handleTerminalSessionRevive(req, res, reviveMatch[1]);
+      }
+      // 内切切换（M12-A）：路由体带目标会话身份，与 revive（无体、用会话自己的
+      // 身份）分工；先收体再进处理器，读体失败按 400 拒。
+      const switchMatch = suffix.match(/^([a-f0-9-]{8,64})\/switch$/i);
+      if (switchMatch && method === "POST") {
+        let switchBody;
+        try {
+          switchBody = await readJsonBody(req);
+        } catch (error) {
+          return sendJson(res, error.statusCode ?? 400, { ok: false, error: error.message });
+        }
+        return handleTerminalSessionSwitch(req, res, switchMatch[1], switchBody);
       }
       if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
       if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);

@@ -290,3 +290,98 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
     });
   });
 });
+
+// M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
+// 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
+describe("内切切换会话（terminal sessions switch）", () => {
+  function switchRouter({ root, hostSession, restarted } = {}) {
+    const calls = { restart: [], fetch: [] };
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      createTerminalSession: async (body) => ({ status: 201, body: { id: "t-new", ...body } }),
+      fetchTerminalSessionFn: async (id, options) => {
+        calls.fetch.push({ id, options });
+        return hostSession === undefined
+          ? { id, label: "Anyswitch", cwd: "C:\\shell-dir", shell: "powershell", status: "running", pid: 42 }
+          : hostSession;
+      },
+      restartTerminalSessionFn: async (id, body, options) => {
+        calls.restart.push({ id, body, options });
+        return restarted === undefined
+          ? { status: 200, body: { id, status: "running", pid: 99, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume } }
+          : restarted;
+      },
+      scanAgentConversationsFn: async () => [],
+      bindingRefreshScheduleFn: () => {},
+    });
+    return { router, calls };
+  }
+
+  it("空白壳内切：launch 带目标 resume 重建，身份三件＋resume 同步进宿主记录", async () => {
+    await withFakeAgents(async (cwd) => {
+      const root = mkTestDir("anyswitch-switch-route-root-");
+      const { router, calls } = switchRouter({ root });
+      const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID },
+        cwd,
+      });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200, "内切起终端");
+      assert.equal(calls.fetch.length, 1, "先读宿主会话记录");
+      assert.equal(calls.restart.length, 1, "走 restart（同记录 terminate+spawn）");
+      const forwarded = calls.restart[0].body;
+      assert.ok(forwarded.launch.args.includes("--session"), "kimi 续接参数由服务端按模板重建");
+      assert.ok(forwarded.launch.args.includes(SESSION_ID), "目标会话 id 进命令行");
+      assert.equal(forwarded.cwd, cwd, "cwd 用目标会话自己的项目目录");
+      assert.deepEqual(forwarded.resume, { endpoint: "kimi", id: SESSION_ID }, "resume 身份同步（去重数据源）");
+      assert.ok(typeof forwarded.label === "string" && forwarded.label, "label 同步");
+      assert.equal(forwarded.agentId, "kimi", "agentId 同步");
+      assert.ok(typeof forwarded.agentName === "string" && forwarded.agentName, "agentName 同步");
+      assert.ok("env" in forwarded, "env 随 restart 走（不回显）");
+      assert.equal("env" in json(), false, "响应不回显 env");
+    });
+  });
+
+  it("宿主无此会话 404；restart 失败 503；都不静默", async () => {
+    await withFakeAgents(async (cwd) => {
+      const missing = switchRouter({ root: mkTestDir("anyswitch-switch-404-"), hostSession: null });
+      const missCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await missing.router.handle(missCall.req, missCall.res);
+      assert.equal(missCall.res.statusCode, 404);
+      assert.equal(missing.calls.restart.length, 0, "无记录不换绑");
+
+      const down = switchRouter({ root: mkTestDir("anyswitch-switch-503-"), restarted: null });
+      const downCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await down.router.handle(downCall.req, downCall.res);
+      assert.equal(downCall.res.statusCode, 503);
+      assert.equal(downCall.json().ok, false);
+    });
+  });
+
+  it("目标端点不可续接/不在册、resume 形状不合法：400 不转发", async () => {
+    await withFakeAgents(async (cwd) => {
+      const cases = [
+        { resume: { endpoint: "dsh", id: SESSION_ID }, expectCode: "resume-unsupported" },
+        { resume: { endpoint: "kimi" }, expectCode: "resume_invalid" },
+        { resume: { endpoint: "kimi", id: "" }, expectCode: "resume_invalid" },
+      ];
+      for (const item of cases) {
+        const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-400-") });
+        const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+          resume: item.resume, cwd,
+        });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 400, `${JSON.stringify(item.resume)} 拒换`);
+        assert.equal(json().code, item.expectCode, "机器可判的 code");
+        assert.match(json().error, /[\u4e00-\u9fff]/, "文案面向用户");
+        assert.equal(calls.restart.length, 0, "不转发给 terminal-host");
+      }
+    });
+  });
+});
