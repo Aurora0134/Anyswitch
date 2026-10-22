@@ -619,6 +619,14 @@
   .rail-term-section-head.is-searching .rail-term-search {
     max-width: 100%; flex: 1 1 auto; height: 30px; padding: 0 7px; border: 1px solid var(--border); background: var(--surface-sunken);
   }
+  /* M11-A：刷新钮砍掉后，标题 max-width 45% 封顶之外的剩余空间无 item 吸收、全堆在
+     钮带右侧——两钮态实测空隙 36.66px（刷新钮在时三钮带只剩 4.66px 残差，肉眼视作贴齐，
+     45% 封顶本就按三钮带调准）。收起态把「搜索＋视图选项」工具组整体贴到段头右缘的 4px
+     边距线：auto 左边距落在组首元（搜索槽）上，标题让出的空间改留在标题与工具组之间
+     （真机量测：视图钮右缘 199＝边距线，搜索/视图中心距 32px 不变）。展开态搜索槽
+     flex:1 1 auto 要吃饱——auto 边距会先于 flex-grow 吃掉剩余空间，故 :not(.is-searching)
+     scop 掉，展开态布局零改动（175px 填满行，与修前逐像素同）。 */
+  .rail-term-section-head:not(.is-searching) .rail-term-search { margin-left: auto; }
   .rail-term-section-head.is-searching .rail-term-section-title,
   .rail-term-section-head.is-searching .rail-term-head-actions {
     max-width: 0; opacity: 0; visibility: hidden; overflow: hidden; pointer-events: none;

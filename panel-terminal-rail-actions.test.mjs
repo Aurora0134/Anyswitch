@@ -1609,6 +1609,18 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
     assert.ok(head.includes("flex: none"), "段头 flex:none（M7-S4 钉底三层不变）");
   });
 
+  it("M11-A：收起态工具组贴右（搜索槽 auto 左边距）；展开态不接管", () => {
+    // 刷新钮砍掉后，标题 45% 封顶之外的剩余空间无 item 吸收、全堆在钮带右侧——
+    // auto 左边距落在工具组首元（搜索槽）上，「搜索＋视图选项」整体贴到段头右缘，
+    // 与刷新钮在时的右缘位置一致（m6c §B5 的 45% 封顶本就按三钮带调准）。
+    assert.ok(/\.rail-term-section-head:not\(\.is-searching\) \.rail-term-search \{[\s\S]*?margin-left:\s*auto/.test(panelCss),
+      "收起态搜索槽 margin-left:auto＝工具组整体贴右（M11-A）");
+    // 展开态搜索槽 flex:1 1 auto 要吃饱：auto 边距会先于 flex-grow 吃掉剩余空间，
+    // 必须被 :not(.is-searching) scop 掉——展开态布局零改动。
+    const expanded = decls(".rail-term-section-head.is-searching .rail-term-search {");
+    assert.ok(!/margin-left/.test(expanded), "展开态无 auto 边距（grow 吃饱，搜索展开不回归）");
+  });
+
   it("标题：14px/20/400 tertiary、max-width 45%", () => {
     const title = decls(".rail-term-section-title {");
     assert.ok(/font-size:\s*14px/.test(title), "标题 14px");
