@@ -1290,6 +1290,7 @@ async function api(method, path, body) {
   // boardRoutingChains 的 storeState 优先读取立即生效，不等 TTL）。
   let msModelsCache = [];
   let routeChainsCache = null;
+  let routeVirtualModelsCache = null;
   let routeChainsFetchedAt = 0;
   let routeNodeInfoCache = null; // { providers: Map<id,name>, pools: Map<id,name> }
   const ROUTE_CHAINS_CACHE_TTL_MS = 60000;
@@ -1300,6 +1301,7 @@ async function api(method, path, body) {
     try {
       const res = await api("GET", "/api/store/state");
       routeChainsCache = Array.isArray(res.routingChains) ? res.routingChains : [];
+      routeVirtualModelsCache = Array.isArray(res.virtualModels) ? res.virtualModels : [];
       routeNodeInfoCache = {
         providers: new Map(((res && res.providers) || []).map((p) => [p.id, p.displayName || p.id])),
         pools: new Map(((res && res.pools) || []).map((pl) => [pl.id, pl.displayName || pl.id])),
@@ -1343,11 +1345,36 @@ async function api(method, path, body) {
     return routeChainsCache || [];
   }
 
+  function boardVirtualModels() {
+    if (storeState && Array.isArray(storeState.virtualModels)) return storeState.virtualModels;
+    return routeVirtualModelsCache || [];
+  }
+
+  // 按链身份取链配置：端点链的键是端点 id（routingChains[].endpointId），虚拟模型链
+  // 的键是模型名（virtualModels[].name）——两者同一个命名空间，服务归因的 chainKey
+  // 报的就是这个键。同一（渠道,模型）可同时出现在端点链和虚拟模型链里（例如
+  // a6api-pool/kimi-k3），所以位次必须按「服务它的那条链」数，不能按端点猜。
+  function boardChainByKey(chainKey) {
+    if (typeof chainKey !== "string" || !chainKey) return null;
+    const endpointChain = boardRoutingChains().find((c) => c && c.endpointId === chainKey);
+    if (endpointChain && Array.isArray(endpointChain.chain) && endpointChain.chain.length > 0) {
+      return endpointChain.chain;
+    }
+    const virtualModel = boardVirtualModels().find((m) => m && m.name === chainKey);
+    if (virtualModel && Array.isArray(virtualModel.chain) && virtualModel.chain.length > 0) {
+      return virtualModel.chain;
+    }
+    return null;
+  }
+
   // 「启用自动路由」判定（语义=该端点正在用 auto 工作）：端点配了链 且 启用
   // 开关开（entry.enabled !== false；getState 显式下发布尔，缺省=开）且端点
   // 进程在运行（status === "running"）。开关本身就是「正在用 auto 工作」的
   // 声明，不再看活跃/最近模型；命中返回链，供胶囊 auto 标记（renderModelBadges）
   // 判定流量来源，否则返回 null，胶囊保持直连样式。
+  //
+  // 只作旧 relay 的退化来源：新 relay 在归因里直接给 chainKey（服务它的那条链，
+  // 虚拟模型链也算），胶囊按 chainKey 定位，不靠端点自己的链去猜。
   function agentUsingAutoRoute(agentId, st) {
     const entry = boardRoutingChains().find((c) => c.endpointId === agentId);
     const chain = entry && Array.isArray(entry.chain) ? entry.chain : null;
@@ -1382,21 +1409,36 @@ async function api(method, path, body) {
   // 最近灰胶囊携带 lastProvider/lastViaAuto 来源。旧 relay 无该字段时退化为
   // 旧 activeModels/currentModel 名单（单段、无 auto 标记）——panel.html 热读
   // 而 relay 未重启的窗口期按旧口径渲染，不报错不误标。
+  //
+  // chainKey 随条目透传（与 viaAuto 同源）：它是「服务这条请求的链」的键，位次要按
+  // 它去数。旧 relay 没有该字段时为 null，退化成按端点自己的链猜（原口径）。
   function capsuleTargetList(st) {
     if (Array.isArray(st?.activeTargets)) {
       const list = (st.activeTargets || [])
         .filter((t) => hasDisplayIdentity(t?.providerId, t?.model))
-        .map((t) => ({ providerId: t.providerId || null, model: t.model, active: true, viaAuto: (Number(t.autoCount) || 0) > 0 }));
+        .map((t) => ({
+          providerId: t.providerId || null,
+          model: t.model,
+          active: true,
+          viaAuto: (Number(t.autoCount) || 0) > 0,
+          chainKey: typeof t.chainKey === "string" && t.chainKey ? t.chainKey : null,
+        }));
       if (list.length > 0) return list;
       return hasDisplayIdentity(st.lastProvider, st.lastModel)
-        ? [{ providerId: st.lastProvider || null, model: st.lastModel, active: false, viaAuto: Boolean(st.lastViaAuto) }]
+        ? [{
+          providerId: st.lastProvider || null,
+          model: st.lastModel,
+          active: false,
+          viaAuto: Boolean(st.lastViaAuto),
+          chainKey: typeof st.lastChainKey === "string" && st.lastChainKey ? st.lastChainKey : null,
+        }]
         : [];
     }
     const activeList = (st.activeModels || (st.currentModel ? [st.currentModel] : []))
       .filter((m) => hasDisplayIdentity(null, m));
-    if (activeList.length > 0) return activeList.map((m) => ({ providerId: null, model: m, active: true, viaAuto: false }));
+    if (activeList.length > 0) return activeList.map((m) => ({ providerId: null, model: m, active: true, viaAuto: false, chainKey: null }));
     return hasDisplayIdentity(null, st.lastModel)
-      ? [{ providerId: null, model: st.lastModel, active: false, viaAuto: false }]
+      ? [{ providerId: null, model: st.lastModel, active: false, viaAuto: false, chainKey: null }]
       : [];
   }
 
@@ -1410,15 +1452,22 @@ async function api(method, path, body) {
   // 端点卡胶囊区：永远渲染真实模型胶囊（活跃绿 / 最近灰），按（渠道,模型）复合
   // 键去重并双段上屏（A/a 与 B/a 各一颗）；条目自身的服务归因（viaAuto）命中时
   // 改挂 badge-auto（紫色相 + auto 角标 + title 位次），直连胶囊保持原样。
+  //
+  // 位次按条目自带的 chainKey 去对应链里数（端点链与虚拟模型链同口径）；旧 relay
+  // 没有 chainKey 时退回端点自己的链（原口径），两条路径都取不到链就不挂标。
   function renderModelBadges(listEl, agentId, st) {
     listEl.innerHTML = "";
-    const chain = agentUsingAutoRoute(agentId, st);
+    const fallbackChain = agentUsingAutoRoute(agentId, st);
+    const running = Boolean(st && st.status === "running");
     const seen = new Set();
     for (const t of capsuleTargetList(st)) {
       const key = (t.providerId || "") + "\u0000" + t.model;
       if (seen.has(key)) continue;
       seen.add(key);
-      const mark = autoRouteMarkForTarget(chain, t.providerId, t.model, t.viaAuto);
+      const chain = boardChainByKey(t.chainKey) || fallbackChain;
+      // 端点在跑才挂 auto 标（与旧口径一致）：停掉的卡只剩「最近」灰胶囊，不把
+      // 历史链服务说成正在使用。
+      const mark = running ? autoRouteMarkForTarget(chain, t.providerId, t.model, t.viaAuto) : null;
       const b = document.createElement("span");
       b.className = "badge " + (mark ? "badge-auto" : t.active ? "badge-accent" : "badge-neutral");
       b.innerHTML = (t.active ? `<i class="lamp lamp-green"></i> 活跃: ` : "最近: ")

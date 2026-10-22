@@ -639,10 +639,12 @@ export function createOpenAIHandler(deps) {
       // Node-level stats attribution for the tracker: memberId -> the chain
       // node that serves it + the node's bound model (what the upstream is
       // actually asked for). Unknown memberIds resolve to null and the
-      // tracker keeps its existing attribution.
+      // tracker keeps its existing attribution. chainKey names the chain that
+      // produced this member (endpoint id / virtual model name) so the panel
+      // can locate the hop in the chain that actually served the request.
       attributeOf: (memberId) => {
         const meta = memberMeta.get(memberId);
-        return meta ? { providerId: meta.nodeId, model: meta.model } : null;
+        return meta ? { providerId: meta.nodeId, model: meta.model, chainKey: routeKey } : null;
       },
       noteSuccess: (memberId) => {
         const meta = memberMeta.get(memberId);

@@ -905,9 +905,13 @@ export function createHandler(deps) {
       // Node-level stats attribution for the tracker: memberId -> the chain
       // node that serves it + the node's bound model. Unknown memberIds
       // resolve to null and the tracker keeps its existing attribution.
+      // chainKey names the chain that produced this member (endpoint id for an
+      // endpoint chain, virtual model name for a virtual chain): the panel needs
+      // it to locate the hop in the right chain, since the same (channel, model)
+      // can appear in several chains.
       attributeOf: (memberId) => {
         const record = byMemberId.get(memberId);
-        return record ? { providerId: record.nodeId, model: record.model } : null;
+        return record ? { providerId: record.nodeId, model: record.model, chainKey: routeKey } : null;
       },
       // A member answered: stick the chain to its node, and when the member
       // is a pool member also feed the pool's own sticky table.

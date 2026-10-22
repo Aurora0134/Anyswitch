@@ -849,6 +849,7 @@ function absorbAggregateState(target, source, keep) {
     if (source.lastModel !== null) target.lastModel = source.lastModel;
     if (source.lastProvider !== null) target.lastProvider = source.lastProvider;
     target.lastViaAuto = source.lastViaAuto;
+    target.lastChainKey = source.lastChainKey ?? null;
   }
   if (source.lastError !== null
     && (target.lastError === null || (source.lastError.time ?? 0) > (target.lastError.time ?? 0))) {
@@ -1365,6 +1366,11 @@ function createAggregateState(sparkWindowPoints = DEFAULT_SPARK_WINDOW_POINTS) {
     activeTargets: new Map(),
     currentViaAuto: null, // 面板当前展示的模型是否来自 auto 链（null = 无展示中）
     lastViaAuto: false, // 与 lastModel 配对的来源标记（面板最近一次展示是否链服务）
+    // 与 lastModel/lastViaAuto 配对的链身份：端点链 = 端点 id，虚拟模型链 = 模型名。
+    // 面板靠它把胶囊定位到「哪条链的第几跳」；同一（渠道,模型）可出现在多条链里，
+    // 只按配对查会找错链。
+    currentChainKey: null,
+    lastChainKey: null,
     currentProvider: null,
     lastProvider: null,
     lastError: null, // { status, message, time, model, providerId } — history; kept after recovery
@@ -1405,6 +1411,7 @@ function serializeAggregateState(state) {
     lastModel: state.lastModel,
     lastProvider: state.lastProvider,
     lastViaAuto: state.lastViaAuto,
+    lastChainKey: state.lastChainKey,
     keepAliveRetries: state.keepAliveRetries,
     keepAliveRecoveries: state.keepAliveRecoveries,
     keepAliveExhausted: state.keepAliveExhausted,
@@ -1437,6 +1444,7 @@ function restoreAggregateState(state, raw, sampleKeep) {
   state.lastModel = typeof raw.lastModel === "string" ? raw.lastModel : null;
   state.lastProvider = typeof raw.lastProvider === "string" ? raw.lastProvider : null;
   state.lastViaAuto = raw.lastViaAuto === true;
+  state.lastChainKey = typeof raw.lastChainKey === "string" ? raw.lastChainKey : null;
   state.keepAliveRetries = snapshotFinite(raw.keepAliveRetries);
   state.keepAliveRecoveries = snapshotFinite(raw.keepAliveRecoveries);
   state.keepAliveExhausted = snapshotFinite(raw.keepAliveExhausted);
@@ -1557,15 +1565,27 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   state.lastRequestAt = startTime;
   // activeTargets 记账：一条请求在（渠道,模型）组合上进/出各一次。viaAuto 由调用方
   // 给出——只有链计划解析出的成员归因才是 true（服务归因语义），直连/池请求恒 false。
-  const bookTarget = (providerId, model, viaAuto, delta) => {
+  // chainKey 与 viaAuto 同源（成员归因给出）：它记录这条服务来自哪条链，面板据此
+  // 把徽标定位到该链里的跳位。键仍是（渠道,模型），chainKey 只作为携带字段。
+  const bookTarget = (providerId, model, viaAuto, chainKey, delta) => {
     const key = `${providerId ?? ""}\u0000${model}`;
     const entry = state.activeTargets.get(key);
     if (delta > 0) {
       if (entry) {
         entry.count += 1;
         if (viaAuto) entry.autoCount += 1;
+        // 同一（渠道,模型）被两条链同时服务时无法判定位次：保留 null（面板只挂
+        // auto 标、不报位次），而不是让后到的链覆盖前者、报一个可能错的跳位。
+        if (chainKey && entry.chainKey !== chainKey) entry.chainKey = null;
+        else if (chainKey) entry.chainKey = chainKey;
       } else {
-        state.activeTargets.set(key, { providerId: providerId ?? null, model, count: 1, autoCount: viaAuto ? 1 : 0 });
+        state.activeTargets.set(key, {
+          providerId: providerId ?? null,
+          model,
+          count: 1,
+          autoCount: viaAuto ? 1 : 0,
+          chainKey: chainKey ?? null,
+        });
       }
     } else if (entry) {
       entry.count -= 1;
@@ -1584,9 +1604,11 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     state.lastModel = meta.model;
     const count = state.activeModels.get(meta.model) || 0;
     state.activeModels.set(meta.model, count + 1);
-    bookTarget(meta.providerId, meta.model, false, +1);
+    bookTarget(meta.providerId, meta.model, false, null, +1);
     state.currentViaAuto = false;
     state.lastViaAuto = false;
+    state.currentChainKey = null;
+    state.lastChainKey = null;
   }
   if (!background && meta.providerId) {
     state.currentProvider = meta.providerId;
@@ -1623,10 +1645,15 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
   let displayModel = !background && typeof meta.model === "string" && meta.model && meta.model !== AUTO_MODEL ? meta.model : null;
   let displayProvider = typeof meta.providerId === "string" && meta.providerId ? meta.providerId : null;
   let displayViaAuto = false;
-  const setDisplayModel = (model, providerId, viaAuto) => {
+  // displayChainKey：与 displayModel/displayViaAuto 同源的链身份（端点 id / 虚拟
+  // 模型名）。直连请求恒 null；链服务请求随成员宣布一起更新。
+  let displayChainKey = null;
+  const setDisplayModel = (model, providerId, viaAuto, chainKey) => {
     if (typeof model !== "string" || !model) return;
     const nextProvider = typeof providerId === "string" && providerId ? providerId : null;
-    if (model === displayModel && nextProvider === displayProvider && viaAuto === displayViaAuto) return;
+    const nextChainKey = viaAuto && typeof chainKey === "string" && chainKey ? chainKey : null;
+    if (model === displayModel && nextProvider === displayProvider && viaAuto === displayViaAuto
+      && nextChainKey === displayChainKey) return;
     if (displayModel !== null) {
       // 同名同渠道才动模型名计数；跨渠道同名（A/a→B/a）只换 activeTargets 的键。
       if (model !== displayModel) {
@@ -1635,21 +1662,24 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         else state.activeModels.set(displayModel, prev - 1);
         state.activeModels.set(model, (state.activeModels.get(model) || 0) + 1);
       }
-      bookTarget(displayProvider, displayModel, displayViaAuto, -1);
-      bookTarget(nextProvider, model, viaAuto, +1);
+      bookTarget(displayProvider, displayModel, displayViaAuto, displayChainKey, -1);
+      bookTarget(nextProvider, model, viaAuto, nextChainKey, +1);
     } else {
       state.activeModels.set(model, (state.activeModels.get(model) || 0) + 1);
-      bookTarget(nextProvider, model, viaAuto, +1);
+      bookTarget(nextProvider, model, viaAuto, nextChainKey, +1);
     }
     displayModel = model;
     displayProvider = nextProvider;
     displayViaAuto = viaAuto;
+    displayChainKey = nextChainKey;
     state.currentModel = model;
     state.lastModel = model;
     state.currentProvider = nextProvider;
     state.lastProvider = nextProvider;
     state.currentViaAuto = viaAuto;
     state.lastViaAuto = viaAuto;
+    state.currentChainKey = nextChainKey;
+    state.lastChainKey = nextChainKey;
   };
   const resolvedAttributeFor = (memberId) => {
     const source = memberId ?? currentMemberId;
@@ -1682,7 +1712,8 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
     },
     // Server wiring for auto-route attribution: the member loop announces the
     // member about to be attempted, and the chain plan installs its
-    // memberId -> { providerId, model } resolver. Both are no-ops elsewhere.
+    // memberId -> { providerId, model, chainKey } resolver. Both are no-ops
+    // elsewhere.
     setCurrentMember: (memberId) => {
       currentMemberId = typeof memberId === "string" && memberId.length > 0 ? memberId : null;
       // Re-point the display model at the announced member's bound model so
@@ -1690,8 +1721,10 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
       // resolver's presence IS the chain provenance — only chain plans install
       // one — so an announcement that resolves here books the composite target
       // with viaAuto (服务归因语义：auto 角标跟徽章条目自身走，不读链位置快照).
+      // chainKey rides along so the panel can find the hop in the chain that
+      // actually served it (endpoint chain vs virtual model chain).
       const attr = resolvedAttributeFor(currentMemberId);
-      if (attr?.model) setDisplayModel(attr.model, attr.providerId, true);
+      if (attr?.model) setDisplayModel(attr.model, attr.providerId, true, attr.chainKey);
     },
     setAttributeResolver: (fn) => {
       attributeResolver = typeof fn === "function" ? fn : null;
@@ -1752,7 +1785,7 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         else state.activeModels.set(displayModel, count);
       }
       if (displayModel !== null) {
-        bookTarget(displayProvider, displayModel, displayViaAuto, -1);
+        bookTarget(displayProvider, displayModel, displayViaAuto, displayChainKey, -1);
       }
       if (state.activeRequests === 0) {
         state.currentModel = null;
@@ -1760,9 +1793,13 @@ function trackAggregateRequest(state, meta, nowFn, recentSampleWindow, stability
         state.activeModels.clear();
         state.activeTargets.clear();
         state.currentViaAuto = null;
+        state.currentChainKey = null;
       } else if (state.activeModels.size > 0) {
         // If other models still generating, currentModel is latest or combined
         state.currentModel = Array.from(state.activeModels.keys()).join(" + ");
+        // 多条请求并存时「当前模型的链身份」不再唯一，与拼接后的 currentModel 配对
+        // 只会给出错的位次；最近身份（lastChainKey）不受影响。
+        state.currentChainKey = null;
       }
       const endTime = nowFn();
       const reqDuration = Math.max(1, endTime - startTime);
@@ -1967,14 +2004,21 @@ function composeInstanceTracker(primary, mirror) {
 // only exist while their requests are in flight; a zero activeRequests state
 // must never leak phantom entries (orphan-settle paths clear activeModels but
 // cannot know this map's keys), so the snapshot gates on activeRequests.
+// chainKey 与 autoCount 同源（只有链服务请求才带）：面板据此把徽标定位到
+// 「哪条链的第几跳」，同一（渠道,模型）出现在多条链里时也不会找错链。
+// 直连条目（以及旧 relay 的口径）没有这个字段，面板按「链身份未知」处理。
 function activeTargetList(state) {
   if (state.activeRequests <= 0) return [];
-  return Array.from(state.activeTargets.values()).map((t) => ({
-    providerId: t.providerId,
-    model: t.model,
-    count: t.count,
-    autoCount: t.autoCount,
-  }));
+  return Array.from(state.activeTargets.values()).map((t) => {
+    const entry = {
+      providerId: t.providerId,
+      model: t.model,
+      count: t.count,
+      autoCount: t.autoCount,
+    };
+    if (t.chainKey) entry.chainKey = t.chainKey;
+    return entry;
+  });
 }
 
 // Authoritative spark history for one aggregate state: one point per measured
@@ -2046,6 +2090,8 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
       lastProvider: state.lastProvider,
       currentViaAuto: state.currentViaAuto ?? false,
       lastViaAuto: Boolean(state.lastViaAuto),
+      currentChainKey: state.currentChainKey ?? null,
+      lastChainKey: state.lastChainKey ?? null,
       activeTargets: activeTargetList(state),
       lastError: state.lastError,
       errorActive: state.errorActive,
@@ -2074,6 +2120,8 @@ function buildAggregateAgentStatus({ id, name, state, processCount, tpsWindow = 
     lastProvider: state.lastProvider,
     currentViaAuto: state.currentViaAuto ?? false,
     lastViaAuto: Boolean(state.lastViaAuto),
+    currentChainKey: state.currentChainKey ?? null,
+    lastChainKey: state.lastChainKey ?? null,
     activeTargets: activeTargetList(state),
     lastError: state.lastError,
     errorActive: state.errorActive,
@@ -3598,12 +3646,14 @@ export function createAgentMetricsCollector(options = {}) {
     // grey 最近 capsule survives a request that never got attributed.
     if ("providerId" in report) session.providerId = report.providerId ?? null;
     if ("viaAuto" in report) session.viaAuto = report.viaAuto === true;
+    if ("chainKey" in report) session.chainKey = typeof report.chainKey === "string" ? report.chainKey : null;
     if ("model" in report) {
       session.model = report.model ?? null;
       if (session.model) {
         session.lastModel = session.model;
         session.lastProvider = session.providerId;
         session.lastViaAuto = session.viaAuto === true;
+        session.lastChainKey = session.chainKey ?? null;
       }
     }
     if (report.ended === true) session.ended = true;
@@ -3700,9 +3750,11 @@ export function createAgentMetricsCollector(options = {}) {
       model: modelHolder?.model ?? null,
       providerId: modelHolder?.providerId ?? null,
       viaAuto: modelHolder?.viaAuto === true,
+      chainKey: modelHolder?.chainKey ?? null,
       lastModel: lastModelHolder?.lastModel ?? null,
       lastProvider: lastModelHolder?.lastProvider ?? null,
       lastViaAuto: lastModelHolder?.lastViaAuto === true,
+      lastChainKey: lastModelHolder?.lastChainKey ?? null,
       ended: false,
     };
     const out = [];
@@ -3757,10 +3809,12 @@ export function createAgentMetricsCollector(options = {}) {
     session.model = state.currentModel;
     session.providerId = state.currentProvider;
     session.viaAuto = state.currentViaAuto === true;
+    session.chainKey = state.currentChainKey ?? null;
     if (state.lastModel !== null) {
       session.lastModel = state.lastModel;
       session.lastProvider = state.lastProvider;
       session.lastViaAuto = state.lastViaAuto === true;
+      session.lastChainKey = state.lastChainKey ?? null;
     }
     if (state.lastRequestAt !== null && state.lastRequestAt > session.lastSeen) {
       session.lastSeen = state.lastRequestAt;
@@ -4364,6 +4418,7 @@ export function createAgentMetricsCollector(options = {}) {
       let last = null;
       let lastProvider = null;
       let lastViaAuto = false;
+      let lastChainKey = null;
       for (const s of claudeRawSessions) {
         const model = typeof s.model === "string" && s.model ? s.model : null;
         if (!model) {
@@ -4373,14 +4428,17 @@ export function createAgentMetricsCollector(options = {}) {
             last = s.lastModel;
             lastProvider = typeof s.lastProvider === "string" && s.lastProvider ? s.lastProvider : null;
             lastViaAuto = s.lastViaAuto === true;
+            lastChainKey = typeof s.lastChainKey === "string" ? s.lastChainKey : null;
           }
           continue;
         }
         const providerId = typeof s.providerId === "string" && s.providerId ? s.providerId : null;
         const viaAuto = s.viaAuto === true;
+        const chainKey = viaAuto && typeof s.chainKey === "string" ? s.chainKey : null;
         last = model;
         lastProvider = providerId;
         lastViaAuto = viaAuto;
+        lastChainKey = chainKey;
         if (s.activeRequests > 0) {
           active.push(model);
           current = model;
@@ -4390,6 +4448,7 @@ export function createAgentMetricsCollector(options = {}) {
           const entry = targets.get(key) ?? { providerId, model, count: 0, autoCount: 0 };
           entry.count += s.activeRequests;
           if (viaAuto) entry.autoCount += s.activeRequests;
+          if (chainKey) entry.chainKey = chainKey;
           targets.set(key, entry);
         }
       }
@@ -4401,6 +4460,7 @@ export function createAgentMetricsCollector(options = {}) {
         lastProvider,
         currentViaAuto,
         lastViaAuto,
+        lastChainKey,
         activeTargets: Array.from(targets.values()),
       };
     })();
@@ -4447,6 +4507,11 @@ export function createAgentMetricsCollector(options = {}) {
       lastProvider: claudeState.lastProvider ?? claudeSessionsDerived.lastProvider,
       currentViaAuto: claudeState.currentViaAuto || claudeSessionsDerived.currentViaAuto,
       lastViaAuto: claudeState.lastViaAuto || claudeSessionsDerived.lastViaAuto,
+      // 链身份与 lastModel 配对：常驻桶优先（它填了才有 lastModel 的常驻来源），
+      // 否则用 per-launch 会话派生值。
+      lastChainKey: claudeState.lastModel !== null
+        ? (claudeState.lastChainKey ?? null)
+        : (claudeSessionsDerived.lastChainKey ?? null),
       activeTargets: activeTargetList(claudeState).length > 0
         ? activeTargetList(claudeState)
         : claudeSessionsDerived.activeTargets,
@@ -4726,10 +4791,17 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   const identityOf = (ctx) => {
     if (!ctx) return null;
     const attr = resolvedAttributeFor(ctx, null);
-    if (attr?.model) return { model: attr.model, providerId: attr.providerId ?? null, viaAuto: true };
+    if (attr?.model) {
+      return {
+        model: attr.model,
+        providerId: attr.providerId ?? null,
+        viaAuto: true,
+        chainKey: typeof attr.chainKey === "string" ? attr.chainKey : null,
+      };
+    }
     const model = ctx.meta?.model;
     if (typeof model !== "string" || !model || model === AUTO_MODEL) return null;
-    return { model, providerId: ctx.meta?.providerId ?? null, viaAuto: false };
+    return { model, providerId: ctx.meta?.providerId ?? null, viaAuto: false, chainKey: null };
   };
   // 快照展示的是最新的在飞请求（Claude Code 会并发发侧查询）；没有在飞请求时
   // 沿用最近一次拿到过的身份，让「最近」胶囊与会话行都有真实渠道/模型。
@@ -4750,7 +4822,9 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
   // 已经推给面板的身份指纹：成员宣布时只在身份真的变了才重发，一次故障切换
   // 至多一次回环 POST（心跳与请求结束照常发）。
   let postedIdentity = "";
-  const identityFingerprint = (ident) => (ident ? `${ident.providerId ?? ""}\u0000${ident.model}\u0000${ident.viaAuto}` : "");
+  const identityFingerprint = (ident) => (ident
+    ? `${ident.providerId ?? ""}\u0000${ident.model}\u0000${ident.viaAuto}\u0000${ident.chainKey ?? ""}`
+    : "");
   function sendSnapshot() {
     postedIdentity = identityFingerprint(displayIdentity());
     post(snapshot());
@@ -4868,6 +4942,7 @@ export function createSessionReporter({ token = null, reportUrl, journal = null,
           model: ident?.model ?? null,
           providerId: ident?.providerId ?? null,
           viaAuto: ident?.viaAuto === true,
+          chainKey: ident?.chainKey ?? null,
         };
       })(),
     };

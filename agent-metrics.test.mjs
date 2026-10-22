@@ -2610,6 +2610,53 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
       "A/a unbooked, B/a booked — the cross-hop switch is visible");
   });
 
+  it("链身份随归因透出（chainKey）：虚拟模型链的跳位也定位得到，直连不带", async () => {
+    // 用户报障：dsh 走的是虚拟模型链 deepseek-v4.1-flash-mix，而胶囊位次原先只在
+    // 「端点自己的链」里找——那条链里没有这个节点，位次永远算不出，悬停只剩半句。
+    // relay 现在把服务它的那条链（虚拟模型名）随归因送上来，面板按它数位次。
+    let mockTime = 1000;
+    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+
+    const direct = collector.startRequest({ agentId: "dsh", providerId: "a6api-pool", model: "glm-5.3", path: "openai" });
+    let dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.activeTargets, [{ providerId: "a6api-pool", model: "glm-5.3", count: 1, autoCount: 0 }],
+      "直连条目不带链身份");
+    assert.equal(dsh.lastChainKey, null);
+
+    const chained = collector.startRequest({ agentId: "dsh", providerId: null, model: "deepseek-v4.1-flash-mix", path: "openai" });
+    chained.setAttributeResolver((memberId) => (memberId === "sensenova/m1"
+      ? { providerId: "sensenova", model: "deepseek-flash", chainKey: "deepseek-v4.1-flash-mix" }
+      : null));
+    chained.setCurrentMember("sensenova/m1");
+
+    dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    const chainedEntry = dsh.activeTargets.find((t) => t.autoCount > 0);
+    assert.equal(chainedEntry?.chainKey, "deepseek-v4.1-flash-mix", "链服务条目带上服务它的那条链");
+    assert.equal(dsh.lastChainKey, "deepseek-v4.1-flash-mix", "最近模型的链身份与 lastModel 配对");
+    assert.equal(dsh.lastModel, "deepseek-flash");
+
+    chained.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    direct.recordEnd({ status: 200, usage: { prompt_tokens: 1, completion_tokens: 1 } });
+    dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
+    assert.deepEqual(dsh.activeTargets, [], "全部结束后账本清空");
+    assert.equal(dsh.lastChainKey, "deepseek-v4.1-flash-mix", "最近模型的链身份保留");
+  });
+
+  it("旧 relay 的归因没有 chainKey：不凭空造链身份（面板按旧口径退化）", async () => {
+    let mockTime = 1000;
+    const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
+    const req = collector.startRequest({ agentId: "kimi", providerId: null, model: "auto", path: "openai" });
+    req.setAttributeResolver((memberId) => (memberId === "chan-a/m1"
+      ? { providerId: "chan-a", model: "kimi-k3" }
+      : null));
+    req.setCurrentMember("chan-a/m1");
+
+    const kimi = (await collector.getAgentsStatus()).find((a) => a.id === "kimi");
+    assert.deepEqual(kimi.activeTargets, [{ providerId: "chan-a", model: "kimi-k3", count: 1, autoCount: 1 }],
+      "没有链身份时条目不多出字段");
+    assert.equal(kimi.lastChainKey, null);
+  });
+
   it("two instances on different hops of one chain stay two targets (同名不坍缩)", async () => {
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });

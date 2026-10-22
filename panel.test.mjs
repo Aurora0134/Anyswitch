@@ -2001,6 +2001,59 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.equal(mark(CHAIN, "b", "", true), null);
   });
 
+  // 位次的链身份：同一（渠道,模型）可以同时出现在端点链和虚拟模型链里，所以
+  // 位次必须按「服务它的那条链」数——relay 在归因里给出 chainKey（端点 id 或
+  // 虚拟模型名），面板按它取链，不能按端点自己的链去猜。
+  function makeChainByKey({ chains = [], virtualModels = [] } = {}) {
+    const m = panelJs.match(/function boardChainByKey\(chainKey\) \{[\s\S]*?\n  \}/);
+    assert.ok(m, "boardChainByKey found in panel.js");
+    return new Function("boardRoutingChains", "boardVirtualModels", `return (${m[0]});`)(
+      () => chains,
+      () => virtualModels,
+    );
+  }
+  const ENDPOINT_CHAINS = [
+    { endpointId: "kimi", chain: [{ node: "a6api-pool", model: "kimi-k3" }, { node: "sensenova", model: "kimi-k3" }], enabled: true },
+  ];
+  const VIRTUAL_MODELS = [
+    {
+      name: "deepseek-v4.1-flash-mix",
+      chain: [
+        { node: "sensenova", model: "deepseek-flash" },
+        { node: "free-pool", model: "deepseek-v4.1-flash" },
+        { node: "a6api-pool", model: "deepseek-v4.1-flash" },
+      ],
+      enabled: true,
+    },
+  ];
+
+  it("chainKey 指向端点链或虚拟模型链，两种都取得到", () => {
+    const byKey = makeChainByKey({ chains: ENDPOINT_CHAINS, virtualModels: VIRTUAL_MODELS });
+    assert.deepEqual(byKey("kimi"), ENDPOINT_CHAINS[0].chain, "端点 id → 端点链");
+    assert.deepEqual(byKey("deepseek-v4.1-flash-mix"), VIRTUAL_MODELS[0].chain, "虚拟模型名 → 虚拟模型链");
+  });
+
+  it("chainKey 缺失或链已被删除时返回 null（不猜、不拿别的链凑数）", () => {
+    const byKey = makeChainByKey({ chains: ENDPOINT_CHAINS, virtualModels: VIRTUAL_MODELS });
+    assert.equal(byKey(null), null);
+    assert.equal(byKey(""), null);
+    assert.equal(byKey("deleted-chain"), null);
+  });
+
+  it("同（渠道,模型）出现在两条链里时，位次按 chainKey 那条数（不串链）", () => {
+    // kimi 端点链与 kimi-k3-mix 虚拟模型链里都有 a6api-pool/kimi-k3，但位次不同。
+    const chains = [
+      { endpointId: "kimi", chain: [{ node: "a6api-pool", model: "kimi-k3" }, { node: "x", model: "m" }, { node: "y", model: "m" }, { node: "z", model: "m" }], enabled: true },
+    ];
+    const virtualModels = [
+      { name: "kimi-k3-mix", chain: [{ node: "other", model: "m" }, { node: "a6api-pool", model: "kimi-k3" }], enabled: true },
+    ];
+    const byKey = makeChainByKey({ chains, virtualModels });
+    const mark = makeAutoMark();
+    assert.deepEqual(mark(byKey("kimi"), "a6api-pool", "kimi-k3", true), { cur: 0, total: 4 }, "端点链第 1 跳");
+    assert.deepEqual(mark(byKey("kimi-k3-mix"), "a6api-pool", "kimi-k3", true), { cur: 1, total: 2 }, "虚拟模型链第 2 跳");
+  });
+
   // 胶囊数据整形：同名坍缩修复的渲染层入口。新 relay 快照带 activeTargets
   // （渠道×模型复合账本）→ 逐条出双段胶囊；旧 relay 无此字段 → 退化为旧名单。
   function makeCapsuleTargetList() {
@@ -2013,18 +2066,18 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     return new Function("hasDisplayIdentity", `return (${m[0]});`)(new Function(`return (${h[0]});`)());
   }
 
-  it("capsuleTargetList：新快照 activeTargets 逐条出（渠道,模型,活跃,归因）", () => {
+  it("capsuleTargetList：新快照 activeTargets 逐条出（渠道,模型,活跃,归因,链身份）", () => {
     const list = makeCapsuleTargetList()({
       activeTargets: [
-        { providerId: "A", model: "a", count: 1, autoCount: 1 },
+        { providerId: "A", model: "a", count: 1, autoCount: 1, chainKey: "kimi" },
         { providerId: "B", model: "a", count: 2, autoCount: 0 },
       ],
       lastModel: "old",
     });
     assert.deepEqual(list, [
-      { providerId: "A", model: "a", active: true, viaAuto: true },
-      { providerId: "B", model: "a", active: true, viaAuto: false },
-    ]);
+      { providerId: "A", model: "a", active: true, viaAuto: true, chainKey: "kimi" },
+      { providerId: "B", model: "a", active: true, viaAuto: false, chainKey: null },
+    ], "chainKey 随条目透传：位次要按服务它的那条链数（旧 relay 缺该字段为 null）");
   });
 
   it("capsuleTargetList：无渠道的虚拟 auto 条目被丢弃（不把路由胶水当模型名显示）", () => {
@@ -2037,24 +2090,36 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.deepEqual(fn({ lastModel: "auto" }), []);
     // 真实模型不受影响（无渠道维度时仍按旧口径单段显示）
     assert.deepEqual(fn({ activeTargets: [{ providerId: null, model: "m", count: 1, autoCount: 0 }] }), [
-      { providerId: null, model: "m", active: true, viaAuto: false },
+      { providerId: null, model: "m", active: true, viaAuto: false, chainKey: null },
     ]);
   });
 
-  it("capsuleTargetList：活跃账本空 → 最近灰胶囊携带 lastProvider/lastViaAuto 来源", () => {
-    const list = makeCapsuleTargetList()({ activeTargets: [], lastModel: "m", lastProvider: "B", lastViaAuto: true });
-    assert.deepEqual(list, [{ providerId: "B", model: "m", active: false, viaAuto: true }]);
+  it("capsuleTargetList：活跃账本空 → 最近灰胶囊携带 lastProvider/lastViaAuto/lastChainKey 来源", () => {
+    const list = makeCapsuleTargetList()({
+      activeTargets: [],
+      lastModel: "m",
+      lastProvider: "B",
+      lastViaAuto: true,
+      lastChainKey: "deepseek-v4.1-flash-mix",
+    });
+    assert.deepEqual(list, [{
+      providerId: "B",
+      model: "m",
+      active: false,
+      viaAuto: true,
+      chainKey: "deepseek-v4.1-flash-mix",
+    }]);
     assert.deepEqual(makeCapsuleTargetList()({ activeTargets: [] }), []);
   });
 
   it("capsuleTargetList：旧 relay 无 activeTargets → 退化为旧名单（无渠道、无标记）", () => {
     const fn = makeCapsuleTargetList();
     assert.deepEqual(fn({ activeModels: ["m1", "m2"] }), [
-      { providerId: null, model: "m1", active: true, viaAuto: false },
-      { providerId: null, model: "m2", active: true, viaAuto: false },
+      { providerId: null, model: "m1", active: true, viaAuto: false, chainKey: null },
+      { providerId: null, model: "m2", active: true, viaAuto: false, chainKey: null },
     ]);
-    assert.deepEqual(fn({ currentModel: "m3" }), [{ providerId: null, model: "m3", active: true, viaAuto: false }]);
-    assert.deepEqual(fn({ lastModel: "m4" }), [{ providerId: null, model: "m4", active: false, viaAuto: false }]);
+    assert.deepEqual(fn({ currentModel: "m3" }), [{ providerId: null, model: "m3", active: true, viaAuto: false, chainKey: null }]);
+    assert.deepEqual(fn({ lastModel: "m4" }), [{ providerId: null, model: "m4", active: false, viaAuto: false, chainKey: null }]);
     assert.deepEqual(fn({}), []);
   });
 
@@ -2095,6 +2160,10 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     assert.ok(panelCss.includes(".badge-auto-tag"), "auto tag CSS");
     assert.ok(panelJs.includes("renderRouteChainBoard();"), "board renderer wired into polling");
     assert.ok(panelJs.includes("renderModelBadges(modelBadgesList,"), "badge helper wired into cards");
+    // 胶囊位次按条目自带的链身份取链（端点链 / 虚拟模型链同口径），旧 relay 缺
+    // chainKey 时才退回端点自己的链——退回不是主路径，不能把主路径写丢。
+    assert.ok(panelJs.includes("boardChainByKey(t.chainKey)"), "badge hop resolves the chain by chainKey");
+    assert.ok(panelJs.includes("boardVirtualModels()"), "virtual model chains are part of the hop lookup");
   });
 
   it("claude 卡头「模型: …」与胶囊同源（虚拟 auto 不会从卡头漏出）", () => {
