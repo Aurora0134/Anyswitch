@@ -573,16 +573,18 @@
      token（--surface / --surface-hover / --accent-soft / --text-3…），不造新色值。 */
   #railTerminalDir {
     /* 换血时整栏接管：不吃 .rail-dir 的贴底 margin-top:auto（id 选择器提级，压过
-       后文那条基座规则），改为从栏顶往下铺满，历史会话段自己滚。
-       min-height 用 auto（默认的自动最小尺寸）而不是 0：栏体是一列 flex，写成 0 会
-       允许「新建终端」这些定高内容被压到内容高度以下——行不缩（min-height:30px），
-       容器缩了，overflow 可见就把行画到下一段的段头上（矮窗口实测：容器 18px 装两个
-       30px 行，段头落进行高亮里）。保持 auto 后，空间不够时先压历史会话段（它是唯一
-       flex:1 1 auto 且 min-height:0 的那段），仍不够则由栏体自己滚（.rail 本来就有
-       overflow-y:auto），任何内容都不重叠。
-       position:relative：组头 ⋯ 菜单与 hover 卡挂在栏体下绝对定位（JS 装配），
-       它们是栏内浮层，不吃 portal。 */
+       后文那条基座规则），改为从栏顶往下铺满，中段滚动层自己滚。
+       min-height:0 + overflow:hidden（M9-D1，dsh regionArea 同口径）：早先选 auto
+       是为躲 e160790（行压段头），但它把整棵树的 min-content 全高传给 aside 的 flex
+       布局——收缩链断在栏体，aside 自己滚、底栏被滚走、滚动层从不接管（真机实测：
+       rail scrollHeight 1468 > clientHeight 566，滚动层 1254==1254）。改成 0 后栏体
+       可缩到剩余空间，flex:1 的滚动层成为唯一 scroller，底栏常驻；overflow:hidden
+       保证极端矮窗下溢出的也是被裁切而不是画到段头/底栏上（e160790 的病征是可见
+       重叠；500px 矮窗下新建钮+段头 73px 远装得进，根本裁不到）。
+       position:relative 仍留：底部渐隐遮罩挂在栏体上（绝对定位贴滚动层底）。两个
+       菜单已 portal 到 body（overflow:hidden 会裁栏内浮层，见 .rail-term-menu）。 */
     margin-top: 12px; flex: 1 1 auto; gap: 0; position: relative;
+    min-height: 0; overflow: hidden;
   }
   /* 栏体分段的 flex 纪律（矮窗口不重叠的前提，见 #railTerminalDir 注释）：
      新建钮、段头、「打开的终端」列表都是定高内容 → flex:none，永不被压缩；
@@ -777,7 +779,10 @@
      栏内单例（JS 保证同一时刻只开一个），挂在栏体下绝对定位。容器可扩：M8 加项
      只加 DOM。现仅「移除分组」一项（红色 danger）。 */
   .rail-term-menu {
-    position: absolute; z-index: 5; min-width: 120px; padding: 4px;
+    /* M9-D1：菜单 portal 到 body 下（position:fixed + 视口坐标）——栏体加了
+       overflow:hidden，栏内 absolute 会被裁掉；层级与 hover 卡/右键菜单同档，
+       压过栏体 40 与终端页内容。 */
+    position: fixed; z-index: 1200; min-width: 120px; padding: 4px;
     display: flex; flex-direction: column; gap: 2px;
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md); box-shadow: var(--shadow-lg); font-size: 12.5px;

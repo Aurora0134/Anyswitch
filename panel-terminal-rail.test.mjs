@@ -133,7 +133,15 @@ describe("终端视图左栏换血（M4）", () => {
       const dir = cssRule("#railTerminalDir {");
       // 只比对声明（注释里也会出现「min-height:0」这类说明文字）
       const decls = (block) => block.replace(/\/\*[\s\S]*?\*\//g, "");
-      assert.ok(!/min-height:\s*0/.test(decls(dir)), "栏体不吃 min-height:0（否则定高内容可被压到内容高度以下）");
+      // M9-D1：栏体必须 min-height:0 + overflow:hidden（dsh regionArea 同口径）。
+      // 早先选 auto 是为躲 e160790，但它把整棵树的 min-content 全高传给 aside 的
+      // flex 布局——收缩链断在栏体，aside 自己滚、底栏被滚走、滚动层从不接管
+      // （真机实测：rail scrollHeight 1468 > clientHeight 566，滚动层 1254==1254）。
+      // min-height:0 让栏体可缩到剩余空间，flex:1 的滚动层成为唯一 scroller；
+      // overflow:hidden 保证矮窗下溢出的也是被裁切而不是画到段头/底栏上（e160790
+      // 的病征是「可见的重叠」，裁切是 containment，且 500px 矮窗下根本裁不到）。
+      assert.ok(/min-height:\s*0/.test(decls(dir)), "栏体 min-height:0（收缩链不断，M9-D1）");
+      assert.ok(/overflow:\s*hidden/.test(decls(dir)), "栏体 overflow:hidden（溢出由滚动层裁）");
       for (const [selector, why] of [
         [".rail-term-new {", "新建终端钮"],
         [".rail-term-section-head {", "段头（T7 三钮所在，定高不滚）"],
@@ -150,6 +158,22 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(scroll.includes("padding-bottom: 16px"), "列表底部留白 16px（dsh 同值）");
       // 树容器不得靠 overflow:hidden 掩盖问题（那会把行切掉，不是修）
       assert.ok(!/\.rail-term-history[^{]*\{[^}]*overflow/.test(panelCss), "树容器不靠 overflow 裁切");
+    });
+
+    it("M9-D1：栏内浮层 portal 到 body（栏体 overflow:hidden 不裁它们）", () => {
+      // 组头 ⋯ 菜单与视图选项菜单原先挂在栏内 absolute——栏体加 overflow:hidden 后
+      // 会把贴边展开的菜单裁掉，故一并 portal 到 body（dsh 的 portal:true 同款），
+      // 坐标改按视口 rect 算、层级抬到与 hover 卡/右键菜单同档。
+      const menu = cssRule(".rail-term-menu {");
+      assert.ok(menu.includes("position: fixed"), "菜单挂 body 下 fixed（不再吃栏内 absolute）");
+      assert.ok(/z-index:\s*1200/.test(menu), "层级 1200：压过栏体 40 与终端页内容");
+      const railBlock = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      const groupOpen = railBlock.slice(railBlock.indexOf("function openTerminalRailGroupMenu"), railBlock.indexOf("function toggleTerminalRailGroupMenu"));
+      const viewOpen = railBlock.slice(railBlock.indexOf("function openTerminalRailViewMenu"), railBlock.indexOf("function applyTerminalRailViewChoice"));
+      assert.ok(groupOpen.includes("document.body.append(menu)"), "组头菜单 append 到 body");
+      assert.ok(viewOpen.includes("document.body.append(menu)"), "视图选项菜单 append 到 body");
+      assert.ok(!groupOpen.includes("dir.append(menu)") && !viewOpen.includes("dir.append(menu)"),
+        "两个菜单都不再挂回栏体（挂了就会被 overflow:hidden 裁）");
     });
 
     it("钉底三层：顶区/中段滚动层/底栏各司其职，不用 sticky/fixed", () => {

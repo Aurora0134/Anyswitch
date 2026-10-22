@@ -8709,14 +8709,15 @@ async function api(method, path, body) {
         menu.append(el);
       }
     }
-    dir.append(menu);
-    const dirRect = dir.getBoundingClientRect();
+    // M9-D1：portal 到 body 下 position:fixed（栏体 overflow:hidden 会裁栏内浮层，
+    // dsh 的 portal:true 同款）；右对齐锚定＝菜单右缘贴钮右缘（m6c §B2 align:end）。
+    document.body.append(menu);
     const btnRect = btn.getBoundingClientRect();
-    menu.style.top = `${Math.max(0, btnRect.bottom - dirRect.top + 4)}px`;
-    menu.style.left = `${Math.max(0, btnRect.right - dirRect.left - menu.offsetWidth)}px`;
+    const width = menu.offsetWidth || 200;
+    menu.style.top = `${Math.max(8, btnRect.bottom + 4)}px`;
+    menu.style.left = `${Math.max(8, Math.min(btnRect.right - width, window.innerWidth - width - 8))}px`;
     terminalRailViewMenuEl = menu;
   }
-
   // 点选：写偏好 → 落盘 → 连带动作（切 manual 快照/切 updated 清序/树模式解折叠）
   // → 重渲 → 关菜单。
   function applyTerminalRailViewChoice(field, value) {
@@ -9348,14 +9349,14 @@ async function api(method, path, body) {
     item.setAttribute("data-rail-term-remove-group", key);
     item.textContent = "移除分组";
     menu.append(item);
-    dir.append(menu);
-    // 定位贴组头：右缘与组头右缘对齐、顶缘贴组头底边。换算到栏体坐标——菜单的
-    // 包含块就是栏体（#railTerminalDir，position:relative），中间隔着的滚动层不
-    // 进偏移计算。栏体滚动会带偏菜单，挂个一次性 capture scroll 监听跟着关。
-    const dirRect = dir.getBoundingClientRect();
+    // M9-D1：portal 到 body 下 position:fixed——栏体 overflow:hidden 会裁掉栏内
+    // 浮层（dsh 的 portal:true 同款）。坐标直接按视口 rect 算，不再换算到栏体。
+    document.body.append(menu);
     const headRect = head.getBoundingClientRect();
-    menu.style.top = `${Math.max(0, headRect.bottom - dirRect.top + 4)}px`;
-    menu.style.left = `${Math.max(0, headRect.right - dirRect.left - menu.offsetWidth)}px`;
+    const width = menu.offsetWidth || 120;
+    menu.style.top = `${Math.max(8, headRect.bottom + 4)}px`;
+    menu.style.left = `${Math.max(8, Math.min(headRect.right - width, window.innerWidth - width - 8))}px`;
+    // 栏体滚动会带偏菜单（它不再跟着内容走），挂个一次性 capture scroll 监听跟着关
     dir.addEventListener("scroll", closeTerminalRailGroupMenu, { capture: true, once: true });
     terminalRailMenuEl = menu;
   }
