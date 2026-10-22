@@ -9098,7 +9098,11 @@ async function api(method, path, body) {
   function syncTerminalRailHistory(agentId) {
     if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
-      terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+      // 活跃页签是空白外壳（无 agent 归属）时不清表：沿用上次加载的历史，用户
+      // 才点得到行、把空白壳内切接管（M12-A 判定矩阵空白壳行）。真机验收发现
+      // 旧行为在此清空 history，矩阵那一行 thereby 永远不可达；切回 agent 上
+      // 下文时 endpoint 对不上，自然会走下面的重拉。从未加载过时本就是空表。
+      terminalRailHistory = { ...terminalRailHistory, endpoint: "" };
       terminalRailFlipMode = "instant";
       renderTerminalRailHistory("");
       return;

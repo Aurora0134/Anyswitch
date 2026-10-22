@@ -1495,5 +1495,28 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     assert.ok(/if \(flipped && typeof renderTerminalRail === "function"\)/.test(block), "只在实际翻转时重渲栏（不是每帧）");
     assert.ok(/renderTerminalSessionData\(\);\s*renderTerminalPreviewTabs\(\);/s.test(block), "原两渲不动（数据＋页签）");
   });
+
+  // M12-A 空白壳接管的可达性前提：活跃页签是空白外壳（无 agent 归属）时栏体不清表——
+  // 沿用上次加载的历史，用户才点得到行、把空白壳内切接管（规格判定矩阵空白壳行）。
+  // 真机验收发现：旧行为在空白壳聚焦时把 history 清空，矩阵那一行 thereby 不可达。
+  it("空白壳聚焦不清栏：沿用上次加载的历史，同参不重拉（vm 真跑）", () => {
+    const fn = new Function(`
+      let terminalRailHistory = { endpoint: "kimi", sessions: [{ id: "s-1", endpoint: "kimi" }], fetchedAt: 1, error: null };
+      const rendered = [];
+      const refetched = [];
+      function renderTerminalRailHistory(agentId) { rendered.push(agentId); }
+      function refreshTerminalRailHistory({ endpoint }) { refetched.push(endpoint); }
+      ${extractFn("syncTerminalRailHistory")}
+      return { sync: syncTerminalRailHistory, state: () => terminalRailHistory, rendered, refetched };
+    `)();
+    fn.sync("");
+    assert.deepEqual(fn.state().sessions, [{ id: "s-1", endpoint: "kimi" }], "空白壳聚焦不清表（行还点得到）");
+    assert.equal(fn.state().endpoint, "", "标记为无 agent 上下文（区别于已加载的 kimi）");
+    assert.deepEqual(fn.rendered, [""], "按无 agent 上下文重渲一次");
+    fn.sync("");
+    assert.deepEqual(fn.rendered, [""], "同参二次调用早退，不重渲");
+    fn.sync("kimi");
+    assert.deepEqual(fn.refetched, ["kimi"], "切回 agent 上下文才走重拉");
+  });
 });
 
