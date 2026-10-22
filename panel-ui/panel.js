@@ -9033,7 +9033,8 @@ async function api(method, path, body) {
 
   // ---- 数据 ----
   // 历史会话只在进终端视图时拉一次（全量扫盘实测 6.7s、无缓存——禁挂轮询）；身份
-  // 换人时补拉一次；段头刷新图标是唯一的手动重取入口。
+  // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），手动重取
+  // 入口随之消失——重取只剩这两条自动路径，要手动刷新可退出终端视图再进。
   function syncTerminalRailHistory(agentId) {
     if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
@@ -9052,8 +9053,6 @@ async function api(method, path, body) {
     // 走到 syncTerminalRailHistory——不认的话它每一拍都判「身份还没拉过」，同一份列表
     // 被反复排队重取。认下后组列表暂时为空，落地即替换。
     terminalRailHistory = { endpoint, sessions: [], fetchedAt: 0, error: null };
-    const refreshBtn = $("railTermHistoryRefresh");
-    if (refreshBtn) refreshBtn.disabled = true;
     try {
       const data = await api("GET", "/api/sessions/list");
       const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
@@ -9063,7 +9062,6 @@ async function api(method, path, body) {
       if (manual) toast(panelError(error, "会话列表加载失败"), true);
     } finally {
       terminalRailFetchInFlight = false;
-      if (refreshBtn) refreshBtn.disabled = false;
       terminalRailFlipMode = "instant";
       renderTerminalRail();
     }
@@ -9594,7 +9592,6 @@ async function api(method, path, body) {
       if (more) toggleTerminalRailWatermark(more.getAttribute("data-rail-term-more"));
     });
     $("railTermNewBtn").onclick = () => terminalRailCreateTerminal();
-    $("railTermHistoryRefresh").onclick = () => refreshTerminalRailHistory({ manual: true });
     // 段头搜索（M8 T7a）：钮＝展开/重新聚焦（非 toggle）；输入＝防抖 250ms；清空钮
     // 与 Esc＝清空＋收起。外点收起逻辑挂在下面的 document 委托里（仅空查询）。
     const searchBtn = $("railTermSearchBtn");

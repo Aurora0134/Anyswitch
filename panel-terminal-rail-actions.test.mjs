@@ -1195,10 +1195,11 @@ describe("M8 T7a 段头搜索（照搬 m6c §A，裁剪后）", () => {
       assert.ok(head.includes('id="railTermSearchClear"'), "清空钮在册");
       assert.ok(head.includes('placeholder="搜索会话名称"'), "placeholder 逐字（m6c §A2）");
       assert.ok(/id="railTermSearchClear"[^>]*aria-label="清除搜索"/.test(head), "清空钮 aria 逐字（m6c §A2）");
-      assert.ok(head.includes('id="railTermHistoryRefresh"'), "刷新钮在位（dsh 该位的「选工作区」用户不加）");
-      // 位序：标题 → 搜索 → （视图选项 T7b）→ 刷新
+      // D4：段头只剩搜索＋视图选项两钮（刷新钮已砍，用户拍板）
+      assert.ok(!head.includes('id="railTermHistoryRefresh"'), "刷新钮不在册（M9-D4）");
+      // 位序：标题 → 搜索 → 视图选项（dsh 两钮排布）
       assert.ok(head.indexOf('id="railTermSectionTitle"') < head.indexOf('id="railTermSearchBtn"')
-        && head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermHistoryRefresh"'), "位序：标题 → 搜索 → 刷新");
+        && head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"'), "位序：标题 → 搜索 → 视图选项");
       // 搜索钮无标签（批准清单里没有它的词）——同 ⋯ 钮形制
       assert.ok(/id="railTermSearchBtn"[^>]*aria-hidden="true"/.test(head), "搜索钮按装饰图标形制（标签待清单补录）");
     });
@@ -1305,9 +1306,8 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
       assert.ok(dir.includes('id="railTermViewOptionsBtn"'), "视图选项钮在册");
       assert.ok(/id="railTermViewOptionsBtn"[^>]*title="视图选项"[^>]*aria-label="视图选项"/.test(dir), "title/aria 逐字");
       const head = dir.slice(dir.indexOf('id="railTermSectionHead"'), dir.indexOf('class="rail-term-scroll"'));
-      assert.ok(head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"')
-        && head.indexOf('id="railTermViewOptionsBtn"') < head.indexOf('id="railTermHistoryRefresh"'),
-        "位序：搜索 → 视图选项 → 刷新（第三格不放假选工作区，用户明确不加）");
+      assert.ok(head.indexOf('id="railTermSearchBtn"') < head.indexOf('id="railTermViewOptionsBtn"'),
+        "位序：搜索 → 视图选项（D4 起段头只此两钮，dsh 两钮排布）");
     });
 
     it("组头 ⋯ 钮补录 aria「分组操作」（用户已知情未异议）", () => {
@@ -1518,7 +1518,7 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
     const btnStub = () => ({ onclick: null, addEventListener: () => {}, disabled: false });
     const els = {
       railTerminalDir: dirStub,
-      railTermNewBtn: btnStub(), railTermHistoryRefresh: btnStub(),
+      railTermNewBtn: btnStub(),
       railTermSearchBtn: btnStub(), railTermSearchInput: btnStub(), railTermSearchClear: btnStub(),
       railTermViewOptionsBtn: btnStub(), railBackBtn: null, v2Rail: { addEventListener: () => {} },
     };
