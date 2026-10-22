@@ -8856,8 +8856,12 @@ async function api(method, path, body) {
     const pending = terminalRailPendingNewTerminals();
     for (const entry of pending) {
       const removed = terminalRailPrefs.removedGroups.some((dir) => terminalRailSameDir(dir, entry.cwd));
-      let group = groups.find((row) => row.key && terminalRailSameDir(row.key, entry.cwd));
-      if (!group && !removed) {
+      // M10-F1：flat 模式只有 key "" 的平铺伪组——兜底行挂伪组，不新建真组
+      // （否则单列表平铺行之外会多出一个真组头，刚拉起全新 agent 终端即撞见）。
+      let group = flat
+        ? groups.find((row) => row.flat)
+        : groups.find((row) => row.key && terminalRailSameDir(row.key, entry.cwd));
+      if (!group && !removed && !flat) {
         group = { key: entry.cwd, label: sessDirName(entry.cwd), rows: [], latest: entry.createdAt, depth: 0 };
         groups.push(group);
         groups.sort((a, b) => {
@@ -9370,6 +9374,9 @@ async function api(method, path, body) {
   // 分组移除（dsh §2 / m6 §2）：红色确认弹窗（复用共用确认件），只从清单移除，
   // 磁盘文件夹与会话记录不动，会话落「未分组」。
   function terminalRailRemoveGroup(key) {
+    // 先收场组头菜单再开弹窗（M10-F2）：菜单 z-index 1200 高于弹窗 overlay 300，
+    // 不收场会滞留 DOM 压住弹窗（窄窗/靠中组头下尤其明显）。
+    closeTerminalRailGroupMenu();
     showSkillsModal({
       title: "移除分组",
       bodyHtml: `把“${escapeHtml(sessDirName(key))}”从会话栏移除。文件夹和会话记录都会保留，里面的会话会显示在“未分组”下。`,

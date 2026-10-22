@@ -37,14 +37,14 @@ const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // ── 渲染沙盒：renderTerminalRailHistory 及其全部依赖（照既有测试的同款桩） ──
-function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedCollapsed = true } = {}) {
+function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedCollapsed = true, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} } } = {}) {
   const list = { html: "", writes: 0 };
   Object.defineProperty(list, "innerHTML", {
     get: () => list.html,
     set: (v) => { list.writes += 1; list.html = v; },
   });
   const state = { collapsed: new Set(collapsed), scrolled: [] };
-  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedCollapsed", `
+  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedCollapsed", "viewPrefs", `
     let terminalRailRendered = { history: null };
     let terminalRailAutoExpandedFor = "";
     let terminalRailScrolledFor = "";
@@ -52,7 +52,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalRailCollapsedGroups = state.collapsed;
     const terminalRailWatermarks = new Map();
     const terminalRailPrefs = prefs;
-    const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+    const terminalRailViewPrefs = viewPrefs;
     let terminalRailRemovedCollapsed = removedCollapsed;
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
@@ -97,7 +97,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
     return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
-  `)(list, state, history, activeSession, prefs, removedCollapsed);
+  `)(list, state, history, activeSession, prefs, removedCollapsed, viewPrefs);
   return { fn, list, state };
 }
 
@@ -500,7 +500,8 @@ describe("S2 分组移除（finding 1b）", () => {
         "正文逐字（目录短名代入）");
       // 桩里 onConfirm 被同步调起：本地先生效、POST 落盘
       assert.deepEqual(fn.prefs().removedGroups, ["C:\\dev\\alpha"], "本地先进清单（瞬时重排，不等网络）");
-      assert.equal(log.menuClosed, 1, "菜单收起");
+      // 两次收场：开弹窗前收一次（M10-F2，菜单不许压弹窗）＋确认后 commit 里再收一次
+      assert.equal(log.menuClosed, 2, "菜单收起（F2 开弹窗前 + commit 后各一次）");
       assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/remove-group", body: { dir: "C:\\dev\\alpha" } }],
         "POST 带目录原始拼写");
       await flush();
@@ -1985,5 +1986,64 @@ describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
       "组头菜单有滚动收场（既有）");
     assert.ok(viewOpen.includes('addEventListener("scroll", closeTerminalRailViewMenu, { capture: true, once: true })'),
       "视图菜单对称补上滚动收场（portal 到 body 后不随树滚，会飘）");
+  });
+});
+
+describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", () => {
+  // 现象（M8 遗留）：flat 转换先于兜底注入执行，兜底行找不到 key "" 的伪组就新建
+  // 一个真组——点「单列表」后平铺行之外多出一个真组头（key 如 C:\\Users\\86183，
+  // 内挂 live 兜底行）。修法：flat 模式下兜底行挂伪组（key ""）不新建组。
+  it("flat ＋ 全新终端兜底行：无 key 非空的伪组头，兜底行挂在平铺伪组里", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [
+          { id: "s-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 },
+          { id: "s-2", endpoint: "kimi", project: "C:\\dev\\beta", title: "接入渠道", lastActive: 200 },
+        ],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-9", cwd: "C:\\Users\\86183", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+      viewPrefs: { groupBy: "flat", orderBy: "updated", archivedFilter: "default", sessionOrder: {} },
+    });
+    sandbox.fn.render("kimi");
+    // 平铺行在册（两历史行直接平铺，无组头）
+    assert.ok(sandbox.list.html.includes('data-rail-term-resume="s-1"'), "历史行平铺在册");
+    assert.ok(sandbox.list.html.includes('data-rail-term-resume="s-2"'), "历史行平铺在册");
+    // 兜底行在册（挂在伪组里）
+    assert.ok(sandbox.list.html.includes(">新会话<"), "兜底行在册");
+    // 关键断言：不得有 key 非空的组头（伪组头残留）
+    assert.ok(!/data-rail-term-group="(?!")[^"]*"/.test(sandbox.list.html),
+      "flat 模式无 key 非空的组头（兜底行不新建真组）");
+    assert.ok(!sandbox.list.html.includes("rail-term-group-head"), "flat 模式干脆没有组头元素");
+  });
+
+  it("对照组：按工作区模式下兜底行照旧为无历史会话的新目录建组", () => {
+    const sandbox = renderSandbox({
+      history: { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null },
+      activeSession: { id: "t-9", cwd: "C:\\Users\\86183", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(sandbox.list.html.includes("rail-term-group-head"), "非 flat 模式照旧建组");
+    assert.ok(sandbox.list.html.includes(">新会话<"), "兜底行在册");
+  });
+});
+
+describe("M10 F2：点「移除分组」先收场组头菜单再开弹窗", () => {
+  // 现象：菜单 z-index 1200 高于弹窗 overlay 300，菜单滞留 DOM 到下一次外点，
+  // 窄窗/靠中组头下可能压住弹窗。修法：开弹窗前先 closeTerminalRailGroupMenu()。
+  it("terminalRailRemoveGroup：先收场菜单，后开弹窗（调用有序）", () => {
+    const order = [];
+    const fn = new Function("order", `
+      function closeTerminalRailGroupMenu() { order.push("closeMenu"); }
+      function showSkillsModal(opts) { order.push("modal"); return opts; }
+      function escapeHtml(v) { return String(v || ""); }
+      function sessDirName(p) { return String(p || "").split(/[\\\\/]/).filter(Boolean).pop() || p || ""; }
+      ${extractFn("terminalRailRemoveGroup")}
+      return terminalRailRemoveGroup;
+    `)(order);
+    fn("C:\\dev\\alpha");
+    assert.deepEqual(order, ["closeMenu", "modal"], "先收场组头菜单，再开确认弹窗（菜单不许压在弹窗上）");
   });
 });
