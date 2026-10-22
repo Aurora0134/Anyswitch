@@ -351,28 +351,46 @@ describe("终端视图左栏换血（M4）", () => {
         function terminalRailIsArchived() { return false; }
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
+        // 槽位接线用桩（markup 逐项由源码钉死测试负责）
+        const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1");
       const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
       const live = { id: "t-1", status: "working" };
       const html = fn(session, live, "t-1");
-      assert.ok(html.includes("terminal-tab-state is-working"), "live 行带状态点（working/idle 双态口径同页签）");
+      // M12-B：working 行的行首槽位挂转圈（dsh 实测口径），不再用 7×7 状态点。
+      assert.ok(html.includes("SPINNER-STUB"), "working 行行首槽位挂转圈");
+      assert.ok(!html.includes("terminal-tab-state"), "working 行不挂 7×7 状态点（转圈即运行中视觉）");
       assert.ok(html.includes("is-active"), "聚焦终端对应的行是选中态（T2）");
       assert.ok(html.includes('data-rail-term-live="t-1"'), "live 行带终端 id（点击走聚焦）");
       assert.ok(html.includes('data-rail-term-close="t-1"'), "live 行 hover 出关闭叉（T5，走同一条关闭处理）");
       assert.ok(html.includes('data-rail-term-archive="s-1"'), "live 行同时带归档钮（T5）");
       assert.ok(html.includes('aria-hidden="true">×</span>'), "关闭叉照页签形制：字形 + aria-hidden，不新造文案");
-      // 非 live 行：无状态点、无关闭叉，只有归档钮
+      // 非 live 行：槽位空（无点、无转圈），无关闭叉，只有归档钮
       const plain = fn(session, null, "t-9");
       assert.ok(!plain.includes("terminal-tab-state"), "非 live 行无状态点");
+      assert.ok(!plain.includes("SPINNER-STUB"), "非 live 行槽位留空（转圈只填运行行的空槽）");
       assert.ok(!plain.includes("data-rail-term-close"), "非 live 行无关闭叉");
       assert.ok(plain.includes('data-rail-term-archive="s-1"'), "非 live 行 hover 出归档钮（T5）");
       assert.ok(!plain.includes("is-active"), "非 live 行不占选中态");
-      // 选中只属于聚焦终端那条 live 行
+      // 选中只属于聚焦终端那条 live 行；idle 的 live 行留状态点
       const other = fn(session, { id: "t-2", status: "idle" }, "t-1");
-      assert.ok(other.includes("terminal-tab-state is-idle"), "另一个 live 行是 idle 点");
+      assert.ok(other.includes("terminal-tab-state is-idle"), "idle 的 live 行是 7×7 状态点（口径同页签）");
       assert.ok(!other.includes("is-active"), "同一时刻至多一条选中（T2）");
+    });
+
+    it("M12-B 转圈 markup 逐项（源码钉死，dsh 实测规格照抄）", () => {
+      const spinner = panelJs.match(/const TERMINAL_RAIL_SPINNER = '([\s\S]*?)';/)?.[1];
+      assert.ok(spinner, "转圈常量在册");
+      assert.ok(spinner.includes('width="14" height="14" viewBox="0 0 24 24"'), "SVG 14×14、viewBox 0 0 24 24");
+      assert.ok(spinner.includes('aria-hidden="true"'), "SVG aria-hidden（读屏文本另挂）");
+      assert.ok(spinner.includes('stroke="currentColor"'), "currentColor 吃三级文字色（不造新色值）");
+      assert.ok(spinner.includes('class="rail-term-spinner-track"') && spinner.includes('r="9.5"') && spinner.includes('opacity=".25"'), "轨道圆 r=9.5、opacity .25");
+      assert.ok(spinner.includes('class="rail-term-spinner-arc"') && spinner.includes('stroke-dasharray="12 150"'), "弧线圆 dasharray 12 150");
+      assert.ok(spinner.includes('class="rail-term-spinner-rot"'), "外层 g 挂旋转类（transform-origin center）");
+      assert.ok(spinner.includes("进行中"), "槽内读屏文本「进行中」（规格批准的唯一新增 aria 文本）");
+      assert.ok(spinner.includes('class="rail-term-spinner-sr"'), "读屏文本走 visuallyHidden 形制");
     });
 
     it("树渲染指纹门控：同串不重写 DOM，选中/状态变化才重写", () => {
@@ -435,6 +453,7 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailVisibleSessions")}
         ${extractFn("terminalRailRegroupRemoved")}
         ${extractFn("terminalRailPendingNewTerminals")}
+        const TERMINAL_RAIL_SPINNER = "";
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("renderTerminalRailHistory")}
@@ -1206,6 +1225,7 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailRegroupRemoved")}
           ${extractFn("terminalRailArchivedKey")}
           ${extractFn("terminalRailVisibleSessions")}
+          const TERMINAL_RAIL_SPINNER = "";
           ${extractFn("terminalRailRowHtml")}
           ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
@@ -1303,6 +1323,7 @@ ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("terminalRailRegroupRemoved")}
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailVisibleSessions")}
+        const TERMINAL_RAIL_SPINNER = "";
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
@@ -1346,3 +1367,133 @@ ${extractFn("terminalRailPendingRowHtml")}
     });
   });
 });
+
+describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => {
+  it("转圈 CSS 逐项：16×20 槽、轨道/弧线 currentColor、两动画同周期、reduced-motion 降级", () => {
+    const slot = cssRule(".rail-term-spinner {");
+    assert.ok(/width:\s*16px/.test(slot) && /height:\s*20px/.test(slot), "行首槽位 16×20（dsh 实测）");
+    assert.ok(/color:\s*var\(--text-3\)/.test(slot), "槽位取三级文字色 token（currentColor 链）");
+    const track = cssRule(".rail-term-spinner-track {");
+    assert.ok(/fill:\s*none/.test(track) && /stroke:\s*currentColor/.test(track) && /stroke-width:\s*2/.test(track) && /opacity:\s*\.25/.test(track),
+      "轨道圆：none 填充、currentColor、2px 描边、opacity .25（r=9.5 由 markup 钉）");
+    const arc = cssRule(".rail-term-spinner-arc {");
+    assert.ok(/stroke:\s*currentColor/.test(arc) && /stroke-width:\s*2/.test(arc), "弧线圆同描边（currentColor，不造新色值）");
+    assert.ok(/stroke-dasharray:\s*12 150/.test(arc), "弧线 dasharray 12 150");
+    assert.ok(/animation:\s*rail-term-spinner-breathe 1\.5s ease-in-out infinite/.test(arc), "弧线呼吸 1.5s ease-in-out infinite");
+    const rot = cssRule(".rail-term-spinner-rot {");
+    assert.ok(/transform-origin:\s*center/.test(rot), "外层 g transform-origin center");
+    assert.ok(/animation:\s*rail-term-spinner-rotate 1\.5s linear infinite/.test(rot), "外层 g 匀速转 1.5s linear infinite（与弧线同周期）");
+    assert.ok(/@keyframes rail-term-spinner-breathe \{[\s\S]*?0% \{ stroke-dasharray: 12 150; stroke-dashoffset: 0; \}[\s\S]*?50% \{ stroke-dasharray: 24 150; stroke-dashoffset: -6; \}[\s\S]*?100% \{ stroke-dasharray: 12 150; stroke-dashoffset: 0; \}/.test(panelCss),
+      "呼吸三段：弧长 12→24→12、offset 0→-6→0");
+    assert.ok(/@keyframes rail-term-spinner-rotate \{ from \{ transform: rotate\(0deg\); \} to \{ transform: rotate\(360deg\); \} \}/.test(panelCss),
+      "匀速 360°");
+    assert.ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-spinner-arc, \.rail-term-spinner-rot \{ animation: none; \}/.test(panelCss),
+      "reduced-motion 两动画全 none（静态轨道＋固定弧）");
+    const sr = cssRule(".rail-term-spinner-sr {");
+    assert.ok(/width:\s*1px/.test(sr) && /height:\s*1px/.test(sr) && /clip:/.test(sr), "读屏文本 visuallyHidden 形制");
+  });
+
+  // 水位线联动 vm 沙盒：参数化（history/sessions/activeId），一次构造两帧对照。
+  const watermarkSandbox = (list, state, history, sessions, activeId) => new Function("list", "state", "history", "sessions", "activeId", `
+    let terminalRailRendered = { open: null, history: null };
+    let terminalRailAutoExpandedFor = "";
+    let terminalRailScrolledFor = "";
+    let terminalRailFlipMode = "instant";
+    const terminalRailCollapsedGroups = state.collapsed;
+    const terminalRailWatermarks = new Map();
+    const terminalRailPrefs = { archived: [], removedGroups: [] };
+    const terminalRailPendingNew = new Map();
+    const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+    let terminalRailRemovedCollapsed = true;
+    const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+    let terminalRailLastGroups = [];
+    const TERMINAL_RAIL_WATERMARK = 5;
+    const TERMINAL_RAIL_ICON_CHEVRON = "";
+    const TERMINAL_RAIL_ICON_ARCHIVE = "";
+    const TERMINAL_RAIL_ICON_UNARCHIVE = "";
+    const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+    const TERMINAL_RAIL_ICON_PLUS = "";
+    const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
+    const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
+    const TERMINAL_RAIL_SPINNER = "";
+    let terminalRailHistory = history;
+    let activeTerminalPreviewId = activeId;
+    function $(id) { return id === "railTermHistoryList" ? list : null; }
+    let terminalBackendReady = true;
+    const terminalBackendSessions = sessions;
+    ${extractFn("terminalRailSessionMap")}
+    ${extractFn("terminalRailActiveSession")}
+    ${extractFn("terminalRailAgentId")}
+    ${extractFn("terminalRailFindOpenSession")}
+    function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+    function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+    function sessRelTime() { return "刚刚"; }
+    function terminalRailRelTime() { return "3 分钟前"; }
+    function esc(v) { return String(v); }
+    function escapeHtml(v) { return String(v || ""); }
+    function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
+    function terminalRailRowTops() { return null; }
+    function playTerminalRailFlip() {}
+    ${extractFn("terminalRailGroupSessions")}
+    ${extractFn("terminalRailWatermarkView")}
+    ${extractFn("terminalRailNextWatermark")}
+    ${extractFn("terminalRailMoreLabel")}
+    ${extractFn("terminalRailSameDir")}
+    ${extractFn("terminalRailGroupForDir")}
+    ${extractFn("terminalRailRegroupRemoved")}
+    ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailIsArchived")}
+    ${extractFn("terminalRailVisibleSessions")}
+    ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("renderTerminalRailHistory")}
+    return { render: renderTerminalRailHistory };
+  `)(list, state, history, sessions, activeId);
+
+  const makeList = () => {
+    const list = { html: "", writes: 0 };
+    Object.defineProperty(list, "innerHTML", {
+      get: () => list.html,
+      set: (v) => { list.writes += 1; list.html = v; },
+    });
+    return list;
+  };
+
+  it("水位线联动：运行中＋当前会话两档强制入可见段，不被藏进「展开其余 N」（vm 真跑）", () => {
+    // 10 条同目录会话（lastActive 递减，s10 最新）：基线水位 5 → s10..s6 可见；
+    // s2 运行中（第 9 新）、s3 是当前会话（第 8 新）——两档强制入可见段。
+    const rows = [];
+    for (let i = 10; i >= 1; i -= 1) {
+      rows.push({ id: `s${i}`, endpoint: "kimi", project: "C:\\dev\\alpha", title: `会话 ${i}`, lastActive: i * 100 });
+    }
+    const history = { endpoint: "kimi", sessions: rows, fetchedAt: 1, error: null };
+    const sessions = {
+      "t-work": { id: "t-work", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "working", resume: { endpoint: "kimi", id: "s2" } },
+      "t-cur": { id: "t-cur", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", resume: { endpoint: "kimi", id: "s3" } },
+    };
+    const list = makeList();
+    watermarkSandbox(list, { collapsed: new Set(), scrolled: [] }, history, sessions, "t-cur").render("kimi");
+    const html = list.html;
+    assert.ok(html.includes('data-rail-term-resume="s2"'), "运行中行（第 9 新，基线水位外）强制入可见段");
+    assert.ok(html.includes('data-rail-term-resume="s3"'), "当前会话行（第 8 新，基线水位外）强制入可见段");
+    assert.ok(!html.includes('data-rail-term-resume="s1"'), "强制入段是前缀语义：最后一条（最旧）仍藏");
+    assert.ok(html.includes("展开其余 1 个会话"), "剩余计数随强制入段扣减（10 − 9＝1）");
+
+    // 对照组：无运行中/当前会话 → 回到纯水位线（最新 5 条）
+    const plain = makeList();
+    watermarkSandbox(plain, { collapsed: new Set(), scrolled: [] }, history, {}, "t-none").render("kimi");
+    assert.ok(plain.html.includes('data-rail-term-resume="s6"'), "对照组：最新 5 条在册（s10..s6）");
+    assert.ok(!plain.html.includes('data-rail-term-resume="s5"'), "对照组：第 6 新起照旧折叠");
+    assert.ok(plain.html.includes("展开其余 5 个会话"), "对照组：剩余 5 条");
+  });
+
+  it("活动流 working 翻转同拍重渲会话栏（转圈不等 1s 轮询；源码钉死）", () => {
+    const block = panelJs.slice(panelJs.indexOf("function syncTerminalActivityStream"), panelJs.indexOf("function initTerminalPreview"));
+    assert.ok(/const statusBefore = new Map\(Object\.values\(terminalSessionMap\(\)\)/.test(block), "应用帧前快照各会话 working 态");
+    assert.ok(block.includes("const flipped = Object.values(terminalSessionMap()).some((s) => statusBefore.get(s.id) !== s.status)"), "帧后比对翻转");
+    assert.ok(/if \(flipped && typeof renderTerminalRail === "function"\)/.test(block), "只在实际翻转时重渲栏（不是每帧）");
+    assert.ok(/renderTerminalSessionData\(\);\s*renderTerminalPreviewTabs\(\);/s.test(block), "原两渲不动（数据＋页签）");
+  });
+});
+

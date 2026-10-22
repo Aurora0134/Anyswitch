@@ -93,6 +93,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailVisibleSessions")}
     ${extractFn("terminalRailRegroupRemoved")}
     ${extractFn("terminalRailPendingNewTerminals")}
+    const TERMINAL_RAIL_SPINNER = "";
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
@@ -114,6 +115,7 @@ function rowHtmlSandbox(prefs) {
     function escapeHtml(v) { return String(v || ""); }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailIsArchived")}
+    const TERMINAL_RAIL_SPINNER = "";
     ${extractFn("terminalRailRowHtml")}
     return terminalRailRowHtml;
   `)(null, null, "t1", prefs);
@@ -1094,6 +1096,7 @@ describe("M8 T2 选中态跟随聚焦", () => {
       function terminalRailIsArchived() { return false; }
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
+      const TERMINAL_RAIL_SPINNER = "";
       ${extractFn("terminalRailRowHtml")}
       return terminalRailRowHtml;
     `)();
@@ -1423,6 +1426,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         function escapeHtml(v) { return String(v || ""); }
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
+        const TERMINAL_RAIL_SPINNER = "";
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1", { archived: [{ endpoint: "kimi", id: "s-9" }], removedGroups: [] });
