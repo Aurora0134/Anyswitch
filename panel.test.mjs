@@ -7919,7 +7919,7 @@ describe("虚拟终端 SSE 重连重置（snapshot 帧先清屏）", () => {
 // 写入，中间态永不落屏。函数体抽进桩环境真跑，定时器可驱动。
 describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
   function syncSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme",
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme",
       "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey",
       "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor",
       "installTerminalFollowBottomGuard", "absorbTerminalSnapshot", "reviveTerminalSession", "sendTerminalInput",
@@ -7943,6 +7943,8 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       let terminalWebglAddon = null;
       let terminalEventSource = null;
       let terminalHostResizeObserver = null;
+      let terminalDprMediaQuery = null;
+      let terminalDprMediaHandler = null;
       let terminalInputDisposable = null;
       let terminalBoundSessionId = null;
       let terminalImeHold = null;
@@ -8298,7 +8300,7 @@ describe("终端回放突发合并（大段历史一次落屏）", () => {
 // 进桩环境真跑（Terminal/EventSource/api 全桩），切换语义逐断言钉死。
 describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
   function streamSandbox() {
-    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["closeTerminalStream", "ensureTerminalXterm", "armTerminalDprWatch", "disarmTerminalDprWatch", "terminalXtermTheme", "connectTerminalStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "terminalNewlineData", "terminalSessionMap", "terminalSessionFor", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -8318,6 +8320,8 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       let terminalWebglAddon = null;
       let terminalEventSource = null;
       let terminalHostResizeObserver = null;
+      let terminalDprMediaQuery = null;
+      let terminalDprMediaHandler = null;
       let terminalInputDisposable = null;
       let terminalBoundSessionId = null;
       let terminalImeHold = null;
@@ -9898,7 +9902,7 @@ describe("虚拟终端页签条收展（页头「隐藏页签/展示页签」钮
 // 显隐返回实测/兜底两套尺寸，复刻真实测量行为。
 describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）", () => {
   function terminalGateSandbox({ viewHidden = true } = {}) {
-    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
+    const bodies = ["fitTerminalXterm", "terminalHostMeasurable", "postTerminalResize", "debounceTerminalFit", "armTerminalDprWatch", "disarmTerminalDprWatch", "ensureTerminalXterm", "terminalXtermTheme", "connectTerminalStream", "closeTerminalStream", "syncTerminalDataStream", "terminalClipboardKeyIntent", "terminalNewlineEnterKey", "terminalNewlineDeliveryBlocked", "installTerminalFollowBottomGuard", "reviveTerminalSession", "sendTerminalInput", "queueTerminalChunk", "flushTerminalBurst", "discardTerminalBurst"]
       .map((name) => {
         const src = panelJs.match(new RegExp(`(?:async )?function ${name}\\([\\s\\S]*?\\n  \\}`))?.[0];
         assert.ok(src, `${name} found in panel.js`);
@@ -9998,6 +10002,8 @@ describe("虚拟终端隐藏期不建流不测量（首次开启碎屏修复）"
       let terminalWebglAddon = null;
       let terminalEventSource = null;
       let terminalHostResizeObserver = null;
+      let terminalDprMediaQuery = null;
+      let terminalDprMediaHandler = null;
       let terminalInputDisposable = null;
       let terminalBoundSessionId = null;
       let terminalImeHold = null;

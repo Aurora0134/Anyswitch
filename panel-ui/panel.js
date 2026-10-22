@@ -4839,6 +4839,12 @@ async function api(method, path, body) {
   // 宿主尺寸观察：inspector 收放、字号变化等任何改变终端区宽度的动作都不经
   // window resize，只挂窗口监听会漏掉——直接观察宿主元素，变动走同一防抖入口。
   let terminalHostResizeObserver = null;
+  // 像素密度监视：显示缩放/睡眠唤醒会改 devicePixelRatio 而 CSS 布局宽度不变（窗口
+  // 随 DPI 等比伸缩），宿主 RO 与 window resize 全看不见；WebGL 渲染器按整设备像素
+  // 量化字宽，密度一变屏宽=cols×新 cell 直接跳变而 cols/PTY 不动——挂 resolution
+  // 媒体查询补这条通路，否则跳变后没有下一次 fit 就卡死在错配态（2026-10-22 根因）。
+  let terminalDprMediaQuery = null;
+  let terminalDprMediaHandler = null;
   let terminalInputDisposable = null;
   // 定投会话 id：connectTerminalStream 建连时固化、closeTerminalStream 清空，值与
   // onData 闭包内的定投局部量同。附着在 xterm 实例上的键位处理器不再随连接重建
@@ -5511,6 +5517,8 @@ async function api(method, path, body) {
     terminalWebglAddon = null;
     terminalHostResizeObserver?.disconnect();
     terminalHostResizeObserver = null;
+    // 像素密度监视随流一起摘除（挂/销理由见 armTerminalDprWatch 注释）。
+    disarmTerminalDprWatch();
     if (terminalImeAnchorTextarea) {
       terminalImeAnchorTextarea.removeEventListener("compositionstart", terminalImeArmHandler);
       terminalImeAnchorTextarea.removeEventListener("compositionend", terminalImeReleaseHandler);
@@ -5656,6 +5664,35 @@ async function api(method, path, body) {
       terminalResizeDebounceTimer = null;
       fitTerminalXterm();
     }, delayMs);
+  }
+
+  // 挂/换挂当前像素密度的 resolution 媒体查询：查询只对「这一档密度」发声，密度变了
+  // 必须换挂新值的查询，否则下一次变化就聋了（内核 CoreBrowserService 同款换挂式）。
+  // 事件到达时 window.devicePixelRatio 已是新值，换挂后走与宿主 RO 同一条防抖 fit——
+  // fit 体内自带视图/尺寸/组字全部闸门，cols 未跨界时由同值闸空转，跨界正常
+  // resize＋POST，agent 重画后两侧尺寸重新对齐。
+  function armTerminalDprWatch() {
+    disarmTerminalDprWatch();
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia(`screen and (resolution: ${window.devicePixelRatio}dppx)`);
+    const handler = () => {
+      armTerminalDprWatch();
+      debounceTerminalFit();
+    };
+    if (typeof query.addEventListener === "function") query.addEventListener("change", handler);
+    else query.addListener(handler);
+    terminalDprMediaQuery = query;
+    terminalDprMediaHandler = handler;
+  }
+
+  function disarmTerminalDprWatch() {
+    const query = terminalDprMediaQuery;
+    const handler = terminalDprMediaHandler;
+    if (!query || !handler) return;
+    if (typeof query.removeEventListener === "function") query.removeEventListener("change", handler);
+    else query.removeListener(handler);
+    terminalDprMediaQuery = null;
+    terminalDprMediaHandler = null;
   }
 
   // xterm 主题与终端屏 CSS token 同源：底色/前景/光标/选区从 --terminal-* 现值取，
@@ -6018,6 +6055,8 @@ async function api(method, path, body) {
       });
       terminalHostResizeObserver.observe(host);
     }
+    // 像素密度监视与宿主 RO 同生命周期：建连挂上、拆流摘除（见 closeTerminalStream）。
+    armTerminalDprWatch();
     return terminalXterm;
   }
 
