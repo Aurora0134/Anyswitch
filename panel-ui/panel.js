@@ -5633,17 +5633,29 @@ async function api(method, path, body) {
     if (cs.colorScheme !== "dark") Object.assign(theme, TERMINAL_ANSI_LIGHT);
     return theme;
   }
-  // 终端亮暗上报（match terminal 契约的面板半边）：虚拟终端里的 agent（如
-  // kimi 的 Auto (match terminal)）靠宿主的 997 报告感知亮暗变化，而亮暗的
-  // 事实源在面板——setTheme/系统亮暗/皮肤重刷都会走到这里，值变了才上报，
-  // 失败视同未上报等下次重试。颜色深浅本身不变、只换肤时深浅值不变即静默。
-  let terminalThemeReported = null;
+  // 终端亮暗/底色上报（match terminal 契约的面板半边）：虚拟终端里的 agent
+  //（kimi 的 Auto (match terminal)、claude code 的同一档）靠宿主的 997 报告
+  // 感知亮暗变化，靠宿主回答「背景色是什么」决定用哪套调色板——两样的事实源
+  // 都在面板。setTheme/系统亮暗/皮肤重刷都会走到这里，值变了才上报，失败视同
+  // 未上报等下次重试。底色与终端屏/xterm 同源取 --terminal-bg，深浅没变只换肤
+  // 时也要重报：宿主按这个值回答背景色询问，答旧色等于答错。
+  let terminalThemeReported = "";
+  function terminalBackgroundHex(dark) {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue("--terminal-bg").trim().toLowerCase();
+    const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/.exec(raw);
+    if (!hex) return dark ? "#0b1220" : "#f8fafc";
+    const value = hex[1];
+    if (value.length === 6) return `#${value}`;
+    return `#${value[0]}${value[0]}${value[1]}${value[1]}${value[2]}${value[2]}`;
+  }
   function reportTerminalThemeToBackend(force = false) {
     const dark = getComputedStyle(document.documentElement).colorScheme === "dark";
-    if (!force && terminalThemeReported === dark) return;
-    terminalThemeReported = dark;
-    api("POST", "/api/terminal/theme", { dark }).catch(() => {
-      terminalThemeReported = null;
+    const background = terminalBackgroundHex(dark);
+    const key = `${dark ? "dark" : "light"}|${background}`;
+    if (!force && terminalThemeReported === key) return;
+    terminalThemeReported = key;
+    api("POST", "/api/terminal/theme", { dark, background }).catch(() => {
+      terminalThemeReported = "";
     });
   }
   // 主题/皮肤/系统亮暗变化后重刷在跑的 xterm；不在跑（未建流）则等下次创建时自然取新值

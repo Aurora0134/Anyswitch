@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTerminalHost, createThemeProbeTracker, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
+import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
 import { createScreenMirror } from "./terminal-screen.mjs";
 
 class FakePty {
@@ -310,7 +310,7 @@ test("stripTerminalReplyProbes only acts on complete sequences", () => {
   assert.equal(stripTerminalReplyProbes("\x1b[>7u\x1b[?u\x1b[c"), "");
 });
 
-test("stream() strips probes from replayed history but passes live chunks through", async () => {
+test("stream() 回放与活流都不携带宿主已认领的询问；未认领的照常转发", async () => {
   const root = mkdtempSync(`${tmpdir()}\anyswitch-terminal-test-`);
   let pty = null;
   const host = createTerminalHost({
@@ -355,9 +355,17 @@ test("stream() strips probes from replayed history but passes live chunks throug
       assert.ok(!replaySection.includes(JSON.stringify(probe).slice(1, -1)), `replay must not contain ${JSON.stringify(probe)}`);
     }
 
-    pty.dataListener("live:\x1b[c\x1b[6n");
-    await readUntil(frame("live:\x1b[c\x1b[6n"));
-    assert.ok(received.includes(frame("live:\x1b[c\x1b[6n")), "live chunks carry probes verbatim");
+    // 活流同口径：宿主认领的询问（DA1 / OSC 11 背景色）就地作答并从转发流里
+    // 摘掉，免得渲染器再答一遍；没认领的（这里的 DSR 光标位置询问）原样转发。
+    // FakePty 会把写回的字节当输入回显，回显与活块落在同一帧里（合帧窗口内），
+    // 因此按「帧里出现过这段活块文本」判定，而不是整帧相等。
+    pty.dataListener("live:\x1b[c\x1b]11;?\x07\x1b[6n");
+    const liveNeedle = JSON.stringify("live:\x1b[6n").slice(1, -1);
+    await readUntil(liveNeedle);
+    const liveSection = received.slice(received.indexOf(liveNeedle));
+    assert.ok(!liveSection.includes(JSON.stringify("\x1b[c").slice(1, -1)), "DA1 询问不进活流");
+    assert.ok(!liveSection.includes(JSON.stringify("\x1b]11;?").slice(1, -1)), "OSC 11 询问不进活流");
+    assert.deepEqual(pty.writeLog, ["\x1b[?1;2c", "\x1b]11;rgb:0b0b/1212/2020\x07"], "宿主即答 DA1 与背景色");
   } finally {
     controller.abort();
     await host.close();
@@ -1881,23 +1889,50 @@ test("纯外壳会话（无 agentId）即使 pid 活着也不树杀——泄漏�
   }
 });
 
-test("主题探针追踪器：整段/跨块各触发一次、纯输出不误报", () => {
-  const tracker = createThemeProbeTracker();
-  assert.deepEqual(tracker.push("\x1b[?996n"), ["\x1b[?996n"], "整段查询即触发");
-  assert.deepEqual(tracker.push("x"), [], "尾部已完整触发过，不重复报");
-  const split = createThemeProbeTracker();
-  assert.deepEqual(split.push("\x1b[?9"), [], "前半段悬而不报");
-  assert.deepEqual(split.push("96n"), ["\x1b[?996n"], "跨块拼齐触发一次");
-  assert.deepEqual(split.push("y"), [], "拼齐之后不再报");
-  const splitNotify = createThemeProbeTracker();
-  assert.deepEqual(splitNotify.push("\x1b[?2"), []);
-  assert.deepEqual(splitNotify.push("031h"), ["\x1b[?2031h"], "2031 开关同样跨块可拼");
-  const noise = createThemeProbeTracker();
-  assert.deepEqual(noise.push("hello\x1b[c\x1b]11;?\x07world\x1b[?997;1n"), [], "DA1/OSC11 查询与 997 报告都不是探针");
-  assert.deepEqual(noise.push("\x1b[?5n\x1b[6n"), [], "DSR 私参族不误报");
+test("终端询问扫描器：整段/跨块各认领一次，询问字节从转发流里摘掉，纯绘制不误伤", () => {
+  const whole = createTerminalQueryScanner();
+  const theme = whole.push("hi\x1b[?996n!");
+  assert.deepEqual(theme.probes, ["theme"], "996n 认领");
+  assert.equal(theme.text, "hi!", "询问字节不得留在转发流里");
+
+  const split = createTerminalQueryScanner();
+  const splitHead = split.push("x\x1b[?9");
+  assert.deepEqual(splitHead.probes, [], "前半段悬而不认领");
+  assert.equal(splitHead.text, "x", "拼齐前的可见字节照常转发");
+  const finished = split.push("96n");
+  assert.deepEqual(finished.probes, ["theme"], "跨块拼齐认领一次");
+  assert.equal(finished.text, "", "询问字节不转发");
+
+  const splitNotify = createTerminalQueryScanner();
+  assert.deepEqual(splitNotify.push("\x1b[?2").probes, []);
+  assert.deepEqual(splitNotify.push("031h").probes, ["notifyOn"], "2031 开关同样跨块可拼");
+
+  // OSC 11 背景色询问：BEL 与 ST 两种终止符都认，终止符没到之前一律悬着
+  const bel = createTerminalQueryScanner();
+  assert.deepEqual(bel.push("\x1b]11;?").probes, [], "终止符没到不算完整询问");
+  assert.deepEqual(bel.push("\x07").probes, ["background"], "BEL 补齐即认领");
+  const st = createTerminalQueryScanner();
+  assert.deepEqual(st.push("\x1b]11;?\x1b").probes, []);
+  assert.deepEqual(st.push("\\").probes, ["background"], "ST 补齐同样认领");
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b]11;?\x07").text, "", "询问不转发");
+
+  // DA1：ESC[c 与 ESC[0c 都认
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b[c").probes, ["deviceAttributes"]);
+  assert.deepEqual(createTerminalQueryScanner().push("\x1b[0c").probes, ["deviceAttributes"]);
+
+  // 普通绘制、光标定位、OSC 8 超链接原样通过
+  const plain = createTerminalQueryScanner();
+  const drawn = plain.push("hello \x1b[1;1H world \x1b]8;;http://x\x07link\x1b]8;;\x07");
+  assert.deepEqual(drawn.probes, []);
+  assert.equal(drawn.text, "hello \x1b[1;1H world \x1b]8;;http://x\x07link\x1b]8;;\x07");
+
+  // 落单的 ESC 先扣住，下一块补齐后原样放出（问询不成形就只是普通转义序列）
+  const tailEsc = createTerminalQueryScanner();
+  assert.equal(tailEsc.push("abc\x1b").text, "abc", "落单 ESC 先扣住");
+  assert.equal(tailEsc.push("[1;1H").text, "\x1b[1;1H", "补齐后原样放出");
 });
 
-test("终端主题契约：996n 即答、2031 开关订阅、亮暗变化扇出 997 且同值幂等", async () => {
+test("终端主题契约：996n/OSC11/DA1 即问即答、问过主题即收 997 扇出、同值幂等", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-theme-`);
   const spawned = [];
   const host = createTerminalHost({
@@ -1910,56 +1945,106 @@ test("终端主题契约：996n 即答、2031 开关订阅、亮暗变化扇出 
   const create = async (label) => (await fetch(url("/terminal/sessions"), {
     method: "POST", headers: headers(host), body: JSON.stringify({ label, cwd: root, shell: "powershell" }),
   })).json();
-  const setTheme = async (dark) => {
+  const setTheme = async (body) => {
     const response = await fetch(url("/terminal/theme"), {
-      method: "POST", headers: headers(host), body: JSON.stringify({ dark }),
+      method: "POST", headers: headers(host), body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() };
   };
+  const themeReports = (pty) => pty.writeLog.filter((log) => log.startsWith("\x1b[?997;"));
   try {
     await create("订阅者");
     await create("旁听者");
+    await create("只问底色");
     const [subscriber, bystander] = spawned;
 
-    // 未上报过主题时按暗色默认应答 996n
+    // 未上报过主题时按暗色默认应答：996n 答 1，OSC 11 答兜底暗色
     subscriber.dataListener("\x1b[?996n");
     assert.deepEqual(subscriber.writeLog, ["\x1b[?997;1n"], "996n 按默认暗色即答");
+    subscriber.dataListener("\x1b]11;?\x07");
+    assert.deepEqual(subscriber.writeLog.slice(-1), ["\x1b]11;rgb:0b0b/1212/2020\x07"], "OSC 11 答兜底暗色");
 
-    // 旁听者没开 2031，亮暗翻转不该收到任何字节
+    // DA1 由宿主代答，且询问字节不进转发流——回放不得让渲染器再答一遍
+    const da1 = await create("问 DA1");
+    const da1Pty = spawned[3];
+    da1Pty.dataListener("\x1b[c");
+    assert.deepEqual(da1Pty.writeLog, ["\x1b[?1;2c"], "DA1 即答");
+    assert.ok(!host.sessions.get(da1.id).buffer.join("").includes("\x1b[c"), "DA1 询问不进回放缓冲");
+
+    // 订阅者开 2031，翻转亮暗即收 997；从没问过主题的会话零扇出
     subscriber.dataListener("\x1b[?2031h");
-    let flipped = await setTheme(false);
+    const flipped = await setTheme({ dark: false, background: "#f8fafc" });
     assert.equal(flipped.status, 200);
-    assert.deepEqual(flipped.body, { ok: true, dark: false });
-    assert.deepEqual(subscriber.writeLog, ["\x1b[?997;1n", "\x1b[?997;2n"], "订阅者收到亮色 997 扇出");
-    assert.deepEqual(bystander.writeLog, [], "未订阅会话零扇出");
+    assert.deepEqual(flipped.body, { ok: true, dark: false, background: "#f8fafc" });
+    assert.deepEqual(subscriber.writeLog.slice(-1), ["\x1b[?997;2n"], "订阅者收到亮色 997 扇出");
+    assert.deepEqual(bystander.writeLog, [], "从没问过主题的会话零扇出");
 
     // 同值重报幂等：不追加报告
-    await setTheme(false);
-    assert.equal(subscriber.writeLog.length, 2, "同值重报不扇出");
+    await setTheme({ dark: false, background: "#f8fafc" });
+    assert.equal(themeReports(subscriber).length, 2, "同值重报不扇出");
 
-    // 翻回暗色再次扇出；随后 2031l 退订，此后翻转静默
-    await setTheme(true);
-    assert.deepEqual(subscriber.writeLog.slice(-1), ["\x1b[?997;1n"], "翻回暗色扇出 1 号报告");
-    subscriber.dataListener("\x1b[?2031l");
-    await setTheme(false);
-    assert.equal(subscriber.writeLog.length, 3, "退订后不再扇出");
+    // 只问过背景色、没发 2031h 的会话也算在意主题（claude code 的实际形状）
+    const passive = spawned[2];
+    passive.dataListener("\x1b]11;?\x07");
+    assert.deepEqual(passive.writeLog, ["\x1b]11;rgb:f8f8/fafa/fcfc\x07"], "OSC 11 答上报的亮色");
+    await setTheme({ dark: true, background: "#0b1220" });
+    assert.deepEqual(passive.writeLog.slice(-1), ["\x1b[?997;1n"], "问过主题的会话同样收到扇出");
 
-    // 996n 应答跟随已上报值：当前亮色答 2
-    bystander.dataListener("\x1b[?996n");
-    assert.deepEqual(bystander.writeLog, ["\x1b[?997;2n"], "996n 应答随上报的亮暗走");
+    // 显式退订（2031l）说话算数
+    passive.dataListener("\x1b[?2031l");
+    await setTheme({ dark: false, background: "#f8fafc" });
+    assert.equal(themeReports(passive).filter((log) => log === "\x1b[?997;2n").length, 0, "退订后不再扇出");
+    // 退订只是不再推送，询问照答
+    passive.dataListener("\x1b[?996n");
+    assert.deepEqual(passive.writeLog.slice(-1), ["\x1b[?997;2n"], "退订后查询仍即答");
 
     // 非法报文 400
-    const invalid = await fetch(url("/terminal/theme"), {
-      method: "POST", headers: headers(host), body: JSON.stringify({ dark: "yes" }),
-    });
-    assert.equal(invalid.status, 400);
+    assert.equal((await setTheme({ dark: "yes" })).status, 400);
+    assert.equal((await setTheme({ dark: true, background: "teal" })).status, 400);
 
     // 跨块 996n（拆成两段 PTY 输出）也只应答一次
-    const splitSession = await create("跨块");
-    const splitPty = spawned[2];
+    await create("跨块");
+    const splitPty = spawned[4];
     splitPty.dataListener("\x1b[?9");
     splitPty.dataListener("96n");
     assert.deepEqual(splitPty.writeLog, ["\x1b[?997;2n"], "跨块查询拼齐即答，一次不多");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("主题状态随状态文件跨宿主重启保留：重启后第一问就答真值", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-theme-restore-`);
+  const boot = (spawned) => createTerminalHost({
+    root, port: 0,
+    ptyModule: { spawn: () => { const pty = new FakePty(); spawned?.push(pty); return pty; } },
+    logger: { warn() {} },
+  });
+  let host = boot();
+  let port = await listen(host);
+  try {
+    await fetch(`http://127.0.0.1:${port}/terminal/theme`, {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ dark: false, background: "#f8fafc" }),
+    });
+    await host.close();
+
+    // 新一代宿主：面板还没补报，agent 就已经开始问了
+    const spawned = [];
+    host = boot(spawned);
+    port = await listen(host);
+    const created = await fetch(`http://127.0.0.1:${port}/terminal/sessions`, {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "重启后", cwd: root, shell: "powershell" }),
+    }).then((response) => response.json());
+    assert.ok(created.id);
+    spawned[0].dataListener("\x1b]11;?\x07");
+    assert.deepEqual(spawned[0].writeLog, ["\x1b]11;rgb:f8f8/fafa/fcfc\x07"], "重启后底色不回落默认暗色");
+    spawned[0].dataListener("\x1b[?996n");
+    assert.deepEqual(spawned[0].writeLog.slice(-1), ["\x1b[?997;2n"], "重启后亮暗不回落默认暗色");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
