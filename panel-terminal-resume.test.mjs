@@ -367,9 +367,12 @@ describe("内切切换会话（terminal sessions switch）", () => {
   it("目标端点不可续接/不在册、resume 形状不合法：400 不转发", async () => {
     await withFakeAgents(async (cwd) => {
       const cases = [
-        { resume: { endpoint: "dsh", id: SESSION_ID }, expectCode: "resume-unsupported" },
-        { resume: { endpoint: "kimi" }, expectCode: "resume_invalid" },
-        { resume: { endpoint: "kimi", id: "" }, expectCode: "resume_invalid" },
+        // 组装失败（dsh 不支持续接）：走 catch 的原有形状——code 机器可判，error 是组装错误原文
+        { resume: { endpoint: "dsh", id: SESSION_ID }, expectCode: "resume-unsupported", machine: false },
+        // 路由级拒换（M12-A 三处 400）：error 即机器码本身，零文案——连字符族让前端门接住落批准句
+        { resume: { endpoint: "kimi" }, expectCode: "resume-invalid", machine: true },
+        { resume: { endpoint: "kimi", id: "" }, expectCode: "resume-invalid", machine: true },
+        { resume: { endpoint: "no-such-agent", id: SESSION_ID }, expectCode: "resume-unsupported", machine: true },
       ];
       for (const item of cases) {
         const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-400-") });
@@ -379,7 +382,11 @@ describe("内切切换会话（terminal sessions switch）", () => {
         await router.handle(req, res);
         assert.equal(res.statusCode, 400, `${JSON.stringify(item.resume)} 拒换`);
         assert.equal(json().code, item.expectCode, "机器可判的 code");
-        assert.match(json().error, /[\u4e00-\u9fff]/, "文案面向用户");
+        if (item.machine) {
+          assert.equal(json().error, item.expectCode, "路由级拒换：error 即机器码本身，零文案（文案零新增冻结条款）");
+        } else {
+          assert.match(json().error, /[\u4e00-\u9fff]/, "组装失败的 error 维持原有形状");
+        }
         assert.equal(calls.restart.length, 0, "不转发给 terminal-host");
       }
     });

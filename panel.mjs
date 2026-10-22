@@ -1311,14 +1311,14 @@ export function createPanelRouter({
     const endpoint = typeof resume?.endpoint === "string" ? resume.endpoint.trim() : "";
     const conversationId = typeof resume?.id === "string" ? resume.id.trim() : "";
     if (!endpoint || !conversationId || endpoint.length > 64 || conversationId.length > 256) {
-      return sendJson(res, 400, { ok: false, code: "resume_invalid", error: "会话信息不全，无法切换" });
+      return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
     }
     if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
-      return sendJson(res, 400, { ok: false, code: "unknown_agent", error: "这个 Agent 不存在" });
+      return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
     }
     const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : "";
     if (!cwd) {
-      return sendJson(res, 400, { ok: false, code: "resume_invalid", error: "会话信息不全，无法切换" });
+      return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
     }
     let claudeBypassPermissions = false;
     try {
@@ -1342,7 +1342,9 @@ export function createPanelRouter({
         },
       });
     } catch (error) {
-      // 续接相关失败回机器可判的 code（不支持续接/信息不全），其余维持原有形状。
+      // 续接相关失败回机器可判的短码（resume-unsupported / resume-invalid，连字符族
+      // ——前端 startsWith("resume-") 门据此落已批准续接句，error 字段即码本身、零
+      // 文案）；其余组装错误维持原有响应形状。
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
     }

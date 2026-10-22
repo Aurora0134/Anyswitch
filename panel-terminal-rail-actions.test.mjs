@@ -2238,4 +2238,24 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     assert.ok(!log.toasts[0].msg.includes("HTTP"), "服务端原文不上屏");
     assert.equal(fn.gate(), false, "失败也放行（可重试）");
   });
+
+  it("切换失败回续接族短码（resume-invalid / resume-unsupported）：落已批准续接句，服务端原文不上屏", async () => {
+    // /switch 路由级拒换把 error 也置成机器码本身（文案零新增冻结条款），api() 落
+    // err.code/err.serverCode 双通道都是短码——前端 startsWith("resume-") 门接住，
+    // 落「这个 Agent 的会话暂时不能在终端里续接」，短码与服务端原文都不外泄。
+    for (const code of ["resume-invalid", "resume-unsupported"]) {
+      const { fn, log } = runSwitch({
+        sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+        agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+        switchImpl: async () => { throw Object.assign(new Error(`HTTP 400：${code}`), { code, serverCode: code }); },
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(log.toasts.length, 1, `${code}：只提示一次`);
+      assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", `${code}：落已批准续接句`);
+      assert.ok(!log.toasts[0].msg.includes("resume-"), `${code}：短码不外泄`);
+      assert.equal(fn.sessions["t-a"].resume, null, `${code}：身份没被改花`);
+      assert.equal(fn.gate(), false, `${code}：失败也放行（可重试）`);
+    }
+  });
 });
