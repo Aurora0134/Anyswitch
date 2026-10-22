@@ -1540,7 +1540,7 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
       function closeTerminalRailHoverCard() {}
       function openTerminalRailSearch() {}
       function openTerminalRailViewMenu() {}
-      function onTerminalRailSearchInput() {}
+      function onTerminalRailSearchInput() { log.input += 1; }
       function scheduleTerminalRailHoverCard() {}
       function terminalRailHeadKey() { return ""; }
       function terminalRailCloseSession() {}
@@ -1625,5 +1625,104 @@ describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
     assert.ok(/height:\s*30px/.test(expanded), "展开态 30px");
     // 过渡列表里不许出现 height（m6c §A1：28→30 瞬时跳）
     assert.ok(!/transition:[^;]*height/.test(collapsed), "height 不在过渡列表（瞬时跳变）");
+  });
+});
+
+describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了没反应」回归）", () => {
+  // 背景：主控真机曾报「视图选项点不开／搜索不展开」，本 worktree 第二实例与生产
+  // 47820 双环境真实点击均复现不出（菜单 8 项在场 1.5s＋、搜索 28→175px 展开聚焦）。
+  // 但「点击无反应」这类断链在结构断言里极难发现，故用 vm 跑真委托把接线钉死：
+  // 点钮 → 开菜单/展开搜索必须真的发生，toggle 状态机也要跟真模块状态走。
+  const buildRail = (log) => {
+    const listeners = {};
+    const btn = (id) => ({
+      id, onclick: null, disabled: false,
+      addEventListener: (type, fn) => { listeners[`${id}:${type}`] = fn; },
+      focus() { log.focus = id; },
+      querySelector: () => null, setAttribute() {}, classList: { add() {}, remove() {}, contains: () => false },
+      tabIndex: -1, value: "", blur() {},
+    });
+    const els = {
+      railTerminalDir: { addEventListener: (type, fn) => { listeners[`dir:${type}`] = fn; }, getBoundingClientRect: () => ({ top: 0, left: 0 }), scrollTop: 0 },
+      railTermNewBtn: btn("newBtn"), railTermHistoryRefresh: null,
+      railTermSearchBtn: btn("searchBtn"), railTermSearchInput: btn("searchInput"), railTermSearchClear: btn("searchClear"),
+      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+    };
+    const fn = new Function("els", "listeners", "log", `
+      let terminalRailViewMenuEl = null;
+      const terminalRailMenuEl = null;
+      const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+      const terminalRailHoverEl = null;
+      const terminalRailHoverHead = null;
+      let terminalRailMotionArmed = false;
+      const document = { addEventListener: () => {} };
+      function $(id) { return els[id] ?? null; }
+      function loadTerminalRailViewPrefs() {}
+      function initTerminalRailScrollbarQuiet() {}
+      function closeTerminalRailGroupMenu() {}
+      function closeTerminalRailHoverCard() {}
+      // 开/关桩跟真模块状态同构：开即占位、关即清位——toggle 分支靠这个判
+      function openTerminalRailViewMenu() { log.openView += 1; terminalRailViewMenuEl = {}; }
+      function closeTerminalRailViewMenu() { log.closeView += 1; terminalRailViewMenuEl = null; }
+      function openTerminalRailSearch() { log.openSearch += 1; terminalRailSearch.open = true; }
+      function closeTerminalRailSearch() { log.closeSearch += 1; terminalRailSearch.open = false; }
+      function onTerminalRailSearchInput() { log.input += 1; }
+      function scheduleTerminalRailHoverCard() {}
+      function terminalRailHeadKey() { return ""; }
+      function terminalRailCloseSession() {}
+      function terminalRailArchiveSession() {}
+      function toggleTerminalRailGroupMenu() {}
+      function terminalRailCreateTerminalInDir() {}
+      function terminalRailRemoveGroup() {}
+      function terminalRailRestoreGroup() {}
+      function toggleTerminalRailRemoved() {}
+      function applyTerminalRailViewChoice() {}
+      function terminalRailActivateSession() {}
+      function terminalRailResumeHistoryRow() {}
+      function terminalRailUnarchiveSession() {}
+      function toggleTerminalRailGroup() {}
+      function toggleTerminalRailWatermark() {}
+      function terminalRailCreateTerminal() {}
+      function refreshTerminalRailHistory() {}
+      function terminalRailMoveInManualOrder() {}
+      function renderTerminalRailHistory() {}
+      function toast() {}
+      ${extractFn("initTerminalRail")}
+      return initTerminalRail;
+    `)(els, listeners, log);
+    fn();
+    return listeners;
+  };
+  const freshLog = () => ({ openView: 0, closeView: 0, openSearch: 0, closeSearch: 0, input: 0, focus: "" });
+
+  it("点视图选项钮 → 开菜单；二点 → 收起（D2 断链守卫）", () => {
+    const log = freshLog();
+    const listeners = buildRail(log);
+    assert.equal(typeof listeners["viewBtn:click"], "function", "视图选项钮 click 监听已绑（没绑就是 D2）");
+    listeners["viewBtn:click"]({ stopPropagation() {} });
+    assert.equal(log.openView, 1, "首点＝开菜单");
+    assert.equal(log.closeView, 0, "首点不收起");
+    listeners["viewBtn:click"]({ stopPropagation() {} });
+    assert.equal(log.closeView, 1, "二点＝收起（toggle 跟随真模块状态）");
+  });
+
+  it("点搜索钮 → 展开搜索；再点 → 只重新聚焦不收起（D3 断链守卫）", () => {
+    const log = freshLog();
+    const listeners = buildRail(log);
+    assert.equal(typeof listeners["searchBtn:click"], "function", "搜索钮 click 监听已绑（没绑就是 D3）");
+    listeners["searchBtn:click"]({ stopPropagation() {} });
+    assert.equal(log.openSearch, 1, "首点＝展开");
+    assert.equal(log.closeSearch, 0, "首点不收起（非 toggle）");
+    listeners["searchBtn:click"]({ stopPropagation() {} });
+    assert.equal(log.closeSearch, 0, "已展开再点＝不退出（m6c §A6：非 toggle）");
+    assert.equal(log.focus, "searchInput", "再点＝重新聚焦输入框");
+  });
+
+  it("输入框 input 事件 → 防抖处理器（防抖链接通）", () => {
+    const log = freshLog();
+    const listeners = buildRail(log);
+    assert.equal(typeof listeners["searchInput:input"], "function", "输入框 input 监听已绑");
+    listeners["searchInput:input"]({ stopPropagation() {} });
+    assert.equal(log.input, 1, "input 事件接通到 onTerminalRailSearchInput");
   });
 });
