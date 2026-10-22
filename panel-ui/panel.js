@@ -9174,7 +9174,58 @@ async function api(method, path, body) {
     }
     const resume = { endpoint: session.endpoint, id: session.id };
     if (typeof session.file === "string" && session.file) resume.file = session.file;
-    return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+    return terminalRailSwitchOrCreate({ session, resume, cwd });
+  }
+
+  // M12-A 内切判定（规格矩阵）：点栏内历史会话、去重未命中后，对当前聚焦页签的
+  // 会话 A 做判定——空白壳/idle/exited 就地换内容（宿主同记录 terminate+spawn+
+  // 身份换绑，页签不新增，dsh 单槽 replaceMain 的我们侧同构）；working/补读失败
+  // 走现状新开页签（保护在跑任务——dsh 被切走继续跑的我们侧等价物；宁多开勿错杀）。
+  // 在飞闸（规格「偏离声明」）：dsh 是 last-wins 因换视图免费；我们要杀起进程、
+  // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
+  // 忽略栏内其他会话点击，记录在案。
+  let terminalSwitchInFlight = false;
+  async function terminalRailSwitchOrCreate({ session, resume, cwd }) {
+    if (terminalSwitchInFlight) return;
+    const active = terminalSessionFor(activeTerminalPreviewId);
+    // 无从内切：没有活跃页签、或活跃是设计稿预览会话（没有宿主记录可换）。
+    if (!active || !active.backend) {
+      return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+    }
+    terminalSwitchInFlight = true;
+    try {
+      // 补读两拍（规格时序防线）：活跃面即时取（防 SSE 活跃流一拍延迟误杀在跑
+      // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。任一失败降级新开。
+      let agents = null;
+      let hostRead = null;
+      try {
+        agents = await api("GET", "/api/agents");
+        hostRead = await api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`);
+      } catch {
+        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      }
+      if (!agents || !Array.isArray(agents.agents) || !hostRead || !hostRead.id) {
+        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      }
+      enrichTerminalSessions(agents.agents);
+      const working = active.status === "working" || (active.metrics && active.metrics.activeRequests > 0);
+      if (working) return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
+      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, { resume, cwd });
+      terminalBackendSessions[active.id] = terminalBackendSession(switched);
+      renderTerminalPreviewSession();
+    } catch (error) {
+      // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
+      // 本地记录原样，页签还是原来那条，只给一句提示。
+      const code = error && (error.serverCode || error.code);
+      if (typeof code === "string" && code.startsWith("resume-")) {
+        toast("这个 Agent 的会话暂时不能在终端里续接", true);
+        return;
+      }
+      toast(panelError(error, "无法启动这个终端"), true);
+    } finally {
+      terminalSwitchInFlight = false;
+    }
   }
 
   function terminalRailResumeHistoryRow(id) {

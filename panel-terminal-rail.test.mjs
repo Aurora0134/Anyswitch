@@ -465,6 +465,7 @@ describe("终端视图左栏换血（M4）", () => {
         function rememberTerminalCwd(cwd) { log.rememberedCwd.push(cwd); }
         function renderTerminalPreviewSession() { log.renders += 1; }
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
         const terminalRailPrefs = { archived: [], removedGroups: [] };
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
@@ -472,6 +473,8 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailSessionMap")}
         ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("createAgentTerminal")}
+        let terminalSwitchInFlight = false;
+        ${extractFn("terminalRailSwitchOrCreate")}
         ${extractFn("terminalRailResumeSession")}
         return {
           run: () => terminalRailResumeSession(session),
