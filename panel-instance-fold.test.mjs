@@ -313,7 +313,7 @@ describe("panel.html 陈旧实例行（lastSeen 超阈值）速率类隐藏", ()
 
 
 describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶）", () => {
-  const m = panelJs.match(/function claudeAggregateMetrics\(sessions\) \{[\s\S]*?\n  \}/);
+  const m = panelJs.match(/function claudeAggregateMetrics\(sessions, retired\) \{[\s\S]*?\n  \}/);
   assert.ok(m, "claudeAggregateMetrics found in panel.html");
   const claudeAggregateMetrics = new Function(`return (${m[0]});`)();
 
@@ -349,6 +349,28 @@ describe("claudeAggregateMetrics 会话求和聚合（claude 无端点聚合桶�
     assert.equal(agg.tps, null);
     assert.equal(agg.cacheHitRate, null);
     assert.equal(agg.lastSeen, null);
+  });
+
+  it("退役账并表：计数累加、lastSeen/TTFT 与活行取最近", () => {
+    const agg = claudeAggregateMetrics(
+      [{ tokens: { prompt: 100, completion: 50, cached: 80 }, requests: 2, activeDurationMs: 60000, lastSeen: 1000, lastTtftMs: 300 }],
+      { requests: 3, promptTokens: 200, completionTokens: 40, cachedTokens: 150, activeDurationMs: 30000, lastTtftMs: 700, lastSeen: 5000 },
+    );
+    assert.deepEqual(agg.tokens, { prompt: 300, completion: 90, cached: 230 });
+    assert.equal(agg.totalRequests, 5);
+    assert.equal(agg.activeDurationMs, 90000);
+    assert.equal(agg.lastTtftMs, 700, "退役账 lastSeen 更新，TTFT 随之取退役账的");
+    assert.equal(agg.lastSeen, 5000);
+  });
+
+  it("退役账不存在或为 null 时与旧口径逐位一致", () => {
+    const sessions = [{ tokens: { prompt: 10, completion: 5, cached: 2 }, requests: 1, lastSeen: 42, lastTtftMs: 111 }];
+    const withNull = claudeAggregateMetrics(sessions, null);
+    const withUndefined = claudeAggregateMetrics(sessions);
+    const legacy = claudeAggregateMetrics(sessions, undefined);
+    assert.deepEqual(withNull, withUndefined);
+    assert.deepEqual(withUndefined, legacy);
+    assert.equal(legacy.totalRequests, 1);
   });
 });
 
