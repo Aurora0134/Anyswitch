@@ -5037,6 +5037,75 @@ describe("Kimi Code 分面（桌面端 / 终端 / kimi web）", () => {
     assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "只有主进程出行");
   });
 
+  it("桌面端拉起的家目录插件帮手不算会话（幻影 TUI 行回归）", async () => {
+    // 实测 2026-10-22：桌面主进程孵化 cmd 垫片再拉起托管插件
+    // ~/.kimi-code/plugins/managed/kimi-cu-win/bin/launch.mjs（computer-use
+    // MCP）。插件命令行里的 `.kimi-code\` 恰好包含 node 谓词的裸安装 token
+    // `kimi-code\`，原先被折成一条零请求的幻影 TUI 会话行（kimi-<pid>），
+    // 卡头凭空多出「TUI ×1」。家目录是数据目录不是安装目录，住在里面的
+    // node 一律是帮手而非会话——isKimiNode 对家目录之下的行整体豁免。
+    const HOME = "C:\\Users\\tester\\.kimi-code";
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        desktopRow(6001),
+        "LAPTOP,cmd.exe /c bin\\kimi-cu-mcp.cmd,cmd.exe,6002",
+        nodeRow(6003, `"${HOME}\\plugins\\managed\\kimi-cu-win\\bin\\launch.mjs"`),
+      )),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.status, "running");
+    assert.equal(card.processCount, 1, "家目录帮手进程不计数");
+    assert.deepEqual(surfacesOf(card), { Desktop: 1 });
+    assert.deepEqual(rowsOf(card), [["kimi-desktop", "Desktop"]], "帮手进程不出实例行");
+  });
+
+  it("家目录豁免罩住 dist/main.mjs 回退分支，真 TUI 照常计数", async () => {
+    // 回退分支（`dist\main.mjs` + `kimi`）同样会被家目录下的帮手命中：插件
+    // 入口若叫 dist/main.mjs，路径里的 `.kimi-code` 同时满足两个条件。豁免
+    // 必须罩住整个 isKimiNode，而不是只堵裸 token 那两条；同一轮里的真 TUI
+    // 行照常计数，证明这是纯减法。
+    const HOME = "C:\\Users\\tester\\.kimi-code";
+    const collector = testCollector({
+      nowFn: () => 3000,
+      execFn: (cmd, opts, cb) => cb(null, wmic(
+        nodeRow(6101, `"${HOME}\\plugins\\managed\\some-mcp\\dist\\main.mjs"`),
+        kimiRow(6102),
+      )),
+      kimiRegistryLookup: registry([]),
+    });
+    const card = kimi(await collector.getAgentsStatus());
+    assert.equal(card.processCount, 1, "家目录帮手不计数，真 TUI 照常");
+    assert.deepEqual(surfacesOf(card), { TUI: 1 });
+    assert.deepEqual(rowsOf(card), [["kimi-6102", "TUI"]]);
+  });
+
+  it("家目录豁免跟随 KIMI_CODE_HOME 挪家", async () => {
+    // 家目录可被 KIMI_CODE_HOME 挪走（kimi-server-registry.mjs 的口径）：
+    // 挪走后默认 token `.kimi-code\` 不再出现在帮手命令行里，但路径含
+    // "kimi" 的 dist/main.mjs 帮手仍会命中回退分支。豁免每轮按解析出的
+    // 真实家目录做前缀匹配，而不是只认默认目录名。
+    const prev = process.env.KIMI_CODE_HOME;
+    process.env.KIMI_CODE_HOME = "D:\\kimihomes\\tester";
+    try {
+      const collector = testCollector({
+        nowFn: () => 3000,
+        execFn: (cmd, opts, cb) => cb(null, wmic(
+          nodeRow(6201, `"D:\\kimihomes\\tester\\plugins\\managed\\kimi-cu-win\\dist\\main.mjs"`),
+          kimiRow(6202),
+        )),
+        kimiRegistryLookup: registry([]),
+      });
+      const card = kimi(await collector.getAgentsStatus());
+      assert.equal(card.processCount, 1);
+      assert.deepEqual(rowsOf(card), [["kimi-6202", "TUI"]]);
+    } finally {
+      if (prev === undefined) delete process.env.KIMI_CODE_HOME;
+      else process.env.KIMI_CODE_HOME = prev;
+    }
+  });
+
   it("reopens the account when the main process is replaced, row identity intact", async () => {
     // 主进程是会话属主，它死了 = 这一代账目结束：新主进程的请求重新开账
     // （请求数/工时/折线从零），行 id 与 Desktop 标签保持稳定。判定只看进程

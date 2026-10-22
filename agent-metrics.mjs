@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { atomicWriteFile } from "./atomic-write.mjs";
 import { DEFAULT_SPARK_WINDOW_POINTS, parseSparkWindowPoints, loadSettings } from "./relay-settings.mjs";
 import { createModelStabilityTracker, STABILITY_FILENAME } from "./model-stability.mjs";
-import { readKimiServerInstances } from "./kimi-server-registry.mjs";
+import { readKimiServerInstances, resolveKimiCodeHome } from "./kimi-server-registry.mjs";
 // AUTO_MODEL is the virtual chain model ("auto"): routing glue, never a real
 // model on any channel. The reporters must never publish it as a model name.
 import { AUTO_MODEL } from "./chain-routing.mjs";
@@ -808,6 +808,27 @@ export function kimiSurfaceLabel(surface) {
   return KIMI_SURFACE_LABELS[surface];
 }
 
+// Kimi 家目录（resolveKimiCodeHome：KIMI_CODE_HOME 优先，否则 ~/.kimi-code）
+// 之下的 node 行一律不是会话。桌面端把托管的插件/MCP 帮手进程放在这棵树下
+// 孵化（真机 2026-10-22：桌面主进程 → `cmd /c bin\kimi-cu-mcp.cmd` →
+// `node %USERPROFILE%\.kimi-code\plugins\managed\kimi-cu-win\bin\launch.mjs`，
+// computer-use 插件）：那条命令行里的 `.kimi-code\` 恰好包含 node 谓词的
+// 裸安装 token `kimi-code\`，`dist\main.mjs` + `kimi` 的回退分支同样会被
+// 家目录下的插件入口命中——原先一条零请求的幻影 TUI 会话行（kimi-<pid>）
+// 就此挂上卡头。家目录是数据目录（config.toml、server/instances/ 注册表、
+// 托管插件），不是安装目录，跑在里面的 node 都是帮手而非客户端；豁免只做
+// 减法，scoped 安装路径（@moonshot-ai\kimi-code\）上的真实 TUI/Web 不受
+// 影响。家目录由调用方按轮解析传入（KIMI_CODE_HOME 挪家当轮生效）；命令行
+// 分隔符先归一成 `\` 再比，/ 与 \ 混拼的路径形态同样命中。
+function isUnderKimiCodeHome(lower, kimiHomeLower) {
+  const back = lower.replaceAll("/", "\\");
+  const home = typeof kimiHomeLower === "string"
+    ? kimiHomeLower.replaceAll("/", "\\").replace(/\\+$/, "")
+    : "";
+  if (home && back.includes(home + "\\")) return true;
+  return back.includes(".kimi-code\\");
+}
+
 // Kimi 桌面端的面级稳定行：主进程（"Kimi Code.exe"，无 --type=）是会话属主，
 // Electron 辅助子进程（--type=）只进家族集、永不进宿主集合 kimiDesktopPids。
 // 行身份与账目分治（与 DSH 同款，2026-10-06 b26a776 先落 DSH 侧）：行可见性
@@ -1080,6 +1101,10 @@ function parseTasklistCsv(stdout, priorCounted = null) {
   // 祖链裁决只能等 ppidByPid 收全后统一做。
   const nativePiPids = new Set();
   const piNodeCandidates = [];
+
+  // 本轮的 kimi 家目录口径：isKimiNode 的家目录豁免（isUnderKimiCodeHome）
+  // 用它按轮解析，KIMI_CODE_HOME 挪家后无需重启即可跟上。
+  const kimiHomeLower = resolveKimiCodeHome().toLowerCase();
 
   const lines = stdout.split(/\r?\n/);
   for (const line of lines) {
@@ -1395,11 +1420,14 @@ function parseTasklistCsv(stdout, priorCounted = null) {
       }
       // Same install-path rule as claude: `npm view @moonshot-ai/kimi-code`
       // style maintenance processes must not register as kimi instances.
-      const isKimiNode =
+      // 家目录之下的行先行豁免（isUnderKimiCodeHome）：桌面端孵化的插件
+      // 帮手就住在那棵树下，token 碰撞的来龙去脉见该谓词的注释。
+      const isKimiNode = !isUnderKimiCodeHome(lower, kimiHomeLower) && (
         lower.includes("kimi-code/") ||
         lower.includes("kimi-code\\") ||
         (lower.includes("dist\\main.mjs") && lower.includes("kimi")) ||
-        (lower.includes("dist/main.mjs") && lower.includes("kimi"));
+        (lower.includes("dist/main.mjs") && lower.includes("kimi"))
+      );
       if (isKimiNode) {
         result.kimi += 1;
         if (pid) {
