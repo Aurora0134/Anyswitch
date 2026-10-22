@@ -549,15 +549,23 @@ describe("S2 分组移除（finding 1b）", () => {
       const block = init.slice(clickAt, init.indexOf("});", clickAt));
       assert.ok(block.indexOf("data-rail-term-restore-group") < block.indexOf("data-rail-term-resume"),
         "恢复钮在行续接之前判");
-      // 移除分组必须走带确认弹窗的入口（复审必修 1）：委托直接调 commit 版会把
+      // 移除分组必须走带确认弹窗的入口（M7 复审必修 1）：委托直接调 commit 版会把
       // 红色确认弹窗整个绕过——点一下就真移除，没有任何二次确认。
-      const removeBranch = block.slice(block.indexOf("data-rail-term-remove-group"), block.indexOf("data-rail-term-restore-group"));
+      // M9 复审必修 1 起该分支随菜单 portal 搬到 document 级委托（先判菜单项后走
+      // 收场），dir 委托里只留注释指向——断链的真 DOM 守卫见「M9 复审必修」用例。
+      const docAt = init.indexOf('document.addEventListener("click"');
+      const docBlock = init.slice(docAt, init.indexOf("});", docAt));
+      const removeBranch = docBlock.slice(docBlock.indexOf("data-rail-term-remove-group"), docBlock.indexOf("terminalRailRemoveGroup(") + 40);
       assert.ok(removeBranch.includes("terminalRailRemoveGroup("),
-        "菜单项委托调 terminalRailRemoveGroup（开弹窗），不是 commit 版");
+        "document 委托的菜单项分支调 terminalRailRemoveGroup（开弹窗），不是 commit 版");
       assert.ok(!removeBranch.includes("terminalRailCommitRemoveGroup("),
         "委托不许直接调 commit 版（那等于绕过确认弹窗）");
-      // 弹窗版是生产可达的：init 委托里必须出现它的调用（死代码检测）
-      assert.ok(block.includes("terminalRailRemoveGroup("), "terminalRailRemoveGroup 有生产调用点（不是死代码）");
+      assert.ok(docBlock.includes("terminalRailRemoveGroup("), "terminalRailRemoveGroup 有生产调用点（不是死代码）");
+      // 菜单项分支必须排在收场逻辑之前（先办事后收场，否则项点击会被当成点外面）
+      assert.ok(docBlock.indexOf("data-rail-term-view") < docBlock.indexOf("terminalRailMenuEl"),
+        "菜单项分支先于收场逻辑（视图菜单项）");
+      assert.ok(docBlock.indexOf("data-rail-term-remove-group") < docBlock.indexOf("terminalRailMenuEl"),
+        "菜单项分支先于收场逻辑（移除分组项）");
     });
   });
 
@@ -1724,5 +1732,258 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
     assert.equal(typeof listeners["searchInput:input"], "function", "输入框 input 监听已绑");
     listeners["searchInput:input"]({ stopPropagation() {} });
     assert.equal(log.input, 1, "input 事件接通到 onTerminalRailSearchInput");
+  });
+});
+
+describe("M9 复审必修：portal 后菜单项点击接线（真 DOM 守卫）", () => {
+  // 背景：D1 把菜单 portal 到 body 后，菜单项（data-rail-term-view /
+  // data-rail-term-remove-group）的唯一处理入口原先只在 #railTerminalDir 作用域
+  // 的点击委托里——body 不是 dir 后代，点击永远到不了委托，菜单项全死。
+  // 本守卫用真 openTerminalRailViewMenu/openTerminalRailGroupMenu 建菜单、挂到
+  // 桩 body 上，经最小 DOM shim 真点一项，断言处理函数真的被调。
+  const buildDom = () => {
+    // 最小 DOM shim：createElement/append/属性/事件冒泡/closest/click
+    const makeEl = (tag) => {
+      const el = {
+        tagName: tag, children: [], parent: null, attrs: {}, style: {}, textContent: "",
+        _listeners: {},
+        classList: { _set: new Set(), add(c) { this._set.add(c); }, remove(c) { this._set.delete(c); }, contains(c) { return this._set.has(c); } },
+        setAttribute(k, v) { this.attrs[k] = String(v); },
+        getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+        append(...kids) { for (const k of kids) { k.parent = el; el.children.push(k); } },
+        appendChild(k) { el.append(k); },
+        remove() { if (el.parent) el.parent.children = el.parent.children.filter((c) => c !== el); },
+        addEventListener(type, fn) { (el._listeners[type] = el._listeners[type] || []).push(fn); },
+        // closest：沿父链找匹配 [attr] 选择器的祖先（够本用例）
+        closest(sel) {
+          const m = /^\[([\w-]+)\]$/.exec(sel);
+          let cur = el;
+          while (cur) {
+            if (m && cur.getAttribute && cur.getAttribute(m[1]) !== null) return cur;
+            cur = cur.parent;
+          }
+          return null;
+        },
+        // 真点：派发到自身监听并沿父链冒泡（document 委托就是这么收到点击的）
+        click() {
+          const event = { target: el, stopPropagation() { this._stopped = true; } };
+          const chain = [];
+          let cur = el;
+          while (cur) { chain.push(cur); cur = cur.parent; }
+          for (const node of chain) {
+            if (event._stopped) break;
+            const fns = node._listeners && node._listeners.click;
+            if (fns) for (const fn of fns.slice()) fn(event);
+          }
+        },
+        querySelectorAll(sel) {
+          const m = /^\[([\w-]+)\]$/.exec(sel);
+          const out = [];
+          const walk = (node) => {
+            for (const c of node.children || []) {
+              if (m && c.getAttribute && c.getAttribute(m[1]) !== null) out.push(c);
+              walk(c);
+            }
+          };
+          walk(el);
+          return out;
+        },
+        contains(node) {
+          let cur = node;
+          while (cur) { if (cur === el) return true; cur = cur.parent; }
+          return false;
+        },
+        getBoundingClientRect: () => ({ top: 100, left: 100, right: 200, bottom: 130, width: 100, height: 30 }),
+        offsetWidth: 200,
+        focus() {}, blur() {},
+        set innerHTML(v) { this.children = []; this._html = v; }, get innerHTML() { return this._html || ""; },
+      };
+      return el;
+    };
+    const body = makeEl("body");
+    const document = {
+      body,
+      createElement: makeEl,
+      addEventListener(type, fn) { (body._listeners[type] = body._listeners[type] || []).push(fn); },
+      querySelector: () => null,
+    };
+    return { body, document, makeEl };
+  };
+
+  const buildRail = (log, dom) => {
+    const listeners = {};
+    const btn = (id) => ({
+      id, onclick: null, disabled: false,
+      addEventListener: (type, fn) => { listeners[id + ":" + type] = fn; },
+      focus() {}, querySelector: () => null, setAttribute() {},
+      getBoundingClientRect: () => ({ top: 100, left: 100, right: 128, bottom: 128, width: 28, height: 28 }),
+      classList: { add() {}, remove() {}, contains: () => false },
+      tabIndex: -1, value: "", blur() {},
+    });
+    const els = {
+      railTerminalDir: { addEventListener: (type, fn) => { listeners["dir:" + type] = fn; }, getBoundingClientRect: () => ({ top: 0, left: 0 }), scrollTop: 0 },
+      railTermNewBtn: btn("newBtn"), railTermHistoryRefresh: null,
+      railTermSearchBtn: btn("searchBtn"), railTermSearchInput: btn("searchInput"), railTermSearchClear: btn("searchClear"),
+      railTermViewOptionsBtn: btn("viewBtn"), railBackBtn: null, v2Rail: { addEventListener: () => {} },
+      railTermHistoryList: {
+        querySelectorAll: () => [{
+          getAttribute: (name) => (name === "data-rail-term-group" ? "C:\\dev\\alpha" : null),
+          getBoundingClientRect: () => ({ top: 100, left: 100, right: 200, bottom: 126, width: 100, height: 26 }),
+        }],
+      },
+    };
+    const fn = new Function("els", "listeners", "log", "document", "window", `
+      let terminalRailMenuEl = null;
+      let terminalRailViewMenuEl = null;
+      const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+      const terminalRailHoverEl = null;
+      const terminalRailHoverHead = null;
+      const terminalRailLastGroups = [];
+      const TERMINAL_RAIL_VIEW_GROUPS = [
+        { label: "分组方式", field: "groupBy", items: [
+          { value: "workspace", label: "按工作区" },
+          { value: "workspace-tree", label: "按工作区树" },
+          { value: "flat", label: "单列表" },
+        ] },
+        { label: "排序方式", field: "orderBy", items: [
+          { value: "updated", label: "最近更新" },
+          { value: "manual", label: "手动排序" },
+        ] },
+        { label: "筛选会话", field: "archivedFilter", items: [
+          { value: "default", label: "隐藏已归档" },
+          { value: "show", label: "全部会话（显示已归档）" },
+          { value: "only", label: "仅显示已归档" },
+        ] },
+      ];
+      let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+      const TERMINAL_RAIL_ICON_CHECK = "";
+      function $(id) { return els[id] ?? null; }
+      function loadTerminalRailViewPrefs() {}
+      function saveTerminalRailViewPrefs() {}
+      function initTerminalRailScrollbarQuiet() {}
+      function closeTerminalRailGroupMenu() { log.closeGroup += 1; terminalRailMenuEl = null; }
+      function closeTerminalRailViewMenu() { log.closeView += 1; terminalRailViewMenuEl = null; }
+      function closeTerminalRailSearch() {}
+      function closeTerminalRailHoverCard() {}
+      function openTerminalRailSearch() {}
+      function onTerminalRailSearchInput() {}
+      function scheduleTerminalRailHoverCard() {}
+      function terminalRailHeadKey() { return ""; }
+      function terminalRailCloseSession() {}
+      function terminalRailArchiveSession() {}
+      function toggleTerminalRailGroupMenu() {}
+      function terminalRailCreateTerminalInDir() {}
+      function terminalRailRestoreGroup() {}
+      function toggleTerminalRailRemoved() {}
+      function terminalRailActivateSession() {}
+      function terminalRailResumeHistoryRow() {}
+      function terminalRailUnarchiveSession() {}
+      function toggleTerminalRailGroup() {}
+      function toggleTerminalRailWatermark() {}
+      function terminalRailCreateTerminal() {}
+      function refreshTerminalRailHistory() {}
+      function terminalRailMoveInManualOrder() {}
+      function renderTerminalRailHistory() {}
+      function toast() {}
+      function sessDirName(p) { return String(p || "").split(/[\\\\/]/).filter(Boolean).pop() || p || ""; }
+      function escapeHtml(v) { return String(v || ""); }
+
+      // 被测真函数（真建菜单、真挂 body、真派事件）
+      ${extractFn("terminalRailGroupHeadEl")}
+      ${extractFn("terminalRailRemoveGroup")}
+      ${extractFn("terminalRailCommitRemoveGroup")}
+      ${extractFn("openTerminalRailGroupMenu")}
+      ${extractFn("applyTerminalRailViewChoice")}
+      ${extractFn("openTerminalRailViewMenu")}
+      ${extractFn("initTerminalRail")}
+      // 记录型替身：菜单项处理链的落点
+      function showSkillsModal(opts) { log.modal = opts; }
+      const realApply = applyTerminalRailViewChoice;
+      applyTerminalRailViewChoice = function (field, value) { log.viewChoice = { field, value }; };
+      const realRemove = terminalRailRemoveGroup;
+      terminalRailRemoveGroup = function (key) { log.removeGroup = key; realRemove(key); };
+      return { init: initTerminalRail, openView: openTerminalRailViewMenu, openGroup: openTerminalRailGroupMenu };
+    `)(els, listeners, log, dom.document, { innerWidth: 1440 });
+    return fn;
+  };
+
+  it("真点视图菜单项（单列表）→ applyTerminalRailViewChoice 被调（断链守卫）", () => {
+    const log = { closeGroup: 0, closeView: 0, modal: null, viewChoice: null, removeGroup: null };
+    const dom = buildDom();
+    const rail = buildRail(log, dom);
+    rail.init();
+    rail.openView();
+    const menu = dom.body.children[dom.body.children.length - 1];
+    assert.ok(menu, "菜单挂到了桩 body 上");
+    const items = menu.querySelectorAll("[data-rail-term-view]");
+    assert.equal(items.length, 8, "真菜单构建器建出 8 项");
+    const flat = items.find((el) => el.getAttribute("data-rail-term-view") === "groupBy:flat");
+    assert.ok(flat, "「单列表」项在册");
+    flat.click(); // 真点：冒泡到 document 委托
+    assert.deepEqual(log.viewChoice, { field: "groupBy", value: "flat" }, "菜单项点击接通到 applyTerminalRailViewChoice（portal 后不断链）");
+  });
+
+  it("真点「移除分组」菜单项 → 确认弹窗出现（移除链通）", () => {
+    const log = { closeGroup: 0, closeView: 0, modal: null, viewChoice: null, removeGroup: null };
+    const dom = buildDom();
+    const rail = buildRail(log, dom);
+    rail.init();
+    rail.openGroup("C:\\dev\\alpha");
+    const menu = dom.body.children[dom.body.children.length - 1];
+    const items = menu.querySelectorAll("[data-rail-term-remove-group]");
+    assert.equal(items.length, 1, "⋯ 菜单建出 1 项");
+    items[0].click(); // 真点：冒泡到 document 委托
+    assert.equal(log.removeGroup, "C:\\dev\\alpha", "移除分组入口接通");
+    assert.ok(log.modal, "确认弹窗被请求（移除链真点通）");
+    assert.equal(log.modal.title, "移除分组", "弹窗标题");
+    assert.equal(log.modal.confirmText, "移除分组", "确认钮文案");
+    assert.equal(log.modal.danger, true, "红色 danger");
+  });
+});
+
+describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
+  // 真因：.rail-term-view-menu{min-width:200px} 与 .rail-term-menu{min-width:120px}
+  // 同权重（0,1,0），后书者胜——视图菜单实际算出来 120px。修法：复合选择器提权重。
+  // 这里跑一个迷你层叠模拟：收集所有能命中「同时带两类的元素」的规则，按
+  // （特异性, 次序）取胜者，断言 min-width 落点。
+  const cascadeMinWidth = (cssRaw) => {
+    const css = cssRaw.replace(/\/\*[\s\S]*?\*\//g, ""); // 先剥注释：否则注释会混进选择器串
+    const rules = [];
+    const re = /([^{}]+)\{([^}]*)\}/g;
+    let m;
+    while ((m = re.exec(css))) {
+      const decl = /min-width:\s*(\d+)px/.exec(m[2]);
+      if (!decl) continue;
+      for (const sel of m[1].split(",")) {
+        const s = sel.trim();
+        if (!s.startsWith(".")) continue; // 只处理类选择器（够本用例）
+        const classes = (s.match(/\.[\w-]+/g) || []).map((c) => c.slice(1));
+        if (!classes.every((c) => c === "rail-term-menu" || c === "rail-term-view-menu")) continue;
+        rules.push({ specificity: classes.length, order: m.index, minWidth: Number(decl[1]), selector: s });
+      }
+    }
+    // 命中元素两类的规则里取胜者
+    const hits = rules.filter((r) => {
+      const cls = (r.selector.match(/\.[\w-]+/g) || []).map((c) => c.slice(1));
+      return cls.every((c) => ["rail-term-menu", "rail-term-view-menu"].includes(c));
+    });
+    if (!hits.length) return null;
+    hits.sort((a, b) => (b.specificity - a.specificity) || (b.order - a.order));
+    return hits[0].minWidth;
+  };
+
+  it("层叠胜者的 min-width = 200px（不被 .rail-term-menu 的 120px 盖掉）", () => {
+    const railBlock = panelCss.slice(panelCss.indexOf("/* ── 终端会话栏"), panelCss.indexOf("── 阶段 2 补"));
+    assert.equal(cascadeMinWidth(railBlock), 200, "视图菜单 min-width 计算值 200px（m6c §B2 实测值）");
+  });
+
+  it("视图选项菜单补随树滚动收场（对称组头菜单的 once-capture scroll 监听）", () => {
+    const src = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+    const groupOpen = src.slice(src.indexOf("function openTerminalRailGroupMenu"), src.indexOf("function toggleTerminalRailGroupMenu"));
+    const viewOpen = src.slice(src.indexOf("function openTerminalRailViewMenu"), src.indexOf("function applyTerminalRailViewChoice"));
+    assert.ok(groupOpen.includes('addEventListener("scroll", closeTerminalRailGroupMenu, { capture: true, once: true })'),
+      "组头菜单有滚动收场（既有）");
+    assert.ok(viewOpen.includes('addEventListener("scroll", closeTerminalRailViewMenu, { capture: true, once: true })'),
+      "视图菜单对称补上滚动收场（portal 到 body 后不随树滚，会飘）");
   });
 });

@@ -8716,6 +8716,9 @@ async function api(method, path, body) {
     const width = menu.offsetWidth || 200;
     menu.style.top = `${Math.max(8, btnRect.bottom + 4)}px`;
     menu.style.left = `${Math.max(8, Math.min(btnRect.right - width, window.innerWidth - width - 8))}px`;
+    // 滚动收场（对称组头菜单）：portal 到 body 后菜单不随树滚，树一滚就飘——挂个
+    // 一次性 capture scroll 监听跟着关。
+    dir.addEventListener("scroll", closeTerminalRailViewMenu, { capture: true, once: true });
     terminalRailViewMenuEl = menu;
   }
   // 点选：写偏好 → 落盘 → 连带动作（切 manual 快照/切 updated 清序/树模式解折叠）
@@ -9535,13 +9538,10 @@ async function api(method, path, body) {
         terminalRailCreateTerminalInDir(newBtn.getAttribute("data-rail-term-group-new"));
         return;
       }
-      const removeItem = target.closest("[data-rail-term-remove-group]");
-      if (removeItem) {
-        // 移除分组必须走带确认弹窗的入口：直接调 commit 版会把红色确认弹窗整个
-        // 绕过——点一下就真移除，没有任何二次确认（复审必修 1 钉住这条链）。
-        terminalRailRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
-        return;
-      }
+      // 注：⋯ 菜单项（data-rail-term-remove-group）与视图选项菜单项
+      // （data-rail-term-view）不在本委托里——两个菜单已 portal 到 body（M9-D1），
+      // 不是 #railTerminalDir 后代，它们的处理入口在 document 级委托（见
+      // initTerminalRail 尾部，先判菜单项后走收场）。
       const restore = target.closest("[data-rail-term-restore-group]");
       if (restore) {
         terminalRailRestoreGroup(restore.getAttribute("data-rail-term-restore-group"));
@@ -9552,14 +9552,7 @@ async function api(method, path, body) {
         toggleTerminalRailRemoved();
         return;
       }
-      // 视图选项点选（M8 T7b）：写偏好＋连带动作＋关菜单
-      const viewItem = target.closest("[data-rail-term-view]");
-      if (viewItem) {
-        const [field, value] = (viewItem.getAttribute("data-rail-term-view") || "").split(":");
-        applyTerminalRailViewChoice(field, value);
-        return;
-      }
-      // 「仅显示已归档」空态动作：切回「隐藏已归档」
+      // 「仅显示已归档」空态动作（在树内，留在本委托）：切回「隐藏已归档」
       const viewReset = target.closest("[data-rail-term-view-reset]");
       if (viewReset) {
         applyTerminalRailViewChoice("archivedFilter", "default");
@@ -9697,19 +9690,37 @@ async function api(method, path, body) {
     // 组头 ⋯ 菜单的兜底收场：点菜单外（委托分支已判的 ⋯ 钮与菜单项除外）与 Esc。
     // document 级监听在委托之后触发（冒泡从内到外），分工不冲突。
     document.addEventListener("click", (event) => {
+      const target = event.target;
+      const hasClosest = !!(target && typeof target.closest === "function");
+      // 菜单项分支（M9 复审必修 1）：两个菜单 portal 到 body 后不是 #railTerminalDir
+      // 后代，dir 委托接不到——菜单项的唯一处理入口搬到这里，**先判菜单项、后走
+      // 下面的收场逻辑**（点选即关由 applyTerminalRailViewChoice 自己承担）。
+      if (hasClosest) {
+        const viewItem = target.closest("[data-rail-term-view]");
+        if (viewItem) {
+          const [field, value] = (viewItem.getAttribute("data-rail-term-view") || "").split(":");
+          applyTerminalRailViewChoice(field, value);
+          return;
+        }
+        const removeItem = target.closest("[data-rail-term-remove-group]");
+        if (removeItem) {
+          // 移除分组必须走带确认弹窗的入口（M7 复审必修 1 钉住的链：直接调 commit
+          // 版会把红色确认弹窗整个绕过）。
+          terminalRailRemoveGroup(removeItem.getAttribute("data-rail-term-remove-group"));
+          return;
+        }
+      }
       if (terminalRailMenuEl) {
-        const target = event.target;
         if (!terminalRailMenuEl.contains(target)) {
-          if (!(target && typeof target.closest === "function" && target.closest("[data-rail-term-group-menu]"))) {
+          if (!(hasClosest && target.closest("[data-rail-term-group-menu]"))) {
             closeTerminalRailGroupMenu();
           }
         }
       }
-      // 视图选项菜单兜底：点菜单外即关（点选分支在委托里已关）
+      // 视图选项菜单兜底：点菜单外即关（点选分支在上面已关）
       if (terminalRailViewMenuEl) {
-        const target = event.target;
         if (!terminalRailViewMenuEl.contains(target)) {
-          if (!(target && typeof target.closest === "function" && target.closest("#railTermViewOptionsBtn"))) {
+          if (!(hasClosest && target.closest("#railTermViewOptionsBtn"))) {
             closeTerminalRailViewMenu();
           }
         }
@@ -9717,7 +9728,6 @@ async function api(method, path, body) {
       // 搜索外点：仅当查询为空才收起（有查询只失焦、保持展开，m6c §A6）
       if (terminalRailSearch.open) {
         const head = $("railTermSectionHead");
-        const target = event.target;
         if (!head || !head.contains(target)) {
           if (!terminalRailSearch.query.trim()) closeTerminalRailSearch();
         }

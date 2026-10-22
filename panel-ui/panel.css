@@ -654,7 +654,7 @@
      右对齐锚定（JS 算 left）、min-width 200、padding 4、dense 30px 项、分组标签
      11px tertiary、✓ 居项最右（margin-left:auto，选中才显、不换文字色不铺底）、
      点选即关（JS）。打开/关闭无动画（0ms 挂载/卸载）。 */
-  .rail-term-view-menu { min-width: 200px; }
+  .rail-term-menu.rail-term-view-menu { min-width: 200px; }
   .rail-term-view-label {
     padding: 6px 8px 2px; font-size: 11px; color: var(--text-3);
   }
