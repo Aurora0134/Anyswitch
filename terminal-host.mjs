@@ -388,6 +388,32 @@ function normalizeResume(raw) {
   return { resume: { endpoint, id } };
 }
 
+// M12-A 内切身份同步三件：restart 路由的可选 body 字段。缺省/空串＝不更新（沿用
+// 原值）；带了但形状不对一律拒（error 码与 create 路由的同款字段口径），不静默
+// 忽略——换绑是显式动作，半途丢字段比报错更难查。resume 走 normalizeResume。
+function normalizeIdentityUpdate(body) {
+  const fields = {};
+  const text = (key, max) => {
+    const value = body?.[key];
+    if (value === undefined || value === null || value === "") return null;
+    if (typeof value !== "string" || !value.trim() || value.trim().length > max) return { error: `invalid_${key}` };
+    return value.trim();
+  };
+  const label = text("label", 80);
+  if (label && label.error) return label;
+  const agentId = text("agentId", 64);
+  if (agentId && agentId.error) return agentId;
+  const agentName = text("agentName", 80);
+  if (agentName && agentName.error) return agentName;
+  const resumeInput = normalizeResume(body?.resume);
+  if (resumeInput && resumeInput.error) return { error: resumeInput.error };
+  if (label) fields.label = label;
+  if (agentId) fields.agentId = agentId;
+  if (agentName) fields.agentName = agentName;
+  if (resumeInput) fields.resume = resumeInput.resume;
+  return { fields };
+}
+
 export function createTerminalHost({
   root,
   port = TERMINAL_HOST_PORT,
@@ -757,7 +783,7 @@ export function createTerminalHost({
   // 一次 spawn：两次 terminate+spawn 交错时，后一次的树杀会落在前一次刚起来的
   // 新进程上，最终留下的进程与响应里的 pid 对不上，多出来的那个成了孤儿。
   // 同会话的重启请求串成一条：在飞时直接返回同一份结果快照。
-  function restartSession(session, { envDelta = null, launch = null, cwd = null } = {}) {
+  function restartSession(session, { envDelta = null, launch = null, cwd = null, resume = null, label = null, agentId = null, agentName = null } = {}) {
     if (session.restartInFlight) return session.restartInFlight;
     const run = (async () => {
       if (envDelta) session.env = mergeInjectedEnv(session.env ?? {}, envDelta);
@@ -765,6 +791,13 @@ export function createTerminalHost({
       // 漂移）。只认调用方校验过的值，缺失则沿用会话原值。
       if (launch) session.launch = launch;
       if (cwd) session.cwd = cwd;
+      // 身份同步（M12-A 内切）：这条终端就地换成目标会话——label/agentId/agentName
+      // 与 resume 身份（endpoint＋会话 id）一并改写，落盘随本轮的 persistNow 走。
+      // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。
+      if (label) session.label = label;
+      if (agentId) session.agentId = agentId;
+      if (agentName) session.agentName = agentName;
+      if (resume) session.resume = resume;
       // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
       // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
       await terminateSessionTree(session);
@@ -1089,7 +1122,11 @@ export function createTerminalHost({
         const launch = body?.launch !== undefined && body.launch !== null ? normalizeLaunch(body.launch) : null;
         const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : null;
         if (cwd !== null && !existsSync(cwd)) return json(res, 400, { error: "invalid_cwd" });
-        const restarted = await restartSession(session, { envDelta, launch, cwd });
+        // 身份同步三件（M12-A 内切）：随 restart 带上即改写会话记录，缺省/空串
+        // 视为「不更新」沿用原值；形状不对拒 400，不静默忽略（换绑是显式动作）。
+        const identity = normalizeIdentityUpdate(body);
+        if (identity.error) return json(res, 400, { error: identity.error });
+        const restarted = await restartSession(session, { envDelta, launch, cwd, ...identity.fields });
         return json(res, 200, restarted);
       }
       if (action === "close" && req.method === "POST") {
