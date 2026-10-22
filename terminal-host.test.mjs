@@ -1160,6 +1160,66 @@ test("restore 后快照带 agentId/agentName/launch，且不自动重新 spawn",
   }
 });
 
+test("restart 接受 resume 身份与 label/agentId/agentName 同步（M12-A 内切）", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  let revived = null;
+  try {
+    // 空白外壳（无 agent 归属）——内切接管的目标形态
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "Anyswitch", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    assert.equal(created.agentId, undefined, "建成时无 agent 归属");
+
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "重构权限矩阵",
+        agentId: "kimi",
+        agentName: "Kimi Code",
+        resume: { endpoint: "kimi", id: "conv-123" },
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd", "--session", "conv-123"] },
+      }),
+    });
+    assert.equal(restarted.status, 200);
+    assert.equal(calls.length, 2, "内切＝同记录 terminate+spawn");
+    const body = await restarted.json();
+    assert.equal(body.label, "重构权限矩阵", "label 同步进响应");
+    assert.equal(body.agentId, "kimi", "agentId 同步进响应");
+    assert.equal(body.agentName, "Kimi Code", "agentName 同步进响应");
+    assert.deepEqual(body.resume, { endpoint: "kimi", id: "conv-123" }, "resume 身份同步进响应（去重数据源）");
+
+    // 形状非法的 resume 一律 400，不建不换（normalizeResume 同款校验）
+    const bad = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ resume: { endpoint: "kimi" } }),
+    });
+    assert.equal(bad.status, 400, "缺 id 的 resume 拒换");
+    const badBody = await bad.json();
+    assert.equal(badBody.error, "invalid_resume");
+
+    // 落盘持久化：重启宿主后身份还在（不是只活在内存响应里）
+    await host.close();
+    revived = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+    const revivedPort = await listen(revived);
+    const listed = await fetch(`http://127.0.0.1:${revivedPort}/terminal/sessions`, { headers: headers(revived) }).then((r) => r.json());
+    assert.equal(listed.sessions[0].label, "重构权限矩阵", "label 落盘");
+    assert.equal(listed.sessions[0].agentId, "kimi", "agentId 落盘");
+    assert.deepEqual(listed.sessions[0].resume, { endpoint: "kimi", id: "conv-123" }, "resume 落盘");
+  } finally {
+    if (revived) await revived.close().catch(() => {});
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart 接受可选 env 合并后再 spawn，响应不回显", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
   const { calls, ptyModule } = capturingPtyModule();

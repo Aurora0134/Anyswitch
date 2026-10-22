@@ -721,6 +721,31 @@
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
   .rail-term-row:hover { background: var(--surface-hover); }
+  /* ── 运行中转圈（M12-B，dsh 实测规格逐项） ──
+     行首 16×20 前导槽：非运行行该槽本来空着（idle 的 live 行是 7×7 状态点、非
+     live 行全空），转圈是填入空槽、不替换任何图标。槽内挂读屏文本「进行中」。
+     SVG 14×14 / viewBox 0 0 24 24 / aria-hidden / currentColor 三级文字色：
+     轨道圆 r=9.5 静态 opacity .25；弧线圆同描边 dasharray 12 150 呼吸（1.5s
+     ease-in-out，弧长 12→24→12、offset 0→-6→0）；外层 g 匀速 360°（1.5s
+     linear）——两动画同周期成稳定加载环。reduced-motion 下两动画全 none
+     （静态轨道＋固定弧）。 */
+  .rail-term-spinner {
+    flex: none; width: 16px; height: 20px; display: inline-flex; align-items: center; justify-content: center;
+    color: var(--text-3);
+  }
+  .rail-term-spinner-track { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; opacity: .25; }
+  .rail-term-spinner-arc { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-dasharray: 12 150; animation: rail-term-spinner-breathe 1.5s ease-in-out infinite; }
+  .rail-term-spinner-rot { transform-origin: center; animation: rail-term-spinner-rotate 1.5s linear infinite; }
+  .rail-term-spinner-sr { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  @keyframes rail-term-spinner-breathe {
+    0% { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+    50% { stroke-dasharray: 24 150; stroke-dashoffset: -6; }
+    100% { stroke-dasharray: 12 150; stroke-dashoffset: 0; }
+  }
+  @keyframes rail-term-spinner-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    .rail-term-spinner-arc, .rail-term-spinner-rot { animation: none; }
+  }
   .rail-term-row.is-active { background: var(--accent-soft); color: var(--accent); }
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }

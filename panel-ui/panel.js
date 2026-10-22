@@ -7443,9 +7443,21 @@ async function api(method, path, body) {
           }
           return;
         }
+        // working 翻转（agent 开跑/回合结束）同拍重渲会话栏：转圈的出现/消失
+        // 不等 1s 归属轮询（该轮询本就每拍重渲栏，这里只是把活动流的低延迟接到
+        // 栏上）。翻转未发生时不动栏——避免每帧重写 DOM 打断 FLIP/滚动。
+        const statusBefore = new Map(Object.values(terminalSessionMap()).map((s) => [s.id, s.status]));
         if (terminalActivityApplyFrame(frame, terminalSessionMap())) {
           renderTerminalSessionData();
           renderTerminalPreviewTabs();
+          const flipped = Object.values(terminalSessionMap()).some((s) => statusBefore.get(s.id) !== s.status);
+          if (flipped && typeof renderTerminalRail === "function") {
+            try {
+              renderTerminalRail();
+            } catch (error) {
+              console.warn("[terminal] rail render failed:", error);
+            }
+          }
         }
       };
       source.onerror = () => {};
@@ -8367,6 +8379,13 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_ICON_PLUS = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
   // 视图选项菜单的选中 ✓（feather check）：居项最右，不换文字色不铺底（m6c §B2）
   const TERMINAL_RAIL_ICON_CHECK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
+  // M12-B 运行中转圈（dsh 实测规格逐项照抄）：行首 16×20 前导槽内的 14×14 SVG——
+  // 轨道圆 r=9.5 静态（opacity .25），弧线圆同描边 dasharray 12 150 呼吸（1.5s
+  // ease-in-out：0% 12 150/offset 0 → 50% 24 150/offset -6 → 100% 12 150/offset 0），
+  // 外层 g 匀速转 360°（1.5s linear）——两动画同周期成稳定加载环。currentColor 吃
+  // 三级文字色（不造新色值）；prefers-reduced-motion 下降级静态（CSS 侧两动画全
+  // none）。槽内挂读屏文本「进行中」（本规格批准的唯一新增 aria 文本）。
+  const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle class="rail-term-spinner-track" cx="12" cy="12" r="9.5" opacity=".25"></circle><g class="rail-term-spinner-rot"><circle class="rail-term-spinner-arc" cx="12" cy="12" r="9.5" stroke-dasharray="12 150"></circle></g></svg><span class="rail-term-spinner-sr">进行中</span></span>';
 
   // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
   // （payment-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
@@ -8897,8 +8916,12 @@ async function api(method, path, body) {
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
     if (live && live.id === activeId) cls.push("is-active");
+    // 行首槽位（M12-B，dsh 实测口径）：working 行填转圈（16×20 槽内的 14×14 SVG，
+    // 读屏文本「进行中」），idle 的 live 行留 7×7 状态点，非 live 行槽位留空。
     const dot = live
-      ? `<span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>`
+      ? (working
+        ? TERMINAL_RAIL_SPINNER
+        : `<span class="terminal-tab-state is-idle" title="空闲"></span>`)
       : "";
     const closeBtn = live
       ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
@@ -8931,7 +8954,7 @@ async function api(method, path, body) {
     const active = entry.id === activeId;
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
-        <span class="terminal-tab-state ${working ? "is-working" : "is-idle"}" title="${working ? "正在运行" : "空闲"}"></span>
+        ${working ? TERMINAL_RAIL_SPINNER : `<span class="terminal-tab-state is-idle" title="空闲"></span>`}
         <span class="rail-term-row-title">新会话</span>
         <span class="rail-term-row-close" data-rail-term-close="${esc(entry.id)}" aria-hidden="true">×</span>
       </button>`;
@@ -9063,11 +9086,23 @@ async function api(method, path, body) {
           }
         } else {
           const view = terminalRailWatermarkView(group.rows.length, terminalRailWatermarks.get(group.key));
-          for (const row of group.rows.slice(0, view.visible)) {
+          // M12-B 水位线联动（dsh requiredWatermark 同构）：运行中＋当前会话两档
+          // 强制入可见段——永远不被藏进「展开其余 N 个会话」。我们只有 running＋
+          // current 两个信号（无 pendingInteraction/completed，范围声明）。flat
+          // 模式不设水位（整组平铺全露），走不到这条分支。
+          let required = view.visible;
+          for (let i = 0; i < group.rows.length; i += 1) {
+            const live = group.live.get(group.rows[i].id) || null;
+            if (!live) continue;
+            if (live.status === "working" || live.id === activeTerminalPreviewId) required = Math.max(required, i + 1);
+          }
+          const shown = Math.min(group.rows.length, required);
+          for (const row of group.rows.slice(0, shown)) {
             parts.push(terminalRailRowHtml(row, group.live.get(row.id) || null, activeTerminalPreviewId));
           }
           if (group.rows.length > TERMINAL_RAIL_WATERMARK) {
-            parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${terminalRailMoreLabel(view)}</button>`);
+            const label = terminalRailMoreLabel({ visible: shown, hidden: group.rows.length - shown, expanded: shown >= group.rows.length });
+            parts.push(`<button type="button" class="rail-term-more" data-rail-term-more="${esc(group.key)}">${label}</button>`);
           }
         }
       }
@@ -9163,7 +9198,11 @@ async function api(method, path, body) {
   function syncTerminalRailHistory(agentId) {
     if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
-      terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+      // 活跃页签是空白外壳（无 agent 归属）时不清表：沿用上次加载的历史，用户
+      // 才点得到行、把空白壳内切接管（M12-A 判定矩阵空白壳行）。真机验收发现
+      // 旧行为在此清空 history，矩阵那一行 thereby 永远不可达；切回 agent 上
+      // 下文时 endpoint 对不上，自然会走下面的重拉。从未加载过时本就是空表。
+      terminalRailHistory = { ...terminalRailHistory, endpoint: "" };
       terminalRailFlipMode = "instant";
       renderTerminalRailHistory("");
       return;
@@ -9274,7 +9313,58 @@ async function api(method, path, body) {
     }
     const resume = { endpoint: session.endpoint, id: session.id };
     if (typeof session.file === "string" && session.file) resume.file = session.file;
-    return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+    return terminalRailSwitchOrCreate({ session, resume, cwd });
+  }
+
+  // M12-A 内切判定（规格矩阵）：点栏内历史会话、去重未命中后，对当前聚焦页签的
+  // 会话 A 做判定——空白壳/idle/exited 就地换内容（宿主同记录 terminate+spawn+
+  // 身份换绑，页签不新增，dsh 单槽 replaceMain 的我们侧同构）；working/补读失败
+  // 走现状新开页签（保护在跑任务——dsh 被切走继续跑的我们侧等价物；宁多开勿错杀）。
+  // 在飞闸（规格「偏离声明」）：dsh 是 last-wins 因换视图免费；我们要杀起进程、
+  // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
+  // 忽略栏内其他会话点击，记录在案。
+  let terminalSwitchInFlight = false;
+  async function terminalRailSwitchOrCreate({ session, resume, cwd }) {
+    if (terminalSwitchInFlight) return;
+    const active = terminalSessionFor(activeTerminalPreviewId);
+    // 无从内切：没有活跃页签、或活跃是设计稿预览会话（没有宿主记录可换）。
+    if (!active || !active.backend) {
+      return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+    }
+    terminalSwitchInFlight = true;
+    try {
+      // 补读两拍（规格时序防线）：活跃面即时取（防 SSE 活跃流一拍延迟误杀在跑
+      // 任务）＋宿主单读（PTY 现态，顺带确认记录还在）。任一失败降级新开。
+      let agents = null;
+      let hostRead = null;
+      try {
+        agents = await api("GET", "/api/agents");
+        hostRead = await api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`);
+      } catch {
+        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      }
+      if (!agents || !Array.isArray(agents.agents) || !hostRead || !hostRead.id) {
+        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      }
+      enrichTerminalSessions(agents.agents);
+      const working = active.status === "working" || (active.metrics && active.metrics.activeRequests > 0);
+      if (working) return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
+      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, { resume, cwd });
+      terminalBackendSessions[active.id] = terminalBackendSession(switched);
+      renderTerminalPreviewSession();
+    } catch (error) {
+      // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
+      // 本地记录原样，页签还是原来那条，只给一句提示。
+      const code = error && (error.serverCode || error.code);
+      if (typeof code === "string" && code.startsWith("resume-")) {
+        toast("这个 Agent 的会话暂时不能在终端里续接", true);
+        return;
+      }
+      toast(panelError(error, "无法启动这个终端"), true);
+    } finally {
+      terminalSwitchInFlight = false;
+    }
   }
 
   function terminalRailResumeHistoryRow(id) {

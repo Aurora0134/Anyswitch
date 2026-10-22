@@ -93,6 +93,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailVisibleSessions")}
     ${extractFn("terminalRailRegroupRemoved")}
     ${extractFn("terminalRailPendingNewTerminals")}
+    const TERMINAL_RAIL_SPINNER = "";
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
@@ -114,6 +115,7 @@ function rowHtmlSandbox(prefs) {
     function escapeHtml(v) { return String(v || ""); }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailIsArchived")}
+    const TERMINAL_RAIL_SPINNER = "";
     ${extractFn("terminalRailRowHtml")}
     return terminalRailRowHtml;
   `)(null, null, "t1", prefs);
@@ -849,6 +851,8 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("terminalRailActivateSession")}
         ${extractFn("createAgentTerminal")}
+        let terminalSwitchInFlight = false;
+        ${extractFn("terminalRailSwitchOrCreate")}
         ${extractFn("terminalRailResumeSession")}
         return {
           resume: terminalRailResumeSession,
@@ -928,8 +932,16 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
 
     it("源码钉死：去重判定在续接之前，聚焦走 terminalRailActivateSession 同路", () => {
       const fn = extractFn("terminalRailResumeSession");
-      assert.ok(fn.indexOf("terminalRailFindOpenSession") < fn.indexOf("createAgentTerminal"),
-        "先查已开着的终端，再走新建");
+      assert.ok(fn.indexOf("terminalRailFindOpenSession") < fn.indexOf("terminalRailSwitchOrCreate"),
+        "先查已开着的终端，再走内切/新开判定");
+      const decide = extractFn("terminalRailSwitchOrCreate");
+      assert.ok(decide.indexOf("terminalRailFindOpenSession") < 0, "判定函数自身不再做去重（去重只在入口）");
+      // 补读在 working 判定之前、判定之后才新开（no-active 的早退新建在补读之前，
+      // 那是「无从内切」的直接新建，不读活跃面）。
+      const workingAt = decide.indexOf("if (working)");
+      assert.ok(decide.indexOf("enrichTerminalSessions") < workingAt, "补读（活跃面即时取）在 working 判定之前");
+      assert.ok(workingAt < decide.indexOf("createAgentTerminal", workingAt), "working 判定之后才走新开");
+      assert.ok(decide.includes("terminalRailActivateSession") === false, "聚焦只在入口的去重分支（本函数不抢）");
       assert.ok(fn.includes("terminalRailActivateSession(open.id)"), "聚焦复用同一通路（置活跃+存档+重渲）");
       const find = extractFn("terminalRailFindOpenSession");
       assert.ok(find.includes("session.resume.endpoint === endpoint") && find.includes("session.resume.id === id"),
@@ -1084,6 +1096,7 @@ describe("M8 T2 选中态跟随聚焦", () => {
       function terminalRailIsArchived() { return false; }
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
+      const TERMINAL_RAIL_SPINNER = "";
       ${extractFn("terminalRailRowHtml")}
       return terminalRailRowHtml;
     `)();
@@ -1413,6 +1426,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         function escapeHtml(v) { return String(v || ""); }
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
+        const TERMINAL_RAIL_SPINNER = "";
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1", { archived: [{ endpoint: "kimi", id: "s-9" }], removedGroups: [] });
@@ -2057,5 +2071,191 @@ describe("M10 F2：点「移除分组」先收场组头菜单再开弹窗", () =
     `)(order);
     fn("C:\\dev\\alpha");
     assert.deepEqual(order, ["closeMenu", "modal"], "先收场组头菜单，再开确认弹窗（菜单不许压在弹窗上）");
+  });
+});
+
+describe("M12-A 内切判定矩阵（vm 真跑）", () => {
+  // 点栏内历史会话、去重未命中后：对当前聚焦页签的会话 A 做判定——空白壳/idle/
+  // exited 就地换内容（同页签），working/补读失败走新开页签（保护在跑任务、
+  // 宁多开勿错杀）。一次内切期间在飞闸忽略后续点击。
+  const HISTORY_ROW = {
+    endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
+    file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
+  };
+  const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl }) => {
+    const log = { gets: [], creates: [], toasts: [], renders: 0 };
+    const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", `      let terminalBackendReady = true;
+      const terminalBackendSessions = sessions;
+      let activeTerminalPreviewId = activeId;
+      let terminalSwitchInFlight = false;
+      function api(method, path) {
+        log.gets.push({ method, path });
+        if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
+        if (method === "GET" && path.startsWith("/api/terminal/sessions/")) return hostReadImpl();
+        if (method === "POST" && path.endsWith("/switch")) return Promise.resolve(switchImpl());
+        return Promise.reject(new Error("unexpected " + method + " " + path));
+      }
+      // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
+      // activeRequests 置 working/idle。
+      function enrichTerminalSessions(agents) {
+        const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
+        const working = !!(row && row.activeRequests > 0);
+        for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+      }
+      function createAgentTerminal(opts) { log.creates.push(opts); return Promise.resolve(createImpl(opts)); }
+      function terminalBackendSession(item) { return { ...item }; }
+      function renderTerminalPreviewSession() { log.renders += 1; }
+      function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
+      function panelError(err, fallback) { return fallback; }
+      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      ${extractFn("terminalRailSwitchOrCreate")}
+      return {
+        go: (row) => terminalRailSwitchOrCreate({ session: row, resume: { endpoint: row.endpoint, id: row.id, file: row.file }, cwd: row.project }),
+        gate: () => terminalSwitchInFlight,
+        sessions: terminalBackendSessions,
+      };
+    `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })));
+    return { fn, log };
+  };
+  const AGENTS_IDLE = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 0 }] }] };
+  const AGENTS_WORKING = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 1 }] }] };
+  const HOST_RUNNING = { id: "t-a", status: "running" };
+  const HOST_EXITED = { id: "t-a", status: "exited" };
+  const SWITCH_OK = { id: "t-a", status: "running", pid: 99, label: "重构权限矩阵", agentId: "kimi", agentName: "Kimi Code", resume: { endpoint: "kimi", id: "s-1" } };
+  const BLANK = { id: "t-a", backend: true, agentId: null, agentName: null, agent: null, resume: null, status: "idle", label: "Anyswitch" };
+  const IDLE = { id: "t-a", backend: true, agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle", label: "旧会话" };
+  const WORKING = { ...IDLE, status: "working" };
+  const PREVIEW = { id: "t-a", backend: false, agentId: null, agent: null, resume: null, status: "idle", label: "设计稿" };
+
+  it("空白壳内切接管：同页签换内容，POST switch 带目标 resume＋cwd，不开新页签", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.deepEqual(log.gets, [
+      { method: "GET", path: "/api/agents" },
+      { method: "GET", path: "/api/terminal/sessions/t-a" },
+      { method: "POST", path: "/api/terminal/sessions/t-a/switch" },
+    ], "补读两拍（活跃＋宿主单读）都在判定与切换之间");
+    assert.equal(log.creates.length, 0, "不开新页签");
+    assert.deepEqual(fn.sessions["t-a"].resume, { endpoint: "kimi", id: "s-1" }, "换绑后同页签就是目标会话（再去重点它会聚焦本页签）");
+    assert.equal(fn.sessions["t-a"].label, "重构权限矩阵", "标签同步");
+    assert.equal(fn.gate(), false, "闸已放行");
+    assert.ok(log.renders >= 1, "重渲（栏/页签/会话数据同拍）");
+  });
+
+  it("idle/exited 内切：对话在盘上无实质损失，照旧就地换", async () => {
+    for (const [name, hostRead, active] of [["idle", HOST_RUNNING, IDLE], ["exited", HOST_EXITED, IDLE]]) {
+      const { fn, log } = runSwitch({
+        sessions: { "t-a": { ...active } }, activeId: "t-a",
+        agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => hostRead, switchImpl: async () => SWITCH_OK,
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(log.creates.length, 0, `${name} 不开新页签`);
+      assert.ok(log.gets.some((g) => g.path.endsWith("/switch")), `${name} 走内切`);
+    }
+  });
+
+  it("working 不内切：保护在跑任务，走现状新开页签，原页签不动", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...WORKING } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_WORKING, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 1, "新开页签（现状通路）");
+    assert.deepEqual(log.creates[0], { agentId: "kimi", cwd: "C:\\dev\\alpha", resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" } },
+      "新开就是既有的续接新建（M3 契约原样）");
+    assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "不发内切");
+    assert.deepEqual(fn.sessions["t-a"].resume, { endpoint: "kimi", id: "s-old" }, "原页签身份没被碰");
+  });
+
+  it("补读失败（活跃面或宿主单读）：降级新开，宁多开勿错杀", async () => {
+    for (const [name, agentsImpl, hostReadImpl] of [
+      ["活跃面失败", async () => { throw new Error("HTTP 500"); }, async () => HOST_RUNNING],
+      ["宿主单读失败", async () => AGENTS_IDLE, async () => { throw new Error("HTTP 500"); }],
+    ]) {
+      const { fn, log } = runSwitch({
+        sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+        agentsImpl, hostReadImpl, switchImpl: async () => SWITCH_OK,
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(log.creates.length, 1, `${name} 降级新开`);
+      assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), `${name} 不发内切`);
+    }
+  });
+
+  it("无活跃页签/活跃是设计稿预览会话：无从内切，照旧新开", async () => {
+    for (const [name, sessions, activeId] of [
+      ["零终端", {}, "t-a"],
+      ["预览会话", { "t-a": { ...PREVIEW } }, "t-a"],
+    ]) {
+      const { fn, log } = runSwitch({
+        sessions, activeId,
+        agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_OK,
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(log.creates.length, 1, `${name} 新开`);
+      assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), `${name} 不发内切`);
+    }
+  });
+
+  it("在飞闸：一次内切进行期间，后续栏内点击被忽略", async () => {
+    let release;
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: () => new Promise((resolve) => { release = resolve; }),
+    });
+    fn.go(HISTORY_ROW);
+    await flush(); // 等补读两拍落定、switch 在飞
+    assert.equal(fn.gate(), true, "闸关着");
+    const getsBefore = log.gets.length;
+    fn.go({ ...HISTORY_ROW, id: "s-2" });
+    assert.equal(log.gets.length, getsBefore, "第二次点击不发任何请求（在飞闸）");
+    release(SWITCH_OK);
+    await flush();
+    assert.equal(fn.gate(), false, "落定后放行");
+  });
+
+  it("切换失败：不删本地状态、维持现状、不静默吞", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 500：boom"), { serverCode: "http_500" }); },
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.ok(fn.sessions["t-a"], "本地会话记录还在（没被删）");
+    assert.equal(fn.sessions["t-a"].resume, null, "身份没被改花（失败不半吊子换绑）");
+    assert.equal(log.toasts.length, 1, "有提示");
+    assert.equal(log.toasts[0].isErr, true, "按错误上屏");
+    assert.ok(!log.toasts[0].msg.includes("HTTP"), "服务端原文不上屏");
+    assert.equal(fn.gate(), false, "失败也放行（可重试）");
+  });
+
+  it("切换失败回续接族短码（resume-invalid / resume-unsupported）：落已批准续接句，服务端原文不上屏", async () => {
+    // /switch 路由级拒换把 error 也置成机器码本身（文案零新增冻结条款），api() 落
+    // err.code/err.serverCode 双通道都是短码——前端 startsWith("resume-") 门接住，
+    // 落「这个 Agent 的会话暂时不能在终端里续接」，短码与服务端原文都不外泄。
+    for (const code of ["resume-invalid", "resume-unsupported"]) {
+      const { fn, log } = runSwitch({
+        sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+        agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+        switchImpl: async () => { throw Object.assign(new Error(`HTTP 400：${code}`), { code, serverCode: code }); },
+      });
+      fn.go(HISTORY_ROW);
+      await flush();
+      assert.equal(log.toasts.length, 1, `${code}：只提示一次`);
+      assert.equal(log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", `${code}：落已批准续接句`);
+      assert.ok(!log.toasts[0].msg.includes("resume-"), `${code}：短码不外泄`);
+      assert.equal(fn.sessions["t-a"].resume, null, `${code}：身份没被改花`);
+      assert.equal(fn.gate(), false, `${code}：失败也放行（可重试）`);
+    }
   });
 });
