@@ -1020,8 +1020,9 @@ async function api(method, path, body) {
 
   // claude 无端点级聚合桶（per-launch 会话流量只落各会话行，不进常驻 relay 聚合桶），
   // 「全局汇总」由各会话行求和派生：tokens/请求数/工时累加，tps 为各会话之和，
-  // 缓存命中率按 prompt 加权，TTFT 与 lastSeen 取最近有活动的会话。
-  function claudeAggregateMetrics(sessions) {
+  // 缓存命中率按 prompt 加权，TTFT 与 lastSeen 取最近有活动的会话。会话行消亡
+  // 后其累计并入后端下发的退役账（retiredMetrics）——汇总 = 活行 + 退役账。
+  function claudeAggregateMetrics(sessions, retired) {
     const tokens = { prompt: 0, completion: 0, cached: 0 };
     let totalRequests = 0, tpsSum = 0, durationMs = 0;
     let lastSeen = null, ttftMs = null, ttftColor = "green", ttftSeen = -1;
@@ -1039,6 +1040,23 @@ async function api(method, path, body) {
         ttftSeen = seen || 0;
         ttftMs = s.lastTtftMs;
         ttftColor = s.ttftColor || "green";
+      }
+    }
+    // 退役账并表：计数类直接加总；lastSeen/TTFT 与活行取最近。后端在 claude
+    // 家族全灭清零时同步归零退役账，无需前端再做归零判断。
+    const ledger = retired && typeof retired === "object" ? retired : null;
+    if (ledger) {
+      tokens.prompt += ledger.promptTokens || 0;
+      tokens.completion += ledger.completionTokens || 0;
+      tokens.cached += ledger.cachedTokens || 0;
+      totalRequests += ledger.requests || 0;
+      durationMs += ledger.activeDurationMs || 0;
+      const seen = typeof ledger.lastSeen === "number" ? ledger.lastSeen : null;
+      if (seen !== null && (lastSeen === null || seen > lastSeen)) lastSeen = seen;
+      if (typeof ledger.lastTtftMs === "number" && ledger.lastTtftMs > 0
+        && seen !== null && seen >= ttftSeen) {
+        ttftSeen = seen;
+        ttftMs = ledger.lastTtftMs;
       }
     }
     return {
@@ -1680,7 +1698,7 @@ async function api(method, path, body) {
       // showSurface：桌面形态收敛成的 claude-desktop 行贴一枚 Desktop 徽标
       //（与 kimi 行徽标同一渲染位、同一 token），逐 PID 行无徽标不变。
       const isGenerating = sessions.some((s) => s.activeRequests > 0 || s.status === "active");
-      const agg = claudeAggregateMetrics(sessions);
+      const agg = claudeAggregateMetrics(sessions, c.retiredMetrics);
       renderInstanceRows({ prefix: "cc", listEl: list, instances: sessions, showSurface: true, aggregateFallback: buildAggregateFallback(agg, c, isGenerating) });
       applyDetailFold("cc");
       gateAggregateRow("cc", $("ccSessionRow"), sessions.length);

@@ -58,14 +58,42 @@ const SESSION_SILENT_ACTIVE_REQUEST_TTL_MS = 45000;
 // crash, or a manual stop/start) used to zero them, and the board then showed
 // an empty card until the endpoint's next request finished settling — for a
 // coding agent that is a whole turn (~30s+). The snapshot persists the
-// display history on the model-stability cadence: cumulative accounting and
+// display history on the model-stability cadence: the run's accounting and
 // the sample windows backing the card's numbers. It is display history, never
 // protocol state — on restore, in-flight counts, fault latches and
 // current-identity fields stay live-only (see restoreAggregateState), because
-// restoring them would pin a "生成中" badge no live request owns.
+// restoring them would pin a "生成中" badge no live request owns. A run anchor
+// rides along (top-level runPids: per endpoint, the process ids the last
+// trusted scan attributed to it): the first trusted scan after restore decides
+// per endpoint whether the pre-restart run is still alive (any anchored pid
+// present) or was replaced (agent restarted during the downtime — the restored
+// account is a dead run's remnant and zeroes). All card metrics are
+// run-scoped, so the anchor is what keeps a restore from pinning one run's
+// totals onto the next.
 export const METRICS_SNAPSHOT_FILENAME = "agent-metrics-snapshot.json";
-const METRICS_SNAPSHOT_VERSION = 1;
+// v2 = runPids anchors + claude retirement ledger. v1 sidecars predate both
+// and are discarded on sight (a v1 restore would resurrect lifetime totals
+// with no anchor to zero them — the exact bug this version exists to close).
+const METRICS_SNAPSHOT_VERSION = 2;
 const METRICS_SNAPSHOT_EVERY_MS = 30_000;
+
+// Per-endpoint pid set that defines "this endpoint's run": the anchor records
+// it, the restore verdict compares against it, and a full-family death during
+// live operation zeroes the endpoint account against the same scope. The sets
+// are family-wide (dsh includes its TUI launcher shells, codex includes the
+// desktop GUI shell) — a surviving family member means the run continues, and
+// the scan-count scope on the cards matches.
+const RUN_ANCHOR_SCOPE = {
+  zcode: "zcodePids",
+  claude: "claudePids",
+  dsh: "dshPids",
+  pi: "piPids",
+  kimi: "kimiPids",
+  qoder: "qoderPids",
+  codex: "codexPids",
+  opencode: "opencodePids",
+  grok: "grokPids",
+};
 
 // Sliding window of recent successful requests. TPS and cache-hit rate are
 // computed from this window, NOT from process-lifetime totals. A lifetime
@@ -959,7 +987,7 @@ export function parseDshConsoleQueryOutput(out) {
 // （tasklist 那一路即全机进程），只在轮次不可信时用来回答「这个 pid 还在不在」：
 // 进程真死了照样淘汰，只是不再因为「这轮认不出它是谁」而淘汰。
 function createEmptyProcessScan() {
-  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
+  return { zcode: 0, claude: 0, opencode: 0, dsh: 0, pi: 0, kimi: 0, qoder: 0, codex: 0, grok: 0, zcodePids: new Set(), claudePids: new Set(), claudeDesktopPids: new Set(), claudeSurfaceByPid: new Map(), opencodePids: new Set(), opencodeEnginePids: new Set(), opencodeServePids: new Set(), dshPids: new Set(), dshEnginePids: new Set(), dshDesktopHostPids: new Set(), dshProfileByPid: new Map(), piPids: new Set(), kimiPids: new Set(), kimiEnginePids: new Set(), kimiDesktopPids: new Set(), kimiSurfaceByPid: new Map(), qoderPids: new Set(), codexPids: new Set(), codexEnginePids: new Set(), grokPids: new Set(), ppidByPid: new Map(), countsAuthoritative: false, seenPids: new Set() };
 }
 
 // Claude 桌面形态的镜像路径分型。桌面壳是 MSIX 应用（包名 Claude，真机
@@ -1080,6 +1108,7 @@ function parseTasklistCsv(stdout) {
         // Electron helper child process, skip
       } else {
         result.zcode += 1;
+        if (pid) result.zcodePids.add(pid);
       }
     } else if (bucket === "claude") {
       // claude.exe is a multi-call binary: the interactive session spawns
@@ -2545,6 +2574,10 @@ export function createAgentMetricsCollector(options = {}) {
         if (counts.countsAuthoritative === true) {
           lastTrustedScan = counts;
           lastTrustedScanTime = nowFn();
+          // 判决先于刷新：判决要读的是「还原进来的旧锚」，刷新会把锚改写成
+          // 本轮扫描——顺序反了就永远比不出「旧 run 是否还活着」。
+          resolvePendingRunVerdicts(counts);
+          refreshRunAnchors(counts);
         }
         cachedProcessCounts = counts;
         // Stamped where the data lands, not when the probe started, so the age
@@ -2900,6 +2933,102 @@ export function createAgentMetricsCollector(options = {}) {
     metricsSnapshotDirty = true;
   }
 
+  // ── 运行锚（run anchor）──────────────────────────────────────────
+  // 端点的「一次运行」= 其进程家族当前活着的这批 pid。锚记的是最近一轮可信扫描
+  // 看到的家族 pid 集（RUN_ANCHOR_SCOPE 决定每个端点对哪个集合认家族）：家族
+  // 全灭过宽限即全账清零、下次启动从 0 计；锚随快照落盘，relay 重启后由还原
+  // 的旧锚在首轮可信扫描上做「续账 or 重开」判决——判决读的是旧锚，必须先于
+  // refreshRunAnchors 的改写执行（见 land() 内的顺序注释）。
+  const runAnchors = new Map(); // endpointId -> Set(pid)：本轮运行认下的家族 pid
+  const pendingRunVerdicts = new Map(); // endpointId -> Set(pid)：还原的旧锚，等首轮可信扫描
+  // Claude 退役账：会话行消亡（正常退出过窗或 PID 被复用）时把行累计并入这个
+  // 端点级累加器，卡片聚合 = 活行 + 退役账，行的历史不随行消亡。与端点账同生
+  // 共死：claude 家族全灭清零时直接归零（不并账——行删、账清，各自归零即可）。
+  const claudeRetiredLedger = {
+    requests: 0,
+    activeDurationMs: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cachedTokens: 0,
+    lastTtftMs: null,
+    lastSeen: null,
+  };
+
+  function absorbClaudeRetiredLedger(session) {
+    claudeRetiredLedger.requests += session.requests || 0;
+    claudeRetiredLedger.activeDurationMs += session.activeDurationMs || 0;
+    claudeRetiredLedger.promptTokens += session.promptTokens || 0;
+    claudeRetiredLedger.completionTokens += session.completionTokens || 0;
+    claudeRetiredLedger.cachedTokens += session.cachedTokens || 0;
+    if (typeof session.lastTtftMs === "number") {
+      claudeRetiredLedger.lastTtftMs = session.lastTtftMs;
+    }
+    if (typeof session.lastSeen === "number"
+      && (claudeRetiredLedger.lastSeen === null || session.lastSeen > claudeRetiredLedger.lastSeen)) {
+      claudeRetiredLedger.lastSeen = session.lastSeen;
+    }
+  }
+
+  // 端点全账清零：原位重置（保住对象身份，在途请求/看板持有的引用随之归零），
+  // claude 连会话行与退役账一起清。实例桶不清——行有独立的生死机制（见
+  // settleAndResetRunAccount 注释），恢复的旧行（无活 pid）由逐行淘汰收走。
+  // sparkWindowPoints 是视窗设置不是账目，保留。触发方一律自己负责
+  //「可信轮 + 过宽限」的门，这里只管清。
+  function resetEndpointRunAccount(id) {
+    const state = endpointStates[id];
+    if (state === undefined) return;
+    Object.assign(state, createAggregateState(state.sparkWindowPoints));
+    if (id === "claude") {
+      claudeSessions.clear();
+      sessionStabilitySeq.clear();
+      reportedChainStates.clear();
+      claudeRetiredLedger.requests = 0;
+      claudeRetiredLedger.activeDurationMs = 0;
+      claudeRetiredLedger.promptTokens = 0;
+      claudeRetiredLedger.completionTokens = 0;
+      claudeRetiredLedger.cachedTokens = 0;
+      claudeRetiredLedger.lastTtftMs = null;
+      claudeRetiredLedger.lastSeen = null;
+    }
+    markMetricsDirty();
+  }
+
+  // 每轮可信扫描刷新锚：家族 pid 集与锚不同即改写（快照随之落盘）。空集也是
+  // 一次合法改写——家族全灭后锚指向空集，落盘的空锚在下次 relay 重启时判
+  // 「没有活锚」→ 还原的零账照旧归零，语义自洽。
+  function refreshRunAnchors(counts) {
+    for (const [id, scopeKey] of Object.entries(RUN_ANCHOR_SCOPE)) {
+      const pids = counts[scopeKey];
+      if (!(pids instanceof Set)) continue;
+      const anchor = runAnchors.get(id);
+      const unchanged = anchor !== undefined && anchor.size === pids.size
+        && [...pids].every((pid) => anchor.has(pid));
+      if (unchanged) continue;
+      runAnchors.set(id, new Set(pids));
+      markMetricsDirty();
+    }
+  }
+
+  // 还原锚的续账判决（只在可信轮跑）：旧锚里任一 pid 还在本轮家族集里 → 同一
+  // 次运行还在，账续着；一个都不在（或没有可用家族集）→ 旧运行已终结，还原
+  // 进来的账整体归零。判决一次性：无论结果如何都出列，之后交给常规路径。
+  function resolvePendingRunVerdicts(counts) {
+    if (pendingRunVerdicts.size === 0) return;
+    for (const [id, anchorPids] of pendingRunVerdicts) {
+      pendingRunVerdicts.delete(id);
+      const scopeKey = RUN_ANCHOR_SCOPE[id];
+      const livePids = scopeKey !== undefined ? counts[scopeKey] : undefined;
+      const continuing = livePids instanceof Set
+        && [...anchorPids].some((pid) => livePids.has(pid));
+      if (continuing) {
+        runAnchors.set(id, new Set(livePids));
+        markMetricsDirty();
+        continue;
+      }
+      resetEndpointRunAccount(id);
+    }
+  }
+
   function serializeMetricsSnapshot(now) {
     const endpoints = {};
     for (const [id, state] of Object.entries(endpointStates)) {
@@ -2925,7 +3054,28 @@ export function createAgentMetricsCollector(options = {}) {
         return row;
       });
     }
-    return { version: METRICS_SNAPSHOT_VERSION, savedAt: now, endpoints, instances };
+    // 运行锚随账落盘：relay 重启后由还原的旧锚在首轮可信扫描上判「续账 or
+    // 重开」（见 pendingRunVerdicts）。claude 退役账是端点账的一部分，同车落盘。
+    const runPids = {};
+    for (const [id, pids] of runAnchors) {
+      runPids[id] = [...pids];
+    }
+    return {
+      version: METRICS_SNAPSHOT_VERSION,
+      savedAt: now,
+      endpoints,
+      instances,
+      runPids,
+      claudeRetiredLedger: {
+        requests: claudeRetiredLedger.requests,
+        activeDurationMs: claudeRetiredLedger.activeDurationMs,
+        promptTokens: claudeRetiredLedger.promptTokens,
+        completionTokens: claudeRetiredLedger.completionTokens,
+        cachedTokens: claudeRetiredLedger.cachedTokens,
+        lastTtftMs: claudeRetiredLedger.lastTtftMs,
+        lastSeen: claudeRetiredLedger.lastSeen,
+      },
+    };
   }
 
   function persistMetricsSnapshot(now = nowFn()) {
@@ -2992,6 +3142,29 @@ export function createAgentMetricsCollector(options = {}) {
           instMap.set(row.id, entry);
         }
       }
+    }
+    // 还原的运行锚不直接当活锚：进 pendingRunVerdicts，等首轮可信扫描判
+    // 「旧 run 还活着（任一锚 pid 在本轮家族集里）→ 续账；全灭 → 重开」。
+    // 判决在 land() 里跑，先于 refreshRunAnchors 改写锚（见其顺序注释）。
+    // 空锚照判：锚为空的端点还原的零账判「重开」，归零操作是幂等的。
+    if (raw.runPids && typeof raw.runPids === "object") {
+      for (const id of Object.keys(endpointStates)) {
+        const arr = raw.runPids[id];
+        if (!Array.isArray(arr)) continue;
+        const pids = new Set(arr.filter((pid) => Number.isFinite(pid)));
+        pendingRunVerdicts.set(id, pids);
+      }
+    }
+    // claude 退役账还原：字段级防御，坏值退化为 0/null，不抛不信任形状。
+    const ledger = raw.claudeRetiredLedger;
+    if (ledger && typeof ledger === "object") {
+      claudeRetiredLedger.requests = snapshotFinite(ledger.requests);
+      claudeRetiredLedger.activeDurationMs = snapshotFinite(ledger.activeDurationMs);
+      claudeRetiredLedger.promptTokens = snapshotFinite(ledger.promptTokens);
+      claudeRetiredLedger.completionTokens = snapshotFinite(ledger.completionTokens);
+      claudeRetiredLedger.cachedTokens = snapshotFinite(ledger.cachedTokens);
+      claudeRetiredLedger.lastTtftMs = snapshotNullableNumber(ledger.lastTtftMs);
+      claudeRetiredLedger.lastSeen = snapshotNullableNumber(ledger.lastSeen);
     }
     // Liveness reconciliation is deliberately NOT repeated here: the first
     // getAgentsStatus read already evicts rows whose owning PID is dead (the
@@ -3341,6 +3514,9 @@ export function createAgentMetricsCollector(options = {}) {
       if (existing.token !== null) {
         existing.ended = true;
         existing.lastSeen = now;
+        // 退役账吸收：旧会话的累计不随行删除消失，并入端点级累加器，聚合
+        //（活行 + 退役账）保持不变。占位行（token === null）计数全 0，免吸收。
+        absorbClaudeRetiredLedger(existing);
       }
       claudeSessions.delete(key);
       // A recycled PID is a new reporter process: its batch seqs restart at
@@ -3653,6 +3829,9 @@ export function createAgentMetricsCollector(options = {}) {
           s.lastSeen = now;
         } else {
           if (now - s.lastSeen > ENDED_DISPLAY_MS) {
+            // 退役账吸收：行到期清除前把累计并入端点级累加器。占位行与空行
+            // 计数为 0，吸收是加 0 的空操作，无需单独豁免。
+            absorbClaudeRetiredLedger(s);
             claudeSessions.delete(key);
             sessionStabilitySeq.delete(key);
             reportedChainStates.delete(key);
@@ -3723,8 +3902,10 @@ export function createAgentMetricsCollector(options = {}) {
     // its banner must fold now instead of lingering until the idle fault TTL.
     // lastError history is kept — only the active latch is ended.
     // 「已工作时间」同属本次运行期：进程全灭（过同一道宽限）即清零，下次启动
-    // 从 0 重计；totalRequests/tokens 等终身累计量不动（2026-10-04 报障：
-    // 该计数自快照持久化后永不清零，关闭再开接着旧值走）。
+    // 从 0 重计。本函数只结算活动量（在飞请求、挂起故障、进行时标识）——
+    // 累计量（请求数/tokens/样本窗/身份/故障史）的重置在结算之外单独做
+    //（settleAndResetRunAccount），因为它还收走随账而生的行（claude 会话行、
+    // 退役账），这些不归逐实例行的结算调用点管。
     function settleAbandonedAggregateState(state, processCount) {
       if (processCount > 0) return;
       const idleSince = state.activeWallStart ?? state.lastRequestAt ?? now;
@@ -3747,17 +3928,55 @@ export function createAgentMetricsCollector(options = {}) {
       state.activeWallClockMs = 0;
     }
 
+    // 端点级全账重置（run zeroing）：与 settleAbandonedAggregateState 同门
+    //（可信轮 + 家族全灭）同宽限（3s），过线即把「本次运行」的账整体归零
+    //——请求数、tokens、已工作时间、折线样本、模型/渠道身份、lastSeen、故障
+    // 史，及随账而生的 claude 会话行与退役账。实例桶不在此清：实例行有自己
+    // 的生死机制（pid 规则、desktopGen 代际、家族连失判定），且 run 判决
+    //（resolvePendingRunVerdicts）路径上「新代流量先到、判决后到」时新代行
+    // 必须存活；恢复的旧实例行（无活 pid）由既有逐行淘汰自行收走。
+    function settleAndResetRunAccount(id, processCount) {
+      if (processCount > 0) return;
+      const state = endpointStates[id];
+      let idleSince = state.activeWallStart ?? state.lastRequestAt;
+      if (idleSince === null && id === "claude" && claudeSessions.size > 0) {
+        // per-launch 会话流量只落会话行、不进端点聚合态：宽限锚点退到会话行
+        // 的最近活动，否则 claude 的账永远等不到过线的一轮。
+        for (const s of claudeSessions.values()) {
+          if (typeof s.lastSeen === "number" && (idleSince === null || s.lastSeen > idleSince)) {
+            idleSince = s.lastSeen;
+          }
+        }
+      }
+      if (idleSince === null) idleSince = now;
+      if (now - idleSince <= PROCESS_GONE_ACTIVE_REQUEST_TTL_MS) return;
+      // 幂等闸：全零态重跑一整圈重置是浪费（多数轮看板读起来端点都静止）。
+      const hadAccount = state.totalRequests > 0 || state.activeRequests > 0
+        || state.lastRequestAt !== null || state.lastModel !== null;
+      const hasClaudeRows = id === "claude"
+        && (claudeSessions.size > 0 || claudeRetiredLedger.requests > 0
+          || claudeRetiredLedger.promptTokens > 0 || claudeRetiredLedger.completionTokens > 0
+          || claudeRetiredLedger.activeDurationMs > 0);
+      if (!hadAccount && !hasClaudeRows) {
+        // 仍需 settle：恢复自旧快照的活动量（activeFaults 等）不走 hadAccount。
+        settleAbandonedAggregateState(state, 0);
+        return;
+      }
+      settleAbandonedAggregateState(state, 0);
+      resetEndpointRunAccount(id);
+    }
+
     // 只在完整轮结算：不完整轮的零进程数是「没看见」，不是「进程没了」。
     if (countsTrusted) {
-      settleAbandonedAggregateState(zcodeState, procCounts.zcode || 0);
-      settleAbandonedAggregateState(dshState, procCounts.dsh || 0);
-      settleAbandonedAggregateState(piState, procCounts.pi || 0);
-      settleAbandonedAggregateState(kimiState, procCounts.kimi || 0);
-      settleAbandonedAggregateState(qoderState, procCounts.qoder || 0);
-      settleAbandonedAggregateState(codexState, procCounts.codex || 0);
-      settleAbandonedAggregateState(opencodeState, procCounts.opencode || 0);
-      settleAbandonedAggregateState(grokState, procCounts.grok || 0);
-      settleAbandonedAggregateState(claudeState, procCounts.claude || 0);
+      settleAndResetRunAccount("zcode", procCounts.zcode || 0);
+      settleAndResetRunAccount("dsh", procCounts.dsh || 0);
+      settleAndResetRunAccount("pi", procCounts.pi || 0);
+      settleAndResetRunAccount("kimi", procCounts.kimi || 0);
+      settleAndResetRunAccount("qoder", procCounts.qoder || 0);
+      settleAndResetRunAccount("codex", procCounts.codex || 0);
+      settleAndResetRunAccount("opencode", procCounts.opencode || 0);
+      settleAndResetRunAccount("grok", procCounts.grok || 0);
+      settleAndResetRunAccount("claude", procCounts.claude || 0);
     }
 
     // Instance housekeeping mirrors the endpoint-level one: settle orphans,
@@ -4200,6 +4419,17 @@ export function createAgentMetricsCollector(options = {}) {
       // Claude now follows the same public instance contract as Kimi. The
       // legacy sessions field remains above for older panel consumers.
       instances: claudeSessionsFormatted,
+      // 退役账：已消亡会话行的累计（退出过窗或 PID 复用吸收而来）。面板的全局
+      // 汇总 = 活行 + 退役账；claude 家族全灭时随端点账一起归零。
+      retiredMetrics: {
+        requests: claudeRetiredLedger.requests,
+        activeDurationMs: claudeRetiredLedger.activeDurationMs,
+        promptTokens: claudeRetiredLedger.promptTokens,
+        completionTokens: claudeRetiredLedger.completionTokens,
+        cachedTokens: claudeRetiredLedger.cachedTokens,
+        lastTtftMs: claudeRetiredLedger.lastTtftMs,
+        lastSeen: claudeRetiredLedger.lastSeen,
+      },
       // Model fields ride the aggregate claude tracker bucket (resident
       // /v1/messages traffic, UA-sniffed agentId "claude") so the panel's
       // auto-route chain indicator works on the claude card the same way it

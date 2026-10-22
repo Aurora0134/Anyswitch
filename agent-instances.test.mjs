@@ -244,20 +244,25 @@ describe("per-instance aggregate tracking", () => {
 
   it("expires an idle instance past the TTL but keeps the aggregate history", async () => {
     let t = 1000;
-    const collector = testCollector({ nowFn: () => t });
+    // pi 进程存活：本例验证的是实例行空闲 TTL，不是 run 清零——零进程夹具
+    // 会让 run zeroing 在 TTL 之外把端点账先收走，聚合史就保不住了。
+    const piExec = (cmd, opts, cb) =>
+      cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\pi\\bin\\main.js,node.exe,4321\r\n");
+    const collector = testCollector({ execFn: piExec, nowFn: () => t });
     const req = collector.startRequest({ agentId: "pi", instanceId: "pi-old", model: "m1" });
     req.recordEnd({ status: 200, usage: { prompt_tokens: 5, completion_tokens: 2 } });
 
     let pi = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
-    assert.equal(pi.instances.length, 1);
+    assert.ok(pi.instances.some((i) => i.id === "pi-old"), "the idle instance is listed");
 
     t = 1000 + 10 * 60 * 1000; // exactly at TTL boundary — still listed
     pi = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
-    assert.equal(pi.instances.length, 1);
+    assert.ok(pi.instances.some((i) => i.id === "pi-old"), "at the TTL boundary the row is still there");
 
     t += 1; // past the TTL
     pi = (await collector.getAgentsStatus()).find((a) => a.id === "pi");
-    assert.deepEqual(pi.instances, []);
+    assert.ok(!pi.instances.some((i) => i.id === "pi-old"), "past the TTL the idle row expires");
+    // 存活进程的占位行（pi-4321）照旧在列：TTL 只收空闲的自定义行。
     assert.equal(pi.metrics.totalRequests, 1, "aggregate keeps the instance's history");
     assert.equal(pi.metrics.tokens.prompt, 5);
   });
