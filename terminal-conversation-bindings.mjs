@@ -11,11 +11,12 @@
 //      跃胜出」判定；判不出唯一者就返回 null——宁可不接，不可接错。
 //
 // 覆盖名单与 session-scan.mjs 的 RESUME_COMMAND 表同一份：只有能把对话 id
-// 非交互地传回 CLI 的端点才可接。qoder 的 --resume 无参（弹选择器）、zcode
-// 与 dsh 没有 resume 通路，三家与纯 shell 会话一律维持现状。
+// 非交互地传回 CLI 的端点才可接。qoder 认 -r <id>（无参才弹选择器），dsh /
+// zcode 的 CLI 亦有 --resume <id>，三家已随 RESUME_COMMAND 一同补齐；纯 shell
+// 会话没有可传回的对话 id，维持现状。
 //
-// resume 后是否同一对话文件：claude/kimi/grok/pi/opencode 续写原存档，绑定
-// 天然不失效；codex 若另起新 rollout，由 revive 成功后的延迟重扫
+// resume 后是否同一对话文件：claude/kimi/grok/pi/opencode/dsh/zcode/qoder 续写
+// 原存档，绑定天然不失效；codex 若另起新 rollout，由 revive 成功后的延迟重扫
 // （pickRefreshedMeta）按「复活时刻之后唯一活跃」自愈换绑。
 
 import { readFileSync } from "node:fs";
@@ -25,17 +26,23 @@ export const TERMINAL_CONVERSATION_BINDINGS_FILE = "terminal-conversation-bindin
 
 // 可按对话 id 续会的端点（参数格式见 resumeArgsFor，与 session-scan.mjs 的
 // RESUME_COMMAND 注释同源：各家 CLI 自己 --help 文档化的形态）。
-export const RESUMABLE_AGENTS = new Set(["claude", "kimi", "pi", "opencode", "codex", "grok"]);
+export const RESUMABLE_AGENTS = new Set(["claude", "kimi", "pi", "opencode", "codex", "grok", "dsh", "zcode", "qoder"]);
 
 // 追加在 launch.args 末尾的续会参数。pi 认存档文件路径（同 RESUME_COMMAND 里
-// 的 meta.file），其余五家认对话 id；codex 是子命令形态（codex resume <id>）。
-// 缺续会所需字段（如 pi 绑定没有 file）返回 null——接不出就不接。
+// 的 meta.file），其余各家认对话 id；codex 是子命令形态（codex resume <id>）。
+// 这里是「追加片段」语境，不是 RESUME_COMMAND 的「独立可跑整句」语境：端点固定
+// 参数已在 launch.args 里，dsh 不再带 --profile（带上会撞 dsh 启动器的
+// 「select a profile only once」）。缺续会所需字段（如 pi 绑定没有 file）返回
+// null——接不出就不接。
 const RESUME_ARGS = {
   claude: (binding) => ["--resume", binding.conversationId],
   kimi: (binding) => ["--session", binding.conversationId],
   grok: (binding) => ["--resume", binding.conversationId],
   codex: (binding) => ["resume", binding.conversationId],
   opencode: (binding) => ["--session", binding.conversationId],
+  dsh: (binding) => ["--resume", binding.conversationId],
+  zcode: (binding) => ["--resume", binding.conversationId],
+  qoder: (binding) => ["--resume", binding.conversationId],
   pi: (binding) => (typeof binding.file === "string" && binding.file !== "" ? ["--session", binding.file] : null),
 };
 

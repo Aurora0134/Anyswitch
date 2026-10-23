@@ -12174,7 +12174,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
     });
   });
 
-  it("不支持续会的 agent（qoder）：原样复活，不扫描不写绑定", async () => {
+  it("qoder：进覆盖名单后复活带续会参数并落绑定（原样复活已成历史）", async () => {
     const home = mkTestDir("anyswitch-revive-qoder-home-");
     const exe = join(home, ".qoder", "bin", "qodercli", "qodercli.exe");
     mkdirSync(dirname(exe), { recursive: true });
@@ -12197,10 +12197,10 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
     const args = restarts[0].body.launch.args;
     assert.deepEqual(args.slice(0, 6), ["/d", "/c", "chcp", "65001", ">nul", "&"]);
     assert.equal(args[6], exe, "launch 保持原组装");
-    assert.equal(args.length, 7, "qoder 没有可定向的续会参数，一个都不加");
-    assert.equal(scanCalls, 0, "不在覆盖名单就不起扫描");
-    assert.equal(scheduled.length, 0);
-    assert.equal(readTerminalBindings(root), null);
+    assert.deepEqual(args.slice(7), ["--resume", "q-1"], "qoder 的续会参数按追加片段接上（不带任何固定参数）");
+    assert.equal(scanCalls, 1, "覆盖名单内且未绑定：起扫描");
+    assert.equal(scheduled.length, 1, "带 resume 复活：布自愈重扫");
+    assert.equal(readTerminalBindings(root)["5e55b006"].conversationId, "q-1", "扫到即绑");
   });
 });
 
@@ -12257,7 +12257,7 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
       sessions: [
         { id: "t-bound", label: "k", cwd, shell: "cmd", pid: 1, status: "running", agentId: "kimi", createdAt: now - 60_000 },
         { id: "t-exited", label: "k2", cwd, shell: "cmd", pid: 2, status: "exited", agentId: "kimi", createdAt: now - 60_000 },
-        { id: "t-qoder", label: "q", cwd, shell: "cmd", pid: 3, status: "running", agentId: "qoder", createdAt: now - 60_000 },
+        { id: "t-uncovered", label: "u", cwd, shell: "cmd", pid: 3, status: "running", agentId: "uncovered-agent", createdAt: now - 60_000 },
         { id: "t-shell", label: "s", cwd, shell: "cmd", pid: 4, status: "running", createdAt: now - 60_000 },
       ],
       scanAgentConversations: async () => {
@@ -12271,7 +12271,7 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
       assert.equal(res.statusCode, 200);
     }
     await flushAsyncSideEffects();
-    assert.equal(kimiScans, 0, "已绑定、已退出、不支持、纯外壳四类都不扫");
+    assert.equal(kimiScans, 0, "已绑定、已退出、名单外、纯外壳四类都不扫");
     // 换一个未绑定的 running kimi 会话进来：第一轮列表只扫一次，防抖窗口内
     // 的后续列表不重复扫。
     const router2 = listRouter({

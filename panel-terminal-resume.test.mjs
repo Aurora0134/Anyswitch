@@ -106,7 +106,7 @@ function withFakeAgents(fn) {
 }
 
 describe("续接历史会话（terminal agent-sessions + resume）", () => {
-  it("六个端点：按模板重建的续接参数随 launch 转发，env/label 与普通启动同源", async () => {
+  it("九个端点：按模板重建的续接参数随 launch 转发，env/label 与普通启动同源", async () => {
     await withFakeAgents(async (cwd) => {
       const expected = {
         claude: ["--resume", SESSION_ID],
@@ -115,6 +115,10 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
         opencode: ["--session", SESSION_ID],
         codex: ["resume", SESSION_ID],
         grok: ["--resume", SESSION_ID],
+        // dsh 模板自带的 --profile 与端点固定参数同值，合并去重后恰一次。
+        dsh: ["--profile", "dsh-tui", "--resume", SESSION_ID],
+        zcode: [fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url)), "--resume", SESSION_ID],
+        qoder: ["--resume", SESSION_ID],
       };
       for (const [endpoint, tail] of Object.entries(expected)) {
         const root = mkTestDir("anyswitch-resume-route-root-");
@@ -140,25 +144,10 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
     });
   });
 
-  it("不支持续接的端点返回 400 resume-unsupported，不转发", async () => {
+  it("resume 端点与 agentId 不配对返回 400 resume-invalid，不转发", async () => {
     await withFakeAgents(async (cwd) => {
-      for (const endpoint of ["dsh", "zcode", "qoder"]) {
-        const root = mkTestDir("anyswitch-resume-route-root-");
-        const { router, calls } = resumeRouter({ root });
-        const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
-          agentId: endpoint,
-          cwd,
-          resume: { endpoint, id: SESSION_ID },
-        });
-        await router.handle(req, res);
-        assert.equal(res.statusCode, 400, `${endpoint} 判不支持`);
-        assert.equal(json().ok, false);
-        assert.equal(json().code, "resume-unsupported", `${endpoint} 回机器可判的 code`);
-        assert.match(json().error, /[\u4e00-\u9fff]/, `${endpoint} 的文案面向用户`);
-        assert.equal(calls.length, 0, `${endpoint} 不转发给 terminal-host`);
-      }
-      // 可续接的 agentId 配上不支持续接的 resume.endpoint：同样判不支持，
-      // 不能拿 kimi 的执行体拼一条不存在的续接命令。
+      // 可续接的 agentId 配上另一家的 resume.endpoint：不能拿 kimi 的执行体
+      // 拼一条 dsh 的续接命令——归到身份配对错误（resume-invalid），也不转发。
       const root = mkTestDir("anyswitch-resume-route-root-");
       const { router, calls } = resumeRouter({ root });
       const { req, res, json } = fakeReqRes("/panel/api/terminal/agent-sessions", "POST", {
@@ -168,7 +157,9 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
       });
       await router.handle(req, res);
       assert.equal(res.statusCode, 400);
-      assert.equal(json().code, "resume-unsupported");
+      assert.equal(json().ok, false);
+      assert.equal(json().code, "resume-invalid");
+      assert.match(json().error, /不属于这个 Agent/);
       assert.equal(calls.length, 0);
     });
   });
@@ -367,8 +358,8 @@ describe("内切切换会话（terminal sessions switch）", () => {
   it("目标端点不可续接/不在册、resume 形状不合法：400 不转发", async () => {
     await withFakeAgents(async (cwd) => {
       const cases = [
-        // 组装失败（dsh 不支持续接）：走 catch 的原有形状——code 机器可判，error 是组装错误原文
-        { resume: { endpoint: "dsh", id: SESSION_ID }, expectCode: "resume-unsupported", machine: false },
+        // 组装失败（身份值带 cmd 元字符）：走 catch 的原有形状——code 机器可判，error 是组装错误原文
+        { resume: { endpoint: "dsh", id: "a&calc" }, expectCode: "resume-invalid", machine: false },
         // 路由级拒换（M12-A 三处 400）：error 即机器码本身，零文案——连字符族让前端门接住落批准句
         { resume: { endpoint: "kimi" }, expectCode: "resume-invalid", machine: true },
         { resume: { endpoint: "kimi", id: "" }, expectCode: "resume-invalid", machine: true },

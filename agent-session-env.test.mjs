@@ -448,7 +448,9 @@ test("未知 agentId 与缺失/不存在的工作目录都报错，不静默回�
 const RESUME_SESSION_ID = "3f2b8c1e-9a44-4d0b-8f6e-1c2d3e4f5a6b";
 const RESUME_FILE = "C:\\Users\\someone\\.pi\\sessions\\3f2b8c1e.jsonl";
 
-// 每个端点的续接参数（模板去掉命令名之后的部分）。
+// 每个端点的续接参数（模板去掉命令名之后的部分，含端点固定参数——dsh 的
+// --profile 与 zcode 的 CLI launcher 路径都在固定段）。
+const ZCODE_CLI_LAUNCHER_PATH = fileURLToPath(new URL("./zcode-cli-launcher.mjs", import.meta.url));
 const RESUME_ARGS_BY_ENDPOINT = {
   claude: ["--resume", RESUME_SESSION_ID],
   kimi: ["--session", RESUME_SESSION_ID],
@@ -456,9 +458,14 @@ const RESUME_ARGS_BY_ENDPOINT = {
   opencode: ["--session", RESUME_SESSION_ID],
   codex: ["resume", RESUME_SESSION_ID],
   grok: ["--resume", RESUME_SESSION_ID],
+  // dsh 模板自带 --profile dsh-tui（复制条要独立可跑），与固定参数同值，
+  // 合并时去重——最终命令行里 profile 恰好一次。
+  dsh: ["--profile", "dsh-tui", "--resume", RESUME_SESSION_ID],
+  zcode: [ZCODE_CLI_LAUNCHER_PATH, "--resume", RESUME_SESSION_ID],
+  qoder: ["--resume", RESUME_SESSION_ID],
 };
 
-test("续接：六个端点按模板重建参数，exe/env/label 与普通启动同源", () => {
+test("续接：九个端点按模板重建参数，exe/env/label 与普通启动同源", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
@@ -492,29 +499,57 @@ test("续接：六个端点按模板重建参数，exe/env/label 与普通启动
   }
 });
 
-test("续接：只有模板表内的端点支持，dsh/zcode/qoder 报 resume-unsupported", () => {
+test("续接：dsh 模板带 profile，最终命令行只出现一次（启动器拒二次选择）", () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-agent-env-"));
   try {
     const base = fakeBase(root);
-    for (const endpoint of ["dsh", "zcode", "qoder"]) {
-      assert.throws(
-        () => buildAgentSessionLaunch({
-          agentId: endpoint,
-          cwd: root,
-          token: TOKEN,
-          base,
-          resume: { endpoint, id: RESUME_SESSION_ID },
-        }),
-        (error) => {
-          assert.equal(error.code, "resume-unsupported", `${endpoint} 不在续接白名单`);
-          assert.match(error.message, /[\u4e00-\u9fff]/, `${endpoint} 报产品文案而不是机器码`);
-          return true;
-        },
-      );
-    }
+    // 复制条的命令形态要独立可跑：裸 dsh 拒绝启动，模板必须自带 profile。
+    assert.deepEqual(
+      buildAgentResumeArgs({ endpoint: "dsh", id: RESUME_SESSION_ID }).args,
+      ["--profile", "dsh-tui", "--resume", RESUME_SESSION_ID],
+    );
+    const launch = buildAgentSessionLaunch({
+      agentId: "dsh",
+      cwd: root,
+      token: TOKEN,
+      base,
+      resume: { endpoint: "dsh", id: RESUME_SESSION_ID },
+    });
+    const args = launch.launch.args;
+    assert.equal(args.filter((token) => token === "--profile").length, 1, "profile 恰好一次（dsh bin.js「select a profile only once」）");
+    const profileAt = args.indexOf("--profile");
+    assert.deepEqual(args.slice(profileAt, profileAt + 4), ["--profile", "dsh-tui", "--resume", RESUME_SESSION_ID], "profile 后紧跟 resume 目标");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("续接：file 只在模板使用它时按路径规则校验，其余端点按定位符放行", () => {
+  // 扫描器的 file 字段对多数端点是会话定位符（opencode/zcode 的
+  // 「sqlite:<db>#<id>」、grok 的百分号编码路径），不进命令行；旧契约把它们
+  // 当路径审，opencode/grok 的栏内续接整端点误判 resume-invalid。
+  assert.deepEqual(
+    buildAgentResumeArgs({ endpoint: "opencode", id: "ses_db1", file: "sqlite:C:\\db\\opencode.db#ses_db1" }).args,
+    ["--session", "ses_db1"],
+    "opencode 的 sqlite 定位符放行",
+  );
+  assert.deepEqual(
+    buildAgentResumeArgs({ endpoint: "grok", id: RESUME_SESSION_ID, file: "C:\\Users\\u\\.grok\\sessions\\C%3A%5CUsers\\01a0" }).args,
+    ["--resume", RESUME_SESSION_ID],
+    "grok 的百分号编码路径放行",
+  );
+  assert.deepEqual(
+    buildAgentResumeArgs({ endpoint: "kimi", id: RESUME_SESSION_ID, file: "C:\\a&b.jsonl" }).args,
+    ["--session", RESUME_SESSION_ID],
+    "模板不用 file 时，含 cmd 元字符的 file 不再触发拒绝",
+  );
+  // pi 的模板真把 file 拼进命令行，路径规则原样保留（危险字符/相对路径/缺失
+  // 的拒绝由既有用例覆盖，这里钉「不因放宽而漏掉」）。
+  assert.throws(
+    () => buildAgentResumeArgs({ endpoint: "pi", id: RESUME_SESSION_ID, file: "C:\\a&b.jsonl" }),
+    { code: "resume-invalid" },
+    "pi 的存档路径仍按 cmd 命令行规则严校验",
+  );
 });
 
 test("续接：非法 endpoint 与身份字段一律拒绝，不猜不回落", () => {
@@ -652,7 +687,13 @@ test("续接：带空格的存档路径整体作为一个参数交给 node-pty�
 });
 
 test("续接：纯函数可桩测，返回模板端点与重建出的参数", () => {
-  for (const [endpoint, expected] of Object.entries(RESUME_ARGS_BY_ENDPOINT)) {
+  // 纯函数只产出模板参数；launch 级期望（RESUME_ARGS_BY_ENDPOINT）另含端点
+  // 固定参数段（zcode 的 CLI launcher 路径），这里剥离后再比。
+  const PURE_RESUME_ARGS = {
+    ...RESUME_ARGS_BY_ENDPOINT,
+    zcode: ["--resume", RESUME_SESSION_ID],
+  };
+  for (const [endpoint, expected] of Object.entries(PURE_RESUME_ARGS)) {
     assert.deepEqual(
       buildAgentResumeArgs({ endpoint, id: RESUME_SESSION_ID, file: RESUME_FILE }),
       { endpoint, args: expected },
@@ -709,10 +750,6 @@ test("无 resume 字段：九端点启动参数与改造前逐位一致（冻结
 // 错误归类：身份「有问题」与「这家 CLI 不支持」是两件事，机器码要能区分，
 // 前端才能给出不同的下一步（重开会话 vs 换一个 agent）。
 test("续接错误归类：载荷/身份问题 resume-invalid，端点不支持续接 resume-unsupported", () => {
-  assert.throws(() => buildAgentResumeArgs({ endpoint: "dsh", id: RESUME_SESSION_ID }), (error) => {
-    assert.equal(error.code, "resume-unsupported", "dsh 不在模板表：端点不支持续接");
-    return true;
-  });
   assert.throws(() => buildAgentResumeArgs({ endpoint: "no-such-agent", id: RESUME_SESSION_ID }), { code: "resume-unsupported" });
   // endpoint 字段本身残缺（不是「合法端点但不支持」）：归到载荷问题。
   for (const resume of [{ id: RESUME_SESSION_ID }, { endpoint: "", id: RESUME_SESSION_ID }, { endpoint: null, id: RESUME_SESSION_ID }]) {

@@ -533,7 +533,7 @@ test("dsh: reads the concatenated-frame session container", async () => {
   assert.equal(sessions[0].project, "C:\\work\\dshproj");
   assert.equal(sessions[0].createdAt, 1788000000000);
   assert.equal(sessions[0].lastActive, 1788000003000, "last activity comes from the final frame");
-  assert.equal(sessions[0].resumeCommand, "", "dsh has no verified resume syntax");
+  assert.equal(sessions[0].resumeCommand, `dsh --profile dsh-tui --resume ${id}`, "dsh 续接带 profile（裸 dsh 拒启动，复制条要独立可跑）");
 
   const messages = await scanner.loadMessages("dsh", file);
   assert.deepEqual(
@@ -837,7 +837,7 @@ test("qoder: scans projects/ transcripts and loads messages", async () => {
   assert.equal(sessions[0].id, "00548ece-46f7-4bc8-8e63-d216659bd48e");
   assert.equal(sessions[0].title, "qoder 真实提问");
   assert.equal(sessions[0].project, "C:\\work\\qoderproj");
-  assert.equal(sessions[0].resumeCommand, "");
+  assert.equal(sessions[0].resumeCommand, "qodercli --resume 00548ece-46f7-4bc8-8e63-d216659bd48e");
 
   const messages = await scanner.loadMessages("qoder", sessions[0].file);
   assert.deepEqual(
@@ -1356,7 +1356,7 @@ test("zcode: scans the session table read-only and loads messages", async () => 
   assert.equal(sessions[0].file, `sqlite:${dbPath}#sess_db1`);
   assert.equal(sessions[0].createdAt, 1788000000000);
   assert.equal(sessions[0].lastActive, 1788000009000);
-  assert.equal(sessions[0].resumeCommand, "", "zcode resume syntax not verified");
+  assert.equal(sessions[0].resumeCommand, "zcode --resume sess_db1", "zcode CLI 自带 --resume <sessionId>（session_<hex> 即 db 主键）");
 
   const messages = await scanner.loadMessages("zcode", sessions[0].file);
   // The turn's tool calls keep their real names ([Tool: Bash], never

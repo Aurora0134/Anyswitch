@@ -252,13 +252,15 @@ function claudeBypassArg(agentId, enabled) {
 //
 // 请求里只带会话身份（endpoint / id / file），命令行一律由 session-scan 的
 // RESUME_COMMAND 模板重建——客户端发来的命令原文、参数、launch 一概不接。
-// 模板同时是「这家 CLI 支持续接吗」的唯一判据：不在表内的端点（dsh / zcode /
-// qoder）报 resume-unsupported，前端据此直接提示，而不是起一个空对话。
+// 模板同时是「这家 CLI 支持续接吗」的唯一判据：不在表内的端点报
+// resume-unsupported，前端据此直接提示，而不是起一个空对话。
 //
 // 身份值会原样落进 cmd 命令行（node-pty 只给含空格的参数套引号），而引号挡不
 // 住 %VAR% 展开，也承不住引号内的转义：& | < > ^ " % 与控制字符一律判非法。
 // 会话 id 额外不许含空白——它是单个 token；存档路径（pi）可以含空格，整体作为
-// 一个参数交给 node-pty，由它加引号。
+// 一个参数交给 node-pty，由它加引号。file 的路径规则只约束「模板真把它拼进
+// 命令行」的端点（pi）；其余端点的 file 是扫描器的会话定位符（sqlite:<db>#<id>、
+// 百分号编码路径），不进命令行，按元数据放行。
 const RESUME_FIELDS = new Set(["endpoint", "id", "file"]);
 const RESUME_ID_UNSAFE = /[\s"&|<>^%]/;
 const RESUME_FILE_UNSAFE = /["&|<>^%]/;
@@ -302,21 +304,47 @@ export function buildAgentResumeArgs(resume) {
   if (resume.file !== undefined && resume.file !== null) {
     if (typeof resume.file !== "string") throw resumeInvalid();
     file = resume.file.trim();
-    if (!file || file.length > RESUME_ARG_MAX_LENGTH || !isAbsolute(file) || RESUME_FILE_UNSAFE.test(file) || RESUME_CONTROL_CHARS.test(file)) {
-      throw resumeInvalid();
-    }
   }
   const tokens = String(template({ id: RESUME_ID_SENTINEL, file: RESUME_FILE_SENTINEL })).trim().split(/\s+/);
   // 模板首 token 是命令名：执行体已由 agentId 解析成绝对路径（归属链与安装位
   // 都不该由一条历史记录决定），这里只取它后面的参数。
   const [, ...args] = tokens;
-  const rebuilt = args.map((token) => {
-    // 模板要 file 而请求没给（pi 的存档路径）：身份不全，不猜。
-    if (token.includes(RESUME_FILE_SENTINEL) && !file) throw resumeInvalid();
-    return token.replaceAll(RESUME_ID_SENTINEL, id).replaceAll(RESUME_FILE_SENTINEL, file);
-  });
+  const templateUsesFile = args.some((token) => token.includes(RESUME_FILE_SENTINEL));
+  // 模板要 file 而请求没给＝身份不全；要了才按路径规则严校验——它将原样落进
+  // cmd 命令行。不要 file 的端点，file 只是随行元数据，定位符形态不是路径，
+  // 不拿路径规则审它（opencode 的 sqlite 定位符、grok 的百分号编码路径在此
+  // 放行，不再误判 resume-invalid）。
+  if (templateUsesFile) {
+    if (!file || file.length > RESUME_ARG_MAX_LENGTH || !isAbsolute(file) || RESUME_FILE_UNSAFE.test(file) || RESUME_CONTROL_CHARS.test(file)) {
+      throw resumeInvalid();
+    }
+  }
+  const rebuilt = args.map((token) => token.replaceAll(RESUME_ID_SENTINEL, id).replaceAll(RESUME_FILE_SENTINEL, file));
   if (rebuilt.length === 0) throw resumeInvalid();
   return { endpoint, args: rebuilt };
+}
+
+// 续接参数并进最终命令行时，去掉与端点固定参数完全相同的「--flag value」对
+// （见 buildAgentSessionLaunch 内的调用注释）。只认成对形态——flag 后跟一个
+// 非选项值，且固定参数里同位置出现同一对；单 token 的重复不在此列（没有哪家的
+// 启动器对它报错）。
+function dropDuplicateFlagPairs(fixedArgs, resumeArgs) {
+  if (resumeArgs.length === 0) return resumeArgs;
+  const merged = [];
+  for (let i = 0; i < resumeArgs.length; i++) {
+    const flag = resumeArgs[i];
+    const value = resumeArgs[i + 1];
+    const at = typeof value === "string" ? fixedArgs.indexOf(flag) : -1;
+    if (
+      at !== -1 && flag.startsWith("--") && !value.startsWith("--")
+      && fixedArgs[at + 1] === value
+    ) {
+      i += 1;
+      continue;
+    }
+    merged.push(flag);
+  }
+  return merged;
 }
 
 // Everything terminal-host needs to spawn the session: a cmd /c wrapper (see
@@ -342,6 +370,13 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
     }
     resumeArgs = rebuilt.args;
   }
+  // dsh 的续接模板自带 --profile（复制到终端要能脱离面板独立跑，裸 dsh 拒绝启动），
+  // 而端点固定参数已经选过一次 profile，dsh 启动器对二次选择直接报错
+  // （bin.js "select a profile only once"）。合并时把续接参数里与固定参数完全
+  // 相同的「--flag value」对去掉：值相同语义幂等；其余端点的续接参数不含固定
+  // 参数对，逐位不变。
+  const fixedArgs = [...(target.launchArgs ?? []), ...claudeBypassArg(agentId, claudeBypassPermissions)];
+  const mergedResumeArgs = dropDuplicateFlagPairs(fixedArgs, resumeArgs);
   return {
     label: target.name,
     shell: "cmd",
@@ -362,7 +397,7 @@ export function buildAgentSessionLaunch({ agentId, cwd, port = AGENT_RELAY_PORT,
       // 续接参数排在最后：执行体与端点自带的固定参数不变，只是这条命令接着
       // 走历史对话（模板见 session-scan.mjs 的 RESUME_COMMAND）。
       file: base.ComSpec || "cmd.exe",
-      args: [...UTF8_CODEPAGE_PREFIX, executable, ...(target.launchArgs ?? []), ...(claudeBypassArg(agentId, claudeBypassPermissions)), ...resumeArgs],
+      args: [...UTF8_CODEPAGE_PREFIX, executable, ...fixedArgs, ...mergedResumeArgs],
     },
     env: buildAgentSessionEnv({ agentId, port, token, base, instanceId: instance }),
     agentId,
