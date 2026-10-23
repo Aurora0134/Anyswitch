@@ -6083,6 +6083,53 @@ describe("新版 UI 阶段 1：框架骨架（轻页头 + 左栏两级降级）"
     assert.ok(!collapseBody.includes('matchMedia("(min-width: 860px)")'),
       "快捷键无宽度门槛——栏任何窗口宽度常驻，Ctrl+\\ 全档在管");
   });
+
+  it("收展交叉淡化：收起向定宽淡出＋落态延迟＋rail-in 进场，展开向整体淡入（dsh 规格）", () => {
+    // ── JS：三个瞬态属性与 150ms 落态延迟（dsh SidebarRoot「slide＋crossfade」）──
+    for (const pin of ['const RAIL_COLLAPSING_ATTR = "data-rail-collapsing";',
+      'const RAIL_WIDEIN_ATTR = "data-rail-widein";',
+      'const RAIL_RAILIN_ATTR = "data-rail-railin";',
+      "const RAIL_SETTLE_MS = 150;", "const RAIL_RAILIN_MS = 200;"]) {
+      assert.ok(panelJs.includes(pin), `收展瞬态常量缺：${pin}`);
+    }
+    const toggleBody = panelJs.match(/function toggleRailManual\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(toggleBody.includes('root.setAttribute(RAIL_COLLAPSING_ATTR, "1")'), "收起向先挂淡出窗口");
+    const settleAt = toggleBody.indexOf("RAIL_SETTLE_MS"), attrAt = toggleBody.indexOf('root.setAttribute(RAIL_COLLAPSING_ATTR, "1")');
+    assert.ok(attrAt > -1 && settleAt > attrAt && /setTimeout\(\(\) => \{[\s\S]*?root\.setAttribute\("data-rail", next\);/.test(toggleBody),
+      "落态写进 150ms 定时器回调——淡出完成后 display:none 才隐（无硬切）");
+    assert.ok(/root\.setAttribute\("data-rail", next\);[\s\S]*?root\.setAttribute\(RAIL_RAILIN_ATTR, "1"\);/.test(toggleBody),
+      "落态同拍放 rail-in 进场，掩掉布局换装的一瞬");
+    assert.ok(toggleBody.includes('root.setAttribute(RAIL_WIDEIN_ATTR, "1")'), "展开向挂整体淡入");
+    const effBody2 = panelJs.match(/function railEffectivelyCollapsed\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(/if \(railCollapseInFlight\) return true;/.test(effBody2)
+      && effBody2.indexOf("railCollapseInFlight") < effBody2.indexOf('=== "collapsed"'),
+      "收起在飞计入有效栏态且优先于属性判（钮即刻换向；窗口内再点自然反转成 expanded）");
+    const clearBody = panelJs.match(/function railClearCollapseSequence\(\) \{([\s\S]*?)\n  \}/)[1];
+    for (const attr of ["RAIL_COLLAPSING_ATTR", "RAIL_WIDEIN_ATTR", "RAIL_RAILIN_ATTR"]) {
+      assert.ok(clearBody.includes(`root.removeAttribute(${attr})`), `中断收口摘 ${attr}`);
+    }
+    const collapseInit = panelJs.match(/function initRailCollapse\(\) \{([\s\S]*?)\n  \}/)[1];
+    assert.ok(/wideMq\.addEventListener\("change", \(\) => \{\s*\n\s*railClearCollapseSequence\(\);/.test(collapseInit),
+      "跨档自动变化先撤收起序半程序再走手动态出口");
+    // ── CSS：淡出／进场／宽度让位镜像／reduced-motion 压零 ──
+    assert.ok(panelCss.includes("@keyframes rail-wide-in { from { opacity: 0; } }"), "展开淡入关键帧在册");
+    assert.ok(panelCss.includes("@keyframes rail-rail-in { from { opacity: 0; transform: translateX(49px); } }"),
+      "rail-in 从右侧 49px 滑入（dsh 同值）");
+    const fadeRule = panelCss.match(/\[data-rail-collapsing\] \.rail > :is\(\.rail-brand, \.rail-tabs, \.rail-dir, \.rail-terminal-dir, \.rail-foot\) \{([^}]*)\}/);
+    assert.ok(fadeRule, "淡出规则在册（五个直接子块）");
+    assert.ok(fadeRule[1].includes("min-width: 192px;") && fadeRule[1].includes("opacity: 0;")
+      && fadeRule[1].includes("transition: opacity 150ms var(--ease-out);"),
+      "内容钉 192px（宽态内容宽，不折行不省略）原地淡出 150ms");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-rail-collapsing] .rail { width: 72px; padding: 8px 8px 16px; }'),
+      "淡出窗口的栏宽镜像照终态值（栏宽与淡出同帧起算，不空滑）");
+    assert.ok(panelCss.includes(':root[data-ui-version="v2"][data-rail-collapsing] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }')
+      && panelCss.includes(':root[data-ui-version="v2"][data-rail-collapsing] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }'),
+      "让位镜像同窗口起算（晚一个窗口会在栏与内容间露底）");
+    assert.ok(panelCss.includes('[data-rail-railin] .rail > .rail-foot {\n    animation: rail-wide-in 150ms'),
+      "栏底行只淡入不位移（dsh footArea 同款）");
+    assert.ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*:root\[data-ui-version="v2"\]\[data-rail-collapsing\][\s\S]{0,600}?transition: none; animation: none;/.test(panelCss),
+      "reduced-motion 压零段在册（淡化全关、直接落位）");
+  });
 });
 
 describe("设置项「运行日志」", () => {

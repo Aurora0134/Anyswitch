@@ -982,6 +982,44 @@
      防抖 → fit），动画结束后重排一次与普通改窗口大小等价，不是缺陷。 */
   :root[data-ui-version="v2"][data-rail-anim] main.layout-container { transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1), max-width 200ms cubic-bezier(0.2, 0, 0, 1); }
 
+  /* ── 收展交叉淡化（dsh SidebarRoot：Collapse is a slide plus crossfade）──
+     收起向（data-rail-collapsing，panel.js 淡出窗口 150ms）：直接子块钉住宽态内容
+     宽（192＝216−24）原地淡出——钉宽是不让标签与树行在中途折行/省略（dsh「nothing
+     reflows mid-slide」），超宽部分由栏基座 overflow-x:hidden 裁掉；栏宽与让位在
+     下方镜像段同时照终态值滑收。落态后（data-rail-railin）：收起态图标行从右侧
+     49px 滑入＋淡入，掩掉落态一瞬的布局换装；栏底行只淡入（dsh footArea 同款）。
+     展开向（data-rail-widein）：全部直接子块整体淡入。时长照 dsh：淡出 150ms /
+     rail-in 150ms / 展开淡入 200ms。三个属性都是手动收展那一次的瞬态开关，自动档
+     跨档不挂（不经 toggleRailManual），reduced-motion 由下方压零段收口。 */
+  @keyframes rail-wide-in { from { opacity: 0; } }
+  @keyframes rail-rail-in { from { opacity: 0; transform: translateX(49px); } }
+  :root[data-ui-version="v2"][data-rail-collapsing] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir, .rail-foot) {
+    min-width: 192px; opacity: 0;
+    transition: opacity 150ms var(--ease-out);
+  }
+  :root[data-ui-version="v2"][data-rail-widein] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir, .rail-foot) {
+    animation: rail-wide-in 200ms var(--ease-out) backwards;
+  }
+  :root[data-ui-version="v2"][data-rail-railin] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir) {
+    animation: rail-rail-in 150ms var(--ease-out) backwards;
+  }
+  :root[data-ui-version="v2"][data-rail-railin] .rail > .rail-foot {
+    animation: rail-wide-in 150ms var(--ease-out) backwards;
+  }
+  /* 收起向的宽度与让位镜像：照 collapsed 终态值逐项抄，两档同值不分媒体——淡出
+     窗口里 data-rail 还没落位（宽档自动态或窄档手动态 expanded 都压着 216），不抄
+     这条栏宽就停在 216 等落态、让位也会晚一个窗口才动。特异性高于基座宽档块、
+     与手动态块持平且位置更靠后。 */
+  :root[data-ui-version="v2"][data-rail-collapsing] .rail { width: 72px; padding: 8px 8px 16px; }
+  :root[data-ui-version="v2"][data-rail-collapsing] .layout-container { max-width: calc(1440px + 72px); padding-left: 96px; }
+  :root[data-ui-version="v2"][data-rail-collapsing] body.terminal-mode main.layout-container { max-width: none; padding-left: 72px; }
+  @media (prefers-reduced-motion: reduce) {
+    :root[data-ui-version="v2"][data-rail-collapsing] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir, .rail-foot),
+    :root[data-ui-version="v2"][data-rail-widein] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir, .rail-foot),
+    :root[data-ui-version="v2"][data-rail-railin] .rail > :is(.rail-brand, .rail-tabs, .rail-dir, .rail-terminal-dir),
+    :root[data-ui-version="v2"][data-rail-railin] .rail > .rail-foot { transition: none; animation: none; }
+  }
+
   /* 终端屏横向溢出永远只裁不滚：屏宽由宿主 ResizeObserver→120ms 防抖→fit 链路管理，
      任何宽度变化（栏收展、inspector 收放、拖窗口）都有一个「容器已变、xterm 仍按旧宽
      渲染」的窗口期——overflow:auto 会在这窗口期瞬时顶出一条横向滚动条吃掉 10px 高度

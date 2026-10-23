@@ -8326,7 +8326,23 @@ async function api(method, path, body) {
   // prefers-reduced-motion 一律不挂开关——拖窗口不是用户在「看收展手法」，不该跟着滑。
   const RAIL_ANIM_ATTR = "data-rail-anim";
   const RAIL_ANIM_MS = 220;
+  // ── 收展交叉淡化（dsh SidebarRoot「Collapse is a slide plus crossfade」）──
+  // 收起向不是一键落终态：先挂 data-rail-collapsing 让宽内容定宽原地淡出（150ms；
+  // CSS 镜像段同时把栏宽与让位照终态值滑收），到点才落 data-rail="collapsed"——
+  // display:none 的段头/树此刻才隐，硬切被淡出掩掉；随后 data-rail-railin 让收起态
+  // 图标行从右侧 49px 滑入进场，掩掉落态一瞬的布局换装（dsh rail-in 同款）。展开向
+  // 无落态延迟，data-rail-widein 整体淡入（dsh wide-in 同款）。三个都是手动收展
+  // 那一次的瞬态开关；自动档跨档不经 toggleRailManual，reduced-motion 在两侧都不挂。
+  const RAIL_COLLAPSING_ATTR = "data-rail-collapsing";
+  const RAIL_WIDEIN_ATTR = "data-rail-widein";
+  const RAIL_RAILIN_ATTR = "data-rail-railin";
+  const RAIL_SETTLE_MS = 150; // dsh COLLAPSE_SETTLE_MS：宽内容淡出时长＝落态延迟
+  const RAIL_RAILIN_MS = 200; // rail-in 动画 150ms＋到点摘除余量
   let railAnimTimer = null;
+  let railSettleTimer = null;
+  let railWideinTimer = null;
+  let railRailinTimer = null;
+  let railCollapseInFlight = false;
   function requestRailSlide() {
     if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const root = document.documentElement;
@@ -8338,6 +8354,9 @@ async function api(method, path, body) {
     }, RAIL_ANIM_MS);
   }
   function railEffectivelyCollapsed() {
+    // 收起淡出的 150ms 里 data-rail 还没落位，但用户已按「收起」——有效态按最终
+    // 意图先行（钮的图标/文案即刻换向，落态回调再按真值重同步，幂等）。
+    if (railCollapseInFlight) return true;
     const manual = document.documentElement.getAttribute("data-rail");
     if (manual === "collapsed") return true;
     if (manual === "expanded") return false;
@@ -8383,12 +8402,58 @@ async function api(method, path, body) {
     try { localStorage.removeItem("panel-rail-manual"); } catch {}
     return true;
   }
+  // 收起序的中断收口：淡出窗口内反悔再点、跨档自动变化，都先撤瞬态属性与定时器——
+  // 半程的 collapsing 态若不撤，落位后会残一条 72px 镜像压着手动态的展开值。
+  function railClearCollapseSequence() {
+    if (railSettleTimer) { clearTimeout(railSettleTimer); railSettleTimer = null; }
+    if (railWideinTimer) { clearTimeout(railWideinTimer); railWideinTimer = null; }
+    if (railRailinTimer) { clearTimeout(railRailinTimer); railRailinTimer = null; }
+    railCollapseInFlight = false;
+    const root = document.documentElement;
+    root.removeAttribute(RAIL_COLLAPSING_ATTR);
+    root.removeAttribute(RAIL_WIDEIN_ATTR);
+    root.removeAttribute(RAIL_RAILIN_ATTR);
+  }
+  function railReducedMotion() {
+    return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  }
   function toggleRailManual() {
+    // 淡出窗口内再点＝反悔收起：railEffectivelyCollapsed 在飞时按最终意图返真，
+    // 这里自然反转成 expanded。
     const next = railEffectivelyCollapsed() ? "expanded" : "collapsed";
-    requestRailSlide();
     try { localStorage.setItem("panel-rail-manual", next); } catch {}
-    document.documentElement.setAttribute("data-rail", next);
+    railClearCollapseSequence();
+    const root = document.documentElement;
+    requestRailSlide(); // reduced-motion 下自身不挂开关；先挂开关再写栏宽（同一帧起算过渡）
+    if (railReducedMotion() || next !== "collapsed") {
+      root.setAttribute("data-rail", next);
+      if (next === "expanded") {
+        root.setAttribute(RAIL_WIDEIN_ATTR, "1");
+        railWideinTimer = setTimeout(() => {
+          railWideinTimer = null;
+          root.removeAttribute(RAIL_WIDEIN_ATTR);
+        }, RAIL_ANIM_MS);
+      }
+      syncRailCollapseBtn();
+      return;
+    }
+    // 收起序：淡出窗口（150ms）内 data-rail 不动——栏体按宽态渲染、内容定宽淡出，
+    // 到点一次性落终态并放 rail-in 进场。
+    railCollapseInFlight = true;
+    root.setAttribute(RAIL_COLLAPSING_ATTR, "1");
     syncRailCollapseBtn();
+    railSettleTimer = setTimeout(() => {
+      railSettleTimer = null;
+      railCollapseInFlight = false;
+      root.removeAttribute(RAIL_COLLAPSING_ATTR);
+      root.setAttribute("data-rail", next);
+      syncRailCollapseBtn();
+      root.setAttribute(RAIL_RAILIN_ATTR, "1");
+      railRailinTimer = setTimeout(() => {
+        railRailinTimer = null;
+        root.removeAttribute(RAIL_RAILIN_ATTR);
+      }, RAIL_RAILIN_MS);
+    }, RAIL_SETTLE_MS);
   }
   function initRailCollapse() {
     const btn = $("railCollapseBtn");
@@ -8398,6 +8463,7 @@ async function api(method, path, body) {
     // 有效态不随宽度变，重同步是幂等空转）；跨进宽档顺带解除手动态（出口）。
     const wideMq = window.matchMedia("(min-width: 1200px)");
     wideMq.addEventListener("change", () => {
+      railClearCollapseSequence(); // 跨档属自动态变化：手动收起的半程序先撤干净
       if (wideMq.matches) releaseRailManual();
       syncRailCollapseBtn();
     });
