@@ -31,25 +31,43 @@
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
-  // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick } 在文案后追加
-  // 一个可点小字（如「查看差异」）——点中即收起 toast 再执行 onClick
+  // opts.durationMs 覆盖默认 3s 驻留；opts.action = { label, onClick }（单钮）或
+  // opts.actions = [{ label, onClick }, …]（多钮）在文案后追加可点小字——点中即
+  // 瞬时收起 toast 再执行 onClick。动效（M13，dsh 同款）：入场 -6px 滑入＋淡入
+  // 160ms（CSS 基座过渡）；驻留期满先转 1s 淡出（is-leaving）再落暗；动作点击
+  // 瞬时消失（is-gone 压掉过渡）。
   function toast(msg, isErr, opts) {
     const t = $("toast");
-    const action = opts && opts.action;
-    if (action) {
+    const actions = opts && (opts.actions || (opts.action ? [opts.action] : null));
+    if (actions) {
       t.textContent = "";
       t.append(document.createTextNode(msg));
-      const link = document.createElement("span");
-      link.className = "toast-action";
-      link.textContent = action.label;
-      link.onclick = () => { clearTimeout(t._tid); t.classList.remove("show"); action.onClick(); };
-      t.append(link);
+      for (const action of actions) {
+        if (!action) continue;
+        const link = document.createElement("span");
+        link.className = "toast-action";
+        link.textContent = action.label;
+        link.onclick = () => { dismissToast(t); action.onClick(); };
+        t.append(link);
+      }
     } else {
       t.textContent = msg;
     }
     t.className = "toast" + (isErr ? " err" : "") + " show";
     clearTimeout(t._tid);
-    t._tid = setTimeout(() => t.classList.remove("show"), (opts && opts.durationMs) || 3000);
+    t._tid = setTimeout(() => {
+      t.classList.add("is-leaving");
+      t._tid = setTimeout(() => t.classList.remove("show", "is-leaving"), 1000);
+    }, (opts && opts.durationMs) || 3000);
+  }
+
+  // 动作钮点击的瞬时收场：压掉过渡（is-gone）再摘 show——撤销/筛选引导点了就该
+  // 立刻没影，不再滑半拍；驻留期满的 1s 淡出走 is-leaving，与此路互斥。
+  function dismissToast(t) {
+    clearTimeout(t._tid);
+    t.classList.add("is-gone");
+    t.classList.remove("show", "is-leaving");
+    t._tid = setTimeout(() => t.classList.remove("is-gone"), 200);
   }
 
   // /panel/api/* 的失败文本按语言分两种身份：中文句子是为这个界面写的，可以直接
@@ -8352,7 +8370,7 @@ async function api(method, path, body) {
   let terminalRailRendered = { history: null };
   let terminalRailFetchInFlight = false;
   // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
-  // flipMode 一帧用完即复位，只有组展开/收起会置 "flip"。
+  // flipMode 一帧用完即复位，组展开/收起与归档/撤销（M13）会置 "flip"。
   let terminalRailMotionArmed = false;
   let terminalRailFlipMode = "instant";
   // 活跃终端所在组的自动展开与滚入只做一次：换活跃终端才重做，用户手动收起不被
@@ -9168,8 +9186,8 @@ async function api(method, path, body) {
   }
 
   // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新行 100ms ease-out）。
-  // 只有组展开/收起会置 flip；水位线增减、刷新、换 agent 是 resetKey，直接落位；
-  // 首次输入前、首次挂载（没有旧位置可比）、prefers-reduced-motion 都不动。
+  // 组展开/收起与归档/撤销（M13）置 flip；水位线增减、刷新、换 agent 是 resetKey，
+  // 直接落位；首次输入前、首次挂载（没有旧位置可比）、prefers-reduced-motion 都不动。
   function playTerminalRailFlip(list, before) {
     if (!before || before.size === 0) return;
     if (terminalRailFlipMode !== "flip") return;
@@ -9189,6 +9207,69 @@ async function api(method, path, body) {
       if (!delta) continue;
       row.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 200, easing: "ease-out" });
     }
+  }
+
+  // ── 归档/撤销的行退场动效（M13，dsh AnimatedRows FLIP 路径） ──
+  // 归档/撤销不再是 resetKey 瞬时消失：动作前给在册行拍快照（克隆＋视口位），重渲
+  // 后离开布局的行以幽灵克隆补进滚动层 100ms 淡出——下方行上移/落回 200ms、回填/
+  // 归位行淡入 100ms 由上面的 FLIP（flip 门）承担，组头与「展开其余 N」不在量测
+  // 范围（只量 [data-rail-term-resume] 行），天然瞬时。show 筛选下行不出布局（只是
+  // 改观感），「活着」判定让幽灵只挂真离开的那行，不误伤。
+  function terminalRailMotionEnabled() {
+    if (!terminalRailMotionArmed) return false;
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
+    return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  }
+
+  function terminalRailSnapshotRows(list) {
+    const rows = new Map();
+    if (!list || typeof list.querySelectorAll !== "function") return rows;
+    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
+      const key = row.getAttribute("data-rail-term-resume");
+      if (!key || typeof row.getBoundingClientRect !== "function" || typeof row.cloneNode !== "function") continue;
+      const rect = row.getBoundingClientRect();
+      rows.set(key, { node: row.cloneNode(true), top: rect.top, left: rect.left, width: rect.width });
+    }
+    return rows;
+  }
+
+  function terminalRailMountExitGhosts(list, host, snapshot) {
+    const alive = new Set();
+    if (typeof list.querySelectorAll === "function") {
+      for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
+        const key = row.getAttribute("data-rail-term-resume");
+        if (key) alive.add(key);
+      }
+    }
+    const hostRect = typeof host.getBoundingClientRect === "function" ? host.getBoundingClientRect() : null;
+    if (!hostRect) return;
+    for (const [key, snap] of snapshot) {
+      if (alive.has(key)) continue;
+      const ghost = snap.node;
+      if (!ghost || !ghost.style || typeof ghost.animate !== "function" || typeof host.append !== "function") continue;
+      if (ghost.classList && typeof ghost.classList.add === "function") ghost.classList.add("rail-term-ghost");
+      if (typeof ghost.setAttribute === "function") ghost.setAttribute("inert", "");
+      ghost.style.top = `${snap.top - hostRect.top + (host.scrollTop || 0)}px`;
+      ghost.style.left = `${snap.left - hostRect.left}px`;
+      ghost.style.width = `${snap.width}px`;
+      host.append(ghost);
+      ghost.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 100, easing: "ease-out", fill: "forwards" });
+      setTimeout(() => { if (typeof ghost.remove === "function") ghost.remove(); }, 110);
+    }
+  }
+
+  // 归档/撤销的统一重渲入口：快照→置 flip（下方行位移＋新行淡入）→重渲→给离开
+  // 布局的行挂幽灵。未武装（首次真实交互前）或 reduced-motion 时快照为空，只落位。
+  // 渲染后显式复位 flip：搜索态走旁路早退不经过 render 尾部的复位，这里统一收口
+  // 防止 flip 串到下一帧非动作渲染。
+  function terminalRailRerenderExitFlip() {
+    const list = $("railTermHistoryList");
+    const host = list && list.parentElement ? list.parentElement : null;
+    const snapshot = list && host && terminalRailMotionEnabled() ? terminalRailSnapshotRows(list) : null;
+    terminalRailFlipMode = "flip";
+    renderTerminalRailHistory(terminalRailAgentId());
+    terminalRailFlipMode = "instant";
+    if (snapshot && snapshot.size && host) terminalRailMountExitGhosts(list, host, snapshot);
   }
 
   // ---- 数据 ----
@@ -9384,12 +9465,12 @@ async function api(method, path, body) {
   }
 
   // 归档（dsh §1.4 / m6b §A）：持久化标记 + 视图过滤，磁盘会话文件一概不动；
-  // 平静会话单击即归档，无确认、无动画（resetKey 瞬时消失，不播 FLIP）。本地先
-  // 生效再落盘——POST 是本机回环，等它往返再动列表会出现「点了没反应」的半个
-  // 节拍；落盘失败回退本地态并提示，不假装成功（刷新回来还在，比假成功更难理解）。
-  // 归档与续接无关：不可续接的会话照样可归档；打开中的终端在另一段，不受影响。
-  // 撤销 toast 是 M7 里唯一的恢复路径——行内取消归档钮与归档视图筛选取舍入 M8
-  // 段头「视图选项」（m6b §A2 的三个入口里，我们只先做 toast 这一个）。
+  // 平静会话单击即归档，无确认。本地先生效再落盘——POST 是本机回环，等它往返再
+  // 动列表会出现「点了没反应」的半个节拍；落盘失败回退本地态并提示，不假装成功
+  // （刷新回来还在，比假成功更难理解）。归档与续接无关：不可续接的会话照样可归档；
+  // 打开中的终端在另一段，不受影响。动效（M13）走 AnimatedRows 同款：行克隆淡出、
+  // 下方行上移、隐藏池回填行淡入（terminalRailRerenderExitFlip）。恢复入口三件：
+  // toast「撤销」＋行内取消归档钮＋段头「视图选项」筛选（m6b §A2 三入口齐备）。
   function terminalRailArchiveSession(id) {
     const session = terminalRailHistory.sessions.find((row) => row && row.id === id);
     if (!session) return;
@@ -9398,14 +9479,20 @@ async function api(method, path, body) {
     if (!key) return;
     if (terminalRailPrefs.archived.some((row) => terminalRailArchivedKey(row) === key)) return;
     terminalRailPrefs.archived.push(entry);
-    terminalRailFlipMode = "instant";
-    renderTerminalRailHistory(terminalRailAgentId());
+    terminalRailRerenderExitFlip();
     api("POST", "/api/terminal/rail/archive", entry)
       .then(() => {
-        // 6s 撤销窗（dsh holdMs 同值）：tone 走成功（不传 isErr），撤销＝取消归档。
+        // 6s 撤销窗（dsh holdMs 同值）：tone 走成功（不传 isErr），撤销＝取消归档；
+        // 当前筛选＝隐藏已归档时追加筛选引导钮（dsh ArchiveToastEntry 的条件性第二
+        // 动作），点了切到「仅显示已归档」看归档去向。
         toast("会话已归档。", false, {
           durationMs: 6000,
-          action: { label: "撤销", onClick: () => terminalRailUnarchiveSession(entry.endpoint, entry.id) },
+          actions: [
+            { label: "撤销", onClick: () => terminalRailUnarchiveSession(entry.endpoint, entry.id) },
+            ...(terminalRailViewPrefs.archivedFilter === "default"
+              ? [{ label: "筛选已归档会话", onClick: () => applyTerminalRailViewChoice("archivedFilter", "only") }]
+              : []),
+          ],
         });
       })
       .catch((error) => {
@@ -9417,13 +9504,13 @@ async function api(method, path, body) {
 
   // 取消归档：从清单移除即回到原分组原位置——底层列表从没被改动，组内按最近活跃
   // 的排序天然还原（dsh 的 sessionIds 槽位保留是同一种思路）。无 toast（m6b §A6
-  // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。
+  // 实测口径：unarchive 成功路径从不 notify）；落盘失败回退并提示。动效（M13）＝
+  // 归档的镜像：行淡入回槽、下方行落回、水位线让位的回填行克隆淡出。
   function terminalRailUnarchiveSession(endpoint, id) {
     const key = `${endpoint}\u0000${id}`;
     if (!terminalRailPrefs.archived.some((row) => `${row.endpoint}\u0000${row.id}` === key)) return;
     terminalRailPrefs.archived = terminalRailPrefs.archived.filter((row) => `${row.endpoint}\u0000${row.id}` !== key);
-    terminalRailFlipMode = "instant";
-    renderTerminalRailHistory(terminalRailAgentId());
+    terminalRailRerenderExitFlip();
     api("POST", "/api/terminal/rail/unarchive", { endpoint, id })
       .catch((error) => {
         terminalRailPrefs.archived.push({ endpoint, id });
@@ -9711,10 +9798,15 @@ async function api(method, path, body) {
     if (!dir) return;
     loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
     initTerminalRailScrollbarQuiet();
-    // 首次指针/键盘输入才武装 FLIP：进页那一帧直接落位，用户还没动手时不放整列表淡入。
+    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，M13 起挂列表
+    // 本体、走捕获相）：合成点击（element.click()）不派发 pointerdown——进页首帧、
+    // 自动化测量全都瞬时落位，用户真动过手才放行位移/淡入淡出。
     const armMotion = () => { terminalRailMotionArmed = true; };
-    dir.addEventListener("pointerdown", armMotion, { once: true });
-    dir.addEventListener("keydown", armMotion, { once: true });
+    const listEl = $("railTermHistoryList");
+    if (listEl && typeof listEl.addEventListener === "function") {
+      listEl.addEventListener("pointerdown", armMotion, { once: true, capture: true });
+      listEl.addEventListener("keydown", armMotion, { once: true, capture: true });
+    }
     // 一处委托：关闭叉 / 切换终端 / 历史行归档 / 组头菜单 / 组头新建 / 移除分组 /
     // 恢复分组 / 历史行续接 / 组折叠 / 水位线。关闭叉与归档钮先判，否则会被行点击
     // 抢走；组头 ⋯、⊕ 与菜单项、恢复钮都要抢在「历史行续接」与「组折叠」之前——
