@@ -116,8 +116,8 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(closeRule, "live 行 hover 出关闭叉（M8 T5，× 走 terminalRailCloseSession 同一条路）");
       assert.ok(closeRule[1].includes("display: inline-flex"), "动作按钮 display 硬切（无淡入无位移）");
       const arrow = cssRule(".rail-term-group-arrow {");
-      assert.ok(arrow.includes("transition: transform .15s cubic-bezier(.4,0,.2,1)"),
-        "组箭头是栏内唯一一条 CSS 过渡：.15s + 设计缓动");
+      assert.ok(arrow.includes("transition: transform .15s ease-in-out"),
+        "组箭头是栏内唯一一条 CSS 过渡：.15s ease-in-out（M14 照 dsh 实测缓动）");
       assert.ok(panelCss.includes(".rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }"),
         "展开态箭头旋转 90°");
       const rm = panelCss.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-group-arrow \{ transition: none; \}/);
@@ -301,6 +301,7 @@ describe("终端视图左栏换血（M4）", () => {
     const groupFn = () => {
       const fn = new Function(`
         ${extractFn("sessDirName")}
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         return terminalRailGroupSessions;
       `)();
@@ -321,6 +322,33 @@ describe("终端视图左栏换血（M4）", () => {
       assert.deepEqual(groups[2].rows.map((r) => r.id), ["d", "e"], "空 project 与 null 同归未分组");
       assert.deepEqual(groupFn()([]), [], "空表不炸");
       assert.deepEqual(groupFn()(null), [], "非数组不炸");
+    });
+
+    it("分组键归一化：同一目录的不同拼写只出一组，label 取最短拼写（M14）", () => {
+      // 用户实测的病灶：同名目录因拼写不同裂成两个组（两个「ai4math」）。
+      const groups = groupFn()([
+        { id: "a", project: "C:\\dev\\alpha", lastActive: 100 },
+        { id: "b", project: "C:/Dev/Alpha/", lastActive: 300 },
+        { id: "c", project: "C:\\DEV\\ALPHA\\", lastActive: 200 },
+      ]);
+      assert.equal(groups.length, 1, "三种拼写（斜杠/大小写/尾斜杠）只出一组");
+      assert.equal(groups[0].key, "C:\\dev\\alpha", "组键取最短的那条原始拼写");
+      assert.equal(groups[0].label, "alpha", "组头短名取自同一拼写");
+      assert.deepEqual(groups[0].rows.map((r) => r.id), ["b", "c", "a"], "组内仍按最近活跃倒序");
+    });
+
+    it("label 稳定：等长拼写按字典序定，和会话先后无关（不随活跃序漂）", () => {
+      const first = groupFn()([
+        { id: "a", project: "C:\\dev\\Beta", lastActive: 100 },
+        { id: "b", project: "c:\\dev\\beta", lastActive: 200 },
+      ]);
+      const second = groupFn()([
+        { id: "b", project: "c:\\dev\\beta", lastActive: 200 },
+        { id: "a", project: "C:\\dev\\Beta", lastActive: 100 },
+      ]);
+      assert.equal(first.length, 1, "等长不同拼写同样归一");
+      assert.equal(first[0].key, "C:\\dev\\Beta", "等长按原串字典序（大写在前）");
+      assert.equal(second[0].key, first[0].key, "输入顺序反过来，组名不漂");
     });
 
     it("水位线：基线 5、点一次 +5、剩余 ≤5 一次全展开、全展开后「收起」回基线", () => {
@@ -413,7 +441,6 @@ describe("终端视图左栏换血（M4）", () => {
         const terminalRailWatermarks = new Map();
         const terminalRailPrefs = { archived: [], removedGroups: [] };
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
-        let terminalRailRemovedCollapsed = true;
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
         const TERMINAL_RAIL_WATERMARK = 5;
@@ -442,6 +469,7 @@ describe("终端视图左栏换血（M4）", () => {
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
         function terminalRailRowTops() { return null; }
         function playTerminalRailFlip() {}
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         ${extractFn("terminalRailWatermarkView")}
         ${extractFn("terminalRailNextWatermark")}
@@ -452,6 +480,7 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailIsArchived")}
         ${extractFn("terminalRailVisibleSessions")}
         ${extractFn("terminalRailRegroupRemoved")}
+        function terminalRailSelfHealRemovedGroups() { return false; }
         ${extractFn("terminalRailPendingNewTerminals")}
         const TERMINAL_RAIL_SPINNER = "";
         ${extractFn("terminalRailRowHtml")}
@@ -1186,7 +1215,6 @@ describe("终端视图左栏换血（M4）", () => {
           const terminalRailPrefs = { archived: [], removedGroups: [] };
           const terminalRailPendingNew = new Map();
           const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
-          let terminalRailRemovedCollapsed = true;
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
           let terminalRailLastGroups = [];
           const TERMINAL_RAIL_WATERMARK = 5;
@@ -1216,6 +1244,7 @@ describe("终端视图左栏换血（M4）", () => {
           function terminalRailRowTops() { return null; }
           function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
           function playTerminalRailFlip() {}
+          ${extractFn("terminalRailNormDir")}
           ${extractFn("terminalRailGroupSessions")}
           ${extractFn("terminalRailWatermarkView")}
           ${extractFn("terminalRailNextWatermark")}
@@ -1223,6 +1252,7 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailSameDir")}
           ${extractFn("terminalRailGroupForDir")}
           ${extractFn("terminalRailRegroupRemoved")}
+          function terminalRailSelfHealRemovedGroups() { return false; }
           ${extractFn("terminalRailArchivedKey")}
           ${extractFn("terminalRailVisibleSessions")}
           const TERMINAL_RAIL_SPINNER = "";
@@ -1285,7 +1315,6 @@ ${extractFn("terminalRailPendingRowHtml")}
         const terminalRailPrefs = { archived: [], removedGroups: [] };
         const terminalRailPendingNew = new Map();
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
-        let terminalRailRemovedCollapsed = true;
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
         const TERMINAL_RAIL_WATERMARK = 5;
@@ -1314,6 +1343,7 @@ ${extractFn("terminalRailPendingRowHtml")}
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
         function terminalRailRowTops() { return null; }
         function playTerminalRailFlip() {}
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         ${extractFn("terminalRailWatermarkView")}
         ${extractFn("terminalRailNextWatermark")}
@@ -1321,6 +1351,7 @@ ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailGroupForDir")}
         ${extractFn("terminalRailRegroupRemoved")}
+        function terminalRailSelfHealRemovedGroups() { return false; }
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailVisibleSessions")}
         const TERMINAL_RAIL_SPINNER = "";
@@ -1404,7 +1435,6 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     const terminalRailPrefs = { archived: [], removedGroups: [] };
     const terminalRailPendingNew = new Map();
     const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
-    let terminalRailRemovedCollapsed = true;
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
@@ -1434,13 +1464,15 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
     function terminalRailRowTops() { return null; }
     function playTerminalRailFlip() {}
-    ${extractFn("terminalRailGroupSessions")}
+    ${extractFn("terminalRailNormDir")}
+        ${extractFn("terminalRailGroupSessions")}
     ${extractFn("terminalRailWatermarkView")}
     ${extractFn("terminalRailNextWatermark")}
     ${extractFn("terminalRailMoreLabel")}
     ${extractFn("terminalRailSameDir")}
     ${extractFn("terminalRailGroupForDir")}
     ${extractFn("terminalRailRegroupRemoved")}
+    function terminalRailSelfHealRemovedGroups() { return false; }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailIsArchived")}
     ${extractFn("terminalRailVisibleSessions")}

@@ -39,14 +39,14 @@ const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 // ── 渲染沙盒：renderTerminalRailHistory 及其全部依赖（照既有测试的同款桩） ──
-function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedCollapsed = true, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} } } = {}) {
+function renderSandbox({ history, activeSession = null, prefs = { archived: [], removedGroups: [] }, collapsed = [], removedAt = {}, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} }, apiImpl = async () => ({ ok: true }) } = {}) {
   const list = { html: "", writes: 0 };
   Object.defineProperty(list, "innerHTML", {
     get: () => list.html,
     set: (v) => { list.writes += 1; list.html = v; },
   });
-  const state = { collapsed: new Set(collapsed), scrolled: [] };
-  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedCollapsed", "viewPrefs", `
+  const state = { collapsed: new Set(collapsed), scrolled: [], posts: [], saved: 0 };
+  const fn = new Function("list", "state", "history", "activeSession", "prefs", "removedAt", "viewPrefs", "apiImpl", `
     let terminalRailRendered = { history: null };
     let terminalRailAutoExpandedFor = "";
     let terminalRailScrolledFor = "";
@@ -55,7 +55,8 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalRailWatermarks = new Map();
     const terminalRailPrefs = prefs;
     const terminalRailViewPrefs = viewPrefs;
-    let terminalRailRemovedCollapsed = removedCollapsed;
+    const terminalRailRemovedAt = removedAt;
+    const terminalRailSelfHealFailed = new Set();
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
@@ -69,6 +70,8 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     let terminalRailHistory = history;
     const activeTerminalPreviewId = activeSession ? activeSession.id : null;
     function $(id) { return id === "railTermHistoryList" ? list : null; }
+    function saveTerminalRailRemovedAt() { state.saved += 1; }
+    function api(method, path, body) { state.posts.push({ method, path, body }); return apiImpl(method, path, body); }
     let terminalBackendReady = true;
     const terminalBackendSessions = activeSession ? { [activeSession.id]: activeSession } : {};
     ${extractFn("terminalRailSessionMap")}
@@ -84,6 +87,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     function terminalRailRowTops() { return null; }
     function playTerminalRailFlip() {}
     ${extractFn("terminalRailFindOpenSession")}
+    ${extractFn("terminalRailNormDir")}
     ${extractFn("terminalRailGroupSessions")}
     ${extractFn("terminalRailWatermarkView")}
     ${extractFn("terminalRailNextWatermark")}
@@ -93,14 +97,21 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailIsArchived")}
     ${extractFn("terminalRailVisibleSessions")}
+    ${extractFn("terminalRailSelfHealRemovedGroups")}
     ${extractFn("terminalRailRegroupRemoved")}
     ${extractFn("terminalRailPendingNewTerminals")}
     const TERMINAL_RAIL_SPINNER = "";
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
-    return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
-  `)(list, state, history, activeSession, prefs, removedCollapsed, viewPrefs);
+    return {
+      render: renderTerminalRailHistory,
+      collapsed: terminalRailCollapsedGroups,
+      scrolled: state.scrolled,
+      prefs: () => terminalRailPrefs,
+      removedAt: () => terminalRailRemovedAt,
+    };
+  `)(list, state, history, activeSession, prefs, removedAt, viewPrefs, apiImpl);
   return { fn, list, state };
 }
 
@@ -379,6 +390,7 @@ describe("S2 分组移除（finding 1b）", () => {
     const runRegroup = (removedGroups) => {
       const fn = new Function("groups", "removed", `
         const terminalRailPrefs = { archived: [], removedGroups: removed };
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailRegroupRemoved")}
         return terminalRailRegroupRemoved;
@@ -443,42 +455,113 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.ok(sandbox.list.html.includes('data-rail-term-resume="a-1"'), "alpha 的会话落到未分组里");
     });
 
-    it("「已移除的分组（N）」折叠区：仅 N>0 时出现，行给短名＋完整路径＋「恢复」", () => {
-      const none = renderSandbox({ history: HISTORY, prefs: { archived: [], removedGroups: [] } });
-      none.fn.render("kimi");
-      assert.ok(!none.list.html.includes("已移除的分组"), "零移除不出折叠区");
-
-      // 默认收起：只露带计数的标题，不露行（N 就在标题里，展开只为逐条恢复）
-      const folded = renderSandbox({
+    it("「已移除的分组」区整块拆除：移除只体现为组消失＋会话落未分组", () => {
+      const sandbox = renderSandbox({
         history: HISTORY,
         prefs: { archived: [], removedGroups: ["C:\\dev\\alpha", "C:\\dev\\gamma"] },
       });
-      folded.fn.render("kimi");
-      assert.ok(folded.list.html.includes("已移除的分组（2）"), "计数逐字形制");
-      assert.ok(!folded.list.html.includes("data-rail-term-restore-group"), "默认收起不露恢复行");
+      sandbox.fn.render("kimi");
+      assert.ok(!sandbox.list.html.includes("已移除的分组"), "区头不再出现");
+      assert.ok(!sandbox.list.html.includes("data-rail-term-restore-group"), "恢复钮不再出现");
+      assert.ok(!sandbox.list.html.includes("rail-term-removed"), "区容器与行样式挂点不再出现");
+      assert.ok(!sandbox.list.html.includes(">恢复<"), "「恢复」文案不再出现");
+      assert.ok(sandbox.list.html.includes(">未分组<"), "被移除目录的会话照旧落未分组");
+    });
 
-      // 展开态：行给目录短名、title 给完整路径、行内「恢复」钮
-      const some = renderSandbox({
-        history: HISTORY,
-        prefs: { archived: [], removedGroups: ["C:\\dev\\alpha", "C:\\dev\\gamma"] },
-        removedCollapsed: false,
+    it("自愈：移除之后来的新会话让组自动重现，并按 restore-group 落盘", async () => {
+      const history = {
+        endpoint: "kimi",
+        sessions: [
+          { id: "a-1", endpoint: "kimi", project: "C:\\dev\\alpha", title: "旧", lastActive: 100 },
+        ],
+        fetchedAt: 1,
+        error: null,
+      };
+      const sandbox = renderSandbox({
+        history,
+        prefs: { archived: [], removedGroups: ["C:\\dev\\alpha"] },
+        removedAt: { "c:\\dev\\alpha": 1000 },
       });
-      some.fn.render("kimi");
-      assert.ok(some.list.html.includes('data-rail-term-restore-group="C:\\dev\\alpha"'), "恢复钮挂目录（原始拼写）");
-      assert.ok(some.list.html.includes(">alpha<"), "行内显示目录短名");
-      assert.ok(/class="rail-term-row rail-term-removed-row" title="C:\\dev\\alpha"/.test(some.list.html),
-        "title 给完整路径");
-      assert.ok(some.list.html.includes(">恢复<"), "行内「恢复」钮文案逐字");
-      assert.ok(some.list.html.includes("已移除的分组（2）"), "展开态标题照旧");
+      sandbox.fn.render("kimi");
+      assert.ok(!sandbox.list.html.includes('data-rail-term-group="C:\\dev\\alpha"'), "旧会话不触发自愈");
+      assert.deepEqual(sandbox.state.posts, [], "无新会话不发请求");
+      assert.deepEqual(sandbox.fn.prefs().removedGroups, ["C:\\dev\\alpha"], "移除清单原样");
+
+      history.sessions.push({ id: "a-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "新", lastActive: 2000 });
+      sandbox.fn.render("kimi");
+      assert.ok(sandbox.list.html.includes('data-rail-term-group="C:\\dev\\alpha"'), "新会话到来自愈成组");
+      assert.deepEqual(sandbox.fn.prefs().removedGroups, [], "目录从本地移除清单摘掉");
+      assert.deepEqual(sandbox.state.posts,
+        [{ method: "POST", path: "/api/terminal/rail/restore-group", body: { dir: "C:\\dev\\alpha" } }],
+        "按既有恢复路由落盘（store 与本地同一份）");
+      await flush();
+      assert.equal(sandbox.fn.removedAt()["c:\\dev\\alpha"], undefined, "落盘成功后移除时刻随条目一起清掉");
+    });
+
+    it("自愈只认「新」会话：没有移除时刻的老条目不自愈，组保持隐藏", () => {
+      const sandbox = renderSandbox({
+        history: {
+          endpoint: "kimi",
+          sessions: [{ id: "a-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "新", lastActive: 999999 }],
+        },
+        prefs: { archived: [], removedGroups: ["C:\\dev\\alpha"] },
+        removedAt: {},
+      });
+      sandbox.fn.render("kimi");
+      assert.ok(!sandbox.list.html.includes('data-rail-term-group="C:\\dev\\alpha"'), "没有时间轴就不猜：保持隐藏");
+      assert.deepEqual(sandbox.state.posts, [], "不发请求");
+      assert.deepEqual(sandbox.fn.prefs().removedGroups, ["C:\\dev\\alpha"], "清单不动");
+    });
+
+    it("自愈落盘失败：目录回到移除清单、移除时刻保留，本会话不再重试", async () => {
+      const history = {
+        endpoint: "kimi",
+        sessions: [{ id: "a-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "新", lastActive: 2000 }],
+        fetchedAt: 1,
+        error: null,
+      };
+      const sandbox = renderSandbox({
+        history,
+        prefs: { archived: [], removedGroups: ["C:\\dev\\alpha"] },
+        removedAt: { "c:\\dev\\alpha": 1000 },
+        apiImpl: async () => { throw new Error("HTTP 500：disk"); },
+      });
+      sandbox.fn.render("kimi");
+      await flush();
+      assert.equal(sandbox.state.posts.length, 1, "只发一次 restore-group");
+      assert.deepEqual(sandbox.fn.prefs().removedGroups, ["C:\\dev\\alpha"], "失败回退：目录回到移除清单");
+      assert.equal(sandbox.fn.removedAt()["c:\\dev\\alpha"], 1000, "移除时刻保留（重载后仍可据此自愈）");
+      assert.ok(!sandbox.list.html.includes('data-rail-term-group="C:\\dev\\alpha"'), "失败后组仍隐藏");
+
+      sandbox.fn.render("kimi");
+      await flush();
+      assert.equal(sandbox.state.posts.length, 1, "本会话不再重试");
+    });
+
+    it("自愈判据 createdAt 优先于 lastActive：旧 createdAt 不被新 lastActive 顶掉", () => {
+      const sandbox = renderSandbox({
+        history: {
+          endpoint: "dsh",
+          sessions: [{ id: "a-1", endpoint: "dsh", project: "C:\\dev\\alpha", title: "旧", createdAt: 500, lastActive: 2000 }],
+        },
+        prefs: { archived: [], removedGroups: ["C:\\dev\\alpha"] },
+        removedAt: { "c:\\dev\\alpha": 1000 },
+      });
+      sandbox.fn.render("dsh");
+      assert.ok(!sandbox.list.html.includes('data-rail-term-group="C:\\dev\\alpha"'), "createdAt 早于移除时刻就不算新会话");
+      assert.deepEqual(sandbox.state.posts, [], "不发请求");
+      assert.deepEqual(sandbox.fn.prefs().removedGroups, ["C:\\dev\\alpha"], "清单不动");
     });
   });
 
   describe("移除/恢复交互（vm 真跑）", () => {
-    const runFlow = ({ apiImpl, prefs = { archived: [], removedGroups: [] } } = {}) => {
-      const log = { posts: [], toasts: [], modals: [], renders: 0, menuClosed: 0 };
-      const fn = new Function("log", "apiImpl", "prefs", `
+    const runFlow = ({ apiImpl, prefs = { archived: [], removedGroups: [] }, removedAt = {} } = {}) => {
+      const log = { posts: [], toasts: [], modals: [], renders: 0, menuClosed: 0, saved: 0 };
+      const fn = new Function("log", "apiImpl", "prefs", "removedAt", `
         let terminalRailPrefs = prefs;
         let terminalRailFlipMode = "instant";
+        const terminalRailRemovedAt = removedAt;
+        const terminalRailSelfHealFailed = new Set();
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
         function panelError(err, fallback) { return fallback; }
@@ -488,17 +571,18 @@ describe("S2 分组移除（finding 1b）", () => {
         function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
         function escapeHtml(v) { return String(v || ""); }
         function showSkillsModal(opts) { log.modals.push(opts); opts.onConfirm(); }
+        function saveTerminalRailRemovedAt() { log.saved += 1; }
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailRemoveGroup")}
         ${extractFn("terminalRailCommitRemoveGroup")}
-        ${extractFn("terminalRailRestoreGroup")}
         return {
           remove: terminalRailRemoveGroup,
           commit: terminalRailCommitRemoveGroup,
-          restore: terminalRailRestoreGroup,
           prefs: () => terminalRailPrefs,
+          removedAt: () => terminalRailRemovedAt,
         };
-      `)(log, apiImpl ?? (async () => ({ ok: true })), prefs);
+      `)(log, apiImpl ?? (async () => ({ ok: true })), prefs, removedAt);
       return { fn, log };
     };
 
@@ -529,21 +613,24 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.ok(!src.includes("createElement"), "不新写弹窗件");
     });
 
-    it("「恢复」：出清单 + POST 恢复；恢复后按最近活跃重新归组（不记原索引）", async () => {
-      const { fn, log } = runFlow({ prefs: { archived: [], removedGroups: ["C:\\dev\\alpha", "C:\\dev\\beta"] } });
-      fn.restore("C:\\dev\\alpha");
-      assert.deepEqual(fn.prefs().removedGroups, ["C:\\dev\\beta"], "恢复即出清单");
-      assert.deepEqual(log.posts, [{ method: "POST", path: "/api/terminal/rail/restore-group", body: { dir: "C:\\dev\\alpha" } }],
-        "POST 带目录原始拼写");
+    it("移除时记下时刻（自愈判据）：本地清单＋时间戳同拍写入，落盘后仍保留", async () => {
+      const { fn, log } = runFlow({ prefs: { archived: [], removedGroups: ["C:\\dev\\beta"] } });
+      fn.commit("C:/Dev/Alpha/");
+      assert.deepEqual(fn.prefs().removedGroups, ["C:\\dev\\beta", "C:/Dev/Alpha/"], "清单进原始拼写");
+      const stamp = fn.removedAt()["c:\\dev\\alpha"];
+      assert.ok(stamp > 0, "时间戳按归一化键记");
+      assert.equal(fn.removedAt()["c:/dev/alpha/"], undefined, "只记一条（归一化去重）");
+      assert.ok(log.saved >= 1, "时间戳落 localStorage");
       await flush();
-      assert.equal(log.toasts.length, 0, "恢复无 toast（与取消归档同口径：成功路径不打扰）");
+      assert.ok(fn.removedAt()["c:\\dev\\alpha"] > 0, "POST 成功后时间戳不被回滚");
     });
 
-    it("落盘失败：回退本地态 + 错误提示", async () => {
+    it("落盘失败：回退本地态＋时间戳 + 错误提示", async () => {
       const { fn, log } = runFlow({ apiImpl: async () => { throw new Error("HTTP 500：disk"); } });
       fn.commit("C:\\dev\\alpha");
       await flush();
       assert.deepEqual(fn.prefs().removedGroups, [], "失败回退");
+      assert.equal(fn.removedAt()["c:\\dev\\alpha"], undefined, "时间戳一并回退（不留半条自愈轴）");
       assert.equal(log.toasts.length, 1, "一句错误提示");
       assert.equal(log.toasts[0].isErr, true, "按错误上屏");
     });
@@ -555,16 +642,14 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.deepEqual(log.posts, [], "不发请求");
     });
 
-    it("点击委托：菜单开关 / 移除分组 / 恢复分组三个分支在册", () => {
+    it("点击委托：菜单开关 / 移除分组分支在册，恢复区分支已随区拆掉", () => {
       const init = extractFn("initTerminalRail");
-      for (const attr of ["data-rail-term-group-menu", "data-rail-term-remove-group", "data-rail-term-restore-group"]) {
+      for (const attr of ["data-rail-term-group-menu", "data-rail-term-remove-group"]) {
         assert.ok(init.includes(attr), `委托分支 ${attr} 在册`);
       }
-      // 恢复钮抢在历史行续接之前（同在列表里，别点恢复变成续接）
-      const clickAt = init.indexOf('dir.addEventListener("click"');
-      const block = init.slice(clickAt, init.indexOf("});", clickAt));
-      assert.ok(block.indexOf("data-rail-term-restore-group") < block.indexOf("data-rail-term-resume"),
-        "恢复钮在行续接之前判");
+      for (const gone of ["data-rail-term-restore-group", "data-rail-term-removed-toggle", "terminalRailRestoreGroup", "toggleTerminalRailRemoved"]) {
+        assert.ok(!init.includes(gone), `恢复区挂点 ${gone} 已清除`);
+      }
       // 移除分组必须走带确认弹窗的入口（M7 复审必修 1）：委托直接调 commit 版会把
       // 红色确认弹窗整个绕过——点一下就真移除，没有任何二次确认。
       // M9 复审必修 1 起该分支随菜单 portal 搬到 document 级委托（先判菜单项后走
@@ -592,11 +677,11 @@ describe("S2 分组移除（finding 1b）", () => {
       assert.ok(body.includes("”从会话栏移除。文件夹和会话记录都会保留，里面的会话会显示在“未分组”下。"), "正文余下逐字");
       assert.ok(body.includes('title: "移除分组"'), "弹窗标题逐字");
       assert.ok(body.includes('confirmText: "移除分组"'), "确认钮逐字");
-      assert.ok(body.includes(">恢复<"), "恢复钮逐字");
-      assert.ok(body.includes("已移除的分组（"), "折叠区标题形制逐字");
-      // 失败兜底两句逐字（用户 2026-10-21 措辞修正：没能→未能）
+      assert.ok(!body.includes("已移除的分组"), "「已移除的分组」区整块拆掉（不是隐藏）");
+      assert.ok(!body.includes(">恢复<"), "「恢复」钮文案随之消失");
+      // 唯一保留的失败兜底（移除）；恢复区的兜底随恢复路径一起拆掉
       assert.ok(body.includes('"分组移除未能保存，请重试"'), "移除失败兜底逐字");
-      assert.ok(body.includes('"分组恢复未能保存，请重试"'), "恢复失败兜底逐字");
+      assert.ok(!body.includes("分组恢复未能保存"), "恢复区兜底随区拆掉");
       assert.ok(!body.includes("没能保存"), "旧措辞「没能保存」清零");
     });
 
@@ -609,12 +694,13 @@ describe("S2 分组移除（finding 1b）", () => {
         "菜单钮的渲染条件含组键判定（未分组不出现）");
     });
 
-    it("CSS：菜单容器与 danger 项、恢复区在册，0ms 硬切", () => {
+    it("CSS：菜单容器与 danger 项在册，0ms 硬切；恢复区样式已随区拆掉", () => {
       assert.ok(cssRule(".rail-term-menu {").length > 0, "⋯ 菜单容器样式在册（可扩：M8 加项只加 DOM）");
       const danger = panelCss.match(/\.rail-term-menu-item\.is-danger \{([^}]*)\}/);
       assert.ok(danger, "danger 项样式在册");
       assert.ok(danger[1].includes("var(--danger)"), "danger 项取既有危险色 token");
-      assert.ok(panelCss.includes(".rail-term-removed-row"), "恢复区行样式在册");
+      assert.ok(!panelCss.includes(".rail-term-removed"), "「已移除的分组」区样式整块拆掉");
+      assert.ok(!panelCss.includes(".rail-term-row-restore"), "「恢复」钮样式整块拆掉");
       assert.ok(!/\.rail-term-menu[^{]*\{[^}]*transition/.test(panelCss), "菜单无过渡（0ms 硬切）");
     });
   });
@@ -705,9 +791,11 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     });
   });
 
-  describe("图标同槽互换（CSS 钉死）", () => {
-    it("非 hover 文件夹、hover 箭头同槽互换；箭头 .15s 是栏内唯一行内过渡", () => {
-      assert.ok(cssRule(".rail-term-group-slot {").includes("width: 14px"), "定宽槽 14px（与文件夹同宽）");
+  describe("图标同槽互换（CSS 钉死，M14 照 dsh 尺寸与色档）", () => {
+    it("非 hover 文件夹、hover 箭头同槽互换；槽 16×20，箭头 14×14、文件夹 16×16", () => {
+      const slot = cssRule(".rail-term-group-slot {");
+      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "槽位 16×20（dsh 实测槽）");
+      assert.ok(slot.includes("justify-content: center"), "两枚图标同槽居中（不产生宽度跳动）");
       assert.ok(panelCss.includes(".rail-term-group-head .rail-term-group-arrow { display: none; }"),
         "组头内箭头默认隐（非 hover 看文件夹）");
       assert.ok(panelCss.includes(".rail-term-group-head:hover .rail-term-group-arrow { display: inline-flex; }"),
@@ -715,14 +803,53 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       assert.ok(panelCss.includes(".rail-term-group-head:hover .rail-term-group-icon { display: none; }"),
         "hover 收文件夹（同槽位互换）");
       const arrow = cssRule(".rail-term-group-arrow {");
-      assert.ok(arrow.includes("transition: transform .15s cubic-bezier(.4,0,.2,1)"), ".15s 旋转保留");
+      assert.ok(arrow.includes("transition: transform .15s ease-in-out"), "箭头 .15s ease-in-out（dsh 实测缓动）");
+      assert.ok(arrow.includes("color: var(--text-4)"), "箭头吃 caption 级色（--text-4）");
+      const icon = cssRule(".rail-term-group-icon {");
+      assert.ok(icon.includes("color: var(--text-3)"), "文件夹静息吃三级文字色");
       assert.ok(panelCss.includes(".rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }"),
         "展开态旋转 90°");
-      assert.ok(/\.rail-term-removed\.is-open \.rail-term-group-arrow \{ transform: rotate\(90deg\); \}/.test(panelCss),
-        "移除区展开态同款旋转");
       assert.ok(!cssRule(".rail-term-group-head {").includes("transition"), "组头容器无过渡");
       assert.ok(!cssRule(".rail-term-group-btn {").includes("transition"), "动作钮无过渡（0ms 硬切）");
       assert.ok(!cssRule(".rail-term-group-toggle {").includes("transition"), "折叠开关无过渡（hover 底色 0ms 硬切）");
+      assert.ok(!panelCss.includes(".rail-term-removed"), "已移除区的箭头旋转规则随区拆掉");
+    });
+
+    it("reduced-motion：箭头过渡压成 none", () => {
+      const rm = panelCss.match(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-group-arrow \{([^}]*)\}/);
+      assert.ok(rm, "reduced-motion 分支在册");
+      assert.ok(rm[1].includes("transition: none"), "过渡关掉（不做位移动画）");
+    });
+
+    it("SVG 数据与 dsh 一致（结构与关键特征）：闭合态两条描边、展开态三层实心、chevron 以 C5.95242 为准", () => {
+      const iconOf = (name) => {
+        const m = panelJs.match(new RegExp(`const ${name} = '([^']*)';`));
+        assert.ok(m, `${name} 在册`);
+        return m[1];
+      };
+
+      const closed = iconOf("TERMINAL_RAIL_ICON_FOLDER_CLOSED");
+      assert.ok(closed.startsWith('<svg width="16" height="16" viewBox="0 0 16 16" fill="none"'), "闭合态 16×16 公共包裹");
+      assert.ok(closed.includes('aria-hidden="true" stroke-width="1"'), "公共包裹属性逐字（1px 描边）");
+      assert.equal((closed.match(/stroke="currentColor"/g) || []).length, 2, "两条描边 path（轮廓＋中线）");
+      assert.ok(!closed.includes('fill="currentColor"'), "闭合态是空心轮廓，不填实");
+      assert.ok(closed.includes('d="M3.63501 7.66614H12.3647"'), "中线 path 逐字");
+
+      const open = iconOf("TERMINAL_RAIL_ICON_FOLDER_OPEN");
+      assert.ok(open.startsWith('<svg width="16" height="16" viewBox="0 0 16 16" fill="none"'), "展开态 16×16 公共包裹");
+      assert.equal((open.match(/fill="currentColor"/g) || []).length, 3, "三层实心填充");
+      assert.ok(!open.includes('stroke="currentColor"'), "展开态不走描边");
+      assert.ok(open.includes('opacity="0.16"'), "首条背板 16% 透明");
+      assert.ok(open.indexOf('opacity="0.16"') < open.indexOf('fill="currentColor"') + 200,
+        "透明背板是第一条 path（层序：背板→盒体→前舌）");
+      assert.ok(open.includes('d="M4.7666 1.90137'), "前舌 path 逐字（长路径未被截断）");
+
+      const chevron = iconOf("TERMINAL_RAIL_ICON_CHEVRON");
+      assert.ok(chevron.startsWith('<svg width="14" height="14" viewBox="0 0 16 16" fill="none"'), "chevron 14×14、viewBox 16");
+      assert.equal((chevron.match(/fill="currentColor"/g) || []).length, 1, "单条实心三角");
+      assert.ok(!chevron.includes('stroke="currentColor"'), "箭头不吃描边");
+      assert.ok(chevron.includes("C5.95242"), "附录勘误后的 path 值（C5.95242）");
+      assert.ok(!chevron.includes("C6.95242"), "旧误读值 C6.95242 清零");
     });
 
     it("整行点击折叠/展开不变：toggle 钮仍是整行宽的开关", () => {
@@ -1354,6 +1481,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
   describe("分组方式（vm 真跑）", () => {
     const runNest = (groups) => {
       const fn = new Function("groups", `
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSameDir")}
         ${extractFn("terminalRailIsAncestorDir")}
         ${extractFn("terminalRailNestGroups")}
@@ -1584,8 +1712,6 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
       function toggleTerminalRailGroupMenu() {}
       function terminalRailCreateTerminalInDir() {}
       function terminalRailRemoveGroup() {}
-      function terminalRailRestoreGroup() {}
-      function toggleTerminalRailRemoved() {}
       function applyTerminalRailViewChoice() {}
       function terminalRailActivateSession(id) { log.activate.push(id); }
       function terminalRailResumeHistoryRow(id) { log.resume.push(id); }
@@ -1722,8 +1848,6 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
       function toggleTerminalRailGroupMenu() {}
       function terminalRailCreateTerminalInDir() {}
       function terminalRailRemoveGroup() {}
-      function terminalRailRestoreGroup() {}
-      function toggleTerminalRailRemoved() {}
       function applyTerminalRailViewChoice() {}
       function terminalRailActivateSession() {}
       function terminalRailResumeHistoryRow() {}
@@ -1913,8 +2037,6 @@ describe("M9 复审必修：portal 后菜单项点击接线（真 DOM 守卫）"
       function terminalRailArchiveSession() {}
       function toggleTerminalRailGroupMenu() {}
       function terminalRailCreateTerminalInDir() {}
-      function terminalRailRestoreGroup() {}
-      function toggleTerminalRailRemoved() {}
       function terminalRailActivateSession() {}
       function terminalRailResumeHistoryRow() {}
       function terminalRailUnarchiveSession() {}
