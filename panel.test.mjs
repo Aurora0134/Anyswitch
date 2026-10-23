@@ -6698,7 +6698,7 @@ describe("panel.html 渠道刷新远离通报与「等切回」暂停", () => {
     assert.ok(toastRule, "基座 .toast 规则存在");
     assert.ok(toastRule[0].includes("top: 68px"), "固定在 56px 顶栏下方 12px");
     assert.ok(!toastRule[0].includes("bottom:"), "底部定位已移除");
-    assert.ok(toastRule[0].includes("translateY(-8px)"), "入场自上方滑下");
+    assert.ok(toastRule[0].includes("translateY(-6px)"), "入场自上方滑下（M13 对齐 dsh 批准规格 -6px/160ms）");
   });
 
   it("终态远离通报：置「等切回」标记、停淡出计时、弹带链接的 8s toast", () => {
