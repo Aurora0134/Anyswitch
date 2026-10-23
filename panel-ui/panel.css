@@ -787,18 +787,24 @@
     min-height: 26px; padding: 0 8px; border-radius: var(--radius-md);
   }
   .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
-  /* 图标同槽互换（M7 S3，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），hover
-     时同槽位换成箭头——两个图标同在定宽槽里 display 硬切，不产生宽度跳动；槽宽
-     14px 与两枚文件夹图标同宽。箭头展开旋转 .15s（栏内唯一行内过渡）。互换规则
-     只作用于组头（.rail-term-group-head 之内的箭头默认隐）——「已移除的分组」
-     标题那枚箭头是常驻指示，不吃这套互换。 */
-  .rail-term-group-slot { flex: none; width: 14px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
+  /* 图标同槽互换（M7 S3 / M14，dsh 实测同款）：非 hover 显示文件夹（开/关两枚），
+     hover 时同槽位换成箭头——两个图标同在 16×20 的居中槽里 display 硬切，不产生
+     宽度跳动（文件夹 16×16、箭头 14×14，同槽居中即 dsh 的槽位尺寸）。箭头展开
+     旋转 .15s ease-in-out（栏内唯一行内过渡）。互换规则只作用于组头（.rail-term-
+     group-head 之内的箭头默认隐）。色档照 dsh 实测：文件夹吃三级文字色（含当前
+     聚焦会话的组改走 --accent，M8 T4 用户修正：不写死 dsh 的蓝），箭头吃 caption
+     级（--text-4）。 */
+  .rail-term-group-slot { flex: none; width: 16px; height: 20px; display: inline-flex; align-items: center; justify-content: center; line-height: 0; }
   .rail-term-group-arrow {
-    flex: none; display: inline-flex; align-items: center; line-height: 0;
-    transition: transform .15s cubic-bezier(.4,0,.2,1);
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    line-height: 0; color: var(--text-4);
+    transition: transform .15s ease-in-out;
   }
   .rail-term-group.is-open .rail-term-group-arrow { transform: rotate(90deg); }
-  .rail-term-group-icon { flex: none; display: inline-flex; align-items: center; line-height: 0; }
+  .rail-term-group-icon {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    line-height: 0; color: var(--text-3);
+  }
   /* M8 T4：含当前聚焦会话的组，文件夹图标取主题 accent（用户修正：不写死 dsh 的蓝，
      sepia 主题出橙等——亮暗/sepia/各皮肤各自生效）。 */
   .rail-term-group-icon.is-current { color: var(--accent); }
@@ -847,22 +853,6 @@
   .rail-term-hover-name { font-size: 13px; font-weight: 600; color: var(--text); }
   .rail-term-hover-path { font-size: 12px; color: var(--text-3); word-break: break-all; }
   .rail-term-hover-count { font-size: 12px; color: var(--text-3); }
-  /* 「已移除的分组（N）」折叠区：段尾，默认收起；行给目录短名 + 行内「恢复」 */
-  .rail-term-removed { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; }
-  .rail-term-removed.is-open .rail-term-group-arrow { transform: rotate(90deg); }
-  .rail-term-removed-head {
-    appearance: none; border: 0; background: transparent; color: var(--text-3);
-    font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
-    display: flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 8px;
-    border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
-  }
-  .rail-term-removed-head:hover { background: var(--surface-hover); color: var(--text-2); }
-  .rail-term-removed-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .rail-term-removed-row { color: var(--text-3); }
-  .rail-term-row-restore {
-    flex: none; display: none; padding: 0 2px; color: var(--accent); cursor: pointer; font-size: 12.5px;
-  }
-  .rail-term-removed-row:hover .rail-term-row-restore { display: inline-flex; }
   /* 水位线按钮：hover 只换文字色、背景不动，无过渡 */
   .rail-term-more {
     appearance: none; border: 0; background: transparent; color: var(--text-3);
