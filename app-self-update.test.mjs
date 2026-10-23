@@ -459,6 +459,89 @@ describe("runSelfUpdate · apply 阶段", () => {
   });
 });
 
+describe("runSelfUpdate · autoApply 顺延（一键流水线）", () => {
+  test("稳定轨：下载核验通过后原地续跑应用段，一个 runId 走到 updated，不停 staged", async () => {
+    const probe = scriptedProbe([{ version: "0.6.1-preview" }, null, { version: "0.7.0" }]);
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
+    const { deps, events, journalDir, cleanup } = baseDeps({
+      spawnFn: git.spawnFn,
+      probePanelFn: probe.probePanelFn,
+    });
+    writeJournal(journalDir, runningRun({ autoApply: true }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已更新到 0\.7\.0/);
+      // 下载与应用同一个 worker 接力：fetch 恰好两次（下载一次、应用幂等补拉一次），
+      // 换装、装依赖、重启 relay 全都发生。
+      const fetches = git.calls.filter((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "tag", "v0.7.0")(call.args));
+      assert.equal(fetches.length, 2, "download fetch and apply re-fetch must share one worker");
+      assert.ok(git.calls.some((call) => args0("checkout", "--detach", "--force", "FETCH_HEAD")(call.args)));
+      assert.ok(git.calls.some(npmCall));
+      assert.equal(events.relayRestarts, 1);
+      // journal：下载后记录原地翻成 apply，终态直达 done，没有 staged 停留。
+      const done = readJournal(journalDir);
+      assert.equal(done.step, "apply");
+      assert.equal(done.state, "done");
+      assert.equal(done.result.outcome, "updated");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("先行轨：版本号下载后回填并顺延进应用段，结论带提交标识", async () => {
+    const TARGET_SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const probe = scriptedProbe([{ version: "0.8.0", commit: "bbbbbbb" }, null, { version: "0.9.0", commit: "aaaaaaa" }]);
+    const git = fakeSpawn(({ args }) => {
+      if (args0("rev-parse", "FETCH_HEAD")(args) || args0("rev-parse", "HEAD")(args)) return { stdout: `${TARGET_SHA}\n` };
+      if (gitShowPackage(args)) return { stdout: JSON.stringify({ version: "0.9.0" }) };
+      return { stdout: "" };
+    });
+    const { deps, journalDir, cleanup } = baseDeps({
+      io: fakeIo({ version: "0.9.0" }),
+      spawnFn: git.spawnFn,
+      probePanelFn: probe.probePanelFn,
+    });
+    writeJournal(journalDir, runningRun({ track: "bleeding", targetSha: TARGET_SHA, targetVersion: null, targetTag: null, autoApply: true }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "updated");
+      assert.match(result.message, /已更新到 0\.9\.0-aaaaaaa/);
+      // 先行轨按引用拉 HEAD：下载与补拉恰好两次。
+      const fetches = git.calls.filter((call) => args0("fetch", "--depth", "1", "--no-tags", "origin", "HEAD")(call.args));
+      assert.equal(fetches.length, 2);
+      const done = readJournal(journalDir);
+      assert.equal(done.step, "apply");
+      assert.equal(done.targetVersion, "0.9.0", "下载阶段回填的版本号留在记录上");
+      assert.equal(done.result.outcome, "updated");
+    } finally {
+      cleanup();
+    }
+  });
+
+  test("顺延后应用段失败：回滚点还原照旧、不落 staged，outcome=failed", async () => {
+    const git = fakeSpawn(withTagVersion(({ args }) => (args0("rev-parse", "HEAD")(args) ? { stdout: "abc123def\n" } : { stdout: "" })));
+    const { deps, events, journalDir, cleanup } = baseDeps({
+      io: fakeIo({ version: "0.6.9" }),
+      spawnFn: git.spawnFn,
+    });
+    writeJournal(journalDir, runningRun({ autoApply: true }));
+    try {
+      const result = await runSelfUpdate({ ...deps });
+      assert.equal(result.outcome, "failed");
+      assert.match(result.message, /不一致/);
+      assert.match(result.message, /已还原/);
+      assert.ok(git.calls.some((call) => args0("checkout", "--detach", "--force", "abc123def")(call.args)), "abort restores the recorded HEAD");
+      assert.equal(events.relayRestarts, 0);
+      const done = readJournal(journalDir);
+      assert.equal(done.step, "apply");
+      assert.equal(done.result.outcome, "failed");
+    } finally {
+      cleanup();
+    }
+  });
+});
+
 describe("runSelfUpdate · 先行轨（bleeding）", () => {
   const TARGET_SHA = "fedcba0987654321fedcba0987654321fedcba09";
 

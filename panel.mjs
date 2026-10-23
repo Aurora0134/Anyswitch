@@ -1706,6 +1706,7 @@ export function createPanelRouter({
       providers: providerCount,
       relay,
       terminalHost,
+      selfUpdate: selfUpdateStatusFrame(),
     });
   }
 
@@ -2063,6 +2064,36 @@ export function createPanelRouter({
     return { ...clientUpdateStatus(run), phase: run.phase ?? null, step: run.step ?? "download", track: run.track ?? "stable", targetVersion: run.targetVersion ?? null, targetTag: run.targetTag ?? null, targetSha: run.targetSha ?? null };
   }
 
+  // 状态帧捎带（/api/status 的 selfUpdate 字段）：页面级观察者的唯一数据源——
+  // 关于页之外的完成提示与换装接管都从这一帧读，不新增轮询请求。/api/status 是
+  // 秒级热路径，journal 读取走短 TTL 缓存（与终端宿主状态帧同一手法）；有
+  // running 记录返回它，否则返回 15 分钟内最近一条 done（新完成的结论让观察者
+  // 补一次提示），再没有就 null。读取失败按 null 处理，不拖垮状态帧本身。
+  const SELF_UPDATE_FRAME_TTL_MS = 3000;
+  let selfUpdateFrameCache = null; // { at, value }
+  function selfUpdateStatusFrame() {
+    const at = Date.now();
+    if (selfUpdateFrameCache && at - selfUpdateFrameCache.at < SELF_UPDATE_FRAME_TTL_MS) return selfUpdateFrameCache.value;
+    let value = null;
+    try {
+      refreshClientUpdates();
+      const runs = listClientUpdateRuns(updateJournalDir).filter((run) => run.clientId === SELF_UPDATE_CLIENT_ID);
+      const running = runs.find((run) => run.state === "running") ?? null;
+      if (running) {
+        value = selfUpdateStatusPayload(running);
+      } else {
+        const recent = runs
+          .filter((run) => run.state === "done" && run.finishedAt && at - Date.parse(run.finishedAt) <= 15 * 60 * 1000)
+          .sort((a, b) => String(b.finishedAt ?? "").localeCompare(String(a.finishedAt ?? "")))[0] ?? null;
+        value = recent ? selfUpdateStatusPayload(recent) : null;
+      }
+    } catch {
+      value = null;
+    }
+    selfUpdateFrameCache = { at, value };
+    return value;
+  }
+
   // 最近一条「已下载待应用」的记录（finishedAt 最新的为准）。有效性现场判定：
   // 目标不比当前身份更新的记录视为过期——稳定/回退轨目标版本 ≤ 当前版本（下载后
   // 本地经别的途径已经到过或超过它），先行轨目标提交已是本地 HEAD。过期当场写上
@@ -2094,8 +2125,9 @@ export function createPanelRouter({
   // 登记 + 拉起下载 worker。轨道与目标身份一起登记：稳定轨带 release 的
   // version/tag；先行轨只带 targetSha（版本号要等下载后从 FETCH_HEAD 读出、由
   // worker 回填）。HTTP 面与自动下载调度共用；返回登记好的 run，拉起失败时记录
-  // 如实落 failed 并返回 null。
-  function registerSelfUpdateDownload({ track = "stable", targetVersion = null, targetTag = null, targetSha = null }) {
+  // 如实落 failed 并返回 null。autoApply 只由用户一键确认的入口置真：worker 在
+  // 下载核验通过后原地续跑应用段；自动下载调度不带它（只下载，绝不自动应用）。
+  function registerSelfUpdateDownload({ track = "stable", targetVersion = null, targetTag = null, targetSha = null, autoApply = false }) {
     const runId = randomUUID();
     const run = {
       runId,
@@ -2108,6 +2140,7 @@ export function createPanelRouter({
       result: null,
       workerPid: null,
       track,
+      autoApply: autoApply === true,
       targetVersion,
       targetTag,
       targetSha,
@@ -2151,7 +2184,8 @@ export function createPanelRouter({
       update = null;
     }
     // 先行轨按提交身份登记（remoteSha 来自强制检查，秒级新鲜）；稳定轨照旧按
-    // release 的 version/tag。两轨共用单飞锁与「已下载待应用」停留态。
+    // release 的 version/tag。两轨共用单飞锁与「已下载待应用」停留态；一键入口
+    // 带 autoApply——用户确认弹层里授权的就是「下载并应用」，worker 一条道跑完。
     if (update?.track === "bleeding" && update.identity !== false) {
       if (update.state !== "update_available" || !update.remoteSha) {
         return sendJson(res, 409, { ok: false, error: "no_update", message: "当前没有可安装的更新，请先检查更新" });
@@ -2160,7 +2194,7 @@ export function createPanelRouter({
       if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
         return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
       }
-      const run = registerSelfUpdateDownload({ track: "bleeding", targetSha: update.remoteSha });
+      const run = registerSelfUpdateDownload({ track: "bleeding", targetSha: update.remoteSha, autoApply: true });
       if (!run) {
         return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
       }
@@ -2173,7 +2207,7 @@ export function createPanelRouter({
     if (runningClientUpdate(updateJournalDir, SELF_UPDATE_CLIENT_ID)) {
       return sendJson(res, 409, { ok: false, error: "busy", message: "已有更新任务在进行中，请等待完成" });
     }
-    const run = registerSelfUpdateDownload({ targetVersion: update.release.version, targetTag: update.release.tag });
+    const run = registerSelfUpdateDownload({ targetVersion: update.release.version, targetTag: update.release.tag, autoApply: true });
     if (!run) {
       return sendJson(res, 500, { ok: false, error: "spawn_failed", message: "更新未能启动，请稍后重试" });
     }

@@ -4834,15 +4834,21 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(panelJs.includes("swapSignal && !swapAnnounced && !window.panelStartupRestart"), "换装事件在重启恢复页上不得派发");
     // 换装信号不能只靠看到 ready-to-restart：服务端监听器在该相位落盘后一秒内就
     // 点火自退，页面轮询经常来不及看到——应用中轮询落空（面板已退场）必须也算数。
-    assert.ok(/isApply && \(status === null \|\| status\?\.phase === "ready-to-restart" \|\| status\?\.phase === "waiting-panel"\)/.test(panelJs),
+    assert.ok(/const atSwap = status === null \|\| status\?\.phase === "ready-to-restart" \|\| status\?\.phase === "waiting-panel";/.test(panelJs),
       "换装信号必须覆盖「应用中轮询落空」，否则开屏在真实时序下永远盖不上");
+    assert.ok(/const swapSignal = sawApply && atSwap && \(status === null \|\| status\?\.state === "running"\);/.test(panelJs),
+      "换装信号只在任务仍在跑时派发：终态帧不得触发恢复监视（空等一次不会来的退场）");
+    // 一键任务（autoApply）从 download 一路跑到 apply：落空信号须等见过应用段
+    // （step=apply 或换装相位）才武装，下载期一次网络抖动不得误盖开屏。
+    assert.ok(panelJs.includes('if (status?.step === "apply" || status?.phase === "ready-to-restart" || status?.phase === "waiting-panel") sawApply = true;'),
+      "落空换装信号须以「见过应用段」为武装条件");
     const outcomeStart = panelJs.indexOf('if (status?.outcome === "updated")', panelJs.indexOf("function renderSelfUpdateOutcome"));
     const outcome = panelJs.slice(outcomeStart, outcomeStart + 1500);
     assert.ok(outcome.includes("window.panelStartupRestart"), "updated 结局按「本页是否换装产物」分流");
     assert.ok(outcome.includes("anyswitch:self-update-shown:"), "新页面直接显示结论时记入已读，/last 不重复补显");
   });
 
-  it("一键更新：一次确认覆盖下载+应用，下载完成自动接续应用，staged 路径保持原样", () => {
+  it("一键更新：一次确认覆盖下载+应用，应用接续在服务端 autoApply，前端不再代点", () => {
     // 确认弹层合并为一次：正文承诺「自动下载并应用」，确认键是「立即更新」，
     // 运行中 Agent 的中断警示从「应用」那次确认前移到这唯一的一次。
     const startStart = panelJs.indexOf("async function startSelfUpdate()");
@@ -4850,20 +4856,27 @@ describe("panel.html 面板重启状态机契约", () => {
     assert.ok(start.length > 500, "未真正取到 startSelfUpdate 函数体，后续断言会全部落空");
     assert.ok(start.includes('"立即更新"'), "一键更新的确认键");
     assert.ok(start.includes('fetchOnce("/api/agents")'), "运行中 Agent 的中断警示前移到首次确认");
-    assert.ok(start.includes('trackSelfUpdate(started.runId, started.targetVersion || target, "staging", false, true)'),
-      "一键下载的 run 必须带 oneClick 标记（先行轨的服务端登记没有版本号，用确认时的目标标识兜底）");
-    assert.ok(!panelJs.includes("下载完成后由你选择何时应用"), "旧两步确认文案不得残留");
-    // 下载完成即接续应用：oneClick 分支先于 staged 停留态。
+    assert.ok(start.includes('trackSelfUpdate(started.runId, started.targetVersion || target, "staging", false)'),
+      "一键 run 交给服务端 autoApply 流水线，前端只跟同一 runId 的进度");
+    assert.ok(!panelJs.includes("oneClick"), "前端自动接续应用已收编进服务端，oneClick 标记不得残留");
+    // 下载不再途经前端接续：downloaded 结局只属于自动下载的停留态（staged）。
     const outcomeStart = panelJs.indexOf("function renderSelfUpdateOutcome");
     const downloaded = panelJs.slice(panelJs.indexOf('status?.outcome === "downloaded"', outcomeStart), panelJs.indexOf('status?.outcome === "updated"', outcomeStart));
-    assert.ok(downloaded.includes("if (oneClick) { void applySelfUpdateRun(status); return; }"),
-      "oneClick 下载完成必须自动接续应用");
-    assert.ok(downloaded.includes("renderSelfUpdateStaged()"), "非 oneClick（自动下载产物）仍落 staged 停留态");
-    // 应用入口共用：手动「应用更新」与自动接续走同一个函数、同一个端点。
+    assert.ok(downloaded.includes("renderSelfUpdateStaged()"), "downloaded（自动下载产物）落 staged 停留态");
+    assert.ok(!downloaded.includes("applySelfUpdateRun(status)"), "下载完成不得再由前端接续应用");
+    // 应用入口：手动「应用更新」仍走同一端点与 isApply 轮询。
     const applyStart = panelJs.indexOf("async function applySelfUpdateRun");
     const apply = panelJs.slice(applyStart, panelJs.indexOf("async function startSelfUpdateApply", applyStart));
     assert.ok(apply.includes('request("POST", "/api/self-update/apply"'), "apply 仍走同一端点");
     assert.ok(apply.includes('trackSelfUpdate(staged.runId, staged.targetVersion, "installing", true)'), "apply 以 isApply 模式接续轮询");
+  });
+
+  it("自更新捎带帧喂给页面级观察者：完成提示与换装接管在关于页之外也成立", () => {
+    assert.ok(panelJs.includes("function createSelfUpdateFrameWatcher("), "观察者工厂在主脚本");
+    const feedStart = panelJs.indexOf('lastPanelIdentity = { pid: res?.pid ?? null, startTime: res?.startTime ?? null };');
+    const feed = panelJs.slice(feedStart, panelJs.indexOf('const dot = $("topDot");', feedStart));
+    assert.ok(feed.includes("selfUpdateWatcher.frame(res?.selfUpdate ?? null)"), "状态帧把 selfUpdate 捎带喂给观察者（旧版服务端无字段喂 null）");
+    assert.ok(panelJs.includes("selfUpdateWatcher.setAboutProbe("), "关于页跟踪探针接线：本页跟踪时观察者让位");
   });
 
   it("开屏动画关到「关」时，看板重启的复播入口整层不出", () => {

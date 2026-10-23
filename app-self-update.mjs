@@ -9,6 +9,11 @@
 // 工作树），然后停 watchdog、重启 relay、等 panel-host 经 restart-helper 自杀
 // 换新并验证复活；新面板未接管以回滚点退回旧版并重装依赖。
 //
+// autoApply 记录（用户一键确认过「下载并应用」）不在 staged 停留：下载核验通过
+// 后同一个 worker 原地把记录翻成 apply 顺延执行，下载与应用之间没有「等前端来
+// 点」的空窗——浏览器页面在不在、在哪个页签都不影响跑完。自动下载的记录绝不带
+// 这个标记，仍旧停在 staged 等用户确认。
+//
 // 三条轨道共用同一副骨架，只差目标身份与核验键（journal 记 track 字段）：
 //   stable  —— 正式 release tag，核验 package.json 版本；
 //   bleeding —— 上游默认分支 HEAD 的单个提交（targetSha），核验提交 SHA，版本号
@@ -174,8 +179,11 @@ export async function runSelfUpdate({
   const appDir = run.appDir ?? null;
   // 轨道与目标身份：track 缺席的旧记录一律按 stable 走（与既有 journal 兼容）。
   const track = run.track === "bleeding" || run.track === "rollback" ? run.track : "stable";
-  const targetVersion = run.targetVersion ?? null;
+  // targetVersion 用 let：先行轨的版本号要等下载后才从 FETCH_HEAD 读出，autoApply
+  // 顺延进应用段时带着这份回填值走完剩余流程。
+  let targetVersion = run.targetVersion ?? null;
   const targetTag = run.targetTag ?? null;
+  const autoApply = run.autoApply === true;
   const targetSha = track === "bleeding" ? String(run.targetSha ?? "") : null;
   const shortSha = targetSha ? targetSha.slice(0, 7) : null;
   const repoUrl = run.repoUrl ?? APP_REPO_URL;
@@ -260,19 +268,30 @@ export async function runSelfUpdate({
       const currentRun = readClientUpdateRun(journalDir, runId) ?? run;
       writeClientUpdateRun(journalDir, { ...currentRun, targetVersion: fetchedVersion });
       // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
-      setPhase("staged");
-      return finish({ outcome: "downloaded", message: `已下载 ${shortSha}，应用后生效`, beforeVersion, latestVersion: fetchedVersion });
+      // autoApply 的记录不停留，带着回填的版本号顺延进应用段。
+      if (!autoApply) {
+        setPhase("staged");
+        return finish({ outcome: "downloaded", message: `已下载 ${shortSha}，应用后生效`, beforeVersion, latestVersion: fetchedVersion });
+      }
+      targetVersion = fetchedVersion;
+    } else {
+      // 不脱裤查验：直接读 tag 里的 package.json，版本不符在此止步——磁盘上什么都没动。
+      const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
+      let tagVersion = null;
+      try { tagVersion = JSON.parse(shown.output).version ?? null; } catch { tagVersion = null; }
+      if (!shown.ok || tagVersion !== targetVersion) {
+        return finish({ outcome: "failed", message: `下载的代码版本（${tagVersion ?? "未知"}）与目标（${targetVersion}）不一致，已中止更新`, beforeVersion, latestVersion: targetVersion });
+      }
+      if (!autoApply) {
+        // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
+        setPhase("staged");
+        return finish({ outcome: "downloaded", message: `已下载 ${targetVersion}，应用后生效`, beforeVersion, latestVersion: targetVersion });
+      }
     }
-    // 不脱裤查验：直接读 tag 里的 package.json，版本不符在此止步——磁盘上什么都没动。
-    const shown = await runGit({ args: ["show", "FETCH_HEAD:package.json"], cwd: appDir, spawnFn, env, raw: true });
-    let tagVersion = null;
-    try { tagVersion = JSON.parse(shown.output).version ?? null; } catch { tagVersion = null; }
-    if (!shown.ok || tagVersion !== targetVersion) {
-      return finish({ outcome: "failed", message: `下载的代码版本（${tagVersion ?? "未知"}）与目标（${targetVersion}）不一致，已中止更新`, beforeVersion, latestVersion: targetVersion });
-    }
-    // staged 是「已下载待应用」的对外标记：面板据它把按钮换成「应用更新」。
-    setPhase("staged");
-    return finish({ outcome: "downloaded", message: `已下载 ${targetVersion}，应用后生效`, beforeVersion, latestVersion: targetVersion });
+    // 一键任务原地续跑：记录翻成 apply（页面轮询见 step=apply 才武装换装信号），
+    // 同一个 worker 顺延进下面的应用段——下载与应用之间没有「等前端来点」的空窗。
+    const carried = readClientUpdateRun(journalDir, runId) ?? run;
+    writeClientUpdateRun(journalDir, { ...carried, step: "apply", targetVersion });
   }
 
   // ── 应用：换装 + 依赖 + 重启 ──

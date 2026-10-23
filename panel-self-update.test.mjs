@@ -2,10 +2,11 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import { createPanelRouter } from "./panel.mjs";
 import { readClientUpdateRun, writeClientUpdateRun } from "./client-update-journal.mjs";
 
@@ -139,6 +140,19 @@ describe("POST /panel/api/self-update（下载）", () => {
       // appDir 就是 panel.mjs 所在目录（与测试文件同目录），与检出位置的名字无关。
       assert.equal(recorded.appDir, dirname(fileURLToPath(import.meta.url)));
       assert.equal(watch.scheduled, 0, "下载阶段不布换装监听器：它只等换装阶段，应用时才布");
+    });
+  });
+
+  test("一键登记带 autoApply：worker 下载核验通过后原地续跑应用段", async () => {
+    const spawned = [];
+    await withPanel({
+      releaseService: selfUpdateReleaseService(),
+      spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return 424242; },
+    }, async (get, post) => {
+      const result = await post("/panel/api/self-update", {});
+      assert.equal(result.status, 202);
+      const recorded = readClientUpdateRun(spawned[0].journalDir, result.body.runId);
+      assert.equal(recorded.autoApply, true, "一键确认授权的就是下载并应用：记录带 autoApply");
     });
   });
 
@@ -457,6 +471,28 @@ describe("自动检测并下载更新（设置项默认关）", () => {
         // 已有在跑任务时再泵一拍：不重复登记。
         await capture.captured.pump();
         assert.equal(spawned.length, 1);
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("自动下载的记录不带 autoApply（只下载，绝不自动应用）", async () => {
+    const capture = autoDownloadCapture();
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-self-update-settings-"));
+    const spawned = [];
+    try {
+      withSettings(baseDir, { autoDownloadUpdates: true });
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService(),
+        spawnSelfUpdateWorkerFn: (request) => { spawned.push(request); return process.pid; },
+        ...capture,
+      }, async (get, post) => {
+        await capture.captured.pump();
+        assert.equal(spawned.length, 1);
+        const recorded = readClientUpdateRun(spawned[0].journalDir, spawned[0].runId);
+        assert.notEqual(recorded.autoApply, true, "自动下载停在「已下载待应用」，绝不自动应用");
       });
     } finally {
       rmSync(baseDir, { recursive: true, force: true });
@@ -863,5 +899,162 @@ describe("稳定轨不一致判定（drift）", () => {
       assert.equal(body.drift.offTag, null, "无本地身份时跳过 HEAD 维度");
       assert.equal(body.drift.localCommit, null);
     });
+  });
+});
+
+describe("GET /panel/api/status 的 selfUpdate 捎带", () => {
+  // 捎带是页面级观察者的唯一数据源：有 running 给 running，否则给 15 分钟内
+  // 最近一条 done（新完成的结论让观察者补一次提示），再没有就 null。
+  // runId 必须 UUID 形态：journal 读写按 RUN_ID 形态校验，不合形态的记录读不回。
+  const runningRecord = () => ({
+    runId: "00000000-0000-4000-8000-0000000000a1",
+    clientId: "anyswitch",
+    action: "update",
+    step: "download",
+    state: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    result: null,
+    workerPid: process.pid,
+    track: "stable",
+    targetVersion: "0.7.0",
+    targetTag: "v0.7.0",
+    phase: "staging",
+  });
+
+  test("无记录：null（前端观察者按无任务处理）", async () => {
+    await withPanel({}, async (get) => {
+      const body = (await get("/panel/api/status")).body;
+      assert.equal(body.selfUpdate, null);
+    });
+  });
+
+  test("进行中的记录：原样捎带 phase/step", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, runningRecord());
+      const body = (await get("/panel/api/status")).body;
+      assert.equal(body.selfUpdate.runId, "00000000-0000-4000-8000-0000000000a1");
+      assert.equal(body.selfUpdate.state, "running");
+      assert.equal(body.selfUpdate.phase, "staging");
+      assert.equal(body.selfUpdate.step, "download");
+    });
+  });
+
+  test("刚完成的结论（15 分钟内）：捎带终态 outcome", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, {
+        ...stagedRun({ runId: "00000000-0000-4000-8000-0000000000a2" }),
+        finishedAt: new Date(Date.now() - 60 * 1000).toISOString(),
+      });
+      const body = (await get("/panel/api/status")).body;
+      assert.equal(body.selfUpdate.runId, "00000000-0000-4000-8000-0000000000a2");
+      assert.equal(body.selfUpdate.state, "done");
+      assert.equal(body.selfUpdate.outcome, "downloaded");
+    });
+  });
+
+  test("超过 15 分钟的旧结论：不捎带（补显窗口由 /last 单独管）", async () => {
+    await withPanel({}, async (get, post, ctx) => {
+      writeClientUpdateRun(ctx.journalDir, {
+        ...stagedRun({ runId: "00000000-0000-4000-8000-0000000000a3" }),
+        finishedAt: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+      });
+      const body = (await get("/panel/api/status")).body;
+      assert.equal(body.selfUpdate, null);
+    });
+  });
+});
+
+describe("自更新页面级观察者（panel.js createSelfUpdateFrameWatcher）", () => {
+  const panelJs = readFileSync(new URL("./panel-ui/panel.js", import.meta.url), "utf8");
+
+  function watcherHarness() {
+    const match = panelJs.match(/  function createSelfUpdateFrameWatcher\([\s\S]*?\n  \}/);
+    assert.ok(match, "watcher factory must exist in panel.js");
+    const storage = new Map();
+    const localStorage = {
+      getItem: (key) => (storage.has(String(key)) ? storage.get(String(key)) : null),
+      setItem: (key, value) => storage.set(String(key), String(value)),
+    };
+    const factory = vm.runInNewContext(`(${match[0]})`, { localStorage });
+    const toasts = [];
+    const swaps = [];
+    const flags = { restarting: false, startupRestart: false };
+    let aboutTracking = false;
+    const watcher = factory({
+      toast: (message, isErr) => toasts.push({ message, isErr }),
+      dispatchSwap: () => swaps.push(1),
+      isPanelRestarting: () => flags.restarting,
+      isStartupRestartPage: () => flags.startupRestart,
+    });
+    watcher.setAboutProbe(() => aboutTracking);
+    const doneFrame = (outcome, message = `结论 ${outcome}`) => ({
+      runId: "r1", state: "done", step: "apply", phase: "waiting-panel",
+      outcome, message, finishedAt: "2026-10-23T00:00:00.000Z", targetVersion: "0.7.0",
+    });
+    return {
+      watcher,
+      toasts,
+      swaps,
+      flags,
+      storage,
+      frame: (payload) => watcher.frame(payload),
+      doneFrame,
+      setTracking: (value) => { aboutTracking = value; },
+    };
+  }
+
+  test("running / downloaded / 无任务帧：什么都不触发", () => {
+    const h = watcherHarness();
+    h.frame({ runId: "r1", state: "running", step: "download", phase: "staging", outcome: null });
+    h.frame({ runId: "r1", state: "done", outcome: "downloaded", message: "已下载 0.7.0，应用后生效" });
+    h.frame(null);
+    assert.equal(h.toasts.length, 0);
+    assert.equal(h.swaps.length, 0);
+    assert.equal(h.storage.size, 0, " downloaded 停留态不是收场：不落已读");
+  });
+
+  test("无刷新终态（失败/回滚/待重启生效）：toast 一次并落已读，重帧不重弹", () => {
+    const h = watcherHarness();
+    for (const [outcome, isErr] of [["failed", true], ["rolled_back", true], ["updated_pending_restart", false]]) {
+      h.frame(h.doneFrame(outcome));
+      assert.equal(h.toasts.length, 1, `${outcome} 就地提示一次`);
+      assert.equal(h.toasts[0].isErr, isErr);
+      assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), "1");
+      h.frame(h.doneFrame(outcome));
+      assert.equal(h.toasts.length, 1, "已读标记压制重弹");
+      h.storage.clear();
+      h.toasts.length = 0;
+    }
+  });
+
+  test("updated 终态：派换装事件（恰一次），不 toast 不落已读——结论归换装后的新页面补显", () => {
+    const h = watcherHarness();
+    h.frame(h.doneFrame("updated", "已更新到 0.7.0"));
+    assert.equal(h.swaps.length, 1);
+    assert.equal(h.toasts.length, 0);
+    assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), undefined, "已读不落：换装后的新页面要经 /last 补显一次");
+    h.frame(h.doneFrame("updated", "已更新到 0.7.0"));
+    assert.equal(h.swaps.length, 1, "同一 run 只派一次，恢复失败也不反复重派");
+  });
+
+  test("归属让位：关于页跟踪、恢复在途、重启恢复页都不抢提示", () => {
+    const h = watcherHarness();
+    h.setTracking(true);
+    h.frame(h.doneFrame("failed"));
+    assert.equal(h.toasts.length, 0, "关于页在跟踪：提示归它");
+    h.setTracking(false);
+    h.frame(h.doneFrame("failed"));
+    assert.equal(h.toasts.length, 1, "关于页放弃后观察者接管");
+
+    const restarting = watcherHarness();
+    restarting.flags.restarting = true;
+    restarting.frame(restarting.doneFrame("updated"));
+    assert.equal(restarting.swaps.length, 0, "恢复监视在途：换装事件已由发起方派过");
+
+    const revived = watcherHarness();
+    revived.flags.startupRestart = true;
+    revived.frame(revived.doneFrame("failed"));
+    assert.equal(revived.toasts.length, 0, "本页就是换装产物：结论由 /last 补显通道负责");
   });
 });

@@ -125,10 +125,14 @@ function harness(respond = () => latest(), options = {}) {
     getElementById: (id) => nodes.get(id),
     createElement: (tag) => new Element(tag),
     querySelector: () => null,
+    addEventListener: () => {},
+    // 换装事件捕获：pollSelfUpdate 见到换装信号会 dispatchEvent 到 doc 上。
+    dispatchEvent: (event) => { if (event?.type === "anyswitch:self-update-swap") swaps.push(event); return true; },
   };
   const calls = [];
   const mutations = [];
   const toasts = [];
+  const swaps = [];
   const respondPost = options.respondPost ?? (() => { throw new Error("unexpected POST"); });
   const request = (method, path, body) => {
     if (method === "POST") {
@@ -154,9 +158,14 @@ function harness(respond = () => latest(), options = {}) {
     setItem: (key, value) => { storage.set(String(key), String(value)); },
     removeItem: (key) => { storage.delete(String(key)); },
   };
-  const factory = vm.runInNewContext(`(${match[0]})`, { URL, URLSearchParams, setTimeout, clearTimeout, localStorage });
+  const factory = vm.runInNewContext(`(${match[0]})`, {
+    URL, URLSearchParams, setTimeout, clearTimeout, localStorage,
+    // 自更新流程会触到换装事件与「本页是否换装产物」判定：给最小桩。
+    window: {},
+    CustomEvent: class { constructor(type) { this.type = type; } },
+  });
   const controller = factory({ request, doc, notify: options.notify ?? ((message, isErr) => { toasts.push({ message, isErr }); }), schedule, cancelSchedule });
-  return { nodes, doc, calls, mutations, toasts, flushJobs, controller, storage, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
+  return { nodes, doc, calls, mutations, toasts, swaps, flushJobs, controller, storage, get: (id) => nodes.get(id), row: (id) => nodes.get("aboutClients").children.find((node) => node.dataset.clientId === id) };
 }
 
 function normal(path) {
@@ -1062,4 +1071,104 @@ test("先行与不一致的定稿文案逐字落盘（对稿结论）", () => {
   assert.ok(source.includes("领先于官方最新"), "仅 ahead");
   assert.ok(source.includes("当前安装不是官方发布的版本，官方最新为"), "仅游离");
   assert.ok(source.includes("已检查更新"), "不一致家族的状态行中性文案");
+});
+
+// ── 一键自更新（服务端 autoApply 流水线，前端只跟同一 runId）──────────────
+const appUpdateAvailable = () => ({
+  state: "update_available",
+  track: "stable",
+  checkedAt: "2026-09-18T08:01:00Z",
+  drift: null,
+  release: { version: "0.7.0", tag: "v0.7.0", prerelease: false, url: "https://example.com/releases/tag/v0.7.0" },
+});
+
+// 一键流程公共驱动：进页 → 点「立即更新」→ 确认弹层 → POST 登记 → 轮询帧脚本。
+function selfUpdateHarness({ frames, last = null } = {}) {
+  let frameIndex = 0;
+  let lastOutcome = last;
+  const h = harness((path) => {
+    if (path.startsWith("/api/self-update/r1")) {
+      const frame = frames[Math.min(frameIndex, frames.length - 1)];
+      frameIndex += 1;
+      if (!frame) throw new Error("poll transient failure");
+      return frame;
+    }
+    if (path === "/api/updates") return appUpdateAvailable();
+    if (path === "/api/self-update/active") return { ok: true, runs: [], staged: null };
+    if (path === "/api/self-update/last") return lastOutcome;
+    return normal(path);
+  }, {
+    respondPost: ({ path }) => {
+      if (path === "/api/self-update") return { ok: true, runId: "r1", targetVersion: "0.7.0" };
+      throw new Error(`unexpected POST ${path}`);
+    },
+  });
+  return {
+    h,
+    publishLast: (record) => { lastOutcome = record; },
+  };
+}
+
+async function startOneClick(h) {
+  h.controller.enter();
+  await tick(); await tick();
+  h.get("aboutSelfUpdate").onclick();
+  await tick();
+  h.get("clientUpdateModalConfirm").click();
+  await tick(); await tick();
+}
+
+test("一键任务：下载期落空轮询不派换装，翻到 apply 后落空才派；旧页面不落已读标记", async () => {
+  const { h } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "staging", step: "download", track: "stable", targetVersion: "0.7.0" },
+      null, // 下载期一次落空轮询（网络抖动）：信号未武装，不得误盖开屏
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      null, // 应用中落空（面板已退场）：这才是换装信号
+      {
+        ok: true, runId: "r1", state: "done", step: "apply", phase: "waiting-panel", track: "stable",
+        targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: "2026-10-23T00:05:00.000Z",
+        outcome: "updated", message: "已更新到 0.7.0", beforeVersion: "0.6.1", afterVersion: "0.7.0", latestVersion: "0.7.0",
+      },
+    ],
+  });
+  await startOneClick(h);
+  assert.deepEqual(h.mutations.map((m) => m.path), ["/api/self-update"], "一键更新只发一次登记 POST，应用由服务端接续");
+  for (let index = 0; index < 5; index++) {
+    h.flushJobs();
+    await tick();
+  }
+  assert.equal(h.swaps.length, 1, "下载期落空不派、应用期落空派一次");
+  assert.match(h.get("aboutUpdateStatus").textContent, /即将刷新/, "旧页面只交代即将刷新");
+  assert.ok(h.toasts.some((t) => /已更新到 0\.7\.0/.test(t.message)));
+  assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), undefined, "旧页面不落已读：结论由换装后的新页面经 /last 补显");
+});
+
+test("无刷新终态（失败）：本页 toast+落已读，再进页 /last 补显通道不再重弹", async () => {
+  const failedRecord = {
+    ok: true, runId: "r1", state: "done", step: "apply", phase: "installing", track: "stable",
+    targetVersion: "0.7.0", startedAt: "2026-10-23T00:00:00.000Z", finishedAt: new Date().toISOString(),
+    outcome: "failed", message: "应用新版本失败，请稍后重试", beforeVersion: "0.6.1", latestVersion: "0.7.0",
+  };
+  const { h, publishLast } = selfUpdateHarness({
+    frames: [
+      { ok: true, runId: "r1", state: "running", phase: "installing", step: "apply", track: "stable", targetVersion: "0.7.0" },
+      failedRecord,
+    ],
+  });
+  await startOneClick(h);
+  for (let index = 0; index < 3; index++) {
+    h.flushJobs();
+    await tick();
+  }
+  assert.equal(h.swaps.length, 0, "失败收场不派换装");
+  assert.ok(h.toasts.some((t) => t.isErr && /失败/.test(t.message)));
+  assert.equal(h.storage.get("anyswitch:self-update-shown:r1"), "1", "本页已交代，观察者与补显通道凭已读标记退场");
+  // 再进页（模拟刷新后回关于页）：/last 有结论但已读过，不重弹。
+  const toastsBefore = h.toasts.length;
+  publishLast(failedRecord);
+  h.controller.leave();
+  await h.controller.enter();
+  await tick(); await tick();
+  assert.equal(h.toasts.length, toastsBefore, "已读标记压制 /last 补显");
 });
