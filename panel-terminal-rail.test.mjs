@@ -1536,6 +1536,7 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
       let terminalRailHistory = { endpoint: "kimi", sessions: [{ id: "s-1", endpoint: "kimi" }], fetchedAt: 1, error: null };
       const rendered = [];
       const refetched = [];
+      function terminalRailSessionMap() { return { "t-blank": { id: "t-blank" } }; }
       function renderTerminalRailHistory(agentId) { rendered.push(agentId); }
       function refreshTerminalRailHistory({ endpoint }) { refetched.push(endpoint); }
       ${extractFn("syncTerminalRailHistory")}
@@ -1549,6 +1550,29 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     assert.deepEqual(fn.rendered, [""], "同参二次调用早退，不重渲");
     fn.sync("kimi");
     assert.deepEqual(fn.refetched, ["kimi"], "切回 agent 上下文才走重拉");
+  });
+
+  // 空态回落中性空树（用户 2026-10-24 裁决）：一个终端都没了（关光最后一个页签/
+  // 远端关光/进程自退），栏不再挂已关 agent 的会话表——会话栏是壳的资产，空态保持
+  // 终端页的正常形态；与「空白壳还开着」的保史行为（f2a60f0）按开着的终端数分界。
+  it("空态清栏：零终端时回落中性空树，不再挂已关 agent 的会话表（vm 真跑）", () => {
+    const fn = new Function(`
+      let terminalRailHistory = { endpoint: "kimi", sessions: [{ id: "s-1", endpoint: "kimi" }], fetchedAt: 1, error: null };
+      const rendered = [];
+      const refetched = [];
+      function terminalRailSessionMap() { return {}; }
+      function renderTerminalRailHistory(agentId) { rendered.push(agentId); }
+      function refreshTerminalRailHistory({ endpoint }) { refetched.push(endpoint); }
+      ${extractFn("syncTerminalRailHistory")}
+      return { sync: syncTerminalRailHistory, state: () => terminalRailHistory, rendered, refetched };
+    `)();
+    fn.sync("");
+    assert.deepEqual(fn.state().sessions, [], "零终端＝空态：上次加载的历史整份清空");
+    assert.equal(fn.state().endpoint, "", "endpoint 归零（后续同参早退、切回 agent 自然重拉）");
+    assert.deepEqual(fn.rendered, [""], "按空态重渲一次");
+    fn.sync("");
+    assert.deepEqual(fn.rendered, [""], "同参二次调用早退");
+    assert.deepEqual(fn.refetched, [], "空态不发重拉");
   });
 });
 

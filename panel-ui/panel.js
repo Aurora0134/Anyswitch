@@ -7579,6 +7579,9 @@ async function api(method, path, body) {
           closeAllTerminalStreams();
           renderTerminalPreviewTabs();
           renderTerminalEmptyState();
+          // 会话栏同拍回落中性空树（不等 1s 轮询）：终端都没了，栏不该再挂已关
+          // agent 的会话表——空态保持终端页的正常形态（用户 2026-10-24 裁决）。
+          renderTerminalRail();
           return;
         }
         renderTerminalPreviewSession();
@@ -9490,11 +9493,18 @@ async function api(method, path, body) {
   function syncTerminalRailHistory(agentId) {
     if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
-      // 活跃页签是空白外壳（无 agent 归属）时不清表：沿用上次加载的历史，用户
-      // 才点得到行、把空白壳内切接管（M12-A 判定矩阵空白壳行）。真机验收发现
-      // 旧行为在此清空 history，矩阵那一行 thereby 永远不可达；切回 agent 上
-      // 下文时 endpoint 对不上，自然会走下面的重拉。从未加载过时本就是空表。
-      terminalRailHistory = { ...terminalRailHistory, endpoint: "" };
+      // 两种无 agent 焦点，处置不同（空态回落中性空树＝用户 2026-10-24 裁决）：
+      // ①空白外壳页签还开着——保留上次加载的历史，用户才点得到行、把空白壳
+      //   内切接管（M12-A 判定矩阵空白壳行，f2a60f0；真机验收发现旧行为在此
+      //   清空 history 会让矩阵那一行永远不可达）。
+      // ②一个终端都没了（关光最后一个页签/远端关光/进程自退）——栏回落中性
+      //   空树，不再挂已关 agent 的会话表：会话栏是壳的资产，空态保持终端页
+      //   的正常形态。切回 agent 上下文时 endpoint 对不上自然走重拉。
+      if (Object.keys(terminalRailSessionMap()).length === 0) {
+        terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
+      } else {
+        terminalRailHistory = { ...terminalRailHistory, endpoint: "" };
+      }
       terminalRailFlipMode = "instant";
       renderTerminalRailHistory("");
       return;
