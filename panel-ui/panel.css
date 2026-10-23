@@ -721,6 +721,12 @@
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
   .rail-term-row:hover { background: var(--surface-hover); }
+  /* ── 归档/撤销退场幽灵行（M13） ──
+     离开布局的行克隆补进滚动层（.rail-term-scroll 是 position:relative 的最近
+     定位祖先，幽灵随内容滚动）：inert＋不可命中，100ms 淡出后由 JS 移除。动画走
+     WAAPI（JS 的 matchMedia 门拦 reduced-motion，全站 CSS 压零规则拦不到 WAAPI），
+     这里只管脱离布局流、不挡指针。 */
+  .rail-term-ghost { position: absolute; pointer-events: none; margin: 0; }
   /* ── 运行中转圈（M12-B，dsh 实测规格逐项） ──
      行首 16×20 前导槽：非运行行该槽本来空着（idle 的 live 行是 7×7 状态点、非
      live 行全空），转圈是填入空槽、不替换任何图标。槽内挂读屏文本「进行中」。
@@ -1667,18 +1673,26 @@
 
   /* 浮动 Toast */
   /* 顶部居中浮层：落在 56px 顶栏下方 12px 处，不遮顶栏 tab——底部位置实测难以
-     察觉（带动作的刷新结果报信需要更高可见性，全站 toast 统一上移）；
-     入场由上方 8px 滑下。z-index 须在 modal-overlay（300）之上：弹窗开着时
-     弹出的报错（如导入弹窗里的互斥提示）不能被蒙层盖住。 */
+     察觉（带动作的刷新结果报信需要更高可见性，全站 toast 统一上移）；入场由上方
+     6px 滑下（160ms ease-out，M13 对齐 dsh）；驻留期满转 1s 只淡出不位移
+     （is-leaving，落暗由 JS 在淡出期满摘类），动作钮点击瞬时消失（is-gone 压
+     过渡）。z-index 须在 modal-overlay（300）之上：弹窗开着时弹出的报错（如导入
+     弹窗里的互斥提示）不能被蒙层盖住。reduced-motion 走全站压零规则
+     （*{transition:none!important}），入场/淡出全瞬时。 */
   .toast {
-    position: fixed; top: 68px; left: 50%; transform: translateX(-50%) translateY(-8px);
+    position: fixed; top: 68px; left: 50%; transform: translateX(-50%) translateY(-6px);
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-md, 8px); box-shadow: var(--shadow-md); padding: 8px 16px;
     font-size: 12.5px; font-weight: 600; color: var(--text); opacity: 0;
-    transition: all 180ms var(--ease-out); pointer-events: none; z-index: 400;
+    transition: opacity 160ms var(--ease-out), transform 160ms var(--ease-out); pointer-events: none; z-index: 400;
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast.err { color: var(--danger); border-color: var(--danger-border); }
+  /* 驻留期满的收场（M13）：只淡出不位移，1s；须后置于 .toast.show（同特异性，
+     层叠序取胜），is-gone 同理再后置 */
+  .toast.is-leaving { opacity: 0; transition: opacity 1s var(--ease-out); }
+  /* 动作钮点击的瞬时收场（M13）：压掉一切过渡，摘类当帧生效 */
+  .toast.is-gone { transition: none; }
   /* toast 动作小字（如渠道刷新结果尾部的「查看差异」）：accent 实色可点击。
      基座 .toast 不拦指针（float 层不遮下方操作），动作小字要可点必须在可见态
      显式开回命中测试——与 .store-refresh-status.show .srs-diff-link 同款解法 */

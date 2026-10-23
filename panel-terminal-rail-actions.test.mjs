@@ -2,6 +2,8 @@
 // 断言分两层：静态源码（HTML 骨架 / CSS 观感红线 / JS 挂点与文案逐字）+ vm 真跑
 // （过滤与归组、归档两分支、toast 撤销、钉底分层结构、去重两分支）。
 // 取样惯例照 panel-terminal-rail.test.mjs：源码字符串断言 + 按函数名切源码进桩环境。
+// M13 追加：归档/撤销 FLIP（退场幽灵行＋flip 门＋armed 门）、toast 动效（入场/
+// 淡出/瞬时收场）与 toast 第二钮「筛选已归档会话」（文案逐字批准，全文件唯一新增文案）。
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -122,6 +124,39 @@ function rowHtmlSandbox(prefs) {
   return fn;
 }
 
+// 归档/撤销交互沙盒（S1 与 M13 共用）：归档两分支真跑——本地态、POST、toast opts。
+const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] }, viewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} } } = {}) => {
+  const log = { posts: [], toasts: [], renders: 0, removed: [], flipModes: [], viewChoice: null };
+  const fn = new Function("session", "log", "apiImpl", "prefs", "viewPrefs", `
+    let terminalRailPrefs = prefs;
+    let terminalRailHistory = { endpoint: "kimi", sessions: [session], fetchedAt: 1, error: null };
+    let terminalRailFlipMode = "instant";
+    const terminalRailMotionArmed = false;
+    const terminalRailViewPrefs = viewPrefs;
+    function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
+    function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
+    function panelError(err, fallback) { return fallback; }
+    function renderTerminalRail() { log.renders += 1; }
+    function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); }
+    function terminalRailAgentId() { return "kimi"; }
+    function $(id) { return null; }
+    function applyTerminalRailViewChoice(field, value) { log.viewChoice = { field, value }; }
+    ${extractFn("terminalRailArchivedKey")}
+    ${extractFn("terminalRailMotionEnabled")}
+    ${extractFn("terminalRailSnapshotRows")}
+    ${extractFn("terminalRailMountExitGhosts")}
+    ${extractFn("terminalRailRerenderExitFlip")}
+    ${extractFn("terminalRailArchiveSession")}
+    ${extractFn("terminalRailUnarchiveSession")}
+    return {
+      archive: () => terminalRailArchiveSession(session.id),
+      unarchive: (endpoint, id) => terminalRailUnarchiveSession(endpoint, id),
+      prefs: () => terminalRailPrefs,
+    };
+  `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs, viewPrefs);
+  return { fn, log };
+};
+
 describe("S1 会话归档（finding 1a）", () => {
   describe("过滤与渲染（vm 真跑）", () => {
     const HISTORY = {
@@ -146,7 +181,7 @@ describe("S1 会话归档（finding 1a）", () => {
         prefs: { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [] },
       });
       withArchived.fn.render("kimi");
-      assert.ok(!withArchived.list.html.includes('data-rail-term-resume="s-1"'), "归档行不进列表（瞬时消失，resetKey）");
+      assert.ok(!withArchived.list.html.includes('data-rail-term-resume="s-1"'), "归档行不进列表（立即出布局，M13 起由退场幽灵行接手视觉）");
       assert.ok(withArchived.list.html.includes('data-rail-term-resume="s-2"'), "同组未归档行不受影响");
 
       // 计数口径：alpha 3 条 → 归档 1 条后剩 2 条；再补 4 条让组超过一档，
@@ -209,30 +244,6 @@ describe("S1 会话归档（finding 1a）", () => {
   });
 
   describe("归档交互两分支（vm 真跑）", () => {
-    const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [] } } = {}) => {
-      const log = { posts: [], toasts: [], renders: 0, removed: [] };
-      const fn = new Function("session", "log", "apiImpl", "prefs", `
-        let terminalRailPrefs = prefs;
-        let terminalRailHistory = { endpoint: "kimi", sessions: [session], fetchedAt: 1, error: null };
-        let terminalRailFlipMode = "instant";
-        function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
-        function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
-        function panelError(err, fallback) { return fallback; }
-        function renderTerminalRail() { log.renders += 1; }
-        function renderTerminalRailHistory() { log.renders += 1; }
-        function terminalRailAgentId() { return "kimi"; }
-        ${extractFn("terminalRailArchivedKey")}
-        ${extractFn("terminalRailArchiveSession")}
-        ${extractFn("terminalRailUnarchiveSession")}
-        return {
-          archive: () => terminalRailArchiveSession(session.id),
-          unarchive: (endpoint, id) => terminalRailUnarchiveSession(endpoint, id),
-          prefs: () => terminalRailPrefs,
-        };
-      `)(session, log, apiImpl ?? (async () => ({ ok: true })), prefs);
-      return { fn, log };
-    };
-
     const SESSION = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", project: "C:\\dev\\alpha" };
 
     it("单击即归档：本地先生效（瞬时消失）、POST 落盘、6s toast 带「撤销」", async () => {
@@ -246,7 +257,7 @@ describe("S1 会话归档（finding 1a）", () => {
       assert.equal(log.toasts.length, 1, "成功后一句 toast");
       assert.equal(log.toasts[0].msg, "会话已归档。", "文案逐字");
       assert.equal(log.toasts[0].opts.durationMs, 6000, "驻留 6s（dsh 同值）");
-      assert.equal(log.toasts[0].opts.action.label, "撤销", "动作钮文案逐字");
+      assert.equal(log.toasts[0].opts.actions[0].label, "撤销", "动作钮文案逐字");
       assert.ok(!log.toasts[0].isErr, "不是错误提示（tone 走成功）");
     });
 
@@ -310,14 +321,16 @@ describe("S1 会话归档（finding 1a）", () => {
         "归档钮在行点击之前判（否则点了归档变成续接）");
     });
 
-    it("toast 动作钮复用既有件：不新造 toast 组件，6s + action 形状", () => {
+    it("toast 动作钮复用既有件：6s + actions 形状（M13 起多钮，单 action 兼容）", () => {
       const archive = extractFn("terminalRailArchiveSession");
       assert.ok(archive.includes('toast("会话已归档。"'), "文案逐字");
       assert.ok(archive.includes('label: "撤销"'), "动作文案逐字");
       assert.ok(archive.includes("durationMs: 6000"), "驻留 6s");
-      // 既有 toast(msg, isErr, opts) 已支持 opts.action = {label, onClick}，不扩件
+      // toast(msg, isErr, opts) 支持 opts.actions = [{label, onClick}, …]（M13 多钮）
+      // 与 opts.action（单钮，既有调用形状不破）
       const toastFn = panelJs.match(/function toast\(msg, isErr, opts\)[\s\S]*?\n  \}/)?.[0];
-      assert.ok(toastFn && toastFn.includes("opts.action"), "toast 件本就有动作钮能力（S1 不扩展它）");
+      assert.ok(toastFn && toastFn.includes("opts.actions"), "toast 件有多钮入口");
+      assert.ok(toastFn && toastFn.includes("opts.action"), "单 action 兼容保留");
     });
 
     it("CSS：归档钮 hover 才出现、时间让位、0ms 硬切无过渡", () => {
@@ -2257,5 +2270,308 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       assert.equal(fn.sessions["t-a"].resume, null, `${code}：身份没被改花`);
       assert.equal(fn.gate(), false, `${code}：失败也放行（可重试）`);
     }
+  });
+});
+
+
+// ── M13 归档/撤销动效（FLIP）＋toast 动效与去向引导钮（dsh 对齐） ──
+// 用户拍板方案：归档不再瞬时消失——被归档行克隆进覆盖层 100ms 淡出、下方行 200ms
+// 上移、隐藏池回填行 100ms 淡入；撤销是镜像；toast 入场 -6px/160ms、驻留 6s 后
+// 1s 淡出、动作点击瞬时收场；引导钮只在「隐藏已归档」筛选下出现（文案逐字批准）。
+describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
+  // 6 条会话、水位线 5（TERMINAL_RAIL_WATERMARK）：归档 s-1 → s-6 回填进可见段；
+  // 撤销 s-1 → s-6 再让位回隐藏池。行高 30px、首行视口 top 100、滚动层 top 50、
+  // scrollTop 12——幽灵绝对位＝100−50＋12＝62px。
+  const runExitFlip = ({ armed = true, reduced = false, mode = "archive" } = {}) => {
+    const log = { posts: [], toasts: [], renders: 0, flipModes: [], ghosts: [] };
+    const makeGhost = (id) => {
+      const ghost = {
+        id, style: {}, inert: false, removed: false, parent: null,
+        classes: new Set(["rail-term-row"]),
+        classList: { add: (c) => ghost.classes.add(c), contains: (c) => ghost.classes.has(c) },
+        setAttribute: () => { ghost.inert = true; },
+        animate: (frames, opts) => { log.ghosts.push({ id, frames, opts, ghost }); return {}; },
+        remove: () => { ghost.removed = true; ghost.parent = null; },
+        append: () => {},
+      };
+      return ghost;
+    };
+    const makeRow = (id, index) => ({
+      id,
+      getAttribute: (name) => (name === "data-rail-term-resume" ? id : null),
+      getBoundingClientRect: () => ({ top: 100 + index * 30, left: 8, width: 240 }),
+      cloneNode: () => makeGhost(id),
+    });
+    const rebuild = (ids) => ids.map((id, i) => makeRow(id, i));
+    // 归档前置态：s-1..s-5 可见（s-6 在隐藏池）；撤销前置态：s-1 已归档、s-2..s-6 可见
+    let visible = mode === "archive" ? rebuild(["s-1", "s-2", "s-3", "s-4", "s-5"]) : rebuild(["s-2", "s-3", "s-4", "s-5", "s-6"]);
+    const host = {
+      children: [], scrollTop: 12,
+      getBoundingClientRect: () => ({ top: 50, left: 0 }),
+      append: (ghost) => { ghost.parent = host; host.children.push(ghost); },
+    };
+    const list = {
+      parentElement: host,
+      querySelectorAll: (sel) => (sel === "[data-rail-term-resume]" ? visible.slice() : []),
+    };
+    // 渲染桩模拟重渲后的行集变化：归档→s-1 出布局、s-6 回填；撤销→s-1 回原槽、s-6 让位
+    const swap = mode === "archive"
+      ? () => { visible = rebuild(["s-2", "s-3", "s-4", "s-5", "s-6"]); }
+      : () => { visible = rebuild(["s-1", "s-2", "s-3", "s-4", "s-5"]); };
+    const sessions = ["s-1", "s-2", "s-3", "s-4", "s-5", "s-6"].map((id, i) => ({
+      id, endpoint: "kimi", project: "C:\\dev\\alpha", title: `会话 ${id}`, lastActive: 100 - i,
+    }));
+    const fn = new Function("log", "list", "window", "armed", "swap", "sessions", "mode", `
+      let terminalRailPrefs = mode === "archive"
+        ? { archived: [], removedGroups: [] }
+        : { archived: [{ endpoint: "kimi", id: "s-1" }], removedGroups: [] };
+      let terminalRailHistory = { endpoint: "kimi", sessions, fetchedAt: 1, error: null };
+      let terminalRailFlipMode = "instant";
+      const terminalRailMotionArmed = armed;
+      const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+      function $(id) { return id === "railTermHistoryList" ? list : null; }
+      function api(method, path, body) { log.posts.push({ method, path, body }); return Promise.resolve({ ok: true }); }
+      function toast(msg, isErr, opts) { log.toasts.push({ msg, isErr, opts }); }
+      function panelError(err, fallback) { return fallback; }
+      function terminalRailAgentId() { return "kimi"; }
+      function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); swap(); }
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailMotionEnabled")}
+      ${extractFn("terminalRailSnapshotRows")}
+      ${extractFn("terminalRailMountExitGhosts")}
+      ${extractFn("terminalRailRerenderExitFlip")}
+      ${extractFn("terminalRailArchiveSession")}
+      ${extractFn("terminalRailUnarchiveSession")}
+      return { archive: terminalRailArchiveSession, unarchive: terminalRailUnarchiveSession };
+    `)(log, list, { matchMedia: () => ({ matches: reduced }) }, armed, swap, sessions, mode);
+    return { fn, log, host, list };
+  };
+
+  describe("flip 门（vm 真跑）", () => {
+    it("归档置 flip：渲染那拍 flipMode＝flip（与组折叠同一扇门），不再瞬时", () => {
+      const { fn, log } = runExitFlip();
+      fn.archive("s-1");
+      assert.deepEqual(log.flipModes, ["flip"], "归档重渲走 FLIP 门——下方行 200ms 上移、回填行 100ms 淡入由 playTerminalRailFlip 承担");
+    });
+
+    it("撤销同门：flipMode＝flip（行落回＋回填行让位的镜像）", () => {
+      const { fn, log } = runExitFlip({ mode: "unarchive" });
+      fn.unarchive("kimi", "s-1");
+      assert.deepEqual(log.flipModes, ["flip"], "撤销重渲走 FLIP 门");
+    });
+  });
+
+  describe("退场幽灵行（vm 真跑）", () => {
+    it("归档：被归档行克隆进滚动层——inert＋绝对定位＋100ms ease-out 淡出 fill forwards，淡出后移除", async () => {
+      const { fn, log, host } = runExitFlip();
+      fn.archive("s-1");
+      assert.equal(log.ghosts.length, 1, "只有离开布局的那一行有幽灵");
+      assert.equal(log.ghosts[0].id, "s-1", "幽灵是被归档行");
+      assert.deepEqual(log.ghosts[0].frames, [{ opacity: 1 }, { opacity: 0 }], "opacity→0 双关键帧");
+      assert.equal(log.ghosts[0].opts.duration, 100, "100ms");
+      assert.equal(log.ghosts[0].opts.easing, "ease-out", "ease-out");
+      assert.equal(log.ghosts[0].opts.fill, "forwards", "fill forwards");
+      const ghost = log.ghosts[0].ghost;
+      assert.equal(host.children[0], ghost, "幽灵挂进滚动层（列表的父级）");
+      assert.ok(ghost.classes.has("rail-term-ghost"), "幽灵类在册（absolute＋pointer-events:none 由 CSS 承担）");
+      assert.equal(ghost.inert, true, "inert 属性置位（克隆不可聚焦不可命中）");
+      assert.equal(ghost.style.top, "62px", "绝对位＝行视口位−滚动层位＋scrollTop（100−50＋12）");
+      assert.equal(ghost.style.left, "8px", "左缘对齐原行");
+      assert.equal(ghost.style.width, "240px", "宽同原行");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(ghost.removed, true, "淡出后移除（不残留 DOM）");
+      assert.equal(host.children.length, 1, "存活行不克隆——下方行交给 FLIP 位移，不叠幽灵");
+    });
+
+    it("撤销镜像：水位线让位的回填行克隆淡出（s-6 回隐藏池）", async () => {
+      const { fn, log } = runExitFlip({ mode: "unarchive" });
+      fn.unarchive("kimi", "s-1");
+      assert.equal(log.ghosts.length, 1, "只有让位的回填行有幽灵");
+      assert.equal(log.ghosts[0].id, "s-6", "幽灵是水位线让位的 s-6");
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      assert.equal(log.ghosts[0].ghost.removed, true, "淡出后移除");
+    });
+
+    it("armed 门与 reduced-motion：首次真实交互前、reduce 下不挂幽灵（一切瞬时）", () => {
+      for (const opts of [{ armed: false }, { reduced: true }]) {
+        const { fn, log } = runExitFlip(opts);
+        fn.archive("s-1");
+        assert.deepEqual(log.ghosts, [], `${JSON.stringify(opts)}：无幽灵克隆`);
+        assert.deepEqual(log.flipModes, ["flip"], "门仍置 flip——实际播放由 playTerminalRailFlip 的 armed/reduce 守卫拦下");
+      }
+    });
+
+    it("快照只量行：组头与「展开其余 N」不进动效范围（瞬时硬切）", () => {
+      assert.ok(extractFn("terminalRailSnapshotRows").includes('querySelectorAll("[data-rail-term-resume]")'),
+        "快照范围＝历史行（组头、水位线钮不在内）");
+      assert.ok(extractFn("terminalRailRowTops").includes('querySelectorAll("[data-rail-term-resume]")'),
+        "FLIP 量位同口径（组头不动、N−1 瞬时）");
+    });
+  });
+
+  describe("armed 门挂点（源码钉死）", () => {
+    it("列表本体捕获相挂 pointerdown/keydown——真实交互才武装，合成点击不武装", () => {
+      const init = extractFn("initTerminalRail");
+      assert.ok(init.includes('listEl.addEventListener("pointerdown", armMotion, { once: true, capture: true })'),
+        "pointerdown 捕获相挂列表（dsh AnimatedRows 同款）");
+      assert.ok(init.includes('listEl.addEventListener("keydown", armMotion, { once: true, capture: true })'),
+        "keydown 捕获相挂列表");
+      assert.ok(!/dir\.addEventListener\("pointerdown"/.test(init), "不再挂栏体气泡相监听");
+      assert.ok(extractFn("terminalRailMotionEnabled").includes("!terminalRailMotionArmed"),
+        "动效开关先看 armed（未武装＝瞬时）");
+    });
+  });
+
+  describe("toast 第二钮「筛选已归档会话」（vm 真跑）", () => {
+    const SESSION = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", project: "C:\\dev\\alpha" };
+    const run = (archivedFilter) => runArchive(SESSION, {
+      viewPrefs: { groupBy: "workspace", orderBy: "updated", archivedFilter, sessionOrder: {} },
+    });
+
+    it("筛选＝隐藏已归档：两钮在册——撤销＋筛选已归档会话（文案逐字）", async () => {
+      const { fn, log } = run("default");
+      fn.archive();
+      await flush();
+      const actions = log.toasts[0].opts.actions;
+      assert.deepEqual(actions.map((action) => action.label), ["撤销", "筛选已归档会话"], "两钮文案逐字");
+    });
+
+    it("点击引导钮：切到「仅显示已归档」（applyTerminalRailViewChoice 接通）", async () => {
+      const { fn, log } = run("default");
+      fn.archive();
+      await flush();
+      log.toasts[0].opts.actions[1].onClick();
+      assert.deepEqual(log.viewChoice, { field: "archivedFilter", value: "only" }, "切筛选动作接通（视图切换走既有通路）");
+    });
+
+    it("筛选＝show/only：只有撤销（引导钮只在隐藏已归档时出现）", async () => {
+      for (const filter of ["show", "only"]) {
+        const { fn, log } = run(filter);
+        fn.archive();
+        await flush();
+        assert.deepEqual(log.toasts[0].opts.actions.map((action) => action.label), ["撤销"],
+          `${filter} 下不出引导钮（归档行本就可见/独占视图）`);
+      }
+    });
+  });
+
+  describe("toast 件动效（vm 真跑＋源码钉死）", () => {
+    const buildToast = () => {
+      const t = {
+        text: "", appended: [], tid: null, classes: new Set(),
+        append(...kids) { t.appended.push(...kids); },
+        set textContent(v) { t.text = v; }, get textContent() { return t.text; },
+        set className(v) { t.classes = new Set(String(v).split(/\s+/).filter(Boolean)); },
+        classList: {
+          add(...cs) { for (const c of cs) t.classes.add(c); },
+          remove(...cs) { for (const c of cs) t.classes.delete(c); },
+          contains: (c) => t.classes.has(c),
+        },
+      };
+      Object.defineProperty(t, "_tid", { get: () => t.tid, set: (v) => { t.tid = v; } });
+      const doc = {
+        createTextNode: (s) => ({ kind: "text", text: s }),
+        createElement: () => ({ kind: "el", className: "", textContent: "", onclick: null }),
+      };
+      const fn = new Function("t", "doc", `
+        function $(id) { return id === "toast" ? t : null; }
+        const document = doc;
+        ${extractFn("toast")}
+        ${extractFn("dismissToast")}
+        return { toast, dismissToast };
+      `)(t, doc);
+      return { fn, t };
+    };
+
+    it("两钮渲染＋动作点击瞬时收场（is-gone 压过渡，不走 1s 淡出）", () => {
+      const { fn, t } = buildToast();
+      const clicks = [];
+      fn.toast("会话已归档。", false, {
+        durationMs: 6000,
+        actions: [
+          { label: "撤销", onClick: () => clicks.push("撤销") },
+          { label: "筛选已归档会话", onClick: () => clicks.push("筛选") },
+        ],
+      });
+      assert.ok(t.classes.has("show"), "上屏");
+      assert.equal(t.appended[0].text, "会话已归档。", "文案节点逐字（主体不变）");
+      const links = t.appended.slice(1);
+      assert.deepEqual(links.map((link) => link.textContent), ["撤销", "筛选已归档会话"], "两钮逐字");
+      assert.equal(links[0].className, "toast-action", "动作小字形状照旧");
+      links[0].onclick();
+      assert.deepEqual(clicks, ["撤销"], "点击接通 onClick");
+      assert.ok(!t.classes.has("show"), "动作点击摘 show（瞬时消失）");
+      assert.ok(t.classes.has("is-gone") && !t.classes.has("is-leaving"), "瞬时收场走 is-gone，不进 1s 淡出");
+      clearTimeout(t.tid);
+    });
+
+    it("单 action 兼容：既有调用（opts.action）照旧单钮；无钮路径照旧直写 textContent", () => {
+      const { fn, t } = buildToast();
+      fn.toast("渠道已刷新", false, { action: { label: "查看差异", onClick: () => {} } });
+      const links = t.appended.slice(1);
+      assert.equal(links.length, 1, "单钮不重复");
+      assert.equal(links[0].textContent, "查看差异", "兼容既有形状");
+      assert.equal(t.appended[0].text, "渠道已刷新", "带钮路径文案走文本节点");
+      clearTimeout(t.tid);
+      const plain = buildToast();
+      plain.fn.toast("渠道已刷新", false);
+      assert.equal(plain.t.text, "渠道已刷新", "无钮路径照旧直写 textContent");
+      assert.equal(plain.t.appended.length, 0, "无钮不建元素");
+      clearTimeout(plain.t.tid);
+    });
+
+    it("驻留期满两段收场：先转 1s 淡出（is-leaving），期满落暗（源码钉死）", () => {
+      const toastFn = panelJs.match(/function toast\(msg, isErr, opts\)[\s\S]*?\n  \}/)?.[0];
+      assert.ok(toastFn, "toast 件在册");
+      assert.ok(/classList\.add\("is-leaving"\)/.test(toastFn), "驻留期满转淡出类");
+      assert.ok(/remove\("show", "is-leaving"\)/.test(toastFn), "淡出期满落暗（摘两类）");
+      const dismiss = panelJs.match(/function dismissToast\(t\)[\s\S]*?\n  \}/)?.[0];
+      assert.ok(dismiss && dismiss.includes('classList.add("is-gone")'), "动作点击走瞬时类");
+      assert.ok(dismiss && dismiss.includes('classList.remove("show", "is-leaving")'), "瞬时收场同时清淡出态");
+    });
+  });
+
+  describe("动效样式（CSS 钉死）", () => {
+    it("toast：入场 -6px/160ms ease-out；驻留期满 1s 只淡出不位移；瞬时类压过渡", () => {
+      const base = panelCss.match(/\.toast \{([^}]*)\}/)[1];
+      assert.ok(/translateY\(-6px\)/.test(base), "入场起点 -6px");
+      assert.ok(/opacity 160ms var\(--ease-out\), transform 160ms var\(--ease-out\)/.test(base), "0.16s ease-out 入场");
+      const show = panelCss.match(/\.toast\.show \{([^}]*)\}/)[1];
+      assert.ok(/translateY\(0\)/.test(show), "入场终点原位");
+      const leaving = panelCss.match(/\.toast\.is-leaving \{([^}]*)\}/)[1];
+      assert.ok(/opacity:\s*0/.test(leaving), "淡出终点");
+      assert.ok(/opacity 1s var\(--ease-out\)/.test(leaving), "1s 淡出");
+      assert.ok(!/transform/.test(leaving), "收场不位移（只淡出）");
+      const gone = panelCss.match(/\.toast\.is-gone \{([^}]*)\}/)[1];
+      assert.ok(/transition:\s*none/.test(gone), "瞬时类压掉一切过渡");
+      assert.ok(panelCss.indexOf(".toast.is-leaving") > panelCss.indexOf(".toast.show {"), "淡出类后置于 show（同特异性后者胜）");
+      assert.ok(panelCss.indexOf(".toast.is-gone") > panelCss.indexOf(".toast.is-leaving"), "瞬时类后置于淡出类");
+    });
+
+    it("幽灵行：absolute＋pointer-events:none（克隆不占布局不挡指针）", () => {
+      const ghost = panelCss.match(/\.rail-term-ghost \{([^}]*)\}/);
+      assert.ok(ghost, "幽灵类在册");
+      assert.ok(/position:\s*absolute/.test(ghost[1]), "脱离布局流");
+      assert.ok(/pointer-events:\s*none/.test(ghost[1]), "不挡指针");
+    });
+
+    it("reduced-motion 全关：全站压零规则在册（CSS 动效随之瞬时），WAAPI 门在 JS", () => {
+      assert.ok(/@media \(prefers-reduced-motion: reduce\)\s*\{\s*\*\s*\{\s*transition: none !important; animation: none !important;\s*\}\s*\}/.test(panelCss),
+        "CSS 过渡/动画全站压零（toast 入场/淡出随之瞬时）");
+      assert.ok(extractFn("playTerminalRailFlip").includes('matchMedia("(prefers-reduced-motion: reduce)")'),
+        "FLIP 的 WAAPI 门在 JS（matchMedia）");
+      assert.ok(extractFn("terminalRailMotionEnabled").includes('matchMedia("(prefers-reduced-motion: reduce)")'),
+        "幽灵的 WAAPI 门同款");
+    });
+  });
+
+  describe("文案纪律（冻结条款）", () => {
+    it("唯一新增文案＝「筛选已归档会话」；既有文案原样", () => {
+      const body = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
+      assert.equal((body.match(/筛选已归档会话/g) || []).length, 1, "新文案恰好一处（toast 引导钮 label）");
+      for (const copy of ["会话已归档。", "撤销", "归档会话", "取消归档", "归档未能保存，请重试", "取消归档未能保存，请重试"]) {
+        assert.ok(body.includes(copy), `既有文案「${copy}」原样在册`);
+      }
+    });
   });
 });
