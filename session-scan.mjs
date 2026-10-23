@@ -66,6 +66,13 @@ const SUMMARY_MAX_CHARS = 160;
 //   opencode --session <id>  (-s, --session)
 //   codex resume <id>        ([SESSION_ID], UUID or session name)
 //   grok --resume <id>       (-r, --resume <ID_OR_TITLE>; user-guide/17-sessions.md)
+//   dsh --profile <p> --resume <id>  (`dsh tui --resume <session>` launcher example)
+//   zcode --resume <id>      (--resume <sessionId>, session_<hex> from the CLI's own db)
+//   qodercli --resume <id>   (-r, --resume [id], project-scoped resolution)
+// The command names are each CLI's own install command (npm bin / vendor PATH
+// entry) — never an Anyswitch-managed takeover shim, which exists only on
+// machines that hand-installed one. dsh carries its profile flag because bare
+// `dsh` refuses to boot without one and the copied command must run as-is.
 export const RESUME_COMMAND = Object.freeze({
   claude: (meta) => `claude --resume ${meta.id}`,
   kimi: (meta) => `kimi --session ${meta.id}`,
@@ -73,6 +80,9 @@ export const RESUME_COMMAND = Object.freeze({
   opencode: (meta) => `opencode --session ${meta.id}`,
   codex: (meta) => `codex resume ${meta.id}`,
   grok: (meta) => `grok --resume ${meta.id}`,
+  dsh: (meta) => `dsh --profile dsh-tui --resume ${meta.id}`,
+  zcode: (meta) => `zcode --resume ${meta.id}`,
+  qoder: (meta) => `qodercli --resume ${meta.id}`,
 });
 
 function resumeCommandFor(endpoint, meta) {

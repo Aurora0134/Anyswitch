@@ -14,7 +14,7 @@ import {
 
 // 绑定存储与匹配的纯数据层合同：文件形态（version+bindings、原子写）、读写
 // 回环、畸形条目清洗；匹配纪律（同 agent 同 cwd、生命周期重叠、最新活跃胜
-// 出、并列判不出）；六家续会参数拼法。
+// 出、并列判不出）；九家续会参数拼法。
 describe("terminal-conversation-bindings", () => {
   function mkStore() {
     const dir = mkdtempSync(join(tmpdir(), "anyswitch-tcb-"));
@@ -118,19 +118,23 @@ describe("terminal-conversation-bindings", () => {
       assert.deepEqual(resumeArgsFor("opencode", b), ["--session", "abc-123"]);
       assert.deepEqual(resumeArgsFor("codex", b), ["resume", "abc-123"], "codex 是子命令形态");
       assert.deepEqual(resumeArgsFor("pi", b), ["--session", "C:\\archives\\rollout.jsonl"], "pi 认存档文件路径");
+      assert.deepEqual(resumeArgsFor("dsh", b), ["--resume", "abc-123"], "dsh 追加片段不带 --profile（launch.args 已有，带了撞二次选择）");
+      assert.deepEqual(resumeArgsFor("zcode", b), ["--resume", "abc-123"]);
+      assert.deepEqual(resumeArgsFor("qoder", b), ["--resume", "abc-123"]);
     });
 
     it("returns null for unsupported agents and unusable bindings", () => {
-      assert.equal(resumeArgsFor("qoder", b), null);
-      assert.equal(resumeArgsFor("zcode", b), null);
-      assert.equal(resumeArgsFor("dsh", b), null);
+      assert.equal(resumeArgsFor("no-such-agent", b), null);
       assert.equal(resumeArgsFor("claude", null), null);
       assert.equal(resumeArgsFor("claude", binding({ conversationId: "" })), null);
       assert.equal(resumeArgsFor("pi", binding({ file: null })), null, "pi 没有 file 接不出");
     });
 
-    it("RESUMABLE_AGENTS matches exactly the six covered endpoints", () => {
-      assert.deepEqual([...RESUMABLE_AGENTS].sort(), ["claude", "codex", "grok", "kimi", "opencode", "pi"]);
+    it("RESUMABLE_AGENTS matches exactly the nine covered endpoints", () => {
+      assert.deepEqual(
+        [...RESUMABLE_AGENTS].sort(),
+        ["claude", "codex", "dsh", "grok", "kimi", "opencode", "pi", "qoder", "zcode"],
+      );
     });
   });
 
