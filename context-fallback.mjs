@@ -38,10 +38,18 @@
 //   - sensenova-6.7/6.8 flash variants (flash / flash-lite) are 262144 per the
 //     same-family channel whose upstream actually reports context_length; the
 //     keyword stops at "-flash" so the non-flash base models stay unmatched
+//   - minimax-m3.1 / step-5 are 1000000 per each vendor's own model table, which
+//     happens to equal the unmatched default; the rule is still worth stating
+//     because it pins the value to a citation instead of to a coincidence — the
+//     next sub-family that moves off 1M is then a diff here, not a silent wrong
+//     number. minimax-m3.1 sits on its own keyword (not "minimax") so a future
+//     non-flash M-row that documents a different window can take one.
 export const CONTEXT_TIER_RULES = [
   { keyword: "gpt-6", contextWindow: 1_050_000 },
   { keyword: "gpt-5", contextWindow: 1_050_000 },
   { keyword: "gpt-4", contextWindow: 128_000 },
+  { keyword: "minimax-m3.1", contextWindow: 1_000_000 },
+  { keyword: "step-5", contextWindow: 1_000_000 },
   { keyword: "claude-opus-4.5", contextWindow: 200_000 },
   { keyword: "claude-opus-4-5", contextWindow: 200_000 },
   { keyword: "claude-opus", contextWindow: 1_000_000 },

@@ -105,11 +105,27 @@ describe("fallbackContextWindow", () => {
     assert.equal(fallbackContextWindow("sensenova-6.8-pro"), UNMATCHED_CONTEXT_FALLBACK);
   });
 
-  it("falls back to 1M for unmatched model families", () => {
-    assert.equal(fallbackContextWindow("deepseek-v4-pro"), UNMATCHED_CONTEXT_FALLBACK);
-    assert.equal(fallbackContextWindow("gemini-3.6-flash"), UNMATCHED_CONTEXT_FALLBACK);
-    assert.equal(fallbackContextWindow("glm-5.2"), UNMATCHED_CONTEXT_FALLBACK);
-    assert.equal(UNMATCHED_CONTEXT_FALLBACK, 1_000_000);
+  it("maps MiniMax M3.1 Flash ids to the 1M tier, including channel decorations", () => {
+    // Vendor documents 1,000,000 for MiniMax-M3.1-Flash. The keyword is scoped
+    // to the m3.1 sub-family, so the bare "minimax" spelling a gateway might
+    // carry for an older M row stays on the unmatched default.
+    assert.equal(fallbackContextWindow("MiniMax-M3.1-Flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("minimax-m3.1-flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("[Cloud]MiniMax-M3.1-Flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("[次][Cloud]MiniMax-M3.1-Flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("go/minimax-m3.1-flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("minimax-m3.1-flash-free"), 1_000_000);
+  });
+
+  it("maps Step 5 Preview to the 1M tier", () => {
+    assert.equal(fallbackContextWindow("step-5-preview"), 1_000_000);
+    assert.equal(fallbackContextWindow("Step-5-Preview"), 1_000_000);
+    assert.equal(fallbackContextWindow("[Cloud]step-5-preview"), 1_000_000);
+  });
+
+  it("leaves non-m3.1 MiniMax ids on the unmatched default", () => {
+    assert.equal(fallbackContextWindow("minimax-m3"), UNMATCHED_CONTEXT_FALLBACK);
+    assert.equal(fallbackContextWindow("MiniMax-M2.7"), UNMATCHED_CONTEXT_FALLBACK);
   });
 
   it("never returns undefined for malformed ids", () => {
