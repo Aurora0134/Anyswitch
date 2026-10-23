@@ -5348,12 +5348,25 @@ async function api(method, path, body) {
     return `${endpointId} ${instanceId ?? ""}`;
   }
 
-  // 口径：activeRequests > 0 → working，== 0 → idle。「N 个请求进行中」明细
-  // 取自真值；metrics 还没被轮询富化出来时（活了一辈子但还没等满一拍）只落
+  // 输出活跃窗：宿主 lastActiveAt（每块输出、每次输入都刷新）在窗内即视为在跑。
+  // relay 只对「模型在想」权威；agent 执行工具命令的整段时间请求数是零，只看
+  // 请求会把在跑的命令判成空闲（页签/会话栏误显空闲＋内切判定门误放行的同源
+  // 根因）。窗取 5s：跑命令的进度输出会持续刷新它，等输入静默几秒后回落空闲；
+  // 完全静默的长命令显示层仍会回落——那一段由 /switch 的服务端杀前探测兜底，
+  // 显示层不追求完美。窗与时刻可注入（vm 沙盒测试）。
+  function terminalBusyByOutput(session, windowMs = 5000, now = Date.now()) {
+    const state = session && session.backendState ? session.backendState : null;
+    if (!state || state.status === "exited") return false;
+    const at = state.lastActiveAt;
+    return Number.isFinite(at) && now - at < windowMs;
+  }
+
+  // 口径：请求在途，或输出在活跃窗内 → working，两者都无 → idle。「N 个请求进行中」
+  // 明细取自真值；metrics 还没被轮询富化出来时（活了一辈子但还没等满一拍）只落
   // 状态位，不为了一行明细编造空指标。
   function terminalActivityApplyToSession(session, activeRequests) {
     const count = Number.isFinite(activeRequests) && activeRequests > 0 ? Math.trunc(activeRequests) : 0;
-    session.status = count > 0 ? "working" : "idle";
+    session.status = count > 0 || terminalBusyByOutput(session) ? "working" : "idle";
     if (session.metrics) session.metrics.activeRequests = count;
     return count;
   }
@@ -6613,7 +6626,8 @@ async function api(method, path, body) {
       if (!session?.backend) continue;
       const agent = session.agent || null;
       const instance = terminalInstanceRow(agentsPayload, agent);
-      session.status = instance && instance.activeRequests > 0 ? "working" : "idle";
+      // 状态口径与活跃真值流同源：请求在途或输出活跃窗内（terminalBusyByOutput）。
+      session.status = (instance && instance.activeRequests > 0) || terminalBusyByOutput(session) ? "working" : "idle";
       session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
       const { route, routeCurrent } = agent
         ? terminalRouteForEndpoint(agent.endpointId, chains, runtime)
@@ -9659,6 +9673,12 @@ async function api(method, path, body) {
       // 失败不删本地状态、维持现状、不静默吞（× 路径 catch(()=>{}) 的教训）：
       // 本地记录原样，页签还是原来那条，只给一句提示。
       const code = error && (error.serverCode || error.code);
+      if (code === "switch_busy") {
+        // 服务端杀前复核拒换（会话树里有活着的命令进程）：静默转新开保护。新开
+        // 本就是点击历史会话的合法落点之一，这里再提示反而是噪声；原页签不动，
+        // 在跑的命令继续。
+        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      }
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
         return;

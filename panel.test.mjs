@@ -11115,16 +11115,34 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
 
   it("前端：terminalActivityApplyToSession 口径（>0 working / 0 idle / 明细即时）", async () => {
     const session = { status: "idle", metrics: { activeRequests: 0, ttft: "—" } };
-    await vmFn("terminalActivityApplyToSession", [session, 2]);
+    await vmFn("terminalActivityApplyToSession", [session, 2], ["terminalBusyByOutput"]);
     assert.equal(session.status, "working");
     assert.equal(session.metrics.activeRequests, 2, "「N 个请求进行中」明细用真值即时更新");
-    await vmFn("terminalActivityApplyToSession", [session, 0]);
+    await vmFn("terminalActivityApplyToSession", [session, 0], ["terminalBusyByOutput"]);
     assert.equal(session.status, "idle");
     assert.equal(session.metrics.activeRequests, 0);
     const bare = { status: "idle", metrics: null };
-    await vmFn("terminalActivityApplyToSession", [bare, 5]);
+    await vmFn("terminalActivityApplyToSession", [bare, 5], ["terminalBusyByOutput"]);
     assert.equal(bare.status, "working");
     assert.equal(bare.metrics, null, "metrics 未富化出来时不编造空指标行");
+  });
+
+  it("前端：输出活跃窗补 LLM 请求盲区（跑长命令不再显示空闲）", async () => {
+    // 请求 0 但终端刚出过字：在跑命令（LLM 空档是执行工具命令的常态）。
+    const hot = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now() - 1000, status: "running" } };
+    await vmFn("terminalActivityApplyToSession", [hot, 0], ["terminalBusyByOutput"]);
+    assert.equal(hot.status, "working", "1s 前还在出字：在跑");
+    // 静默超窗回落空闲；请求在途与输出活跃是 OR 关系（活跃窗不吞请求真值）。
+    const cold = { status: "working", metrics: { activeRequests: 0 }, backendState: { lastActiveAt: Date.now() - 60_000, status: "running" } };
+    await vmFn("terminalActivityApplyToSession", [cold, 0], ["terminalBusyByOutput"]);
+    assert.equal(cold.status, "idle", "静默超窗回落空闲");
+    const both = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now() - 60_000, status: "running" } };
+    await vmFn("terminalActivityApplyToSession", [both, 1], ["terminalBusyByOutput"]);
+    assert.equal(both.status, "working", "请求在途照常 working（窗不吞请求真值）");
+    // exited 不因退出瞬间的 lastActiveAt 刷新而误转圈。
+    const dead = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now(), status: "exited" } };
+    await vmFn("terminalActivityApplyToSession", [dead, 0], ["terminalBusyByOutput"]);
+    assert.equal(dead.status, "idle", "exited 不转圈");
   });
 
   it("前端：terminalActivityApplyFrame 定点更新不串键、snapshot 整帧对齐", async () => {
@@ -11142,7 +11160,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "activity", endpointId: "claude", instanceId: "claude-9001", activeRequests: 2, at: 1 },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalActivityKey"]), true);
+      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), true);
     assert.equal(claude.status, "working");
     assert.equal(claude.metrics.activeRequests, 2);
     assert.equal(kimi.status, "idle", "键不匹配的会话不动");
@@ -11151,7 +11169,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 9, at: 2 },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalActivityKey"]), false,
+      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false,
       "未命中任何会话返回 false（不重绘）");
     assert.equal(kimi.status, "idle");
 
@@ -11161,15 +11179,15 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "snapshot", instances: [{ endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 1, at: 3 }] },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalActivityKey"]), true);
+      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), true);
     assert.equal(kimi.status, "working", "快照里命中的键用真值");
     assert.equal(kimi.metrics.activeRequests, 1);
     assert.equal(claude.status, "idle", "快照里查不到的键一律回落 0");
 
     assert.equal(await vmFn("terminalActivityApplyFrame", [{ type: "other" }, { t1: kimi }],
-      ["terminalActivityApplyToSession", "terminalActivityKey"]), false, "未知帧型忽略");
+      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false, "未知帧型忽略");
     assert.equal(await vmFn("terminalActivityApplyFrame", [null, { t1: kimi }],
-      ["terminalActivityApplyToSession", "terminalActivityKey"]), false, "空帧忽略");
+      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false, "空帧忽略");
   });
 
   it("接线结构：路由就位、桥注释行直通、轮询原样 1s、EventSource 按活性同拍开合", () => {

@@ -54,6 +54,7 @@ import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefs
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
+import { probeTerminalCommandTree as defaultProbeTerminalCommandTree } from "./terminal-switch-guard.mjs";
 import {
   RESUMABLE_AGENTS,
   TERMINAL_CONVERSATION_BINDINGS_FILE,
@@ -858,6 +859,9 @@ export function createPanelRouter({
    createTerminalSession = defaultCreateTerminalSession,
    fetchTerminalSessionFn = defaultFetchTerminalSession,
    restartTerminalSessionFn = defaultRestartTerminalSession,
+   // 内切换内容前的杀前兜底探测（terminal-switch-guard.mjs）：会话 PTY 树里有没有
+   // 活着的命令子进程。默认真跑 PowerShell 全表；单测注入桩，不碰真进程枚举。
+   probeTerminalCommandTreeFn = defaultProbeTerminalCommandTree,
    // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
@@ -1301,7 +1305,8 @@ export function createPanelRouter({
   // 复活用会话自己的身份重组装；内切用请求体给的目标会话身份（endpoint/id/file）
   // 重组装，cwd 用目标会话的项目目录（claude 这类按项目分存档，目录错了 --resume
   // 找不到会话）。working 判定与在飞闸在面板侧（panel.js terminalRailSwitchOrCreate），
-  // 本路由只接「已决定内切」的请求。
+  // 本路由接「已决定内切」的请求，但杀进程前再做一道 switch-guard 复核（见下）：
+  // 前端信号覆盖不了静默执行中的命令，不可逆动作的最后一道闸留在服务端。
   async function handleTerminalSessionSwitch(req, res, id, body) {
     const token = terminalPullToken();
     if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
@@ -1347,6 +1352,38 @@ export function createPanelRouter({
       // 文案）；其余组装错误维持原有响应形状。
       const code = error.code === "resume-unsupported" || error.code === "resume-invalid" ? error.code : null;
       return sendJson(res, 400, { ok: false, ...(code ? { code } : {}), error: error.message });
+    }
+    // 杀前复核（switch-guard）：前端判定门的 working 只覆盖「LLM 请求在途＋输出
+    // 活跃窗」，静默执行中的命令（无请求也无输出）两头都够不着，而本路由的落点
+    // 是整棵进程树 terminate——不可逆动作前按需探测一次「PTY 树里有没有活着的
+    // 命令子进程」。探测失败（null）同样拒：宁多开勿错杀。exited 不探测，树里已
+    // 没有活进程，restart 的树杀只剩残留登记的收尾。前端收到 switch_busy 静默转
+    // 新开（新开本就是点击历史会话的合法落点，无需提示）。
+    if (session.status === "running") {
+      // 归属锚：relay 检测面里这个会话的 agent 主进程 pid——有锚时探测从锚起
+      //（锚之下的进程才是在跑命令，agent 本体不算），无锚按根形态判（见
+      // terminal-switch-guard）。join 复用轮询的拉取缓存，纯内存计算；失败或
+      // 无归属都按无锚形态继续判。
+      let anchorPid = null;
+      try {
+        const feed = await pulledDetectedProcesses(token);
+        const detected = Array.isArray(feed?.processes) ? feed.processes : null;
+        if (detected && detected.length > 0) {
+          const agents = await pulledAgentsForJoin(token);
+          const [joined] = attributeTerminalSessions([session], detected, agents, {
+            codex: Array.isArray(feed.codexSessions) ? feed.codexSessions : [],
+            opencode: Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
+          });
+          const pid = joined && joined.agent && joined.agent.pid;
+          if (Number.isInteger(pid) && pid > 0) anchorPid = pid;
+        }
+      } catch {
+        /* 归属失败按无锚形态判 */
+      }
+      const busy = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
+      if (busy !== false) {
+        return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
+      }
     }
     const switchStartedAt = Date.now();
     const restarted = await restartTerminalSessionFn(id, {

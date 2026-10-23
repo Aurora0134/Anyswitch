@@ -2374,6 +2374,25 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     assert.equal(fn.gate(), false, "失败也放行（可重试）");
   });
 
+  it("杀前复核拒换（switch_busy）：终端里有活命令进程，静默转新开保护，原页签不动", async () => {
+    // LLM 空档＋静默命令＝前端判定够不着的灰色地带，服务端 switch-guard 探测兜
+    // 底：409 短码回来后转既有新开路径——新开本就是点击历史会话的合法落点，不再
+    // 多一枚提示。
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 409：switch_busy"), { code: "switch_busy", serverCode: "switch_busy" }); },
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 1, "转新开（保护在跑命令）");
+    assert.deepEqual(log.creates[0], { agentId: "kimi", cwd: "C:\\dev\\alpha", resume: { endpoint: "kimi", id: "s-1", file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl" } },
+      "新开带目标会话续接身份（M3 契约原样）");
+    assert.equal(log.toasts.length, 0, "不提示（新开是合法落点，提示是噪声）");
+    assert.deepEqual(fn.sessions["t-a"].resume, { endpoint: "kimi", id: "s-old" }, "原页签身份没被碰，在跑命令继续");
+    assert.equal(fn.gate(), false, "失败也放行（可重试）");
+  });
+
   it("切换失败回续接族短码（resume-invalid / resume-unsupported）：落已批准续接句，服务端原文不上屏", async () => {
     // /switch 路由级拒换把 error 也置成机器码本身（文案零新增冻结条款），api() 落
     // err.code/err.serverCode 双通道都是短码——前端 startsWith("resume-") 门接住，

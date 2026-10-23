@@ -285,18 +285,23 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
 // M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
 // 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
 describe("内切切换会话（terminal sessions switch）", () => {
-  function switchRouter({ root, hostSession, restarted } = {}) {
-    const calls = { restart: [], fetch: [] };
+  function switchRouter({ root, hostSession, restarted, probe } = {}) {
+    const calls = { restart: [], fetch: [], probe: [] };
     const router = createPanelRouter({
       storePaths: { root },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
       createTerminalSession: async (body) => ({ status: 201, body: { id: "t-new", ...body } }),
       fetchTerminalSessionFn: async (id, options) => {
         calls.fetch.push({ id, options });
         return hostSession === undefined
           ? { id, label: "Anyswitch", cwd: "C:\\shell-dir", shell: "powershell", status: "running", pid: 42 }
           : hostSession;
+      },
+      probeTerminalCommandTreeFn: async (pid) => {
+        calls.probe.push(pid);
+        return probe === undefined ? false : probe;
       },
       restartTerminalSessionFn: async (id, body, options) => {
         calls.restart.push({ id, body, options });
@@ -332,6 +337,35 @@ describe("内切切换会话（terminal sessions switch）", () => {
       assert.ok(typeof forwarded.agentName === "string" && forwarded.agentName, "agentName 同步");
       assert.ok("env" in forwarded, "env 随 restart 走（不回显）");
       assert.equal("env" in json(), false, "响应不回显 env");
+    });
+  });
+
+  it("杀前复核：running 且探测有活命令子进程（或探测失败）→ 409 switch_busy 不 restart；exited 不探测照旧内切", async () => {
+    await withFakeAgents(async (cwd) => {
+      for (const [name, probe] of [["有活后代", true], ["探测失败（null）", null]]) {
+        const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-busy-"), probe });
+        const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+          resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+        });
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 409, `${name} 拒换`);
+        assert.equal(json().code, "switch_busy", "机器可判短码");
+        assert.equal(json().error, "switch_busy", "error 即机器码本身（零文案）");
+        assert.deepEqual(calls.probe, [42], `${name} 按会话 pid 探测过一次`);
+        assert.equal(calls.restart.length, 0, `${name} 不 restart（在跑命令不被杀）`);
+      }
+      const gone = switchRouter({
+        root: mkTestDir("anyswitch-switch-exit-"),
+        hostSession: { id: SESSION_ID, label: "Anyswitch", cwd: "C:\\shell-dir", shell: "powershell", status: "exited", pid: 42 },
+        probe: true,
+      });
+      const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await gone.router.handle(call.req, call.res);
+      assert.equal(call.res.statusCode, 200, "exited 照旧内切");
+      assert.equal(gone.calls.probe.length, 0, "exited 不探测（树里没有活进程可杀，restart 只收残留登记）");
+      assert.equal(gone.calls.restart.length, 1, "照旧走 restart");
     });
   });
 
