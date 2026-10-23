@@ -8387,7 +8387,7 @@ async function api(method, path, body) {
   let terminalRailLastGroups = [];
 
   // 组头两枚图标与开合箭头：数据逐字符照抄 dsh（m14 附录，净室提取自 dsh-desktop
-  // 0.2.2 bundle，chevron 以附录勘误后的 C5.95242 为准）。闭合态是 1px 描边空心
+  // 0.2.1-rc.2 bundle，chevron 以附录勘误后的 C5.95242 为准）。闭合态是 1px 描边空心
   // 轮廓＋一条中线（两条 path 都不填）；展开态是三层实心（背板 16% 透明＋盒体＋
   // 前舌）——两者构造方式不同，不是同一轮廓的改线，别把闭合态也填实。
   const TERMINAL_RAIL_ICON_CHEVRON = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" stroke-width="1"><path d="M5.5 4.5C5.5 4.40714 5.52586 4.31612 5.57467 4.23713C5.62349 4.15815 5.69334 4.09431 5.77639 4.05279C5.85945 4.01126 5.95242 3.99368 6.0449 4.00202C6.13738 4.01036 6.22572 4.04429 6.3 4.1L10.967 7.6C11.0291 7.64657 11.0795 7.70697 11.1142 7.77639C11.1489 7.84582 11.167 7.92238 11.167 8C11.167 8.07762 11.1489 8.15418 11.1142 8.22361C11.0795 8.29303 11.0291 8.35343 10.967 8.4L6.3 11.9C6.22572 11.9557 6.13738 11.9896 6.0449 11.998C5.95242 12.0063 5.85945 11.9887 5.77639 11.9472C5.69334 11.9057 5.62349 11.8419 5.57467 11.7629C5.52586 11.6839 5.5 11.5929 5.5 11.5V4.5Z" fill="currentColor"></path></svg>';
@@ -8543,10 +8543,13 @@ async function api(method, path, body) {
         && (Number(session.createdAt) || Number(session.lastActive) || 0) > removedAt);
       if (!fresh) continue;
       terminalRailPrefs.removedGroups = terminalRailPrefs.removedGroups.filter((row) => !terminalRailSameDir(row, dir));
-      delete terminalRailRemovedAt[key];
-      saveTerminalRailRemovedAt();
       healed = true;
       api("POST", "/api/terminal/rail/restore-group", { dir })
+        .then(() => {
+          // 落盘成功才清时间轴：失败时保留原移除时刻，重载后仍能据它自愈。
+          delete terminalRailRemovedAt[key];
+          saveTerminalRailRemovedAt();
+        })
         .catch(() => {
           terminalRailSelfHealFailed.add(key);
           terminalRailPrefs.removedGroups.push(dir);
@@ -9867,11 +9870,10 @@ async function api(method, path, body) {
       listEl.addEventListener("pointerdown", armMotion, { once: true, capture: true });
       listEl.addEventListener("keydown", armMotion, { once: true, capture: true });
     }
-    // 一处委托：关闭叉 / 切换终端 / 历史行归档 / 组头菜单 / 组头新建 / 移除分组 /
-    // 恢复分组 / 历史行续接 / 组折叠 / 水位线。关闭叉与归档钮先判，否则会被行点击
-    // 抢走；组头 ⋯、⊕ 与菜单项、恢复钮都要抢在「历史行续接」与「组折叠」之前——
-    // 它们同在那一片区域里，判序错了点⋯ 就会折叠组、点⊕ 就会折叠组、点恢复就会
-    // 续接会话。
+    // 一处委托：关闭叉 / 历史行归档 / 取消归档 / 组头菜单 / 组头新建 / 空态复位 /
+    // 切换终端 / 历史行续接 / 组折叠 / 水位线。关闭叉、归档与取消归档钮先判，否则会
+    // 被行点击抢走；组头 ⋯ 与 ⊕ 要抢在「历史行续接」与「组折叠」之前——它们同在
+    // 那一片区域里，判序错了点⋯ 就会折叠组、点⊕ 就会折叠组。
     dir.addEventListener("click", (event) => {
       const target = event.target;
       if (!target || typeof target.closest !== "function") return;
