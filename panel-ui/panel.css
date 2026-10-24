@@ -738,12 +738,14 @@
   .rail-term-ghost { position: absolute; pointer-events: none; margin: 0; }
   /* ── 运行中转圈（M12-B，dsh 实测规格逐项） ──
      转圈住进行首 16×20 常驻槽（.rail-term-slot）：working 填入，idle 与非 live
-     行该槽让给状态点或留空，不替换任何图标。槽内挂读屏文本「进行中」。
+     行一律留空（dsh 四态机 idle 不画任何图标，灰点已退役），不替换任何图标。
+     槽内挂读屏文本「进行中」。页签指示位复用本组件（.terminal-tab-state 槽内
+     嵌同一 markup）。
      SVG 14×14 / viewBox 0 0 24 24 / aria-hidden / currentColor 三级文字色：
      轨道圆 r=9.5 静态 opacity .25；弧线圆同描边 dasharray 12 150 呼吸（1.5s
      ease-in-out，弧长 12→24→12、offset 0→-6→0）；外层 g 匀速 360°（1.5s
      linear）——两动画同周期成稳定加载环。reduced-motion 下两动画全 none
-     （静态轨道＋固定弧）。 */
+     （静态轨道＋固定弧，规格见下方媒体查询）。 */
   .rail-term-spinner {
     flex: none; width: 16px; height: 20px; display: inline-flex; align-items: center; justify-content: center;
     color: var(--text-3);
@@ -760,6 +762,9 @@
   @keyframes rail-term-spinner-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) {
     .rail-term-spinner-arc, .rail-term-spinner-rot { animation: none; }
+    /* 静态弧对齐 dsh：降级不是回到动画 0% 的短弧，而是画一条更长的固定弧
+       （dasharray 18 150、offset -3），静态下也能读出「加载环」的形状。 */
+    .rail-term-spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
   }
   .rail-term-row.is-active { background: var(--accent-soft); color: var(--accent); }
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -2038,9 +2043,10 @@
   .terminal-tab-copy { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
   .terminal-tab-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
   .terminal-tab-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--text-3); }
-  .terminal-tab-state { flex: none; width: 7px; height: 7px; border-radius: 50%; }
-  .terminal-tab-state.is-working { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
-  .terminal-tab-state.is-idle { background: var(--text-4); }
+  /* 页签指示位＝常驻定宽槽（dsh 四态机行内子集）：工作态填栏内同款转圈组件
+     （.rail-term-spinner 原样嵌进槽内），idle 不画任何图标（灰点/绿点光晕均已
+     退役）。槽宽恒定，转圈出现/消失不推挤页签文字——沿用会话栏行首槽原则。 */
+  .terminal-tab-state { flex: none; width: 16px; height: 20px; display: inline-flex; align-items: center; justify-content: center; }
   /* 关闭叉放大一号并垫出命中区：负外边距抵消内边距，字形位置与行内布局不动。 */
   .terminal-tab-close { flex: none; margin: -3px -5px; padding: 3px 5px; color: var(--text-4); font-size: 18px; line-height: 1; opacity: .5; }
   .terminal-tab:hover .terminal-tab-close, .terminal-tab.active .terminal-tab-close { opacity: 1; }

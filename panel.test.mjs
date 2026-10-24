@@ -10914,6 +10914,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     const tabsApi = new Function("$", "escapeHtml", "sessions", `
       let activeTerminalPreviewId = "t1";
       let terminalTabsRenderedHtml = "";
+      const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
       function terminalSessionMap() { return sessions; }
       ${extractFn("renderTerminalPreviewTabs")}
       return { render: renderTerminalPreviewTabs, setActive: (id) => { activeTerminalPreviewId = id; } };
@@ -11143,6 +11144,44 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     const dead = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now(), status: "exited" } };
     await vmFn("terminalActivityApplyToSession", [dead, 0], ["terminalBusyByOutput"]);
     assert.equal(dead.status, "idle", "exited 不转圈");
+  });
+
+  it("前端：terminalBusyByOutput 四输入面（出生零输出／键入抑制／孵化豁免／请求穿透）", async () => {
+    // 时刻注入固定值，四个面全按相对时刻构造，不依赖墙钟。
+    const now = 1_000_000;
+    const busy = (backendState) => vmFn("terminalBusyByOutput", [{ backendState }, 5000, now]);
+    // 面 1：出生零输出不忙——宿主不再播种 lastActiveAt，刚打开的空会话不转圈、
+    // M12 内切门按 idle 就地换内容（不再保护性新开）。
+    assert.equal(await busy({ status: "running", createdAt: now - 1000, spawnedAt: now - 1000 }), false,
+      "出生零输出不忙（快照没有 lastActiveAt）");
+    // 面 2：近 2s 有键入则输出不判忙（PTY 回显归因用户交互）；静默超 2s 后的
+    // 输出才是程序自己的。lastInputAt 缺省（undefined/0：老会话恢复、老宿主
+    // 快照）按无抑制处理。
+    const echoState = (inputAt) => ({
+      status: "running", createdAt: now - 60_000, spawnedAt: now - 60_000,
+      lastActiveAt: now - 500, lastInputAt: inputAt,
+    });
+    assert.equal(await busy(echoState(now - 1000)), false, "1s 前刚键入：回显不判忙");
+    assert.equal(await busy(echoState(now - 2500)), true, "键入静默 2.5s 后仍在出字：在跑");
+    assert.equal(await busy(echoState(undefined)), true, "lastInputAt 缺省按无抑制");
+    assert.equal(await busy(echoState(0)), true, "lastInputAt 为 0 按无抑制");
+    // 面 3：孵化窗 15s——出生 15s 内的输出（新 shell banner／续接重放实测
+    // 6–12s）不当「在跑」，窗后命令输出照常判忙；出生点锚 spawnedAt，老宿主
+    // 快照没有时回落 createdAt。
+    const bannerState = (bornAt) => ({
+      status: "running", createdAt: now - 600_000, spawnedAt: bornAt, lastActiveAt: now - 100,
+    });
+    assert.equal(await busy(bannerState(now - 10_000)), false, "出生 10s：banner/重放不判忙");
+    assert.equal(await busy(bannerState(now - 16_000)), true, "出生 16s：窗后命令输出判忙");
+    assert.equal(await busy({ status: "running", createdAt: now - 10_000, lastActiveAt: now - 100 }), false,
+      "老宿主快照无 spawnedAt：回落 createdAt 照样豁免");
+    // 面 4：孵化窗内在途请求 >0 仍忙——请求真值是 relay 权威信号，豁免窗只收
+    // 输出启发，不吞请求（写点口径 count > 0 || busy 的 OR 结构）。
+    const fresh = { status: "idle", metrics: null, backendState: bannerState(now - 1000) };
+    await vmFn("terminalActivityApplyToSession", [fresh, 1], ["terminalBusyByOutput"]);
+    assert.equal(fresh.status, "working", "孵化窗内请求在途仍 working");
+    await vmFn("terminalActivityApplyToSession", [fresh, 0], ["terminalBusyByOutput"]);
+    assert.equal(fresh.status, "idle", "孵化窗内零请求零有效输出：idle（内切门就地换内容）");
   });
 
   it("前端：terminalActivityApplyFrame 定点更新不串键、snapshot 整帧对齐", async () => {
@@ -12611,6 +12650,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       const fn = new Function("$", "escapeHtml", "sessions", `
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
+        const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
         function terminalSessionMap() { return sessions; }
         ${src}
         return renderTerminalPreviewTabs;
@@ -12667,6 +12707,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       new Function("$", "escapeHtml", "sessions", `
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
+        const TERMINAL_RAIL_SPINNER = "";
         function terminalSessionMap() { return sessions; }
         ${extractFn("renderTerminalPreviewTabs")}
         return renderTerminalPreviewTabs;
@@ -12678,6 +12719,39 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     }
     assert.ok(docStub.queried.includes('.panel-card[data-agent-id="claude"] .agent-avatar'), "克隆来源是看板卡头像");
     assert.equal(slotStub.filled, avatarClone, "头像克隆整体替换槽位默认徽标");
+  });
+
+  it("页签指示位 dsh 四态子集：工作态复用栏内转圈、idle 空槽无灰点、定宽防挤动", () => {
+    const escapeHtml = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const runTabs = (sessions) => {
+      const tabs = { innerHTML: "" };
+      new Function("$", "escapeHtml", "sessions", `
+        let terminalTabsRenderedHtml = "";
+        let activeTerminalPreviewId = "t1";
+        const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        function terminalSessionMap() { return sessions; }
+        ${extractFn("renderTerminalPreviewTabs")}
+        return renderTerminalPreviewTabs;
+      `)((id) => (id === "terminalTabs" ? tabs : null), escapeHtml, sessions)();
+      return tabs.innerHTML;
+    };
+    const base = { label: "新终端", shell: { name: "PowerShell" }, agentName: null, agent: null };
+    const working = runTabs({ t1: { ...base, status: "working" } });
+    assert.ok(working.includes("SPINNER-STUB"), "工作态填栏内同款转圈组件（复用 TERMINAL_RAIL_SPINNER）");
+    assert.ok(working.includes('title="进行中"'), "工作态悬停提示「进行中」");
+    assert.ok(!working.includes("is-working"), "绿点光晕类名不出现（图标面退役）");
+    const idle = runTabs({ t1: { ...base, status: "idle" } });
+    assert.ok(idle.includes('<span class="terminal-tab-state"></span>'), "idle 指示位是空常驻槽（dsh：idle 不画任何图标）");
+    assert.ok(!idle.includes("SPINNER-STUB"), "idle 无转圈");
+    assert.ok(!idle.includes("is-idle"), "灰点类名不出现（图标面退役）");
+    assert.ok(!idle.includes('title="空闲"') && !idle.includes('title="进行中"'), "「空闲」tooltip 随灰点消失，idle 无悬停提示");
+    // 定宽防挤动：指示位是常驻槽（与栏内行首槽同原则），转圈出现/消失不推挤
+    // 页签文字；绿点光晕（is-working）与灰点（is-idle）两条规则随图标面清用删除。
+    const slot = panelCss.match(/\.terminal-tab-state \{([^}]*)\}/)?.[1] ?? "";
+    assert.ok(/width:\s*16px/.test(slot) && /height:\s*20px/.test(slot) && /flex:\s*none/.test(slot),
+      "指示位常驻定宽槽 16×20 不参与伸缩");
+    assert.ok(!panelCss.includes(".terminal-tab-state.is-working") && !panelCss.includes(".terminal-tab-state.is-idle"),
+      "页签绿点/灰点死规则已删（文字状态条 .terminal-live-status.is-idle 是另一面）");
   });
 
   it("监测区 agent 徽标整体退役：身份标注由页签副行承担，节点/JS/CSS 无残留", () => {
