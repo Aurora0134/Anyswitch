@@ -421,6 +421,52 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(spinner.includes('class="rail-term-spinner-sr"'), "读屏文本走 visuallyHidden 形制");
     });
 
+    it("行首常驻槽：三种状态同起点，组头文字与会话标题同 x（dsh sessionRow 同构）", () => {
+      const fn = new Function("session", "live", "activeId", `
+        const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
+        const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
+        function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+        function terminalRailRelTime() { return "3 分钟前"; }
+        function terminalRailIsArchived() { return false; }
+        function esc(v) { return String(v); }
+        function escapeHtml(v) { return String(v || ""); }
+        const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        ${extractFn("terminalRailRowHtml")}
+        return terminalRailRowHtml;
+      `)(null, null, "t1");
+      const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
+      const states = {
+        working: fn(session, { id: "t-1", status: "working" }, "t-1"),
+        idle: fn(session, { id: "t-1", status: "idle" }, "t-1"),
+        dead: fn(session, null, "t-1"),
+      };
+      // 不变式②：三种行（working 转圈 / idle 灰点 / 非 live 空）行首都是同一个常驻
+      // 槽——图标出现/消失/互换只动槽内容，标题文字起点不动。
+      for (const [name, html] of Object.entries(states)) {
+        const slotAt = html.indexOf('<span class="rail-term-slot">');
+        const titleAt = html.indexOf('class="rail-term-row-title"');
+        assert.ok(slotAt >= 0, `${name} 行行首先渲染常驻槽`);
+        assert.ok(titleAt > slotAt, `${name} 行槽在标题之前（空槽也占位）`);
+      }
+      assert.ok(states.working.indexOf("SPINNER-STUB") > states.working.indexOf('<span class="rail-term-slot">'), "转圈填进常驻槽");
+      assert.ok(states.idle.indexOf("terminal-tab-state") > states.idle.indexOf('<span class="rail-term-slot">'), "idle 状态点填进常驻槽");
+      // 不变式①③：几何同式对齐——行 8+16+8 == 组头 8+16+8（32px），行 gap 与组头
+      // gap 都是 8、两个槽都是 16 宽，标题与组头文字严格同 x，三种行互相对齐。
+      const slot = cssRule(".rail-term-slot {");
+      assert.ok(slot.includes("width: 16px") && slot.includes("height: 20px"), "行首槽 16×20（dsh 实测槽）");
+      assert.ok(slot.includes("flex: none"), "槽不参与伸缩");
+      assert.ok(slot.includes("justify-content: center"), "槽内图标居中（状态互换不产生位移）");
+      const row = cssRule(".rail-term-row {");
+      assert.ok(/gap: 8px/.test(row) && /padding: 0 8px/.test(row), "行 padding 0 8px + gap 8px（8+16+8=32px 起点）");
+      const toggle = cssRule(".rail-term-group-toggle {");
+      assert.ok(/gap: 8px/.test(toggle), "组头 gap 8px（8+16+8=32px 起点，与行严格同 x）");
+      const groupSlot = cssRule(".rail-term-group-slot {");
+      assert.ok(groupSlot.includes("width: 16px") && groupSlot.includes("height: 20px"), "组头槽同 16×20（两槽同宽）");
+      // pending「新会话」行同构：兜底行也走常驻槽，标题与历史行对齐
+      const pendingSrc = extractFn("terminalRailPendingRowHtml");
+      assert.ok(pendingSrc.includes('<span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER'), "pending 行行首常驻槽包住转圈/状态点");
+    });
+
     it("树渲染指纹门控：同串不重写 DOM，选中/状态变化才重写", () => {
       // 打开列表段拆除后，指纹门控并进树渲染（1s 归属轮询每拍都走，同串不写 DOM）。
       const list = { html: "", writes: 0 };

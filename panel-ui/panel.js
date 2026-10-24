@@ -9180,8 +9180,10 @@ async function api(method, path, body) {
     if (live) cls.push("is-live");
     if (archived) cls.push("is-archived");
     if (live && live.id === activeId) cls.push("is-active");
-    // 行首槽位（M12-B，dsh 实测口径）：working 行填转圈（16×20 槽内的 14×14 SVG，
-    // 读屏文本「进行中」），idle 的 live 行留 7×7 状态点，非 live 行槽位留空。
+    // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
+    // 16×20 前导槽——working 行填转圈（14×14 SVG，读屏文本「进行中」），idle 的
+    // live 行填 7×7 状态点，非 live 行留空。槽宽恒定，图标出现/消失/互换都不动标题
+    // 文字起点；行 8+16+8 与组头 8+16+8 同式，标题与组头文字严格同 x。
     const dot = live
       ? (working
         ? TERMINAL_RAIL_SPINNER
@@ -9201,7 +9203,7 @@ async function api(method, path, body) {
     const draggable = archived ? "" : ` draggable="true"`;
     return `
       <button type="button" class="${cls.join(" ")}" data-rail-term-resume="${esc(session.id)}"${live ? ` data-rail-term-live="${esc(live.id)}"` : ""}${draggable} title="${esc(title)}">
-        ${dot}
+        <span class="rail-term-slot">${dot}</span>
         <span class="rail-term-row-title">${escapeHtml(title)}</span>
         ${dirMeta}
         <span class="rail-term-row-time">${escapeHtml(time)}</span>
@@ -9218,7 +9220,7 @@ async function api(method, path, body) {
     const active = entry.id === activeId;
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
-        ${working ? TERMINAL_RAIL_SPINNER : `<span class="terminal-tab-state is-idle" title="空闲"></span>`}
+        <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : `<span class="terminal-tab-state is-idle" title="空闲"></span>`}</span>
         <span class="rail-term-row-title">新会话</span>
         <span class="rail-term-row-close" data-rail-term-close="${esc(entry.id)}" aria-hidden="true">×</span>
       </button>`;

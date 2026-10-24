@@ -721,6 +721,15 @@
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
   .rail-term-row:hover { background: var(--surface-hover); }
+  /* ── 行首常驻槽（dsh sessionRow 同构） ──
+     所有会话行（历史/pending/搜索结果）行首都渲染这个 16×20 槽：working 填转圈、
+     idle 的 live 行填 7×7 状态点、非 live 行留空。槽宽恒定，状态图标出现/消失/
+     互换时标题文字起点不动。行 padding 8 + 槽 16 + 行 gap 8 = 组头 padding 8 +
+     组头槽 16 + 组头 gap 8（32px）——会话行标题与组头文字严格同 x。 */
+  .rail-term-slot {
+    flex: none; width: 16px; height: 20px; display: inline-flex;
+    align-items: center; justify-content: center; line-height: 0;
+  }
   /* ── 归档/撤销退场幽灵行（M13） ──
      离开布局的行克隆补进滚动层（.rail-term-scroll 是 position:relative 的最近
      定位祖先，幽灵随内容滚动）：inert＋不可命中，100ms 淡出后由 JS 移除。动画走
@@ -728,8 +737,8 @@
      这里只管脱离布局流、不挡指针。 */
   .rail-term-ghost { position: absolute; pointer-events: none; margin: 0; }
   /* ── 运行中转圈（M12-B，dsh 实测规格逐项） ──
-     行首 16×20 前导槽：非运行行该槽本来空着（idle 的 live 行是 7×7 状态点、非
-     live 行全空），转圈是填入空槽、不替换任何图标。槽内挂读屏文本「进行中」。
+     转圈住进行首 16×20 常驻槽（.rail-term-slot）：working 填入，idle 与非 live
+     行该槽让给状态点或留空，不替换任何图标。槽内挂读屏文本「进行中」。
      SVG 14×14 / viewBox 0 0 24 24 / aria-hidden / currentColor 三级文字色：
      轨道圆 r=9.5 静态 opacity .25；弧线圆同描边 dasharray 12 150 呼吸（1.5s
      ease-in-out，弧长 12→24→12、offset 0→-6→0）；外层 g 匀速 360°（1.5s
@@ -780,10 +789,13 @@
     display: flex; align-items: center; gap: 4px; min-height: 26px;
     border-radius: var(--radius-md); white-space: nowrap; min-width: 0;
   }
+  /* gap 8（原 6）：padding 8 + 槽 16 + gap 8 = 32px，与行首常驻槽几何同式——
+     组头文字与会话行标题严格同 x。dsh 组头 gap 6、其行标题另走 margin 4（组头
+     30 / 行 28，差 2px 不严格对齐），这里按对齐不变式取同式 8。 */
   .rail-term-group-toggle {
     appearance: none; border: 0; background: transparent; color: var(--text-3);
     font: inherit; font-size: 12.5px; text-align: left; cursor: pointer;
-    display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0;
     min-height: 26px; padding: 0 8px; border-radius: var(--radius-md);
   }
   .rail-term-group-toggle:hover { background: var(--surface-hover); color: var(--text-2); }
