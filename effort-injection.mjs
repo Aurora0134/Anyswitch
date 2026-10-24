@@ -24,9 +24,9 @@
 //   4. a client that named nothing gets the library default: a store row that
 //      states its own levels answers first (`reasoningEffortLevels` /
 //      `reasoningVariants`, with `defaultEffort` naming the level when it is
-//      legal), and the level is never `max` by construction (the north gateway
-//      kills a deep-thinking agentic request at ~296s wall clock and bills it
-//      anyway);
+//      legal), and the level is never `max` by construction (some upstream
+//      gateways wall-clock deep-thinking agentic requests and bill them
+//      anyway, so an over-deep default invites silent paid kills);
 //   5. if a channel answers that it does not take the parameter, the field is
 //      dropped and the request is sent again, and that channel stops being
 //      injected for.

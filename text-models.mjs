@@ -17,12 +17,12 @@
 // The starting registry is ccswitch's CONFIRMED_TAILS trimmed to the model
 // families this install actually routes (see the per-entry notes).
 
-// Trimmed to families present in this machine's store (checked 2026-10-19):
+// Registry trimmed to model families an operator store plausibly routes:
 // deepseek (v4-* gateway aliases), glm (5.2/5.3 base tiers, incl. the
-// sta1n channel's "[Cloud]GLM-5.3" labelled ids), mimo (v2.5-pro), minimax
-// (m2.7 family via the -free gateway variant). ccswitch families this store
-// never routes (kat/ling/longcat/ark-code/qwen3-coder/step-3.5/us.deepseek)
-// are dropped; unconfirmed local variants (glm-5.3-flash, glm-5.3-flashx,
+// "[云]GLM-5.3"-style channel-labelled ids), mimo (v2.5-pro), minimax
+// (m2.7 family via the -free gateway variant). ccswitch families such an
+// install never routes (kat/ling/longcat/ark-code/qwen3-coder/step-3.5/us.deepseek)
+// are dropped; unconfirmed variants (glm-5.3-flash, glm-5.3-flashx,
 // kimi-k3, qwen3.8-*, mimo-v2.6-*, MiniMax-M2.7-free, deepseek-v4-*) stay out
 // on the fail-open rule — deepseek-v4-flash/v4-pro deliberately so: the
 // vendor routes those aliases to vision-capable endpoints.
@@ -38,9 +38,9 @@ export const CONFIRMED_TEXT_ONLY_MODELS = Object.freeze([
 
 const CONFIRMED_TEXT_ONLY_SET = new Set(CONFIRMED_TEXT_ONLY_MODELS);
 
-// Channel-decorated ids this store actually carries: a leading "[Cloud]"/
-// "[特价]"-style bracket label (sta1n channel) is the gateway's tag, not part
-// of the model name, so it is peeled before the exact match. The trailing
+// Channel-decorated ids: a leading "[云]"/"[特价]"-style bracket label is
+// the gateway's tag, not part of the model name, so it is peeled before the
+// exact match. The trailing
 // "[1m]" context marker is what Claude clients append to the 1M variant (the
 // relay's own inbound normalization usually removes it first; kept here so
 // the registry is safe on the openai path too). "models/" is the OpenRouter

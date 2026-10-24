@@ -2152,7 +2152,7 @@ describe("M9 复审必修 2：视图菜单 min-width 层叠", () => {
 
 describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", () => {
   // 现象（M8 遗留）：flat 转换先于兜底注入执行，兜底行找不到 key "" 的伪组就新建
-  // 一个真组——点「单列表」后平铺行之外多出一个真组头（key 如 C:\\Users\\86183，
+  // 一个真组——点「单列表」后平铺行之外多出一个真组头（key 如 C:\\Users\\me，
   // 内挂 live 兜底行）。修法：flat 模式下兜底行挂伪组（key ""）不新建组。
   it("flat ＋ 全新终端兜底行：无 key 非空的伪组头，兜底行挂在平铺伪组里", () => {
     const sandbox = renderSandbox({
@@ -2165,7 +2165,7 @@ describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", (
         fetchedAt: 1,
         error: null,
       },
-      activeSession: { id: "t-9", cwd: "C:\\Users\\86183", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+      activeSession: { id: "t-9", cwd: "C:\\Users\\me", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
       viewPrefs: { groupBy: "flat", orderBy: "updated", archivedFilter: "default", sessionOrder: {} },
     });
     sandbox.fn.render("kimi");
@@ -2183,7 +2183,7 @@ describe("M10 F1：单列表模式下「新会话」兜底行不新建真组", (
   it("对照组：按工作区模式下兜底行照旧为无历史会话的新目录建组", () => {
     const sandbox = renderSandbox({
       history: { endpoint: "kimi", sessions: [], fetchedAt: 1, error: null },
-      activeSession: { id: "t-9", cwd: "C:\\Users\\86183", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+      activeSession: { id: "t-9", cwd: "C:\\Users\\me", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
     });
     sandbox.fn.render("kimi");
     assert.ok(sandbox.list.html.includes("rail-term-group-head"), "非 flat 模式照旧建组");

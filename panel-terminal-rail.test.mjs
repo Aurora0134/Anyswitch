@@ -578,14 +578,14 @@ describe("终端视图左栏换血（M4）", () => {
       // 还会触发不该有的目录信任提示。这里把「记住上次」设成一个**不同的**目录，
       // 只要实现有任何回落，POST 里的 cwd 就会露出来。
       const { sandbox, log } = runResume(
-        { ...RESUMABLE, project: "C:\\Users\\86183\\Desktop\\agent-home" },
-        async () => ({ id: "t-9", label: "Claude Code", agentId: "claude", shell: "cmd", cwd: "C:\\Users\\86183\\Desktop\\agent-home" }),
+        { ...RESUMABLE, project: "C:\\Users\\me\\Desktop\\work" },
+        async () => ({ id: "t-9", label: "Claude Code", agentId: "claude", shell: "cmd", cwd: "C:\\Users\\me\\Desktop\\work" }),
       );
       await sandbox.run();
       const post = log.posts.find((p) => p.path === "/api/terminal/agent-sessions");
       assert.ok(post, "发起续接请求");
-      assert.equal(post.body.cwd, "C:\\Users\\86183\\Desktop\\agent-home", "cwd = 会话 project");
-      assert.notEqual(post.body.cwd, "C:\\Users\\86183\\fixture", "不是「记住上次」的那个目录");
+      assert.equal(post.body.cwd, "C:\\Users\\me\\Desktop\\work", "cwd = 会话 project");
+      assert.notEqual(post.body.cwd, "C:\\Users\\me\\fixture", "不是「记住上次」的那个目录");
       assert.equal(post.body.resume.id, "s-1", "resume 身份照旧");
     });
 
@@ -745,7 +745,7 @@ describe("终端视图左栏换血（M4）", () => {
 
     // 设计稿遗留的预览种子：未就绪时 terminalSessionMap 会回落这张表
     const PREVIEW = {
-      checkout: { id: "checkout", label: "payment-service", shell: { name: "PowerShell" }, agent: null, status: "idle" },
+      checkout: { id: "checkout", label: "demo-service", shell: { name: "PowerShell" }, agent: null, status: "idle" },
       "preview-1": { id: "preview-1", label: "新终端", shell: { name: "PowerShell" }, agent: null, status: "idle" },
     };
     const BACKEND = {

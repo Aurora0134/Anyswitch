@@ -73,15 +73,15 @@ describe("fallbackContextWindow", () => {
   it("maps Kimi tiers, including the bare k3 alias and bracketed channel prefixes", () => {
     assert.equal(fallbackContextWindow("kimi-k3"), 1_048_576);
     assert.equal(fallbackContextWindow("Kimi-K3"), 1_048_576);
-    assert.equal(fallbackContextWindow("[Cloud]Kimi-K3"), 1_048_576);
+    assert.equal(fallbackContextWindow("[云]Kimi-K3"), 1_048_576);
     assert.equal(fallbackContextWindow("k3"), 1_048_576);
-    assert.equal(fallbackContextWindow("[SQUALL]k3"), 1_048_576);
-    assert.equal(fallbackContextWindow("[Cloud][SQUALL]K3"), 1_048_576);
-    assert.equal(fallbackContextWindow("squall/k3"), 1_048_576);
+    assert.equal(fallbackContextWindow("[网关]k3"), 1_048_576);
+    assert.equal(fallbackContextWindow("[云][网关]K3"), 1_048_576);
+    assert.equal(fallbackContextWindow("gateway/k3"), 1_048_576);
     assert.equal(fallbackContextWindow("vendor/path/k3"), 1_048_576);
     assert.equal(fallbackContextWindow("kimi-k2.6"), 262_144);
     assert.equal(fallbackContextWindow("Kimi-K2.6-free"), 262_144);
-    assert.equal(fallbackContextWindow("[Cloud]Kimi-K2.7-Code"), 262_144);
+    assert.equal(fallbackContextWindow("[云]Kimi-K2.7-Code"), 262_144);
   });
 
   it("maps Grok 4.5/4.6/4.7 to the 500K tier instead of the 1M default", () => {
@@ -111,8 +111,8 @@ describe("fallbackContextWindow", () => {
     // carry for an older M row stays on the unmatched default.
     assert.equal(fallbackContextWindow("MiniMax-M3.1-Flash"), 1_000_000);
     assert.equal(fallbackContextWindow("minimax-m3.1-flash"), 1_000_000);
-    assert.equal(fallbackContextWindow("[Cloud]MiniMax-M3.1-Flash"), 1_000_000);
-    assert.equal(fallbackContextWindow("[次][Cloud]MiniMax-M3.1-Flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("[云]MiniMax-M3.1-Flash"), 1_000_000);
+    assert.equal(fallbackContextWindow("[站][云]MiniMax-M3.1-Flash"), 1_000_000);
     assert.equal(fallbackContextWindow("go/minimax-m3.1-flash"), 1_000_000);
     assert.equal(fallbackContextWindow("minimax-m3.1-flash-free"), 1_000_000);
   });
@@ -120,7 +120,7 @@ describe("fallbackContextWindow", () => {
   it("maps Step 5 Preview to the 1M tier", () => {
     assert.equal(fallbackContextWindow("step-5-preview"), 1_000_000);
     assert.equal(fallbackContextWindow("Step-5-Preview"), 1_000_000);
-    assert.equal(fallbackContextWindow("[Cloud]step-5-preview"), 1_000_000);
+    assert.equal(fallbackContextWindow("[云]step-5-preview"), 1_000_000);
   });
 
   it("leaves non-m3.1 MiniMax ids on the unmatched default", () => {

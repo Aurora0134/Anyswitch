@@ -65,11 +65,11 @@ export function parseInjectThinkingEffort(raw) {
 
 // 会话缓存优化：anthropicToOpenAI 翻译时把入站 messages 数组里 role=system 的
 // 消息（mid-conversation system——Claude Code 每轮追加的 <total_tokens> 标记与
-// 环境更新就是这种）改写成 user 角色发往上游。部分渠道（a6api 的 deepseek 栈）
-// 会把 system 消息提升进前部稳定区，每轮新增的标记把前缀缓存断点钉死（生产实
-// 测 3% 命中）；改写后消息序列恢复纯追加形态，实测满命中（M11 判决）。默认
-// 开——缺失、畸形、旧版本没有这个键，一律视为开，升级上来的安装直接享受优化；
-// 只有显式写入 false 才回到原样翻译 system 角色。
+// 环境更新就是这种）改写成 user 角色发往上游。部分上游渠道的 deepseek 栈会把
+// system 消息提升进前部稳定区，每轮新增的标记把前缀缓存断点钉死（实测命中率
+// 掉到个位数）；改写后消息序列恢复纯追加形态，实测恢复满命中。默认开——缺失、
+// 畸形、旧版本没有这个键，一律视为开，升级上来的安装直接享受优化；只有显式
+// 写入 false 才回到原样翻译 system 角色。
 export const DEFAULT_MID_SYSTEM_REWRITE = true;
 
 export function parseMidSystemRewrite(raw) {

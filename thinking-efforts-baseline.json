@@ -87,7 +87,7 @@
         "scope": "step-5-preview, deepseek-flash, deepseek-v4.1-flash, qwen3.8, qwen3.8-flash",
         "what": "补查后改用各模型原生分档：step-5-preview low/medium/high；deepseek-flash 与 deepseek-v4.1-flash low/high/max；qwen3.8 max·flash low/medium/xhigh（默认 xhigh）",
         "evidence": "StepFun 官方模型页与推理模型接入页；DeepSeek 官方思考模式页与 V4.1 Flash 公告页；阿里云百炼 OpenAI 兼容页与思考模式页；pi-ai 目录 deepseek.json / qwen-token-plan*.json",
-        "ruleChange": "build.mjs 新增 step-5-preview-native / deepseek-v4.1-native / qwen3.8-max-flash-native 三条 set 型规则；deepseek-xhigh 的 test 排除 V4.1 两枚官方名；撤掉 2026-09-12 的 qwen3.8-flash-max-xhigh-max（证据显示 high/max 都折到 xhigh）",
+        "ruleChange": "新增 step-5-preview-native / deepseek-v4.1-native / qwen3.8-max-flash-native 三条 set 型规则；deepseek-xhigh 的 test 排除 V4.1 两枚官方名；撤掉 2026-09-12 的 qwen3.8-flash-max-xhigh-max（证据显示 high/max 都折到 xhigh）",
         "notApplied": "wire 与 thinkingFormat 未写入（DSH compat 方言轴，本次未授权）"
       },
       {

@@ -722,7 +722,7 @@ describe("openai relay transport", () => {
   });
 
   describe("chunk-envelope repair is gated on grok alone", () => {
-    // The live SQUALL-deepseek shape: choices + object only, no id/created/model.
+    // A live deepseek-channel wire shape: choices + object only, no id/created/model.
     const ENVELOPELESS_SSE = [
       'data: {"choices":[{"delta":{"content":"hi"},"index":0}],"object":"chat.completion.chunk"}\n\n',
       'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"object":"chat.completion.chunk"}\n\n',

@@ -530,10 +530,10 @@ describe("tool-call delta normalization (upstream repeats empty strings on conti
 });
 
 describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struct)", () => {
-  // The exact wire shape a live SQUALL-deepseek stream produced: choices + object
+  // The exact wire shape a live deepseek-channel stream produced: choices + object
   // only, no id/created/model. grok aborts the whole turn on the first such
   // chunk (is_retryable=false), while every other client reads it fine.
-  const squallFrames = [
+  const capturedFrames = [
     'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null,"index":0}],"object":"chat.completion.chunk"}\n\n',
     'data: {"choices":[{"delta":{"reasoning_content":"The user"},"finish_reason":null,"index":0}],"object":"chat.completion.chunk"}\n\n',
     'data: {"choices":[{"delta":{"content":"hello"},"index":0}],"object":"chat.completion.chunk"}\n\n',
@@ -556,7 +556,7 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
 
   it("fills id/created/model on every data chunk when enabled", () => {
     const guard = on();
-    const emitted = pump(guard, squallFrames);
+    const emitted = pump(guard, capturedFrames);
     const verdict = guard.finish();
     assert.equal(verdict.action, "pass");
     const parsed = frames(emitted + (verdict.tail || ""));
@@ -573,7 +573,7 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
   });
 
   it("leaves the stream byte-identical when the repair is off (every non-grok client)", () => {
-    const sse = squallFrames.join("");
+    const sse = capturedFrames.join("");
     const guard = new OpenAIStreamGuard();
     const emitted = pump(guard, [sse]);
     const verdict = guard.finish();
@@ -616,7 +616,7 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
 
   it("repairs under whole-turn hold too (enhanced keep-alive mode)", () => {
     const guard = new OpenAIStreamGuard({ holdEntireTurn: true, fillChunkEnvelope: { model: "m" } });
-    const emitted = pump(guard, squallFrames);
+    const emitted = pump(guard, capturedFrames);
     assert.equal(emitted, "", "nothing releases the hold in enhanced mode");
     const verdict = guard.finish();
     assert.equal(verdict.action, "pass");
@@ -643,7 +643,7 @@ describe("chunk-envelope repair (opt-in, grok's strict ChatCompletionChunk struc
 
   it("falls back to \"unknown\" rather than a null model when neither the stream nor the request names one", () => {
     const guard = new OpenAIStreamGuard({ fillChunkEnvelope: { model: "" } });
-    const emitted = pump(guard, squallFrames);
+    const emitted = pump(guard, capturedFrames);
     const verdict = guard.finish();
     const [f] = frames(emitted + (verdict.tail || ""));
     assert.equal(f.model, "unknown");

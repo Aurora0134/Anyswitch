@@ -1373,7 +1373,7 @@ async function api(method, path, body) {
   // 按链身份取链配置：端点链的键是端点 id（routingChains[].endpointId），虚拟模型链
   // 的键是模型名（virtualModels[].name）——两者同一个命名空间，服务归因的 chainKey
   // 报的就是这个键。同一（渠道,模型）可同时出现在端点链和虚拟模型链里（例如
-  // a6api-pool/kimi-k3），所以位次必须按「服务它的那条链」数，不能按端点猜。
+  // demo-pool/kimi-k3），所以位次必须按「服务它的那条链」数，不能按端点猜。
   function boardChainByKey(chainKey) {
     if (typeof chainKey !== "string" || !chainKey) return null;
     const endpointChain = boardRoutingChains().find((c) => c && c.endpointId === chainKey);
@@ -4764,7 +4764,7 @@ async function api(method, path, body) {
     checkout: {
       // 归属链：终端会话 → shell 进程 → 检测到的 Agent 进程/实例 → 请求、指标与路由都挂在实例号下；
       // 归属只认进程与实例号，不从终端输出文本里猜。Agent 退出后会话保留终端自身状态，监测区随 agent 一并隐藏。
-      label: "payment-service", cwd: "D:\\dev\\payment-service", branch: "main",
+      label: "demo-service", cwd: "D:\\dev\\demo-service", branch: "main",
       shell: { name: "PowerShell", pid: 23140 },
       agent: { name: "Codex CLI", endpointId: "codex", instanceId: "codex-23140", pid: 24512 },
       status: "working",
@@ -4798,13 +4798,13 @@ async function api(method, path, body) {
         ["dim", "Windows PowerShell"],
         ["dim", "Copyright (C) Microsoft Corporation. All rights reserved."],
         ["", ""],
-        ["prompt-line", "PS D:\\dev\\payment-service> "],
+        ["prompt-line", "PS D:\\dev\\demo-service> "],
         ["command-line", "codex --model kimi-k3"],
         ["dim", "╭──────────────────────────────────────────────────────────────╮"],
         ["agent-line", "│ Codex CLI                                             v0.154.0 │"],
         ["dim", "╰──────────────────────────────────────────────────────────────╯"],
         ["", ""],
-        ["info-line", "  project  payment-service"],
+        ["info-line", "  project  demo-service"],
         ["info-line", "  branch   main"],
         ["info-line", "  model    kimi-k3 · north-main"],
         ["", ""],
@@ -6876,7 +6876,7 @@ async function api(method, path, body) {
     if (footStats) footStats.hidden = true;
     const addBtn = $("terminalAddBtn");
     if (addBtn) addBtn.disabled = true;
-    // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏/假监测区（payment-service/portal、
+    // 静态种子里还有设计稿遗留的假页签/假会话栏/假底栏/假监测区（demo-service/portal、
     // PID 23140、Codex CLI 等）——降级下也必须一并退场，否则空态旁边仍挂着以假乱真的名字。
     // 会话级那几条与零会话共用同一套退场动作（含工作区整体收走，不留空壳）。
     const tabs = $("terminalTabs");
@@ -8574,7 +8574,7 @@ async function api(method, path, body) {
   const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle class="rail-term-spinner-track" cx="12" cy="12" r="9.5" opacity=".25"></circle><g class="rail-term-spinner-rot"><circle class="rail-term-spinner-arc" cx="12" cy="12" r="9.5" stroke-dasharray="12 150"></circle></g></svg><span class="rail-term-spinner-sr">进行中</span></span>';
 
   // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
-  // （payment-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
+  // （demo-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
   // 未就绪一律当空——「打开的终端」如实空缺；历史会话段是真实磁盘数据，不经过这里，
   // 照常渲染。
   function terminalRailSessionMap() {

@@ -231,19 +231,19 @@ test("classifyDiscovery refuses to prune when the sanitizer dropped usable ids",
 
 test("mergeModelIds keeps surviving entries untouched and appends new ids with makeEntry", () => {
   const existing = {
-    "[AN]claude-opus-4-6": { displayName: "[AN] Claude Opus 4-6" },
+    "[渠]claude-opus-4-6": { displayName: "[渠] Claude Opus 4-6" },
     "gpt-5.5": { displayName: "GPT 5.5", contextWindow: 922000, maxOutputTokens: 65536 },
   };
   const merged = mergeModelIds({
     existing,
-    upstreamIds: ["[AN]claude-opus-4-6", "gpt-5.5", "brand-new"],
+    upstreamIds: ["[渠]claude-opus-4-6", "gpt-5.5", "brand-new"],
     canPrune: true,
     makeEntry: (id) => ({ displayName: id }),
   });
-  assert.deepEqual(merged["[AN]claude-opus-4-6"], { displayName: "[AN] Claude Opus 4-6" });
+  assert.deepEqual(merged["[渠]claude-opus-4-6"], { displayName: "[渠] Claude Opus 4-6" });
   assert.deepEqual(merged["gpt-5.5"], { displayName: "GPT 5.5", contextWindow: 922000, maxOutputTokens: 65536 });
   assert.deepEqual(merged["brand-new"], { displayName: "brand-new" });
-  assert.deepEqual(Object.keys(merged), ["[AN]claude-opus-4-6", "gpt-5.5", "brand-new"]);
+  assert.deepEqual(Object.keys(merged), ["[渠]claude-opus-4-6", "gpt-5.5", "brand-new"]);
   assert.notEqual(merged["gpt-5.5"], existing["gpt-5.5"]);
 });
 

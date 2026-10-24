@@ -62,7 +62,7 @@ export const CLAUDE_TIER_AGENT_ID = "claude";
 // (the `[1m]` family suffix); it is not part of any model name upstream
 // accepts, so classification strips it first. Only this marker: Anyswitch
 // model ids legitimately contain brackets elsewhere (a channel can carry
-// "[cloud]deepseek-…"), and no other bracket suffix is Claude's.
+// "[站点]deepseek-…"), and no other bracket suffix is Claude's.
 const CAPABILITY_MARKER = /\[1m\]$/i;
 
 // Where a model-family segment can begin: the start of the name, or after a

@@ -707,7 +707,7 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
 
   it("pi 头照发但值不采用：身份按连接属主进程归一（socket override）", async () => {
     // pi 的 models.json 写死 ${ANYSWITCH_INSTANCE_ID} 占位符（缺变量启动即抛错，
-    // pi-launcher.mjs 头注），头只能照发；值是 "agent-home-t3db95104" 形随机
+    // pi-launcher.mjs 头注），头只能照发；值是 "work-t3db95104" 形随机
     // 标签，折不进进程身份。override 集合成员与上面 kimi 用例恰成对照：头值不进
     // 身份，实例行只认连接属主进程。
     const piPidExec = (cmd, opts, cb) => cb(null, "Node,CommandLine,Name,ProcessId\r\nLAPTOP,C:\\Tools\\node.exe C:\\x\\node_modules\\@earendil-works\\pi-coding-agent\\dist\\bundle\\cli.js,node.exe,4321\r\n");
@@ -717,7 +717,7 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     const server = createOpenAIRelayServer(relayDeps(collector, socketOwner));
     const { port, close } = await listenLoopback(server, 0);
     try {
-      const res = await postChat(port, { "x-agent-id": "pi", "x-agent-instance": "agent-home-t3db95104" });
+      const res = await postChat(port, { "x-agent-id": "pi", "x-agent-instance": "work-t3db95104" });
       assert.equal(res.status, 200);
       await res.text();
 
@@ -760,7 +760,7 @@ describe("openai relay socket→PID fallback (no instance header)", () => {
     const server = createOpenAIRelayServer(deps);
     const { port, close } = await listenLoopback(server, 0);
     try {
-      const pending = postChat(port, { "x-agent-id": "pi", "x-agent-instance": "agent-home-t3db95104" });
+      const pending = postChat(port, { "x-agent-id": "pi", "x-agent-instance": "work-t3db95104" });
       await upstreamReady;
       assert.equal(listeners.size, 1, "头值不采用：起始无身份，迟到绑定已订阅");
       const mid = (await collector.getAgentsStatus()).find((a) => a.id === "pi");

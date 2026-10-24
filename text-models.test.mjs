@@ -22,8 +22,8 @@ describe("isConfirmedTextOnlyModel", () => {
     assert.equal(isConfirmedTextOnlyModel("models/glm-5.2"), true);
     assert.equal(isConfirmedTextOnlyModel("GLM-5.3[1M]"), true);
     assert.equal(isConfirmedTextOnlyModel("glm-5.2 [1m]"), true);
-    // 本机 sta1n 渠道的带标签形态：方括号是渠道标签，不是模型名。
-    assert.equal(isConfirmedTextOnlyModel("[Cloud]GLM-5.3"), true);
+    // 上游渠道的带标签形态：方括号是渠道标签，不是模型名。
+    assert.equal(isConfirmedTextOnlyModel("[云]GLM-5.3"), true);
     assert.equal(isConfirmedTextOnlyModel("[特价]DeepSeek-Chat"), true);
   });
 
@@ -68,9 +68,9 @@ describe("isConfirmedTextOnlyModel", () => {
       assert.equal(isConfirmedTextOnlyModel(name), false, name);
     }
     // 带标签的未确认形态同样不命中（前缀剥离后仍需精确匹配）。
-    assert.equal(isConfirmedTextOnlyModel("[Cloud]GLM-5.3-Flash"), false);
-    assert.equal(isConfirmedTextOnlyModel("[Cloud]Kimi-K3"), false);
-    assert.equal(isConfirmedTextOnlyModel("[AN]gemini-3.8-flash-thinking"), false);
+    assert.equal(isConfirmedTextOnlyModel("[云]GLM-5.3-Flash"), false);
+    assert.equal(isConfirmedTextOnlyModel("[云]Kimi-K3"), false);
+    assert.equal(isConfirmedTextOnlyModel("[渠]gemini-3.8-flash-thinking"), false);
   });
 
   it("never matches an empty or non-string id", () => {
@@ -84,7 +84,7 @@ describe("isConfirmedTextOnlyModel", () => {
     assert.equal(normalizeModelId("  GLM-5.3 "), "glm-5.3");
     assert.equal(normalizeModelId("models/deepseek-chat"), "deepseek-chat");
     assert.equal(normalizeModelId("GLM-5.2[1M]"), "glm-5.2");
-    assert.equal(normalizeModelId("[Cloud]GLM-5.3"), "glm-5.3");
+    assert.equal(normalizeModelId("[云]GLM-5.3"), "glm-5.3");
     assert.equal(normalizeModelId("[特价] GLM-5.3-Flash "), "glm-5.3-flash");
     assert.equal(normalizeModelId(""), "");
     assert.equal(normalizeModelId(null), "");

@@ -407,7 +407,7 @@ test("仓库指向现读现用：建服务后改了 skills.json，预览与落�
 
 test("Skills 仓库的 .git 不进包、不计数、也不回拷", async () => {
   const m = fakeMachine();
-  // agent-home/skills 本身就是 git 仓库：只读对象文件会在回拷时撞 Access denied。
+  // work/skills 本身就是 git 仓库：只读对象文件会在回拷时撞 Access denied。
   mkdirSync(join(m.repoPath, ".git", "objects"), { recursive: true });
   writeFileSync(join(m.repoPath, ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
   writeFileSync(join(m.repoPath, ".git", "objects", "loose"), "git-object-bytes\n", "utf8");

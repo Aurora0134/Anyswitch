@@ -2013,15 +2013,15 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
     );
   }
   const ENDPOINT_CHAINS = [
-    { endpointId: "kimi", chain: [{ node: "a6api-pool", model: "kimi-k3" }, { node: "sensenova", model: "kimi-k3" }], enabled: true },
+    { endpointId: "kimi", chain: [{ node: "demo-pool", model: "kimi-k3" }, { node: "sensenova", model: "kimi-k3" }], enabled: true },
   ];
   const VIRTUAL_MODELS = [
     {
       name: "deepseek-v4.1-flash-mix",
       chain: [
         { node: "sensenova", model: "deepseek-flash" },
-        { node: "free-pool", model: "deepseek-v4.1-flash" },
-        { node: "a6api-pool", model: "deepseek-v4.1-flash" },
+        { node: "backup-pool", model: "deepseek-v4.1-flash" },
+        { node: "demo-pool", model: "deepseek-v4.1-flash" },
       ],
       enabled: true,
     },
@@ -2041,17 +2041,17 @@ describe("panel.html 路由链状态（灯色口径 + 胶囊 auto 标记 + 左�
   });
 
   it("同（渠道,模型）出现在两条链里时，位次按 chainKey 那条数（不串链）", () => {
-    // kimi 端点链与 kimi-k3-mix 虚拟模型链里都有 a6api-pool/kimi-k3，但位次不同。
+    // kimi 端点链与 kimi-k3-mix 虚拟模型链里都有 demo-pool/kimi-k3，但位次不同。
     const chains = [
-      { endpointId: "kimi", chain: [{ node: "a6api-pool", model: "kimi-k3" }, { node: "x", model: "m" }, { node: "y", model: "m" }, { node: "z", model: "m" }], enabled: true },
+      { endpointId: "kimi", chain: [{ node: "demo-pool", model: "kimi-k3" }, { node: "x", model: "m" }, { node: "y", model: "m" }, { node: "z", model: "m" }], enabled: true },
     ];
     const virtualModels = [
-      { name: "kimi-k3-mix", chain: [{ node: "other", model: "m" }, { node: "a6api-pool", model: "kimi-k3" }], enabled: true },
+      { name: "kimi-k3-mix", chain: [{ node: "other", model: "m" }, { node: "demo-pool", model: "kimi-k3" }], enabled: true },
     ];
     const byKey = makeChainByKey({ chains, virtualModels });
     const mark = makeAutoMark();
-    assert.deepEqual(mark(byKey("kimi"), "a6api-pool", "kimi-k3", true), { cur: 0, total: 4 }, "端点链第 1 跳");
-    assert.deepEqual(mark(byKey("kimi-k3-mix"), "a6api-pool", "kimi-k3", true), { cur: 1, total: 2 }, "虚拟模型链第 2 跳");
+    assert.deepEqual(mark(byKey("kimi"), "demo-pool", "kimi-k3", true), { cur: 0, total: 4 }, "端点链第 1 跳");
+    assert.deepEqual(mark(byKey("kimi-k3-mix"), "demo-pool", "kimi-k3", true), { cur: 1, total: 2 }, "虚拟模型链第 2 跳");
   });
 
   // 胶囊数据整形：同名坍缩修复的渲染层入口。新 relay 快照带 activeTargets
@@ -11535,7 +11535,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       terminalFootStats: { hidden: false },
       terminalAddBtn: { disabled: false },
       terminalInspector: { style: {} },
-      terminalTabs: { innerHTML: "<button>payment-service</button>" },
+      terminalTabs: { innerHTML: "<button>demo-service</button>" },
       terminalWorkspace: { classList: { add: (c) => els.terminalWorkspace.classes.add(c), remove: (c) => els.terminalWorkspace.classes.delete(c), contains: (c) => els.terminalWorkspace.classes.has(c), toggle: (c, on) => (on ? els.terminalWorkspace.classes.add(c) : els.terminalWorkspace.classes.delete(c)) }, classes: new Set() },
       ".terminal-session-bar": { style: {} },
       ".terminal-foot-status": { style: {} },
@@ -11597,10 +11597,10 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(els.terminalMetricsSection.hidden, true, "监测区走 hidden 通路");
     assert.equal(els.terminalFootStats.hidden, true, "底栏统计随监测区一并隐藏");
     assert.equal(els.terminalAddBtn.disabled, true, "「+」随降级禁用");
-    assert.equal(els.terminalTabs.innerHTML, "", "降级清空静态假页签（payment-service/portal 种子）");
+    assert.equal(els.terminalTabs.innerHTML, "", "降级清空静态假页签（demo-service/portal 种子）");
     assert.equal(els[".terminal-session-bar"].style.display, "none", "降级隐藏静态假会话栏");
     assert.equal(els[".terminal-foot-status"].style.display, "none", "降级隐藏静态假底栏左段（PID/尺寸种子）");
-    assert.equal(els.terminalInspector.style.display, "none", "降级隐藏静态假监测区（payment-service/Codex CLI 种子）");
+    assert.equal(els.terminalInspector.style.display, "none", "降级隐藏静态假监测区（demo-service/Codex CLI 种子）");
     assert.ok(els.terminalWorkspace.classList.contains("is-empty"), "监测区退场即收成单列，不留 340px 空 column");
     assert.equal(state.connected, null, "不建流——mock 横幅不进屏");
     assert.equal(state.renderedData, 0, "假会话数据不渲染");
@@ -11755,7 +11755,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
     assert.equal(els.terminalTabs.innerHTML, "", "未定性即清空静态假页签");
     assert.equal(els[".terminal-session-bar"].style.display, "none", "假会话栏退场");
     assert.equal(els[".terminal-foot-status"].style.display, "none", "假底栏左段（PID/尺寸种子）退场");
-    assert.equal(els.terminalInspector.style.display, "none", "假监测区（payment-service/Codex CLI）退场");
+    assert.equal(els.terminalInspector.style.display, "none", "假监测区（demo-service/Codex CLI）退场");
     assert.equal(els.terminalAddBtn.disabled, true, "「+」按未就绪保持禁用");
     assert.equal(state.connected, null, "未定性不建流");
     assert.equal(state.renderedData, 0, "未定性不渲会话数据");

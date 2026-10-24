@@ -69,11 +69,11 @@ export const CONTEXT_TIER_RULES = [
 
 export const UNMATCHED_CONTEXT_FALLBACK = 1_000_000;
 
-// One channel (SQUALL-kimi) lists the model under the bare alias "k3" instead of
+// Some upstream channels list the model under the bare alias "k3" instead of
 // the vendor id; normalize it so the k3 tier rule catches both spellings. The
 // decorated spellings seen in the store get the same peel effort-catalog uses:
 // leading [Channel] brackets in a loop, then a "vendor/model" namespace keeps
-// its last segment — so "[SQUALL]k3" and "squall/k3" normalize too. Only the
+// its last segment — so "[Gateway]k3" and "gateway/k3" normalize too. Only the
 // peeled spelling is alias-checked; non-alias ids keep their original form for
 // the substring keyword match.
 function normalizeContextModelId(id) {

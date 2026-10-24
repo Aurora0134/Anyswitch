@@ -2617,9 +2617,9 @@ describe("capsule 渠道×模型 composite ledger (同名坍缩修复 + 服务�
     let mockTime = 1000;
     const collector = testCollector({ nowFn: () => mockTime, journal: fakeJournal() });
 
-    const direct = collector.startRequest({ agentId: "dsh", providerId: "a6api-pool", model: "glm-5.3", path: "openai" });
+    const direct = collector.startRequest({ agentId: "dsh", providerId: "demo-pool", model: "glm-5.3", path: "openai" });
     let dsh = (await collector.getAgentsStatus()).find((a) => a.id === "dsh");
-    assert.deepEqual(dsh.activeTargets, [{ providerId: "a6api-pool", model: "glm-5.3", count: 1, autoCount: 0 }],
+    assert.deepEqual(dsh.activeTargets, [{ providerId: "demo-pool", model: "glm-5.3", count: 1, autoCount: 0 }],
       "直连条目不带链身份");
     assert.equal(dsh.lastChainKey, null);
 

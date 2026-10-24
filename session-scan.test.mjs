@@ -1560,12 +1560,12 @@ test("cwd: head 窗里没有 cwd 时从 tail 补——别让长前导把它挤�
     type: "assistant",
     message: { role: "assistant", content: "回答" },
     timestamp: "2026-09-01T10:01:00.000Z",
-    cwd: "C:\\Users\\86183\\Desktop\\agent-home",
+    cwd: "C:\\Users\\me\\Desktop\\work",
   }));
-  writeClaudeSession(root, "C--Users-86183-Desktop-agent-home", "sess-cwd-tail.jsonl", lines);
+  writeClaudeSession(root, "C--Users-me-Desktop-work", "sess-cwd-tail.jsonl", lines);
   const { sessions } = await claudeScanner(root).scanAll();
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].cwd, "C:\\Users\\86183\\Desktop\\agent-home",
+  assert.equal(sessions[0].cwd, "C:\\Users\\me\\Desktop\\work",
     "头窗没有就从尾窗取——否则续接会落在错目录");
 });
 

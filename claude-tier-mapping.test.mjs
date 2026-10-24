@@ -57,9 +57,9 @@ test("Anthropic official ids classify by their family segment", () => {
 test("the trailing capability marker is not part of the name", () => {
   assert.deepEqual(classifyTierEntryName("claude-sonnet-4-5-20250929[1m]"), { ok: true, tier: "sonnet" });
   assert.deepEqual(classifyTierEntryName("sonnet[1M]"), { ok: true, tier: "sonnet" });
-  // A bracketed prefix is not a separator: "[cloud]claude-…" is some channel's
+  // A bracketed prefix is not a separator: "[站点]claude-…" is some channel's
   // own model id, and a name that specific resolves under the strict rules.
-  assert.equal(classifyTierEntryName("[cloud]claude-sonnet-5").reason, "not-claude-family");
+  assert.equal(classifyTierEntryName("[站点]claude-sonnet-5").reason, "not-claude-family");
 });
 
 test("names that are not Claude's tier vocabulary are refused, not guessed", () => {

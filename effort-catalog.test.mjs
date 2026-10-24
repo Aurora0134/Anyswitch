@@ -61,7 +61,7 @@ const SAMPLE_MODELS = {
 
 describe("canonicalizeModelId", () => {
   it("strips repeated bracket prefixes and effort tails", () => {
-    assert.equal(canonicalizeModelId("[次][AN]gemini-3.7-flash"), "gemini-3.7-flash");
+    assert.equal(canonicalizeModelId("[站][渠]gemini-3.7-flash"), "gemini-3.7-flash");
     assert.equal(canonicalizeModelId("claude-opus-4.7-max-thinking"), "claude-opus-4.7");
     assert.equal(canonicalizeModelId("kimi-k2.5-thinking"), "kimi-k2.5");
     assert.equal(canonicalizeModelId("gpt-5.6-sol-light"), "gpt-5.6-sol");
@@ -101,7 +101,7 @@ describe("effortLookupKeys", () => {
 describe("isNonTextModel", () => {
   it("recognizes non-text families by raw id and canonical id", () => {
     assert.equal(isNonTextModel("text-embedding-v3"), true);
-    assert.equal(isNonTextModel("[次]agnes-image-2.0-flash"), true);
+    assert.equal(isNonTextModel("[站]agnes-image-2.0-flash"), true);
     assert.equal(isNonTextModel("glm-5.3"), false);
   });
 });
@@ -215,7 +215,7 @@ describe("resolveModelEfforts", () => {
   const catalog = { models: new Map(Object.entries(SAMPLE_MODELS).map(([k, v]) => [k, normalizeEffortEntry(v)])) };
 
   it("matches a production id through the canonical spelling", () => {
-    const resolved = resolveModelEfforts("[次]glm-5.3-high", catalog);
+    const resolved = resolveModelEfforts("[站]glm-5.3-high", catalog);
     assert.equal(resolved.origin, "library");
     assert.equal(resolved.matchedKey, "glm-5.3");
     assert.deepEqual(resolved.levels, ["medium", "high", "xhigh", "max"]);

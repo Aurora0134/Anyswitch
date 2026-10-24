@@ -72,7 +72,7 @@ const NON_TEXT_RE = /embedding|diffusion|dall-e|stable-diffusion|sdxl|flux|whisp
  * Fold one gateway model id onto the library's key spelling.
  *
  * Order matters and is load-bearing: bracket prefixes are stripped in a loop
- * ("[次][AN]gemini-3.7-flash" is a relay-site decoration, not part of the id),
+ * ("[站点][渠道]gemini-3.7-flash" is a relay-site decoration, not part of the id),
  * the effort tail is removed before the date tail (a dated id can carry both),
  * and the Claude "family name after version" reorder runs last so the earlier
  * steps see the raw spelling.

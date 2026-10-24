@@ -5308,7 +5308,7 @@
      只会留下一条 340px 的背景缝——那一帧的空白列与随后 is-empty 收全宽的主区，
      等于让终端屏宽跳一次、PTY 跟着重排一次。取值抄 .terminal-workspace.is-empty。 */
   html[data-prepaint-view="terminal"] .terminal-workspace { grid-template-columns: minmax(0, 1fr); }
-  /* 终端页的会话级静态种子（设计稿遗留：假页签 payment-service / 假会话栏 / 假底栏
+  /* 终端页的会话级静态种子（设计稿遗留：假页签 demo-service / 假会话栏 / 假底栏
      两段 / 假监测区）首帧一律不露，等 JS 的 renderTerminalPendingState 接手同一套退场。
      「+」在页签栏里，随容器留着，只收假页签本身。 */
   html[data-prepaint-view="terminal"] .terminal-tabs .terminal-tab { display: none; }

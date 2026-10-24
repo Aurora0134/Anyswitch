@@ -107,8 +107,8 @@ const PREVIEW = {
   ok: true, token: "t1", sourceComputer: "DESKTOP-A1B2C3", createdAt: "2026-09-23T04:00:00.000Z",
   counts: { providers: 22, pools: 4, routingChains: 2, presets: 8, skillDirs: 25, credentials: 22 },
   includes: { settings: true, prompts: true, skills: true },
-  skillsSourcePath: "C:\\Users\\me\\Desktop\\agent-home\\skills",
-  skillsRepoPath: "C:\\Users\\me\\Desktop\\agent-home\\skills",
+  skillsSourcePath: "C:\\Users\\me\\Desktop\\work\\skills",
+  skillsRepoPath: "C:\\Users\\me\\Desktop\\work\\skills",
   skillsDefaultPath: "C:\\Users\\me\\.agents\\skills",
 };
 // 形态 B：本机没配过 Skills 仓库
@@ -216,7 +216,7 @@ test("导入：选包后预览进弹窗，卡面回初值；形态 A 的勾选�
   assert.equal(h.modalMeta(), "渠道 22 · 号池 4 · 路由链 2 · 预设 8 · Skills 25 · 密钥 22");
   assert.equal(h.summary().text, "尚未选择配置包", "卡面不占预览内容");
   assert.equal(h.get("dataSkillsRepoLine").hidden, false);
-  assert.equal(h.get("dataSkillsRepoPath").textContent, "C:\\Users\\me\\Desktop\\agent-home\\skills");
+  assert.equal(h.get("dataSkillsRepoPath").textContent, "C:\\Users\\me\\Desktop\\work\\skills");
   assert.equal(h.get("dataSkillsRepoCheck").checked, true, "默认导入到本机仓库");
   assert.equal(h.get("dataSkillsCustomItem").hidden, false, "自选行常开");
   assert.equal(h.get("dataSkillsCustomPickBtn").disabled, false, "自选随时可点");
@@ -286,13 +286,13 @@ test("导入：Skills 落到哪、指向动没动，如实进结果明细", asyn
   const landed = harness({
     respondPost: ({ path }) => (path === "/api/data/import-pick" ? PREVIEW : {
       ok: true, backupId: "b8", counts: { providers: 3 },
-      applied: { store: true, credentials: 3, skills: true, skillsTarget: "C:\\Users\\me\\Desktop\\agent-home\\skills", skillsRepoChanged: false },
+      applied: { store: true, credentials: 3, skills: true, skillsTarget: "C:\\Users\\me\\Desktop\\work\\skills", skillsRepoChanged: false },
     }),
   });
   await pickPackage(landed);
   await confirmApply(landed);
   assert.equal(landed.summary().text, "导入完成 · 备份号 b8");
-  assert.match(landed.meta(), /Skills 落到：C:\\Users\\me\\Desktop\\agent-home\\skills/);
+  assert.match(landed.meta(), /Skills 落到：C:\\Users\\me\\Desktop\\work\\skills/);
   assert.match(landed.meta(), /主仓库指向未变/, "已配仓库自选别处时要注明指向未动");
 
   const skipped = harness({
