@@ -101,6 +101,9 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailRegroupRemoved")}
     ${extractFn("terminalRailPendingNewTerminals")}
     const TERMINAL_RAIL_SPINNER = "";
+    const TERMINAL_RAIL_DONE_DOT = "";
+    const terminalDoneUnread = new Map();
+    ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
     ${extractFn("renderTerminalRailHistory")}
@@ -129,6 +132,9 @@ function rowHtmlSandbox(prefs) {
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailIsArchived")}
     const TERMINAL_RAIL_SPINNER = "";
+    const TERMINAL_RAIL_DONE_DOT = "";
+    const terminalDoneUnread = new Map();
+    ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
     return terminalRailRowHtml;
   `)(null, null, "t1", prefs);
@@ -976,6 +982,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         let terminalBackendReady = true;
         const terminalBackendSessions = sessions;
         let activeTerminalPreviewId = activeId;
+        const terminalDoneUnread = new Map();
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
         function panelError(err, fallback) { return fallback; }
@@ -1237,6 +1244,9 @@ describe("M8 T2 选中态跟随聚焦", () => {
       function esc(v) { return String(v); }
       function escapeHtml(v) { return String(v || ""); }
       const TERMINAL_RAIL_SPINNER = "";
+      const TERMINAL_RAIL_DONE_DOT = "";
+      const terminalDoneUnread = new Map();
+      ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       return terminalRailRowHtml;
     `)();
@@ -1568,6 +1578,9 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailIsArchived")}
         const TERMINAL_RAIL_SPINNER = "";
+        const TERMINAL_RAIL_DONE_DOT = "";
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1", { archived: [{ endpoint: "kimi", id: "s-9" }], removedGroups: [] });

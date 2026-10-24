@@ -4948,6 +4948,14 @@ async function api(method, path, body) {
   // 改塌缩触发时机，上面两条锁存规则（用户钉住 / 系统收拢标记）原样。
   const TERMINAL_HOLLOW_COLLAPSE_STREAK = 3;
   const terminalHollowStreak = new Map();
+  // done（跑完未读）标记：dsh completed/completionUnread 的前端同构。后台会话
+  // working→idle 翻转且非当前聚焦 → 置位（见 noteTerminalWorkingStatus）；清除＝
+  // 聚焦该终端（每拍聚焦即清）/点它的会话栏行/向它发键入/会话退出或关闭。
+  // 上一拍状态表 terminalPrevWorking 用来识别真实观测到的翻转：初拍（刷新后
+  // 首见、无上一拍）不置——不拿「刷新前它在跑」的想象补标。两张表都是内存态、
+  // 不持久化：面板刷新即清（与 dsh 同口径——completed 本就是事件派生非持久）。
+  const terminalDoneUnread = new Map();
+  const terminalPrevWorking = new Map();
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -5390,8 +5398,30 @@ async function api(method, path, body) {
   function terminalActivityApplyToSession(session, activeRequests) {
     const count = Number.isFinite(activeRequests) && activeRequests > 0 ? Math.trunc(activeRequests) : 0;
     session.status = count > 0 || terminalBusyByOutput(session) ? "working" : "idle";
+    noteTerminalWorkingStatus(session, session.status);
     if (session.metrics) session.metrics.activeRequests = count;
     return count;
+  }
+
+  // done（跑完未读）标记的翻转观测器——两个 working 写点（SSE apply 经上面的
+  // terminalActivityApplyToSession／1s 轮询 enrichTerminalSessions）算出 status 后
+  // 都先过这里再落定：非聚焦会话真实观测到 working→idle 翻转 → 置 doneUnread
+  // （dsh completed：后台回合跑完且未被查看）；working 再起（idle→working）同拍
+  // 清旧标——跑起来了就不再是「已完成」，下次翻完成再重新置；聚焦即清（每拍
+  // 聚焦即清，不等事件：看着＝已读）；会话退出（backendState.status exited，
+  // 含输入路径写回的 exited）不置标且清既有标。上一拍状态按会话 id 记模块级
+  // Map（会话对象每秒整表换血，标记不能挂在对象上）。
+  function noteTerminalWorkingStatus(session, next) {
+    const id = session && typeof session.id === "string" ? session.id : null;
+    if (!id) return;
+    const prev = terminalPrevWorking.get(id);
+    terminalPrevWorking.set(id, next);
+    const exited = !!(session.backendState && session.backendState.status === "exited");
+    if (exited || next === "working" || id === activeTerminalPreviewId) {
+      terminalDoneUnread.delete(id);
+      return;
+    }
+    if (prev === "working" && next === "idle") terminalDoneUnread.set(id, true);
   }
 
   // activity 帧定点更新匹配的会话；snapshot 帧整帧对齐——快照里查不到键的
@@ -5536,9 +5566,23 @@ async function api(method, path, body) {
     }
   }
 
+  // done（跑完未读）两张表的同款清零：只清后端会话表不认的 id——轮询整表换血后，
+  // 别处（另一个面板窗口）关掉的会话从此不再出现，未读标记与上一拍状态不串到
+  // 同 id 的下一代会话。预览稿假会话从不会有 done 标（只对真实翻转置位），不查
+  // 预览表。
+  function pruneTerminalDoneState() {
+    for (const id of terminalDoneUnread.keys()) {
+      if (!terminalBackendSessions[id]) terminalDoneUnread.delete(id);
+    }
+    for (const id of terminalPrevWorking.keys()) {
+      if (!terminalBackendSessions[id]) terminalPrevWorking.delete(id);
+    }
+  }
+
   function rebuildTerminalBackendSessions(items) {
     terminalBackendSessions = Object.fromEntries((Array.isArray(items) ? items : []).map((item) => [item.id, terminalBackendSession(item)]));
     pruneTerminalHollowStreak();
+    pruneTerminalDoneState();
     // 空壳拍计数在这张表重建时推进：每次重建（1s 轮询、连接）都是一轮
     // 新的归属观测——空壳会话计数 +1、有归属会话清零。计数必须跟着数据拍走而非
     // 跟着渲染走：SSE 活跃真值流命中任一会话就会整渲当前会话（renderTerminal-
@@ -6260,6 +6304,8 @@ async function api(method, path, body) {
   // 再敲一遍。复活失败则放弃这次输入，由调用方保持沉默（终端上没有新增提示）。
   function sendTerminalInput(sessionId, data) {
     if (sessionId === null || sessionId === undefined) return Promise.resolve(false);
+    // 键入即读：往这个终端打字＝看着它，done（跑完未读）标记当场清。
+    terminalDoneUnread.delete(sessionId);
     const path = `/api/terminal/sessions/${encodeURIComponent(sessionId)}/input`;
     const session = terminalSessionFor(sessionId);
     return api("POST", path, { data })
@@ -6610,11 +6656,12 @@ async function api(method, path, body) {
       const rawBrandId = session.agent?.endpointId || session.agentId || "";
       const brandId = /^[\w-]+$/.test(rawBrandId) ? rawBrandId : "";
       const tabIcon = brandId ? `<span class="terminal-tab-brand" data-terminal-brand="${brandId}">${shellBadge}</span>` : shellBadge;
-      // 页签指示位（dsh 四态机的行内子集）：工作态复用栏内转圈组件 TERMINAL_RAIL_
-      // SPINNER——同一 markup 与 class，页签与会话栏同一视觉语言；idle 不画任何
-      // 图标（灰点退役）。指示位是常驻定宽槽（沿用会话栏行首槽原则），转圈出现/
-      // 消失不推挤页签文字；title 只在工作态挂「进行中」，idle 无悬停提示。
-      const tabState = session.status === "working" ? TERMINAL_RAIL_SPINNER : "";
+      // 页签指示位（dsh 四态机的行内子集）：槽内容与会话栏行首槽同一判定
+      // （terminalRailStateSlotHtml——working 转圈／非聚焦的 done 绿点／空，勿写
+      // 两份口径）；idle 不画任何图标（灰点退役）。指示位是常驻定宽槽（沿用会话
+      // 栏行首槽原则），转圈出现/消失不推挤页签文字；title 只在工作态挂「进行中」
+      //（绿点自带 title「已完成」），idle 无悬停提示。
+      const tabState = terminalRailStateSlotHtml(session, activeId);
       return `
       <button type="button" class="terminal-tab${id === activeId ? " active" : ""}" role="tab"
         aria-selected="${id === activeId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
@@ -6655,7 +6702,9 @@ async function api(method, path, body) {
       const agent = session.agent || null;
       const instance = terminalInstanceRow(agentsPayload, agent);
       // 状态口径与活跃真值流同源：请求在途或输出活跃窗内（terminalBusyByOutput）。
+      // 算完过 noteTerminalWorkingStatus（done 未读标记的翻转观测，同 SSE 写点）。
       session.status = (instance && instance.activeRequests > 0) || terminalBusyByOutput(session) ? "working" : "idle";
+      noteTerminalWorkingStatus(session, session.status);
       session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
       const { route, routeCurrent } = agent
         ? terminalRouteForEndpoint(agent.endpointId, chains, runtime)
@@ -7057,8 +7106,9 @@ async function api(method, path, body) {
       // 直写清空同步重置指纹（保住「指纹 = DOM 现值」，见指纹缓存声明注释）
       terminalTabsRenderedHtml = "";
     }
-    // 关停清场 = 后端会话全数失效：空壳防抖计数一并清（预览稿会话不动）
+    // 关停清场 = 后端会话全数失效：空壳防抖计数与 done 未读表一并清（预览稿会话不动）
     pruneTerminalHollowStreak();
+    pruneTerminalDoneState();
   }
 
   // 「已停止」状态页：与「未运行」同一覆盖层、同一套退场动作，文案与动作钮随即改写。
@@ -7611,6 +7661,9 @@ async function api(method, path, body) {
         } else delete terminalPreviewSessions[id];
         // 关标签即会话关闭：空壳防抖计数同步清零，不留陈旧计数
         terminalHollowStreak.delete(id);
+        // done（跑完未读）标记与上一拍状态一并清：会话没了，未读态随之失效
+        terminalDoneUnread.delete(id);
+        terminalPrevWorking.delete(id);
         const remaining = Object.keys(terminalSessionMap());
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
         rememberTerminalSessionId(activeTerminalPreviewId);
@@ -8600,6 +8653,24 @@ async function api(method, path, body) {
   // 三级文字色（不造新色值）；prefers-reduced-motion 下降级静态（CSS 侧两动画全
   // none）。槽内挂读屏文本「进行中」（本规格批准的唯一新增 aria 文本）。
   const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle class="rail-term-spinner-track" cx="12" cy="12" r="9.5" opacity=".25"></circle><g class="rail-term-spinner-rot"><circle class="rail-term-spinner-arc" cx="12" cy="12" r="9.5" stroke-dasharray="12 150"></circle></g></svg><span class="rail-term-spinner-sr">进行中</span></span>';
+  // done（跑完未读）绿点（dsh 状态点规格）：10×10 槽、:after inset 20%（视觉 6px
+  // 圆）、色走既有 --ok（dsh success 档）。挂在 16×20 常驻槽内居中（.rail-term-done
+  // 自身不另起布局）；tooltip「已完成」（本笔唯一新增文案）随 markup 走，会话栏行
+  // 与页签指示位同一份。
+  const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成"></span>';
+
+  // 状态槽内容判定（三面同一口径，勿写两份）：会话栏 live 行、搜索结果行（同一
+  // terminalRailRowHtml 的两态）与页签指示位（renderTerminalPreviewTabs）都取本
+  // 函数——优先级 working 转圈 ＞ 非聚焦的 doneUnread 绿点 ＞ 空。聚焦终端不画
+  // 绿点：看着＝已读（标记本身也每拍即清，这里是渲染面的同语义兜底，聚焦切换后
+  // 首次重渲即消点，不等下一拍轮询）。pending「新会话」兜底行不取本口径——方案
+  // 定死 pending 行不涉及 done 态，维持 working 转圈/留空两态。
+  function terminalRailStateSlotHtml(session, activeId) {
+    if (!session) return "";
+    if (session.status === "working") return TERMINAL_RAIL_SPINNER;
+    if (session.id !== activeId && terminalDoneUnread.has(session.id)) return TERMINAL_RAIL_DONE_DOT;
+    return "";
+  }
 
   // 栏体只认后端真值：未就绪时 terminalSessionMap() 会回落到设计稿的预览种子表
   // （demo-service 等假会话），照单全收就是「以假乱真」。所以这两个入口先看就绪位，
@@ -9201,7 +9272,6 @@ async function api(method, path, body) {
     const title = sessTitle(session);
     const time = session.lastActive ? terminalRailRelTime(session.lastActive) : "";
     const archived = terminalRailIsArchived(session);
-    const working = !!live && live.status === "working";
     const result = !!(opts && opts.result);
     const cls = ["rail-term-row", "rail-term-row-history"];
     if (result) cls.push("rail-term-row-result");
@@ -9209,12 +9279,14 @@ async function api(method, path, body) {
     if (archived) cls.push("is-archived");
     if (live && live.id === activeId) cls.push("is-active");
     // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
-    // 16×20 前导槽——working 行填转圈（14×14 SVG，读屏文本「进行中」），idle 的
-    // live 行与非 live 行一律留空（dsh 四态机 pendingInteraction＞running＞completed
-    // ＞idle，行内只画最高优先级一态、idle 不画任何图标；exited 无专门呈现，随空
-    // 槽自然成立，行点击续接/复活语义不变）。槽宽恒定，图标出现/消失/互换都不动
-    // 标题文字起点；行 8+16+8 与组头 8+16+8 同式，标题与组头文字严格同 x。
-    const dot = live && working ? TERMINAL_RAIL_SPINNER : "";
+    // 16×20 前导槽——槽内容取 terminalRailStateSlotHtml（与页签指示位同一判定）：
+    // working 行填转圈（14×14 SVG，读屏文本「进行中」）、非聚焦的 done（跑完未读）
+    // live 行填绿点（title「已完成」，dsh completed）、其余一律留空（dsh 四态机
+    // pendingInteraction＞running＞completed＞idle，行内只画最高优先级一态、idle 不画
+    // 任何图标；exited 无专门呈现，随空槽自然成立，行点击续接/复活语义不变）。槽宽
+    // 恒定，图标出现/消失/互换都不动标题文字起点；行 8+16+8 与组头 8+16+8 同式，
+    // 标题与组头文字严格同 x。
+    const dot = terminalRailStateSlotHtml(live, activeId);
     const closeBtn = live
       ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
       : "";
@@ -9577,6 +9649,9 @@ async function api(method, path, body) {
 
   // ---- 交互 ----
   function terminalRailActivateSession(id) {
+    // 点它的会话栏行即读：done（跑完未读）标记当场清（聚焦清是每拍兜底，这里
+    // 是点行这一拍的即时清——两路同一语义）。
+    terminalDoneUnread.delete(id);
     if (!id || !terminalSessionFor(id) || id === activeTerminalPreviewId) return;
     activeTerminalPreviewId = id;
     rememberTerminalSessionId(id);

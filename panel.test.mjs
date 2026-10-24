@@ -3515,7 +3515,7 @@ describe("panel.html 设置全页视图", () => {
       return src;
     };
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"].map(srcOf).join("\n");
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"].map(srcOf).join("\n");
     // 整页加载把内存里的活动 id 打回预览稿遗留的初值 "checkout"，这就是恢复的起点。
     const run = (store, items, initialId = "checkout") => new Function("store", "items", "initialId", `
       let activeTerminalPreviewId = initialId;
@@ -3528,6 +3528,9 @@ describe("panel.html 设置全页视图", () => {
       let terminalDefaultCwd = "";
       // 空壳防抖计数表（rebuild 重建后清掉已消失会话的计数）：桩环境给空表即可
       const terminalHollowStreak = new Map();
+      // done 未读两张表（rebuild 同拍 prune）：桩环境给空表即可
+      const terminalDoneUnread = new Map();
+      const terminalPrevWorking = new Map();
       const terminalPreviewSessions = {};
       ${bodies}
       rebuildTerminalBackendSessions(items);
@@ -8027,6 +8030,7 @@ describe("虚拟终端同步输出合帧（整屏重绘不再撕裂）", () => {
       const document = { documentElement: {} };
       const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const terminalReviveInflight = new Map();
+      const terminalDoneUnread = new Map();
       const api = () => Promise.resolve({});
       function fitTerminalXterm() {}
       function requestAnimationFrame(cb) { cb(); }
@@ -8405,6 +8409,7 @@ describe("终端应答定投回所属会话（每连接独占 xterm）", () => {
       const document = { documentElement: {} };
       const getComputedStyle = () => ({ getPropertyValue: () => "", colorScheme: "dark" });
       const terminalReviveInflight = new Map();
+      const terminalDoneUnread = new Map();
       const api = (method, url, body) => {
         state.posts.push({ method, url, body });
         if (state.apiImpl) return state.apiImpl(method, url, body);
@@ -9643,6 +9648,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
         return elements[id];
       };
       const terminalReviveInflight = new Map();
+      const terminalDoneUnread = new Map();
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function sendTerminalInput(sessionId, data) {
         return api("POST", "/api/terminal/sessions/" + sessionId + "/input", { data });
@@ -10806,7 +10812,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
 
     // 桩环境真跑拍计数：计数跟归属观测走——闪断清零、连续空壳累积、会话消失即清
     const bodies = ["storedTerminalSessionId", "rememberTerminalSessionId",
-      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak"]
+      "terminalBackendSession", "rebuildTerminalBackendSessions", "pruneTerminalHollowStreak", "pruneTerminalDoneState"]
       .map(extractFn).join("\n");
     const store = {};
     const counter = new Function("store", `
@@ -10814,6 +10820,8 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       let terminalBackendSessions = {};
       let terminalDefaultCwd = "C:\\\\";
       const terminalHollowStreak = new Map();
+      const terminalDoneUnread = new Map();
+      const terminalPrevWorking = new Map();
       const terminalPreviewSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
@@ -10869,6 +10877,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       const host = { clientWidth: 1200, clientHeight: 600 };
       const $ = (id) => (id === "terminalView" ? view : id === "terminalXtermHost" ? host : null);
       const terminalReviveInflight = new Map();
+      const terminalDoneUnread = new Map();
       const api = (method, url, body) => { state.posts.push({ method, url, body }); return Promise.resolve({}); };
       function terminalSessionFor(id) { return state.session; }
       ${fitFloorSrc}
@@ -10915,6 +10924,9 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       let activeTerminalPreviewId = "t1";
       let terminalTabsRenderedHtml = "";
       const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+      const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+      const terminalDoneUnread = new Map();
+      ${extractFn("terminalRailStateSlotHtml")}
       function terminalSessionMap() { return sessions; }
       ${extractFn("renderTerminalPreviewTabs")}
       return { render: renderTerminalPreviewTabs, setActive: (id) => { activeTerminalPreviewId = id; } };
@@ -10989,6 +11001,48 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
     dataApi.render();
     assert.equal(state.requestWrites.length, 2, "展开态稳态后回到零写");
   });
+
+  it("页签指示位 done 同口径：非聚焦已完成挂绿点、聚焦即空、working 转圈优先", () => {
+    const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const writes = [];
+    const tabsEl = { set innerHTML(v) { writes.push(v); } };
+    const sessions = {
+      t1: { id: "t1", label: "前台", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
+      t2: { id: "t2", label: "后台", shell: { name: "PowerShell" }, agentName: null, agent: null, status: "idle" },
+    };
+    const api = new Function("$", "escapeHtml", "sessions", `
+      let activeTerminalPreviewId = "t1";
+      let terminalTabsRenderedHtml = "";
+      const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+      const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+      const terminalDoneUnread = new Map();
+      ${extractFn("terminalRailStateSlotHtml")}
+      function terminalSessionMap() { return sessions; }
+      ${extractFn("renderTerminalPreviewTabs")}
+      return {
+        render: renderTerminalPreviewTabs,
+        setActive: (id) => { activeTerminalPreviewId = id; },
+        markDone: (id) => terminalDoneUnread.set(id, true),
+      };
+    `)((id) => (id === "terminalTabs" ? tabsEl : null), esc, sessions);
+    api.markDone("t2");
+    api.render();
+    const doneHtml = writes[writes.length - 1];
+    assert.equal((doneHtml.match(/DONE-STUB/g) || []).length, 1, "只有被标的后台页签带绿点");
+    assert.ok(/data-terminal-tab="t2"[\s\S]*DONE-STUB[\s\S]*data-terminal-tab/.test(doneHtml + 'data-terminal-tab'), "绿点落在 t2 自己的页签里");
+    assert.ok(doneHtml.includes('title="已完成"'), "绿点自带「已完成」提示（唯一新增文案）");
+    sessions.t2.status = "working";
+    api.render();
+    const workingHtml = writes[writes.length - 1];
+    assert.ok(workingHtml.includes("SPINNER-STUB") && !workingHtml.includes("DONE-STUB"), "working 转圈优先于绿点");
+    assert.ok(/data-terminal-tab="t2"[\s\S]*title="进行中"/.test(workingHtml), "工作态页签挂「进行中」");
+    sessions.t2.status = "idle";
+    api.markDone("t2");
+    api.setActive("t2");
+    api.render();
+    const focusedHtml = writes[writes.length - 1];
+    assert.ok(!focusedHtml.includes("DONE-STUB"), "聚焦＝已读：聚焦后首渲即消点（不等下一拍轮询）");
+  });
 });
 
 // 活跃真值推送：panel 侧长驻订阅 relay 的 /api/internal/agents-activity，缓存
@@ -10996,13 +11050,17 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
 // 先拿缓存快照、其后收转发事件；前端把帧按真值键落到终端标签圆点与实况行。
 // 与 panel-log-bridge 同路取证：桥硬编码 47821，测试用假 fetch 喂流直读真代码。
 describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", () => {
+  // noteTerminalWorkingStatus（done 未读翻转观测，terminalActivityApplyToSession 落
+  // status 前必经）的模块级自由变量：桩环境给空表，本 describe 的断言面只在
+  // session.status，不读标记。
+  const VM_DONE_STATE = "const terminalDoneUnread = new Map(); const terminalPrevWorking = new Map(); let activeTerminalPreviewId = null;";
   async function vmFn(name, args, deps = []) {
     const source = [name, ...deps].map((fnName) => {
       const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
       assert.ok(body, `${fnName} found in panel.js`);
       return body;
     }).join("\n");
-    const fn = await vm.runInNewContext(`(() => { ${source}; return ${name}; })()`, {});
+    const fn = await vm.runInNewContext(`(() => { ${VM_DONE_STATE}\n${source}; return ${name}; })()`, {});
     const result = fn(...args);
     return result === undefined || result === null ? result : JSON.parse(JSON.stringify(result));
   }
@@ -11116,14 +11174,14 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
 
   it("前端：terminalActivityApplyToSession 口径（>0 working / 0 idle / 明细即时）", async () => {
     const session = { status: "idle", metrics: { activeRequests: 0, ttft: "—" } };
-    await vmFn("terminalActivityApplyToSession", [session, 2], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [session, 2], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(session.status, "working");
     assert.equal(session.metrics.activeRequests, 2, "「N 个请求进行中」明细用真值即时更新");
-    await vmFn("terminalActivityApplyToSession", [session, 0], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [session, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(session.status, "idle");
     assert.equal(session.metrics.activeRequests, 0);
     const bare = { status: "idle", metrics: null };
-    await vmFn("terminalActivityApplyToSession", [bare, 5], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [bare, 5], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(bare.status, "working");
     assert.equal(bare.metrics, null, "metrics 未富化出来时不编造空指标行");
   });
@@ -11131,18 +11189,18 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
   it("前端：输出活跃窗补 LLM 请求盲区（跑长命令不再显示空闲）", async () => {
     // 请求 0 但终端刚出过字：在跑命令（LLM 空档是执行工具命令的常态）。
     const hot = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now() - 1000, status: "running" } };
-    await vmFn("terminalActivityApplyToSession", [hot, 0], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [hot, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(hot.status, "working", "1s 前还在出字：在跑");
     // 静默超窗回落空闲；请求在途与输出活跃是 OR 关系（活跃窗不吞请求真值）。
     const cold = { status: "working", metrics: { activeRequests: 0 }, backendState: { lastActiveAt: Date.now() - 60_000, status: "running" } };
-    await vmFn("terminalActivityApplyToSession", [cold, 0], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [cold, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(cold.status, "idle", "静默超窗回落空闲");
     const both = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now() - 60_000, status: "running" } };
-    await vmFn("terminalActivityApplyToSession", [both, 1], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [both, 1], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(both.status, "working", "请求在途照常 working（窗不吞请求真值）");
     // exited 不因退出瞬间的 lastActiveAt 刷新而误转圈。
     const dead = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now(), status: "exited" } };
-    await vmFn("terminalActivityApplyToSession", [dead, 0], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [dead, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(dead.status, "idle", "exited 不转圈");
   });
 
@@ -11178,9 +11236,9 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     // 面 4：孵化窗内在途请求 >0 仍忙——请求真值是 relay 权威信号，豁免窗只收
     // 输出启发，不吞请求（写点口径 count > 0 || busy 的 OR 结构）。
     const fresh = { status: "idle", metrics: null, backendState: bannerState(now - 1000) };
-    await vmFn("terminalActivityApplyToSession", [fresh, 1], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [fresh, 1], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(fresh.status, "working", "孵化窗内请求在途仍 working");
-    await vmFn("terminalActivityApplyToSession", [fresh, 0], ["terminalBusyByOutput"]);
+    await vmFn("terminalActivityApplyToSession", [fresh, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(fresh.status, "idle", "孵化窗内零请求零有效输出：idle（内切门就地换内容）");
   });
 
@@ -11199,7 +11257,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "activity", endpointId: "claude", instanceId: "claude-9001", activeRequests: 2, at: 1 },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), true);
+      ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"]), true);
     assert.equal(claude.status, "working");
     assert.equal(claude.metrics.activeRequests, 2);
     assert.equal(kimi.status, "idle", "键不匹配的会话不动");
@@ -11208,7 +11266,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "activity", endpointId: "kimi", instanceId: null, activeRequests: 9, at: 2 },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false,
+      ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"]), false,
       "未命中任何会话返回 false（不重绘）");
     assert.equal(kimi.status, "idle");
 
@@ -11218,15 +11276,15 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(await vmFn("terminalActivityApplyFrame",
       [{ type: "snapshot", instances: [{ endpointId: "kimi", instanceId: "kimi-4321", activeRequests: 1, at: 3 }] },
         { t1: kimi, t2: claude }],
-      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), true);
+      ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"]), true);
     assert.equal(kimi.status, "working", "快照里命中的键用真值");
     assert.equal(kimi.metrics.activeRequests, 1);
     assert.equal(claude.status, "idle", "快照里查不到的键一律回落 0");
 
     assert.equal(await vmFn("terminalActivityApplyFrame", [{ type: "other" }, { t1: kimi }],
-      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false, "未知帧型忽略");
+      ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"]), false, "未知帧型忽略");
     assert.equal(await vmFn("terminalActivityApplyFrame", [null, { t1: kimi }],
-      ["terminalActivityApplyToSession", "terminalBusyByOutput", "terminalActivityKey"]), false, "空帧忽略");
+      ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"]), false, "空帧忽略");
   });
 
   it("接线结构：路由就位、桥注释行直通、轮询原样 1s、EventSource 按活性同拍开合", () => {
@@ -12651,6 +12709,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         function terminalSessionMap() { return sessions; }
         ${src}
         return renderTerminalPreviewTabs;
@@ -12708,6 +12769,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = "";
+        const TERMINAL_RAIL_DONE_DOT = "";
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         function terminalSessionMap() { return sessions; }
         ${extractFn("renderTerminalPreviewTabs")}
         return renderTerminalPreviewTabs;
@@ -12729,6 +12793,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         let terminalTabsRenderedHtml = "";
         let activeTerminalPreviewId = "t1";
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         function terminalSessionMap() { return sessions; }
         ${extractFn("renderTerminalPreviewTabs")}
         return renderTerminalPreviewTabs;
