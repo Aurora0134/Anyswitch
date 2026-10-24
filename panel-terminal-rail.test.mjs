@@ -402,9 +402,13 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(!plain.includes("data-rail-term-close"), "非 live 行无关闭叉");
       assert.ok(plain.includes('data-rail-term-archive="s-1"'), "非 live 行 hover 出归档钮（T5）");
       assert.ok(!plain.includes("is-active"), "非 live 行不占选中态");
-      // 选中只属于聚焦终端那条 live 行；idle 的 live 行留状态点
+      // 选中只属于聚焦终端那条 live 行；idle 的 live 行留空槽（dsh 四态机：idle
+      // 不画任何图标，灰点退役）
       const other = fn(session, { id: "t-2", status: "idle" }, "t-1");
-      assert.ok(other.includes("terminal-tab-state is-idle"), "idle 的 live 行是 7×7 状态点（口径同页签）");
+      assert.ok(other.includes('<span class="rail-term-slot"></span>'), "idle 的 live 行是空常驻槽（不画图标）");
+      assert.ok(!other.includes("terminal-tab-state"), "idle 的 live 行不再渲染状态点");
+      assert.ok(!other.includes("SPINNER-STUB"), "idle 的 live 行无转圈");
+      assert.ok(!other.includes('title="空闲"'), "「空闲」tooltip 随灰点一并消失");
       assert.ok(!other.includes("is-active"), "同一时刻至多一条选中（T2）");
     });
 
@@ -440,7 +444,7 @@ describe("终端视图左栏换血（M4）", () => {
         idle: fn(session, { id: "t-1", status: "idle" }, "t-1"),
         dead: fn(session, null, "t-1"),
       };
-      // 不变式②：三种行（working 转圈 / idle 灰点 / 非 live 空）行首都是同一个常驻
+      // 不变式②：三种行（working 转圈 / idle 空 / 非 live 空）行首都是同一个常驻
       // 槽——图标出现/消失/互换只动槽内容，标题文字起点不动。
       for (const [name, html] of Object.entries(states)) {
         const slotAt = html.indexOf('<span class="rail-term-slot">');
@@ -449,7 +453,8 @@ describe("终端视图左栏换血（M4）", () => {
         assert.ok(titleAt > slotAt, `${name} 行槽在标题之前（空槽也占位）`);
       }
       assert.ok(states.working.indexOf("SPINNER-STUB") > states.working.indexOf('<span class="rail-term-slot">'), "转圈填进常驻槽");
-      assert.ok(states.idle.indexOf("terminal-tab-state") > states.idle.indexOf('<span class="rail-term-slot">'), "idle 状态点填进常驻槽");
+      assert.ok(states.idle.includes('<span class="rail-term-slot"></span>'), "idle 行常驻槽留空（dsh 四态机 idle 不画图标）");
+      assert.ok(!states.idle.includes("terminal-tab-state"), "idle 行不再渲染状态点");
       // 不变式①③：几何同式对齐——行 8+16+8 == 组头 8+16+8（32px），行 gap 与组头
       // gap 都是 8、两个槽都是 16 宽，标题与组头文字严格同 x，三种行互相对齐。
       const slot = cssRule(".rail-term-slot {");
@@ -464,7 +469,7 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(groupSlot.includes("width: 16px") && groupSlot.includes("height: 20px"), "组头槽同 16×20（两槽同宽）");
       // pending「新会话」行同构：兜底行也走常驻槽，标题与历史行对齐
       const pendingSrc = extractFn("terminalRailPendingRowHtml");
-      assert.ok(pendingSrc.includes('<span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER'), "pending 行行首常驻槽包住转圈/状态点");
+      assert.ok(pendingSrc.includes('<span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER'), "pending 行行首常驻槽包住转圈/留空");
     });
 
     it("树渲染指纹门控：同串不重写 DOM，选中/状态变化才重写", () => {
@@ -1466,6 +1471,8 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
       "匀速 360°");
     assert.ok(/@media \(prefers-reduced-motion: reduce\) \{\s*\.rail-term-spinner-arc, \.rail-term-spinner-rot \{ animation: none; \}/.test(panelCss),
       "reduced-motion 两动画全 none（静态轨道＋固定弧）");
+    assert.ok(/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.rail-term-spinner-arc \{ stroke-dasharray: 18 150; stroke-dashoffset: -3; \}/.test(panelCss),
+      "reduced-motion 静态弧对齐 dsh：dasharray 18 150、offset -3（不是动画 0% 的短弧）");
     const sr = cssRule(".rail-term-spinner-sr {");
     assert.ok(/width:\s*1px/.test(sr) && /height:\s*1px/.test(sr) && /clip:/.test(sr), "读屏文本 visuallyHidden 形制");
   });

@@ -5348,17 +5348,40 @@ async function api(method, path, body) {
     return `${endpointId} ${instanceId ?? ""}`;
   }
 
-  // 输出活跃窗：宿主 lastActiveAt（每块输出、每次输入都刷新）在窗内即视为在跑。
-  // relay 只对「模型在想」权威；agent 执行工具命令的整段时间请求数是零，只看
-  // 请求会把在跑的命令判成空闲（页签/会话栏误显空闲＋内切判定门误放行的同源
-  // 根因）。窗取 5s：跑命令的进度输出会持续刷新它，等输入静默几秒后回落空闲；
-  // 完全静默的长命令显示层仍会回落——那一段由 /switch 的服务端杀前探测兜底，
-  // 显示层不追求完美。窗与时刻可注入（vm 沙盒测试）。
+  // 输出活跃窗：宿主 lastActiveAt（每块输出、退出时刷新；键入不刷新——键入记
+  // lastInputAt 另走键入抑制窗）在窗内即视为在跑。relay 只对「模型在想」权威；
+  // agent 执行工具命令的整段时间请求数是零，只看请求会把在跑的命令判成空闲
+  // （页签/会话栏误显空闲＋内切判定门误放行的同源根因）。窗取 5s：跑命令的进度
+  // 输出会持续刷新它，等输入静默几秒后回落空闲。窗与时刻可注入（vm 沙盒测试）。
+  // 输出窗的输入面有两处污染，各用一只豁免窗收窄（dsh 的 running 是「回合在跑」
+  // 布尔位、信号在 agent 进程内部拿不到，这里是在它缺席下的替代信号）：
+  //  · 孵化窗 15s——新 shell 的 banner 与续接重放（宿主把盘上尾巴回放给终端）
+  //    实测 6–12s，出生 15s 内的输出活跃一律不当「在跑」（出生≠活跃），窗值取
+  //    实测上界再留一拍余量；出生点锚 spawnedAt（进程生日，内切/复活跟着走），
+  //    老宿主快照没有时回落 createdAt。
+  //  · 键入抑制窗 2s——PTY 对键入的回显会走 emit 顶进输出窗，把「用户在打字」
+  //    误归因成「agent 在跑」；距最近一次键入 2s 内的输出活跃不判忙（回显随
+  //    键入即时出现，静默 2s 后的输出才是程序自己的）。
+  // 已知残留（替代信号的精度天花板，dsh 靠回合信号无此面）：空闲仍持续重绘的
+  // TUI（htop 之类）会被输出启发误判忙；完全静默的长命令显示层回落空闲由服务
+  // 端 /switch 的杀前进程树探测（switch-guard）兜底——既有，显示层不追求完美。
   function terminalBusyByOutput(session, windowMs = 5000, now = Date.now()) {
+    const TERMINAL_BUSY_INCUBATION_MS = 15000;
+    const TERMINAL_BUSY_INPUT_SUPPRESS_MS = 2000;
     const state = session && session.backendState ? session.backendState : null;
     if (!state || state.status === "exited") return false;
     const at = state.lastActiveAt;
-    return Number.isFinite(at) && now - at < windowMs;
+    if (!(Number.isFinite(at) && now - at < windowMs)) return false;
+    // 孵化豁免：出生 15s 内不判忙。出生点缺位（更老的快照）不豁免——按纯输出
+    // 窗口径走。
+    const born = Number.isFinite(state.spawnedAt) ? state.spawnedAt : state.createdAt;
+    if (Number.isFinite(born) && now - born < TERMINAL_BUSY_INCUBATION_MS) return false;
+    // 键入抑制：最近 2s 内有键入则输出多半是回显，不判忙。lastInputAt 缺位
+    // （undefined/0：老会话恢复、老宿主快照）按无抑制处理——抑制面只认明确的
+    // 新鲜键入。
+    const inputAt = state.lastInputAt;
+    if (Number.isFinite(inputAt) && inputAt > 0 && now - inputAt < TERMINAL_BUSY_INPUT_SUPPRESS_MS) return false;
+    return true;
   }
 
   // 口径：请求在途，或输出在活跃窗内 → working，两者都无 → idle。「N 个请求进行中」
@@ -6587,12 +6610,17 @@ async function api(method, path, body) {
       const rawBrandId = session.agent?.endpointId || session.agentId || "";
       const brandId = /^[\w-]+$/.test(rawBrandId) ? rawBrandId : "";
       const tabIcon = brandId ? `<span class="terminal-tab-brand" data-terminal-brand="${brandId}">${shellBadge}</span>` : shellBadge;
+      // 页签指示位（dsh 四态机的行内子集）：工作态复用栏内转圈组件 TERMINAL_RAIL_
+      // SPINNER——同一 markup 与 class，页签与会话栏同一视觉语言；idle 不画任何
+      // 图标（灰点退役）。指示位是常驻定宽槽（沿用会话栏行首槽原则），转圈出现/
+      // 消失不推挤页签文字；title 只在工作态挂「进行中」，idle 无悬停提示。
+      const tabState = session.status === "working" ? TERMINAL_RAIL_SPINNER : "";
       return `
       <button type="button" class="terminal-tab${id === activeId ? " active" : ""}" role="tab"
         aria-selected="${id === activeId ? "true" : "false"}" data-terminal-tab="${escapeHtml(id)}">
         ${tabIcon}
         <span class="terminal-tab-copy"><strong>${escapeHtml(session.label)}</strong><small>${escapeHtml(tabAgent)}</small></span>
-        <span class="terminal-tab-state ${session.status === "working" ? "is-working" : "is-idle"}" title="${session.status === "working" ? "正在运行" : "空闲"}"></span>
+        <span class="terminal-tab-state"${session.status === "working" ? ' title="进行中"' : ""}>${tabState}</span>
         <span class="terminal-tab-close" aria-hidden="true">×</span>
       </button>
     `;
@@ -6745,7 +6773,7 @@ async function api(method, path, body) {
     // 实况行同时答「忙不忙 + 谁在服务」：归属段实例身份优先、路由当前跳后备，
     // 没有可说的服务方（普通终端/身份未上报）就不出模型段。
     const serving = terminalServingLabel(session);
-    $("terminalLiveTitle").textContent = session.status === "working" ? "生成中" : "空闲";
+    $("terminalLiveTitle").textContent = session.status === "working" ? "进行中" : "空闲";
     const metrics = session.metrics || null;
     $("terminalLiveDetail").textContent = session.status === "working" && metrics
       ? [serving, `${metrics.activeRequests} 个请求进行中`].filter(Boolean).join(" · ")
@@ -9182,13 +9210,11 @@ async function api(method, path, body) {
     if (live && live.id === activeId) cls.push("is-active");
     // 行首常驻槽（dsh sessionRow 同构）：所有会话行（历史/pending/搜索结果）都渲染
     // 16×20 前导槽——working 行填转圈（14×14 SVG，读屏文本「进行中」），idle 的
-    // live 行填 7×7 状态点，非 live 行留空。槽宽恒定，图标出现/消失/互换都不动标题
-    // 文字起点；行 8+16+8 与组头 8+16+8 同式，标题与组头文字严格同 x。
-    const dot = live
-      ? (working
-        ? TERMINAL_RAIL_SPINNER
-        : `<span class="terminal-tab-state is-idle" title="空闲"></span>`)
-      : "";
+    // live 行与非 live 行一律留空（dsh 四态机 pendingInteraction＞running＞completed
+    // ＞idle，行内只画最高优先级一态、idle 不画任何图标；exited 无专门呈现，随空
+    // 槽自然成立，行点击续接/复活语义不变）。槽宽恒定，图标出现/消失/互换都不动
+    // 标题文字起点；行 8+16+8 与组头 8+16+8 同式，标题与组头文字严格同 x。
+    const dot = live && working ? TERMINAL_RAIL_SPINNER : "";
     const closeBtn = live
       ? `<span class="rail-term-row-close" data-rail-term-close="${esc(live.id)}" aria-hidden="true">×</span>`
       : "";
@@ -9220,7 +9246,7 @@ async function api(method, path, body) {
     const active = entry.id === activeId;
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
-        <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : `<span class="terminal-tab-state is-idle" title="空闲"></span>`}</span>
+        <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : ""}</span>
         <span class="rail-term-row-title">新会话</span>
         <span class="rail-term-row-close" data-rail-term-close="${esc(entry.id)}" aria-hidden="true">×</span>
       </button>`;

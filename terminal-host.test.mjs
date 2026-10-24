@@ -176,6 +176,51 @@ test("PTY 已退出的会话 POST input 返回 409 session_exited", async () => 
   }
 });
 
+// 工作态信号收窄（dsh 语义对齐·信号层）：出生不再播种 lastActiveAt（出生≠活跃，
+// 播种会让刚打开的空会话在前 5s 误转圈、M12 内切门误判 working 走保护性新开）；
+// 键入改记 lastInputAt、不刷新 lastActiveAt（PTY 回显的判忙交给面板键入抑制窗）；
+// spawn 记 spawnedAt（孵化豁免窗锚点——内切/复活保记录换进程，createdAt 不动，
+// 只有它跟着每次 spawn 走）。pty 用不回显的哑件：把「键入→回显走 emit 刷新
+// lastActiveAt」的老通路断开，才能单独观察 input 路由写字段的效果。
+test("会话信号面：出生不播种 lastActiveAt、键入记 lastInputAt、spawn 记 spawnedAt（restart 换新生日）", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-signal-`);
+  const silentPty = () => ({
+    pid: 7777,
+    onData() {}, onExit() {}, write() {}, resize() {}, kill() {},
+  });
+  const host = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => silentPty() }, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "信号", cwd: root, shell: "cmd" }),
+    }).then((response) => response.json());
+    assert.equal(created.lastActiveAt, undefined, "出生不播种 lastActiveAt（出生≠活跃）");
+    assert.equal(created.lastInputAt, undefined, "从未键入没有 lastInputAt");
+    assert.ok(Number.isFinite(created.spawnedAt), "快照透传进程生日 spawnedAt（孵化豁免窗锚点）");
+
+    await fetch(url(`/terminal/sessions/${created.id}/input`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({ data: "ls\r" }),
+    });
+    const afterInput = await fetch(url(`/terminal/sessions/${created.id}`), { headers: headers(host) }).then((response) => response.json());
+    assert.ok(Number.isFinite(afterInput.lastInputAt), "键入记 lastInputAt");
+    assert.equal(afterInput.lastActiveAt, undefined, "键入不再刷新 lastActiveAt（回显判忙交给面板键入抑制窗）");
+
+    // restart（内切/复活共用咽喉）：换进程换新生日，记录生日 createdAt 原地不动。
+    await sleep(5);
+    const restarted = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host), body: JSON.stringify({}),
+    }).then((response) => response.json());
+    assert.ok(Number.isFinite(restarted.spawnedAt) && restarted.spawnedAt > created.spawnedAt,
+      "重 spawn 换新生日（孵化窗跟着新进程的 banner/续接重放走）");
+    assert.equal(restarted.createdAt, created.createdAt, "记录生日 createdAt 不随 restart 漂移（会话绑定窗口不吃换壳）");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // 回放窗口按字节计，不按块数计：忙的 TUI 每 ~80ms 一块，旧的 400 块上限只装得下
 // 约 31 秒输出，而它喂的 xterm 留着 5000 行滚屏——整页刷新等于把用户眼前的历史丢掉。
 // 这里钉四件事：窗口按字节裁、只整块从头部丢、轮询列表不带走窗口、落盘尾部另按更紧

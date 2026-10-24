@@ -400,6 +400,12 @@ function snapshot(session) {
     exitCode: session.exitCode,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
+    // 工作态判定的两只输入信号（面板 terminalBusyByOutput 消费，均不落盘）：
+    // lastInputAt＝最近一次用户键入（键入抑制窗的锚点，出生起未键入则缺省）；
+    // spawnedAt＝最近一次进程出生（孵化豁免窗的锚点——内切/复活保记录换进程，
+    // createdAt 不动，只有它跟着每次 spawn 走）。
+    lastInputAt: session.lastInputAt,
+    spawnedAt: session.spawnedAt,
     cols: session.cols,
     rows: session.rows,
     ...agentMetadata(session),
@@ -940,6 +946,11 @@ export function createTerminalHost({
   }
 
   function spawnSession(session) {
+    // 进程生日（新建与 restart/内切/复活都走这一咽喉）：面板的孵化豁免窗锚点。
+    // 记在这而不是 createdAt 上——restart 保记录换进程，createdAt 不动，拿它当
+    // 生日会把换壳后的 banner/续接重放漏出豁免窗（误转圈＋内切门误判 working）。
+    // 不落盘：恢复出来的会话没有活进程，等复活重 spawn 时自然记新值。
+    session.spawnedAt = Date.now();
     // 进程换代即订阅作废：2031 与「问过主题」都是进程内行为，新进程（新 shell
     // 或新 agent 实例）尚未表态；旧进程留下的半截询问尾巴也可能与新输出拼出
     // 幽灵询问，一并清零。新 agent 起来后自会再问一遍（OSC 11 / 996n / 2031h）。
@@ -1125,7 +1136,8 @@ export function createTerminalHost({
           agentName: typeof body.agentName === "string" && body.agentName.trim() ? body.agentName.trim().slice(0, 80) : null,
           pid: null,
           createdAt: Date.now(),
-          lastActiveAt: Date.now(),
+          // 不播种 lastActiveAt（出生≠活跃）：输出活跃窗只认 emit 真出过字。播种会让
+          // 刚打开的空会话在前 5s 误转圈、M12 内切门误判 working 走保护性新开。
           cols: Math.max(2, Math.min(240, Number(body.cols) || 120)),
           rows: Math.max(1, Math.min(120, Number(body.rows) || 34)),
           exitCode: null,
@@ -1217,7 +1229,10 @@ export function createTerminalHost({
         if (typeof body.data !== "string" || body.data.length > 64 * 1024) return json(res, 400, { error: "invalid_input" });
         if (!session.pty) return json(res, 409, { error: "session_exited" });
         session.pty?.write(body.data);
-        session.lastActiveAt = Date.now();
+        // 键入不再刷新 lastActiveAt（PTY 回显会走 emit 把它顶进活跃窗，把「用户
+        // 在打字」误归因成「agent 在跑」）——改记 lastInputAt，面板的键入抑制窗
+        // 拿它当锚点。不落盘：它是分秒级信号，恢复后的老会话按缺省（无抑制）走。
+        session.lastInputAt = Date.now();
         return json(res, 200, { ok: true });
       }
       if (action === "resize" && req.method === "POST") {
