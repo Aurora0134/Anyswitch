@@ -381,6 +381,9 @@ describe("终端视图左栏换血（M4）", () => {
         function escapeHtml(v) { return String(v || ""); }
         // 槽位接线用桩（markup 逐项由源码钉死测试负责）
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1");
@@ -435,6 +438,9 @@ describe("终端视图左栏换血（M4）", () => {
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+        const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
       `)(null, null, "t1");
@@ -534,6 +540,9 @@ describe("终端视图左栏换血（M4）", () => {
         function terminalRailSelfHealRemovedGroups() { return false; }
         ${extractFn("terminalRailPendingNewTerminals")}
         const TERMINAL_RAIL_SPINNER = "";
+        const TERMINAL_RAIL_DONE_DOT = "";
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("renderTerminalRailHistory")}
@@ -707,6 +716,7 @@ describe("终端视图左栏换血（M4）", () => {
       const sandbox = new Function("sessions", "activeId", "log", "els", `
         const terminalBackendSessions = sessions;
         let activeTerminalPreviewId = activeId;
+        const terminalDoneUnread = new Map();
         function $(id) { return els[id] ?? null; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
         function rememberTerminalSessionId(id) { log.remembered.push(id); }
@@ -717,6 +727,8 @@ describe("终端视图左栏换血（M4）", () => {
           activate: terminalRailActivateSession,
           close: terminalRailCloseSession,
           activeId: () => activeTerminalPreviewId,
+          markDone: (id) => terminalDoneUnread.set(id, true),
+          done: (id) => terminalDoneUnread.has(id),
         };
       `)(sessions, activeId, log, els);
       return { sandbox, log };
@@ -741,6 +753,19 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(sandbox.activeId(), "t1", "活跃指针原样");
       assert.deepEqual(log.remembered, [], "不写存档");
       assert.equal(log.renders, 0, "不重渲");
+    });
+
+    it("done（跑完未读）：点行即读——点它的行/点焦点行都当场清标", () => {
+      const { sandbox } = runRail({ sessions: { t1: { id: "t1" }, t2: { id: "t2" } }, activeId: "t1" });
+      sandbox.markDone("t2");
+      sandbox.activate("t2");
+      assert.equal(sandbox.activeId(), "t2", "活跃指针切换");
+      assert.ok(!sandbox.done("t2"), "点行＝已读，标记当场清");
+      sandbox.markDone("t1");
+      sandbox.markDone("t2");
+      sandbox.activate("t2");
+      assert.ok(!sandbox.done("t2"), "点已在焦点上的行同样清（清标在早退前，幂等）");
+      assert.ok(sandbox.done("t1"), "别的会话的标记不受牵连");
     });
 
     it("关闭叉走页签同一条处理：点到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
@@ -1307,6 +1332,9 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailArchivedKey")}
           ${extractFn("terminalRailVisibleSessions")}
           const TERMINAL_RAIL_SPINNER = "";
+          const TERMINAL_RAIL_DONE_DOT = "";
+          const terminalDoneUnread = new Map();
+          ${extractFn("terminalRailStateSlotHtml")}
           ${extractFn("terminalRailRowHtml")}
           ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
@@ -1406,6 +1434,9 @@ ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("terminalRailArchivedKey")}
         ${extractFn("terminalRailVisibleSessions")}
         const TERMINAL_RAIL_SPINNER = "";
+        const TERMINAL_RAIL_DONE_DOT = "";
+        const terminalDoneUnread = new Map();
+        ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
@@ -1499,6 +1530,9 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
     const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
     const TERMINAL_RAIL_SPINNER = "";
+    const TERMINAL_RAIL_DONE_DOT = "";
+    const terminalDoneUnread = new Map();
+    ${extractFn("terminalRailStateSlotHtml")}
     let terminalRailHistory = history;
     let activeTerminalPreviewId = activeId;
     function $(id) { return id === "railTermHistoryList" ? list : null; }
@@ -1626,6 +1660,100 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     fn.sync("");
     assert.deepEqual(fn.rendered, [""], "同参二次调用早退");
     assert.deepEqual(fn.refetched, [], "空态不发重拉");
+  });
+});
+
+describe("done（跑完未读）标记与绿点（dsh completed/completionUnread 同构）", () => {
+  const mkObserver = () => new Function(`
+    const terminalDoneUnread = new Map();
+    const terminalPrevWorking = new Map();
+    let activeTerminalPreviewId = "t-focus";
+    ${extractFn("noteTerminalWorkingStatus")}
+    return { note: noteTerminalWorkingStatus, marked: (id) => terminalDoneUnread.has(id) };
+  `)();
+
+  it("翻转观测：非聚焦会话真实观测到 working→idle 才置标；初拍不置", () => {
+    const h = mkObserver();
+    h.note({ id: "t-bg", backendState: { status: "running" } }, "working");
+    assert.ok(!h.marked("t-bg"), "跑着不置");
+    h.note({ id: "t-bg", backendState: { status: "running" } }, "idle");
+    assert.ok(h.marked("t-bg"), "后台翻完成即置（dsh completed）");
+    const fresh = mkObserver();
+    fresh.note({ id: "t-bg", backendState: { status: "running" } }, "idle");
+    assert.ok(!fresh.marked("t-bg"), "初拍（刷新后首见直接 idle）不置——不拿想象补标");
+  });
+
+  it("聚焦即读：翻转发生在焦点上的会话不置标", () => {
+    const h = mkObserver();
+    h.note({ id: "t-focus", backendState: { status: "running" } }, "working");
+    h.note({ id: "t-focus", backendState: { status: "running" } }, "idle");
+    assert.ok(!h.marked("t-focus"), "看着＝已读，不置");
+  });
+
+  it("working 再起清旧标、下次完成重新置；exited 清标且不置", () => {
+    const h = mkObserver();
+    h.note({ id: "a", backendState: { status: "running" } }, "working");
+    h.note({ id: "a", backendState: { status: "running" } }, "idle");
+    assert.ok(h.marked("a"), "先置上");
+    h.note({ id: "a", backendState: { status: "running" } }, "working");
+    assert.ok(!h.marked("a"), "跑起来就不再是「已完成」");
+    h.note({ id: "a", backendState: { status: "running" } }, "idle");
+    assert.ok(h.marked("a"), "再次完成重新置");
+    h.note({ id: "a", backendState: { status: "exited" } }, "idle");
+    assert.ok(!h.marked("a"), "退出清标");
+    h.note({ id: "b", backendState: { status: "running" } }, "working");
+    h.note({ id: "b", backendState: { status: "exited" } }, "idle");
+    assert.ok(!h.marked("b"), "working 直接翻 exited 不置");
+  });
+
+  it("行渲染：working 转圈优先、非聚焦 done 绿点、聚焦/无标/非 live 空槽；pending 行不涉及 done", () => {
+    const mkRow = (seed) => new Function("seed", `
+      function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+      function terminalRailRelTime() { return "3 分钟"; }
+      function terminalRailIsArchived() { return false; }
+      function esc(v) { return String(v); }
+      function escapeHtml(v) { return String(v || ""); }
+      const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
+      const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
+      const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
+      const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
+      const terminalDoneUnread = new Map(seed);
+      ${extractFn("terminalRailStateSlotHtml")}
+      ${extractFn("terminalRailRowHtml")}
+      return terminalRailRowHtml;
+    `)(seed);
+    const plain = mkRow([]);
+    const seeded = mkRow([["t-2", true]]);
+    const session = { id: "s-1", endpoint: "kimi", title: "权限矩阵", lastActive: 100 };
+    const liveIdle = { id: "t-2", status: "idle" };
+    const doneRow = seeded(session, liveIdle, "t-1");
+    assert.ok(doneRow.includes("DONE-STUB") && !doneRow.includes("SPINNER-STUB"), "非聚焦已完成行：槽内绿点非转圈");
+    const workingRow = seeded(session, { id: "t-2", status: "working" }, "t-1");
+    assert.ok(workingRow.includes("SPINNER-STUB") && !workingRow.includes("DONE-STUB"), "working 转圈优先于绿点");
+    const focusedRow = seeded(session, liveIdle, "t-2");
+    assert.ok(!focusedRow.includes("DONE-STUB") && !focusedRow.includes("SPINNER-STUB"), "聚焦＝已读：渲染面同语义兜底，空槽");
+    const plainRow = plain(session, liveIdle, "t-1");
+    assert.ok(!plainRow.includes("DONE-STUB") && !plainRow.includes("SPINNER-STUB"), "idle 无标：空槽");
+    const nonLiveRow = plain(session, null, "t-1");
+    assert.ok(!nonLiveRow.includes("DONE-STUB") && !nonLiveRow.includes("SPINNER-STUB"), "非 live 行恒空槽");
+    assert.ok(extractFn("terminalRailPendingRowHtml").includes('working ? TERMINAL_RAIL_SPINNER : ""'), "pending 行维持 working 转圈/留空两态（方案定死不涉及 done）");
+  });
+
+  it("绿点规格与四路清除接线（源码钉）：dsh 状态点规格＋清除在位", () => {
+    const doneRule = cssRule(".rail-term-done {");
+    assert.ok(doneRule.includes("width: 10px") && doneRule.includes("height: 10px"), "10×10 槽（dsh 状态点规格）");
+    const afterRule = panelCss.slice(panelCss.indexOf(".rail-term-done::after")).slice(0, 220);
+    assert.ok(afterRule.includes("inset: 20%") && afterRule.includes("var(--ok)") && afterRule.includes("border-radius: 50%"), "视觉 6px 圆、--ok（dsh success 档）、:after 承载");
+    assert.ok(extractFn("terminalRailActivateSession").includes("terminalDoneUnread.delete(id)"), "点行即读：activate 即时清标");
+    const sendAt = panelJs.indexOf("function sendTerminalInput");
+    const sendBlock = panelJs.slice(sendAt, sendAt + 700);
+    assert.ok(sendBlock.includes("terminalDoneUnread.delete(sessionId)"), "键入即读：sendTerminalInput 清标");
+    const hollowAt = panelJs.indexOf("terminalHollowStreak.delete(id);");
+    const closeBlock = panelJs.slice(hollowAt - 200, hollowAt + 500);
+    assert.ok(closeBlock.includes("terminalDoneUnread.delete(id)") && closeBlock.includes("terminalPrevWorking.delete(id)"), "关页签即失效：done 标记与上一拍状态两表同清");
+    const rebuildAt = panelJs.indexOf("function rebuildTerminalBackendSessions");
+    const rebuildBlock = panelJs.slice(rebuildAt, rebuildAt + 700);
+    assert.ok(rebuildBlock.includes("pruneTerminalDoneState()"), "整表换血清孤儿标记（别处关掉的会话不串到同 id 下一代）");
   });
 });
 

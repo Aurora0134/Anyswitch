@@ -723,9 +723,9 @@
   .rail-term-row:hover { background: var(--surface-hover); }
   /* ── 行首常驻槽（dsh sessionRow 同构） ──
      所有会话行（历史/pending/搜索结果）行首都渲染这个 16×20 槽：working 填转圈、
-     idle 的 live 行填 7×7 状态点、非 live 行留空。槽宽恒定，状态图标出现/消失/
-     互换时标题文字起点不动。行 padding 8 + 槽 16 + 行 gap 8 = 组头 padding 8 +
-     组头槽 16 + 组头 gap 8（32px）——会话行标题与组头文字严格同 x。 */
+     非聚焦的 done（跑完未读）live 行填绿点（.rail-term-done）、其余留空。槽宽恒定，
+     状态图标出现/消失/互换时标题文字起点不动。行 padding 8 + 槽 16 + 行 gap 8 =
+     组头 padding 8 + 组头槽 16 + 组头 gap 8（32px）——会话行标题与组头文字严格同 x。 */
   .rail-term-slot {
     flex: none; width: 16px; height: 20px; display: inline-flex;
     align-items: center; justify-content: center; line-height: 0;
@@ -766,6 +766,13 @@
        （dasharray 18 150、offset -3），静态下也能读出「加载环」的形状。 */
     .rail-term-spinner-arc { stroke-dasharray: 18 150; stroke-dashoffset: -3; }
   }
+  /* ── done（跑完未读）绿点（dsh completed/completionUnread 同构，状态点规格照抄） ──
+     非聚焦的后台会话跑完且未被查看时填进 16×20 常驻槽：10×10 容器、:after inset
+     20%（视觉 6px 圆）、色走既有 --ok（dsh success 档，不造新色值）。静态元素无
+     动画面，reduced-motion 无降级分支；容器居中由常驻槽的 flex 承担，本类不另起
+     布局。页签指示位复用同一 markup（.terminal-tab-state 槽内嵌同一份）。 */
+  .rail-term-done { flex: none; position: relative; width: 10px; height: 10px; }
+  .rail-term-done::after { content: ""; position: absolute; inset: 20%; border-radius: 50%; background: var(--ok); }
   .rail-term-row.is-active { background: var(--accent-soft); color: var(--accent); }
   .rail-term-row-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .rail-term-row-time { flex: none; font-size: 11px; color: var(--text-4); }
