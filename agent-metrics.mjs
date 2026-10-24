@@ -1019,6 +1019,25 @@ export function claudeDesktopForm(commandLine) {
   return null;
 }
 
+// 环境检测（environment-service）对本地版本无清单可读的原生 CLI
+// （PROBE_VERSION_CLIENTS：qoder-cli、grok）探版本的方式是 spawn `<exe>
+// --version`——进程秒退（qodercli 实测 0.32s）。扫描若照常认领会把它当活
+// 客户端：占位实例行起行、processCount 1，看板卡翻「运行中/待命」一个扫描
+// 窗口再回落（2026-10-24 取证：重启后页面重载触发首次检测，恰好撞上扫描
+// 节奏，看板闪悬空 qoder 卡数秒）。只豁免无歧义形状——探针是唯一「参数
+// 只有 --version、后面再无别的」的调用；真实会话不可能裸 --version 常驻
+//（它打印即退），漏判不会掩盖会话，误判方向只会多算不漏算。
+// tasklist 降级轮无命令列，过不了这里，维持既有「认不出即计数」的残差。
+function isVersionProbeRow(commandLine) {
+  if (typeof commandLine !== "string" || commandLine.length === 0) return false;
+  // 可执行体 token：带引号路径取闭引号之后，裸 token 取首个空格之后；
+  // 只看尾段。解析不出形状（引号残缺等）按非探针处理，宁可多算不漏算。
+  const rest = commandLine.startsWith('"')
+    ? commandLine.slice(commandLine.indexOf('"', 1) + 1)
+    : commandLine.slice(commandLine.indexOf(" ") + 1);
+  return rest.trim() === "--version";
+}
+
 function parseTasklistCsv(stdout) {
   const result = createEmptyProcessScan();
   if (typeof stdout !== "string" || stdout.length === 0) return result;
@@ -1061,8 +1080,11 @@ function parseTasklistCsv(stdout) {
       // image, no relay connection of its own) and is skipped the same way —
       // the lineage table still sees its parent pointer (every row feeds
       // ppidByPid), and the main CLI is what joins terminal sessions.
-      if (commandLine?.includes("--type=") || commandLine?.includes("--internal-sites-mcp")) {
-        // helper child process, skip
+      // Bare `--version` rows are the environment page's version probe
+      // (isVersionProbeRow), not a session — same skip.
+      if (commandLine?.includes("--type=") || commandLine?.includes("--internal-sites-mcp")
+        || isVersionProbeRow(commandLine)) {
+        // helper child process / version probe, skip
       } else {
         result.qoder += 1;
         if (pid) result.qoderPids.add(pid);
@@ -1241,11 +1263,18 @@ function parseTasklistCsv(stdout) {
       }
     } else if (bucket === "grok") {
       // Grok Build is a native binary (one grok.exe per terminal session,
-      // kimi-style multi-instance) — no helper-image filtering applies. Its
-      // bin dir also ships agent.exe / grove*.exe: deliberately NOT bucketed
-      // (agent.exe is a generic name third-party software may carry).
-      result.grok += 1;
-      if (pid) result.grokPids.add(pid);
+      // kimi-style multi-instance) — no helper-image filtering applies, with
+      // one exception: bare `--version` is the environment page's version
+      // probe (grok is a PROBE_VERSION_CLIENT — isVersionProbeRow), not a
+      // session. Its bin dir also ships agent.exe / grove*.exe: deliberately
+      // NOT bucketed (agent.exe is a generic name third-party software may
+      // carry).
+      if (isVersionProbeRow(commandLine)) {
+        // version probe, skip
+      } else {
+        result.grok += 1;
+        if (pid) result.grokPids.add(pid);
+      }
     } else if (bucket === "node") {
       // The scoped package name must appear as an install PATH (trailing
       // separator): Claude Code's auto-update check spawns

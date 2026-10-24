@@ -1296,6 +1296,51 @@ describe("createAgentMetricsCollector", () => {
       assert.equal(procs.ppidByPid.get(7332), 10284, "其父指针照常进谱系表");
     });
 
+    // 2026-10-24 修复面：环境检测探版本 spawn `qodercli.exe --version`（秒退），
+    // 扫描按镜像名认领会把探针当活客户端——占位实例行起行、看板卡翻「运行中/
+    // 待命」一个扫描窗口再回落（重启后首次检测撞扫描节奏，悬空卡间歇闪现）。
+    // 裸 --version 形状（参数仅此一个）豁免；带其他参数的调用照常计数。
+    describe("version probe row (--version only) exemption", () => {
+      const PS_PROBE_SCAN = [
+        String.raw`10284,19560,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe`,
+        String.raw`42424,23332,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe --version`,
+        String.raw`42425,23332,qodercli.exe,"C:\Users\tester\.qoder\bin\qodercli\qodercli.exe" --version`,
+      ].join("\r\n") + "\r\n";
+
+      it("skips the probe row; the real CLI still counts and the probe pid stays in the lineage table", async () => {
+        const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_PROBE_SCAN), nowFn: () => 10000 });
+        const procs = await collector.scanProcesses();
+        assert.equal(procs.qoder, 1, "探针行（裸 --version，引号/裸路径两形）不计数，主 CLI 照常");
+        assert.ok(procs.qoderPids.has(10284));
+        assert.ok(!procs.qoderPids.has(42424), "探针 pid 不进家族集（不起占位行、不翻卡）");
+        assert.ok(!procs.qoderPids.has(42425));
+        assert.equal(procs.ppidByPid.get(42424), 23332, "探针父指针照常进谱系表");
+      });
+
+      it("a probe-only round counts zero, so no placeholder row and the card stays stopped", async () => {
+        let t = 1000;
+        const collector = testCollector({
+          execFn: (c, o, cb) => cb(null, String.raw`42424,23332,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe --version` + "\r\n"),
+          nowFn: () => t,
+        });
+        const procs = await collector.scanProcesses();
+        assert.equal(procs.qoder, 0);
+        const qoder = (await collector.getAgentsStatus()).find((a) => a.id === "qoder");
+        assert.equal(qoder.status, "stopped", "探针独轮不翻卡");
+        assert.equal(qoder.instances.length, 0, "不起占位实例行");
+      });
+
+      it("a session-shaped invocation (arguments beyond --version) still counts", async () => {
+        const collector = testCollector({
+          execFn: (c, o, cb) => cb(null, String.raw`10284,19560,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe --resume 0198b8a6-7f5e-7f73-a1c2-9f4d5e6a7b8c` + "\r\n"),
+          nowFn: () => 10000,
+        });
+        const procs = await collector.scanProcesses();
+        assert.equal(procs.qoder, 1, "续接会话形调用不是探针，照常计数");
+        assert.ok(procs.qoderPids.has(10284));
+      });
+    });
+
     it("feeds the terminal attribution with the main CLI, ancestor chain up to the shell", async () => {
       const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_QODER_CLI_SCAN), nowFn: () => 10000 });
       await collector.scanProcesses();
@@ -2152,6 +2197,21 @@ describe("createAgentMetricsCollector", () => {
     assert.deepEqual(grok.instances.map((i) => i.id), ["grok-7400"]);
     const zcode = status.find((a) => a.id === "zcode");
     assert.equal(zcode.metrics.totalRequests, 0);
+  });
+
+  // 2026-10-24 修复面：grok 与 qoder-cli 同在 PROBE_VERSION_CLIENTS——环境检测
+  // spawn `grok.exe --version` 探版本（秒退），不过滤同样把看板 grok 卡闪翻
+  // 「运行中」。裸 --version 豁免、真实会话形照常计数。
+  it("skips the grok version-probe row but still counts session-shaped invocations", async () => {
+    const csv = [
+      String.raw`7401,23332,grok.exe,C:\Users\tester\.grok\bin\grok.exe --version`,
+      String.raw`7400,23332,grok.exe,C:\Users\tester\.grok\bin\grok.exe --resume 0198b8a6-7f5e-7f73-a1c2-9f4d5e6a7b8c`,
+    ].join("\r\n") + "\r\n";
+    const collector = testCollector({ execFn: (c, o, cb) => cb(null, csv), nowFn: () => 10000 });
+    const procs = await collector.scanProcesses();
+    assert.equal(procs.grok, 1, "探针行不计数，会话形调用照常");
+    assert.ok(procs.grokPids.has(7400));
+    assert.ok(!procs.grokPids.has(7401), "探针 pid 不进家族集（不起占位行、不翻卡）");
   });
 
   it("routes grok traffic by User-Agent header (grok-cli/<version>) if agentId is missing", async () => {
