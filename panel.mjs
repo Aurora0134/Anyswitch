@@ -1304,26 +1304,44 @@ export function createPanelRouter({
   // terminate 旧进程树→spawn 目标会话→身份换绑，页签不新增。与复活路由的分工：
   // 复活用会话自己的身份重组装；内切用请求体给的目标会话身份（endpoint/id/file）
   // 重组装，cwd 用目标会话的项目目录（claude 这类按项目分存档，目录错了 --resume
-  // 找不到会话）。working 判定与在飞闸在面板侧（panel.js terminalRailSwitchOrCreate），
-  // 本路由接「已决定内切」的请求，但杀进程前再做一道 switch-guard 复核（见下）：
+  // 找不到会话）。body 不带 resume＝全新内切：把这条终端就地换成一个全新 agent
+  // 会话（「新建会话」入口对齐 M12 矩阵），身份侧清空旧 resume（clearResume），
+  // 绑定重扫不做——没有目标身份可扫，新对话存档由既有绑定捕获路径自然接管。
+  // working 判定与在飞闸在面板侧（panel.js terminalRailSwitchOrCreate），本路由
+  // 接「已决定内切」的请求，但杀进程前再做一道 switch-guard 复核（见下）：
   // 前端信号覆盖不了静默执行中的命令，不可逆动作的最后一道闸留在服务端。
   async function handleTerminalSessionSwitch(req, res, id, body) {
     const token = terminalPullToken();
     if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     const session = await fetchTerminalSessionFn(id, { token });
     if (!session) return sendJson(res, 404, { ok: false, error: "terminal_session_not_found" });
-    const resume = body?.resume;
-    const endpoint = typeof resume?.endpoint === "string" ? resume.endpoint.trim() : "";
-    const conversationId = typeof resume?.id === "string" ? resume.id.trim() : "";
-    if (!endpoint || !conversationId || endpoint.length > 64 || conversationId.length > 256) {
-      return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
-    }
-    if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
-      return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
+    const resume = body?.resume ?? null;
+    // 目标身份：resume 路径＝endpoint＋会话 id（两键缺一即拒）；全新路径＝agentId
+    // 必在册。两条都要求 cwd（全新路径用面板「记住上次」，resume 路径用目标会话
+    // 项目目录）。错误码全走机器判短码，全新路径不用 resume- 前缀族——前端对那
+    // 族落的是续接专用句，全新创建的失败该走通用启动句。
+    let endpoint = "";
+    let conversationId = "";
+    let resumeFile = null;
+    if (resume !== null) {
+      endpoint = typeof resume?.endpoint === "string" ? resume.endpoint.trim() : "";
+      conversationId = typeof resume?.id === "string" ? resume.id.trim() : "";
+      if (!endpoint || !conversationId || endpoint.length > 64 || conversationId.length > 256) {
+        return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
+      }
+      if (!Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
+        return sendJson(res, 400, { ok: false, code: "resume-unsupported", error: "resume-unsupported" });
+      }
+      if (typeof resume.file === "string" && resume.file.trim()) resumeFile = resume.file.trim();
+    } else {
+      endpoint = typeof body?.agentId === "string" ? body.agentId.trim() : "";
+      if (!endpoint || endpoint.length > 64 || !Object.prototype.hasOwnProperty.call(AGENT_TERMINAL_TARGETS, endpoint)) {
+        return sendJson(res, 400, { ok: false, code: "agent-invalid", error: "agent-invalid" });
+      }
     }
     const cwd = typeof body?.cwd === "string" && body.cwd.trim() ? body.cwd.trim() : "";
     if (!cwd) {
-      return sendJson(res, 400, { ok: false, code: "resume-invalid", error: "resume-invalid" });
+      return sendJson(res, 400, { ok: false, code: resume !== null ? "resume-invalid" : "invalid_cwd", error: resume !== null ? "resume-invalid" : "invalid_cwd" });
     }
     let claudeBypassPermissions = false;
     try {
@@ -1340,11 +1358,15 @@ export function createPanelRouter({
         token,
         base,
         claudeBypassPermissions,
-        resume: {
-          endpoint,
-          id: conversationId,
-          ...(typeof resume.file === "string" && resume.file.trim() ? { file: resume.file.trim() } : {}),
-        },
+        ...(resume !== null
+          ? {
+              resume: {
+                endpoint,
+                id: conversationId,
+                ...(resumeFile ? { file: resumeFile } : {}),
+              },
+            }
+          : {}),
       });
     } catch (error) {
       // 续接相关失败回机器可判的短码（resume-unsupported / resume-invalid，连字符族
@@ -1391,8 +1413,11 @@ export function createPanelRouter({
       cwd: launch.cwd,
       env: launch.env,
       // 身份同步三件＋resume：宿主 restart 路由写进会话记录（M12-A），去重聚焦、
-      // 页签与栏行展示都读它们；env 只走请求体，不经响应回显。
-      resume: { endpoint, id: conversationId },
+      // 页签与栏行展示都读它们；env 只走请求体，不经响应回显。全新内切带
+      // clearResume 显式清空旧 resume——缺省「不更新」语义会残留旧会话身份。
+      ...(resume !== null
+        ? { resume: { endpoint, id: conversationId } }
+        : { clearResume: true }),
       label: launch.label,
       agentId: launch.agentId,
       agentName: launch.agentName,
@@ -1401,8 +1426,9 @@ export function createPanelRouter({
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
     // 身份（endpoint＋目标 cwd），不是宿主记录里的旧归属——空白壳那一栏根本没有
-    // 旧身份可言（复活路由传 session 是因它复活的正是会话自己的归属）。
-    scheduleBindingRefresh({ id: session.id, agentId: endpoint, cwd: launch.cwd }, switchStartedAt);
+    // 旧身份可言（复活路由传 session 是因它复活的正是会话自己的归属）。全新内切
+    // 无目标身份可扫，不走这条——新对话存档由绑定捕获既有路径接管。
+    if (resume !== null) scheduleBindingRefresh({ id: session.id, agentId: endpoint, cwd: launch.cwd }, switchStartedAt);
     return sendJson(res, restarted.status || 200, restarted.body ?? {});
   }
 

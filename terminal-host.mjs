@@ -486,6 +486,9 @@ function normalizeResume(raw) {
 // M12-A 内切身份同步三件：restart 路由的可选 body 字段。缺省/空串＝不更新（沿用
 // 原值）；带了但形状不对一律拒（error 码与 create 路由的同款字段口径），不静默
 // 忽略——换绑是显式动作，半途丢字段比报错更难查。resume 走 normalizeResume。
+// clearResume（全新内切）：布尔，true＝把记录里的 resume 显式清空。缺省沿用
+// 「不更新」语义；只有 true 一个有效取值，false 与缺省等价，非布尔拒换——没有
+// 清除语义时内切成新会话会残留旧会话身份，去重聚焦与兜底行判定都会拿旧身份误判。
 function normalizeIdentityUpdate(body) {
   const fields = {};
   const text = (key, max) => {
@@ -506,6 +509,11 @@ function normalizeIdentityUpdate(body) {
   if (agentId) fields.agentId = agentId;
   if (agentName) fields.agentName = agentName;
   if (resumeInput) fields.resume = resumeInput.resume;
+  const clearResume = body?.clearResume;
+  if (clearResume !== undefined && clearResume !== null) {
+    if (typeof clearResume !== "boolean") return { error: "invalid_clearResume" };
+    if (clearResume) fields.clearResume = true;
+  }
   return { fields };
 }
 
@@ -909,7 +917,7 @@ export function createTerminalHost({
   // 一次 spawn：两次 terminate+spawn 交错时，后一次的树杀会落在前一次刚起来的
   // 新进程上，最终留下的进程与响应里的 pid 对不上，多出来的那个成了孤儿。
   // 同会话的重启请求串成一条：在飞时直接返回同一份结果快照。
-  function restartSession(session, { envDelta = null, launch = null, cwd = null, resume = null, label = null, agentId = null, agentName = null } = {}) {
+  function restartSession(session, { envDelta = null, launch = null, cwd = null, resume = null, clearResume = false, label = null, agentId = null, agentName = null } = {}) {
     if (session.restartInFlight) return session.restartInFlight;
     const run = (async () => {
       if (envDelta) session.env = mergeInjectedEnv(session.env ?? {}, envDelta);
@@ -919,11 +927,14 @@ export function createTerminalHost({
       if (cwd) session.cwd = cwd;
       // 身份同步（M12-A 内切）：这条终端就地换成目标会话——label/agentId/agentName
       // 与 resume 身份（endpoint＋会话 id）一并改写，落盘随本轮的 persistNow 走。
-      // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。
+      // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。clearResume 是
+      // 全新内切的显式清除位：内切成新会话时旧 resume 必须清空，残留会让面板的
+      // 去重聚焦与「新会话」兜底行拿旧身份误判。
       if (label) session.label = label;
       if (agentId) session.agentId = agentId;
       if (agentName) session.agentName = agentName;
       if (resume) session.resume = resume;
+      if (clearResume) session.resume = null;
       // 重 spawn 前必须把旧树终结干净：控制台解耦的旧 agent（kimi）不会被
       // pty.kill 带走，不补树杀就会新旧两个 agent 同屏双开。
       await terminateSessionTree(session);

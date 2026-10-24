@@ -1265,6 +1265,69 @@ test("restart 接受 resume 身份与 label/agentId/agentName 同步（M12-A 内
   }
 });
 
+test("restart 接受 clearResume（全新内切）：显式清空旧 resume，缺省沿用，非布尔拒换", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  let revived = null;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ label: "Anyswitch", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+
+    // 先带身份内切一次，落一个旧 resume 进记录
+    await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "旧会话", agentId: "kimi", agentName: "Kimi Code",
+        resume: { endpoint: "kimi", id: "conv-123" },
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd", "--session", "conv-123"] },
+      }),
+    });
+
+    // 全新内切：clearResume 显式清空，缺省「不更新」语义不会残留旧身份
+    const fresh = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({
+        label: "新会话", agentId: "kimi", agentName: "Kimi Code", clearResume: true,
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+      }),
+    });
+    assert.equal(fresh.status, 200, "全新内切换绑成功");
+    const freshBody = await fresh.json();
+    assert.equal(freshBody.resume, undefined, "旧 resume 被显式清空（快照不再下发；兜底行/去重按 falsy 口径判新会话）");
+    assert.equal(freshBody.agentId, "kimi", "agent 身份照常同步");
+    assert.equal(calls.length, 3, "创建＋两次换绑各一次 spawn");
+
+    // 非布尔一律拒（换绑是显式动作，半途丢字段比报错更难查）
+    const bad = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST",
+      headers: headers(host),
+      body: JSON.stringify({ clearResume: "yes" }),
+    });
+    assert.equal(bad.status, 400, "非布尔 clearResume 拒换");
+    assert.equal((await bad.json()).error, "invalid_clearResume");
+
+    // 落盘持久化：重启宿主后清空仍在盘上
+    await host.close();
+    revived = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+    const revivedPort = await listen(revived);
+    const listed = await fetch(`http://127.0.0.1:${revivedPort}/terminal/sessions`, { headers: headers(revived) }).then((r) => r.json());
+    assert.equal(listed.sessions[0].resume, undefined, "清空落盘（字段不再随列表下发）");
+    assert.equal(listed.sessions[0].label, "新会话", "新身份落盘");
+  } finally {
+    if (revived) await revived.close().catch(() => {});
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart 接受可选 env 合并后再 spawn，响应不回显", async () => {
   const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-test-`);
   const { calls, ptyModule } = capturingPtyModule();

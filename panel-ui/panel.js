@@ -8628,6 +8628,12 @@ async function api(method, path, body) {
   // 最近一帧渲染出来的组表（过滤/改组后的终态）：hover 卡的「N 个会话」按它取数，
   // 不重新扫 DOM。
   let terminalRailLastGroups = [];
+  // 兜底行生命周期动效（2026-10-25）的 diff 门状态：换 agent 与搜索退出两族渲染
+  // 沿 M13 的 resetKey 口径保持瞬时落位——换 agent 时 DOM 里是旧 agent 的兜底行，
+  // 搜索退出时树从结果平铺换回，两者的「行集合变化」都不是兜底行的真实离开，
+  // 不播幽灵。首帧（无记录）同样按 reset 处理。
+  let terminalRailLastDiffAgent = null;
+  let terminalRailLastDiffSearch = false;
 
   // 组头两枚图标与开合箭头：数据逐字符照抄 dsh（m14 附录，净室提取自 dsh-desktop
   // 0.2.1-rc.2 bundle，chevron 以附录勘误后的 C5.95242 为准）。闭合态是 1px 描边空心
@@ -8886,13 +8892,18 @@ async function api(method, path, body) {
     for (const session of Object.values(terminalRailSessionMap())) {
       if (terminalRailAgentId(session) !== agentId) continue;
       if (session.resume) continue;
-      const createdAt = session.backendState && Number.isFinite(session.backendState.createdAt)
-        ? session.backendState.createdAt
+      // 锚＝最近进程出生（spawnedAt 优先，回退 createdAt；与闲置判定同款）：
+      // 内切/复活换进程时 createdAt 不动，拿它当锚会让同目录旧会话
+      // （lastActive ≥ createdAt）把换新进程的兜底行误判成「已被接替」——
+      // 全新内切后「新会话」行就出不来。旧记录无 spawnedAt 回退 createdAt。
+      const state = session.backendState;
+      const born = state && Number.isFinite(state.spawnedAt) ? state.spawnedAt
+        : state && Number.isFinite(state.createdAt) ? state.createdAt
         : Date.now();
       const taken = terminalRailHistory.sessions.some((row) =>
-        terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= createdAt);
+        terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= born);
       if (taken) continue;
-      out.push({ id: session.id, cwd: session.cwd, createdAt });
+      out.push({ id: session.id, cwd: session.cwd, createdAt: born });
     }
     return out;
   }
@@ -9327,8 +9338,11 @@ async function api(method, path, body) {
   function renderTerminalRailHistory(agentId) {
     const list = $("railTermHistoryList");
     if (!list) return;
-    // 搜索态：结果平铺列表整块替换树（m6c §A4），树渲染全旁路
+    // 搜索态：结果平铺列表整块替换树（m6c §A4），树渲染全旁路。退出搜索后的首帧
+    // 树渲染也按 reset 处理（兜底行 diff 门，见下方）——树从结果平铺换回，行集合
+    // 变化不是兜底行的真实离开。
     if (terminalRailSearch.open && terminalRailSearch.query.trim()) {
+      terminalRailLastDiffSearch = true;
       renderTerminalRailSearchResults(list);
       return;
     }
@@ -9477,6 +9491,26 @@ async function api(method, path, body) {
       if (!group.flat) parts.push(`</div>`);
     }
     const html = parts.join("");
+    // 兜底行生命周期动效（2026-10-25，与归档 M13 同观感）：本帧兜底集与 DOM 现存
+    // 集比对，有增删且动效可用时本帧按归档同款处理——量旧位＋快照→换写→FLIP
+    // （下方行位移 200ms/新行淡入 100ms）＋消失行挂幽灵淡出 100ms。新会话行的
+    // 出现（新建/全新内切）与消失（内切换走/被真行接替/关闭终端）都走这一条；
+    // 快照含历史行，同帧被水位线挤出可见段的行随之幽灵淡出，与真实离开同观感。
+    // 门：无人为 FLIP 在途（组折叠/归档已置 flip——组折叠整组藏行不是离开）；换
+    // agent/搜索退出/首帧沿 resetKey 口径瞬时落位；未武装或 reduced-motion 不量。
+    let pendingExitSnapshot = null;
+    const pendingDiffReset = agentId !== terminalRailLastDiffAgent || terminalRailLastDiffSearch;
+    terminalRailLastDiffAgent = agentId;
+    terminalRailLastDiffSearch = false;
+    if (!pendingDiffReset && terminalRailFlipMode === "instant" && terminalRailMotionEnabled() && html !== terminalRailRendered.history) {
+      const present = terminalRailPendingRowKeys(list);
+      let pendingChanged = present.size !== pending.length;
+      for (let i = 0; !pendingChanged && i < pending.length; i += 1) pendingChanged = !present.has(pending[i].id);
+      if (pendingChanged) {
+        terminalRailFlipMode = "flip";
+        pendingExitSnapshot = terminalRailSnapshotRows(list);
+      }
+    }
     // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐行
     // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的行）。
     const before = terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null;
@@ -9484,6 +9518,9 @@ async function api(method, path, body) {
       terminalRailRendered.history = html;
       list.innerHTML = html;
       if (before) playTerminalRailFlip(list, before);
+      if (pendingExitSnapshot && pendingExitSnapshot.size && list.parentElement) {
+        terminalRailMountExitGhosts(list, list.parentElement, pendingExitSnapshot);
+      }
     }
     terminalRailFlipMode = "instant";
     if (scrollKey && terminalRailScrolledFor !== autoKey) {
@@ -9492,11 +9529,20 @@ async function api(method, path, body) {
     }
   }
 
+  // 行身份键与量测选择器：历史行（data-rail-term-resume）与「新会话」兜底行
+  // （data-rail-term-session）统一进 FLIP/退场幽灵的量测集（2026-10-25）——
+  // 兜底行的出现/消失与归档同观感。两键不同名不互撞，单行只带其中一键。
+  const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
+  function terminalRailRowKey(row) {
+    if (!row || typeof row.getAttribute !== "function") return "";
+    return row.getAttribute("data-rail-term-resume") || row.getAttribute("data-rail-term-session") || "";
+  }
+
   function terminalRailRowTops(list) {
     const tops = new Map();
     if (!list || typeof list.querySelectorAll !== "function") return tops;
-    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
-      const key = row.getAttribute("data-rail-term-resume");
+    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
+      const key = terminalRailRowKey(row);
       if (!key || typeof row.getBoundingClientRect !== "function") continue;
       tops.set(key, row.getBoundingClientRect().top);
     }
@@ -9514,18 +9560,21 @@ async function api(method, path, body) {
   }
 
   // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新行 100ms ease-out）。
-  // 组展开/收起与归档/撤销（M13）置 flip；水位线增减、刷新、换 agent 是 resetKey，
-  // 直接落位；首次输入前、首次挂载（没有旧位置可比）、prefers-reduced-motion 都不动。
+  // 组展开/收起与归档/撤销（M13）置 flip；兜底行增删（2026-10-25）同样置 flip。
+  // 水位线增减、刷新、换 agent 是 resetKey，直接落位；首次输入前、首次挂载（没有
+  // 旧位置可比）、prefers-reduced-motion 都不动。空集 before（换写前栏里一行都没
+  // 量到）不整体跳过——新行淡入仍然成立（撤销归档让唯一行归组、空栏里第一条
+  // 兜底行出现），只是没有可位移的旧位。
   function playTerminalRailFlip(list, before) {
-    if (!before || before.size === 0) return;
+    if (!before) return;
     if (terminalRailFlipMode !== "flip") return;
     if (!terminalRailMotionArmed) return;
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     if (!list || typeof list.querySelectorAll !== "function") return;
-    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
+    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
       if (typeof row.animate !== "function" || typeof row.getBoundingClientRect !== "function") continue;
-      const key = row.getAttribute("data-rail-term-resume");
+      const key = terminalRailRowKey(row);
       const previous = before.get(key);
       if (previous === undefined) {
         row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, easing: "ease-out" });
@@ -9537,12 +9586,13 @@ async function api(method, path, body) {
     }
   }
 
-  // ── 归档/撤销的行退场动效（M13，dsh AnimatedRows FLIP 路径） ──
-  // 归档/撤销不再是 resetKey 瞬时消失：动作前给在册行拍快照（克隆＋视口位），重渲
-  // 后离开布局的行以幽灵克隆补进滚动层 100ms 淡出——下方行上移/落回 200ms、回填/
-  // 归位行淡入 100ms 由上面的 FLIP（flip 门）承担，组头与「展开其余 N」不在量测
-  // 范围（只量 [data-rail-term-resume] 行），天然瞬时。show 筛选下行不出布局（只是
-  // 改观感），「活着」判定让幽灵只挂真离开的那行，不误伤。
+  // ── 行退场动效（M13 归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
+  // FLIP 路径）── 归档/撤销不再是 resetKey 瞬时消失：动作前给在册行拍快照（克隆＋
+  // 视口位），重渲后离开布局的行以幽灵克隆补进滚动层 100ms 淡出——下方行上移/
+  // 落回 200ms、回填/归位行淡入 100ms 由上面的 FLIP（flip 门）承担，组头与
+  // 「展开其余 N」不在量测范围（只量 TERMINAL_RAIL_ROW_SELECTOR 行），天然瞬时。
+  // show 筛选下行不出布局（只是改观感），「活着」判定让幽灵只挂真离开的那行，
+  // 不误伤。
   function terminalRailMotionEnabled() {
     if (!terminalRailMotionArmed) return false;
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
@@ -9552,8 +9602,8 @@ async function api(method, path, body) {
   function terminalRailSnapshotRows(list) {
     const rows = new Map();
     if (!list || typeof list.querySelectorAll !== "function") return rows;
-    for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
-      const key = row.getAttribute("data-rail-term-resume");
+    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
+      const key = terminalRailRowKey(row);
       if (!key || typeof row.getBoundingClientRect !== "function" || typeof row.cloneNode !== "function") continue;
       const rect = row.getBoundingClientRect();
       rows.set(key, { node: row.cloneNode(true), top: rect.top, left: rect.left, width: rect.width });
@@ -9561,11 +9611,24 @@ async function api(method, path, body) {
     return rows;
   }
 
+  // DOM 里现存兜底行的键集（data-rail-term-session）：供渲染 diff 判「本帧兜底集
+  // 是否有增删」。历史行不进这个集——水位线截断（DOM 只挂可见段）造成的行增减
+  // 不是真实离开，混进来会把展开/收拢误判成生命周期变化。
+  function terminalRailPendingRowKeys(list) {
+    const keys = new Set();
+    if (!list || typeof list.querySelectorAll !== "function") return keys;
+    for (const row of list.querySelectorAll("[data-rail-term-session]")) {
+      const key = row.getAttribute("data-rail-term-session");
+      if (key) keys.add(key);
+    }
+    return keys;
+  }
+
   function terminalRailMountExitGhosts(list, host, snapshot) {
     const alive = new Set();
     if (typeof list.querySelectorAll === "function") {
-      for (const row of list.querySelectorAll("[data-rail-term-resume]")) {
-        const key = row.getAttribute("data-rail-term-resume");
+      for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
+        const key = terminalRailRowKey(row);
         if (key) alive.add(key);
       }
     }
@@ -9672,16 +9735,17 @@ async function api(method, path, body) {
   }
 
   // 新建终端：一键对当前 agent 建终端（cwd 沿用既有「记住上次」），无 agent 时建空白
-  // 终端；就绪闸与页签栏加号同拍。有 agent 走一键启动同一通路（createAgentTerminal），
-  // 空白终端的入参与「+」菜单同一形状（实测尺寸由 terminalCreateSize 给）。
+  // 终端；就绪闸与页签栏加号同拍。有 agent 走与点历史行同一道内切判定门
+  // （2026-10-25 用户拍板对齐超实例）：当前页签 idle/空白壳/exited 就地换新会话、
+  // working/无从内切新开页签；一键启动同一通路（createAgentTerminal）仍是全部新开
+  // 落点。空白终端不在矩阵内（不是 agent 会话），维持新开。
   function terminalRailCreateTerminal() {
     if (!terminalBackendReady) return;
     const cwd = terminalCwdInitial();
     rememberTerminalCwd(cwd);
     const agentId = terminalRailAgentId();
     if (agentId) {
-      createAgentTerminal({ agentId, cwd });
-      return;
+      return terminalRailSwitchOrCreateCore({ agentId, cwd });
     }
     const size = terminalCreateSize();
     return api("POST", "/api/terminal/sessions", { label: "Anyswitch", cwd, shell: "powershell", cols: size.cols, rows: size.rows })
@@ -9743,12 +9807,17 @@ async function api(method, path, body) {
   // 有秒级窗口，last-wins 要取消在飞 spawn，复杂度不值——一次内切（含补读）期间
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
-  async function terminalRailSwitchOrCreate({ session, resume, cwd }) {
+  // 判定门通用核：目标可以是某条历史会话（带 resume 身份）或一个全新会话
+  // （resume 缺省——「新建会话」与组头 ⊕ 两个入口同门，2026-10-25 用户拍板对齐：
+  // idle/空白壳/exited 就地换新会话、working 新开页签，与点历史行共用同一矩阵、
+  // 同一在飞闸与降级路径）。新开的落点都是 createAgentTerminal（全新路径不带
+  // resume 键，服务端 /switch 按缺省走 agentId＋cwd 的全新分支）。
+  async function terminalRailSwitchOrCreateCore({ agentId, cwd, resume = null }) {
     if (terminalSwitchInFlight) return;
     const active = terminalSessionFor(activeTerminalPreviewId);
     // 无从内切：没有活跃页签、或活跃是设计稿预览会话（没有宿主记录可换）。
     if (!active || !active.backend) {
-      return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      return createAgentTerminal({ agentId, cwd, resume });
     }
     terminalSwitchInFlight = true;
     try {
@@ -9760,16 +9829,16 @@ async function api(method, path, body) {
         agents = await api("GET", "/api/agents");
         hostRead = await api("GET", `/api/terminal/sessions/${encodeURIComponent(active.id)}`);
       } catch {
-        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+        return createAgentTerminal({ agentId, cwd, resume });
       }
       if (!agents || !Array.isArray(agents.agents) || !hostRead || !hostRead.id) {
-        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+        return createAgentTerminal({ agentId, cwd, resume });
       }
       enrichTerminalSessions(agents.agents);
       const working = active.status === "working" || (active.metrics && active.metrics.activeRequests > 0);
-      if (working) return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+      if (working) return createAgentTerminal({ agentId, cwd, resume });
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
-      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, { resume, cwd });
+      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       renderTerminalPreviewSession();
     } catch (error) {
@@ -9780,7 +9849,7 @@ async function api(method, path, body) {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：静默转新开保护。新开
         // 本就是点击历史会话的合法落点之一，这里再提示反而是噪声；原页签不动，
         // 在跑的命令继续。
-        return createAgentTerminal({ agentId: session.endpoint, cwd, resume });
+        return createAgentTerminal({ agentId, cwd, resume });
       }
       if (typeof code === "string" && code.startsWith("resume-")) {
         toast("这个 Agent 的会话暂时不能在终端里续接", true);
@@ -9790,6 +9859,10 @@ async function api(method, path, body) {
     } finally {
       terminalSwitchInFlight = false;
     }
+  }
+
+  async function terminalRailSwitchOrCreate({ session, resume, cwd }) {
+    return terminalRailSwitchOrCreateCore({ agentId: session.endpoint, cwd, resume });
   }
 
   function terminalRailResumeHistoryRow(id) {
@@ -9870,10 +9943,12 @@ async function api(method, path, body) {
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
-  // ⊕ 新建（dsh B1 的 onCreate）：先展开该组（若收起），再以该组目录为 cwd 走
-  // createAgentTerminal 同一通路给当前 agent 建终端。历史会话段只在有 agent 聚焦时
-  // 才有内容——组头天然带着 agentId（terminalRailAgentId），不写无 agent 分支：
-  // 没有 agent 时列表为空、组头不存在，⊕ 根本不会露面。就绪闸与页签栏加号同拍。
+  // ⊕ 新建（dsh B1 的 onCreate）：先展开该组（若收起），再以该组目录为 cwd 给当前
+  // agent 建终端。历史会话段只在有 agent 聚焦时才有内容——组头天然带着 agentId
+  // （terminalRailAgentId），不写无 agent 分支：没有 agent 时列表为空、组头不存在，
+  // ⊕ 根本不会露面。就绪闸与页签栏加号同拍。与「新建会话」同门（2026-10-25 用户
+  // 拍板对齐超实例）：idle/空白壳/exited 就地换新会话、working/无从内切新开页签，
+  // cwd 用组目录。
   function terminalRailCreateTerminalInDir(key) {
     if (!terminalBackendReady || !key) return;
     if (terminalRailCollapsedGroups.has(key)) {
@@ -9881,7 +9956,7 @@ async function api(method, path, body) {
       terminalRailFlipMode = "flip";
       renderTerminalRailHistory(terminalRailAgentId());
     }
-    createAgentTerminal({ agentId: terminalRailAgentId(), cwd: key });
+    return terminalRailSwitchOrCreateCore({ agentId: terminalRailAgentId(), cwd: key });
   }
 
   // ── 组头 hover 卡（M7 S3，dsh B4） ──

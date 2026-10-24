@@ -526,6 +526,12 @@ describe("终端视图左栏换血（M4）", () => {
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
         function terminalRailRowTops() { return null; }
         function playTerminalRailFlip() {}
+        function terminalRailMotionEnabled() { return false; }
+        function terminalRailPendingRowKeys() { return new Set(); }
+        function terminalRailSnapshotRows() { return new Map(); }
+        function terminalRailMountExitGhosts() {}
+        let terminalRailLastDiffAgent = null;
+        let terminalRailLastDiffSearch = false;
         ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         ${extractFn("terminalRailWatermarkView")}
@@ -582,6 +588,8 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
+        function enrichTerminalSessions() {}
+        ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailSwitchOrCreate")}
         ${extractFn("terminalRailResumeSession")}
         return {
@@ -1190,10 +1198,10 @@ describe("终端视图左栏换血（M4）", () => {
         "进入终端前记下返回目标");
     });
 
-    it("新建终端：对当前 agent 建终端，cwd 沿用记住上次，无 agent 建空白终端，禁用位跟就绪位", () => {
+    it("新建终端：对当前 agent 走同一道内切判定门（idle 内切/working 新开），cwd 沿用记住上次，无 agent 建空白终端，禁用位跟就绪位", () => {
       const create = extractFn("terminalRailCreateTerminal");
       assert.ok(create.includes("terminalCwdInitial()"), "cwd 沿用既有「记住上次」逻辑");
-      assert.ok(create.includes("createAgentTerminal({ agentId, cwd })"), "有 agent 走一键启动同一通路");
+      assert.ok(create.includes("terminalRailSwitchOrCreateCore({ agentId, cwd })"), "有 agent 与点历史行同一道内切判定门（2026-10-25 对齐超实例）");
       assert.ok(create.includes('api("POST", "/api/terminal/sessions"'), "无 agent 建空白终端");
       assert.ok(create.includes("terminalBackendReady"), "就绪闸与页签栏加号同拍");
       assert.ok(extractFn("renderTerminalRail").includes("newBtn.disabled = !terminalBackendReady")
@@ -1243,7 +1251,9 @@ describe("终端视图左栏换血（M4）", () => {
       const fn = new Function("list", "before", "mode", "armed", "reduced", `
         const terminalRailFlipMode = mode;
         const terminalRailMotionArmed = armed;
+        const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
         const window = { matchMedia: () => ({ matches: reduced }) };
+        ${extractFn("terminalRailRowKey")}
         ${extractFn("playTerminalRailFlip")}
         return playTerminalRailFlip;
       `)(list, before, mode, armed, reduced);
@@ -1268,9 +1278,15 @@ describe("终端视图左栏换血（M4）", () => {
     it("resetKey（水位线 / 刷新 / 换 agent）直接落位；首次输入前与 reduced-motion 不动", () => {
       const before = new Map([["s1", 0], ["s2", 0]]);
       assert.deepEqual(runFlip({ mode: "instant", before }), [], "水位线增减与刷新是瞬时跳变（dsh 实测）");
-      assert.deepEqual(runFlip({ armed: false, before }), [], "首次输入前不做动画");
+      assert.deepEqual(runFlip({ armed: false, before }), [], "首次输入前不做动画（真实首挂由 armed 门拦下）");
       assert.deepEqual(runFlip({ reduced: true, before }), [], "prefers-reduced-motion 全关");
-      assert.deepEqual(runFlip({ before: new Map() }), [], "首次挂载直接落位（不做整列表淡入）");
+      // 空集 before（换写前栏里一行都没量到）不再整体跳过（2026-10-25 兜底行动效
+      // 放宽）：新行淡入仍然成立——空栏里第一条「新会话」兜底行的出现、撤销归档让
+      // 唯一行归组；位移无旧位可播，不做整列表位移。
+      const emptyBefore = runFlip({ before: new Map() });
+      assert.ok(emptyBefore.length > 0, "空集 before 仍播新行淡入");
+      assert.ok(emptyBefore.every((a) => a.frames.length === 2 && a.frames[0].opacity === 0 && a.frames[1].opacity === 1 && a.opts.duration === 100),
+        "只淡入（100ms），无位移动画");
     });
 
     it("活跃终端所在组自动展开：等列表落地后才做一次，用户手动收起不被轮询顶回来", () => {
@@ -1320,6 +1336,12 @@ describe("终端视图左栏换血（M4）", () => {
           function terminalRailRowTops() { return null; }
           function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
           function playTerminalRailFlip() {}
+          function terminalRailMotionEnabled() { return false; }
+          function terminalRailPendingRowKeys() { return new Set(); }
+          function terminalRailSnapshotRows() { return new Map(); }
+          function terminalRailMountExitGhosts() {}
+          let terminalRailLastDiffAgent = null;
+          let terminalRailLastDiffSearch = false;
           ${extractFn("terminalRailNormDir")}
           ${extractFn("terminalRailGroupSessions")}
           ${extractFn("terminalRailWatermarkView")}
@@ -1422,6 +1444,12 @@ ${extractFn("terminalRailPendingRowHtml")}
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
         function terminalRailRowTops() { return null; }
         function playTerminalRailFlip() {}
+        function terminalRailMotionEnabled() { return false; }
+        function terminalRailPendingRowKeys() { return new Set(); }
+        function terminalRailSnapshotRows() { return new Map(); }
+        function terminalRailMountExitGhosts() {}
+        let terminalRailLastDiffAgent = null;
+        let terminalRailLastDiffSearch = false;
         ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
         ${extractFn("terminalRailWatermarkView")}
@@ -1551,6 +1579,12 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
     function terminalRailRowTops() { return null; }
     function playTerminalRailFlip() {}
+    function terminalRailMotionEnabled() { return false; }
+    function terminalRailPendingRowKeys() { return new Set(); }
+    function terminalRailSnapshotRows() { return new Map(); }
+    function terminalRailMountExitGhosts() {}
+    let terminalRailLastDiffAgent = null;
+    let terminalRailLastDiffSearch = false;
     ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailGroupSessions")}
     ${extractFn("terminalRailWatermarkView")}

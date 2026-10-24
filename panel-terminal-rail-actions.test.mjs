@@ -86,6 +86,14 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
     function terminalRailRowTops() { return null; }
     function playTerminalRailFlip() {}
+    // 兜底行 diff 动效（2026-10-25）依赖面的桩：默认关闭（MotionEnabled false），
+    // 行为与既有渲染断言一致；diff 路径的真跑见「兜底行生命周期动效」专组沙盒。
+    function terminalRailMotionEnabled() { return false; }
+    function terminalRailPendingRowKeys() { return new Set(); }
+    function terminalRailSnapshotRows() { return new Map(); }
+    function terminalRailMountExitGhosts() {}
+    let terminalRailLastDiffAgent = null;
+    let terminalRailLastDiffSearch = false;
     ${extractFn("terminalRailFindOpenSession")}
     ${extractFn("terminalRailNormDir")}
     ${extractFn("terminalRailGroupSessions")}
@@ -714,28 +722,77 @@ describe("S2 分组移除（finding 1b）", () => {
 
 describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
   describe("⊕ 在此目录新建终端（vm 真跑）", () => {
-    const runCreate = ({ collapsed = [], agentId = "kimi", ready = true, apiImpl } = {}) => {
-      const log = { posts: [], renders: 0, collapsed: new Set(collapsed) };
-      const fn = new Function("log", "apiImpl", "agentId", "ready", `
+    const runCreate = ({ collapsed = [], agentId = "kimi", ready = true, apiImpl, sessions = {}, activeId = null, agentsImpl, hostReadImpl, switchImpl } = {}) => {
+      const log = { posts: [], gets: [], switchBodies: [], renders: 0, collapsed: new Set(collapsed) };
+      const fn = new Function("log", "apiImpl", "agentId", "ready", "sessions", "activeId", "agentsImpl", "hostReadImpl", "switchImpl", `
         let terminalBackendReady = ready;
         let terminalRailFlipMode = "instant";
+        let terminalSwitchInFlight = false;
+        let activeTerminalPreviewId = activeId;
+        const terminalBackendSessions = sessions;
         const terminalRailCollapsedGroups = log.collapsed;
+        function api(method, path, body) {
+          log.gets.push({ method, path });
+          if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
+          if (method === "GET" && path.startsWith("/api/terminal/sessions/")) return hostReadImpl();
+          if (method === "POST" && path.endsWith("/switch")) { log.switchBodies.push(body); return Promise.resolve(switchImpl()); }
+          return Promise.reject(new Error("unexpected " + method + " " + path));
+        }
+        function enrichTerminalSessions(agents) {
+          const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
+          const working = !!(row && row.activeRequests > 0);
+          for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+        }
         function createAgentTerminal(opts) { log.posts.push(opts); return apiImpl(opts); }
+        function terminalBackendSession(item) { return { ...item }; }
+        function renderTerminalPreviewSession() { log.renders += 1; }
         function renderTerminalRailHistory() { log.renders += 1; }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        function toast() {}
+        function panelError(err, fallback) { return fallback; }
         function terminalRailAgentId() { return agentId; }
+        ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailCreateTerminalInDir")}
         return terminalRailCreateTerminalInDir;
-      `)(log, apiImpl ?? (() => Promise.resolve()), agentId, ready);
+      `)(log, apiImpl ?? (() => Promise.resolve()), agentId, ready, sessions, activeId,
+        agentsImpl ?? (async () => ({ agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 0 }] }] })),
+        hostReadImpl ?? (async () => ({ id: "t-a", status: "running" })),
+        switchImpl ?? (async () => ({ id: "t-a", status: "running", resume: null })));
       return { fn, log };
     };
 
-    it("点击＝先展开该组（若收起）＋以该组目录为 cwd 给当前 agent 建终端", async () => {
+    it("点击＝先展开该组（若收起）＋以该组目录为 cwd 建终端（无活跃页签落新开）", async () => {
       const { fn, log } = runCreate({ collapsed: ["C:\\dev\\alpha"] });
       fn("C:\\dev\\alpha");
       assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组先展开");
-      assert.deepEqual(log.posts, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }],
-        "走 createAgentTerminal 同一通路，cwd＝组目录");
+      assert.deepEqual(log.posts, [{ agentId: "kimi", cwd: "C:\\dev\\alpha", resume: null }],
+        "无从内切走 createAgentTerminal 通路，cwd＝组目录，全新建不带 resume");
       await flush();
+    });
+
+    it("idle 聚焦页签：⊕ 就地换新会话（与「新建会话」同门），POST 体只有组目录 cwd", async () => {
+      const { fn, log } = runCreate({
+        collapsed: ["C:\\dev\\alpha"],
+        sessions: { "t-a": { id: "t-a", backend: true, agentId: "kimi", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle" } },
+        activeId: "t-a",
+      });
+      fn("C:\\dev\\alpha");
+      await flush();
+      assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组照常先展开");
+      assert.deepEqual(log.switchBodies, [{ cwd: "C:\\dev\\alpha" }], "内切体只有 cwd，无 resume 键");
+      assert.deepEqual(log.posts, [], "不开新页签");
+    });
+
+    it("working 聚焦页签：⊕ 新开页签保护在跑任务，cwd＝组目录", async () => {
+      const { fn, log } = runCreate({
+        sessions: { "t-a": { id: "t-a", backend: true, agentId: "kimi", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle" } },
+        activeId: "t-a",
+        agentsImpl: async () => ({ agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 1 }] }] }),
+      });
+      fn("C:\\dev\\alpha");
+      await flush();
+      assert.deepEqual(log.posts, [{ agentId: "kimi", cwd: "C:\\dev\\alpha", resume: null }], "新开，cwd＝组目录");
+      assert.deepEqual(log.switchBodies, [], "不发内切");
     });
 
     it("已展开的组不重复展开；未就绪（就绪闸）不建", () => {
@@ -750,7 +807,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
 
     it("源码钉死：不写无 agent 分支——历史段只在有 agent 聚焦时有内容，⊕ 天然有 agentId", () => {
       const fn = extractFn("terminalRailCreateTerminalInDir");
-      assert.ok(fn.includes("createAgentTerminal({ agentId: terminalRailAgentId(), cwd: key })"), "同一创建通路");
+      assert.ok(fn.includes("terminalRailSwitchOrCreateCore({ agentId: terminalRailAgentId(), cwd: key })"), "与「新建会话」同一道内切判定门");
       assert.ok(!fn.includes('agentId: ""'), "没有为无 agent 兜底的代码路径");
       // 理由写在函数上方的注释里（栏体代码段内）
       const block = panelJs.slice(panelJs.indexOf("终端会话栏（M4 + M7 + M8）"), panelJs.indexOf("function initSkillsTab"));
@@ -999,6 +1056,8 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         ${extractFn("terminalRailActivateSession")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
+        function enrichTerminalSessions() {}
+        ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailSwitchOrCreate")}
         ${extractFn("terminalRailResumeSession")}
         return {
@@ -1081,7 +1140,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
       const fn = extractFn("terminalRailResumeSession");
       assert.ok(fn.indexOf("terminalRailFindOpenSession") < fn.indexOf("terminalRailSwitchOrCreate"),
         "先查已开着的终端，再走内切/新开判定");
-      const decide = extractFn("terminalRailSwitchOrCreate");
+      const decide = extractFn("terminalRailSwitchOrCreateCore");
       assert.ok(decide.indexOf("terminalRailFindOpenSession") < 0, "判定函数自身不再做去重（去重只在入口）");
       // 补读在 working 判定之前、判定之后才新开（no-active 的早退新建在补读之前，
       // 那是「无从内切」的直接新建，不读活跃面）。
@@ -1199,6 +1258,183 @@ describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树"
     });
     closed.fn.render("kimi");
     assert.ok(!closed.list.html.includes(">新会话<"), "终端已关：兜底行不再渲染");
+  });
+
+  it("兜底行锚＝进程出生（spawnedAt 优先，回退 createdAt）：内切换新进程后同目录旧会话不再吞掉兜底行", () => {
+    // 2026-10-25 全新内切落地后新增：内切保记录换进程，createdAt 不动、spawnedAt
+    // 才是本次会话的出生点。旧口径（createdAt）下 lastActive 300 ≥ 100 会把兜底
+    // 行判成已被接替，全新内切后「新会话」行出不来。
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-old", endpoint: "kimi", project: "C:\\dev\\alpha", title: "旧会话", lastActive: 300 }],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-a", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 100, spawnedAt: 500 } },
+    });
+    sandbox.fn.render("kimi");
+    assert.ok(sandbox.list.html.includes('data-rail-term-session="t-a"'), "spawnedAt(500) 在旧会话 lastActive(300) 之后：兜底行在场");
+    assert.ok(!sandbox.list.html.includes(">旧会话<") || sandbox.list.html.includes('data-rail-term-session="t-a"'),
+      "兜底行不被旧会话顶掉");
+  });
+});
+
+// ── 兜底行生命周期动效（2026-10-25，与归档 M13 同观感）──
+// 真跑 renderTerminalRailHistory，动效帮手换成记录桩：兜底集增删的那一帧置 flip、
+// 量旧位、挂幽灵；稳态帧/换 agent/搜索退出/未武装一律瞬时。几何与幽灵机制本体由
+// M13 组的真跑用例与「快照只量行」源码钉死覆盖，这里钉的是 diff 的接线与门。
+describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
+  const DIFF_HISTORY = {
+    endpoint: "kimi",
+    sessions: [{ id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastActive: 200 }],
+    fetchedAt: 1,
+    error: null,
+  };
+  const diffPendingSession = (id) => (id
+    ? { id, cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 900 } }
+    : {});
+  const diffSandbox = () => {
+    const list = { html: "", writes: 0, parentElement: { append() {} } };
+    Object.defineProperty(list, "innerHTML", {
+      get: () => list.html,
+      set: (v) => { list.writes += 1; list.html = v; },
+    });
+    const rec = { measureModes: [], flips: 0, ghosts: 0, snapshots: 0 };
+    const ctrl = { present: new Set(), motion: true };
+    const fn = new Function("list", "rec", "ctrl", "history", "pendingSession", `
+      let terminalRailRendered = { history: null };
+      let terminalRailAutoExpandedFor = "";
+      let terminalRailScrolledFor = "";
+      let terminalRailFlipMode = "instant";
+      let terminalRailLastDiffAgent = null;
+      let terminalRailLastDiffSearch = false;
+      const terminalRailCollapsedGroups = new Set();
+      const terminalRailWatermarks = new Map();
+      const terminalRailPrefs = { archived: [], removedGroups: [] };
+      const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+      const terminalRailRemovedAt = {};
+      const terminalRailSelfHealFailed = new Set();
+      const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
+      let terminalRailLastGroups = [];
+      const TERMINAL_RAIL_WATERMARK = 5;
+      const TERMINAL_RAIL_ICON_CHEVRON = "";
+      const TERMINAL_RAIL_ICON_ARCHIVE = "";
+      const TERMINAL_RAIL_ICON_UNARCHIVE = "";
+      const TERMINAL_RAIL_ICON_ELLIPSIS = "";
+      const TERMINAL_RAIL_ICON_PLUS = "";
+      const TERMINAL_RAIL_ICON_FOLDER_OPEN = "";
+      const TERMINAL_RAIL_ICON_FOLDER_CLOSED = "";
+      let terminalRailHistory = history;
+      let terminalBackendSessions = {};
+      let activeTerminalPreviewId = null;
+      let terminalBackendReady = true;
+      function $(id) { return id === "railTermHistoryList" ? list : null; }
+      function saveTerminalRailRemovedAt() {}
+      function api() { return Promise.resolve({ ok: true }); }
+      function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+      function sessDirName(p) { return String(p || "").split("\\\\").pop(); }
+      function terminalRailRelTime() { return "3 分钟前"; }
+      function esc(v) { return String(v); }
+      function escapeHtml(v) { return String(v || ""); }
+      function terminalRailScrollGroupIntoView() {}
+      function renderTerminalRailSearchResults() {}
+      function terminalRailRowTops() { rec.measureModes.push(terminalRailFlipMode); return new Map([["s-2", 100]]); }
+      function playTerminalRailFlip() { rec.flips += 1; }
+      function terminalRailMotionEnabled() { return ctrl.motion; }
+      function terminalRailPendingRowKeys() { return new Set(ctrl.present); }
+      function terminalRailSnapshotRows() { rec.snapshots += 1; return new Map([["s-2", {}]]); }
+      function terminalRailMountExitGhosts() { rec.ghosts += 1; }
+      ${extractFn("terminalRailSessionMap")}
+      ${extractFn("terminalRailActiveSession")}
+      ${extractFn("terminalRailAgentId")}
+      ${extractFn("terminalRailFindOpenSession")}
+      ${extractFn("terminalRailNormDir")}
+      ${extractFn("terminalRailGroupSessions")}
+      ${extractFn("terminalRailWatermarkView")}
+      ${extractFn("terminalRailNextWatermark")}
+      ${extractFn("terminalRailMoreLabel")}
+      ${extractFn("terminalRailSameDir")}
+      ${extractFn("terminalRailGroupForDir")}
+      ${extractFn("terminalRailArchivedKey")}
+      ${extractFn("terminalRailIsArchived")}
+      ${extractFn("terminalRailVisibleSessions")}
+      ${extractFn("terminalRailSelfHealRemovedGroups")}
+      ${extractFn("terminalRailRegroupRemoved")}
+      ${extractFn("terminalRailPendingNewTerminals")}
+      const TERMINAL_RAIL_SPINNER = "";
+      const TERMINAL_RAIL_DONE_DOT = "";
+      const terminalDoneUnread = new Map();
+      ${extractFn("terminalRailStateSlotHtml")}
+      ${extractFn("terminalRailRowHtml")}
+      ${extractFn("terminalRailPendingRowHtml")}
+      ${extractFn("renderTerminalRailHistory")}
+      return {
+        render: renderTerminalRailHistory,
+        setPending: (id) => {
+          terminalBackendSessions = id ? { [id]: pendingSession(id) } : {};
+          activeTerminalPreviewId = id || null;
+        },
+        setPresent: (ids) => { ctrl.present = new Set(ids); },
+        setMotion: (on) => { ctrl.motion = on; },
+        openSearch: () => { terminalRailSearch.open = true; terminalRailSearch.query = "接入"; },
+        closeSearch: () => { terminalRailSearch.open = false; terminalRailSearch.query = ""; },
+      };
+    `)(list, rec, ctrl, DIFF_HISTORY, diffPendingSession);
+    return { fn, list, rec };
+  };
+
+  it("兜底行出现：那一帧置 flip（量旧位＋FLIP 播放），新行淡入/下方行位移由同一扇门承担；稳态帧不再动画", () => {
+    const { fn, rec } = diffSandbox();
+    fn.render("kimi");
+    assert.deepEqual(rec.measureModes, [], "首帧＝reset（无 diff 基线）：瞬时落位");
+    fn.setPending("t-9");
+    fn.render("kimi");
+    assert.deepEqual(rec.measureModes, ["flip"], "兜底集出现的那帧按 flip 量旧位");
+    assert.equal(rec.flips, 1, "FLIP 播放一次");
+    assert.equal(rec.snapshots, 1, "退场快照同帧拍下（出现帧无行离开，真实挂载由存活判定拦下，见 M13 真跑组）");
+    fn.setPresent(["t-9"]);
+    fn.render("kimi");
+    assert.deepEqual(rec.measureModes, ["flip"], "兜底集未变的重渲不动画");
+    assert.equal(rec.flips, 1, "稳态帧不重播");
+  });
+
+  it("兜底行消失：同一扇门＋快照交给幽灵挂载（淡出由 terminalRailMountExitGhosts 承担）", () => {
+    const { fn, rec } = diffSandbox();
+    fn.render("kimi");
+    fn.setPending("t-9");
+    fn.render("kimi");
+    fn.setPresent(["t-9"]);
+    fn.setPending(null);
+    fn.render("kimi");
+    assert.deepEqual(rec.measureModes, ["flip", "flip"], "出现帧与消失帧都置 flip");
+    assert.equal(rec.ghosts, 2, "两帧都把快照交给幽灵挂载（真实挂载时只有离开的那行被克隆，见 M13 真跑组）");
+  });
+
+  it("reset 门：换 agent 与搜索退出的那一帧瞬时落位（沿 M13 resetKey 口径）", () => {
+    const { fn, rec } = diffSandbox();
+    fn.render("kimi");
+    fn.setPending("t-9");
+    fn.render("claude");
+    assert.equal(rec.measureModes.length, 0, "换 agent：DOM 里是旧 agent 的兜底行，不按离开播动画");
+    fn.render("kimi");
+    assert.equal(rec.measureModes.length, 0, "回到原 agent 的首帧仍是 reset 基线");
+    fn.openSearch();
+    fn.render("kimi");
+    fn.closeSearch();
+    fn.setPending(null);
+    fn.render("kimi");
+    assert.equal(rec.measureModes.length, 0, "搜索退出后的首帧树渲染：瞬时落位");
+    assert.equal(rec.ghosts, 0, "无幽灵");
+  });
+
+  it("armed/reduced-motion 门：动效不可用时一切瞬时（diff 不置 flip）", () => {
+    const { fn, rec } = diffSandbox();
+    fn.setMotion(false);
+    fn.setPending("t-9");
+    fn.render("kimi");
+    assert.deepEqual(rec.measureModes, [], "未武装/reduce：不量不播");
+    assert.equal(rec.ghosts, 0, "无幽灵");
   });
 });
 
@@ -2231,16 +2467,16 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
   };
   const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl }) => {
-    const log = { gets: [], creates: [], toasts: [], renders: 0 };
+    const log = { gets: [], switchBodies: [], creates: [], toasts: [], renders: 0 };
     const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", `      let terminalBackendReady = true;
       const terminalBackendSessions = sessions;
       let activeTerminalPreviewId = activeId;
       let terminalSwitchInFlight = false;
-      function api(method, path) {
+      function api(method, path, body) {
         log.gets.push({ method, path });
         if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
         if (method === "GET" && path.startsWith("/api/terminal/sessions/")) return hostReadImpl();
-        if (method === "POST" && path.endsWith("/switch")) return Promise.resolve(switchImpl());
+        if (method === "POST" && path.endsWith("/switch")) { log.switchBodies.push(body); return Promise.resolve(switchImpl()); }
         return Promise.reject(new Error("unexpected " + method + " " + path));
       }
       // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
@@ -2256,9 +2492,11 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
       function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      ${extractFn("terminalRailSwitchOrCreateCore")}
       ${extractFn("terminalRailSwitchOrCreate")}
       return {
         go: (row) => terminalRailSwitchOrCreate({ session: row, resume: { endpoint: row.endpoint, id: row.id, file: row.file }, cwd: row.project }),
+        goFresh: ({ agentId, cwd }) => terminalRailSwitchOrCreateCore({ agentId, cwd }),
         gate: () => terminalSwitchInFlight,
         sessions: terminalBackendSessions,
       };
@@ -2425,6 +2663,57 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       assert.equal(fn.gate(), false, `${code}：失败也放行（可重试）`);
     }
   });
+
+  // ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
+  // body 不带 resume 键＝把当前页签就地换成一个全新 agent 会话；服务端按缺省走
+  // agentId＋cwd 的全新分支并清空旧 resume。换绑快照 resume 为 null——兜底行
+  // 推导、去重聚焦都以此为准。
+  const SWITCH_FRESH_OK = { id: "t-a", status: "running", pid: 99, label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", resume: null };
+
+  it("全新内切：idle 页签就地换新会话，POST 体只有 cwd（无 resume 键），不开新页签", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_FRESH_OK,
+    });
+    fn.goFresh({ agentId: "kimi", cwd: "C:\\dev\\alpha" });
+    await flush();
+    assert.deepEqual(log.switchBodies, [{ cwd: "C:\\dev\\alpha" }], "全新内切不带 resume 键");
+    assert.equal(log.creates.length, 0, "不开新页签");
+    assert.equal(fn.sessions["t-a"].resume, null, "旧会话身份被清空（兜底行/去重都以新会话为准）");
+    assert.equal(fn.sessions["t-a"].agentId, "kimi", "agent 身份换绑");
+    assert.ok(log.renders >= 1, "重渲（兜底行出现走同拍）");
+  });
+
+  it("全新内切矩阵：working 新开页签（不带 resume）；无活跃页签照旧新开", async () => {
+    for (const [name, sessions] of [
+      ["working 保护", { "t-a": { ...WORKING } }],
+      ["零终端", {}],
+      ["预览会话", { "t-a": { ...PREVIEW } }],
+    ]) {
+      const { fn, log } = runSwitch({
+        sessions, activeId: "t-a",
+        agentsImpl: async () => AGENTS_WORKING, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_FRESH_OK,
+      });
+      fn.goFresh({ agentId: "kimi", cwd: "C:\\dev\\alpha" });
+      await flush();
+      assert.equal(log.creates.length, 1, `${name}：新开页签`);
+      assert.deepEqual(log.creates[0], { agentId: "kimi", cwd: "C:\\dev\\alpha", resume: null }, `${name}：新开不带 resume`);
+      assert.equal(log.switchBodies.length, 0, `${name}：不发内切`);
+    }
+  });
+
+  it("全新内切 switch_busy：静默转新开（与续接内切同款），原页签不动", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 409：switch_busy"), { code: "switch_busy", serverCode: "switch_busy" }); },
+    });
+    fn.goFresh({ agentId: "kimi", cwd: "C:\\dev\\alpha" });
+    await flush();
+    assert.equal(log.creates.length, 1, "静默转新开");
+    assert.equal(log.toasts.length, 0, "不提示（新开本就是合法落点）");
+    assert.deepEqual(fn.sessions["t-a"].resume, { endpoint: "kimi", id: "s-old" }, "原页签身份没被碰");
+  });
 });
 
 
@@ -2466,7 +2755,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
     };
     const list = {
       parentElement: host,
-      querySelectorAll: (sel) => (sel === "[data-rail-term-resume]" ? visible.slice() : []),
+      querySelectorAll: (sel) => (sel === "[data-rail-term-resume], [data-rail-term-session]" ? visible.slice() : []),
     };
     // 渲染桩模拟重渲后的行集变化：归档→s-1 出布局、s-6 回填；撤销→s-1 回原槽、s-6 让位
     const swap = mode === "archive"
@@ -2482,6 +2771,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       let terminalRailHistory = { endpoint: "kimi", sessions, fetchedAt: 1, error: null };
       let terminalRailFlipMode = "instant";
       const terminalRailMotionArmed = armed;
+      const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
       const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
       function $(id) { return id === "railTermHistoryList" ? list : null; }
       function api(method, path, body) { log.posts.push({ method, path, body }); return Promise.resolve({ ok: true }); }
@@ -2489,6 +2779,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       function panelError(err, fallback) { return fallback; }
       function terminalRailAgentId() { return "kimi"; }
       function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); swap(); }
+      ${extractFn("terminalRailRowKey")}
       ${extractFn("terminalRailArchivedKey")}
       ${extractFn("terminalRailMotionEnabled")}
       ${extractFn("terminalRailSnapshotRows")}
@@ -2555,11 +2846,13 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       }
     });
 
-    it("快照只量行：组头与「展开其余 N」不进动效范围（瞬时硬切）", () => {
-      assert.ok(extractFn("terminalRailSnapshotRows").includes('querySelectorAll("[data-rail-term-resume]")'),
-        "快照范围＝历史行（组头、水位线钮不在内）");
-      assert.ok(extractFn("terminalRailRowTops").includes('querySelectorAll("[data-rail-term-resume]")'),
+    it("快照只量行：历史行＋「新会话」兜底行统一量测，组头与「展开其余 N」不进动效范围（瞬时硬切）", () => {
+      assert.ok(extractFn("terminalRailSnapshotRows").includes("querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)"),
+        "快照范围＝历史行＋兜底行（组头、水位线钮不在内）");
+      assert.ok(extractFn("terminalRailRowTops").includes("querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)"),
         "FLIP 量位同口径（组头不动、N−1 瞬时）");
+      assert.ok(extractFn("terminalRailRowKey").includes('data-rail-term-resume') && extractFn("terminalRailRowKey").includes('data-rail-term-session'),
+        "行键两属兼容读（历史行会话键、兜底行终端键）");
     });
   });
 

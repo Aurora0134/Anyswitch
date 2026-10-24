@@ -310,7 +310,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
           : restarted;
       },
       scanAgentConversationsFn: async () => [],
-      bindingRefreshScheduleFn: () => {},
+      bindingRefreshScheduleFn: () => { calls.bindingRefresh = (calls.bindingRefresh || 0) + 1; },
     });
     return { router, calls };
   }
@@ -337,6 +337,45 @@ describe("内切切换会话（terminal sessions switch）", () => {
       assert.ok(typeof forwarded.agentName === "string" && forwarded.agentName, "agentName 同步");
       assert.ok("env" in forwarded, "env 随 restart 走（不回显）");
       assert.equal("env" in json(), false, "响应不回显 env");
+    });
+  });
+
+  it("全新内切（无 resume，2026-10-25）：agentId＋cwd 就地换新会话，clearResume 清旧身份，不扫绑定", async () => {
+    await withFakeAgents(async (cwd) => {
+      const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-fresh-") });
+      const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        agentId: "kimi", cwd,
+      });
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200, "全新内切起终端");
+      assert.equal(calls.restart.length, 1, "走 restart（同记录 terminate+spawn）");
+      const forwarded = calls.restart[0].body;
+      assert.ok(!forwarded.launch.args.includes("--session"), "全新会话不带续接参数");
+      assert.equal(forwarded.clearResume, true, "显式清空旧 resume（缺省沿用语义会残留旧身份）");
+      assert.equal(forwarded.resume, undefined, "不写 resume 字段（清除语义由 clearResume 单独承担）");
+      assert.equal(forwarded.agentId, "kimi", "agentId 同步");
+      assert.equal(forwarded.cwd, cwd, "cwd 用请求体目录");
+      assert.ok(typeof forwarded.label === "string" && forwarded.label, "label 同步");
+      assert.equal("env" in json(), false, "响应不回显 env");
+      assert.equal(calls.bindingRefresh, undefined, "全新内切无目标身份可扫，不做绑定重扫（新存档由捕获路径接管）");
+    });
+  });
+
+  it("全新内切的入参校验：agentId 缺失/不在册 400 agent-invalid；缺 cwd 400 invalid_cwd；不进 restart", async () => {
+    await withFakeAgents(async (cwd) => {
+      for (const [name, body, expectCode] of [
+        ["无 agentId", { cwd }, "agent-invalid"],
+        ["agentId 不在册", { agentId: "no-such-agent", cwd }, "agent-invalid"],
+        ["缺 cwd", { agentId: "kimi" }, "invalid_cwd"],
+      ]) {
+        const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-fresh-400-") });
+        const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", body);
+        await router.handle(req, res);
+        assert.equal(res.statusCode, 400, `${name} 拒换`);
+        assert.equal(json().code, expectCode, `${name}：机器可判短码（不走 resume- 前缀族——全新创建失败该走通用启动句）`);
+        assert.equal(json().error, expectCode, "error 即机器码本身，零文案");
+        assert.equal(calls.restart.length, 0, `${name} 不 restart`);
+      }
     });
   });
 
