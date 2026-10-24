@@ -112,10 +112,13 @@ const isBlankRow = (row) => row.chars.every((ch, index) => {
   return !cellPainted(row.attrs[index]);
 });
 
-// 回放要重放的应用态模式：鼠标族（1000/1002/1003/1006/1015）、括号粘贴（2004）
-// 与 convertEol 开关（20，见 write 里的换行语义）。20 必须重放：客户端重建后
-// 会退回「默认开着」的选项值，应用显式关掉时回放不带上它，两边换行就又不一致。
-const REPLAYED_MODES = [20, 1000, 1002, 1003, 1006, 1015, 2004];
+// 回放要重放的应用态模式。收录规则（不再逐块打补丁）：凡是镜像内部追踪、且会改变
+// 渲染或转发语义的模式，必须三选一——①进这份清单（客户端重建＝RIS 后退回出厂默认，
+// 应用显式设置过而回放不带，两边对后续实时字节的理解就分叉；7/4/20 同此理）；②走
+// 专用回放（?25 光标可见性见 toReplay 末尾；备屏 1049/1047/47 见 inAlt 分支，须发
+// 应用实际使用的那只 API）；③在 setMode 的注释里写明不回放的理由（2026 是同帧批
+// 处理标记，回放只有单帧画面）。不得只追踪不回放。
+const REPLAYED_MODES = [7, 4, 20, 1000, 1002, 1003, 1006, 1015, 2004];
 
 export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMINAL_HISTORY_LINES, historyBytes = TERMINAL_HISTORY_MAX_BYTES } = {}) {
   let width = Math.max(1, cols | 0);
@@ -123,6 +126,9 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   let grid = Array.from({ length: height }, () => blankRow(width));
   let altSaved = null;
   let inAlt = false;
+  // 进备屏用的那只 API（1049/1047/47）：回放时原样发回。1049 附带存光标＋清备屏，
+  // 47/1047 不带——擅自换成 1049 会把客户端的保存/恢复语义换成另一套。
+  let altApi = 1049;
   let row = 0;
   let col = 0;
   let pendingWrap = false;
@@ -403,15 +409,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       if (final === "h" || final === "l") {
         const value = on;
         if (p === 25) cursorVisible = value;
-        else if (p === 7) autoWrap = value;
-        else if (p === 4 && !value) insertMode = false;
-        else if (p === 4 && value) insertMode = true;
+        else if (p === 7) { autoWrap = value; appModes[p] = value; }
+        else if (p === 4) { insertMode = value; appModes[p] = value; }
         else if (p === 20) { convertEol = value; appModes[p] = value; }
-        else if (p === 1049 || p === 1047 || p === 47) setAlt(value);
+        else if (p === 1049 || p === 1047 || p === 47) { if (value) altApi = p; setAlt(value); }
         else if (REPLAYED_MODES.includes(p)) appModes[p] = value;
-        // 1 (cursor keys), 12 (blink), 2026 (synchronised output), 6 (origin):
-        // consumed, no grid effect here. Mouse modes and bracketed paste are
-        // recorded above so toReplay can restore them.
+        // 1 (cursor keys), 12 (blink), 6 (origin), 1004 (focus reporting):
+        // consumed, no grid effect, not tracked — replaying them would need new
+        // recording plus replay-ordering care (origin/scroll-region modes change
+        // how the replay's own absolute positioning and history pushes behave;
+        // see the REPLAYED_MODES rule comment). 2026 stays unreplayed per toReplay.
       }
     }
   }
@@ -825,10 +832,11 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     if (replayCache !== null) return replayCache;
     const parts = ["\u001b[0m\u001b[2J\u001b[H"];
     let bytes = 8;
-    // 画面前先回放记录过的应用态模式（鼠标族 / 括号粘贴 / convertEol 开关），让客户端
-    // 与应用的当前状态对齐。2026 同步标记不发：它是同帧批处理标记，回放只有单帧画面，
-    // 发了没有意义。1049 备屏只对「当下就在备屏」的会话发（见下面的 inAlt 分支）——
-    // 不在备屏的会话发 1049 会把回放切进备用屏，丢掉刻意保留的滚屏历史。
+    // 画面前先回放记录过的应用态模式（autowrap/IRM/convertEol 开关、鼠标族、
+    // 括号粘贴），让客户端与应用的当前状态对齐。2026 同步标记不发：它是同帧批处理
+    // 标记，回放只有单帧画面，发了没有意义。备屏（1049/1047/47）只对「当下就在备屏」
+    // 的会话发（见下面的 inAlt 分支）——不在备屏的会话发备屏序列会把回放切进备用屏，
+    // 丢掉刻意保留的滚屏历史。
     for (const p of REPLAYED_MODES) {
       if (!(p in appModes)) continue;
       const seq = `\u001b[?${p}${appModes[p] ? "h" : "l"}`;
@@ -847,8 +855,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     if (inAlt) {
       // 备屏会话：历史画进普通屏即止，不垫 LF 推开——帧画在备屏，普通屏维持历史
       // 尾部原样，应用退备屏时客户端恢复的就是这张（与 1049 的保存/恢复语义对齐）。
-      parts.push("\u001b[?1049h");
-      bytes += 8;
+      // 切换序列用应用当初进备屏的那只 API，不擅自换（1049 带存光标＋清屏，另两只不带）。
+      const seq = `\u001b[?${altApi}h`;
+      parts.push(seq);
+      bytes += seq.length;
     } else {
       // Push the tail of the history off the bottom edge before painting: after `keep`
       // lines the client still has up to rows-1 of them sitting on screen, and the

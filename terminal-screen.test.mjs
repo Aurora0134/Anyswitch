@@ -289,9 +289,62 @@ test("鼠标族与括号粘贴：显式设置过的模式进回放，未记录�
   const legacy = createScreenMirror({ cols: 40, rows: 10 });
   legacy.write("旧会话\r\n");
   const legacyReplay = legacy.toReplay();
-  for (const p of [20, 1000, 1002, 1003, 1006, 1015, 2004]) {
+  for (const p of [7, 4, 20, 1000, 1002, 1003, 1006, 1015, 2004]) {
     assert.ok(!legacyReplay.includes(`?${p}`), `未记录时回放不得含 ?${p}`);
   }
+});
+
+test("autowrap/IRM 显式设置进回放：重建后客户端与镜像对后续字节的排法一致", () => {
+  // ?7l（kimi code 进 TUI 即关 autowrap）与 ?4h（IRM）此前只被镜像追踪、不进回放：
+  // 重建后退回客户端默认（7 开 / 4 关），应用的溢出行与中段插入两边排法分叉——
+  // 回放帧本身用绝对定位不受影响，分叉发生在其后的活字节上。
+  const nowrap = createScreenMirror({ cols: 10, rows: 6 });
+  nowrap.write("\u001b[?7l");
+  nowrap.write("A".repeat(25));
+  assert.equal(nowrap.screenLines()[0], "A".repeat(10), "autowrap 关时镜像钳在行尾不折行");
+  assert.equal(nowrap.screenLines()[1].trim(), "", "不得折到第二行");
+  assert.ok(nowrap.toReplay().includes("\u001b[?7l"), "显式关掉的 autowrap 必须进回放，否则重建后退回默认开");
+  const nowrapAgain = repaint(nowrap.toReplay(), 10, 6);
+  nowrapAgain.write("B".repeat(25));
+  nowrap.write("B".repeat(25));
+  assert.deepEqual(nowrapAgain.screenLines(), nowrap.screenLines(), "重建后两边对溢出行的排法必须一致");
+
+  const rewrap = createScreenMirror({ cols: 10, rows: 6 });
+  rewrap.write("\u001b[?7l\u001b[?7h");
+  assert.ok(rewrap.toReplay().includes("\u001b[?7h"), "重新显式打开的 autowrap 以 DECSET 回放");
+
+  const irm = createScreenMirror({ cols: 10, rows: 4 });
+  irm.write("\u001b[?4hABCDEF\u001b[1;2HXY");
+  assert.equal(irm.screenLines()[0], "AXYBCDEF", "IRM 开时按插入语义落字");
+  assert.ok(irm.toReplay().includes("\u001b[?4h"), "显式开着的 IRM 必须进回放");
+  const irmAgain = repaint(irm.toReplay(), 10, 4);
+  irmAgain.write("\u001b[1;3HZ");
+  irm.write("\u001b[1;3HZ");
+  assert.deepEqual(irmAgain.screenLines(), irm.screenLines(), "重建后两边的插入语义必须一致");
+  irm.write("\u001b[?4l");
+  assert.ok(irm.toReplay().includes("\u001b[?4l"), "显式关掉的 IRM 以 DECRST 回放");
+});
+
+test("备屏 API 保真：?47h 进的备屏以 47h 回放，退出 47l 照常弹回", () => {
+  // 旧实现回放只发 1049：用旧 API（47/1047）进备屏的应用，重建后客户端留在普通屏，
+  // 应用在备屏语义下续写、客户端却画在普通屏。1049 附带存光标＋清备屏，不得擅自替换。
+  const mirror = createScreenMirror({ cols: 30, rows: 6 });
+  for (let i = 1; i <= 6; i += 1) mirror.write(`主屏行 ${i}\r\n`);
+  mirror.write("\u001b[?47h");
+  for (let i = 1; i <= 3; i += 1) mirror.write(`备屏行 ${i}\r\n`);
+  const altScreen = mirror.screenLines();
+  const replay = mirror.toReplay();
+  assert.ok(replay.includes("\u001b[?47h"), "用 47 进的备屏必须以 47 回放");
+  assert.ok(!replay.includes("?1049"), "不得擅自换成 1049（保存/恢复语义不同）");
+  const again = repaint(replay, 30, 6);
+  assert.equal(again.info().inAlt, true, "回放后客户端必须在备屏");
+  assert.deepEqual(again.screenLines(), altScreen, "回放必须还原同一张备屏画面");
+  mirror.write("\u001b[?47l");
+  again.write("\u001b[?47l");
+  assert.equal(again.info().inAlt, false, "47l 退出备屏");
+  const restored = again.screenLines().join("\n");
+  assert.ok(!restored.includes("备屏行"), "退备屏后不得残留备屏帧");
+  assert.ok(restored.includes("主屏行"), "退备屏后普通屏的历史尾部可见（与 1049 测试同口径）");
 });
 
 test("换行语义与客户端一致：LF/VT/FF 都换行，convertEol 下连列一起归零", () => {
