@@ -1,4 +1,4 @@
-// ZCode CLI launcher — spawns the locally built ZCode CLI (node bin\zcode.mjs)
+// ZCode CLI launcher — spawns a configured ZCode CLI entry (node bin\zcode.mjs)
 // through the Anyswitch relay against an Anyswitch-owned provider config slot,
 // so the CLI never reads or writes the desktop client's ~/.zcode data.
 //
@@ -14,8 +14,9 @@
 //     writes nothing and skips the CDN refresh entirely.
 //
 // The flow:
-//   1. resolve the CLI entry (ZCODE_CLI_EXECUTABLE override or the local build
-//      tree) and derive the bundled builtin config from it — when neither the
+//   1. resolve the CLI entry (ZCODE_CLI_EXECUTABLE override only; the product
+//      ships no built-in default) and derive the bundled builtin config from
+//      it — when neither the
 //      bundled file nor the source-tree fallback exists the launch is refused:
 //      starting without the pin would silently materialize the builtin cache
 //      into the desktop client's data root;
@@ -53,7 +54,7 @@ import {
 } from "./zcode-merge-config.mjs";
 import { syncZcodePersonalConfig, PERSONAL_CONFIG_FILENAME } from "./zcode-personal-config.mjs";
 import { acquireRelayOrNative, loadNativeSyncToken } from "./launcher-native-fallback.mjs";
-import { defaultZcodeCliExecutable, resolveZcodeCliExecutable } from "./agent-discovery.mjs";
+import { resolveZcodeCliExecutable } from "./agent-discovery.mjs";
 export { resolveZcodeCliExecutable };
 
 export const RELAY_PORT = DEFAULT_RELAY_PORT;
@@ -231,8 +232,8 @@ export async function runZcodeCliLauncher({
   const entry = resolveExecutable(base);
   if (entry === null || entry === undefined) {
     throw new Error(
-      `zcode CLI not found at the default build path (${defaultZcodeCliExecutable(base)}); ` +
-        `set ZCODE_CLI_EXECUTABLE to the absolute path of the CLI's bin\\zcode.mjs`,
+      `zcode CLI entry not found. Point ZCODE_CLI_EXECUTABLE at the entry file ` +
+        `(bin\\zcode.mjs) of a zcode CLI distribution to enable this launcher`,
     );
   }
   const builtinConfigPath = resolveBuiltinConfig(entry);

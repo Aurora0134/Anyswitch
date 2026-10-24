@@ -126,6 +126,8 @@ npm test
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder 参数]` |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok 参数]` |
 
+ZCode CLI 是显式配置制：需自备 zcode CLI 发行物，并以环境变量 `ZCODE_CLI_EXECUTABLE` 指向其入口文件（`bin\zcode.mjs`）；未配置时该启动器不可用。
+
 配置同步把托管渠道写进各 agent 自己的配置位置，你手写的其它内容原样保留：
 
 | agent | Anyswitch 写入的位置 |

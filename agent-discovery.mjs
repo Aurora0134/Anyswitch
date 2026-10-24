@@ -241,22 +241,12 @@ export function resolveZcodeExecutable(base = process.env) {
   );
 }
 
-// ZCode CLI 是从官方源码本机构建的 node 入口（dist 发行树里的 bin\zcode.mjs，
-// 由 node 拉起），与桌面版 ZCode.exe 是两种形态，override 变量也因此独立。
-export function defaultZcodeCliExecutable(base = process.env) {
-  return join(
-    base.USERPROFILE ?? "",
-    "Desktop", "agent-home", "zcode-src", "dist", "zcode", "debug", "zcode", "bin", "zcode.mjs",
-  );
-}
-
-// 默认候选即本机构建产物；找不到返回 null（优雅 not-found，不抛错），
-// 是提示未安装还是跳过由调用方决定。
-export function resolveZcodeCliExecutable(base = process.env, io = { existsSync }) {
-  const override = absoluteOverride(base, "ZCODE_CLI_EXECUTABLE");
-  if (override !== null) return override;
-  const candidate = defaultZcodeCliExecutable(base);
-  return io.existsSync(candidate) ? candidate : null;
+// ZCode CLI 形态是显式配置制：唯一入口是 ZCODE_CLI_EXECUTABLE 绝对路径覆盖，
+// 产品不内置任何默认路径；与桌面版 ZCode.exe 是两种形态，override 变量也因此
+// 独立。覆盖缺省返回 null（优雅 not-found，不抛错），是提示未安装还是跳过由
+// 调用方决定；覆盖只验绝对路径，存在性由调用方核验。
+export function resolveZcodeCliExecutable(base = process.env) {
+  return absoluteOverride(base, "ZCODE_CLI_EXECUTABLE");
 }
 
 export function resolveGrokExecutable(base = process.env) {

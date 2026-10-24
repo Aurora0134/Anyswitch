@@ -126,6 +126,8 @@ Nine agents, nine wirings — configure once and they all live here:
 | Qoder | OpenAI | `node qoder-launcher.mjs [qoder args]` |
 | Grok Build | OpenAI | `node grok-launcher.mjs [grok args]` |
 
+The ZCode CLI row is explicit-config only: bring your own zcode CLI distribution and point the `ZCODE_CLI_EXECUTABLE` environment variable at its entry file (`bin\zcode.mjs`); without it the launcher is unavailable.
+
 Config sync writes managed channels into each agent's own config location and leaves everything you wrote by hand untouched:
 
 | agent | Where Anyswitch writes |

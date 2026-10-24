@@ -5,7 +5,7 @@ import {
   resolveClaudeExecutable, resolveOpencodeExecutable,
   resolvePiExecutable, resolveKimiExecutable, resolveDshExecutable,
   resolveZcodeExecutable, resolveGrokExecutable, resolveQoderCliExecutable,
-  resolveZcodeCliExecutable, defaultZcodeCliExecutable, resolveDshTuiExecutable,
+  resolveZcodeCliExecutable, resolveDshTuiExecutable,
 } from "./agent-discovery.mjs";
 import { compareVersions, parseVersion } from "./version-check.mjs";
 
@@ -138,8 +138,8 @@ export const CLIENT_ENTRY_FORMS = Object.freeze({
   pi: Object.freeze(["CLI"]),
   opencode: Object.freeze(["CLI"]),
   grok: Object.freeze(["CLI"]),
-  // ZCode 桌面端是主形态；CLI 是官方源码在本机构建的 node 入口形态（bin\zcode.mjs），
-  // 无官方 release 渠道，不参团官方版本比对。
+  // ZCode 桌面端是主形态；CLI 形态为显式配置制——没有官方发行渠道，仅在
+  // 用户以 ZCODE_CLI_EXECUTABLE 指定入口时出现，不参团官方版本比对。
   zcode: Object.freeze(["Desktop", "CLI"]),
 });
 
@@ -293,9 +293,9 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     return null;
   }
 
-  // zcode-cli 是本机源码构建的发行树（dist/zcode/debug/zcode/），入口
-  // bin\zcode.mjs 上两级就是带版本号的包清单。只认包名对得上的那份——
-  // 与 readAsarPackageVersion 的包名防线同理，目录里可能有别人的清单。
+  // CLI 入口上两级是发行树的带版本号包清单（zcode CLI 布局）。只认包名对得上
+  // 的那份——与 readAsarPackageVersion 的包名防线同理，目录里可能有别人的
+  // 清单；布局对不上时版本如实不可得（null）。
   function zcodeCliVersion(path) {
     const text = readText(join(dirname(dirname(path)), "package.json"));
     if (!text) return null;
@@ -419,18 +419,18 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
     }
   }
 
-  // ZCode 的 CLI 形态（zcode 端点的第二条安装记录）：官方源码在本机构建的
-  // node 入口 bin\zcode.mjs。不能裸用通用 inspect，有三处定制：
-  // resolveZcodeCliExecutable 找不到时返回 null 而不是抛错，这里包一层回落
-  // 默认构建树路径，让缺失如实走 not_found（裸传给 isFile 会 TypeError 落进
-  // error 态）；本机构建没有官方 release 渠道，remoteId 恒为 null，否则关于页
-  // 会拿它去查 /api/environment/latest/<id> 撞白名单 404；.mjs 在 Windows
-  // 上不能直接执行，版本从入口附近的包清单读，不走 probeVersion。
+  // ZCode 的 CLI 形态（zcode 端点的第二条安装记录）：显式配置制，唯一入口是
+  // ZCODE_CLI_EXECUTABLE 绝对路径覆盖，产品不内置默认路径。不能裸用通用
+  // inspect，有三处定制：resolveZcodeCliExecutable 解析不到返回 null 而不是
+  // 抛错，须先判 null 再探存在性（裸传给 isFile 会 TypeError 落进 error 态），
+  // 缺失如实走 not_found；CLI 形态不参团官方版本比对，remoteId 恒为 null，
+  // 否则关于页会拿它去查 /api/environment/latest/<id> 撞白名单 404；.mjs 在
+  // Windows 上不能直接执行，版本从入口附近的包清单读，不走 probeVersion。
   async function inspectZcodeCli() {
     const result = { kind: "cli", remoteId: null, status: "not_found", path: null, version: null, versionSource: null, issue: "entry_missing" };
     try {
-      const path = resolveZcodeCliExecutable(base, resolverIo) ?? defaultZcodeCliExecutable(base);
-      if (!isFile(path)) return result;
+      const path = resolveZcodeCliExecutable(base);
+      if (path === null || !isFile(path)) return result;
       const found = { ...result, status: "found", path, issue: "version_unavailable" };
       const version = zcodeCliVersion(path);
       return version ? { ...found, version, versionSource: "package.json", issue: null } : found;
@@ -467,7 +467,7 @@ export function createEnvironmentService({ base = process.env, now = Date.now, i
       // 每个端点的主安装记录在 index 0：codex 的 0 是面板代管更新的 npm CLI、1 是
       // Microsoft Store 桌面端；qoder 的 0 是原生 CLI、1 是桌面 IDE；claude 与 dsh
       // 的 0 是 npm 全局 CLI（更新按钮装的就是这个包）、1 是官方桌面端；kimi 的
-      // 1 是官方桌面应用；zcode 的 0 是桌面主形态、1 是本机源码构建的 CLI。
+      // 1 是官方桌面应用；zcode 的 0 是桌面主形态、1 是显式配置制（ZCODE_CLI_EXECUTABLE）的 CLI。
       // 顺序即「动作位认哪一条」的约定；dsh 另有 index 2 的终端插件，只在展示与
       // 版本比对上使用，不参与「动作位认哪一条」。
       const desktopInstallations = {

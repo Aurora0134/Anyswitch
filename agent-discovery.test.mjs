@@ -6,7 +6,7 @@ import {
   defaultClaudeExecutable, resolveClaudeExecutable, resolveCodexExecutable,
   resolveOpencodeExecutable, resolvePiExecutable, resolveKimiExecutable,
   resolveDshExecutable, resolveZcodeExecutable, resolveZcodeCliExecutable,
-  defaultZcodeCliExecutable, resolveQoderExecutable,
+  resolveQoderExecutable,
   resolveQoderCliExecutable, resolveGrokExecutable,
 } from "./agent-discovery.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
@@ -208,16 +208,14 @@ test("GROK_EXECUTABLE refuses shims that could recurse into the launcher", () =>
   assert.throws(() => resolveGrokExecutable({ ...base, GROK_EXECUTABLE: "C:\\custom\\grok.cmd" }), /must point at a \.exe/);
 });
 
-test("resolveZcodeCliExecutable: override wins, default needs the local build to exist, missing is null", () => {
+test("resolveZcodeCliExecutable: explicit-config only — override wins, unconfigured is null", () => {
   const base = { USERPROFILE: "C:\\Users\\fixture" };
-  // 默认候选是本机构建路径（dist 发行树的 bin\zcode.mjs）；存在与否由 io 注入决定，
-  // 找不到返回 null（优雅 not-found）而不抛错。
-  const expected = join(base.USERPROFILE, "Desktop/agent-home/zcode-src/dist/zcode/debug/zcode/bin/zcode.mjs");
-  assert.equal(defaultZcodeCliExecutable(base), expected);
-  assert.equal(resolveZcodeCliExecutable(base, { existsSync: () => true }), expected);
-  assert.equal(resolveZcodeCliExecutable(base, { existsSync: () => false }), null);
+  // CLI 形态无内置默认路径：唯一入口是 ZCODE_CLI_EXECUTABLE 绝对路径覆盖
+  // （只验绝对路径，存在性由调用方核验）；未配置返回 null（优雅 not-found）
+  // 而不抛错。
+  assert.equal(resolveZcodeCliExecutable(base), null);
   assert.equal(
-    resolveZcodeCliExecutable({ ...base, ZCODE_CLI_EXECUTABLE: "D:\\cli\\zcode.mjs" }, { existsSync: () => false }),
+    resolveZcodeCliExecutable({ ...base, ZCODE_CLI_EXECUTABLE: "D:\\cli\\zcode.mjs" }),
     "D:\\cli\\zcode.mjs",
   );
   assert.throws(

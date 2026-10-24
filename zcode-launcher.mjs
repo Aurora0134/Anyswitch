@@ -163,7 +163,7 @@ export async function writeZcodeConfig(store, port, token, sidecarRoot, configPa
 // 两边读到的是同一份规则）。定位与 zcode-cli-launcher.mjs 的
 // resolveZcodeCliBuiltinConfig 同一布局：发行树 bin\zcode.mjs 的兄弟
 // agent\provider\，再回落源码树的 config\provider\。找不到或解析失败都返回
-// null，生成器随之走验收锚点回落（free-pool 首模型 + disabled）。
+// null，生成器随之回落到第一个有模型的其他托管渠道（解析不出才用 disabled 兜底）。
 export function loadZcodeCliBuiltinModelRules(cliEntry, io = { existsSync, readFileSync }) {
   if (typeof cliEntry !== "string" || cliEntry.length === 0) return null;
   const entryDir = dirname(cliEntry);
@@ -201,8 +201,7 @@ export function syncZcodeCliSlot({ sidecarRoot, managedEntries, managedIds, ...o
   if (!io.existsSync(slotDir)) {
     return { ok: true, skipped: true, reason: "zcode CLI slot directory does not exist" };
   }
-  const resolveExecutable =
-    options.resolveExecutable ?? ((base) => resolveZcodeCliExecutable(base, { existsSync: io.existsSync }));
+  const resolveExecutable = options.resolveExecutable ?? resolveZcodeCliExecutable;
   const cliEntry = resolveExecutable(options.base ?? process.env);
   if (typeof cliEntry !== "string" || cliEntry.length === 0) {
     return { ok: true, skipped: true, reason: "zcode CLI is not installed" };

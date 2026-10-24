@@ -273,11 +273,11 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
           credentialFile: "poke-api.dpapi",
           models: { "m-alpha": { displayName: "Alpha", contextWindow: 1000000 } },
         },
-        "squall-api": {
-          displayName: "SQUALL",
-          baseURL: "https://squall.example/v1",
+        "relay-api": {
+          displayName: "RELAY",
+          baseURL: "https://relay.example/v1",
           protocol: "openai-compatible",
-          credentialFile: "squall-api.dpapi",
+          credentialFile: "relay-api.dpapi",
           models: { "kimi-k3": { displayName: "Kimi K3", contextWindow: 262144 } },
         },
       },
@@ -342,10 +342,10 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
       assert.equal(result.cli.skipped, false);
 
       const doc = readSlotDoc(dir);
-      assert.deepEqual(doc.config.providerConfigRules.providerRules.map((r) => r.providerId), ["_poke-api", "_squall-api"]);
+      assert.deepEqual(doc.config.providerConfigRules.providerRules.map((r) => r.providerId), ["_poke-api", "_relay-api"]);
       // 全新文件恒含 manualProviderModelRules（CLI schema 必填），无手动规则即 []。
       assert.deepEqual(doc.config.modelConfigRules.manualProviderModelRules, []);
-      // 没有 _auto/_free-pool 时回落到第一个有模型的托管渠道，reasoningLevel 经
+      // 没有 _auto 时回落到第一个有模型的托管渠道，reasoningLevel 经
       // builtin 规则解析合法（catch-all ["disabled","enabled"] → disabled）。
       assert.deepEqual(doc.config.defaultModelSelection, {
         providerId: "_poke-api",
@@ -353,8 +353,8 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
         options: { reasoningLevel: "disabled" },
       });
       // sidecar 分槽：与桌面版 zcode-sidecar.json 是两个文件。
-      assert.deepEqual(readSidecar(dir), { providers: ["poke-api", "squall-api"] });
-      assert.deepEqual(readSidecarFile(zcodeCliSidecarPath(dir)), { providers: ["poke-api", "squall-api"] });
+      assert.deepEqual(readSidecar(dir), { providers: ["poke-api", "relay-api"] });
+      assert.deepEqual(readSidecarFile(zcodeCliSidecarPath(dir)), { providers: ["poke-api", "relay-api"] });
 
       // 桌面版槽位行为不变：不生成默认选择，但 manualProviderModelRules 同样恒输出。
       const desktopDoc = JSON.parse(readFileSync(join(dir, "provider_config.json"), "utf8"));
@@ -375,14 +375,14 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
       // 桌面版 sidecar 丢失（分槽的意义所在：CLI 槽位的记忆不跟它同生死）。
       rmSync(join(dir, "zcode-sidecar.json"));
       const store = twoChannelStore();
-      delete store.providers["squall-api"];
+      delete store.providers["relay-api"];
       const result = await writeZcodeConfig(store, 47821, "tok", dir, join(dir, "config.json"), null, false, cliSlot);
       assert.equal(result.cli.ok, true, result.cli.reason);
 
       const doc = readSlotDoc(dir);
       assert.deepEqual(doc.config.providerConfigRules.providerRules.map((r) => r.providerId), ["_poke-api"]);
       assert.equal(
-        doc.config.modelConfigRules.providerModelRules.some((r) => r.providerId === "_squall-api"),
+        doc.config.modelConfigRules.providerModelRules.some((r) => r.providerId === "_relay-api"),
         false,
         "退役渠道的模型规则一并清掉",
       );
@@ -431,13 +431,13 @@ describe("writeZcodeConfig 的 CLI 槽位同步", () => {
       // 用户在 CLI 里改选了模型——CLI 写回的选择带自己的 reasoningLevel。
       const slotPath = join(zcodeCliSlotDir(dir), "provider_config.json");
       const doc = readSlotDoc(dir);
-      doc.config.defaultModelSelection = { providerId: "_squall-api", modelId: "kimi-k3", options: { reasoningLevel: "enabled" } };
+      doc.config.defaultModelSelection = { providerId: "_relay-api", modelId: "kimi-k3", options: { reasoningLevel: "enabled" } };
       writeFileSync(slotPath, JSON.stringify(doc, null, 2));
 
       const second = await writeZcodeConfig(twoChannelStore(), 47821, "tok", dir, join(dir, "config.json"), null, false, cliSlot);
       assert.equal(second.cli.ok, true, second.cli.reason);
       assert.deepEqual(readSlotDoc(dir).config.defaultModelSelection, {
-        providerId: "_squall-api",
+        providerId: "_relay-api",
         modelId: "kimi-k3",
         options: { reasoningLevel: "enabled" } },
       );

@@ -138,10 +138,10 @@ function sessionInstanceId(agentId, cwd, instanceId) {
 
 // zcode 的终端形态是 launcher 拉起：真正要验证的是 CLI 入口（bin\zcode.mjs）
 // 存在，交给 cmd 的执行体则是 node.exe 本身（process.execPath 恒为绝对路径且
-// 存在，必过 resolveAgentExecutable 的检查）。agent-discovery 对默认构建路径
-// 自带 existsSync、对 ZCODE_CLI_EXECUTABLE 覆盖只验绝对路径，存在性在此一并
-// 补齐；入口解析不到返回 null，由 resolveAgentExecutable 转成 executable_missing
-// 的产品文案。
+// 存在，必过 resolveAgentExecutable 的检查）。CLI 入口是显式配置制
+// （ZCODE_CLI_EXECUTABLE 覆盖、无内置默认），覆盖只验绝对路径，存在性在此
+// 一并补齐；入口解析不到返回 null，由 resolveAgentExecutable 转成
+// executable_missing 的产品文案。
 function resolveZcodeTerminalExecutable(base) {
   const entry = resolveZcodeCliExecutable(base);
   if (typeof entry !== "string" || !existsSync(entry)) return null;

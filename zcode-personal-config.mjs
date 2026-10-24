@@ -255,7 +255,7 @@ export function mergePersonalProviderConfig(existing, managedEntries, previousMa
     providerConfigRules: { providerRules },
     modelConfigRules: {
       providerModelRules: nextModelRules,
-      // ZCode 的 schema 把 manualProviderModelRules 定为必填（zcode-src
+      // ZCode 的 schema 把 manualProviderModelRules 定为必填（上游源码
       // packages/provider/src/config/rule-data-schema.ts
       // personalModelConfigRulesSchema）：缺这个键的文件会被 CLI 整份拒收、静默
       // recovery 成空 personal 层（界面报 Select a model before continuing）。
@@ -293,12 +293,7 @@ export function mergePersonalProviderConfig(existing, managedEntries, previousMa
 // continuing". A fresh CLI slot therefore gets one generated selection whose
 // reasoningLevel is provably legal for the chosen model.
 //
-// Anchor verified by the acceptance run with real requests: _free-pool's
-// mimo-v2.6-flash-free resolves to reasoningLevel.values ["disabled","enabled"],
-// so "disabled" is a legal, working level there. "free-pool" is a channel id
-// from the operator's store, not a code-level constant — hence the literal.
 const CLI_AUTO_PROVIDER_ID = `_${AUTO_CHANNEL_KEY}`;
-const CLI_FALLBACK_PROVIDER_ID = "_free-pool";
 const CLI_FALLBACK_REASONING_LEVEL = "disabled";
 
 function firstModelIdOf(entry) {
@@ -306,7 +301,7 @@ function firstModelIdOf(entry) {
   return modelIds.length > 0 ? modelIds[0] : undefined;
 }
 
-// Rule matching mirrors ModelConfigRules.resolve (zcode-src
+// Rule matching mirrors ModelConfigRules.resolve (upstream source
 // packages/provider/src/config/model-config.ts): modelMatch is
 // case-insensitive, apiTypeMatch/baseUrlMatch are case-sensitive, and the
 // baseUrl is normalized (trailing slashes stripped) before matching.
@@ -387,11 +382,11 @@ function pickLegalReasoningLevel(values) {
 
 /**
  * The default selection a fresh CLI slot file gets. 通用规则：优先 _auto 渠道
- * （首模型，reasoningLevel 取该模型经 builtin 规则解析后的合法项）；不可解析
- * （builtin 规则不可用或没解析出取值集合）则回落到验收锚点形态——_free-pool
- * 首模型 + "disabled"。两个锚点都不在时取第一个有模型的托管渠道，同样先解析、
- * 解析不出才用 "disabled" 兜底：兜底值即便不合法，CLI 也只是静默退回
- * registry-fallback，仍好过没有选择直接报 Select a model before continuing。
+ * （首模型，reasoningLevel 取该模型经 builtin 规则解析后的合法项）；_auto 不在
+ * 或其规则解析不出时按托管条目顺序取第一个有模型的其他渠道，先解析、builtin
+ * 规则不可用或没解析出取值集合才用 "disabled" 兜底：兜底值即便不合法，CLI
+ * 也只是静默退回 registry-fallback，仍好过没有选择直接报 Select a model
+ * before continuing。
  *
  * @param {object} managedEntries { [prefixedProviderId]: config.json provider entry }
  * @param {object|null} builtinModelRules parsed zcode-builtin.json's config.modelConfigRules
@@ -420,9 +415,8 @@ export function defaultCliModelSelection(managedEntries, builtinModelRules) {
 
   const autoSelection = buildSelection(CLI_AUTO_PROVIDER_ID, entries[CLI_AUTO_PROVIDER_ID], { requireResolved: true });
   if (autoSelection) return autoSelection;
-  const fallbackSelection = buildSelection(CLI_FALLBACK_PROVIDER_ID, entries[CLI_FALLBACK_PROVIDER_ID], { requireResolved: false });
-  if (fallbackSelection) return fallbackSelection;
   for (const [providerId, entry] of Object.entries(entries)) {
+    if (providerId === CLI_AUTO_PROVIDER_ID) continue;
     const selection = buildSelection(providerId, entry, { requireResolved: false });
     if (selection) return selection;
   }

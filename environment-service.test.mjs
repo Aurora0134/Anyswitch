@@ -159,22 +159,18 @@ test("ZCode reads only the selected desktop package from ASAR, not Electron or P
   assert.equal(item.versionSource, "app.asar/package.json");
 });
 
-test("ZCode CLI row resolves the default build tree and reads its version from the package manifest", async (t) => {
+test("ZCode CLI row has no built-in default: unconfigured reports not_found", async (t) => {
   const f = fixture(t);
-  // 默认构建树即 defaultZcodeCliExecutable 给出的落点：发行树 bin\zcode.mjs
-  // 上两级是带版本号的包清单（name zcode-runtime）。
-  const tree = join(f.base.USERPROFILE, "Desktop/agent-home/zcode-src/dist/zcode/debug/zcode");
-  const entry = f.put(join(tree, "bin/zcode.mjs"), "export {};");
-  f.put(join(tree, "package.json"), JSON.stringify({ name: "zcode-runtime", version: "3.14.3" }));
+  // 显式配置制：产品不内置任何默认路径，未配置 ZCODE_CLI_EXECUTABLE 时如实
+  // not_found（关于页不挂装不出的记录）。默认值若被重新引入，
+  // agent-discovery.test 的「unconfigured is null」钉点会先红。
   const found = installation(await f.service().getState(), "zcode", 1);
   assert.equal(found.kind, "cli");
-  // 本机源码构建没有官方 release 渠道：remoteId 恒为 null，关于页不为它发查询。
+  // 无官方 release 渠道：remoteId 恒为 null，关于页不为它发查询。
   assert.equal(found.remoteId, null);
-  assert.equal(found.status, "found");
-  assert.equal(found.path, entry);
-  assert.equal(found.version, "3.14.3");
-  assert.equal(found.versionSource, "package.json");
-  assert.equal(found.issue, null);
+  assert.equal(found.status, "not_found");
+  assert.equal(found.path, null);
+  assert.equal(found.issue, "entry_missing");
 });
 
 test("ZCode CLI row honors ZCODE_CLI_EXECUTABLE and degrades to version_unavailable without a manifest", async (t) => {
@@ -198,7 +194,7 @@ test("ZCode CLI row honors ZCODE_CLI_EXECUTABLE and degrades to version_unavaila
   assert.equal(degraded.issue, "version_unavailable");
 });
 
-test("ZCode CLI row reports not_found, never error, when the build tree is absent", async (t) => {
+test("ZCode CLI row reports not_found, never error, when no CLI entry is configured", async (t) => {
   const f = fixture(t);
   // resolveZcodeCliExecutable 找不到候选时返回 null：必须如实 not_found，
   // 不能把 null 交给 isFile 炸成 error。
@@ -556,7 +552,7 @@ test("an empty installation reports all nine clients, with six dual-installation
   const kimi = state.clients.find((c) => c.id === "kimi");
   assert.deepEqual(kimi.installations.map((i) => [i.kind, i.remoteId]), [["cli", "kimi"], ["desktop", "kimi-desktop"]]);
   // ZCode 与 Qoder 同为双安装记录但主形态相反：index 0 是桌面主形态，index 1 是
-  // 本机源码构建的 CLI——CLI 没有官方 release 渠道，remoteId 恒为 null。
+  // 显式配置制的 CLI——CLI 没有官方 release 渠道，remoteId 恒为 null。
   const zcode = state.clients.find((c) => c.id === "zcode");
   assert.deepEqual(zcode.installations.map((i) => [i.kind, i.remoteId]), [["desktop", "zcode"], ["cli", null]]);
   for (const client of state.clients) {

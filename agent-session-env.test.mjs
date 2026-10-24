@@ -386,7 +386,7 @@ test("zcode CLI 未装：入口解析不到即报 executable_missing 产品文�
     // 覆盖变量指向不存在的绝对路径：agent-discovery 只验绝对路径，存在性
     // 由终端侧包装补齐。
     const brokenOverride = { ...base, ZCODE_CLI_EXECUTABLE: join(root, "bin", "gone.mjs") };
-    // 不设覆盖、默认构建路径也不存在：resolveZcodeCliExecutable 返回 null。
+    // 不设覆盖（显式配置制、无内置默认）：resolveZcodeCliExecutable 返回 null。
     const noCli = { ...base };
     delete noCli.ZCODE_CLI_EXECUTABLE;
     for (const broken of [brokenOverride, noCli]) {

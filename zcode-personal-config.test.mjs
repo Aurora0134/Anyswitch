@@ -627,13 +627,13 @@ describe("ZCode sync end to end", () => {
           },
           ...extra["poke-api"],
         },
-        "squall-api": {
-          displayName: "SQUALL",
-          baseURL: "https://squall.example/v1",
+        "relay-api": {
+          displayName: "RELAY",
+          baseURL: "https://relay.example/v1",
           protocol: "openai-compatible",
-          credentialFile: "squall-api.dpapi",
+          credentialFile: "relay-api.dpapi",
           models: { "kimi-k3": { displayName: "Kimi K3", contextWindow: 262144 } },
-          ...extra["squall-api"],
+          ...extra["relay-api"],
         },
       },
     };
@@ -660,7 +660,7 @@ describe("ZCode sync end to end", () => {
       assert.equal(validatePersonalProviderConfig(doc).valid, true);
       assert.deepEqual(
         doc.config.providerConfigRules.providerRules.map((r) => r.providerId),
-        ["_poke-api", "_squall-api"],
+        ["_poke-api", "_relay-api"],
       );
       const poke = ruleOf(doc, "_poke-api");
       // A plain channel is labelled with its own id; only pools and route
@@ -672,7 +672,7 @@ describe("ZCode sync end to end", () => {
       assert.deepEqual(poke.config.access, { type: "api-key", apiKey: "tok-1" });
       assert.deepEqual(
         doc.config.modelConfigRules.providerModelRules.map((r) => `${r.providerId}/${r.modelId}`).sort(),
-        ["_poke-api/claude-opus-5", "_poke-api/glm-5.3", "_squall-api/kimi-k3"],
+        ["_poke-api/claude-opus-5", "_poke-api/glm-5.3", "_relay-api/kimi-k3"],
       );
       assert.equal(
         doc.config.modelConfigRules.providerModelRules.find((r) => r.modelId === "claude-opus-5").config.properties.contextWindow,
@@ -711,7 +711,7 @@ describe("ZCode sync end to end", () => {
       const configPath = join(dir, "config.json");
       await writeZcodeConfig(channelStore(), 47821, "tok-1", dir, configPath);
       const store = channelStore();
-      delete store.providers["squall-api"];
+      delete store.providers["relay-api"];
       const result = await writeZcodeConfig(store, 47821, "tok-1", dir, configPath);
       assert.equal(result.ok, true, result.reason);
 
@@ -749,7 +749,7 @@ describe("ZCode sync end to end", () => {
 
       const doc = readPersonal(dir);
       assert.deepEqual(doc.config.providerConfigRules.providerRules.map((r) => r.providerId), [
-        "_handmade", "_poke-api", "_squall-api",
+        "_handmade", "_poke-api", "_relay-api",
       ]);
       assert.deepEqual(doc.config.providerOrder, ["_handmade", "_poke-api"]);
       assert.deepEqual(
@@ -913,7 +913,7 @@ describe("ZCode sync end to end", () => {
       assert.deepEqual(doc.config.providerOrder, ["builtin:zai"]);
       assert.deepEqual(
         doc.config.providerConfigRules.providerRules.map((r) => r.providerId),
-        ["builtin:zai", "_poke-api", "_squall-api"],
+        ["builtin:zai", "_poke-api", "_relay-api"],
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1049,29 +1049,30 @@ describe("defaultCliModelSelection（CLI 槽位的默认模型选择）", () => 
     assert.deepEqual(selection, { providerId: "_auto", modelId: "kimi-k3", options: { reasoningLevel: "low" } });
   });
 
-  it("falls back to _free-pool's first model + disabled when builtin rules cannot be resolved", () => {
-    // 验收锚点：_free-pool/mimo-v2.6-flash-free + disabled 是真实请求跑通过的形态。
+  it("falls back to the first other managed channel + disabled when _auto's rules cannot be resolved", () => {
+    // _auto 严格解析（builtin 规则不可用就不硬造 _auto 选择）；随后按托管条目
+    // 顺序回落，解析不出才用 "disabled" 兜底。
     const entries = {
       _auto: cliEntryOf("auto", ["auto"]),
-      "_free-pool": cliEntryOf("free-pool", ["mimo-v2.6-flash-free", "other-model"]),
+      _poke: cliEntryOf("poke", ["some-model", "other-model"]),
     };
     assert.deepEqual(defaultCliModelSelection(entries, null), {
-      providerId: "_free-pool",
-      modelId: "mimo-v2.6-flash-free",
+      providerId: "_poke",
+      modelId: "some-model",
       options: { reasoningLevel: "disabled" },
     });
   });
 
-  it("resolves the free-pool anchor too when rules are available", () => {
-    const entries = { "_free-pool": cliEntryOf("free-pool", ["mimo-v2.6-flash-free"]) };
+  it("treats underscore channels as regular managed entries when _auto is absent", () => {
+    const entries = { "_pool-a": cliEntryOf("pool-a", ["mimo-v2.6-flash-free"]) };
     assert.deepEqual(defaultCliModelSelection(entries, builtinRules), {
-      providerId: "_free-pool",
+      providerId: "_pool-a",
       modelId: "mimo-v2.6-flash-free",
       options: { reasoningLevel: "disabled" },
     });
   });
 
-  it("falls back to the first managed channel when neither _auto nor _free-pool exists", () => {
+  it("falls back to the first managed channel when _auto is absent", () => {
     const entries = { _poke: cliEntryOf("poke", ["some-model"]) };
     assert.deepEqual(defaultCliModelSelection(entries, null), {
       providerId: "_poke",

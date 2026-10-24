@@ -67,20 +67,6 @@ describe("resolveZcodeCliBuiltinConfig", () => {
     );
   });
 
-  it("the real local build tree matches the derivation", (t) => {
-    // 一次性核验收款闸用的真实布局：dist 树随包 builtin 配置必须命中第一候选。
-    // 该测试依赖本机构建产物；构建树移动时随之更新，而不是放宽断言。
-    const realEntry = join(
-      process.env.USERPROFILE ?? "",
-      "Desktop", "agent-home", "zcode-src", "dist", "zcode", "debug", "zcode", "bin", "zcode.mjs",
-    );
-    if (!existsSync(realEntry)) {
-      t.skip("local zcode build tree absent");
-      return;
-    }
-    const derived = resolveZcodeCliBuiltinConfig(realEntry);
-    assert.ok(derived.endsWith(join("agent", "provider", "zcode-builtin.json")));
-  });
 });
 
 describe("realSpawnZcodeCli", () => {

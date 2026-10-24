@@ -99,7 +99,7 @@ function environment() {
                 ]
         : id === "zcode"
           ? [
-            // 与生产同形：zcode 桌面主形态守 index 0，CLI 行 remoteId 为空（本机源码构建，无官方源）
+            // 与生产同形：zcode 桌面主形态守 index 0，CLI 行 remoteId 为空（显式配置制，无官方源）
             { kind: "desktop", remoteId: "zcode", status: "found", path: "C:\\Apps\\zcode\\desktop", version: "2.0.0", versionSource: "package-json", issue: null },
             { kind: "cli", remoteId: null, status: "found", path: "C:\\Apps\\zcode\\cli", version: "1.0.0", versionSource: "package-json", issue: null },
           ]
