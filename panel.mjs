@@ -50,7 +50,7 @@ import {
   writeClientUpdateRun,
 } from "./client-update-journal.mjs";
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
-import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault } from "./app-git-identity.mjs";
+import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault, readRemoteHeadRelation as readRemoteHeadRelationDefault } from "./app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
 import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
@@ -946,6 +946,8 @@ export function createPanelRouter({
   // 既慢又不稳定；默认走真模块。
   readLocalHeadFn = readLocalHeadDefault,
   readRemoteRefsFn = readRemoteRefsDefault,
+  // 远端尖端 vs 本地 HEAD 的祖先后系（先行轨防倒退）：判不了时保持既有邀请行为。
+  readRemoteHeadRelationFn = readRemoteHeadRelationDefault,
   // 远端身份短缓存 TTL：进页自动检查吃缓存，refresh=1 的强制检查绕过。
   remoteIdentityTtlMs = 60_000,
  }) {
@@ -1966,9 +1968,16 @@ export function createPanelRouter({
         checkedAt: new Date().toISOString(),
       };
       if (!remote) return { ...base, state: "error", release: null, errorCode: null };
-      return local.sha === remote.headSha
-        ? { ...base, state: "current", release: null, errorCode: null }
-        : { ...base, state: "update_available", remoteSha: remote.headSha, release: null, errorCode: null };
+      if (local.sha === remote.headSha) {
+        return { ...base, state: "current", release: null, errorCode: null };
+      }
+      // 防倒退门：远端尖端已在本仓时判祖先后系。本地不落后（远端尖端是本地祖先，
+      // 或互不为祖先——换装会丢本地独有提交）就不发「发现先行新提交」邀请；只有
+      // 本地严格落后、或判不了（对象不在本仓／git 故障）才保持既有邀请。
+      const relation = await readRemoteHeadRelationFn({ appDir: APP_DIR, remoteSha: remote.headSha });
+      return relation === "remote_newer" || relation === "absent" || relation === null
+        ? { ...base, state: "update_available", remoteSha: remote.headSha, release: null, errorCode: null }
+        : { ...base, state: "current", release: null, errorCode: null };
     }
     const result = await getReleaseService().then((service) => service.getAppUpdate({ force }));
     const drift = await buildStableDrift(result, force);

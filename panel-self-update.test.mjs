@@ -49,9 +49,16 @@ function stagedRun(overrides = {}) {
 async function withPanel(options, run) {
   const journalDir = options.clientUpdateJournalDir ?? mkdtempSync(join(tmpdir(), "anys-self-update-panel-"));
   const ownsJournal = !options.clientUpdateJournalDir;
+  // base 不隔离就会读到真实机器的 settings（先行版开关等），用例随宿主机状态漂移：
+  // 本机先行版常开，稳定轨用例会被整体拖进先行轨真 git 身份路径（drift 套件因此
+  // 在本机长期红）。默认给每个用例一个干净的临时 LOCALAPPDATA；显式传 base 的
+  // 先行轨套件不受影响。
+  const ownsBase = !options.base;
+  const base = options.base ?? { LOCALAPPDATA: mkdtempSync(join(tmpdir(), "anys-self-update-base-")) };
   options = {
     appInfo: { version: "0.6.1-preview", platform: "win32", nodeVersion: "v24.18.0", prerelease: true },
     ...options,
+    base,
     clientUpdateJournalDir: journalDir,
     spawnClientUpdateWorkerFn: () => process.pid,
     spawnSelfUpdateWorkerFn: options.spawnSelfUpdateWorkerFn ?? (() => process.pid),
@@ -106,6 +113,7 @@ async function withPanel(options, run) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
     if (ownsJournal) rmSync(journalDir, { recursive: true, force: true });
+    if (ownsBase) rmSync(base.LOCALAPPDATA, { recursive: true, force: true });
   }
 }
 
@@ -622,6 +630,8 @@ describe("先行轨道（bleedingEdgeMode）", () => {
         ["v0.6.5", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
       ]),
     }),
+    // 缺席＝既有邀请行为（真安装机上远端尖端通常不在本仓）；防倒退用例单独覆写。
+    readRemoteHeadRelationFn: async () => "absent",
   };
 
   function bleedingSettings(baseDir) {
@@ -645,6 +655,46 @@ describe("先行轨道（bleedingEdgeMode）", () => {
         assert.equal(result.remoteSha, MAIN_SHA);
         assert.equal(result.remoteCommit, "fedcba0");
         assert.equal(result.currentCommit, "0123456");
+      });
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("防倒退：远端尖端是本地祖先或已分叉（本地不落后）→ 不发更新邀请，state=current", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    try {
+      bleedingSettings(baseDir);
+      for (const relation of ["remote_older", "diverged"]) {
+        await withPanel({
+          base: { LOCALAPPDATA: baseDir },
+          releaseService: selfUpdateReleaseService("current"),
+          ...identityFns,
+          readRemoteHeadRelationFn: async () => relation,
+        }, async (get) => {
+          const body = (await get("/panel/api/updates?refresh=1")).body;
+          assert.equal(body.state, "current", `relation=${relation}：本地不落后，换装即倒退/丢提交，不发邀请`);
+          assert.equal(body.currentCommit, "0123456");
+        });
+      }
+    } finally {
+      rmSync(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  test("本地严格落后于远端尖端（remote_newer 纯前进）：照常发出更新邀请", async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), "anys-bleeding-"));
+    try {
+      bleedingSettings(baseDir);
+      await withPanel({
+        base: { LOCALAPPDATA: baseDir },
+        releaseService: selfUpdateReleaseService("current"),
+        ...identityFns,
+        readRemoteHeadRelationFn: async () => "remote_newer",
+      }, async (get) => {
+        const body = (await get("/panel/api/updates?refresh=1")).body;
+        assert.equal(body.state, "update_available");
+        assert.equal(body.remoteSha, MAIN_SHA);
       });
     } finally {
       rmSync(baseDir, { recursive: true, force: true });

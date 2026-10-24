@@ -11,7 +11,14 @@ const GIT_QUERY_TIMEOUT_MS = 20_000;
 function runGitOnce({ file, args, cwd = null, spawnFn, timeoutMs = GIT_QUERY_TIMEOUT_MS }) {
   return new Promise((done) => {
     spawnFn(file, args, { ...(cwd ? { cwd } : {}), timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024, encoding: "utf8" }, (error, stdout) => {
-      done({ ok: !error, missing: error?.code === "ENOENT", output: String(stdout ?? "") });
+      done({
+        ok: !error,
+        missing: error?.code === "ENOENT",
+        // merge-base --is-ancestor 以退出码作答（0＝是祖先、1＝不是、其余判不了），
+        // 调用方需要区分「否」与「判不了」。
+        exitCode: error ? (typeof error.code === "number" ? error.code : null) : 0,
+        output: String(stdout ?? ""),
+      });
     });
   });
 }
@@ -64,4 +71,27 @@ export async function readRemoteRefs({ repoUrl, spawnFn = execFile, env = proces
     }
   }
   return headSha ? { headSha, tags } : null;
+}
+
+// 远端尖端提交与本地 HEAD 的关系（先行轨防倒退判定用）。只在远端尖端对象已在本仓时
+// 判祖先后系；cat-file 缺席或 merge-base 异常都不强行下结论，交给调用方保持既有行为。
+// 浅克隆边界之上的提交对象根本不在本仓，cat-file 这一道就把它们挡在 merge-base 之外，
+// 所以不会踩「边界之外的历史 is-ancestor 恒 NO」的坑。返回：
+//   "remote_older" —— 远端尖端是本地 HEAD 的祖先（本地不落后，更新邀请实为倒退）
+//   "remote_newer" —— 本地 HEAD 是远端尖端的祖先（纯前进，换装安全）
+//   "diverged"     —— 互不为祖先（换装会丢本地独有提交）
+//   "absent"       —— 远端尖端对象不在本仓（标准安装常态：远端在新提交上前进）
+//   null           —— git 不可用/超时等判不了的场合
+export async function readRemoteHeadRelation({ appDir, remoteSha, spawnFn = execFile, env = process.env }) {
+  if (typeof appDir !== "string" || !appDir) return null;
+  if (typeof remoteSha !== "string" || !SHA.test(remoteSha)) return null;
+  const present = await runGit({ args: ["cat-file", "-e", `${remoteSha}^{commit}`], cwd: appDir, spawnFn, env });
+  if (!present.ok) return "absent";
+  const remoteIsAncestor = await runGit({ args: ["merge-base", "--is-ancestor", remoteSha, "HEAD"], cwd: appDir, spawnFn, env });
+  if (remoteIsAncestor.ok) return "remote_older";
+  if (remoteIsAncestor.exitCode !== 1) return null;
+  const localIsAncestor = await runGit({ args: ["merge-base", "--is-ancestor", "HEAD", remoteSha], cwd: appDir, spawnFn, env });
+  if (localIsAncestor.ok) return "remote_newer";
+  if (localIsAncestor.exitCode !== 1) return null;
+  return "diverged";
 }
