@@ -6702,6 +6702,23 @@ describe("panel.html 删除渠道/号池携路由链剪除", () => {
     assert.ok(!panelJs.includes("const failed = (rr && rr.failed) || [];"), "不得保留旧写法（直接拿对象数组 join）");
   });
 
+  it("建池回滚子句：全删干净报全数回滚；有删失败如实列残留渠道指引手动清理", () => {
+    // 删失败的渠道带着密钥残留，「已回滚 N 个」说满了就是撒谎——行为钉住
+    // 批准文案：全成保持原话，有残留列渠道 id 指引到渠道列表手动删。
+    const m = panelJs.match(/function poolRollbackClause\(createdCount, failedRollbacks\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "poolRollbackClause found in panel.js");
+    const clause = new Function(`return function poolRollbackClause(createdCount, failedRollbacks) {${m[1]}\n  }`)();
+    assert.equal(clause(3, []), "已回滚 3 个已建渠道");
+    assert.equal(
+      clause(2, ["a6api-03"]),
+      "已回滚 1 个已建渠道，1 个删除失败：a6api-03，请到渠道列表手动删除",
+    );
+    assert.equal(
+      clause(3, ["a6api-03", "a6api-04"]),
+      "已回滚 1 个已建渠道，2 个删除失败：a6api-03、a6api-04，请到渠道列表手动删除",
+    );
+  });
+
   it("删除渠道/池成员/号池/多选四个弹窗都预报自动路由被剪", () => {
     for (const fn of ["confirmDeleteProvider", "confirmDeletePoolMember", "confirmDissolvePool", "confirmDeletePool", "confirmDeleteStoreSelection"]) {
       assert.ok(panelJs.includes(`function ${fn}`), `${fn} 存在`);

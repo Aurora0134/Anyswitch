@@ -256,6 +256,8 @@ describe("pool routing: streaming", () => {
       assert.equal(res.status, 400);
       const body = await res.json();
       assert.match(body.error.message, /returned status 400/);
+      // 请求形状错误在首个上游就终局，没发生多上游尝试，报错保持原样不带后缀。
+      assert.doesNotMatch(body.error.message, /已尝试/);
       assert.deepEqual(calls, ["member-a"], "400 must not trigger failover");
     });
   });
@@ -272,6 +274,8 @@ describe("pool routing: streaming", () => {
       assert.equal(res.status, 429, "the last member's status surfaces");
       const body = await res.json();
       assert.match(body.error.message, /returned status 429/);
+      // 全灭上下文：末位报错须带尝试数——否则死号的报错读起来像「密钥坏了」。
+      assert.match(body.error.message, /已尝试 2 个上游，均未成功/);
       assert.deepEqual(calls, ["member-a", "member-b"]);
     });
   });
@@ -375,6 +379,10 @@ describe("pool routing: non-streaming", () => {
     await withServer(deps, async (port) => {
       const res = await postChat(port, { stream: false });
       assert.equal(res.status, 401);
+      const body = await res.json();
+      assert.match(body.error.message, /returned status 401/);
+      // 非流式全灭同款：末位死号的报错须带尝试数上下文。
+      assert.match(body.error.message, /已尝试 2 个上游，均未成功/);
       assert.deepEqual(calls, ["member-a", "member-b"]);
     });
   });

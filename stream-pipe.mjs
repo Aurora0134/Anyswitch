@@ -57,6 +57,22 @@ export function sleepWithAbort(ms, signal) {
   });
 }
 
+// 全灭上下文：请求跨多个上游扇出、全部失败时，客户端只拿到末位上游的原始报错
+// ——常是某个死号的 401，读起来像「密钥坏了」，把排查引向换号。这里给末位报错
+// 文本追加尝试数；只动 message 不动错误体结构（服务端无按 message 内容分支的
+// 逻辑，agent 客户端按 status/error.type 分类）。只加真实发生过多上游尝试的
+// 请求：单上游、或首个上游就是不可切换的请求形状错误，报错保持原样。三个通道
+// 的错误体形状一致（body.error.message），故一个 helper 全覆盖。
+export function appendFailoverContext(result, attemptedMembers) {
+  if (!result || result.status === undefined || result.status < 400 || attemptedMembers <= 1) return result;
+  const message = result.body?.error?.message;
+  if (typeof message !== "string" || message === "") return result;
+  return {
+    ...result,
+    body: { ...result.body, error: { ...result.body.error, message: `${message}（已尝试 ${attemptedMembers} 个上游，均未成功）` } },
+  };
+}
+
 // Pipe an upstream OpenAI SSE stream to the client, either verbatim (OpenAI
 // passthrough) or translated to Anthropic SSE events. Returns an outcome
 // describing whether the stream committed content, ended retryably before any
@@ -557,7 +573,7 @@ export async function runStreamWithKeepAlive(res, channel) {
           // this member did fail the request, so it counts the same way.
           channel.onMemberFault?.(member, `upstream_${result.status}`);
         }
-        channel.onTerminalResult(result, member);
+        channel.onTerminalResult(appendFailoverContext(result, memberIndex + 1), member);
         return;
       }
 

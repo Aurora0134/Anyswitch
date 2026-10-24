@@ -14369,6 +14369,12 @@ async function api(method, path, body) {
     }
   }
 
+  // 回滚子句：删除失败的渠道带着密钥残留，「已回滚 N 个」说满了就是在撒谎——
+  // 只有全删干净才报全数回滚，有残留就如实列出渠道 id 指引手动清理。
+  function poolRollbackClause(createdCount, failedRollbacks) {
+    if (!failedRollbacks.length) return `已回滚 ${createdCount} 个已建渠道`;
+    return `已回滚 ${createdCount - failedRollbacks.length} 个已建渠道，${failedRollbacks.length} 个删除失败：${failedRollbacks.join("、")}，请到渠道列表手动删除`;
+  }
   // 建池模式提交：串行创建 N 个渠道，任一失败回滚已建渠道（删除事务会清凭据），
   // 全部成功才调 pool/create；pool/create 失败同样回滚。错误指明第几份资料。
   async function submitAddPoolModal() {
@@ -14400,11 +14406,13 @@ async function api(method, path, body) {
     }
     const created = [];
     const rollback = async () => {
+      const failedRollbacks = [];
       for (const createdId of created) {
         try {
           await api("POST", "/api/store/delete", { id: createdId });
-        } catch { /* 回滚尽力而为，残留渠道用户可手动删 */ }
+        } catch { failedRollbacks.push(createdId); }
       }
+      return failedRollbacks;
     };
     for (const s of sets) {
       const baseURLs = s.baseURLs || sets[0].baseURLs;
@@ -14419,8 +14427,8 @@ async function api(method, path, body) {
         });
         created.push(r.id);
       } catch (e) {
-        await rollback();
-        fail(`第 ${s.k} 份资料：${/provide modelIds/.test(e.code || "") ? "在线发现没拿到模型列表，请在「模型 IDs」里手填后重试" : panelError(e, "渠道创建失败")}（已回滚 ${created.length} 个已建渠道）`);
+        const failedRollbacks = await rollback();
+        fail(`第 ${s.k} 份资料：${/provide modelIds/.test(e.code || "") ? "在线发现没拿到模型列表，请在「模型 IDs」里手填后重试" : panelError(e, "渠道创建失败")}（${poolRollbackClause(created.length, failedRollbacks)}）`);
         await refreshStoreState();
         return;
       }
@@ -14428,8 +14436,8 @@ async function api(method, path, body) {
     try {
       await api("POST", "/api/store/pool/create", { poolId, displayName, members: created });
     } catch (e) {
-      await rollback();
-      fail(`${panelError(e, "号池创建失败")}（已回滚 ${created.length} 个已建渠道）`);
+      const failedRollbacks = await rollback();
+      fail(`${panelError(e, "号池创建失败")}（${poolRollbackClause(created.length, failedRollbacks)}）`);
       await refreshStoreState();
       return;
     }

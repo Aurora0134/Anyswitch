@@ -2,7 +2,7 @@ import { createServer, request } from "node:http";
 import { createOpenAIHandler, openAIError } from "./openai-handler.mjs";
 import { parseOpenAIPath, buildOpenAIPath } from "./openai-path.mjs";
 import { createHandler, errorBody } from "./handler.mjs";
-import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel } from "./stream-pipe.mjs";
+import { sendJson, runStreamWithKeepAlive, openAIStreamChannel, anthropicStreamChannel, responsesStreamChannel, appendFailoverContext } from "./stream-pipe.mjs";
 import { translateResponsesRequest } from "./responses-translate.mjs";
 import { validateStore } from "./store-schema.mjs";
 import { isPoolFailoverStatus } from "./pool-routing.mjs";
@@ -899,6 +899,7 @@ export function createOpenAIRelayServer(deps) {
           }
 
           let result;
+          let attemptedMembers = 0;
           if (memberPlan) {
             // Non-streaming pool/chain request: one attempt per member (no
             // keep-alive, same as the classic path), failing over on
@@ -908,6 +909,7 @@ export function createOpenAIRelayServer(deps) {
             for (let index = 0; index < memberPlan.members.length; index += 1) {
               const member = memberPlan.members[index];
               tracker?.setCurrentMember?.(member.memberId);
+              attemptedMembers += 1;
               result = await member.call({ signal: abortController.signal });
               if (result.status < 400) {
                 memberPlan.noteSuccess(member.memberId);
@@ -925,6 +927,7 @@ export function createOpenAIRelayServer(deps) {
           } else {
             result = await handler.handleChatCompletions(routePath, req.headers, body, { signal: abortController.signal });
           }
+          result = appendFailoverContext(result, attemptedMembers);
           if (result.status >= 400) {
             // Error responses never produce a first token — no recordFirstChunk
             // here, otherwise the failure duration lands in TTFT as a fake
@@ -1233,6 +1236,7 @@ export function createOpenAIRelayServer(deps) {
           }
 
           let result;
+          let attemptedMembers = 0;
           if (memberPlan) {
             // Non-streaming pool/chain request: one attempt per member (no
             // keep-alive, same as the classic path), failing over on
@@ -1242,6 +1246,7 @@ export function createOpenAIRelayServer(deps) {
             for (let index = 0; index < memberPlan.members.length; index += 1) {
               const member = memberPlan.members[index];
               tracker?.setCurrentMember?.(member.memberId);
+              attemptedMembers += 1;
               result = await member.call({ signal: abortController.signal });
               if (result.status < 400) {
                 memberPlan.noteSuccess(member.memberId);
@@ -1259,6 +1264,7 @@ export function createOpenAIRelayServer(deps) {
           } else {
             result = await anthropicHandler.handleMessages(req.headers, body, { signal: abortController.signal, agentId });
           }
+          result = appendFailoverContext(result, attemptedMembers);
           const mappedUsage = anthropicUsageToOpenAI(result.body?.usage);
           if (result.status >= 400) {
             tracker?.recordEnd({ status: result.status, error: { status: result.status, message: result.body?.error?.message || "Error" }, usage: mappedUsage });
