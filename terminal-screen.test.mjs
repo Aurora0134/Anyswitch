@@ -651,15 +651,26 @@ describe("有预算切片解析：与整块解析逐字节等价，且单片不�
   test("单片耗时不超过预算 + 一个采样量子", () => {
     // 64KB 换行密集块是镜像最坏的输入形态（每字符都触发一次滚动与历史序列化）。
     const heavy = "\n".repeat(64 * 1024);
-    const mirror = createScreenMirror({ cols: 80, rows: 24 });
     const budget = 4;
-    const started = performance.now();
-    const first = mirror.writeSliced(heavy, budget);
-    const elapsed = performance.now() - started;
-    assert.equal(first.done, false, "64KB 换行密集块必须在预算内停下，不能一口气排完");
+    // 全量门是 node --test *.test.mjs 十几个文件并行跑，本进程随时被同机 worker
+    // 抢占，墙钟读数会被纯调度噪声抬高（实测：满负载下单次读数约 10% 概率超 8ms，
+    // 闲置稳定 4.1–4.5ms）。门槛要卡的是实现本身的单片成本，不是调度噪声；噪声
+    // 只会把读数往上抬，所以最多测 5 次取最快一次即可剥离。真回归（量子采样失效
+    // 退化成同步排空）实测地板 69ms、满负载 325ms 起，远超门槛，不会被重试洗白。
+    // 确定性断言（预算内停下）每次尝试都查，行为回归一次都过不去。
+    let elapsed = Infinity;
+    let mirror = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      mirror = createScreenMirror({ cols: 80, rows: 24 });
+      const started = performance.now();
+      const first = mirror.writeSliced(heavy, budget);
+      elapsed = performance.now() - started;
+      assert.equal(first.done, false, "64KB 换行密集块必须在预算内停下，不能一口气排完");
+      if (elapsed < 8) break;
+    }
     // 门槛是单次同步块 ≤ 8ms（spec 验收表）。预算是软的：每 256 个字符才看一次
     // 时钟，所以最多超出一个量子的解析时间；8ms 对 4ms 预算留了整整一个量子。
-    assert.ok(elapsed < 8, `单片耗时 ${elapsed.toFixed(1)}ms 必须 ≤ 8ms 门槛`);
+    assert.ok(elapsed < 8, `单片最快耗时 ${elapsed.toFixed(1)}ms 必须 ≤ 8ms 门槛（5 次全超限即真超限）`);
     while (!mirror.drain(budget).done) { /* 排完 */ }
     assert.equal(mirror.info().pendingChars, 0, "排空后不得残留字节");
   });
