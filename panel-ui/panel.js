@@ -9808,10 +9808,11 @@ async function api(method, path, body) {
   // 忽略栏内其他会话点击，记录在案。
   let terminalSwitchInFlight = false;
   // 判定门通用核：目标可以是某条历史会话（带 resume 身份）或一个全新会话
-  // （resume 缺省——「新建会话」与组头 ⊕ 两个入口同门，2026-10-25 用户拍板对齐：
+  // （resume 缺省＝全新目标，agentId 仍必须传给服务端）。「新建会话」与组头 ⊕
+  // 两个入口同门（2026-10-25 用户拍板对齐）：
   // idle/空白壳/exited 就地换新会话、working 新开页签，与点历史行共用同一矩阵、
-  // 同一在飞闸与降级路径）。新开的落点都是 createAgentTerminal（全新路径不带
-  // resume 键，服务端 /switch 按缺省走 agentId＋cwd 的全新分支）。
+  // 同一在飞闸与降级路径）。新开的落点都是 createAgentTerminal（全新路径带
+  // agentId＋cwd、不带 resume 键，服务端 /switch 据此走全新分支）。
   async function terminalRailSwitchOrCreateCore({ agentId, cwd, resume = null }) {
     if (terminalSwitchInFlight) return;
     const active = terminalSessionFor(activeTerminalPreviewId);
@@ -9835,10 +9836,13 @@ async function api(method, path, body) {
         return createAgentTerminal({ agentId, cwd, resume });
       }
       enrichTerminalSessions(agents.agents);
-      const working = active.status === "working" || (active.metrics && active.metrics.activeRequests > 0);
+      // 已退出不是 working：迟到的请求/输出信号不能把它重新判忙，否则切走会
+      // 错走保护性新开（原页签的新会话行也随之残留）。宿主现态优先于缓存信号。
+      const exited = hostRead.status === "exited" || active.backendState?.status === "exited";
+      const working = !exited && (active.status === "working" || (active.metrics && active.metrics.activeRequests > 0));
       if (working) return createAgentTerminal({ agentId, cwd, resume });
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
-      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { cwd });
+      const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
       renderTerminalPreviewSession();
     } catch (error) {
@@ -10214,15 +10218,13 @@ async function api(method, path, body) {
     if (!dir) return;
     loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
     initTerminalRailScrollbarQuiet();
-    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，M13 起挂列表
-    // 本体、走捕获相）：合成点击（element.click()）不派发 pointerdown——进页首帧、
-    // 自动化测量全都瞬时落位，用户真动过手才放行位移/淡入淡出。
+    // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，M13 走捕获相）：
+    // 合成点击（element.click()）不派发 pointerdown——进页首帧、自动化测量都瞬时
+    // 落位。监听挂整个会话栏而非仅历史列表：新建按钮也在列内，它的首次点击同样
+    // 会让兜底行出现，不能等到下一次操作才有动画。
     const armMotion = () => { terminalRailMotionArmed = true; };
-    const listEl = $("railTermHistoryList");
-    if (listEl && typeof listEl.addEventListener === "function") {
-      listEl.addEventListener("pointerdown", armMotion, { once: true, capture: true });
-      listEl.addEventListener("keydown", armMotion, { once: true, capture: true });
-    }
+    dir.addEventListener("pointerdown", armMotion, { once: true, capture: true });
+    dir.addEventListener("keydown", armMotion, { once: true, capture: true });
     // 一处委托：关闭叉 / 历史行归档 / 取消归档 / 组头菜单 / 组头新建 / 空态复位 /
     // 切换终端 / 历史行续接 / 组折叠 / 水位线。关闭叉、归档与取消归档钮先判，否则会
     // 被行点击抢走；组头 ⋯ 与 ⊕ 要抢在「历史行续接」与「组折叠」之前——它们同在

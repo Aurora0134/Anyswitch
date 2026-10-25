@@ -1196,6 +1196,8 @@ export function createPanelRouter({
   // 捕获防抖：同一会话两次扫描尝试的最小间隔。记的是「尝试」而非「成功」——
   // 扫描慢/空表同样占一拍，1s 轮询的列表路由才不会每拍都重扫一遍盘。
   const bindingCaptureLastAttempt = new Map(); // sessionId → ms
+  // 内切保终端 id：捕获扫描必须跟随最新一代身份，旧代返回不得覆盖新代。
+  const terminalBindingGenerations = new Map(); // sessionId → 递增代际
 
   // 列表路由的异步旁路：给「未绑定且 running 的可续会 agent 会话」补绑定，
   // 顺手清掉会话已消失的孤儿绑定。绝不阻塞、绝不让列表请求失败——全部
@@ -1214,6 +1216,9 @@ export function createPanelRouter({
     for (const sessionId of [...bindingCaptureLastAttempt.keys()]) {
       if (!keepIds.has(sessionId)) bindingCaptureLastAttempt.delete(sessionId);
     }
+    for (const sessionId of [...terminalBindingGenerations.keys()]) {
+      if (!keepIds.has(sessionId)) terminalBindingGenerations.delete(sessionId);
+    }
     const now = Date.now();
     for (const session of sessions) {
       if (!session || typeof session.id !== "string" || session.id === "") continue;
@@ -1221,16 +1226,19 @@ export function createPanelRouter({
       if (store.get(session.id)) continue;
       const lastAttempt = bindingCaptureLastAttempt.get(session.id) ?? 0;
       if (now - lastAttempt < bindingCaptureDebounceMs) continue;
+      const generation = terminalBindingGenerations.get(session.id) ?? 0;
+      const captured = { agentId: session.agentId, cwd: session.cwd };
       bindingCaptureLastAttempt.set(session.id, now);
       Promise.resolve()
         .then(() => scanAgentConversationsFn(session.agentId))
         .then((metas) => {
-          // 跑着的会话生命周期窗口开口到今天：createdAt 之后新建/活跃的同
-          // agent 同 cwd 存档里取最佳重叠者。
+          // 内切保 id，createdAt 不能代表本轮新对话的起点。以最近一次进程
+          // 出生为界；扫描返回时身份/目录/代际已变即整份结果作废，防跨代抢绑。
+          if ((terminalBindingGenerations.get(session.id) ?? 0) !== generation) return;
           const picked = pickConversationMeta(metas, {
-            agentId: session.agentId,
-            cwd: session.cwd,
-            createdAt: session.createdAt ?? null,
+            agentId: captured.agentId,
+            cwd: captured.cwd,
+            createdAt: session.spawnedAt ?? session.createdAt ?? null,
             lastActiveAt: null,
           });
           // 扫描期间可能已被兜底路径绑上：已有绑定不覆盖。
@@ -1425,6 +1433,10 @@ export function createPanelRouter({
       agentName: launch.agentName,
     }, { token });
     if (!restarted) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
+    // 还须清旧对话绑定，否则复活会接回旧会话；历史续接的既有绑定语义不变。
+    terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
+    if (resume === null) terminalBindings().delete(session.id);
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
     // 身份（endpoint＋目标 cwd），不是宿主记录里的旧归属——空白壳那一栏根本没有
@@ -1540,10 +1552,16 @@ export function createPanelRouter({
       // 空白复活——接线失败绝不挡复活本身（catch 回落 null）。只在控制面
       // 进程接（绑定库单写入方，同列表捕获的门）。
       resumeArgs = hostKind === "panel-host" ? await resolveResumeArgsForRevive(session).catch(() => null) : null;
+      // 已确认要续接的对话同时写回宿主身份：进程生日随复活前移后，
+      // 兜底行若只看无 resume 会把旧对话误显示成「新会话」。
+      const binding = resumeArgs ? terminalBindings().get(session.id) : null;
+      const resumeIdentity = binding && binding.agentId === session.agentId && sameCwd(binding.cwd, session.cwd)
+        ? { endpoint: session.agentId, id: binding.conversationId } : null;
       body = {
         launch: resumeArgs ? { ...launch.launch, args: [...launch.launch.args, ...resumeArgs] } : launch.launch,
         cwd: launch.cwd,
         env: launch.env,
+        ...(resumeIdentity ? { resume: resumeIdentity } : {}),
       };
     }
     const reviveStartedAt = Date.now();

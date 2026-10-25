@@ -1320,6 +1320,7 @@ test("restart 接受 clearResume（全新内切）：显式清空旧 resume，�
     const revivedPort = await listen(revived);
     const listed = await fetch(`http://127.0.0.1:${revivedPort}/terminal/sessions`, { headers: headers(revived) }).then((r) => r.json());
     assert.equal(listed.sessions[0].resume, undefined, "清空落盘（字段不再随列表下发）");
+    assert.equal(listed.sessions[0].spawnedAt, freshBody.spawnedAt, "本轮进程生日随会话落盘，恢复后不拿 createdAt 抢绑旧历史");
     assert.equal(listed.sessions[0].label, "新会话", "新身份落盘");
   } finally {
     if (revived) await revived.close().catch(() => {});

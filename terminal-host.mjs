@@ -400,7 +400,7 @@ function snapshot(session) {
     exitCode: session.exitCode,
     createdAt: session.createdAt,
     lastActiveAt: session.lastActiveAt,
-    // 工作态判定的两只输入信号（面板 terminalBusyByOutput 消费，均不落盘）：
+    // 工作态判定的两只输入信号（面板 terminalBusyByOutput 消费）：
     // lastInputAt＝最近一次用户键入（键入抑制窗的锚点，出生起未键入则缺省）；
     // spawnedAt＝最近一次进程出生（孵化豁免窗的锚点——内切/复活保记录换进程，
     // createdAt 不动，只有它跟着每次 spawn 走）。
@@ -595,6 +595,7 @@ export function createTerminalHost({
           pid: session.pid,
           createdAt: session.createdAt,
           lastActiveAt: session.lastActiveAt,
+          spawnedAt: session.spawnedAt,
           cols: session.cols,
           rows: session.rows,
           buffer: persistedBufferTail(session.buffer),
@@ -960,7 +961,8 @@ export function createTerminalHost({
     // 进程生日（新建与 restart/内切/复活都走这一咽喉）：面板的孵化豁免窗锚点。
     // 记在这而不是 createdAt 上——restart 保记录换进程，createdAt 不动，拿它当
     // 生日会把换壳后的 banner/续接重放漏出豁免窗（误转圈＋内切门误判 working）。
-    // 不落盘：恢复出来的会话没有活进程，等复活重 spawn 时自然记新值。
+    // 落盘保留的是「上一代进程生日」：恢复出的 exited 会话需靠它界定本轮
+    // 对话，不能拿页签 createdAt 抢绑更早的存档；下次复活会覆盖为新生日。
     session.spawnedAt = Date.now();
     // 进程换代即订阅作废：2031 与「问过主题」都是进程内行为，新进程（新 shell
     // 或新 agent 实例）尚未表态；旧进程留下的半截询问尾巴也可能与新输出拼出

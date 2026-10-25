@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { createPanelRouter } from "./panel.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 import { loadOrGenerateToken } from "./pi-relay-token.mjs";
+import { createBindingStore } from "./terminal-conversation-bindings.mjs";
 
 // 路由级：点历史会话续接时，面板只把会话身份（endpoint/id/file）交给服务端，
 // 命令行按 session-scan 的 RESUME_COMMAND 模板重建；客户端给什么命令原文都不接。
@@ -285,13 +286,18 @@ describe("续接历史会话（terminal agent-sessions + resume）", () => {
 // M12-A 内切路由：把已开着的终端就地换成目标会话（同记录 terminate+spawn+身份
 // 换绑），页签不新增。working 判定在面板侧，本路由只接「已决定内切」的请求。
 describe("内切切换会话（terminal sessions switch）", () => {
-  function switchRouter({ root, hostSession, restarted, probe } = {}) {
+  function switchRouter({ root, hostSession, restarted, probe, scanAgentConversations, terminalSessions } = {}) {
     const calls = { restart: [], fetch: [], probe: [] };
+    const terminalBindingStore = createBindingStore({ file: join(root, "terminal-conversation-bindings.json") });
+    terminalBindingStore.set(SESSION_ID, {
+      agentId: "kimi", cwd: "C:\\old", conversationId: "conv-old", file: null, boundAt: 1, source: "bound",
+    });
     const router = createPanelRouter({
       storePaths: { root },
       logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
       fetchRelayAgents: async () => null,
       fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => terminalSessions ?? [],
       createTerminalSession: async (body) => ({ status: 201, body: { id: "t-new", ...body } }),
       fetchTerminalSessionFn: async (id, options) => {
         calls.fetch.push({ id, options });
@@ -309,10 +315,12 @@ describe("内切切换会话（terminal sessions switch）", () => {
           ? { status: 200, body: { id, status: "running", pid: 99, label: body.label, agentId: body.agentId, agentName: body.agentName, resume: body.resume } }
           : restarted;
       },
-      scanAgentConversationsFn: async () => [],
+      scanAgentConversationsFn: scanAgentConversations ?? (async () => []),
       bindingRefreshScheduleFn: () => { calls.bindingRefresh = (calls.bindingRefresh || 0) + 1; },
+      bindingCaptureDebounceMs: 0,
+      terminalBindingStore,
     });
-    return { router, calls };
+    return { router, calls, terminalBindingStore };
   }
 
   it("空白壳内切：launch 带目标 resume 重建，身份三件＋resume 同步进宿主记录", async () => {
@@ -342,7 +350,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
 
   it("全新内切（无 resume，2026-10-25）：agentId＋cwd 就地换新会话，clearResume 清旧身份，不扫绑定", async () => {
     await withFakeAgents(async (cwd) => {
-      const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-fresh-") });
+      const { router, calls, terminalBindingStore } = switchRouter({ root: mkTestDir("anyswitch-switch-fresh-") });
       const { req, res, json } = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
         agentId: "kimi", cwd,
       });
@@ -358,6 +366,44 @@ describe("内切切换会话（terminal sessions switch）", () => {
       assert.ok(typeof forwarded.label === "string" && forwarded.label, "label 同步");
       assert.equal("env" in json(), false, "响应不回显 env");
       assert.equal(calls.bindingRefresh, undefined, "全新内切无目标身份可扫，不做绑定重扫（新存档由捕获路径接管）");
+      assert.equal(terminalBindingStore.get(SESSION_ID), null, "旧对话绑定随全新内切清空，复活不会接回旧会话");
+    });
+  });
+
+  it("全新内切后不抢绑旧历史：捕获以本轮进程出生为界，并在扫描完成时复核代际", async () => {
+    await withFakeAgents(async (cwd) => {
+      const now = Date.now();
+      const oldMeta = { endpoint: "kimi", id: "conv-old", project: cwd, createdAt: now - 9000, lastActive: now - 8000 };
+      const newMeta = { endpoint: "kimi", id: "conv-new", project: cwd, createdAt: now + 1000, lastActive: now + 2000 };
+      let metas = [oldMeta];
+      let scans = 0;
+      let releaseScan;
+      const scanFinished = new Promise((resolve) => { releaseScan = resolve; });
+      const { router, terminalBindingStore } = switchRouter({
+        root: mkTestDir("anyswitch-switch-binding-epoch-"),
+        scanAgentConversations: async () => { scans += 1; if (scans === 1) await scanFinished; return metas; },
+        terminalSessions: [{ id: SESSION_ID, label: "Kimi Code", cwd, shell: "cmd", pid: 99, status: "running", agentId: "kimi", createdAt: now - 10_000, spawnedAt: now }],
+      });
+      const call = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
+      await router.handle(call.req, call.res);
+      assert.equal(call.res.statusCode, 200);
+
+      const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      const listed = router.handle(list.req, list.res);
+      await new Promise((resolve) => setImmediate(resolve));
+      // 下一轮内切已经开始，但上一轮的扫描尚未返回：旧扫描不得落库。
+      metas = [oldMeta, newMeta];
+      const next = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", { agentId: "kimi", cwd });
+      await router.handle(next.req, next.res);
+      releaseScan();
+      await listed;
+      assert.equal(terminalBindingStore.get(SESSION_ID), null, "过期扫描结果在代际复核处作废");
+      assert.equal(list.res.statusCode, 200);
+
+      const settled = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(settled.req, settled.res);
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(terminalBindingStore.get(SESSION_ID)?.conversationId, "conv-new", "只绑定本轮进程出生后的新对话");
     });
   });
 

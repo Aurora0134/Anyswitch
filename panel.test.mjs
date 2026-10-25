@@ -12242,6 +12242,7 @@ describe("终端会话复活（revive 路由重组装凭据）", () => {
       assert.equal(res.statusCode, 200);
       assert.equal(restarts.length, 1);
       assert.deepEqual(restarts[0].body.launch.args.slice(-2), ["--session", "conv-42"], "kimi 按 --session <id> 续会");
+      assert.deepEqual(restarts[0].body.resume, { endpoint: "kimi", id: "conv-42" }, "复活的是旧对话，宿主 resume 身份同步（不得渲染成新会话兜底行）");
       assert.equal(scheduled.length, 1, "复活带了 resume 才布自愈重扫");
       // 绑定里的 file 被扫描现值刷新（续写原存档的 agent 上这是同值确认）。
       assert.equal(readTerminalBindings(root)["5e55b001"].file, "F:\\kimi\\conv-42");

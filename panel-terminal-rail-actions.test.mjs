@@ -770,7 +770,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       await flush();
     });
 
-    it("idle 聚焦页签：⊕ 就地换新会话（与「新建会话」同门），POST 体只有组目录 cwd", async () => {
+    it("idle 聚焦页签：⊕ 就地换新会话（与「新建会话」同门），POST 体带 agentId＋组目录 cwd", async () => {
       const { fn, log } = runCreate({
         collapsed: ["C:\\dev\\alpha"],
         sessions: { "t-a": { id: "t-a", backend: true, agentId: "kimi", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle" } },
@@ -779,7 +779,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
       fn("C:\\dev\\alpha");
       await flush();
       assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组照常先展开");
-      assert.deepEqual(log.switchBodies, [{ cwd: "C:\\dev\\alpha" }], "内切体只有 cwd，无 resume 键");
+      assert.deepEqual(log.switchBodies, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }], "内切体必须带目标 agentId 与组目录，无 resume 键");
       assert.deepEqual(log.posts, [], "不开新页签");
     });
 
@@ -1994,6 +1994,57 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
   });
 });
 
+describe("M13 新会话按钮的首次交互动画", () => {
+  it("第一次按下新建按钮就武装动画，不必先点历史行", () => {
+    const listeners = {};
+    const fn = new Function("listeners", `
+      let terminalRailMotionArmed = false;
+      const dir = { addEventListener: (type, fn) => { listeners[type] = fn; } };
+      const btn = () => ({ addEventListener() {}, focus() {}, blur() {}, classList: { add() {}, remove() {} } });
+      const els = {
+        railTerminalDir: dir, railTermHistoryList: null,
+        railTermNewBtn: btn(), railTermSearchBtn: btn(), railTermSearchInput: btn(),
+        railTermSearchClear: btn(), railTermViewOptionsBtn: btn(), railBackBtn: null,
+      };
+      const document = { addEventListener() {} };
+      function $(id) { return els[id] || null; }
+      function loadTerminalRailViewPrefs() {}
+      function initTerminalRailScrollbarQuiet() {}
+      function closeTerminalRailGroupMenu() {}
+      function closeTerminalRailViewMenu() {}
+      function closeTerminalRailSearch() {}
+      function closeTerminalRailHoverCard() {}
+      function openTerminalRailSearch() {}
+      function openTerminalRailViewMenu() {}
+      function onTerminalRailSearchInput() {}
+      function scheduleTerminalRailHoverCard() {}
+      function terminalRailHeadKey() {}
+      function terminalRailCloseSession() {}
+      function terminalRailArchiveSession() {}
+      function toggleTerminalRailGroupMenu() {}
+      function terminalRailCreateTerminalInDir() {}
+      function terminalRailRemoveGroup() {}
+      function applyTerminalRailViewChoice() {}
+      function terminalRailActivateSession() {}
+      function terminalRailResumeHistoryRow() {}
+      function terminalRailUnarchiveSession() {}
+      function toggleTerminalRailGroup() {}
+      function toggleTerminalRailWatermark() {}
+      function terminalRailCreateTerminal() {}
+      function refreshTerminalRailHistory() {}
+      function terminalRailMoveInManualOrder() {}
+      function renderTerminalRailHistory() {}
+      function toast() {}
+      ${extractFn("initTerminalRail")}
+      return { init: initTerminalRail, armed: () => terminalRailMotionArmed };
+    `)(listeners);
+    fn.init();
+    assert.equal(typeof listeners.pointerdown, "function", "首次交互监听挂在包含新建按钮的栏体");
+    listeners.pointerdown();
+    assert.equal(fn.armed(), true, "新建按钮首次 pointerdown 即放行本帧动效");
+  });
+});
+
 describe("M8 复审必修 2：段头行观感照抄 m6c §B5", () => {
   const decls = (selector) => {
     const at = panelCss.indexOf(selector);
@@ -2466,9 +2517,9 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
     file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
   };
-  const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl }) => {
+  const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl, realEnrich = false }) => {
     const log = { gets: [], switchBodies: [], creates: [], toasts: [], renders: 0 };
-    const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", `      let terminalBackendReady = true;
+    const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", "realEnrich", `      let terminalBackendReady = true;
       const terminalBackendSessions = sessions;
       let activeTerminalPreviewId = activeId;
       let terminalSwitchInFlight = false;
@@ -2482,9 +2533,13 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
       // activeRequests 置 working/idle。
       function enrichTerminalSessions(agents) {
-        const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
-        const working = !!(row && row.activeRequests > 0);
-        for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+        if (!realEnrich) {
+          const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
+          const working = !!(row && row.activeRequests > 0);
+          for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+          return;
+        }
+        enrichTerminalSessionsReal(agents);
       }
       function createAgentTerminal(opts) { log.creates.push(opts); return Promise.resolve(createImpl(opts)); }
       function terminalBackendSession(item) { return { ...item }; }
@@ -2492,6 +2547,20 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
       function panelError(err, fallback) { return fallback; }
       function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+      function boardRoutingChains() { return []; }
+      let routeRuntimeState = "none";
+      let routeRuntimeCache = null;
+      const terminalDoneUnread = new Map();
+      const terminalPrevWorking = new Map();
+      ${extractFn("terminalInstanceRow")}
+      ${extractFn("terminalMetricNum")}
+      ${extractFn("terminalWorkTime")}
+      ${extractFn("terminalMetricsFromInstance")}
+      ${extractFn("terminalRouteForEndpoint")}
+      ${extractFn("terminalBusyByOutput")}
+      ${extractFn("noteTerminalWorkingStatus")}
+      ${extractFn("enrichTerminalSessions")}
+      const enrichTerminalSessionsReal = enrichTerminalSessions;
       ${extractFn("terminalRailSwitchOrCreateCore")}
       ${extractFn("terminalRailSwitchOrCreate")}
       return {
@@ -2500,7 +2569,7 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
         gate: () => terminalSwitchInFlight,
         sessions: terminalBackendSessions,
       };
-    `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })));
+    `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
     return { fn, log };
   };
   const AGENTS_IDLE = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 0 }] }] };
@@ -2543,6 +2612,20 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       assert.equal(log.creates.length, 0, `${name} 不开新页签`);
       assert.ok(log.gets.some((g) => g.path.endsWith("/switch")), `${name} 走内切`);
     }
+  });
+
+  it("已退出会话不被迟到的活跃信号误判 working：点历史仍内切，不多开", async () => {
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE, status: "idle", backendState: { status: "exited" } } },
+      activeId: "t-a",
+      agentsImpl: async () => AGENTS_WORKING, hostReadImpl: async () => HOST_EXITED,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 0, "进程已退出：没有运行任务可保护，不开新页签");
+    assert.deepEqual(log.toasts, [], "真实富化依赖齐全，不把异常误当分支结果");
+    assert.equal(log.switchBodies.length, 1, "按 exited 矩阵内切");
   });
 
   it("working 不内切：保护在跑任务，走现状新开页签，原页签不动", async () => {
@@ -2665,19 +2748,19 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
   });
 
   // ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
-  // body 不带 resume 键＝把当前页签就地换成一个全新 agent 会话；服务端按缺省走
-  // agentId＋cwd 的全新分支并清空旧 resume。换绑快照 resume 为 null——兜底行
+  // body 带 agentId＋cwd、不带 resume 键＝把当前页签就地换成一个全新 agent
+  // 会话；服务端按目标身份清空旧 resume。换绑快照 resume 为 null——兜底行
   // 推导、去重聚焦都以此为准。
   const SWITCH_FRESH_OK = { id: "t-a", status: "running", pid: 99, label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", resume: null };
 
-  it("全新内切：idle 页签就地换新会话，POST 体只有 cwd（无 resume 键），不开新页签", async () => {
+  it("全新内切：idle 页签就地换新会话，POST 体带 agentId＋cwd（无 resume 键），不开新页签", async () => {
     const { fn, log } = runSwitch({
       sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
       agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_FRESH_OK,
     });
     fn.goFresh({ agentId: "kimi", cwd: "C:\\dev\\alpha" });
     await flush();
-    assert.deepEqual(log.switchBodies, [{ cwd: "C:\\dev\\alpha" }], "全新内切不带 resume 键");
+    assert.deepEqual(log.switchBodies, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }], "全新内切必须带目标 agentId，且不带 resume 键");
     assert.equal(log.creates.length, 0, "不开新页签");
     assert.equal(fn.sessions["t-a"].resume, null, "旧会话身份被清空（兜底行/去重都以新会话为准）");
     assert.equal(fn.sessions["t-a"].agentId, "kimi", "agent 身份换绑");
@@ -2857,13 +2940,12 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
   });
 
   describe("armed 门挂点（源码钉死）", () => {
-    it("列表本体捕获相挂 pointerdown/keydown——真实交互才武装，合成点击不武装", () => {
+    it("会话栏捕获相挂 pointerdown/keydown——首次新建也武装，合成点击不武装", () => {
       const init = extractFn("initTerminalRail");
-      assert.ok(init.includes('listEl.addEventListener("pointerdown", armMotion, { once: true, capture: true })'),
-        "pointerdown 捕获相挂列表（dsh AnimatedRows 同款）");
-      assert.ok(init.includes('listEl.addEventListener("keydown", armMotion, { once: true, capture: true })'),
-        "keydown 捕获相挂列表");
-      assert.ok(!/dir\.addEventListener\("pointerdown"/.test(init), "不再挂栏体气泡相监听");
+      assert.ok(init.includes('dir.addEventListener("pointerdown", armMotion, { once: true, capture: true })'),
+        "pointerdown 捕获相挂栏体（覆盖列表外的新建按钮）");
+      assert.ok(init.includes('dir.addEventListener("keydown", armMotion, { once: true, capture: true })'),
+        "keydown 捕获相挂栏体");
       assert.ok(extractFn("terminalRailMotionEnabled").includes("!terminalRailMotionArmed"),
         "动效开关先看 armed（未武装＝瞬时）");
     });
