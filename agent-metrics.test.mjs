@@ -5452,6 +5452,82 @@ describe("probe row claiming by image name (probe self-match regression)", () =>
   });
 });
 
+// pi 原生形态（上游发布的原生 pi.exe）计数：PS 白名单本就拉取 pi.exe 行，但
+// 桶表缺席时行→桶查不到即跳过——原生行只进谱系表，不进任何计数（2026-10-25
+// 体检：原生形态潜伏漏计，现状 npm 形态不受影响）。这里钉三件事：原生行直接
+// 计入 pi；「pi.exe 父＋node 子」谱系只算一次；npm 形态既有行为不回归。
+describe("pi 原生形态计数（pi.exe 镜像桶）", () => {
+  // PowerShell 探测行格式 <pid>,<ppid>,<name>,<cmdline>（同终端归属面夹具）
+  const psScan = (rows) => rows.join("\r\n") + "\r\n";
+  const nativePi = String.raw`7000,9000,pi.exe,C:\Tools\pi\pi.exe --session`;
+  const scan = async (rows) => {
+    const execFn = (cmd, opts, cb) => cb(null, psScan(rows));
+    const collector = testCollector({ execFn, nowFn: () => 10000 });
+    return collector.scanProcesses();
+  };
+
+  it("native pi.exe row counts into pi and joins the pid set", async () => {
+    const p = await scan([nativePi]);
+    assert.equal(p.pi, 1);
+    assert.ok(p.piPids.has(7000), "pid 进 piPids（run 锚与终端归属面都吃这个集合）");
+  });
+
+  it("panel face: a lone native pi.exe marks the pi card running with processCount 1", async () => {
+    const execFn = (cmd, opts, cb) => cb(null, psScan([nativePi]));
+    const collector = testCollector({ execFn, nowFn: () => 10000 });
+    const status = await collector.getAgentsStatus();
+    const pi = status.find((a) => a.id === "pi");
+    assert.equal(pi.status, "running");
+    assert.equal(pi.processCount, 1);
+  });
+
+  it("pi.exe parent + node child (pi paths) counts once: the node row is suppressed", async () => {
+    const p = await scan([
+      String.raw`7000,9000,pi.exe,C:\Tools\pi\pi.exe`,
+      String.raw`7100,7000,node.exe,C:\Tools\pi\node_modules\@earendil-works\pi-coding-agent\dist\bundle\cli.js`,
+    ]);
+    assert.equal(p.pi, 1, "同一会话两种形态并存时只算一次");
+    assert.ok(p.piPids.has(7000), "会话记在原生 pi.exe 名下");
+    assert.equal(p.piPids.has(7100), false, "node 子行不重复计数");
+  });
+
+  it("suppression crosses a cmd /c shim between the pi.exe parent and the node child", async () => {
+    const p = await scan([
+      String.raw`7000,9000,pi.exe,C:\Tools\pi\pi.exe`,
+      String.raw`7050,7000,cmd.exe,C:\WINDOWS\system32\cmd.exe /d /s /c "C:\Program Files\nodejs\node.exe" C:\Tools\pi\bin\pi.js`,
+      String.raw`7100,7050,node.exe,"C:\Program Files\nodejs\node.exe" C:\Tools\pi\bin\pi.js`,
+    ]);
+    assert.equal(p.pi, 1);
+    assert.ok(p.piPids.has(7000));
+    assert.equal(p.piPids.has(7100), false, "隔垫片的 node 子行同样被压掉");
+  });
+
+  it("npm-form pi beside an unrelated native pi.exe counts both", async () => {
+    const p = await scan([
+      nativePi,
+      String.raw`4321,500,node.exe,C:\Users\tester\AppData\Roaming\npm\node_modules\@earendil-works\pi-coding-agent\dist\cli.js`,
+    ]);
+    assert.equal(p.pi, 2, "两个独立会话各算一次：npm 形态不受邻近 pi.exe 压制");
+    assert.ok(p.piPids.has(7000));
+    assert.ok(p.piPids.has(4321));
+  });
+
+  it("lineage table keeps every pi.exe row whether or not a branch claims it", async () => {
+    const p = await scan([nativePi]);
+    assert.equal(p.ppidByPid.get(7000), 9000);
+    assert.ok(p.seenPids.has(7000));
+  });
+
+  it("tasklist rows (no command line) count pi.exe accept-by-name", async () => {
+    const csv = '"pi.exe","7000","Console","1","55,000 K"\r\n';
+    const execFn = (cmd, opts, cb) => cb(null, csv);
+    const collector = testCollector({ execFn, nowFn: () => 10000 });
+    const p = await collector.scanProcesses();
+    assert.equal(p.pi, 1);
+    assert.ok(p.piPids.has(7000));
+  });
+});
+
 describe("claude process-scan helper filtering and ended-latch revival", () => {
   const wmic = (rows) => `Node,CommandLine,Name,ProcessId\r\n${rows.join("\r\n")}\r\n`;
   const claude = (status) => status.find((a) => a.id === "claude");

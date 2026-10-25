@@ -508,6 +508,14 @@ const AGENT_IMAGE_BUCKETS = [
   ["claude.exe", "claude"],
   ["opencode.exe", "opencode"],
   ["dsh.exe", "dsh"],
+  // pi 的原生形态（上游发布的原生二进制，若在）：镜像名即会话进程，由 pi 桶
+  // 分支照 dsh.exe 的 accept-by-name 直接计数——isPiNode 那套 @earendil-works
+  // 包路径谓词对原生行的命令行不适用。白名单（PS_PROCESS_SCAN_QUERY）本就
+  // 拉取 pi.exe 行，桶表缺席时该行只进谱系表不进任何计数，原生形态整段漏计
+  // （2026-10-25 体检确认的潜伏缺陷）。与 node.exe 形态（npm 包）是同一会话
+  // 可能的两种形态，「pi.exe 父＋node 子」谱系的双计防护见 parseTasklistCsv
+  // 循环后的裁决。
+  ["pi.exe", "pi"],
   ["grok.exe", "grok"],
   // Kimi Code 的官方桌面端是原生 Electron 包：镜像名 `Kimi Code.exe`，命令行里
   // 没有任何 `kimi-code` 安装路径特征，下面 node.exe 分支的那套路径谓词永远匹配
@@ -1042,6 +1050,13 @@ function parseTasklistCsv(stdout) {
   const result = createEmptyProcessScan();
   if (typeof stdout !== "string" || stdout.length === 0) return result;
 
+  // pi 双计防护的工作区（写入见 pi 桶分支与 node 分支，裁决在循环后）：
+  // nativePiPids 收原生 pi.exe 行的 pid；piNodeCandidates 收命中 isPiNode 的
+  // node 行 pid。探测输出里行序不定（pi.exe 父行可能排在 node 子行之后），
+  // 祖链裁决只能等 ppidByPid 收全后统一做。
+  const nativePiPids = new Set();
+  const piNodeCandidates = [];
+
   const lines = stdout.split(/\r?\n/);
   for (const line of lines) {
     const trimmed = line.trim();
@@ -1275,6 +1290,18 @@ function parseTasklistCsv(stdout) {
         result.grok += 1;
         if (pid) result.grokPids.add(pid);
       }
+    } else if (bucket === "pi") {
+      // pi 原生形态：镜像名即会话进程，accept-by-name 直接计数（无命令列的
+      // tasklist 降级轮同此，与其余端点的残差一致）。原生二进制的辅助子进程
+      // 形状无本机取证，先不设过滤——宁可多算不漏算，等真形态落地再收。
+      // 双计防护的数据面：原生启动器若拉起 node 跑包路径（「pi.exe 父＋node
+      // 子」谱系），node 子行会同时命中 isPiNode——pid 先记入 nativePiPids，
+      // 循环后的裁决把这类 node 行压掉，一个会话只算一次。
+      result.pi += 1;
+      if (pid) {
+        result.piPids.add(pid);
+        nativePiPids.add(pid);
+      }
     } else if (bucket === "node") {
       // The scoped package name must appear as an install PATH (trailing
       // separator): Claude Code's auto-update check spawns
@@ -1330,8 +1357,10 @@ function parseTasklistCsv(stdout) {
          lower.includes("@earendil-works/pi-coding-agent/") ||
          lower.includes("@earendil-works\\pi-coding-agent\\"));
       if (isPiNode) {
-        result.pi += 1;
-        if (pid) result.piPids.add(pid);
+        // 计数裁决推迟到循环后（pi 双计防护）：node 行与 pi.exe 父行在探测
+        // 输出里的先后不定，祖链压制要等 ppidByPid 收全。无 pi.exe 祖链时
+        // 循环后照旧逐行计数，npm 形态行为不变。
+        piNodeCandidates.push(pid);
       }
       // Same install-path rule as claude: `npm view @moonshot-ai/kimi-code`
       // style maintenance processes must not register as kimi instances.
@@ -1354,6 +1383,36 @@ function parseTasklistCsv(stdout) {
       }
     }
   }
+
+  // pi 双计裁决：命中 isPiNode 的 node 行若祖链上有原生 pi.exe 行（原生启动
+  // 器拉起 node 跑 @earendil-works 包；链上可能隔着 cmd /c 垫片——启动链穿
+  // 垫片是本仓既有谱系形状），会话属 pi.exe、node 行不重复计数。ppidByPid
+  // 在循环里已收全（每行入表先于分派），行序无关。走查与
+  // findDescendantClientPid 同款：深度上限＋visited 防环/防脏指针。npm 形态
+  // （祖链无 pi.exe）不受影响，逐行照旧计数。pid 解析失败的 node 行无法走
+  // 查，维持既有「认出即计数」。
+  for (const nodePid of piNodeCandidates) {
+    let claimedByNativePi = false;
+    if (nodePid !== null) {
+      let current = nodePid;
+      const seen = new Set([current]);
+      for (let depth = 0; depth < INSTANCE_LINEAGE_MAX_DEPTH; depth += 1) {
+        const parent = result.ppidByPid.get(current);
+        if (parent === undefined || seen.has(parent)) break;
+        if (nativePiPids.has(parent)) {
+          claimedByNativePi = true;
+          break;
+        }
+        seen.add(parent);
+        current = parent;
+      }
+    }
+    if (!claimedByNativePi) {
+      result.pi += 1;
+      if (nodePid !== null) result.piPids.add(nodePid);
+    }
+  }
+
   return result;
 }
 
