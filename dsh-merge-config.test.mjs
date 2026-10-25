@@ -15,7 +15,7 @@ import {
   dshYamlSchema,
   deriveAutoRouteChannel,
 } from "./dsh-merge-config.mjs";
-import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
@@ -434,6 +434,95 @@ test("坏掉的 profile patch 只被跳过、不被改动，同期其它界面�
     assert.equal(readFileSync(brokenPath, "utf8"), broken, "被跳过的文件一个字节都不许动");
     const web = yaml.load(readFileSync(join(profiles, "web", "cordis.patch.yml"), "utf8"));
     assert.equal(web.find((entry) => entry.id === "llm-pi-ai").config.providers._poke.baseURL, "http://127.0.0.1:47821/openai/poke/v1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// 失联不得伪装成功（2026-10-25 体检项）：dsh 在装而 profiles 目录失联（被移走、读不出）
+// 时，同步必须报 ok:false，交给 agent-sync 既有的 warn 日志与 failed 名单接管，而不是顶
+// 着「no dsh profiles」的 ok 计成同步成功；「dsh 未装/没有 profile」维持 ok+unchanged 正常
+// 跳过。sidecar 里的托管记录（上次确实往 profiles 里写过渠道）是「曾经有 profile」的存在
+// 性前提，家目录整个不在则视为未装，不得拿残留记录报假失败。
+const SYNC_PRESENCE_STORE = {
+  version: 2,
+  providers: {
+    poke: {
+      displayName: "Poke",
+      baseURL: "https://poke.example/v1",
+      protocol: "openai-compatible",
+      credentialFile: "poke.dpapi",
+      models: { "claude-opus-5": { displayName: "Claude Opus 5", contextWindow: 200000 } },
+    },
+  },
+};
+
+test("dsh 在装而 profiles 目录失联时必须报失败，不得伪装成正常跳过", async () => {
+  const dir = mkTestDir("dsh-patch-lost-");
+  try {
+    const home = join(dir, "home");
+    mkdirSync(join(home, "profiles", "dsh-tui"), { recursive: true });
+    const first = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.equal(first.ok, true, first.reason);
+    // profile 目录被整体移走：dsh 还在装，托管渠道却再也写不进去了。
+    renameSync(join(home, "profiles"), join(home, "profiles.moved-away"));
+    const second = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.equal(second.ok, false, "失联必须走可见失败，不能计成同步成功");
+    assert.equal(second.unchanged, true);
+    assert.match(second.reason, /dsh profiles directory/i, `原因要可读：${second.reason}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("profiles 位置被普通文件顶替（patch 面读不出来）时必须报失败", async () => {
+  const dir = mkTestDir("dsh-patch-notdir-");
+  try {
+    const home = join(dir, "home");
+    mkdirSync(join(home, "profiles", "dsh-tui"), { recursive: true });
+    const first = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.equal(first.ok, true, first.reason);
+    rmSync(join(home, "profiles"), { recursive: true, force: true });
+    writeFileSync(join(home, "profiles"), "not a directory\n", "utf8");
+    const second = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.equal(second.ok, false, "patch 面读不出来必须走可见失败");
+    assert.match(second.reason, /dsh profiles directory/i, `原因要可读：${second.reason}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dsh 未装（家目录不存在）时维持 ok+unchanged 正常跳过", async () => {
+  const dir = mkTestDir("dsh-patch-absent-");
+  try {
+    const result = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, join(dir, "home"));
+    assert.deepEqual(result, { ok: true, unchanged: true, reason: "no dsh profiles" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("profiles 目录在而是空的时候维持 ok+unchanged 正常跳过", async () => {
+  const dir = mkTestDir("dsh-patch-empty-");
+  try {
+    mkdirSync(join(dir, "home", "profiles"), { recursive: true });
+    const result = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, join(dir, "home"));
+    assert.deepEqual(result, { ok: true, unchanged: true, reason: "no dsh profiles" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dsh 卸载后（家目录整个没了）不因 sidecar 残留记录报假失败", async () => {
+  const dir = mkTestDir("dsh-patch-gone-");
+  try {
+    const home = join(dir, "home");
+    mkdirSync(join(home, "profiles", "dsh-tui"), { recursive: true });
+    const first = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.equal(first.ok, true, first.reason);
+    rmSync(home, { recursive: true, force: true });
+    const second = await writeDshProfilePatches(SYNC_PRESENCE_STORE, 47821, TOKEN, dir, home);
+    assert.deepEqual(second, { ok: true, unchanged: true, reason: "no dsh profiles" }, "未装就是未装，不得拿 sidecar 残留当失联证据");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

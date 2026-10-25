@@ -302,18 +302,29 @@ export function readDshSettings(filePath, yaml) {
 export const DSH_LLM_ENTRY_ID = "llm-pi-ai";
 export const DSH_LLM_ENTRY_NAME = "@deepseek-ai/dsh-llm-pi-ai";
 
-export function dshProfilePatchPaths(dshHome) {
+// 读 profiles 目录就是在看 dsh 的 patch 面。读成功（哪怕一条 profile 都没有）说明
+// 真的就是「无 profile」；读失败说明 patch 面本身失联或不可读，同步必须把它报成
+// 失败而不是伪装成「no dsh profiles」。只罗列路径的消费方（byok 导入、卸载清理）
+// 经 dshProfilePatchPaths 继续拿普通数组。
+function readDshProfilePatchPaths(dshHome) {
   const profilesDir = join(dshHome, "profiles");
-  let entries;
   try {
-    entries = readdirSync(profilesDir, { withFileTypes: true });
-  } catch {
-    return [];
+    const entries = readdirSync(profilesDir, { withFileTypes: true });
+    return {
+      ok: true,
+      paths: entries
+        .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
+        .map((entry) => join(profilesDir, entry.name, "cordis.patch.yml"))
+        .sort(),
+    };
+  } catch (error) {
+    return { ok: false, error };
   }
-  return entries
-    .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
-    .map((entry) => join(profilesDir, entry.name, "cordis.patch.yml"))
-    .sort();
+}
+
+export function dshProfilePatchPaths(dshHome) {
+  const read = readDshProfilePatchPaths(dshHome);
+  return read.ok ? read.paths : [];
 }
 
 function loadPatchEntries(filePath, yaml) {
@@ -400,7 +411,22 @@ async function writeDshProfilePatchesWithYaml(store, port, token, sidecarRoot, d
   for (const [providerId, provider] of Object.entries(providers)) {
     Object.assign(built, buildDshProviderEntry(providerId, provider, port, token, knowledge, catalog, effortsEnabled));
   }
-  const paths = dshProfilePatchPaths(dshHome);
+  const read = readDshProfilePatchPaths(dshHome);
+  if (!read.ok) {
+    // 失联不得伪装成功。家目录整个不在＝dsh 未装（卸载清掉家目录是正常状态），维持
+    // 正常跳过；家目录在而 profiles 读不出来时，ENOENT 只有在 sidecar 记着上次确实往
+    // profile 里写过渠道的情况下才算失联，否则可能只是装了 dsh 还没建 profile；其余读
+    // 错误（权限、profiles 被普通文件顶替等）一律按失联报失败，交给 agent-sync 的
+    // warn 日志与 failed 名单接管。
+    const homeMissing = !existsSync(dshHome);
+    const everManaged = previousManaged.length > 0;
+    if (!homeMissing && (read.error?.code !== "ENOENT" || everManaged)) {
+      const detail = read.error?.message ?? String(read.error);
+      return { ok: false, unchanged: true, reason: `dsh profiles directory is missing or unreadable: ${detail}` };
+    }
+    return { ok: true, unchanged: true, reason: "no dsh profiles" };
+  }
+  const paths = read.paths;
   if (paths.length === 0) {
     return { ok: true, unchanged: true, reason: "no dsh profiles" };
   }
