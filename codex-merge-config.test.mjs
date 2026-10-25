@@ -742,3 +742,77 @@ describe("writeCodexConfig", () => {
     assert.equal(codexConfigPath({ USERPROFILE: "/home/u" }), join("/home/u", ".codex", "config.toml"));
   });
 });
+
+describe("blank-line convergence between the top-level key region and the first table", () => {
+  // 生产事故形态：insertTopLevelKey 曾用 /\s*\[/ 在整段文本上找「首个表头」，
+  // \s* 跨行把空行带一口吞掉，匹配点落在空行带首行而非表头行——每一轮同步
+  // 净增一个空行，生产 config.toml 积了 ~900 个空行。
+  const pollutedConfig = () => [
+    'model = "gpt-6-astra"',
+    'model_provider = "anyswitch-poke-api"',
+    'model_reasoning_effort = "medium"',
+    `model_catalog_json = "${CATALOG_POINTER_VALUE}"`,
+    ...Array.from({ length: 900 }, () => ""),
+    "[desktop]",
+    'theme = "dark"',
+    "",
+    MANAGED_BEGIN,
+    '[model_providers."anyswitch-poke-api"]',
+    'name = "Poke API"',
+    'base_url = "http://127.0.0.1:47821/openai/poke-api/v1"',
+    'wire_api = "responses"',
+    "",
+    MANAGED_END,
+    "",
+  ].join("\n");
+
+  it("stops growing on the polluted config: three merges, byte-identical from the second on", () => {
+    assert.ok(CATALOG_TEMPLATE, "template asset loads — the re-inserted pointer is the per-round writer");
+    const r1 = mergeCodexConfigToml(pollutedConfig(), extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    const r2 = mergeCodexConfigToml(r1.text, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    const r3 = mergeCodexConfigToml(r2.text, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.equal(r2.text, r1.text, "the second sync must not add a byte");
+    assert.equal(r3.text, r1.text, "the third sync must not add a byte");
+    // 收敛后：首表之前不再有连续两个空行，表内容逐字未动。
+    const head = r1.text.slice(0, r1.text.indexOf("[desktop]"));
+    assert.doesNotMatch(head, /\n\n\n/, "no two consecutive blank lines ahead of the first table");
+    assert.match(r1.text, /\[desktop\]\ntheme = "dark"/, "the table's content is untouched");
+    assert.match(r1.text, /^model_catalog_json = "model-catalogs\/anyswitch-models\.json"$/m, "the pointer still lands in the top-level key region");
+  });
+
+  it("keeps a clean config's shape: one separating blank, pointer ahead of the first table", () => {
+    const existing = ['model = "gpt-6-astra"', "", "[desktop]", 'theme = "dark"', ""].join("\n");
+    const once = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.match(
+      once.text,
+      /^model = "gpt-6-astra"\nmodel_catalog_json = "model-catalogs\/anyswitch-models\.json"\n\n\[desktop\]\ntheme = "dark"$/m,
+      "the user's single separating blank survives, the pointer slots into the key region",
+    );
+    const twice = mergeCodexConfigToml(once.text, extractManagedProviders(STORE), 47821, "tok", null, CATALOG_TEMPLATE);
+    assert.equal(twice.text, once.text);
+  });
+
+  it("folds only the run ahead of the first table — table interiors and the user's other blanks stay verbatim", () => {
+    const existing = [
+      'model = "gpt-6-astra"',
+      "",
+      "",
+      "notify = true",
+      "",
+      "",
+      "",
+      "[desktop]",
+      'theme = "dark"',
+      "",
+      "",
+      "",
+      "[mcp_servers.fs]",
+      'command = "npx"',
+      "",
+    ].join("\n");
+    const { text } = mergeCodexConfigToml(existing, extractManagedProviders(STORE), 47821, "tok");
+    assert.match(text, /theme = "dark"\n\n\n\n\[mcp_servers\.fs\]/, "blank lines inside a table are not ours to fold");
+    assert.match(text, /^model = "gpt-6-astra"\n\n\nnotify = true$/m, "blank lines between the user's own keys are not ours to fold");
+    assert.match(text, /notify = true\n\n\[desktop\]/, "the band sitting on the first table folds to one blank line");
+  });
+});

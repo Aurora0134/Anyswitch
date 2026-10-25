@@ -265,9 +265,13 @@ function extractCatalogPointer(text) {
   return { text: out.join("\n"), userPointer };
 }
 
-// A top-level key must sit before the first table header.
+// A top-level key must sit before the first table header. The match anchors
+// the header LINE itself (line-start `[` with only horizontal whitespace
+// before it): a `\s*` here would crawl across the blank-line band in front of
+// the first table and match there, leaving the whole band in `after` — the
+// sync then appended one blank line per round on top of it.
 function insertTopLevelKey(text, keyLine) {
-  const tableMatch = text.match(/^\s*\[/m);
+  const tableMatch = text.match(/^[ \t]*\[/m);
   if (!tableMatch) {
     const head = text.replace(/\s+$/, "");
     return (head ? `${head}\n\n` : "") + keyLine + "\n";
@@ -420,6 +424,20 @@ export function protectModelKey(text, catalogModels, catalogPointer) {
   return text;
 }
 
+// 收敛本模块自己制造的残留：顶层键区与首表之间紧贴表头的那个空行连续段折叠
+// 至至多一个空行（旧 insertTopLevelKey 把「首个表头」匹配点落在空行带上，每
+// 轮同步净增一空行，生产 config.toml 积了 ~900 个空行）。范围严格限于此区域：
+// 表内空行与用户键与键之间的空行一律不动。
+function collapseTopLevelBlankRun(text) {
+  const lines = text.split(/\r?\n/);
+  const firstTable = lines.findIndex((line) => /^\s*\[/.test(line));
+  if (firstTable <= 0) return text;
+  let runStart = firstTable;
+  while (runStart > 0 && /^\s*$/.test(lines[runStart - 1])) runStart -= 1;
+  if (firstTable - runStart <= 1) return text;
+  return [...lines.slice(0, runStart), "", ...lines.slice(firstTable)].join("\n");
+}
+
 export function mergeCodexConfigToml(existingText, managedProviders, port, token, autoChannel = null, catalogTemplate = null, effortCatalog = null) {
   const preserved = dropLegacyKeys(stripManagedTables(stripManagedBlock(existingText ?? "")));
   // The managed block is regenerated wholesale on every merge, so appending
@@ -433,7 +451,7 @@ export function mergeCodexConfigToml(existingText, managedProviders, port, token
   // feature off: our stale pointer is stripped and no fresh one is written.
   const catalogModels = catalogTemplate ? collectCodexCatalogModels(providers) : new Map();
   const pointer = extractCatalogPointer(preserved);
-  let head = pointer.text;
+  let head = collapseTopLevelBlankRun(pointer.text);
   let catalogPointer = "none";
   if (pointer.userPointer !== null) {
     catalogPointer = "user";
