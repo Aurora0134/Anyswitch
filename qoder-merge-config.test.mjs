@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, readFileSync, readdirSync, mkdirSync } from "node:fs";
+import { writeFileSync, readFileSync, readdirSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -622,6 +622,22 @@ describe("writeQoderConfig (high-level)", () => {
     assert.ok(result.reason.includes("unparseable"));
     // The broken file must be left untouched.
     assert.equal(readFileSync(settingsPath, "utf8"), "{ broken json");
+  });
+
+  it("refuses to write when the settings path is relative (home unresolved)", () => {
+    // home 变量缺失的调用方（agent-sync / qoder-launcher / uninstall）会把
+    // join("", ".qoder", …) 的相对路径喂进来：真实用户配置不被更新，写入器却会
+    // 在进程 CWD 静默建出 .qoder/settings.json。合并入口必须拒绝相对路径落盘。
+    const dir = mkTestDir("qoder-write-test-");
+    const cwdQoderDir = join(process.cwd(), ".qoder");
+    assert.equal(existsSync(cwdQoderDir), false, "CWD 里不应已有 .qoder 目录（环境不对就先失败，避免误删）");
+    const result = writeQoderConfig(STORE, PORT, TOKEN, dir, join(".qoder", "settings.json"));
+    // 红阶段这里真的会在 CWD 写出 .qoder；断言前先清掉自证不留痕。
+    if (existsSync(cwdQoderDir)) rmSync(cwdQoderDir, { recursive: true, force: true });
+    assert.equal(result.ok, false);
+    assert.equal(result.unchanged, true, "相对路径一个字节都不该写");
+    assert.ok(result.reason.length > 0, "失败原因非空");
+    assert.equal(existsSync(cwdQoderDir), false, "CWD 里没有新落盘的 .qoder");
   });
 });
 

@@ -18,7 +18,7 @@
 // one, so removed providers/chains drop out on the next sync.
 
 import { readFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { createHash } from "node:crypto";
 import { contentHash, atomicWriteFile, pruneBackups } from "./atomic-write.mjs";
 import { readSidecar as readSidecarFile, writeSidecar as writeSidecarFile, AUTO_CHANNEL_KEY, deriveAnyswitchChannel } from "./merge-common.mjs";
@@ -264,6 +264,17 @@ export function writeQoderSettingsWithBackup(filePath, data) {
 // High-level write: read existing settings, merge managed providers, write
 // back with backup. Returns { ok, unchanged, backupPath?, reason? }.
 export function writeQoderConfig(store, port, token, sidecarRoot, settingsPath, catalog = catalogForRoot(sidecarRoot), effortsEnabled = null) {
+  // 调用方 home 变量缺失时会把 join("", ".qoder", …) 的相对路径喂进来：真实用户
+  // 配置不会被更新，下面的 mkdirSync 却会在进程 CWD 静默建出 .qoder/settings.json。
+  // 这类失败必须可见——不是绝对路径就判失败，绝不落盘。协调器以外的调用链
+  // （qoder-launcher 的启动期同步、uninstall 的清理）也从这里过，闸门放在入口一并兜住。
+  if (!isAbsolute(settingsPath)) {
+    return {
+      ok: false,
+      unchanged: true,
+      reason: `refusing to write relative qoder settings path ("${settingsPath}"); home directory unresolved`,
+    };
+  }
   const managedProviders = extractManagedProviders(store);
   const autoChannel = deriveAnyswitchChannel(store, "qoder");
   const previousManaged = readSidecar(sidecarRoot).providers;

@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import { rmSync, writeFileSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   syncAllAgentConfigs,
@@ -9,6 +9,7 @@ import {
   formatSyncSummaryLine,
   parseSyncSummaryLine,
   codexCatalogLogMessage,
+  AGENT_ENDPOINTS,
   SYNC_RESULT_PREFIX,
 } from "./agent-sync.mjs";
 import { atomicWriteFile } from "./atomic-write.mjs";
@@ -597,6 +598,40 @@ describe("agent-sync 同步结果摘要", () => {
     assert.equal(summary.ok, false, "仓库数据读不出来是真失败");
     assert.deepEqual(summary.synced, [], "没有端点结果可言，成功名单留空");
     assert.deepEqual(summary.failed, [], "失败原因走 error，不塞进端点名单");
+  });
+
+  it("home 变量缺失时全部端点判失败，绝不往进程 CWD 落盘", async () => {
+    const cwd = process.cwd();
+    const before = readdirSync(cwd);
+    let after = null;
+    let res;
+    try {
+      res = await syncAllAgentConfigs({
+        store: summaryStore(),
+        port: 47821,
+        token: "test-token",
+        root: tmpRoot,
+        base: {}, // USERPROFILE 缺失：各端点路径解析退化成相对路径
+      });
+      after = readdirSync(cwd);
+    } finally {
+      // 修复前这些写入真的会落进 CWD（本测试红阶段运行）；无论红绿都清掉自证不留痕。
+      for (const entry of (after ?? []).filter((name) => !before.includes(name))) {
+        rmSync(join(cwd, entry), { recursive: true, force: true });
+      }
+    }
+    assert.equal(res.ok, true, "home 缺失是端点级失败，不拖垮整次同步");
+    for (const name of AGENT_ENDPOINTS) {
+      const entry = res.results[name];
+      assert.ok(entry, `${name} 有结果`);
+      assert.equal(entry.ok, false, `${name} 判失败`);
+      assert.equal(typeof entry.reason, "string", `${name} 带失败原因`);
+      assert.ok(entry.reason.length > 0, `${name} 的失败原因非空`);
+    }
+    assert.deepEqual(after, before, "CWD 目录清单不变：没有任何新文件落盘");
+    const summary = buildSyncSummary(res);
+    assert.deepEqual([...summary.failed].sort(), [...AGENT_ENDPOINTS].sort(), "八个端点全进失败名单");
+    assert.deepEqual(summary.synced, [], "成功名单为空");
   });
 
   it("摘要行可被解析，缺这行或这行坏了都不报错", () => {

@@ -7,7 +7,7 @@
 // without requiring manual relay restarts or agent launcher re-invocations.
 
 import { watch, existsSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { loadStore, storePaths as defaultStorePaths } from "./store-io.mjs";
 import { writeZcodeConfig, zcodeConfigPath } from "./zcode-launcher.mjs";
 import { writeDshConfig, dshSettingsPath } from "./dsh-launcher.mjs";
@@ -96,6 +96,18 @@ export function parseSyncSummaryLine(text) {
   return summary;
 }
 
+// base（默认 process.env）里 home 变量缺失时，各端点的 *Path 解析会把空串喂进
+// join，得到相对路径；写盘函数的 mkdirSync(recursive) 随之在进程 CWD 静默建目录
+// 落盘，真实用户配置不被更新而同步照报 ok。统一闸门：解析出的配置路径不是绝对
+// 路径就判该端点失败（reason 走既有 !ok 告警与 failed 名单），绝不把相对路径交给
+// 写盘函数。qoder 写入器在自家模块入口另有同款守卫，兜住协调器以外的调用链。
+function relativeHomeFailure(configPath) {
+  return {
+    ok: false,
+    reason: `home directory unresolved: config path "${configPath}" is relative; refusing to write`,
+  };
+}
+
 /**
  * Synchronize all supported coding agent configurations against the current store.
  *
@@ -139,7 +151,10 @@ export async function syncAllAgentConfigs({
 
   // 1. ZCode config sync (~/.zcode/v2/config.json)
   try {
-    const zResult = await writeZcodeConfig(store, port, token, root, zcodeConfigPath(base), undefined, null, {}, { log: logger });
+    const zPath = zcodeConfigPath(base);
+    const zResult = isAbsolute(zPath)
+      ? await writeZcodeConfig(store, port, token, root, zPath, undefined, null, {}, { log: logger })
+      : relativeHomeFailure(zPath);
     results.zcode = zResult;
     if (!zResult.ok) {
       logger?.warn?.(`zcode config.json not updated: ${zResult.reason ?? "unknown"}`);
@@ -154,7 +169,10 @@ export async function syncAllAgentConfigs({
   // 2. DSH profile patches (~/.dsh/profiles/<name>/cordis.patch.yml). 0.1.7
   // retired the home-level settings.yaml; each existing profile reads its own.
   try {
-    const dshResult = await writeDshConfig(store, port, token, root, dshSettingsPath(base));
+    const dshPath = dshSettingsPath(base);
+    const dshResult = isAbsolute(dshPath)
+      ? await writeDshConfig(store, port, token, root, dshPath)
+      : relativeHomeFailure(dshPath);
     results.dsh = dshResult;
     if (!dshResult.ok) {
       logger?.warn?.(`dsh profile patch not updated: ${dshResult.reason ?? "unknown"}`);
@@ -168,7 +186,10 @@ export async function syncAllAgentConfigs({
 
   // 3. Pi models.json sync (~/.pi/agent/models.json)
   try {
-    const piResult = await writePiModels(store, port, root, piModelsPath(base));
+    const piPath = piModelsPath(base);
+    const piResult = isAbsolute(piPath)
+      ? await writePiModels(store, port, root, piPath)
+      : relativeHomeFailure(piPath);
     results.pi = piResult;
     if (!piResult.ok) {
       logger?.warn?.(`pi models.json not updated: ${piResult.reason ?? "unknown"}`);
@@ -182,7 +203,10 @@ export async function syncAllAgentConfigs({
 
   // 4. Kimi Code config.toml sync (~/.kimi-code/config.toml)
   try {
-    const kimiResult = await writeKimiConfig(store, port, token, root, kimiConfigPath(base));
+    const kimiPath = kimiConfigPath(base);
+    const kimiResult = isAbsolute(kimiPath)
+      ? await writeKimiConfig(store, port, token, root, kimiPath)
+      : relativeHomeFailure(kimiPath);
     results.kimi = kimiResult;
     if (!kimiResult.ok) {
       logger?.warn?.(`kimi config.toml not updated: ${kimiResult.reason ?? "unknown"}`);
@@ -203,7 +227,10 @@ export async function syncAllAgentConfigs({
 
   // 5. Qoder settings.json sync (~/.qoder/settings.json)
   try {
-    const qoderResult = await writeQoderConfig(store, port, token, root, qoderSettingsPath(base.USERPROFILE ?? ""));
+    const qPath = qoderSettingsPath(base.USERPROFILE ?? "");
+    const qoderResult = isAbsolute(qPath)
+      ? await writeQoderConfig(store, port, token, root, qPath)
+      : relativeHomeFailure(qPath);
     results.qoder = qoderResult;
     if (!qoderResult.ok) {
       logger?.warn?.(`qoder settings.json not updated: ${qoderResult.reason ?? "unknown"}`);
@@ -217,7 +244,10 @@ export async function syncAllAgentConfigs({
 
   // 6. Codex config.toml sync (~/.codex/config.toml)
   try {
-    const codexResult = await writeCodexConfig(store, port, token, root, codexConfigPath(base));
+    const codexPath = codexConfigPath(base);
+    const codexResult = isAbsolute(codexPath)
+      ? await writeCodexConfig(store, port, token, root, codexPath)
+      : relativeHomeFailure(codexPath);
     results.codex = codexResult;
     if (!codexResult.ok) {
       logger?.warn?.(`codex config.toml not updated: ${codexResult.reason ?? "unknown"}`);
@@ -235,7 +265,10 @@ export async function syncAllAgentConfigs({
 
   // 7. OpenCode opencode.json sync (~/.config/opencode/opencode.json)
   try {
-    const ocResult = await writeOpencodeConfig(store, port, root, opencodeConfigPath(base));
+    const ocPath = opencodeConfigPath(base);
+    const ocResult = isAbsolute(ocPath)
+      ? await writeOpencodeConfig(store, port, root, ocPath)
+      : relativeHomeFailure(ocPath);
     results.opencode = ocResult;
     if (!ocResult.ok) {
       logger?.warn?.(`opencode.json not updated: ${ocResult.reason ?? "unknown"}`);
@@ -249,7 +282,10 @@ export async function syncAllAgentConfigs({
 
   // 8. Grok Build config.toml sync (~/.grok/config.toml)
   try {
-    const grokResult = await writeGrokConfig(store, port, token, root, grokConfigPath(base));
+    const grokPath = grokConfigPath(base);
+    const grokResult = isAbsolute(grokPath)
+      ? await writeGrokConfig(store, port, token, root, grokPath)
+      : relativeHomeFailure(grokPath);
     results.grok = grokResult;
     if (!grokResult.ok) {
       logger?.warn?.(`grok config.toml not updated: ${grokResult.reason ?? "unknown"}`);
