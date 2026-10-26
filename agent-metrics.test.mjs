@@ -1341,6 +1341,120 @@ describe("createAgentMetricsCollector", () => {
       });
     });
 
+    // 2026-10-26 修复面：探针退场那一小段，可信轮的 CIM 会把 CommandLine 报空
+    // （现场原始行 `<pid>,<ppid>,qodercli.exe,`；高频采样 20 次探针进程，12 次
+    // 看到「先 --version 后空」）。只看形状的豁免认不出这种行，它落进「认不出
+    // 即计数」，于是任何一次环境检测都能变成一张悬空卡——症状与 10-24 那笔同形，
+    // 触发面却从重启扩到了全程。判定改为「连续性」：读不出命令行的行，只认上一轮
+    // 可信扫描已经算进同一个桶的 pid；探针活不到下一轮扫描，永远进不了那个集合。
+    describe("version probe teardown row (unreadable command line)", () => {
+      const SESSION_ROW = String.raw`10284,19560,qodercli.exe,C:\Users\tester\.qoder\bin\qodercli\qodercli.exe`;
+      const PROBE_TEARDOWN_ROW = String.raw`42424,23332,qodercli.exe,`;
+
+      // 越窗的那次读只负责踢起扫描（返回上一份快照），落地后再读一次才是本轮
+      // 真值——与既有 eviction 测试同款。
+      async function settle(collector, id = "qoder") {
+        await collector.getAgentsStatus();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return (await collector.getAgentsStatus()).find((a) => a.id === id);
+      }
+
+      it("an unreadable probe row with no history counts zero — no flip, no placeholder row", async () => {
+        const collector = testCollector({
+          execFn: (c, o, cb) => cb(null, PROBE_TEARDOWN_ROW + "\r\n"),
+          nowFn: () => 10000,
+        });
+        const procs = await collector.scanProcesses();
+        assert.equal(procs.qoder, 0, "命令行读不出的探针行不计数");
+        assert.equal(procs.qoderPids.size, 0, "探针 pid 不进家族集");
+        assert.equal(procs.ppidByPid.get(42424), 23332, "父指针照常进谱系表");
+        const qoder = await settle(collector);
+        assert.equal(qoder.status, "stopped", "不翻卡");
+        assert.equal(qoder.instances.length, 0, "不起占位实例行");
+      });
+
+      it("a real session that reads empty in a later round keeps counting", async () => {
+        let t = 3000;
+        let rows = SESSION_ROW + "\r\n";
+        const collector = testCollector({ execFn: (c, o, cb) => cb(null, rows), nowFn: () => t });
+        let qoder = await settle(collector);
+        assert.equal(qoder.status, "running");
+        assert.deepEqual(qoder.instances.map((i) => i.id), ["qoder-10284"]);
+        rows = String.raw`10284,19560,qodercli.exe,` + "\r\n";
+        t += 3000;
+        qoder = await settle(collector);
+        assert.equal(qoder.status, "running", "同一 pid 上一轮算过，读空也照常计数");
+        assert.deepEqual(qoder.instances.map((i) => i.id), ["qoder-10284"], "读空不得把行误删（那会闪灭一次卡）");
+      });
+
+      it("a session first seen with an empty command line lands one round later", async () => {
+        let t = 3000;
+        let rows = String.raw`10284,19560,qodercli.exe,` + "\r\n";
+        const collector = testCollector({ execFn: (c, o, cb) => cb(null, rows), nowFn: () => t });
+        let qoder = await settle(collector);
+        assert.equal(qoder.status, "stopped", "首见即读空：这一轮不计数（宁可少算一轮）");
+        rows = SESSION_ROW + "\r\n";
+        t += 3000;
+        qoder = await settle(collector);
+        assert.equal(qoder.status, "running", "下一轮读得出，照常计数");
+      });
+
+      it("a blind tasklist round counts no probe either", async () => {
+        const execFn = (cmd, opts, cb) => {
+          if (String(cmd).startsWith("tasklist")) {
+            return cb(null, '"qodercli.exe","42424","Console","1","10,000 K"\r\n');
+          }
+          return cb(null, ""); // 常驻探针这一路不出行 → 本轮降到 tasklist
+        };
+        const collector = testCollector({ execFn, nowFn: () => 10000 });
+        const procs = await collector.scanProcesses();
+        assert.equal(procs.countsAuthoritative, false, "确认走的是降级轮");
+        assert.equal(procs.qoder, 0, "整轮没有命令行，探针同样不计数（上一笔遗留的残差一并收掉）");
+        const qoder = await settle(collector);
+        assert.equal(qoder.status, "stopped");
+        assert.equal(qoder.instances.length, 0);
+      });
+
+      it("a blind round keeps a real session counted (carry across the fallback)", async () => {
+        let t = 3000;
+        let trusted = true;
+        const execFn = (cmd, opts, cb) => {
+          if (String(cmd).startsWith("tasklist")) {
+            return cb(null, trusted ? "" : '"qodercli.exe","10284","Console","1","10,000 K"\r\n');
+          }
+          return cb(null, trusted ? SESSION_ROW + "\r\n" : "");
+        };
+        const collector = testCollector({ execFn, nowFn: () => t });
+        let qoder = await settle(collector);
+        assert.equal(qoder.status, "running");
+        trusted = false;
+        t += 3000;
+        qoder = await settle(collector);
+        assert.equal(qoder.status, "running", "降级轮不得把读不出命令行的真会话判没");
+        assert.deepEqual(qoder.instances.map((i) => i.id), ["qoder-10284"]);
+      });
+
+      it("grok (the other PROBE_VERSION_CLIENT) follows the same rule", async () => {
+        const probe = testCollector({
+          execFn: (c, o, cb) => cb(null, String.raw`7401,23332,grok.exe,` + "\r\n"),
+          nowFn: () => 10000,
+        });
+        const procs = await probe.scanProcesses();
+        assert.equal(procs.grok, 0, "grok 探针的收尾行同样不计数");
+        assert.equal(procs.grokPids.size, 0);
+
+        let t = 3000;
+        let rows = String.raw`7402,23332,grok.exe,C:\Users\tester\.grok\bin\grok.exe` + "\r\n";
+        const collector = testCollector({ execFn: (c, o, cb) => cb(null, rows), nowFn: () => t });
+        let grok = await settle(collector, "grok");
+        assert.equal(grok.status, "running");
+        rows = String.raw`7402,23332,grok.exe,` + "\r\n";
+        t += 3000;
+        grok = await settle(collector, "grok");
+        assert.equal(grok.status, "running", "真会话读空仍计数");
+      });
+    });
+
     it("feeds the terminal attribution with the main CLI, ancestor chain up to the shell", async () => {
       const collector = testCollector({ execFn: (c, o, cb) => cb(null, PS_QODER_CLI_SCAN), nowFn: () => 10000 });
       await collector.scanProcesses();
