@@ -951,6 +951,9 @@ export function createPanelRouter({
    // 那一个（同文件既是主线程壳也是 worker 体）。给单测一个替换口：把「扫描」
    // 换成忙等块，用来钉住「扫描不占面板事件循环」——修前这条会红。
    sessionScanWorkerFile = null,
+   // 扫描承载的进程内兜底（worker 不可用那一拍）。默认 null＝真 session-scan
+   // 扫描真 home 存档；单测注入自己的假扫描，别让降级路径读真存档。
+   sessionScanFallback = null,
    // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
@@ -1058,7 +1061,7 @@ export function createPanelRouter({
   const scanHost = createSessionScanOffload({
     ...(sessionScanWorkerFile ? { workerFile: sessionScanWorkerFile } : {}),
     logger,
-    fallback: {
+    fallback: sessionScanFallback ?? {
       scanAll: () => sessionScanner.scanAll(),
       scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
     },

@@ -12552,24 +12552,28 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
   // 回归钉（M1）：列表路由里的绑定捕获扫描不许占住面板的事件循环。S1 取证实测
   // 修前 dsh 全盘扫描 2.7–4.3s，期间 setTimeout(1) 链一次都没触发、并发的
   // /input 从 25ms 变 4325ms——用户主观就是「点完组头 ⊕ 打字要等 5 秒」。
-  // 这里把「扫描」换成一个忙等 400ms 的同步块（写进临时 worker 文件，由扫描承载
-  // 在独立线程里跑）。面板事件循环若被它按住，下面那条 setTimeout 链就会出现
-  // ≥400ms 的空档；修前（扫描在请求路径上同步跑）实测空档 ≈ 整段扫描时长。
-  it("忙等扫描在飞时面板事件循环不被按住（回归钉）", async () => {
+  // 装置三件（评审 F5 加严）：
+  //   ① 忙等 300ms、采样窗 600ms（≥2×）——推迟 300ms 才发生的阻塞也在窗内；
+  //   ② 同时连打并发请求（/panel/api/agents），断言单条时延没被推迟，不只测
+  //      「事件循环有空拍」；
+  //   ③ 注入自己的进程内兜底（sessionScanFallback），不让降级路径去读真 home。
+  it("忙等扫描在飞时面板事件循环与并发请求都不被推迟（回归钉）", async () => {
     const root = mkTestDir("anyswitch-capture-blocking-root-");
     const cwd = mkTestDir("anyswitch-capture-blocking-cwd-");
     const now = Date.now();
-    // 临时扫描 worker：忙等 400ms 再回空表（判不出 → 不写绑定，正好只测阻塞），
-    // 落一个标记文件证明这一趟扫描真的跑过了——否则上面的时延断言会空过。
+    const BUSY_MS = 300;
+    const WINDOW_MS = 600; // ≥2× 忙等时长：推迟发生的阻塞也逃不出采样窗
+    // 临时扫描 worker：忙等后回空表（判不出 → 不写绑定，正好只测阻塞）。
     const workerFile = join(root, "blocking-scan-worker.mjs");
-    const markerFile = join(root, "scan-ran.txt");
+    const workerMarker = join(root, "worker-ran.txt");
+    const fallbackMarker = join(root, "fallback-ran.txt");
     writeFileSync(workerFile, `
 import { appendFileSync } from "node:fs";
 import { parentPort } from "node:worker_threads";
 parentPort.on("message", (message) => {
-  appendFileSync(${JSON.stringify(markerFile)}, "x");
+  appendFileSync(${JSON.stringify(workerMarker)}, "x");
   const started = Date.now();
-  while (Date.now() - started < 400) { /* 模拟同步 fs 全盘扫描 */ }
+  while (Date.now() - started < ${BUSY_MS}) { /* 模拟同步 fs 全盘扫描 */ }
   const result = message?.kind === "agent" ? [] : { sessions: [], endpointErrors: [] };
   parentPort.postMessage({ id: message?.id, ok: true, result });
 });
@@ -12583,39 +12587,64 @@ parentPort.on("message", (message) => {
         { id: "ab12cd34", label: "k", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
       ],
       sessionScanWorkerFile: workerFile,
-      // 同款忙等扫描的「进程内」版本：扫描承载起不来时它才是真正跑的那个，
-      // 所以这条钉子在任何降级路径下都不会去碰真 home 存档。修前没有 worker
-      // 承载，跑的就是它——那 400ms 直接落在列表请求路径上，钉子当场红。
-      scanAgentConversationsFn: () => {
-        appendFileSync(markerFile, "x");
-        const busyUntil = Date.now() + 400;
-        while (Date.now() < busyUntil) { /* 同步全盘扫描的替身 */ }
-        return [];
+      // 进程内兜底：同款忙等。worker 真起不来时跑的就是它，所以这条钉子在任何
+      // 降级路径下都不会去碰真 home 存档（承载默认兜底是真 session-scan）。
+      // 它落自己的标记，用来断言「这次没走降级」。
+      sessionScanFallback: {
+        scanAll: () => {
+          appendFileSync(fallbackMarker, "x");
+          return { sessions: [], endpointErrors: [] };
+        },
+        scanAgent: () => {
+          appendFileSync(fallbackMarker, "x");
+          const busyUntil = Date.now() + BUSY_MS;
+          while (Date.now() < busyUntil) { /* 同步全盘扫描的替身 */ }
+          return [];
+        },
       },
     });
-    // 列表请求触发一次绑定捕获扫描；不等它落地就开始量事件循环的响应。
+    // 列表请求触发一次绑定捕获扫描；不等它落地就开始采样。
     const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
     const listDone = router.handle(list.req, list.res);
     const started = Date.now();
     let worstGap = 0;
     let last = Date.now();
     let ticks = 0;
-    while (Date.now() - started < 250) {
+    const concurrent = [];
+    while (Date.now() - started < WINDOW_MS) {
       await new Promise((resolve) => setTimeout(resolve, 5));
       const nowTick = Date.now();
       worstGap = Math.max(worstGap, nowTick - last - 5);
       last = nowTick;
       ticks += 1;
+      // 每 40ms 打一条并发请求。/panel/api/agents 是最轻的一条真路由：relay 拉取
+      // 已注入为 null，不发网络，量到的纯粹是「本进程还有没有空处理请求」。
+      if (ticks % 8 === 0) {
+        const probe = fakeReqRes("/panel/api/agents", "GET");
+        const probeStart = Date.now();
+        concurrent.push(
+          router.handle(probe.req, probe.res).then(() => ({ ms: Date.now() - probeStart, status: probe.res.statusCode })),
+        );
+      }
     }
+    const probes = await Promise.all(concurrent);
     await listDone;
-    // 等这一趟扫描真的跑完（标记文件出现），再收口断言。
+    // 等这一趟扫描真的跑完（任一标记出现），再收口断言——否则时延断言会空过。
     const deadline = Date.now() + 3000;
-    while (!existsSync(markerFile) && Date.now() < deadline) {
+    while (!existsSync(workerMarker) && !existsSync(fallbackMarker) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    assert.ok(existsSync(markerFile), "忙等扫描没跑起来——这条钉子会空过，必须先修装置");
-    assert.ok(ticks > 10, `定时器链几乎没跑（${ticks} 拍），事件循环已被按住`);
+    assert.ok(existsSync(workerMarker) || existsSync(fallbackMarker),
+      "扫描压根没跑起来——这条钉子会空过，必须先修装置");
+    // 先断言「没被按住」：扫描若退回进程内（哪怕晚一拍才发生），这里必红。
+    assert.ok(ticks > 40, `定时器链几乎没跑（${ticks} 拍），事件循环已被按住`);
     assert.ok(worstGap < 150, `事件循环被扫描按住 ${worstGap}ms（修前 ≈ 整段扫描时长）`);
+    assert.ok(probes.length >= 5, `并发请求发得太少（${probes.length} 条），断言不成立`);
+    const worstProbe = Math.max(...probes.map((p) => p.ms));
+    assert.ok(worstProbe < 150, `并发请求被扫描推迟到 ${worstProbe}ms（修前实测 4325ms）`);
+    // 再断言「走的是 worker」：进程内兜底也过得了上面两条（它就是本进程忙等），
+    // 所以这一条把「有没有真的离线程」钉死。
+    assert.ok(!existsSync(fallbackMarker), "扫描没走 worker 而是走了进程内兜底——这一拍其实仍在占事件循环");
   });
 
   // 回归钉（M1）：判不出要退避，不能每 5s 重扫一遍全盘。刚内切/新开的会话在
