@@ -12611,15 +12611,19 @@ parentPort.on("message", (message) => {
     let last = Date.now();
     let ticks = 0;
     const concurrent = [];
+    // 并发探测按**时间**调度（每 40ms 一条），不按拍数——Windows 上 setTimeout(5)
+    // 实际按 ~16ms 粒度落，600ms 窗只有 ~38 拍，按拍数取模会少发几条。
+    let nextProbeAt = 40;
     while (Date.now() - started < WINDOW_MS) {
       await new Promise((resolve) => setTimeout(resolve, 5));
       const nowTick = Date.now();
       worstGap = Math.max(worstGap, nowTick - last - 5);
       last = nowTick;
       ticks += 1;
-      // 每 40ms 打一条并发请求。/panel/api/agents 是最轻的一条真路由：relay 拉取
-      // 已注入为 null，不发网络，量到的纯粹是「本进程还有没有空处理请求」。
-      if (ticks % 8 === 0) {
+      // /panel/api/agents 是最轻的一条真路由：relay 拉取已注入为 null，不发网络，
+      // 量到的纯粹是「本进程还有没有空处理请求」。
+      if (nowTick - started >= nextProbeAt) {
+        nextProbeAt += 40;
         const probe = fakeReqRes("/panel/api/agents", "GET");
         const probeStart = Date.now();
         concurrent.push(
@@ -12636,10 +12640,12 @@ parentPort.on("message", (message) => {
     }
     assert.ok(existsSync(workerMarker) || existsSync(fallbackMarker),
       "扫描压根没跑起来——这条钉子会空过，必须先修装置");
-    // 先断言「没被按住」：扫描若退回进程内（哪怕晚一拍才发生），这里必红。
-    assert.ok(ticks > 40, `定时器链几乎没跑（${ticks} 拍），事件循环已被按住`);
+    // 拍数只是「装置真的跑了」的下限，不是判据：Windows 定时器粒度 ~16ms，
+    // 600ms 窗空闲也只有 ~38 拍，而进程内阻塞 300ms 时仍有 ~20 拍——两者重叠，
+    // 拿它当健康线会误红。真正的判据是下面两条「被按住多久」。
+    assert.ok(ticks >= 12, `采样窗几乎没跑（${ticks} 拍），装置本身有问题`);
     assert.ok(worstGap < 150, `事件循环被扫描按住 ${worstGap}ms（修前 ≈ 整段扫描时长）`);
-    assert.ok(probes.length >= 5, `并发请求发得太少（${probes.length} 条），断言不成立`);
+    assert.ok(probes.length >= 8, `并发请求发得太少（${probes.length} 条），断言不成立`);
     const worstProbe = Math.max(...probes.map((p) => p.ms));
     assert.ok(worstProbe < 150, `并发请求被扫描推迟到 ${worstProbe}ms（修前实测 4325ms）`);
     // 再断言「走的是 worker」：进程内兜底也过得了上面两条（它就是本进程忙等），
