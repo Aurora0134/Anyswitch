@@ -1259,6 +1259,7 @@ describe("终端视图左栏换血（M4）", () => {
         const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const window = { matchMedia: () => ({ matches: reduced }) };
         ${extractFn("terminalRailMotionKey")}
+        ${extractFn("terminalRailMotionEntries")}
         ${extractFn("playTerminalRailFlip")}
         return playTerminalRailFlip;
       `)(list, before, mode, armed, reduced);
@@ -1333,6 +1334,56 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(emptyBefore.length > 0, "空集 before 仍播新元素淡入");
       assert.ok(emptyBefore.every((a) => a.frames.length === 2 && a.frames[0].opacity === 0 && a.frames[1].opacity === 1 && a.opts.duration === 100),
         "只淡入（100ms），无位移动画");
+    });
+
+    it("同 id 的两行各算各的旧位：收起下方组时不再把后一行的位置当前一行的旧位（2026-10-26 抽搐根因钉）", () => {
+      // 真实成因：同一段对话被复制到另一个项目目录，扫描按文件各出一行，同一个
+      // data-rail-term-resume 在组里出现两次。旧位表按 id 索引，后一行覆盖前一行，
+      // 靠前那行算出一个行距的假位移（30~32px，200ms ease-out）——收起下方组时整组
+      // 位移把同组其它行的运动盖住，只有它单行「向下抽搐再弹回」。
+      const node = (attrs, top) => ({
+        getAttribute: (name) => (name in attrs ? attrs[name] : null),
+        hasAttribute: (name) => name in attrs,
+        getBoundingClientRect: () => ({ top }),
+        animate: () => {},
+        cloneNode: () => null,
+      });
+      const oldRows = [
+        node({ "data-rail-term-resume": "dup" }, 70),
+        node({ "data-rail-term-resume": "dup" }, 100),
+        node({ "data-rail-term-resume": "other" }, 130),
+      ];
+      // 收起下方组：这三行自身位置一个都没变
+      const newRows = [
+        node({ "data-rail-term-resume": "dup" }, 70),
+        node({ "data-rail-term-resume": "dup" }, 100),
+        node({ "data-rail-term-resume": "other" }, 130),
+      ];
+      const animated = [];
+      const run = new Function("oldList", "newList", "animated", `
+        const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
+        const terminalRailFlipMode = "flip";
+        const terminalRailMotionArmed = true;
+        const window = { matchMedia: () => ({ matches: false }) };
+        ${extractFn("terminalRailMotionKey")}
+        ${extractFn("terminalRailMotionEntries")}
+        ${extractFn("terminalRailMotionTops")}
+        ${extractFn("playTerminalRailFlip")}
+        const before = terminalRailMotionTops(oldList);
+        const keys = [...before.keys()];
+        playTerminalRailFlip(newList, before);
+        return { keys, size: before.size };
+      `);
+      const result = run(
+        { querySelectorAll: () => oldRows },
+        { querySelectorAll: () => newRows.map((el) => ({ ...el, animate: (frames, opts) => animated.push({ frames, opts }) })) },
+        animated,
+      );
+      assert.equal(result.size, 3, "三行三个旧位（同 id 的两行不互相覆盖）");
+      assert.deepEqual(result.keys, ["resume:dup", "resume:dup#2", "resume:other"],
+        "同键的第 n 个出现补序号后缀，量测/播放同一份枚举");
+      assert.deepEqual(animated, [], "自身位置没变就不该有任何位移动画（抽搐＝假位移）");
     });
 
     it("活跃终端所在组自动展开：等列表落地后才做一次，用户手动收起不被轮询顶回来", () => {

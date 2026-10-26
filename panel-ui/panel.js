@@ -9607,12 +9607,30 @@ async function api(method, path, body) {
     return "";
   }
 
+  // 动效身份键的唯一枚举入口（2026-10-26）：同一份会话列表里可能出现同 id 的两行
+  // （同一段对话被复制到另一个项目目录，扫描按文件各出一行）。身份键只按 id 拼，旧位
+  // 表按 id 索引会让后一行覆盖前一行——靠前那行读到的是靠后那行的位置，算出一个行距
+  // 的假位移（30~32px，200ms ease-out）；收起下方组时整组位移把同组其它行的运动盖住，
+  // 只有它单行「向下抽搐再弹回」。这里按文档序给同键的第 n 个出现补序号后缀，
+  // 量测／播放／退场快照／幽灵存活四处共用同一份枚举，四者键序必然一致。
+  function terminalRailMotionEntries(list) {
+    const entries = [];
+    if (!list || typeof list.querySelectorAll !== "function") return entries;
+    const seen = new Map();
+    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+      const base = terminalRailMotionKey(el);
+      if (!base) continue;
+      const count = (seen.get(base) || 0) + 1;
+      seen.set(base, count);
+      entries.push({ el, key: count === 1 ? base : `${base}#${count}` });
+    }
+    return entries;
+  }
+
   function terminalRailMotionTops(list) {
     const tops = new Map();
-    if (!list || typeof list.querySelectorAll !== "function") return tops;
-    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
-      const key = terminalRailMotionKey(el);
-      if (!key || typeof el.getBoundingClientRect !== "function") continue;
+    for (const { el, key } of terminalRailMotionEntries(list)) {
+      if (typeof el.getBoundingClientRect !== "function") continue;
       tops.set(key, el.getBoundingClientRect().top);
     }
     return tops;
@@ -9643,9 +9661,8 @@ async function api(method, path, body) {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     if (!list || typeof list.querySelectorAll !== "function") return;
-    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+    for (const { el, key } of terminalRailMotionEntries(list)) {
       if (typeof el.animate !== "function" || typeof el.getBoundingClientRect !== "function") continue;
-      const key = terminalRailMotionKey(el);
       const previous = before.get(key);
       if (previous === undefined) {
         el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, easing: "ease-out" });
@@ -9673,9 +9690,8 @@ async function api(method, path, body) {
   function terminalRailSnapshotMotion(list) {
     const snapshot = new Map();
     if (!list || typeof list.querySelectorAll !== "function") return snapshot;
-    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
-      const key = terminalRailMotionKey(el);
-      if (!key || typeof el.getBoundingClientRect !== "function" || typeof el.cloneNode !== "function") continue;
+    for (const { el, key } of terminalRailMotionEntries(list)) {
+      if (typeof el.getBoundingClientRect !== "function" || typeof el.cloneNode !== "function") continue;
       const rect = el.getBoundingClientRect();
       snapshot.set(key, { node: el.cloneNode(true), top: rect.top, left: rect.left, width: rect.width });
     }
@@ -9697,12 +9713,7 @@ async function api(method, path, body) {
 
   function terminalRailMountExitGhosts(list, host, snapshot) {
     const alive = new Set();
-    if (typeof list.querySelectorAll === "function") {
-      for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
-        const key = terminalRailMotionKey(el);
-        if (key) alive.add(key);
-      }
-    }
+    for (const { key } of terminalRailMotionEntries(list)) alive.add(key);
     const hostRect = typeof host.getBoundingClientRect === "function" ? host.getBoundingClientRect() : null;
     if (!hostRect) return;
     for (const [key, snap] of snapshot) {

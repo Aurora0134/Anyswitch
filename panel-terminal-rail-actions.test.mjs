@@ -2914,6 +2914,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       function terminalRailAgentId() { return "kimi"; }
       function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); swap(); }
       ${extractFn("terminalRailMotionKey")}
+      ${extractFn("terminalRailMotionEntries")}
       ${extractFn("terminalRailArchivedKey")}
       ${extractFn("terminalRailMotionEnabled")}
       ${extractFn("terminalRailSnapshotMotion")}
@@ -2981,10 +2982,15 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
     });
 
     it("动效量测集＝行＋组头＋水位线钮：三类共用一套位移/淡入口径，键按类前缀不互撞；组头容器带身份属性", () => {
-      assert.ok(extractFn("terminalRailSnapshotMotion").includes("querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)"),
-        "快照范围＝历史行＋兜底行＋组头＋水位线钮");
-      assert.ok(extractFn("terminalRailMotionTops").includes("querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)"),
-        "FLIP 量位同口径（组头与行同缓动，不再「组头瞬跳」）");
+      const entriesFn = extractFn("terminalRailMotionEntries");
+      assert.ok(entriesFn.includes("querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)"),
+        "唯一枚举点：量测集＝历史行＋兜底行＋组头＋水位线钮");
+      assert.ok(entriesFn.includes("terminalRailMotionKey"),
+        "同键的第 n 个出现补序号后缀（同 id 两行不互相覆盖旧位）");
+      for (const fn of ["terminalRailSnapshotMotion", "terminalRailMotionTops", "playTerminalRailFlip", "terminalRailMountExitGhosts"]) {
+        assert.ok(extractFn(fn).includes("terminalRailMotionEntries("),
+          `${fn} 走同一份枚举（否则键序不一致＝又一次假位移）`);
+      }
       const keyFn = extractFn("terminalRailMotionKey");
       for (const attr of ["data-rail-term-resume", "data-rail-term-session", "data-rail-term-group-head", "data-rail-term-more"]) {
         assert.ok(keyFn.includes(attr), `键读 ${attr}`);
@@ -3020,6 +3026,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
         const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
         const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         ${extractFn("terminalRailMotionKey")}
+        ${extractFn("terminalRailMotionEntries")}
         ${extractFn("terminalRailSnapshotMotion")}
         ${extractFn("terminalRailMountExitGhosts")}
         return { snapshot: terminalRailSnapshotMotion, mount: terminalRailMountExitGhosts };
