@@ -11209,7 +11209,7 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(bare.metrics, null, "metrics 未富化出来时不编造空指标行");
   });
 
-  it("前端：输出活跃窗补 LLM 请求盲区（跑长命令不再显示空闲）", async () => {
+  it("前端：输出活跃窗补 LLM 请求盲区（无归属普通终端跑长命令不显示空闲；已归属会话另过回合闸）", async () => {
     // 请求 0 但终端刚出过字：在跑命令（LLM 空档是执行工具命令的常态）。
     const hot = { status: "idle", metrics: null, backendState: { lastActiveAt: Date.now() - 1000, status: "running" } };
     await vmFn("terminalActivityApplyToSession", [hot, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
@@ -11289,6 +11289,13 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     // 回合内请求回落 0 但输出仍新鲜（工具命令在跑）→ 仍 working。
     apply(idle, 0);
     assert.equal(idle.status, "working", "回合内输出照常算忙（长命令不被判空闲）");
+    // 生产现实是 1s 轮询整表换血、会话对象换新：闸位按 session.id 存活，不随对象走。
+    const swapped = {
+      ...idle, status: "idle", metrics: null,
+      backendState: { ...idle.backendState, lastActiveAt: Date.now() - 300 },
+    };
+    apply(swapped, 0);
+    assert.equal(swapped.status, "working", "整表换血后闸位按 id 存活（回合内不自愈成空闲）");
     // 静默超窗（无请求、无输出）→ 出回合；此后再有输出也不再点亮。
     idle.backendState = { ...idle.backendState, lastActiveAt: now - 60_000 };
     apply(idle, 0);

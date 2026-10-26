@@ -5377,8 +5377,10 @@ async function api(method, path, body) {
   //    误归因成「agent 在跑」；距最近一次键入 2s 内的输出活跃不判忙（回显随
   //    键入即时出现，静默 2s 后的输出才是程序自己的）。
   // 已知残留（替代信号的精度天花板，dsh 靠回合信号无此面）：空闲仍持续重绘的
-  // TUI（htop 之类）会被输出启发误判忙；完全静默的长命令显示层回落空闲由服务
-  // 端 /switch 的杀前进程树探测（switch-guard）兜底——既有，显示层不追求完美。
+  // TUI（htop 之类）在回合内会被输出启发误判忙；完全静默的长命令显示层回落空闲
+  // 由服务端 /switch 的杀前进程树探测（switch-guard）兜底——既有，显示层不追求
+  // 完美。另注：本函数只回答「输出窗内出过字节」，已归属 agent 会话还须过回合闸
+  // （terminalSessionBusyFromSignals）才算忙。
   function terminalBusyByOutput(session, windowMs = 5000, now = Date.now()) {
     const TERMINAL_BUSY_INCUBATION_MS = 15000;
     const TERMINAL_BUSY_INPUT_SUPPRESS_MS = 2000;
@@ -5408,6 +5410,13 @@ async function api(method, path, body) {
   // 该实例一出现在途请求即入回合，回落到无请求且输出窗过期即出回合；出回合后
   // 只有新的请求能重新入回合，界面自绘不再点亮。无归属的普通终端没有回合概念，
   // 维持原输出窗口径（用户在 shell 里跑命令照样看得到进行中）。
+  //
+  // 已知窄化（知情取舍，用户 2026-10-26 验收口径）：回合的入场券只能由「看到在途
+  // 请求」签发，而两个写点都只在终端页可见时运行。所以「回合在面板刷新/停在看板页
+  // 期间开跑、此刻已进工具执行段」的会话会显示空闲——直到下一次请求。要消掉它需要
+  // relay 下发实例级「回合在跑」布尔位（本架构目前拿不到，见上面输出窗注释）。这段
+  // 窗口里误杀风险仍由服务端杀前进程树探测兜住（/switch 会探到活命令并拒换），
+  // 只是显示面不保证。
   function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
     const id = session && typeof session.id === "string" ? session.id : null;
     if (count > 0) {
@@ -5465,12 +5474,13 @@ async function api(method, path, body) {
         // 端点级聚合行（instanceId 缺省）代表整个端点的合计在途请求，不驱动任何
         // 单个终端会话：未绑定实例的新会话与它同键，会把别的实例的请求算到自己
         // 头上（空闲页闪转圈）。单会话只认自己的实例行，拿不到就等绑定落定。
-        if (inst.instanceId === null || inst.instanceId === undefined) continue;
+        // 空串一并跳过：活跃键用 `?? ""` 归一，空串会与「未绑定」撞同一个键。
+        if (!inst.instanceId) continue;
         countByKey.set(terminalActivityKey(inst.endpointId, inst.instanceId), inst.activeRequests);
       }
     } else if (frame.type === "activity" && typeof frame.endpointId === "string") {
       // 同款：端点级活跃帧不落到单会话上（见上）。
-      if (frame.instanceId === null || frame.instanceId === undefined) return false;
+      if (!frame.instanceId) return false;
       countByKey = new Map([[terminalActivityKey(frame.endpointId, frame.instanceId), frame.activeRequests]]);
     } else {
       return false;

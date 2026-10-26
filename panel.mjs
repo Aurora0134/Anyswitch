@@ -865,6 +865,8 @@ export function createPanelRouter({
   // 判「忙」后复探的间隔：agent 启动期的瞬时子进程（环境探测、chcp、一次性包装壳）
    // 与一次探测超时都会让单次判定落到「忙」，隔一拍再探一次即能分清瞬时与真在跑。
    switchGuardRecheckDelayMs = 700,
+   // 复探的单次超时：只用来确认「刚才那波子进程还在不在」，不需要首探那么宽。
+   switchGuardRecheckTimeoutMs = 2000,
    // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
@@ -1421,8 +1423,16 @@ export function createPanelRouter({
         // 也算成在跑命令，会把空闲新会话的内切误拒（前端再把 409 静默落成新开
         // 页签）。真在跑的命令跨得住两次探测，瞬时子进程跨不住——复探只滤掉
         // 误拒，不动「探测失败亦拒」的保护语义。
+        //
+        // 代价是忙路径的往返变长：首探实测 1.4–1.6s，加这次间隔与复探约 3.7s，
+        // 两次都撞满超时则约 8.7s。干净路径（首探 false）零额外开销；这段期间前端
+        // 的在飞闸会吞掉后续点击，所以复探用更短的超时（只滤瞬时误判，真在跑的
+        // 命令首探就够判），把最坏耗时压回 6s 量级。
         await new Promise((resolve) => setTimeout(resolve, switchGuardRecheckDelayMs));
-        const recheck = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
+        const recheck = await probeTerminalCommandTreeFn(session.pid, {
+          anchorPid,
+          timeoutMs: switchGuardRecheckTimeoutMs,
+        });
         if (recheck !== false) {
           return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
         }

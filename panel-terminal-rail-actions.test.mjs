@@ -2617,6 +2617,46 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     }
   });
 
+  it("已归属会话空闲自绘不误判 working：点历史仍就地内切，不多开（真实富化链路）", async () => {
+    // 用户报的症状 1 主路径：新会话页挂着不动（TUI 自绘让输出窗一直「新鲜」），
+    // 点历史会话却多开一页。桩式 enrich 把 working 重写成「有请求」，覆盖不到这
+    // 条；这里走真 enrich（经回合闸）：零请求 + 输出新鲜但未入回合 → idle → 内切。
+    const { fn, log } = runSwitch({
+      sessions: {
+        "t-a": {
+          ...IDLE, status: "idle",
+          backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 500 },
+        },
+      },
+      activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 0, "空闲自绘不点亮：就地内切，不开新页签");
+    assert.equal(log.switchBodies.length, 1, "走 /switch");
+  });
+
+  it("回合内（请求曾在途）输出新鲜：仍判 working，点历史新开页签保护在跑任务", async () => {
+    // 反向钉子：闸门只收「空闲自绘」，不能把回合内执行工具命令的会话也判空闲。
+    const { fn, log } = runSwitch({
+      sessions: {
+        "t-a": {
+          ...IDLE, status: "idle",
+          backendState: { status: "running", createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000, lastActiveAt: Date.now() - 500 },
+        },
+      },
+      activeId: "t-a",
+      agentsImpl: async () => AGENTS_WORKING, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => SWITCH_OK, realEnrich: true,
+    });
+    fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(log.creates.length, 1, "回合内照旧保护性新开");
+    assert.ok(!log.gets.some((g) => g.path.endsWith("/switch")), "不发内切");
+  });
+
   it("已退出会话不被迟到的活跃信号误判 working：点历史仍内切，不多开", async () => {
     const { fn, log } = runSwitch({
       sessions: { "t-a": { ...IDLE, status: "idle", backendState: { status: "exited" } } },
