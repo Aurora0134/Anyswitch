@@ -57,15 +57,21 @@ const TERMINAL_BUFFER_PERSIST_MAX_BYTES = 128 * 1024;
 const SSE_PENDING_FLUSH_BYTES = 32 * 1024;
 // 落盘防抖窗口：一个窗口内的多块输出合成一拍写。
 const PERSIST_DEBOUNCE_MS = 250;
-// 单拍最多写几份会话文件、最多写多少字节。防抖拍到的写是「有界单拍」：N 个会话
-// 同时出字时一轮只写这么多，剩下的留在脏集合里下一拍继续——单拍成本因此不随会话
-// 数增长。两个上限都要有：份数挡住「一堆小记录」，字节数挡住「一块就几百 KB」的
-// 极端尾部。代价是最坏情况下某条记录的落盘推迟 ⌈份数/上限⌉ 拍（250ms/拍），
+// 单拍最多写几份会话文件、最多写多少（**序列化后**）字节。防抖拍到的写是「有界
+// 单拍」：N 个会话同时出字时一轮只写这么多，剩下的留在脏集合里下一拍继续——单拍
+// 成本因此不随会话数增长。两个上限都要有：份数挡住「一堆小记录」，字节数挡住
+// 「一份就几百 KB」的极端尾部（序列化字节，不是内存原始字节——ESC 密集内容落盘
+// 会六倍膨胀，按内存字节算的预算不是代码能保证的量）。
+// 单份超预算时仍然写（最新一块必留），所以真实上界是「≤份数上限，且除单份超预算
+// 外 ≤字节上限」。代价是最坏情况下某条记录的落盘推迟 ⌈份数/上限⌉ 拍（250ms/拍），
 // 积压上限是会话总数（不再是无界增长的 promise 链）。
 // 显式等落定的路径不受这个上限约束：定向冲净（建会话/resize/重开/退出）只写那一条，
-// 全量冲净（关停）必须写完。
+// 全量冲净（关停）必须写到没有欠账。
 const PERSIST_SESSION_WRITES_PER_PASS = 4;
-const PERSIST_PASS_MAX_BYTES = 768 * 1024;
+const PERSIST_PASS_MAX_BYTES = 512 * 1024;
+// 全量冲净最多连跑几轮。它本来该一轮写完，多轮只用于收编「写期间新到的脏」；
+// 上限防的是输出永不停止时的活锁。
+const PERSIST_FULL_FLUSH_MAX_ROUNDS = 32;
 
 function json(res, status, body) {
   const text = JSON.stringify(body);
@@ -593,10 +599,16 @@ export function createTerminalHost({
   // 一致性：一份文件一个原子 rename。跨会话不再有「整份一致」的瞬间，换来的是每
   // 份文件各自完整——状态文件是可恢复快照而非事务日志，混合快照无害（每个会话的
   // 尾部仍是它自己那一代的完整切片）。顺序保证：会话文件先落、索引后落（索引里
-  // 出现某个 id 就等于宣称那份文件已写过），删除先删文件再写索引；因此崩溃只会留
-  // 下「索引没点名」的孤儿文件，restore 会清掉。索引是成员表的唯一权威：relay 的
-  // clearSessions 兜底只 unlink 索引（relay-host.mjs 里那份 TERMINAL_STATE_FILE
-  // 副本），正好落在「索引没了 = 会话全没」这条语义上。
+  // 出现某个 id 就等于宣称那份文件已写过），删除先删文件再写索引，且处理删除的那
+  // 一轮**无条件重写索引**——崩溃与并发下都只会留下「索引没点名」的孤儿文件，
+  // restore 会清掉；反向的「索引点名、文件没了」在任何路径上都不会出现。索引是
+  // 成员表的唯一权威：relay 的 clearSessions 兜底只 unlink 索引（relay-host.mjs
+  // 里那份 TERMINAL_STATE_FILE 副本），正好落在「索引没了 = 会话全没」这条语义上。
+  //
+  // ⚠️ 格式换代是**单向**的：v1 → v2 就地升级，没有回退路径。v2 的索引里 sessions
+  // 是 id 字符串数组，旧码读它会把字符串展开成 `{0:'x',…}`、id 为 undefined，恢复
+  // 出一排无 id 的幽灵页签。所以「降级回旧版宿主」不是受支持的操作；要回退只能先
+  // 删掉状态文件与 terminal-sessions/ 目录（会话页签全部丢失，用户手工重开）。
   let indexDirty = false;
   const dirtySessions = new Set();
   const removedSessionIds = new Set();
@@ -678,33 +690,73 @@ export function createTerminalHost({
 
   // 一轮落盘。
   //   full=false：防抖拍到的「有界单拍」，最多写 PERSIST_SESSION_WRITES_PER_PASS
-  //   份会话文件，剩下的留在脏集合里等下一拍——单拍成本因此不随会话数增长。
+  //   份会话文件、最多 PERSIST_PASS_MAX_BYTES 序列化字节，剩下的留在脏集合里等
+  //   下一拍——单拍成本因此不随会话数增长。
   //   full=true：全量冲净（关停、清场），不受上限约束。
   //   only 非空：只冲这几条会话（建会话 / resize / 重开这类「只改了一条记录」的
-  //   显式等待），别的会话的欠账留给防抖拍去摊。
+  //   显式等待），别的会话的欠账留给防抖拍去摊。**只有 full 为假时 only 才生效**
+  //   ——全量冲净不许被降级成定向冲净（关停要的是「内存态整份在盘上」）。
   // 返回本轮是否全部写成功；写失败的留在脏集合里重试。
+  //
+  // 脏位纪律（这条是评审打回的那条 P0，base 的注释也专门警告过）：
+  //   **入队即清、写成功不回头清**。每一条要写的记录在 await 之前就退出脏集合，
+  //   写失败再置回。反过来（写成功后才清）会把「写进行中」新置的脏一并抹掉：
+  //   序列化发生在 await 之前，写期间新到的输出块不在那份文本里，脏却被清了，
+  //   于是那一块永久只活在内存里（关停前最后一块就直接丢）。索引同理。
   async function persistPass(full, only = null) {
     const startedAt = performance.now();
     let ok = true;
     let written = 0;
     let bytes = 0;
     try {
+      // 先把这一轮要写的记录**序列化**出来：批次的选取按序列化后的真实字节数
+      // 计量（内存原始字节会低估 ESC 密集内容的落盘体积，六倍膨胀是常态），
+      // 顺带把「快照时刻」钉在 await 之前——后面再到的变更属于下一轮。
+      //
+      // 清脏就在这一刻做，与快照同拍：不能等 write 回来再清（那是 P0），也不能
+      // 等下面 mkdir 的 await 之后再清（同一个洞，只是窗口小一点——两者之间到达
+      // 的变更会被这一笔成功的写顺手抹掉：序列化时它不在文本里，清脏时它被当成
+      // 已写）。写失败再置回。
       const batch = [];
+      const consider = (session) => {
+        // 写之前就被关掉的会话：收尾由 removedSessionIds 负责，不必再写。
+        if (sessions.get(session.id) !== session) {
+          dirtySessions.delete(session);
+          return null;
+        }
+        try {
+          // 紧凑序列化：这份文件是给机器读的，两空格缩进会白添每块一个换行，
+          // 128KB 级尾部上就是几十 KB 的额外写量。
+          const text = JSON.stringify(sessionRecord(session));
+          const size = Buffer.byteLength(text);
+          dirtySessions.delete(session);
+          unpersistedIds.delete(session.id);
+          return { session, text, size };
+        } catch (error) {
+          ok = false;
+          logger.warn?.(`[terminal-host] session record serialize failed (${session.id}): ${error.message}`);
+          return null;
+        }
+      };
       if (only) {
         for (const session of only) {
-          if (dirtySessions.has(session) && sessions.get(session.id) === session) batch.push(session);
+          if (!dirtySessions.has(session)) continue;
+          const item = consider(session);
+          if (item) batch.push(item);
         }
       } else {
         let batchBytes = 0;
         for (const session of dirtySessions) {
+          // 「至少写一份」兜底：单份超预算也必须写出去（最新一块必留），所以两个
+          // 上限都在 batch 非空之后才判。
           if (batch.length > 0) {
             if (!full && batch.length >= PERSIST_SESSION_WRITES_PER_PASS) break;
             if (!full && batchBytes >= PERSIST_PASS_MAX_BYTES) break;
           }
-          batch.push(session);
-          // 尾部预算就是落盘体积的上界；单块超预算时它也只会被低估成 128KB，
-          // 由「至少写一份」兜底（最新一块必留，写出去就是几百 KB 也得写）。
-          batchBytes += Math.min(session.bufferBytes ?? 0, TERMINAL_BUFFER_PERSIST_MAX_BYTES);
+          const item = consider(session);
+          if (!item) continue;
+          batch.push(item);
+          batchBytes += item.size;
         }
       }
       if (batch.length > 0) {
@@ -714,43 +766,31 @@ export function createTerminalHost({
           ok = false;
           logger.warn?.(`[terminal-host] session state dir unavailable: ${error.message}`);
         }
-        for (const session of batch) {
-          // 写这一份的途中被关掉的会话：收尾由 removedSessionIds 负责，不必再写。
-          if (sessions.get(session.id) !== session) {
-            dirtySessions.delete(session);
-            continue;
-          }
-          let text;
-          try {
-            // 紧凑序列化：这份文件是给机器读的，两空格缩进会白添每块一个换行，
-            // 128KB 级尾部上就是几十 KB 的额外写量。
-            text = JSON.stringify(sessionRecord(session));
-          } catch (error) {
-            ok = false;
-            logger.warn?.(`[terminal-host] session record serialize failed (${session.id}): ${error.message}`);
-            continue;
-          }
+        for (const item of batch) {
+          const { session, text, size } = item;
           try {
             await atomicWriteJsonFile(sessionStatePath(session.id), text);
-            dirtySessions.delete(session);
-            unpersistedIds.delete(session.id);
             written += 1;
-            bytes += Buffer.byteLength(text);
+            bytes += size;
             persistStats.sessionWrites += 1;
           } catch (error) {
-            // 写失败保持脏标：下一拍重试。单份写失败不该打断输出转发，也不该把
+            // 写失败置回脏标：下一拍重试。单份写失败不该打断输出转发，也不该把
             // 没有清场后果的路由打成 500——需要失败冒头的调用方走 persistIndexNowOrThrow。
             ok = false;
+            if (sessions.get(session.id) === session) {
+              dirtySessions.add(session);
+              if (!existsSync(sessionStatePath(session.id))) unpersistedIds.add(session.id);
+            }
             logger.warn?.(`[terminal-host] session state persist failed (${session.id}): ${error.message}`);
           }
         }
       }
       // 索引只在「没有待落盘的记录文件」时写：索引里出现某个 id 就等于宣称那份
       // 文件已落盘。别的会话的尾部欠账不拦索引——它们的文件早就在盘上了。
+      // 有待删除的 id 时**无条件重写索引**：索引必须立刻不再点名它们，否则盘上
+      // 留下「索引点名、文件已删」这种读不回来的悬空项。
       const indexDue = indexDirty || removedSessionIds.size > 0;
       if (indexDue && unpersistedIds.size === 0) {
-        // 删除先于索引：先 rm 文件，再写索引。反过来的话崩溃窗口里索引不点名、
-        // 文件还在——restore 会当孤儿清掉，结果一样，但这样不留悬空。
         for (const id of [...removedSessionIds]) {
           try {
             await rm(sessionStatePath(id), { force: true });
@@ -760,14 +800,20 @@ export function createTerminalHost({
             logger.warn?.(`[terminal-host] session state remove failed (${id}): ${error.message}`);
           }
         }
-        if (indexDirty) {
+        // 走到这里就一定要重写索引：要么 indexDirty 为真，要么刚删过会话（索引
+        // 必须立刻不再点名它们）。快照与清脏都在 await 之前（同会话记录的纪律）：
+        // 写期间新置的 indexDirty 会留在集合里，下一轮补写。
+        //
+        // 但上面 rm 的 await 期间可能新建了会话（它的记录文件还没落）：这时索引
+        // 不能点名它，否则「索引点名 = 文件已写过」这条顺序保证就破了。留到下一轮。
+        if (unpersistedIds.size === 0) {
+          const text = JSON.stringify(indexRecord(), null, 2);
+          indexDirty = false;
           try {
-            // 索引人读得懂才查得动：成员表加主题，缩进两格，几百字节。
-            const text = JSON.stringify(indexRecord(), null, 2);
             await atomicWriteJsonFile(statePath, text);
-            indexDirty = false;
             bytes += Buffer.byteLength(text);
           } catch (error) {
+            indexDirty = true;
             ok = false;
             logger.warn?.(`[terminal-host] state index persist failed: ${error.message}`);
           }
@@ -835,9 +881,14 @@ export function createTerminalHost({
     pumpRunning = true;
     pumpPromise = (async () => {
       let ok = true;
+      let rounds = 0;
       for (;;) {
+        rounds += 1;
+        // full 与 only 不合并进同一轮：full 优先，且 only 在 full 轮里自然被满足
+        // （全量写本来就覆盖它们）。两者合并会让 close() 的全量冲净被降级成定向
+        // 冲净——关停时 SIGTERM 紧接着 process.exit(0)，没写完的尾部就没了。
         const fullPass = pumpWantFull;
-        const onlyPass = pumpWantOnly;
+        const onlyPass = fullPass ? null : pumpWantOnly;
         pumpWantFull = false;
         pumpWantOnly = null;
         pumpWantSlice = false;
@@ -848,14 +899,25 @@ export function createTerminalHost({
           logger.warn?.(`[terminal-host] state persist failed: ${error.message}`);
         }
         ok = passOk && ok;
+        // 全量冲净的语义是「返回时内存态整份在盘上」：写期间新置的脏（输出还在
+        // 流、有人刚关了页签）必须在这一轮里继续写完，不能留给下一次防抖。上限
+        // 防的是「输出永不停止」时的活锁——关停路径下输出几拍内就断了。
+        if (fullPass && passOk && hasPendingWork() && rounds < PERSIST_FULL_FLUSH_MAX_ROUNDS) continue;
         // 这个判断必须是同步的：写期间到达的请求在这里被收编，泵不会「已经决定
         // 退出却又漏掉一个请求」。
         if (pumpWantFull || pumpWantSlice) continue;
         pumpRunning = false;
         lastPassOk = ok;
-        // 有界单拍留下的欠账：自己续下一拍，不必等下一次输出把它叫醒。写失败时
-        // 不续（否则永久失败会变成每 250ms 一次的空转），等下一次变更再来。
-        if ((dirtySessions.size > 0 || removedSessionIds.size > 0 || indexDirty) && ok) schedulePersist();
+        if (fullPass && passOk && hasPendingWork()) {
+          // 撞到轮次上限还有欠账：记一笔，剩下的交给防抖拍继续收（有界单拍不会
+          // 让它无界增长）。正常关停路径走不到这里。
+          logger.warn?.(`[terminal-host] full flush stopped at ${rounds} rounds with backlog=${dirtySessions.size}`);
+          schedulePersist();
+        } else if ((dirtySessions.size > 0 || removedSessionIds.size > 0 || indexDirty) && ok) {
+          // 有界单拍留下的欠账：自己续下一拍，不必等下一次输出把它叫醒。写失败时
+          // 不续（否则永久失败会变成每 250ms 一次的空转），等下一次变更再来。
+          schedulePersist();
+        }
         return ok;
       }
     })();
@@ -927,15 +989,22 @@ export function createTerminalHost({
   //   v1（旧）——索引的 sessions 是完整对象数组，正文（含 buffer）就在里面。
   // 判据是元素类型：字符串＝v2 的 id，对象＝v1 的整份记录。这样新码读旧文件不需要
   // 版本分支也不留迁移义务：v1 文件在第一次落盘时自然变成 v2，而 v1 永远读得回来。
+  //
+  // 返回值里 indexIds 与 records 是**两件事**：indexIds 是「索引点名的全部合法 id」
+  // （不管这次读没读成功），records 是「这次真读出来的记录」。清理孤儿必须用前者
+  // ——用后者的话，一次瞬时读失败（杀软锁、EACCES）就会被当成「索引没点名」而把
+  // 那份记录当场删掉，瞬时故障变成永久丢尾部。
   function readPersistedRecords(raw) {
     const items = Array.isArray(raw?.sessions) ? raw.sessions : [];
     const records = [];
+    const indexIds = new Set();
     for (const item of items) {
       if (typeof item === "string") {
         if (!SESSION_ID_PATTERN.test(item)) {
           logger.warn?.(`[terminal-host] session id rejected from index: ${JSON.stringify(item)}`);
           continue;
         }
+        indexIds.add(item);
         try {
           const record = JSON.parse(readFileSync(sessionStatePath(item), "utf8"));
           if (record && typeof record === "object") records.push(record);
@@ -947,15 +1016,17 @@ export function createTerminalHost({
         }
         continue;
       }
-      if (item && typeof item === "object" && !Array.isArray(item)) records.push(item);
+      if (item && typeof item === "object" && !Array.isArray(item)) {
+        if (SESSION_ID_PATTERN.test(String(item.id ?? ""))) indexIds.add(String(item.id));
+        records.push(item);
+      }
     }
-    return records.filter((record) => SESSION_ID_PATTERN.test(String(record?.id ?? "")));
+    return { records: records.filter((record) => SESSION_ID_PATTERN.test(String(record?.id ?? ""))), indexIds };
   }
 
   // 清理索引没点名的残留记录文件（崩溃窗口的孤儿、v1 时代的旧文件、原子写留下的
   // 临时文件）。索引是成员表的唯一权威，所以这里只删「不在索引里」的：relay 的
-  // clearSessions 兜底只 unlink 索引，留下的正是这一批。只在索引读成功时清——读不
-  // 出来（首次启动、占位目录）时按「不知道盘上有什么」处理，绝不动手。
+  // clearSessions 兜底只 unlink 索引，留下的正是这一批。
   function pruneSessionRecords(keepIds) {
     let entries;
     try {
@@ -988,8 +1059,7 @@ export function createTerminalHost({
           terminalThemeBackground = raw.theme.background;
         }
       }
-      const records = readPersistedRecords(raw);
-      const keepIds = new Set(records.map((record) => record.id).filter((id) => typeof id === "string"));
+      const { records, indexIds } = readPersistedRecords(raw);
       for (const item of records) {
         const buffer = Array.isArray(item.buffer) ? item.buffer : [];
         const { version: _recordVersion, ...rest } = item;
@@ -1036,15 +1106,27 @@ export function createTerminalHost({
           markSessionDirty(session);
         }
       }
-      pruneSessionRecords(keepIds);
+      // 孤儿清理用**索引点名的 id**做保留集，不是「这次读成功的记录」：一次瞬时
+      // 读失败不该把那份记录当场删掉（那会把瞬时故障变成永久丢尾部）。
+      pruneSessionRecords(indexIds);
       // 盘上是旧格式（v1 整份文件）：把索引改成 v2 的成员表。迁移只有这一次，之后
       // 索引已是 v2，启动不再动盘。
       const indexIsCurrent = raw?.version === 2 && Array.isArray(raw.sessions)
         && raw.sessions.every((entry) => typeof entry === "string");
       if (!indexIsCurrent) markIndexDirty();
       if (indexDirty || dirtySessions.size > 0) schedulePersist();
-    } catch {
-      // First start or a partially written state file: start empty.
+    } catch (error) {
+      // 首次启动、或状态文件半截写坏：从空表起。
+      //
+      // 但「索引不存在」与「索引读不出来」要分开对待：索引是成员表的唯一权威，
+      // **它不在盘上就等于「没有会话」**——relay 的 clearSessions 兜底就是
+      // unlinkSync(索引)，此时那些记录文件全是无人认领的终端内容，必须一起清掉，
+      // 否则 N×128KB 的屏幕内容会一直留在盘上直到下一次「索引读成功」的启动。
+      // 索引存在却读不出来（杀软锁、EACCES、半截 JSON）则什么都不删——那是瞬时
+      // 故障，删了就把可恢复的数据变成不可恢复。
+      if (error?.code === "ENOENT" || !existsSync(statePath)) {
+        pruneSessionRecords(new Set());
+      }
     }
     if (sweeps.length > 0) restoreSweep = Promise.all(sweeps);
   }
