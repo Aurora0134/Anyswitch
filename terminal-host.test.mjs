@@ -1410,6 +1410,120 @@ test("⑬ 全量冲净不被定向冲净降级：返回时不留欠账", async (
   }
 });
 
+// ⑭ 全量冲净必须「写到没有欠账」，不是「跑一轮」。
+//
+// 评审 r2 §3.2：上一版 `pumpWantFull` 是**一次性请求位**，每轮开头就被消费掉。
+// 第 1 轮（full）跑完若仍有欠账 → 进第 2 轮，但第 2 轮的 full 位已是 false，于是
+// 第 2 轮退化成有界单拍（≤4 份）；第 2 轮后既不再 continue 也没人置位 → 泵退出、
+// 欠账留给 250ms 后的防抖拍。而 close() 只 await 泵、不等那个定时器，SIGTERM 紧接
+// 着 exit(0)——欠账就跟着没了。PERSIST_FULL_FLUSH_MAX_ROUNDS 因此是死代码。
+//
+// 复现形状与评审一致：N=12 每条喂满 128KB 尾部 → 全部 emit 置脏 → persistNow()
+// （full）→ **在飞行期间**再对全部会话 emit 一个带标记的块 → await → 断言
+// backlog === 0 且每条记录的盘上内容含那个标记块。修前实测 backlog = 8。
+test("⑭ 全量冲净写期间又置脏：返回时必须没有欠账，且最后一块在盘上", async () => {
+  const n = 12;
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-fullclean-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const marker = "TAIL-DURING-FULL-FLUSH";
+  try {
+    const ids = [];
+    for (let i = 0; i < n; i += 1) {
+      const created = await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell", cols: 120, rows: 34 }),
+      }).then((r) => r.json());
+      ids.push(created.id);
+    }
+    // 每条喂满 128KB 落盘尾部：一轮全量写 12 份要十几毫秒，飞行窗口足够插进 emit。
+    const line = "\x1b[1;36m␣\x1b[0m 正在读取文件 abcdefghijklmnopqrstuvwxyz\r\n";
+    const chunk = line.repeat(Math.ceil((16 * KB_) / Buffer.byteLength(line)));
+    for (const call of calls) for (let k = 0; k < 8; k += 1) call.pty.dataListener(chunk);
+    await host.persistNow();
+
+    // 全部置脏，然后起一轮全量冲净
+    for (const call of calls) call.pty.dataListener("pre-flush");
+    const flush = host.persistNow();
+    // 飞行期间：再给全部会话各来一个标记块（这就是「full 之后又有新脏」）
+    for (const call of calls) call.pty.dataListener(marker);
+    await flush;
+
+    assert.equal(host.persistStats.backlog, 0,
+      `全量冲净返回时必须没有欠账（实得 ${host.persistStats.backlog}）——`
+      + `欠账跟着 SIGTERM 的 exit(0) 一起没了就是丢尾部`);
+    assert.equal(host.persistStats.lastFullFlushIncomplete, null,
+      "正常路径不该留下「冲净不完整」的记录");
+    for (const id of ids) {
+      const record = readSessionRecord(host, id);
+      assert.ok(record.buffer.join("").includes(marker),
+        `会话 ${id}：飞行期间到达的标记块必须在盘上（不在 = 那一轮之后泵提前退出了）`);
+    }
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑮ close() 把「盘上是不是整份状态」这个结果返回出来，不再静默。
+// 撞轮次上限（"输出永不停"）时必须有可观测的记法（lastFullFlushIncomplete）；
+// 正常关停则 complete=true、backlog=0。
+test("⑮ close() 返回「还有没有欠账」：正常关停 complete=true", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-closecomplete-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    for (let i = 0; i < 6; i += 1) {
+      await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell" }),
+      });
+    }
+    for (const call of calls) call.pty.dataListener("last-block-before-close");
+    const result = await host.close();
+    assert.ok(result && typeof result === "object", "close() 必须返回结果对象");
+    assert.equal(result.backlog, 0, `关停返回时不许有欠账（实得 ${result.backlog}）`);
+    assert.equal(result.complete, true, "正常关停 complete=true");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑯ 全量冲净没能兑现时必须有可观测的记法，不许静默。
+// 构造必败：索引路径占成目录，每笔索引写都失败 → 欠账留到 close() 仍存在。
+// 该用例钉的是「结果被返回出来 + lastFullFlushIncomplete 有记录」这条可观测性，
+// 不是写失败本身的 500 语义（那条在 ⑤）。
+test("⑯ 全量冲净未完成时 close() 返回 complete=false 且留下可观测记录", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-incomplete-"));
+  mkdirSync(join(root, TERMINAL_STATE_FILE)); // 占位目录：索引写必败
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "写失败", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener("tail");
+    // 索引写失败 → 索引的脏位被置回 → 全量冲净无法兑现
+    const result = await host.close();
+    assert.ok(result && typeof result === "object", "close() 必须返回结果对象");
+    assert.equal(result.complete, false, "有欠账时 complete 必须为 false（不许静默返回成功）");
+    // 欠账可能落在会话记录上，也可能只落在索引上（本例是索引写失败）：两处都要如实上报。
+    assert.ok(result.backlog > 0 || result.indexDirty === true,
+      `欠账必须如实反映（backlog=${result.backlog}, indexDirty=${result.indexDirty}）`);
+    assert.ok(host.persistStats.lastFullFlushIncomplete,
+      "撞上限或写失败时 lastFullFlushIncomplete 必须有记录（这是「盘上不是整份状态」的机器可判信号）");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("watchParentProcess stays quiet while the parent lives", () => {
   let tick = null;
   let dead = 0;
