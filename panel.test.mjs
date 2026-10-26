@@ -3531,6 +3531,7 @@ describe("panel.html 设置全页视图", () => {
       // done 未读两张表（rebuild 同拍 prune）：桩环境给空表即可
       const terminalDoneUnread = new Map();
       const terminalPrevWorking = new Map();
+      const terminalTurnArmed = new Set();
       const terminalPreviewSessions = {};
       ${bodies}
       rebuildTerminalBackendSessions(items);
@@ -10839,6 +10840,7 @@ describe("终端渲染行为性能（塌缩防抖 / 同尺寸跳过 / innerHTML 
       const terminalHollowStreak = new Map();
       const terminalDoneUnread = new Map();
       const terminalPrevWorking = new Map();
+      const terminalTurnArmed = new Set();
       const terminalPreviewSessions = {};
       const localStorage = {
         getItem: (k) => (k in store ? store[k] : null),
@@ -11070,9 +11072,13 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
   // noteTerminalWorkingStatus（done 未读翻转观测，terminalActivityApplyToSession 落
   // status 前必经）的模块级自由变量：桩环境给空表，本 describe 的断言面只在
   // session.status，不读标记。
-  const VM_DONE_STATE = "const terminalDoneUnread = new Map(); const terminalPrevWorking = new Map(); let activeTerminalPreviewId = null;";
+  const VM_DONE_STATE = "const terminalDoneUnread = new Map(); const terminalPrevWorking = new Map(); const terminalTurnArmed = new Set(); let activeTerminalPreviewId = null;";
   async function vmFn(name, args, deps = []) {
-    const source = [name, ...deps].map((fnName) => {
+    // 回合闸是 working 口径的必经中间层（terminalActivityApplyToSession / enrich 都
+    // 经它落 status），统一随源抽出，调用点不必逐个补依赖。
+    const all = ["terminalSessionBusyFromSignals", "terminalBusyByOutput"]
+      .reduce((acc, dep) => (acc.includes(dep) ? acc : [...acc, dep]), [...deps]);
+    const source = [name, ...all].map((fnName) => {
       const body = panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0];
       assert.ok(body, `${fnName} found in panel.js`);
       return body;
@@ -11257,6 +11263,70 @@ describe("活跃真值推送桥（缓存 / 浏览器出口 / 前端应用）", (
     assert.equal(fresh.status, "working", "孵化窗内请求在途仍 working");
     await vmFn("terminalActivityApplyToSession", [fresh, 0], ["terminalBusyByOutput", "noteTerminalWorkingStatus"]);
     assert.equal(fresh.status, "idle", "孵化窗内零请求零有效输出：idle（内切门就地换内容）");
+  });
+
+  it("前端：回合闸——已归属 agent 会话的空闲自绘不点亮，回合内输出照常点亮", async () => {
+    const now = Date.now();
+    // 回合闸是跨拍状态（Set），必须落在同一个 VM 上下文里连续调用：vmFn 每次新建
+    // 上下文，逐次调用会把闸位丢掉，这里自己建一个复用上下文。
+    const apply = await (async () => {
+      const source = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalSessionBusyFromSignals"]
+        .map((fnName) => panelJs.match(new RegExp(`function ${fnName}\\([\\s\\S]*?\\n  \\}`))?.[0])
+        .join("\n");
+      return vm.runInNewContext(`(() => { ${VM_DONE_STATE}\n${source}; return terminalActivityApplyToSession; })()`, {});
+    })();
+    // 已归属会话（agent.endpointId 有值）：空闲界面自绘只有输出、没有回合——不点亮。
+    const idle = {
+      id: "t-idle", status: "idle", metrics: null,
+      agent: { endpointId: "dsh", instanceId: "dsh-1" },
+      backendState: { status: "running", lastActiveAt: now - 500, createdAt: now - 600_000, spawnedAt: now - 600_000 },
+    };
+    apply(idle, 0);
+    assert.equal(idle.status, "idle", "没进过回合的空闲自绘：不转圈（转圈误报根因）");
+    // 同一会话：出现在途请求即入回合 → 输出窗有效（请求与输出是 OR）。
+    apply(idle, 1);
+    assert.equal(idle.status, "working", "请求在途：入回合");
+    // 回合内请求回落 0 但输出仍新鲜（工具命令在跑）→ 仍 working。
+    apply(idle, 0);
+    assert.equal(idle.status, "working", "回合内输出照常算忙（长命令不被判空闲）");
+    // 静默超窗（无请求、无输出）→ 出回合；此后再有输出也不再点亮。
+    idle.backendState = { ...idle.backendState, lastActiveAt: now - 60_000 };
+    apply(idle, 0);
+    assert.equal(idle.status, "idle", "静默出回合");
+    idle.backendState = { ...idle.backendState, lastActiveAt: Date.now() - 300 };
+    apply(idle, 0);
+    assert.equal(idle.status, "idle", "出回合后的空闲自绘不再点亮（下次点亮只由新请求发起）");
+    // 无归属的普通终端没有回合概念：原输出窗口径不变（用户在 shell 里跑命令照常显示进行中）。
+    const shell = {
+      id: "t-shell", status: "idle", metrics: null, agent: null,
+      backendState: { status: "running", lastActiveAt: Date.now() - 300, createdAt: now - 600_000, spawnedAt: now - 600_000 },
+    };
+    apply(shell, 0);
+    assert.equal(shell.status, "working", "普通终端维持输出活跃窗口径");
+  });
+
+  it("前端：端点级活跃帧不落到单个会话（未绑定新会话不再被别人的请求点亮）", async () => {
+    const deps = ["terminalActivityApplyToSession", "noteTerminalWorkingStatus", "terminalBusyByOutput", "terminalActivityKey"];
+    const unbound = {
+      status: "idle", metrics: null,
+      agent: { endpointId: "dsh", name: "DeepSeek Harness", pid: 6100, instanceId: null },
+      backendState: { status: "running", lastActiveAt: Date.now() - 60_000, createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000 },
+    };
+    // 端点级活跃帧（instanceId 缺省＝整个 dsh 端点的合计在途请求）：不得驱动单会话。
+    const applied = await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "dsh", instanceId: null, activeRequests: 3, at: 1 }, { t1: unbound }], deps);
+    assert.equal(applied, false, "端点级帧不命中任何会话（不重绘）");
+    assert.equal(unbound.status, "idle", "别人的请求不把未绑定新会话点亮");
+    // 实例级帧照旧落到自己的会话上。
+    const bound = {
+      status: "idle", metrics: { activeRequests: 0 },
+      agent: { endpointId: "dsh", instanceId: "dsh-6100" },
+      backendState: { status: "running", lastActiveAt: Date.now() - 60_000, createdAt: Date.now() - 600_000, spawnedAt: Date.now() - 600_000 },
+    };
+    const hit = await vmFn("terminalActivityApplyFrame",
+      [{ type: "activity", endpointId: "dsh", instanceId: "dsh-6100", activeRequests: 2, at: 2 }, { t1: bound }], deps);
+    assert.equal(hit, true, "实例级帧命中");
+    assert.equal(bound.status, "working");
   });
 
   it("前端：terminalActivityApplyFrame 定点更新不串键、snapshot 整帧对齐", async () => {

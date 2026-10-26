@@ -2552,12 +2552,15 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       let routeRuntimeCache = null;
       const terminalDoneUnread = new Map();
       const terminalPrevWorking = new Map();
+      // 回合闸（working 口径的跨拍状态）：桩环境给空表；真 enrich 路径会用它。
+      const terminalTurnArmed = new Set();
       ${extractFn("terminalInstanceRow")}
       ${extractFn("terminalMetricNum")}
       ${extractFn("terminalWorkTime")}
       ${extractFn("terminalMetricsFromInstance")}
       ${extractFn("terminalRouteForEndpoint")}
       ${extractFn("terminalBusyByOutput")}
+      ${extractFn("terminalSessionBusyFromSignals")}
       ${extractFn("noteTerminalWorkingStatus")}
       ${extractFn("enrichTerminalSessions")}
       const enrichTerminalSessionsReal = enrichTerminalSessions;

@@ -4956,6 +4956,12 @@ async function api(method, path, body) {
   // 不持久化：面板刷新即清（与 dsh 同口径——completed 本就是事件派生非持久）。
   const terminalDoneUnread = new Map();
   const terminalPrevWorking = new Map();
+  // 回合闸（terminalSessionBusyFromSignals 的状态位）：输出活跃窗只在本轮对话回合
+  // 内算数。agent 会话空闲时 TUI 自己也会往 PTY 写字节（启动重绘、提示行轮换、
+  // 光标/动画帧），只看「5s 内出过字节」会把空闲页点亮成进行中。回合的起点取
+  // 「该实例出现在途请求」，终点取「无在途请求且输出窗过期」。内存态、不持久化，
+  // 与上面两张表同生命周期（关会话、轮询重建后消失即清）。
+  const terminalTurnArmed = new Set();
   // 首连定性位：false = 面板刚装载、会话列表请求还在飞（实测一个往返 16–41ms）。
   // 这一窗不落「终端不可用」——刷新恢复直接落进终端页时，那一帧的空白是「还不知道」
   // 而不是「服务没了」，把降级空态画出来再收走就是自己造一次闪烁。
@@ -5395,9 +5401,31 @@ async function api(method, path, body) {
   // 口径：请求在途，或输出在活跃窗内 → working，两者都无 → idle。「N 个请求进行中」
   // 明细取自真值；metrics 还没被轮询富化出来时（活了一辈子但还没等满一拍）只落
   // 状态位，不为了一行明细编造空指标。
+  //
+  // 归属会话另过回合闸（terminalTurnArmed）：输出窗单独不足以证明「回合在跑」——
+  // dsh 这类 Ink 自绘 TUI 空闲时也在写 PTY，只看字节会让空闲页周期性转圈，也会
+  // 让 M12 内切判定门误走「保护性新开页签」。所以输出窗只在「本回合」内有效：
+  // 该实例一出现在途请求即入回合，回落到无请求且输出窗过期即出回合；出回合后
+  // 只有新的请求能重新入回合，界面自绘不再点亮。无归属的普通终端没有回合概念，
+  // 维持原输出窗口径（用户在 shell 里跑命令照样看得到进行中）。
+  function terminalSessionBusyFromSignals(session, count, now = Date.now()) {
+    const id = session && typeof session.id === "string" ? session.id : null;
+    if (count > 0) {
+      if (id) terminalTurnArmed.add(id);
+      return true;
+    }
+    const output = terminalBusyByOutput(session, undefined, now);
+    if (!output) {
+      if (id) terminalTurnArmed.delete(id);
+      return false;
+    }
+    if (!session || !session.agent) return true;
+    return !!(id && terminalTurnArmed.has(id));
+  }
+
   function terminalActivityApplyToSession(session, activeRequests) {
     const count = Number.isFinite(activeRequests) && activeRequests > 0 ? Math.trunc(activeRequests) : 0;
-    session.status = count > 0 || terminalBusyByOutput(session) ? "working" : "idle";
+    session.status = terminalSessionBusyFromSignals(session, count) ? "working" : "idle";
     noteTerminalWorkingStatus(session, session.status);
     if (session.metrics) session.metrics.activeRequests = count;
     return count;
@@ -5433,12 +5461,17 @@ async function api(method, path, body) {
     if (frame.type === "snapshot" && Array.isArray(frame.instances)) {
       countByKey = new Map();
       for (const inst of frame.instances) {
-        if (inst && typeof inst.endpointId === "string") {
-          countByKey.set(terminalActivityKey(inst.endpointId, inst.instanceId ?? null), inst.activeRequests);
-        }
+        if (!inst || typeof inst.endpointId !== "string") continue;
+        // 端点级聚合行（instanceId 缺省）代表整个端点的合计在途请求，不驱动任何
+        // 单个终端会话：未绑定实例的新会话与它同键，会把别的实例的请求算到自己
+        // 头上（空闲页闪转圈）。单会话只认自己的实例行，拿不到就等绑定落定。
+        if (inst.instanceId === null || inst.instanceId === undefined) continue;
+        countByKey.set(terminalActivityKey(inst.endpointId, inst.instanceId), inst.activeRequests);
       }
     } else if (frame.type === "activity" && typeof frame.endpointId === "string") {
-      countByKey = new Map([[terminalActivityKey(frame.endpointId, frame.instanceId ?? null), frame.activeRequests]]);
+      // 同款：端点级活跃帧不落到单会话上（见上）。
+      if (frame.instanceId === null || frame.instanceId === undefined) return false;
+      countByKey = new Map([[terminalActivityKey(frame.endpointId, frame.instanceId), frame.activeRequests]]);
     } else {
       return false;
     }
@@ -5576,6 +5609,10 @@ async function api(method, path, body) {
     }
     for (const id of terminalPrevWorking.keys()) {
       if (!terminalBackendSessions[id]) terminalPrevWorking.delete(id);
+    }
+    // 回合闸同款：会话没了，闸位不留给同 id 的下一代会话。
+    for (const id of terminalTurnArmed) {
+      if (!terminalBackendSessions[id]) terminalTurnArmed.delete(id);
     }
   }
 
@@ -6701,9 +6738,11 @@ async function api(method, path, body) {
       if (!session?.backend) continue;
       const agent = session.agent || null;
       const instance = terminalInstanceRow(agentsPayload, agent);
-      // 状态口径与活跃真值流同源：请求在途或输出活跃窗内（terminalBusyByOutput）。
+      // 状态口径与活跃真值流同源：请求在途，或输出活跃窗内且本回合已入闸
+      // （terminalSessionBusyFromSignals）。
       // 算完过 noteTerminalWorkingStatus（done 未读标记的翻转观测，同 SSE 写点）。
-      session.status = (instance && instance.activeRequests > 0) || terminalBusyByOutput(session) ? "working" : "idle";
+      const activeRequests = instance && Number(instance.activeRequests) > 0 ? Math.trunc(instance.activeRequests) : 0;
+      session.status = terminalSessionBusyFromSignals(session, activeRequests) ? "working" : "idle";
       noteTerminalWorkingStatus(session, session.status);
       session.metrics = instance ? terminalMetricsFromInstance(instance) : null;
       const { route, routeCurrent } = agent
@@ -7664,6 +7703,7 @@ async function api(method, path, body) {
         // done（跑完未读）标记与上一拍状态一并清：会话没了，未读态随之失效
         terminalDoneUnread.delete(id);
         terminalPrevWorking.delete(id);
+        terminalTurnArmed.delete(id);
         const remaining = Object.keys(terminalSessionMap());
         if (activeTerminalPreviewId === id) activeTerminalPreviewId = remaining[0] || null;
         rememberTerminalSessionId(activeTerminalPreviewId);

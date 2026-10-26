@@ -307,8 +307,11 @@ describe("内切切换会话（terminal sessions switch）", () => {
       },
       probeTerminalCommandTreeFn: async (pid) => {
         calls.probe.push(pid);
+        // 复探引入后，判定可能探两次：给序列就按序消费（末位复用），给标量就恒定。
+        if (Array.isArray(probe)) return probe.length > 1 ? probe.shift() : probe[0];
         return probe === undefined ? false : probe;
       },
+      switchGuardRecheckDelayMs: 0,
       restartTerminalSessionFn: async (id, body, options) => {
         calls.restart.push({ id, body, options });
         return restarted === undefined
@@ -425,7 +428,7 @@ describe("内切切换会话（terminal sessions switch）", () => {
     });
   });
 
-  it("杀前复核：running 且探测有活命令子进程（或探测失败）→ 409 switch_busy 不 restart；exited 不探测照旧内切", async () => {
+  it("杀前复核：running 且探测有活命令子进程（或探测失败）→ 409 switch_busy 不 restart；复探放行；exited 不探测照旧内切", async () => {
     await withFakeAgents(async (cwd) => {
       for (const [name, probe] of [["有活后代", true], ["探测失败（null）", null]]) {
         const { router, calls } = switchRouter({ root: mkTestDir("anyswitch-switch-busy-"), probe });
@@ -436,9 +439,19 @@ describe("内切切换会话（terminal sessions switch）", () => {
         assert.equal(res.statusCode, 409, `${name} 拒换`);
         assert.equal(json().code, "switch_busy", "机器可判短码");
         assert.equal(json().error, "switch_busy", "error 即机器码本身（零文案）");
-        assert.deepEqual(calls.probe, [42], `${name} 按会话 pid 探测过一次`);
+        assert.deepEqual(calls.probe, [42, 42], `${name} 判忙后复探一拍（两次都非 false 才拒）`);
         assert.equal(calls.restart.length, 0, `${name} 不 restart（在跑命令不被杀）`);
       }
+      // 复探放行：首探撞上 agent 启动期的瞬时子进程（或一次超时），隔一拍再探干净
+      // ——不是真在跑的命令，照常就地内切。
+      const transient = switchRouter({ root: mkTestDir("anyswitch-switch-recheck-"), probe: [true, false] });
+      const transientCall = fakeReqRes(`/panel/api/terminal/sessions/${SESSION_ID}/switch`, "POST", {
+        resume: { endpoint: "kimi", id: SESSION_ID }, cwd,
+      });
+      await transient.router.handle(transientCall.req, transientCall.res);
+      assert.equal(transientCall.res.statusCode, 200, "首探忙、复探干净：照常内切");
+      assert.deepEqual(transient.calls.probe, [42, 42], "确实探了两次");
+      assert.equal(transient.calls.restart.length, 1, "复探放行后走 restart");
       const gone = switchRouter({
         root: mkTestDir("anyswitch-switch-exit-"),
         hostSession: { id: SESSION_ID, label: "Anyswitch", cwd: "C:\\shell-dir", shell: "powershell", status: "exited", pid: 42 },
