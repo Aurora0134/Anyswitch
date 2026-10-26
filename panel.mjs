@@ -954,6 +954,9 @@ export function createPanelRouter({
    // 扫描承载的进程内兜底（worker 不可用那一拍）。默认 null＝真 session-scan
    // 扫描真 home 存档；单测注入自己的假扫描，别让降级路径读真存档。
    sessionScanFallback = null,
+   // 扫描承载降级后的冷却窗（毫秒）。默认 null＝模块默认 5 分钟；单测注入 0
+   // 验「冷却到点确实重建」，注入大值验「冷却窗内不重建」。
+   sessionScanReviveCooldownMs = null,
    // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
@@ -1060,6 +1063,7 @@ export function createPanelRouter({
   // 与「降级也不碰真 home 存档」时，注入自己的假扫描，别让测试去读真存档。
   const scanHost = createSessionScanOffload({
     ...(sessionScanWorkerFile ? { workerFile: sessionScanWorkerFile } : {}),
+    ...(sessionScanReviveCooldownMs === null ? {} : { reviveCooldownMs: sessionScanReviveCooldownMs }),
     logger,
     fallback: sessionScanFallback ?? {
       scanAll: () => sessionScanner.scanAll(),

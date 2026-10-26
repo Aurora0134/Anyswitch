@@ -12,8 +12,14 @@
 // 与 in-process 调用逐字段一致（session-scan.test.mjs 有对照钉）。
 //
 // 降级：worker 起不来 / 崩了 / 单次超时，就退回本进程内扫（面板仍能出列表，
-// 只是那一拍会卡），并只在首次降级时记一条 warn——不每拍重试、不无限重连。
-// 这保证了「worker 在某些打包/受限环境下不可用」不会变成「会话列表没了」。
+// 只是那一拍会卡），并记一条 warn——不每拍重试、不无限重连。这保证了「worker
+// 在某些打包/受限环境下不可用」不会变成「会话列表没了」。
+//
+// 降级不是终点（reviveCooldownMs，默认 5 分钟）：冷却窗过后允许重建一次
+// worker。一次抖动（机器休眠唤醒、磁盘卡顿撞上 120s 上限、worker 偶发崩溃）
+// 不许把整个进程生命周期永久打回「扫描占住事件循环」——那正是本 mission 要
+// 消掉的症状。重建失败只是再记一条 warn 并重新起算冷却窗，没有额外成本；
+// 也不主动定时重建——没人在扫的时候不必起线程。
 //
 // 生命周期：worker 懒建（首次真正要扫时才起），有请求在飞时 ref、空闲时
 // unref，所以它既不拖住进程退出，也不会在空闲期被提前回收。
@@ -27,6 +33,8 @@ const WORKER_FILE = fileURLToPath(import.meta.url);
 // 单次扫描上限：本机最坏实测 8s（2927 条会话），给到 120s 只用于兜住「worker
 // 挂死」这种不该发生的情形——超时后退回进程内扫，宁可卡一拍也不无限等。
 const SCAN_TIMEOUT_MS = 120_000;
+// 降级后的冷却窗：期间一律本进程扫，到点允许重建一次 worker。
+const REVIVE_COOLDOWN_MS = 5 * 60_000;
 
 // One request/response channel to the scan worker, plus the in-process
 // fallback. `fallback.scanAll()` / `fallback.scanAgent(id)` must be the same
@@ -35,12 +43,18 @@ export function createSessionScanOffload({
   workerFile = WORKER_FILE,
   workerData = null,
   timeoutMs = SCAN_TIMEOUT_MS,
+  reviveCooldownMs = REVIVE_COOLDOWN_MS,
   logger = null,
   fallback,
 } = {}) {
   let worker = null;
-  let degraded = false; // worker 不可用：此后一律本进程扫，不再重试
-  let warned = false;
+  // 冷却窗：degradedUntil 在未来时一律走本进程；到点后下一次扫描尝试重建。
+  let degradedUntil = 0;
+  // 是否处于「已降级且还没重建」的状态：同一次故障会同时从 worker 的 error
+  // 事件和 run() 的 catch 两路走到 retire()，靠它去重，别把一次故障记成两次。
+  let degraded = false;
+  let failures = 0;
+  let workerStarts = 0;
   let seq = 0;
   const pending = new Map(); // id → { resolve, reject, timer }
 
@@ -52,16 +66,15 @@ export function createSessionScanOffload({
     pending.clear();
   }
 
-  // 一次性降级：起不来 / 崩了 / 超时都走这里。只记一条 warn——之后每一拍都
-  // 本进程扫，重复刷日志没有增量信息。
+  // 一次降级：起不来 / 崩了 / 超时都走这里。记一条 warn，起算冷却窗。
   function retire(error) {
-    if (!degraded) {
-      degraded = true;
-      if (!warned) {
-        warned = true;
-        logger?.warn?.(`session scan worker unavailable, scanning in-process: ${error?.message}`);
-      }
-    }
+    if (degraded && worker === null) return; // 同一场故障只记一次
+    degraded = true;
+    failures += 1;
+    degradedUntil = Date.now() + reviveCooldownMs;
+    logger?.warn?.(
+      `session scan worker unavailable (${failures}), scanning in-process; retry in ${Math.round(reviveCooldownMs / 1000)}s: ${error?.message}`,
+    );
     try {
       worker?.terminate();
     } catch {
@@ -73,6 +86,9 @@ export function createSessionScanOffload({
 
   function ensureWorker() {
     if (worker) return worker;
+    workerStarts += 1;
+    // 重建即离开降级态：若这次仍失败，retire() 会重新置位并重新起算冷却窗。
+    degraded = false;
     const created = new Worker(workerFile, { name: "session-scan", ...(workerData ? { workerData } : {}) });
     created.on("message", (message) => {
       const entry = pending.get(message?.id);
@@ -121,7 +137,9 @@ export function createSessionScanOffload({
   }
 
   async function run(kind, agentId, fallbackFn) {
-    if (degraded) return fallbackFn();
+    // 冷却窗内一律本进程扫——不在这段时间里反复重建线程（起不来的环境每拍
+    // 重建一次只会拖慢每一拍）。
+    if (Date.now() < degradedUntil) return fallbackFn();
     try {
       return await request(kind, agentId);
     } catch (error) {
@@ -135,6 +153,10 @@ export function createSessionScanOffload({
     scanAll: () => run("all", undefined, () => fallback.scanAll()),
     // 单端点扫描（终端会话 ↔ 对话存档绑定、复活兜底）。
     scanAgent: (agentId) => run("agent", agentId, () => fallback.scanAgent(agentId)),
+    // 诊断面（测试与现场排查用）：worker 起过几次、降级了几次、当前是否在冷却窗。
+    stats() {
+      return { workerStarts, failures, degraded: Date.now() < degradedUntil, degradedUntil };
+    },
     close() {
       if (!worker) return;
       const target = worker;

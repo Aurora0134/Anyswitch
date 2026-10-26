@@ -1594,6 +1594,77 @@ test("scan offload: worker 起不来时退回本进程扫，不丢结果", async
   }
 });
 
+test("scan offload: 降级不是终点——冷却窗过后会重建 worker（评审 F8）", async () => {
+  // 一次抖动（worker 崩一次、某次扫描撞上超时）不许把整个进程生命周期永久
+  // 打回「扫描占住事件循环」。冷却窗到点后允许重建，重建成功就该重新离线程。
+  const dir = makeTmp();
+  const workerFile = join(dir, "reviving-worker.mjs");
+  // 先放一个必然崩溃的 worker：顶层直接退出非 0 → 承载判定不可用。
+  writeFileSync(workerFile, "process.exit(1);\n", "utf8");
+  let fallbackCalls = 0;
+  const offload = createSessionScanOffload({
+    workerFile,
+    // 冷却窗压到 0：下一次扫描立刻允许重建（生产是 5 分钟）。
+    reviveCooldownMs: 0,
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => {
+        fallbackCalls += 1;
+        return { sessions: [], endpointErrors: [] };
+      },
+      scanAgent: () => [],
+    },
+  });
+  try {
+    const first = await offload.scanAll();
+    assert.deepEqual(first, { sessions: [], endpointErrors: [] });
+    assert.equal(fallbackCalls, 1, "第一次扫描走进程内兜底");
+    assert.equal(offload.stats().failures, 1);
+    // 修好 worker 模块：冷却窗已过，下一次扫描应当重建并真的走 worker。
+    writeFileSync(workerFile, `
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  parentPort.postMessage({ id: message?.id, ok: true, result: { sessions: [{ id: "from-worker" }], endpointErrors: [] } });
+});
+`, "utf8");
+    const second = await offload.scanAll();
+    assert.equal(second.sessions[0]?.id, "from-worker", "冷却窗过后必须重建 worker 并重新离线程");
+    assert.equal(fallbackCalls, 1, "重建成功后不该再走进程内兜底");
+    assert.equal(offload.stats().workerStarts, 2, "worker 应当被重建一次");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: 冷却窗内不反复重建 worker（评审 F8 的另一半）", async () => {
+  const dir = makeTmp();
+  const workerFile = join(dir, "broken-worker.mjs");
+  writeFileSync(workerFile, "process.exit(1);\n", "utf8");
+  let fallbackCalls = 0;
+  const offload = createSessionScanOffload({
+    workerFile,
+    reviveCooldownMs: 60_000, // 一分钟内不许重建
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => {
+        fallbackCalls += 1;
+        return { sessions: [], endpointErrors: [] };
+      },
+      scanAgent: () => [],
+    },
+  });
+  try {
+    await offload.scanAll();
+    await offload.scanAll();
+    await offload.scanAll();
+    assert.equal(fallbackCalls, 3, "冷却窗内三次扫描都走进程内兜底");
+    assert.equal(offload.stats().workerStarts, 1, "冷却窗内只起过一次 worker（不每拍重建）");
+    assert.equal(offload.stats().degraded, true);
+  } finally {
+    offload.close();
+  }
+});
+
 test("loadMessages rejects files outside the endpoint roots", async () => {
   const root = makeTmp();
   const outside = makeTmp();
