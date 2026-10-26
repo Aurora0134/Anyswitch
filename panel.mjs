@@ -295,8 +295,10 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
 // 用户显式要「现在刷一遍」（会话管理 tab 的刷新按钮）走 refresh()——那是唯一
 // 会等真扫描的入口，见列表路由的 ?refresh=1。这是 TTL 的逃生口：没有它，刷新
 // 按钮在窗口内就是个假动作（返回旧数据 + toast「已刷新」）。
-// invalidate() 是另一半：刚改过盘面、等不及 TTL 的路径把快照作废，下一拍按冷
-// 缓存重扫。（session-scan.mjs 的头注释只描述「怎么读盘」，缓存语义全在这里。）
+// 另一条改快照的通路是 dropRows（本进程刚删完行）。这里刻意不提供 invalidate
+// 式的「整份作废」入口：没有真实调用方，留着就是没人用也没人测的半截 API；
+// 需要「立刻与盘面对齐」就走 ?refresh=1，需要「摘掉某行」就走 dropRows。
+// （session-scan.mjs 的头注释只描述「怎么读盘」，缓存语义全在这里。）
 function createSessionsListSnapshot(load, ttlMs) {
   const inFlight = { p: null };
   let snap = null;
@@ -338,9 +340,6 @@ function createSessionsListSnapshot(load, ttlMs) {
     // 强制刷新：等真扫描落地再返回新值（在飞的扫描直接搭车，不重复扫）。
     // 只给用户显式动作（刷新按钮）用，轮询路径不许走这里。
     refresh,
-    // 作废快照：下一拍 get 当冷缓存处理（等扫描）。给「刚改过盘面、等不及 TTL」
-    // 的路径用。
-    invalidate() { snap = null; },
     // 本进程刚删掉的行就地摘掉（响应里立刻不再出现），并把快照置为过期：
     // 下一拍请求先拿这份（已摘掉那行）的旧值，同时后台补一扫与盘面对齐。
     // 没有快照时什么都不做——下一拍自然是冷扫。
