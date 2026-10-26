@@ -576,6 +576,9 @@ export function createTerminalHost({
   // 应答时按亮暗取兜底色——见 effectiveBackground。
   let terminalThemeDark = true;
   let terminalThemeBackground = "";
+  // 关停闸：close() 一进来就置真，之后 emit 不再置脏（见 emit 里的注释）。
+  // 它保证「close() 返回时盘上是整份状态」这句话在 PTY 仍在出字时也成立。
+  let shuttingDown = false;
 
   // ---------------------------------------------------------------------------
   // 落盘：一份索引 + 每会话一份记录
@@ -630,6 +633,9 @@ export function createTerminalHost({
     lastPassSessionWrites: 0,
     maxPassSessionWrites: 0,
     lastPassBytes: 0,
+    // 最近一次全量冲净「撞上限/写失败还有欠账」的记录（正常路径恒为 null）。
+    // close() 与测试看它判断「盘上是不是整份状态」——没有它就是冲净了。
+    lastFullFlushIncomplete: null,
   };
 
   // 会话 id 会直接进文件名，所以只认「安全文件名」形状的 id（randomUUID 的子集）。
@@ -851,6 +857,13 @@ export function createTerminalHost({
   let pumpWantFull = false;
   let pumpWantSlice = false;
   let pumpWantOnly = null;
+  // full 是一段**会话状态**，不是一拍请求：`pumpWantFull` 是「本轮要全量」的一次性
+  // 请求位，每轮开头就被消费掉；如果只靠它，第二轮就退化成有界单拍（≤4 份），
+  // 32 轮上限永远够不到，而 close() 只等泵、不等 250ms 防抖——欠账就跟着
+  // process.exit(0) 一起没了。所以另设这个位：收到 full 请求时置真，**一直保持到
+  // 没有欠账**（或被轮次上限强制中止），泵每轮按 `pumpWantFull || fullFlushUntilClean`
+  // 决定是不是全量轮。
+  let fullFlushUntilClean = false;
   let lastPassOk = true;
 
   function hasPendingWork() {
@@ -860,6 +873,7 @@ export function createTerminalHost({
   function requestPersist({ full = false, only = null } = {}) {
     pumpWantFull = pumpWantFull || full;
     pumpWantSlice = true;
+    if (full) fullFlushUntilClean = true;
     if (only) {
       // 定向请求：只冲这几条会话。它在泵里与「再跑一轮」的标记一起被收编，所以
       // 不会与正在写的那一份撞车（同一时刻只有一轮在写）。
@@ -876,6 +890,7 @@ export function createTerminalHost({
       pumpWantFull = false;
       pumpWantSlice = false;
       pumpWantOnly = null;
+      fullFlushUntilClean = false; // 没有欠账：全量冲刷状态结束
       return Promise.resolve(lastPassOk);
     }
     pumpRunning = true;
@@ -887,7 +902,9 @@ export function createTerminalHost({
         // full 与 only 不合并进同一轮：full 优先，且 only 在 full 轮里自然被满足
         // （全量写本来就覆盖它们）。两者合并会让 close() 的全量冲净被降级成定向
         // 冲净——关停时 SIGTERM 紧接着 process.exit(0)，没写完的尾部就没了。
-        const fullPass = pumpWantFull;
+        // 轮型看 `fullFlushUntilClean`：它跨轮保持，所以续跑的第 N 轮仍然是全量轮
+        // （只靠 pumpWantFull 的话第 2 轮就退化成有界单拍，见变量处的注释）。
+        const fullPass = pumpWantFull || fullFlushUntilClean;
         const onlyPass = fullPass ? null : pumpWantOnly;
         pumpWantFull = false;
         pumpWantOnly = null;
@@ -900,23 +917,31 @@ export function createTerminalHost({
         }
         ok = passOk && ok;
         // 全量冲净的语义是「返回时内存态整份在盘上」：写期间新置的脏（输出还在
-        // 流、有人刚关了页签）必须在这一轮里继续写完，不能留给下一次防抖。上限
-        // 防的是「输出永不停止」时的活锁——关停路径下输出几拍内就断了。
+        // 流、有人刚关了页签）必须继续写完，不能留给下一次防抖。上限防的是
+        // 「输出永不停止」时的活锁——关停路径下输出几拍内就断了。
         if (fullPass && passOk && hasPendingWork() && rounds < PERSIST_FULL_FLUSH_MAX_ROUNDS) continue;
         // 这个判断必须是同步的：写期间到达的请求在这里被收编，泵不会「已经决定
         // 退出却又漏掉一个请求」。
         if (pumpWantFull || pumpWantSlice) continue;
         pumpRunning = false;
         lastPassOk = ok;
-        if (fullPass && passOk && hasPendingWork()) {
-          // 撞到轮次上限还有欠账：记一笔，剩下的交给防抖拍继续收（有界单拍不会
-          // 让它无界增长）。正常关停路径走不到这里。
-          logger.warn?.(`[terminal-host] full flush stopped at ${rounds} rounds with backlog=${dirtySessions.size}`);
+        const leftover = hasPendingWork();
+        if (fullPass && leftover) {
+          // 撞到轮次上限（或本轮写失败）还有欠账：这是**没能兑现**「返回时盘上是
+          // 整份状态」的情况，不能静默——记进 lastFullFlushIncomplete 供 close()
+          // 与测试观察，并退回防抖拍继续收（有界单拍不会让它无界增长）。
+          persistStats.lastFullFlushIncomplete = {
+            rounds, backlog: dirtySessions.size, ok, at: Date.now(),
+          };
+          logger.warn?.(`[terminal-host] full flush incomplete at ${rounds} rounds: backlog=${dirtySessions.size} ok=${ok}`);
+          fullFlushUntilClean = false; // 中断这次全量状态，免得下一拍又整轮全量
           schedulePersist();
-        } else if ((dirtySessions.size > 0 || removedSessionIds.size > 0 || indexDirty) && ok) {
+        } else if (leftover && ok) {
           // 有界单拍留下的欠账：自己续下一拍，不必等下一次输出把它叫醒。写失败时
           // 不续（否则永久失败会变成每 250ms 一次的空转），等下一次变更再来。
           schedulePersist();
+        } else if (!leftover) {
+          fullFlushUntilClean = false; // 冲净了：全量冲刷状态结束
         }
         return ok;
       }
@@ -1230,6 +1255,13 @@ export function createTerminalHost({
   }
 
   function emit(session, chunk) {
+    // 关停闸：close() 一进去就置真，此后到达的输出**整块丢弃**（不进字节窗、不进
+    // 镜像、不置脏）。理由：close() 承诺「返回时盘上是整份状态」，而 PTY 在宿主
+    // 进程退出前仍在出字；只要还往字节窗里收，全量冲净就永远追不上（实测 6 会话
+    // 每 5ms 一块时撞满 32 轮上限仍剩 6 条欠账）。关停后到的字节本来就无人接收
+    // （监听器已清空、进程随即 exit(0)），丢在入口比收进来再丢掉更一致：
+    // 内存态与盘上态在 close() 返回那一刻完全相同。
+    if (shuttingDown) return;
     // 询问一律在这里认领并摘掉，再看剩下什么要转发。跨块被拆开的询问留在
     // 扫描器尾巴里，等到下一块拼齐才应答——应答永远只有一份。
     if (!session.queryScanner) session.queryScanner = createTerminalQueryScanner();
@@ -1789,11 +1821,30 @@ export function createTerminalHost({
       // 连接死后几毫秒内会补开一条空闲连接，监听先停，补连就被直接拒绝；若先
       // 等落盘再关监听，那条没有请求挂靠的连接会被 server.close() 当成在场
       // 连接等满一个客户端 keep-alive 周期（实测约 4 秒）。
+      // 先立关停闸再起全量冲净：PTY 在进程退出前还在出字，不掐断的话每一轮全量
+      // 冲净都会被新输出重新置脏，永远追不上（实测 6 会话每 5ms 一块时撞满 32 轮
+      // 上限仍剩 6 条欠账，close() 被拖到 1.3–1.6s）。
+      shuttingDown = true;
       const flush = persistNow();
       for (const session of sessions.values()) session.listeners.clear();
       const closed = new Promise((resolve) => server.close(resolve));
-      await flush;
+      const persisted = await flush;
       await closed;
+      // 「返回时盘上是整份状态」是一句需要能被检验的承诺：撞了全量冲净的轮次上限
+      // 或写失败还有欠账时，SIGTERM 处理器紧接着要 process.exit(0)，那批尾部就
+      // 没了。这里把结果**返回出去**并记一条 warn——静默返回等于让关停把自己丢了
+      // 数据这件事藏起来。
+      // 判完整用 hasPendingWork()（会话脏 + 索引脏 + 待删除），不能只看会话数：
+      // 索引写失败时会话集合是空的，但盘上的成员表仍可能是旧的那一份。
+      const incomplete = persistStats.lastFullFlushIncomplete;
+      const backlog = dirtySessions.size;
+      const complete = !hasPendingWork();
+      if (!complete) {
+        logger.warn?.(`[terminal-host] close() finished with ${backlog} session record(s) + `
+          + `indexDirty=${indexDirty} removed=${removedSessionIds.size} still unsaved`
+          + (incomplete ? ` (full flush stopped after ${incomplete.rounds} rounds)` : ""));
+      }
+      return { persisted, backlog, indexDirty, complete };
     },
   };
 }
