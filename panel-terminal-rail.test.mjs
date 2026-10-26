@@ -501,6 +501,8 @@ describe("终端视图左栏换血（M4）", () => {
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
         const TERMINAL_RAIL_WATERMARK = 5;
+        const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const TERMINAL_RAIL_ICON_CHEVRON = "";
         const TERMINAL_RAIL_ICON_ARCHIVE = "";
         const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -524,11 +526,11 @@ describe("终端视图左栏换血（M4）", () => {
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
-        function terminalRailRowTops() { return null; }
+        function terminalRailMotionTops() { return null; }
         function playTerminalRailFlip() {}
         function terminalRailMotionEnabled() { return false; }
         function terminalRailPendingRowKeys() { return new Set(); }
-        function terminalRailSnapshotRows() { return new Map(); }
+        function terminalRailSnapshotMotion() { return new Map(); }
         function terminalRailMountExitGhosts() {}
         let terminalRailLastDiffAgent = null;
         let terminalRailLastDiffSearch = false;
@@ -1234,26 +1236,29 @@ describe("终端视图左栏换血（M4）", () => {
   });
 
   describe("FLIP 门控（vm 真跑）", () => {
-    const runFlip = ({ mode = "flip", armed = true, reduced = false, before = new Map() }) => {
+    // 量测集＝行＋组头＋水位线钮（TERMINAL_RAIL_MOTION_SELECTOR，2026-10-26 扩全）：
+    // 同一段布局变化里所有元素同缓动——位移 200ms ease-out、新元素 100ms ease-out。
+    const runFlip = ({ mode = "flip", armed = true, reduced = false, before = new Map(), items = null } = {}) => {
       const animated = [];
-      const rows = [
-        { key: "s1", top: 10 },
-        { key: "s2", top: 70 },
-        { key: "s3", top: 100 },
+      const defs = items || [
+        { attrs: { "data-rail-term-resume": "s1" }, top: 10, key: "s1" },
+        { attrs: { "data-rail-term-resume": "s2" }, top: 70, key: "s2" },
+        { attrs: { "data-rail-term-resume": "s3" }, top: 100, key: "s3" },
       ];
-      const list = {
-        querySelectorAll: () => rows.map((row) => ({
-          getAttribute: () => row.key,
-          getBoundingClientRect: () => ({ top: row.top }),
-          animate: (frames, opts) => animated.push({ key: row.key, frames, opts }),
-        })),
-      };
+      const nodes = defs.map((def) => ({
+        getAttribute: (name) => (name in def.attrs ? def.attrs[name] : null),
+        hasAttribute: (name) => name in def.attrs,
+        getBoundingClientRect: () => ({ top: def.top }),
+        animate: (frames, opts) => animated.push({ key: def.key, frames, opts }),
+      }));
+      const list = { querySelectorAll: () => nodes };
       const fn = new Function("list", "before", "mode", "armed", "reduced", `
         const terminalRailFlipMode = mode;
         const terminalRailMotionArmed = armed;
-        const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
+        const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const window = { matchMedia: () => ({ matches: reduced }) };
-        ${extractFn("terminalRailRowKey")}
+        ${extractFn("terminalRailMotionKey")}
         ${extractFn("playTerminalRailFlip")}
         return playTerminalRailFlip;
       `)(list, before, mode, armed, reduced);
@@ -1262,7 +1267,7 @@ describe("终端视图左栏换血（M4）", () => {
     };
 
     it("组展开/收起：位移 200ms ease-out、新行 100ms 淡入", () => {
-      const animated = runFlip({ before: new Map([["s1", 10], ["s2", 40]]) });
+      const animated = runFlip({ before: new Map([["resume:s1", 10], ["resume:s2", 40]]) });
       assert.equal(animated.length, 2, "位置变的两行 + 新出现的一行各一条动画");
       const glide = animated.find((a) => a.key === "s2");
       assert.equal(glide.opts.duration, 200, "行移动 200ms");
@@ -1275,16 +1280,57 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(animated.filter((a) => a.key === "s1").length, 0, "位置没变的行不做空动画");
     });
 
+    it("组头与水位线钮同缓动：兜底行增删推动整棵树时不再瞬跳压在行上（2026-10-26 回归钉）", () => {
+      const animated = runFlip({
+        before: new Map([["head:C:\\dev\\alpha", 168], ["more:C:\\dev\\beta", 368]]),
+        items: [
+          { attrs: { "data-rail-term-group-head": "C:\\dev\\alpha" }, top: 200, key: "组头 α" },
+          { attrs: { "data-rail-term-group-head": "C:\\dev\\delta" }, top: 12, key: "组头 δ（新组）" },
+          { attrs: { "data-rail-term-more": "C:\\dev\\beta" }, top: 400, key: "水位线钮" },
+        ],
+      });
+      assert.equal(animated.length, 3, "两个组头各一条、水位线钮一条");
+      const moved = animated.find((a) => a.key === "组头 α");
+      assert.equal(moved.opts.duration, 200, "组头位移与行同 200ms");
+      assert.equal(moved.opts.easing, "ease-out", "组头位移与行同 ease-out");
+      assert.equal(moved.frames[0].transform, "translateY(-32px)", "组头从旧位起滑（168→200 的 -32px）");
+      assert.equal(moved.frames[1].transform, "none", "落位到自然位置");
+      const born = animated.find((a) => a.key === "组头 δ（新组）");
+      assert.equal(born.opts.duration, 100, "新组头与「新会话」行同 100ms 淡入");
+      assert.equal(born.frames[0].opacity, 0);
+      const more = animated.find((a) => a.key === "水位线钮");
+      assert.equal(more.opts.duration, 200, "水位线钮同为 200ms 位移");
+      assert.equal(more.frames[0].transform, "translateY(-32px)");
+    });
+
+    it("身份键按类前缀：会话行/兜底行/组头/水位线钮四属不互撞（组头与水位线钮同吃组键）", () => {
+      const keyOf = (attrs) => new Function(`
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
+        ${extractFn("terminalRailMotionKey")}
+        return terminalRailMotionKey;
+      `)()({
+        getAttribute: (name) => (name in attrs ? attrs[name] : null),
+        hasAttribute: (name) => name in attrs,
+      });
+      assert.equal(keyOf({ "data-rail-term-resume": "s-1" }), "resume:s-1", "历史行");
+      assert.equal(keyOf({ "data-rail-term-session": "t-9" }), "pending:t-9", "「新会话」兜底行");
+      assert.equal(keyOf({ "data-rail-term-group-head": "C:\\dev\\alpha" }), "head:C:\\dev\\alpha", "组头");
+      assert.equal(keyOf({ "data-rail-term-group-head": "~ungrouped" }), "head:~ungrouped", "「未分组」组头用哨兵键，不落空串");
+      assert.equal(keyOf({ "data-rail-term-more": "C:\\dev\\beta" }), "more:C:\\dev\\beta", "水位线钮");
+      assert.equal(keyOf({ "data-rail-term-more": "" }), "more:~ungrouped", "「未分组」水位线钮同哨兵");
+      assert.equal(keyOf({}), "", "三属都没有＝不进动效集");
+    });
+
     it("resetKey（水位线 / 刷新 / 换 agent）直接落位；首次输入前与 reduced-motion 不动", () => {
-      const before = new Map([["s1", 0], ["s2", 0]]);
+      const before = new Map([["resume:s1", 0], ["resume:s2", 0]]);
       assert.deepEqual(runFlip({ mode: "instant", before }), [], "水位线增减与刷新是瞬时跳变（dsh 实测）");
       assert.deepEqual(runFlip({ armed: false, before }), [], "首次输入前不做动画（真实首挂由 armed 门拦下）");
       assert.deepEqual(runFlip({ reduced: true, before }), [], "prefers-reduced-motion 全关");
       // 空集 before（换写前栏里一行都没量到）不再整体跳过（2026-10-25 兜底行动效
-      // 放宽）：新行淡入仍然成立——空栏里第一条「新会话」兜底行的出现、撤销归档让
+      // 放宽）：新元素淡入仍然成立——空栏里第一条「新会话」兜底行的出现、撤销归档让
       // 唯一行归组；位移无旧位可播，不做整列表位移。
       const emptyBefore = runFlip({ before: new Map() });
-      assert.ok(emptyBefore.length > 0, "空集 before 仍播新行淡入");
+      assert.ok(emptyBefore.length > 0, "空集 before 仍播新元素淡入");
       assert.ok(emptyBefore.every((a) => a.frames.length === 2 && a.frames[0].opacity === 0 && a.frames[1].opacity === 1 && a.opts.duration === 100),
         "只淡入（100ms），无位移动画");
     });
@@ -1310,6 +1356,8 @@ describe("终端视图左栏换血（M4）", () => {
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
           let terminalRailLastGroups = [];
           const TERMINAL_RAIL_WATERMARK = 5;
+          const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+          const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
           const TERMINAL_RAIL_ICON_CHEVRON = "";
           const TERMINAL_RAIL_ICON_ARCHIVE = "";
           const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -1333,12 +1381,12 @@ describe("终端视图左栏换血（M4）", () => {
           function esc(v) { return String(v); }
           function escapeHtml(v) { return String(v || ""); }
           function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
-          function terminalRailRowTops() { return null; }
+          function terminalRailMotionTops() { return null; }
           function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
           function playTerminalRailFlip() {}
           function terminalRailMotionEnabled() { return false; }
           function terminalRailPendingRowKeys() { return new Set(); }
-          function terminalRailSnapshotRows() { return new Map(); }
+          function terminalRailSnapshotMotion() { return new Map(); }
           function terminalRailMountExitGhosts() {}
           let terminalRailLastDiffAgent = null;
           let terminalRailLastDiffSearch = false;
@@ -1419,6 +1467,8 @@ ${extractFn("terminalRailPendingRowHtml")}
         const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
         let terminalRailLastGroups = [];
         const TERMINAL_RAIL_WATERMARK = 5;
+        const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
         const TERMINAL_RAIL_ICON_CHEVRON = "";
         const TERMINAL_RAIL_ICON_ARCHIVE = "";
           const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -1442,11 +1492,11 @@ ${extractFn("terminalRailPendingRowHtml")}
         function esc(v) { return String(v); }
         function escapeHtml(v) { return String(v || ""); }
         function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
-        function terminalRailRowTops() { return null; }
+        function terminalRailMotionTops() { return null; }
         function playTerminalRailFlip() {}
         function terminalRailMotionEnabled() { return false; }
         function terminalRailPendingRowKeys() { return new Set(); }
-        function terminalRailSnapshotRows() { return new Map(); }
+        function terminalRailSnapshotMotion() { return new Map(); }
         function terminalRailMountExitGhosts() {}
         let terminalRailLastDiffAgent = null;
         let terminalRailLastDiffSearch = false;
@@ -1502,7 +1552,7 @@ ${extractFn("terminalRailPendingRowHtml")}
       assert.ok(extractFn("refreshTerminalRailHistory").includes('terminalRailFlipMode = "instant"'), "刷新直接落位");
       assert.ok(extractFn("renderTerminalRailHistory").includes('terminalRailFlipMode = "instant"'),
         "一帧用完即复位，下一次更新默认瞬时");
-      assert.ok(extractFn("renderTerminalRailHistory").includes('terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null'),
+      assert.ok(extractFn("renderTerminalRailHistory").includes('terminalRailFlipMode === "flip" ? terminalRailMotionTops(list) : null'),
         "旧位置只在真要播 FLIP 时才量（1s 轮询每拍都渲染，无条件量行等于每秒一次强制布局）");
       assert.ok(extractFn("initTerminalRail").includes("terminalRailMotionArmed = true"), "首次指针/键盘输入才武装动画");
     });
@@ -1550,6 +1600,8 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
+    const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+    const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
     const TERMINAL_RAIL_ICON_CHEVRON = "";
     const TERMINAL_RAIL_ICON_ARCHIVE = "";
     const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -1577,11 +1629,11 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
     function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
-    function terminalRailRowTops() { return null; }
+    function terminalRailMotionTops() { return null; }
     function playTerminalRailFlip() {}
     function terminalRailMotionEnabled() { return false; }
     function terminalRailPendingRowKeys() { return new Set(); }
-    function terminalRailSnapshotRows() { return new Map(); }
+    function terminalRailSnapshotMotion() { return new Map(); }
     function terminalRailMountExitGhosts() {}
     let terminalRailLastDiffAgent = null;
     let terminalRailLastDiffSearch = false;

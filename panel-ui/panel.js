@@ -9497,7 +9497,7 @@ async function api(method, path, body) {
       if (!group.flat) {
         parts.push(`
       <div class="rail-term-group${collapsed ? "" : " is-open"}">
-        <div class="rail-term-group-head"${indent}>
+        <div class="rail-term-group-head" data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"${indent}>
           <button type="button" class="rail-term-group-toggle" data-rail-term-group="${esc(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" title="${esc(group.label)}">
             <span class="rail-term-group-slot">
               <span class="rail-term-group-arrow">${TERMINAL_RAIL_ICON_CHEVRON}</span>
@@ -9543,9 +9543,11 @@ async function api(method, path, body) {
     const html = parts.join("");
     // 兜底行生命周期动效（2026-10-25，与归档 M13 同观感）：本帧兜底集与 DOM 现存
     // 集比对，有增删且动效可用时本帧按归档同款处理——量旧位＋快照→换写→FLIP
-    // （下方行位移 200ms/新行淡入 100ms）＋消失行挂幽灵淡出 100ms。新会话行的
+    // （下方元素位移 200ms/新元素淡入 100ms）＋消失元素挂幽灵淡出 100ms。新会话行的
     // 出现（新建/全新内切）与消失（内切换走/被真行接替/关闭终端）都走这一条；
     // 快照含历史行，同帧被水位线挤出可见段的行随之幽灵淡出，与真实离开同观感。
+    // 量测集自 2026-10-26 起含组头与水位线钮：兜底行增删推动的是整棵树，只让行滑、
+    // 组头按布局瞬跳会让组头在 200ms 里压在自己那行身上（两种缓动同屏）。
     // 门：无人为 FLIP 在途（组折叠/归档已置 flip——组折叠整组藏行不是离开）；换
     // agent/搜索退出/首帧沿 resetKey 口径瞬时落位；未武装或 reduced-motion 不量。
     let pendingExitSnapshot = null;
@@ -9558,12 +9560,12 @@ async function api(method, path, body) {
       for (let i = 0; !pendingChanged && i < pending.length; i += 1) pendingChanged = !present.has(pending[i].id);
       if (pendingChanged) {
         terminalRailFlipMode = "flip";
-        pendingExitSnapshot = terminalRailSnapshotRows(list);
+        pendingExitSnapshot = terminalRailSnapshotMotion(list);
       }
     }
-    // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐行
-    // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的行）。
-    const before = terminalRailFlipMode === "flip" ? terminalRailRowTops(list) : null;
+    // 旧位置只在真要播 FLIP 时才量：1s 归属轮询每拍都走本函数，无条件逐元素
+    // getBoundingClientRect 等于每秒一次强制布局（dsh 也只量参与动画的元素）。
+    const before = terminalRailFlipMode === "flip" ? terminalRailMotionTops(list) : null;
     if (html !== terminalRailRendered.history) {
       terminalRailRendered.history = html;
       list.innerHTML = html;
@@ -9579,22 +9581,39 @@ async function api(method, path, body) {
     }
   }
 
-  // 行身份键与量测选择器：历史行（data-rail-term-resume）与「新会话」兜底行
-  // （data-rail-term-session）统一进 FLIP/退场幽灵的量测集（2026-10-25）——
-  // 兜底行的出现/消失与归档同观感。两键不同名不互撞，单行只带其中一键。
-  const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
-  function terminalRailRowKey(row) {
-    if (!row || typeof row.getAttribute !== "function") return "";
-    return row.getAttribute("data-rail-term-resume") || row.getAttribute("data-rail-term-session") || "";
+  // 动效参与者与身份键（2026-10-26 扩到全树）：会话行（data-rail-term-resume）、
+  // 「新会话」兜底行（data-rail-term-session）、组头（data-rail-term-group-head）与
+  // 水位线钮（data-rail-term-more）共用同一套量测/播放口径。此前只量行——兜底行
+  // 增删会把整棵树纵向推动（新组出现、整组消失、跨组位移），行滑 200ms 而组头按
+  // 布局瞬间落位，动画期间组头就压在自己那行身上：同一段位移两种缓动，观感即
+  // 「表观缓动不一致」。键按类别加前缀，四属不互撞（组头与水位线钮同吃组键）。
+  const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+  // 「未分组」组没有目录键，但组序变化时它照样被推动——用固定哨兵当键，不用空串
+  // （空串＝该元素不进动效集）。
+  const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
+  function terminalRailMotionKey(el) {
+    if (!el || typeof el.getAttribute !== "function") return "";
+    const resume = el.getAttribute("data-rail-term-resume");
+    if (resume) return `resume:${resume}`;
+    const pending = el.getAttribute("data-rail-term-session");
+    if (pending) return `pending:${pending}`;
+    const head = el.getAttribute("data-rail-term-group-head");
+    if (head) return `head:${head}`;
+    // 水位线钮的 data 值就是组键本身（点击处理要用它），「未分组」组为空串——
+    // 空串键与「没量到」不可区分，故空值补哨兵后仍进动效集。
+    if (el.hasAttribute && el.hasAttribute("data-rail-term-more")) {
+      return `more:${el.getAttribute("data-rail-term-more") || TERMINAL_RAIL_UNGROUPED_HEAD}`;
+    }
+    return "";
   }
 
-  function terminalRailRowTops(list) {
+  function terminalRailMotionTops(list) {
     const tops = new Map();
     if (!list || typeof list.querySelectorAll !== "function") return tops;
-    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
-      const key = terminalRailRowKey(row);
-      if (!key || typeof row.getBoundingClientRect !== "function") continue;
-      tops.set(key, row.getBoundingClientRect().top);
+    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+      const key = terminalRailMotionKey(el);
+      if (!key || typeof el.getBoundingClientRect !== "function") continue;
+      tops.set(key, el.getBoundingClientRect().top);
     }
     return tops;
   }
@@ -9609,11 +9628,13 @@ async function api(method, path, body) {
     }
   }
 
-  // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新行 100ms ease-out）。
+  // 简版 FLIP（dsh AnimatedRows 实测：位移 200ms ease-out、新元素 100ms ease-out）。
   // 组展开/收起与归档/撤销（M13）置 flip；兜底行增删（2026-10-25）同样置 flip。
+  // 量测集＝TERMINAL_RAIL_MOTION_SELECTOR（行＋组头＋水位线钮，2026-10-26 扩全）：
+  // 同一段位移里所有元素同缓动，不再出现组头瞬跳压在行上。
   // 水位线增减、刷新、换 agent 是 resetKey，直接落位；首次输入前、首次挂载（没有
   // 旧位置可比）、prefers-reduced-motion 都不动。空集 before（换写前栏里一行都没
-  // 量到）不整体跳过——新行淡入仍然成立（撤销归档让唯一行归组、空栏里第一条
+  // 量到）不整体跳过——新元素淡入仍然成立（撤销归档让唯一行归组、空栏里第一条
   // 兜底行出现），只是没有可位移的旧位。
   function playTerminalRailFlip(list, before) {
     if (!before) return;
@@ -9622,26 +9643,26 @@ async function api(method, path, body) {
     if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     if (!list || typeof list.querySelectorAll !== "function") return;
-    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
-      if (typeof row.animate !== "function" || typeof row.getBoundingClientRect !== "function") continue;
-      const key = terminalRailRowKey(row);
+    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+      if (typeof el.animate !== "function" || typeof el.getBoundingClientRect !== "function") continue;
+      const key = terminalRailMotionKey(el);
       const previous = before.get(key);
       if (previous === undefined) {
-        row.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, easing: "ease-out" });
+        el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 100, easing: "ease-out" });
         continue;
       }
-      const delta = previous - row.getBoundingClientRect().top;
+      const delta = previous - el.getBoundingClientRect().top;
       if (!delta) continue;
-      row.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 200, easing: "ease-out" });
+      el.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 200, easing: "ease-out" });
     }
   }
 
-  // ── 行退场动效（M13 归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
-  // FLIP 路径）── 归档/撤销不再是 resetKey 瞬时消失：动作前给在册行拍快照（克隆＋
-  // 视口位），重渲后离开布局的行以幽灵克隆补进滚动层 100ms 淡出——下方行上移/
-  // 落回 200ms、回填/归位行淡入 100ms 由上面的 FLIP（flip 门）承担，组头与
-  // 「展开其余 N」不在量测范围（只量 TERMINAL_RAIL_ROW_SELECTOR 行），天然瞬时。
-  // show 筛选下行不出布局（只是改观感），「活着」判定让幽灵只挂真离开的那行，
+  // ── 退场动效（M13 归档/撤销；2026-10-25 起兜底行增删同路，dsh AnimatedRows
+  // FLIP 路径）── 归档/撤销不再是 resetKey 瞬时消失：动作前给在册元素拍快照（克隆＋
+  // 视口位），重渲后离开布局的元素以幽灵克隆补进滚动层 100ms 淡出——下方元素上移/
+  // 落回 200ms、回填/归位元素淡入 100ms 由上面的 FLIP（flip 门）承担。量测集自
+  // 2026-10-26 起含组头与水位线钮（整组消失时组头随之幽灵淡出，不再瞬跳）。
+  // show 筛选下行不出布局（只是改观感），「活着」判定让幽灵只挂真离开的那一元素，
   // 不误伤。
   function terminalRailMotionEnabled() {
     if (!terminalRailMotionArmed) return false;
@@ -9649,16 +9670,16 @@ async function api(method, path, body) {
     return !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   }
 
-  function terminalRailSnapshotRows(list) {
-    const rows = new Map();
-    if (!list || typeof list.querySelectorAll !== "function") return rows;
-    for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
-      const key = terminalRailRowKey(row);
-      if (!key || typeof row.getBoundingClientRect !== "function" || typeof row.cloneNode !== "function") continue;
-      const rect = row.getBoundingClientRect();
-      rows.set(key, { node: row.cloneNode(true), top: rect.top, left: rect.left, width: rect.width });
+  function terminalRailSnapshotMotion(list) {
+    const snapshot = new Map();
+    if (!list || typeof list.querySelectorAll !== "function") return snapshot;
+    for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+      const key = terminalRailMotionKey(el);
+      if (!key || typeof el.getBoundingClientRect !== "function" || typeof el.cloneNode !== "function") continue;
+      const rect = el.getBoundingClientRect();
+      snapshot.set(key, { node: el.cloneNode(true), top: rect.top, left: rect.left, width: rect.width });
     }
-    return rows;
+    return snapshot;
   }
 
   // DOM 里现存兜底行的键集（data-rail-term-session）：供渲染 diff 判「本帧兜底集
@@ -9677,8 +9698,8 @@ async function api(method, path, body) {
   function terminalRailMountExitGhosts(list, host, snapshot) {
     const alive = new Set();
     if (typeof list.querySelectorAll === "function") {
-      for (const row of list.querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)) {
-        const key = terminalRailRowKey(row);
+      for (const el of list.querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)) {
+        const key = terminalRailMotionKey(el);
         if (key) alive.add(key);
       }
     }
@@ -9699,14 +9720,14 @@ async function api(method, path, body) {
     }
   }
 
-  // 归档/撤销的统一重渲入口：快照→置 flip（下方行位移＋新行淡入）→重渲→给离开
-  // 布局的行挂幽灵。未武装（首次真实交互前）或 reduced-motion 时快照为空，只落位。
+  // 归档/撤销的统一重渲入口：快照→置 flip（下方元素位移＋新元素淡入）→重渲→给离开
+  // 布局的元素挂幽灵。未武装（首次真实交互前）或 reduced-motion 时快照为空，只落位。
   // 渲染后显式复位 flip：搜索态走旁路早退不经过 render 尾部的复位，这里统一收口
   // 防止 flip 串到下一帧非动作渲染。
   function terminalRailRerenderExitFlip() {
     const list = $("railTermHistoryList");
     const host = list && list.parentElement ? list.parentElement : null;
-    const snapshot = list && host && terminalRailMotionEnabled() ? terminalRailSnapshotRows(list) : null;
+    const snapshot = list && host && terminalRailMotionEnabled() ? terminalRailSnapshotMotion(list) : null;
     terminalRailFlipMode = "flip";
     renderTerminalRailHistory(terminalRailAgentId());
     terminalRailFlipMode = "instant";

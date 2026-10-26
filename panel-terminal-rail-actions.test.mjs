@@ -60,6 +60,8 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
     let terminalRailLastGroups = [];
     const TERMINAL_RAIL_WATERMARK = 5;
+    const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+    const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
     const TERMINAL_RAIL_ICON_CHEVRON = "";
     const TERMINAL_RAIL_ICON_ARCHIVE = "";
     const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -84,13 +86,13 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     function esc(v) { return String(v); }
     function escapeHtml(v) { return String(v || ""); }
     function terminalRailScrollGroupIntoView(key) { state.scrolled.push(key); }
-    function terminalRailRowTops() { return null; }
+    function terminalRailMotionTops() { return null; }
     function playTerminalRailFlip() {}
     // 兜底行 diff 动效（2026-10-25）依赖面的桩：默认关闭（MotionEnabled false），
     // 行为与既有渲染断言一致；diff 路径的真跑见「兜底行生命周期动效」专组沙盒。
     function terminalRailMotionEnabled() { return false; }
     function terminalRailPendingRowKeys() { return new Set(); }
-    function terminalRailSnapshotRows() { return new Map(); }
+    function terminalRailSnapshotMotion() { return new Map(); }
     function terminalRailMountExitGhosts() {}
     let terminalRailLastDiffAgent = null;
     let terminalRailLastDiffSearch = false;
@@ -168,7 +170,7 @@ const runArchive = (session, { apiImpl, prefs = { archived: [], removedGroups: [
     function applyTerminalRailViewChoice(field, value) { log.viewChoice = { field, value }; }
     ${extractFn("terminalRailArchivedKey")}
     ${extractFn("terminalRailMotionEnabled")}
-    ${extractFn("terminalRailSnapshotRows")}
+    ${extractFn("terminalRailSnapshotMotion")}
     ${extractFn("terminalRailMountExitGhosts")}
     ${extractFn("terminalRailRerenderExitFlip")}
     ${extractFn("terminalRailArchiveSession")}
@@ -1318,6 +1320,8 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       const terminalRailSearch = { open: false, query: "", timer: null, searching: false };
       let terminalRailLastGroups = [];
       const TERMINAL_RAIL_WATERMARK = 5;
+      const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+      const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
       const TERMINAL_RAIL_ICON_CHEVRON = "";
       const TERMINAL_RAIL_ICON_ARCHIVE = "";
       const TERMINAL_RAIL_ICON_UNARCHIVE = "";
@@ -1339,11 +1343,11 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       function escapeHtml(v) { return String(v || ""); }
       function terminalRailScrollGroupIntoView() {}
       function renderTerminalRailSearchResults() {}
-      function terminalRailRowTops() { rec.measureModes.push(terminalRailFlipMode); return new Map([["s-2", 100]]); }
+      function terminalRailMotionTops() { rec.measureModes.push(terminalRailFlipMode); return new Map([["s-2", 100]]); }
       function playTerminalRailFlip() { rec.flips += 1; }
       function terminalRailMotionEnabled() { return ctrl.motion; }
       function terminalRailPendingRowKeys() { return new Set(ctrl.present); }
-      function terminalRailSnapshotRows() { rec.snapshots += 1; return new Map([["s-2", {}]]); }
+      function terminalRailSnapshotMotion() { rec.snapshots += 1; return new Map([["s-2", {}]]); }
       function terminalRailMountExitGhosts() { rec.ghosts += 1; }
       ${extractFn("terminalRailSessionMap")}
       ${extractFn("terminalRailActiveSession")}
@@ -2853,6 +2857,8 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
   // scrollTop 12——幽灵绝对位＝100−50＋12＝62px。
   const runExitFlip = ({ armed = true, reduced = false, mode = "archive" } = {}) => {
     const log = { posts: [], toasts: [], renders: 0, flipModes: [], ghosts: [] };
+    // 量测选择器与生产同串（2026-10-26 起含组头与水位线钮）
+    const TERMINAL_RAIL_MOTION_SELECTOR_STUB = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
     const makeGhost = (id) => {
       const ghost = {
         id, style: {}, inert: false, removed: false, parent: null,
@@ -2868,6 +2874,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
     const makeRow = (id, index) => ({
       id,
       getAttribute: (name) => (name === "data-rail-term-resume" ? id : null),
+      hasAttribute: (name) => name === "data-rail-term-resume",
       getBoundingClientRect: () => ({ top: 100 + index * 30, left: 8, width: 240 }),
       cloneNode: () => makeGhost(id),
     });
@@ -2881,7 +2888,7 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
     };
     const list = {
       parentElement: host,
-      querySelectorAll: (sel) => (sel === "[data-rail-term-resume], [data-rail-term-session]" ? visible.slice() : []),
+      querySelectorAll: (sel) => (sel === TERMINAL_RAIL_MOTION_SELECTOR_STUB ? visible.slice() : []),
     };
     // 渲染桩模拟重渲后的行集变化：归档→s-1 出布局、s-6 回填；撤销→s-1 回原槽、s-6 让位
     const swap = mode === "archive"
@@ -2897,7 +2904,8 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       let terminalRailHistory = { endpoint: "kimi", sessions, fetchedAt: 1, error: null };
       let terminalRailFlipMode = "instant";
       const terminalRailMotionArmed = armed;
-      const TERMINAL_RAIL_ROW_SELECTOR = "[data-rail-term-resume], [data-rail-term-session]";
+      const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+      const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
       const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
       function $(id) { return id === "railTermHistoryList" ? list : null; }
       function api(method, path, body) { log.posts.push({ method, path, body }); return Promise.resolve({ ok: true }); }
@@ -2905,10 +2913,10 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       function panelError(err, fallback) { return fallback; }
       function terminalRailAgentId() { return "kimi"; }
       function renderTerminalRailHistory() { log.renders += 1; log.flipModes.push(terminalRailFlipMode); swap(); }
-      ${extractFn("terminalRailRowKey")}
+      ${extractFn("terminalRailMotionKey")}
       ${extractFn("terminalRailArchivedKey")}
       ${extractFn("terminalRailMotionEnabled")}
-      ${extractFn("terminalRailSnapshotRows")}
+      ${extractFn("terminalRailSnapshotMotion")}
       ${extractFn("terminalRailMountExitGhosts")}
       ${extractFn("terminalRailRerenderExitFlip")}
       ${extractFn("terminalRailArchiveSession")}
@@ -2972,13 +2980,58 @@ describe("M13 归档/撤销动效（FLIP）＋toast 引导钮", () => {
       }
     });
 
-    it("快照只量行：历史行＋「新会话」兜底行统一量测，组头与「展开其余 N」不进动效范围（瞬时硬切）", () => {
-      assert.ok(extractFn("terminalRailSnapshotRows").includes("querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)"),
-        "快照范围＝历史行＋兜底行（组头、水位线钮不在内）");
-      assert.ok(extractFn("terminalRailRowTops").includes("querySelectorAll(TERMINAL_RAIL_ROW_SELECTOR)"),
-        "FLIP 量位同口径（组头不动、N−1 瞬时）");
-      assert.ok(extractFn("terminalRailRowKey").includes('data-rail-term-resume') && extractFn("terminalRailRowKey").includes('data-rail-term-session'),
-        "行键两属兼容读（历史行会话键、兜底行终端键）");
+    it("动效量测集＝行＋组头＋水位线钮：三类共用一套位移/淡入口径，键按类前缀不互撞；组头容器带身份属性", () => {
+      assert.ok(extractFn("terminalRailSnapshotMotion").includes("querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)"),
+        "快照范围＝历史行＋兜底行＋组头＋水位线钮");
+      assert.ok(extractFn("terminalRailMotionTops").includes("querySelectorAll(TERMINAL_RAIL_MOTION_SELECTOR)"),
+        "FLIP 量位同口径（组头与行同缓动，不再「组头瞬跳」）");
+      const keyFn = extractFn("terminalRailMotionKey");
+      for (const attr of ["data-rail-term-resume", "data-rail-term-session", "data-rail-term-group-head", "data-rail-term-more"]) {
+        assert.ok(keyFn.includes(attr), `键读 ${attr}`);
+      }
+      for (const prefix of ["resume:", "pending:", "head:", "more:"]) {
+        assert.ok(keyFn.includes(prefix), `键前缀 ${prefix}（组头与水位线钮同吃组键，不加前缀会互撞）`);
+      }
+      const render = extractFn("renderTerminalRailHistory");
+      assert.ok(render.includes('class="rail-term-group-head" data-rail-term-group-head="${esc(group.key || TERMINAL_RAIL_UNGROUPED_HEAD)}"'),
+        "组头容器自带身份属性（「未分组」组用哨兵键，空串＝不量）");
+    });
+
+    it("整组消失：组头进快照并以幽灵淡出（不再瞬跳消失）", () => {
+      const ghosts = [];
+      const host = { children: [], scrollTop: 0, getBoundingClientRect: () => ({ top: 50, left: 0 }), append: (g) => { g.parent = host; host.children.push(g); } };
+      const makeHead = (key) => {
+        const el = {
+          classes: new Set(), style: {}, removed: false,
+          classList: { add(c) { el.classes.add(c); } },
+          setAttribute() {},
+          getAttribute: (name) => (name === "data-rail-term-group-head" ? key : null),
+          hasAttribute: (name) => name === "data-rail-term-group-head",
+          getBoundingClientRect: () => ({ top: 100, left: 8, width: 240 }),
+          animate: (frames, opts) => { ghosts.push({ frames, opts, el }); },
+          remove() {},
+        };
+        el.cloneNode = () => makeHead(key);
+        return el;
+      };
+      const snapshotList = { querySelectorAll: () => [makeHead("C:\\dev\\delta")] };
+      const afterList = { querySelectorAll: () => [], parentElement: host };
+      const fn = new Function("snapshotList", "afterList", "host", `
+        const TERMINAL_RAIL_MOTION_SELECTOR = "[data-rail-term-resume], [data-rail-term-session], [data-rail-term-group-head], [data-rail-term-more]";
+        const TERMINAL_RAIL_UNGROUPED_HEAD = "~ungrouped";
+        ${extractFn("terminalRailMotionKey")}
+        ${extractFn("terminalRailSnapshotMotion")}
+        ${extractFn("terminalRailMountExitGhosts")}
+        return { snapshot: terminalRailSnapshotMotion, mount: terminalRailMountExitGhosts };
+      `)(snapshotList, afterList, host);
+      const snapshot = fn.snapshot(snapshotList);
+      assert.equal(snapshot.size, 1, "组头进快照");
+      assert.ok(snapshot.has("head:C:\\dev\\delta"), "快照键带组头前缀");
+      fn.mount(afterList, host, snapshot);
+      assert.equal(host.children.length, 1, "离开布局的组头挂进滚动层");
+      assert.equal(ghosts[0].opts.duration, 100, "组头幽灵 100ms 淡出（与行同）");
+      assert.deepEqual(ghosts[0].frames, [{ opacity: 1 }, { opacity: 0 }], "淡出双关键帧");
+      assert.ok(ghosts[0].el.classes.has("rail-term-ghost"), "幽灵类在册（absolute＋pointer-events:none 由 CSS 承担）");
     });
   });
 
