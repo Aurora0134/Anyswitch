@@ -212,6 +212,42 @@ test("SGR 与宽字符：颜色随回放保留，中日韩字不切碎行", () =
   assert.equal(terminalCharWidth("a"), 1);
 });
 
+test("字符宽度表与客户端 xterm 同源：全码点逐一对账", async () => {
+  // 客户端加载的正是 node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js
+  // （panel.mjs 的 /panel/assets/xterm-unicode11.js），并把 unicode.activeVersion
+  // 设为 "11"；这里动态 import 同一个包（Node 解析到同一份 main），逐码点对账。
+  // 表必须同源：镜像只在「后台切回 / F5」时上屏一次，少算一列，应用用空格覆盖擦行时
+  // 就少擦一格，行尾留下擦不掉的旧字符——2026-10-26 悬空碎片案的根因。
+  // 升级 xterm 后此处变红 = 需按同一份 provider 重新生成 terminal-screen.mjs 的两张表。
+  const { Unicode11Addon } = await import("@xterm/addon-unicode11");
+  const addon = new Unicode11Addon();
+  let provider = null;
+  addon.activate({ unicode: { register(p) { provider = p; } } });
+  assert.equal(provider?.version, "11", "客户端激活的是 Unicode 11 表，provider 版本不符即需同步镜像的两张表");
+  const mismatches = [];
+  for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const expected = provider.wcwidth(cp);
+    const actual = terminalCharWidth(String.fromCodePoint(cp));
+    if (expected !== actual && mismatches.length < 12) {
+      mismatches.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")} 客户端=${expected} 镜像=${actual}`);
+    }
+  }
+  assert.deepEqual(mismatches, [], "镜像宽度表必须与客户端逐码点一致");
+});
+
+test("⚓ 按客户端口径占 2 列：其后内容不左移，空格覆盖擦除不留上一屏碎片", () => {
+  // 2026-10-26 案的最小复现：dsh 的「⚓ 思考中」行在客户端按 2 列排版，旧表按 1 列
+  // 算，该行之后的内容整体左移一格，应用用空格覆盖擦行时少擦一格，行尾就留下上一屏
+  // 的字符（用户看到的悬空碎片）。此处直接把「覆盖擦除够不够到行尾」钉住。
+  assert.equal(terminalCharWidth("⚓"), 2, "客户端（Unicode11）把 ⚓ 记为 2 列");
+  const mirror = createScreenMirror({ cols: 8, rows: 2 });
+  mirror.write("\u001b[1;1HABCDEFGH"); // 上一屏：整行铺满
+  mirror.write("\u001b[1;1H⚓1234  "); // 本屏：⚓(2 列) + 四字 + 两格空格覆盖
+  assert.equal(mirror.screenLines()[0], "⚓1234", "覆盖擦除必须够到行尾，不能留下上一屏的字符");
+  assert.equal(repaint(mirror.toReplay(), 8, 2).screenLines()[0], "⚓1234", "回放后同样不得留碎片");
+});
+
 test("铺满一行的色块和字后面的色块，重画后还在", () => {
   const mirror = createScreenMirror({ cols: 20, rows: 4 });
   mirror.write(`\u001b[48;5;236m${" ".repeat(20)}\u001b[0m\r\n`);
