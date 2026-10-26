@@ -291,16 +291,29 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
 // 本进程自己的删除会先就地摘掉对应行再置脏（见 dropRows），用户删完立刻看不
 // 到那行；别处新建/删除的会话最多晚 TTL 一拍出现，对「进终端页填左栏历史」
 // 这条唯一消费路径没有可感知代价。
+//
+// 用户显式要「现在刷一遍」（会话管理 tab 的刷新按钮）走 refresh()——那是唯一
+// 会等真扫描的入口，见列表路由的 ?refresh=1。这是 TTL 的逃生口：没有它，刷新
+// 按钮在窗口内就是个假动作（返回旧数据 + toast「已刷新」）。
+// invalidate() 是另一半：刚改过盘面、等不及 TTL 的路径把快照作废，下一拍按冷
+// 缓存重扫。（session-scan.mjs 的头注释只描述「怎么读盘」，缓存语义全在这里。）
 function createSessionsListSnapshot(load, ttlMs) {
   const inFlight = { p: null };
   let snap = null;
+  // 删除代际：dropRows 时 +1。refresh 起飞时记下代际，落地时代际已变说明期间
+  // 有删除——那份结果可能含刚删的行（删前扫的盘面），整份丢弃，绝不让已删的
+  // 行被写回快照。
+  let dropSeq = 0;
 
   function refresh() {
     if (inFlight.p) return inFlight.p;
+    const seqAtStart = dropSeq;
     const round = (async () => {
       try {
         const value = await load();
-        snap = { at: Date.now(), value };
+        // 代际不符＝扫描期间删过行：保持当前快照（它已摘掉那些行），只把值交给
+        // 调用方。冷缓存时 snap 仍为 null，下一次 get 会重扫。
+        if (seqAtStart === dropSeq) snap = { at: Date.now(), value };
         return value;
       } finally {
         // 微任务延迟一拍再摘，避免「round 已落定但等待者还没读到」时的同步重扫。
@@ -322,11 +335,18 @@ function createSessionsListSnapshot(load, ttlMs) {
       refresh().catch(() => {});
       return snap.value;
     },
+    // 强制刷新：等真扫描落地再返回新值（在飞的扫描直接搭车，不重复扫）。
+    // 只给用户显式动作（刷新按钮）用，轮询路径不许走这里。
+    refresh,
+    // 作废快照：下一拍 get 当冷缓存处理（等扫描）。给「刚改过盘面、等不及 TTL」
+    // 的路径用。
+    invalidate() { snap = null; },
     // 本进程刚删掉的行就地摘掉（响应里立刻不再出现），并把快照置为过期：
     // 下一拍请求先拿这份（已摘掉那行）的旧值，同时后台补一扫与盘面对齐。
     // 没有快照时什么都不做——下一拍自然是冷扫。
     dropRows(predicate) {
       if (!snap || !Array.isArray(snap.value?.sessions)) return;
+      dropSeq += 1;
       snap = {
         at: 0,
         value: { ...snap.value, sessions: snap.value.sessions.filter((session) => !predicate(session)) },
@@ -1032,7 +1052,9 @@ export function createPanelRouter({
   // 扫描承载（session-scan-worker.mjs）：session-scan 的九个 adapter 全是同步 fs，
   // 在哪调用就在哪按住事件循环。这里把「九家全量」与「单端点」两种扫描都送进
   // 独立 worker 线程；worker 不可用时退回本进程（面板仍出列表，只那一拍会卡），
-  // 降级路径在承载里一次性收敛并记一条 warn。
+  // 降级路径在承载里按冷却窗收敛并记 warn。
+  // fallback 可注入（sessionScanFallback）：单测要钉「降级那一拍会卡住事件循环」
+  // 与「降级也不碰真 home 存档」时，注入自己的假扫描，别让测试去读真存档。
   const scanHost = createSessionScanOffload({
     ...(sessionScanWorkerFile ? { workerFile: sessionScanWorkerFile } : {}),
     logger,
@@ -1607,7 +1629,9 @@ export function createPanelRouter({
     // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
     // 还须清旧对话绑定，否则复活会接回旧会话；历史续接的既有绑定语义不变。
     terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
-    if (resume === null) terminalBindings().delete(session.id);
+    if (resume === null) {
+      terminalBindings().delete(session.id);
+    }
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
     // 身份（endpoint＋目标 cwd），不是宿主记录里的旧归属——空白壳那一栏根本没有
@@ -4025,8 +4049,12 @@ export function createPanelRouter({
         // 但这一拍不再每次都扫盘：见 createSessionsListSnapshot——TTL 内复用上次
         // 结果，过期后先返回旧值、后台补一拍，请求绝不等刷新（冷缓存那一拍除外，
         // 没有旧值可交）。扫描本身在 worker 线程里跑，不占本进程事件循环。
+        // ?refresh=1 是 TTL 的逃生口：会话管理 tab 的刷新按钮用它，等真扫描落地
+        // 再回新值——否则按钮在窗口内就是「返回旧数据 + toast 已刷新」的假动作。
         try {
-          return sendJson(res, 200, await sessionsListSnapshotFor(svc).get());
+          const snapshot = sessionsListSnapshotFor(svc);
+          const forced = url.searchParams.get("refresh") === "1";
+          return sendJson(res, 200, forced ? await snapshot.refresh() : await snapshot.get());
         } catch (err) {
           return sendJson(res, 500, { ok: false, error: err.message });
         }

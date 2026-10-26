@@ -128,6 +128,42 @@ parentPort.on("message", (message) => {
     assert.equal(svc.calls.scanAll, 1, "TTL 窗口内三次列表请求只该触发一次扫描");
   });
 
+  // 回归钉（M1，评审 F2）：会话管理 tab 的刷新按钮不许变成假动作。TTL 内
+  // 普通 GET 拿旧快照是对的，但用户显式点刷新（?refresh=1）必须等一次真扫描
+  // 再回新值——否则前端照旧 toast「已刷新」，屏幕上还是旧列表。
+  it("?refresh=1 命中 TTL 也等真扫描并返回新值（刷新按钮的逃生口）", async () => {
+    let round = 0;
+    const calls = { scanAll: 0 };
+    const svc = {
+      scanAll: async () => {
+        calls.scanAll += 1;
+        round += 1;
+        return { sessions: [{ endpoint: "claude", id: `r${round}`, file: `C:/s/r${round}.jsonl` }], endpointErrors: [] };
+      },
+      loadMessages: async () => [],
+      deleteSessions: async () => ({ ok: [], fail: [] }),
+    };
+    // TTL 拉长到 1 小时：普通 GET 一定命中旧快照，只有 ?refresh=1 能穿透。
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 3_600_000 });
+    const first = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().sessions[0].id, "r1");
+    const warm = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(warm.req, warm.res);
+    assert.equal(warm.json().sessions[0].id, "r1", "TTL 内普通 GET 走快照");
+    assert.equal(calls.scanAll, 1);
+    const forced = fakeReqRes("/panel/api/sessions/list?refresh=1", "GET");
+    await router.handle(forced.req, forced.res);
+    assert.equal(forced.res.statusCode, 200);
+    assert.equal(calls.scanAll, 2, "?refresh=1 必须真的扫一次");
+    assert.equal(forced.json().sessions[0].id, "r2", "?refresh=1 必须回新值，不能回旧快照");
+    // 刷新落地后快照也更新了：紧接着的普通 GET 拿到的就是新值。
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    assert.equal(after.json().sessions[0].id, "r2");
+    assert.equal(calls.scanAll, 2, "刷新重置了 TTL，普通 GET 不该再扫");
+  });
+
   it("TTL 过期先返回上次结果、刷新在后台（请求不等刷新）", async () => {
     let round = 0;
     const calls = { scanAll: 0 };
@@ -159,6 +195,65 @@ parentPort.on("message", (message) => {
     const third = fakeReqRes("/panel/api/sessions/list", "GET");
     await router.handle(third.req, third.res);
     assert.equal(third.json().sessions[0].id, "s2");
+  });
+
+  // 回归钉（M1，评审 F9）：删除与在飞刷新有竞态——删掉一行的同时后台刷新正
+  // 在飞，那份结果是「删之前」的盘面，落地时会把刚删的行写回快照，最长留一个
+  // TTL。用户看到的是「删了又回来」。删除代际：dropRows 时 +1，刷新落地时代际
+  // 不符就整份丢弃。
+  it("删除与在飞刷新竞态：已删的行不会被写回快照（回归钉）", async () => {
+    let call = 0;
+    let releaseSlowScan = null;
+    const slow = new Promise((resolve) => { releaseSlowScan = resolve; });
+    const svc = {
+      scanAll: async () => {
+        call += 1;
+        if (call === 2) {
+          // 第二拍＝删除期间在飞的那一次：它扫到的是「删除前」的盘面。
+          await slow;
+          return {
+            sessions: [
+              { endpoint: "claude", id: "keep", file: "C:/s/keep.jsonl" },
+              { endpoint: "claude", id: "gone", file: "C:/s/gone.jsonl" },
+            ],
+            endpointErrors: [],
+          };
+        }
+        if (call === 1) {
+          return {
+            sessions: [
+              { endpoint: "claude", id: "keep", file: "C:/s/keep.jsonl" },
+              { endpoint: "claude", id: "gone", file: "C:/s/gone.jsonl" },
+            ],
+            endpointErrors: [],
+          };
+        }
+        // 之后：盘面已无 gone。
+        return { sessions: [{ endpoint: "claude", id: "keep", file: "C:/s/keep.jsonl" }], endpointErrors: [] };
+      },
+      loadMessages: async () => [],
+      deleteSessions: async () => ({ ok: [{ endpoint: "claude", file: "C:/s/gone.jsonl" }], fail: [] }),
+    };
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 0 });
+    const first = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().sessions.length, 2);
+    // 过期拍：先回旧值，同时后台那一拍（call 2）挂在 slow 上。
+    const stale = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(stale.req, stale.res);
+    assert.equal(stale.json().sessions.length, 2);
+    // 刷新在飞时删除 gone。
+    const del = fakeReqRes("/panel/api/sessions/delete", "POST", { items: [{ endpoint: "claude", file: "C:/s/gone.jsonl" }] });
+    await router.handle(del.req, del.res);
+    assert.equal(del.res.statusCode, 200);
+    // 让那一拍旧盘面的刷新落地。
+    releaseSlowScan();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // 下一拍：已删的 gone 绝不许回来。
+    const after = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(after.req, after.res);
+    const ids = after.json().sessions.map((s) => s.id);
+    assert.ok(!ids.includes("gone"), `已删的会话被在飞刷新写回了快照：${JSON.stringify(ids)}`);
   });
 
   it("GET /panel/api/sessions/list returns the scan result verbatim", async () => {

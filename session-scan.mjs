@@ -4,16 +4,14 @@
 // Node): it holds nothing between calls and every call re-reads the agents'
 // files.
 //
-// 扫描执行位置与列表缓存（2026-10-26 起，M1「扫描离线程」）：
-//   1. 这些 adapter 体内全是同步 fs（readdirSync/statSync/readFileSync/readSync），
-//      async 外壳下没有任何 await 点，所以「在哪个线程调用」就是「哪个事件循环
-//      被按住」。修前面板进程（47820）直接调用它，2927 条会话实测 2.7–8.0s，
-//      期间终端字节流、SSE 握手、1s 轮询全部停摆。现在面板侧一律经
-//      `session-scan-worker.mjs` 把它送进独立 worker 线程跑，面板进程零阻塞。
-//   2. 本模块自身仍无缓存；但面板的 `GET /panel/api/sessions/list` 改为「短 TTL
-//      快照 + 过期先返回旧值、后台补一拍」（见 panel.mjs createSessionsListSnapshot）。
-//      也就是说「每次列表请求都重扫一遍」这条旧语义不再成立：TTL 窗口内直接复用
-//      上一次结果，过期后由后台刷新对齐盘面。要「立刻重扫」请显式 invalidate。
+// 扫描执行位置（2026-10-26 起，M1「扫描离线程」）：这些 adapter 体内全是同步 fs
+// （readdirSync/statSync/readFileSync/readSync），async 外壳下没有任何 await 点，
+// 所以「在哪个线程调用」就是「哪个事件循环被按住」。修前面板进程（47820）直接
+// 调用它，2927 条会话实测 2.7–8.0s，期间终端字节流、SSE 握手、1s 轮询全部停摆。
+// 现在面板侧一律经 `session-scan-worker.mjs` 把它送进独立 worker 线程跑，面板
+// 进程零阻塞。本模块仍然只负责「怎么读盘」——线程归属、列表快照与刷新语义都在
+// 面板侧（panel.mjs 的 scanHost 与 createSessionsListSnapshot），这里不持有任何
+// 缓存或调度状态。
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
