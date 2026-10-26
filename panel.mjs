@@ -1631,6 +1631,11 @@ export function createPanelRouter({
     terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
     if (resume === null) {
       terminalBindings().delete(session.id);
+      // 全新内切＝同一终端 id 换了新对话，上一代累计的「判不出」退避必须一起
+      // 清掉：否则新对话要等旧代攒到的 40–60s 退避走完才尝试第一次捕获（修前
+      // 是 5s）。这正是 S1 的现场——用户点完 ⊕ 想打字，却卡在等绑定上。
+      bindingCaptureMissStreak.delete(session.id);
+      bindingCaptureLastAttempt.delete(session.id);
     }
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
