@@ -1581,6 +1581,37 @@ test("cwd: 拿不到就空串，绝不猜（不从 munged 目录名反推）", a
   assert.equal(sessions[0].cwd, "", "cwd 落空串（不是目录名猜测、不是 null）");
 });
 
+// 同一段对话被复制到第二个项目目录（真实成因：worktree 里接着聊，claude 在新 cwd 下
+// 另起一份 jsonl，sessionId 原样沿用）——扫描按文件各出一行，同一个 id 在列表里出现
+// 两次。会话栏按 id 做身份，重复行会互相覆盖动效旧位（收起下方组时单行向下抽搐）。
+// 列表层只认「一个会话一行」：同 endpoint 同 id 保留最近活跃的那份。
+test("重复 id：同一段对话出现在两个项目目录时只出一行，保留最近活跃的那份", async () => {
+  const root = makeTmp();
+  const older = writeClaudeSession(root, "C--work-proj", "sess-dup.jsonl", [
+    claudeLine({ sessionId: "sess-dup", message: { role: "user", content: "原目录里的那段对话" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答" }, timestamp: "2026-09-01T10:01:00.000Z", sessionId: "sess-dup" }),
+  ]);
+  const newer = writeClaudeSession(root, "C--work-proj--claude-worktrees-x", "sess-dup.jsonl", [
+    claudeLine({ sessionId: "sess-dup", message: { role: "user", content: "原目录里的那段对话" } }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "答" }, timestamp: "2026-09-02T10:01:00.000Z", sessionId: "sess-dup" }),
+  ]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  const dup = sessions.filter((row) => row.endpoint === "claude" && row.id === "sess-dup");
+  assert.equal(dup.length, 1, "同 id 只留一行");
+  assert.equal(dup[0].file, newer, "留下的是最近活跃那份（旧目录副本不顶替）");
+  assert.equal(dup[0].lastActive, Date.parse("2026-09-02T10:01:00.000Z"));
+  assert.ok(existsSync(older), "去重只在列表层，磁盘文件一个都不动");
+});
+
+test("重复 id：不同端点的同 id 不是同一个会话，不许合并", async () => {
+  const root = makeTmp();
+  writeClaudeSession(root, "C--work-proj", "sess-shared.jsonl", [claudeLine({ sessionId: "sess-shared" })]);
+  const { sessions } = await claudeScanner(root).scanAll();
+  const claudeRows = sessions.filter((row) => row.id === "sess-shared");
+  assert.equal(claudeRows.length, 1);
+  assert.equal(claudeRows[0].endpoint, "claude", "端点仍是区分键的一部分");
+});
+
 test("cwd: 每个 adapter 的 SessionMeta 都带这个字段（契约不靠个别 adapter 自觉）", async () => {
   const root = makeTmp();
   writeClaudeSession(root, "C--work-myproj", "sess-contract.jsonl", [claudeLine({})]);

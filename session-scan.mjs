@@ -2053,7 +2053,19 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
       sessions.sort(
         (a, b) => (b.lastActive ?? b.createdAt ?? 0) - (a.lastActive ?? a.createdAt ?? 0),
       );
-      return { sessions, endpointErrors };
+      // 一个会话一行：同一段对话可能被复制到第二个项目目录（claude 在 worktree 里接着
+      // 聊会另起一份 jsonl，sessionId 原样沿用），扫描按文件各出一行。重复行在会话栏里
+      // 是两条同名条目，且会互相覆盖按 id 索引的动效旧位。按 endpoint+id 去重，保留排好
+      // 序后的第一条（即最近活跃那份）；跨端点的同 id 不是同一个会话，不合并。
+      const deduped = [];
+      const seenKeys = new Set();
+      for (const session of sessions) {
+        const key = `${session.endpoint}\u0000${session.id}`;
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        deduped.push(session);
+      }
+      return { sessions: deduped, endpointErrors };
     },
 
     async loadMessages(endpoint, file) {
