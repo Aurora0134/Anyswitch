@@ -1035,7 +1035,6 @@ export function claudeDesktopForm(commandLine) {
 // 节奏，看板闪悬空 qoder 卡数秒）。只豁免无歧义形状——探针是唯一「参数
 // 只有 --version、后面再无别的」的调用；真实会话不可能裸 --version 常驻
 //（它打印即退），漏判不会掩盖会话，误判方向只会多算不漏算。
-// tasklist 降级轮无命令列，过不了这里，维持既有「认不出即计数」的残差。
 function isVersionProbeRow(commandLine) {
   if (typeof commandLine !== "string" || commandLine.length === 0) return false;
   // 可执行体 token：带引号路径取闭引号之后，裸 token 取首个空格之后；
@@ -1046,7 +1045,32 @@ function isVersionProbeRow(commandLine) {
   return rest.trim() === "--version";
 }
 
-function parseTasklistCsv(stdout) {
+// 命令行读不出的行。这不只发生在 tasklist 降级轮：进程正被系统收尾时，可信轮
+// （带命令行的 CIM 行 dump）也会把 CommandLine 报成空。2026-10-26 实测：
+// qodercli 探针 0.32s 的生命里最后一段正是这个状态——对探针进程高频采样 20 次，
+// 12 次看到「先读到 --version、随后读空」，且空值只在收尾阶段出现。只看形状的
+// isVersionProbeRow 认不出这种行，它于是落进「认不出即计数」的兜底，把一次环境
+// 检测变成一张悬空卡（症状与 2026-10-24 那笔同形，只是触发面从重启扩到任何时候
+// 的环境检测——启动面板、关于页重新检测、检查更新、更新收尾刷新都算）。
+// 现场抓到的原始行：`<pid>,<ppid>,qodercli.exe,`（命令行字段为空）。
+function isCommandLineUnreadable(commandLine) {
+  return typeof commandLine !== "string" || commandLine.trim().length === 0;
+}
+
+// 读不出命令行的行凭什么还能算客户端：只认「连续性」——上一轮可信扫描已经把它
+// 算进同一个桶的 pid。据此，两种行被分开处理：
+//   · 探针（活不到下一次扫描，永远进不了上一轮集合）→ 不计数，不起占位行、
+//     不翻卡。降级轮同此：整轮都没有命令行，探针照样不在集合里。
+//   · 真会话被收尾窗口/降级轮撞上读空 → 它一直在集合里，照常计数，既不会因
+//     读空被当轮删行（那会把卡闪灭一次），也不会漏掉这一轮的计数。
+// 代价只有一档：真会话「第一次出现就读空」这种罕见组合要等下一轮（≤ 一个扫描
+// 窗口）才被计数；漏判方向仍是少算一轮，不会掩盖会话。
+function priorCountedIn(priorCounted, bucket, pid) {
+  const set = priorCounted?.[bucket];
+  return pid !== null && set instanceof Set && set.has(pid);
+}
+
+function parseTasklistCsv(stdout, priorCounted = null) {
   const result = createEmptyProcessScan();
   if (typeof stdout !== "string" || stdout.length === 0) return result;
 
@@ -1096,10 +1120,14 @@ function parseTasklistCsv(stdout) {
       // the lineage table still sees its parent pointer (every row feeds
       // ppidByPid), and the main CLI is what joins terminal sessions.
       // Bare `--version` rows are the environment page's version probe
-      // (isVersionProbeRow), not a session — same skip.
+      // (isVersionProbeRow), not a session — same skip. A row whose command line
+      // could not be read at all counts only on continuity (priorCountedIn):
+      // the probe's teardown window and the tasklist fallback both read empty,
+      // and a process that was never counted before is not a session.
       if (commandLine?.includes("--type=") || commandLine?.includes("--internal-sites-mcp")
-        || isVersionProbeRow(commandLine)) {
-        // helper child process / version probe, skip
+        || isVersionProbeRow(commandLine)
+        || (isCommandLineUnreadable(commandLine) && !priorCountedIn(priorCounted, "qoder", pid))) {
+        // helper child / version probe / unclassifiable row, skip
       } else {
         result.qoder += 1;
         if (pid) result.qoderPids.add(pid);
@@ -1281,11 +1309,14 @@ function parseTasklistCsv(stdout) {
       // kimi-style multi-instance) — no helper-image filtering applies, with
       // one exception: bare `--version` is the environment page's version
       // probe (grok is a PROBE_VERSION_CLIENT — isVersionProbeRow), not a
-      // session. Its bin dir also ships agent.exe / grove*.exe: deliberately
+      // session. Unreadable rows follow the same continuity rule as qoder
+      // (the probe's teardown window reads empty; see priorCountedIn).
+      // Its bin dir also ships agent.exe / grove*.exe: deliberately
       // NOT bucketed (agent.exe is a generic name third-party software may
       // carry).
-      if (isVersionProbeRow(commandLine)) {
-        // version probe, skip
+      if (isVersionProbeRow(commandLine)
+        || (isCommandLineUnreadable(commandLine) && !priorCountedIn(priorCounted, "grok", pid))) {
+        // version probe / unclassifiable row, skip
       } else {
         result.grok += 1;
         if (pid) result.grokPids.add(pid);
@@ -2672,6 +2703,16 @@ export function createAgentMetricsCollector(options = {}) {
   let lastTrustedScan = null;
   let lastTrustedScanTime = 0;
 
+  // 上一轮可信扫描里两个探针端点各自的家族集，喂给本轮的「读不出命令行按连续性
+  // 判定」（priorCountedIn）。只读不搬：命中的 pid 是本轮真看见的进程号，集合仅
+  // 用来回答「这个进程以前算不算这个端点的客户端」。可信轮与降级轮共用同一份
+  // 来源——降级轮整轮没有命令行，正好靠它把探针挡在门外、把真会话留在门内。
+  // 首轮（还没有可信快照）时为空：这一轮读不出命令行的行一律不计数，宁可少算
+  // 一轮，也不能把一次环境检测变成一张悬空卡。
+  const priorCountedPids = () => (lastTrustedScan === null
+    ? null
+    : { qoder: lastTrustedScan.qoderPids ?? null, grok: lastTrustedScan.grokPids ?? null });
+
   // 把可信轮的一份归属并进降级轮：先收本轮还活着的可信值，再补上可信轮根本没
   // 枚举过的进程号的本轮答案（后者通常为空——命令行读不出就没有归属可言）。
   function mergeCarriedForm(trusted, blind, trustedSaw, alive) {
@@ -2726,7 +2767,7 @@ export function createAgentMetricsCollector(options = {}) {
       // failed round — the tasklist fallback still gets its say.
       const psOut = await psProbe.query().catch(() => null);
       if (typeof psOut === "string" && psOut.trim().length > 0) {
-        const counts = parseTasklistCsv(psOut);
+        const counts = parseTasklistCsv(psOut, priorCountedPids());
         // 常驻探针这一路带命令行与父进程列，是唯一能认全 node 型客户端的
         // 扫描形状——桶内计数可信（见 createEmptyProcessScan 上方）。
         counts.countsAuthoritative = true;
@@ -2754,7 +2795,7 @@ export function createAgentMetricsCollector(options = {}) {
       await new Promise((resolve) => {
         execFn('tasklist /NH /FO CSV', { timeout: 3000, windowsHide: true }, async (err, stdout) => {
           if (!err && typeof stdout === "string") {
-            const counts = parseTasklistCsv(stdout);
+            const counts = parseTasklistCsv(stdout, priorCountedPids());
             // 这半张视图认不出 node 型客户端：报了行的轮次其桶内计数不可信
             // （见 createEmptyProcessScan 上方）；零行则没有可误判归属的行，
             // 沿用「端点已关闭」这一既有语义。
