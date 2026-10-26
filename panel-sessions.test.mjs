@@ -1,6 +1,9 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createPanelRouter } from "./panel.mjs";
+import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 // Sessions tab routes: the router is exercised with a mock session-scan
 // service so no real agent session store is touched. Covers the route
@@ -39,7 +42,7 @@ function fakeReqRes(url, method = "GET", body = null, extraHeaders = {}) {
   return { req, res, json };
 }
 
-function sessionsRouter(sessionScanService) {
+function sessionsRouter(sessionScanService, extra = {}) {
   return createPanelRouter({
     storePaths: { root: "C:/fake/anyswitch" },
     logger: null,
@@ -48,6 +51,7 @@ function sessionsRouter(sessionScanService) {
     aliasPath: null,
     fetchRelayAgents: async () => null,
     sessionScanService,
+    ...extra,
   });
 }
 
@@ -73,6 +77,41 @@ function mockSessionScan({ scanResult, scanError, messagesResult, deleteResult }
 }
 
 describe("panel router sessions routes", () => {
+  // 回归钉（M1）：不注入 sessionScanService 时，列表扫描必须走扫描承载（worker
+  // 线程），绝不许在面板进程里直接跑 session-scan 的同步 fs 扫描。修前这条路径
+  // 就是 `scanAll: sessionScanAll`——一次 8s 的同步块，整个面板停摆。
+  it("默认服务把列表扫描送进 worker（面板进程零阻塞）", async () => {
+    const root = mkTestDir("anyswitch-sessions-offload-");
+    // 临时扫描 worker：忙等 400ms 再回一份可识别的空表。
+    const workerFile = join(root, "busy-scan-worker.mjs");
+    writeFileSync(workerFile, `
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  const started = Date.now();
+  while (Date.now() - started < 400) { /* 同步全盘扫描的替身 */ }
+  parentPort.postMessage({ id: message?.id, ok: true, result: { sessions: [], endpointErrors: [] } });
+});
+`);
+    const router = sessionsRouter(null, { sessionScanWorkerFile: workerFile });
+    const started = Date.now();
+    let worstGap = 0;
+    let last = Date.now();
+    let ticks = 0;
+    const list = fakeReqRes("/panel/api/sessions/list", "GET");
+    const done = router.handle(list.req, list.res);
+    while (Date.now() - started < 250) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const now = Date.now();
+      worstGap = Math.max(worstGap, now - last - 5);
+      last = now;
+      ticks += 1;
+    }
+    await done;
+    assert.equal(list.res.statusCode, 200);
+    assert.ok(ticks > 10, `定时器链几乎没跑（${ticks} 拍），扫描把面板事件循环按住了`);
+    assert.ok(worstGap < 150, `扫描期间事件循环空档 ${worstGap}ms`);
+  });
+
   it("GET /panel/api/sessions/list returns the scan result verbatim", async () => {
     const scan = {
       sessions: [

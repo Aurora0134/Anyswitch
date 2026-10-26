@@ -12549,6 +12549,74 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
     assert.equal(kimiScans, 1, "同一未绑定会话在防抖窗内只扫一拍");
   });
 
+  // 回归钉（M1）：列表路由里的绑定捕获扫描不许占住面板的事件循环。S1 取证实测
+  // 修前 dsh 全盘扫描 2.7–4.3s，期间 setTimeout(1) 链一次都没触发、并发的
+  // /input 从 25ms 变 4325ms——用户主观就是「点完组头 ⊕ 打字要等 5 秒」。
+  // 这里把「扫描」换成一个忙等 400ms 的同步块（写进临时 worker 文件，由扫描承载
+  // 在独立线程里跑）。面板事件循环若被它按住，下面那条 setTimeout 链就会出现
+  // ≥400ms 的空档；修前（扫描在请求路径上同步跑）实测空档 ≈ 整段扫描时长。
+  it("忙等扫描在飞时面板事件循环不被按住（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-blocking-root-");
+    const cwd = mkTestDir("anyswitch-capture-blocking-cwd-");
+    const now = Date.now();
+    // 临时扫描 worker：忙等 400ms 再回空表（判不出 → 不写绑定，正好只测阻塞），
+    // 落一个标记文件证明这一趟扫描真的跑过了——否则上面的时延断言会空过。
+    const workerFile = join(root, "blocking-scan-worker.mjs");
+    const markerFile = join(root, "scan-ran.txt");
+    writeFileSync(workerFile, `
+import { appendFileSync } from "node:fs";
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  appendFileSync(${JSON.stringify(markerFile)}, "x");
+  const started = Date.now();
+  while (Date.now() - started < 400) { /* 模拟同步 fs 全盘扫描 */ }
+  const result = message?.kind === "agent" ? [] : { sessions: [], endpointErrors: [] };
+  parentPort.postMessage({ id: message?.id, ok: true, result });
+});
+`);
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "ab12cd34", label: "k", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      sessionScanWorkerFile: workerFile,
+      // 同款忙等扫描的「进程内」版本：扫描承载起不来时它才是真正跑的那个，
+      // 所以这条钉子在任何降级路径下都不会去碰真 home 存档。修前没有 worker
+      // 承载，跑的就是它——那 400ms 直接落在列表请求路径上，钉子当场红。
+      scanAgentConversationsFn: () => {
+        const busyUntil = Date.now() + 400;
+        while (Date.now() < busyUntil) { /* 同步全盘扫描的替身 */ }
+        return [];
+      },
+    });
+    // 列表请求触发一次绑定捕获扫描；不等它落地就开始量事件循环的响应。
+    const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    const listDone = router.handle(list.req, list.res);
+    const started = Date.now();
+    let worstGap = 0;
+    let last = Date.now();
+    let ticks = 0;
+    while (Date.now() - started < 250) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const nowTick = Date.now();
+      worstGap = Math.max(worstGap, nowTick - last - 5);
+      last = nowTick;
+      ticks += 1;
+    }
+    await listDone;
+    // 等这一趟扫描真的跑完（标记文件出现），再收口断言。
+    const deadline = Date.now() + 3000;
+    while (!existsSync(markerFile) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(existsSync(markerFile), "忙等扫描没跑起来——这条钉子会空过，必须先修装置");
+    assert.ok(ticks > 10, `定时器链几乎没跑（${ticks} 拍），事件循环已被按住`);
+    assert.ok(worstGap < 150, `事件循环被扫描按住 ${worstGap}ms（修前 ≈ 整段扫描时长）`);
+  });
+
   it("扫描判不出（并列）则不绑定，下轮列表还可再试", async () => {
     const root = mkTestDir("anyswitch-capture-tie-root-");
     const cwd = mkTestDir("anyswitch-capture-tie-cwd-");

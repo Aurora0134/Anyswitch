@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import { createSessionScanner, buildTurns } from "./session-scan.mjs";
+import { createSessionScanOffload } from "./session-scan-worker.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeTmp() {
@@ -1521,6 +1522,76 @@ test("scanAll merges adapters, sorts by lastActive desc, isolates failures", asy
   assert.equal(sessions[0].endpoint, "pi", "pi is more recent and sorts first");
   assert.equal(sessions[1].endpoint, "claude");
   assert.ok(endpointErrors.some((e) => e.endpoint === "zcode"));
+});
+
+test("scanEndpoint: 只扫指定端点，名单外与读盘失败都降级为空表", async () => {
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-e", "sess-e.jsonl", [claudeLine({ sessionId: "sess-e" })]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const metas = await scanner.scanEndpoint("claude");
+  assert.equal(metas.length, 1);
+  assert.equal(metas[0].endpoint, "claude");
+  // 绑定捕获/复活兜底的调用纪律：判不出就空表，绝不让调用方吃到异常。
+  assert.deepEqual(await scanner.scanEndpoint("not-an-endpoint"), []);
+});
+
+// --- 扫描离线程（session-scan-worker.mjs） -----------------------------------
+// 面板进程的请求路径绝不许直接跑这段同步 fs 扫描：修前实测 2927 条会话
+// 2.7–8.0s，期间整个面板（含终端字节流）停摆。这两条钉住承载的两件事：
+// 结果与 in-process 调用逐字段一致；worker 起不来时退回本进程而不是丢结果。
+
+test("scan offload: 结果与 in-process 扫描逐字段一致", async () => {
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-w", "sess-w.jsonl", [
+    claudeLine({ sessionId: "sess-w", timestamp: "2026-09-01T10:00:00.000Z" }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "w" }, timestamp: "2026-09-01T10:05:00.000Z" }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const inProcess = await scanner.scanAll();
+  // worker 侧也给全套临时根（workerData.roots）：跨线程跑的是同一份扫描代码，
+  // 但绝不去读真 home 下的存档。注意 createSessionScanner 是「覆盖式合并默认
+  // 根」，所以九个端点都要给临时目录，漏一个就会去扫真 home。
+  const workerRoots = {};
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
+    workerRoots[id] = [makeTmp()];
+  }
+  workerRoots.claude = [claudeRoot];
+  const offload = createSessionScanOffload({
+    workerData: { roots: workerRoots },
+    fallback: { scanAll: () => scanner.scanAll(), scanAgent: (id) => scanner.scanEndpoint(id) },
+  });
+  try {
+    const offloaded = await offload.scanAll();
+    const only = (rows) => rows.sessions.filter((session) => session.endpoint === "claude");
+    assert.deepEqual(only(offloaded), only(inProcess), "全量扫描跨线程后逐字段一致");
+    const agentMetas = await offload.scanAgent("claude");
+    assert.equal(agentMetas.length, 1);
+    assert.equal(agentMetas[0].id, inProcess.sessions[0].id);
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: worker 起不来时退回本进程扫，不丢结果", async () => {
+  const warns = [];
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-d", "sess-d.jsonl", [claudeLine({ sessionId: "sess-d" })]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const offload = createSessionScanOffload({
+    // 不存在的 worker 模块 → 构造即失败，走降级路径。
+    workerFile: join(makeTmp(), "no-such-worker.mjs"),
+    logger: { warn: (line) => warns.push(line) },
+    fallback: { scanAll: () => scanner.scanAll(), scanAgent: (id) => scanner.scanEndpoint(id) },
+  });
+  try {
+    const result = await offload.scanAll();
+    assert.equal(result.sessions.length, 1, "降级后仍出结果");
+    const agentMetas = await offload.scanAgent("claude");
+    assert.equal(agentMetas.length, 1, "单端点扫描同样降级可用");
+    assert.equal(warns.length, 1, "降级只记一条 warn，不每拍刷日志");
+  } finally {
+    offload.close();
+  }
 });
 
 test("loadMessages rejects files outside the endpoint roots", async () => {

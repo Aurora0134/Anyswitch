@@ -52,7 +52,8 @@ import {
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
 import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault, readRemoteHeadRelation as readRemoteHeadRelationDefault } from "./app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
-import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
+import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
+import { createSessionScanOffload } from "./session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 import { probeTerminalCommandTree as defaultProbeTerminalCommandTree } from "./terminal-switch-guard.mjs";
 import {
@@ -502,17 +503,10 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
 }
 
 // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
-// 要读九家存档，列表轮询路径用不起）。扫描失败降级为空表——匹配层拿到空表
-// 自然判不出，按「宁可不接」回落。
-async function defaultScanAgentConversations(agentId) {
-  const adapter = sessionScanner.adapters.get(agentId);
-  if (!adapter) return [];
-  try {
-    return await adapter.scan();
-  } catch {
-    return [];
-  }
-}
+// 要读九家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
+// session-scan 的 scanEndpoint 里（匹配层拿到空表自然判不出，按「宁可不接」
+// 回落）。真正的执行位置由扫描承载决定——见 createPanelRouter 里的 scanHost：
+// 默认进 worker 线程，面板进程不被这段同步 fs 扫描按住。
 
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
@@ -871,7 +865,14 @@ export function createPanelRouter({
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
    terminalBindingStore = null,
-   scanAgentConversationsFn = defaultScanAgentConversations,
+   // 单端点对话存档扫描（绑定捕获 / 复活兜底共用）。`null` = 走扫描承载
+   // （session-scan-worker.mjs：worker 线程里跑，面板进程零阻塞）；单测注入
+   // 假扫描函数时原地同步跑，不碰真存档、也不起 worker。
+   scanAgentConversationsFn = null,
+   // 扫描承载的 worker 模块（session-scan-worker.mjs）。默认 null＝用模块自带的
+   // 那一个（同文件既是主线程壳也是 worker 体）。给单测一个替换口：把「扫描」
+   // 换成忙等块，用来钉住「扫描不占面板事件循环」——修前这条会红。
+   sessionScanWorkerFile = null,
    // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
@@ -961,6 +962,23 @@ export function createPanelRouter({
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
   const logLevelGate = createLogLevelGate(settingsFile, base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
+  // 扫描承载（session-scan-worker.mjs）：session-scan 的九个 adapter 全是同步 fs，
+  // 在哪调用就在哪按住事件循环。这里把「九家全量」与「单端点」两种扫描都送进
+  // 独立 worker 线程；worker 不可用时退回本进程（面板仍出列表，只那一拍会卡），
+  // 降级路径在承载里一次性收敛并记一条 warn。
+  const scanHost = createSessionScanOffload({
+    ...(sessionScanWorkerFile ? { workerFile: sessionScanWorkerFile } : {}),
+    logger,
+    fallback: {
+      scanAll: () => sessionScanner.scanAll(),
+      scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
+    },
+  });
+  // 注入的假扫描函数（单测）原地同步跑——不碰真存档，也不起 worker；显式指定
+  // 了 worker 模块时一律走 worker（离线钉靠这条证明扫描不占事件循环）。
+  const scanAgentConversations = scanAgentConversationsFn && !sessionScanWorkerFile
+    ? scanAgentConversationsFn
+    : (agentId) => scanHost.scanAgent(agentId);
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
   // answers instantly once a probe round has settled; POST followAgent invalidates.
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
@@ -1235,7 +1253,7 @@ export function createPanelRouter({
       const captured = { agentId: session.agentId, cwd: session.cwd };
       bindingCaptureLastAttempt.set(session.id, now);
       Promise.resolve()
-        .then(() => scanAgentConversationsFn(session.agentId))
+        .then(() => scanAgentConversations(session.agentId))
         .then((metas) => {
           // 内切保 id，createdAt 不能代表本轮新对话的起点。以最近一次进程
           // 出生为界；扫描返回时身份/目录/代际已变即整份结果作废，防跨代抢绑。
@@ -1265,7 +1283,7 @@ export function createPanelRouter({
     const identity = { agentId: session.agentId, cwd: session.cwd };
     let metas = null;
     try {
-      metas = await scanAgentConversationsFn(session.agentId);
+      metas = await scanAgentConversations(session.agentId);
     } catch {
       metas = null;
     }
@@ -1301,7 +1319,7 @@ export function createPanelRouter({
   function scheduleBindingRefresh(session, sinceMs) {
     bindingRefreshScheduleFn(() => {
       Promise.resolve()
-        .then(() => scanAgentConversationsFn(session.agentId))
+        .then(() => scanAgentConversations(session.agentId))
         .then((metas) => {
           const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs });
           if (!picked) return;
@@ -3860,7 +3878,9 @@ export function createPanelRouter({
     if (path.startsWith("/panel/api/sessions/")) {
       if (!sessionScanService) {
         sessionScanService = {
-          scanAll: sessionScanAll,
+          // 列表扫描走扫描承载（worker 线程）：修前这里直接绑 session-scan 的
+          // scanAll，九个 adapter 的同步 fs 全跑在面板进程的事件循环上。
+          scanAll: () => scanHost.scanAll(),
           loadMessages: sessionLoadMessages,
           deleteSessions: sessionDeleteSessions,
         };
@@ -3868,9 +3888,9 @@ export function createPanelRouter({
       const svc = sessionScanService;
 
       if (path === "/panel/api/sessions/list" && method === "GET") {
+        // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，单 adapter 失败
+        // 降级进 endpointErrors，路由原样透传。
         try {
-          // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，
-          // 单 adapter 失败降级进 endpointErrors，路由原样透传。
           return sendJson(res, 200, await svc.scanAll());
         } catch (err) {
           return sendJson(res, 500, { ok: false, error: err.message });
