@@ -12617,6 +12617,38 @@ parentPort.on("message", (message) => {
     assert.ok(worstGap < 150, `事件循环被扫描按住 ${worstGap}ms（修前 ≈ 整段扫描时长）`);
   });
 
+  // 回归钉（M1）：判不出要退避，不能每 5s 重扫一遍全盘。刚内切/新开的会话在
+  // agent 写出第一条存档前，扫描必然判不出——修前是「判不出就 5s 后再扫」，
+  // 于是用户打字的那段时间里，面板每 5s 被按住 1.5–4.6s（S1 §3.2⑦）。
+  it("判不出后按退避窗等，不再每拍重扫（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-backoff-root-");
+    const cwd = mkTestDir("anyswitch-capture-backoff-cwd-");
+    const now = Date.now();
+    let scans = 0;
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "t-miss", label: "k", cwd, shell: "cmd", pid: 8, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      scanAgentConversationsFn: async () => {
+        scans += 1;
+        return []; // 一直判不出（新会话还没写存档）
+      },
+      // 防抖窗压到 1ms：修前＝每次列表都重扫；修后＝判不出一次就进 10s 退避。
+      bindingCaptureDebounceMs: 1,
+    });
+    for (let round = 0; round < 4; round += 1) {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      await flushAsyncSideEffects();
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(scans, 1, `判不出后仍在重扫（扫了 ${scans} 次）——这就是每 5s 卡一次的开关`);
+  });
+
   it("扫描判不出（并列）则不绑定，下轮列表还可再试", async () => {
     const root = mkTestDir("anyswitch-capture-tie-root-");
     const cwd = mkTestDir("anyswitch-capture-tie-cwd-");

@@ -935,6 +935,12 @@ export function createPanelRouter({
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
    bindingCaptureDebounceMs = 5000,
+   // 「判不出」的负结果退避：刚内切/新开的会话要等 agent 自己写出第一条存档，
+   // 扫描才会出现可匹配行。修前判不出就按 5s 一拍重扫（S1：这就是「每 5 秒卡
+   // 一次」的开关）。判不出一次后按 bindingCaptureMissBackoffMs 起步翻倍，
+   // 封顶 bindingCaptureMissMaxMs——仍然会自愈，但不再无限重扫。
+   bindingCaptureMissBackoffMs = 10_000,
+   bindingCaptureMissMaxMs = 60_000,
    bindingRefreshDelayMs = 10_000,
    bindingRefreshScheduleFn = (fn, ms) => {
      const timer = setTimeout(fn, ms);
@@ -1208,7 +1214,9 @@ export function createPanelRouter({
     // 绑定捕获只在控制面进程跑：relay 侧也挂着同一套路由器，绑定库只认
     // panel-host 一个写入方（页面本来就只由 47820 服务，relay 实际收不到
     // 这个轮询，这里把「实际」钉成「制度」）。
-    if (hostKind === "panel-host") captureTerminalConversationBindings(sessions);
+    // 捕获是旁路：先让列表响应落地，扫描调度排在当前 turn 之后（见
+    // scheduleBindingCapture）。修前这里是同步调用，扫描把这一拍整段按住。
+    if (hostKind === "panel-host") scheduleBindingCapture(sessions);
     const feed = await pulledDetectedProcesses(terminalPullToken());
     const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
@@ -1291,8 +1299,34 @@ export function createPanelRouter({
   // 捕获防抖：同一会话两次扫描尝试的最小间隔。记的是「尝试」而非「成功」——
   // 扫描慢/空表同样占一拍，1s 轮询的列表路由才不会每拍都重扫一遍盘。
   const bindingCaptureLastAttempt = new Map(); // sessionId → ms
+  // 「判不出」的连续次数：判不出（空表 / 并列 / 目录不重叠）是常态而非异常，
+  // 刚内切或新开的会话要等 agent 自己写出第一条存档才会出现匹配行。这里按次数
+  // 指数退避（bindingCaptureMissBackoffMs 起步翻倍，封顶 bindingCaptureMissMaxMs），
+  // 判出即清——既保证迟早自愈，又不再「每 5s 重扫一遍全盘」。
+  const bindingCaptureMissStreak = new Map(); // sessionId → 连续判不出次数
   // 内切保终端 id：捕获扫描必须跟随最新一代身份，旧代返回不得覆盖新代。
   const terminalBindingGenerations = new Map(); // sessionId → 递增代际
+  // 同一 agent 的扫描在飞去重：一拍里有多条同 agent 未绑定会话（或内切后连着
+  // 几拍）时共用一次扫描，别让 N 条会话排队扫 N 遍盘。
+  const agentScanInFlight = new Map(); // agentId → Promise<SessionMeta[]>
+
+  // 单端点扫描的去重壳：同一 agent 已有扫描在飞就搭同一趟车。失败降级为空表
+  // （匹配层拿到空表自然判不出，按「宁可不接」回落）。
+  function scanAgentConversationsShared(agentId) {
+    const running = agentScanInFlight.get(agentId);
+    if (running) return running;
+    const round = Promise.resolve()
+      .then(() => scanAgentConversations(agentId))
+      .catch(() => [])
+      .finally(() => {
+        // 微任务延后一拍再摘：同一 tick 里后到的会话仍能搭上这趟扫描。
+        Promise.resolve().then(() => {
+          if (agentScanInFlight.get(agentId) === round) agentScanInFlight.delete(agentId);
+        });
+      });
+    agentScanInFlight.set(agentId, round);
+    return round;
+  }
 
   // 列表路由的异步旁路：给「未绑定且 running 的可续会 agent 会话」补绑定，
   // 顺手清掉会话已消失的孤儿绑定。绝不阻塞、绝不让列表请求失败——全部
@@ -1311,6 +1345,9 @@ export function createPanelRouter({
     for (const sessionId of [...bindingCaptureLastAttempt.keys()]) {
       if (!keepIds.has(sessionId)) bindingCaptureLastAttempt.delete(sessionId);
     }
+    for (const sessionId of [...bindingCaptureMissStreak.keys()]) {
+      if (!keepIds.has(sessionId)) bindingCaptureMissStreak.delete(sessionId);
+    }
     for (const sessionId of [...terminalBindingGenerations.keys()]) {
       if (!keepIds.has(sessionId)) terminalBindingGenerations.delete(sessionId);
     }
@@ -1319,13 +1356,17 @@ export function createPanelRouter({
       if (!session || typeof session.id !== "string" || session.id === "") continue;
       if (session.status !== "running" || !RESUMABLE_AGENTS.has(session.agentId)) continue;
       if (store.get(session.id)) continue;
+      // 判不出过一次就按退避窗等：首次仍是 bindingCaptureDebounceMs。
+      const misses = bindingCaptureMissStreak.get(session.id) ?? 0;
+      const backoff = misses === 0
+        ? bindingCaptureDebounceMs
+        : Math.min(bindingCaptureMissBackoffMs * 2 ** (misses - 1), bindingCaptureMissMaxMs);
       const lastAttempt = bindingCaptureLastAttempt.get(session.id) ?? 0;
-      if (now - lastAttempt < bindingCaptureDebounceMs) continue;
+      if (now - lastAttempt < backoff) continue;
       const generation = terminalBindingGenerations.get(session.id) ?? 0;
       const captured = { agentId: session.agentId, cwd: session.cwd };
       bindingCaptureLastAttempt.set(session.id, now);
-      Promise.resolve()
-        .then(() => scanAgentConversations(session.agentId))
+      scanAgentConversationsShared(session.agentId)
         .then((metas) => {
           // 内切保 id，createdAt 不能代表本轮新对话的起点。以最近一次进程
           // 出生为界；扫描返回时身份/目录/代际已变即整份结果作废，防跨代抢绑。
@@ -1336,13 +1377,32 @@ export function createPanelRouter({
             createdAt: session.spawnedAt ?? session.createdAt ?? null,
             lastActiveAt: null,
           });
+          if (!picked) {
+            // 判不出＝负结果入表，下一拍按退避窗等（而不是 5s 后重扫一遍全盘）。
+            bindingCaptureMissStreak.set(session.id, misses + 1);
+            return;
+          }
+          bindingCaptureMissStreak.delete(session.id);
           // 扫描期间可能已被兜底路径绑上：已有绑定不覆盖。
-          if (picked && !store.get(session.id)) {
+          if (!store.get(session.id)) {
             store.set(session.id, bindingFromMeta(picked, { agentId: session.agentId, cwd: session.cwd }, "bound"));
           }
         })
         .catch(() => {});
     }
+  }
+
+  // 列表路由的调用口：把整段捕获（含 prune 与扫描调度）挪到当前 turn 之后，
+  // 列表响应先落地。修前这里是同步调用，绑定扫描的微任务就排在响应之前——
+  // 扫描 2.7–8s，同一时刻到达的 /input 与 SSE 握手全被推迟（S1 实测 4325ms）。
+  function scheduleBindingCapture(sessions) {
+    setImmediate(() => {
+      try {
+        captureTerminalConversationBindings(sessions);
+      } catch {
+        // 捕获是旁路，任何失败都不许冒泡到列表路由之外。
+      }
+    });
   }
 
   // 复活要追加的 resume 参数。三级判定：绑定在且存档还在 → 按绑定；绑定没有
@@ -1391,7 +1451,7 @@ export function createPanelRouter({
   function scheduleBindingRefresh(session, sinceMs) {
     bindingRefreshScheduleFn(() => {
       Promise.resolve()
-        .then(() => scanAgentConversations(session.agentId))
+        .then(() => scanAgentConversationsShared(session.agentId))
         .then((metas) => {
           const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs });
           if (!picked) return;
