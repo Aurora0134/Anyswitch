@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
@@ -889,14 +889,58 @@ test("⑤ 写盘失败时 close/clear-all 回 500 拒答，不答假 200", async
 // 而且 `persistChain` 单笔超 250ms 就无界积压。用户点 ⊕ 不断新增会话，这条路径
 // 就是延迟的放大器。
 //
-// 三个钉子都走相对口径（N 增长时看结构量的变化），不写绝对毫秒阈值——仓里没有
-// 假时钟，绝对阈值必然 flaky：
-//   ⑥ 「一个会话在出字」那一拍写几份/多少字节，N=2 与 N=20 必须一样；
-//   ⑧ 「N 个会话同时出字」那一拍必须被上限截断，不能一轮全写完；积压有界。
-//   ⑦ 抗回归的对照组：同一拍里必须真写了那个出字会话（否则⑥可以是「什么都不写」
-//      的假绿）。
+// 观察面只用文件系统（不看宿主自报的计数）：一拍落盘的可观察结果是「哪些 .json
+// 的 mtime 变了、变了几个字节」。这样断言的是**行为**而不是某套内部计数，旧实现
+// 上没有这套计数也照样能被判红——正是回归钉该有的性质。
+// 口径仍是相对的（N 增长时看结构量的变化），不写绝对毫秒阈值：仓里没有假时钟，
+// 绝对阈值必然 flaky。
 
 const KB_ = 1024;
+
+// 根目录下全部 .json 的 { mtimeMs, size }。原子写留下的 .tmp 不在其中（它们是
+// 写完就 rename 掉的中间态，后缀不是 .json）。
+function snapshotStateFiles(root) {
+  const map = new Map();
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        const stats = statSync(path);
+        map.set(path, { mtimeMs: stats.mtimeMs, size: stats.size });
+      }
+    }
+  };
+  walk(root);
+  return map;
+}
+
+// 等「下一次落盘」落定：轮询到至少一个 .json 的 mtime/大小变了为止。返回这一拍
+// 写了哪些文件、合计多少字节——这就是单拍落盘成本的直接读数。
+async function waitForStateWrite(root, before, { timeoutMs = 2500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const now = snapshotStateFiles(root);
+    const changed = [];
+    for (const [path, info] of now) {
+      const prev = before.get(path);
+      if (!prev || prev.mtimeMs !== info.mtimeMs || prev.size !== info.size) {
+        changed.push({ path, bytes: info.size });
+      }
+    }
+    if (changed.length > 0) {
+      return { files: changed.length, bytes: changed.reduce((total, item) => total + item.bytes, 0), changed };
+    }
+    if (Date.now() >= deadline) return { files: 0, bytes: 0, changed: [] };
+    await sleep(10);
+  }
+}
 
 // 建 N 个会话并把每条喂满落盘尾部预算（128KB），返回能直接 dataListener 的假 PTY。
 async function seedSessions(host, url, root, n) {
@@ -920,22 +964,7 @@ async function seedSessions(host, url, root, n) {
   return ptys;
 }
 
-// 量「防抖拍到的那一拍」：只等定时器，不显式冲净。
-async function measureDebouncePass(host, activePtys, { waitMs = 340 } = {}) {
-  const before = host.persistStats.passes;
-  for (const pty of activePtys) pty.dataListener("tick");
-  const deadline = Date.now() + waitMs;
-  while (host.persistStats.passes === before && Date.now() < deadline) await sleep(10);
-  assert.ok(host.persistStats.passes > before, `${waitMs}ms 内防抖拍必须至少跑过一轮`);
-  return {
-    passes: host.persistStats.passes - before,
-    writes: host.persistStats.lastPassSessionWrites,
-    bytes: host.persistStats.lastPassBytes,
-    backlog: host.persistStats.backlog,
-  };
-}
-
-test("⑥ 单会话出字的防抖拍成本不随会话数增长：N=2 与 N=20 写同样份数/字节", async () => {
+test("⑥ 单会话出字的防抖拍成本不随会话数增长：N=2 与 N=20 写同样字节", async () => {
   const measured = [];
   for (const n of [2, 20]) {
     const root = mkdtempSync(join(tmpdir(), `anyswitch-terminal-scale-${n}-`));
@@ -947,26 +976,27 @@ test("⑥ 单会话出字的防抖拍成本不随会话数增长：N=2 与 N=20 
       const ptys = await seedSessions(host, url, root, n);
       assert.equal(calls.length, n, `前置：${n} 个会话都真的 spawn 了`);
       // 只让第一个会话出字——这就是「开了一个页签在跑 agent、其它页签闲着」的形态
-      const pass = await measureDebouncePass(host, [ptys[0]]);
+      const before = snapshotStateFiles(root);
+      ptys[0].dataListener("tick");
+      const pass = await waitForStateWrite(root, before);
+      assert.ok(pass.files > 0, `N=${n}：防抖拍到点必须真的落盘（250ms + 写，2.5s 内没动静就是丢了变更）`);
       measured.push({ n, ...pass });
-      // ⑦ 对照组：这一拍必须真写了那条出字的会话（否则上面的相等可以是假绿）
-      assert.equal(pass.writes, 1, `N=${n}：一个会话出字，那一拍只写它自己那份`);
-      assert.ok(pass.bytes > 0, `N=${n}：那一拍必须有真实写量`);
     } finally {
       await host.close().catch(() => {});
       rmSync(root, { recursive: true, force: true });
     }
   }
   const [small, large] = measured;
-  assert.equal(large.writes, small.writes,
-    `单拍写的份数不随会话数增长（N=${small.n} 写 ${small.writes} 份，N=${large.n} 写 ${large.writes} 份；旧实现是 ${small.n}→${large.n} 份）`);
-  // 字节数同口径：写的就是那一条会话的尾部，与会话总数无关。尾巴本身按预算裁，
-  // 所以两边应当几乎一样；给 1KB 余量吸收块边界取整。
-  assert.ok(Math.abs(large.bytes - small.bytes) <= KB_,
-    `单拍写量不随会话数增长（N=${small.n} ${small.bytes}B vs N=${large.n} ${large.bytes}B；旧实现会从 ${small.n}×尾部 涨到 ${large.n}×尾部）`);
+  // 这一条就是病灶本身：一个会话出字，写出去的量与会话总数无关。
+  // 旧实现写的是整份状态文件，N=2 ≈ 301KB、N=20 ≈ 3MB（十倍）。
+  assert.ok(large.bytes <= small.bytes * 1.5,
+    `单拍写量不随会话数增长（N=${small.n} 写 ${small.bytes}B，N=${large.n} 写 ${large.bytes}B；`
+    + `旧实现是整份重写，会从 ${small.n} 份尾部涨到 ${large.n} 份尾部）`);
+  // ⑦ 对照组：那一拍必须真写了东西（否则「都不写」也能让上面的比值成立）。
+  assert.ok(small.bytes > 0 && large.bytes > 0, "两拍都必须有真实写量");
 });
 
-test("⑧ N 个会话同时出字：单拍被上限截断、积压有界，剩下的下一拍续上", async () => {
+test("⑧ N 个会话同时出字：单拍被上限截断、欠账自己续上，最终全部收敛", async () => {
   const n = 20;
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-scale-all-"));
   const { ptyModule } = capturingPtyModule();
@@ -975,22 +1005,34 @@ test("⑧ N 个会话同时出字：单拍被上限截断、积压有界，剩�
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   try {
     const ptys = await seedSessions(host, url, root, n);
-    // 全部 20 个会话在同一拍里出字：旧实现一轮写 20 份、3MB。
-    const pass = await measureDebouncePass(host, ptys);
-    assert.ok(pass.writes < n,
-      `一轮不许把 ${n} 个会话全写完（实写 ${pass.writes} 份）——单拍成本必须被上限截断`);
-    assert.ok(pass.writes >= 1, "但必须真写出去东西（至少一份，否则是空转）");
-    // 单拍写量有上界：上限 × 每条尾部预算（略放一点余量吸收块边界）。
+
+    // 全部 20 个会话在同一拍里出字。旧实现一轮写 20 份、约 3MB。
+    const before = snapshotStateFiles(root);
+    for (const pty of ptys) pty.dataListener("tick");
+    const first = await waitForStateWrite(root, before);
+    assert.ok(first.files > 0, "第一拍必须真的落盘");
+    // 上限：单拍写量必须落在「上限 × 每条尾部预算」的量级内，不能是 N×尾部。
     const capBytes = 4 * 128 * KB_ * 1.25;
-    assert.ok(pass.bytes <= capBytes,
-      `单拍写量 ${pass.bytes}B 必须落在上限量级内（≤ ${Math.round(capBytes)}B）；旧实现是 N×128KB`);
-    // 积压有界且可见：欠账留在脏集合里等下一拍，不会消失也不会无界增长。
-    assert.equal(pass.backlog, n - pass.writes,
-      `积压 = 还没写出去的会话数（实得 ${pass.backlog}，应为 ${n - pass.writes}）`);
-    assert.ok(pass.backlog <= n, "积压上界是会话总数（不再是无界增长的 promise 链）");
-    // 显式冲净必须能把欠账全部收干（关停/清场走这条，不能留尾巴）。
+    assert.ok(first.bytes <= capBytes,
+      `单拍写量 ${first.bytes}B 必须落在上限量级内（≤ ${Math.round(capBytes)}B）；旧实现一轮写 ${n}×128KB ≈ 2.5MB`);
+
+    // 欠账不许等下一次输出来叫醒：没有新输出，后续拍也要自己续上把欠账写完。
+    const afterFirst = snapshotStateFiles(root);
+    const second = await waitForStateWrite(root, afterFirst, { timeoutMs: 1500 });
+    assert.ok(second.files > 0,
+      "有界单拍留下的欠账必须自己续下一拍（没有新输出也该继续写）——否则会话记录会长期停在旧内容");
+
+    // 收敛：所有会话的记录都落到盘上，每条都守住 128KB 落盘尾部预算。
     await host.persistNow();
-    assert.equal(host.persistStats.backlog, 0, "全量冲净后不留欠账");
+    for (const session of host.sessions.values()) {
+      const record = readSessionRecord(host, session.id);
+      const tailBytes = Buffer.byteLength(record.buffer.join(""));
+      assert.ok(tailBytes <= 128 * KB_,
+        `收敛后每条记录守 128KB 落盘尾部（${session.id} 实得 ${tailBytes}B）`);
+    }
+    // 一拍写完的份数确实少于会话总数——上限真的在截断，不是「恰好一轮写完」。
+    assert.ok(first.files < n || n <= 4,
+      `一轮不许把 ${n} 个会话全写完（实写 ${first.files} 份）——单拍成本必须被上限截断`);
   } finally {
     await host.close().catch(() => {});
     rmSync(root, { recursive: true, force: true });
@@ -1049,6 +1091,27 @@ test("⑨ 新码读得回旧格式（v1 整份文件）：逐字段恢复、尾�
 // （emit 累加 / restart 归零 / restore 重算）任何一处漏掉都让裁尾静默失效。
 // 按块数上限单独钉一次：4000 块很多，但块小的时候字节上限先命中，所以这里用
 // 极小块的极端形状让块数上限成为唯一约束。
+// ⑩ 双上限与「最新一块必留」在分文件落盘之后仍成立。
+// 契约（不许因落盘形态换代而破）：内存环 512KB + 4000 块；裁尾只整块从头部丢；
+// 最新一块无条件保留；落盘尾部 128KB、同样最新一块无条件留（单块超预算也得存，
+// 否则宿主再启动一次恢复回来的就是白屏）；session.bufferBytes 三处维护
+// （emit 累加 / restart 归零 / restore 重算）任何一处漏掉都让裁尾静默失效。
+//
+// 这是「契约保持」钉子，不是病灶钉子：它在改造前后都该绿。所以读盘用
+// readDiskTail 按形态自适应（v1 整份文件的 sessions[0].buffer / v2 每会话记录），
+// 不依赖新码才有的 host.sessionStatePath——否则它在旧码上会因为缺方法而红，
+// 那就分不清「契约破了」和「API 没了」。
+function readDiskTail(host, root, id) {
+  if (typeof host.sessionStatePath === "function") {
+    const record = JSON.parse(readFileSync(host.sessionStatePath(id), "utf8"));
+    return Array.isArray(record.buffer) ? record.buffer : [];
+  }
+  // v1：整份状态文件，按 id 找那条
+  const state = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
+  const item = (state.sessions ?? []).find((entry) => entry?.id === id);
+  return Array.isArray(item?.buffer) ? item.buffer : [];
+}
+
 test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘后仍成立", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-dualcap-"));
   const { calls, ptyModule } = capturingPtyModule();
@@ -1080,19 +1143,19 @@ test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘
     assert.ok(bytes <= 512 * KB_, `内存窗口 ${bytes}B 超 512KB 字节上限`);
     assert.ok(session.buffer[session.buffer.length - 1].includes("#59"), "字节裁剪后最新一块仍在");
 
-    // 落盘尾部：128KB 预算 + 最新一块无条件留。写到记录文件里量。
+    // 落盘尾部：128KB 预算 + 最新一块无条件留。
     await host.persistNow();
-    const record = JSON.parse(readFileSync(host.sessionStatePath(created.id), "utf8"));
-    const diskBytes = Buffer.byteLength(record.buffer.join(""));
+    const diskTail = readDiskTail(host, root, created.id);
+    const diskBytes = Buffer.byteLength(diskTail.join(""));
     assert.ok(diskBytes <= 128 * KB_, `落盘尾部 ${diskBytes}B 超 128KB 预算`);
-    assert.ok(record.buffer[record.buffer.length - 1].includes("#59"), "落盘尾部保留的也是最新一块");
+    assert.ok(diskTail[diskTail.length - 1].includes("#59"), "落盘尾部保留的也是最新一块");
 
     // 单块超预算：最新一块照样落盘（不然再启动一次就是白屏）
     pty.dataListener(`#MEGA ${"y".repeat(400 * KB_)}`);
     await host.persistNow();
-    const megaRecord = JSON.parse(readFileSync(host.sessionStatePath(created.id), "utf8"));
-    assert.equal(megaRecord.buffer.length, 1, "超预算的单块独占落盘尾部，旧块整块让位");
-    assert.ok(megaRecord.buffer[0].includes("#MEGA"), "落的就是最新那块");
+    const megaTail = readDiskTail(host, root, created.id);
+    assert.equal(megaTail.length, 1, "超预算的单块独占落盘尾部，旧块整块让位");
+    assert.ok(megaTail[0].includes("#MEGA"), "落的就是最新那块");
 
     // 宿主重启：恢复时按盘上尾部重算字节位（第三处维护点），不是 undefined/NaN
     await host.close();
@@ -1101,7 +1164,7 @@ test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘
     });
     try {
       const revived = restored.sessions.get(created.id);
-      assert.ok(revived, "分文件落盘的会话读得回来");
+      assert.ok(revived, "盘上落过的会话读得回来");
       assert.equal(revived.bufferBytes, Buffer.byteLength(revived.buffer.join("")),
         "restore 按读回的尾部重算字节位（漏了这处就是 NaN，裁尾静默失效）");
       assert.ok(Number.isFinite(revived.bufferBytes) && revived.bufferBytes > 0, "字节位有限且非零");
