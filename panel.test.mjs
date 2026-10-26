@@ -1,7 +1,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12587,6 +12587,7 @@ parentPort.on("message", (message) => {
       // 所以这条钉子在任何降级路径下都不会去碰真 home 存档。修前没有 worker
       // 承载，跑的就是它——那 400ms 直接落在列表请求路径上，钉子当场红。
       scanAgentConversationsFn: () => {
+        appendFileSync(markerFile, "x");
         const busyUntil = Date.now() + 400;
         while (Date.now() < busyUntil) { /* 同步全盘扫描的替身 */ }
         return [];
