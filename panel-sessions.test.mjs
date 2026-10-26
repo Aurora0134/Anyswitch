@@ -112,6 +112,55 @@ parentPort.on("message", (message) => {
     assert.ok(worstGap < 150, `扫描期间事件循环空档 ${worstGap}ms`);
   });
 
+  // 回归钉（M1）：列表路由的扫描是「短 TTL + 在飞去重 + 先返回上次结果」。
+  // 修前每次 GET 都整盘重扫（S2 实测 2927 条会话 2.7–8.0s / 1.6MB），用户
+  // 每进一次终端页就堵一次事件循环；修后同一 TTL 窗口内只扫一拍。
+  it("TTL 窗口内重复 GET 只扫一拍（在飞去重）", async () => {
+    const svc = mockSessionScan({
+      scanResult: { sessions: [{ endpoint: "claude", id: "abc", file: "C:/s/abc.jsonl" }], endpointErrors: [] },
+    });
+    const router = sessionsRouter(svc);
+    for (let round = 0; round < 3; round += 1) {
+      const { req, res } = fakeReqRes("/panel/api/sessions/list", "GET");
+      await router.handle(req, res);
+      assert.equal(res.statusCode, 200);
+    }
+    assert.equal(svc.calls.scanAll, 1, "TTL 窗口内三次列表请求只该触发一次扫描");
+  });
+
+  it("TTL 过期先返回上次结果、刷新在后台（请求不等刷新）", async () => {
+    let round = 0;
+    const calls = { scanAll: 0 };
+    const svc = {
+      scanAll: async () => {
+        calls.scanAll += 1;
+        round += 1;
+        // 第二拍扫描慢一些也无所谓：请求绝不该等它。
+        if (round > 1) await new Promise((resolve) => setTimeout(resolve, 50));
+        return { sessions: [{ endpoint: "claude", id: `s${round}`, file: `C:/s/${round}.jsonl` }], endpointErrors: [] };
+      },
+      loadMessages: async () => [],
+      deleteSessions: async () => ({ ok: [], fail: [] }),
+    };
+    // ttl=0：每一拍都过期，但只有冷缓存那一拍会等扫描。
+    const router = sessionsRouter(svc, { sessionsListTtlMs: 0 });
+    const first = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(first.req, first.res);
+    assert.equal(first.json().sessions[0].id, "s1", "冷缓存首拍等扫描");
+    const started = Date.now();
+    const second = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(second.req, second.res);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 40, `过期拍不许等刷新（等了 ${elapsed}ms）`);
+    assert.equal(second.json().sessions[0].id, "s1", "先返回上次结果");
+    assert.equal(calls.scanAll, 2, "后台确实补了一拍刷新");
+    // 刷新落地后下一次请求拿到新结果。
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    const third = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(third.req, third.res);
+    assert.equal(third.json().sessions[0].id, "s2");
+  });
+
   it("GET /panel/api/sessions/list returns the scan result verbatim", async () => {
     const scan = {
       sessions: [

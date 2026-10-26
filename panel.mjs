@@ -109,6 +109,11 @@ const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 // re-probes synchronously and never reports pre-toggle drift.
 const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
 
+// 会话列表快照的 TTL（见 createSessionsListSnapshot）。同样是 stale-while-
+// revalidate：TTL 内复用上一次全盘扫描结果，过期后先交旧值再后台补一拍。
+// 30s 远大于最坏扫描（实测 8s），所以正常使用下不会出现「扫描刚完又该扫了」。
+const SESSIONS_LIST_TTL_MS = 30_000;
+
 // 请求日志路由（/panel/api/stats/logs）的枚举与钳制口径：range 档位 → 含当天
 // 往前推的天数（all = 90 天 retention 窗口）；status 档位同时是 errKind 枚举
 // 子集（ok 单独映射 ok=true）；pageSize 白名单。非法值一律回落默认。
@@ -274,6 +279,59 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
     // Kick the first probe round without waiting for it (panel-host calls
     // this at startup); the settled value becomes the initial snapshot.
     prewarm() { refresh().catch(() => {}); },
+  };
+}
+
+// 会话列表快照：GET /panel/api/sessions/list 是九家存档的全盘扫描（S2 实测
+// 2927 条会话 2.7–8.0s / 1.6MB 响应）。修前每个请求都重扫一遍，面板进程的
+// 事件循环被整段按住——终端字节流、SSE 握手、1s 轮询一起停摆。
+// 现在：{ at, value } 快照 + 短 TTL + 在飞去重 + 过期先返回旧值、后台补一拍。
+// TTL 取 30s 的理由：会话栏是粗粒度清单（列表本身不带 buffer，行只用于选一
+// 条去读/去删），而最坏扫描实测 8s——TTL 远大于扫描时长，不会背靠背排队重扫；
+// 本进程自己的删除会先就地摘掉对应行再置脏（见 dropRows），用户删完立刻看不
+// 到那行；别处新建/删除的会话最多晚 TTL 一拍出现，对「进终端页填左栏历史」
+// 这条唯一消费路径没有可感知代价。
+function createSessionsListSnapshot(load, ttlMs) {
+  const inFlight = { p: null };
+  let snap = null;
+
+  function refresh() {
+    if (inFlight.p) return inFlight.p;
+    const round = (async () => {
+      try {
+        const value = await load();
+        snap = { at: Date.now(), value };
+        return value;
+      } finally {
+        // 微任务延迟一拍再摘，避免「round 已落定但等待者还没读到」时的同步重扫。
+        await Promise.resolve();
+        inFlight.p = null;
+      }
+    })();
+    inFlight.p = round;
+    return round;
+  }
+
+  return {
+    // 冷缓存（本进程还没扫过）：只能等这一拍——没有旧值可交，列表不能凭空
+    // 空着。失败照实抛给路由（500），与修前一致。
+    // 有过结果：TTL 内直接复用；过期则交旧值、后台补一拍，请求绝不等刷新。
+    async get() {
+      if (!snap) return refresh();
+      if (Date.now() - snap.at < ttlMs) return snap.value;
+      refresh().catch(() => {});
+      return snap.value;
+    },
+    // 本进程刚删掉的行就地摘掉（响应里立刻不再出现），并把快照置为过期：
+    // 下一拍请求先拿这份（已摘掉那行）的旧值，同时后台补一扫与盘面对齐。
+    // 没有快照时什么都不做——下一拍自然是冷扫。
+    dropRows(predicate) {
+      if (!snap || !Array.isArray(snap.value?.sessions)) return;
+      snap = {
+        at: 0,
+        value: { ...snap.value, sessions: snap.value.sessions.filter((session) => !predicate(session)) },
+      };
+    },
   };
 }
 
@@ -931,6 +989,9 @@ export function createPanelRouter({
   // Injectable for tests; `null` lazily binds the real module's exports on
   // the first sessions request.
   sessionScanService = null,
+  // 会话列表快照的 TTL（见 createSessionsListSnapshot）。注入给单测：0 = 每一拍
+  // 都视为过期（验「先返回旧值、后台刷新」），默认 30s。
+  sessionsListTtlMs = SESSIONS_LIST_TTL_MS,
   environmentService = null,
   releaseService = null,
   // 客户端更新的脱离进程。注入给测试；`null` 用真实的脱离拉起。
@@ -979,6 +1040,17 @@ export function createPanelRouter({
   const scanAgentConversations = scanAgentConversationsFn && !sessionScanWorkerFile
     ? scanAgentConversationsFn
     : (agentId) => scanHost.scanAgent(agentId);
+  // 会话列表快照（短 TTL + 在飞去重 + 过期先返回旧值）。首次用到时才建，
+  // 装载函数指向最终绑定的 session-scan 服务（注入的或真模块）。
+  let sessionListSnapshot = null;
+  // 按「谁提供 scanAll」建快照：注入假服务的单测与真模块各走各的，且只建一次
+  // （快照一旦建好就一直服务这个 router 的列表路由）。
+  function sessionsListSnapshotFor(svc) {
+    if (!sessionListSnapshot) {
+      sessionListSnapshot = createSessionsListSnapshot(() => svc.scanAll(), sessionsListTtlMs);
+    }
+    return sessionListSnapshot;
+  }
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
   // answers instantly once a probe round has settled; POST followAgent invalidates.
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
@@ -3890,8 +3962,11 @@ export function createPanelRouter({
       if (path === "/panel/api/sessions/list" && method === "GET") {
         // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，单 adapter 失败
         // 降级进 endpointErrors，路由原样透传。
+        // 但这一拍不再每次都扫盘：见 createSessionsListSnapshot——TTL 内复用上次
+        // 结果，过期后先返回旧值、后台补一拍，请求绝不等刷新（冷缓存那一拍除外，
+        // 没有旧值可交）。扫描本身在 worker 线程里跑，不占本进程事件循环。
         try {
-          return sendJson(res, 200, await svc.scanAll());
+          return sendJson(res, 200, await sessionsListSnapshotFor(svc).get());
         } catch (err) {
           return sendJson(res, 500, { ok: false, error: err.message });
         }
@@ -3923,6 +3998,10 @@ export function createPanelRouter({
             return sendJson(res, 400, { ok: false, error: "items must be a non-empty array of { endpoint, file }" });
           }
           const result = await svc.deleteSessions(body.items);
+          // 删掉的行就地摘出快照：用户刚删完再看列表不该还看到它，也不必为
+          // 此把整份快照作废（下一拍后台刷新会与盘面对齐）。
+          const goneFiles = new Set((result?.ok ?? []).map((entry) => entry?.file ?? entry));
+          sessionListSnapshot?.dropRows((session) => goneFiles.has(session?.file));
           // 响应契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
           return sendJson(res, 200, {
             ok: result?.ok ?? [],
