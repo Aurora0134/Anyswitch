@@ -1,7 +1,17 @@
-// Session scan data layer for the panel「会话管理」tab: stateless on-demand
-// scan of each managed agent's on-disk session stores. No index, no DB of our
-// own — every list call re-reads the agents' files (cc-switch's session_manager
-// pattern, translated to Node).
+// Session scan data layer for the panel「会话管理」tab: on-demand scan of each
+// managed agent's on-disk session stores. No index, no DB of our own — the scan
+// itself is still stateless (cc-switch's session_manager pattern, translated to
+// Node): it holds nothing between calls and every call re-reads the agents'
+// files.
+//
+// 扫描执行位置（2026-10-26 起，M1「扫描离线程」）：这些 adapter 体内全是同步 fs
+// （readdirSync/statSync/readFileSync/readSync），async 外壳下没有任何 await 点，
+// 所以「在哪个线程调用」就是「哪个事件循环被按住」。修前面板进程（47820）直接
+// 调用它，2927 条会话实测 2.7–8.0s，期间终端字节流、SSE 握手、1s 轮询全部停摆。
+// 现在面板侧一律经 `session-scan-worker.mjs` 把它送进独立 worker 线程跑，面板
+// 进程零阻塞。本模块仍然只负责「怎么读盘」——线程归属、列表快照与刷新语义都在
+// 面板侧（panel.mjs 的 scanHost 与 createSessionsListSnapshot），这里不持有任何
+// 缓存或调度状态。
 //
 // One adapter per endpoint, unified shape:
 //   { id, roots(), scan(), loadMessages(file), delete(file) }
@@ -2072,6 +2082,19 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
       return adapterFor(endpoint).loadMessages(file);
     },
 
+    // 单端点扫描（绑定捕获 / 复活兜底用）：只读该 agent 一家存档——全量
+    // scanAll 要读九家，1s 轮询路径用不起。名单外与读盘失败都降级为空表：
+    // 匹配层拿到空表自然判不出，按「宁可不接」回落，绝不让调用方抛。
+    async scanEndpoint(endpoint) {
+      const adapter = adapters.get(endpoint);
+      if (!adapter) return [];
+      try {
+        return await adapter.scan();
+      } catch {
+        return [];
+      }
+    },
+
     // Serial per-item deletes: { ok: [...], fail: [{ endpoint, file, reason }] }.
     // Items carry {endpoint, file} so the roots whitelist
     // check runs inside the right adapter without a lookup race.
@@ -2100,6 +2123,7 @@ export function createSessionScanner({ roots: rootOverrides } = {}) {
 export const defaultScanner = createSessionScanner();
 
 export const scanAll = () => defaultScanner.scanAll();
+export const scanEndpoint = (endpoint) => defaultScanner.scanEndpoint(endpoint);
 export const loadMessages = (endpoint, file) => defaultScanner.loadMessages(endpoint, file);
 export const deleteSessions = (items) => defaultScanner.deleteSessions(items);
 

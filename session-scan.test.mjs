@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import { createSessionScanner, buildTurns } from "./session-scan.mjs";
+import { createSessionScanOffload } from "./session-scan-worker.mjs";
 import { mkTestDir } from "./test-helpers/tmp.mjs";
 
 function makeTmp() {
@@ -1521,6 +1522,147 @@ test("scanAll merges adapters, sorts by lastActive desc, isolates failures", asy
   assert.equal(sessions[0].endpoint, "pi", "pi is more recent and sorts first");
   assert.equal(sessions[1].endpoint, "claude");
   assert.ok(endpointErrors.some((e) => e.endpoint === "zcode"));
+});
+
+test("scanEndpoint: 只扫指定端点，名单外与读盘失败都降级为空表", async () => {
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-e", "sess-e.jsonl", [claudeLine({ sessionId: "sess-e" })]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const metas = await scanner.scanEndpoint("claude");
+  assert.equal(metas.length, 1);
+  assert.equal(metas[0].endpoint, "claude");
+  // 绑定捕获/复活兜底的调用纪律：判不出就空表，绝不让调用方吃到异常。
+  assert.deepEqual(await scanner.scanEndpoint("not-an-endpoint"), []);
+});
+
+// --- 扫描离线程（session-scan-worker.mjs） -----------------------------------
+// 面板进程的请求路径绝不许直接跑这段同步 fs 扫描：修前实测 2927 条会话
+// 2.7–8.0s，期间整个面板（含终端字节流）停摆。这两条钉住承载的两件事：
+// 结果与 in-process 调用逐字段一致；worker 起不来时退回本进程而不是丢结果。
+
+test("scan offload: 结果与 in-process 扫描逐字段一致", async () => {
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-w", "sess-w.jsonl", [
+    claudeLine({ sessionId: "sess-w", timestamp: "2026-09-01T10:00:00.000Z" }),
+    JSON.stringify({ type: "assistant", message: { role: "assistant", content: "w" }, timestamp: "2026-09-01T10:05:00.000Z" }),
+  ]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const inProcess = await scanner.scanAll();
+  // worker 侧也给全套临时根（workerData.roots）：跨线程跑的是同一份扫描代码，
+  // 但绝不去读真 home 下的存档。注意 createSessionScanner 是「覆盖式合并默认
+  // 根」，所以九个端点都要给临时目录，漏一个就会去扫真 home。
+  const workerRoots = {};
+  for (const id of ["claude", "kimi", "zcode", "dsh", "pi", "opencode", "qoder", "codex", "grok"]) {
+    workerRoots[id] = [makeTmp()];
+  }
+  workerRoots.claude = [claudeRoot];
+  const offload = createSessionScanOffload({
+    workerData: { roots: workerRoots },
+    fallback: { scanAll: () => scanner.scanAll(), scanAgent: (id) => scanner.scanEndpoint(id) },
+  });
+  try {
+    const offloaded = await offload.scanAll();
+    const only = (rows) => rows.sessions.filter((session) => session.endpoint === "claude");
+    assert.deepEqual(only(offloaded), only(inProcess), "全量扫描跨线程后逐字段一致");
+    const agentMetas = await offload.scanAgent("claude");
+    assert.equal(agentMetas.length, 1);
+    assert.equal(agentMetas[0].id, inProcess.sessions[0].id);
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: worker 起不来时退回本进程扫，不丢结果", async () => {
+  const warns = [];
+  const claudeRoot = makeTmp();
+  writeClaudeSession(claudeRoot, "C--work-d", "sess-d.jsonl", [claudeLine({ sessionId: "sess-d" })]);
+  const scanner = testScanner({ claude: [claudeRoot] });
+  const offload = createSessionScanOffload({
+    // 不存在的 worker 模块 → 构造即失败，走降级路径。
+    workerFile: join(makeTmp(), "no-such-worker.mjs"),
+    logger: { warn: (line) => warns.push(line) },
+    fallback: { scanAll: () => scanner.scanAll(), scanAgent: (id) => scanner.scanEndpoint(id) },
+  });
+  try {
+    const result = await offload.scanAll();
+    assert.equal(result.sessions.length, 1, "降级后仍出结果");
+    const agentMetas = await offload.scanAgent("claude");
+    assert.equal(agentMetas.length, 1, "单端点扫描同样降级可用");
+    assert.equal(warns.length, 1, "降级只记一条 warn，不每拍刷日志");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: 降级不是终点——冷却窗过后会重建 worker（评审 F8）", async () => {
+  // 一次抖动（worker 崩一次、某次扫描撞上超时）不许把整个进程生命周期永久
+  // 打回「扫描占住事件循环」。冷却窗到点后允许重建，重建成功就该重新离线程。
+  const dir = makeTmp();
+  const workerFile = join(dir, "reviving-worker.mjs");
+  // 先放一个必然崩溃的 worker：顶层直接退出非 0 → 承载判定不可用。
+  writeFileSync(workerFile, "process.exit(1);\n", "utf8");
+  let fallbackCalls = 0;
+  const offload = createSessionScanOffload({
+    workerFile,
+    // 冷却窗压到 0：下一次扫描立刻允许重建（生产是 5 分钟）。
+    reviveCooldownMs: 0,
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => {
+        fallbackCalls += 1;
+        return { sessions: [], endpointErrors: [] };
+      },
+      scanAgent: () => [],
+    },
+  });
+  try {
+    const first = await offload.scanAll();
+    assert.deepEqual(first, { sessions: [], endpointErrors: [] });
+    assert.equal(fallbackCalls, 1, "第一次扫描走进程内兜底");
+    assert.equal(offload.stats().failures, 1);
+    // 修好 worker 模块：冷却窗已过，下一次扫描应当重建并真的走 worker。
+    writeFileSync(workerFile, `
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  parentPort.postMessage({ id: message?.id, ok: true, result: { sessions: [{ id: "from-worker" }], endpointErrors: [] } });
+});
+`, "utf8");
+    const second = await offload.scanAll();
+    assert.equal(second.sessions[0]?.id, "from-worker", "冷却窗过后必须重建 worker 并重新离线程");
+    assert.equal(fallbackCalls, 1, "重建成功后不该再走进程内兜底");
+    assert.equal(offload.stats().workerStarts, 2, "worker 应当被重建一次");
+  } finally {
+    offload.close();
+  }
+});
+
+test("scan offload: 冷却窗内不反复重建 worker（评审 F8 的另一半）", async () => {
+  const dir = makeTmp();
+  const workerFile = join(dir, "broken-worker.mjs");
+  writeFileSync(workerFile, "process.exit(1);\n", "utf8");
+  let fallbackCalls = 0;
+  const offload = createSessionScanOffload({
+    workerFile,
+    reviveCooldownMs: 60_000, // 一分钟内不许重建
+    logger: { warn: () => {} },
+    fallback: {
+      scanAll: () => {
+        fallbackCalls += 1;
+        return { sessions: [], endpointErrors: [] };
+      },
+      scanAgent: () => [],
+    },
+  });
+  try {
+    await offload.scanAll();
+    await offload.scanAll();
+    await offload.scanAll();
+    assert.equal(fallbackCalls, 3, "冷却窗内三次扫描都走进程内兜底");
+    assert.equal(offload.stats().workerStarts, 1, "冷却窗内只起过一次 worker（不每拍重建）");
+    assert.equal(offload.stats().degraded, true);
+  } finally {
+    offload.close();
+  }
 });
 
 test("loadMessages rejects files outside the endpoint roots", async () => {

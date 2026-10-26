@@ -52,7 +52,8 @@ import {
 import { APP_REPO_URL, SELF_UPDATE_CLIENT_ID, spawnSelfUpdateWorker } from "./app-self-update.mjs";
 import { readLocalHead as readLocalHeadDefault, readRemoteRefs as readRemoteRefsDefault, readRemoteHeadRelation as readRemoteHeadRelationDefault } from "./app-git-identity.mjs";
 import { compareVersions as compareVersionsDefault, parseVersion as parseVersionDefault } from "./version-check.mjs";
-import { scanAll as sessionScanAll, loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
+import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
+import { createSessionScanOffload } from "./session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
 import { probeTerminalCommandTree as defaultProbeTerminalCommandTree } from "./terminal-switch-guard.mjs";
 import {
@@ -107,6 +108,11 @@ const PANEL_HOST_EXIT_BACKSTOP_MS = 1_200;
 // background round refreshes. POST followAgent invalidates so the next GET
 // re-probes synchronously and never reports pre-toggle drift.
 const WATCHDOG_SNAPSHOT_TTL_MS = 30_000;
+
+// 会话列表快照的 TTL（见 createSessionsListSnapshot）。同样是 stale-while-
+// revalidate：TTL 内复用上一次全盘扫描结果，过期后先交旧值再后台补一拍。
+// 30s 远大于最坏扫描（实测 8s），所以正常使用下不会出现「扫描刚完又该扫了」。
+const SESSIONS_LIST_TTL_MS = 30_000;
 
 // 请求日志路由（/panel/api/stats/logs）的枚举与钳制口径：range 档位 → 含当天
 // 往前推的天数（all = 90 天 retention 窗口）；status 档位同时是 errKind 枚举
@@ -273,6 +279,78 @@ function createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, t
     // Kick the first probe round without waiting for it (panel-host calls
     // this at startup); the settled value becomes the initial snapshot.
     prewarm() { refresh().catch(() => {}); },
+  };
+}
+
+// 会话列表快照：GET /panel/api/sessions/list 是九家存档的全盘扫描（S2 实测
+// 2927 条会话 2.7–8.0s / 1.6MB 响应）。修前每个请求都重扫一遍，面板进程的
+// 事件循环被整段按住——终端字节流、SSE 握手、1s 轮询一起停摆。
+// 现在：{ at, value } 快照 + 短 TTL + 在飞去重 + 过期先返回旧值、后台补一拍。
+// TTL 取 30s 的理由：会话栏是粗粒度清单（列表本身不带 buffer，行只用于选一
+// 条去读/去删），而最坏扫描实测 8s——TTL 远大于扫描时长，不会背靠背排队重扫；
+// 本进程自己的删除会先就地摘掉对应行再置脏（见 dropRows），用户删完立刻看不
+// 到那行；别处新建/删除的会话最多晚 TTL 一拍出现，对「进终端页填左栏历史」
+// 这条唯一消费路径没有可感知代价。
+//
+// 用户显式要「现在刷一遍」（会话管理 tab 的刷新按钮）走 refresh()——那是唯一
+// 会等真扫描的入口，见列表路由的 ?refresh=1。这是 TTL 的逃生口：没有它，刷新
+// 按钮在窗口内就是个假动作（返回旧数据 + toast「已刷新」）。
+// 另一条改快照的通路是 dropRows（本进程刚删完行）。这里刻意不提供 invalidate
+// 式的「整份作废」入口：没有真实调用方，留着就是没人用也没人测的半截 API；
+// 需要「立刻与盘面对齐」就走 ?refresh=1，需要「摘掉某行」就走 dropRows。
+// （session-scan.mjs 的头注释只描述「怎么读盘」，缓存语义全在这里。）
+function createSessionsListSnapshot(load, ttlMs) {
+  const inFlight = { p: null };
+  let snap = null;
+  // 删除代际：dropRows 时 +1。refresh 起飞时记下代际，落地时代际已变说明期间
+  // 有删除——那份结果可能含刚删的行（删前扫的盘面），整份丢弃，绝不让已删的
+  // 行被写回快照。
+  let dropSeq = 0;
+
+  function refresh() {
+    if (inFlight.p) return inFlight.p;
+    const seqAtStart = dropSeq;
+    const round = (async () => {
+      try {
+        const value = await load();
+        // 代际不符＝扫描期间删过行：保持当前快照（它已摘掉那些行），只把值交给
+        // 调用方。冷缓存时 snap 仍为 null，下一次 get 会重扫。
+        if (seqAtStart === dropSeq) snap = { at: Date.now(), value };
+        return value;
+      } finally {
+        // 微任务延迟一拍再摘，避免「round 已落定但等待者还没读到」时的同步重扫。
+        await Promise.resolve();
+        inFlight.p = null;
+      }
+    })();
+    inFlight.p = round;
+    return round;
+  }
+
+  return {
+    // 冷缓存（本进程还没扫过）：只能等这一拍——没有旧值可交，列表不能凭空
+    // 空着。失败照实抛给路由（500），与修前一致。
+    // 有过结果：TTL 内直接复用；过期则交旧值、后台补一拍，请求绝不等刷新。
+    async get() {
+      if (!snap) return refresh();
+      if (Date.now() - snap.at < ttlMs) return snap.value;
+      refresh().catch(() => {});
+      return snap.value;
+    },
+    // 强制刷新：等真扫描落地再返回新值（在飞的扫描直接搭车，不重复扫）。
+    // 只给用户显式动作（刷新按钮）用，轮询路径不许走这里。
+    refresh,
+    // 本进程刚删掉的行就地摘掉（响应里立刻不再出现），并把快照置为过期：
+    // 下一拍请求先拿这份（已摘掉那行）的旧值，同时后台补一扫与盘面对齐。
+    // 没有快照时什么都不做——下一拍自然是冷扫。
+    dropRows(predicate) {
+      if (!snap || !Array.isArray(snap.value?.sessions)) return;
+      dropSeq += 1;
+      snap = {
+        at: 0,
+        value: { ...snap.value, sessions: snap.value.sessions.filter((session) => !predicate(session)) },
+      };
+    },
   };
 }
 
@@ -502,17 +580,10 @@ async function defaultRestartTerminalSession(id, body, { token } = {}) {
 }
 
 // 绑定捕获/复活兜底共用的单端点对话存档扫描：只扫该 agent 一家（全量 scanAll
-// 要读九家存档，列表轮询路径用不起）。扫描失败降级为空表——匹配层拿到空表
-// 自然判不出，按「宁可不接」回落。
-async function defaultScanAgentConversations(agentId) {
-  const adapter = sessionScanner.adapters.get(agentId);
-  if (!adapter) return [];
-  try {
-    return await adapter.scan();
-  } catch {
-    return [];
-  }
-}
+// 要读九家存档，列表轮询路径用不起）。名单外与读盘失败降级为空表的纪律在
+// session-scan 的 scanEndpoint 里（匹配层拿到空表自然判不出，按「宁可不接」
+// 回落）。真正的执行位置由扫描承载决定——见 createPanelRouter 里的 scanHost：
+// 默认进 worker 线程，面板进程不被这段同步 fs 扫描按住。
 
 // Terminal-host lifecycle pull: the relay (47821) owns the host child and
 // reports its state at /terminal-host/status (same pi-relay-token guard as
@@ -871,11 +942,30 @@ export function createPanelRouter({
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
    terminalBindingStore = null,
-   scanAgentConversationsFn = defaultScanAgentConversations,
+   // 单端点对话存档扫描（绑定捕获 / 复活兜底共用）。`null` = 走扫描承载
+   // （session-scan-worker.mjs：worker 线程里跑，面板进程零阻塞）；单测注入
+   // 假扫描函数时原地同步跑，不碰真存档、也不起 worker。
+   scanAgentConversationsFn = null,
+   // 扫描承载的 worker 模块（session-scan-worker.mjs）。默认 null＝用模块自带的
+   // 那一个（同文件既是主线程壳也是 worker 体）。给单测一个替换口：把「扫描」
+   // 换成忙等块，用来钉住「扫描不占面板事件循环」——修前这条会红。
+   sessionScanWorkerFile = null,
+   // 扫描承载的进程内兜底（worker 不可用那一拍）。默认 null＝真 session-scan
+   // 扫描真 home 存档；单测注入自己的假扫描，别让降级路径读真存档。
+   sessionScanFallback = null,
+   // 扫描承载降级后的冷却窗（毫秒）。默认 null＝模块默认 5 分钟；单测注入 0
+   // 验「冷却到点确实重建」，注入大值验「冷却窗内不重建」。
+   sessionScanReviveCooldownMs = null,
    // 终端会话栏的视图状态（归档清单 + 已移除分组目录清单，M7）：store 为 null 时
    // 按 relayRoot 惰性建真库，单测注入内存/临时文件库。
    terminalRailStore = null,
    bindingCaptureDebounceMs = 5000,
+   // 「判不出」的负结果退避：刚内切/新开的会话要等 agent 自己写出第一条存档，
+   // 扫描才会出现可匹配行。修前判不出就按 5s 一拍重扫（S1：这就是「每 5 秒卡
+   // 一次」的开关）。判不出一次后按 bindingCaptureMissBackoffMs 起步翻倍，
+   // 封顶 bindingCaptureMissMaxMs——仍然会自愈，但不再无限重扫。
+   bindingCaptureMissBackoffMs = 10_000,
+   bindingCaptureMissMaxMs = 60_000,
    bindingRefreshDelayMs = 10_000,
    bindingRefreshScheduleFn = (fn, ms) => {
      const timer = setTimeout(fn, ms);
@@ -930,6 +1020,9 @@ export function createPanelRouter({
   // Injectable for tests; `null` lazily binds the real module's exports on
   // the first sessions request.
   sessionScanService = null,
+  // 会话列表快照的 TTL（见 createSessionsListSnapshot）。注入给单测：0 = 每一拍
+  // 都视为过期（验「先返回旧值、后台刷新」），默认 30s。
+  sessionsListTtlMs = SESSIONS_LIST_TTL_MS,
   environmentService = null,
   releaseService = null,
   // 客户端更新的脱离进程。注入给测试；`null` 用真实的脱离拉起。
@@ -961,6 +1054,37 @@ export function createPanelRouter({
   // 已经建着的日志流必须当场按新级别走，不能等下次重启面板。它只读设置，不写。
   const logLevelGate = createLogLevelGate(settingsFile, base);
   const relayRoot = storePaths?.root ?? defaultStorePaths().root;
+  // 扫描承载（session-scan-worker.mjs）：session-scan 的九个 adapter 全是同步 fs，
+  // 在哪调用就在哪按住事件循环。这里把「九家全量」与「单端点」两种扫描都送进
+  // 独立 worker 线程；worker 不可用时退回本进程（面板仍出列表，只那一拍会卡），
+  // 降级路径在承载里按冷却窗收敛并记 warn。
+  // fallback 可注入（sessionScanFallback）：单测要钉「降级那一拍会卡住事件循环」
+  // 与「降级也不碰真 home 存档」时，注入自己的假扫描，别让测试去读真存档。
+  const scanHost = createSessionScanOffload({
+    ...(sessionScanWorkerFile ? { workerFile: sessionScanWorkerFile } : {}),
+    ...(sessionScanReviveCooldownMs === null ? {} : { reviveCooldownMs: sessionScanReviveCooldownMs }),
+    logger,
+    fallback: sessionScanFallback ?? {
+      scanAll: () => sessionScanner.scanAll(),
+      scanAgent: (agentId) => sessionScanner.scanEndpoint(agentId),
+    },
+  });
+  // 注入的假扫描函数（单测）原地同步跑——不碰真存档，也不起 worker；显式指定
+  // 了 worker 模块时一律走 worker（离线钉靠这条证明扫描不占事件循环）。
+  const scanAgentConversations = scanAgentConversationsFn && !sessionScanWorkerFile
+    ? scanAgentConversationsFn
+    : (agentId) => scanHost.scanAgent(agentId);
+  // 会话列表快照（短 TTL + 在飞去重 + 过期先返回旧值）。首次用到时才建，
+  // 装载函数指向最终绑定的 session-scan 服务（注入的或真模块）。
+  let sessionListSnapshot = null;
+  // 按「谁提供 scanAll」建快照：注入假服务的单测与真模块各走各的，且只建一次
+  // （快照一旦建好就一直服务这个 router 的列表路由）。
+  function sessionsListSnapshotFor(svc) {
+    if (!sessionListSnapshot) {
+      sessionListSnapshot = createSessionsListSnapshot(() => svc.scanAll(), sessionsListTtlMs);
+    }
+    return sessionListSnapshot;
+  }
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
   // answers instantly once a probe round has settled; POST followAgent invalidates.
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
@@ -1118,7 +1242,9 @@ export function createPanelRouter({
     // 绑定捕获只在控制面进程跑：relay 侧也挂着同一套路由器，绑定库只认
     // panel-host 一个写入方（页面本来就只由 47820 服务，relay 实际收不到
     // 这个轮询，这里把「实际」钉成「制度」）。
-    if (hostKind === "panel-host") captureTerminalConversationBindings(sessions);
+    // 捕获是旁路：先让列表响应落地，扫描调度排在当前 turn 之后（见
+    // scheduleBindingCapture）。修前这里是同步调用，扫描把这一拍整段按住。
+    if (hostKind === "panel-host") scheduleBindingCapture(sessions);
     const feed = await pulledDetectedProcesses(terminalPullToken());
     const detected = feed ? feed.processes : null;
     if (!detected || detected.length === 0) return sendJson(res, 200, { ok: true, sessions });
@@ -1201,8 +1327,34 @@ export function createPanelRouter({
   // 捕获防抖：同一会话两次扫描尝试的最小间隔。记的是「尝试」而非「成功」——
   // 扫描慢/空表同样占一拍，1s 轮询的列表路由才不会每拍都重扫一遍盘。
   const bindingCaptureLastAttempt = new Map(); // sessionId → ms
+  // 「判不出」的连续次数：判不出（空表 / 并列 / 目录不重叠）是常态而非异常，
+  // 刚内切或新开的会话要等 agent 自己写出第一条存档才会出现匹配行。这里按次数
+  // 指数退避（bindingCaptureMissBackoffMs 起步翻倍，封顶 bindingCaptureMissMaxMs），
+  // 判出即清——既保证迟早自愈，又不再「每 5s 重扫一遍全盘」。
+  const bindingCaptureMissStreak = new Map(); // sessionId → 连续判不出次数
   // 内切保终端 id：捕获扫描必须跟随最新一代身份，旧代返回不得覆盖新代。
   const terminalBindingGenerations = new Map(); // sessionId → 递增代际
+  // 同一 agent 的扫描在飞去重：一拍里有多条同 agent 未绑定会话（或内切后连着
+  // 几拍）时共用一次扫描，别让 N 条会话排队扫 N 遍盘。
+  const agentScanInFlight = new Map(); // agentId → Promise<SessionMeta[]>
+
+  // 单端点扫描的去重壳：同一 agent 已有扫描在飞就搭同一趟车。失败降级为空表
+  // （匹配层拿到空表自然判不出，按「宁可不接」回落）。
+  function scanAgentConversationsShared(agentId) {
+    const running = agentScanInFlight.get(agentId);
+    if (running) return running;
+    const round = Promise.resolve()
+      .then(() => scanAgentConversations(agentId))
+      .catch(() => [])
+      .finally(() => {
+        // 微任务延后一拍再摘：同一 tick 里后到的会话仍能搭上这趟扫描。
+        Promise.resolve().then(() => {
+          if (agentScanInFlight.get(agentId) === round) agentScanInFlight.delete(agentId);
+        });
+      });
+    agentScanInFlight.set(agentId, round);
+    return round;
+  }
 
   // 列表路由的异步旁路：给「未绑定且 running 的可续会 agent 会话」补绑定，
   // 顺手清掉会话已消失的孤儿绑定。绝不阻塞、绝不让列表请求失败——全部
@@ -1221,6 +1373,9 @@ export function createPanelRouter({
     for (const sessionId of [...bindingCaptureLastAttempt.keys()]) {
       if (!keepIds.has(sessionId)) bindingCaptureLastAttempt.delete(sessionId);
     }
+    for (const sessionId of [...bindingCaptureMissStreak.keys()]) {
+      if (!keepIds.has(sessionId)) bindingCaptureMissStreak.delete(sessionId);
+    }
     for (const sessionId of [...terminalBindingGenerations.keys()]) {
       if (!keepIds.has(sessionId)) terminalBindingGenerations.delete(sessionId);
     }
@@ -1229,13 +1384,17 @@ export function createPanelRouter({
       if (!session || typeof session.id !== "string" || session.id === "") continue;
       if (session.status !== "running" || !RESUMABLE_AGENTS.has(session.agentId)) continue;
       if (store.get(session.id)) continue;
+      // 判不出过一次就按退避窗等：首次仍是 bindingCaptureDebounceMs。
+      const misses = bindingCaptureMissStreak.get(session.id) ?? 0;
+      const backoff = misses === 0
+        ? bindingCaptureDebounceMs
+        : Math.min(bindingCaptureMissBackoffMs * 2 ** (misses - 1), bindingCaptureMissMaxMs);
       const lastAttempt = bindingCaptureLastAttempt.get(session.id) ?? 0;
-      if (now - lastAttempt < bindingCaptureDebounceMs) continue;
+      if (now - lastAttempt < backoff) continue;
       const generation = terminalBindingGenerations.get(session.id) ?? 0;
       const captured = { agentId: session.agentId, cwd: session.cwd };
       bindingCaptureLastAttempt.set(session.id, now);
-      Promise.resolve()
-        .then(() => scanAgentConversationsFn(session.agentId))
+      scanAgentConversationsShared(session.agentId)
         .then((metas) => {
           // 内切保 id，createdAt 不能代表本轮新对话的起点。以最近一次进程
           // 出生为界；扫描返回时身份/目录/代际已变即整份结果作废，防跨代抢绑。
@@ -1246,13 +1405,32 @@ export function createPanelRouter({
             createdAt: session.spawnedAt ?? session.createdAt ?? null,
             lastActiveAt: null,
           });
+          if (!picked) {
+            // 判不出＝负结果入表，下一拍按退避窗等（而不是 5s 后重扫一遍全盘）。
+            bindingCaptureMissStreak.set(session.id, misses + 1);
+            return;
+          }
+          bindingCaptureMissStreak.delete(session.id);
           // 扫描期间可能已被兜底路径绑上：已有绑定不覆盖。
-          if (picked && !store.get(session.id)) {
+          if (!store.get(session.id)) {
             store.set(session.id, bindingFromMeta(picked, { agentId: session.agentId, cwd: session.cwd }, "bound"));
           }
         })
         .catch(() => {});
     }
+  }
+
+  // 列表路由的调用口：把整段捕获（含 prune 与扫描调度）挪到当前 turn 之后，
+  // 列表响应先落地。修前这里是同步调用，绑定扫描的微任务就排在响应之前——
+  // 扫描 2.7–8s，同一时刻到达的 /input 与 SSE 握手全被推迟（S1 实测 4325ms）。
+  function scheduleBindingCapture(sessions) {
+    setImmediate(() => {
+      try {
+        captureTerminalConversationBindings(sessions);
+      } catch {
+        // 捕获是旁路，任何失败都不许冒泡到列表路由之外。
+      }
+    });
   }
 
   // 复活要追加的 resume 参数。三级判定：绑定在且存档还在 → 按绑定；绑定没有
@@ -1265,7 +1443,7 @@ export function createPanelRouter({
     const identity = { agentId: session.agentId, cwd: session.cwd };
     let metas = null;
     try {
-      metas = await scanAgentConversationsFn(session.agentId);
+      metas = await scanAgentConversations(session.agentId);
     } catch {
       metas = null;
     }
@@ -1301,7 +1479,7 @@ export function createPanelRouter({
   function scheduleBindingRefresh(session, sinceMs) {
     bindingRefreshScheduleFn(() => {
       Promise.resolve()
-        .then(() => scanAgentConversationsFn(session.agentId))
+        .then(() => scanAgentConversationsShared(session.agentId))
         .then((metas) => {
           const picked = pickRefreshedMeta(metas, { agentId: session.agentId, cwd: session.cwd, sinceMs });
           if (!picked) return;
@@ -1457,7 +1635,14 @@ export function createPanelRouter({
     // 每次切换都开启新代：在飞的旧代扫描不得把上一段身份绑回来。全新内切
     // 还须清旧对话绑定，否则复活会接回旧会话；历史续接的既有绑定语义不变。
     terminalBindingGenerations.set(session.id, (terminalBindingGenerations.get(session.id) ?? 0) + 1);
-    if (resume === null) terminalBindings().delete(session.id);
+    if (resume === null) {
+      terminalBindings().delete(session.id);
+      // 全新内切＝同一终端 id 换了新对话，上一代累计的「判不出」退避必须一起
+      // 清掉：否则新对话要等旧代攒到的 40–60s 退避走完才尝试第一次捕获（修前
+      // 是 5s）。这正是 S1 的现场——用户点完 ⊕ 想打字，却卡在等绑定上。
+      bindingCaptureMissStreak.delete(session.id);
+      bindingCaptureLastAttempt.delete(session.id);
+    }
     // 换绑自愈：延迟重扫目标目录下「切换时刻之后唯一活跃」的存档——有的 agent
     // resume 会另起新对话存档，届时把绑定改到新 id；判不出维持原绑定。传的是新
     // 身份（endpoint＋目标 cwd），不是宿主记录里的旧归属——空白壳那一栏根本没有
@@ -3860,7 +4045,9 @@ export function createPanelRouter({
     if (path.startsWith("/panel/api/sessions/")) {
       if (!sessionScanService) {
         sessionScanService = {
-          scanAll: sessionScanAll,
+          // 列表扫描走扫描承载（worker 线程）：修前这里直接绑 session-scan 的
+          // scanAll，九个 adapter 的同步 fs 全跑在面板进程的事件循环上。
+          scanAll: () => scanHost.scanAll(),
           loadMessages: sessionLoadMessages,
           deleteSessions: sessionDeleteSessions,
         };
@@ -3868,10 +4055,17 @@ export function createPanelRouter({
       const svc = sessionScanService;
 
       if (path === "/panel/api/sessions/list" && method === "GET") {
+        // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，单 adapter 失败
+        // 降级进 endpointErrors，路由原样透传。
+        // 但这一拍不再每次都扫盘：见 createSessionsListSnapshot——TTL 内复用上次
+        // 结果，过期后先返回旧值、后台补一拍，请求绝不等刷新（冷缓存那一拍除外，
+        // 没有旧值可交）。扫描本身在 worker 线程里跑，不占本进程事件循环。
+        // ?refresh=1 是 TTL 的逃生口：会话管理 tab 的刷新按钮用它，等真扫描落地
+        // 再回新值——否则按钮在窗口内就是「返回旧数据 + toast 已刷新」的假动作。
         try {
-          // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，
-          // 单 adapter 失败降级进 endpointErrors，路由原样透传。
-          return sendJson(res, 200, await svc.scanAll());
+          const snapshot = sessionsListSnapshotFor(svc);
+          const forced = url.searchParams.get("refresh") === "1";
+          return sendJson(res, 200, forced ? await snapshot.refresh() : await snapshot.get());
         } catch (err) {
           return sendJson(res, 500, { ok: false, error: err.message });
         }
@@ -3903,6 +4097,10 @@ export function createPanelRouter({
             return sendJson(res, 400, { ok: false, error: "items must be a non-empty array of { endpoint, file }" });
           }
           const result = await svc.deleteSessions(body.items);
+          // 删掉的行就地摘出快照：用户刚删完再看列表不该还看到它，也不必为
+          // 此把整份快照作废（下一拍后台刷新会与盘面对齐）。
+          const goneFiles = new Set((result?.ok ?? []).map((entry) => entry?.file ?? entry));
+          sessionListSnapshot?.dropRows((session) => goneFiles.has(session?.file));
           // 响应契约：逐项成败，ok/fail 是数组（不是外层布尔包装）。
           return sendJson(res, 200, {
             ok: result?.ok ?? [],

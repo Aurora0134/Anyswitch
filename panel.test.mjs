@@ -1,7 +1,7 @@
 import test, { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
-import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, appendFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12549,7 +12549,283 @@ describe("终端会话绑定捕获（列表路由异步扫描）", () => {
     assert.equal(kimiScans, 1, "同一未绑定会话在防抖窗内只扫一拍");
   });
 
-  it("扫描判不出（并列）则不绑定，下轮列表还可再试", async () => {
+  // 回归钉（M1）：列表路由里的绑定捕获扫描不许占住面板的事件循环。S1 取证实测
+  // 修前 dsh 全盘扫描 2.7–4.3s，期间 setTimeout(1) 链一次都没触发、并发的
+  // /input 从 25ms 变 4325ms——用户主观就是「点完组头 ⊕ 打字要等 5 秒」。
+  // 装置三件（评审 F5 加严）：
+  //   ① 忙等 300ms、采样窗 600ms（≥2×）——推迟 300ms 才发生的阻塞也在窗内；
+  //   ② 同时连打并发请求（/panel/api/agents），断言单条时延没被推迟，不只测
+  //      「事件循环有空拍」；
+  //   ③ 注入自己的进程内兜底（sessionScanFallback），不让降级路径去读真 home。
+  it("忙等扫描在飞时面板事件循环与并发请求都不被推迟（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-blocking-root-");
+    const cwd = mkTestDir("anyswitch-capture-blocking-cwd-");
+    const now = Date.now();
+    const BUSY_MS = 300;
+    const WINDOW_MS = 600; // ≥2× 忙等时长：推迟发生的阻塞也逃不出采样窗
+    // 临时扫描 worker：忙等后回空表（判不出 → 不写绑定，正好只测阻塞）。
+    const workerFile = join(root, "blocking-scan-worker.mjs");
+    const workerMarker = join(root, "worker-ran.txt");
+    const fallbackMarker = join(root, "fallback-ran.txt");
+    writeFileSync(workerFile, `
+import { appendFileSync } from "node:fs";
+import { parentPort } from "node:worker_threads";
+parentPort.on("message", (message) => {
+  appendFileSync(${JSON.stringify(workerMarker)}, "x");
+  const started = Date.now();
+  while (Date.now() - started < ${BUSY_MS}) { /* 模拟同步 fs 全盘扫描 */ }
+  const result = message?.kind === "agent" ? [] : { sessions: [], endpointErrors: [] };
+  parentPort.postMessage({ id: message?.id, ok: true, result });
+});
+`);
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "ab12cd34", label: "k", cwd, shell: "cmd", pid: 7, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      sessionScanWorkerFile: workerFile,
+      // 进程内兜底：同款忙等。worker 真起不来时跑的就是它，所以这条钉子在任何
+      // 降级路径下都不会去碰真 home 存档（承载默认兜底是真 session-scan）。
+      // 它落自己的标记，用来断言「这次没走降级」。
+      sessionScanFallback: {
+        scanAll: () => {
+          appendFileSync(fallbackMarker, "x");
+          return { sessions: [], endpointErrors: [] };
+        },
+        scanAgent: () => {
+          appendFileSync(fallbackMarker, "x");
+          const busyUntil = Date.now() + BUSY_MS;
+          while (Date.now() < busyUntil) { /* 同步全盘扫描的替身 */ }
+          return [];
+        },
+      },
+    });
+    // 列表请求触发一次绑定捕获扫描；不等它落地就开始采样。
+    const list = fakeReqRes("/panel/api/terminal/sessions", "GET");
+    const listDone = router.handle(list.req, list.res);
+    const started = Date.now();
+    let worstGap = 0;
+    let last = Date.now();
+    let ticks = 0;
+    const concurrent = [];
+    // 并发探测按**时间**调度（每 40ms 一条），不按拍数——Windows 上 setTimeout(5)
+    // 实际按 ~16ms 粒度落，600ms 窗只有 ~38 拍，按拍数取模会少发几条。
+    let nextProbeAt = 40;
+    while (Date.now() - started < WINDOW_MS) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const nowTick = Date.now();
+      worstGap = Math.max(worstGap, nowTick - last - 5);
+      last = nowTick;
+      ticks += 1;
+      // /panel/api/agents 是最轻的一条真路由：relay 拉取已注入为 null，不发网络，
+      // 量到的纯粹是「本进程还有没有空处理请求」。
+      if (nowTick - started >= nextProbeAt) {
+        nextProbeAt += 40;
+        const probe = fakeReqRes("/panel/api/agents", "GET");
+        const probeStart = Date.now();
+        concurrent.push(
+          router.handle(probe.req, probe.res).then(() => ({ ms: Date.now() - probeStart, status: probe.res.statusCode })),
+        );
+      }
+    }
+    const probes = await Promise.all(concurrent);
+    await listDone;
+    // 等这一趟扫描真的跑完（任一标记出现），再收口断言——否则时延断言会空过。
+    const deadline = Date.now() + 3000;
+    while (!existsSync(workerMarker) && !existsSync(fallbackMarker) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(existsSync(workerMarker) || existsSync(fallbackMarker),
+      "扫描压根没跑起来——这条钉子会空过，必须先修装置");
+    // 拍数只是「装置真的跑了」的下限，不是判据：Windows 定时器粒度 ~16ms，
+    // 600ms 窗空闲也只有 ~38 拍，而进程内阻塞 300ms 时仍有 ~20 拍——两者重叠，
+    // 拿它当健康线会误红。真正的判据是下面两条「被按住多久」。
+    assert.ok(ticks >= 12, `采样窗几乎没跑（${ticks} 拍），装置本身有问题`);
+    assert.ok(worstGap < 150, `事件循环被扫描按住 ${worstGap}ms（修前 ≈ 整段扫描时长）`);
+    assert.ok(probes.length >= 8, `并发请求发得太少（${probes.length} 条），断言不成立`);
+    const worstProbe = Math.max(...probes.map((p) => p.ms));
+    assert.ok(worstProbe < 150, `并发请求被扫描推迟到 ${worstProbe}ms（修前实测 4325ms）`);
+    // 再断言「走的是 worker」：进程内兜底也过得了上面两条（它就是本进程忙等），
+    // 所以这一条把「有没有真的离线程」钉死。
+    assert.ok(!existsSync(fallbackMarker), "扫描没走 worker 而是走了进程内兜底——这一拍其实仍在占事件循环");
+  });
+
+  // 回归钉（M1）：判不出要退避，不能每 5s 重扫一遍全盘。刚内切/新开的会话在
+  // agent 写出第一条存档前，扫描必然判不出——修前是「判不出就 5s 后再扫」，
+  // 于是用户打字的那段时间里，面板每 5s 被按住 1.5–4.6s（S1 §3.2⑦）。
+  it("判不出后按退避窗等，不再每拍重扫（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-backoff-root-");
+    const cwd = mkTestDir("anyswitch-capture-backoff-cwd-");
+    const now = Date.now();
+    let scans = 0;
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "t-miss", label: "k", cwd, shell: "cmd", pid: 8, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      scanAgentConversationsFn: async () => {
+        scans += 1;
+        return []; // 一直判不出（新会话还没写存档）
+      },
+      // 防抖窗压到 1ms：修前＝每次列表都重扫；修后＝判不出一次就进退避。
+      bindingCaptureDebounceMs: 1,
+    });
+    for (let round = 0; round < 4; round += 1) {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      await flushAsyncSideEffects();
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    assert.equal(scans, 1, `判不出后仍在重扫（扫了 ${scans} 次）——这就是每 5s 卡一次的开关`);
+  });
+
+  // 回归钉（M1，评审 F4）：退避必须是**有界**退避，不能退化成「永不再试」。
+  // 没有这条钉时，把 bindingCaptureMissMaxMs 改成 Infinity（判不出＝永久放弃
+  // 绑定）三套测试全绿——「新开的会话会不会永远绑不上」正好落在那个盲区里。
+  // 这里把退避压到几十毫秒，先让扫描判不出、再让它能判出，断言退避窗过后确实
+  // 又扫了一次并写上了绑定。任何「不重试」的实现都会红。
+  it("判不出退避是有界的：窗口过后会再扫，并把绑定写上（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-heal-root-");
+    const cwd = mkTestDir("anyswitch-capture-heal-cwd-");
+    const now = Date.now();
+    let scans = 0;
+    let matchable = false;
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "t-heal", label: "k", cwd, shell: "cmd", pid: 11, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      scanAgentConversationsFn: async () => {
+        scans += 1;
+        if (!matchable) return []; // 前几拍：新会话还没写出存档
+        return [{ endpoint: "kimi", id: "conv-heal", project: cwd, createdAt: now - 30_000, lastActive: now }];
+      },
+      bindingCaptureDebounceMs: 1,
+      bindingCaptureMissBackoffMs: 20,
+      bindingCaptureMissMaxMs: 40,
+    });
+    const listOnce = async () => {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      await flushAsyncSideEffects();
+    };
+    // 前两拍：判不出 → 进退避窗。
+    await listOnce();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await listOnce();
+    assert.equal(readTerminalBindings(root), null, "判不出时不该写绑定");
+    const scansBeforeHeal = scans;
+    assert.ok(scansBeforeHeal >= 2, `判不出后应该还会再试（当前 ${scansBeforeHeal} 次）`);
+    // 存档出现了：退避窗（≤40ms）过后必须再扫一次并绑上。
+    matchable = true;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await listOnce();
+    const bindings = readTerminalBindings(root);
+    assert.ok(scans > scansBeforeHeal, "退避窗过后没有重扫——退避退成了「永不再试」");
+    assert.equal(bindings?.["t-heal"]?.conversationId, "conv-heal", "自愈重扫后绑定必须写上");
+  });
+
+  // 回归钉（M1，评审 F4 第二半）：退避不仅要会重试，还得**有上限**。只断言
+  // 「重试过一次」的话，把上限拆掉（`Math.min(…)` 变成无界翻倍）仍然会绿——
+  // 而生产上 base 是 10s，无界翻倍几次就等于「这个进程里再也不试了」。
+  // 这里用 20ms 起步 / 40ms 封顶，在 500ms 窗口里数「判不出的重扫次数」：
+  // 有上限时约 12 拍，无界翻倍只有 5 拍（20/40/80/160/320 递增）。
+  it("判不出退避有上限：封顶后按固定节奏重试（回归钉）", async () => {
+    const root = mkTestDir("anyswitch-capture-cap-root-");
+    const cwd = mkTestDir("anyswitch-capture-cap-cwd-");
+    const now = Date.now();
+    let scans = 0;
+    const router = createPanelRouter({
+      storePaths: { root },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "t-cap", label: "k", cwd, shell: "cmd", pid: 13, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      scanAgentConversationsFn: async () => {
+        scans += 1;
+        return []; // 一直判不出，逼退避一路涨到封顶
+      },
+      bindingCaptureDebounceMs: 1,
+      bindingCaptureMissBackoffMs: 20,
+      bindingCaptureMissMaxMs: 40,
+    });
+    const deadline = Date.now() + 500;
+    while (Date.now() < deadline) {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      await flushAsyncSideEffects();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    // 有上限：20→40→40→40… 500ms 内约 12 拍；无界翻倍只有 5 拍。
+    assert.ok(scans >= 8, `500ms 内只重扫了 ${scans} 次——退避没有封顶（无界翻倍约 5 拍）`);
+  });
+
+  // 回归钉（M1，评审 F3）：内切＝同一终端 id 换新对话，上一代累计的退避必须
+  // 一起清掉。否则新对话要等旧代攒到的 40–60s 退避走完才尝试第一次捕获
+  // （修前是 5s），正好是 S1 的现场。
+  it("内切（resume 为空）清掉该会话的退避与防抖，新对话立刻可再捕获", async () => {
+    const root = mkTestDir("anyswitch-capture-switch-root-");
+    const cwd = mkTestDir("anyswitch-capture-switch-cwd-");
+    const now = Date.now();
+    const scans = [];
+    let matchable = false;
+    const router = createPanelRouter({
+      storePaths: { root },
+      base: { ...process.env },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [
+        { id: "5e55d001", label: "k", cwd, shell: "cmd", pid: 12, status: "running", agentId: "kimi", createdAt: now - 60_000, lastActiveAt: now },
+      ],
+      fetchTerminalSessionFn: async (id) => ({ id, status: "running", agentId: "kimi", cwd, pid: 12, createdAt: now - 60_000 }),
+      probeTerminalCommandTreeFn: async () => false,
+      restartTerminalSessionFn: async (id, body) => {
+        scans.push({ id, body });
+        return { status: 200, body: { id, status: "running", pid: 4242 } };
+      },
+      scanAgentConversationsFn: async () => {
+        if (!matchable) return [];
+        return [{ endpoint: "kimi", id: "conv-new", project: cwd, createdAt: now - 10_000, lastActive: now }];
+      },
+      bindingCaptureDebounceMs: 1,
+      // 退避封顶拉长到 1 小时：不清表的话，新对话这一拍必然被挡住。
+      bindingCaptureMissBackoffMs: 3_600_000,
+      bindingCaptureMissMaxMs: 3_600_000,
+    });
+    const listOnce = async () => {
+      const { req, res } = fakeReqRes("/panel/api/terminal/sessions", "GET");
+      await router.handle(req, res);
+      await flushAsyncSideEffects();
+    };
+    // 先判不出一次 → 该会话进入 1 小时退避。
+    await listOnce();
+    assert.equal(readTerminalBindings(root), null);
+    // 内切（body 无 resume）＝全新对话。
+    const switched = fakeReqRes("/panel/api/terminal/sessions/5e55d001/switch", "POST", { agentId: "kimi", cwd });
+    await router.handle(switched.req, switched.res);
+    assert.equal(switched.res.statusCode, 200);
+    assert.equal(scans.length, 1, "内切应当转到宿主重开");
+    // 新对话能写出存档了：列表这一拍就该重新捕获（退避已被清掉）。
+    matchable = true;
+    await listOnce();
+    const bindings = readTerminalBindings(root);
+    assert.equal(bindings?.["5e55d001"]?.conversationId, "conv-new",
+      "内切后没清退避：新对话被上一代的退避窗挡住了（修前是 5s 就能再试）");
+  });
+
+  it("扫描判不出（并列）则不绑定，退避窗内不重扫", async () => {
     const root = mkTestDir("anyswitch-capture-tie-root-");
     const cwd = mkTestDir("anyswitch-capture-tie-cwd-");
     const now = Date.now();
