@@ -685,7 +685,7 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
     };
     const factory = new Function(
       "api", "sessState", "renderSessList", "renderSessErrBanner", "renderSessDetail",
-      "updateSessBatchBar", "toast", "panelError",
+      "updateSessBatchBar", "toast", "panelError", "$", "setSessSessions", "currentView",
       `
       let sessListReqSeq = 0;
       ${extractFn("refreshSessionsList")}
@@ -701,6 +701,9 @@ describe("T7 刷新会话列表：显式刷新带 ?refresh=1", () => {
       () => {},
       (msg) => { seen.toast.push(msg); },
       (err, fallback) => fallback,
+      () => null,
+      (list) => { state.sessions = list; },
+      "terminal",
     );
     return { run, seen, state, calls, seqOf: () => seq };
   }
