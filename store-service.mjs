@@ -29,7 +29,7 @@ import {
 } from "./store-io.mjs";
 import { protect as defaultProtect, unprotect as defaultUnprotect } from "./dpapi.mjs";
 import { atomicWriteFile as defaultAtomicWriteFile } from "./atomic-write.mjs";
-import { MAX_CHAIN_NODES, ROUTING_ENDPOINT_IDS, VIRTUAL_MODEL_ID, VIRTUAL_MODEL_MAX } from "./store-schema.mjs";
+import { MAX_CHAIN_NODES, RESERVED_VIRTUAL_MODEL_NAMES, ROUTING_ENDPOINT_IDS, VIRTUAL_MODEL_ID, VIRTUAL_MODEL_MAX } from "./store-schema.mjs";
 import { chainNodeExists, chainNodeKey } from "./chain-routing.mjs";
 import {
   buildV2AddEntry,
@@ -1225,12 +1225,14 @@ export function createStoreService({
      */
     async saveVirtualModel(name, chain, previousName) {
       if (typeof name !== "string" || !VIRTUAL_MODEL_ID.test(name)) {
-        return { ok: false, error: "虚拟模型名必须以小写字母开头，只能使用小写字母、数字与 . _ -" };
+        return { ok: false, error: "虚拟模型名必须以字母开头，只能使用字母、数字与 . _ -" };
       }
       if (name.length > VIRTUAL_MODEL_MAX) {
         return { ok: false, error: `虚拟模型名最多 ${VIRTUAL_MODEL_MAX} 个字符` };
       }
-      if (name === "auto" || ROUTING_ENDPOINT_IDS.includes(name)) {
+      // 保留名不区分大小写（名单成员全小写）：auto 是链路由触发词、端点 id 是
+      // 路由键，"Auto" 这类仿名变体一并拦下。
+      if (RESERVED_VIRTUAL_MODEL_NAMES.has(name.toLowerCase())) {
         return { ok: false, error: `"${name}" 是保留名（自动路由与端点 id），虚拟模型不能用` };
       }
       if (previousName !== undefined && (typeof previousName !== "string" || previousName.length === 0)) {
@@ -1267,6 +1269,18 @@ export function createStoreService({
           return { ok: false, error: `虚拟模型名 "${name}" 已被占用` };
         }
         target = source;
+      }
+      // 仅大小写不同的名字一律视为占用（schema 的 case-dup 校验同口径）：新建或改名
+      // 撞上都拦在写盘前，免得 writeStore 的整体校验以英文报错拒绝整次写入。精确
+      // 同名不算冲突——upsert 是合法替换，改名的精确撞名已在上面单独拦过。
+      const clash = list.findIndex((vm) => {
+        if (!vm || typeof vm.name !== "string") return false;
+        if (vm.name === name) return false;
+        if (renaming && vm.name === previousName) return false;
+        return vm.name.toLowerCase() === name.toLowerCase();
+      });
+      if (clash >= 0) {
+        return { ok: false, error: `虚拟模型名 "${name}" 与已有的 "${list[clash].name}" 仅大小写不同` };
       }
       const prevEnabled = target >= 0 ? list[target].enabled : undefined;
       const entry = {

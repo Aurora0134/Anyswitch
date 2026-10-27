@@ -16268,8 +16268,8 @@ async function api(method, path, body) {
     // 名字输入框：新建与编辑同一形态（可编辑）。编辑流的初值就是当前名，
     // 改名与改链一起在保存时提交，改名前过一次确认。
     const nameRow = isVirtual
-      ? `<div class="store-form-row virtual-add-row"><label class="store-form-label">模型名（小写字母、数字、. _ -；改名后旧名字立即失效）</label>
-          <input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(vmName)}" placeholder="如 deepseek-pro" autocomplete="off" spellcheck="false"></div>`
+      ? `<div class="store-form-row virtual-add-row"><label class="store-form-label">模型名（字母、数字、. _ -；改名后旧名字立即失效）</label>
+          <input class="store-form-input" id="virtualModelNameInput" value="${escapeHtml(vmName)}" placeholder="如 DeepSeek-Pro" autocomplete="off" spellcheck="false"></div>`
       : "";
     $("routeChainBody").innerHTML = `
       ${nameRow}
@@ -16525,22 +16525,28 @@ async function api(method, path, body) {
     }
   }
 
-  // 虚拟模型名与 store 渠道 id 同字符集（store-schema PROVIDER_ID 口径）：
-  // 小写字母开头，小写字母/数字/. _ - 组成；它同时充当链查找键与客户端模型 id。
+  // 虚拟模型名字符集（store-schema VIRTUAL_MODEL_ID 口径）：字母开头（大小写均可），
+  // 其余为字母/数字/. _ -；它同时充当链查找键与客户端模型 id。占用判定不区分大小写
+  // ——仅大小写不同的两个名字会互相顶掉对外 id，与保存入口同口径拦在写盘前。
   // 名字取自草稿（编辑流打开即填入当前名），故编辑已有虚拟模型时不会误报缺名。
   function virtualModelNameError() {
     const name = virtualModelNameValue();
     if (!name) return "请填写模型名";
-    if (!/^[a-z][a-z0-9._-]*$/.test(name)) return "模型名格式不对：小写字母开头，只能含小写字母、数字、. _ -";
+    if (!/^[A-Za-z][A-Za-z0-9._-]*$/.test(name)) return "模型名格式不对：字母开头，只能含字母、数字、. _ -";
     if (name.length > 64) return "模型名最长 64 字符";
     if (routeChainDraft.some((it) => it.model === name)) {
       return `模型名不能与链内模型重名（${name}）`;
     }
-    // 占用校验：与别的虚拟模型同名一律拦在保存之前——新建撞名会静默换掉那条模型的链，
-    // 改名撞名会顶掉别人的对外 id。编辑流按目标 id 排除自己。
+    // 占用校验：与别的虚拟模型同名（或仅大小写不同）一律拦在保存之前——新建撞名
+    // 会静默换掉那条模型的链，改名撞名会顶掉别人的对外 id。编辑流按目标 id 排除自己。
     const self = virtualModelCreating ? null : routeChainTarget.id;
-    if (storeVirtualModels().some((v) => v && v.name === name && v.name !== self)) {
-      return `这个名字已被占用：${name}`;
+    const taken = storeVirtualModels().find(
+      (v) => v && v.name !== self && v.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (taken) {
+      return taken.name === name
+        ? `这个名字已被占用：${name}`
+        : `这个名字与已有的 ${taken.name} 仅大小写不同`;
     }
     return null;
   }

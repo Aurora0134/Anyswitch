@@ -1803,16 +1803,37 @@ describe("store-service virtualModels（虚拟模型）", () => {
     assert.deepEqual(readStore(paths).store.virtualModels.map((v) => v.name), ["vm-a"], "拒了就不写盘");
   });
 
-  it("saveVirtualModel 拒绝非法名字：大写开头/超长/auto/端点 id", async () => {
+  it("saveVirtualModel 名字规则：非字母开头/超长/保留名（含大小写变体）拒；混合大小写放行且落盘", async () => {
     const paths = makeRoot();
     vmSeed(paths);
     const svc = makeService(paths);
     const chain = [{ node: "prov-a", model: "m1" }];
-    assert.match((await svc.saveVirtualModel("MyChain", chain)).error, /小写字母开头/);
+    assert.match((await svc.saveVirtualModel("9chain", chain)).error, /字母开头/);
+    assert.match((await svc.saveVirtualModel("_chain", chain)).error, /字母开头/);
     assert.match((await svc.saveVirtualModel("x".repeat(65), chain)).error, new RegExp(`${64}`));
     assert.match((await svc.saveVirtualModel("auto", chain)).error, /保留名/);
     assert.match((await svc.saveVirtualModel("claude", chain)).error, /保留名/);
+    assert.match((await svc.saveVirtualModel("Auto", chain)).error, /保留名/, "保留名大小写变体一并拒");
     assert.equal(readStore(paths).store.virtualModels, undefined, "全拒，不落盘");
+    assert.equal((await svc.saveVirtualModel("MyChain", chain)).ok, true, "混合大小写名字放行");
+    assert.deepEqual(readStore(paths).store.virtualModels, [{ name: "MyChain", chain }], "落盘保留原大小写");
+  });
+
+  it("saveVirtualModel 仅大小写不同的名字视为占用：新建与改名都拦；改成自己的大小写变体放行", async () => {
+    const paths = makeRoot();
+    vmSeed(paths);
+    const svc = makeService(paths);
+    await svc.saveVirtualModel("vm-a", [{ node: "prov-a", model: "m1" }]);
+    await svc.saveVirtualModel("vm-b", [{ node: "prov-b", model: "m2" }]);
+    const chain = [{ node: "prov-c", model: "m4" }];
+    assert.match((await svc.saveVirtualModel("VM-A", chain)).error, /仅大小写不同/, "新建撞大小写变体拦下");
+    assert.match((await svc.saveVirtualModel("VM-A", chain, "vm-b")).error, /仅大小写不同/, "改名的目标撞大小写变体拦下");
+    assert.equal((await svc.saveVirtualModel("Vm-B", chain, "vm-b")).ok, true, "改成自己的大小写变体放行（原位换名）");
+    assert.deepEqual(
+      readStore(paths).store.virtualModels.map((v) => v.name),
+      ["vm-a", "Vm-B"],
+      "拒的不落盘、成的原位换名",
+    );
   });
 
   it("saveVirtualModel 拒绝坏链：空链/超 8 节点/节点不存在/同节点同模型重复", async () => {

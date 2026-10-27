@@ -2574,12 +2574,13 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
     assert.ok(panelJs.includes('"/api/store/virtual-model/enabled"'), "enabled endpoint wired");
   });
 
-  it("虚拟模型名称校验：小写字母开头 + 字符集 + 长度上限，不得与链内模型重名，也不得占用别的虚拟模型名", () => {
+  it("虚拟模型名称校验：字母开头（大小写均可）+ 字符集 + 长度上限，不得与链内模型重名，也不得占用别的虚拟模型名（含仅大小写不同）", () => {
     const m = panelJs.match(/function virtualModelNameError\(\) \{[\s\S]*?\n  \}/);
     assert.ok(m, "name validator exists");
-    assert.ok(m[0].includes('^[a-z][a-z0-9._-]*$'), "charset anchored to store PROVIDER_ID shape");
+    assert.ok(m[0].includes('^[A-Za-z][A-Za-z0-9._-]*$'), "charset: letter start, mixed case allowed (store VIRTUAL_MODEL_ID 口径)");
     assert.ok(m[0].includes("模型名不能与链内模型重名"), "chain-internal collision rejected");
     assert.ok(m[0].includes("这个名字已被占用"), "other virtual models' names rejected");
+    assert.ok(m[0].includes("仅大小写不同"), "case-variant of an existing name rejected");
   });
 
   it("编辑已有虚拟模型：名字取自当前名，校验放行（回归：曾误报「请填写模型名」）", () => {
@@ -2603,7 +2604,9 @@ describe("panel.html 自动路由卡片启用开关 + agentUsingAutoRoute 口径
     };
     assert.equal(call({}), null, "编辑流保留原名必须放行（曾恒报「请填写模型名」）");
     assert.equal(call({ virtualModelNameDraft: "  " }), "请填写模型名", "清空名字仍报缺名");
-    assert.equal(call({ virtualModelNameDraft: "MyName" }).startsWith("模型名格式不对"), true, "格式校验不变");
+    assert.equal(call({ virtualModelNameDraft: "9model" }).startsWith("模型名格式不对"), true, "数字开头仍拒");
+    assert.equal(call({ virtualModelNameDraft: "My-Name_2" }), null, "混合大小写放行");
+    assert.equal(call({ virtualModelNameDraft: "Other-VM" }), "这个名字与已有的 other-vm 仅大小写不同", "仅大小写不同的名字拦在保存前");
     assert.equal(call({ virtualModelNameDraft: "other-vm" }), "这个名字已被占用：other-vm", "改名撞名拦在保存前");
     assert.equal(
       call({ virtualModelNameDraft: "deepseek-pro", virtualModelCreating: true, routeChainTarget: { kind: "virtual", id: null } }),

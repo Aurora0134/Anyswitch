@@ -316,16 +316,19 @@ export const MAX_CHAIN_NODES = 8;
 
 // Virtual models (虚拟模型)：用户自建、不绑定端点的命名路由链。store.virtualModels
 // 是顶层数组，元素形如 { name, chain: [{ node, model }, ...], enabled?: boolean }：
-// name 是端点可见的虚拟模型 id（小写字母开头，[a-z0-9._-]），chain 与 routingChains
+// name 是端点可见的虚拟模型 id（字母开头、大小写均可，[A-Za-z0-9._-]；仅大小写
+// 不同的两个名字视为重名），chain 与 routingChains
 // 的节点完全同构（池优先解析、node+model 复合键去重），enabled 语义同端点链开关
 // （absent = 启用）。虚拟模型不绑定端点：任何端点请求这个名字都走同一条链，
 // 并与 auto 一起出现在各端点模型列表的 Anyswitch 分组下。save 按名字 upsert（只换链
 // 不动名）；带 previousName 时按原名原位换名（位次与启用开关保留）——名字就是对外
 // 模型 id，改名后旧名的调用随即失效。名字禁用端点 id 与 "auto"——它们分别是端点链
-// 路由键与链路由触发词，撞名会让请求被拦截到错误的目标。
-export const VIRTUAL_MODEL_ID = /^[a-z][a-z0-9._-]*$/;
+// 路由键与链路由触发词，撞名会让请求被拦截到错误的目标；保留名判定不区分大小写
+// （"Auto" 这类仿名变体一并拦下）。
+export const VIRTUAL_MODEL_ID = /^[A-Za-z][A-Za-z0-9._-]*$/;
 export const VIRTUAL_MODEL_MAX = 64;
-const RESERVED_VIRTUAL_MODEL_NAMES = new Set(["auto", ...ROUTING_ENDPOINT_IDS]);
+// 成员全部小写（endpoint ids 均为小写），查成员请先把候选名转小写再比对。
+export const RESERVED_VIRTUAL_MODEL_NAMES = new Set(["auto", ...ROUTING_ENDPOINT_IDS]);
 
 // 端点链与虚拟模型共用的节点序列校验：节点存在性（池优先由运行时解析，这里
 // 只查 id）、id 字符集、node+model 复合键去重、model 非空。model 故意不对
@@ -389,7 +392,7 @@ function validateVirtualModels(store, errors) {
       continue;
     }
     if (typeof vm.name !== "string" || !VIRTUAL_MODEL_ID.test(vm.name)) {
-      errors.push(`${where}.name: must start with a lowercase letter and use only [a-z0-9._-]`);
+      errors.push(`${where}.name: must start with a letter and use only [A-Za-z0-9._-]`);
       continue;
     }
     if (vm.name.length > VIRTUAL_MODEL_MAX) {
@@ -401,7 +404,7 @@ function validateVirtualModels(store, errors) {
     } else {
       names.add(lowered);
     }
-    if (RESERVED_VIRTUAL_MODEL_NAMES.has(vm.name)) {
+    if (RESERVED_VIRTUAL_MODEL_NAMES.has(vm.name.toLowerCase())) {
       errors.push(`${where}.name: "${vm.name}" is reserved`);
     }
     // enabled: 虚拟模型启用开关（可选；缺省 = 开，与端点链开关同语义）。
