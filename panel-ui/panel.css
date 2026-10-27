@@ -3495,6 +3495,11 @@
   .sess-item { display: flex; align-items: flex-start; gap: 9px; padding: 9px 12px; cursor: pointer; border-left: 3px solid transparent; transition: background 120ms var(--ease-out); position: relative; }
   .sess-item:hover { background: var(--surface-hover); }
   .sess-item.selected { background: var(--accent-soft); border-left-color: var(--accent); }
+  /* 会话行动辄三千条，视口外的行不必参与样式与布局结算：分帧铺行时每帧的结算耗时
+     从两三百毫秒降到百毫秒内，整表铺开也从秒级压到亚秒级。行高由标题与副行的一行
+     定高决定、与内容宽度无关，故用实测行高占位；auto 让浏览器记住真实尺寸，
+     滚动条长度与回页落位都不会跳。 */
+  .sess-item { content-visibility: auto; contain-intrinsic-size: auto 55.4px; }
   .sess-item .ep-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px; }
   /* 白/黑两个端点标识在某一侧底色上会与背景融掉，用一圈内描边把边界托出来；
      其余端点的实色点不需要，加了反而发灰。 */
