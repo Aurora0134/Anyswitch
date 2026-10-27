@@ -18367,12 +18367,15 @@ async function api(method, path, body) {
   /* ============================================================
      数据拉取
      ============================================================ */
-  async function refreshSessionsList() {
+  // force：服务端把这份列表缓存成短 TTL 快照（见 panel.mjs createSessionsListSnapshot），
+  // 不带 refresh=1 的请求在窗口内只会拿到旧值。只有用户显式点「刷新」才 force——
+  // 首次装载、分组重渲这些自动路径必须留在 TTL 内复用，否则每次进页都重排一次真扫描。
+  async function refreshSessionsList({ force = false } = {}) {
     const seq = ++sessListReqSeq;
     sessState.loading = true;
     renderSessList({ keepScroll: true });
     try {
-      const res = await api("GET", "/api/sessions/list");
+      const res = await api("GET", `/api/sessions/list${force ? "?refresh=1" : ""}`);
       if (seq !== sessListReqSeq) return; // 已有更新请求在飞，丢弃旧响应
       sessState.sessions = Array.isArray(res.sessions) ? res.sessions : [];
       sessState.endpointErrors = Array.isArray(res.endpointErrors) ? res.endpointErrors : [];
@@ -19055,12 +19058,13 @@ async function api(method, path, body) {
       if (sessState.checked.size) openSessDeleteDlg([...sessState.checked]);
     });
 
-    // 刷新：重调 list（无状态现扫下 list 即 rescan）
+    // 刷新：带 force 走 ?refresh=1 等一次真扫描落地——不带它，服务端 TTL 快照会把
+    // 旧值原样返回，按钮就只剩一句「已刷新」的空响。
     $("sessRefreshBtn").addEventListener("click", async () => {
       const btn = $("sessRefreshBtn");
       if (btn.disabled) return;
       btn.disabled = true;
-      try { await refreshSessionsList(); toast("会话列表已刷新"); }
+      try { await refreshSessionsList({ force: true }); toast("会话列表已刷新"); }
       finally { btn.disabled = false; }
     });
 
