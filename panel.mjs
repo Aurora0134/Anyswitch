@@ -963,10 +963,13 @@ export function createPanelRouter({
    // 活着的命令子进程。默认真跑 PowerShell 全表；单测注入桩，不碰真进程枚举。
    probeTerminalCommandTreeFn = defaultProbeTerminalCommandTree,
   // 判「忙」后复探的间隔：agent 启动期的瞬时子进程（环境探测、chcp、一次性包装壳）
-   // 与一次探测超时都会让单次判定落到「忙」，隔一拍再探一次即能分清瞬时与真在跑。
-   switchGuardRecheckDelayMs = 700,
-   // 复探的单次超时：只用来确认「刚才那波子进程还在不在」，不需要首探那么宽。
-   switchGuardRecheckTimeoutMs = 2000,
+  // 与一次探测超时都会让单次判定落到「忙」，隔一拍再探一次即能分清瞬时与真在跑。
+  // 复探在子进程里自己睡这一拍（与首探并行发起），不占首探的等待。
+  switchGuardRecheckDelayMs = 700,
+  // 复探的查询预算：只用来确认「刚才那波子进程还在不在」，不需要首探那么宽。
+  // 1200ms ≈ 实测一次枚举（548–617ms）的 2 倍。双探一起的等待上界是
+  // max(首探 1500, 700+1200)=1900ms。
+  switchGuardRecheckTimeoutMs = 1200,
    // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
@@ -1639,22 +1642,42 @@ export function createPanelRouter({
       } catch {
         /* 归属失败按无锚形态判 */
       }
-      const busy = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
-      if (busy !== false) {
-        // 复探一拍再判：单次探测把「agent 自己的启动期瞬时子进程」或一次超时
-        // 也算成在跑命令，会把空闲新会话的内切误拒（前端再把 409 静默落成新开
-        // 页签）。真在跑的命令跨得住两次探测，瞬时子进程跨不住——复探只滤掉
-        // 误拒，不动「探测失败亦拒」的保护语义。
-        //
-        // 代价是忙路径的往返变长：首探实测 1.4–1.6s，加这次间隔与复探约 3.7s，
-        // 两次都撞满超时则约 8.7s。干净路径（首探 false）零额外开销；这段期间前端
-        // 的在飞闸会吞掉后续点击，所以复探用更短的超时（只滤瞬时误判，真在跑的
-        // 命令首探就够判），把最坏耗时压回 6s 量级。
-        await new Promise((resolve) => setTimeout(resolve, switchGuardRecheckDelayMs));
-        const recheck = await probeTerminalCommandTreeFn(session.pid, {
-          anchorPid,
-          timeoutMs: switchGuardRecheckTimeoutMs,
-        });
+      // 双探并行发起：复探子进程先睡 switchGuardRecheckDelayMs 再查，观察点仍
+      // 在首探之后一拍，但启动税与首探重叠。修前是串行「首探 + 睡 0.7s + 复探」，
+      // 两次 PowerShell 启动税连付；实测（本机 2 会话）首探 548–617ms，串行忙
+      // 路径 ≈1.9s，现在由最慢的一次封顶 ≈1.3–1.4s。上界也从
+      // 4000+700+2000=6.7s 收到 max(首探 1500, 700+复探 1200)=1900ms。
+      // 首探判干净就立刻掐掉复探（此刻它多半还在睡），干净路径不多等。
+      //
+      // 复探只滤「agent 启动期瞬时子进程」与一次超时误判，不动「探测失败亦拒」：
+      // 真在跑的命令跨得住两次探测，瞬时子进程跨不住。并行的代价是两次观察的间隔
+      // 从「首探耗时 + 700ms」缩到 ≈700ms——间隔变短只会让误判更偏向「拒换」
+      // （宁多开勿错杀），不会偏向错杀。
+      const recheckAbort = new AbortController();
+      // new Promise 的执行器同步跑：复探子进程在首探之前就出发（不是等首探返回
+      // 才起第二个进程）。执行器里抛错也走同一条 catch，按 null（拒换）处置。
+      const recheckPromise = new Promise((resolve) => resolve(probeTerminalCommandTreeFn(session.pid, {
+        anchorPid,
+        delayMs: switchGuardRecheckDelayMs,
+        timeoutMs: switchGuardRecheckTimeoutMs,
+        signal: recheckAbort.signal,
+      })))
+        // 复探被中止/抛错一律按 null（＝拒换）：中止只发生在首探已判干净的场合，
+        // 那个值调用方不再看；异常则沿用「探测失败亦拒」。
+        .catch(() => null);
+      let busy;
+      try {
+        busy = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
+      } catch (error) {
+        recheckAbort.abort();
+        await recheckPromise;
+        throw error;
+      }
+      if (busy === false) {
+        recheckAbort.abort();
+        await recheckPromise;
+      } else {
+        const recheck = await recheckPromise;
         if (recheck !== false) {
           return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
         }

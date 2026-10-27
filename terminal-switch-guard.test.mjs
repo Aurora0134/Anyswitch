@@ -179,4 +179,31 @@ describe("probeTerminalCommandTree：按需探测", () => {
     assert.equal(await probeTerminalCommandTree("10", { execFileFn: counting }), null);
     assert.equal(spawned, 0);
   });
+
+  // 复探形态（M2-T3）：观察点由子进程自己睡出来，好让两个探测的启动税重叠。
+  it("delayMs：脚本先 Start-Sleep，睡的那段不占查询预算", async () => {
+    let captured = null;
+    const exec = async (file, args, opts, cb) => { captured = { file, args, opts }; cb(null, "10\t1\tcmd.exe\tcmd /c claude\n"); };
+    await probeTerminalCommandTree(10, { execFileFn: exec, delayMs: 700, timeoutMs: 1200 });
+    assert.match(captured.args[3], /^Start-Sleep -Milliseconds 700; Get-CimInstance /, "查询前先睡这一拍");
+    assert.equal(captured.opts.timeout, 1900, "execFile 的超时要把睡的那段算进去，查询预算才不缩水");
+    // 不给 delayMs 时脚本原样（首探形态），超时就是预算本身。
+    await probeTerminalCommandTree(10, { execFileFn: exec, timeoutMs: 1500 });
+    assert.match(captured.args[3], /^Get-CimInstance /);
+    assert.equal(captured.opts.timeout, 1500);
+  });
+
+  it("signal 透传给 execFile；被中止（AbortError）按 null 处置", async () => {
+    const ctl = new AbortController();
+    let seenSignal = null;
+    const exec = async (file, args, opts, cb) => {
+      seenSignal = opts.signal;
+      cb(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }), "");
+    };
+    ctl.abort();
+    assert.equal(await probeTerminalCommandTree(10, { execFileFn: exec, signal: ctl.signal }), null);
+    assert.equal(seenSignal, ctl.signal, "中止信号必须到得了子进程（掐掉复探靠它）");
+    // 不给 signal 时不往 opts 里塞一个 undefined：老注入桩只认自己认识的键。
+    await probeTerminalCommandTree(10, { execFileFn: async (file, args, opts, cb) => { assert.equal("signal" in opts, false); cb(null, "10\t1\tcmd.exe\tx\n"); } });
+  });
 });

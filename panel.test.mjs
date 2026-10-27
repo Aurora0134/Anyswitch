@@ -12899,6 +12899,122 @@ parentPort.on("message", (message) => {
   });
 });
 
+// 内切前的杀前复核（switch-guard 双探）——保护语义的钉子：树里有活着的命令进程
+// 就不换会话（宁多开勿错杀），两次观察缺一不可；同时钉住「复探与首探并行发起、
+// 首探判干净就掐掉复探」这一形态（修前是串行等首探返回再起第二个进程）。
+describe("内切杀前复核（switch-guard 双探）", () => {
+  // 会话 cwd 用真实存在的临时目录：launch 组装会校验工作目录。
+  const switchFixture = (extra) => {
+    const cwd = mkTestDir("anyswitch-switch-guard-cwd-");
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-switch-guard-") },
+      base: { ...process.env },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [],
+      fetchTerminalSessionFn: async (id) => ({ id, status: "running", agentId: "kimi", cwd, pid: 4242 }),
+      fetchTerminalSessionReadFn: async (id) => ({ status: 200, body: { id, status: "running" } }),
+      scanAgentConversationsFn: async () => [],
+      ...extra,
+    });
+    const switchOnce = async () => {
+      const out = fakeReqRes("/panel/api/terminal/sessions/aaaa1111/switch", "POST", { agentId: "kimi", cwd });
+      await router.handle(out.req, out.res);
+      return out;
+    };
+    return { router, switchOnce };
+  };
+
+  it("有活命令必拒：首探与复探都判在跑 → 409 switch_busy，且不动宿主", async () => {
+    let restarts = 0;
+    const seen = [];
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => { seen.push(opts); return true; },
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0, "树里有活命令时不得换会话（宁多开勿错杀）");
+    assert.equal(seen.length, 2, "两次观察缺一不可——复核不许被省掉");
+    assert.equal(seen.find((o) => o.delayMs !== undefined)?.delayMs, 700, "复探由子进程自己睡出这一拍");
+  });
+
+  it("空闲必换：两次都判干净 → 200 并转到宿主 restart", async () => {
+    let restarts = 0;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async () => false,
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id, status: "running" } }; },
+    });
+    const { res } = await switchOnce();
+    assert.equal(res.statusCode, 200);
+    assert.equal(restarts, 1, "空闲会话照常内切");
+  });
+
+  it("首探超时（null）但复核干净 → 仍换：复核只滤误判，不放宽保护", async () => {
+    let restarts = 0;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => (opts.delayMs !== undefined ? false : null),
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res } = await switchOnce();
+    assert.equal(res.statusCode, 200);
+    assert.equal(restarts, 1);
+  });
+
+  it("复核也判不出（null）→ 仍拒：探测失败亦拒", async () => {
+    let restarts = 0;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => (opts.delayMs !== undefined ? null : true),
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0);
+  });
+
+  it("双探并行发起：复探在首探返回之前就已出发", async () => {
+    let recheckStarted = false;
+    let firstSawRecheckStarted = null;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => {
+        if (opts.delayMs !== undefined) { recheckStarted = true; return true; }
+        firstSawRecheckStarted = recheckStarted;
+        return true;
+      },
+      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+    });
+    await switchOnce();
+    assert.equal(firstSawRecheckStarted, true, "复探必须先于首探返回发起，否则又退回串行两次启动");
+  });
+
+  it("首探判干净就掐掉复探：不白等它睡满一拍", async () => {
+    let recheckSignal = null;
+    let pendingTimer = null;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: (pid, opts = {}) => {
+        if (opts.delayMs === undefined) return Promise.resolve(false);
+        recheckSignal = opts.signal;
+        return new Promise((resolve) => {
+          pendingTimer = setTimeout(() => resolve(false), 5000);
+          opts.signal?.addEventListener("abort", () => { clearTimeout(pendingTimer); resolve(null); });
+        });
+      },
+      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+    });
+    const guard = new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("首探判干净后复探没有被掐掉（白等了一拍）")), 1500);
+      t.unref?.();
+    });
+    const { res } = await Promise.race([switchOnce(), guard]);
+    clearTimeout(pendingTimer);
+    assert.equal(res.statusCode, 200);
+    assert.equal(recheckSignal?.aborted, true, "复探子进程必须被中止");
+  });
+});
+
 // 前端：「+」开菜单（已安装 CLI Agent 单选 + 工作目录）、createAgentTerminal
 // 走新路由、成功分支登记会话并渲染；空白终端保留原 POST 逻辑。
 describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {

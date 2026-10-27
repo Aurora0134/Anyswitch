@@ -19,7 +19,13 @@
 // 常走——引擎底下挂着的命令进程仍算在跑。
 import { execFile } from "node:child_process";
 
-export const SWITCH_GUARD_PROBE_TIMEOUT_MS = 4000;
+// 单次枚举的预算。实测（本机 2 条真实会话、机器空闲）：整次探测 548–617ms，
+// 拆开是 PowerShell 启动 ~250–350ms + 全表查询 ~270–370ms。1500ms ≈ 实测 2.4 倍，
+// 留够一台真在跑 agent 的机器的抖动；撞满即按 null 处置＝拒换（宁多开勿错杀），
+// 与修前语义一致——收窄的只是「等多久才认输」，不是「认输之后干什么」。
+// 修前是 4000ms：那是实测值的 6 倍多，最坏等待被它一个人撑到 6.7s（双探的上界
+// 见 panel.mjs handleTerminalSessionSwitch 的注释），而真正的枚举成本从来不到 1s。
+export const SWITCH_GUARD_PROBE_TIMEOUT_MS = 1500;
 
 // 全表查询（不带 name 过滤）：命令子进程的 image 千姿百态（npm/python/构建器
 // …），白名单式过滤必然漏，漏报就是误杀。查询按需低频（用户点击内切时一次），
@@ -107,17 +113,39 @@ export function hasRunningCommand(table, { rootPid, anchorPid = null }) {
 }
 
 // 一次按需探测。true＝树里有正在执行的命令；false＝光杆（等输入/交互提示符）；
-// null＝没跑成（spawn 失败/超时/起点不在枚举表里）。execFileFn 与 timeoutMs 可
-// 注入，单测不碰真 PowerShell。
-export async function probeTerminalCommandTree(rootPid, { anchorPid = null, execFileFn = execFile, timeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS } = {}) {
+// null＝没跑成（spawn 失败/超时/被中止/起点不在枚举表里）。execFileFn 与 timeoutMs
+// 可注入，单测不碰真 PowerShell。
+//
+// delayMs：查询前先睡这么久（脚本里 Start-Sleep）。给「复探」用——调用方要在首探
+// 之后一拍再取一次观察，把它塞进子进程自己睡，两个探测的启动税就能重叠：修前
+// 复探是串行等首探返回再起进程（再付一次 ~0.3s 启动税 + ~0.35s 查询），现在是
+// 「复探进程先起、睡够再查」，整段等待由最慢的一次封顶。
+// timeoutMs 只算查询这一段，睡的那段另加——所以 execFile 的 timeout 是
+// delayMs + timeoutMs。
+// signal：AbortSignal。首探判出「干净」后调用方立刻掐掉还在睡的复探子进程，
+// Node 会杀掉它并把这次探测置成 null（调用方此时已不再看这个值）。
+export async function probeTerminalCommandTree(rootPid, {
+  anchorPid = null,
+  execFileFn = execFile,
+  timeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS,
+  delayMs = 0,
+  signal = null,
+} = {}) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return null;
+  const sleepMs = Number.isFinite(delayMs) && delayMs > 0 ? Math.round(delayMs) : 0;
+  const script = sleepMs > 0 ? `Start-Sleep -Milliseconds ${sleepMs}; ${SWITCH_GUARD_PS_QUERY}` : SWITCH_GUARD_PS_QUERY;
   let out;
   try {
     out = await new Promise((resolve, reject) => {
       execFileFn(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", SWITCH_GUARD_PS_QUERY],
-        { windowsHide: true, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        {
+          windowsHide: true,
+          timeout: timeoutMs + sleepMs,
+          maxBuffer: 8 * 1024 * 1024,
+          ...(signal ? { signal } : {}),
+        },
         (error, stdout) => {
           if (error && !stdout) reject(error);
           else resolve(stdout);
