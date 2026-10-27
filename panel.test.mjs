@@ -10076,6 +10076,7 @@ describe("终端键盘兜底转发（焦点不在 xterm 时）", () => {
       function closeTerminalAddMenu() {}
       function confirmTerminalAddMenu() {}
       function selectTerminalAddAgent() {}
+      function loadTerminalAddAgentsArchive() {}
       function loadInstalledTerminalAgents() {}
       // 页签条收展接线走真实现（applyTerminalTabsHidden/setTerminalTabsHidden 在源码内），
       // 桩只补它们触到的外部面：localStorage 与 scheduleTerminalFit。
@@ -12141,6 +12142,7 @@ describe("虚拟终端降级空态（terminal-backend 不可达不再渲 mock）
       function terminalSessionFor() { return state.session; }
       function renderTerminalSessionData() { state.renderedData += 1; }
       function renderTerminalPreviewTabs() { state.renderedTabs += 1; }
+      function syncTerminalBootingOverlay() {}
       function connectTerminalStream(session) { state.connected = session; }
       function scheduleTerminalFit() {}
       function pollTerminalSessions() { state.polled += 1; }
@@ -13380,7 +13382,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       // 新终端置活跃要写存档；沙盒的 localStorage 用内存桩真跑，不碰真存档。
       "rememberTerminalSessionId",
       // 目录解析三件套：confirm 记目录、open 预填，都靠它们取默认值与持久化。
-      "rememberTerminalCwd", "loadTerminalCwd", "terminalCwdInitial"]
+      "rememberTerminalCwd", "loadTerminalCwd", "terminalCwdInitial",
+      // 清单本地存档三件套：取新成功落存档、载入读回、确认启动武装加载占位。
+      "loadTerminalAddAgentsArchive", "saveTerminalAddAgentsArchive", "armTerminalBootingOverlay", "dropTerminalBootingOverlay"]
       .map(extractFn).join("\n");
     const btnRect = { left: 400, right: 430, top: 12, bottom: 42 };
     const barRect = { left: 0, top: 0, width: 1200 };
@@ -13418,9 +13422,11 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
       let terminalXterm = null;
       let terminalDefaultCwd = "C:\\\\Users\\\\fixture";
       const TERMINAL_ADD_MENU_AGENT_IDS = ["claude", "codex", "kimi", "pi", "dsh", "opencode", "grok", "qoder", "zcode"];
+      const TERMINAL_ADD_AGENTS_KEY = "panel-terminal-add-agents";
       let terminalAddMenuAgents = [];
       let terminalAddMenuAgentsAt = 0;
       let terminalAddMenuSelection = "";
+      let terminalBooting = null;
       ${bodies}
       return {
         load: loadInstalledTerminalAgents,
@@ -13428,6 +13434,9 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
         open: openTerminalAddMenu,
         select: selectTerminalAddAgent,
         confirm: confirmTerminalAddMenu,
+        loadArchive: loadTerminalAddAgentsArchive,
+        agents: () => terminalAddMenuAgents,
+        booting: () => terminalBooting,
         activeId: () => activeTerminalPreviewId,
         sessions: terminalBackendSessions,
       };
@@ -13469,6 +13478,7 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
   it("启动方式列表双预热：面板启动与进终端页各补一次", () => {
     const init = panelJs.match(/function initTerminalPreview\(\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(init, "initTerminalPreview found in panel.js");
+    assert.ok(init.includes("loadTerminalAddAgentsArchive()"), "上次清单先进内存：首开菜单当拍就有，不吃取新空窗");
     assert.ok(init.includes("loadInstalledTerminalAgents()"), "面板启动即预热，点「+」不等探测");
     const sw = panelJs.match(/function switchView\(name\) \{[\s\S]*?\n  \}/)?.[0];
     assert.ok(sw, "switchView found in panel.js");
@@ -13489,6 +13499,76 @@ describe("一键启动 CLI Agent（前端菜单 + 启动链路）", () => {
     none.sandbox.render([]);
     assert.equal(none.els.terminalAddMenuNote.hidden, false);
     assert.equal(none.els.terminalAddMenuNote.textContent, "尚未安装可用的 CLI Agent，可以先建空白终端");
+  });
+
+  it("存档先上屏：开菜单当拍渲染上次清单，不等环境检测落地", async () => {
+    const seeded = addMenuSandbox({ environment: ENVIRONMENT });
+    seeded.store["panel-terminal-add-agents"] = JSON.stringify([{ id: "kimi", name: "Kimi Code" }]);
+    seeded.sandbox.loadArchive(); // 页面载入路径把存档读回内存
+    seeded.sandbox.open();
+    assert.ok(seeded.els.terminalAddMenuList.innerHTML.includes("Kimi Code"), "点「+」当拍即有清单（存档）");
+    assert.equal(seeded.els.terminalAddMenuNote.hidden, true, "有清单不落说明");
+    await flush();
+    assert.equal(seeded.log.environmentFetches, 1, "存档只是先上屏，取新照常发起");
+    assert.ok(seeded.els.terminalAddMenuList.innerHTML.includes("Claude Code"), "取新落地后重渲为全量清单");
+  });
+
+  it("取新失败保留存档清单，不再退回「只显示空白终端」", async () => {
+    const failed = addMenuSandbox({ environmentError: new Error("HTTP 500") });
+    failed.store["panel-terminal-add-agents"] = JSON.stringify([{ id: "kimi", name: "Kimi Code" }]);
+    failed.sandbox.loadArchive();
+    failed.sandbox.open();
+    await flush();
+    assert.ok(failed.els.terminalAddMenuList.innerHTML.includes("Kimi Code"), "失败不清屏上已有的存档清单");
+    assert.equal(failed.els.terminalAddMenuNote.hidden, true, "也不落「暂时读不到」说明");
+  });
+
+  it("无存档且取新失败维持原状：空白终端＋「暂时读不到」", async () => {
+    const failed = addMenuSandbox({ environmentError: new Error("HTTP 500") });
+    failed.sandbox.open();
+    assert.equal(failed.els.terminalAddMenuList.innerHTML, "", "无存档时同步渲染不硬造清单");
+    await flush();
+    assert.ok(failed.els.terminalAddMenuList.innerHTML.includes("空白终端"));
+    assert.equal(failed.els.terminalAddMenuNote.textContent, "暂时读不到已安装的 CLI Agent，可以先建空白终端");
+  });
+
+  it("取新成功落存档；坏存档与野条目不砸内存现值", async () => {
+    const { sandbox, store } = addMenuSandbox({ environment: ENVIRONMENT });
+    await sandbox.load();
+    assert.deepEqual(
+      JSON.parse(store["panel-terminal-add-agents"]).map((a) => a.id),
+      ["claude", "kimi", "zcode", "qoder"],
+      "取新落地即写本地存档",
+    );
+    store["panel-terminal-add-agents"] = "{oops";
+    assert.doesNotThrow(() => sandbox.loadArchive());
+    assert.equal(sandbox.agents().length, 4, "坏存档不覆盖内存现值");
+    store["panel-terminal-add-agents"] = JSON.stringify([{ id: "kimi", name: "Kimi" }, { id: "evil" }, null, "junk"]);
+    sandbox.loadArchive();
+    assert.deepEqual(sandbox.agents().map((a) => a.id), ["kimi"], "白名单外与形状坏的条目一律过滤");
+  });
+
+  it("确认启动武装加载占位：agent 与空白终端两条路径都锚到新会话", async () => {
+    const { sandbox } = addMenuSandbox({ environment: ENVIRONMENT });
+    await sandbox.load();
+    sandbox.select("kimi");
+    await sandbox.confirm();
+    await flush();
+    assert.equal(sandbox.booting()?.sessionId, "t-new", "agent 新建武装占位，锚到新会话 id");
+    const blank = addMenuSandbox({ environment: ENVIRONMENT });
+    await blank.sandbox.confirm();
+    await flush();
+    assert.equal(blank.sandbox.booting()?.sessionId, "t-new", "空白终端新建同样武装");
+  });
+
+  it("加载占位接线：页签渲染同步显隐，首帧数据落地即撤", () => {
+    const render = panelJs.match(/function renderTerminalPreviewSession\(([\s\S]*?)\n  \}/)?.[0];
+    assert.ok(render, "renderTerminalPreviewSession 可取样");
+    assert.ok(render.includes("syncTerminalBootingOverlay(null)"), "未就绪/零会话分支撤占位");
+    assert.ok(render.includes("syncTerminalBootingOverlay(session.id)"), "主路径按活跃会话同步占位（武装的挂、其余撤）");
+    const data = panelJs.match(/terminalEventSource\.addEventListener\("data"[\s\S]*?\n    \}\);/)?.[0];
+    assert.ok(data, "流 data 处理器可取样");
+    assert.ok(data.includes("dropTerminalBootingOverlay"), "首帧数据落地即撤占位（typeof 闸护桩环境）");
   });
 
   it("createAgentTerminal POST 到新路由，成功分支登记会话、置活跃、重渲", async () => {

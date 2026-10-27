@@ -2143,6 +2143,21 @@
   .terminal-xterm-host .xterm.terminal-stale-frame {
     position: absolute; inset: 0; z-index: 1; pointer-events: none;
   }
+  /* 「+」新建页签的「正在加载」占位（panel.js syncTerminalBootingOverlay）：全新
+     页签没有旧帧可垫，agent 首帧前屏上只有底色——这里按武装的会话挂一层居中
+     占位，首帧数据落地即撤。绝对定位不参与布局，z-index 与切签垫片同层（压在
+     空态覆盖层之下），指针事件穿透，键入照常进终端。 */
+  .terminal-booting {
+    position: absolute; inset: 0; z-index: 1; pointer-events: none;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    font: 12.5px var(--font-sans); color: var(--terminal-fg); opacity: .55;
+  }
+  .terminal-booting-spin {
+    width: 16px; height: 16px; border-radius: 50%;
+    border: 2px solid currentColor; border-top-color: transparent;
+    animation: terminal-booting-rotate .8s linear infinite;
+  }
+  @keyframes terminal-booting-rotate { to { transform: rotate(360deg); } }
   /* 输入法按焦点框定位。完全透明会被当成不在画面上，候选框就飞走；
      字色透明、框本身仍在画面内，终端画面上看不到它。 */
   .terminal-xterm-host .xterm-helper-textarea {

@@ -592,6 +592,7 @@ describe("终端视图左栏换血（M4）", () => {
         function rememberTerminalSessionId(id) { log.active = id; }
         function rememberTerminalCwd(cwd) { log.rememberedCwd.push(cwd); }
         function renderTerminalPreviewSession() { log.renders += 1; }
+        function armTerminalBootingOverlay() {}
         function terminalCreateSize() { return { cols: 120, rows: 34 }; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
         const terminalRailPrefs = { archived: [], removedGroups: [] };
@@ -1431,6 +1432,7 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalRail() { order.push("rail"); }
         function renderTerminalSessionData() { order.push("data"); }
         function renderTerminalPreviewTabs() { order.push("tabs"); }
+        function syncTerminalBootingOverlay() {}
         function clearTerminalEmptyState() { order.push("clearEmpty"); }
         function renderTerminalEmptyState() { order.push("empty"); }
         function parkTerminalScreen() { order.push("park"); }

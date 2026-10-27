@@ -6818,6 +6818,10 @@ async function api(method, path, body) {
       } catch {}
     });
     terminalEventSource.addEventListener("data", (event) => {
+      // 任意数据帧落地即撤「正在加载」占位：同一时刻只有活跃会话有流（connect 前
+      // 必先 close），帧到即「武装会话已开画」。typeof 闸护单测桩环境（同
+      // terminalReplayEpoch——那些沙箱把本函数整段切出真跑，没有占位设施）。
+      if (typeof dropTerminalBootingOverlay === "function") dropTerminalBootingOverlay();
       try {
         const text = JSON.parse(event.data);
         // 建连后的第一帧是自足整屏重绘（见 absorbTerminalSnapshot），直写——此刻
@@ -7574,6 +7578,63 @@ async function api(method, path, body) {
   let terminalAddMenuAgentsAt = 0;
   let terminalAddMenuSelection = "";
 
+  // 已安装清单的本地存档（与左栏折叠存档同层的纯视图缓存）：取新落地时写入，页面
+  // 载入时读回——开菜单当拍先渲染存档（含过期），后台取新落地再替换，「点 + 到清单
+  // 出现」之间不再有等环境检测的空窗。存档坏了/存储被禁都不砸内存现值。
+  const TERMINAL_ADD_AGENTS_KEY = "panel-terminal-add-agents";
+
+  function loadTerminalAddAgentsArchive() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(TERMINAL_ADD_AGENTS_KEY) || "null");
+      if (!Array.isArray(parsed)) return;
+      const agents = parsed.filter((agent) => agent && typeof agent.id === "string"
+        && typeof agent.name === "string" && TERMINAL_ADD_MENU_AGENT_IDS.includes(agent.id));
+      if (agents.length) terminalAddMenuAgents = agents;
+    } catch { /* 坏存档/存储被禁：维持内存现值，取新落地后自会覆盖 */ }
+  }
+
+  function saveTerminalAddAgentsArchive(agents) {
+    try { localStorage.setItem(TERMINAL_ADD_AGENTS_KEY, JSON.stringify(agents)); } catch { /* 存储被禁：菜单退回每次现取 */ }
+  }
+
+  // 「+」新建页签的「正在加载」占位：确认启动到 agent 首帧之间屏上只有底色——切签
+  // 垫片（parkTerminalScreen）只服务「有旧帧可停」的切换，全新页签没有旧帧。武装只认
+  // + 菜单确认的那一次新建（续接/复活不武装，不闪占位）；页签渲染当拍挂层，首帧数据
+  // 落地即撤（connectTerminalStream 的 data 处理器），3 秒兜底与「活跃会话变了」同撤。
+  const TERMINAL_BOOTING_MAX_MS = 3000;
+  const TERMINAL_BOOTING_ARM_TTL_MS = 10000;
+  let terminalBooting = null;
+
+  function armTerminalBootingOverlay(sessionId) {
+    dropTerminalBootingOverlay();
+    terminalBooting = { sessionId, armedAt: Date.now(), timer: null, el: null };
+  }
+
+  function dropTerminalBootingOverlay() {
+    const booting = terminalBooting;
+    if (!booting) return;
+    terminalBooting = null;
+    if (booting.timer !== null) clearTimeout(booting.timer);
+    if (booting.el && booting.el.parentNode) booting.el.parentNode.removeChild(booting.el);
+  }
+
+  function syncTerminalBootingOverlay(sessionId) {
+    const booting = terminalBooting;
+    if (!booting || booting.sessionId !== sessionId || Date.now() - booting.armedAt > TERMINAL_BOOTING_ARM_TTL_MS) {
+      dropTerminalBootingOverlay();
+      return;
+    }
+    if (booting.el) return;
+    const screen = $("terminalScreen");
+    if (!screen) { dropTerminalBootingOverlay(); return; }
+    const el = document.createElement("div");
+    el.className = "terminal-booting";
+    el.innerHTML = `<span class="terminal-booting-spin" aria-hidden="true"></span><span>正在加载</span>`;
+    screen.appendChild(el);
+    booting.el = el;
+    booting.timer = setTimeout(() => dropTerminalBootingOverlay(), TERMINAL_BOOTING_MAX_MS);
+  }
+
   function closeTerminalAddMenu() {
     const menu = $("terminalAddMenu");
     if (menu) menu.hidden = true;
@@ -7595,9 +7656,10 @@ async function api(method, path, body) {
         }
         terminalAddMenuAgents = agents;
         terminalAddMenuAgentsAt = Date.now();
+        saveTerminalAddAgentsArchive(agents);
         return agents;
       })
-      .catch(() => null); // 失败不进缓存：下次开菜单再试，当前只留空白终端
+      .catch(() => null); // 失败不进缓存：下次开菜单再试；屏上已有存档清单时开菜单会保留它
   }
 
   function renderTerminalAddMenuList(agents) {
@@ -7652,7 +7714,16 @@ async function api(method, path, body) {
     positionTerminalAddMenu();
     const cwdInput = $("terminalAddMenuCwd");
     if (cwdInput) cwdInput.value = terminalCwdInitial();
-    loadInstalledTerminalAgents().then((agents) => renderTerminalAddMenuList(agents));
+    // 存档先上屏（含过期）：点「+」当拍就有清单，环境检测在后台补一拍。手上什么
+    // 都没有时不硬造——等取新落地按结果渲染（全量清单或失败说明）。
+    const known = terminalAddMenuAgents.length ? terminalAddMenuAgents : null;
+    if (known) renderTerminalAddMenuList(known);
+    loadInstalledTerminalAgents().then((agents) => {
+      // 取新失败且屏上已有存档：保留旧清单——它比退回「空白终端＋读不到」有用，
+      // 那句说明只服务「从没拿到过清单」的场合。
+      if (agents === null && known) return;
+      renderTerminalAddMenuList(agents);
+    });
   }
 
   function selectTerminalAddAgent(agentId) {
@@ -7677,6 +7748,8 @@ async function api(method, path, body) {
         terminalBackendSessions[created.id] = terminalBackendSession(created);
         activeTerminalPreviewId = created.id;
         rememberTerminalSessionId(created.id);
+        // 新建成功即武装「正在加载」占位（先于渲染：sync 按武装认领会话）。
+        armTerminalBootingOverlay(created.id);
         renderTerminalPreviewSession();
       })
       .catch((error) => {
@@ -7706,6 +7779,7 @@ async function api(method, path, body) {
           terminalBackendSessions[created.id] = terminalBackendSession(created);
           activeTerminalPreviewId = created.id;
           rememberTerminalSessionId(created.id);
+          armTerminalBootingOverlay(created.id);
           renderTerminalPreviewSession();
         })
         .catch((error) => toast(panelError(error, "无法新建终端"), true));
@@ -7775,6 +7849,7 @@ async function api(method, path, body) {
       // 种子收走（见 renderTerminalPendingState）。定性失败才落降级空态。
       if (!terminalFirstConnectSettled) renderTerminalPendingState();
       else renderTerminalUnavailableState();
+      syncTerminalBootingOverlay(null);
       return;
     }
     const unavailable = $("terminalUnavailable");
@@ -7783,6 +7858,7 @@ async function api(method, path, body) {
     if (!session) {
       // 零会话：关掉最后一个标签后，或退出再回归时本就是零会话——留在终端页
       // 落空态（空背景 + 文字提示），不退出、也不挂静态占位数据。
+      syncTerminalBootingOverlay(null);
       renderTerminalEmptyState();
       return;
     }
@@ -7793,6 +7869,9 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
+    // 「正在加载」占位随活跃会话同步：武装的那次新建当拍挂层（首帧前屏上不再是
+    // 纯底色），其余会话把层撤走（用户在占位期间点了别的页签）。
+    syncTerminalBootingOverlay(session.id);
     if (deferScreen) {
       // live 行快路径让帧（M5）：左栏点已开着的会话行时，这一帧先让栏体当拍重渲
       // （高亮即刻点亮），停放＋建流＋fit 三步整组延后到双 rAF 之后——同步任务里
@@ -7913,6 +7992,7 @@ async function api(method, path, body) {
     syncTerminalAddBtn();
     fetchTerminalDefaultCwd();
     connectTerminalBackend();
+    loadTerminalAddAgentsArchive(); // 上次清单先进内存：首开菜单当拍就有，不吃取新空窗
     loadInstalledTerminalAgents(); // 启动即预热新建菜单的启动方式列表，点「+」即弹不等探测
     if (!terminalPollTimer) {
       // 初值按"当下"起步：常驻隐藏的环境里这不是转折，兜底拍不该把终端页拆成空白。

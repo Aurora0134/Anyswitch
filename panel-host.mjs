@@ -69,6 +69,11 @@ export function createPanelServer(options = {}) {
   // un-primed first GET would otherwise pay the ~1s probe round inline.
   // Fire-and-forget — the first GET cold-waits only if it beats the prewarm.
   router.prewarmWatchdogProbes();
+  // Cold-scan prewarm (environment detection + sessions snapshot): same deal —
+  // the first scan moves from the first user request to process startup. The
+  // new-terminal menu's agent list and the terminal rail history stop paying
+  // the cold scan inline. Fire-and-forget; failures fall back to lazy paths.
+  router.prewarmColdScans();
   const server = createServer(async (req, res) => {
     if (!isLoopback(req.socket.remoteAddress)) {
       res.writeHead(403, { "content-type": "application/json" });

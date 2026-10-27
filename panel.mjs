@@ -1122,6 +1122,19 @@ export function createPanelRouter({
     }
     return sessionListSnapshot;
   }
+  // 会话扫描服务：注入的用注入的；没注入的懒建默认——列表扫描走扫描承载（worker
+  // 线程），九个 adapter 的同步 fs 不跑在面板进程的事件循环上。列表路由与启动预热
+  // 共用这一定位点。
+  function ensureSessionScanService() {
+    if (!sessionScanService) {
+      sessionScanService = {
+        scanAll: () => scanHost.scanAll(),
+        loadMessages: sessionLoadMessages,
+        deleteSessions: sessionDeleteSessions,
+      };
+    }
+    return sessionScanService;
+  }
   // Watchdog drift snapshot (see createWatchdogSnapshot above): GET /api/settings
   // answers instantly once a probe round has settled; POST followAgent invalidates.
   const watchdogSnapshot = createWatchdogSnapshot(isWatchdogAutostartEnabledFn, probeWatchdogFn, watchdogSnapshotTtlMs);
@@ -4132,16 +4145,7 @@ export function createPanelRouter({
     // + per-adapter roots whitelist) lives inside session-scan's delete —
     // the router only validates the request shape.
     if (path.startsWith("/panel/api/sessions/")) {
-      if (!sessionScanService) {
-        sessionScanService = {
-          // 列表扫描走扫描承载（worker 线程）：修前这里直接绑 session-scan 的
-          // scanAll，九个 adapter 的同步 fs 全跑在面板进程的事件循环上。
-          scanAll: () => scanHost.scanAll(),
-          loadMessages: sessionLoadMessages,
-          deleteSessions: sessionDeleteSessions,
-        };
-      }
-      const svc = sessionScanService;
+      const svc = ensureSessionScanService();
 
       if (path === "/panel/api/sessions/list" && method === "GET") {
         // 响应契约：{ sessions, endpointErrors } 由 scanAll 装配，单 adapter 失败
@@ -4559,6 +4563,15 @@ export function createPanelRouter({
     // startup) so even the very first GET /api/settings is snapshot-served.
     prewarmWatchdogProbes() {
       watchdogSnapshot.prewarm();
+    },
+    // 启动预热（panel-host 启动时调一次）：环境检测与会话快照的首扫从「第一个用户
+    // 请求」挪到「进程启动」——新建终端菜单的 Agent 清单与左栏历史因此不再吃冷扫。
+    // 两者都 fire-and-forget：预热只是把冷路径提前，失败静默，首个请求照旧走懒加载。
+    prewarmColdScans() {
+      getEnvironmentService().then((svc) => svc.getState()).catch(() => {});
+      try {
+        sessionsListSnapshotFor(ensureSessionScanService()).refresh().catch(() => {});
+      } catch { /* 扫描承载不可用：与懒加载同败法 */ }
     },
     // 面板宿主退出时调用：把导入预览留在 %TEMP% 的暂存目录、以及票据内存里的
     // 明文密钥副本一并丢掉。没被调用过时，弃用票据靠新建票据时的过期清扫兜底。

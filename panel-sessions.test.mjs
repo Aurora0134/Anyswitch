@@ -197,6 +197,23 @@ parentPort.on("message", (message) => {
     assert.equal(third.json().sessions[0].id, "s2");
   });
 
+  // 启动预热：快照与环境检测的首扫从「第一个用户请求」挪到「进程启动」（panel-host
+  // 启动时调一次 prewarmColdScans）。左栏历史与会话页的首开因此不再吃 2.7–8s 冷扫。
+  it("prewarmColdScans 启动即预热：快照与环境检测各扫一拍，首个 GET 不吃冷扫", async () => {
+    const svc = mockSessionScan({ scanResult: { sessions: [], endpointErrors: [] } });
+    const envCalls = { getState: 0 };
+    const envService = { getState: async () => { envCalls.getState += 1; return { clients: [] }; } };
+    const router = sessionsRouter(svc, { environmentService: envService });
+    router.prewarmColdScans();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(svc.calls.scanAll, 1, "快照启动预热已扫一拍");
+    assert.equal(envCalls.getState, 1, "环境检测启动预热已跑一拍");
+    const { req, res } = fakeReqRes("/panel/api/sessions/list", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(svc.calls.scanAll, 1, "预热落地的快照直接服务首个请求，不再冷扫");
+  });
+
   // 回归钉（M1，评审 F9）：删除与在飞刷新有竞态——删掉一行的同时后台刷新正
   // 在飞，那份结果是「删之前」的盘面，落地时会把刚删的行写回快照，最长留一个
   // TTL。用户看到的是「删了又回来」。删除代际：dropRows 时 +1，刷新落地时代际
