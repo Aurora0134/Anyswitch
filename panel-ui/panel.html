@@ -1830,13 +1830,13 @@ if (window.panelStartupController) panelStartupPlay();
               <tbody id="logsTbody"></tbody>
             </table>
           </div>
-          <div class="logs-pager" id="logsPager" hidden>
-            <span class="logs-total" id="logsTotal"></span>
-            <div class="logs-pager-right">
+          <div class="list-pager" id="logsPager" hidden>
+            <span class="list-total" id="logsTotal"></span>
+            <div class="list-pager-right">
               <button type="button" class="btn btn-mini" id="logsPrevBtn">上一页</button>
-              <span class="logs-pages" id="logsPages"></span>
+              <span class="list-pages" id="logsPages"></span>
               <button type="button" class="btn btn-mini" id="logsNextBtn">下一页</button>
-              <input type="text" class="logs-jump" id="logsJump" inputmode="numeric" autocomplete="off" aria-label="跳至页码">
+              <input type="text" class="list-jump" id="logsJump" inputmode="numeric" autocomplete="off" aria-label="跳至页码">
               <select class="logs-sel" id="logPageSize">
                 <option value="20" selected>20</option>
                 <option value="50">50</option>
@@ -1909,6 +1909,22 @@ if (window.panelStartupController) panelStartupPlay();
         </div>
 
         <div class="sessions-scroll" id="sessScroll"><!-- JS 渲染列表 --></div>
+
+        <!-- 分页条：总页数 ≤1 时整条隐藏（renderSessPager 控制）；页码钮与省略号由 JS 生成。
+             窄卡内分两行（页码行＋动作行）——11 个页码钮与翻页钮同排必然溢出，见 panel.css -->
+        <div class="list-pager" id="sessPager" hidden>
+          <span class="list-pages" id="sessPages"></span>
+          <div class="list-pager-right">
+            <button type="button" class="btn btn-mini" id="sessPrevBtn">上一页</button>
+            <button type="button" class="btn btn-mini" id="sessNextBtn">下一页</button>
+            <input type="text" class="list-jump" id="sessJump" inputmode="numeric" autocomplete="off" aria-label="跳至页码">
+            <select class="sessions-sel" id="sessPageSize">
+              <option value="20" selected>20</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </div>
+        </div>
       </aside>
       <div class="sessions-drawer-mask" id="sessDrawerMask"></div>
 
