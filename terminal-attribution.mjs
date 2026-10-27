@@ -34,6 +34,9 @@ function cwdKey(value) {
 // it becomes the most recent; the endpoint-level card aggregates both
 // regardless. Only rows that exist in the agents payload bind, mirroring the
 // pid path.
+// opencode 2.1.x breaks the cwd premise itself (see soleInteractiveTui): its
+// TUI can display a session in any project, so the recency rule supersedes the
+// cwd match there while it is the machine's only TUI.
 function sessionRowInstanceIdFor(cwd, feed, instanceRow) {
   const key = cwdKey(cwd);
   if (key === null) return null;
@@ -49,6 +52,44 @@ function sessionRowInstanceIdFor(cwd, feed, instanceRow) {
     }
   }
   return best === null ? null : best.id;
+}
+
+// Recency pick over one endpoint's session feed: the most-recently-active row
+// that exists in the agents payload (ties on lastActive resolve by id, same as
+// the cwd bridge). Used by the sole-owner fallback below.
+function latestActiveSessionRowId(feed, instanceRow) {
+  let best = null;
+  for (const meta of feed) {
+    if (!meta || typeof meta.id !== "string") continue;
+    if (String(meta.originator ?? "").toLowerCase().includes("desktop")) continue;
+    if (!instanceRow.has(`${meta.agentId}:${meta.id}`)) continue;
+    const lastActive = typeof meta.lastActive === "number" && Number.isFinite(meta.lastActive) ? meta.lastActive : 0;
+    if (best === null || lastActive > best.lastActive || (lastActive === best.lastActive && meta.id < best.id)) {
+      best = { id: meta.id, lastActive };
+    }
+  }
+  return best === null ? null : best.id;
+}
+
+// Whether this terminal session runs every interactive opencode TUI on the
+// machine. opencode 2.1.x decoupled a TUI's session directory from its launch
+// directory (project switching / restoring the last project — live forensics
+// 2026-10-27: terminal launched at Desktop\agent-home, the TUI's live session
+// belonged to an Anyswitch worktree), so the cwd bridge misses exactly the
+// sessions a user is working in and the right rail falls empty. When a single
+// TUI exists it owns every session row of the endpoint — the most recently
+// active one is the session it is displaying. With a second TUI running the
+// recency answer could name the other terminal's session, so the bridge stays
+// cwd-only and unbound rather than guessing.
+function soleInteractiveTui(detected, candidates, agentId) {
+  let total = 0;
+  let mine = 0;
+  for (const proc of detected) {
+    if (!proc || proc.agentId !== agentId || !Number.isFinite(proc.pid)) continue;
+    total += 1;
+    if (candidates.some((entry) => entry.agentId === agentId && entry.pid === proc.pid)) mine += 1;
+  }
+  return mine > 0 && mine === total;
 }
 
 // Join terminal sessions with detected client processes + the agents payload.
@@ -119,6 +160,14 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
     const bridgedId = feed !== undefined && feed.length > 0
       ? sessionRowInstanceIdFor(session.cwd, feed, instanceRow)
       : null;
+    // opencode only: when this terminal runs the machine's only interactive
+    // TUI, recency is the authoritative answer (see soleInteractiveTui) and
+    // beats a cwd match — the TUI may be working in a session whose directory
+    // is not the shell's, and a stale same-cwd row would freeze the rail on
+    // another project's numbers. Other session-row endpoints keep cwd-only.
+    const sessionRowId = best.agentId === "opencode" && soleInteractiveTui(detected, candidates, "opencode")
+      ? (latestActiveSessionRowId(feed ?? [], instanceRow) ?? bridgedId)
+      : bridgedId;
     // Which shape wins when both exist depends on what a pid row means there.
     // codex: a codex-<pid> row only ever comes from launcher-tagged traffic, so
     // it names the session that actually ran in that process — keep it first.
@@ -126,8 +175,8 @@ export function attributeTerminalSessions(sessions, detected, agents, sessionFee
     // that started opencode, which never carries the conversation's requests),
     // so the bridged session row is strictly the more accurate answer.
     const instanceId = SESSION_ROW_FIRST_AGENT_IDS.has(best.agentId)
-      ? (bridgedId ?? pidRowId)
-      : (pidRowId ?? bridgedId);
+      ? (sessionRowId ?? pidRowId)
+      : (pidRowId ?? sessionRowId);
     return {
       ...session,
       agent: {
