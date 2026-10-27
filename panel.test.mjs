@@ -7207,6 +7207,52 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
+  // 回归钉（M2-T2）：⊕ 与点历史行走的共用判定门用 `GET /api/terminal/sessions/:id`
+  // 只读 id 与 status，而宿主那条单读会把全量回放窗一起送（实测 0.58–0.61MB）。
+  // 面板代理层剥掉它——与列表路由同一口径。修前这条会红（响应里带着 buffer）。
+  it("单会话读剥掉回放窗：响应不含 buffer，仍带 id/status", async () => {
+    // 宿主侧负载按现场量级造：一条会话的回放窗 ≈600KB 的原始块。
+    const hostBody = {
+      id: "098fb88f", label: "Claude Code", cwd: "D:\\dev", shell: "cmd", pid: 6360,
+      status: "running", cols: 122, rows: 22, buffer: ["\u001b[31m" + "x".repeat(600 * 1024)],
+    };
+    const hostBytes = Buffer.byteLength(JSON.stringify(hostBody));
+    let readCalls = 0;
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-read-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => {
+        readCalls += 1;
+        return { status: 200, body: hostBody };
+      },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/098fb88f", "GET");
+    await router.handle(req, res);
+    assert.equal(readCalls, 1, "裸 id 的 GET 必须走剥壳的单读处理器，不能退回直通代理");
+    assert.equal(res.statusCode, 200);
+    const body = json();
+    assert.equal(body.buffer, undefined, "回放窗属于 SSE 流，单读不得把它搬给浏览器");
+    assert.equal(body.id, "098fb88f", "调用方判「记录还在」用 id");
+    assert.equal(body.status, "running", "调用方判 exited/working 用 status");
+    // 相对口径：剥掉之后在线上只剩零头（不是「少一点」，是量级差）。
+    assert.ok(
+      Buffer.byteLength(res.body) * 50 < hostBytes,
+      `单读响应 ${Buffer.byteLength(res.body)}B vs 宿主 ${hostBytes}B：回放窗没剥干净`,
+    );
+  });
+
+  it("单会话读原样带回宿主的 404（记录已消失时调用方据此降级）", async () => {
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-read-404-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => ({ status: 404, body: { error: "not_found" } }),
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/deadbeef", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 404);
+    assert.equal(json().error, "not_found");
+  });
+
   it("codex 会话桥接：pid 形绑不上时按 cwd 绑 codex-sess 实例行", async () => {
     const router = terminalRouter({
       sessions: [{ id: "t1", label: "Codex 终端", cwd: "D:\\dev\\bridge", shell: "cmd", pid: 8888 }],

@@ -563,6 +563,32 @@ async function defaultFetchTerminalSession(id, { token } = {}) {
   }
 }
 
+// 单会话读（宿主 /terminal/sessions/:id）：宿主的响应里带全量回放窗，所以只给
+// 面板代理层用——出网前由 stripSessionReplayWindow 剥掉（见 handleTerminalSessionRead）。
+// status 原样带回，宿主的 404 不被抹成 200。
+async function defaultFetchTerminalSessionRead(id, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions/${encodeURIComponent(id)}`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
+// 回放窗（session.buffer）属于 SSE 流，不属于任何一次读接口的响应：列表路由在
+// handleTerminalSessionsList 里剥，单会话读在这里剥。宿主哪天改成不带了也照常
+// 走——剥的动作对不带 buffer 的载荷是幂等的。
+function stripSessionReplayWindow(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const { buffer, ...rest } = payload;
+  return rest;
+}
+
 async function defaultRestartTerminalSession(id, body, { token } = {}) {
   if (!token) return null;
   try {
@@ -929,6 +955,9 @@ export function createPanelRouter({
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
    createTerminalSession = defaultCreateTerminalSession,
    fetchTerminalSessionFn = defaultFetchTerminalSession,
+   // 单会话读（裸 id 的 GET，宿主那条会连回放窗一起送）。面板代理会剥掉回放窗，
+   // 单测注入 { status, body } 即可断言剥离，不碰真宿主。
+   fetchTerminalSessionReadFn = defaultFetchTerminalSessionRead,
    restartTerminalSessionFn = defaultRestartTerminalSession,
    // 内切换内容前的杀前兜底探测（terminal-switch-guard.mjs）：会话 PTY 树里有没有
    // 活着的命令子进程。默认真跑 PowerShell 全表；单测注入桩，不碰真进程枚举。
@@ -1254,6 +1283,21 @@ export function createPanelRouter({
       opencode: feed && Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
     };
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, sessionFeeds) });
+  }
+
+  // 单会话读（⊕ 与历史行的共用判定门读它取 id/status）：宿主那条 GET 把全量回放
+  // 窗一起送（实测 0.58–0.61MB，ANSI 流 JSON 转义后 ≈5.1×），而调用方只读 id 与
+  // status。回放归 SSE 流——与列表路由同一口径，在面板代理层剥掉；宿主侧响应形状
+  // 不动（改宿主得换终端宿主进程才生效，会带走当时全部 PTY）。
+  async function handleTerminalSessionRead(res, id) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    const read = await fetchTerminalSessionReadFn(id, { token });
+    if (!read) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    if (read.status < 200 || read.status >= 300) {
+      return sendJson(res, read.status, read.body ?? { ok: false, error: "terminal_host_unavailable" });
+    }
+    return sendJson(res, 200, stripSessionReplayWindow(read.body));
   }
 
   // ---- 终端会话 ↔ agent 对话存档绑定（复活带回原对话） ----
@@ -3549,6 +3593,8 @@ export function createPanelRouter({
         return handleTerminalSessionSwitch(req, res, switchMatch[1], switchBody);
       }
       if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
+      // 裸会话 id＝读一条会话（剥回放窗后回给浏览器）；子路由（stream 等）仍直通。
+      if (method === "GET" && !suffix.includes("/")) return handleTerminalSessionRead(res, suffix);
       if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);
       if (method === "POST") {
         try {
