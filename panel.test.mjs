@@ -7241,6 +7241,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(body.buffer, undefined, "回放窗属于 SSE 流，单读不得把它搬给浏览器");
     assert.equal(body.id, "098fb88f", "调用方判「记录还在」用 id");
     assert.equal(body.status, "running", "调用方判 exited/working 用 status");
+    assert.equal(res.headers["cache-control"], "no-cache", "与直通代理（proxyTerminal）同一响应头口径");
     // 相对口径：剥掉之后在线上只剩零头（不是「少一点」，是量级差）。
     assert.ok(
       Buffer.byteLength(res.body) * 50 < hostBytes,
@@ -7258,6 +7259,45 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     await router.handle(req, res);
     assert.equal(res.statusCode, 404);
     assert.equal(json().error, "not_found");
+  });
+
+  // 回归钉（M2-T3，评审必修）：`/stream` 是 SSE，绝不能落到剥壳的单读处理器上——
+  // 那会把整条事件流当 JSON 解析/改写（回放全没）。把路由条件放宽成「所有 GET 都
+  // 剥壳」时这条必红：单读处理器被调用、content-type 变成 application/json。
+  it("SSE 子路（/stream）仍直通代理：不剥壳、content-type 是 event-stream、首帧是快照", async () => {
+    const sse = "event: snapshot\ndata: {\"id\":\"098fb88f\",\"status\":\"running\"}\n\nevent: data\ndata: \"hello\"\n\n";
+    let readCalls = 0;
+    const proxied = [];
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-stream-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => { readCalls += 1; return { status: 200, body: { id: "098fb88f" } }; },
+      terminalProxyFetchFn: async (url) => {
+        proxied.push(String(url));
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    // 直通代理要写流：补一个能收 chunk 的 res（共享的 fakeReqRes 只收 end）。
+    const chunks = [];
+    const res = {
+      statusCode: null, headers: {}, headersSent: false, _events: {},
+      writeHead(code, h) { this.statusCode = code; this.headers = h || {}; this.headersSent = true; },
+      write(chunk) { chunks.push(Buffer.from(chunk)); return true; },
+      end(data) { if (data !== undefined) chunks.push(Buffer.from(data)); },
+      once(event, fn) { (this._events[event] ??= []).push(fn); return this; },
+    };
+    const req = {
+      url: "/panel/api/terminal/sessions/098fb88f/stream", method: "GET",
+      headers: { host: "127.0.0.1", origin: "http://127.0.0.1:47820", "x-anyswitch-panel": "1" },
+      on() { return req; },
+    };
+    await router.handle(req, res);
+    assert.equal(readCalls, 0, "SSE 子路不得被剥壳的单读处理器接管");
+    assert.equal(proxied.length, 1, "子路应当走直通代理");
+    assert.match(proxied[0], /\/terminal\/sessions\/098fb88f\/stream$/, "直通到宿主的 stream 路由");
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/event-stream");
+    assert.match(Buffer.concat(chunks).toString("utf8"), /^event: snapshot/, "首帧必须是快照事件");
   });
 
   it("codex 会话桥接：pid 形绑不上时按 cwd 绑 codex-sess 实例行", async () => {
@@ -12952,15 +12992,23 @@ describe("内切杀前复核（switch-guard 双探）", () => {
     assert.equal(restarts, 1, "空闲会话照常内切");
   });
 
-  it("首探超时（null）但复核干净 → 仍换：复核只滤误判，不放宽保护", async () => {
+  // 评审钉（M2-T3，安全方向）：首探没跑成（null：超时/枚举不可信）一律拒换，不许被
+  // 复探的「干净」观察救回来。修前这里会放行——一次没看完的枚举不该由后一次兜底。
+  it("首探超时（null）→ 409 fail-safe：复探的「干净」不得把它救回来", async () => {
     let restarts = 0;
+    const seen = [];
     const { switchOnce } = switchFixture({
-      probeTerminalCommandTreeFn: async (pid, opts = {}) => (opts.delayMs !== undefined ? false : null),
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => {
+        seen.push(opts);
+        return opts.delayMs !== undefined ? false : null;
+      },
       restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
     });
-    const { res } = await switchOnce();
-    assert.equal(res.statusCode, 200);
-    assert.equal(restarts, 1);
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409, "判不出＝拒换（fail-safe），不是「干净」");
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0, "判不出时不得换会话");
+    assert.equal(seen.length, 2, "复探照常发起（并行形态不变），只是它的结论不再采纳");
   });
 
   it("复核也判不出（null）→ 仍拒：探测失败亦拒", async () => {
