@@ -2181,7 +2181,9 @@ test("内切换换 agent：镜像按身份重置，新会话页不回填老会�
     // 重挂即按镜像整屏重绘：新镜像必须查不到老 agent 的任何帧
     const replay = session.screen.toReplay();
     assert.ok(!replay.includes("CLAUDE帧"), "回放里不得残留老 agent 画面（客户端重挂不回填）");
-    assert.ok(replay.startsWith("\u001b[0m\u001b[2J\u001b[H"), "回放以清屏序列开场");
+    // 纯新会话界面：新镜像必须与同尺寸全新会话的镜像逐字节一致（替代无钉力的
+    // 「以清屏序列开场」——toReplay 无条件以该前缀开场，钉不住任何东西）。
+    assert.equal(replay, createScreenMirror({ cols: 20, rows: 4 }).toReplay(), "新镜像与全新会话逐字节一致");
     assert.equal(session.screen.info().historyLines, 0, "镜像历史一并清空（重建镜像，不靠 3J no-op）");
     // 字节窗是宿主重启恢复的原料：旧 agent 字节全部作废，只剩重置序列（旧帧不再跨重挂常驻）
     assert.equal(session.buffer.join(""), "\u001b[0m\u001b[2J\u001b[H", "清窗后 journal 只剩清屏序列");
@@ -2290,6 +2292,84 @@ test("同身份 restart 保史：同 agentId/resume 重开仍走衔接卫生（�
     assert.ok(!session.screen.toReplay().includes("行 8"), "换 resume 后旧会话画面不回填");
     assert.ok(!session.screen.toReplay().includes("切换前帧"), "换 resume 后上一会话画面不回填");
     assert.equal(session.screen.info().historyLines, 0, "换 resume 后镜像历史清空");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("同 agent 全新内切：同 agentId ＋ clearResume 清旧 resume，重置由 clearResume 项独立兜住", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-identity-clear-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "旧会话", cwd: root, shell: "cmd", cols: 20, rows: 4,
+        agentId: "kimi", agentName: "Kimi Code",
+        resume: { endpoint: "kimi", id: "conv-1" },
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+      }),
+    }).then((r) => r.json());
+    for (let i = 1; i <= 8; i += 1) calls[0].pty.dataListener?.(`旧会话帧-${i}\r\n`);
+    const session = host.sessions.get(created.id);
+    assert.ok(session.screen.info().historyLines > 0, "前置：旧会话已滚出历史");
+
+    // 生产唯一触发形态（panel.mjs 全新内切恒发）：同一 agentId ＋ clearResume、
+    // 不带 resume——identityChanged 三分项里只有 clearResume 项为真，重置必须
+    // 由它独立兜住；该项回退，同 agent 新会话回填旧画面的 bug 原地复活。
+    const switched = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "新会话", agentId: "kimi", agentName: "Kimi Code", clearResume: true,
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+      }),
+    });
+    assert.equal(switched.status, 200, "同 agent 全新内切成功");
+    assert.ok(!session.screen.toReplay().includes("旧会话帧"), "同 agent 新会话不得回填旧会话画面");
+    assert.equal(session.screen.info().historyLines, 0, "镜像历史清空");
+    assert.equal(session.buffer.join(""), "\u001b[0m\u001b[2J\u001b[H", "journal 只剩清屏序列");
+  } finally {
+    await host.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("内切换 agentId 单独变化（不带 resume/clearResume）：重置由 agentId 项独立兜住", async () => {
+  const root = mkdtempSync(`${tmpdir()}\\anyswitch-terminal-identity-agentid-`);
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, isAliveFn: () => false, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    // 老会话没有 resume（session.resume 未落过）——三分项里 clearResume 项恒假，
+    // 只有 agentId 项能为真
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "老会话", cwd: root, shell: "cmd", cols: 20, rows: 4,
+        agentId: "claude", agentName: "Claude Code",
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\claude.cmd"] },
+      }),
+    }).then((r) => r.json());
+    for (let i = 1; i <= 8; i += 1) calls[0].pty.dataListener?.(`CLAUDE帧-${i}\r\n`);
+    const session = host.sessions.get(created.id);
+    assert.ok(session.screen.info().historyLines > 0, "前置：老画面已滚出历史");
+
+    const switched = await fetch(url(`/terminal/sessions/${created.id}/restart`), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({
+        label: "新会话", agentId: "kimi", agentName: "Kimi Code",
+        launch: { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] },
+      }),
+    });
+    assert.equal(switched.status, 200, "内切换绑成功");
+    assert.ok(!session.screen.toReplay().includes("CLAUDE帧"), "仅 agentId 变化也要重置：老画面不回填");
+    assert.equal(session.screen.info().historyLines, 0, "镜像历史清空");
+    assert.equal(session.buffer.join(""), "\u001b[0m\u001b[2J\u001b[H", "journal 只剩清屏序列");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
