@@ -1266,10 +1266,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // 从尾部往前收，够 2MB 就停；收完反向输出，免掉逐条 unshift 的 O(n²) 搬移。
     const keep = [];
     for (let k = history.length - 1; k >= 0; k -= 1) {
-      const size = history[k].length + 2;
+      const size = history[k]._text.length + 2;
       if (bytes + size > TERMINAL_REPLAY_MAX_BYTES) break;
       bytes += size;
-      keep.push(history[k]);
+      keep.push(history[k]._text);
     }
     for (let k = keep.length - 1; k >= 0; k -= 1) parts.push(`${keep[k]}\u001b[0m\r\n`);
     if (inAlt) {
@@ -1366,7 +1366,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     },
     historyLines() {
       flush();
-      return history.map((line) => line.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+$/, ""));
+      return history.map((line) => line._text.replace(/\u001b\[[0-9;]*m/g, "").replace(/\s+$/, ""));
     },
     info() {
       // 刻意不排空待解析字节：info() 在每次建连（stream 判断要不要发回放）与
