@@ -55,7 +55,7 @@ import { compareVersions as compareVersionsDefault, parseVersion as parseVersion
 import { loadMessages as sessionLoadMessages, deleteSessions as sessionDeleteSessions, buildTurns as sessionBuildTurns, defaultScanner as sessionScanner } from "./session-scan.mjs";
 import { createSessionScanOffload } from "./session-scan-worker.mjs";
 import { TERMINAL_HOST_PORT } from "./terminal-process-manager.mjs";
-import { probeTerminalCommandTree as defaultProbeTerminalCommandTree } from "./terminal-switch-guard.mjs";
+import { probeTerminalCommandTree as defaultProbeTerminalCommandTree, SWITCH_GUARD_PROBE_TIMEOUT_MS } from "./terminal-switch-guard.mjs";
 import {
   RESUMABLE_AGENTS,
   TERMINAL_CONVERSATION_BINDINGS_FILE,
@@ -203,11 +203,13 @@ export function createPromptsPanelService({ base = process.env, homeDir, isEndpo
   };
 }
 
-function sendJson(res, status, body) {
+// extraHeaders：需要与直通代理保持同一响应头时用（终端读路由的 cache-control）。
+function sendJson(res, status, body, extraHeaders = null) {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
+    ...(extraHeaders ?? {}),
   });
   res.end(text);
 }
@@ -561,6 +563,32 @@ async function defaultFetchTerminalSession(id, { token } = {}) {
   } catch {
     return null;
   }
+}
+
+// 单会话读（宿主 /terminal/sessions/:id）：宿主的响应里带全量回放窗，所以只给
+// 面板代理层用——出网前由 stripSessionReplayWindow 剥掉（见 handleTerminalSessionRead）。
+// status 原样带回，宿主的 404 不被抹成 200。
+async function defaultFetchTerminalSessionRead(id, { token } = {}) {
+  if (!token) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}/terminal/sessions/${encodeURIComponent(id)}`, {
+      headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(1500),
+    });
+    const payload = await response.json().catch(() => null);
+    return { status: response.status, body: payload };
+  } catch {
+    return null;
+  }
+}
+
+// 回放窗（session.buffer）属于 SSE 流，不属于任何一次读接口的响应：列表路由在
+// handleTerminalSessionsList 里剥，单会话读在这里剥。宿主哪天改成不带了也照常
+// 走——剥的动作对不带 buffer 的载荷是幂等的。
+function stripSessionReplayWindow(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
+  const { buffer, ...rest } = payload;
+  return rest;
 }
 
 async function defaultRestartTerminalSession(id, body, { token } = {}) {
@@ -929,15 +957,24 @@ export function createPanelRouter({
    fetchTerminalSessionsList = defaultFetchTerminalSessionsList,
    createTerminalSession = defaultCreateTerminalSession,
    fetchTerminalSessionFn = defaultFetchTerminalSession,
+   // 单会话读（裸 id 的 GET，宿主那条会连回放窗一起送）。面板代理会剥掉回放窗，
+   // 单测注入 { status, body } 即可断言剥离，不碰真宿主。
+   fetchTerminalSessionReadFn = defaultFetchTerminalSessionRead,
+   // 直通代理（proxyTerminal）的出站 fetch。默认就是全局 fetch；单测注入一个假宿主，
+   // 才能在不碰真 47823 的前提下钉住子路由（stream 等）的直通形态。
+   terminalProxyFetchFn = fetch,
    restartTerminalSessionFn = defaultRestartTerminalSession,
    // 内切换内容前的杀前兜底探测（terminal-switch-guard.mjs）：会话 PTY 树里有没有
    // 活着的命令子进程。默认真跑 PowerShell 全表；单测注入桩，不碰真进程枚举。
    probeTerminalCommandTreeFn = defaultProbeTerminalCommandTree,
   // 判「忙」后复探的间隔：agent 启动期的瞬时子进程（环境探测、chcp、一次性包装壳）
-   // 与一次探测超时都会让单次判定落到「忙」，隔一拍再探一次即能分清瞬时与真在跑。
-   switchGuardRecheckDelayMs = 700,
-   // 复探的单次超时：只用来确认「刚才那波子进程还在不在」，不需要首探那么宽。
-   switchGuardRecheckTimeoutMs = 2000,
+  // 与一次探测超时都会让单次判定落到「忙」，隔一拍再探一次即能分清瞬时与真在跑。
+  // 复探在子进程里自己睡这一拍（与首探并行发起），不占首探的等待。
+  switchGuardRecheckDelayMs = 700,
+  // 复探的查询预算：与首探同宽（同一种枚举、同一批负载，两探判定质量必须一致——
+  // 修前复探 1200ms 名义、扣掉启动实得 ≈950ms，比首探窄一截，负载下最先倒）。
+  // 默认直接取 guard 的常量，防止两处漂移。上界见 handleTerminalSessionSwitch 的注释。
+  switchGuardRecheckTimeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS,
    // 终端会话 ↔ agent 对话存档的绑定（terminal-conversation-bindings.mjs）：
    // 复活时按绑定/兜底扫描给 launch 追加 resume 参数。store 为 null 时按
    // relayRoot 惰性建真库；扫描与刷新拍节可注入，单测不碰真存档、不挂真定时器。
@@ -1120,7 +1157,7 @@ export function createPanelRouter({
     const token = terminalPullToken();
     if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
     try {
-      const response = await fetch(`http://127.0.0.1:${TERMINAL_HOST_PORT}${targetPath}`, {
+      const response = await terminalProxyFetchFn(`http://127.0.0.1:${TERMINAL_HOST_PORT}${targetPath}`, {
         method,
         headers: {
           authorization: `Bearer ${token}`,
@@ -1254,6 +1291,24 @@ export function createPanelRouter({
       opencode: feed && Array.isArray(feed.opencodeSessions) ? feed.opencodeSessions : [],
     };
     sendJson(res, 200, { ok: true, sessions: attributeTerminalSessions(sessions, detected, agents, sessionFeeds) });
+  }
+
+  // 单会话读（⊕ 与历史行的共用判定门读它取 id/status）：宿主那条 GET 把全量回放
+  // 窗一起送（实测 0.58–0.61MB，ANSI 流 JSON 转义后 ≈5.1×），而调用方只读 id 与
+  // status。回放归 SSE 流——与列表路由同一口径，在面板代理层剥掉；宿主侧响应形状
+  // 不动（改宿主得换终端宿主进程才生效，会带走当时全部 PTY）。
+  // 收益口径：省掉的是**浏览器这一跳的字节与解析**，不是延迟——面板仍要向宿主拉
+  // 一次带 buffer 的单读（loopback 0.6MB / 几十毫秒），那一跳的耗时不变。
+  // cache-control 与直通代理一致（proxyTerminal 也设 no-cache）。
+  async function handleTerminalSessionRead(res, id) {
+    const token = terminalPullToken();
+    if (!token) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    const read = await fetchTerminalSessionReadFn(id, { token });
+    if (!read) return sendJson(res, 503, { ok: false, error: "terminal_host_unavailable" });
+    if (read.status < 200 || read.status >= 300) {
+      return sendJson(res, read.status, read.body ?? { ok: false, error: "terminal_host_unavailable" }, { "cache-control": "no-cache" });
+    }
+    return sendJson(res, 200, stripSessionReplayWindow(read.body), { "cache-control": "no-cache" });
   }
 
   // ---- 终端会话 ↔ agent 对话存档绑定（复活带回原对话） ----
@@ -1595,25 +1650,57 @@ export function createPanelRouter({
       } catch {
         /* 归属失败按无锚形态判 */
       }
-      const busy = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
-      if (busy !== false) {
-        // 复探一拍再判：单次探测把「agent 自己的启动期瞬时子进程」或一次超时
-        // 也算成在跑命令，会把空闲新会话的内切误拒（前端再把 409 静默落成新开
-        // 页签）。真在跑的命令跨得住两次探测，瞬时子进程跨不住——复探只滤掉
-        // 误拒，不动「探测失败亦拒」的保护语义。
-        //
-        // 代价是忙路径的往返变长：首探实测 1.4–1.6s，加这次间隔与复探约 3.7s，
-        // 两次都撞满超时则约 8.7s。干净路径（首探 false）零额外开销；这段期间前端
-        // 的在飞闸会吞掉后续点击，所以复探用更短的超时（只滤瞬时误判，真在跑的
-        // 命令首探就够判），把最坏耗时压回 6s 量级。
-        await new Promise((resolve) => setTimeout(resolve, switchGuardRecheckDelayMs));
-        const recheck = await probeTerminalCommandTreeFn(session.pid, {
-          anchorPid,
-          timeoutMs: switchGuardRecheckTimeoutMs,
-        });
-        if (recheck !== false) {
-          return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
-        }
+      // 双探并行发起：复探子进程先睡 switchGuardRecheckDelayMs 再查，观察点仍
+      // 在首探之后一拍，但启动税与首探重叠。修前是串行「首探 + 睡 0.7s + 复探」，
+      // 两次 PowerShell 启动税连付。
+      //
+      // 时限按**负载分布**定，不按空闲机实测（评审阻断项：1500ms 在 12 核跑满的
+      // 机器上把空闲会话判成 409，前端静默多开页签）。本机 16 核跑满 0/8/12/16 核
+      // 的首探 min/med/max：697/840/1049、1057/1701/2440、1769/2138/3119、
+      // 7864/9517/10172（ms）。两探都取 3000ms 查询预算 + 700ms 启动余量 ⇒
+      // 12 核跑满那档（端到端最慢 3119ms）落在 3700ms 内，留 ~19% 余量。
+      // 16 核全跑满这一档任何 PowerShell 方案都超（纯启动 2.2s、枚举 6–8s）——
+      // 那档按 fail-safe 拒换，是已登记的残余风险，不靠抬超时掩盖。
+      //
+      // 等待上界：启动余量 + max(首探, 间隔 + 复探) = 700 + max(3000, 3700) = 4400ms
+      // （修前 4000+700+2000=6700ms）；首探判不出时不等复探，那一路 ≤3700ms。
+      //
+      // 复探只滤「agent 启动期瞬时子进程」的误判，不动「探测失败亦拒」：真在跑的
+      // 命令跨得住两次探测，瞬时子进程跨不住。并行的代价是两次观察的间隔从
+      // 「首探耗时 + 700ms」缩到 ≈700ms——间隔变短只会让误判更偏向「拒换」
+      // （宁多开勿错杀），不会偏向错杀。
+      const recheckAbort = new AbortController();
+      // new Promise 的执行器同步跑：复探子进程在首探之前就出发（不是等首探返回
+      // 才起第二个进程）。执行器里抛错也走同一条 catch，按 null（拒换）处置。
+      const recheckPromise = new Promise((resolve) => resolve(probeTerminalCommandTreeFn(session.pid, {
+        anchorPid,
+        delayMs: switchGuardRecheckDelayMs,
+        timeoutMs: switchGuardRecheckTimeoutMs,
+        signal: recheckAbort.signal,
+      })))
+        // 复探被中止/抛错一律按 null（＝拒换）：中止只发生在首探已判干净的场合，
+        // 那个值调用方不再看；异常则沿用「探测失败亦拒」。
+        .catch(() => null);
+      let first;
+      try {
+        first = await probeTerminalCommandTreeFn(session.pid, { anchorPid });
+      } catch (error) {
+        recheckAbort.abort();
+        await recheckPromise;
+        throw error;
+      }
+      let recheck = null;
+      if (first === true) {
+        recheck = await recheckPromise;
+      } else {
+        // first 为 false（干净）或 null（判不出）：复探都不再采纳，立刻掐掉。
+        // null 走 fail-safe 拒换——一次没看完的枚举不能被后来的「干净」观察救回来
+        // （评审钉：超时不得当成干净放行），这条只影响安全方向。
+        recheckAbort.abort();
+        await recheckPromise;
+      }
+      if (first !== false && recheck !== false) {
+        return sendJson(res, 409, { ok: false, code: "switch_busy", error: "switch_busy" });
       }
     }
     const switchStartedAt = Date.now();
@@ -3549,6 +3636,8 @@ export function createPanelRouter({
         return handleTerminalSessionSwitch(req, res, switchMatch[1], switchBody);
       }
       if (!/^[a-f0-9-]+(?:\/(?:input|resize|stream|restart|close))?$/i.test(suffix)) return sendJson(res, 400, { ok: false, error: "invalid_terminal_session" });
+      // 裸会话 id＝读一条会话（剥回放窗后回给浏览器）；子路由（stream 等）仍直通。
+      if (method === "GET" && !suffix.includes("/")) return handleTerminalSessionRead(res, suffix);
       if (method === "GET") return proxyTerminal(req, res, `/terminal/sessions/${suffix}`);
       if (method === "POST") {
         try {

@@ -19,7 +19,32 @@
 // 常走——引擎底下挂着的命令进程仍算在跑。
 import { execFile } from "node:child_process";
 
-export const SWITCH_GUARD_PROBE_TIMEOUT_MS = 4000;
+// 单次枚举的**查询**预算（不含 PowerShell 冷启动，见 SWITCH_GUARD_STARTUP_ALLOWANCE_MS）。
+//
+// 负载分布实测（本机 16 核，跑满 0/8/12/16 核，各 5 个样本，单位 ms）：
+//
+//   负载     启动(中位)   首探 min/med/max        拆掉启动后的查询 max
+//   0/16     270          697 / 840 / 1049        ~780
+//   8/16     450          1057 / 1701 / 2440      ~1990
+//   12/16    719          1769 / 2138 / 3119      ~2400
+//   16/16    2264         7864 / 9517 / 10172     ~7900
+//
+// 3000ms 的判据是「12 核跑满仍要能换」：那档端到端最慢 3119ms，配 700ms 启动
+// 余量后上限 3700ms，留 ~19% 余量。16 核全跑满这一档任何 PowerShell 方案都救不了
+// （纯启动就要 2.2s、一次枚举 6–8s），撞满即按 null 处置＝拒换，交给面板侧
+// fail-safe，实测数字与残余风险写在 mission 交班里，不靠继续抬超时凑绿。
+//
+// 修前是 4000ms 且只给首探：彼时两探串行、复探另算 2000ms，最坏 6700ms；而
+// 4000ms 对「12 核跑满的查询」其实不够（查询就要 2.4s + 启动 0.7s）。
+export const SWITCH_GUARD_PROBE_TIMEOUT_MS = 3000;
+
+// PowerShell 冷启动 + WMI 首次枚举的余量。实测中位 270/450/719/2264ms（0/8/12/16
+// 核跑满）。取 700ms＝覆盖到 12 核跑满那档；16 核全跑满时启动本身就超预算，
+// 结果是两次探测都按超时→拒换（fail-safe），不是误换。
+// 它单独成项而不是摊进探测预算：execFile 的 timeout 从 spawn 起算，启动开销会
+// 吃掉查询窗口——不把这段补回来，两探的「真实查询窗」就都不是标称值（修前复探
+// 名义 1200ms、实得 ≈950ms，比首探还窄一截）。
+export const SWITCH_GUARD_STARTUP_ALLOWANCE_MS = 700;
 
 // 全表查询（不带 name 过滤）：命令子进程的 image 千姿百态（npm/python/构建器
 // …），白名单式过滤必然漏，漏报就是误杀。查询按需低频（用户点击内切时一次），
@@ -107,17 +132,41 @@ export function hasRunningCommand(table, { rootPid, anchorPid = null }) {
 }
 
 // 一次按需探测。true＝树里有正在执行的命令；false＝光杆（等输入/交互提示符）；
-// null＝没跑成（spawn 失败/超时/起点不在枚举表里）。execFileFn 与 timeoutMs 可
-// 注入，单测不碰真 PowerShell。
-export async function probeTerminalCommandTree(rootPid, { anchorPid = null, execFileFn = execFile, timeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS } = {}) {
+// null＝没跑成（spawn 失败/超时/被中止/起点不在枚举表里）。execFileFn 与 timeoutMs
+// 可注入，单测不碰真 PowerShell。
+//
+// delayMs：查询前先睡这么久（脚本里 Start-Sleep）。给「复探」用——调用方要在首探
+// 之后一拍再取一次观察，把它塞进子进程自己睡，两个探测的启动税就能重叠：修前
+// 复探是串行等首探返回再起进程（再付一次启动税 + 一次查询），现在是「复探进程
+// 先起、睡够再查」，整段等待由最慢的一次封顶。
+// timeoutMs 只算**查询**这一段：execFile 的 timeout 另加 delayMs 与
+// SWITCH_GUARD_STARTUP_ALLOWANCE_MS，所以两个探测真正拿到的查询窗口一样宽。
+// signal：AbortSignal。首探判出「干净」后调用方立刻掐掉还在睡的复探子进程，
+// Node 会杀掉它并把这次探测置成 null（调用方此时已不再看这个值）。
+export async function probeTerminalCommandTree(rootPid, {
+  anchorPid = null,
+  execFileFn = execFile,
+  timeoutMs = SWITCH_GUARD_PROBE_TIMEOUT_MS,
+  delayMs = 0,
+  signal = null,
+} = {}) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return null;
+  const sleepMs = Number.isFinite(delayMs) && delayMs > 0 ? Math.round(delayMs) : 0;
+  const script = sleepMs > 0 ? `Start-Sleep -Milliseconds ${sleepMs}; ${SWITCH_GUARD_PS_QUERY}` : SWITCH_GUARD_PS_QUERY;
   let out;
   try {
     out = await new Promise((resolve, reject) => {
       execFileFn(
         "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-Command", SWITCH_GUARD_PS_QUERY],
-        { windowsHide: true, timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+        ["-NoProfile", "-NonInteractive", "-Command", script],
+        {
+          windowsHide: true,
+          // spawn 起算的超时＝睡 + 冷启动 + 查询。不把前两段加进来，标称的
+          // timeoutMs 就只是「查询能分到多少」，负载下两探先后的判定质量不一致。
+          timeout: sleepMs + SWITCH_GUARD_STARTUP_ALLOWANCE_MS + timeoutMs,
+          maxBuffer: 8 * 1024 * 1024,
+          ...(signal ? { signal } : {}),
+        },
         (error, stdout) => {
           if (error && !stdout) reject(error);
           else resolve(stdout);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { parseProcessTable, hasRunningCommand, probeTerminalCommandTree } from "./terminal-switch-guard.mjs";
+import { parseProcessTable, hasRunningCommand, probeTerminalCommandTree, SWITCH_GUARD_STARTUP_ALLOWANCE_MS } from "./terminal-switch-guard.mjs";
 
 // switch-guard 的三段判定：解析（CIM 行形状）→ 后代搜索（锚优先＋根形态定证据层
 // ＋dsh 派生豁免）→ 按需探测（execFile 注入）。路由层的 409 行为在
@@ -178,5 +178,37 @@ describe("probeTerminalCommandTree：按需探测", () => {
     assert.equal(await probeTerminalCommandTree(0, { execFileFn: counting }), null);
     assert.equal(await probeTerminalCommandTree("10", { execFileFn: counting }), null);
     assert.equal(spawned, 0);
+  });
+
+  // 复探形态（M2-T3）：观察点由子进程自己睡出来，好让两个探测的启动税重叠。
+  it("delayMs：脚本先 Start-Sleep，睡的那段不占查询预算", async () => {
+    let captured = null;
+    const exec = async (file, args, opts, cb) => { captured = { file, args, opts }; cb(null, "10\t1\tcmd.exe\tcmd /c claude\n"); };
+    await probeTerminalCommandTree(10, { execFileFn: exec, delayMs: 700, timeoutMs: 1200 });
+    assert.match(captured.args[3], /^Start-Sleep -Milliseconds 700; Get-CimInstance /, "查询前先睡这一拍");
+    assert.equal(captured.opts.timeout, 700 + SWITCH_GUARD_STARTUP_ALLOWANCE_MS + 1200,
+      "execFile 的超时＝睡 + 冷启动余量 + 查询预算：标称的 timeoutMs 必须整段留给查询");
+    // 不给 delayMs 时脚本原样（首探形态），超时＝启动余量 + 预算。
+    await probeTerminalCommandTree(10, { execFileFn: exec, timeoutMs: 1500 });
+    assert.match(captured.args[3], /^Get-CimInstance /);
+    assert.equal(captured.opts.timeout, SWITCH_GUARD_STARTUP_ALLOWANCE_MS + 1500);
+    // 两探拿到同一个查询窗（评审：复探名义 1200 实得 ≈950，比首探窄，负载下先倒）。
+    const queryWindow = (sleep, budget) => sleep + SWITCH_GUARD_STARTUP_ALLOWANCE_MS + budget - sleep - SWITCH_GUARD_STARTUP_ALLOWANCE_MS;
+    assert.equal(queryWindow(700, 1200), 1200);
+    assert.equal(queryWindow(0, 1200), 1200);
+  });
+
+  it("signal 透传给 execFile；被中止（AbortError）按 null 处置", async () => {
+    const ctl = new AbortController();
+    let seenSignal = null;
+    const exec = async (file, args, opts, cb) => {
+      seenSignal = opts.signal;
+      cb(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }), "");
+    };
+    ctl.abort();
+    assert.equal(await probeTerminalCommandTree(10, { execFileFn: exec, signal: ctl.signal }), null);
+    assert.equal(seenSignal, ctl.signal, "中止信号必须到得了子进程（掐掉复探靠它）");
+    // 不给 signal 时不往 opts 里塞一个 undefined：老注入桩只认自己认识的键。
+    await probeTerminalCommandTree(10, { execFileFn: async (file, args, opts, cb) => { assert.equal("signal" in opts, false); cb(null, "10\t1\tcmd.exe\tx\n"); } });
   });
 });

@@ -7207,6 +7207,99 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     assert.equal(body.sessions[0].buffer, undefined, "输出缓冲留在 SSE 流，不进轮询列表");
   });
 
+  // 回归钉（M2-T2）：⊕ 与点历史行走的共用判定门用 `GET /api/terminal/sessions/:id`
+  // 只读 id 与 status，而宿主那条单读会把全量回放窗一起送（实测 0.58–0.61MB）。
+  // 面板代理层剥掉它——与列表路由同一口径。
+  //
+  // 红/绿的记账要说清（别当行为证据用）：旧码（13f84d0）在这条用例上是**形态红**
+  // ——注入口还不存在，路由退回 proxyTerminal 直通真宿主，临时根里的 token 换来
+  // 503，根本走不到 body.buffer 那一行。「旧码真的把 0.6MB 吐给浏览器」这件事的
+  // 行为证据是 route A/B 实测（608,817B → 693B），不是这条用例。
+  // 这条钉的是**剥离行为在不在**：把 stripSessionReplayWindow 改成原样透传（注入
+  // 口保留）时，只有下面两条 buffer 断言红、404 那条照绿（见交班记录）。
+  it("单会话读剥掉回放窗：响应不含 buffer，仍带 id/status", async () => {
+    // 宿主侧负载按现场量级造：一条会话的回放窗 ≈600KB 的原始块。
+    const hostBody = {
+      id: "098fb88f", label: "Claude Code", cwd: "D:\\dev", shell: "cmd", pid: 6360,
+      status: "running", cols: 122, rows: 22, buffer: ["\u001b[31m" + "x".repeat(600 * 1024)],
+    };
+    const hostBytes = Buffer.byteLength(JSON.stringify(hostBody));
+    let readCalls = 0;
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-read-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => {
+        readCalls += 1;
+        return { status: 200, body: hostBody };
+      },
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/098fb88f", "GET");
+    await router.handle(req, res);
+    assert.equal(readCalls, 1, "裸 id 的 GET 必须走剥壳的单读处理器：退回直通代理就没有剥离可言");
+    assert.equal(res.statusCode, 200);
+    const body = json();
+    assert.equal(body.buffer, undefined, "回放窗属于 SSE 流，单读不得把它搬给浏览器");
+    assert.equal(body.id, "098fb88f", "调用方判「记录还在」用 id");
+    assert.equal(body.status, "running", "调用方判 exited/working 用 status");
+    assert.equal(res.headers["cache-control"], "no-cache", "与直通代理（proxyTerminal）同一响应头口径");
+    // 相对口径：剥掉之后在线上只剩零头（不是「少一点」，是量级差）。
+    assert.ok(
+      Buffer.byteLength(res.body) * 50 < hostBytes,
+      `单读响应 ${Buffer.byteLength(res.body)}B vs 宿主 ${hostBytes}B：回放窗没剥干净`,
+    );
+  });
+
+  it("单会话读原样带回宿主的 404（记录已消失时调用方据此降级）", async () => {
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-read-404-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => ({ status: 404, body: { error: "not_found" } }),
+    });
+    const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/deadbeef", "GET");
+    await router.handle(req, res);
+    assert.equal(res.statusCode, 404);
+    assert.equal(json().error, "not_found");
+  });
+
+  // 回归钉（M2-T3，评审必修）：`/stream` 是 SSE，绝不能落到剥壳的单读处理器上——
+  // 那会把整条事件流当 JSON 解析/改写（回放全没）。把路由条件放宽成「所有 GET 都
+  // 剥壳」时这条必红：单读处理器被调用、content-type 变成 application/json。
+  it("SSE 子路（/stream）仍直通代理：不剥壳、content-type 是 event-stream、首帧是快照", async () => {
+    const sse = "event: snapshot\ndata: {\"id\":\"098fb88f\",\"status\":\"running\"}\n\nevent: data\ndata: \"hello\"\n\n";
+    let readCalls = 0;
+    const proxied = [];
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-session-stream-root-") },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchTerminalSessionReadFn: async () => { readCalls += 1; return { status: 200, body: { id: "098fb88f" } }; },
+      terminalProxyFetchFn: async (url) => {
+        proxied.push(String(url));
+        return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+      },
+    });
+    // 直通代理要写流：补一个能收 chunk 的 res（共享的 fakeReqRes 只收 end）。
+    const chunks = [];
+    const res = {
+      statusCode: null, headers: {}, headersSent: false, _events: {},
+      writeHead(code, h) { this.statusCode = code; this.headers = h || {}; this.headersSent = true; },
+      write(chunk) { chunks.push(Buffer.from(chunk)); return true; },
+      end(data) { if (data !== undefined) chunks.push(Buffer.from(data)); },
+      once(event, fn) { (this._events[event] ??= []).push(fn); return this; },
+    };
+    const req = {
+      url: "/panel/api/terminal/sessions/098fb88f/stream", method: "GET",
+      headers: { host: "127.0.0.1", origin: "http://127.0.0.1:47820", "x-anyswitch-panel": "1" },
+      on() { return req; },
+    };
+    await router.handle(req, res);
+    assert.equal(readCalls, 0, "SSE 子路不得被剥壳的单读处理器接管");
+    assert.equal(proxied.length, 1, "子路应当走直通代理");
+    assert.match(proxied[0], /\/terminal\/sessions\/098fb88f\/stream$/, "直通到宿主的 stream 路由");
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers["content-type"], "text/event-stream");
+    assert.match(Buffer.concat(chunks).toString("utf8"), /^event: snapshot/, "首帧必须是快照事件");
+  });
+
   it("codex 会话桥接：pid 形绑不上时按 cwd 绑 codex-sess 实例行", async () => {
     const router = terminalRouter({
       sessions: [{ id: "t1", label: "Codex 终端", cwd: "D:\\dev\\bridge", shell: "cmd", pid: 8888 }],
@@ -12843,6 +12936,130 @@ parentPort.on("message", (message) => {
     await router.handle(req, res);
     await flushAsyncSideEffects();
     assert.equal(readTerminalBindings(root), null, "判不出就宁缺毋滥");
+  });
+});
+
+// 内切前的杀前复核（switch-guard 双探）——保护语义的钉子：树里有活着的命令进程
+// 就不换会话（宁多开勿错杀），两次观察缺一不可；同时钉住「复探与首探并行发起、
+// 首探判干净就掐掉复探」这一形态（修前是串行等首探返回再起第二个进程）。
+describe("内切杀前复核（switch-guard 双探）", () => {
+  // 会话 cwd 用真实存在的临时目录：launch 组装会校验工作目录。
+  const switchFixture = (extra) => {
+    const cwd = mkTestDir("anyswitch-switch-guard-cwd-");
+    const router = createPanelRouter({
+      storePaths: { root: mkTestDir("anyswitch-switch-guard-") },
+      base: { ...process.env },
+      logger: null, metricsCollector: null, aliasResolver: null, aliasPath: null,
+      fetchRelayAgents: async () => null,
+      fetchRelayDetectedProcesses: async () => null,
+      fetchTerminalSessionsList: async () => [],
+      fetchTerminalSessionFn: async (id) => ({ id, status: "running", agentId: "kimi", cwd, pid: 4242 }),
+      fetchTerminalSessionReadFn: async (id) => ({ status: 200, body: { id, status: "running" } }),
+      scanAgentConversationsFn: async () => [],
+      ...extra,
+    });
+    const switchOnce = async () => {
+      const out = fakeReqRes("/panel/api/terminal/sessions/aaaa1111/switch", "POST", { agentId: "kimi", cwd });
+      await router.handle(out.req, out.res);
+      return out;
+    };
+    return { router, switchOnce };
+  };
+
+  it("有活命令必拒：首探与复探都判在跑 → 409 switch_busy，且不动宿主", async () => {
+    let restarts = 0;
+    const seen = [];
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => { seen.push(opts); return true; },
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0, "树里有活命令时不得换会话（宁多开勿错杀）");
+    assert.equal(seen.length, 2, "两次观察缺一不可——复核不许被省掉");
+    assert.equal(seen.find((o) => o.delayMs !== undefined)?.delayMs, 700, "复探由子进程自己睡出这一拍");
+  });
+
+  it("空闲必换：两次都判干净 → 200 并转到宿主 restart", async () => {
+    let restarts = 0;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async () => false,
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id, status: "running" } }; },
+    });
+    const { res } = await switchOnce();
+    assert.equal(res.statusCode, 200);
+    assert.equal(restarts, 1, "空闲会话照常内切");
+  });
+
+  // 评审钉（M2-T3，安全方向）：首探没跑成（null：超时/枚举不可信）一律拒换，不许被
+  // 复探的「干净」观察救回来。修前这里会放行——一次没看完的枚举不该由后一次兜底。
+  it("首探超时（null）→ 409 fail-safe：复探的「干净」不得把它救回来", async () => {
+    let restarts = 0;
+    const seen = [];
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => {
+        seen.push(opts);
+        return opts.delayMs !== undefined ? false : null;
+      },
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409, "判不出＝拒换（fail-safe），不是「干净」");
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0, "判不出时不得换会话");
+    assert.equal(seen.length, 2, "复探照常发起（并行形态不变），只是它的结论不再采纳");
+  });
+
+  it("复核也判不出（null）→ 仍拒：探测失败亦拒", async () => {
+    let restarts = 0;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => (opts.delayMs !== undefined ? null : true),
+      restartTerminalSessionFn: async (id) => { restarts += 1; return { status: 200, body: { id } }; },
+    });
+    const { res, json } = await switchOnce();
+    assert.equal(res.statusCode, 409);
+    assert.equal(json().code, "switch_busy");
+    assert.equal(restarts, 0);
+  });
+
+  it("双探并行发起：复探在首探返回之前就已出发", async () => {
+    let recheckStarted = false;
+    let firstSawRecheckStarted = null;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: async (pid, opts = {}) => {
+        if (opts.delayMs !== undefined) { recheckStarted = true; return true; }
+        firstSawRecheckStarted = recheckStarted;
+        return true;
+      },
+      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+    });
+    await switchOnce();
+    assert.equal(firstSawRecheckStarted, true, "复探必须先于首探返回发起，否则又退回串行两次启动");
+  });
+
+  it("首探判干净就掐掉复探：不白等它睡满一拍", async () => {
+    let recheckSignal = null;
+    let pendingTimer = null;
+    const { switchOnce } = switchFixture({
+      probeTerminalCommandTreeFn: (pid, opts = {}) => {
+        if (opts.delayMs === undefined) return Promise.resolve(false);
+        recheckSignal = opts.signal;
+        return new Promise((resolve) => {
+          pendingTimer = setTimeout(() => resolve(false), 5000);
+          opts.signal?.addEventListener("abort", () => { clearTimeout(pendingTimer); resolve(null); });
+        });
+      },
+      restartTerminalSessionFn: async (id) => ({ status: 200, body: { id } }),
+    });
+    const guard = new Promise((_, reject) => {
+      const t = setTimeout(() => reject(new Error("首探判干净后复探没有被掐掉（白等了一拍）")), 1500);
+      t.unref?.();
+    });
+    const { res } = await Promise.race([switchOnce(), guard]);
+    clearTimeout(pendingTimer);
+    assert.equal(res.statusCode, 200);
+    assert.equal(recheckSignal?.aborted, true, "复探子进程必须被中止");
   });
 });
 
