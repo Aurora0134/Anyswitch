@@ -7209,7 +7209,14 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
 
   // 回归钉（M2-T2）：⊕ 与点历史行走的共用判定门用 `GET /api/terminal/sessions/:id`
   // 只读 id 与 status，而宿主那条单读会把全量回放窗一起送（实测 0.58–0.61MB）。
-  // 面板代理层剥掉它——与列表路由同一口径。修前这条会红（响应里带着 buffer）。
+  // 面板代理层剥掉它——与列表路由同一口径。
+  //
+  // 红/绿的记账要说清（别当行为证据用）：旧码（13f84d0）在这条用例上是**形态红**
+  // ——注入口还不存在，路由退回 proxyTerminal 直通真宿主，临时根里的 token 换来
+  // 503，根本走不到 body.buffer 那一行。「旧码真的把 0.6MB 吐给浏览器」这件事的
+  // 行为证据是 route A/B 实测（608,817B → 693B），不是这条用例。
+  // 这条钉的是**剥离行为在不在**：把 stripSessionReplayWindow 改成原样透传（注入
+  // 口保留）时，只有下面两条 buffer 断言红、404 那条照绿（见交班记录）。
   it("单会话读剥掉回放窗：响应不含 buffer，仍带 id/status", async () => {
     // 宿主侧负载按现场量级造：一条会话的回放窗 ≈600KB 的原始块。
     const hostBody = {
@@ -7228,7 +7235,7 @@ describe("虚拟终端归属接线（terminal sessions list + recent requests）
     });
     const { req, res, json } = fakeReqRes("/panel/api/terminal/sessions/098fb88f", "GET");
     await router.handle(req, res);
-    assert.equal(readCalls, 1, "裸 id 的 GET 必须走剥壳的单读处理器，不能退回直通代理");
+    assert.equal(readCalls, 1, "裸 id 的 GET 必须走剥壳的单读处理器：退回直通代理就没有剥离可言");
     assert.equal(res.statusCode, 200);
     const body = json();
     assert.equal(body.buffer, undefined, "回放窗属于 SSE 流，单读不得把它搬给浏览器");
