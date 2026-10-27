@@ -383,6 +383,7 @@ describe("终端视图左栏换血（M4）", () => {
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
         const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
@@ -440,6 +441,7 @@ describe("终端视图左栏换血（M4）", () => {
         const TERMINAL_RAIL_SPINNER = '<span class="rail-term-spinner">SPINNER-STUB</span>';
         const TERMINAL_RAIL_DONE_DOT = '<span class="rail-term-done" title="已完成">DONE-STUB</span>';
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
@@ -550,6 +552,7 @@ describe("终端视图左栏换血（M4）", () => {
         const TERMINAL_RAIL_SPINNER = "";
         const TERMINAL_RAIL_DONE_DOT = "";
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailPendingRowHtml")}
@@ -588,6 +591,13 @@ describe("终端视图左栏换血（M4）", () => {
         function terminalCwdInitial() { return "C:\\\\Users\\\\fixture"; }
         ${extractFn("terminalRailSessionMap")}
         ${extractFn("terminalRailFindOpenSession")}
+        let terminalRailSelectPending = null;
+        let terminalRailSelectSeq = 0;
+        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+        ${extractFn("terminalRailSwitchBusy")}
+        ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailEndSelect")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
         function enrichTerminalSessions() {}
@@ -598,6 +608,9 @@ describe("终端视图左栏换血（M4）", () => {
           run: () => terminalRailResumeSession(session),
           sessions: terminalBackendSessions,
           activeId: () => activeTerminalPreviewId,
+          pending: () => terminalRailSelectPending,
+          setBusy: (busy) => { terminalSwitchInFlight = busy; },
+          endSelect: (token) => terminalRailEndSelect(token),
         };
       `)(session, log, apiImpl);
       return { sandbox, log };
@@ -717,6 +730,44 @@ describe("终端视图左栏换血（M4）", () => {
       assert.equal(log.toasts.length, 1);
       assert.equal(log.toasts[0].msg, "无法启动这个终端", "非续接类失败走终端创建的既有兜底");
     });
+
+    it("乐观选中（M5）：点击当拍落 pending；新建失败即撤，成功不清（live 接管）", async () => {
+      // 点亮发生在调判定门之前：点击当拍高亮成立，不等宿主 1~2s。
+      const ok = runResume(RESUMABLE, async () => ({
+        id: "t-9", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "C:\\dev\\alpha",
+      }));
+      ok.sandbox.run();
+      assert.deepEqual(ok.sandbox.pending(), { endpoint: "kimi", id: "s-1", token: 1, timer: ok.sandbox.pending().timer },
+        "BeginSelect 当拍落 pending（带端点+会话 id 两键，同 FindOpenSession 口径）");
+      await flush();
+      assert.equal(ok.sandbox.activeId(), "t-9", "成功照旧置活跃");
+      assert.ok(ok.sandbox.pending() && ok.sandbox.pending().id === "s-1",
+        "成功不清：点亮行与 live 派生同一行，自然接管（TTL 兜底会收）");
+      ok.sandbox.endSelect(null); // 收尾清计时器（TTL 已 unref，不拖进程）
+
+      // 失败清点：新建失败即撤——点亮的那行没换成，继续说它选中就是说谎。
+      const failed = runResume(RESUMABLE, async () => {
+        const err = new Error("HTTP 500：spawn_failed");
+        err.code = "spawn_failed";
+        throw err;
+      });
+      await failed.sandbox.run();
+      await flush();
+      assert.equal(failed.sandbox.pending(), null, "新建失败即撤乐观高亮");
+      assert.equal(failed.log.toasts.length, 1, "照旧只提示一次");
+
+      // 续接类短码同路：落批准句，pending 同样撤（clear 在分支之前）。
+      const unsupported = runResume(RESUMABLE, async () => {
+        const err = new Error("HTTP 400：resume-unsupported");
+        err.code = "resume-unsupported";
+        err.serverCode = "resume-unsupported";
+        throw err;
+      });
+      await unsupported.sandbox.run();
+      await flush();
+      assert.equal(unsupported.sandbox.pending(), null, "resume-* 失败也撤");
+      assert.equal(unsupported.log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "落批准句");
+    });
   });
 
   describe("打开的终端行交互（vm 真跑）", () => {
@@ -727,6 +778,14 @@ describe("终端视图左栏换血（M4）", () => {
         const terminalBackendSessions = sessions;
         let activeTerminalPreviewId = activeId;
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
+        let terminalRailSelectSeq = 0;
+        let terminalSwitchInFlight = false;
+        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+        ${extractFn("terminalRailSwitchBusy")}
+        ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailEndSelect")}
         function $(id) { return els[id] ?? null; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
         function rememberTerminalSessionId(id) { log.remembered.push(id); }
@@ -739,6 +798,10 @@ describe("终端视图左栏换血（M4）", () => {
           activeId: () => activeTerminalPreviewId,
           markDone: (id) => terminalDoneUnread.set(id, true),
           done: (id) => terminalDoneUnread.has(id),
+          begin: (session) => terminalRailBeginSelect(session),
+          endSelect: (token) => terminalRailEndSelect(token),
+          pending: () => terminalRailSelectPending,
+          seq: () => terminalRailSelectSeq,
         };
       `)(sessions, activeId, log, els);
       return { sandbox, log };
@@ -778,6 +841,27 @@ describe("终端视图左栏换血（M4）", () => {
       assert.ok(sandbox.done("t1"), "别的会话的标记不受牵连");
     });
 
+    it("乐观选中（M5）：activate 无条件作废旧令牌；EndSelect 令牌不匹配 no-op", () => {
+      const { sandbox, log } = runRail({ sessions: { t1: { id: "t1" }, t2: { id: "t2" } }, activeId: "t1" });
+      // 改主意清点：点 live 行（activate）前先有一发在飞的乐观选中（resume 路径落的）。
+      sandbox.begin({ endpoint: "kimi", id: "s-1" });
+      const stale = sandbox.pending().token;
+      assert.equal(stale, 1, "BeginSelect 领到令牌 1");
+      sandbox.activate("t2");
+      assert.equal(sandbox.pending(), null, "activate 无条件作废旧令牌——置活跃即由 live 派生接管");
+      assert.equal(sandbox.activeId(), "t2", "置活跃照旧");
+      assert.equal(log.renders, 1, "仍只重渲一次（快路径让帧不改变重渲次数）");
+
+      // 令牌不匹配 no-op：迟到的旧切换清不掉新点击的高亮。
+      sandbox.begin({ endpoint: "kimi", id: "s-1" });
+      const fresh = sandbox.pending().token;
+      assert.equal(fresh, sandbox.seq(), "再次 BeginSelect 领到当前 seq 作令牌（activate 作废时已推进）");
+      sandbox.endSelect(999);
+      assert.ok(sandbox.pending(), "旧令牌（999）不匹配 → no-op，新高亮留着");
+      sandbox.endSelect(fresh);
+      assert.equal(sandbox.pending(), null, "匹配即清");
+    });
+
     it("关闭叉走页签同一条处理：点到对应页签里那颗 ×，不复制第二份关闭逻辑", () => {
       const clicked = [];
       const makeTab = (id, closeEl) => ({
@@ -806,6 +890,114 @@ describe("终端视图左栏换血（M4）", () => {
       const missing = runRail({ sessions: { t1: {}, t2: {} }, tabs });
       missing.sandbox.close("t9");
       assert.deepEqual(clicked, [], "id 对不上时什么都不点");
+    });
+  });
+
+  describe("乐观选中态（M5）：行选中判据 pending 优先（vm 真跑）", () => {
+    // 行 HTML 直判：同一份 pending 状态下两行各渲一次，等价于一屏——「一屏至多
+    // 一条选中」由判据本身保证（pending 存在时只有命中行亮）。
+    const rowSandbox = () => new Function("log", `
+      const log2 = log;
+      const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
+      const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
+      function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+      function terminalRailRelTime() { return "3 分钟前"; }
+      function terminalRailIsArchived() { return false; }
+      function esc(v) { return String(v); }
+      function escapeHtml(v) { return String(v || ""); }
+      const TERMINAL_RAIL_SPINNER = "";
+      const TERMINAL_RAIL_DONE_DOT = "";
+      const terminalDoneUnread = new Map();
+      function terminalRailSessionMap() { return {}; }
+      let terminalRailSelectPending = null;
+      let terminalRailSelectSeq = 0;
+      let terminalSwitchInFlight = false;
+      const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+      function renderTerminalRail() { log2.rails += 1; }
+      ${extractFn("terminalRailSwitchBusy")}
+      ${extractFn("terminalRailBeginSelect")}
+      ${extractFn("terminalRailEndSelect")}
+      ${extractFn("terminalRailStateSlotHtml")}
+      ${extractFn("terminalRailRowHtml")}
+      ${extractFn("terminalRailPendingRowHtml")}
+      return {
+        row: terminalRailRowHtml,
+        pendingRow: terminalRailPendingRowHtml,
+        begin: (session) => terminalRailBeginSelect(session),
+        endSelect: (token) => terminalRailEndSelect(token),
+        pending: () => terminalRailSelectPending,
+      };
+    `)({ rails: 0 });
+
+    it("pending 命中非 live 行当拍亮；同期 live 活跃行立刻失亮", () => {
+      const fn = rowSandbox();
+      const live = { id: "t-1", status: "idle" };
+      const oldActiveRow = { id: "s-1", endpoint: "kimi", title: "甲" };
+      const targetRow = { id: "s-2", endpoint: "kimi", title: "乙" };
+      // 无 pending：原判（live 派生）——s-1 亮、s-2 不亮。
+      assert.ok(fn.row(oldActiveRow, live, "t-1").includes("is-active"), "基线：live 活跃行亮");
+      assert.ok(!fn.row(targetRow, null, "t-1").includes("is-active"), "基线：非活跃行不亮");
+
+      fn.begin({ endpoint: "kimi", id: "s-2" });
+      const hit = fn.row(targetRow, null, "t-1");
+      const old = fn.row(oldActiveRow, live, "t-1");
+      assert.ok(hit.includes("is-active"), "pending 命中的非 live 行当拍亮（不等宿主 1~2s）");
+      assert.ok(!old.includes("is-active"), "同期旧活跃行失亮——pending 优先于 live 派生，高亮不说谎");
+      assert.equal((hit.match(/is-active/g) || []).length, 1, "一行只带一个 is-active");
+      // 同 id 不同端点是另一条会话（FindOpenSession 两键口径）：不误亮。
+      assert.ok(!fn.row({ id: "s-2", endpoint: "claude", title: "乙" }, null, "t-1").includes("is-active"),
+        "端点不同不误亮（两键比对）");
+
+      // 收尾后回到 live 派生。
+      fn.endSelect(fn.pending().token);
+      assert.equal(fn.pending(), null, "匹配令牌收尾即清");
+      assert.ok(!fn.row(targetRow, null, "t-1").includes("is-active"), "收尾后非 live 行不再占选中");
+      assert.ok(fn.row(oldActiveRow, live, "t-1").includes("is-active"), "回到 live 派生（旧活跃行复位）");
+    });
+
+    it("pending 期间「新会话」兜底行不亮；无 pending 维持原判", () => {
+      const fn = rowSandbox();
+      const entry = { id: "t-9" };
+      fn.begin({ endpoint: "kimi", id: "s-2" });
+      assert.ok(!fn.pendingRow(entry, "t-9").includes("is-active"),
+        "pending 期间兜底行不亮——它没有历史身份，pending 命中的永远是历史行");
+      fn.endSelect(null);
+      assert.ok(fn.pendingRow(entry, "t-9").includes("is-active"), "无 pending 时维持原判（活跃兜底行照常亮）");
+    });
+
+    it("BeginSelect 只重渲栏（不碰终端屏重建）；在飞时不亮", () => {
+      const log = { rails: 0 };
+      const fn = new Function("log", `
+        const log2 = log;
+        let terminalRailSelectPending = null;
+        let terminalRailSelectSeq = 0;
+        let terminalSwitchInFlight = false;
+        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        let screenRuns = 0;
+        function renderTerminalRail() { log2.rails += 1; }
+        function renderTerminalPreviewSession() { screenRuns += 1; }
+        ${extractFn("terminalRailSwitchBusy")}
+        ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailEndSelect")}
+        return {
+          begin: (session) => terminalRailBeginSelect(session),
+          endSelect: (token) => terminalRailEndSelect(token),
+          pending: () => terminalRailSelectPending,
+          setBusy: (busy) => { terminalSwitchInFlight = busy; },
+          screenRuns: () => screenRuns,
+        };
+      `)(log);
+      fn.begin({ endpoint: "kimi", id: "s-2" });
+      assert.equal(log.rails, 1, "BeginSelect 只重渲栏一帧");
+      assert.equal(fn.screenRuns(), 0, "不触发终端屏重建（xterm 那 1~2s 不在高亮的关键路径上）");
+      fn.setBusy(true);
+      fn.endSelect(null);
+      fn.begin({ endpoint: "kimi", id: "s-3" });
+      assert.equal(fn.pending(), null, "在飞时不亮（亮也会被判定门静默吞掉——高亮说谎比慢更糟）");
+      fn.setBusy(false);
+      fn.begin({ endpoint: "kimi", id: "s-3" });
+      assert.ok(fn.pending() && fn.pending().id === "s-3", "放行后才点亮");
+      fn.endSelect(null);
     });
   });
 
@@ -1190,6 +1382,69 @@ describe("终端视图左栏换血（M4）", () => {
         "栏体只在终端视图露出，别处不白跑渲染");
     });
 
+    it("live 行快路径让帧（M5）：停放/建流/fit 成对延后双 rAF，帧令牌保连点（源码+vm 真跑）", async () => {
+      const render = extractFn("renderTerminalPreviewSession");
+      assert.ok(render.includes("{ revive = true, deferScreen = false } = {}"), "开关默认关，其余调用点行为不变");
+      const branch = render.slice(render.indexOf("if (deferScreen)"));
+      assert.ok(branch.includes("requestAnimationFrame(() => requestAnimationFrame(runDeferredScreen))"),
+        "双 rAF 调度（一帧给渲染器排程、一帧给合成器上屏）");
+      assert.ok(branch.indexOf("parkTerminalScreen();") < branch.indexOf("connectTerminalStream(session, { revive });"),
+        "停放排在建流之前：92f6ced 垫片次序，park 与 connect 成对延后");
+      assert.ok(branch.includes('if (currentView === "terminal") scheduleTerminalFit();'), "fit 同组延后");
+      assert.ok(branch.includes("if (terminalScreenSeq !== screenSeq) return;"), "帧令牌：连点时旧帧醒来即退场");
+      // 非 defer 路径保持同步直排（panel-terminal-loading 的切换入口断言同款字面）
+      assert.ok(render.includes("if (typeof parkTerminalScreen === \"function\") parkTerminalScreen();\n    connectTerminalStream(session, { revive });"),
+        "默认路径原样：停放→建流同步直排");
+      const passers = panelJs.match(/renderTerminalPreviewSession\(\{[^}]*deferScreen[^}]*\}\)/g) || [];
+      assert.equal(passers.length, 1, "只有一处传 deferScreen");
+      assert.ok(extractFn("terminalRailActivateSession").includes("renderTerminalPreviewSession({ deferScreen: true })"),
+        "传它的只有 terminalRailActivateSession（live 行快路径）");
+
+      // vm 真跑：栏体先渲、屏重建延后；连点只有最新一帧执行。
+      const log = { order: [], frames: 0 };
+      const fn = new Function("log", `
+        const order = log.order;
+        let currentView = "terminal";
+        let terminalBackendReady = true;
+        let terminalFirstConnectSettled = true;
+        const terminalBackendSessions = { t1: { id: "t1" } };
+        let activeTerminalPreviewId = "t1";
+        let terminalScreenSeq = 0;
+        const document = { hidden: false, querySelector: () => null };
+        function $(id) { return null; }
+        function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+        function renderTerminalRail() { order.push("rail"); }
+        function renderTerminalSessionData() { order.push("data"); }
+        function renderTerminalPreviewTabs() { order.push("tabs"); }
+        function clearTerminalEmptyState() { order.push("clearEmpty"); }
+        function renderTerminalEmptyState() { order.push("empty"); }
+        function parkTerminalScreen() { order.push("park"); }
+        function connectTerminalStream(session, opts) { order.push("connect:" + !!(opts && opts.revive)); }
+        function scheduleTerminalFit() { order.push("fit"); }
+        const requestAnimationFrame = (cb) => { log.frames += 1; queueMicrotask(cb); return log.frames; };
+        ${extractFn("renderTerminalPreviewSession")}
+        return renderTerminalPreviewSession;
+      `)(log);
+      fn({ deferScreen: true });
+      assert.deepEqual(log.order, ["rail", "clearEmpty", "data", "tabs"],
+        "同步任务里先渲栏与数据——高亮当拍成立，xterm 重建不挡首绘");
+      assert.equal(log.frames, 1, "第一层 rAF 当拍排上");
+      await flush();
+      assert.deepEqual(log.order, ["rail", "clearEmpty", "data", "tabs", "park", "connect:true", "fit"],
+        "双 rAF 后按垫片次序成对执行（停放 → 建流 → fit）");
+      assert.equal(log.frames, 2, "双 rAF（嵌套两层）");
+      log.order.length = 0;
+      fn({ deferScreen: true });
+      fn({ deferScreen: true });
+      await flush();
+      assert.deepEqual(log.order, ["rail", "clearEmpty", "data", "tabs", "rail", "clearEmpty", "data", "tabs", "park", "connect:true", "fit"],
+        "连点两帧：两拍的栏体/数据都当拍渲，屏重建只有最新令牌那帧执行（旧帧醒来即退场）");
+      log.order.length = 0;
+      fn();
+      assert.deepEqual(log.order, ["rail", "clearEmpty", "data", "tabs", "park", "connect:true", "fit"],
+        "默认关：与改前一致（同步直排）");
+    });
+
     it("返回镜像：终端态栏底「返回」回进入终端前的视图（settingsReturnView 同款）", () => {
       const init = extractFn("initTerminalRail");
       assert.ok(init.includes("closeTerminalPreview"), "终端态「返回」回 terminalReturnView（closeTerminalPreview 同一链）");
@@ -1455,6 +1710,7 @@ describe("终端视图左栏换血（M4）", () => {
           const TERMINAL_RAIL_SPINNER = "";
           const TERMINAL_RAIL_DONE_DOT = "";
           const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
           ${extractFn("terminalRailStateSlotHtml")}
           ${extractFn("terminalRailRowHtml")}
           ${extractFn("terminalRailIsArchived")}
@@ -1565,6 +1821,7 @@ ${extractFn("terminalRailPendingRowHtml")}
         const TERMINAL_RAIL_SPINNER = "";
         const TERMINAL_RAIL_DONE_DOT = "";
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailIsArchived")}
@@ -1663,6 +1920,7 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
     const terminalDoneUnread = new Map();
+    let terminalRailSelectPending = null;
     ${extractFn("terminalRailStateSlotHtml")}
     let terminalRailHistory = history;
     let activeTerminalPreviewId = activeId;
@@ -1855,6 +2113,7 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
       const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
       const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
       const terminalDoneUnread = new Map(seed);
+      let terminalRailSelectPending = null;
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       return terminalRailRowHtml;

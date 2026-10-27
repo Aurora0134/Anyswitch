@@ -113,6 +113,14 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
     const terminalDoneUnread = new Map();
+    let terminalRailSelectPending = null;
+    let terminalRailSelectSeq = 0;
+    let terminalSwitchInFlight = false;
+    const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+    function renderTerminalRail() { renderTerminalRailHistory(terminalRailAgentId()); }
+    ${extractFn("terminalRailSwitchBusy")}
+    ${extractFn("terminalRailBeginSelect")}
+    ${extractFn("terminalRailEndSelect")}
     ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
@@ -123,6 +131,9 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
       scrolled: state.scrolled,
       prefs: () => terminalRailPrefs,
       removedAt: () => terminalRailRemovedAt,
+      begin: (session) => terminalRailBeginSelect(session),
+      endSelect: (token) => terminalRailEndSelect(token),
+      pending: () => terminalRailSelectPending,
     };
   `)(list, state, history, activeSession, prefs, removedAt, viewPrefs, apiImpl);
   return { fn, list, state };
@@ -144,6 +155,7 @@ function rowHtmlSandbox(prefs) {
     const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
     const terminalDoneUnread = new Map();
+    let terminalRailSelectPending = null;
     ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
     return terminalRailRowHtml;
@@ -753,6 +765,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
         function toast() {}
         function panelError(err, fallback) { return fallback; }
         function terminalRailAgentId() { return agentId; }
+        function terminalRailEndSelect() {}
         ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailCreateTerminalInDir")}
         return terminalRailCreateTerminalInDir;
@@ -1056,6 +1069,13 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         ${extractFn("terminalRailSessionMap")}
         ${extractFn("terminalRailFindOpenSession")}
         ${extractFn("terminalRailActivateSession")}
+        let terminalRailSelectPending = null;
+        let terminalRailSelectSeq = 0;
+        const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+        function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+        ${extractFn("terminalRailSwitchBusy")}
+        ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailEndSelect")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
         function enrichTerminalSessions() {}
@@ -1065,6 +1085,9 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         return {
           resume: terminalRailResumeSession,
           activeId: () => activeTerminalPreviewId,
+          pending: () => terminalRailSelectPending,
+          setBusy: (busy) => { terminalSwitchInFlight = busy; },
+          endSelect: (token) => terminalRailEndSelect(token),
         };
       `)(sessions, activeId, log, apiImpl);
       return { fn, log };
@@ -1155,6 +1178,46 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
       assert.ok(find.includes("session.resume.endpoint === endpoint") && find.includes("session.resume.id === id"),
         "两键比对：endpoint + 会话 id");
     });
+
+    it("乐观选中（M5）源码钉死：BeginSelect 在判定门之前点亮，失败清点两处到位", () => {
+      const fn = extractFn("terminalRailResumeSession");
+      assert.ok(fn.indexOf("terminalRailBeginSelect") < fn.indexOf("terminalRailSwitchOrCreate"),
+        "过完全部拦截后先点亮再调判定门——高亮不等宿主 1~2s");
+      assert.ok(extractFn("terminalRailBeginSelect").includes("terminalRailSwitchBusy()"),
+        "在飞闸前置为谓词：在飞时不亮（亮也会被吞，高亮说谎比慢更糟）");
+      const decide = extractFn("terminalRailSwitchOrCreateCore");
+      const busyAt = decide.indexOf('if (code === "switch_busy")');
+      assert.ok(decide.indexOf("terminalRailEndSelect(null)") > busyAt,
+        "判定门 catch 失败清点在 switch_busy 转新开之后（点击仍在兑现途中，不清）");
+      assert.ok(decide.indexOf("terminalRailEndSelect(null)") < decide.indexOf("} finally {"),
+        "清点不放 finally：working 转新开落点会把高亮弹回旧行");
+      assert.ok(extractFn("createAgentTerminal").includes("terminalRailEndSelect(null)"),
+        "新建失败同样清点（createAgentTerminal 的 catch）");
+      assert.ok(extractFn("terminalRailActivateSession").includes("terminalRailEndSelect(null)"),
+        "改主意清点：activate 无条件作废旧令牌");
+      assert.ok(extractFn("terminalRailActivateSession").includes("renderTerminalPreviewSession({ deferScreen: true })"),
+        "live 行快路径传 deferScreen（先让栏体高亮当拍渲，屏重建延后双 rAF）");
+      const row = extractFn("terminalRailRowHtml");
+      assert.ok(row.includes("terminalRailSelectPending") && row.includes('cls.push("is-active")'),
+        "行选中判据读 pending 状态位（不是 DOM-only 切类名——1s 轮询会冲掉）");
+      assert.ok(extractFn("terminalRailPendingRowHtml").includes("terminalRailSelectPending"),
+        "兜底行同口径：pending 存在时不亮");
+    });
+
+    it("乐观选中（M5）vm 真跑：在飞时不亮不切，放行后才点亮", async () => {
+      const { fn, log } = runResume({}, "t-0", async () => ({ id: "t-new", agentId: "kimi" }));
+      fn.setBusy(true);
+      fn.resume(HISTORY_ROW);
+      assert.equal(fn.pending(), null, "在飞不落 pending");
+      assert.deepEqual(log.posts, [], "在飞不发起（判定门同一条闸）");
+      fn.setBusy(false);
+      fn.resume(HISTORY_ROW);
+      assert.ok(fn.pending() && fn.pending().id === "s-1", "放行后当拍点亮");
+      await flush();
+      assert.equal(log.posts.length, 1, "放行后照旧走新建");
+      assert.equal(fn.activeId(), "t-new", "成功置活跃");
+      fn.endSelect(null);
+    });
   });
 
   describe("后端契约（源码钉死，真跑在 terminal-host/panel 测试）", () => {
@@ -1219,6 +1282,40 @@ describe("M8 T1 两段合并：live 内联 / 新会话兜底 / 无 agent 空树"
     // 组顶：兜底行排在 lastActive 200 的 s-2 之前（不看 lastActive，固定组顶）
     const order = [...sandbox.list.html.matchAll(/data-rail-term-(?:resume|session)="([^"]+)"/g)].map((m) => m[1]);
     assert.equal(order[0], "t-9", "兜底行在组顶");
+  });
+
+  it("乐观选中（M5）：pending 期间兜底行不亮、历史行亮，一屏至多一条（整树口径）", () => {
+    const sandbox = renderSandbox({
+      history: {
+        endpoint: "kimi",
+        sessions: [{ id: "s-2", endpoint: "kimi", project: "C:\\dev\\alpha", title: "接入渠道", lastActive: 200 }],
+        fetchedAt: 1,
+        error: null,
+      },
+      activeSession: { id: "t-9", cwd: "C:\\dev\\alpha", agent: { endpointId: "kimi" }, status: "idle", backendState: { createdAt: 500 } },
+    });
+    // 基线：活跃兜底行（t-9）亮。
+    sandbox.fn.render("kimi");
+    const baseRow = (id) => {
+      const at = sandbox.list.html.indexOf(`data-rail-term-resume="${id}"`) >= 0
+        ? sandbox.list.html.indexOf(`data-rail-term-resume="${id}"`)
+        : sandbox.list.html.indexOf(`data-rail-term-session="${id}"`);
+      return sandbox.list.html.slice(sandbox.list.html.lastIndexOf("<button", at), sandbox.list.html.indexOf("</button>", at));
+    };
+    assert.ok(baseRow("t-9").includes("is-active"), "基线：活跃兜底行亮（live 派生）");
+
+    // 点历史行 s-2（没开终端的老会话）：当拍亮 s-2，兜底行同拍失亮。
+    sandbox.fn.begin({ endpoint: "kimi", id: "s-2" });
+    sandbox.fn.render("kimi");
+    assert.ok(baseRow("s-2").includes("is-active"), "pending 命中的历史行当拍亮");
+    assert.ok(!baseRow("t-9").includes("is-active"), "同期活跃兜底行失亮（pending 优先，不说谎）");
+    assert.equal((sandbox.list.html.match(/is-active/g) || []).length, 1, "一屏至多一条选中");
+
+    // 收尾后回到 live 派生。
+    sandbox.fn.endSelect(null);
+    sandbox.fn.render("kimi");
+    assert.ok(!baseRow("s-2").includes("is-active"), "收尾后历史行不再占选中");
+    assert.ok(baseRow("t-9").includes("is-active"), "活跃兜底行复位");
   });
 
   it("兜底行的目录没有历史会话时，为它新建组（组头三件齐全）", () => {
@@ -1369,6 +1466,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       const TERMINAL_RAIL_SPINNER = "";
       const TERMINAL_RAIL_DONE_DOT = "";
       const terminalDoneUnread = new Map();
+      let terminalRailSelectPending = null;
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       ${extractFn("terminalRailPendingRowHtml")}
@@ -1486,6 +1584,7 @@ describe("M8 T2 选中态跟随聚焦", () => {
       const TERMINAL_RAIL_SPINNER = "";
       const TERMINAL_RAIL_DONE_DOT = "";
       const terminalDoneUnread = new Map();
+      let terminalRailSelectPending = null;
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       return terminalRailRowHtml;
@@ -1820,6 +1919,7 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         const TERMINAL_RAIL_SPINNER = "";
         const TERMINAL_RAIL_DONE_DOT = "";
         const terminalDoneUnread = new Map();
+        let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         return terminalRailRowHtml;
@@ -2568,6 +2668,13 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       ${extractFn("noteTerminalWorkingStatus")}
       ${extractFn("enrichTerminalSessions")}
       const enrichTerminalSessionsReal = enrichTerminalSessions;
+      let terminalRailSelectPending = null;
+      let terminalRailSelectSeq = 0;
+      const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+      function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+      ${extractFn("terminalRailSwitchBusy")}
+      ${extractFn("terminalRailBeginSelect")}
+      ${extractFn("terminalRailEndSelect")}
       ${extractFn("terminalRailSwitchOrCreateCore")}
       ${extractFn("terminalRailSwitchOrCreate")}
       return {
@@ -2575,6 +2682,8 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
         goFresh: ({ agentId, cwd }) => terminalRailSwitchOrCreateCore({ agentId, cwd }),
         gate: () => terminalSwitchInFlight,
         sessions: terminalBackendSessions,
+        begin: (session) => terminalRailBeginSelect(session),
+        pending: () => terminalRailSelectPending,
       };
     `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
     return { fn, log };
@@ -2792,6 +2901,47 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
       assert.equal(fn.sessions["t-a"].resume, null, `${code}：身份没被改花`);
       assert.equal(fn.gate(), false, `${code}：失败也放行（可重试）`);
     }
+  });
+
+  it("乐观选中（M5）：内切失败即撤 pending；switch_busy 转新开不清（点击仍在兑现途中）", async () => {
+    // 失败清点：宿主判死 → 撤高亮（点亮的行没换成，继续说它选中就是说谎）。
+    const failed = runSwitch({
+      sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 500：boom"), { serverCode: "http_500" }); },
+    });
+    failed.fn.begin(HISTORY_ROW);
+    assert.ok(failed.fn.pending(), "判定门前点亮");
+    failed.fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(failed.fn.pending(), null, "内切失败即撤乐观高亮");
+    assert.equal(failed.log.toasts.length, 1, "照旧提示一次");
+
+    // resume-* 族（落批准句的那条）同路撤。
+    const unsupported = runSwitch({
+      sessions: { "t-a": { ...BLANK } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 400：resume-unsupported"), { code: "resume-unsupported", serverCode: "resume-unsupported" }); },
+    });
+    unsupported.fn.begin(HISTORY_ROW);
+    unsupported.fn.go(HISTORY_ROW);
+    await flush();
+    assert.equal(unsupported.fn.pending(), null, "resume-* 失败也撤");
+    assert.equal(unsupported.log.toasts[0].msg, "这个 Agent 的会话暂时不能在终端里续接", "落批准句");
+
+    // switch_busy 不清：静默转新开，点击仍在兑现途中（新开失败由
+    // createAgentTerminal 的 catch 清，见 panel-terminal-rail 的真跑）。
+    const busy = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 409：switch_busy"), { code: "switch_busy", serverCode: "switch_busy" }); },
+      createImpl: async () => ({ id: "t-new", resume: { endpoint: "kimi", id: "s-1" } }),
+    });
+    busy.fn.begin(HISTORY_ROW);
+    busy.fn.go(HISTORY_ROW);
+    await flush();
+    assert.ok(busy.fn.pending() && busy.fn.pending().id === "s-1", "switch_busy 不清（新开落点仍会兑现这次点击）");
+    assert.equal(busy.log.creates.length, 1, "静默转新开");
   });
 
   // ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
