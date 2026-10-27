@@ -1417,6 +1417,42 @@ export function createTerminalHost({
     }
   }
 
+  // 内切换按身份重置镜像（M6）：这条终端就地换成另一个 agent / 另一段会话时，
+  // 旧 agent 画在镜像当前网格里的那一屏必须整屏作废。只做 restartHygiene 的话，
+  // 旧帧留在新 agent 画面上方、新输出只往下方续写，客户端一重挂就按镜像整屏
+  // 重绘，把老会话画面回填到新实例屏上（claude→kimi 显形即此）；残留还随
+  // markSessionDirty 落盘，跨宿主重启常驻。历史由「重建镜像＋清字节窗」清，
+  // 不依赖 3J——镜像的 3J 是 no-op（2026-10-18 拍板，回滚历史归页签）。
+  function resetSessionScreen(session) {
+    try {
+      // flush 把切片解析留下的积压排空：inAlt 要读「镜像当前画面」的真值，
+      // 落后一帧就会漏发退屏序列、把已挂客户端关在备屏里（restartHygiene 同款口径）。
+      session.screen.flush();
+      const wasInAlt = session.screen.info().inAlt;
+      session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      // 字节窗是宿主重启恢复的原料：旧 agent 的字节全部作废（计数同步归零）。
+      session.buffer.length = 0;
+      session.bufferBytes = 0;
+      // 顺序硬要求：先弹备屏再清屏——反了清屏落进备屏、应用退屏时主画面又回来。
+      // 合成字节走 emit 单咽喉：在线 SSE 客户端实时收到清屏，字节窗留一份，
+      // 宿主重启恢复重喂同一段复现干净屏（restartHygiene 同款三方同拍）。新镜像
+      // 在重建之后才收到它们：1049l 对主屏是 no-op，2J+H 只清一张已空的屏。
+      if (wasInAlt) emit(session, "\u001b[?1049l");
+      emit(session, "\u001b[0m\u001b[2J\u001b[H");
+    } catch (error) {
+      // 重置失败不拦换绑：最坏退回改动前的显形形态，也不能卡死整条换绑。
+      // 解析面坏了就把旧镜像换掉——留着它等于继续把旧画面喂给新 agent。
+      logger.warn?.(`[terminal-host] screen reset skipped (${session.id}): ${error.message}`);
+      session.buffer.length = 0;
+      session.bufferBytes = 0;
+      try {
+        session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      } catch {
+        /* 重建也失败：保留原样，feedMirror 会在下一块输出时兜底新建 */
+      }
+    }
+  }
+
   // 进程代际护栏：重启会在旧进程的退出通知到达之前就 spawn 新一代（ConPTY 的
   // exit 通知要晚几十到几百毫秒）。没有代际判断时，旧进程迟到的 onExit 会把
   // session.pty 置空、把状态翻成 exited——新一代进程明明活着却被判死，面板
@@ -1509,6 +1545,14 @@ export function createTerminalHost({
       // 缺省字段一律沿用原值（restart 的既有语义：只更新带来的）。clearResume 是
       // 全新内切的显式清除位：内切成新会话时旧 resume 必须清空，残留会让面板的
       // 去重聚焦与「新会话」兜底行拿旧身份误判。
+      // 在改写身份字段之前算「身份是否真的换了」（M6）：agentId 不同、resume 换了
+      // 另一段会话、clearResume 清掉旧 resume，三种都意味着这条终端交给了另一个
+      // 身份——旧 agent 画在镜像里的那一屏对新 agent 是纯回填污染。同身份字段的
+      // 重开（复活/重挂带全量字段）与不带身份字段的普通重开都不算，继续保史。
+      const identityChanged =
+        (agentId && agentId !== session.agentId) ||
+        (resume && (!session.resume || resume.endpoint !== session.resume.endpoint || resume.id !== session.resume.id)) ||
+        (clearResume && session.resume !== null);
       if (label) session.label = label;
       if (agentId) session.agentId = agentId;
       if (agentName) session.agentName = agentName;
@@ -1521,8 +1565,11 @@ export function createTerminalHost({
       // 回滚历史归页签（2026-10-18 拍板：重启/清回滚不丢史）：重开只是换进程，
       // 字节窗与镜像原地保留、新进程输出续写在旧画面下方（与 VS Code 同屏重开
       // 终端同一语义）；宿主重启后恢复的深度以盘上尾窗预算为限（既有上限）。
-      // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。
+      // 衔接卫生只在镜像存在时做；缺失则兜底新建（空镜像无需卫生）。唯一例外是
+      // 内切换身份变了（M6）：旧画面整屏作废、换一只新镜像，否则新会话页上方
+      // 会回填老会话的完整内容——见 resetSessionScreen。
       if (!session.screen) session.screen = createScreenMirror({ cols: session.cols, rows: session.rows });
+      else if (identityChanged) resetSessionScreen(session);
       else restartHygiene(session);
       spawnSession(session);
       // 与新建路由同款：等 spawn 引起的那笔写落定再答，响应语义与旧同步写一致。
