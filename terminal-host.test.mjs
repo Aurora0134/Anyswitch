@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, statSync, mkdirSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTerminalHost, createTerminalQueryScanner, stripTerminalReplyProbes, watchParentProcess, installTerminalHostFaultHandlers, PARENT_WATCHDOG_INTERVAL_MS, WATCHDOG_MISSES_REQUIRED, TERMINAL_STATE_FILE } from "./terminal-host.mjs";
@@ -56,6 +56,12 @@ async function listen(host) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// 落盘形态：索引（成员表 id + 主题）＋ 每会话一份记录文件。要读某条会话的正文
+// 就走 host.sessionStatePath(id)——路径由宿主给出，测试不自己拼目录。
+function readSessionRecord(host, id) {
+  return JSON.parse(readFileSync(host.sessionStatePath(id), "utf8"));
+}
 
 // SSE 帧采集器：后台持续读流、按 "\n\n" 切帧、解析 event:/data: 两行、追加进
 // frames，直到连接结束或被 abort 打断。合帧用例要数「一个窗口内出了几帧」，
@@ -262,15 +268,15 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     assert.equal(listed.sessions[0].buffer, undefined, "窗口属 SSE 流，不上百秒一轮的轮询列表");
 
     await waitPersist();
-    // persistNow 异步化后，防抖拍到点 ≠ 写已落定：显式等链尾兜底（没脏时它是
+    // persistNow 异步化后，防抖拍到点 ≠ 写已落定：显式等泵尾兜底（没脏时它是
     // 纯空跳，脏还在就直接冲），下面两次读盘不再跟在途写赛跑。
     await host.persistNow();
-    const onDisk = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
-    const diskBytes = Buffer.byteLength(onDisk.sessions[0].buffer.join(""));
+    const onDisk = readSessionRecord(host, created.id);
+    const diskBytes = Buffer.byteLength(onDisk.buffer.join(""));
     assert.ok(diskBytes <= 128 * KB, `落盘尾部 ${diskBytes} 字节，超 128KB 预算`);
     assert.ok(diskBytes > 100 * KB, `落盘尾部只剩 ${diskBytes} 字节，裁得比预算狠`);
-    assert.ok(diskBytes < liveBytes, "落盘尾部紧于内存窗口：整文件重写按防抖跑");
-    assert.ok(onDisk.sessions[0].buffer.every((chunk) => whole.test(chunk)), "落盘尾部同样整块");
+    assert.ok(diskBytes < liveBytes, "落盘尾部紧于内存窗口");
+    assert.ok(onDisk.buffer.every((chunk) => whole.test(chunk)), "落盘尾部同样整块");
     await host.close();
     hostClosed = true;
 
@@ -299,9 +305,9 @@ test("回放窗口按字节裁尾：整块丢、最新块必留、列表不带�
     // 否则宿主再重启一次，恢复回来的就是一块白屏而不是那张画满的屏。
     await waitPersist();
     await restoredHost.persistNow();
-    const diskAgain = JSON.parse(readFileSync(`${root}\\terminal-sessions.json`, "utf8"));
-    assert.equal(diskAgain.sessions[0].buffer.length, 1, "超预算的单块照样落盘");
-    assert.ok(diskAgain.sessions[0].buffer[0].includes(marker(900)), "落的就是最新那块");
+    const diskAgain = readSessionRecord(restoredHost, created.id);
+    assert.equal(diskAgain.buffer.length, 1, "超预算的单块照样落盘");
+    assert.ok(diskAgain.buffer[0].includes(marker(900)), "落的就是最新那块");
   } finally {
     if (!hostClosed) await host.close().catch(() => {});
     if (restoredHost) await restoredHost.close().catch(() => {});
@@ -543,12 +549,15 @@ test("宿主换新进程后由盘上尾部重建镜像，回放仍出画面不�
 
 // ---------------------------------------------------------------------------
 // 性能改造钉子。三处病灶各自的回归防线：同尺寸 resize 短路（①）、SSE data 帧
-// 合帧（②）、脏位门控与异步原子写（③④）。观察手段说明：
+// 合帧（②）、脏位门控与异步原子写（③④）、落盘不再随会话数线性膨胀（⑥⑦⑧）。
+// 观察手段说明：
 //   - 「写没写盘」用 mtimeMs 判：内容比对分不出「重写了同样的内容」和「没写」，
 //     NTFS 的 100ns 时间戳分得出；断言前 sleep 25ms 只为跨过时钟粒度，不是在
-//     等异步写落定——落定一律走 await host.persistNow()（等链尾，没脏时空跳）。
+//     等异步写落定——落定一律走 await host.persistNow()（等泵尾，没脏时空跳）。
 //   - 「帧数/帧序」用 SSE 帧读取器数：窗口值由测试注入，让每个断言都不依赖
 //     真实时钟的运气（合帧用小窗口，exit/阈值冲刷用大到永不到点的窗口）。
+//   - 「落盘成本随会话数怎么变」用相对口径（⑥⑦）：仓里没有假时钟，绝对毫秒
+//     阈值必然 flaky，而「N 翻倍时单拍写了几份/多少字节」是纯结构量，可判死。
 
 // ① 前端 fit 后无条件补发 resize：同尺寸请求不得再走 ConPTY 重排与整份落盘。
 test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", async () => {
@@ -565,7 +574,7 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
     const pty = calls[0].pty;
     assert.deepEqual(pty.resizeCalls, [], "起点：创建后的 FakePty 未被重排过");
 
-    const before = statSync(host.statePath);
+    const before = statSync(host.sessionStatePath(created.id));
     await sleep(25); // 只为跨过 mtime 粒度，让「没写」可判
 
     const same = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
@@ -575,8 +584,8 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
     assert.deepEqual(await same.json(), { ok: true, cols: 100, rows: 30 }, "短路响应与全路径同形");
     await host.persistNow(); // 没脏即空跳；有脏即冲净——两种结果都算落定
     assert.deepEqual(pty.resizeCalls, [], "同尺寸 resize 不调 pty.resize（ConPTY 重排是多开卡顿源之一）");
-    const after = statSync(host.statePath);
-    assert.equal(after.mtimeMs, before.mtimeMs, "同尺寸 resize 不重写状态文件（含 128KB 级全量落盘）");
+    const after = statSync(host.sessionStatePath(created.id));
+    assert.equal(after.mtimeMs, before.mtimeMs, "同尺寸 resize 不重写这条会话的记录文件");
 
     // 对照组：尺寸真变了，全路径照旧——重排发生、盘上尺寸更新。
     const changed = await fetch(url(`/terminal/sessions/${created.id}/resize`), {
@@ -584,8 +593,8 @@ test("① 同尺寸 resize 短路：不调 pty.resize、不重写状态文件", 
     }).then((r) => r.json());
     assert.deepEqual(changed, { ok: true, cols: 120, rows: 40 });
     assert.deepEqual(pty.resizeCalls, [[120, 40]], "尺寸不同时 pty.resize 照常调用");
-    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
-    assert.equal(persisted.sessions[0].cols, 120, "实际变化的 resize 照常落盘");
+    const persisted = readSessionRecord(host, created.id);
+    assert.equal(persisted.cols, 120, "实际变化的 resize 照常落盘");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -750,11 +759,12 @@ test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
     }).then((r) => r.json());
 
     // 创建路由已等过落盘；此后内存再无变化，两次显式 persistNow 都必须是空跳。
-    const settled = statSync(host.statePath).mtimeMs;
+    // 探针读会话自己那份记录（索引只在成员/主题变化时重写，出字不碰它）。
+    const settled = statSync(host.sessionStatePath(created.id)).mtimeMs;
     await sleep(25); // 跨过 mtime 粒度，让「没写」可判
     await host.persistNow();
     await host.persistNow();
-    assert.equal(statSync(host.statePath).mtimeMs, settled, "无变化时 persistNow 不写盘");
+    assert.equal(statSync(host.sessionStatePath(created.id)).mtimeMs, settled, "无变化时 persistNow 不写盘");
 
     // 一条「走完整路径但无实际变化」的 mutate：杀掉 PTY 后发同尺寸 resize——
     // 旧实现这里照样整份重写；脏位门控下 persistNow 是纯空跳。
@@ -762,25 +772,26 @@ test("③ 脏位门控：无变化不写盘；有变化才写", async () => {
     await fetch(url(`/terminal/sessions/${created.id}/resize`), {
       method: "POST", headers: headers(host), body: JSON.stringify({ cols: 100, rows: 30 }),
     }).then((r) => r.json());
-    const afterExit = statSync(host.statePath).mtimeMs;
+    const afterExit = statSync(host.sessionStatePath(created.id)).mtimeMs;
     await sleep(25);
     await host.persistNow();
-    assert.equal(statSync(host.statePath).mtimeMs, afterExit, "PTY 已退出的同尺寸 resize（无实际变化）不写盘");
+    assert.equal(statSync(host.sessionStatePath(created.id)).mtimeMs, afterExit, "PTY 已退出的同尺寸 resize（无实际变化）不写盘");
 
     // 对照组：emit 一块输出 → 置脏 → 真写盘，盘上带得上这块。
     calls[0].pty.dataListener("新输出");
     await host.persistNow();
-    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
-    assert.ok(persisted.sessions[0].buffer.some((chunk) => chunk.includes("新输出")), "置脏后的变更落盘");
+    const persisted = readSessionRecord(host, created.id);
+    assert.ok(persisted.buffer.some((chunk) => chunk.includes("新输出")), "置脏后的变更落盘");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-// ④ 异步原子写的可观察性质：写进行中的任意时刻，状态文件都是完整可解析的 JSON
+// ④ 异步原子写的可观察性质：写进行中的任意时刻，落盘文件都是完整可解析的 JSON
 // （读者要么看到旧版全文、要么看到新版全文，永不看到半份）。大块输出拖长
-// writeFile(临时文件) 阶段，并发读者与写真正在时间上叠起来。
+// writeFile(临时文件) 阶段，并发读者与写真正在时间上叠起来。读的是这条会话的
+// 记录文件——128KB 级尾部写的就是它（索引只有几百字节，叠不上写）。
 test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件", async () => {
   const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-atomic-"));
   let pty = null;
@@ -793,17 +804,18 @@ test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件"
   const port = await listen(host);
   const url = (path) => `http://127.0.0.1:${port}${path}`;
   try {
-    await fetch(url("/terminal/sessions"), {
+    const created = await fetch(url("/terminal/sessions"), {
       method: "POST", headers: headers(host),
       body: JSON.stringify({ label: "原子", cwd: root, shell: "powershell" }),
     }).then((r) => r.json());
+    const recordPath = host.sessionStatePath(created.id);
 
     const big = "x".repeat(96 * 1024);
     const reads = [];
     let stopReading = false;
     const reader = (async () => {
       while (!stopReading) {
-        reads.push(readFileSync(host.statePath, "utf8"));
+        reads.push(readFileSync(recordPath, "utf8"));
         await new Promise((resolve) => setImmediate(resolve));
       }
     })();
@@ -818,11 +830,11 @@ test("④ 状态文件任意时刻可解析：原子替换不暴露半份文件"
     for (const [index, text] of reads.entries()) {
       let parsed = null;
       assert.doesNotThrow(() => { parsed = JSON.parse(text); }, `第 ${index} 次读必须是完整 JSON`);
-      assert.ok(Array.isArray(parsed.sessions), `第 ${index} 次读必须是完整状态结构`);
+      assert.ok(Array.isArray(parsed.buffer), `第 ${index} 次读必须是完整会话记录`);
     }
     // 终态也完整：最后一轮的大块按落盘尾部预算留在盘上。
-    const final = JSON.parse(readFileSync(host.statePath, "utf8"));
-    assert.ok(final.sessions[0].buffer.length >= 1, "终态快照内容完好");
+    const final = JSON.parse(readFileSync(recordPath, "utf8"));
+    assert.ok(final.buffer.length >= 1, "终态快照内容完好");
   } finally {
     await host.close();
     rmSync(root, { recursive: true, force: true });
@@ -868,6 +880,311 @@ test("⑤ 写盘失败时 close/clear-all 回 500 拒答，不答假 200", async
   }
 });
 
+// ---------------------------------------------------------------------------
+// ⑥⑦⑧ 落盘不再随会话数线性膨胀。
+//
+// 病灶（S3 报告 §2.1）：旧实现把「全部会话 + 每会话 128KB 尾部」序列化成一份
+// JSON，防抖每 250ms 整份重写。一个会话在出字，全部空闲会话的尾部也要跟着重写
+// 一遍——单拍成本 O(N)，现场实测 N=2 12ms/301KB、N=8 27ms/1.2MB、N=20 45ms/3MB，
+// 而且 `persistChain` 单笔超 250ms 就无界积压。用户点 ⊕ 不断新增会话，这条路径
+// 就是延迟的放大器。
+//
+// 观察面只用文件系统（不看宿主自报的计数）：一拍落盘的可观察结果是「哪些 .json
+// 的 mtime 变了、变了几个字节」。这样断言的是**行为**而不是某套内部计数，旧实现
+// 上没有这套计数也照样能被判红——正是回归钉该有的性质。
+// 口径仍是相对的（N 增长时看结构量的变化），不写绝对毫秒阈值：仓里没有假时钟，
+// 绝对阈值必然 flaky。
+
+const KB_ = 1024;
+
+// 根目录下全部 .json 的 { mtimeMs, size }。原子写留下的 .tmp 不在其中（它们是
+// 写完就 rename 掉的中间态，后缀不是 .json）。
+function snapshotStateFiles(root) {
+  const map = new Map();
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else if (entry.isFile() && entry.name.endsWith(".json")) {
+        const stats = statSync(path);
+        map.set(path, { mtimeMs: stats.mtimeMs, size: stats.size });
+      }
+    }
+  };
+  walk(root);
+  return map;
+}
+
+// 等「下一次落盘」落定：轮询到至少一个 .json 的 mtime/大小变了为止。返回这一拍
+// 写了哪些文件、合计多少字节——这就是单拍落盘成本的直接读数。
+async function waitForStateWrite(root, before, { timeoutMs = 2500 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const now = snapshotStateFiles(root);
+    const changed = [];
+    for (const [path, info] of now) {
+      const prev = before.get(path);
+      if (!prev || prev.mtimeMs !== info.mtimeMs || prev.size !== info.size) {
+        changed.push({ path, bytes: info.size });
+      }
+    }
+    if (changed.length > 0) {
+      return { files: changed.length, bytes: changed.reduce((total, item) => total + item.bytes, 0), changed };
+    }
+    if (Date.now() >= deadline) return { files: 0, bytes: 0, changed: [] };
+    await sleep(10);
+  }
+}
+
+// 建 N 个会话并把每条喂满落盘尾部预算（128KB），返回能直接 dataListener 的假 PTY。
+async function seedSessions(host, url, root, n) {
+  const ptys = [];
+  for (let i = 0; i < n; i += 1) {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell", cols: 120, rows: 34 }),
+    }).then((r) => r.json());
+    ptys.push(host.sessions.get(created.id).pty);
+  }
+  // 128KB 尾部：8 块 × 16KB。内容带 SGR，落盘时 ESC 会膨胀成 \u001b（六倍字节），
+  // 这正是现场状态文件 425KB ↔ 内存 262KB 那个比例。
+  const line = "\x1b[1;36m␣\x1b[0m 正在读取文件 abcdefghijklmnopqrstuvwxyz\r\n";
+  const chunk = line.repeat(Math.ceil((16 * KB_) / Buffer.byteLength(line)));
+  for (const pty of ptys) {
+    for (let k = 0; k < 8; k += 1) pty.dataListener(chunk);
+  }
+  await host.persistNow(); // 先把种子全部落定，再开始量
+  await sleep(120); // 让切片解析的续排跑完，别把镜像排空算进落盘
+  return ptys;
+}
+
+test("⑥ 单会话出字的防抖拍成本不随会话数增长：N=2 与 N=20 写同样字节", async () => {
+  const measured = [];
+  for (const n of [2, 20]) {
+    const root = mkdtempSync(join(tmpdir(), `anyswitch-terminal-scale-${n}-`));
+    const { calls, ptyModule } = capturingPtyModule();
+    const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+    const port = await listen(host);
+    const url = (path) => `http://127.0.0.1:${port}${path}`;
+    try {
+      const ptys = await seedSessions(host, url, root, n);
+      assert.equal(calls.length, n, `前置：${n} 个会话都真的 spawn 了`);
+      // 只让第一个会话出字——这就是「开了一个页签在跑 agent、其它页签闲着」的形态
+      const before = snapshotStateFiles(root);
+      ptys[0].dataListener("tick");
+      const pass = await waitForStateWrite(root, before);
+      assert.ok(pass.files > 0, `N=${n}：防抖拍到点必须真的落盘（250ms + 写，2.5s 内没动静就是丢了变更）`);
+      measured.push({ n, ...pass });
+    } finally {
+      await host.close().catch(() => {});
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const [small, large] = measured;
+  // 这一条就是病灶本身：一个会话出字，写出去的量与会话总数无关。
+  // 旧实现写的是整份状态文件，N=2 ≈ 301KB、N=20 ≈ 3MB（十倍）。
+  assert.ok(large.bytes <= small.bytes * 1.5,
+    `单拍写量不随会话数增长（N=${small.n} 写 ${small.bytes}B，N=${large.n} 写 ${large.bytes}B；`
+    + `旧实现是整份重写，会从 ${small.n} 份尾部涨到 ${large.n} 份尾部）`);
+  // ⑦ 对照组：那一拍必须真写了东西（否则「都不写」也能让上面的比值成立）。
+  assert.ok(small.bytes > 0 && large.bytes > 0, "两拍都必须有真实写量");
+});
+
+test("⑧ N 个会话同时出字：单拍被上限截断、欠账自己续上，最终全部收敛", async () => {
+  const n = 20;
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-scale-all-"));
+  const { ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const ptys = await seedSessions(host, url, root, n);
+
+    // 全部 20 个会话在同一拍里出字。旧实现一轮写 20 份、约 3MB。
+    // 种子阶段的显式冲净会写满 20 份（那是 full 路径，不受单拍上限约束），
+    // 所以把「最大单拍份数」的观测归零，只看下面这几拍。
+    host.persistStats.maxPassSessionWrites = 0;
+    const before = snapshotStateFiles(root);
+    for (const pty of ptys) pty.dataListener("tick");
+    const first = await waitForStateWrite(root, before);
+    assert.ok(first.files > 0, "第一拍必须真的落盘");
+    // 上限：单拍写量必须落在「上限 × 每条尾部预算」的量级内，不能是 N×尾部。
+    const capBytes = 4 * 128 * KB_ * 1.25;
+    assert.ok(first.bytes <= capBytes,
+      `单拍写量 ${first.bytes}B 必须落在上限量级内（≤ ${Math.round(capBytes)}B）；旧实现一轮写 ${n}×128KB ≈ 2.5MB`);
+
+    // 欠账不许等下一次输出来叫醒：没有新输出，后续拍也要自己续上把欠账写完。
+    const afterFirst = snapshotStateFiles(root);
+    const second = await waitForStateWrite(root, afterFirst, { timeoutMs: 1500 });
+    assert.ok(second.files > 0,
+      "有界单拍留下的欠账必须自己续下一拍（没有新输出也该继续写）——否则会话记录会长期停在旧内容");
+
+    // 判据要落在「这一拍的总量」上，不是「第一次看到变化」（评审 P2-4）：
+    // waitForStateWrite 一见到任何文件变化就返回，读到的是下界。等泵静默后取
+    // persistStats 记下的那一拍真实份数/字节——这才是「每拍 ≤4 份」的判据。
+    await waitForQuiescence(root);
+    assert.ok(host.persistStats.maxPassSessionWrites <= 4,
+      `任何一拍的份数不得超过上限 4（实得最大 ${host.persistStats.maxPassSessionWrites} 份）——`
+      + `这条才真正钉住「单拍有界」；只看到首帧变化的观测会让上限被改成 8 也照样绿`);
+    // 单拍字节上界同样按上限判：4 份 × 单份实际序列化大小。种子尾部约 137KB，
+    // 给到 4×128KB 的 1.5 倍余量吸收 ESC 膨胀比例差异。
+    assert.ok(host.persistStats.lastPassBytes <= 4 * 128 * KB_ * 1.5,
+      `单拍序列化字节 ${host.persistStats.lastPassBytes}B 必须落在 4 份的量级内`);
+
+    // 收敛：所有会话的记录都落到盘上，每条都守住 128KB 落盘尾部预算。
+    await host.persistNow();
+    for (const session of host.sessions.values()) {
+      const record = readSessionRecord(host, session.id);
+      const tailBytes = Buffer.byteLength(record.buffer.join(""));
+      assert.ok(tailBytes <= 128 * KB_,
+        `收敛后每条记录守 128KB 落盘尾部（${session.id} 实得 ${tailBytes}B）`);
+    }
+    // 一拍写完的份数确实少于会话总数——上限真的在截断，不是「恰好一轮写完」。
+    assert.ok(first.files < n || n <= 4,
+      `一轮不许把 ${n} 个会话全写完（实写 ${first.files} 份）——单拍成本必须被上限截断`);
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("⑨ 新码读得回旧格式（v1 整份文件）：逐字段恢复、尾部照用，并自然迁移成 v2", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-v1compat-"));
+  const { writeFileSync } = await import("node:fs");
+  // v1 形态：sessions 是完整对象数组，正文（含 buffer）就在里面。这段字节是旧宿主
+  // 真实会写出来的形状，一个字段都不少。
+  const legacyBuffer = ["旧宿主留下的第一屏\r\n", "\x1b[1;32m旧宿主留下的第二屏\x1b[0m\r\n"];
+  writeFileSync(join(root, TERMINAL_STATE_FILE), JSON.stringify({
+    version: 1,
+    theme: { dark: false, background: "#101010" },
+    sessions: [{
+      id: "legacy-session-1", label: "旧会话", cwd: root, shell: "powershell",
+      pid: 4321, createdAt: 111, lastActiveAt: 222, spawnedAt: 222,
+      cols: 90, rows: 20, buffer: legacyBuffer, status: "running", exitCode: null,
+      agentId: "kimi", agentName: "Kimi Code",
+      resume: { endpoint: "kimi", id: "s-old" },
+    }],
+  }, null, 2));
+  const restored = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} } });
+  try {
+    const session = restored.sessions.get("legacy-session-1");
+    assert.ok(session, "旧格式里的会话必须读得回来（读不回来就是字段/形状对不上）");
+    assert.equal(session.label, "旧会话");
+    assert.equal(session.cols, 90, "元数据逐字段还原");
+    assert.equal(session.agentId, "kimi", "agent 元数据不丢");
+    assert.deepEqual(session.resume, { endpoint: "kimi", id: "s-old" }, "续接身份不丢");
+    assert.deepEqual(session.buffer, legacyBuffer, "落盘尾部原样读回（不重排、不丢块）");
+    assert.equal(session.bufferBytes, Buffer.byteLength(legacyBuffer.join("")), "字节位按读回的尾部重算");
+    assert.equal(session.pty, null, "旧宿主留下的 running 状态不许当成活进程");
+    assert.ok(session.screen.screenLines().join("|").includes("旧宿主留下的第二屏"), "镜像已由尾部重喂出来");
+
+    // 自然迁移：下一次落盘把 v1 换成 v2（索引点 id，正文进每会话记录），不需要
+    // 一次性迁移脚本，也不留迁移义务。
+    await restored.persistNow();
+    const index = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
+    assert.equal(index.version, 2, "索引升到 v2");
+    assert.deepEqual(index.sessions, ["legacy-session-1"], "索引只点名 id");
+    assert.deepEqual(index.theme, { dark: false, background: "#101010" }, "主题随索引保留");
+    const record = JSON.parse(readFileSync(restored.sessionStatePath("legacy-session-1"), "utf8"));
+    assert.deepEqual(record.buffer, legacyBuffer, "记录文件里的尾部与旧文件逐位相同");
+  } finally {
+    await restored.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑩ 双上限与「最新一块必留」在分文件落盘之后仍成立。
+// 契约（不许因落盘形态换代而破）：内存环 512KB + 4000 块；裁尾只整块从头部丢；
+// 最新一块无条件保留；落盘尾部 128KB、同样最新一块无条件留（单块超预算也得存，
+// 否则宿主再启动一次恢复回来的就是白屏）；session.bufferBytes 三处维护
+// （emit 累加 / restart 归零 / restore 重算）任何一处漏掉都让裁尾静默失效。
+//
+// 这是「契约保持」钉子，不是病灶钉子：它在改造前后都该绿。所以读盘用
+// readDiskTail 按形态自适应（v1 整份文件的 sessions[0].buffer / v2 每会话记录），
+// 不依赖新码才有的 host.sessionStatePath——否则它在旧码上会因为缺方法而红，
+// 那就分不清「契约破了」和「API 没了」。
+function readDiskTail(host, root, id) {
+  if (typeof host.sessionStatePath === "function") {
+    const record = JSON.parse(readFileSync(host.sessionStatePath(id), "utf8"));
+    return Array.isArray(record.buffer) ? record.buffer : [];
+  }
+  // v1：整份状态文件，按 id 找那条
+  const state = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
+  const item = (state.sessions ?? []).find((entry) => entry?.id === id);
+  return Array.isArray(item?.buffer) ? item.buffer : [];
+}
+
+test("⑩ 双上限（512KB / 4000 块）与最新一块必留在分文件落盘后仍成立", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-dualcap-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const whole = /^#\d+ \d+$/;
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "双上限", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    const pty = calls[0].pty;
+
+    // 块数上限：4000 块 × 每块 12 字节 = 48KB，远低于 512KB，字节上界不会先命中。
+    for (let i = 0; i < 6000; i += 1) pty.dataListener(`#${i} 000`);
+    const session = host.sessions.get(created.id);
+    assert.ok(session.buffer.length <= 4000, `块数上限：留下 ${session.buffer.length} 块，超 4000`);
+    assert.ok(session.buffer.length > 3900, `块数上限没有裁得过狠（留 ${session.buffer.length} 块）`);
+    assert.ok(Number.isFinite(session.bufferBytes) && session.bufferBytes > 0,
+      "字节位保持有限值（NaN 比较会让裁尾静默失效）");
+    assert.equal(session.buffer[session.buffer.length - 1], "#5999 000", "最新一块无条件保留");
+    // 裁尾只整块从头部丢：留下的每一块都是完整的 `#序号 序号`，没有半块。
+    for (const kept of session.buffer) assert.ok(whole.test(kept), `只许整块丢：${JSON.stringify(kept)}`);
+
+    // 字节上限：再灌满，让 512KB 字节预算成为约束
+    for (let i = 0; i < 60; i += 1) pty.dataListener(`${"z".repeat(16 * KB_)}#${i}`);
+    const bytes = Buffer.byteLength(session.buffer.join(""));
+    assert.ok(bytes <= 512 * KB_, `内存窗口 ${bytes}B 超 512KB 字节上限`);
+    assert.ok(session.buffer[session.buffer.length - 1].includes("#59"), "字节裁剪后最新一块仍在");
+
+    // 落盘尾部：128KB 预算 + 最新一块无条件留。
+    await host.persistNow();
+    const diskTail = readDiskTail(host, root, created.id);
+    const diskBytes = Buffer.byteLength(diskTail.join(""));
+    assert.ok(diskBytes <= 128 * KB_, `落盘尾部 ${diskBytes}B 超 128KB 预算`);
+    assert.ok(diskTail[diskTail.length - 1].includes("#59"), "落盘尾部保留的也是最新一块");
+
+    // 单块超预算：最新一块照样落盘（不然再启动一次就是白屏）
+    pty.dataListener(`#MEGA ${"y".repeat(400 * KB_)}`);
+    await host.persistNow();
+    const megaTail = readDiskTail(host, root, created.id);
+    assert.equal(megaTail.length, 1, "超预算的单块独占落盘尾部，旧块整块让位");
+    assert.ok(megaTail[0].includes("#MEGA"), "落的就是最新那块");
+
+    // 宿主重启：恢复时按盘上尾部重算字节位（第三处维护点），不是 undefined/NaN
+    await host.close();
+    const restored = createTerminalHost({
+      root, port: 0, ptyModule: { spawn: () => new FakePty() }, isAliveFn: () => false, logger: { warn() {} },
+    });
+    try {
+      const revived = restored.sessions.get(created.id);
+      assert.ok(revived, "盘上落过的会话读得回来");
+      assert.equal(revived.bufferBytes, Buffer.byteLength(revived.buffer.join("")),
+        "restore 按读回的尾部重算字节位（漏了这处就是 NaN，裁尾静默失效）");
+      assert.ok(Number.isFinite(revived.bufferBytes) && revived.bufferBytes > 0, "字节位有限且非零");
+    } finally {
+      await restored.close();
+    }
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 
 // watchParentProcess: the relay-owned child's death pact. Without a parent
 // pid env (single runs, tests) nothing is scheduled; with one, a dead parent
@@ -900,6 +1217,311 @@ test("watchParentProcess fires onDead once when the parent is gone", () => {
   assert.equal(dead, 1, "a dead parent triggers the host shutdown path");
   tick();
   assert.equal(dead, 1, "the shutdown path fires exactly once");
+});
+
+// 等落盘泵静默：连续 quietMs 没有任何 .json 变化才算这一拍彻底结束。用来观察
+// 「一拍总共写了多少」——只看「第一次看到变化」拿到的是下界（评审 P2-4 指出的
+// 判据错位就是这么来的）。
+async function waitForQuiescence(root, { quietMs = 150, timeoutMs = 3000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = snapshotStateFiles(root);
+  let lastChangeAt = Date.now();
+  for (;;) {
+    await sleep(15);
+    const now = snapshotStateFiles(root);
+    let changed = now.size !== previous.size;
+    if (!changed) {
+      for (const [path, info] of now) {
+        const prev = previous.get(path);
+        if (!prev || prev.mtimeMs !== info.mtimeMs || prev.size !== info.size) { changed = true; break; }
+      }
+    }
+    if (changed) lastChangeAt = Date.now();
+    previous = now;
+    if (Date.now() - lastChangeAt >= quietMs) return;
+    if (Date.now() >= deadline) return;
+  }
+}
+
+// ⑪ 写盘进行中置的脏不许被那一笔成功的写顺手抹掉（评审 P0 的钉子）。
+//
+// 机制：序列化发生在 await 之前。若「清脏」发生在 write 回来之后（或哪怕只是挪到
+// 中间某个 await 之后），这段窗口里新到的变更就会「不在文本里、却被当成已写」——
+// 那一块永久只活在内存里。旧写法（base 的注释专门警告过）正是这么写的。
+//
+// 复现手法：让一份超大记录正在写盘（8MB，写它要十几毫秒），确认这一拍还没结束
+// （passes 没增加 = 我们确实在窗口内），此刻再 emit 一个带标记的块，然后落定，
+// 断言标记必须在盘上。修前实测：脏被抹成 0，随后的 persistNow() 是纯空跳，
+// 标记不在盘上。
+test("⑪ 写盘期间到达的输出块必须落盘，不被那一笔成功的写抹掉", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-lostupdate-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const marker = "MARKER-INSIDE-WRITE-WINDOW";
+  try {
+    const created = await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "丢更新", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    const pty = calls[0].pty;
+
+    // 一块 8MB：单块超落盘尾部预算时「最新一块必留」，所以这份记录约 8MB，
+    // writeFile+rename 要十几毫秒，窗口足够宽。
+    pty.dataListener(`${"a".repeat(8 * 1024 * KB_)}`);
+    await sleep(200);
+
+    const passesBefore = host.persistStats.passes;
+    const inFlight = host.persistNow();
+    await sleep(3);
+    assert.equal(host.persistStats.passes, passesBefore,
+      "前置：8MB 的写盘此刻必须仍在进行（否则这次没测到窗口，得加大块）");
+    // 就在写盘窗口内：新到一个块
+    pty.dataListener(marker);
+    const late = host.persistNow();
+    await Promise.all([inFlight, late]);
+    await host.persistNow();
+
+    const record = readSessionRecord(host, created.id);
+    assert.ok(record.buffer.join("").includes(marker),
+      "写盘期间到达的块必须在盘上（不在盘上 = 那一笔成功的写把新脏抹掉了，关停前最后一块会永久丢）");
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑫ 建/关混合压力下，索引与记录文件始终自洽（**不变量守卫钉，非红钉**）。
+//
+// 要防的状态是「索引点名了一个既不在内存、也没有记录文件的 id」——评审在
+// 34e472d 上用 12 轮 ×（12 并发建 + 6 关 + 4 建）跑到过 4/12 轮。**诚实记录：
+// 同一形状在本装置上复现不出来（修前修后都绿）**，所以它不能作为 P0-c 的红证，
+// 只能作为「这个不变量以后不许被破」的守卫。P0-c 的机制红证由 ⑪ 承担——两者
+// 同一个根因（写成功后才清脏），⑪ 能稳定复现。
+// 反过来「文件在、索引不点名」是允许的（崩溃窗口的孤儿，下次启动由 prune 收）。
+//
+// 判据取在**静默之后**：中间不插显式全量冲净，否则那一笔会把坏索引顺手修好，
+// 把要抓的状态洗掉。
+test("⑫ 建关混合压力下索引与记录文件自洽：不许出现「索引点名但文件不存在」", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-indexrace-"));
+  const { ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const post = (path) => fetch(url(path), { method: "POST", headers: headers(host), body: "{}" });
+  const problems = [];
+  // 静默后取盘上真状态：索引点名却读不回来的 id = 脏位被抹过（写盘窗口里置的
+  // indexDirty / removedSessionIds 被那一笔成功的写顺手清了）。
+  const checkInvariant = async (round, phase) => {
+    await waitForQuiescence(root);
+    const index = JSON.parse(readFileSync(host.statePath, "utf8"));
+    const indexIds = index.sessions;
+    const onDisk = new Set(readdirSync(host.sessionStateDir).filter((n) => n.endsWith(".json")).map((n) => n.slice(0, -5)));
+    const inMemory = new Set(host.sessions.keys());
+    const missingFiles = indexIds.filter((id) => !onDisk.has(id));
+    const notInMemory = indexIds.filter((id) => !inMemory.has(id));
+    if (missingFiles.length > 0 || notInMemory.length > 0) {
+      problems.push({ round, phase, missingFiles, notInMemory });
+    }
+    // 内存里的会话必须全被索引点名（否则下次启动它就消失）
+    const unlisted = [...inMemory].filter((id) => !indexIds.includes(id));
+    if (unlisted.length > 0) problems.push({ round, phase, unlistedInIndex: unlisted });
+  };
+  try {
+    for (let round = 0; round < 12; round += 1) {
+      // 并发建 12 条、关掉其中 6 条、再建 4 条：建与关都在写盘窗口里交错
+      const created = await Promise.all(Array.from({ length: 12 }, (_, i) => (
+        fetch(url("/terminal/sessions"), {
+          method: "POST", headers: headers(host),
+          body: JSON.stringify({ label: `r${round}-${i}`, cwd: root, shell: "powershell" }),
+        }).then((r) => r.json())
+      )));
+      await Promise.all(created.slice(0, 6).map((session) => post(`/terminal/sessions/${session.id}/close`)));
+      // 关页签之后立刻看：此时若索引还点着已删的会话，下一次建会话会把坏态「修好」，
+      // 所以这一拍必须单独看。
+      await checkInvariant(round, "after-close");
+      await Promise.all(Array.from({ length: 4 }, (_, i) => (
+        fetch(url("/terminal/sessions"), {
+          method: "POST", headers: headers(host),
+          body: JSON.stringify({ label: `r${round}-late${i}`, cwd: root, shell: "powershell" }),
+        }).then((r) => r.json())
+      )));
+      await checkInvariant(round, "after-late-create");
+      // 收干净，进入下一轮
+      await post("/terminal/sessions/clear-all");
+    }
+    assert.deepEqual(problems, [], "索引与盘上记录必须自洽（missingFiles/notInMemory 都说明脏位被抹过）");
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑬ 关停全量冲净不许被并发的定向冲净降级（评审 P1 的钉子）。
+//
+// 形态：一批会话置脏 → 250ms 防抖起一轮**有界**写盘（只写 4 份）→ 在那一轮飞行
+// 期间来一个 only 请求（resize 路由）和一个 full 请求（close() 的 flush）。修前：
+// 泵把两者合并成一轮、only 优先，full 只写掉那一条就返回，`backlog` 还剩一批——
+// SIGTERM 紧接着 process.exit(0)，那些尾部就没了。修后：full 单独成轮并优先，
+// 且写到没有欠账才返回。
+//
+// 窗口只有几毫秒，所以重试多次（修后每次都必须 0 欠账；修前只需命中一次即红）。
+test("⑬ 全量冲净不被定向冲净降级：返回时不留欠账", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-fullflush-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    const ids = [];
+    for (let i = 0; i < 12; i += 1) {
+      const created = await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell", cols: 100, rows: 30 }),
+      }).then((r) => r.json());
+      ids.push(created.id);
+    }
+    await host.persistNow();
+
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      // 12 条全部置脏：防抖拍只写 4 份，剩 8 份欠账
+      for (const pty of calls.map((call) => call.pty)) pty.dataListener(`flush-${attempt}`);
+      // 等防抖拍到点并进入有界那一拍（250ms 窗口 + 几毫秒飞行），再插 only + full
+      await sleep(252);
+      const resize = fetch(url(`/terminal/sessions/${ids[attempt % ids.length]}/resize`), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ cols: 120 + (attempt % 7), rows: 40 }),
+      });
+      const full = host.persistNow();
+      await Promise.all([resize, full]);
+
+      assert.equal(host.persistStats.backlog, 0,
+        `第 ${attempt} 次：全量冲净返回时必须没有欠账（实得 ${host.persistStats.backlog}）——关停时 SIGTERM 紧接着 exit(0)，欠账就是丢尾部`);
+    }
+    // 落盘实证：每条会话的记录里都有最后一批尾部
+    for (const id of ids) {
+      const record = readSessionRecord(host, id);
+      assert.ok(record.buffer.join("").includes("flush-11"), `会话 ${id} 的最后一批尾部必须在盘上`);
+    }
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑭ 全量冲净必须「写到没有欠账」，不是「跑一轮」。
+//
+// 评审 r2 §3.2：上一版 `pumpWantFull` 是**一次性请求位**，每轮开头就被消费掉。
+// 第 1 轮（full）跑完若仍有欠账 → 进第 2 轮，但第 2 轮的 full 位已是 false，于是
+// 第 2 轮退化成有界单拍（≤4 份）；第 2 轮后既不再 continue 也没人置位 → 泵退出、
+// 欠账留给 250ms 后的防抖拍。而 close() 只 await 泵、不等那个定时器，SIGTERM 紧接
+// 着 exit(0)——欠账就跟着没了。PERSIST_FULL_FLUSH_MAX_ROUNDS 因此是死代码。
+//
+// 复现形状与评审一致：N=12 每条喂满 128KB 尾部 → 全部 emit 置脏 → persistNow()
+// （full）→ **在飞行期间**再对全部会话 emit 一个带标记的块 → await → 断言
+// backlog === 0 且每条记录的盘上内容含那个标记块。修前实测 backlog = 8。
+test("⑭ 全量冲净写期间又置脏：返回时必须没有欠账，且最后一块在盘上", async () => {
+  const n = 12;
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-fullclean-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  const marker = "TAIL-DURING-FULL-FLUSH";
+  try {
+    const ids = [];
+    for (let i = 0; i < n; i += 1) {
+      const created = await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell", cols: 120, rows: 34 }),
+      }).then((r) => r.json());
+      ids.push(created.id);
+    }
+    // 每条喂满 128KB 落盘尾部：一轮全量写 12 份要十几毫秒，飞行窗口足够插进 emit。
+    const line = "\x1b[1;36m␣\x1b[0m 正在读取文件 abcdefghijklmnopqrstuvwxyz\r\n";
+    const chunk = line.repeat(Math.ceil((16 * KB_) / Buffer.byteLength(line)));
+    for (const call of calls) for (let k = 0; k < 8; k += 1) call.pty.dataListener(chunk);
+    await host.persistNow();
+
+    // 全部置脏，然后起一轮全量冲净
+    for (const call of calls) call.pty.dataListener("pre-flush");
+    const flush = host.persistNow();
+    // 飞行期间：再给全部会话各来一个标记块（这就是「full 之后又有新脏」）
+    for (const call of calls) call.pty.dataListener(marker);
+    await flush;
+
+    assert.equal(host.persistStats.backlog, 0,
+      `全量冲净返回时必须没有欠账（实得 ${host.persistStats.backlog}）——`
+      + `欠账跟着 SIGTERM 的 exit(0) 一起没了就是丢尾部`);
+    assert.equal(host.persistStats.lastFullFlushIncomplete, null,
+      "正常路径不该留下「冲净不完整」的记录");
+    for (const id of ids) {
+      const record = readSessionRecord(host, id);
+      assert.ok(record.buffer.join("").includes(marker),
+        `会话 ${id}：飞行期间到达的标记块必须在盘上（不在 = 那一轮之后泵提前退出了）`);
+    }
+  } finally {
+    await host.close().catch(() => {});
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑮ close() 把「盘上是不是整份状态」这个结果返回出来，不再静默。
+// 撞轮次上限（"输出永不停"）时必须有可观测的记法（lastFullFlushIncomplete）；
+// 正常关停则 complete=true、backlog=0。
+test("⑮ close() 返回「还有没有欠账」：正常关停 complete=true", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-closecomplete-"));
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    for (let i = 0; i < 6; i += 1) {
+      await fetch(url("/terminal/sessions"), {
+        method: "POST", headers: headers(host),
+        body: JSON.stringify({ label: `会话${i}`, cwd: root, shell: "powershell" }),
+      });
+    }
+    for (const call of calls) call.pty.dataListener("last-block-before-close");
+    const result = await host.close();
+    assert.ok(result && typeof result === "object", "close() 必须返回结果对象");
+    assert.equal(result.backlog, 0, `关停返回时不许有欠账（实得 ${result.backlog}）`);
+    assert.equal(result.complete, true, "正常关停 complete=true");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ⑯ 全量冲净没能兑现时必须有可观测的记法，不许静默。
+// 构造必败：索引路径占成目录，每笔索引写都失败 → 欠账留到 close() 仍存在。
+// 该用例钉的是「结果被返回出来 + lastFullFlushIncomplete 有记录」这条可观测性，
+// 不是写失败本身的 500 语义（那条在 ⑤）。
+test("⑯ 全量冲净未完成时 close() 返回 complete=false 且留下可观测记录", async () => {
+  const root = mkdtempSync(join(tmpdir(), "anyswitch-terminal-incomplete-"));
+  mkdirSync(join(root, TERMINAL_STATE_FILE)); // 占位目录：索引写必败
+  const { calls, ptyModule } = capturingPtyModule();
+  const host = createTerminalHost({ root, port: 0, ptyModule, logger: { warn() {} } });
+  const port = await listen(host);
+  const url = (path) => `http://127.0.0.1:${port}${path}`;
+  try {
+    await fetch(url("/terminal/sessions"), {
+      method: "POST", headers: headers(host),
+      body: JSON.stringify({ label: "写失败", cwd: root, shell: "powershell" }),
+    }).then((r) => r.json());
+    calls[0].pty.dataListener("tail");
+    // 索引写失败 → 索引的脏位被置回 → 全量冲净无法兑现
+    const result = await host.close();
+    assert.ok(result && typeof result === "object", "close() 必须返回结果对象");
+    assert.equal(result.complete, false, "有欠账时 complete 必须为 false（不许静默返回成功）");
+    // 欠账可能落在会话记录上，也可能只落在索引上（本例是索引写失败）：两处都要如实上报。
+    assert.ok(result.backlog > 0 || result.indexDirty === true,
+      `欠账必须如实反映（backlog=${result.backlog}, indexDirty=${result.indexDirty}）`);
+    assert.ok(host.persistStats.lastFullFlushIncomplete,
+      "撞上限或写失败时 lastFullFlushIncomplete 必须有记录（这是「盘上不是整份状态」的机器可判信号）");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("watchParentProcess stays quiet while the parent lives", () => {
@@ -1150,14 +1772,15 @@ test("agent launch：cmd 包装 spawn、注入值覆盖继承值、真键标删�
     assert.deepEqual(snapshot.launch, { file: process.env.ComSpec, args: ["/d", "/c", "C:\\fake\\kimi.cmd"] });
     assert.equal("env" in snapshot, false, "快照不回显 env");
 
-    // 密不上盘：落盘状态文件既无 env 键，也不含令牌明文。
-    const persisted = JSON.parse(readFileSync(host.statePath, "utf8"));
-    assert.equal(persisted.sessions.length, 1);
-    assert.equal("env" in persisted.sessions[0], false, "env 绝不落盘");
-    assert.equal(persisted.sessions[0].agentId, "kimi");
-    assert.equal(persisted.sessions[0].agentName, "Kimi Code");
-    assert.ok(persisted.sessions[0].launch, "非密 launch 元数据随会话落盘");
-    const raw = readFileSync(host.statePath, "utf8");
+    // 密不上盘：落盘的两份文件（索引 + 这条会话的记录）都无 env 键、也不含令牌明文。
+    const index = JSON.parse(readFileSync(host.statePath, "utf8"));
+    assert.deepEqual(index.sessions, [snapshot.id], "索引点名这条会话");
+    const persisted = readSessionRecord(host, snapshot.id);
+    assert.equal("env" in persisted, false, "env 绝不落盘");
+    assert.equal(persisted.agentId, "kimi");
+    assert.equal(persisted.agentName, "Kimi Code");
+    assert.ok(persisted.launch, "非密 launch 元数据随会话落盘");
+    const raw = readFileSync(host.sessionStatePath(snapshot.id), "utf8") + readFileSync(host.statePath, "utf8");
     assert.ok(!raw.includes("relay-token-xyz"), "落盘文件不含令牌明文");
     assert.ok(!raw.includes("leaked-real-key"), "落盘文件不含被删掉的上游真键");
   } finally {
@@ -2420,7 +3043,8 @@ test("续接身份落会话记录：创建带 resume、快照与落盘都带，�
     // 落盘：状态文件里带着（宿主重启/页面刷新后面板重拉列表还能认）
     await host.close();
     const persisted = JSON.parse(readFileSync(join(root, TERMINAL_STATE_FILE), "utf8"));
-    assert.deepEqual(persisted.sessions[0].resume, { endpoint: "kimi", id: "s-1" }, "状态文件带续接身份");
+    assert.deepEqual(persisted.sessions, [created.id], "索引点名这条会话");
+    assert.deepEqual(readSessionRecord(host, created.id).resume, { endpoint: "kimi", id: "s-1" }, "会话记录带续接身份");
     const restored = createTerminalHost({ root, port: 0, ptyModule: { spawn: () => new FakePty() }, logger: { warn() {} } });
     const restoredPort = await listen(restored);
     const relisted = await fetch(`http://127.0.0.1:${restoredPort}/terminal/sessions`, { headers: headers(restored) }).then((response) => response.json());
