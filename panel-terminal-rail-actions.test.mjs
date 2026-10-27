@@ -111,6 +111,8 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     ${extractFn("terminalRailSelfHealRemovedGroups")}
     ${extractFn("terminalRailRegroupRemoved")}
     ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
     const TERMINAL_RAIL_SPINNER = "";
     const TERMINAL_RAIL_DONE_DOT = "";
     const terminalDoneUnread = new Map();
@@ -121,10 +123,13 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     function renderTerminalRail() { renderTerminalRailHistory(terminalRailAgentId()); }
     ${extractFn("terminalRailSwitchBusy")}
     ${extractFn("terminalRailBeginSelect")}
+    ${extractFn("terminalRailArmSelect")}
     ${extractFn("terminalRailEndSelect")}
     ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
     ${extractFn("renderTerminalRailHistory")}
     return {
       render: renderTerminalRailHistory,
@@ -159,6 +164,8 @@ function rowHtmlSandbox(prefs) {
     let terminalRailSelectPending = null;
     ${extractFn("terminalRailStateSlotHtml")}
     ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
     return terminalRailRowHtml;
   `)(null, null, "t1", prefs);
   return fn;
@@ -770,6 +777,8 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
         function panelError(err, fallback) { return fallback; }
         function terminalRailAgentId() { return agentId; }
         function terminalRailEndSelect() {}
+        function terminalRailBeginSelect(session) { log.armed = (log.armed || []).concat(session); }
+        function terminalRailArmSelect(session) { log.armed = (log.armed || []).concat(session); }
         ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailCreateTerminalInDir")}
@@ -1080,6 +1089,7 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
         ${extractFn("terminalRailEndSelect")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
@@ -1205,8 +1215,8 @@ describe("S5 去重聚焦（finding 3，用户选甲）", () => {
       const row = extractFn("terminalRailRowHtml");
       assert.ok(row.includes("terminalRailSelectPending") && row.includes('cls.push("is-active")'),
         "行选中判据读 pending 状态位（不是 DOM-only 切类名——1s 轮询会冲掉）");
-      assert.ok(extractFn("terminalRailPendingRowHtml").includes("terminalRailSelectPending"),
-        "兜底行同口径：pending 存在时不亮");
+      assert.ok(extractFn("terminalRailPendingRowHtml").includes("terminalRailPendingFreshActive"),
+        "兜底行同口径：选中判据走共享谓词（pending 按终端 id 命中才亮，一屏至多一条）");
     });
 
     it("乐观选中（M5）vm 真跑：在飞时不亮不切，放行后才点亮", async () => {
@@ -1469,6 +1479,8 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       ${extractFn("terminalRailSelfHealRemovedGroups")}
       ${extractFn("terminalRailRegroupRemoved")}
       ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
       const TERMINAL_RAIL_SPINNER = "";
       const TERMINAL_RAIL_DONE_DOT = "";
       const terminalDoneUnread = new Map();
@@ -1476,6 +1488,8 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
       ${extractFn("renderTerminalRailHistory")}
       return {
         render: renderTerminalRailHistory,
@@ -1593,6 +1607,8 @@ describe("M8 T2 选中态跟随聚焦", () => {
       let terminalRailSelectPending = null;
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
       return terminalRailRowHtml;
     `)();
     const html = rowFn({ id: "s-1", endpoint: "kimi", title: "t", lastActive: 1 }, { id: "t-7", status: "idle" }, "t-1");
@@ -1928,6 +1944,8 @@ describe("M8 T7b 视图选项三组（分组/排序+行拖拽/筛选）", () => 
         let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         return terminalRailRowHtml;
       `)(null, null, "t1", { archived: [{ endpoint: "kimi", id: "s-9" }], removedGroups: [] });
       const archivedRow = rowFn({ id: "s-9", endpoint: "kimi", title: "t", lastActive: 1 }, null, "t1");
@@ -2627,86 +2645,6 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
   // 点栏内历史会话、去重未命中后：对当前聚焦页签的会话 A 做判定——空白壳/idle/
   // exited 就地换内容（同页签），working/补读失败走新开页签（保护在跑任务、
   // 宁多开勿错杀）。一次内切期间在飞闸忽略后续点击。
-  const HISTORY_ROW = {
-    endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
-    file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
-  };
-  const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl, realEnrich = false }) => {
-    const log = { gets: [], switchBodies: [], creates: [], toasts: [], renders: 0 };
-    const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", "realEnrich", `      let terminalBackendReady = true;
-      const terminalBackendSessions = sessions;
-      let activeTerminalPreviewId = activeId;
-      let terminalSwitchInFlight = false;
-      function api(method, path, body) {
-        log.gets.push({ method, path });
-        if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
-        if (method === "GET" && path.startsWith("/api/terminal/sessions/")) return hostReadImpl();
-        if (method === "POST" && path.endsWith("/switch")) { log.switchBodies.push(body); return Promise.resolve(switchImpl()); }
-        return Promise.reject(new Error("unexpected " + method + " " + path));
-      }
-      // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
-      // activeRequests 置 working/idle。
-      function enrichTerminalSessions(agents) {
-        if (!realEnrich) {
-          const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
-          const working = !!(row && row.activeRequests > 0);
-          for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
-          return;
-        }
-        enrichTerminalSessionsReal(agents);
-      }
-      function createAgentTerminal(opts) { log.creates.push(opts); return Promise.resolve(createImpl(opts)); }
-      function terminalBackendSession(item) { return { ...item }; }
-      function renderTerminalPreviewSession() { log.renders += 1; }
-      function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
-      function panelError(err, fallback) { return fallback; }
-      function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
-      function boardRoutingChains() { return []; }
-      let routeRuntimeState = "none";
-      let routeRuntimeCache = null;
-      const terminalDoneUnread = new Map();
-      const terminalPrevWorking = new Map();
-      // 回合闸（working 口径的跨拍状态）：桩环境给空表；真 enrich 路径会用它。
-      const terminalTurnArmed = new Set();
-      ${extractFn("terminalInstanceRow")}
-      ${extractFn("terminalMetricNum")}
-      ${extractFn("terminalWorkTime")}
-      ${extractFn("terminalMetricsFromInstance")}
-      ${extractFn("terminalRouteForEndpoint")}
-      ${extractFn("terminalBusyByOutput")}
-      ${extractFn("terminalSessionBusyFromSignals")}
-      ${extractFn("noteTerminalWorkingStatus")}
-      ${extractFn("enrichTerminalSessions")}
-      const enrichTerminalSessionsReal = enrichTerminalSessions;
-      let terminalRailSelectPending = null;
-      let terminalRailSelectSeq = 0;
-      const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
-      function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
-      ${extractFn("terminalRailSwitchBusy")}
-      ${extractFn("terminalRailBeginSelect")}
-      ${extractFn("terminalRailEndSelect")}
-      ${extractFn("terminalRailSwitchOrCreateCore")}
-      ${extractFn("terminalRailSwitchOrCreate")}
-      return {
-        go: (row) => terminalRailSwitchOrCreate({ session: row, resume: { endpoint: row.endpoint, id: row.id, file: row.file }, cwd: row.project }),
-        goFresh: ({ agentId, cwd }) => terminalRailSwitchOrCreateCore({ agentId, cwd }),
-        gate: () => terminalSwitchInFlight,
-        sessions: terminalBackendSessions,
-        begin: (session) => terminalRailBeginSelect(session),
-        pending: () => terminalRailSelectPending,
-      };
-    `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
-    return { fn, log };
-  };
-  const AGENTS_IDLE = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 0 }] }] };
-  const AGENTS_WORKING = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 1 }] }] };
-  const HOST_RUNNING = { id: "t-a", status: "running" };
-  const HOST_EXITED = { id: "t-a", status: "exited" };
-  const SWITCH_OK = { id: "t-a", status: "running", pid: 99, label: "重构权限矩阵", agentId: "kimi", agentName: "Kimi Code", resume: { endpoint: "kimi", id: "s-1" } };
-  const BLANK = { id: "t-a", backend: true, agentId: null, agentName: null, agent: null, resume: null, status: "idle", label: "Anyswitch" };
-  const IDLE = { id: "t-a", backend: true, agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle", label: "旧会话" };
-  const WORKING = { ...IDLE, status: "working" };
-  const PREVIEW = { id: "t-a", backend: false, agentId: null, agent: null, resume: null, status: "idle", label: "设计稿" };
 
   it("空白壳内切接管：同页签换内容，POST switch 带目标 resume＋cwd，不开新页签", async () => {
     const { fn, log } = runSwitch({
@@ -2954,11 +2892,6 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     assert.equal(busy.log.creates.length, 1, "静默转新开");
   });
 
-  // ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
-  // body 带 agentId＋cwd、不带 resume 键＝把当前页签就地换成一个全新 agent
-  // 会话；服务端按目标身份清空旧 resume。换绑快照 resume 为 null——兜底行
-  // 推导、去重聚焦都以此为准。
-  const SWITCH_FRESH_OK = { id: "t-a", status: "running", pid: 99, label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", resume: null };
 
   it("全新内切：idle 页签就地换新会话，POST 体带 agentId＋cwd（无 resume 键），不开新页签", async () => {
     const { fn, log } = runSwitch({
@@ -3003,6 +2936,238 @@ describe("M12-A 内切判定矩阵（vm 真跑）", () => {
     assert.equal(log.creates.length, 1, "静默转新开");
     assert.equal(log.toasts.length, 0, "不提示（新开本就是合法落点）");
     assert.deepEqual(fn.sessions["t-a"].resume, { endpoint: "kimi", id: "s-old" }, "原页签身份没被碰");
+  });
+});
+
+// runSwitch 提升为顶层工具：M12-A 判定矩阵与全新内切乐观选中两族共用
+const runSwitch = ({ sessions, activeId, agentsImpl, hostReadImpl, switchImpl, createImpl, realEnrich = false }) => {
+  const log = { gets: [], switchBodies: [], creates: [], toasts: [], renders: 0 };
+  const fn = new Function("sessions", "activeId", "log", "agentsImpl", "hostReadImpl", "switchImpl", "createImpl", "realEnrich", `      let terminalBackendReady = true;
+    const terminalBackendSessions = sessions;
+    let activeTerminalPreviewId = activeId;
+    let terminalSwitchInFlight = false;
+    function api(method, path, body) {
+      log.gets.push({ method, path });
+      if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
+      if (method === "GET" && path.startsWith("/api/terminal/sessions/")) return hostReadImpl();
+      if (method === "POST" && path.endsWith("/switch")) { log.switchBodies.push(body); return Promise.resolve(switchImpl()); }
+      return Promise.reject(new Error("unexpected " + method + " " + path));
+    }
+    // 契约级桩：入参是 agents 数组（真口径见 enrich 本体 6462-6477），按实例
+    // activeRequests 置 working/idle。
+    function enrichTerminalSessions(agents) {
+      if (!realEnrich) {
+        const row = Array.isArray(agents) && agents[0] && Array.isArray(agents[0].instances) ? agents[0].instances[0] : null;
+        const working = !!(row && row.activeRequests > 0);
+        for (const s of Object.values(terminalBackendSessions)) if (s.agent) s.status = working ? "working" : "idle";
+        return;
+      }
+      enrichTerminalSessionsReal(agents);
+    }
+    function createAgentTerminal(opts) { log.creates.push(opts); return Promise.resolve(createImpl(opts)); }
+    function terminalBackendSession(item) { return { ...item }; }
+    function renderTerminalPreviewSession() { log.renders += 1; }
+    function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
+    function panelError(err, fallback) { return fallback; }
+    function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
+    function boardRoutingChains() { return []; }
+    let routeRuntimeState = "none";
+    let routeRuntimeCache = null;
+    const terminalDoneUnread = new Map();
+    const terminalPrevWorking = new Map();
+    // 回合闸（working 口径的跨拍状态）：桩环境给空表；真 enrich 路径会用它。
+    const terminalTurnArmed = new Set();
+    ${extractFn("terminalInstanceRow")}
+    ${extractFn("terminalMetricNum")}
+    ${extractFn("terminalWorkTime")}
+    ${extractFn("terminalMetricsFromInstance")}
+    ${extractFn("terminalRouteForEndpoint")}
+    ${extractFn("terminalBusyByOutput")}
+    ${extractFn("terminalSessionBusyFromSignals")}
+    ${extractFn("noteTerminalWorkingStatus")}
+    ${extractFn("enrichTerminalSessions")}
+    const enrichTerminalSessionsReal = enrichTerminalSessions;
+    let terminalRailSelectPending = null;
+    let terminalRailSelectSeq = 0;
+    const TERMINAL_RAIL_SELECT_TTL_MS = 12000;
+    function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
+    ${extractFn("terminalRailSwitchBusy")}
+    ${extractFn("terminalRailBeginSelect")}
+    ${extractFn("terminalRailArmSelect")}
+    ${extractFn("terminalRailEndSelect")}
+    ${extractFn("terminalRailSwitchOrCreateCore")}
+    ${extractFn("terminalRailSwitchOrCreate")}
+    // 新会话乐观选中（本 describe 下方测试族）的观察面：行渲染与兜底行推导真跑。
+    const terminalRailHistory = { endpoint: "kimi", sessions: [], fetchedAt: 0, error: null };
+    function terminalRailSameDir(a, b) {
+      return String(a || "").replace(/\\+/g, "/").replace(/\\/+$/, "").toLowerCase()
+        === String(b || "").replace(/\\+/g, "/").replace(/\\/+$/, "").toLowerCase();
+    }
+    function terminalRailIsArchived() { return false; }
+    const TERMINAL_RAIL_SPINNER = "";
+    const TERMINAL_RAIL_DONE_DOT = "";
+    function esc(v) { return String(v); }
+    function escapeHtml(v) { return String(v || ""); }
+    const TERMINAL_RAIL_ICON_ARCHIVE = "<svg></svg>";
+    const TERMINAL_RAIL_ICON_UNARCHIVE = "<svg></svg>";
+    function sessTitle(s) { return s.title || String(s.id || "").slice(0, 8); }
+    function terminalRailRelTime() { return "3 分钟前"; }
+    function sessDirName(p) { return String(p || "").replace(/\\\\/g, "/").split("/").filter(Boolean).pop() || p || ""; }
+    ${extractFn("terminalRailStateSlotHtml")}
+    ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
+    ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
+    ${extractFn("terminalRailAgentId")}
+    ${extractFn("terminalRailActiveSession")}
+    ${extractFn("terminalRailSessionMap")}
+    ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
+    return {
+      go: (row) => terminalRailSwitchOrCreate({ session: row, resume: { endpoint: row.endpoint, id: row.id, file: row.file }, cwd: row.project }),
+      goFresh: ({ agentId, cwd }) => terminalRailSwitchOrCreateCore({ agentId, cwd }),
+      gate: () => terminalSwitchInFlight,
+      sessions: terminalBackendSessions,
+      begin: (session) => terminalRailBeginSelect(session),
+      beginFresh: (terminalId, cwd) => terminalRailBeginSelect({ terminalId, cwd }),
+      pending: () => terminalRailSelectPending,
+      pendingRowHtml: (entry, activeIdForRow) => terminalRailPendingRowHtml(entry, activeIdForRow),
+      pendingFresh: () => terminalRailPendingNewTerminals(),
+      switchBusy: terminalRailSwitchBusy,
+      endSelect: (token) => terminalRailEndSelect(token),
+    };
+  `)(sessions, activeId, log, agentsImpl, hostReadImpl, switchImpl, createImpl ?? (async () => ({ id: "t-new" })), realEnrich);
+  return { fn, log };
+};
+
+// 判定矩阵夹具（M12-A 判定矩阵与全新内切乐观选中两族共用）
+const HISTORY_ROW = {
+  endpoint: "kimi", id: "s-1", title: "重构权限矩阵", project: "C:\\dev\\alpha",
+  file: "C:\\Users\\fixture\\.kimi\\sessions\\s-1.jsonl", resumeCommand: "kimi --session s-1",
+};
+const AGENTS_IDLE = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 0 }] }] };
+const AGENTS_WORKING = { agents: [{ id: "kimi", instances: [{ id: "inst-1", activeRequests: 1 }] }] };
+const HOST_RUNNING = { id: "t-a", status: "running" };
+const HOST_EXITED = { id: "t-a", status: "exited" };
+const SWITCH_OK = { id: "t-a", status: "running", pid: 99, label: "重构权限矩阵", agentId: "kimi", agentName: "Kimi Code", resume: { endpoint: "kimi", id: "s-1" } };
+const BLANK = { id: "t-a", backend: true, agentId: null, agentName: null, agent: null, resume: null, status: "idle", label: "Anyswitch" };
+const IDLE = { id: "t-a", backend: true, agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle", label: "旧会话", cwd: "C:\\dev\\alpha" };
+const WORKING = { ...IDLE, status: "working" };
+const PREVIEW = { id: "t-a", backend: false, agentId: null, agent: null, resume: null, status: "idle", label: "设计稿" };
+
+// ── 全新内切（2026-10-25 用户拍板：「新建会话」/组头 ⊕ 与点历史行同门）──
+// body 带 agentId＋cwd、不带 resume 键＝把当前页签就地换成一个全新 agent
+// 会话；服务端按目标身份清空旧 resume。换绑快照 resume 为 null——兜底行
+// 推导、去重聚焦都以此为准。
+const SWITCH_FRESH_OK = { id: "t-a", status: "running", pid: 99, label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: null };
+
+describe("全新内切乐观选中（M5 补口：组头 ⊕ / 新建会话无历史身份可先亮）", () => {
+  // 症状：超实例页签内点「新建会话」/组头 ⊕，高亮在旧会话行上多留约半秒。
+  // M5 的 pending 只认历史行身份（endpoint＋会话 id），全新内切既无 resume、
+  // 活跃终端 id 又不变（同记录换内容），成功前没有任何通道能把高亮挪到新行——
+  // 只能等 POST /switch 返回、spawnedAt 刷新后兜底行「新会话」才出现并被点亮。
+  // 补口：判定门确定要内切后、POST 之前武装一枚按**终端 id**认行的 pending，
+  // 兜底行随之提前出现（目标目录组顶），高亮当拍到位。
+  const FRESH_CWDS = { agentId: "kimi", cwd: "C:\\dev\\alpha" };
+
+  it("判定门：确定内切后武装 pending（键＝终端 id＋目标目录），成功由真值接管", async () => {
+    let release;
+    const { fn, log } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: () => new Promise((resolve) => { release = resolve; }),
+    });
+    fn.goFresh(FRESH_CWDS);
+    await flush();
+    const armed = fn.pending();
+    assert.ok(armed, "POST /switch 在飞期间必须已有乐观高亮（否则这半秒栏上仍是旧行）");
+    assert.equal(armed.terminalId, "t-a", "全新内切按终端 id 认行（活跃记录不换）");
+    assert.equal(armed.cwd, "C:\\dev\\alpha", "记下目标目录：兜底行要落在目标组顶");
+    assert.equal(armed.endpoint, "kimi", "端点随门内 agentId 记下（组归属同源）");
+    assert.equal(armed.id, null, "不带历史会话 id（它不是历史行身份）");
+    const entry = fn.pendingFresh().find((row) => row.id === "t-a");
+    assert.ok(entry, "兜底行立刻可推导（不等 spawnedAt 刷新）");
+    assert.equal(entry.cwd, "C:\\dev\\alpha", "落在目标目录");
+    assert.ok(fn.pendingRowHtml(entry, "t-a").includes("is-active"), "兜底行当拍点亮");
+    release(SWITCH_FRESH_OK);
+    await flush();
+    // 成功后仍留着的 pending 无害：真实兜底行由 spawnedAt 接替，pending 过期自动撤。
+    assert.equal(log.creates.length, 0, "不开新页签");
+  });
+
+  it("判定门：working/补读失败照旧新开，从不武装（新开落点不是这条页签，亮它就是说谎）", async () => {
+    const cases = [
+      ["working 保护", { "t-a": { ...WORKING } }, async () => AGENTS_WORKING, async () => HOST_RUNNING],
+      ["零终端", {}, async () => AGENTS_IDLE, async () => HOST_RUNNING],
+      ["预览会话", { "t-a": { ...PREVIEW } }, async () => AGENTS_IDLE, async () => HOST_RUNNING],
+      ["补读失败", { "t-a": { ...IDLE } }, async () => AGENTS_IDLE, async () => { throw new Error("HTTP 500"); }],
+    ];
+    for (const [name, sessions, agentsImpl, hostReadImpl] of cases) {
+      const { fn, log } = runSwitch({ sessions, activeId: "t-a", agentsImpl, hostReadImpl, switchImpl: async () => SWITCH_FRESH_OK });
+      fn.goFresh(FRESH_CWDS);
+      await flush();
+      assert.equal(fn.pending(), null, `${name}：不武装`);
+      assert.equal(log.creates.length, 1, `${name}：照旧新开`);
+    }
+  });
+
+  it("失败清点：内切失败撤 pending（点亮的行没换成）；switch_busy 转新开显式撤（新开在别的页签）", async () => {
+    const failed = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 500：boom"), { serverCode: "http_500" }); },
+    });
+    failed.fn.goFresh(FRESH_CWDS);
+    await flush();
+    assert.equal(failed.fn.pending(), null, "内切失败即撤");
+    assert.equal(failed.log.toasts.length, 1, "照旧提示一次");
+
+    // 续接内切的 switch_busy 不清（M5 原口径：新开仍是这次点击的兑现，新页签会
+    // 亮）；全新内切不同——兜底行提前出现锚在**本页签**上，转新开后本页签没换
+    // 内容，留着就是点亮一个没发生的内切。
+    const busy = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING,
+      switchImpl: async () => { throw Object.assign(new Error("HTTP 409：switch_busy"), { code: "switch_busy", serverCode: "switch_busy" }); },
+    });
+    busy.fn.goFresh(FRESH_CWDS);
+    await flush();
+    assert.equal(busy.fn.pending(), null, "switch_busy 转新开：撤掉锚在本页签上的高亮");
+    assert.equal(busy.log.creates.length, 1, "静默转新开");
+    assert.deepEqual(busy.fn.pendingFresh(), [], "兜底行随之退场（本页签内容没换）");
+  });
+
+  it("收尾清点：activate（改主意点开着的行）无条件作废旧令牌", async () => {
+    const { fn } = runSwitch({
+      sessions: { "t-a": { ...IDLE } }, activeId: "t-a",
+      agentsImpl: async () => AGENTS_IDLE, hostReadImpl: async () => HOST_RUNNING, switchImpl: async () => SWITCH_FRESH_OK,
+    });
+    fn.beginFresh("t-a", "C:\\dev\\alpha");
+    assert.ok(fn.pending(), "判定门前点亮（入口上的手势先反馈）");
+    fn.endSelect(null);
+    assert.equal(fn.pending(), null, "无条件清点生效");
+  });
+
+  it("源码钉：武装点在判定门内、POST /switch 之前（working 分支之后）", () => {
+    const decide = extractFn("terminalRailSwitchOrCreateCore");
+    const armAt = decide.indexOf("terminalRailArmSelect(");
+    const busyAt = decide.indexOf("if (working)");
+    const postAt = decide.indexOf('await api("POST"');
+    assert.ok(armAt > busyAt, "武装在 working 判定之后（working 转新开不许亮本页签）");
+    assert.ok(armAt < postAt, "武装在 POST /switch 之前（高亮不等宿主 kill+spawn）");
+    assert.ok(/terminalRailArmSelect\(\{[^}]*terminalId/.test(decide), "全新分支按终端 id 武装");
+    const begin = extractFn("terminalRailBeginSelect");
+    assert.ok(/terminalRailSwitchBusy\(\)/.test(begin), "入口的 BeginSelect 仍在飞闸前置（在飞点击不亮）");
+    assert.ok(!/terminalRailSwitchBusy\(\)/.test(extractFn("terminalRailArmSelect")),
+      "门内武装走无闸内核（判定门已持闸，过 BeginSelect 会被自己挡掉）");
+    const row = extractFn("terminalRailPendingRowHtml");
+    assert.ok(/terminalRailPendingFreshActive\(/.test(row),
+      "兜底行选中判据加一条「pending 按终端 id 命中」的通道（原判据只认 activeId）");
+    assert.ok(extractFn("terminalRailPendingNewTerminals").includes("terminalRailPendingFreshArmed"),
+      "兜底行推导认被武装的终端：spawnedAt 还旧、resume 还在也提前出现");
   });
 });
 

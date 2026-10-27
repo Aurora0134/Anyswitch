@@ -8918,7 +8918,10 @@ async function api(method, path, body) {
   // pending 必须进渲染消费的状态而不是 DOM-only 切类名：pollTerminalSessions
   // 每 1s 全树重铺栏（renderTerminalRailHistory 整块 innerHTML），DOM-only 的
   // 类名切换会被下一拍轮询冲掉——这是选状态位的决定性理由。
-  let terminalRailSelectPending = null; // { endpoint, id, token, timer }
+  let terminalRailSelectPending = null; // { endpoint, id, terminalId, cwd, token, timer }
+  // id/endpoint＝历史行身份（续接内切）；terminalId＋cwd＝全新内切的身份（活跃记录
+  // 不换，按终端 id 认「新会话」兜底行，cwd 记下目标目录让兜底行落在目标组顶）。
+  // 两者只占一种：有历史 id 就不带 terminalId，反之亦然（一个 pending 点亮一行）。
   let terminalRailSelectSeq = 0;
   // TTL 兜底：api() 没有超时，切换请求万一长年挂起（宿主卡死）时假高亮不能
   // 常驻——到点撤 pending 重回 live 派生（那一行没换成，点亮它就是说谎）。
@@ -9212,7 +9215,13 @@ async function api(method, path, body) {
     const out = [];
     for (const session of Object.values(terminalRailSessionMap())) {
       if (terminalRailAgentId(session) !== agentId) continue;
-      if (session.resume) continue;
+      // 全新内切刚武装（POST /switch 未回）：这条终端正在变成「新会话」，兜底行
+      // 必须当拍出现——旧 resume 还在、spawnedAt 还旧都是宿主侧未落定的表象，
+      // 不能拿它们把用户此刻点击的目标行扣下（那一扣就是半秒空窗）。
+      // 例外：目标目录的会话列表还没落地（历史未取回）时，兜底行无处安放；这种
+      // 情况不用豁免，等列表回来按既有推导走（此时 POST 通常已落定）。
+      const armed = terminalRailPendingFreshArmed(session);
+      if (!armed && session.resume) continue;
       // 锚＝最近进程出生（spawnedAt 优先，回退 createdAt；与闲置判定同款）：
       // 内切/复活换进程时 createdAt 不动，拿它当锚会让同目录旧会话
       // （lastActive ≥ createdAt）把换新进程的兜底行误判成「已被接替」——
@@ -9221,9 +9230,13 @@ async function api(method, path, body) {
       const born = state && Number.isFinite(state.spawnedAt) ? state.spawnedAt
         : state && Number.isFinite(state.createdAt) ? state.createdAt
         : Date.now();
-      const taken = terminalRailHistory.sessions.some((row) =>
-        terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= born);
-      if (taken) continue;
+      // 武装中的全新内切跳过「已被接替」判定：同目录旧会话的 lastActive 必然
+      // ≥ 旧出生时刻，按它判这条会被立刻扣掉——而这正是本次点击要接替的那批行。
+      if (!armed) {
+        const taken = terminalRailHistory.sessions.some((row) =>
+          terminalRailSameDir(row.project, session.cwd) && (row.lastActive || 0) >= born);
+        if (taken) continue;
+      }
       out.push({ id: session.id, cwd: session.cwd, createdAt: born });
     }
     return out;
@@ -9675,9 +9688,10 @@ async function api(method, path, body) {
   function terminalRailPendingRowHtml(entry, activeId) {
     const session = terminalRailSessionMap()[entry.id];
     const working = !!session && session.status === "working";
-    // 同 terminalRailRowHtml 的选中判据（M5）：pending 存在时兜底行不亮——它没有
-    // 历史身份，pending 命中的永远是历史行；点它的会话走 activate（作废令牌）。
-    const active = terminalRailSelectPending ? false : entry.id === activeId;
+    // 同 terminalRailRowHtml 的选中判据（M5）：pending 存在时按终端 id 认行——
+    // 这枚 pending 就是这条终端的全新内切时，兜底行是这次点击的目标行，当拍亮；
+    // 其余情况不亮（pending 命中的历史行才是被选中的那条，一屏至多一条）。
+    const active = terminalRailPendingFreshActive(entry, activeId);
     return `
       <button type="button" class="rail-term-row rail-term-row-history is-live${active ? " is-active" : ""}" data-rail-term-session="${esc(entry.id)}" title="新会话">
         <span class="rail-term-slot">${working ? TERMINAL_RAIL_SPINNER : ""}</span>
@@ -10162,9 +10176,20 @@ async function api(method, path, body) {
   // 乐观选中起点（M5）：领令牌、写 pending、起 TTL 兜底，然后只重渲栏——
   // 高亮当拍成立，不等宿主侧 1~2s 的进程探测与 PTY 重启。在飞闸前置：在飞时
   // 点亮了也兑现不了（点击会被判定门吞掉），直接返回不亮。
+  // 入参两形：历史会话行 { endpoint, id }（续接内切/新开都用它认行）；全新内切
+  // { endpoint, terminalId, cwd }（没有历史身份可亮，按终端 id 认「新会话」兜底行，
+  // cwd 让兜底行落在目标目录组顶）。识别键互不串扰：pending 一次只点亮一行。
   function terminalRailBeginSelect(session) {
-    if (!session || !session.id) return;
+    if (!session || (!session.id && !session.terminalId)) return;
     if (terminalRailSwitchBusy()) return;
+    terminalRailArmSelect(session);
+  }
+
+  // 领令牌＋写 pending＋TTL 兜底（无在飞闸）。两处调用：BeginSelect（用户点击当拍）
+  // 与判定门内（全新内切确定要换之后）——后者本身就在闸里，闸已由它持有，再过
+  // BeginSelect 的闸门会被自己挡掉。
+  function terminalRailArmSelect(session) {
+    if (!session || (!session.id && !session.terminalId)) return;
     terminalRailSelectSeq += 1;
     const token = terminalRailSelectSeq;
     if (terminalRailSelectPending && terminalRailSelectPending.timer !== null) {
@@ -10180,8 +10205,35 @@ async function api(method, path, body) {
     // 兜底定时器不拖住单测进程退出（浏览器无此 API，条件调用不改变行为——
     // 与全文件「typeof 闸护桩环境」同一条惯例）。
     if (timer && typeof timer.unref === "function") timer.unref();
-    terminalRailSelectPending = { endpoint: session.endpoint || "", id: session.id, token, timer };
+    terminalRailSelectPending = {
+      endpoint: session.endpoint || "",
+      id: session.id || null,
+      terminalId: session.terminalId || null,
+      cwd: session.cwd || null,
+      token,
+      timer,
+    };
     renderTerminalRail();
+  }
+
+  // 兜底行选中判据的两条通道（行渲染与兜底行推导共用同一口径）：默认＝活跃终端
+  // id；有 pending 时历史行由 pending 占选中，兜底行只在「这枚 pending 就是这条
+  // 终端的全新内切」（pending.terminalId 命中）时亮——否则不亮（pending 命中的
+  // 历史行才是被选中的那条，一屏至多一条）。
+  function terminalRailPendingFreshActive(entry, activeId) {
+    return terminalRailSelectPending
+      ? entry.id === terminalRailSelectPending.terminalId
+      : entry.id === activeId;
+  }
+
+  // 全新内切的武装判定（兜底行推导用它豁免时序闸门）：pending 按终端 id 命中、
+  // 目标目录与这条终端的 cwd 同组——此时即使 spawnedAt 还旧（POST /switch 未回）、
+  // resume 还在（宿主还没清身份），也把这条终端视作「正在内切成全新会话」，
+  // 让兜底行立刻出现在目标目录组顶。
+  function terminalRailPendingFreshArmed(session) {
+    const pending = terminalRailSelectPending;
+    return !!pending && pending.terminalId === session.id
+      && !!pending.cwd && terminalRailSameDir(pending.cwd, session.cwd);
   }
 
   // 乐观选中收尾：令牌不匹配 no-op（迟到的旧切换清不掉新点击的高亮）；匹配则
@@ -10334,6 +10386,12 @@ async function api(method, path, body) {
       const exited = hostRead.status === "exited" || active.backendState?.status === "exited";
       const working = !exited && (active.status === "working" || (active.metrics && active.metrics.activeRequests > 0));
       if (working) return createAgentTerminal({ agentId, cwd, resume });
+      // 全新内切乐观选中（M5 补口）：没有历史身份可亮，activeTerminalPreviewId 又不
+      // 换（同记录换内容）——不武装的话，高亮要等 POST 返回、spawnedAt 刷新、兜底行
+      // 出现才挪过去（实测小半秒）。确定要内切（过了 working 门）后、POST 之前点亮：
+      // 兜底行当拍出现在目标目录组顶。working/无从内切落点都是别的页签，不许亮本页
+      // 签——武装点必须在这两个 return 之后。
+      if (!resume) terminalRailArmSelect({ endpoint: agentId, terminalId: active.id, cwd });
       // 内切：宿主同记录 terminate+spawn+身份换绑；响应快照换写本页签记录。
       const switched = await api("POST", `/api/terminal/sessions/${encodeURIComponent(active.id)}/switch`, resume ? { resume, cwd } : { agentId, cwd });
       terminalBackendSessions[active.id] = terminalBackendSession(switched);
@@ -10346,8 +10404,11 @@ async function api(method, path, body) {
         // 服务端杀前复核拒换（会话树里有活着的命令进程）：静默转新开保护。新开
         // 本就是点击历史会话的合法落点之一，这里再提示反而是噪声；原页签不动，
         // 在跑的命令继续。
-        // 失败清点不含这条（M5）：点击仍在兑现途中，乐观高亮留着——新开失败由
-        // createAgentTerminal 的 catch 清。此处清会让高亮先弹回旧行再亮新行。
+        // 失败清点不含这条（M5 原口径）：续接内切点亮的是历史行，转新开后那枚
+        // 高亮仍兑现（新页签会亮），此处清会让高亮先弹回旧行再亮新行。全新内切
+        // 不同——兜底行锚在**本页签**上，转新开后本页签没换内容，留着它就是说
+        // 这条页签换了会话，必须显式撤；新页签自己的兜底行由新建链路自然带出。
+        if (!resume) terminalRailEndSelect(null);
         return createAgentTerminal({ agentId, cwd, resume });
       }
       // 失败清点（M5）：这一拍点击被宿主判死——撤乐观高亮，点亮的行没换成，

@@ -386,6 +386,8 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         return terminalRailRowHtml;
       `)(null, null, "t1");
       const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
@@ -444,6 +446,8 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailSelectPending = null;
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         return terminalRailRowHtml;
       `)(null, null, "t1");
       const session = { id: "s-1", endpoint: "kimi", title: "重构权限矩阵", lastActive: 100 };
@@ -550,6 +554,8 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailRegroupRemoved")}
         function terminalRailSelfHealRemovedGroups() { return false; }
         ${extractFn("terminalRailPendingNewTerminals")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         const TERMINAL_RAIL_SPINNER = "";
         const TERMINAL_RAIL_DONE_DOT = "";
         const terminalDoneUnread = new Map();
@@ -557,6 +563,8 @@ describe("终端视图左栏换血（M4）", () => {
         ${extractFn("terminalRailStateSlotHtml")}
         ${extractFn("terminalRailRowHtml")}
         ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         ${extractFn("renderTerminalRailHistory")}
         return { render: renderTerminalRailHistory, rendered: terminalRailRendered };
       `)(list, state);
@@ -598,6 +606,7 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
         ${extractFn("terminalRailEndSelect")}
         ${extractFn("createAgentTerminal")}
         let terminalSwitchInFlight = false;
@@ -738,8 +747,8 @@ describe("终端视图左栏换血（M4）", () => {
         id: "t-9", label: "Kimi Code", agentId: "kimi", agentName: "Kimi Code", shell: "cmd", cwd: "C:\\dev\\alpha",
       }));
       ok.sandbox.run();
-      assert.deepEqual(ok.sandbox.pending(), { endpoint: "kimi", id: "s-1", token: 1, timer: ok.sandbox.pending().timer },
-        "BeginSelect 当拍落 pending（带端点+会话 id 两键，同 FindOpenSession 口径）");
+      assert.deepEqual(ok.sandbox.pending(), { endpoint: "kimi", id: "s-1", terminalId: null, cwd: null, token: 1, timer: ok.sandbox.pending().timer },
+        "BeginSelect 当拍落 pending（带端点+会话 id 两键，同 FindOpenSession 口径；全新内切那两键空着）");
       await flush();
       assert.equal(ok.sandbox.activeId(), "t-9", "成功照旧置活跃");
       assert.ok(ok.sandbox.pending() && ok.sandbox.pending().id === "s-1",
@@ -786,6 +795,7 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalRail() { log.railRenders = (log.railRenders || 0) + 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
         ${extractFn("terminalRailEndSelect")}
         function $(id) { return els[id] ?? null; }
         function terminalSessionFor(id) { return terminalBackendSessions[id] || null; }
@@ -917,10 +927,13 @@ describe("终端视图左栏换血（M4）", () => {
       function renderTerminalRail() { log2.rails += 1; }
       ${extractFn("terminalRailSwitchBusy")}
       ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
       ${extractFn("terminalRailEndSelect")}
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
       ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
       return {
         row: terminalRailRowHtml,
         pendingRow: terminalRailPendingRowHtml,
@@ -979,6 +992,7 @@ describe("终端视图左栏换血（M4）", () => {
         function renderTerminalPreviewSession() { screenRuns += 1; }
         ${extractFn("terminalRailSwitchBusy")}
         ${extractFn("terminalRailBeginSelect")}
+        ${extractFn("terminalRailArmSelect")}
         ${extractFn("terminalRailEndSelect")}
         return {
           begin: (session) => terminalRailBeginSelect(session),
@@ -1718,6 +1732,8 @@ describe("终端视图左栏换血（M4）", () => {
           ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
 ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
           ${extractFn("renderTerminalRailHistory")}
           return { render: renderTerminalRailHistory, collapsed: terminalRailCollapsedGroups, scrolled: state.scrolled };
         `)(list, state, history, activeSession);
@@ -1831,6 +1847,8 @@ ${extractFn("terminalRailPendingRowHtml")}
         ${extractFn("terminalRailIsArchived")}
 ${extractFn("terminalRailPendingNewTerminals")}
 ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
         ${extractFn("renderTerminalRailHistory")}
         return {
           render: renderTerminalRailHistory,
@@ -2038,6 +2056,8 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     ${extractFn("terminalRailPendingNewTerminals")}
     ${extractFn("terminalRailRowHtml")}
     ${extractFn("terminalRailPendingRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
     ${extractFn("renderTerminalRailHistory")}
     return { render: renderTerminalRailHistory };
   `)(list, state, history, sessions, activeId);
@@ -2193,6 +2213,8 @@ describe("done（跑完未读）标记与绿点（dsh completed/completionUnread
       let terminalRailSelectPending = null;
       ${extractFn("terminalRailStateSlotHtml")}
       ${extractFn("terminalRailRowHtml")}
+    ${extractFn("terminalRailPendingFreshActive")}
+    ${extractFn("terminalRailPendingFreshArmed")}
       return terminalRailRowHtml;
     `)(seed);
     const plain = mkRow([]);
