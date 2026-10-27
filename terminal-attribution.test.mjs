@@ -185,9 +185,11 @@ describe("attributeTerminalSessions", () => {
     const detected = [{ agentId: "opencode", pid: 2960, ancestors: [8888] }];
 
     it("binds the latest same-cwd opencode-sess row when the pid shape misses", () => {
+      // 两个 TUI 在跑时不按活跃猜（另一个终端的 TUI 也可能在别处干活），维持 cwd 匹配。
+      const twoTuis = [...detected, { agentId: "opencode", pid: 7777, ancestors: [4444] }];
       const out = attributeTerminalSessions(
         [cwdSession],
-        detected,
+        twoTuis,
         ocAgents(["opencode-sess-old", "opencode-sess-new", "opencode-sess-other"]),
         { opencode: [
           { id: "opencode-sess-old", cwd: "C:\\Users\\t\\proj", lastActive: 1000 },
@@ -197,6 +199,109 @@ describe("attributeTerminalSessions", () => {
       );
       assert.equal(out[0].agent.instanceId, "opencode-sess-new",
         "cwd 匹配忽略大小写/分隔符/尾斜杠；别的目录不参与；取最近活跃");
+    });
+
+    it("binds the latest-active row when the sole TUI works outside the shell cwd", () => {
+      // opencode 2.1.x 的 TUI 可以显示任意项目里的会话（项目切换 / 恢复上次
+      // 项目），会话目录不必等于终端启动目录——真机取证 2026-10-27：终端启动
+      // 目录 C:\Users\86183\Desktop\agent-home，TUI 正在干活的项目却是
+      // Anyswitch worktree。机器上只有这一个 opencode 交互进程时，全部会话行
+      // 都归它所有，「最近活跃」就是它正在显示的那一个。
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-sess-here", "opencode-sess-worktree"]),
+        { opencode: [
+          { id: "opencode-sess-here", cwd: "C:\\Users\\t\\proj", lastActive: 1000 },
+          { id: "opencode-sess-worktree", cwd: "C:\\Anyswitch-worktrees\\wt", lastActive: 3000 },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-worktree");
+      assert.equal(out[0].agent.pid, 2960, "进程归属本身不变");
+    });
+
+    it("sole-TUI recency beats a stale same-cwd row (TUI switched projects)", () => {
+      // 启动目录里那条旧会话行还在负载里（未过空闲 TTL），但 TUI 早已切到别处
+      // 干活：按 cwd 匹配会绑到一条停滞指标上，右栏显示的是别人项目的旧账。
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-sess-stale", "opencode-sess-active"]),
+        { opencode: [
+          { id: "opencode-sess-stale", cwd: "C:\\Users\\t\\proj", lastActive: 1000 },
+          { id: "opencode-sess-active", cwd: "D:\\other-project", lastActive: 5000 },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-active");
+    });
+
+    it("sole-TUI recency only binds rows that exist in the agents payload", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-sess-live"]),
+        { opencode: [
+          { id: "opencode-sess-dead", cwd: "C:\\Users\\t\\proj", lastActive: 9000 },
+          { id: "opencode-sess-live", cwd: "E:\\elsewhere", lastActive: 100 },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-live",
+        "过了空闲 TTL 的行不在负载里，绑上去右栏也取不到数");
+    });
+
+    it("sole TUI with no live session row falls back to the pid row", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        detected,
+        ocAgents(["opencode-2960"]),
+        { opencode: [{ id: "opencode-sess-dead", cwd: "C:\\Users\\t\\proj", lastActive: 9000 }] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-2960");
+    });
+
+    it("does not bind another terminal's TUI row when a second TUI is running", () => {
+      // 另一个终端也开着 opencode（在别的目录干活）：本终端 cwd 匹配不到任何
+      // 行时保持未绑定，不猜——抢过来右栏显示的就是别人终端的会话。
+      const twoTuis = [...detected, { agentId: "opencode", pid: 7777, ancestors: [4444] }];
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        twoTuis,
+        ocAgents(["opencode-sess-elsewhere"]),
+        { opencode: [{ id: "opencode-sess-elsewhere", cwd: "E:\\elsewhere", lastActive: 3000 }] },
+      );
+      assert.equal(out[0].agent.instanceId, null);
+    });
+
+    it("two TUIs under one shell still bind the latest-active row", () => {
+      const twoUnderOneShell = [
+        { agentId: "opencode", pid: 2960, ancestors: [8888] },
+        { agentId: "opencode", pid: 2961, ancestors: [8888] },
+      ];
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        twoUnderOneShell,
+        ocAgents(["opencode-sess-a", "opencode-sess-b"]),
+        { opencode: [
+          { id: "opencode-sess-a", cwd: "C:\\Users\\t\\proj", lastActive: 1000 },
+          { id: "opencode-sess-b", cwd: "C:\\Users\\t\\proj", lastActive: 2000 },
+        ] },
+      );
+      assert.equal(out[0].agent.instanceId, "opencode-sess-b");
+    });
+
+    it("a non-opencode terminal never triggers the recency fallback", () => {
+      const out = attributeTerminalSessions(
+        [cwdSession],
+        [{ agentId: "claude", pid: 6100, ancestors: [8888] }],
+        [{ id: "claude", name: "Claude Code", sessions: [{ id: "claude-777" }] }],
+        { opencode: [{ id: "opencode-sess-x", cwd: "E:\\elsewhere", lastActive: 3000 }] },
+      );
+      assert.deepEqual(out[0].agent, {
+        endpointId: "claude",
+        name: "Claude Code",
+        pid: 6100,
+        instanceId: null,
+      }, "feed 只在自家端点的行集里挑，别的端点连猜都不猜");
     });
 
     it("prefers the bridged session row over the resident-service pid row", () => {
