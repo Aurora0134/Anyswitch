@@ -219,7 +219,7 @@ function wrappedTrimmedLength(chain, idx, cols) {
   const line = chain[idx];
   const next = chain[idx + 1];
   const boundaryBlank = line.chars[cols - 1] === null || line.chars[cols - 1] === undefined;
-  const nextWide = next.chars[0] !== null && next.chars[0] !== "" && next.chars[1] === "";
+  const nextWide = next.chars[0] !== null && next.chars[0] !== "" && isWideHead(next, 0);
   return boundaryBlank && nextWide ? cols - 1 : cols;
 }
 
@@ -339,7 +339,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   // 保存都在当前缓冲的槽里写）。进备屏后主屏的槽被存进 altSaved、备屏用一份新的——
   // 否则备屏里的 ESC 8 会误读主屏的保存位置（实测：?1049h 后 ESC 8，xterm 落 (0,0)，
   // 共享槽的镜像会落回主屏保存点）。
-  let saved = { row: 0, col: 0, attrs: "" };
+  let saved = { abs: 0, col: 0, attrs: "" };
   let top = 0;
   let bottom = height - 1;
   let sgr = [];
@@ -393,84 +393,225 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       })
       .join(";");
 
-  // resize 重排（xterm 的软折行语义）：把每条折行链的格子流按新列数重新切分，链首
-  // 行位置不变、其下各行整体让位；多出的行从屏顶进滚动区，少了在底部补空行。客户端
-  // xterm 的滚动区也是这么重排的——镜像原先只按 min(newCols,width) 拷格补空，改列数
-  // 后两边同一行内容错开，应用按行擦写就整片错位（135→120 列实测 33/39 行不同）。
-  // 重排一组行，返回重排后的行、调整后的光标行与滚出屏顶的行。供活动屏与「备屏期间
-  // 被 resize 的主屏」共用。allowReflow=false 只截断/补空——xterm 的备屏缓冲没有滚动区
-  // （Buffer 的 _hasScrollback=false），resize 因此不重排折行链，只按新列数裁/补。
-  function reflowGridRows(rowsArr, cursorRow, oldCols, newCols, newRows, allowReflow = true) {
-    const out = [];
-    let mappedCursorRow = cursorRow;
-    let i = 0;
-    while (i < rowsArr.length) {
-      let end = i;
-      if (allowReflow) {
-        while (end + 1 < rowsArr.length && rowsArr[end + 1].wrapped) end += 1;
+  // resize 重排（xterm 的软折行语义）。镜像原先只按 min(newCols,width) 拷格补空，
+  // 客户端 xterm 会把「滚动区 + 屏幕」当成一条缓冲、按折行链重新接起来——镜像不跟着
+  // 重排，改列数后两边同一行内容错开，应用再按行擦写就整片错位（135→120 列实测
+  // 33/39 行不同的病灶）。下面两个函数是 xterm 的 Buffer.resize/_reflowSmaller/
+  // _reflowLarger 的移植（去掉 markers、视口滚动条、windowsPty 分支；镜像没有用户滚动，
+  // ydisp 恒等于 ybase）。折行链的长度与重切规则在模块级 wrappedTrimmedLength/
+  // chainCells/splitCells/resizeRow 里。
+
+  // 收窄列时的逐链重排（xterm 的 _reflowSmaller）。底部先扫，新增行延迟到末尾统一
+  // 插入（与 xterm 的 s 数组一致），补偿按插入前的缓冲长度算。in-place 改 buffer。
+  // savedRef 是该缓冲的保存光标绝对行（{ value }）：xterm 对每条被重排的链都做
+  // savedY = min(savedY + linesToAdd, ybase + newRows - 1)，链在保存点下方也照加，
+  // 这是 xterm 的原样口径，照抄不修正。
+  function reflowBufferSmaller(buffer, ybase, y, oldCols, newCols, newRows, maxLength, savedRef) {
+    const insertions = [];
+    let r = 0;
+    for (let n = buffer.length - 1; n >= 0; n -= 1) {
+      let h = buffer[n];
+      if (!h || (!h.wrapped && trimmedLength(h) <= newCols)) continue;
+      const chain = [h];
+      while (h.wrapped && n > 0) { h = buffer[--n]; chain.unshift(h); }
+      const cursorAbs = ybase + y;
+      // xterm 对含光标的链不重排（光标绝对行落在链内就跳过），只按新列数截断。
+      if (cursorAbs >= n && cursorAbs < n + chain.length) continue;
+      const laid = splitCells(chainCells(chain, oldCols), newCols);
+      for (let k = 0; k < laid.length; k += 1) laid[k].wrapped = k === 0 ? chain[0].wrapped : true;
+      const u = laid.length - chain.length;
+      // f：因缓冲上限要裁掉的新行数（滚动区远未满载时恒 0）
+      let f;
+      if (ybase === 0 && y !== buffer.length - 1) f = Math.max(0, y - maxLength + u);
+      else f = Math.max(0, buffer.length - maxLength + u);
+      // 链的原有行就地换成新布局的前几行，新增行延迟插入
+      for (let k = 0; k < chain.length; k += 1) buffer[n + k] = laid[k];
+      const extra = laid.slice(chain.length);
+      if (extra.length > 0) { insertions.push({ start: n + chain.length + r, newLines: extra }); r += extra.length; }
+      // 补偿：多出的行优先「弹掉底部、光标跟着下移」，光标到底才滚动（ybase++）。
+      let C = u - f;
+      while (C-- > 0) {
+        if (ybase === 0) {
+          if (y < newRows - 1) { y += 1; buffer.pop(); }
+          else { ybase += 1; }
+        } else if (ybase < Math.min(maxLength, buffer.length + r) - newRows) {
+          ybase += 1;
+        }
       }
-      const chain = rowsArr.slice(i, end + 1);
-      // xterm 对含光标的链不重排（reflowSmaller 的「光标绝对行落在链内就跳过」），
-      // 只按新列数截断——照做，保证两边同一帧同一种截断形态。
-      const containsCursor = cursorRow >= i && cursorRow <= end;
-      // 单行链只有超宽才需要重排；多行链必然要重接（xterm 以「末行是续行」为触发条件）。
-      const needReflow = allowReflow && (chain.length > 1 || trimmedLength(chain[0]) > newCols);
-      let laid;
-      if (containsCursor || !needReflow) {
-        laid = chain.map((line) => resizeRow(line, newCols));
-      } else {
-        laid = splitCells(chainCells(chain, oldCols), newCols);
-        for (let k = 0; k < laid.length; k += 1) laid[k].wrapped = k === 0 ? chain[0].wrapped : true;
+      // 保存光标随重排走（xterm 的 savedY 更新在补偿之后，用当时的 ybase）。
+      if (savedRef) savedRef.value = Math.min(savedRef.value + u, ybase + newRows - 1);
+    }
+    // 统一应用插入（xterm 的 reflowSmaller 末尾重建）：自底向上把原行搬回来，走到插入点
+    // 就把新行插在当前位置上方。直接按记录顺序 splice 会颠倒上下相邻两个插入点的次序
+    // （135→120 实测：A 的续行被插到 B 的续行下面）。
+    if (insertions.length > 0) {
+      const snapshot = buffer.slice();
+      const i = buffer.length;
+      buffer.length = Math.min(maxLength, buffer.length + r);
+      let n = i - 1;
+      let o = 0;
+      let a = insertions[0];
+      let h = 0;
+      for (let c = Math.min(maxLength - 1, i + r - 1); c >= 0; c -= 1) {
+        if (a && a.start > n + h) {
+          for (let e = a.newLines.length - 1; e >= 0; e -= 1) buffer[c--] = a.newLines[e];
+          c += 1;
+          h += a.newLines.length;
+          a = insertions[++o];
+        } else {
+          buffer[c] = snapshot[n--];
+        }
       }
-      // 光标跟着自己那一行走：它前面的链重排出多少行，它就平移多少行。
-      if (containsCursor) mappedCursorRow = cursorRow + (out.length - i);
-      out.push(...laid);
-      i = end + 1;
     }
-    // xterm 的补偿：重排多出的行优先「弹掉底部、光标跟着内容下移」，光标要溢出屏底
-    // 才滚动（顶部行进滚动区）。多出的行不是从屏顶进史——否则一屏正好看得见的内容
-    // 会被挤进滚动区（用户侧形态：改列数后画面内容上移一截）。
-    let pushed = [];
-    let rows2;
-    if (mappedCursorRow > newRows - 1) {
-      const scrolled = mappedCursorRow - newRows + 1;
-      pushed = out.slice(0, scrolled);
-      rows2 = out.slice(scrolled, scrolled + newRows);
-      mappedCursorRow = newRows - 1;
-    } else {
-      rows2 = out.slice(0, newRows);
-    }
-    while (rows2.length < newRows) rows2.push(blankRow(newCols));
-    return { rows: rows2, cursorRow: mappedCursorRow, pushed };
+    return { ybase, y };
   }
 
-  // resize 重排（xterm 的软折行语义）：把每条折行链的格子流按新列数重新切分，链首
-  // 行位置不变、其下各行整体让位；多出的行从屏顶进滚动区，少了在底部补空行。客户端
-  // xterm 的滚动区也是这么重排的——镜像原先只按 min(newCols,width) 拷格补空，改列数
-  // 后两边同一行内容错开，应用按行擦写就整片错位（135→120 列实测 33/39 行不同）。
+  // 放宽列时把续行重接回父行（xterm 的 _reflowLarger + _reflowLargerAdjustViewport）。
+  // 必须先按原位置把该接的链全部收齐、再统一应用（xterm 的 reflowLargerGetLinesToRemove
+  // 先收索引、_reflowLargerCreateNewLayout/ApplyNewLayout 后删）：边扫边删会让后面的链
+  // 位置前移，光标链判定就用上了错位后的位置（实测：该接的链被当成「含光标」跳过）。
+  // savedRef 同 reflowBufferSmaller：xterm 收拢全部删除量后 savedY = max(savedY -
+  // countRemoved, 0)。
+  function reflowBufferLarger(buffer, ybase, y, oldCols, newCols, newRows, savedRef) {
+    const joins = [];
+    for (let a = 0; a < buffer.length - 1; a += 1) {
+      const next = buffer[a + 1];
+      if (!next || !next.wrapped) continue;
+      const chain = [buffer[a]];
+      let h = a + 1;
+      while (h < buffer.length && buffer[h].wrapped) { chain.push(buffer[h]); h += 1; }
+      const cursorAbs = ybase + y;
+      if (cursorAbs >= a && cursorAbs < h) { a = h - 1; continue; }
+      const laid = splitCells(chainCells(chain, oldCols), newCols);
+      for (let k = 0; k < laid.length; k += 1) laid[k].wrapped = k === 0 ? chain[0].wrapped : true;
+      joins.push({ start: a, oldLen: chain.length, laid });
+      a = h - 1;
+    }
+    let removed = 0;
+    for (let i = joins.length - 1; i >= 0; i -= 1) {
+      const { start, oldLen, laid } = joins[i];
+      removed += oldLen - laid.length;
+      buffer.splice(start, oldLen, ...laid);
+    }
+    // 每少一行：无滚动区时光标上移一行（短了补空行），有滚动区时滚动区回一行。
+    for (let rr = removed; rr-- > 0;) {
+      if (ybase === 0) {
+        if (y > 0) y -= 1;
+        if (buffer.length < newRows) buffer.push(blankRow(newCols));
+      } else {
+        ybase -= 1;
+      }
+    }
+    // 保存光标随重排走（xterm 在 AdjustViewport 末尾按总删除量下移）。
+    if (savedRef) savedRef.value = Math.max(0, savedRef.value - removed);
+    return { ybase, y };
+  }
+
+  // xterm 的 Buffer.resize 移植：扩列先逐行补齐、行数调整（拉高从滚动区往回拉行，
+  // 光标到底才补空行；拉低优先弹底部，光标在底部才滚动）、再按软折行重排、收窄最后
+  // 逐行截断。allowReflow=false 用于备屏缓冲（没有滚动区，xterm 不重排它）。
+  // savedRef 是该缓冲的保存光标槽（{ value } 绝对行），随重排走 xterm 的 savedY 调整。
+  // 返回调整后的视口顶 ybase 与光标视口行 y（不变量：buffer.length === ybase + newRows）。
+  function resizeBuffer(buffer, cursorAbs, oldCols, oldRows, newCols, newRows, allowReflow, savedRef) {
+    let ybase = Math.max(0, buffer.length - oldRows);
+    let y = cursorAbs - ybase;
+    // 1) 扩列：逐行补到新宽（xterm 在重排前先 pad）。
+    if (newCols > oldCols) {
+      for (let i = 0; i < buffer.length; i += 1) buffer[i] = resizeRow(buffer[i], newCols);
+    }
+    // 2) 行数调整
+    let pulled = 0;
+    if (oldRows < newRows) {
+      for (let s = oldRows; s < newRows; s += 1) {
+        if (buffer.length < newRows + ybase) {
+          if (ybase > 0 && buffer.length <= ybase + y + pulled + 1) { ybase -= 1; pulled += 1; }
+          else buffer.push(blankRow(newCols));
+        }
+      }
+    } else {
+      for (let e = oldRows; e > newRows; e -= 1) {
+        if (buffer.length > newRows + ybase) {
+          if (buffer.length > ybase + y + 1) buffer.pop();
+          else ybase += 1;
+        }
+      }
+    }
+    y = Math.min(y, newRows - 1);
+    y += pulled;
+    // 3) 软折行重排 + 4) 收窄逐行截断
+    if (allowReflow && newCols !== oldCols) {
+      if (newCols > oldCols) ({ ybase, y } = reflowBufferLarger(buffer, ybase, y, oldCols, newCols, newRows, savedRef));
+      else ({ ybase, y } = reflowBufferSmaller(buffer, ybase, y, oldCols, newCols, newRows, historyLines + newRows, savedRef));
+      if (newCols < oldCols) {
+        for (let i = 0; i < buffer.length; i += 1) buffer[i] = resizeRow(buffer[i], newCols);
+      }
+    } else if (newCols < oldCols) {
+      // 备屏收窄不截断（xterm 只在能重排时才截）：行保留原长，多出列的内容留着等放宽
+      // 回来——读取处（screenLines/serializeRow）按当前宽裁剪。
+    }
+    return { buffer, ybase, y };
+  }
+
+  // resize：把「滚动区 + 屏幕」当成一条缓冲做重排，再拆回两段。备屏期间两个缓冲都
+  // 处理（xterm 的 BufferSet.resize 两个缓冲都 resize）：主屏那份（含滚动区）照重排，
+  // 备屏那份只调行数不调折行——不做的话，退备屏时还原的是旧尺寸网格、光标越界。
+  // 保存光标槽跟缓冲走（xterm 的 savedX/savedY 是 per-Buffer 的）：主屏缓冲的重排调整
+  // 主屏槽（备屏期间存在 altSaved.mainSaved），备屏缓冲的调整备屏槽。
   function rebuild(newCols, newRows) {
-    const res = reflowGridRows(grid, row, width, newCols, newRows, !inAlt);
-    grid = res.rows;
-    row = res.cursorRow;
-    // 备屏没有滚动区（与实时滚动一致）：重排滚出的行直接丢弃。
-    if (!inAlt) for (const line of res.pushed) pushHistory(serializeRow(line));
+    const mainSaved = inAlt && altSaved ? altSaved.mainSaved : saved;
+    const mainRef = { value: mainSaved.abs };
+    const resizeOne = (buffer, cursorAbs, allowReflow, savedRef) =>
+      resizeBuffer(buffer, cursorAbs, width, height, newCols, newRows, allowReflow, savedRef);
     if (inAlt && altSaved) {
-      // 备屏期间 resize：主屏那份网格也要重排到同尺寸——xterm 的 BufferSet.resize 两个
-      // 缓冲都 resize。不跟着做，退备屏时还原的是旧尺寸网格，光标越界、后续写入全错位。
-      const main = reflowGridRows(altSaved.grid, altSaved.row, width, newCols, newRows);
-      altSaved.grid = main.rows;
-      altSaved.row = main.cursorRow;
+      // 主屏（含滚动区）
+      const mainBuffer = history.concat(altSaved.grid);
+      const resMain = resizeOne(mainBuffer, altSaved.row + history.length, true, mainRef);
+      const mainGridStart = Math.max(0, resMain.ybase);
+      history = resMain.buffer.slice(0, mainGridStart);
+      altSaved.grid = resMain.buffer.slice(mainGridStart, mainGridStart + newRows);
+      while (altSaved.grid.length < newRows) altSaved.grid.push(blankRow(newCols));
+      altSaved.row = Math.min(newRows - 1, Math.max(0, resMain.y));
       altSaved.col = Math.min(newCols - 1, altSaved.col);
-      for (const line of main.pushed) pushHistory(serializeRow(line));
       altSaved.top = 0;
       altSaved.bottom = newRows - 1;
+      // 备屏（无滚动区，不重排）。slice 掉的顶行就是 xterm 的 trimStart：保存点随之下移。
+      const resAlt = resizeOne(grid, row, false, null);
+      const altGridStart = Math.max(0, resAlt.ybase);
+      grid = resAlt.buffer.slice(altGridStart, altGridStart + newRows);
+      while (grid.length < newRows) grid.push(blankRow(newCols));
+      row = Math.min(newRows - 1, Math.max(0, resAlt.y));
+      saved.abs = Math.max(0, saved.abs - altGridStart);
+    } else {
+      const buffer = history.concat(grid);
+      const res = resizeOne(buffer, row + history.length, true, mainRef);
+      const gridStart = Math.max(0, res.ybase);
+      history = res.buffer.slice(0, gridStart);
+      grid = res.buffer.slice(gridStart, gridStart + newRows);
+      while (grid.length < newRows) grid.push(blankRow(newCols));
+      row = Math.min(newRows - 1, Math.max(0, res.y));
+    }
+    mainSaved.abs = mainRef.value;
+    // resize 后重算滚动区的文本缓存与字节预算
+    historyTotal = 0;
+    for (const line of history) {
+      line._text = serializeRow(line);
+      line._bytes = line._text.length;
+      historyTotal += line._bytes;
+    }
+    while (history.length > historyLines || historyTotal > historyBytes) {
+      historyTotal -= history.shift()._bytes;
+      // 顶部裁行把缓冲内容整体上移：保存点的绝对行跟着减（xterm 的 trimStart 调 savedY）。
+      mainSaved.abs = Math.max(0, mainSaved.abs - 1);
     }
     width = newCols;
     height = newRows;
     top = 0;
     bottom = height - 1;
-    // xterm 的 resize 末尾把 x 夹回 cols-1：满行哨兵到此为止。
+    // xterm 的 resize 末尾把 x 夹回 cols-1：满行哨兵到此为止。保存的列同样夹（savedX =
+    // Math.min(savedX, newCols - 1)）：当前缓冲的槽与被挂起缓冲的槽各夹各的。
     col = Math.min(newCols - 1, Math.max(0, col));
+    saved.col = Math.min(newCols - 1, Math.max(0, saved.col));
+    if (inAlt && altSaved) altSaved.mainSaved.col = Math.min(newCols - 1, Math.max(0, altSaved.mainSaved.col));
   }
 
   // 只把光标夹回屏内。刻意不动满行哨兵（col === width）：它表示「光标停在最后一列
@@ -796,13 +937,16 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     }
   }
 
-  // 保存/恢复光标（CSI s/u、ESC 7/8、1049 共用这一槽，xterm 同构）。恢复末尾
-  // _restrictCursor——哨兵也随之折回末列。
+  // 保存/恢复光标（CSI s/u、ESC 7/8、1049 共用这一槽，xterm 同构）。保存的行是缓冲
+  // 绝对行（xterm 的 savedY = ybase + y），滚动会把内容往上顶——恢复时要用当时的绝对
+  // 行减回现在的滚动区长度，否则滚过屏后一次 ESC 8 / CSI u 就把光标放错一行。恢复的
+  // 末尾 _restrictCursor——哨兵也随之折回末列。
   function saveCursorNow() {
-    saved = { row, col, attrs: attrsString() };
+    saved = { abs: (inAlt ? 0 : history.length) + row, col, attrs: attrsString() };
   }
   function restoreSavedCursor() {
-    row = saved.row;
+    const base = inAlt ? 0 : history.length;
+    row = Math.max(0, Math.min(height - 1, saved.abs - base));
     col = saved.col;
     // 恢复串经 applySgr 重放：直接 split 会把 38;2;… 劈成裸数字碎片，
     // 破坏 applySgr 里「同槽颜色 token 是原子、新色到达先摘旧色」的替换不变量。
@@ -855,7 +999,7 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       if (api === 1049) saveCursorNow();
       altSaved = { grid, row, col, top, bottom, inAlt, mainSaved: saved };
       grid = Array.from({ length: height }, () => blankRow(width));
-      saved = { row: 0, col: 0, attrs: "" };
+      saved = { abs: 0, col: 0, attrs: "" };
       top = 0;
       bottom = height - 1;
       // 光标位置不动：备屏继承主屏光标（activateAltBuffer：alt.x = normal.x）。
@@ -1009,10 +1153,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
       }
       return INCOMPLETE;
     }
-    if (next === 0x37) { saved = { row, col, attrs: attrsString() }; return start + 2; } // ESC 7
+    if (next === 0x37) { saveCursorNow(); return start + 2; } // ESC 7
     // ESC 8 恢复光标（xterm 走 restoreCursor：末尾 _restrictCursor，哨兵随之消失）、
     // ESC E 归零再换行、ESC c 整屏复位：三者都重新定光标。
-    if (next === 0x38) { row = saved.row; col = saved.col; clampCursor(); return start + 2; } // ESC 8
+    if (next === 0x38) { restoreSavedCursor(); return start + 2; } // ESC 8
     // ESC D（IND）与 ESC M（RI）只移行不移列，与 LF 同口径：哨兵折回末列。
     if (next === 0x44) { lineFeed(); return start + 2; } // ESC D
     if (next === 0x45) { col = 0; lineFeed(); return start + 2; } // ESC E
@@ -1203,7 +1347,10 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
   }
 
   function serializeRow(line) {
-    let end = line.chars.length;
+    // 只序列化当前宽内的格子：备屏收窄时行会保长（xterm 不截断备屏行），多出列的内容
+    // 客户端根本看不见，回放也不该发。
+    const limit = Math.min(line.chars.length, width);
+    let end = limit;
     while (end > 0) {
       const ch = line.chars[end - 1];
       const blank = ch === null || ch === undefined || ch === " ";
@@ -1329,7 +1476,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // Test/diagnostic surface: the rendered picture as plain lines.
     screenLines() {
       flush();
-      return grid.map((line) => line.chars.map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
+      // 按当前宽裁剪：备屏收窄时行会保长（xterm 不截断备屏行），多出列的内容客户端看不见。
+      return grid.map((line) => line.chars.slice(0, width).map((ch) => (ch === null ? " " : ch)).join("").replace(/\s+$/, ""));
     },
     // Same grid, one cell at a time, so a repaint can be checked for colour and
     // not just for text. Background is whatever background SGR the cell carries.
@@ -1337,7 +1485,8 @@ export function createScreenMirror({ cols = 80, rows = 24, historyLines = TERMIN
     // 绿色分量，不是背景（下划线色不是底色）。
     screenAttrs() {
       flush();
-      return grid.map((line) => line.chars.map((ch, index) => {
+      // 按当前宽裁剪（同 screenLines）：备屏收窄时行会保长。
+      return grid.map((line) => line.chars.slice(0, width).map((ch, index) => {
         const tokens = String(line.attrs[index] ?? "").split(";");
         let bg = "";
         for (let i = 0; i < tokens.length; i += 1) {
