@@ -52,6 +52,7 @@ function renderSandbox({ history, activeSession = null, prefs = { archived: [], 
     let terminalRailScrolledFor = "";
     let terminalRailFlipMode = "instant";
     const terminalRailCollapsedGroups = state.collapsed;
+    function saveTerminalRailCollapsedGroups() { state.saved += 1; }
     const terminalRailWatermarks = new Map();
     const terminalRailPrefs = prefs;
     const terminalRailViewPrefs = viewPrefs;
@@ -584,12 +585,14 @@ describe("S2 分组移除（finding 1b）", () => {
 
   describe("移除/恢复交互（vm 真跑）", () => {
     const runFlow = ({ apiImpl, prefs = { archived: [], removedGroups: [] }, removedAt = {} } = {}) => {
-      const log = { posts: [], toasts: [], modals: [], renders: 0, menuClosed: 0, saved: 0 };
+      const log = { posts: [], toasts: [], modals: [], renders: 0, menuClosed: 0, saved: 0, collapsedSaved: 0 };
       const fn = new Function("log", "apiImpl", "prefs", "removedAt", `
         let terminalRailPrefs = prefs;
         let terminalRailFlipMode = "instant";
         const terminalRailRemovedAt = removedAt;
         const terminalRailSelfHealFailed = new Set();
+        const terminalRailCollapsedGroups = new Set();
+        function saveTerminalRailCollapsedGroups() { log.collapsedSaved += 1; }
         function api(method, path, body) { log.posts.push({ method, path, body }); return apiImpl(method, path, body); }
         function toast(msg, isErr) { log.toasts.push({ msg, isErr }); }
         function panelError(err, fallback) { return fallback; }
@@ -745,6 +748,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
         let activeTerminalPreviewId = activeId;
         const terminalBackendSessions = sessions;
         const terminalRailCollapsedGroups = log.collapsed;
+        function saveTerminalRailCollapsedGroups() { log.saved = (log.saved || 0) + 1; }
         function api(method, path, body) {
           log.gets.push({ method, path });
           if (method === "GET" && path === "/api/agents") return Promise.resolve(agentsImpl());
@@ -766,6 +770,7 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
         function panelError(err, fallback) { return fallback; }
         function terminalRailAgentId() { return agentId; }
         function terminalRailEndSelect() {}
+        ${extractFn("terminalRailNormDir")}
         ${extractFn("terminalRailSwitchOrCreateCore")}
         ${extractFn("terminalRailCreateTerminalInDir")}
         return terminalRailCreateTerminalInDir;
@@ -777,9 +782,9 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
     };
 
     it("点击＝先展开该组（若收起）＋以该组目录为 cwd 建终端（无活跃页签落新开）", async () => {
-      const { fn, log } = runCreate({ collapsed: ["C:\\dev\\alpha"] });
+      const { fn, log } = runCreate({ collapsed: ["c:\\dev\\alpha"] });
       fn("C:\\dev\\alpha");
-      assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组先展开");
+      assert.equal(log.collapsed.has("c:\\dev\\alpha"), false, "收起的组先展开");
       assert.deepEqual(log.posts, [{ agentId: "kimi", cwd: "C:\\dev\\alpha", resume: null }],
         "无从内切走 createAgentTerminal 通路，cwd＝组目录，全新建不带 resume");
       await flush();
@@ -787,13 +792,13 @@ describe("S3 组头三件（dsh 工作区行按钮，m6b §B）", () => {
 
     it("idle 聚焦页签：⊕ 就地换新会话（与「新建会话」同门），POST 体带 agentId＋组目录 cwd", async () => {
       const { fn, log } = runCreate({
-        collapsed: ["C:\\dev\\alpha"],
+        collapsed: ["c:\\dev\\alpha"],
         sessions: { "t-a": { id: "t-a", backend: true, agentId: "kimi", agent: { endpointId: "kimi", instanceId: "inst-1" }, resume: { endpoint: "kimi", id: "s-old" }, status: "idle" } },
         activeId: "t-a",
       });
       fn("C:\\dev\\alpha");
       await flush();
-      assert.equal(log.collapsed.has("C:\\dev\\alpha"), false, "收起的组照常先展开");
+      assert.equal(log.collapsed.has("c:\\dev\\alpha"), false, "收起的组照常先展开");
       assert.deepEqual(log.switchBodies, [{ agentId: "kimi", cwd: "C:\\dev\\alpha" }], "内切体必须带目标 agentId 与组目录，无 resume 键");
       assert.deepEqual(log.posts, [], "不开新页签");
     });
@@ -1409,6 +1414,7 @@ describe("兜底行生命周期动效（diff 驱动 FLIP/幽灵）", () => {
       let terminalRailLastDiffAgent = null;
       let terminalRailLastDiffSearch = false;
       const terminalRailCollapsedGroups = new Set();
+      function saveTerminalRailCollapsedGroups() {}
       const terminalRailWatermarks = new Map();
       const terminalRailPrefs = { archived: [], removedGroups: [] };
       const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
@@ -2051,6 +2057,7 @@ describe("M8 复审必修 1：取消归档钮的行委托断链", () => {
       const document = { addEventListener: () => {} };
       function initTerminalRailScrollbarQuiet() {}
       function loadTerminalRailViewPrefs() {}
+      function loadTerminalRailCollapsedGroups() {}
       function closeTerminalRailGroupMenu() {}
       function closeTerminalRailViewMenu() {}
       function closeTerminalRailSearch() {}
@@ -2113,6 +2120,7 @@ describe("M13 新会话按钮的首次交互动画", () => {
       const document = { addEventListener() {} };
       function $(id) { return els[id] || null; }
       function loadTerminalRailViewPrefs() {}
+      function loadTerminalRailCollapsedGroups() {}
       function initTerminalRailScrollbarQuiet() {}
       function closeTerminalRailGroupMenu() {}
       function closeTerminalRailViewMenu() {}
@@ -2236,6 +2244,7 @@ describe("M9 D2/D3 接线守卫：段头两钮点击必须接通（防「点了�
       const document = { addEventListener: () => {} };
       function $(id) { return els[id] ?? null; }
       function loadTerminalRailViewPrefs() {}
+      function loadTerminalRailCollapsedGroups() {}
       function initTerminalRailScrollbarQuiet() {}
       function closeTerminalRailGroupMenu() {}
       function closeTerminalRailHoverCard() {}
@@ -2428,6 +2437,7 @@ describe("M9 复审必修：portal 后菜单项点击接线（真 DOM 守卫）"
       function $(id) { return els[id] ?? null; }
       function loadTerminalRailViewPrefs() {}
       function saveTerminalRailViewPrefs() {}
+      function loadTerminalRailCollapsedGroups() {}
       function initTerminalRailScrollbarQuiet() {}
       function closeTerminalRailGroupMenu() { log.closeGroup += 1; terminalRailMenuEl = null; }
       function closeTerminalRailViewMenu() { log.closeView += 1; terminalRailViewMenuEl = null; }

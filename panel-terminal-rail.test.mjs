@@ -497,6 +497,7 @@ describe("终端视图左栏换血（M4）", () => {
         let terminalRailScrolledFor = "";
         let terminalRailFlipMode = "instant";
         const terminalRailCollapsedGroups = state.collapsed;
+        function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
         const terminalRailWatermarks = new Map();
         const terminalRailPrefs = { archived: [], removedGroups: [] };
         const terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
@@ -1655,6 +1656,7 @@ describe("终端视图左栏换血（M4）", () => {
           let terminalRailScrolledFor = "";
           let terminalRailFlipMode = "instant";
           const terminalRailCollapsedGroups = state.collapsed;
+          function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
           const terminalRailWatermarks = new Map();
           const terminalRailPrefs = { archived: [], removedGroups: [] };
           const terminalRailPendingNew = new Map();
@@ -1723,11 +1725,11 @@ ${extractFn("terminalRailPendingRowHtml")}
       };
 
       const activeSession = { id: "t1", cwd: "C:\\dev\\alpha" };
-      const collapsed = ["C:\\dev\\alpha"];
+      const collapsed = ["c:\\dev\\alpha"];
       // 首帧：历史还没拉回来（sessions 空），不许把「已自动展开」认下来
       const early = build({ endpoint: "kimi", sessions: [] }, activeSession, collapsed, "");
       early.fn.render("kimi");
-      assert.equal(early.state.collapsed.has("C:\\dev\\alpha"), true, "数据没落地时不动组态（这一刻组表本来就是空的）");
+      assert.equal(early.state.collapsed.has("c:\\dev\\alpha"), true, "数据没落地时不动组态（这一刻组表本来就是空的）");
       assert.equal(early.state.scrolled.length, 0, "也不滚");
 
       // 落地后同一次渲染：展开活跃所在组并滚到可见
@@ -1739,16 +1741,17 @@ ${extractFn("terminalRailPendingRowHtml")}
         activeSession, collapsed, "",
       );
       landed.fn.render("kimi");
-      assert.equal(landed.state.collapsed.has("C:\\dev\\alpha"), false, "活跃终端所在组自动展开");
+      assert.equal(landed.state.collapsed.has("c:\\dev\\alpha"), false, "活跃终端所在组自动展开");
+      assert.ok(landed.state.saved >= 1, "自动展开同步写回折叠存档（看到的＝存下的）");
       assert.deepEqual(landed.state.scrolled, ["C:\\dev\\alpha"], "并滚到可见");
 
       // 已展开过一次之后：用户手动收起，后续轮询渲染不许把它顶回来
       const after = build(
         { endpoint: "kimi", sessions: [{ id: "s1", project: "C:\\dev\\alpha", title: "重构权限矩阵", lastActive: 100 }] },
-        activeSession, ["C:\\dev\\alpha"], "kimi\u0000t1",
+        activeSession, ["c:\\dev\\alpha"], "kimi\u0000t1",
       );
       after.fn.render("kimi");
-      assert.equal(after.state.collapsed.has("C:\\dev\\alpha"), true, "同一活跃终端不再自动展开（尊重用户手动收起）");
+      assert.equal(after.state.collapsed.has("c:\\dev\\alpha"), true, "同一活跃终端不再自动展开（尊重用户手动收起）");
       assert.equal(after.state.scrolled.length, 0, "也不重复滚");
     });
 
@@ -1760,13 +1763,14 @@ ${extractFn("terminalRailPendingRowHtml")}
         get: () => list.html,
         set: (v) => { list.writes += 1; list.html = v; },
       });
-      const state = { collapsed: new Set(["C:\\dev\\alpha"]), scrolled: [] };
+      const state = { collapsed: new Set(["c:\\dev\\alpha"]), scrolled: [] };
       const sandbox = new Function("list", "state", "activeSession", `
         let terminalRailRendered = { open: null, history: null };
         let terminalRailAutoExpandedFor = "";
         let terminalRailScrolledFor = "";
         let terminalRailFlipMode = "instant";
         const terminalRailCollapsedGroups = state.collapsed;
+        function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
         const terminalRailWatermarks = new Map();
         const terminalRailPrefs = { archived: [], removedGroups: [] };
         const terminalRailPendingNew = new Map();
@@ -1840,7 +1844,7 @@ ${extractFn("terminalRailPendingRowHtml")}
       sandbox.setHistory({ endpoint: "kimi", sessions: [], fetchedAt: 1, error: new Error("terminal_host_unavailable") });
       sandbox.render("kimi");
       assert.equal(sandbox.autoExpandedFor(), "", "失败态不消费 autoKey（失败那份空表不是事实）");
-      assert.equal(state.collapsed.has("C:\\dev\\alpha"), true, "失败态不动组态");
+      assert.equal(state.collapsed.has("c:\\dev\\alpha"), true, "失败态不动组态");
 
       // 第二帧：用户手动刷新成功，列表落地 → 活跃组照常自动展开并滚到可见。
       sandbox.setHistory({
@@ -1850,7 +1854,7 @@ ${extractFn("terminalRailPendingRowHtml")}
       });
       sandbox.render("kimi");
       assert.equal(sandbox.autoExpandedFor(), "kimi\u0000t1", "成功落地才认下「已自动展开」");
-      assert.equal(state.collapsed.has("C:\\dev\\alpha"), false, "活跃组自动展开");
+      assert.equal(state.collapsed.has("c:\\dev\\alpha"), false, "活跃组自动展开");
       assert.deepEqual(state.scrolled, ["C:\\dev\\alpha"], "并滚到可见");
     });
 
@@ -1864,6 +1868,78 @@ ${extractFn("terminalRailPendingRowHtml")}
         "旧位置只在真要播 FLIP 时才量（1s 轮询每拍都渲染，无条件量行等于每秒一次强制布局）");
       assert.ok(extractFn("initTerminalRail").includes("terminalRailMotionArmed = true"), "首次指针/键盘输入才武装动画");
     });
+  });
+});
+
+describe("组折叠持久化（localStorage）", () => {
+  const KEY = "panel-terminal-rail-collapsed";
+  const storageSandbox = (store) => new Function("store", `
+    const TERMINAL_RAIL_COLLAPSED_KEY = "panel-terminal-rail-collapsed";
+    const terminalRailCollapsedGroups = new Set();
+    const localStorage = {
+      getItem(key) { return store.has(key) ? store.get(key) : null; },
+      setItem(key, value) { store.set(key, String(value)); },
+    };
+    ${extractFn("terminalRailNormDir")}
+    ${extractFn("loadTerminalRailCollapsedGroups")}
+    ${extractFn("saveTerminalRailCollapsedGroups")}
+    let terminalRailFlipMode = "instant";
+    function terminalRailAgentId() { return "kimi"; }
+    function renderTerminalRailHistory() {}
+    ${extractFn("toggleTerminalRailGroup")}
+    return {
+      load: loadTerminalRailCollapsedGroups,
+      save: saveTerminalRailCollapsedGroups,
+      toggle: toggleTerminalRailGroup,
+      groups: terminalRailCollapsedGroups,
+    };
+  `)(store);
+
+  it("读回落盘：大小写/斜杠/尾斜杠归一化，脏键跳过；写回同一口径", () => {
+    const store = new Map();
+    store.set(KEY, JSON.stringify(["C:\\Dev\\Alpha\\", "d:/Work/Beta", "", 42, null]));
+    const box = storageSandbox(store);
+    box.load();
+    assert.deepEqual([...box.groups].sort(),
+      ["", "c:\\dev\\alpha", "d:\\work\\beta"],
+      "目录键归一化到同一把尺（未分组空键保留，非字符串丢弃）");
+    box.save();
+    assert.deepEqual(JSON.parse(store.get(KEY)).sort(),
+      ["", "c:\\dev\\alpha", "d:\\work\\beta"], "写回同样归一化");
+  });
+
+  it("坏存档不砸内存现值：坏 JSON / 非数组保留当前集合", () => {
+    const store = new Map([[KEY, "{oops"]]);
+    const box = storageSandbox(store);
+    box.groups.add("c:\\dev\\alpha");
+    box.load();
+    assert.ok(box.groups.has("c:\\dev\\alpha"), "坏 JSON：保留内存现值");
+    store.set(KEY, JSON.stringify({ collapsed: true }));
+    box.load();
+    assert.ok(box.groups.has("c:\\dev\\alpha"), "非数组：保留内存现值");
+  });
+
+  it("点组头即落盘：收起写入归一化键，再点删键", () => {
+    const store = new Map();
+    const box = storageSandbox(store);
+    box.toggle("C:\\Dev\\Alpha");
+    assert.deepEqual(JSON.parse(store.get(KEY)), ["c:\\dev\\alpha"], "收起即写盘");
+    box.toggle("C:\\Dev\\Alpha");
+    assert.deepEqual(JSON.parse(store.get(KEY)), [], "展开即删键");
+  });
+
+  it("接线钉：首渲前读回，四条改折叠态的路径都写回", () => {
+    assert.ok(extractFn("initTerminalRail").includes("loadTerminalRailCollapsedGroups()"),
+      "页面启动首渲之前读回折叠存档");
+    for (const fn of ["toggleTerminalRailGroup", "terminalRailCreateTerminalInDir"]) {
+      assert.ok(extractFn(fn).includes("saveTerminalRailCollapsedGroups()"), `${fn} 写回`);
+    }
+    assert.ok(extractFn("applyTerminalRailViewChoice").includes("saveTerminalRailCollapsedGroups()"),
+      "树模式自动展开祖先组写回");
+    assert.ok(extractFn("renderTerminalRailHistory").includes("terminalRailCollapsedGroups.has(terminalRailNormDir(group.key))"),
+      "渲染按归一化键读折叠态");
+    assert.ok(extractFn("renderTerminalRailHistory").includes("saveTerminalRailCollapsedGroups()"),
+      "活跃组自动展开写回（看到的＝存下的）");
   });
 });
 
@@ -1901,6 +1977,7 @@ describe("M12-B 运行中转圈与水位线联动（dsh 实测规格）", () => 
     let terminalRailScrolledFor = "";
     let terminalRailFlipMode = "instant";
     const terminalRailCollapsedGroups = state.collapsed;
+    function saveTerminalRailCollapsedGroups() { state.saved = (state.saved || 0) + 1; }
     const terminalRailWatermarks = new Map();
     const terminalRailPrefs = { archived: [], removedGroups: [] };
     const terminalRailPendingNew = new Map();

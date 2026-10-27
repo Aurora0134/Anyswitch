@@ -8881,6 +8881,9 @@ async function api(method, path, body) {
   // 按钮一律 0ms 硬切（加过渡就错），栏内只有组箭头 .15s 旋转与组展开的 FLIP 行位
   // 移有运动。
   const TERMINAL_RAIL_WATERMARK = 5;
+  // 组折叠态：跨视图进出与页面重载都要保持（用户手动收起的组不该每次进来都弹开）。
+  // 键一律过 terminalRailNormDir——组键是「稳定代表拼写」（最短优先），会话数据里
+  // 同一目录的大小写/斜杠拼写可能换形态，拿原始拼写当存储键会在重载后对不上。
   const terminalRailCollapsedGroups = new Set();
   const terminalRailWatermarks = new Map();
   // 历史会话缓存：{ endpoint, sessions, fetchedAt, error }。只装当前 agent 那一份——
@@ -8901,6 +8904,10 @@ async function api(method, path, body) {
   // （手动排序的唯一来源）。默认值即 dsh 出厂默认。
   const TERMINAL_RAIL_VIEW_KEY = "panel-terminal-rail-view";
   let terminalRailViewPrefs = { groupBy: "workspace", orderBy: "updated", archivedFilter: "default", sessionOrder: {} };
+  // 组折叠态（与视图偏好同层）：归一化目录键的数组。纯视图状态，不进面板后端
+  // （归档/已移除分组才是 workspace domain 的持久化集合）。先例：会话页的
+  // SESS_LS.collapsed 与栏内 removed-at 都走 localStorage。
+  const TERMINAL_RAIL_COLLAPSED_KEY = "panel-terminal-rail-collapsed";
   // 树的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
   let terminalRailRendered = { history: null };
   // 乐观选中态（M5）：点会话行当拍点亮的高亮。is-active 的 live 派生判据要等
@@ -9379,6 +9386,27 @@ async function api(method, path, body) {
     } catch { /* 隐私模式等：偏好不持久化，本次会话内仍生效 */ }
   }
 
+  // 组折叠态读写：只认字符串键；坏 JSON / 非数组 / 存储被禁时保留内存现值（首次为
+  // 空表）——最坏表现为全展开，不挡栏体渲染。归一化在读、写两侧都过：组键是「稳定
+  // 代表拼写」，同一目录的大小写/斜杠形态可能变，落盘口径必须与分组归并同一把尺。
+  function loadTerminalRailCollapsedGroups() {
+    let raw = null;
+    try {
+      raw = JSON.parse(localStorage.getItem(TERMINAL_RAIL_COLLAPSED_KEY) || "[]");
+    } catch { return; }
+    if (!Array.isArray(raw)) return;
+    terminalRailCollapsedGroups.clear();
+    for (const value of raw) {
+      if (typeof value === "string") terminalRailCollapsedGroups.add(terminalRailNormDir(value));
+    }
+  }
+
+  function saveTerminalRailCollapsedGroups() {
+    try {
+      localStorage.setItem(TERMINAL_RAIL_COLLAPSED_KEY, JSON.stringify([...terminalRailCollapsedGroups]));
+    } catch { /* 隐私模式等：本次会话内仍生效 */ }
+  }
+
   // 移除时刻表的读写（M14 自愈用）：键一律过 terminalRailNormDir，与移除清单同一把
   // 尺——大小写/斜杠/尾斜杠不同的拼写必须落到同一条。读不懂/被禁用就从空表开始：
   // 最坏是这次会话不自愈，组保持隐藏，不会误把已移除的组放出来。
@@ -9556,8 +9584,9 @@ async function api(method, path, body) {
     if (field === "groupBy" && value === "workspace-tree") {
       // 树模式：祖先组自动展开（一次性；之后尊重用户手动收起）
       for (const group of terminalRailLastGroups) {
-        if (group.key && group.depth > 0) terminalRailCollapsedGroups.delete(group.key);
+        if (group.key && group.depth > 0) terminalRailCollapsedGroups.delete(terminalRailNormDir(group.key));
       }
+      saveTerminalRailCollapsedGroups();
     }
     terminalRailViewPrefs[field] = value;
     saveTerminalRailViewPrefs();
@@ -9737,7 +9766,7 @@ async function api(method, path, body) {
     let scrollKey = "";
     if (activeGroup && autoKey !== terminalRailAutoExpandedFor) {
       terminalRailAutoExpandedFor = autoKey;
-      terminalRailCollapsedGroups.delete(activeGroup);
+      if (terminalRailCollapsedGroups.delete(terminalRailNormDir(activeGroup))) saveTerminalRailCollapsedGroups();
       scrollKey = activeGroup;
     }
     const parts = [];
@@ -9752,7 +9781,7 @@ async function api(method, path, body) {
       </div>`);
     }
     for (const group of groups) {
-      const collapsed = terminalRailCollapsedGroups.has(group.key);
+      const collapsed = terminalRailCollapsedGroups.has(terminalRailNormDir(group.key));
       // 组头三件（M7 S3 / M8 T7）：非 hover 是文件夹图标（开/关两枚），hover 同槽位
       // 换成箭头（0ms 硬切，CSS 管）；含当前聚焦会话的组图标变主题色（T4）；右侧
       // hover 出 ⊕（在此目录新建终端）与 ⋯（菜单，现仅「移除分组」）。「未分组」组
@@ -10411,8 +10440,10 @@ async function api(method, path, body) {
   }
 
   function toggleTerminalRailGroup(key) {
-    if (terminalRailCollapsedGroups.has(key)) terminalRailCollapsedGroups.delete(key);
-    else terminalRailCollapsedGroups.add(key);
+    const stateKey = terminalRailNormDir(key);
+    if (terminalRailCollapsedGroups.has(stateKey)) terminalRailCollapsedGroups.delete(stateKey);
+    else terminalRailCollapsedGroups.add(stateKey);
+    saveTerminalRailCollapsedGroups();
     terminalRailFlipMode = "flip";
     renderTerminalRailHistory(terminalRailAgentId());
   }
@@ -10425,8 +10456,8 @@ async function api(method, path, body) {
   // cwd 用组目录。
   function terminalRailCreateTerminalInDir(key) {
     if (!terminalBackendReady || !key) return;
-    if (terminalRailCollapsedGroups.has(key)) {
-      terminalRailCollapsedGroups.delete(key);
+    if (terminalRailCollapsedGroups.delete(terminalRailNormDir(key))) {
+      saveTerminalRailCollapsedGroups();
       terminalRailFlipMode = "flip";
       renderTerminalRailHistory(terminalRailAgentId());
     }
@@ -10585,6 +10616,8 @@ async function api(method, path, body) {
     terminalRailRemovedAt[terminalRailNormDir(key)] = Date.now();
     terminalRailSelfHealFailed.delete(terminalRailNormDir(key));
     saveTerminalRailRemovedAt();
+    // 组都移除了，折叠存档里对应的键一并清掉（自愈回来时按默认展开）。
+    if (terminalRailCollapsedGroups.delete(terminalRailNormDir(key))) saveTerminalRailCollapsedGroups();
     closeTerminalRailGroupMenu();
     terminalRailFlipMode = "instant"; // 移除是 resetKey：瞬时重排，不播 FLIP
     renderTerminalRailHistory(terminalRailAgentId());
@@ -10610,8 +10643,9 @@ async function api(method, path, body) {
 
   // 进终端视图：历史会话**不再**在这里抛掉重取。视图内的其他渲染都不触发扫盘；
   // 水位线随列表卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态
-  // 留在内存里跨进出保持（用户手动收起的组不该每次进来都弹开）。视图状态（归档/已移除
-  // 分组）同样在这里拉一次——落盘在面板侧，与 terminal-host 就绪与否无关。
+  // 落 localStorage、跨视图进出与页面重载保持（用户手动收起的组不该每次进来都弹开）。
+  // 视图状态（归档/已移除分组）同样在这里拉一次——落盘在面板侧，与 terminal-host
+  // 就绪与否无关。
   //
   // 缓存留着的三个理由：①进页首帧左栏就有内容（原写法是先清空再等扫描）；②本页
   // 已经拉过的那份没有理由因为「用户切出去又切回来」再赌一次网络；③这条请求排在
@@ -10692,6 +10726,7 @@ async function api(method, path, body) {
     const dir = $("railTerminalDir");
     if (!dir) return;
     loadTerminalRailViewPrefs(); // 视图偏好先进状态再首渲（localStorage 读回）
+    loadTerminalRailCollapsedGroups(); // 组折叠态同层读回：首帧就是存档形态，不先全展开再跳
     initTerminalRailScrollbarQuiet();
     // 首次真实指针/键盘交互才武装 FLIP（dsh AnimatedRows 的 armed 门，M13 走捕获相）：
     // 合成点击（element.click()）不派发 pointerdown——进页首帧、自动化测量都瞬时
