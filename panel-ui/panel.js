@@ -8667,6 +8667,15 @@ async function api(method, path, body) {
   // 树的 innerHTML 指纹（与页签栏同一条不变式：指纹 = DOM 现值）。
   let terminalRailRendered = { history: null };
   let terminalRailFetchInFlight = false;
+  // 历史会话快照的复用窗口。服务端把这份列表缓存成短 TTL 快照（panel.mjs
+  // createSessionsListSnapshot，同为 30s），过期先交旧值、后台补一拍——也就是说
+  // 客户端这里没必要每次进页都发一次请求：进页发出的请求排在画面之前，那才是
+  // 「进终端页先白一下」的一半（S2 取证：进页必拉，且拉在飞时 SSE 握手排队）。
+  // 取值与服务端对齐：比它更短只会多打无谓的请求，比它更长则会让别处新建的会话
+  // 在左栏里更晚出现——左栏是粗粒度清单，30s 是两边都无感的窗口。
+  const TERMINAL_RAIL_HISTORY_TTL_MS = 30 * 1000;
+  // 补拉只排一次：进页、换身份、轮询都经同一个门，重复排队没有意义。
+  let terminalRailFetchQueued = false;
   // FLIP 门控：首次指针/键盘输入前不播（dsh AnimatedRows 的 armed 同口径）；
   // flipMode 一帧用完即复位，组展开/收起与归档/撤销（M13）会置 "flip"。
   let terminalRailMotionArmed = false;
@@ -9749,8 +9758,46 @@ async function api(method, path, body) {
   // 历史会话只在进终端视图时拉一次（全量扫盘实测 6.7s、无缓存——禁挂轮询）；身份
   // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），手动重取
   // 入口随之消失——重取只剩这两条自动路径，要手动刷新可退出终端视图再进。
+  //
+  // M4 起这两条路径**都不在首帧上**：进页先拿缓存渲一帧，请求交给
+  // scheduleTerminalRailHistoryFetch 排到首帧之后；TTL 内一律不发。原来的写法是
+  // 进页第一件事把缓存清成空表再同步重取——请求与首帧抢同一条链路，左栏在这几秒
+  // 里也是空的（S2 场景②③④的共同来源）。
+  function terminalRailHistoryFresh(endpoint) {
+    // 判据只认 TTL，不认 error：失败也记 fetchedAt，于是 TTL 内不再重试——否则
+    // 每秒一次的 renderTerminalRail 会变成每秒一次的重试风暴（旧写法靠「身份没变
+    // 就早退」隐式免掉重试，这里必须显式钉住）。
+    return !!endpoint
+      && terminalRailHistory.endpoint === endpoint
+      && (Date.now() - (terminalRailHistory.fetchedAt || 0)) < TERMINAL_RAIL_HISTORY_TTL_MS;
+  }
+
+  // 补拉的唯一排队点：rAF 让出进页这一拍渲染，setTimeout(0) 再把请求排到其后一个
+  // 任务里——rAF 回调仍排在渲染之前，光靠它发请求还是跟首帧抢。
+  function scheduleTerminalRailHistoryFetch() {
+    if (terminalRailFetchQueued) return;
+    terminalRailFetchQueued = true;
+    const run = () => {
+      terminalRailFetchQueued = false;
+      // 排队期间可能已经离开终端页、已经没有 agent 焦点、或别的路径刚拉回一份：
+      // 落地前逐条复核，命中任何一条就不发（补拉是背景动作，不值得为它补一次校验
+      // 请求）。
+      if (currentView !== "terminal") return;
+      const endpoint = terminalRailAgentId();
+      if (!endpoint || terminalRailFetchInFlight) return;
+      if (terminalRailHistoryFresh(endpoint)) return;
+      refreshTerminalRailHistory({ endpoint });
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(run, 0));
+    else setTimeout(run, 0);
+  }
+
   function syncTerminalRailHistory(agentId) {
-    if (agentId === terminalRailHistory.endpoint) return;
+    if (agentId === terminalRailHistory.endpoint) {
+      // 身份没变：缓存照用；只有过期才排一次背景补拉（TTL 内彻底不发请求）。
+      if (!terminalRailHistoryFresh(agentId)) scheduleTerminalRailHistoryFetch();
+      return;
+    }
     if (!agentId) {
       // 两种无 agent 焦点，处置不同（空态回落中性空树＝用户 2026-10-24 裁决）：
       // ①空白外壳页签还开着——保留上次加载的历史，用户才点得到行、把空白壳
@@ -9768,7 +9815,12 @@ async function api(method, path, body) {
       renderTerminalRailHistory("");
       return;
     }
-    refreshTerminalRailHistory({ endpoint: agentId });
+    // 身份换人：旧身份的行挂在新身份下就是错行，当场清掉并渲一帧（空树），
+    // 请求照样排到首帧之后——换 agent 的那一帧不该等网络。
+    terminalRailHistory = { endpoint: agentId, sessions: [], fetchedAt: 0, error: null };
+    terminalRailFlipMode = "instant";
+    renderTerminalRailHistory(agentId);
+    scheduleTerminalRailHistoryFetch();
   }
 
   async function refreshTerminalRailHistory({ endpoint = terminalRailAgentId(), manual = false } = {}) {
@@ -9777,7 +9829,13 @@ async function api(method, path, body) {
     // 在飞期间就把 endpoint 认下来：全量扫盘一次实测 6.7s，这段时间里每次归属轮询都会
     // 走到 syncTerminalRailHistory——不认的话它每一拍都判「身份还没拉过」，同一份列表
     // 被反复排队重取。认下后组列表暂时为空，落地即替换。
-    terminalRailHistory = { endpoint, sessions: [], fetchedAt: 0, error: null };
+    //
+    // 但「认下来」不等于「清成空表」：同身份复取（TTL 过期后的补拉、手动刷新）把屏上
+    // 已有的行留着，等新值落地再替换——清空了就是左栏在这段网络上开天窗，而这份复取
+    // 本来只是把粗粒度清单对齐一拍。换身份才必须清：旧身份的行挂在新身份下就是错行。
+    if (terminalRailHistory.endpoint !== endpoint) {
+      terminalRailHistory = { endpoint, sessions: [], fetchedAt: 0, error: null };
+    }
     try {
       const data = await api("GET", "/api/sessions/list");
       const rows = (Array.isArray(data && data.sessions) ? data.sessions : []).filter((row) => row && row.endpoint === endpoint);
@@ -10220,12 +10278,16 @@ async function api(method, path, body) {
     renderTerminalRailHistory(terminalRailAgentId());
   }
 
-  // 进终端视图：历史会话在这里重取一次，视图内的其他渲染都不触发扫盘。水位线随列表
-  // 卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态留在内存里
-  // 跨进出保持（用户手动收起的组不该每次进来都弹开）。视图状态（归档/已移除分组）
-  // 同样在这里拉一次——落盘在面板侧，与 terminal-host 就绪与否无关。
+  // 进终端视图：历史会话**不再**在这里抛掉重取。视图内的其他渲染都不触发扫盘；
+  // 水位线随列表卸载即重置（dsh 实测同口径：水位不持久化，分组树卸载即丢），组折叠态
+  // 留在内存里跨进出保持（用户手动收起的组不该每次进来都弹开）。视图状态（归档/已移除
+  // 分组）同样在这里拉一次——落盘在面板侧，与 terminal-host 就绪与否无关。
+  //
+  // 缓存留着的三个理由：①进页首帧左栏就有内容（原写法是先清空再等扫描）；②本页
+  // 已经拉过的那份没有理由因为「用户切出去又切回来」再赌一次网络；③这条请求排在
+  // 进页这一拍上，就必然抢在终端画面之前（S2 场景②：进页扫描在飞期间整块面板停摆）。
+  // 过期与换身份由 scheduleTerminalRailHistoryFetch 在首帧之后补拉。
   function enterTerminalRail() {
-    terminalRailHistory = { endpoint: "", sessions: [], fetchedAt: 0, error: null };
     terminalRailRendered = { history: null };
     terminalRailWatermarks.clear();
     terminalRailAutoExpandedFor = "";
@@ -10236,6 +10298,7 @@ async function api(method, path, body) {
     loadTerminalRailRemovedAt();
     loadTerminalRailPrefs();
     renderTerminalRail();
+    scheduleTerminalRailHistoryFetch();
   }
 
   // 视图状态全量拉取（GET /panel/api/terminal/rail/prefs）。失败按空表处理：最坏
@@ -10758,8 +10821,8 @@ async function api(method, path, body) {
       // 兜底：字号变更等路径改的是已存实例，进入时补一次 fit 对齐当前视口。
       scheduleTerminalFit();
       loadInstalledTerminalAgents(); // 进页补热：60s TTL 内近零成本，过期才真实探测
-      // 终端会话栏：进页即渲一帧，历史会话在这里重取一次（全量扫盘 6.7s 无缓存，
-      // 只跟视图进入与身份变化走，绝不挂轮询）。
+      // 终端会话栏：进页即渲一帧，历史会话先吃缓存（TTL 见 enterTerminalRail）；
+      // 过期才在首帧之后补拉，绝不把这条请求排在画面之前。
       enterTerminalRail();
     }
     // 设置是全页视图：主头行（品牌 + 六个主 tab + 状态条）与设置专用头行互斥
