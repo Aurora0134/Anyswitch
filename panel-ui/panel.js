@@ -5723,7 +5723,137 @@ async function api(method, path, body) {
 
   // 整页清场入口（关停清场 / 零会话）：关闭终端流与实例。
   function closeAllTerminalStreams() {
+    dropTerminalStaleScreen();
     closeTerminalStream();
+  }
+
+  // ---- 切签垫片：切换期屏上始终有内容 ----
+  //
+  // 病灶（S2 §2）：切换链第一步就是 closeTerminalStream() → terminalXterm.dispose()，
+  // xterm 自己把 DOM 从宿主摘掉，三层覆盖层（未连接/降级/零会话）都不服务「正在重建」，
+  // 于是中间态只能是 #terminalScreen 的一块底色。
+  //
+  // 形态：切换时**不停留旧连接、只停留旧实例的那一帧像素**。停放的做法是借
+  // closeTerminalStream 本身那一拍——把实例的 dispose 临时换成空操作，让它把这套
+  // teardown（关事件源、摘 onData、断 RO、摘 dpr 监视与 IME 锚点、撤回放闩与合帧层、
+  // 丢突发）照跑一遍、全局引用全部归零，唯独不真的销毁实例；调用返回后立刻把真身
+  // dispose 还回去。这样拆流公共体一个字都不用改（它在别处的语义必须原样），
+  // 而旧实例的 DOM 与最后一帧像素留在宿主里，打上 .terminal-stale-frame 绝对定位
+  // 盖在新实例上方；新实例照常在同一个已可见宿主里新建、同步 fit 把尺寸 POST 进
+  // PTY、整屏回放，等它真的画出内容（首帧回放落地）再撤垫片。
+  //
+  // 旧会话未解析字节为什么打不进新会话（三道，逐条可验）：
+  //  1) 连接语义不变：停放那一拍 closeTerminalStream 已经把 onData 监听 dispose 了，
+  //     而 xterm 的自动应答（DA/CPR）只经实例的 onData 派发——旧积压后来解析出来也只
+  //     落到空的监听器表，这与直接 dispose 版本依赖的是同一条机制，没有放宽。
+  //  2) 更靠前的一道：停放时置 `disableStdin = true`，xterm 5.5 的
+  //     CoreService.triggerDataEvent 在 disableStdin 为真时直接早退（xterm.js 原文：
+  //     `triggerDataEvent(e,t=!1){if(this._optionsService.rawOptions.disableStdin)return;…}`），
+  //     应答在产生处就被掐掉，连「派发给空表」这一步都到不了。
+  //  3) 新实例是全新构造的（WriteBuffer 空、监听器表自带新闭包），建连时固化的
+  //     boundSessionId 只属于它自己；垫片实例不在任何全局写者手里（terminalStreamWrite
+  //     / burst / 回放闩全部在停放那一刻被置空），也不会被重新绑定——它连全局引用都没了。
+  // 另：垫片 pointer-events: none，键盘/滚轮/拖选都落不到它身上。
+  //
+  // 与「隐藏期不建流、不测量」的关系：那条闸一字未动。垫片期间终端页可见，新实例在
+  // 同一个已可见宿主里按原尺寸布局与测量（不是 display:none、也不是 0×0），建流前的
+  // 同步 fit 照旧把尺寸 POST 进 PTY；垫片不参与布局，也不改变任何测量结果。
+  const TERMINAL_STALE_SCREEN_MAX_MS = 2000;
+  let terminalStaleScreen = null;
+
+  function dropTerminalStaleScreen() {
+    const stale = terminalStaleScreen;
+    if (!stale) return;
+    terminalStaleScreen = null;
+    stale.done = true; // 在飞的观察循环与揭幕回调看到这一位就自行作废
+    if (stale.timer !== null) clearTimeout(stale.timer);
+    stale.timer = null;
+    if (stale.frame !== null) cancelAnimationFrame(stale.frame);
+    stale.frame = null;
+    stale.el?.classList?.remove("terminal-stale-frame");
+    // dispose 自己会把 element 从宿主摘掉（xterm 的 dispose 里 removeChild）；摘不
+    // 干净时再兜一刀，避免一个已死的空壳继续占着屏。
+    try { stale.term?.dispose(); } catch {}
+    if (stale.el?.parentNode) stale.el.parentNode.removeChild(stale.el);
+  }
+
+  // 停放当前实例当垫片：返回垫片句柄；没有可停的画面时照旧整条拆流（首连、或上次
+  // 就没建出实例）。
+  function parkTerminalScreen() {
+    // 隐藏期不停放也不拆流：与 connectTerminalStream 的隐藏闸同一条口径——离开终端页
+    // 后活着的那条流，不能被隐藏期的重渲染路径关掉。
+    if ($("terminalView")?.hidden) return null;
+    dropTerminalStaleScreen();
+    const term = terminalXterm;
+    const el = term && term.element ? term.element : null;
+    if (!term || !el) {
+      closeTerminalStream();
+      return null;
+    }
+    // 先掐输入面再拆流：顺序反了会有「监听还在、实例已脱离全局」的窗口。
+    try { term.options.disableStdin = true; } catch {}
+    const originalDispose = term.dispose;
+    term.dispose = () => {}; // 只在这一拍的拆流里让 dispose 空转
+    try { closeTerminalStream(); } finally { term.dispose = originalDispose; }
+    el.classList.add("terminal-stale-frame");
+    const stale = { term, el, timer: null, frame: null, done: false, sawReplayPending: false };
+    terminalStaleScreen = stale;
+    // 兜底撤垫片：新画面迟迟不来（握手失败、宿主在飞）时不能把旧画面永久留在屏上
+    // ——那是一屏别的会话的内容，看久了就是错的信息。到点撤走，退回既有三态覆盖层，
+    // 也就是今天的行为，不是新增的中间态。
+    stale.timer = setTimeout(() => {
+      stale.timer = null;
+      dropTerminalStaleScreen();
+    }, TERMINAL_STALE_SCREEN_MAX_MS);
+    watchTerminalStaleScreen(stale);
+    return stale;
+  }
+
+  // 就绪判据（两条任一）：
+  //  a) 新实例的缓冲区里已经有内容——首帧回放的字节被解析了（空屏会话走 b）；
+  //  b) 「等首帧」标志翻回过一次：absorbTerminalSnapshot 置真、首帧 data 落地置假，
+  //     翻回就说明这一屏已经交代过了（哪怕回放帧是空的，也是它自己的空屏）。
+  function terminalScreenHasContent(term) {
+    const length = term && term.buffer && term.buffer.active ? term.buffer.active.length : 0;
+    return Number.isFinite(length) && length > 1;
+  }
+
+  // 逐帧观察新画面何时就绪，就绪后再等两帧（一帧给渲染器排程、一帧给合成器上屏）
+  // 才撤垫片。视图被藏起来时当即收掉：垫片只服务可见的重建。
+  function watchTerminalStaleScreen(stale) {
+    if (stale.done) return;
+    if (terminalStaleScreen !== stale) return;
+    if ($("terminalView")?.hidden) { dropTerminalStaleScreen(); return; }
+    if (terminalReplayFramePending) stale.sawReplayPending = true;
+    const ready = (stale.sawReplayPending && !terminalReplayFramePending)
+      || terminalScreenHasContent(terminalXterm);
+    if (ready) { revealTerminalStaleScreen(stale); return; }
+    if (typeof requestAnimationFrame !== "function") return;
+    stale.frame = requestAnimationFrame(() => {
+      stale.frame = null;
+      watchTerminalStaleScreen(stale);
+    });
+  }
+
+  // 撤垫片 + 补一帧整屏重绘：垫片盖住期间新实例可能被合成器裁掉（不合成就不呈现
+  // 画面），而 webgl 渲染器不保留绘制缓冲，揭幕拿到底的可能是旧像素。重绘一次只有
+  // 一帧成本。
+  function revealTerminalStaleScreen(stale) {
+    if (!stale || stale.done || terminalStaleScreen !== stale) return;
+    const settle = () => {
+      stale.frame = null;
+      if (stale.done || terminalStaleScreen !== stale) return;
+      dropTerminalStaleScreen();
+      const term = terminalXterm;
+      if (term && Number.isFinite(term.rows) && term.rows > 0 && typeof term.refresh === "function") {
+        try { term.refresh(0, term.rows - 1); } catch {}
+      }
+    };
+    if (typeof requestAnimationFrame !== "function") { settle(); return; }
+    stale.frame = requestAnimationFrame(() => {
+      if (stale.done || terminalStaleScreen !== stale) return;
+      stale.frame = requestAnimationFrame(settle);
+    });
   }
 
   // 窗口级尺寸闸的下限：按 13px 字号一格约 7.8×17px 取整，80×34 约合 10 列 2 行。
@@ -7582,6 +7712,10 @@ async function api(method, path, body) {
     if (footStatus) footStatus.style.display = "";
     renderTerminalSessionData();
     renderTerminalPreviewTabs();
+    // 切签/切回都经这里重建流：先把旧画面停成垫片（见 parkTerminalScreen），新画面
+    // 首帧落绘后由观察循环撤走——切换期间屏上始终有内容，不再是纯底色。停放与建流
+    // 之间没有 await，旧画面不会在这一拍消失。typeof 闸护单测桩环境（同 renderTerminalRail）。
+    if (typeof parkTerminalScreen === "function") parkTerminalScreen();
     connectTerminalStream(session, { revive });
     if (currentView === "terminal") scheduleTerminalFit();
   }
@@ -9759,10 +9893,11 @@ async function api(method, path, body) {
   // 换人时补拉一次。M9-D4 起段头刷新钮已砍（用户拍板只留搜索/视图选项），手动重取
   // 入口随之消失——重取只剩这两条自动路径，要手动刷新可退出终端视图再进。
   //
-  // M4 起这两条路径**都不在首帧上**：进页先拿缓存渲一帧，请求交给
-  // scheduleTerminalRailHistoryFetch 排到首帧之后；TTL 内一律不发。原来的写法是
-  // 进页第一件事把缓存清成空表再同步重取——请求与首帧抢同一条链路，左栏在这几秒
-  // 里也是空的（S2 场景②③④的共同来源）。
+  // M4 起「进页」这条路径不再把请求排在首帧上：进页先拿缓存渲一帧，TTL 内一次都
+  // 不发；过期才由 scheduleTerminalRailHistoryFetch 排到首帧之后补一拍。原来的写法
+  // 是进页第一件事把缓存清成空表再同步重取——请求与首帧抢同一条链路，左栏在这几秒
+  // 里也是空的（S2 场景②③④的共同来源）。「身份换人」那条仍是同步重拉（既有契约，
+  // 见 syncTerminalRailHistory 尾部注释），它命中的是换 agent，不是每次进页。
   function terminalRailHistoryFresh(endpoint) {
     // 判据只认 TTL，不认 error：失败也记 fetchedAt，于是 TTL 内不再重试——否则
     // 每秒一次的 renderTerminalRail 会变成每秒一次的重试风暴（旧写法靠「身份没变
@@ -9793,11 +9928,7 @@ async function api(method, path, body) {
   }
 
   function syncTerminalRailHistory(agentId) {
-    if (agentId === terminalRailHistory.endpoint) {
-      // 身份没变：缓存照用；只有过期才排一次背景补拉（TTL 内彻底不发请求）。
-      if (!terminalRailHistoryFresh(agentId)) scheduleTerminalRailHistoryFetch();
-      return;
-    }
+    if (agentId === terminalRailHistory.endpoint) return;
     if (!agentId) {
       // 两种无 agent 焦点，处置不同（空态回落中性空树＝用户 2026-10-24 裁决）：
       // ①空白外壳页签还开着——保留上次加载的历史，用户才点得到行、把空白壳
@@ -9815,12 +9946,10 @@ async function api(method, path, body) {
       renderTerminalRailHistory("");
       return;
     }
-    // 身份换人：旧身份的行挂在新身份下就是错行，当场清掉并渲一帧（空树），
-    // 请求照样排到首帧之后——换 agent 的那一帧不该等网络。
-    terminalRailHistory = { endpoint: agentId, sessions: [], fetchedAt: 0, error: null };
-    terminalRailFlipMode = "instant";
-    renderTerminalRailHistory(agentId);
-    scheduleTerminalRailHistoryFetch();
+    // 身份换人：旧身份的行挂在新身份下就是错行，先清再拉。这一条保持既有同步契约
+    // （panel-terminal-rail.test.mjs 的两个 vm 沙箱钉着「切回 agent 上下文才走重拉」
+    // 且是当场发生）；T2 动的是**进页那条路径**——身份没变的重复进入不再重拉。
+    refreshTerminalRailHistory({ endpoint: agentId });
   }
 
   async function refreshTerminalRailHistory({ endpoint = terminalRailAgentId(), manual = false } = {}) {
@@ -10286,7 +10415,7 @@ async function api(method, path, body) {
   // 缓存留着的三个理由：①进页首帧左栏就有内容（原写法是先清空再等扫描）；②本页
   // 已经拉过的那份没有理由因为「用户切出去又切回来」再赌一次网络；③这条请求排在
   // 进页这一拍上，就必然抢在终端画面之前（S2 场景②：进页扫描在飞期间整块面板停摆）。
-  // 过期与换身份由 scheduleTerminalRailHistoryFetch 在首帧之后补拉。
+  // 过期（TTL）由 scheduleTerminalRailHistoryFetch 在首帧之后补拉。
   function enterTerminalRail() {
     terminalRailRendered = { history: null };
     terminalRailWatermarks.clear();
