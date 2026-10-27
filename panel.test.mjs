@@ -1733,7 +1733,7 @@ describe("panel.html sessions tab", () => {
 
   it("取数回来时视图已切走就不再铺列表", () => {
     // 离开会把节点收掉，这时再铺一遍等于把刚释放的整棵树当场重建。
-    const m = panelJs.match(/async function refreshSessionsList\(\) \{([\s\S]*?)\n  \}/);
+    const m = panelJs.match(/async function refreshSessionsList\(\{ force = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
     assert.ok(m, "refreshSessionsList found in panel.js");
     const guard = m[1].indexOf('if (currentView !== "sessions") return;');
     const render = m[1].indexOf('renderSessList({ keepScroll: true });', guard);
