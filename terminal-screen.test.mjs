@@ -948,6 +948,19 @@ describe("S5 光标语义与真 xterm 对账", () => {
     await assertXtermParity("满行后 TAB 保留哨兵", 9, 3, ["123456789", "\t", "Z"]);
     await assertXtermParity("满行后退格", 6, 3, ["123456", "\bZ"]);
   });
+
+  test("保存光标跨 resize/滚动：绝对行语义与恢复落点", async () => {
+    // savedY 是缓冲绝对行（xterm 的 saveCursor：savedY = ybase + y），滚动把内容往上
+    // 顶，恢复时减回当时的滚动区长度；resize 重排还要按 xterm 的三处 savedY 调整
+    // （reflowSmaller 逐链累加、reflowLarger 按删除量、trimStart 下移）——此前镜像
+    // 没建模，放宽重排后 ESC 8 落错一行（实测：镜像 4 行、xterm 3 行）。
+    await assertXtermParity("滚过后恢复", 20, 5, ["m1\r\nm2\r\nm3\r\nm4\r\nm5\r\n", "\u001b7", "m6\r\nm7\r\nm8\r\nm9\r\n", "\u001b8"]);
+    await assertXtermParity("拉高后恢复", 20, 5, ["m1\r\nm2\r\nm3\r\nm4\r\nm5\r\n", "\u001b7", [20, 8], "\u001b8"]);
+    await assertXtermParity("放宽重排后恢复", 8, 5, ["aaaaaaaaaaaa\r\nbbbbbbbbbbbb\r\ncccc\r\n", "\u001b7", [16, 5], "\u001b8"]);
+    await assertXtermParity("收窄重排后恢复", 10, 5, ["aaaaaaaaaaXX\r\nbbbbbbbbbbYY\r\nccccccccccZZ\r\n", "\u001b7", [6, 5], "\u001b8"]);
+    // 保存槽按缓冲各一份：备屏期间 resize（含主屏重排）不弄丢主屏的保存点
+    await assertXtermParity("备屏期间 resize 后恢复主屏保存点", 10, 5, ["aaaaaaaaaaXX\r\nbbbbbbbbbbYY\r\n", "\u001b[1;3H\u001b7", "\u001b[?1049h", "alt1\r\nalt2\r\nalt3\r\n", [6, 5], "\u001b[?1049l", "\u001b8"]);
+  });
 });
 
 // ---- S1 resize 重排：与真 xterm 对账 ----
@@ -978,6 +991,18 @@ describe("S1 resize 按软折行重排与真 xterm 对账", () => {
 
   test("滚动区在 resize 后回到整屏", async () => {
     await assertXtermParity("resize 后滚动区复位", 20, 6, ["\u001b[2;4r", "AAA\r\nBBB\r\nCCC\r\nDDD\r\nEEE", [24, 6], "ZZZ\r\nYYY"]);
+  });
+
+  test("备屏缓冲 resize：滚出的行即弃、不重排不收窄、拉高补空、拉低滚顶", async () => {
+    // xterm 的备屏缓冲 _hasScrollback=false：整屏滚动时顶行直接 recycle 丢弃（没有
+    // 滚动区可进），resize 因此不重排折行、收窄不截断（行保长，多出的列等放宽回来）、
+    // 拉高只在底部补空行（不回拉）、拉低且光标触底时顶部出行（trimStart 口径）。
+    await assertXtermParity("备屏滚出后拉高补空", 30, 6, ["\u001b[?1049h", ...Array.from({ length: 11 }, (_, i) => `alt ${i + 1}\r\n`), [30, 8]]);
+    await assertXtermParity("备屏收窄不截断放宽还原", 10, 5, ["\u001b[?1049h", "abcdefghijklmnop\r\nsecond\r\nthird\r\n", [6, 5], [10, 5]]);
+    await assertXtermParity("备屏拉低滚顶", 30, 6, ["\u001b[?1049h", "a1\r\na2\r\na3\r\na4\r\na5\r\na6", [30, 3]]);
+    await assertXtermParity("备屏拉低再拉高补空", 30, 6, ["\u001b[?1049h", "a1\r\na2\r\na3\r\na4\r\na5\r\na6", [30, 3], [30, 6]]);
+    // 备屏里的保存点也按 trimStart 随拉低下移（备屏槽 per-Buffer）
+    await assertXtermParity("备屏拉低后恢复保存点", 30, 6, ["\u001b[?1049h", "a1\r\na2\r\na3\r\na4\r\na5\r\na6", "\u001b7", [30, 3], "\u001b8"]);
   });
 });
 
