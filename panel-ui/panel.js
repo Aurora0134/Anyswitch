@@ -370,7 +370,7 @@ async function api(method, path, body) {
               : view === "terminal" ? $("terminalView")
               : $("sessionsView");
             enteredView.classList.remove("view-enter");
-            void enteredView.offsetWidth;
+            void getComputedStyle(enteredView).animationName;
             enteredView.classList.add("view-enter");
             enteredView.addEventListener("animationend", () => enteredView.classList.remove("view-enter"), { once: true });
           }
@@ -10706,11 +10706,17 @@ async function api(method, path, body) {
     if ($("skillsView").hidden) refreshSkillsState(); // skills 视图时 switchView 已触发刷新
   }
 
-  // view-enter 重播：remove → 强制 reflow（复位进行中的动画，连切时重播）→ add →
-  // animationend 一次性清类。switchView 的视图入场与设置子 tab 面板切换共用同一套。
+  // view-enter 重播：remove → 冲刷样式 → add → animationend 一次性清类。switchView 的视图
+  // 入场与设置子 tab 面板切换共用同一套。
+  // 冲刷读 animationName 而不是 offsetWidth：两者都能让浏览器认定动画已中断、下次 add 从 0
+  // 起播，但 offsetWidth 会连布局一起逼出来。视图刚被 unhide、或刚塞进上千行列表时，一次
+  // 布局要把整棵子树重排（实测 0.6–1s），只为重播一段 300ms 动画不值得。类名本来就不在时
+  // 连冲刷都省掉——那时没有进行中的动画需要中断。
   function replayViewEnter(el) {
-    el.classList.remove("view-enter");
-    void el.offsetWidth;
+    if (el.classList.contains("view-enter")) {
+      el.classList.remove("view-enter");
+      void getComputedStyle(el).animationName;
+    }
     el.classList.add("view-enter");
     el.addEventListener("animationend", () => el.classList.remove("view-enter"), { once: true });
   }
@@ -10722,6 +10728,10 @@ async function api(method, path, body) {
   }
 
   function switchView(name) {
+    // 点的就是当前这一页：高亮已经在、内容也在，再走一遍只会把整棵列表重建一次、
+    // 再发一轮请求、再回一次顶——用户看到的是一次闪动。设置子 tab 那边是同款先例
+    // （activateSettingsSubTab 开头的 active 守卫）。
+    if (name === currentView) return;
     const board = name === "board";
     const store = name === "store";
     const stats = name === "stats";
@@ -10827,28 +10837,39 @@ async function api(method, path, body) {
     if (!settings && !terminal) try { localStorage.setItem("panel-view", name); } catch {}
     try { localStorage.setItem("panel-settings-open", settings ? "1" : "0"); } catch {}
     try { localStorage.setItem("panel-terminal-open", terminal ? "1" : "0"); } catch {}
-    let viewReady;
-    if (name === "skills") viewReady = refreshSkillsState();
-    if (presets) viewReady = refreshPresetsState();
-    if (store) viewReady = refreshStoreState();
-    if (stats) viewReady = enterStatsView(); else leaveStatsView();
-    if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
-    if (settings) viewReady = enterSettingsView(); else leaveSettingsView();
-    if (window.panelStartupController && viewReady) startupViewReady = viewReady;
-    // 刷新终态在离开期间落的小字暂停了淡出计时，切回渠道 tab 即消费「等切回」标记、
-    // 重新计一个完整 10s（与差异弹窗关闭重计同款先例）；此后再切走不再暂停
-    if (store && storeStatusAwaitReturn) {
-      storeStatusAwaitReturn = false;
-      if ($("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
-    }
-    // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
-    if (board) {
-      resetAgentRenderFingerprints();
-      refreshAgents();
-      refreshModelStability();
-      // 左侧栏常驻预设总开关，切回看板时补刷一次保证状态最新
-      refreshPresetsState();
-    }
+    // 进入工作整段让到高亮之后：上面的高亮、显隐与入场动效仍留在本次任务里，浏览器
+    // 画完这一帧 tab 就亮了；各视图的首次渲染（会话列表铺行、看板补刷、设置取数……）
+    // 排到高亮上屏之后再做，不再和它抢同一帧——否则点击到高亮之间还隔着整份视图的
+    // 渲染耗时（实测会话页 1.5–3.3s）。
+    const runViewEntry = () => {
+      let viewReady;
+      if (name === "skills") viewReady = refreshSkillsState();
+      if (presets) viewReady = refreshPresetsState();
+      if (store) viewReady = refreshStoreState();
+      if (stats) viewReady = enterStatsView(); else leaveStatsView();
+      if (sessions) viewReady = enterSessionsView(); else leaveSessionsView();
+      if (settings) viewReady = enterSettingsView(); else leaveSettingsView();
+      // 刷新终态在离开期间落的小字暂停了淡出计时，切回渠道 tab 即消费「等切回」标记、
+      // 重新计一个完整 10s（与差异弹窗关闭重计同款先例）；此后再切走不再暂停
+      if (store && storeStatusAwaitReturn) {
+        storeStatusAwaitReturn = false;
+        if ($("storeRefreshStatus") && $("storeRefreshStatus").classList.contains("show")) armStoreStatusTimer();
+      }
+      // 切回看板：清卡片指纹表并立即补刷，离开期间的缓存/链配置变化即刻生效
+      if (board) {
+        resetAgentRenderFingerprints();
+        refreshAgents();
+        refreshModelStability();
+        // 左侧栏常驻预设总开关，切回看板时补刷一次保证状态最新
+        refreshPresetsState();
+      }
+      return viewReady;
+    };
+    // 开屏台等的是「本视图首帧就绪」：进入工作延后之后，就绪时刻也跟着挪到延后的那段，
+    // 不能再拿同步返回的那个 promise（它此刻还没开工）。被后续切换作废的按已兑现处理，
+    // 不吊住开屏层的退场判据。
+    const entryReady = scheduleViewEntry(runViewEntry);
+    if (window.panelStartupController) startupViewReady = entryReady;
   }
 
   // 看板变体入场（移植 CC Switch 设置页「关于」tab 的 mount 阶梯动画）：容器整体淡入
@@ -10857,7 +10878,8 @@ async function api(method, path, body) {
   // 跳过不占延迟位；播完即清，1s 轮询只更新卡片内容不重建节点，不会打断动画。
   function playBoardEnter(view) {
     view.classList.remove("board-enter");
-    void view.offsetWidth; // 复位进行中的动画，连切时重播
+    // 只冲样式不冲布局：连切时让动画从 0 重播，代价不该是整块看板重排一遍
+    void getComputedStyle(view).animationName;
     view.classList.add("board-enter");
     view.addEventListener("animationend", () => view.classList.remove("board-enter"), { once: true });
     const cards = [...view.querySelectorAll(".panel-card")].filter((el) => !el.hidden);
@@ -10881,9 +10903,27 @@ async function api(method, path, body) {
       const hero = i === 0;
       el.style.setProperty("--board-delay", hero ? "100ms" : `${150 + (i - 1) * 40}ms`);
       el.classList.remove("board-card-enter", "board-card-enter-scale");
-      void el.offsetWidth;
+      void getComputedStyle(el).animationName; // 同上：只冲样式，卡片不逐张重排
       el.classList.add(hero ? "board-card-enter-scale" : "board-card-enter");
       el.addEventListener("animationend", () => el.classList.remove("board-card-enter", "board-card-enter-scale"), { once: true });
+    });
+  }
+
+  // 视图进入工作的让位调度：把目标视图的首次渲染排到「点击已画出高亮」之后。
+  // 浏览器要等当前 JS 任务结束才绘制，所以高亮要多久上屏，取决于 switchView 这一段
+  // 同步代码跑多久；把重活留在同步段里，就是让高亮陪着会话列表一起等（实测 1.5–3.3s）。
+  // 双 rAF：第一个回调仍在本帧绘制之前，第二个才落到下一帧，那时高亮已经上屏。
+  // 连点时只认最后一次：seq 对不上就直接按已兑现返回，不让旧视图的迟到渲染盖掉新视图；
+  // 各视图的进入/离开成对写在同一个闭包里，最新那次会把该收的收干净，状态不会错位。
+  let viewEntrySeq = 0;
+  function scheduleViewEntry(work) {
+    const seq = ++viewEntrySeq;
+    return new Promise((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (seq !== viewEntrySeq) { resolve(); return; }
+        try { resolve(work()); }
+        catch (err) { console.warn("[panel] 视图进入失败：", err); resolve(); }
+      }));
     });
   }
 
@@ -18354,27 +18394,51 @@ async function api(method, path, body) {
     batch: false,                      // 批量管理模式
     checked: new Set(),                // 批量已选会话 id
     deleting: false,                   // 删除进行中（遮罩 + 禁止再触发）
+    listScrollTop: 0,                  // 离开视图时记下的列表滚动位，回页首铺兑现后清零
   };
   let sessTimer = null;                // 60s 相对时间刷新定时器（enter/leave 管理）
   let sessMsgObserver = null;          // TOC 高亮用的 IntersectionObserver
   let sessInited = false;              // initSessionsTab 一次性事件绑定标记
   let sessListReqSeq = 0;              // 列表取数竞态守卫
+  let sessListRenderSeq = 0;           // 列表分帧铺行的作废令牌：新渲染、离开视图即自增
+  let sessListLastKey = "";            // 上一次铺进容器的内容指纹，相同则不必重建
+  let sessListPumping = false;         // 分帧还没铺完：此时容器里是半份列表，不能直接复用
+  let sessDataRev = 0;                 // 会话数据版本：取数回来内容真有变化才自增
+  let sessDataSig = "";                // 上一次取数的内容摘要，用来判断「真有变化」
   let sessRenderCursor = 0;            // 消息流分帧：下一条待建的下标
   const SESS_FOLD_LIMIT = 3000, SESS_FOLD_HEAD = 1500; // 超长消息折叠阈值与预览长度
   const SESS_RENDER_CHUNK = 120;       // 消息流每帧条数
+  const SESS_LIST_CHUNK = 200;         // 列表每帧铺的行数
   const SESS_TOC_MIN_TURNS = 2;        // 目录起显门槛：一两轮的会话不占栏
 
   /* ============================================================
      数据拉取
      ============================================================ */
+  // 会话数据落位。取数是整份 JSON 重解析，数组和对象每次都是新的，比引用判不出「其实
+  // 没变」；这里按列表行用到的字段算一份摘要，真有变化才推进版本号——列表重铺的指纹
+  // 靠它决定要不要重建，静默重取带回同一份数据时就不必白清一次再铺一遍。
+  function setSessSessions(list) {
+    let h = 5381;
+    for (const s of list) {
+      const row = s.id + "\u0001" + (s.lastActive || 0) + "\u0001" + (s.title || "") + "\u0001" + (s.project || "");
+      for (let i = 0; i < row.length; i++) h = ((h << 5) + h + row.charCodeAt(i)) | 0;
+    }
+    const sig = list.length + ":" + h;
+    if (sig !== sessDataSig) { sessDataSig = sig; sessDataRev++; }
+    sessState.sessions = list;
+  }
+
   async function refreshSessionsList() {
     const seq = ++sessListReqSeq;
     sessState.loading = true;
-    renderSessList({ keepScroll: true });
+    // 手上已经铺着一份列表时不必先重铺一遍：取回结果之后还会再铺一次，静默重取尤其不该让
+    // 列表白闪一下。只有容器空着（冷启动，或刚离开视图时节点已被收走）才先拿缓存顶上。
+    const scrollEl = $("sessScroll");
+    if (!scrollEl || !scrollEl.childElementCount || sessState.sessions.length === 0) renderSessList({ keepScroll: true });
     try {
       const res = await api("GET", "/api/sessions/list");
       if (seq !== sessListReqSeq) return; // 已有更新请求在飞，丢弃旧响应
-      sessState.sessions = Array.isArray(res.sessions) ? res.sessions : [];
+      setSessSessions(Array.isArray(res.sessions) ? res.sessions : []);
       sessState.endpointErrors = Array.isArray(res.endpointErrors) ? res.endpointErrors : [];
       // prune：已消失的会话从 checked/selectedId 清掉
       const ids = new Set(sessState.sessions.map((s) => s.id));
@@ -18383,11 +18447,14 @@ async function api(method, path, body) {
     } catch (err) {
       if (seq !== sessListReqSeq) return;
       toast(panelError(err, "会话列表加载失败"), true);
-      sessState.sessions = [];
+      setSessSessions([]);
       sessState.endpointErrors = [];
     } finally {
       if (seq === sessListReqSeq) sessState.loading = false;
     }
+    // 取数回来时视图可能已经切走了：离开会把列表节点收掉，这时再铺一遍等于把刚释放的
+    // 整棵树当场重建，白占主线程还挡住下一次进入。数据已经落进 sessState，回来时自然铺。
+    if (currentView !== "sessions") return;
     renderSessErrBanner();
     renderSessList({ keepScroll: true });
     renderSessDetail();
@@ -18431,11 +18498,17 @@ async function api(method, path, body) {
     $("sessListCount").textContent = list.length;
     $("sessTotalBadge").textContent = sessState.sessions.length + " 个会话";
     scrollEl.classList.toggle("deleting", sessState.deleting);
-    const prevScrollTop = keepScroll ? scrollEl.scrollTop : 0;
+    // 滚动位：离开视图时记下的那一份优先兑现（容器已被收空，问它的 scrollTop 只会得到 0）；
+    // 记下的位置只在真正落位后才清掉——回来先拿缓存铺一遍、紧接着取数回来再铺时，第一轮
+    // 很可能还没铺到那个位置就被作废，清了就再也回不到原处。没得兑现时沿用当前位。
+    const restoreTop = keepScroll ? (sessState.listScrollTop || scrollEl.scrollTop) : 0;
+    if (!keepScroll) sessState.listScrollTop = 0;
 
     // 加载态骨架屏只在冷启动演：切走再切回时 sessions 里还留着上一次的数据，
     // 整树换成骨架屏会把「静默重取」显形成为重载。
     if (sessState.loading && sessState.sessions.length === 0) {
+      sessListLastKey = "";
+      sessListPumping = false;
       scrollEl.innerHTML = Array.from({ length: 6 }, () =>
         `<div style="padding:10px 12px;"><div class="sessions-skel" style="height:14px;width:75%;margin-bottom:6px;"></div><div class="sessions-skel" style="height:11px;width:45%;"></div></div>`
       ).join("");
@@ -18443,39 +18516,98 @@ async function api(method, path, body) {
     }
     // 空态 / 搜索无结果
     if (sessState.sessions.length === 0) {
+      sessListLastKey = "";
+      sessListPumping = false;
       scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🗂️</div>还没有可浏览的会话<br><span style="font-size:11.5px;">在任意 Agent 里开始一段对话后，会出现在这里。</span></div>`;
       return;
     }
     if (list.length === 0) {
+      sessListLastKey = "";
+      sessListPumping = false;
       scrollEl.innerHTML = `<div class="sessions-list-empty"><div class="le-icon">🔍</div>没有匹配的会话<br><span style="font-size:11.5px;">换个关键词试试，或清空搜索查看全部。</span></div>`;
       return;
     }
 
-    scrollEl.innerHTML = sessState.view === "group" ? renderSessGrouped(list) : renderSessFlat(list);
-    if (keepScroll) scrollEl.scrollTop = prevScrollTop;
-    bindSessListEvents();
+    // 铺出来的内容与上一次完全相同（典型场景：切回会话页先拿缓存铺一遍，随后的静默
+    // 重取带回来同一份数据）就沿用现成的行，不白清一次再重铺。选中态不进指纹：它只是
+    // 行上的一个类，校正一下即可；还在铺的那一轮同理，它铺的就是这份内容，让它铺完。
+    const key = [
+      sessDataRev, sessState.view, sessState.search, sessState.endpoint,
+      sessState.batch ? "cb:" + [...sessState.checked].sort().join(",") : "nobatch",
+      JSON.stringify(sessState.collapsed), list.length,
+    ].join("\u0001");
+    if (key === sessListLastKey && scrollEl.childElementCount) {
+      syncSessSelection();
+      // 行还在逐帧补的话，落位交给那一轮自己收尾；铺完了才在这里兑现——此刻若说明这份
+      // 内容比存档位置还矮（数据变少了），就贴到底部为止，别把一份够不着的存档一直留着。
+      if (!sessListPumping && restoreTop) {
+        scrollEl.scrollTop = Math.min(restoreTop, Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight));
+        sessState.listScrollTop = 0;
+      }
+      return;
+    }
+
+    // 行是逐帧铺的：整树一次性重建在三千行的真实数据上实测 0.85s，全程占着主线程；
+    // 分帧后第一帧只生成并解析两百行，剩下的在后续帧补齐，期间页面照常响应。
+    const renderSeq = ++sessListRenderSeq; // 作废上一轮没铺完的帧
+    sessListLastKey = key;
+    sessListPumping = true;
+    const rows = sessRowSeq(list);
+    scrollEl.innerHTML = "";
+    let bakedSel = sessState.selectedId; // 已铺行里烘着的选中态
+    let exhausted = false;
+    let restored = !restoreTop;
+    const pump = () => {
+      if (renderSeq !== sessListRenderSeq) return; // 已被新一轮渲染或离开视图作废
+      const before = scrollEl.childElementCount;
+      const parts = [];
+      while (parts.length < SESS_LIST_CHUNK) {
+        const next = rows.next();
+        if (next.done) { exhausted = true; break; }
+        parts.push(next.value);
+      }
+      if (parts.length) {
+        scrollEl.insertAdjacentHTML("beforeend", parts.join(""));
+        bindSessRows(Array.from(scrollEl.children).slice(before));
+      }
+      // 行里的选中态是渲染开始时烘进去的；这期间用户点了别的行，就按当前状态校正。
+      if (bakedSel !== sessState.selectedId) { bakedSel = sessState.selectedId; syncSessSelection(); }
+      // 先铺到能盖住目标位置再把滚动条放回去：一上来就设 scrollTop 会被还没铺出来的
+      // 内容挡住，视口只能停在顶部，随着后续帧往下长一路下坠。
+      if (!restored && (exhausted || scrollEl.scrollHeight >= restoreTop + scrollEl.clientHeight)) {
+        scrollEl.scrollTop = restoreTop;
+        restored = true;
+        sessState.listScrollTop = 0; // 已落位，这份存档消费掉
+      }
+      if (!exhausted) requestAnimationFrame(pump);
+      else sessListPumping = false;
+    };
+    pump();
   }
 
-  /* 分组视图 */
-  function renderSessGrouped(list) {
+  /* 行内容：一条字符串一层，组头与会话项同序排列；用生成器交出，分帧逐段取用 */
+  function* sessRowSeq(list) {
     const kw = sessState.search.trim();
+    if (sessState.view !== "group") {
+      for (const s of list) yield sessItemHtml(s, kw, 1);
+      return;
+    }
+    /* 分组视图：端点 → 项目目录 */
     const byEp = sessGroup(list);
-    let html = "";
     for (const [epId, byProj] of byEp) {
       const epCount = [...byProj.values()].reduce((n, arr) => n + arr.length, 0);
       const epKey = "ep:" + epId;
       const epCollapsed = !!sessState.collapsed[epKey];
-      html += sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj, null, SESS_EP_RINGED.has(epId));
+      yield sessGroupHeadHtml(epKey, sessEpName(epId), epCount, epCollapsed, 1, sessEpColor(epId), byProj, null, SESS_EP_RINGED.has(epId));
       if (epCollapsed) continue;
       for (const [proj, arr] of byProj) {
         const pKey = "proj:" + epId + "|" + String(proj || "").replace(/\\/g, "/").toLowerCase();
         const pCollapsed = !!sessState.collapsed[pKey];
-        html += sessGroupHeadHtml(pKey, sessDirName(proj), arr.length, pCollapsed, 2, null, arr, proj);
+        yield sessGroupHeadHtml(pKey, sessDirName(proj), arr.length, pCollapsed, 2, null, arr, proj);
         if (pCollapsed) continue;
-        html += arr.map((s) => sessItemHtml(s, kw, 2)).join("");
+        for (const s of arr) yield sessItemHtml(s, kw, 2);
       }
     }
-    return html;
   }
 
   /* 组头：含折叠箭头、（批量模式下）组复选框、组内计数 */
@@ -18497,13 +18629,7 @@ async function api(method, path, body) {
     const n = ids.filter((id) => sessState.checked.has(id)).length;
     if (n === 0) return "";
     if (n === ids.length) return "checked";
-    return `data-indeterminate="1"`; // 半选态在 bindSessListEvents 里设置（HTML 属性无法表达 indeterminate）
-  }
-
-  /* 列表视图（平铺，按最后活跃倒序，sessFiltered 已排序） */
-  function renderSessFlat(list) {
-    const kw = sessState.search.trim();
-    return list.map((s) => sessItemHtml(s, kw, 1)).join("");
+    return `data-indeterminate="1"`; // 半选态在 bindSessRows 里设置（HTML 属性无法表达 indeterminate）
   }
 
   /* 单个会话列表项：克制三字段（端点圆点 + 标题 + 相对时间） */
@@ -18521,47 +18647,61 @@ async function api(method, path, body) {
     </div>`;
   }
 
-  /* 列表事件绑定（渲染后重绑） */
-  function bindSessListEvents() {
-    const root = $("sessScroll");
-    // 组头折叠/展开
-    root.querySelectorAll(".sess-group-head").forEach((h) => {
-      h.addEventListener("click", (e) => {
-        if (e.target.classList.contains("grp-cb")) return; // 点复选框不折叠
-        const key = h.dataset.key;
-        sessState.collapsed[key] = !sessState.collapsed[key];
-        if (!sessState.collapsed[key]) delete sessState.collapsed[key];
-        SESS_LS.set("collapsed", sessState.collapsed);
-        renderSessList();
-      });
-    });
-    // 组复选框：全选/取消整组；设置半选态
-    root.querySelectorAll(".grp-cb").forEach((cb) => {
-      if (cb.dataset.indeterminate) cb.indeterminate = true;
-      cb.addEventListener("change", () => {
-        const ids = sessCollectGroupIds(cb.dataset.key);
-        if (cb.checked) ids.forEach((id) => sessState.checked.add(id));
-        else ids.forEach((id) => sessState.checked.delete(id));
-        renderSessList(); updateSessBatchBar();
-      });
-    });
-    // 会话项：批量模式下点整行切换勾选；正常模式选中查看
-    root.querySelectorAll(".sess-item").forEach((item) => {
-      item.addEventListener("click", (e) => {
-        const id = item.dataset.id;
-        if (sessState.batch) {
-          if (!e.target.classList.contains("item-cb")) {
-            const cb = item.querySelector(".item-cb");
-            cb.checked = !cb.checked;
-          }
-          const on = item.querySelector(".item-cb").checked;
-          on ? sessState.checked.add(id) : sessState.checked.delete(id);
-          renderSessList(); updateSessBatchBar();
-          return;
+  /* 列表事件绑定：只绑这一批新插入的顶层节点（分帧铺行时逐段调用，不回首扫全表） */
+  function bindSessRows(nodes) {
+    for (const node of nodes) {
+      if (node.classList.contains("sess-group-head")) {
+        // 组头折叠/展开
+        node.addEventListener("click", (e) => {
+          if (e.target.classList.contains("grp-cb")) return; // 点复选框不折叠
+          const key = node.dataset.key;
+          sessState.collapsed[key] = !sessState.collapsed[key];
+          if (!sessState.collapsed[key]) delete sessState.collapsed[key];
+          SESS_LS.set("collapsed", sessState.collapsed);
+          renderSessList();
+        });
+        // 组复选框：全选/取消整组；半选态只能由脚本设置（HTML 属性表达不了 indeterminate）
+        const cb = node.querySelector(".grp-cb");
+        if (cb) {
+          if (cb.dataset.indeterminate) cb.indeterminate = true;
+          cb.addEventListener("change", () => {
+            const ids = sessCollectGroupIds(cb.dataset.key);
+            if (cb.checked) ids.forEach((id) => sessState.checked.add(id));
+            else ids.forEach((id) => sessState.checked.delete(id));
+            renderSessList(); updateSessBatchBar();
+          });
         }
-        selectSession(id);
-      });
-    });
+        continue;
+      }
+      if (node.classList.contains("sess-item")) {
+        // 会话项：批量模式下点整行切换勾选；正常模式选中查看
+        node.addEventListener("click", (e) => {
+          const id = node.dataset.id;
+          if (sessState.batch) {
+            if (!e.target.classList.contains("item-cb")) {
+              const checkbox = node.querySelector(".item-cb");
+              if (!checkbox) return;
+              checkbox.checked = !checkbox.checked;
+            }
+            const on = node.querySelector(".item-cb").checked;
+            on ? sessState.checked.add(id) : sessState.checked.delete(id);
+            renderSessList(); updateSessBatchBar();
+            return;
+          }
+          selectSession(id);
+        });
+      }
+    }
+  }
+
+  /* 选中态：只切行上的类，不动 DOM 结构（分帧期间新铺的行会自行校正） */
+  function syncSessSelection() {
+    const root = $("sessScroll");
+    if (!root) return;
+    const sel = sessState.selectedId;
+    for (const el of root.querySelectorAll(".sess-item")) {
+      el.classList.toggle("selected", !!sel && el.dataset.id === sel);
+    }
   }
 
   /* 收集某分组下全部会话 id（按当前筛选结果） */
@@ -18592,7 +18732,7 @@ async function api(method, path, body) {
      ============================================================ */
   function selectSession(id) {
     sessState.selectedId = id;
-    renderSessList();      // 刷新选中态
+    syncSessSelection();   // 刷新选中态：只切行的类，不整树重铺
     renderSessDetail();
     // 移动端：选中后收起抽屉
     $("sessListCard").classList.remove("drawer-open");
@@ -18864,7 +19004,7 @@ async function api(method, path, body) {
         }
       }
       // 从 sessions 移除成功项
-      sessState.sessions = sessState.sessions.filter((s) => !okFiles.has(s.file));
+      setSessSessions(sessState.sessions.filter((s) => !okFiles.has(s.file)));
       // 若包含当前选中会话且已删除，selectedId 置空，详情区回空态
       const cur = currentSession();
       if (cur && okFiles.has(cur.file)) sessState.selectedId = null;
@@ -18953,6 +19093,15 @@ async function api(method, path, body) {
     if (sessMsgObserver) { sessMsgObserver.disconnect(); sessMsgObserver = null; }
     // ☰ 靠 body 类随视图收起，弹层是属性控制的：不收就会在回来时挂着开着的空层。
     $("sessTocPop").hidden = true;
+    // 列表节点不跟着视图一起留在 DOM 里：三千行、一万八千个节点，隐藏状态下浏览器仍要
+    // 为它们做样式与布局结算，切回来那一帧还得整棵重排一遍。滚动位先记下，回来再兑现。
+    const scrollEl = $("sessScroll");
+    if (!scrollEl) return;
+    sessState.listScrollTop = scrollEl.scrollTop;
+    sessListRenderSeq++; // 作废还在排队的分帧
+    sessListLastKey = "";
+    sessListPumping = false;
+    scrollEl.innerHTML = "";
   }
 
   /* 一次性事件绑定（enterSessionsView 首进时执行；restoreView 可能先于 init 到达） */
@@ -19090,9 +19239,9 @@ async function api(method, path, body) {
       $("sessDrawerMask").classList.remove("show");
     });
 
-    // 右键菜单：委托挂常驻滚动容器（行节点每次全量重建，逐行绑会失效）；
+    // 右键菜单：委托挂常驻滚动容器（行节点逐帧铺入，逐行绑会失效）；
     // 命中会话行 → 先选中该行再弹单项删除菜单；空白处/组头/骨架空态不弹。
-    // 选中走 keepScroll 变体：selectSession 会整树重渲染并回顶，右键时必须保住滚动条。
+    // 选中只切行的类，不重铺列表，滚动位一动不动。
     $("sessScroll").addEventListener("contextmenu", (e) => {
       const item = e.target.closest(".sess-item");
       if (!item || sessState.deleting) return;
@@ -19101,7 +19250,7 @@ async function api(method, path, body) {
       if (!id) return;
       if (sessState.selectedId !== id) {
         sessState.selectedId = id;
-        renderSessList({ keepScroll: true });
+        syncSessSelection(); // 同 selectSession：只切类，滚动位一动不动
         renderSessDetail();
         $("sessListCard").classList.remove("drawer-open");
         $("sessDrawerMask").classList.remove("show");

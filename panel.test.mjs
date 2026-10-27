@@ -1697,6 +1697,103 @@ describe("panel.html sessions tab", () => {
     assert.ok(/#sessDEpBadge \{ transition: none; \}/.test(css),
       "详情端点徽标必须按 id 覆盖掉 .badge 的过渡");
   });
+
+  it("会话列表分帧铺行：逐帧取行、逐段绑定、旧帧可作废", () => {
+    // 三千行整树重建实测 0.85s，全程占着主线程，点击到 tab 高亮之间的那段等待
+    // 大半花在这里。分帧后每帧只解析一批行，页面在补齐过程中照常响应。
+    const r = panelJs.match(/function renderSessList\(\{ keepScroll = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r, "renderSessList found in panel.js");
+    const body = r[1];
+    assert.ok(panelJs.includes("const SESS_LIST_CHUNK = 200;"), "每帧行数常量存在");
+    assert.ok(body.includes("const renderSeq = ++sessListRenderSeq"), "新一轮渲染先作废旧帧");
+    assert.ok(body.includes("if (renderSeq !== sessListRenderSeq) return;"), "旧帧醒来即退场");
+    assert.ok(body.includes("requestAnimationFrame(pump)"), "剩余行排到后续帧");
+    assert.ok(body.includes("insertAdjacentHTML"), "逐段插入而不是一次性拼整树");
+    assert.ok(body.includes("bindSessRows("), "只绑新插入的那批顶层节点");
+    assert.ok(/function\* sessRowSeq\(list\) \{/.test(panelJs), "行内容由生成器逐条交出");
+    assert.ok(!panelJs.includes("function bindSessListEvents()"), "旧的全表扫描绑定已移除");
+    assert.ok(!panelJs.includes("renderSessGrouped("), "旧的一次性拼串实现已移除");
+    assert.ok(!panelJs.includes("renderSessFlat("), "旧的一次性拼串实现已移除");
+  });
+
+  it("离开会话页收走列表节点，回来时兑现记下的滚动位", () => {
+    // 隐藏视图里的三千行仍要参与样式与布局结算，切回来那一帧还得整棵重排；
+    // 离开时收掉节点，把滚动位存进状态，回来铺够了再落位。
+    const leave = panelJs.match(/function leaveSessionsView\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(leave, "leaveSessionsView found in panel.js");
+    assert.ok(leave[1].includes("sessState.listScrollTop = scrollEl.scrollTop"), "离开时记下滚动位");
+    assert.ok(leave[1].includes("sessListRenderSeq++"), "离开时作废还在排队的帧");
+    assert.ok(leave[1].includes('scrollEl.innerHTML = ""'), "离开时释放列表节点");
+    const r = panelJs.match(/function renderSessList\(\{ keepScroll = false \} = \{\}\) \{([\s\S]*?)\n  \}/);
+    assert.ok(r[1].includes("sessState.listScrollTop || scrollEl.scrollTop"),
+      "重铺时优先兑现存档（空容器的 scrollTop 恒为 0）");
+    assert.ok(r[1].includes("sessState.listScrollTop = 0;"), "落位后清掉存档");
+    assert.ok(panelJs.includes("listScrollTop: 0"), "滚动位存档有初始值");
+  });
+
+  it("取数回来时视图已切走就不再铺列表", () => {
+    // 离开会把节点收掉，这时再铺一遍等于把刚释放的整棵树当场重建。
+    const m = panelJs.match(/async function refreshSessionsList\(\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "refreshSessionsList found in panel.js");
+    const guard = m[1].indexOf('if (currentView !== "sessions") return;');
+    const render = m[1].indexOf('renderSessList({ keepScroll: true });', guard);
+    assert.ok(guard !== -1, "取数回来先看视图还在不在");
+    assert.ok(render > guard, "返回在主渲染之前");
+    assert.ok(m[1].indexOf("sessState.sessions = list") !== -1 || m[1].includes("setSessSessions("),
+      "数据已经落进状态，回来时自然铺");
+  });
+
+  it("点当前页签直接返回：不重铺、不重取、不回顶", () => {
+    // 设置子 tab 早就有同款守卫（activateSettingsSubTab 开头的 active 判断）。
+    const m = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "switchView found in panel.js");
+    const guard = m[1].indexOf("if (name === currentView) return;");
+    assert.ok(guard !== -1, "同页守卫存在");
+    assert.ok(guard < m[1].indexOf("resetPageScroll();"), "守卫排在任何副作用之前");
+    assert.ok(guard < m[1].indexOf("currentView = name;"), "守卫排在状态写入之前");
+  });
+
+  it("视图首次渲染让位到高亮上屏之后：双 rAF 调度，连点只认最后一次", () => {
+    // 浏览器要等当前 JS 任务结束才绘制；重活留在同步段里，高亮就得陪它一起等。
+    const m = panelJs.match(/function scheduleViewEntry\(work\) \{([\s\S]*?)\n  \}/);
+    assert.ok(m, "scheduleViewEntry found in panel.js");
+    const body = m[1];
+    assert.ok(body.includes("const seq = ++viewEntrySeq;"), "每次调度领一个令牌");
+    assert.ok(/requestAnimationFrame\(\(\) => requestAnimationFrame\(/.test(body), "双 rAF 排队");
+    assert.ok(body.includes("if (seq !== viewEntrySeq) { resolve(); return; }"), "过期的让位直接按已兑现处理");
+    assert.ok(body.includes("console.warn("), "进入失败走诊断日志，不吞也不打断");
+    assert.ok(!body.includes("console.error("), "沿用仓库的 warn 口径");
+    assert.ok(panelJs.includes("let viewEntrySeq = 0;"), "令牌有初始值");
+    const sw = panelJs.match(/function switchView\(name\) \{([\s\S]*?)\n  \}/);
+    assert.ok(sw[1].includes("scheduleViewEntry(runViewEntry)"), "switchView 把进入工作交给调度器");
+    assert.ok(sw[1].includes("if (window.panelStartupController) startupViewReady = entryReady;"),
+      "开屏判据等的是延后那段自己的就绪承诺");
+  });
+
+  it("入场动画重播只冲样式，不逼整树布局", () => {
+    // offsetWidth 会连布局一起逼出来：视图刚被 unhide、或刚塞进上千行时，
+    // 一次布局要重排整棵子树（实测 0.6–1s），只为重播一段 300ms 动画不值得。
+    for (const fn of ["replayViewEnter", "playBoardEnter"]) {
+      const m = panelJs.match(new RegExp(`function ${fn}\\(([a-z]+)\\) \\{([\\s\\S]*?)\\n  \\}`));
+      assert.ok(m, `${fn} found in panel.js`);
+      const body = m[2];
+      assert.ok(!body.includes("offsetWidth"), `${fn} 不再用 offsetWidth 冲动画`);
+      assert.ok(body.includes("getComputedStyle("), `${fn} 改读计算样式`);
+    }
+    const init = panelJs.match(/async function init\(\) \{[\s\S]*?\n  \}/);
+    assert.ok(init, "init found in panel.js");
+    assert.ok(!/offsetWidth/.test(init[0].split("onLeave")[1]?.split("};")[0] ?? ""),
+      "开屏退场沿用的重播也不逼布局");
+  });
+
+  it("视口外的会话行不参与样式与布局结算", () => {
+    // 每帧插进来的行即使看不见也要结算；三千行铺满的耗时大半在这里。
+    // 行高由一行标题与一行副行定死、与宽度无关，故用实测行高占位即可。
+    const m = panelCss.match(/\.sess-item \{[^}]*content-visibility: auto;[^}]*\}/);
+    assert.ok(m, ".sess-item 带 content-visibility: auto");
+    assert.ok(m[0].includes("contain-intrinsic-size: auto 55.4px"),
+      "占位高度用实测行高，auto 让浏览器记住真实尺寸");
+  });
 });
 
 // Body size cap + panel.html lookup chain. readJsonBody rejects bodies over
