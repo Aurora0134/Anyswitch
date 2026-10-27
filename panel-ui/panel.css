@@ -1759,6 +1759,10 @@
     opacity: 0; pointer-events: none; transition: opacity 160ms var(--ease-out);
   }
   .modal-overlay.show { opacity: 1; pointer-events: auto; }
+  /* 确认弹窗单例会从其他弹窗内部弹出（如路由链编辑器的虚拟模型改名确认）：同一
+     z-index 时按 DOM 顺序叠放，靠后的编辑器会反盖确认框，故确认框须压过整个弹窗
+     层；仍低于 toast(400) 与右键菜单(1200)。 */
+  #skillsModal { z-index: 340; }
   .modal-card {
     background: var(--surface); border: 1px solid var(--border-strong);
     border-radius: var(--radius-lg, 12px); box-shadow: var(--shadow-lg); width: 100%; max-width: 520px;
